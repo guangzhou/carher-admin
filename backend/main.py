@@ -10,6 +10,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from . import database as db
 from . import config_gen
 from . import k8s_ops
 from . import sync_worker
+from . import deployer
 from .models import HerAddRequest, HerBatchAction, HerBatchImport, HerUpdateRequest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -370,6 +372,63 @@ def api_import_from_k8s():
         except Exception as e:
             logger.warning("Import failed for %d: %s", uid, e)
     return {"imported": imported, "skipped": skipped, "total": len(configmaps)}
+
+
+# ── API: Deploy Pipeline ──
+
+@app.post("/api/deploy")
+async def api_start_deploy(body: dict):
+    image_tag = body.get("image_tag")
+    if not image_tag:
+        raise HTTPException(400, "image_tag required")
+    return await deployer.start_deploy(image_tag)
+
+
+@app.get("/api/deploy/status")
+def api_deploy_status():
+    return deployer.get_deploy_status()
+
+
+@app.post("/api/deploy/continue")
+async def api_deploy_continue():
+    return await deployer.continue_deploy()
+
+
+@app.post("/api/deploy/rollback")
+async def api_deploy_rollback():
+    return await deployer.rollback_deploy()
+
+
+@app.post("/api/deploy/abort")
+def api_deploy_abort():
+    return deployer.abort_deploy()
+
+
+@app.get("/api/deploy/history")
+def api_deploy_history(limit: int = Query(20)):
+    return db.list_deploys(limit=limit)
+
+
+@app.put("/api/instances/{uid}/deploy-group")
+def api_set_deploy_group(uid: int, body: dict):
+    group = body.get("group")
+    if group not in ("canary", "early", "stable"):
+        raise HTTPException(400, "group must be canary, early, or stable")
+    db.set_deploy_group(uid, group)
+    return {"id": uid, "deploy_group": group}
+
+
+@app.post("/api/deploy/webhook")
+async def api_deploy_webhook(body: dict):
+    """GitHub Actions webhook: auto-trigger deploy after image push."""
+    image_tag = body.get("image_tag")
+    secret = body.get("secret")
+    expected = os.environ.get("DEPLOY_WEBHOOK_SECRET", "")
+    if expected and secret != expected:
+        raise HTTPException(403, "Invalid webhook secret")
+    if not image_tag:
+        raise HTTPException(400, "image_tag required")
+    return await deployer.start_deploy(image_tag)
 
 
 # ── Serve frontend ──

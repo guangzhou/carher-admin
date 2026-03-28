@@ -20,6 +20,8 @@ class HerInstance(BaseModel):
     owner: str = ""
     provider: str = "openrouter"
     sync_status: str = ""
+    deploy_group: str = "stable"
+    image_tag: str = ""
     has_memory: bool | None = None
 
 

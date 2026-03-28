@@ -27,7 +27,7 @@ DB_DIR = Path(os.environ.get("CARHER_ADMIN_DB_DIR", "/data/carher-admin"))
 DB_PATH = DB_DIR / "admin.db"
 BACKUP_DIR = Path(os.environ.get("CARHER_ADMIN_BACKUP_DIR", "/nas-backup/carher-admin"))
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS her_instances (
@@ -42,8 +42,24 @@ CREATE TABLE IF NOT EXISTS her_instances (
     bot_open_id     TEXT NOT NULL DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'running',
     sync_status     TEXT NOT NULL DEFAULT 'pending',
+    deploy_group    TEXT NOT NULL DEFAULT 'stable',
+    image_tag       TEXT NOT NULL DEFAULT 'v20260328',
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS deploys (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    image_tag       TEXT NOT NULL,
+    prev_image_tag  TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    total           INTEGER NOT NULL DEFAULT 0,
+    done            INTEGER NOT NULL DEFAULT 0,
+    failed          INTEGER NOT NULL DEFAULT 0,
+    current_wave    TEXT NOT NULL DEFAULT '',
+    error           TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -59,6 +75,20 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 """
 
+MIGRATIONS = {
+    2: [
+        "ALTER TABLE her_instances ADD COLUMN deploy_group TEXT NOT NULL DEFAULT 'stable'",
+        "ALTER TABLE her_instances ADD COLUMN image_tag TEXT NOT NULL DEFAULT 'v20260328'",
+        """CREATE TABLE IF NOT EXISTS deploys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, image_tag TEXT NOT NULL,
+            prev_image_tag TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
+            total INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0,
+            failed INTEGER NOT NULL DEFAULT 0, current_wave TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            completed_at TEXT)""",
+    ],
+}
+
 
 def init_db():
     """Initialize DB: restore from backup if local missing, then ensure schema."""
@@ -72,15 +102,27 @@ def init_db():
     conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(SCHEMA_SQL)
 
-    # Check schema version
+    # Check schema version and run migrations
     cur = conn.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
     row = cur.fetchone()
-    if not row:
+    current_version = row[0] if row else 0
+    if current_version == 0:
         conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+    else:
+        for ver in sorted(MIGRATIONS.keys()):
+            if ver > current_version:
+                for sql in MIGRATIONS[ver]:
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError as e:
+                        if "duplicate column" not in str(e).lower() and "already exists" not in str(e).lower():
+                            raise
+                conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (ver,))
+                logger.info("Migrated DB to schema version %d", ver)
 
     conn.commit()
     conn.close()
-    logger.info("Database initialized at %s", DB_PATH)
+    logger.info("Database initialized at %s (schema v%d)", DB_PATH, SCHEMA_VERSION)
 
 
 def _try_restore_from_backup():
@@ -323,3 +365,86 @@ def import_from_configmap_data(uid: int, cfg: dict):
         logger.info("Instance %d already in DB, skipping import", uid)
         return existing
     return insert(data)
+
+
+# ──────────────────────────────────────
+# Deploy groups
+# ──────────────────────────────────────
+
+def list_by_deploy_group(group: str) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM her_instances WHERE deploy_group = ? AND status = 'running' ORDER BY id",
+            (group,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_deploy_group(uid: int, group: str):
+    with get_db() as conn:
+        conn.execute("UPDATE her_instances SET deploy_group = ? WHERE id = ?", (group, uid))
+        _audit(conn, uid, f"deploy_group:{group}")
+    backup_to_nas()
+
+
+def set_image_tag(uid: int, tag: str):
+    with get_db() as conn:
+        conn.execute("UPDATE her_instances SET image_tag = ? WHERE id = ?", (tag, uid))
+
+
+def get_current_image_tag() -> str:
+    """Get the most common image_tag across running instances."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT image_tag, COUNT(*) as cnt FROM her_instances WHERE status='running' GROUP BY image_tag ORDER BY cnt DESC LIMIT 1"
+        ).fetchone()
+        return row["image_tag"] if row else "v20260328"
+
+
+# ──────────────────────────────────────
+# Deploy records
+# ──────────────────────────────────────
+
+def create_deploy(image_tag: str, prev_tag: str, total: int) -> int:
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO deploys (image_tag, prev_image_tag, status, total, created_at) VALUES (?, ?, 'pending', ?, ?)",
+            (image_tag, prev_tag, total, _now()),
+        )
+        deploy_id = cur.lastrowid
+        _audit(conn, None, "deploy:created", f"tag={image_tag} total={total}")
+    backup_to_nas()
+    return deploy_id
+
+
+def update_deploy(deploy_id: int, **kwargs):
+    sets = []
+    params = {"id": deploy_id}
+    for k, v in kwargs.items():
+        sets.append(f"{k} = :{k}")
+        params[k] = v
+    if not sets:
+        return
+    sql = f"UPDATE deploys SET {', '.join(sets)} WHERE id = :id"
+    with get_db() as conn:
+        conn.execute(sql, params)
+
+
+def get_deploy(deploy_id: int) -> dict | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM deploys WHERE id = ?", (deploy_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_active_deploy() -> dict | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM deploys WHERE status IN ('pending','canary','rolling','paused') ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def list_deploys(limit: int = 20) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM deploys ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]

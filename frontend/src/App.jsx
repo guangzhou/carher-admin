@@ -4,11 +4,13 @@ import InstanceList from "./components/InstanceList";
 import AddInstance from "./components/AddInstance";
 import BatchImport from "./components/BatchImport";
 import HealthCheck from "./components/HealthCheck";
+import DeployPage from "./components/DeployPage";
 import AdminPanel from "./components/AdminPanel";
 
 const TABS = [
   { id: "dashboard", label: "仪表盘" },
   { id: "instances", label: "实例管理" },
+  { id: "deploy", label: "部署" },
   { id: "add", label: "新增" },
   { id: "import", label: "批量导入" },
   { id: "health", label: "健康检查" },
@@ -57,6 +59,7 @@ export default function App() {
         {tab === "instances" && <InstanceList detailId={detailId} setDetailId={setDetailId} />}
         {tab === "add" && <AddInstance onCreated={(id) => openDetail(id)} />}
         {tab === "import" && <BatchImport onDone={() => setTab("instances")} />}
+        {tab === "deploy" && <DeployPage />}
         {tab === "health" && <HealthCheck />}
         {tab === "admin" && <AdminPanel />}
       </main>

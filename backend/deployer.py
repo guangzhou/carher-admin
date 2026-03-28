@@ -24,7 +24,6 @@ from . import database as db
 
 logger = logging.getLogger("carher-admin")
 
-WAVE_ORDER = ["canary", "early", "stable"]
 BATCH_SIZE = 10
 
 # Configurable via env
@@ -91,12 +90,15 @@ async def start_deploy(image_tag: str, mode: str = "normal") -> dict:
 async def _run_deploy(deploy_id: int, image_tag: str, mode: str):
     """Execute the deploy pipeline."""
     try:
+        wave_order = db.get_wave_order() or ["canary", "early", "stable"]
+
         if mode == "fast":
             await _deploy_fast(deploy_id, image_tag)
         elif mode == "canary-only":
-            await _deploy_wave(deploy_id, image_tag, ["canary"])
+            # Deploy only the first group in the wave order
+            await _deploy_wave(deploy_id, image_tag, [wave_order[0]])
         else:
-            await _deploy_wave(deploy_id, image_tag, WAVE_ORDER)
+            await _deploy_wave(deploy_id, image_tag, wave_order)
 
     except asyncio.CancelledError:
         logger.info("Deploy #%d: cancelled", deploy_id)
@@ -300,11 +302,13 @@ def get_deploy_status() -> dict:
     total = deploy["total"]
     done = deploy["done"]
     pct = round(done / total * 100) if total > 0 else 0
+    wave_order = db.get_wave_order() or ["canary", "early", "stable"]
     return {
         "active": True,
         "deploy": deploy,
         "progress_pct": pct,
-        "waves": {g: len(db.list_by_deploy_group(g)) for g in WAVE_ORDER},
+        "waves": {g: len(db.list_by_deploy_group(g)) for g in wave_order},
+        "wave_order": wave_order,
     }
 
 

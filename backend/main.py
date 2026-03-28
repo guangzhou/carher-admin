@@ -414,11 +414,60 @@ def api_deploy_history(limit: int = Query(20)):
 
 @app.put("/api/instances/{uid}/deploy-group")
 def api_set_deploy_group(uid: int, body: dict):
-    group = body.get("group")
-    if group not in ("canary", "early", "stable"):
-        raise HTTPException(400, "group must be canary, early, or stable")
+    group = body.get("group", "").strip()
+    if not group:
+        raise HTTPException(400, "group is required")
     db.set_deploy_group(uid, group)
     return {"id": uid, "deploy_group": group}
+
+
+@app.post("/api/instances/batch-deploy-group")
+def api_batch_set_deploy_group(body: dict):
+    """Move multiple instances to a deploy group at once."""
+    uids = body.get("ids", [])
+    group = body.get("group", "").strip()
+    if not uids or not group:
+        raise HTTPException(400, "ids and group are required")
+    db.batch_set_deploy_group(uids, group)
+    return {"action": "batch_set_deploy_group", "count": len(uids), "group": group}
+
+
+# ── API: Deploy Groups ──
+
+@app.get("/api/deploy-groups")
+def api_list_deploy_groups():
+    groups = db.list_deploy_groups()
+    stats = db.get_deploy_group_stats()
+    for g in groups:
+        g["count"] = stats.get(g["name"], 0)
+    return groups
+
+
+@app.post("/api/deploy-groups")
+def api_create_deploy_group(body: dict):
+    name = body.get("name", "").strip().lower()
+    priority = body.get("priority", 100)
+    description = body.get("description", "")
+    if not name:
+        raise HTTPException(400, "name is required")
+    if not name.isalnum() and not all(c.isalnum() or c in "-_" for c in name):
+        raise HTTPException(400, "name must be alphanumeric (with - or _)")
+    db.create_deploy_group(name, priority, description)
+    return {"name": name, "priority": priority}
+
+
+@app.put("/api/deploy-groups/{name}")
+def api_update_deploy_group(name: str, body: dict):
+    db.update_deploy_group(name, priority=body.get("priority"), description=body.get("description"))
+    return {"name": name, "updated": True}
+
+
+@app.delete("/api/deploy-groups/{name}")
+def api_delete_deploy_group(name: str):
+    if name in ("stable",):
+        raise HTTPException(400, "Cannot delete the default 'stable' group")
+    moved = db.delete_deploy_group(name)
+    return {"name": name, "deleted": True, "instances_moved_to_stable": moved}
 
 
 @app.post("/api/deploy/webhook")

@@ -1,38 +1,54 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../api";
 
-const GROUPS = ["canary", "early", "stable"];
-const GROUP_LABELS = { canary: "金丝雀", early: "先行者", stable: "稳定" };
-const GROUP_COLORS = {
-  canary: "bg-orange-600/20 text-orange-400 border-orange-600/30",
-  early: "bg-blue-600/20 text-blue-400 border-blue-600/30",
-  stable: "bg-gray-600/20 text-gray-300 border-gray-600/30",
-};
+const PALETTE = [
+  "bg-orange-600/20 text-orange-400 border-orange-600/30",
+  "bg-blue-600/20 text-blue-400 border-blue-600/30",
+  "bg-emerald-600/20 text-emerald-400 border-emerald-600/30",
+  "bg-purple-600/20 text-purple-400 border-purple-600/30",
+  "bg-pink-600/20 text-pink-400 border-pink-600/30",
+  "bg-cyan-600/20 text-cyan-400 border-cyan-600/30",
+  "bg-yellow-600/20 text-yellow-400 border-yellow-600/30",
+  "bg-gray-600/20 text-gray-300 border-gray-600/30",
+];
+
+function groupColor(idx) {
+  return PALETTE[idx % PALETTE.length];
+}
 
 export default function DeployPage() {
   const [status, setStatus] = useState(null);
   const [history, setHistory] = useState([]);
   const [instances, setInstances] = useState([]);
+  const [deployGroups, setDeployGroups] = useState([]);
   const [imageTag, setImageTag] = useState("");
   const [deployMode, setDeployMode] = useState("normal");
   const [loading, setLoading] = useState("");
+
+  // New group form
+  const [newGroupName, setNewGroupName] = useState("");
+  const [newGroupPriority, setNewGroupPriority] = useState(50);
+  const [newGroupDesc, setNewGroupDesc] = useState("");
+  const [showNewGroup, setShowNewGroup] = useState(false);
 
   const load = useCallback(() => {
     api.getDeployStatus().then(setStatus);
     api.getDeployHistory().then(setHistory);
     api.listInstances().then(setInstances);
+    api.listDeployGroups().then(setDeployGroups);
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  // Auto-refresh during active deploy
   useEffect(() => {
     if (!status?.active) return;
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
   }, [status?.active, load]);
 
-  const MODE_LABELS = { normal: "灰度部署", fast: "紧急全量", "canary-only": "仅金丝雀" };
+  const groupNames = deployGroups.map((g) => g.name);
+
+  const MODE_LABELS = { normal: "灰度部署", fast: "紧急全量", "canary-only": "仅首组" };
   const startDeploy = async () => {
     if (!imageTag) return alert("请输入镜像 tag");
     const modeLabel = MODE_LABELS[deployMode] || deployMode;
@@ -67,8 +83,40 @@ export default function DeployPage() {
     load();
   };
 
+  const createGroup = async () => {
+    if (!newGroupName.trim()) return;
+    try {
+      await api.createDeployGroup(newGroupName.trim().toLowerCase(), newGroupPriority, newGroupDesc);
+      setNewGroupName("");
+      setNewGroupPriority(50);
+      setNewGroupDesc("");
+      setShowNewGroup(false);
+      load();
+    } catch (e) {
+      alert(e.message);
+    }
+  };
+
+  const deleteGroup = async (name) => {
+    if (!confirm(`删除分组 "${name}"？该组实例将移入 stable 组`)) return;
+    try {
+      await api.deleteDeployGroup(name);
+      load();
+    } catch (e) {
+      alert(e.message);
+    }
+  };
+
   const deploy = status?.deploy;
   const isActive = status?.active;
+  const waveOrder = status?.wave_order || groupNames;
+
+  const waveDesc = waveOrder.length > 0
+    ? waveOrder.map((g) => {
+        const dg = deployGroups.find((x) => x.name === g);
+        return `${dg?.description || g}(${status?.waves?.[g] || 0})`;
+      }).join(" → ")
+    : "";
 
   return (
     <div className="space-y-6">
@@ -84,7 +132,7 @@ export default function DeployPage() {
               </h3>
               <p className="text-xs text-gray-500 mt-1">
                 状态: <StatusBadge status={deploy.status} />
-                {deploy.current_wave && <span className="ml-2">当前波次: {GROUP_LABELS[deploy.current_wave]}</span>}
+                {deploy.current_wave && <span className="ml-2">当前波次: {deploy.current_wave}</span>}
               </p>
             </div>
             <div className="flex gap-2">
@@ -118,16 +166,16 @@ export default function DeployPage() {
           </div>
 
           {/* Wave status */}
-          <div className="flex gap-4">
-            {GROUPS.map((g) => {
+          <div className="flex gap-4 overflow-x-auto">
+            {waveOrder.map((g, idx) => {
               const count = status.waves?.[g] || 0;
               const isCurrent = deploy.current_wave === g;
-              const isDone = GROUPS.indexOf(g) < GROUPS.indexOf(deploy.current_wave);
+              const isDone = waveOrder.indexOf(g) < waveOrder.indexOf(deploy.current_wave);
               return (
-                <div key={g} className={`flex-1 p-3 rounded-lg border ${isCurrent ? "border-blue-500 bg-blue-600/10" : isDone ? "border-emerald-600/30 bg-emerald-600/10" : "border-gray-700"}`}>
-                  <p className="text-xs text-gray-500">{GROUP_LABELS[g]}</p>
+                <div key={g} className={`flex-1 min-w-[120px] p-3 rounded-lg border ${isCurrent ? "border-blue-500 bg-blue-600/10" : isDone ? "border-emerald-600/30 bg-emerald-600/10" : "border-gray-700"}`}>
+                  <p className="text-xs text-gray-500">{g}</p>
                   <p className="text-lg font-bold">{count}</p>
-                  <p className="text-xs">{isDone ? "✅ 完成" : isCurrent ? "🔄 进行中" : "⏳ 等待"}</p>
+                  <p className="text-xs">{isDone ? "Done" : isCurrent ? "Rolling" : "Waiting"}</p>
                 </div>
               );
             })}
@@ -157,48 +205,79 @@ export default function DeployPage() {
             >
               <option value="normal">灰度部署</option>
               <option value="fast">紧急全量</option>
-              <option value="canary-only">仅金丝雀</option>
+              <option value="canary-only">仅首组</option>
             </select>
             <button className="btn btn-primary px-6" onClick={startDeploy} disabled={!!loading}>
               {loading === "deploy" ? "部署中..." : "开始部署"}
             </button>
           </div>
           <div className="text-xs text-gray-600 space-y-1">
-            <p><strong>灰度部署:</strong> 金丝雀({status?.waves?.canary || 0}) → 先行者({status?.waves?.early || 0}) → 稳定({status?.waves?.stable || 0})，每批后自动健康检查</p>
+            {waveDesc && <p><strong>灰度部署:</strong> {waveDesc}，每批后自动健康检查</p>}
             <p><strong>紧急全量:</strong> 跳过灰度，所有实例直接更新（用于 hotfix）</p>
-            <p><strong>仅金丝雀:</strong> 只更新金丝雀组，手动确认后再继续</p>
+            <p><strong>仅首组:</strong> 只更新优先级最高的分组，手动确认后再继续</p>
           </div>
         </div>
       )}
 
       {/* Deploy group management */}
       <div className="card p-5 space-y-3">
-        <h3 className="text-sm font-medium text-gray-400">实例分组管理</h3>
-        <p className="text-xs text-gray-600">拖动实例到不同分组，金丝雀组最先更新，稳定组最后更新</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium text-gray-400">实例分组管理</h3>
+            <p className="text-xs text-gray-600">按 priority 从小到大部署，可自定义分组</p>
+          </div>
+          <button className="btn btn-sm" onClick={() => setShowNewGroup(!showNewGroup)}>
+            {showNewGroup ? "取消" : "+ 新建分组"}
+          </button>
+        </div>
 
-        <div className="grid grid-cols-3 gap-4">
-          {GROUPS.map((g) => {
-            const groupInstances = instances.filter((i) => (i.deploy_group || "stable") === g && i.status !== "Deleted");
+        {showNewGroup && (
+          <div className="flex gap-2 items-end bg-gray-800/50 p-3 rounded">
+            <div className="flex-1">
+              <label className="text-xs text-gray-500">名称</label>
+              <input className="input w-full" placeholder="如 vip, test, team-a" value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} />
+            </div>
+            <div className="w-24">
+              <label className="text-xs text-gray-500">优先级</label>
+              <input type="number" className="input w-full" value={newGroupPriority} onChange={(e) => setNewGroupPriority(+e.target.value)} />
+            </div>
+            <div className="flex-1">
+              <label className="text-xs text-gray-500">描述</label>
+              <input className="input w-full" placeholder="描述" value={newGroupDesc} onChange={(e) => setNewGroupDesc(e.target.value)} />
+            </div>
+            <button className="btn btn-primary" onClick={createGroup}>创建</button>
+          </div>
+        )}
+
+        <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${Math.min(deployGroups.length || 3, 4)}, minmax(0, 1fr))` }}>
+          {deployGroups.map((g, idx) => {
+            const groupInstances = instances.filter((i) => (i.deploy_group || "stable") === g.name && i.status !== "Deleted");
             return (
-              <div key={g} className={`rounded-lg border p-3 ${GROUP_COLORS[g]}`}>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-medium">{GROUP_LABELS[g]}</span>
-                  <span className="text-xs">{groupInstances.length}</span>
+              <div key={g.name} className={`rounded-lg border p-3 ${groupColor(idx)}`}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm font-medium">{g.name}</span>
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs opacity-60">P{g.priority}</span>
+                    {g.name !== "stable" && (
+                      <button className="text-xs opacity-40 hover:opacity-100 ml-1" onClick={() => deleteGroup(g.name)} title="删除分组">x</button>
+                    )}
+                  </div>
                 </div>
+                {g.description && <p className="text-xs opacity-60 mb-2">{g.description}</p>}
+                <div className="text-xs mb-1">{groupInstances.length} 个实例</div>
                 <div className="space-y-1 max-h-48 overflow-auto">
                   {groupInstances.map((inst) => (
                     <div key={inst.id} className="flex items-center justify-between text-xs bg-gray-900/50 rounded px-2 py-1">
                       <span>#{inst.id} {inst.name}</span>
                       <select
                         className="bg-transparent text-xs border-none cursor-pointer"
-                        value={g}
+                        value={g.name}
                         onChange={(e) => setGroup(inst.id, e.target.value)}
                       >
-                        {GROUPS.map((opt) => <option key={opt} value={opt}>{GROUP_LABELS[opt]}</option>)}
+                        {groupNames.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
                       </select>
                     </div>
                   ))}
-                  {groupInstances.length === 0 && <p className="text-xs text-gray-600">空</p>}
                 </div>
               </div>
             );

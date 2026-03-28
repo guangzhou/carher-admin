@@ -52,7 +52,7 @@ spec:
                 deployGroup:
                   type: string
                   default: stable
-                  enum: [canary, early, stable]
+                  description: "Custom deploy group name, e.g. canary, early, stable, vip, test"
                 image:
                   type: string
                   default: v20260328

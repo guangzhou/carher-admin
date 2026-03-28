@@ -55,6 +55,9 @@
 | knownBots (全局 bot 注册表) | 共享 ConfigMap (1 份) | Operator | 各实例 Pod |
 | 每实例运行配置 | per-user ConfigMap | Operator | 各实例 Pod |
 | 用户数据 | PVC (NAS 5Gi) | Pod 运行时 | Pod 运行时 |
+| Skills (全员) | NAS PVC `carher-shared-skills` (ReadWriteMany) | 管理员 | 各实例 Pod |
+| Skills (部门) | NAS PVC `carher-dept-skills` (ReadWriteMany) | 管理员 | 各实例 Pod |
+| Session 日志 | NAS PVC `carher-shared-sessions` (ReadWriteMany) | Pod 运行时 | Pod 运行时 |
 | 审计日志 + 部署历史 | SQLite (非关键路径) | admin API | admin Dashboard |
 | 监控指标 | Prometheus | Operator /metrics | Grafana |
 
@@ -71,7 +74,7 @@
 | 新增/导入 | 表单创建、CSV 批量导入 |
 | 生命周期 | 启动、停止、重启、删除 (单个/批量) |
 | 部署管理 | 灰度 / 紧急全量 / 仅金丝雀，回滚、中止 |
-| 分组管理 | canary / early / stable 拖拽分配 |
+| 分组管理 | 自定义灰度分组（CRUD），按优先级部署 |
 | 健康检查 | 飞书 WS、记忆库、模型加载 三项全检 |
 | 日志 | 实时 Pod 日志查看 |
 | 系统管理 | 强制同步、一致性检查、审计日志 |
@@ -118,6 +121,23 @@
 | HighRestarts | 重启 >5 次 | warning |
 | SelfHealSpike | 自愈率 >0.1/s | critical |
 
+## 自愈数据连续性保证
+
+Pod 崩溃 / 节点故障后，Operator 自动重建 Pod。以下数据保证完整恢复：
+
+| 数据类别 | 存储方式 | 跨节点恢复 | 说明 |
+|---------|---------|-----------|------|
+| 用户会话/记忆 | PVC (`carher-{uid}-data`) NAS | **是** | 独立 PVC，Pod 重建后自动挂载 |
+| 运行配置 | ConfigMap (Operator 管理) | **是** | 从 CRD spec 实时生成 |
+| appSecret | K8s Secret | **是** | etcd 存储，Pod 通过 Secret 读取 |
+| 全员 Skills | NAS PVC (`carher-shared-skills`) | **是** | ReadWriteMany，所有节点共享 |
+| 部门 Skills | NAS PVC (`carher-dept-skills`) | **是** | ReadWriteMany，所有节点共享 |
+| Session 日志 | NAS PVC (`carher-shared-sessions`) | **是** | 按 uid 子目录隔离 |
+| knownBots | 共享 ConfigMap | **是** | Operator 定期重算 |
+| Feishu OAuth Token | PVC 内 (`/data/.openclaw/credentials/`) | **是** | 随用户数据 PVC |
+
+**关键设计**: Skills 使用 NAS PVC（`ReadWriteMany`）而非 `hostPath`，确保 Pod 无论调度到哪个节点都能读到完整的 skills 文件。
+
 ## 项目结构
 
 ```
@@ -153,9 +173,11 @@
 │   ├── deployment.yaml       # admin Deployment + Service
 │   ├── operator-rbac.yaml    # operator RBAC
 │   ├── operator-deployment.yaml  # operator Deployment + metrics Service
-│   └── servicemonitor.yaml   # Prometheus 采集规则 + 告警规则
+│   ├── servicemonitor.yaml   # Prometheus 采集规则 + 告警规则
+│   └── shared-pvcs.yaml      # 共享 NAS PVC (skills, sessions)
 ├── .github/workflows/
-│   └── build-deploy.yml      # CI/CD
+│   ├── build-deploy.yml      # CI/CD (main branch)
+│   └── feature-branch.yml    # Feature branch 构建 + 金丝雀部署
 ├── Dockerfile                 # admin 多阶段构建
 └── deploy.sh                  # 一键部署脚本
 ```
@@ -178,6 +200,16 @@
 | POST | `/api/instances/batch` | 批量操作 |
 | POST | `/api/instances/batch-import` | 批量导入 |
 | PUT | `/api/instances/:id/deploy-group` | 设置部署分组 |
+| POST | `/api/instances/batch-deploy-group` | 批量设置部署分组 |
+
+### 部署分组
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/deploy-groups` | 列出所有分组 (含实例计数) |
+| POST | `/api/deploy-groups` | 创建自定义分组 (body: `{name, priority, description}`) |
+| PUT | `/api/deploy-groups/:name` | 修改分组优先级/描述 |
+| DELETE | `/api/deploy-groups/:name` | 删除分组 (实例移入 stable) |
 
 ### 部署
 
@@ -230,6 +262,7 @@ kubectl apply -f k8s/operator-rbac.yaml     # operator 权限
 kubectl apply -f k8s/operator-deployment.yaml  # 部署 operator
 kubectl apply -f k8s/rbac.yaml              # admin 权限
 kubectl apply -f k8s/deployment.yaml        # 部署 admin
+kubectl apply -f k8s/shared-pvcs.yaml         # 共享 NAS PVC (skills/sessions)
 kubectl apply -f k8s/servicemonitor.yaml    # Prometheus 监控
 
 # 迁移现有实例到 CRD

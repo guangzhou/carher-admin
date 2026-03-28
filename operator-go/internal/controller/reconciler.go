@@ -283,6 +283,7 @@ func (r *HerInstanceReconciler) createPod(ctx context.Context, her *herv1.HerIns
 					{Name: "gcloud-adc", MountPath: "/gcloud/application_default_credentials.json", SubPath: "application_default_credentials.json", ReadOnly: true},
 					{Name: "shared-skills", MountPath: "/data/.openclaw/skills", ReadOnly: true},
 					{Name: "dept-skills", MountPath: "/data/.agents/skills", ReadOnly: true},
+					{Name: "user-sessions", MountPath: "/data/.openclaw/sessions", SubPath: fmt.Sprintf("sessions/%d", uid)},
 				},
 			}},
 			Volumes: []corev1.Volume{
@@ -290,8 +291,9 @@ func (r *HerInstanceReconciler) createPod(ctx context.Context, her *herv1.HerIns
 				{Name: "user-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: fmt.Sprintf("carher-%d-user-config", uid)}}}},
 				{Name: "base-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "carher-base-config"}}}},
 				{Name: "gcloud-adc", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "carher-gcloud-adc"}}},
-				{Name: "shared-skills", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/root/.openclaw/skills", Type: hostPathType(corev1.HostPathDirectoryOrCreate)}}},
-				{Name: "dept-skills", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/root/.openclaw/dept-skills/default", Type: hostPathType(corev1.HostPathDirectoryOrCreate)}}},
+				{Name: "shared-skills", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "carher-shared-skills", ReadOnly: true}}},
+				{Name: "dept-skills", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "carher-dept-skills", ReadOnly: true}}},
+				{Name: "user-sessions", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "carher-shared-sessions"}}},
 			},
 		},
 	}
@@ -337,10 +339,6 @@ func (r *HerInstanceReconciler) ensurePVC(ctx context.Context, uid int) error {
 		},
 	}
 	return r.Create(ctx, pvc)
-}
-
-func hostPathType(t corev1.HostPathType) *corev1.HostPathType {
-	return &t
 }
 
 // base64Decode is unused but kept for future Secret reading in non-K8s client contexts

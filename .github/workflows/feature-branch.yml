@@ -1,0 +1,117 @@
+name: Feature Branch Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "What to build"
+        type: choice
+        options:
+          - carher-image
+          - admin
+          - operator
+        default: carher-image
+      deploy_to_canary:
+        description: "Deploy to canary group after build?"
+        type: boolean
+        default: true
+
+env:
+  ACR_REGISTRY: cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com
+  ADMIN_URL: https://admin.carher.net
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate tag from branch
+        id: tag
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          SAFE_BRANCH=$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9]/-/g' | head -c 40)
+          TAG="dev-${SAFE_BRANCH}-${GITHUB_SHA::7}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build CarHer user image
+        if: inputs.target == 'carher-image'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ACR_REGISTRY }}/her/carher:${{ steps.tag.outputs.tag }}
+
+      - name: Build admin
+        if: inputs.target == 'admin'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.ACR_REGISTRY }}/her/carher-admin:${{ steps.tag.outputs.tag }}
+
+      - name: Build operator
+        if: inputs.target == 'operator'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./operator-go
+          push: true
+          tags: |
+            ${{ env.ACR_REGISTRY }}/her/carher-operator:${{ steps.tag.outputs.tag }}
+
+      - name: Summary
+        run: |
+          echo "### Feature Branch Build" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: \`${{ steps.tag.outputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Tag: \`${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Target: ${{ inputs.target }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To deploy this to canary instances:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "POST /api/deploy {\"image_tag\": \"${{ steps.tag.outputs.tag }}\", \"mode\": \"canary-only\"}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  deploy-canary:
+    needs: build
+    runs-on: ubuntu-latest
+    if: inputs.deploy_to_canary == true && inputs.target == 'carher-image'
+    steps:
+      - name: Deploy to canary group only
+        run: |
+          TAG="${{ needs.build.outputs.image_tag }}"
+          echo "Deploying $TAG to canary group..."
+
+          HTTP_CODE=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+            -X POST "${{ env.ADMIN_URL }}/api/deploy/webhook" \
+            -H "Content-Type: application/json" \
+            -d "{\"image_tag\": \"$TAG\", \"secret\": \"${{ secrets.DEPLOY_WEBHOOK_SECRET }}\", \"mode\": \"canary-only\"}")
+
+          echo "HTTP: $HTTP_CODE"
+          cat /tmp/resp.json
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            BODY=$(cat /tmp/resp.json)
+            if echo "$BODY" | grep -q "already_deploy"; then
+              echo "Skipped (idempotent)"
+            else
+              echo "::error::Deploy failed: $HTTP_CODE"
+              exit 1
+            fi
+          fi
+
+          echo "### Canary Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "- Tag: \`$TAG\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Mode: canary-only" >> $GITHUB_STEP_SUMMARY

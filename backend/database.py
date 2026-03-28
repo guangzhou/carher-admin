@@ -27,7 +27,7 @@ DB_DIR = Path(os.environ.get("CARHER_ADMIN_DB_DIR", "/data/carher-admin"))
 DB_PATH = DB_DIR / "admin.db"
 BACKUP_DIR = Path(os.environ.get("CARHER_ADMIN_BACKUP_DIR", "/nas-backup/carher-admin"))
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS her_instances (
@@ -70,6 +70,13 @@ CREATE TABLE IF NOT EXISTS audit_log (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS deploy_groups (
+    name            TEXT PRIMARY KEY,
+    priority        INTEGER NOT NULL DEFAULT 100,
+    description     TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
@@ -86,6 +93,15 @@ MIGRATIONS = {
             failed INTEGER NOT NULL DEFAULT 0, current_wave TEXT NOT NULL DEFAULT '',
             error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')),
             completed_at TEXT)""",
+    ],
+    3: [
+        """CREATE TABLE IF NOT EXISTS deploy_groups (
+            name TEXT PRIMARY KEY, priority INTEGER NOT NULL DEFAULT 100,
+            description TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')))""",
+        "INSERT OR IGNORE INTO deploy_groups (name, priority, description) VALUES ('canary', 10, '金丝雀 — 最先更新')",
+        "INSERT OR IGNORE INTO deploy_groups (name, priority, description) VALUES ('early', 50, '先行者 — 金丝雀通过后更新')",
+        "INSERT OR IGNORE INTO deploy_groups (name, priority, description) VALUES ('stable', 100, '稳定 — 最后更新')",
     ],
 }
 
@@ -385,6 +401,79 @@ def set_deploy_group(uid: int, group: str):
         conn.execute("UPDATE her_instances SET deploy_group = ? WHERE id = ?", (group, uid))
         _audit(conn, uid, f"deploy_group:{group}")
     backup_to_nas()
+
+
+def batch_set_deploy_group(uids: list[int], group: str):
+    """Move multiple instances to a deploy group at once."""
+    with get_db() as conn:
+        for uid in uids:
+            conn.execute("UPDATE her_instances SET deploy_group = ? WHERE id = ?", (group, uid))
+            _audit(conn, uid, f"deploy_group:{group}")
+    backup_to_nas()
+
+
+# ──────────────────────────────────────
+# Deploy group registry
+# ──────────────────────────────────────
+
+def list_deploy_groups() -> list[dict]:
+    """Return all deploy groups ordered by priority (low = first to deploy)."""
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM deploy_groups ORDER BY priority, name").fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_wave_order() -> list[str]:
+    """Return group names in deploy order (ascending priority)."""
+    groups = list_deploy_groups()
+    return [g["name"] for g in groups]
+
+
+def create_deploy_group(name: str, priority: int, description: str = ""):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO deploy_groups (name, priority, description) VALUES (?, ?, ?)",
+            (name, priority, description),
+        )
+        _audit(conn, None, f"deploy_group_created:{name}", f"priority={priority}")
+    backup_to_nas()
+
+
+def update_deploy_group(name: str, priority: int | None = None, description: str | None = None):
+    sets, params = [], {"name": name}
+    if priority is not None:
+        sets.append("priority = :priority")
+        params["priority"] = priority
+    if description is not None:
+        sets.append("description = :description")
+        params["description"] = description
+    if not sets:
+        return
+    with get_db() as conn:
+        conn.execute(f"UPDATE deploy_groups SET {', '.join(sets)} WHERE name = :name", params)
+    backup_to_nas()
+
+
+def delete_deploy_group(name: str) -> int:
+    """Delete a group and move its instances to 'stable'. Returns count moved."""
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE her_instances SET deploy_group = 'stable' WHERE deploy_group = ?", (name,)
+        )
+        moved = cur.rowcount
+        conn.execute("DELETE FROM deploy_groups WHERE name = ?", (name,))
+        _audit(conn, None, f"deploy_group_deleted:{name}", f"moved={moved}")
+    backup_to_nas()
+    return moved
+
+
+def get_deploy_group_stats() -> dict[str, int]:
+    """Return {group_name: instance_count} for running instances."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT deploy_group, COUNT(*) as cnt FROM her_instances WHERE status='running' GROUP BY deploy_group"
+        ).fetchall()
+        return {r["deploy_group"]: r["cnt"] for r in rows}
 
 
 def set_image_tag(uid: int, tag: str):

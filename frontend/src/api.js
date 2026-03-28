@@ -40,4 +40,10 @@ export const api = {
   abortDeploy: () => request("/deploy/abort", { method: "POST" }),
   getDeployHistory: (limit = 20) => request(`/deploy/history?limit=${limit}`),
   setDeployGroup: (uid, group) => request(`/instances/${uid}/deploy-group`, { method: "PUT", body: JSON.stringify({ group }) }),
+  batchSetDeployGroup: (ids, group) => request("/instances/batch-deploy-group", { method: "POST", body: JSON.stringify({ ids, group }) }),
+  // Deploy groups
+  listDeployGroups: () => request("/deploy-groups"),
+  createDeployGroup: (name, priority, description) => request("/deploy-groups", { method: "POST", body: JSON.stringify({ name, priority, description }) }),
+  updateDeployGroup: (name, data) => request(`/deploy-groups/${name}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteDeployGroup: (name) => request(`/deploy-groups/${name}`, { method: "DELETE" }),
 };

@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: carher-shared-skills
+  namespace: carher
+  labels:
+    app: carher
+    purpose: shared-skills
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: alicloud-nas
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: carher-dept-skills
+  namespace: carher
+  labels:
+    app: carher
+    purpose: dept-skills
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: alicloud-nas
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: carher-shared-sessions
+  namespace: carher
+  labels:
+    app: carher
+    purpose: sessions
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: alicloud-nas
+  resources:
+    requests:
+      storage: 20Gi

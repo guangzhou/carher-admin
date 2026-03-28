@@ -14,6 +14,10 @@ spec:
     metadata:
       labels:
         app: carher-operator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: carher-operator
       imagePullSecrets:
@@ -21,19 +25,42 @@ spec:
       containers:
         - name: operator
           image: cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her/carher-operator:latest
+          ports:
+            - containerPort: 8080
+              name: metrics
+            - containerPort: 8081
+              name: health
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "128Mi"
             limits:
-              cpu: "500m"
-              memory: "256Mi"
+              cpu: "1"
+              memory: "512Mi"
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 8080
+              port: 8081
             initialDelaySeconds: 15
-            periodSeconds: 30
-          env:
-            - name: KOPF_LOG_LEVEL
-              value: INFO
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: carher-operator-metrics
+  namespace: carher
+  labels:
+    app: carher-operator
+spec:
+  selector:
+    app: carher-operator
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: metrics

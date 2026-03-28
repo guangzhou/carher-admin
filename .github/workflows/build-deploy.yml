@@ -59,11 +59,11 @@ jobs:
             ${{ env.ACR_REGISTRY }}/her/carher-admin:${{ steps.tag.outputs.tag }}
             ${{ env.ACR_REGISTRY }}/her/carher-admin:latest
 
-      - name: Build operator
+      - name: Build operator (Go)
         if: inputs.components != 'admin'
         uses: docker/build-push-action@v5
         with:
-          context: ./operator
+          context: ./operator-go
           push: true
           tags: |
             ${{ env.ACR_REGISTRY }}/her/carher-operator:${{ steps.tag.outputs.tag }}

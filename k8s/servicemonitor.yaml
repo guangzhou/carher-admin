@@ -1,0 +1,67 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: carher-operator
+  namespace: carher
+  labels:
+    app: carher-operator
+spec:
+  selector:
+    matchLabels:
+      app: carher-operator
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+---
+# Prometheus alerting rules for CarHer
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: carher-alerts
+  namespace: carher
+  labels:
+    app: carher
+spec:
+  groups:
+    - name: carher.rules
+      rules:
+        - alert: CarHerFeishuDisconnected
+          expr: carher_feishu_ws_connected == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CarHer {{ $labels.user_id }} ({{ $labels.name }}) Feishu WS disconnected for 5m"
+
+        - alert: CarHerMassDisconnect
+          expr: count(carher_feishu_ws_connected == 0) > 10
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $value }} CarHer instances have Feishu WS disconnected"
+
+        - alert: CarHerHighRestarts
+          expr: carher_pod_restarts > 5
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CarHer {{ $labels.user_id }} ({{ $labels.name }}) has {{ $value }} restarts"
+
+        - alert: CarHerHealthCheckSlow
+          expr: carher_health_check_duration_seconds > 60
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CarHer health check cycle taking {{ $value }}s (should be <10s)"
+
+        - alert: CarHerSelfHealSpike
+          expr: rate(carher_self_heal_total[5m]) > 0.1
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CarHer self-healing rate is high: {{ $value }}/s — possible cluster issue"

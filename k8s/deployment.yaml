@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: carher-admin
+  namespace: carher
+  labels:
+    app: carher-admin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: carher-admin
+  template:
+    metadata:
+      labels:
+        app: carher-admin
+    spec:
+      serviceAccountName: carher-admin
+      imagePullSecrets:
+        - name: acr-secret
+      containers:
+        - name: admin
+          image: cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her/carher-admin:latest
+          ports:
+            - containerPort: 8900
+              name: http
+          env:
+            - name: ADMIN_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: carher-admin-auth
+                  key: token
+                  optional: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /api/status
+              port: 8900
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: 8900
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: carher-admin
+  namespace: carher
+  labels:
+    app: carher-admin
+spec:
+  selector:
+    app: carher-admin
+  ports:
+    - port: 8900
+      targetPort: 8900
+      protocol: TCP
+      name: http

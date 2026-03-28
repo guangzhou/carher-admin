@@ -379,9 +379,12 @@ def api_import_from_k8s():
 @app.post("/api/deploy")
 async def api_start_deploy(body: dict):
     image_tag = body.get("image_tag")
+    mode = body.get("mode", "normal")
     if not image_tag:
         raise HTTPException(400, "image_tag required")
-    return await deployer.start_deploy(image_tag)
+    if mode not in ("normal", "fast", "canary-only"):
+        raise HTTPException(400, "mode must be normal, fast, or canary-only")
+    return await deployer.start_deploy(image_tag, mode=mode)
 
 
 @app.get("/api/deploy/status")
@@ -421,14 +424,19 @@ def api_set_deploy_group(uid: int, body: dict):
 @app.post("/api/deploy/webhook")
 async def api_deploy_webhook(body: dict):
     """GitHub Actions webhook: auto-trigger deploy after image push."""
-    image_tag = body.get("image_tag")
-    secret = body.get("secret")
+    secret = body.get("secret", "")
     expected = os.environ.get("DEPLOY_WEBHOOK_SECRET", "")
-    if expected and secret != expected:
+    if not expected:
+        raise HTTPException(503, "DEPLOY_WEBHOOK_SECRET not configured")
+    if secret != expected:
         raise HTTPException(403, "Invalid webhook secret")
+
+    image_tag = body.get("image_tag")
     if not image_tag:
         raise HTTPException(400, "image_tag required")
-    return await deployer.start_deploy(image_tag)
+
+    mode = body.get("mode", "normal")
+    return await deployer.start_deploy(image_tag, mode=mode)
 
 
 # ── Serve frontend ──

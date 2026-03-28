@@ -33,7 +33,7 @@ export const api = {
   getAuditLog: (instanceId, limit = 50) => request(`/audit?${instanceId ? `instance_id=${instanceId}&` : ""}limit=${limit}`),
   importFromK8s: () => request("/import-from-k8s", { method: "POST" }),
   // Deploy pipeline
-  startDeploy: (imageTag) => request("/deploy", { method: "POST", body: JSON.stringify({ image_tag: imageTag }) }),
+  startDeploy: (imageTag, mode = "normal") => request("/deploy", { method: "POST", body: JSON.stringify({ image_tag: imageTag, mode }) }),
   getDeployStatus: () => request("/deploy/status"),
   continueDeploy: () => request("/deploy/continue", { method: "POST" }),
   rollbackDeploy: () => request("/deploy/rollback", { method: "POST" }),

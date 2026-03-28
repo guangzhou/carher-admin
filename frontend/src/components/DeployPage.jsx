@@ -14,6 +14,7 @@ export default function DeployPage() {
   const [history, setHistory] = useState([]);
   const [instances, setInstances] = useState([]);
   const [imageTag, setImageTag] = useState("");
+  const [deployMode, setDeployMode] = useState("normal");
   const [loading, setLoading] = useState("");
 
   const load = useCallback(() => {
@@ -31,13 +32,16 @@ export default function DeployPage() {
     return () => clearInterval(t);
   }, [status?.active, load]);
 
+  const MODE_LABELS = { normal: "灰度部署", fast: "紧急全量", "canary-only": "仅金丝雀" };
   const startDeploy = async () => {
     if (!imageTag) return alert("请输入镜像 tag");
-    if (!confirm(`确认部署 ${imageTag}？将按 金丝雀 → 先行者 → 稳定 顺序灰度发布`)) return;
+    const modeLabel = MODE_LABELS[deployMode] || deployMode;
+    if (!confirm(`确认 [${modeLabel}] 部署 ${imageTag}？`)) return;
     setLoading("deploy");
     try {
-      const r = await api.startDeploy(imageTag);
+      const r = await api.startDeploy(imageTag, deployMode);
       if (r.error) alert(r.error);
+      else if (r.status === "already_deployed") alert("该镜像已部署完成，无需重复部署");
       else load();
     } finally {
       setLoading("");
@@ -142,18 +146,28 @@ export default function DeployPage() {
           <div className="flex gap-2">
             <input
               className="input flex-1"
-              placeholder="镜像 tag (如 v20260329)"
+              placeholder="镜像 tag (如 v20260329-abc1234)"
               value={imageTag}
               onChange={(e) => setImageTag(e.target.value)}
             />
+            <select
+              className="input w-36"
+              value={deployMode}
+              onChange={(e) => setDeployMode(e.target.value)}
+            >
+              <option value="normal">灰度部署</option>
+              <option value="fast">紧急全量</option>
+              <option value="canary-only">仅金丝雀</option>
+            </select>
             <button className="btn btn-primary px-6" onClick={startDeploy} disabled={!!loading}>
-              {loading === "deploy" ? "部署中..." : "开始灰度部署"}
+              {loading === "deploy" ? "部署中..." : "开始部署"}
             </button>
           </div>
-          <p className="text-xs text-gray-600">
-            部署顺序: 金丝雀({status?.waves?.canary || 0}) → 先行者({status?.waves?.early || 0}) → 稳定({status?.waves?.stable || 0})，
-            每批 {10} 个，每批完成后自动健康检查
-          </p>
+          <div className="text-xs text-gray-600 space-y-1">
+            <p><strong>灰度部署:</strong> 金丝雀({status?.waves?.canary || 0}) → 先行者({status?.waves?.early || 0}) → 稳定({status?.waves?.stable || 0})，每批后自动健康检查</p>
+            <p><strong>紧急全量:</strong> 跳过灰度，所有实例直接更新（用于 hotfix）</p>
+            <p><strong>仅金丝雀:</strong> 只更新金丝雀组，手动确认后再继续</p>
+          </div>
         </div>
       )}
 

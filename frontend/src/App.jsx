@@ -4,6 +4,7 @@ import InstanceList from "./components/InstanceList";
 import AddInstance from "./components/AddInstance";
 import BatchImport from "./components/BatchImport";
 import HealthCheck from "./components/HealthCheck";
+import AdminPanel from "./components/AdminPanel";
 
 const TABS = [
   { id: "dashboard", label: "仪表盘" },
@@ -11,6 +12,7 @@ const TABS = [
   { id: "add", label: "新增" },
   { id: "import", label: "批量导入" },
   { id: "health", label: "健康检查" },
+  { id: "admin", label: "系统管理" },
 ];
 
 export default function App() {
@@ -56,6 +58,7 @@ export default function App() {
         {tab === "add" && <AddInstance onCreated={(id) => openDetail(id)} />}
         {tab === "import" && <BatchImport onDone={() => setTab("instances")} />}
         {tab === "health" && <HealthCheck />}
+        {tab === "admin" && <AdminPanel />}
       </main>
     </div>
   );

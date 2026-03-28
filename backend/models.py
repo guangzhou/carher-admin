@@ -18,6 +18,8 @@ class HerInstance(BaseModel):
     app_id: str = ""
     oauth_url: str = ""
     owner: str = ""
+    provider: str = "openrouter"
+    sync_status: str = ""
     has_memory: bool | None = None
 
 

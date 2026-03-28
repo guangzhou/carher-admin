@@ -132,6 +132,7 @@ export default function InstanceList({ detailId, setDetailId }) {
               <th className="p-3">状态</th>
               <th className="p-3">Pod IP</th>
               <th className="p-3">运行时长</th>
+              <th className="p-3">同步</th>
               <th className="p-3 text-right">操作</th>
             </tr>
           </thead>
@@ -159,6 +160,15 @@ export default function InstanceList({ detailId, setDetailId }) {
                 </td>
                 <td className="p-3 text-gray-400 font-mono text-xs">{inst.pod_ip || "-"}</td>
                 <td className="p-3 text-gray-400 text-xs">{inst.age || "-"}</td>
+                <td className="p-3">
+                  {inst.sync_status === "synced" ? (
+                    <span className="text-emerald-400 text-xs">●</span>
+                  ) : inst.sync_status === "pending" ? (
+                    <span className="text-yellow-400 text-xs" title="ConfigMap 同步待重试">◐</span>
+                  ) : (
+                    <span className="text-gray-600 text-xs">-</span>
+                  )}
+                </td>
                 <td className="p-3 text-right">
                   <div className="flex items-center justify-end gap-1">
                     {inst.status === "Running" ? (
@@ -176,7 +186,7 @@ export default function InstanceList({ detailId, setDetailId }) {
             ))}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan="8" className="p-8 text-center text-gray-500">
+                <td colSpan="9" className="p-8 text-center text-gray-500">
                   {loading ? "加载中..." : "没有找到实例"}
                 </td>
               </tr>

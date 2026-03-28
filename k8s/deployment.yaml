@@ -18,6 +18,9 @@ spec:
       serviceAccountName: carher-admin
       imagePullSecrets:
         - name: acr-secret
+      # Pin to a specific node for stable hostPath storage
+      nodeSelector:
+        kubernetes.io/hostname: cn-hongkong.10.0.1.226
       containers:
         - name: admin
           image: cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her/carher-admin:latest
@@ -25,12 +28,10 @@ spec:
             - containerPort: 8900
               name: http
           env:
-            - name: ADMIN_AUTH_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: carher-admin-auth
-                  key: token
-                  optional: true
+            - name: CARHER_ADMIN_DB_DIR
+              value: /data/db
+            - name: CARHER_ADMIN_BACKUP_DIR
+              value: /data/nas-backup
           resources:
             requests:
               cpu: "100m"
@@ -38,6 +39,13 @@ spec:
             limits:
               cpu: "500m"
               memory: "256Mi"
+          volumeMounts:
+            # SQLite on local disk (hostPath) — safe for file locking
+            - name: db-local
+              mountPath: /data/db
+            # NAS mount for backup only (write backup, never run SQLite here)
+            - name: nas-backup
+              mountPath: /data/nas-backup
           livenessProbe:
             httpGet:
               path: /api/status
@@ -50,6 +58,28 @@ spec:
               port: 8900
             initialDelaySeconds: 5
             periodSeconds: 10
+      volumes:
+        # Local disk on pinned node — SQLite runs here
+        - name: db-local
+          hostPath:
+            path: /data/carher-admin/db
+            type: DirectoryOrCreate
+        # NAS — backup destination only
+        - name: nas-backup
+          persistentVolumeClaim:
+            claimName: carher-admin-backup
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: carher-admin-backup
+  namespace: carher
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: alibabacloud-cnfs-nas
+  resources:
+    requests:
+      storage: 1Gi
 ---
 apiVersion: v1
 kind: Service

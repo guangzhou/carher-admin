@@ -27,4 +27,9 @@ export const api = {
   getStatus: () => request("/status"),
   getHealth: () => request("/health"),
   getNextId: () => request("/next-id"),
+  // Sync & Admin
+  forceSync: () => request("/sync/force", { method: "POST" }),
+  consistencyCheck: () => request("/sync/check"),
+  getAuditLog: (instanceId, limit = 50) => request(`/audit?${instanceId ? `instance_id=${instanceId}&` : ""}limit=${limit}`),
+  importFromK8s: () => request("/import-from-k8s", { method: "POST" }),
 };

@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: carher-operator
+  namespace: carher
+  labels:
+    app: carher-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: carher-operator
+  template:
+    metadata:
+      labels:
+        app: carher-operator
+    spec:
+      serviceAccountName: carher-operator
+      imagePullSecrets:
+        - name: acr-secret
+      containers:
+        - name: operator
+          image: cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her/carher-operator:latest
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          env:
+            - name: KOPF_LOG_LEVEL
+              value: INFO

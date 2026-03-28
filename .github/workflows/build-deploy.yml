@@ -31,7 +31,7 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      - name: Build and push
+      - name: Build and push admin
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -39,6 +39,15 @@ jobs:
           tags: |
             ${{ env.ACR_REGISTRY }}/${{ env.ACR_REPO }}:${{ steps.tag.outputs.tag }}
             ${{ env.ACR_REGISTRY }}/${{ env.ACR_REPO }}:latest
+
+      - name: Build and push operator
+        uses: docker/build-push-action@v5
+        with:
+          context: ./operator
+          push: true
+          tags: |
+            ${{ env.ACR_REGISTRY }}/her/carher-operator:${{ steps.tag.outputs.tag }}
+            ${{ env.ACR_REGISTRY }}/her/carher-operator:latest
 
   deploy:
     needs: build-and-push

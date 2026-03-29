@@ -117,7 +117,7 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if needRecreate {
-		logger.Info("Recreating pod", "uid", uid, "action", action, "image", her.Spec.Image)
+		logger.Info("Recreating pod", "uid", uid, "action", action, "image", resolveImage(her.Spec.Image))
 		if err := r.deletePod(ctx, uid); err != nil {
 			logger.V(1).Info("Delete pod returned error (may be ok)", "uid", uid, "err", err)
 		}

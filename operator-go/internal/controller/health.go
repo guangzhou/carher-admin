@@ -154,8 +154,10 @@ func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, p
 	}
 
 	if pod == nil {
-		logger.Info("Pod missing, triggering self-heal")
-		metrics.SelfHealTotal.Inc()
+		if her.Status.Phase != "Pending" {
+			logger.Info("Pod missing, triggering self-heal")
+			metrics.SelfHealTotal.Inc()
+		}
 		status.Phase = "Pending"
 		status.Message = "Pod missing, self-heal triggered"
 		status.FeishuWS = "Unknown"

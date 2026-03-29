@@ -37,10 +37,7 @@ type ConfigInput struct {
 }
 
 func GenerateOpenclawJSON(input ConfigInput) string {
-	prefix := input.Prefix
-	if prefix == "" {
-		prefix = "s1"
-	}
+	prefix := resolvePrefix(input.Prefix)
 	pfx := prefix + "-"
 
 	mm := modelMap

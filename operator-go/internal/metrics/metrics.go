@@ -54,13 +54,6 @@ var (
 		},
 	)
 
-	DeployActive = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "carher_deploy_active",
-			Help: "Whether a deploy is currently active (1=yes, 0=no)",
-		},
-	)
-
 	SelfHealTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "carher_self_heal_total",
@@ -77,7 +70,6 @@ func init() {
 		ReconcileDuration,
 		HealthCheckDuration,
 		KnownBotsCount,
-		DeployActive,
 		SelfHealTotal,
 	)
 }

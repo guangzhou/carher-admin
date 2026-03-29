@@ -24,7 +24,12 @@ from . import config_gen
 from . import k8s_ops
 from . import sync_worker
 from . import deployer
-from .models import HerAddRequest, HerBatchAction, HerBatchImport, HerUpdateRequest
+from .models import (
+    HerAddRequest, HerBatchAction, HerBatchImport, HerUpdateRequest,
+    DeployGroupCreate, DeployGroupUpdate, SetDeployGroupRequest,
+    BatchSetDeployGroupRequest, DeployRequest, DeployWebhookRequest,
+    AgentRequest, AgentResponse,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("carher-admin")
@@ -40,7 +45,14 @@ async def lifespan(app: FastAPI):
     logger.info("CarHer Admin started (DB + K8s + sync workers)")
     yield
 
-app = FastAPI(title="CarHer Admin", lifespan=lifespan)
+app = FastAPI(
+    title="CarHer Admin",
+    description="Enterprise management platform for 500+ CarHer (Feishu AI assistant) instances. "
+                "Provides declarative lifecycle management, canary deployment, health monitoring, "
+                "and an AI operations agent. All APIs return JSON.",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -202,17 +214,18 @@ def api_batch_import(req: HerBatchImport):
 
 # ── API: Update ──
 
-@app.put("/api/instances/{uid}")
+@app.put("/api/instances/{uid}", tags=["instances"])
 def api_update(uid: int, req: HerUpdateRequest):
+    """Update instance fields. Only non-null fields are applied."""
     inst = db.get_by_id(uid)
     if not inst:
         raise HTTPException(404, f"Instance {uid} not found")
 
     changes = {}
-    if req.model is not None:
-        changes["model"] = req.model
-    if req.owner is not None:
-        changes["owner"] = req.owner
+    for field in ("name", "model", "owner", "provider", "prefix", "deploy_group"):
+        val = getattr(req, field, None)
+        if val is not None:
+            changes[field] = val
 
     if changes:
         inst = db.update(uid, changes)
@@ -221,7 +234,7 @@ def api_update(uid: int, req: HerUpdateRequest):
         except Exception as e:
             logger.warning("ConfigMap sync failed for %d after update: %s", uid, e)
 
-    return {"id": uid, "action": "updated", "needs_restart": True}
+    return {"id": uid, "action": "updated", "changes": changes}
 
 
 # ── API: Lifecycle ──
@@ -376,15 +389,12 @@ def api_import_from_k8s():
 
 # ── API: Deploy Pipeline ──
 
-@app.post("/api/deploy")
-async def api_start_deploy(body: dict):
-    image_tag = body.get("image_tag")
-    mode = body.get("mode", "normal")
-    if not image_tag:
-        raise HTTPException(400, "image_tag required")
-    if mode not in ("normal", "fast", "canary-only"):
+@app.post("/api/deploy", tags=["deploy"])
+async def api_start_deploy(req: DeployRequest):
+    """Start a new deployment. Modes: normal (canary→early→stable), fast (all at once), canary-only."""
+    if req.mode not in ("normal", "fast", "canary-only"):
         raise HTTPException(400, "mode must be normal, fast, or canary-only")
-    return await deployer.start_deploy(image_tag, mode=mode)
+    return await deployer.start_deploy(req.image_tag, mode=req.mode)
 
 
 @app.get("/api/deploy/status")
@@ -412,24 +422,18 @@ def api_deploy_history(limit: int = Query(20)):
     return db.list_deploys(limit=limit)
 
 
-@app.put("/api/instances/{uid}/deploy-group")
-def api_set_deploy_group(uid: int, body: dict):
-    group = body.get("group", "").strip()
-    if not group:
-        raise HTTPException(400, "group is required")
-    db.set_deploy_group(uid, group)
-    return {"id": uid, "deploy_group": group}
+@app.put("/api/instances/{uid}/deploy-group", tags=["deploy-groups"])
+def api_set_deploy_group(uid: int, req: SetDeployGroupRequest):
+    """Move a single instance to a deploy group."""
+    db.set_deploy_group(uid, req.group)
+    return {"id": uid, "deploy_group": req.group}
 
 
-@app.post("/api/instances/batch-deploy-group")
-def api_batch_set_deploy_group(body: dict):
+@app.post("/api/instances/batch-deploy-group", tags=["deploy-groups"])
+def api_batch_set_deploy_group(req: BatchSetDeployGroupRequest):
     """Move multiple instances to a deploy group at once."""
-    uids = body.get("ids", [])
-    group = body.get("group", "").strip()
-    if not uids or not group:
-        raise HTTPException(400, "ids and group are required")
-    db.batch_set_deploy_group(uids, group)
-    return {"action": "batch_set_deploy_group", "count": len(uids), "group": group}
+    db.batch_set_deploy_group(req.ids, req.group)
+    return {"action": "batch_set_deploy_group", "count": len(req.ids), "group": req.group}
 
 
 # ── API: Deploy Groups ──
@@ -443,22 +447,22 @@ def api_list_deploy_groups():
     return groups
 
 
-@app.post("/api/deploy-groups")
-def api_create_deploy_group(body: dict):
-    name = body.get("name", "").strip().lower()
-    priority = body.get("priority", 100)
-    description = body.get("description", "")
+@app.post("/api/deploy-groups", tags=["deploy-groups"])
+def api_create_deploy_group(req: DeployGroupCreate):
+    """Create a custom deploy group. Lower priority = deployed first."""
+    name = req.name.strip().lower()
     if not name:
         raise HTTPException(400, "name is required")
-    if not name.isalnum() and not all(c.isalnum() or c in "-_" for c in name):
+    if not all(c.isalnum() or c in "-_" for c in name):
         raise HTTPException(400, "name must be alphanumeric (with - or _)")
-    db.create_deploy_group(name, priority, description)
-    return {"name": name, "priority": priority}
+    db.create_deploy_group(name, req.priority, req.description)
+    return {"name": name, "priority": req.priority}
 
 
-@app.put("/api/deploy-groups/{name}")
-def api_update_deploy_group(name: str, body: dict):
-    db.update_deploy_group(name, priority=body.get("priority"), description=body.get("description"))
+@app.put("/api/deploy-groups/{name}", tags=["deploy-groups"])
+def api_update_deploy_group(name: str, req: DeployGroupUpdate):
+    """Update priority or description of a deploy group."""
+    db.update_deploy_group(name, priority=req.priority, description=req.description)
     return {"name": name, "updated": True}
 
 
@@ -470,22 +474,286 @@ def api_delete_deploy_group(name: str):
     return {"name": name, "deleted": True, "instances_moved_to_stable": moved}
 
 
-@app.post("/api/deploy/webhook")
-async def api_deploy_webhook(body: dict):
+@app.post("/api/deploy/webhook", tags=["deploy"])
+async def api_deploy_webhook(req: DeployWebhookRequest):
     """GitHub Actions webhook: auto-trigger deploy after image push."""
-    secret = body.get("secret", "")
     expected = os.environ.get("DEPLOY_WEBHOOK_SECRET", "")
     if not expected:
         raise HTTPException(503, "DEPLOY_WEBHOOK_SECRET not configured")
-    if secret != expected:
+    if req.secret != expected:
         raise HTTPException(403, "Invalid webhook secret")
+    return await deployer.start_deploy(req.image_tag, mode=req.mode)
 
-    image_tag = body.get("image_tag")
-    if not image_tag:
-        raise HTTPException(400, "image_tag required")
 
-    mode = body.get("mode", "normal")
-    return await deployer.start_deploy(image_tag, mode=mode)
+# ── API: Search / Filter ──
+
+@app.get("/api/instances/search", tags=["instances"])
+def api_search_instances(
+    status: str | None = Query(None, description="Filter: Running/Stopped/Failed/Paused"),
+    model: str | None = Query(None, description="Filter: gpt/sonnet/opus"),
+    deploy_group: str | None = Query(None, description="Filter: group name"),
+    owner: str | None = Query(None, description="Filter: owner contains open_id"),
+    name: str | None = Query(None, description="Filter: name contains text"),
+    feishu_ws: str | None = Query(None, description="Filter: Connected/Disconnected"),
+):
+    """Search instances with flexible filters. All filters are AND-combined."""
+    instances = db.list_all()
+    pod_statuses = k8s_ops.get_all_pod_statuses()
+
+    results = []
+    for inst in instances:
+        if inst["status"] == "deleted":
+            continue
+        uid = inst["id"]
+        pod = pod_statuses.get(uid, {})
+        phase = pod.get("phase", "Stopped") if pod.get("pod_exists") else "Stopped"
+
+        if status and phase.lower() != status.lower():
+            continue
+        if model and inst.get("model", "") != model:
+            continue
+        if deploy_group and inst.get("deploy_group", "stable") != deploy_group:
+            continue
+        if owner and owner not in inst.get("owner", ""):
+            continue
+        if name and name.lower() not in inst.get("name", "").lower():
+            continue
+
+        prefix = inst.get("prefix", "s1")
+        pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
+        mm = config_gen.MODEL_MAP_ANTHROPIC if inst.get("provider") == "anthropic" else config_gen.MODEL_MAP
+        model_full = mm.get(inst.get("model", "gpt"), inst.get("model", "gpt"))
+
+        entry = {
+            "id": uid,
+            "name": inst.get("name", ""),
+            "model": model_full,
+            "model_short": inst.get("model", ""),
+            "status": phase,
+            "pod_ip": pod.get("pod_ip", ""),
+            "node": pod.get("node", ""),
+            "restarts": pod.get("restarts", 0),
+            "deploy_group": inst.get("deploy_group", "stable"),
+            "owner": inst.get("owner", ""),
+            "provider": inst.get("provider", "openrouter"),
+        }
+
+        if feishu_ws:
+            health = k8s_ops.check_pod_health(uid) if pod.get("pod_exists") else {}
+            ws = "Connected" if health.get("feishu_ws") else "Disconnected"
+            if ws.lower() != feishu_ws.lower():
+                continue
+            entry["feishu_ws"] = ws
+
+        results.append(entry)
+
+    return {"count": len(results), "instances": results}
+
+
+# ── API: Config Preview ──
+
+@app.get("/api/instances/{uid}/config-preview", tags=["instances"])
+def api_config_preview(uid: int):
+    """Preview the openclaw.json that would be generated, without applying it."""
+    inst = db.get_by_id(uid)
+    if not inst:
+        raise HTTPException(404, f"Instance {uid} not found")
+    return config_gen.generate_openclaw_json(inst)
+
+
+@app.get("/api/instances/{uid}/config-current", tags=["instances"])
+def api_config_current(uid: int):
+    """Get the currently applied ConfigMap content for an instance."""
+    try:
+        cm = k8s_ops._core().read_namespaced_config_map(f"carher-{uid}-user-config", "carher")
+        import json
+        return json.loads(cm.data.get("openclaw.json", "{}"))
+    except Exception as e:
+        raise HTTPException(404, f"ConfigMap not found: {e}")
+
+
+# ── API: knownBots ──
+
+@app.get("/api/known-bots", tags=["system"])
+def api_known_bots():
+    """Get the global knownBots registry (all bot app_id → name mappings)."""
+    bots, bot_open_ids = db.collect_known_bots()
+    return {
+        "known_bots": bots,
+        "known_bot_open_ids": bot_open_ids,
+        "total": len(bots),
+    }
+
+
+# ── API: Statistics ──
+
+@app.get("/api/stats", tags=["system"])
+def api_stats():
+    """Aggregated statistics for dashboard and monitoring."""
+    instances = db.list_all()
+    pod_statuses = k8s_ops.get_all_pod_statuses()
+    group_stats = db.get_deploy_group_stats()
+
+    active = [i for i in instances if i["status"] != "deleted"]
+    running_pods = sum(1 for uid, p in pod_statuses.items() if p.get("pod_exists") and p.get("phase") == "Running")
+
+    model_dist = {}
+    provider_dist = {}
+    prefix_dist = {}
+    for inst in active:
+        m = inst.get("model", "gpt")
+        model_dist[m] = model_dist.get(m, 0) + 1
+        p = inst.get("provider", "openrouter")
+        provider_dist[p] = provider_dist.get(p, 0) + 1
+        pfx = inst.get("prefix", "s1")
+        prefix_dist[pfx] = prefix_dist.get(pfx, 0) + 1
+
+    return {
+        "total_instances": len(active),
+        "running_pods": running_pods,
+        "stopped": sum(1 for i in active if i["status"] == "stopped"),
+        "model_distribution": model_dist,
+        "provider_distribution": provider_dist,
+        "prefix_distribution": prefix_dist,
+        "deploy_group_distribution": group_stats,
+        "deploy_groups": db.list_deploy_groups(),
+        "wave_order": db.get_wave_order(),
+        "current_image_tag": db.get_current_image_tag(),
+    }
+
+
+# ── API: K8s Events ──
+
+@app.get("/api/instances/{uid}/events", tags=["instances"])
+def api_instance_events(uid: int, limit: int = Query(20)):
+    """Get K8s events related to an instance (Pod + PVC)."""
+    try:
+        v1 = k8s_ops._core()
+        events = v1.list_namespaced_event("carher", field_selector=f"involvedObject.name=carher-{uid}")
+        items = sorted(events.items, key=lambda e: e.last_timestamp or e.event_time or "", reverse=True)[:limit]
+        return [{
+            "type": e.type,
+            "reason": e.reason,
+            "message": e.message,
+            "count": e.count,
+            "first_seen": str(e.first_timestamp) if e.first_timestamp else "",
+            "last_seen": str(e.last_timestamp) if e.last_timestamp else "",
+            "source": e.source.component if e.source else "",
+        } for e in items]
+    except Exception as e:
+        return {"error": str(e), "events": []}
+
+
+# ── API: CRD Direct Query ──
+
+@app.get("/api/crd/instances", tags=["crd"])
+def api_crd_list():
+    """List all HerInstance CRDs with spec + status (direct K8s API)."""
+    try:
+        from . import crd_ops
+        instances = crd_ops.list_her_instances()
+        return [{
+            "name": i["metadata"]["name"],
+            "uid": i["spec"].get("userId"),
+            "spec": i.get("spec", {}),
+            "status": i.get("status", {}),
+        } for i in instances]
+    except Exception as e:
+        raise HTTPException(500, f"CRD query failed: {e}")
+
+
+@app.get("/api/crd/instances/{uid}", tags=["crd"])
+def api_crd_get(uid: int):
+    """Get a single HerInstance CRD (spec + status)."""
+    try:
+        from . import crd_ops
+        inst = crd_ops.get_her_instance(uid)
+        if not inst:
+            raise HTTPException(404, f"CRD her-{uid} not found")
+        return {
+            "name": inst["metadata"]["name"],
+            "spec": inst.get("spec", {}),
+            "status": inst.get("status", {}),
+            "metadata": {
+                "created": inst["metadata"].get("creationTimestamp"),
+                "generation": inst["metadata"].get("generation"),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+# ── API: Backup ──
+
+@app.post("/api/backup", tags=["system"])
+def api_trigger_backup():
+    """Manually trigger SQLite backup to NAS."""
+    db.backup_to_nas()
+    return {"action": "backup", "status": "ok", "path": str(db.BACKUP_DIR)}
+
+
+# ── API: Pod Exec (debug) ──
+
+@app.post("/api/instances/{uid}/exec", tags=["instances"])
+def api_pod_exec(uid: int, body: dict):
+    """Execute a command inside an instance's Pod (for debugging). Returns stdout."""
+    command = body.get("command", "")
+    if not command:
+        raise HTTPException(400, "command is required")
+    forbidden = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "kill -9 1"]
+    for f in forbidden:
+        if f in command:
+            raise HTTPException(403, f"Forbidden command pattern: {f}")
+    try:
+        from kubernetes.stream import stream as k8s_stream
+        v1 = k8s_ops._core()
+        resp = k8s_stream(
+            v1.connect_get_namespaced_pod_exec,
+            f"carher-{uid}", "carher",
+            command=["/bin/sh", "-c", command],
+            stderr=True, stdout=True, stdin=False, tty=False,
+        )
+        return {"id": uid, "command": command, "output": resp}
+    except Exception as e:
+        raise HTTPException(500, f"Exec failed: {e}")
+
+
+# ── API: AI Agent ──
+
+@app.post("/api/agent", tags=["agent"], response_model=AgentResponse)
+async def api_agent(req: AgentRequest):
+    """Natural language operations agent. Understands Chinese and English.
+
+    Examples:
+      - "重启所有飞书断连的实例"
+      - "查看金丝雀组有哪些实例"
+      - "把用户 14 移到 VIP 组"
+      - "分析 carher-25 的日志，找出错误原因"
+      - "当前集群状态怎么样"
+      - "部署 v20260329 镜像到金丝雀组"
+    """
+    from . import agent
+    return await agent.handle_message(req.message, context=req.context, dry_run=req.dry_run)
+
+
+@app.get("/api/agent/capabilities", tags=["agent"])
+def api_agent_capabilities():
+    """List all capabilities the AI agent can perform."""
+    return {
+        "description": "CarHer AI operations agent. Accepts natural language (Chinese/English).",
+        "capabilities": [
+            {"name": "query", "examples": ["当前集群状态", "查看实例 14 详情", "有哪些飞书断连的"]},
+            {"name": "lifecycle", "examples": ["重启实例 25", "停止所有 Failed 的实例", "启动 carher-14"]},
+            {"name": "deploy", "examples": ["部署 v20260329 到金丝雀组", "查看当前部署状态"]},
+            {"name": "group", "examples": ["把 14 移到 VIP 组", "创建 test 分组 优先级 5"]},
+            {"name": "diagnose", "examples": ["分析 carher-25 的日志", "为什么 14 号飞书断连了"]},
+            {"name": "stats", "examples": ["当前有多少实例在运行", "各模型使用分布"]},
+        ],
+        "model": os.environ.get("AGENT_MODEL", "gpt-4o"),
+        "endpoint": "POST /api/agent",
+    }
 
 
 # ── Serve frontend ──

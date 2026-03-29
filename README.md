@@ -203,14 +203,15 @@ Pod 崩溃 / 节点故障后，Operator 自动重建 Pod。以下数据保证完
 ```
 carher-admin/
 ├── backend/                     # Python FastAPI 后端
-│   ├── main.py                 # API 路由 (50+ endpoints)
+│   ├── main.py                 # API 路由 (60+ endpoints)
+│   ├── agent.py                # AI 运维 Agent (自然语言 → API 调用)
 │   ├── database.py             # SQLite (审计/部署历史/灰度分组, schema v3)
 │   ├── deployer.py             # 灰度部署编排器 (动态 wave order)
 │   ├── crd_ops.py              # CRD 操作 (admin → K8s API)
 │   ├── k8s_ops.py              # 直接 K8s 操作 (legacy 兼容)
 │   ├── config_gen.py           # openclaw.json 配置生成
 │   ├── sync_worker.py          # 后台同步
-│   ├── models.py               # Pydantic 数据模型
+│   ├── models.py               # Pydantic 数据模型 (含 OpenAPI schema)
 │   └── requirements.txt        # Python 依赖
 ├── frontend/                    # React + Vite + Tailwind
 │   └── src/
@@ -256,19 +257,28 @@ carher-admin/
 
 ## API 参考
 
+> **OpenAPI Schema**: `GET /openapi.json` — 完整的 JSON Schema，可被 Cursor、Postman、代码生成器等直接消费。
+>
+> **Cursor Skill**: `.cursor/skills/carher-admin-api/SKILL.md` — 含所有 API 的 curl 示例。
+
 ### 实例管理
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/instances` | 列出所有实例 (含 Pod 运行状态) |
+| GET | `/api/instances/search` | **搜索** — 按 status/model/deploy_group/owner/name/feishu_ws 过滤 |
 | GET | `/api/instances/:id` | 实例详情 (含 PVC 状态, knownBots 计数) |
 | POST | `/api/instances` | 创建实例 |
-| PUT | `/api/instances/:id` | 修改配置 (model, owner) |
+| PUT | `/api/instances/:id` | 修改配置 (**支持全字段**: name/model/owner/provider/prefix/deploy_group) |
 | DELETE | `/api/instances/:id?purge=false` | 删除实例 (purge=true 同时删除 PVC) |
 | POST | `/api/instances/:id/stop` | 停止 (删 Pod, 保留数据) |
 | POST | `/api/instances/:id/start` | 启动 |
 | POST | `/api/instances/:id/restart` | 重启 |
 | GET | `/api/instances/:id/logs?tail=200` | 查看 Pod 日志 |
+| GET | `/api/instances/:id/events` | **K8s Events** (Pod 创建/重启/OOM 等事件) |
+| GET | `/api/instances/:id/config-preview` | **配置预览** — 生成但不应用 openclaw.json |
+| GET | `/api/instances/:id/config-current` | **当前配置** — 已应用的 ConfigMap 内容 |
+| POST | `/api/instances/:id/exec` | **Pod Exec** — 在容器内执行命令 (调试用) |
 | POST | `/api/instances/batch` | 批量操作 (body: `{ids, action, params}`) |
 | POST | `/api/instances/batch-import` | 批量导入 |
 | PUT | `/api/instances/:id/deploy-group` | 设置部署分组 (body: `{group}`) |
@@ -295,17 +305,34 @@ carher-admin/
 | GET | `/api/deploy/history?limit=20` | 部署历史 |
 | POST | `/api/deploy/webhook` | GitHub Actions 自动触发 (body: `{image_tag, secret, mode}`) |
 
+### CRD 直查
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/crd/instances` | 列出所有 CRD (spec + status，直接读 K8s etcd) |
+| GET | `/api/crd/instances/:uid` | 单个 CRD 详情 (含 metadata.generation) |
+
 ### 系统
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/status` | 集群状态 |
+| GET | `/api/stats` | **统计汇总** — 模型/提供商/前缀/分组分布 + 当前镜像 |
 | GET | `/api/health` | 全量健康检查 (飞书 WS + 记忆库 + 模型) |
+| GET | `/api/known-bots` | **knownBots 注册表** — 全局 bot appId→name 映射 |
 | GET | `/api/next-id` | 下一个可用 ID |
 | POST | `/api/sync/force` | 强制全量 ConfigMap 同步 |
 | GET | `/api/sync/check` | DB ↔ K8s 一致性检查 |
 | GET | `/api/audit?instance_id=&limit=50` | 审计日志 |
 | POST | `/api/import-from-k8s` | 从现有 ConfigMap 导入到 DB (一次性迁移) |
+| POST | `/api/backup` | **手动备份** — 触发 SQLite → NAS 备份 |
+
+### AI 运维 Agent
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/agent` | **自然语言运维** — 支持中英文，自动调用 API (body: `{message, dry_run?}`) |
+| GET | `/api/agent/capabilities` | Agent 能力清单 + 示例 |
 
 ## 本地开发
 
@@ -417,6 +444,64 @@ kubectl delete her her-14 -n carher
 | `message` | string | 附加信息 (错误原因等) |
 | `configHash` | string | ConfigMap 内容 hash (变更检测) |
 
+## AI 运维 Agent
+
+内嵌的 AI Agent 支持自然语言操作集群（中英文），底层通过 LLM 理解意图后调用 REST API 执行。
+
+### 使用方式
+
+```bash
+# 自然语言查询
+curl -X POST https://admin.carher.net/api/agent \
+  -H "Content-Type: application/json" \
+  -d '{"message":"当前有多少实例在运行？飞书断连的有哪些？"}'
+
+# 执行操作 (Agent 自动识别意图并调用 API)
+curl -X POST https://admin.carher.net/api/agent \
+  -H "Content-Type: application/json" \
+  -d '{"message":"把用户 14 移到 VIP 组"}'
+
+# Dry run — 只描述会做什么，不执行
+curl -X POST https://admin.carher.net/api/agent \
+  -H "Content-Type: application/json" \
+  -d '{"message":"重启所有飞书断连的实例","dry_run":true}'
+```
+
+### Agent 能力
+
+| 类别 | 示例 |
+|------|------|
+| 查询 | "当前集群状态" "查看实例 14 详情" "有哪些飞书断连的" |
+| 生命周期 | "重启实例 25" "停止所有 Failed 的实例" "启动 carher-14" |
+| 部署 | "部署 v20260329 到金丝雀组" "查看当前部署状态" |
+| 分组 | "把 14 移到 VIP 组" "创建 test 分组 优先级 5" |
+| 诊断 | "分析 carher-25 的日志" "为什么 14 号飞书断连了" |
+| 统计 | "当前有多少实例在运行" "各模型使用分布" |
+
+### 安全机制
+
+- 破坏性操作 (delete/purge) 需要确认
+- 批量操作 >10 实例时先汇报计划
+- `dry_run=true` 只返回执行计划不执行
+- 危险命令 (rm -rf 等) 在 Pod exec 中被禁止
+
+## 程序化调用 (Cursor / MCP)
+
+所有 API 均有完整的 Pydantic 类型定义，FastAPI 自动生成 OpenAPI 3.0 schema：
+
+```bash
+# 获取完整 OpenAPI schema (JSON)
+curl -s https://admin.carher.net/openapi.json | jq
+
+# 获取 Swagger UI
+open https://admin.carher.net/docs
+
+# 获取 ReDoc
+open https://admin.carher.net/redoc
+```
+
+Cursor 可通过 `.cursor/skills/carher-admin-api/SKILL.md` 直接消费所有 API。
+
 ## 环境变量
 
 | 变量 | 组件 | 说明 |
@@ -427,6 +512,9 @@ kubectl delete her her-14 -n carher
 | `FEISHU_DEPLOY_WEBHOOK` | admin | 飞书群 webhook URL (部署通知) |
 | `DEPLOY_HEALTH_WAIT_CANARY` | admin | 金丝雀健康检查等待秒数 (默认 30) |
 | `DEPLOY_HEALTH_WAIT` | admin | 普通波次健康检查等待秒数 (默认 15) |
+| `AGENT_LLM_API_KEY` | admin | AI Agent LLM API Key (OpenRouter/OpenAI) |
+| `AGENT_LLM_BASE_URL` | admin | LLM API Base URL (默认 OpenRouter) |
+| `AGENT_MODEL` | admin | LLM 模型名 (默认 openai/gpt-4o) |
 
 ## GitHub Secrets 配置
 

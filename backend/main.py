@@ -369,6 +369,8 @@ def api_search_instances(
                 "node": st.get("node", ""), "restarts": st.get("restarts", 0),
                 "deploy_group": spec.get("deployGroup", "stable"),
                 "owner": spec.get("owner", ""), "provider": spec.get("provider", "openrouter"),
+                "app_id": spec.get("appId", ""), "image": spec.get("image", ""),
+                "paused": spec.get("paused", False),
                 "feishu_ws": st.get("feishuWS", "Unknown"), "managed_by": "operator",
             })
     except Exception as e:
@@ -428,15 +430,17 @@ def api_get_instance(uid: int):
             status = crd.get("status", {})
             prefix = spec.get("prefix", "s1")
             pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
+            model_short = spec.get("model", "gpt")
             return {
                 "id": uid,
                 "name": spec.get("name", ""),
-                "model": spec.get("model", ""),
+                "model": model_short, "model_short": model_short,
                 "status": status.get("phase", "Unknown"),
                 "pod_ip": status.get("podIP", ""),
                 "node": status.get("node", ""),
                 "restarts": status.get("restarts", 0),
                 "app_id": spec.get("appId", ""),
+                "bot_open_id": spec.get("botOpenId", ""),
                 "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
                 "owner": spec.get("owner", ""),
                 "provider": spec.get("provider", "openrouter"),
@@ -448,6 +452,7 @@ def api_get_instance(uid: int):
                 "managed_by": "operator",
                 "pvc_status": k8s_ops.get_pvc_status(uid),
                 "last_health_check": status.get("lastHealthCheck", ""),
+                "message": status.get("message", ""),
             }
     except Exception:
         pass
@@ -476,7 +481,19 @@ def _has_crd(uid: int) -> bool:
 
 @app.post("/api/instances", dependencies=[Depends(verify_api_key)])
 def api_add_instance(req: HerAddRequest):
-    uid = req.id or db.next_id()
+    if req.id:
+        uid = req.id
+    else:
+        db_next = db.next_id()
+        crd_max = 0
+        try:
+            for inst in crd_ops.list_her_instances():
+                u = inst.get("spec", {}).get("userId", 0)
+                if u > crd_max:
+                    crd_max = u
+        except Exception:
+            pass
+        uid = max(db_next, crd_max + 1)
 
     data = {
         "id": uid, "name": req.name, "model": req.model,
@@ -563,32 +580,51 @@ def api_batch_import(req: HerBatchImport):
 _DB_TO_CRD_FIELD = {
     "name": "name", "model": "model", "owner": "owner",
     "provider": "provider", "prefix": "prefix", "deploy_group": "deployGroup",
+    "image": "image", "app_id": "appId", "bot_open_id": "botOpenId",
 }
+
+_UPDATE_FIELDS = (
+    "name", "model", "app_id", "owner", "provider",
+    "prefix", "bot_open_id", "image", "deploy_group",
+)
 
 @app.put("/api/instances/{uid}", tags=["instances"])
 def api_update(uid: int, req: HerUpdateRequest):
     """Update instance fields. Only non-null fields are applied.
-    CRD-managed instances are patched via the K8s API; operator reconciles."""
+    CRD-managed instances are patched via the K8s API; operator reconciles.
+    app_secret is stored in a dedicated K8s Secret (never in CRD spec)."""
     changes = {}
-    for field in ("name", "model", "owner", "provider", "prefix", "deploy_group"):
+    for field in _UPDATE_FIELDS:
         val = getattr(req, field, None)
         if val is not None:
             changes[field] = val
 
-    if not changes:
+    has_secret_change = req.app_secret is not None
+
+    if not changes and not has_secret_change:
         return {"id": uid, "action": "updated", "changes": {}}
 
     # CRD path
     if _has_crd(uid):
-        crd_changes = {_DB_TO_CRD_FIELD[k]: v for k, v in changes.items() if k in _DB_TO_CRD_FIELD}
-        crd_ops.update_her_instance(uid, crd_changes)
-        return {"id": uid, "action": "updated", "managed_by": "operator", "changes": changes}
+        if has_secret_change:
+            crd_ops._ensure_secret(uid, req.app_secret)
+        if changes:
+            crd_changes = {_DB_TO_CRD_FIELD[k]: v for k, v in changes.items() if k in _DB_TO_CRD_FIELD}
+            crd_ops.update_her_instance(uid, crd_changes)
+        reported = {**changes}
+        if has_secret_change:
+            reported["app_secret"] = "***updated***"
+        return {"id": uid, "action": "updated", "managed_by": "operator", "changes": reported}
 
     # Legacy path
     inst = db.get_by_id(uid)
     if not inst:
         raise HTTPException(404, f"Instance {uid} not found")
-    inst = db.update(uid, changes)
+    db_changes = {k: v for k, v in changes.items() if k != "image"}
+    if has_secret_change:
+        db_changes["app_secret"] = req.app_secret
+    if db_changes:
+        inst = db.update(uid, db_changes)
     try:
         _sync_and_deploy(inst)
     except Exception as e:
@@ -703,10 +739,19 @@ def api_logs(uid: int, tail: int = Query(200)):
 
 @app.get("/api/status")
 def api_status():
+    """Cluster status summary, merging CRD and DB counts."""
     k8s_status = k8s_ops.cluster_status()
+    # Include CRD-managed paused instances as "stopped"
+    crd_paused = 0
+    try:
+        for inst in crd_ops.list_her_instances():
+            if inst.get("spec", {}).get("paused"):
+                crd_paused += 1
+    except Exception:
+        pass
     db_counts = db.list_all()
     stopped = sum(1 for i in db_counts if i["status"] == "stopped")
-    k8s_status["stopped"] = stopped
+    k8s_status["stopped"] = stopped + crd_paused
     return k8s_status
 
 
@@ -756,7 +801,17 @@ def api_health():
 
 @app.get("/api/next-id")
 def api_next_id():
-    return {"next_id": db.next_id()}
+    """Next available ID, considering both DB and CRD instances."""
+    db_next = db.next_id()
+    crd_max = 0
+    try:
+        for inst in crd_ops.list_her_instances():
+            uid = inst.get("spec", {}).get("userId", 0)
+            if uid > crd_max:
+                crd_max = uid
+    except Exception:
+        pass
+    return {"next_id": max(db_next, crd_max + 1)}
 
 
 @app.post("/api/sync/force")
@@ -863,6 +918,13 @@ def api_batch_set_deploy_group(req: BatchSetDeployGroupRequest):
 def api_list_deploy_groups():
     groups = db.list_deploy_groups()
     stats = db.get_deploy_group_stats()
+    # Merge CRD instance counts
+    try:
+        for inst in crd_ops.list_her_instances():
+            g = inst.get("spec", {}).get("deployGroup", "stable")
+            stats[g] = stats.get(g, 0) + 1
+    except Exception:
+        pass
     for g in groups:
         g["count"] = stats.get(g["name"], 0)
     return groups
@@ -910,7 +972,23 @@ async def api_deploy_webhook(req: DeployWebhookRequest):
 
 @app.get("/api/instances/{uid}/config-preview", tags=["instances"])
 def api_config_preview(uid: int):
-    """Preview the openclaw.json that would be generated, without applying it."""
+    """Preview the openclaw.json that would be generated, without applying it.
+    For CRD-managed instances, synthesizes a DB-like dict from the CRD spec."""
+    try:
+        crd = crd_ops.get_her_instance(uid)
+        if crd:
+            spec = crd.get("spec", {})
+            inst = {
+                "id": uid, "name": spec.get("name", ""),
+                "model": spec.get("model", "gpt"), "app_id": spec.get("appId", ""),
+                "app_secret": "", "prefix": spec.get("prefix", "s1"),
+                "owner": spec.get("owner", ""), "provider": spec.get("provider", "openrouter"),
+                "bot_open_id": spec.get("botOpenId", ""),
+            }
+            return config_gen.generate_openclaw_json(inst)
+    except Exception:
+        pass
+
     inst = db.get_by_id(uid)
     if not inst:
         raise HTTPException(404, f"Instance {uid} not found")
@@ -932,8 +1010,21 @@ def api_config_current(uid: int):
 
 @app.get("/api/known-bots", tags=["system"])
 def api_known_bots():
-    """Get the global knownBots registry (all bot app_id → name mappings)."""
+    """Get the global knownBots registry (all bot app_id -> name mappings).
+    Merges DB and CRD instances."""
     bots, bot_open_ids = db.collect_known_bots()
+    try:
+        for inst in crd_ops.list_her_instances():
+            spec = inst.get("spec", {})
+            app_id = spec.get("appId", "")
+            name = spec.get("name", "")
+            if app_id and app_id not in bots:
+                bots[app_id] = name
+            boi = spec.get("botOpenId", "")
+            if boi and boi not in bot_open_ids:
+                bot_open_ids[boi] = name
+    except Exception:
+        pass
     return {
         "known_bots": bots,
         "known_bot_open_ids": bot_open_ids,

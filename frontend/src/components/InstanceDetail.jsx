@@ -7,17 +7,24 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
   const [loading, setLoading] = useState(true);
   const [showLogs, setShowLogs] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [editModel, setEditModel] = useState("");
-  const [editOwner, setEditOwner] = useState("");
+  const [editForm, setEditForm] = useState({});
   const [actionLoading, setActionLoading] = useState(false);
 
-  useEffect(() => {
+  const reload = () => {
     api.getInstance(id).then((d) => {
       setData(d);
-      setEditModel(d.model_short || "");
-      setEditOwner(d.owner || "");
+      setEditForm({
+        name: d.name || "",
+        model: d.model_short || d.model || "",
+        owner: d.owner || "",
+        provider: d.provider || "openrouter",
+        deploy_group: d.deploy_group || "stable",
+        image: d.image || "",
+      });
     }).finally(() => setLoading(false));
-  }, [id]);
+  };
+
+  useEffect(() => { reload(); }, [id]);
 
   const doAction = async (action) => {
     const labels = { stop: "停止", start: "启动", restart: "重启", delete: "删除" };
@@ -28,10 +35,7 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
       else if (action === "start") await api.startInstance(id);
       else if (action === "restart") await api.restartInstance(id);
       else if (action === "delete") { await api.deleteInstance(id); onBack(); return; }
-      setTimeout(() => {
-        api.getInstance(id).then(setData);
-        onRefresh();
-      }, 3000);
+      setTimeout(() => { reload(); onRefresh(); }, 3000);
     } catch (e) {
       alert(e.message);
     } finally {
@@ -43,11 +47,21 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
     setActionLoading(true);
     try {
       const params = {};
-      if (editModel !== data.model_short) params.model = editModel;
-      if (editOwner !== data.owner) params.owner = editOwner;
+      if (editForm.name !== (data.name || "")) params.name = editForm.name;
+      if (editForm.model !== (data.model_short || data.model || "")) params.model = editForm.model;
+      if (editForm.owner !== (data.owner || "")) params.owner = editForm.owner;
+      if (editForm.provider !== (data.provider || "openrouter")) params.provider = editForm.provider;
+      if (editForm.deploy_group !== (data.deploy_group || "stable")) params.deploy_group = editForm.deploy_group;
+      if (editForm.image && editForm.image !== (data.image || "")) params.image = editForm.image;
+
+      if (Object.keys(params).length === 0) {
+        setEditing(false);
+        return;
+      }
+
       await api.updateInstance(id, params);
       setEditing(false);
-      setTimeout(() => api.getInstance(id).then(setData), 3000);
+      setTimeout(() => { reload(); onRefresh(); }, 3000);
     } catch (e) {
       alert(e.message);
     } finally {
@@ -55,8 +69,12 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
     }
   };
 
+  const setField = (k, v) => setEditForm((f) => ({ ...f, [k]: v }));
+
   if (loading) return <div className="animate-pulse h-96 bg-gray-800 rounded-xl" />;
   if (!data) return <p className="text-gray-500">加载失败</p>;
+
+  const isCRD = data.managed_by === "operator";
 
   return (
     <div className="space-y-6">
@@ -65,10 +83,11 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
         <div className="flex items-center gap-3">
           <button className="btn btn-ghost" onClick={onBack}>← 返回</button>
           <h2 className="text-xl font-semibold">carher-{id}</h2>
-          <StatusBadge status={data.status} />
+          <StatusBadge status={data.paused ? "Paused" : data.status} />
+          {isCRD && <span className="text-xs text-blue-400 bg-blue-900/30 px-2 py-0.5 rounded">Operator</span>}
         </div>
         <div className="flex gap-2">
-          {data.status === "Running" ? (
+          {data.status === "Running" && !data.paused ? (
             <>
               <button className="btn btn-ghost" onClick={() => setShowLogs(!showLogs)}>{showLogs ? "隐藏日志" : "查看日志"}</button>
               <button className="btn btn-ghost" onClick={() => doAction("restart")} disabled={actionLoading}>重启</button>
@@ -88,9 +107,11 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
           <h3 className="text-sm font-medium text-gray-400 mb-2">基本信息</h3>
           <InfoRow label="名字" value={data.name} />
           <InfoRow label="模型" value={data.model} />
-          <InfoRow label="App ID" value={data.app_id} />
-          <InfoRow label="Owner" value={data.owner} />
-          <InfoRow label="knownBots" value={`${data.known_bots_count || 0} 个`} />
+          <InfoRow label="Provider" value={data.provider} />
+          <InfoRow label="App ID" value={data.app_id} mono />
+          <InfoRow label="Bot Open ID" value={data.bot_open_id} mono />
+          <InfoRow label="Owner" value={data.owner} mono />
+          <InfoRow label="部署组" value={data.deploy_group} />
         </div>
 
         <div className="card p-5 space-y-3">
@@ -98,9 +119,12 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
           <InfoRow label="Pod IP" value={data.pod_ip} mono />
           <InfoRow label="节点" value={data.node} mono />
           <InfoRow label="重启次数" value={data.restarts} />
-          <InfoRow label="运行时长" value={data.age} />
           <InfoRow label="PVC" value={data.pvc_status} />
           <InfoRow label="镜像" value={data.image} mono />
+          <InfoRow label="飞书 WS" value={data.feishu_ws} />
+          <InfoRow label="Config Hash" value={data.config_hash} mono />
+          {data.last_health_check && <InfoRow label="最后检查" value={data.last_health_check} />}
+          {data.message && <InfoRow label="消息" value={data.message} />}
         </div>
       </div>
 
@@ -118,11 +142,15 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
       {/* Edit form */}
       {editing && (
         <div className="card p-5 space-y-4 border-blue-600/30">
-          <h3 className="text-sm font-medium text-blue-400">编辑配置</h3>
+          <h3 className="text-sm font-medium text-blue-400">编辑配置{isCRD ? "（Operator 将自动 reconcile）" : ""}</h3>
           <div className="grid grid-cols-2 gap-4">
             <div>
+              <label className="block text-xs text-gray-500 mb-1">名字</label>
+              <input className="input w-full" value={editForm.name} onChange={(e) => setField("name", e.target.value)} />
+            </div>
+            <div>
               <label className="block text-xs text-gray-500 mb-1">模型</label>
-              <select className="input w-full" value={editModel} onChange={(e) => setEditModel(e.target.value)}>
+              <select className="input w-full" value={editForm.model} onChange={(e) => setField("model", e.target.value)}>
                 <option value="gpt">GPT-5.4</option>
                 <option value="sonnet">Claude Sonnet 4.6</option>
                 <option value="opus">Claude Opus 4.6</option>
@@ -130,13 +158,30 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
               </select>
             </div>
             <div>
+              <label className="block text-xs text-gray-500 mb-1">Provider</label>
+              <select className="input w-full" value={editForm.provider} onChange={(e) => setField("provider", e.target.value)}>
+                <option value="openrouter">OpenRouter</option>
+                <option value="anthropic">Anthropic (直连)</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">部署组</label>
+              <input className="input w-full" value={editForm.deploy_group} onChange={(e) => setField("deploy_group", e.target.value)} placeholder="stable / canary / vip" />
+            </div>
+            <div>
               <label className="block text-xs text-gray-500 mb-1">Owner (open_id)</label>
-              <input className="input w-full" value={editOwner} onChange={(e) => setEditOwner(e.target.value)} placeholder="ou_xxx" />
+              <input className="input w-full" value={editForm.owner} onChange={(e) => setField("owner", e.target.value)} placeholder="ou_xxx" />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">镜像版本</label>
+              <input className="input w-full" value={editForm.image} onChange={(e) => setField("image", e.target.value)} placeholder="v20260329" />
             </div>
           </div>
           <div className="flex gap-2 justify-end">
             <button className="btn btn-ghost" onClick={() => setEditing(false)}>取消</button>
-            <button className="btn btn-primary" onClick={saveEdit} disabled={actionLoading}>保存并重启</button>
+            <button className="btn btn-primary" onClick={saveEdit} disabled={actionLoading}>
+              {actionLoading ? "保存中..." : "保存"}
+            </button>
           </div>
         </div>
       )}
@@ -160,6 +205,8 @@ function StatusBadge({ status }) {
   const cls = {
     Running: "bg-emerald-600/20 text-emerald-400",
     Stopped: "bg-yellow-600/20 text-yellow-400",
+    Paused: "bg-purple-600/20 text-purple-400",
+    Failed: "bg-red-600/20 text-red-400",
   }[status] || "bg-gray-600/20 text-gray-400";
   return <span className={`badge ${cls}`}>{status}</span>;
 }

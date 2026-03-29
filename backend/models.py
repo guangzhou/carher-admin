@@ -52,10 +52,13 @@ class HerBatchImport(BaseModel):
 class HerUpdateRequest(BaseModel):
     name: str | None = Field(None, description="Update display name")
     model: str | None = Field(None, description="Update model: gpt / sonnet / opus")
+    app_id: str | None = Field(None, description="Update Feishu App ID (cli_xxx)")
+    app_secret: str | None = Field(None, description="Update Feishu App Secret (stored in K8s Secret)")
     owner: str | None = Field(None, description="Update owner open_id(s)")
-    provider: str | None = Field(None, description="Update provider")
-    prefix: str | None = Field(None, description="Update server prefix")
-    image: str | None = Field(None, description="Update image tag")
+    provider: str | None = Field(None, description="Update provider: openrouter / anthropic")
+    prefix: str | None = Field(None, description="Update server prefix (s1/s2/s3)")
+    bot_open_id: str | None = Field(None, description="Update bot open_id")
+    image: str | None = Field(None, description="Update image tag (e.g. v20260329)")
     deploy_group: str | None = Field(None, description="Update deploy group")
 
 

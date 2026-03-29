@@ -151,7 +151,10 @@ def _sync_and_deploy(instance: dict):
 # ── API: List / Get ──
 
 @app.get("/api/instances")
-def api_list_instances():
+def api_list_instances(
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    limit: int = Query(0, ge=0, le=5000, description="Max items (0 = all)"),
+):
     instances = db.list_all()
     pod_statuses = k8s_ops.get_all_pod_statuses()
 
@@ -181,8 +184,13 @@ def api_list_instances():
             "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback" if inst.get("app_id") else "",
             "owner": inst.get("owner", ""),
             "sync_status": inst.get("sync_status", ""),
+            "deploy_group": inst.get("deploy_group", "stable"),
         })
-    return results
+
+    total = len(results)
+    if limit > 0:
+        results = results[offset:offset + limit]
+    return {"total": total, "offset": offset, "limit": limit, "instances": results}
 
 
 @app.get("/api/instances/{uid}")
@@ -567,6 +575,8 @@ def api_search_instances(
     owner: str | None = Query(None, description="Filter: owner contains open_id"),
     name: str | None = Query(None, description="Filter: name contains text"),
     feishu_ws: str | None = Query(None, description="Filter: Connected/Disconnected"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    limit: int = Query(200, ge=1, le=5000, description="Max results"),
 ):
     """Search instances with flexible filters. All filters are AND-combined."""
     instances = db.list_all()
@@ -619,7 +629,9 @@ def api_search_instances(
 
         results.append(entry)
 
-    return {"count": len(results), "instances": results}
+    total = len(results)
+    results = results[offset:offset + limit]
+    return {"total": total, "offset": offset, "limit": limit, "instances": results}
 
 
 # ── API: Config Preview ──

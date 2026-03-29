@@ -122,7 +122,6 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		if err := r.createPod(ctx, &her); err != nil {
 			if errors.IsAlreadyExists(err) {
-				// Pod still terminating, requeue quickly
 				return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
 			}
 			logger.Error(err, "Failed to create pod", "uid", uid)
@@ -136,15 +135,19 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		her.Status.Phase = "Pending"
 	}
 
+	// Only mark knownBots dirty if bot-related fields might have changed
+	oldAppID := her.Status.ConfigHash // reuse as change marker: configHash changes when spec changes
 	her.Status.ConfigHash = configHash
 	if err := r.Status().Update(ctx, &her); err != nil {
 		logger.V(1).Info("Status update failed", "uid", uid, "err", err)
 	}
+	if oldAppID != configHash {
+		r.KnownBots.MarkDirty()
+	}
 
-	// Check if bot fields changed (triggers knownBots rebuild)
-	r.KnownBots.MarkDirty()
-
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	// Event-driven: no periodic requeue. Reconcile fires on CRD spec changes.
+	// HealthChecker handles Pod status monitoring separately.
+	return ctrl.Result{}, nil
 }
 
 func (r *HerInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {

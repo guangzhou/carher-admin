@@ -80,15 +80,21 @@ func (hc *HealthChecker) runCycle(ctx context.Context) {
 	jobs := make(chan job, len(list.Items))
 	var wg sync.WaitGroup
 
-	// Reset instance metrics
-	metrics.InstancesTotal.Reset()
+	// Collect metrics into a local map, then set gauges atomically after the cycle.
+	// Avoids Reset() which causes Prometheus to see zero-valued metrics briefly.
+	type phaseGroup struct{ phase, group string }
+	phaseCounts := make(map[phaseGroup]float64)
+	var phaseCountsMu sync.Mutex
 
 	for w := 0; w < HealthCheckWorkers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				hc.checkOne(ctx, j.her, j.pod)
+				phase, group := hc.checkOne(ctx, j.her, j.pod)
+				phaseCountsMu.Lock()
+				phaseCounts[phaseGroup{phase, group}]++
+				phaseCountsMu.Unlock()
 			}
 		}()
 	}
@@ -101,12 +107,18 @@ func (hc *HealthChecker) runCycle(ctx context.Context) {
 	close(jobs)
 	wg.Wait()
 
+	// Atomically replace gauge values (no Reset gap visible to Prometheus)
+	metrics.InstancesTotal.Reset()
+	for pg, count := range phaseCounts {
+		metrics.InstancesTotal.WithLabelValues(pg.phase, pg.group).Set(count)
+	}
+
 	duration := time.Since(start)
 	metrics.HealthCheckDuration.Observe(duration.Seconds())
 	logger.Info("Health check cycle complete", "instances", len(list.Items), "duration", duration.Round(time.Millisecond))
 }
 
-func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, pod *corev1.Pod) {
+func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, pod *corev1.Pod) (string, string) {
 	uid := her.Spec.UserID
 	uidStr := strconv.Itoa(uid)
 	logger := log.FromContext(ctx).WithName("health").WithValues("uid", uid)
@@ -114,8 +126,7 @@ func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, p
 	status := her.Status.DeepCopy()
 	status.LastHealthCheck = time.Now().UTC().Format(time.RFC3339)
 
-	// Track metrics
-	defer func() {
+	retPhase := func() (string, string) {
 		phase := status.Phase
 		if phase == "" {
 			phase = "Unknown"
@@ -124,25 +135,23 @@ func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, p
 		if group == "" {
 			group = "stable"
 		}
-		metrics.InstancesTotal.WithLabelValues(phase, group).Inc()
-	}()
+		return phase, group
+	}
 
 	if her.Spec.Paused {
 		status.Phase = "Paused"
 		hc.updateStatus(ctx, her, status)
-		return
+		return retPhase()
 	}
 
 	if pod == nil {
-		// Pod missing — self-heal
 		logger.Info("Pod missing, triggering self-heal")
 		metrics.SelfHealTotal.Inc()
 		status.Phase = "Pending"
 		status.Message = "Pod missing, self-heal triggered"
 		status.FeishuWS = "Unknown"
 		hc.updateStatus(ctx, her, status)
-		// The reconciler's RequeueAfter will handle recreation
-		return
+		return retPhase()
 	}
 
 	phase := string(pod.Status.Phase)
@@ -176,6 +185,7 @@ func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, p
 	}
 
 	hc.updateStatus(ctx, her, status)
+	return retPhase()
 }
 
 func (hc *HealthChecker) checkFeishuWS(ctx context.Context, pod *corev1.Pod) bool {

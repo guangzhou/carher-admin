@@ -31,20 +31,25 @@ export default function DeployPage() {
   const [newGroupDesc, setNewGroupDesc] = useState("");
   const [showNewGroup, setShowNewGroup] = useState(false);
 
-  const load = useCallback(() => {
+  const loadFull = useCallback(() => {
     api.getDeployStatus().then(setStatus);
     api.getDeployHistory().then(setHistory);
     api.listInstances().then(setInstances);
     api.listDeployGroups().then(setDeployGroups);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  const loadStatusOnly = useCallback(() => {
+    api.getDeployStatus().then(setStatus);
+    api.listDeployGroups().then(setDeployGroups);
+  }, []);
+
+  useEffect(() => { loadFull(); }, [loadFull]);
 
   useEffect(() => {
     if (!status?.active) return;
-    const t = setInterval(load, 5000);
+    const t = setInterval(loadStatusOnly, 5000);
     return () => clearInterval(t);
-  }, [status?.active, load]);
+  }, [status?.active, loadStatusOnly]);
 
   const groupNames = deployGroups.map((g) => g.name);
 
@@ -58,7 +63,7 @@ export default function DeployPage() {
       const r = await api.startDeploy(imageTag, deployMode);
       if (r.error) alert(r.error);
       else if (r.status === "already_deployed") alert("该镜像已部署完成，无需重复部署");
-      else load();
+      else loadFull();
     } catch (e) {
       alert(`部署失败: ${e.message}`);
     } finally {
@@ -74,7 +79,7 @@ export default function DeployPage() {
       if (action === "continue") await api.continueDeploy();
       else if (action === "rollback") await api.rollbackDeploy();
       else if (action === "abort") await api.abortDeploy();
-      setTimeout(load, 1000);
+      setTimeout(loadFull, 1000);
     } finally {
       setLoading("");
     }
@@ -83,7 +88,7 @@ export default function DeployPage() {
   const setGroup = async (uid, group) => {
     try {
       await api.setDeployGroup(uid, group);
-      load();
+      loadFull();
     } catch (e) {
       alert(`分组变更失败: ${e.message}`);
     }
@@ -97,7 +102,7 @@ export default function DeployPage() {
       setNewGroupPriority(50);
       setNewGroupDesc("");
       setShowNewGroup(false);
-      load();
+      loadFull();
     } catch (e) {
       alert(e.message);
     }
@@ -107,7 +112,7 @@ export default function DeployPage() {
     if (!confirm(`删除分组 "${name}"？该组实例将移入 stable 组`)) return;
     try {
       await api.deleteDeployGroup(name);
-      load();
+      loadFull();
     } catch (e) {
       alert(e.message);
     }

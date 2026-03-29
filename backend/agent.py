@@ -28,6 +28,15 @@ AGENT_MODEL = os.environ.get("AGENT_MODEL", "openai/gpt-4o")
 AGENT_API_KEY = os.environ.get("AGENT_LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", ""))
 AGENT_BASE_URL = os.environ.get("AGENT_LLM_BASE_URL", "https://openrouter.ai/api/v1")
 
+_llm_session: aiohttp.ClientSession | None = None
+
+
+def _get_llm_session() -> aiohttp.ClientSession:
+    global _llm_session
+    if _llm_session is None or _llm_session.closed:
+        _llm_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+    return _llm_session
+
 SYSTEM_PROMPT = """You are CarHer Ops Agent — an AI operations assistant for a Kubernetes cluster
 running 500+ CarHer instances (Feishu AI assistants).
 
@@ -160,31 +169,30 @@ async def _call_llm(messages: list[dict]) -> str:
         "max_tokens": 4096,
     }
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            f"{AGENT_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                logger.error("LLM API error %d: %s", resp.status, text[:200])
-                return json.dumps({
-                    "answer": f"LLM API 调用失败 (HTTP {resp.status})",
-                    "actions_taken": [],
-                    "suggestions": [],
-                })
-            data = await resp.json()
-            choices = data.get("choices")
-            if not choices or not isinstance(choices, list):
-                logger.error("LLM API returned unexpected structure: %s", json.dumps(data)[:200])
-                return json.dumps({
-                    "answer": "LLM 返回格式异常，请稍后重试",
-                    "actions_taken": [],
-                    "suggestions": [],
-                })
-            return choices[0].get("message", {}).get("content", "")
+    session = _get_llm_session()
+    async with session.post(
+        f"{AGENT_BASE_URL}/chat/completions",
+        headers=headers,
+        json=payload,
+    ) as resp:
+        if resp.status != 200:
+            text = await resp.text()
+            logger.error("LLM API error %d: %s", resp.status, text[:200])
+            return json.dumps({
+                "answer": f"LLM API 调用失败 (HTTP {resp.status})",
+                "actions_taken": [],
+                "suggestions": [],
+            })
+        data = await resp.json()
+        choices = data.get("choices")
+        if not choices or not isinstance(choices, list):
+            logger.error("LLM API returned unexpected structure: %s", json.dumps(data)[:200])
+            return json.dumps({
+                "answer": "LLM 返回格式异常，请稍后重试",
+                "actions_taken": [],
+                "suggestions": [],
+            })
+        return choices[0].get("message", {}).get("content", "")
 
 
 def _execute_tool(name: str, params: dict, dry_run: bool = False) -> dict:
@@ -247,17 +255,20 @@ def _execute_tool(name: str, params: dict, dry_run: bool = False) -> dict:
             }
 
         elif name == "get_health":
-            instances = db.list_all()
-            pod_statuses = k8s_ops.get_all_pod_statuses()
-            unhealthy = []
-            for inst in instances:
-                uid = inst["id"]
-                if uid not in pod_statuses or inst["status"] == "deleted":
-                    continue
-                health = k8s_ops.check_pod_health(uid)
-                if not health.get("feishu_ws"):
-                    unhealthy.append({"id": uid, "name": inst["name"], "feishu_ws": False})
-            result["data"] = {"unhealthy_count": len(unhealthy), "unhealthy": unhealthy[:20]}
+            try:
+                from . import crd_ops
+                crd_statuses = crd_ops.get_all_statuses()
+                unhealthy = []
+                for uid, data in crd_statuses.items():
+                    spec = data.get("spec", {})
+                    status = data.get("status", {})
+                    if spec.get("paused") or status.get("phase") != "Running":
+                        continue
+                    if status.get("feishuWS") != "Connected":
+                        unhealthy.append({"id": uid, "name": spec.get("name", ""), "feishu_ws": False})
+                result["data"] = {"unhealthy_count": len(unhealthy), "unhealthy": unhealthy[:20]}
+            except ImportError:
+                result["data"] = {"error": "CRD ops not available, use /api/health instead"}
 
         elif name == "restart_instance":
             uid = int(params["uid"])

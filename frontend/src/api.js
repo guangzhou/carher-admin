@@ -26,7 +26,10 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  listInstances: () => request("/instances"),
+  listInstances: async () => {
+    const data = await request("/instances");
+    return Array.isArray(data) ? data : (data.instances || []);
+  },
   getInstance: (id) => request(`/instances/${id}`),
   addInstance: (data) => request("/instances", { method: "POST", body: JSON.stringify(data) }),
   batchImport: (instances) => request("/instances/batch-import", { method: "POST", body: JSON.stringify({ instances }) }),

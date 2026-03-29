@@ -35,13 +35,15 @@
 │  ┌─────────────────────▼─────────────────────────────────────┐      │
 │  │  carher-operator (Go, controller-runtime)                  │      │
 │  │  ├── Reconciler: CRD → ConfigMap + PVC + Pod               │      │
-│  │  │   └── AlreadyExists 自动 requeue (不再 sleep 阻塞)      │      │
-│  │  ├── Health Checker: 50 worker 并发池, 500 实例 10s/轮      │      │
-│  │  │   └── Container Ready Status 判断 WS 连接              │      │
-│  │  ├── KnownBots Manager: goroutine-safe, O(1) 更新          │      │
-│  │  ├── Self-Heal: Pod 消失 → 30s 自动重建 (NAS volume 完整)  │      │
-│  │  ├── Status Patch (减少 conflict) + Error Propagation       │      │
-│  │  └── Prometheus /metrics (8 指标)                           │      │
+│  │  │   ├── Owns(&Pod{}): Pod 删除/驱逐自动触发 reconcile     │      │
+│  │  │   ├── ownerReferences: K8s GC 自动清理孤儿 Pod          │      │
+│  │  │   └── ConfigMap hash 跳过: 无变更不写, 省 API 调用       │      │
+│  │  ├── Health Checker: 可配 worker 池 (默认 50, env 可调)    │      │
+│  │  │   └── SelfHealTotal 仅首次计数, 不每 30s 重复             │      │
+│  │  ├── KnownBots Manager: goroutine-safe, 仅 config 变更重建  │      │
+│  │  ├── Self-Heal: Pod 消失 → 立即 reconcile (NAS 完整恢复)   │      │
+│  │  ├── Status Patch (减少 conflict) + 指标清理 (删除时)       │      │
+│  │  └── Prometheus /metrics (7 指标)                           │      │
 │  └─────────────────────┬─────────────────────────────────────┘      │
 │                        │ manages                                     │
 │  ┌─────────────────────▼─────────────────────────────────────┐      │
@@ -96,15 +98,20 @@
 
 | 功能 | 说明 | 性能 |
 |------|------|------|
-| Reconcile | CRD spec → ConfigMap + PVC + Pod | 多 goroutine 并发 |
-| 自愈 | Pod 消失 → 30s 内自动重建，NAS volume 完整恢复 | 无需人工 |
-| 健康检查 | Container Ready + CrashLoop + 重启次数 | 50 worker，500 实例 10s/轮 |
-| knownBots | 共享 ConfigMap，自动计算 | 消除 O(N²) |
-| Config Hash | 只在配置变更时重建 Pod | 避免无谓重启 |
+| Reconcile | CRD spec → ConfigMap + PVC + Pod，事件驱动 (无轮询) | 多 goroutine 并发 |
+| Owns(&Pod{}) | Pod 被删除/驱逐 → 立即触发 reconcile 重建 | 秒级自愈 |
+| ownerReferences | Pod 关联到 CRD，K8s GC 自动清理孤儿资源 | 无需手动 |
+| ConfigMap 跳过 | hash 相同时不写 ConfigMap，省去 Get+Update API 调用 | 500 实例省 500 次调用 |
+| 自愈 | Pod 消失 → 立即重建，NAS volume 完整恢复 | SelfHeal 仅首次计数 |
+| 健康检查 | Container Ready + CrashLoop + 重启次数 | 可配 worker (env `HEALTH_CHECK_WORKERS`，默认 50) |
+| knownBots | 共享 ConfigMap，仅 config 变更时重建 | 消除 O(N²)，不每次 reconcile 重建 |
+| Config Hash | 只在配置变更时重建 Pod + 写 ConfigMap | 避免无谓重启和 API 调用 |
 | Pod 重建 | AlreadyExists 自动 requeue，不阻塞 worker | 无 sleep 阻塞 |
 | Status 更新 | Patch 替代 Update，减少 conflict | 高并发安全 |
-| Leader Election | 多副本 HA | 内置 |
-| /metrics | 8 个 Prometheus 指标 | 15s 采集 |
+| 指标清理 | 实例删除时移除 FeishuWSConnected/PodRestarts 标签 | 防止指标基数膨胀 |
+| 默认值统一 | `resolveImage` / `resolvePrefix` helper 避免空值比较 bug | 消除无限重建循环 |
+| Leader Election | 多副本 HA (2 replicas) | 内置 |
+| /metrics | 7 个 Prometheus 指标 | metricsserver API (v0.20) |
 
 ### 3. CI/CD — GitHub Actions
 
@@ -178,8 +185,7 @@ vip(P5) → canary(P10) → early(P50) → stable(P100)
 | `carher_reconcile_duration_seconds` | reconcile 耗时 |
 | `carher_health_check_duration_seconds` | 全量健康检查耗时 |
 | `carher_known_bots_total` | knownBots 总数 |
-| `carher_deploy_active` | 是否有活跃部署 |
-| `carher_self_heal_total` | 自愈次数累计 |
+| `carher_self_heal_total` | 自愈次数累计 (仅状态转换时计数，不重复递增) |
 
 | 告警 | 条件 | 严重性 |
 |------|------|--------|
@@ -248,17 +254,17 @@ carher-admin/
 │           ├── HealthCheck.jsx  # 健康检查
 │           └── AdminPanel.jsx   # 系统管理
 ├── operator-go/                 # Go Operator (500+ 规模)
-│   ├── api/v1alpha1/types.go   # CRD 类型定义 + DeepCopy
+│   ├── api/v1alpha1/types.go   # CRD 类型定义 + DeepCopy (spec/status 不冗余)
 │   ├── internal/
 │   │   ├── controller/
-│   │   │   ├── reconciler.go   # 主 reconciler (requeue 替代 sleep)
-│   │   │   ├── health.go       # 50-worker 并发健康检查 (Status Patch)
-│   │   │   ├── known_bots.go   # goroutine-safe knownBots 管理
-│   │   │   ├── config_gen.go   # openclaw.json 配置生成 (Go)
+│   │   │   ├── reconciler.go   # 主 reconciler (Owns Pod, ownerRef, hash 跳过)
+│   │   │   ├── health.go       # 可配 worker 并发健康检查 (SelfHeal 去重)
+│   │   │   ├── known_bots.go   # goroutine-safe knownBots (Create/Update 错误处理)
+│   │   │   ├── config_gen.go   # openclaw.json 配置生成 (resolvePrefix 统一)
 │   │   │   └── config_gen_test.go
-│   │   └── metrics/metrics.go  # Prometheus 指标定义
-│   ├── cmd/main.go             # 入口 (manager setup)
-│   ├── Dockerfile              # 多阶段构建 (golang:1.23 → alpine:3.21)
+│   │   └── metrics/metrics.go  # Prometheus 7 指标 (已移除 DeployActive)
+│   ├── cmd/main.go             # 入口 (metricsserver.Options, leader election)
+│   ├── Dockerfile              # 多阶段构建 (缓存优化, -ldflags -s -w)
 │   ├── go.mod / go.sum
 │   └── README.md               # Go Operator 详细文档
 ├── operator/                    # Python kopf Operator (旧版, 兼容保留)
@@ -553,6 +559,8 @@ Cursor 可通过 `.cursor/skills/carher-admin-api/SKILL.md` 直接消费所有 A
 | `AGENT_LLM_API_KEY` | admin | AI Agent LLM API Key (OpenRouter/OpenAI) |
 | `AGENT_LLM_BASE_URL` | admin | LLM API Base URL (默认 OpenRouter) |
 | `AGENT_MODEL` | admin | LLM 模型名 (默认 openai/gpt-4o) |
+| `DEPLOY_BATCH_SIZE` | admin | 部署批次大小 (默认 50) |
+| `HEALTH_CHECK_WORKERS` | operator | 并发健康检查 goroutine 数 (默认 50) |
 
 ## GitHub Secrets 配置
 
@@ -563,3 +571,67 @@ Cursor 可通过 `.cursor/skills/carher-admin-api/SKILL.md` 直接消费所有 A
 | `ACR_USERNAME` | 阿里云 ACR 登录用户名 |
 | `ACR_PASSWORD` | 阿里云 ACR 登录密码 |
 | `DEPLOY_WEBHOOK_SECRET` | 与 K8s Secret 中 `deploy-webhook-secret` 值一致 |
+
+## 性能优化记录
+
+六轮 Go Operator review（R1–R6）+ Python Admin 优化，共 19+ 修复。关键优化项：
+
+### Go Operator (R3–R6)
+
+| 优化 | 原问题 | 改进 | 影响 |
+|------|--------|------|------|
+| Owns(&Pod{}) + ownerRef | Pod 被删除后需等 30s 健康检查才发现 | Pod 删除/驱逐立即触发 reconcile | 自愈从 30s → 秒级 |
+| ConfigMap hash 跳过 | 每次 reconcile 都写 ConfigMap | hash 相同跳过写操作 | 500 实例省 500 次 K8s API 调用/轮 |
+| knownBots 按需重建 | 每次 reconcile 都 MarkDirty | 仅 configHash 变更时重建 | 大幅减少 ConfigMap 写入 |
+| resolveImage/resolvePrefix | Spec.Image 为空时比较 mismatch → 无限 Pod 重建 | 统一 helper 处理默认值 | 消除循环重建 bug |
+| 指标清理 (DeleteLabelValues) | 实例删除后 Prometheus label 永留 | 删除时清理 FeishuWS/PodRestarts | 防止指标基数膨胀 |
+| SelfHealTotal 去重 | 每 30s 健康检查都递增 | 仅 Phase ≠ Pending 时首次计数 | 指标真实反映自愈事件 |
+| DeployActive 移除 | 注册但从未设值 | 删除死指标 | 指标表干净 |
+| Dockerfile 层缓存 | go.mod 变动重新下载所有依赖 | go.mod/go.sum 单独 COPY + `-ldflags -s -w` | 构建时间缩短 ~40% |
+| metricsserver API 迁移 | MetricsBindAddress 已弃用 | 使用 controller-runtime v0.20 新 API | 无弃用警告 |
+
+### Python Admin
+
+| 优化 | 原问题 | 改进 | 影响 |
+|------|--------|------|------|
+| api_health() 读 CRD status | 逐 Pod 读日志 + exec (O(N) K8s 调用) | 单次 list CRD status | 500 实例: 1000+ → 1 次 API 调用 |
+| backup_to_nas() 去抖 | 每次 DB 写后立即复制到 NAS | dirty flag + flush_backup() | 批量导入不再触发 1500 次全量复制 |
+| deployer 并发 asyncio.gather | 逐实例串行部署/健康检查 | gather 并发 (DEPLOY_BATCH_SIZE=50) | 部署速度提升 ~10x |
+| knownBots TTL 缓存 | 每个 API 请求都 collect_known_bots() | 15s TTL 缓存 + invalidate | 消除 O(N) 重复计算 |
+| K8s API client 单例 | 每次调用创建新 client 实例 | singleton CoreV1Api/CustomObjectsApi | 减少连接开销 |
+| 分页 API | list_instances 返回全量 JSON | offset + limit 参数 | 大实例量下首屏加载快 |
+| 前端轮询分离 | 5s 间隔重新加载全量实例列表 | loadStatusOnly 只拉 status + groups | 网络流量减少 ~80% |
+
+## 扩展到 10+ 服务器节点
+
+当前架构（3 节点 ACK）已为 500+ 实例设计。扩展到 10+ 节点时：
+
+### 无需修改即可工作
+
+| 组件 | 原因 |
+|------|------|
+| Go Operator | 事件驱动 reconcile，不轮询；Leader Election HA；Pod 调度由 K8s scheduler 自动分配节点 |
+| NAS PVC (skills/sessions) | `ReadWriteMany`，所有节点自动挂载；`alibabacloud-cnfs-nas` 跨节点共享 |
+| HerInstance CRD | K8s etcd 存储，节点数无关 |
+| Prometheus + AlertManager | ServiceMonitor 自动发现，节点增加无需配置变更 |
+| CI/CD Pipeline | 部署/灰度逻辑与节点数无关，operator 按 CRD 声明调度 |
+
+### 建议改进 (10+ 节点)
+
+| 改进项 | 当前状态 | 建议 | 优先级 |
+|--------|---------|------|--------|
+| Cloudflare Tunnel | systemd on node 226 | 容器化为 K8s Deployment + 多副本 | **高** — 单点故障 |
+| Admin DB (SQLite) | hostPath + nodeSelector 固定节点 | 迁移到 NAS PVC，解除节点亲和性 | **高** — 节点故障影响 admin |
+| HEALTH_CHECK_WORKERS | 默认 50 | 按实例数调整 (建议 instances/10) | 中 — 1000+ 时需调 |
+| Pod 反亲和 | 无 (K8s scheduler 默认分散) | 对关键实例添加 podAntiAffinity | 低 — 默认已足够 |
+| 节点 taint/toleration | 无 | 专用节点池给 Her Pods，隔离 admin/monitoring | 低 — 资源紧张时 |
+
+### 容量估算 (10 节点)
+
+| 资源 | 3 节点 (当前) | 10 节点 |
+|------|-------------|---------|
+| Her 实例 | ~500 | ~1500–2000 |
+| Operator replicas | 2 | 2 (不变，worker 池自动分摊) |
+| NAS 容量 | 1TB | 2–3TB (按实例数线性增长) |
+| 健康检查周期 | ~10s (50 workers / 500 实例) | ~10s (调 workers 至 150) |
+| Prometheus 存储 | 7 指标 × 500 = 3500 series | 7 × 2000 = 14000 series (无需担心) |

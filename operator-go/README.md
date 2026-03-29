@@ -29,18 +29,29 @@ CRD spec 变化
   → 更新 CRD status (Patch, 减少 conflict)
 ```
 
-**关键改进**:
+**关键改进 (R1–R6)**:
+- `Owns(&corev1.Pod{})`: Pod 被删除/驱逐时立即触发 reconcile，不再等 30s 健康检查
+- `ownerReferences`: Pod 关联到 CRD，K8s GC 自动清理孤儿资源
+- ConfigMap hash 跳过: `configHash` 相同时不写 ConfigMap，500 实例省 500 次 API 调用/轮
+- knownBots 按需重建: 仅 `configHash` 变更时 `MarkDirty()`，不每次 reconcile 重建
+- `resolveImage` / `resolvePrefix` helper: 统一默认值处理，消除空值比较导致的无限 Pod 重建循环
 - Pod 重建不再使用 `time.Sleep(2s)` 阻塞 worker，改为 `AlreadyExists` 时 `RequeueAfter: 3s`
 - `deletePod`/`deleteConfigMap` 返回 error 并由调用方处理
 - Status 更新使用 `Patch` 替代 `Update`，减少高并发下的 conflict
+- 实例删除时清理 Prometheus label (`FeishuWSConnected`/`PodRestarts`)，防止指标基数膨胀
 - `DeepCopy` 方法定义在 `api/v1alpha1/types.go`（与 CRD 类型同包，确保编译通过）
 
 ### Self-Healing
 
-每 30 秒检查所有实例：
+双重机制确保秒级自愈：
+
+1. **事件驱动** (`Owns(&Pod{})`): Pod 被删除/驱逐 → 立即触发 reconcile → 重建 Pod
+2. **定期巡检** (健康检查): 每 30 秒检查所有实例，兜底发现异常
+
 - Pod 消失 → 自动重建（所有 NAS volume 完整恢复）
 - CrashLoopBackOff → 标记 Failed + 告警
 - Container not Ready → 标记 Disconnected
+- `SelfHealTotal` 仅在 Phase 从非 Pending 转换时计数，不每轮重复递增
 
 ### Pod Volume 架构
 
@@ -60,15 +71,16 @@ CRD spec 变化
 
 ### Health Checker
 
-- **50 worker 并发池**: 500 实例 10s 内完成一轮
-- **Container Ready Status**: 用容器 ready 状态判断 Feishu WS 连接性（替代永远返回 true 的 placeholder）
+- **可配 worker 并发池**: 默认 50 worker，可通过 `HEALTH_CHECK_WORKERS` 环境变量调整
+- **Container Ready Status**: 用容器 ready 状态判断 Feishu WS 连接性
 - **Status Patch**: 使用 `client.MergeFrom` + `Status().Patch()` 替代 `Status().Update()`，减少 conflict
-- **Metrics 准确性**: `InstancesTotal.Reset()` 每轮清零后重新计数
+- **Metrics 准确性**: 每轮 atomic 收集后一次性设置 `InstancesTotal`，不再 `Reset()` 造成 Prometheus 零值间隙
 
 ### knownBots 中心化
 
 所有 bot ID 存在一个共享 ConfigMap `carher-known-bots`：
-- 新增/删除 bot → 自动重建共享 ConfigMap
+- **按需重建**: 仅当 `configHash` 变更时 `MarkDirty()`，不每次 reconcile 重建
+- **错误处理**: ConfigMap Create/Update 失败时记录日志并标记重试
 - 各实例 ConfigMap 从缓存获取 knownBots
 - 消除 O(N²) 问题
 
@@ -82,27 +94,26 @@ CRD spec 变化
 | `carher_reconcile_duration_seconds` | reconcile 耗时 |
 | `carher_health_check_duration_seconds` | 健康检查周期耗时 |
 | `carher_known_bots_total` | knownBots 总数 |
-| `carher_deploy_active` | 是否有活跃部署 |
-| `carher_self_heal_total` | 自愈次数 |
+| `carher_self_heal_total` | 自愈次数 (仅状态转换时计数) |
 
 ## 项目结构
 
 ```
 operator-go/
 ├── api/v1alpha1/
-│   └── types.go              # HerInstance CRD 类型定义 + DeepCopy
+│   └── types.go              # CRD 类型 + DeepCopy (spec/status 不冗余赋值)
 ├── internal/
 │   ├── controller/
-│   │   ├── reconciler.go     # 主 reconciler (requeue 替代 sleep, error propagation)
-│   │   ├── health.go         # 50-worker 并发健康检查 (Status Patch, Container Ready)
-│   │   ├── known_bots.go     # goroutine-safe knownBots 管理
-│   │   ├── config_gen.go     # openclaw.json 配置生成
+│   │   ├── reconciler.go     # Owns(Pod) + ownerRef + hash 跳过 + resolveImage
+│   │   ├── health.go         # 可配 worker 池 + SelfHeal 去重 + atomic 指标
+│   │   ├── known_bots.go     # goroutine-safe + 错误处理 + 按需重建
+│   │   ├── config_gen.go     # openclaw.json 生成 + resolvePrefix 统一
 │   │   └── config_gen_test.go # 单元测试
 │   └── metrics/
-│       └── metrics.go        # Prometheus 指标定义 + 注册
+│       └── metrics.go        # 7 个 Prometheus 指标 (已移除 DeployActive)
 ├── cmd/
-│   └── main.go               # 入口 (controller-runtime manager setup)
-├── Dockerfile                 # 多阶段: golang:1.23-alpine → alpine:3.21
+│   └── main.go               # metricsserver.Options + leader election
+├── Dockerfile                 # 缓存优化 + -ldflags -s -w + alpine:3.21
 ├── go.mod / go.sum
 └── README.md
 ```

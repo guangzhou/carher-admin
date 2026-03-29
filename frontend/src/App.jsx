@@ -6,6 +6,8 @@ import BatchImport from "./components/BatchImport";
 import HealthCheck from "./components/HealthCheck";
 import DeployPage from "./components/DeployPage";
 import AdminPanel from "./components/AdminPanel";
+import LoginPage from "./components/LoginPage";
+import { setAuthFailureHandler } from "./api";
 
 const TABS = [
   { id: "dashboard", label: "仪表盘" },
@@ -29,8 +31,20 @@ function getInitialDetail() {
 }
 
 export default function App() {
+  const [user, setUser] = useState(() => localStorage.getItem("carher_user") || "");
   const [tab, setTab] = useState(getInitialTab);
   const [detailId, setDetailId] = useState(getInitialDetail);
+
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem("carher_token");
+    localStorage.removeItem("carher_user");
+    setUser("");
+  }, []);
+
+  useEffect(() => {
+    setAuthFailureHandler(() => setUser(""));
+    return () => setAuthFailureHandler(null);
+  }, []);
 
   const updateURL = useCallback((t, d) => {
     const params = new URLSearchParams();
@@ -50,6 +64,10 @@ export default function App() {
     setTab("instances");
   };
 
+  if (!user) {
+    return <LoginPage onLogin={(u) => setUser(u)} />;
+  }
+
   return (
     <div className="min-h-screen flex flex-col">
       {/* Header */}
@@ -59,21 +77,32 @@ export default function App() {
             <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold text-sm">H</div>
             <h1 className="text-lg font-semibold text-white">CarHer Admin</h1>
           </div>
-          <nav className="flex gap-1">
-            {TABS.map((t) => (
+          <div className="flex items-center gap-2">
+            <nav className="flex gap-1">
+              {TABS.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => { setTab(t.id); setDetailId(null); }}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                    tab === t.id
+                      ? "bg-blue-600/20 text-blue-400"
+                      : "text-gray-400 hover:text-gray-200 hover:bg-gray-800"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </nav>
+            <div className="ml-3 pl-3 border-l border-gray-700 flex items-center gap-2">
+              <span className="text-gray-500 text-sm">{user}</span>
               <button
-                key={t.id}
-                onClick={() => { setTab(t.id); setDetailId(null); }}
-                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                  tab === t.id
-                    ? "bg-blue-600/20 text-blue-400"
-                    : "text-gray-400 hover:text-gray-200 hover:bg-gray-800"
-                }`}
+                onClick={handleLogout}
+                className="text-gray-500 hover:text-gray-300 text-sm transition-colors"
               >
-                {t.label}
+                退出
               </button>
-            ))}
-          </nav>
+            </div>
+          </div>
         </div>
       </header>
 

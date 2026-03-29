@@ -10,16 +10,21 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 
+import jwt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from . import database as db
 from . import config_gen
@@ -61,30 +66,108 @@ ALLOWED_ORIGINS = os.environ.get("CORS_ALLOW_ORIGINS", "https://admin.carher.net
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# API Key authentication
+# ── Authentication ──
+
 ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+JWT_SECRET = ADMIN_API_KEY or "carher-admin-fallback-secret"
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = 24
+
+AUTH_EXEMPT_PATHS = {"/api/auth/login", "/api/deploy/webhook"}
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+def _create_jwt(username: str) -> str:
+    payload = {
+        "sub": username,
+        "iat": int(time.time()),
+        "exp": int(time.time()) + JWT_EXPIRE_HOURS * 3600,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _verify_jwt(token: str) -> dict | None:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
+
+@app.post("/api/auth/login")
+def api_auth_login(req: LoginRequest):
+    """Authenticate with username/password. Returns JWT token (valid 24h)."""
+    if not ADMIN_PASSWORD:
+        raise HTTPException(503, "ADMIN_PASSWORD not configured on server")
+    if req.username != ADMIN_USERNAME or not hmac.compare_digest(req.password, ADMIN_PASSWORD):
+        raise HTTPException(401, "Invalid username or password")
+    token = _create_jwt(req.username)
+    return {"token": token, "expires_in": JWT_EXPIRE_HOURS * 3600, "username": req.username}
+
+
+@app.get("/api/auth/me")
+def api_auth_me(request: Request):
+    """Check current auth status. Returns user info if authenticated."""
+    claims = _extract_auth(request)
+    if not claims:
+        raise HTTPException(401, "Not authenticated")
+    return {"username": claims.get("sub", ""), "authenticated": True}
+
+
+def _extract_auth(request: Request) -> dict | None:
+    """Extract authentication from JWT Bearer token or X-API-Key header."""
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        claims = _verify_jwt(token)
+        if claims:
+            return claims
+
+    api_key = request.headers.get("X-API-Key", "") or request.query_params.get("api_key", "")
+    if api_key and ADMIN_API_KEY and hmac.compare_digest(api_key, ADMIN_API_KEY):
+        return {"sub": "api-key", "api_key": True}
+
+    return None
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """Protect all /api/* endpoints except login and webhook. Static files pass through."""
+    path = request.url.path
+
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    if path in AUTH_EXEMPT_PATHS:
+        return await call_next(request)
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    if not ADMIN_PASSWORD and not ADMIN_API_KEY:
+        return await call_next(request)
+
+    claims = _extract_auth(request)
+    if not claims:
+        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+
+    return await call_next(request)
 
 
 async def verify_api_key(request: Request):
-    """Verify API key for mutating endpoints. Read-only endpoints skip auth if no key configured."""
-    if not ADMIN_API_KEY:
-        return
-    if request.url.path == "/api/deploy/webhook":
-        return  # webhook has its own secret-based auth
-    if request.method in ("GET", "HEAD", "OPTIONS"):
-        return
-    key = request.headers.get("X-API-Key", "") or request.query_params.get("api_key", "")
-    if key != ADMIN_API_KEY:
-        raise HTTPException(401, "Invalid or missing API key")
-
-
-# Apply API key auth globally for mutating operations
-app.dependency_overrides[verify_api_key] = verify_api_key
+    """Legacy dependency: now handled by auth_middleware. Kept for endpoint-level Depends()."""
+    pass
 
 
 # ── knownBots cache ──

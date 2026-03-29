@@ -1,16 +1,38 @@
 const BASE = "/api";
 const REQUEST_TIMEOUT_MS = 30000;
 
+function getToken() {
+  return localStorage.getItem("carher_token") || "";
+}
+
+let onAuthFailure = null;
+
+export function setAuthFailureHandler(handler) {
+  onAuthFailure = handler;
+}
+
 async function request(path, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
+  const token = getToken();
+  const headers = { "Content-Type": "application/json", ...options.headers };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
   try {
     const res = await fetch(`${BASE}${path}`, {
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
       ...options,
+      headers,
+      signal: controller.signal,
     });
+    if (res.status === 401) {
+      localStorage.removeItem("carher_token");
+      localStorage.removeItem("carher_user");
+      if (onAuthFailure) onAuthFailure();
+      throw new Error("登录已过期，请重新登录");
+    }
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`${res.status}: ${text}`);

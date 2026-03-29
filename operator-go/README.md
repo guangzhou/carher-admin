@@ -13,78 +13,182 @@ Kubernetes Operator for managing 500+ CarHer instances with self-healing, concur
 | 类型安全 | dict | struct |
 | 社区 | 小 | CNCF 标准 |
 
-## 功能
+## 核心架构
 
-### Reconciler
+```mermaid
+graph TB
+    subgraph Input["触发源"]
+        CRD["HerInstance CRD<br/>spec 变更"]
+        PodEvent["Pod 事件<br/>(删除/驱逐/OOM)"]
+        Timer["30s 定期<br/>健康检查"]
+    end
 
-监听 `HerInstance` CRD 变化，自动管理子资源：
+    subgraph Operator["carher-operator"]
+        Reconciler["Reconciler"]
+        Health["Health Checker<br/>(50 goroutine worker)"]
+        KB["KnownBots Manager<br/>(goroutine-safe)"]
+        Metrics["Prometheus /metrics<br/>(7 指标)"]
+    end
 
+    subgraph Resources["管理的 K8s 资源"]
+        CM["ConfigMap<br/>(per-user config)"]
+        PVC["PVC<br/>(user-data, NAS)"]
+        Pod["Pod<br/>(7 volume mounts)"]
+        SharedCM["共享 ConfigMap<br/>(knownBots)"]
+        Status["CRD Status<br/>(phase, podIP, feishuWS...)"]
+    end
+
+    CRD -->|"watch"| Reconciler
+    PodEvent -->|"Owns(&Pod{})<br/>立即触发"| Reconciler
+    Timer --> Health
+
+    Reconciler --> CM
+    Reconciler --> PVC
+    Reconciler --> Pod
+    Reconciler --> Status
+    Reconciler -->|"configHash 变更"| KB
+    KB --> SharedCM
+    Health --> Status
+    Health --> Metrics
+
+    style PodEvent fill:#ef444420,stroke:#ef4444
+    style CRD fill:#3b82f620,stroke:#3b82f6
 ```
-CRD spec 变化
-  → 读取 appSecret (K8s Secret)
-  → 生成 openclaw.json (含全局 knownBots)
-  → apply ConfigMap
-  → 比较 image / configHash → 决定是否重建 Pod
-  → 确保 PVC 存在 + 创建 Pod (挂载 7 个 volume)
-  → 更新 CRD status (Patch, 减少 conflict)
+
+## Reconcile 流程
+
+```mermaid
+flowchart TD
+    A["CRD spec 变更<br/>(watch event)"] --> B["读取 appSecret<br/>(K8s Secret)"]
+    B --> C["生成 openclaw.json<br/>(含全局 knownBots)"]
+    C --> D{"计算 configHash<br/>是否变更?"}
+    D -->|"相同"| E["跳过 ConfigMap 写入<br/>省 API 调用"]
+    D -->|"变更"| F["写入 ConfigMap<br/>+ MarkDirty knownBots"]
+    E --> G{"Pod 是否存在?"}
+    F --> G
+    G -->|"不存在"| H["确保 PVC 存在"]
+    G -->|"存在"| I{"image 或 configHash<br/>是否变更?"}
+    H --> J["创建 Pod<br/>(ownerReferences → CRD)<br/>(7 volume mounts)"]
+    I -->|"否"| K["保持当前 Pod"]
+    I -->|"是"| L["删旧 Pod"]
+    L --> M{"AlreadyExists?"}
+    M -->|"是"| N["RequeueAfter: 3s<br/>(不阻塞 worker)"]
+    M -->|"否"| J
+    J --> O["Patch CRD status<br/>(Phase: Pending → Running)"]
+    K --> O
+    N --> O
+
+    P["Pod 被删除/驱逐"] -->|"Owns(&Pod{})<br/>立即触发"| A
+    Q["30s 健康检查"] -->|"发现 Pod 消失"| A
+
+    style P fill:#ef444420,stroke:#ef4444
+    style J fill:#10b98120,stroke:#10b981
 ```
 
-**关键改进 (R1–R6)**:
-- `Owns(&corev1.Pod{})`: Pod 被删除/驱逐时立即触发 reconcile，不再等 30s 健康检查
-- `ownerReferences`: Pod 关联到 CRD，K8s GC 自动清理孤儿资源
-- ConfigMap hash 跳过: `configHash` 相同时不写 ConfigMap，500 实例省 500 次 API 调用/轮
-- knownBots 按需重建: 仅 `configHash` 变更时 `MarkDirty()`，不每次 reconcile 重建
-- `resolveImage` / `resolvePrefix` helper: 统一默认值处理，消除空值比较导致的无限 Pod 重建循环
-- Pod 重建不再使用 `time.Sleep(2s)` 阻塞 worker，改为 `AlreadyExists` 时 `RequeueAfter: 3s`
-- `deletePod`/`deleteConfigMap` 返回 error 并由调用方处理
-- Status 更新使用 `Patch` 替代 `Update`，减少高并发下的 conflict
-- 实例删除时清理 Prometheus label (`FeishuWSConnected`/`PodRestarts`)，防止指标基数膨胀
-- `DeepCopy` 方法定义在 `api/v1alpha1/types.go`（与 CRD 类型同包，确保编译通过）
+### 关键优化 (R1–R6)
 
-### Self-Healing
+- **Owns(&corev1.Pod{})**: Pod 被删除/驱逐时立即触发 reconcile，不再等 30s 健康检查
+- **ownerReferences**: Pod 关联到 CRD，K8s GC 自动清理孤儿资源
+- **ConfigMap hash 跳过**: `configHash` 相同时不写 ConfigMap，500 实例省 500 次 API 调用/轮
+- **knownBots 按需重建**: 仅 `configHash` 变更时 `MarkDirty()`，不每次 reconcile 重建
+- **resolveImage / resolvePrefix**: 统一默认值处理，消除空值比较导致的无限 Pod 重建循环
+- **RequeueAfter**: Pod 重建不再 `time.Sleep(2s)` 阻塞 worker，改为 `AlreadyExists` 时 requeue
+- **Status Patch**: 使用 `client.MergeFrom` + `Status().Patch()` 替代 `Update`，减少 conflict
+- **指标清理**: 实例删除时移除 Prometheus label，防止基数膨胀
+- **SelfHealTotal 去重**: 仅 Phase ≠ Pending 时首次计数，不每轮重复递增
+
+## Self-Healing
+
+```mermaid
+flowchart LR
+    A["Pod 崩溃<br/>节点故障<br/>驱逐"] --> B["Owns(&Pod{})<br/>立即通知"]
+    B --> C["Reconciler<br/>触发重建"]
+    C --> D["从 CRD spec<br/>读取配置"]
+    D --> E["创建新 Pod<br/>(7 volumes)"]
+    E --> F["NAS PVC<br/>自动挂载"]
+    F --> G["数据完整恢复<br/>Phase: Running"]
+
+    style A fill:#ef444420,stroke:#ef4444
+    style G fill:#10b98120,stroke:#10b981
+```
 
 双重机制确保秒级自愈：
 
 1. **事件驱动** (`Owns(&Pod{})`): Pod 被删除/驱逐 → 立即触发 reconcile → 重建 Pod
-2. **定期巡检** (健康检查): 每 30 秒检查所有实例，兜底发现异常
+2. **定期巡检** (30s 健康检查): 兜底发现异常
 
 - Pod 消失 → 自动重建（所有 NAS volume 完整恢复）
 - CrashLoopBackOff → 标记 Failed + 告警
 - Container not Ready → 标记 Disconnected
-- `SelfHealTotal` 仅在 Phase 从非 Pending 转换时计数，不每轮重复递增
+- `SelfHealTotal` 仅在 Phase 从非 Pending 转换时计数
 
-### Pod Volume 架构
+## Pod Volume 架构
 
-每个 Pod 挂载 7 个 volume，确保自愈后数据完整：
+```mermaid
+graph LR
+    Pod["Her Pod"]
 
-| Volume | 类型 | 说明 |
-|--------|------|------|
-| `user-data` | PVC `carher-{uid}-data` (NAS) | 用户私有数据 (记忆、OAuth token 等) |
-| `user-config` | ConfigMap | openclaw.json (Operator 从 CRD 生成) |
-| `base-config` | ConfigMap | 共享基础配置 |
-| `gcloud-adc` | Secret | GCloud 认证 |
-| `shared-skills` | PVC `carher-shared-skills` (NAS, ReadWriteMany) | 全员共享 skills |
-| `dept-skills` | PVC `carher-dept-skills` (NAS, ReadWriteMany) | 部门共享 skills |
-| `user-sessions` | PVC `carher-shared-sessions` (NAS, ReadWriteMany) | Session 日志 (按 uid 子目录隔离) |
+    Pod --> V1["user-data<br/>PVC (NAS 5Gi)<br/>/data/.openclaw"]
+    Pod --> V2["user-config<br/>ConfigMap<br/>/data/.openclaw/openclaw.json"]
+    Pod --> V3["base-config<br/>ConfigMap<br/>/data/.openclaw/carher-config.json"]
+    Pod --> V4["gcloud-adc<br/>Secret<br/>/gcloud/application_default_credentials.json"]
+    Pod --> V5["shared-skills<br/>NAS PVC (RWX)<br/>/data/.openclaw/skills"]
+    Pod --> V6["dept-skills<br/>NAS PVC (RWX)<br/>/data/.agents/skills"]
+    Pod --> V7["user-sessions<br/>NAS PVC (RWX)<br/>/data/.openclaw/sessions"]
+
+    style V1 fill:#3b82f620,stroke:#3b82f6
+    style V5 fill:#10b98120,stroke:#10b981
+    style V6 fill:#10b98120,stroke:#10b981
+    style V7 fill:#10b98120,stroke:#10b981
+```
 
 所有共享 PVC 统一使用 `alibabacloud-cnfs-nas` StorageClass，确保 Pod 无论调度到哪个节点都能读到完整数据。
 
-### Health Checker
+## Health Checker
 
-- **可配 worker 并发池**: 默认 50 worker，可通过 `HEALTH_CHECK_WORKERS` 环境变量调整
-- **Container Ready Status**: 用容器 ready 状态判断 Feishu WS 连接性
-- **Status Patch**: 使用 `client.MergeFrom` + `Status().Patch()` 替代 `Status().Update()`，减少 conflict
-- **Metrics 准确性**: 每轮 atomic 收集后一次性设置 `InstancesTotal`，不再 `Reset()` 造成 Prometheus 零值间隙
+```mermaid
+flowchart TD
+    Start["30s 定时触发"] --> List["List all HerInstance CRD"]
+    List --> Pool["分发到 Worker 池<br/>(默认 50 goroutine)"]
+    Pool --> W1["Worker 1"]
+    Pool --> W2["Worker 2"]
+    Pool --> WN["Worker N"]
 
-### knownBots 中心化
+    W1 --> Check["检查 Container Ready<br/>CrashLoop / 重启次数"]
+    W2 --> Check
+    WN --> Check
 
-所有 bot ID 存在一个共享 ConfigMap `carher-known-bots`：
-- **按需重建**: 仅当 `configHash` 变更时 `MarkDirty()`，不每次 reconcile 重建
+    Check --> Healthy{"健康?"}
+    Healthy -->|"是"| Update1["Status: Running<br/>FeishuWS: Connected"]
+    Healthy -->|"Pod 消失"| Heal["触发 Reconcile<br/>(自愈)"]
+    Healthy -->|"CrashLoop"| Update2["Status: Failed<br/>+ 告警"]
+
+    Update1 --> Metrics["更新 Prometheus 指标<br/>(atomic 批量设置)"]
+    Update2 --> Metrics
+    Heal --> Metrics
+```
+
+- **可配 worker 并发池**: 默认 50 worker，可通过 `HEALTH_CHECK_WORKERS` 调整
+- **Status Patch**: `client.MergeFrom` + `Status().Patch()`，减少 conflict
+- **Metrics 准确性**: 每轮 atomic 收集后一次性设置 `InstancesTotal`，不 `Reset()` 造成零值间隙
+
+## knownBots 中心化
+
+```mermaid
+flowchart LR
+    R1["Reconcile 实例 A<br/>configHash 变更"] -->|"MarkDirty()"| KB["KnownBots Manager<br/>(goroutine-safe)"]
+    R2["Reconcile 实例 B<br/>configHash 不变"] -.->|"不触发"| KB
+    KB -->|"收集所有 bot ID"| CM["共享 ConfigMap<br/>carher-known-bots"]
+    CM --> P1["Pod A 读取"]
+    CM --> P2["Pod B 读取"]
+    CM --> PN["Pod N 读取"]
+```
+
+- **按需重建**: 仅当 `configHash` 变更时 `MarkDirty()`
 - **错误处理**: ConfigMap Create/Update 失败时记录日志并标记重试
-- 各实例 ConfigMap 从缓存获取 knownBots
 - 消除 O(N²) 问题
 
-### Prometheus Metrics
+## Prometheus Metrics
 
 | 指标 | 说明 |
 |------|------|
@@ -101,19 +205,19 @@ CRD spec 变化
 ```
 operator-go/
 ├── api/v1alpha1/
-│   └── types.go              # CRD 类型 + DeepCopy (spec/status 不冗余赋值)
+│   └── types.go              # CRD 类型 + DeepCopy
 ├── internal/
 │   ├── controller/
-│   │   ├── reconciler.go     # Owns(Pod) + ownerRef + hash 跳过 + resolveImage
-│   │   ├── health.go         # 可配 worker 池 + SelfHeal 去重 + atomic 指标
-│   │   ├── known_bots.go     # goroutine-safe + 错误处理 + 按需重建
-│   │   ├── config_gen.go     # openclaw.json 生成 + resolvePrefix 统一
-│   │   └── config_gen_test.go # 单元测试
+│   │   ├── reconciler.go     # Owns(Pod) + ownerRef + hash 跳过
+│   │   ├── health.go         # 可配 worker 池 + SelfHeal 去重
+│   │   ├── known_bots.go     # goroutine-safe + 按需重建
+│   │   ├── config_gen.go     # openclaw.json 生成
+│   │   └── config_gen_test.go
 │   └── metrics/
-│       └── metrics.go        # 7 个 Prometheus 指标 (已移除 DeployActive)
+│       └── metrics.go        # 7 个 Prometheus 指标
 ├── cmd/
 │   └── main.go               # metricsserver.Options + leader election
-├── Dockerfile                 # 缓存优化 + -ldflags -s -w + alpine:3.21
+├── Dockerfile                 # 缓存优化 + -ldflags -s -w
 ├── go.mod / go.sum
 └── README.md
 ```
@@ -121,7 +225,7 @@ operator-go/
 ## 构建
 
 ```bash
-# Docker (推荐, 无需本地 Go 环境)
+# Docker (推荐)
 docker build -t carher-operator:latest .
 
 # 本地 (需要 Go 1.23+)
@@ -140,7 +244,7 @@ kubectl apply -f ../k8s/shared-pvcs.yaml
 kubectl apply -f ../k8s/operator-rbac.yaml
 kubectl apply -f ../k8s/operator-deployment.yaml
 
-# 3. 安装 Prometheus 监控
+# 3. Prometheus 监控
 kubectl apply -f ../k8s/servicemonitor.yaml
 
 # 验证
@@ -158,7 +262,7 @@ curl http://localhost:8080/metrics | grep carher_
 go test ./internal/controller/ -v
 ```
 
-## HerInstance CRD
+## HerInstance CRD 示例
 
 ```yaml
 apiVersion: carher.io/v1alpha1
@@ -169,28 +273,28 @@ metadata:
 spec:
   userId: 14
   name: "张三"
-  model: gpt                    # gpt | sonnet | opus
+  model: gpt
   appId: cli_xxx
-  appSecretRef: carher-14-secret # K8s Secret name (存 app_secret)
-  prefix: s3                     # 服务器前缀 (影响 OAuth URL)
-  owner: "ou_abc|ou_def"         # 飞书 open_id (竖线分隔多个)
-  provider: openrouter           # openrouter | anthropic
+  appSecretRef: carher-14-secret
+  prefix: s3
+  owner: "ou_abc|ou_def"
+  provider: openrouter
   botOpenId: ou_bot123
-  deployGroup: canary            # 任意自定义分组名 (按 priority 排序部署)
-  image: v20260328               # ACR 镜像 tag
-  paused: false                  # true → Operator 不维护 Pod
+  deployGroup: canary
+  image: v20260328
+  paused: false
 status:
-  phase: Running                 # Pending | Running | Failed | Stopped | Paused
+  phase: Running
   podIP: "10.0.1.50"
   node: "cn-hongkong.10.0.1.226"
   restarts: 0
-  feishuWS: Connected            # Connected | Disconnected | Unknown
+  feishuWS: Connected
   memoryDB: true
   lastHealthCheck: "2026-03-28T16:00:00Z"
-  configHash: "a1b2c3d4e5f6"    # ConfigMap 内容 hash, 变更时才重建 Pod
+  configHash: "a1b2c3d4e5f6"
 ```
 
-### 常用 kubectl 命令
+## 常用 kubectl 命令
 
 ```bash
 # 列出所有实例
@@ -202,10 +306,8 @@ kubectl describe her her-14 -n carher
 # 更新镜像 (operator 自动重建 Pod)
 kubectl patch her her-14 -n carher --type merge -p '{"spec":{"image":"v20260329"}}'
 
-# 暂停实例 (删除 Pod, 保留数据)
+# 暂停 / 恢复
 kubectl patch her her-14 -n carher --type merge -p '{"spec":{"paused":true}}'
-
-# 恢复实例
 kubectl patch her her-14 -n carher --type merge -p '{"spec":{"paused":false}}'
 
 # 移动到自定义灰度组
@@ -219,12 +321,18 @@ kubectl get her -n carher -o wide
 kubectl get her -n carher -o json | jq '.items[] | {name: .metadata.name, phase: .status.phase, ws: .status.feishuWS, group: .spec.deployGroup}'
 ```
 
-### 灰度分组说明
+## 灰度分组
 
-`deployGroup` 字段不限于固定值，支持任意自定义名称（如 `vip`, `test`, `team-a`）。部署编排器按 priority 从小到大逐组部署：
+```mermaid
+flowchart LR
+    A["VIP 组<br/>P5"] -->|"健康检查 ✓"| B["金丝雀组<br/>P10"]
+    B -->|"健康检查 ✓"| C["早期组<br/>P50"]
+    C -->|"健康检查 ✓"| D["稳定组<br/>P100"]
 
+    style A fill:#f59e0b20,stroke:#f59e0b
+    style B fill:#3b82f620,stroke:#3b82f6
+    style C fill:#8b5cf620,stroke:#8b5cf6
+    style D fill:#10b98120,stroke:#10b981
 ```
-vip(P5) → canary(P10) → early(P50) → stable(P100)
-```
 
-分组的 priority 由 admin Dashboard 的 `deploy_groups` 表管理，Operator 本身不关心分组语义，只负责维护 Pod 生命周期。
+`deployGroup` 支持任意自定义名称。部署编排器按 priority 从小到大逐组部署。分组的 priority 由 Admin Dashboard 的 `deploy_groups` 表管理，Operator 本身不关心分组语义，只负责维护 Pod 生命周期。

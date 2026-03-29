@@ -18,28 +18,35 @@
 │                                                                      │
 │  ┌────────────────────────────────────────────────────────────┐      │
 │  │  carher-admin (Python FastAPI + React)                     │      │
-│  │  Web Dashboard + REST API + SQLite (审计/部署历史)           │      │
+│  │  ├── Web Dashboard + REST API (60+, OpenAPI 文档)           │      │
+│  │  ├── SQLite (审计日志 / 部署历史 / 灰度分组)                   │      │
+│  │  ├── AI Agent (自然语言运维, 中英文)                          │      │
+│  │  ├── API Key 认证 (写操作需 X-API-Key)                      │      │
+│  │  └── 灰度部署编排器 (动态 wave, 波次恢复)                     │      │
 │  │         │                                                  │      │
 │  │         │ CRUD HerInstance CRD (声明式)                     │      │
 │  │         ▼                                                  │      │
 │  │  ┌─────────────────────────────────────────────┐          │      │
 │  │  │  HerInstance CRD (K8s etcd)                 │          │      │
-│  │  │  = source of truth                          │          │      │
+│  │  │  = source of truth for runtime              │          │      │
 │  │  └──────────────────┬──────────────────────────┘          │      │
 │  └─────────────────────┼─────────────────────────────────────┘      │
 │                        │ watch                                       │
 │  ┌─────────────────────▼─────────────────────────────────────┐      │
 │  │  carher-operator (Go, controller-runtime)                  │      │
-│  │  ├── Reconciler (多 goroutine 并发)                         │      │
-│  │  ├── Health Checker (50 worker 并发池, 500 实例 10s/轮)     │      │
-│  │  ├── KnownBots Manager (goroutine-safe, O(1) 更新)         │      │
-│  │  ├── Self-Heal (Pod 消失 → 30s 自动重建)                    │      │
+│  │  ├── Reconciler: CRD → ConfigMap + PVC + Pod               │      │
+│  │  │   └── AlreadyExists 自动 requeue (不再 sleep 阻塞)      │      │
+│  │  ├── Health Checker: 50 worker 并发池, 500 实例 10s/轮      │      │
+│  │  │   └── Container Ready Status 判断 WS 连接              │      │
+│  │  ├── KnownBots Manager: goroutine-safe, O(1) 更新          │      │
+│  │  ├── Self-Heal: Pod 消失 → 30s 自动重建 (NAS volume 完整)  │      │
+│  │  ├── Status Patch (减少 conflict) + Error Propagation       │      │
 │  │  └── Prometheus /metrics (8 指标)                           │      │
 │  └─────────────────────┬─────────────────────────────────────┘      │
 │                        │ manages                                     │
 │  ┌─────────────────────▼─────────────────────────────────────┐      │
 │  │  CarHer 实例 Pods (×500+)                                  │      │
-│  │  每个: Pod + ConfigMap + PVC + Secret                       │      │
+│  │  每个: Pod + ConfigMap + PVC + Secret  (7 volume mounts)   │      │
 │  │  共享: NAS PVC (skills) + NAS PVC (sessions)               │      │
 │  └────────────────────────────────────────────────────────────┘      │
 │                                                                      │
@@ -65,7 +72,7 @@
 | 监控指标 | Prometheus | Operator /metrics | Grafana |
 | 灰度分组配置 | SQLite `deploy_groups` 表 | admin API | 部署编排器 |
 
-## 五大功能模块
+## 六大功能模块
 
 ### 1. carher-admin — Web Dashboard + API
 
@@ -77,7 +84,7 @@
 | 实例管理 | 列表、搜索、详情、配置编辑 |
 | 新增/导入 | 表单创建、CSV 批量导入 |
 | 生命周期 | 启动、停止、重启、删除 (单个/批量) |
-| 部署管理 | 灰度 / 紧急全量 / 仅首组，回滚、中止 |
+| 部署管理 | 灰度 / 紧急全量 / 仅首组，回滚、中止、波次恢复 |
 | 灰度分组 | 自定义分组 CRUD (名称 + 优先级)，拖拽分配实例，按 priority 排序部署 |
 | 健康检查 | 飞书 WS、记忆库、模型加载 三项全检 |
 | 日志 | 实时 Pod 日志查看 |
@@ -90,10 +97,12 @@
 | 功能 | 说明 | 性能 |
 |------|------|------|
 | Reconcile | CRD spec → ConfigMap + PVC + Pod | 多 goroutine 并发 |
-| 自愈 | Pod 消失 → 30s 内自动重建，数据完整恢复 | 无需人工 |
-| 健康检查 | 飞书 WS、CrashLoop、重启次数 | 50 worker，500 实例 10s/轮 |
+| 自愈 | Pod 消失 → 30s 内自动重建，NAS volume 完整恢复 | 无需人工 |
+| 健康检查 | Container Ready + CrashLoop + 重启次数 | 50 worker，500 实例 10s/轮 |
 | knownBots | 共享 ConfigMap，自动计算 | 消除 O(N²) |
 | Config Hash | 只在配置变更时重建 Pod | 避免无谓重启 |
+| Pod 重建 | AlreadyExists 自动 requeue，不阻塞 worker | 无 sleep 阻塞 |
+| Status 更新 | Patch 替代 Update，减少 conflict | 高并发安全 |
 | Leader Election | 多副本 HA | 内置 |
 | /metrics | 8 个 Prometheus 指标 | 15s 采集 |
 
@@ -115,7 +124,7 @@
 | 手动触发 | workflow_dispatch：选组件 (all/admin/operator) + 部署模式 |
 | 4 种模式 | `normal` (灰度) / `fast` (全量) / `canary-only` / `build-only` |
 | 幂等安全 | 相同 tag 不重复部署，secret 验证 |
-| 金丝雀验证 | normal 模式自动等待 45s 后检查健康状态 |
+| 金丝雀验证 | normal 模式 15s 间隔轮询 (最多 90s)，而非固定 sleep |
 
 **feature-branch.yml** (开发者快速验证)：
 
@@ -140,13 +149,26 @@
 | 实例分配 | 支持单个/批量将实例移入分组 |
 | 前端管理 | Dashboard 可视化创建/删除分组、拖拽分配实例 |
 | `stable` 保护 | `stable` 组不可删除，删除其他组时实例自动回归 stable |
+| 波次恢复 | `continue` 从暂停的波次恢复，不重放已完成波次 |
 
 示例：把董事长放入 `vip` 组 (priority=5)，灰度部署时 VIP 组最先更新：
 ```
 vip(P5) → canary(P10) → early(P50) → stable(P100)
 ```
 
-### 5. 监控告警 — Prometheus + AlertManager
+### 5. 安全机制
+
+| 层面 | 机制 | 说明 |
+|------|------|------|
+| API 认证 | `X-API-Key` Header | 所有写操作 (POST/PUT/DELETE) 需携带 API Key，读操作可选 |
+| Webhook 认证 | `DEPLOY_WEBHOOK_SECRET` | GitHub Actions webhook 独立密钥验证 |
+| CORS | 可配白名单 | `CORS_ALLOW_ORIGINS` 环境变量，默认仅 `admin.carher.net` |
+| Pod Exec | 命令白名单 | 仅允许 `ls`/`cat`/`grep`/`ps` 等诊断命令 (500 字符上限) |
+| Secret 存储 | K8s Secret | appSecret 不存 CRD (明文)，通过独立 Secret 注入 |
+| 容器运行 | 非 root 用户 | Dockerfile 使用 `carher` 用户运行 |
+| Agent 安全 | dry_run + 确认 | 破坏性操作需确认，批量 >10 先汇报计划 |
+
+### 6. 监控告警 — Prometheus + AlertManager
 
 | 指标 | 说明 |
 |------|------|
@@ -182,7 +204,7 @@ Pod 崩溃 / 节点故障后，Operator 自动重建 Pod。以下数据保证完
 | knownBots | 共享 ConfigMap | **是** | Operator 定期重算 |
 | Feishu OAuth Token | PVC 内 `/data/.openclaw/credentials/` | **是** | 随用户数据 PVC |
 
-**关键设计**: Skills 使用 NAS PVC（`ReadWriteMany`）而非 `hostPath`，确保 Pod 无论调度到哪个节点都能读到完整的 skills 文件。
+**关键设计**: 所有共享 PVC 统一使用 `alibabacloud-cnfs-nas` StorageClass (`ReadWriteMany`)，确保 Pod 无论调度到哪个节点都能读到完整数据。
 
 ### Pod Volume 挂载详情
 
@@ -203,34 +225,34 @@ Pod 崩溃 / 节点故障后，Operator 自动重建 Pod。以下数据保证完
 ```
 carher-admin/
 ├── backend/                     # Python FastAPI 后端
-│   ├── main.py                 # API 路由 (60+ endpoints)
-│   ├── agent.py                # AI 运维 Agent (自然语言 → API 调用)
-│   ├── database.py             # SQLite (审计/部署历史/灰度分组, schema v3)
-│   ├── deployer.py             # 灰度部署编排器 (动态 wave order)
+│   ├── main.py                 # API 路由 (60+, API Key 认证, 非阻塞)
+│   ├── agent.py                # AI 运维 Agent (LLM → 工具调用, 错误汇报)
+│   ├── database.py             # SQLite (schema v3, deploy_group 持久化)
+│   ├── deployer.py             # 灰度部署编排器 (动态 wave, 波次恢复)
 │   ├── crd_ops.py              # CRD 操作 (admin → K8s API)
 │   ├── k8s_ops.py              # 直接 K8s 操作 (legacy 兼容)
-│   ├── config_gen.py           # openclaw.json 配置生成
-│   ├── sync_worker.py          # 后台同步
-│   ├── models.py               # Pydantic 数据模型 (含 OpenAPI schema)
+│   ├── config_gen.py           # openclaw.json 配置生成 (knownBots 缓存)
+│   ├── sync_worker.py          # 后台同步 + NAS 备份
+│   ├── models.py               # Pydantic 模型 (含 OpenAPI schema)
 │   └── requirements.txt        # Python 依赖
 ├── frontend/                    # React + Vite + Tailwind
 │   └── src/
-│       ├── api.js              # API 客户端
-│       ├── App.jsx             # 主应用 (路由 + 导航)
+│       ├── api.js              # API 客户端 (超时 30s, 非 JSON 防御)
+│       ├── App.jsx             # 主应用 (URL query 同步 tab/detailId)
 │       └── components/
 │           ├── Dashboard.jsx    # 仪表盘
 │           ├── InstanceList.jsx # 实例列表
-│           ├── DeployPage.jsx   # 部署管理 + 分组管理
+│           ├── DeployPage.jsx   # 部署管理 + 分组管理 (波次状态修复)
 │           ├── AddInstance.jsx  # 新增实例
 │           ├── BatchImport.jsx  # 批量导入
 │           ├── HealthCheck.jsx  # 健康检查
 │           └── AdminPanel.jsx   # 系统管理
 ├── operator-go/                 # Go Operator (500+ 规模)
-│   ├── api/v1alpha1/types.go   # CRD 类型定义
+│   ├── api/v1alpha1/types.go   # CRD 类型定义 + DeepCopy
 │   ├── internal/
 │   │   ├── controller/
-│   │   │   ├── reconciler.go   # 主 reconciler
-│   │   │   ├── health.go       # 50-worker 并发健康检查
+│   │   │   ├── reconciler.go   # 主 reconciler (requeue 替代 sleep)
+│   │   │   ├── health.go       # 50-worker 并发健康检查 (Status Patch)
 │   │   │   ├── known_bots.go   # goroutine-safe knownBots 管理
 │   │   │   ├── config_gen.go   # openclaw.json 配置生成 (Go)
 │   │   │   └── config_gen_test.go
@@ -243,16 +265,18 @@ carher-admin/
 ├── k8s/                         # K8s 部署清单
 │   ├── crd.yaml                # HerInstance CRD 定义
 │   ├── rbac.yaml               # admin RBAC (ServiceAccount + Role + Binding)
-│   ├── deployment.yaml         # admin Deployment + PVC + Service
+│   ├── deployment.yaml         # admin Deployment + PVC + Service (512Mi)
 │   ├── operator-rbac.yaml      # operator RBAC (ClusterRole + Binding)
 │   ├── operator-deployment.yaml # operator Deployment + metrics Service
-│   ├── shared-pvcs.yaml        # 共享 NAS PVC (skills + sessions)
+│   ├── shared-pvcs.yaml        # 共享 NAS PVC (alibabacloud-cnfs-nas)
 │   └── servicemonitor.yaml     # Prometheus ServiceMonitor + AlertRules
 ├── .github/workflows/
-│   ├── build-deploy.yml        # CI/CD (main branch → 正式构建 + 灰度部署)
+│   ├── build-deploy.yml        # CI/CD (轮询验证, 条件修复)
 │   └── feature-branch.yml     # Feature branch 构建 + 金丝雀部署
-├── Dockerfile                   # admin 多阶段构建 (Node → Python)
-└── deploy.sh                    # 本地一键部署脚本
+├── .cursor/skills/
+│   └── carher-admin-api/SKILL.md # Cursor 编程调用技能
+├── Dockerfile                   # admin 多阶段构建 (非 root, npm ci)
+└── deploy.sh                    # 本地一键部署脚本 (参数解析修复)
 ```
 
 ## API 参考
@@ -260,6 +284,8 @@ carher-admin/
 > **OpenAPI Schema**: `GET /openapi.json` — 完整的 JSON Schema，可被 Cursor、Postman、代码生成器等直接消费。
 >
 > **Cursor Skill**: `.cursor/skills/carher-admin-api/SKILL.md` — 含所有 API 的 curl 示例。
+>
+> **认证**: 写操作需携带 `X-API-Key` Header (环境变量 `ADMIN_API_KEY`)。读操作无需认证。Webhook 使用独立的 `DEPLOY_WEBHOOK_SECRET`。
 
 ### 实例管理
 
@@ -267,18 +293,18 @@ carher-admin/
 |--------|------|-------------|
 | GET | `/api/instances` | 列出所有实例 (含 Pod 运行状态) |
 | GET | `/api/instances/search` | **搜索** — 按 status/model/deploy_group/owner/name/feishu_ws 过滤 |
-| GET | `/api/instances/:id` | 实例详情 (含 PVC 状态, knownBots 计数) |
-| POST | `/api/instances` | 创建实例 |
-| PUT | `/api/instances/:id` | 修改配置 (**支持全字段**: name/model/owner/provider/prefix/deploy_group) |
+| GET | `/api/instances/:id` | 实例详情 (含 PVC 状态, knownBots 计数, 30s 缓存) |
+| POST | `/api/instances` | 创建实例 (deploy_group 正确持久化) |
+| PUT | `/api/instances/:id` | 修改配置 (**全字段**: name/model/owner/provider/prefix/deploy_group) |
 | DELETE | `/api/instances/:id?purge=false` | 删除实例 (purge=true 同时删除 PVC) |
 | POST | `/api/instances/:id/stop` | 停止 (删 Pod, 保留数据) |
 | POST | `/api/instances/:id/start` | 启动 |
-| POST | `/api/instances/:id/restart` | 重启 |
+| POST | `/api/instances/:id/restart` | 重启 (async, 不阻塞事件循环) |
 | GET | `/api/instances/:id/logs?tail=200` | 查看 Pod 日志 |
 | GET | `/api/instances/:id/events` | **K8s Events** (Pod 创建/重启/OOM 等事件) |
 | GET | `/api/instances/:id/config-preview` | **配置预览** — 生成但不应用 openclaw.json |
 | GET | `/api/instances/:id/config-current` | **当前配置** — 已应用的 ConfigMap 内容 |
-| POST | `/api/instances/:id/exec` | **Pod Exec** — 在容器内执行命令 (调试用) |
+| POST | `/api/instances/:id/exec` | **Pod Exec** — 白名单命令 (ls/cat/grep/ps 等, 500 字符上限) |
 | POST | `/api/instances/batch` | 批量操作 (body: `{ids, action, params}`) |
 | POST | `/api/instances/batch-import` | 批量导入 |
 | PUT | `/api/instances/:id/deploy-group` | 设置部署分组 (body: `{group}`) |
@@ -299,7 +325,7 @@ carher-admin/
 |--------|------|-------------|
 | POST | `/api/deploy` | 启动部署 (body: `{image_tag, mode}`, mode: normal/fast/canary-only) |
 | GET | `/api/deploy/status` | 当前部署状态 (含 wave_order, 各组计数, 进度百分比) |
-| POST | `/api/deploy/continue` | 继续暂停的部署 |
+| POST | `/api/deploy/continue` | 继续暂停的部署 (**从暂停波次恢复**, 不重放已完成波次) |
 | POST | `/api/deploy/rollback` | 回滚到上一版本 |
 | POST | `/api/deploy/abort` | 中止部署 |
 | GET | `/api/deploy/history?limit=20` | 部署历史 |
@@ -367,6 +393,11 @@ kubectl apply -f k8s/operator-deployment.yaml   # 4. 部署 Go Operator
 kubectl apply -f k8s/rbac.yaml                  # 5. Admin 权限
 kubectl apply -f k8s/deployment.yaml            # 6. 部署 Admin Dashboard
 kubectl apply -f k8s/servicemonitor.yaml        # 7. Prometheus 监控 + 告警规则
+
+# 配置 admin 认证密钥
+kubectl create secret generic carher-admin-secrets -n carher \
+  --from-literal=deploy-webhook-secret=YOUR_WEBHOOK_SECRET \
+  --from-literal=admin-api-key=YOUR_API_KEY
 
 # 迁移现有 bare Pod 实例到 CRD
 python -m operator.migrate --dry-run     # 预览
@@ -454,16 +485,19 @@ kubectl delete her her-14 -n carher
 # 自然语言查询
 curl -X POST https://admin.carher.net/api/agent \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_KEY" \
   -d '{"message":"当前有多少实例在运行？飞书断连的有哪些？"}'
 
 # 执行操作 (Agent 自动识别意图并调用 API)
 curl -X POST https://admin.carher.net/api/agent \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_KEY" \
   -d '{"message":"把用户 14 移到 VIP 组"}'
 
 # Dry run — 只描述会做什么，不执行
 curl -X POST https://admin.carher.net/api/agent \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_KEY" \
   -d '{"message":"重启所有飞书断连的实例","dry_run":true}'
 ```
 
@@ -480,10 +514,12 @@ curl -X POST https://admin.carher.net/api/agent \
 
 ### 安全机制
 
+- 所有 Agent API 调用需 `X-API-Key` 认证
 - 破坏性操作 (delete/purge) 需要确认
 - 批量操作 >10 实例时先汇报计划
 - `dry_run=true` 只返回执行计划不执行
-- 危险命令 (rm -rf 等) 在 Pod exec 中被禁止
+- Pod exec 仅允许白名单命令 (ls/cat/grep/ps 等)
+- batch_action 失败不再静默吞掉，返回每个失败 UID 和原因
 
 ## 程序化调用 (Cursor / MCP)
 
@@ -509,6 +545,8 @@ Cursor 可通过 `.cursor/skills/carher-admin-api/SKILL.md` 直接消费所有 A
 | `CARHER_ADMIN_DB_DIR` | admin | SQLite 存储路径 (默认 `/data/carher-admin`) |
 | `CARHER_ADMIN_BACKUP_DIR` | admin | NAS 备份路径 (默认 `/nas-backup/carher-admin`) |
 | `DEPLOY_WEBHOOK_SECRET` | admin | GitHub webhook 验证密钥 (K8s Secret 注入) |
+| `ADMIN_API_KEY` | admin | API 认证密钥 (写操作, K8s Secret 注入, 可选) |
+| `CORS_ALLOW_ORIGINS` | admin | CORS 白名单 (逗号分隔, 默认 `https://admin.carher.net`) |
 | `FEISHU_DEPLOY_WEBHOOK` | admin | 飞书群 webhook URL (部署通知) |
 | `DEPLOY_HEALTH_WAIT_CANARY` | admin | 金丝雀健康检查等待秒数 (默认 30) |
 | `DEPLOY_HEALTH_WAIT` | admin | 普通波次健康检查等待秒数 (默认 15) |

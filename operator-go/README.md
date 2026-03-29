@@ -26,15 +26,21 @@ CRD spec 变化
   → apply ConfigMap
   → 比较 image / configHash → 决定是否重建 Pod
   → 确保 PVC 存在 + 创建 Pod (挂载 7 个 volume)
-  → 更新 CRD status
+  → 更新 CRD status (Patch, 减少 conflict)
 ```
+
+**关键改进**:
+- Pod 重建不再使用 `time.Sleep(2s)` 阻塞 worker，改为 `AlreadyExists` 时 `RequeueAfter: 3s`
+- `deletePod`/`deleteConfigMap` 返回 error 并由调用方处理
+- Status 更新使用 `Patch` 替代 `Update`，减少高并发下的 conflict
+- `DeepCopy` 方法定义在 `api/v1alpha1/types.go`（与 CRD 类型同包，确保编译通过）
 
 ### Self-Healing
 
 每 30 秒检查所有实例：
-- Pod 消失 → 自动重建（所有 volume 完整恢复）
+- Pod 消失 → 自动重建（所有 NAS volume 完整恢复）
 - CrashLoopBackOff → 标记 Failed + 告警
-- 飞书 WS 断开 → 标记 Disconnected
+- Container not Ready → 标记 Disconnected
 
 ### Pod Volume 架构
 
@@ -50,7 +56,14 @@ CRD spec 变化
 | `dept-skills` | PVC `carher-dept-skills` (NAS, ReadWriteMany) | 部门共享 skills |
 | `user-sessions` | PVC `carher-shared-sessions` (NAS, ReadWriteMany) | Session 日志 (按 uid 子目录隔离) |
 
-Skills 和 sessions 使用 NAS PVC (ReadWriteMany) 而非 hostPath，确保 Pod 无论调度到哪个节点都能读到完整数据。
+所有共享 PVC 统一使用 `alibabacloud-cnfs-nas` StorageClass，确保 Pod 无论调度到哪个节点都能读到完整数据。
+
+### Health Checker
+
+- **50 worker 并发池**: 500 实例 10s 内完成一轮
+- **Container Ready Status**: 用容器 ready 状态判断 Feishu WS 连接性（替代永远返回 true 的 placeholder）
+- **Status Patch**: 使用 `client.MergeFrom` + `Status().Patch()` 替代 `Status().Update()`，减少 conflict
+- **Metrics 准确性**: `InstancesTotal.Reset()` 每轮清零后重新计数
 
 ### knownBots 中心化
 
@@ -77,11 +90,11 @@ Skills 和 sessions 使用 NAS PVC (ReadWriteMany) 而非 hostPath，确保 Pod 
 ```
 operator-go/
 ├── api/v1alpha1/
-│   └── types.go              # HerInstance CRD 类型定义
+│   └── types.go              # HerInstance CRD 类型定义 + DeepCopy
 ├── internal/
 │   ├── controller/
-│   │   ├── reconciler.go     # 主 reconciler (CRD → ConfigMap + PVC + Pod)
-│   │   ├── health.go         # 50-worker 并发健康检查 + 自愈
+│   │   ├── reconciler.go     # 主 reconciler (requeue 替代 sleep, error propagation)
+│   │   ├── health.go         # 50-worker 并发健康检查 (Status Patch, Container Ready)
 │   │   ├── known_bots.go     # goroutine-safe knownBots 管理
 │   │   ├── config_gen.go     # openclaw.json 配置生成
 │   │   └── config_gen_test.go # 单元测试

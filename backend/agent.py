@@ -176,7 +176,15 @@ async def _call_llm(messages: list[dict]) -> str:
                     "suggestions": [],
                 })
             data = await resp.json()
-            return data["choices"][0]["message"]["content"]
+            choices = data.get("choices")
+            if not choices or not isinstance(choices, list):
+                logger.error("LLM API returned unexpected structure: %s", json.dumps(data)[:200])
+                return json.dumps({
+                    "answer": "LLM 返回格式异常，请稍后重试",
+                    "actions_taken": [],
+                    "suggestions": [],
+                })
+            return choices[0].get("message", {}).get("content", "")
 
 
 def _execute_tool(name: str, params: dict, dry_run: bool = False) -> dict:
@@ -258,7 +266,6 @@ def _execute_tool(name: str, params: dict, dry_run: bool = False) -> dict:
             if inst:
                 config_json = config_gen.generate_json_string(inst)
                 k8s_ops.apply_configmap(uid, config_json)
-                import time; time.sleep(2)
                 k8s_ops.create_pod(uid, prefix=inst.get("prefix", "s1"))
             result["data"] = {"id": uid, "action": "restarted"}
 
@@ -298,7 +305,12 @@ def _execute_tool(name: str, params: dict, dry_run: bool = False) -> dict:
             result["data"] = {"name": params["name"], "priority": params.get("priority", 100)}
 
         elif name == "start_deploy":
-            result["data"] = {"note": "Deployment must be triggered via the deploy API for safety"}
+            image_tag = params.get("image_tag", "")
+            mode = params.get("mode", "canary-only")
+            if not image_tag:
+                result["error"] = "image_tag is required"
+            else:
+                result["data"] = {"note": f"Use POST /api/deploy with image_tag={image_tag} mode={mode}. Agent cannot trigger deploys directly for safety."}
 
         elif name == "get_deploy_status":
             result["data"] = deployer.get_deploy_status()
@@ -316,7 +328,10 @@ def _execute_tool(name: str, params: dict, dry_run: bool = False) -> dict:
         elif name == "batch_action":
             uids = [int(u) for u in params.get("uids", [])]
             action = params.get("action", "")
-            done = []
+            if action not in ("restart", "stop", "start"):
+                result["error"] = f"Unknown batch action: {action}"
+                return result
+            done, failed = [], []
             for uid in uids:
                 try:
                     if action == "restart":
@@ -326,9 +341,9 @@ def _execute_tool(name: str, params: dict, dry_run: bool = False) -> dict:
                     elif action == "start":
                         _execute_tool("start_instance", {"uid": uid})
                     done.append(uid)
-                except Exception:
-                    pass
-            result["data"] = {"action": action, "count": len(done), "ids": done}
+                except Exception as e:
+                    failed.append({"uid": uid, "error": str(e)})
+            result["data"] = {"action": action, "done_count": len(done), "done_ids": done, "failed": failed}
 
         else:
             result["error"] = f"Unknown tool: {name}"

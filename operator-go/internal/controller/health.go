@@ -163,9 +163,9 @@ func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, p
 		}
 	}
 
-	// Check Feishu WS from pod logs (only for Running pods)
+	// Check Feishu WS connectivity (only for Running pods)
 	if phase == "Running" {
-		wsConnected := hc.checkFeishuWS(ctx, uid)
+		wsConnected := hc.checkFeishuWS(ctx, pod)
 		if wsConnected {
 			status.FeishuWS = "Connected"
 			metrics.FeishuWSConnected.WithLabelValues(uidStr, her.Spec.Name).Set(1)
@@ -178,29 +178,25 @@ func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, p
 	hc.updateStatus(ctx, her, status)
 }
 
-func (hc *HealthChecker) checkFeishuWS(ctx context.Context, uid int) bool {
-	// Read last 100 lines of pod logs
-	podName := fmt.Sprintf("carher-%d", uid)
-	req := hc.Client.Scheme() // We need raw clientset for logs
-	_ = req
-	_ = podName
+func (hc *HealthChecker) checkFeishuWS(ctx context.Context, pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	// Check container ready status as a proxy for Feishu WS connectivity.
 	// controller-runtime client doesn't support pod logs directly;
-	// we'll use the status that the reconciler sets.
-	// For now, rely on the reconciler's log-based check.
-	// TODO: switch to a metrics endpoint on each pod for more reliable WS status
-	return true // placeholder — the reconciler handles this in its requeue
+	// a proper solution would be a /healthz endpoint on each Pod.
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "carher" && cs.Ready {
+			return true
+		}
+	}
+	return false
 }
 
 func (hc *HealthChecker) updateStatus(ctx context.Context, her *herv1.HerInstance, status *herv1.HerInstanceStatus) {
+	patch := client.MergeFrom(her.DeepCopyObject().(client.Object))
 	her.Status = *status
-	if err := hc.Client.Status().Update(ctx, her); err != nil {
-		// Status update failures are non-fatal; will retry next cycle
-		log.FromContext(ctx).V(1).Info("Status update failed", "uid", her.Spec.UserID, "err", err)
+	if err := hc.Client.Status().Patch(ctx, her, patch); err != nil {
+		log.FromContext(ctx).V(1).Info("Status patch failed", "uid", her.Spec.UserID, "err", err)
 	}
-}
-
-// DeepCopy for HerInstanceStatus
-func (s *herv1.HerInstanceStatus) DeepCopy() *herv1.HerInstanceStatus {
-	cp := *s
-	return &cp
 }

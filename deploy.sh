@@ -11,15 +11,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ACR="cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com"
 REPO="her/carher-admin"
-TAG="${1:-latest}"
 NS="carher"
 
+TAG="latest"
 BUILD="yes"
 DEPLOY="yes"
 for arg in "$@"; do
   case "$arg" in
     --build-only)  DEPLOY="" ;;
     --deploy-only) BUILD="" ;;
+    --*)           ;; # ignore unknown flags
+    *)             TAG="$arg" ;; # positional arg = tag
   esac
 done
 

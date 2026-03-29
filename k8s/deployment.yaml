@@ -18,7 +18,8 @@ spec:
       serviceAccountName: carher-admin
       imagePullSecrets:
         - name: acr-secret
-      # Pin to a specific node for stable hostPath storage
+      # Pin to a specific node for stable hostPath storage (SQLite).
+      # TODO: migrate DB to NAS PVC to remove nodeSelector.
       nodeSelector:
         kubernetes.io/hostname: cn-hongkong.10.0.1.226
       containers:
@@ -32,18 +33,26 @@ spec:
               value: /data/db
             - name: CARHER_ADMIN_BACKUP_DIR
               value: /data/nas-backup
+            - name: CORS_ALLOW_ORIGINS
+              value: "https://admin.carher.net"
             - name: DEPLOY_WEBHOOK_SECRET
               valueFrom:
                 secretKeyRef:
                   name: carher-admin-secrets
                   key: deploy-webhook-secret
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: carher-admin-secrets
+                  key: admin-api-key
+                  optional: true
           resources:
             requests:
               cpu: "100m"
-              memory: "128Mi"
+              memory: "256Mi"
             limits:
               cpu: "500m"
-              memory: "256Mi"
+              memory: "512Mi"
           volumeMounts:
             # SQLite on local disk (hostPath) — safe for file locking
             - name: db-local

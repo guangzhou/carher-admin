@@ -70,7 +70,9 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if her.Status.Phase != "Paused" {
 			r.deletePod(ctx, uid)
 			her.Status.Phase = "Paused"
-			r.Status().Update(ctx, &her)
+			if err := r.Status().Update(ctx, &her); err != nil {
+				logger.V(1).Info("Status update failed", "uid", uid, "err", err)
+			}
 		}
 		return ctrl.Result{}, nil
 	}
@@ -115,20 +117,29 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	if needRecreate {
 		logger.Info("Recreating pod", "uid", uid, "action", action, "image", her.Spec.Image)
-		r.deletePod(ctx, uid)
-		time.Sleep(2 * time.Second)
+		if err := r.deletePod(ctx, uid); err != nil {
+			logger.V(1).Info("Delete pod returned error (may be ok)", "uid", uid, "err", err)
+		}
 		if err := r.createPod(ctx, &her); err != nil {
+			if errors.IsAlreadyExists(err) {
+				// Pod still terminating, requeue quickly
+				return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
+			}
 			logger.Error(err, "Failed to create pod", "uid", uid)
 			her.Status.Phase = "Failed"
 			her.Status.Message = err.Error()
-			r.Status().Update(ctx, &her)
+			if uerr := r.Status().Update(ctx, &her); uerr != nil {
+				logger.V(1).Info("Status update failed", "uid", uid, "err", uerr)
+			}
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, err
 		}
 		her.Status.Phase = "Pending"
 	}
 
 	her.Status.ConfigHash = configHash
-	r.Status().Update(ctx, &her)
+	if err := r.Status().Update(ctx, &her); err != nil {
+		logger.V(1).Info("Status update failed", "uid", uid, "err", err)
+	}
 
 	// Check if bot fields changed (triggers knownBots rebuild)
 	r.KnownBots.MarkDirty()
@@ -300,14 +311,20 @@ func (r *HerInstanceReconciler) createPod(ctx context.Context, her *herv1.HerIns
 	return r.Create(ctx, pod)
 }
 
-func (r *HerInstanceReconciler) deletePod(ctx context.Context, uid int) {
+func (r *HerInstanceReconciler) deletePod(ctx context.Context, uid int) error {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("carher-%d", uid), Namespace: Namespace}}
-	r.Delete(ctx, pod)
+	if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
-func (r *HerInstanceReconciler) deleteConfigMap(ctx context.Context, uid int) {
+func (r *HerInstanceReconciler) deleteConfigMap(ctx context.Context, uid int) error {
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("carher-%d-user-config", uid), Namespace: Namespace}}
-	r.Delete(ctx, cm)
+	if err := r.Delete(ctx, cm); err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // ── PVC ──

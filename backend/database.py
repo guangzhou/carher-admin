@@ -224,9 +224,14 @@ def get_by_id(uid: int) -> dict | None:
 def insert(data: dict) -> dict:
     with get_db() as conn:
         conn.execute(
-            """INSERT INTO her_instances (id, name, model, app_id, app_secret, prefix, owner, provider, bot_open_id, status, sync_status, created_at, updated_at)
-               VALUES (:id, :name, :model, :app_id, :app_secret, :prefix, :owner, :provider, :bot_open_id, :status, 'pending', :now, :now)""",
-            {**data, "now": _now()},
+            """INSERT INTO her_instances (id, name, model, app_id, app_secret, prefix, owner, provider, bot_open_id, status, sync_status, deploy_group, image_tag, created_at, updated_at)
+               VALUES (:id, :name, :model, :app_id, :app_secret, :prefix, :owner, :provider, :bot_open_id, :status, 'pending', :deploy_group, :image_tag, :now, :now)""",
+            {
+                "deploy_group": data.get("deploy_group", "stable"),
+                "image_tag": data.get("image_tag", "v20260328"),
+                **data,
+                "now": _now(),
+            },
         )
         _audit(conn, data["id"], "created", json.dumps({k: v for k, v in data.items() if k != "app_secret"}, ensure_ascii=False))
     backup_to_nas()
@@ -343,12 +348,13 @@ def import_from_configmap_data(uid: int, cfg: dict):
     feishu = cfg.get("channels", {}).get("feishu", {})
     primary = cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
 
-    # Reverse-map model
+    # Reverse-map model (most specific match first to avoid false positives)
     model_short = "gpt"
-    for short, full in [("sonnet", "claude-sonnet"), ("opus", "claude-opus"), ("gpt", "gpt-5")]:
-        if short in primary.lower() or full in primary.lower():
-            model_short = short
-            break
+    primary_lower = primary.lower()
+    if "opus" in primary_lower or "claude-opus" in primary_lower:
+        model_short = "opus"
+    elif "sonnet" in primary_lower or "claude-sonnet" in primary_lower:
+        model_short = "sonnet"
 
     # Extract prefix from OAuth URL
     prefix = "s1"

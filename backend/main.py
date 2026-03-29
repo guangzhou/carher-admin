@@ -9,12 +9,14 @@ Architecture:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -54,12 +56,53 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+ALLOWED_ORIGINS = os.environ.get("CORS_ALLOW_ORIGINS", "https://admin.carher.net").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# API Key authentication
+ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
+
+
+async def verify_api_key(request: Request):
+    """Verify API key for mutating endpoints. Read-only endpoints skip auth if no key configured."""
+    if not ADMIN_API_KEY:
+        return
+    if request.url.path == "/api/deploy/webhook":
+        return  # webhook has its own secret-based auth
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    key = request.headers.get("X-API-Key", "") or request.query_params.get("api_key", "")
+    if key != ADMIN_API_KEY:
+        raise HTTPException(401, "Invalid or missing API key")
+
+
+# Apply API key auth globally for mutating operations
+app.dependency_overrides[verify_api_key] = verify_api_key
+
+
+# ── knownBots cache ──
+
+_known_bots_cache: dict | None = None
+_known_bots_ts: float = 0
+KNOWN_BOTS_TTL = 30  # seconds
+
+
+def _get_known_bots_cached():
+    """Cache knownBots for 30s to avoid O(N) DB query per request."""
+    import time
+    global _known_bots_cache, _known_bots_ts
+    now = time.monotonic()
+    if _known_bots_cache is None or now - _known_bots_ts > KNOWN_BOTS_TTL:
+        _known_bots_cache = db.collect_known_bots()
+        _known_bots_ts = now
+    return _known_bots_cache
 
 
 # ── Helpers ──
@@ -149,23 +192,23 @@ def api_get_instance(uid: int):
         raise HTTPException(404, f"Instance {uid} not found")
     result = _enrich_with_runtime(inst)
     result["pvc_status"] = k8s_ops.get_pvc_status(uid)
-    result["known_bots_count"] = len(db.collect_known_bots()[0])
+    bots, _ = _get_known_bots_cached()
+    result["known_bots_count"] = len(bots)
     return result
 
 
 # ── API: Create ──
 
-@app.post("/api/instances")
+@app.post("/api/instances", dependencies=[Depends(verify_api_key)])
 def api_add_instance(req: HerAddRequest):
     uid = req.id or db.next_id()
 
-    # Insert into DB
     data = {
         "id": uid, "name": req.name, "model": req.model,
         "app_id": req.app_id, "app_secret": req.app_secret,
         "prefix": req.prefix, "owner": req.owner,
         "provider": req.provider, "bot_open_id": "",
-        "status": "running",
+        "status": "running", "deploy_group": req.deploy_group,
     }
     inst = db.insert(data)
 
@@ -185,7 +228,7 @@ def api_add_instance(req: HerAddRequest):
     }
 
 
-@app.post("/api/instances/batch-import")
+@app.post("/api/instances/batch-import", dependencies=[Depends(verify_api_key)])
 def api_batch_import(req: HerBatchImport):
     results = []
     for item in req.instances:
@@ -258,12 +301,13 @@ def api_start(uid: int):
 
 
 @app.post("/api/instances/{uid}/restart")
-def api_restart(uid: int):
+async def api_restart(uid: int):
     inst = db.get_by_id(uid)
     if not inst:
         raise HTTPException(404, f"Instance {uid} not found")
-    k8s_ops.delete_pod(uid)
-    import time; time.sleep(2)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, k8s_ops.delete_pod, uid)
+    await asyncio.sleep(2)
     _sync_and_deploy(inst)
     k8s_ops.create_pod(uid, prefix=inst.get("prefix", "s1"))
     return {"id": uid, "action": "restarted"}
@@ -283,7 +327,7 @@ def api_delete(uid: int, purge: bool = Query(False)):
 
 # ── API: Batch ──
 
-@app.post("/api/instances/batch")
+@app.post("/api/instances/batch", dependencies=[Depends(verify_api_key)])
 def api_batch_action(req: HerBatchAction):
     results = []
     for uid in req.ids:
@@ -389,7 +433,7 @@ def api_import_from_k8s():
 
 # ── API: Deploy Pipeline ──
 
-@app.post("/api/deploy", tags=["deploy"])
+@app.post("/api/deploy", tags=["deploy"], dependencies=[Depends(verify_api_key)])
 async def api_start_deploy(req: DeployRequest):
     """Start a new deployment. Modes: normal (canary→early→stable), fast (all at once), canary-only."""
     if req.mode not in ("normal", "fast", "canary-only"):
@@ -696,16 +740,23 @@ def api_trigger_backup():
 
 # ── API: Pod Exec (debug) ──
 
-@app.post("/api/instances/{uid}/exec", tags=["instances"])
+EXEC_ALLOWED_PREFIXES = [
+    "ls", "cat ", "head ", "tail ", "grep ", "wc ", "df ", "du ",
+    "ps ", "uptime", "env", "echo ", "test ", "stat ", "find ",
+    "node --version", "npm --version", "openclaw ",
+]
+
+
+@app.post("/api/instances/{uid}/exec", tags=["instances"], dependencies=[Depends(verify_api_key)])
 def api_pod_exec(uid: int, body: dict):
-    """Execute a command inside an instance's Pod (for debugging). Returns stdout."""
-    command = body.get("command", "")
+    """Execute a whitelisted command inside an instance's Pod (for debugging). Returns stdout."""
+    command = body.get("command", "").strip()
     if not command:
         raise HTTPException(400, "command is required")
-    forbidden = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "kill -9 1"]
-    for f in forbidden:
-        if f in command:
-            raise HTTPException(403, f"Forbidden command pattern: {f}")
+    if len(command) > 500:
+        raise HTTPException(400, "command too long (max 500 chars)")
+    if not any(command.startswith(pfx) or command == pfx.strip() for pfx in EXEC_ALLOWED_PREFIXES):
+        raise HTTPException(403, f"Command not in allowlist. Allowed prefixes: {', '.join(p.strip() for p in EXEC_ALLOWED_PREFIXES)}")
     try:
         from kubernetes.stream import stream as k8s_stream
         v1 = k8s_ops._core()
@@ -722,7 +773,7 @@ def api_pod_exec(uid: int, body: dict):
 
 # ── API: AI Agent ──
 
-@app.post("/api/agent", tags=["agent"], response_model=AgentResponse)
+@app.post("/api/agent", tags=["agent"], response_model=AgentResponse, dependencies=[Depends(verify_api_key)])
 async def api_agent(req: AgentRequest):
     """Natural language operations agent. Understands Chinese and English.
 

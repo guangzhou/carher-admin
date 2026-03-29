@@ -68,3 +68,9 @@ func (h *HerInstanceList) DeepCopyObject() interface{} {
 	}
 	return &cp
 }
+
+// DeepCopy returns a deep copy of HerInstanceStatus.
+func (s *HerInstanceStatus) DeepCopy() *HerInstanceStatus {
+	cp := *s
+	return &cp
+}

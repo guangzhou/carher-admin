@@ -59,6 +59,8 @@ export default function DeployPage() {
       if (r.error) alert(r.error);
       else if (r.status === "already_deployed") alert("该镜像已部署完成，无需重复部署");
       else load();
+    } catch (e) {
+      alert(`部署失败: ${e.message}`);
     } finally {
       setLoading("");
     }
@@ -79,8 +81,12 @@ export default function DeployPage() {
   };
 
   const setGroup = async (uid, group) => {
-    await api.setDeployGroup(uid, group);
-    load();
+    try {
+      await api.setDeployGroup(uid, group);
+      load();
+    } catch (e) {
+      alert(`分组变更失败: ${e.message}`);
+    }
   };
 
   const createGroup = async () => {
@@ -167,10 +173,12 @@ export default function DeployPage() {
 
           {/* Wave status */}
           <div className="flex gap-4 overflow-x-auto">
-            {waveOrder.map((g, idx) => {
+            {waveOrder.map((g) => {
               const count = status.waves?.[g] || 0;
               const isCurrent = deploy.current_wave === g;
-              const isDone = waveOrder.indexOf(g) < waveOrder.indexOf(deploy.current_wave);
+              const currentIdx = deploy.current_wave ? waveOrder.indexOf(deploy.current_wave) : -1;
+              const thisIdx = waveOrder.indexOf(g);
+              const isDone = currentIdx >= 0 && thisIdx < currentIdx;
               return (
                 <div key={g} className={`flex-1 min-w-[120px] p-3 rounded-lg border ${isCurrent ? "border-blue-500 bg-blue-600/10" : isDone ? "border-emerald-600/30 bg-emerald-600/10" : "border-gray-700"}`}>
                   <p className="text-xs text-gray-500">{g}</p>

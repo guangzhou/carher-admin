@@ -166,7 +166,7 @@ async def _deploy_wave(deploy_id: int, image_tag: str, waves: list[str]):
 async def _deploy_batch(deploy_id: int, batch: list[dict], image_tag: str):
     """Deploy a batch of instances. Uses CRD or direct k8s_ops."""
     backend = _get_backend()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     for inst in batch:
         uid = inst["id"]
@@ -197,7 +197,7 @@ async def _deploy_batch(deploy_id: int, batch: list[dict], image_tag: str):
 async def _health_check_batch(batch: list[dict]) -> list[dict]:
     """Check health. Returns list of unhealthy instances."""
     backend = _get_backend()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     failures = []
 
     for inst in batch:
@@ -230,6 +230,7 @@ async def _health_check_batch(batch: list[dict]) -> list[dict]:
 # ──────────────────────────────────────
 
 async def continue_deploy() -> dict:
+    """Resume a paused deploy from the wave that caused the pause."""
     global _active_task
     deploy = db.get_active_deploy()
     if not deploy:
@@ -237,8 +238,27 @@ async def continue_deploy() -> dict:
     if deploy["status"] != "paused":
         return {"error": f"Deploy is {deploy['status']}, not paused"}
 
+    paused_wave = deploy.get("current_wave", "")
     db.update_deploy(deploy["id"], status="rolling", error="")
-    _active_task = asyncio.create_task(_run_deploy(deploy["id"], deploy["image_tag"], "normal"))
+
+    async def _resume_deploy(deploy_id: int, image_tag: str, resume_from: str):
+        """Resume deploy from the paused wave (skip completed waves)."""
+        try:
+            wave_order = db.get_wave_order() or ["canary", "early", "stable"]
+            start_idx = 0
+            if resume_from and resume_from in wave_order:
+                start_idx = wave_order.index(resume_from)
+            remaining_waves = wave_order[start_idx:]
+            await _deploy_wave(deploy_id, image_tag, remaining_waves)
+        except asyncio.CancelledError:
+            logger.info("Deploy #%d: cancelled", deploy_id)
+            db.update_deploy(deploy_id, status="failed", error="Cancelled", completed_at=_now())
+        except Exception as e:
+            logger.error("Deploy #%d: unexpected error: %s", deploy_id, e)
+            db.update_deploy(deploy_id, status="failed", error=str(e), completed_at=_now())
+            await _notify_deploy_event(deploy_id, "failed", str(e))
+
+    _active_task = asyncio.create_task(_resume_deploy(deploy["id"], deploy["image_tag"], paused_wave))
     return db.get_deploy(deploy["id"])
 
 
@@ -256,7 +276,7 @@ async def rollback_deploy() -> dict:
     logger.info("Deploy #%d: rollback → %s", deploy["id"], prev_tag)
 
     backend = _get_backend()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     all_instances = db.list_all()
     rolled = 0
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Dashboard from "./components/Dashboard";
 import InstanceList from "./components/InstanceList";
 import AddInstance from "./components/AddInstance";
@@ -17,9 +17,33 @@ const TABS = [
   { id: "admin", label: "系统管理" },
 ];
 
+function getInitialTab() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("tab") || "instances";
+}
+
+function getInitialDetail() {
+  const params = new URLSearchParams(window.location.search);
+  const d = params.get("detail");
+  return d ? Number(d) : null;
+}
+
 export default function App() {
-  const [tab, setTab] = useState("instances");
-  const [detailId, setDetailId] = useState(null);
+  const [tab, setTab] = useState(getInitialTab);
+  const [detailId, setDetailId] = useState(getInitialDetail);
+
+  const updateURL = useCallback((t, d) => {
+    const params = new URLSearchParams();
+    if (t && t !== "instances") params.set("tab", t);
+    if (d) params.set("detail", d);
+    const qs = params.toString();
+    const url = qs ? `?${qs}` : window.location.pathname;
+    window.history.replaceState(null, "", url);
+  }, []);
+
+  useEffect(() => {
+    updateURL(tab, detailId);
+  }, [tab, detailId, updateURL]);
 
   const openDetail = (id) => {
     setDetailId(id);

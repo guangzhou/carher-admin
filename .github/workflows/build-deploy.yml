@@ -50,7 +50,7 @@ jobs:
           password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Build admin
-        if: inputs.components != 'operator'
+        if: github.event_name == 'push' || inputs.components != 'operator'
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -60,7 +60,7 @@ jobs:
             ${{ env.ACR_REGISTRY }}/her/carher-admin:latest
 
       - name: Build operator (Go)
-        if: inputs.components != 'admin'
+        if: github.event_name == 'push' || inputs.components != 'admin'
         uses: docker/build-push-action@v5
         with:
           context: ./operator-go
@@ -114,17 +114,27 @@ jobs:
       - name: Wait and verify (canary)
         if: (inputs.deploy_mode || 'normal') == 'normal'
         run: |
-          echo "Waiting 45s for canary health check..."
-          sleep 45
-          STATUS=$(curl -sf "${{ env.ADMIN_URL }}/api/deploy/status" || echo '{"error":"unreachable"}')
-          echo "Deploy status: $STATUS"
-          echo "$STATUS" >> $GITHUB_STEP_SUMMARY
+          echo "Polling deploy status..."
+          for i in $(seq 1 6); do
+            sleep 15
+            STATUS=$(curl -sf "${{ env.ADMIN_URL }}/api/deploy/status" || echo '{"error":"unreachable"}')
+            echo "[$i/6] Deploy status: $STATUS"
 
-          # Fail the workflow if deploy paused/failed (so you get a notification)
-          if echo "$STATUS" | grep -q '"paused"'; then
-            echo "::warning::Deploy paused — canary health check may have failed. Check admin dashboard."
-          fi
-          if echo "$STATUS" | grep -q '"failed"'; then
-            echo "::error::Deploy failed"
-            exit 1
-          fi
+            if echo "$STATUS" | grep -q '"complete"'; then
+              echo "Deploy complete!"
+              echo "$STATUS" >> $GITHUB_STEP_SUMMARY
+              exit 0
+            fi
+            if echo "$STATUS" | grep -q '"paused"'; then
+              echo "::warning::Deploy paused — canary health check may have failed."
+              echo "$STATUS" >> $GITHUB_STEP_SUMMARY
+              exit 0
+            fi
+            if echo "$STATUS" | grep -q '"failed"'; then
+              echo "::error::Deploy failed"
+              echo "$STATUS" >> $GITHUB_STEP_SUMMARY
+              exit 1
+            fi
+          done
+          echo "Deploy still in progress after 90s — check dashboard"
+          echo "### Deploy In Progress (timeout)" >> $GITHUB_STEP_SUMMARY

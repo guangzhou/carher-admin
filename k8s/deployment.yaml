@@ -46,6 +46,18 @@ spec:
                   name: carher-admin-secrets
                   key: admin-api-key
                   optional: true
+            - name: ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: carher-admin-secrets
+                  key: admin-username
+                  optional: true
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: carher-admin-secrets
+                  key: admin-password
+                  optional: true
           resources:
             requests:
               cpu: "100m"
@@ -61,14 +73,12 @@ spec:
             - name: nas-backup
               mountPath: /data/nas-backup
           livenessProbe:
-            httpGet:
-              path: /api/status
+            tcpSocket:
               port: 8900
             initialDelaySeconds: 10
             periodSeconds: 30
           readinessProbe:
-            httpGet:
-              path: /api/status
+            tcpSocket:
               port: 8900
             initialDelaySeconds: 5
             periodSeconds: 10

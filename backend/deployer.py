@@ -111,11 +111,13 @@ def _list_by_group(group: str) -> list[dict]:
 # Start deploy
 # ──────────────────────────────────────
 
-async def start_deploy(image_tag: str, mode: str = "normal", force: bool = False) -> dict:
+async def start_deploy(image_tag: str, mode: str = "normal", force: bool = False,
+                       ci_meta: dict | None = None) -> dict:
     """Initiate a new deploy.
 
     mode: "normal", "fast", "canary-only", or "group:<name>" for targeted deploy
     force: if True, skip the already_deployed check
+    ci_meta: optional dict with branch, commit_sha, commit_msg, author, repo, run_url
     """
     global _active_task
 
@@ -139,9 +141,16 @@ async def start_deploy(image_tag: str, mode: str = "normal", force: bool = False
     if total == 0:
         return {"error": "No running instances to deploy"}
 
+    meta = ci_meta or {}
     prev_tag = _get_current_image_tag(all_instances)
-    deploy_id = db.create_deploy(image_tag, prev_tag, total, mode=mode)
-    logger.info("Deploy #%d: %s → %s (%d instances, mode=%s)", deploy_id, prev_tag, image_tag, total, mode)
+    deploy_id = db.create_deploy(
+        image_tag, prev_tag, total, mode=mode,
+        branch=meta.get("branch", ""), commit_sha=meta.get("commit_sha", ""),
+        commit_msg=meta.get("commit_msg", ""), author=meta.get("author", ""),
+        repo=meta.get("repo", ""), run_url=meta.get("run_url", ""),
+    )
+    logger.info("Deploy #%d: %s → %s (%d instances, mode=%s, branch=%s)",
+                deploy_id, prev_tag, image_tag, total, mode, meta.get("branch", "-"))
 
     _active_task = asyncio.create_task(_run_deploy(deploy_id, image_tag, mode))
     return db.get_deploy(deploy_id)

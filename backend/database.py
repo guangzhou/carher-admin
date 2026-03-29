@@ -27,7 +27,7 @@ DB_DIR = Path(os.environ.get("CARHER_ADMIN_DB_DIR", "/data/carher-admin"))
 DB_PATH = DB_DIR / "admin.db"
 BACKUP_DIR = Path(os.environ.get("CARHER_ADMIN_BACKUP_DIR", "/nas-backup/carher-admin"))
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS her_instances (
@@ -117,6 +117,26 @@ MIGRATIONS = {
     ],
     5: [
         "ALTER TABLE deploys ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'",
+    ],
+    6: [
+        "ALTER TABLE deploys ADD COLUMN branch TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE deploys ADD COLUMN commit_sha TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE deploys ADD COLUMN commit_msg TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE deploys ADD COLUMN author TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE deploys ADD COLUMN repo TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE deploys ADD COLUMN run_url TEXT NOT NULL DEFAULT ''",
+        """CREATE TABLE IF NOT EXISTS branch_rules (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern     TEXT NOT NULL UNIQUE,
+            deploy_mode TEXT NOT NULL DEFAULT 'normal',
+            target_group TEXT NOT NULL DEFAULT '',
+            auto_deploy INTEGER NOT NULL DEFAULT 1,
+            description TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        )""",
+        "INSERT OR IGNORE INTO branch_rules (pattern, deploy_mode, target_group, auto_deploy, description) VALUES ('main', 'normal', '', 1, '主分支 → 灰度部署')",
+        "INSERT OR IGNORE INTO branch_rules (pattern, deploy_mode, target_group, auto_deploy, description) VALUES ('hotfix/*', 'fast', '', 1, '紧急修复 → 全量部署')",
+        "INSERT OR IGNORE INTO branch_rules (pattern, deploy_mode, target_group, auto_deploy, description) VALUES ('feature/*', 'group:canary', 'canary', 0, '特性分支 → 仅金丝雀(需手动触发)')",
     ],
 }
 
@@ -524,14 +544,18 @@ def get_current_image_tag() -> str:
 # Deploy records
 # ──────────────────────────────────────
 
-def create_deploy(image_tag: str, prev_tag: str, total: int, mode: str = "normal") -> int:
+def create_deploy(image_tag: str, prev_tag: str, total: int, mode: str = "normal",
+                   branch: str = "", commit_sha: str = "", commit_msg: str = "",
+                   author: str = "", repo: str = "", run_url: str = "") -> int:
     with get_db() as conn:
         cur = conn.execute(
-            "INSERT INTO deploys (image_tag, prev_image_tag, status, total, mode, created_at) VALUES (?, ?, 'pending', ?, ?, ?)",
-            (image_tag, prev_tag, total, mode, _now()),
+            """INSERT INTO deploys (image_tag, prev_image_tag, status, total, mode,
+               branch, commit_sha, commit_msg, author, repo, run_url, created_at)
+               VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (image_tag, prev_tag, total, mode, branch, commit_sha, commit_msg, author, repo, run_url, _now()),
         )
         deploy_id = cur.lastrowid
-        _audit(conn, None, "deploy:created", f"tag={image_tag} total={total} mode={mode}")
+        _audit(conn, None, "deploy:created", f"tag={image_tag} total={total} mode={mode} branch={branch}")
     backup_to_nas()
     return deploy_id
 
@@ -567,6 +591,64 @@ def list_deploys(limit: int = 20) -> list[dict]:
     with get_db() as conn:
         rows = conn.execute("SELECT * FROM deploys ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+
+# ──────────────────────────────────────
+# Branch rules (CI/CD → deploy mapping)
+# ──────────────────────────────────────
+
+def list_branch_rules() -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM branch_rules ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+
+def create_branch_rule(pattern: str, deploy_mode: str = "normal",
+                       target_group: str = "", auto_deploy: bool = True,
+                       description: str = "") -> int:
+    with get_db() as conn:
+        cur = conn.execute(
+            """INSERT INTO branch_rules (pattern, deploy_mode, target_group, auto_deploy, description)
+               VALUES (?, ?, ?, ?, ?)""",
+            (pattern, deploy_mode, target_group, 1 if auto_deploy else 0, description),
+        )
+        _audit(conn, None, "branch_rule:created", f"pattern={pattern} mode={deploy_mode}")
+    backup_to_nas()
+    return cur.lastrowid
+
+
+def update_branch_rule(rule_id: int, **kwargs) -> bool:
+    allowed = {"pattern", "deploy_mode", "target_group", "auto_deploy", "description"}
+    sets, params = [], {"id": rule_id}
+    for k, v in kwargs.items():
+        if k in allowed and v is not None:
+            if k == "auto_deploy":
+                v = 1 if v else 0
+            sets.append(f"{k} = :{k}")
+            params[k] = v
+    if not sets:
+        return False
+    with get_db() as conn:
+        conn.execute(f"UPDATE branch_rules SET {', '.join(sets)} WHERE id = :id", params)
+    backup_to_nas()
+    return True
+
+
+def delete_branch_rule(rule_id: int):
+    with get_db() as conn:
+        conn.execute("DELETE FROM branch_rules WHERE id = ?", (rule_id,))
+        _audit(conn, None, "branch_rule:deleted", f"id={rule_id}")
+    backup_to_nas()
+
+
+def match_branch_rule(branch: str) -> dict | None:
+    """Find the first matching rule for a branch name. Supports glob patterns (*)."""
+    import fnmatch
+    rules = list_branch_rules()
+    for rule in rules:
+        if fnmatch.fnmatch(branch, rule["pattern"]):
+            return rule
+    return None
 
 
 # ──────────────────────────────────────

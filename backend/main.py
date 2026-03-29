@@ -37,6 +37,7 @@ from .models import (
     HerAddRequest, HerBatchAction, HerBatchImport, HerUpdateRequest,
     DeployGroupCreate, DeployGroupUpdate, SetDeployGroupRequest,
     BatchSetDeployGroupRequest, DeployRequest, DeployWebhookRequest,
+    BranchRuleCreate, BranchRuleUpdate, TriggerBuildRequest,
     AgentRequest, AgentResponse,
 )
 
@@ -1020,13 +1021,96 @@ def api_delete_deploy_group(name: str):
 
 @app.post("/api/deploy/webhook", tags=["deploy"])
 async def api_deploy_webhook(req: DeployWebhookRequest):
-    """GitHub Actions webhook: auto-trigger deploy after image push."""
+    """GitHub Actions webhook with CI metadata. Auto-matches branch rules if mode is empty."""
     expected = os.environ.get("DEPLOY_WEBHOOK_SECRET", "")
     if not expected:
         raise HTTPException(503, "DEPLOY_WEBHOOK_SECRET not configured")
     if req.secret != expected:
         raise HTTPException(403, "Invalid webhook secret")
-    return await deployer.start_deploy(req.image_tag, mode=req.mode)
+
+    ci_meta = {
+        "branch": req.branch, "commit_sha": req.commit_sha,
+        "commit_msg": req.commit_msg, "author": req.author,
+        "repo": req.repo, "run_url": req.run_url,
+    }
+
+    mode = req.mode
+    if not mode and req.branch:
+        rule = db.match_branch_rule(req.branch)
+        if rule:
+            mode = rule["deploy_mode"]
+            if not rule["auto_deploy"]:
+                return {"status": "build_only", "image_tag": req.image_tag,
+                        "branch": req.branch, "matched_rule": rule["pattern"],
+                        "message": "Branch rule matched but auto_deploy=false"}
+    mode = mode or "normal"
+
+    return await deployer.start_deploy(req.image_tag, mode=mode, ci_meta=ci_meta)
+
+
+# ── API: Branch Rules ──
+
+@app.get("/api/branch-rules", tags=["ci-cd"])
+def api_list_branch_rules():
+    """List all branch → deploy mode mapping rules."""
+    return db.list_branch_rules()
+
+
+@app.post("/api/branch-rules", tags=["ci-cd"])
+def api_create_branch_rule(req: BranchRuleCreate):
+    """Create a branch rule. Supports glob patterns: main, hotfix/*, feature/*."""
+    rule_id = db.create_branch_rule(
+        req.pattern, req.deploy_mode, req.target_group, req.auto_deploy, req.description)
+    return {"id": rule_id, "pattern": req.pattern}
+
+
+@app.put("/api/branch-rules/{rule_id}", tags=["ci-cd"])
+def api_update_branch_rule(rule_id: int, req: BranchRuleUpdate):
+    """Update an existing branch rule."""
+    ok = db.update_branch_rule(rule_id, **req.model_dump(exclude_none=True))
+    if not ok:
+        raise HTTPException(404, "Rule not found or no changes")
+    return {"id": rule_id, "updated": True}
+
+
+@app.delete("/api/branch-rules/{rule_id}", tags=["ci-cd"])
+def api_delete_branch_rule(rule_id: int):
+    """Delete a branch rule."""
+    db.delete_branch_rule(rule_id)
+    return {"id": rule_id, "deleted": True}
+
+
+@app.post("/api/branch-rules/test", tags=["ci-cd"])
+def api_test_branch_rule(branch: str = Query(..., description="Branch name to test")):
+    """Test which rule would match a given branch name."""
+    rule = db.match_branch_rule(branch)
+    return {"branch": branch, "matched_rule": dict(rule) if rule else None}
+
+
+# ── API: Trigger GitHub Build ──
+
+@app.post("/api/ci/trigger-build", tags=["ci-cd"])
+async def api_trigger_build(req: TriggerBuildRequest):
+    """Trigger a GitHub Actions workflow_dispatch build.
+
+    Requires GITHUB_TOKEN env var with workflow dispatch permission.
+    """
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        raise HTTPException(503, "GITHUB_TOKEN not configured")
+
+    import aiohttp
+    url = f"https://api.github.com/repos/{req.repo}/actions/workflows/{req.workflow}/dispatches"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    body = {"ref": req.branch, "inputs": {"deploy_mode": req.deploy_mode}}
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status == 204:
+                return {"status": "triggered", "repo": req.repo, "branch": req.branch,
+                        "workflow": req.workflow, "deploy_mode": req.deploy_mode}
+            text = await resp.text()
+            raise HTTPException(resp.status, f"GitHub API error: {text}")
 
 
 # ── API: Config Preview ──

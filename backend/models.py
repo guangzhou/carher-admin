@@ -126,7 +126,36 @@ class DeployRequest(BaseModel):
 class DeployWebhookRequest(BaseModel):
     image_tag: str = Field(..., description="Docker image tag")
     secret: str = Field(..., description="Webhook authentication secret")
-    mode: str = Field("normal", description="Deploy mode")
+    mode: str = Field("", description="Deploy mode (auto-detected from branch rule if empty)")
+    branch: str = Field("", description="Git branch name")
+    commit_sha: str = Field("", description="Git commit SHA")
+    commit_msg: str = Field("", description="Git commit message")
+    author: str = Field("", description="Git commit author")
+    repo: str = Field("", description="GitHub repo (owner/name)")
+    run_url: str = Field("", description="GitHub Actions run URL")
+
+
+class BranchRuleCreate(BaseModel):
+    pattern: str = Field(..., description="Branch pattern (supports glob: main, hotfix/*, feature/*)")
+    deploy_mode: str = Field("normal", description="Deploy mode: normal / fast / canary-only / group:<name>")
+    target_group: str = Field("", description="Target deploy group (for group:<name> mode)")
+    auto_deploy: bool = Field(True, description="Auto-deploy when webhook received (false = build only)")
+    description: str = Field("", description="Rule description")
+
+
+class BranchRuleUpdate(BaseModel):
+    pattern: str | None = Field(None, description="Branch pattern")
+    deploy_mode: str | None = Field(None, description="Deploy mode")
+    target_group: str | None = Field(None, description="Target deploy group")
+    auto_deploy: bool | None = Field(None, description="Auto-deploy on/off")
+    description: str | None = Field(None, description="Description")
+
+
+class TriggerBuildRequest(BaseModel):
+    repo: str = Field("guangzhou/CarHer", description="GitHub repo (owner/name)")
+    branch: str = Field("main", description="Branch to build")
+    workflow: str = Field("build-deploy.yml", description="Workflow file name")
+    deploy_mode: str = Field("normal", description="Deploy mode input")
 
 
 # ──────────────────────────────────────

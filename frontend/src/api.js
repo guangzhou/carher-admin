@@ -92,4 +92,11 @@ export const api = {
   createDeployGroup: (name, priority, description) => request("/deploy-groups", { method: "POST", body: JSON.stringify({ name, priority, description }) }),
   updateDeployGroup: (name, data) => request(`/deploy-groups/${name}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteDeployGroup: (name) => request(`/deploy-groups/${name}`, { method: "DELETE" }),
+  // Branch rules (CI/CD)
+  listBranchRules: () => request("/branch-rules"),
+  createBranchRule: (data) => request("/branch-rules", { method: "POST", body: JSON.stringify(data) }),
+  updateBranchRule: (id, data) => request(`/branch-rules/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteBranchRule: (id) => request(`/branch-rules/${id}`, { method: "DELETE" }),
+  testBranchRule: (branch) => request(`/branch-rules/test?branch=${encodeURIComponent(branch)}`),
+  triggerBuild: (data) => request("/ci/trigger-build", { method: "POST", body: JSON.stringify(data) }),
 };

@@ -92,26 +92,40 @@ jobs:
       - name: Deploy to canary group only
         run: |
           TAG="${{ needs.build.outputs.image_tag }}"
-          echo "Deploying $TAG to canary group..."
+          BRANCH="${GITHUB_REF_NAME}"
+          SHA="${GITHUB_SHA}"
+          AUTHOR="${{ github.actor }}"
+          REPO="${{ github.repository }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          echo "Deploying $TAG (branch: $BRANCH) to canary group..."
+
+          PAYLOAD=$(jq -n \
+            --arg tag "$TAG" --arg secret "${{ secrets.DEPLOY_WEBHOOK_SECRET }}" \
+            --arg branch "$BRANCH" --arg sha "$SHA" \
+            --arg author "$AUTHOR" --arg repo "$REPO" \
+            --arg run_url "$RUN_URL" \
+            '{image_tag:$tag, secret:$secret, mode:"", branch:$branch,
+              commit_sha:$sha, author:$author, repo:$repo, run_url:$run_url}')
 
           HTTP_CODE=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
             -X POST "${{ env.ADMIN_URL }}/api/deploy/webhook" \
             -H "Content-Type: application/json" \
-            -d "{\"image_tag\": \"$TAG\", \"secret\": \"${{ secrets.DEPLOY_WEBHOOK_SECRET }}\", \"mode\": \"canary-only\"}")
+            -d "$PAYLOAD")
 
           echo "HTTP: $HTTP_CODE"
           cat /tmp/resp.json
 
           if [ "$HTTP_CODE" -ge 400 ]; then
             BODY=$(cat /tmp/resp.json)
-            if echo "$BODY" | grep -q "already_deploy"; then
-              echo "Skipped (idempotent)"
+            if echo "$BODY" | jq -r '.status // ""' 2>/dev/null | grep -q "already_deploy\|build_only"; then
+              echo "Skipped: $BODY"
             else
               echo "::error::Deploy failed: $HTTP_CODE"
               exit 1
             fi
           fi
 
-          echo "### Canary Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "### Feature Branch Deploy" >> $GITHUB_STEP_SUMMARY
           echo "- Tag: \`$TAG\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Mode: canary-only" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: \`$BRANCH\`" >> $GITHUB_STEP_SUMMARY

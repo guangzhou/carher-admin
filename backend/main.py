@@ -519,8 +519,10 @@ def api_add_instance(req: HerAddRequest):
         crd_ops.create_her_instance(data)
         logger.info("Created HerInstance CRD for uid=%d", uid)
         # Auto-sync cloudflared config + DNS for the new instance
+        # Wait for Operator to create the Service before generating config
         try:
-            cloudflare_ops.sync_tunnel_config()
+            svc_name = f"carher-{uid}-svc"
+            cloudflare_ops.sync_tunnel_config(wait_for_service=svc_name)
             cloudflare_ops.register_dns_routes(uid, prefix=req.prefix)
         except Exception as cf_err:
             logger.warning("Cloudflare auto-config failed for %d (non-fatal): %s", uid, cf_err)

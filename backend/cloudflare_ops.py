@@ -153,8 +153,17 @@ def restart_cloudflared():
         logger.error("Failed to restart cloudflared: %s", e)
 
 
-def sync_tunnel_config():
-    """Full sync: regenerate config, update ConfigMap, restart if changed."""
+def sync_tunnel_config(wait_for_service: str | None = None, retries: int = 5):
+    """Full sync: regenerate config, update ConfigMap, restart if changed.
+    If wait_for_service is given, poll until that Service exists before generating config.
+    """
+    if wait_for_service:
+        import time
+        for i in range(retries):
+            if _get_svc_cluster_ip(wait_for_service):
+                break
+            time.sleep(3)
+
     changed = update_configmap()
     if changed:
         restart_cloudflared()

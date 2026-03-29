@@ -27,7 +27,7 @@ DB_DIR = Path(os.environ.get("CARHER_ADMIN_DB_DIR", "/data/carher-admin"))
 DB_PATH = DB_DIR / "admin.db"
 BACKUP_DIR = Path(os.environ.get("CARHER_ADMIN_BACKUP_DIR", "/nas-backup/carher-admin"))
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS her_instances (
@@ -114,6 +114,9 @@ MIGRATIONS = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metrics_history(ts)",
         "CREATE INDEX IF NOT EXISTS idx_metrics_kind_uid ON metrics_history(kind, uid)",
+    ],
+    5: [
+        "ALTER TABLE deploys ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'",
     ],
 }
 
@@ -521,14 +524,14 @@ def get_current_image_tag() -> str:
 # Deploy records
 # ──────────────────────────────────────
 
-def create_deploy(image_tag: str, prev_tag: str, total: int) -> int:
+def create_deploy(image_tag: str, prev_tag: str, total: int, mode: str = "normal") -> int:
     with get_db() as conn:
         cur = conn.execute(
-            "INSERT INTO deploys (image_tag, prev_image_tag, status, total, created_at) VALUES (?, ?, 'pending', ?, ?)",
-            (image_tag, prev_tag, total, _now()),
+            "INSERT INTO deploys (image_tag, prev_image_tag, status, total, mode, created_at) VALUES (?, ?, 'pending', ?, ?, ?)",
+            (image_tag, prev_tag, total, mode, _now()),
         )
         deploy_id = cur.lastrowid
-        _audit(conn, None, "deploy:created", f"tag={image_tag} total={total}")
+        _audit(conn, None, "deploy:created", f"tag={image_tag} total={total} mode={mode}")
     backup_to_nas()
     return deploy_id
 

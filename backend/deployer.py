@@ -5,11 +5,15 @@ Supports two modes:
   2. Legacy mode: directly manages Pods via k8s_ops (fallback if CRD not installed)
 
 Deploy flows:
-  - normal:    canary → health gate → early → health gate → stable
-  - fast:      all instances at once (skip canary gates, for hotfixes)
+  - normal:      canary → health gate → early → health gate → stable
+  - fast:        all instances at once (skip canary gates, for hotfixes)
   - canary-only: deploy to canary group only (manual promotion later)
+  - group:<name>: deploy to a specific named group only
 
 Deploy statuses: pending → canary → rolling → complete | paused | failed | rolled_back
+
+Instance sources: merges CRD-managed + DB-managed instances.
+CRD instances take priority; DB instances are included only if not already in CRD.
 """
 
 from __future__ import annotations
@@ -26,23 +30,25 @@ logger = logging.getLogger("carher-admin")
 
 BATCH_SIZE = int(os.environ.get("DEPLOY_BATCH_SIZE", "50"))
 
-# Configurable via env
 HEALTH_WAIT_CANARY = int(os.environ.get("DEPLOY_HEALTH_WAIT_CANARY", "30"))
 HEALTH_WAIT_DEFAULT = int(os.environ.get("DEPLOY_HEALTH_WAIT", "15"))
 
 _active_task: asyncio.Task | None = None
 
-_USE_CRD = True
+_USE_CRD = os.environ.get("DEPLOY_USE_CRD", "true").lower() not in ("false", "0", "no")
 
 
-def _get_backend():
-    """Return crd_ops if operator mode, else k8s_ops."""
+def _get_crd_ops():
     if _USE_CRD:
         try:
             from . import crd_ops
             return crd_ops
         except ImportError:
             pass
+    return None
+
+
+def _get_k8s_ops():
     from . import k8s_ops
     return k8s_ops
 
@@ -52,39 +58,105 @@ def _now() -> str:
 
 
 # ──────────────────────────────────────
+# Unified instance listing (CRD + DB)
+# ──────────────────────────────────────
+
+def _list_all_deployable() -> list[dict]:
+    """Merge CRD-managed and DB-managed running instances.
+    Each entry has at least: id, deploy_group, image_tag, source ('crd'|'db')."""
+    result = []
+    seen_uids: set[int] = set()
+
+    crd_ops = _get_crd_ops()
+    if crd_ops:
+        try:
+            for inst in crd_ops.list_her_instances():
+                spec = inst.get("spec", {})
+                uid = spec.get("userId", 0)
+                if not uid or spec.get("paused"):
+                    continue
+                seen_uids.add(uid)
+                result.append({
+                    "id": uid,
+                    "deploy_group": spec.get("deployGroup", "stable"),
+                    "image_tag": spec.get("image", ""),
+                    "prefix": spec.get("prefix", "s1"),
+                    "source": "crd",
+                })
+        except Exception as e:
+            logger.warning("CRD list failed in deployer: %s", e)
+
+    for inst in db.list_all():
+        if inst["id"] in seen_uids:
+            continue
+        if inst["status"] != "running":
+            continue
+        result.append({
+            "id": inst["id"],
+            "deploy_group": inst.get("deploy_group", "stable"),
+            "image_tag": inst.get("image_tag", ""),
+            "prefix": inst.get("prefix", "s1"),
+            "source": "db",
+        })
+
+    return result
+
+
+def _list_by_group(group: str) -> list[dict]:
+    """List deployable instances in a specific deploy group."""
+    return [i for i in _list_all_deployable() if i["deploy_group"] == group]
+
+
+# ──────────────────────────────────────
 # Start deploy
 # ──────────────────────────────────────
 
-async def start_deploy(image_tag: str, mode: str = "normal") -> dict:
+async def start_deploy(image_tag: str, mode: str = "normal", force: bool = False) -> dict:
     """Initiate a new deploy.
 
-    mode: "normal" (canary→early→stable), "fast" (all at once), "canary-only"
+    mode: "normal", "fast", "canary-only", or "group:<name>" for targeted deploy
+    force: if True, skip the already_deployed check
     """
     global _active_task
 
-    # Idempotency: if same tag already active or last completed, skip
     active = db.get_active_deploy()
     if active:
         if active["image_tag"] == image_tag:
             return {"status": "already_deploying", "deploy": active}
         return {"error": f"Deploy #{active['id']} in progress ({active['status']}). Abort it first."}
 
-    last = db.list_deploys(limit=1)
-    if last and last[0]["image_tag"] == image_tag and last[0]["status"] == "complete":
-        return {"status": "already_deployed", "image_tag": image_tag}
+    if not force:
+        last = db.list_deploys(limit=1)
+        if last and last[0]["image_tag"] == image_tag and last[0]["status"] == "complete":
+            return {"status": "already_deployed", "image_tag": image_tag}
 
-    prev_tag = db.get_current_image_tag()
-    all_running = [i for i in db.list_all() if i["status"] == "running"]
-    total = len(all_running)
+    all_instances = _list_all_deployable()
+    if mode.startswith("group:"):
+        target_group = mode[6:]
+        all_instances = [i for i in all_instances if i["deploy_group"] == target_group]
 
+    total = len(all_instances)
     if total == 0:
         return {"error": "No running instances to deploy"}
 
-    deploy_id = db.create_deploy(image_tag, prev_tag, total)
+    prev_tag = _get_current_image_tag(all_instances)
+    deploy_id = db.create_deploy(image_tag, prev_tag, total, mode=mode)
     logger.info("Deploy #%d: %s → %s (%d instances, mode=%s)", deploy_id, prev_tag, image_tag, total, mode)
 
     _active_task = asyncio.create_task(_run_deploy(deploy_id, image_tag, mode))
     return db.get_deploy(deploy_id)
+
+
+def _get_current_image_tag(instances: list[dict]) -> str:
+    """Most common image tag across given instances."""
+    counts: dict[str, int] = {}
+    for i in instances:
+        tag = i.get("image_tag", "")
+        if tag:
+            counts[tag] = counts.get(tag, 0) + 1
+    if not counts:
+        return db.get_current_image_tag()
+    return max(counts, key=counts.get)
 
 
 async def _run_deploy(deploy_id: int, image_tag: str, mode: str):
@@ -95,8 +167,10 @@ async def _run_deploy(deploy_id: int, image_tag: str, mode: str):
         if mode == "fast":
             await _deploy_fast(deploy_id, image_tag)
         elif mode == "canary-only":
-            # Deploy only the first group in the wave order
             await _deploy_wave(deploy_id, image_tag, [wave_order[0]])
+        elif mode.startswith("group:"):
+            target_group = mode[6:]
+            await _deploy_wave(deploy_id, image_tag, [target_group])
         else:
             await _deploy_wave(deploy_id, image_tag, wave_order)
 
@@ -112,7 +186,7 @@ async def _run_deploy(deploy_id: int, image_tag: str, mode: str):
 async def _deploy_fast(deploy_id: int, image_tag: str):
     """Deploy all running instances at once, skip canary gates."""
     db.update_deploy(deploy_id, status="rolling", current_wave="all")
-    all_running = [i for i in db.list_all() if i["status"] == "running"]
+    all_running = _list_all_deployable()
 
     for batch_start in range(0, len(all_running), BATCH_SIZE):
         batch = all_running[batch_start:batch_start + BATCH_SIZE]
@@ -125,25 +199,23 @@ async def _deploy_fast(deploy_id: int, image_tag: str):
 async def _deploy_wave(deploy_id: int, image_tag: str, waves: list[str]):
     """Deploy by waves with health gates between each."""
     for wave in waves:
-        instances = db.list_by_deploy_group(wave)
+        instances = _list_by_group(wave)
         if not instances:
             continue
 
-        db.update_deploy(deploy_id, status="canary" if wave == "canary" else "rolling", current_wave=wave)
+        db.update_deploy(deploy_id, status="canary" if wave == waves[0] else "rolling", current_wave=wave)
         logger.info("Deploy #%d: wave '%s' (%d instances)", deploy_id, wave, len(instances))
 
         for batch_start in range(0, len(instances), BATCH_SIZE):
             batch = instances[batch_start:batch_start + BATCH_SIZE]
 
-            # Abort check
             deploy = db.get_deploy(deploy_id)
             if deploy and deploy["status"] in ("paused", "failed", "rolled_back"):
                 return
 
             await _deploy_batch(deploy_id, batch, image_tag)
 
-            # Health gate
-            wait = HEALTH_WAIT_CANARY if wave == "canary" else HEALTH_WAIT_DEFAULT
+            wait = HEALTH_WAIT_CANARY if wave == waves[0] else HEALTH_WAIT_DEFAULT
             await asyncio.sleep(wait)
             failures = await _health_check_batch(batch)
 
@@ -165,24 +237,26 @@ async def _deploy_wave(deploy_id: int, image_tag: str, waves: list[str]):
 
 async def _deploy_batch(deploy_id: int, batch: list[dict], image_tag: str):
     """Deploy a batch of instances concurrently."""
-    backend = _get_backend()
+    crd_ops = _get_crd_ops()
     loop = asyncio.get_running_loop()
 
     async def _deploy_one(inst: dict):
         uid = inst["id"]
         try:
-            if _USE_CRD:
-                await loop.run_in_executor(None, backend.set_image, uid, image_tag)
+            if inst["source"] == "crd" and crd_ops:
+                await loop.run_in_executor(None, crd_ops.set_image, uid, image_tag)
+            elif crd_ops:
+                try:
+                    await loop.run_in_executor(None, crd_ops.set_image, uid, image_tag)
+                except Exception:
+                    await _deploy_one_legacy(inst, image_tag, loop)
             else:
-                from . import config_gen
-                config_json = config_gen.generate_json_string(inst)
-                await loop.run_in_executor(None, backend.apply_configmap, uid, config_json)
-                await loop.run_in_executor(None, backend.delete_pod, uid)
-                await asyncio.sleep(2)
-                prefix = inst.get("prefix", "s1")
-                await loop.run_in_executor(None, backend.create_pod, uid, prefix, image_tag)
+                await _deploy_one_legacy(inst, image_tag, loop)
 
-            db.set_image_tag(uid, image_tag)
+            try:
+                db.set_image_tag(uid, image_tag)
+            except Exception:
+                pass
             with db.get_db() as conn:
                 conn.execute("UPDATE deploys SET done = done + 1 WHERE id = ?", (deploy_id,))
         except Exception as e:
@@ -193,16 +267,30 @@ async def _deploy_batch(deploy_id: int, batch: list[dict], image_tag: str):
     await asyncio.gather(*[_deploy_one(inst) for inst in batch])
 
 
+async def _deploy_one_legacy(inst: dict, image_tag: str, loop):
+    """Legacy deploy path: ConfigMap + Pod recreation."""
+    from . import config_gen, k8s_ops
+    uid = inst["id"]
+    db_inst = db.get_by_id(uid)
+    if not db_inst:
+        return
+    config_json = config_gen.generate_json_string(db_inst)
+    await loop.run_in_executor(None, k8s_ops.apply_configmap, uid, config_json)
+    await loop.run_in_executor(None, k8s_ops.delete_pod, uid)
+    await asyncio.sleep(2)
+    await loop.run_in_executor(None, k8s_ops.create_pod, uid, inst.get("prefix", "s1"), image_tag)
+
+
 async def _health_check_batch(batch: list[dict]) -> list[dict]:
     """Check health concurrently. Returns list of unhealthy instances."""
-    backend = _get_backend()
+    crd_ops = _get_crd_ops()
     loop = asyncio.get_running_loop()
 
     async def _check_one(inst: dict) -> dict | None:
         uid = inst["id"]
         try:
-            if _USE_CRD:
-                status = await loop.run_in_executor(None, backend.get_instance_status, uid)
+            if crd_ops:
+                status = await loop.run_in_executor(None, crd_ops.get_instance_status, uid)
                 phase = status.get("phase", "Unknown")
                 if phase not in ("Running", "Pending"):
                     return {"id": uid, "reason": f"Phase: {phase}"}
@@ -241,7 +329,6 @@ async def continue_deploy() -> dict:
     db.update_deploy(deploy["id"], status="rolling", error="")
 
     async def _resume_deploy(deploy_id: int, image_tag: str, resume_from: str):
-        """Resume deploy from the paused wave (skip completed waves)."""
         try:
             wave_order = db.get_wave_order() or ["canary", "early", "stable"]
             start_idx = 0
@@ -274,25 +361,23 @@ async def rollback_deploy() -> dict:
     db.update_deploy(deploy["id"], status="rolled_back", completed_at=_now())
     logger.info("Deploy #%d: rollback → %s", deploy["id"], prev_tag)
 
-    backend = _get_backend()
+    crd_ops = _get_crd_ops()
     loop = asyncio.get_running_loop()
-    all_instances = db.list_all()
     rolled = 0
 
+    all_instances = _list_all_deployable()
     for inst in all_instances:
-        if inst["image_tag"] == deploy["image_tag"] and inst["status"] == "running":
+        if inst["image_tag"] == deploy["image_tag"]:
             try:
                 uid = inst["id"]
-                if _USE_CRD:
-                    await loop.run_in_executor(None, backend.set_image, uid, prev_tag)
+                if crd_ops:
+                    await loop.run_in_executor(None, crd_ops.set_image, uid, prev_tag)
                 else:
-                    from . import config_gen, k8s_ops
-                    config_json = config_gen.generate_json_string(inst)
-                    await loop.run_in_executor(None, k8s_ops.apply_configmap, uid, config_json)
-                    await loop.run_in_executor(None, k8s_ops.delete_pod, uid)
-                    await asyncio.sleep(2)
-                    await loop.run_in_executor(None, k8s_ops.create_pod, uid, inst.get("prefix", "s1"), prev_tag)
-                db.set_image_tag(uid, prev_tag)
+                    await _deploy_one_legacy(inst, prev_tag, loop)
+                try:
+                    db.set_image_tag(uid, prev_tag)
+                except Exception:
+                    pass
                 rolled += 1
             except Exception as e:
                 logger.error("Rollback failed carher-%d: %s", inst["id"], e)
@@ -322,7 +407,22 @@ def get_deploy_status() -> dict:
     done = deploy["done"]
     pct = round(done / total * 100) if total > 0 else 0
     wave_order = db.get_wave_order() or ["canary", "early", "stable"]
-    group_stats = db.get_deploy_group_stats()  # single GROUP BY query
+
+    group_stats: dict[str, int] = {}
+    try:
+        crd_ops = _get_crd_ops()
+        if crd_ops:
+            for inst in crd_ops.list_her_instances():
+                spec = inst.get("spec", {})
+                if not spec.get("paused"):
+                    g = spec.get("deployGroup", "stable")
+                    group_stats[g] = group_stats.get(g, 0) + 1
+    except Exception:
+        pass
+    db_stats = db.get_deploy_group_stats()
+    for g, c in db_stats.items():
+        group_stats[g] = group_stats.get(g, 0) + c
+
     return {
         "active": True,
         "deploy": deploy,

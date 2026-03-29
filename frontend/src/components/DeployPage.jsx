@@ -16,6 +16,12 @@ function groupColor(idx) {
   return PALETTE[idx % PALETTE.length];
 }
 
+const MODE_LABELS = {
+  normal: "灰度部署",
+  fast: "紧急全量",
+  "canary-only": "仅首组",
+};
+
 export default function DeployPage() {
   const [status, setStatus] = useState(null);
   const [history, setHistory] = useState([]);
@@ -23,9 +29,10 @@ export default function DeployPage() {
   const [deployGroups, setDeployGroups] = useState([]);
   const [imageTag, setImageTag] = useState("");
   const [deployMode, setDeployMode] = useState("normal");
+  const [targetGroup, setTargetGroup] = useState("");
+  const [forceDeploy, setForceDeploy] = useState(false);
   const [loading, setLoading] = useState("");
 
-  // New group form
   const [newGroupName, setNewGroupName] = useState("");
   const [newGroupPriority, setNewGroupPriority] = useState(50);
   const [newGroupDesc, setNewGroupDesc] = useState("");
@@ -53,16 +60,21 @@ export default function DeployPage() {
 
   const groupNames = deployGroups.map((g) => g.name);
 
-  const MODE_LABELS = { normal: "灰度部署", fast: "紧急全量", "canary-only": "仅首组" };
   const startDeploy = async () => {
     if (!imageTag) return alert("请输入镜像 tag");
-    const modeLabel = MODE_LABELS[deployMode] || deployMode;
-    if (!confirm(`确认 [${modeLabel}] 部署 ${imageTag}？`)) return;
+    let mode = deployMode;
+    if (mode === "group" && targetGroup) {
+      mode = `group:${targetGroup}`;
+    } else if (mode === "group") {
+      return alert("请选择目标分组");
+    }
+    const modeLabel = MODE_LABELS[mode] || `指定分组: ${targetGroup}`;
+    if (!confirm(`确认 [${modeLabel}] 部署 ${imageTag}？${forceDeploy ? "\n(强制模式：即使该 tag 已部署也将重新执行)" : ""}`)) return;
     setLoading("deploy");
     try {
-      const r = await api.startDeploy(imageTag, deployMode);
+      const r = await api.startDeploy(imageTag, mode, forceDeploy);
       if (r.error) alert(r.error);
-      else if (r.status === "already_deployed") alert("该镜像已部署完成，无需重复部署");
+      else if (r.status === "already_deployed") alert("该镜像已部署完成。如需重新部署，请勾选「强制部署」");
       else loadFull();
     } catch (e) {
       alert(`部署失败: ${e.message}`);
@@ -143,6 +155,9 @@ export default function DeployPage() {
               </h3>
               <p className="text-xs text-gray-500 mt-1">
                 状态: <StatusBadge status={deploy.status} />
+                {deploy.mode && deploy.mode !== "normal" && (
+                  <span className="ml-2 badge bg-gray-600/20 text-gray-300">{MODE_LABELS[deploy.mode] || deploy.mode}</span>
+                )}
                 {deploy.current_wave && <span className="ml-2">当前波次: {deploy.current_wave}</span>}
               </p>
             </div>
@@ -194,7 +209,7 @@ export default function DeployPage() {
             })}
           </div>
 
-          {deploy.error && (
+          {deploy.error && !deploy.error.startsWith("mode:") && (
             <div className="text-sm text-red-400 bg-red-600/10 p-3 rounded">{deploy.error}</div>
           )}
         </div>
@@ -204,9 +219,9 @@ export default function DeployPage() {
       {!isActive && (
         <div className="card p-5 space-y-3">
           <h3 className="text-sm font-medium text-gray-400">发起新部署</h3>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap items-end">
             <input
-              className="input flex-1"
+              className="input flex-1 min-w-[200px]"
               placeholder="镜像 tag (如 v20260329-abc1234)"
               value={imageTag}
               onChange={(e) => setImageTag(e.target.value)}
@@ -214,12 +229,23 @@ export default function DeployPage() {
             <select
               className="input w-36"
               value={deployMode}
-              onChange={(e) => setDeployMode(e.target.value)}
+              onChange={(e) => { setDeployMode(e.target.value); if (e.target.value !== "group") setTargetGroup(""); }}
             >
               <option value="normal">灰度部署</option>
               <option value="fast">紧急全量</option>
               <option value="canary-only">仅首组</option>
+              <option value="group">指定分组</option>
             </select>
+            {deployMode === "group" && (
+              <select className="input w-32" value={targetGroup} onChange={(e) => setTargetGroup(e.target.value)}>
+                <option value="">选择分组</option>
+                {groupNames.map((g) => <option key={g} value={g}>{g}</option>)}
+              </select>
+            )}
+            <label className="flex items-center gap-1 text-xs text-gray-400 cursor-pointer">
+              <input type="checkbox" checked={forceDeploy} onChange={(e) => setForceDeploy(e.target.checked)} className="accent-blue-500" />
+              强制
+            </label>
             <button className="btn btn-primary px-6" onClick={startDeploy} disabled={!!loading}>
               {loading === "deploy" ? "部署中..." : "开始部署"}
             </button>
@@ -228,6 +254,8 @@ export default function DeployPage() {
             {waveDesc && <p><strong>灰度部署:</strong> {waveDesc}，每批后自动健康检查</p>}
             <p><strong>紧急全量:</strong> 跳过灰度，所有实例直接更新（用于 hotfix）</p>
             <p><strong>仅首组:</strong> 只更新优先级最高的分组，手动确认后再继续</p>
+            <p><strong>指定分组:</strong> 只更新选定的分组（如 VIP、test）</p>
+            <p><strong>强制:</strong> 即使相同 tag 已部署，仍重新执行部署</p>
           </div>
         </div>
       )}
@@ -281,7 +309,10 @@ export default function DeployPage() {
                 <div className="space-y-1 max-h-48 overflow-auto">
                   {groupInstances.map((inst) => (
                     <div key={inst.id} className="flex items-center justify-between text-xs bg-gray-900/50 rounded px-2 py-1">
-                      <span>#{inst.id} {inst.name}</span>
+                      <span className="flex items-center gap-2">
+                        <span>#{inst.id} {inst.name}</span>
+                        {inst.image && <span className="text-gray-600 font-mono text-[10px]">{inst.image}</span>}
+                      </span>
                       <select
                         className="bg-transparent text-xs border-none cursor-pointer"
                         value={g.name}
@@ -306,6 +337,7 @@ export default function DeployPage() {
             <tr className="border-b border-gray-800 text-gray-500">
               <th className="p-2 text-left">#</th>
               <th className="p-2 text-left">镜像</th>
+              <th className="p-2 text-left">模式</th>
               <th className="p-2 text-left">状态</th>
               <th className="p-2 text-left">进度</th>
               <th className="p-2 text-left">时间</th>
@@ -316,13 +348,14 @@ export default function DeployPage() {
               <tr key={d.id} className="border-b border-gray-800/50">
                 <td className="p-2 font-mono">{d.id}</td>
                 <td className="p-2 font-mono">{d.image_tag}</td>
+                <td className="p-2">{MODE_LABELS[d.mode] || d.mode || "-"}</td>
                 <td className="p-2"><StatusBadge status={d.status} /></td>
                 <td className="p-2">{d.done}/{d.total}{d.failed > 0 && <span className="text-red-400 ml-1">({d.failed} failed)</span>}</td>
                 <td className="p-2 text-gray-500">{d.created_at}</td>
               </tr>
             ))}
             {history.length === 0 && (
-              <tr><td colSpan="5" className="p-4 text-center text-gray-600">暂无部署记录</td></tr>
+              <tr><td colSpan="6" className="p-4 text-center text-gray-600">暂无部署记录</td></tr>
             )}
           </tbody>
         </table>

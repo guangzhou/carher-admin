@@ -412,6 +412,7 @@ def api_search_instances(
             "node": pod.get("node", ""), "restarts": pod.get("restarts", 0),
             "deploy_group": inst.get("deploy_group", "stable"),
             "owner": inst.get("owner", ""), "provider": inst.get("provider", "openrouter"),
+            "image": inst.get("image_tag", ""),
         }
         if feishu_ws:
             health = k8s_ops.check_pod_health(uid) if pod.get("pod_exists") else {}
@@ -906,10 +907,15 @@ def api_metrics_storage():
 
 @app.post("/api/deploy", tags=["deploy"], dependencies=[Depends(verify_api_key)])
 async def api_start_deploy(req: DeployRequest):
-    """Start a new deployment. Modes: normal (canary→early→stable), fast (all at once), canary-only."""
-    if req.mode not in ("normal", "fast", "canary-only"):
-        raise HTTPException(400, "mode must be normal, fast, or canary-only")
-    return await deployer.start_deploy(req.image_tag, mode=req.mode)
+    """Start a new deployment.
+
+    Modes: normal (canary→early→stable), fast (all at once), canary-only, group:<name>.
+    Set force=true to re-deploy even if the same image tag was already deployed.
+    """
+    valid_modes = ("normal", "fast", "canary-only")
+    if req.mode not in valid_modes and not req.mode.startswith("group:"):
+        raise HTTPException(400, f"mode must be {', '.join(valid_modes)}, or group:<name>")
+    return await deployer.start_deploy(req.image_tag, mode=req.mode, force=req.force)
 
 
 @app.get("/api/deploy/status")
@@ -939,29 +945,32 @@ def api_deploy_history(limit: int = Query(20)):
 
 @app.put("/api/instances/{uid}/deploy-group", tags=["deploy-groups"])
 def api_set_deploy_group(uid: int, req: SetDeployGroupRequest):
-    """Move a single instance to a deploy group. Updates CRD if operator-managed."""
+    """Move a single instance to a deploy group. Syncs both CRD and DB."""
     if _has_crd(uid):
         crd_ops.set_deploy_group(uid, req.group)
-        return {"id": uid, "deploy_group": req.group, "managed_by": "operator"}
-    db.set_deploy_group(uid, req.group)
-    return {"id": uid, "deploy_group": req.group}
+    try:
+        db.set_deploy_group(uid, req.group)
+    except Exception:
+        pass
+    managed = "operator" if _has_crd(uid) else "db"
+    return {"id": uid, "deploy_group": req.group, "managed_by": managed}
 
 
 @app.post("/api/instances/batch-deploy-group", tags=["deploy-groups"])
 def api_batch_set_deploy_group(req: BatchSetDeployGroupRequest):
-    """Move multiple instances to a deploy group at once."""
+    """Move multiple instances to a deploy group at once. Syncs both CRD and DB."""
     crd_count = 0
-    db_ids = []
-    for uid in req.ids:
+    all_ids = list(req.ids)
+    for uid in all_ids:
         if _has_crd(uid):
             crd_ops.set_deploy_group(uid, req.group)
             crd_count += 1
-        else:
-            db_ids.append(uid)
-    if db_ids:
-        db.batch_set_deploy_group(db_ids, req.group)
-    return {"action": "batch_set_deploy_group", "count": len(req.ids),
-            "group": req.group, "crd_updated": crd_count, "db_updated": len(db_ids)}
+    try:
+        db.batch_set_deploy_group(all_ids, req.group)
+    except Exception:
+        pass
+    return {"action": "batch_set_deploy_group", "count": len(all_ids),
+            "group": req.group, "crd_updated": crd_count, "db_synced": len(all_ids)}
 
 
 # ── API: Deploy Groups ──

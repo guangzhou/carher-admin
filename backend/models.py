@@ -119,7 +119,8 @@ class BatchSetDeployGroupRequest(BaseModel):
 
 class DeployRequest(BaseModel):
     image_tag: str = Field(..., description="Docker image tag to deploy")
-    mode: str = Field("normal", description="Deploy mode: normal / fast / canary-only")
+    mode: str = Field("normal", description="Deploy mode: normal / fast / canary-only / group:<name>")
+    force: bool = Field(False, description="Force deploy even if same tag was already deployed")
 
 
 class DeployWebhookRequest(BaseModel):

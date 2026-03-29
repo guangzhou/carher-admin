@@ -120,21 +120,21 @@ jobs:
             STATUS=$(curl -sf "${{ env.ADMIN_URL }}/api/deploy/status" || echo '{"error":"unreachable"}')
             echo "[$i/6] Deploy status: $STATUS"
 
-            if echo "$STATUS" | grep -q '"complete"'; then
-              echo "Deploy complete!"
-              echo "$STATUS" >> $GITHUB_STEP_SUMMARY
-              exit 0
-            fi
-            if echo "$STATUS" | grep -q '"paused"'; then
-              echo "::warning::Deploy paused — canary health check may have failed."
-              echo "$STATUS" >> $GITHUB_STEP_SUMMARY
-              exit 0
-            fi
-            if echo "$STATUS" | grep -q '"failed"'; then
-              echo "::error::Deploy failed"
-              echo "$STATUS" >> $GITHUB_STEP_SUMMARY
-              exit 1
-            fi
+            DEPLOY_STATUS=$(echo "$STATUS" | jq -r '.deploy.status // .last.status // "unknown"' 2>/dev/null || echo "unknown")
+            case "$DEPLOY_STATUS" in
+              complete)
+                echo "Deploy complete!"
+                echo "$STATUS" >> $GITHUB_STEP_SUMMARY
+                exit 0 ;;
+              paused)
+                echo "::warning::Deploy paused — canary health check may have failed."
+                echo "$STATUS" >> $GITHUB_STEP_SUMMARY
+                exit 0 ;;
+              failed|rolled_back)
+                echo "::error::Deploy failed ($DEPLOY_STATUS)"
+                echo "$STATUS" >> $GITHUB_STEP_SUMMARY
+                exit 1 ;;
+            esac
           done
           echo "Deploy still in progress after 90s — check dashboard"
           echo "### Deploy In Progress (timeout)" >> $GITHUB_STEP_SUMMARY

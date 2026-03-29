@@ -28,6 +28,7 @@ from pydantic import BaseModel
 
 from . import database as db
 from . import config_gen
+from . import crd_ops
 from . import k8s_ops
 from . import sync_worker
 from . import deployer
@@ -238,14 +239,53 @@ def api_list_instances(
     offset: int = Query(0, ge=0, description="Pagination offset"),
     limit: int = Query(0, ge=0, le=5000, description="Max items (0 = all)"),
 ):
+    results = []
+    seen_uids: set[int] = set()
+
+    # CRD-managed instances (primary source of truth when operator is running)
+    try:
+        for inst in crd_ops.list_her_instances():
+            spec = inst.get("spec", {})
+            status = inst.get("status", {})
+            uid = spec.get("userId", 0)
+            if not uid:
+                continue
+            seen_uids.add(uid)
+            prefix = spec.get("prefix", "s1")
+            pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
+            phase = status.get("phase", "Unknown")
+            if spec.get("paused"):
+                phase = "Paused"
+            results.append({
+                "id": uid,
+                "name": spec.get("name", ""),
+                "model": spec.get("model", ""),
+                "model_short": spec.get("model", ""),
+                "status": phase,
+                "pod_ip": status.get("podIP", ""),
+                "node": status.get("node", ""),
+                "age": "",
+                "restarts": status.get("restarts", 0),
+                "app_id": spec.get("appId", ""),
+                "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback" if spec.get("appId") else "",
+                "owner": spec.get("owner", ""),
+                "sync_status": "operator",
+                "deploy_group": spec.get("deployGroup", "stable"),
+                "managed_by": "operator",
+            })
+    except Exception as e:
+        logger.warning("CRD list failed, falling back to DB-only: %s", e)
+
+    # DB-managed instances (legacy, not yet migrated to CRD)
     instances = db.list_all()
     pod_statuses = k8s_ops.get_all_pod_statuses()
 
-    results = []
     for inst in instances:
         if inst["status"] == "deleted":
             continue
         uid = inst["id"]
+        if uid in seen_uids:
+            continue
         pod = pod_statuses.get(uid, {})
 
         prefix = inst.get("prefix", "s1")
@@ -270,6 +310,7 @@ def api_list_instances(
             "deploy_group": inst.get("deploy_group", "stable"),
         })
 
+    results.sort(key=lambda x: x["id"])
     total = len(results)
     if limit > 0:
         results = results[offset:offset + limit]
@@ -278,6 +319,38 @@ def api_list_instances(
 
 @app.get("/api/instances/{uid}")
 def api_get_instance(uid: int):
+    # Try CRD first for operator-managed instances
+    try:
+        crd = crd_ops.get_her_instance(uid)
+        if crd:
+            spec = crd.get("spec", {})
+            status = crd.get("status", {})
+            prefix = spec.get("prefix", "s1")
+            pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
+            return {
+                "id": uid,
+                "name": spec.get("name", ""),
+                "model": spec.get("model", ""),
+                "status": status.get("phase", "Unknown"),
+                "pod_ip": status.get("podIP", ""),
+                "node": status.get("node", ""),
+                "restarts": status.get("restarts", 0),
+                "app_id": spec.get("appId", ""),
+                "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
+                "owner": spec.get("owner", ""),
+                "provider": spec.get("provider", "openrouter"),
+                "deploy_group": spec.get("deployGroup", "stable"),
+                "feishu_ws": status.get("feishuWS", "Unknown"),
+                "config_hash": status.get("configHash", ""),
+                "image": spec.get("image", ""),
+                "paused": spec.get("paused", False),
+                "managed_by": "operator",
+                "pvc_status": k8s_ops.get_pvc_status(uid),
+                "last_health_check": status.get("lastHealthCheck", ""),
+            }
+    except Exception:
+        pass
+
     inst = db.get_by_id(uid)
     if not inst:
         raise HTTPException(404, f"Instance {uid} not found")
@@ -286,6 +359,16 @@ def api_get_instance(uid: int):
     bots, _ = _get_known_bots_cached()
     result["known_bots_count"] = len(bots)
     return result
+
+
+# ── CRD helper ──
+
+def _has_crd(uid: int) -> bool:
+    """Check if this instance is managed by a HerInstance CRD."""
+    try:
+        return crd_ops.get_her_instance(uid) is not None
+    except Exception:
+        return False
 
 
 # ── API: Create ──
@@ -301,10 +384,23 @@ def api_add_instance(req: HerAddRequest):
         "provider": req.provider, "bot_open_id": "",
         "status": "running", "deploy_group": req.deploy_group,
     }
+
+    pfx = f"{req.prefix}-" if not req.prefix.endswith("-") else req.prefix
+
+    # CRD path: create HerInstance CRD → operator handles everything
+    try:
+        crd_ops.create_her_instance(data)
+        logger.info("Created HerInstance CRD for uid=%d", uid)
+        return {
+            "id": uid, "status": "created", "managed_by": "operator",
+            "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
+        }
+    except Exception as e:
+        logger.warning("CRD create failed for %d, falling back to legacy: %s", uid, e)
+
+    # Legacy fallback
     inst = db.insert(data)
     config_gen.invalidate_bots_cache()
-
-    # Deploy to K8s
     try:
         k8s_ops.ensure_pvc(uid)
         _sync_and_deploy(inst)
@@ -313,7 +409,6 @@ def api_add_instance(req: HerAddRequest):
         logger.error("K8s deploy failed for %d: %s", uid, e)
         db.set_sync_status(uid, "pending")
 
-    pfx = f"{req.prefix}-" if not req.prefix.endswith("-") else req.prefix
     return {
         "id": uid, "status": "created",
         "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
@@ -325,6 +420,7 @@ def api_batch_import(req: HerBatchImport):
     results = []
     for item in req.instances:
         uid = item.id or db.next_id()
+        pfx = f"{item.prefix}-" if not item.prefix.endswith("-") else item.prefix
         try:
             data = {
                 "id": uid, "name": item.name, "model": item.model,
@@ -333,11 +429,22 @@ def api_batch_import(req: HerBatchImport):
                 "provider": item.provider, "bot_open_id": "",
                 "status": "running",
             }
+            # CRD path
+            try:
+                crd_ops.create_her_instance(data)
+                results.append({
+                    "id": uid, "status": "created", "managed_by": "operator",
+                    "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
+                })
+                continue
+            except Exception as crd_err:
+                logger.warning("CRD create failed for %d in batch, fallback: %s", uid, crd_err)
+
+            # Legacy fallback
             inst = db.insert(data)
             k8s_ops.ensure_pvc(uid)
             _sync_and_deploy(inst)
             k8s_ops.create_pod(uid, prefix=item.prefix)
-            pfx = f"{item.prefix}-" if not item.prefix.endswith("-") else item.prefix
             results.append({
                 "id": uid, "status": "created",
                 "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
@@ -351,25 +458,40 @@ def api_batch_import(req: HerBatchImport):
 
 # ── API: Update ──
 
+# CRD spec field names differ from DB field names
+_DB_TO_CRD_FIELD = {
+    "name": "name", "model": "model", "owner": "owner",
+    "provider": "provider", "prefix": "prefix", "deploy_group": "deployGroup",
+}
+
 @app.put("/api/instances/{uid}", tags=["instances"])
 def api_update(uid: int, req: HerUpdateRequest):
-    """Update instance fields. Only non-null fields are applied."""
-    inst = db.get_by_id(uid)
-    if not inst:
-        raise HTTPException(404, f"Instance {uid} not found")
-
+    """Update instance fields. Only non-null fields are applied.
+    CRD-managed instances are patched via the K8s API; operator reconciles."""
     changes = {}
     for field in ("name", "model", "owner", "provider", "prefix", "deploy_group"):
         val = getattr(req, field, None)
         if val is not None:
             changes[field] = val
 
-    if changes:
-        inst = db.update(uid, changes)
-        try:
-            _sync_and_deploy(inst)
-        except Exception as e:
-            logger.warning("ConfigMap sync failed for %d after update: %s", uid, e)
+    if not changes:
+        return {"id": uid, "action": "updated", "changes": {}}
+
+    # CRD path
+    if _has_crd(uid):
+        crd_changes = {_DB_TO_CRD_FIELD[k]: v for k, v in changes.items() if k in _DB_TO_CRD_FIELD}
+        crd_ops.update_her_instance(uid, crd_changes)
+        return {"id": uid, "action": "updated", "managed_by": "operator", "changes": changes}
+
+    # Legacy path
+    inst = db.get_by_id(uid)
+    if not inst:
+        raise HTTPException(404, f"Instance {uid} not found")
+    inst = db.update(uid, changes)
+    try:
+        _sync_and_deploy(inst)
+    except Exception as e:
+        logger.warning("ConfigMap sync failed for %d after update: %s", uid, e)
 
     return {"id": uid, "action": "updated", "changes": changes}
 
@@ -378,6 +500,11 @@ def api_update(uid: int, req: HerUpdateRequest):
 
 @app.post("/api/instances/{uid}/stop")
 def api_stop(uid: int):
+    """Stop (pause) an instance. CRD: sets paused=true; Operator deletes Pod."""
+    if _has_crd(uid):
+        crd_ops.pause_her_instance(uid)
+        return {"id": uid, "action": "stopped", "managed_by": "operator"}
+
     k8s_ops.delete_pod(uid)
     db.set_status(uid, "stopped")
     return {"id": uid, "action": "stopped"}
@@ -385,6 +512,11 @@ def api_stop(uid: int):
 
 @app.post("/api/instances/{uid}/start")
 def api_start(uid: int):
+    """Start (resume) an instance. CRD: sets paused=false; Operator creates Pod."""
+    if _has_crd(uid):
+        crd_ops.resume_her_instance(uid)
+        return {"id": uid, "action": "started", "managed_by": "operator"}
+
     inst = db.get_by_id(uid)
     if not inst:
         raise HTTPException(404, f"Instance {uid} not found")
@@ -396,6 +528,13 @@ def api_start(uid: int):
 
 @app.post("/api/instances/{uid}/restart")
 async def api_restart(uid: int):
+    """Restart an instance. CRD: deletes Pod, Operator self-heals and recreates."""
+    if _has_crd(uid):
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, k8s_ops.delete_pod, uid)
+        return {"id": uid, "action": "restarted", "managed_by": "operator",
+                "note": "Pod deleted; operator will recreate within 30s"}
+
     inst = db.get_by_id(uid)
     if not inst:
         raise HTTPException(404, f"Instance {uid} not found")
@@ -409,6 +548,12 @@ async def api_restart(uid: int):
 
 @app.delete("/api/instances/{uid}")
 def api_delete(uid: int, purge: bool = Query(False)):
+    """Delete an instance. CRD: deletes HerInstance; Operator cleans up Pod + ConfigMap."""
+    if _has_crd(uid):
+        crd_ops.delete_her_instance(uid, purge_data=purge)
+        config_gen.invalidate_bots_cache()
+        return {"id": uid, "action": "deleted", "managed_by": "operator", "purge": purge}
+
     k8s_ops.delete_pod(uid)
     k8s_ops.delete_configmap(uid)
     if purge:
@@ -469,7 +614,6 @@ def api_health():
     """Health overview. Uses CRD status (maintained by Go operator) for O(1) list call,
     avoiding per-Pod log reads that don't scale past a few hundred instances."""
     try:
-        from . import crd_ops
         crd_statuses = crd_ops.get_all_statuses()
         results = []
         for uid, data in crd_statuses.items():
@@ -486,7 +630,7 @@ def api_health():
                 "status": status.get("phase", "Unknown"),
             })
         return sorted(results, key=lambda x: x["id"])
-    except ImportError:
+    except Exception:
         pass
 
     # Legacy fallback: only check pods that are Running (skip exec-based checks for scale)
@@ -817,7 +961,6 @@ def api_instance_events(uid: int, limit: int = Query(20)):
 def api_crd_list():
     """List all HerInstance CRDs with spec + status (direct K8s API)."""
     try:
-        from . import crd_ops
         instances = crd_ops.list_her_instances()
         return [{
             "name": i["metadata"]["name"],
@@ -833,7 +976,6 @@ def api_crd_list():
 def api_crd_get(uid: int):
     """Get a single HerInstance CRD (spec + status)."""
     try:
-        from . import crd_ops
         inst = crd_ops.get_her_instance(uid)
         if not inst:
             raise HTTPException(404, f"CRD her-{uid} not found")

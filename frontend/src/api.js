@@ -100,4 +100,5 @@ export const api = {
   testBranchRule: (branch) => request(`/branch-rules/test?branch=${encodeURIComponent(branch)}`),
   triggerBuild: (data) => request("/ci/trigger-build", { method: "POST", body: JSON.stringify(data) }),
   listBranches: (repo) => request(`/ci/branches?repo=${encodeURIComponent(repo)}`),
+  listWorkflows: (repo) => request(`/ci/workflows?repo=${encodeURIComponent(repo)}`),
 };

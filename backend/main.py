@@ -1113,6 +1113,32 @@ async def api_trigger_build(req: TriggerBuildRequest):
             raise HTTPException(resp.status, f"GitHub API error: {text}")
 
 
+@app.get("/api/ci/workflows", tags=["ci-cd"])
+async def api_list_workflows(repo: str = Query("guangzhou/CarHer", description="GitHub repo owner/name")):
+    """List workflows that support workflow_dispatch for a repo."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if token:
+        headers["Authorization"] = f"token {token}"
+
+    import aiohttp
+    url = f"https://api.github.com/repos/{repo}/actions/workflows?per_page=100"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return {"repo": repo, "workflows": [], "error": f"GitHub API {resp.status}"}
+                data = await resp.json()
+                workflows = [
+                    {"name": w["name"], "file": w["path"].split("/")[-1], "state": w["state"]}
+                    for w in data.get("workflows", [])
+                    if w.get("state") == "active"
+                ]
+                return {"repo": repo, "workflows": workflows}
+    except Exception as e:
+        return {"repo": repo, "workflows": [], "error": str(e)}
+
+
 @app.get("/api/ci/branches", tags=["ci-cd"])
 async def api_list_branches(repo: str = Query("guangzhou/CarHer", description="GitHub repo owner/name")):
     """List branches of a GitHub repo. Requires GITHUB_TOKEN for private repos."""

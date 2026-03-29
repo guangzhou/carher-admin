@@ -154,7 +154,7 @@ class BranchRuleUpdate(BaseModel):
 class TriggerBuildRequest(BaseModel):
     repo: str = Field("guangzhou/CarHer", description="GitHub repo (owner/name)")
     branch: str = Field("main", description="Branch to build")
-    workflow: str = Field("build-deploy.yml", description="Workflow file name")
+    workflow: str = Field(..., description="Workflow file name (e.g. carher-release.yml)")
     deploy_mode: str = Field("normal", description="Deploy mode input")
 
 

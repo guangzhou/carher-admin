@@ -59,7 +59,9 @@ export default function DeployPage() {
   // Build trigger
   const [buildRepo, setBuildRepo] = useState("guangzhou/CarHer");
   const [buildBranch, setBuildBranch] = useState("main");
+  const [buildWorkflow, setBuildWorkflow] = useState("");
   const [repoBranches, setRepoBranches] = useState([]);
+  const [repoWorkflows, setRepoWorkflows] = useState([]);
 
   const loadFull = useCallback(() => {
     api.getDeployStatus().then(setStatus);
@@ -79,6 +81,13 @@ export default function DeployPage() {
   useEffect(() => {
     if (!buildRepo) return;
     api.listBranches(buildRepo).then((r) => setRepoBranches(r.branches || [])).catch(() => {});
+    api.listWorkflows(buildRepo).then((r) => {
+      const wfs = r.workflows || [];
+      setRepoWorkflows(wfs);
+      if (wfs.length > 0 && !wfs.find((w) => w.file === buildWorkflow)) {
+        setBuildWorkflow(wfs[0].file);
+      }
+    }).catch(() => setRepoWorkflows([]));
   }, [buildRepo]);
 
   useEffect(() => {
@@ -195,10 +204,11 @@ export default function DeployPage() {
   };
 
   const triggerBuild = async () => {
-    if (!confirm(`确认触发构建？\n仓库: ${buildRepo}\n分支: ${buildBranch}`)) return;
+    if (!buildWorkflow) return alert("请先选择 Workflow");
+    if (!confirm(`确认触发构建？\n仓库: ${buildRepo}\n分支: ${buildBranch}\nWorkflow: ${buildWorkflow}`)) return;
     setLoading("build");
     try {
-      const r = await api.triggerBuild({ repo: buildRepo, branch: buildBranch });
+      const r = await api.triggerBuild({ repo: buildRepo, branch: buildBranch, workflow: buildWorkflow });
       alert(r.status === "triggered" ? "构建已触发，请在 GitHub Actions 查看进度" : JSON.stringify(r));
     } catch (e) { alert(`触发失败: ${e.message}`); }
     finally { setLoading(""); }
@@ -323,16 +333,29 @@ export default function DeployPage() {
           {/* Trigger GitHub build */}
           <div className="border-t border-gray-800 pt-3">
             <p className="text-xs text-gray-500 mb-2">或从 GitHub 触发构建（构建完成后自动部署）</p>
-            <div className="flex gap-2 items-end">
-              <select className="input w-48" value={buildRepo} onChange={(e) => setBuildRepo(e.target.value)}>
-                <option value="guangzhou/CarHer">guangzhou/CarHer</option>
-                <option value="guangzhou/carher-admin">guangzhou/carher-admin</option>
-              </select>
-              <select className="input w-36" value={buildBranch} onChange={(e) => setBuildBranch(e.target.value)}>
-                {knownBranches.length === 0 && <option value="main">main</option>}
-                {knownBranches.map((b) => <option key={b} value={b}>{b}</option>)}
-              </select>
-              <button className="btn btn-sm" onClick={triggerBuild} disabled={loading === "build"}>
+            <div className="flex flex-wrap gap-2 items-end">
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">仓库</label>
+                <select className="input w-48" value={buildRepo} onChange={(e) => setBuildRepo(e.target.value)}>
+                  <option value="guangzhou/CarHer">guangzhou/CarHer</option>
+                  <option value="guangzhou/carher-admin">guangzhou/carher-admin</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">分支</label>
+                <select className="input w-36" value={buildBranch} onChange={(e) => setBuildBranch(e.target.value)}>
+                  {knownBranches.length === 0 && <option value="main">main</option>}
+                  {knownBranches.map((b) => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Workflow</label>
+                <select className="input w-48" value={buildWorkflow} onChange={(e) => setBuildWorkflow(e.target.value)}>
+                  {repoWorkflows.length === 0 && <option value="">加载中...</option>}
+                  {repoWorkflows.map((w) => <option key={w.file} value={w.file}>{w.name}</option>)}
+                </select>
+              </div>
+              <button className="btn btn-sm mt-auto" onClick={triggerBuild} disabled={loading === "build" || !buildWorkflow}>
                 {loading === "build" ? "触发中..." : "触发构建"}
               </button>
             </div>

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -22,12 +23,13 @@ var scheme = runtime.NewScheme()
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
-	// Register HerInstance CRD types
+	// Register HerInstance CRD types with full scheme support
 	gv := schema.GroupVersion{Group: "carher.io", Version: "v1alpha1"}
 	scheme.AddKnownTypes(gv,
 		&herv1.HerInstance{},
 		&herv1.HerInstanceList{},
 	)
+	metav1.AddToGroupVersion(scheme, gv)
 }
 
 func main() {

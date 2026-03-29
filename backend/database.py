@@ -27,7 +27,7 @@ DB_DIR = Path(os.environ.get("CARHER_ADMIN_DB_DIR", "/data/carher-admin"))
 DB_PATH = DB_DIR / "admin.db"
 BACKUP_DIR = Path(os.environ.get("CARHER_ADMIN_BACKUP_DIR", "/nas-backup/carher-admin"))
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS her_instances (
@@ -137,6 +137,20 @@ MIGRATIONS = {
         "INSERT OR IGNORE INTO branch_rules (pattern, deploy_mode, target_group, auto_deploy, description) VALUES ('main', 'normal', '', 1, '主分支 → 灰度部署')",
         "INSERT OR IGNORE INTO branch_rules (pattern, deploy_mode, target_group, auto_deploy, description) VALUES ('hotfix/*', 'fast', '', 1, '紧急修复 → 全量部署')",
         "INSERT OR IGNORE INTO branch_rules (pattern, deploy_mode, target_group, auto_deploy, description) VALUES ('feature/*', 'group:canary', 'canary', 0, '特性分支 → 仅金丝雀(需手动触发)')",
+    ],
+    7: [
+        """CREATE TABLE IF NOT EXISTS settings (
+            key         TEXT PRIMARY KEY,
+            value       TEXT NOT NULL DEFAULT '',
+            is_secret   INTEGER NOT NULL DEFAULT 0,
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        )""",
+        "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('github_token', '', 1)",
+        "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('github_repos', '[\"guangzhou/CarHer\", \"guangzhou/carher-admin\"]', 0)",
+        "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('webhook_secret', '', 1)",
+        "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('feishu_webhook', '', 1)",
+        "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('agent_api_key', '', 1)",
+        "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_registry', 'cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com', 0)",
     ],
 }
 
@@ -709,3 +723,65 @@ def get_all_pods_latest_metrics() -> dict[int, dict]:
                )""",
         ).fetchall()
         return {r["uid"]: {"cpu_m": r["cpu_m"], "memory_mi": r["memory_mi"]} for r in rows}
+
+
+# ──────────────────────────────────────
+# Settings (key-value store)
+# ──────────────────────────────────────
+
+def get_all_settings(include_secrets: bool = False) -> dict[str, Any]:
+    """Return all settings as {key: value}. Secrets are masked unless include_secrets=True."""
+    with get_db() as conn:
+        rows = conn.execute("SELECT key, value, is_secret FROM settings ORDER BY key").fetchall()
+        result = {}
+        for r in rows:
+            if r["is_secret"] and not include_secrets and r["value"]:
+                result[r["key"]] = "••••" + r["value"][-4:] if len(r["value"]) > 4 else "••••"
+            else:
+                result[r["key"]] = r["value"]
+        return result
+
+
+def get_setting(key: str) -> str:
+    """Get a single setting value. Returns empty string if not found."""
+    with get_db() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else ""
+
+
+def update_settings(updates: dict[str, str]):
+    """Update multiple settings at once. Empty string clears the value."""
+    with get_db() as conn:
+        for key, value in updates.items():
+            conn.execute(
+                """INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at""",
+                (key, value, _now()),
+            )
+        _audit(conn, None, "settings:updated", ", ".join(updates.keys()))
+    backup_to_nas()
+
+
+def get_github_token() -> str:
+    """Get GitHub token: prefer DB setting, fallback to env var."""
+    db_token = get_setting("github_token")
+    return db_token or os.environ.get("GITHUB_TOKEN", "")
+
+
+def get_github_repos() -> list[str]:
+    """Get configured GitHub repos as list."""
+    raw = get_setting("github_repos")
+    if raw:
+        try:
+            repos = json.loads(raw)
+            if isinstance(repos, list):
+                return repos
+        except json.JSONDecodeError:
+            pass
+    return ["guangzhou/CarHer", "guangzhou/carher-admin"]
+
+
+def get_webhook_secret() -> str:
+    """Get webhook secret: prefer DB setting, fallback to env var."""
+    db_secret = get_setting("webhook_secret")
+    return db_secret or os.environ.get("DEPLOY_WEBHOOK_SECRET", "")

@@ -1022,9 +1022,9 @@ def api_delete_deploy_group(name: str):
 @app.post("/api/deploy/webhook", tags=["deploy"])
 async def api_deploy_webhook(req: DeployWebhookRequest):
     """GitHub Actions webhook with CI metadata. Auto-matches branch rules if mode is empty."""
-    expected = os.environ.get("DEPLOY_WEBHOOK_SECRET", "")
+    expected = db.get_webhook_secret()
     if not expected:
-        raise HTTPException(503, "DEPLOY_WEBHOOK_SECRET not configured")
+        raise HTTPException(503, "DEPLOY_WEBHOOK_SECRET not configured (set in Settings or env)")
     if req.secret != expected:
         raise HTTPException(403, "Invalid webhook secret")
 
@@ -1093,11 +1093,11 @@ def api_test_branch_rule(branch: str = Query(..., description="Branch name to te
 async def api_trigger_build(req: TriggerBuildRequest):
     """Trigger a GitHub Actions workflow_dispatch build.
 
-    Requires GITHUB_TOKEN env var with workflow dispatch permission.
+    Requires GITHUB_TOKEN (DB setting or env var) with workflow dispatch permission.
     """
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = db.get_github_token()
     if not token:
-        raise HTTPException(503, "GITHUB_TOKEN not configured")
+        raise HTTPException(503, "GITHUB_TOKEN not configured (set in Settings or env)")
 
     import aiohttp
     url = f"https://api.github.com/repos/{req.repo}/actions/workflows/{req.workflow}/dispatches"
@@ -1116,7 +1116,7 @@ async def api_trigger_build(req: TriggerBuildRequest):
 @app.get("/api/ci/workflows", tags=["ci-cd"])
 async def api_list_workflows(repo: str = Query("guangzhou/CarHer", description="GitHub repo owner/name")):
     """List workflows that support workflow_dispatch for a repo."""
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = db.get_github_token()
     headers = {"Accept": "application/vnd.github.v3+json"}
     if token:
         headers["Authorization"] = f"token {token}"
@@ -1142,7 +1142,7 @@ async def api_list_workflows(repo: str = Query("guangzhou/CarHer", description="
 @app.get("/api/ci/branches", tags=["ci-cd"])
 async def api_list_branches(repo: str = Query("guangzhou/CarHer", description="GitHub repo owner/name")):
     """List branches of a GitHub repo. Requires GITHUB_TOKEN for private repos."""
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = db.get_github_token()
     headers = {"Accept": "application/vnd.github.v3+json"}
     if token:
         headers["Authorization"] = f"token {token}"
@@ -1159,6 +1159,36 @@ async def api_list_branches(repo: str = Query("guangzhou/CarHer", description="G
                 return {"repo": repo, "branches": branches}
     except Exception as e:
         return {"repo": repo, "branches": [], "error": str(e)}
+
+
+# ── API: Settings ──
+
+@app.get("/api/settings", tags=["settings"])
+async def api_get_settings():
+    """Get all settings. Secret values are masked."""
+    return db.get_all_settings(include_secrets=False)
+
+
+@app.put("/api/settings", tags=["settings"])
+async def api_update_settings(updates: dict[str, str]):
+    """Update settings. Only send keys you want to change.
+    For secrets, send empty string to clear, or the new full value."""
+    safe_keys = {"github_token", "github_repos", "webhook_secret",
+                 "feishu_webhook", "agent_api_key", "acr_registry"}
+    filtered = {k: v for k, v in updates.items() if k in safe_keys}
+    if not filtered:
+        raise HTTPException(400, "No valid settings to update")
+    # Skip masked values (frontend sends back "••••xxxx")
+    filtered = {k: v for k, v in filtered.items() if not v.startswith("••••")}
+    if filtered:
+        db.update_settings(filtered)
+    return db.get_all_settings(include_secrets=False)
+
+
+@app.get("/api/settings/repos", tags=["settings"])
+async def api_get_repos():
+    """Get configured GitHub repos list."""
+    return {"repos": db.get_github_repos()}
 
 
 # ── API: Config Preview ──

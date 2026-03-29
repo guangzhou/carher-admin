@@ -57,7 +57,8 @@ export default function DeployPage() {
   const [testResult, setTestResult] = useState(null);
 
   // Build trigger
-  const [buildRepo, setBuildRepo] = useState("guangzhou/CarHer");
+  const [configuredRepos, setConfiguredRepos] = useState([]);
+  const [buildRepo, setBuildRepo] = useState("");
   const [buildBranch, setBuildBranch] = useState("main");
   const [buildWorkflow, setBuildWorkflow] = useState("");
   const [repoBranches, setRepoBranches] = useState([]);
@@ -76,7 +77,14 @@ export default function DeployPage() {
     api.listDeployGroups().then(setDeployGroups);
   }, []);
 
-  useEffect(() => { loadFull(); }, [loadFull]);
+  useEffect(() => {
+    loadFull();
+    api.getRepos().then((r) => {
+      const repos = r.repos || ["guangzhou/CarHer", "guangzhou/carher-admin"];
+      setConfiguredRepos(repos);
+      if (!buildRepo && repos.length > 0) setBuildRepo(repos[0]);
+    }).catch(() => setConfiguredRepos(["guangzhou/CarHer", "guangzhou/carher-admin"]));
+  }, [loadFull]);
 
   useEffect(() => {
     if (!buildRepo) return;
@@ -336,10 +344,9 @@ export default function DeployPage() {
             <div className="flex flex-wrap gap-2 items-end">
               <div>
                 <label className="text-xs text-gray-500 block mb-1">仓库</label>
-                <select className="input w-48" value={buildRepo} onChange={(e) => setBuildRepo(e.target.value)}>
-                  <option value="guangzhou/CarHer">guangzhou/CarHer</option>
-                  <option value="guangzhou/carher-admin">guangzhou/carher-admin</option>
-                </select>
+              <select className="input w-48" value={buildRepo} onChange={(e) => setBuildRepo(e.target.value)}>
+                {configuredRepos.map((r) => <option key={r} value={r}>{r}</option>)}
+              </select>
               </div>
               <div>
                 <label className="text-xs text-gray-500 block mb-1">分支</label>

@@ -1,11 +1,10 @@
-# ServiceAccount + Role + RoleBinding for carher-admin
-# Scoped to carher namespace only
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: carher-admin
   namespace: carher
 ---
+# Namespace-scoped permissions
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -25,8 +24,12 @@ rules:
     resources: ["secrets"]
     verbs: ["get", "list"]
   - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # HerInstance CRD operations (admin backend crd_ops.py)
+  - apiGroups: ["carher.io"]
+    resources: ["herinstances", "herinstances/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -37,6 +40,29 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: carher-admin
+subjects:
+  - kind: ServiceAccount
+    name: carher-admin
+    namespace: carher
+---
+# Cluster-scoped permissions (nodes are cluster resources)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: carher-admin-cluster
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: carher-admin-cluster
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: carher-admin-cluster
 subjects:
   - kind: ServiceAccount
     name: carher-admin

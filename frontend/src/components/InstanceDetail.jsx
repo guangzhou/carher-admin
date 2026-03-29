@@ -9,6 +9,8 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [actionLoading, setActionLoading] = useState(false);
+  const [metrics, setMetrics] = useState(null);
+  const [metricsHistory, setMetricsHistory] = useState([]);
 
   const reload = () => {
     api.getInstance(id).then((d) => {
@@ -22,6 +24,8 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
         image: d.image || "",
       });
     }).finally(() => setLoading(false));
+    api.getInstanceMetrics(id).then(setMetrics).catch(() => {});
+    api.getInstanceMetricsHistory(id, 24).then((r) => setMetricsHistory(r.data || [])).catch(() => {});
   };
 
   useEffect(() => { reload(); }, [id]);
@@ -100,6 +104,33 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
           <button className="btn btn-danger" onClick={() => doAction("delete")} disabled={actionLoading}>删除</button>
         </div>
       </div>
+
+      {/* Resource metrics (real-time) */}
+      {metrics && !metrics.error && (
+        <div className="grid grid-cols-2 gap-4">
+          <div className="card p-4 border border-emerald-600/20">
+            <p className="text-xs text-gray-500 uppercase mb-1">CPU</p>
+            <p className="text-2xl font-bold text-emerald-400">{metrics.cpu_m}m</p>
+            <p className="text-xs text-gray-600">millicores</p>
+          </div>
+          <div className="card p-4 border border-purple-600/20">
+            <p className="text-xs text-gray-500 uppercase mb-1">内存</p>
+            <p className="text-2xl font-bold text-purple-400">{formatMemory(metrics.memory_mi)}</p>
+            <p className="text-xs text-gray-600">{Math.round(metrics.memory_mi)} MiB</p>
+          </div>
+        </div>
+      )}
+
+      {/* Metrics history mini chart (text-based sparkline) */}
+      {metricsHistory.length > 1 && (
+        <div className="card p-4">
+          <h3 className="text-sm font-medium text-gray-400 mb-3">24h 资源趋势</h3>
+          <div className="grid grid-cols-2 gap-4">
+            <Sparkline label="CPU (m)" data={metricsHistory} field="cpu_m" color="emerald" />
+            <Sparkline label="内存 (Mi)" data={metricsHistory} field="memory_mi" color="purple" />
+          </div>
+        </div>
+      )}
 
       {/* Info cards */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -188,6 +219,51 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
 
       {/* Logs */}
       {showLogs && <LogViewer id={id} />}
+    </div>
+  );
+}
+
+function formatMemory(mi) {
+  if (!mi) return "0";
+  if (mi >= 1024) return `${(mi / 1024).toFixed(1)} Gi`;
+  return `${Math.round(mi)} Mi`;
+}
+
+function Sparkline({ label, data, field, color }) {
+  if (!data || data.length < 2) return null;
+  const values = data.map((d) => d[field] || 0);
+  const max = Math.max(...values, 1);
+  const min = Math.min(...values);
+  const latest = values[values.length - 1];
+  const barCount = Math.min(values.length, 48);
+  const step = Math.max(1, Math.floor(values.length / barCount));
+  const sampled = [];
+  for (let i = 0; i < values.length; i += step) {
+    sampled.push(values[i]);
+  }
+
+  const colors = { emerald: "bg-emerald-500", purple: "bg-purple-500" };
+  const textColors = { emerald: "text-emerald-400", purple: "text-purple-400" };
+
+  return (
+    <div>
+      <div className="flex justify-between text-xs mb-1">
+        <span className="text-gray-500">{label}</span>
+        <span className={textColors[color]}>{field === "memory_mi" ? formatMemory(latest) : `${latest.toFixed(1)}m`}</span>
+      </div>
+      <div className="flex items-end gap-px h-10">
+        {sampled.map((v, i) => (
+          <div
+            key={i}
+            className={`flex-1 ${colors[color]} rounded-t opacity-70`}
+            style={{ height: `${Math.max((v - min) / (max - min) * 100, 4)}%` }}
+          />
+        ))}
+      </div>
+      <div className="flex justify-between text-xs text-gray-600 mt-0.5">
+        <span>{data.length > 0 ? data[0].ts?.slice(11, 16) : ""}</span>
+        <span>{data.length > 0 ? data[data.length - 1].ts?.slice(11, 16) : ""}</span>
+      </div>
     </div>
   );
 }

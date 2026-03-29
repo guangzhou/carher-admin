@@ -45,7 +45,7 @@ subjects:
     name: carher-admin
     namespace: carher
 ---
-# Cluster-scoped permissions (nodes are cluster resources)
+# Cluster-scoped permissions (nodes + metrics API)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -53,6 +53,9 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

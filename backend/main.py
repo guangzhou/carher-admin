@@ -30,6 +30,7 @@ from . import database as db
 from . import config_gen
 from . import crd_ops
 from . import k8s_ops
+from . import metrics as metrics_mod
 from . import sync_worker
 from . import deployer
 from .models import (
@@ -50,7 +51,8 @@ async def lifespan(app: FastAPI):
     k8s_ops.init_k8s()
     db.init_db()
     await sync_worker.start_workers()
-    logger.info("CarHer Admin started (DB + K8s + sync workers)")
+    metrics_mod.start_sampler(db)
+    logger.info("CarHer Admin started (DB + K8s + sync workers + metrics sampler)")
     yield
 
 app = FastAPI(
@@ -852,6 +854,52 @@ def api_import_from_k8s():
         except Exception as e:
             logger.warning("Import failed for %d: %s", uid, e)
     return {"imported": imported, "skipped": skipped, "total": len(configmaps)}
+
+
+# ── API: Metrics ──
+
+@app.get("/api/metrics/overview", tags=["metrics"])
+def api_metrics_overview():
+    """Cluster-wide resource overview: nodes CPU/Memory, Her totals, PVC storage."""
+    return metrics_mod.get_cluster_overview()
+
+
+@app.get("/api/metrics/nodes", tags=["metrics"])
+def api_metrics_nodes():
+    """Per-node CPU/Memory usage and capacity."""
+    return metrics_mod.get_node_metrics()
+
+
+@app.get("/api/metrics/pods", tags=["metrics"])
+def api_metrics_pods():
+    """Real-time CPU/Memory for all Her pods."""
+    return metrics_mod.get_all_pod_metrics()
+
+
+@app.get("/api/instances/{uid}/metrics", tags=["metrics"])
+def api_instance_metrics(uid: int):
+    """Real-time CPU/Memory for a specific instance."""
+    return metrics_mod.get_pod_metrics(uid)
+
+
+@app.get("/api/instances/{uid}/metrics/history", tags=["metrics"])
+def api_instance_metrics_history(uid: int, hours: int = Query(24, ge=1, le=168)):
+    """Historical CPU/Memory for a specific pod (default: 24h, max: 7 days)."""
+    data = db.get_pod_metrics_history(uid, hours=hours)
+    return {"uid": uid, "hours": hours, "samples": len(data), "data": data}
+
+
+@app.get("/api/metrics/history/nodes", tags=["metrics"])
+def api_node_metrics_history(hours: int = Query(24, ge=1, le=168)):
+    """Historical aggregated node metrics (default: 24h, max: 7 days)."""
+    data = db.get_node_metrics_history(hours=hours)
+    return {"hours": hours, "samples": len(data), "data": data}
+
+
+@app.get("/api/metrics/storage", tags=["metrics"])
+def api_metrics_storage():
+    """PVC storage status in carher namespace."""
+    return metrics_mod.get_storage_info()
 
 
 # ── API: Deploy Pipeline ──

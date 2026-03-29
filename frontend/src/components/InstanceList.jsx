@@ -11,10 +11,13 @@ export default function InstanceList({ detailId, setDetailId }) {
   const [statusFilter, setStatusFilter] = useState("all");
   const [showLogs, setShowLogs] = useState(null);
   const [batchLoading, setBatchLoading] = useState(false);
+  const [podMetrics, setPodMetrics] = useState({});
 
   const load = useCallback(() => {
     setLoading(true);
-    api.listInstances().then(setInstances).finally(() => setLoading(false));
+    Promise.all([api.listInstances(), api.getMetricsPods()])
+      .then(([inst, m]) => { setInstances(inst); setPodMetrics(m || {}); })
+      .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -132,67 +135,76 @@ export default function InstanceList({ detailId, setDetailId }) {
               <th className="p-3">名字</th>
               <th className="p-3">模型</th>
               <th className="p-3">状态</th>
-              <th className="p-3">Pod IP</th>
-              <th className="p-3">运行时长</th>
+              <th className="p-3 text-right">CPU</th>
+              <th className="p-3 text-right">内存</th>
+              <th className="p-3">节点</th>
               <th className="p-3">同步</th>
               <th className="p-3 text-right">操作</th>
             </tr>
           </thead>
           <tbody>
-            {filtered.map((inst) => (
-              <tr
-                key={inst.id}
-                className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors"
-              >
-                <td className="p-3">
-                  <input type="checkbox" checked={selected.has(inst.id)} onChange={() => toggleSelect(inst.id)}
-                    className="rounded border-gray-600" />
-                </td>
-                <td className="p-3">
-                  <button className="text-blue-400 hover:underline font-mono" onClick={() => setDetailId(inst.id)}>
-                    {inst.id}
-                  </button>
-                </td>
-                <td className="p-3 text-gray-200">{inst.name || "-"}</td>
-                <td className="p-3">
-                  <span className="badge bg-gray-800 text-gray-300">{inst.model_short || "-"}</span>
-                </td>
-                <td className="p-3">
-                  <StatusBadge status={inst.status} />
-                </td>
-                <td className="p-3 text-gray-400 font-mono text-xs">{inst.pod_ip || "-"}</td>
-                <td className="p-3 text-gray-400 text-xs">{inst.age || "-"}</td>
-                <td className="p-3">
-                  {inst.sync_status === "operator" ? (
-                    <span className="text-blue-400 text-xs" title="Operator 管理">⚙</span>
-                  ) : inst.sync_status === "synced" ? (
-                    <span className="text-emerald-400 text-xs">●</span>
-                  ) : inst.sync_status === "pending" ? (
-                    <span className="text-yellow-400 text-xs" title="ConfigMap 同步待重试">◐</span>
-                  ) : (
-                    <span className="text-gray-600 text-xs">-</span>
-                  )}
-                </td>
-                <td className="p-3 text-right">
-                  <div className="flex items-center justify-end gap-1">
-                    {inst.status === "Running" ? (
-                      <>
-                        <button className="btn btn-ghost text-xs" onClick={() => setShowLogs(inst.id)}>日志</button>
-                        <button className="btn btn-ghost text-xs" onClick={() => singleAction(inst.id, "restart")}>重启</button>
-                        <button className="btn btn-danger text-xs" onClick={() => singleAction(inst.id, "stop")}>停止</button>
-                      </>
+            {filtered.map((inst) => {
+              const m = podMetrics[inst.id] || {};
+              return (
+                <tr
+                  key={inst.id}
+                  className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors"
+                >
+                  <td className="p-3">
+                    <input type="checkbox" checked={selected.has(inst.id)} onChange={() => toggleSelect(inst.id)}
+                      className="rounded border-gray-600" />
+                  </td>
+                  <td className="p-3">
+                    <button className="text-blue-400 hover:underline font-mono" onClick={() => setDetailId(inst.id)}>
+                      {inst.id}
+                    </button>
+                  </td>
+                  <td className="p-3 text-gray-200">{inst.name || "-"}</td>
+                  <td className="p-3">
+                    <span className="badge bg-gray-800 text-gray-300">{inst.model_short || "-"}</span>
+                  </td>
+                  <td className="p-3">
+                    <StatusBadge status={inst.status} />
+                  </td>
+                  <td className="p-3 text-right font-mono text-xs text-emerald-400">
+                    {m.cpu_m != null ? `${m.cpu_m}m` : "-"}
+                  </td>
+                  <td className="p-3 text-right font-mono text-xs text-purple-400">
+                    {m.memory_mi != null ? formatMem(m.memory_mi) : "-"}
+                  </td>
+                  <td className="p-3 text-gray-400 font-mono text-xs">{shortNode(inst.node)}</td>
+                  <td className="p-3">
+                    {inst.sync_status === "operator" ? (
+                      <span className="text-blue-400 text-xs" title="Operator 管理">⚙</span>
+                    ) : inst.sync_status === "synced" ? (
+                      <span className="text-emerald-400 text-xs">●</span>
+                    ) : inst.sync_status === "pending" ? (
+                      <span className="text-yellow-400 text-xs" title="ConfigMap 同步待重试">◐</span>
                     ) : (
-                      <button className="btn btn-success text-xs" onClick={() => singleAction(inst.id, "start")}>
-                        {inst.status === "Paused" ? "恢复" : "启动"}
-                      </button>
+                      <span className="text-gray-600 text-xs">-</span>
                     )}
-                  </div>
-                </td>
-              </tr>
-            ))}
+                  </td>
+                  <td className="p-3 text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      {inst.status === "Running" ? (
+                        <>
+                          <button className="btn btn-ghost text-xs" onClick={() => setShowLogs(inst.id)}>日志</button>
+                          <button className="btn btn-ghost text-xs" onClick={() => singleAction(inst.id, "restart")}>重启</button>
+                          <button className="btn btn-danger text-xs" onClick={() => singleAction(inst.id, "stop")}>停止</button>
+                        </>
+                      ) : (
+                        <button className="btn btn-success text-xs" onClick={() => singleAction(inst.id, "start")}>
+                          {inst.status === "Paused" ? "恢复" : "启动"}
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan="9" className="p-8 text-center text-gray-500">
+                <td colSpan="10" className="p-8 text-center text-gray-500">
                   {loading ? "加载中..." : "没有找到实例"}
                 </td>
               </tr>
@@ -204,6 +216,18 @@ export default function InstanceList({ detailId, setDetailId }) {
       <p className="text-xs text-gray-600">共 {instances.length} 个实例，显示 {filtered.length} 个</p>
     </div>
   );
+}
+
+function formatMem(mi) {
+  if (!mi) return "0";
+  if (mi >= 1024) return `${(mi / 1024).toFixed(1)}G`;
+  return `${Math.round(mi)}M`;
+}
+
+function shortNode(name) {
+  if (!name) return "-";
+  const m = name.match(/(\d+\.\d+\.\d+\.\d+)/);
+  return m ? m[1] : name.slice(-12);
 }
 
 function StatusBadge({ status }) {

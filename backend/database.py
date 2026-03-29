@@ -27,7 +27,7 @@ DB_DIR = Path(os.environ.get("CARHER_ADMIN_DB_DIR", "/data/carher-admin"))
 DB_PATH = DB_DIR / "admin.db"
 BACKUP_DIR = Path(os.environ.get("CARHER_ADMIN_BACKUP_DIR", "/nas-backup/carher-admin"))
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS her_instances (
@@ -102,6 +102,18 @@ MIGRATIONS = {
         "INSERT OR IGNORE INTO deploy_groups (name, priority, description) VALUES ('canary', 10, '金丝雀 — 最先更新')",
         "INSERT OR IGNORE INTO deploy_groups (name, priority, description) VALUES ('early', 50, '先行者 — 金丝雀通过后更新')",
         "INSERT OR IGNORE INTO deploy_groups (name, priority, description) VALUES ('stable', 100, '稳定 — 最后更新')",
+    ],
+    4: [
+        """CREATE TABLE IF NOT EXISTS metrics_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          TEXT NOT NULL,
+            kind        TEXT NOT NULL,
+            uid         INTEGER NOT NULL DEFAULT 0,
+            cpu_m       REAL NOT NULL DEFAULT 0,
+            memory_mi   REAL NOT NULL DEFAULT 0
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metrics_history(ts)",
+        "CREATE INDEX IF NOT EXISTS idx_metrics_kind_uid ON metrics_history(kind, uid)",
     ],
 }
 
@@ -552,3 +564,63 @@ def list_deploys(limit: int = 20) -> list[dict]:
     with get_db() as conn:
         rows = conn.execute("SELECT * FROM deploys ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+
+# ──────────────────────────────────────
+# Metrics history
+# ──────────────────────────────────────
+
+def insert_metrics_batch(rows: list[tuple]):
+    """Batch insert metrics samples. Each row: (ts, kind, uid, cpu_m, memory_mi)."""
+    with get_db() as conn:
+        conn.executemany(
+            "INSERT INTO metrics_history (ts, kind, uid, cpu_m, memory_mi) VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+
+
+def cleanup_old_metrics(days: int = 7):
+    """Delete metrics older than N days."""
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM metrics_history WHERE ts < datetime('now', ?)",
+            (f"-{days} days",),
+        )
+        logger.info("Cleaned up metrics older than %d days", days)
+
+
+def get_pod_metrics_history(uid: int, hours: int = 24) -> list[dict]:
+    """Get historical metrics for a specific pod, sampled over last N hours."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT ts, cpu_m, memory_mi FROM metrics_history
+               WHERE kind = 'pod' AND uid = ? AND ts >= datetime('now', ?)
+               ORDER BY ts""",
+            (uid, f"-{hours} hours"),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_node_metrics_history(hours: int = 24) -> list[dict]:
+    """Get historical node metrics (aggregated, uid=0)."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT ts, SUM(cpu_m) as cpu_m, SUM(memory_mi) as memory_mi
+               FROM metrics_history
+               WHERE kind = 'node' AND ts >= datetime('now', ?)
+               GROUP BY ts ORDER BY ts""",
+            (f"-{hours} hours",),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_all_pods_latest_metrics() -> dict[int, dict]:
+    """Get the latest metrics sample for each pod."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT uid, cpu_m, memory_mi FROM metrics_history
+               WHERE kind = 'pod' AND ts = (
+                   SELECT MAX(ts) FROM metrics_history WHERE kind = 'pod'
+               )""",
+        ).fetchall()
+        return {r["uid"]: {"cpu_m": r["cpu_m"], "memory_mi": r["memory_mi"]} for r in rows}

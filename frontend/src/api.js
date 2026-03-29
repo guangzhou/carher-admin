@@ -79,6 +79,14 @@ export const api = {
   getDeployHistory: (limit = 20) => request(`/deploy/history?limit=${limit}`),
   setDeployGroup: (uid, group) => request(`/instances/${uid}/deploy-group`, { method: "PUT", body: JSON.stringify({ group }) }),
   batchSetDeployGroup: (ids, group) => request("/instances/batch-deploy-group", { method: "POST", body: JSON.stringify({ ids, group }) }),
+  // Metrics
+  getMetricsOverview: () => request("/metrics/overview"),
+  getMetricsNodes: () => request("/metrics/nodes"),
+  getMetricsPods: () => request("/metrics/pods"),
+  getInstanceMetrics: (id) => request(`/instances/${id}/metrics`),
+  getInstanceMetricsHistory: (id, hours = 24) => request(`/instances/${id}/metrics/history?hours=${hours}`),
+  getNodeMetricsHistory: (hours = 24) => request(`/metrics/history/nodes?hours=${hours}`),
+  getMetricsStorage: () => request("/metrics/storage"),
   // Deploy groups
   listDeployGroups: () => request("/deploy-groups"),
   createDeployGroup: (name, priority, description) => request("/deploy-groups", { method: "POST", body: JSON.stringify({ name, priority, description }) }),

@@ -33,8 +33,14 @@ def init_k8s():
         logger.info("Loaded local kubeconfig")
 
 
+_core_instance: client.CoreV1Api | None = None
+
+
 def _core() -> client.CoreV1Api:
-    return client.CoreV1Api()
+    global _core_instance
+    if _core_instance is None:
+        _core_instance = client.CoreV1Api()
+    return _core_instance
 
 
 def _age(creation: datetime | None) -> str:
@@ -228,6 +234,7 @@ def create_pod(uid: int, prefix: str, image_tag: str = DEFAULT_IMAGE_TAG):
                     client.V1VolumeMount(name="gcloud-adc", mount_path="/gcloud/application_default_credentials.json", sub_path="application_default_credentials.json", read_only=True),
                     client.V1VolumeMount(name="shared-skills", mount_path="/data/.openclaw/skills", read_only=True),
                     client.V1VolumeMount(name="dept-skills", mount_path="/data/.agents/skills", read_only=True),
+                    client.V1VolumeMount(name="user-sessions", mount_path="/data/.openclaw/sessions", sub_path=str(uid)),
                 ],
             )],
             volumes=[
@@ -235,8 +242,9 @@ def create_pod(uid: int, prefix: str, image_tag: str = DEFAULT_IMAGE_TAG):
                 client.V1Volume(name="user-config", config_map=client.V1ConfigMapVolumeSource(name=f"carher-{uid}-user-config")),
                 client.V1Volume(name="base-config", config_map=client.V1ConfigMapVolumeSource(name="carher-base-config")),
                 client.V1Volume(name="gcloud-adc", secret=client.V1SecretVolumeSource(secret_name="carher-gcloud-adc")),
-                client.V1Volume(name="shared-skills", host_path=client.V1HostPathVolumeSource(path="/root/.openclaw/skills", type="DirectoryOrCreate")),
-                client.V1Volume(name="dept-skills", host_path=client.V1HostPathVolumeSource(path="/root/.openclaw/dept-skills/default", type="DirectoryOrCreate")),
+                client.V1Volume(name="shared-skills", persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(claim_name="carher-shared-skills", read_only=True)),
+                client.V1Volume(name="dept-skills", persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(claim_name="carher-dept-skills", read_only=True)),
+                client.V1Volume(name="user-sessions", persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(claim_name="carher-shared-sessions")),
             ],
         ),
     )

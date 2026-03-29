@@ -24,7 +24,7 @@ from . import database as db
 
 logger = logging.getLogger("carher-admin")
 
-BATCH_SIZE = 10
+BATCH_SIZE = int(os.environ.get("DEPLOY_BATCH_SIZE", "50"))
 
 # Configurable via env
 HEALTH_WAIT_CANARY = int(os.environ.get("DEPLOY_HEALTH_WAIT_CANARY", "30"))
@@ -164,18 +164,16 @@ async def _deploy_wave(deploy_id: int, image_tag: str, waves: list[str]):
 
 
 async def _deploy_batch(deploy_id: int, batch: list[dict], image_tag: str):
-    """Deploy a batch of instances. Uses CRD or direct k8s_ops."""
+    """Deploy a batch of instances concurrently."""
     backend = _get_backend()
     loop = asyncio.get_running_loop()
 
-    for inst in batch:
+    async def _deploy_one(inst: dict):
         uid = inst["id"]
         try:
             if _USE_CRD:
-                # Operator mode: just update CRD spec.image → operator reconciles
                 await loop.run_in_executor(None, backend.set_image, uid, image_tag)
             else:
-                # Legacy: direct Pod management
                 from . import config_gen
                 config_json = config_gen.generate_json_string(inst)
                 await loop.run_in_executor(None, backend.apply_configmap, uid, config_json)
@@ -185,7 +183,6 @@ async def _deploy_batch(deploy_id: int, batch: list[dict], image_tag: str):
                 await loop.run_in_executor(None, backend.create_pod, uid, prefix, image_tag)
 
             db.set_image_tag(uid, image_tag)
-            # Atomic increment
             with db.get_db() as conn:
                 conn.execute("UPDATE deploys SET done = done + 1 WHERE id = ?", (deploy_id,))
         except Exception as e:
@@ -193,36 +190,38 @@ async def _deploy_batch(deploy_id: int, batch: list[dict], image_tag: str):
             with db.get_db() as conn:
                 conn.execute("UPDATE deploys SET failed = failed + 1 WHERE id = ?", (deploy_id,))
 
+    await asyncio.gather(*[_deploy_one(inst) for inst in batch])
+
 
 async def _health_check_batch(batch: list[dict]) -> list[dict]:
-    """Check health. Returns list of unhealthy instances."""
+    """Check health concurrently. Returns list of unhealthy instances."""
     backend = _get_backend()
     loop = asyncio.get_running_loop()
-    failures = []
 
-    for inst in batch:
+    async def _check_one(inst: dict) -> dict | None:
         uid = inst["id"]
         try:
             if _USE_CRD:
                 status = await loop.run_in_executor(None, backend.get_instance_status, uid)
                 phase = status.get("phase", "Unknown")
                 if phase not in ("Running", "Pending"):
-                    failures.append({"id": uid, "reason": f"Phase: {phase}"})
-                elif status.get("feishuWS") == "Disconnected":
-                    failures.append({"id": uid, "reason": "Feishu WS disconnected"})
+                    return {"id": uid, "reason": f"Phase: {phase}"}
+                if status.get("feishuWS") == "Disconnected":
+                    return {"id": uid, "reason": "Feishu WS disconnected"}
             else:
                 from . import k8s_ops
                 pod = await loop.run_in_executor(None, k8s_ops.get_pod_status, uid)
                 if not pod.get("pod_exists") or pod.get("phase") != "Running":
-                    failures.append({"id": uid, "reason": f"Pod: {pod.get('phase', '?')}"})
-                    continue
+                    return {"id": uid, "reason": f"Pod: {pod.get('phase', '?')}"}
                 health = await loop.run_in_executor(None, k8s_ops.check_pod_health, uid)
                 if not health["feishu_ws"]:
-                    failures.append({"id": uid, "reason": "Feishu WS not connected"})
+                    return {"id": uid, "reason": "Feishu WS not connected"}
         except Exception as e:
-            failures.append({"id": uid, "reason": str(e)})
+            return {"id": uid, "reason": str(e)}
+        return None
 
-    return failures
+    results = await asyncio.gather(*[_check_one(inst) for inst in batch])
+    return [r for r in results if r is not None]
 
 
 # ──────────────────────────────────────
@@ -323,11 +322,12 @@ def get_deploy_status() -> dict:
     done = deploy["done"]
     pct = round(done / total * 100) if total > 0 else 0
     wave_order = db.get_wave_order() or ["canary", "early", "stable"]
+    group_stats = db.get_deploy_group_stats()  # single GROUP BY query
     return {
         "active": True,
         "deploy": deploy,
         "progress_pct": pct,
-        "waves": {g: len(db.list_by_deploy_group(g)) for g in wave_order},
+        "waves": {g: group_stats.get(g, 0) for g in wave_order},
         "wave_order": wave_order,
     }
 

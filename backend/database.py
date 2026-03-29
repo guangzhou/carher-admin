@@ -152,20 +152,29 @@ def _try_restore_from_backup():
         logger.info("No backup found, starting with empty DB")
 
 
+_backup_dirty = False
+
+
 def backup_to_nas():
-    """Copy DB to NAS backup directory. Called after every write."""
-    if not DB_PATH.exists():
+    """Mark DB as needing backup. Actual backup runs via flush_backup() or sync_worker."""
+    global _backup_dirty
+    _backup_dirty = True
+
+
+def flush_backup():
+    """Execute the actual NAS backup if dirty. Called by sync_worker every 60s."""
+    global _backup_dirty
+    if not _backup_dirty or not DB_PATH.exists():
         return
+    _backup_dirty = False
     try:
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        # Use sqlite3 backup API for consistency
         src = sqlite3.connect(str(DB_PATH))
         dst = sqlite3.connect(str(BACKUP_DIR / "admin.db"))
         src.backup(dst)
         dst.close()
         src.close()
 
-        # Also keep a daily snapshot
         daily = BACKUP_DIR / f"admin-{datetime.now().strftime('%Y%m%d')}.db"
         if not daily.exists():
             shutil.copy2(str(BACKUP_DIR / "admin.db"), str(daily))

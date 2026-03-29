@@ -44,14 +44,19 @@ async def _sync_pending_loop():
                     logger.warning("Sync failed for %d: %s", inst["id"], e)
         except Exception as e:
             logger.error("Sync worker error: %s", e)
+        # Flush any pending DB backup after sync cycle
+        try:
+            db.flush_backup()
+        except Exception:
+            pass
 
 
 async def _backup_loop():
-    """Periodic NAS backup."""
+    """Periodic NAS backup — flushes any pending dirty writes."""
     while True:
         await asyncio.sleep(BACKUP_INTERVAL)
         try:
-            db.backup_to_nas()
+            db.flush_backup()
         except Exception as e:
             logger.warning("Backup worker error: %s", e)
 

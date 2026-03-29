@@ -28,12 +28,22 @@ def init_k8s():
         config.load_kube_config()
 
 
+_crd_instance: client.CustomObjectsApi | None = None
+_v1_instance: client.CoreV1Api | None = None
+
+
 def _crd_api() -> client.CustomObjectsApi:
-    return client.CustomObjectsApi()
+    global _crd_instance
+    if _crd_instance is None:
+        _crd_instance = client.CustomObjectsApi()
+    return _crd_instance
 
 
 def _v1() -> client.CoreV1Api:
-    return client.CoreV1Api()
+    global _v1_instance
+    if _v1_instance is None:
+        _v1_instance = client.CoreV1Api()
+    return _v1_instance
 
 
 # ──────────────────────────────────────

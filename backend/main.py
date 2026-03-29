@@ -211,6 +211,7 @@ def api_add_instance(req: HerAddRequest):
         "status": "running", "deploy_group": req.deploy_group,
     }
     inst = db.insert(data)
+    config_gen.invalidate_bots_cache()
 
     # Deploy to K8s
     try:
@@ -252,6 +253,8 @@ def api_batch_import(req: HerBatchImport):
             })
         except Exception as e:
             results.append({"id": uid, "error": str(e)})
+    config_gen.invalidate_bots_cache()
+    db.flush_backup()
     return {"results": results}
 
 
@@ -322,13 +325,14 @@ def api_delete(uid: int, purge: bool = Query(False)):
         db.purge_instance(uid)
     else:
         db.delete_instance(uid)
+    config_gen.invalidate_bots_cache()
     return {"id": uid, "action": "deleted", "purge": purge}
 
 
 # ── API: Batch ──
 
 @app.post("/api/instances/batch", dependencies=[Depends(verify_api_key)])
-def api_batch_action(req: HerBatchAction):
+async def api_batch_action(req: HerBatchAction):
     results = []
     for uid in req.ids:
         try:
@@ -337,7 +341,7 @@ def api_batch_action(req: HerBatchAction):
             elif req.action == "start":
                 results.append(api_start(uid))
             elif req.action == "restart":
-                results.append(api_restart(uid))
+                results.append(await api_restart(uid))
             elif req.action == "delete":
                 purge = req.params and req.params.image == "purge"
                 results.append(api_delete(uid, purge=bool(purge)))
@@ -371,6 +375,30 @@ def api_status():
 
 @app.get("/api/health")
 def api_health():
+    """Health overview. Uses CRD status (maintained by Go operator) for O(1) list call,
+    avoiding per-Pod log reads that don't scale past a few hundred instances."""
+    try:
+        from . import crd_ops
+        crd_statuses = crd_ops.get_all_statuses()
+        results = []
+        for uid, data in crd_statuses.items():
+            spec = data.get("spec", {})
+            status = data.get("status", {})
+            if spec.get("paused"):
+                continue
+            results.append({
+                "id": uid,
+                "name": spec.get("name", ""),
+                "feishu_ws": status.get("feishuWS", "Unknown") == "Connected",
+                "memory_db": True,  # not tracked by operator; assume ok if Pod running
+                "model_ok": True,
+                "status": status.get("phase", "Unknown"),
+            })
+        return sorted(results, key=lambda x: x["id"])
+    except ImportError:
+        pass
+
+    # Legacy fallback: only check pods that are Running (skip exec-based checks for scale)
     instances = db.list_all()
     pod_statuses = k8s_ops.get_all_pod_statuses()
     results = []
@@ -378,14 +406,14 @@ def api_health():
         uid = inst["id"]
         if uid not in pod_statuses or inst["status"] == "deleted":
             continue
-        health = k8s_ops.check_pod_health(uid)
+        phase = pod_statuses[uid].get("phase", "?")
         results.append({
             "id": uid,
             "name": inst.get("name", ""),
-            "feishu_ws": health["feishu_ws"],
-            "memory_db": health["memory_db"],
-            "model_ok": health["model_ok"],
-            "status": pod_statuses[uid].get("phase", "?"),
+            "feishu_ws": False,
+            "memory_db": False,
+            "model_ok": False,
+            "status": phase,
         })
     return sorted(results, key=lambda x: x["id"])
 

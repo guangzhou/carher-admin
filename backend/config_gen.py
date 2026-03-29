@@ -1,18 +1,40 @@
 """Config generator: DB row → openclaw.json → K8s ConfigMap.
 
 This is the bridge between the DB (source of truth) and the K8s runtime.
-knownBots are computed globally from DB, never stored per-user.
+knownBots are computed globally from DB, cached to avoid O(N) per-instance.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from . import database as db
 
 logger = logging.getLogger("carher-admin")
+
+# knownBots cache shared across all config generation calls.
+# Avoids 1500× DB queries during sync_all / deploy.
+_bots_cache: tuple[dict, dict] | None = None
+_bots_cache_ts: float = 0
+_BOTS_CACHE_TTL = 15  # seconds
+
+
+def _get_known_bots() -> tuple[dict, dict]:
+    global _bots_cache, _bots_cache_ts
+    now = time.monotonic()
+    if _bots_cache is None or now - _bots_cache_ts > _BOTS_CACHE_TTL:
+        _bots_cache = db.collect_known_bots()
+        _bots_cache_ts = now
+    return _bots_cache
+
+
+def invalidate_bots_cache():
+    """Call after adding/removing an instance to refresh knownBots."""
+    global _bots_cache
+    _bots_cache = None
 
 GEMINI_PROJECT = "gen-lang-client-0519229117"
 GEMINI_MODEL = "gemini-live-2.5-flash-native-audio"
@@ -78,8 +100,7 @@ def generate_openclaw_json(instance: dict) -> dict:
     bot_open_id = instance.get("bot_open_id", "")
 
     if app_id and app_secret:
-        # Compute knownBots from DB (single SQL, no per-user duplication)
-        known_bots, known_bot_open_ids = db.collect_known_bots()
+        known_bots, known_bot_open_ids = _get_known_bots()
 
         feishu: dict[str, Any] = {
             "enabled": True,

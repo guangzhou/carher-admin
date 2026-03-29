@@ -146,8 +146,8 @@ def get_node_metrics() -> list[dict]:
 
             pod_count = 0
             try:
-                pods = _core().list_pod_for_all_namespaces(
-                    field_selector=f"spec.nodeName={name},status.phase=Running"
+                pods = _core().list_namespaced_pod(
+                    NS, field_selector=f"spec.nodeName={name},status.phase=Running"
                 )
                 pod_count = len(pods.items)
             except Exception:

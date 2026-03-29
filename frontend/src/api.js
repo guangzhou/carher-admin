@@ -99,4 +99,5 @@ export const api = {
   deleteBranchRule: (id) => request(`/branch-rules/${id}`, { method: "DELETE" }),
   testBranchRule: (branch) => request(`/branch-rules/test?branch=${encodeURIComponent(branch)}`),
   triggerBuild: (data) => request("/ci/trigger-build", { method: "POST", body: JSON.stringify(data) }),
+  listBranches: (repo) => request(`/ci/branches?repo=${encodeURIComponent(repo)}`),
 };

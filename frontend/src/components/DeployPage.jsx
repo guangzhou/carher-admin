@@ -59,6 +59,7 @@ export default function DeployPage() {
   // Build trigger
   const [buildRepo, setBuildRepo] = useState("guangzhou/CarHer");
   const [buildBranch, setBuildBranch] = useState("main");
+  const [repoBranches, setRepoBranches] = useState([]);
 
   const loadFull = useCallback(() => {
     api.getDeployStatus().then(setStatus);
@@ -76,6 +77,11 @@ export default function DeployPage() {
   useEffect(() => { loadFull(); }, [loadFull]);
 
   useEffect(() => {
+    if (!buildRepo) return;
+    api.listBranches(buildRepo).then((r) => setRepoBranches(r.branches || [])).catch(() => {});
+  }, [buildRepo]);
+
+  useEffect(() => {
     if (!status?.active) return;
     const t = setInterval(loadStatusOnly, 5000);
     return () => clearInterval(t);
@@ -89,10 +95,9 @@ export default function DeployPage() {
     ...instances.map((i) => i.image || i.image_tag).filter(Boolean),
   ])];
 
-  // Collect branch names from rules (strip glob chars) + common defaults
+  // Merge real GitHub branches + deploy history branches
   const knownBranches = [...new Set([
-    "main",
-    ...branchRules.map((r) => r.pattern.replace(/\*/g, "")).filter((b) => b && !b.endsWith("/")),
+    ...repoBranches,
     ...history.map((d) => d.branch).filter(Boolean),
   ])];
 

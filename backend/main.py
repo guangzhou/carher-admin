@@ -1113,6 +1113,28 @@ async def api_trigger_build(req: TriggerBuildRequest):
             raise HTTPException(resp.status, f"GitHub API error: {text}")
 
 
+@app.get("/api/ci/branches", tags=["ci-cd"])
+async def api_list_branches(repo: str = Query("guangzhou/CarHer", description="GitHub repo owner/name")):
+    """List branches of a GitHub repo. Requires GITHUB_TOKEN for private repos."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if token:
+        headers["Authorization"] = f"token {token}"
+
+    import aiohttp
+    url = f"https://api.github.com/repos/{repo}/branches?per_page=100"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return {"repo": repo, "branches": [], "error": f"GitHub API {resp.status}"}
+                data = await resp.json()
+                branches = [b["name"] for b in data]
+                return {"repo": repo, "branches": branches}
+    except Exception as e:
+        return {"repo": repo, "branches": [], "error": str(e)}
+
+
 # ── API: Config Preview ──
 
 @app.get("/api/instances/{uid}/config-preview", tags=["instances"])

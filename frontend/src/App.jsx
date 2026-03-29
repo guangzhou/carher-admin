@@ -27,9 +27,13 @@ const SUB_TABS = {
   ],
 };
 
+const LEGACY_TAB_MAP = { add: "instances", import: "instances", health: "instances" };
+const LEGACY_SUB_MAP = { add: "add", import: "import", health: "health" };
+
 function getInitialTab() {
   const params = new URLSearchParams(window.location.search);
-  return params.get("tab") || "instances";
+  const raw = params.get("tab") || "instances";
+  return LEGACY_TAB_MAP[raw] || raw;
 }
 
 function getInitialDetail() {
@@ -40,6 +44,8 @@ function getInitialDetail() {
 
 function getInitialSub() {
   const params = new URLSearchParams(window.location.search);
+  const tab = params.get("tab") || "";
+  if (LEGACY_SUB_MAP[tab]) return LEGACY_SUB_MAP[tab];
   return params.get("sub") || "list";
 }
 

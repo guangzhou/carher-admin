@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -82,6 +83,12 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.ensurePVC(ctx, uid); err != nil {
 		logger.Error(err, "Failed to ensure PVC", "uid", uid)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
+	}
+
+	// Ensure ClusterIP Service (stable endpoint for Cloudflare/ingress)
+	if err := r.ensureService(ctx, &her); err != nil {
+		logger.Error(err, "Failed to ensure Service", "uid", uid)
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
 
 	// Generate and apply config
@@ -155,6 +162,7 @@ func (r *HerInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&herv1.HerInstance{}).
 		Owns(&corev1.Pod{}).
+		Owns(&corev1.Service{}).
 		Complete(r)
 }
 
@@ -369,6 +377,57 @@ func (r *HerInstanceReconciler) ensurePVC(ctx context.Context, uid int) error {
 		},
 	}
 	return r.Create(ctx, pvc)
+}
+
+// ── Service ──
+
+func (r *HerInstanceReconciler) ensureService(ctx context.Context, her *herv1.HerInstance) error {
+	uid := her.Spec.UserID
+	svcName := fmt.Sprintf("carher-%d-svc", uid)
+
+	var existing corev1.Service
+	if err := r.Get(ctx, types.NamespacedName{Name: svcName, Namespace: Namespace}, &existing); err == nil {
+		return nil
+	} else if !errors.IsNotFound(err) {
+		return err
+	}
+
+	isController := true
+	blockOwnerDeletion := true
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      svcName,
+			Namespace: Namespace,
+			Labels: map[string]string{
+				"app":        "carher-user",
+				"user-id":    strconv.Itoa(uid),
+				"managed-by": "carher-operator",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion:         "carher.io/v1alpha1",
+				Kind:               "HerInstance",
+				Name:               her.Name,
+				UID:                her.UID,
+				Controller:         &isController,
+				BlockOwnerDeletion: &blockOwnerDeletion,
+			}},
+		},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeClusterIP,
+			Selector: map[string]string{
+				"app":     "carher-user",
+				"user-id": strconv.Itoa(uid),
+			},
+			Ports: []corev1.ServicePort{
+				{Name: "gateway", Port: 18789, TargetPort: intstr.FromInt(18789), Protocol: corev1.ProtocolTCP},
+				{Name: "realtime", Port: 18790, TargetPort: intstr.FromInt(18790), Protocol: corev1.ProtocolTCP},
+				{Name: "frontend", Port: 8000, TargetPort: intstr.FromInt(8000), Protocol: corev1.ProtocolTCP},
+				{Name: "ws-proxy", Port: 8080, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
+				{Name: "oauth", Port: 18891, TargetPort: intstr.FromInt(18891), Protocol: corev1.ProtocolTCP},
+			},
+		},
+	}
+	return r.Create(ctx, svc)
 }
 
 // ── helpers ──

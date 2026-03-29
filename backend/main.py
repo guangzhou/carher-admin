@@ -33,6 +33,7 @@ from . import k8s_ops
 from . import metrics as metrics_mod
 from . import sync_worker
 from . import deployer
+from . import cloudflare_ops
 from .models import (
     HerAddRequest, HerBatchAction, HerBatchImport, HerUpdateRequest,
     DeployGroupCreate, DeployGroupUpdate, SetDeployGroupRequest,
@@ -517,6 +518,12 @@ def api_add_instance(req: HerAddRequest):
     try:
         crd_ops.create_her_instance(data)
         logger.info("Created HerInstance CRD for uid=%d", uid)
+        # Auto-sync cloudflared config + DNS for the new instance
+        try:
+            cloudflare_ops.sync_tunnel_config()
+            cloudflare_ops.register_dns_routes(uid, prefix=req.prefix)
+        except Exception as cf_err:
+            logger.warning("Cloudflare auto-config failed for %d (non-fatal): %s", uid, cf_err)
         return {
             "id": uid, "status": "created", "managed_by": "operator",
             "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
@@ -697,6 +704,10 @@ def api_delete(uid: int, purge: bool = Query(False)):
     if _has_crd(uid):
         crd_ops.delete_her_instance(uid, purge_data=purge)
         config_gen.invalidate_bots_cache()
+        try:
+            cloudflare_ops.sync_tunnel_config()
+        except Exception as cf_err:
+            logger.warning("Cloudflare config sync failed after delete %d: %s", uid, cf_err)
         return {"id": uid, "action": "deleted", "managed_by": "operator", "purge": purge}
 
     k8s_ops.delete_pod(uid)
@@ -1236,6 +1247,16 @@ async def api_update_settings(updates: dict[str, str]):
 async def api_get_repos():
     """Get configured GitHub repos list."""
     return {"repos": db.get_github_repos()}
+
+
+@app.post("/api/cloudflare/sync", tags=["settings"])
+async def api_cloudflare_sync():
+    """Regenerate cloudflared config from active CRDs and restart if changed."""
+    try:
+        changed = cloudflare_ops.sync_tunnel_config()
+        return {"synced": True, "config_changed": changed}
+    except Exception as e:
+        raise HTTPException(500, f"Cloudflare sync failed: {e}")
 
 
 # ── API: Config Preview ──

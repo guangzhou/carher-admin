@@ -213,7 +213,6 @@ function StatusBadge({ status }) {
     Paused: "bg-orange-600/20 text-orange-400",
     Pending: "bg-blue-600/20 text-blue-400",
     Failed: "bg-red-600/20 text-red-400",
-    Unknown: "bg-gray-600/20 text-gray-400",
   }[status] || "bg-gray-600/20 text-gray-400";
 
   return <span className={`badge ${cls}`}>{status}</span>;

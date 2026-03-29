@@ -21,7 +21,7 @@ spec:
       # Pin to a specific node for stable hostPath storage (SQLite).
       # TODO: migrate DB to NAS PVC to remove nodeSelector.
       nodeSelector:
-        kubernetes.io/hostname: cn-hongkong.10.0.1.226
+        kubernetes.io/hostname: ap-southeast-1.172.16.0.226
       containers:
         - name: admin
           image: cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her/carher-admin:latest

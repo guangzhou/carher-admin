@@ -83,6 +83,19 @@ export default function DeployPage() {
 
   const groupNames = deployGroups.map((g) => g.name);
 
+  // Collect unique image tags from history + running instances for autocomplete
+  const knownTags = [...new Set([
+    ...history.map((d) => d.image_tag).filter(Boolean),
+    ...instances.map((i) => i.image || i.image_tag).filter(Boolean),
+  ])];
+
+  // Collect branch names from rules (strip glob chars) + common defaults
+  const knownBranches = [...new Set([
+    "main",
+    ...branchRules.map((r) => r.pattern.replace(/\*/g, "")).filter((b) => b && !b.endsWith("/")),
+    ...history.map((d) => d.branch).filter(Boolean),
+  ])];
+
   const startDeploy = async () => {
     if (!imageTag) return alert("请输入镜像 tag");
     let mode = deployMode;
@@ -269,8 +282,11 @@ export default function DeployPage() {
         <div className="card p-5 space-y-4">
           <h3 className="text-sm font-medium text-gray-400">发起新部署</h3>
           <div className="flex gap-2 flex-wrap items-end">
-            <input className="input flex-1 min-w-[200px]" placeholder="镜像 tag (如 v20260329-abc1234)"
+            <input className="input flex-1 min-w-[200px]" placeholder="镜像 tag" list="tag-options"
               value={imageTag} onChange={(e) => setImageTag(e.target.value)} />
+            <datalist id="tag-options">
+              {knownTags.map((t) => <option key={t} value={t} />)}
+            </datalist>
             <select className="input w-36" value={deployMode}
               onChange={(e) => { setDeployMode(e.target.value); if (e.target.value !== "group") setTargetGroup(""); }}>
               <option value="normal">灰度部署</option>
@@ -297,8 +313,15 @@ export default function DeployPage() {
           <div className="border-t border-gray-800 pt-3">
             <p className="text-xs text-gray-500 mb-2">或从 GitHub 触发构建（构建完成后自动部署）</p>
             <div className="flex gap-2 items-end">
-              <input className="input w-48" placeholder="仓库 owner/name" value={buildRepo} onChange={(e) => setBuildRepo(e.target.value)} />
-              <input className="input w-36" placeholder="分支" value={buildBranch} onChange={(e) => setBuildBranch(e.target.value)} />
+              <input className="input w-48" placeholder="仓库 owner/name" list="repo-options" value={buildRepo} onChange={(e) => setBuildRepo(e.target.value)} />
+              <datalist id="repo-options">
+                <option value="guangzhou/CarHer" />
+                <option value="guangzhou/carher-admin" />
+              </datalist>
+              <input className="input w-36" placeholder="分支" list="branch-options" value={buildBranch} onChange={(e) => setBuildBranch(e.target.value)} />
+              <datalist id="branch-options">
+                {knownBranches.map((b) => <option key={b} value={b} />)}
+              </datalist>
               <button className="btn btn-sm" onClick={triggerBuild} disabled={loading === "build"}>
                 {loading === "build" ? "触发中..." : "触发构建"}
               </button>

@@ -99,9 +99,18 @@ def consistency_check() -> list[dict]:
         if inst["status"] == "running" and uid not in pod_statuses:
             issues.append({"id": uid, "issue": "db_running_no_pod", "detail": "DB says running but no Pod found"})
 
-    # Pod exists but not in DB
+    # Pod exists but not in DB (skip CRD-managed instances)
+    crd_uids: set[int] = set()
+    try:
+        from . import crd_ops
+        for inst in crd_ops.list_her_instances():
+            u = inst.get("spec", {}).get("userId", 0)
+            if u:
+                crd_uids.add(u)
+    except Exception:
+        pass
     for uid in pod_statuses:
-        if uid not in db_instances:
+        if uid not in db_instances and uid not in crd_uids:
             issues.append({"id": uid, "issue": "pod_no_db", "detail": "Pod exists but not in DB"})
 
     # DB says stopped but Pod exists

@@ -232,6 +232,107 @@ def _sync_and_deploy(instance: dict):
     db.set_sync_status(uid, "synced")
 
 
+# ── API: Search (must be before /api/instances/{uid} to avoid route conflict) ──
+
+@app.get("/api/instances/search", tags=["instances"])
+def api_search_instances(
+    status: str | None = Query(None, description="Filter: Running/Stopped/Failed/Paused"),
+    model: str | None = Query(None, description="Filter: gpt/sonnet/opus"),
+    deploy_group: str | None = Query(None, description="Filter: group name"),
+    owner: str | None = Query(None, description="Filter: owner contains open_id"),
+    name: str | None = Query(None, description="Filter: name contains text"),
+    feishu_ws: str | None = Query(None, description="Filter: Connected/Disconnected"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    limit: int = Query(200, ge=1, le=5000, description="Max results"),
+):
+    """Search instances with flexible filters. All filters are AND-combined.
+    Searches both CRD-managed and DB instances."""
+    results = []
+
+    # CRD instances
+    try:
+        for inst in crd_ops.list_her_instances():
+            spec = inst.get("spec", {})
+            st = inst.get("status", {})
+            uid = spec.get("userId", 0)
+            if not uid:
+                continue
+            phase = "Paused" if spec.get("paused") else st.get("phase", "Unknown")
+
+            if status and phase.lower() != status.lower():
+                continue
+            if model and spec.get("model", "") != model:
+                continue
+            if deploy_group and spec.get("deployGroup", "stable") != deploy_group:
+                continue
+            if owner and owner not in spec.get("owner", ""):
+                continue
+            if name and name.lower() not in spec.get("name", "").lower():
+                continue
+            if feishu_ws:
+                ws = st.get("feishuWS", "Unknown")
+                if feishu_ws.lower() != ws.lower():
+                    continue
+
+            prefix = spec.get("prefix", "s1")
+            pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
+            results.append({
+                "id": uid,
+                "name": spec.get("name", ""),
+                "model": spec.get("model", ""),
+                "model_short": spec.get("model", ""),
+                "status": phase,
+                "pod_ip": st.get("podIP", ""),
+                "node": st.get("node", ""),
+                "restarts": st.get("restarts", 0),
+                "deploy_group": spec.get("deployGroup", "stable"),
+                "owner": spec.get("owner", ""),
+                "provider": spec.get("provider", "openrouter"),
+                "managed_by": "operator",
+            })
+    except Exception:
+        pass
+
+    # DB fallback instances (skip those already in CRD results)
+    seen = {r["id"] for r in results}
+    instances = db.list_all()
+    pod_statuses = k8s_ops.get_all_pod_statuses()
+    for inst in instances:
+        if inst["status"] == "deleted":
+            continue
+        uid = inst["id"]
+        if uid in seen:
+            continue
+        pod = pod_statuses.get(uid, {})
+        phase = pod.get("phase", "Stopped") if pod.get("pod_exists") else "Stopped"
+        if status and phase.lower() != status.lower():
+            continue
+        if model and inst.get("model", "") != model:
+            continue
+        if deploy_group and inst.get("deploy_group", "stable") != deploy_group:
+            continue
+        if owner and owner not in inst.get("owner", ""):
+            continue
+        if name and name.lower() not in inst.get("name", "").lower():
+            continue
+        prefix = inst.get("prefix", "s1")
+        pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
+        mm = config_gen.MODEL_MAP_ANTHROPIC if inst.get("provider") == "anthropic" else config_gen.MODEL_MAP
+        model_full = mm.get(inst.get("model", "gpt"), inst.get("model", "gpt"))
+        results.append({
+            "id": uid, "name": inst.get("name", ""), "model": model_full,
+            "model_short": inst.get("model", ""), "status": phase,
+            "pod_ip": pod.get("pod_ip", ""), "node": pod.get("node", ""),
+            "restarts": pod.get("restarts", 0),
+            "deploy_group": inst.get("deploy_group", "stable"),
+            "owner": inst.get("owner", ""), "provider": inst.get("provider", "openrouter"),
+        })
+
+    total = len(results)
+    results = results[offset:offset + limit]
+    return {"total": total, "offset": offset, "limit": limit, "instances": results}
+
+
 # ── API: List / Get ──
 
 @app.get("/api/instances")
@@ -655,7 +756,15 @@ def api_health():
 
 @app.get("/api/next-id")
 def api_next_id():
-    return {"next_id": db.next_id()}
+    db_next = db.next_id()
+    try:
+        crd_max = max(
+            (inst.get("spec", {}).get("userId", 0) for inst in crd_ops.list_her_instances()),
+            default=0,
+        )
+        return {"next_id": max(db_next, crd_max + 1)}
+    except Exception:
+        return {"next_id": db_next}
 
 
 @app.post("/api/sync/force")
@@ -792,75 +901,6 @@ async def api_deploy_webhook(req: DeployWebhookRequest):
     return await deployer.start_deploy(req.image_tag, mode=req.mode)
 
 
-# ── API: Search / Filter ──
-
-@app.get("/api/instances/search", tags=["instances"])
-def api_search_instances(
-    status: str | None = Query(None, description="Filter: Running/Stopped/Failed/Paused"),
-    model: str | None = Query(None, description="Filter: gpt/sonnet/opus"),
-    deploy_group: str | None = Query(None, description="Filter: group name"),
-    owner: str | None = Query(None, description="Filter: owner contains open_id"),
-    name: str | None = Query(None, description="Filter: name contains text"),
-    feishu_ws: str | None = Query(None, description="Filter: Connected/Disconnected"),
-    offset: int = Query(0, ge=0, description="Pagination offset"),
-    limit: int = Query(200, ge=1, le=5000, description="Max results"),
-):
-    """Search instances with flexible filters. All filters are AND-combined."""
-    instances = db.list_all()
-    pod_statuses = k8s_ops.get_all_pod_statuses()
-
-    results = []
-    for inst in instances:
-        if inst["status"] == "deleted":
-            continue
-        uid = inst["id"]
-        pod = pod_statuses.get(uid, {})
-        phase = pod.get("phase", "Stopped") if pod.get("pod_exists") else "Stopped"
-
-        if status and phase.lower() != status.lower():
-            continue
-        if model and inst.get("model", "") != model:
-            continue
-        if deploy_group and inst.get("deploy_group", "stable") != deploy_group:
-            continue
-        if owner and owner not in inst.get("owner", ""):
-            continue
-        if name and name.lower() not in inst.get("name", "").lower():
-            continue
-
-        prefix = inst.get("prefix", "s1")
-        pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
-        mm = config_gen.MODEL_MAP_ANTHROPIC if inst.get("provider") == "anthropic" else config_gen.MODEL_MAP
-        model_full = mm.get(inst.get("model", "gpt"), inst.get("model", "gpt"))
-
-        entry = {
-            "id": uid,
-            "name": inst.get("name", ""),
-            "model": model_full,
-            "model_short": inst.get("model", ""),
-            "status": phase,
-            "pod_ip": pod.get("pod_ip", ""),
-            "node": pod.get("node", ""),
-            "restarts": pod.get("restarts", 0),
-            "deploy_group": inst.get("deploy_group", "stable"),
-            "owner": inst.get("owner", ""),
-            "provider": inst.get("provider", "openrouter"),
-        }
-
-        if feishu_ws:
-            health = k8s_ops.check_pod_health(uid) if pod.get("pod_exists") else {}
-            ws = "Connected" if health.get("feishu_ws") else "Disconnected"
-            if ws.lower() != feishu_ws.lower():
-                continue
-            entry["feishu_ws"] = ws
-
-        results.append(entry)
-
-    total = len(results)
-    results = results[offset:offset + limit]
-    return {"total": total, "offset": offset, "limit": limit, "instances": results}
-
-
 # ── API: Config Preview ──
 
 @app.get("/api/instances/{uid}/config-preview", tags=["instances"])
@@ -900,33 +940,77 @@ def api_known_bots():
 
 @app.get("/api/stats", tags=["system"])
 def api_stats():
-    """Aggregated statistics for dashboard and monitoring."""
+    """Aggregated statistics for dashboard and monitoring.
+    Merges CRD-managed and DB-managed instances."""
+    model_dist: dict[str, int] = {}
+    provider_dist: dict[str, int] = {}
+    prefix_dist: dict[str, int] = {}
+    group_dist: dict[str, int] = {}
+    total = 0
+    running = 0
+    stopped = 0
+    paused = 0
+    seen_uids: set[int] = set()
+
+    # CRD instances
+    try:
+        for inst in crd_ops.list_her_instances():
+            spec = inst.get("spec", {})
+            status = inst.get("status", {})
+            uid = spec.get("userId", 0)
+            if not uid:
+                continue
+            seen_uids.add(uid)
+            total += 1
+            phase = status.get("phase", "Unknown")
+            if spec.get("paused"):
+                paused += 1
+            elif phase == "Running":
+                running += 1
+            m = spec.get("model", "gpt")
+            model_dist[m] = model_dist.get(m, 0) + 1
+            p = spec.get("provider", "openrouter")
+            provider_dist[p] = provider_dist.get(p, 0) + 1
+            pfx = spec.get("prefix", "s1")
+            prefix_dist[pfx] = prefix_dist.get(pfx, 0) + 1
+            g = spec.get("deployGroup", "stable")
+            group_dist[g] = group_dist.get(g, 0) + 1
+    except Exception:
+        pass
+
+    # DB instances
     instances = db.list_all()
     pod_statuses = k8s_ops.get_all_pod_statuses()
-    group_stats = db.get_deploy_group_stats()
-
-    active = [i for i in instances if i["status"] != "deleted"]
-    running_pods = sum(1 for uid, p in pod_statuses.items() if p.get("pod_exists") and p.get("phase") == "Running")
-
-    model_dist = {}
-    provider_dist = {}
-    prefix_dist = {}
-    for inst in active:
+    for inst in instances:
+        if inst["status"] == "deleted":
+            continue
+        uid = inst["id"]
+        if uid in seen_uids:
+            continue
+        total += 1
+        pod = pod_statuses.get(uid, {})
+        if pod.get("pod_exists") and pod.get("phase") == "Running":
+            running += 1
+        if inst["status"] == "stopped":
+            stopped += 1
         m = inst.get("model", "gpt")
         model_dist[m] = model_dist.get(m, 0) + 1
         p = inst.get("provider", "openrouter")
         provider_dist[p] = provider_dist.get(p, 0) + 1
         pfx = inst.get("prefix", "s1")
         prefix_dist[pfx] = prefix_dist.get(pfx, 0) + 1
+        g = inst.get("deploy_group", "stable")
+        group_dist[g] = group_dist.get(g, 0) + 1
 
     return {
-        "total_instances": len(active),
-        "running_pods": running_pods,
-        "stopped": sum(1 for i in active if i["status"] == "stopped"),
+        "total_instances": total,
+        "running_pods": running,
+        "stopped": stopped,
+        "paused": paused,
         "model_distribution": model_dist,
         "provider_distribution": provider_dist,
         "prefix_distribution": prefix_dist,
-        "deploy_group_distribution": group_stats,
+        "deploy_group_distribution": group_dist,
         "deploy_groups": db.list_deploy_groups(),
         "wave_order": db.get_wave_order(),
         "current_image_tag": db.get_current_image_tag(),

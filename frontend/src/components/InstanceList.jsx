@@ -21,7 +21,8 @@ export default function InstanceList({ detailId, setDetailId }) {
 
   const filtered = instances.filter((i) => {
     if (statusFilter === "running" && i.status !== "Running") return false;
-    if (statusFilter === "stopped" && i.status !== "Stopped") return false;
+    if (statusFilter === "stopped" && i.status !== "Stopped" && i.status !== "Paused") return false;
+    if (statusFilter === "paused" && i.status !== "Paused") return false;
     if (filter) {
       const q = filter.toLowerCase();
       return (
@@ -101,6 +102,7 @@ export default function InstanceList({ detailId, setDetailId }) {
           <option value="all">全部状态</option>
           <option value="running">运行中</option>
           <option value="stopped">已停止</option>
+          <option value="paused">已暂停</option>
         </select>
         <button className="btn btn-ghost" onClick={load} disabled={loading}>
           {loading ? "加载中..." : "刷新"}
@@ -161,7 +163,9 @@ export default function InstanceList({ detailId, setDetailId }) {
                 <td className="p-3 text-gray-400 font-mono text-xs">{inst.pod_ip || "-"}</td>
                 <td className="p-3 text-gray-400 text-xs">{inst.age || "-"}</td>
                 <td className="p-3">
-                  {inst.sync_status === "synced" ? (
+                  {inst.sync_status === "operator" ? (
+                    <span className="text-blue-400 text-xs" title="Operator 管理">⚙</span>
+                  ) : inst.sync_status === "synced" ? (
                     <span className="text-emerald-400 text-xs">●</span>
                   ) : inst.sync_status === "pending" ? (
                     <span className="text-yellow-400 text-xs" title="ConfigMap 同步待重试">◐</span>
@@ -178,7 +182,9 @@ export default function InstanceList({ detailId, setDetailId }) {
                         <button className="btn btn-danger text-xs" onClick={() => singleAction(inst.id, "stop")}>停止</button>
                       </>
                     ) : (
-                      <button className="btn btn-success text-xs" onClick={() => singleAction(inst.id, "start")}>启动</button>
+                      <button className="btn btn-success text-xs" onClick={() => singleAction(inst.id, "start")}>
+                        {inst.status === "Paused" ? "恢复" : "启动"}
+                      </button>
                     )}
                   </div>
                 </td>
@@ -204,8 +210,10 @@ function StatusBadge({ status }) {
   const cls = {
     Running: "bg-emerald-600/20 text-emerald-400",
     Stopped: "bg-yellow-600/20 text-yellow-400",
+    Paused: "bg-orange-600/20 text-orange-400",
     Pending: "bg-blue-600/20 text-blue-400",
     Failed: "bg-red-600/20 text-red-400",
+    Unknown: "bg-gray-600/20 text-gray-400",
   }[status] || "bg-gray-600/20 text-gray-400";
 
   return <span className={`badge ${cls}`}>{status}</span>;

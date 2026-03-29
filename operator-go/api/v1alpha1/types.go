@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // HerInstanceSpec defines the desired state.
@@ -50,13 +51,13 @@ type HerInstanceList struct {
 	Items           []HerInstance `json:"items"`
 }
 
-func (h *HerInstance) DeepCopyObject() interface{} {
+func (h *HerInstance) DeepCopyObject() runtime.Object {
 	cp := *h
 	h.ObjectMeta.DeepCopyInto(&cp.ObjectMeta)
 	return &cp
 }
 
-func (h *HerInstanceList) DeepCopyObject() interface{} {
+func (h *HerInstanceList) DeepCopyObject() runtime.Object {
 	cp := *h
 	if h.Items != nil {
 		cp.Items = make([]HerInstance, len(h.Items))

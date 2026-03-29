@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,10 +17,19 @@ import (
 	"github.com/guangzhou/carher-admin/operator-go/internal/metrics"
 )
 
-const (
+var (
 	HealthCheckInterval = 30 * time.Second
-	HealthCheckWorkers  = 50 // 500 instances / 50 workers = 10 seconds per cycle
+	HealthCheckWorkers  = getEnvInt("HEALTH_CHECK_WORKERS", 50)
 )
+
+func getEnvInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return fallback
+}
 
 // HealthChecker runs periodic concurrent health checks across all HerInstances.
 type HealthChecker struct {

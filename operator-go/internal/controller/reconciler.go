@@ -3,8 +3,6 @@ package controller
 import (
 	"context"
 	"crypto/md5"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -135,13 +133,13 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		her.Status.Phase = "Pending"
 	}
 
-	// Only mark knownBots dirty if bot-related fields might have changed
-	oldAppID := her.Status.ConfigHash // reuse as change marker: configHash changes when spec changes
+	prevHash := her.Status.ConfigHash
 	her.Status.ConfigHash = configHash
 	if err := r.Status().Update(ctx, &her); err != nil {
 		logger.V(1).Info("Status update failed", "uid", uid, "err", err)
 	}
-	if oldAppID != configHash {
+	// Only rebuild knownBots when config actually changed (bot fields are part of the config hash)
+	if prevHash != configHash && prevHash != "" {
 		r.KnownBots.MarkDirty()
 	}
 
@@ -153,6 +151,7 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 func (r *HerInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&herv1.HerInstance{}).
+		Owns(&corev1.Pod{}).
 		Complete(r)
 }
 
@@ -192,7 +191,11 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 
 	hash := fmt.Sprintf("%x", md5.Sum([]byte(configJSON)))[:12]
 
-	// Apply ConfigMap
+	// Skip ConfigMap write if hash matches (no config change)
+	if her.Status.ConfigHash == hash {
+		return hash, nil
+	}
+
 	cmName := fmt.Sprintf("carher-%d-user-config", uid)
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -242,6 +245,8 @@ func (r *HerInstanceReconciler) createPod(ctx context.Context, her *herv1.HerIns
 	}
 	pfx := prefix + "-"
 
+	isController := true
+	blockOwnerDeletion := true
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("carher-%d", uid),
@@ -254,6 +259,14 @@ func (r *HerInstanceReconciler) createPod(ctx context.Context, her *herv1.HerIns
 			Annotations: map[string]string{
 				"carher.io/deploy-group": her.Spec.DeployGroup,
 			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion:         "carher.io/v1alpha1",
+				Kind:               "HerInstance",
+				Name:               her.Name,
+				UID:                her.UID,
+				Controller:         &isController,
+				BlockOwnerDeletion: &blockOwnerDeletion,
+			}},
 		},
 		Spec: corev1.PodSpec{
 			ImagePullSecrets: []corev1.LocalObjectReference{{Name: "acr-secret"}},
@@ -361,21 +374,7 @@ func (r *HerInstanceReconciler) ensurePVC(ctx context.Context, uid int) error {
 	return r.Create(ctx, pvc)
 }
 
-// base64Decode is unused but kept for future Secret reading in non-K8s client contexts
-func base64Decode(s string) string {
-	b, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		return s
-	}
-	return string(b)
-}
-
 // ── helpers ──
-
-func jsonMarshal(v interface{}) string {
-	b, _ := json.MarshalIndent(v, "", "  ")
-	return string(b)
-}
 
 // splitOwners splits a pipe-separated owner string into a slice.
 func splitOwners(s string) []string {

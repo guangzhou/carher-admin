@@ -146,11 +146,23 @@ func (m *KnownBotsManager) rebuild(ctx context.Context) {
 	var existing corev1.ConfigMap
 	err := m.Client.Get(ctx, types.NamespacedName{Name: KnownBotsCMName, Namespace: Namespace}, &existing)
 	if errors.IsNotFound(err) {
-		m.Client.Create(ctx, cm)
+		if cerr := m.Client.Create(ctx, cm); cerr != nil {
+			logger.Error(cerr, "Failed to create knownBots ConfigMap")
+			m.MarkDirty()
+			return
+		}
 	} else if err == nil {
 		existing.Data = cm.Data
 		existing.Labels = cm.Labels
-		m.Client.Update(ctx, &existing)
+		if uerr := m.Client.Update(ctx, &existing); uerr != nil {
+			logger.Error(uerr, "Failed to update knownBots ConfigMap")
+			m.MarkDirty()
+			return
+		}
+	} else {
+		logger.Error(err, "Failed to get knownBots ConfigMap")
+		m.MarkDirty()
+		return
 	}
 
 	metrics.KnownBotsCount.Set(float64(len(bots)))

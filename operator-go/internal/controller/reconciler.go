@@ -60,6 +60,9 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		r.deleteConfigMap(ctx, uid)
 		// PVC intentionally preserved
 		r.KnownBots.MarkDirty()
+		uidStr := strconv.Itoa(uid)
+		metrics.FeishuWSConnected.DeleteLabelValues(uidStr, her.Spec.Name)
+		metrics.PodRestarts.DeleteLabelValues(uidStr, her.Spec.Name)
 		return ctrl.Result{}, nil
 	}
 

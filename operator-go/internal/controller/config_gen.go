@@ -52,28 +52,25 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		modelFull = input.Model
 	}
 
-	var models map[string]interface{}
+	alias := func(a string) map[string]string { return map[string]string{"alias": a} }
+
+	models := make(map[string]interface{})
 	if input.Provider == "anthropic" {
-		models = map[string]interface{}{
-			"anthropic/claude-opus-4-6":                {"alias": "opus"},
-			"anthropic/claude-sonnet-4-6":              {"alias": "sonnet"},
-			"openrouter/anthropic/claude-opus-4.6":     {"alias": "or-opus"},
-			"openrouter/anthropic/claude-sonnet-4.6":   {"alias": "or-sonnet"},
-		}
+		models["anthropic/claude-opus-4-6"] = alias("opus")
+		models["anthropic/claude-sonnet-4-6"] = alias("sonnet")
+		models["openrouter/anthropic/claude-opus-4.6"] = alias("or-opus")
+		models["openrouter/anthropic/claude-sonnet-4.6"] = alias("or-sonnet")
 	} else {
-		models = map[string]interface{}{
-			"openrouter/anthropic/claude-opus-4.6":     {"alias": "opus"},
-			"openrouter/anthropic/claude-sonnet-4.6":   {"alias": "sonnet"},
-			"anthropic/claude-opus-4-6":                {"alias": "or-opus"},
-			"anthropic/claude-sonnet-4-6":              {"alias": "or-sonnet"},
-		}
+		models["openrouter/anthropic/claude-opus-4.6"] = alias("opus")
+		models["openrouter/anthropic/claude-sonnet-4.6"] = alias("sonnet")
+		models["anthropic/claude-opus-4-6"] = alias("or-opus")
+		models["anthropic/claude-sonnet-4-6"] = alias("or-sonnet")
 	}
-	// Shared models
-	models["openrouter/google/gemini-3.1-pro-preview"] = map[string]string{"alias": "gemini"}
-	models["openrouter/minimax/minimax-m2.5"] = map[string]string{"alias": "minimax"}
-	models["openrouter/z-ai/glm-5"] = map[string]string{"alias": "glm"}
-	models["openrouter/openai/gpt-5.4"] = map[string]string{"alias": "gpt"}
-	models["openrouter/openai/gpt-5.3-codex"] = map[string]string{"alias": "codex"}
+	models["openrouter/google/gemini-3.1-pro-preview"] = alias("gemini")
+	models["openrouter/minimax/minimax-m2.5"] = alias("minimax")
+	models["openrouter/z-ai/glm-5"] = alias("glm")
+	models["openrouter/openai/gpt-5.4"] = alias("gpt")
+	models["openrouter/openai/gpt-5.3-codex"] = alias("codex")
 
 	cfg := map[string]interface{}{
 		"$include": "./carher-config.json",
@@ -99,6 +96,8 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		},
 	}
 
+	owners := splitOwners(input.Owner)
+
 	if input.AppID != "" && input.AppSecret != "" {
 		feishu := map[string]interface{}{
 			"enabled":          true,
@@ -117,14 +116,12 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		if input.BotOpenID != "" {
 			feishu["botOpenId"] = input.BotOpenID
 		}
-		owners := splitOwners(input.Owner)
 		if len(owners) > 0 {
 			feishu["dm"] = map[string]interface{}{"allowFrom": owners}
 		}
 		cfg["channels"] = map[string]interface{}{"feishu": feishu}
 	}
 
-	owners := splitOwners(input.Owner)
 	if len(owners) > 0 {
 		cfg["commands"] = map[string]interface{}{"ownerAllowFrom": owners}
 	}

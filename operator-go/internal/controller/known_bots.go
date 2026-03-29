@@ -24,11 +24,10 @@ const KnownBotsCMName = "carher-known-bots"
 type KnownBotsManager struct {
 	Client client.Client
 
-	mu             sync.RWMutex
-	bots           map[string]string // appId → name
-	botOpenIDs     map[string]string // botOpenId → appId
-	dirty          bool
-	rebuildPending bool
+	mu         sync.RWMutex
+	bots       map[string]string // appId → name
+	botOpenIDs map[string]string // botOpenId → appId
+	dirty      bool
 }
 
 func NewKnownBotsManager(c client.Client) *KnownBotsManager {

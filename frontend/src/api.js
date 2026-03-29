@@ -101,6 +101,7 @@ export const api = {
   triggerBuild: (data) => request("/ci/trigger-build", { method: "POST", body: JSON.stringify(data) }),
   listBranches: (repo) => request(`/ci/branches?repo=${encodeURIComponent(repo)}`),
   listWorkflows: (repo) => request(`/ci/workflows?repo=${encodeURIComponent(repo)}`),
+  listRuns: (repo = "", perPage = 10) => request(`/ci/runs?repo=${encodeURIComponent(repo)}&per_page=${perPage}`),
   // Settings
   getSettings: () => request("/settings"),
   updateSettings: (updates) => request("/settings", { method: "PUT", body: JSON.stringify(updates) }),

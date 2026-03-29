@@ -64,6 +64,10 @@ export default function DeployPage() {
   const [repoBranches, setRepoBranches] = useState([]);
   const [repoWorkflows, setRepoWorkflows] = useState([]);
 
+  // CI runs
+  const [ciRuns, setCiRuns] = useState([]);
+  const [ciLoading, setCiLoading] = useState(false);
+
   const loadFull = useCallback(() => {
     api.getDeployStatus().then(setStatus);
     api.getDeployHistory().then(setHistory);
@@ -77,14 +81,27 @@ export default function DeployPage() {
     api.listDeployGroups().then(setDeployGroups);
   }, []);
 
+  const loadCiRuns = useCallback(() => {
+    setCiLoading(true);
+    api.listRuns("", 10).then((r) => setCiRuns(r.runs || [])).catch(() => {}).finally(() => setCiLoading(false));
+  }, []);
+
   useEffect(() => {
     loadFull();
+    loadCiRuns();
     api.getRepos().then((r) => {
       const repos = r.repos || ["guangzhou/CarHer", "guangzhou/carher-admin"];
       setConfiguredRepos(repos);
       if (!buildRepo && repos.length > 0) setBuildRepo(repos[0]);
     }).catch(() => setConfiguredRepos(["guangzhou/CarHer", "guangzhou/carher-admin"]));
-  }, [loadFull]);
+  }, [loadFull, loadCiRuns]);
+
+  useEffect(() => {
+    const hasActive = ciRuns.some((r) => r.status === "in_progress" || r.status === "queued");
+    if (!hasActive) return;
+    const t = setInterval(loadCiRuns, 10000);
+    return () => clearInterval(t);
+  }, [ciRuns, loadCiRuns]);
 
   useEffect(() => {
     if (!buildRepo) return;
@@ -376,6 +393,53 @@ export default function DeployPage() {
         </div>
       )}
 
+      {/* CI Runs */}
+      <div className="card p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium text-gray-400">GitHub Actions 构建状态</h3>
+            <p className="text-xs text-gray-600">所有仓库最近构建，运行中时自动刷新</p>
+          </div>
+          <button className="btn btn-sm text-xs" onClick={loadCiRuns} disabled={ciLoading}>
+            {ciLoading ? "刷新中..." : "刷新"}
+          </button>
+        </div>
+
+        {ciRuns.length === 0 && !ciLoading && (
+          <p className="text-xs text-gray-600 text-center py-4">暂无构建记录</p>
+        )}
+
+        {ciRuns.length > 0 && (
+          <div className="space-y-2">
+            {ciRuns.map((run) => (
+              <div key={run.id} className="flex items-center justify-between bg-gray-800/50 rounded-lg px-4 py-2.5 hover:bg-gray-800/80 transition-colors">
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <RunStatusIcon status={run.status} conclusion={run.conclusion} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-200 truncate">{run.name}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400 font-mono whitespace-nowrap">{run.repo.split("/")[1]}</span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5 text-xs text-gray-500">
+                      <span className="font-mono text-blue-400">{run.branch}</span>
+                      <span>#{run.run_number}</span>
+                      {run.actor && <span>by {run.actor}</span>}
+                      <span>{run.event}</span>
+                      <span>{formatRunTime(run.created_at)}</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 ml-3">
+                  <RunBadge status={run.status} conclusion={run.conclusion} />
+                  <a href={run.html_url} target="_blank" rel="noreferrer"
+                    className="text-xs text-gray-500 hover:text-blue-400 transition-colors" title="在 GitHub 查看">↗</a>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Branch rules */}
       <div className="card p-5 space-y-3">
         <div className="flex items-center justify-between">
@@ -630,4 +694,52 @@ function StatusBadge({ status }) {
     rolled_back: "bg-purple-600/20 text-purple-400",
   }[status] || "bg-gray-600/20 text-gray-400";
   return <span className={`badge ${cls}`}>{status}</span>;
+}
+
+function RunStatusIcon({ status, conclusion }) {
+  if (status === "in_progress") {
+    return (
+      <span className="relative flex h-3 w-3">
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+        <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500" />
+      </span>
+    );
+  }
+  if (status === "queued" || status === "waiting" || status === "pending") {
+    return <span className="inline-flex h-3 w-3 rounded-full bg-yellow-500/60" />;
+  }
+  if (conclusion === "success") {
+    return <span className="inline-flex h-3 w-3 rounded-full bg-emerald-500" />;
+  }
+  if (conclusion === "failure") {
+    return <span className="inline-flex h-3 w-3 rounded-full bg-red-500" />;
+  }
+  if (conclusion === "cancelled") {
+    return <span className="inline-flex h-3 w-3 rounded-full bg-gray-500" />;
+  }
+  return <span className="inline-flex h-3 w-3 rounded-full bg-gray-600" />;
+}
+
+function RunBadge({ status, conclusion }) {
+  if (status === "in_progress") return <span className="badge bg-blue-600/20 text-blue-400 animate-pulse">运行中</span>;
+  if (status === "queued" || status === "waiting") return <span className="badge bg-yellow-600/20 text-yellow-400">排队中</span>;
+  if (status === "pending") return <span className="badge bg-gray-600/20 text-gray-400">等待中</span>;
+  if (conclusion === "success") return <span className="badge bg-emerald-600/20 text-emerald-400">成功</span>;
+  if (conclusion === "failure") return <span className="badge bg-red-600/20 text-red-400">失败</span>;
+  if (conclusion === "cancelled") return <span className="badge bg-gray-600/20 text-gray-400">已取消</span>;
+  if (conclusion === "skipped") return <span className="badge bg-gray-600/20 text-gray-500">跳过</span>;
+  return <span className="badge bg-gray-600/20 text-gray-400">{conclusion || status}</span>;
+}
+
+function formatRunTime(isoStr) {
+  if (!isoStr) return "";
+  try {
+    const d = new Date(isoStr);
+    const now = new Date();
+    const diffMs = now - d;
+    if (diffMs < 60000) return "刚刚";
+    if (diffMs < 3600000) return `${Math.floor(diffMs / 60000)}分钟前`;
+    if (diffMs < 86400000) return `${Math.floor(diffMs / 3600000)}小时前`;
+    return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  } catch { return isoStr; }
 }

@@ -1161,6 +1161,53 @@ async def api_list_branches(repo: str = Query("guangzhou/CarHer", description="G
         return {"repo": repo, "branches": [], "error": str(e)}
 
 
+# ── API: CI Runs (GitHub Actions) ──
+
+@app.get("/api/ci/runs", tags=["ci-cd"])
+async def api_list_runs(
+    repo: str = Query("", description="GitHub repo (empty = all configured repos)"),
+    per_page: int = Query(10, ge=1, le=30),
+):
+    """List recent GitHub Actions workflow runs. If repo is empty, fetches from all configured repos."""
+    token = db.get_github_token()
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if token:
+        headers["Authorization"] = f"token {token}"
+
+    repos = [repo] if repo else db.get_github_repos()
+    all_runs = []
+
+    import aiohttp
+    try:
+        async with aiohttp.ClientSession() as session:
+            for r in repos:
+                url = f"https://api.github.com/repos/{r}/actions/runs?per_page={per_page}"
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    for run in data.get("workflow_runs", []):
+                        all_runs.append({
+                            "id": run["id"],
+                            "repo": r,
+                            "name": run.get("name", ""),
+                            "branch": run.get("head_branch", ""),
+                            "status": run.get("status", ""),
+                            "conclusion": run.get("conclusion"),
+                            "created_at": run.get("created_at", ""),
+                            "updated_at": run.get("updated_at", ""),
+                            "html_url": run.get("html_url", ""),
+                            "run_number": run.get("run_number", 0),
+                            "event": run.get("event", ""),
+                            "actor": run.get("actor", {}).get("login", ""),
+                        })
+    except Exception as e:
+        return {"runs": all_runs, "error": str(e)}
+
+    all_runs.sort(key=lambda x: x["created_at"], reverse=True)
+    return {"runs": all_runs[:per_page]}
+
+
 # ── API: Settings ──
 
 @app.get("/api/settings", tags=["settings"])

@@ -104,7 +104,7 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if len(pod.Spec.Containers) > 0 {
 			currentImage = pod.Spec.Containers[0].Image
 		}
-		desiredImage := fmt.Sprintf("%s:%s", ACR, her.Spec.Image)
+		desiredImage := fmt.Sprintf("%s:%s", ACR, resolveImage(her.Spec.Image))
 		if currentImage != desiredImage {
 			needRecreate = true
 			action = "update-image"
@@ -238,14 +238,8 @@ func (r *HerInstanceReconciler) getPod(ctx context.Context, uid int) (*corev1.Po
 
 func (r *HerInstanceReconciler) createPod(ctx context.Context, her *herv1.HerInstance) error {
 	uid := her.Spec.UserID
-	imageTag := her.Spec.Image
-	if imageTag == "" {
-		imageTag = "v20260328"
-	}
-	prefix := her.Spec.Prefix
-	if prefix == "" {
-		prefix = "s1"
-	}
+	imageTag := resolveImage(her.Spec.Image)
+	prefix := resolvePrefix(her.Spec.Prefix)
 	pfx := prefix + "-"
 
 	isController := true
@@ -378,6 +372,20 @@ func (r *HerInstanceReconciler) ensurePVC(ctx context.Context, uid int) error {
 }
 
 // ── helpers ──
+
+func resolveImage(specImage string) string {
+	if specImage == "" {
+		return "v20260328"
+	}
+	return specImage
+}
+
+func resolvePrefix(specPrefix string) string {
+	if specPrefix == "" {
+		return "s1"
+	}
+	return specPrefix
+}
 
 // splitOwners splits a pipe-separated owner string into a slice.
 func splitOwners(s string) []string {

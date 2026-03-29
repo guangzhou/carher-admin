@@ -10,6 +10,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	herv1 "github.com/guangzhou/carher-admin/operator-go/api/v1alpha1"
 	"github.com/guangzhou/carher-admin/operator-go/internal/controller"
@@ -36,7 +37,7 @@ func main() {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: ":8081",
-		MetricsBindAddress:     ":8080",
+		Metrics:                metricsserver.Options{BindAddress: ":8080"},
 		LeaderElection:         true,
 		LeaderElectionID:       "carher-operator-leader",
 	})
@@ -60,8 +61,7 @@ func main() {
 
 	// Register health checker as a Runnable (concurrent goroutine pool)
 	if err := mgr.Add(&controller.HealthChecker{
-		Client:    mgr.GetClient(),
-		KnownBots: knownBots,
+		Client: mgr.GetClient(),
 	}); err != nil {
 		logger.Error(err, "Unable to add health checker")
 		os.Exit(1)

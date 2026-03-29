@@ -52,8 +52,6 @@ type HerInstanceList struct {
 
 func (h *HerInstance) DeepCopyObject() interface{} {
 	cp := *h
-	cp.Spec = h.Spec
-	cp.Status = h.Status
 	h.ObjectMeta.DeepCopyInto(&cp.ObjectMeta)
 	return &cp
 }

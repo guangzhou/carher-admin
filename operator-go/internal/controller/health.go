@@ -33,8 +33,7 @@ func getEnvInt(key string, fallback int) int {
 
 // HealthChecker runs periodic concurrent health checks across all HerInstances.
 type HealthChecker struct {
-	Client    client.Client
-	KnownBots *KnownBotsManager
+	Client client.Client
 }
 
 // Start runs the health check loop. Call from manager startup.

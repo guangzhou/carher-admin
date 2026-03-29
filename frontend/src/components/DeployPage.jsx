@@ -38,6 +38,10 @@ export default function DeployPage() {
   const [newGroupDesc, setNewGroupDesc] = useState("");
   const [showNewGroup, setShowNewGroup] = useState(false);
 
+  const [editingGroup, setEditingGroup] = useState(null);
+  const [editPriority, setEditPriority] = useState(0);
+  const [editDesc, setEditDesc] = useState("");
+
   const loadFull = useCallback(() => {
     api.getDeployStatus().then(setStatus);
     api.getDeployHistory().then(setHistory);
@@ -114,6 +118,23 @@ export default function DeployPage() {
       setNewGroupPriority(50);
       setNewGroupDesc("");
       setShowNewGroup(false);
+      loadFull();
+    } catch (e) {
+      alert(e.message);
+    }
+  };
+
+  const startEditGroup = (g) => {
+    setEditingGroup(g.name);
+    setEditPriority(g.priority);
+    setEditDesc(g.description || "");
+  };
+
+  const saveEditGroup = async () => {
+    if (!editingGroup) return;
+    try {
+      await api.updateDeployGroup(editingGroup, { priority: editPriority, description: editDesc });
+      setEditingGroup(null);
       loadFull();
     } catch (e) {
       alert(e.message);
@@ -293,18 +314,43 @@ export default function DeployPage() {
         <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${Math.min(deployGroups.length || 3, 4)}, minmax(0, 1fr))` }}>
           {deployGroups.map((g, idx) => {
             const groupInstances = instances.filter((i) => (i.deploy_group || "stable") === g.name && i.status !== "Deleted");
+            const isEditing = editingGroup === g.name;
             return (
               <div key={g.name} className={`rounded-lg border p-3 ${groupColor(idx)}`}>
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-sm font-medium">{g.name}</span>
                   <div className="flex items-center gap-1">
-                    <span className="text-xs opacity-60">P{g.priority}</span>
-                    {g.name !== "stable" && (
-                      <button className="text-xs opacity-40 hover:opacity-100 ml-1" onClick={() => deleteGroup(g.name)} title="删除分组">x</button>
+                    {!isEditing && (
+                      <>
+                        <span className="text-xs opacity-60">P{g.priority}</span>
+                        <button className="text-xs opacity-40 hover:opacity-100 ml-1" onClick={() => startEditGroup(g)} title="编辑分组">✎</button>
+                        {g.name !== "stable" && (
+                          <button className="text-xs opacity-40 hover:opacity-100 ml-1" onClick={() => deleteGroup(g.name)} title="删除分组">x</button>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
-                {g.description && <p className="text-xs opacity-60 mb-2">{g.description}</p>}
+
+                {isEditing ? (
+                  <div className="space-y-2 mb-2">
+                    <div className="flex gap-2 items-center">
+                      <label className="text-[10px] text-gray-500 w-12">优先级</label>
+                      <input type="number" className="input w-16 text-xs py-1" value={editPriority} onChange={(e) => setEditPriority(+e.target.value)} />
+                    </div>
+                    <div className="flex gap-2 items-center">
+                      <label className="text-[10px] text-gray-500 w-12">描述</label>
+                      <input className="input flex-1 text-xs py-1" value={editDesc} onChange={(e) => setEditDesc(e.target.value)} placeholder="分组描述" />
+                    </div>
+                    <div className="flex gap-1">
+                      <button className="btn btn-sm btn-primary text-[10px] py-0.5 px-2" onClick={saveEditGroup}>保存</button>
+                      <button className="btn btn-sm text-[10px] py-0.5 px-2" onClick={() => setEditingGroup(null)}>取消</button>
+                    </div>
+                  </div>
+                ) : (
+                  g.description && <p className="text-xs opacity-60 mb-2">{g.description}</p>
+                )}
+
                 <div className="text-xs mb-1">{groupInstances.length} 个实例</div>
                 <div className="space-y-1 max-h-48 overflow-auto">
                   {groupInstances.map((inst) => (
@@ -322,6 +368,9 @@ export default function DeployPage() {
                       </select>
                     </div>
                   ))}
+                  {groupInstances.length === 0 && (
+                    <p className="text-[10px] text-gray-600 italic py-1">暂无实例，可从其他分组拖入</p>
+                  )}
                 </div>
               </div>
             );

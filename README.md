@@ -31,11 +31,14 @@ graph TB
         CRD -->|"watch"| Operator
 
         subgraph Pods["CarHer 实例 Pods (×500+)"]
-            P1["Pod + ConfigMap<br/>+ PVC + Secret"]
-            P2["Pod + ConfigMap<br/>+ PVC + Secret"]
+            P1["Pod + ConfigMap<br/>+ PVC + Secret + Service"]
+            P2["Pod + ConfigMap<br/>+ PVC + Secret + Service"]
             P3["..."]
         end
         Operator -->|"reconcile<br/>manage lifecycle"| Pods
+
+        SVC["ClusterIP Service<br/>(per instance, 稳定 IP)<br/>Operator 自动创建"]
+        Pods --- SVC
 
         NAS["NAS PVC (ReadWriteMany)<br/>skills / sessions / data"]
         Pods --- NAS
@@ -46,15 +49,45 @@ graph TB
         Prom --> Grafana
         Alert["AlertManager<br/>→ 飞书群告警"]
         Prom --> Alert
+
+        CFD["cloudflared<br/>K8s Deployment<br/>ConfigMap 驱动"]
+        CFD -->|"ClusterIP"| SVC
+        CFD --> Admin
     end
 
-    CF["Cloudflare Tunnel<br/>*.carher.net → Pod"]
-    CF --> Pods
-    CF --> Admin
+    CF["Cloudflare Tunnel<br/>*.carher.net"]
+    CF --> CFD
 
     User["运维人员 / Cursor"]
     User -->|"Web Dashboard<br/>REST API"| Admin
 ```
+
+### 网络架构
+
+```mermaid
+graph LR
+    Internet["用户 / 飞书"] -->|"*.carher.net"| CloudflareCDN["Cloudflare CDN"]
+    CloudflareCDN --> Tunnel["Cloudflare Tunnel"]
+    Tunnel --> CFPod["cloudflared Pod<br/>(K8s Deployment)"]
+
+    CFPod -->|"admin.carher.net"| AdminSvc["carher-admin-svc<br/>ClusterIP"]
+    CFPod -->|"s3-u14-auth/fe/proxy"| Svc14["carher-14-svc<br/>ClusterIP"]
+    CFPod -->|"s1-u79-auth/fe/proxy"| Svc79["carher-79-svc<br/>ClusterIP"]
+    CFPod -->|"s1-uN-auth/fe/proxy"| SvcN["carher-N-svc<br/>ClusterIP"]
+
+    AdminSvc --> AdminPod["Admin Pod"]
+    Svc14 --> Pod14["carher-14 Pod"]
+    Svc79 --> Pod79["carher-79 Pod"]
+    SvcN --> PodN["carher-N Pod"]
+
+    style CFPod fill:#f59e0b20,stroke:#f59e0b
+    style AdminSvc fill:#3b82f620,stroke:#3b82f6
+    style Svc14 fill:#3b82f620,stroke:#3b82f6
+    style Svc79 fill:#3b82f620,stroke:#3b82f6
+    style SvcN fill:#3b82f620,stroke:#3b82f6
+```
+
+**关键设计**: Pod IP 随重启变化，但 ClusterIP Service 保持稳定。cloudflared 路由到 Service ClusterIP，Pod 重建时**零配置变更**。
 
 ### 数据流
 
@@ -116,8 +149,10 @@ graph LR
 | 监控指标历史 | SQLite `metrics_history` 表 (60s 采样) | Admin 后台线程 | Admin Dashboard |
 | 实时监控指标 | Prometheus | Operator /metrics | Grafana |
 | 灰度分组配置 | SQLite `deploy_groups` 表 | Admin API | 部署编排器 |
+| Cloudflare 隧道配置 | K8s ConfigMap `cloudflared-config` | Admin API | cloudflared Pod |
+| Cloudflare 隧道凭证 | K8s Secret `cloudflared-credentials` | 管理员 | cloudflared Pod |
 
-## 七大功能模块
+## 八大功能模块
 
 ### 1. carher-admin — Web Dashboard + API
 
@@ -127,12 +162,12 @@ graph LR
 |----------|------|
 | 仪表盘 | 集群 CPU/内存/存储概览、节点资源分布、Pod 统计、Her 资源汇总 |
 | 实例管理 | 列表/搜索/详情/配置编辑、生命周期操作、Pod 日志、K8s Events |
-| 新增/导入 | 表单创建、JSON 批量导入 |
+| 新增/导入 | 表单创建 (自动 CRD + Service + Cloudflare DNS)、JSON 批量导入 |
 | 部署管理 | 灰度/紧急全量/仅首组/指定分组，回滚、中止、波次恢复 |
-| CI/CD 集成 | GitHub Actions 触发构建、分支规则自动匹配、Workflow 选择器 |
+| CI/CD 集成 | GitHub Actions 触发构建、分支规则自动匹配、Workflow 选择器、构建状态展示 |
 | 灰度分组 | 自定义分组 CRUD + 实例分配、按 priority 排序部署 |
 | 监控指标 | 实时 Pod/Node CPU+内存、PVC 存储、历史趋势 (Sparkline) |
-| 系统管理 | 强制同步、一致性检查、审计日志、K8s 导入 |
+| 系统设置 | GitHub Token/仓库、Webhook 密钥、Cloudflare 同步、系统管理 |
 
 ### 2. carher-operator (Go) — 核心引擎
 
@@ -145,22 +180,24 @@ flowchart TD
     C --> D{"configHash<br/>是否变更?"}
     D -->|"相同"| E["跳过 ConfigMap 写入<br/>省 API 调用"]
     D -->|"变更"| F["写入 ConfigMap"]
-    F --> G{"image 或 configHash<br/>是否变更?"}
+    F --> G["确保 ClusterIP Service"]
     E --> G
-    G -->|"否"| H["保持当前 Pod"]
-    G -->|"是"| I["删旧 Pod → 创新 Pod<br/>(7 volume mounts)"]
-    H --> J["Patch CRD status"]
-    I --> J
+    G --> H{"image 或 configHash<br/>是否变更?"}
+    H -->|"否"| I["保持当前 Pod"]
+    H -->|"是"| J["删旧 Pod → 创新 Pod<br/>(7 volume mounts)"]
+    I --> K["Patch CRD status"]
+    J --> K
 
-    K["Pod 被删除/驱逐"] -->|"Owns(&Pod{})<br/>立即触发"| A
-    L["30s 定期健康检查"] -->|"兜底发现异常"| A
+    L["Pod 被删除/驱逐"] -->|"Owns(&Pod{})<br/>立即触发"| A
+    M["30s 定期健康检查"] -->|"兜底发现异常"| A
 ```
 
 | 功能 | 说明 | 性能 |
 |------|------|------|
-| Reconcile | CRD spec → ConfigMap + PVC + Pod，事件驱动 | 多 goroutine 并发 |
-| Owns(&Pod{}) | Pod 被删除/驱逐 → 立即触发 reconcile 重建 | 秒级自愈 |
-| ownerReferences | Pod 关联到 CRD，K8s GC 自动清理孤儿资源 | 无需手动 |
+| Reconcile | CRD spec → PVC + Service + ConfigMap + Pod，事件驱动 | 多 goroutine 并发 |
+| Owns(&Pod{}) + Owns(&Service{}) | Pod/Service 变更 → 立即触发 reconcile | 秒级自愈 |
+| ownerReferences | Pod + Service 关联到 CRD，K8s GC 自动清理 | 无需手动 |
+| ClusterIP Service | 每实例自动创建 Service，Cloudflare 不再依赖 Pod IP | 零运维 |
 | ConfigMap hash 跳过 | hash 相同时不写 ConfigMap | 500 实例省 500 次调用 |
 | 自愈 | Pod 消失 → 立即重建，NAS volume 完整恢复 | SelfHeal 仅首次计数 |
 | 健康检查 | Container Ready + CrashLoop + 重启次数 | 可配 worker (默认 50) |
@@ -171,7 +208,37 @@ flowchart TD
 | Leader Election | 多副本 HA (2 replicas) | 内置 |
 | /metrics | 7 个 Prometheus 指标 | controller-runtime v0.20 |
 
-### 3. CI/CD — GitHub Actions + 分支规则
+### 3. Cloudflare Tunnel — 自动化网络接入
+
+**技术栈**: cloudflared K8s Deployment + ConfigMap + Admin API 联动
+
+```mermaid
+sequenceDiagram
+    participant Admin as carher-admin
+    participant Op as Operator
+    participant CF as cloudflared Pod
+    participant DNS as Cloudflare DNS
+
+    Admin->>Admin: POST /api/instances (创建实例)
+    Admin->>Admin: 创建 CRD + Secret
+    Admin->>Admin: 等待 Service 就绪 (轮询)
+    Op->>Op: Reconcile → 创建 PVC + Service + Pod
+    Admin->>Admin: 生成新 cloudflared config.yml
+    Admin->>CF: 更新 ConfigMap + 重启 Pod
+    Admin->>DNS: cloudflared tunnel route dns (注册 CNAME)
+    CF->>CF: 加载新配置，路由到 Service ClusterIP
+```
+
+| 组件 | 说明 |
+|------|------|
+| cloudflared Deployment | K8s 托管，自动重启，不依赖宿主机 |
+| ConfigMap `cloudflared-config` | Admin 自动生成，包含所有活跃实例的 hostname → Service 映射 |
+| Secret `cloudflared-credentials` | Tunnel 凭证 + Origin Cert |
+| ClusterIP Service | Operator 自动创建，Pod 重建不影响路由 |
+| DNS 自动注册 | Admin 创建实例时自动注册 `{prefix}-u{uid}-auth/fe/proxy.carher.net` |
+| POST /api/cloudflare/sync | 手动触发全量配置重新生成 |
+
+### 4. CI/CD — GitHub Actions + 分支规则
 
 ```mermaid
 sequenceDiagram
@@ -187,7 +254,7 @@ sequenceDiagram
     GH->>ACR: Push Image
     GH->>Admin: POST /api/deploy/webhook<br/>{image_tag, branch, commit...}
     Admin->>Admin: 匹配分支规则<br/>(main→灰度, hotfix→全量, feature→仅金丝雀)
-    
+
     alt 灰度部署 (normal)
         Admin->>Admin: Wave 1: canary 组
         Admin->>Op: Patch CRD image
@@ -222,7 +289,7 @@ sequenceDiagram
 
 分支规则可通过 Admin Dashboard 的 "分支规则" 面板自由增删改。
 
-### 4. 灰度部署分组
+### 5. 灰度部署分组
 
 ```mermaid
 flowchart LR
@@ -253,7 +320,7 @@ flowchart LR
 | `stable` 保护 | `stable` 组不可删除，删除其他组时实例自动回归 stable |
 | 波次恢复 | `continue` 从暂停的波次恢复，不重放已完成波次 |
 
-### 5. 监控指标
+### 6. 监控指标
 
 ```mermaid
 graph TB
@@ -293,7 +360,7 @@ graph TB
 | HealthCheckSlow | 健康检查 >60s | warning |
 | SelfHealSpike | 自愈率 >0.1/s | critical |
 
-### 6. 安全机制
+### 7. 安全机制
 
 | 层面 | 机制 | 说明 |
 |------|------|------|
@@ -304,8 +371,9 @@ graph TB
 | Secret 存储 | K8s Secret | appSecret 不存 CRD (明文)，通过独立 Secret 注入 |
 | 容器运行 | 非 root 用户 | Dockerfile 使用 `carher` 用户运行 |
 | Agent 安全 | dry_run + 确认 | 破坏性操作需确认，批量 >10 先汇报计划 |
+| 数据安全 | PVC 独立于 Pod | 删除 Pod 不删数据，仅 purge=true 才清理 PVC |
 
-### 7. 自愈数据连续性
+### 8. 自愈数据连续性
 
 ```mermaid
 flowchart TD
@@ -315,10 +383,11 @@ flowchart TD
     D --> E["重新生成 ConfigMap<br/>(configHash)"]
     E --> F["创建新 Pod<br/>(7 volume mounts)"]
     F --> G["NAS PVC 自动挂载<br/>所有数据完整恢复"]
-    G --> H["更新 CRD status<br/>Phase: Running"]
+    G --> H["ClusterIP Service 无需变更<br/>Cloudflare 路由自动恢复"]
+    H --> I["更新 CRD status<br/>Phase: Running"]
 
     style A fill:#ef444420,stroke:#ef4444
-    style H fill:#10b98120,stroke:#10b981
+    style I fill:#10b98120,stroke:#10b981
 ```
 
 | 数据类别 | 存储方式 | 跨节点恢复 | 说明 |
@@ -331,8 +400,31 @@ flowchart TD
 | Session 日志 | NAS PVC `carher-shared-sessions` | **是** | 按 uid 子目录隔离 |
 | knownBots | 共享 ConfigMap | **是** | Operator 定期重算 |
 | Feishu OAuth Token | PVC 内 `/data/.openclaw/credentials/` | **是** | 随用户数据 PVC |
+| 网络路由 | ClusterIP Service (Operator 管理) | **是** | Service IP 稳定，Pod 重建后自动路由 |
 
-**关键设计**: 所有共享 PVC 统一使用 `alibabacloud-cnfs-nas` StorageClass (`ReadWriteMany`)，确保 Pod 无论调度到哪个节点都能读到完整数据。
+**关键设计**: 所有共享 PVC 统一使用 `alibabacloud-cnfs-nas` StorageClass (`ReadWriteMany`)，确保 Pod 无论调度到哪个节点都能读到完整数据。ClusterIP Service 确保 Pod 重建后 Cloudflare 路由零中断。
+
+### Pod + Service 资源详情
+
+每个 HerInstance CRD 由 Operator 自动管理以下 K8s 资源：
+
+| 资源 | 名称模式 | 说明 |
+|------|---------|------|
+| Pod | `carher-{uid}` | 运行实例，ownerRef → CRD |
+| Service | `carher-{uid}-svc` | ClusterIP，ownerRef → CRD，5 端口 |
+| PVC | `carher-{uid}-data` | NAS 5Gi，无 ownerRef (保留数据) |
+| ConfigMap | `carher-{uid}-user-config` | openclaw.json 配置 |
+| Secret | `carher-{uid}-secret` | appSecret |
+
+Service 端口映射:
+
+| 端口 | 名称 | 用途 |
+|------|------|------|
+| 18789 | gateway | OpenClaw Gateway |
+| 18790 | realtime | 实时语音 |
+| 8000 | frontend | Web 前端 |
+| 8080 | ws-proxy | WebSocket 代理 |
+| 18891 | oauth | Feishu OAuth 回调 |
 
 ### Pod Volume 挂载详情
 
@@ -353,11 +445,12 @@ carher-admin/
 ├── backend/                     # Python FastAPI 后端
 │   ├── main.py                 # API 路由 (60+, JWT 认证, 非阻塞)
 │   ├── agent.py                # AI 运维 Agent (LLM → 工具调用)
-│   ├── database.py             # SQLite (schema v6, 含监控/分支规则)
+│   ├── database.py             # SQLite (schema v7, 含 settings 表)
 │   ├── deployer.py             # 灰度部署编排器 (动态 wave, 波次恢复)
 │   ├── metrics.py              # K8s Metrics API (Pod/Node/PVC/集群)
 │   ├── crd_ops.py              # CRD 操作 (admin → K8s API)
 │   ├── k8s_ops.py              # 直接 K8s 操作 (legacy 兼容)
+│   ├── cloudflare_ops.py       # Cloudflare Tunnel 配置管理
 │   ├── config_gen.py           # openclaw.json 配置生成
 │   ├── sync_worker.py          # 后台同步 + NAS 备份
 │   ├── models.py               # Pydantic 模型 (含 OpenAPI schema)
@@ -370,10 +463,11 @@ carher-admin/
 │           ├── Dashboard.jsx    # 仪表盘 + 集群/节点资源
 │           ├── InstanceList.jsx # 实例列表 + 搜索
 │           ├── InstanceDetail.jsx # 实例详情 + 指标
-│           ├── DeployPage.jsx   # 部署 + 分组 + CI/CD + 分支规则
+│           ├── DeployPage.jsx   # 部署 + 分组 + CI/CD + 分支规则 + GitHub Actions 状态
 │           ├── AddInstance.jsx  # 新增实例
 │           ├── BatchImport.jsx  # 批量导入
 │           ├── HealthCheck.jsx  # 健康检查
+│           ├── SettingsPage.jsx # 系统设置 (GitHub/Webhook/ACR)
 │           ├── AdminPanel.jsx   # 系统管理
 │           ├── LoginPage.jsx    # 登录页
 │           └── LogViewer.jsx    # Pod 日志查看
@@ -381,7 +475,7 @@ carher-admin/
 │   ├── api/v1alpha1/types.go   # CRD 类型 + DeepCopy
 │   ├── internal/
 │   │   ├── controller/
-│   │   │   ├── reconciler.go   # 主 reconciler
+│   │   │   ├── reconciler.go   # Reconcile + ensureService + ensurePVC
 │   │   │   ├── health.go       # 并发健康检查
 │   │   │   ├── known_bots.go   # knownBots 管理
 │   │   │   ├── config_gen.go   # 配置生成
@@ -391,7 +485,7 @@ carher-admin/
 │   ├── Dockerfile
 │   ├── go.mod / go.sum
 │   └── README.md
-├── operator/                    # Python kopf Operator (旧版)
+├── operator/                    # Python kopf Operator (旧版, 已废弃)
 ├── k8s/                         # K8s 部署清单
 │   ├── crd.yaml
 │   ├── rbac.yaml
@@ -415,7 +509,7 @@ carher-admin/
 >
 > **Swagger UI**: `GET /docs` | **ReDoc**: `GET /redoc`
 >
-> **认证**: 所有 API 需 JWT Bearer Token（`POST /api/auth/login` 获取）。Webhook 使用独立的 `DEPLOY_WEBHOOK_SECRET`。
+> **认证**: 所有 API 需 JWT Bearer Token（`POST /api/auth/login` 获取）或 `X-API-Key` header。Webhook 使用独立的 `DEPLOY_WEBHOOK_SECRET`。
 
 ### 认证
 
@@ -431,7 +525,7 @@ carher-admin/
 | GET | `/api/instances` | 列出所有实例 (含 Pod 运行状态) |
 | GET | `/api/instances/search` | 搜索 — 按 status/model/deploy_group/owner/name/feishu_ws 过滤 |
 | GET | `/api/instances/:id` | 实例详情 (含 PVC 状态, knownBots 计数) |
-| POST | `/api/instances` | 创建实例 |
+| POST | `/api/instances` | 创建实例 (自动 CRD + Service + Cloudflare DNS) |
 | PUT | `/api/instances/:id` | 修改配置 (name/model/owner/provider/prefix/deploy_group) |
 | DELETE | `/api/instances/:id?purge=false` | 删除实例 (purge=true 同时删除 PVC) |
 | POST | `/api/instances/:id/stop` | 停止 (删 Pod, 保留数据) |
@@ -487,6 +581,21 @@ carher-admin/
 | POST | `/api/ci/trigger-build` | 触发 GitHub Actions 构建 |
 | GET | `/api/ci/workflows?repo=` | 列出仓库可用 Workflow |
 | GET | `/api/ci/branches?repo=` | 列出仓库分支 |
+| GET | `/api/ci/runs?repo=&per_page=10` | 最近 GitHub Actions 构建状态 |
+
+### Cloudflare Tunnel
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/cloudflare/sync` | 重新生成 cloudflared 配置并重启 (从所有活跃 CRD 生成) |
+
+### 系统设置
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/settings` | 获取所有设置 (密钥值脱敏) |
+| PUT | `/api/settings` | 更新设置 (GitHub Token, Webhook Secret 等) |
+| GET | `/api/settings/repos` | 获取已配置的 GitHub 仓库列表 |
 
 ### CRD 直查
 
@@ -578,9 +687,9 @@ go test ./internal/controller/ -v
 # 或分步：
 kubectl apply -f k8s/crd.yaml                  # 1. CRD
 kubectl apply -f k8s/shared-pvcs.yaml           # 2. 共享 NAS PVC
-kubectl apply -f k8s/operator-rbac.yaml         # 3. Operator RBAC
+kubectl apply -f k8s/operator-rbac.yaml         # 3. Operator RBAC (含 services 权限)
 kubectl apply -f k8s/operator-deployment.yaml   # 4. Go Operator
-kubectl apply -f k8s/rbac.yaml                  # 5. Admin RBAC
+kubectl apply -f k8s/rbac.yaml                  # 5. Admin RBAC (含 deployments/configmaps/secrets)
 kubectl apply -f k8s/deployment.yaml            # 6. Admin Dashboard
 kubectl apply -f k8s/servicemonitor.yaml        # 7. Prometheus 监控
 
@@ -590,7 +699,40 @@ kubectl create secret generic carher-admin-secrets -n carher \
   --from-literal=admin-username=admin \
   --from-literal=admin-password=YOUR_PASSWORD \
   --from-literal=github-token=YOUR_GITHUB_PAT
+
+# 部署 cloudflared (Cloudflare Tunnel)
+kubectl create secret generic cloudflared-credentials -n carher \
+  --from-file=credentials.json=TUNNEL_CREDENTIALS.json \
+  --from-file=cert.pem=ORIGIN_CERT.pem
+# cloudflared ConfigMap 和 Deployment 由 admin 或 deploy.sh 自动管理
 ```
+
+## RBAC 权限矩阵
+
+### Operator (ClusterRole: carher-operator)
+
+| 资源 | 权限 | 说明 |
+|------|------|------|
+| herinstances, herinstances/status | 全部 | CRD 管理 |
+| pods, pods/log, pods/exec | 全部 | Pod 生命周期 |
+| services | 全部 | 自动创建 ClusterIP Service |
+| configmaps | 全部 | 配置管理 |
+| persistentvolumeclaims | get/list/watch/create/delete | PVC 管理 |
+| secrets | get/list/watch | 读取 appSecret |
+| events | create/patch | 事件记录 |
+| leases | 全部 | Leader Election |
+
+### Admin (Role: carher-admin, namespace: carher)
+
+| 资源 | 权限 | 说明 |
+|------|------|------|
+| herinstances, herinstances/status | 全部 | CRD CRUD |
+| pods, pods/log, pods/exec | 全部 | Pod 操作 |
+| services | get/list/watch | 读取 Service ClusterIP |
+| configmaps | 全部 | cloudflared ConfigMap 管理 |
+| secrets | get/list/create/update/patch/delete | appSecret 管理 |
+| persistentvolumeclaims | get/list/watch/create/delete | PVC 管理 |
+| deployments | get/list/watch/patch | cloudflared 重启 |
 
 ## 使用 HerInstance CRD
 
@@ -598,9 +740,9 @@ kubectl create secret generic carher-admin-secrets -n carher \
 # 查看所有实例
 kubectl get her -n carher
 # NAME     USER   NAME   MODEL   PHASE     FEISHU      GROUP    IMAGE
-# her-14   14     张三    gpt     Running   Connected   stable   v20260328
+# her-14   14     张三    gpt     Running   Connected   stable   dev-bd6a40ca
 
-# 新增实例
+# 新增实例 (推荐通过 Admin Dashboard)
 kubectl apply -f - <<EOF
 apiVersion: carher.io/v1alpha1
 kind: HerInstance
@@ -661,6 +803,7 @@ curl -X POST https://admin.carher.net/api/agent \
 |------|------|------|
 | `ADMIN_USERNAME` | admin | 登录用户名 (K8s Secret 注入) |
 | `ADMIN_PASSWORD` | admin | 登录密码 (K8s Secret 注入) |
+| `ADMIN_API_KEY` | admin | API Key (替代 JWT 的 X-API-Key 认证) |
 | `DEPLOY_WEBHOOK_SECRET` | admin | GitHub webhook 验证密钥 |
 | `GITHUB_TOKEN` | admin | GitHub PAT (触发构建 + 读取分支/Workflow) |
 | `CORS_ALLOW_ORIGINS` | admin | CORS 白名单 (默认 `https://admin.carher.net`) |
@@ -677,13 +820,15 @@ curl -X POST https://admin.carher.net/api/agent \
 
 ## GitHub Secrets
 
-在 https://github.com/guangzhou/carher-admin/settings/secrets/actions 配置：
+在 https://github.com/guangzhou/carher-admin/settings/secrets/actions 配置 (Repository Secrets)：
 
 | Secret | 说明 |
 |--------|------|
-| `ACR_USERNAME` | 阿里云 ACR 登录用户名 |
-| `ACR_PASSWORD` | 阿里云 ACR 登录密码 |
+| `ACR_USERNAME` | 阿里云 ACR 登录用户名 (新加坡 ACR) |
+| `ACR_PASSWORD` | 阿里云 ACR 登录密码 (新加坡 ACR) |
 | `DEPLOY_WEBHOOK_SECRET` | 与 K8s Secret 中值一致 |
+
+> **注意**: 必须配置为 **Repository Secrets**，不是 Environment Secrets。
 
 ## 性能优化记录
 
@@ -691,7 +836,8 @@ curl -X POST https://admin.carher.net/api/agent \
 
 | 优化 | 原问题 | 改进 | 影响 |
 |------|--------|------|------|
-| Owns(&Pod{}) + ownerRef | Pod 删除后等 30s 才发现 | 立即触发 reconcile | 自愈 30s → 秒级 |
+| Owns(&Pod{}) + Owns(&Service{}) + ownerRef | Pod 删除后等 30s 才发现 | 立即触发 reconcile | 自愈 30s → 秒级 |
+| ensureService (ClusterIP) | Pod IP 变化导致 Cloudflare 路由断裂 | 稳定 ClusterIP | 消除手动运维 |
 | ConfigMap hash 跳过 | 每次都写 ConfigMap | hash 相同跳过 | 省 500 次 API 调用/轮 |
 | knownBots 按需重建 | 每次 reconcile 都重建 | 仅 configHash 变更时 | 大幅减少写入 |
 | resolveImage/resolvePrefix | 空值 mismatch → 无限重建 | 统一默认值 | 消除循环 bug |
@@ -704,6 +850,7 @@ curl -X POST https://admin.carher.net/api/agent \
 | 优化 | 原问题 | 改进 | 影响 |
 |------|--------|------|------|
 | health() 读 CRD status | 逐 Pod exec (O(N)) | 单次 list CRD | 1000+ → 1 次调用 |
+| cloudflare_ops 自动化 | 手动更新 cloudflared config | 自动 ConfigMap + DNS | 新实例零配置 |
 | backup 去抖 | 每次 DB 写后复制 NAS | dirty flag + flush | 不再批量触发 |
 | deployer 并发 | 串行部署 | asyncio.gather | 速度 10x |
 | knownBots TTL 缓存 | 每请求都 collect | 15s TTL | 消除 O(N) |
@@ -722,6 +869,8 @@ curl -X POST https://admin.carher.net/api/agent \
 | Go Operator | 事件驱动 reconcile，Leader Election HA |
 | NAS PVC | `ReadWriteMany`，跨节点自动挂载 |
 | HerInstance CRD | K8s etcd 存储，节点数无关 |
+| ClusterIP Service | 自动路由到 Pod，节点无关 |
+| cloudflared (K8s Deployment) | 已容器化，自动调度 |
 | Prometheus + AlertManager | ServiceMonitor 自动发现 |
 | CI/CD Pipeline | 与节点数无关 |
 
@@ -729,7 +878,6 @@ curl -X POST https://admin.carher.net/api/agent \
 
 | 改进项 | 当前状态 | 建议 | 优先级 |
 |--------|---------|------|--------|
-| Cloudflare Tunnel | 直接进程 on node 226 | 容器化为 K8s Deployment + 多副本 | **高** |
 | Admin DB (SQLite) | hostPath + nodeSelector | 迁移到 NAS PVC | **高** |
 | HEALTH_CHECK_WORKERS | 默认 50 | 按实例数调整 (instances/10) | 中 |
 | Pod 反亲和 | 无 | 关键实例添加 podAntiAffinity | 低 |

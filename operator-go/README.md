@@ -31,6 +31,7 @@ graph TB
     end
 
     subgraph Resources["管理的 K8s 资源"]
+        SVC["Service<br/>(ClusterIP, 5 端口)"]
         CM["ConfigMap<br/>(per-user config)"]
         PVC["PVC<br/>(user-data, NAS)"]
         Pod["Pod<br/>(7 volume mounts)"]
@@ -39,9 +40,10 @@ graph TB
     end
 
     CRD -->|"watch"| Reconciler
-    PodEvent -->|"Owns(&Pod{})<br/>立即触发"| Reconciler
+    PodEvent -->|"Owns(&Pod{})<br/>+ Owns(&Service{})<br/>立即触发"| Reconciler
     Timer --> Health
 
+    Reconciler --> SVC
     Reconciler --> CM
     Reconciler --> PVC
     Reconciler --> Pod
@@ -64,10 +66,11 @@ flowchart TD
     C --> D{"计算 configHash<br/>是否变更?"}
     D -->|"相同"| E["跳过 ConfigMap 写入<br/>省 API 调用"]
     D -->|"变更"| F["写入 ConfigMap<br/>+ MarkDirty knownBots"]
-    E --> G{"Pod 是否存在?"}
+    E --> G["确保 ClusterIP Service"]
     F --> G
-    G -->|"不存在"| H["确保 PVC 存在"]
-    G -->|"存在"| I{"image 或 configHash<br/>是否变更?"}
+    G --> GA{"Pod 是否存在?"}
+    GA -->|"不存在"| H["确保 PVC 存在"]
+    GA -->|"存在"| I{"image 或 configHash<br/>是否变更?"}
     H --> J["创建 Pod<br/>(ownerReferences → CRD)<br/>(7 volume mounts)"]
     I -->|"否"| K["保持当前 Pod"]
     I -->|"是"| L["删旧 Pod"]
@@ -87,8 +90,9 @@ flowchart TD
 
 ### 关键优化 (R1–R6)
 
-- **Owns(&corev1.Pod{})**: Pod 被删除/驱逐时立即触发 reconcile，不再等 30s 健康检查
-- **ownerReferences**: Pod 关联到 CRD，K8s GC 自动清理孤儿资源
+- **Owns(&corev1.Pod{}) + Owns(&corev1.Service{})**: Pod/Service 变更立即触发 reconcile
+- **ownerReferences**: Pod + Service 关联到 CRD，K8s GC 自动清理
+- **ensureService**: 每实例自动创建 ClusterIP Service (5 端口)，Cloudflare 路由不再依赖 Pod IP
 - **ConfigMap hash 跳过**: `configHash` 相同时不写 ConfigMap，500 实例省 500 次 API 调用/轮
 - **knownBots 按需重建**: 仅 `configHash` 变更时 `MarkDirty()`，不每次 reconcile 重建
 - **resolveImage / resolvePrefix**: 统一默认值处理，消除空值比较导致的无限 Pod 重建循环
@@ -106,7 +110,8 @@ flowchart LR
     C --> D["从 CRD spec<br/>读取配置"]
     D --> E["创建新 Pod<br/>(7 volumes)"]
     E --> F["NAS PVC<br/>自动挂载"]
-    F --> G["数据完整恢复<br/>Phase: Running"]
+    F --> FA["ClusterIP Service 不变<br/>Cloudflare 路由自动恢复"]
+    FA --> G["数据完整恢复<br/>Phase: Running"]
 
     style A fill:#ef444420,stroke:#ef4444
     style G fill:#10b98120,stroke:#10b981
@@ -143,6 +148,28 @@ graph LR
 ```
 
 所有共享 PVC 统一使用 `alibabacloud-cnfs-nas` StorageClass，确保 Pod 无论调度到哪个节点都能读到完整数据。
+
+## ClusterIP Service
+
+Operator 为每个 HerInstance 自动创建 ClusterIP Service，提供稳定的内部网络端点：
+
+```mermaid
+graph LR
+    CRD["HerInstance CRD"] -->|"Reconcile"| SVC["carher-{uid}-svc<br/>ClusterIP Service"]
+    SVC -->|"ownerRef → CRD"| GC["K8s GC 自动清理"]
+    SVC -->|"稳定 IP"| CF["cloudflared 路由"]
+    SVC --> Pod["carher-{uid} Pod"]
+```
+
+| 端口 | 名称 | 用途 |
+|------|------|------|
+| 18789 | gateway | OpenClaw Gateway |
+| 18790 | realtime | 实时语音 |
+| 8000 | frontend | Web 前端 |
+| 8080 | ws-proxy | WebSocket 代理 |
+| 18891 | oauth | Feishu OAuth 回调 |
+
+Pod 重建时 Service ClusterIP 保持不变，Cloudflare Tunnel 路由零中断。
 
 ## Health Checker
 
@@ -208,7 +235,7 @@ operator-go/
 │   └── types.go              # CRD 类型 + DeepCopy
 ├── internal/
 │   ├── controller/
-│   │   ├── reconciler.go     # Owns(Pod) + ownerRef + hash 跳过
+│   │   ├── reconciler.go     # Owns(Pod+Service) + ensureService + hash 跳过
 │   │   ├── health.go         # 可配 worker 池 + SelfHeal 去重
 │   │   ├── known_bots.go     # goroutine-safe + 按需重建
 │   │   ├── config_gen.go     # openclaw.json 生成

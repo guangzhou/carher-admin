@@ -134,6 +134,7 @@ export default function InstanceList({ detailId, setDetailId }) {
               <th className="p-3">ID</th>
               <th className="p-3">名字</th>
               <th className="p-3">模型</th>
+              <th className="p-3">镜像</th>
               <th className="p-3">状态</th>
               <th className="p-3 text-right">CPU</th>
               <th className="p-3 text-right">内存</th>
@@ -162,6 +163,9 @@ export default function InstanceList({ detailId, setDetailId }) {
                   <td className="p-3 text-gray-200">{inst.name || "-"}</td>
                   <td className="p-3">
                     <span className="badge bg-gray-800 text-gray-300">{inst.model_short || "-"}</span>
+                  </td>
+                  <td className="p-3">
+                    <span className="font-mono text-xs text-gray-400">{shortImage(inst.image)}</span>
                   </td>
                   <td className="p-3">
                     <StatusBadge status={inst.status} />
@@ -204,7 +208,7 @@ export default function InstanceList({ detailId, setDetailId }) {
             })}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan="10" className="p-8 text-center text-gray-500">
+                <td colSpan="11" className="p-8 text-center text-gray-500">
                   {loading ? "加载中..." : "没有找到实例"}
                 </td>
               </tr>
@@ -222,6 +226,12 @@ function formatMem(mi) {
   if (!mi) return "0";
   if (mi >= 1024) return `${(mi / 1024).toFixed(1)}G`;
   return `${Math.round(mi)}M`;
+}
+
+function shortImage(tag) {
+  if (!tag) return "-";
+  if (tag.startsWith("dev-")) return tag.slice(0, 12);
+  return tag;
 }
 
 function shortNode(name) {

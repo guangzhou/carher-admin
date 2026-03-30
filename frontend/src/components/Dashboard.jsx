@@ -67,7 +67,7 @@ export default function Dashboard() {
             </div>
             <div>
               <span className="text-gray-500">总 CPU</span>
-              <p className="text-lg font-bold text-emerald-400">{her.cpu_m}m</p>
+              <p className="text-lg font-bold text-emerald-400">{(her.cpu_m / 1000).toFixed(2)}核</p>
             </div>
             <div>
               <span className="text-gray-500">总内存</span>
@@ -76,7 +76,7 @@ export default function Dashboard() {
             <div>
               <span className="text-gray-500">平均/实例</span>
               <p className="text-lg font-bold text-gray-300">
-                {her.avg_cpu_m}m / {Math.round(her.avg_memory_mi)}Mi
+                {(her.avg_cpu_m / 1000).toFixed(3)}核 / {Math.round(her.avg_memory_mi)}Mi
               </p>
             </div>
           </div>

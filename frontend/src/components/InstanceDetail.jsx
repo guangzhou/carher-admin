@@ -110,8 +110,8 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
         <div className="grid grid-cols-2 gap-4">
           <div className="card p-4 border border-emerald-600/20">
             <p className="text-xs text-gray-500 uppercase mb-1">CPU</p>
-            <p className="text-2xl font-bold text-emerald-400">{metrics.cpu_m}m</p>
-            <p className="text-xs text-gray-600">millicores</p>
+            <p className="text-2xl font-bold text-emerald-400">{(metrics.cpu_m / 1000).toFixed(3)}核</p>
+            <p className="text-xs text-gray-600">{metrics.cpu_m}m (millicores)</p>
           </div>
           <div className="card p-4 border border-purple-600/20">
             <p className="text-xs text-gray-500 uppercase mb-1">内存</p>
@@ -126,7 +126,7 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
         <div className="card p-4">
           <h3 className="text-sm font-medium text-gray-400 mb-3">24h 资源趋势</h3>
           <div className="grid grid-cols-2 gap-4">
-            <Sparkline label="CPU (m)" data={metricsHistory} field="cpu_m" color="emerald" />
+            <Sparkline label="CPU (核)" data={metricsHistory} field="cpu_m" color="emerald" transform={(v) => v / 1000} unit="核" />
             <Sparkline label="内存 (Mi)" data={metricsHistory} field="memory_mi" color="purple" />
           </div>
         </div>
@@ -229,9 +229,10 @@ function formatMemory(mi) {
   return `${Math.round(mi)} Mi`;
 }
 
-function Sparkline({ label, data, field, color }) {
+function Sparkline({ label, data, field, color, transform, unit }) {
   if (!data || data.length < 2) return null;
-  const values = data.map((d) => d[field] || 0);
+  const raw = data.map((d) => d[field] || 0);
+  const values = transform ? raw.map(transform) : raw;
   const max = Math.max(...values, 1);
   const min = Math.min(...values);
   const latest = values[values.length - 1];
@@ -249,7 +250,7 @@ function Sparkline({ label, data, field, color }) {
     <div>
       <div className="flex justify-between text-xs mb-1">
         <span className="text-gray-500">{label}</span>
-        <span className={textColors[color]}>{field === "memory_mi" ? formatMemory(latest) : `${latest.toFixed(1)}m`}</span>
+        <span className={textColors[color]}>{unit ? `${latest.toFixed(3)}${unit}` : field === "memory_mi" ? formatMemory(latest) : `${latest.toFixed(1)}m`}</span>
       </div>
       <div className="flex items-end gap-px h-10">
         {sampled.map((v, i) => (

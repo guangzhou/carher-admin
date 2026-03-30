@@ -172,7 +172,7 @@ export default function InstanceList({ detailId, setDetailId }) {
                     <StatusBadge status={inst.status} />
                   </td>
                   <td className="p-3 text-right font-mono text-xs text-emerald-400">
-                    {m.cpu_m != null ? `${m.cpu_m}m` : "-"}
+                    {m.cpu_m != null ? formatCpu(m.cpu_m) : "-"}
                   </td>
                   <td className="p-3 text-right font-mono text-xs text-purple-400">
                     {m.memory_mi != null ? formatMem(m.memory_mi) : "-"}
@@ -221,6 +221,13 @@ export default function InstanceList({ detailId, setDetailId }) {
       <p className="text-xs text-gray-600">共 {instances.length} 个实例，显示 {filtered.length} 个</p>
     </div>
   );
+}
+
+function formatCpu(millicores) {
+  if (millicores == null) return "-";
+  const cores = millicores / 1000;
+  if (cores >= 1) return `${cores.toFixed(1)}核`;
+  return `${cores.toFixed(3)}核`;
 }
 
 function formatMem(mi) {

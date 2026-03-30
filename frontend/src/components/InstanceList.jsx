@@ -31,7 +31,8 @@ export default function InstanceList({ detailId, setDetailId }) {
       return (
         String(i.id).includes(q) ||
         (i.name || "").toLowerCase().includes(q) ||
-        (i.model_short || "").toLowerCase().includes(q)
+        (i.model_short || "").toLowerCase().includes(q) ||
+        (i.image || "").toLowerCase().includes(q)
       );
     }
     return true;
@@ -97,7 +98,7 @@ export default function InstanceList({ detailId, setDetailId }) {
       <div className="flex flex-wrap items-center gap-3">
         <input
           className="input w-64"
-          placeholder="搜索 ID / 名字 / 模型..."
+          placeholder="搜索 ID / 名字 / 模型 / 镜像..."
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />

@@ -84,12 +84,14 @@ jobs:
       (inputs.deploy_mode || 'normal') != 'build-only'
     steps:
       - name: Trigger deploy
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           MODE="${{ inputs.deploy_mode || '' }}"
           TAG="${{ needs.build.outputs.image_tag }}"
           BRANCH="${GITHUB_REF_NAME}"
           SHA="${GITHUB_SHA}"
-          MSG=$(echo '${{ github.event.head_commit.message }}' | head -1 | head -c 200)
+          MSG=$(printf '%s' "$COMMIT_MSG" | head -1 | head -c 200)
           AUTHOR="${{ github.actor }}"
           REPO="${{ github.repository }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

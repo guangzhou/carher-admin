@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -25,7 +26,18 @@ import (
 
 const (
 	Namespace = "carher"
-	ACR       = "cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her/carher"
+	ACR       = "cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher"
+
+	initScript = `
+const fs = require('fs');
+const cfg = JSON.parse(fs.readFileSync('/config-template/openclaw.json', 'utf8'));
+const secret = process.env.FEISHU_APP_SECRET || '';
+if (secret && cfg.channels && cfg.channels.feishu) {
+  cfg.channels.feishu.appSecret = secret;
+}
+fs.writeFileSync('/merged-config/openclaw.json', JSON.stringify(cfg, null, 2));
+console.log('config merged, secret-injected:', !!secret);
+`
 )
 
 type HerInstanceReconciler struct {
@@ -53,13 +65,11 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		metrics.ReconcileDuration.WithLabelValues(action).Observe(time.Since(start).Seconds())
 	}()
 
-	// Handle deletion
 	if !her.DeletionTimestamp.IsZero() {
 		action = "delete"
 		logger.Info("Deleting", "uid", uid)
-		r.deletePod(ctx, uid)
+		r.deleteDeployment(ctx, uid)
 		r.deleteConfigMap(ctx, uid)
-		// PVC intentionally preserved
 		r.KnownBots.MarkDirty()
 		uidStr := strconv.Itoa(uid)
 		metrics.FeishuWSConnected.DeleteLabelValues(uidStr, her.Spec.Name)
@@ -67,10 +77,9 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
-	// Handle paused
 	if her.Spec.Paused {
 		if her.Status.Phase != "Paused" {
-			r.deletePod(ctx, uid)
+			r.scaleDeployment(ctx, uid, 0)
 			her.Status.Phase = "Paused"
 			if err := r.Status().Update(ctx, &her); err != nil {
 				logger.V(1).Info("Status update failed", "uid", uid, "err", err)
@@ -79,60 +88,49 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
-	// Ensure PVC
 	if err := r.ensurePVC(ctx, uid); err != nil {
 		logger.Error(err, "Failed to ensure PVC", "uid", uid)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
 	}
 
-	// Ensure ClusterIP Service (stable endpoint for Cloudflare/ingress)
 	if err := r.ensureService(ctx, &her); err != nil {
 		logger.Error(err, "Failed to ensure Service", "uid", uid)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
 
-	// Generate and apply config
 	configHash, err := r.applyConfig(ctx, &her)
 	if err != nil {
 		logger.Error(err, "Failed to apply config", "uid", uid)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
 
-	// Check if Pod needs recreation
-	needRecreate := false
-	pod, podErr := r.getPod(ctx, uid)
+	needUpdate := false
+	deploy, deployErr := r.getDeployment(ctx, uid)
 
-	if podErr != nil || pod == nil {
-		needRecreate = true
+	if deployErr != nil || deploy == nil {
+		needUpdate = true
 		action = "create"
 	} else {
-		// Image changed?
 		currentImage := ""
-		if len(pod.Spec.Containers) > 0 {
-			currentImage = pod.Spec.Containers[0].Image
+		if len(deploy.Spec.Template.Spec.Containers) > 0 {
+			currentImage = deploy.Spec.Template.Spec.Containers[0].Image
 		}
 		desiredImage := fmt.Sprintf("%s:%s", ACR, resolveImage(her.Spec.Image))
 		if currentImage != desiredImage {
-			needRecreate = true
+			needUpdate = true
 			action = "update-image"
 		}
-		// Config changed?
-		if her.Status.ConfigHash != "" && her.Status.ConfigHash != configHash {
-			needRecreate = true
+		currentHash := deploy.Spec.Template.Annotations["carher.io/config-hash"]
+		if currentHash != configHash {
+			needUpdate = true
 			action = "update-config"
 		}
 	}
 
-	if needRecreate {
-		logger.Info("Recreating pod", "uid", uid, "action", action, "image", resolveImage(her.Spec.Image))
-		if err := r.deletePod(ctx, uid); err != nil {
-			logger.V(1).Info("Delete pod returned error (may be ok)", "uid", uid, "err", err)
-		}
-		if err := r.createPod(ctx, &her); err != nil {
-			if errors.IsAlreadyExists(err) {
-				return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
-			}
-			logger.Error(err, "Failed to create pod", "uid", uid)
+	if needUpdate {
+		logger.Info("Ensuring deployment", "uid", uid, "action", action, "image", resolveImage(her.Spec.Image))
+		if err := r.ensureDeployment(ctx, &her, configHash); err != nil {
+			logger.Error(err, "Failed to ensure deployment", "uid", uid)
 			her.Status.Phase = "Failed"
 			her.Status.Message = err.Error()
 			if uerr := r.Status().Update(ctx, &her); uerr != nil {
@@ -148,20 +146,17 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.Status().Update(ctx, &her); err != nil {
 		logger.V(1).Info("Status update failed", "uid", uid, "err", err)
 	}
-	// Only rebuild knownBots when config actually changed (bot fields are part of the config hash)
 	if prevHash != configHash && prevHash != "" {
 		r.KnownBots.MarkDirty()
 	}
 
-	// Event-driven: no periodic requeue. Reconcile fires on CRD spec changes.
-	// HealthChecker handles Pod status monitoring separately.
 	return ctrl.Result{}, nil
 }
 
 func (r *HerInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&herv1.HerInstance{}).
-		Owns(&corev1.Pod{}).
+		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Complete(r)
 }
@@ -171,7 +166,6 @@ func (r *HerInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerInstance) (string, error) {
 	uid := her.Spec.UserID
 
-	// Read appSecret from K8s Secret
 	appSecret := ""
 	secretName := her.Spec.AppSecretRef
 	if secretName == "" {
@@ -202,7 +196,6 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 
 	hash := fmt.Sprintf("%x", md5.Sum([]byte(configJSON)))[:12]
 
-	// Skip ConfigMap write if hash matches (no config change)
 	if her.Status.ConfigHash == hash {
 		return hash, nil
 	}
@@ -233,52 +226,74 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 	return hash, r.Update(ctx, &existing)
 }
 
-// ── Pod lifecycle ──
+// ── Deployment lifecycle ──
 
-func (r *HerInstanceReconciler) getPod(ctx context.Context, uid int) (*corev1.Pod, error) {
-	var pod corev1.Pod
-	err := r.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("carher-%d", uid), Namespace: Namespace}, &pod)
+func (r *HerInstanceReconciler) getDeployment(ctx context.Context, uid int) (*appsv1.Deployment, error) {
+	var deploy appsv1.Deployment
+	err := r.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("carher-%d", uid), Namespace: Namespace}, &deploy)
 	if errors.IsNotFound(err) {
 		return nil, nil
 	}
-	return &pod, err
+	return &deploy, err
 }
 
-func (r *HerInstanceReconciler) createPod(ctx context.Context, her *herv1.HerInstance) error {
+func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1.HerInstance, configHash string) error {
 	uid := her.Spec.UserID
 	imageTag := resolveImage(her.Spec.Image)
+	image := fmt.Sprintf("%s:%s", ACR, imageTag)
 	prefix := resolvePrefix(her.Spec.Prefix)
 	pfx := prefix + "-"
+	uidStr := strconv.Itoa(uid)
+
+	secretName := her.Spec.AppSecretRef
+	if secretName == "" {
+		secretName = fmt.Sprintf("carher-%d-secret", uid)
+	}
 
 	isController := true
 	blockOwnerDeletion := true
-	pod := &corev1.Pod{
+	replicas := int32(1)
+
+	labels := map[string]string{
+		"app":        "carher-user",
+		"user-id":    uidStr,
+		"managed-by": "carher-operator",
+	}
+
+	podTemplate := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("carher-%d", uid),
-			Namespace: Namespace,
-			Labels: map[string]string{
-				"app":        "carher-user",
-				"user-id":    strconv.Itoa(uid),
-				"managed-by": "carher-operator",
-			},
+			Labels: labels,
 			Annotations: map[string]string{
+				"carher.io/config-hash":  configHash,
 				"carher.io/deploy-group": her.Spec.DeployGroup,
 			},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion:         "carher.io/v1alpha1",
-				Kind:               "HerInstance",
-				Name:               her.Name,
-				UID:                her.UID,
-				Controller:         &isController,
-				BlockOwnerDeletion: &blockOwnerDeletion,
-			}},
 		},
 		Spec: corev1.PodSpec{
-			ImagePullSecrets: []corev1.LocalObjectReference{{Name: "acr-secret"}},
-			RestartPolicy:    corev1.RestartPolicyAlways,
+			ImagePullSecrets: []corev1.LocalObjectReference{
+				{Name: "acr-secret"},
+				{Name: "acr-vpc-secret"},
+			},
+			InitContainers: []corev1.Container{{
+				Name:    "inject-secret",
+				Image:   image,
+				Command: []string{"node", "-e", initScript},
+				Env: []corev1.EnvVar{{
+					Name: "FEISHU_APP_SECRET",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+							Key:                  "app_secret",
+						},
+					},
+				}},
+				VolumeMounts: []corev1.VolumeMount{
+					{Name: "user-config-template", MountPath: "/config-template"},
+					{Name: "merged-config", MountPath: "/merged-config"},
+				},
+			}},
 			Containers: []corev1.Container{{
 				Name:  "carher",
-				Image: fmt.Sprintf("%s:%s", ACR, imageTag),
+				Image: image,
 				Ports: []corev1.ContainerPort{
 					{ContainerPort: 18789, Name: "gateway"},
 					{ContainerPort: 18790, Name: "realtime"},
@@ -289,7 +304,7 @@ func (r *HerInstanceReconciler) createPod(ctx context.Context, her *herv1.HerIns
 				Env: []corev1.EnvVar{
 					{Name: "HOME", Value: "/data"},
 					{Name: "OPENCLAW_INSTANCE_ID", Value: fmt.Sprintf("carher-%d-k8s", uid)},
-					{Name: "NODE_OPTIONS", Value: "--max-old-space-size=1536"},
+					{Name: "NODE_OPTIONS", Value: "--max-old-space-size=2304"},
 					{Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/gcloud/application_default_credentials.json"},
 					{Name: "VOICE_FE_HOST", Value: fmt.Sprintf("%su%d-fe.carher.net", pfx, uid)},
 					{Name: "VOICE_PROXY_HOST", Value: fmt.Sprintf("%su%d-proxy.carher.net", pfx, uid)},
@@ -299,17 +314,17 @@ func (r *HerInstanceReconciler) createPod(ctx context.Context, her *herv1.HerIns
 				}},
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.MustParse("500m"),
+						corev1.ResourceCPU:    resource.MustParse("300m"),
 						corev1.ResourceMemory: resource.MustParse("1Gi"),
 					},
 					Limits: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.MustParse("2"),
-						corev1.ResourceMemory: resource.MustParse("2Gi"),
+						corev1.ResourceCPU:    resource.MustParse("3"),
+						corev1.ResourceMemory: resource.MustParse("3Gi"),
 					},
 				},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "user-data", MountPath: "/data/.openclaw"},
-					{Name: "user-config", MountPath: "/data/.openclaw/openclaw.json", SubPath: "openclaw.json"},
+					{Name: "merged-config", MountPath: "/data/.openclaw/openclaw.json", SubPath: "openclaw.json"},
 					{Name: "base-config", MountPath: "/data/.openclaw/carher-config.json", SubPath: "carher-config.json"},
 					{Name: "base-config", MountPath: "/data/.openclaw/shared-config.json5", SubPath: "shared-config.json5"},
 					{Name: "gcloud-adc", MountPath: "/gcloud/application_default_credentials.json", SubPath: "application_default_credentials.json", ReadOnly: true},
@@ -320,7 +335,8 @@ func (r *HerInstanceReconciler) createPod(ctx context.Context, her *herv1.HerIns
 			}},
 			Volumes: []corev1.Volume{
 				{Name: "user-data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: fmt.Sprintf("carher-%d-data", uid)}}},
-				{Name: "user-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: fmt.Sprintf("carher-%d-user-config", uid)}}}},
+				{Name: "user-config-template", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: fmt.Sprintf("carher-%d-user-config", uid)}}}},
+				{Name: "merged-config", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 				{Name: "base-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "carher-base-config"}}}},
 				{Name: "gcloud-adc", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "carher-gcloud-adc"}}},
 				{Name: "shared-skills", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "carher-shared-skills", ReadOnly: true}}},
@@ -329,15 +345,71 @@ func (r *HerInstanceReconciler) createPod(ctx context.Context, her *herv1.HerIns
 			},
 		},
 	}
-	return r.Create(ctx, pod)
+
+	desired := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("carher-%d", uid),
+			Namespace: Namespace,
+			Labels:    labels,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion:         "carher.io/v1alpha1",
+				Kind:               "HerInstance",
+				Name:               her.Name,
+				UID:                her.UID,
+				Controller:         &isController,
+				BlockOwnerDeletion: &blockOwnerDeletion,
+			}},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+				"app":     "carher-user",
+				"user-id": uidStr,
+			}},
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxSurge:       intstrPtr(1),
+					MaxUnavailable: intstrPtr(0),
+				},
+			},
+			Template: podTemplate,
+		},
+	}
+
+	var existing appsv1.Deployment
+	err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: Namespace}, &existing)
+	if errors.IsNotFound(err) {
+		return r.Create(ctx, desired)
+	} else if err != nil {
+		return err
+	}
+
+	existing.Spec.Template = desired.Spec.Template
+	existing.Spec.Strategy = desired.Spec.Strategy
+	existing.Labels = desired.Labels
+	return r.Update(ctx, &existing)
 }
 
-func (r *HerInstanceReconciler) deletePod(ctx context.Context, uid int) error {
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("carher-%d", uid), Namespace: Namespace}}
-	if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
+func (r *HerInstanceReconciler) deleteDeployment(ctx context.Context, uid int) error {
+	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("carher-%d", uid), Namespace: Namespace}}
+	if err := r.Delete(ctx, deploy); err != nil && !errors.IsNotFound(err) {
 		return err
 	}
 	return nil
+}
+
+func (r *HerInstanceReconciler) scaleDeployment(ctx context.Context, uid int, replicas int32) error {
+	var deploy appsv1.Deployment
+	name := fmt.Sprintf("carher-%d", uid)
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: Namespace}, &deploy); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	deploy.Spec.Replicas = &replicas
+	return r.Update(ctx, &deploy)
 }
 
 func (r *HerInstanceReconciler) deleteConfigMap(ctx context.Context, uid int) error {
@@ -446,7 +518,6 @@ func resolvePrefix(specPrefix string) string {
 	return specPrefix
 }
 
-// splitOwners splits a pipe-separated owner string into a slice.
 func splitOwners(s string) []string {
 	var result []string
 	for _, o := range strings.Split(s, "|") {
@@ -456,4 +527,9 @@ func splitOwners(s string) []string {
 		}
 	}
 	return result
+}
+
+func intstrPtr(val int) *intstr.IntOrString {
+	v := intstr.FromInt(val)
+	return &v
 }

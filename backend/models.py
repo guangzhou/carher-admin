@@ -26,7 +26,7 @@ class HerInstance(BaseModel):
     app_id: str = ""
     oauth_url: str = ""
     owner: str = ""
-    provider: str = "openrouter"
+    provider: str = "wangsu"
     sync_status: str = ""
     deploy_group: str = "stable"
     image_tag: str = ""
@@ -36,12 +36,12 @@ class HerInstance(BaseModel):
 class HerAddRequest(BaseModel):
     id: int | None = Field(None, description="Instance ID (auto-assigned if omitted)")
     name: str = Field(..., description="User display name")
-    model: str = Field("gpt", description="Model: gpt / sonnet / opus")
+    model: str = Field("opus", description="Model: gpt / sonnet / opus")
     app_id: str = Field(..., description="Feishu App ID (cli_xxx)")
     app_secret: str = Field(..., description="Feishu App Secret")
     prefix: str = Field("s1", description="Server prefix (s1/s2/s3)")
     owner: str = Field("", description="Feishu open_id(s), pipe-separated")
-    provider: str = Field("openrouter", description="AI provider: openrouter / anthropic / wangsu")
+    provider: str = Field("wangsu", description="AI provider: openrouter / anthropic / wangsu")
     deploy_group: str = Field("stable", description="Deploy group name")
 
 

@@ -5,12 +5,12 @@ export default function AddInstance({ onCreated }) {
   const [form, setForm] = useState({
     id: "",
     name: "",
-    model: "gpt",
+    model: "opus",
     app_id: "",
     app_secret: "",
     prefix: "s1",
     owner: "",
-    provider: "openrouter",
+    provider: "wangsu",
   });
   const [nextId, setNextId] = useState(null);
   const [loading, setLoading] = useState(false);

@@ -29,7 +29,7 @@ spec:
                   type: string
                 model:
                   type: string
-                  default: gpt
+                  default: opus
                   enum: [gpt, sonnet, opus]
                 appId:
                   type: string
@@ -44,7 +44,7 @@ spec:
                   default: ""
                 provider:
                   type: string
-                  default: openrouter
+                  default: wangsu
                   enum: [openrouter, anthropic, wangsu]
                 botOpenId:
                   type: string

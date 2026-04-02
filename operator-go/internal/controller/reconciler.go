@@ -38,6 +38,24 @@ if (secret && cfg.channels && cfg.channels.feishu) {
 fs.writeFileSync('/merged-config/openclaw.json', JSON.stringify(cfg, null, 2));
 console.log('config merged, secret-injected:', !!secret);
 `
+
+	// reloaderScript runs as a sidecar, watching ConfigMap volume for changes
+	// and syncing merged config (with secret injected) to the EmptyDir.
+	// K8s auto-propagates ConfigMap changes to non-SubPath mounts (~60s).
+	reloaderScript = `
+const fs=require('fs'),crypto=require('crypto');
+const SRC='/config-watch/openclaw.json',DST='/merged-config/openclaw.json';
+let lastHash='';
+function sync(){try{const raw=fs.readFileSync(SRC,'utf8');
+const h=crypto.createHash('md5').update(raw).digest('hex').slice(0,12);
+if(h===lastHash)return;const cfg=JSON.parse(raw);
+const s=process.env.FEISHU_APP_SECRET||'';
+if(s&&cfg.channels&&cfg.channels.feishu)cfg.channels.feishu.appSecret=s;
+fs.writeFileSync(DST,JSON.stringify(cfg,null,2));lastHash=h;
+console.log('[reloader] synced hash='+h);}catch(e){
+if(lastHash)console.error('[reloader]',e.message);}}
+sync();setInterval(sync,5000);
+`
 )
 
 type HerInstanceReconciler struct {
@@ -104,30 +122,59 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, err
 	}
 
-	needUpdate := false
+	needRollout := false
+	hotReload := false
 	deploy, deployErr := r.getDeployment(ctx, uid)
 
+	// pod-spec-key covers all fields that affect the Pod template beyond ConfigMap content.
+	// If any of these change, a rolling update is required. If only ConfigMap changes,
+	// the config-reloader sidecar handles it without pod restart.
+	secretName_ := her.Spec.AppSecretRef
+	if secretName_ == "" {
+		secretName_ = fmt.Sprintf("carher-%d-secret", uid)
+	}
+	desiredPodSpecKey := fmt.Sprintf("%s|%s|%s",
+		resolveImage(her.Spec.Image), resolvePrefix(her.Spec.Prefix), secretName_)
+
 	if deployErr != nil || deploy == nil {
-		needUpdate = true
+		needRollout = true
 		action = "create"
 	} else {
-		currentImage := ""
-		if len(deploy.Spec.Template.Spec.Containers) > 0 {
-			currentImage = deploy.Spec.Template.Spec.Containers[0].Image
+		currentPodSpecKey := ""
+		if deploy.Annotations != nil {
+			currentPodSpecKey = deploy.Annotations["carher.io/pod-spec-key"]
 		}
-		desiredImage := fmt.Sprintf("%s:%s", ACR, resolveImage(her.Spec.Image))
-		if currentImage != desiredImage {
-			needUpdate = true
-			action = "update-image"
+		if currentPodSpecKey == "" {
+			// Legacy: reconstruct from existing deployment for backward compat
+			img := ""
+			if len(deploy.Spec.Template.Spec.Containers) > 0 {
+				img = deploy.Spec.Template.Spec.Containers[0].Image
+			}
+			currentPodSpecKey = img
 		}
-		currentHash := deploy.Spec.Template.Annotations["carher.io/config-hash"]
-		if currentHash != configHash {
-			needUpdate = true
-			action = "update-config"
+		if currentPodSpecKey != desiredPodSpecKey {
+			needRollout = true
+			action = "update-pod-spec"
+		}
+
+		// For config-only changes, use hot-reload via sidecar instead of rolling out.
+		// live-config-hash tracks the latest config even when no rollout occurred.
+		if !needRollout {
+			liveHash := ""
+			if deploy.Annotations != nil {
+				liveHash = deploy.Annotations["carher.io/live-config-hash"]
+			}
+			if liveHash == "" {
+				liveHash = deploy.Spec.Template.Annotations["carher.io/config-hash"]
+			}
+			if liveHash != configHash {
+				hotReload = true
+				action = "hot-reload-config"
+			}
 		}
 	}
 
-	if needUpdate {
+	if needRollout {
 		logger.Info("Ensuring deployment", "uid", uid, "action", action, "image", resolveImage(her.Spec.Image))
 		if err := r.ensureDeployment(ctx, &her, configHash); err != nil {
 			logger.Error(err, "Failed to ensure deployment", "uid", uid)
@@ -139,6 +186,18 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, err
 		}
 		her.Status.Phase = "Pending"
+	} else if hotReload {
+		// Config-only change: ConfigMap already updated by applyConfig above.
+		// The config-reloader sidecar will detect the ConfigMap volume change
+		// and write the merged config to the shared EmptyDir — no pod restart.
+		logger.Info("Hot config reload via sidecar (no pod restart)", "uid", uid, "configHash", configHash)
+		if deploy.Annotations == nil {
+			deploy.Annotations = map[string]string{}
+		}
+		deploy.Annotations["carher.io/live-config-hash"] = configHash
+		if err := r.Update(ctx, deploy); err != nil {
+			logger.Error(err, "Failed to update live-config-hash", "uid", uid)
+		}
 	}
 
 	prevHash := her.Status.ConfigHash
@@ -322,6 +381,13 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 						corev1.ResourceMemory: resource.MustParse("3Gi"),
 					},
 				},
+				Lifecycle: &corev1.Lifecycle{
+					PreStop: &corev1.LifecycleHandler{
+						Exec: &corev1.ExecAction{
+							Command: []string{"sh", "-c", "sleep 15"},
+						},
+					},
+				},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "user-data", MountPath: "/data/.openclaw"},
 					{Name: "merged-config", MountPath: "/data/.openclaw/openclaw.json", SubPath: "openclaw.json"},
@@ -332,7 +398,35 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 					{Name: "dept-skills", MountPath: "/data/.agents/skills", ReadOnly: true},
 					{Name: "user-sessions", MountPath: "/data/.openclaw/sessions", SubPath: fmt.Sprintf("sessions/%d", uid)},
 				},
+			}, {
+				Name:    "config-reloader",
+				Image:   image,
+				Command: []string{"node", "-e", reloaderScript},
+				Env: []corev1.EnvVar{{
+					Name: "FEISHU_APP_SECRET",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+							Key:                  "app_secret",
+						},
+					},
+				}},
+				VolumeMounts: []corev1.VolumeMount{
+					{Name: "user-config-template", MountPath: "/config-watch", ReadOnly: true},
+					{Name: "merged-config", MountPath: "/merged-config"},
+				},
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("10m"),
+						corev1.ResourceMemory: resource.MustParse("32Mi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("50m"),
+						corev1.ResourceMemory: resource.MustParse("64Mi"),
+					},
+				},
 			}},
+			TerminationGracePeriodSeconds: func() *int64 { v := int64(30); return &v }(),
 			Volumes: []corev1.Volume{
 				{Name: "user-data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: fmt.Sprintf("carher-%d-data", uid)}}},
 				{Name: "user-config-template", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: fmt.Sprintf("carher-%d-user-config", uid)}}}},
@@ -351,6 +445,10 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 			Name:      fmt.Sprintf("carher-%d", uid),
 			Namespace: Namespace,
 			Labels:    labels,
+			Annotations: map[string]string{
+				"carher.io/live-config-hash": configHash,
+				"carher.io/pod-spec-key":     fmt.Sprintf("%s|%s|%s", imageTag, prefix, secretName),
+			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion:         "carher.io/v1alpha1",
 				Kind:               "HerInstance",
@@ -388,6 +486,12 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 	existing.Spec.Template = desired.Spec.Template
 	existing.Spec.Strategy = desired.Spec.Strategy
 	existing.Labels = desired.Labels
+	if existing.Annotations == nil {
+		existing.Annotations = map[string]string{}
+	}
+	for k, v := range desired.Annotations {
+		existing.Annotations[k] = v
+	}
 	return r.Update(ctx, &existing)
 }
 

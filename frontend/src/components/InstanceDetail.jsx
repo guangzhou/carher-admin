@@ -57,6 +57,8 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
       if (editForm.provider !== (data.provider || "openrouter")) params.provider = editForm.provider;
       if (editForm.deploy_group !== (data.deploy_group || "stable")) params.deploy_group = editForm.deploy_group;
       if (editForm.image && editForm.image !== (data.image || "")) params.image = editForm.image;
+      if (editForm.app_id !== (data.app_id || "")) params.app_id = editForm.app_id;
+      if (editForm.app_secret) params.app_secret = editForm.app_secret;
 
       if (Object.keys(params).length === 0) {
         setEditing(false);
@@ -100,7 +102,19 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
           ) : (
             <button className="btn btn-success" onClick={() => doAction("start")} disabled={actionLoading}>启动</button>
           )}
-          {!editing && <button className="btn btn-ghost" onClick={() => setEditing(true)}>编辑配置</button>}
+          {!editing && <button className="btn btn-ghost" onClick={() => {
+            setEditForm({
+              name: data.name || "",
+              model: data.model_short || data.model || "",
+              owner: data.owner || "",
+              provider: data.provider || "openrouter",
+              deploy_group: data.deploy_group || "stable",
+              image: data.image || "",
+              app_id: data.app_id || "",
+              app_secret: "",
+            });
+            setEditing(true);
+          }}>编辑配置</button>}
           <button className="btn btn-danger" onClick={() => doAction("delete")} disabled={actionLoading}>删除</button>
         </div>
       </div>
@@ -207,6 +221,19 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
             <div>
               <label className="block text-xs text-gray-500 mb-1">镜像版本</label>
               <input className="input w-full" value={editForm.image} onChange={(e) => setField("image", e.target.value)} placeholder="v20260329" />
+            </div>
+          </div>
+          <div className="border-t border-gray-700 pt-4 mt-2">
+            <h4 className="text-xs text-gray-500 mb-3">飞书机器人配置</h4>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">App ID</label>
+                <input className="input w-full font-mono text-xs" value={editForm.app_id} onChange={(e) => setField("app_id", e.target.value)} placeholder="cli_xxxxxxxx" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">App Secret（留空则不修改）</label>
+                <input className="input w-full font-mono text-xs" type="password" value={editForm.app_secret} onChange={(e) => setField("app_secret", e.target.value)} placeholder="不修改请留空" />
+              </div>
             </div>
           </div>
           <div className="flex gap-2 justify-end">

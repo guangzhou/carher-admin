@@ -104,7 +104,7 @@ export default function App() {
     <div className="min-h-screen flex flex-col">
       {/* Header */}
       <header className="border-b border-gray-800 bg-gray-900/80 backdrop-blur-sm sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-2.5 flex items-center justify-between">
+        <div className="mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white font-bold text-sm shadow-lg shadow-blue-600/20">H</div>
             <h1 className="text-lg font-semibold text-white hidden sm:block">CarHer Admin</h1>
@@ -171,7 +171,7 @@ export default function App() {
         {/* Sub-tabs */}
         {subs && (
           <div className="border-t border-gray-800/50 bg-gray-900/40">
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 flex gap-0.5 overflow-x-auto">
+            <div className="mx-auto px-4 sm:px-6 lg:px-8 flex gap-0.5 overflow-x-auto">
               {subs.map((s) => (
                 <button
                   key={s.id}
@@ -191,7 +191,7 @@ export default function App() {
       </header>
 
       {/* Content */}
-      <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 py-6 w-full">
+      <main className="flex-1 mx-auto px-4 sm:px-6 lg:px-8 py-6 w-full">
         {tab === "dashboard" && <Dashboard />}
         {tab === "instances" && subTab === "list" && <InstanceList detailId={detailId} setDetailId={setDetailId} />}
         {tab === "instances" && subTab === "add" && <AddInstance onCreated={(id) => openDetail(id)} />}

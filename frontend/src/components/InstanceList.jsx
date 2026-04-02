@@ -142,24 +142,24 @@ export default function InstanceList({ detailId, setDetailId }) {
 
       {/* Table */}
       <div className="card overflow-x-auto">
-        <table className="w-full text-sm table-fixed">
+        <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-gray-800 text-gray-500 text-left">
               <th className="p-3 w-10">
                 <input type="checkbox" checked={selected.size === filtered.length && filtered.length > 0} onChange={toggleAll}
                   className="rounded border-gray-600" />
               </th>
-              <th className="p-3 w-12">ID</th>
-              <th className="p-3 w-24">名字</th>
-              <th className="p-3 w-24">模型</th>
-              <th className="p-3 w-40">镜像</th>
-              <th className="p-3 w-20">灰度组</th>
-              <th className="p-3 w-20">状态</th>
-              <th className="p-3 w-16 text-right">CPU</th>
-              <th className="p-3 w-16 text-right">内存</th>
-              <th className="p-3 w-28">节点</th>
-              <th className="p-3 w-10">同步</th>
-              <th className="p-3 w-36 text-right">操作</th>
+              <th className="p-3">ID</th>
+              <th className="p-3">名字</th>
+              <th className="p-3">模型</th>
+              <th className="p-3">镜像</th>
+              <th className="p-3">灰度组</th>
+              <th className="p-3">状态</th>
+              <th className="p-3 text-right">CPU</th>
+              <th className="p-3 text-right">内存</th>
+              <th className="p-3">节点</th>
+              <th className="p-3 w-12 text-center">同步</th>
+              <th className="p-3 text-right">操作</th>
             </tr>
           </thead>
           <tbody>

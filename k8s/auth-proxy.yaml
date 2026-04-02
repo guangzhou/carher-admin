@@ -1,0 +1,173 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: auth-proxy-config
+  namespace: carher
+  labels:
+    app: auth-proxy
+data:
+  nginx.conf: |
+    worker_processes auto;
+    error_log /dev/stderr warn;
+    pid /tmp/nginx.pid;
+
+    events {
+      worker_connections 1024;
+    }
+
+    http {
+      access_log /dev/stdout combined;
+
+      # K8s cluster DNS for dynamic upstream resolution
+      resolver 192.168.0.10 valid=30s ipv6=off;
+      resolver_timeout 5s;
+
+      # Shared proxy settings
+      proxy_connect_timeout 10s;
+      proxy_read_timeout 60s;
+      proxy_send_timeout 30s;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_http_version 1.1;
+
+      # Auth domains: s{prefix}-u{id}-auth.carher.net -> carher-{id}-svc:18891
+      server {
+        listen 80;
+        server_name ~^s\d+-u(?<uid>\d+)-auth\.carher\.net$;
+
+        location / {
+          set $backend "carher-${uid}-svc.carher.svc.cluster.local:18891";
+          proxy_pass http://$backend;
+        }
+
+        location = /healthz {
+          return 200 "ok";
+          add_header Content-Type text/plain;
+        }
+      }
+
+      # Frontend domains: s{prefix}-u{id}-fe.carher.net -> carher-{id}-svc:8000
+      server {
+        listen 80;
+        server_name ~^s\d+-u(?<uid>\d+)-fe\.carher\.net$;
+
+        location / {
+          set $backend "carher-${uid}-svc.carher.svc.cluster.local:8000";
+          proxy_pass http://$backend;
+        }
+
+        location = /healthz {
+          return 200 "ok";
+          add_header Content-Type text/plain;
+        }
+      }
+
+      # WebSocket proxy domains: s{prefix}-u{id}-proxy.carher.net -> carher-{id}-svc:8080
+      server {
+        listen 80;
+        server_name ~^s\d+-u(?<uid>\d+)-proxy\.carher\.net$;
+
+        location / {
+          set $backend "carher-${uid}-svc.carher.svc.cluster.local:8080";
+          proxy_pass http://$backend;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_read_timeout 86400s;
+        }
+
+        location = /healthz {
+          return 200 "ok";
+          add_header Content-Type text/plain;
+        }
+      }
+
+      # Catch-all: return 404 for unmatched hosts
+      server {
+        listen 80 default_server;
+        server_name _;
+        return 404 "unknown host";
+        add_header Content-Type text/plain;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-proxy
+  namespace: carher
+  labels:
+    app: auth-proxy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: auth-proxy
+  template:
+    metadata:
+      labels:
+        app: auth-proxy
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+              httpHeaders:
+                - name: Host
+                  value: s1-u0-auth.carher.net
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+              httpHeaders:
+                - name: Host
+                  value: s1-u0-auth.carher.net
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: auth-proxy-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-proxy-lb
+  namespace: carher
+  labels:
+    app: auth-proxy
+  annotations:
+    service.beta.kubernetes.io/alibaba-cloud-loadbalancer-address-type: "internet"
+    service.beta.kubernetes.io/alibaba-cloud-loadbalancer-spec: "slb.s1.small"
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: auth-proxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+    - name: https
+      port: 443
+      targetPort: 80

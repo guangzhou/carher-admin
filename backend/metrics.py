@@ -8,6 +8,7 @@ we just read it via the standard /apis/metrics.k8s.io/v1beta1 API.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -66,24 +67,28 @@ def _parse_memory_mi(val: str) -> float:
 # Pod metrics
 # ──────────────────────────────────────
 
+_POD_NAME_RE = re.compile(r"^carher-(\d+)-")
+
+
 def get_pod_metrics(uid: int) -> dict:
     """Get CPU/Memory for a specific carher Pod."""
     try:
         data = _custom().list_namespaced_custom_object(
             "metrics.k8s.io", "v1beta1", NS, "pods",
-            label_selector=f"app=carher-user,user-id={uid}",
         )
-        items = data.get("items", [])
-        if not items:
-            return {"cpu_m": 0, "memory_mi": 0, "error": "Pod not running"}
-        containers = items[0].get("containers", [])
-        if not containers:
-            return {"cpu_m": 0, "memory_mi": 0}
-        usage = containers[0].get("usage", {})
-        return {
-            "cpu_m": round(_parse_cpu(usage.get("cpu", "0")), 2),
-            "memory_mi": round(_parse_memory_mi(usage.get("memory", "0")), 1),
-        }
+        for item in data.get("items", []):
+            name = item.get("metadata", {}).get("name", "")
+            m = _POD_NAME_RE.match(name)
+            if m and int(m.group(1)) == uid:
+                containers = item.get("containers", [])
+                if not containers:
+                    return {"cpu_m": 0, "memory_mi": 0}
+                usage = containers[0].get("usage", {})
+                return {
+                    "cpu_m": round(_parse_cpu(usage.get("cpu", "0")), 2),
+                    "memory_mi": round(_parse_memory_mi(usage.get("memory", "0")), 1),
+                }
+        return {"cpu_m": 0, "memory_mi": 0, "error": "Pod not running"}
     except ApiException as e:
         if e.status == 404:
             return {"cpu_m": 0, "memory_mi": 0, "error": "Pod not running"}
@@ -96,14 +101,13 @@ def get_all_pod_metrics() -> dict[int, dict]:
     try:
         data = _custom().list_namespaced_custom_object(
             "metrics.k8s.io", "v1beta1", NS, "pods",
-            label_selector="app=carher-user",
         )
         for item in data.get("items", []):
-            labels = item.get("metadata", {}).get("labels", {})
-            uid_str = labels.get("user-id", "")
-            if not uid_str or not uid_str.isdigit():
+            name = item.get("metadata", {}).get("name", "")
+            m = _POD_NAME_RE.match(name)
+            if not m:
                 continue
-            uid = int(uid_str)
+            uid = int(m.group(1))
             containers = item.get("containers", [])
             if not containers:
                 continue

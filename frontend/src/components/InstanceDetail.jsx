@@ -2,6 +2,25 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import LogViewer from "./LogViewer";
 
+const PROVIDER_MODELS = {
+  openrouter: [
+    { value: "gpt", label: "GPT-5.4" },
+    { value: "sonnet", label: "Claude Sonnet 4.6" },
+    { value: "opus", label: "Claude Opus 4.6" },
+    { value: "gemini", label: "Gemini 3.1 Pro" },
+  ],
+  anthropic: [
+    { value: "sonnet", label: "Claude Sonnet 4.6" },
+    { value: "opus", label: "Claude Opus 4.6" },
+  ],
+  wangsu: [
+    { value: "gpt", label: "GPT-5.4" },
+    { value: "sonnet", label: "Claude Sonnet 4.6" },
+    { value: "opus", label: "Claude Opus 4.6" },
+    { value: "gemini", label: "Gemini 3.1 Pro" },
+  ],
+};
+
 export default function InstanceDetail({ id, onBack, onRefresh }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -194,20 +213,26 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
               <input className="input w-full" value={editForm.name} onChange={(e) => setField("name", e.target.value)} />
             </div>
             <div>
-              <label className="block text-xs text-gray-500 mb-1">模型</label>
-              <select className="input w-full" value={editForm.model} onChange={(e) => setField("model", e.target.value)}>
-                <option value="gpt">GPT-5.4</option>
-                <option value="sonnet">Claude Sonnet 4.6</option>
-                <option value="opus">Claude Opus 4.6</option>
-                <option value="gemini">Gemini 3.1 Pro</option>
-              </select>
-            </div>
-            <div>
               <label className="block text-xs text-gray-500 mb-1">Provider</label>
-              <select className="input w-full" value={editForm.provider} onChange={(e) => setField("provider", e.target.value)}>
+              <select className="input w-full" value={editForm.provider} onChange={(e) => {
+                const p = e.target.value;
+                setField("provider", p);
+                const models = PROVIDER_MODELS[p] || PROVIDER_MODELS.openrouter;
+                if (!models.some((m) => m.value === editForm.model)) {
+                  setField("model", models[0].value);
+                }
+              }}>
                 <option value="openrouter">OpenRouter</option>
                 <option value="anthropic">Anthropic (直连)</option>
                 <option value="wangsu">网宿</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">模型</label>
+              <select className="input w-full" value={editForm.model} onChange={(e) => setField("model", e.target.value)}>
+                {(PROVIDER_MODELS[editForm.provider] || PROVIDER_MODELS.openrouter).map((m) => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
               </select>
             </div>
             <div>

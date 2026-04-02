@@ -26,7 +26,13 @@ var modelMapWangsu = map[string]string{
 	"sonnet": "wangsu/claude-sonnet-4-6",
 	"opus":   "wangsu/claude-opus-4-6",
 	"gpt":    "wangsu/gpt-5.4",
+	"gemini": "wangsu/gemini-3.1-pro-preview",
 }
+
+const (
+	WangsuBaseURL = "https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1"
+	WangsuAPIKey  = "6d1dc662f0cb41a5b19bc22c905b29e1"
+)
 
 type ConfigInput struct {
 	ID              int
@@ -85,16 +91,27 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		models["wangsu/gemini-3.1-pro-preview"] = alias("ws-gemini")
 	}
 
+	agents := map[string]interface{}{
+		"defaults": map[string]interface{}{
+			"model": map[string]interface{}{
+				"primary": modelFull,
+			},
+			"models": models,
+		},
+	}
+	if input.Provider == "wangsu" {
+		agents["providers"] = map[string]interface{}{
+			"wangsu": map[string]string{
+				"type":    "openai",
+				"baseURL": WangsuBaseURL,
+				"apiKey":  WangsuAPIKey,
+			},
+		}
+	}
+
 	cfg := map[string]interface{}{
 		"$include": "./carher-config.json",
-		"agents": map[string]interface{}{
-			"defaults": map[string]interface{}{
-				"model": map[string]interface{}{
-					"primary": modelFull,
-				},
-				"models": models,
-			},
-		},
+		"agents":   agents,
 		"plugins": map[string]interface{}{
 			"entries": map[string]interface{}{
 				"realtime": map[string]interface{}{

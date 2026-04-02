@@ -1,6 +1,25 @@
 import { useState, useEffect } from "react";
 import { api } from "../api";
 
+const PROVIDER_MODELS = {
+  openrouter: [
+    { value: "gpt", label: "GPT-5.4" },
+    { value: "sonnet", label: "Claude Sonnet 4.6" },
+    { value: "opus", label: "Claude Opus 4.6" },
+    { value: "gemini", label: "Gemini 3.1 Pro" },
+  ],
+  anthropic: [
+    { value: "sonnet", label: "Claude Sonnet 4.6" },
+    { value: "opus", label: "Claude Opus 4.6" },
+  ],
+  wangsu: [
+    { value: "gpt", label: "GPT-5.4" },
+    { value: "sonnet", label: "Claude Sonnet 4.6" },
+    { value: "opus", label: "Claude Opus 4.6" },
+    { value: "gemini", label: "Gemini 3.1 Pro" },
+  ],
+};
+
 export default function AddInstance({ onCreated }) {
   const [form, setForm] = useState({
     id: "",
@@ -64,18 +83,24 @@ export default function AddInstance({ onCreated }) {
           <Field label="飞书 App Secret" required>
             <input className="input w-full" type="password" value={form.app_secret} onChange={set("app_secret")} placeholder="xxx" />
           </Field>
-          <Field label="模型">
-            <select className="input w-full" value={form.model} onChange={set("model")}>
-              <option value="gpt">GPT-5.4</option>
-              <option value="sonnet">Claude Sonnet 4.6</option>
-              <option value="opus">Claude Opus 4.6</option>
-            </select>
-          </Field>
           <Field label="Provider">
-            <select className="input w-full" value={form.provider} onChange={set("provider")}>
+            <select className="input w-full" value={form.provider} onChange={(e) => {
+              const p = e.target.value;
+              const models = PROVIDER_MODELS[p] || PROVIDER_MODELS.openrouter;
+              const next = { ...form, provider: p };
+              if (!models.some((m) => m.value === form.model)) next.model = models[0].value;
+              setForm(next);
+            }}>
               <option value="openrouter">OpenRouter</option>
               <option value="anthropic">Anthropic 直连</option>
               <option value="wangsu">网宿</option>
+            </select>
+          </Field>
+          <Field label="模型">
+            <select className="input w-full" value={form.model} onChange={set("model")}>
+              {(PROVIDER_MODELS[form.provider] || PROVIDER_MODELS.openrouter).map((m) => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
             </select>
           </Field>
           <Field label="域名前缀">

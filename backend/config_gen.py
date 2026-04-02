@@ -53,7 +53,11 @@ MODEL_MAP_WANGSU = {
     "sonnet": "wangsu/claude-sonnet-4-6",
     "opus": "wangsu/claude-opus-4-6",
     "gpt": "wangsu/gpt-5.4",
+    "gemini": "wangsu/gemini-3.1-pro-preview",
 }
+
+WANGSU_BASE_URL = "https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1"
+WANGSU_API_KEY = "6d1dc662f0cb41a5b19bc22c905b29e1"
 
 
 def generate_openclaw_json(instance: dict) -> dict:
@@ -101,9 +105,15 @@ def generate_openclaw_json(instance: dict) -> dict:
             "wangsu/gemini-3.1-pro-preview": {"alias": "ws-gemini"},
         })
 
+    agents: dict[str, Any] = {"defaults": {"model": {"primary": model_full}, "models": models}}
+    if provider == "wangsu":
+        agents["providers"] = {
+            "wangsu": {"type": "openai", "baseURL": WANGSU_BASE_URL, "apiKey": WANGSU_API_KEY},
+        }
+
     cfg: dict[str, Any] = {
         "$include": "./carher-config.json",
-        "agents": {"defaults": {"model": {"primary": model_full}, "models": models}},
+        "agents": agents,
         "plugins": {"entries": {"realtime": {"config": {"gemini": {
             "projectId": GEMINI_PROJECT, "model": GEMINI_MODEL,
         }}}}},

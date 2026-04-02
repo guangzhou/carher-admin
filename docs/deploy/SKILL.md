@@ -52,6 +52,20 @@ Push to `main` branch auto-triggers `.github/workflows/build-deploy.yml`:
 `deploy_mode` (normal/fast/canary-only/build-only) and `components`
 (all/admin/operator).
 
+## kubectl 隧道
+
+本地 kubectl 通过 SSH 隧道连接阿里云 K8s API Server：
+
+```bash
+SSHPASS='5ip0krF>qazQjcvnqc' sshpass -e ssh \
+  -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
+  -p 1023 -L 16443:172.16.1.163:6443 -N root@47.84.112.136 &
+```
+
+验证连通性：`kubectl get nodes`
+
+如果 kubectl 报 `connection refused`，重新执行上面的命令重建隧道。
+
 ## Method 2: Manual Deployment
 
 When CI is broken or you need immediate deployment.

@@ -12,6 +12,8 @@ export default function InstanceList({ detailId, setDetailId }) {
   const [showLogs, setShowLogs] = useState(null);
   const [batchLoading, setBatchLoading] = useState(false);
   const [podMetrics, setPodMetrics] = useState({});
+  const [showBatchEdit, setShowBatchEdit] = useState(false);
+  const [deployGroups, setDeployGroups] = useState([]);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -21,6 +23,10 @@ export default function InstanceList({ detailId, setDetailId }) {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    api.listDeployGroups().then((g) => setDeployGroups(Array.isArray(g) ? g : [])).catch(() => {});
+  }, []);
 
   const filtered = instances.filter((i) => {
     if (statusFilter === "running" && i.status !== "Running") return false;
@@ -32,7 +38,8 @@ export default function InstanceList({ detailId, setDetailId }) {
         String(i.id).includes(q) ||
         (i.name || "").toLowerCase().includes(q) ||
         (i.model_short || "").toLowerCase().includes(q) ||
-        (i.image || "").toLowerCase().includes(q)
+        (i.image || "").toLowerCase().includes(q) ||
+        (i.deploy_group || "").toLowerCase().includes(q)
       );
     }
     return true;
@@ -56,8 +63,8 @@ export default function InstanceList({ detailId, setDetailId }) {
 
   const batchAction = async (action, params) => {
     if (!selected.size) return;
-    const label = { stop: "停止", start: "启动", restart: "重启", delete: "删除" }[action];
-    if (!confirm(`确认${label} ${selected.size} 个实例？`)) return;
+    const label = { stop: "停止", start: "启动", restart: "重启", delete: "删除", update: "修改" }[action];
+    if (action !== "update" && !confirm(`确认${label} ${selected.size} 个实例？`)) return;
     setBatchLoading(true);
     try {
       await api.batchAction([...selected], action, params);
@@ -66,6 +73,11 @@ export default function InstanceList({ detailId, setDetailId }) {
     } finally {
       setBatchLoading(false);
     }
+  };
+
+  const handleBatchUpdate = async (params) => {
+    setShowBatchEdit(false);
+    await batchAction("update", params);
   };
 
   const singleAction = async (id, action) => {
@@ -115,6 +127,7 @@ export default function InstanceList({ detailId, setDetailId }) {
         {selected.size > 0 && (
           <div className="flex items-center gap-2 ml-auto">
             <span className="text-sm text-gray-400">已选 {selected.size} 个</span>
+            <button className="btn btn-primary" onClick={() => setShowBatchEdit(true)} disabled={batchLoading}>批量修改</button>
             <button className="btn btn-success" onClick={() => batchAction("start")} disabled={batchLoading}>批量启动</button>
             <button className="btn btn-ghost" onClick={() => batchAction("restart")} disabled={batchLoading}>批量重启</button>
             <button className="btn btn-danger" onClick={() => batchAction("stop")} disabled={batchLoading}>批量停止</button>
@@ -136,6 +149,7 @@ export default function InstanceList({ detailId, setDetailId }) {
               <th className="p-3">名字</th>
               <th className="p-3">模型</th>
               <th className="p-3">镜像</th>
+              <th className="p-3">灰度组</th>
               <th className="p-3">状态</th>
               <th className="p-3 text-right">CPU</th>
               <th className="p-3 text-right">内存</th>
@@ -167,6 +181,9 @@ export default function InstanceList({ detailId, setDetailId }) {
                   </td>
                   <td className="p-3">
                     <span className="font-mono text-xs text-gray-400">{shortImage(inst.image)}</span>
+                  </td>
+                  <td className="p-3">
+                    <DeployGroupBadge group={inst.deploy_group} />
                   </td>
                   <td className="p-3">
                     <StatusBadge status={inst.status} />
@@ -209,7 +226,7 @@ export default function InstanceList({ detailId, setDetailId }) {
             })}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan="11" className="p-8 text-center text-gray-500">
+                <td colSpan="12" className="p-8 text-center text-gray-500">
                   {loading ? "加载中..." : "没有找到实例"}
                 </td>
               </tr>
@@ -219,6 +236,15 @@ export default function InstanceList({ detailId, setDetailId }) {
       </div>
 
       <p className="text-xs text-gray-600">共 {instances.length} 个实例，显示 {filtered.length} 个</p>
+
+      {showBatchEdit && (
+        <BatchEditModal
+          count={selected.size}
+          deployGroups={deployGroups}
+          onSubmit={handleBatchUpdate}
+          onClose={() => setShowBatchEdit(false)}
+        />
+      )}
     </div>
   );
 }
@@ -246,6 +272,89 @@ function shortNode(name) {
   if (!name) return "-";
   const m = name.match(/(\d+\.\d+\.\d+\.\d+)/);
   return m ? m[1] : name.slice(-12);
+}
+
+function BatchEditModal({ count, deployGroups, onSubmit, onClose }) {
+  const [enableModel, setEnableModel] = useState(false);
+  const [enableGroup, setEnableGroup] = useState(false);
+  const [enableImage, setEnableImage] = useState(false);
+  const [model, setModel] = useState("opus");
+  const [deployGroup, setDeployGroup] = useState("stable");
+  const [image, setImage] = useState("");
+
+  const groupNames = deployGroups.map((g) => g.name || g).filter(Boolean);
+
+  const handleSubmit = () => {
+    const params = {};
+    if (enableModel) params.model = model;
+    if (enableGroup) params.deploy_group = deployGroup;
+    if (enableImage) params.image = image;
+    if (!Object.keys(params).length) return;
+    onSubmit(params);
+  };
+
+  const hasChanges = enableModel || enableGroup || (enableImage && image);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div className="bg-gray-900 border border-gray-700 rounded-xl p-6 w-[420px] space-y-5" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold text-gray-100">批量修改 ({count} 个实例)</h3>
+        <p className="text-xs text-gray-500">勾选要修改的字段，留空的不会变更。Config 类变更（模型、灰度组）热加载生效，镜像变更会触发滚动更新。</p>
+
+        <div className="space-y-4">
+          {/* Model */}
+          <label className="flex items-center gap-3">
+            <input type="checkbox" checked={enableModel} onChange={(e) => setEnableModel(e.target.checked)} className="rounded border-gray-600" />
+            <span className="text-sm text-gray-300 w-16">模型</span>
+            <select className="input flex-1" value={model} onChange={(e) => setModel(e.target.value)} disabled={!enableModel}>
+              <option value="opus">opus</option>
+              <option value="sonnet">sonnet</option>
+              <option value="gpt">gpt</option>
+            </select>
+          </label>
+
+          {/* Deploy Group */}
+          <label className="flex items-center gap-3">
+            <input type="checkbox" checked={enableGroup} onChange={(e) => setEnableGroup(e.target.checked)} className="rounded border-gray-600" />
+            <span className="text-sm text-gray-300 w-16">灰度组</span>
+            {groupNames.length > 0 ? (
+              <select className="input flex-1" value={deployGroup} onChange={(e) => setDeployGroup(e.target.value)} disabled={!enableGroup}>
+                {groupNames.map((g) => <option key={g} value={g}>{g}</option>)}
+              </select>
+            ) : (
+              <input className="input flex-1" value={deployGroup} onChange={(e) => setDeployGroup(e.target.value)}
+                placeholder="stable / canary / ..." disabled={!enableGroup} />
+            )}
+          </label>
+
+          {/* Image */}
+          <label className="flex items-center gap-3">
+            <input type="checkbox" checked={enableImage} onChange={(e) => setEnableImage(e.target.checked)} className="rounded border-gray-600" />
+            <span className="text-sm text-gray-300 w-16">镜像</span>
+            <input className="input flex-1" value={image} onChange={(e) => setImage(e.target.value)}
+              placeholder="v20260402" disabled={!enableImage} />
+          </label>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button className="btn btn-ghost" onClick={onClose}>取消</button>
+          <button className="btn btn-primary" onClick={handleSubmit} disabled={!hasChanges}>
+            确认修改
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeployGroupBadge({ group }) {
+  if (!group) return <span className="text-gray-600 text-xs">-</span>;
+  const cls = {
+    stable: "bg-emerald-600/20 text-emerald-400",
+    canary: "bg-amber-600/20 text-amber-400",
+    beta: "bg-blue-600/20 text-blue-400",
+  }[group] || "bg-gray-600/20 text-gray-400";
+  return <span className={`badge ${cls}`}>{group}</span>;
 }
 
 function StatusBadge({ status }) {

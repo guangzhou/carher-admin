@@ -957,6 +957,12 @@ def api_deploy_history(limit: int = Query(20)):
     return db.list_deploys(limit=limit)
 
 
+@app.get("/api/image-tags", tags=["deploy"])
+def api_list_image_tags(limit: int = Query(30)):
+    """List available carher image tags (from deploy history + instances)."""
+    return db.list_image_tags(limit=limit)
+
+
 @app.put("/api/instances/{uid}/deploy-group", tags=["deploy-groups"])
 def api_set_deploy_group(uid: int, req: SetDeployGroupRequest):
     """Move a single instance to a deploy group. Syncs both CRD and DB."""

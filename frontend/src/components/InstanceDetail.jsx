@@ -12,6 +12,7 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
   const [actionLoading, setActionLoading] = useState(false);
   const [metrics, setMetrics] = useState(null);
   const [metricsHistory, setMetricsHistory] = useState([]);
+  const [imageTags, setImageTags] = useState([]);
 
   const reload = () => {
     api.getInstance(id).then((d) => {
@@ -30,6 +31,7 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
   };
 
   useEffect(() => { reload(); }, [id]);
+  useEffect(() => { api.listImageTags().then((t) => setImageTags(Array.isArray(t) ? t : [])).catch(() => {}); }, []);
 
   const doAction = async (action) => {
     const labels = { stop: "停止", start: "启动", restart: "重启", delete: "删除" };
@@ -227,7 +229,10 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">镜像版本</label>
-              <input className="input w-full" value={editForm.image} onChange={(e) => setField("image", e.target.value)} placeholder="v20260329" />
+              <select className="input w-full" value={editForm.image} onChange={(e) => setField("image", e.target.value)}>
+                {imageTags.includes(editForm.image) || !editForm.image ? null : <option value={editForm.image}>{editForm.image}</option>}
+                {imageTags.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
             </div>
           </div>
           <div className="border-t border-gray-700 pt-4 mt-2">

@@ -15,6 +15,7 @@ export default function InstanceList({ detailId, setDetailId }) {
   const [podMetrics, setPodMetrics] = useState({});
   const [showBatchEdit, setShowBatchEdit] = useState(false);
   const [deployGroups, setDeployGroups] = useState([]);
+  const [imageTags, setImageTags] = useState([]);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -27,6 +28,7 @@ export default function InstanceList({ detailId, setDetailId }) {
 
   useEffect(() => {
     api.listDeployGroups().then((g) => setDeployGroups(Array.isArray(g) ? g : [])).catch(() => {});
+    api.listImageTags().then((t) => setImageTags(Array.isArray(t) ? t : [])).catch(() => {});
   }, []);
 
   const filtered = instances.filter((i) => {
@@ -243,6 +245,7 @@ export default function InstanceList({ detailId, setDetailId }) {
         <BatchEditModal
           count={selected.size}
           deployGroups={deployGroups}
+          imageTags={imageTags}
           onSubmit={handleBatchUpdate}
           onClose={() => setShowBatchEdit(false)}
         />
@@ -276,7 +279,7 @@ function shortNode(name) {
   return m ? m[1] : name.slice(-12);
 }
 
-function BatchEditModal({ count, deployGroups, onSubmit, onClose }) {
+function BatchEditModal({ count, deployGroups, imageTags, onSubmit, onClose }) {
   const [enableProvider, setEnableProvider] = useState(false);
   const [enableModel, setEnableModel] = useState(false);
   const [enableGroup, setEnableGroup] = useState(false);
@@ -355,8 +358,10 @@ function BatchEditModal({ count, deployGroups, onSubmit, onClose }) {
           <label className="flex items-center gap-3">
             <input type="checkbox" checked={enableImage} onChange={(e) => setEnableImage(e.target.checked)} className="rounded border-gray-600" />
             <span className="text-sm text-gray-300 w-16">镜像</span>
-            <input className="input flex-1" value={image} onChange={(e) => setImage(e.target.value)}
-              placeholder="v20260402" disabled={!enableImage} />
+            <select className="input flex-1" value={image} onChange={(e) => setImage(e.target.value)} disabled={!enableImage}>
+              <option value="">选择镜像版本...</option>
+              {imageTags.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
           </label>
         </div>
 

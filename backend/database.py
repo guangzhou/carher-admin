@@ -554,6 +554,20 @@ def get_current_image_tag() -> str:
         return row["image_tag"] if row else "v20260328"
 
 
+def list_image_tags(limit: int = 30) -> list[str]:
+    """Return distinct image tags from deploy history + instances, newest first."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT tag FROM (
+                 SELECT image_tag AS tag, MAX(created_at) AS ts FROM deploys GROUP BY image_tag
+                 UNION
+                 SELECT image_tag AS tag, MAX(updated_at) AS ts FROM her_instances WHERE image_tag != '' GROUP BY image_tag
+               ) ORDER BY ts DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [r["tag"] for r in rows]
+
+
 # ──────────────────────────────────────
 # Deploy records
 # ──────────────────────────────────────

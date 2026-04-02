@@ -45,7 +45,7 @@ spec:
                 provider:
                   type: string
                   default: openrouter
-                  enum: [openrouter, anthropic]
+                  enum: [openrouter, anthropic, wangsu]
                 botOpenId:
                   type: string
                   default: ""

@@ -75,6 +75,7 @@ export default function AddInstance({ onCreated }) {
             <select className="input w-full" value={form.provider} onChange={set("provider")}>
               <option value="openrouter">OpenRouter</option>
               <option value="anthropic">Anthropic 直连</option>
+              <option value="wangsu">网宿</option>
             </select>
           </Field>
           <Field label="域名前缀">

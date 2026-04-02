@@ -49,6 +49,11 @@ MODEL_MAP_ANTHROPIC = {
     "opus": "anthropic/claude-opus-4-6",
     "gpt": "openrouter/openai/gpt-5.4",
 }
+MODEL_MAP_WANGSU = {
+    "sonnet": "wangsu/claude-sonnet-4-6",
+    "opus": "wangsu/claude-opus-4-6",
+    "gpt": "wangsu/gpt-5.4",
+}
 
 
 def generate_openclaw_json(instance: dict) -> dict:
@@ -59,10 +64,14 @@ def generate_openclaw_json(instance: dict) -> dict:
     prefix = instance.get("prefix", "s1")
     pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
 
-    mm = MODEL_MAP_ANTHROPIC if provider == "anthropic" else MODEL_MAP
+    if provider == "wangsu":
+        mm = MODEL_MAP_WANGSU
+    elif provider == "anthropic":
+        mm = MODEL_MAP_ANTHROPIC
+    else:
+        mm = MODEL_MAP
     model_full = mm.get(model_short, model_short)
 
-    # Model aliases: provider's models get primary aliases
     if provider == "anthropic":
         models = {
             "anthropic/claude-opus-4-6": {"alias": "opus"},
@@ -84,6 +93,13 @@ def generate_openclaw_json(instance: dict) -> dict:
         "openrouter/openai/gpt-5.4": {"alias": "gpt"},
         "openrouter/openai/gpt-5.3-codex": {"alias": "codex"},
     })
+    if provider == "wangsu":
+        models.update({
+            "wangsu/claude-opus-4-6": {"alias": "ws-opus"},
+            "wangsu/claude-sonnet-4-6": {"alias": "ws-sonnet"},
+            "wangsu/gpt-5.4": {"alias": "ws-gpt"},
+            "wangsu/gemini-3.1-pro-preview": {"alias": "ws-gemini"},
+        })
 
     cfg: dict[str, Any] = {
         "$include": "./carher-config.json",

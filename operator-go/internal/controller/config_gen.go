@@ -22,6 +22,12 @@ var modelMapAnthropic = map[string]string{
 	"gpt":    "openrouter/openai/gpt-5.4",
 }
 
+var modelMapWangsu = map[string]string{
+	"sonnet": "wangsu/claude-sonnet-4-6",
+	"opus":   "wangsu/claude-opus-4-6",
+	"gpt":    "wangsu/gpt-5.4",
+}
+
 type ConfigInput struct {
 	ID              int
 	Name            string
@@ -41,7 +47,10 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 	pfx := prefix + "-"
 
 	mm := modelMap
-	if input.Provider == "anthropic" {
+	switch input.Provider {
+	case "wangsu":
+		mm = modelMapWangsu
+	case "anthropic":
 		mm = modelMapAnthropic
 	}
 	modelFull := mm[input.Model]
@@ -52,12 +61,13 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 	alias := func(a string) map[string]string { return map[string]string{"alias": a} }
 
 	models := make(map[string]interface{})
-	if input.Provider == "anthropic" {
+	switch input.Provider {
+	case "anthropic":
 		models["anthropic/claude-opus-4-6"] = alias("opus")
 		models["anthropic/claude-sonnet-4-6"] = alias("sonnet")
 		models["openrouter/anthropic/claude-opus-4.6"] = alias("or-opus")
 		models["openrouter/anthropic/claude-sonnet-4.6"] = alias("or-sonnet")
-	} else {
+	default:
 		models["openrouter/anthropic/claude-opus-4.6"] = alias("opus")
 		models["openrouter/anthropic/claude-sonnet-4.6"] = alias("sonnet")
 		models["anthropic/claude-opus-4-6"] = alias("or-opus")
@@ -68,6 +78,12 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 	models["openrouter/z-ai/glm-5"] = alias("glm")
 	models["openrouter/openai/gpt-5.4"] = alias("gpt")
 	models["openrouter/openai/gpt-5.3-codex"] = alias("codex")
+	if input.Provider == "wangsu" {
+		models["wangsu/claude-opus-4-6"] = alias("ws-opus")
+		models["wangsu/claude-sonnet-4-6"] = alias("ws-sonnet")
+		models["wangsu/gpt-5.4"] = alias("ws-gpt")
+		models["wangsu/gemini-3.1-pro-preview"] = alias("ws-gemini")
+	}
 
 	cfg := map[string]interface{}{
 		"$include": "./carher-config.json",

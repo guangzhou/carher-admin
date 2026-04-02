@@ -4,7 +4,7 @@ import { api } from "../api";
 const CSV_TEMPLATE = `# name,model,app_id,app_secret,prefix,owner,provider
 # 例:
 # 张三,gpt,cli_axxxx,secret_xxx,s1,ou_xxx,openrouter
-# 李四,sonnet,cli_bxxxx,secret_yyy,s2,,openrouter`;
+# 李四,sonnet,cli_bxxxx,secret_yyy,s2,,wangsu`;
 
 const FIELDS = ["name", "model", "app_id", "app_secret", "prefix", "owner", "provider"];
 

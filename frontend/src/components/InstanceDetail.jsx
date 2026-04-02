@@ -193,6 +193,7 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
               <select className="input w-full" value={editForm.provider} onChange={(e) => setField("provider", e.target.value)}>
                 <option value="openrouter">OpenRouter</option>
                 <option value="anthropic">Anthropic (直连)</option>
+                <option value="wangsu">网宿</option>
               </select>
             </div>
             <div>

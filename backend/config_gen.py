@@ -105,15 +105,9 @@ def generate_openclaw_json(instance: dict) -> dict:
             "wangsu/gemini-3.1-pro-preview": {"alias": "ws-gemini"},
         })
 
-    agents: dict[str, Any] = {"defaults": {"model": {"primary": model_full}, "models": models}}
-    if provider == "wangsu":
-        agents["providers"] = {
-            "wangsu": {"type": "openai", "baseURL": WANGSU_BASE_URL, "apiKey": WANGSU_API_KEY},
-        }
-
     cfg: dict[str, Any] = {
         "$include": "./carher-config.json",
-        "agents": agents,
+        "agents": {"defaults": {"model": {"primary": model_full}, "models": models}},
         "plugins": {"entries": {"realtime": {"config": {"gemini": {
             "projectId": GEMINI_PROJECT, "model": GEMINI_MODEL,
         }}}}},

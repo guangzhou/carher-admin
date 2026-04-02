@@ -91,27 +91,16 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		models["wangsu/gemini-3.1-pro-preview"] = alias("ws-gemini")
 	}
 
-	agents := map[string]interface{}{
-		"defaults": map[string]interface{}{
-			"model": map[string]interface{}{
-				"primary": modelFull,
-			},
-			"models": models,
-		},
-	}
-	if input.Provider == "wangsu" {
-		agents["providers"] = map[string]interface{}{
-			"wangsu": map[string]string{
-				"type":    "openai",
-				"baseURL": WangsuBaseURL,
-				"apiKey":  WangsuAPIKey,
-			},
-		}
-	}
-
 	cfg := map[string]interface{}{
 		"$include": "./carher-config.json",
-		"agents":   agents,
+		"agents": map[string]interface{}{
+			"defaults": map[string]interface{}{
+				"model": map[string]interface{}{
+					"primary": modelFull,
+				},
+				"models": models,
+			},
+		},
 		"plugins": map[string]interface{}{
 			"entries": map[string]interface{}{
 				"realtime": map[string]interface{}{

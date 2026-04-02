@@ -23,12 +23,13 @@ Bot 实例由 operator 管理（Deployment），镜像更新通过 admin API 触
 
 Push 到 `main` 分支自动触发 `.github/workflows/build-deploy.yml`：
 
-1. CI 构建 admin + operator 镜像（bot 镜像共用同一 tag）
+1. CI 构建 `her/carher` 镜像（从 `docker/Dockerfile`）
 2. Tag 格式：`v{YYYYMMDD}-{sha7}`
-3. CI 调用 `POST /api/deploy/webhook` → admin 触发 bot 实例滚动更新
-4. CI 轮询 `/api/deploy/status` 90s 验证
+3. 推送到 ACR
+4. CI 调用 `POST /api/deploy/webhook` → admin 触发 bot 实例滚动更新
+5. CI 轮询 `/api/deploy/status` 90s 验证
 
-**Paths ignored**（不触发 CI）：`*.md`, `docs/**`
+**触发条件**：`docker/**` 或 `configs/**` 有变更时触发。admin/operator 代码变更不触发。
 
 Deploy modes（通过 webhook 的 mode 字段或 branch rules 控制）：
 

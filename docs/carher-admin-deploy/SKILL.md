@@ -40,30 +40,33 @@ SSHPASS='5ip0krF>qazQjcvnqc' sshpass -e ssh \
 
 ---
 
-## 方式 1：手动 kubectl（默认）
+## 方式 1：本地构建 + kubectl 部署（默认）
 
-CI 会自动构建镜像并推送到 ACR，但 **不会** 自动部署 admin/operator。
-推送代码到 main 后，等 CI 构建完成，再手动 `kubectl set image`。
+Admin/Operator **不走 CI/CD**，GitHub Actions 不构建也不部署。
+所有步骤在本地完成：构建镜像 → 推送 ACR → kubectl 更新。
 
 ### 标准流程
 
 ```bash
-# 1. 推代码到 main（触发 CI 构建镜像）
-git push origin main
-
-# 2. 等 CI 构建完成（约 3-5 分钟），确认 tag
 TAG="v$(date +%Y%m%d)-$(git rev-parse --short HEAD)"
+ACR_PUB="cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her"
+ACR_VPC="cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her"
 
-# 3. 部署 admin
+# 1. 构建 admin 镜像（MUST --platform linux/amd64，Mac 默认 ARM64）
+docker build --platform linux/amd64 -t $ACR_PUB/carher-admin:$TAG .
+docker push $ACR_PUB/carher-admin:$TAG
+
+# 2. 部署 admin
 kubectl set image deploy/carher-admin \
-  admin=cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher-admin:$TAG \
-  -n carher
+  admin=$ACR_VPC/carher-admin:$TAG -n carher
 kubectl rollout status deploy/carher-admin -n carher --timeout=120s
 
-# 4. 部署 operator（如果有 operator 代码变更）
+# 3. 部署 operator（如果有 operator 代码变更）
+docker build --platform linux/amd64 -t $ACR_PUB/carher-operator:$TAG ./operator-go
+docker push $ACR_PUB/carher-operator:$TAG
+
 kubectl set image deploy/carher-operator \
-  operator=cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher-operator:$TAG \
-  -n carher
+  operator=$ACR_VPC/carher-operator:$TAG -n carher
 kubectl rollout status deploy/carher-operator -n carher --timeout=120s
 ```
 
@@ -77,45 +80,6 @@ kubectl get deploy carher-admin -n carher \
 kubectl logs -n carher deploy/carher-admin --tail=30
 kubectl logs -n carher deploy/carher-operator --tail=30
 ```
-
----
-
-## 方式 2：本地构建 + 手动部署
-
-CI 挂了或需要紧急部署时使用。
-
-```bash
-TAG="v$(date +%Y%m%d)-$(git rev-parse --short HEAD)"
-ACR_PUB="cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her"
-ACR_VPC="cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her"
-
-# CRITICAL: Must specify --platform linux/amd64 (Mac 默认构建 ARM64)
-docker build --platform linux/amd64 -t $ACR_PUB/carher-admin:$TAG .
-docker push $ACR_PUB/carher-admin:$TAG
-
-kubectl set image deploy/carher-admin \
-  admin=$ACR_VPC/carher-admin:$TAG -n carher
-kubectl rollout status deploy/carher-admin -n carher --timeout=120s
-
-# Operator（如需）
-docker build --platform linux/amd64 -t $ACR_PUB/carher-operator:$TAG ./operator-go
-docker push $ACR_PUB/carher-operator:$TAG
-
-kubectl set image deploy/carher-operator \
-  operator=$ACR_VPC/carher-operator:$TAG -n carher
-kubectl rollout status deploy/carher-operator -n carher --timeout=120s
-```
-
----
-
-## 方式 3：GitHub Actions 手动触发
-
-通过 `workflow_dispatch` 只构建 admin 或 operator，不触发 bot 实例部署：
-
-1. GitHub Actions → Build & Deploy → Run workflow
-2. `deploy_mode` 选 `build-only`
-3. `components` 选 `admin` 或 `operator`
-4. CI 构建并推送镜像后，手动 `kubectl set image`
 
 ---
 

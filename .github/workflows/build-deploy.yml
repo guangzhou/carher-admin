@@ -1,15 +1,15 @@
-name: Build & Deploy
+name: Build & Deploy CarHer
 
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "*.md"
-      - "docs/**"
+    paths:
+      - "docker/**"
+      - "configs/**"
   workflow_dispatch:
     inputs:
       deploy_mode:
-        description: "Deploy mode after build"
+        description: "Deploy mode"
         type: choice
         options:
           - normal
@@ -17,14 +17,6 @@ on:
           - canary-only
           - build-only
         default: normal
-      components:
-        description: "What to build"
-        type: choice
-        options:
-          - all
-          - admin
-          - operator
-        default: all
 
 env:
   ACR_REGISTRY: cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com
@@ -49,32 +41,21 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      - name: Build admin
-        if: github.event_name == 'push' || inputs.components != 'operator'
+      - name: Build CarHer image
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: docker/Dockerfile
           push: true
           tags: |
-            ${{ env.ACR_REGISTRY }}/her/carher-admin:${{ steps.tag.outputs.tag }}
-            ${{ env.ACR_REGISTRY }}/her/carher-admin:latest
-
-      - name: Build operator (Go)
-        if: github.event_name == 'push' || inputs.components != 'admin'
-        uses: docker/build-push-action@v5
-        with:
-          context: ./operator-go
-          push: true
-          tags: |
-            ${{ env.ACR_REGISTRY }}/her/carher-operator:${{ steps.tag.outputs.tag }}
-            ${{ env.ACR_REGISTRY }}/her/carher-operator:latest
+            ${{ env.ACR_REGISTRY }}/her/carher:${{ steps.tag.outputs.tag }}
+            ${{ env.ACR_REGISTRY }}/her/carher:latest
 
       - name: Summary
         run: |
           echo "### Build Complete" >> $GITHUB_STEP_SUMMARY
           echo "- Tag: \`${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Components: ${{ inputs.components || 'all' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Deploy mode: ${{ inputs.deploy_mode || 'normal' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: \`her/carher\`" >> $GITHUB_STEP_SUMMARY
 
   deploy:
     needs: build
@@ -127,7 +108,7 @@ jobs:
           echo "- Branch: \`$BRANCH\`" >> $GITHUB_STEP_SUMMARY
           echo "- Mode: ${MODE:-auto (branch rule)}" >> $GITHUB_STEP_SUMMARY
 
-      - name: Wait and verify (canary)
+      - name: Wait and verify
         if: (inputs.deploy_mode || 'normal') == 'normal'
         run: |
           echo "Polling deploy status..."

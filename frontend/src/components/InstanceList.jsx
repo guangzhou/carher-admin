@@ -141,25 +141,25 @@ export default function InstanceList({ detailId, setDetailId }) {
       </div>
 
       {/* Table */}
-      <div className="card overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="card overflow-x-auto">
+        <table className="w-full text-sm table-fixed">
           <thead>
             <tr className="border-b border-gray-800 text-gray-500 text-left">
               <th className="p-3 w-10">
                 <input type="checkbox" checked={selected.size === filtered.length && filtered.length > 0} onChange={toggleAll}
                   className="rounded border-gray-600" />
               </th>
-              <th className="p-3">ID</th>
-              <th className="p-3">名字</th>
-              <th className="p-3">模型</th>
-              <th className="p-3">镜像</th>
-              <th className="p-3">灰度组</th>
-              <th className="p-3">状态</th>
-              <th className="p-3 text-right">CPU</th>
-              <th className="p-3 text-right">内存</th>
-              <th className="p-3">节点</th>
-              <th className="p-3">同步</th>
-              <th className="p-3 text-right">操作</th>
+              <th className="p-3 w-12">ID</th>
+              <th className="p-3 w-24">名字</th>
+              <th className="p-3 w-24">模型</th>
+              <th className="p-3 w-40">镜像</th>
+              <th className="p-3 w-20">灰度组</th>
+              <th className="p-3 w-20">状态</th>
+              <th className="p-3 w-16 text-right">CPU</th>
+              <th className="p-3 w-16 text-right">内存</th>
+              <th className="p-3 w-28">节点</th>
+              <th className="p-3 w-10">同步</th>
+              <th className="p-3 w-36 text-right">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -179,11 +179,11 @@ export default function InstanceList({ detailId, setDetailId }) {
                       {inst.id}
                     </button>
                   </td>
-                  <td className="p-3 text-gray-200">{inst.name || "-"}</td>
+                  <td className="p-3 text-gray-200 truncate">{inst.name || "-"}</td>
                   <td className="p-3">
-                    <span className="badge bg-gray-800 text-gray-300">{getModelAlias(inst.provider, inst.model_short)}</span>
+                    <span className="badge bg-gray-800 text-gray-300 whitespace-nowrap">{getModelAlias(inst.provider, inst.model_short)}</span>
                   </td>
-                  <td className="p-3">
+                  <td className="p-3 truncate" title={inst.image}>
                     <span className="font-mono text-xs text-gray-400">{shortImage(inst.image)}</span>
                   </td>
                   <td className="p-3">
@@ -192,13 +192,13 @@ export default function InstanceList({ detailId, setDetailId }) {
                   <td className="p-3">
                     <StatusBadge status={inst.status} />
                   </td>
-                  <td className="p-3 text-right font-mono text-xs text-emerald-400">
+                  <td className="p-3 text-right font-mono text-xs text-emerald-400 whitespace-nowrap">
                     {m.cpu_m != null ? formatCpu(m.cpu_m) : "-"}
                   </td>
-                  <td className="p-3 text-right font-mono text-xs text-purple-400">
+                  <td className="p-3 text-right font-mono text-xs text-purple-400 whitespace-nowrap">
                     {m.memory_mi != null ? formatMem(m.memory_mi) : "-"}
                   </td>
-                  <td className="p-3 text-gray-400 font-mono text-xs">{shortNode(inst.node)}</td>
+                  <td className="p-3 text-gray-400 font-mono text-xs truncate">{shortNode(inst.node)}</td>
                   <td className="p-3">
                     {inst.sync_status === "operator" ? (
                       <span className="text-blue-400 text-xs" title="Operator 管理">⚙</span>

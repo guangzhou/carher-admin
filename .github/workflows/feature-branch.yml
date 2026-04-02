@@ -3,14 +3,6 @@ name: Feature Branch Build
 on:
   workflow_dispatch:
     inputs:
-      target:
-        description: "What to build"
-        type: choice
-        options:
-          - carher-image
-          - admin
-          - operator
-        default: carher-image
       deploy_to_canary:
         description: "Deploy to canary group after build?"
         type: boolean
@@ -44,8 +36,7 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      - name: Build CarHer user image
-        if: inputs.target == 'carher-image'
+      - name: Build CarHer image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -54,40 +45,17 @@ jobs:
           tags: |
             ${{ env.ACR_REGISTRY }}/her/carher:${{ steps.tag.outputs.tag }}
 
-      - name: Build admin
-        if: inputs.target == 'admin'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ env.ACR_REGISTRY }}/her/carher-admin:${{ steps.tag.outputs.tag }}
-
-      - name: Build operator
-        if: inputs.target == 'operator'
-        uses: docker/build-push-action@v5
-        with:
-          context: ./operator-go
-          push: true
-          tags: |
-            ${{ env.ACR_REGISTRY }}/her/carher-operator:${{ steps.tag.outputs.tag }}
-
       - name: Summary
         run: |
           echo "### Feature Branch Build" >> $GITHUB_STEP_SUMMARY
           echo "- Branch: \`${{ steps.tag.outputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Tag: \`${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Target: ${{ inputs.target }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "To deploy this to canary instances:" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "POST /api/deploy {\"image_tag\": \"${{ steps.tag.outputs.tag }}\", \"mode\": \"canary-only\"}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "- Image: \`her/carher\`" >> $GITHUB_STEP_SUMMARY
 
   deploy-canary:
     needs: build
     runs-on: ubuntu-latest
-    if: inputs.deploy_to_canary == true && inputs.target == 'carher-image'
+    if: inputs.deploy_to_canary == true
     steps:
       - name: Deploy to canary group only
         run: |

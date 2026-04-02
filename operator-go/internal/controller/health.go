@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -71,20 +74,20 @@ func (hc *HealthChecker) runCycle(ctx context.Context) {
 		logger.Error(err, "Failed to list pods")
 		return
 	}
-	podMap := make(map[int]*corev1.Pod, len(podList.Items))
+	podsByUID := make(map[int][]*corev1.Pod, len(podList.Items))
 	for i := range podList.Items {
 		p := &podList.Items[i]
 		if uidStr, ok := p.Labels["user-id"]; ok {
 			if uid, err := strconv.Atoi(uidStr); err == nil {
-				podMap[uid] = p
+				podsByUID[uid] = append(podsByUID[uid], p)
 			}
 		}
 	}
 
 	// Concurrent health checks with worker pool
 	type job struct {
-		her *herv1.HerInstance
-		pod *corev1.Pod
+		her  *herv1.HerInstance
+		pods []*corev1.Pod
 	}
 	jobs := make(chan job, len(list.Items))
 	var wg sync.WaitGroup
@@ -100,7 +103,7 @@ func (hc *HealthChecker) runCycle(ctx context.Context) {
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				phase, group := hc.checkOne(ctx, j.her, j.pod)
+				phase, group := hc.checkOne(ctx, j.her, j.pods)
 				phaseCountsMu.Lock()
 				phaseCounts[phaseGroup{phase, group}]++
 				phaseCountsMu.Unlock()
@@ -110,8 +113,8 @@ func (hc *HealthChecker) runCycle(ctx context.Context) {
 
 	for i := range list.Items {
 		her := &list.Items[i]
-		pod := podMap[her.Spec.UserID]
-		jobs <- job{her: her, pod: pod}
+		pods := podsByUID[her.Spec.UserID]
+		jobs <- job{her: her, pods: pods}
 	}
 	close(jobs)
 	wg.Wait()
@@ -127,7 +130,7 @@ func (hc *HealthChecker) runCycle(ctx context.Context) {
 	logger.Info("Health check cycle complete", "instances", len(list.Items), "duration", duration.Round(time.Millisecond))
 }
 
-func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, pod *corev1.Pod) (string, string) {
+func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, pods []*corev1.Pod) (string, string) {
 	uid := her.Spec.UserID
 	uidStr := strconv.Itoa(uid)
 	logger := log.FromContext(ctx).WithName("health").WithValues("uid", uid)
@@ -153,7 +156,7 @@ func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, p
 		return retPhase()
 	}
 
-	if pod == nil {
+	if len(pods) == 0 {
 		if her.Status.Phase != "Pending" {
 			logger.Info("Pod missing, triggering self-heal")
 			metrics.SelfHealTotal.Inc()
@@ -165,53 +168,147 @@ func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, p
 		return retPhase()
 	}
 
-	phase := string(pod.Status.Phase)
+	// During rolling updates, multiple pods may exist for the same uid.
+	// Pick the newest Running pod for CRD status, but check ReadinessGate on ALL.
+	var primary *corev1.Pod
+	for _, p := range pods {
+		if string(p.Status.Phase) == "Running" {
+			if primary == nil || p.CreationTimestamp.After(primary.CreationTimestamp.Time) {
+				primary = p
+			}
+		}
+	}
+	if primary == nil {
+		primary = pods[0]
+	}
+
+	phase := string(primary.Status.Phase)
 	status.Phase = phase
-	status.PodIP = pod.Status.PodIP
-	status.Node = pod.Spec.NodeName
+	status.PodIP = primary.Status.PodIP
+	status.Node = primary.Spec.NodeName
 
-	// Container status
-	if len(pod.Status.ContainerStatuses) > 0 {
-		cs := pod.Status.ContainerStatuses[0]
-		status.Restarts = cs.RestartCount
-		metrics.PodRestarts.WithLabelValues(uidStr, her.Spec.Name).Set(float64(cs.RestartCount))
-
-		// CrashLoopBackOff detection
-		if cs.State.Waiting != nil && strings.Contains(cs.State.Waiting.Reason, "CrashLoopBackOff") {
-			status.Phase = "Failed"
-			status.Message = fmt.Sprintf("CrashLoopBackOff (restarts: %d)", cs.RestartCount)
+	// Container status (from primary pod)
+	for _, cs := range primary.Status.ContainerStatuses {
+		if cs.Name == "carher" {
+			status.Restarts = cs.RestartCount
+			metrics.PodRestarts.WithLabelValues(uidStr, her.Spec.Name).Set(float64(cs.RestartCount))
+			if cs.State.Waiting != nil && strings.Contains(cs.State.Waiting.Reason, "CrashLoopBackOff") {
+				status.Phase = "Failed"
+				status.Message = fmt.Sprintf("CrashLoopBackOff (restarts: %d)", cs.RestartCount)
+			}
+			break
 		}
 	}
 
-	// Check Feishu WS connectivity (only for Running pods)
-	if phase == "Running" {
-		wsConnected := hc.checkFeishuWS(ctx, pod)
-		if wsConnected {
-			status.FeishuWS = "Connected"
-			metrics.FeishuWSConnected.WithLabelValues(uidStr, her.Spec.Name).Set(1)
-		} else {
-			status.FeishuWS = "Disconnected"
-			metrics.FeishuWSConnected.WithLabelValues(uidStr, her.Spec.Name).Set(0)
+	// Set ReadinessGate on EVERY Running pod (critical for rolling updates:
+	// the new pod must get its gate set, or the rollout stalls forever).
+	anyConnected := false
+	for _, p := range pods {
+		if string(p.Status.Phase) != "Running" {
+			continue
 		}
+		wsConnected := hc.checkFeishuWS(ctx, p)
+		hc.setReadinessGate(ctx, p, wsConnected)
+		if wsConnected {
+			anyConnected = true
+		}
+	}
+
+	if anyConnected {
+		status.FeishuWS = "Connected"
+		metrics.FeishuWSConnected.WithLabelValues(uidStr, her.Spec.Name).Set(1)
+	} else if phase == "Running" {
+		status.FeishuWS = "Disconnected"
+		metrics.FeishuWSConnected.WithLabelValues(uidStr, her.Spec.Name).Set(0)
 	}
 
 	hc.updateStatus(ctx, her, status)
 	return retPhase()
 }
 
+var healthClient = &http.Client{Timeout: 3 * time.Second}
+
 func (hc *HealthChecker) checkFeishuWS(ctx context.Context, pod *corev1.Pod) bool {
-	if pod == nil {
+	if pod == nil || pod.Status.PodIP == "" {
 		return false
 	}
-	// Check container ready status as a proxy for Feishu WS connectivity.
-	// controller-runtime client doesn't support pod logs directly;
-	// a proper solution would be a /healthz endpoint on each Pod.
-	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name == "carher" && cs.Ready {
+
+	// Try the pod's /healthz endpoint for accurate Feishu WS status.
+	url := fmt.Sprintf("http://%s:18789/healthz", pod.Status.PodIP)
+	resp, err := healthClient.Get(url)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			var health struct {
+				FeishuWS string `json:"feishuWS"`
+				OK       bool   `json:"ok"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&health) == nil {
+				if health.FeishuWS == "connected" || health.FeishuWS == "Connected" {
+					return true
+				}
+				if health.FeishuWS != "" {
+					return false
+				}
+				return health.OK
+			}
 			return true
+		}
+		return false
+	}
+
+	// Fallback: container ready + minimum uptime (for pods without /healthz).
+	// TCP ready alone isn't sufficient — Feishu WS typically takes 5-15s after
+	// container start. Require 15s uptime to avoid setting ReadinessGate prematurely.
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "carher" && cs.Ready && cs.State.Running != nil {
+			uptime := time.Since(cs.State.Running.StartedAt.Time)
+			return uptime >= 15*time.Second
 		}
 	}
 	return false
+}
+
+// setReadinessGate patches the pod's status conditions to satisfy the ReadinessGate.
+// K8s rolling update will not terminate the old pod until the new pod's gate is True.
+func (hc *HealthChecker) setReadinessGate(ctx context.Context, pod *corev1.Pod, ready bool) {
+	if pod == nil {
+		return
+	}
+
+	status := corev1.ConditionFalse
+	if ready {
+		status = corev1.ConditionTrue
+	}
+
+	for _, c := range pod.Status.Conditions {
+		if c.Type == FeishuWSReadinessGate && c.Status == status {
+			return
+		}
+	}
+
+	patch := client.MergeFrom(pod.DeepCopy())
+	condition := corev1.PodCondition{
+		Type:               FeishuWSReadinessGate,
+		Status:             status,
+		LastTransitionTime: metav1.Now(),
+	}
+
+	found := false
+	for i, c := range pod.Status.Conditions {
+		if c.Type == FeishuWSReadinessGate {
+			pod.Status.Conditions[i] = condition
+			found = true
+			break
+		}
+	}
+	if !found {
+		pod.Status.Conditions = append(pod.Status.Conditions, condition)
+	}
+
+	if err := hc.Client.Status().Patch(ctx, pod, patch); err != nil {
+		log.FromContext(ctx).V(1).Info("Failed to set readiness gate", "pod", pod.Name, "ready", ready, "err", err)
+	}
 }
 
 func (hc *HealthChecker) updateStatus(ctx context.Context, her *herv1.HerInstance, status *herv1.HerInstanceStatus) {

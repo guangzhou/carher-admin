@@ -28,6 +28,11 @@ const (
 	Namespace = "carher"
 	ACR       = "cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher"
 
+	// FeishuWSReadinessGate is a custom pod condition set by the health checker.
+	// K8s rolling update will NOT terminate the old pod until this gate is True on
+	// the new pod — guaranteeing zero WebSocket disruption during rollouts.
+	FeishuWSReadinessGate corev1.PodConditionType = "carher.io/feishu-ws-ready"
+
 	initScript = `
 const fs = require('fs');
 const cfg = JSON.parse(fs.readFileSync('/config-template/openclaw.json', 'utf8'));
@@ -42,6 +47,9 @@ console.log('config merged, secret-injected:', !!secret);
 	// reloaderScript runs as a sidecar, watching ConfigMap volume for changes
 	// and syncing merged config (with secret injected) to the EmptyDir.
 	// K8s auto-propagates ConfigMap changes to non-SubPath mounts (~60s).
+	// IMPORTANT: must use writeFileSync (same inode) instead of rename, because
+	// the main container mounts this file via SubPath bind mount — rename would
+	// create a new inode that the bind mount doesn't follow.
 	reloaderScript = `
 const fs=require('fs'),crypto=require('crypto');
 const SRC='/config-watch/openclaw.json',DST='/merged-config/openclaw.json';
@@ -51,7 +59,8 @@ const h=crypto.createHash('md5').update(raw).digest('hex').slice(0,12);
 if(h===lastHash)return;const cfg=JSON.parse(raw);
 const s=process.env.FEISHU_APP_SECRET||'';
 if(s&&cfg.channels&&cfg.channels.feishu)cfg.channels.feishu.appSecret=s;
-fs.writeFileSync(DST,JSON.stringify(cfg,null,2));lastHash=h;
+fs.writeFileSync(DST,JSON.stringify(cfg,null,2));
+lastHash=h;
 console.log('[reloader] synced hash='+h);}catch(e){
 if(lastHash)console.error('[reloader]',e.message);}}
 sync();setInterval(sync,5000);
@@ -198,15 +207,25 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if err := r.Update(ctx, deploy); err != nil {
 			logger.Error(err, "Failed to update live-config-hash", "uid", uid)
 		}
+	} else if deploy != nil && deploy.Spec.Replicas != nil && *deploy.Spec.Replicas == 0 {
+		// Instance was paused (scaled to 0) and has since been unpaused.
+		// Neither pod-spec-key nor config changed, so scale back up explicitly.
+		logger.Info("Scaling deployment back to 1 (unpause)", "uid", uid)
+		if err := r.scaleDeployment(ctx, uid, 1); err != nil {
+			logger.Error(err, "Failed to scale deployment", "uid", uid)
+		}
 	}
 
 	prevHash := her.Status.ConfigHash
+	statusChanged := needRollout || prevHash != configHash
 	her.Status.ConfigHash = configHash
-	if err := r.Status().Update(ctx, &her); err != nil {
-		logger.V(1).Info("Status update failed", "uid", uid, "err", err)
-	}
-	if prevHash != configHash && prevHash != "" {
-		r.KnownBots.MarkDirty()
+	if statusChanged {
+		if err := r.Status().Update(ctx, &her); err != nil {
+			logger.V(1).Info("Status update failed", "uid", uid, "err", err)
+		}
+		if prevHash != configHash && prevHash != "" {
+			r.KnownBots.MarkDirty()
+		}
 	}
 
 	return ctrl.Result{}, nil
@@ -259,6 +278,8 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 		return hash, nil
 	}
 
+	isController := true
+	blockOwnerDeletion := true
 	cmName := fmt.Sprintf("carher-%d-user-config", uid)
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -269,6 +290,14 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 				"user-id":    strconv.Itoa(uid),
 				"managed-by": "carher-operator",
 			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion:         "carher.io/v1alpha1",
+				Kind:               "HerInstance",
+				Name:               her.Name,
+				UID:                her.UID,
+				Controller:         &isController,
+				BlockOwnerDeletion: &blockOwnerDeletion,
+			}},
 		},
 		Data: map[string]string{"openclaw.json": configJSON},
 	}
@@ -282,6 +311,7 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 	}
 	existing.Data = cm.Data
 	existing.Labels = cm.Labels
+	existing.OwnerReferences = cm.OwnerReferences
 	return hash, r.Update(ctx, &existing)
 }
 
@@ -332,6 +362,9 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 				{Name: "acr-secret"},
 				{Name: "acr-vpc-secret"},
 			},
+			ReadinessGates: []corev1.PodReadinessGate{{
+				ConditionType: FeishuWSReadinessGate,
+			}},
 			InitContainers: []corev1.Container{{
 				Name:    "inject-secret",
 				Image:   image,
@@ -485,6 +518,7 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 
 	existing.Spec.Template = desired.Spec.Template
 	existing.Spec.Strategy = desired.Spec.Strategy
+	existing.Spec.Replicas = desired.Spec.Replicas
 	existing.Labels = desired.Labels
 	if existing.Annotations == nil {
 		existing.Annotations = map[string]string{}

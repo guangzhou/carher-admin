@@ -13,9 +13,17 @@ rules:
   - apiGroups: [carher.io]
     resources: [herinstances, herinstances/status]
     verbs: [get, list, watch, create, update, patch, delete]
-  # Pod lifecycle
+  # Deployments (apps/v1) — Owns() watch + CRUD in ensureDeployment
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Services — Owns() watch + create in ensureService
   - apiGroups: [""]
-    resources: [pods, pods/log, pods/exec]
+    resources: [services]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Pod lifecycle + status (for ReadinessGate condition patching)
+  - apiGroups: [""]
+    resources: [pods, pods/log, pods/exec, pods/status]
     verbs: [get, list, watch, create, update, patch, delete]
   # ConfigMaps
   - apiGroups: [""]

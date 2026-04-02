@@ -69,10 +69,14 @@ def _parse_memory_mi(val: str) -> float:
 def get_pod_metrics(uid: int) -> dict:
     """Get CPU/Memory for a specific carher Pod."""
     try:
-        data = _custom().get_namespaced_custom_object(
-            "metrics.k8s.io", "v1beta1", NS, "pods", f"carher-{uid}",
+        data = _custom().list_namespaced_custom_object(
+            "metrics.k8s.io", "v1beta1", NS, "pods",
+            label_selector=f"app=carher-user,user-id={uid}",
         )
-        containers = data.get("containers", [])
+        items = data.get("items", [])
+        if not items:
+            return {"cpu_m": 0, "memory_mi": 0, "error": "Pod not running"}
+        containers = items[0].get("containers", [])
         if not containers:
             return {"cpu_m": 0, "memory_mi": 0}
         usage = containers[0].get("usage", {})
@@ -92,12 +96,14 @@ def get_all_pod_metrics() -> dict[int, dict]:
     try:
         data = _custom().list_namespaced_custom_object(
             "metrics.k8s.io", "v1beta1", NS, "pods",
+            label_selector="app=carher-user",
         )
         for item in data.get("items", []):
-            name = item.get("metadata", {}).get("name", "")
-            if not name.startswith("carher-") or not name[7:].isdigit():
+            labels = item.get("metadata", {}).get("labels", {})
+            uid_str = labels.get("user-id", "")
+            if not uid_str or not uid_str.isdigit():
                 continue
-            uid = int(name[7:])
+            uid = int(uid_str)
             containers = item.get("containers", [])
             if not containers:
                 continue

@@ -1,24 +1,6 @@
 import { useState, useEffect } from "react";
 import { api } from "../api";
-
-const PROVIDER_MODELS = {
-  openrouter: [
-    { value: "gpt", label: "GPT-5.4" },
-    { value: "sonnet", label: "Claude Sonnet 4.6" },
-    { value: "opus", label: "Claude Opus 4.6" },
-    { value: "gemini", label: "Gemini 3.1 Pro" },
-  ],
-  anthropic: [
-    { value: "sonnet", label: "Claude Sonnet 4.6" },
-    { value: "opus", label: "Claude Opus 4.6" },
-  ],
-  wangsu: [
-    { value: "gpt", label: "GPT-5.4" },
-    { value: "sonnet", label: "Claude Sonnet 4.6" },
-    { value: "opus", label: "Claude Opus 4.6" },
-    { value: "gemini", label: "Gemini 3.1 Pro" },
-  ],
-};
+import { PROVIDER_MODELS } from "../models";
 
 export default function AddInstance({ onCreated }) {
   const [form, setForm] = useState({

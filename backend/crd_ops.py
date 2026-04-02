@@ -215,10 +215,28 @@ def get_all_statuses() -> dict[int, dict]:
 
 def get_logs(uid: int, tail: int = 200) -> str:
     v1 = _v1()
+    pod_name = _find_pod(uid, v1)
+    if not pod_name:
+        return f"Error: No running pod found for carher-{uid}"
     try:
-        return v1.read_namespaced_pod_log(f"carher-{uid}", NS, tail_lines=tail)
+        return v1.read_namespaced_pod_log(pod_name, NS, tail_lines=tail, container="carher")
     except ApiException as e:
         return f"Error: {e.reason}"
+
+
+def _find_pod(uid: int, v1=None) -> str | None:
+    if v1 is None:
+        v1 = _v1()
+    try:
+        pods = v1.list_namespaced_pod(NS, label_selector=f"user-id={uid}")
+        for pod in pods.items:
+            if pod.status.phase in ("Running", "Pending"):
+                return pod.metadata.name
+        if pods.items:
+            return pods.items[0].metadata.name
+    except ApiException:
+        pass
+    return None
 
 
 # ──────────────────────────────────────

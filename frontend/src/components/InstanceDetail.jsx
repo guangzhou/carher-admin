@@ -1,25 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { PROVIDER_MODELS, getModelAlias } from "../models";
 import LogViewer from "./LogViewer";
-
-const PROVIDER_MODELS = {
-  openrouter: [
-    { value: "gpt", label: "GPT-5.4" },
-    { value: "sonnet", label: "Claude Sonnet 4.6" },
-    { value: "opus", label: "Claude Opus 4.6" },
-    { value: "gemini", label: "Gemini 3.1 Pro" },
-  ],
-  anthropic: [
-    { value: "sonnet", label: "Claude Sonnet 4.6" },
-    { value: "opus", label: "Claude Opus 4.6" },
-  ],
-  wangsu: [
-    { value: "gpt", label: "GPT-5.4" },
-    { value: "sonnet", label: "Claude Sonnet 4.6" },
-    { value: "opus", label: "Claude Opus 4.6" },
-    { value: "gemini", label: "Gemini 3.1 Pro" },
-  ],
-};
 
 export default function InstanceDetail({ id, onBack, onRefresh }) {
   const [data, setData] = useState(null);
@@ -170,7 +152,7 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
         <div className="card p-5 space-y-3">
           <h3 className="text-sm font-medium text-gray-400 mb-2">基本信息</h3>
           <InfoRow label="名字" value={data.name} />
-          <InfoRow label="模型" value={data.model} />
+          <InfoRow label="模型" value={getModelAlias(data.provider, data.model_short || data.model)} />
           <InfoRow label="Provider" value={data.provider} />
           <InfoRow label="App ID" value={data.app_id} mono />
           <InfoRow label="Bot Open ID" value={data.bot_open_id} mono />

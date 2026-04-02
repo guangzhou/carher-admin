@@ -80,3 +80,56 @@ their original values.
 
 **Fix:** For existing instances, explicitly patch via `kubectl patch` or the
 admin API batch endpoint. This triggers the operator's hot-reload path.
+
+## 9. openclaw.json Config Schema Validation — Unknown Keys Crash the Process
+
+**Problem:** Added `agents.providers.wangsu` (baseURL + apiKey) to the generated
+`openclaw.json`. The CarHer process validates its config on startup and rejects
+unrecognized keys. Result: `Config invalid — agents: Unrecognized key: "providers"`.
+All 20 wangsu instances entered CrashLoopBackOff simultaneously.
+
+**Impact:** 20 instances down for ~40 minutes. Hot-reload delivered the bad
+config instantly to all running pods — no rollout, no canary, no chance to catch
+it before full blast.
+
+**Fix:** Removed `agents.providers` from config_gen. The wangsu provider config
+already exists in the shared `carher-config.json` (mounted as base-config
+ConfigMap) under `models.providers.wangsu`. Per-user `openclaw.json` inherits it
+via `$include`.
+
+**Rules:**
+- **Never add unknown keys** to `openclaw.json`. Always check a running
+  instance's actual config first: `kubectl exec <pod> -c carher -- cat
+  /data/.openclaw/openclaw.json`
+- **Provider definitions** (baseURL, apiKey, model list) belong in
+  `carher-config.json` (`models.providers.*`), not in per-user config.
+- **Per-user config** (`openclaw.json`) only sets: `agents.defaults.model`,
+  `agents.defaults.models` (aliases), `channels.feishu`, `commands`,
+  `plugins.entries.realtime`.
+- **Hot-reload is a double-edged sword** — it delivers config changes instantly
+  without pod restart, but a bad config will crash all affected instances
+  simultaneously with no rollback window. Test config changes on a single
+  instance first.
+
+## 10. Frontend–Backend Model Map Desync
+
+**Problem:** Frontend `PROVIDER_MODELS` offered `gemini` for all providers
+(openrouter, wangsu), but the backend `MODEL_MAP` (Python) and `modelMap` (Go)
+for the openrouter provider had no `gemini` entry. The fallback
+`mm.get(model_short, model_short)` returned the raw string `"gemini"` as the
+primary model — not the full identifier `"openrouter/google/gemini-3.1-pro-preview"`.
+
+**Impact:** Any instance with `provider=openrouter, model=gemini` would get
+`primary: "gemini"` in its config, which may not resolve to a valid model.
+
+**Fix:** Added `"gemini": "openrouter/google/gemini-3.1-pro-preview"` to both
+Python `MODEL_MAP` and Go `modelMap`.
+
+**Rule:** When adding a new model option to the frontend `PROVIDER_MODELS`,
+always add the corresponding mapping to **all three places**:
+1. `frontend/src/components/InstanceDetail.jsx` — `PROVIDER_MODELS`
+2. `backend/config_gen.py` — `MODEL_MAP` / `MODEL_MAP_*`
+3. `operator-go/internal/controller/config_gen.go` — `modelMap` / `modelMap*`
+
+And check that the Pydantic model description in `backend/models.py` includes
+the new model name.

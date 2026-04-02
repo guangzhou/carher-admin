@@ -36,7 +36,7 @@ class HerInstance(BaseModel):
 class HerAddRequest(BaseModel):
     id: int | None = Field(None, description="Instance ID (auto-assigned if omitted)")
     name: str = Field(..., description="User display name")
-    model: str = Field("opus", description="Model: gpt / sonnet / opus")
+    model: str = Field("opus", description="Model: gpt / sonnet / opus / gemini")
     app_id: str = Field(..., description="Feishu App ID (cli_xxx)")
     app_secret: str = Field(..., description="Feishu App Secret")
     prefix: str = Field("s1", description="Server prefix (s1/s2/s3)")
@@ -51,7 +51,7 @@ class HerBatchImport(BaseModel):
 
 class HerUpdateRequest(BaseModel):
     name: str | None = Field(None, description="Update display name")
-    model: str | None = Field(None, description="Update model: gpt / sonnet / opus")
+    model: str | None = Field(None, description="Update model: gpt / sonnet / opus / gemini")
     app_id: str | None = Field(None, description="Update Feishu App ID (cli_xxx)")
     app_secret: str | None = Field(None, description="Update Feishu App Secret (stored in K8s Secret)")
     owner: str | None = Field(None, description="Update owner open_id(s)")

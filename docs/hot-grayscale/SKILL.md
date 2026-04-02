@@ -25,8 +25,8 @@ Changes are classified into two tiers based on what they affect:
 
 The operator determines the tier by comparing two keys on the Deployment:
 
-- `carher.io/pod-spec-key` — hash of `image|prefix|secretName`
-- `carher.io/live-config-hash` — MD5 of ConfigMap content
+- `carher.io/pod-spec-key` — raw concatenation `image|prefix|secretName` (NOT a hash)
+- `carher.io/live-config-hash` — MD5 of ConfigMap content (first 12 hex chars)
 
 ## Tier 1: Config-Only Hot Reload (No Pod Restart)
 
@@ -61,7 +61,8 @@ kubectl get her -n carher --no-headers -o custom-columns='NAME:.metadata.name' \
 ### Rollback
 
 ```bash
-# Revert canary instances back to original config
+# Revert canary instances back to previous config (adjust model/provider as needed)
+# Current defaults for NEW instances: provider=wangsu, model=opus
 kubectl get her -n carher --no-headers -o custom-columns='NAME:.metadata.name' \
   | sort -t- -k2 -n | head -20 \
   | xargs -I{} kubectl patch her {} -n carher --type merge \
@@ -124,10 +125,12 @@ This tags instances with `deploy_group=canary` for monitoring and rollback.
 
 ### ReadinessGate Health Check
 
-- Health checker queries `http://{podIP}:18789/healthz` for real WS status
+- Health checker runs every **30s** with **50 concurrent workers**
+- Queries `http://{podIP}:18789/healthz` for real WS status
 - Fallback: container ready + 15s uptime (WS typically connects in 5-15s)
 - During rolling updates, checks **all** pods for a UID (not just one),
   preventing rollout stalls when old pod shadows new pod in the pod map
+- Worst-case ReadinessGate delay: ~30s (one health check cycle)
 
 ### Graceful Shutdown
 

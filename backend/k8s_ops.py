@@ -265,20 +265,40 @@ def delete_pod(uid: int):
 
 def get_logs(uid: int, tail: int = 200) -> str:
     v1 = _core()
+    pod_name = _find_pod(uid)
+    if not pod_name:
+        return f"Error: No running pod found for carher-{uid}"
     try:
-        return v1.read_namespaced_pod_log(f"carher-{uid}", NS, tail_lines=tail)
+        return v1.read_namespaced_pod_log(pod_name, NS, tail_lines=tail, container="carher")
     except ApiException as e:
         return f"Error: {e.reason}"
+
+
+def _find_pod(uid: int) -> str | None:
+    """Find the running pod name for a user instance by label selector."""
+    v1 = _core()
+    try:
+        pods = v1.list_namespaced_pod(NS, label_selector=f"user-id={uid}")
+        for pod in pods.items:
+            if pod.status.phase in ("Running", "Pending"):
+                return pod.metadata.name
+        if pods.items:
+            return pods.items[0].metadata.name
+    except ApiException:
+        pass
+    return None
 
 
 def check_pod_health(uid: int) -> dict:
     """Check Feishu WS, memory DB, model loading for a running pod."""
     v1 = _core()
+    pod_name = _find_pod(uid)
     logs = ""
-    try:
-        logs = v1.read_namespaced_pod_log(f"carher-{uid}", NS, tail_lines=200)
-    except ApiException:
-        pass
+    if pod_name:
+        try:
+            logs = v1.read_namespaced_pod_log(pod_name, NS, tail_lines=200, container="carher")
+        except ApiException:
+            pass
 
     has_memory = False
     try:

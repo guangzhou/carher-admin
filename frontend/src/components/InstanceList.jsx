@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../api";
+import { PROVIDER_MODELS, ALL_MODELS, getModelAlias } from "../models";
 import InstanceDetail from "./InstanceDetail";
 import LogViewer from "./LogViewer";
 
@@ -38,6 +39,7 @@ export default function InstanceList({ detailId, setDetailId }) {
         String(i.id).includes(q) ||
         (i.name || "").toLowerCase().includes(q) ||
         (i.model_short || "").toLowerCase().includes(q) ||
+        getModelAlias(i.provider, i.model_short).toLowerCase().includes(q) ||
         (i.image || "").toLowerCase().includes(q) ||
         (i.deploy_group || "").toLowerCase().includes(q)
       );
@@ -177,7 +179,7 @@ export default function InstanceList({ detailId, setDetailId }) {
                   </td>
                   <td className="p-3 text-gray-200">{inst.name || "-"}</td>
                   <td className="p-3">
-                    <span className="badge bg-gray-800 text-gray-300">{inst.model_short || "-"}</span>
+                    <span className="badge bg-gray-800 text-gray-300">{getModelAlias(inst.provider, inst.model_short)}</span>
                   </td>
                   <td className="p-3">
                     <span className="font-mono text-xs text-gray-400">{shortImage(inst.image)}</span>
@@ -275,17 +277,30 @@ function shortNode(name) {
 }
 
 function BatchEditModal({ count, deployGroups, onSubmit, onClose }) {
+  const [enableProvider, setEnableProvider] = useState(false);
   const [enableModel, setEnableModel] = useState(false);
   const [enableGroup, setEnableGroup] = useState(false);
   const [enableImage, setEnableImage] = useState(false);
+  const [provider, setProvider] = useState("wangsu");
   const [model, setModel] = useState("opus");
   const [deployGroup, setDeployGroup] = useState("stable");
   const [image, setImage] = useState("");
+
+  const modelOptions = enableProvider ? (PROVIDER_MODELS[provider] || ALL_MODELS) : ALL_MODELS;
+
+  const handleProviderChange = (val) => {
+    setProvider(val);
+    const available = PROVIDER_MODELS[val] || ALL_MODELS;
+    if (!available.some((m) => m.value === model)) {
+      setModel(available[0].value);
+    }
+  };
 
   const groupNames = deployGroups.map((g) => g.name || g).filter(Boolean);
 
   const handleSubmit = () => {
     const params = {};
+    if (enableProvider) params.provider = provider;
     if (enableModel) params.model = model;
     if (enableGroup) params.deploy_group = deployGroup;
     if (enableImage) params.image = image;
@@ -293,23 +308,32 @@ function BatchEditModal({ count, deployGroups, onSubmit, onClose }) {
     onSubmit(params);
   };
 
-  const hasChanges = enableModel || enableGroup || (enableImage && image);
+  const hasChanges = enableProvider || enableModel || enableGroup || (enableImage && image);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div className="bg-gray-900 border border-gray-700 rounded-xl p-6 w-[420px] space-y-5" onClick={(e) => e.stopPropagation()}>
         <h3 className="text-lg font-semibold text-gray-100">批量修改 ({count} 个实例)</h3>
-        <p className="text-xs text-gray-500">勾选要修改的字段，留空的不会变更。Config 类变更（模型、灰度组）热加载生效，镜像变更会触发滚动更新。</p>
+        <p className="text-xs text-gray-500">勾选要修改的字段，留空的不会变更。Config 类变更（Provider、模型、灰度组）热加载生效，镜像变更会触发滚动更新。</p>
 
         <div className="space-y-4">
+          {/* Provider */}
+          <label className="flex items-center gap-3">
+            <input type="checkbox" checked={enableProvider} onChange={(e) => setEnableProvider(e.target.checked)} className="rounded border-gray-600" />
+            <span className="text-sm text-gray-300 w-16">Provider</span>
+            <select className="input flex-1" value={provider} onChange={(e) => handleProviderChange(e.target.value)} disabled={!enableProvider}>
+              <option value="openrouter">OpenRouter</option>
+              <option value="anthropic">Anthropic 直连</option>
+              <option value="wangsu">网宿</option>
+            </select>
+          </label>
+
           {/* Model */}
           <label className="flex items-center gap-3">
             <input type="checkbox" checked={enableModel} onChange={(e) => setEnableModel(e.target.checked)} className="rounded border-gray-600" />
             <span className="text-sm text-gray-300 w-16">模型</span>
             <select className="input flex-1" value={model} onChange={(e) => setModel(e.target.value)} disabled={!enableModel}>
-              <option value="opus">opus</option>
-              <option value="sonnet">sonnet</option>
-              <option value="gpt">gpt</option>
+              {modelOptions.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
             </select>
           </label>
 

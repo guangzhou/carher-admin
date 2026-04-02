@@ -43,6 +43,7 @@ MODEL_MAP = {
     "sonnet": "openrouter/anthropic/claude-sonnet-4.6",
     "opus": "openrouter/anthropic/claude-opus-4.6",
     "gpt": "openrouter/openai/gpt-5.4",
+    "gemini": "openrouter/google/gemini-3.1-pro-preview",
 }
 MODEL_MAP_ANTHROPIC = {
     "sonnet": "anthropic/claude-sonnet-4-6",
@@ -55,9 +56,6 @@ MODEL_MAP_WANGSU = {
     "gpt": "wangsu/gpt-5.4",
     "gemini": "wangsu/gemini-3.1-pro-preview",
 }
-
-WANGSU_BASE_URL = "https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1"
-WANGSU_API_KEY = "6d1dc662f0cb41a5b19bc22c905b29e1"
 
 
 def generate_openclaw_json(instance: dict) -> dict:

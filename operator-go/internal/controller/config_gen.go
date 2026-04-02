@@ -14,6 +14,7 @@ var modelMap = map[string]string{
 	"sonnet": "openrouter/anthropic/claude-sonnet-4.6",
 	"opus":   "openrouter/anthropic/claude-opus-4.6",
 	"gpt":    "openrouter/openai/gpt-5.4",
+	"gemini": "openrouter/google/gemini-3.1-pro-preview",
 }
 
 var modelMapAnthropic = map[string]string{
@@ -28,11 +29,6 @@ var modelMapWangsu = map[string]string{
 	"gpt":    "wangsu/gpt-5.4",
 	"gemini": "wangsu/gemini-3.1-pro-preview",
 }
-
-const (
-	WangsuBaseURL = "https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1"
-	WangsuAPIKey  = "6d1dc662f0cb41a5b19bc22c905b29e1"
-)
 
 type ConfigInput struct {
 	ID              int

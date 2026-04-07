@@ -15,8 +15,9 @@ type HerInstanceSpec struct {
 	Prefix       string `json:"prefix,omitempty"`
 	Owner        string `json:"owner,omitempty"`
 	Provider     string `json:"provider,omitempty"`
-	BotOpenID    string `json:"botOpenId,omitempty"`
-	DeployGroup  string `json:"deployGroup,omitempty"`
+	BotOpenID        string `json:"botOpenId,omitempty"`
+	OAuthRedirectUri string `json:"oauthRedirectUri,omitempty"`
+	DeployGroup      string `json:"deployGroup,omitempty"`
 	Image        string `json:"image,omitempty"`
 	Paused       bool   `json:"paused,omitempty"`
 }

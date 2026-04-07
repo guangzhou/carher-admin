@@ -257,15 +257,16 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 	}
 
 	configJSON := GenerateOpenclawJSON(ConfigInput{
-		ID:        uid,
-		Name:      her.Spec.Name,
-		Model:     her.Spec.Model,
-		AppID:     her.Spec.AppID,
-		AppSecret: appSecret,
-		Prefix:    her.Spec.Prefix,
-		Owner:     her.Spec.Owner,
-		Provider:  her.Spec.Provider,
-		BotOpenID: her.Spec.BotOpenID,
+		ID:               uid,
+		Name:             her.Spec.Name,
+		Model:            her.Spec.Model,
+		AppID:            her.Spec.AppID,
+		AppSecret:        appSecret,
+		Prefix:           her.Spec.Prefix,
+		Owner:            her.Spec.Owner,
+		Provider:         her.Spec.Provider,
+		BotOpenID:        her.Spec.BotOpenID,
+		OAuthRedirectUri: her.Spec.OAuthRedirectUri,
 	})
 
 	hash := fmt.Sprintf("%x", md5.Sum([]byte(configJSON)))[:12]

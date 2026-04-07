@@ -130,6 +130,30 @@ func TestGenerateOpenclawJSON_NoFeishu(t *testing.T) {
 	}
 }
 
+func TestGenerateOpenclawJSON_OAuthRedirectOverride(t *testing.T) {
+	input := ConfigInput{
+		ID:               14,
+		Name:             "Test",
+		Model:            "opus",
+		AppID:            "cli_test",
+		AppSecret:        "secret",
+		Prefix:           "s3",
+		Provider:         "wangsu",
+		OAuthRedirectUri: "https://s3-u9999-auth.carher.net/feishu/oauth/callback",
+	}
+
+	result := GenerateOpenclawJSON(input)
+	var cfg map[string]interface{}
+	json.Unmarshal([]byte(result), &cfg)
+
+	channels := cfg["channels"].(map[string]interface{})
+	feishu := channels["feishu"].(map[string]interface{})
+	uri := feishu["oauthRedirectUri"].(string)
+	if uri != "https://s3-u9999-auth.carher.net/feishu/oauth/callback" {
+		t.Errorf("Expected override URI, got: %v", uri)
+	}
+}
+
 func TestSplitOwners(t *testing.T) {
 	tests := []struct {
 		input    string

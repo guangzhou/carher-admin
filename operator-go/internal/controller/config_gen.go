@@ -41,15 +41,23 @@ var googleAnthropicRouting = map[string]interface{}{
 }
 
 type ConfigInput struct {
-	ID        int
-	Name      string
-	Model     string
-	AppID     string
-	AppSecret string
-	Prefix    string
-	Owner     string
-	Provider  string
-	BotOpenID string
+	ID               int
+	Name             string
+	Model            string
+	AppID            string
+	AppSecret        string
+	Prefix           string
+	Owner            string
+	Provider         string
+	BotOpenID        string
+	OAuthRedirectUri string
+}
+
+func resolveOAuthRedirectUri(override string, pfx string, id int) string {
+	if override != "" {
+		return override
+	}
+	return fmt.Sprintf("https://%su%d-auth.carher.net/feishu/oauth/callback", pfx, id)
 }
 
 func GenerateOpenclawJSON(input ConfigInput) string {
@@ -139,7 +147,7 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 			"appSecret":        input.AppSecret,
 			"name":             feishuName,
 			"groups":           map[string]bool{"enabled": true, "archive": true},
-			"oauthRedirectUri": fmt.Sprintf("https://%su%d-auth.carher.net/feishu/oauth/callback", pfx, input.ID),
+			"oauthRedirectUri": resolveOAuthRedirectUri(input.OAuthRedirectUri, pfx, input.ID),
 		}
 		// knownBots/knownBotOpenIds removed — now populated dynamically via Redis bot-registry.
 		if input.BotOpenID != "" {

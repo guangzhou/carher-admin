@@ -548,7 +548,7 @@ def api_add_instance(req: HerAddRequest):
 
     # Legacy fallback
     inst = db.insert(data)
-    config_gen.invalidate_bots_cache()
+    # knownBots cache invalidation removed — bots now register dynamically via Redis.
     try:
         k8s_ops.ensure_pvc(uid)
         _sync_and_deploy(inst)
@@ -600,7 +600,7 @@ def api_batch_import(req: HerBatchImport):
             })
         except Exception as e:
             results.append({"id": uid, "error": str(e)})
-    config_gen.invalidate_bots_cache()
+    # knownBots cache invalidation removed — bots now register dynamically via Redis.
     db.flush_backup()
     return {"results": results}
 
@@ -732,7 +732,7 @@ def api_delete(uid: int, purge: bool = Query(False)):
         except K8sApiException as e:
             if e.status != 404:
                 raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
-        config_gen.invalidate_bots_cache()
+        # knownBots cache invalidation removed — bots now register dynamically via Redis.
         try:
             cloudflare_ops.sync_tunnel_config()
         except Exception as cf_err:
@@ -746,7 +746,7 @@ def api_delete(uid: int, purge: bool = Query(False)):
         db.purge_instance(uid)
     else:
         db.delete_instance(uid)
-    config_gen.invalidate_bots_cache()
+    # knownBots cache invalidation removed — bots now register dynamically via Redis.
     return {"id": uid, "action": "deleted", "purge": purge}
 
 

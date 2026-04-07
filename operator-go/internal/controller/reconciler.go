@@ -256,20 +256,16 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 		}
 	}
 
-	knownBots, knownBotOpenIDs := r.KnownBots.Get()
-
 	configJSON := GenerateOpenclawJSON(ConfigInput{
-		ID:              uid,
-		Name:            her.Spec.Name,
-		Model:           her.Spec.Model,
-		AppID:           her.Spec.AppID,
-		AppSecret:       appSecret,
-		Prefix:          her.Spec.Prefix,
-		Owner:           her.Spec.Owner,
-		Provider:        her.Spec.Provider,
-		BotOpenID:       her.Spec.BotOpenID,
-		KnownBots:       knownBots,
-		KnownBotOpenIDs: knownBotOpenIDs,
+		ID:        uid,
+		Name:      her.Spec.Name,
+		Model:     her.Spec.Model,
+		AppID:     her.Spec.AppID,
+		AppSecret: appSecret,
+		Prefix:    her.Spec.Prefix,
+		Owner:     her.Spec.Owner,
+		Provider:  her.Spec.Provider,
+		BotOpenID: her.Spec.BotOpenID,
 	})
 
 	hash := fmt.Sprintf("%x", md5.Sum([]byte(configJSON)))[:12]
@@ -392,6 +388,7 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 					{ContainerPort: 8000, Name: "frontend"},
 					{ContainerPort: 8080, Name: "ws-proxy"},
 					{ContainerPort: 18891, Name: "oauth"},
+					{ContainerPort: 18795, Name: "a2a"},
 				},
 				Env: []corev1.EnvVar{
 					{Name: "HOME", Value: "/data"},
@@ -400,6 +397,7 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 					{Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/gcloud/application_default_credentials.json"},
 					{Name: "VOICE_FE_HOST", Value: fmt.Sprintf("%su%d-fe.carher.net", pfx, uid)},
 					{Name: "VOICE_PROXY_HOST", Value: fmt.Sprintf("%su%d-proxy.carher.net", pfx, uid)},
+					{Name: "REDIS_URL", Value: "redis://carher-redis.carher.svc:6379"},
 				},
 				EnvFrom: []corev1.EnvFromSource{{
 					SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "carher-env-keys"}},
@@ -634,6 +632,7 @@ func (r *HerInstanceReconciler) ensureService(ctx context.Context, her *herv1.He
 				{Name: "frontend", Port: 8000, TargetPort: intstr.FromInt(8000), Protocol: corev1.ProtocolTCP},
 				{Name: "ws-proxy", Port: 8080, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
 				{Name: "oauth", Port: 18891, TargetPort: intstr.FromInt(18891), Protocol: corev1.ProtocolTCP},
+				{Name: "a2a", Port: 18795, TargetPort: intstr.FromInt(18795), Protocol: corev1.ProtocolTCP},
 			},
 		},
 	}

@@ -1,0 +1,75 @@
+# Redis 7 for CarHer bot-registry, discussion-state, group-mode.
+# Single-instance with persistent storage. All CarHer pods connect via
+# redis://carher-redis.carher.svc:6379
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: carher-redis
+  namespace: carher
+  labels:
+    app: carher-redis
+spec:
+  serviceName: carher-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: carher-redis
+  template:
+    metadata:
+      labels:
+        app: carher-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+          ports:
+            - containerPort: 6379
+              name: redis
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+        labels:
+          app: carher-redis
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: alibabacloud-cnfs-nas
+        resources:
+          requests:
+            storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: carher-redis
+  namespace: carher
+  labels:
+    app: carher-redis
+spec:
+  type: ClusterIP
+  selector:
+    app: carher-redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+      name: redis

@@ -17,29 +17,19 @@ func TestGenerateOpenclawJSON_Basic(t *testing.T) {
 		Owner:     "ou_abc|ou_def",
 		Provider:  "openrouter",
 		BotOpenID: "ou_bot123",
-		KnownBots: map[string]string{
-			"cli_test123": "张三",
-			"cli_test456": "李四",
-		},
-		KnownBotOpenIDs: map[string]string{
-			"ou_bot123": "cli_test123",
-		},
 	}
 
 	result := GenerateOpenclawJSON(input)
 
-	// Validate it's valid JSON
 	var cfg map[string]interface{}
 	if err := json.Unmarshal([]byte(result), &cfg); err != nil {
 		t.Fatalf("Generated invalid JSON: %v", err)
 	}
 
-	// Check $include
 	if cfg["$include"] != "./carher-config.json" {
 		t.Error("Missing or wrong $include")
 	}
 
-	// Check model
 	agents := cfg["agents"].(map[string]interface{})
 	defaults := agents["defaults"].(map[string]interface{})
 	model := defaults["model"].(map[string]interface{})
@@ -47,7 +37,6 @@ func TestGenerateOpenclawJSON_Basic(t *testing.T) {
 		t.Errorf("Wrong primary model: %v", model["primary"])
 	}
 
-	// Check feishu
 	channels := cfg["channels"].(map[string]interface{})
 	feishu := channels["feishu"].(map[string]interface{})
 	if feishu["appId"] != "cli_test123" {
@@ -59,21 +48,34 @@ func TestGenerateOpenclawJSON_Basic(t *testing.T) {
 	if feishu["botOpenId"] != "ou_bot123" {
 		t.Error("Missing botOpenId")
 	}
-
-	// Check knownBots
-	kb := feishu["knownBots"].(map[string]interface{})
-	if kb["cli_test123"] != "张三" {
-		t.Error("Wrong knownBots")
-	}
-	if len(kb) != 2 {
-		t.Errorf("Expected 2 knownBots, got %d", len(kb))
+	if feishu["name"] != "张三的her" {
+		t.Errorf("Expected name suffix '的her', got: %v", feishu["name"])
 	}
 
-	// Check owners
+	// knownBots should NOT be present (now via Redis)
+	if _, ok := feishu["knownBots"]; ok {
+		t.Error("knownBots should not be in feishu config (now dynamic via Redis)")
+	}
+
 	dm := feishu["dm"].(map[string]interface{})
 	allowFrom := dm["allowFrom"].([]interface{})
 	if len(allowFrom) != 2 {
 		t.Errorf("Expected 2 owners, got %d", len(allowFrom))
+	}
+
+	// Check minimax model uses m2.7
+	models := defaults["models"].(map[string]interface{})
+	if _, ok := models["openrouter/minimax/minimax-m2.7"]; !ok {
+		t.Error("Expected minimax-m2.7 model key")
+	}
+	if _, ok := models["openrouter/minimax/minimax-m2.5"]; ok {
+		t.Error("Old minimax-m2.5 should not be present")
+	}
+
+	// Check Google/Anthropic routing on openrouter opus
+	opusModel := models["openrouter/anthropic/claude-opus-4.6"].(map[string]interface{})
+	if _, ok := opusModel["params"]; !ok {
+		t.Error("openrouter opus should have Google/Anthropic routing params")
 	}
 }
 
@@ -103,6 +105,12 @@ func TestGenerateOpenclawJSON_Anthropic(t *testing.T) {
 	opus := models["anthropic/claude-opus-4-6"].(map[string]interface{})
 	if opus["alias"] != "opus" {
 		t.Error("Anthropic opus should have primary alias")
+	}
+
+	// openrouter models should have routing when provider=anthropic
+	orOpus := models["openrouter/anthropic/claude-opus-4.6"].(map[string]interface{})
+	if _, ok := orOpus["params"]; !ok {
+		t.Error("openrouter opus (anthropic provider) should have routing params")
 	}
 }
 

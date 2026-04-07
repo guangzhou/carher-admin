@@ -1,40 +1,17 @@
 """Config generator: DB row → openclaw.json → K8s ConfigMap.
 
 This is the bridge between the DB (source of truth) and the K8s runtime.
-knownBots are computed globally from DB, cached to avoid O(N) per-instance.
+Bot identity is now dynamically registered via Redis bot-registry (no more
+static knownBots injection).
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import time
 from typing import Any
 
-from . import database as db
-
 logger = logging.getLogger("carher-admin")
-
-# knownBots cache shared across all config generation calls.
-# Avoids 1500× DB queries during sync_all / deploy.
-_bots_cache: tuple[dict, dict] | None = None
-_bots_cache_ts: float = 0
-_BOTS_CACHE_TTL = 15  # seconds
-
-
-def _get_known_bots() -> tuple[dict, dict]:
-    global _bots_cache, _bots_cache_ts
-    now = time.monotonic()
-    if _bots_cache is None or now - _bots_cache_ts > _BOTS_CACHE_TTL:
-        _bots_cache = db.collect_known_bots()
-        _bots_cache_ts = now
-    return _bots_cache
-
-
-def invalidate_bots_cache():
-    """Call after adding/removing an instance to refresh knownBots."""
-    global _bots_cache
-    _bots_cache = None
 
 GEMINI_PROJECT = "gen-lang-client-0519229117"
 GEMINI_MODEL = "gemini-live-2.5-flash-native-audio"
@@ -57,9 +34,18 @@ MODEL_MAP_WANGSU = {
     "gemini": "wangsu/gemini-3.1-pro-preview",
 }
 
+GOOGLE_ANTHROPIC_ROUTING = {
+    "params": {
+        "provider": {
+            "order": ["Google", "Anthropic"],
+            "allow_fallbacks": True,
+        },
+    },
+}
+
 
 def generate_openclaw_json(instance: dict) -> dict:
-    """Generate a complete openclaw.json from a DB row + global knownBots."""
+    """Generate a complete openclaw.json from a DB row."""
     uid = instance["id"]
     provider = instance.get("provider", "openrouter")
     model_short = instance.get("model", "gpt")
@@ -74,23 +60,26 @@ def generate_openclaw_json(instance: dict) -> dict:
         mm = MODEL_MAP
     model_full = mm.get(model_short, model_short)
 
+    def _alias_with_routing(a: str) -> dict:
+        return {"alias": a, **GOOGLE_ANTHROPIC_ROUTING}
+
     if provider == "anthropic":
-        models = {
+        models: dict[str, Any] = {
             "anthropic/claude-opus-4-6": {"alias": "opus"},
             "anthropic/claude-sonnet-4-6": {"alias": "sonnet"},
-            "openrouter/anthropic/claude-opus-4.6": {"alias": "or-opus"},
-            "openrouter/anthropic/claude-sonnet-4.6": {"alias": "or-sonnet"},
+            "openrouter/anthropic/claude-opus-4.6": _alias_with_routing("or-opus"),
+            "openrouter/anthropic/claude-sonnet-4.6": _alias_with_routing("or-sonnet"),
         }
     else:
         models = {
-            "openrouter/anthropic/claude-opus-4.6": {"alias": "opus"},
-            "openrouter/anthropic/claude-sonnet-4.6": {"alias": "sonnet"},
+            "openrouter/anthropic/claude-opus-4.6": _alias_with_routing("opus"),
+            "openrouter/anthropic/claude-sonnet-4.6": _alias_with_routing("sonnet"),
             "anthropic/claude-opus-4-6": {"alias": "or-opus"},
             "anthropic/claude-sonnet-4-6": {"alias": "or-sonnet"},
         }
     models.update({
         "openrouter/google/gemini-3.1-pro-preview": {"alias": "gemini"},
-        "openrouter/minimax/minimax-m2.5": {"alias": "minimax"},
+        "openrouter/minimax/minimax-m2.7": {"alias": "minimax"},
         "openrouter/z-ai/glm-5": {"alias": "glm"},
         "openrouter/openai/gpt-5.4": {"alias": "gpt"},
         "openrouter/openai/gpt-5.3-codex": {"alias": "codex"},
@@ -118,20 +107,16 @@ def generate_openclaw_json(instance: dict) -> dict:
     bot_open_id = instance.get("bot_open_id", "")
 
     if app_id and app_secret:
-        known_bots, known_bot_open_ids = _get_known_bots()
-
+        feishu_name = f"{name}的her" if name else ""
         feishu: dict[str, Any] = {
             "enabled": True,
             "appId": app_id,
             "appSecret": app_secret,
-            "name": name,
+            "name": feishu_name,
             "groups": {"enabled": True, "archive": True},
             "oauthRedirectUri": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
         }
-        if known_bots:
-            feishu["knownBots"] = known_bots
-        if known_bot_open_ids:
-            feishu["knownBotOpenIds"] = known_bot_open_ids
+        # knownBots/knownBotOpenIds removed — now populated dynamically via Redis bot-registry.
         if bot_open_id:
             feishu["botOpenId"] = bot_open_id
         if owner:

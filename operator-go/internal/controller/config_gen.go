@@ -30,18 +30,26 @@ var modelMapWangsu = map[string]string{
 	"gemini": "wangsu/gemini-3.1-pro-preview",
 }
 
+// Google Vertex provider routing: prefer Google → Anthropic fallback
+var googleAnthropicRouting = map[string]interface{}{
+	"params": map[string]interface{}{
+		"provider": map[string]interface{}{
+			"order":          []string{"Google", "Anthropic"},
+			"allow_fallbacks": true,
+		},
+	},
+}
+
 type ConfigInput struct {
-	ID              int
-	Name            string
-	Model           string
-	AppID           string
-	AppSecret       string
-	Prefix          string
-	Owner           string
-	Provider        string
-	BotOpenID       string
-	KnownBots       map[string]string
-	KnownBotOpenIDs map[string]string
+	ID        int
+	Name      string
+	Model     string
+	AppID     string
+	AppSecret string
+	Prefix    string
+	Owner     string
+	Provider  string
+	BotOpenID string
 }
 
 func GenerateOpenclawJSON(input ConfigInput) string {
@@ -60,23 +68,30 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		modelFull = input.Model
 	}
 
-	alias := func(a string) map[string]string { return map[string]string{"alias": a} }
+	alias := func(a string) map[string]interface{} { return map[string]interface{}{"alias": a} }
+	aliasWithRouting := func(a string) map[string]interface{} {
+		m := map[string]interface{}{"alias": a}
+		for k, v := range googleAnthropicRouting {
+			m[k] = v
+		}
+		return m
+	}
 
 	models := make(map[string]interface{})
 	switch input.Provider {
 	case "anthropic":
 		models["anthropic/claude-opus-4-6"] = alias("opus")
 		models["anthropic/claude-sonnet-4-6"] = alias("sonnet")
-		models["openrouter/anthropic/claude-opus-4.6"] = alias("or-opus")
-		models["openrouter/anthropic/claude-sonnet-4.6"] = alias("or-sonnet")
+		models["openrouter/anthropic/claude-opus-4.6"] = aliasWithRouting("or-opus")
+		models["openrouter/anthropic/claude-sonnet-4.6"] = aliasWithRouting("or-sonnet")
 	default:
-		models["openrouter/anthropic/claude-opus-4.6"] = alias("opus")
-		models["openrouter/anthropic/claude-sonnet-4.6"] = alias("sonnet")
+		models["openrouter/anthropic/claude-opus-4.6"] = aliasWithRouting("opus")
+		models["openrouter/anthropic/claude-sonnet-4.6"] = aliasWithRouting("sonnet")
 		models["anthropic/claude-opus-4-6"] = alias("or-opus")
 		models["anthropic/claude-sonnet-4-6"] = alias("or-sonnet")
 	}
 	models["openrouter/google/gemini-3.1-pro-preview"] = alias("gemini")
-	models["openrouter/minimax/minimax-m2.5"] = alias("minimax")
+	models["openrouter/minimax/minimax-m2.7"] = alias("minimax")
 	models["openrouter/z-ai/glm-5"] = alias("glm")
 	models["openrouter/openai/gpt-5.4"] = alias("gpt")
 	models["openrouter/openai/gpt-5.3-codex"] = alias("codex")
@@ -114,20 +129,19 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 	owners := splitOwners(input.Owner)
 
 	if input.AppID != "" && input.AppSecret != "" {
+		feishuName := input.Name
+		if feishuName != "" {
+			feishuName += "的her"
+		}
 		feishu := map[string]interface{}{
 			"enabled":          true,
 			"appId":            input.AppID,
 			"appSecret":        input.AppSecret,
-			"name":             input.Name,
+			"name":             feishuName,
 			"groups":           map[string]bool{"enabled": true, "archive": true},
 			"oauthRedirectUri": fmt.Sprintf("https://%su%d-auth.carher.net/feishu/oauth/callback", pfx, input.ID),
 		}
-		if len(input.KnownBots) > 0 {
-			feishu["knownBots"] = input.KnownBots
-		}
-		if len(input.KnownBotOpenIDs) > 0 {
-			feishu["knownBotOpenIds"] = input.KnownBotOpenIDs
-		}
+		// knownBots/knownBotOpenIds removed — now populated dynamically via Redis bot-registry.
 		if input.BotOpenID != "" {
 			feishu["botOpenId"] = input.BotOpenID
 		}

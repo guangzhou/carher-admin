@@ -37,6 +37,8 @@ fi
 
 if [ -n "$DEPLOY" ]; then
   echo "▶ Applying K8s manifests..."
+  kubectl apply -f "$SCRIPT_DIR/k8s/redis.yaml"
+  kubectl apply -f "$SCRIPT_DIR/k8s/base-config.yaml"
   kubectl apply -f "$SCRIPT_DIR/k8s/rbac.yaml"
   kubectl apply -f "$SCRIPT_DIR/k8s/deployment.yaml"
 

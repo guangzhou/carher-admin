@@ -17,14 +17,16 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
   const reload = () => {
     api.getInstance(id).then((d) => {
       setData(d);
-      setEditForm({
+      setEditForm((prev) => ({
         name: d.name || "",
         model: d.model_short || d.model || "",
         owner: d.owner || "",
         provider: d.provider || "openrouter",
         deploy_group: d.deploy_group || "stable",
         image: d.image || "",
-      });
+        app_id: prev.app_id ?? d.app_id ?? "",
+        app_secret: prev.app_secret ?? "",
+      }));
     }).finally(() => setLoading(false));
     api.getInstanceMetrics(id).then(setMetrics).catch(() => {});
     api.getInstanceMetricsHistory(id, 24).then((r) => setMetricsHistory(r.data || [])).catch(() => {});

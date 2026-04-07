@@ -58,47 +58,32 @@ def _get_svc_cluster_ip(svc_name: str) -> str | None:
         return None
 
 
+AUTH_PROXY_SVC = "auth-proxy"
+ADMIN_SVC = "carher-admin-svc"
+
+
 def generate_config() -> str:
-    """Generate cloudflared config.yml from all active HerInstance CRDs + admin."""
+    """Generate cloudflared config.yml using wildcard → auth-proxy routing.
+
+    All *.carher.net traffic is routed to the auth-proxy nginx, which
+    parses the uid from the hostname and proxies to per-instance services.
+    This avoids per-instance ingress entries and stale ClusterIP references.
+    """
     ingress: list[dict[str, str]] = []
 
-    # Admin service
-    admin_ip = _get_svc_cluster_ip("carher-admin-svc")
+    admin_ip = _get_svc_cluster_ip(ADMIN_SVC)
     if admin_ip:
         ingress.append({"hostname": f"admin.{DOMAIN}", "service": f"http://{admin_ip}:8900"})
 
-    # Her instances from CRDs
-    api = _crd_api()
-    try:
-        items = api.list_namespaced_custom_object(
-            "carher.io", "v1alpha1", NS, "herinstances"
-        ).get("items", [])
-    except ApiException:
-        items = []
+    proxy_ip = _get_svc_cluster_ip(AUTH_PROXY_SVC)
+    if proxy_ip:
+        ingress.append({"hostname": f"*.{DOMAIN}", "service": f"http://{proxy_ip}:80"})
+    else:
+        logger.error("auth-proxy service not found, wildcard route will be missing!")
 
-    for inst in items:
-        spec = inst.get("spec", {})
-        uid = spec.get("userId", 0)
-        prefix = spec.get("prefix", "s1")
-        paused = spec.get("paused", False)
-        if not uid or paused:
-            continue
-
-        svc_ip = _get_svc_cluster_ip(f"carher-{uid}-svc")
-        if not svc_ip:
-            logger.warning("No Service for carher-%d, skipping cloudflare config", uid)
-            continue
-
-        pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
-        ingress.append({"hostname": f"{pfx}u{uid}-auth.{DOMAIN}", "service": f"http://{svc_ip}:18891"})
-        ingress.append({"hostname": f"{pfx}u{uid}-fe.{DOMAIN}", "service": f"http://{svc_ip}:8000"})
-        ingress.append({"hostname": f"{pfx}u{uid}-proxy.{DOMAIN}", "service": f"http://{svc_ip}:8080"})
-
-    # Catch-all must be last
     ingress.append({"service": "http_status:404"})
 
     config_data = {
-        "tunnel": TUNNEL_UUID,
         "credentials-file": "/etc/cloudflared/credentials.json",
         "ingress": ingress,
     }

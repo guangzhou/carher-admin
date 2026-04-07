@@ -252,9 +252,29 @@ def create_pod(uid: int, prefix: str, image_tag: str = DEFAULT_IMAGE_TAG):
 
 
 def delete_pod(uid: int):
+    """Delete pod(s) for a user instance.
+
+    Handles both legacy bare pods (carher-{uid}) and Deployment-managed
+    pods (carher-{uid}-xxxxx-yyyyy) by using label selector as fallback.
+    """
     v1 = _core()
     try:
         v1.delete_namespaced_pod(f"carher-{uid}", NS)
+        return
+    except ApiException as e:
+        if e.status != 404:
+            raise
+
+    # Bare pod not found — likely a Deployment-managed instance.
+    # Find and delete pods by label selector.
+    try:
+        pods = v1.list_namespaced_pod(NS, label_selector=f"user-id={uid}")
+        for pod in pods.items:
+            try:
+                v1.delete_namespaced_pod(pod.metadata.name, NS)
+                logger.info("Deleted Deployment-managed pod %s for uid=%d", pod.metadata.name, uid)
+            except ApiException:
+                pass
     except ApiException:
         pass
 
@@ -301,16 +321,18 @@ def check_pod_health(uid: int) -> dict:
             pass
 
     has_memory = False
-    try:
-        stream(
-            v1.connect_get_namespaced_pod_exec,
-            f"carher-{uid}", NS,
-            command=["test", "-f", "/data/.openclaw/memory/main.sqlite"],
-            stderr=True, stdin=False, stdout=True, tty=False,
-        )
-        has_memory = True
-    except Exception:
-        pass
+    if pod_name:
+        try:
+            stream(
+                v1.connect_get_namespaced_pod_exec,
+                pod_name, NS,
+                container="carher",
+                command=["test", "-f", "/data/.openclaw/memory/main.sqlite"],
+                stderr=True, stdin=False, stdout=True, tty=False,
+            )
+            has_memory = True
+        except Exception:
+            pass
 
     return {
         "feishu_ws": "ws client ready" in logs,

@@ -71,9 +71,15 @@ export default function InstanceList({ detailId, setDetailId }) {
     if (action !== "update" && !confirm(`确认${label} ${selected.size} 个实例？`)) return;
     setBatchLoading(true);
     try {
-      await api.batchAction([...selected], action, params);
+      const res = await api.batchAction([...selected], action, params);
+      const errors = (res?.results || []).filter((r) => r.error);
+      if (errors.length > 0) {
+        alert(`${errors.length} 个实例操作失败:\n${errors.map((e) => `#${e.id}: ${e.error}`).join("\n")}`);
+      }
       setSelected(new Set());
       setTimeout(load, 2000);
+    } catch (e) {
+      alert(`批量操作失败: ${e.message}`);
     } finally {
       setBatchLoading(false);
     }
@@ -144,7 +150,7 @@ export default function InstanceList({ detailId, setDetailId }) {
       <div className="card overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-gray-800 text-gray-500 text-left">
+            <tr className="border-b border-gray-800 text-gray-500 text-left whitespace-nowrap">
               <th className="p-3 w-10">
                 <input type="checkbox" checked={selected.size === filtered.length && filtered.length > 0} onChange={toggleAll}
                   className="rounded border-gray-600" />
@@ -158,7 +164,7 @@ export default function InstanceList({ detailId, setDetailId }) {
               <th className="p-3 text-right">CPU</th>
               <th className="p-3 text-right">内存</th>
               <th className="p-3">节点</th>
-              <th className="p-3 w-12 text-center">同步</th>
+              <th className="p-3 text-center">同步</th>
               <th className="p-3 text-right">操作</th>
             </tr>
           </thead>

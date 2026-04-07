@@ -26,6 +26,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import json as _json
+
+from kubernetes.client.rest import ApiException as K8sApiException
+
 from . import database as db
 from . import config_gen
 from . import crd_ops
@@ -46,6 +50,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 logger = logging.getLogger("carher-admin")
 
 STATIC_DIR = Path(__file__).parent.parent / "frontend" / "dist"
+
+
+def _k8s_error_detail(exc: K8sApiException) -> str:
+    """Extract a human-readable message from a K8s ApiException."""
+    try:
+        body = _json.loads(exc.body) if exc.body else {}
+        return body.get("message", exc.reason or str(exc))
+    except Exception:
+        return exc.reason or str(exc)
 
 
 @asynccontextmanager
@@ -562,6 +575,7 @@ def api_batch_import(req: HerBatchImport):
                 "app_id": item.app_id, "app_secret": item.app_secret,
                 "prefix": item.prefix, "owner": item.owner,
                 "provider": item.provider, "bot_open_id": "",
+                "deploy_group": item.deploy_group,
                 "status": "running",
             }
             # CRD path
@@ -623,11 +637,14 @@ def api_update(uid: int, req: HerUpdateRequest):
 
     # CRD path
     if _has_crd(uid):
-        if has_secret_change:
-            crd_ops._ensure_secret(uid, req.app_secret)
-        if changes:
-            crd_changes = {_DB_TO_CRD_FIELD[k]: v for k, v in changes.items() if k in _DB_TO_CRD_FIELD}
-            crd_ops.update_her_instance(uid, crd_changes)
+        try:
+            if has_secret_change:
+                crd_ops._ensure_secret(uid, req.app_secret)
+            if changes:
+                crd_changes = {_DB_TO_CRD_FIELD[k]: v for k, v in changes.items() if k in _DB_TO_CRD_FIELD}
+                crd_ops.update_her_instance(uid, crd_changes)
+        except K8sApiException as e:
+            raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
         reported = {**changes}
         if has_secret_change:
             reported["app_secret"] = "***updated***"
@@ -656,7 +673,10 @@ def api_update(uid: int, req: HerUpdateRequest):
 def api_stop(uid: int):
     """Stop (pause) an instance. CRD: sets paused=true; Operator deletes Pod."""
     if _has_crd(uid):
-        crd_ops.pause_her_instance(uid)
+        try:
+            crd_ops.pause_her_instance(uid)
+        except K8sApiException as e:
+            raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
         return {"id": uid, "action": "stopped", "managed_by": "operator"}
 
     k8s_ops.delete_pod(uid)
@@ -668,7 +688,10 @@ def api_stop(uid: int):
 def api_start(uid: int):
     """Start (resume) an instance. CRD: sets paused=false; Operator creates Pod."""
     if _has_crd(uid):
-        crd_ops.resume_her_instance(uid)
+        try:
+            crd_ops.resume_her_instance(uid)
+        except K8sApiException as e:
+            raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
         return {"id": uid, "action": "started", "managed_by": "operator"}
 
     inst = db.get_by_id(uid)
@@ -704,7 +727,11 @@ async def api_restart(uid: int):
 def api_delete(uid: int, purge: bool = Query(False)):
     """Delete an instance. CRD: deletes HerInstance; Operator cleans up Pod + ConfigMap."""
     if _has_crd(uid):
-        crd_ops.delete_her_instance(uid, purge_data=purge)
+        try:
+            crd_ops.delete_her_instance(uid, purge_data=purge)
+        except K8sApiException as e:
+            if e.status != 404:
+                raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
         config_gen.invalidate_bots_cache()
         try:
             cloudflare_ops.sync_tunnel_config()
@@ -744,8 +771,10 @@ async def api_batch_action(req: HerBatchAction):
                     results.append(api_update(uid, req.params))
             else:
                 results.append({"id": uid, "error": f"Unknown action: {req.action}"})
+        except HTTPException as he:
+            results.append({"id": uid, "error": he.detail or f"HTTP {he.status_code}"})
         except Exception as e:
-            results.append({"id": uid, "error": str(e)})
+            results.append({"id": uid, "error": str(e) or repr(e)})
     return {"results": results}
 
 
@@ -967,7 +996,10 @@ def api_list_image_tags(limit: int = Query(30)):
 def api_set_deploy_group(uid: int, req: SetDeployGroupRequest):
     """Move a single instance to a deploy group. Syncs both CRD and DB."""
     if _has_crd(uid):
-        crd_ops.set_deploy_group(uid, req.group)
+        try:
+            crd_ops.set_deploy_group(uid, req.group)
+        except K8sApiException as e:
+            raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
     try:
         db.set_deploy_group(uid, req.group)
     except Exception:
@@ -980,17 +1012,24 @@ def api_set_deploy_group(uid: int, req: SetDeployGroupRequest):
 def api_batch_set_deploy_group(req: BatchSetDeployGroupRequest):
     """Move multiple instances to a deploy group at once. Syncs both CRD and DB."""
     crd_count = 0
+    errors = []
     all_ids = list(req.ids)
     for uid in all_ids:
         if _has_crd(uid):
-            crd_ops.set_deploy_group(uid, req.group)
-            crd_count += 1
+            try:
+                crd_ops.set_deploy_group(uid, req.group)
+                crd_count += 1
+            except K8sApiException as e:
+                errors.append({"id": uid, "error": _k8s_error_detail(e)})
     try:
         db.batch_set_deploy_group(all_ids, req.group)
     except Exception:
         pass
-    return {"action": "batch_set_deploy_group", "count": len(all_ids),
-            "group": req.group, "crd_updated": crd_count, "db_synced": len(all_ids)}
+    result = {"action": "batch_set_deploy_group", "count": len(all_ids),
+              "group": req.group, "crd_updated": crd_count, "db_synced": len(all_ids)}
+    if errors:
+        result["errors"] = errors
+    return result
 
 
 # ── API: Deploy Groups ──
@@ -1141,6 +1180,8 @@ async def api_list_workflows(repo: str = Query("guangzhou/CarHer", description="
         headers["Authorization"] = f"token {token}"
 
     import aiohttp
+    import asyncio
+    import base64
     url = f"https://api.github.com/repos/{repo}/actions/workflows?per_page=100"
     try:
         async with aiohttp.ClientSession() as session:
@@ -1148,12 +1189,28 @@ async def api_list_workflows(repo: str = Query("guangzhou/CarHer", description="
                 if resp.status != 200:
                     return {"repo": repo, "workflows": [], "error": f"GitHub API {resp.status}"}
                 data = await resp.json()
-                workflows = [
-                    {"name": w["name"], "file": w["path"].split("/")[-1], "state": w["state"]}
-                    for w in data.get("workflows", [])
+                active_workflows = [
+                    w for w in data.get("workflows", [])
                     if w.get("state") == "active"
                 ]
-                return {"repo": repo, "workflows": workflows}
+
+            async def check_dispatch(w):
+                content_url = f"https://api.github.com/repos/{repo}/contents/{w['path']}"
+                has_dispatch = None
+                try:
+                    async with session.get(content_url, headers=headers,
+                                           timeout=aiohttp.ClientTimeout(total=10)) as r:
+                        if r.status == 200:
+                            cdata = await r.json()
+                            content = base64.b64decode(cdata.get("content", "")).decode()
+                            has_dispatch = "workflow_dispatch" in content
+                except Exception:
+                    pass
+                return {"name": w["name"], "file": w["path"].split("/")[-1],
+                        "state": w["state"], "has_dispatch": has_dispatch}
+
+            workflows = await asyncio.gather(*[check_dispatch(w) for w in active_workflows])
+            return {"repo": repo, "workflows": [w for w in workflows if w["has_dispatch"] is not False]}
     except Exception as e:
         return {"repo": repo, "workflows": [], "error": str(e)}
 
@@ -1507,13 +1564,19 @@ def api_pod_exec(uid: int, body: dict):
     try:
         from kubernetes.stream import stream as k8s_stream
         v1 = k8s_ops._core()
+        pod_name = k8s_ops._find_pod(uid)
+        if not pod_name:
+            raise HTTPException(404, f"No running pod found for carher-{uid}")
         resp = k8s_stream(
             v1.connect_get_namespaced_pod_exec,
-            f"carher-{uid}", "carher",
+            pod_name, "carher",
+            container="carher",
             command=["/bin/sh", "-c", command],
             stderr=True, stdout=True, stdin=False, tty=False,
         )
         return {"id": uid, "command": command, "output": resp}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Exec failed: {e}")
 

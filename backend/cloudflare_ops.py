@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import yaml
-from typing import Any
 
 from kubernetes import client
 from kubernetes.client.rest import ApiException
@@ -17,15 +16,12 @@ logger = logging.getLogger("carher-admin")
 
 NS = "carher"
 TUNNEL_UUID = "0e83a70f-93d9-4c17-86cc-7600f52696a2"
-TUNNEL_NAME = "carher-k8s"
-CRED_SECRET_NAME = "cloudflared-credentials"
 CONFIG_CM_NAME = "cloudflared-config"
 CLOUDFLARED_DEPLOYMENT = "cloudflared"
 DOMAIN = "carher.net"
 
 _v1_instance: client.CoreV1Api | None = None
 _apps_instance: client.AppsV1Api | None = None
-_custom_instance: client.CustomObjectsApi | None = None
 
 
 def _v1() -> client.CoreV1Api:
@@ -40,13 +36,6 @@ def _apps() -> client.AppsV1Api:
     if _apps_instance is None:
         _apps_instance = client.AppsV1Api()
     return _apps_instance
-
-
-def _crd_api() -> client.CustomObjectsApi:
-    global _custom_instance
-    if _custom_instance is None:
-        _custom_instance = client.CustomObjectsApi()
-    return _custom_instance
 
 
 def _get_svc_cluster_ip(svc_name: str) -> str | None:
@@ -156,8 +145,11 @@ def sync_tunnel_config(wait_for_service: str | None = None, retries: int = 5):
 
 
 def register_dns_routes(uid: int, prefix: str = "s1"):
-    """Register Cloudflare DNS CNAME routes for a new instance.
-    Runs 'cloudflared tunnel route dns' via exec into the cloudflared pod.
+    """Per-user DNS routes are intentionally skipped.
+
+    The K8s tunnel now exposes a stable `*.carher.net` wildcard and relies on
+    the in-cluster `auth-proxy` to route by Host, so Cloudflare no longer needs
+    to learn one public hostname per instance.
     """
     pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
     hostnames = [
@@ -165,32 +157,5 @@ def register_dns_routes(uid: int, prefix: str = "s1"):
         f"{pfx}u{uid}-fe.{DOMAIN}",
         f"{pfx}u{uid}-proxy.{DOMAIN}",
     ]
-
-    v1 = _v1()
-    try:
-        pods = v1.list_namespaced_pod(NS, label_selector=f"app={CLOUDFLARED_DEPLOYMENT}")
-        if not pods.items:
-            logger.warning("No cloudflared pod found; DNS routes must be registered manually")
-            return []
-        pod_name = pods.items[0].metadata.name
-    except ApiException:
-        logger.error("Failed to find cloudflared pod for DNS registration")
-        return []
-
-    results = []
-    from kubernetes.stream import stream
-    for hostname in hostnames:
-        try:
-            resp = stream(
-                v1.connect_get_namespaced_pod_exec,
-                pod_name, NS,
-                command=["cloudflared", "tunnel", "route", "dns", "--overwrite-dns", TUNNEL_NAME, hostname],
-                stderr=True, stdout=True, stdin=False, tty=False,
-            )
-            results.append({"hostname": hostname, "ok": True, "output": resp})
-            logger.info("DNS route created: %s", hostname)
-        except Exception as e:
-            results.append({"hostname": hostname, "ok": False, "error": str(e)})
-            logger.error("DNS route failed for %s: %s", hostname, e)
-
-    return results
+    logger.info("Skipping per-user DNS registration for uid=%s; wildcard route is active", uid)
+    return [{"hostname": hostname, "ok": True, "skipped": True, "reason": "wildcard route"} for hostname in hostnames]

@@ -225,17 +225,18 @@ sequenceDiagram
     Op->>Op: Reconcile → 创建 PVC + Service + Pod
     Admin->>Admin: 生成新 cloudflared config.yml
     Admin->>CF: 更新 ConfigMap + 重启 Pod
-    Admin->>DNS: cloudflared tunnel route dns (注册 CNAME)
-    CF->>CF: 加载新配置，路由到 Service ClusterIP
+    Admin->>CF: 更新 cloudflared ConfigMap
+    CF->>CF: 加载 wildcard 入口，转发到 auth-proxy
+    CF->>CF: auth-proxy 按 Host 路由到实例 Service
 ```
 
 | 组件 | 说明 |
 |------|------|
 | cloudflared Deployment | K8s 托管，自动重启，不依赖宿主机 |
-| ConfigMap `cloudflared-config` | Admin 自动生成，包含所有活跃实例的 hostname → Service 映射 |
+| ConfigMap `cloudflared-config` | Admin 自动生成，仅维护 `admin.carher.net` 与 `*.carher.net` 两类稳定入口 |
 | Secret `cloudflared-credentials` | Tunnel 凭证 + Origin Cert |
 | ClusterIP Service | Operator 自动创建，Pod 重建不影响路由 |
-| DNS 自动注册 | Admin 创建实例时自动注册 `{prefix}-u{uid}-auth/fe/proxy.carher.net` |
+| Host 路由 | `auth-proxy` 按 `{prefix}-u{uid}-auth/fe/proxy.carher.net` 解析 uid 并转发到实例 Service |
 | POST /api/cloudflare/sync | 手动触发全量配置重新生成 |
 
 ### 4. CI/CD — GitHub Actions + 分支规则

@@ -27,7 +27,7 @@ DB_DIR = Path(os.environ.get("CARHER_ADMIN_DB_DIR", "/data/carher-admin"))
 DB_PATH = DB_DIR / "admin.db"
 BACKUP_DIR = Path(os.environ.get("CARHER_ADMIN_BACKUP_DIR", "/nas-backup/carher-admin"))
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS her_instances (
@@ -220,6 +220,10 @@ MIGRATIONS = {
         "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_access_key_id', '', 1)",
         "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_access_key_secret', '', 1)",
     ],
+    9: [
+        "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_username', '', 1)",
+        "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_password', '', 1)",
+    ],
 }
 
 SEED_SQL = [
@@ -235,10 +239,8 @@ SEED_SQL = [
     "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('feishu_webhook', '', 1)",
     "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('agent_api_key', '', 1)",
     "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_registry', 'cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com', 0)",
-    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_region_id', 'ap-southeast-1', 0)",
-    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_instance_id', '', 0)",
-    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_access_key_id', '', 1)",
-    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_access_key_secret', '', 1)",
+    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_username', '', 1)",
+    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_password', '', 1)",
 ]
 
 
@@ -959,10 +961,9 @@ def get_webhook_secret() -> str:
 
 
 def get_acr_settings() -> dict[str, str]:
-    """Get ACR OpenAPI settings with env fallback."""
+    """Get ACR Docker Registry v2 settings with env fallback."""
     return {
-        "region_id": get_setting("acr_region_id") or os.environ.get("ACR_REGION_ID", "ap-southeast-1"),
-        "instance_id": get_setting("acr_instance_id") or os.environ.get("ACR_INSTANCE_ID", ""),
-        "access_key_id": get_setting("acr_access_key_id") or os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID", ""),
-        "access_key_secret": get_setting("acr_access_key_secret") or os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET", ""),
+        "registry": get_setting("acr_registry") or os.environ.get("ACR_REGISTRY", "cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com"),
+        "username": get_setting("acr_username") or os.environ.get("ACR_USERNAME", ""),
+        "password": get_setting("acr_password") or os.environ.get("ACR_PASSWORD", ""),
     }

@@ -1,23 +1,29 @@
-"""Alibaba Cloud ACR client for syncing CarHer image tags.
+"""ACR client for syncing CarHer image tags via Docker Registry v2 API.
 
-Uses the official ACR OpenAPI:
-- ListRepository: resolve the fixed `her/carher` repository to a RepoId
-- ListRepoTag: list tags for that repository page by page
+Auth flow (ACR Enterprise Edition):
+  1. GET /v2/ → 401 with WWW-Authenticate Bearer realm + service
+  2. GET {realm}?service={service}&scope=repository:{repo}:pull  (basic auth)
+  3. Use returned bearer token for subsequent API calls
+  4. GET /v2/{repo}/tags/list → tag list
 """
 
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+from urllib.parse import urlencode
+from base64 import b64encode
+import json
 
-from alibabacloud_cr20181201.client import Client as ACRClient
-from alibabacloud_cr20181201 import models as acr_models
-from alibabacloud_tea_openapi.models import Config
+logger = logging.getLogger("carher-admin")
 
 REPO_NAMESPACE = "her"
 REPO_NAME = "carher"
-PAGE_SIZE = 100
+REPO_PATH = f"{REPO_NAMESPACE}/{REPO_NAME}"
 
 
 class ACRConfigError(ValueError):
@@ -26,10 +32,9 @@ class ACRConfigError(ValueError):
 
 @dataclass(frozen=True)
 class ACRSettings:
-    region_id: str
-    instance_id: str
-    access_key_id: str
-    access_key_secret: str
+    registry: str
+    username: str
+    password: str
 
 
 @dataclass(frozen=True)
@@ -42,139 +47,75 @@ class ACRTag:
     updated_at: str
 
 
-def build_settings(*, region_id: str, instance_id: str, access_key_id: str, access_key_secret: str) -> ACRSettings:
+def build_settings(*, registry: str, username: str, password: str) -> ACRSettings:
     missing = [
         name for name, value in (
-            ("acr_region_id", region_id),
-            ("acr_instance_id", instance_id),
-            ("acr_access_key_id", access_key_id),
-            ("acr_access_key_secret", access_key_secret),
+            ("acr_registry", registry),
+            ("acr_username", username),
+            ("acr_password", password),
         ) if not value
     ]
     if missing:
         raise ACRConfigError(f"Missing ACR settings: {', '.join(missing)}")
-    return ACRSettings(
-        region_id=region_id,
-        instance_id=instance_id,
-        access_key_id=access_key_id,
-        access_key_secret=access_key_secret,
-    )
+    return ACRSettings(registry=registry, username=username, password=password)
 
 
 def list_carher_tags(settings: ACRSettings) -> list[ACRTag]:
-    client = _create_client(settings)
-    repo_id = _find_repo_id(client, settings.instance_id)
-    tags: list[ACRTag] = []
-    page_no = 1
-
-    while True:
-        request = acr_models.ListRepoTagRequest(
-            instance_id=settings.instance_id,
-            repo_id=repo_id,
-            page_no=page_no,
-            page_size=PAGE_SIZE,
-        )
-        payload = _response_map(client.list_repo_tag(request))
-        images = _get_list(payload, "Images")
-        if not images:
-            break
-        for image in images:
-            parsed = _parse_tag(image)
-            if parsed is not None:
-                tags.append(parsed)
-
-        total_count = _to_int(_get_value(payload, "TotalCount"))
-        if total_count <= page_no * PAGE_SIZE:
-            break
-        page_no += 1
-
-    tags.sort(key=lambda item: (item.image_update_ms, item.tag), reverse=True)
-    return tags
-
-
-def _create_client(settings: ACRSettings) -> ACRClient:
-    config = Config(
-        access_key_id=settings.access_key_id,
-        access_key_secret=settings.access_key_secret,
-        region_id=settings.region_id,
-        endpoint=f"cr.{settings.region_id}.aliyuncs.com",
-    )
-    return ACRClient(config)
-
-
-def _find_repo_id(client: ACRClient, instance_id: str) -> str:
-    request = acr_models.ListRepositoryRequest(
-        instance_id=instance_id,
-        repo_namespace_name=REPO_NAMESPACE,
-        repo_name=REPO_NAME,
-        page_no=1,
-        page_size=PAGE_SIZE,
-    )
-    payload = _response_map(client.list_repository(request))
-    repositories = _get_list(payload, "Repositories")
-    for repo in repositories:
-        if _matches_carher_repo(repo):
-            repo_id = str(_get_value(repo, "RepoId") or "")
-            if repo_id:
-                return repo_id
-    raise ACRConfigError(f"ACR repository not found: {REPO_NAMESPACE}/{REPO_NAME}")
-
-
-def _matches_carher_repo(repo: dict[str, Any]) -> bool:
-    return (
-        str(_get_value(repo, "RepoNamespaceName") or "") == REPO_NAMESPACE
-        and str(_get_value(repo, "RepoName") or "") == REPO_NAME
-    )
-
-
-def _parse_tag(image: dict[str, Any]) -> ACRTag | None:
-    tag = str(_get_value(image, "Tag") or "").strip()
-    if not tag:
-        return None
-    image_update_ms = _to_int(_get_value(image, "ImageUpdate"))
-    return ACRTag(
-        tag=tag,
-        digest=str(_get_value(image, "Digest") or ""),
-        image_id=str(_get_value(image, "ImageId") or ""),
-        image_size=_to_int(_get_value(image, "ImageSize")),
-        image_update_ms=image_update_ms,
-        updated_at=_iso_from_millis(image_update_ms),
-    )
-
-
-def _response_map(response: Any) -> dict[str, Any]:
-    body = getattr(response, "body", None)
-    if body is not None and hasattr(body, "to_map"):
-        return body.to_map()
-    if hasattr(response, "to_map"):
-        return response.to_map()
-    if isinstance(response, dict):
-        return response
-    raise TypeError(f"Unsupported ACR response type: {type(response)!r}")
-
-
-def _get_value(payload: dict[str, Any], key: str) -> Any:
-    for candidate in (key, key[:1].lower() + key[1:], key.upper(), key.lower()):
-        if candidate in payload:
-            return payload[candidate]
-    return None
-
-
-def _get_list(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
-    value = _get_value(payload, key)
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, dict)]
-    return []
-
-
-def _to_int(value: Any) -> int:
+    """List all tags for her/carher via Docker Registry v2 API."""
+    token = _get_bearer_token(settings)
+    url = f"https://{settings.registry}/v2/{REPO_PATH}/tags/list"
+    req = Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
+        with urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+    except (URLError, HTTPError) as e:
+        raise ACRConfigError(f"Failed to list tags: {e}") from e
+
+    tag_names = data.get("tags") or []
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return [
+        ACRTag(tag=t, digest="", image_id="", image_size=0, image_update_ms=0, updated_at=now_str)
+        for t in tag_names
+        if isinstance(t, str) and t.strip()
+    ]
 
 
-def _iso_from_millis(value: int) -> str:
-    if value <= 0:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    return datetime.fromtimestamp(value / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+def _get_bearer_token(settings: ACRSettings) -> str:
+    """Obtain a bearer token via the ACR Docker auth endpoint."""
+    realm, service = _discover_auth(settings.registry)
+    params = urlencode({"service": service, "scope": f"repository:{REPO_PATH}:pull"})
+    url = f"{realm}?{params}"
+    creds = b64encode(f"{settings.username}:{settings.password}".encode()).decode()
+    req = Request(url, headers={"Authorization": f"Basic {creds}"})
+    try:
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (URLError, HTTPError) as e:
+        raise ACRConfigError(f"ACR auth failed: {e}") from e
+    token = data.get("token") or data.get("access_token") or ""
+    if not token:
+        raise ACRConfigError("ACR auth returned empty token")
+    return token
+
+
+_WWW_AUTH_RE = re.compile(r'Bearer\s+realm="([^"]+)",\s*service="([^"]+)"')
+
+
+def _discover_auth(registry: str) -> tuple[str, str]:
+    """GET /v2/ → parse WWW-Authenticate header for realm and service."""
+    url = f"https://{registry}/v2/"
+    try:
+        req = Request(url)
+        with urlopen(req, timeout=10) as resp:
+            return "", ""
+    except HTTPError as e:
+        if e.code != 401:
+            raise ACRConfigError(f"Unexpected /v2/ response: HTTP {e.code}") from e
+        www_auth = e.headers.get("WWW-Authenticate", "")
+    except URLError as e:
+        raise ACRConfigError(f"Cannot reach registry {registry}: {e}") from e
+
+    m = _WWW_AUTH_RE.search(www_auth)
+    if not m:
+        raise ACRConfigError(f"Cannot parse WWW-Authenticate: {www_auth!r}")
+    return m.group(1), m.group(2)

@@ -1333,7 +1333,7 @@ async def api_update_settings(updates: dict[str, str]):
     For secrets, send empty string to clear, or the new full value."""
     safe_keys = {"github_token", "github_repos", "webhook_secret",
                  "feishu_webhook", "agent_api_key", "acr_registry",
-                 "acr_region_id", "acr_instance_id", "acr_access_key_id", "acr_access_key_secret"}
+                 "acr_username", "acr_password"}
     filtered = {k: v for k, v in updates.items() if k in safe_keys}
     if not filtered:
         raise HTTPException(400, "No valid settings to update")

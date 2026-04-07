@@ -6,8 +6,8 @@ const SECRET_KEYS = new Set([
   "webhook_secret",
   "feishu_webhook",
   "agent_api_key",
-  "acr_access_key_id",
-  "acr_access_key_secret",
+  "acr_username",
+  "acr_password",
 ]);
 
 const SETTING_META = {
@@ -16,11 +16,9 @@ const SETTING_META = {
   webhook_secret: { label: "Deploy Webhook Secret", desc: "GitHub Actions webhook 验证密钥 (需与 GitHub Secrets 一致)" },
   feishu_webhook: { label: "飞书群 Webhook URL", desc: "部署通知推送到飞书群" },
   agent_api_key: { label: "AI Agent LLM API Key", desc: "OpenRouter / OpenAI API Key" },
-  acr_registry: { label: "ACR 镜像仓库地址", desc: "阿里云容器镜像服务地址" },
-  acr_region_id: { label: "ACR Region ID", desc: "阿里云 ACR OpenAPI 地域，如 ap-southeast-1" },
-  acr_instance_id: { label: "ACR Instance ID", desc: "阿里云 ACR 企业版实例 ID，用于官方 OpenAPI 查询仓库和 tag" },
-  acr_access_key_id: { label: "ACR AccessKey ID", desc: "用于调用阿里云 ACR OpenAPI 的 AccessKey ID" },
-  acr_access_key_secret: { label: "ACR AccessKey Secret", desc: "用于调用阿里云 ACR OpenAPI 的 AccessKey Secret" },
+  acr_registry: { label: "ACR 镜像仓库地址", desc: "阿里云容器镜像服务地址（如 cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com）" },
+  acr_username: { label: "ACR 用户名", desc: "Docker Registry 登录用户名（与 K8s acr-secret 一致）" },
+  acr_password: { label: "ACR 密码", desc: "Docker Registry 登录密码（与 K8s acr-secret 一致）" },
 };
 
 export default function SettingsPage() {
@@ -83,10 +81,8 @@ export default function SettingsPage() {
     "feishu_webhook",
     "agent_api_key",
     "acr_registry",
-    "acr_region_id",
-    "acr_instance_id",
-    "acr_access_key_id",
-    "acr_access_key_secret",
+    "acr_username",
+    "acr_password",
   ];
 
   return (

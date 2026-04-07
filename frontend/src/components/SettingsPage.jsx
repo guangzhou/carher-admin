@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 
-const SECRET_KEYS = new Set(["github_token", "webhook_secret", "feishu_webhook", "agent_api_key"]);
+const SECRET_KEYS = new Set([
+  "github_token",
+  "webhook_secret",
+  "feishu_webhook",
+  "agent_api_key",
+  "acr_access_key_id",
+  "acr_access_key_secret",
+]);
 
 const SETTING_META = {
   github_token: { label: "GitHub Token (PAT)", desc: "用于触发构建、读取分支和 Workflow (需 Contents:read + Actions:write 权限)" },
@@ -10,6 +17,10 @@ const SETTING_META = {
   feishu_webhook: { label: "飞书群 Webhook URL", desc: "部署通知推送到飞书群" },
   agent_api_key: { label: "AI Agent LLM API Key", desc: "OpenRouter / OpenAI API Key" },
   acr_registry: { label: "ACR 镜像仓库地址", desc: "阿里云容器镜像服务地址" },
+  acr_region_id: { label: "ACR Region ID", desc: "阿里云 ACR OpenAPI 地域，如 ap-southeast-1" },
+  acr_instance_id: { label: "ACR Instance ID", desc: "阿里云 ACR 企业版实例 ID，用于官方 OpenAPI 查询仓库和 tag" },
+  acr_access_key_id: { label: "ACR AccessKey ID", desc: "用于调用阿里云 ACR OpenAPI 的 AccessKey ID" },
+  acr_access_key_secret: { label: "ACR AccessKey Secret", desc: "用于调用阿里云 ACR OpenAPI 的 AccessKey Secret" },
 };
 
 export default function SettingsPage() {
@@ -65,7 +76,18 @@ export default function SettingsPage() {
     );
   }
 
-  const orderedKeys = ["github_token", "github_repos", "webhook_secret", "feishu_webhook", "agent_api_key", "acr_registry"];
+  const orderedKeys = [
+    "github_token",
+    "github_repos",
+    "webhook_secret",
+    "feishu_webhook",
+    "agent_api_key",
+    "acr_registry",
+    "acr_region_id",
+    "acr_instance_id",
+    "acr_access_key_id",
+    "acr_access_key_secret",
+  ];
 
   return (
     <div className="space-y-6 max-w-3xl">

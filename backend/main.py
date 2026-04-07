@@ -31,6 +31,7 @@ import json as _json
 from kubernetes.client.rest import ApiException as K8sApiException
 
 from . import database as db
+from . import acr_client
 from . import config_gen
 from . import crd_ops
 from . import k8s_ops
@@ -988,8 +989,42 @@ def api_deploy_history(limit: int = Query(20)):
 
 @app.get("/api/image-tags", tags=["deploy"])
 def api_list_image_tags(limit: int = Query(30)):
-    """List available carher image tags (from deploy history + instances)."""
+    """List available CarHer image tags from ACR sync + deploy history + instances."""
     return db.list_image_tags(limit=limit)
+
+
+@app.post("/api/image-tags/sync", tags=["deploy"])
+def api_sync_image_tags():
+    """Sync the fixed her/carher repository tags from Alibaba Cloud ACR into SQLite."""
+    settings = db.get_acr_settings()
+    try:
+        acr_settings = acr_client.build_settings(**settings)
+        tags = acr_client.list_carher_tags(acr_settings)
+    except acr_client.ACRConfigError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        logger.exception("ACR tag sync failed")
+        raise HTTPException(502, f"ACR sync failed: {e}")
+
+    upserted = db.upsert_acr_image_tags([
+        {
+            "tag": item.tag,
+            "repo_namespace": acr_client.REPO_NAMESPACE,
+            "repo_name": acr_client.REPO_NAME,
+            "digest": item.digest,
+            "image_id": item.image_id,
+            "image_size": item.image_size,
+            "image_update_ms": item.image_update_ms,
+            "updated_at": item.updated_at,
+        }
+        for item in tags
+    ])
+    return {
+        "repo": f"{acr_client.REPO_NAMESPACE}/{acr_client.REPO_NAME}",
+        "fetched": len(tags),
+        "upserted": upserted,
+        "latest_tags": [item.tag for item in tags[:10]],
+    }
 
 
 @app.put("/api/instances/{uid}/deploy-group", tags=["deploy-groups"])
@@ -1297,7 +1332,8 @@ async def api_update_settings(updates: dict[str, str]):
     """Update settings. Only send keys you want to change.
     For secrets, send empty string to clear, or the new full value."""
     safe_keys = {"github_token", "github_repos", "webhook_secret",
-                 "feishu_webhook", "agent_api_key", "acr_registry"}
+                 "feishu_webhook", "agent_api_key", "acr_registry",
+                 "acr_region_id", "acr_instance_id", "acr_access_key_id", "acr_access_key_secret"}
     filtered = {k: v for k, v in updates.items() if k in safe_keys}
     if not filtered:
         raise HTTPException(400, "No valid settings to update")

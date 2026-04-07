@@ -32,6 +32,7 @@ export default function DeployPage() {
   const [status, setStatus] = useState(null);
   const [history, setHistory] = useState([]);
   const [instances, setInstances] = useState([]);
+  const [imageTags, setImageTags] = useState([]);
   const [deployGroups, setDeployGroups] = useState([]);
   const [branchRules, setBranchRules] = useState([]);
   const [imageTag, setImageTag] = useState("");
@@ -67,11 +68,13 @@ export default function DeployPage() {
   // CI runs
   const [ciRuns, setCiRuns] = useState([]);
   const [ciLoading, setCiLoading] = useState(false);
+  const [tagSyncing, setTagSyncing] = useState(false);
 
   const loadFull = useCallback(() => {
     api.getDeployStatus().then(setStatus);
     api.getDeployHistory().then(setHistory);
     api.listInstances().then(setInstances);
+    api.listImageTags(100).then((tags) => setImageTags(Array.isArray(tags) ? tags : [])).catch(() => {});
     api.listDeployGroups().then(setDeployGroups);
     api.listBranchRules().then(setBranchRules).catch(() => {});
   }, []);
@@ -123,8 +126,9 @@ export default function DeployPage() {
 
   const groupNames = deployGroups.map((g) => g.name);
 
-  // Collect unique image tags from history + running instances for autocomplete
+  // Prefer synced ACR tags, then fall back to history + running instances.
   const knownTags = [...new Set([
+    ...imageTags.filter(Boolean),
     ...history.map((d) => d.image_tag).filter(Boolean),
     ...instances.map((i) => i.image || i.image_tag).filter(Boolean),
   ])];
@@ -239,6 +243,20 @@ export default function DeployPage() {
     finally { setLoading(""); }
   };
 
+  const syncImageTags = async () => {
+    setTagSyncing(true);
+    try {
+      const result = await api.syncImageTags();
+      await loadFull();
+      const count = result?.fetched ?? result?.upserted ?? 0;
+      alert(`ACR 同步完成，已获取 ${count} 个 CarHer tag`);
+    } catch (e) {
+      alert(`ACR 同步失败: ${e.message}`);
+    } finally {
+      setTagSyncing(false);
+    }
+  };
+
   const deploy = status?.deploy;
   const isActive = status?.active;
   const waveOrder = status?.wave_order || groupNames;
@@ -320,7 +338,12 @@ export default function DeployPage() {
       {/* Start new deploy / Trigger build */}
       {!isActive && (
         <div className="card p-5 space-y-4">
-          <h3 className="text-sm font-medium text-gray-400">发起新部署</h3>
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-sm font-medium text-gray-400">发起新部署</h3>
+            <button className="btn btn-sm text-xs" onClick={syncImageTags} disabled={tagSyncing}>
+              {tagSyncing ? "同步中..." : "同步 ACR tag"}
+            </button>
+          </div>
           <div className="flex gap-2 flex-wrap items-end">
             <div className="flex-1 min-w-[200px] relative">
               <input className="input w-full pr-8" placeholder="输入或选择镜像 tag"
@@ -386,6 +409,7 @@ export default function DeployPage() {
           </div>
 
           <div className="text-xs text-gray-600 space-y-1">
+            <p><strong>镜像下拉:</strong> 优先展示已同步的阿里云 ACR `her/carher` tag，并合并历史部署与当前实例镜像</p>
             {waveDesc && <p><strong>灰度部署:</strong> {waveDesc}，每批后自动健康检查</p>}
             <p><strong>紧急全量:</strong> 跳过灰度，所有实例直接更新</p>
             <p><strong>仅首组 / 指定分组:</strong> 精确控制部署范围</p>

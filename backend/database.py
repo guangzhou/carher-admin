@@ -27,7 +27,7 @@ DB_DIR = Path(os.environ.get("CARHER_ADMIN_DB_DIR", "/data/carher-admin"))
 DB_PATH = DB_DIR / "admin.db"
 BACKUP_DIR = Path(os.environ.get("CARHER_ADMIN_BACKUP_DIR", "/nas-backup/carher-admin"))
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS her_instances (
@@ -56,8 +56,15 @@ CREATE TABLE IF NOT EXISTS deploys (
     total           INTEGER NOT NULL DEFAULT 0,
     done            INTEGER NOT NULL DEFAULT 0,
     failed          INTEGER NOT NULL DEFAULT 0,
+    mode            TEXT NOT NULL DEFAULT 'normal',
     current_wave    TEXT NOT NULL DEFAULT '',
     error           TEXT NOT NULL DEFAULT '',
+    branch          TEXT NOT NULL DEFAULT '',
+    commit_sha      TEXT NOT NULL DEFAULT '',
+    commit_msg      TEXT NOT NULL DEFAULT '',
+    author          TEXT NOT NULL DEFAULT '',
+    repo            TEXT NOT NULL DEFAULT '',
+    run_url         TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at    TEXT
 );
@@ -75,6 +82,49 @@ CREATE TABLE IF NOT EXISTS deploy_groups (
     priority        INTEGER NOT NULL DEFAULT 100,
     description     TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS acr_image_tags (
+    tag              TEXT PRIMARY KEY,
+    repo_namespace   TEXT NOT NULL DEFAULT 'her',
+    repo_name        TEXT NOT NULL DEFAULT 'carher',
+    digest           TEXT NOT NULL DEFAULT '',
+    image_id         TEXT NOT NULL DEFAULT '',
+    image_size       INTEGER NOT NULL DEFAULT 0,
+    image_update_ms  INTEGER NOT NULL DEFAULT 0,
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_acr_image_tags_updated_at ON acr_image_tags(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS metrics_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    uid         INTEGER NOT NULL DEFAULT 0,
+    cpu_m       REAL NOT NULL DEFAULT 0,
+    memory_mi   REAL NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metrics_history(ts);
+CREATE INDEX IF NOT EXISTS idx_metrics_kind_uid ON metrics_history(kind, uid);
+
+CREATE TABLE IF NOT EXISTS branch_rules (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    pattern      TEXT NOT NULL UNIQUE,
+    deploy_mode  TEXT NOT NULL DEFAULT 'normal',
+    target_group TEXT NOT NULL DEFAULT '',
+    auto_deploy  INTEGER NOT NULL DEFAULT 1,
+    description  TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL DEFAULT '',
+    is_secret   INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -152,7 +202,50 @@ MIGRATIONS = {
         "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('agent_api_key', '', 1)",
         "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_registry', 'cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com', 0)",
     ],
+    8: [
+        """CREATE TABLE IF NOT EXISTS acr_image_tags (
+            tag TEXT PRIMARY KEY,
+            repo_namespace TEXT NOT NULL DEFAULT 'her',
+            repo_name TEXT NOT NULL DEFAULT 'carher',
+            digest TEXT NOT NULL DEFAULT '',
+            image_id TEXT NOT NULL DEFAULT '',
+            image_size INTEGER NOT NULL DEFAULT 0,
+            image_update_ms INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_acr_image_tags_updated_at ON acr_image_tags(updated_at DESC)",
+        "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_region_id', 'ap-southeast-1', 0)",
+        "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_instance_id', '', 0)",
+        "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_access_key_id', '', 1)",
+        "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_access_key_secret', '', 1)",
+    ],
 }
+
+SEED_SQL = [
+    "INSERT OR IGNORE INTO deploy_groups (name, priority, description) VALUES ('canary', 10, '金丝雀 — 最先更新')",
+    "INSERT OR IGNORE INTO deploy_groups (name, priority, description) VALUES ('early', 50, '先行者 — 金丝雀通过后更新')",
+    "INSERT OR IGNORE INTO deploy_groups (name, priority, description) VALUES ('stable', 100, '稳定 — 最后更新')",
+    "INSERT OR IGNORE INTO branch_rules (pattern, deploy_mode, target_group, auto_deploy, description) VALUES ('main', 'normal', '', 1, '主分支 → 灰度部署')",
+    "INSERT OR IGNORE INTO branch_rules (pattern, deploy_mode, target_group, auto_deploy, description) VALUES ('hotfix/*', 'fast', '', 1, '紧急修复 → 全量部署')",
+    "INSERT OR IGNORE INTO branch_rules (pattern, deploy_mode, target_group, auto_deploy, description) VALUES ('feature/*', 'group:canary', 'canary', 0, '特性分支 → 仅金丝雀(需手动触发)')",
+    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('github_token', '', 1)",
+    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('github_repos', '[\"guangzhou/CarHer\", \"guangzhou/carher-admin\"]', 0)",
+    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('webhook_secret', '', 1)",
+    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('feishu_webhook', '', 1)",
+    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('agent_api_key', '', 1)",
+    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_registry', 'cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com', 0)",
+    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_region_id', 'ap-southeast-1', 0)",
+    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_instance_id', '', 0)",
+    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_access_key_id', '', 1)",
+    "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_access_key_secret', '', 1)",
+]
+
+
+def _ensure_seed_data(conn: sqlite3.Connection):
+    """Populate default groups, rules, and settings for both fresh and upgraded DBs."""
+    for sql in SEED_SQL:
+        conn.execute(sql)
 
 
 def init_db():
@@ -185,6 +278,7 @@ def init_db():
                 conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?)", (ver,))
                 logger.info("Migrated DB to schema version %d", ver)
 
+    _ensure_seed_data(conn)
     conn.commit()
     conn.close()
     logger.info("Database initialized at %s (schema v%d)", DB_PATH, SCHEMA_VERSION)
@@ -545,6 +639,64 @@ def set_image_tag(uid: int, tag: str):
         conn.execute("UPDATE her_instances SET image_tag = ? WHERE id = ?", (tag, uid))
 
 
+def upsert_acr_image_tags(tags: list[dict[str, Any]]) -> int:
+    """Upsert deduplicated ACR tags for the fixed her/carher repository."""
+    if not tags:
+        return 0
+
+    deduped: dict[str, dict[str, Any]] = {}
+    for item in tags:
+        tag = str(item.get("tag", "")).strip()
+        if not tag:
+            continue
+        current = deduped.get(tag)
+        if current is None or int(item.get("image_update_ms", 0) or 0) >= int(current.get("image_update_ms", 0) or 0):
+            deduped[tag] = {
+                "tag": tag,
+                "repo_namespace": item.get("repo_namespace", "her"),
+                "repo_name": item.get("repo_name", "carher"),
+                "digest": item.get("digest", ""),
+                "image_id": item.get("image_id", ""),
+                "image_size": int(item.get("image_size", 0) or 0),
+                "image_update_ms": int(item.get("image_update_ms", 0) or 0),
+                "updated_at": item.get("updated_at", _now()),
+                "last_seen_at": _now(),
+            }
+
+    with get_db() as conn:
+        for item in deduped.values():
+            conn.execute(
+                """INSERT INTO acr_image_tags
+                   (tag, repo_namespace, repo_name, digest, image_id, image_size, image_update_ms, updated_at, last_seen_at)
+                   VALUES (:tag, :repo_namespace, :repo_name, :digest, :image_id, :image_size, :image_update_ms, :updated_at, :last_seen_at)
+                   ON CONFLICT(tag) DO UPDATE SET
+                     repo_namespace = excluded.repo_namespace,
+                     repo_name = excluded.repo_name,
+                     digest = excluded.digest,
+                     image_id = excluded.image_id,
+                     image_size = excluded.image_size,
+                     image_update_ms = excluded.image_update_ms,
+                     updated_at = excluded.updated_at,
+                     last_seen_at = excluded.last_seen_at""",
+                item,
+            )
+        _audit(conn, None, "acr:sync", f"upserted={len(deduped)} repo=her/carher")
+    backup_to_nas()
+    return len(deduped)
+
+
+def list_acr_image_tags(limit: int = 100) -> list[str]:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT tag FROM acr_image_tags
+               WHERE repo_namespace = 'her' AND repo_name = 'carher'
+               ORDER BY updated_at DESC, tag DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [r["tag"] for r in rows]
+
+
 def get_current_image_tag() -> str:
     """Get the most common image_tag across running instances."""
     with get_db() as conn:
@@ -555,14 +707,19 @@ def get_current_image_tag() -> str:
 
 
 def list_image_tags(limit: int = 30) -> list[str]:
-    """Return distinct image tags from deploy history + instances, newest first."""
+    """Return distinct image tags from ACR sync + deploy history + instances, newest first."""
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT DISTINCT tag FROM (
-                 SELECT image_tag AS tag, MAX(created_at) AS ts FROM deploys GROUP BY image_tag
-                 UNION
-                 SELECT image_tag AS tag, MAX(updated_at) AS ts FROM her_instances WHERE image_tag != '' GROUP BY image_tag
-               ) ORDER BY ts DESC LIMIT ?""",
+            """SELECT tag FROM (
+                 SELECT tag, MAX(ts) AS ts FROM (
+                   SELECT tag, updated_at AS ts FROM acr_image_tags
+                    WHERE repo_namespace = 'her' AND repo_name = 'carher'
+                   UNION ALL
+                   SELECT image_tag AS tag, MAX(created_at) AS ts FROM deploys GROUP BY image_tag
+                   UNION ALL
+                   SELECT image_tag AS tag, MAX(updated_at) AS ts FROM her_instances WHERE image_tag != '' GROUP BY image_tag
+                 ) GROUP BY tag
+               ) ORDER BY ts DESC, tag DESC LIMIT ?""",
             (limit,),
         ).fetchall()
         return [r["tag"] for r in rows]
@@ -799,3 +956,13 @@ def get_webhook_secret() -> str:
     """Get webhook secret: prefer DB setting, fallback to env var."""
     db_secret = get_setting("webhook_secret")
     return db_secret or os.environ.get("DEPLOY_WEBHOOK_SECRET", "")
+
+
+def get_acr_settings() -> dict[str, str]:
+    """Get ACR OpenAPI settings with env fallback."""
+    return {
+        "region_id": get_setting("acr_region_id") or os.environ.get("ACR_REGION_ID", "ap-southeast-1"),
+        "instance_id": get_setting("acr_instance_id") or os.environ.get("ACR_INSTANCE_ID", ""),
+        "access_key_id": get_setting("acr_access_key_id") or os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID", ""),
+        "access_key_secret": get_setting("acr_access_key_secret") or os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET", ""),
+    }

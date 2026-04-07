@@ -88,6 +88,7 @@ export const api = {
   getNodeMetricsHistory: (hours = 24) => request(`/metrics/history/nodes?hours=${hours}`),
   getMetricsStorage: () => request("/metrics/storage"),
   listImageTags: (limit = 30) => request(`/image-tags?limit=${limit}`),
+  syncImageTags: () => request("/image-tags/sync", { method: "POST" }),
   // Deploy groups
   listDeployGroups: () => request("/deploy-groups"),
   createDeployGroup: (name, priority, description) => request("/deploy-groups", { method: "POST", body: JSON.stringify({ name, priority, description }) }),

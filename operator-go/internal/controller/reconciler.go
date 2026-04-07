@@ -581,7 +581,7 @@ func (r *HerInstanceReconciler) ensurePVC(ctx context.Context, uid int) error {
 			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
 			StorageClassName: &sc,
 			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("5Gi")},
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("20Gi")},
 			},
 		},
 	}

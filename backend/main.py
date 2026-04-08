@@ -198,7 +198,6 @@ KNOWN_BOTS_TTL = 30  # seconds
 
 def _get_known_bots_cached():
     """Cache knownBots for 30s to avoid O(N) DB query per request."""
-    import time
     global _known_bots_cache, _known_bots_ts
     now = time.monotonic()
     if _known_bots_cache is None or now - _known_bots_ts > KNOWN_BOTS_TTL:

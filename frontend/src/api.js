@@ -48,9 +48,17 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  listInstances: async () => {
-    const data = await request("/instances");
+  // Auth
+  authMe: () => request("/auth/me"),
+
+  // Instances
+  listInstances: async (offset = 0, limit = 0) => {
+    const data = await request(`/instances?offset=${offset}&limit=${limit}`);
     return Array.isArray(data) ? data : (data.instances || []);
+  },
+  searchInstances: (params = {}) => {
+    const qs = Object.entries(params).filter(([, v]) => v != null && v !== "").map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+    return request(`/instances/search?${qs}`);
   },
   getInstance: (id) => request(`/instances/${id}`),
   addInstance: (data) => request("/instances", { method: "POST", body: JSON.stringify(data) }),
@@ -62,14 +70,25 @@ export const api = {
   updateInstance: (id, data) => request(`/instances/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteInstance: (id, purge = false) => request(`/instances/${id}?purge=${purge}`, { method: "DELETE" }),
   getLogs: (id, tail = 200) => request(`/instances/${id}/logs?tail=${tail}`),
+  getConfigPreview: (id) => request(`/instances/${id}/config-preview`),
+  getConfigCurrent: (id) => request(`/instances/${id}/config-current`),
+  getInstanceEvents: (id, limit = 20) => request(`/instances/${id}/events?limit=${limit}`),
+  podExec: (id, command) => request(`/instances/${id}/exec`, { method: "POST", body: JSON.stringify({ command }) }),
+
+  // Cluster / Health
   getStatus: () => request("/status"),
   getHealth: () => request("/health"),
   getNextId: () => request("/next-id"),
+  getStats: () => request("/stats"),
+  getKnownBots: () => request("/known-bots"),
+
   // Sync & Admin
   forceSync: () => request("/sync/force", { method: "POST" }),
   consistencyCheck: () => request("/sync/check"),
   getAuditLog: (instanceId, limit = 50) => request(`/audit?${instanceId ? `instance_id=${instanceId}&` : ""}limit=${limit}`),
   importFromK8s: () => request("/import-from-k8s", { method: "POST" }),
+  triggerBackup: () => request("/backup", { method: "POST" }),
+
   // Deploy pipeline
   startDeploy: (imageTag, mode = "normal", force = false) => request("/deploy", { method: "POST", body: JSON.stringify({ image_tag: imageTag, mode, force }) }),
   getDeployStatus: () => request("/deploy/status"),
@@ -79,6 +98,7 @@ export const api = {
   getDeployHistory: (limit = 20) => request(`/deploy/history?limit=${limit}`),
   setDeployGroup: (uid, group) => request(`/instances/${uid}/deploy-group`, { method: "PUT", body: JSON.stringify({ group }) }),
   batchSetDeployGroup: (ids, group) => request("/instances/batch-deploy-group", { method: "POST", body: JSON.stringify({ ids, group }) }),
+
   // Metrics
   getMetricsOverview: () => request("/metrics/overview"),
   getMetricsNodes: () => request("/metrics/nodes"),
@@ -89,23 +109,35 @@ export const api = {
   getMetricsStorage: () => request("/metrics/storage"),
   listImageTags: (limit = 30) => request(`/image-tags?limit=${limit}`),
   syncImageTags: () => request("/image-tags/sync", { method: "POST" }),
+
   // Deploy groups
   listDeployGroups: () => request("/deploy-groups"),
   createDeployGroup: (name, priority, description) => request("/deploy-groups", { method: "POST", body: JSON.stringify({ name, priority, description }) }),
   updateDeployGroup: (name, data) => request(`/deploy-groups/${name}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteDeployGroup: (name) => request(`/deploy-groups/${name}`, { method: "DELETE" }),
+
   // Branch rules (CI/CD)
   listBranchRules: () => request("/branch-rules"),
   createBranchRule: (data) => request("/branch-rules", { method: "POST", body: JSON.stringify(data) }),
   updateBranchRule: (id, data) => request(`/branch-rules/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteBranchRule: (id) => request(`/branch-rules/${id}`, { method: "DELETE" }),
-  testBranchRule: (branch) => request(`/branch-rules/test?branch=${encodeURIComponent(branch)}`),
+  testBranchRule: (branch) => request(`/branch-rules/test?branch=${encodeURIComponent(branch)}`, { method: "POST" }),
   triggerBuild: (data) => request("/ci/trigger-build", { method: "POST", body: JSON.stringify(data) }),
   listBranches: (repo) => request(`/ci/branches?repo=${encodeURIComponent(repo)}`),
   listWorkflows: (repo) => request(`/ci/workflows?repo=${encodeURIComponent(repo)}`),
   listRuns: (repo = "", perPage = 10) => request(`/ci/runs?repo=${encodeURIComponent(repo)}&per_page=${perPage}`),
+
   // Settings
   getSettings: () => request("/settings"),
   updateSettings: (updates) => request("/settings", { method: "PUT", body: JSON.stringify(updates) }),
   getRepos: () => request("/settings/repos"),
+  cloudflareSync: () => request("/cloudflare/sync", { method: "POST" }),
+
+  // CRD direct query
+  listCrdInstances: () => request("/crd/instances"),
+  getCrdInstance: (uid) => request(`/crd/instances/${uid}`),
+
+  // AI Agent
+  sendAgentMessage: (message, context = null, dryRun = false) => request("/agent", { method: "POST", body: JSON.stringify({ message, context, dry_run: dryRun }) }),
+  getAgentCapabilities: () => request("/agent/capabilities"),
 };

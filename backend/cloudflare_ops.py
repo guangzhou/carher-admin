@@ -7,6 +7,7 @@ new Her instances are automatically reachable via Cloudflare Tunnel.
 from __future__ import annotations
 
 import logging
+import re
 import yaml
 
 from kubernetes import client
@@ -16,6 +17,7 @@ logger = logging.getLogger("carher-admin")
 
 NS = "carher"
 TUNNEL_UUID = "0e83a70f-93d9-4c17-86cc-7600f52696a2"
+TUNNEL_NAME = "carher-k8s"
 CONFIG_CM_NAME = "cloudflared-config"
 CLOUDFLARED_DEPLOYMENT = "cloudflared"
 DOMAIN = "carher.net"
@@ -49,14 +51,32 @@ def _get_svc_cluster_ip(svc_name: str) -> str | None:
 
 AUTH_PROXY_SVC = "auth-proxy"
 ADMIN_SVC = "carher-admin-svc"
+INSTANCE_SERVICE_RE = re.compile(r"^carher-(\d+)-svc$")
+
+
+def _list_instance_uids() -> list[int]:
+    """List K8s-backed CarHer instance IDs from Services."""
+    try:
+        services = _v1().list_namespaced_service(NS).items
+    except ApiException as e:
+        logger.error("Failed to list services for tunnel config generation: %s", e)
+        return []
+
+    uids: list[int] = []
+    for svc in services:
+        name = svc.metadata.name if svc.metadata else ""
+        match = INSTANCE_SERVICE_RE.match(name)
+        if match:
+            uids.append(int(match.group(1)))
+    return sorted(set(uids))
 
 
 def generate_config() -> str:
-    """Generate cloudflared config.yml using wildcard → auth-proxy routing.
+    """Generate cloudflared config.yml using stable auth-proxy backends.
 
-    All *.carher.net traffic is routed to the auth-proxy nginx, which
-    parses the uid from the hostname and proxies to per-instance services.
-    This avoids per-instance ingress entries and stale ClusterIP references.
+    Each K8s instance still gets explicit public hostnames so Cloudflare edge
+    learns them, but they all point to the stable in-cluster auth-proxy
+    instead of ephemeral per-instance Pod IPs.
     """
     ingress: list[dict[str, str]] = []
 
@@ -66,6 +86,15 @@ def generate_config() -> str:
 
     proxy_ip = _get_svc_cluster_ip(AUTH_PROXY_SVC)
     if proxy_ip:
+        proxy_service = f"http://{proxy_ip}:80"
+        for uid in _list_instance_uids():
+            ingress.extend(
+                [
+                    {"hostname": f"s1-u{uid}-auth.{DOMAIN}", "service": proxy_service},
+                    {"hostname": f"s1-u{uid}-fe.{DOMAIN}", "service": proxy_service},
+                    {"hostname": f"s1-u{uid}-proxy.{DOMAIN}", "service": proxy_service},
+                ]
+            )
         ingress.append({"hostname": f"*.{DOMAIN}", "service": f"http://{proxy_ip}:80"})
     else:
         logger.error("auth-proxy service not found, wildcard route will be missing!")
@@ -145,11 +174,11 @@ def sync_tunnel_config(wait_for_service: str | None = None, retries: int = 5):
 
 
 def register_dns_routes(uid: int, prefix: str = "s1"):
-    """Per-user DNS routes are intentionally skipped.
+    """Register Cloudflare DNS CNAME routes for a new instance.
 
-    The K8s tunnel now exposes a stable `*.carher.net` wildcard and relies on
-    the in-cluster `auth-proxy` to route by Host, so Cloudflare no longer needs
-    to learn one public hostname per instance.
+    Even though the tunnel ingress uses a stable wildcard -> auth-proxy route,
+    new public hostnames still need explicit DNS records so Cloudflare can
+    route external traffic to the K8s tunnel consistently.
     """
     pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
     hostnames = [
@@ -157,5 +186,37 @@ def register_dns_routes(uid: int, prefix: str = "s1"):
         f"{pfx}u{uid}-fe.{DOMAIN}",
         f"{pfx}u{uid}-proxy.{DOMAIN}",
     ]
-    logger.info("Skipping per-user DNS registration for uid=%s; wildcard route is active", uid)
-    return [{"hostname": hostname, "ok": True, "skipped": True, "reason": "wildcard route"} for hostname in hostnames]
+
+    v1 = _v1()
+    try:
+        pods = v1.list_namespaced_pod(NS, label_selector=f"app={CLOUDFLARED_DEPLOYMENT}")
+        if not pods.items:
+            logger.warning("No cloudflared pod found; DNS routes must be registered manually")
+            return []
+        pod_name = pods.items[0].metadata.name
+    except ApiException:
+        logger.error("Failed to find cloudflared pod for DNS registration")
+        return []
+
+    results = []
+    from kubernetes.stream import stream
+
+    for hostname in hostnames:
+        try:
+            resp = stream(
+                v1.connect_get_namespaced_pod_exec,
+                pod_name,
+                NS,
+                command=["cloudflared", "tunnel", "route", "dns", "--overwrite-dns", TUNNEL_NAME, hostname],
+                stderr=True,
+                stdout=True,
+                stdin=False,
+                tty=False,
+            )
+            results.append({"hostname": hostname, "ok": True, "output": resp})
+            logger.info("DNS route created: %s", hostname)
+        except Exception as e:
+            results.append({"hostname": hostname, "ok": False, "error": str(e)})
+            logger.error("DNS route failed for %s: %s", hostname, e)
+
+    return results

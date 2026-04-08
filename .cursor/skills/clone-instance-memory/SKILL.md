@@ -37,6 +37,10 @@ curl -s -H "X-API-Key: $API_KEY" \
 
 记录：`name`、`app_id`、`model`、`provider`、`prefix`、`deploy_group`、`owner`、`image`。
 
+**prefix 不要盲目复制源实例！** prefix 决定 OAuth 回调域名（`{prefix}-u{id}-auth.carher.net`）。
+源实例可能用特殊 prefix（如 `s3`），新实例通常应使用默认值 `s1`。
+必须与用户确认新实例的 prefix，不确定时用 `s1`。
+
 从 K8s Secret 取 `app_secret`：
 
 ```bash
@@ -59,7 +63,7 @@ curl -s -X POST "https://admin.carher.net/api/instances/batch-import" \
     "owner": "<同源>",
     "model": "<同源>",
     "provider": "<同源>",
-    "prefix": "<同源>",
+    "prefix": "s1",
     "deploy_group": "<同源>"
   }]
 }'
@@ -225,6 +229,7 @@ curl -s -H "X-API-Key: $API_KEY" \
 | **拷贝全量 PVC** | 不能只拷 `memory/main.sqlite`；bot 的人格记忆在 `workspace/MEMORY.md`，缺少则 bot 不认识用户 |
 | **临时 Pod 挂双 PVC** | 唯一可靠的跨 PVC 拷贝方式；`kubectl cp` 经隧道会断，HTTP 多此一举 |
 | **镜像版本** | 新实例默认镜像可能是旧版，必须创建后立即 `PUT /api/instances/{id}` 对齐 |
+| **prefix 不要照搬** | 源实例可能用特殊 prefix（如 s3），新实例默认用 `s1`，必须与用户确认 |
 | **同 app_id 冲突** | 新旧实例共用同一飞书应用时，不能同时运行，否则消息路由混乱、响应丢失 |
 | **WAL 文件** | 若 `memory/` 下有 `-wal`/`-shm`，拷贝前先 `PRAGMA wal_checkpoint(TRUNCATE)` |
 | **exec API 白名单** | 只允许 ls/cat/du/node 等；tar/sqlite3/cp 不在白名单，大操作用 kubectl exec 或临时 Pod |

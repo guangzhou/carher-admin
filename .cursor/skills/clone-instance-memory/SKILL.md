@@ -1,14 +1,15 @@
 ---
 name: clone-instance-memory
 description: >-
-  Clone a CarHer bot instance with its memory (SQLite) to a new instance ID.
-  Use when creating a new her that reuses an existing her's memory/knowledge,
-  duplicating instances, or migrating memory between instances.
+  Clone a CarHer bot instance with full PVC data to a new instance ID.
+  Use when creating a new her that reuses an existing her's memory, personality,
+  workspace, and all persistent data. Covers duplicating instances or migrating
+  data between instances.
 ---
 
-# 克隆 Her 实例 + 复用记忆
+# 克隆 Her 实例（全量 PVC）
 
-将已有 her 实例的配置和记忆完整克隆到一个新 ID。
+将已有 her 实例的配置和全部持久化数据克隆到一个新 ID。
 
 ## 前置条件
 
@@ -43,7 +44,7 @@ kubectl get secret carher-{SOURCE_ID}-secret -n carher \
   -o jsonpath='{.data.app_secret}' | base64 -d
 ```
 
-### 2. 创建新实例
+### 2. 创建新实例 + 同步镜像
 
 ```bash
 curl -s -X POST "https://admin.carher.net/api/instances/batch-import" \
@@ -64,9 +65,7 @@ curl -s -X POST "https://admin.carher.net/api/instances/batch-import" \
 }'
 ```
 
-### 3. 同步镜像版本
-
-新实例可能使用默认旧镜像，必须与源实例对齐：
+新实例默认镜像可能是旧版，**必须立即对齐**：
 
 ```bash
 curl -s -X PUT "https://admin.carher.net/api/instances/{NEW_ID}" \
@@ -75,109 +74,137 @@ curl -s -X PUT "https://admin.carher.net/api/instances/{NEW_ID}" \
   -d '{"image":"<源实例 image tag>"}'
 ```
 
-### 4. 等待 Pod Running
+等待 Pod Running：
 
 ```bash
 curl -s -H "X-API-Key: $API_KEY" \
   https://admin.carher.net/api/instances/{NEW_ID} | jq .status
-# 期望: "Running"
 ```
 
-### 5. 拷贝记忆（集群内网直传）
+### 3. 临时 Pod 挂载双 PVC 拷贝全部数据
 
-**关键：不要用 `kubectl cp`（经过本地 SSH 隧道，慢且易断）。用 Pod 间 HTTP 直传。**
+**为什么不用 `kubectl cp` 或 HTTP 传输？**
 
-先检查源实例记忆大小和 WAL 状态：
+- `kubectl cp`：数据经 SSH 隧道中转本地，慢且易 EOF 断连
+- Pod 间 HTTP：多此一举，两个 PVC 在同一个 NAS 上
+- **临时 Pod 挂双 PVC**：`cp -a` 在 NAS 内部直接拷贝，最快最可靠
+
+每个 Pod 只能看到自己的 PVC，无法跨 PVC 直接拷贝。临时 Pod 同时挂载源和目标两个 PVC（均为 `ReadWriteMany`），让 `cp -a` 在同一个 NAS 的两个目录之间执行。
 
 ```bash
-# 通过 exec API 检查（不经过隧道）
+cat <<'YAML' | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-copier-{SOURCE_ID}-to-{NEW_ID}
+  namespace: carher
+spec:
+  restartPolicy: Never
+  containers:
+  - name: copier
+    image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher:upgrade-0402-8ef16fb
+    command:
+    - sh
+    - -c
+    - |
+      echo "=== PVC copy: carher-{SOURCE_ID} -> carher-{NEW_ID} ==="
+      du -sh /src/*/ 2>/dev/null | head -20
+      echo "--- Copying ---"
+      cd /src && cp -a \
+        agents browser canvas compaction-reports cron \
+        delivery-queue devices extensions \
+        feishu-doc-backups feishu-groups \
+        feishu-card-text-cache.json feishu-message-text-cache.json \
+        feishu-sent-messages.json exec-approvals.json \
+        identity media memory subagents tasks workspace \
+        /dst/ 2>&1
+      [ -f /src/.voice-token ] && cp -a /src/.voice-token /dst/
+      echo "=== Done ==="
+      du -sh /dst/
+    volumeMounts:
+    - name: src
+      mountPath: /src
+      readOnly: true
+    - name: dst
+      mountPath: /dst
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "1"
+        memory: "512Mi"
+  volumes:
+  - name: src
+    persistentVolumeClaim:
+      claimName: carher-{SOURCE_ID}-data
+      readOnly: true
+  - name: dst
+    persistentVolumeClaim:
+      claimName: carher-{NEW_ID}-data
+YAML
+```
+
+等待完成（1.2GB 约 3-5 分钟）：
+
+```bash
+kubectl get pod pvc-copier-{SOURCE_ID}-to-{NEW_ID} -n carher --watch
+# 等到 Completed，然后查看日志确认
+kubectl logs pvc-copier-{SOURCE_ID}-to-{NEW_ID} -n carher
+```
+
+清理：
+
+```bash
+kubectl delete pod pvc-copier-{SOURCE_ID}-to-{NEW_ID} -n carher
+```
+
+### PVC 拷贝清单
+
+**需要拷贝（用户数据）：**
+
+| 目录/文件 | 说明 |
+|-----------|------|
+| `workspace/` | **MEMORY.md（人格记忆）、SOUL.md、USER.md、IDENTITY.md** + 工作文件 |
+| `memory/` | 语义搜索 SQLite（main.sqlite） |
+| `agents/` | 对话历史 |
+| `media/` | 媒体文件 |
+| `browser/` | 浏览器数据 |
+| `feishu-groups/` | 飞书群配置 |
+| `tasks/` | 任务数据 |
+| `identity/`、`canvas/`、`cron/`、`extensions/`、`subagents/` 等 | 其他运行时数据 |
+
+**不拷贝（由 ConfigMap / 共享 PVC 覆盖挂载）：**
+
+| 路径 | 原因 |
+|------|------|
+| `openclaw.json*` | operator 按实例生成，会被 ConfigMap 覆盖 |
+| `carher-config.json`、`shared-config.json5` | ConfigMap base-config 挂载 |
+| `skills/` | 共享只读 PVC |
+| `sessions/` | 共享 PVC，按 uid 子路径隔离 |
+| `logs/`、`update-check.json` | 运行时自动生成 |
+| `feishu-user-tokens/` | OAuth token 绑定原实例 |
+
+### 4. 验证关键文件
+
+```bash
 curl -s -X POST -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
-  https://admin.carher.net/api/instances/{SOURCE_ID}/exec \
-  -d '{"command":"du -sh /data/.openclaw/memory/ && ls -la /data/.openclaw/memory/"}'
+  https://admin.carher.net/api/instances/{NEW_ID}/exec \
+  -d '{"command":"ls -la /data/.openclaw/workspace/MEMORY.md /data/.openclaw/workspace/SOUL.md /data/.openclaw/memory/main.sqlite"}'
 ```
 
-如果存在 `-wal` 或 `-shm` 文件，先 checkpoint（需 kubectl exec，exec API 不允许 sqlite3）：
+三个文件都存在且大小与源一致即可。
 
-```bash
-kubectl exec -n carher {SOURCE_POD} -c carher -- \
-  sqlite3 /data/.openclaw/memory/main.sqlite "PRAGMA wal_checkpoint(TRUNCATE);"
-```
-
-在源 Pod 启动临时 HTTP 文件服务：
-
-```bash
-SOURCE_POD=$(kubectl get pods -n carher -l user-id={SOURCE_ID} \
-  -o jsonpath='{.items[0].metadata.name}')
-
-kubectl exec -n carher $SOURCE_POD -c carher -- sh -c '
-nohup node -e "
-const http = require(\"http\");
-const fs = require(\"fs\");
-const s = http.createServer((req, res) => {
-  const file = \"/data/.openclaw/memory/main.sqlite\";
-  const stat = fs.statSync(file);
-  res.writeHead(200, {\"Content-Length\": stat.size});
-  fs.createReadStream(file).pipe(res);
-});
-s.listen(19876);
-setTimeout(() => { s.close(); process.exit(0); }, 300000);
-" > /dev/null 2>&1 &
-echo "SERVER_STARTED"
-'
-```
-
-在新 Pod 通过集群内网下载（数据不经过本地）：
-
-```bash
-SOURCE_IP=$(kubectl get pod $SOURCE_POD -n carher -o jsonpath='{.status.podIP}')
-NEW_POD=$(kubectl get pods -n carher -l user-id={NEW_ID} \
-  -o jsonpath='{.items[0].metadata.name}')
-
-kubectl exec -n carher $NEW_POD -c carher -- node -e '
-const http = require("http");
-const fs = require("fs");
-const dir = "/data/.openclaw/memory";
-fs.mkdirSync(dir, {recursive: true});
-const out = fs.createWriteStream(dir + "/main.sqlite");
-const start = Date.now();
-http.get("http://'$SOURCE_IP':19876/", (res) => {
-  const total = parseInt(res.headers["content-length"] || 0);
-  let received = 0;
-  res.on("data", (chunk) => { received += chunk.length; });
-  res.pipe(out);
-  out.on("finish", () => {
-    const secs = ((Date.now() - start) / 1000).toFixed(1);
-    console.log("DONE: " + (received/1048576).toFixed(1) + "MB in " + secs + "s");
-    process.exit(0);
-  });
-}).on("error", (e) => { console.error("ERR:", e.message); process.exit(1); });
-'
-```
-
-### 6. 验证
-
-```bash
-# 文件大小应与源一致
-kubectl exec -n carher $NEW_POD -c carher -- \
-  ls -la /data/.openclaw/memory/main.sqlite
-
-# SQLite 文件头校验
-kubectl exec -n carher $NEW_POD -c carher -- node -e '
-const fs = require("fs");
-const buf = Buffer.alloc(16);
-const fd = fs.openSync("/data/.openclaw/memory/main.sqlite", "r");
-fs.readSync(fd, buf, 0, 16, 0);
-fs.closeSync(fd);
-console.log("Valid SQLite:", buf.toString("ascii",0,15) === "SQLite format 3" ? "YES" : "NO");
-'
-```
-
-### 7. 重启新实例
+### 5. 重启新实例 + 停源实例
 
 ```bash
 curl -s -X POST -H "X-API-Key: $API_KEY" \
   https://admin.carher.net/api/instances/{NEW_ID}/restart
+
+# 同 app_id 不能同时运行，停掉源实例
+curl -s -X POST -H "X-API-Key: $API_KEY" \
+  https://admin.carher.net/api/instances/{SOURCE_ID}/stop
 ```
 
 等 ~30s 后确认：
@@ -195,9 +222,10 @@ curl -s -H "X-API-Key: $API_KEY" \
 
 | 事项 | 说明 |
 |------|------|
-| **镜像版本** | 新实例默认镜像可能与源不同，必须在 Step 3 显式对齐 |
-| **不要用 kubectl cp** | 177M 文件经 SSH 隧道极易 EOF 中断；用 Pod 间 HTTP 直传 |
-| **WAL 文件** | 若有 `-wal`/`-shm`，拷贝前必须 `PRAGMA wal_checkpoint(TRUNCATE)` |
-| **exec API 白名单** | 不支持 tar/sqlite3/cp，只允许 ls/cat/du/node 等，大文件操作用 kubectl exec |
+| **拷贝全量 PVC** | 不能只拷 `memory/main.sqlite`；bot 的人格记忆在 `workspace/MEMORY.md`，缺少则 bot 不认识用户 |
+| **临时 Pod 挂双 PVC** | 唯一可靠的跨 PVC 拷贝方式；`kubectl cp` 经隧道会断，HTTP 多此一举 |
+| **镜像版本** | 新实例默认镜像可能是旧版，必须创建后立即 `PUT /api/instances/{id}` 对齐 |
+| **同 app_id 冲突** | 新旧实例共用同一飞书应用时，不能同时运行，否则消息路由混乱、响应丢失 |
+| **WAL 文件** | 若 `memory/` 下有 `-wal`/`-shm`，拷贝前先 `PRAGMA wal_checkpoint(TRUNCATE)` |
+| **exec API 白名单** | 只允许 ls/cat/du/node 等；tar/sqlite3/cp 不在白名单，大操作用 kubectl exec 或临时 Pod |
 | **不影响其他实例** | 每实例独立 PVC，sessions 按 uid 子路径隔离 |
-| **同飞书应用** | 若新旧实例用同一 app_id，open_id 一致，记忆匹配无问题 |

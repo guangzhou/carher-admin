@@ -11,7 +11,8 @@ frontend/dist/
 # IDE
 .vscode/
 .idea/
-.cursor/
+.cursor/*
+!.cursor/skills/
 *.swp
 *.swo
 

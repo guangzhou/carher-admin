@@ -10,7 +10,7 @@ data:
     credentials-file: /etc/cloudflared/credentials.json
     ingress:
     - hostname: admin.carher.net
-      service: http://carher-admin-svc.carher.svc.cluster.local:8900
+      service: http://carher-admin.carher.svc.cluster.local:8900
     - hostname: "*.carher.net"
       service: http://auth-proxy.carher.svc.cluster.local:80
     - service: http_status:404

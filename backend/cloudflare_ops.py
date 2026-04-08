@@ -50,7 +50,7 @@ def _get_svc_cluster_ip(svc_name: str) -> str | None:
 
 
 AUTH_PROXY_SVC = "auth-proxy"
-ADMIN_SVC = "carher-admin-svc"
+ADMIN_SVC = "carher-admin"
 INSTANCE_SERVICE_RE = re.compile(r"^carher-(\d+)-svc$")
 
 

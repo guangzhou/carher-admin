@@ -22,7 +22,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch"]

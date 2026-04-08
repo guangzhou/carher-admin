@@ -272,28 +272,42 @@ def _execute_tool(name: str, params: dict, dry_run: bool = False) -> dict:
 
         elif name == "restart_instance":
             uid = int(params["uid"])
-            k8s_ops.delete_pod(uid)
-            inst = db.get_by_id(uid)
-            if inst:
-                config_json = config_gen.generate_json_string(inst)
-                k8s_ops.apply_configmap(uid, config_json)
-                k8s_ops.create_pod(uid, prefix=inst.get("prefix", "s1"))
+            from .main import _has_crd
+            if _has_crd(uid):
+                k8s_ops.delete_pod(uid)
+            else:
+                k8s_ops.delete_pod(uid)
+                inst = db.get_by_id(uid)
+                if inst:
+                    config_json = config_gen.generate_json_string(inst)
+                    k8s_ops.apply_configmap(uid, config_json)
+                    k8s_ops.create_pod(uid, prefix=inst.get("prefix", "s1"))
             result["data"] = {"id": uid, "action": "restarted"}
 
         elif name == "stop_instance":
             uid = int(params["uid"])
-            k8s_ops.delete_pod(uid)
-            db.set_status(uid, "stopped")
+            from .main import _has_crd
+            if _has_crd(uid):
+                from . import crd_ops
+                crd_ops.pause_her_instance(uid)
+            else:
+                k8s_ops.delete_pod(uid)
+                db.set_status(uid, "stopped")
             result["data"] = {"id": uid, "action": "stopped"}
 
         elif name == "start_instance":
             uid = int(params["uid"])
-            inst = db.get_by_id(uid)
-            if inst:
-                config_json = config_gen.generate_json_string(inst)
-                k8s_ops.apply_configmap(uid, config_json)
-                k8s_ops.create_pod(uid, prefix=inst.get("prefix", "s1"))
-                db.set_status(uid, "running")
+            from .main import _has_crd
+            if _has_crd(uid):
+                from . import crd_ops
+                crd_ops.resume_her_instance(uid)
+            else:
+                inst = db.get_by_id(uid)
+                if inst:
+                    config_json = config_gen.generate_json_string(inst)
+                    k8s_ops.apply_configmap(uid, config_json)
+                    k8s_ops.create_pod(uid, prefix=inst.get("prefix", "s1"))
+                    db.set_status(uid, "running")
             result["data"] = {"id": uid, "action": "started"}
 
         elif name == "get_logs":
@@ -308,6 +322,10 @@ def _execute_tool(name: str, params: dict, dry_run: bool = False) -> dict:
         elif name == "set_deploy_group":
             uid = int(params["uid"])
             group = params["group"]
+            from .main import _has_crd
+            if _has_crd(uid):
+                from . import crd_ops
+                crd_ops.set_deploy_group(uid, group)
             db.set_deploy_group(uid, group)
             result["data"] = {"id": uid, "deploy_group": group}
 

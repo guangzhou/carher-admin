@@ -287,6 +287,7 @@ function Sparkline({ label, data, field, color, transform, unit }) {
 
   const colors = { emerald: "bg-emerald-500", purple: "bg-purple-500" };
   const textColors = { emerald: "text-emerald-400", purple: "text-purple-400" };
+  const range = max > min ? max - min : 1;
 
   return (
     <div>
@@ -299,7 +300,7 @@ function Sparkline({ label, data, field, color, transform, unit }) {
           <div
             key={i}
             className={`flex-1 ${colors[color]} rounded-t opacity-70`}
-            style={{ height: `${Math.max((v - min) / (max - min) * 100, 4)}%` }}
+            style={{ height: `${Math.max((v - min) / range * 100, 4)}%` }}
           />
         ))}
       </div>

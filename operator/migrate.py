@@ -121,6 +121,16 @@ def main():
         bot_open_id = feishu.get("botOpenId", "")
         primary = cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
         primary_lower = primary.lower()
+        agent_models = cfg.get("agents", {}).get("defaults", {}).get("models", {}) or {}
+        if not isinstance(agent_models, dict):
+            agent_models = {}
+        provider_cfg = cfg.get("models", {}).get("providers", {}) or {}
+        if not isinstance(provider_cfg, dict):
+            provider_cfg = {}
+        litellm_cfg = provider_cfg.get("litellm", {}) or {}
+        if not isinstance(litellm_cfg, dict):
+            litellm_cfg = {}
+        litellm_key = litellm_cfg.get("apiKey", "")
         owners = feishu.get("dm", {}).get("allowFrom", [])
         oauth_redirect_uri = feishu.get("oauthRedirectUri", "")
 
@@ -137,16 +147,18 @@ def main():
                 break
 
         # Detect provider
-        if primary_lower.startswith("litellm/"):
+        if primary_lower.startswith("litellm/") or "litellm" in provider_cfg:
             provider = "litellm"
-        elif primary_lower.startswith("wangsu/"):
+        elif primary_lower.startswith("wangsu/") or any(str(k).startswith("wangsu/") for k in agent_models):
             provider = "wangsu"
-        elif primary_lower.startswith("anthropic/"):
+        elif primary_lower.startswith("anthropic/") or any(str(k).startswith("anthropic/") for k in agent_models):
             provider = "anthropic"
-        elif primary_lower.startswith("openrouter/"):
+        elif primary_lower.startswith("openrouter/") or any(str(k).startswith("openrouter/") for k in agent_models):
             provider = "openrouter"
         else:
-            provider = "wangsu"
+            logger.warning("her-%d: unsupported primary model %r, skipping", uid, primary)
+            skipped += 1
+            continue
 
         # Detect prefix from OAuth URL
         prefix = "s1"
@@ -221,6 +233,8 @@ def main():
             spec["appSecretRef"] = secret_ref
         if oauth_redirect_uri:
             spec["oauthRedirectUri"] = oauth_redirect_uri
+        if provider == "litellm" and litellm_key and litellm_key != "${LITELLM_API_KEY}":
+            spec["litellmKey"] = litellm_key
 
         body = {
             "apiVersion": f"{CRD_GROUP}/{CRD_VERSION}",

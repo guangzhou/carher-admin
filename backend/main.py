@@ -827,6 +827,7 @@ def api_delete(uid: int, purge: bool = Query(False)):
         # knownBots cache invalidation removed — bots now register dynamically via Redis.
         try:
             cloudflare_ops.sync_tunnel_config()
+            cloudflare_ops.update_remote_ingress()
         except Exception as cf_err:
             logger.warning("Cloudflare config sync failed after delete %d: %s", uid, cf_err)
         return {"id": uid, "action": "deleted", "managed_by": "operator", "purge": purge}
@@ -1452,7 +1453,7 @@ async def api_cloudflare_sync():
     """
     try:
         changed = cloudflare_ops.sync_tunnel_config()
-        cloudflare_ops.update_remote_ingress([])
+        cloudflare_ops.update_remote_ingress()
         return {"synced": True, "config_changed": changed}
     except Exception as e:
         raise HTTPException(500, f"Cloudflare sync failed: {e}")

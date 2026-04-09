@@ -61,7 +61,7 @@ def _get_svc_cluster_ip(svc_name: str) -> str | None:
 
 AUTH_PROXY_SVC = "auth-proxy"
 ADMIN_SVC = "carher-admin"
-INSTANCE_SERVICE_RE = re.compile(r"^carher-(\d+)-svc$")
+MANAGED_INSTANCE_HOST_RE = re.compile(rf"^[^.]+-u\d+-(auth|fe|proxy)\.{re.escape(DOMAIN)}$")
 
 # Infrastructure services that need dedicated tunnel routes.
 # These are inserted BEFORE the wildcard catch-all so they take priority.
@@ -71,21 +71,72 @@ INFRA_ROUTES: list[tuple[str, str, int]] = [
 ]
 
 
-def _list_instance_uids() -> list[int]:
-    """List K8s-backed CarHer instance IDs from Services."""
-    try:
-        services = _v1().list_namespaced_service(NS).items
-    except ApiException as e:
-        logger.error("Failed to list services for tunnel config generation: %s", e)
-        return []
+def _normalize_prefix(prefix: str) -> str:
+    return f"{prefix}-" if not prefix.endswith("-") else prefix
 
-    uids: list[int] = []
-    for svc in services:
-        name = svc.metadata.name if svc.metadata else ""
-        match = INSTANCE_SERVICE_RE.match(name)
-        if match:
-            uids.append(int(match.group(1)))
-    return sorted(set(uids))
+
+def _list_active_instances() -> list[tuple[int, str]]:
+    """List active instances as (uid, prefix), preferring CRDs over DB rows."""
+    from . import crd_ops, database as db
+
+    seen_uids: set[int] = set()
+    instances: list[tuple[int, str]] = []
+
+    try:
+        for inst in crd_ops.list_her_instances():
+            spec = inst.get("spec", {})
+            uid = spec.get("userId", 0)
+            if not uid:
+                continue
+            seen_uids.add(uid)
+            instances.append((uid, spec.get("prefix", "s1")))
+    except Exception as e:
+        logger.warning("Failed to list CRD instances for tunnel sync, falling back to DB-only: %s", e)
+
+    try:
+        for inst in db.list_all():
+            uid = inst.get("id", 0)
+            if not uid or uid in seen_uids or inst.get("status") == "deleted":
+                continue
+            instances.append((uid, inst.get("prefix", "s1")))
+    except Exception as e:
+        logger.warning("Failed to list DB instances for tunnel sync: %s", e)
+
+    return sorted(set(instances), key=lambda item: item[0])
+
+
+def _build_instance_hostnames(uid: int, prefix: str) -> list[str]:
+    pfx = _normalize_prefix(prefix)
+    return [
+        f"{pfx}u{uid}-auth.{DOMAIN}",
+        f"{pfx}u{uid}-fe.{DOMAIN}",
+        f"{pfx}u{uid}-proxy.{DOMAIN}",
+    ]
+
+
+def _is_managed_remote_hostname(hostname: str) -> bool:
+    if not hostname:
+        return False
+    if hostname in {f"{hostname_prefix}.{DOMAIN}" for hostname_prefix, _, _ in INFRA_ROUTES}:
+        return True
+    return bool(MANAGED_INSTANCE_HOST_RE.match(hostname))
+
+
+def _build_infra_rules(*, include_origin_request: bool) -> list[dict[str, str] | dict[str, object]]:
+    rules: list[dict[str, str] | dict[str, object]] = []
+    for hostname_prefix, svc_name, port in INFRA_ROUTES:
+        ip = _get_svc_cluster_ip(svc_name)
+        if not ip:
+            logger.warning("Infra service %s not found, skipping %s.%s route", svc_name, hostname_prefix, DOMAIN)
+            continue
+        rule: dict[str, str] | dict[str, object] = {
+            "hostname": f"{hostname_prefix}.{DOMAIN}",
+            "service": f"http://{ip}:{port}",
+        }
+        if include_origin_request:
+            rule["originRequest"] = {}
+        rules.append(rule)
+    return rules
 
 
 def generate_config() -> str:
@@ -101,24 +152,20 @@ def generate_config() -> str:
     if admin_ip:
         ingress.append({"hostname": f"admin.{DOMAIN}", "service": f"http://{admin_ip}:8900"})
 
+    ingress.extend(_build_infra_rules(include_origin_request=False))
+
     proxy_ip = _get_svc_cluster_ip(AUTH_PROXY_SVC)
     if proxy_ip:
         proxy_service = f"http://{proxy_ip}:80"
-        for uid in _list_instance_uids():
+        for uid, prefix in _list_active_instances():
+            auth_host, fe_host, proxy_host = _build_instance_hostnames(uid, prefix)
             ingress.extend(
                 [
-                    {"hostname": f"s1-u{uid}-auth.{DOMAIN}", "service": proxy_service},
-                    {"hostname": f"s1-u{uid}-fe.{DOMAIN}", "service": proxy_service},
-                    {"hostname": f"s1-u{uid}-proxy.{DOMAIN}", "service": proxy_service},
+                    {"hostname": auth_host, "service": proxy_service},
+                    {"hostname": fe_host, "service": proxy_service},
+                    {"hostname": proxy_host, "service": proxy_service},
                 ]
             )
-
-        for hostname_prefix, svc_name, port in INFRA_ROUTES:
-            ip = _get_svc_cluster_ip(svc_name)
-            if ip:
-                ingress.append({"hostname": f"{hostname_prefix}.{DOMAIN}", "service": f"http://{ip}:{port}"})
-            else:
-                logger.warning("Infra service %s not found, skipping %s.%s route", svc_name, hostname_prefix, DOMAIN)
 
         ingress.append({"hostname": f"*.{DOMAIN}", "service": f"http://{proxy_ip}:80"})
     else:
@@ -270,60 +317,65 @@ def _put_remote_ingress(config: dict) -> bool:
 
 
 def update_remote_ingress(
-    instances: list[tuple[int, str]],
+    instances: list[tuple[int, str]] | None = None,
     wait_for_service: bool = True,
 ):
-    """Add remote tunnel ingress rules for new instances.
+    """Upsert remote tunnel ingress rules for instances and infra routes.
 
     Args:
-        instances: list of (uid, prefix) tuples to add
+        instances: list of (uid, prefix) tuples to reconcile. If None, reconcile
+                   all active instances from CRD/DB.
         wait_for_service: if True, resolve each instance's ClusterIP for routing;
                           if Service not yet ready, skip that instance with a warning.
 
     The remote ingress is the authoritative routing config for the tunnel
     (the K8s ConfigMap is overridden by Cloudflare at runtime).
     """
+    full_sync = instances is None
+    target_instances = _list_active_instances() if full_sync else (instances or [])
     config, ingress = _get_remote_ingress()
     catch_all = ingress[-1]
-    existing_hostnames = {r.get("hostname", "") for r in ingress}
+    existing_rules = ingress[:-1]
 
-    new_rules: list[dict] = []
-    for uid, prefix in (instances or []):
-        pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
-        auth_host = f"{pfx}u{uid}-auth.{DOMAIN}"
-
-        if auth_host in existing_hostnames:
-            logger.info("Remote ingress already has %s, skipping", auth_host)
-            continue
-
+    desired_rules: list[dict] = []
+    managed_hostnames: set[str] = set()
+    for uid, prefix in target_instances:
         svc_name = f"carher-{uid}-svc"
         svc_ip = _get_svc_cluster_ip(svc_name) if wait_for_service else None
         if not svc_ip:
             logger.warning("Service %s not ready, skipping remote ingress for uid=%d", svc_name, uid)
             continue
 
-        new_rules.extend([
-            {"hostname": f"{pfx}u{uid}-auth.{DOMAIN}",  "service": f"http://{svc_ip}:18891", "originRequest": {}},
-            {"hostname": f"{pfx}u{uid}-fe.{DOMAIN}",    "service": f"http://{svc_ip}:8000",  "originRequest": {}},
-            {"hostname": f"{pfx}u{uid}-proxy.{DOMAIN}",  "service": f"http://{svc_ip}:8080",  "originRequest": {}},
+        auth_host, fe_host, proxy_host = _build_instance_hostnames(uid, prefix)
+        managed_hostnames.update([auth_host, fe_host, proxy_host])
+        desired_rules.extend([
+            {"hostname": auth_host, "service": f"http://{svc_ip}:18891", "originRequest": {}},
+            {"hostname": fe_host, "service": f"http://{svc_ip}:8000", "originRequest": {}},
+            {"hostname": proxy_host, "service": f"http://{svc_ip}:8080", "originRequest": {}},
         ])
 
-    for hostname_prefix, svc_name, port in INFRA_ROUTES:
-        fqdn = f"{hostname_prefix}.{DOMAIN}"
-        if fqdn not in existing_hostnames:
-            ip = _get_svc_cluster_ip(svc_name)
-            if ip:
-                new_rules.append({"hostname": fqdn, "service": f"http://{ip}:{port}", "originRequest": {}})
-                logger.info("Adding infra remote ingress: %s -> %s:%d", fqdn, svc_name, port)
+    infra_rules = _build_infra_rules(include_origin_request=True)
+    managed_hostnames.update(
+        str(rule["hostname"]) for rule in infra_rules if isinstance(rule.get("hostname"), str)
+    )
+    desired_rules.extend(infra_rules)
 
-    if not new_rules:
-        logger.info("No new remote ingress rules to add")
+    if full_sync:
+        preserved_rules = [
+            rule for rule in existing_rules if not _is_managed_remote_hostname(rule.get("hostname", ""))
+        ]
+    else:
+        preserved_rules = [rule for rule in existing_rules if rule.get("hostname", "") not in managed_hostnames]
+    new_ingress = preserved_rules + desired_rules + [catch_all]
+
+    if ingress == new_ingress:
+        logger.info("Remote ingress already matches desired state")
         return
 
-    config["ingress"] = ingress[:-1] + new_rules + [catch_all]
+    config["ingress"] = new_ingress
     ok = _put_remote_ingress(config)
-    added_hosts = list({r["hostname"] for r in new_rules})
+    updated_hosts = sorted(managed_hostnames)
     if ok:
-        logger.info("Remote ingress updated: added %d rules for %s", len(new_rules), added_hosts)
+        logger.info("Remote ingress updated for %s", updated_hosts)
     else:
-        logger.error("Remote ingress PUT failed for %s", added_hosts)
+        logger.error("Remote ingress PUT failed for %s", updated_hosts)

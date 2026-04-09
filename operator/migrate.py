@@ -17,7 +17,7 @@ This scans the carher namespace for:
 
 After migration:
   - Operator takes over management of all instances
-  - Bare Pods are adopted (operator won't recreate them until next update)
+  - Legacy bare Pods are replaced by operator-managed Deployments
   - carher-admin switches to CRD mode
 """
 
@@ -29,6 +29,7 @@ import json
 import logging
 import re
 import sys
+import time
 
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -75,9 +76,13 @@ def main():
         if uid_str and uid_str.isdigit():
             image = pod.spec.containers[0].image if pod.spec.containers else ""
             tag = image.split(":")[-1] if ":" in image else "v20260328"
+            owner_refs = pod.metadata.owner_references or []
+            is_bare_pod = not any(ref.controller for ref in owner_refs)
             pods[int(uid_str)] = {
+                "name": pod.metadata.name,
                 "phase": pod.status.phase,
                 "image_tag": tag,
+                "is_bare_pod": is_bare_pod,
             }
 
     all_uids = sorted(set(configmaps.keys()) | set(pods.keys()))
@@ -152,11 +157,14 @@ def main():
 
         image_tag = pod_info.get("image_tag", "v20260328")
         is_running = pod_info.get("phase") == "Running"
+        bare_pod_name = pod_info.get("name", "") if pod_info.get("is_bare_pod") else ""
+        final_paused = not is_running
+        initial_paused = final_paused or bool(bare_pod_name)
 
         if args.dry_run:
             logger.info(
-                "DRY-RUN her-%d: name=%s model=%s provider=%s prefix=%s image=%s running=%s",
-                uid, name, model, provider, prefix, image_tag, is_running,
+                "DRY-RUN her-%d: name=%s model=%s provider=%s prefix=%s image=%s running=%s bare_pod=%s",
+                uid, name, model, provider, prefix, image_tag, is_running, bool(bare_pod_name),
             )
             created += 1
             continue
@@ -207,7 +215,7 @@ def main():
             "botOpenId": bot_open_id,
             "deployGroup": "stable",
             "image": image_tag,
-            "paused": not is_running,
+            "paused": initial_paused,
         }
         if secret_ref:
             spec["appSecretRef"] = secret_ref
@@ -227,7 +235,34 @@ def main():
 
         try:
             crd_api.create_namespaced_custom_object(CRD_GROUP, CRD_VERSION, NS, CRD_PLURAL, body)
-            logger.info("her-%d: CRD created (paused=%s)", uid, not is_running)
+            logger.info("her-%d: CRD created (paused=%s)", uid, initial_paused)
+
+            if bare_pod_name:
+                logger.info("her-%d: deleting legacy bare pod %s before operator rollout", uid, bare_pod_name)
+                v1.delete_namespaced_pod(bare_pod_name, NS, grace_period_seconds=10)
+                for _ in range(30):
+                    try:
+                        v1.read_namespaced_pod(bare_pod_name, NS)
+                    except ApiException as e:
+                        if e.status == 404:
+                            break
+                        raise
+                    time.sleep(1)
+                else:
+                    logger.error("her-%d: legacy bare pod %s did not terminate in time", uid, bare_pod_name)
+                    errors += 1
+                    continue
+
+            if initial_paused != final_paused:
+                crd_api.patch_namespaced_custom_object(
+                    CRD_GROUP,
+                    CRD_VERSION,
+                    NS,
+                    CRD_PLURAL,
+                    f"her-{uid}",
+                    {"spec": {"paused": final_paused}},
+                )
+                logger.info("her-%d: unpaused CRD after legacy pod removal", uid)
             created += 1
         except ApiException as e:
             logger.error("her-%d: failed to create CRD: %s", uid, e)

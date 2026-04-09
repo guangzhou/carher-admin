@@ -531,12 +531,12 @@ def api_add_instance(req: HerAddRequest):
     try:
         crd_ops.create_her_instance(data)
         logger.info("Created HerInstance CRD for uid=%d", uid)
-        # Auto-sync cloudflared config + DNS for the new instance
-        # Wait for Operator to create the Service before generating config
+        # Auto-sync Cloudflare DNS + remote tunnel ingress for the new instance
         try:
             svc_name = f"carher-{uid}-svc"
             cloudflare_ops.sync_tunnel_config(wait_for_service=svc_name)
             cloudflare_ops.register_dns_routes(uid, prefix=req.prefix)
+            cloudflare_ops.update_remote_ingress([(uid, req.prefix)])
         except Exception as cf_err:
             logger.warning("Cloudflare auto-config failed for %d (non-fatal): %s", uid, cf_err)
         return {
@@ -566,6 +566,7 @@ def api_add_instance(req: HerAddRequest):
 @app.post("/api/instances/batch-import", dependencies=[Depends(verify_api_key)])
 def api_batch_import(req: HerBatchImport):
     results = []
+    crd_created: list[tuple[int, str]] = []
     for item in req.instances:
         uid = item.id or db.next_id()
         pfx = f"{item.prefix}-" if not item.prefix.endswith("-") else item.prefix
@@ -581,6 +582,7 @@ def api_batch_import(req: HerBatchImport):
             # CRD path
             try:
                 crd_ops.create_her_instance(data)
+                crd_created.append((uid, item.prefix))
                 results.append({
                     "id": uid, "status": "created", "managed_by": "operator",
                     "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
@@ -600,7 +602,17 @@ def api_batch_import(req: HerBatchImport):
             })
         except Exception as e:
             results.append({"id": uid, "error": str(e)})
-    # knownBots cache invalidation removed — bots now register dynamically via Redis.
+
+    # Batch-register Cloudflare DNS + remote tunnel ingress for all new CRD instances
+    if crd_created:
+        try:
+            cloudflare_ops.sync_tunnel_config()
+            for uid, prefix in crd_created:
+                cloudflare_ops.register_dns_routes(uid, prefix=prefix)
+            cloudflare_ops.update_remote_ingress(crd_created)
+        except Exception as cf_err:
+            logger.warning("Cloudflare batch config failed (non-fatal): %s", cf_err)
+
     db.flush_backup()
     return {"results": results}
 

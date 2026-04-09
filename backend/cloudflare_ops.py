@@ -1,13 +1,16 @@
 """Cloudflare Tunnel management for CarHer.
 
-Manages cloudflared config (ConfigMap) and DNS routes so that
-new Her instances are automatically reachable via Cloudflare Tunnel.
+Manages cloudflared config (ConfigMap), DNS routes, and remote tunnel
+ingress so that new Her instances are automatically reachable via
+Cloudflare Tunnel.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import urllib.request
 import yaml
 
 from kubernetes import client
@@ -21,6 +24,13 @@ TUNNEL_NAME = "carher-k8s"
 CONFIG_CM_NAME = "cloudflared-config"
 CLOUDFLARED_DEPLOYMENT = "cloudflared"
 DOMAIN = "carher.net"
+
+CF_ACCOUNT_ID = "67e6618e6af7e4342cbd1de02536fa2f"
+CF_TOKEN = "w2Tjp0aqvc_jr8W5WgiERKkm750CZNlKsb80khlm"
+CF_TUNNEL_CONFIG_URL = (
+    f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
+    f"/cfd_tunnel/{TUNNEL_UUID}/configurations"
+)
 
 _v1_instance: client.CoreV1Api | None = None
 _apps_instance: client.AppsV1Api | None = None
@@ -174,12 +184,7 @@ def sync_tunnel_config(wait_for_service: str | None = None, retries: int = 5):
 
 
 def register_dns_routes(uid: int, prefix: str = "s1"):
-    """Register Cloudflare DNS CNAME routes for a new instance.
-
-    Even though the tunnel ingress uses a stable wildcard -> auth-proxy route,
-    new public hostnames still need explicit DNS records so Cloudflare can
-    route external traffic to the K8s tunnel consistently.
-    """
+    """Register Cloudflare DNS CNAME routes for a new instance via cloudflared pod."""
     pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
     hostnames = [
         f"{pfx}u{uid}-auth.{DOMAIN}",
@@ -220,3 +225,85 @@ def register_dns_routes(uid: int, prefix: str = "s1"):
             logger.error("DNS route failed for %s: %s", hostname, e)
 
     return results
+
+
+# ── Remote Tunnel Ingress (Cloudflare API) ──
+
+
+def _cf_api(method: str, url: str, data: dict | None = None) -> dict:
+    """Make authenticated request to Cloudflare API."""
+    body = json.dumps(data).encode() if data else None
+    req = urllib.request.Request(url, data=body, method=method, headers={
+        "Authorization": f"Bearer {CF_TOKEN}",
+        "Content-Type": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read())
+
+
+def _get_remote_ingress() -> tuple[dict, list[dict]]:
+    """GET the current remote tunnel config. Returns (full_config, ingress_list)."""
+    resp = _cf_api("GET", CF_TUNNEL_CONFIG_URL)
+    config = resp["result"]["config"]
+    return config, config["ingress"]
+
+
+def _put_remote_ingress(config: dict) -> bool:
+    """PUT updated remote tunnel config. Returns success bool."""
+    resp = _cf_api("PUT", CF_TUNNEL_CONFIG_URL, {"config": config})
+    return resp.get("success", False)
+
+
+def update_remote_ingress(
+    instances: list[tuple[int, str]],
+    wait_for_service: bool = True,
+):
+    """Add remote tunnel ingress rules for new instances.
+
+    Args:
+        instances: list of (uid, prefix) tuples to add
+        wait_for_service: if True, resolve each instance's ClusterIP for routing;
+                          if Service not yet ready, skip that instance with a warning.
+
+    The remote ingress is the authoritative routing config for the tunnel
+    (the K8s ConfigMap is overridden by Cloudflare at runtime).
+    """
+    if not instances:
+        return
+
+    config, ingress = _get_remote_ingress()
+    catch_all = ingress[-1]
+    existing_hostnames = {r.get("hostname", "") for r in ingress}
+
+    new_rules: list[dict] = []
+    for uid, prefix in instances:
+        pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
+        auth_host = f"{pfx}u{uid}-auth.{DOMAIN}"
+
+        if auth_host in existing_hostnames:
+            logger.info("Remote ingress already has %s, skipping", auth_host)
+            continue
+
+        svc_name = f"carher-{uid}-svc"
+        svc_ip = _get_svc_cluster_ip(svc_name) if wait_for_service else None
+        if not svc_ip:
+            logger.warning("Service %s not ready, skipping remote ingress for uid=%d", svc_name, uid)
+            continue
+
+        new_rules.extend([
+            {"hostname": f"{pfx}u{uid}-auth.{DOMAIN}",  "service": f"http://{svc_ip}:18891", "originRequest": {}},
+            {"hostname": f"{pfx}u{uid}-fe.{DOMAIN}",    "service": f"http://{svc_ip}:8000",  "originRequest": {}},
+            {"hostname": f"{pfx}u{uid}-proxy.{DOMAIN}",  "service": f"http://{svc_ip}:8080",  "originRequest": {}},
+        ])
+
+    if not new_rules:
+        logger.info("No new remote ingress rules to add")
+        return
+
+    config["ingress"] = ingress[:-1] + new_rules + [catch_all]
+    ok = _put_remote_ingress(config)
+    added_uids = list({r["hostname"].split("-")[1] for r in new_rules})
+    if ok:
+        logger.info("Remote ingress updated: added %d rules for %s", len(new_rules), added_uids)
+    else:
+        logger.error("Remote ingress PUT failed for %s", added_uids)

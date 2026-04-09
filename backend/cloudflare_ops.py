@@ -247,12 +247,7 @@ def sync_tunnel_config(wait_for_service: str | None = None, retries: int = 5):
 
 def register_dns_routes(uid: int, prefix: str = "s1"):
     """Register Cloudflare DNS CNAME routes for a new instance via cloudflared pod."""
-    pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
-    hostnames = [
-        f"{pfx}u{uid}-auth.{DOMAIN}",
-        f"{pfx}u{uid}-fe.{DOMAIN}",
-        f"{pfx}u{uid}-proxy.{DOMAIN}",
-    ]
+    hostnames = _build_instance_hostnames(uid, prefix)
 
     v1 = _v1()
     try:

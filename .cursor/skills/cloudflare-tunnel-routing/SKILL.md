@@ -151,9 +151,29 @@ curl -sS -o /dev/null -w "%{http_code}" \
 | `-fe` | 8000 | Web 前端 |
 | `-proxy` | 8080 | API 代理 |
 
+## 基础设施路由（非实例）
+
+除了 per-instance 路由外，一些基础设施服务也需要通过 tunnel 暴露。
+这些路由在 `cloudflare_ops.INFRA_ROUTES` 中集中定义，`generate_config()` 和
+`update_remote_ingress()` 会自动包含它们，无需手动维护。
+
+当前注册的基础设施路由：
+
+| hostname | K8s Service | 端口 | 用途 |
+|----------|-------------|------|------|
+| `litellm.carher.net` | `litellm-proxy` | 4000 | LiteLLM 代理 + Web UI |
+
+如需新增基础设施路由，只需在 `cloudflare_ops.py` 的 `INFRA_ROUTES` 列表中追加一个
+`(hostname_prefix, service_name, port)` 元组即可。
+
 ## 历史教训
 
 2026-04-07: 新增 u173~u178 后用户报 404。根因是远程 tunnel ingress
 只到 u172，新用户没被加进去。修 ConfigMap、重启 cloudflared、加 DNS 记录
 都无效，因为远程配置覆盖了本地配置。最终通过 Cloudflare API PUT
 远程 ingress 配置解决。
+
+2026-04-09: LiteLLM UI (`litellm.carher.net`) 返回 502。根因是 `generate_config()`
+和 `update_remote_ingress()` 只遍历 carher 实例的 Service，不包含基础设施路由。
+手动加到 ConfigMap 的 litellm 路由在下次 `sync_tunnel_config()` 时被覆盖。
+修复方案：引入 `INFRA_ROUTES` 常量，在配置生成逻辑中自动包含基础设施路由。

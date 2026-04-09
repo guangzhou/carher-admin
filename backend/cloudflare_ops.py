@@ -63,6 +63,13 @@ AUTH_PROXY_SVC = "auth-proxy"
 ADMIN_SVC = "carher-admin"
 INSTANCE_SERVICE_RE = re.compile(r"^carher-(\d+)-svc$")
 
+# Infrastructure services that need dedicated tunnel routes.
+# These are inserted BEFORE the wildcard catch-all so they take priority.
+# Format: (hostname_prefix, service_name, port)
+INFRA_ROUTES: list[tuple[str, str, int]] = [
+    ("litellm", "litellm-proxy", 4000),
+]
+
 
 def _list_instance_uids() -> list[int]:
     """List K8s-backed CarHer instance IDs from Services."""
@@ -105,6 +112,14 @@ def generate_config() -> str:
                     {"hostname": f"s1-u{uid}-proxy.{DOMAIN}", "service": proxy_service},
                 ]
             )
+
+        for hostname_prefix, svc_name, port in INFRA_ROUTES:
+            ip = _get_svc_cluster_ip(svc_name)
+            if ip:
+                ingress.append({"hostname": f"{hostname_prefix}.{DOMAIN}", "service": f"http://{ip}:{port}"})
+            else:
+                logger.warning("Infra service %s not found, skipping %s.%s route", svc_name, hostname_prefix, DOMAIN)
+
         ingress.append({"hostname": f"*.{DOMAIN}", "service": f"http://{proxy_ip}:80"})
     else:
         logger.error("auth-proxy service not found, wildcard route will be missing!")
@@ -268,15 +283,12 @@ def update_remote_ingress(
     The remote ingress is the authoritative routing config for the tunnel
     (the K8s ConfigMap is overridden by Cloudflare at runtime).
     """
-    if not instances:
-        return
-
     config, ingress = _get_remote_ingress()
     catch_all = ingress[-1]
     existing_hostnames = {r.get("hostname", "") for r in ingress}
 
     new_rules: list[dict] = []
-    for uid, prefix in instances:
+    for uid, prefix in (instances or []):
         pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
         auth_host = f"{pfx}u{uid}-auth.{DOMAIN}"
 
@@ -296,14 +308,22 @@ def update_remote_ingress(
             {"hostname": f"{pfx}u{uid}-proxy.{DOMAIN}",  "service": f"http://{svc_ip}:8080",  "originRequest": {}},
         ])
 
+    for hostname_prefix, svc_name, port in INFRA_ROUTES:
+        fqdn = f"{hostname_prefix}.{DOMAIN}"
+        if fqdn not in existing_hostnames:
+            ip = _get_svc_cluster_ip(svc_name)
+            if ip:
+                new_rules.append({"hostname": fqdn, "service": f"http://{ip}:{port}", "originRequest": {}})
+                logger.info("Adding infra remote ingress: %s -> %s:%d", fqdn, svc_name, port)
+
     if not new_rules:
         logger.info("No new remote ingress rules to add")
         return
 
     config["ingress"] = ingress[:-1] + new_rules + [catch_all]
     ok = _put_remote_ingress(config)
-    added_uids = list({r["hostname"].split("-")[1] for r in new_rules})
+    added_hosts = list({r["hostname"] for r in new_rules})
     if ok:
-        logger.info("Remote ingress updated: added %d rules for %s", len(new_rules), added_uids)
+        logger.info("Remote ingress updated: added %d rules for %s", len(new_rules), added_hosts)
     else:
-        logger.error("Remote ingress PUT failed for %s", added_uids)
+        logger.error("Remote ingress PUT failed for %s", added_hosts)

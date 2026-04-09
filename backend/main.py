@@ -1447,9 +1447,12 @@ async def api_get_repos():
 
 @app.post("/api/cloudflare/sync", tags=["settings"])
 async def api_cloudflare_sync():
-    """Regenerate cloudflared config from active CRDs and restart if changed."""
+    """Regenerate cloudflared config from active CRDs and restart if changed.
+    Also ensures infrastructure routes (e.g. litellm) exist in remote tunnel config.
+    """
     try:
         changed = cloudflare_ops.sync_tunnel_config()
+        cloudflare_ops.update_remote_ingress([])
         return {"synced": True, "config_changed": changed}
     except Exception as e:
         raise HTTPException(500, f"Cloudflare sync failed: {e}")

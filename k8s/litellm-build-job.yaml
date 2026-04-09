@@ -1,0 +1,51 @@
+# Kaniko build job: clone guangzhou/litellm from GitHub, build, push to ACR VPC.
+# Run once, delete after image is built.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-build
+  namespace: carher
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: clone
+          image: alpine/git:latest
+          command: ["git", "clone", "--depth=1", "https://github.com/guangzhou/litellm.git", "/workspace"]
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - "--dockerfile=/workspace/Dockerfile"
+            - "--context=/workspace"
+            - "--destination=cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/litellm-proxy:v1"
+            - "--cache=false"
+            - "--snapshot-mode=redo"
+            - "--compressed-caching=false"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: docker-config
+              mountPath: /kaniko/.docker/
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: docker-config
+          secret:
+            secretName: acr-vpc-secret
+            items:
+              - key: .dockerconfigjson
+                path: config.json

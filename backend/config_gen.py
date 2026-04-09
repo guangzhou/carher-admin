@@ -33,6 +33,12 @@ MODEL_MAP_WANGSU = {
     "gpt": "wangsu/gpt-5.4",
     "gemini": "wangsu/gemini-3.1-pro-preview",
 }
+MODEL_MAP_LITELLM = {
+    "sonnet": "litellm/claude-sonnet-4-6",
+    "opus": "litellm/claude-opus-4-6",
+    "gpt": "litellm/gpt-5.4",
+    "gemini": "litellm/gemini-3.1-pro-preview",
+}
 
 GOOGLE_ANTHROPIC_ROUTING = {
     "params": {
@@ -52,7 +58,9 @@ def generate_openclaw_json(instance: dict) -> dict:
     prefix = instance.get("prefix", "s1")
     pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
 
-    if provider == "wangsu":
+    if provider == "litellm":
+        mm = MODEL_MAP_LITELLM
+    elif provider == "wangsu":
         mm = MODEL_MAP_WANGSU
     elif provider == "anthropic":
         mm = MODEL_MAP_ANTHROPIC
@@ -63,8 +71,17 @@ def generate_openclaw_json(instance: dict) -> dict:
     def _alias_with_routing(a: str) -> dict:
         return {"alias": a, **GOOGLE_ANTHROPIC_ROUTING}
 
-    if provider == "anthropic":
+    if provider == "litellm":
         models: dict[str, Any] = {
+            "litellm/claude-opus-4-6": {"alias": "opus"},
+            "litellm/claude-sonnet-4-6": {"alias": "sonnet"},
+            "litellm/gpt-5.4": {"alias": "ws-gpt"},
+            "litellm/gemini-3.1-pro-preview": {"alias": "ws-gemini"},
+            "openrouter/anthropic/claude-opus-4.6": _alias_with_routing("or-opus"),
+            "openrouter/anthropic/claude-sonnet-4.6": _alias_with_routing("or-sonnet"),
+        }
+    elif provider == "anthropic":
+        models = {
             "anthropic/claude-opus-4-6": {"alias": "opus"},
             "anthropic/claude-sonnet-4-6": {"alias": "sonnet"},
             "openrouter/anthropic/claude-opus-4.6": _alias_with_routing("or-opus"),
@@ -99,6 +116,19 @@ def generate_openclaw_json(instance: dict) -> dict:
             "projectId": GEMINI_PROJECT, "model": GEMINI_MODEL,
         }}}}},
     }
+
+    if provider == "litellm":
+        api_key = instance.get("litellm_key") or "${LITELLM_API_KEY}"
+        cfg["models"] = {"providers": {"litellm": {
+            "baseUrl": "http://litellm-proxy.carher.svc:4000",
+            "apiKey": api_key,
+            "models": [
+                {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 128000, "cost": {"input": 5, "output": 25, "cacheRead": 0.5}},
+                {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 64000, "cost": {"input": 3, "output": 15, "cacheRead": 0.3}},
+                {"id": "gpt-5.4", "name": "GPT-5.4", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 128000, "cost": {"input": 2.5, "output": 15, "cacheRead": 0.25}},
+                {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 65536, "cost": {"input": 2, "output": 12, "cacheRead": 0.2}},
+            ],
+        }}}
 
     app_id = instance.get("app_id", "")
     app_secret = instance.get("app_secret", "")

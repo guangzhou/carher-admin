@@ -27,7 +27,7 @@ DB_DIR = Path(os.environ.get("CARHER_ADMIN_DB_DIR", "/data/carher-admin"))
 DB_PATH = DB_DIR / "admin.db"
 BACKUP_DIR = Path(os.environ.get("CARHER_ADMIN_BACKUP_DIR", "/nas-backup/carher-admin"))
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS her_instances (
@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS her_instances (
     sync_status     TEXT NOT NULL DEFAULT 'pending',
     deploy_group    TEXT NOT NULL DEFAULT 'stable',
     image_tag       TEXT NOT NULL DEFAULT 'v20260328',
+    litellm_key     TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -224,6 +225,9 @@ MIGRATIONS = {
         "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_username', '', 1)",
         "INSERT OR IGNORE INTO settings (key, value, is_secret) VALUES ('acr_password', '', 1)",
     ],
+    10: [
+        "ALTER TABLE her_instances ADD COLUMN litellm_key TEXT NOT NULL DEFAULT ''",
+    ],
 }
 
 SEED_SQL = [
@@ -378,16 +382,17 @@ def get_by_id(uid: int) -> dict | None:
 def insert(data: dict) -> dict:
     with get_db() as conn:
         conn.execute(
-            """INSERT INTO her_instances (id, name, model, app_id, app_secret, prefix, owner, provider, bot_open_id, status, sync_status, deploy_group, image_tag, created_at, updated_at)
-               VALUES (:id, :name, :model, :app_id, :app_secret, :prefix, :owner, :provider, :bot_open_id, :status, 'pending', :deploy_group, :image_tag, :now, :now)""",
+            """INSERT INTO her_instances (id, name, model, app_id, app_secret, prefix, owner, provider, bot_open_id, status, sync_status, deploy_group, image_tag, litellm_key, created_at, updated_at)
+               VALUES (:id, :name, :model, :app_id, :app_secret, :prefix, :owner, :provider, :bot_open_id, :status, 'pending', :deploy_group, :image_tag, :litellm_key, :now, :now)""",
             {
                 "deploy_group": data.get("deploy_group", "stable"),
                 "image_tag": data.get("image_tag", "v20260328"),
+                "litellm_key": data.get("litellm_key", ""),
                 **data,
                 "now": _now(),
             },
         )
-        _audit(conn, data["id"], "created", json.dumps({k: v for k, v in data.items() if k != "app_secret"}, ensure_ascii=False))
+        _audit(conn, data["id"], "created", json.dumps({k: v for k, v in data.items() if k not in ("app_secret", "litellm_key")}, ensure_ascii=False))
     backup_to_nas()
     return get_by_id(data["id"])
 
@@ -406,7 +411,7 @@ def update(uid: int, changes: dict) -> dict | None:
     sql = f"UPDATE her_instances SET {', '.join(sets)} WHERE id = :uid"
     with get_db() as conn:
         conn.execute(sql, params)
-        _audit(conn, uid, "updated", json.dumps({k: v for k, v in changes.items() if k != "app_secret"}, ensure_ascii=False))
+        _audit(conn, uid, "updated", json.dumps({k: v for k, v in changes.items() if k not in ("app_secret", "litellm_key")}, ensure_ascii=False))
     backup_to_nas()
     return get_by_id(uid)
 
@@ -519,7 +524,14 @@ def import_from_configmap_data(uid: int, cfg: dict):
         prefix = m.group(1)
 
     # Determine provider
-    provider = "anthropic" if primary.startswith("anthropic/") else "openrouter"
+    if primary.startswith("litellm/"):
+        provider = "litellm"
+    elif primary.startswith("wangsu/"):
+        provider = "wangsu"
+    elif primary.startswith("anthropic/"):
+        provider = "anthropic"
+    else:
+        provider = "openrouter"
 
     owners = feishu.get("dm", {}).get("allowFrom", [])
 

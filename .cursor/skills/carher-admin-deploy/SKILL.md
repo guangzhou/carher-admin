@@ -93,6 +93,23 @@ kubectl apply -f k8s/operator-deployment.yaml
 kubectl apply -f k8s/deployment.yaml
 ```
 
+### LiteLLM 相关资源
+
+LiteLLM proxy 和 PostgreSQL 有独立的 K8s manifests：
+
+```bash
+# Secrets（immutable，仅首次 apply 或 delete+recreate 更新）
+kubectl apply -f k8s/litellm-secrets.yaml
+
+# Proxy + DB（可反复 apply）
+kubectl apply -f k8s/litellm-proxy.yaml
+kubectl apply -f k8s/litellm-postgres.yaml
+```
+
+> **Immutable Secret 策略**：`k8s/litellm-secrets.yaml` 中的 Secret 标记了 `immutable: true`。
+> 首次 `kubectl apply` 创建后，后续 apply 不可修改 data 字段。
+> 如需变更：`kubectl delete secret <name> -n carher && kubectl apply -f k8s/litellm-secrets.yaml`
+
 ## K8s Resources
 
 | Resource | File | Notes |
@@ -102,6 +119,9 @@ kubectl apply -f k8s/deployment.yaml
 | CRD | `k8s/crd.yaml` | HerInstance custom resource (`herinstances.carher.io`) |
 | Operator RBAC | `k8s/operator-rbac.yaml` | ClusterRole: herinstances, deployments, services, pods, configmaps, PVCs, secrets, events, namespaces, leases |
 | Admin RBAC | `k8s/rbac.yaml` | SA + Role + ClusterRole (`carher-admin-cluster`): pods, configmaps, PVCs, secrets, events, herinstances, nodes, metrics |
+| LiteLLM Secrets | `k8s/litellm-secrets.yaml` | `litellm-secrets` + `litellm-db-credentials`，`immutable: true` |
+| LiteLLM Proxy | `k8s/litellm-proxy.yaml` | ConfigMap + Deployment + Service，端口 4000 |
+| LiteLLM PostgreSQL | `k8s/litellm-postgres.yaml` | StatefulSet + Service，NAS PVC 持久化 |
 
 ## Pitfalls
 

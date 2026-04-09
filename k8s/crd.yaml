@@ -45,7 +45,7 @@ spec:
                 provider:
                   type: string
                   default: wangsu
-                  enum: [openrouter, anthropic, wangsu]
+                  enum: [openrouter, anthropic, wangsu, litellm]
                 botOpenId:
                   type: string
                   default: ""
@@ -60,6 +60,10 @@ spec:
                   type: string
                   default: ""
                   description: "Override OAuth callback URL; if empty, auto-generated from prefix+userId"
+                litellmKey:
+                  type: string
+                  default: ""
+                  description: "Per-instance LiteLLM virtual key for spend tracking"
                 paused:
                   type: boolean
                   default: false

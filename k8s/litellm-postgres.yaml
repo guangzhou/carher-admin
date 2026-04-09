@@ -1,0 +1,79 @@
+# PostgreSQL 16 for LiteLLM spend tracking.
+# Single-instance with NAS persistent storage.
+#
+# Secret is in k8s/litellm-secrets.yaml (immutable, apply once separately).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: litellm-db
+  namespace: carher
+  labels:
+    app: litellm-db
+spec:
+  serviceName: litellm-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-db
+  template:
+    metadata:
+      labels:
+        app: litellm-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          envFrom:
+            - secretRef:
+                name: litellm-db-credentials
+          ports:
+            - containerPort: 5432
+              name: postgres
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm", "-d", "litellm"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm", "-d", "litellm"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: litellm-db-data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+  volumeClaimTemplates:
+    - metadata:
+        name: litellm-db-data
+        labels:
+          app: litellm-db
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: alibabacloud-cnfs-nas
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-db
+  namespace: carher
+  labels:
+    app: litellm-db
+spec:
+  type: ClusterIP
+  selector:
+    app: litellm-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres

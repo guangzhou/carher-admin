@@ -20,7 +20,7 @@ Changes are classified into two tiers based on what they affect:
 
 | Change Type | Examples | Mechanism | Pod Restart? |
 |---|---|---|---|
-| **Config-only** | model, provider, owner, bot name | Hot-reload via sidecar | No |
+| **Config-only** | model, provider, owner, bot name, litellmKey | Hot-reload via sidecar | No |
 | **Pod-spec** | image, prefix, appSecretRef | Rolling update + ReadinessGate | Yes (zero-downtime) |
 
 The operator determines the tier by comparing two keys on the Deployment:
@@ -146,7 +146,17 @@ For detailed technical pitfalls discovered during implementation, see
 
 ```
 CRD spec changed?
-├─ model/provider/owner/name changed → Tier 1 hot-reload (no restart)
-├─ image/prefix/appSecretRef changed → Tier 2 rolling update (zero-downtime)
-└─ nothing changed, replicas=0       → Scale up (unpause)
+├─ model/provider/owner/name/litellmKey changed → Tier 1 hot-reload (no restart)
+├─ image/prefix/appSecretRef changed            → Tier 2 rolling update (zero-downtime)
+└─ nothing changed, replicas=0                  → Scale up (unpause)
 ```
+
+### Provider 切换到 litellm 的副作用
+
+将实例的 `provider` 从 `wangsu/openrouter/anthropic` 切换为 `litellm` 时，
+Admin API 会自动生成一个 per-instance LiteLLM 虚拟 key 并写入 CRD `spec.litellmKey`。
+反向切换（从 `litellm` 切走）会删除该 key 并清空 `spec.litellmKey`。
+
+这属于 Tier 1 config-only 变更，不会触发 Pod 重启。但需注意：
+- 批量切换时，每个实例都会产生一次 LiteLLM key API 调用
+- 切走后对应 key 在 LiteLLM 侧被删除，历史 spend 数据仍保留

@@ -56,6 +56,7 @@ kubectl get her her-<ID> -n carher -o yaml
 | `spec.model` / `spec.provider` | 模型与供应商 |
 | `spec.image` | 镜像 tag |
 | `spec.deployGroup` | 部署组 |
+| `spec.litellmKey` | LiteLLM 虚拟 key（仅 provider=litellm 时有值） |
 | `spec.paused` | 是否暂停 |
 | `status.phase` | 运行阶段 (Running/Stopped/CrashLoopBackOff) |
 | `status.feishuWS` | 飞书 WebSocket (Connected/Disconnected) |
@@ -120,6 +121,7 @@ Pod:  <POD_NAME>  (<READY> <STATUS>, restarts: N)
 节点: <NODE>
 镜像: <IMAGE>
 模型: <MODEL> (provider: <PROVIDER>)
+LiteLLM Key: <已配置 / 未配置>
 部署组: <DEPLOY_GROUP>
 飞书WS: <Connected/Disconnected>
 CPU/内存: <CPU> / <MEM>

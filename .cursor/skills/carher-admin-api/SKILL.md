@@ -63,6 +63,11 @@ curl -X POST https://admin.carher.net/api/instances \
 #   openrouter: gpt (GPT-5.4), sonnet (Claude Sonnet 4.6), opus (Claude Opus 4.6), gemini (Gemini 3.1 Pro)
 #   anthropic:  sonnet (Claude Sonnet 4.6), opus (Claude Opus 4.6)
 #   wangsu:     gpt (GPT-5.4), sonnet (Claude Sonnet 4.6), opus (Claude Opus 4.6), gemini (Gemini 3.1 Pro)
+#   litellm:    gpt (GPT-5.4), sonnet (Claude Sonnet 4.6), opus (Claude Opus 4.6), gemini (Gemini 3.1 Pro)
+#
+# When provider=litellm, a per-instance LiteLLM virtual key is auto-generated
+# for spend tracking. Requests are routed through the LiteLLM proxy
+# (litellm-proxy.carher.svc:4000) which load-balances across Wangsu + OpenRouter.
 curl -X PUT https://admin.carher.net/api/instances/14 \
   -H "Content-Type: application/json" \
   -d '{"model":"sonnet","provider":"wangsu","deploy_group":"vip"}'
@@ -271,6 +276,22 @@ curl -X PUT https://admin.carher.net/api/settings \
 
 # Get configured GitHub repos
 curl -s https://admin.carher.net/api/settings/repos | jq
+```
+
+### LiteLLM Key Management
+
+```bash
+# Generate a virtual key for a specific instance (idempotent: returns existing key if present)
+curl -X POST "https://admin.carher.net/api/litellm/keys/generate?uid=1000" \
+  -H "X-API-Key: $API_KEY"
+
+# Batch-generate keys for ALL litellm-provider instances that don't have one yet
+curl -X POST https://admin.carher.net/api/litellm/keys/generate-batch \
+  -H "X-API-Key: $API_KEY"
+
+# Get per-instance spend summary (token usage & cost)
+curl -s https://admin.carher.net/api/litellm/spend \
+  -H "X-API-Key: $API_KEY" | jq
 ```
 
 ### CRD Direct Query

@@ -39,6 +39,7 @@ from . import metrics as metrics_mod
 from . import sync_worker
 from . import deployer
 from . import cloudflare_ops
+from . import litellm_ops
 from .models import (
     HerAddRequest, HerBatchAction, HerBatchImport, HerUpdateRequest,
     DeployGroupCreate, DeployGroupUpdate, SetDeployGroupRequest,
@@ -213,6 +214,16 @@ def _model_short(full: str) -> str:
     return parts[-1] if parts else full
 
 
+def _model_map_for_provider(provider: str) -> dict[str, str]:
+    if provider == "litellm":
+        return config_gen.MODEL_MAP_LITELLM
+    if provider == "wangsu":
+        return config_gen.MODEL_MAP_WANGSU
+    if provider == "anthropic":
+        return config_gen.MODEL_MAP_ANTHROPIC
+    return config_gen.MODEL_MAP
+
+
 def _enrich_with_runtime(instance: dict) -> dict:
     """Merge DB data with live K8s pod status."""
     uid = instance["id"]
@@ -220,7 +231,7 @@ def _enrich_with_runtime(instance: dict) -> dict:
 
     prefix = instance.get("prefix", "s1")
     pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
-    model_map = config_gen.MODEL_MAP_ANTHROPIC if instance.get("provider") == "anthropic" else config_gen.MODEL_MAP
+    model_map = _model_map_for_provider(instance.get("provider", "openrouter"))
     model_full = model_map.get(instance.get("model", "gpt"), instance.get("model", "gpt"))
 
     return {
@@ -311,7 +322,7 @@ def api_list_instances(
 
         prefix = inst.get("prefix", "s1")
         pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
-        mm = config_gen.MODEL_MAP_ANTHROPIC if inst.get("provider") == "anthropic" else config_gen.MODEL_MAP
+        mm = _model_map_for_provider(inst.get("provider", "openrouter"))
         model_full = mm.get(inst.get("model", "gpt"), inst.get("model", "gpt"))
 
         results.append({
@@ -418,7 +429,7 @@ def api_search_instances(
         if name and name.lower() not in inst.get("name", "").lower():
             continue
 
-        mm = config_gen.MODEL_MAP_ANTHROPIC if inst.get("provider") == "anthropic" else config_gen.MODEL_MAP
+        mm = _model_map_for_provider(inst.get("provider", "openrouter"))
         model_full = mm.get(inst.get("model", "gpt"), inst.get("model", "gpt"))
         entry = {
             "id": uid, "name": inst.get("name", ""),
@@ -527,6 +538,12 @@ def api_add_instance(req: HerAddRequest):
 
     pfx = f"{req.prefix}-" if not req.prefix.endswith("-") else req.prefix
 
+    if req.provider == "litellm":
+        key = litellm_ops.generate_key(uid, name=req.name)
+        if not key:
+            raise HTTPException(502, f"Failed to generate LiteLLM key for her-{uid}")
+        data["litellm_key"] = key
+
     # CRD path: create HerInstance CRD → operator handles everything
     try:
         crd_ops.create_her_instance(data)
@@ -547,7 +564,12 @@ def api_add_instance(req: HerAddRequest):
         logger.warning("CRD create failed for %d, falling back to legacy: %s", uid, e)
 
     # Legacy fallback
-    inst = db.insert(data)
+    try:
+        inst = db.insert(data)
+    except Exception:
+        if data.get("litellm_key"):
+            litellm_ops.delete_key(data["litellm_key"])
+        raise
     # knownBots cache invalidation removed — bots now register dynamically via Redis.
     try:
         k8s_ops.ensure_pvc(uid)
@@ -567,9 +589,22 @@ def api_add_instance(req: HerAddRequest):
 def api_batch_import(req: HerBatchImport):
     results = []
     crd_created: list[tuple[int, str]] = []
+    next_uid = db.next_id()
+    try:
+        crd_max = 0
+        for inst in crd_ops.list_her_instances():
+            u = inst.get("spec", {}).get("userId", 0)
+            if u > crd_max:
+                crd_max = u
+        next_uid = max(next_uid, crd_max + 1)
+    except Exception:
+        pass
     for item in req.instances:
-        uid = item.id or db.next_id()
+        uid = item.id or next_uid
+        if not item.id:
+            next_uid += 1
         pfx = f"{item.prefix}-" if not item.prefix.endswith("-") else item.prefix
+        persisted = False
         try:
             data = {
                 "id": uid, "name": item.name, "model": item.model,
@@ -579,6 +614,12 @@ def api_batch_import(req: HerBatchImport):
                 "deploy_group": item.deploy_group,
                 "status": "running",
             }
+            if item.provider == "litellm":
+                key = litellm_ops.generate_key(uid, name=item.name)
+                if not key:
+                    results.append({"id": uid, "error": f"Failed to generate LiteLLM key for her-{uid}"})
+                    continue
+                data["litellm_key"] = key
             # CRD path
             try:
                 crd_ops.create_her_instance(data)
@@ -593,6 +634,7 @@ def api_batch_import(req: HerBatchImport):
 
             # Legacy fallback
             inst = db.insert(data)
+            persisted = True
             k8s_ops.ensure_pvc(uid)
             _sync_and_deploy(inst)
             k8s_ops.create_pod(uid, prefix=item.prefix)
@@ -601,6 +643,8 @@ def api_batch_import(req: HerBatchImport):
                 "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
             })
         except Exception as e:
+            if not persisted and data.get("litellm_key"):
+                litellm_ops.delete_key(data["litellm_key"])
             results.append({"id": uid, "error": str(e)})
 
     # Batch-register Cloudflare DNS + remote tunnel ingress for all new CRD instances
@@ -649,13 +693,38 @@ def api_update(uid: int, req: HerUpdateRequest):
 
     # CRD path
     if _has_crd(uid):
+        generated_key = ""
+        old_key_to_delete = ""
         try:
             if has_secret_change:
                 crd_ops._ensure_secret(uid, req.app_secret)
             if changes:
                 crd_changes = {_DB_TO_CRD_FIELD[k]: v for k, v in changes.items() if k in _DB_TO_CRD_FIELD}
+                new_provider = changes.get("provider")
+                if new_provider == "litellm":
+                    existing = crd_ops.get_her_instance(uid)
+                    existing_key = (existing or {}).get("spec", {}).get("litellmKey", "")
+                    if not existing_key:
+                        inst_name = changes.get("name") or (existing or {}).get("spec", {}).get("name", "")
+                        generated_key = litellm_ops.generate_key(uid, name=inst_name) or ""
+                        if not generated_key:
+                            raise HTTPException(502, f"Failed to generate LiteLLM key for her-{uid}")
+                        crd_changes["litellmKey"] = generated_key
+                elif new_provider and new_provider != "litellm":
+                    existing = crd_ops.get_her_instance(uid)
+                    old_key = (existing or {}).get("spec", {}).get("litellmKey", "")
+                    if old_key:
+                        crd_changes["litellmKey"] = ""
+                        old_key_to_delete = old_key
                 crd_ops.update_her_instance(uid, crd_changes)
+                if generated_key:
+                    db.update(uid, {"litellm_key": generated_key})
+                if old_key_to_delete:
+                    db.update(uid, {"litellm_key": ""})
+                    litellm_ops.delete_key(old_key_to_delete)
         except K8sApiException as e:
+            if generated_key:
+                litellm_ops.delete_key(generated_key)
             raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
         reported = {**changes}
         if has_secret_change:
@@ -739,11 +808,22 @@ async def api_restart(uid: int):
 def api_delete(uid: int, purge: bool = Query(False)):
     """Delete an instance. CRD: deletes HerInstance; Operator cleans up Pod + ConfigMap."""
     if _has_crd(uid):
+        crd = crd_ops.get_her_instance(uid)
+        old_key = (crd or {}).get("spec", {}).get("litellmKey", "")
         try:
             crd_ops.delete_her_instance(uid, purge_data=purge)
         except K8sApiException as e:
             if e.status != 404:
                 raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+        if old_key:
+            litellm_ops.delete_key(old_key)
+        try:
+            if purge:
+                db.purge_instance(uid)
+            else:
+                db.delete_instance(uid)
+        except Exception:
+            pass
         # knownBots cache invalidation removed — bots now register dynamically via Redis.
         try:
             cloudflare_ops.sync_tunnel_config()
@@ -751,6 +831,8 @@ def api_delete(uid: int, purge: bool = Query(False)):
             logger.warning("Cloudflare config sync failed after delete %d: %s", uid, cf_err)
         return {"id": uid, "action": "deleted", "managed_by": "operator", "purge": purge}
 
+    inst = db.get_by_id(uid)
+    old_key = (inst or {}).get("litellm_key", "") if inst else ""
     k8s_ops.delete_pod(uid)
     k8s_ops.delete_configmap(uid)
     if purge:
@@ -758,6 +840,8 @@ def api_delete(uid: int, purge: bool = Query(False)):
         db.purge_instance(uid)
     else:
         db.delete_instance(uid)
+    if old_key:
+        litellm_ops.delete_key(old_key)
     # knownBots cache invalidation removed — bots now register dynamically via Redis.
     return {"id": uid, "action": "deleted", "purge": purge}
 
@@ -1381,12 +1465,23 @@ def api_config_preview(uid: int):
         crd = crd_ops.get_her_instance(uid)
         if crd:
             spec = crd.get("spec", {})
+            app_secret = ""
+            secret_name = spec.get("appSecretRef") or f"carher-{uid}-secret"
+            try:
+                secret = k8s_ops._core().read_namespaced_secret(secret_name, "carher")
+                import base64
+                raw = (secret.data or {}).get("app_secret", "")
+                if raw:
+                    app_secret = base64.b64decode(raw).decode()
+            except Exception:
+                pass
             inst = {
                 "id": uid, "name": spec.get("name", ""),
                 "model": spec.get("model", "gpt"), "app_id": spec.get("appId", ""),
-                "app_secret": "", "prefix": spec.get("prefix", "s1"),
+                "app_secret": app_secret, "prefix": spec.get("prefix", "s1"),
                 "owner": spec.get("owner", ""), "provider": spec.get("provider", "openrouter"),
                 "bot_open_id": spec.get("botOpenId", ""),
+                "litellm_key": spec.get("litellmKey", ""),
             }
             return config_gen.generate_openclaw_json(inst)
     except Exception:
@@ -1433,6 +1528,81 @@ def api_known_bots():
         "known_bot_open_ids": bot_open_ids,
         "total": len(bots),
     }
+
+
+# ── API: LiteLLM Key Management ──
+
+@app.post("/api/litellm/keys/generate", tags=["litellm"], dependencies=[Depends(verify_api_key)])
+def api_litellm_generate_key(uid: int = Query(..., description="Instance ID")):
+    """Generate a LiteLLM virtual key for a specific instance if missing."""
+    if not litellm_ops.LITELLM_MASTER_KEY:
+        raise HTTPException(503, "LITELLM_MASTER_KEY is not configured")
+    inst = crd_ops.get_her_instance(uid)
+    if not inst:
+        raise HTTPException(404, f"Instance her-{uid} not found")
+    if inst.get("spec", {}).get("provider") != "litellm":
+        raise HTTPException(400, f"Instance her-{uid} is not using provider=litellm")
+    old_key = inst.get("spec", {}).get("litellmKey", "")
+    if old_key:
+        return {"id": uid, "key": old_key, "status": "already_exists"}
+    name = inst.get("spec", {}).get("name", "")
+    key = litellm_ops.generate_key(uid, name=name)
+    if not key:
+        raise HTTPException(502, "Failed to generate LiteLLM key")
+    try:
+        crd_ops.update_her_instance(uid, {"litellmKey": key})
+    except Exception as e:
+        litellm_ops.delete_key(key)
+        logger.warning("CRD patch litellmKey failed for %d: %s", uid, e)
+        raise HTTPException(500, f"Failed to patch CRD with LiteLLM key: {e}")
+    db.update(uid, {"litellm_key": key})
+    return {"id": uid, "key": key}
+
+
+@app.post("/api/litellm/keys/generate-batch", tags=["litellm"], dependencies=[Depends(verify_api_key)])
+def api_litellm_generate_batch():
+    """Generate LiteLLM keys for ALL instances that use litellm provider but have no key yet."""
+    if not litellm_ops.LITELLM_MASTER_KEY:
+        raise HTTPException(503, "LITELLM_MASTER_KEY is not configured")
+    results = []
+    for inst in crd_ops.list_her_instances():
+        spec = inst.get("spec", {})
+        uid = spec.get("userId", 0)
+        if not uid or spec.get("provider") != "litellm":
+            continue
+        if spec.get("litellmKey"):
+            results.append({"id": uid, "status": "already_has_key"})
+            continue
+        key = litellm_ops.generate_key(uid, name=spec.get("name", ""))
+        if key:
+            try:
+                crd_ops.update_her_instance(uid, {"litellmKey": key})
+                db.update(uid, {"litellm_key": key})
+                results.append({"id": uid, "status": "generated"})
+            except Exception as e:
+                litellm_ops.delete_key(key)
+                results.append({"id": uid, "status": "error", "error": str(e)})
+        else:
+            results.append({"id": uid, "status": "generation_failed"})
+    return {"results": results}
+
+
+@app.get("/api/litellm/spend", tags=["litellm"], dependencies=[Depends(verify_api_key)])
+def api_litellm_spend():
+    """Get spend summary for all LiteLLM virtual keys (per-instance spend tracking)."""
+    import urllib.request
+    if not litellm_ops.LITELLM_MASTER_KEY:
+        raise HTTPException(503, "LITELLM_MASTER_KEY is not configured")
+    try:
+        req = urllib.request.Request(
+            f"{litellm_ops.LITELLM_PROXY_URL}/global/spend/keys?limit=500",
+            headers={"Authorization": f"Bearer {litellm_ops.LITELLM_MASTER_KEY}"},
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = _json.loads(resp.read())
+        return {"spend_data": data}
+    except Exception as e:
+        return {"error": str(e), "spend_data": []}
 
 
 # ── API: Statistics ──

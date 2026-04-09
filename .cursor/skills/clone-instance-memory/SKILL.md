@@ -234,3 +234,4 @@ curl -s -H "X-API-Key: $API_KEY" \
 | **WAL 文件** | 若 `memory/` 下有 `-wal`/`-shm`，拷贝前先 `PRAGMA wal_checkpoint(TRUNCATE)` |
 | **exec API 白名单** | 只允许 ls/cat/du/node 等；tar/sqlite3/cp 不在白名单，大操作用 kubectl exec 或临时 Pod |
 | **不影响其他实例** | 每实例独立 PVC，sessions 按 uid 子路径隔离 |
+| **LiteLLM Key** | 若源实例 `provider=litellm`，新实例会自动生成独立的 LiteLLM 虚拟 key（不会复用源实例的 key），spend 从零开始 |

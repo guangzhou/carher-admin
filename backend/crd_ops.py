@@ -76,6 +76,7 @@ def create_her_instance(data: dict) -> dict:
             "prefix": data.get("prefix", "s1"),
             "owner": data.get("owner", ""),
             "provider": data.get("provider", "wangsu"),
+            "litellmKey": data.get("litellm_key", ""),
             "botOpenId": data.get("bot_open_id", ""),
             "deployGroup": data.get("deploy_group", "stable"),
             "image": data.get("image_tag", "v20260328"),

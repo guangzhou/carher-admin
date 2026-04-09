@@ -30,6 +30,13 @@ var modelMapWangsu = map[string]string{
 	"gemini": "wangsu/gemini-3.1-pro-preview",
 }
 
+var modelMapLitellm = map[string]string{
+	"sonnet": "litellm/claude-sonnet-4-6",
+	"opus":   "litellm/claude-opus-4-6",
+	"gpt":    "litellm/gpt-5.4",
+	"gemini": "litellm/gemini-3.1-pro-preview",
+}
+
 // Google Vertex provider routing: prefer Google → Anthropic fallback
 var googleAnthropicRouting = map[string]interface{}{
 	"params": map[string]interface{}{
@@ -49,6 +56,7 @@ type ConfigInput struct {
 	Prefix           string
 	Owner            string
 	Provider         string
+	LitellmKey       string
 	BotOpenID        string
 	OAuthRedirectUri string
 }
@@ -66,6 +74,8 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 
 	mm := modelMap
 	switch input.Provider {
+	case "litellm":
+		mm = modelMapLitellm
 	case "wangsu":
 		mm = modelMapWangsu
 	case "anthropic":
@@ -87,6 +97,13 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 
 	models := make(map[string]interface{})
 	switch input.Provider {
+	case "litellm":
+		models["litellm/claude-opus-4-6"] = alias("opus")
+		models["litellm/claude-sonnet-4-6"] = alias("sonnet")
+		models["litellm/gpt-5.4"] = alias("ws-gpt")
+		models["litellm/gemini-3.1-pro-preview"] = alias("ws-gemini")
+		models["openrouter/anthropic/claude-opus-4.6"] = aliasWithRouting("or-opus")
+		models["openrouter/anthropic/claude-sonnet-4.6"] = aliasWithRouting("or-sonnet")
 	case "anthropic":
 		models["anthropic/claude-opus-4-6"] = alias("opus")
 		models["anthropic/claude-sonnet-4-6"] = alias("sonnet")
@@ -132,6 +149,27 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 				},
 			},
 		},
+	}
+
+	if input.Provider == "litellm" {
+		apiKey := "${LITELLM_API_KEY}"
+		if input.LitellmKey != "" {
+			apiKey = input.LitellmKey
+		}
+		cfg["models"] = map[string]interface{}{
+			"providers": map[string]interface{}{
+				"litellm": map[string]interface{}{
+					"baseUrl": "http://litellm-proxy.carher.svc:4000",
+					"apiKey":  apiKey,
+					"models": []map[string]interface{}{
+						{"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 200000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 25, "cacheRead": 0.5}},
+						{"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 200000, "maxTokens": 64000, "cost": map[string]interface{}{"input": 3, "output": 15, "cacheRead": 0.3}},
+						{"id": "gpt-5.4", "name": "GPT-5.4", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 200000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 2.5, "output": 15, "cacheRead": 0.25}},
+						{"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 200000, "maxTokens": 65536, "cost": map[string]interface{}{"input": 2, "output": 12, "cacheRead": 0.2}},
+					},
+				},
+			},
+		}
 	}
 
 	owners := splitOwners(input.Owner)

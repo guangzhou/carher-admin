@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import urllib.request
 import yaml
@@ -26,7 +27,7 @@ CLOUDFLARED_DEPLOYMENT = "cloudflared"
 DOMAIN = "carher.net"
 
 CF_ACCOUNT_ID = "67e6618e6af7e4342cbd1de02536fa2f"
-CF_TOKEN = "w2Tjp0aqvc_jr8W5WgiERKkm750CZNlKsb80khlm"
+CF_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "")
 CF_TUNNEL_CONFIG_URL = (
     f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}"
     f"/cfd_tunnel/{TUNNEL_UUID}/configurations"
@@ -123,20 +124,28 @@ def _is_managed_remote_hostname(hostname: str) -> bool:
 
 
 def _build_infra_rules(*, include_origin_request: bool) -> list[dict[str, str] | dict[str, object]]:
+    rules, _ = _resolve_infra_rules(include_origin_request=include_origin_request)
+    return rules
+
+
+def _resolve_infra_rules(*, include_origin_request: bool) -> tuple[list[dict[str, str] | dict[str, object]], set[str]]:
     rules: list[dict[str, str] | dict[str, object]] = []
+    unresolved_hostnames: set[str] = set()
     for hostname_prefix, svc_name, port in INFRA_ROUTES:
+        hostname = f"{hostname_prefix}.{DOMAIN}"
         ip = _get_svc_cluster_ip(svc_name)
         if not ip:
-            logger.warning("Infra service %s not found, skipping %s.%s route", svc_name, hostname_prefix, DOMAIN)
+            logger.warning("Infra service %s not found, skipping %s route", svc_name, hostname)
+            unresolved_hostnames.add(hostname)
             continue
         rule: dict[str, str] | dict[str, object] = {
-            "hostname": f"{hostname_prefix}.{DOMAIN}",
+            "hostname": hostname,
             "service": f"http://{ip}:{port}",
         }
         if include_origin_request:
             rule["originRequest"] = {}
         rules.append(rule)
-    return rules
+    return rules, unresolved_hostnames
 
 
 def generate_config() -> str:
@@ -289,6 +298,8 @@ def register_dns_routes(uid: int, prefix: str = "s1"):
 
 def _cf_api(method: str, url: str, data: dict | None = None) -> dict:
     """Make authenticated request to Cloudflare API."""
+    if not CF_TOKEN:
+        raise RuntimeError("CLOUDFLARE_API_TOKEN is not configured")
     body = json.dumps(data).encode() if data else None
     req = urllib.request.Request(url, data=body, method=method, headers={
         "Authorization": f"Bearer {CF_TOKEN}",
@@ -302,7 +313,10 @@ def _get_remote_ingress() -> tuple[dict, list[dict]]:
     """GET the current remote tunnel config. Returns (full_config, ingress_list)."""
     resp = _cf_api("GET", CF_TUNNEL_CONFIG_URL)
     config = resp["result"]["config"]
-    return config, config["ingress"]
+    ingress = config.get("ingress")
+    if not isinstance(ingress, list) or not ingress:
+        raise RuntimeError("Cloudflare remote tunnel config has no ingress rules")
+    return config, ingress
 
 
 def _put_remote_ingress(config: dict) -> bool:
@@ -334,22 +348,28 @@ def update_remote_ingress(
 
     desired_rules: list[dict] = []
     managed_hostnames: set[str] = set()
+    unresolved_hostnames: set[str] = set()
     for uid, prefix in target_instances:
+        auth_host, fe_host, proxy_host = _build_instance_hostnames(uid, prefix)
+        hostnames = [auth_host, fe_host, proxy_host]
         svc_name = f"carher-{uid}-svc"
         svc_ip = _get_svc_cluster_ip(svc_name) if wait_for_service else None
         if not svc_ip:
             logger.warning("Service %s not ready, skipping remote ingress for uid=%d", svc_name, uid)
+            if full_sync:
+                unresolved_hostnames.update(hostnames)
             continue
 
-        auth_host, fe_host, proxy_host = _build_instance_hostnames(uid, prefix)
-        managed_hostnames.update([auth_host, fe_host, proxy_host])
+        managed_hostnames.update(hostnames)
         desired_rules.extend([
             {"hostname": auth_host, "service": f"http://{svc_ip}:18891", "originRequest": {}},
             {"hostname": fe_host, "service": f"http://{svc_ip}:8000", "originRequest": {}},
             {"hostname": proxy_host, "service": f"http://{svc_ip}:8080", "originRequest": {}},
         ])
 
-    infra_rules = _build_infra_rules(include_origin_request=True)
+    infra_rules, unresolved_infra_hostnames = _resolve_infra_rules(include_origin_request=True)
+    if full_sync:
+        unresolved_hostnames.update(unresolved_infra_hostnames)
     managed_hostnames.update(
         str(rule["hostname"]) for rule in infra_rules if isinstance(rule.get("hostname"), str)
     )
@@ -357,7 +377,10 @@ def update_remote_ingress(
 
     if full_sync:
         preserved_rules = [
-            rule for rule in existing_rules if not _is_managed_remote_hostname(rule.get("hostname", ""))
+            rule
+            for rule in existing_rules
+            if not _is_managed_remote_hostname(rule.get("hostname", ""))
+            or rule.get("hostname", "") in unresolved_hostnames
         ]
     else:
         preserved_rules = [rule for rule in existing_rules if rule.get("hostname", "") not in managed_hostnames]
@@ -373,4 +396,4 @@ def update_remote_ingress(
     if ok:
         logger.info("Remote ingress updated for %s", updated_hosts)
     else:
-        logger.error("Remote ingress PUT failed for %s", updated_hosts)
+        raise RuntimeError(f"Remote ingress PUT failed for {updated_hosts}")

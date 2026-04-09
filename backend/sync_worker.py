@@ -14,6 +14,7 @@ import logging
 from . import database as db
 from . import config_gen
 from . import k8s_ops
+from .crd_helpers import crd_uids
 
 logger = logging.getLogger("carher-admin")
 
@@ -33,7 +34,11 @@ async def _sync_pending_loop():
     while True:
         await asyncio.sleep(SYNC_INTERVAL)
         try:
-            pending = db.get_pending_sync()
+            known_crd = crd_uids(strict=True)
+            if known_crd is None:
+                logger.warning("CRD API unreachable, skipping pending sync cycle")
+                continue
+            pending = [inst for inst in db.get_pending_sync() if inst["id"] not in known_crd]
             if not pending:
                 continue
             logger.info("Syncing %d pending ConfigMaps", len(pending))
@@ -72,7 +77,11 @@ def sync_configmap(instance: dict):
 
 def sync_all():
     """Force sync all active instances. Used for manual 'force sync' button."""
-    instances = db.list_all()
+    known_crd = crd_uids(strict=True)
+    if known_crd is None:
+        logger.warning("CRD API unreachable, aborting sync_all to avoid touching CRD instances")
+        return {"synced": 0, "failed": 0, "error": "CRD API unreachable"}
+    instances = [inst for inst in db.list_all() if inst["id"] not in known_crd]
     synced = 0
     failed = 0
     for inst in instances:
@@ -89,7 +98,14 @@ def sync_all():
 
 def consistency_check() -> list[dict]:
     """Compare DB state vs actual K8s state. Returns list of discrepancies."""
-    db_instances = {inst["id"]: inst for inst in db.list_all() if inst["status"] != "deleted"}
+    known_crd = crd_uids(strict=True)
+    if known_crd is None:
+        return [{"id": 0, "issue": "crd_api_unreachable", "detail": "CRD API unreachable, skipping consistency check"}]
+    db_instances = {
+        inst["id"]: inst
+        for inst in db.list_all()
+        if inst["status"] != "deleted" and inst["id"] not in known_crd
+    }
     pod_statuses = k8s_ops.get_all_pod_statuses()
 
     issues = []
@@ -100,17 +116,8 @@ def consistency_check() -> list[dict]:
             issues.append({"id": uid, "issue": "db_running_no_pod", "detail": "DB says running but no Pod found"})
 
     # Pod exists but not in DB (skip CRD-managed instances)
-    crd_uids: set[int] = set()
-    try:
-        from . import crd_ops
-        for inst in crd_ops.list_her_instances():
-            u = inst.get("spec", {}).get("userId", 0)
-            if u:
-                crd_uids.add(u)
-    except Exception:
-        pass
     for uid in pod_statuses:
-        if uid not in db_instances and uid not in crd_uids:
+        if uid not in db_instances and uid not in known_crd:
             issues.append({"id": uid, "issue": "pod_no_db", "detail": "Pod exists but not in DB"})
 
     # DB says stopped but Pod exists

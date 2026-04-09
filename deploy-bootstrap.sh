@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ACR="cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com"
 ACR_USER="liuguoxian@1989403661820148"
+ACR_PASSWORD="${ACR_PASSWORD:-}"
 NS="carher"
 TAG="v$(date +%Y%m%d)-$(git -C "$SCRIPT_DIR" rev-parse --short HEAD)"
 
@@ -32,6 +33,11 @@ echo "============================================"
 
 # --- Build & Push ---
 if [ -n "$BUILD" ]; then
+  if [ -z "$ACR_PASSWORD" ]; then
+    echo "ERROR: ACR_PASSWORD is not set. Export the ACR password before building images." >&2
+    exit 1
+  fi
+
   echo ""
   echo "▶ [1/4] Starting Docker daemon (temporary)..."
   groupadd docker 2>/dev/null || true
@@ -39,7 +45,7 @@ if [ -n "$BUILD" ]; then
   sleep 2
 
   echo "▶ [2/4] Logging into ACR..."
-  printf '%s' 'cltx!@#456' | docker login --username="$ACR_USER" \
+  printf '%s' "$ACR_PASSWORD" | docker login --username="$ACR_USER" \
     --password-stdin "$ACR"
 
   echo ""
@@ -95,7 +101,8 @@ if [ -n "$APPLY" ]; then
     API_KEY=$(openssl rand -hex 32)
     kubectl create secret generic carher-admin-secrets -n "$NS" \
       --from-literal=deploy-webhook-secret="$WEBHOOK_SECRET" \
-      --from-literal=admin-api-key="$API_KEY"
+      --from-literal=admin-api-key="$API_KEY" \
+      --from-literal=cloudflare-api-token=""
     echo ""
     echo "  ╔══════════════════════════════════════════════════════╗"
     echo "  ║  SAVE THESE KEYS (shown only once):                 ║"

@@ -115,17 +115,33 @@ def main():
         name = feishu.get("name", "")
         bot_open_id = feishu.get("botOpenId", "")
         primary = cfg.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
+        primary_lower = primary.lower()
         owners = feishu.get("dm", {}).get("allowFrom", [])
+        oauth_redirect_uri = feishu.get("oauthRedirectUri", "")
 
         # Detect model
         model = "gpt"
-        for short, patterns in [("sonnet", ["sonnet"]), ("opus", ["opus"]), ("gpt", ["gpt-5"])]:
-            if any(p in primary.lower() for p in patterns):
+        for short, patterns in [
+            ("sonnet", ["sonnet"]),
+            ("opus", ["opus"]),
+            ("gemini", ["gemini"]),
+            ("gpt", ["gpt-5", "gpt-4", "gpt"]),
+        ]:
+            if any(p in primary_lower for p in patterns):
                 model = short
                 break
 
         # Detect provider
-        provider = "anthropic" if primary.startswith("anthropic/") else "openrouter"
+        if primary_lower.startswith("litellm/"):
+            provider = "litellm"
+        elif primary_lower.startswith("wangsu/"):
+            provider = "wangsu"
+        elif primary_lower.startswith("anthropic/"):
+            provider = "anthropic"
+        elif primary_lower.startswith("openrouter/"):
+            provider = "openrouter"
+        else:
+            provider = "wangsu"
 
         # Detect prefix from OAuth URL
         prefix = "s1"
@@ -145,11 +161,14 @@ def main():
             created += 1
             continue
 
-        # Create K8s Secret for app_secret
+        secret_name = f"carher-{uid}-secret"
+        secret_ref = ""
+
+        # Create or reuse K8s Secret for app_secret
         if app_secret:
             secret = client.V1Secret(
                 metadata=client.V1ObjectMeta(
-                    name=f"carher-{uid}-secret", namespace=NS,
+                    name=secret_name, namespace=NS,
                     labels={"app": "carher-user", "user-id": str(uid)},
                 ),
                 type="Opaque",
@@ -159,13 +178,42 @@ def main():
                 v1.create_namespaced_secret(NS, secret)
             except ApiException as e:
                 if e.status == 409:
-                    v1.replace_namespaced_secret(f"carher-{uid}-secret", NS, secret)
+                    v1.replace_namespaced_secret(secret_name, NS, secret)
                 else:
                     logger.error("her-%d: failed to create secret: %s", uid, e)
                     errors += 1
                     continue
+            secret_ref = secret_name
+        else:
+            try:
+                v1.read_namespaced_secret(secret_name, NS)
+                secret_ref = secret_name
+            except ApiException as e:
+                if e.status == 404:
+                    logger.warning("her-%d: no appSecret in config and no Secret %s, skipping", uid, secret_name)
+                    skipped += 1
+                    continue
+                raise
 
         # Create HerInstance CRD
+        spec = {
+            "userId": uid,
+            "name": name,
+            "model": model,
+            "appId": app_id,
+            "prefix": prefix,
+            "owner": "|".join(owners),
+            "provider": provider,
+            "botOpenId": bot_open_id,
+            "deployGroup": "stable",
+            "image": image_tag,
+            "paused": not is_running,
+        }
+        if secret_ref:
+            spec["appSecretRef"] = secret_ref
+        if oauth_redirect_uri:
+            spec["oauthRedirectUri"] = oauth_redirect_uri
+
         body = {
             "apiVersion": f"{CRD_GROUP}/{CRD_VERSION}",
             "kind": "HerInstance",
@@ -174,20 +222,7 @@ def main():
                 "namespace": NS,
                 "labels": {"app": "carher-user", "user-id": str(uid)},
             },
-            "spec": {
-                "userId": uid,
-                "name": name,
-                "model": model,
-                "appId": app_id,
-                "appSecretRef": f"carher-{uid}-secret",
-                "prefix": prefix,
-                "owner": "|".join(owners),
-                "provider": provider,
-                "botOpenId": bot_open_id,
-                "deployGroup": "stable",
-                "image": image_tag,
-                "paused": not is_running,
-            },
+            "spec": spec,
         }
 
         try:

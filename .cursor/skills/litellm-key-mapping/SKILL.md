@@ -78,7 +78,7 @@ curl -s -H "X-API-Key: $API_KEY" https://admin.carher.net/api/crd/instances/<ID>
 curl -s -H "X-API-Key: $API_KEY" https://admin.carher.net/api/litellm/spend | jq
 
 # 单个 key 的详细信息（从 LiteLLM proxy 直接查）
-MASTER_KEY="sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707"
+MASTER_KEY=$(kubectl get secret litellm-secrets -n carher -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 curl -s "http://litellm-proxy.carher.svc:4000/key/info?key=<实例的litellm_key>" \
   -H "Authorization: Bearer $MASTER_KEY" | jq
 ```

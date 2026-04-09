@@ -98,8 +98,10 @@ kubectl apply -f k8s/deployment.yaml
 LiteLLM proxy 和 PostgreSQL 有独立的 K8s manifests：
 
 ```bash
-# Secrets（immutable，仅首次 apply 或 delete+recreate 更新）
-kubectl apply -f k8s/litellm-secrets.yaml
+# Secrets（immutable。先把模板里的 CHANGE_ME_* 替换成真实值，再 apply）
+cp k8s/litellm-secrets.yaml /tmp/litellm-secrets.rendered.yaml
+# 编辑 /tmp/litellm-secrets.rendered.yaml，把所有 CHANGE_ME_* 替换为真实值
+kubectl apply -f /tmp/litellm-secrets.rendered.yaml
 
 # Proxy + DB（可反复 apply）
 kubectl apply -f k8s/litellm-proxy.yaml
@@ -107,8 +109,9 @@ kubectl apply -f k8s/litellm-postgres.yaml
 ```
 
 > **Immutable Secret 策略**：`k8s/litellm-secrets.yaml` 中的 Secret 标记了 `immutable: true`。
-> 首次 `kubectl apply` 创建后，后续 apply 不可修改 data 字段。
-> 如需变更：`kubectl delete secret <name> -n carher && kubectl apply -f k8s/litellm-secrets.yaml`
+> 首次创建前，必须先把模板中的 `CHANGE_ME_*` 替换成真实值。
+> 创建后，后续 apply 不可修改 data 字段。
+> 如需变更：`kubectl delete secret <name> -n carher`，重新渲染模板后再 apply。
 
 ## K8s Resources
 

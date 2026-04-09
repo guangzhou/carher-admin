@@ -44,7 +44,7 @@ const MODEL_ALIAS = {
   wangsu:     { sonnet: "ws-sonnet", opus: "ws-opus", gpt: "ws-gpt", gemini: "ws-gemini" },
   openrouter: { sonnet: "sonnet", opus: "opus", gpt: "gpt", gemini: "gemini" },
   anthropic:  { sonnet: "sonnet", opus: "opus", gpt: "gpt" },
-  litellm:    { sonnet: "sonnet", opus: "opus", gpt: "gpt", gemini: "gemini" },
+  litellm:    { sonnet: "sonnet", opus: "opus", gpt: "ws-gpt", gemini: "ws-gemini" },
 };
 
 export function getModelAlias(provider, modelShort) {

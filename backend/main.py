@@ -202,7 +202,20 @@ def _get_known_bots_cached():
     global _known_bots_cache, _known_bots_ts
     now = time.monotonic()
     if _known_bots_cache is None or now - _known_bots_ts > KNOWN_BOTS_TTL:
-        _known_bots_cache = db.collect_known_bots()
+        bots, bot_open_ids = db.collect_known_bots()
+        try:
+            for inst in crd_ops.list_her_instances():
+                spec = inst.get("spec", {})
+                app_id = spec.get("appId", "")
+                name = spec.get("name", "")
+                if app_id and name:
+                    bots[app_id] = name
+                boi = spec.get("botOpenId", "")
+                if boi and app_id:
+                    bot_open_ids[boi] = app_id
+        except Exception:
+            pass
+        _known_bots_cache = (bots, bot_open_ids)
         _known_bots_ts = now
     return _known_bots_cache
 
@@ -222,6 +235,9 @@ def _model_map_for_provider(provider: str) -> dict[str, str]:
     if provider == "anthropic":
         return config_gen.MODEL_MAP_ANTHROPIC
     return config_gen.MODEL_MAP
+
+
+from .crd_helpers import db_instances_excluding_crds as _db_instances_excluding_crds
 
 
 def _enrich_with_runtime(instance: dict) -> dict:
@@ -258,6 +274,16 @@ def _sync_and_deploy(instance: dict):
     config_json = config_gen.generate_json_string(instance)
     k8s_ops.apply_configmap(uid, config_json)
     db.set_sync_status(uid, "synced")
+
+
+def _update_legacy_cloudflare(uid: int, prefix: str):
+    try:
+        svc_name = f"carher-{uid}-svc"
+        cloudflare_ops.sync_tunnel_config(wait_for_service=svc_name)
+        cloudflare_ops.register_dns_routes(uid, prefix=prefix)
+        cloudflare_ops.update_remote_ingress([(uid, prefix)])
+    except Exception as cf_err:
+        logger.warning("Cloudflare auto-config failed for legacy instance %d (non-fatal): %s", uid, cf_err)
 
 
 # ── API: List / Get ──
@@ -309,7 +335,7 @@ def api_list_instances(
         logger.warning("CRD list failed, falling back to DB-only: %s", e)
 
     # DB-managed instances (legacy, not yet migrated to CRD)
-    instances = db.list_all()
+    instances = _db_instances_excluding_crds()
     pod_statuses = k8s_ops.get_all_pod_statuses()
 
     for inst in instances:
@@ -408,7 +434,7 @@ def api_search_instances(
     except Exception as e:
         logger.warning("CRD search failed: %s", e)
 
-    instances = db.list_all()
+    instances = _db_instances_excluding_crds()
     pod_statuses = k8s_ops.get_all_pod_statuses()
     for inst in instances:
         if inst["status"] == "deleted":
@@ -487,8 +513,8 @@ def api_get_instance(uid: int):
                 "last_health_check": status.get("lastHealthCheck", ""),
                 "message": status.get("message", ""),
             }
-    except Exception:
-        pass
+    except K8sApiException as e:
+        raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
 
     inst = db.get_by_id(uid)
     if not inst:
@@ -504,10 +530,12 @@ def api_get_instance(uid: int):
 
 def _has_crd(uid: int) -> bool:
     """Check if this instance is managed by a HerInstance CRD."""
-    try:
-        return crd_ops.get_her_instance(uid) is not None
-    except Exception:
-        return False
+    return crd_ops.get_her_instance(uid) is not None
+
+
+def _should_fallback_to_legacy(exc: Exception) -> bool:
+    """Only fall back to legacy when the CRD API is truly unavailable."""
+    return isinstance(exc, K8sApiException) and exc.status == 404
 
 
 # ── API: Create ──
@@ -561,6 +589,12 @@ def api_add_instance(req: HerAddRequest):
             "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
         }
     except Exception as e:
+        if not _should_fallback_to_legacy(e):
+            if data.get("litellm_key"):
+                litellm_ops.delete_key(data["litellm_key"])
+            if isinstance(e, K8sApiException):
+                raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+            raise HTTPException(500, f"Failed to create HerInstance for {uid}: {e}")
         logger.warning("CRD create failed for %d, falling back to legacy: %s", uid, e)
 
     # Legacy fallback
@@ -573,11 +607,13 @@ def api_add_instance(req: HerAddRequest):
     # knownBots cache invalidation removed — bots now register dynamically via Redis.
     try:
         k8s_ops.ensure_pvc(uid)
+        k8s_ops.ensure_service(uid)
         _sync_and_deploy(inst)
         k8s_ops.create_pod(uid, prefix=req.prefix)
     except Exception as e:
         logger.error("K8s deploy failed for %d: %s", uid, e)
         db.set_sync_status(uid, "pending")
+    _update_legacy_cloudflare(uid, req.prefix)
 
     return {
         "id": uid, "status": "created",
@@ -605,6 +641,7 @@ def api_batch_import(req: HerBatchImport):
             next_uid += 1
         pfx = f"{item.prefix}-" if not item.prefix.endswith("-") else item.prefix
         persisted = False
+        data: dict | None = None
         try:
             data = {
                 "id": uid, "name": item.name, "model": item.model,
@@ -630,20 +667,30 @@ def api_batch_import(req: HerBatchImport):
                 })
                 continue
             except Exception as crd_err:
+                if not _should_fallback_to_legacy(crd_err):
+                    if data.get("litellm_key"):
+                        litellm_ops.delete_key(data["litellm_key"])
+                    if isinstance(crd_err, K8sApiException):
+                        results.append({"id": uid, "error": _k8s_error_detail(crd_err)})
+                    else:
+                        results.append({"id": uid, "error": str(crd_err)})
+                    continue
                 logger.warning("CRD create failed for %d in batch, fallback: %s", uid, crd_err)
 
             # Legacy fallback
             inst = db.insert(data)
             persisted = True
             k8s_ops.ensure_pvc(uid)
+            k8s_ops.ensure_service(uid)
             _sync_and_deploy(inst)
             k8s_ops.create_pod(uid, prefix=item.prefix)
+            _update_legacy_cloudflare(uid, item.prefix)
             results.append({
                 "id": uid, "status": "created",
                 "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
             })
         except Exception as e:
-            if not persisted and data.get("litellm_key"):
+            if not persisted and data and data.get("litellm_key"):
                 litellm_ops.delete_key(data["litellm_key"])
             results.append({"id": uid, "error": str(e)})
 
@@ -691,18 +738,24 @@ def api_update(uid: int, req: HerUpdateRequest):
     if not changes and not has_secret_change:
         return {"id": uid, "action": "updated", "changes": {}}
 
+    try:
+        has_crd = _has_crd(uid)
+    except K8sApiException as e:
+        raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+
     # CRD path
-    if _has_crd(uid):
+    if has_crd:
         generated_key = ""
         old_key_to_delete = ""
+        existing = None
         try:
             if has_secret_change:
                 crd_ops._ensure_secret(uid, req.app_secret)
             if changes:
                 crd_changes = {_DB_TO_CRD_FIELD[k]: v for k, v in changes.items() if k in _DB_TO_CRD_FIELD}
+                existing = crd_ops.get_her_instance(uid)
                 new_provider = changes.get("provider")
                 if new_provider == "litellm":
-                    existing = crd_ops.get_her_instance(uid)
                     existing_key = (existing or {}).get("spec", {}).get("litellmKey", "")
                     if not existing_key:
                         inst_name = changes.get("name") or (existing or {}).get("spec", {}).get("name", "")
@@ -711,21 +764,21 @@ def api_update(uid: int, req: HerUpdateRequest):
                             raise HTTPException(502, f"Failed to generate LiteLLM key for her-{uid}")
                         crd_changes["litellmKey"] = generated_key
                 elif new_provider and new_provider != "litellm":
-                    existing = crd_ops.get_her_instance(uid)
                     old_key = (existing or {}).get("spec", {}).get("litellmKey", "")
                     if old_key:
                         crd_changes["litellmKey"] = ""
                         old_key_to_delete = old_key
                 crd_ops.update_her_instance(uid, crd_changes)
-                if generated_key:
-                    db.update(uid, {"litellm_key": generated_key})
                 if old_key_to_delete:
-                    db.update(uid, {"litellm_key": ""})
                     litellm_ops.delete_key(old_key_to_delete)
-        except K8sApiException as e:
+        except Exception as e:
             if generated_key:
                 litellm_ops.delete_key(generated_key)
-            raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+            if isinstance(e, HTTPException):
+                raise
+            if isinstance(e, K8sApiException):
+                raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+            raise HTTPException(500, f"Failed to update HerInstance {uid}: {e}")
         reported = {**changes}
         if has_secret_change:
             reported["app_secret"] = "***updated***"
@@ -735,15 +788,45 @@ def api_update(uid: int, req: HerUpdateRequest):
     inst = db.get_by_id(uid)
     if not inst:
         raise HTTPException(404, f"Instance {uid} not found")
+    old_key_to_delete = ""
     db_changes = {k: v for k, v in changes.items() if k != "image"}
+    if "image" in changes:
+        db_changes["image_tag"] = changes["image"]
     if has_secret_change:
         db_changes["app_secret"] = req.app_secret
+    new_provider = changes.get("provider")
+    if new_provider == "litellm" and not inst.get("litellm_key"):
+        generated_key = litellm_ops.generate_key(uid, name=changes.get("name") or inst.get("name", "")) or ""
+        if not generated_key:
+            raise HTTPException(502, f"Failed to generate LiteLLM key for her-{uid}")
+        db_changes["litellm_key"] = generated_key
+    elif new_provider and new_provider != "litellm" and inst.get("litellm_key"):
+        db_changes["litellm_key"] = ""
+        old_key_to_delete = inst.get("litellm_key", "")
     if db_changes:
         inst = db.update(uid, db_changes)
+    if not inst:
+        raise HTTPException(404, f"Instance {uid} not found")
     try:
+        if "prefix" in changes or "image" in changes:
+            k8s_ops.ensure_service(uid)
         _sync_and_deploy(inst)
+        if "image" in changes or "prefix" in changes:
+            k8s_ops.create_pod(
+                uid,
+                prefix=inst.get("prefix", "s1"),
+                image_tag=changes.get("image") or inst.get("image_tag", "v20260328"),
+            )
+        if "prefix" in changes:
+            _update_legacy_cloudflare(uid, inst.get("prefix", "s1"))
     except Exception as e:
         logger.warning("ConfigMap sync failed for %d after update: %s", uid, e)
+    finally:
+        if old_key_to_delete:
+            try:
+                litellm_ops.delete_key(old_key_to_delete)
+            except Exception as e:
+                logger.warning("Failed to delete old LiteLLM key for %d: %s", uid, e)
 
     return {"id": uid, "action": "updated", "changes": changes}
 
@@ -753,7 +836,11 @@ def api_update(uid: int, req: HerUpdateRequest):
 @app.post("/api/instances/{uid}/stop")
 def api_stop(uid: int):
     """Stop (pause) an instance. CRD: sets paused=true; Operator deletes Pod."""
-    if _has_crd(uid):
+    try:
+        has_crd = _has_crd(uid)
+    except K8sApiException as e:
+        raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+    if has_crd:
         try:
             crd_ops.pause_her_instance(uid)
         except K8sApiException as e:
@@ -768,7 +855,11 @@ def api_stop(uid: int):
 @app.post("/api/instances/{uid}/start")
 def api_start(uid: int):
     """Start (resume) an instance. CRD: sets paused=false; Operator creates Pod."""
-    if _has_crd(uid):
+    try:
+        has_crd = _has_crd(uid)
+    except K8sApiException as e:
+        raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+    if has_crd:
         try:
             crd_ops.resume_her_instance(uid)
         except K8sApiException as e:
@@ -778,16 +869,22 @@ def api_start(uid: int):
     inst = db.get_by_id(uid)
     if not inst:
         raise HTTPException(404, f"Instance {uid} not found")
+    k8s_ops.ensure_service(uid)
     _sync_and_deploy(inst)
     k8s_ops.create_pod(uid, prefix=inst.get("prefix", "s1"))
     db.set_status(uid, "running")
+    _update_legacy_cloudflare(uid, inst.get("prefix", "s1"))
     return {"id": uid, "action": "started"}
 
 
 @app.post("/api/instances/{uid}/restart")
 async def api_restart(uid: int):
     """Restart an instance. CRD: deletes Pod, Operator self-heals and recreates."""
-    if _has_crd(uid):
+    try:
+        has_crd = _has_crd(uid)
+    except K8sApiException as e:
+        raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+    if has_crd:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, k8s_ops.delete_pod, uid)
         return {"id": uid, "action": "restarted", "managed_by": "operator",
@@ -799,15 +896,21 @@ async def api_restart(uid: int):
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, k8s_ops.delete_pod, uid)
     await asyncio.sleep(2)
+    k8s_ops.ensure_service(uid)
     _sync_and_deploy(inst)
     k8s_ops.create_pod(uid, prefix=inst.get("prefix", "s1"))
+    _update_legacy_cloudflare(uid, inst.get("prefix", "s1"))
     return {"id": uid, "action": "restarted"}
 
 
 @app.delete("/api/instances/{uid}")
 def api_delete(uid: int, purge: bool = Query(False)):
     """Delete an instance. CRD: deletes HerInstance; Operator cleans up Pod + ConfigMap."""
-    if _has_crd(uid):
+    try:
+        has_crd = _has_crd(uid)
+    except K8sApiException as e:
+        raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+    if has_crd:
         crd = crd_ops.get_her_instance(uid)
         old_key = (crd or {}).get("spec", {}).get("litellmKey", "")
         try:
@@ -834,16 +937,28 @@ def api_delete(uid: int, purge: bool = Query(False)):
 
     inst = db.get_by_id(uid)
     old_key = (inst or {}).get("litellm_key", "") if inst else ""
-    k8s_ops.delete_pod(uid)
-    k8s_ops.delete_configmap(uid)
+    try:
+        # Delete the Service first so a new RBAC/API failure does not leave
+        # the Pod/ConfigMap gone while the DB row is still active.
+        k8s_ops.delete_service(uid)
+        k8s_ops.delete_pod(uid)
+        k8s_ops.delete_configmap(uid)
+        if purge:
+            k8s_ops.delete_pvc(uid)
+    except K8sApiException as e:
+        raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
     if purge:
-        k8s_ops.delete_pvc(uid)
         db.purge_instance(uid)
     else:
         db.delete_instance(uid)
     if old_key:
         litellm_ops.delete_key(old_key)
     # knownBots cache invalidation removed — bots now register dynamically via Redis.
+    try:
+        cloudflare_ops.sync_tunnel_config()
+        cloudflare_ops.update_remote_ingress()
+    except Exception as cf_err:
+        logger.warning("Cloudflare config sync failed after legacy delete %d: %s", uid, cf_err)
     return {"id": uid, "action": "deleted", "purge": purge}
 
 
@@ -896,7 +1011,7 @@ def api_status():
                 crd_paused += 1
     except Exception:
         pass
-    db_counts = db.list_all()
+    db_counts = _db_instances_excluding_crds()
     stopped = sum(1 for i in db_counts if i["status"] == "stopped")
     k8s_status["stopped"] = stopped + crd_paused
     return k8s_status
@@ -927,7 +1042,7 @@ def api_health():
         pass
 
     # Legacy fallback: only check pods that are Running (skip exec-based checks for scale)
-    instances = db.list_all()
+    instances = _db_instances_excluding_crds()
     pod_statuses = k8s_ops.get_all_pod_statuses()
     results = []
     for inst in instances:
@@ -1126,7 +1241,11 @@ def api_sync_image_tags():
 @app.put("/api/instances/{uid}/deploy-group", tags=["deploy-groups"])
 def api_set_deploy_group(uid: int, req: SetDeployGroupRequest):
     """Move a single instance to a deploy group. Syncs both CRD and DB."""
-    if _has_crd(uid):
+    try:
+        has_crd = _has_crd(uid)
+    except K8sApiException as e:
+        raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+    if has_crd:
         try:
             crd_ops.set_deploy_group(uid, req.group)
         except K8sApiException as e:
@@ -1135,7 +1254,7 @@ def api_set_deploy_group(uid: int, req: SetDeployGroupRequest):
         db.set_deploy_group(uid, req.group)
     except Exception:
         pass
-    managed = "operator" if _has_crd(uid) else "db"
+    managed = "operator" if has_crd else "db"
     return {"id": uid, "deploy_group": req.group, "managed_by": managed}
 
 
@@ -1146,7 +1265,12 @@ def api_batch_set_deploy_group(req: BatchSetDeployGroupRequest):
     errors = []
     all_ids = list(req.ids)
     for uid in all_ids:
-        if _has_crd(uid):
+        try:
+            has_crd = _has_crd(uid)
+        except K8sApiException as e:
+            errors.append({"id": uid, "error": _k8s_error_detail(e)})
+            continue
+        if has_crd:
             try:
                 crd_ops.set_deploy_group(uid, req.group)
                 crd_count += 1
@@ -1520,11 +1644,11 @@ def api_known_bots():
             spec = inst.get("spec", {})
             app_id = spec.get("appId", "")
             name = spec.get("name", "")
-            if app_id and app_id not in bots:
+            if app_id and name:
                 bots[app_id] = name
             boi = spec.get("botOpenId", "")
-            if boi and boi not in bot_open_ids:
-                bot_open_ids[boi] = name
+            if boi and app_id:
+                bot_open_ids[boi] = app_id
     except Exception:
         pass
     return {
@@ -1541,26 +1665,48 @@ def api_litellm_generate_key(uid: int = Query(..., description="Instance ID")):
     """Generate a LiteLLM virtual key for a specific instance if missing."""
     if not litellm_ops.LITELLM_MASTER_KEY:
         raise HTTPException(503, "LITELLM_MASTER_KEY is not configured")
+
+    # Try CRD first
     inst = crd_ops.get_her_instance(uid)
-    if not inst:
+    if inst:
+        if inst.get("spec", {}).get("provider") != "litellm":
+            raise HTTPException(400, f"Instance her-{uid} is not using provider=litellm")
+        old_key = inst.get("spec", {}).get("litellmKey", "")
+        if old_key:
+            return {"id": uid, "key": old_key, "status": "already_exists"}
+        name = inst.get("spec", {}).get("name", "")
+        key = litellm_ops.generate_key(uid, name=name)
+        if not key:
+            raise HTTPException(502, "Failed to generate LiteLLM key")
+        try:
+            crd_ops.update_her_instance(uid, {"litellmKey": key})
+        except Exception as e:
+            litellm_ops.delete_key(key)
+            logger.warning("CRD patch litellmKey failed for %d: %s", uid, e)
+            raise HTTPException(500, f"Failed to patch CRD with LiteLLM key: {e}")
+        return {"id": uid, "key": key}
+
+    # Legacy DB fallback
+    db_inst = db.get_by_id(uid)
+    if not db_inst:
         raise HTTPException(404, f"Instance her-{uid} not found")
-    if inst.get("spec", {}).get("provider") != "litellm":
+    if db_inst.get("provider") != "litellm":
         raise HTTPException(400, f"Instance her-{uid} is not using provider=litellm")
-    old_key = inst.get("spec", {}).get("litellmKey", "")
+    old_key = db_inst.get("litellm_key", "")
     if old_key:
         return {"id": uid, "key": old_key, "status": "already_exists"}
-    name = inst.get("spec", {}).get("name", "")
-    key = litellm_ops.generate_key(uid, name=name)
+    key = litellm_ops.generate_key(uid, name=db_inst.get("name", ""))
     if not key:
         raise HTTPException(502, "Failed to generate LiteLLM key")
     try:
-        crd_ops.update_her_instance(uid, {"litellmKey": key})
+        updated = db.update(uid, {"litellm_key": key})
+        if not updated:
+            raise RuntimeError(f"Instance her-{uid} disappeared while storing LiteLLM key")
     except Exception as e:
         litellm_ops.delete_key(key)
-        logger.warning("CRD patch litellmKey failed for %d: %s", uid, e)
-        raise HTTPException(500, f"Failed to patch CRD with LiteLLM key: {e}")
-    db.update(uid, {"litellm_key": key})
-    return {"id": uid, "key": key}
+        logger.warning("Legacy DB update litellm_key failed for %d: %s", uid, e)
+        raise HTTPException(500, f"Failed to store LiteLLM key for her-{uid}: {e}")
+    return {"id": uid, "key": key, "managed_by": "legacy"}
 
 
 @app.post("/api/litellm/keys/generate-batch", tags=["litellm"], dependencies=[Depends(verify_api_key)])
@@ -1569,6 +1715,8 @@ def api_litellm_generate_batch():
     if not litellm_ops.LITELLM_MASTER_KEY:
         raise HTTPException(503, "LITELLM_MASTER_KEY is not configured")
     results = []
+
+    # CRD instances
     for inst in crd_ops.list_her_instances():
         spec = inst.get("spec", {})
         uid = spec.get("userId", 0)
@@ -1581,13 +1729,35 @@ def api_litellm_generate_batch():
         if key:
             try:
                 crd_ops.update_her_instance(uid, {"litellmKey": key})
-                db.update(uid, {"litellm_key": key})
                 results.append({"id": uid, "status": "generated"})
             except Exception as e:
                 litellm_ops.delete_key(key)
                 results.append({"id": uid, "status": "error", "error": str(e)})
         else:
             results.append({"id": uid, "status": "generation_failed"})
+
+    # Legacy DB instances (not covered by CRD)
+    handled_uids = {r["id"] for r in results}
+    for inst in _db_instances_excluding_crds():
+        uid = inst.get("id")
+        if not uid or uid in handled_uids or inst.get("provider") != "litellm":
+            continue
+        if inst.get("litellm_key"):
+            results.append({"id": uid, "status": "already_has_key", "managed_by": "legacy"})
+            continue
+        key = litellm_ops.generate_key(uid, name=inst.get("name", ""))
+        if key:
+            try:
+                updated = db.update(uid, {"litellm_key": key})
+                if not updated:
+                    raise RuntimeError(f"Instance her-{uid} disappeared while storing LiteLLM key")
+                results.append({"id": uid, "status": "generated", "managed_by": "legacy"})
+            except Exception as e:
+                litellm_ops.delete_key(key)
+                results.append({"id": uid, "status": "error", "error": str(e), "managed_by": "legacy"})
+        else:
+            results.append({"id": uid, "status": "generation_failed", "managed_by": "legacy"})
+
     return {"results": results}
 
 
@@ -1654,7 +1824,7 @@ def api_stats():
         logger.warning("CRD stats failed: %s", e)
 
     # DB-managed instances
-    instances = db.list_all()
+    instances = _db_instances_excluding_crds()
     pod_statuses = k8s_ops.get_all_pod_statuses()
     for inst in instances:
         if inst["status"] == "deleted":

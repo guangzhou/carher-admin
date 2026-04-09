@@ -271,14 +271,21 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 	})
 
 	hash := fmt.Sprintf("%x", md5.Sum([]byte(configJSON)))[:12]
+	cmName := fmt.Sprintf("carher-%d-user-config", uid)
 
 	if her.Status.ConfigHash == hash {
-		return hash, nil
+		var existing corev1.ConfigMap
+		err := r.Get(ctx, types.NamespacedName{Name: cmName, Namespace: Namespace}, &existing)
+		if err == nil {
+			return hash, nil
+		}
+		if err != nil && !errors.IsNotFound(err) {
+			return hash, err
+		}
 	}
 
 	isController := true
 	blockOwnerDeletion := true
-	cmName := fmt.Sprintf("carher-%d-user-config", uid)
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cmName,
@@ -595,13 +602,6 @@ func (r *HerInstanceReconciler) ensureService(ctx context.Context, her *herv1.He
 	uid := her.Spec.UserID
 	svcName := fmt.Sprintf("carher-%d-svc", uid)
 
-	var existing corev1.Service
-	if err := r.Get(ctx, types.NamespacedName{Name: svcName, Namespace: Namespace}, &existing); err == nil {
-		return nil
-	} else if !errors.IsNotFound(err) {
-		return err
-	}
-
 	isController := true
 	blockOwnerDeletion := true
 	svc := &corev1.Service{
@@ -638,7 +638,20 @@ func (r *HerInstanceReconciler) ensureService(ctx context.Context, her *herv1.He
 			},
 		},
 	}
-	return r.Create(ctx, svc)
+
+	var existing corev1.Service
+	err := r.Get(ctx, types.NamespacedName{Name: svcName, Namespace: Namespace}, &existing)
+	if errors.IsNotFound(err) {
+		return r.Create(ctx, svc)
+	} else if err != nil {
+		return err
+	}
+
+	existing.Labels = svc.Labels
+	existing.OwnerReferences = svc.OwnerReferences
+	existing.Spec.Selector = svc.Spec.Selector
+	existing.Spec.Ports = svc.Spec.Ports
+	return r.Update(ctx, &existing)
 }
 
 // ── helpers ──

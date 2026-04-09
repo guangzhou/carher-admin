@@ -34,7 +34,7 @@ description: >-
 ACCOUNT_ID = "67e6618e6af7e4342cbd1de02536fa2f"
 TUNNEL_ID  = "0e83a70f-93d9-4c17-86cc-7600f52696a2"
 ZONE_ID    = "3748a528561bd0e67f85d1ef23271612"
-CF_TOKEN   = "w2Tjp0aqvc_jr8W5WgiERKkm750CZNlKsb80khlm"
+CF_TOKEN   = os.environ["CLOUDFLARE_API_TOKEN"]
 DOMAIN     = "carher.net"
 ```
 
@@ -69,11 +69,11 @@ curl -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
 这一步是之前遗漏的。必须通过 Cloudflare API 更新远程配置：
 
 ```python
-import json, urllib.request
+import json, os, urllib.request
 
 ACCOUNT = "67e6618e6af7e4342cbd1de02536fa2f"
 TUNNEL  = "0e83a70f-93d9-4c17-86cc-7600f52696a2"
-TOKEN   = "w2Tjp0aqvc_jr8W5WgiERKkm750CZNlKsb80khlm"
+TOKEN   = os.environ["CLOUDFLARE_API_TOKEN"]
 URL     = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/cfd_tunnel/{TUNNEL}/configurations"
 
 # 1) GET 当前配置

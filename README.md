@@ -697,8 +697,10 @@ kubectl apply -f k8s/servicemonitor.yaml        # 7. Prometheus 监控
 # 配置 admin 认证密钥
 kubectl create secret generic carher-admin-secrets -n carher \
   --from-literal=deploy-webhook-secret=YOUR_WEBHOOK_SECRET \
+  --from-literal=admin-api-key=YOUR_ADMIN_API_KEY \
   --from-literal=admin-username=admin \
   --from-literal=admin-password=YOUR_PASSWORD \
+  --from-literal=cloudflare-api-token=YOUR_CLOUDFLARE_API_TOKEN \
   --from-literal=github-token=YOUR_GITHUB_PAT
 
 # 部署 cloudflared (Cloudflare Tunnel)

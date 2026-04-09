@@ -1,7 +1,8 @@
 # PostgreSQL 16 for LiteLLM spend tracking.
 # Single-instance with NAS persistent storage.
 #
-# Secret is in k8s/litellm-secrets.yaml (immutable, apply once separately).
+# Secret is defined by the template in k8s/litellm-secrets.yaml.
+# Render that file with real values before applying the Secret.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

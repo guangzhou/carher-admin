@@ -1,7 +1,8 @@
 """LiteLLM virtual key management.
 
 Generates per-instance keys for spend tracking via LiteLLM proxy API.
-Keys are stored in the admin DB (litellm_key column) and CRD (spec.litellmKey).
+For CRD-managed instances, the authoritative mapping is stored in HerInstance
+spec.litellmKey. Legacy DB-managed instances keep using her_instances.litellm_key.
 """
 
 from __future__ import annotations

@@ -31,6 +31,47 @@ AGENT_BASE_URL = os.environ.get("AGENT_LLM_BASE_URL", "https://openrouter.ai/api
 _llm_session: aiohttp.ClientSession | None = None
 
 
+from .crd_helpers import db_instances_excluding_crds as _db_instances_excluding_crds
+
+
+def _merged_instances() -> list[dict]:
+    """Return a merged operator + legacy instance view for read-only agent tools."""
+    merged: list[dict] = []
+    try:
+        from . import crd_ops
+
+        for inst in crd_ops.list_her_instances():
+            spec = inst.get("spec", {})
+            uid = spec.get("userId", 0)
+            if not uid:
+                continue
+            merged.append({
+                "id": uid,
+                "name": spec.get("name", ""),
+                "model": spec.get("model", "gpt"),
+                "deploy_group": spec.get("deployGroup", "stable"),
+                "owner": spec.get("owner", ""),
+                "status": "stopped" if spec.get("paused") else "running",
+                "managed_by": "operator",
+            })
+    except Exception as e:
+        logger.warning("Agent CRD list failed, falling back to DB-only view: %s", e)
+
+    for inst in _db_instances_excluding_crds():
+        if inst["status"] == "deleted":
+            continue
+        merged.append({
+            "id": inst["id"],
+            "name": inst.get("name", ""),
+            "model": inst.get("model", "gpt"),
+            "deploy_group": inst.get("deploy_group", "stable"),
+            "owner": inst.get("owner", ""),
+            "status": inst.get("status", "unknown"),
+            "managed_by": "db",
+        })
+    return merged
+
+
 def _get_llm_session() -> aiohttp.ClientSession:
     global _llm_session
     if _llm_session is None or _llm_session.closed:
@@ -206,51 +247,94 @@ def _execute_tool(name: str, params: dict, dry_run: bool = False) -> dict:
 
     try:
         if name == "list_instances":
-            instances = db.list_all()
-            filtered = [i for i in instances if i["status"] != "deleted"]
+            instances = _merged_instances()
+            filtered = list(instances)
             if params.get("status"):
                 pod_statuses = k8s_ops.get_all_pod_statuses()
                 target = params["status"].lower()
-                filtered = [i for i in filtered
-                            if (pod_statuses.get(i["id"], {}).get("phase", "Stopped") or "Stopped").lower() == target]
+                filtered = [
+                    i for i in filtered
+                    if (
+                        pod_statuses.get(
+                            i["id"],
+                            {},
+                        ).get("phase", "Stopped" if i.get("status") == "stopped" else "Unknown")
+                        or "Stopped"
+                    ).lower() == target
+                ]
             if params.get("model"):
                 filtered = [i for i in filtered if i.get("model") == params["model"]]
             if params.get("deploy_group"):
                 filtered = [i for i in filtered if i.get("deploy_group") == params["deploy_group"]]
             if params.get("name"):
                 filtered = [i for i in filtered if params["name"].lower() in i.get("name", "").lower()]
-            result["data"] = [{"id": i["id"], "name": i["name"], "model": i["model"], "deploy_group": i.get("deploy_group", "stable")} for i in filtered]
+            result["data"] = [
+                {
+                    "id": i["id"],
+                    "name": i["name"],
+                    "model": i["model"],
+                    "deploy_group": i.get("deploy_group", "stable"),
+                    "managed_by": i.get("managed_by", "db"),
+                }
+                for i in filtered
+            ]
             result["count"] = len(filtered)
 
         elif name == "get_instance":
             uid = int(params["uid"])
-            inst = db.get_by_id(uid)
-            if not inst:
-                result["error"] = f"Instance {uid} not found"
-            else:
+            try:
+                from . import crd_ops
+
+                crd = crd_ops.get_her_instance(uid)
+            except Exception as e:
+                logger.warning("Agent CRD get failed for %d: %s", uid, e)
+                crd = None
+            if crd:
+                spec = crd.get("spec", {})
+                status = crd.get("status", {})
                 pod = k8s_ops.get_pod_status(uid)
-                health = k8s_ops.check_pod_health(uid) if pod.get("pod_exists") else {}
                 result["data"] = {
-                    "id": uid, "name": inst["name"], "model": inst["model"],
-                    "status": pod.get("phase", "Stopped"),
-                    "feishu_ws": health.get("feishu_ws", False),
-                    "restarts": pod.get("restarts", 0),
-                    "deploy_group": inst.get("deploy_group", "stable"),
-                    "owner": inst.get("owner", ""),
+                    "id": uid,
+                    "name": spec.get("name", ""),
+                    "model": spec.get("model", "gpt"),
+                    "status": "Stopped" if spec.get("paused") else status.get("phase", pod.get("phase", "Unknown")),
+                    "feishu_ws": status.get("feishuWS", "Unknown") == "Connected",
+                    "restarts": status.get("restarts", pod.get("restarts", 0)),
+                    "deploy_group": spec.get("deployGroup", "stable"),
+                    "owner": spec.get("owner", ""),
+                    "managed_by": "operator",
                 }
+            else:
+                inst = db.get_by_id(uid)
+                if not inst:
+                    result["error"] = f"Instance {uid} not found"
+                else:
+                    pod = k8s_ops.get_pod_status(uid)
+                    health = k8s_ops.check_pod_health(uid) if pod.get("pod_exists") else {}
+                    result["data"] = {
+                        "id": uid, "name": inst["name"], "model": inst["model"],
+                        "status": pod.get("phase", "Stopped"),
+                        "feishu_ws": health.get("feishu_ws", False),
+                        "restarts": pod.get("restarts", 0),
+                        "deploy_group": inst.get("deploy_group", "stable"),
+                        "owner": inst.get("owner", ""),
+                        "managed_by": "db",
+                    }
 
         elif name == "get_stats":
-            instances = db.list_all()
-            active = [i for i in instances if i["status"] != "deleted"]
+            active = _merged_instances()
             model_dist = {}
+            deploy_groups = {}
             for i in active:
                 m = i.get("model", "gpt")
                 model_dist[m] = model_dist.get(m, 0) + 1
+                g = i.get("deploy_group", "stable")
+                deploy_groups[g] = deploy_groups.get(g, 0) + 1
             result["data"] = {
                 "total": len(active),
                 "stopped": sum(1 for i in active if i["status"] == "stopped"),
                 "model_distribution": model_dist,
-                "deploy_groups": db.get_deploy_group_stats(),
+                "deploy_groups": deploy_groups,
                 "current_image": db.get_current_image_tag(),
             }
 

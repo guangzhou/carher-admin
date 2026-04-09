@@ -150,6 +150,52 @@ def delete_configmap(uid: int):
 
 
 # ──────────────────────────────────────
+# Service
+# ──────────────────────────────────────
+
+def ensure_service(uid: int):
+    """Ensure a stable per-instance ClusterIP Service exists."""
+    v1 = _core()
+    svc_name = f"carher-{uid}-svc"
+    try:
+        v1.read_namespaced_service(svc_name, NS)
+        return
+    except ApiException as e:
+        if e.status != 404:
+            raise
+
+    svc = client.V1Service(
+        metadata=client.V1ObjectMeta(
+            name=svc_name,
+            namespace=NS,
+            labels={"app": "carher-user", "user-id": str(uid), "managed-by": "carher-admin"},
+        ),
+        spec=client.V1ServiceSpec(
+            type="ClusterIP",
+            selector={"app": "carher-user", "user-id": str(uid)},
+            ports=[
+                client.V1ServicePort(name="gateway", port=18789, target_port=18789, protocol="TCP"),
+                client.V1ServicePort(name="realtime", port=18790, target_port=18790, protocol="TCP"),
+                client.V1ServicePort(name="frontend", port=8000, target_port=8000, protocol="TCP"),
+                client.V1ServicePort(name="ws-proxy", port=8080, target_port=8080, protocol="TCP"),
+                client.V1ServicePort(name="oauth", port=18891, target_port=18891, protocol="TCP"),
+                client.V1ServicePort(name="a2a", port=18795, target_port=18795, protocol="TCP"),
+            ],
+        ),
+    )
+    v1.create_namespaced_service(NS, svc)
+
+
+def delete_service(uid: int):
+    v1 = _core()
+    try:
+        v1.delete_namespaced_service(f"carher-{uid}-svc", NS)
+    except ApiException as e:
+        if e.status != 404:
+            raise
+
+
+# ──────────────────────────────────────
 # PVC
 # ──────────────────────────────────────
 
@@ -212,6 +258,7 @@ def create_pod(uid: int, prefix: str, image_tag: str = DEFAULT_IMAGE_TAG):
                     client.V1ContainerPort(container_port=8000, name="frontend"),
                     client.V1ContainerPort(container_port=8080, name="ws-proxy"),
                     client.V1ContainerPort(container_port=18891, name="oauth"),
+                    client.V1ContainerPort(container_port=18795, name="a2a"),
                 ],
                 env=[
                     client.V1EnvVar(name="HOME", value="/data"),

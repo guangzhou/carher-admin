@@ -1,3 +1,5 @@
+export const DEFAULT_PROVIDER = "wangsu";
+
 export const PROVIDER_MODELS = {
   openrouter: [
     { value: "gpt", label: "GPT-5.4" },
@@ -22,6 +24,13 @@ export const PROVIDER_MODELS = {
     { value: "gemini", label: "Gemini 3.1 Pro" },
   ],
 };
+
+export const PROVIDER_OPTIONS = [
+  { value: "openrouter", label: "OpenRouter" },
+  { value: "anthropic", label: "Anthropic 直连" },
+  { value: "wangsu", label: "网宿" },
+  { value: "litellm", label: "LiteLLM" },
+];
 
 export const ALL_MODELS = [
   { value: "gpt", label: "GPT-5.4" },

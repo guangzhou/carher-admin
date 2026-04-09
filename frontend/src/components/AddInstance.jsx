@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { api } from "../api";
-import { PROVIDER_MODELS } from "../models";
+import { DEFAULT_PROVIDER, PROVIDER_MODELS, PROVIDER_OPTIONS } from "../models";
 
 export default function AddInstance({ onCreated }) {
   const [form, setForm] = useState({
@@ -11,7 +11,7 @@ export default function AddInstance({ onCreated }) {
     app_secret: "",
     prefix: "s1",
     owner: "",
-    provider: "wangsu",
+    provider: DEFAULT_PROVIDER,
   });
   const [nextId, setNextId] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -73,9 +73,9 @@ export default function AddInstance({ onCreated }) {
               if (!models.some((m) => m.value === form.model)) next.model = models[0].value;
               setForm(next);
             }}>
-              <option value="openrouter">OpenRouter</option>
-              <option value="anthropic">Anthropic 直连</option>
-              <option value="wangsu">网宿</option>
+              {PROVIDER_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
             </select>
           </Field>
           <Field label="模型">

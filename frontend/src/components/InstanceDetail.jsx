@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { PROVIDER_MODELS, getModelAlias } from "../models";
+import { DEFAULT_PROVIDER, PROVIDER_MODELS, PROVIDER_OPTIONS, getModelAlias } from "../models";
 import LogViewer from "./LogViewer";
 
 export default function InstanceDetail({ id, onBack, onRefresh }) {
@@ -21,7 +21,7 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
         name: d.name || "",
         model: d.model_short || d.model || "",
         owner: d.owner || "",
-        provider: d.provider || "openrouter",
+        provider: d.provider || DEFAULT_PROVIDER,
         deploy_group: d.deploy_group || "stable",
         image: d.image || "",
         app_id: prev.app_id ?? d.app_id ?? "",
@@ -59,7 +59,7 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
       if (editForm.name !== (data.name || "")) params.name = editForm.name;
       if (editForm.model !== (data.model_short || data.model || "")) params.model = editForm.model;
       if (editForm.owner !== (data.owner || "")) params.owner = editForm.owner;
-      if (editForm.provider !== (data.provider || "openrouter")) params.provider = editForm.provider;
+      if (editForm.provider !== (data.provider || DEFAULT_PROVIDER)) params.provider = editForm.provider;
       if (editForm.deploy_group !== (data.deploy_group || "stable")) params.deploy_group = editForm.deploy_group;
       if (editForm.image && editForm.image !== (data.image || "")) params.image = editForm.image;
       if (editForm.app_id !== (data.app_id || "")) params.app_id = editForm.app_id;
@@ -112,7 +112,7 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
               name: data.name || "",
               model: data.model_short || data.model || "",
               owner: data.owner || "",
-              provider: data.provider || "openrouter",
+              provider: data.provider || DEFAULT_PROVIDER,
               deploy_group: data.deploy_group || "stable",
               image: data.image || "",
               app_id: data.app_id || "",
@@ -208,9 +208,9 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
                   setField("model", models[0].value);
                 }
               }}>
-                <option value="openrouter">OpenRouter</option>
-                <option value="anthropic">Anthropic (直连)</option>
-                <option value="wangsu">网宿</option>
+                {PROVIDER_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
               </select>
             </div>
             <div>

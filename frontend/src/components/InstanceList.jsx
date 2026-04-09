@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../api";
-import { PROVIDER_MODELS, ALL_MODELS, getModelAlias } from "../models";
+import { DEFAULT_PROVIDER, PROVIDER_MODELS, PROVIDER_OPTIONS, ALL_MODELS, getModelAlias } from "../models";
 import InstanceDetail from "./InstanceDetail";
 import LogViewer from "./LogViewer";
 
@@ -290,7 +290,7 @@ function BatchEditModal({ count, deployGroups, imageTags, onSubmit, onClose }) {
   const [enableModel, setEnableModel] = useState(false);
   const [enableGroup, setEnableGroup] = useState(false);
   const [enableImage, setEnableImage] = useState(false);
-  const [provider, setProvider] = useState("wangsu");
+  const [provider, setProvider] = useState(DEFAULT_PROVIDER);
   const [model, setModel] = useState("opus");
   const [deployGroup, setDeployGroup] = useState("stable");
   const [image, setImage] = useState("");
@@ -331,9 +331,9 @@ function BatchEditModal({ count, deployGroups, imageTags, onSubmit, onClose }) {
             <input type="checkbox" checked={enableProvider} onChange={(e) => setEnableProvider(e.target.checked)} className="rounded border-gray-600" />
             <span className="text-sm text-gray-300 w-16">Provider</span>
             <select className="input flex-1" value={provider} onChange={(e) => handleProviderChange(e.target.value)} disabled={!enableProvider}>
-              <option value="openrouter">OpenRouter</option>
-              <option value="anthropic">Anthropic 直连</option>
-              <option value="wangsu">网宿</option>
+              {PROVIDER_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
             </select>
           </label>
 

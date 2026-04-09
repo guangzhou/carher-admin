@@ -231,7 +231,7 @@ def _enrich_with_runtime(instance: dict) -> dict:
 
     prefix = instance.get("prefix", "s1")
     pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
-    model_map = _model_map_for_provider(instance.get("provider", "openrouter"))
+    model_map = _model_map_for_provider(instance.get("provider", "wangsu"))
     model_full = model_map.get(instance.get("model", "gpt"), instance.get("model", "gpt"))
 
     return {
@@ -247,7 +247,7 @@ def _enrich_with_runtime(instance: dict) -> dict:
         "app_id": instance.get("app_id", ""),
         "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback" if instance.get("app_id") else "",
         "owner": instance.get("owner", ""),
-        "provider": instance.get("provider", "openrouter"),
+        "provider": instance.get("provider", "wangsu"),
         "sync_status": instance.get("sync_status", ""),
     }
 
@@ -297,7 +297,7 @@ def api_list_instances(
                 "app_id": spec.get("appId", ""),
                 "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback" if spec.get("appId") else "",
                 "owner": spec.get("owner", ""),
-                "provider": spec.get("provider", "openrouter"),
+                "provider": spec.get("provider", "wangsu"),
                 "image": spec.get("image", ""),
                 "paused": spec.get("paused", False),
                 "feishu_ws": status.get("feishuWS", "Unknown"),
@@ -322,7 +322,7 @@ def api_list_instances(
 
         prefix = inst.get("prefix", "s1")
         pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
-        mm = _model_map_for_provider(inst.get("provider", "openrouter"))
+        mm = _model_map_for_provider(inst.get("provider", "wangsu"))
         model_full = mm.get(inst.get("model", "gpt"), inst.get("model", "gpt"))
 
         results.append({
@@ -400,7 +400,7 @@ def api_search_instances(
                 "status": phase, "pod_ip": st.get("podIP", ""),
                 "node": st.get("node", ""), "restarts": st.get("restarts", 0),
                 "deploy_group": spec.get("deployGroup", "stable"),
-                "owner": spec.get("owner", ""), "provider": spec.get("provider", "openrouter"),
+                "owner": spec.get("owner", ""), "provider": spec.get("provider", "wangsu"),
                 "app_id": spec.get("appId", ""), "image": spec.get("image", ""),
                 "paused": spec.get("paused", False),
                 "feishu_ws": st.get("feishuWS", "Unknown"), "managed_by": "operator",
@@ -429,7 +429,7 @@ def api_search_instances(
         if name and name.lower() not in inst.get("name", "").lower():
             continue
 
-        mm = _model_map_for_provider(inst.get("provider", "openrouter"))
+        mm = _model_map_for_provider(inst.get("provider", "wangsu"))
         model_full = mm.get(inst.get("model", "gpt"), inst.get("model", "gpt"))
         entry = {
             "id": uid, "name": inst.get("name", ""),
@@ -437,7 +437,7 @@ def api_search_instances(
             "status": phase, "pod_ip": pod.get("pod_ip", ""),
             "node": pod.get("node", ""), "restarts": pod.get("restarts", 0),
             "deploy_group": inst.get("deploy_group", "stable"),
-            "owner": inst.get("owner", ""), "provider": inst.get("provider", "openrouter"),
+            "owner": inst.get("owner", ""), "provider": inst.get("provider", "wangsu"),
             "image": inst.get("image_tag", ""),
         }
         if feishu_ws:
@@ -476,7 +476,7 @@ def api_get_instance(uid: int):
                 "bot_open_id": spec.get("botOpenId", ""),
                 "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
                 "owner": spec.get("owner", ""),
-                "provider": spec.get("provider", "openrouter"),
+                "provider": spec.get("provider", "wangsu"),
                 "deploy_group": spec.get("deployGroup", "stable"),
                 "feishu_ws": status.get("feishuWS", "Unknown"),
                 "config_hash": status.get("configHash", ""),
@@ -1483,7 +1483,7 @@ def api_config_preview(uid: int):
                 "id": uid, "name": spec.get("name", ""),
                 "model": spec.get("model", "gpt"), "app_id": spec.get("appId", ""),
                 "app_secret": app_secret, "prefix": spec.get("prefix", "s1"),
-                "owner": spec.get("owner", ""), "provider": spec.get("provider", "openrouter"),
+                "owner": spec.get("owner", ""), "provider": spec.get("provider", "wangsu"),
                 "bot_open_id": spec.get("botOpenId", ""),
                 "litellm_key": spec.get("litellmKey", ""),
             }
@@ -1644,7 +1644,7 @@ def api_stats():
 
             m = spec.get("model", "gpt")
             model_dist[m] = model_dist.get(m, 0) + 1
-            p = spec.get("provider", "openrouter")
+            p = spec.get("provider", "wangsu")
             provider_dist[p] = provider_dist.get(p, 0) + 1
             pfx = spec.get("prefix", "s1")
             prefix_dist[pfx] = prefix_dist.get(pfx, 0) + 1
@@ -1671,7 +1671,7 @@ def api_stats():
 
         m = inst.get("model", "gpt")
         model_dist[m] = model_dist.get(m, 0) + 1
-        p = inst.get("provider", "openrouter")
+        p = inst.get("provider", "wangsu")
         provider_dist[p] = provider_dist.get(p, 0) + 1
         pfx = inst.get("prefix", "s1")
         prefix_dist[pfx] = prefix_dist.get(pfx, 0) + 1

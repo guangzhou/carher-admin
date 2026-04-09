@@ -6,6 +6,8 @@ Cursor and other AI agents consume these via /openapi.json.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -41,7 +43,10 @@ class HerAddRequest(BaseModel):
     app_secret: str = Field(..., description="Feishu App Secret")
     prefix: str = Field("s1", description="Server prefix (s1/s2/s3)")
     owner: str = Field("", description="Feishu open_id(s), pipe-separated")
-    provider: str = Field("wangsu", description="AI provider: openrouter / anthropic / wangsu / litellm")
+    provider: Literal["openrouter", "anthropic", "wangsu", "litellm"] = Field(
+        "wangsu",
+        description="AI provider: openrouter / anthropic / wangsu / litellm",
+    )
     deploy_group: str = Field("stable", description="Deploy group name")
 
 
@@ -55,7 +60,10 @@ class HerUpdateRequest(BaseModel):
     app_id: str | None = Field(None, description="Update Feishu App ID (cli_xxx)")
     app_secret: str | None = Field(None, description="Update Feishu App Secret (stored in K8s Secret)")
     owner: str | None = Field(None, description="Update owner open_id(s)")
-    provider: str | None = Field(None, description="Update provider: openrouter / anthropic / wangsu / litellm")
+    provider: Literal["openrouter", "anthropic", "wangsu", "litellm"] | None = Field(
+        None,
+        description="Update provider: openrouter / anthropic / wangsu / litellm",
+    )
     prefix: str | None = Field(None, description="Update server prefix (s1/s2/s3)")
     bot_open_id: str | None = Field(None, description="Update bot open_id")
     image: str | None = Field(None, description="Update image tag (e.g. v20260329)")

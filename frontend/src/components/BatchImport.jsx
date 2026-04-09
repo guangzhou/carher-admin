@@ -1,12 +1,15 @@
 import { useState } from "react";
 import { api } from "../api";
+import { DEFAULT_PROVIDER, PROVIDER_OPTIONS } from "../models";
 
 const CSV_TEMPLATE = `# name,model,app_id,app_secret,prefix,owner,provider
+# provider 可选值: openrouter / anthropic / wangsu / litellm
 # 例:
-# 张三,gpt,cli_axxxx,secret_xxx,s1,ou_xxx,openrouter
-# 李四,sonnet,cli_bxxxx,secret_yyy,s2,,wangsu`;
+# 张三,opus,cli_axxxx,secret_xxx,s1,ou_xxx,wangsu
+# 李四,sonnet,cli_bxxxx,secret_yyy,s2,,litellm`;
 
 const FIELDS = ["name", "model", "app_id", "app_secret", "prefix", "owner", "provider"];
+const VALID_PROVIDERS = new Set(PROVIDER_OPTIONS.map((option) => option.value));
 
 export default function BatchImport({ onDone }) {
   const [mode, setMode] = useState("csv"); // csv | form
@@ -19,6 +22,7 @@ export default function BatchImport({ onDone }) {
     const lines = csv.split("\n").filter((l) => l.trim() && !l.trim().startsWith("#"));
     const items = lines.map((line) => {
       const cols = line.split(",").map((c) => c.trim());
+      const provider = (cols[6] || DEFAULT_PROVIDER).toLowerCase();
       return {
         name: cols[0] || "",
         model: cols[1] || "gpt",
@@ -26,7 +30,7 @@ export default function BatchImport({ onDone }) {
         app_secret: cols[3] || "",
         prefix: cols[4] || "s1",
         owner: cols[5] || "",
-        provider: cols[6] || "openrouter",
+        provider,
       };
     });
     setParsed(items);
@@ -50,6 +54,13 @@ export default function BatchImport({ onDone }) {
     const invalid = parsed.filter((p) => !p.name || !p.app_id || !p.app_secret);
     if (invalid.length) {
       alert(`${invalid.length} 行缺少必填字段 (name, app_id, app_secret)`);
+      return;
+    }
+    const invalidProviderRows = parsed
+      .map((row, idx) => ({ row, idx: idx + 1 }))
+      .filter(({ row }) => !VALID_PROVIDERS.has(row.provider));
+    if (invalidProviderRows.length) {
+      alert(`以下行的 provider 非法: ${invalidProviderRows.map(({ idx }) => idx).join(", ")}\n可选值: ${[...VALID_PROVIDERS].join(" / ")}`);
       return;
     }
     if (!confirm(`确认导入 ${parsed.length} 个 Her 实例？`)) return;
@@ -113,13 +124,21 @@ export default function BatchImport({ onDone }) {
             </thead>
             <tbody>
               {parsed.map((row, i) => {
-                const valid = row.name && row.app_id && row.app_secret;
+                const valid = row.name && row.app_id && row.app_secret && VALID_PROVIDERS.has(row.provider);
                 const res = results?.[i];
                 return (
                   <tr key={i} className="border-b border-gray-800/50">
                     <td className="p-2 text-gray-500">{i + 1}</td>
                     {FIELDS.map((f) => (
-                      <td key={f} className={`p-2 ${!row[f] && (f === "name" || f === "app_id" || f === "app_secret") ? "text-red-400" : "text-gray-300"}`}>
+                      <td
+                        key={f}
+                        className={`p-2 ${
+                          (!row[f] && (f === "name" || f === "app_id" || f === "app_secret")) ||
+                          (f === "provider" && !VALID_PROVIDERS.has(row.provider))
+                            ? "text-red-400"
+                            : "text-gray-300"
+                        }`}
+                      >
                         {f === "app_secret" ? "***" : (row[f] || "-")}
                       </td>
                     ))}
@@ -131,7 +150,7 @@ export default function BatchImport({ onDone }) {
                       ) : (
                         valid
                           ? <span className="text-gray-500">待导入</span>
-                          : <span className="text-red-400">缺字段</span>
+                          : <span className="text-red-400">{VALID_PROVIDERS.has(row.provider) ? "缺字段" : "provider 非法"}</span>
                       )}
                     </td>
                   </tr>

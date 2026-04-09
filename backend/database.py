@@ -27,7 +27,7 @@ DB_DIR = Path(os.environ.get("CARHER_ADMIN_DB_DIR", "/data/carher-admin"))
 DB_PATH = DB_DIR / "admin.db"
 BACKUP_DIR = Path(os.environ.get("CARHER_ADMIN_BACKUP_DIR", "/nas-backup/carher-admin"))
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS her_instances (
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS her_instances (
     app_secret      TEXT NOT NULL DEFAULT '',
     prefix          TEXT NOT NULL DEFAULT 's1',
     owner           TEXT NOT NULL DEFAULT '',
-    provider        TEXT NOT NULL DEFAULT 'openrouter',
+    provider        TEXT NOT NULL DEFAULT 'wangsu',
     bot_open_id     TEXT NOT NULL DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'running',
     sync_status     TEXT NOT NULL DEFAULT 'pending',
@@ -227,6 +227,38 @@ MIGRATIONS = {
     ],
     10: [
         "ALTER TABLE her_instances ADD COLUMN litellm_key TEXT NOT NULL DEFAULT ''",
+    ],
+    11: [
+        "ALTER TABLE her_instances RENAME TO her_instances_old",
+        """CREATE TABLE her_instances (
+            id              INTEGER PRIMARY KEY,
+            name            TEXT NOT NULL DEFAULT '',
+            model           TEXT NOT NULL DEFAULT 'gpt',
+            app_id          TEXT NOT NULL DEFAULT '',
+            app_secret      TEXT NOT NULL DEFAULT '',
+            prefix          TEXT NOT NULL DEFAULT 's1',
+            owner           TEXT NOT NULL DEFAULT '',
+            provider        TEXT NOT NULL DEFAULT 'wangsu',
+            bot_open_id     TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'running',
+            sync_status     TEXT NOT NULL DEFAULT 'pending',
+            deploy_group    TEXT NOT NULL DEFAULT 'stable',
+            image_tag       TEXT NOT NULL DEFAULT 'v20260328',
+            litellm_key     TEXT NOT NULL DEFAULT '',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        )""",
+        """INSERT INTO her_instances (
+            id, name, model, app_id, app_secret, prefix, owner, provider,
+            bot_open_id, status, sync_status, deploy_group, image_tag, litellm_key,
+            created_at, updated_at
+        )
+        SELECT
+            id, name, model, app_id, app_secret, prefix, owner, provider,
+            bot_open_id, status, sync_status, deploy_group, image_tag, litellm_key,
+            created_at, updated_at
+        FROM her_instances_old""",
+        "DROP TABLE her_instances_old",
     ],
 }
 

@@ -53,7 +53,7 @@ GOOGLE_ANTHROPIC_ROUTING = {
 def generate_openclaw_json(instance: dict) -> dict:
     """Generate a complete openclaw.json from a DB row."""
     uid = instance["id"]
-    provider = instance.get("provider", "openrouter")
+    provider = instance.get("provider", "wangsu")
     model_short = instance.get("model", "gpt")
     prefix = instance.get("prefix", "s1")
     pfx = f"{prefix}-" if not prefix.endswith("-") else prefix

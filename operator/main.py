@@ -263,7 +263,8 @@ def _apply_config(spec: dict) -> str:
         "app_secret": app_secret,
         "prefix": spec.get("prefix", "s1"),
         "owner": spec.get("owner", ""),
-        "provider": spec.get("provider", "openrouter"),
+        "provider": spec.get("provider", "wangsu"),
+        "litellm_key": spec.get("litellmKey", ""),
         "bot_open_id": spec.get("botOpenId", ""),
     }
 

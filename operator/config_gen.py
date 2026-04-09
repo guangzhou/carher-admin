@@ -16,11 +16,33 @@ MODEL_MAP = {
     "sonnet": "openrouter/anthropic/claude-sonnet-4.6",
     "opus": "openrouter/anthropic/claude-opus-4.6",
     "gpt": "openrouter/openai/gpt-5.4",
+    "gemini": "openrouter/google/gemini-3.1-pro-preview",
 }
 MODEL_MAP_ANTHROPIC = {
     "sonnet": "anthropic/claude-sonnet-4-6",
     "opus": "anthropic/claude-opus-4-6",
     "gpt": "openrouter/openai/gpt-5.4",
+}
+MODEL_MAP_WANGSU = {
+    "sonnet": "wangsu/claude-sonnet-4-6",
+    "opus": "wangsu/claude-opus-4-6",
+    "gpt": "wangsu/gpt-5.4",
+    "gemini": "wangsu/gemini-3.1-pro-preview",
+}
+MODEL_MAP_LITELLM = {
+    "sonnet": "litellm/claude-sonnet-4-6",
+    "opus": "litellm/claude-opus-4-6",
+    "gpt": "litellm/gpt-5.4",
+    "gemini": "litellm/gemini-3.1-pro-preview",
+}
+
+GOOGLE_ANTHROPIC_ROUTING = {
+    "params": {
+        "provider": {
+            "order": ["Google", "Anthropic"],
+            "allow_fallbacks": True,
+        },
+    },
 }
 
 
@@ -31,35 +53,61 @@ def generate_openclaw_json(
 ) -> dict:
     """Generate openclaw.json from instance data + precomputed knownBots."""
     uid = instance["id"]
-    provider = instance.get("provider", "openrouter")
+    provider = instance.get("provider", "wangsu")
     model_short = instance.get("model", "gpt")
     prefix = instance.get("prefix", "s1")
     pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
 
-    mm = MODEL_MAP_ANTHROPIC if provider == "anthropic" else MODEL_MAP
+    if provider == "litellm":
+        mm = MODEL_MAP_LITELLM
+    elif provider == "wangsu":
+        mm = MODEL_MAP_WANGSU
+    elif provider == "anthropic":
+        mm = MODEL_MAP_ANTHROPIC
+    else:
+        mm = MODEL_MAP
     model_full = mm.get(model_short, model_short)
 
-    if provider == "anthropic":
+    def _alias_with_routing(a: str) -> dict:
+        return {"alias": a, **GOOGLE_ANTHROPIC_ROUTING}
+
+    if provider == "litellm":
+        models = {
+            "litellm/claude-opus-4-6": {"alias": "opus"},
+            "litellm/claude-sonnet-4-6": {"alias": "sonnet"},
+            "litellm/gpt-5.4": {"alias": "ws-gpt"},
+            "litellm/gemini-3.1-pro-preview": {"alias": "ws-gemini"},
+            "openrouter/anthropic/claude-opus-4.6": _alias_with_routing("or-opus"),
+            "openrouter/anthropic/claude-sonnet-4.6": _alias_with_routing("or-sonnet"),
+        }
+    elif provider == "anthropic":
         models = {
             "anthropic/claude-opus-4-6": {"alias": "opus"},
             "anthropic/claude-sonnet-4-6": {"alias": "sonnet"},
-            "openrouter/anthropic/claude-opus-4.6": {"alias": "or-opus"},
-            "openrouter/anthropic/claude-sonnet-4.6": {"alias": "or-sonnet"},
+            "openrouter/anthropic/claude-opus-4.6": _alias_with_routing("or-opus"),
+            "openrouter/anthropic/claude-sonnet-4.6": _alias_with_routing("or-sonnet"),
         }
     else:
         models = {
-            "openrouter/anthropic/claude-opus-4.6": {"alias": "opus"},
-            "openrouter/anthropic/claude-sonnet-4.6": {"alias": "sonnet"},
+            "openrouter/anthropic/claude-opus-4.6": _alias_with_routing("opus"),
+            "openrouter/anthropic/claude-sonnet-4.6": _alias_with_routing("sonnet"),
             "anthropic/claude-opus-4-6": {"alias": "or-opus"},
             "anthropic/claude-sonnet-4-6": {"alias": "or-sonnet"},
         }
     models.update({
         "openrouter/google/gemini-3.1-pro-preview": {"alias": "gemini"},
-        "openrouter/minimax/minimax-m2.5": {"alias": "minimax"},
+        "openrouter/minimax/minimax-m2.7": {"alias": "minimax"},
         "openrouter/z-ai/glm-5": {"alias": "glm"},
         "openrouter/openai/gpt-5.4": {"alias": "gpt"},
         "openrouter/openai/gpt-5.3-codex": {"alias": "codex"},
     })
+    if provider == "wangsu":
+        models.update({
+            "wangsu/claude-opus-4-6": {"alias": "ws-opus"},
+            "wangsu/claude-sonnet-4-6": {"alias": "ws-sonnet"},
+            "wangsu/gpt-5.4": {"alias": "ws-gpt"},
+            "wangsu/gemini-3.1-pro-preview": {"alias": "ws-gemini"},
+        })
 
     cfg: dict[str, Any] = {
         "$include": "./carher-config.json",
@@ -68,6 +116,19 @@ def generate_openclaw_json(
             "projectId": GEMINI_PROJECT, "model": GEMINI_MODEL,
         }}}}},
     }
+
+    if provider == "litellm":
+        api_key = instance.get("litellm_key") or "${LITELLM_API_KEY}"
+        cfg["models"] = {"providers": {"litellm": {
+            "baseUrl": "http://litellm-proxy.carher.svc:4000",
+            "apiKey": api_key,
+            "models": [
+                {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 128000, "cost": {"input": 5, "output": 25, "cacheRead": 0.5}},
+                {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 64000, "cost": {"input": 3, "output": 15, "cacheRead": 0.3}},
+                {"id": "gpt-5.4", "name": "GPT-5.4", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 128000, "cost": {"input": 2.5, "output": 15, "cacheRead": 0.25}},
+                {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 65536, "cost": {"input": 2, "output": 12, "cacheRead": 0.2}},
+            ],
+        }}}
 
     app_id = instance.get("app_id", "")
     app_secret = instance.get("app_secret", "")

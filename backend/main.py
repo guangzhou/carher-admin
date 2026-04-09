@@ -97,7 +97,7 @@ app.add_middleware(
 ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
-JWT_SECRET = ADMIN_API_KEY or "carher-admin-fallback-secret"
+JWT_SECRET = os.environ.get("JWT_SECRET", ADMIN_API_KEY or ADMIN_PASSWORD)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = 24
 
@@ -110,6 +110,8 @@ class LoginRequest(BaseModel):
 
 
 def _create_jwt(username: str) -> str:
+    if not JWT_SECRET:
+        raise RuntimeError("JWT secret is not configured")
     payload = {
         "sub": username,
         "iat": int(time.time()),
@@ -119,6 +121,8 @@ def _create_jwt(username: str) -> str:
 
 
 def _verify_jwt(token: str) -> dict | None:
+    if not JWT_SECRET:
+        return None
     try:
         return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
@@ -132,6 +136,8 @@ def api_auth_login(req: LoginRequest):
     """Authenticate with username/password. Returns JWT token (valid 24h)."""
     if not ADMIN_PASSWORD:
         raise HTTPException(503, "ADMIN_PASSWORD not configured on server")
+    if not JWT_SECRET:
+        raise HTTPException(503, "JWT secret is not configured on server")
     if req.username != ADMIN_USERNAME or not hmac.compare_digest(req.password, ADMIN_PASSWORD):
         raise HTTPException(401, "Invalid username or password")
     token = _create_jwt(req.username)
@@ -176,7 +182,7 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     if not ADMIN_PASSWORD and not ADMIN_API_KEY:
-        return await call_next(request)
+        return JSONResponse(status_code=503, content={"detail": "Admin authentication is not configured"})
 
     claims = _extract_auth(request)
     if not claims:
@@ -1776,7 +1782,7 @@ def api_litellm_spend():
         data = _json.loads(resp.read())
         return {"spend_data": data}
     except Exception as e:
-        return {"error": str(e), "spend_data": []}
+        raise HTTPException(502, f"Failed to fetch LiteLLM spend data: {e}")
 
 
 # ── API: Statistics ──

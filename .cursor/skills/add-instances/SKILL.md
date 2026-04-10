@@ -19,11 +19,11 @@ API_KEY=$(kubectl get secret carher-admin-secrets -n carher \
 
 ## 数据格式
 
-用户通常提供如下信息：
+用户通常提供如下信息（多行文本，每个实例一组）：
 
 | 字段 | 说明 | 示例 |
 |------|------|------|
-| id | 实例 ID（可选，省略则自动分配） | 173 |
+| id | 实例 ID（可选，省略则自动分配） | 180 |
 | name | 显示名称 | 永康的her |
 | app_id | 飞书 App ID | cli_a95e1e0534795cd1 |
 | app_secret | 飞书 App Secret | VJJMhZlJ2XYad3Dl4jxTJcj5nTiU1ESq |
@@ -33,12 +33,20 @@ API_KEY=$(kubectl get secret carher-admin-secrets -n carher \
 
 | 参数 | 默认值 | 可选值 |
 |------|--------|--------|
-| provider | wangsu | wangsu / openrouter / anthropic / litellm |
+| provider | litellm | litellm / wangsu / openrouter / anthropic |
 | model | gpt | gpt / sonnet / opus / gemini（litellm 额外支持 minimax / glm / codex） |
 | prefix | s1 | s1 / s2 / s3 |
 | deploy_group | stable | stable / test / canary / vip 等 |
+| image | upgrade-0402-8ef16fb | 当前线上版本，operator 自动填充 |
 
 ## 执行步骤
+
+### Step 0: 对齐计划
+
+收到用户数据后，**先整理成表格让用户确认**，再执行。注意检查：
+- ID 是否重复（两个不同实例用了同一个 ID）
+- ID 是否连续（有无空缺）
+- name 和 owner 是否对应
 
 ### Step 1: 确认 next-id（可选）
 
@@ -50,47 +58,47 @@ curl -s -H "X-API-Key: $API_KEY" https://admin.carher.net/api/next-id
 
 ### Step 2: batch-import 创建实例
 
+**必须显式指定 `provider` 和 `model`**，不要依赖后端默认值：
+
 ```bash
 curl -s -X POST "https://admin.carher.net/api/instances/batch-import" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $API_KEY" \
   -d '{
   "instances": [
-    {
-      "id": 173,
-      "name": "永康的her",
-      "app_id": "cli_a95e1e0534795cd1",
-      "app_secret": "VJJMhZlJ2XYad3Dl4jxTJcj5nTiU1ESq",
-      "owner": "辛永康",
-      "deploy_group": "test"
-    }
+    {"id":180,"name":"系统需求部的her","app_id":"cli_xxx","app_secret":"xxx","owner":"秦建国","provider":"litellm","model":"gpt"},
+    {"id":181,"name":"李杰的her","app_id":"cli_yyy","app_secret":"yyy","owner":"李杰","provider":"litellm","model":"gpt"}
   ]
 }'
 ```
 
-每个实例支持的字段：`id`、`name`、`model`、`app_id`、`app_secret`、`prefix`、`owner`、`provider`、`deploy_group`。未提供的字段使用上述默认值。
+每个实例支持的字段：`id`、`name`、`model`、`app_id`、`app_secret`、`prefix`、`owner`、`provider`、`deploy_group`。
 
-> **LiteLLM 注意事项**：当 `provider=litellm` 时：
-> - Admin API 自动生成 per-instance 虚拟 key（`key_alias` / `user_id` = `carher-{uid}`），存入 CRD `spec.litellmKey`
-> - Operator 向 Pod 注入 `LITELLM_API_KEY` env var（该 key），覆盖共享 Secret 中的 master key
-> - Key 允许访问 7 个 chat 模型 + `BAAI/bge-m3` embedding
-> - 路由：gpt/sonnet/opus/gemini → OpenRouter 主 + 网宿备；minimax/glm/codex → OpenRouter only
+> **LiteLLM 自动处理**：当 `provider=litellm` 时：
+> - Admin API 自动生成 per-instance 虚拟 key（`carher-{uid}`），存入 CRD `spec.litellmKey`
+> - Operator 向 Pod 注入 `LITELLM_API_KEY` env var，覆盖共享 master key
+> - Key 允许 7 个 chat 模型 + `BAAI/bge-m3` embedding
+> - 路由：全部 7 个模型走 OpenRouter（网宿已禁用）
 > - 无需手动创建 key
 
 ### Step 3: 验证创建结果
 
 ```bash
-# 检查 CRD 状态
-kubectl get herinstances -n carher | grep -E "her-(173|174|175)"
+# 批量检查 Pod（替换 ID 范围）
+for i in $(seq 180 193); do
+  kubectl get pod -n carher -l user-id=$i --no-headers 2>/dev/null \
+    | awk -v id=$i '{printf "carher-%-4d %s %s\n", id, $2, $3}'
+done
 
-# 检查 Pod 是否 Running
-kubectl get pods -n carher | grep -E "carher-(173|174|175)"
-
-# 通过 API 检查实例详情
-curl -s -H "X-API-Key: $API_KEY" https://admin.carher.net/api/instances/173
+# 批量检查 CRD 状态
+for i in $(seq 180 193); do
+  kubectl get her her-$i -n carher \
+    -o jsonpath="her-$i: phase={.status.phase} ws={.status.feishuWS} image={.spec.image}" 2>/dev/null
+  echo ""
+done
 ```
 
-正常情况下 Pod 会在 30s 内变为 Running (2/2)。
+正常标准：Pod `2/2 Running`，飞书 WS `Connected`，image = `upgrade-0402-8ef16fb`。
 
 ### Step 4: 确认 OAuth 回调地址
 
@@ -108,7 +116,7 @@ https://s1-u{id}-auth.carher.net/feishu/oauth/callback
 curl -s -X POST "https://admin.carher.net/api/instances/batch" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $API_KEY" \
-  -d '{"ids":[173,174,175],"action":"update","params":{"deploy_group":"test"}}'
+  -d '{"ids":[180,181,182],"action":"update","params":{"deploy_group":"test"}}'
 ```
 
 ## 常见问题
@@ -116,5 +124,7 @@ curl -s -X POST "https://admin.carher.net/api/instances/batch" \
 | 问题 | 原因 | 解决 |
 |------|------|------|
 | Pod 一直 Pending | 节点资源不足 | `kubectl describe pod carher-{id} -n carher` 查看事件 |
-| Pod CrashLoopBackOff | app_id/app_secret 错误 | 检查飞书凭据，`PUT /api/instances/{id}` 修正 |
+| Pod CrashLoopBackOff / Error | 镜像版本过旧（不兼容 shared-config 新 key） | `kubectl patch her her-{id} -n carher --type merge -p '{"spec":{"image":"upgrade-0402-8ef16fb"}}'` |
 | 创建返回 409 | ID 已存在 | 使用不同 ID 或先删除旧实例 |
+| `field messages is required` 报错 | 网宿 API 兼容性问题（已禁用） | 确认 provider=litellm，路由全走 OpenRouter |
+| LiteLLM key 未生成 | Admin API 调用 LiteLLM proxy 失败 | `curl -X POST "https://admin.carher.net/api/litellm/keys/generate?uid={id}" -H "X-API-Key: $API_KEY"` |

@@ -79,7 +79,7 @@ def create_her_instance(data: dict) -> dict:
             "litellmKey": data.get("litellm_key", ""),
             "botOpenId": data.get("bot_open_id", ""),
             "deployGroup": data.get("deploy_group", "stable"),
-            "image": data.get("image_tag", "v20260328"),
+            "image": data.get("image_tag", "upgrade-0402-8ef16fb"),
             "paused": False,
         },
     }

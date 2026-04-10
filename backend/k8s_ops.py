@@ -21,7 +21,7 @@ logger = logging.getLogger("carher-admin")
 
 NS = "carher"
 ACR = "cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her/carher"
-DEFAULT_IMAGE_TAG = "v20260328"
+DEFAULT_IMAGE_TAG = "upgrade-0402-8ef16fb"
 
 
 def init_k8s():

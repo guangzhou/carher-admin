@@ -25,7 +25,8 @@ spec:
         - name: acr-vpc-secret
       containers:
         - name: operator
-          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher-operator:latest
+          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher-operator:v20260410-db9e5f4-review012405
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
               name: metrics

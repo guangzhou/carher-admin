@@ -25,7 +25,8 @@ spec:
         kubernetes.io/hostname: ap-southeast-1.172.16.0.226
       containers:
         - name: admin
-          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher-admin:latest
+          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher-admin:v20260410-afcf4fc-review013141
+          imagePullPolicy: Always
           ports:
             - containerPort: 8900
               name: http

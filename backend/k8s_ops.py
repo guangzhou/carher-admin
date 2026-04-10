@@ -22,6 +22,17 @@ logger = logging.getLogger("carher-admin")
 NS = "carher"
 ACR = "cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her/carher"
 DEFAULT_IMAGE_TAG = "upgrade-0402-8ef16fb"
+USER_PVC_STORAGE_CLASS = "alibabacloud-cnfs-nas"
+USER_PVC_STORAGE_REQUEST = "20Gi"
+
+_QUANTITY_SUFFIXES = {
+    None: 1,
+    "Ki": 1024,
+    "Mi": 1024**2,
+    "Gi": 1024**3,
+    "Ti": 1024**4,
+    "Ei": 1024**6,
+}
 
 
 def init_k8s():
@@ -41,6 +52,15 @@ def _core() -> client.CoreV1Api:
     if _core_instance is None:
         _core_instance = client.CoreV1Api()
     return _core_instance
+
+
+def _parse_storage_quantity(val: Any) -> int:
+    s = str(val or "").strip()
+    m = re.fullmatch(r"(\d+)([KMGTE]i)?", s)
+    if not m:
+        logger.warning("Unknown storage quantity %r, treating as 0", s)
+        return 0
+    return int(m.group(1)) * _QUANTITY_SUFFIXES[m.group(2)]
 
 
 def _age(creation: datetime | None) -> str:
@@ -201,19 +221,33 @@ def delete_service(uid: int):
 
 def ensure_pvc(uid: int):
     v1 = _core()
+    pvc_name = f"carher-{uid}-data"
     try:
-        v1.read_namespaced_persistent_volume_claim(f"carher-{uid}-data", NS)
+        pvc = v1.read_namespaced_persistent_volume_claim(pvc_name, NS)
     except ApiException as e:
-        if e.status == 404:
-            pvc = client.V1PersistentVolumeClaim(
-                metadata=client.V1ObjectMeta(name=f"carher-{uid}-data", namespace=NS),
-                spec=client.V1PersistentVolumeClaimSpec(
-                    access_modes=["ReadWriteMany"],
-                    storage_class_name="alibabacloud-cnfs-nas",
-                    resources=client.V1VolumeResourceRequirements(requests={"storage": "5Gi"}),
-                ),
-            )
-            v1.create_namespaced_persistent_volume_claim(NS, pvc)
+        if e.status != 404:
+            raise
+    else:
+        current_storage = ((pvc.spec.resources.requests or {}) if pvc.spec and pvc.spec.resources else {}).get("storage")
+        if _parse_storage_quantity(current_storage) >= _parse_storage_quantity(USER_PVC_STORAGE_REQUEST):
+            return
+        v1.patch_namespaced_persistent_volume_claim(
+            pvc_name,
+            NS,
+            {"spec": {"resources": {"requests": {"storage": USER_PVC_STORAGE_REQUEST}}}},
+        )
+        logger.info("Expanded PVC %s from %s to %s", pvc_name, current_storage, USER_PVC_STORAGE_REQUEST)
+        return
+
+    pvc = client.V1PersistentVolumeClaim(
+        metadata=client.V1ObjectMeta(name=pvc_name, namespace=NS),
+        spec=client.V1PersistentVolumeClaimSpec(
+            access_modes=["ReadWriteMany"],
+            storage_class_name=USER_PVC_STORAGE_CLASS,
+            resources=client.V1VolumeResourceRequirements(requests={"storage": USER_PVC_STORAGE_REQUEST}),
+        ),
+    )
+    v1.create_namespaced_persistent_volume_claim(NS, pvc)
 
 
 def delete_pvc(uid: int):

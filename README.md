@@ -141,7 +141,7 @@ graph LR
 | appSecret | K8s Secret (加密) | Admin / 迁移工具 | Operator |
 | knownBots (全局 bot 注册表) | 共享 ConfigMap (1 份) | Operator | 各实例 Pod |
 | 每实例运行配置 | per-user ConfigMap | Operator | 各实例 Pod |
-| 用户数据 (记忆/会话) | PVC `carher-{uid}-data` (NAS 5Gi) | Pod 运行时 | Pod 运行时 |
+| 用户数据 (记忆/会话) | PVC `carher-{uid}-data` (NAS 20Gi) | Pod 运行时 | Pod 运行时 |
 | Skills (全员共享) | NAS PVC `carher-shared-skills` (ReadWriteMany) | 管理员 | 各实例 Pod |
 | Skills (部门共享) | NAS PVC `carher-dept-skills` (ReadWriteMany) | 管理员 | 各实例 Pod |
 | Session 日志 | NAS PVC `carher-shared-sessions` (ReadWriteMany, 按 uid 子目录) | Pod 运行时 | Pod 运行时 |
@@ -413,7 +413,7 @@ flowchart TD
 |------|---------|------|
 | Pod | `carher-{uid}` | 运行实例，ownerRef → CRD |
 | Service | `carher-{uid}-svc` | ClusterIP，ownerRef → CRD，5 端口 |
-| PVC | `carher-{uid}-data` | NAS 5Gi，无 ownerRef (保留数据) |
+| PVC | `carher-{uid}-data` | NAS 20Gi，无 ownerRef (保留数据) |
 | ConfigMap | `carher-{uid}-user-config` | openclaw.json 配置 |
 | Secret | `carher-{uid}-secret` | appSecret |
 

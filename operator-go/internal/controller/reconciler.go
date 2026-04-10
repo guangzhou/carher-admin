@@ -27,6 +27,8 @@ import (
 const (
 	Namespace = "carher"
 	ACR       = "cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher"
+	UserPVCStorageClass = "alibabacloud-cnfs-nas"
+	UserPVCStorageSize  = "20Gi"
 
 	// FeishuWSReadinessGate is a custom pod condition set by the health checker.
 	// K8s rolling update will NOT terminate the old pod until this gate is True on
@@ -589,13 +591,23 @@ func (r *HerInstanceReconciler) ensurePVC(ctx context.Context, uid int) error {
 	var existing corev1.PersistentVolumeClaim
 	err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: Namespace}, &existing)
 	if err == nil {
-		return nil
+		current := existing.Spec.Resources.Requests[corev1.ResourceStorage]
+		target := resource.MustParse(UserPVCStorageSize)
+		if current.Cmp(target) >= 0 {
+			return nil
+		}
+		updated := existing.DeepCopy()
+		if updated.Spec.Resources.Requests == nil {
+			updated.Spec.Resources.Requests = corev1.ResourceList{}
+		}
+		updated.Spec.Resources.Requests[corev1.ResourceStorage] = target
+		return r.Update(ctx, updated)
 	}
 	if !errors.IsNotFound(err) {
 		return err
 	}
 
-	sc := "alibabacloud-cnfs-nas"
+	sc := UserPVCStorageClass
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      pvcName,
@@ -606,7 +618,7 @@ func (r *HerInstanceReconciler) ensurePVC(ctx context.Context, uid int) error {
 			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
 			StorageClassName: &sc,
 			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("5Gi")},
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(UserPVCStorageSize)},
 			},
 		},
 	}

@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 
@@ -34,6 +35,17 @@ ACR = "cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her/carher"
 CRD_GROUP = "carher.io"
 CRD_VERSION = "v1alpha1"
 CRD_PLURAL = "herinstances"
+USER_PVC_STORAGE_CLASS = "alibabacloud-cnfs-nas"
+USER_PVC_STORAGE_REQUEST = "20Gi"
+
+_QUANTITY_SUFFIXES = {
+    None: 1,
+    "Ki": 1024,
+    "Mi": 1024**2,
+    "Gi": 1024**3,
+    "Ti": 1024**4,
+    "Ei": 1024**6,
+}
 
 
 # ──────────────────────────────────────
@@ -49,6 +61,15 @@ def on_startup(settings: kopf.OperatorSettings, **_):
     except config.ConfigException:
         config.load_kube_config()
     logger.info("CarHer operator started")
+
+
+def _parse_storage_quantity(val) -> int:
+    s = str(val or "").strip()
+    m = re.fullmatch(r"(\d+)([KMGTE]i)?", s)
+    if not m:
+        logger.warning("Unknown storage quantity %r, treating as 0", s)
+        return 0
+    return int(m.group(1)) * _QUANTITY_SUFFIXES[m.group(2)]
 
 
 # ──────────────────────────────────────
@@ -297,18 +318,31 @@ def _ensure_pvc(uid: int):
     v1 = client.CoreV1Api()
     pvc_name = f"carher-{uid}-data"
     try:
-        v1.read_namespaced_persistent_volume_claim(pvc_name, NS)
+        pvc = v1.read_namespaced_persistent_volume_claim(pvc_name, NS)
     except client.rest.ApiException as e:
-        if e.status == 404:
-            pvc = client.V1PersistentVolumeClaim(
-                metadata=client.V1ObjectMeta(name=pvc_name, namespace=NS, labels={"managed-by": "carher-operator"}),
-                spec=client.V1PersistentVolumeClaimSpec(
-                    access_modes=["ReadWriteMany"],
-                    storage_class_name="alibabacloud-cnfs-nas",
-                    resources=client.V1VolumeResourceRequirements(requests={"storage": "5Gi"}),
-                ),
-            )
-            v1.create_namespaced_persistent_volume_claim(NS, pvc)
+        if e.status != 404:
+            raise
+    else:
+        current_storage = ((pvc.spec.resources.requests or {}) if pvc.spec and pvc.spec.resources else {}).get("storage")
+        if _parse_storage_quantity(current_storage) >= _parse_storage_quantity(USER_PVC_STORAGE_REQUEST):
+            return
+        v1.patch_namespaced_persistent_volume_claim(
+            pvc_name,
+            NS,
+            {"spec": {"resources": {"requests": {"storage": USER_PVC_STORAGE_REQUEST}}}},
+        )
+        logger.info("Expanded PVC %s from %s to %s", pvc_name, current_storage, USER_PVC_STORAGE_REQUEST)
+        return
+
+    pvc = client.V1PersistentVolumeClaim(
+        metadata=client.V1ObjectMeta(name=pvc_name, namespace=NS, labels={"managed-by": "carher-operator"}),
+        spec=client.V1PersistentVolumeClaimSpec(
+            access_modes=["ReadWriteMany"],
+            storage_class_name=USER_PVC_STORAGE_CLASS,
+            resources=client.V1VolumeResourceRequirements(requests={"storage": USER_PVC_STORAGE_REQUEST}),
+        ),
+    )
+    v1.create_namespaced_persistent_volume_claim(NS, pvc)
 
 
 def _ensure_pod(spec: dict):

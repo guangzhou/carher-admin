@@ -133,7 +133,7 @@ flowchart LR
 graph LR
     Pod["Her Pod"]
 
-    Pod --> V1["user-data<br/>PVC (NAS 5Gi)<br/>/data/.openclaw"]
+    Pod --> V1["user-data<br/>PVC (NAS 20Gi)<br/>/data/.openclaw"]
     Pod --> V2["user-config<br/>ConfigMap<br/>/data/.openclaw/openclaw.json"]
     Pod --> V3["base-config<br/>ConfigMap<br/>/data/.openclaw/carher-config.json"]
     Pod --> V4["gcloud-adc<br/>Secret<br/>/gcloud/application_default_credentials.json"]

@@ -145,7 +145,7 @@ def generate_openclaw_json(instance: dict) -> dict:
     bot_open_id = instance.get("bot_open_id", "")
 
     if app_id and app_secret:
-        feishu_name = f"{name}的her" if name else ""
+        feishu_name = name if "的her" in name.lower() else f"{name}的her" if name else ""
         feishu: dict[str, Any] = {
             "enabled": True,
             "appId": app_id,

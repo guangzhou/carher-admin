@@ -230,6 +230,47 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 	}
 }
 
+func TestGenerateOpenclawJSON_NameSuffix(t *testing.T) {
+	tests := []struct {
+		inputName string
+		wantName  string
+	}{
+		{"张三", "张三的her"},
+		{"永兵的her", "永兵的her"},
+		{"国际法务的Her", "国际法务的Her"},
+		{"国现的her(阿里云)", "国现的her(阿里云)"},
+		{"IT基础设施her", "IT基础设施her"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		input := ConfigInput{
+			ID: 1, Model: "gpt", AppID: "cli_a", AppSecret: "s",
+			Prefix: "s1", Provider: "litellm", Name: tt.inputName,
+		}
+		result := GenerateOpenclawJSON(input)
+		var cfg map[string]interface{}
+		json.Unmarshal([]byte(result), &cfg)
+
+		if tt.inputName == "" {
+			if _, ok := cfg["channels"]; ok {
+				feishu := cfg["channels"].(map[string]interface{})["feishu"].(map[string]interface{})
+				if feishu["name"] != "" {
+					t.Errorf("Name=%q: expected empty feishu name, got %v", tt.inputName, feishu["name"])
+				}
+			}
+			continue
+		}
+
+		channels := cfg["channels"].(map[string]interface{})
+		feishu := channels["feishu"].(map[string]interface{})
+		got := feishu["name"].(string)
+		if got != tt.wantName {
+			t.Errorf("Name=%q: feishu name = %q, want %q", tt.inputName, got, tt.wantName)
+		}
+	}
+}
+
 func TestSplitOwners(t *testing.T) {
 	tests := []struct {
 		input    string

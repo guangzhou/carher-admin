@@ -3,6 +3,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 const (
@@ -185,7 +186,7 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 
 	if input.AppID != "" && input.AppSecret != "" {
 		feishuName := input.Name
-		if feishuName != "" {
+		if feishuName != "" && !strings.Contains(strings.ToLower(feishuName), "的her") {
 			feishuName += "的her"
 		}
 		feishu := map[string]interface{}{

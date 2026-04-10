@@ -103,6 +103,28 @@ kubectl set image deploy/carher-operator \
 kubectl rollout status deploy/carher-operator -n carher --timeout=120s
 ```
 
+### Step 3.5：确认 admin 带上 Cloudflare token
+
+`carher-admin` 创建新实例时，需要用 `CLOUDFLARE_API_TOKEN` 去更新远程 tunnel ingress。
+如果这个 token 缺失，新实例 callback URL 会 `404`，现在 API 会直接返回 `503`。
+
+```bash
+# secret 里必须有 cloudflare-api-token
+kubectl get secret carher-admin-secrets -n carher \
+  -o jsonpath='{.data.cloudflare-api-token}' | base64 -d
+
+# admin Pod 里环境变量必须为 true
+kubectl exec -n carher deploy/carher-admin -- \
+  python -c "import os; print(bool(os.environ.get('CLOUDFLARE_API_TOKEN')))"
+```
+
+如果你刚修改了 `carher-admin-secrets`，必须再执行一次：
+
+```bash
+kubectl rollout restart deploy/carher-admin -n carher
+kubectl rollout status deploy/carher-admin -n carher --timeout=120s
+```
+
 ### 验证
 
 ```bash
@@ -215,6 +237,12 @@ If this node is unavailable, admin pod cannot be scheduled.
 
 **Symptom**: Logs show `schema v7` after a revert, but the previous deploy was `v8`.
 **Fix**: Always deploy forward. SQLite data on hostPath persists across deploys.
+
+### 6. Cloudflare Token Missing on Admin
+
+**Symptom**: `POST /api/instances` or `/api/instances/batch-import` returns `503` mentioning `CLOUDFLARE_API_TOKEN`.
+**Root cause**: `carher-admin-secrets` lacks `cloudflare-api-token`, or the secret was updated but `carher-admin` was not restarted.
+**Fix**: patch the secret, rollout restart `deploy/carher-admin`, then retry the create request.
 
 ## Troubleshooting
 

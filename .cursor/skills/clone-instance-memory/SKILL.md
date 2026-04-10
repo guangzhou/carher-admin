@@ -16,6 +16,11 @@ description: >-
 ```bash
 API_KEY=$(kubectl get secret carher-admin-secrets -n carher \
   -o jsonpath='{.data.admin-api-key}' | base64 -d)
+
+# 新增 her 前，必须确认 admin 已加载 Cloudflare token；
+# 否则创建接口会直接返回 503，避免静默生成 404 callback。
+kubectl exec -n carher deploy/carher-admin -- \
+  python -c "import os; print(bool(os.environ.get('CLOUDFLARE_API_TOKEN')))"
 ```
 
 若本地 kubectl 不通（`127.0.0.1:16443` 拒连），先建 SSH 隧道：
@@ -69,7 +74,10 @@ curl -s -X POST "https://admin.carher.net/api/instances/batch-import" \
 }'
 ```
 
-新实例默认镜像可能是旧版，**必须立即对齐**：
+返回结果里必须确认 `cloudflare.ok=true`。如果是 `false`，或接口直接返回
+`503` 且提示 `CLOUDFLARE_API_TOKEN`，先修 Cloudflare 再继续，不要往下执行。
+
+如果源实例用了**非默认镜像**，新实例也要立即对齐：
 
 ```bash
 curl -s -X PUT "https://admin.carher.net/api/instances/{NEW_ID}" \
@@ -218,6 +226,14 @@ curl -s -H "X-API-Key: $API_KEY" \
   https://admin.carher.net/api/instances/{NEW_ID} | jq '{status, feishu_ws, oauth_url}'
 ```
 
+再做一次 callback live 验证：
+
+```bash
+# 正常结果应为 HTTP 400（无效测试 code），不是 404
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  "https://{prefix}-u{NEW_ID}-auth.carher.net/feishu/oauth/callback?code=test&state=test"
+```
+
 ## OAuth 回调地址
 
 自动生成规则：`https://{prefix}-u{id}-auth.carher.net/feishu/oauth/callback`
@@ -228,8 +244,9 @@ curl -s -H "X-API-Key: $API_KEY" \
 |------|------|
 | **拷贝全量 PVC** | 不能只拷 `memory/main.sqlite`；bot 的人格记忆在 `workspace/MEMORY.md`，缺少则 bot 不认识用户 |
 | **临时 Pod 挂双 PVC** | 唯一可靠的跨 PVC 拷贝方式；`kubectl cp` 经隧道会断，HTTP 多此一举 |
-| **镜像版本** | 新实例默认镜像可能是旧版，必须创建后立即 `PUT /api/instances/{id}` 对齐 |
+| **镜像版本** | 当前默认镜像是 `upgrade-0402-8ef16fb`；若源实例使用其他 tag，必须创建后立即 `PUT /api/instances/{id}` 对齐 |
 | **prefix 不要照搬** | 源实例可能用特殊 prefix（如 s3），新实例默认用 `s1`，必须与用户确认 |
+| **Cloudflare 必须成功** | 新实例创建后必须检查 `cloudflare.ok=true`；否则 callback 可能 `404` |
 | **同 app_id 冲突** | 新旧实例共用同一飞书应用时，不能同时运行，否则消息路由混乱、响应丢失 |
 | **WAL 文件** | 若 `memory/` 下有 `-wal`/`-shm`，拷贝前先 `PRAGMA wal_checkpoint(TRUNCATE)` |
 | **exec API 白名单** | 只允许 ls/cat/du/node 等；tar/sqlite3/cp 不在白名单，大操作用 kubectl exec 或临时 Pod |

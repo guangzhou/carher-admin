@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.request
 import yaml
 
@@ -58,6 +59,17 @@ def _get_svc_cluster_ip(svc_name: str) -> str | None:
         return svc.spec.cluster_ip
     except ApiException:
         return None
+
+
+def _wait_for_svc_cluster_ip(svc_name: str, retries: int = 5, delay_seconds: int = 3) -> str | None:
+    """Poll for a Service ClusterIP for a short period."""
+    for i in range(retries):
+        svc_ip = _get_svc_cluster_ip(svc_name)
+        if svc_ip:
+            return svc_ip
+        if i < retries - 1:
+            time.sleep(delay_seconds)
+    return None
 
 
 AUTH_PROXY_SVC = "auth-proxy"
@@ -349,13 +361,15 @@ def update_remote_ingress(
     desired_rules: list[dict] = []
     managed_hostnames: set[str] = set()
     unresolved_hostnames: set[str] = set()
+    unresolved_uids: list[int] = []
     for uid, prefix in target_instances:
         auth_host, fe_host, proxy_host = _build_instance_hostnames(uid, prefix)
         hostnames = [auth_host, fe_host, proxy_host]
         svc_name = f"carher-{uid}-svc"
-        svc_ip = _get_svc_cluster_ip(svc_name) if wait_for_service else None
+        svc_ip = _wait_for_svc_cluster_ip(svc_name) if wait_for_service else _get_svc_cluster_ip(svc_name)
         if not svc_ip:
             logger.warning("Service %s not ready, skipping remote ingress for uid=%d", svc_name, uid)
+            unresolved_uids.append(uid)
             if full_sync:
                 unresolved_hostnames.update(hostnames)
             continue
@@ -388,12 +402,23 @@ def update_remote_ingress(
 
     if ingress == new_ingress:
         logger.info("Remote ingress already matches desired state")
-        return
+        return {
+            "updated": False,
+            "updated_hosts": sorted(managed_hostnames),
+            "unresolved_uids": unresolved_uids,
+            "unresolved_hostnames": sorted(unresolved_hostnames),
+        }
 
     config["ingress"] = new_ingress
     ok = _put_remote_ingress(config)
     updated_hosts = sorted(managed_hostnames)
     if ok:
         logger.info("Remote ingress updated for %s", updated_hosts)
+        return {
+            "updated": True,
+            "updated_hosts": updated_hosts,
+            "unresolved_uids": unresolved_uids,
+            "unresolved_hostnames": sorted(unresolved_hostnames),
+        }
     else:
         raise RuntimeError(f"Remote ingress PUT failed for {updated_hosts}")

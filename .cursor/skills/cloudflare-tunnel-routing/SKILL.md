@@ -27,6 +27,25 @@ description: >-
 3. 每个新实例需要同时满足两个条件才能通：
    - **DNS CNAME 记录**：`s1-u{id}-auth.carher.net` → `{tunnel_uuid}.cfargotunnel.com`
    - **远程 ingress 规则**：hostname → `http://{ClusterIP}:{port}`
+4. `carher-admin` 必须带上 **`CLOUDFLARE_API_TOKEN`**，否则它只能创建实例，
+   但无法通过 Cloudflare API 更新远程 ingress
+
+## 新增实例前的前置检查
+
+```bash
+# secret 里必须有 cloudflare-api-token
+kubectl get secret carher-admin-secrets -n carher \
+  -o jsonpath='{.data.cloudflare-api-token}' | base64 -d
+
+# admin Pod 里环境变量必须为 true
+kubectl exec -n carher deploy/carher-admin -- \
+  python -c "import os; print(bool(os.environ.get('CLOUDFLARE_API_TOKEN')))"
+```
+
+如果这里为空或返回 `False`：
+
+- 现在 `POST /api/instances` / `POST /api/instances/batch-import` 会直接返回 `503`
+- 这是**故意 fail-fast**，避免再出现“实例创建成功但 callback URL 实际 404”的静默故障
 
 ## 常量
 
@@ -114,6 +133,17 @@ curl -sS -o /dev/null -w "%{http_code}" \
   "https://s1-u{uid}-auth.carher.net/feishu/oauth/callback?code=test&state=test"
 ```
 
+如果是通过 Admin API 创建的，还要检查返回体里的 `cloudflare`：
+
+```json
+{
+  "cloudflare": {
+    "ok": true,
+    "message": "DNS + remote tunnel ingress synced"
+  }
+}
+```
+
 ## 排查 404 问题
 
 当某个实例的 OAuth URL 返回 404 时，按顺序检查：
@@ -177,3 +207,11 @@ curl -sS -o /dev/null -w "%{http_code}" \
 和 `update_remote_ingress()` 只遍历 carher 实例的 Service，不包含基础设施路由。
 手动加到 ConfigMap 的 litellm 路由在下次 `sync_tunnel_config()` 时被覆盖。
 修复方案：引入 `INFRA_ROUTES` 常量，在配置生成逻辑中自动包含基础设施路由。
+
+2026-04-10: 新增 u179~u193 的 callback URL 配置值正确，但全部返回 404。根因不是
+实例本身，而是 `carher-admin-secrets` 缺少 `cloudflare-api-token`，导致 admin
+创建实例时无法调用 Cloudflare API 更新远程 ingress。修复方案：
+1. 给 `carher-admin` 补 token 并重启
+2. 补跑 `register_dns_routes()` + `update_remote_ingress()`
+3. API 创建接口增加 fail-fast：无 token 时直接 `503`
+4. API 响应增加 `cloudflare.ok/message`，不再静默成功

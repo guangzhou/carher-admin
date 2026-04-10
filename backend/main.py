@@ -46,7 +46,8 @@ from .models import (
     DeployGroupCreate, DeployGroupUpdate, SetDeployGroupRequest,
     BatchSetDeployGroupRequest, DeployRequest, DeployWebhookRequest,
     BranchRuleCreate, BranchRuleUpdate, TriggerBuildRequest,
-    AgentRequest, AgentResponse,
+    AgentRequest, AgentResponse, CloudflareSyncResult,
+    HerCreateResponse, HerBatchImportResponse,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -76,6 +77,88 @@ def _k8s_error_detail(exc: K8sApiException) -> str:
         return body.get("message", exc.reason or str(exc))
     except Exception:
         return exc.reason or str(exc)
+
+
+_CLOUDFLARE_SYNC_OK = "DNS + remote tunnel ingress synced"
+_CLOUDFLARE_CREATE_BLOCK_MSG = (
+    "CLOUDFLARE_API_TOKEN is not configured on carher-admin. Refusing to create "
+    "new instances because OAuth callback routes would be incomplete and return "
+    "404. Fix the admin secret and restart carher-admin first."
+)
+
+
+def _cloudflare_ok_result() -> dict:
+    return CloudflareSyncResult(ok=True, message=_CLOUDFLARE_SYNC_OK).model_dump()
+
+
+def _cloudflare_warning_result(message: str) -> dict:
+    return CloudflareSyncResult(ok=False, message=message).model_dump()
+
+
+def _require_cloudflare_for_create():
+    if not cloudflare_ops.CF_TOKEN:
+        raise HTTPException(503, _CLOUDFLARE_CREATE_BLOCK_MSG)
+
+
+def _sync_cloudflare_for_instance(uid: int, prefix: str, *, legacy: bool = False) -> dict:
+    label = "legacy instance" if legacy else "instance"
+    try:
+        svc_name = f"carher-{uid}-svc"
+        cloudflare_ops.sync_tunnel_config(wait_for_service=svc_name)
+        cloudflare_ops.register_dns_routes(uid, prefix=prefix)
+        result = cloudflare_ops.update_remote_ingress([(uid, prefix)])
+        if uid in result.get("unresolved_uids", []):
+            return _cloudflare_warning_result(
+                f"Cloudflare remote ingress skipped for her-{uid} because "
+                f"Service carher-{uid}-svc was not ready in time. The instance was "
+                "created, but its callback URL may still return 404 until "
+                "Cloudflare is repaired. Run POST /api/cloudflare/sync after the "
+                "Service is ready."
+            )
+        return _cloudflare_ok_result()
+    except Exception as cf_err:
+        logger.warning("Cloudflare auto-config failed for %s %d: %s", label, uid, cf_err)
+        return _cloudflare_warning_result(
+            f"Cloudflare auto-config failed for her-{uid}: {cf_err}. "
+            "The instance was created, but its callback URL may still return 404 "
+            "until Cloudflare is repaired. After fixing the admin token or tunnel "
+            "config, run POST /api/cloudflare/sync."
+        )
+
+
+def _sync_cloudflare_for_batch(instances: list[tuple[int, str]]) -> dict[int, dict]:
+    if not instances:
+        return {}
+    try:
+        cloudflare_ops.sync_tunnel_config()
+        for uid, prefix in instances:
+            cloudflare_ops.register_dns_routes(uid, prefix=prefix)
+        result = cloudflare_ops.update_remote_ingress(instances)
+        unresolved = set(result.get("unresolved_uids", []))
+        out: dict[int, dict] = {}
+        for uid, _ in instances:
+            if uid in unresolved:
+                out[uid] = _cloudflare_warning_result(
+                    f"Cloudflare remote ingress skipped for her-{uid} because "
+                    f"Service carher-{uid}-svc was not ready in time. The instance "
+                    "was created, but its callback URL may still return 404 until "
+                    "Cloudflare is repaired. Run POST /api/cloudflare/sync after "
+                    "the Service is ready."
+                )
+            else:
+                out[uid] = _cloudflare_ok_result()
+        return out
+    except Exception as cf_err:
+        logger.warning("Cloudflare batch config failed (non-fatal): %s", cf_err)
+        return {
+            uid: _cloudflare_warning_result(
+                f"Cloudflare batch auto-config failed for her-{uid}: {cf_err}. "
+                "The instance was created, but its callback URL may still return "
+                "404 until Cloudflare is repaired. After fixing the admin token "
+                "or tunnel config, run POST /api/cloudflare/sync."
+            )
+            for uid, _ in instances
+        }
 
 
 @asynccontextmanager
@@ -298,13 +381,7 @@ def _sync_and_deploy(instance: dict):
 
 
 def _update_legacy_cloudflare(uid: int, prefix: str):
-    try:
-        svc_name = f"carher-{uid}-svc"
-        cloudflare_ops.sync_tunnel_config(wait_for_service=svc_name)
-        cloudflare_ops.register_dns_routes(uid, prefix=prefix)
-        cloudflare_ops.update_remote_ingress([(uid, prefix)])
-    except Exception as cf_err:
-        logger.warning("Cloudflare auto-config failed for legacy instance %d (non-fatal): %s", uid, cf_err)
+    return _sync_cloudflare_for_instance(uid, prefix, legacy=True)
 
 
 # ── API: List / Get ──
@@ -561,8 +638,10 @@ def _should_fallback_to_legacy(exc: Exception) -> bool:
 
 # ── API: Create ──
 
-@app.post("/api/instances", dependencies=[Depends(verify_api_key)])
+@app.post("/api/instances", tags=["instances"], response_model=HerCreateResponse, dependencies=[Depends(verify_api_key)])
 def api_add_instance(req: HerAddRequest):
+    _require_cloudflare_for_create()
+
     if req.id:
         uid = req.id
     else:
@@ -597,17 +676,11 @@ def api_add_instance(req: HerAddRequest):
     try:
         crd_ops.create_her_instance(data)
         logger.info("Created HerInstance CRD for uid=%d", uid)
-        # Auto-sync Cloudflare DNS + remote tunnel ingress for the new instance
-        try:
-            svc_name = f"carher-{uid}-svc"
-            cloudflare_ops.sync_tunnel_config(wait_for_service=svc_name)
-            cloudflare_ops.register_dns_routes(uid, prefix=req.prefix)
-            cloudflare_ops.update_remote_ingress([(uid, req.prefix)])
-        except Exception as cf_err:
-            logger.warning("Cloudflare auto-config failed for %d (non-fatal): %s", uid, cf_err)
+        cloudflare = _sync_cloudflare_for_instance(uid, req.prefix)
         return {
             "id": uid, "status": "created", "managed_by": "operator",
             "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
+            "cloudflare": cloudflare,
         }
     except Exception as e:
         if not _should_fallback_to_legacy(e):
@@ -634,15 +707,16 @@ def api_add_instance(req: HerAddRequest):
     except Exception as e:
         logger.error("K8s deploy failed for %d: %s", uid, e)
         db.set_sync_status(uid, "pending")
-    _update_legacy_cloudflare(uid, req.prefix)
+    cloudflare = _update_legacy_cloudflare(uid, req.prefix)
 
     return {
-        "id": uid, "status": "created",
+        "id": uid, "status": "created", "managed_by": "legacy",
         "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
+        "cloudflare": cloudflare,
     }
 
 
-@app.post("/api/instances/batch-import", dependencies=[Depends(verify_api_key)])
+@app.post("/api/instances/batch-import", tags=["instances"], response_model=HerBatchImportResponse, dependencies=[Depends(verify_api_key)])
 def api_batch_import(
     req: Annotated[
         list[HerAddRequest] | HerBatchImport,
@@ -655,7 +729,7 @@ def api_batch_import(
                             {
                                 "name": "用户A",
                                 "model": "gpt",
-                                "provider": "wangsu",
+                                "provider": "litellm",
                                 "app_id": "cli_xxx",
                                 "app_secret": "xxx",
                                 "prefix": "s1",
@@ -670,7 +744,7 @@ def api_batch_import(
                         {
                             "name": "用户A",
                             "model": "gpt",
-                            "provider": "wangsu",
+                            "provider": "litellm",
                             "app_id": "cli_xxx",
                             "app_secret": "xxx",
                             "prefix": "s1",
@@ -687,8 +761,10 @@ def api_batch_import(
     Preferred request body is {"instances":[...]}. A legacy raw JSON array body
     is also accepted for backward compatibility with older scripts and skills.
     """
+    _require_cloudflare_for_create()
     results = []
     crd_created: list[tuple[int, str]] = []
+    crd_result_index: dict[int, int] = {}
     next_uid = db.next_id()
     items = req.instances if isinstance(req, HerBatchImport) else req
     try:
@@ -730,6 +806,7 @@ def api_batch_import(
                     "id": uid, "status": "created", "managed_by": "operator",
                     "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
                 })
+                crd_result_index[uid] = len(results) - 1
                 continue
             except Exception as crd_err:
                 if not _should_fallback_to_legacy(crd_err):
@@ -749,10 +826,11 @@ def api_batch_import(
             k8s_ops.ensure_service(uid)
             _sync_and_deploy(inst)
             k8s_ops.create_pod(uid, prefix=item.prefix)
-            _update_legacy_cloudflare(uid, item.prefix)
+            cloudflare = _update_legacy_cloudflare(uid, item.prefix)
             results.append({
-                "id": uid, "status": "created",
+                "id": uid, "status": "created", "managed_by": "legacy",
                 "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
+                "cloudflare": cloudflare,
             })
         except Exception as e:
             if not persisted and data and data.get("litellm_key"):
@@ -761,13 +839,17 @@ def api_batch_import(
 
     # Batch-register Cloudflare DNS + remote tunnel ingress for all new CRD instances
     if crd_created:
-        try:
-            cloudflare_ops.sync_tunnel_config()
-            for uid, prefix in crd_created:
-                cloudflare_ops.register_dns_routes(uid, prefix=prefix)
-            cloudflare_ops.update_remote_ingress(crd_created)
-        except Exception as cf_err:
-            logger.warning("Cloudflare batch config failed (non-fatal): %s", cf_err)
+        cloudflare_results = _sync_cloudflare_for_batch(crd_created)
+        for uid, _ in crd_created:
+            idx = crd_result_index.get(uid)
+            if idx is not None:
+                results[idx]["cloudflare"] = cloudflare_results.get(
+                    uid,
+                    _cloudflare_warning_result(
+                        f"Cloudflare auto-config status missing for her-{uid}. "
+                        "Run POST /api/cloudflare/sync and re-check the callback URL."
+                    ),
+                )
 
     db.flush_backup()
     return {"results": results}

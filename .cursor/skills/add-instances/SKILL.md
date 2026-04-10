@@ -15,6 +15,11 @@ description: >-
 ```bash
 API_KEY=$(kubectl get secret carher-admin-secrets -n carher \
   -o jsonpath='{.data.admin-api-key}' | base64 -d)
+
+# 新增 her 前，必须确认 admin 已加载 Cloudflare token；
+# 否则创建接口现在会直接返回 503，避免静默生成 404 callback。
+kubectl exec -n carher deploy/carher-admin -- \
+  python -c "import os; print(bool(os.environ.get('CLOUDFLARE_API_TOKEN')))"
 ```
 
 ## 数据格式
@@ -81,9 +86,39 @@ curl -s -X POST "https://admin.carher.net/api/instances/batch-import" \
 > - 路由：全部 7 个模型走 OpenRouter（网宿已禁用）
 > - 无需手动创建 key
 
+**创建响应必须检查 `cloudflare` 字段**：
+
+```json
+{
+  "results": [
+    {
+      "id": 180,
+      "status": "created",
+      "managed_by": "operator",
+      "oauth_url": "https://s1-u180-auth.carher.net/feishu/oauth/callback",
+      "cloudflare": {
+        "ok": true,
+        "message": "DNS + remote tunnel ingress synced"
+      }
+    }
+  ]
+}
+```
+
+- `cloudflare.ok=true`：说明 DNS + 远程 tunnel ingress 已同步
+- `cloudflare.ok=false`：实例虽已创建，但 callback 可能仍会 `404`，先修 Cloudflare 再继续
+- 如果接口直接返回 `503` 且提示 `CLOUDFLARE_API_TOKEN`，不要重试创建；先修 admin secret 并重启 `carher-admin`
+
 ### Step 3: 验证创建结果
 
 ```bash
+# 先看 API 返回里的 cloudflare 状态
+curl -s -X POST "https://admin.carher.net/api/instances/batch-import" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"instances":[{"id":180,"name":"系统需求部的her","app_id":"cli_xxx","app_secret":"xxx","owner":"秦建国","provider":"litellm","model":"gpt"}]}' \
+  | jq '.results[] | {id,status,oauth_url,cloudflare}'
+
 # 批量检查 Pod（替换 ID 范围）
 for i in $(seq 180 193); do
   kubectl get pod -n carher -l user-id=$i --no-headers 2>/dev/null \
@@ -98,14 +133,22 @@ for i in $(seq 180 193); do
 done
 ```
 
-正常标准：Pod `2/2 Running`，飞书 WS `Connected`，image = `upgrade-0402-8ef16fb`。
+正常标准：`cloudflare.ok=true`，Pod `2/2 Running`，飞书 WS `Connected`，image = `upgrade-0402-8ef16fb`。
 
-### Step 4: 确认 OAuth 回调地址
+### Step 4: 确认 OAuth 回调地址 + Live 验证
 
 创建成功后返回的 `oauth_url` 需要配置到对应飞书应用的重定向 URL：
 
 ```
 https://s1-u{id}-auth.carher.net/feishu/oauth/callback
+```
+
+实际连通性验证：
+
+```bash
+# 正常结果应为 HTTP 400（无效测试 code），而不是 404
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  "https://s1-u180-auth.carher.net/feishu/oauth/callback?code=test&state=test"
 ```
 
 ## 批量更新已有实例
@@ -126,5 +169,7 @@ curl -s -X POST "https://admin.carher.net/api/instances/batch" \
 | Pod 一直 Pending | 节点资源不足 | `kubectl describe pod carher-{id} -n carher` 查看事件 |
 | Pod CrashLoopBackOff / Error | 镜像版本过旧（不兼容 shared-config 新 key） | `kubectl patch her her-{id} -n carher --type merge -p '{"spec":{"image":"upgrade-0402-8ef16fb"}}'` |
 | 创建返回 409 | ID 已存在 | 使用不同 ID 或先删除旧实例 |
+| 创建返回 503 `CLOUDFLARE_API_TOKEN` | `carher-admin` 没有 Cloudflare token | 修复 `carher-admin-secrets.cloudflare-api-token`，重启 `carher-admin` 后再创建 |
+| `cloudflare.ok=false` | 实例已创建，但 DNS/远程 ingress 同步失败 | 先修 Cloudflare，再执行 `POST /api/cloudflare/sync`，然后重新验证 callback URL 是否返回 400 |
 | `field messages is required` 报错 | 网宿 API 兼容性问题（已禁用） | 确认 provider=litellm，路由全走 OpenRouter |
 | LiteLLM key 未生成 | Admin API 调用 LiteLLM proxy 失败 | `curl -X POST "https://admin.carher.net/api/litellm/keys/generate?uid={id}" -H "X-API-Key: $API_KEY"` |

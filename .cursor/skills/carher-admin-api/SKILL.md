@@ -53,13 +53,15 @@ curl -s https://admin.carher.net/api/next-id | jq
 # Create instance
 curl -X POST https://admin.carher.net/api/instances \
   -H "Content-Type: application/json" \
-  -d '{"name":"新用户","model":"gpt","provider":"wangsu","app_id":"cli_xxx","app_secret":"xxx","prefix":"s1","owner":"ou_xxx"}'
+  -H "X-API-Key: $API_KEY" \
+  -d '{"name":"新用户","model":"gpt","provider":"litellm","app_id":"cli_xxx","app_secret":"xxx","prefix":"s1","owner":"ou_xxx"}'
 
 # Update instance (only non-null fields are applied)
 # Supported fields: name, model, provider, owner, deploy_group, image,
 #   app_id, app_secret, prefix, bot_open_id
 #
-# Defaults for new instances: provider=wangsu, model=gpt, prefix=s1, deploy_group=stable
+# Historical backend defaults may differ. For new instances, always send
+# provider=litellm and model=gpt explicitly instead of relying on defaults.
 #
 # Provider → Model mapping:
 #   openrouter: gpt (GPT-5.4), sonnet (Claude Sonnet 4.6), opus (Claude Opus 4.6), gemini (Gemini 3.1 Pro)
@@ -72,10 +74,13 @@ curl -X POST https://admin.carher.net/api/instances \
 # When provider=litellm, a per-instance LiteLLM virtual key (carher-{uid}) is
 # auto-generated for spend tracking. Operator injects LITELLM_API_KEY env var
 # into the Pod to override the shared master key.
-# Routing: gpt/sonnet/opus/gemini → OpenRouter primary + Wangsu fallback;
-#          minimax/glm/codex → OpenRouter only.
+# Routing: all 7 chat models currently go through OpenRouter.
 # Runtime aliases: `gpt`, `sonnet`, `opus`, `gemini`, `minimax`, `glm`, `codex`
 # (no `ws-*` / `or-*` aliases in pure LiteLLM mode).
+# The create APIs now also return:
+#   "cloudflare": {"ok": true|false, "message": "..."}
+# If CLOUDFLARE_API_TOKEN is missing on carher-admin, create/batch-import
+# fail fast with HTTP 503 instead of silently creating 404 callback routes.
 curl -X PUT https://admin.carher.net/api/instances/14 \
   -H "Content-Type: application/json" \
   -d '{"model":"sonnet","provider":"wangsu","deploy_group":"vip"}'
@@ -99,8 +104,20 @@ curl -X POST https://admin.carher.net/api/instances/batch \
 # Batch import instances (preferred wrapped body)
 curl -X POST https://admin.carher.net/api/instances/batch-import \
   -H "Content-Type: application/json" \
-  -d '{"instances":[{"name":"用户A","model":"gpt","provider":"wangsu","app_id":"cli_xxx","app_secret":"xxx","prefix":"s1","owner":"ou_xxx"}]}'
+  -H "X-API-Key: $API_KEY" \
+  -d '{"instances":[{"name":"用户A","model":"gpt","provider":"litellm","app_id":"cli_xxx","app_secret":"xxx","prefix":"s1","owner":"ou_xxx"}]}'
 # Legacy raw-array bodies are also accepted for backward compatibility.
+
+# Verify create response
+curl -s -X POST https://admin.carher.net/api/instances/batch-import \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"instances":[{"name":"用户A","model":"gpt","provider":"litellm","app_id":"cli_xxx","app_secret":"xxx","prefix":"s1","owner":"ou_xxx"}]}' \
+  | jq '.results[] | {id,status,oauth_url,cloudflare}'
+
+# Live callback verification: normal result is HTTP 400, not 404
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  "https://s1-u180-auth.carher.net/feishu/oauth/callback?code=test&state=test"
 
 # Get Pod logs
 curl -s "https://admin.carher.net/api/instances/14/logs?tail=200" | jq .logs

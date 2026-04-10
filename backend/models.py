@@ -54,8 +54,10 @@ class HerAddRequest(BaseModel):
         description=(
             "AI provider: openrouter / anthropic / wangsu / litellm. "
             "Default: wangsu. When provider=litellm, requests are routed through "
-            "the LiteLLM proxy (OpenRouter primary + Wangsu fallback for main "
-            "models; OpenRouter-only for minimax/glm/codex)."
+            "the LiteLLM proxy. Current production routing uses OpenRouter for "
+            "all 7 chat models (gpt / sonnet / opus / gemini / minimax / glm / codex). "
+            "For new instances, explicitly send both provider and model instead of "
+            "relying on historical defaults."
         ),
     )
     deploy_group: str = Field("stable", description="Deploy group name")
@@ -89,8 +91,8 @@ class HerUpdateRequest(BaseModel):
         description=(
             "Update provider: openrouter / anthropic / wangsu / litellm. "
             "When provider=litellm, requests are routed through the LiteLLM "
-            "proxy (OpenRouter primary + Wangsu fallback for main models; "
-            "OpenRouter-only for minimax/glm/codex)."
+            "proxy. Current production routing uses OpenRouter for all 7 chat "
+            "models."
         ),
     )
     prefix: str | None = Field(None, description="Update server prefix (s1/s2/s3)")
@@ -103,6 +105,45 @@ class HerBatchAction(BaseModel):
     ids: list[int] = Field(..., description="List of instance IDs")
     action: str = Field(..., description="Action: stop / start / restart / delete / update")
     params: HerUpdateRequest | None = None
+
+
+class CloudflareSyncResult(BaseModel):
+    ok: bool = Field(..., description="Whether Cloudflare DNS + remote tunnel ingress sync completed")
+    message: str = Field(
+        "",
+        description=(
+            "Details or warning for callback routing. When ok=false, the OAuth "
+            "callback URL may still return 404 until Cloudflare is repaired and "
+            "/api/cloudflare/sync is run."
+        ),
+    )
+
+
+class HerCreateResponse(BaseModel):
+    id: int
+    status: str = "created"
+    managed_by: str = ""
+    oauth_url: str = ""
+    cloudflare: CloudflareSyncResult = Field(
+        default_factory=lambda: CloudflareSyncResult(ok=False, message=""),
+        description="Cloudflare DNS + tunnel ingress status for this instance",
+    )
+
+
+class HerBatchImportItemResponse(BaseModel):
+    id: int
+    status: str = ""
+    managed_by: str = ""
+    oauth_url: str = ""
+    error: str = ""
+    cloudflare: CloudflareSyncResult | None = Field(
+        default=None,
+        description="Cloudflare DNS + tunnel ingress status for this instance when creation succeeded",
+    )
+
+
+class HerBatchImportResponse(BaseModel):
+    results: list[HerBatchImportItemResponse]
 
 
 # ──────────────────────────────────────

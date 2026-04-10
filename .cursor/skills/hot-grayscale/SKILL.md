@@ -153,7 +153,7 @@ CRD spec changed?
 
 ### Provider 切换到 litellm 的副作用
 
-将实例的 `provider` 从 `wangsu/openrouter/anthropic` 切换为 `litellm` 时（当前路由：OpenRouter 主 + 网宿备），
+将实例的 `provider` 从 `wangsu/openrouter/anthropic` 切换为 `litellm` 时（当前路由：全部 7 个 chat 模型走 OpenRouter），
 Admin API 会自动生成一个 per-instance LiteLLM 虚拟 key 并写入 CRD `spec.litellmKey`。
 反向切换（从 `litellm` 切走）会删除该 key 并清空 `spec.litellmKey`。
 

@@ -148,7 +148,33 @@ print(f'primary: {primary}')
 
 应输出 `primary: litellm/claude-opus-4-6`（或对应模型）。
 
-### 4c. 确认实例健康
+### 4c. 确认 pure LiteLLM alias 集已生效
+
+```bash
+kubectl get cm carher-<SAMPLE_ID>-user-config -n carher \
+  -o jsonpath='{.data.openclaw\.json}' \
+  | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+models = d.get('agents',{}).get('defaults',{}).get('models',{})
+providers = d.get('models',{}).get('providers',{})
+provider_models = providers.get('litellm',{}).get('models',[])
+print('aliases:', sorted(v.get('alias','') for v in models.values()))
+print('alias_count:', len(models))
+print('providers:', list(providers.keys()))
+print('provider_model_count:', len(provider_models))
+"
+```
+
+期望：
+
+- `alias_count: 7`
+- `providers: ['litellm']`
+- `provider_model_count: 7`
+- aliases 为 `opus / sonnet / gpt / gemini / minimax / glm / codex`
+- 不再出现 `ws-gpt` / `ws-gemini` / `or-opus` / `or-sonnet`
+
+### 4d. 确认实例健康
 
 ```bash
 for i in $(seq <START> <END>); do
@@ -193,7 +219,9 @@ done
 ## 注意事项
 
 - LiteLLM key 生成通过 admin pod 内 `urllib` 调用 cluster-internal API，不走外网
+- LiteLLM virtual key 允许模型集合需与 proxy/config_gen 同步；当前应包含 7 个 chat 模型
 - 每个 key 的 `user_id` / `key_alias` 保证唯一，重复生成会创建新 key（旧 key 仍有效）
 - 升级过程完全热加载，Pod 不重启，飞书 WebSocket 不断连
+- pure LiteLLM 形态下，运行时只暴露 `litellm/*` 别名；不再保留 `ws-*` / `or-*`
 - 如果目标实例已是 `provider=litellm`，脚本中 `kubectl patch` 为幂等操作
 - 建议先在小范围（2-3 个实例）验证，再批量推广

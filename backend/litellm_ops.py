@@ -27,6 +27,9 @@ ALL_MODELS = [
     "claude-sonnet-4-6",
     "gpt-5.4",
     "gemini-3.1-pro-preview",
+    "minimax-m2.7",
+    "glm-5",
+    "gpt-5.3-codex",
     "BAAI/bge-m3",
 ]
 

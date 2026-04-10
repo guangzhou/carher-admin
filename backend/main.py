@@ -401,7 +401,7 @@ def api_list_instances(
 @app.get("/api/instances/search", tags=["instances"])
 def api_search_instances(
     status: str | None = Query(None, description="Filter: Running/Stopped/Failed/Paused"),
-    model: str | None = Query(None, description="Filter: gpt/sonnet/opus"),
+    model: str | None = Query(None, description="Filter: gpt/sonnet/opus/gemini/minimax/glm/codex"),
     deploy_group: str | None = Query(None, description="Filter: group name"),
     owner: str | None = Query(None, description="Filter: owner contains open_id"),
     name: str | None = Query(None, description="Filter: name contains text"),

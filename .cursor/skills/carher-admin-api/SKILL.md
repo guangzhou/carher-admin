@@ -65,11 +65,15 @@ curl -X POST https://admin.carher.net/api/instances \
 #   openrouter: gpt (GPT-5.4), sonnet (Claude Sonnet 4.6), opus (Claude Opus 4.6), gemini (Gemini 3.1 Pro)
 #   anthropic:  sonnet (Claude Sonnet 4.6), opus (Claude Opus 4.6)
 #   wangsu:     gpt (GPT-5.4), sonnet (Claude Sonnet 4.6), opus (Claude Opus 4.6), gemini (Gemini 3.1 Pro)
-#   litellm:    gpt (GPT-5.4), sonnet (Claude Sonnet 4.6), opus (Claude Opus 4.6), gemini (Gemini 3.1 Pro)
+#   litellm:    gpt (GPT-5.4), sonnet (Claude Sonnet 4.6), opus (Claude Opus 4.6),
+#               gemini (Gemini 3.1 Pro), minimax (MiniMax M2.7),
+#               glm (GLM-5), codex (GPT-5.3 Codex)
 #
 # When provider=litellm, a per-instance LiteLLM virtual key is auto-generated
 # for spend tracking. Requests are routed through the LiteLLM proxy
 # (litellm-proxy.carher.svc:4000) with Wangsu as primary and OpenRouter as fallback.
+# Runtime aliases in pure LiteLLM mode are `gpt`, `sonnet`, `opus`, `gemini`,
+# `minimax`, `glm`, `codex` (no `ws-*` / `or-*` aliases).
 curl -X PUT https://admin.carher.net/api/instances/14 \
   -H "Content-Type: application/json" \
   -d '{"model":"sonnet","provider":"wangsu","deploy_group":"vip"}'

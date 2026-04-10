@@ -504,7 +504,7 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 			Labels:    labels,
 			Annotations: map[string]string{
 				"carher.io/live-config-hash": configHash,
-				"carher.io/pod-spec-key":     fmt.Sprintf("%s|%s|%s", imageTag, prefix, secretName),
+				"carher.io/pod-spec-key":     fmt.Sprintf("%s|%s|%s|%s", imageTag, prefix, secretName, her.Spec.DeployGroup),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion:         "carher.io/v1alpha1",

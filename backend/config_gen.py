@@ -38,6 +38,9 @@ MODEL_MAP_LITELLM = {
     "opus": "litellm/claude-opus-4-6",
     "gpt": "litellm/gpt-5.4",
     "gemini": "litellm/gemini-3.1-pro-preview",
+    "minimax": "litellm/minimax-m2.7",
+    "glm": "litellm/glm-5",
+    "codex": "litellm/gpt-5.3-codex",
 }
 
 GOOGLE_ANTHROPIC_ROUTING = {
@@ -75,10 +78,11 @@ def generate_openclaw_json(instance: dict) -> dict:
         models: dict[str, Any] = {
             "litellm/claude-opus-4-6": {"alias": "opus"},
             "litellm/claude-sonnet-4-6": {"alias": "sonnet"},
-            "litellm/gpt-5.4": {"alias": "ws-gpt"},
-            "litellm/gemini-3.1-pro-preview": {"alias": "ws-gemini"},
-            "openrouter/anthropic/claude-opus-4.6": _alias_with_routing("or-opus"),
-            "openrouter/anthropic/claude-sonnet-4.6": _alias_with_routing("or-sonnet"),
+            "litellm/gpt-5.4": {"alias": "gpt"},
+            "litellm/gemini-3.1-pro-preview": {"alias": "gemini"},
+            "litellm/minimax-m2.7": {"alias": "minimax"},
+            "litellm/glm-5": {"alias": "glm"},
+            "litellm/gpt-5.3-codex": {"alias": "codex"},
         }
     elif provider == "anthropic":
         models = {
@@ -94,13 +98,14 @@ def generate_openclaw_json(instance: dict) -> dict:
             "anthropic/claude-opus-4-6": {"alias": "or-opus"},
             "anthropic/claude-sonnet-4-6": {"alias": "or-sonnet"},
         }
-    models.update({
-        "openrouter/google/gemini-3.1-pro-preview": {"alias": "gemini"},
-        "openrouter/minimax/minimax-m2.7": {"alias": "minimax"},
-        "openrouter/z-ai/glm-5": {"alias": "glm"},
-        "openrouter/openai/gpt-5.4": {"alias": "gpt"},
-        "openrouter/openai/gpt-5.3-codex": {"alias": "codex"},
-    })
+    if provider != "litellm":
+        models.update({
+            "openrouter/google/gemini-3.1-pro-preview": {"alias": "gemini"},
+            "openrouter/minimax/minimax-m2.7": {"alias": "minimax"},
+            "openrouter/z-ai/glm-5": {"alias": "glm"},
+            "openrouter/openai/gpt-5.4": {"alias": "gpt"},
+            "openrouter/openai/gpt-5.3-codex": {"alias": "codex"},
+        })
     if provider == "wangsu":
         models.update({
             "wangsu/claude-opus-4-6": {"alias": "ws-opus"},
@@ -127,6 +132,9 @@ def generate_openclaw_json(instance: dict) -> dict:
                 {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 64000, "cost": {"input": 3, "output": 15, "cacheRead": 0.3}},
                 {"id": "gpt-5.4", "name": "GPT-5.4", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 128000, "cost": {"input": 2.5, "output": 15, "cacheRead": 0.25}},
                 {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 65536, "cost": {"input": 2, "output": 12, "cacheRead": 0.2}},
+                {"id": "minimax-m2.7", "name": "MiniMax M2.7", "api": "openai-completions", "input": ["text"], "contextWindow": 200000, "maxTokens": 128000, "cost": {"input": 0.5, "output": 1.5}},
+                {"id": "glm-5", "name": "GLM-5", "api": "openai-completions", "input": ["text"], "contextWindow": 128000, "maxTokens": 32000, "cost": {"input": 1, "output": 3}},
+                {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "api": "openai-completions", "reasoning": True, "input": ["text"], "contextWindow": 200000, "maxTokens": 128000, "cost": {"input": 3, "output": 15}},
             ],
         }}}
 

@@ -154,6 +154,82 @@ func TestGenerateOpenclawJSON_OAuthRedirectOverride(t *testing.T) {
 	}
 }
 
+func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
+	input := ConfigInput{
+		ID:         1000,
+		Name:       "Test",
+		Model:      "opus",
+		AppID:      "cli_test",
+		AppSecret:  "secret",
+		Prefix:     "s1",
+		Provider:   "litellm",
+		LitellmKey: "sk-test-key",
+	}
+
+	result := GenerateOpenclawJSON(input)
+	var cfg map[string]interface{}
+	if err := json.Unmarshal([]byte(result), &cfg); err != nil {
+		t.Fatalf("Generated invalid JSON: %v", err)
+	}
+
+	agents := cfg["agents"].(map[string]interface{})
+	defaults := agents["defaults"].(map[string]interface{})
+	model := defaults["model"].(map[string]interface{})
+	if model["primary"] != "litellm/claude-opus-4-6" {
+		t.Errorf("Wrong primary model: %v", model["primary"])
+	}
+
+	models := defaults["models"].(map[string]interface{})
+
+	expectedAliases := map[string]string{
+		"litellm/claude-opus-4-6":      "opus",
+		"litellm/claude-sonnet-4-6":    "sonnet",
+		"litellm/gpt-5.4":             "gpt",
+		"litellm/gemini-3.1-pro-preview": "gemini",
+		"litellm/minimax-m2.7":        "minimax",
+		"litellm/glm-5":               "glm",
+		"litellm/gpt-5.3-codex":       "codex",
+	}
+	for mid, wantAlias := range expectedAliases {
+		m, ok := models[mid]
+		if !ok {
+			t.Errorf("Missing model %s", mid)
+			continue
+		}
+		got := m.(map[string]interface{})["alias"]
+		if got != wantAlias {
+			t.Errorf("Model %s alias = %v, want %v", mid, got, wantAlias)
+		}
+	}
+
+	if len(models) != 7 {
+		t.Errorf("Expected exactly 7 models for litellm, got %d", len(models))
+		for k := range models {
+			t.Logf("  model: %s", k)
+		}
+	}
+
+	// No openrouter/* models should be present
+	for k := range models {
+		if strings.HasPrefix(k, "openrouter/") {
+			t.Errorf("Unexpected openrouter model in litellm config: %s", k)
+		}
+	}
+
+	// Verify litellm provider is defined with 7 models
+	modelsSection := cfg["models"].(map[string]interface{})
+	providers := modelsSection["providers"].(map[string]interface{})
+	litellmProv := providers["litellm"].(map[string]interface{})
+	provModels := litellmProv["models"].([]interface{})
+	if len(provModels) != 7 {
+		t.Errorf("Expected 7 provider models, got %d", len(provModels))
+	}
+
+	if litellmProv["apiKey"] != "sk-test-key" {
+		t.Errorf("Wrong apiKey: %v", litellmProv["apiKey"])
+	}
+}
+
 func TestSplitOwners(t *testing.T) {
 	tests := []struct {
 		input    string

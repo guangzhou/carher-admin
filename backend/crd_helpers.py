@@ -43,11 +43,18 @@ def crd_uids(*, strict: bool = False) -> Optional[set[int]]:
         if _last_good_crd_uids is not None:
             logger.warning("CRD listing failed; using cached CRD UID set for read-only paths")
             return set(_last_good_crd_uids)
-        logger.warning("CRD listing failed before cache warmup; returning empty CRD UID set")
-        return set()
+        logger.warning("CRD listing failed before cache warmup; returning None to prevent misclassification")
+        return None
 
 
 def db_instances_excluding_crds() -> list[dict]:
-    """Return DB instances that are NOT managed by a CRD."""
+    """Return DB instances that are NOT managed by a CRD.
+
+    If CRD listing is unavailable and cache is cold, returns an empty list
+    to avoid misclassifying CRD instances as legacy.
+    """
     uids = crd_uids(strict=False)
+    if uids is None:
+        logger.warning("CRD UIDs unavailable; returning empty legacy list to avoid misclassification")
+        return []
     return [inst for inst in db.list_all() if inst.get("id") not in uids]

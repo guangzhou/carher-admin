@@ -73,7 +73,7 @@ spec:
               properties:
                 phase:
                   type: string
-                  enum: [Pending, Running, Failed, Stopped, Paused]
+                  enum: [Pending, Running, Failed, Stopped, Paused, Succeeded, Unknown]
                 podIP:
                   type: string
                 node:

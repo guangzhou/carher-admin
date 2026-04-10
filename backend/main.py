@@ -55,6 +55,20 @@ logger = logging.getLogger("carher-admin")
 STATIC_DIR = Path(__file__).parent.parent / "frontend" / "dist"
 
 
+_SECRET_KEYS = {"app_secret", "appSecret", "secret", "token", "password", "apiKey", "api_key"}
+
+
+def _redact_secrets(d: dict, _depth: int = 0):
+    """Recursively mask values whose key looks like a secret."""
+    if _depth > 10:
+        return
+    for k, v in d.items():
+        if isinstance(v, dict):
+            _redact_secrets(v, _depth + 1)
+        elif isinstance(v, str) and v and k in _SECRET_KEYS:
+            d[k] = v[:4] + "****" if len(v) > 4 else "****"
+
+
 def _k8s_error_detail(exc: K8sApiException) -> str:
     """Extract a human-readable message from a K8s ApiException."""
     try:
@@ -1304,7 +1318,7 @@ def api_set_deploy_group(uid: int, req: SetDeployGroupRequest):
     try:
         db.set_deploy_group(uid, req.group)
     except Exception:
-        pass
+        logger.warning("DB set_deploy_group failed for uid=%d (CRD already updated)", uid, exc_info=True)
     managed = "operator" if has_crd else "db"
     return {"id": uid, "deploy_group": req.group, "managed_by": managed}
 
@@ -1330,7 +1344,7 @@ def api_batch_set_deploy_group(req: BatchSetDeployGroupRequest):
     try:
         db.batch_set_deploy_group(all_ids, req.group)
     except Exception:
-        pass
+        logger.warning("DB batch_set_deploy_group failed (CRD already updated)", exc_info=True)
     result = {"action": "batch_set_deploy_group", "count": len(all_ids),
               "group": req.group, "crd_updated": crd_count, "db_synced": len(all_ids)}
     if errors:
@@ -1662,14 +1676,20 @@ def api_config_preview(uid: int):
                 "bot_open_id": spec.get("botOpenId", ""),
                 "litellm_key": spec.get("litellmKey", ""),
             }
-            return config_gen.generate_openclaw_json(inst)
+            result = config_gen.generate_openclaw_json(inst)
+            if isinstance(result, dict):
+                _redact_secrets(result)
+            return result
     except Exception:
         pass
 
     inst = db.get_by_id(uid)
     if not inst:
         raise HTTPException(404, f"Instance {uid} not found")
-    return config_gen.generate_openclaw_json(inst)
+    result = config_gen.generate_openclaw_json(inst)
+    if isinstance(result, dict):
+        _redact_secrets(result)
+    return result
 
 
 @app.get("/api/instances/{uid}/config-current", tags=["instances"])

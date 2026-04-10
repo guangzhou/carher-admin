@@ -142,8 +142,8 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if secretName_ == "" {
 		secretName_ = fmt.Sprintf("carher-%d-secret", uid)
 	}
-	desiredPodSpecKey := fmt.Sprintf("%s|%s|%s",
-		resolveImage(her.Spec.Image), resolvePrefix(her.Spec.Prefix), secretName_)
+	desiredPodSpecKey := fmt.Sprintf("%s|%s|%s|%s",
+		resolveImage(her.Spec.Image), resolvePrefix(her.Spec.Prefix), secretName_, her.Spec.DeployGroup)
 
 	if deployErr != nil || deploy == nil {
 		needRollout = true
@@ -242,6 +242,7 @@ func (r *HerInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // ── Config generation ──
 
 func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerInstance) (string, error) {
+	logger := log.FromContext(ctx)
 	uid := her.Spec.UserID
 
 	appSecret := ""
@@ -250,7 +251,12 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 		secretName = fmt.Sprintf("carher-%d-secret", uid)
 	}
 	var secret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: Namespace}, &secret); err == nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: Namespace}, &secret); err != nil {
+		if !errors.IsNotFound(err) {
+			logger.Error(err, "Failed to read app secret, aborting config generation", "uid", uid, "secret", secretName)
+			return "", fmt.Errorf("read secret %s: %w", secretName, err)
+		}
+	} else {
 		if v, ok := secret.Data["app_secret"]; ok {
 			appSecret = string(v)
 		}

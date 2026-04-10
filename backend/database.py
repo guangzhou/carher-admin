@@ -934,10 +934,12 @@ def get_all_pods_latest_metrics() -> dict[int, dict]:
     """Get the latest metrics sample for each pod."""
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT uid, cpu_m, memory_mi FROM metrics_history
-               WHERE kind = 'pod' AND ts = (
-                   SELECT MAX(ts) FROM metrics_history WHERE kind = 'pod'
-               )""",
+            """SELECT m.uid, m.cpu_m, m.memory_mi FROM metrics_history m
+               INNER JOIN (
+                   SELECT uid, MAX(ts) as max_ts FROM metrics_history
+                   WHERE kind = 'pod' GROUP BY uid
+               ) latest ON m.uid = latest.uid AND m.ts = latest.max_ts
+               WHERE m.kind = 'pod'""",
         ).fetchall()
         return {r["uid"]: {"cpu_m": r["cpu_m"], "memory_mi": r["memory_mi"]} for r in rows}
 

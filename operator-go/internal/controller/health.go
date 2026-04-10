@@ -183,7 +183,14 @@ func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, p
 	}
 
 	phase := string(primary.Status.Phase)
-	status.Phase = phase
+	switch phase {
+	case "Pending", "Running", "Failed":
+		status.Phase = phase
+	case "Succeeded":
+		status.Phase = "Stopped"
+	default:
+		status.Phase = "Unknown"
+	}
 	status.PodIP = primary.Status.PodIP
 	status.Node = primary.Spec.NodeName
 

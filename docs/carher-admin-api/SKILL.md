@@ -72,7 +72,7 @@ curl -X POST https://admin.carher.net/api/instances \
 # When provider=litellm, a per-instance LiteLLM virtual key (carher-{uid}) is
 # auto-generated for spend tracking. Operator injects LITELLM_API_KEY env var
 # into the Pod to override the shared master key.
-# Routing: gpt/sonnet/opus/gemini → Wangsu primary + OpenRouter fallback;
+# Routing: gpt/sonnet/opus/gemini → OpenRouter primary + Wangsu fallback;
 #          minimax/glm/codex → OpenRouter only.
 # Runtime aliases: `gpt`, `sonnet`, `opus`, `gemini`, `minimax`, `glm`, `codex`
 # (no `ws-*` / `or-*` aliases in pure LiteLLM mode).

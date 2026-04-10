@@ -211,10 +211,10 @@ done
 
 | 维度 | wangsu (升级前) | litellm (升级后) |
 |------|----------------|-----------------|
-| 路由 | 直连网宿 API | gpt/sonnet/opus/gemini → 网宿(主) + OpenRouter(备)；minimax/glm/codex → OpenRouter only |
+| 路由 | 直连网宿 API | gpt/sonnet/opus/gemini → OpenRouter(主) + 网宿(备)；minimax/glm/codex → OpenRouter only |
 | 可用模型 | 4 个（gpt/sonnet/opus/gemini） | 7 个（+minimax/glm/codex） |
 | Token 追踪 | 无 | per-instance virtual key（`carher-{uid}`），按 user_id 聚合 |
-| 故障转移 | 无 | 4 个主模型自动 fallback 到 OpenRouter |
+| 故障转移 | 无 | 4 个主模型自动 fallback 到网宿 |
 | 消费监控 | 无 | LiteLLM Dashboard / Admin API `/api/litellm/spend` |
 | Env 注入 | — | Operator 注入 `LITELLM_API_KEY` 覆盖共享 master key |
 | 延迟 | 直连 | +1 hop（集群内 <1ms） |

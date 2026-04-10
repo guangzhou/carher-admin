@@ -74,7 +74,7 @@ curl -s -X POST "https://admin.carher.net/api/instances/batch-import" \
 > - Admin API 自动生成 per-instance 虚拟 key（`key_alias` / `user_id` = `carher-{uid}`），存入 CRD `spec.litellmKey`
 > - Operator 向 Pod 注入 `LITELLM_API_KEY` env var（该 key），覆盖共享 Secret 中的 master key
 > - Key 允许访问 7 个 chat 模型 + `BAAI/bge-m3` embedding
-> - 路由：gpt/sonnet/opus/gemini → 网宿主 + OpenRouter 备；minimax/glm/codex → OpenRouter only
+> - 路由：gpt/sonnet/opus/gemini → OpenRouter 主 + 网宿备；minimax/glm/codex → OpenRouter only
 > - 无需手动创建 key
 
 ### Step 3: 验证创建结果

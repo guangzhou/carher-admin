@@ -237,7 +237,7 @@ sequenceDiagram
 | Secret `cloudflared-credentials` | Tunnel 凭证 + Origin Cert |
 | ClusterIP Service | Operator 自动创建，Pod 重建不影响路由 |
 | Host 路由 | `auth-proxy` 按 `{prefix}-u{uid}-auth/fe/proxy.carher.net` 解析 uid 并转发到实例 Service |
-| POST /api/cloudflare/sync | 手动触发全量配置重新生成 |
+| POST /api/cloudflare/sync | 手动触发 cloudflared ConfigMap + 远程 tunnel ingress 全量同步 |
 
 ### 4. CI/CD — GitHub Actions + 分支规则
 
@@ -538,7 +538,7 @@ carher-admin/
 | GET | `/api/instances/:id/config-current` | 当前配置 |
 | POST | `/api/instances/:id/exec` | Pod Exec (白名单命令) |
 | POST | `/api/instances/batch` | 批量操作 |
-| POST | `/api/instances/batch-import` | 批量导入 |
+| POST | `/api/instances/batch-import` | 批量导入（推荐 `{"instances":[...]}`，兼容旧裸数组 body） |
 | PUT | `/api/instances/:id/deploy-group` | 设置部署分组 |
 | POST | `/api/instances/batch-deploy-group` | 批量设置分组 |
 
@@ -578,8 +578,8 @@ carher-admin/
 | POST | `/api/branch-rules` | 创建分支规则 |
 | PUT | `/api/branch-rules/:id` | 修改分支规则 |
 | DELETE | `/api/branch-rules/:id` | 删除分支规则 |
-| GET | `/api/branch-rules/test?branch=` | 测试分支匹配 |
-| POST | `/api/ci/trigger-build` | 触发 GitHub Actions 构建 |
+| POST | `/api/branch-rules/test?branch=` | 测试分支匹配 |
+| POST | `/api/ci/trigger-build` | 触发 GitHub Actions 构建（需传 `workflow`） |
 | GET | `/api/ci/workflows?repo=` | 列出仓库可用 Workflow |
 | GET | `/api/ci/branches?repo=` | 列出仓库分支 |
 | GET | `/api/ci/runs?repo=&per_page=10` | 最近 GitHub Actions 构建状态 |
@@ -588,7 +588,7 @@ carher-admin/
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/cloudflare/sync` | 重新生成 cloudflared 配置并重启 (从所有活跃 CRD 生成) |
+| POST | `/api/cloudflare/sync` | 同步 cloudflared ConfigMap，并补齐 Cloudflare 远程 tunnel ingress |
 
 ### 系统设置
 
@@ -635,12 +635,12 @@ carher-admin/
 |------|------|--------|------|
 | `userId` | integer | (必填) | 实例唯一 ID |
 | `name` | string | (必填) | 用户名 |
-| `model` | string | `gpt` | 模型 (gpt / sonnet / opus) |
+| `model` | string | `opus` | 模型 (gpt / sonnet / opus / gemini) |
 | `appId` | string | (必填) | 飞书 App ID |
 | `appSecretRef` | string | `carher-{uid}-secret` | K8s Secret 名 |
 | `prefix` | string | `s1` | 服务器前缀 |
 | `owner` | string | `""` | 飞书用户 open_id (竖线分隔) |
-| `provider` | string | `openrouter` | AI 提供商 |
+| `provider` | string | `wangsu` | AI 提供商 |
 | `botOpenId` | string | `""` | 飞书 Bot Open ID |
 | `deployGroup` | string | `stable` | 灰度分组 |
 | `image` | string | `v20260328` | 镜像 tag |

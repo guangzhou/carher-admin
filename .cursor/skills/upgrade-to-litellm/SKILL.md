@@ -211,17 +211,19 @@ done
 
 | 维度 | wangsu (升级前) | litellm (升级后) |
 |------|----------------|-----------------|
-| 路由 | 直连网宿 API | LiteLLM proxy → 网宿(主) + OpenRouter(备) |
-| Token 追踪 | 无 | 每个实例独立 virtual key，按 user_id 聚合 |
-| 故障转移 | 无 | 自动 fallback 到 OpenRouter |
+| 路由 | 直连网宿 API | gpt/sonnet/opus/gemini → 网宿(主) + OpenRouter(备)；minimax/glm/codex → OpenRouter only |
+| 可用模型 | 4 个（gpt/sonnet/opus/gemini） | 7 个（+minimax/glm/codex） |
+| Token 追踪 | 无 | per-instance virtual key（`carher-{uid}`），按 user_id 聚合 |
+| 故障转移 | 无 | 4 个主模型自动 fallback 到 OpenRouter |
 | 消费监控 | 无 | LiteLLM Dashboard / Admin API `/api/litellm/spend` |
+| Env 注入 | — | Operator 注入 `LITELLM_API_KEY` 覆盖共享 master key |
 | 延迟 | 直连 | +1 hop（集群内 <1ms） |
 
 ## 注意事项
 
 - LiteLLM key 生成通过 admin pod 内 `urllib` 调用 cluster-internal API，不走外网
 - LiteLLM virtual key 允许模型集合需与 proxy/config_gen 同步；当前应包含 7 个 chat 模型
-- 每个 key 的 `user_id` / `key_alias` 保证唯一，重复生成会创建新 key（旧 key 仍有效）
+- 每个 key 的 `user_id` / `key_alias` 统一为 `carher-{uid}`，保证唯一
 - 升级过程完全热加载，Pod 不重启，飞书 WebSocket 不断连
 - pure LiteLLM 形态下，运行时只暴露 `litellm/*` 别名；不再保留 `ws-*` / `or-*`
 - 如果目标实例已是 `provider=litellm`，脚本中 `kubectl patch` 为幂等操作

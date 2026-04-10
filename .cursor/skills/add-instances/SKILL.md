@@ -34,7 +34,7 @@ API_KEY=$(kubectl get secret carher-admin-secrets -n carher \
 | 参数 | 默认值 | 可选值 |
 |------|--------|--------|
 | provider | wangsu | wangsu / openrouter / anthropic / litellm |
-| model | opus | opus / sonnet / gpt / gemini |
+| model | opus | opus / sonnet / gpt / gemini（litellm 额外支持 minimax / glm / codex） |
 | prefix | s1 | s1 / s2 / s3 |
 | deploy_group | stable | stable / test / canary / vip 等 |
 
@@ -70,7 +70,12 @@ curl -s -X POST "https://admin.carher.net/api/instances/batch-import" \
 
 每个实例支持的字段：`id`、`name`、`model`、`app_id`、`app_secret`、`prefix`、`owner`、`provider`、`deploy_group`。未提供的字段使用上述默认值。
 
-> **LiteLLM 注意事项**：当 `provider=litellm` 时，Admin API 会在创建实例时自动调用 LiteLLM proxy 生成一个 per-instance 虚拟 key（存入 DB `litellm_key` 和 CRD `spec.litellmKey`），用于独立的 token 消费追踪。无需手动创建 key。
+> **LiteLLM 注意事项**：当 `provider=litellm` 时：
+> - Admin API 自动生成 per-instance 虚拟 key（`key_alias` / `user_id` = `carher-{uid}`），存入 CRD `spec.litellmKey`
+> - Operator 向 Pod 注入 `LITELLM_API_KEY` env var（该 key），覆盖共享 Secret 中的 master key
+> - Key 允许访问 7 个 chat 模型 + `BAAI/bge-m3` embedding
+> - 路由：gpt/sonnet/opus/gemini → 网宿主 + OpenRouter 备；minimax/glm/codex → OpenRouter only
+> - 无需手动创建 key
 
 ### Step 3: 验证创建结果
 

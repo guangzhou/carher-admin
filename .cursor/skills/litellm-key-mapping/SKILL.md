@@ -10,6 +10,14 @@ description: >-
 
 查看所有使用 `provider=litellm` 的 her 实例及其对应的 LiteLLM 虚拟 key。
 
+## 关键概念
+
+- **Key 命名**：`key_alias` 和 `user_id` 统一为 `carher-{uid}`（如 `carher-1000`）
+- **Env 注入**：Operator 向 Pod 注入 `LITELLM_API_KEY` env var（per-instance key），覆盖共享 Secret 中的 master key
+- **模型白名单**：每个 key 允许 7 个 chat 模型 + 1 个 embedding（`BAAI/bge-m3`）
+- **路由**：gpt/sonnet/opus/gemini → Wangsu 主 + OpenRouter 备；minimax/glm/codex → OpenRouter only
+- **当前规模**：约 101 个实例使用 litellm
+
 ## 前置：kubectl 隧道
 
 先测试连通性：`kubectl get nodes`

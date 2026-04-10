@@ -69,11 +69,13 @@ curl -X POST https://admin.carher.net/api/instances \
 #               gemini (Gemini 3.1 Pro), minimax (MiniMax M2.7),
 #               glm (GLM-5), codex (GPT-5.3 Codex)
 #
-# When provider=litellm, a per-instance LiteLLM virtual key is auto-generated
-# for spend tracking. Requests are routed through the LiteLLM proxy
-# (litellm-proxy.carher.svc:4000) with Wangsu as primary and OpenRouter as fallback.
-# Runtime aliases in pure LiteLLM mode are `gpt`, `sonnet`, `opus`, `gemini`,
-# `minimax`, `glm`, `codex` (no `ws-*` / `or-*` aliases).
+# When provider=litellm, a per-instance LiteLLM virtual key (carher-{uid}) is
+# auto-generated for spend tracking. Operator injects LITELLM_API_KEY env var
+# into the Pod to override the shared master key.
+# Routing: gpt/sonnet/opus/gemini → Wangsu primary + OpenRouter fallback;
+#          minimax/glm/codex → OpenRouter only.
+# Runtime aliases: `gpt`, `sonnet`, `opus`, `gemini`, `minimax`, `glm`, `codex`
+# (no `ws-*` / `or-*` aliases in pure LiteLLM mode).
 curl -X PUT https://admin.carher.net/api/instances/14 \
   -H "Content-Type: application/json" \
   -d '{"model":"sonnet","provider":"wangsu","deploy_group":"vip"}'

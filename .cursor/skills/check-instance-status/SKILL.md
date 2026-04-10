@@ -56,7 +56,7 @@ kubectl get her her-<ID> -n carher -o yaml
 | `spec.model` / `spec.provider` | 模型与供应商 |
 | `spec.image` | 镜像 tag |
 | `spec.deployGroup` | 部署组 |
-| `spec.litellmKey` | LiteLLM 虚拟 key（仅 provider=litellm 时有值） |
+| `spec.litellmKey` | LiteLLM 虚拟 key（仅 provider=litellm 时有值）。Operator 会将此值注入 Pod env `LITELLM_API_KEY`，覆盖共享 master key |
 | `spec.paused` | 是否暂停 |
 | `status.phase` | 运行阶段 (Running/Stopped/CrashLoopBackOff) |
 | `status.feishuWS` | 飞书 WebSocket (Connected/Disconnected) |
@@ -108,6 +108,7 @@ kubectl get svc carher-<ID>-svc -n carher -o wide
 | Phase=Running + message 含 CrashLoopBackOff | message 可能是历史残留，以 Pod 实际状态为准 |
 | Phase=Running + feishuWS=Disconnected | 飞书连接异常，检查日志中 `[ws]` 相关错误 |
 | Phase=Stopped + paused=true | 人工暂停，正常 |
+| `LITELLM_API_KEY` env 与 CRD key 不匹配 | Operator 未 reconcile，annotate CRD 触发 reconcile |
 | Pod 0/2 或 CrashLoopBackOff | 容器崩溃，用 `kubectl logs --previous` 查上次崩溃原因 |
 | No Pod found | Operator 未创建 Pod，检查 `kubectl logs deploy/carher-operator -n carher` |
 

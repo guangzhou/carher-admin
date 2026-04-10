@@ -21,11 +21,11 @@ Changes are classified into two tiers based on what they affect:
 | Change Type | Examples | Mechanism | Pod Restart? |
 |---|---|---|---|
 | **Config-only** | model, provider, owner, bot name, litellmKey | Hot-reload via sidecar | No |
-| **Pod-spec** | image, prefix, appSecretRef | Rolling update + ReadinessGate | Yes (zero-downtime) |
+| **Pod-spec** | image, prefix, appSecretRef, deployGroup | Rolling update + ReadinessGate | Yes (zero-downtime) |
 
 The operator determines the tier by comparing two keys on the Deployment:
 
-- `carher.io/pod-spec-key` — raw concatenation `image|prefix|secretName` (NOT a hash)
+- `carher.io/pod-spec-key` — raw concatenation `image|prefix|secretName|deployGroup` (NOT a hash)
 - `carher.io/live-config-hash` — MD5 of ConfigMap content (first 12 hex chars)
 
 ## Tier 1: Config-Only Hot Reload (No Pod Restart)
@@ -147,7 +147,7 @@ For detailed technical pitfalls discovered during implementation, see
 ```
 CRD spec changed?
 ├─ model/provider/owner/name/litellmKey changed → Tier 1 hot-reload (no restart)
-├─ image/prefix/appSecretRef changed            → Tier 2 rolling update (zero-downtime)
+├─ image/prefix/appSecretRef/deployGroup changed → Tier 2 rolling update (zero-downtime)
 └─ nothing changed, replicas=0                  → Scale up (unpause)
 ```
 
@@ -160,3 +160,5 @@ Admin API 会自动生成一个 per-instance LiteLLM 虚拟 key 并写入 CRD `s
 这属于 Tier 1 config-only 变更，不会触发 Pod 重启。但需注意：
 - 批量切换时，每个实例都会产生一次 LiteLLM key API 调用
 - 切走后对应 key 在 LiteLLM 侧被删除，历史 spend 数据仍保留
+- Operator 会向 Pod 注入 `LITELLM_API_KEY` env（per-instance virtual key），覆盖共享 Secret 中的 master key
+- Key 命名统一为 `carher-{uid}`（`key_alias` 和 `user_id` 一致）

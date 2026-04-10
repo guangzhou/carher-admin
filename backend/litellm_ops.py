@@ -39,7 +39,7 @@ def generate_key(uid: int, name: str = "") -> str | None:
     if not LITELLM_MASTER_KEY:
         logger.error("LITELLM_MASTER_KEY is not configured")
         return None
-    alias = f"her-{uid}"
+    alias = f"carher-{uid}"
     body = json.dumps({
         "user_id": alias,
         "key_alias": alias,
@@ -60,10 +60,10 @@ def generate_key(uid: int, name: str = "") -> str | None:
         data = json.loads(resp.read())
         key = data.get("key", "")
         if key:
-            logger.info("Generated LiteLLM key for her-%d: %s...%s", uid, key[:6], key[-4:])
+            logger.info("Generated LiteLLM key for carher-%d: %s...%s", uid, key[:6], key[-4:])
         return key
     except Exception as e:
-        logger.error("Failed to generate LiteLLM key for her-%d: %s", uid, e)
+        logger.error("Failed to generate LiteLLM key for carher-%d: %s", uid, e)
         return None
 
 

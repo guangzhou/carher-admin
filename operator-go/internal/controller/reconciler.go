@@ -326,6 +326,25 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 	return hash, r.Update(ctx, &existing)
 }
 
+// herContainerEnv returns the env vars for the main carher container.
+// When litellmKey is set, LITELLM_API_KEY is injected explicitly so it
+// overrides the master key from the shared carher-env-keys Secret.
+func herContainerEnv(uid int, pfx, litellmKey string) []corev1.EnvVar {
+	env := []corev1.EnvVar{
+		{Name: "HOME", Value: "/data"},
+		{Name: "OPENCLAW_INSTANCE_ID", Value: fmt.Sprintf("carher-%d-k8s", uid)},
+		{Name: "NODE_OPTIONS", Value: "--max-old-space-size=2304"},
+		{Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/gcloud/application_default_credentials.json"},
+		{Name: "VOICE_FE_HOST", Value: fmt.Sprintf("%su%d-fe.carher.net", pfx, uid)},
+		{Name: "VOICE_PROXY_HOST", Value: fmt.Sprintf("%su%d-proxy.carher.net", pfx, uid)},
+		{Name: "REDIS_URL", Value: "redis://carher-redis.carher.svc:6379"},
+	}
+	if litellmKey != "" {
+		env = append(env, corev1.EnvVar{Name: "LITELLM_API_KEY", Value: litellmKey})
+	}
+	return env
+}
+
 // ── Deployment lifecycle ──
 
 func (r *HerInstanceReconciler) getDeployment(ctx context.Context, uid int) (*appsv1.Deployment, error) {
@@ -405,15 +424,7 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 					{ContainerPort: 18891, Name: "oauth"},
 					{ContainerPort: 18795, Name: "a2a"},
 				},
-				Env: []corev1.EnvVar{
-					{Name: "HOME", Value: "/data"},
-					{Name: "OPENCLAW_INSTANCE_ID", Value: fmt.Sprintf("carher-%d-k8s", uid)},
-					{Name: "NODE_OPTIONS", Value: "--max-old-space-size=2304"},
-					{Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: "/gcloud/application_default_credentials.json"},
-					{Name: "VOICE_FE_HOST", Value: fmt.Sprintf("%su%d-fe.carher.net", pfx, uid)},
-					{Name: "VOICE_PROXY_HOST", Value: fmt.Sprintf("%su%d-proxy.carher.net", pfx, uid)},
-					{Name: "REDIS_URL", Value: "redis://carher-redis.carher.svc:6379"},
-				},
+			Env: herContainerEnv(uid, pfx, her.Spec.LitellmKey),
 				EnvFrom: []corev1.EnvFromSource{{
 					SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "carher-env-keys"}},
 				}},

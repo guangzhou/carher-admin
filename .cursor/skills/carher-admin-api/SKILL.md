@@ -28,6 +28,8 @@ curl -s https://admin.carher.net/api/auth/me \
 ```
 
 Most API endpoints also accept `X-API-Key` header with the admin API key.
+For automation, prefer `X-API-Key`. `/api/auth/login` returns `503` when
+`ADMIN_PASSWORD` or `JWT_SECRET` is intentionally left unconfigured.
 
 ## Quick Reference
 
@@ -51,7 +53,7 @@ curl -s https://admin.carher.net/api/next-id | jq
 # Create instance
 curl -X POST https://admin.carher.net/api/instances \
   -H "Content-Type: application/json" \
-  -d '{"name":"新用户","model":"gpt","provider":"openrouter","app_id":"cli_xxx","app_secret":"xxx","prefix":"s1","owner":"ou_xxx"}'
+  -d '{"name":"新用户","model":"gpt","provider":"wangsu","app_id":"cli_xxx","app_secret":"xxx","prefix":"s1","owner":"ou_xxx"}'
 
 # Update instance (only non-null fields are applied)
 # Supported fields: name, model, provider, owner, deploy_group, image,
@@ -67,7 +69,7 @@ curl -X POST https://admin.carher.net/api/instances \
 #
 # When provider=litellm, a per-instance LiteLLM virtual key is auto-generated
 # for spend tracking. Requests are routed through the LiteLLM proxy
-# (litellm-proxy.carher.svc:4000) which load-balances across Wangsu + OpenRouter.
+# (litellm-proxy.carher.svc:4000) with Wangsu as primary and OpenRouter as fallback.
 curl -X PUT https://admin.carher.net/api/instances/14 \
   -H "Content-Type: application/json" \
   -d '{"model":"sonnet","provider":"wangsu","deploy_group":"vip"}'
@@ -88,10 +90,11 @@ curl -X POST https://admin.carher.net/api/instances/batch \
   -H "Content-Type: application/json" \
   -d '{"ids":[14,25,30],"action":"update","params":{"provider":"wangsu","model":"opus"}}'
 
-# Batch import instances
+# Batch import instances (preferred wrapped body)
 curl -X POST https://admin.carher.net/api/instances/batch-import \
   -H "Content-Type: application/json" \
-  -d '[{"name":"用户A","model":"gpt","app_id":"cli_xxx","app_secret":"xxx","prefix":"s1","owner":"ou_xxx"}]'
+  -d '{"instances":[{"name":"用户A","model":"gpt","provider":"wangsu","app_id":"cli_xxx","app_secret":"xxx","prefix":"s1","owner":"ou_xxx"}]}'
+# Legacy raw-array bodies are also accepted for backward compatibility.
 
 # Get Pod logs
 curl -s "https://admin.carher.net/api/instances/14/logs?tail=200" | jq .logs
@@ -186,7 +189,8 @@ curl -s https://admin.carher.net/api/branch-rules | jq
 # Create branch rule
 curl -X POST https://admin.carher.net/api/branch-rules \
   -H "Content-Type: application/json" \
-  -d '{"branch_pattern":"release/*","auto_deploy":false,"deploy_mode":"canary-only"}'
+  -d '{"pattern":"release/*","auto_deploy":false,"deploy_mode":"canary-only"}'
+# Legacy request key `branch_pattern` is also accepted.
 
 # Update branch rule
 curl -X PUT https://admin.carher.net/api/branch-rules/1 \
@@ -200,9 +204,10 @@ curl -X DELETE https://admin.carher.net/api/branch-rules/1
 curl -X POST "https://admin.carher.net/api/branch-rules/test?branch=release/v2.0"
 
 # Trigger GitHub Actions build
+# Tip: call /api/ci/workflows first to discover the exact workflow file name.
 curl -X POST https://admin.carher.net/api/ci/trigger-build \
   -H "Content-Type: application/json" \
-  -d '{"branch":"main"}'
+  -d '{"repo":"guangzhou/CarHer","branch":"main","workflow":"<workflow-file>.yml","deploy_mode":"normal"}'
 
 # List CI workflows
 curl -s https://admin.carher.net/api/ci/workflows | jq
@@ -263,7 +268,8 @@ curl -X POST https://admin.carher.net/api/backup | jq
 # Import instances from K8s ConfigMaps (one-time migration)
 curl -X POST https://admin.carher.net/api/import-from-k8s | jq
 
-# Regenerate cloudflared config
+# Reconcile cloudflared ConfigMap + remote tunnel ingress
+# Requires CLOUDFLARE_API_TOKEN to be configured on carher-admin.
 curl -X POST https://admin.carher.net/api/cloudflare/sync | jq
 
 # Get settings

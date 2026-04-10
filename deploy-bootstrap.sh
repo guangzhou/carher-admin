@@ -11,6 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ACR="cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com"
+ACR_VPC="cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com"
 ACR_USER="liuguoxian@1989403661820148"
 ACR_PASSWORD="${ACR_PASSWORD:-}"
 NS="carher"
@@ -50,22 +51,16 @@ if [ -n "$BUILD" ]; then
 
   echo ""
   echo "▶ [3/4] Building carher-admin image..."
-  docker build -t "${ACR}/her/carher-admin:${TAG}" \
-               -t "${ACR}/her/carher-admin:latest" \
-               "$SCRIPT_DIR"
+  docker build -t "${ACR}/her/carher-admin:${TAG}" "$SCRIPT_DIR"
   echo "  Pushing carher-admin..."
   docker push "${ACR}/her/carher-admin:${TAG}"
-  docker push "${ACR}/her/carher-admin:latest"
   echo "  ✓ carher-admin pushed"
 
   echo ""
   echo "▶ [4/4] Building carher-operator image..."
-  docker build -t "${ACR}/her/carher-operator:${TAG}" \
-               -t "${ACR}/her/carher-operator:latest" \
-               "$SCRIPT_DIR/operator-go"
+  docker build -t "${ACR}/her/carher-operator:${TAG}" "$SCRIPT_DIR/operator-go"
   echo "  Pushing carher-operator..."
   docker push "${ACR}/her/carher-operator:${TAG}"
-  docker push "${ACR}/her/carher-operator:latest"
   echo "  ✓ carher-operator pushed"
 
   echo ""
@@ -116,6 +111,14 @@ if [ -n "$APPLY" ]; then
 
   echo "  [6/7] Admin Deployment..."
   kubectl apply -f "$SCRIPT_DIR/k8s/deployment.yaml"
+
+  if [ -n "$BUILD" ]; then
+    echo "  [6.5/7] Pinning admin/operator Deployments to freshly built tag..."
+    kubectl set image deployment/carher-admin \
+      admin="${ACR_VPC}/her/carher-admin:${TAG}" -n "$NS"
+    kubectl set image deployment/carher-operator \
+      operator="${ACR_VPC}/her/carher-operator:${TAG}" -n "$NS"
+  fi
 
   echo "  [7/7] ServiceMonitor + AlertRules..."
   kubectl apply -f "$SCRIPT_DIR/k8s/servicemonitor.yaml" 2>/dev/null || \

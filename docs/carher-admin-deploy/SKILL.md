@@ -81,6 +81,16 @@ kubectl logs -n carher deploy/carher-admin --tail=30
 kubectl logs -n carher deploy/carher-operator --tail=30
 ```
 
+### Bootstrap 脚本
+
+`deploy-bootstrap.sh` 用于首次集群初始化。脚本现在会：
+
+1. 只构建并 push 带 `$TAG` 的 admin/operator 镜像
+2. apply manifests
+3. 再用 `kubectl set image` 把 `carher-admin` / `carher-operator` 明确切到刚构建的 `$TAG`
+
+不要依赖 `:latest`。admin/operator 的实际发布以显式 tag 为准。
+
 ---
 
 ## Apply K8s Manifests（RBAC, CRD 等）

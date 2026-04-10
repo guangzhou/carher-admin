@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 # ──────────────────────────────────────
@@ -45,13 +45,24 @@ class HerAddRequest(BaseModel):
     owner: str = Field("", description="Feishu open_id(s), pipe-separated")
     provider: Literal["openrouter", "anthropic", "wangsu", "litellm"] = Field(
         "wangsu",
-        description="AI provider: openrouter / anthropic / wangsu / litellm",
+        description=(
+            "AI provider: openrouter / anthropic / wangsu / litellm. "
+            "Default: wangsu. When provider=litellm, requests go through the "
+            "LiteLLM proxy with Wangsu priority and OpenRouter fallback."
+        ),
     )
     deploy_group: str = Field("stable", description="Deploy group name")
 
 
 class HerBatchImport(BaseModel):
-    instances: list[HerAddRequest]
+    instances: list[HerAddRequest] = Field(
+        ...,
+        description=(
+            "Instances to import. Preferred request body is "
+            '{"instances":[...]}. The API also accepts a legacy raw JSON array '
+            "body for backward compatibility."
+        ),
+    )
 
 
 class HerUpdateRequest(BaseModel):
@@ -62,7 +73,11 @@ class HerUpdateRequest(BaseModel):
     owner: str | None = Field(None, description="Update owner open_id(s)")
     provider: Literal["openrouter", "anthropic", "wangsu", "litellm"] | None = Field(
         None,
-        description="Update provider: openrouter / anthropic / wangsu / litellm",
+        description=(
+            "Update provider: openrouter / anthropic / wangsu / litellm. "
+            "When provider=litellm, requests go through the LiteLLM proxy with "
+            "Wangsu priority and OpenRouter fallback."
+        ),
     )
     prefix: str | None = Field(None, description="Update server prefix (s1/s2/s3)")
     bot_open_id: str | None = Field(None, description="Update bot open_id")
@@ -144,7 +159,16 @@ class DeployWebhookRequest(BaseModel):
 
 
 class BranchRuleCreate(BaseModel):
-    pattern: str = Field(..., description="Branch pattern (supports glob: main, hotfix/*, feature/*)")
+    model_config = ConfigDict(populate_by_name=True)
+
+    pattern: str = Field(
+        ...,
+        description=(
+            "Branch pattern (supports glob: main, hotfix/*, feature/*). "
+            "Legacy request key branch_pattern is also accepted."
+        ),
+        validation_alias=AliasChoices("pattern", "branch_pattern"),
+    )
     deploy_mode: str = Field("normal", description="Deploy mode: normal / fast / canary-only / group:<name>")
     target_group: str = Field("", description="Target deploy group (for group:<name> mode)")
     auto_deploy: bool = Field(True, description="Auto-deploy when webhook received (false = build only)")
@@ -152,7 +176,13 @@ class BranchRuleCreate(BaseModel):
 
 
 class BranchRuleUpdate(BaseModel):
-    pattern: str | None = Field(None, description="Branch pattern")
+    model_config = ConfigDict(populate_by_name=True)
+
+    pattern: str | None = Field(
+        None,
+        description="Branch pattern. Legacy request key branch_pattern is also accepted.",
+        validation_alias=AliasChoices("pattern", "branch_pattern"),
+    )
     deploy_mode: str | None = Field(None, description="Deploy mode")
     target_group: str | None = Field(None, description="Target deploy group")
     auto_deploy: bool | None = Field(None, description="Auto-deploy on/off")
@@ -162,7 +192,10 @@ class BranchRuleUpdate(BaseModel):
 class TriggerBuildRequest(BaseModel):
     repo: str = Field("guangzhou/CarHer", description="GitHub repo (owner/name)")
     branch: str = Field("main", description="Branch to build")
-    workflow: str = Field(..., description="Workflow file name (e.g. carher-release.yml)")
+    workflow: str = Field(
+        ...,
+        description="Workflow file name (discover via /api/ci/workflows, e.g. build-deploy.yml)",
+    )
     deploy_mode: str = Field("normal", description="Deploy mode input")
 
 

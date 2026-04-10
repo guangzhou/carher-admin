@@ -18,9 +18,10 @@ import time
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -628,10 +629,54 @@ def api_add_instance(req: HerAddRequest):
 
 
 @app.post("/api/instances/batch-import", dependencies=[Depends(verify_api_key)])
-def api_batch_import(req: HerBatchImport):
+def api_batch_import(
+    req: Annotated[
+        list[HerAddRequest] | HerBatchImport,
+        Body(
+            openapi_examples={
+                "wrapped": {
+                    "summary": "Preferred wrapped request body",
+                    "value": {
+                        "instances": [
+                            {
+                                "name": "用户A",
+                                "model": "gpt",
+                                "provider": "wangsu",
+                                "app_id": "cli_xxx",
+                                "app_secret": "xxx",
+                                "prefix": "s1",
+                                "owner": "ou_xxx",
+                            }
+                        ]
+                    },
+                },
+                "legacy_raw_array": {
+                    "summary": "Legacy raw array body",
+                    "value": [
+                        {
+                            "name": "用户A",
+                            "model": "gpt",
+                            "provider": "wangsu",
+                            "app_id": "cli_xxx",
+                            "app_secret": "xxx",
+                            "prefix": "s1",
+                            "owner": "ou_xxx",
+                        }
+                    ],
+                },
+            }
+        ),
+    ],
+):
+    """Batch import instances.
+
+    Preferred request body is {"instances":[...]}. A legacy raw JSON array body
+    is also accepted for backward compatibility with older scripts and skills.
+    """
     results = []
     crd_created: list[tuple[int, str]] = []
     next_uid = db.next_id()
+    items = req.instances if isinstance(req, HerBatchImport) else req
     try:
         crd_max = 0
         for inst in crd_ops.list_her_instances():
@@ -641,7 +686,7 @@ def api_batch_import(req: HerBatchImport):
         next_uid = max(next_uid, crd_max + 1)
     except Exception:
         pass
-    for item in req.instances:
+    for item in items:
         uid = item.id or next_uid
         if not item.id:
             next_uid += 1

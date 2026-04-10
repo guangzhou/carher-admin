@@ -71,7 +71,7 @@ spec:
                 secretKeyRef:
                   name: carher-admin-secrets
                   key: cloudflare-api-token
-                  optional: true
+                  optional: false
             - name: LITELLM_MASTER_KEY
               valueFrom:
                 secretKeyRef:

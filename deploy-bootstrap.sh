@@ -14,6 +14,7 @@ ACR="cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com"
 ACR_VPC="cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com"
 ACR_USER="liuguoxian@1989403661820148"
 ACR_PASSWORD="${ACR_PASSWORD:-}"
+CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
 NS="carher"
 TAG="v$(date +%Y%m%d)-$(git -C "$SCRIPT_DIR" rev-parse --short HEAD)"
 
@@ -92,12 +93,16 @@ if [ -n "$APPLY" ]; then
   # Create admin secrets if they don't exist
   if ! kubectl get secret carher-admin-secrets -n "$NS" &>/dev/null; then
     echo "  [5.5] Creating admin secrets..."
+    if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+      echo "ERROR: CLOUDFLARE_API_TOKEN is not set. Export it before bootstrap so admin can update Cloudflare tunnel ingress." >&2
+      exit 1
+    fi
     WEBHOOK_SECRET=$(openssl rand -hex 32)
     API_KEY=$(openssl rand -hex 32)
     kubectl create secret generic carher-admin-secrets -n "$NS" \
       --from-literal=deploy-webhook-secret="$WEBHOOK_SECRET" \
       --from-literal=admin-api-key="$API_KEY" \
-      --from-literal=cloudflare-api-token=""
+      --from-literal=cloudflare-api-token="$CLOUDFLARE_API_TOKEN"
     echo ""
     echo "  ╔══════════════════════════════════════════════════════╗"
     echo "  ║  SAVE THESE KEYS (shown only once):                 ║"

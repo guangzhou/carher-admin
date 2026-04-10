@@ -53,8 +53,9 @@ class HerAddRequest(BaseModel):
         "wangsu",
         description=(
             "AI provider: openrouter / anthropic / wangsu / litellm. "
-            "Default: wangsu. When provider=litellm, requests go through the "
-            "LiteLLM proxy with Wangsu priority and OpenRouter fallback."
+            "Default: wangsu. When provider=litellm, requests are routed through "
+            "the LiteLLM proxy (Wangsu primary + OpenRouter fallback for main "
+            "models; OpenRouter-only for minimax/glm/codex)."
         ),
     )
     deploy_group: str = Field("stable", description="Deploy group name")
@@ -87,8 +88,9 @@ class HerUpdateRequest(BaseModel):
         None,
         description=(
             "Update provider: openrouter / anthropic / wangsu / litellm. "
-            "When provider=litellm, requests go through the LiteLLM proxy with "
-            "Wangsu priority and OpenRouter fallback."
+            "When provider=litellm, requests are routed through the LiteLLM "
+            "proxy (Wangsu primary + OpenRouter fallback for main models; "
+            "OpenRouter-only for minimax/glm/codex)."
         ),
     )
     prefix: str | None = Field(None, description="Update server prefix (s1/s2/s3)")

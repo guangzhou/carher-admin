@@ -145,18 +145,16 @@ def generate_openclaw_json(
     bot_open_id = instance.get("bot_open_id", "")
 
     if app_id and app_secret:
+        feishu_name = f"{name}的her" if name else ""
         feishu: dict[str, Any] = {
             "enabled": True,
             "appId": app_id,
             "appSecret": app_secret,
-            "name": name,
+            "name": feishu_name,
             "groups": {"enabled": True, "archive": True},
             "oauthRedirectUri": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
         }
-        if known_bots:
-            feishu["knownBots"] = known_bots
-        if known_bot_open_ids:
-            feishu["knownBotOpenIds"] = known_bot_open_ids
+        # knownBots/knownBotOpenIds removed — now populated dynamically via Redis bot-registry.
         if bot_open_id:
             feishu["botOpenId"] = bot_open_id
         if owner:

@@ -341,6 +341,14 @@ def _model_map_for_provider(provider: str) -> dict[str, str]:
     return config_gen.MODEL_MAP
 
 
+def _litellm_route_policy(data: dict | None) -> str:
+    if not data:
+        return litellm_ops.DEFAULT_LITELLM_ROUTE_POLICY
+    return litellm_ops.normalize_route_policy(
+        data.get("litellm_route_policy") or data.get("litellmRoutePolicy")
+    )
+
+
 from .crd_helpers import db_instances_excluding_crds as _db_instances_excluding_crds
 
 
@@ -368,6 +376,7 @@ def _enrich_with_runtime(instance: dict) -> dict:
         "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback" if instance.get("app_id") else "",
         "owner": instance.get("owner", ""),
         "provider": instance.get("provider", "wangsu"),
+        "litellm_route_policy": _litellm_route_policy(instance),
         "sync_status": instance.get("sync_status", ""),
     }
 
@@ -422,6 +431,7 @@ def api_list_instances(
                 "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback" if spec.get("appId") else "",
                 "owner": spec.get("owner", ""),
                 "provider": spec.get("provider", "wangsu"),
+                "litellm_route_policy": _litellm_route_policy(spec),
                 "image": spec.get("image", ""),
                 "paused": spec.get("paused", False),
                 "feishu_ws": status.get("feishuWS", "Unknown"),
@@ -462,6 +472,8 @@ def api_list_instances(
             "app_id": inst.get("app_id", ""),
             "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback" if inst.get("app_id") else "",
             "owner": inst.get("owner", ""),
+            "provider": inst.get("provider", "wangsu"),
+            "litellm_route_policy": _litellm_route_policy(inst),
             "sync_status": inst.get("sync_status", ""),
             "deploy_group": inst.get("deploy_group", "stable"),
         })
@@ -525,6 +537,7 @@ def api_search_instances(
                 "node": st.get("node", ""), "restarts": st.get("restarts", 0),
                 "deploy_group": spec.get("deployGroup", "stable"),
                 "owner": spec.get("owner", ""), "provider": spec.get("provider", "wangsu"),
+                "litellm_route_policy": _litellm_route_policy(spec),
                 "app_id": spec.get("appId", ""), "image": spec.get("image", ""),
                 "paused": spec.get("paused", False),
                 "feishu_ws": st.get("feishuWS", "Unknown"), "managed_by": "operator",
@@ -562,6 +575,7 @@ def api_search_instances(
             "node": pod.get("node", ""), "restarts": pod.get("restarts", 0),
             "deploy_group": inst.get("deploy_group", "stable"),
             "owner": inst.get("owner", ""), "provider": inst.get("provider", "wangsu"),
+            "litellm_route_policy": _litellm_route_policy(inst),
             "image": inst.get("image_tag", ""),
         }
         if feishu_ws:
@@ -601,6 +615,7 @@ def api_get_instance(uid: int):
                 "oauth_url": f"https://{pfx}u{uid}-auth.carher.net/feishu/oauth/callback",
                 "owner": spec.get("owner", ""),
                 "provider": spec.get("provider", "wangsu"),
+                "litellm_route_policy": _litellm_route_policy(spec),
                 "deploy_group": spec.get("deployGroup", "stable"),
                 "feishu_ws": status.get("feishuWS", "Unknown"),
                 "config_hash": status.get("configHash", ""),
@@ -661,13 +676,18 @@ def api_add_instance(req: HerAddRequest):
         "app_id": req.app_id, "app_secret": req.app_secret,
         "prefix": req.prefix, "owner": req.owner,
         "provider": req.provider, "bot_open_id": "",
+        "litellm_route_policy": litellm_ops.normalize_route_policy(req.litellm_route_policy),
         "status": "running", "deploy_group": req.deploy_group,
     }
 
     pfx = f"{req.prefix}-" if not req.prefix.endswith("-") else req.prefix
 
     if req.provider == "litellm":
-        key = litellm_ops.generate_key(uid, name=req.name)
+        key = litellm_ops.generate_key(
+            uid,
+            name=req.name,
+            route_policy=data["litellm_route_policy"],
+        )
         if not key:
             raise HTTPException(502, f"Failed to generate LiteLLM key for her-{uid}")
         data["litellm_key"] = key
@@ -789,11 +809,16 @@ def api_batch_import(
                 "app_id": item.app_id, "app_secret": item.app_secret,
                 "prefix": item.prefix, "owner": item.owner,
                 "provider": item.provider, "bot_open_id": "",
+                "litellm_route_policy": litellm_ops.normalize_route_policy(item.litellm_route_policy),
                 "deploy_group": item.deploy_group,
                 "status": "running",
             }
             if item.provider == "litellm":
-                key = litellm_ops.generate_key(uid, name=item.name)
+                key = litellm_ops.generate_key(
+                    uid,
+                    name=item.name,
+                    route_policy=data["litellm_route_policy"],
+                )
                 if not key:
                     results.append({"id": uid, "error": f"Failed to generate LiteLLM key for her-{uid}"})
                     continue
@@ -862,11 +887,12 @@ _DB_TO_CRD_FIELD = {
     "name": "name", "model": "model", "owner": "owner",
     "provider": "provider", "prefix": "prefix", "deploy_group": "deployGroup",
     "image": "image", "app_id": "appId", "bot_open_id": "botOpenId",
+    "litellm_route_policy": "litellmRoutePolicy",
 }
 
 _UPDATE_FIELDS = (
     "name", "model", "app_id", "owner", "provider",
-    "prefix", "bot_open_id", "image", "deploy_group",
+    "prefix", "bot_open_id", "image", "deploy_group", "litellm_route_policy",
 )
 
 @app.put("/api/instances/{uid}", tags=["instances"])
@@ -893,34 +919,73 @@ def api_update(uid: int, req: HerUpdateRequest):
     # CRD path
     if has_crd:
         generated_key = ""
+        existing_key_updated = False
         old_key_to_delete = ""
         existing = None
+        current_key = ""
+        current_name = ""
+        current_policy = litellm_ops.DEFAULT_LITELLM_ROUTE_POLICY
         try:
             if has_secret_change:
                 crd_ops._ensure_secret(uid, req.app_secret)
             if changes:
-                crd_changes = {_DB_TO_CRD_FIELD[k]: v for k, v in changes.items() if k in _DB_TO_CRD_FIELD}
                 existing = crd_ops.get_her_instance(uid)
-                new_provider = changes.get("provider")
-                if new_provider == "litellm":
-                    existing_key = (existing or {}).get("spec", {}).get("litellmKey", "")
-                    if not existing_key:
-                        inst_name = changes.get("name") or (existing or {}).get("spec", {}).get("name", "")
-                        generated_key = litellm_ops.generate_key(uid, name=inst_name) or ""
+                spec = (existing or {}).get("spec", {})
+                current_provider = spec.get("provider", "wangsu")
+                current_key = spec.get("litellmKey", "")
+                current_name = spec.get("name", "")
+                current_policy = _litellm_route_policy(spec)
+                next_provider = changes.get("provider", current_provider)
+                next_name = changes.get("name") or current_name
+                next_policy = litellm_ops.normalize_route_policy(
+                    changes.get("litellm_route_policy", current_policy)
+                )
+                policy_changed = next_policy != current_policy
+
+                crd_changes = {_DB_TO_CRD_FIELD[k]: v for k, v in changes.items() if k in _DB_TO_CRD_FIELD}
+
+                if next_provider == "litellm":
+                    if not current_key:
+                        generated_key = (
+                            litellm_ops.generate_key(
+                                uid,
+                                name=next_name,
+                                route_policy=next_policy,
+                            )
+                            or ""
+                        )
                         if not generated_key:
                             raise HTTPException(502, f"Failed to generate LiteLLM key for her-{uid}")
                         crd_changes["litellmKey"] = generated_key
-                elif new_provider and new_provider != "litellm":
-                    old_key = (existing or {}).get("spec", {}).get("litellmKey", "")
-                    if old_key:
+                    elif current_provider != "litellm" or policy_changed:
+                        if not litellm_ops.update_key(
+                            current_key,
+                            uid,
+                            name=next_name,
+                            route_policy=next_policy,
+                        ):
+                            raise HTTPException(502, f"Failed to update LiteLLM key for her-{uid}")
+                        existing_key_updated = True
+                    if current_provider != "litellm" or policy_changed:
+                        crd_changes["litellmRoutePolicy"] = next_policy
+                elif next_provider != "litellm" and current_key:
+                    if current_key:
                         crd_changes["litellmKey"] = ""
-                        old_key_to_delete = old_key
+                        old_key_to_delete = current_key
                 crd_ops.update_her_instance(uid, crd_changes)
                 if old_key_to_delete:
                     litellm_ops.delete_key(old_key_to_delete)
         except Exception as e:
             if generated_key:
                 litellm_ops.delete_key(generated_key)
+            elif existing_key_updated and current_key:
+                if not litellm_ops.update_key(
+                    current_key,
+                    uid,
+                    name=current_name,
+                    route_policy=current_policy,
+                ):
+                    logger.warning("Failed to roll back LiteLLM key update for %d", uid)
             if isinstance(e, HTTPException):
                 raise
             if isinstance(e, K8sApiException):
@@ -936,24 +1001,66 @@ def api_update(uid: int, req: HerUpdateRequest):
     if not inst:
         raise HTTPException(404, f"Instance {uid} not found")
     old_key_to_delete = ""
+    generated_key = ""
+    existing_key_updated = False
+    current_key = inst.get("litellm_key", "")
+    current_name = inst.get("name", "")
+    current_provider = inst.get("provider", "wangsu")
+    current_policy = _litellm_route_policy(inst)
+    next_provider = changes.get("provider", current_provider)
+    next_name = changes.get("name") or current_name
+    next_policy = litellm_ops.normalize_route_policy(
+        changes.get("litellm_route_policy", current_policy)
+    )
+    policy_changed = next_policy != current_policy
     db_changes = {k: v for k, v in changes.items() if k != "image"}
     if "image" in changes:
         db_changes["image_tag"] = changes["image"]
     if has_secret_change:
         db_changes["app_secret"] = req.app_secret
-    new_provider = changes.get("provider")
-    if new_provider == "litellm" and not inst.get("litellm_key"):
-        generated_key = litellm_ops.generate_key(uid, name=changes.get("name") or inst.get("name", "")) or ""
-        if not generated_key:
-            raise HTTPException(502, f"Failed to generate LiteLLM key for her-{uid}")
-        db_changes["litellm_key"] = generated_key
-    elif new_provider and new_provider != "litellm" and inst.get("litellm_key"):
+    if next_provider == "litellm":
+        if current_provider != "litellm" or policy_changed:
+            db_changes["litellm_route_policy"] = next_policy
+        if not current_key:
+            generated_key = litellm_ops.generate_key(
+                uid,
+                name=next_name,
+                route_policy=next_policy,
+            ) or ""
+            if not generated_key:
+                raise HTTPException(502, f"Failed to generate LiteLLM key for her-{uid}")
+            db_changes["litellm_key"] = generated_key
+        elif current_provider != "litellm" or policy_changed:
+            if not litellm_ops.update_key(
+                current_key,
+                uid,
+                name=next_name,
+                route_policy=next_policy,
+            ):
+                raise HTTPException(502, f"Failed to update LiteLLM key for her-{uid}")
+            existing_key_updated = True
+    elif next_provider != "litellm" and current_key:
         db_changes["litellm_key"] = ""
-        old_key_to_delete = inst.get("litellm_key", "")
-    if db_changes:
-        inst = db.update(uid, db_changes)
-    if not inst:
-        raise HTTPException(404, f"Instance {uid} not found")
+        old_key_to_delete = current_key
+    try:
+        if db_changes:
+            inst = db.update(uid, db_changes)
+            if not inst:
+                raise RuntimeError(f"Instance her-{uid} disappeared while updating")
+    except Exception as e:
+        if generated_key:
+            litellm_ops.delete_key(generated_key)
+        elif existing_key_updated and current_key:
+            if not litellm_ops.update_key(
+                current_key,
+                uid,
+                name=current_name,
+                route_policy=current_policy,
+            ):
+                logger.warning("Failed to roll back LiteLLM key update for %d", uid)
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(500, f"Failed to update instance {uid}: {e}")
     try:
         if "prefix" in changes or "image" in changes:
             k8s_ops.ensure_service(uid)
@@ -1757,6 +1864,7 @@ def api_config_preview(uid: int):
                 "owner": spec.get("owner", ""), "provider": spec.get("provider", "wangsu"),
                 "bot_open_id": spec.get("botOpenId", ""),
                 "litellm_key": spec.get("litellmKey", ""),
+                "litellm_route_policy": _litellm_route_policy(spec),
             }
             result = config_gen.generate_openclaw_json(inst)
             if isinstance(result, dict):
@@ -1822,13 +1930,18 @@ def api_litellm_generate_key(uid: int = Query(..., description="Instance ID")):
     # Try CRD first
     inst = crd_ops.get_her_instance(uid)
     if inst:
-        if inst.get("spec", {}).get("provider") != "litellm":
+        spec = inst.get("spec", {})
+        if spec.get("provider") != "litellm":
             raise HTTPException(400, f"Instance her-{uid} is not using provider=litellm")
-        old_key = inst.get("spec", {}).get("litellmKey", "")
+        old_key = spec.get("litellmKey", "")
         if old_key:
             return {"id": uid, "key": old_key, "status": "already_exists"}
-        name = inst.get("spec", {}).get("name", "")
-        key = litellm_ops.generate_key(uid, name=name)
+        name = spec.get("name", "")
+        key = litellm_ops.generate_key(
+            uid,
+            name=name,
+            route_policy=_litellm_route_policy(spec),
+        )
         if not key:
             raise HTTPException(502, "Failed to generate LiteLLM key")
         try:
@@ -1848,7 +1961,11 @@ def api_litellm_generate_key(uid: int = Query(..., description="Instance ID")):
     old_key = db_inst.get("litellm_key", "")
     if old_key:
         return {"id": uid, "key": old_key, "status": "already_exists"}
-    key = litellm_ops.generate_key(uid, name=db_inst.get("name", ""))
+    key = litellm_ops.generate_key(
+        uid,
+        name=db_inst.get("name", ""),
+        route_policy=_litellm_route_policy(db_inst),
+    )
     if not key:
         raise HTTPException(502, "Failed to generate LiteLLM key")
     try:
@@ -1878,7 +1995,11 @@ def api_litellm_generate_batch():
         if spec.get("litellmKey"):
             results.append({"id": uid, "status": "already_has_key"})
             continue
-        key = litellm_ops.generate_key(uid, name=spec.get("name", ""))
+        key = litellm_ops.generate_key(
+            uid,
+            name=spec.get("name", ""),
+            route_policy=_litellm_route_policy(spec),
+        )
         if key:
             try:
                 crd_ops.update_her_instance(uid, {"litellmKey": key})
@@ -1898,7 +2019,11 @@ def api_litellm_generate_batch():
         if inst.get("litellm_key"):
             results.append({"id": uid, "status": "already_has_key", "managed_by": "legacy"})
             continue
-        key = litellm_ops.generate_key(uid, name=inst.get("name", ""))
+        key = litellm_ops.generate_key(
+            uid,
+            name=inst.get("name", ""),
+            route_policy=_litellm_route_policy(inst),
+        )
         if key:
             try:
                 updated = db.update(uid, {"litellm_key": key})

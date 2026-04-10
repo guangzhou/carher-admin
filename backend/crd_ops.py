@@ -77,6 +77,7 @@ def create_her_instance(data: dict) -> dict:
             "owner": data.get("owner", ""),
             "provider": data.get("provider", "wangsu"),
             "litellmKey": data.get("litellm_key", ""),
+            "litellmRoutePolicy": data.get("litellm_route_policy", "openrouter_first"),
             "botOpenId": data.get("bot_open_id", ""),
             "deployGroup": data.get("deploy_group", "stable"),
             "image": data.get("image_tag", "upgrade-0402-8ef16fb"),

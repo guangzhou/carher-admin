@@ -1,6 +1,14 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../api";
-import { DEFAULT_PROVIDER, PROVIDER_MODELS, PROVIDER_OPTIONS, ALL_MODELS, getModelAlias } from "../models";
+import {
+  ALL_MODELS,
+  DEFAULT_LITELLM_ROUTE_POLICY,
+  DEFAULT_PROVIDER,
+  LITELLM_ROUTE_POLICY_OPTIONS,
+  PROVIDER_MODELS,
+  PROVIDER_OPTIONS,
+  getModelAlias,
+} from "../models";
 import InstanceDetail from "./InstanceDetail";
 import LogViewer from "./LogViewer";
 
@@ -290,10 +298,12 @@ function BatchEditModal({ count, deployGroups, imageTags, onSubmit, onClose }) {
   const [enableModel, setEnableModel] = useState(false);
   const [enableGroup, setEnableGroup] = useState(false);
   const [enableImage, setEnableImage] = useState(false);
+  const [enableRoutePolicy, setEnableRoutePolicy] = useState(false);
   const [provider, setProvider] = useState(DEFAULT_PROVIDER);
   const [model, setModel] = useState("opus");
   const [deployGroup, setDeployGroup] = useState("stable");
   const [image, setImage] = useState("");
+  const [litellmRoutePolicy, setLitellmRoutePolicy] = useState(DEFAULT_LITELLM_ROUTE_POLICY);
 
   const modelOptions = enableProvider ? (PROVIDER_MODELS[provider] || ALL_MODELS) : ALL_MODELS;
 
@@ -311,19 +321,20 @@ function BatchEditModal({ count, deployGroups, imageTags, onSubmit, onClose }) {
     const params = {};
     if (enableProvider) params.provider = provider;
     if (enableModel) params.model = model;
+    if (enableRoutePolicy) params.litellm_route_policy = litellmRoutePolicy;
     if (enableGroup) params.deploy_group = deployGroup;
     if (enableImage) params.image = image;
     if (!Object.keys(params).length) return;
     onSubmit(params);
   };
 
-  const hasChanges = enableProvider || enableModel || enableGroup || (enableImage && image);
+  const hasChanges = enableProvider || enableModel || enableRoutePolicy || enableGroup || (enableImage && image);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div className="bg-gray-900 border border-gray-700 rounded-xl p-6 w-[420px] space-y-5" onClick={(e) => e.stopPropagation()}>
         <h3 className="text-lg font-semibold text-gray-100">批量修改 ({count} 个实例)</h3>
-        <p className="text-xs text-gray-500">勾选要修改的字段，留空的不会变更。Config 类变更（Provider、模型、灰度组）热加载生效，镜像变更会触发滚动更新。</p>
+        <p className="text-xs text-gray-500">勾选要修改的字段，留空的不会变更。Config 类变更（Provider、模型、LiteLLM 路由、灰度组）热加载生效，镜像变更会触发滚动更新。</p>
 
         <div className="space-y-4">
           {/* Provider */}
@@ -343,6 +354,17 @@ function BatchEditModal({ count, deployGroups, imageTags, onSubmit, onClose }) {
             <span className="text-sm text-gray-300 w-16">模型</span>
             <select className="input flex-1" value={model} onChange={(e) => setModel(e.target.value)} disabled={!enableModel}>
               {modelOptions.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+            </select>
+          </label>
+
+          {/* LiteLLM Route Policy */}
+          <label className="flex items-center gap-3">
+            <input type="checkbox" checked={enableRoutePolicy} onChange={(e) => setEnableRoutePolicy(e.target.checked)} className="rounded border-gray-600" />
+            <span className="text-sm text-gray-300 w-16">LiteLLM</span>
+            <select className="input flex-1" value={litellmRoutePolicy} onChange={(e) => setLitellmRoutePolicy(e.target.value)} disabled={!enableRoutePolicy}>
+              {LITELLM_ROUTE_POLICY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
             </select>
           </label>
 

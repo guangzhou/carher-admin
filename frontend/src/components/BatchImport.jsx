@@ -1,15 +1,22 @@
 import { useState } from "react";
 import { api } from "../api";
-import { DEFAULT_PROVIDER, PROVIDER_OPTIONS } from "../models";
+import {
+  DEFAULT_LITELLM_ROUTE_POLICY,
+  DEFAULT_PROVIDER,
+  LITELLM_ROUTE_POLICY_OPTIONS,
+  PROVIDER_OPTIONS,
+} from "../models";
 
-const CSV_TEMPLATE = `# name,model,app_id,app_secret,prefix,owner,provider
+const CSV_TEMPLATE = `# name,model,app_id,app_secret,prefix,owner,provider,litellm_route_policy
 # provider 可选值: openrouter / anthropic / wangsu / litellm
+# litellm_route_policy 可选值: openrouter_first / wangsu_first（仅 provider=litellm 生效）
 # 例:
-# 张三,opus,cli_axxxx,secret_xxx,s1,ou_xxx,wangsu
-# 李四,sonnet,cli_bxxxx,secret_yyy,s2,,litellm`;
+# 张三,opus,cli_axxxx,secret_xxx,s1,ou_xxx,wangsu,
+# 李四,sonnet,cli_bxxxx,secret_yyy,s2,,litellm,wangsu_first`;
 
-const FIELDS = ["name", "model", "app_id", "app_secret", "prefix", "owner", "provider"];
+const FIELDS = ["name", "model", "app_id", "app_secret", "prefix", "owner", "provider", "litellm_route_policy"];
 const VALID_PROVIDERS = new Set(PROVIDER_OPTIONS.map((option) => option.value));
+const VALID_LITELLM_ROUTE_POLICIES = new Set(LITELLM_ROUTE_POLICY_OPTIONS.map((option) => option.value));
 
 export default function BatchImport({ onDone }) {
   const [mode, setMode] = useState("csv"); // csv | form
@@ -23,6 +30,7 @@ export default function BatchImport({ onDone }) {
     const items = lines.map((line) => {
       const cols = line.split(",").map((c) => c.trim());
       const provider = (cols[6] || DEFAULT_PROVIDER).toLowerCase();
+      const litellmRoutePolicy = (cols[7] || DEFAULT_LITELLM_ROUTE_POLICY).toLowerCase();
       return {
         name: cols[0] || "",
         model: cols[1] || "gpt",
@@ -31,6 +39,7 @@ export default function BatchImport({ onDone }) {
         prefix: cols[4] || "s1",
         owner: cols[5] || "",
         provider,
+        litellm_route_policy: litellmRoutePolicy,
       };
     });
     setParsed(items);
@@ -61,6 +70,13 @@ export default function BatchImport({ onDone }) {
       .filter(({ row }) => !VALID_PROVIDERS.has(row.provider));
     if (invalidProviderRows.length) {
       alert(`以下行的 provider 非法: ${invalidProviderRows.map(({ idx }) => idx).join(", ")}\n可选值: ${[...VALID_PROVIDERS].join(" / ")}`);
+      return;
+    }
+    const invalidRoutePolicyRows = parsed
+      .map((row, idx) => ({ row, idx: idx + 1 }))
+      .filter(({ row }) => row.provider === "litellm" && !VALID_LITELLM_ROUTE_POLICIES.has(row.litellm_route_policy));
+    if (invalidRoutePolicyRows.length) {
+      alert(`以下行的 litellm_route_policy 非法: ${invalidRoutePolicyRows.map(({ idx }) => idx).join(", ")}\n可选值: ${[...VALID_LITELLM_ROUTE_POLICIES].join(" / ")}`);
       return;
     }
     if (!confirm(`确认导入 ${parsed.length} 个 Her 实例？`)) return;
@@ -124,7 +140,11 @@ export default function BatchImport({ onDone }) {
             </thead>
             <tbody>
               {parsed.map((row, i) => {
-                const valid = row.name && row.app_id && row.app_secret && VALID_PROVIDERS.has(row.provider);
+                const valid = row.name
+                  && row.app_id
+                  && row.app_secret
+                  && VALID_PROVIDERS.has(row.provider)
+                  && (row.provider !== "litellm" || VALID_LITELLM_ROUTE_POLICIES.has(row.litellm_route_policy));
                 const res = results?.[i];
                 return (
                   <tr key={i} className="border-b border-gray-800/50">
@@ -134,12 +154,17 @@ export default function BatchImport({ onDone }) {
                         key={f}
                         className={`p-2 ${
                           (!row[f] && (f === "name" || f === "app_id" || f === "app_secret")) ||
-                          (f === "provider" && !VALID_PROVIDERS.has(row.provider))
+                          (f === "provider" && !VALID_PROVIDERS.has(row.provider)) ||
+                          (f === "litellm_route_policy" && row.provider === "litellm" && !VALID_LITELLM_ROUTE_POLICIES.has(row.litellm_route_policy))
                             ? "text-red-400"
                             : "text-gray-300"
                         }`}
                       >
-                        {f === "app_secret" ? "***" : (row[f] || "-")}
+                        {f === "app_secret"
+                          ? "***"
+                          : f === "litellm_route_policy" && row.provider !== "litellm"
+                            ? "-"
+                            : (row[f] || "-")}
                       </td>
                     ))}
                     <td className="p-2">
@@ -150,7 +175,13 @@ export default function BatchImport({ onDone }) {
                       ) : (
                         valid
                           ? <span className="text-gray-500">待导入</span>
-                          : <span className="text-red-400">{VALID_PROVIDERS.has(row.provider) ? "缺字段" : "provider 非法"}</span>
+                          : <span className="text-red-400">
+                              {!VALID_PROVIDERS.has(row.provider)
+                                ? "provider 非法"
+                                : (row.provider === "litellm" && !VALID_LITELLM_ROUTE_POLICIES.has(row.litellm_route_policy))
+                                  ? "路由策略非法"
+                                  : "缺字段"}
+                            </span>
                       )}
                     </td>
                   </tr>

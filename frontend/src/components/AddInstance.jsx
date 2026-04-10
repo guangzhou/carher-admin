@@ -1,6 +1,12 @@
 import { useState, useEffect } from "react";
 import { api } from "../api";
-import { DEFAULT_PROVIDER, PROVIDER_MODELS, PROVIDER_OPTIONS } from "../models";
+import {
+  DEFAULT_LITELLM_ROUTE_POLICY,
+  DEFAULT_PROVIDER,
+  LITELLM_ROUTE_POLICY_OPTIONS,
+  PROVIDER_MODELS,
+  PROVIDER_OPTIONS,
+} from "../models";
 
 export default function AddInstance({ onCreated }) {
   const [form, setForm] = useState({
@@ -12,6 +18,7 @@ export default function AddInstance({ onCreated }) {
     prefix: "s1",
     owner: "",
     provider: DEFAULT_PROVIDER,
+    litellm_route_policy: DEFAULT_LITELLM_ROUTE_POLICY,
   });
   const [nextId, setNextId] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -85,6 +92,15 @@ export default function AddInstance({ onCreated }) {
               ))}
             </select>
           </Field>
+          {form.provider === "litellm" && (
+            <Field label="LiteLLM 路由策略" hint="仅影响 gpt / sonnet / opus / gemini">
+              <select className="input w-full" value={form.litellm_route_policy} onChange={set("litellm_route_policy")}>
+                {LITELLM_ROUTE_POLICY_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </Field>
+          )}
           <Field label="域名前缀">
             <select className="input w-full" value={form.prefix} onChange={set("prefix")}>
               <option value="s1">s1</option>

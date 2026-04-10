@@ -15,12 +15,13 @@ type HerInstanceSpec struct {
 	Prefix       string `json:"prefix,omitempty"`
 	Owner        string `json:"owner,omitempty"`
 	Provider     string `json:"provider,omitempty"`
-	BotOpenID        string `json:"botOpenId,omitempty"`
-	OAuthRedirectUri string `json:"oauthRedirectUri,omitempty"`
-	DeployGroup      string `json:"deployGroup,omitempty"`
-	LitellmKey   string `json:"litellmKey,omitempty"`
-	Image        string `json:"image,omitempty"`
-	Paused       bool   `json:"paused,omitempty"`
+	BotOpenID         string `json:"botOpenId,omitempty"`
+	OAuthRedirectUri  string `json:"oauthRedirectUri,omitempty"`
+	DeployGroup       string `json:"deployGroup,omitempty"`
+	LitellmKey        string `json:"litellmKey,omitempty"`
+	LitellmRoutePolicy string `json:"litellmRoutePolicy,omitempty"`
+	Image             string `json:"image,omitempty"`
+	Paused            bool   `json:"paused,omitempty"`
 }
 
 // HerInstanceStatus defines the observed state.

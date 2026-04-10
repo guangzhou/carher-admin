@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { DEFAULT_PROVIDER, PROVIDER_MODELS, PROVIDER_OPTIONS, getModelAlias } from "../models";
+import {
+  DEFAULT_LITELLM_ROUTE_POLICY,
+  DEFAULT_PROVIDER,
+  LITELLM_ROUTE_POLICY_OPTIONS,
+  PROVIDER_MODELS,
+  PROVIDER_OPTIONS,
+  getLitellmRoutePolicyLabel,
+  getModelAlias,
+} from "../models";
 import LogViewer from "./LogViewer";
 
 export default function InstanceDetail({ id, onBack, onRefresh }) {
@@ -22,6 +30,7 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
         model: d.model_short || d.model || "",
         owner: d.owner || "",
         provider: d.provider || DEFAULT_PROVIDER,
+        litellm_route_policy: d.litellm_route_policy || DEFAULT_LITELLM_ROUTE_POLICY,
         deploy_group: d.deploy_group || "stable",
         image: d.image || "",
         app_id: prev.app_id ?? d.app_id ?? "",
@@ -60,6 +69,9 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
       if (editForm.model !== (data.model_short || data.model || "")) params.model = editForm.model;
       if (editForm.owner !== (data.owner || "")) params.owner = editForm.owner;
       if (editForm.provider !== (data.provider || DEFAULT_PROVIDER)) params.provider = editForm.provider;
+      if (editForm.litellm_route_policy !== (data.litellm_route_policy || DEFAULT_LITELLM_ROUTE_POLICY)) {
+        params.litellm_route_policy = editForm.litellm_route_policy;
+      }
       if (editForm.deploy_group !== (data.deploy_group || "stable")) params.deploy_group = editForm.deploy_group;
       if (editForm.image && editForm.image !== (data.image || "")) params.image = editForm.image;
       if (editForm.app_id !== (data.app_id || "")) params.app_id = editForm.app_id;
@@ -113,6 +125,7 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
               model: data.model_short || data.model || "",
               owner: data.owner || "",
               provider: data.provider || DEFAULT_PROVIDER,
+              litellm_route_policy: data.litellm_route_policy || DEFAULT_LITELLM_ROUTE_POLICY,
               deploy_group: data.deploy_group || "stable",
               image: data.image || "",
               app_id: data.app_id || "",
@@ -158,6 +171,9 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
           <InfoRow label="名字" value={data.name} />
           <InfoRow label="模型" value={getModelAlias(data.provider, data.model_short || data.model)} />
           <InfoRow label="Provider" value={data.provider} />
+          {data.provider === "litellm" && (
+            <InfoRow label="LiteLLM 路由" value={getLitellmRoutePolicyLabel(data.litellm_route_policy)} />
+          )}
           <InfoRow label="App ID" value={data.app_id} mono />
           <InfoRow label="Bot Open ID" value={data.bot_open_id} mono />
           <InfoRow label="Owner" value={data.owner} mono />
@@ -221,6 +237,16 @@ export default function InstanceDetail({ id, onBack, onRefresh }) {
                 ))}
               </select>
             </div>
+            {editForm.provider === "litellm" && (
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">LiteLLM 路由策略</label>
+                <select className="input w-full" value={editForm.litellm_route_policy} onChange={(e) => setField("litellm_route_policy", e.target.value)}>
+                  {LITELLM_ROUTE_POLICY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div>
               <label className="block text-xs text-gray-500 mb-1">部署组</label>
               <input className="input w-full" value={editForm.deploy_group} onChange={(e) => setField("deploy_group", e.target.value)} placeholder="stable / canary / vip" />

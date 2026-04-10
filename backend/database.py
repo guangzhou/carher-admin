@@ -27,7 +27,7 @@ DB_DIR = Path(os.environ.get("CARHER_ADMIN_DB_DIR", "/data/carher-admin"))
 DB_PATH = DB_DIR / "admin.db"
 BACKUP_DIR = Path(os.environ.get("CARHER_ADMIN_BACKUP_DIR", "/nas-backup/carher-admin"))
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS her_instances (
@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS her_instances (
     deploy_group    TEXT NOT NULL DEFAULT 'stable',
     image_tag       TEXT NOT NULL DEFAULT 'upgrade-0402-8ef16fb',
     litellm_key     TEXT NOT NULL DEFAULT '',
+    litellm_route_policy TEXT NOT NULL DEFAULT 'openrouter_first',
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -245,20 +246,26 @@ MIGRATIONS = {
             deploy_group    TEXT NOT NULL DEFAULT 'stable',
             image_tag       TEXT NOT NULL DEFAULT 'upgrade-0402-8ef16fb',
             litellm_key     TEXT NOT NULL DEFAULT '',
+            litellm_route_policy TEXT NOT NULL DEFAULT 'openrouter_first',
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
         )""",
         """INSERT INTO her_instances (
             id, name, model, app_id, app_secret, prefix, owner, provider,
             bot_open_id, status, sync_status, deploy_group, image_tag, litellm_key,
+            litellm_route_policy,
             created_at, updated_at
         )
         SELECT
             id, name, model, app_id, app_secret, prefix, owner, provider,
             bot_open_id, status, sync_status, deploy_group, image_tag, litellm_key,
+            'openrouter_first',
             created_at, updated_at
         FROM her_instances_old""",
         "DROP TABLE her_instances_old",
+    ],
+    12: [
+        "ALTER TABLE her_instances ADD COLUMN litellm_route_policy TEXT NOT NULL DEFAULT 'openrouter_first'",
     ],
 }
 
@@ -414,12 +421,13 @@ def get_by_id(uid: int) -> dict | None:
 def insert(data: dict) -> dict:
     with get_db() as conn:
         conn.execute(
-            """INSERT INTO her_instances (id, name, model, app_id, app_secret, prefix, owner, provider, bot_open_id, status, sync_status, deploy_group, image_tag, litellm_key, created_at, updated_at)
-               VALUES (:id, :name, :model, :app_id, :app_secret, :prefix, :owner, :provider, :bot_open_id, :status, 'pending', :deploy_group, :image_tag, :litellm_key, :now, :now)""",
+            """INSERT INTO her_instances (id, name, model, app_id, app_secret, prefix, owner, provider, bot_open_id, status, sync_status, deploy_group, image_tag, litellm_key, litellm_route_policy, created_at, updated_at)
+               VALUES (:id, :name, :model, :app_id, :app_secret, :prefix, :owner, :provider, :bot_open_id, :status, 'pending', :deploy_group, :image_tag, :litellm_key, :litellm_route_policy, :now, :now)""",
             {
                 "deploy_group": data.get("deploy_group", "stable"),
                 "image_tag": data.get("image_tag", "upgrade-0402-8ef16fb"),
                 "litellm_key": data.get("litellm_key", ""),
+                "litellm_route_policy": data.get("litellm_route_policy", "openrouter_first"),
                 **data,
                 "now": _now(),
             },

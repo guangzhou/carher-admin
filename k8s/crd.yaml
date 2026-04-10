@@ -64,6 +64,11 @@ spec:
                   type: string
                   default: ""
                   description: "Per-instance LiteLLM virtual key for spend tracking"
+                litellmRoutePolicy:
+                  type: string
+                  default: openrouter_first
+                  enum: [openrouter_first, wangsu_first]
+                  description: "When provider=litellm, choose the primary provider for shared chat models (gpt / sonnet / opus / gemini)"
                 paused:
                   type: boolean
                   default: false

@@ -1,4 +1,5 @@
 export const DEFAULT_PROVIDER = "litellm";
+export const DEFAULT_LITELLM_ROUTE_POLICY = "openrouter_first";
 
 export const PROVIDER_MODELS = {
   openrouter: [
@@ -35,6 +36,11 @@ export const PROVIDER_OPTIONS = [
   { value: "litellm", label: "LiteLLM" },
 ];
 
+export const LITELLM_ROUTE_POLICY_OPTIONS = [
+  { value: "openrouter_first", label: "OpenRouter 优先，网宿兜底" },
+  { value: "wangsu_first", label: "网宿优先，OpenRouter 兜底" },
+];
+
 export const ALL_MODELS = [
   { value: "gpt", label: "GPT-5.4" },
   { value: "sonnet", label: "Claude Sonnet 4.6" },
@@ -52,4 +58,8 @@ const MODEL_ALIAS = {
 
 export function getModelAlias(provider, modelShort) {
   return MODEL_ALIAS[provider]?.[modelShort] || modelShort || "-";
+}
+
+export function getLitellmRoutePolicyLabel(policy) {
+  return LITELLM_ROUTE_POLICY_OPTIONS.find((option) => option.value === policy)?.label || "OpenRouter 优先，网宿兜底";
 }

@@ -15,6 +15,8 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 # Instance models
 # ──────────────────────────────────────
 
+LitellmRoutePolicy = Literal["openrouter_first", "wangsu_first"]
+
 class HerInstance(BaseModel):
     id: int
     name: str = ""
@@ -29,6 +31,7 @@ class HerInstance(BaseModel):
     oauth_url: str = ""
     owner: str = ""
     provider: str = "wangsu"
+    litellm_route_policy: LitellmRoutePolicy = "openrouter_first"
     sync_status: str = ""
     deploy_group: str = "stable"
     image_tag: str = ""
@@ -54,10 +57,19 @@ class HerAddRequest(BaseModel):
         description=(
             "AI provider: openrouter / anthropic / wangsu / litellm. "
             "Default: wangsu. When provider=litellm, requests are routed through "
-            "the LiteLLM proxy. Current production routing uses OpenRouter for "
-            "all 7 chat models (gpt / sonnet / opus / gemini / minimax / glm / codex). "
+            "the LiteLLM proxy. Shared chat models (gpt / sonnet / opus / gemini) "
+            "default to openrouter_first and can be changed per instance via "
+            "litellm_route_policy. "
             "For new instances, explicitly send both provider and model instead of "
             "relying on historical defaults."
+        ),
+    )
+    litellm_route_policy: LitellmRoutePolicy = Field(
+        "openrouter_first",
+        description=(
+            "When provider=litellm, controls per-key provider priority for shared "
+            "chat models (gpt / sonnet / opus / gemini): "
+            "openrouter_first or wangsu_first. Default: openrouter_first."
         ),
     )
     deploy_group: str = Field("stable", description="Deploy group name")
@@ -91,8 +103,17 @@ class HerUpdateRequest(BaseModel):
         description=(
             "Update provider: openrouter / anthropic / wangsu / litellm. "
             "When provider=litellm, requests are routed through the LiteLLM "
-            "proxy. Current production routing uses OpenRouter for all 7 chat "
-            "models."
+            "proxy. Shared chat models (gpt / sonnet / opus / gemini) default "
+            "to openrouter_first and can be changed per instance via "
+            "litellm_route_policy."
+        ),
+    )
+    litellm_route_policy: LitellmRoutePolicy | None = Field(
+        None,
+        description=(
+            "When provider=litellm, update per-key provider priority for shared "
+            "chat models (gpt / sonnet / opus / gemini): "
+            "openrouter_first or wangsu_first."
         ),
     )
     prefix: str | None = Field(None, description="Update server prefix (s1/s2/s3)")

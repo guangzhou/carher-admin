@@ -70,7 +70,7 @@ def create_her_instance(data: dict) -> dict:
         "spec": {
             "userId": uid,
             "name": data.get("name", ""),
-            "model": data.get("model", "opus"),
+            "model": data.get("model", "gpt"),
             "appId": data.get("app_id", ""),
             "appSecretRef": f"carher-{uid}-secret",
             "prefix": data.get("prefix", "s1"),

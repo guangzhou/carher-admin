@@ -39,7 +39,7 @@ class HerAddRequest(BaseModel):
     id: int | None = Field(None, description="Instance ID (auto-assigned if omitted)")
     name: str = Field(..., description="User display name")
     model: str = Field(
-        "opus",
+        "gpt",
         description=(
             "Primary model short name. Common values: gpt / sonnet / opus / gemini. "
             "When provider=litellm, also supports minimax / glm / codex."
@@ -54,7 +54,7 @@ class HerAddRequest(BaseModel):
         description=(
             "AI provider: openrouter / anthropic / wangsu / litellm. "
             "Default: wangsu. When provider=litellm, requests are routed through "
-            "the LiteLLM proxy (Wangsu primary + OpenRouter fallback for main "
+            "the LiteLLM proxy (OpenRouter primary + Wangsu fallback for main "
             "models; OpenRouter-only for minimax/glm/codex)."
         ),
     )
@@ -89,7 +89,7 @@ class HerUpdateRequest(BaseModel):
         description=(
             "Update provider: openrouter / anthropic / wangsu / litellm. "
             "When provider=litellm, requests are routed through the LiteLLM "
-            "proxy (Wangsu primary + OpenRouter fallback for main models; "
+            "proxy (OpenRouter primary + Wangsu fallback for main models; "
             "OpenRouter-only for minimax/glm/codex)."
         ),
     )

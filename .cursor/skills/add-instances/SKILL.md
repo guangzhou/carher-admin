@@ -34,7 +34,7 @@ API_KEY=$(kubectl get secret carher-admin-secrets -n carher \
 | 参数 | 默认值 | 可选值 |
 |------|--------|--------|
 | provider | wangsu | wangsu / openrouter / anthropic / litellm |
-| model | opus | opus / sonnet / gpt / gemini（litellm 额外支持 minimax / glm / codex） |
+| model | gpt | gpt / sonnet / opus / gemini（litellm 额外支持 minimax / glm / codex） |
 | prefix | s1 | s1 / s2 / s3 |
 | deploy_group | stable | stable / test / canary / vip 等 |
 

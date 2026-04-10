@@ -147,7 +147,7 @@ print(f'primary: {primary}')
 "
 ```
 
-应输出 `primary: litellm/claude-opus-4-6`（或对应模型）。
+应输出 `primary: litellm/gpt-5.4`（或对应实例 `spec.model` 的映射）。
 
 ### 4c. 确认 pure LiteLLM alias 集已生效
 

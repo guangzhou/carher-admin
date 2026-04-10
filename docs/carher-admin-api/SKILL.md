@@ -59,7 +59,7 @@ curl -X POST https://admin.carher.net/api/instances \
 # Supported fields: name, model, provider, owner, deploy_group, image,
 #   app_id, app_secret, prefix, bot_open_id
 #
-# Defaults for new instances: provider=wangsu, model=opus, prefix=s1, deploy_group=stable
+# Defaults for new instances: provider=wangsu, model=gpt, prefix=s1, deploy_group=stable
 #
 # Provider → Model mapping:
 #   openrouter: gpt (GPT-5.4), sonnet (Claude Sonnet 4.6), opus (Claude Opus 4.6), gemini (Gemini 3.1 Pro)
@@ -94,7 +94,7 @@ curl -X POST https://admin.carher.net/api/instances/batch \
 # Batch update (action=update with params)
 curl -X POST https://admin.carher.net/api/instances/batch \
   -H "Content-Type: application/json" \
-  -d '{"ids":[14,25,30],"action":"update","params":{"provider":"wangsu","model":"opus"}}'
+  -d '{"ids":[14,25,30],"action":"update","params":{"provider":"litellm","model":"gpt"}}'
 
 # Batch import instances (preferred wrapped body)
 curl -X POST https://admin.carher.net/api/instances/batch-import \

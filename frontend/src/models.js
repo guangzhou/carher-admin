@@ -1,4 +1,4 @@
-export const DEFAULT_PROVIDER = "wangsu";
+export const DEFAULT_PROVIDER = "litellm";
 
 export const PROVIDER_MODELS = {
   openrouter: [

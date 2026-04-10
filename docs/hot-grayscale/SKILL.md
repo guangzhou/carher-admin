@@ -42,10 +42,10 @@ Flow:
 ### Batch Config Update via kubectl
 
 ```bash
-# Update all instances to wangsu/opus
+# Update all instances to litellm/gpt
 kubectl get her -n carher --no-headers -o custom-columns='NAME:.metadata.name' \
   | xargs -I{} kubectl patch her {} -n carher --type merge \
-    -p '{"spec":{"model":"opus","provider":"wangsu"}}'
+    -p '{"spec":{"model":"gpt","provider":"litellm"}}'
 ```
 
 ### Canary: Update a Subset
@@ -55,18 +55,18 @@ kubectl get her -n carher --no-headers -o custom-columns='NAME:.metadata.name' \
 kubectl get her -n carher --no-headers -o custom-columns='NAME:.metadata.name' \
   | sort -t- -k2 -n | head -20 \
   | xargs -I{} kubectl patch her {} -n carher --type merge \
-    -p '{"spec":{"model":"opus","provider":"wangsu"}}'
+    -p '{"spec":{"model":"gpt","provider":"litellm"}}'
 ```
 
 ### Rollback
 
 ```bash
 # Revert canary instances back to previous config (adjust model/provider as needed)
-# Current defaults for NEW instances: provider=wangsu, model=opus
+# Current defaults for NEW instances: provider=litellm, model=gpt
 kubectl get her -n carher --no-headers -o custom-columns='NAME:.metadata.name' \
   | sort -t- -k2 -n | head -20 \
   | xargs -I{} kubectl patch her {} -n carher --type merge \
-    -p '{"spec":{"model":"gpt","provider":"openrouter"}}'
+    -p '{"spec":{"model":"gpt","provider":"litellm"}}'
 ```
 
 ### Verify
@@ -146,9 +146,9 @@ For detailed technical pitfalls discovered during implementation, see
 
 ```
 CRD spec changed?
-├─ model/provider/owner/name/litellmKey changed → Tier 1 hot-reload (no restart)
-├─ image/prefix/appSecretRef/deployGroup changed → Tier 2 rolling update (zero-downtime)
-└─ nothing changed, replicas=0                  → Scale up (unpause)
+├─ model/provider/owner/name/litellmKey changed  → Tier 1 hot-reload (no restart)
+├─ image/prefix/appSecretRef/deployGroup changed  → Tier 2 rolling update (zero-downtime)
+└─ nothing changed, replicas=0                    → Scale up (unpause)
 ```
 
 ### Provider 切换到 litellm 的副作用

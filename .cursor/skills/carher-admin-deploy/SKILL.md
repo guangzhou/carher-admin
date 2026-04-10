@@ -19,10 +19,10 @@ description: >-
 
 | Endpoint | Usage |
 |----------|-------|
-| `cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com` | Public (CI push, local push) |
-| `cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com` | VPC (K8s pod pull) |
+| `cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com` | Public（push 用此地址） |
+| `cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com` | VPC（K8s pod pull） |
 
-Push 用 Public，`kubectl set image` 用 **VPC**。
+Push 用 Public，`kubectl set image` 用 **VPC**。二者共享同一底层存储。
 
 ## kubectl 隧道
 
@@ -40,31 +40,64 @@ SSHPASS='5ip0krF>qazQjcvnqc' sshpass -e ssh \
 
 ---
 
-## 方式 1：本地构建 + kubectl 部署（默认）
+## 构建服务器
+
+镜像构建在 K8s 跳板机上完成（`47.84.112.136:1023`），**不在本地 Mac 构建**。
+
+| 项目 | 值 |
+|------|---|
+| SSH | `sshpass -e ssh -p 1023 root@47.84.112.136` |
+| 构建工具 | `nerdctl` + `buildkitd`（已安装为 systemd service） |
+| 仓库路径 | `/root/carher-admin` |
+| ACR 凭证 | 已 `nerdctl login`（存于 `/root/.docker/config.json`） |
+
+---
+
+## 标准部署流程（默认方式）
 
 Admin/Operator **不走 CI/CD**，GitHub Actions 不构建也不部署。
-所有步骤在本地完成：构建镜像 → 推送 ACR → kubectl 更新。
 
-### 标准流程
+### Step 1：本地提交代码
+
+```bash
+git add -A && git commit -m "your message" && git push
+```
+
+### Step 2：SSH 到服务器构建并推送
+
+```bash
+export SSHPASS='5ip0krF>qazQjcvnqc'
+
+sshpass -e ssh -o StrictHostKeyChecking=no -p 1023 root@47.84.112.136 "
+cd /root/carher-admin && git pull
+
+TAG=\"v\$(date +%Y%m%d)-\$(git rev-parse --short HEAD)\"
+ACR_PUB='cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her'
+
+# 构建 + 推送 admin
+nerdctl build -t \$ACR_PUB/carher-admin:\$TAG . && \
+nerdctl push \$ACR_PUB/carher-admin:\$TAG
+
+# 构建 + 推送 operator（如果有 operator 代码变更）
+nerdctl build -t \$ACR_PUB/carher-operator:\$TAG ./operator-go && \
+nerdctl push \$ACR_PUB/carher-operator:\$TAG
+
+echo \"TAG=\$TAG\"
+"
+```
+
+### Step 3：kubectl 部署
 
 ```bash
 TAG="v$(date +%Y%m%d)-$(git rev-parse --short HEAD)"
-ACR_PUB="cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her"
 ACR_VPC="cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her"
 
-# 1. 构建 admin 镜像（MUST --platform linux/amd64，Mac 默认 ARM64）
-docker build --platform linux/amd64 -t $ACR_PUB/carher-admin:$TAG .
-docker push $ACR_PUB/carher-admin:$TAG
-
-# 2. 部署 admin
+# 部署 admin
 kubectl set image deploy/carher-admin \
   admin=$ACR_VPC/carher-admin:$TAG -n carher
 kubectl rollout status deploy/carher-admin -n carher --timeout=120s
 
-# 3. 部署 operator（如果有 operator 代码变更）
-docker build --platform linux/amd64 -t $ACR_PUB/carher-operator:$TAG ./operator-go
-docker push $ACR_PUB/carher-operator:$TAG
-
+# 部署 operator（如果有 operator 代码变更）
 kubectl set image deploy/carher-operator \
   operator=$ACR_VPC/carher-operator:$TAG -n carher
 kubectl rollout status deploy/carher-operator -n carher --timeout=120s
@@ -81,15 +114,35 @@ kubectl logs -n carher deploy/carher-admin --tail=30
 kubectl logs -n carher deploy/carher-operator --tail=30
 ```
 
-### Bootstrap 脚本
+---
 
-`deploy-bootstrap.sh` 用于首次集群初始化。脚本现在会：
+## 构建服务器维护
 
-1. 只构建并 push 带 `$TAG` 的 admin/operator 镜像
-2. apply manifests
-3. 再用 `kubectl set image` 把 `carher-admin` / `carher-operator` 明确切到刚构建的 `$TAG`
+### buildkitd
 
-不要依赖 `:latest`。admin/operator 的实际发布以显式 tag 为准。
+buildkitd 作为 systemd service 运行，开机自启：
+
+```bash
+systemctl status buildkit       # 检查状态
+systemctl restart buildkit      # 重启
+journalctl -u buildkit -n 20    # 查看日志
+```
+
+如果 `nerdctl build` 报 `buildctl not found` 或 socket 错误，重启 buildkit。
+
+### ACR 登录过期
+
+```bash
+nerdctl login --username='liuguoxian@1989403661820148' \
+  --password='cltx!@#456' \
+  cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com
+```
+
+### 仓库更新
+
+```bash
+cd /root/carher-admin && git pull
+```
 
 ---
 
@@ -138,10 +191,10 @@ kubectl apply -f k8s/litellm-postgres.yaml
 
 ## Pitfalls
 
-### 1. Platform Mismatch (ImagePullBackOff)
+### 1. 禁止本地 Mac 构建
 
-**Symptom**: `no match for platform in manifest: not found`
-**Fix**: Always use `--platform linux/amd64` when building locally.
+**原因**：Mac 默认 ARM64 架构，构建的镜像在 K8s（amd64）上会 `ImagePullBackOff`。
+**正确做法**：始终在构建服务器（`47.84.112.136`）上用 `nerdctl build` 构建。
 
 ### 2. Public vs VPC Registry
 
@@ -167,7 +220,9 @@ If this node is unavailable, admin pod cannot be scheduled.
 
 | Symptom | Check | Fix |
 |---------|-------|-----|
-| ImagePullBackOff | `kubectl describe pod` → image arch | Rebuild with `--platform linux/amd64` |
+| `buildctl` not found on server | `systemctl status buildkit` | `systemctl restart buildkit` |
+| ACR push 401 | `nerdctl login` 过期 | 重新 `nerdctl login`（见上方凭证） |
+| ImagePullBackOff | `kubectl describe pod` → image arch | 确认在服务器上构建，不是本地 Mac |
 | CrashLoopBackOff | `kubectl logs <pod>` | Fix config, rebuild |
 | Connection refused | SSH tunnel down | Re-run SSH tunnel command |
 | Pod stuck Pending | `kubectl describe pod` → node affinity | Check nodeSelector and node status |

@@ -81,8 +81,8 @@ req = urllib.request.Request(
     '${LITELLM_URL}/key/generate',
     data=json.dumps({
         'user_id': 'carher-$i',
-        'key_alias': 'her-$i',
-        'metadata': {'instance_name': '$NAME'},
+        'key_alias': 'carher-$i',
+        'metadata': {'instance': 'carher-$i', 'owner_name': '$NAME'},
         'max_budget': None
     }).encode(),
     headers={
@@ -112,9 +112,10 @@ done
 | 参数 | 用途 |
 |------|------|
 | `user_id` | LiteLLM 用户标识，格式 `carher-{ID}`，用于 spend 聚合 |
-| `key_alias` | LiteLLM key 别名，格式 `her-{ID}`，方便在 UI 中识别 |
+| `key_alias` | LiteLLM key 别名，格式 `carher-{ID}`，与 user_id 保持一致 |
 | `max_budget` | 可选消费上限（None = 不限） |
-| `metadata.instance_name` | 附加元数据，便于在 LiteLLM 侧关联用户名 |
+| `metadata.instance` | 实例标识 `carher-{ID}` |
+| `metadata.owner_name` | 附加元数据，便于在 LiteLLM 侧关联用户名 |
 
 ## Step 4：等待 Reconcile 并验证
 

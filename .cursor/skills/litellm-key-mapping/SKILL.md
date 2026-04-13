@@ -1,9 +1,10 @@
 ---
 name: litellm-key-mapping
 description: >-
-  View LiteLLM virtual key mappings and spend for CarHer bot instances.
-  Use when the user asks to see, list, or check LiteLLM keys, key mappings,
-  token usage, spend tracking, or mentions "key" + "litellm" / "映射" / "消费".
+  View or delete LiteLLM virtual keys and spend for CarHer and non-Her (CLI/tool)
+  accounts. Use when the user asks to see, list, check, revoke, or delete LiteLLM
+  keys, key mappings, token usage, spend tracking, or mentions "key" + "litellm"
+  / "映射" / "消费" / 删除 key / 撤销 key.
 ---
 
 # 查看 Her 实例 LiteLLM Key 映射
@@ -12,11 +13,12 @@ description: >-
 
 ## 关键概念
 
-- **Key 命名**：`key_alias` 和 `user_id` 统一为 `carher-{uid}`（如 `carher-1000`）
+- **Key 命名（Her 实例）**：`key_alias` 和 `user_id` 统一为 `carher-{uid}`（如 `carher-1000`）
+- **Key 命名（其他）**：CLI/工具等也会在 LiteLLM 里建虚拟 key，例如 `claude-code-*`、`cursor-*` 等；**删除前务必按别名确认**，勿误删 `carher-*`
 - **Env 注入**：Operator 向 Pod 注入 `LITELLM_API_KEY` env var（per-instance key），覆盖共享 Secret 中的 master key
 - **模型白名单**：每个 key 允许 7 个 chat 模型 + 1 个 embedding（`BAAI/bge-m3`）
-- **路由**：gpt/sonnet/opus/gemini → OpenRouter 主 + Wangsu 备；minimax/glm/codex → OpenRouter only
-- **当前规模**：约 101 个实例使用 litellm
+- **路由**：sonnet/opus → Wangsu Anthropic Direct 主 + OpenRouter 备；gpt/gemini → OpenRouter 主 + Wangsu 备；minimax/glm/codex → OpenRouter only
+- **当前规模**：约 117 个实例使用 litellm
 
 ## 前置：kubectl 隧道
 
@@ -130,3 +132,69 @@ LiteLLM Key 映射（共 N 个 litellm 实例）:
 
 注意：**不要在汇总中展示完整 key**，只展示前 4 位 + 后 6 位脱敏格式。
 完整 key 仅在排查问题时通过 kubectl 或 API 单独查看。
+
+---
+
+## 删除虚拟 key（按 key_alias，含非 Her 账户）
+
+用于撤销某批账户的 API key（例如离职、轮换、误发 key）。**破坏性操作**：删除后该 key 立即失效，需重新走生成流程。
+
+### 1. 前置
+
+- 能连集群：`kubectl get nodes`（若 `connection refused`，先按上文建 SSH 隧道）。
+- 本地访问 LiteLLM：`kubectl port-forward -n carher svc/litellm-proxy 4000:4000`（本地端口可换，下文用 `http://127.0.0.1:4000`）。
+- Master key：`MASTER_KEY=$(kubectl get secret litellm-secrets -n carher -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)`
+
+### 2. 按关键词查别名（粗筛）
+
+`GET /key/aliases` 的 `search` 为子串匹配，可多次换关键词：
+
+```bash
+curl -s "http://127.0.0.1:4000/key/aliases?page=1&size=100&search=<关键词>" \
+  -H "Authorization: Bearer $MASTER_KEY" | jq
+```
+
+### 3. 解析可删除的内部 key id（`token`）
+
+`/key/list` 返回的是内部 id 列表，**不适合**按业务别名筛选。应使用 **`GET /spend/keys`**：每条记录含 `key_alias`、`token`（64 位十六进制，即删除接口要用的 id）、脱敏 `key_name`。
+
+按 **前缀** 过滤示例（按需改前缀）：
+
+```bash
+curl -s "http://127.0.0.1:4000/spend/keys?limit=500" \
+  -H "Authorization: Bearer $MASTER_KEY" -o /tmp/spend_keys.json
+
+python3 << 'PY'
+import json
+with open("/tmp/spend_keys.json") as f:
+    rows = json.load(f)
+for r in rows:
+    a = r.get("key_alias") or ""
+    if a.startswith("PREFIX1") or a.startswith("PREFIX2"):
+        print(r["key_alias"], r["token"])
+PY
+```
+
+删除前向用户列出 **`key_alias` 列表**，确认无 `carher-*` 误选。
+
+### 4. 单条校验（可选）
+
+```bash
+curl -s "http://127.0.0.1:4000/key/info?key=<token>" \
+  -H "Authorization: Bearer $MASTER_KEY" | jq
+```
+
+### 5. 调用删除
+
+```bash
+curl -s -X POST "http://127.0.0.1:4000/key/delete" \
+  -H "Authorization: Bearer $MASTER_KEY" -H "Content-Type: application/json" \
+  -d '{"keys":["<token1>","<token2>"]}' | jq
+```
+
+成功时响应里一般有 `deleted_keys` 数组。再用 `key/aliases?search=...` 或上一步脚本复查，确认目标别名已消失。
+
+### 6. 注意
+
+- **不要用**误传的完整 `sk-...` 贴到聊天或日志；运维脚本里只处理 `token` 或脱敏名。
+- Her 实例的 key 若需作废，应优先走业务侧（更新 CRD `litellmKey` / Admin 流程），避免只删 LiteLLM 侧导致集群与代理不一致；**本小节针对独立虚拟 key（如 CLI 账户）为主**。

@@ -37,8 +37,8 @@ export const PROVIDER_OPTIONS = [
 ];
 
 export const LITELLM_ROUTE_POLICY_OPTIONS = [
-  { value: "openrouter_first", label: "Sonnet/Opus 网宿直连，GPT/Gemini OpenRouter" },
-  { value: "wangsu_first", label: "Sonnet/Opus 网宿直连，GPT/Gemini OpenRouter" },
+  { value: "openrouter_first", label: "OpenRouter 优先（GPT/Gemini OpenRouter，Sonnet/Opus 网宿直连）" },
+  { value: "wangsu_first", label: "网宿优先（全部优先走网宿，回退 OpenRouter）" },
 ];
 
 export const ALL_MODELS = [
@@ -61,5 +61,5 @@ export function getModelAlias(provider, modelShort) {
 }
 
 export function getLitellmRoutePolicyLabel(policy) {
-  return LITELLM_ROUTE_POLICY_OPTIONS.find((option) => option.value === policy)?.label || "Sonnet/Opus 网宿直连，GPT/Gemini OpenRouter";
+  return LITELLM_ROUTE_POLICY_OPTIONS.find((option) => option.value === policy)?.label || LITELLM_ROUTE_POLICY_OPTIONS[0].label;
 }

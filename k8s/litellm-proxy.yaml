@@ -24,6 +24,12 @@ data:
           model: anthropic/anthropic.claude-opus-4-6
           api_key: os.environ/WANGSU_DIRECT_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/yqhhclqf/anthropic
+          cache_control_injection_points:
+            - location: message
+              role: system
+            - location: message
+              role: user
+              index: -1
         model_info:
           id: wangsu-direct/claude-opus-4-6
           input_cost_per_token: 0.000005
@@ -37,6 +43,12 @@ data:
           model: anthropic/anthropic.claude-sonnet-4-6
           api_key: os.environ/WANGSU_DIRECT_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/yqhhclqf/anthropic
+          cache_control_injection_points:
+            - location: message
+              role: system
+            - location: message
+              role: user
+              index: -1
         model_info:
           id: wangsu-direct/claude-sonnet-4-6
           input_cost_per_token: 0.000003
@@ -130,6 +142,12 @@ data:
           model: anthropic/anthropic.claude-sonnet-4-6
           api_key: os.environ/WANGSU_DIRECT_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/yqhhclqf/anthropic
+          cache_control_injection_points:
+            - location: message
+              role: system
+            - location: message
+              role: user
+              index: -1
         model_info:
           id: anthropic.claude-sonnet-4-6
           input_cost_per_token: 0.000003
@@ -142,6 +160,12 @@ data:
           model: anthropic/anthropic.claude-opus-4-6
           api_key: os.environ/WANGSU_DIRECT_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/yqhhclqf/anthropic
+          cache_control_injection_points:
+            - location: message
+              role: system
+            - location: message
+              role: user
+              index: -1
         model_info:
           id: anthropic.claude-opus-4-6
           input_cost_per_token: 0.000005

@@ -37,8 +37,8 @@ export const PROVIDER_OPTIONS = [
 ];
 
 export const LITELLM_ROUTE_POLICY_OPTIONS = [
-  { value: "openrouter_first", label: "OpenRouter 优先，网宿兜底" },
-  { value: "wangsu_first", label: "网宿优先，OpenRouter 兜底" },
+  { value: "openrouter_first", label: "Sonnet/Opus 网宿直连，GPT/Gemini OpenRouter" },
+  { value: "wangsu_first", label: "Sonnet/Opus 网宿直连，GPT/Gemini OpenRouter" },
 ];
 
 export const ALL_MODELS = [

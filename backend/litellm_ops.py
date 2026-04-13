@@ -30,9 +30,11 @@ VALID_LITELLM_ROUTE_POLICIES = {
     WANGSU_FIRST_LITELLM_ROUTE_POLICY,
 }
 
-PRIMARY_TO_WANGSU_MODEL_GROUP = {
-    "claude-opus-4-6": "wangsu-claude-opus-4-6",
-    "claude-sonnet-4-6": "wangsu-claude-sonnet-4-6",
+# Sonnet/Opus: Wangsu Direct primary → OpenRouter fallback
+# GPT/Gemini:  OpenRouter primary → Wangsu OpenAI-compat fallback
+MODEL_FALLBACK_MAP = {
+    "claude-opus-4-6": "openrouter-claude-opus-4-6",
+    "claude-sonnet-4-6": "openrouter-claude-sonnet-4-6",
     "gpt-5.4": "wangsu-gpt-5.4",
     "gemini-3.1-pro-preview": "wangsu-gemini-3.1-pro-preview",
 }
@@ -47,7 +49,7 @@ _BASE_MODELS = [
     "gpt-5.3-codex",
     "BAAI/bge-m3",
 ]
-ALL_MODELS = _BASE_MODELS + list(PRIMARY_TO_WANGSU_MODEL_GROUP.values())
+ALL_MODELS = _BASE_MODELS + list(MODEL_FALLBACK_MAP.values())
 
 
 def normalize_route_policy(policy: str | None) -> str:
@@ -56,20 +58,10 @@ def normalize_route_policy(policy: str | None) -> str:
     return DEFAULT_LITELLM_ROUTE_POLICY
 
 
-def _build_aliases(route_policy: str) -> dict[str, str]:
-    if route_policy != WANGSU_FIRST_LITELLM_ROUTE_POLICY:
-        return {}
-    return dict(PRIMARY_TO_WANGSU_MODEL_GROUP)
-
-
-def _build_router_settings(route_policy: str) -> dict[str, list[dict[str, list[str]]]]:
+def _build_router_settings() -> dict[str, list[dict[str, list[str]]]]:
     fallbacks: list[dict[str, list[str]]] = []
-    if route_policy == WANGSU_FIRST_LITELLM_ROUTE_POLICY:
-        for primary, wangsu in PRIMARY_TO_WANGSU_MODEL_GROUP.items():
-            fallbacks.append({wangsu: [primary]})
-    else:
-        for primary, wangsu in PRIMARY_TO_WANGSU_MODEL_GROUP.items():
-            fallbacks.append({primary: [wangsu]})
+    for primary, fallback in MODEL_FALLBACK_MAP.items():
+        fallbacks.append({primary: [fallback]})
     return {"fallbacks": fallbacks}
 
 
@@ -85,8 +77,8 @@ def _build_key_payload(uid: int, name: str = "", route_policy: str | None = None
             "litellm_route_policy": normalized_policy,
         },
         "models": ALL_MODELS,
-        "aliases": _build_aliases(normalized_policy),
-        "router_settings": _build_router_settings(normalized_policy),
+        "aliases": {},
+        "router_settings": _build_router_settings(),
     }
 
 

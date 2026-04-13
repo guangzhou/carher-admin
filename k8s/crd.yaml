@@ -68,7 +68,7 @@ spec:
                   type: string
                   default: openrouter_first
                   enum: [openrouter_first, wangsu_first]
-                  description: "When provider=litellm, choose the primary provider for shared chat models (gpt / sonnet / opus / gemini)"
+                  description: "Legacy field kept for compatibility. Routing is now fixed: Sonnet/Opus → Wangsu Direct, GPT/Gemini → OpenRouter."
                 paused:
                   type: boolean
                   default: false

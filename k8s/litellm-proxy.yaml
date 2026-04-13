@@ -14,28 +14,39 @@ data:
   config.yaml: |
     model_list:
       # ═══════════════════════════════════════════
-      # Provider: OpenRouter — sole provider for main models
+      # Sonnet / Opus: Wangsu Anthropic Direct (v2 gateway) — primary
+      # Native Anthropic protocol via cheliantianxia3 gateway.
       # ═══════════════════════════════════════════
 
-      # ── Claude Opus 4.6 via OpenRouter ──
+      # ── Claude Opus 4.6 via Wangsu Direct ──
       - model_name: claude-opus-4-6
         litellm_params:
-          model: openrouter/anthropic/claude-opus-4.6
-          api_key: os.environ/OPENROUTER_API_KEY
+          model: anthropic/anthropic.claude-opus-4-6
+          api_key: os.environ/WANGSU_DIRECT_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/yqhhclqf/anthropic
         model_info:
-          id: openrouter/claude-opus-4-6
+          id: wangsu-direct/claude-opus-4-6
           input_cost_per_token: 0.000005
           output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
 
-      # ── Claude Sonnet 4.6 via OpenRouter ──
+      # ── Claude Sonnet 4.6 via Wangsu Direct ──
       - model_name: claude-sonnet-4-6
         litellm_params:
-          model: openrouter/anthropic/claude-sonnet-4.6
-          api_key: os.environ/OPENROUTER_API_KEY
+          model: anthropic/anthropic.claude-sonnet-4-6
+          api_key: os.environ/WANGSU_DIRECT_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/yqhhclqf/anthropic
         model_info:
-          id: openrouter/claude-sonnet-4-6
+          id: wangsu-direct/claude-sonnet-4-6
           input_cost_per_token: 0.000003
           output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
+
+      # ═══════════════════════════════════════════
+      # GPT / Gemini: OpenRouter — primary (unchanged)
+      # ═══════════════════════════════════════════
 
       # ── GPT-5.4 via OpenRouter ──
       - model_name: gpt-5.4
@@ -58,35 +69,31 @@ data:
           output_cost_per_token: 0.000012
 
       # ═══════════════════════════════════════════
-      # Provider: Wangsu (网宿) — dedicated fallback deployments
-      # Keep these in separate model groups. Router fallbacks decide when to
-      # use them, so initial traffic always stays on OpenRouter.
-      # Use custom_openai/* so LiteLLM stays on chat/completions.
-      # openai/* can bridge gpt-5.4 tool+reasoning calls to /responses,
-      # which Wangsu rejects with "field messages is required".
+      # Fallback: OpenRouter for Sonnet / Opus
       # ═══════════════════════════════════════════
 
-      - model_name: wangsu-claude-opus-4-6
+      - model_name: openrouter-claude-opus-4-6
         litellm_params:
-          model: custom_openai/claude-opus-4-6
-          api_key: os.environ/WANGSU_API_KEY
-          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          model: openrouter/anthropic/claude-opus-4.6
+          api_key: os.environ/OPENROUTER_API_KEY
         model_info:
-          id: wangsu/claude-opus-4-6
+          id: openrouter/claude-opus-4-6
           input_cost_per_token: 0.000005
           output_cost_per_token: 0.000025
-          cache_read_input_token_cost: 0.0000005
 
-      - model_name: wangsu-claude-sonnet-4-6
+      - model_name: openrouter-claude-sonnet-4-6
         litellm_params:
-          model: custom_openai/claude-sonnet-4-6
-          api_key: os.environ/WANGSU_API_KEY
-          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          model: openrouter/anthropic/claude-sonnet-4.6
+          api_key: os.environ/OPENROUTER_API_KEY
         model_info:
-          id: wangsu/claude-sonnet-4-6
+          id: openrouter/claude-sonnet-4-6
           input_cost_per_token: 0.000003
           output_cost_per_token: 0.000015
-          cache_read_input_token_cost: 0.0000003
+
+      # ═══════════════════════════════════════════
+      # Fallback: Wangsu (网宿) OpenAI compat for GPT / Gemini
+      # Use custom_openai/* so LiteLLM stays on chat/completions.
+      # ═══════════════════════════════════════════
 
       - model_name: wangsu-gpt-5.4
         litellm_params:
@@ -159,8 +166,8 @@ data:
 
     router_settings:
       fallbacks:
-        - claude-opus-4-6: ["wangsu-claude-opus-4-6"]
-        - claude-sonnet-4-6: ["wangsu-claude-sonnet-4-6"]
+        - claude-opus-4-6: ["openrouter-claude-opus-4-6"]
+        - claude-sonnet-4-6: ["openrouter-claude-sonnet-4-6"]
         - gpt-5.4: ["wangsu-gpt-5.4"]
         - gemini-3.1-pro-preview: ["wangsu-gemini-3.1-pro-preview"]
 

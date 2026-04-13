@@ -57,19 +57,17 @@ class HerAddRequest(BaseModel):
         description=(
             "AI provider: openrouter / anthropic / wangsu / litellm. "
             "Default: wangsu. When provider=litellm, requests are routed through "
-            "the LiteLLM proxy. Shared chat models (gpt / sonnet / opus / gemini) "
-            "default to openrouter_first and can be changed per instance via "
-            "litellm_route_policy. "
-            "For new instances, explicitly send both provider and model instead of "
-            "relying on historical defaults."
+            "the LiteLLM proxy. Sonnet/Opus → Wangsu Anthropic Direct (fallback: "
+            "OpenRouter). GPT/Gemini → OpenRouter (fallback: Wangsu)."
         ),
     )
     litellm_route_policy: LitellmRoutePolicy = Field(
         "openrouter_first",
         description=(
-            "When provider=litellm, controls per-key provider priority for shared "
-            "chat models (gpt / sonnet / opus / gemini): "
-            "openrouter_first or wangsu_first. Default: openrouter_first."
+            "Legacy field, kept for backward compatibility. "
+            "Sonnet/Opus now always route through Wangsu Anthropic Direct "
+            "(fallback: OpenRouter). GPT/Gemini route through OpenRouter "
+            "(fallback: Wangsu). This field no longer affects routing."
         ),
     )
     deploy_group: str = Field("stable", description="Deploy group name")
@@ -102,18 +100,16 @@ class HerUpdateRequest(BaseModel):
         None,
         description=(
             "Update provider: openrouter / anthropic / wangsu / litellm. "
-            "When provider=litellm, requests are routed through the LiteLLM "
-            "proxy. Shared chat models (gpt / sonnet / opus / gemini) default "
-            "to openrouter_first and can be changed per instance via "
-            "litellm_route_policy."
+            "When provider=litellm, Sonnet/Opus → Wangsu Anthropic Direct "
+            "(fallback: OpenRouter). GPT/Gemini → OpenRouter (fallback: Wangsu)."
         ),
     )
     litellm_route_policy: LitellmRoutePolicy | None = Field(
         None,
         description=(
-            "When provider=litellm, update per-key provider priority for shared "
-            "chat models (gpt / sonnet / opus / gemini): "
-            "openrouter_first or wangsu_first."
+            "Legacy field, kept for backward compatibility. "
+            "Routing is now fixed: Sonnet/Opus → Wangsu Direct, "
+            "GPT/Gemini → OpenRouter. This field no longer affects routing."
         ),
     )
     prefix: str | None = Field(None, description="Update server prefix (s1/s2/s3)")

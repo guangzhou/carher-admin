@@ -61,5 +61,5 @@ export function getModelAlias(provider, modelShort) {
 }
 
 export function getLitellmRoutePolicyLabel(policy) {
-  return LITELLM_ROUTE_POLICY_OPTIONS.find((option) => option.value === policy)?.label || "OpenRouter 优先，网宿兜底";
+  return LITELLM_ROUTE_POLICY_OPTIONS.find((option) => option.value === policy)?.label || "Sonnet/Opus 网宿直连，GPT/Gemini OpenRouter";
 }

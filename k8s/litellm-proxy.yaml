@@ -16,6 +16,11 @@ data:
       # ═══════════════════════════════════════════
       # Sonnet / Opus: Wangsu Anthropic Direct (v2 gateway) — primary
       # Native Anthropic protocol via cheliantianxia3 gateway.
+      #
+      # IMPORTANT: Pricing MUST be in litellm_params (not only model_info).
+      # LiteLLM bug: register_model() fails to inject model_info pricing
+      # when model names collide with built-in entries. Per-deployment
+      # cost path (litellm_params) is the only reliable path.
       # ═══════════════════════════════════════════
 
       # ── Claude Opus 4.6 via Wangsu Direct ──
@@ -24,6 +29,10 @@ data:
           model: anthropic/anthropic.claude-opus-4-6
           api_key: os.environ/WANGSU_DIRECT_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/yqhhclqf/anthropic
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
           cache_control_injection_points:
             - location: message
               role: system
@@ -43,6 +52,10 @@ data:
           model: anthropic/anthropic.claude-sonnet-4-6
           api_key: os.environ/WANGSU_DIRECT_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/yqhhclqf/anthropic
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
           cache_control_injection_points:
             - location: message
               role: system
@@ -94,10 +107,14 @@ data:
           api_key: os.environ/OPENROUTER_API_KEY
           input_cost_per_token: 0.000005
           output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
         model_info:
           id: openrouter/claude-opus-4-6
           input_cost_per_token: 0.000005
           output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
 
       - model_name: openrouter-claude-sonnet-4-6
         litellm_params:
@@ -105,10 +122,14 @@ data:
           api_key: os.environ/OPENROUTER_API_KEY
           input_cost_per_token: 0.000003
           output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
         model_info:
           id: openrouter/claude-sonnet-4-6
           input_cost_per_token: 0.000003
           output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
 
       # ═══════════════════════════════════════════
       # Fallback: Wangsu (网宿) OpenAI compat for GPT / Gemini

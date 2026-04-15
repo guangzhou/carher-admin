@@ -80,7 +80,7 @@ MANAGED_INSTANCE_HOST_RE = re.compile(rf"^[^.]+-u\d+-(auth|fe|proxy)\.{re.escape
 # These are inserted BEFORE the wildcard catch-all so they take priority.
 # Format: (hostname_prefix, service_name, port)
 INFRA_ROUTES: list[tuple[str, str, int]] = [
-    ("litellm", "litellm-proxy", 4000),
+    ("litellm", "litellm-proxy", 8080),
 ]
 
 

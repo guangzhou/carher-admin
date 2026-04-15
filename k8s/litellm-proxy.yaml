@@ -312,64 +312,6 @@ data:
       store_model_in_db: false
       database_url: os.environ/DATABASE_URL
 ---
-# Nginx sidecar config: strip /cursor/ prefix so Cursor IDE users
-# (Base URL = https://litellm.carher.net/cursor) hit normal LiteLLM
-# endpoints with full routing + spend tracking.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: litellm-nginx-config
-  namespace: carher
-  labels:
-    app: litellm-proxy
-data:
-  nginx.conf: |
-    worker_processes 1;
-    events { worker_connections 1024; }
-    http {
-      client_max_body_size 0;
-      server {
-        listen 8080;
-
-        # /cursor/... → strip prefix, proxy to LiteLLM
-        location /cursor/ {
-          rewrite ^/cursor/(.*)$ /$1 break;
-          proxy_pass http://127.0.0.1:4000;
-          proxy_http_version 1.1;
-          proxy_set_header Host $host;
-          proxy_set_header Connection "";
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_buffering off;
-          proxy_read_timeout 300s;
-          proxy_send_timeout 300s;
-        }
-        # /cursor (no trailing slash) → same treatment
-        location = /cursor {
-          rewrite ^/cursor$ / break;
-          proxy_pass http://127.0.0.1:4000;
-          proxy_http_version 1.1;
-          proxy_set_header Host $host;
-          proxy_set_header Connection "";
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_buffering off;
-        }
-
-        # Everything else → pass through unchanged
-        location / {
-          proxy_pass http://127.0.0.1:4000;
-          proxy_http_version 1.1;
-          proxy_set_header Host $host;
-          proxy_set_header Connection "";
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_buffering off;
-          proxy_read_timeout 300s;
-          proxy_send_timeout 300s;
-        }
-      }
-    }
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -396,7 +338,7 @@ spec:
           args: ["--config", "/app/config.yaml", "--port", "4000"]
           ports:
             - containerPort: 4000
-              name: litellm
+              name: http
           envFrom:
             - secretRef:
                 name: litellm-secrets
@@ -430,40 +372,10 @@ spec:
               mountPath: /app/config.yaml
               subPath: config.yaml
               readOnly: true
-        - name: nginx
-          image: nginx:1.27-alpine
-          ports:
-            - containerPort: 8080
-              name: http
-          volumeMounts:
-            - name: nginx-config
-              mountPath: /etc/nginx/nginx.conf
-              subPath: nginx.conf
-              readOnly: true
-          resources:
-            requests:
-              cpu: 10m
-              memory: 16Mi
-            limits:
-              cpu: 100m
-              memory: 64Mi
-          livenessProbe:
-            tcpSocket:
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          readinessProbe:
-            tcpSocket:
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
       volumes:
         - name: config
           configMap:
             name: litellm-config
-        - name: nginx-config
-          configMap:
-            name: litellm-nginx-config
 ---
 apiVersion: v1
 kind: Service
@@ -479,7 +391,4 @@ spec:
   ports:
     - port: 4000
       targetPort: 4000
-      name: litellm
-    - port: 8080
-      targetPort: 8080
       name: http

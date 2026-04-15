@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS her_instances (
     status          TEXT NOT NULL DEFAULT 'running',
     sync_status     TEXT NOT NULL DEFAULT 'pending',
     deploy_group    TEXT NOT NULL DEFAULT 'stable',
-    image_tag       TEXT NOT NULL DEFAULT 'upgrade-0402-8ef16fb',
+    image_tag       TEXT NOT NULL DEFAULT 'skills-two-layer-8045eb9e',
     litellm_key     TEXT NOT NULL DEFAULT '',
     litellm_route_policy TEXT NOT NULL DEFAULT 'openrouter_first',
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -244,7 +244,7 @@ MIGRATIONS = {
             status          TEXT NOT NULL DEFAULT 'running',
             sync_status     TEXT NOT NULL DEFAULT 'pending',
             deploy_group    TEXT NOT NULL DEFAULT 'stable',
-            image_tag       TEXT NOT NULL DEFAULT 'upgrade-0402-8ef16fb',
+            image_tag       TEXT NOT NULL DEFAULT 'skills-two-layer-8045eb9e',
             litellm_key     TEXT NOT NULL DEFAULT '',
             litellm_route_policy TEXT NOT NULL DEFAULT 'openrouter_first',
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -425,7 +425,7 @@ def insert(data: dict) -> dict:
                VALUES (:id, :name, :model, :app_id, :app_secret, :prefix, :owner, :provider, :bot_open_id, :status, 'pending', :deploy_group, :image_tag, :litellm_key, :litellm_route_policy, :now, :now)""",
             {
                 "deploy_group": data.get("deploy_group", "stable"),
-                "image_tag": data.get("image_tag", "upgrade-0402-8ef16fb"),
+                "image_tag": data.get("image_tag", "skills-two-layer-8045eb9e"),
                 "litellm_key": data.get("litellm_key", ""),
                 "litellm_route_policy": data.get("litellm_route_policy", "openrouter_first"),
                 **data,
@@ -757,7 +757,7 @@ def get_current_image_tag() -> str:
         row = conn.execute(
             "SELECT image_tag, COUNT(*) as cnt FROM her_instances WHERE status='running' GROUP BY image_tag ORDER BY cnt DESC LIMIT 1"
         ).fetchone()
-        return row["image_tag"] if row else "upgrade-0402-8ef16fb"
+        return row["image_tag"] if row else "skills-two-layer-8045eb9e"
 
 
 def list_image_tags(limit: int = 30) -> list[str]:

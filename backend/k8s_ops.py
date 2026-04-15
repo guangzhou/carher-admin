@@ -21,7 +21,7 @@ logger = logging.getLogger("carher-admin")
 
 NS = "carher"
 ACR = "cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her/carher"
-DEFAULT_IMAGE_TAG = "upgrade-0402-8ef16fb"
+DEFAULT_IMAGE_TAG = "skills-two-layer-8045eb9e"
 USER_PVC_STORAGE_CLASS = "alibabacloud-cnfs-nas"
 USER_PVC_STORAGE_REQUEST = "20Gi"
 

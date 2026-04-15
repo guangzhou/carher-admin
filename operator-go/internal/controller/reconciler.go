@@ -687,7 +687,7 @@ func (r *HerInstanceReconciler) ensureService(ctx context.Context, her *herv1.He
 
 func resolveImage(specImage string) string {
 	if specImage == "" {
-		return "upgrade-0402-8ef16fb"
+		return "skills-two-layer-8045eb9e"
 	}
 	return specImage
 }

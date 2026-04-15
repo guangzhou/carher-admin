@@ -30,13 +30,22 @@ spec:
           ports:
             - containerPort: 5432
               name: postgres
+          args:
+            - -c
+            - shared_buffers=256MB
+            - -c
+            - work_mem=8MB
+            - -c
+            - effective_cache_size=512MB
+            - -c
+            - maintenance_work_mem=128MB
           resources:
             requests:
               cpu: 100m
-              memory: 128Mi
+              memory: 256Mi
             limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 1Gi
           livenessProbe:
             exec:
               command: ["pg_isready", "-U", "litellm", "-d", "litellm"]

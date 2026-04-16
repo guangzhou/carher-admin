@@ -80,7 +80,7 @@ def create_her_instance(data: dict) -> dict:
             "litellmRoutePolicy": data.get("litellm_route_policy", "openrouter_first"),
             "botOpenId": data.get("bot_open_id", ""),
             "deployGroup": data.get("deploy_group", "stable"),
-            "image": data.get("image_tag", "skills-two-layer-8045eb9e"),
+            "image": data.get("image_tag", "fix-compact-eb348941"),
             "paused": False,
         },
     }

@@ -12,6 +12,20 @@ description: >-
 每次升级 carher 主程序前，**必须先比较目标版本与线上版本**，给出改动分析和风险评估，
 用户确认后再执行升级。
 
+## 升级范围
+
+| 范围 | 触发方式 | 影响 |
+|------|----------|------|
+| **单实例** | `kubectl patch her her-<ID>` | 只更新指定实例，其余不受影响 |
+| **批量灰度** | 批量 `kubectl patch` 前 N 个实例 | canary 组更新，stable 不动 |
+| **全量** | Admin API `POST /api/deploy` 或批量 patch 全部 | 所有实例更新 |
+
+**单实例升级关键原则**：
+- **不更新共享 ConfigMap**（`carher-base-config`）——会影响全部实例
+- **不更新 operator**——operator 变更影响所有 pod 创建
+- **不同步 Skills PVC**——除非 skills 加载机制变更
+- 只做：构建镜像 → patch 单个 CRD → 验证
+
 ## 前置条件
 
 - carher 主程序仓库在本地：`/Users/Liuguoxian/codes/carher`
@@ -26,9 +40,9 @@ kubectl get her -n carher -o jsonpath='{range .items[*]}{.spec.image}{"\n"}{end}
   | sort | uniq -c | sort -rn
 ```
 
-解析 image tag 中的 commit hash。tag 格式通常为 `<描述>-<commit7>`，
+解析 image tag 中的 commit hash。tag 格式通常为 `<描述>-<commit8>`，
 例如 `upgrade-0402-8ef16fb` → commit `8ef16fb`；
-`skills-two-layer-8045eb9e` → commit `8045eb9e`。
+`fix-compact-eb348941` → commit `eb348941`。
 
 记录：
 - `ONLINE_TAG`: 线上 image tag（可能有多个，取最多的那个）
@@ -95,6 +109,10 @@ diff <(kubectl get configmap carher-base-config -n carher \
      <(cd /Users/Liuguoxian/codes/carher && \
        git show <TARGET_COMMIT>:docker/carher-config.json | python3 -m json.tool)
 ```
+
+**⚠️ 单实例升级时不要更新共享 ConfigMap。** `carher-base-config` 是所有实例共享的，
+更新它会影响全部实例。代码 bug fix 通常不依赖特定 config 值即可生效。
+只有全量升级时才考虑同步更新 ConfigMap。
 
 ### 4.3 Operator 变更（需要重新部署 operator）
 
@@ -183,23 +201,30 @@ sshpass -e ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
   "test -d /root/carher || git clone --branch <TARGET_BRANCH> \
    https://x-access-token:${GITHUB_TOKEN}@github.com/guangzhou/CarHer.git /root/carher"
 
-# 切换到目标 commit
+# 更新 remote URL（token 会过期）+ fetch 目标分支 + checkout
 sshpass -e ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
   -p 1023 root@47.84.112.136 \
-  "cd /root/carher && git fetch origin && git checkout <TARGET_COMMIT>"
+  "cd /root/carher && \
+   git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/guangzhou/CarHer.git && \
+   git fetch origin <TARGET_BRANCH> && \
+   git checkout <TARGET_COMMIT>"
 ```
 
-**构建镜像**（耗时约 5-10 分钟，大部分时间在 pnpm install + build）：
+**构建镜像**：
+- 有 layer 缓存时约 **3 分钟**（仅重建变更层 + pnpm build）
+- 无缓存（首次或 Dockerfile 改动）约 **5-10 分钟**（pnpm install + build）
 
 ```bash
 # tag 格式：<描述>-<commit8>
 TAG="<branch-slug>-$(echo <TARGET_COMMIT> | cut -c1-8)"
-ACR_PUB="cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her"
+ACR_VPC="cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her"
 
 sshpass -e ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
   -p 1023 root@47.84.112.136 \
-  "cd /root/carher && nerdctl build -f Dockerfile.carher -t $ACR_PUB/carher:$TAG . 2>&1 | tail -30"
+  "cd /root/carher && nerdctl build --progress=plain -f Dockerfile.carher -t $ACR_VPC/carher:$TAG . 2>&1 | tail -50"
 ```
+
+**⚠️ block_until_ms 必须设够长**（建议 600000 即 10 分钟），构建是同步操作。
 
 **已知问题**：Dockerfile 中 `curl -fsSL https://bun.sh/install | bash` 可能因
 GitHub 下载 503 失败（服务器到 GitHub 不稳定）。解决方法：在服务器上给 Dockerfile
@@ -210,15 +235,17 @@ sshpass -e ssh ... "cd /root/carher && \
   sed -i 's#RUN curl -fsSL https://bun.sh/install | bash#RUN for i in 1 2 3 4 5; do curl -fsSL https://bun.sh/install | bash \&\& break || { echo \"Retry \$i...\"; sleep 10; }; done#' Dockerfile.carher"
 ```
 
-**推送到 ACR**（镜像约 1.2 GiB，推送约 5-10 分钟）：
+**推送到 ACR VPC 内网**（构建服务器在 VPC 内，走内网更快更稳定）：
 
 ```bash
 sshpass -e ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
   -p 1023 root@47.84.112.136 \
-  "nerdctl push $ACR_PUB/carher:$TAG"
+  "nerdctl push $ACR_VPC/carher:$TAG"
 ```
 
-Push 用 Public endpoint，K8s Pod pull 时自动走 VPC endpoint（共享底层存储）。
+**⚠️ block_until_ms 同样设 600000。** push 进度条会持续输出。
+
+构建服务器和 K8s 节点都在同一 VPC，统一使用 VPC endpoint，build/push/pull 全程内网。
 
 ### Phase 1：前置数据准备
 
@@ -297,9 +324,17 @@ ConfigMap 变更不重启 Pod，通过 config-reloader sidecar 热重载（~60s 
 kubectl patch her her-<ID> -n carher --type merge \
   -p '{"spec":{"image":"<TAG>"}}'
 
-# 观察滚动更新（新 Pod → ReadinessGate 1/1 → 老 Pod Terminating）
-kubectl get pod -n carher -l user-id=<ID> -o wide -w
+# 观察滚动更新
+kubectl get pod -n carher -l user-id=<ID> -o wide
 ```
+
+**滚动更新时间线**（典型，零宕机）：
+1. `Init:0/1` — 新 Pod 拉镜像 + init container（~15-30s）
+2. `Running 0/2` → `Running 2/2` — 容器启动（~10s）
+3. `ReadinessGate 0/1` → `1/1` — 飞书 WS 连接就绪（~30-60s）
+4. 旧 Pod `Terminating` — K8s 自动优雅终止（preStop 15s）
+
+总计约 **1-2 分钟**。期间旧 Pod 持续服务，用户无感。
 
 #### 批量灰度
 
@@ -322,16 +357,17 @@ kubectl get her -n carher --no-headers -o custom-columns='NAME:.metadata.name' \
 ```bash
 # 1. Pod 状态
 kubectl get pod -n carher -l user-id=<ID> -o wide
-# 期望：2/2 Running, ReadinessGate 1/1
+# 期望：2/2 Running, ReadinessGate 1/1，且只有一个 Pod（旧 Pod 已消失）
 
 # 2. CRD 状态
 kubectl get her her-<ID> -n carher \
   -o jsonpath='image={.spec.image} phase={.status.phase} ws={.status.feishuWS}'
 # 期望：image=<TAG> phase=Running ws=Connected
 
-# 3. Skills PVC 挂载
-kubectl exec -n carher deploy/carher-<ID> -c carher -- ls /data/.openclaw/skills/
-# 期望：所有 feishu-* skills 目录
+# 3. 镜像分布（确认其他实例未受影响）
+kubectl get her -n carher -o jsonpath='{range .items[*]}{.spec.image}{"\n"}{end}' \
+  | sort | uniq -c | sort -rn
+# 期望：只有目标实例使用新 tag，其余不变
 
 # 4. 容器日志（无 ERROR）
 kubectl logs deploy/carher-<ID> -n carher -c carher --tail=40
@@ -402,8 +438,26 @@ git clone https://x-access-token:${GITHUB_TOKEN}@github.com/guangzhou/CarHer.git
 
 **场景**：`nerdctl build ... 2>&1 | tail -30` 在构建期间无输出，因为 tail 缓冲。
 
-**建议**：后台执行并用 Await 工具等待 exit_code，或去掉 tail 直接看完整输出。
-用 `--progress=plain` 可以看到更详细的构建步骤。
+**建议**：使用 `--progress=plain` 并 `tail -50`。block_until_ms 设为 600000（10 分钟），
+构建和推送都是同步长操作。实测：有缓存 ~3 min 构建 + ~6 min 推送。
+
+### 7. 服务器 git remote URL 中的 token 过期
+
+**场景**：服务器 `/root/carher` 已 clone，但之前设置的 GitHub token 已过期，
+`git fetch` 返回 403。
+
+**解决**：每次操作前都 `git remote set-url origin` 刷新 token：
+```bash
+git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/guangzhou/CarHer.git
+```
+
+### 8. 单实例升级不要动共享 ConfigMap
+
+**场景**：目标版本的 `carher-config.json` 与线上 ConfigMap 有差异（如 contextWindow、
+provider 增删），但这是共享配置，更新它会影响全部实例。
+
+**铁律**：单实例/灰度测试时，**只 patch CRD image**，不动 `carher-base-config` ConfigMap。
+代码 bug fix 通常不依赖特定 config 阈值即可生效。全量升级时再一起更新 ConfigMap。
 
 ### 4. Skills PVC 为空导致功能丢失
 

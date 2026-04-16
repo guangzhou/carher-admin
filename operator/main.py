@@ -348,7 +348,7 @@ def _ensure_pvc(uid: int):
 def _ensure_pod(spec: dict):
     """Create pod for a HerInstance. If exists, delete first."""
     uid = spec["userId"]
-    image_tag = spec.get("image", "skills-two-layer-8045eb9e")
+    image_tag = spec.get("image", "fix-compact-eb348941")
     prefix = spec.get("prefix", "s1")
     pfx = f"{prefix}-" if not prefix.endswith("-") else prefix
 

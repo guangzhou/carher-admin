@@ -2,8 +2,10 @@
 name: carher-admin-deploy
 description: >-
   Deploy carher-admin and carher-operator to Alibaba Cloud K8s.
-  Use when deploying admin panel or operator code changes.
+  Use when deploying admin panel or operator code changes, or asking about
+  K8s image pull rules, ACR VPC registry, zero-downtime deployment strategy.
   Does NOT touch bot instances (carher main program).
+  For LiteLLM proxy operations, see litellm-ops skill.
 ---
 
 # CarHer Admin + Operator 部署
@@ -19,10 +21,21 @@ description: >-
 
 | Endpoint | Usage |
 |----------|-------|
-| `cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com` | Public（push 用此地址） |
-| `cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com` | VPC（K8s pod pull） |
+| `cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com` | **VPC 内网**（构建服务器 push + K8s pod pull，优先使用） |
+| `cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com` | Public（仅当 VPC 不可达时 fallback） |
 
-Push 用 Public，`kubectl set image` 用 **VPC**。二者共享同一底层存储。
+构建服务器（`47.84.112.136`）在 VPC 内，**push 和 pull 都走 VPC 内网**，速度更快、更稳定、不消耗公网带宽。
+
+### K8s 镜像拉取规则（全局适用）
+
+- K8s Pod 的镜像**必须通过 ACR VPC 内网**拉取（`cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com`）
+- **禁止**在 Deployment/Job 中直接引用公网镜像仓库（如 `ghcr.io`、`docker.io`），公网拉取极慢且不可靠
+- 第三方镜像（如 LiteLLM）需先推到 ACR 再引用 VPC 地址：
+  1. 在构建服务器（`47.84.112.136:1023`）上 `nerdctl pull` 公网镜像
+  2. `nerdctl tag` 为 ACR 格式
+  3. 通过 Kaniko Job 或构建服务器 `nerdctl push` 推到 ACR
+  4. 注意：构建服务器对 `her/litellm-proxy` 仓库无 push 权限，需用集群内 Kaniko Job 推送
+- `imagePullPolicy` 推荐设为 `IfNotPresent`（tag 部署）或明确用 digest（不可变引用）
 
 ## kubectl 隧道
 
@@ -53,6 +66,16 @@ SSHPASS='5ip0krF>qazQjcvnqc' sshpass -e ssh \
 
 ---
 
+## 零中断部署规则（全局适用）
+
+- **禁止手动 `kubectl delete pod` 正在服务的 Pod**，必须依赖 Deployment 的滚动更新机制
+- 滚动更新流程：新 Pod 启动 → Readiness 探针通过 → 流量切到新 Pod → 旧 Pod 才被终止
+- 操作变更时使用 `kubectl apply` 或 `kubectl set image`，让 K8s 自动完成滚动
+- 如需确认新 Pod 正常后再继续，使用 `kubectl rollout status` 监控，而不是手动杀旧 Pod
+- 对于启动慢的服务（如 LiteLLM 有 90s initialDelaySeconds），要有耐心等待
+
+---
+
 ## 标准部署流程（默认方式）
 
 Admin/Operator **不走 CI/CD**，GitHub Actions 不构建也不部署。
@@ -72,15 +95,15 @@ sshpass -e ssh -o StrictHostKeyChecking=no -p 1023 root@47.84.112.136 "
 cd /root/carher-admin && git pull
 
 TAG=\"v\$(date +%Y%m%d)-\$(git rev-parse --short HEAD)\"
-ACR_PUB='cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com/her'
+ACR_VPC='cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her'
 
-# 构建 + 推送 admin
-nerdctl build -t \$ACR_PUB/carher-admin:\$TAG . && \
-nerdctl push \$ACR_PUB/carher-admin:\$TAG
+# 构建 + 推送 admin（走 VPC 内网）
+nerdctl build -t \$ACR_VPC/carher-admin:\$TAG . && \
+nerdctl push \$ACR_VPC/carher-admin:\$TAG
 
 # 构建 + 推送 operator（如果有 operator 代码变更）
-nerdctl build -t \$ACR_PUB/carher-operator:\$TAG ./operator-go && \
-nerdctl push \$ACR_PUB/carher-operator:\$TAG
+nerdctl build -t \$ACR_VPC/carher-operator:\$TAG ./operator-go && \
+nerdctl push \$ACR_VPC/carher-operator:\$TAG
 
 echo \"TAG=\$TAG\"
 "
@@ -155,6 +178,12 @@ journalctl -u buildkit -n 20    # 查看日志
 ### ACR 登录过期
 
 ```bash
+# VPC 内网（优先，构建服务器和 K8s 都在 VPC 内）
+nerdctl login --username='liuguoxian@1989403661820148' \
+  --password='cltx!@#456' \
+  cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com
+
+# Public（仅 fallback）
 nerdctl login --username='liuguoxian@1989403661820148' \
   --password='cltx!@#456' \
   cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com
@@ -179,6 +208,8 @@ kubectl apply -f k8s/deployment.yaml
 ```
 
 ### LiteLLM 相关资源
+
+> **LiteLLM 的升级、故障排查、性能调优请使用 `litellm-ops` skill。**
 
 LiteLLM proxy 和 PostgreSQL 有独立的 K8s manifests：
 
@@ -218,10 +249,15 @@ kubectl apply -f k8s/litellm-postgres.yaml
 **原因**：Mac 默认 ARM64 架构，构建的镜像在 K8s（amd64）上会 `ImagePullBackOff`。
 **正确做法**：始终在构建服务器（`47.84.112.136`）上用 `nerdctl build` 构建。
 
-### 2. Public vs VPC Registry
+### 2. ACR Registry Endpoint
 
-**Symptom**: Image push succeeds but pod can't pull.
-**Fix**: Push to public endpoint, set pod image to VPC endpoint. They share the same underlying storage.
+构建服务器在 VPC 内，push 和 pull 统一用 VPC endpoint。
+如果 VPC endpoint push 失败（`nerdctl login` 未配置 VPC），需先登录：
+```bash
+nerdctl login --username='liuguoxian@1989403661820148' \
+  --password='cltx!@#456' \
+  cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com
+```
 
 ### 3. rollout restart Doesn't Update Code
 

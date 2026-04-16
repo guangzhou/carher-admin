@@ -1069,7 +1069,7 @@ def api_update(uid: int, req: HerUpdateRequest):
             k8s_ops.create_pod(
                 uid,
                 prefix=inst.get("prefix", "s1"),
-                image_tag=changes.get("image") or inst.get("image_tag", "skills-two-layer-8045eb9e"),
+                image_tag=changes.get("image") or inst.get("image_tag", "fix-compact-eb348941"),
             )
         if "prefix" in changes:
             _update_legacy_cloudflare(uid, inst.get("prefix", "s1"))

@@ -375,6 +375,11 @@ data:
         - claude-sonnet-4-6: ["openrouter-claude-sonnet-4-6"]
         - gpt-5.4: ["wangsu-gpt-5.4"]
         - gemini-3.1-pro-preview: ["wangsu-gemini-3.1-pro-preview"]
+        # opus-4-7 lives only on cheliantianxia6 (af1ho8mp). If it returns
+        # 400 (e.g. upstream schema drift) silently degrade to opus-4-6 so
+        # bot users never see a hard error. opus-4-6 then has its own
+        # openrouter fallback further below.
+        - anthropic.claude-opus-4-7: ["anthropic.claude-opus-4-6", "openrouter-claude-opus-4-6"]
 
     litellm_settings:
       drop_params: true
@@ -383,11 +388,158 @@ data:
       stream_timeout: 120
       telemetry: false
       return_response_headers: true
+      # Pre-call hook: rewrite legacy thinking.type=enabled / reasoning_effort
+      # payloads to the 2026 adaptive schema for models that require it
+      # (opus-4-7+). Covers both carher's OpenAI chat path and Claude Code /
+      # Cursor's Anthropic-native /v1/messages path. Source:
+      # k8s/litellm-callbacks/opus_47_fix.py -> mounted at /app/opus_47_fix.py
+      # via the litellm-callbacks ConfigMap below.
+      callbacks: ["opus_47_fix.thinking_schema_fix"]
 
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
       store_model_in_db: false
       database_url: os.environ/DATABASE_URL
+---
+# Custom pre-call hook that rewrites legacy Anthropic "thinking" schema to
+# the 2026 adaptive schema for opus-4-7 (and future adaptive-only models).
+# See k8s/litellm-callbacks/opus_47_fix.py for the canonical source — keep
+# the two in sync when editing.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-callbacks
+  namespace: carher
+  labels:
+    app: litellm-proxy
+data:
+  opus_47_fix.py: |
+    """
+    LiteLLM pre-call hook: rewrite old Anthropic "thinking" schema to the 2026
+    "adaptive" schema for models routed to the Wangsu cheliantianxia6 gateway
+    (anthropic.claude-opus-4-7 and any future opus-4-7+ model).
+    """
+    from __future__ import annotations
+
+    from typing import Any, Dict, Optional, Union
+
+    from litellm.integrations.custom_logger import CustomLogger
+    import litellm
+
+
+    NEEDS_ADAPTIVE_MODELS = (
+        "opus-4-7",
+        "opus_4_7",
+        "opus-4.7",
+        "opus_4.7",
+    )
+
+
+    EFFORT_MAP_FROM_OPENAI = {
+        "minimal": "low",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "max": "max",
+    }
+
+
+    def _budget_to_effort(budget_tokens: int) -> str:
+        if budget_tokens <= 8192:
+            return "low"
+        if budget_tokens <= 32768:
+            return "medium"
+        return "high"
+
+
+    def _is_target_model(*model_candidates: Optional[str]) -> bool:
+        for m in model_candidates:
+            if not isinstance(m, str):
+                continue
+            ml = m.lower()
+            if any(tag in ml for tag in NEEDS_ADAPTIVE_MODELS):
+                return True
+        return False
+
+
+    def _rewrite_thinking(data: Dict[str, Any]) -> bool:
+        changed = False
+
+        reasoning_effort = data.pop("reasoning_effort", None)
+        effort_from_re: Optional[str] = None
+        if reasoning_effort is not None:
+            effort_from_re = EFFORT_MAP_FROM_OPENAI.get(
+                str(reasoning_effort).lower(), "medium"
+            )
+
+        thinking = data.get("thinking")
+        effort_from_thinking: Optional[str] = None
+        if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+            raw_budget = thinking.get("budget_tokens")
+            try:
+                budget = int(raw_budget) if raw_budget is not None else 4096
+            except (TypeError, ValueError):
+                budget = 4096
+            effort_from_thinking = _budget_to_effort(budget)
+
+        effort = effort_from_re or effort_from_thinking
+        if effort is None and reasoning_effort is None:
+            return changed
+
+        final_effort = effort or "medium"
+
+        existing_oc = data.get("output_config")
+        oc: Dict[str, Any] = dict(existing_oc) if isinstance(existing_oc, dict) else {}
+        oc.setdefault("effort", final_effort)
+        data["output_config"] = oc
+
+        data["thinking"] = {"type": "adaptive"}
+        changed = True
+
+        return changed
+
+
+    class ThinkingSchemaFix(CustomLogger):
+        """Rewrite thinking schema for models that require the 2026 adaptive API."""
+
+        async def async_pre_call_hook(
+            self,
+            user_api_key_dict: Any,
+            cache: Any,
+            data: Dict[str, Any],
+            call_type: Any,
+        ) -> Optional[Union[Exception, str, Dict[str, Any]]]:
+            try:
+                if not isinstance(data, dict):
+                    return data
+
+                model_group: Optional[str] = None
+                meta = data.get("metadata") or data.get("litellm_metadata") or {}
+                if isinstance(meta, dict):
+                    model_group = meta.get("model_group")
+
+                if not _is_target_model(data.get("model"), model_group):
+                    return data
+
+                if _rewrite_thinking(data):
+                    try:
+                        litellm.print_verbose(
+                            "[opus_47_fix] rewrote thinking schema "
+                            f"model={data.get('model')!r} call_type={call_type!r} "
+                            f"new_thinking={data.get('thinking')} "
+                            f"output_config={data.get('output_config')}"
+                        )
+                    except Exception:
+                        pass
+            except Exception as exc:
+                try:
+                    litellm.print_verbose(f"[opus_47_fix] ERROR: {exc!r}")
+                except Exception:
+                    pass
+            return data
+
+
+    thinking_schema_fix = ThinkingSchemaFix()
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -464,10 +616,19 @@ spec:
               mountPath: /app/config.yaml
               subPath: config.yaml
               readOnly: true
+            # Custom pre-call hook lives next to config.yaml so LiteLLM's
+            # get_instance_fn() resolves it by relative path.
+            - name: callbacks
+              mountPath: /app/opus_47_fix.py
+              subPath: opus_47_fix.py
+              readOnly: true
       volumes:
         - name: config
           configMap:
             name: litellm-config
+        - name: callbacks
+          configMap:
+            name: litellm-callbacks
 ---
 apiVersion: v1
 kind: Service

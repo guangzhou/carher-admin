@@ -47,23 +47,10 @@ var modelMapLitellm = map[string]string{
 // `carher.io/extra-litellm-models=<id1,id2>`, each listed id looked up here
 // gets merged into that instance's generated config — only that instance.
 // Unknown ids are silently skipped so typos don't brick the bot.
-var extraLitellmModelRegistry = map[string]map[string]interface{}{
-	"anthropic.claude-opus-4-7": {
-		"id":            "anthropic.claude-opus-4-7",
-		"name":          "Claude Opus 4.7",
-		"alias":         "opus-4-7",
-		"api":           "openai-completions",
-		"reasoning":     true,
-		"input":         []string{"text", "image"},
-		"contextWindow": 200000,
-		"maxTokens":     128000,
-		"cost": map[string]interface{}{
-			"input":     5,
-			"output":    25,
-			"cacheRead": 0.5,
-		},
-	},
-}
+//
+// Empty for now — `anthropic.claude-opus-4-7` graduated to the default set
+// (see case "litellm" below). Add new opt-in models here to stage rollouts.
+var extraLitellmModelRegistry = map[string]map[string]interface{}{}
 
 // Google Vertex provider routing: prefer Google → Anthropic fallback
 var googleAnthropicRouting = map[string]interface{}{
@@ -134,6 +121,7 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		models["litellm/minimax-m2.7"] = alias("minimax")
 		models["litellm/glm-5"] = alias("glm")
 		models["litellm/gpt-5.3-codex"] = alias("codex")
+		models["litellm/anthropic.claude-opus-4-7"] = alias("opus4.7")
 	case "anthropic":
 		models["anthropic/claude-opus-4-6"] = alias("opus")
 		models["anthropic/claude-sonnet-4-6"] = alias("sonnet")
@@ -223,6 +211,7 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 			{"id": "minimax-m2.7", "name": "MiniMax M2.7", "api": "openai-completions", "input": []string{"text"}, "contextWindow": 200000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 0.5, "output": 1.5}},
 			{"id": "glm-5", "name": "GLM-5", "api": "openai-completions", "input": []string{"text"}, "contextWindow": 128000, "maxTokens": 32000, "cost": map[string]interface{}{"input": 1, "output": 3}},
 			{"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 200000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 3, "output": 15}},
+			{"id": "anthropic.claude-opus-4-7", "name": "Claude Opus 4.7", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 200000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 25, "cacheRead": 0.5}},
 		}
 		providerModels := append(baseModels, extraProviderModels...)
 		cfg["models"] = map[string]interface{}{

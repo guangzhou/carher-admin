@@ -182,13 +182,14 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 	models := defaults["models"].(map[string]interface{})
 
 	expectedAliases := map[string]string{
-		"litellm/claude-opus-4-6":      "opus",
-		"litellm/claude-sonnet-4-6":    "sonnet",
-		"litellm/gpt-5.4":             "gpt",
-		"litellm/gemini-3.1-pro-preview": "gemini",
-		"litellm/minimax-m2.7":        "minimax",
-		"litellm/glm-5":               "glm",
-		"litellm/gpt-5.3-codex":       "codex",
+		"litellm/claude-opus-4-6":             "opus",
+		"litellm/claude-sonnet-4-6":           "sonnet",
+		"litellm/gpt-5.4":                     "gpt",
+		"litellm/gemini-3.1-pro-preview":      "gemini",
+		"litellm/minimax-m2.7":                "minimax",
+		"litellm/glm-5":                       "glm",
+		"litellm/gpt-5.3-codex":               "codex",
+		"litellm/anthropic.claude-opus-4-7":   "opus4.7",
 	}
 	for mid, wantAlias := range expectedAliases {
 		m, ok := models[mid]
@@ -202,8 +203,8 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 		}
 	}
 
-	if len(models) != 7 {
-		t.Errorf("Expected exactly 7 models for litellm, got %d", len(models))
+	if len(models) != 8 {
+		t.Errorf("Expected exactly 8 models for litellm, got %d", len(models))
 		for k := range models {
 			t.Logf("  model: %s", k)
 		}
@@ -216,13 +217,13 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 		}
 	}
 
-	// Verify litellm provider is defined with 7 models
+	// Verify litellm provider is defined with 8 models
 	modelsSection := cfg["models"].(map[string]interface{})
 	providers := modelsSection["providers"].(map[string]interface{})
 	litellmProv := providers["litellm"].(map[string]interface{})
 	provModels := litellmProv["models"].([]interface{})
-	if len(provModels) != 7 {
-		t.Errorf("Expected 7 provider models, got %d", len(provModels))
+	if len(provModels) != 8 {
+		t.Errorf("Expected 8 provider models, got %d", len(provModels))
 	}
 
 	if litellmProv["apiKey"] != "sk-test-key" {
@@ -272,10 +273,25 @@ func TestGenerateOpenclawJSON_NameSuffix(t *testing.T) {
 }
 
 func TestGenerateOpenclawJSON_ExtraLitellmModels(t *testing.T) {
+	// Inject a test-only entry to exercise the opt-in path; restore after.
+	const testID = "test.future-model"
+	extraLitellmModelRegistry[testID] = map[string]interface{}{
+		"id":            testID,
+		"name":          "Test Future Model",
+		"alias":         "future",
+		"api":           "openai-completions",
+		"reasoning":     true,
+		"input":         []string{"text"},
+		"contextWindow": 128000,
+		"maxTokens":     32000,
+		"cost":          map[string]interface{}{"input": 1, "output": 3},
+	}
+	defer delete(extraLitellmModelRegistry, testID)
+
 	input := ConfigInput{
 		ID: 1000, Model: "opus", AppID: "cli_a", AppSecret: "s",
 		Prefix: "s1", Provider: "litellm", LitellmKey: "sk-abc",
-		ExtraLitellmModels: []string{"anthropic.claude-opus-4-7", "nonexistent.model"},
+		ExtraLitellmModels: []string{testID, "nonexistent.model"},
 	}
 	result := GenerateOpenclawJSON(input)
 	var cfg map[string]interface{}
@@ -284,12 +300,12 @@ func TestGenerateOpenclawJSON_ExtraLitellmModels(t *testing.T) {
 	agents := cfg["agents"].(map[string]interface{})
 	defaults := agents["defaults"].(map[string]interface{})
 	aliases := defaults["models"].(map[string]interface{})
-	entry, ok := aliases["litellm/anthropic.claude-opus-4-7"].(map[string]interface{})
+	entry, ok := aliases["litellm/"+testID].(map[string]interface{})
 	if !ok {
-		t.Fatal("Expected litellm/anthropic.claude-opus-4-7 alias entry")
+		t.Fatalf("Expected litellm/%s alias entry", testID)
 	}
-	if entry["alias"] != "opus-4-7" {
-		t.Errorf("Expected alias opus-4-7, got %v", entry["alias"])
+	if entry["alias"] != "future" {
+		t.Errorf("Expected alias 'future', got %v", entry["alias"])
 	}
 	if _, ok := aliases["litellm/nonexistent.model"]; ok {
 		t.Error("Unknown extra model should be silently skipped")
@@ -297,37 +313,41 @@ func TestGenerateOpenclawJSON_ExtraLitellmModels(t *testing.T) {
 
 	providers := cfg["models"].(map[string]interface{})["providers"].(map[string]interface{})
 	provModels := providers["litellm"].(map[string]interface{})["models"].([]interface{})
-	if len(provModels) != 8 {
-		t.Errorf("Expected 8 provider models (7 base + 1 extra), got %d", len(provModels))
+	// 8 default + 1 test extra = 9
+	if len(provModels) != 9 {
+		t.Errorf("Expected 9 provider models (8 default + 1 extra), got %d", len(provModels))
 	}
 	var found bool
 	for _, m := range provModels {
 		mm := m.(map[string]interface{})
-		if mm["id"] == "anthropic.claude-opus-4-7" {
+		if mm["id"] == testID {
 			found = true
 			if _, hasAlias := mm["alias"]; hasAlias {
 				t.Error("alias should not leak into providers.litellm.models entry")
 			}
-			if mm["name"] != "Claude Opus 4.7" {
-				t.Errorf("Expected name 'Claude Opus 4.7', got %v", mm["name"])
-			}
 		}
 	}
 	if !found {
-		t.Error("opus-4-7 not found in providers.litellm.models list")
+		t.Errorf("%s not found in providers.litellm.models list", testID)
 	}
 }
 
 func TestGenerateOpenclawJSON_ExtraLitellmModels_NonLitellmIgnored(t *testing.T) {
+	const testID = "test.nonlitellm"
+	extraLitellmModelRegistry[testID] = map[string]interface{}{
+		"id": testID, "name": "T", "alias": "t", "api": "openai-completions",
+	}
+	defer delete(extraLitellmModelRegistry, testID)
+
 	input := ConfigInput{
 		ID: 1, Model: "opus", AppID: "cli_a", AppSecret: "s", Prefix: "s1",
-		Provider: "wangsu", ExtraLitellmModels: []string{"anthropic.claude-opus-4-7"},
+		Provider: "wangsu", ExtraLitellmModels: []string{testID},
 	}
 	result := GenerateOpenclawJSON(input)
 	var cfg map[string]interface{}
 	json.Unmarshal([]byte(result), &cfg)
 	aliases := cfg["agents"].(map[string]interface{})["defaults"].(map[string]interface{})["models"].(map[string]interface{})
-	if _, ok := aliases["litellm/anthropic.claude-opus-4-7"]; ok {
+	if _, ok := aliases["litellm/"+testID]; ok {
 		t.Error("Extra models should be ignored when provider != litellm")
 	}
 }

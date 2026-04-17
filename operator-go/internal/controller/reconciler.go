@@ -35,6 +35,12 @@ const (
 	// the new pod — guaranteeing zero WebSocket disruption during rollouts.
 	FeishuWSReadinessGate corev1.PodConditionType = "carher.io/feishu-ws-ready"
 
+	// AnnotationExtraLitellmModels opts a specific HerInstance into additional
+	// LiteLLM models beyond the default set. Value: comma-separated model ids
+	// registered in extraLitellmModelRegistry (e.g. "anthropic.claude-opus-4-7").
+	// Only takes effect when spec.provider=litellm. Unknown ids are ignored.
+	AnnotationExtraLitellmModels = "carher.io/extra-litellm-models"
+
 	initScript = `
 const fs = require('fs');
 const cfg = JSON.parse(fs.readFileSync('/config-template/openclaw.json', 'utf8'));
@@ -264,18 +270,21 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 		}
 	}
 
+	extraModels := parseExtraLitellmModels(her.Annotations[AnnotationExtraLitellmModels])
+
 	configJSON := GenerateOpenclawJSON(ConfigInput{
-		ID:               uid,
-		Name:             her.Spec.Name,
-		Model:            her.Spec.Model,
-		AppID:            her.Spec.AppID,
-		AppSecret:        appSecret,
-		Prefix:           her.Spec.Prefix,
-		Owner:            her.Spec.Owner,
-		Provider:         her.Spec.Provider,
-		LitellmKey:       her.Spec.LitellmKey,
-		BotOpenID:        her.Spec.BotOpenID,
-		OAuthRedirectUri: her.Spec.OAuthRedirectUri,
+		ID:                 uid,
+		Name:               her.Spec.Name,
+		Model:              her.Spec.Model,
+		AppID:              her.Spec.AppID,
+		AppSecret:          appSecret,
+		Prefix:             her.Spec.Prefix,
+		Owner:              her.Spec.Owner,
+		Provider:           her.Spec.Provider,
+		LitellmKey:         her.Spec.LitellmKey,
+		BotOpenID:          her.Spec.BotOpenID,
+		OAuthRedirectUri:   her.Spec.OAuthRedirectUri,
+		ExtraLitellmModels: extraModels,
 	})
 
 	hash := fmt.Sprintf("%x", md5.Sum([]byte(configJSON)))[:12]
@@ -705,6 +714,22 @@ func splitOwners(s string) []string {
 		o = strings.TrimSpace(o)
 		if o != "" {
 			result = append(result, o)
+		}
+	}
+	return result
+}
+
+// parseExtraLitellmModels splits a comma-separated annotation value into a
+// clean slice of non-empty trimmed ids. Empty input returns nil.
+func parseExtraLitellmModels(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var result []string
+	for _, m := range strings.Split(s, ",") {
+		m = strings.TrimSpace(m)
+		if m != "" {
+			result = append(result, m)
 		}
 	}
 	return result

@@ -271,6 +271,84 @@ func TestGenerateOpenclawJSON_NameSuffix(t *testing.T) {
 	}
 }
 
+func TestGenerateOpenclawJSON_ExtraLitellmModels(t *testing.T) {
+	input := ConfigInput{
+		ID: 1000, Model: "opus", AppID: "cli_a", AppSecret: "s",
+		Prefix: "s1", Provider: "litellm", LitellmKey: "sk-abc",
+		ExtraLitellmModels: []string{"anthropic.claude-opus-4-7", "nonexistent.model"},
+	}
+	result := GenerateOpenclawJSON(input)
+	var cfg map[string]interface{}
+	json.Unmarshal([]byte(result), &cfg)
+
+	agents := cfg["agents"].(map[string]interface{})
+	defaults := agents["defaults"].(map[string]interface{})
+	aliases := defaults["models"].(map[string]interface{})
+	entry, ok := aliases["litellm/anthropic.claude-opus-4-7"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected litellm/anthropic.claude-opus-4-7 alias entry")
+	}
+	if entry["alias"] != "opus-4-7" {
+		t.Errorf("Expected alias opus-4-7, got %v", entry["alias"])
+	}
+	if _, ok := aliases["litellm/nonexistent.model"]; ok {
+		t.Error("Unknown extra model should be silently skipped")
+	}
+
+	providers := cfg["models"].(map[string]interface{})["providers"].(map[string]interface{})
+	provModels := providers["litellm"].(map[string]interface{})["models"].([]interface{})
+	if len(provModels) != 8 {
+		t.Errorf("Expected 8 provider models (7 base + 1 extra), got %d", len(provModels))
+	}
+	var found bool
+	for _, m := range provModels {
+		mm := m.(map[string]interface{})
+		if mm["id"] == "anthropic.claude-opus-4-7" {
+			found = true
+			if _, hasAlias := mm["alias"]; hasAlias {
+				t.Error("alias should not leak into providers.litellm.models entry")
+			}
+			if mm["name"] != "Claude Opus 4.7" {
+				t.Errorf("Expected name 'Claude Opus 4.7', got %v", mm["name"])
+			}
+		}
+	}
+	if !found {
+		t.Error("opus-4-7 not found in providers.litellm.models list")
+	}
+}
+
+func TestGenerateOpenclawJSON_ExtraLitellmModels_NonLitellmIgnored(t *testing.T) {
+	input := ConfigInput{
+		ID: 1, Model: "opus", AppID: "cli_a", AppSecret: "s", Prefix: "s1",
+		Provider: "wangsu", ExtraLitellmModels: []string{"anthropic.claude-opus-4-7"},
+	}
+	result := GenerateOpenclawJSON(input)
+	var cfg map[string]interface{}
+	json.Unmarshal([]byte(result), &cfg)
+	aliases := cfg["agents"].(map[string]interface{})["defaults"].(map[string]interface{})["models"].(map[string]interface{})
+	if _, ok := aliases["litellm/anthropic.claude-opus-4-7"]; ok {
+		t.Error("Extra models should be ignored when provider != litellm")
+	}
+}
+
+func TestParseExtraLitellmModels(t *testing.T) {
+	cases := map[string]int{
+		"":                                    0,
+		"a":                                   1,
+		"a,b":                                 2,
+		" a , b ,, c ":                        3,
+		"anthropic.claude-opus-4-7":           1,
+		"anthropic.claude-opus-4-7,glm-5":     2,
+	}
+	for in, want := range cases {
+		got := parseExtraLitellmModels(in)
+		if len(got) != want {
+			t.Errorf("parseExtraLitellmModels(%q) = %v (len %d), want len %d", in, got, len(got), want)
+		}
+	}
+}
+
 func TestSplitOwners(t *testing.T) {
 	tests := []struct {
 		input    string

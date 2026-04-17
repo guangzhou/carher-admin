@@ -238,6 +238,35 @@ data:
           cache_creation_input_token_cost: 0.00000125
 
       # ═══════════════════════════════════════════
+      # Provider: Wangsu Anthropic Direct Mode (v2 gateway) — cheliantianxia6
+      # Gateway id: af1ho8mp. Initially opt-in only: restricted to specific
+      # virtual keys via per-key `models` allowlist (e.g. carher-1000 and
+      # claude-code-liuguoxian-50gj). Pricing identical to Opus 4.6.
+      # ═══════════════════════════════════════════
+
+      - model_name: anthropic.claude-opus-4-7
+        litellm_params:
+          model: anthropic/anthropic.claude-opus-4-7
+          api_key: os.environ/WANGSU_DIRECT6_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/af1ho8mp/anthropic
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          cache_control_injection_points:
+            - location: message
+              role: system
+            - location: message
+              role: user
+              index: -1
+        model_info:
+          id: wangsu-direct6/claude-opus-4-7
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
+      # ═══════════════════════════════════════════
       # OpenRouter-only models (no Wangsu equivalent)
       # These only have OpenRouter routing, no primary/fallback split.
       # ═══════════════════════════════════════════

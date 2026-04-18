@@ -1,42 +1,20 @@
 """
-LiteLLM pre-call hook: rewrite old Anthropic "thinking" schema to the 2026
-"adaptive" schema for models routed to the Wangsu cheliantianxia6 gateway
-(anthropic.claude-opus-4-7 and any future opus-4-7+ model).
+LiteLLM pre-call hook — thinking schema rewrite (opus-4-7+).
 
-Why this exists
-===============
-LiteLLM v1.82.6 only knows how to emit the new "adaptive" thinking schema for
-Claude 4.6 models (see litellm/llms/anthropic/common_utils.py _is_claude_4_6_model).
-For every other model it falls back to the legacy:
+Rewrites legacy ``thinking.type=enabled`` / OpenAI-style ``reasoning_effort``
+to the 2026 ``thinking.type=adaptive`` + ``output_config.effort`` schema
+required by the Wangsu cheliantianxia6 gateway for claude-opus-4-7.
 
-    thinking = {"type": "enabled", "budget_tokens": N}
-
-The Wangsu cheliantianxia6 gateway (which hosts opus-4-7) rejects that legacy
-schema with HTTP 400:
-
-    "thinking.type.enabled" is not supported for this model. Use
-    "thinking.type.adaptive" and "output_config.effort" to control
-    thinking behavior.
-
-This hook runs BEFORE LiteLLM's provider-specific transformation, so we can:
-
-  1. Pop the OpenAI-style ``reasoning_effort`` out of ``data`` so LiteLLM
-     does NOT translate it to the legacy ``thinking.type=enabled`` schema.
-  2. Directly rewrite any incoming legacy ``thinking.type=enabled`` payload
-     (Anthropic-native /v1/messages entry used by Claude Code / Cursor) to
-     the new adaptive schema.
-
-Both entry points (carher's OpenAI ``completion`` path and Claude Code's
-``anthropic_messages`` native path) are handled uniformly.
+NOTE: ``stream_options.include_usage`` injection is NOT done here. It must be
+configured via ``general_settings.always_include_stream_usage: true`` in the
+LiteLLM config — that path runs before ``function_setup``, which is the only
+stage that reliably propagates the flag to the upstream call. Injection from a
+pre-call hook happens too late and is silently ignored by some providers.
 
 Registered in LiteLLM via ``litellm_settings.callbacks``:
 
     litellm_settings:
       callbacks: ["opus_47_fix.thinking_schema_fix"]
-
-The module lives next to ``config.yaml`` (i.e. ``/app/opus_47_fix.py`` in the
-litellm-proxy container), so ``litellm.proxy.types_utils.utils.get_instance_fn``
-resolves it relative to the config file.
 """
 from __future__ import annotations
 
@@ -124,7 +102,7 @@ def _rewrite_thinking(data: Dict[str, Any]) -> bool:
 
 
 class ThinkingSchemaFix(CustomLogger):
-    """Rewrite thinking schema for models that require the 2026 adaptive API."""
+    """Pre-call hook: rewrite opus-4-7 thinking params to adaptive schema."""
 
     async def async_pre_call_hook(
         self,

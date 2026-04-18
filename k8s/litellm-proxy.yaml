@@ -400,9 +400,24 @@ data:
       master_key: os.environ/LITELLM_MASTER_KEY
       store_model_in_db: false
       database_url: os.environ/DATABASE_URL
+      # Always auto-inject stream_options.include_usage=true on streaming
+      # requests. Without this, OpenAI-compatible clients that omit the flag
+      # get no usage chunk from streaming responses, and:
+      #   (a) LiteLLM_SpendLogs occasionally loses entries for streamed calls
+      #   (b) CarHer's Feishu footer shows "?/400k" because pi-ai can't read
+      #       prompt/completion tokens from the stream.
+      # LiteLLM applies this BEFORE function_setup + pre_call_hook, so it is
+      # the only reliable place to enforce the flag on every upstream call.
+      always_include_stream_usage: true
 ---
-# Custom pre-call hook that rewrites legacy Anthropic "thinking" schema to
-# the 2026 adaptive schema for opus-4-7 (and future adaptive-only models).
+# Custom pre-call hook: rewrite legacy Anthropic "thinking" schema to the
+# 2026 adaptive schema for opus-4-7+.
+#
+# stream_options.include_usage injection is handled by
+# general_settings.always_include_stream_usage: true above — that path runs
+# before function_setup, which is the only stage that reliably propagates the
+# flag to upstream providers. Injecting from a pre-call hook happens too late.
+#
 # See k8s/litellm-callbacks/opus_47_fix.py for the canonical source — keep
 # the two in sync when editing.
 apiVersion: v1
@@ -415,9 +430,9 @@ metadata:
 data:
   opus_47_fix.py: |
     """
-    LiteLLM pre-call hook: rewrite old Anthropic "thinking" schema to the 2026
-    "adaptive" schema for models routed to the Wangsu cheliantianxia6 gateway
-    (anthropic.claude-opus-4-7 and any future opus-4-7+ model).
+    LiteLLM pre-call hook — thinking schema rewrite (opus-4-7+).
+
+    See k8s/litellm-callbacks/opus_47_fix.py for the canonical source.
     """
     from __future__ import annotations
 
@@ -500,7 +515,7 @@ data:
 
 
     class ThinkingSchemaFix(CustomLogger):
-        """Rewrite thinking schema for models that require the 2026 adaptive API."""
+        """Pre-call hook: rewrite opus-4-7 thinking params to adaptive schema."""
 
         async def async_pre_call_hook(
             self,

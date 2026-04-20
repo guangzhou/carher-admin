@@ -1,12 +1,19 @@
 #!/usr/bin/env node
 /**
- * Her Cost Stats v3 - 跨实例 OpenClaw Token & 成本统计
+ * Her Cost Stats v4 - 跨实例 OpenClaw Token & 成本统计
+ *
+ * v4 修复（2026-04-20）：
+ *   - P0: 价格表支持 openrouter/ 前缀匹配（之前 opus 4.7 走 default 价导致严重高估）
+ *   - P0: 新增 ACP session 扫描（/data/.openclaw/acp 和 ~/.codex/sessions）
+ *   - P1: .jsonl.reset.* 文件单独桶（不再重复计算到主桶）
+ *   - P1: 孤儿 session 分类说明改进，仍单独桶便于对账
+ *   - P2: cron 桶补全 cacheRead/cacheWrite tokens
  *
  * 全功能：
  *   - 自动定位 OpenClaw 数据根目录
- *   - 7 类来源全统计
+ *   - 8 类来源全统计（新增 ACP 和 reset 归档）
  *   - 去除双重计算
- *   - 按 session 类型拆分（私聊/群聊/cron/subagent/dreaming）
+ *   - 按 session 类型拆分（私聊/群聊/cron/subagent/dreaming/acp）
  *   - 输出表格 + JSON（方便跨 her 汇总）
  *
  * 用法：
@@ -68,6 +75,7 @@ const PRICING = {
   'anthropic/claude-opus-4.7':     { i: 15,   o: 75,  cr: 1.50,  cw: 18.75 },
   'anthropic/claude-opus-4.6':     { i: 15,   o: 75,  cr: 1.50,  cw: 18.75 },
   'anthropic/claude-sonnet-4.6':   { i: 3,    o: 15,  cr: 0.30,  cw: 3.75  },
+  'anthropic/claude-sonnet-4-5':   { i: 3,    o: 15,  cr: 0.30,  cw: 3.75  },
   'anthropic/claude-haiku-4-5':    { i: 1,    o: 5,   cr: 0.10,  cw: 1.25  },
   'openai/gpt-5.4':                { i: 1.25, o: 10,  cr: 0.125, cw: 1.25  },
   'openai/gpt-5.3-codex':          { i: 1.25, o: 10,  cr: 0.125, cw: 1.25  },
@@ -80,8 +88,16 @@ const PRICING = {
 
 const FX_RMB = 6.87;
 
+// v4: 支持 openrouter/ 前缀 strip
+function normalizeModel(model) {
+  if (!model || typeof model !== 'string') return 'unknown';
+  // strip openrouter/ prefix
+  return model.replace(/^openrouter\//, '');
+}
+
 function priceFor(model) {
-  return PRICING[model] || PRICING.default;
+  const normalized = normalizeModel(model);
+  return PRICING[normalized] || PRICING.default;
 }
 
 function calcCost(usage, model) {
@@ -117,6 +133,7 @@ function loadSessionIndex() {
 }
 
 // ============== Source 1: Main Sessions（按 session 类型拆分）==============
+// v4: .reset.* 文件单独桶，避免与活动 session 重复计算
 function statMainSessions(sessionIndex, cronSidsInRuns) {
   // 按 kind 分桶
   const buckets = {
@@ -127,7 +144,8 @@ function statMainSessions(sessionIndex, cronSidsInRuns) {
     dreaming: emptyBucket(),
     realtime: emptyBucket(),
     cron_dup: emptyBucket(),  // 重复算的 cron session
-    orphan: emptyBucket(),     // sessions.json 里找不到的孤儿文件
+    orphan: emptyBucket(),     // sessions.json 里找不到的孤儿文件（历史主对话居多）
+    reset_archive: emptyBucket(), // v4: .jsonl.reset.* 历史归档（避免与活跃 session 双算）
   };
 
   if (!fs.existsSync(SESSIONS_DIR)) return buckets;
@@ -139,9 +157,13 @@ function statMainSessions(sessionIndex, cronSidsInRuns) {
   for (const f of files) {
     // 提取 sessionId（去掉 .jsonl 或 .jsonl.reset.xxx）
     const sid = f.replace(/\.jsonl(\.reset\..*)?$/, '');
+    const isResetArchive = /\.jsonl\.reset\./.test(f);
 
     let kind;
-    if (cronSidsInRuns.has(sid)) {
+    if (isResetArchive) {
+      // v4: reset 归档文件单独算，避免与同 sid 的活跃 .jsonl 重复计算 token
+      kind = 'reset_archive';
+    } else if (cronSidsInRuns.has(sid)) {
       // 这个文件本质上是 cron 任务的 session（cron/runs 里也有）
       kind = 'cron_dup';
     } else if (sessionIndex[sid]) {
@@ -225,6 +247,9 @@ function statCronRuns() {
       stats.calls++;
       stats.input  += u.input_tokens  || 0;
       stats.output += u.output_tokens || 0;
+      // v4: cron runs 补全 cache tokens（以前漏统）
+      stats.cacheRead  += u.cache_read_input_tokens  || u.cacheRead  || 0;
+      stats.cacheWrite += u.cache_creation_input_tokens || u.cacheWrite || 0;
       stats.cost += c;
       stats.models[m] = (stats.models[m] || 0) + 1;
 
@@ -237,6 +262,81 @@ function statCronRuns() {
     }
   }
   return { stats, sidsSeen };
+}
+
+// ============== Source 2.5: ACP sessions（Claude Code / Codex）==============
+// v4: 新增 ACP session 扫描
+// ACP harness 的 session 数据可能在：
+//   - /data/.openclaw/acp/**/*.jsonl
+//   - ~/.codex/sessions/**/*.jsonl（Codex）
+//   - ~/.claude/**/*.jsonl（Claude Code）
+function statACPSessions() {
+  const stats = emptyBucket();
+  stats.scannedPaths = [];
+
+  const acpRoots = [
+    path.join(ROOT, 'acp'),
+    path.join(os.homedir(), '.codex', 'sessions'),
+    path.join(os.homedir(), '.claude'),
+  ].filter(p => fs.existsSync(p));
+
+  if (acpRoots.length === 0) return stats;
+
+  function walk(dir) {
+    let files = [];
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const fp = path.join(dir, entry.name);
+        if (entry.isDirectory()) files = files.concat(walk(fp));
+        else if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(fp);
+      }
+    } catch {}
+    return files;
+  }
+
+  for (const root of acpRoots) {
+    const files = walk(root);
+    if (files.length > 0) stats.scannedPaths.push({ root, files: files.length });
+
+    for (const fp of files) {
+      let txt;
+      try { txt = fs.readFileSync(fp, 'utf-8'); } catch { continue; }
+
+      for (const line of txt.split('\n')) {
+        if (!line.includes('"usage"')) continue;
+        let o;
+        try { o = JSON.parse(line); } catch { continue; }
+
+        // 兼容多种 ACP 格式：Claude Code / Codex / OpenClaw wrapper
+        const u = o.message?.usage || o.usage;
+        if (!u) continue;
+
+        const ts = new Date(o.timestamp || o.ts || 0).getTime();
+        if (ts && ts < cutoff) continue;
+
+        const m = o.message?.model || o.model || 'unknown';
+        const input = u.input || u.input_tokens || 0;
+        const output = u.output || u.output_tokens || 0;
+        const cacheRead = u.cacheRead || u.cache_read_input_tokens || 0;
+        const cacheWrite = u.cacheWrite || u.cache_creation_input_tokens || 0;
+
+        let c = 0;
+        if (typeof u.cost === 'number') c = u.cost;
+        else if (u.cost?.total !== undefined) c = u.cost.total;
+        else c = calcCost({ input, output, cacheRead, cacheWrite }, m);
+
+        stats.calls++;
+        stats.input += input;
+        stats.output += output;
+        stats.cacheRead += cacheRead;
+        stats.cacheWrite += cacheWrite;
+        stats.cost += c;
+        stats.models[m] = (stats.models[m] || 0) + 1;
+      }
+    }
+  }
+
+  return stats;
 }
 
 // ============== Source 3: A2A inbound（粗略统计）==============
@@ -311,17 +411,19 @@ function main() {
   const sessionIndex = loadSessionIndex();
   const { stats: cronStats, sidsSeen: cronSids } = statCronRuns();
   const mainBuckets = statMainSessions(sessionIndex, cronSids);
+  const acpStats = statACPSessions(); // v4 新增
   const a2a = statA2A();
   const compaction = statCompaction();
 
   const identity = getHerIdentity();
   const dayDesc = days >= 999 ? 'all-time' : `last ${days} days`;
 
-  // 算总数（去掉 cron_dup 避免重复）
-  let totalCost = cronStats.cost;
-  let totalCalls = cronStats.calls;
+  // 算总数（去掉 cron_dup 避免重复，去掉 reset_archive 避免双算）
+  let totalCost = cronStats.cost + acpStats.cost;
+  let totalCalls = cronStats.calls + acpStats.calls;
   for (const [k, b] of Object.entries(mainBuckets)) {
     if (k === 'cron_dup') continue; // 重复，已在 cronStats 算
+    if (k === 'reset_archive') continue; // v4: reset 归档，和活跃 session 可能是同一批 token
     totalCost += b.cost;
     totalCalls += b.calls;
   }
@@ -349,7 +451,9 @@ function main() {
         realtime: bucketSummary(mainBuckets.realtime),
         orphan_sessions: bucketSummary(mainBuckets.orphan),
         cron: { ...bucketSummary(cronStats), byJob: cronStats.byJob },
+        acp: { ...bucketSummary(acpStats), scannedPaths: acpStats.scannedPaths }, // v4
         cron_double_count_excluded: bucketSummary(mainBuckets.cron_dup),
+        reset_archive_excluded: bucketSummary(mainBuckets.reset_archive), // v4
       },
       a2a_inbound: {
         tasks: a2a.tasks,
@@ -370,7 +474,7 @@ function main() {
   // 表格输出
   const W = 70;
   console.log(`\n${'='.repeat(W)}`);
-  console.log(`📊 OpenClaw Her 成本统计 v3`);
+  console.log(`📊 OpenClaw Her 成本统计 v4`);
   console.log(`   Her:    ${identity}`);
   console.log(`   Root:   ${ROOT}`);
   console.log(`   Range:  ${dayDesc}`);
@@ -386,10 +490,19 @@ function main() {
   printRow('6. Realtime 实时', mainBuckets.realtime);
   printRow('7. 孤儿 session', mainBuckets.orphan);
   printRow('8. Cron 定时任务', cronStats);
+  printRow('9. ACP (Claude/Codex)', acpStats);
   console.log('|---------------------|---------|------------|------------|-------------|');
   console.log(`| **合计**            | ${String(totalCalls).padStart(7)} |    -       | $${totalCost.toFixed(2).padStart(9)} | ¥${totalRMB.toFixed(0).padStart(10)} |`);
 
-  console.log(`\n⚠️  已扣除重复（cron 跑出的 session 也在 main/sessions/）: $${mainBuckets.cron_dup.cost.toFixed(2)} (${mainBuckets.cron_dup.calls} calls)`);
+  console.log(`\n⚠️  已扣除重复:`);
+  console.log(`   - cron 跑出的 session 也在 main/sessions/: $${mainBuckets.cron_dup.cost.toFixed(2)} (${mainBuckets.cron_dup.calls} calls)`);
+  console.log(`   - reset 归档 .jsonl.reset.*（避免与活跃 session 双算）: $${mainBuckets.reset_archive.cost.toFixed(2)} (${mainBuckets.reset_archive.calls} calls)`);
+  if (acpStats.scannedPaths?.length > 0) {
+    console.log(`\n🔧 ACP 扫描路径:`);
+    for (const sp of acpStats.scannedPaths) {
+      console.log(`   - ${sp.root}: ${sp.files} files`);
+    }
+  }
 
   if (a2a.tasks > 0) {
     console.log(`\n🔗 A2A 入站任务: ${a2a.tasks} 个，累计 LLM 跑了 ${(a2a.totalDurMs / 60000).toFixed(1)} 分钟`);

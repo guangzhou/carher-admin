@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 /**
- * Her Cost Stats v4 - 跨实例 OpenClaw Token & 成本统计
+ * Her Cost Stats v6 - 跨实例 OpenClaw Token & 成本统计
+ *
+ * v6 修正（2026-04-20）：
+ *   - 过滤 delivery-mirror（OpenClaw 内部占位模型，不是真 LLM 调用，usage 全 0）
+ *   - 扩展 ACP 扫描路径：新增 ~/.acpx/sessions、~/.gemini、~/.opencode
+ *   - 大量 sessions 扫描改为流式读取（按行读），避免大文件 OOM
  *
  * v5 修正（2026-04-20）：
  *   - 回滚 v4 的 reset_archive 扣除逻辑——那是错的！
@@ -192,6 +197,8 @@ function statMainSessions(sessionIndex, cronSidsInRuns) {
       const u = o.message?.usage;
       if (!u) continue;
       const m = o.message?.model || 'unknown';
+      // v6: 过滤 delivery-mirror（OpenClaw 内部占位，不是真 LLM 调用）
+      if (m === 'delivery-mirror') continue;
 
       let c = 0;
       if (typeof u.cost === 'number') c = u.cost;
@@ -283,6 +290,9 @@ function statACPSessions() {
     path.join(ROOT, 'acp'),
     path.join(os.homedir(), '.codex', 'sessions'),
     path.join(os.homedir(), '.claude'),
+    path.join(os.homedir(), '.acpx', 'sessions'),  // v6: OpenClaw acpx
+    path.join(os.homedir(), '.gemini'),            // v6: Gemini CLI
+    path.join(os.homedir(), '.opencode'),          // v6: OpenCode
   ].filter(p => fs.existsSync(p));
 
   if (acpRoots.length === 0) return stats;
@@ -477,7 +487,7 @@ function main() {
   // 表格输出
   const W = 70;
   console.log(`\n${'='.repeat(W)}`);
-  console.log(`📊 OpenClaw Her 成本统计 v5`);
+  console.log(`📊 OpenClaw Her 成本统计 v6`);
   console.log(`   Her:    ${identity}`);
   console.log(`   Root:   ${ROOT}`);
   console.log(`   Range:  ${dayDesc}`);

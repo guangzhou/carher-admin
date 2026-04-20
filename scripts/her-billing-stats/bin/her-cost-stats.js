@@ -2,6 +2,12 @@
 /**
  * Her Cost Stats v4 - 跨实例 OpenClaw Token & 成本统计
  *
+ * v5 修正（2026-04-20）：
+ *   - 回滚 v4 的 reset_archive 扣除逻辑——那是错的！
+ *   - 真相：.jsonl.reset.<ts> 是 session reset 后的历史归档，和
+ *     active .jsonl 的时间段**不重叠**，都是真实消费，都要算。
+ *   - 持续保留 v4 中 P0+P2 的修正：openrouter 前缀、ACP 扫描、cron cache tokens
+ *
  * v4 修复（2026-04-20）：
  *   - P0: 价格表支持 openrouter/ 前缀匹配（之前 opus 4.7 走 default 价导致严重高估）
  *   - P0: 新增 ACP session 扫描（/data/.openclaw/acp 和 ~/.codex/sessions）
@@ -133,7 +139,9 @@ function loadSessionIndex() {
 }
 
 // ============== Source 1: Main Sessions（按 session 类型拆分）==============
-// v4: .reset.* 文件单独桶，避免与活动 session 重复计算
+// v5: reset 归档和 active 不重叠，都计入相应桶。
+// reset 机制：session reset 时，将 active .jsonl 重命名为 .jsonl.reset.<ts>，
+// 然后创建新的空 active .jsonl 继续。两者时间段不重叠，v4 扣除是错的。
 function statMainSessions(sessionIndex, cronSidsInRuns) {
   // 按 kind 分桶
   const buckets = {
@@ -145,7 +153,6 @@ function statMainSessions(sessionIndex, cronSidsInRuns) {
     realtime: emptyBucket(),
     cron_dup: emptyBucket(),  // 重复算的 cron session
     orphan: emptyBucket(),     // sessions.json 里找不到的孤儿文件（历史主对话居多）
-    reset_archive: emptyBucket(), // v4: .jsonl.reset.* 历史归档（避免与活跃 session 双算）
   };
 
   if (!fs.existsSync(SESSIONS_DIR)) return buckets;
@@ -157,13 +164,9 @@ function statMainSessions(sessionIndex, cronSidsInRuns) {
   for (const f of files) {
     // 提取 sessionId（去掉 .jsonl 或 .jsonl.reset.xxx）
     const sid = f.replace(/\.jsonl(\.reset\..*)?$/, '');
-    const isResetArchive = /\.jsonl\.reset\./.test(f);
 
     let kind;
-    if (isResetArchive) {
-      // v4: reset 归档文件单独算，避免与同 sid 的活跃 .jsonl 重复计算 token
-      kind = 'reset_archive';
-    } else if (cronSidsInRuns.has(sid)) {
+    if (cronSidsInRuns.has(sid)) {
       // 这个文件本质上是 cron 任务的 session（cron/runs 里也有）
       kind = 'cron_dup';
     } else if (sessionIndex[sid]) {
@@ -172,6 +175,8 @@ function statMainSessions(sessionIndex, cronSidsInRuns) {
     } else {
       kind = 'orphan';
     }
+    // v5: reset 文件依然按 sid 查 kind。如果 sessionIndex 里找不到，归 orphan。
+    // 不再独立 reset_archive 桶。
 
     const fp = path.join(SESSIONS_DIR, f);
     let txt;
@@ -418,12 +423,11 @@ function main() {
   const identity = getHerIdentity();
   const dayDesc = days >= 999 ? 'all-time' : `last ${days} days`;
 
-  // 算总数（去掉 cron_dup 避免重复，去掉 reset_archive 避免双算）
+  // 算总数（去掉 cron_dup 避免重复）
   let totalCost = cronStats.cost + acpStats.cost;
   let totalCalls = cronStats.calls + acpStats.calls;
   for (const [k, b] of Object.entries(mainBuckets)) {
     if (k === 'cron_dup') continue; // 重复，已在 cronStats 算
-    if (k === 'reset_archive') continue; // v4: reset 归档，和活跃 session 可能是同一批 token
     totalCost += b.cost;
     totalCalls += b.calls;
   }
@@ -451,9 +455,8 @@ function main() {
         realtime: bucketSummary(mainBuckets.realtime),
         orphan_sessions: bucketSummary(mainBuckets.orphan),
         cron: { ...bucketSummary(cronStats), byJob: cronStats.byJob },
-        acp: { ...bucketSummary(acpStats), scannedPaths: acpStats.scannedPaths }, // v4
+        acp: { ...bucketSummary(acpStats), scannedPaths: acpStats.scannedPaths },
         cron_double_count_excluded: bucketSummary(mainBuckets.cron_dup),
-        reset_archive_excluded: bucketSummary(mainBuckets.reset_archive), // v4
       },
       a2a_inbound: {
         tasks: a2a.tasks,
@@ -474,7 +477,7 @@ function main() {
   // 表格输出
   const W = 70;
   console.log(`\n${'='.repeat(W)}`);
-  console.log(`📊 OpenClaw Her 成本统计 v4`);
+  console.log(`📊 OpenClaw Her 成本统计 v5`);
   console.log(`   Her:    ${identity}`);
   console.log(`   Root:   ${ROOT}`);
   console.log(`   Range:  ${dayDesc}`);
@@ -494,9 +497,7 @@ function main() {
   console.log('|---------------------|---------|------------|------------|-------------|');
   console.log(`| **合计**            | ${String(totalCalls).padStart(7)} |    -       | $${totalCost.toFixed(2).padStart(9)} | ¥${totalRMB.toFixed(0).padStart(10)} |`);
 
-  console.log(`\n⚠️  已扣除重复:`);
-  console.log(`   - cron 跑出的 session 也在 main/sessions/: $${mainBuckets.cron_dup.cost.toFixed(2)} (${mainBuckets.cron_dup.calls} calls)`);
-  console.log(`   - reset 归档 .jsonl.reset.*（避免与活跃 session 双算）: $${mainBuckets.reset_archive.cost.toFixed(2)} (${mainBuckets.reset_archive.calls} calls)`);
+  console.log(`\n⚠️  已扣除重复: cron 跑出的 session 也在 main/sessions/: $${mainBuckets.cron_dup.cost.toFixed(2)} (${mainBuckets.cron_dup.calls} calls)`);
   if (acpStats.scannedPaths?.length > 0) {
     console.log(`\n🔧 ACP 扫描路径:`);
     for (const sp of acpStats.scannedPaths) {

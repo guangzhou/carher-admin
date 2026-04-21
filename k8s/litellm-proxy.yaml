@@ -122,26 +122,35 @@ data:
       # standard `cache_control` field + anthropic-beta headers (2026-04-21).
       # ═══════════════════════════════════════════
 
-      # WORKAROUND: use `custom_openai/` instead of `openrouter/` to bypass a
-      # LiteLLM v1.82.x bug where the openrouter provider's /v1/responses
-      # handler fails to strip the `openrouter/` prefix before sending the
-      # request to OpenRouter, causing HTTP 400 "is not a valid model ID".
-      # The /v1/chat/completions path is unaffected, but CarHer bot and
-      # some OpenAI SDKs also use /v1/responses. By routing through the
-      # generic custom_openai provider + explicit api_base, LiteLLM passes
-      # the upstream model id (`anthropic/claude-opus-4.6`) through cleanly.
-      # OpenRouter still resolves it correctly and prompt caching continues
-      # to work because LiteLLM pre-call injection of `cache_control` and
-      # `anthropic-beta` headers is provider-agnostic.
+      # NOTE: we intentionally use the `openrouter/` provider here (not
+      # `custom_openai/`) because LiteLLM's cache_control_injection_points
+      # only works for Anthropic-aware providers (anthropic, openrouter).
+      # The `custom_openai/` path does NOT auto-inject cache_control
+      # (verified 2026-04-22), so cache would be effectively disabled.
+      #
+      # Known tradeoff: LiteLLM v1.82.x has a bug in the openrouter provider's
+      # /v1/responses handler where it forwards the `openrouter/` prefix to
+      # OpenRouter, causing HTTP 400. For /v1/chat/completions (the common
+      # bot path) this works correctly with full cache injection.
+      # The 400 on /v1/responses is absorbed by the key-level fallback to
+      # anthropic.claude-opus-4-X (Wangsu Direct5/6), which also has cache.
+      #
+      # `extra_body.provider.order` forces OpenRouter to route to Anthropic
+      # first, Google Vertex second, and never Amazon Bedrock — because
+      # Bedrock does not support Anthropic prompt cache via OpenRouter
+      # (verified 2026-04-22 across opus-4.6, opus-4.7).
       - model_name: openrouter-claude-opus-4-6
         litellm_params:
-          model: custom_openai/anthropic/claude-opus-4.6
-          api_base: https://openrouter.ai/api/v1
+          model: openrouter/anthropic/claude-opus-4.6
           api_key: os.environ/OPENROUTER_API_KEY
           input_cost_per_token: 0.000005
           output_cost_per_token: 0.000025
           cache_read_input_token_cost: 0.0000005
           cache_creation_input_token_cost: 0.00000625
+          extra_body:
+            provider:
+              order: ["anthropic", "google-vertex"]
+              allow_fallbacks: false
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:
@@ -163,16 +172,21 @@ data:
           cache_read_input_token_cost: 0.0000005
           cache_creation_input_token_cost: 0.00000625
 
-      # See custom_openai workaround comment above openrouter-claude-opus-4-6.
+      # Same openrouter/ + provider.order pattern as opus-4-6. sonnet-4.6
+      # defaults to Google Vertex (which supports cache), so pinning is
+      # technically optional; we pin for consistency with the opus family.
       - model_name: openrouter-claude-sonnet-4-6
         litellm_params:
-          model: custom_openai/anthropic/claude-sonnet-4.6
-          api_base: https://openrouter.ai/api/v1
+          model: openrouter/anthropic/claude-sonnet-4.6
           api_key: os.environ/OPENROUTER_API_KEY
           input_cost_per_token: 0.000003
           output_cost_per_token: 0.000015
           cache_read_input_token_cost: 0.0000003
           cache_creation_input_token_cost: 0.00000375
+          extra_body:
+            provider:
+              order: ["anthropic", "google-vertex"]
+              allow_fallbacks: false
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:
@@ -194,16 +208,19 @@ data:
           cache_read_input_token_cost: 0.0000003
           cache_creation_input_token_cost: 0.00000375
 
-      # See custom_openai workaround comment above openrouter-claude-opus-4-6.
+      # Same openrouter/ + provider.order pattern as opus-4-6.
       - model_name: openrouter-claude-opus-4-7
         litellm_params:
-          model: custom_openai/anthropic/claude-opus-4.7
-          api_base: https://openrouter.ai/api/v1
+          model: openrouter/anthropic/claude-opus-4.7
           api_key: os.environ/OPENROUTER_API_KEY
           input_cost_per_token: 0.000005
           output_cost_per_token: 0.000025
           cache_read_input_token_cost: 0.0000005
           cache_creation_input_token_cost: 0.00000625
+          extra_body:
+            provider:
+              order: ["anthropic", "google-vertex"]
+              allow_fallbacks: false
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:

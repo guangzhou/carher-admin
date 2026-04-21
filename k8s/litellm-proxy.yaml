@@ -114,7 +114,12 @@ data:
           output_cost_per_token: 0.000012
 
       # ═══════════════════════════════════════════
-      # Fallback: OpenRouter for Sonnet / Opus
+      # OpenRouter OpenAI-compat: Claude via /chat/completions
+      # Used by CarHer bot (OpenAI-compat client) for:
+      #   - fallback of claude-opus-4-6 / claude-sonnet-4-6 (Wangsu-primary)
+      #   - primary of "openrouter-primary" cohort (e.g. even-ID carher users)
+      # OpenRouter verified to support Anthropic prompt caching via the
+      # standard `cache_control` field + anthropic-beta headers (2026-04-21).
       # ═══════════════════════════════════════════
 
       - model_name: openrouter-claude-opus-4-6
@@ -125,6 +130,20 @@ data:
           output_cost_per_token: 0.000025
           cache_read_input_token_cost: 0.0000005
           cache_creation_input_token_cost: 0.00000625
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
         model_info:
           id: openrouter/claude-opus-4-6
           input_cost_per_token: 0.000005
@@ -140,12 +159,55 @@ data:
           output_cost_per_token: 0.000015
           cache_read_input_token_cost: 0.0000003
           cache_creation_input_token_cost: 0.00000375
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
         model_info:
           id: openrouter/claude-sonnet-4-6
           input_cost_per_token: 0.000003
           output_cost_per_token: 0.000015
           cache_read_input_token_cost: 0.0000003
           cache_creation_input_token_cost: 0.00000375
+
+      - model_name: openrouter-claude-opus-4-7
+        litellm_params:
+          model: openrouter/anthropic/claude-opus-4.7
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: openrouter/claude-opus-4-7
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
 
       # ═══════════════════════════════════════════
       # Fallback: Wangsu (网宿) OpenAI compat for GPT / Gemini
@@ -315,6 +377,106 @@ data:
           cache_creation_input_token_cost: 0.00000625
 
       # ═══════════════════════════════════════════
+      # Provider: OpenRouter Anthropic-native (/v1/messages passthrough)
+      # For Claude Code / Cursor users that call LiteLLM's Anthropic-native
+      # /v1/messages endpoint but want OpenRouter as the primary.
+      # OpenRouter exposes an Anthropic-compatible /api/v1/messages endpoint
+      # (verified 2026-04-21), so LiteLLM can passthrough with the `anthropic`
+      # provider + api_base override, preserving cache_control / tool_use /
+      # thinking fields with zero protocol-conversion loss.
+      # ═══════════════════════════════════════════
+
+      - model_name: anthropic.openrouter.claude-sonnet-4-6
+        litellm_params:
+          model: anthropic/anthropic/claude-sonnet-4.6
+          api_base: https://openrouter.ai/api
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: openrouter-anthropic/claude-sonnet-4-6
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
+
+      - model_name: anthropic.openrouter.claude-opus-4-6
+        litellm_params:
+          model: anthropic/anthropic/claude-opus-4.6
+          api_base: https://openrouter.ai/api
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: openrouter-anthropic/claude-opus-4-6
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
+      - model_name: anthropic.openrouter.claude-opus-4-7
+        litellm_params:
+          model: anthropic/anthropic/claude-opus-4.7
+          api_base: https://openrouter.ai/api
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: openrouter-anthropic/claude-opus-4-7
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
+      # ═══════════════════════════════════════════
       # OpenRouter-only models (no Wangsu equivalent)
       # These only have OpenRouter routing, no primary/fallback split.
       # ═══════════════════════════════════════════
@@ -382,6 +544,7 @@ data:
 
     router_settings:
       fallbacks:
+        # ── Wangsu-primary Claude (OpenAI-compat, bot default) ──
         - claude-opus-4-6: ["openrouter-claude-opus-4-6"]
         - claude-sonnet-4-6: ["openrouter-claude-sonnet-4-6"]
         - gpt-5.4: ["wangsu-gpt-5.4"]
@@ -391,6 +554,15 @@ data:
         # bot users never see a hard error. opus-4-6 then has its own
         # openrouter fallback further below.
         - anthropic.claude-opus-4-7: ["anthropic.claude-opus-4-6", "openrouter-claude-opus-4-6"]
+        # ── OpenRouter-primary Claude (OpenAI-compat, opt-in cohort) ──
+        # Symmetric fallback to Wangsu Direct5 when OpenRouter fails.
+        - openrouter-claude-opus-4-7: ["anthropic.claude-opus-4-7"]
+        - openrouter-claude-opus-4-6: ["anthropic.claude-opus-4-6"]
+        - openrouter-claude-sonnet-4-6: ["anthropic.claude-sonnet-4-6"]
+        # ── OpenRouter-primary Claude (Anthropic-native, Claude Code cohort) ──
+        - anthropic.openrouter.claude-opus-4-7: ["anthropic.claude-opus-4-7"]
+        - anthropic.openrouter.claude-opus-4-6: ["anthropic.claude-opus-4-6"]
+        - anthropic.openrouter.claude-sonnet-4-6: ["anthropic.claude-sonnet-4-6"]
 
     litellm_settings:
       drop_params: true

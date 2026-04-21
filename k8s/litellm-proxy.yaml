@@ -360,14 +360,25 @@ data:
       # ═══════════════════════════════════════════
 
       # ── BGE-M3 via OpenRouter (memory search) ──
+      # Official OpenRouter pricing (confirmed 2026-04-21):
+      # https://openrouter.ai/baai/bge-m3/pricing
+      #   Input:  $0.01 per 1M tokens  (= 1e-8 per token)
+      #   Output: $0.00
+      # Both litellm_params and model_info carry the pricing to match the
+      # double-write pattern used by other models in this config (LiteLLM
+      # v1.82.x register_model() reliability: per-deployment cost path).
       - model_name: BAAI/bge-m3
         litellm_params:
           model: openrouter/BAAI/bge-m3
           api_key: os.environ/OPENROUTER_API_KEY
           api_base: https://openrouter.ai/api/v1
+          input_cost_per_token: 0.00000001
+          output_cost_per_token: 0
         model_info:
           id: openrouter/bge-m3
           mode: embedding
+          input_cost_per_token: 0.00000001
+          output_cost_per_token: 0
 
     router_settings:
       fallbacks:
@@ -564,7 +575,18 @@ metadata:
   labels:
     app: litellm-proxy
 spec:
-  replicas: 1
+  replicas: 2
+  # Zero-disruption rolling updates: always keep all existing replicas
+  # Ready while surging up one new pod, so the Service never drops below
+  # the desired replica count. Combined with the container's preStop +
+  # terminationGracePeriodSeconds, in-flight streaming requests on a pod
+  # being rotated get up to 60s to drain while new traffic is steered to
+  # the other Ready pod.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: litellm-proxy
@@ -573,6 +595,10 @@ spec:
       labels:
         app: litellm-proxy
     spec:
+      # Give in-flight streaming requests time to complete when a pod is
+      # being rotated out during a rolling update. Default is 30s which
+      # can cut off streaming chat completions mid-response.
+      terminationGracePeriodSeconds: 60
       imagePullSecrets:
         - name: acr-vpc-secret
       initContainers:
@@ -626,6 +652,15 @@ spec:
             periodSeconds: 15
             failureThreshold: 5
             timeoutSeconds: 15
+          # preStop sleep gives kube-proxy time to drop this pod's IP from
+          # the Service endpoint set before uvicorn starts shutting down,
+          # so new requests stop arriving before SIGTERM is delivered.
+          # With terminationGracePeriodSeconds=60, the effective shutdown
+          # budget is ~15s no-new-traffic + ~45s graceful drain.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 15"]
           volumeMounts:
             - name: config
               mountPath: /app/config.yaml

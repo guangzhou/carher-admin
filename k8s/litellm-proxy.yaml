@@ -122,9 +122,21 @@ data:
       # standard `cache_control` field + anthropic-beta headers (2026-04-21).
       # ═══════════════════════════════════════════
 
+      # WORKAROUND: use `custom_openai/` instead of `openrouter/` to bypass a
+      # LiteLLM v1.82.x bug where the openrouter provider's /v1/responses
+      # handler fails to strip the `openrouter/` prefix before sending the
+      # request to OpenRouter, causing HTTP 400 "is not a valid model ID".
+      # The /v1/chat/completions path is unaffected, but CarHer bot and
+      # some OpenAI SDKs also use /v1/responses. By routing through the
+      # generic custom_openai provider + explicit api_base, LiteLLM passes
+      # the upstream model id (`anthropic/claude-opus-4.6`) through cleanly.
+      # OpenRouter still resolves it correctly and prompt caching continues
+      # to work because LiteLLM pre-call injection of `cache_control` and
+      # `anthropic-beta` headers is provider-agnostic.
       - model_name: openrouter-claude-opus-4-6
         litellm_params:
-          model: openrouter/anthropic/claude-opus-4.6
+          model: custom_openai/anthropic/claude-opus-4.6
+          api_base: https://openrouter.ai/api/v1
           api_key: os.environ/OPENROUTER_API_KEY
           input_cost_per_token: 0.000005
           output_cost_per_token: 0.000025
@@ -151,9 +163,11 @@ data:
           cache_read_input_token_cost: 0.0000005
           cache_creation_input_token_cost: 0.00000625
 
+      # See custom_openai workaround comment above openrouter-claude-opus-4-6.
       - model_name: openrouter-claude-sonnet-4-6
         litellm_params:
-          model: openrouter/anthropic/claude-sonnet-4.6
+          model: custom_openai/anthropic/claude-sonnet-4.6
+          api_base: https://openrouter.ai/api/v1
           api_key: os.environ/OPENROUTER_API_KEY
           input_cost_per_token: 0.000003
           output_cost_per_token: 0.000015
@@ -180,9 +194,11 @@ data:
           cache_read_input_token_cost: 0.0000003
           cache_creation_input_token_cost: 0.00000375
 
+      # See custom_openai workaround comment above openrouter-claude-opus-4-6.
       - model_name: openrouter-claude-opus-4-7
         litellm_params:
-          model: openrouter/anthropic/claude-opus-4.7
+          model: custom_openai/anthropic/claude-opus-4.7
+          api_base: https://openrouter.ai/api/v1
           api_key: os.environ/OPENROUTER_API_KEY
           input_cost_per_token: 0.000005
           output_cost_per_token: 0.000025

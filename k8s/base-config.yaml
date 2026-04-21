@@ -21,9 +21,16 @@ data:
           compaction: { mode: "safeguard", reserveTokens: 100000 },
           memorySearch: {
             provider: "openai",
+            // Route all memorySearch / embedding calls through the internal
+            // LiteLLM Proxy so every call lands in LiteLLM_SpendLogs and
+            // appears in the /ui + her-spend-stats dashboards.
+            // Per-instance virtual key is injected by the Operator as
+            // LITELLM_API_KEY env var; base-config substitutes it at pod
+            // start. See k8s/litellm-proxy.yaml for the upstream mapping
+            // (currently openrouter/BAAI/bge-m3, priced at $0.01/1M tokens).
             remote: {
-              baseUrl: "https://openrouter.ai/api/v1/",
-              apiKey: "${OPENROUTER_API_KEY}",
+              baseUrl: "http://litellm-proxy.carher.svc:4000",
+              apiKey: "${LITELLM_API_KEY}",
             },
             model: "BAAI/bge-m3",
             sources: ["memory", "sessions"],

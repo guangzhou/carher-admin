@@ -22,6 +22,7 @@ export const PROVIDER_MODELS = {
     { value: "gpt", label: "GPT-5.4" },
     { value: "sonnet", label: "Claude Sonnet 4.6" },
     { value: "opus", label: "Claude Opus 4.6" },
+    { value: "opus4.7", label: "Claude Opus 4.7" },
     { value: "gemini", label: "Gemini 3.1 Pro" },
     { value: "minimax", label: "MiniMax M2.7" },
     { value: "glm", label: "GLM-5" },

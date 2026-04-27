@@ -24,14 +24,14 @@ description: >-
 | `cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com` | **VPC 内网**（构建服务器 push + K8s pod pull，优先使用） |
 | `cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com` | Public（仅当 VPC 不可达时 fallback） |
 
-构建服务器（`47.84.112.136`）在 VPC 内，**push 和 pull 都走 VPC 内网**，速度更快、更稳定、不消耗公网带宽。
+构建服务器在 VPC 内，**push 和 pull 都走 VPC 内网**，速度更快、更稳定、不消耗公网带宽。
 
 ### K8s 镜像拉取规则（全局适用）
 
 - K8s Pod 的镜像**必须通过 ACR VPC 内网**拉取（`cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com`）
 - **禁止**在 Deployment/Job 中直接引用公网镜像仓库（如 `ghcr.io`、`docker.io`），公网拉取极慢且不可靠
 - 第三方镜像（如 LiteLLM）需先推到 ACR 再引用 VPC 地址：
-  1. 在构建服务器（`47.84.112.136:1023`）上 `nerdctl pull` 公网镜像
+  1. 在构建服务器上 `nerdctl pull` 公网镜像
   2. `nerdctl tag` 为 ACR 格式
   3. 通过 Kaniko Job 或构建服务器 `nerdctl push` 推到 ACR
   4. 注意：构建服务器对 `her/litellm-proxy` 仓库无 push 权限，需用集群内 Kaniko Job 推送
@@ -39,29 +39,28 @@ description: >-
 
 ## kubectl 隧道
 
-本地 kubectl 通过 SSH 隧道连接阿里云 K8s API Server：
+按 `k8s-via-bastion` skill 启动 proxy（已在跑会被 pgrep 跳过）：
 
 ```bash
-SSHPASS='5ip0krF>qazQjcvnqc' sshpass -e ssh \
-  -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
-  -p 1023 -L 16443:172.16.1.163:6443 -N root@47.84.112.136 &
+pgrep -af 'jms.*proxy laoyang' >/dev/null \
+  || nohup scripts/jms proxy laoyang 16443 172.16.1.163 6443 > /tmp/jms-proxy.log 2>&1 &
+sleep 2 && kubectl get nodes
 ```
 
-验证连通性：`kubectl get nodes`
-
-如果 kubectl 报 `connection refused`，重新执行上面的命令重建隧道。
+如果 `kubectl get nodes` 报 `connection refused`，先 `pkill -f 'jms.*proxy laoyang'` 清理残留再启动。
 
 ---
 
 ## 构建服务器
 
-镜像构建在 K8s 跳板机上完成（`47.84.112.136:1023`），**不在本地 Mac 构建**。
+镜像构建在 K8s 跳板机（`k8s-work-227`）上完成，**不在本地 Mac 构建**。
 
 | 项目 | 值 |
 |------|---|
-| SSH | `sshpass -e ssh -p 1023 root@47.84.112.136` |
-| 构建工具 | `nerdctl` + `buildkitd`（已安装为 systemd service） |
-| 仓库路径 | `/root/carher-admin` |
+| 入口 | `scripts/jms ssh k8s-work-227 'cmd...'`（走堡垒机，详见 `k8s-via-bastion` skill） |
+| 备用机 | `k8s-work-226`（仅 admin 仓库，无 carher 主仓） |
+| 构建工具 | `nerdctl`（containerd 内建 BuildKit，无独立 buildkitd 服务） |
+| 仓库路径 | `/root/carher-admin`（admin 主机：226/227 都有） |
 | ACR 凭证 | 已 `nerdctl login`（存于 `/root/.docker/config.json`） |
 
 ---
@@ -86,27 +85,24 @@ Admin/Operator **不走 CI/CD**，GitHub Actions 不构建也不部署。
 git add -A && git commit -m "your message" && git push
 ```
 
-### Step 2：SSH 到服务器构建并推送
+### Step 2：通过堡垒机到构建服务器构建并推送
 
 ```bash
-export SSHPASS='5ip0krF>qazQjcvnqc'
-
-sshpass -e ssh -o StrictHostKeyChecking=no -p 1023 root@47.84.112.136 "
+scripts/jms ssh k8s-work-227 'bash -s' <<'EOF'
+set -e
 cd /root/carher-admin && git pull
 
-TAG=\"v\$(date +%Y%m%d)-\$(git rev-parse --short HEAD)\"
+TAG="v$(date +%Y%m%d)-$(git rev-parse --short HEAD)"
 ACR_VPC='cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her'
 
-# 构建 + 推送 admin（走 VPC 内网）
-nerdctl build -t \$ACR_VPC/carher-admin:\$TAG . && \
-nerdctl push \$ACR_VPC/carher-admin:\$TAG
+nerdctl build -t $ACR_VPC/carher-admin:$TAG . && \
+  nerdctl push $ACR_VPC/carher-admin:$TAG
 
-# 构建 + 推送 operator（如果有 operator 代码变更）
-nerdctl build -t \$ACR_VPC/carher-operator:\$TAG ./operator-go && \
-nerdctl push \$ACR_VPC/carher-operator:\$TAG
+nerdctl build -t $ACR_VPC/carher-operator:$TAG ./operator-go && \
+  nerdctl push $ACR_VPC/carher-operator:$TAG
 
-echo \"TAG=\$TAG\"
-"
+echo "TAG=$TAG"
+EOF
 ```
 
 ### Step 3：kubectl 部署
@@ -163,36 +159,30 @@ kubectl logs -n carher deploy/carher-operator --tail=30
 
 ## 构建服务器维护
 
-### buildkitd
+> 进入构建服务器：`scripts/jms ssh k8s-work-227`（详见 `k8s-via-bastion` skill）
 
-buildkitd 作为 systemd service 运行，开机自启：
+### nerdctl / containerd
+
+`nerdctl` 直接调用 containerd 内建的 BuildKit，**无需独立 buildkitd systemd 服务**。
+若构建报错检查 containerd：
 
 ```bash
-systemctl status buildkit       # 检查状态
-systemctl restart buildkit      # 重启
-journalctl -u buildkit -n 20    # 查看日志
+scripts/jms ssh k8s-work-227 'systemctl status containerd | head -5'
 ```
-
-如果 `nerdctl build` 报 `buildctl not found` 或 socket 错误，重启 buildkit。
 
 ### ACR 登录过期
 
 ```bash
-# VPC 内网（优先，构建服务器和 K8s 都在 VPC 内）
-nerdctl login --username='liuguoxian@1989403661820148' \
-  --password='cltx!@#456' \
-  cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com
-
-# Public（仅 fallback）
-nerdctl login --username='liuguoxian@1989403661820148' \
-  --password='cltx!@#456' \
-  cltx-her-ck-registry.ap-southeast-1.cr.aliyuncs.com
+scripts/jms ssh k8s-work-227 "nerdctl login --username='liuguoxian@1989403661820148' \
+  --password='cltx!@#456' cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com"
 ```
+
+公网 fallback 同样命令把 `-vpc` 后缀去掉即可。
 
 ### 仓库更新
 
 ```bash
-cd /root/carher-admin && git pull
+scripts/jms ssh k8s-work-227 'cd /root/carher-admin && git pull'
 ```
 
 ---
@@ -247,16 +237,15 @@ kubectl apply -f k8s/litellm-postgres.yaml
 ### 1. 禁止本地 Mac 构建
 
 **原因**：Mac 默认 ARM64 架构，构建的镜像在 K8s（amd64）上会 `ImagePullBackOff`。
-**正确做法**：始终在构建服务器（`47.84.112.136`）上用 `nerdctl build` 构建。
+**正确做法**：通过堡垒机到构建服务器 `k8s-work-227` 上 `nerdctl build`。
 
 ### 2. ACR Registry Endpoint
 
 构建服务器在 VPC 内，push 和 pull 统一用 VPC endpoint。
 如果 VPC endpoint push 失败（`nerdctl login` 未配置 VPC），需先登录：
 ```bash
-nerdctl login --username='liuguoxian@1989403661820148' \
-  --password='cltx!@#456' \
-  cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com
+scripts/jms ssh k8s-work-227 "nerdctl login --username='liuguoxian@1989403661820148' \
+  --password='cltx!@#456' cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com"
 ```
 
 ### 3. rollout restart Doesn't Update Code
@@ -284,11 +273,11 @@ If this node is unavailable, admin pod cannot be scheduled.
 
 | Symptom | Check | Fix |
 |---------|-------|-----|
-| `buildctl` not found on server | `systemctl status buildkit` | `systemctl restart buildkit` |
+| `nerdctl: cannot connect to ...` | containerd 没起 | `scripts/jms ssh k8s-work-227 systemctl restart containerd` |
 | ACR push 401 | `nerdctl login` 过期 | 重新 `nerdctl login`（见上方凭证） |
 | ImagePullBackOff | `kubectl describe pod` → image arch | 确认在服务器上构建，不是本地 Mac |
 | CrashLoopBackOff | `kubectl logs <pod>` | Fix config, rebuild |
-| Connection refused | SSH tunnel down | Re-run SSH tunnel command |
+| Connection refused on 16443 | jms proxy 未启动或挂了 | 见 `k8s-via-bastion` skill 的 proxy 启动步骤 |
 | Pod stuck Pending | `kubectl describe pod` → node affinity | Check nodeSelector and node status |
 | Operator not reconciling | `kubectl logs deploy/carher-operator` | Check RBAC, CRD version |
 | OOMKilled | `kubectl describe pod` → Last State | Admin: 256Mi-512Mi, Operator: 128Mi-512Mi |

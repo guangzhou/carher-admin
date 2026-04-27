@@ -187,23 +187,18 @@ git diff <ONLINE_COMMIT>..<TARGET_COMMIT> -- docs/her/her-feishu-bot-enterprise-
 
 ### Phase 0：在服务器上构建新镜像
 
-carher 主程序仓库在服务器 `/root/carher`。如果不存在需要先 clone。
+carher 主程序仓库在构建服务器 **`k8s-work-227`** 的 `/root/carher`（详见 `k8s-via-bastion` skill）。
+如果不存在需要先 clone。
 
 ```bash
 GITHUB_TOKEN=$(kubectl get secret carher-admin-secrets -n carher \
   -o jsonpath='{.data.github-token}' | base64 -d)
 
-export SSHPASS='5ip0krF>qazQjcvnqc'
-
-# 首次 clone（如已存在则跳过）
-sshpass -e ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
-  -p 1023 root@47.84.112.136 \
+scripts/jms ssh k8s-work-227 \
   "test -d /root/carher || git clone --branch <TARGET_BRANCH> \
    https://x-access-token:${GITHUB_TOKEN}@github.com/guangzhou/CarHer.git /root/carher"
 
-# 更新 remote URL（token 会过期）+ fetch 目标分支 + checkout
-sshpass -e ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
-  -p 1023 root@47.84.112.136 \
+scripts/jms ssh k8s-work-227 \
   "cd /root/carher && \
    git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/guangzhou/CarHer.git && \
    git fetch origin <TARGET_BRANCH> && \
@@ -215,32 +210,27 @@ sshpass -e ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
 - 无缓存（首次或 Dockerfile 改动）约 **5-10 分钟**（pnpm install + build）
 
 ```bash
-# tag 格式：<描述>-<commit8>
 TAG="<branch-slug>-$(echo <TARGET_COMMIT> | cut -c1-8)"
 ACR_VPC="cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her"
 
-sshpass -e ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
-  -p 1023 root@47.84.112.136 \
+scripts/jms ssh k8s-work-227 \
   "cd /root/carher && nerdctl build --progress=plain -f Dockerfile.carher -t $ACR_VPC/carher:$TAG . 2>&1 | tail -50"
 ```
 
 **⚠️ block_until_ms 必须设够长**（建议 600000 即 10 分钟），构建是同步操作。
 
 **已知问题**：Dockerfile 中 `curl -fsSL https://bun.sh/install | bash` 可能因
-GitHub 下载 503 失败（服务器到 GitHub 不稳定）。解决方法：在服务器上给 Dockerfile
-的 bun install 行加重试：
+GitHub 下载 503 失败。解决方法：在服务器上给 Dockerfile 的 bun install 行加重试：
 
 ```bash
-sshpass -e ssh ... "cd /root/carher && \
+scripts/jms ssh k8s-work-227 "cd /root/carher && \
   sed -i 's#RUN curl -fsSL https://bun.sh/install | bash#RUN for i in 1 2 3 4 5; do curl -fsSL https://bun.sh/install | bash \&\& break || { echo \"Retry \$i...\"; sleep 10; }; done#' Dockerfile.carher"
 ```
 
 **推送到 ACR VPC 内网**（构建服务器在 VPC 内，走内网更快更稳定）：
 
 ```bash
-sshpass -e ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
-  -p 1023 root@47.84.112.136 \
-  "nerdctl push $ACR_VPC/carher:$TAG"
+scripts/jms ssh k8s-work-227 "nerdctl push $ACR_VPC/carher:$TAG"
 ```
 
 **⚠️ block_until_ms 同样设 600000。** push 进度条会持续输出。

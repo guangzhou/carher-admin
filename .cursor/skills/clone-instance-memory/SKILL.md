@@ -23,12 +23,13 @@ kubectl exec -n carher deploy/carher-admin -- \
   python -c "import os; print(bool(os.environ.get('CLOUDFLARE_API_TOKEN')))"
 ```
 
-若本地 kubectl 不通（`127.0.0.1:16443` 拒连），先建 SSH 隧道：
+若本地 kubectl 不通（`127.0.0.1:16443` 拒连），按 `k8s-via-bastion`
+skill 启动 proxy：
 
 ```bash
-SSHPASS='<password>' sshpass -e ssh -o StrictHostKeyChecking=no \
-  -o ServerAliveInterval=30 -p 1023 \
-  -L 16443:172.16.1.163:6443 -N root@47.84.112.136 &
+pgrep -af 'jms.*proxy laoyang' >/dev/null \
+  || nohup scripts/jms proxy laoyang 16443 172.16.1.163 6443 > /tmp/jms-proxy.log 2>&1 &
+sleep 2 && kubectl get nodes
 ```
 
 ## 步骤

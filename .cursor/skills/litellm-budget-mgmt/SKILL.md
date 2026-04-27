@@ -34,12 +34,13 @@ description: >-
 
 ## 前置
 
-1. 集群连通性：`kubectl get nodes`（若 `connection refused`，建隧道）：
+1. 集群连通性：`kubectl get nodes`。若 `connection refused`，按
+   `k8s-via-bastion` skill 启动 kubectl 隧道：
 
 ```bash
-SSHPASS='5ip0krF>qazQjcvnqc' sshpass -e ssh \
-  -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
-  -p 1023 -L 16443:172.16.1.163:6443 -N root@47.84.112.136 &
+pgrep -af 'jms.*proxy laoyang' >/dev/null \
+  || nohup scripts/jms proxy laoyang 16443 172.16.1.163 6443 > /tmp/jms-proxy.log 2>&1 &
+sleep 2 && kubectl get nodes
 ```
 
 2. Port-forward LiteLLM：

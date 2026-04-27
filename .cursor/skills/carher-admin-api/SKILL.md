@@ -79,6 +79,11 @@ curl -s https://admin.carher.net/api/next-id | jq
 # Optional: id (auto-assigned if omitted), model (default: gpt),
 #   provider (default: wangsu), prefix (default: s1), owner (pipe-separated open_ids),
 #   deploy_group (default: stable), litellm_route_policy (legacy, no longer affects routing)
+#
+# ⚠️ OWNER open_id 必须用该实例自己的 appId+appSecret 查询获得！
+#   飞书 open_id 是 per-app 的，lark-cli 查到的 open_id 不可用于 carher 实例。
+#   正确流程：lark-cli 查 user_id → 用实例 appId+appSecret 换 token → 查该 app 下的 open_id。
+#   多个 owner 用 | 分隔。详见 check-instance-status SKILL。
 curl -X POST https://admin.carher.net/api/instances \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $API_KEY" \

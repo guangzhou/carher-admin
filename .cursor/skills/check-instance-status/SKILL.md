@@ -10,18 +10,16 @@ description: >-
 
 ## 前置：kubectl 隧道
 
-本地 kubectl 通过 SSH 隧道连接阿里云 K8s API Server。
-先测试连通性：`kubectl get nodes`
+本地 kubectl 通过 JumpServer 堡垒机连接阿里云 K8s API Server。
+完整说明见 `k8s-via-bastion` skill。先测试连通性：`kubectl get nodes`
 
-如果报 `connection refused`，建立隧道：
+如果报 `connection refused`，启动 proxy（已在跑会被 pgrep 检测到，不重复启动）：
 
 ```bash
-SSHPASS='5ip0krF>qazQjcvnqc' sshpass -e ssh \
-  -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
-  -p 1023 -L 16443:172.16.1.163:6443 -N root@47.84.112.136 &
+pgrep -af 'jms.*proxy laoyang' >/dev/null \
+  || nohup scripts/jms proxy laoyang 16443 172.16.1.163 6443 > /tmp/jms-proxy.log 2>&1 &
+sleep 2 && kubectl get nodes
 ```
-
-等待 3 秒后重试 `kubectl get nodes`。
 
 ## Step 1：定位实例
 
@@ -111,6 +109,77 @@ kubectl get svc carher-<ID>-svc -n carher -o wide
 | `LITELLM_API_KEY` env 与 CRD key 不匹配 | Operator 未 reconcile，annotate CRD 触发 reconcile |
 | Pod 0/2 或 CrashLoopBackOff | 容器崩溃，用 `kubectl logs --previous` 查上次崩溃原因 |
 | No Pod found | Operator 未创建 Pod，检查 `kubectl logs deploy/carher-operator -n carher` |
+
+## 查找/设置 Owner open_id
+
+> **关键**：飞书 open_id 是 per-app 的，同一个用户在不同飞书应用下有不同的 open_id。
+> **绝对不能**用 `lark-cli` 查到的 open_id 来设置 carher 实例的 owner，因为 lark-cli 使用的是另一个飞书应用。
+> 必须用该 carher 实例自己的 appId + appSecret 获取 tenant_access_token，再查用户的 open_id。
+
+### Step 1: 获取实例的飞书应用凭据
+
+**新建实例时**：用户直接提供了 app_id 和 app_secret，跳到 Step 2。
+
+**已有实例**：从 K8s 或 Admin API 获取凭据：
+
+```bash
+# 方案 A：kubectl 可用
+APP_ID=$(kubectl get her her-<ID> -n carher -o jsonpath='{.spec.appId}')
+APP_SECRET=$(kubectl get secret carher-<ID>-secret -n carher -o jsonpath='{.data.app_secret}' | base64 -d)
+
+# 方案 B：kubectl 不可用，通过 Admin API 获取 app_id
+# （app_secret 不会在 API 响应中明文返回，需要用户提供或从 kubectl 获取）
+curl -s -H "X-API-Key: $API_KEY" "https://admin.carher.net/api/instances/<ID>" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'app_id: {d.get(\"app_id\",\"N/A\")}')"
+```
+
+### Step 2: 获取 tenant_access_token
+
+```bash
+TOKEN=$(curl -s -X POST 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal' \
+  -H 'Content-Type: application/json' \
+  -d "{\"app_id\":\"$APP_ID\",\"app_secret\":\"$APP_SECRET\"}" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['tenant_access_token'])")
+echo "TOKEN=$TOKEN"
+```
+
+### Step 3: 通过 user_id 查 open_id
+
+先用 `lark-cli contact +search-user --query "姓名"` 获取用户的 `user_id`（user_id 跨应用一致），
+然后用实例自己的 token 查该用户在此应用下的 open_id：
+
+```bash
+# 1. 查 user_id
+lark-cli contact +search-user --query "姚鹏"
+# → user_id: "debb89ae"
+
+# 2. 用实例 token 查 per-app open_id
+curl -s "https://open.feishu.cn/open-apis/contact/v3/users/debb89ae?user_id_type=user_id" \
+  -H "Authorization: Bearer $TOKEN" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data']['user']['name'], d['data']['user']['open_id'])"
+# → 姚鹏 ou_1d72a4547f4ae57c2dd14dc97fea430f
+```
+
+> ⚠️ lark-cli 返回的 `open_id`（如 `ou_9f18fae...`）是 lark-cli 应用的，**不是**该 carher 实例的。
+> 只有 `user_id`（如 `debb89ae`）是跨应用一致的，可以拿来做第二步查询。
+
+### Step 4: 更新 owner
+
+多个 owner 用 `|` 分隔（参考 her-195 网络安全的her）：
+
+```bash
+# 方案 A：kubectl 可用
+kubectl patch her her-<ID> -n carher --type=merge \
+  -p '{"spec":{"owner":"ou_aaa|ou_bbb"}}'
+kubectl delete pod -n carher -l user-id=<ID>
+
+# 方案 B：kubectl 不可用，通过 Admin API 更新
+curl -s -X PUT "https://admin.carher.net/api/instances/<ID>" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"owner":"ou_aaa|ou_bbb"}'
+# Admin API 更新 owner 后 operator 会自动 reconcile，通常不需要手动重启
+```
 
 ## 快速汇总模板
 

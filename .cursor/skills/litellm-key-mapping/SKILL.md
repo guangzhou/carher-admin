@@ -24,12 +24,12 @@ description: >-
 
 先测试连通性：`kubectl get nodes`
 
-如果报 `connection refused`，建立隧道：
+若 `connection refused`，按 `k8s-via-bastion` skill 启动 proxy：
 
 ```bash
-SSHPASS='uGTdq>hn4ps4gwivjs' sshpass -e ssh \
-  -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
-  -L 16443:172.16.1.163:6443 -N root@43.98.160.216 &
+pgrep -af 'jms.*proxy laoyang' >/dev/null \
+  || nohup scripts/jms proxy laoyang 16443 172.16.1.163 6443 > /tmp/jms-proxy.log 2>&1 &
+sleep 2 && kubectl get nodes
 ```
 
 ## 方式 1：kubectl 查 CRD（最权威）

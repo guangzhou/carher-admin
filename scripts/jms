@@ -1,0 +1,533 @@
+#!/usr/bin/env python3
+"""
+jms — JumpServer wrapper for SSH/SCP/tunnel via internal KoKo gateway.
+
+Replaces the legacy direct-SSH path (root@47.84.112.136:1023) with
+JumpServer-routed connections through internal IP 10.68.13.189:2222.
+
+Usage:
+  jms ssh    <asset> [<remote-cmd>...]            # exec or interactive
+  jms scp    [scp-args...] <src> <dst>            # use <asset>:/path syntax
+  jms tunnel <asset> -L <local>:<host>:<port>     # ssh -L tunnel
+  jms list                                         # list permitted assets
+  jms resolve <asset>                              # show asset → JMS account
+
+Auth: each call acquires a fresh 5-minute JMS connection token via API
+(uses AccessKey in ~/.config/jms/key.json), then SSHes as
+'JMS-<token-id>@<ssh-host>' with the token-value as password.
+
+Requires: python3, sshpass (brew install hudochenkov/sshpass/sshpass).
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import hmac
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from email.utils import formatdate
+from pathlib import Path
+
+CONFIG_PATH = Path.home() / ".config" / "jms" / "key.json"
+CACHE_PATH = Path.home() / ".config" / "jms" / "cache.json"
+
+
+def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        sys.exit(f"missing {CONFIG_PATH}; create it with key_id/secret/ssh_host")
+    with CONFIG_PATH.open() as f:
+        return json.load(f)
+
+
+def load_cache() -> dict:
+    if not CACHE_PATH.exists():
+        return {}
+    try:
+        with CACHE_PATH.open() as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_cache(cache: dict) -> None:
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CACHE_PATH.with_suffix(".tmp")
+    with tmp.open("w") as f:
+        json.dump(cache, f, indent=2, ensure_ascii=False)
+    tmp.replace(CACHE_PATH)
+
+
+def api(path: str, method: str = "GET", body: dict | None = None) -> tuple[int, dict | str]:
+    cfg = load_config()
+    url = cfg["endpoint"].rstrip("/") + path
+    date = formatdate(usegmt=True)
+    parsed = urllib.parse.urlparse(path)
+    target = parsed.path + (("?" + parsed.query) if parsed.query else "")
+    sig_str = f"(request-target): {method.lower()} {target}\ndate: {date}"
+    mac = hmac.new(cfg["secret"].encode(), sig_str.encode(), hashlib.sha256).digest()
+    sig = base64.b64encode(mac).decode()
+    auth = (
+        f'Signature keyId="{cfg["key_id"]}",algorithm="hmac-sha256",'
+        f'headers="(request-target) date",signature="{sig}"'
+    )
+    req = urllib.request.Request(url, method=method)
+    req.add_header("Date", date)
+    req.add_header("Authorization", auth)
+    req.add_header("Accept", "application/json")
+    if body is not None:
+        req.data = json.dumps(body).encode()
+        req.add_header("Content-Type", "application/json")
+    try:
+        r = urllib.request.urlopen(req, timeout=15)
+        text = r.read().decode()
+        try:
+            return r.status, json.loads(text)
+        except Exception:
+            return r.status, text
+    except urllib.error.HTTPError as e:
+        text = e.read().decode()
+        try:
+            return e.code, json.loads(text)
+        except Exception:
+            return e.code, text
+
+
+def resolve_asset(name_or_uuid: str) -> dict:
+    """Return {uuid, name, account, account_id} for the given asset name."""
+    cache = load_cache()
+    cached = cache.get(name_or_uuid)
+    if cached and cached.get("expires_at", 0) > time.time():
+        return cached["data"]
+
+    is_uuid = len(name_or_uuid) == 36 and name_or_uuid.count("-") == 4
+    if is_uuid:
+        uuid = name_or_uuid
+    else:
+        code, data = api(f"/api/v1/perms/users/self/assets/?search={urllib.parse.quote(name_or_uuid)}")
+        if code != 200 or not isinstance(data, list) or not data:
+            sys.exit(f"asset '{name_or_uuid}' not found via API: HTTP {code}: {data}")
+        exact = [a for a in data if a.get("name") == name_or_uuid]
+        candidates = exact if exact else data
+        if len(candidates) > 1:
+            names = ", ".join(a["name"] for a in candidates)
+            sys.exit(f"asset name '{name_or_uuid}' is ambiguous: {names}")
+        uuid = candidates[0]["id"]
+
+    code, detail = api(f"/api/v1/perms/users/self/assets/{uuid}/")
+    if code != 200 or not isinstance(detail, dict):
+        sys.exit(f"asset {uuid} detail failed: HTTP {code}: {detail}")
+    accounts = detail.get("permed_accounts") or []
+    if not accounts:
+        sys.exit(f"asset {detail.get('name', uuid)} has no permitted accounts")
+
+    result = {
+        "uuid": uuid,
+        "name": detail.get("name", uuid),
+        "account": accounts[0]["username"],
+        "account_id": accounts[0]["id"],
+    }
+    cache[name_or_uuid] = {"expires_at": time.time() + 3600, "data": result}
+    save_cache(cache)
+    return result
+
+
+def issue_token(asset: dict) -> dict:
+    """POST /authentication/connection-token/ → returns {id, value, expire_time}."""
+    body = {
+        "asset": asset["uuid"],
+        "account": asset["account_id"],
+        "protocol": "ssh",
+        "connect_method": "ssh",
+    }
+    code, data = api("/api/v1/authentication/connection-token/", "POST", body)
+    if code not in (200, 201) or not isinstance(data, dict):
+        sys.exit(f"connection-token failed: HTTP {code}: {data}")
+    return data
+
+
+def require_sshpass() -> str:
+    p = shutil.which("sshpass")
+    if not p:
+        sys.exit(
+            "sshpass not found. Install with:\n"
+            "  brew install hudochenkov/sshpass/sshpass    # macOS\n"
+            "  apt-get install sshpass                     # Debian/Ubuntu"
+        )
+    return p
+
+
+def ssh_target(token_id: str, ssh_host: str) -> str:
+    return f"JMS-{token_id}@{ssh_host}"
+
+
+def cmd_resolve(args) -> int:
+    asset = resolve_asset(args.asset)
+    cfg = load_config()
+    print(f"asset_uuid:    {asset['uuid']}")
+    print(f"asset_name:    {asset['name']}")
+    print(f"asset_account: {asset['account']}")
+    print(f"account_id:    {asset['account_id']}")
+    print(f"ssh_host:      {cfg['ssh_host']}")
+    print(f"ssh_port:      {cfg['ssh_port']}")
+    return 0
+
+
+def cmd_list(args) -> int:
+    code, data = api("/api/v1/perms/users/self/assets/?limit=200")
+    if code != 200 or not isinstance(data, dict):
+        sys.exit(f"list failed: HTTP {code}: {data}")
+    fmt = "{:<32}  {:<18}  {:<10}  {}"
+    print(fmt.format("NAME", "ADDRESS", "STATUS", "NODE"))
+    for a in data.get("results", []):
+        nodes = ",".join(n["name"] for n in a.get("nodes", []))
+        print(fmt.format(a["name"], a["address"], a["connectivity"]["value"], nodes))
+    return 0
+
+
+def _build_ssh_base(cfg: dict, extra: list[str]) -> list[str]:
+    return [
+        "ssh",
+        "-p", str(cfg["ssh_port"]),
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ServerAliveInterval=30",
+        "-o", "PreferredAuthentications=password",
+        "-o", "PubkeyAuthentication=no",
+        "-o", "NumberOfPasswordPrompts=1",
+        *extra,
+    ]
+
+
+def _run_with_token(ssh_args: list[str], token_value: str, verbose: bool) -> int:
+    """Run command with sshpass providing the token as password."""
+    sshpass = require_sshpass()
+    cmd = [sshpass, "-e", *ssh_args]
+    env = os.environ.copy()
+    env["SSHPASS"] = token_value
+    if verbose:
+        sanitized = [c for c in cmd]
+        print(f"+ SSHPASS=<token> {' '.join(shlex.quote(c) for c in sanitized[1:])}",
+              file=sys.stderr)
+    return subprocess.call(cmd, env=env)
+
+
+def cmd_ssh(args) -> int:
+    asset = resolve_asset(args.asset)
+    cfg = load_config()
+    token = issue_token(asset)
+    if args.verbose:
+        print(f"# token id={token['id']} expires_in={token.get('expire_time')}s",
+              file=sys.stderr)
+
+    extra: list[str] = []
+    user_opts = os.environ.get("JMS_SSH_OPTS", "")
+    if user_opts:
+        extra.extend(shlex.split(user_opts))
+    if not sys.stdin.isatty() and not args.remote_cmd:
+        pass
+
+    target = ssh_target(token["id"], cfg["ssh_host"])
+    ssh_args = _build_ssh_base(cfg, extra) + [target]
+    if args.remote_cmd:
+        ssh_args.append(" ".join(args.remote_cmd))
+
+    return _run_with_token(ssh_args, token["value"], args.verbose)
+
+
+def _parse_asset_path(arg: str) -> tuple[str | None, str]:
+    """Return (asset_name|None, path). Asset form: '<name>:/path'."""
+    if arg.startswith("/") or ":" not in arg:
+        return None, arg
+    head, _, path = arg.partition(":")
+    if "/" in head:
+        return None, arg
+    return head, path
+
+
+def cmd_scp(args) -> int:
+    """
+    File transfer over SSH (KoKo SFTP/SCP subsystem is read-only for
+    token-bound sessions, so we stream via 'ssh "cat > file"').
+
+    Forms:
+        jms scp <local-path> <asset>:<remote-path>     # upload
+        jms scp <asset>:<remote-path> <local-path>     # download
+        jms scp <asset>:<remote-path> -                # download to stdout
+        jms scp - <asset>:<remote-path>                # upload from stdin
+
+    Directory uploads are tarballed: a `tar | ssh 'tar x'` pipeline.
+    """
+    if len(args.paths) != 2:
+        sys.exit("scp: need exactly 2 paths (src dst)")
+    cfg = load_config()
+    src, dst = args.paths
+    src_asset, src_path = _parse_asset_path(src)
+    dst_asset, dst_path = _parse_asset_path(dst)
+    if src_asset and dst_asset:
+        sys.exit("scp: at most one side may reference an asset")
+    if not src_asset and not dst_asset:
+        sys.exit("scp: one side must be in <asset>:/path form")
+
+    asset = resolve_asset(src_asset or dst_asset)
+    token = issue_token(asset)
+    target = ssh_target(token["id"], cfg["ssh_host"])
+    if args.verbose:
+        print(f"# token id={token['id']}", file=sys.stderr)
+
+    sshpass = require_sshpass()
+    base = [
+        sshpass, "-e", "ssh",
+        "-p", str(cfg["ssh_port"]),
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "PreferredAuthentications=password",
+        "-o", "PubkeyAuthentication=no",
+        "-o", "NumberOfPasswordPrompts=1",
+        "-o", "ServerAliveInterval=30",
+        target,
+    ]
+    env = os.environ.copy()
+    env["SSHPASS"] = token["value"]
+
+    if dst_asset:
+        local = src_path
+        remote = dst_path
+        if local == "-":
+            cmd = base + [f"cat > {shlex.quote(remote)}"]
+            if args.verbose:
+                print(f"# stream stdin → asset:{remote}", file=sys.stderr)
+            return subprocess.call(cmd, env=env)
+        if not os.path.exists(local):
+            sys.exit(f"scp: local file not found: {local}")
+        if os.path.isdir(local):
+            parent = os.path.dirname(os.path.abspath(local)) or "/"
+            name = os.path.basename(os.path.abspath(local))
+            tar_cmd = ["tar", "-cz", "-C", parent, name]
+            ssh_cmd = base + [f"mkdir -p {shlex.quote(remote)} && tar -xz -C {shlex.quote(remote)}"]
+            if args.verbose:
+                print(f"# tar -cz {local} | ssh tar -xz -C {remote}", file=sys.stderr)
+            tar_p = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE)
+            ssh_p = subprocess.Popen(ssh_cmd, stdin=tar_p.stdout, env=env)
+            tar_p.stdout.close()
+            return ssh_p.wait()
+        with open(local, "rb") as f:
+            cmd = base + [f"cat > {shlex.quote(remote)}"]
+            if args.verbose:
+                print(f"# upload {local} → asset:{remote}", file=sys.stderr)
+            return subprocess.call(cmd, stdin=f, env=env)
+    else:
+        remote = src_path
+        local = dst_path
+        cmd = base + [f"cat {shlex.quote(remote)}"]
+        if local == "-":
+            if args.verbose:
+                print(f"# download asset:{remote} → stdout", file=sys.stderr)
+            return subprocess.call(cmd, env=env)
+        target_path = local
+        if os.path.isdir(local):
+            target_path = os.path.join(local, os.path.basename(remote))
+        if args.verbose:
+            print(f"# download asset:{remote} → {target_path}", file=sys.stderr)
+        with open(target_path, "wb") as f:
+            return subprocess.call(cmd, stdout=f, env=env)
+
+
+def cmd_proxy(args) -> int:
+    """Local TCP listener that pipes each accepted connection through
+    `ssh <asset> nc <host> <port>`, bypassing KoKo's restriction on
+    `ssh -L` to non-localhost destinations.
+
+    Each accepted connection spawns a new JMS token + ssh subprocess,
+    so unlimited duration / many parallel kubectl calls all work.
+    """
+    import socket
+    import threading
+
+    cfg = load_config()
+    asset = resolve_asset(args.asset)
+    sshpass = require_sshpass()
+
+    listen_port = args.listen
+    target_host = args.target_host
+    target_port = args.target_port
+
+    def handle(client_sock: socket.socket, client_addr) -> None:
+        if args.verbose:
+            print(f"[proxy] {client_addr} → {asset['name']}:{target_host}:{target_port}",
+                  file=sys.stderr)
+        try:
+            token = issue_token(asset)
+        except SystemExit as e:
+            client_sock.close()
+            print(f"[proxy] token issue failed: {e}", file=sys.stderr)
+            return
+        target = ssh_target(token["id"], cfg["ssh_host"])
+        cmd = [
+            sshpass, "-e", "ssh",
+            "-p", str(cfg["ssh_port"]),
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=15",
+            "-o", "PreferredAuthentications=password",
+            "-o", "PubkeyAuthentication=no",
+            "-o", "NumberOfPasswordPrompts=1",
+            "-o", "LogLevel=ERROR",
+            target,
+            f"nc -q 1 {shlex.quote(target_host)} {target_port}",
+        ]
+        env = os.environ.copy()
+        env["SSHPASS"] = token["value"]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=env, bufsize=0)
+
+        def s2p() -> None:
+            try:
+                while True:
+                    data = client_sock.recv(65536)
+                    if not data:
+                        break
+                    proc.stdin.write(data)
+                    proc.stdin.flush()
+            except OSError:
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+
+        def p2s() -> None:
+            try:
+                while True:
+                    data = proc.stdout.read(65536)
+                    if not data:
+                        break
+                    client_sock.sendall(data)
+            except OSError:
+                pass
+            finally:
+                try:
+                    client_sock.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+
+        t1 = threading.Thread(target=s2p, daemon=True)
+        t2 = threading.Thread(target=p2s, daemon=True)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        proc.wait()
+        try:
+            client_sock.close()
+        except OSError:
+            pass
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((args.bind, listen_port))
+    listener.listen(64)
+    print(f"jms-proxy listening on {args.bind}:{listen_port} → "
+          f"{asset['name']} → {target_host}:{target_port}",
+          file=sys.stderr)
+    try:
+        while True:
+            sock, addr = listener.accept()
+            threading.Thread(target=handle, args=(sock, addr), daemon=True).start()
+    except KeyboardInterrupt:
+        print("\nshutting down", file=sys.stderr)
+        return 0
+
+
+def cmd_tunnel(args) -> int:
+    """ssh -L tunnel via JumpServer. NOTE: tunnel duration is bounded by
+    token expiry (5 min). For long-lived tunnels, set
+    JMS_REUSABLE_TOKEN=1 and the token will be marked reusable (if your
+    JumpServer permission allows it).
+
+    LIMITATION: KoKo blocks ssh -L to non-localhost destinations.
+    For non-localhost targets, use `jms proxy` instead.
+    """
+    asset = resolve_asset(args.asset)
+    cfg = load_config()
+    token = issue_token(asset)
+    if args.verbose:
+        print(f"# token id={token['id']} expires_in={token.get('expire_time')}s",
+              file=sys.stderr)
+
+    target = ssh_target(token["id"], cfg["ssh_host"])
+    ssh_args = [
+        "ssh",
+        "-p", str(cfg["ssh_port"]),
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "PreferredAuthentications=password",
+        "-o", "PubkeyAuthentication=no",
+        "-o", "NumberOfPasswordPrompts=1",
+        "-N",
+    ]
+    if args.background:
+        ssh_args.append("-f")
+    for fwd in args.forward:
+        ssh_args.extend(["-L", fwd])
+    ssh_args.append(target)
+
+    return _run_with_token(ssh_args, token["value"], args.verbose)
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        prog="jms",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("-v", "--verbose", action="store_true")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("ssh", help="ssh into a JumpServer asset (token auth)")
+    s.add_argument("asset")
+    s.add_argument("remote_cmd", nargs="*",
+                   help="optional remote command; pass extra ssh opts via $JMS_SSH_OPTS")
+    s.set_defaults(func=cmd_ssh)
+
+    s = sub.add_parser("scp", help="upload/download via SSH stream (KoKo SFTP is RO for tokens)")
+    s.add_argument("paths", nargs=2, metavar=("SRC", "DST"),
+                   help="<local> <asset>:/remote   OR   <asset>:/remote <local>; '-' = stdin/stdout")
+    s.set_defaults(func=cmd_scp)
+
+    s = sub.add_parser("tunnel", help="ssh -L tunnel via JumpServer (target must be localhost)")
+    s.add_argument("asset")
+    s.add_argument("-L", "--forward", action="append", required=True,
+                   help="local:host:port (can be given multiple times)")
+    s.add_argument("-f", "--background", action="store_true")
+    s.set_defaults(func=cmd_tunnel)
+
+    s = sub.add_parser("proxy", help="TCP forward via 'ssh asset nc host port' (any host)")
+    s.add_argument("asset", help="JumpServer asset name (e.g. laoyang)")
+    s.add_argument("listen", type=int, help="local listen port")
+    s.add_argument("target_host", help="destination host (resolvable from asset)")
+    s.add_argument("target_port", type=int, help="destination port")
+    s.add_argument("--bind", default="127.0.0.1", help="local bind address (default 127.0.0.1)")
+    s.set_defaults(func=cmd_proxy)
+
+    s = sub.add_parser("list", help="list permitted assets")
+    s.set_defaults(func=cmd_list)
+
+    s = sub.add_parser("resolve", help="show resolved JumpServer username for an asset")
+    s.add_argument("asset")
+    s.set_defaults(func=cmd_resolve)
+
+    args = p.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

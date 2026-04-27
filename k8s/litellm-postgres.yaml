@@ -61,6 +61,10 @@ spec:
               mountPath: /var/lib/postgresql/data
               subPath: pgdata
   volumeClaimTemplates:
+    # NOTE: volumeClaimTemplates is immutable after the StatefulSet is created.
+    # The live PVC (litellm-db-data-litellm-db-0) has been expanded in-place via
+    # `kubectl patch pvc ... {"spec":{"resources":{"requests":{"storage":"100Gi"}}}}`.
+    # This field is kept in sync only for documentation / new replica provisioning.
     - metadata:
         name: litellm-db-data
         labels:
@@ -70,7 +74,7 @@ spec:
         storageClassName: alibabacloud-cnfs-nas
         resources:
           requests:
-            storage: 5Gi
+            storage: 100Gi
 ---
 apiVersion: v1
 kind: Service

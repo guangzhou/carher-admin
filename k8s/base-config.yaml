@@ -15,10 +15,10 @@ data:
     {
       agents: {
         defaults: {
-          contextTokens: 400000,
+          contextTokens: 1000000,
           userTimezone: "Asia/Shanghai",
           llm: { idleTimeoutSeconds: 300 },
-          compaction: { mode: "safeguard", reserveTokens: 100000 },
+          compaction: { mode: "safeguard", reserveTokens: 100000, truncateAfterCompaction: true },
           memorySearch: {
             provider: "openai",
             // Route all memorySearch / embedding calls through the internal
@@ -98,7 +98,7 @@ data:
       "meta": { "lastTouchedVersion": "2026.4.2" },
       "agents": {
         "defaults": {
-          "contextTokens": 400000,
+          "contextTokens": 1000000,
           "model": { "primary": "openrouter/anthropic/claude-sonnet-4.6" }
         }
       },
@@ -108,16 +108,16 @@ data:
             "baseUrl": "https://api.anthropic.com",
             "apiKey": "sk-ant-not-used-on-server",
             "models": [
-              { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", "api": "anthropic-messages", "reasoning": true, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 128000, "cost": { "input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25 } },
-              { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "api": "anthropic-messages", "reasoning": true, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 64000, "cost": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75 } }
+              { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", "api": "anthropic-messages", "reasoning": true, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 128000, "cost": { "input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25 } },
+              { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "api": "anthropic-messages", "reasoning": true, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 64000, "cost": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75 } }
             ]
           },
           "wangsu": {
             "baseUrl": "https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1",
             "apiKey": "${WANGSU_API_KEY}",
             "models": [
-              { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", "api": "openai-completions", "reasoning": true, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 128000, "cost": { "input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25 } },
-              { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "api": "openai-completions", "reasoning": true, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 64000, "cost": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75 } },
+              { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", "api": "openai-completions", "reasoning": true, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 128000, "cost": { "input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25 } },
+              { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "api": "openai-completions", "reasoning": true, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 64000, "cost": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75 } },
               { "id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro", "api": "openai-completions", "reasoning": true, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 65536, "cost": { "input": 2, "output": 12, "cacheRead": 0.2, "cacheWrite": 0.375 } },
               { "id": "gpt-5.4", "name": "GPT-5.4", "api": "openai-completions", "reasoning": true, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 128000, "cost": { "input": 2.5, "output": 15, "cacheRead": 0.25 } }
             ]
@@ -125,8 +125,8 @@ data:
           "openrouter": {
             "baseUrl": "https://openrouter.ai/api/v1",
             "models": [
-              { "id": "anthropic/claude-opus-4.6", "name": "Claude Opus 4.6", "api": "openai-completions", "reasoning": true, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 128000, "cost": { "input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25 } },
-              { "id": "anthropic/claude-sonnet-4.6", "name": "Claude Sonnet 4.6", "api": "openai-completions", "reasoning": true, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 64000, "cost": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75 } },
+              { "id": "anthropic/claude-opus-4.6", "name": "Claude Opus 4.6", "api": "openai-completions", "reasoning": true, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 128000, "cost": { "input": 5, "output": 25, "cacheRead": 0.5, "cacheWrite": 6.25 } },
+              { "id": "anthropic/claude-sonnet-4.6", "name": "Claude Sonnet 4.6", "api": "openai-completions", "reasoning": true, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 64000, "cost": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75 } },
               { "id": "google/gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro", "api": "openai-completions", "reasoning": true, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 65536, "cost": { "input": 2, "output": 12, "cacheRead": 0.2, "cacheWrite": 0.375 } },
               { "id": "minimax/minimax-m2.7", "name": "MiniMax M2.7", "api": "openai-completions", "reasoning": false, "input": ["text"], "contextWindow": 200000, "maxTokens": 16384, "cost": { "input": 0.3, "output": 1.1, "cacheRead": 0.15 } },
               { "id": "z-ai/glm-5", "name": "GLM-5", "api": "openai-completions", "reasoning": true, "input": ["text"], "contextWindow": 200000, "maxTokens": 131072, "cost": { "input": 0.95, "output": 2.55 } },

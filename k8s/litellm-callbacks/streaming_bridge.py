@@ -1,9 +1,9 @@
 """
 LiteLLM streaming bridge — SSE heartbeat + TTFT fix + httpx
-read-timeout patch + mid-stream stall recovery for the
-``anthropic_messages`` (/v1/messages) passthrough path.
+read-timeout patch + progress watchdog + mid-stream stall recovery
+for the ``anthropic_messages`` (/v1/messages) passthrough path.
 
-Four independent problems this module addresses
+Five independent problems this module addresses
 -----------------------------------------------
 
 1.  **524 origin timeouts on Claude Code CLI clients.**
@@ -88,6 +88,23 @@ Four independent problems this module addresses
     not exhibit the bug in production because their endpoints do not
     stall mid-stream.
 
+5.  **Ping-only stalls bypass the httpx read-timeout entirely.**
+
+    The httpx patch above (problem 4) catches the case where the
+    upstream socket goes completely silent. But Wangsu's gateway
+    keeps the socket alive during a stalled prefill by sending
+    ``event: ping`` frames every ~10 s -- those bytes reset the
+    httpx read clock without representing any actual generation
+    progress. Production data (24 h, 27 prefill stalls all dragged
+    out to ~600 s) confirmed the httpx 120 s patch never fired in
+    these cases.
+
+    Mid-stream stalls also bypass LiteLLM's router fallback chain,
+    because ``acompletion()`` returned successfully the moment the
+    upstream emitted HTTP 200 + headers; the router has already
+    handed control to the iterator and nothing in the
+    ``router_settings.fallbacks`` path will ever run.
+
 Fix
 ---
 
@@ -151,6 +168,21 @@ This module does three things at import time + two things per request:
       in pre-deployment mock testing) so non-streaming clients see a
       parseable response instead of an
       ``APIResponseValidationError``.
+    * **Progress watchdog** runs alongside the heartbeat. Two
+      data-driven thresholds (default 120 s pre-message_start, 60 s
+      post-message_start) bound how long upstream may stay silent on
+      real progress events (everything except ``event: ping``). When
+      tripped, the watchdog emits the same synthetic error frame /
+      synthetic Message that the httpx-timeout path uses, so the
+      client experience is identical regardless of whether the stall
+      is "complete socket silence" (caught by httpx) or "ping-only
+      keepalives drag out forever" (caught by watchdog). Thresholds
+      tuned against 24 h production TTFT distributions; see
+      ``_load_progress_thresholds`` and the comments next to the
+      defaults for the data and reasoning. Per-arm kill switch via
+      ``STREAMING_BRIDGE_PROGRESS_TIMEOUT_PRE_SECONDS`` /
+      ``..._POST_SECONDS=999999`` (env-only; no pod restart needed
+      beyond the next config rollout).
 
 Combined effect for canary requests
 -----------------------------------
@@ -240,6 +272,61 @@ _CONTENT_DELTA_MARKER: bytes = b"content_block_delta"
 # well under 4 KB; 64 KB leaves plenty of headroom while still capping
 # worst-case buffering for a request that never emits a delta.
 _SCAN_BUFFER_LIMIT: int = 64 * 1024
+
+
+# --------------------------- progress watchdog ------------------------
+#
+# Mid-stream stalls bypass LiteLLM's router fallback because acompletion()
+# returns successfully the moment the upstream emits HTTP 200 + headers.
+# Wangsu's gateway responds with HTTP 200 within ~5 s for the vast majority
+# of requests; once that happens the iterator owns the connection and any
+# further upstream silence (ping-only frames, or true silence under the
+# httpx read-timeout patch's threshold) drags out to the client SDK's
+# 600 s default timeout. The httpx-timeout patch above only fires on
+# *complete* socket silence, which Wangsu avoids by sending periodic
+# `event: ping` frames during prefill -- those bytes reset the
+# socket-level read clock but carry zero generation progress.
+#
+# The watchdog detects "no real progress" by scanning the upstream byte
+# stream for SSE event markers other than ping (per Anthropic's stream
+# spec, ping is heartbeat, every other event carries actual state). It
+# uses two thresholds tuned to 24 h production data:
+#
+# Pre-message_start (TTFT-equivalent window):
+#     TTFT p99 across all input-token buckets ≤ 38 s, max 220 s.
+#     120 s catches 99.5%+ of legitimate prefills; the 0.5% tail
+#     between p99 and max gets routed through router fallback (which
+#     adds ~30 s recovery latency, vs. 600 s of dead-wait without it).
+#
+# Post-message_start (generation phase):
+#     content_block_delta / message_delta arrive token-by-token at
+#     50-100 events/s during normal generation, including thinking blocks
+#     (thinking_delta is a content_block_delta). 60 s of silence is
+#     unambiguously a stall.
+#
+# False positive cost: per-request ~30 s extra latency due to fallback +
+# SDK retry. False negative cost (status quo): 600 s dead-wait. Net
+# expected effect on production: ~30 prefill stalls/day saved at cost of
+# <30 false-positive retries/day in the >150k-input bucket.
+_DEFAULT_PROGRESS_PRE_SECONDS: float = 120.0
+_DEFAULT_PROGRESS_POST_SECONDS: float = 60.0
+
+# SSE event markers that count as "upstream made real progress". Anthropic
+# spec event names: message_start, message_delta, message_stop,
+# content_block_start, content_block_delta, content_block_stop, error.
+# Explicitly excluded: `event: ping` (keepalive only). We scan as raw
+# bytes since the iterator hook receives un-decoded chunks; this avoids
+# decoding overhead on the hot path.
+_PROGRESS_MARKERS: Tuple[bytes, ...] = (
+    b"event: message_start",
+    b"event: message_delta",
+    b"event: message_stop",
+    b"event: content_block_start",
+    b"event: content_block_delta",
+    b"event: content_block_stop",
+    b"event: error",
+)
+_MESSAGE_START_MARKER: bytes = b"event: message_start"
 
 
 # --------------------------- collapse mode ----------------------------
@@ -731,6 +818,66 @@ def _load_heartbeat_seconds() -> float:
     return value
 
 
+def _load_progress_thresholds() -> Tuple[float, float]:
+    """Read pre/post-message_start watchdog thresholds from env.
+
+    Setting either to a very large value (e.g. 999999) effectively
+    disables that arm of the watchdog without removing the code -- this
+    is the kill switch for fast rollback if the watchdog turns out to
+    cause regressions.
+    """
+    def _read(name: str, default: float, lo: float, hi: float = 600.0) -> float:
+        raw = os.environ.get(name)
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return default
+        if value < lo:
+            return lo
+        if value > hi:
+            return hi
+        return value
+
+    pre = _read(
+        "STREAMING_BRIDGE_PROGRESS_TIMEOUT_PRE_SECONDS",
+        _DEFAULT_PROGRESS_PRE_SECONDS,
+        lo=30.0,
+        hi=999999.0,
+    )
+    post = _read(
+        "STREAMING_BRIDGE_PROGRESS_TIMEOUT_POST_SECONDS",
+        _DEFAULT_PROGRESS_POST_SECONDS,
+        lo=15.0,
+        hi=999999.0,
+    )
+    return pre, post
+
+
+def _scan_progress_marker(view: bytes) -> Tuple[bool, bool]:
+    """Scan ``view`` for any SSE event marker that signals real upstream
+    progress (anything except ``event: ping``).
+
+    A single TCP read often contains multiple SSE events; checking via
+    ``bytes.__contains__`` is O(n*m) but n is bounded by the chunk size
+    (httpx default 16 KB) and m is small (we have 7 markers), so this
+    is well below 1 ms per chunk in practice and runs only when a chunk
+    actually arrives -- not on the heartbeat tick.
+
+    Returns ``(any_progress, saw_message_start)``. ``saw_message_start``
+    is the signal that flips the watchdog from the pre-threshold (TTFT
+    headroom) to the post-threshold (generation-phase tolerance).
+    """
+    saw_msg_start = _MESSAGE_START_MARKER in view
+    if saw_msg_start:
+        return True, True
+    for marker in _PROGRESS_MARKERS:
+        if marker in view:
+            return True, False
+    return False, False
+
+
 def _chunk_bytes_view(chunk: Any) -> Optional[bytes]:
     """Return a bytes view of the chunk iff it can be scanned for the marker.
 
@@ -804,13 +951,17 @@ _patch_anthropic_httpx_timeout()
 
 
 class StreamingBridge(CustomLogger):
-    """SSE heartbeat + TTFT stamping for anthropic_messages streams."""
+    """SSE heartbeat + TTFT stamping + progress watchdog for
+    anthropic_messages streams."""
 
     def __init__(self) -> None:
         super().__init__()
         self._canary_aliases: Set[str] = _load_canary_aliases()
         self._canary_prefixes: Tuple[str, ...] = _load_canary_prefixes()
         self._heartbeat_seconds: float = _load_heartbeat_seconds()
+        pre, post = _load_progress_thresholds()
+        self._progress_timeout_pre: float = pre
+        self._progress_timeout_post: float = post
 
     def _alias_matches(self, key_alias: Optional[str]) -> bool:
         if not isinstance(key_alias, str):
@@ -914,7 +1065,11 @@ class StreamingBridge(CustomLogger):
         if collapse_mode:
             collapse_buf = bytearray()
             stamped = False
-            last_yield_at: float = asyncio.get_event_loop().time()
+            loop = asyncio.get_event_loop()
+            last_yield_at: float = loop.time()
+            # Watchdog state mirrors the pass-through path.
+            last_progress_at: float = loop.time()
+            seen_message_start: bool = False
             upstream_done = False
             upstream_error: Optional[BaseException] = None
 
@@ -923,8 +1078,13 @@ class StreamingBridge(CustomLogger):
 
                 Returns True if EOF was reached, False if a chunk was
                 buffered, raises asyncio.TimeoutError on timeout.
+
+                Also updates the enclosing watchdog state
+                (``last_progress_at`` / ``seen_message_start``) on real
+                upstream events so the collapse path can detect a stall
+                even though it never relays SSE bytes to the client.
                 """
-                nonlocal stamped
+                nonlocal stamped, last_progress_at, seen_message_start
                 item = await asyncio.wait_for(queue.get(), timeout=timeout)
                 if item is eof_sentinel:
                     return True
@@ -937,6 +1097,11 @@ class StreamingBridge(CustomLogger):
                 view = _chunk_bytes_view(item)
                 if view is not None:
                     collapse_buf.extend(view)
+                    any_progress, saw_msg_start = _scan_progress_marker(view)
+                    if any_progress:
+                        last_progress_at = loop.time()
+                    if saw_msg_start and not seen_message_start:
+                        seen_message_start = True
                     if (
                         not stamped
                         and _CONTENT_DELTA_MARKER in collapse_buf
@@ -950,21 +1115,57 @@ class StreamingBridge(CustomLogger):
 
             try:
                 while not upstream_done:
-                    now = asyncio.get_event_loop().time()
-                    remaining = self._heartbeat_seconds - (now - last_yield_at)
-                    if remaining <= 0:
+                    now = loop.time()
+                    heartbeat_remaining = (
+                        self._heartbeat_seconds - (now - last_yield_at)
+                    )
+                    if heartbeat_remaining <= 0:
                         # Heartbeat is overdue. Yield right now and
                         # reset the wall-clock timer.
                         yield _COLLAPSE_HEARTBEAT_CHUNK
-                        last_yield_at = asyncio.get_event_loop().time()
+                        last_yield_at = loop.time()
                         continue
+
+                    # Watchdog deadline: if upstream goes too long
+                    # without a non-ping SSE event, trip a synthetic
+                    # stall and bail out of collapse mode with a
+                    # parseable Message body explaining the failure.
+                    threshold = (
+                        self._progress_timeout_post
+                        if seen_message_start
+                        else self._progress_timeout_pre
+                    )
+                    stall_remaining = (last_progress_at + threshold) - now
+                    if stall_remaining <= 0:
+                        try:
+                            _log.warning(
+                                "streaming_bridge: collapse watchdog stall "
+                                "(seen_message_start=%s, threshold=%ss); "
+                                "yielding synthetic Message",
+                                seen_message_start, threshold,
+                            )
+                        except Exception:
+                            pass
+                        msg = _build_collapsed_synthetic_message(
+                            "Upstream stalled with only keepalive frames "
+                            "and no progress events; please retry."
+                        )
+                        yield json.dumps(msg, ensure_ascii=False).encode("utf-8")
+                        return
+
+                    wait_seconds = max(
+                        0.05, min(heartbeat_remaining, stall_remaining)
+                    )
+
                     try:
-                        upstream_done = await _drain_one(timeout=remaining)
+                        upstream_done = await _drain_one(timeout=wait_seconds)
                     except asyncio.TimeoutError:
-                        # Heartbeat interval elapsed with no EOF; yield
-                        # whitespace and loop back to wait again.
+                        # Either heartbeat or watchdog deadline tick.
+                        # We yield a heartbeat unconditionally — the
+                        # next iteration will re-evaluate the watchdog
+                        # against the (now refreshed) clock.
                         yield _COLLAPSE_HEARTBEAT_CHUNK
-                        last_yield_at = asyncio.get_event_loop().time()
+                        last_yield_at = loop.time()
                     except Exception as exc:
                         upstream_error = exc
                         break
@@ -1015,7 +1216,7 @@ class StreamingBridge(CustomLogger):
                     except (asyncio.CancelledError, Exception):
                         pass
 
-        # ---------- pass-through mode (existing behavior) ----------
+        # ---------- pass-through mode ----------
         # Scan buffer for first `content_block_delta` marker across chunk
         # boundaries (httpx may split a single SSE frame across TCP reads).
         # We keep up to ``_SCAN_BUFFER_LIMIT`` bytes and slide the window
@@ -1024,16 +1225,68 @@ class StreamingBridge(CustomLogger):
         marker_len = len(_CONTENT_DELTA_MARKER)
         first_content_seen = False
 
+        # Progress watchdog state. ``last_progress_at`` advances every
+        # time we see a non-ping SSE event from upstream; it does NOT
+        # advance on heartbeats we inject ourselves (those are bytes we
+        # produced, not upstream progress). ``seen_message_start`` flips
+        # the watchdog from the generous pre-prefill threshold to the
+        # tight generation-phase threshold.
+        loop = asyncio.get_event_loop()
+        last_progress_at: float = loop.time()
+        seen_message_start: bool = False
+
         try:
             while True:
+                # Compute deadlines for this iteration. The watchdog
+                # threshold is selected by message_start state; the loop
+                # waits for the sooner of (heartbeat tick, watchdog
+                # deadline). Heartbeat refreshes Cloudflare; watchdog
+                # detects upstream stall.
+                threshold = (
+                    self._progress_timeout_post
+                    if seen_message_start
+                    else self._progress_timeout_pre
+                )
+                now = loop.time()
+                stall_remaining = (last_progress_at + threshold) - now
+                if stall_remaining <= 0:
+                    # Upstream has emitted no non-ping SSE event for
+                    # ``threshold`` seconds. Convert this mid-stream
+                    # stall into a clean synthetic error frame so the
+                    # SDK raises ``APIError`` immediately and any
+                    # retry-on-overloaded client (Anthropic SDK,
+                    # claude-code CLI, Cursor) recovers automatically.
+                    # Without this, the request drags out to the
+                    # client's own ~600 s read timeout for no benefit.
+                    try:
+                        _log.warning(
+                            "streaming_bridge: watchdog stall "
+                            "(seen_message_start=%s, threshold=%ss); "
+                            "emitting synthetic error frame",
+                            seen_message_start, threshold,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        yield _build_passthrough_stall_sse_frame()
+                    except Exception:
+                        pass
+                    return
+
+                # Always wait at least 0.05 s so we never busy-spin even
+                # if rounding pushes stall_remaining to a tiny positive.
+                wait_seconds = max(
+                    0.05, min(self._heartbeat_seconds, stall_remaining)
+                )
+
                 try:
                     item = await asyncio.wait_for(
-                        queue.get(), timeout=self._heartbeat_seconds
+                        queue.get(), timeout=wait_seconds
                     )
                 except asyncio.TimeoutError:
-                    # Upstream has been silent long enough that Cloudflare
-                    # would soon 524. Inject an SSE comment — clients
-                    # ignore it, Cloudflare sees activity.
+                    # Either heartbeat tick or watchdog tick fired with
+                    # no upstream chunk. Send a heartbeat and loop —
+                    # the watchdog re-evaluates on the next iteration.
                     yield _HEARTBEAT_CHUNK
                     continue
 
@@ -1074,9 +1327,21 @@ class StreamingBridge(CustomLogger):
                     # exception class.
                     raise upstream_exc
 
-                if not first_content_seen:
-                    view = _chunk_bytes_view(item)
-                    if view is not None:
+                view = _chunk_bytes_view(item)
+                if view is not None:
+                    # Watchdog bookkeeping: any non-ping SSE event in
+                    # this chunk resets the stall clock. ping-only
+                    # chunks intentionally do not reset, so a Wangsu
+                    # gateway that only sends pings during a stalled
+                    # prefill will eventually trip the watchdog.
+                    any_progress, saw_msg_start = _scan_progress_marker(view)
+                    if any_progress:
+                        last_progress_at = loop.time()
+                    if saw_msg_start and not seen_message_start:
+                        seen_message_start = True
+
+                    # TTFT stamping (independent of the watchdog).
+                    if not first_content_seen:
                         scan_buf.extend(view)
                         if _CONTENT_DELTA_MARKER in scan_buf:
                             first_content_seen = True

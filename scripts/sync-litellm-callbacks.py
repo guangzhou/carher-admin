@@ -49,6 +49,7 @@ CALLBACK_FILES: Tuple[str, ...] = (
     "streaming_bridge.py",
     "force_stream.py",
     "null_byte_sanitize.py",
+    "anthropic_passthrough_pingfix.py",
 )
 
 # Indentation of the literal block's content. This MUST match the YAML

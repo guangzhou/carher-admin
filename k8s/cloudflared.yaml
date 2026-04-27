@@ -43,6 +43,14 @@ spec:
             - /etc/cloudflared/config.yml
             - --grace-period
             - "30s"
+            # NOTE: 强制使用 HTTP/2 而非 QUIC 作为 cloudflared <-> CF Edge 的传输协议。
+            # 背景：cloudflared QUIC 路径下，对 chunked / 缺少 Content-Length 的
+            # streaming POST body 存在已知 bug（见 cloudflare/cloudflared#1485）：
+            # body 会被静默替换为 Content-Length:0，origin 收到空 body，导致
+            # LiteLLM 抛 starlette.requests.ClientDisconnect 并误报 model=None。
+            # 切到 http2 后走 TCP，绕开该 bug，社区/官方均推荐此 workaround。
+            - --protocol
+            - http2
             - run
             - carher-k8s
           lifecycle:

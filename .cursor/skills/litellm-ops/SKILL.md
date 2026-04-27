@@ -114,6 +114,8 @@ kubectl logs litellm-db-0 -n carher --tail=30 | grep ERROR
 | YAML 改了 fallback / callback 不生效 | DB `LiteLLM_Config` row 覆盖 YAML | 检查 wipe-db-config-rows initContainer 是否在跑（见 "SoT 不变量"章节） |
 | `No fallback model group found` 但 YAML 里写了 | 同上，runtime fallback 比 YAML 少 | 同上 |
 | 改了 streaming_bridge.py 看不到 patch 生效 | YAML 内嵌副本和源 drift | `python3 scripts/sync-litellm-callbacks.py check` 然后 write + 重启 |
+| `update_spend Exception` / `unexpected end of hex escape` / `invalid byte sequence for encoding "UTF8": 0x00` / `22P05`，每个 pod 每 30 分钟 23–27 次 | spend-log batch 中混入 NUL byte 或孤立 UTF-16 surrogate，整批 1000 条被 prisma/PG 拒收 → 计费/审计数据丢失 | 部署 `null_byte_sanitize.py`（见附录 C）；`bash scripts/litellm-healthcheck.sh` 里 `[3] null_byte_sanitize patch` 必须为 ✓ |
+| `RouterRateLimitError: cooldown_list=['openrouter/bge-m3']` / 整组 model group 突然全部 key 不可用 | 单 deployment 的 model group 因为某 key 401 进入 5s cooldown → 期间所有合法 key 共享被拒 | YAML 里 `router_settings.disable_cooldowns: true`（见附录 D）；同时按 P1-A 流程清理失效 key 持有方的 client |
 
 ### 手动执行 Prisma 迁移（紧急修复）
 
@@ -195,7 +197,7 @@ kubectl logs "$POD" -c litellm -n carher 2>&1 | grep "streaming_bridge: patched"
 kubectl logs "$POD" -c wipe-db-config-rows -n carher
 # 必须看到：[wipe-db-config-rows] OK: removed N row(s); LiteLLM_Config is clean ...
 
-# 3. runtime 4 个 callback + 13 fallback
+# 3. runtime 5 个 callback + 13 fallback
 MK=$(kubectl get secret litellm-secrets -n carher -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 kubectl port-forward svc/litellm-proxy 4000:4000 -n carher >/dev/null 2>&1 &
 PF=$!; sleep 3
@@ -208,7 +210,8 @@ fbs = d.get('router_settings', {}).get('fallbacks', [])
 print('callbacks:', cbs)
 print('fallback count:', len(fbs))
 expect_cbs = {'streaming_bridge.streaming_bridge','opus_47_fix.thinking_schema_fix',
-              'force_stream.force_stream','embedding_sanitize.embedding_sanitize'}
+              'force_stream.force_stream','embedding_sanitize.embedding_sanitize',
+              'null_byte_sanitize.null_byte_sanitize'}
 miss = expect_cbs - set(cbs)
 print('MISSING:', miss if miss else 'none')
 "
@@ -260,18 +263,20 @@ ORDER BY sl.\"startTime\" DESC LIMIT 30;"
 bash scripts/litellm-healthcheck.sh
 ```
 
-11 项检查，覆盖：
+15 项检查，覆盖：
 
 | 类别 | 检查项 |
 |------|--------|
 | Pod | 1/1 Running |
 | InitContainers | wipe-db-config-rows 跑了；prisma-migrate done |
-| streaming_bridge boot | iterator init patch；httpx Anthropic timeout patch (read=120s) |
-| Runtime registry | 4 个 callback 全注册（streaming_bridge / opus_47_fix / force_stream / embedding_sanitize） |
+| Boot patches | streaming_bridge: iterator init；streaming_bridge: httpx Anthropic timeout (read=120s)；null_byte_sanitize: PrismaClient.jsonify_object |
+| Runtime registry | 5 个 callback 全注册（streaming_bridge / opus_47_fix / force_stream / embedding_sanitize / null_byte_sanitize） |
 | Runtime registry | fallback count = 13 |
 | Runtime registry | opus-4.7 fallback 第一跳 = `anthropic.openrouter.claude-opus-4-7` |
+| 计费/审计 | 最近 5 分钟内 0 次 `update_spend Exception` |
+| 风暴防护 | YAML 里 `router_settings.disable_cooldowns: true` |
 
-期望输出 `PASS=11 FAIL=0`。任一项 `✗` → 不要进入下一步，对照"症状字典"和"排查路径"定位。
+期望输出 `PASS=15 FAIL=0`。任一项 `✗` → 不要进入下一步，对照"症状字典"和"排查路径"定位。
 
 CI / 运维场景建议：
 - 每次 `kubectl apply -f k8s/litellm-proxy.yaml` 后立刻跑
@@ -323,21 +328,23 @@ LiteLLM Proxy 启动时配置来源有三个，**优先级是 DB > YAML（DB 全
 有第二道同类防御：源文件在 `k8s/litellm-callbacks/`，YAML 内嵌副本由
 `scripts/sync-litellm-callbacks.py` 再生。
 
-### 当前 4 个 callback 各自的职责（重要 — 别归错位）
+### 当前 5 个 callback 各自的职责（重要 — 别归错位）
 
 | 文件 | 行数 | 注册符号 | 干什么 |
 |------|------|---------|--------|
 | `streaming_bridge.py` | ~1100 | `streaming_bridge.streaming_bridge` | **核心**：① 流式响应注 SSE 心跳防 Cloudflare 524；② 流式中途上游断流时合成 `event: error overloaded_error + event: message_stop` 给客户端，避免客户端死挂出现"600s 假成功"；③ 进程级 monkey-patch httpx Anthropic client `read=120s`（默认 600s 太长）；④ 修 `BaseAnthropicMessagesStreamingIterator.__init__` 的 `start_time`，让 TTFT 日志正确 |
 | `force_stream.py` | ~190 | `force_stream.force_stream` | 把同步（`stream=False`）请求强制包成 SSE 流式上游调用，绕开 Cloudflare 100s 整 body timeout |
 | `opus_47_fix.py` | ~145 | `opus_47_fix.thinking_schema_fix` | 仅做 thinking schema 改写（兼容 Wangsu 4.7 的 schema 差异），**不**负责 SSE 错误帧——常被误以为它管 524，实际不管 |
-| `embedding_sanitize.py` | ~95 | `embedding_sanitize.embedding_sanitize` | 清洗 embedding 输入里的孤立 surrogate（避免 bge-m3 400） |
+| `embedding_sanitize.py` | ~95 | `embedding_sanitize.embedding_sanitize` | 请求路径上的清洗：把 `data["input"]` 里的孤立 UTF-16 surrogate 剔掉再发给上游 bge-m3，避免上游 400 |
+| `null_byte_sanitize.py` | ~370 | `null_byte_sanitize.null_byte_sanitize` | **写库路径上的清洗**：monkey-patch `PrismaClient.jsonify_object` / module-level `jsonify_object` / `safe_dumps`，递归剔除 `\x00`、`\u0000` 转义、孤立 surrogate（codepoint + 字面量两种形式），保留配对 `\ud83d\ude00` emoji。**目标只有一个：让 `update_spend_logs` 后台 batch 不要因为一条脏行整批丢失（每批 1000 条）。** |
 
-启动时 boot log 中应能看到（仅 streaming_bridge 会打印这两行）：
+启动时 boot log 中应能看到这三行：
 ```
 streaming_bridge: patched BaseAnthropicMessagesStreamingIterator.__init__ to use logging_obj.start_time
 streaming_bridge: patched anthropic httpx client timeout (read=120.0s; was hardcoded 600s in LiteLLM upstream)
+null_byte_sanitize: patched PrismaClient.jsonify_object (scrubs \x00 and \u0000 from spend-log payloads)
 ```
-没看到 = 这次启动的 streaming_bridge 是旧版（drift），跑 sync 脚本。
+任何一行缺失 = 对应 callback 是旧版（drift），跑 sync 脚本。
 
 ### 改配置的标准流程
 
@@ -533,5 +540,100 @@ kubectl exec litellm-db-0 -n carher -- psql -U litellm -d litellm \
 | 2026-04-27 凌晨 | 多个 claude-code 用户 600s "假成功" duration + 个位 token | 流式中途上游 socket 断开，LiteLLM 没合成 SSE error frame，客户端死等 | `streaming_bridge.async_post_call_streaming_iterator_hook` 包流，断流时合成 `event: error overloaded_error` + `event: message_stop` |
 | 2026-04-27 下午 | 改 YAML fallback 不生效 / callback 注册不完整 | DB `LiteLLM_Config` 三行覆盖 YAML | 加 `wipe-db-config-rows` initContainer + 在 YAML 里显式 `store_model_in_db: false`；引入 `scripts/sync-litellm-callbacks.py` 防 ConfigMap 内嵌副本 drift |
 | 2026-04-27 下午 | opus-4.7 fallback 直接降一档丢质量 | 链没考虑 OpenRouter 同档 | fallback 改为 `[anthropic.openrouter.claude-opus-4-7, anthropic.claude-opus-4-6, openrouter-claude-opus-4-6]` |
+| 2026-04-27 晚 | 计费 / 审计丢数据：每个 pod 每 30 分钟 23–27 次 `update_spend Exception`，每次最多丢 1000 条 SpendLogs | LiteLLM 1.82.6 `update_spend_logs` 用 `prisma_client.db.litellm_spendlogs.create_many` 整批写库；payload 中只要混入一条**含 NUL 字节 (`\x00` / `\u0000` 转义)** 或**孤立 UTF-16 surrogate**（`\ud800-\udfff` codepoint，或 json-dump 后的字面量 `\ud83d`）的行，PG 抛 SQLSTATE `22P05` 或 prisma Rust 解析器抛 `unexpected end of hex escape`，**整批 1000 行被静默丢弃**。`embedding_sanitize` 只在请求路径修 `data["input"]`，写库路径上 `proxy_server_request` / `metadata` 里残留的 surrogate 仍会害死 batch。 | 新增 `null_byte_sanitize.py`：在 import 时 monkey-patch `PrismaClient.jsonify_object` / module-level `jsonify_object` / `safe_dumps`，递归剔除 NUL（raw + JSON 转义）和孤立 surrogate（codepoint + 字面量），同时保留配对 `\ud83d\ude00`（emoji 不破坏）。验证：13 单元 case + 1 端到端 case 全过；新 pod 上 `update_spend Exception` 计数 0 |
+| 2026-04-27 晚 | 12 个 carher key 偶发 `RouterRateLimitError: cooldown_list=['openrouter/bge-m3']`，全部 401 失败；某一时间窗内 `bge-m3` 整组对所有 key 不可用 | 一个被删除多日的"僵尸 key"（`LiteLLM_VerificationToken` 已删，但 client 还在跑）以 ~9945 次/48h 击中 LiteLLM auth → LiteLLM 把这 401 视为 router-level deployment failure → 5s cooldown → `bge-m3` 是单 deployment 的 model group，cooldown 一开**所有合法 key 同步遭殃**。Trade-off：401 在 `cooldown_handlers.py:241-247` 是被显式列入"non-retryable also cooldown"的。 | (a) **P1-A 业务侧**：业务团队定位并停用持有失效 key 的 client。(b) **P1-B 代理侧硬开关**：`router_settings.disable_cooldowns: true`，整个 router 的 cooldown 机制关闭，401 不再连坐其他 key。代价：多 deployment 的 model group 失去"跳过坏副本"能力，但 `num_retries=2` + 完整 `fallbacks` 已足够兜底。条件解除：所有僵尸 client 清完 + bge-m3 加备份 deployment。 |
 
 下次遇到类似问题，**先来这张表里搜关键词**，往往同事已经踩过。
+
+---
+
+## 附录 C：`update_spend` 失败 / 计费数据丢失专项
+
+LiteLLM 计费 / 审计依赖 `LiteLLM_SpendLogs` 表。表写入路径与请求路径**完全解耦**：
+
+```
+请求完成 → 内存 in-flight buffer (BATCH_SIZE 条上限 1000)
+              ↓ 后台协程每 ~30s 触发一次
+update_spend_logs:
+  for j in range(0, len(buffer), 1000):
+      batch = buffer[j : j+1000]
+      batch_json = [PrismaClient.jsonify_object(r) for r in batch]
+      await db.litellm_spendlogs.create_many(data=batch_json)  # ← 整批
+```
+
+**整批写**意味着：只要一个 row 触发 PG/prisma 报错，全 batch（最多 1000 条）被丢弃，且 LiteLLM 1.82.6 没有 single-row 重试逻辑——直接 `except: return`。
+
+### 触发条件（实测）
+
+| 错误形态 | 来源字段 | 报错 |
+|---------|---------|------|
+| 原始 `\x00` 字节 | `messages[*].content` / `proxy_server_request` 里二进制工具输出（DOCX/PDF 文本提取、原始字节切片） | PG: `invalid byte sequence for encoding "UTF8": 0x00` |
+| JSON 转义 `\u0000` | 客户端 / 上游已 json-dump 一遍的 payload | PG: `unsupported Unicode escape sequence ... \u0000 cannot be converted to text` (`22P05`) |
+| Codepoint 形式 lone surrogate `\uD83D` | Node.js 客户端按字节切割 emoji 后剩半个 | prisma Rust serde_json: `unexpected end of hex escape at line 1 column N` |
+| 字面量形式 lone surrogate `\ud83d`（6 ASCII 字符） | 上游已 `json.dumps(ensure_ascii=True)` 过一遍，codepoint 已变字面量 escape | 同上，prisma 同样拒收 |
+
+### 排查 / 监控 SQL
+
+```bash
+# 1. 看最近一小时 update_spend 异常数 / pod
+for p in $(kubectl get po -n carher -l app=litellm-proxy -o name); do
+  POD=${p#pod/}
+  CNT=$(kubectl logs "$POD" -n carher --since=1h 2>&1 \
+    | rg -c 'update_spend.*Exception|unexpected end of hex|22P05|invalid byte sequence' || echo 0)
+  echo "$POD: $CNT"
+done
+
+# 2. 在 DB 查最近 24h 各小时实际写入的 SpendLogs 行数（监控丢失趋势）
+kubectl exec litellm-db-0 -n carher -- psql -U litellm -d litellm -c "
+SELECT date_trunc('hour', \"startTime\") AS h,
+       count(*) AS rows
+FROM \"LiteLLM_SpendLogs\"
+WHERE \"startTime\" > NOW() - INTERVAL '24 hours'
+GROUP BY 1 ORDER BY 1;"
+```
+
+### 修复后状态（2026-04-27 验证）
+
+新 pod 启动 5 分钟后：
+
+```bash
+# update_spend 异常计数（应 = 0）
+kubectl logs <new-pod> -c litellm -n carher --since=5m | rg -c 'update_spend.*Exception' || echo 0
+
+# 端到端 functional verify
+kubectl exec <new-pod> -c litellm -- python3 -c "
+import sys; sys.path.insert(0, '/app')
+import null_byte_sanitize  # triggers patch
+from litellm.proxy.utils import PrismaClient
+print('patched flag:', getattr(PrismaClient.jsonify_object,
+                               '_null_byte_sanitize_patched', False))
+"
+# 期望: patched flag: True
+```
+
+### 设计要点
+
+* **为什么不用 CustomLogger pre-call hook**：失败发生在请求**之后** N 百毫秒的后台 batch flush，pre-call hook 进不去那个时间窗。唯一可靠拦截点是 `PrismaClient.jsonify_object` 这条最后必经的序列化函数。
+* **为什么三个函数都 patch**：① `PrismaClient.jsonify_object`（实例方法）— 1.82.6 spend-log 真正调用的入口；② module-level `jsonify_object`（同名函数）— credential / vector-store 等其他写库路径走的；③ `safe_dumps` — 异常序列化、telemetry 用的；②③ 是防御性补丁，防上游下次 refactor 把入口换走。
+* **保留配对 surrogate**：JSON 规范里 `\ud83d\ude00` 是合法的 emoji 编码，prisma 接受。我们的 regex 用 lookahead/lookbehind 严格区分孤立 vs 配对，避免把好 emoji 也清掉。
+* **失败回退**：`_strip_nul` 内部抛异常时，patched 函数把原始 `data` 透传给原版 `jsonify_object`。**绝不允许这个 hook 自己变成新的故障点。**
+
+### 何时移除
+
+LiteLLM upstream 自带 NUL byte / lone surrogate sanitization 落地后（追踪 issue #21290 / #24310 / #19847），此 callback 就退化为 cosmetic no-op，可以直接删除。
+
+---
+
+## 附录 D：`disable_cooldowns: true` 的语义和何时关掉
+
+`router_settings.disable_cooldowns: true`（已部署）等价于 LiteLLM `cooldown_handlers.py:136-140` 的早返回——**任何 deployment 在任何错误下都不会进入冷却**。
+
+代价：多副本 model group 失去"跳过短暂坏副本"能力。但当前 carher 部署里：
+* `Wangsu Direct5` / `OpenRouter` 这种多 deployment 组：仍有 `num_retries: 2` + router 级 `fallbacks` 兜底，用户基本无感
+* `BAAI/bge-m3` 等单 deployment 组：cooldown 本来就没意义（cooldown 一开 = 整组挂），关掉只有好处
+
+**保留这条配置的两个前置条件——任何一条不满足都不要删**：
+1. 所有失效 key 持有方的 client 清理完毕（`LiteLLM_VerificationToken` 删除后**不应该**再有 401 流量打过来），且
+2. `bge-m3` 等关键单点 model group 已加备份 deployment **或** 在 `router_settings.fallbacks` 里显式补上一条 `{"BAAI/bge-m3": [...]}`
+
+历史上类似 401 风暴 → 单 deployment cooldown → 全组瘫的事件是常见 LiteLLM 反模式：上游 GitHub issue 列表里至少有 5 起。`disable_cooldowns` 是这类问题的"硬开关"。

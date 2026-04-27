@@ -1,9 +1,10 @@
 """
-LiteLLM streaming bridge — SSE heartbeat + TTFT fix for the
+LiteLLM streaming bridge — SSE heartbeat + TTFT fix + httpx
+read-timeout patch + mid-stream stall recovery for the
 ``anthropic_messages`` (/v1/messages) passthrough path.
 
-Three independent problems this module addresses
-------------------------------------------------
+Four independent problems this module addresses
+-----------------------------------------------
 
 1.  **524 origin timeouts on Claude Code CLI clients.**
 
@@ -63,10 +64,34 @@ Three independent problems this module addresses
     hook wasn't in effect). We need to explicitly stamp
     ``completion_start_time`` when the first user-visible token arrives.
 
+4.  **600 s "fake-success" hangs after upstream Wangsu cheliantianxia
+    network gateway stalls mid-stream.**
+
+    LiteLLM's ``async_anthropic_messages_handler`` (used for the
+    passthrough ``/v1/messages`` path) calls ``httpx.AsyncClient.post()``
+    without ever passing the configured ``request_timeout`` /
+    ``stream_timeout`` value. The httpx client is therefore
+    constructed with its hardcoded default ``Timeout(read=600)``, which
+    only fires after the connection has been silent for 600 wall-clock
+    seconds. Combined with the heartbeat patch above (which keeps
+    Cloudflare alive indefinitely), upstream Wangsu cheliantianxia
+    stalls produced ``LiteLLM_SpendLogs`` rows with
+    ``duration ≈ 600 s``, ``status = success``, ``output_tokens ≤ 18``
+    -- "fake successes" where the client received only whitespace
+    heartbeats and ultimately raised
+    ``API returned an empty or malformed response (HTTP 200)``.
+
+    Confirmed root cause via direct httpx introspection:
+    ``litellm.LlmProviders.ANTHROPIC`` async httpx client has
+    ``timeout = Timeout(connect=5, read=600, write=600, pool=600)``.
+    OpenAI / OpenRouter clients have the same default; they simply do
+    not exhibit the bug in production because their endpoints do not
+    stall mid-stream.
+
 Fix
 ---
 
-This module does two things at import time + one thing per request:
+This module does three things at import time + two things per request:
 
 *   **(patch, global)** Replaces
     ``BaseAnthropicMessagesStreamingIterator.__init__`` with a version
@@ -79,6 +104,23 @@ This module does two things at import time + one thing per request:
     proxy-entry time is semantically the right value for
     ``LiteLLM_SpendLogs.startTime`` in every case — this removes the
     upstream bug's effect on Duration as well.
+
+*   **(patch, global, env-gated)** Tightens the per-chunk read timeout
+    on the cached ``litellm.LlmProviders.ANTHROPIC`` async httpx
+    client from the hardcoded 600 s default to a configurable value
+    (default 120 s when the env var
+    ``STREAMING_BRIDGE_HTTPX_READ_TIMEOUT_SECONDS`` is set). Also
+    wraps ``litellm.llms.custom_httpx.http_handler.get_async_httpx_client``
+    so any future cache miss returns a tightened client. Only the
+    Anthropic provider is touched -- OpenAI / OpenRouter / Vertex
+    clients keep their 600 s defaults.
+
+    With this patch in effect, an upstream stall surfaces as
+    ``httpx.ReadTimeout`` after the configured interval instead of
+    600 s. Pre-headers stalls then trigger LiteLLM Router's normal
+    retry + fallback machinery; mid-stream stalls bubble up into
+    this iterator hook, which converts them into a clean Anthropic
+    error frame so the client SDK can retry.
 
 *   **(hook, gated)** Registers an
     ``async_post_call_streaming_iterator_hook`` callback. For requests
@@ -98,6 +140,17 @@ This module does two things at import time + one thing per request:
       spec, any compliant SSE client (incl. all Anthropic SDKs and
       claude-code CLI) silently ignores lines starting with ``:``.
       Cloudflare sees activity on the wire and does not time out.
+    * If the upstream raises ``httpx.ReadTimeout`` (mid-stream stall
+      surfaced by the global httpx patch), pass-through mode emits a
+      synthetic ``event: error`` (``overloaded_error``) +
+      ``event: message_stop`` SSE pair so the Anthropic SDK raises a
+      clean ``APIError`` and clients with retry logic (claude-code CLI,
+      Cursor) recover automatically. Collapse mode emits a synthetic
+      Anthropic ``Message`` JSON whose ``content[0].text`` explains
+      the stall (Pydantic-validated against ``anthropic.types.Message``
+      in pre-deployment mock testing) so non-streaming clients see a
+      parseable response instead of an
+      ``APIResponseValidationError``.
 
 Combined effect for canary requests
 -----------------------------------
@@ -145,9 +198,13 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import logging as _stdlib_logging
 import os
-from typing import Any, AsyncIterator, Optional, Set, Tuple
+import uuid
+from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
+
+import httpx
 
 from litellm.integrations.custom_logger import CustomLogger
 import litellm
@@ -183,6 +240,460 @@ _CONTENT_DELTA_MARKER: bytes = b"content_block_delta"
 # well under 4 KB; 64 KB leaves plenty of headroom while still capping
 # worst-case buffering for a request that never emits a delta.
 _SCAN_BUFFER_LIMIT: int = 64 * 1024
+
+
+# --------------------------- collapse mode ----------------------------
+#
+# When ``force_stream`` flipped ``data["stream"]=True`` for a request
+# whose client originally did NOT ask for streaming, we are in collapse
+# mode: upstream sends SSE, but the client expects a single JSON body.
+#
+# In this mode the bridge:
+#   - yields a single space (b" ") every HEARTBEAT_INTERVAL_SECONDS to
+#     keep Cloudflare's idle timer alive. JSON parsers ignore leading
+#     whitespace so the eventual JSON body still parses cleanly.
+#   - buffers all upstream SSE bytes
+#   - on EOF, parses the accumulated SSE events and reassembles them
+#     into the single Anthropic Message JSON object that a non-streaming
+#     call would have returned, then yields that as the final chunk.
+#
+# Output bytes go through ``return_sse_chunk`` and
+# ``_process_chunk_with_cost_injection`` in
+# ``async_streaming_data_generator``; both are no-ops for raw bytes
+# that aren't shaped like SSE frames, so our whitespace and final JSON
+# bytes pass through unmodified.
+
+# Single-space heartbeat. This is the key trick of collapse mode:
+# (a) JSON's grammar tolerates arbitrary leading whitespace,
+#     so a stream like ``b"   {...}"`` parses identically to ``b"{...}"``
+# (b) Cloudflare sees activity on the wire and resets its idle timer.
+_COLLAPSE_HEARTBEAT_CHUNK: bytes = b" "
+
+
+def _request_data_marks_collapse(request_data: Any) -> bool:
+    """Was this request flipped to streaming by ``force_stream``?
+
+    The flag travels via ``request_data["litellm_metadata"]
+    ["_force_stream_collapse"]``. Returns False on any access error so
+    a malformed metadata blob never crashes the iterator hook.
+    """
+    try:
+        if not isinstance(request_data, dict):
+            return False
+        md = request_data.get("litellm_metadata")
+        if not isinstance(md, dict):
+            return False
+        return bool(md.get("_force_stream_collapse"))
+    except Exception:
+        return False
+
+
+def _parse_anthropic_sse_events(buf: bytes) -> List[Dict[str, Any]]:
+    """Parse a raw Anthropic SSE byte buffer into a list of event dicts.
+
+    Each Anthropic SSE event has the shape::
+
+        event: <event_name>
+        data: <json>
+
+    separated by a blank line. A single TCP chunk often contains many
+    events. The ``data`` JSON's ``"type"`` field also names the event,
+    so for our reassembly we ignore the ``event:`` line and key off the
+    parsed JSON's ``type``.
+
+    Malformed events are skipped, not raised — partial / truncated
+    upstream responses still produce as much output as we can.
+    """
+    events: List[Dict[str, Any]] = []
+    if not buf:
+        return events
+    # SSE event boundary is a blank line. Normalize CRLF first.
+    normalized = buf.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    for raw_event in normalized.split(b"\n\n"):
+        raw_event = raw_event.strip()
+        if not raw_event:
+            continue
+        data_lines: List[bytes] = []
+        for line in raw_event.split(b"\n"):
+            if line.startswith(b"data:"):
+                data_lines.append(line[len(b"data:") :].lstrip())
+            elif line.startswith(b"data: "):  # belt-and-suspenders
+                data_lines.append(line[len(b"data: ") :])
+        if not data_lines:
+            continue
+        try:
+            payload = json.loads(b"\n".join(data_lines).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            events.append(payload)
+    return events
+
+
+def _reassemble_anthropic_message(
+    events: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Walk parsed SSE events to rebuild the single Message JSON that
+    a non-streaming Anthropic /v1/messages call would have returned.
+
+    Anthropic's streaming protocol splits a Message into:
+
+        message_start         -> seeds the message envelope (id, model,
+                                 role, usage.input_tokens, empty content)
+        content_block_start   -> initializes content[index] with a typed
+                                 stub ({"type": "text", "text": ""},
+                                 {"type": "tool_use", "input": {} from
+                                 partial_json}, {"type": "thinking", ...})
+        content_block_delta   -> incrementally fills the block
+                                 (text_delta, thinking_delta,
+                                 input_json_delta, signature_delta)
+        content_block_stop    -> finalizes the block (for tool_use we
+                                 must JSON-decode the accumulated
+                                 partial_json into ``input``)
+        message_delta         -> stop_reason, stop_sequence, usage
+                                 deltas (output_tokens etc.)
+        message_stop          -> end of message
+        ping                  -> ignored
+        error                 -> upstream error mid-stream; we surface
+                                 it as a JSON error response so the
+                                 client's non-streaming path can raise
+
+    Returns ``None`` if no ``message_start`` was ever seen — caller
+    surfaces that as an explicit error to the client.
+    """
+    msg: Optional[Dict[str, Any]] = None
+    # Per-index accumulator for partial_json (tool_use input)
+    partial_inputs: Dict[int, str] = {}
+
+    for ev in events:
+        ev_type = ev.get("type")
+
+        if ev_type == "error":
+            # Return Anthropic-shaped error envelope. Their non-streaming
+            # error format matches this exactly.
+            err_body = ev.get("error", ev)
+            return {"type": "error", "error": err_body}
+
+        if ev_type == "message_start":
+            inner = ev.get("message")
+            if isinstance(inner, dict):
+                msg = dict(inner)
+                if not isinstance(msg.get("content"), list):
+                    msg["content"] = []
+            continue
+
+        if msg is None:
+            # Got a non-message_start event before message_start. Skip.
+            continue
+
+        if ev_type == "content_block_start":
+            idx = ev.get("index", 0)
+            block = ev.get("content_block")
+            if not isinstance(block, dict):
+                continue
+            block = dict(block)
+            content_list = msg.setdefault("content", [])
+            while len(content_list) <= idx:
+                content_list.append({})
+            content_list[idx] = block
+            if block.get("type") == "tool_use":
+                # tool_use blocks accumulate partial_json deltas; the
+                # ``input`` field is filled at content_block_stop.
+                partial_inputs[idx] = ""
+                block.setdefault("input", {})
+            continue
+
+        if ev_type == "content_block_delta":
+            idx = ev.get("index", 0)
+            delta = ev.get("delta") or {}
+            content_list = msg.get("content") or []
+            if not (0 <= idx < len(content_list)):
+                continue
+            block = content_list[idx]
+            if not isinstance(block, dict):
+                continue
+            d_type = delta.get("type")
+            if d_type == "text_delta":
+                block["text"] = (block.get("text") or "") + (delta.get("text") or "")
+            elif d_type == "thinking_delta":
+                block["thinking"] = (block.get("thinking") or "") + (
+                    delta.get("thinking") or ""
+                )
+            elif d_type == "signature_delta":
+                # signatures are sent whole, but be defensive about
+                # multiple deltas just in case.
+                sig = delta.get("signature") or ""
+                block["signature"] = (block.get("signature") or "") + sig
+            elif d_type == "input_json_delta":
+                partial_inputs[idx] = partial_inputs.get(idx, "") + (
+                    delta.get("partial_json") or ""
+                )
+            continue
+
+        if ev_type == "content_block_stop":
+            idx = ev.get("index", 0)
+            if idx in partial_inputs:
+                pj = partial_inputs.pop(idx)
+                content_list = msg.get("content") or []
+                if 0 <= idx < len(content_list) and isinstance(
+                    content_list[idx], dict
+                ):
+                    try:
+                        content_list[idx]["input"] = json.loads(pj) if pj else {}
+                    except (json.JSONDecodeError, TypeError):
+                        # Leave whatever we had; the client will see a
+                        # malformed tool_use input but at least the rest
+                        # of the message is intact.
+                        content_list[idx].setdefault("input", {})
+            continue
+
+        if ev_type == "message_delta":
+            delta = ev.get("delta") or {}
+            if "stop_reason" in delta:
+                msg["stop_reason"] = delta.get("stop_reason")
+            if "stop_sequence" in delta:
+                msg["stop_sequence"] = delta.get("stop_sequence")
+            usage = ev.get("usage")
+            if isinstance(usage, dict):
+                existing = msg.setdefault("usage", {})
+                if not isinstance(existing, dict):
+                    existing = {}
+                    msg["usage"] = existing
+                existing.update(usage)
+            continue
+
+        # message_stop / ping / unknown -> no-op
+    return msg
+
+
+def _build_collapsed_synthetic_message(
+    detail: str,
+    model_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Construct a Pydantic-valid Anthropic ``Message`` that surfaces
+    the error condition to the user inline.
+
+    Background: Anthropic's Python / TypeScript SDK validates non-streaming
+    response bodies against the ``Message`` model (``id``, ``role``,
+    ``content``, ``stop_reason``, ``usage`` etc. are required). If we
+    were to emit ``{"type": "error", "error": {...}}`` over a
+    non-streaming HTTP 200 (which is what the collapsed path always
+    returns -- LiteLLM has already committed to status=200 with
+    ``Content-Type: text/event-stream`` by the time we yield), Pydantic
+    rejects it and the SDK raises ``APIResponseValidationError`` with a
+    confusing schema dump instead of a readable message.
+
+    This synthesizer instead emits a real ``Message`` whose ``content[0]``
+    text describes the failure. Shape-validated against
+    ``anthropic.types.Message.model_validate`` in pre-deployment mock
+    tests. ``stop_reason="end_turn"`` is the canonical "complete, no
+    error" terminator; choosing it (vs. ``"max_tokens"`` etc.) avoids
+    triggering any client-side retry-on-truncation heuristics.
+    """
+    return {
+        "id": f"msg_carher_proxy_{uuid.uuid4().hex[:12]}",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {
+                "type": "text",
+                "text": f"[CarHer LiteLLM] {detail}",
+            }
+        ],
+        "model": model_name or "anthropic.claude",
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+    }
+
+
+def _is_upstream_stall_exception(exc: BaseException) -> bool:
+    """Return True iff ``exc`` indicates an upstream mid-stream stall
+    that should be surfaced as a clean Anthropic error frame rather
+    than re-raised.
+
+    The httpx-timeout patch turns a stalled upstream connection into
+    ``httpx.ReadTimeout`` after the configured interval. A subset of
+    LiteLLM internal paths re-wrap the underlying ``httpx`` exceptions
+    in their own classes whose names contain ``Timeout``; we accept
+    both shapes to be defensive against version drift.
+    """
+    if isinstance(exc, httpx.ReadTimeout):
+        return True
+    if isinstance(exc, httpx.ConnectTimeout):
+        return True
+    if isinstance(exc, asyncio.TimeoutError):
+        return True
+    cls_name = type(exc).__name__.lower()
+    return "timeout" in cls_name
+
+
+def _build_passthrough_stall_sse_frame() -> bytes:
+    """Synthetic Anthropic SSE frame to terminate a stalled stream cleanly.
+
+    Emits ``event: error`` (with Anthropic's ``overloaded_error`` type
+    so SDKs that special-case throttling treat it as retryable) followed
+    by ``event: message_stop`` so the SDK's stream parser cleanly
+    resolves and the underlying ``Stream`` iterator raises ``APIError``
+    instead of waiting on more bytes.
+    """
+    err_payload = {
+        "type": "error",
+        "error": {
+            "type": "overloaded_error",
+            "message": (
+                "Upstream stalled mid-stream after first byte; "
+                "please retry."
+            ),
+        },
+    }
+    stop_payload = {"type": "message_stop"}
+    return (
+        b"event: error\ndata: "
+        + json.dumps(err_payload).encode("utf-8")
+        + b"\n\n"
+        + b"event: message_stop\ndata: "
+        + json.dumps(stop_payload).encode("utf-8")
+        + b"\n\n"
+    )
+
+
+def _load_anthropic_read_timeout() -> Optional[float]:
+    """Read the desired anthropic httpx read timeout from the environment.
+
+    Returns ``None`` when the env var is unset / blank, signaling that
+    the global httpx-timeout patch must NOT be applied (preserves the
+    upstream LiteLLM default of 600 s for a clean rollback path:
+    unsetting the env var returns the proxy to pre-patch behavior on
+    next pod restart).
+
+    Clamped to ``[30, 600]`` seconds:
+
+    * ``< 30 s`` would risk false positives on ordinary long thinking
+      (the longest observed gap between live wire bytes during normal
+      Opus 4.7 thinking is ~28 s -- 30 s is the hard floor below which
+      we'd cause regressions).
+    * ``> 600 s`` makes the patch a no-op vs. the LiteLLM default, so
+      anything beyond is silently capped.
+    """
+    raw = os.environ.get("STREAMING_BRIDGE_HTTPX_READ_TIMEOUT_SECONDS")
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value < 30.0:
+        return 30.0
+    if value > 600.0:
+        return 600.0
+    return value
+
+
+def _patch_anthropic_httpx_timeout() -> None:
+    """Tighten the per-chunk read timeout on the cached anthropic
+    async httpx client and on any future cache miss.
+
+    LiteLLM's ``async_anthropic_messages_handler`` builds upstream
+    requests via ``httpx_client.post(stream=True)`` without forwarding
+    the configured ``request_timeout`` / ``stream_timeout``, so the
+    underlying ``httpx.AsyncClient`` falls back to its hardcoded
+    ``Timeout(read=600)`` default. That 600 s default is what produced
+    the observed "fake-success" rows in production: upstream Wangsu
+    cheliantianxia hangs mid-stream → httpx silently waits the full 600 s
+    → the response body finally closes with ``message_stop`` only ever
+    relayed as our keep-alive whitespace heartbeats → the client SDK
+    eventually raises ``empty or malformed response``.
+
+    Patch strategy:
+
+    1. Look up the cached anthropic async client (it is a singleton
+       within the LiteLLM process) and overwrite ``client.timeout``
+       in-place. This catches the case where the client was
+       constructed before this module imported, which happens during
+       LiteLLM's normal startup sequence.
+    2. Wrap ``http_handler.get_async_httpx_client`` so any future cache
+       miss (rare; happens only if the singleton is evicted or a new
+       provider variant is registered) returns a tightened client.
+
+    Idempotent via the ``_streaming_bridge_patched`` attribute on the
+    wrapped function. Failing open: any error in the patch logs a
+    warning and leaves the client at its 600 s default.
+    """
+    new_read = _load_anthropic_read_timeout()
+    if new_read is None:
+        _log.warning(
+            "streaming_bridge: anthropic httpx timeout patch DISABLED "
+            "(STREAMING_BRIDGE_HTTPX_READ_TIMEOUT_SECONDS unset)"
+        )
+        return
+
+    try:
+        from litellm.llms.custom_httpx import http_handler as _hh
+    except Exception as exc:
+        _log.error(
+            "streaming_bridge: cannot import http_handler for httpx patch: %r",
+            exc,
+        )
+        return
+
+    new_timeout = httpx.Timeout(
+        connect=10.0,
+        read=new_read,
+        write=30.0,
+        pool=600.0,
+    )
+
+    try:
+        cached = _hh.get_async_httpx_client(litellm.LlmProviders.ANTHROPIC)
+        cached.timeout = new_timeout
+        cached.client.timeout = new_timeout
+    except Exception as exc:
+        _log.warning(
+            "streaming_bridge: cannot tighten cached anthropic client timeout: %r",
+            exc,
+        )
+
+    if getattr(_hh.get_async_httpx_client, "_streaming_bridge_patched", False):
+        _log.warning(
+            "streaming_bridge: get_async_httpx_client already patched; "
+            "anthropic timeout=read %ss",
+            new_read,
+        )
+        return
+
+    _orig_get = _hh.get_async_httpx_client
+
+    def _patched_get(*args, **kwargs):  # type: ignore[no-untyped-def]
+        client = _orig_get(*args, **kwargs)
+        # Determine the provider regardless of how the caller passed it.
+        # LiteLLM's signature is
+        # ``get_async_httpx_client(llm_provider, params=None)``; some call
+        # sites use the kwarg form, others positional. Don't enforce a
+        # signature here -- forward args verbatim and inspect.
+        provider = kwargs.get("llm_provider")
+        if provider is None and args:
+            provider = args[0]
+        if provider == litellm.LlmProviders.ANTHROPIC:
+            try:
+                client.timeout = new_timeout
+                client.client.timeout = new_timeout
+            except Exception:
+                pass
+        return client
+
+    _patched_get._streaming_bridge_patched = True  # type: ignore[attr-defined]
+    _hh.get_async_httpx_client = _patched_get
+    _log.warning(
+        "streaming_bridge: patched anthropic httpx client timeout "
+        "(read=%ss; was hardcoded 600s in LiteLLM upstream)",
+        new_read,
+    )
 
 
 def _load_canary_aliases() -> Set[str]:
@@ -275,7 +786,7 @@ def _patch_base_anthropic_streaming_iterator() -> None:
 
     patched_init._streaming_bridge_patched = True  # type: ignore[attr-defined]
     BaseAnthropicMessagesStreamingIterator.__init__ = patched_init
-    _log.info(
+    _log.warning(
         "streaming_bridge: patched BaseAnthropicMessagesStreamingIterator.__init__"
         " to use logging_obj.start_time"
     )
@@ -284,6 +795,12 @@ def _patch_base_anthropic_streaming_iterator() -> None:
 # Apply the __init__ patch at import time so every subsequent
 # /v1/messages request uses the corrected start_time.
 _patch_base_anthropic_streaming_iterator()
+
+# Apply the anthropic httpx read-timeout patch at import time so the
+# very next /v1/messages call uses the tightened timeout. Env-gated;
+# unsetting STREAMING_BRIDGE_HTTPX_READ_TIMEOUT_SECONDS reverts to
+# LiteLLM's 600 s default on next pod restart (clean rollback).
+_patch_anthropic_httpx_timeout()
 
 
 class StreamingBridge(CustomLogger):
@@ -356,6 +873,8 @@ class StreamingBridge(CustomLogger):
                 yield chunk
             return
 
+        collapse_mode = _request_data_marks_collapse(request_data)
+
         # Prefetcher pushes upstream chunks into a queue; the main loop
         # reads with wait_for so we can inject heartbeats on silence.
         queue: asyncio.Queue = asyncio.Queue()
@@ -374,6 +893,129 @@ class StreamingBridge(CustomLogger):
                 await queue.put(eof_sentinel)
 
         task = asyncio.create_task(_prefetch())
+
+        # ---------- collapse mode ----------
+        # Buffer everything from upstream; never relay SSE bytes to the
+        # client. Yield a single space (b" ") on a wall-clock cadence
+        # so the client TCP connection always sees activity, even when
+        # upstream is busy emitting SSE events that we are silently
+        # buffering. JSON parsers ignore leading whitespace so the
+        # eventual JSON body still parses cleanly.
+        #
+        # Critical detail: the heartbeat MUST fire on wall-clock
+        # cadence, not on "no upstream chunk in N seconds". If we keyed
+        # off upstream silence, a chatty SSE stream (ping every 1 s,
+        # content_block_delta every 200 ms) would buffer everything
+        # internally for 100+ s without yielding anything to the
+        # client, and Cloudflare would 524 the connection. By
+        # tracking time-since-last-yield-to-client we guarantee the
+        # client wire sees a byte at least every ``_heartbeat_seconds``
+        # regardless of how busy upstream is.
+        if collapse_mode:
+            collapse_buf = bytearray()
+            stamped = False
+            last_yield_at: float = asyncio.get_event_loop().time()
+            upstream_done = False
+            upstream_error: Optional[BaseException] = None
+
+            async def _drain_one(timeout: float) -> bool:
+                """Pull one item from the queue with a timeout.
+
+                Returns True if EOF was reached, False if a chunk was
+                buffered, raises asyncio.TimeoutError on timeout.
+                """
+                nonlocal stamped
+                item = await asyncio.wait_for(queue.get(), timeout=timeout)
+                if item is eof_sentinel:
+                    return True
+                if (
+                    isinstance(item, tuple)
+                    and len(item) == 2
+                    and item[0] is err_sentinel
+                ):
+                    raise item[1]
+                view = _chunk_bytes_view(item)
+                if view is not None:
+                    collapse_buf.extend(view)
+                    if (
+                        not stamped
+                        and _CONTENT_DELTA_MARKER in collapse_buf
+                        and not getattr(
+                            logging_obj, "completion_start_time", None
+                        )
+                    ):
+                        self._stamp_completion_start(logging_obj)
+                        stamped = True
+                return False
+
+            try:
+                while not upstream_done:
+                    now = asyncio.get_event_loop().time()
+                    remaining = self._heartbeat_seconds - (now - last_yield_at)
+                    if remaining <= 0:
+                        # Heartbeat is overdue. Yield right now and
+                        # reset the wall-clock timer.
+                        yield _COLLAPSE_HEARTBEAT_CHUNK
+                        last_yield_at = asyncio.get_event_loop().time()
+                        continue
+                    try:
+                        upstream_done = await _drain_one(timeout=remaining)
+                    except asyncio.TimeoutError:
+                        # Heartbeat interval elapsed with no EOF; yield
+                        # whitespace and loop back to wait again.
+                        yield _COLLAPSE_HEARTBEAT_CHUNK
+                        last_yield_at = asyncio.get_event_loop().time()
+                    except Exception as exc:
+                        upstream_error = exc
+                        break
+
+                if upstream_error is not None:
+                    # Upstream errored mid-stream. Anthropic SDK validates
+                    # the non-streaming response body against the Message
+                    # Pydantic model, so emitting a raw error envelope
+                    # would surface as APIResponseValidationError on the
+                    # client. Yield a synthetic Message instead -- the
+                    # client sees a parseable response whose text body
+                    # explains the failure, which is strictly better UX
+                    # than an opaque schema dump.
+                    if _is_upstream_stall_exception(upstream_error):
+                        detail = (
+                            "Upstream stalled mid-stream after first byte "
+                            "(httpx read timeout); please retry."
+                        )
+                    else:
+                        detail = (
+                            f"upstream stream interrupted: "
+                            f"{type(upstream_error).__name__}"
+                        )
+                    msg = _build_collapsed_synthetic_message(detail)
+                    yield json.dumps(msg, ensure_ascii=False).encode("utf-8")
+                    return
+
+                # Upstream closed cleanly. Reassemble + emit one JSON.
+                events = _parse_anthropic_sse_events(bytes(collapse_buf))
+                msg = _reassemble_anthropic_message(events)
+                if msg is None or msg.get("type") != "message":
+                    # Either no message_start was ever produced, or the
+                    # upstream emitted only an `error` event mid-stream
+                    # (which _reassemble surfaces as type=error). In both
+                    # cases emit a synthetic Message so the client SDK
+                    # parses the body cleanly.
+                    msg = _build_collapsed_synthetic_message(
+                        "Upstream did not produce a complete message; "
+                        "please retry.",
+                    )
+                yield json.dumps(msg, ensure_ascii=False).encode("utf-8")
+                return
+            finally:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+        # ---------- pass-through mode (existing behavior) ----------
         # Scan buffer for first `content_block_delta` marker across chunk
         # boundaries (httpx may split a single SSE frame across TCP reads).
         # We keep up to ``_SCAN_BUFFER_LIMIT`` bytes and slide the window
@@ -402,7 +1044,35 @@ class StreamingBridge(CustomLogger):
                     and len(item) == 2
                     and item[0] is err_sentinel
                 ):
-                    raise item[1]
+                    upstream_exc = item[1]
+                    # Mid-stream stalls show up here as httpx.ReadTimeout
+                    # (the global httpx-timeout patch fires after the
+                    # configured interval). Translating that into a clean
+                    # Anthropic SSE error frame lets the client SDK raise
+                    # a parseable APIError instead of silently waiting on
+                    # a stream that already terminated. Clients with
+                    # retry-on-overloaded behavior (claude-code CLI,
+                    # Cursor, Anthropic SDK with default backoff) recover
+                    # automatically.
+                    if _is_upstream_stall_exception(upstream_exc):
+                        try:
+                            _log.warning(
+                                "streaming_bridge: passthrough mid-stream stall, "
+                                "emitting synthetic error frame: %r",
+                                upstream_exc,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            yield _build_passthrough_stall_sse_frame()
+                        except Exception:
+                            pass
+                        return
+                    # Non-stall exception (real upstream error, network
+                    # reset, etc.) — surface unchanged so LiteLLM's
+                    # outer handlers / spend-log writer see the real
+                    # exception class.
+                    raise upstream_exc
 
                 if not first_content_seen:
                     view = _chunk_bytes_view(item)

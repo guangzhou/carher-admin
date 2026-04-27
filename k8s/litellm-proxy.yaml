@@ -1036,11 +1036,12 @@ data:
 
   streaming_bridge.py: |
     """
-    LiteLLM streaming bridge — SSE heartbeat + TTFT fix for the
+    LiteLLM streaming bridge — SSE heartbeat + TTFT fix + httpx
+    read-timeout patch + mid-stream stall recovery for the
     ``anthropic_messages`` (/v1/messages) passthrough path.
 
-    Three independent problems this module addresses
-    ------------------------------------------------
+    Four independent problems this module addresses
+    -----------------------------------------------
 
     1.  **524 origin timeouts on Claude Code CLI clients.**
 
@@ -1100,10 +1101,34 @@ data:
         hook wasn't in effect). We need to explicitly stamp
         ``completion_start_time`` when the first user-visible token arrives.
 
+    4.  **600 s "fake-success" hangs after upstream Wangsu cheliantianxia
+        network gateway stalls mid-stream.**
+
+        LiteLLM's ``async_anthropic_messages_handler`` (used for the
+        passthrough ``/v1/messages`` path) calls ``httpx.AsyncClient.post()``
+        without ever passing the configured ``request_timeout`` /
+        ``stream_timeout`` value. The httpx client is therefore
+        constructed with its hardcoded default ``Timeout(read=600)``, which
+        only fires after the connection has been silent for 600 wall-clock
+        seconds. Combined with the heartbeat patch above (which keeps
+        Cloudflare alive indefinitely), upstream Wangsu cheliantianxia
+        stalls produced ``LiteLLM_SpendLogs`` rows with
+        ``duration ≈ 600 s``, ``status = success``, ``output_tokens ≤ 18``
+        -- "fake successes" where the client received only whitespace
+        heartbeats and ultimately raised
+        ``API returned an empty or malformed response (HTTP 200)``.
+
+        Confirmed root cause via direct httpx introspection:
+        ``litellm.LlmProviders.ANTHROPIC`` async httpx client has
+        ``timeout = Timeout(connect=5, read=600, write=600, pool=600)``.
+        OpenAI / OpenRouter clients have the same default; they simply do
+        not exhibit the bug in production because their endpoints do not
+        stall mid-stream.
+
     Fix
     ---
 
-    This module does two things at import time + one thing per request:
+    This module does three things at import time + two things per request:
 
     *   **(patch, global)** Replaces
         ``BaseAnthropicMessagesStreamingIterator.__init__`` with a version
@@ -1116,6 +1141,23 @@ data:
         proxy-entry time is semantically the right value for
         ``LiteLLM_SpendLogs.startTime`` in every case — this removes the
         upstream bug's effect on Duration as well.
+
+    *   **(patch, global, env-gated)** Tightens the per-chunk read timeout
+        on the cached ``litellm.LlmProviders.ANTHROPIC`` async httpx
+        client from the hardcoded 600 s default to a configurable value
+        (default 120 s when the env var
+        ``STREAMING_BRIDGE_HTTPX_READ_TIMEOUT_SECONDS`` is set). Also
+        wraps ``litellm.llms.custom_httpx.http_handler.get_async_httpx_client``
+        so any future cache miss returns a tightened client. Only the
+        Anthropic provider is touched -- OpenAI / OpenRouter / Vertex
+        clients keep their 600 s defaults.
+
+        With this patch in effect, an upstream stall surfaces as
+        ``httpx.ReadTimeout`` after the configured interval instead of
+        600 s. Pre-headers stalls then trigger LiteLLM Router's normal
+        retry + fallback machinery; mid-stream stalls bubble up into
+        this iterator hook, which converts them into a clean Anthropic
+        error frame so the client SDK can retry.
 
     *   **(hook, gated)** Registers an
         ``async_post_call_streaming_iterator_hook`` callback. For requests
@@ -1135,6 +1177,17 @@ data:
           spec, any compliant SSE client (incl. all Anthropic SDKs and
           claude-code CLI) silently ignores lines starting with ``:``.
           Cloudflare sees activity on the wire and does not time out.
+        * If the upstream raises ``httpx.ReadTimeout`` (mid-stream stall
+          surfaced by the global httpx patch), pass-through mode emits a
+          synthetic ``event: error`` (``overloaded_error``) +
+          ``event: message_stop`` SSE pair so the Anthropic SDK raises a
+          clean ``APIError`` and clients with retry logic (claude-code CLI,
+          Cursor) recover automatically. Collapse mode emits a synthetic
+          Anthropic ``Message`` JSON whose ``content[0].text`` explains
+          the stall (Pydantic-validated against ``anthropic.types.Message``
+          in pre-deployment mock testing) so non-streaming clients see a
+          parseable response instead of an
+          ``APIResponseValidationError``.
 
     Combined effect for canary requests
     -----------------------------------
@@ -1185,7 +1238,10 @@ data:
     import json
     import logging as _stdlib_logging
     import os
+    import uuid
     from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
+
+    import httpx
 
     from litellm.integrations.custom_logger import CustomLogger
     import litellm
@@ -1447,18 +1503,234 @@ data:
         return msg
 
 
-    def _build_collapsed_error(message: str, code: int = 500) -> Dict[str, Any]:
-        """Construct an Anthropic-shaped error response for the collapsed
-        path when reassembly fails entirely (no message_start, decode
-        error, etc.). Keeps client behavior consistent with a real
-        upstream error."""
+    def _build_collapsed_synthetic_message(
+        detail: str,
+        model_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Construct a Pydantic-valid Anthropic ``Message`` that surfaces
+        the error condition to the user inline.
+
+        Background: Anthropic's Python / TypeScript SDK validates non-streaming
+        response bodies against the ``Message`` model (``id``, ``role``,
+        ``content``, ``stop_reason``, ``usage`` etc. are required). If we
+        were to emit ``{"type": "error", "error": {...}}`` over a
+        non-streaming HTTP 200 (which is what the collapsed path always
+        returns -- LiteLLM has already committed to status=200 with
+        ``Content-Type: text/event-stream`` by the time we yield), Pydantic
+        rejects it and the SDK raises ``APIResponseValidationError`` with a
+        confusing schema dump instead of a readable message.
+
+        This synthesizer instead emits a real ``Message`` whose ``content[0]``
+        text describes the failure. Shape-validated against
+        ``anthropic.types.Message.model_validate`` in pre-deployment mock
+        tests. ``stop_reason="end_turn"`` is the canonical "complete, no
+        error" terminator; choosing it (vs. ``"max_tokens"`` etc.) avoids
+        triggering any client-side retry-on-truncation heuristics.
+        """
         return {
-            "type": "error",
-            "error": {
-                "type": "api_error",
-                "message": message,
+            "id": f"msg_carher_proxy_{uuid.uuid4().hex[:12]}",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"[CarHer LiteLLM] {detail}",
+                }
+            ],
+            "model": model_name or "anthropic.claude",
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
             },
         }
+
+
+    def _is_upstream_stall_exception(exc: BaseException) -> bool:
+        """Return True iff ``exc`` indicates an upstream mid-stream stall
+        that should be surfaced as a clean Anthropic error frame rather
+        than re-raised.
+
+        The httpx-timeout patch turns a stalled upstream connection into
+        ``httpx.ReadTimeout`` after the configured interval. A subset of
+        LiteLLM internal paths re-wrap the underlying ``httpx`` exceptions
+        in their own classes whose names contain ``Timeout``; we accept
+        both shapes to be defensive against version drift.
+        """
+        if isinstance(exc, httpx.ReadTimeout):
+            return True
+        if isinstance(exc, httpx.ConnectTimeout):
+            return True
+        if isinstance(exc, asyncio.TimeoutError):
+            return True
+        cls_name = type(exc).__name__.lower()
+        return "timeout" in cls_name
+
+
+    def _build_passthrough_stall_sse_frame() -> bytes:
+        """Synthetic Anthropic SSE frame to terminate a stalled stream cleanly.
+
+        Emits ``event: error`` (with Anthropic's ``overloaded_error`` type
+        so SDKs that special-case throttling treat it as retryable) followed
+        by ``event: message_stop`` so the SDK's stream parser cleanly
+        resolves and the underlying ``Stream`` iterator raises ``APIError``
+        instead of waiting on more bytes.
+        """
+        err_payload = {
+            "type": "error",
+            "error": {
+                "type": "overloaded_error",
+                "message": (
+                    "Upstream stalled mid-stream after first byte; "
+                    "please retry."
+                ),
+            },
+        }
+        stop_payload = {"type": "message_stop"}
+        return (
+            b"event: error\ndata: "
+            + json.dumps(err_payload).encode("utf-8")
+            + b"\n\n"
+            + b"event: message_stop\ndata: "
+            + json.dumps(stop_payload).encode("utf-8")
+            + b"\n\n"
+        )
+
+
+    def _load_anthropic_read_timeout() -> Optional[float]:
+        """Read the desired anthropic httpx read timeout from the environment.
+
+        Returns ``None`` when the env var is unset / blank, signaling that
+        the global httpx-timeout patch must NOT be applied (preserves the
+        upstream LiteLLM default of 600 s for a clean rollback path:
+        unsetting the env var returns the proxy to pre-patch behavior on
+        next pod restart).
+
+        Clamped to ``[30, 600]`` seconds:
+
+        * ``< 30 s`` would risk false positives on ordinary long thinking
+          (the longest observed gap between live wire bytes during normal
+          Opus 4.7 thinking is ~28 s -- 30 s is the hard floor below which
+          we'd cause regressions).
+        * ``> 600 s`` makes the patch a no-op vs. the LiteLLM default, so
+          anything beyond is silently capped.
+        """
+        raw = os.environ.get("STREAMING_BRIDGE_HTTPX_READ_TIMEOUT_SECONDS")
+        if not raw:
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if value < 30.0:
+            return 30.0
+        if value > 600.0:
+            return 600.0
+        return value
+
+
+    def _patch_anthropic_httpx_timeout() -> None:
+        """Tighten the per-chunk read timeout on the cached anthropic
+        async httpx client and on any future cache miss.
+
+        LiteLLM's ``async_anthropic_messages_handler`` builds upstream
+        requests via ``httpx_client.post(stream=True)`` without forwarding
+        the configured ``request_timeout`` / ``stream_timeout``, so the
+        underlying ``httpx.AsyncClient`` falls back to its hardcoded
+        ``Timeout(read=600)`` default. That 600 s default is what produced
+        the observed "fake-success" rows in production: upstream Wangsu
+        cheliantianxia hangs mid-stream → httpx silently waits the full 600 s
+        → the response body finally closes with ``message_stop`` only ever
+        relayed as our keep-alive whitespace heartbeats → the client SDK
+        eventually raises ``empty or malformed response``.
+
+        Patch strategy:
+
+        1. Look up the cached anthropic async client (it is a singleton
+           within the LiteLLM process) and overwrite ``client.timeout``
+           in-place. This catches the case where the client was
+           constructed before this module imported, which happens during
+           LiteLLM's normal startup sequence.
+        2. Wrap ``http_handler.get_async_httpx_client`` so any future cache
+           miss (rare; happens only if the singleton is evicted or a new
+           provider variant is registered) returns a tightened client.
+
+        Idempotent via the ``_streaming_bridge_patched`` attribute on the
+        wrapped function. Failing open: any error in the patch logs a
+        warning and leaves the client at its 600 s default.
+        """
+        new_read = _load_anthropic_read_timeout()
+        if new_read is None:
+            _log.warning(
+                "streaming_bridge: anthropic httpx timeout patch DISABLED "
+                "(STREAMING_BRIDGE_HTTPX_READ_TIMEOUT_SECONDS unset)"
+            )
+            return
+
+        try:
+            from litellm.llms.custom_httpx import http_handler as _hh
+        except Exception as exc:
+            _log.error(
+                "streaming_bridge: cannot import http_handler for httpx patch: %r",
+                exc,
+            )
+            return
+
+        new_timeout = httpx.Timeout(
+            connect=10.0,
+            read=new_read,
+            write=30.0,
+            pool=600.0,
+        )
+
+        try:
+            cached = _hh.get_async_httpx_client(litellm.LlmProviders.ANTHROPIC)
+            cached.timeout = new_timeout
+            cached.client.timeout = new_timeout
+        except Exception as exc:
+            _log.warning(
+                "streaming_bridge: cannot tighten cached anthropic client timeout: %r",
+                exc,
+            )
+
+        if getattr(_hh.get_async_httpx_client, "_streaming_bridge_patched", False):
+            _log.warning(
+                "streaming_bridge: get_async_httpx_client already patched; "
+                "anthropic timeout=read %ss",
+                new_read,
+            )
+            return
+
+        _orig_get = _hh.get_async_httpx_client
+
+        def _patched_get(*args, **kwargs):  # type: ignore[no-untyped-def]
+            client = _orig_get(*args, **kwargs)
+            # Determine the provider regardless of how the caller passed it.
+            # LiteLLM's signature is
+            # ``get_async_httpx_client(llm_provider, params=None)``; some call
+            # sites use the kwarg form, others positional. Don't enforce a
+            # signature here -- forward args verbatim and inspect.
+            provider = kwargs.get("llm_provider")
+            if provider is None and args:
+                provider = args[0]
+            if provider == litellm.LlmProviders.ANTHROPIC:
+                try:
+                    client.timeout = new_timeout
+                    client.client.timeout = new_timeout
+                except Exception:
+                    pass
+            return client
+
+        _patched_get._streaming_bridge_patched = True  # type: ignore[attr-defined]
+        _hh.get_async_httpx_client = _patched_get
+        _log.warning(
+            "streaming_bridge: patched anthropic httpx client timeout "
+            "(read=%ss; was hardcoded 600s in LiteLLM upstream)",
+            new_read,
+        )
 
 
     def _load_canary_aliases() -> Set[str]:
@@ -1551,7 +1823,7 @@ data:
 
         patched_init._streaming_bridge_patched = True  # type: ignore[attr-defined]
         BaseAnthropicMessagesStreamingIterator.__init__ = patched_init
-        _log.info(
+        _log.warning(
             "streaming_bridge: patched BaseAnthropicMessagesStreamingIterator.__init__"
             " to use logging_obj.start_time"
         )
@@ -1560,6 +1832,12 @@ data:
     # Apply the __init__ patch at import time so every subsequent
     # /v1/messages request uses the corrected start_time.
     _patch_base_anthropic_streaming_iterator()
+
+    # Apply the anthropic httpx read-timeout patch at import time so the
+    # very next /v1/messages call uses the tightened timeout. Env-gated;
+    # unsetting STREAMING_BRIDGE_HTTPX_READ_TIMEOUT_SECONDS reverts to
+    # LiteLLM's 600 s default on next pod restart (clean rollback).
+    _patch_anthropic_httpx_timeout()
 
 
     class StreamingBridge(CustomLogger):
@@ -1729,21 +2007,40 @@ data:
                             break
 
                     if upstream_error is not None:
-                        # Upstream errored before completing. Surface an
-                        # Anthropic-shaped error envelope; the client's
-                        # non-streaming path will raise a sensible APIError.
-                        err_body = _build_collapsed_error(
-                            f"upstream stream interrupted: {upstream_error!r}"
-                        )
-                        yield json.dumps(err_body).encode("utf-8")
+                        # Upstream errored mid-stream. Anthropic SDK validates
+                        # the non-streaming response body against the Message
+                        # Pydantic model, so emitting a raw error envelope
+                        # would surface as APIResponseValidationError on the
+                        # client. Yield a synthetic Message instead -- the
+                        # client sees a parseable response whose text body
+                        # explains the failure, which is strictly better UX
+                        # than an opaque schema dump.
+                        if _is_upstream_stall_exception(upstream_error):
+                            detail = (
+                                "Upstream stalled mid-stream after first byte "
+                                "(httpx read timeout); please retry."
+                            )
+                        else:
+                            detail = (
+                                f"upstream stream interrupted: "
+                                f"{type(upstream_error).__name__}"
+                            )
+                        msg = _build_collapsed_synthetic_message(detail)
+                        yield json.dumps(msg, ensure_ascii=False).encode("utf-8")
                         return
 
                     # Upstream closed cleanly. Reassemble + emit one JSON.
                     events = _parse_anthropic_sse_events(bytes(collapse_buf))
                     msg = _reassemble_anthropic_message(events)
-                    if msg is None:
-                        msg = _build_collapsed_error(
-                            "upstream stream produced no message_start event"
+                    if msg is None or msg.get("type") != "message":
+                        # Either no message_start was ever produced, or the
+                        # upstream emitted only an `error` event mid-stream
+                        # (which _reassemble surfaces as type=error). In both
+                        # cases emit a synthetic Message so the client SDK
+                        # parses the body cleanly.
+                        msg = _build_collapsed_synthetic_message(
+                            "Upstream did not produce a complete message; "
+                            "please retry.",
                         )
                     yield json.dumps(msg, ensure_ascii=False).encode("utf-8")
                     return
@@ -1784,7 +2081,35 @@ data:
                         and len(item) == 2
                         and item[0] is err_sentinel
                     ):
-                        raise item[1]
+                        upstream_exc = item[1]
+                        # Mid-stream stalls show up here as httpx.ReadTimeout
+                        # (the global httpx-timeout patch fires after the
+                        # configured interval). Translating that into a clean
+                        # Anthropic SSE error frame lets the client SDK raise
+                        # a parseable APIError instead of silently waiting on
+                        # a stream that already terminated. Clients with
+                        # retry-on-overloaded behavior (claude-code CLI,
+                        # Cursor, Anthropic SDK with default backoff) recover
+                        # automatically.
+                        if _is_upstream_stall_exception(upstream_exc):
+                            try:
+                                _log.warning(
+                                    "streaming_bridge: passthrough mid-stream stall, "
+                                    "emitting synthetic error frame: %r",
+                                    upstream_exc,
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                yield _build_passthrough_stall_sse_frame()
+                            except Exception:
+                                pass
+                            return
+                        # Non-stall exception (real upstream error, network
+                        # reset, etc.) — surface unchanged so LiteLLM's
+                        # outer handlers / spend-log writer see the real
+                        # exception class.
+                        raise upstream_exc
 
                     if not first_content_seen:
                         view = _chunk_bytes_view(item)
@@ -2006,7 +2331,377 @@ data:
     force_stream = ForceStream()
 
   null_byte_sanitize.py: |
-    # placeholder — populated by scripts/sync-litellm-callbacks.py write
+    """
+    LiteLLM spend-log payload sanitizer — strips NUL bytes and lone UTF-16
+    surrogates that crash the ``update_spend_logs`` flush job.
+
+    Problem
+    -------
+    LiteLLM 1.82.6's ``update_spend_logs`` background job flushes accumulated
+    ``LiteLLM_SpendLogs`` rows to PostgreSQL in batches of up to 1000 via
+    ``prisma_client.db.litellm_spendlogs.create_many(...)``. Each row's dict
+    fields (``messages``, ``response``, ``metadata``, ``proxy_server_request``)
+    are first serialized via ``PrismaClient.jsonify_object`` (defined in
+    ``litellm/proxy/utils.py``):
+
+        def jsonify_object(self, data: dict) -> dict:
+            db_data = copy.deepcopy(data)
+            for k, v in db_data.items():
+                if isinstance(v, dict):
+                    try:
+                        db_data[k] = json.dumps(v)
+                    except Exception:
+                        db_data[k] = "failed-to-serialize-json"
+            return db_data
+
+    This implementation does **zero validation** of two byte patterns that
+    PostgreSQL or its prisma driver reject:
+
+      1. **NUL bytes** (``\\x00`` and the literal escape ``\\u0000``).
+         Commonly emitted by binary tool outputs — DOCX/PDF text extraction,
+         raw byte slices, client-side ``\\u0000`` escapes in user content.
+         ``json.dumps`` encodes ``\\x00`` as the literal six-character
+         sequence ``\\u0000``, which PostgreSQL rejects in both ``text`` and
+         ``jsonb``:
+
+             ERROR: invalid byte sequence for encoding "UTF8": 0x00
+             ERROR: unsupported Unicode escape sequence
+             DETAIL: \\u0000 cannot be converted to text.   (SQLSTATE 22P05)
+
+      2. **Lone UTF-16 surrogates** (``\\ud800``..``\\udfff`` codepoints
+         not paired with a counterpart). Produced when Node.js clients
+         byte-slice an emoji or otherwise truncate a string at a non-codepoint
+         boundary. Python's ``str`` happily holds them, and CPython
+         ``json.dumps(ensure_ascii=True)`` emits them as a 4-digit hex
+         escape — but the prisma client's Rust ``serde_json`` parser
+         enforces the JSON spec strictly and rejects any lone surrogate
+         with::
+
+             prisma.errors.DataError: ... is not a valid JSON String.
+             Underlying error: unexpected end of hex escape at line 1 column N
+
+         The ``embedding_sanitize`` pre-call hook strips lone surrogates
+         from ``data["input"]`` before the upstream call, but the spend-log
+         payload is built from independent copies — ``proxy_server_request``
+         (raw client body), ``metadata`` (logging context), and the
+         ``UserAPIKeyAuth`` repr — so lone surrogates can still reach the
+         DB even when the embedding call itself succeeded.
+
+    In **either case**, when ``create_many`` (NUL byte → PG side) or its
+    prisma JSON encoder (lone surrogate → driver side) hits one bad row,
+    **the entire batch of up to 1000 rows is rejected and silently
+    discarded** by LiteLLM's flush loop:
+
+        # litellm/proxy/utils.py — update_spend_logs
+        for j in range(0, len(logs_to_process), BATCH_SIZE):
+            batch = logs_to_process[j : j + BATCH_SIZE]
+            batch_with_dates = [
+                prisma_client.jsonify_object({**entry}) for entry in batch
+            ]
+            await prisma_client.db.litellm_spendlogs.create_many(
+                data=batch_with_dates, skip_duplicates=True
+            )
+            # Items already removed from queue at start of function
+            # (NO retry, NO single-row split, just drops the whole batch)
+
+    In production this manifests as 23–27 ``update_spend`` failures per
+    pod per 30 minutes, each erasing up to 1000 spend rows from the
+    billing / audit trail. Upstream issues with no fix merged:
+
+      - https://github.com/BerriAI/litellm/issues/21290  (NUL bytes)
+      - https://github.com/BerriAI/litellm/issues/24310  (NUL bytes)
+      - https://github.com/BerriAI/litellm/issues/19847  (lone surrogates)
+
+    Fix strategy
+    ------------
+    We monkey-patch ``PrismaClient.jsonify_object`` (and the module-level
+    ``jsonify_object`` for defense-in-depth) at import time so that every
+    spend-log batch is recursively scrubbed of:
+
+      * raw NUL byte ``\\x00`` and its JSON escape ``\\u0000``, and
+      * any lone UTF-16 surrogate codepoint in U+D800..U+DFFF
+
+    **before** ``json.dumps`` is invoked. Once the bad bytes are gone,
+    PostgreSQL accepts the row and the prisma driver successfully encodes
+    the batch.
+
+    We also patch ``litellm_core_utils/safe_json_dumps.safe_dumps`` because
+    several other paths inside LiteLLM (logging payloads, exception
+    serialization) reach the DB through it, even though it is not on the
+    spend-log critical path today — cheap insurance against the next
+    upstream code reshuffle.
+
+    Why monkey-patch and not a CustomLogger pre-call hook
+    -----------------------------------------------------
+    The failure happens in a *background job* (``update_spend_logs``),
+    hundreds of milliseconds after the originating request has already
+    returned to the client. CustomLogger hooks (``async_pre_call_hook``,
+    ``async_log_success_event``) run in the request lifecycle and **cannot
+    intercept the batch flush**. The only reliable interception point is
+    the serializer itself.
+
+    Trade-offs
+    ----------
+      * **Lossiness**: stripping ``\\x00`` from a string discards what was
+        almost certainly garbage anyway (PG cannot store it, the LLM
+        cannot tokenize it cleanly, and most tools that generate it are
+        binary-mode artifacts). The literal text ``\\u0000`` *that the user
+        typed* will also be stripped — extremely rare in practice and
+        losing it is preferable to losing the entire 1000-row batch.
+
+        Lone surrogates only exist in strings that are already broken
+        UTF-16 fragments (e.g. half of an emoji). They cannot tokenize as
+        valid Unicode, so dropping them is identical to what the upstream
+        LLM would do anyway; we just do it earlier.
+
+      * **Fail-open**: if ``_strip_nul`` itself raises, the original data is
+        passed through unchanged. We never block a spend log on this hook.
+
+      * **Idempotence**: each patch checks a private flag on the function
+        object so that re-importing this module (e.g. during dev reloads)
+        does not stack patches.
+
+    Removal criteria
+    ----------------
+    Remove this entire module once an upstream LiteLLM release ships its
+    own NUL-byte sanitization in ``jsonify_object`` / ``safe_dumps``. At
+    that point the patch becomes a no-op cosmetic and can be deleted.
+
+    Verification (recorded 2026-04-27)
+    ----------------------------------
+      * pod ``litellm-proxy-554dc489d5-fh86v`` — direct INSERT into
+        ``LiteLLM_SpendLogs`` with raw ``\\x00`` and literal ``\\u0000``
+        payloads reproduces both PG error variants.
+      * Same pod — monkey-patched ``PrismaClient.jsonify_object`` correctly
+        scrubbed both byte forms, output JSON contained neither.
+      * pod ``litellm-proxy-7758ccb55c-4qfb7`` (after rollout) — observed
+        a fresh ``unexpected end of hex escape`` on a ``BAAI/bge-m3`` row
+        whose ``proxy_server_request.input[]`` contained the lone surrogate
+        ``\\ud83d`` (truncated emoji). Confirms that NUL stripping alone
+        is insufficient and motivates the extension to surrogate stripping.
+    """
+    from __future__ import annotations
+
+    import logging
+    import re
+    from typing import Any
+
+    from litellm.integrations.custom_logger import CustomLogger
+
+
+    _log = logging.getLogger(__name__)
+
+
+    # ── core sanitizer ─────────────────────────────────────────────────────
+    # Strip both the raw NUL byte and its JSON-escaped literal form. The
+    # literal ``\\u0000`` arrives whenever upstream code already ran
+    # ``json.dumps`` on a NUL-containing value (which is exactly what
+    # ``jsonify_object`` does for nested dicts, see docstring above).
+    _NUL_RAW = "\x00"
+    _NUL_ESCAPED = "\\u0000"
+
+    # Lone (unpaired) UTF-16 surrogate code points. CPython auto-collapses
+    # correctly-paired surrogates to a single >U+FFFF codepoint, so this
+    # regex only matches genuinely broken fragments — typically half of an
+    # emoji that was byte-truncated upstream.
+    _LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+
+    # JSON-escape *literal* form of a lone surrogate (6 ASCII chars: \uDxxx).
+    # Reaches the spend-log buffer when upstream code has already run
+    # ``json.dumps`` once on a value containing a lone surrogate codepoint,
+    # so by the time our patch sees it the codepoint is gone but the
+    # 6-character escape sequence remains. Prisma's Rust serde_json driver
+    # rejects this literal form just as harshly as the codepoint form
+    # ("unexpected end of hex escape").
+    #
+    # We must NOT strip *paired* surrogate literals like ``\\ud83d\\ude00`` —
+    # those are the JSON spec's official way to encode codepoints above
+    # U+FFFF (e.g. emoji) and prisma accepts them. Hence the lookahead /
+    # lookbehind to require the partner be missing.
+    _LITERAL_HIGH_LONE_RE = re.compile(
+        # high surrogate `\uD800..\uDBFF` NOT followed by a low surrogate
+        r"\\u[dD][89aAbB][0-9a-fA-F]{2}"
+        r"(?!\\u[dD][c-fC-F][0-9a-fA-F]{2})"
+    )
+    _LITERAL_LOW_LONE_RE = re.compile(
+        # low surrogate `\uDC00..\uDFFF` NOT preceded by a high surrogate
+        r"(?<!\\u[dD][89aAbB][0-9a-fA-F]{2})"
+        r"\\u[dD][c-fC-F][0-9a-fA-F]{2}"
+    )
+
+
+    def _scrub_str(s: str) -> str:
+        """Strip every byte sequence that crashes our PG/prisma write path.
+
+        Three independent checks; cheap-existence test first so the common
+        case (clean string) allocates nothing.
+        """
+        if _NUL_RAW in s or _NUL_ESCAPED in s:
+            s = s.replace(_NUL_RAW, "").replace(_NUL_ESCAPED, "")
+        if _LONE_SURROGATE_RE.search(s):
+            s = _LONE_SURROGATE_RE.sub("", s)
+        # ``\\u`` only appears in strings that have been json-dumped at least
+        # once, so this short-circuit avoids two re.sub passes on every
+        # input string in the common case.
+        if "\\u" in s:
+            s = _LITERAL_HIGH_LONE_RE.sub("", s)
+            s = _LITERAL_LOW_LONE_RE.sub("", s)
+        return s
+
+
+    def _strip_nul(value: Any) -> Any:
+        """Recursively scrub PG/prisma-unsafe bytes from
+        ``str`` / ``list`` / ``tuple`` / ``dict`` values.
+
+        Despite the historical name (``_strip_nul``), this also handles
+        lone UTF-16 surrogates — kept for backwards-compat with any
+        external reference to the symbol.
+
+        Anything other than the above container/string types (int / float /
+        bool / None / unknown objects) is returned untouched. The walk is
+        O(N) on the encoded payload size with no allocation when the input
+        is already clean.
+        """
+        if isinstance(value, str):
+            return _scrub_str(value)
+        if isinstance(value, dict):
+            return {k: _strip_nul(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_strip_nul(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(_strip_nul(v) for v in value)
+        return value
+
+
+    # ── patch points ───────────────────────────────────────────────────────
+    def _patch_prisma_jsonify_object() -> None:
+        """Wrap ``PrismaClient.jsonify_object`` (the instance method actually
+        used by ``update_spend_logs``) so every flushed batch is scrubbed
+        before ``json.dumps``.
+
+        Idempotent via ``_null_byte_sanitize_patched`` attribute.
+        """
+        try:
+            from litellm.proxy import utils as _proxy_utils
+        except Exception as exc:
+            _log.error(
+                "null_byte_sanitize: cannot import litellm.proxy.utils: %r",
+                exc,
+            )
+            return
+
+        PrismaClient = getattr(_proxy_utils, "PrismaClient", None)
+        if PrismaClient is None:
+            _log.error(
+                "null_byte_sanitize: litellm.proxy.utils.PrismaClient missing; "
+                "skipping jsonify_object patch"
+            )
+            return
+
+        if getattr(PrismaClient.jsonify_object, "_null_byte_sanitize_patched", False):
+            return
+
+        original = PrismaClient.jsonify_object
+
+        def patched_jsonify_object(self, data: dict) -> dict:  # type: ignore[no-untyped-def]
+            try:
+                cleaned = _strip_nul(data) if isinstance(data, dict) else data
+            except Exception as exc:
+                try:
+                    _log.warning(
+                        "null_byte_sanitize: _strip_nul failed (%r); falling back to original data",
+                        exc,
+                    )
+                except Exception:
+                    pass
+                cleaned = data
+            return original(self, cleaned)
+
+        patched_jsonify_object._null_byte_sanitize_patched = True  # type: ignore[attr-defined]
+        PrismaClient.jsonify_object = patched_jsonify_object  # type: ignore[method-assign]
+        _log.warning(
+            "null_byte_sanitize: patched PrismaClient.jsonify_object "
+            "(scrubs \\x00 and \\u0000 from spend-log payloads)"
+        )
+
+
+    def _patch_module_level_jsonify_object() -> None:
+        """Also patch the module-level ``litellm.proxy.utils.jsonify_object``
+        function (defined at line 2264 in 1.82.6 alongside the instance
+        method). It is currently used by credential / vector-store / org
+        endpoints — not the spend-log critical path — but patching it is
+        cheap insurance and mirrors the instance-method behavior.
+
+        Idempotent via ``_null_byte_sanitize_patched`` attribute.
+        """
+        try:
+            from litellm.proxy import utils as _proxy_utils
+        except Exception:
+            return
+
+        fn = getattr(_proxy_utils, "jsonify_object", None)
+        if fn is None or getattr(fn, "_null_byte_sanitize_patched", False):
+            return
+
+        def patched_module_jsonify_object(data: dict) -> dict:  # type: ignore[no-untyped-def]
+            try:
+                cleaned = _strip_nul(data) if isinstance(data, dict) else data
+            except Exception:
+                cleaned = data
+            return fn(cleaned)
+
+        patched_module_jsonify_object._null_byte_sanitize_patched = True  # type: ignore[attr-defined]
+        _proxy_utils.jsonify_object = patched_module_jsonify_object  # type: ignore[assignment]
+
+
+    def _patch_safe_json_dumps() -> None:
+        """Wrap ``safe_dumps`` so any future upstream path that routes
+        through it on the way to PG also has NUL bytes scrubbed.
+
+        ``safe_dumps`` is used by exception serialization, telemetry
+        payloads, and some logging callbacks. Not currently on the
+        spend-log critical path in 1.82.6, but upstream has been moving
+        serialization in this direction.
+
+        Idempotent via ``_null_byte_sanitize_patched`` attribute.
+        """
+        try:
+            from litellm.litellm_core_utils import safe_json_dumps as _sjd
+        except Exception:
+            return
+
+        fn = getattr(_sjd, "safe_dumps", None)
+        if fn is None or getattr(fn, "_null_byte_sanitize_patched", False):
+            return
+
+        def patched_safe_dumps(data: Any, max_depth: int = 10) -> str:  # type: ignore[no-untyped-def]
+            try:
+                cleaned = _strip_nul(data)
+            except Exception:
+                cleaned = data
+            return fn(cleaned, max_depth)
+
+        patched_safe_dumps._null_byte_sanitize_patched = True  # type: ignore[attr-defined]
+        _sjd.safe_dumps = patched_safe_dumps  # type: ignore[assignment]
+
+
+    # Apply all patches at import time so the very next ``update_spend_logs``
+    # tick scrubs whatever NUL-bearing rows are already sitting in the
+    # in-memory buffer.
+    _patch_prisma_jsonify_object()
+    _patch_module_level_jsonify_object()
+    _patch_safe_json_dumps()
+
+
+    class NullByteSanitize(CustomLogger):
+        """Inert ``CustomLogger`` placeholder so this module can be referenced
+        from ``litellm_settings.callbacks`` like the other callbacks in
+        the deployment. All real work is done by the import-time patches
+        above; this class is just the registration handle.
+        """
+
+
+    null_byte_sanitize = NullByteSanitize()
 
 ---
 apiVersion: apps/v1

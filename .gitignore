@@ -29,3 +29,15 @@ cloud-migration-it-handover.md
 k8s/litellm-callbacks/tests/.venv/
 k8s/litellm-callbacks/__pycache__/
 k8s/litellm-callbacks/tests/__pycache__/
+
+# Large binaries / installers (don't commit to repo)
+*.dmg
+docs/QNX_UT_Training_v2.pptx
+docs/*.tar.gz
+
+# Raw data exports (large + may contain sensitive info)
+docs/litellm-raw-*.csv
+
+# Claude Code: project-level settings.json is committed,
+# but local-only overrides stay out of the repo
+.claude/settings.local.json

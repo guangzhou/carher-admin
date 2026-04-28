@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(lark-cli im *)",
+      "Bash(npx skills *)"
+    ]
+  }
+}

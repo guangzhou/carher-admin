@@ -233,6 +233,7 @@ import datetime
 import json
 import logging as _stdlib_logging
 import os
+import re
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 
@@ -327,6 +328,78 @@ _PROGRESS_MARKERS: Tuple[bytes, ...] = (
     b"event: error",
 )
 _MESSAGE_START_MARKER: bytes = b"event: message_start"
+
+
+# --------------------------- [DONE] residue filter --------------------
+#
+# Anthropic SSE protocol terminates a stream with
+# ``event: message_stop\ndata: {"type":"message_stop"}\n\n``. There is
+# no ``[DONE]`` marker in Anthropic's spec — that is an OpenAI-protocol
+# terminator. Some upstreams (notably OpenRouter's ``/v1/messages``
+# Anthropic-compat endpoint) leak ``data: [DONE]`` at end-of-stream
+# anyway. The Claude Code official SDK silently ignores unknown SSE
+# lines so it tolerates the noise; strict Anthropic SDK clients
+# (``acpx``/``openclaw``) parse every ``data:`` line as JSON and abort
+# with::
+#
+#     Could not parse Anthropic SSE event data:
+#     Unexpected token 'D', "[DONE]" is not valid JSON
+#
+# Filtering ``[DONE]`` at the LiteLLM egress is a protocol-level
+# cleanup: every legitimate Anthropic event (message_start /
+# content_block_delta / ping / message_stop / error / ...) passes
+# through unchanged, only the OpenAI residue is stripped. The pattern
+# requires ``[DONE]`` to be the entire payload of a ``data:`` line
+# (``\s*\[DONE\]\s*\n+``), so a literal ``[DONE]`` substring inside a
+# JSON string is NOT matched and never falsely dropped.
+_SSE_DONE_PATTERN: re.Pattern = re.compile(
+    rb"(?:^|\n)(?:event:\s*[^\n]*\n)?data:\s*\[DONE\]\s*\n+",
+    re.IGNORECASE,
+)
+
+
+def _strip_sse_done_lines(chunk: bytes) -> bytes:
+    """Remove OpenAI-style ``data: [DONE]`` SSE events from ``chunk``.
+
+    Fast-path returns the same object (identity-equal) when the literal
+    byte sequence ``[DONE]`` is absent, so the cost on hot streaming
+    chunks is a single ``in`` containment check. The caller can rely on
+    ``cleaned is chunk`` to mean "no rewrite happened".
+
+    Replacement preserves the leading ``\\n`` for matches that start
+    inside the chunk so adjacent SSE events stay separated; matches at
+    chunk start become empty (the next chunk will supply its own
+    leading bytes).
+
+    NOTE on chunk boundaries: this function operates on a single byte
+    buffer at a time. When a TCP read happens to split the literal byte
+    sequence ``[DONE]`` across two chunks (e.g. ``...data: [D`` |
+    ``ONE]\\n\\n``), the fast-path containment check on the second chunk
+    triggers but the regex fails to match (because the chunk does not
+    start with ``data:`` or ``\\n``), which would leak the residue to
+    the client. The egress loop in
+    ``async_post_call_streaming_iterator_hook`` therefore feeds this
+    function a buffer that has been concatenated with a small carry-over
+    tail from the previous chunk; see ``_EGRESS_TAIL_KEEP`` below.
+    """
+    if b"[DONE]" not in chunk:
+        return chunk
+
+    def _replace(match: "re.Match[bytes]") -> bytes:
+        return b"" if match.start() == 0 else b"\n"
+
+    return _SSE_DONE_PATTERN.sub(_replace, chunk)
+
+
+# Tail length carried between chunks so the per-chunk ``[DONE]`` regex
+# can heal cross-chunk splits. The longest pattern we want to match
+# is ``event: data\ndata: [DONE]\n\n`` (26 bytes); 32 leaves a small
+# safety margin while keeping carry-over latency negligible. Any chunk
+# whose total length is ``<= _EGRESS_TAIL_KEEP`` is fully buffered and
+# emitted on the next chunk (or at EOF), which matters only for the
+# final 1–2 chunks of a stream — earlier chunks are typically 1–8 KB
+# from the upstream gateway and round-trip through here unchanged.
+_EGRESS_TAIL_KEEP: int = 32
 
 
 # --------------------------- collapse mode ----------------------------
@@ -1235,6 +1308,60 @@ class StreamingBridge(CustomLogger):
         last_progress_at: float = loop.time()
         seen_message_start: bool = False
 
+        # Complete-event egress buffer. The bridge yields bytes to the
+        # client only at SSE event boundaries (blank line, ``\n\n``).
+        # Any trailing bytes after the last complete event are held here
+        # until the next upstream chunk arrives, then prepended.
+        #
+        # Why this is a CORRECTNESS requirement (not just a [DONE]
+        # healing nicety): when upstream goes silent for the heartbeat
+        # interval, the bridge injects ``: keepalive\n\n`` to keep the
+        # connection warm. SSE protocol treats lines starting with
+        # ``:`` as ignorable comments — but ONLY if the parser is at a
+        # line boundary when ``:`` arrives. If we yielded a chunk
+        # whose last bytes ended mid-``data:`` line (no trailing
+        # ``\n``), the heartbeat's leading ``: keepalive`` byte
+        # sequence appends directly onto the in-progress ``data:``
+        # line. The first ``\n`` in the heartbeat then terminates the
+        # corrupted line, the second ``\n`` dispatches the SSE event,
+        # and the client's JSON parser sees a ``data:`` payload like
+        # ``{"type":"text_delta","text":"hel: keepalive`` —
+        # raising ``SyntaxError: Expected '}'`` (or ``Unterminated
+        # string`` / ``Expecting ',' delimiter`` depending on where
+        # the chunk split fell).
+        #
+        # tenggeer's VS Code extension hit this on 2026-04-28 13:23
+        # CST during a 321 s Opus 4.6 stream emitting 25 919 output
+        # tokens. The bug fires whenever (a) TCP fragments an
+        # upstream ``data:`` line (long ``thinking_delta`` payloads
+        # routinely exceed the ~1500 B MTU and split mid-line) AND
+        # (b) the ensuing intra-event silence exceeds the heartbeat
+        # interval. The official Claude Code SDK happens to tolerate
+        # malformed ``data:`` lines silently; stricter SDKs (acpx /
+        # openclaw / VS Code Continue / Cursor's anthropic provider)
+        # abort the session.
+        #
+        # By buffering only the trailing partial event, we preserve
+        # two invariants:
+        #
+        #   I1. Every bytes batch we yield ends in ``\n\n``, so heartbeat
+        #       injection always lands on an SSE event boundary and is
+        #       parsed as a comment.
+        #   I2. Cross-chunk splits inside ``data: [DONE]`` are healed
+        #       automatically — the OpenRouter residue lives in one SSE
+        #       event, so the buffer always reassembles both its
+        #       ``event: data`` line and its ``data: [DONE]`` line before
+        #       the regex runs. This avoids leaking an orphan
+        #       ``event: data`` frame to strict clients.
+        #
+        # The buffer is bounded by the longest upstream SSE event. For
+        # Anthropic content_block_delta events on Opus 4.x this is
+        # typically <16 KB. We do not cap the buffer explicitly because
+        # an unbounded event from upstream is itself a protocol violation;
+        # in practice the client SDK's own line-length / event-size limit
+        # bounds it.
+        event_buf: bytes = b""
+
         try:
             while True:
                 # Compute deadlines for this iteration. The watchdog
@@ -1291,6 +1418,17 @@ class StreamingBridge(CustomLogger):
                     continue
 
                 if item is eof_sentinel:
+                    # Flush any held partial event. Upstream EOF means
+                    # no more bytes are coming — the held bytes are
+                    # the final tail and must reach the client. Apply
+                    # the [DONE] strip in case upstream ended without
+                    # a final blank line (some OpenRouter Anthropic-compat
+                    # responses do this at exactly end-of-stream).
+                    if event_buf:
+                        flushed = _strip_sse_done_lines(event_buf)
+                        event_buf = b""
+                        if flushed:
+                            yield flushed
                     return
                 if (
                     isinstance(item, tuple)
@@ -1298,6 +1436,18 @@ class StreamingBridge(CustomLogger):
                     and item[0] is err_sentinel
                 ):
                     upstream_exc = item[1]
+                    # Flush any partial event BEFORE emitting the
+                    # synthetic error / re-raising. Otherwise the
+                    # held bytes are silently lost and the client may
+                    # see a truncated final event.
+                    if event_buf:
+                        try:
+                            flushed = _strip_sse_done_lines(event_buf)
+                            event_buf = b""
+                            if flushed:
+                                yield flushed
+                        except Exception:
+                            event_buf = b""
                     # Mid-stream stalls show up here as httpx.ReadTimeout
                     # (the global httpx-timeout patch fires after the
                     # configured interval). Translating that into a clean
@@ -1329,11 +1479,11 @@ class StreamingBridge(CustomLogger):
 
                 view = _chunk_bytes_view(item)
                 if view is not None:
-                    # Watchdog bookkeeping: any non-ping SSE event in
-                    # this chunk resets the stall clock. ping-only
-                    # chunks intentionally do not reset, so a Wangsu
-                    # gateway that only sends pings during a stalled
-                    # prefill will eventually trip the watchdog.
+                    # Watchdog bookkeeping operates on the raw upstream
+                    # view (buffer-free) so progress timing reflects
+                    # what the gateway actually sent in this read,
+                    # regardless of how the partial-line buffer below
+                    # time-shifts bytes for protocol safety.
                     any_progress, saw_msg_start = _scan_progress_marker(view)
                     if any_progress:
                         last_progress_at = loop.time()
@@ -1352,7 +1502,43 @@ class StreamingBridge(CustomLogger):
                             # the boundary is still findable, but stop
                             # the buffer from growing unboundedly.
                             del scan_buf[: -(marker_len - 1)]
-                yield item
+
+                    # Complete-event egress buffer. Yield only up to the
+                    # last ``\n\n`` in the merged (held + new) bytes so
+                    # every batch we emit ends on an SSE event boundary —
+                    # this is what makes heartbeat injection safe (see
+                    # the long block comment where ``event_buf`` is
+                    # initialized). Trailing bytes after the final
+                    # complete event are held until the next upstream
+                    # chunk (or EOF) supplies the event terminator.
+                    chunk_bytes = bytes(view)
+                    if event_buf:
+                        merged = event_buf + chunk_bytes
+                    else:
+                        merged = chunk_bytes
+                    event_end = merged.rfind(b"\n\n")
+                    if event_end == -1:
+                        # The entire merged buffer is an incomplete SSE
+                        # event. Hold everything and wait for the next
+                        # chunk to bring the blank-line terminator.
+                        event_buf = merged
+                        continue
+                    body = merged[: event_end + 2]
+                    event_buf = merged[event_end + 2:]
+                    cleaned = _strip_sse_done_lines(body)
+                    if cleaned:
+                        yield cleaned
+                else:
+                    # Non-bytes upstream chunk (shouldn't happen on the
+                    # anthropic_messages path, but be defensive). Flush
+                    # any held partial event first to preserve byte
+                    # order, then pass the item through unchanged.
+                    if event_buf:
+                        flushed = _strip_sse_done_lines(event_buf)
+                        event_buf = b""
+                        if flushed:
+                            yield flushed
+                    yield item
         finally:
             if not task.done():
                 task.cancel()

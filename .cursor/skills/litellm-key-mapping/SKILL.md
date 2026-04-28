@@ -101,6 +101,36 @@ kubectl port-forward -n carher svc/litellm-proxy 4000:4000
 # 浏览器打开 http://localhost:4000/ui
 ```
 
+### ⚠️ UI 搜索 / 历史消费的几个反直觉点
+
+| 你想做的事 | 在 UI 上的真实行为 | 怎么绕开 |
+|---|---|---|
+| 在 "Search by Alias" 输入 `claude-code-zhangsan` 找 key | 走 `GET /key/list?key_alias=<exact>` **精确匹配**（不是 LIKE / 子串） | DB 里实际是带 4 字符随机后缀的 `claude-code-zhangsan-50gj`（老 keygen 历史包袱）。**完整粘贴带后缀的 alias 才能命中**；找不到后缀时用 CLI：`curl -s "http://127.0.0.1:4000/spend/keys?limit=600" -H "Authorization: Bearer $MK" \| jq -r '.[]\|select(.key_alias\|test("zhangsan";"i"))\|.key_alias'` |
+| 用某个 `sk-...` user-key 查自己的 "Logs / 消费明细" | LiteLLM 1.82.x 的"Logs"页走 `GET /spend/logs/v2?api_key=...`，**这是 admin-only 端点**，user-key role=`unknown` → 401 → 前端渲染空 | (a) 走旧版 `GET /spend/logs?api_key=<token>&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD` —— **owner 可见** ✓ ；(b) 让前端走 carher-admin 后端代查（master key 走服务端） |
+| 找 owner 自己的最近一笔调用 | UI 默认时间窗口 = "今天 UTC"，BJT 用户在 BJT 早 8:00 前（= UTC 还是昨天）打的请求看不到 | UI 显式选时间窗口；或直接 SQL（见 `litellm-ops` skill 里 "用户具体 case：怎么定位他/她的请求"），注意 `LiteLLM_SpendLogs.startTime` 是 **naive UTC**，BJT 时间要先 -8h 代入 |
+| 看一笔流式调用是否"卡住" | 客户端感知 "T1 → T2 持续在打字" 像多次调用，但 SpendLogs 一次 HTTP 只写一行，时间戳是 **`startTime`** | 每行 `dur_s = endTime - startTime` 才是这次流式的实际持续；46s 输出 2.7k token 是 sonnet 流式的正常体感 |
+
+> 历史踩坑（2026-04-28 实测）：用户报"前端搜不到 `claude-code-liuguoxian`、消费明细打不开"，根因是上面表里前两行的组合：① UI 别名搜精确匹配 + 别名带 `-50gj` 后缀；② 客户端用 user-key 调 `/spend/logs/v2` 被 admin 校验 401。
+
+### Owner 自助查自己的历史消费（最稳的 user-key 路径）
+
+如果你拿的是某把 user-key 的明文 `sk-...`（**不是** master key），不要打 `/spend/logs/v2`，改用旧版：
+
+```bash
+# 通过 cloudflare 公网入口直接验证（无需 kubectl）
+KEY="sk-..."   # 用户自己的 key
+
+# 单天明细
+curl -s "https://litellm.carher.net/spend/logs?api_key=$KEY&start_date=2026-04-28&end_date=2026-04-29" \
+  -H "Authorization: Bearer $KEY" | jq
+
+# key 自身基本信息（含 spend、max_budget、budget_reset_at）
+curl -s "https://litellm.carher.net/key/info?key=$KEY" \
+  -H "Authorization: Bearer $KEY" | jq '.info'
+```
+
+> 注：`/spend/logs` 接受的 `api_key` 既可以是明文 `sk-...` 也可以是 64 位 hash（token）。`/key/info?key=...` 同理，但带 `sk-...` 形式时 LiteLLM 会**先 hash 再查**，所以两种都行；管理脚本里统一用 hash（token）以避免明文落盘/落 kubectl logs。
+
 ## 补发缺失的 key
 
 如果发现有 litellm 实例没有 key：

@@ -82,6 +82,25 @@ curl -s "https://open.feishu.cn/open-apis/contact/v3/users/debb89ae?user_id_type
 
 多个 owner 用 `|`（管道符）分隔，例如：`ou_aaa|ou_bbb|ou_ccc`。
 
+### 批量场景：脚本化查 open_id
+
+多实例创建时，把 token 和 open_id 查询写成 shell 变量管道，避免人工拷贝粘贴：
+
+```bash
+# 单实例（id=214, 黄子泽 user_id=65d667g4）
+TOKEN=$(curl -s -X POST "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" \
+  -H "Content-Type: application/json" \
+  -d '{"app_id":"cli_a97af6599b64dcd5","app_secret":"76NcUdUg7e6KZz7nVBVKfbb0nTMpCNrB"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['tenant_access_token'])")
+
+curl -s "https://open.feishu.cn/open-apis/contact/v3/users/65d667g4?user_id_type=user_id" \
+  -H "Authorization: Bearer $TOKEN" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['user']['open_id'])"
+# → ou_19c91ca3d56c80a4a0c6099c3dcea03b
+```
+
+批量时把每个实例的 (app_id, app_secret, user_id) 喂给同一个循环，**每个实例都换自己的 token**（不能复用），再写回 batch-import payload。
+
 ## 默认值
 
 | 参数 | 默认值 | 可选值 |
@@ -167,20 +186,28 @@ curl -s -X POST "https://admin.carher.net/api/instances/batch-import" \
 
 ### Step 4: 验证创建结果
 
-**优先用 Admin API 验证**（不依赖 kubectl）：
+**优先用 Admin API 验证**（不依赖 kubectl）。批量场景推荐合并 status + callback HTTP 一次循环：
 
 ```bash
-# 查实例详情：status, feishu_ws, image, model, provider, owner
-curl -s -H "X-API-Key: $API_KEY" "https://admin.carher.net/api/instances/201" \
-  | python3 -c "
+sleep 12
+for id in 214 215; do
+  echo "=== Instance $id ==="
+  curl -s -H "X-API-Key: $API_KEY" "https://admin.carher.net/api/instances/$id" \
+    | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 for k in ['id','name','model','provider','owner','deploy_group','status','image','feishu_ws']:
     print(f'  {k}: {d.get(k, \"N/A\")}')
 print(f'  oauth_url: {d.get(\"oauth_url\", \"N/A\")}')
 "
+  echo "  callback: $(curl -sS -o /dev/null -w "%{http_code}" \
+    "https://s1-u${id}-auth.carher.net/feishu/oauth/callback?code=test&state=test")"
+done
+```
 
-# 查 CRD 状态（phase, feishuWS, image）
+需要更细粒度时也可单独查 CRD 状态：
+
+```bash
 curl -s -H "X-API-Key: $API_KEY" "https://admin.carher.net/api/crd/instances/201" \
   | python3 -c "
 import sys, json
@@ -192,7 +219,9 @@ print(f'image: {d.get(\"spec\",{}).get(\"image\",\"N/A\")}')
 "
 ```
 
-> **Pod 刚启动时 feishu_ws 可能为 Disconnected**，等 10-15 秒后重查通常会变 Connected。
+> **Pod 启动时间可能差异较大**：通常 10-15 秒内 `feishu_ws=Connected`、callback=400；
+> 偶发情况（节点冷启 / 镜像 pull）可能拖到 30 秒以上。
+> 如果第一次轮询有实例还是 `Disconnected` / 502，再 `sleep 20` 重跑同一段循环即可，不要急着排错。
 
 kubectl 可用时也可以批量检查：
 
@@ -249,6 +278,6 @@ curl -s -X POST "https://admin.carher.net/api/instances/batch" \
 | 创建返回 409 | ID 已存在 | 使用不同 ID 或先删除旧实例 |
 | 创建返回 503 `CLOUDFLARE_API_TOKEN` | `carher-admin` 没有 Cloudflare token | 修复 `carher-admin-secrets.cloudflare-api-token`，重启 `carher-admin` 后再创建 |
 | `cloudflare.ok=false` | 实例已创建，但 DNS/远程 ingress 同步失败 | 先修 Cloudflare，再执行 `POST /api/cloudflare/sync`，然后重新验证 callback URL 是否返回 400 |
-| OAuth callback 返回 502 | Pod 刚启动，服务还没就绪 | 等待 10-15 秒后重试，正常会变成 400 |
+| OAuth callback 返回 502 | Pod 刚启动，服务还没就绪 | 等待 10-30 秒后重试，正常会变成 400；超过 60 秒还 502 才需要排查 |
 | `field messages is required` 报错 | 网宿 API 兼容性问题（已禁用） | 确认 provider=litellm，路由全走 OpenRouter |
 | LiteLLM key 未生成 | Admin API 调用 LiteLLM proxy 失败 | `curl -X POST "https://admin.carher.net/api/litellm/keys/generate?uid={id}" -H "X-API-Key: $API_KEY"` |

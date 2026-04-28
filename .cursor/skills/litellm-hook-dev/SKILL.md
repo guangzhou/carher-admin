@@ -20,9 +20,25 @@ description: >-
 |---|---|---|---|
 | `k8s/litellm-callbacks/opus_47_fix.py` | 把老的 `thinking.type=enabled` / `reasoning_effort` 改写成 opus-4-7+ 的 adaptive schema + 强制 streaming | `async_pre_call_hook` (chat/completion) | `call_type` + 模型名前缀 |
 | `k8s/litellm-callbacks/embedding_sanitize.py` | 清洗 embedding input 里的 lone UTF-16 surrogate（Node.js bot 脏数据防御）| `async_pre_call_hook` (embedding) | `call_type` |
-| `k8s/litellm-callbacks/streaming_bridge.py` | 1) 全局 monkey-patch `BaseAnthropicMessagesStreamingIterator.__init__` 修正 `startTime`（所有 `anthropic_messages` 请求）<br>2) SSE 心跳防 Cloudflare 524 + 首个 `content_block_delta` 打 `completion_start_time` 修 TTFT（按 `key_alias` 前缀 gate）| `async_post_call_streaming_iterator_hook` + 模块级 monkey-patch | `STREAMING_BRIDGE_KEY_PREFIXES` / `STREAMING_BRIDGE_KEY_ALIASES` env |
+| `k8s/litellm-callbacks/streaming_bridge.py` | 1) 全局 monkey-patch `BaseAnthropicMessagesStreamingIterator.__init__` 修正 `startTime`（所有 `anthropic_messages` 请求）<br>2) SSE 心跳防 Cloudflare 524 + 首个 `content_block_delta` 打 `completion_start_time` 修 TTFT（按 `key_alias` 前缀 gate）<br>3) 出口流过滤 OpenRouter `data: [DONE]` 残留（带 32B carry-over 处理跨 chunk 边界）| `async_post_call_streaming_iterator_hook` + 模块级 monkey-patch | `STREAMING_BRIDGE_KEY_PREFIXES` / `STREAMING_BRIDGE_KEY_ALIASES` env |
 
 **所有 hook 挂到同一个 ConfigMap `litellm-callbacks` 里，写在 `litellm_settings.callbacks` 列表里按顺序执行。**
+
+## 测试沉淀位置
+
+仓库里的回归测试落在 `k8s/litellm-callbacks/tests/`，纯 unittest + httpx，stub 掉 litellm imports，零 K8s 依赖：
+
+```bash
+cd k8s/litellm-callbacks/tests
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m unittest discover -v
+```
+
+新写一个 hook **必须**在这里加一份回归测试。模板参考 `test_streaming_bridge_done_filter.py`：
+- 顶部 `_install_litellm_stubs()` 装好 `litellm` / `litellm.integrations.custom_logger` / `litellm.llms.*` 桩
+- `os.environ[...]` **在 import 目标 hook 之前**设置好 gate（很多 hook 在模块 load 时读 env）
+- `importlib.util.spec_from_file_location` 直接把 `../<hook>.py` 作为模块 load 进来，不依赖 PYTHONPATH
+- 用 `asyncio.run` 驱动 streaming hook，喂自定义 chunk 序列，断言 client 端收到的 bytes
 
 ## Hook 类型选择指南
 
@@ -294,6 +310,90 @@ my_streaming_bridge = MyStreamingBridge()
 3. **chunk 会 bundle**：实测 Anthropic/Wangsu 会把 HTTP headers + `message_start` + 首个 `content_block_delta` 合并到同一个 TCP chunk。想打 TTFT 必须扫 `content_block_delta`，不能打 "第一个非空 chunk"（那个 chunk 此时其实是 headers 到达的瞬间）。
 4. **`response` 可能是生成器也可能是对象带 `__aiter__`**，`response.__aiter__()` 都能工作，但 `async for ... in response` 在外层包层里要先判断是否真的是 async iterable。
 5. **gate 一定要在最前**：只要不想包的分支，直接 `async for ... yield`，不要进入复杂逻辑。否则会增加延迟、还可能把 `acompletion` 路径的流式 chunk 破坏。
+6. **要修改字节流就必须做 carry-over**（见下一节）。
+7. **client 端 SSE 协议宽容度**（见下一节）——同样的 wire bytes，不同 SDK 反应不一样，靠"客户端没报错"判断兼容性会漏 bug。
+
+### 改字节流的"跨 chunk 边界"陷阱（必读）
+
+如果 hook 要 **删除/重写** SSE 字节流里的某段（例如剥掉 OpenRouter 漏出来的 `data: [DONE]`、 改写错误的 event name、过滤敏感 token），**永远不能只用"逐 chunk 跑一次正则"**。原因：
+
+- 上游每次 `anext()` 给你的是任意大小的 TCP chunk。LiteLLM / httpx 不保证 chunk 边界对齐 SSE 行边界。
+- 实测完全合法的拆分位置：`b"data: [D"` + `b"ONE]\n\n"`、`b"event: dat"` + `b"a\ndata: [DONE]\n\n"`、甚至每 1 byte 一个 chunk（极端但合法）。
+- 单 chunk 跑正则时，被切散的特征**没人能匹配上**，残骸照样吐给 client。
+
+**通用模式 — 32 byte carry-over buffer**：
+
+```python
+_TAIL_KEEP: int = 32   # 略大于待匹配最长串（"event: data\ndata: [DONE]\n\n" = 26B）
+
+egress_carry: bytes = b""
+async for chunk in upstream:
+    if not isinstance(chunk, (bytes, bytearray)):
+        # 非 bytes 路径（例如 ModelResponseStream），先把 carry flush 出去
+        if egress_carry:
+            yield _strip(egress_carry)
+            egress_carry = b""
+        yield chunk
+        continue
+
+    merged = egress_carry + bytes(chunk)
+    if len(merged) > _TAIL_KEEP:
+        body = merged[:-_TAIL_KEEP]
+        egress_carry = merged[-_TAIL_KEEP:]
+    else:
+        body, egress_carry = b"", merged
+    cleaned = _strip(body)
+    if cleaned:
+        yield cleaned
+
+# EOF: flush 剩余 carry
+if egress_carry:
+    flushed = _strip(egress_carry)
+    if flushed:
+        yield flushed
+```
+
+**关键不变量**：
+- `_TAIL_KEEP` ≥ 你要匹配的最长串（含可选前缀和换行符），**留一点余量更稳**。我们用 32B 兜住 26B 的 `event: data\ndata: [DONE]\n\n`。
+- 只对"已确认安全"的部分（`body`）跑正则；不安全的尾巴留到下一次合并。
+- EOF 必须 flush 一次 carry，否则最后一段被吞。
+- 如果 hook 同时在做 **观察**（例如打 TTFT），观察还是该看原始 `chunk`/`merged`（首个 `content_block_delta` 不会被任何过滤删掉），**只有写出 client 的字节流才走 body / carry**。
+
+**怎么验证 carry 写对了**——在仓库 `tests/` 里写一个 split-position sweep：
+
+```python
+for split in range(len(prefix), len(prefix) + len(target_substring)):
+    chunks = [wire[:split], wire[split:]]
+    out = run_hook(chunks)
+    assert TARGET not in out, f"leak at split={split}"
+```
+
+只有这个穷举测试通过，才能说 "跨边界" 这个维度真的覆盖了。 `test_streaming_bridge_done_filter.py::AllChunkSplitPositionsTest` 是参考。
+
+### Anthropic SSE 严格 vs 宽容（client SDK 兼容性）
+
+走 LiteLLM 的 `/v1/messages` (`anthropic_messages`) 时，上游 provider 的 SSE 不一定严格遵守 Anthropic 协议——特别是 OpenRouter 的 Anthropic-compat endpoint 会在 `message_stop` 之后再送一段 OpenAI 协议的 `event: data\ndata: [DONE]\n\n` 终结符。
+
+不同 client SDK 对未知 SSE 的反应：
+
+| Client | 行为 | 后果 |
+|---|---|---|
+| Claude Code 官方 SDK | 静默忽略未知 event / 非 JSON `data:` 行 | **没人发现** |
+| acpx (`@acpx/api`) | 每个 `data:` 行都 `JSON.parse` | `Could not parse Anthropic SSE event data: Unexpected token 'D', "[DONE]" is not valid JSON` |
+| openclaw 同底 | 同 acpx | 同上 |
+
+**教训**："看起来 Claude Code 跑得好"≠ wire 上没有协议噪音。换个严格 SDK 就炸。**协议层兼容性必须在 LiteLLM 出口侧做净化**（不是寄希望于 client）。
+
+判断责任的方法：
+1. 拿到 client 报错——记录精确 error message。
+2. `kubectl exec` 进 litellm-proxy pod 用 curl 直接打上游 `/v1/messages`（绕过 LiteLLM proxy 自己），抓 wire bytes：
+   ```bash
+   curl -sN -H "Authorization: Bearer $OR_KEY" -H "Content-Type: application/json" \
+     https://openrouter.ai/api/v1/messages \
+     -d '{"model":"anthropic/claude-opus-4.7","stream":true,"max_tokens":50,
+          "messages":[{"role":"user","content":"hi"}]}' | hexdump -C | tail -5
+   ```
+3. 如果上游 wire 上就有非协议 bytes，责任在 provider，但兜底必须在 LiteLLM 这一层（我们没法改 OpenRouter）。
 
 ### Env-var gate 模式
 
@@ -362,6 +462,26 @@ _patch_xxx()  # ConfigMap 加载 callbacks 时即生效
 - 必须做 idempotent 判断（`_my_patched` 标志），否则 reload 会叠加 patch 变成无限递归
 - monkey-patch 是**全局生效**的，不能按 key gate，所以只适合用于「**修正所有人的错误行为**」
 - patch 失败必须吞异常并打 warn，不能让 callbacks module import 失败拖垮整个 proxy
+
+## 案例：streaming_bridge `[DONE]` 残留过滤 (2026-04-28)
+
+- **问题**：openclaw 用户 buyitian 用 acpx 报 `Could not parse Anthropic SSE event data: Unexpected token 'D', "[DONE]" is not valid JSON`。流式响应**全部内容已正确返回**，但末尾多出 OpenAI 协议的 `event: data\ndata: [DONE]\n\n`。Claude Code 官方 SDK 静默忽略，acpx 严格按 Anthropic 协议每个 `data:` 行 JSON.parse → 炸。
+- **责任链**：OpenRouter 的 `/v1/messages` 实现复用了 OpenAI completion 的流式终结逻辑，没区分 Anthropic-compat。LiteLLM `anthropic_messages` 透传不洗。Anthropic 协议正确终结符是 `event: message_stop\ndata: {"type":"message_stop"}\n\n`，**没有** `[DONE]`。
+- **历史伏笔**：之前已经有 `anthropic_passthrough_pingfix.py` 抑制 LiteLLM 自己 logging 时的 `JSONDecodeError`（server-side 噪音），但那条路径**只动了 logging**，没动出口字节流。client 端继续吃 `[DONE]` 残骸。
+- **修复**：在 `streaming_bridge.py` 的 `async_post_call_streaming_iterator_hook` 里加出口过滤：
+  - `_SSE_DONE_PATTERN = re.compile(rb"(?:^|\n)(?:event:\s*[^\n]*\n)?data:\s*\[DONE\]\s*\n+", re.IGNORECASE)`
+  - `_strip_sse_done_lines(buf)` 含 `if b"[DONE]" not in buf: return buf` 快路径，避免给 99.99% 的正常 chunk 加 regex 开销。
+  - `_EGRESS_TAIL_KEEP = 32`，在 egress 循环里维护 `egress_carry` 把每个 chunk 的尾部 32 byte 留给下一轮——见上面"改字节流的跨 chunk 边界陷阱"一节，这是**关键**。EOF 时 flush 一次。
+- **第一版修复的 bug + 修法**：第一版只跑 per-chunk 正则没做 carry-over。本地穷举测试发现：把 wire bytes 在 `event: data\ndata: [DONE]\n\n` 内部任意位置 split，**12/26 个 split 位置 `[DONE]` 残骸照样泄漏到 client**（典型例如 `data: [D` + `ONE]\n\n` —— 第一段没 `[DONE]` 字面量、快路径直接 return；第二段不以 `data:` 或 `\n` 开头、regex 不匹配）。加 carry 后 26/26 全过。
+- **测试方法**：本地 stub 掉 `litellm` imports，用 `importlib` 直接 load `streaming_bridge.py`，喂自定义 chunk 序列驱动 hook。三层覆盖：
+  1. 单元测试 `_strip_sse_done_lines` 各种输入（含 `data:[DONE]`、`data: [DONE]`、CRLF、JSON 内含 `[DONE]` 字面量但不该删的负样本）
+  2. 场景覆盖（fused / split-after-keyword / no-DONE 全透传）
+  3. **穷举 split 位置** 26 个 + 1/3/7/31/33 byte 极端碎片化
+- **代码 + 测试**：
+  - 修复：`k8s/litellm-callbacks/streaming_bridge.py`（`_SSE_DONE_PATTERN` / `_strip_sse_done_lines` / `_EGRESS_TAIL_KEEP` / egress loop carry 维护）
+  - 回归：`k8s/litellm-callbacks/tests/test_streaming_bridge_done_filter.py`（18 test）
+- **验证**：`python3 -m unittest discover` 18/18 pass，27ms。Acpx client 报错消失。
+- **注意**：`anthropic_passthrough_pingfix.py` 还要保留——它管的是 server-side logging 的 JSONDecodeError；本 fix 管的是 client-side egress 的字节流残骸。两个不冲突，叠加生效。
 
 ## 案例：streaming_bridge (2026-04-24)
 

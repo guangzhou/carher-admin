@@ -24,3 +24,8 @@ Thumbs.db
 .env
 .env.local
 cloud-migration-it-handover.md
+
+# litellm-callbacks tests
+k8s/litellm-callbacks/tests/.venv/
+k8s/litellm-callbacks/__pycache__/
+k8s/litellm-callbacks/tests/__pycache__/

@@ -1,0 +1,115 @@
+# Her sessions archive 风险扫描报告
+
+扫描总数: 201, 成功: 190, 失败: 11
+
+## TOP 风险列表（按 archive_total + active_max 排序）
+
+her      archive_total  a_cnt     a_max  act_total act_cnt   act_max  notes
+--------------------------------------------------------------------------------------------------------------
+her-40           750.0M    121    158.8M     602.9M      75    271.4M  HIGH,ACTIVE_CRITICAL
+her-89           587.2M     65    328.8M       2.5M      13      943K  HIGH
+her-30           560.0M    241     21.3M      59.7M     254      5.3M  HIGH
+her-98           480.5M    156    106.9M     100.8M      61     21.5M  HIGH
+her-85           450.4M     46    150.4M      72.0M     371     24.2M  HIGH
+her-4            409.9M    141    167.9M      34.7M     175      6.6M  HIGH
+her-54           395.7M    207     64.5M      31.3M      83      3.2M  HIGH
+her-66           374.6M    201     25.4M      73.6M     144      9.9M  HIGH
+her-53           345.0M    102     29.3M     208.3M      62     36.8M  HIGH,ACTIVE_BIG
+her-1000         353.3M    189     93.3M      25.8M     109      6.5M  HIGH
+her-2            300.4M    207     43.5M     136.3M     417     54.6M  HIGH,ACTIVE_BIG
+her-191          347.1M     22    198.1M       8.6M      11      4.6M  HIGH
+her-56           141.0M     70     42.5M     247.4M      36    197.3M  HIGH,ACTIVE_CRITICAL
+her-163          310.7M     23    205.1M       5.8M       9      5.6M  HIGH
+her-42           305.8M     62     82.6M      11.7M      46      2.4M  HIGH
+her-91           279.0M     57     68.4M     123.9M      66     24.4M  HIGH
+her-87           225.4M     15     68.1M     206.5M     131     45.8M  HIGH,ACTIVE_BIG
+her-187          205.2M     21    146.6M      42.3M       7     30.9M  HIGH,ACTIVE_BIG
+her-160          218.2M     72     99.4M       6.8M      38      876K  HIGH
+her-190           42.6M      8     20.4M     173.7M       3    172.9M  MED,ACTIVE_CRITICAL
+her-11           171.9M     64     21.2M     127.2M     101     36.1M  HIGH,ACTIVE_BIG
+her-161          198.8M    152     25.8M      21.6M      41      6.7M  HIGH
+her-8            183.6M     93     15.1M     169.2M     294     16.2M  HIGH
+her-135          196.1M     30     35.7M       2.7M      11      1.0M  HIGH
+her-64           183.7M     52     44.9M      41.6M      50     12.7M  HIGH
+her-101          190.9M     13    156.3M       320K       2      285K  HIGH
+her-180          178.5M     21     99.5M       9.9M      27      7.4M  HIGH
+her-12           178.1M     28    168.4M       824K       8      407K  HIGH
+her-73           164.9M     96     14.9M      25.1M      70      3.1M  HIGH
+her-175          157.6M     30    144.2M       1.2M      12      353K  HIGH
+her-145          156.4M     22    143.0M       843K       3      711K  HIGH
+her-141          152.1M     34     16.2M       1.3M       5      1.1M  HIGH
+her-94           123.6M     18     26.3M      41.1M      57     27.9M  HIGH
+her-67           150.5M    148     55.1M       8.0M      55      913K  HIGH
+her-95           133.6M     30     50.4M       2.9M      10      2.8M  HIGH
+her-26           134.2M    182     22.4M      11.2M     171      1.4M  HIGH
+her-182           38.5M      1     38.5M      90.3M      11     90.2M  HIGH,ACTIVE_BIG
+her-57           113.2M     69     17.0M      14.7M      34     11.1M  HIGH
+her-70           120.8M     94     17.9M       2.7M      18      1.8M  HIGH
+her-5            113.1M     39     75.5M      10.9M      24      8.1M  HIGH
+her-170          109.0M     46      7.5M       7.5M      89      2.6M  HIGH
+her-174          111.5M     18     61.5M       166K      11       97K  HIGH
+her-120           97.7M     80     13.6M      26.4M      35     10.8M  MED
+her-63           104.4M    502      7.7M      14.7M     500      2.8M  HIGH
+her-51            96.7M     56     15.3M      21.8M      45      6.3M  MED
+her-68            98.3M    322     23.0M       8.5M      92      1.4M  MED
+her-168           93.8M     34     23.9M       4.9M      30      1.6M  MED
+her-74            90.0M     63     13.4M       7.1M      35      3.1M  MED
+her-104           72.7M     18     40.8M      37.6M      17     18.7M  HIGH
+her-23            83.7M    151     23.6M      27.7M     121      3.0M  MED
+her-90            77.6M     41     23.5M      19.6M      37      9.1M  MED
+her-192           82.9M     20     47.4M      16.5M      25      3.1M  HIGH
+her-164           79.2M     29     32.7M       4.9M      11      4.8M  HIGH
+her-10            78.3M     61      7.9M      14.5M      58      5.3M  MED
+her-21            78.2M     37      7.3M       8.7M      16      4.1M  MED
+her-185           70.8M     21     49.5M      10.1M       9      7.3M  HIGH
+her-166           75.8M     18     34.5M       3.9M      14      1.9M  HIGH
+her-43            76.1M     68      6.7M       2.7M      54      787K  MED
+her-6             72.8M     34     29.9M       7.1M      32      2.9M  MED
+her-105           61.2M     47     12.7M      29.1M      50     13.9M  MED
+her-19            62.5M     41      7.2M       9.7M      63      4.3M  MED
+her-149           65.4M     41     10.1M       767K      18      435K  MED
+her-136           61.1M     28     25.4M       2.2M      10      1.6M  MED
+her-130           54.2M     23     12.5M       8.0M       8      7.8M  MED
+her-38            51.3M    107     22.8M      13.3M     118      4.5M  MED
+her-110           43.0M     21     24.9M      36.4M      20     11.8M  MED
+her-71            49.5M     43     11.4M       8.0M      17      5.2M  MED
+her-33            48.3M     27     15.7M       9.6M      11      5.1M  MED
+her-62            48.1M     43      8.0M       4.1M      14      2.7M  MED
+her-137           50.3M     20      7.6M         8K       2        4K  MED
+her-59            46.3M     74      9.0M       3.0M      28      1.8M  MED
+her-28            39.1M     65      3.5M      15.0M      67      4.7M  MED
+her-115           41.8M     13     18.3M       189K       2      160K  MED
+her-17            34.3M     58     18.2M      12.8M      55      6.3M  MED
+her-46            19.6M      5     16.5M      24.6M      17     19.4M  MED
+her-7             36.9M     45      4.0M       1.6M      17      993K  MED
+her-58            36.7M     35     16.8M       1.3M      16      762K  MED
+her-55            31.3M     46      4.4M       7.6M      23      4.8M  MED
+her-49            30.4M     67      5.4M      18.1M      61      4.8M  MED
+her-31            31.9M     57     10.1M       3.0M      23      1.7M  MED
+her-79             2.3M     10      1.1M      31.0M       7     30.9M  ACTIVE_BIG
+her-195           31.3M      6     27.2M       1.3M       9      450K  MED
+her-129           30.1M     30     14.5M       4.3M      15      1.6M  MED
+her-109           28.2M     33     12.2M       3.9M      21      3.5M  MED
+her-97            29.9M     15     21.8M       2.1M       8      1.6M  MED
+her-173           21.1M     18     12.5M       6.9M       5      6.8M  MED
+her-155           24.7M     23     12.1M       1.9M       7      1.3M  MED
+her-76            21.9M     21     16.4M       197K       6      112K  MED
+
+HIGH: 47, MED: 40, ACTIVE_CRITICAL/BIG: 10
+
+## 扫描失败 (无法判断)
+  her-3      EXEC_FAIL
+  her-29     PARSE_FAIL: ARCH_TOTAL=0 ARCH_COUNT=0
+0 ARCH_MAX=0 ACT_TOTAL=34320 ACT_C
+  her-80     EXEC_FAIL
+  her-133    EXEC_FAIL
+  her-134    EXEC_FAIL
+  her-176    EXEC_FAIL
+  her-188    EXEC_FAIL
+  her-203    PARSE_FAIL: ARCH_TOTAL=0 ARCH_COUNT=0
+0 ARCH_MAX=0 ACT_TOTAL=1795 ACT_CO
+  her-206    EXEC_FAIL
+  her-208    PARSE_FAIL: ARCH_TOTAL=0 ARCH_COUNT=0
+0 ARCH_MAX=0 ACT_TOTAL=1795 ACT_CO
+  her-209    PARSE_FAIL: ARCH_TOTAL=0 ARCH_COUNT=0
+0 ARCH_MAX=0 ACT_TOTAL=5408 ACT_CO

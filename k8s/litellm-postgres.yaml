@@ -32,20 +32,20 @@ spec:
               name: postgres
           args:
             - -c
-            - shared_buffers=256MB
+            - shared_buffers=1GB
             - -c
-            - work_mem=8MB
+            - work_mem=16MB
             - -c
-            - effective_cache_size=512MB
+            - effective_cache_size=2GB
             - -c
-            - maintenance_work_mem=128MB
+            - maintenance_work_mem=256MB
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: 1Gi
             limits:
               cpu: 500m
-              memory: 1Gi
+              memory: 4Gi
           livenessProbe:
             exec:
               command: ["pg_isready", "-U", "litellm", "-d", "litellm"]
@@ -63,7 +63,8 @@ spec:
   volumeClaimTemplates:
     # NOTE: volumeClaimTemplates is immutable after the StatefulSet is created.
     # The live PVC (litellm-db-data-litellm-db-0) has been expanded in-place via
-    # `kubectl patch pvc ... {"spec":{"resources":{"requests":{"storage":"100Gi"}}}}`.
+    # `kubectl patch pvc ... {"spec":{"resources":{"requests":{"storage":"200Gi"}}}}`.
+    # History: 100Gi (initial) -> 100Gi expand -> 200Gi (2026-04-28, alert at ~88GB used)
     # This field is kept in sync only for documentation / new replica provisioning.
     - metadata:
         name: litellm-db-data
@@ -74,7 +75,7 @@ spec:
         storageClassName: alibabacloud-cnfs-nas
         resources:
           requests:
-            storage: 100Gi
+            storage: 200Gi
 ---
 apiVersion: v1
 kind: Service

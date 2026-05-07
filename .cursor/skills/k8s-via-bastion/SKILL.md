@@ -51,7 +51,7 @@ description: >-
 
 | Asset 名 | 公网 IP | 内网 IP | 角色 | 用途 |
 |----------|---------|---------|------|------|
-| **`laoyang`** | 43.98.160.216 | 172.16.0.228 | 阿里云 ECS（**网关 / 工具节点**） | **唯一能路由到 apiserver** `172.16.1.163:6443`；自带 docker / git / python3 / cloudflared / ansible，但**没有 kubectl / nerdctl**；本地 ext4 `/Data`（不是 NAS） |
+| **`laoyang`** | 43.98.160.216 | 172.16.0.228 | 阿里云 ECS（**约定的网关 / 工具节点**） | 默认 kubectl 隧道出口（能路由到 apiserver `172.16.1.163:6443`，但 worker 节点同样能路由）；自带 docker / git / python3 / cloudflared / ansible，但**没有 kubectl / nerdctl**；本地 ext4 `/Data`（不是 NAS） |
 | **`k8s-work-227`** | 47.84.112.136 | 172.16.0.227 | K8s worker + 主构建机 | `/root/carher` + `/root/carher-admin` + `nerdctl` + NAS `/Data` |
 | `k8s-work-226` | 47.84.112.136 | 172.16.0.226 | K8s worker + 备构建机 | `/root/carher-admin` + `nerdctl` + NAS `/Data`（无 carher 主仓） |
 | `k8s-work-229` | 47.84.112.136 | 172.16.0.229 | K8s worker | `nerdctl` + NAS `/Data`（无 git 仓） |
@@ -60,8 +60,12 @@ description: >-
 > 旧的"216 那台"（`43.98.160.216`）= 现在的 `laoyang`。
 > 老的 `root@43.98.160.216 -p 22` 公网入口已下线，登录 / 端口转发都走堡垒机。
 >
+> **每个 asset 都是堡垒机里的独立资产**——`scripts/jms ssh/scp/proxy <asset>`
+> 是 `Mac → 10.68.13.189 (KoKo) → <asset>` 直连，**不会先到 laoyang 再中转**。
+>
 > **构建镜像默认上 `k8s-work-227`**（carher 主程序 + admin 都有仓库）。
-> **kubectl 隧道 / 任何需要"接入 K8s 控制面"的端口转发** 都默认走 `laoyang`。
+> **kubectl 隧道默认走 `laoyang`**——纯属约定（不抢 worker 资源），
+> 技术上 `jms proxy k8s-work-22{6,7,9} 16443 172.16.1.163 6443` 也能用。
 > **laoyang 上不要直接跑 kubectl**——它没装；如要在该机上执行 kubectl，
 > 改用本地 Mac + `jms proxy laoyang` 隧道（场景 1）。
 
@@ -98,6 +102,10 @@ nohup scripts/jms proxy laoyang 16443 172.16.1.163 6443 \
 
 sleep 2 && kubectl get nodes   # 验证
 ```
+
+> 出口选 `laoyang` 只是**约定默认值**（不抢 worker 资源、不受 drain/重启影响）。
+> 任何 worker（`k8s-work-22{6,7,9}`）也能 nc 到 apiserver，用它们替换 asset
+> 名一样能跑——本仓所有 skill 的一行命令都按 `laoyang` 这个约定写。
 
 第一次会自动 `accept-new` host key 并申请 token。后续每次连接（kubectl
 每次调用都是新连接）会自动申请新 token，不需要人工续期。
@@ -136,7 +144,7 @@ scripts/jms ssh laoyang 'ansible-playbook /root/playbooks/xxx.yml'   # ansible
 ```
 
 > ⚠️ laoyang 上**没有 kubectl**——不要在它上面跑 `kubectl get pods`。
-> 任何 kubectl 需求都用 Mac 本地 + `jms proxy laoyang` 隧道（场景 1）。
+> 任何 kubectl 需求都在 Mac 本地跑，前提是场景 1 的 `jms proxy` 隧道起着。
 
 文件传输同样支持：
 
@@ -244,11 +252,12 @@ psql -h 127.0.0.1 -p 25432 -U llmproxy -d litellm
 
 ### `kubectl ... read: connection reset by peer`
 - 用了 `jms tunnel ... -L 16443:172.16.1.163:6443` 这种**非 localhost 目标**
-- KoKo 拒绝 → 必须改用 `jms proxy laoyang 16443 172.16.1.163 6443`
+- KoKo 拒绝 → 改用 `proxy` 子命令：`jms proxy <asset> 16443 172.16.1.163 6443`
+  （`<asset>` 约定填 `laoyang`，worker 节点同样可用）
 
 ### `scripts/jms ssh laoyang 'kubectl ...'` 报 `kubectl: command not found`
 - laoyang **没装** kubectl/helm/nerdctl，它纯粹是网关 + 工具节点
-- 把 kubectl 操作搬回 Mac，前提是 `jms proxy laoyang` 起着
+- 把 kubectl 操作搬回 Mac，前提是场景 1 的 `jms proxy` 隧道起着
 
 ### `scp: dest open ...: Failure`
 - KoKo 的 SFTP 子系统对 token-bound 会话只读

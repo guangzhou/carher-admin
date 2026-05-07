@@ -2,11 +2,14 @@
 name: litellm-ops
 description: >-
   LiteLLM Proxy 运维：升级镜像、Prisma DB 迁移、故障排查、性能调优、
-  YAML-as-source-of-truth 不变量维护、callback 源↔ConfigMap 同步。
+  YAML-as-source-of-truth 不变量维护、callback 源↔ConfigMap 同步、
+  litellm-db PVC 容量告警在线扩容。
   Use when the user mentions "litellm" + 升级/部署/502/挂了/故障/重启/schema/prisma/
-  探针/OOM/性能/日志级别/fallback 没生效/callback 没注册/yaml 改了不生效, or when
+  探针/OOM/性能/日志级别/fallback 没生效/callback 没注册/yaml 改了不生效/
+  PVC 容量告警/disk/磁盘/扩容/quota/LowAvailableCapacity, or when
   litellm.carher.net returns 502/503, or when an admin UI config change needs to
-  be made permanent.
+  be made permanent, or when "litellm-db-data-litellm-db-0 is running out of space"
+  alert fires.
 ---
 
 # LiteLLM Proxy 运维
@@ -558,7 +561,106 @@ kubectl exec litellm-db-0 -n carher -- psql -U litellm -d litellm \
 # 各表大小（SpendLogs 是最大的表）
 kubectl exec litellm-db-0 -n carher -- psql -U litellm -d litellm \
   -c "SELECT tablename, pg_size_pretty(pg_total_relation_size('public.\"' || tablename || '\"')) AS size FROM pg_tables WHERE schemaname='public' ORDER BY pg_total_relation_size('public.\"' || tablename || '\"') DESC LIMIT 5;"
+
+# DB PVC 配额 vs 实际占用（阿里云 LowAvailableCapacity 告警就是看这个比值，阈值 85%）
+kubectl get pvc litellm-db-data-litellm-db-0 -n carher \
+  -o jsonpath='quota={.status.capacity.storage}{"\n"}'
+kubectl exec litellm-db-0 -n carher -- du -sh /var/lib/postgresql/data
 ```
+
+> ⚠️ **`df -h` 在 pod 内会骗你**：CNFS NAS 是 subpath 配额型，pod 看到的 `Size` 是底层 NAS 池容量（10P 级别），`Use% 0%`，**不反映 PVC quota**。要看实际配额必须用上面的 `kubectl get pvc ... .status.capacity.storage`。
+
+---
+
+## litellm-db PVC 容量告警 / 在线扩容
+
+阿里云告警示例：
+> `(combined from similar events): PVC carher/litellm-db-data-litellm-db-0 is running out of space, total capacity: 300.000000Gi, used capacity: 258.7Gi, used percentage: 86.25%, percentage threshold: 85.00%`
+
+阈值 85%，告警来源 = `csi-controller-server` 周期性发的 `LowAvailableCapacity` Event。本节给完整处置流程。
+
+### 前置事实（必须先确认才能扩）
+
+| 事实 | 当前值（litellm-db） | 检查命令 |
+|------|---------------------|----------|
+| StorageClass 允许扩容 | `allowVolumeExpansion: true` ✓ | `kubectl get sc alibabacloud-cnfs-nas -o yaml \| grep allowVolumeExpansion` |
+| Provisioner 是 NAS subpath（在线配额扩容） | `nasplugin.csi.alibabacloud.com` + `volumeAs: subpath` ✓ | `kubectl get pv <pv-name> -o yaml \| grep -E 'volumeAs\|driver:'` |
+| PV / PVC 当前 quota | 看 `.status.capacity.storage` | `kubectl get pvc litellm-db-data-litellm-db-0 -n carher` |
+| 实际占用 | `du -sh /var/lib/postgresql/data` 或 `pg_database_size('litellm')` | 见上节"监控" |
+| PVC 由谁创建 | StatefulSet `litellm-db` 的 `volumeClaimTemplates` | `kubectl get sts litellm-db -n carher -o yaml` |
+
+只要 SC + provisioner 这两条满足，**整个扩容是在线的，pod 不会重启，DB 不中断**。
+
+### 标准扩容流程（实测零中断）
+
+```bash
+# 1) patch live PVC（直接生效，无需重启 pod）
+kubectl patch pvc litellm-db-data-litellm-db-0 -n carher --type=merge \
+  -p '{"spec":{"resources":{"requests":{"storage":"500Gi"}}}}'
+
+# 2) 等 ~5s，验证 PVC + PV 都到新 quota
+sleep 5
+kubectl get pvc litellm-db-data-litellm-db-0 -n carher
+kubectl get pv $(kubectl get pvc litellm-db-data-litellm-db-0 -n carher \
+                  -o jsonpath='{.spec.volumeName}') \
+  -o jsonpath='pv.capacity={.spec.capacity.storage}{"\n"}'
+
+# 3) 三层健康验证
+kubectl get pod litellm-db-0 -n carher                     # 1/1 Running，RESTARTS 不变
+kubectl exec litellm-db-0 -n carher -- du -sh /var/lib/postgresql/data
+kubectl exec litellm-db-0 -n carher -- psql -U litellm -d litellm \
+  -c "SELECT 1 AS healthcheck;"
+```
+
+### ⚠️ volumeClaimTemplates 是 immutable —— 仓库 manifest 一定会 drift
+
+这是 **K8s 的硬限制**，不是我们能修的：StatefulSet 创建后 `volumeClaimTemplates` **不可变**，所以
+`k8s/litellm-postgres.yaml` 里的 `storage: 200Gi` 不能用 `kubectl apply` 直接同步到 live 资源。
+
+实际意味着：**live PVC 才是 source of truth**，仓库 manifest 仅用于：
+- 文档（让人/agent 知道 quota 历史）
+- 未来如果有人 `delete sts --cascade=orphan` 重建（罕见）
+- 增加副本时新 PVC 的初始 quota（litellm-db 是单副本，永远不会发生）
+
+**所以扩容后必须做的两件 manifest 同步**：
+
+1. 改 `k8s/litellm-postgres.yaml` 的 `volumeClaimTemplates[0].spec.resources.requests.storage` 为新值
+2. 把上方注释的 `History:` 段追加一条（保持可追溯）
+
+模板：
+
+```yaml
+  volumeClaimTemplates:
+    # NOTE: volumeClaimTemplates is immutable after the StatefulSet is created.
+    # The live PVC (litellm-db-data-litellm-db-0) has been expanded in-place via
+    # `kubectl patch pvc ... {"spec":{"resources":{"requests":{"storage":"<NEW>Gi"}}}}`.
+    # History:
+    #   100Gi (initial)
+    #   -> 200Gi (2026-04-28, alert at ~88GB used)
+    #   -> 300Gi (~2026-04 mid, ack alert at ~258GB used)
+    #   -> 500Gi (2026-05-06, ACK alert at ~259GB used / 86.25% of 300Gi quota)
+    # This field is kept in sync only for documentation / new replica provisioning;
+    # the live PVC is the source of truth.
+```
+
+> 历史教训（2026-04 → 2026-05）：300Gi 那次扩容只 patch 了 PVC，没改仓库注释和字段，结果下次（500Gi）扩容时 manifest 还停留在 200Gi → 看起来像 "live 比 manifest 多 100Gi" 的诡异 drift。**永远在扩 PVC 的同一个 commit 里把 manifest 注释和字段一起改掉**。
+
+### 不要做的事
+
+- ❌ 不要 `kubectl apply -f k8s/litellm-postgres.yaml` 试图通过 STS 改 PVC quota —— `volumeClaimTemplates` immutable，会被 K8s 拒绝（或者更糟，部分字段被静默忽略）
+- ❌ 不要 `kubectl delete sts litellm-db --cascade=orphan` 重建 STS —— 单副本 DB 没必要承担这个风险，patch PVC 已经足够
+- ❌ 不要相信 pod 内 `df -h` 的 `Use%` —— CNFS NAS subpath 在 pod 内永远显示 0%（见上节"监控"的 ⚠️）
+- ❌ 不要预先扩到非常大（如直接 1Ti）—— 阿里云 NAS 配额扩容**只能扩不能缩**，按 1.5–2× 当前用量分批扩即可（200→300→500 这种节奏）
+
+### 何时该考虑别的方案（而不是继续扩）
+
+如果短期内连续扩了 ≥3 次（半年里 200→300→500→…），说明在加速堆积，要先排查：
+
+1. `LiteLLM_SpendLogs` 增长速率（每天写几行、单行 `request_response` 多大）—— 这是 90%+ 的占用来源
+2. 是否需要开 spend-log 截断 / 归档（参考上游 `general_settings.spend_logs_disable_request_response`）
+3. carher-admin 的"近 N 天" SQL 是不是已经够 → 是否可以加 `pg_partman` 月分区 + 老月份转 cold storage
+
+继续无脑扩容只是把 NAS 账单和告警阈值往后推。
 
 ---
 
@@ -600,6 +702,7 @@ kubectl exec litellm-db-0 -n carher -- psql -U litellm -d litellm \
 | 2026-04-27 下午 | 改 YAML fallback 不生效 / callback 注册不完整 | DB `LiteLLM_Config` 三行覆盖 YAML | 加 `wipe-db-config-rows` initContainer + 在 YAML 里显式 `store_model_in_db: false`；引入 `scripts/sync-litellm-callbacks.py` 防 ConfigMap 内嵌副本 drift |
 | 2026-04-27 下午 | opus-4.7 fallback 直接降一档丢质量 | 链没考虑 OpenRouter 同档 | fallback 改为 `[anthropic.openrouter.claude-opus-4-7, anthropic.claude-opus-4-6, openrouter-claude-opus-4-6]` |
 | 2026-04-27 晚 | 计费 / 审计丢数据：每个 pod 每 30 分钟 23–27 次 `update_spend Exception`，每次最多丢 1000 条 SpendLogs | LiteLLM 1.82.6 `update_spend_logs` 用 `prisma_client.db.litellm_spendlogs.create_many` 整批写库；payload 中只要混入一条**含 NUL 字节 (`\x00` / `\u0000` 转义)** 或**孤立 UTF-16 surrogate**（`\ud800-\udfff` codepoint，或 json-dump 后的字面量 `\ud83d`）的行，PG 抛 SQLSTATE `22P05` 或 prisma Rust 解析器抛 `unexpected end of hex escape`，**整批 1000 行被静默丢弃**。`embedding_sanitize` 只在请求路径修 `data["input"]`，写库路径上 `proxy_server_request` / `metadata` 里残留的 surrogate 仍会害死 batch。 | 新增 `null_byte_sanitize.py`：在 import 时 monkey-patch `PrismaClient.jsonify_object` / module-level `jsonify_object` / `safe_dumps`，递归剔除 NUL（raw + JSON 转义）和孤立 surrogate（codepoint + 字面量），同时保留配对 `\ud83d\ude00`（emoji 不破坏）。验证：13 单元 case + 1 端到端 case 全过；新 pod 上 `update_spend Exception` 计数 0 |
+| 2026-05-06 中午 | 阿里云 K8s 通用 Warn 告警：`PVC carher/litellm-db-data-litellm-db-0 is running out of space, total capacity: 300Gi, used: 258.7Gi (86.25%)，threshold 85%` | `LiteLLM_SpendLogs` 持续累积，DB 实际占用 260GB，触及 CSI controller 的 LowAvailableCapacity 阈值；同时仓库 `k8s/litellm-postgres.yaml` 还停留在 200Gi（300Gi 那次扩容漏同步注释/字段），manifest drift | `kubectl patch pvc litellm-db-data-litellm-db-0 -n carher --type=merge -p '{"spec":{"resources":{"requests":{"storage":"500Gi"}}}}'`（CNFS NAS subpath 在线扩容，pod 不重启）；同步把 `k8s/litellm-postgres.yaml` 注释 + storage 一起补到 500Gi。详细流程见正文"litellm-db PVC 容量告警 / 在线扩容"章节 |
 | 2026-04-27 晚 | 12 个 carher key 偶发 `RouterRateLimitError: cooldown_list=['openrouter/bge-m3']`，全部 401 失败；某一时间窗内 `bge-m3` 整组对所有 key 不可用 | 一个被删除多日的"僵尸 key"（`LiteLLM_VerificationToken` 已删，但 client 还在跑）以 ~9945 次/48h 击中 LiteLLM auth → LiteLLM 把这 401 视为 router-level deployment failure → 5s cooldown → `bge-m3` 是单 deployment 的 model group，cooldown 一开**所有合法 key 同步遭殃**。Trade-off：401 在 `cooldown_handlers.py:241-247` 是被显式列入"non-retryable also cooldown"的。 | (a) **P1-A 业务侧**：业务团队定位并停用持有失效 key 的 client。(b) **P1-B 代理侧硬开关**：`router_settings.disable_cooldowns: true`，整个 router 的 cooldown 机制关闭，401 不再连坐其他 key。代价：多 deployment 的 model group 失去"跳过坏副本"能力，但 `num_retries=2` + 完整 `fallbacks` 已足够兜底。条件解除：所有僵尸 client 清完 + bge-m3 加备份 deployment。 |
 
 下次遇到类似问题，**先来这张表里搜关键词**，往往同事已经踩过。

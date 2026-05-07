@@ -45,6 +45,20 @@ description: >-
 
 > **prefix 不要随便改**，否则 callback URL 变，飞书侧旧配置全部失效。除非用户明确要求改，否则原样保留。
 
+### app_secret 三种来源（按优先级）
+
+不换 app 时，需要把老 app_secret 重新喂给 `batch-import`。三条获取路径：
+
+| 来源 | 命令 | 适用 |
+|------|------|------|
+| **A. admin API `/config-current`**（**首选**，公网路径，跟 K8s 隧道无关） | `curl -s -H "X-API-Key: $API_KEY" "https://admin.carher.net/api/instances/{ID}/config-current" \| python3 -c 'import sys,json; d=json.load(sys.stdin); f=d["channels"]["feishu"]; print("app_id =", f["appId"]); print("app_secret =", f["appSecret"]); print("oauthRedirectUri =", f["oauthRedirectUri"])'` | 始终可用——只要能访问 `admin.carher.net`（公网 + Cloudflare）就行 |
+| B. K8s Secret 直读 | `kubectl get secret carher-{ID}-feishu -n carher -o jsonpath='{.data.appSecret}' \| base64 -d` | 仅当 K8s 隧道在线（`scripts/jms proxy` 通了） |
+| C. 用户手工粘贴 | 让用户从飞书后台拷 | 兜底 |
+
+> **A 是默认**——`/config-current` 直接吐 ConfigMap 中的明文 `appSecret`（受 X-API-Key 保护）。**不要**先尝试 K8s 路径再 fallback——这会浪费时间在 VPN/堡垒机调试上。
+> `/config-preview` 不行，那个端点会 redact secret；只有 `/config-current` 给原文。
+> `oauthRedirectUri` 同时返回，可以用来反推 `prefix`（`s2-u{id}-...` → `s2`），不需要再从 `oauth_url` 解析。
+
 ## 方案对比
 
 | 方案 | 做法 | 推荐度 |
@@ -67,19 +81,39 @@ API_KEY=$(kubectl get secret carher-admin-secrets -n carher \
 # kubectl 不可用时见 add-instances skill 的硬编码备份
 ```
 
-### Step 1: 现状盘点
+### Step 1: 现状盘点（一次拉两份，含 app_secret）
+
+**两份并拉**：instance detail（看运行态、镜像、deploy_group）+ `/config-current`（拿 app_secret + 反推 prefix）。
 
 ```bash
+echo "=== instance detail ==="
 curl -s -H "X-API-Key: $API_KEY" "https://admin.carher.net/api/instances/{ID}" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 for k in ['id','name','app_id','model','provider','prefix','owner','deploy_group','status','image','feishu_ws','oauth_url','paused']:
     print(f'  {k}: {d.get(k, \"N/A\")}')
 "
+
+echo ""
+echo "=== config-current (channels.feishu) ==="
+curl -s -H "X-API-Key: $API_KEY" "https://admin.carher.net/api/instances/{ID}/config-current" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+f = d.get('channels', {}).get('feishu', {})
+print(f'  appId            = {f.get(\"appId\")}')
+print(f'  appSecret        = {f.get(\"appSecret\")}')
+print(f'  name             = {f.get(\"name\")}')
+print(f'  oauthRedirectUri = {f.get(\"oauthRedirectUri\")}')
+"
 ```
 
-记录：`prefix`（决定 callback URL）、`image`（重建后必须对齐）、`model` / `provider` / `deploy_group` / 旧 `app_id`。
-注意 `prefix` 字段在响应中可能显示 `N/A`，从 `oauth_url` 反推（`s2-u{id}-...` → prefix=`s2`）。
+记录：
+- `prefix`（决定 callback URL）：instance detail 字段常返回 `N/A`；从 `oauthRedirectUri` 反推：`https://s2-u35-auth.carher.net/...` → `prefix=s2`
+- `image`（重建后必须对齐）
+- `model` / `provider` / `deploy_group` / 旧 `app_id`
+- **`appSecret`（不换 app 路径必需）** —— 上面 `/config-current` 已直接吐出明文，不需要再去 K8s 拉 secret
+
+> 把 instance detail 和 config-current 一起读，是为了**避免后续走到 batch-import 时才发现没有 app_secret**，又被迫绕去开 K8s 隧道。一次到位。
 
 ### Step 2: 验证新 app 凭据 + 查新主人 per-app open_id
 
@@ -97,13 +131,33 @@ TOKEN=$(curl -s -X POST 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_
 USER_ID=$(lark-cli contact +search-user --query "新主人姓名" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['users'][0]['user_id'])")
 
-NEW_OWNER=$(curl -s "https://open.feishu.cn/open-apis/contact/v3/users/$USER_ID?user_id_type=user_id" \
-  -H "Authorization: Bearer $TOKEN" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['user']['open_id'])")
+# 完整查询（带错误回显，方便辨别"可见性不足"）：
+RESP=$(curl -s "https://open.feishu.cn/open-apis/contact/v3/users/$USER_ID?user_id_type=user_id" \
+  -H "Authorization: Bearer $TOKEN")
+echo "$RESP" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if d.get('code') != 0:
+    print(f'❌ 查询失败 code={d.get(\"code\")} msg={d.get(\"msg\")}')
+    sys.exit(1)
+u = d['data']['user']
+print(f'✅ name={u[\"name\"]} open_id={u[\"open_id\"]}')
+"
+NEW_OWNER=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['user']['open_id'])")
 echo "new owner = $NEW_OWNER"
 ```
 
 token 拿到 = app_secret 有效；同时也确认新 app_id+secret 是真实匹配的一对。
+
+#### 失败模式：新主人不在该 app 通讯录可见范围内
+
+如果上一步返回 `code != 0`（典型：`99991672 / contact:user.id:readonly` 范围拒绝、或 user 找不到），说明该飞书应用的"通讯录权限"没有覆盖到新主人，**没法直接拿到 per-app open_id**。处理：
+
+1. 先确认是不是真的不在范围（不同应用的通讯录权限范围不同——有的覆盖全员、有的只覆盖某几个部门）
+2. 让该应用的管理员（开发者后台 → 权限管理 → 通讯录权限范围）把新主人或其部门加进去
+3. 或者，直接走"换 app"路径——用新主人自己作为开发者的应用替换
+
+> **怎么判断 per-app 可见性问题 vs 凭据失效**：token 取到了（Step 2 第一段不报错）但查 user 失败 → 是可见性；token 取不到（`invalid app_id/app_secret`）→ 是凭据。
 
 ### Step 3: purge 删除旧实例
 
@@ -201,3 +255,7 @@ curl -sS -o /dev/null -w "%{http_code}\n" \
 | `DELETE` 漏 `purge=true` | PVC + LiteLLM key 残留，老主人 memory / feishu token / spend 进入新实例 |
 | 先建新再删旧（顺序错） | 同 app_id 双订阅飞书事件，消息错乱；必须**先 DELETE 再 batch-import** |
 | 新老主人共用 app 时仍重新配飞书后台 | 完全没必要，浪费新主人时间 |
+| **VPN 不通就停下找 K8s secret** | 不换 app 时 app_secret 走 admin API `/config-current` 即可，**不必**先开 K8s 隧道。先尝试 K8s 路径会浪费几分钟在 VPN/堡垒机调试上 |
+| **新主人不在该 app 通讯录可见范围** | Step 2 查 per-app open_id 会返回非 0 code；让 app 管理员把新主人或其部门加入"通讯录权限范围"，或改走"换 app" |
+| **沿用旧 app 但应用所有权没移交** | 新主人没法登录旧主人的飞书后台改 OAuth/事件订阅。当前不要紧（飞书侧零配置），但未来要改 prefix / callback / scope 时只能找原所有者；如果新主人长期接手且想自治，建议改走"换 app"路径 |
+| 老 app_secret 已知泄漏给前主人 | 不换 app 时仍是同一个 secret，前主人理论上仍能模拟该 app 调飞书 API。介意就让 app 管理员在飞书后台 rotate secret，再 PUT `app_secret` 同步到实例 |

@@ -63,9 +63,14 @@ spec:
   volumeClaimTemplates:
     # NOTE: volumeClaimTemplates is immutable after the StatefulSet is created.
     # The live PVC (litellm-db-data-litellm-db-0) has been expanded in-place via
-    # `kubectl patch pvc ... {"spec":{"resources":{"requests":{"storage":"200Gi"}}}}`.
-    # History: 100Gi (initial) -> 100Gi expand -> 200Gi (2026-04-28, alert at ~88GB used)
-    # This field is kept in sync only for documentation / new replica provisioning.
+    # `kubectl patch pvc ... {"spec":{"resources":{"requests":{"storage":"500Gi"}}}}`.
+    # History:
+    #   100Gi (initial)
+    #   -> 200Gi (2026-04-28, alert at ~88GB used)
+    #   -> 300Gi (~2026-04 mid, ack alert at ~258GB used; manifest field not synced at the time)
+    #   -> 500Gi (2026-05-06, ACK alert at ~259GB used / 86.25% of 300Gi quota)
+    # This field is kept in sync only for documentation / new replica provisioning;
+    # the live PVC is the source of truth.
     - metadata:
         name: litellm-db-data
         labels:
@@ -75,7 +80,7 @@ spec:
         storageClassName: alibabacloud-cnfs-nas
         resources:
           requests:
-            storage: 200Gi
+            storage: 500Gi
 ---
 apiVersion: v1
 kind: Service

@@ -551,6 +551,294 @@ data:
           output_cost_per_token: 0.000015
 
       # ═══════════════════════════════════════════
+      # Kuaihui (https://kuaihuiai.com/v1) — canary, added 2026-04-29
+      # for carher-1000 main-chat experiment. Single-instance scope; no
+      # other instance / fallback chain references these `kuaihui-*` names,
+      # so this block is purely additive (zero blast radius for the rest
+      # of the cluster).
+      #
+      # Protocol: OpenAI-compat /v1/chat/completions (verified streaming
+      # + non-streaming). Native /v1/messages also works on the same
+      # base_url but we route via openai/* for consistency with the rest
+      # of the chat path.
+      #
+      # Pricing: each entry uses official Anthropic / OpenAI list-price
+      # (per per-model URL inline) as an upper-bound estimate — a 中转
+      # gateway typically charges at-or-below the official rate. These
+      # are the SpendLogs cost basis; replace with kuaihui's actual
+      # per-token rates once first invoice / billing console exposes
+      # them, otherwise spend rows for kuaihui-* will diverge from
+      # what kuaihui actually bills. Verified against:
+      #   - https://www.anthropic.com/pricing  (Opus 4.7/4.6, Sonnet 4.6, Haiku 4.5)
+      #   - https://openai.com/api/pricing/    (GPT-5.5, 5.4, 5.4-mini)
+      # ═══════════════════════════════════════════
+
+      # ── Claude Opus 4.7 via Kuaihui ──
+      - model_name: kuaihui-claude-opus-4-7
+        litellm_params:
+          model: openai/claude-opus-4-7
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+        model_info:
+          id: kuaihui/claude-opus-4-7
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+
+      # ── Claude Opus 4.6 via Kuaihui ──
+      - model_name: kuaihui-claude-opus-4-6
+        litellm_params:
+          model: openai/claude-opus-4-6
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+        model_info:
+          id: kuaihui/claude-opus-4-6
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+
+      # ── Claude Sonnet 4.6 via Kuaihui ──
+      # Anthropic-native provider so /v1/messages clients (claude-code CLI,
+      # Cursor) get pure passthrough; OpenAI-compat clients (carher main
+      # program /v1/chat/completions) still work via LiteLLM's built-in
+      # OpenAI↔Anthropic transform.
+      #
+      # extra_headers + default_headers: mirror the wangsu Claude config
+      # (anthropic.claude-sonnet-4-6) which is known-working on /v1/messages.
+      # Without these, kuaihui's /v1/messages reply seemed to hang LiteLLM's
+      # internal anthropic streaming parser (no upstream bytes after 60s).
+      - model_name: kuaihui-claude-sonnet-4-6
+        litellm_params:
+          model: anthropic/claude-sonnet-4-6
+          api_base: https://kuaihuiai.com
+          api_key: os.environ/KUAIHUI_API_KEY
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+        model_info:
+          id: kuaihui/claude-sonnet-4-6
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+
+      # ── Claude Haiku 4.5 (dated) via Kuaihui ──
+      - model_name: kuaihui-claude-haiku-4-5-20251001
+        litellm_params:
+          model: openai/claude-haiku-4-5-20251001
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000005
+        model_info:
+          id: kuaihui/claude-haiku-4-5-20251001
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000005
+
+      # ── Claude Haiku 4.5 thinking via Kuaihui ──
+      - model_name: kuaihui-claude-haiku-4-5-20251001-thinking
+        litellm_params:
+          model: openai/claude-haiku-4-5-20251001-thinking
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000005
+        model_info:
+          id: kuaihui/claude-haiku-4-5-20251001-thinking
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000005
+
+      # ── GPT-5.5 via Kuaihui ──
+      # Standard tier (<272K ctx): $5 input / $30 output per 1M tokens
+      # (OpenAI official, as of 2026-04-23 GPT-5.5 release).
+      - model_name: kuaihui-gpt-5.5
+        litellm_params:
+          model: openai/gpt-5.5
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.00003
+        model_info:
+          id: kuaihui/gpt-5.5
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.00003
+
+      # ── GPT-5.4 via Kuaihui ──
+      - model_name: kuaihui-gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.0000025
+          output_cost_per_token: 0.000015
+        model_info:
+          id: kuaihui/gpt-5.4
+          input_cost_per_token: 0.0000025
+          output_cost_per_token: 0.000015
+
+      # ── GPT-5.4 mini via Kuaihui ──
+      # OpenAI official: $0.75 input / $4.50 output per 1M tokens.
+      - model_name: kuaihui-gpt-5.4-mini
+        litellm_params:
+          model: openai/gpt-5.4-mini
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.00000075
+          output_cost_per_token: 0.0000045
+        model_info:
+          id: kuaihui/gpt-5.4-mini
+          input_cost_per_token: 0.00000075
+          output_cost_per_token: 0.0000045
+
+      # ── GPT-5.4 codex via Kuaihui ──
+      # NOTE: "gpt-5.4-codex" is kuaihui's branding; OpenAI's official model
+      # catalog has no such SKU (closest = GPT-5.3-Codex at $1.75/$14 per 1M).
+      # Pricing here mirrors GPT-5.4 standard ($2.50/$15) as upper bound;
+      # update once kuaihui's per-token rate is known.
+      - model_name: kuaihui-gpt-5.4-codex
+        litellm_params:
+          model: openai/gpt-5.4-codex
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.0000025
+          output_cost_per_token: 0.000015
+        model_info:
+          id: kuaihui/gpt-5.4-codex
+          input_cost_per_token: 0.0000025
+          output_cost_per_token: 0.000015
+
+      # NOTE: gpt-image-2 NOT added here — it's an image-generation model
+      # (per-call billing, not per-token); requires `mode: image_generation`
+      # config and `/v1/images/generations` endpoint. carher has no image-gen
+      # workflow today, so deferred. Re-enable when needed.
+
+      # ═══════════════════════════════════════════
+      # Tag-routed kuaihui-primary aliases — added 2026-04-29
+      # ═══════════════════════════════════════════
+      # Per-key canary: liuguoxian's claude-code key keeps using the
+      # canonical model_name (anthropic.claude-{opus-4-7,opus-4-6,
+      # sonnet-4-6,haiku-4-5}) but its requests get routed to kuaihui
+      # primary, with the existing wangsu / openrouter chain acting as
+      # fallback. Implementation = LiteLLM tag-based routing:
+      #
+      #   1) These 4 deployments are tagged `liuguoxian-canary`. Per
+      #      LiteLLM router rules, a tagged deployment ONLY accepts
+      #      requests whose key.metadata.tags contains a matching tag.
+      #   2) The pre-existing wangsu / openrouter deployments for the
+      #      same 4 model_name(s) are UNTAGGED, so all ~200 other keys
+      #      keep landing on them — zero blast radius.
+      #   3) liuguoxian's key (alias `claude-code-liuguoxian-50gj`) has
+      #      metadata.tags=["liuguoxian-canary"] (set out-of-band via
+      #      /key/update). Its requests prefer the tagged kuaihui
+      #      deployment; if kuaihui fails, the untagged wangsu copy of
+      #      the same model_group is reachable too, and beyond that
+      #      router_settings.fallbacks chains to the openrouter twin.
+      #   4) router_settings.enable_tag_filtering: true (added below)
+      #      activates the whole mechanism cluster-wide.
+      #
+      # extra_headers (anthropic-beta) MUST be set on every kuaihui
+      # anthropic-provider entry — without them LiteLLM's anthropic
+      # client wedges 60s on /v1/messages because of how kuaihui's
+      # streaming/cache fields are formatted; verified 2026-04-29 on
+      # the kuaihui-claude-sonnet-4-6 sibling deployment.
+      #
+      # Pricing: same official Anthropic list-price as the kuaihui-*
+      # naked-name siblings above (kuaihui charges ≤ list-price; SpendLogs
+      # is upper-bound until kuaihui's billing console exposes per-token
+      # rates).
+
+      # ── DISABLED 2026-05-02: full rollback to wangsu ──────────────────
+      # Original design = liuguoxian-canary tag isolation (4 tag-routed
+      # `anthropic.claude-{opus-4-7,opus-4-6,sonnet-4-6,haiku-4-5}`
+      # deployments pointing at kuaihui, paired with key
+      # `claude-code-liuguoxian-50gj` carrying metadata.tags=
+      # ["liuguoxian-canary"]).
+      #
+      # Observed reality (2026-04-29 → 2026-05-02): SpendLogs shows
+      # 211 unique keys (196 claude-code-* + 13 carher-* + 2 cursor-*)
+      # hitting api_base=kuaihuiai.com despite zero of them carrying
+      # the canary tag. Wangsu calls dropped 53k → 17k/day over the
+      # same window. Inferred mechanism: when wangsu deployment cools
+      # down on 5xx / timeout, LiteLLM Router fallback within the
+      # `anthropic.claude-*` model_group selects the only other
+      # deployment available (the kuaihui-tagged one) regardless of
+      # `enable_tag_filtering: true`, i.e. the tag filter is bypassed
+      # in the router-fallback hot path (LiteLLM v1.82).
+      #
+      # Action: removed the 4 tag-routed kuaihui deployments so the
+      # 4 model_groups each fall back to the single wangsu-direct
+      # deployment + the existing per-group openrouter fallback chain
+      # (anthropic.claude-{opus-4-7,opus-4-6,sonnet-4-6} → openrouter
+      # twin, see router_settings.fallbacks below).
+      #
+      # liuguoxian's key still carries metadata.tags=["liuguoxian-canary"]
+      # but with no tag-routed deployment alive its requests land on
+      # the untagged wangsu deployment like everyone else.
+      #
+      # The 9 `kuaihui-*` naked-name deployments above are kept as a
+      # manual debug entrypoint (no key actively uses them; flip back
+      # to kuaihui canary by re-adding the 4 deployments below).
+      #
+      # ── verbatim original block, restore to re-enable canary ──
+      # - model_name: anthropic.claude-opus-4-7
+      #   litellm_params:
+      #     model: anthropic/claude-opus-4-7
+      #     api_base: https://kuaihuiai.com
+      #     api_key: os.environ/KUAIHUI_API_KEY
+      #     tags: ["liuguoxian-canary"]
+      #     extra_headers:
+      #       anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+      #     input_cost_per_token: 0.000005
+      #     output_cost_per_token: 0.000025
+      #   model_info:
+      #     id: kuaihui/anthropic.claude-opus-4-7
+      #     input_cost_per_token: 0.000005
+      #     output_cost_per_token: 0.000025
+      # - model_name: anthropic.claude-opus-4-6
+      #   litellm_params:
+      #     model: anthropic/claude-opus-4-6
+      #     api_base: https://kuaihuiai.com
+      #     api_key: os.environ/KUAIHUI_API_KEY
+      #     tags: ["liuguoxian-canary"]
+      #     extra_headers:
+      #       anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+      #     input_cost_per_token: 0.000005
+      #     output_cost_per_token: 0.000025
+      #   model_info:
+      #     id: kuaihui/anthropic.claude-opus-4-6
+      #     input_cost_per_token: 0.000005
+      #     output_cost_per_token: 0.000025
+      # - model_name: anthropic.claude-sonnet-4-6
+      #   litellm_params:
+      #     model: anthropic/claude-sonnet-4-6
+      #     api_base: https://kuaihuiai.com
+      #     api_key: os.environ/KUAIHUI_API_KEY
+      #     tags: ["liuguoxian-canary"]
+      #     extra_headers:
+      #       anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+      #     input_cost_per_token: 0.000003
+      #     output_cost_per_token: 0.000015
+      #   model_info:
+      #     id: kuaihui/anthropic.claude-sonnet-4-6
+      #     input_cost_per_token: 0.000003
+      #     output_cost_per_token: 0.000015
+      # - model_name: anthropic.claude-haiku-4-5
+      #   litellm_params:
+      #     model: anthropic/claude-haiku-4-5
+      #     api_base: https://kuaihuiai.com
+      #     api_key: os.environ/KUAIHUI_API_KEY
+      #     tags: ["liuguoxian-canary"]
+      #     extra_headers:
+      #       anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+      #     input_cost_per_token: 0.000001
+      #     output_cost_per_token: 0.000005
+      #   model_info:
+      #     id: kuaihui/anthropic.claude-haiku-4-5
+      #     input_cost_per_token: 0.000001
+      #     output_cost_per_token: 0.000005
+
+      # ═══════════════════════════════════════════
       # Embedding
       # ═══════════════════════════════════════════
 
@@ -576,6 +864,19 @@ data:
           output_cost_per_token: 0
 
     router_settings:
+      # ── tag-based routing ────────────────────────────────────────────
+      # Activate per-key deployment selection via tags. Behavior:
+      #   * Untagged deployments accept ALL requests (default).
+      #   * Tagged deployments ONLY accept requests whose API key carries
+      #     a matching tag in metadata.tags.
+      # Currently the only tagged deployments are the 4 kuaihui-primary
+      # `anthropic.claude-*` aliases above (tag=`liuguoxian-canary`),
+      # paired with the `claude-code-liuguoxian-50gj` key which has
+      # metadata.tags=["liuguoxian-canary"]. All other ~200 keys carry
+      # no tag, so this flag is a no-op for them. See the model_list
+      # block above for the full design rationale.
+      enable_tag_filtering: true
+
       # Map dated-snapshot model names that newer Anthropic SDKs send (e.g.
       # ``@anthropic-ai/sdk`` / Claude Code CLI emits ``claude-haiku-4-5-
       # 20251001`` when the user picks haiku-4.5) onto our existing model
@@ -759,13 +1060,17 @@ data:
       database_url: os.environ/DATABASE_URL
       # CRITICAL — keep `false`. With `true` the proxy persists model_list
       # changes via the admin UI/API to LiteLLM_Config and merges them on
-      # every restart, defeating the YAML-as-source-of-truth invariant
-      # below. The chicken-and-egg flip at proxy_server.py:6015 reads the
-      # DB general_settings.store_model_in_db and overrides this YAML
-      # value if it finds True there. The initContainer
-      # ``wipe-db-config-rows`` deletes the DB row on every pod start so
-      # this YAML value is final and authoritative.
-      store_model_in_db: false
+      # 2026-04-29: opened back up to True so the single admin user
+      # (Liuguoxian) can edit Spend Logs settings (Store Prompts toggle,
+      # retention period) from the LiteLLM admin UI without hitting
+      # "Set 'STORE_MODEL_IN_DB=True' in your env to enable this feature."
+      # Risk surface is bounded because: (1) UI is single-user; (2) the
+      # wipe-db-config-rows initContainer below still deletes the
+      # router_settings + litellm_settings rows on every pod start, so
+      # fallbacks / callback registrations remain YAML-as-source-of-truth
+      # and cannot be silently flipped via UI. Only general_settings is
+      # now allowed to persist via DB row.
+      store_model_in_db: true
       # Always auto-inject stream_options.include_usage=true on streaming
       # requests. Without this, OpenAI-compatible clients that omit the flag
       # get no usage chunk from streaming responses, and:
@@ -3488,7 +3793,14 @@ spec:
               import sys
               from prisma import Prisma
 
-              ROWS = ("router_settings", "litellm_settings", "general_settings")
+              # 2026-04-29: general_settings intentionally OMITTED from
+              # the wipe list so that admin-UI edits to Spend Logs
+              # settings (store_prompts_in_spend_logs / retention period /
+              # health_check_interval / ui_access_mode) survive pod
+              # restarts. router_settings (fallbacks) and litellm_settings
+              # (callbacks) remain wiped — those are YAML-only and must
+              # not be alterable via the admin UI.
+              ROWS = ("router_settings", "litellm_settings")
 
               async def go() -> None:
                   db = Prisma()
@@ -3496,7 +3808,7 @@ spec:
                   try:
                       before = await db.query_raw(
                           'SELECT param_name FROM "LiteLLM_Config" '
-                          'WHERE param_name IN ($1, $2, $3) '
+                          'WHERE param_name IN ($1, $2) '
                           'ORDER BY param_name',
                           *ROWS,
                       )
@@ -3505,13 +3817,13 @@ spec:
 
                       await db.execute_raw(
                           'DELETE FROM "LiteLLM_Config" '
-                          'WHERE param_name IN ($1, $2, $3)',
+                          'WHERE param_name IN ($1, $2)',
                           *ROWS,
                       )
 
                       after = await db.query_raw(
                           'SELECT param_name FROM "LiteLLM_Config" '
-                          'WHERE param_name IN ($1, $2, $3) '
+                          'WHERE param_name IN ($1, $2) '
                           'ORDER BY param_name',
                           *ROWS,
                       )
@@ -3689,6 +4001,16 @@ spec:
               value: "999999"
             - name: STREAMING_BRIDGE_PROGRESS_TIMEOUT_POST_SECONDS
               value: "999999"
+            # 2026-04-29: enable admin-UI Spend Logs settings editing.
+            # YAML general_settings doesn't reach runtime in 1.82.6
+            # (proxy_server reads it from DB only, and the
+            # wipe-db-config-rows initContainer currently keeps DB clean).
+            # These two env vars are read directly by LiteLLM regardless
+            # of YAML/DB and let the admin UI persist Spend Logs toggles.
+            - name: STORE_MODEL_IN_DB
+              value: "True"
+            - name: STORE_PROMPTS_IN_SPEND_LOGS
+              value: "True"
           envFrom:
             - secretRef:
                 name: litellm-secrets

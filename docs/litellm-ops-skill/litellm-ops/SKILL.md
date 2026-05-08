@@ -117,14 +117,18 @@ gemini-3.1-pro-preview → OpenRouter 主    → fallback: wangsu-gemini-3.1-pro
 ## API 调用方式
 
 使用 exec 工具执行 curl 命令。所有管理 API 需要 Master Key 认证。
+**Master Key 必须从 K8s secret 现取**（密钥会轮换，不要硬编码）：
 
 ```bash
+MK=$(kubectl get secret litellm-secrets -n carher \
+  -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+
 curl -s http://litellm-proxy.carher.svc:4000/health/readiness \
-  -H "Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707"
+  -H "Authorization: Bearer $MK"
 ```
 
 **Base URL**: `http://litellm-proxy.carher.svc:4000`
-**认证**: `Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707`
+**认证**: `Authorization: Bearer $MK`（从 secret 取，见上）
 
 ## 安全规则
 
@@ -282,11 +286,11 @@ curl -s http://carher-admin-svc.carher:8900/api/litellm/spend \
 ```bash
 # 快速检查
 curl -s http://litellm-proxy.carher.svc:4000/health/readiness \
-  -H "Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707"
+  -H "Authorization: Bearer $MK"
 
 # 全面检查（会向所有模型发请求，耗时 ~45s）
 curl -s http://litellm-proxy.carher.svc:4000/health \
-  -H "Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707"
+  -H "Authorization: Bearer $MK"
 ```
 
 返回中 `healthy_count` / `unhealthy_count` 可快速判断。unhealthy 的模型会有 `error` 字段说明原因。
@@ -296,11 +300,11 @@ curl -s http://litellm-proxy.carher.svc:4000/health \
 ```bash
 # 模型列表
 curl -s http://litellm-proxy.carher.svc:4000/v1/models \
-  -H "Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707"
+  -H "Authorization: Bearer $MK"
 
 # 模型组详情（含 provider、RPM/TPM）
 curl -s http://litellm-proxy.carher.svc:4000/model_group/info \
-  -H "Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707"
+  -H "Authorization: Bearer $MK"
 ```
 
 ### 3. 查看费用 Top-N
@@ -308,7 +312,7 @@ curl -s http://litellm-proxy.carher.svc:4000/model_group/info \
 ```bash
 # 按 key 费用排行
 curl -s "http://litellm-proxy.carher.svc:4000/spend/keys?limit=20" \
-  -H "Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707"
+  -H "Authorization: Bearer $MK"
 ```
 
 返回 `[{key_alias: "carher-89", spend: 626.43}, ...]`，key_alias 格式为 `carher-{uid}`，可直接映射到 Her 实例。
@@ -318,7 +322,7 @@ curl -s "http://litellm-proxy.carher.svc:4000/spend/keys?limit=20" \
 ```bash
 # 先查 key 信息
 curl -s "http://litellm-proxy.carher.svc:4000/key/info?key=sk-实例的key" \
-  -H "Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707"
+  -H "Authorization: Bearer $MK"
 
 # 或通过 Admin API 汇总
 curl -s http://carher-admin-svc.carher:8900/api/litellm/spend \
@@ -338,7 +342,7 @@ curl -X POST "http://carher-admin-svc.carher:8900/api/litellm/keys/generate?uid=
 
 ```bash
 curl -X POST http://litellm-proxy.carher.svc:4000/key/generate \
-  -H "Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707" \
+  -H "Authorization: Bearer $MK" \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "carher-500",
@@ -353,13 +357,13 @@ curl -X POST http://litellm-proxy.carher.svc:4000/key/generate \
 ```bash
 # 封禁
 curl -X POST http://litellm-proxy.carher.svc:4000/key/block \
-  -H "Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707" \
+  -H "Authorization: Bearer $MK" \
   -H "Content-Type: application/json" \
   -d '{"key": "sk-被封禁的key"}'
 
 # 解封
 curl -X POST http://litellm-proxy.carher.svc:4000/key/unblock \
-  -H "Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707" \
+  -H "Authorization: Bearer $MK" \
   -H "Content-Type: application/json" \
   -d '{"key": "sk-被封禁的key"}'
 ```
@@ -368,7 +372,7 @@ curl -X POST http://litellm-proxy.carher.svc:4000/key/unblock \
 
 ```bash
 curl -s "http://litellm-proxy.carher.svc:4000/health?model=claude-sonnet-4-6" \
-  -H "Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707"
+  -H "Authorization: Bearer $MK"
 ```
 
 ### 8. 路由策略说明（legacy）
@@ -380,7 +384,7 @@ curl -s "http://litellm-proxy.carher.svc:4000/health?model=claude-sonnet-4-6" \
 
 ```bash
 curl -X POST http://litellm-proxy.carher.svc:4000/spend/calculate \
-  -H "Authorization: Bearer sk-carher-litellm-7c5e14f76cc7718def67ccfae6f00707" \
+  -H "Authorization: Bearer $MK" \
   -H "Content-Type: application/json" \
   -d '{"model": "claude-sonnet-4-6", "messages": [{"role":"user","content":"一段1000字的消息"}]}'
 ```

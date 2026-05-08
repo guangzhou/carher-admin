@@ -48,6 +48,9 @@ _BASE_MODELS = [
     "glm-5",
     "gpt-5.3-codex",
     "BAAI/bge-m3",
+    "wangsu-gpt-5.5",
+    "wangsu-deepseek-v4-pro",
+    "wangsu-deepseek-v4-flash",
 ]
 ALL_MODELS = _BASE_MODELS + list(MODEL_FALLBACK_MAP.values())
 

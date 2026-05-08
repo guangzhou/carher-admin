@@ -267,6 +267,48 @@ data:
           input_cost_per_token: 0.000002
           output_cost_per_token: 0.000012
 
+      # ── New on cheliantianxia1 (added 2026-05-08): GPT-5.5 + DeepSeek V4 ──
+      # Pricing rationale:
+      #   gpt-5.5     — OpenAI list price ($5/$30 per 1M); Wangsu pass-through.
+      #   deepseek-*  — DeepSeek official list price (cache_miss + output);
+      #                 the 75%-off promo ends 2026-05-31, so we book at full
+      #                 list to keep spend tracking conservative.
+      - model_name: wangsu-gpt-5.5
+        litellm_params:
+          model: custom_openai/gpt-5.5
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.00003
+        model_info:
+          id: wangsu/gpt-5.5
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.00003
+
+      - model_name: wangsu-deepseek-v4-pro
+        litellm_params:
+          model: custom_openai/deepseek-v4-pro
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          input_cost_per_token: 0.00000171
+          output_cost_per_token: 0.00000343
+        model_info:
+          id: wangsu/deepseek-v4-pro
+          input_cost_per_token: 0.00000171
+          output_cost_per_token: 0.00000343
+
+      - model_name: wangsu-deepseek-v4-flash
+        litellm_params:
+          model: custom_openai/deepseek-v4-flash
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          input_cost_per_token: 0.000000143
+          output_cost_per_token: 0.000000286
+        model_info:
+          id: wangsu/deepseek-v4-flash
+          input_cost_per_token: 0.000000143
+          output_cost_per_token: 0.000000286
+
       # ═══════════════════════════════════════════
       # Provider: Wangsu Anthropic Direct Mode (v2 gateway)
       # Native Anthropic protocol for Cursor / Claude Code users.

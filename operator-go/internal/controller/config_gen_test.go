@@ -190,6 +190,9 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 		"litellm/glm-5":                       "glm",
 		"litellm/gpt-5.3-codex":               "codex",
 		"litellm/anthropic.claude-opus-4-7":   "opus4.7",
+		"litellm/wangsu-gpt-5.5":              "gpt55",
+		"litellm/wangsu-deepseek-v4-pro":      "ds-pro",
+		"litellm/wangsu-deepseek-v4-flash":    "ds-flash",
 	}
 	for mid, wantAlias := range expectedAliases {
 		m, ok := models[mid]
@@ -203,8 +206,8 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 		}
 	}
 
-	if len(models) != 8 {
-		t.Errorf("Expected exactly 8 models for litellm, got %d", len(models))
+	if len(models) != 11 {
+		t.Errorf("Expected exactly 11 models for litellm, got %d", len(models))
 		for k := range models {
 			t.Logf("  model: %s", k)
 		}
@@ -217,13 +220,13 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 		}
 	}
 
-	// Verify litellm provider is defined with 8 models
+	// Verify litellm provider is defined with 11 models
 	modelsSection := cfg["models"].(map[string]interface{})
 	providers := modelsSection["providers"].(map[string]interface{})
 	litellmProv := providers["litellm"].(map[string]interface{})
 	provModels := litellmProv["models"].([]interface{})
-	if len(provModels) != 8 {
-		t.Errorf("Expected 8 provider models, got %d", len(provModels))
+	if len(provModels) != 11 {
+		t.Errorf("Expected 11 provider models, got %d", len(provModels))
 	}
 
 	if litellmProv["apiKey"] != "sk-test-key" {
@@ -313,9 +316,9 @@ func TestGenerateOpenclawJSON_ExtraLitellmModels(t *testing.T) {
 
 	providers := cfg["models"].(map[string]interface{})["providers"].(map[string]interface{})
 	provModels := providers["litellm"].(map[string]interface{})["models"].([]interface{})
-	// 8 default + 1 test extra = 9
-	if len(provModels) != 9 {
-		t.Errorf("Expected 9 provider models (8 default + 1 extra), got %d", len(provModels))
+	// 11 default + 1 test extra = 12
+	if len(provModels) != 12 {
+		t.Errorf("Expected 12 provider models (11 default + 1 extra), got %d", len(provModels))
 	}
 	var found bool
 	for _, m := range provModels {

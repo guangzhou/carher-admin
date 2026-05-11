@@ -384,6 +384,17 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 	blockOwnerDeletion := true
 	replicas := int32(1)
 
+	// CarHer-1000-style image (carher-14 同源, 67ffa406 commit) 需要：
+	//   1) 走专属 base-config (兼容 2026.5.3 schema)
+	//   2) 锁定 openclaw-lark 版本 + 强制重装
+	//   3) 挂 carher-patches ConfigMap，含 R-9/R-10 footer & history-fill patch + 新 entrypoint
+	// 默认 image (fix-compact-eb348941 等) 行为不变。
+	cleanImage := imageTag == "67ffa406-clean"
+	baseConfigName := "carher-base-config"
+	if cleanImage {
+		baseConfigName = "carher-base-config-67ffa406-test"
+	}
+
 	labels := map[string]string{
 		"app":        "carher-user",
 		"user-id":    uidStr,
@@ -499,13 +510,37 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 				{Name: "user-data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: fmt.Sprintf("carher-%d-data", uid)}}},
 				{Name: "user-config-template", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: fmt.Sprintf("carher-%d-user-config", uid)}}}},
 				{Name: "merged-config", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-				{Name: "base-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "carher-base-config"}}}},
+				{Name: "base-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: baseConfigName}}}},
 				{Name: "gcloud-adc", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "carher-gcloud-adc"}}},
 				{Name: "shared-skills", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "carher-shared-skills", ReadOnly: true}}},
 				{Name: "dept-skills", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "carher-dept-skills", ReadOnly: true}}},
 				{Name: "user-sessions", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "carher-shared-sessions"}}},
 			},
 		},
+	}
+
+	// CarHer-1000-style additions: env + carher-patches volume + mount.
+	if cleanImage {
+		mode := int32(0o755)
+		podTemplate.Spec.Volumes = append(podTemplate.Spec.Volumes, corev1.Volume{
+			Name: "carher-patches",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "carher-patches"},
+					DefaultMode:          &mode,
+				},
+			},
+		})
+		podTemplate.Spec.Containers[0].VolumeMounts = append(
+			podTemplate.Spec.Containers[0].VolumeMounts,
+			corev1.VolumeMount{Name: "carher-patches", MountPath: "/carher-patches", ReadOnly: true},
+			corev1.VolumeMount{Name: "carher-patches", MountPath: "/entrypoint.sh", SubPath: "carher-entrypoint.sh", ReadOnly: true},
+		)
+		podTemplate.Spec.Containers[0].Env = append(
+			podTemplate.Spec.Containers[0].Env,
+			corev1.EnvVar{Name: "CARHER_OPENCLAW_LARK_VERSION", Value: "2026.4.10"},
+			corev1.EnvVar{Name: "CARHER_FORCE_PLUGIN_INSTALL", Value: "1"},
+		)
 	}
 
 	desired := &appsv1.Deployment{

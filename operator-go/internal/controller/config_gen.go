@@ -243,9 +243,14 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 			"appId":            input.AppID,
 			"appSecret":        input.AppSecret,
 			"name":             feishuName,
-			"groups":           map[string]bool{"enabled": true, "archive": true},
 			"oauthRedirectUri": resolveOAuthRedirectUri(input.OAuthRedirectUri, pfx, input.ID),
 		}
+		// NOTE: never set channels.feishu.groups here. SDK treats `groups`
+		// as a chat_id → per-group config map (e.g. {"oc_xxx": {requireMention:true}}).
+		// Any non-empty value forces allowlist mode; "open" groupPolicy can't
+		// bypass it. The old `{enabled: true, archive: true}` semantics
+		// (toggle + archive flag) is a misread — caused carher-1000 group
+		// messages to be blocked by group-level policy (2026-05-11).
 		// knownBots/knownBotOpenIds removed — now populated dynamically via Redis bot-registry.
 		if input.BotOpenID != "" {
 			feishu["botOpenId"] = input.BotOpenID

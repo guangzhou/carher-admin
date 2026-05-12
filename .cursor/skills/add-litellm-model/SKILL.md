@@ -256,6 +256,39 @@ print({k: v.get('alias') for k,v in m.items() if 'wangsu-' in k})
 
 ---
 
+## contextWindow 对齐（每次新增模型后必查）
+
+新增模型时，顺手检查**存量模型**的 `contextWindow` 是否与官方规格一致。
+历史遗留：早期所有模型统一写 `200000`，后来官方纷纷升到 1M，旧值变成了错误的上限。
+
+### 官方 contextWindow 参考（截至 2026-05）
+
+| 模型 | 官方 contextWindow | maxTokens（输出上限）|
+|---|---|---|
+| claude-opus-4-6 / claude-sonnet-4-6 | **1 000 000** | 128K / 64K |
+| gpt-5.4 / gpt-5.5 | **1 000 000** | 128K |
+| gemini-3.1-pro-preview | **1 000 000** | 65 536 |
+| anthropic.claude-opus-4-7 | **1 000 000** | 128K |
+| deepseek-v4-pro / deepseek-v4-flash | **1 000 000** | 384K |
+| minimax-m2.7 | 200 000（官方限制） | 128K |
+| glm-5 | 128 000（官方限制） | 32K |
+| gpt-5.3-codex | 200 000（官方限制） | 128K |
+
+后三个模型**有意保留低值**，不应改到 1M。
+
+### 需要同步修改的 3 个地方
+
+```
+backend/config_gen.py               → providers.litellm.models 列表里每个 id 的 contextWindow
+operator-go/.../config_gen.go       → 同上（Go 侧，漏改 = operator rollout 后 her 仍用旧值）
+k8s/base-config.yaml                → wangsu 和 openrouter provider 两个 section 各自的 models 数组
+```
+
+base-config.yaml 改完用外科手术 patch（同上文步骤 3a），不要 `kubectl apply` 整文件。
+改完需要走完整 build + rollout（步骤 3b），否则 her 的 openclaw.json 不更新。
+
+---
+
 ## 仓库提交规则
 
 `carher-admin` **直接提交到 main**，不开 feature 分支不走 PR：

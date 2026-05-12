@@ -1,11 +1,16 @@
 ---
 name: k8s-build-buildkit-config
 description: |
-  k8s-work-227 上 buildkitd 的配置约束 + 故障历史 + 操作命令。Use when the
-  user is debugging slow / hung / failing builds on the K8s build node, asks
-  about buildkitd config, futex_wait_queue / NFS / BoltDB / flock issues, or
-  is tempted to move buildkit data root back to NAS. Includes the 2026-05-11
-  NFS+BoltDB deadlock root cause + why root MUST stay on local NVMe.
+  k8s-work-227 (K8s build 节点) 的两个主用途：
+  (1) buildkitd 的配置约束 + NFS+BoltDB 死锁规避；
+  (2) 直接 mount 全部阿里云 NAS root 在 /Data，可作为"NAS jumphost"绕过
+      kubectl cp + 临时 pod 写任意 PVC 数据（shared-skills / dept-skills /
+      per-her user-data 全部直接可写）。
+  Use when the user is debugging slow / hung / failing builds (futex_wait_queue
+  / NFS / BoltDB / flock / 移 root 回 NAS 的诱惑); OR needs to write to a K8s
+  PVC backed by Aliyun NAS (skills 同步、给某个 her user-data 改文件、批量
+  rsync 到所有 her PVC) and wants to avoid kubectl cp + temp pod
+  (which routes through K8s API tunnel and is unreliable).
 ---
 
 # K8s Build 节点（k8s-work-227）— buildkit config
@@ -185,3 +190,99 @@ jms ssh k8s-work-227 'sudo systemctl restart buildkit'
 - ❌ 不要 `rm -rf /etc/buildkit/buildkitd.toml.nas`（历史证据）
 - ❌ 不要把 buildkit 跑成 docker / nerdctl 容器+本地 SSD bind mount（systemd 已经稳定，没必要）
 - ❌ 不要把 buildkit 装到非 build 节点（其他 worker 没准备这个 binary 和 config）
+
+---
+
+# Build 节点 = K8s NAS Jumphost（同节点的第二个用途）
+
+## 关键事实
+
+K8s build 节点 `k8s-work-227` 因为是 K8s worker，已经把阿里云 NAS server **整个 root** mount 到了 `/Data/`：
+
+```
+7e9554b917-wjh53.ap-southeast-1.nas.aliyuncs.com:/  →  /Data/   (NFSv3, rw)
+```
+
+每个 K8s PVC 对应 NAS 上的一个**子目录**（命名是 `nas-<uuid>`），所以**所有 PVC 数据都直接可读可写**：
+
+| PVC | NAS 子目录 | build 节点直连路径 |
+|---|---|---|
+| `carher-shared-skills` | `nas-429a1fe7-c0cb-4cf4-9349-8268e39c9acb` | `/Data/nas-429a1fe7-c0cb-4cf4-9349-8268e39c9acb/` |
+| `carher-dept-skills` | `nas-cfa26fb2-f559-4bee-8cc3-555f2bc5c981` | `/Data/nas-cfa26fb2-f559-4bee-8cc3-555f2bc5c981/` |
+| `carher-shared-sessions` | `nas-2246fe6c-80ab-4845-b306-b7a7f03616d5` | `/Data/nas-2246fe6c-80ab-4845-b306-b7a7f03616d5/` |
+| `carher-N-data` (per-her) | `nas-<each-pvc>-<uuid>` | `kubectl get pv $(kubectl -n carher get pvc carher-N-data -o jsonpath='{.spec.volumeName}') -o jsonpath='{.spec.csi.volumeAttributes.path}'` 拼到 `/Data/` 后面 |
+
+## 何时用 NAS jumphost 模式
+
+| 场景 | 走 NAS jumphost | 走 kubectl cp + temp pod |
+|---|---|---|
+| 给 carher-shared-skills 加新 skill（fleet 全员立即看到） | ✅ 直接写 NAS 子目录 | ❌ 多此一举 |
+| 修复某个 her 的 PVC 数据（误删文件、修 corrupt SQLite） | ✅ 直接写 her 的 NAS 子目录 | ⚠️ 可，但不稳 |
+| 大批量同步（>50MB / 上百 PVC） | ✅ 必走，避开 K8s API tunnel | ❌ kubectl cp 单文件慢且断 |
+| 需要 strict atomicity（写完后 pod 立即看到） | ✅ NFS 是实时的，无 cache 延迟 | ✅ 也实时 |
+| 操作不存在的 PVC（PV 还没创建） | ❌ NAS 子目录还没建 | ❌ 一样不行 |
+
+## 为什么这条路比 kubectl cp 稳
+
+`kubectl cp` 经过：
+```
+mac → jms tunnel → laoyang → K8s API server → kubelet exec → pod tar receive
+```
+
+而 NAS jumphost 经过：
+```
+mac → jms tunnel → k8s-work-227 (跳板) → 直接 NFS 写
+```
+
+少了 **K8s API server** 这一段（今天最不稳定的一段），少了 **temp pod 启动 + image pull + tar over exec stream** 这些 fail point。
+
+## 操作模板
+
+### 写 shared-skills（fleet 全员立即看到）
+
+```bash
+# 1. tar 源（mac 或 S1）
+jms ssh JSZX-AI-01 'cd /home/cltx/.openclaw/skills && tar czf /tmp/skills.tar.gz <skill-1> <skill-2>'
+
+# 2. scp 到 build 节点
+jms scp JSZX-AI-01:/tmp/skills.tar.gz /tmp/  # 经过 mac，但 80KB 级别秒级
+jms scp /tmp/skills.tar.gz k8s-work-227:/tmp/
+
+# 3. 直接在 NAS 子目录解压
+jms ssh k8s-work-227 'cd /Data/nas-429a1fe7-c0cb-4cf4-9349-8268e39c9acb && tar xzf /tmp/skills.tar.gz && ls'
+
+# 4. 验证 her pod 立即看到（NFS 实时）
+POD=$(kubectl -n carher get pods -l user-id=1000 --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+kubectl -n carher exec $POD -c carher -- ls /data/.openclaw/skills/
+
+# 5. 清理
+jms ssh k8s-work-227 'rm /tmp/skills.tar.gz'
+rm /tmp/skills.tar.gz
+```
+
+### 修复某个 her 的 user-data PVC
+
+```bash
+# 1. 找到 her 的 PV → NAS 子目录
+PV=$(kubectl -n carher get pvc carher-66-data -o jsonpath='{.spec.volumeName}')
+NAS_SUB=$(kubectl get pv $PV -o jsonpath='{.spec.csi.volumeAttributes.path}')
+echo "NAS path: /Data$NAS_SUB"
+
+# 2. ssh build 节点直接操作
+jms ssh k8s-work-227 "ls /Data$NAS_SUB"
+
+# 3. 改 / 加 / 删，her pod 立即看到（NFS 实时）
+```
+
+## 注意事项
+
+- **写文件用 root 身份**：build 节点上是 root 写，文件 owner 是 root；如果 her container 用非 root 身份运行，**ro mount 不影响读**，但**写时会权限拒绝**——大多数共享 skill 是 ro mount 给 her，pod 不需要写
+- **NAS 不锁**（`local_lock=all`）：不要在 NAS 上跑 BoltDB / etcd / sqlite-with-flock 等需要真锁的应用——会跟 buildkit 一样死锁
+- **不要 `rm -rf /Data/<wrong-path>`**：这是 fleet 共享 NAS，rm 错路径影响 200+ her。每次操作前先 `ls -la` 看清楚
+- **build 节点磁盘**和这个 NAS root 是**独立**的：写 NAS 不占 build 节点本地 SSD（buildkit 用本地 SSD）
+
+## 不要做（NAS jumphost 部分）
+
+- ❌ 不要在 build 节点 `chmod -R` / `chown -R` 整个 NAS 子目录（per-her PVC 有特定 uid/gid）
+- ❌ 不要在 NAS 上跑 BoltDB / sqlite-with-flock（参考 buildkit 死锁教训）
+- ❌ 不要把 build 节点用作长期数据存储——它是 jumphost，操作完即走

@@ -73,6 +73,9 @@ spec:
                   type: boolean
                   default: false
                   description: "When true, operator will not create/maintain a Pod"
+                contextTokens:
+                  type: integer
+                  description: "Override agents.defaults.contextTokens in generated openclaw.json. Omit/0 = inherit base-config (1M)."
             status:
               type: object
               properties:

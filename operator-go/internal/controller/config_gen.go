@@ -75,6 +75,7 @@ type ConfigInput struct {
 	BotOpenID          string
 	OAuthRedirectUri   string
 	ExtraLitellmModels []string
+	ContextTokens      int
 }
 
 func resolveOAuthRedirectUri(override string, pfx string, id int) string {
@@ -201,6 +202,10 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		},
 	}
 
+	if input.ContextTokens > 0 {
+		cfg["agents"].(map[string]interface{})["defaults"].(map[string]interface{})["contextTokens"] = input.ContextTokens
+	}
+
 	if input.Provider == "litellm" {
 		apiKey := "${LITELLM_API_KEY}"
 		if input.LitellmKey != "" {
@@ -262,7 +267,10 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 	}
 
 	if len(owners) > 0 {
-		cfg["commands"] = map[string]interface{}{"ownerAllowFrom": owners}
+		cfg["commands"] = map[string]interface{}{
+			"ownerAllowFrom": owners,
+			"allowFrom":      map[string]interface{}{"*": []string{"*"}},
+		}
 	}
 
 	b, _ := json.MarshalIndent(cfg, "", "  ")

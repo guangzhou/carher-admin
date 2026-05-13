@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	herv1 "github.com/guangzhou/carher-admin/operator-go/api/v1alpha1"
@@ -109,6 +110,11 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		uidStr := strconv.Itoa(uid)
 		metrics.FeishuWSConnected.DeleteLabelValues(uidStr, her.Spec.Name)
 		metrics.PodRestarts.DeleteLabelValues(uidStr, her.Spec.Name)
+		if controllerutil.RemoveFinalizer(&her, "carher.io/cleanup") {
+			if err := r.Update(ctx, &her); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -285,6 +291,7 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 		BotOpenID:          her.Spec.BotOpenID,
 		OAuthRedirectUri:   her.Spec.OAuthRedirectUri,
 		ExtraLitellmModels: extraModels,
+		ContextTokens:      her.Spec.ContextTokens,
 	})
 
 	hash := fmt.Sprintf("%x", md5.Sum([]byte(configJSON)))[:12]

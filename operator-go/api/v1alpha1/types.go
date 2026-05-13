@@ -22,6 +22,7 @@ type HerInstanceSpec struct {
 	LitellmRoutePolicy string `json:"litellmRoutePolicy,omitempty"`
 	Image             string `json:"image,omitempty"`
 	Paused            bool   `json:"paused,omitempty"`
+	ContextTokens     int    `json:"contextTokens,omitempty"`
 }
 
 // HerInstanceStatus defines the observed state.

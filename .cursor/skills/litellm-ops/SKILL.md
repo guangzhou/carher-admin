@@ -3,10 +3,10 @@ name: litellm-ops
 description: >-
   LiteLLM Proxy 运维：升级镜像、Prisma DB 迁移、故障排查、性能调优、
   YAML-as-source-of-truth 不变量维护、callback 源↔ConfigMap 同步、
-  litellm-db PVC 容量告警在线扩容。
+  litellm-db PVC 容量告警在线扩容、canary 金丝雀部署（per-instance litellmUrl 路由）。
   Use when the user mentions "litellm" + 升级/部署/502/挂了/故障/重启/schema/prisma/
   探针/OOM/性能/日志级别/fallback 没生效/callback 没注册/yaml 改了不生效/
-  PVC 容量告警/disk/磁盘/扩容/quota/LowAvailableCapacity, or when
+  PVC 容量告警/disk/磁盘/扩容/quota/LowAvailableCapacity/canary/金丝雀, or when
   litellm.carher.net returns 502/503, or when an admin UI config change needs to
   be made permanent, or when "litellm-db-data-litellm-db-0 is running out of space"
   alert fires.
@@ -54,35 +54,95 @@ LiteLLM 用 Prisma ORM。新版镜像可能新增 DB 列，如果不执行迁移
 
 当前部署已包含 initContainer `prisma-migrate`，每次 Pod 启动前自动执行 `prisma db push`。
 
-### 升级流程
+### ACR 镜像推送限制（重要，2026-05-13 实测）
 
-1. **在构建服务器拉取新镜像**（走堡垒机，主构建机 = `k8s-work-227`）：
-```bash
-scripts/jms ssh k8s-work-227 \
-  'nerdctl pull ghcr.io/berriai/litellm:<new-tag>'
-```
+`liuguoxian@1989403661820148` 账号对 `her/litellm-proxy` 仓库**没有 push 权限**（`insufficient_scope`）：
+- nerdctl push 从 k8s-work-227 直接推 → 失败
+- Kaniko Job 用 `acr-vpc-secret` 推 → 失败（同一账号）
+- nerdctl push `--namespace k8s.io` → 失败（且不读 nerdctl login 凭据，两套 credential store 独立）
 
-2. **推到 ACR**（构建服务器对 `her/litellm-proxy` 无 push 权限，需用 Kaniko Job）：
-```bash
-# 更新 k8s/litellm-build-job.yaml 中的 --destination tag
-# 然后 kubectl apply -f k8s/litellm-build-job.yaml
-```
+该账号对 `her/carher`、`her/carher-admin`、`her/carher-operator` 有 push 权限，唯独 `her/litellm-proxy` 没有。
+**workaround**：用 `imagePullPolicy: Never` + `nodeSelector` 固定节点，直接用构建节点本地 containerd 镜像（见下面 canary 部署模式）。
 
-3. **更新 Deployment 镜像**：
+### 从上游官方镜像升级（prod 流程，ghcr.io）
+
+1. **更新 `k8s/litellm-proxy.yaml`** 中三处 image（initContainer ×2 + container ×1）为新 digest
+2. **apply**：
 ```bash
-# 修改 k8s/litellm-proxy.yaml 中 initContainers 和 containers 的 image
-# 两处必须同步更新为同一个镜像
 kubectl apply -f k8s/litellm-proxy.yaml
-# 让 K8s 滚动更新，不要手动 delete pod
 kubectl rollout status deploy/litellm-proxy -n carher --timeout=300s
 ```
 
-4. **验证**：
+### 从 dev 分支构建自定义镜像（canary 流程）
+
+1. **在 k8s-work-227 克隆并构建**（nerdctl 默认写入 k8s.io namespace，K8s 可直接用）：
+```bash
+scripts/jms ssh k8s-work-227 'bash -s' <<'EOF'
+git clone --depth=1 --branch dev https://github.com/guangzhou/litellm.git /root/litellm
+nerdctl build --namespace k8s.io \
+  -t cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/litellm-proxy:<TAG> \
+  -f /root/litellm/Dockerfile /root/litellm \
+  > /tmp/litellm-build.log 2>&1 &
+echo $!  # 记录 PID，build 约 20-30 分钟
+EOF
+# 检查进度
+scripts/jms ssh k8s-work-227 'tail -20 /tmp/litellm-build.log'
+```
+
+2. **部署 canary**（不 push ACR，直接用本地镜像）：
+   - `imagePullPolicy: Never`（不去 ACR 拉取）
+   - `nodeSelector: kubernetes.io/hostname: ap-southeast-1.172.16.0.227`（镜像在该节点）
+   - 参考 `k8s/litellm-proxy-canary.yaml`
+
+3. **路由指定 her 到 canary**（patch `spec.litellmUrl`）：
+```bash
+kubectl patch her her-1000 -n carher \
+  --type=merge -p '{"spec":{"litellmUrl":"http://litellm-proxy-canary.carher.svc:4000"}}'
+```
+
+4. **回滚**（清空字段即恢复默认）：
+```bash
+kubectl patch her her-1000 -n carher --type=merge -p '{"spec":{"litellmUrl":""}}'
+```
+
+### initContainer 内存要求
+
+| initContainer | 说明 | 最低 memory limit |
+|---|---|---|
+| `prisma-migrate` | 执行 `prisma db push` | **1536Mi** |
+| `wipe-db-config-rows` | Python 脚本用 `from prisma import Prisma` | **1536Mi**（Prisma 引擎二进制很重，768Mi 会 OOMKill） |
+
+### 升级后验证
+
 ```bash
 kubectl get pods -n carher | grep litellm-proxy   # 1/1 Running
 kubectl logs <pod> -c prisma-migrate -n carher     # 应显示 "Your database is now in sync"
 curl -s -o /dev/null -w "%{http_code}" https://litellm.carher.net/health  # 应返回 401（非 502）
 kubectl logs litellm-db-0 -n carher --since=2m | grep ERROR  # 不应有 "column XXX does not exist"
+```
+
+---
+
+## Canary 金丝雀部署（per-instance litellmUrl 路由）
+
+HerInstance CRD 有 `spec.litellmUrl` 字段（2026-05-13 加入），允许单个 her 实例指向不同的 litellm endpoint，其他实例完全不受影响。
+
+```bash
+# 查看当前路由
+kubectl get her her-1000 -n carher -o jsonpath='{.spec.litellmUrl}'
+
+# 指向 canary
+kubectl patch her her-1000 -n carher \
+  --type=merge -p '{"spec":{"litellmUrl":"http://litellm-proxy-canary.carher.svc:4000"}}'
+
+# 查看 canary 日志
+kubectl logs -f -n carher -l app=litellm-proxy-canary -c litellm
+
+# 回滚（清空 = 恢复默认 http://litellm-proxy.carher.svc:4000）
+kubectl patch her her-1000 -n carher --type=merge -p '{"spec":{"litellmUrl":""}}'
+
+# 清理 canary deployment
+kubectl delete -f k8s/litellm-proxy-canary.yaml
 ```
 
 ---

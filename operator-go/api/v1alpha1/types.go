@@ -19,6 +19,7 @@ type HerInstanceSpec struct {
 	OAuthRedirectUri  string `json:"oauthRedirectUri,omitempty"`
 	DeployGroup       string `json:"deployGroup,omitempty"`
 	LitellmKey        string `json:"litellmKey,omitempty"`
+	LitellmUrl        string `json:"litellmUrl,omitempty"`
 	LitellmRoutePolicy string `json:"litellmRoutePolicy,omitempty"`
 	Image             string `json:"image,omitempty"`
 	Paused            bool   `json:"paused,omitempty"`

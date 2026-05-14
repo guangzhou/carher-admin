@@ -288,6 +288,7 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 		Owner:              her.Spec.Owner,
 		Provider:           her.Spec.Provider,
 		LitellmKey:         her.Spec.LitellmKey,
+		LitellmUrl:         her.Spec.LitellmUrl,
 		BotOpenID:          her.Spec.BotOpenID,
 		OAuthRedirectUri:   her.Spec.OAuthRedirectUri,
 		ExtraLitellmModels: extraModels,

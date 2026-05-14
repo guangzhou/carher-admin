@@ -42,6 +42,7 @@ MODEL_FALLBACK_MAP = {
 _BASE_MODELS = [
     "claude-opus-4-6",
     "claude-sonnet-4-6",
+    "claude-opus-4-7",
     "gpt-5.4",
     "gemini-3.1-pro-preview",
     "minimax-m2.7",
@@ -51,6 +52,8 @@ _BASE_MODELS = [
     "wangsu-gpt-5.5",
     "wangsu-deepseek-v4-pro",
     "wangsu-deepseek-v4-flash",
+    "openrouter-claude-opus-4-7",
+    "openrouter-claude-sonnet-4-6",
 ]
 ALL_MODELS = _BASE_MODELS + list(MODEL_FALLBACK_MAP.values())
 

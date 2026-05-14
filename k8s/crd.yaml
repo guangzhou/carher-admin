@@ -64,6 +64,10 @@ spec:
                   type: string
                   default: ""
                   description: "Per-instance LiteLLM virtual key for spend tracking"
+                litellmUrl:
+                  type: string
+                  default: ""
+                  description: "Override LiteLLM proxy endpoint; empty = cluster default http://litellm-proxy.carher.svc:4000"
                 litellmRoutePolicy:
                   type: string
                   default: openrouter_first

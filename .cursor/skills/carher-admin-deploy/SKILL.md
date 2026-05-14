@@ -63,6 +63,10 @@ sleep 2 && kubectl get nodes
 | 仓库路径 | `/root/carher-admin`（admin 主机：226/227 都有） |
 | ACR 凭证 | 已 `nerdctl login`（存于 `/root/.docker/config.json`） |
 
+> **nerdctl namespace 陷阱**：`nerdctl build --namespace k8s.io` 构建的镜像在 k8s.io 命名空间，
+> `nerdctl login` 的凭据在 default namespace，两套 credential store 独立。
+> 用 `--namespace k8s.io` push 会报 `insufficient_scope`——直接用 default namespace 构建和推送即可（carher/admin/operator 都用 default，无 `--namespace` 参数）。
+
 ---
 
 ## 零中断部署规则（全局适用）
@@ -117,6 +121,7 @@ kubectl set image deploy/carher-admin \
 kubectl rollout status deploy/carher-admin -n carher --timeout=120s
 
 # 部署 operator（如果有 operator 代码变更）
+# 注意：carher-operator deployment 里的容器名是 "operator"（不是 "carher-operator" 或 "manager"）
 kubectl set image deploy/carher-operator \
   operator=$ACR_VPC/carher-operator:$TAG -n carher
 kubectl rollout status deploy/carher-operator -n carher --timeout=120s

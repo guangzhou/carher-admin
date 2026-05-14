@@ -30,7 +30,7 @@ class HerInstance(BaseModel):
     app_id: str = ""
     oauth_url: str = ""
     owner: str = ""
-    provider: str = "wangsu"
+    provider: str = "litellm"
     litellm_route_policy: LitellmRoutePolicy = "openrouter_first"
     sync_status: str = ""
     deploy_group: str = "stable"
@@ -53,10 +53,10 @@ class HerAddRequest(BaseModel):
     prefix: str = Field("s1", description="Server prefix (s1/s2/s3)")
     owner: str = Field("", description="Feishu open_id(s), pipe-separated")
     provider: Literal["openrouter", "anthropic", "wangsu", "litellm"] = Field(
-        "wangsu",
+        "litellm",
         description=(
             "AI provider: openrouter / anthropic / wangsu / litellm. "
-            "Default: wangsu. When provider=litellm, requests are routed through "
+            "Default: litellm. When provider=litellm, requests are routed through "
             "the LiteLLM proxy. Sonnet/Opus → Wangsu Anthropic Direct (fallback: "
             "OpenRouter). GPT/Gemini → OpenRouter (fallback: Wangsu)."
         ),

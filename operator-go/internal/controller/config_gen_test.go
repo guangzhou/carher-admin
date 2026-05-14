@@ -189,7 +189,7 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 		"litellm/minimax-m2.7":                "minimax",
 		"litellm/glm-5":                       "glm",
 		"litellm/gpt-5.3-codex":               "codex",
-		"litellm/anthropic.claude-opus-4-7":   "opus4.7",
+		"litellm/claude-opus-4-7":             "opus4.7",
 		"litellm/wangsu-gpt-5.5":              "gpt55",
 		"litellm/wangsu-deepseek-v4-pro":      "ds-pro",
 		"litellm/wangsu-deepseek-v4-flash":    "ds-flash",

@@ -72,6 +72,7 @@ type ConfigInput struct {
 	Owner              string
 	Provider           string
 	LitellmKey         string
+	LitellmUrl         string
 	BotOpenID          string
 	OAuthRedirectUri   string
 	ExtraLitellmModels []string
@@ -122,7 +123,7 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		models["litellm/minimax-m2.7"] = alias("minimax")
 		models["litellm/glm-5"] = alias("glm")
 		models["litellm/gpt-5.3-codex"] = alias("codex")
-		models["litellm/anthropic.claude-opus-4-7"] = alias("opus4.7")
+		models["litellm/claude-opus-4-7"] = alias("opus4.7")
 		models["litellm/wangsu-gpt-5.5"] = alias("gpt55")
 		models["litellm/wangsu-deepseek-v4-pro"] = alias("ds-pro")
 		models["litellm/wangsu-deepseek-v4-flash"] = alias("ds-flash")
@@ -219,7 +220,7 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 			{"id": "minimax-m2.7", "name": "MiniMax M2.7", "api": "openai-completions", "input": []string{"text"}, "contextWindow": 200000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 0.5, "output": 1.5}},
 			{"id": "glm-5", "name": "GLM-5", "api": "openai-completions", "input": []string{"text"}, "contextWindow": 128000, "maxTokens": 32000, "cost": map[string]interface{}{"input": 1, "output": 3}},
 			{"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 200000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 3, "output": 15}},
-			{"id": "anthropic.claude-opus-4-7", "name": "Claude Opus 4.7", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 25, "cacheRead": 0.5}},
+			{"id": "claude-opus-4-7", "name": "Claude Opus 4.7", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 25, "cacheRead": 0.5}},
 			{"id": "wangsu-gpt-5.5", "name": "GPT-5.5 (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 30}},
 			{"id": "wangsu-deepseek-v4-pro", "name": "DeepSeek V4 Pro (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 1000000, "maxTokens": 384000, "cost": map[string]interface{}{"input": 1.71, "output": 3.43}},
 			{"id": "wangsu-deepseek-v4-flash", "name": "DeepSeek V4 Flash (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 1000000, "maxTokens": 384000, "cost": map[string]interface{}{"input": 0.143, "output": 0.286}},
@@ -228,7 +229,12 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		cfg["models"] = map[string]interface{}{
 			"providers": map[string]interface{}{
 				"litellm": map[string]interface{}{
-					"baseUrl": "http://litellm-proxy.carher.svc:4000",
+					"baseUrl": func() string {
+						if input.LitellmUrl != "" {
+							return input.LitellmUrl
+						}
+						return "http://litellm-proxy.carher.svc:4000"
+					}(),
 					"apiKey":  apiKey,
 					"models":  providerModels,
 				},

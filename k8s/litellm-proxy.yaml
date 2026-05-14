@@ -85,6 +85,41 @@ data:
           cache_read_input_token_cost: 0.0000003
           cache_creation_input_token_cost: 0.00000375
 
+      # ── Claude Opus 4.7 via Wangsu Direct (cheliantianxia5/sqix2pnh) ──
+      # Operator config_gen.go references this model_name (no `anthropic.`
+      # prefix) so all per-instance LiteLLM keys must include it in their
+      # allowlist. Same upstream as anthropic.claude-opus-4-7 (kept as alias
+      # for legacy clients calling the prefixed name directly).
+      - model_name: claude-opus-4-7
+        litellm_params:
+          model: anthropic/anthropic.claude-opus-4-7
+          api_key: os.environ/WANGSU_DIRECT5_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: wangsu-direct5/claude-opus-4-7
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
       # ═══════════════════════════════════════════
       # GPT / Gemini: OpenRouter — primary (unchanged)
       # ═══════════════════════════════════════════
@@ -424,8 +459,8 @@ data:
       - model_name: anthropic.claude-opus-4-7
         litellm_params:
           model: anthropic/anthropic.claude-opus-4-7
-          api_key: os.environ/WANGSU_DIRECT6_API_KEY
-          api_base: https://aigateway.edgecloudapp.com/v2/gws/af1ho8mp/anthropic
+          api_key: os.environ/WANGSU_DIRECT5_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
           input_cost_per_token: 0.000005
           output_cost_per_token: 0.000025
           cache_read_input_token_cost: 0.0000005
@@ -3772,12 +3807,21 @@ spec:
       # eventually hit upstream's own 600s cap, so a longer grace period
       # buys nothing extra.
       terminationGracePeriodSeconds: 600
-      imagePullSecrets:
-        - name: acr-vpc-secret
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - ap-southeast-1.172.16.0.226
+                      - ap-southeast-1.172.16.0.227
+                      - ap-southeast-1.172.16.0.229
       initContainers:
         - name: prisma-migrate
-          image: ghcr.io/berriai/litellm@sha256:d90ae7e09aee669c53e4b6b267c123f0e830ed3f067b8c789644a965c30acf4a
-          imagePullPolicy: IfNotPresent
+          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/litellm-proxy:v1.83.14-stable.patch.3-20260513
+          imagePullPolicy: Never
           command: ["sh", "-c", "prisma db push --schema /app/litellm/proxy/schema.prisma --skip-generate --accept-data-loss"]
           envFrom:
             - secretRef:
@@ -3826,8 +3870,8 @@ spec:
         # the table is guaranteed to exist.
         # ═══════════════════════════════════════════════════════════════
         - name: wipe-db-config-rows
-          image: ghcr.io/berriai/litellm@sha256:d90ae7e09aee669c53e4b6b267c123f0e830ed3f067b8c789644a965c30acf4a
-          imagePullPolicy: IfNotPresent
+          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/litellm-proxy:v1.83.14-stable.patch.3-20260513
+          imagePullPolicy: Never
           command: ["python3", "-c"]
           args:
             - |
@@ -3897,14 +3941,14 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: 512Mi
             limits:
               cpu: 500m
-              memory: 768Mi
+              memory: 1536Mi
       containers:
         - name: litellm
-          image: ghcr.io/berriai/litellm@sha256:d90ae7e09aee669c53e4b6b267c123f0e830ed3f067b8c789644a965c30acf4a
-          imagePullPolicy: IfNotPresent
+          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/litellm-proxy:v1.83.14-stable.patch.3-20260513
+          imagePullPolicy: Never
           args: ["--config", "/app/config.yaml", "--port", "4000"]
           ports:
             - containerPort: 4000

@@ -1,0 +1,228 @@
+# litellm-proxy-canary: parallel deployment for canary testing.
+# Differences from litellm-proxy.yaml:
+#   - name/label: litellm-proxy-canary
+#   - replicas: 1
+#   - image: local containerd image on k8s-work-227 (imagePullPolicy: Never, no ACR push needed)
+#   - nodeSelector: pinned to ap-southeast-1.172.16.0.227
+#   - Service: litellm-proxy-canary (separate ClusterIP)
+# Same ConfigMaps, Secrets, env vars as prod — only the image changes.
+# To route a her instance here: kubectl patch her <name> -n carher \
+#   --type=merge -p '{"spec":{"litellmUrl":"http://litellm-proxy-canary.carher.svc:4000"}}'
+# To roll back: set litellmUrl back to ""
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-proxy-canary
+  namespace: carher
+  labels:
+    app: litellm-proxy-canary
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: litellm-proxy-canary
+  template:
+    metadata:
+      labels:
+        app: litellm-proxy-canary
+    spec:
+      terminationGracePeriodSeconds: 600
+      nodeSelector:
+        kubernetes.io/hostname: ap-southeast-1.172.16.0.227
+      initContainers:
+        - name: prisma-migrate
+          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/litellm-proxy:v1.83.14-stable.patch.3-20260513
+          imagePullPolicy: Never
+          command: ["sh", "-c", "prisma db push --schema /app/litellm/proxy/schema.prisma --skip-generate --accept-data-loss"]
+          envFrom:
+            - secretRef:
+                name: litellm-secrets
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+        - name: wipe-db-config-rows
+          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/litellm-proxy:v1.83.14-stable.patch.3-20260513
+          imagePullPolicy: Never
+          command: ["python3", "-c"]
+          args:
+            - |
+              import asyncio
+              import sys
+              from prisma import Prisma
+
+              ROWS = ("router_settings", "litellm_settings")
+
+              async def go() -> None:
+                  db = Prisma()
+                  await db.connect()
+                  try:
+                      before = await db.query_raw(
+                          'SELECT param_name FROM "LiteLLM_Config" '
+                          'WHERE param_name IN ($1, $2) '
+                          'ORDER BY param_name',
+                          *ROWS,
+                      )
+                      before_names = [r["param_name"] for r in before]
+                      print(f"[wipe-db-config-rows] before: {before_names}", flush=True)
+
+                      await db.execute_raw(
+                          'DELETE FROM "LiteLLM_Config" '
+                          'WHERE param_name IN ($1, $2)',
+                          *ROWS,
+                      )
+
+                      after = await db.query_raw(
+                          'SELECT param_name FROM "LiteLLM_Config" '
+                          'WHERE param_name IN ($1, $2) '
+                          'ORDER BY param_name',
+                          *ROWS,
+                      )
+                      after_names = [r["param_name"] for r in after]
+                      print(f"[wipe-db-config-rows] after : {after_names}", flush=True)
+
+                      if after_names:
+                          print(
+                              "[wipe-db-config-rows] FATAL: rows still present",
+                              file=sys.stderr, flush=True,
+                          )
+                          raise SystemExit(2)
+
+                      print(
+                          f"[wipe-db-config-rows] OK: removed "
+                          f"{len(before_names)} row(s)",
+                          flush=True,
+                      )
+                  finally:
+                      await db.disconnect()
+
+              asyncio.run(go())
+          envFrom:
+            - secretRef:
+                name: litellm-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1536Mi
+      containers:
+        - name: litellm
+          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/litellm-proxy:v1.83.14-stable.patch.3-20260513
+          imagePullPolicy: Never
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports:
+            - containerPort: 4000
+              name: http
+          env:
+            - name: STREAMING_BRIDGE_KEY_ALIASES
+              value: ""
+            - name: STREAMING_BRIDGE_KEY_PREFIXES
+              value: "claude-code-"
+            - name: FORCE_STREAM_KEY_ALIASES
+              value: ""
+            - name: FORCE_STREAM_KEY_PREFIXES
+              value: "claude-code-"
+            - name: STREAMING_BRIDGE_HTTPX_READ_TIMEOUT_SECONDS
+              value: "600"
+            - name: STREAMING_BRIDGE_PROGRESS_TIMEOUT_PRE_SECONDS
+              value: "999999"
+            - name: STREAMING_BRIDGE_PROGRESS_TIMEOUT_POST_SECONDS
+              value: "999999"
+            - name: STORE_MODEL_IN_DB
+              value: "True"
+            - name: STORE_PROMPTS_IN_SPEND_LOGS
+              value: "True"
+          envFrom:
+            - secretRef:
+                name: litellm-secrets
+            - secretRef:
+                name: carher-env-keys
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            failureThreshold: 5
+            timeoutSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 4000
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            failureThreshold: 5
+            timeoutSeconds: 15
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 15"]
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: callbacks
+              mountPath: /app/opus_47_fix.py
+              subPath: opus_47_fix.py
+              readOnly: true
+            - name: callbacks
+              mountPath: /app/embedding_sanitize.py
+              subPath: embedding_sanitize.py
+              readOnly: true
+            - name: callbacks
+              mountPath: /app/streaming_bridge.py
+              subPath: streaming_bridge.py
+              readOnly: true
+            - name: callbacks
+              mountPath: /app/force_stream.py
+              subPath: force_stream.py
+              readOnly: true
+            - name: callbacks
+              mountPath: /app/null_byte_sanitize.py
+              subPath: null_byte_sanitize.py
+              readOnly: true
+            - name: callbacks
+              mountPath: /app/anthropic_passthrough_pingfix.py
+              subPath: anthropic_passthrough_pingfix.py
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+        - name: callbacks
+          configMap:
+            name: litellm-callbacks
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-proxy-canary
+  namespace: carher
+  labels:
+    app: litellm-proxy-canary
+spec:
+  type: ClusterIP
+  selector:
+    app: litellm-proxy-canary
+  ports:
+    - port: 4000
+      targetPort: 4000
+      name: http

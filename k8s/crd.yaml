@@ -30,7 +30,7 @@ spec:
                 model:
                   type: string
                   default: opus
-                  enum: [gpt, sonnet, opus, gemini]
+                  enum: [gpt, sonnet, opus, gemini, gpt-5.5]
                 appId:
                   type: string
                 appSecretRef:

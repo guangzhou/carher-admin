@@ -35,6 +35,7 @@ var modelMapLitellm = map[string]string{
 	"sonnet":  "litellm/claude-sonnet-4-6",
 	"opus":    "litellm/claude-opus-4-6",
 	"gpt":     "litellm/gpt-5.4",
+	"gpt-5.5": "litellm/chatgpt-gpt-5.5",
 	"gemini":  "litellm/gemini-3.1-pro-preview",
 	"minimax": "litellm/minimax-m2.7",
 	"glm":     "litellm/glm-5",
@@ -119,6 +120,7 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		models["litellm/claude-opus-4-6"] = alias("opus")
 		models["litellm/claude-sonnet-4-6"] = alias("sonnet")
 		models["litellm/gpt-5.4"] = alias("gpt")
+		models["litellm/chatgpt-gpt-5.5"] = alias("gpt-5.5")
 		models["litellm/gemini-3.1-pro-preview"] = alias("gemini")
 		models["litellm/minimax-m2.7"] = alias("minimax")
 		models["litellm/glm-5"] = alias("glm")
@@ -216,6 +218,7 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 			{"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 25, "cacheRead": 0.5}},
 			{"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 64000, "cost": map[string]interface{}{"input": 3, "output": 15, "cacheRead": 0.3}},
 			{"id": "gpt-5.4", "name": "GPT-5.4", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 2.5, "output": 15, "cacheRead": 0.25}},
+			{"id": "chatgpt-gpt-5.5", "name": "GPT-5.5 (ChatGPT Pro)", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 400000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 0, "output": 0, "cacheRead": 0}},
 			{"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 65536, "cost": map[string]interface{}{"input": 2, "output": 12, "cacheRead": 0.2}},
 			{"id": "minimax-m2.7", "name": "MiniMax M2.7", "api": "openai-completions", "input": []string{"text"}, "contextWindow": 200000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 0.5, "output": 1.5}},
 			{"id": "glm-5", "name": "GLM-5", "api": "openai-completions", "input": []string{"text"}, "contextWindow": 128000, "maxTokens": 32000, "cost": map[string]interface{}{"input": 1, "output": 3}},

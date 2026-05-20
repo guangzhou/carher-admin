@@ -43,6 +43,7 @@ _BASE_MODELS = [
     "claude-opus-4-6",
     "claude-sonnet-4-6",
     "claude-opus-4-7",
+    "claude-haiku-4-5",
     "gpt-5.4",
     "gemini-3.1-pro-preview",
     "minimax-m2.7",
@@ -52,10 +53,16 @@ _BASE_MODELS = [
     "wangsu-gpt-5.5",
     "wangsu-deepseek-v4-pro",
     "wangsu-deepseek-v4-flash",
+    "wangsu-text-embedding-v3",
     "openrouter-claude-opus-4-7",
     "openrouter-claude-sonnet-4-6",
+    "anthropic.claude-opus-4-7",
+    "chatgpt-gpt-5.5",
+    "chatgpt-gpt-5.4",
+    "chatgpt-gpt-5.3-codex",
+    "chatgpt-gpt-5.3-codex-spark",
 ]
-ALL_MODELS = _BASE_MODELS + list(MODEL_FALLBACK_MAP.values())
+ALL_MODELS = sorted({*_BASE_MODELS, *MODEL_FALLBACK_MAP.values()})
 
 
 def normalize_route_policy(policy: str | None) -> str:

@@ -34,12 +34,13 @@ var modelMapWangsu = map[string]string{
 var modelMapLitellm = map[string]string{
 	"sonnet":  "litellm/claude-sonnet-4-6",
 	"opus":    "litellm/claude-opus-4-6",
-	"gpt":     "litellm/gpt-5.4",
-	"gpt-5.5": "litellm/chatgpt-gpt-5.5",
+	"opus4.7": "litellm/claude-opus-4-7",
+	"gpt":     "litellm/chatgpt-gpt-5.5",
+	"gpt-5.4": "litellm/chatgpt-gpt-5.4",
 	"gemini":  "litellm/gemini-3.1-pro-preview",
 	"minimax": "litellm/minimax-m2.7",
 	"glm":     "litellm/glm-5",
-	"codex":   "litellm/gpt-5.3-codex",
+	"codex":   "litellm/chatgpt-gpt-5.3-codex",
 }
 
 // extraLitellmModelRegistry holds metadata for opt-in LiteLLM models that are
@@ -119,14 +120,13 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 	case "litellm":
 		models["litellm/claude-opus-4-6"] = alias("opus")
 		models["litellm/claude-sonnet-4-6"] = alias("sonnet")
-		models["litellm/gpt-5.4"] = alias("gpt")
-		models["litellm/chatgpt-gpt-5.5"] = alias("gpt-5.5")
+		models["litellm/chatgpt-gpt-5.4"] = alias("gpt-5.4")
+		models["litellm/chatgpt-gpt-5.5"] = alias("gpt")
 		models["litellm/gemini-3.1-pro-preview"] = alias("gemini")
 		models["litellm/minimax-m2.7"] = alias("minimax")
 		models["litellm/glm-5"] = alias("glm")
-		models["litellm/gpt-5.3-codex"] = alias("codex")
+		models["litellm/chatgpt-gpt-5.3-codex"] = alias("codex")
 		models["litellm/claude-opus-4-7"] = alias("opus4.7")
-		models["litellm/wangsu-gpt-5.5"] = alias("gpt55")
 		models["litellm/wangsu-deepseek-v4-pro"] = alias("ds-pro")
 		models["litellm/wangsu-deepseek-v4-flash"] = alias("ds-flash")
 	case "anthropic":

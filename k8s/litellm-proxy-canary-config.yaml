@@ -1,0 +1,1286 @@
+# LiteLLM Proxy: unified LLM gateway with spend tracking.
+# Experiment phase: single replica, no HPA.
+#
+# Secret is defined by the template in k8s/litellm-secrets.yaml.
+# Render that file with real values before applying the Secret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config-canary
+  namespace: carher
+  labels:
+    app: litellm-proxy
+data:
+  config.yaml: |
+    model_list:
+      # ═══════════════════════════════════════════
+      # Sonnet / Opus: Wangsu Anthropic Direct (v2 gateway) — primary
+      # Native Anthropic protocol via cheliantianxia3 gateway.
+      #
+      # IMPORTANT: Pricing MUST be in litellm_params (not only model_info).
+      # LiteLLM bug: register_model() fails to inject model_info pricing
+      # when model names collide with built-in entries. Per-deployment
+      # cost path (litellm_params) is the only reliable path.
+      # ═══════════════════════════════════════════
+
+      # ── Claude Opus 4.6 via Wangsu Direct ──
+      - model_name: claude-opus-4-6
+        litellm_params:
+          model: anthropic/anthropic.claude-opus-4-6
+          api_key: os.environ/WANGSU_DIRECT_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/yqhhclqf/anthropic
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: wangsu-direct/claude-opus-4-6
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
+      # ── Claude Sonnet 4.6 via Wangsu Direct ──
+      - model_name: claude-sonnet-4-6
+        litellm_params:
+          model: anthropic/anthropic.claude-sonnet-4-6
+          api_key: os.environ/WANGSU_DIRECT_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/yqhhclqf/anthropic
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: wangsu-direct/claude-sonnet-4-6
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
+
+      # ── Claude Opus 4.7 via Wangsu Direct (cheliantianxia5/sqix2pnh) ──
+      # Operator config_gen.go references this model_name (no `anthropic.`
+      # prefix) so all per-instance LiteLLM keys must include it in their
+      # allowlist. Same upstream as anthropic.claude-opus-4-7 (kept as alias
+      # for legacy clients calling the prefixed name directly).
+      - model_name: claude-opus-4-7
+        litellm_params:
+          model: anthropic/anthropic.claude-opus-4-7
+          api_key: os.environ/WANGSU_DIRECT5_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: wangsu-direct5/claude-opus-4-7
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
+      # ═══════════════════════════════════════════
+      # GPT / Gemini: OpenRouter — primary (unchanged)
+      # ═══════════════════════════════════════════
+
+      # ── Gemini 3.1 Pro via OpenRouter ──
+      - model_name: gemini-3.1-pro-preview
+        litellm_params:
+          model: openrouter/google/gemini-3.1-pro-preview
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.000002
+          output_cost_per_token: 0.000012
+        model_info:
+          id: openrouter/gemini-3.1-pro-preview
+          input_cost_per_token: 0.000002
+          output_cost_per_token: 0.000012
+
+      # ═══════════════════════════════════════════
+      # OpenRouter OpenAI-compat: Claude via /chat/completions
+      # Used by CarHer bot (OpenAI-compat client) for:
+      #   - fallback of claude-opus-4-6 / claude-sonnet-4-6 (Wangsu-primary)
+      #   - primary of "openrouter-primary" cohort (e.g. even-ID carher users)
+      # OpenRouter verified to support Anthropic prompt caching via the
+      # standard `cache_control` field + anthropic-beta headers (2026-04-21).
+      # ═══════════════════════════════════════════
+
+      # NOTE: we intentionally use the `openrouter/` provider here (not
+      # `custom_openai/`) because LiteLLM's cache_control_injection_points
+      # only works for Anthropic-aware providers (anthropic, openrouter).
+      # The `custom_openai/` path does NOT auto-inject cache_control
+      # (verified 2026-04-22), so cache would be effectively disabled.
+      #
+      # Known tradeoff: LiteLLM v1.82.x has a bug in the openrouter provider's
+      # /v1/responses handler where it forwards the `openrouter/` prefix to
+      # OpenRouter, causing HTTP 400. For /v1/chat/completions (the common
+      # bot path) this works correctly with full cache injection.
+      # The 400 on /v1/responses is absorbed by the key-level fallback to
+      # anthropic.claude-opus-4-X (Wangsu Direct5/6), which also has cache.
+      #
+      # `extra_body.provider.order` forces OpenRouter to route to Anthropic
+      # first, Google Vertex second, and never Amazon Bedrock — because
+      # Bedrock does not support Anthropic prompt cache via OpenRouter
+      # (verified 2026-04-22 across opus-4.6, opus-4.7).
+      - model_name: openrouter-claude-opus-4-6
+        litellm_params:
+          model: openrouter/anthropic/claude-opus-4.6
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_body:
+            provider:
+              order: ["anthropic", "google-vertex"]
+              allow_fallbacks: false
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: openrouter/claude-opus-4-6
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
+      # Same openrouter/ + provider.order pattern as opus-4-6. sonnet-4.6
+      # defaults to Google Vertex (which supports cache), so pinning is
+      # technically optional; we pin for consistency with the opus family.
+      - model_name: openrouter-claude-sonnet-4-6
+        litellm_params:
+          model: openrouter/anthropic/claude-sonnet-4.6
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
+          extra_body:
+            provider:
+              order: ["anthropic", "google-vertex"]
+              allow_fallbacks: false
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: openrouter/claude-sonnet-4-6
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
+
+      # Same openrouter/ + provider.order pattern as opus-4-6.
+      - model_name: openrouter-claude-opus-4-7
+        litellm_params:
+          model: openrouter/anthropic/claude-opus-4.7
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_body:
+            provider:
+              order: ["anthropic", "google-vertex"]
+              allow_fallbacks: false
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: openrouter/claude-opus-4-7
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
+      # ═══════════════════════════════════════════
+      # Fallback: Wangsu (网宿) OpenAI compat for GPT / Gemini
+      # Use custom_openai/* so LiteLLM stays on chat/completions.
+      # ═══════════════════════════════════════════
+
+      - model_name: wangsu-gpt-5.4
+        litellm_params:
+          model: custom_openai/gpt-5.4
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+        model_info:
+          id: wangsu/gpt-5.4
+          input_cost_per_token: 0.0000025
+          output_cost_per_token: 0.000015
+
+      - model_name: wangsu-gemini-3.1-pro-preview
+        litellm_params:
+          model: custom_openai/gemini-3.1-pro-preview
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+        model_info:
+          id: wangsu/gemini-3.1-pro-preview
+          input_cost_per_token: 0.000002
+          output_cost_per_token: 0.000012
+
+      # ── New on cheliantianxia1 (added 2026-05-08): GPT-5.5 + DeepSeek V4 ──
+      # Pricing rationale:
+      #   gpt-5.5     — OpenAI list price ($5/$30 per 1M); Wangsu pass-through.
+      #   deepseek-*  — DeepSeek official list price (cache_miss + output);
+      #                 the 75%-off promo ends 2026-05-31, so we book at full
+      #                 list to keep spend tracking conservative.
+      - model_name: wangsu-gpt-5.5
+        litellm_params:
+          model: custom_openai/gpt-5.5
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.00003
+        model_info:
+          id: wangsu/gpt-5.5
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.00003
+
+      - model_name: wangsu-deepseek-v4-pro
+        litellm_params:
+          model: custom_openai/deepseek-v4-pro
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          input_cost_per_token: 0.00000171
+          output_cost_per_token: 0.00000343
+        model_info:
+          id: wangsu/deepseek-v4-pro
+          input_cost_per_token: 0.00000171
+          output_cost_per_token: 0.00000343
+
+      - model_name: wangsu-deepseek-v4-flash
+        litellm_params:
+          model: custom_openai/deepseek-v4-flash
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          input_cost_per_token: 0.000000143
+          output_cost_per_token: 0.000000286
+        model_info:
+          id: wangsu/deepseek-v4-flash
+          input_cost_per_token: 0.000000143
+          output_cost_per_token: 0.000000286
+
+      # ═══════════════════════════════════════════
+      # Provider: Wangsu Anthropic Direct Mode (v2 gateway)
+      # Native Anthropic protocol for Cursor / Claude Code users.
+      # Gateway: cheliantianxia5, schema: anthropic, strict model match.
+      #
+      # BUG WORKAROUND (LiteLLM v1.82.6):
+      # register_model() fails to inject custom pricing when model_info.id
+      # collides with built-in entries (bedrock_converse 'anthropic.claude-sonnet-4-6')
+      # or is absent from the bundled model_prices JSON ('anthropic.claude-opus-4-6').
+      # Cost calc resolves model_without_prefix = 'anthropic.claude-*' but finds
+      # either wrong pricing (bedrock) or nothing -> spend=$0.
+      # Fix: duplicate pricing into litellm_params so the per-deployment cost
+      # path is used, AND use unique model_info.id to avoid collisions.
+      # ═══════════════════════════════════════════
+
+      - model_name: anthropic.claude-sonnet-4-6
+        litellm_params:
+          model: anthropic/anthropic.claude-sonnet-4-6
+          api_key: os.environ/WANGSU_DIRECT5_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: wangsu-direct5/claude-sonnet-4-6
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
+
+      - model_name: anthropic.claude-opus-4-6
+        litellm_params:
+          model: anthropic/anthropic.claude-opus-4-6
+          api_key: os.environ/WANGSU_DIRECT5_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: wangsu-direct5/claude-opus-4-6
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
+      - model_name: anthropic.claude-haiku-4-5
+        litellm_params:
+          model: anthropic/anthropic.claude-haiku-4-5
+          api_key: os.environ/WANGSU_DIRECT5_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000005
+          cache_read_input_token_cost: 0.0000001
+          cache_creation_input_token_cost: 0.00000125
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: wangsu-direct5/claude-haiku-4-5
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000005
+          cache_read_input_token_cost: 0.0000001
+          cache_creation_input_token_cost: 0.00000125
+
+      # ═══════════════════════════════════════════
+      # Provider: Wangsu Anthropic Direct Mode (v2 gateway) — cheliantianxia6
+      # Gateway id: af1ho8mp. Initially opt-in only: restricted to specific
+      # virtual keys via per-key `models` allowlist (e.g. carher-1000 and
+      # claude-code-liuguoxian-50gj). Pricing identical to Opus 4.6.
+      # ═══════════════════════════════════════════
+
+      - model_name: anthropic.claude-opus-4-7
+        litellm_params:
+          model: anthropic/anthropic.claude-opus-4-7
+          api_key: os.environ/WANGSU_DIRECT5_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: wangsu-direct6/claude-opus-4-7
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
+      # ═══════════════════════════════════════════
+      # Provider: OpenRouter Anthropic-native (/v1/messages passthrough)
+      # For Claude Code / Cursor users that call LiteLLM's Anthropic-native
+      # /v1/messages endpoint but want OpenRouter as the primary.
+      # OpenRouter exposes an Anthropic-compatible /api/v1/messages endpoint
+      # (verified 2026-04-21), so LiteLLM can passthrough with the `anthropic`
+      # provider + api_base override, preserving cache_control / tool_use /
+      # thinking fields with zero protocol-conversion loss.
+      # ═══════════════════════════════════════════
+
+      - model_name: anthropic.openrouter.claude-sonnet-4-6
+        litellm_params:
+          model: anthropic/anthropic/claude-sonnet-4.6
+          api_base: https://openrouter.ai/api
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: openrouter-anthropic/claude-sonnet-4-6
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+          cache_read_input_token_cost: 0.0000003
+          cache_creation_input_token_cost: 0.00000375
+
+      - model_name: anthropic.openrouter.claude-opus-4-6
+        litellm_params:
+          model: anthropic/anthropic/claude-opus-4.6
+          api_base: https://openrouter.ai/api
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: openrouter-anthropic/claude-opus-4-6
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
+      - model_name: anthropic.openrouter.claude-opus-4-7
+        litellm_params:
+          model: anthropic/anthropic/claude-opus-4.7
+          api_base: https://openrouter.ai/api
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: openrouter-anthropic/claude-opus-4-7
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
+      # ═══════════════════════════════════════════
+      # OpenRouter-only models (no Wangsu equivalent)
+      # These only have OpenRouter routing, no primary/fallback split.
+      # ═══════════════════════════════════════════
+
+      # ── MiniMax M2.7 via OpenRouter ──
+      - model_name: minimax-m2.7
+        litellm_params:
+          model: openrouter/minimax/minimax-m2.7
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.0000005
+          output_cost_per_token: 0.0000015
+        model_info:
+          id: openrouter/minimax-m2.7
+          input_cost_per_token: 0.0000005
+          output_cost_per_token: 0.0000015
+
+      # ── GLM-5 via OpenRouter ──
+      - model_name: glm-5
+        litellm_params:
+          model: openrouter/z-ai/glm-5
+          api_key: os.environ/OPENROUTER_API_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000003
+        model_info:
+          id: openrouter/glm-5
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000003
+
+      # ═══════════════════════════════════════════
+      # Kuaihui (https://kuaihuiai.com/v1) — canary, added 2026-04-29
+      # for carher-1000 main-chat experiment. Single-instance scope; no
+      # other instance / fallback chain references these `kuaihui-*` names,
+      # so this block is purely additive (zero blast radius for the rest
+      # of the cluster).
+      #
+      # Protocol: OpenAI-compat /v1/chat/completions (verified streaming
+      # + non-streaming). Native /v1/messages also works on the same
+      # base_url but we route via openai/* for consistency with the rest
+      # of the chat path.
+      #
+      # Pricing: each entry uses official Anthropic / OpenAI list-price
+      # (per per-model URL inline) as an upper-bound estimate — a 中转
+      # gateway typically charges at-or-below the official rate. These
+      # are the SpendLogs cost basis; replace with kuaihui's actual
+      # per-token rates once first invoice / billing console exposes
+      # them, otherwise spend rows for kuaihui-* will diverge from
+      # what kuaihui actually bills. Verified against:
+      #   - https://www.anthropic.com/pricing  (Opus 4.7/4.6, Sonnet 4.6, Haiku 4.5)
+      #   - https://openai.com/api/pricing/    (GPT-5.5, 5.4, 5.4-mini)
+      # ═══════════════════════════════════════════
+
+      # ── Claude Opus 4.7 via Kuaihui ──
+      - model_name: kuaihui-claude-opus-4-7
+        litellm_params:
+          model: openai/claude-opus-4-7
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+        model_info:
+          id: kuaihui/claude-opus-4-7
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+
+      # ── Claude Opus 4.6 via Kuaihui ──
+      - model_name: kuaihui-claude-opus-4-6
+        litellm_params:
+          model: openai/claude-opus-4-6
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+        model_info:
+          id: kuaihui/claude-opus-4-6
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+
+      # ── Claude Sonnet 4.6 via Kuaihui ──
+      # Anthropic-native provider so /v1/messages clients (claude-code CLI,
+      # Cursor) get pure passthrough; OpenAI-compat clients (carher main
+      # program /v1/chat/completions) still work via LiteLLM's built-in
+      # OpenAI↔Anthropic transform.
+      #
+      # extra_headers + default_headers: mirror the wangsu Claude config
+      # (anthropic.claude-sonnet-4-6) which is known-working on /v1/messages.
+      # Without these, kuaihui's /v1/messages reply seemed to hang LiteLLM's
+      # internal anthropic streaming parser (no upstream bytes after 60s).
+      - model_name: kuaihui-claude-sonnet-4-6
+        litellm_params:
+          model: anthropic/claude-sonnet-4-6
+          api_base: https://kuaihuiai.com
+          api_key: os.environ/KUAIHUI_API_KEY
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+        model_info:
+          id: kuaihui/claude-sonnet-4-6
+          input_cost_per_token: 0.000003
+          output_cost_per_token: 0.000015
+
+      # ── Claude Haiku 4.5 (dated) via Kuaihui ──
+      - model_name: kuaihui-claude-haiku-4-5-20251001
+        litellm_params:
+          model: openai/claude-haiku-4-5-20251001
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000005
+        model_info:
+          id: kuaihui/claude-haiku-4-5-20251001
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000005
+
+      # ── Claude Haiku 4.5 thinking via Kuaihui ──
+      - model_name: kuaihui-claude-haiku-4-5-20251001-thinking
+        litellm_params:
+          model: openai/claude-haiku-4-5-20251001-thinking
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000005
+        model_info:
+          id: kuaihui/claude-haiku-4-5-20251001-thinking
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000005
+
+      # ── GPT-5.5 via Kuaihui ──
+      # Standard tier (<272K ctx): $5 input / $30 output per 1M tokens
+      # (OpenAI official, as of 2026-04-23 GPT-5.5 release).
+      - model_name: kuaihui-gpt-5.5
+        litellm_params:
+          model: openai/gpt-5.5
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.00003
+        model_info:
+          id: kuaihui/gpt-5.5
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.00003
+
+      # ── GPT-5.4 via Kuaihui ──
+      - model_name: kuaihui-gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.0000025
+          output_cost_per_token: 0.000015
+        model_info:
+          id: kuaihui/gpt-5.4
+          input_cost_per_token: 0.0000025
+          output_cost_per_token: 0.000015
+
+      # ── GPT-5.4 mini via Kuaihui ──
+      # OpenAI official: $0.75 input / $4.50 output per 1M tokens.
+      - model_name: kuaihui-gpt-5.4-mini
+        litellm_params:
+          model: openai/gpt-5.4-mini
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.00000075
+          output_cost_per_token: 0.0000045
+        model_info:
+          id: kuaihui/gpt-5.4-mini
+          input_cost_per_token: 0.00000075
+          output_cost_per_token: 0.0000045
+
+      # ── GPT-5.4 codex via Kuaihui ──
+      # NOTE: "gpt-5.4-codex" is kuaihui's branding; OpenAI's official model
+      # catalog has no such SKU (closest = GPT-5.3-Codex at $1.75/$14 per 1M).
+      # Pricing here mirrors GPT-5.4 standard ($2.50/$15) as upper bound;
+      # update once kuaihui's per-token rate is known.
+      - model_name: kuaihui-gpt-5.4-codex
+        litellm_params:
+          model: openai/gpt-5.4-codex
+          api_base: https://kuaihuiai.com/v1
+          api_key: os.environ/KUAIHUI_API_KEY
+          input_cost_per_token: 0.0000025
+          output_cost_per_token: 0.000015
+        model_info:
+          id: kuaihui/gpt-5.4-codex
+          input_cost_per_token: 0.0000025
+          output_cost_per_token: 0.000015
+
+      # NOTE: gpt-image-2 NOT added here — it's an image-generation model
+      # (per-call billing, not per-token); requires `mode: image_generation`
+      # config and `/v1/images/generations` endpoint. carher has no image-gen
+      # workflow today, so deferred. Re-enable when needed.
+
+      # ═══════════════════════════════════════════
+      # Tag-routed kuaihui-primary aliases — added 2026-04-29
+      # ═══════════════════════════════════════════
+      # Per-key canary: liuguoxian's claude-code key keeps using the
+      # canonical model_name (anthropic.claude-{opus-4-7,opus-4-6,
+      # sonnet-4-6,haiku-4-5}) but its requests get routed to kuaihui
+      # primary, with the existing wangsu / openrouter chain acting as
+      # fallback. Implementation = LiteLLM tag-based routing:
+      #
+      #   1) These 4 deployments are tagged `liuguoxian-canary`. Per
+      #      LiteLLM router rules, a tagged deployment ONLY accepts
+      #      requests whose key.metadata.tags contains a matching tag.
+      #   2) The pre-existing wangsu / openrouter deployments for the
+      #      same 4 model_name(s) are UNTAGGED, so all ~200 other keys
+      #      keep landing on them — zero blast radius.
+      #   3) liuguoxian's key (alias `claude-code-liuguoxian-50gj`) has
+      #      metadata.tags=["liuguoxian-canary"] (set out-of-band via
+      #      /key/update). Its requests prefer the tagged kuaihui
+      #      deployment; if kuaihui fails, the untagged wangsu copy of
+      #      the same model_group is reachable too, and beyond that
+      #      router_settings.fallbacks chains to the openrouter twin.
+      #   4) router_settings.enable_tag_filtering: true (added below)
+      #      activates the whole mechanism cluster-wide.
+      #
+      # extra_headers (anthropic-beta) MUST be set on every kuaihui
+      # anthropic-provider entry — without them LiteLLM's anthropic
+      # client wedges 60s on /v1/messages because of how kuaihui's
+      # streaming/cache fields are formatted; verified 2026-04-29 on
+      # the kuaihui-claude-sonnet-4-6 sibling deployment.
+      #
+      # Pricing: same official Anthropic list-price as the kuaihui-*
+      # naked-name siblings above (kuaihui charges ≤ list-price; SpendLogs
+      # is upper-bound until kuaihui's billing console exposes per-token
+      # rates).
+
+      # ── DISABLED 2026-05-02: full rollback to wangsu ──────────────────
+      # Original design = liuguoxian-canary tag isolation (4 tag-routed
+      # `anthropic.claude-{opus-4-7,opus-4-6,sonnet-4-6,haiku-4-5}`
+      # deployments pointing at kuaihui, paired with key
+      # `claude-code-liuguoxian-50gj` carrying metadata.tags=
+      # ["liuguoxian-canary"]).
+      #
+      # Observed reality (2026-04-29 → 2026-05-02): SpendLogs shows
+      # 211 unique keys (196 claude-code-* + 13 carher-* + 2 cursor-*)
+      # hitting api_base=kuaihuiai.com despite zero of them carrying
+      # the canary tag. Wangsu calls dropped 53k → 17k/day over the
+      # same window. Inferred mechanism: when wangsu deployment cools
+      # down on 5xx / timeout, LiteLLM Router fallback within the
+      # `anthropic.claude-*` model_group selects the only other
+      # deployment available (the kuaihui-tagged one) regardless of
+      # `enable_tag_filtering: true`, i.e. the tag filter is bypassed
+      # in the router-fallback hot path (LiteLLM v1.82).
+      #
+      # Action: removed the 4 tag-routed kuaihui deployments so the
+      # 4 model_groups each fall back to the single wangsu-direct
+      # deployment + the existing per-group openrouter fallback chain
+      # (anthropic.claude-{opus-4-7,opus-4-6,sonnet-4-6} → openrouter
+      # twin, see router_settings.fallbacks below).
+      #
+      # liuguoxian's key still carries metadata.tags=["liuguoxian-canary"]
+      # but with no tag-routed deployment alive its requests land on
+      # the untagged wangsu deployment like everyone else.
+      #
+      # The 9 `kuaihui-*` naked-name deployments above are kept as a
+      # manual debug entrypoint (no key actively uses them; flip back
+      # to kuaihui canary by re-adding the 4 deployments below).
+      #
+      # ── verbatim original block, restore to re-enable canary ──
+      # - model_name: anthropic.claude-opus-4-7
+      #   litellm_params:
+      #     model: anthropic/claude-opus-4-7
+      #     api_base: https://kuaihuiai.com
+      #     api_key: os.environ/KUAIHUI_API_KEY
+      #     tags: ["liuguoxian-canary"]
+      #     extra_headers:
+      #       anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+      #     input_cost_per_token: 0.000005
+      #     output_cost_per_token: 0.000025
+      #   model_info:
+      #     id: kuaihui/anthropic.claude-opus-4-7
+      #     input_cost_per_token: 0.000005
+      #     output_cost_per_token: 0.000025
+      # - model_name: anthropic.claude-opus-4-6
+      #   litellm_params:
+      #     model: anthropic/claude-opus-4-6
+      #     api_base: https://kuaihuiai.com
+      #     api_key: os.environ/KUAIHUI_API_KEY
+      #     tags: ["liuguoxian-canary"]
+      #     extra_headers:
+      #       anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+      #     input_cost_per_token: 0.000005
+      #     output_cost_per_token: 0.000025
+      #   model_info:
+      #     id: kuaihui/anthropic.claude-opus-4-6
+      #     input_cost_per_token: 0.000005
+      #     output_cost_per_token: 0.000025
+      # - model_name: anthropic.claude-sonnet-4-6
+      #   litellm_params:
+      #     model: anthropic/claude-sonnet-4-6
+      #     api_base: https://kuaihuiai.com
+      #     api_key: os.environ/KUAIHUI_API_KEY
+      #     tags: ["liuguoxian-canary"]
+      #     extra_headers:
+      #       anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+      #     input_cost_per_token: 0.000003
+      #     output_cost_per_token: 0.000015
+      #   model_info:
+      #     id: kuaihui/anthropic.claude-sonnet-4-6
+      #     input_cost_per_token: 0.000003
+      #     output_cost_per_token: 0.000015
+      # - model_name: anthropic.claude-haiku-4-5
+      #   litellm_params:
+      #     model: anthropic/claude-haiku-4-5
+      #     api_base: https://kuaihuiai.com
+      #     api_key: os.environ/KUAIHUI_API_KEY
+      #     tags: ["liuguoxian-canary"]
+      #     extra_headers:
+      #       anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+      #     input_cost_per_token: 0.000001
+      #     output_cost_per_token: 0.000005
+      #   model_info:
+      #     id: kuaihui/anthropic.claude-haiku-4-5
+      #     input_cost_per_token: 0.000001
+      #     output_cost_per_token: 0.000005
+
+      # ═══════════════════════════════════════════
+      # Embedding
+      # ═══════════════════════════════════════════
+
+      # ── BGE-M3 via OpenRouter (memory search) ──
+      # Official OpenRouter pricing (confirmed 2026-04-21):
+      # https://openrouter.ai/baai/bge-m3/pricing
+      #   Input:  $0.01 per 1M tokens  (= 1e-8 per token)
+      #   Output: $0.00
+      # Both litellm_params and model_info carry the pricing to match the
+      # double-write pattern used by other models in this config (LiteLLM
+      # v1.82.x register_model() reliability: per-deployment cost path).
+      - model_name: BAAI/bge-m3
+        litellm_params:
+          model: openrouter/BAAI/bge-m3
+          api_key: os.environ/OPENROUTER_API_KEY
+          api_base: https://openrouter.ai/api/v1
+          input_cost_per_token: 0.00000001
+          output_cost_per_token: 0
+        model_info:
+          id: openrouter/bge-m3
+          mode: embedding
+          input_cost_per_token: 0.00000001
+          output_cost_per_token: 0
+
+      # ═══════════════════════════════════════════
+      # ChatGPT Pro pool (5 accounts migrated from 188, added 2026-05-20).
+      # Each chatgpt-* model_name has 5 deployments, one per chatgpt-acct-N pod.
+      # LiteLLM router simple-shuffles across the 5 deployments.
+      # model_name uses `chatgpt-gpt-5.5` (matches base-config + her vkey allowlists);
+      # other 3 stay bare names because base-config + vkeys already use bare names.
+      # api_key from env CHATGPT_POOL_KEY (Secret chatgpt-pool-master-key).
+      # ═══════════════════════════════════════════
+      # ── chatgpt-gpt-5.5 (5 deployments) ──
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-7.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-7/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-8.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-8/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-9.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-9/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-10.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-10/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-11.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-11/chatgpt-gpt-5.5}
+
+      # ── gpt-5.4 (5 deployments) ──
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-7.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-7/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-8.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-8/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-9.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-9/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-10.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-10/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-11.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.4}
+
+      # ── gpt-5.3-codex (5 deployments) ──
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-7.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-7/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-8.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-8/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-9.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-9/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-10.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-10/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-11.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.3-codex}
+
+      # ── gpt-5.3-codex-spark (5 deployments) ──
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-7.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-7/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-8.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-8/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-9.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-9/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-10.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-10/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-11.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.3-codex-spark}
+
+    router_settings:
+      # ── tag-based routing ────────────────────────────────────────────
+      # Activate per-key deployment selection via tags. Behavior:
+      #   * Untagged deployments accept ALL requests (default).
+      #   * Tagged deployments ONLY accept requests whose API key carries
+      #     a matching tag in metadata.tags.
+      # Currently the only tagged deployments are the 4 kuaihui-primary
+      # `anthropic.claude-*` aliases above (tag=`liuguoxian-canary`),
+      # paired with the `claude-code-liuguoxian-50gj` key which has
+      # metadata.tags=["liuguoxian-canary"]. All other ~200 keys carry
+      # no tag, so this flag is a no-op for them. See the model_list
+      # block above for the full design rationale.
+      enable_tag_filtering: true
+
+      # Map dated-snapshot model names that newer Anthropic SDKs send (e.g.
+      # ``@anthropic-ai/sdk`` / Claude Code CLI emits ``claude-haiku-4-5-
+      # 20251001`` when the user picks haiku-4.5) onto our existing model
+      # groups. ``model_group_alias`` is consulted inside
+      # ``_can_object_call_model`` BEFORE the ACL check fails, so any key
+      # that already lists the canonical name (``anthropic.claude-haiku-
+      # 4-5``) is automatically allowed to call the dated alias — no
+      # per-key migration needed.
+      #
+      # Why this exists: 2026-04-25 audit found 9787 failures across 5 keys
+      # over 48 h, 0 successes, all because Claude Code CLI sends the dated
+      # snapshot but every existing key allowlist references the canonical.
+      #
+      # When adding a new dated alias, also confirm the underlying model
+      # group exists in ``model_list`` and that pricing/usage tracking on
+      # that group is correct — alias maps the request, not the cost row.
+      model_group_alias:
+        "claude-haiku-4-5-20251001": "anthropic.claude-haiku-4-5"
+      # ── cooldowns: enabled (default) ─────────────────────────────────
+      # 2026-04-27 ROLLBACK: 之前在此处设 ``disable_cooldowns: true``，
+      # commit 0058214 论证为"zombie key 触发 bge-m3 cooldown 殃及 12 个
+      # 用户"。按 .cursor/rules/diagnosis-discipline.mdc 三段式复审后该
+      # 论证被双重证伪（见 docs/improvement-plan.md 或本仓库 audit 记录）：
+      #
+      #   假设：删 verification token → stale client → 触发 bge-m3 cooldown
+      #   证伪条件：(a) cooldown 受害者 api_key 应是 zombie hash；
+      #             (b) zombie 401 应进入 router/deployment 阶段
+      #   数据：✗ (a) 受害者是 12 个**健康** key，不是 zombie hash；
+      #         ✗ (b) zombie 401 在 auth_checks.py:2213 直接抛出，**从未
+      #               进入 router** —— 因此不可能触发任何 cooldown
+      #         真凶：4-22~4-24 OpenRouter 上游 BAAI/bge-m3 自身故障
+      #               ('No successful provider responses' NotFoundError 404，
+      #               4-25 起上游已恢复至 < 11 次/天）
+      #
+      # 撤回此 flag 让 router 自愈机制恢复（5s cooldown 隔离 bad replica）。
+      # 对今天 wangsu-direct /v1/messages 的偶发抽风是正向的（router 会
+      # 自动 failover）。多 deployment 组依然有 num_retries: 2 + 完整
+      # router-level fallbacks 兜底。
+      fallbacks:
+        # ── Wangsu-primary Claude (OpenAI-compat, bot default) ──
+        - claude-opus-4-6: ["openrouter-claude-opus-4-6"]
+        - claude-sonnet-4-6: ["openrouter-claude-sonnet-4-6"]
+        - gpt-5.4: ["wangsu-gpt-5.4"]
+        - chatgpt-gpt-5.5: ["wangsu-gpt-5.5"]
+        - gemini-3.1-pro-preview: ["wangsu-gemini-3.1-pro-preview"]
+        # opus-4-7 primary lives on Wangsu cheliantianxia6 (af1ho8mp).
+        # Fallback chain (in order, each tried once):
+        #   1) anthropic.openrouter.claude-opus-4-7
+        #      OpenRouter Anthropic-native, SAME model, alternative provider.
+        #      Verified live 2026-04-27 (status 200, gen-* id, both stream &
+        #      non-stream, content_block_delta + message_stop intact).
+        #      Covers Wangsu pre-headers stalls / 5xx without quality loss.
+        #   2) anthropic.claude-opus-4-6
+        #      One-tier downgrade if both opus-4-7 paths are dead. Native
+        #      protocol, no provider switch.
+        #   3) openrouter-claude-opus-4-6
+        #      Last resort: opus-4-6 via OpenRouter OpenAI-compat. Note that
+        #      Router fallbacks are flat (the chain is tried left-to-right
+        #      against the originating request); this is a manual mirror
+        #      of `claude-opus-4-6: ["openrouter-claude-opus-4-6"]` so users
+        #      never see a hard 5xx even if both Wangsu paths are down.
+        - anthropic.claude-opus-4-7: ["anthropic.openrouter.claude-opus-4-7", "anthropic.claude-opus-4-6", "openrouter-claude-opus-4-6"]
+        # ── Wangsu-primary Claude (Anthropic-native, Claude Code cohort) ──
+        # 2026-04-27: prior to this addition the /v1/messages path's
+        # ``anthropic.claude-*-4-6`` aliases had NO router-level fallback.
+        # When the Wangsu cheliantianxia5 gateway returns a pre-headers
+        # error (HTTP 5xx, ConnectTimeout, the 120 s ReadTimeout from the
+        # streaming_bridge httpx patch, etc.) LiteLLM Router's
+        # ``async_function_with_fallbacks`` uses these entries to retry
+        # the request on OpenRouter Anthropic-native, which speaks the
+        # same /v1/messages protocol with full cache_control support.
+        # Mid-stream stalls (after first byte) bypass router retry by
+        # design; those are handled by streaming_bridge's synthetic
+        # error frames so SDK-level retries kick in.
+        - anthropic.claude-opus-4-6: ["anthropic.openrouter.claude-opus-4-6"]
+        - anthropic.claude-sonnet-4-6: ["anthropic.openrouter.claude-sonnet-4-6"]
+        # ── OpenRouter-primary Claude (OpenAI-compat, opt-in cohort) ──
+        # Symmetric fallback to Wangsu Direct5 when OpenRouter fails.
+        - openrouter-claude-opus-4-7: ["anthropic.claude-opus-4-7"]
+        - openrouter-claude-opus-4-6: ["anthropic.claude-opus-4-6"]
+        - openrouter-claude-sonnet-4-6: ["anthropic.claude-sonnet-4-6"]
+        # ── OpenRouter-primary Claude (Anthropic-native, Claude Code cohort) ──
+        - anthropic.openrouter.claude-opus-4-7: ["anthropic.claude-opus-4-7"]
+        - anthropic.openrouter.claude-opus-4-6: ["anthropic.claude-opus-4-6"]
+        - anthropic.openrouter.claude-sonnet-4-6: ["anthropic.claude-sonnet-4-6"]
+
+    litellm_settings:
+      drop_params: true
+      num_retries: 2
+      request_timeout: 300
+      stream_timeout: 120
+      telemetry: false
+      return_response_headers: true
+      # ── Settings absorbed from previous DB litellm_settings row (2026-04-27) ──
+      # Prior to this commit a DB row at LiteLLM_Config.param_name='litellm_settings'
+      # contributed these two keys via _init_callback_settings_from_db /
+      # _add_litellm_settings_from_db_config and won over YAML on overlap. The
+      # initContainer ``wipe-db-config-rows`` now deletes that row on every
+      # pod start, so YAML must carry them itself or they vanish.
+      log_raw_request_response: true
+      store_prompts_in_spend_logs: true
+      # Pre-call hooks (run in order, one file each in ConfigMap litellm-callbacks):
+      # - opus_47_fix.thinking_schema_fix: rewrite legacy thinking.type=enabled /
+      #   reasoning_effort payloads to the 2026 adaptive schema for opus-4-7+.
+      #   Covers carher's OpenAI chat path and Claude Code / Cursor's Anthropic-
+      #   native /v1/messages path.
+      # - embedding_sanitize.embedding_sanitize: strip lone UTF-16 surrogates
+      #   from embedding inputs before Python httpx tries to UTF-8 encode them
+      #   (Node.js clients sometimes byte-slice emoji, producing bare \ud8xx
+      #   code points that would otherwise throw `surrogates not allowed`).
+      # - force_stream.force_stream: pre-call hook for selected
+      #   claude-code-* keys; when the client did NOT request streaming
+      #   on /v1/messages we flip data["stream"]=True upstream and stamp
+      #   litellm_metadata["_force_stream_collapse"]=True so the bridge
+      #   below knows to keep the connection alive with whitespace
+      #   heartbeats and reassemble the SSE back into one JSON Message.
+      #   This eliminates the residual ~45/day 524s on non-streaming
+      #   long-tail requests (Cursor IDE Background Agent etc.). Gated
+      #   on FORCE_STREAM_KEY_ALIASES / FORCE_STREAM_KEY_PREFIXES.
+      # - streaming_bridge.streaming_bridge: post-call iterator hook for
+      #   anthropic_messages (/v1/messages). Two modes:
+      #   * pass-through (default): inject SSE comment frames every 25 s
+      #     to prevent Cloudflare Tunnel 524 on long Opus 4.7 thinking,
+      #     stamp completion_start_time on the first content_block_delta
+      #     so SpendLogs TTFT is real instead of equal to end_time.
+      #   * collapse mode (when force_stream marked the request): buffer
+      #     all upstream SSE bytes, yield a single space b" " every 25 s
+      #     for keepalive (JSON parsers ignore leading whitespace), and
+      #     at EOF emit the reassembled Anthropic Message JSON object as
+      #     the final chunk.
+      #   Pass-through mode gated on STREAMING_BRIDGE_KEY_ALIASES /
+      #   STREAMING_BRIDGE_KEY_PREFIXES. Collapse mode triggers off the
+      #   _force_stream_collapse flag set by force_stream.
+      # - null_byte_sanitize.null_byte_sanitize: import-time monkey-patch of
+      #   PrismaClient.jsonify_object / module-level jsonify_object /
+      #   safe_dumps to recursively scrub two byte patterns that crash
+      #   the spend-log flush job:
+      #     1) NUL bytes (\x00 and the literal \u0000 escape) — PG
+      #        rejects with SQLSTATE 22P05.
+      #     2) Lone UTF-16 surrogates (\ud800..\udfff) — prisma's Rust
+      #        serde_json driver rejects with "unexpected end of hex
+      #        escape", which has the same blast radius.
+      #   In either case LiteLLM 1.82.6's flush loop drops the whole
+      #   1000-row batch without retry — observed 23–27× per pod per
+      #   30 min in production prior to this fix. Class instance is
+      #   inert; the patches run at import time, so this entry only
+      #   matters insofar as listing the module here is what *causes*
+      #   LiteLLM to import it. Tracked upstream in
+      #   github.com/BerriAI/litellm/issues/21290, /24310 (NUL bytes)
+      #   and /19847 (lone surrogates). Remove this line + delete the
+      #   file once an upstream release ships its own sanitization.
+      # - anthropic_passthrough_pingfix.anthropic_passthrough_pingfix:
+      #   import-time monkey-patch of
+      #   ModelResponseIterator.convert_str_chunk_to_generic_chunk to
+      #   tolerate JSONDecodeError on un-parseable ``data:`` SSE lines.
+      #   Without this patch, a single keepalive heartbeat from
+      #   OpenRouter (e.g. ``data:\n`` during long prefills) raises
+      #   inside ``_route_streaming_logging_to_handler`` and aborts the
+      #   entire post-stream success chain — leaving the request HTTP
+      #   200 to the client but with NO LiteLLM_SpendLogs row. Affects
+      #   every claude-code-* request that fails over to or runs on
+      #   OpenRouter; Wangsu's heartbeat shape is different and does
+      #   not trigger the bug. Patch tolerates ALL JSONDecodeErrors at
+      #   that one call site, replacing the failed chunk with the same
+      #   empty ModelResponseStream that the upstream already returns
+      #   for non-data: lines. Lost telemetry: at most one heartbeat
+      #   delta per affected stream (zero token impact by spec).
+      #   Class instance is inert; listing this module here is what
+      #   triggers the import-time patch. Remove once an upstream
+      #   LiteLLM release fixes the unconditional json.loads.
+      # Order matters: force_stream MUST run before streaming_bridge so
+      # the flag is in place before the iterator hook fires.
+      # null_byte_sanitize and anthropic_passthrough_pingfix are
+      # order-independent (both only do import-time monkey-patching,
+      # contribute no per-request behavior).
+      # Source files live under k8s/litellm-callbacks/ and are mounted into
+      # /app/<file>.py by the litellm-callbacks ConfigMap + pod volumeMounts.
+      callbacks: ["opus_47_fix.thinking_schema_fix", "embedding_sanitize.embedding_sanitize", "force_stream.force_stream", "streaming_bridge.streaming_bridge", "null_byte_sanitize.null_byte_sanitize", "anthropic_passthrough_pingfix.anthropic_passthrough_pingfix"]
+
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+      database_url: os.environ/DATABASE_URL
+      # CRITICAL — keep `false`. With `true` the proxy persists model_list
+      # changes via the admin UI/API to LiteLLM_Config and merges them on
+      # 2026-04-29: opened back up to True so the single admin user
+      # (Liuguoxian) can edit Spend Logs settings (Store Prompts toggle,
+      # retention period) from the LiteLLM admin UI without hitting
+      # "Set 'STORE_MODEL_IN_DB=True' in your env to enable this feature."
+      # Risk surface is bounded because: (1) UI is single-user; (2) the
+      # wipe-db-config-rows initContainer below still deletes the
+      # router_settings + litellm_settings rows on every pod start, so
+      # fallbacks / callback registrations remain YAML-as-source-of-truth
+      # and cannot be silently flipped via UI. Only general_settings is
+      # now allowed to persist via DB row.
+      store_model_in_db: true
+      # Always auto-inject stream_options.include_usage=true on streaming
+      # requests. Without this, OpenAI-compatible clients that omit the flag
+      # get no usage chunk from streaming responses, and:
+      #   (a) LiteLLM_SpendLogs occasionally loses entries for streamed calls
+      #   (b) CarHer's Feishu footer shows "?/400k" because pi-ai can't read
+      #       prompt/completion tokens from the stream.
+      # LiteLLM applies this BEFORE function_setup + pre_call_hook, so it is
+      # the only reliable place to enforce the flag on every upstream call.
+      always_include_stream_usage: true
+      # ── Settings absorbed from previous DB general_settings row (2026-04-27) ──
+      # Prior to wipe-db-config-rows initContainer being introduced these
+      # six keys lived only in the LiteLLM_Config DB row and were applied
+      # via _add_general_settings_from_db_config (alerting only) and the
+      # 30 s background _update_general_settings job that runs while
+      # store_model_in_db=True. With store_model_in_db now permanently
+      # false and the DB row wiped on every restart, YAML must carry them
+      # to preserve the prior runtime behaviour.
+      database_connection_pool_limit: 10
+      database_connection_timeout: 60
+      health_check_interval: 300
+      enable_public_model_hub: false
+      store_prompts_in_spend_logs: true
+      ui_access_mode: all

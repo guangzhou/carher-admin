@@ -184,13 +184,13 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 	expectedAliases := map[string]string{
 		"litellm/claude-opus-4-6":             "opus",
 		"litellm/claude-sonnet-4-6":           "sonnet",
-		"litellm/gpt-5.4":                     "gpt",
+		"litellm/chatgpt-gpt-5.4":             "gpt-5.4",
+		"litellm/chatgpt-gpt-5.5":             "gpt",
 		"litellm/gemini-3.1-pro-preview":      "gemini",
 		"litellm/minimax-m2.7":                "minimax",
 		"litellm/glm-5":                       "glm",
-		"litellm/gpt-5.3-codex":               "codex",
+		"litellm/chatgpt-gpt-5.3-codex":       "codex",
 		"litellm/claude-opus-4-7":             "opus4.7",
-		"litellm/wangsu-gpt-5.5":              "gpt55",
 		"litellm/wangsu-deepseek-v4-pro":      "ds-pro",
 		"litellm/wangsu-deepseek-v4-flash":    "ds-flash",
 	}

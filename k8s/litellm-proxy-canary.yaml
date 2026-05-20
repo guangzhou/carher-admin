@@ -2,13 +2,30 @@
 # Differences from litellm-proxy.yaml:
 #   - name/label: litellm-proxy-canary
 #   - replicas: 1
-#   - image: local containerd image on k8s-work-227 (imagePullPolicy: Never, no ACR push needed)
-#   - nodeSelector: pinned to ap-southeast-1.172.16.0.227
-#   - Service: litellm-proxy-canary (separate ClusterIP)
-# Same ConfigMaps, Secrets, env vars as prod — only the image changes.
+#   - image: public ghcr.io/berriai/litellm:v1.85.0 (canary experiment, no ACR push)
+#   - imagePullPolicy: IfNotPresent (let node pull from ghcr on first use)
+#   - ConfigMap: litellm-config-canary (independent from prod litellm-config)
+#   - chatgpt-* models proxied to chatgpt-acct-{7..11} pool pods (simple-shuffle LB)
+#   - extra env CHATGPT_POOL_KEY → Secret chatgpt-pool-master-key (LITELLM_MASTER_KEY of pool)
+# Same Secrets, callbacks ConfigMap as prod.
 # To route a her instance here: kubectl patch her <name> -n carher \
 #   --type=merge -p '{"spec":{"litellmUrl":"http://litellm-proxy-canary.carher.svc:4000"}}'
 # To roll back: set litellmUrl back to ""
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chatgpt-acct-11-auth
+  namespace: carher
+  labels:
+    app: litellm-proxy-canary
+    purpose: chatgpt-acct-11-auth-json
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: alibabacloud-cnfs-nas
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,12 +49,10 @@ spec:
         app: litellm-proxy-canary
     spec:
       terminationGracePeriodSeconds: 600
-      nodeSelector:
-        kubernetes.io/hostname: ap-southeast-1.172.16.0.227
       initContainers:
         - name: prisma-migrate
-          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/litellm-proxy:v1.83.14-stable.patch.3-20260513
-          imagePullPolicy: Never
+          image: ghcr.io/berriai/litellm:v1.85.0
+          imagePullPolicy: IfNotPresent
           command: ["sh", "-c", "prisma db push --schema /app/litellm/proxy/schema.prisma --skip-generate --accept-data-loss"]
           envFrom:
             - secretRef:
@@ -50,8 +65,8 @@ spec:
               cpu: "1"
               memory: 1536Mi
         - name: wipe-db-config-rows
-          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/litellm-proxy:v1.83.14-stable.patch.3-20260513
-          imagePullPolicy: Never
+          image: ghcr.io/berriai/litellm:v1.85.0
+          imagePullPolicy: IfNotPresent
           command: ["python3", "-c"]
           args:
             - |
@@ -117,8 +132,8 @@ spec:
               memory: 1536Mi
       containers:
         - name: litellm
-          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/litellm-proxy:v1.83.14-stable.patch.3-20260513
-          imagePullPolicy: Never
+          image: ghcr.io/berriai/litellm:v1.85.0
+          imagePullPolicy: IfNotPresent
           args: ["--config", "/app/config.yaml", "--port", "4000"]
           ports:
             - containerPort: 4000
@@ -142,6 +157,11 @@ spec:
               value: "True"
             - name: STORE_PROMPTS_IN_SPEND_LOGS
               value: "True"
+            - name: CHATGPT_POOL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: chatgpt-pool-master-key
+                  key: LITELLM_MASTER_KEY
           envFrom:
             - secretRef:
                 name: litellm-secrets
@@ -206,7 +226,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: litellm-config
+            name: litellm-config-canary
         - name: callbacks
           configMap:
             name: litellm-callbacks

@@ -109,7 +109,7 @@ curl -s "https://open.feishu.cn/open-apis/contact/v3/users/65d667g4?user_id_type
 | model | opus | gpt / sonnet / opus / gemini（litellm 额外支持 minimax / glm / codex） |
 | prefix | s1 | s1 / s2 / s3 |
 | deploy_group | stable | stable / test / canary / vip 等 |
-| image | （不指定） | operator 自动填充当前线上版本 |
+| image | **以 carher-1000 为准**（见 Step 0.5） | operator 默认填充值可能落后于线上推进版本，必须跟 carher-1000 对齐 |
 
 ## 执行步骤
 
@@ -120,6 +120,18 @@ curl -s "https://open.feishu.cn/open-apis/contact/v3/users/65d667g4?user_id_type
 - ID 是否连续（有无空缺）
 - name 和 owner 是否对应
 - provider / model 用户是否有特殊要求（默认 litellm + opus）
+
+### Step 0.5: 查 carher-1000 当前 image（**强制步骤，不可跳过**）
+
+新建实例的 image **必须跟 carher-1000 对齐**——operator 的默认 image 字段往往落后于线上实际推进的版本，
+直接用默认值会让新实例跑老镜像，跟 stable 群组其他人不一致（bug fix、新功能、配置兼容性都会跟不上）。
+
+```bash
+curl -s -H "X-API-Key: $API_KEY" "https://admin.carher.net/api/instances/1000" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('target image:', d.get('image','N/A'))"
+```
+
+记下这个 `target_image`，Step 3.5 要用。
 
 ### Step 1: 预检（ID 冲突 + API 连通）
 
@@ -183,6 +195,23 @@ curl -s -X POST "https://admin.carher.net/api/instances/batch-import" \
 - `cloudflare.ok=true`：说明 DNS + 远程 tunnel ingress 已同步
 - `cloudflare.ok=false`：实例虽已创建，但 callback 可能仍会 `404`，先修 Cloudflare 再继续
 - 如果接口直接返回 `503` 且提示 `CLOUDFLARE_API_TOKEN`，不要重试创建；先修 admin secret 并重启 `carher-admin`
+
+### Step 3.5: 对齐 image 到 carher-1000（**强制步骤**）
+
+batch-import 不接受 `image` 字段，必须在创建后用 PUT 单独 patch。用 Step 0.5 拿到的 `target_image`：
+
+```bash
+TARGET_IMAGE="fix-compact-eb348941"  # 来自 Step 0.5，每次都要重查不要硬编码
+for id in 231 232 233; do
+  curl -s -X PUT "https://admin.carher.net/api/instances/$id" \
+    -H "Content-Type: application/json" \
+    -H "X-API-Key: $API_KEY" \
+    -d "{\"image\":\"$TARGET_IMAGE\"}" \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  {d.get(\"id\")}: {d.get(\"action\")} image={d.get(\"changes\",{}).get(\"image\",\"N/A\")}')"
+done
+```
+
+operator 看到 image 变更会重建 Pod；Step 4 验证时 image 字段需匹配 `target_image`。
 
 ### Step 4: 验证创建结果
 

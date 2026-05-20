@@ -18,45 +18,70 @@ set -euo pipefail
 HER="${1:-}"
 COUNT="${2:-5}"
 MODEL="${3:-chatgpt-gpt-5.5}"
+CLUSTER="${4:-aliyun}"     # aliyun | 198
 
 if [[ -z "$HER" ]]; then
-  echo "usage: $0 <her-name> [count=5] [model=chatgpt-gpt-5.5]" >&2
-  echo "       e.g. $0 her-1000" >&2
+  echo "usage:" >&2
+  echo "  aliyun: $0 <her-name> [count=5] [model=chatgpt-gpt-5.5]" >&2
+  echo "          e.g. $0 her-1000" >&2
+  echo "  198:    $0 master [count=5] [model=chatgpt-gpt-5.5] 198" >&2
   exit 2
 fi
 
-# 找 carher Pod
-POD=$(kubectl get pod -n carher -l user-id=${HER#her-} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-if [[ -z "$POD" ]]; then
-  echo "  ✗ carher Pod for ${HER} not found (user-id=${HER#her-})" >&2
-  exit 3
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+JMS="$REPO_ROOT/scripts/jms"
+
+# 取 vkey + label
+if [[ "$CLUSTER" == "198" ]]; then
+  VK="sk-pro-litellm-ce077e2b0721bb419a633e4d"   # 198 prod master key
+  LABEL="198 prod master key"
+else
+  POD=$(kubectl get pod -n carher -l user-id=${HER#her-} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  if [[ -z "$POD" ]]; then
+    echo "  ✗ carher Pod for ${HER} not found (user-id=${HER#her-})" >&2
+    exit 3
+  fi
+  VK=$(kubectl exec -n carher "$POD" -c carher -- sh -c "python3 -c \"import json; print(json.load(open('/data/.openclaw/openclaw.json'))['models']['providers']['litellm']['apiKey'])\"" 2>&1 || echo "")
+  LABEL="${HER} (pod=${POD})"
 fi
 
-# 拿 vkey
-VK=$(kubectl exec -n carher "$POD" -c carher -- sh -c "python3 -c \"import json; print(json.load(open('/data/.openclaw/openclaw.json'))['models']['providers']['litellm']['apiKey'])\"" 2>&1 || echo "")
 if [[ -z "$VK" || "$VK" != sk-* ]]; then
-  echo "  ✗ cannot read vkey from ${POD}" >&2
-  echo "$VK" >&2
+  echo "  ✗ vkey 获取失败: $VK" >&2
   exit 4
 fi
 
-echo "[litellm-sticky-verify] her=${HER} pod=${POD} model=${MODEL} count=${COUNT}"
+echo "[litellm-sticky-verify] cluster=${CLUSTER} target=${LABEL} model=${MODEL} count=${COUNT}"
 echo "  vkey: ${VK:0:18}..."
 echo
 
 declare ACCT_RECORD=""
 RUNNER="curl-stick-verify-$$"
-for i in $(seq 1 "$COUNT"); do
-  POD_NAME="${RUNNER}-${i}"
-  RES=$(kubectl run "$POD_NAME" -n carher --image=curlimages/curl:8.5.0 --restart=Never --rm -i --quiet -- \
-    sh -c "curl -sS -X POST http://litellm-proxy.carher.svc:4000/v1/chat/completions \
+
+if [[ "$CLUSTER" == "aliyun" ]]; then
+  for i in $(seq 1 "$COUNT"); do
+    POD_NAME="${RUNNER}-${i}"
+    RES=$(kubectl run "$POD_NAME" -n carher --image=curlimages/curl:8.5.0 --restart=Never --rm -i --quiet -- \
+      sh -c "curl -sS -X POST http://litellm-proxy.carher.svc:4000/v1/chat/completions \
+        -H 'Authorization: Bearer $VK' -H 'Content-Type: application/json' \
+        -d '{\"model\":\"$MODEL\",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"verify $i\"}]}' \
+        --max-time 25 -D /tmp/h 2>&1; grep -i 'x-litellm-model-id' /tmp/h 2>/dev/null" 2>&1)
+    ACCT=$(echo "$RES" | grep -i "x-litellm-model-id" | head -1 | sed -E 's/.*x-litellm-model-id: //' | tr -d '\r' || echo "<unknown>")
+    echo "  req $i: $ACCT"
+    ACCT_RECORD="${ACCT_RECORD}${ACCT}"$'\n'
+  done
+else
+  # 198: jms ssh + 内网 curl localhost:30402
+  for i in $(seq 1 "$COUNT"); do
+    RES=$("$JMS" ssh AIYJY-litellm "curl -sS -X POST http://localhost:30402/chat/completions \
       -H 'Authorization: Bearer $VK' -H 'Content-Type: application/json' \
       -d '{\"model\":\"$MODEL\",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"verify $i\"}]}' \
-      --max-time 25 -D /tmp/h 2>&1; grep -i 'x-litellm-model-id' /tmp/h 2>/dev/null" 2>&1)
-  ACCT=$(echo "$RES" | grep -i "x-litellm-model-id" | head -1 | sed -E 's/.*x-litellm-model-id: //' | tr -d '\r' || echo "<unknown>")
-  echo "  req $i: $ACCT"
-  ACCT_RECORD="${ACCT_RECORD}${ACCT}"$'\n'
-done
+      --max-time 25 -D /tmp/h 2>&1 >/dev/null; grep -i x-litellm-model-id /tmp/h 2>/dev/null" 2>&1)
+    ACCT=$(echo "$RES" | grep -i "x-litellm-model-id" | head -1 | sed -E 's/.*x-litellm-model-id: //' | tr -d '\r' || echo "<unknown>")
+    echo "  req $i: $ACCT"
+    ACCT_RECORD="${ACCT_RECORD}${ACCT}"$'\n'
+  done
+fi
 
 echo
 echo "--- 分布 ---"

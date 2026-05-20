@@ -528,12 +528,102 @@ print([type(cb).__name__ for cb in litellm.callbacks])
 |------|------|
 | `k8s/litellm-proxy.yaml` | LiteLLM Proxy 主 ConfigMap + Deployment + Service（含 sticky 配置）|
 | `k8s/litellm-callbacks/inject_prompt_cache_key.py` | P3 pre-call hook 源码 |
-| `scripts/litellm-cache-hit-rate.sh` | P2 监控：按模型 cache 命中率 + 节省估算 |
-| `scripts/chatgpt-acct-spend.sh` | ChatGPT 池 5 acct 流量分布（198 + 阿里云双源）|
-| `scripts/chatgpt-acct-usage.sh` | ChatGPT 上游 5h%/wk% 配额查询（双源 auth.json）|
+| `scripts/litellm-cache-hit-rate.sh` | P2 监控（双集群 aliyun/198）|
+| `scripts/litellm-vkey-acct-mapping.sh` | vkey × acct 分布健康度（双集群） |
+| `scripts/litellm-sticky-verify.sh` | sticky 实测（aliyun 用 her-N / 198 用 master key）|
+| `scripts/litellm-redis-health.sh` | Redis 健康（双集群）|
+| `scripts/chatgpt-acct-spend.sh` | ChatGPT 池流量（198 + 阿里云双源）|
 | `docs/litellm-prompt-cache-sticky-routing-plan.md` | 升级方案对齐稿（决策过程）|
 | `docs/litellm-cache-routing-runbook.md` | **本文档**（运维手册）|
 | `docs/chatgpt-pool-aliyun-migration.md` | ChatGPT 5 acct 池迁移阿里云的实施记录 |
+
+---
+
+## 十一、198 prod 同款落地（2026-05-21）
+
+阿里云 carher 验证稳定后，同套方案 promote 到 198 prod (`litellm-product` ns) 落地。**架构同款**，只是少量集群差异。
+
+### 11.1 198 跟阿里云的差异
+
+| 维度 | 阿里云 carher | 198 prod |
+|------|--------------|----------|
+| 集群 | 阿里云 ACK | 198 K3s（jms ssh AIYJY-litellm 访问）|
+| Namespace | `carher` | `litellm-product` |
+| Redis | `carher-redis` (共享给 her bot) | `litellm-redis` (独立 ns，仅 LiteLLM 用)|
+| Storage | NAS（cnfs）| `local-path`（rancher）|
+| `model_id` 命名 | `chatgpt-acct-N/<model>`（用 `/` 拆）| `chatgpt-acct-N-<model>`（用 `-` 拆）|
+| 5 acct ChatGPT 池 | acct-7~11（K8s Pod）| acct-2~6（188 docker + admin API DB-registered）|
+| LiteLLM master key | `sk-carher-litellm-...`（不公开）| `sk-pro-litellm-ce077e2b0721bb419a633e4d`（多个 skill 提及）|
+| 用户 vkey 体系 | `carher-N` 自动生成 | `claude-code-*` / `cursor-*` 团队 IDE |
+
+### 11.2 198 落地步骤（已完成）
+
+**P0(a) 部署 Redis**：
+```bash
+# StatefulSet redis:7-alpine + emptyDir + Service ClusterIP
+scripts/jms ssh AIYJY-litellm "kubectl apply -f /tmp/litellm-redis.yaml"
+```
+
+**P0(b) ConfigMap 改动**：
+```yaml
+router_settings:
+  redis_host: litellm-redis.litellm-product.svc.cluster.local
+  redis_port: 6379
+  optional_pre_call_checks:
+    - deployment_affinity
+    - responses_api_deployment_check
+    - prompt_caching
+  deployment_affinity_ttl_seconds: 600
+```
+
+实施：拉 live ConfigMap → python patch → 写回 manifest `/root/litellm-product-manifests/30-cm-litellm-config.yaml` → `kubectl apply` + `rollout restart`。
+
+注意：直接 `kubectl apply -f manifest` 会因 stale resourceVersion 报 conflict。要先用 `kubectl get cm -o yaml` 拉 live state + strip server 字段（`resourceVersion` / `creationTimestamp` / `uid` / `managedFields` / `kubectl.kubernetes.io/last-applied-configuration`），再 apply。
+
+**P1 验证 sticky**：`./scripts/litellm-sticky-verify.sh master 5 chatgpt-gpt-5.5 198` 5 次全部 → `chatgpt-acct-3-gpt-5.5` ✅。
+
+### 11.3 198 当前数据
+
+```
+Anthropic Claude cache 命中率 + 节省（今天）:
+  claude-opus-4-7:    80.2% hit  ~$8,135/天
+  claude-sonnet-4-6:  87.1% hit  ~$4,132/天
+  claude-opus-4-6:    84.7% hit  ~$2,093/天
+  claude-haiku-4-5:   83.4% hit  ~$135/天
+  合计 ~$14.5k/天 ≈ $435k/月  (vs 阿里云 ~$210k/月)
+```
+
+198 已经在省 $435k/月（**比阿里云大一倍**），主因团队 IDE 用户连续编程密度高，opus-4-7 命中率 80%（vs 阿里云 42%）。
+
+### 11.4 198 监控命令（双集群通用）
+
+所有脚本第二个参数（或对应位置）传 `198` 切换集群：
+
+```bash
+./scripts/litellm-cache-hit-rate.sh today 198
+./scripts/litellm-cache-hit-rate.sh 7d 198
+
+./scripts/litellm-vkey-acct-mapping.sh 10m 198
+./scripts/litellm-vkey-acct-mapping.sh 1h 198 --raw
+
+./scripts/litellm-sticky-verify.sh master 5 chatgpt-gpt-5.5 198
+
+./scripts/litellm-redis-health.sh
+./scripts/litellm-redis-health.sh --sample "" 198
+```
+
+`litellm-redis-health.sh --vkey <her>` 仅 aliyun 模式（198 没 her CRD 对应 vkey 体系）。
+
+### 11.5 198 ROI
+
+跟阿里云结论一致：**真金白银增量 ≈ $0**（cache_control_injection 早就最大化 Anthropic cache）。升级 sticky 的实际价值：
+1. **可观察性**：198 上的 cache 命中率、5 acct 流量分布、sticky 健康度都可量化监控
+2. **ChatGPT 池容量保障**：198 ChatGPT 1.47B tok 是阿里云 4x，撞限风险高，sticky 后单 acct cache 命中率提升 → 减少 token 计入 quota
+3. **未来扩展**：方案双集群同款，新加集群（如 dev）走相同流程
+
+---
+
+## 十二、关键脚本和文件清单（重复见第十节，留作 anchor）
 
 ---
 

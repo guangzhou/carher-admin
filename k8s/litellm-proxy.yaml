@@ -1082,6 +1082,34 @@ data:
         model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.3-codex-spark}
 
     router_settings:
+      # ── DualCache backend: Redis (2026-05-20) ────────────────────────
+      # litellm-proxy runs 2 replicas. pre_call_checks (deployment_affinity /
+      # responses_api_deployment_check / prompt_caching) maintain sticky
+      # mappings in DualCache. Without Redis the two replicas keep separate
+      # local maps → ~50% chance the same vkey lands on a different deployment
+      # depending on which replica handles the request. Redis is shared with
+      # carher bot (bot-registry / session) but LiteLLM uses its own prefix,
+      # no collision.
+      # carher-redis StatefulSet has no requirepass set; redis_password omitted.
+      redis_host: carher-redis.carher.svc.cluster.local
+      redis_port: 6379
+
+      # ── Sticky pre_call_checks (2026-05-20) ──────────────────────────
+      # Three flags layered on top of simple-shuffle. Same vkey / same
+      # previous_response_id / same prompt prefix all converge to the same
+      # deployment, maximising ChatGPT Pro upstream prompt cache hit rate
+      # (217 her default model=gpt → chatgpt-gpt-5.5 is the main beneficiary).
+      # TTL = 600s (10min): balances cache hit (ChatGPT in_memory cache is
+      # 5-10min so 10min sticky covers it; gpt-5.5 24h extended cache also
+      # gets natural refresh every minute under normal load) against single-
+      # account cooldown recovery (撞限 acct 10min 后 vkey 重新 LB).
+      # See docs/litellm-prompt-cache-sticky-routing-plan.md for full design.
+      optional_pre_call_checks:
+        - deployment_affinity                # vkey hash → same acct
+        - responses_api_deployment_check     # OpenAI Responses API previous_response_id sticky
+        - prompt_caching                     # prompt prefix hash → same deployment (≥1024 tok)
+      deployment_affinity_ttl_seconds: 600
+
       # ── tag-based routing ────────────────────────────────────────────
       # Activate per-key deployment selection via tags. Behavior:
       #   * Untagged deployments accept ALL requests (default).
@@ -1272,7 +1300,7 @@ data:
       # contribute no per-request behavior).
       # Source files live under k8s/litellm-callbacks/ and are mounted into
       # /app/<file>.py by the litellm-callbacks ConfigMap + pod volumeMounts.
-      callbacks: ["opus_47_fix.thinking_schema_fix", "embedding_sanitize.embedding_sanitize", "force_stream.force_stream", "streaming_bridge.streaming_bridge", "null_byte_sanitize.null_byte_sanitize", "anthropic_passthrough_pingfix.anthropic_passthrough_pingfix"]
+      callbacks: ["opus_47_fix.thinking_schema_fix", "embedding_sanitize.embedding_sanitize", "force_stream.force_stream", "streaming_bridge.streaming_bridge", "null_byte_sanitize.null_byte_sanitize", "anthropic_passthrough_pingfix.anthropic_passthrough_pingfix", "inject_prompt_cache_key.inject_prompt_cache_key"]
 
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
@@ -3902,6 +3930,118 @@ data:
 
     anthropic_passthrough_pingfix = AnthropicPassthroughPingFix()
 
+  inject_prompt_cache_key.py: |
+    """
+    LiteLLM pre-call hook — inject prompt_cache_key for OpenAI/ChatGPT routes.
+    
+    Background
+    ----------
+    OpenAI ChatGPT prompt cache routing:
+      https://platform.openai.com/docs/guides/prompt-caching
+    
+    OpenAI's server-side prompt cache routes by `(prompt_prefix_hash + prompt_cache_key)`.
+    Without `prompt_cache_key`, all 217 her instances sharing the same system prompt
+    collapse to one routing key on each acct, and the per-key 15 req/min throughput
+    limit is shared. When traffic exceeds 15 req/min, OpenAI overflows to other
+    servers and cache hits drop.
+    
+    Solution: inject `prompt_cache_key = vkey_alias` (e.g. `carher-1000`) so each
+    her routes on its own key, splitting load across 217 routing keys at OpenAI
+    servers and avoiding the 15 req/min cliff.
+    
+    `prompt_cache_retention = "24h"` is added too — gpt-5.5+ defaults to this anyway
+    but explicit setting keeps gpt-4o / gpt-4.1 (5-10 min default) on extended cache
+    when the per-her vkey is the cache key.
+    
+    This complements P1 deployment_affinity (LiteLLM-side sticky vkey→acct):
+      - P1 sticky decides WHICH acct
+      - This hook helps OpenAI's internal cache routing on that chosen acct
+    
+    Scope
+    -----
+    Only fires when `data["model"]` looks like an OpenAI / ChatGPT model
+    (`openai/`, `chatgpt-`, `gpt-5`, `gpt-4`). Anthropic / OpenRouter / Wangsu
+    paths are untouched (they have their own cache_control_injection_points).
+    
+    Idempotent: respects existing prompt_cache_key (won't override caller-provided).
+    """
+    
+    from __future__ import annotations
+    
+    from typing import Any, Dict, Literal
+    
+    from litellm.integrations.custom_logger import CustomLogger
+    
+    
+    _OPENAI_MODEL_PATTERNS = (
+        "openai/",          # e.g. openai/chatgpt-gpt-5.5, openai/gpt-5.4
+        "chatgpt-",         # e.g. chatgpt-gpt-5.5 (model_name on canary/prod ConfigMap)
+        "chatgpt/",         # e.g. chatgpt/gpt-5.5 (in-process chatgpt provider, on chatgpt-acct-N pods)
+        "gpt-5",            # e.g. gpt-5.4 / gpt-5.5
+        "gpt-4",            # e.g. gpt-4.1 / gpt-4o / etc.
+        "custom_openai/",   # wangsu OpenAI-compat path; harmless to inject
+    )
+    
+    
+    def _is_openai_model(model: str) -> bool:
+        if not isinstance(model, str):
+            return False
+        m = model.lower()
+        return any(p in m for p in _OPENAI_MODEL_PATTERNS)
+    
+    
+    class InjectPromptCacheKey(CustomLogger):
+        """Pre-call hook that injects OpenAI prompt_cache_key + 24h retention.
+    
+        Hook surface: LiteLLM `async_pre_call_hook` runs after virtual-key auth
+        but before the request is dispatched to the upstream provider, so the
+        `user_api_key_dict.key_alias` is already populated with the carher-* alias.
+        """
+    
+        async def async_pre_call_hook(
+            self,
+            user_api_key_dict,
+            cache,
+            data: Dict[str, Any],
+            call_type: Literal[
+                "completion",
+                "text_completion",
+                "embeddings",
+                "image_generation",
+                "moderation",
+                "audio_transcription",
+                "pass_through_endpoint",
+                "rerank",
+                "mcp_call",
+                "responses",
+                "anthropic_messages",
+                "google_genai_messages",
+                "ocr",
+            ],
+        ) -> Dict[str, Any]:
+            # Only inject for chat/completion/responses paths; skip embeddings, moderation, etc.
+            if call_type not in ("completion", "responses"):
+                return data
+    
+            model = data.get("model", "")
+            if not _is_openai_model(model):
+                return data
+    
+            # Resolve cache key from vkey alias (carher-<N>) — falls back to a stable
+            # value if alias missing so we never inject empty string.
+            alias = getattr(user_api_key_dict, "key_alias", None) or "carher-default"
+    
+            # Inject via extra_body so LiteLLM forwards as native OpenAI params.
+            extra_body = data.get("extra_body") or {}
+            # Respect caller-provided values (idempotent).
+            extra_body.setdefault("prompt_cache_key", alias)
+            extra_body.setdefault("prompt_cache_retention", "24h")
+            data["extra_body"] = extra_body
+    
+            return data
+    
+    
+    inject_prompt_cache_key = InjectPromptCacheKey()
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -4311,6 +4451,10 @@ spec:
             - name: callbacks
               mountPath: /app/anthropic_passthrough_pingfix.py
               subPath: anthropic_passthrough_pingfix.py
+              readOnly: true
+            - name: callbacks
+              mountPath: /app/inject_prompt_cache_key.py
+              subPath: inject_prompt_cache_key.py
               readOnly: true
       volumes:
         - name: config

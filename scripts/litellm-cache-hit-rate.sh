@@ -22,6 +22,13 @@
 set -euo pipefail
 
 ARG="${1:-today}"
+CLUSTER="${2:-aliyun}"     # aliyun | 198
+
+case "$CLUSTER" in
+  aliyun) NS="carher" ;;
+  198)    NS="litellm-product" ;;
+  *) echo "usage: $0 [today|Nd|YYYY-MM-DD] [aliyun|198]" >&2; exit 2 ;;
+esac
 
 case "$ARG" in
   today)
@@ -46,9 +53,29 @@ case "$ARG" in
     ;;
 esac
 
-DB_URL=$(kubectl get secret litellm-secrets -n carher -o jsonpath='{.data.DATABASE_URL}' | base64 -d)
+# kubectl wrapper：aliyun 走本地 (jms tunnel), 198 走 jms ssh AIYJY-litellm
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+JMS="$REPO_ROOT/scripts/jms"
+
+kctl() {
+  if [[ "$CLUSTER" == "aliyun" ]]; then
+    kubectl "$@"
+  else
+    "$JMS" ssh AIYJY-litellm "kubectl $*"
+  fi
+}
+
+DB_URL=$(kctl get secret litellm-secrets -n "$NS" -o jsonpath='{.data.DATABASE_URL}' | base64 -d)
 USER=$(echo "$DB_URL" | sed -E 's|.*://([^:]+):.*|\1|')
 DB=$(echo "$DB_URL" | sed -E 's|.*/([^?]+).*|\1|')
+
+# model_id 格式: aliyun 用 '/' 拆 (chatgpt-acct-7/...), 198 用 '-' (chatgpt-acct-2-...)
+if [[ "$CLUSTER" == "aliyun" ]]; then
+  ACCT_REGEX="REGEXP_REPLACE(model_id, 'chatgpt-acct-([0-9]+)/.*', 'acct-\1')"
+else
+  ACCT_REGEX="REGEXP_REPLACE(model_id, 'chatgpt-acct-([0-9]+)-.*', 'acct-\1')"
+fi
 
 cat > /tmp/cache-hit-rate.sql <<SQL
 \set QUIET on
@@ -97,15 +124,21 @@ ORDER BY 4 DESC;
 \echo === [$LABEL] ChatGPT 池 5 acct 流量分布 (sticky 后应该看到 vkey hash 分布) ===
 \echo "  (cache 数据不可观察，但流量分布能看出 sticky 是否生效)"
 SELECT
-  REGEXP_REPLACE(model_id, 'chatgpt-acct-([0-9]+)/.*', 'acct-\1') AS acct,
+  ${ACCT_REGEX} AS acct,
   COUNT(*) AS calls,
   ROUND(SUM(spend)::numeric, 2) AS spend_usd
 FROM "LiteLLM_SpendLogs"
-WHERE ${SPENDLOGS_WHERE} AND model_id LIKE 'chatgpt-acct-%/%'
+WHERE ${SPENDLOGS_WHERE} AND model_id LIKE 'chatgpt-acct-%'
 GROUP BY 1
 ORDER BY 1;
 SQL
 
-kubectl cp /tmp/cache-hit-rate.sql carher/litellm-db-0:/tmp/cache-hit-rate.sql 2>/dev/null
-kubectl exec -n carher litellm-db-0 -- psql -U "$USER" -d "$DB" -P pager=off -f /tmp/cache-hit-rate.sql
-kubectl exec -n carher litellm-db-0 -- rm -f /tmp/cache-hit-rate.sql >/dev/null 2>&1 || true
+if [[ "$CLUSTER" == "aliyun" ]]; then
+  kubectl cp /tmp/cache-hit-rate.sql ${NS}/litellm-db-0:/tmp/cache-hit-rate.sql 2>/dev/null
+  kubectl exec -n "$NS" litellm-db-0 -- psql -U "$USER" -d "$DB" -P pager=off -f /tmp/cache-hit-rate.sql
+  kubectl exec -n "$NS" litellm-db-0 -- rm -f /tmp/cache-hit-rate.sql >/dev/null 2>&1 || true
+else
+  # 198: scp 到堡垒机 → kubectl cp 到 db pod → exec psql
+  "$JMS" scp /tmp/cache-hit-rate.sql AIYJY-litellm:/tmp/cache-hit-rate.sql >/dev/null
+  "$JMS" ssh AIYJY-litellm "kubectl cp /tmp/cache-hit-rate.sql ${NS}/litellm-db-0:/tmp/cache-hit-rate.sql 2>/dev/null && kubectl exec -n ${NS} litellm-db-0 -- psql -U ${USER} -d ${DB} -P pager=off -f /tmp/cache-hit-rate.sql && kubectl exec -n ${NS} litellm-db-0 -- rm -f /tmp/cache-hit-rate.sql"
+fi

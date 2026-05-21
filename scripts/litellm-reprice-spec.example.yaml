@@ -1,0 +1,59 @@
+# litellm-reprice example spec — exact reproduction of the 2026-05-21
+# repricing (commit 2ef1ae6). Keep this as a runnable reference, even if
+# the actual cost values drift over time.
+#
+# Run:
+#   python3 scripts/litellm-reprice.py scripts/litellm-reprice-spec.example.yaml --dry-run
+#   python3 scripts/litellm-reprice.py scripts/litellm-reprice-spec.example.yaml
+#   git diff k8s/litellm-proxy.yaml             # review
+#   scripts/litellm-reprice-deploy.sh           # apply + rollout
+#   scripts/litellm-reprice-verify.sh '%claude-sonnet%'
+#   scripts/litellm-reprice-verify.sh 'openai/chatgpt-gpt-5.5'
+
+rules:
+  # ── Claude across every upstream channel: *2 ─────────────────────────
+  # Match anything with claude/opus/sonnet/haiku in the model_name.
+  # Default fields = all 4 cost fields (input/output/cache_read/cache_create).
+  - desc: "Claude (Opus/Sonnet/Haiku) *2 across all upstream channels"
+    match: "(?i)(claude|opus|sonnet|haiku)"
+    op: multiply
+    factor: 2.0
+    # fields omitted = all 4 by default
+
+  # ── chatgpt-* shared pool: explicit cost at 1/5 of OpenAI list price ─
+  # Why "add" not "multiply": these had NO cost field, so LiteLLM was
+  # falling back to its built-in model_prices.json (full OpenAI rates).
+  # Inserted after the `api_key:` line which is the canonical last line
+  # of litellm_params in these blocks.
+
+  - desc: "chatgpt-gpt-5.5 = OpenAI $5/$30 / 5"
+    match: "^chatgpt-gpt-5\\.5$"
+    op: add
+    insert_after: api_key
+    values:
+      input_cost_per_token: "0.000001"
+      output_cost_per_token: "0.000006"
+
+  - desc: "chatgpt-gpt-5.4 = OpenAI $2.5/$15 / 5"
+    match: "^chatgpt-gpt-5\\.4$"
+    op: add
+    insert_after: api_key
+    values:
+      input_cost_per_token: "0.0000005"
+      output_cost_per_token: "0.000003"
+
+  - desc: "chatgpt-gpt-5.3-codex = OpenAI $3/$15 / 5"
+    match: "^chatgpt-gpt-5\\.3-codex$"
+    op: add
+    insert_after: api_key
+    values:
+      input_cost_per_token: "0.0000006"
+      output_cost_per_token: "0.000003"
+
+  - desc: "chatgpt-gpt-5.3-codex-spark (no OpenAI list = peg to codex)"
+    match: "^chatgpt-gpt-5\\.3-codex-spark$"
+    op: add
+    insert_after: api_key
+    values:
+      input_cost_per_token: "0.0000006"
+      output_cost_per_token: "0.000003"

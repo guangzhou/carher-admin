@@ -193,6 +193,8 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 		"litellm/claude-opus-4-7":             "opus4.7",
 		"litellm/wangsu-deepseek-v4-pro":      "ds-pro",
 		"litellm/wangsu-deepseek-v4-flash":    "ds-flash",
+		"litellm/wangsu-glm-5.1":              "glm51",
+		"litellm/wangsu-gemini-3.5-flash":     "gemini35",
 	}
 	for mid, wantAlias := range expectedAliases {
 		m, ok := models[mid]
@@ -206,8 +208,8 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 		}
 	}
 
-	if len(models) != 11 {
-		t.Errorf("Expected exactly 11 models for litellm, got %d", len(models))
+	if len(models) != 13 {
+		t.Errorf("Expected exactly 13 models for litellm, got %d", len(models))
 		for k := range models {
 			t.Logf("  model: %s", k)
 		}
@@ -220,13 +222,13 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 		}
 	}
 
-	// Verify litellm provider is defined with 11 models
+	// Verify litellm provider is defined with 13 models
 	modelsSection := cfg["models"].(map[string]interface{})
 	providers := modelsSection["providers"].(map[string]interface{})
 	litellmProv := providers["litellm"].(map[string]interface{})
 	provModels := litellmProv["models"].([]interface{})
-	if len(provModels) != 11 {
-		t.Errorf("Expected 11 provider models, got %d", len(provModels))
+	if len(provModels) != 13 {
+		t.Errorf("Expected 13 provider models, got %d", len(provModels))
 	}
 
 	if litellmProv["apiKey"] != "sk-test-key" {

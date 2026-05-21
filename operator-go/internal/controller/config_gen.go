@@ -129,6 +129,8 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		models["litellm/claude-opus-4-7"] = alias("opus4.7")
 		models["litellm/wangsu-deepseek-v4-pro"] = alias("ds-pro")
 		models["litellm/wangsu-deepseek-v4-flash"] = alias("ds-flash")
+		models["litellm/wangsu-glm-5.1"] = alias("glm51")
+		models["litellm/wangsu-gemini-3.5-flash"] = alias("gemini35")
 	case "anthropic":
 		models["anthropic/claude-opus-4-6"] = alias("opus")
 		models["anthropic/claude-sonnet-4-6"] = alias("sonnet")
@@ -227,6 +229,8 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 			{"id": "wangsu-gpt-5.5", "name": "GPT-5.5 (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 30}},
 			{"id": "wangsu-deepseek-v4-pro", "name": "DeepSeek V4 Pro (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 1000000, "maxTokens": 384000, "cost": map[string]interface{}{"input": 1.71, "output": 3.43}},
 			{"id": "wangsu-deepseek-v4-flash", "name": "DeepSeek V4 Flash (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 1000000, "maxTokens": 384000, "cost": map[string]interface{}{"input": 0.143, "output": 0.286}},
+			{"id": "wangsu-glm-5.1", "name": "GLM-5.1 (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 203008, "maxTokens": 65536, "cost": map[string]interface{}{"input": 1.4, "output": 4.4}},
+			{"id": "wangsu-gemini-3.5-flash", "name": "Gemini 3.5 Flash (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1048576, "maxTokens": 65536, "cost": map[string]interface{}{"input": 1.5, "output": 9}},
 		}
 		providerModels := append(baseModels, extraProviderModels...)
 		cfg["models"] = map[string]interface{}{

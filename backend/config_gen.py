@@ -89,6 +89,8 @@ def generate_openclaw_json(instance: dict) -> dict:
             "litellm/wangsu-gpt-5.5": {"alias": "gpt55"},
             "litellm/wangsu-deepseek-v4-pro": {"alias": "ds-pro"},
             "litellm/wangsu-deepseek-v4-flash": {"alias": "ds-flash"},
+            "litellm/wangsu-glm-5.1": {"alias": "glm51"},
+            "litellm/wangsu-gemini-3.5-flash": {"alias": "gemini35"},
         }
     elif provider == "anthropic":
         models = {
@@ -145,6 +147,8 @@ def generate_openclaw_json(instance: dict) -> dict:
                 {"id": "wangsu-gpt-5.5", "name": "GPT-5.5 (Wangsu)", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 128000, "cost": {"input": 5, "output": 30}},
                 {"id": "wangsu-deepseek-v4-pro", "name": "DeepSeek V4 Pro (Wangsu)", "api": "openai-completions", "reasoning": True, "input": ["text"], "contextWindow": 1000000, "maxTokens": 384000, "cost": {"input": 1.71, "output": 3.43}},
                 {"id": "wangsu-deepseek-v4-flash", "name": "DeepSeek V4 Flash (Wangsu)", "api": "openai-completions", "reasoning": True, "input": ["text"], "contextWindow": 1000000, "maxTokens": 384000, "cost": {"input": 0.143, "output": 0.286}},
+                {"id": "wangsu-glm-5.1", "name": "GLM-5.1 (Wangsu)", "api": "openai-completions", "reasoning": True, "input": ["text"], "contextWindow": 203008, "maxTokens": 65536, "cost": {"input": 1.4, "output": 4.4}},
+                {"id": "wangsu-gemini-3.5-flash", "name": "Gemini 3.5 Flash (Wangsu)", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 1048576, "maxTokens": 65536, "cost": {"input": 1.5, "output": 9}},
             ],
         }}}
 

@@ -53,6 +53,8 @@ _BASE_MODELS = [
     "wangsu-gpt-5.5",
     "wangsu-deepseek-v4-pro",
     "wangsu-deepseek-v4-flash",
+    "wangsu-glm-5.1",
+    "wangsu-gemini-3.5-flash",
     "wangsu-text-embedding-v3",
     "openrouter-claude-opus-4-7",
     "openrouter-claude-sonnet-4-6",

@@ -344,6 +344,35 @@ data:
           input_cost_per_token: 0.000000143
           output_cost_per_token: 0.000000286
 
+      # ── New on cheliantianxia1 (added 2026-05-21): GLM-5.1 + Gemini-3.5-flash ──
+      # Pricing rationale: official list price (Wangsu pass-through, full list to keep
+      # spend tracking conservative if the upstream offers temporary promotions later).
+      #   glm-5.1            — Z.ai official: $1.40 / $4.40 per 1M tokens.
+      #   gemini-3.5-flash   — Google official: $1.50 / $9.00 per 1M tokens.
+      - model_name: wangsu-glm-5.1
+        litellm_params:
+          model: custom_openai/glm-5.1
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          input_cost_per_token: 0.0000014
+          output_cost_per_token: 0.0000044
+        model_info:
+          id: wangsu/glm-5.1
+          input_cost_per_token: 0.0000014
+          output_cost_per_token: 0.0000044
+
+      - model_name: wangsu-gemini-3.5-flash
+        litellm_params:
+          model: custom_openai/gemini-3.5-flash
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          input_cost_per_token: 0.0000015
+          output_cost_per_token: 0.000009
+        model_info:
+          id: wangsu/gemini-3.5-flash
+          input_cost_per_token: 0.0000015
+          output_cost_per_token: 0.000009
+
       # ═══════════════════════════════════════════
       # Provider: Wangsu Anthropic Direct Mode (v2 gateway)
       # Native Anthropic protocol for Cursor / Claude Code users.

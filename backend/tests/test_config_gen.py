@@ -117,13 +117,16 @@ class TestModelAliases:
         assert {"opus", "sonnet", "gpt", "gemini", "minimax", "glm", "codex"}.issubset(alias_set)
 
     def test_litellm_has_wangsu_relay_aliases(self):
-        # New cheliantianxia1 models added 2026-05-08 (gpt-5.5 + DeepSeek V4).
+        # New cheliantianxia1 models added 2026-05-08 (gpt-5.5 + DeepSeek V4)
+        # and 2026-05-21 (glm-5.1 + gemini-3.5-flash).
         models = self._models("litellm")
         alias_set = {v["alias"] for v in models.values()}
-        assert {"gpt55", "ds-pro", "ds-flash"}.issubset(alias_set)
+        assert {"gpt55", "ds-pro", "ds-flash", "glm51", "gemini35"}.issubset(alias_set)
         assert "litellm/wangsu-gpt-5.5" in models
         assert "litellm/wangsu-deepseek-v4-pro" in models
         assert "litellm/wangsu-deepseek-v4-flash" in models
+        assert "litellm/wangsu-glm-5.1" in models
+        assert "litellm/wangsu-gemini-3.5-flash" in models
 
     def test_wangsu_has_openrouter_and_wangsu_keys(self):
         models = self._models("wangsu")
@@ -333,4 +336,5 @@ class TestLitellmProviderSection:
     def test_litellm_provider_has_new_wangsu_relay_models(self):
         cfg = self._litellm_cfg()
         ids = {m["id"] for m in cfg["models"]["providers"]["litellm"]["models"]}
-        assert {"wangsu-gpt-5.5", "wangsu-deepseek-v4-pro", "wangsu-deepseek-v4-flash"}.issubset(ids)
+        assert {"wangsu-gpt-5.5", "wangsu-deepseek-v4-pro", "wangsu-deepseek-v4-flash",
+                "wangsu-glm-5.1", "wangsu-gemini-3.5-flash"}.issubset(ids)

@@ -29,10 +29,10 @@ data:
           model: anthropic/anthropic.claude-opus-4-6
           api_key: os.environ/WANGSU_DIRECT_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/yqhhclqf/anthropic
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:
@@ -49,10 +49,10 @@ data:
                 ttl: "1h"
         model_info:
           id: wangsu-direct/claude-opus-4-6
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
 
       # ── Claude Sonnet 4.6 via Wangsu Direct ──
       - model_name: claude-sonnet-4-6
@@ -60,10 +60,10 @@ data:
           model: anthropic/anthropic.claude-sonnet-4-6
           api_key: os.environ/WANGSU_DIRECT_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/yqhhclqf/anthropic
-          input_cost_per_token: 0.000006
-          output_cost_per_token: 0.00003
-          cache_read_input_token_cost: 0.0000006
-          cache_creation_input_token_cost: 0.0000075
+          input_cost_per_token: 1.5e-05
+          output_cost_per_token: 7.5e-05
+          cache_read_input_token_cost: 1.5e-06
+          cache_creation_input_token_cost: 1.875e-05
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:
@@ -80,10 +80,10 @@ data:
                 ttl: "1h"
         model_info:
           id: wangsu-direct/claude-sonnet-4-6
-          input_cost_per_token: 0.000006
-          output_cost_per_token: 0.00003
-          cache_read_input_token_cost: 0.0000006
-          cache_creation_input_token_cost: 0.0000075
+          input_cost_per_token: 1.5e-05
+          output_cost_per_token: 7.5e-05
+          cache_read_input_token_cost: 1.5e-06
+          cache_creation_input_token_cost: 1.875e-05
 
       # ── Claude Opus 4.7 via Wangsu Direct (cheliantianxia5/sqix2pnh) ──
       # Operator config_gen.go references this model_name (no `anthropic.`
@@ -95,10 +95,10 @@ data:
           model: anthropic/anthropic.claude-opus-4-7
           api_key: os.environ/WANGSU_DIRECT5_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:
@@ -115,10 +115,10 @@ data:
                 ttl: "1h"
         model_info:
           id: wangsu-direct5/claude-opus-4-7
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
 
       # ═══════════════════════════════════════════
       # GPT / Gemini: OpenRouter — primary (unchanged)
@@ -178,10 +178,10 @@ data:
         litellm_params:
           model: openrouter/anthropic/claude-opus-4.6
           api_key: os.environ/OPENROUTER_API_KEY
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
           extra_body:
             provider:
               order: ["anthropic", "google-vertex"]
@@ -202,10 +202,10 @@ data:
                 ttl: "1h"
         model_info:
           id: openrouter/claude-opus-4-6
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
 
       # Same openrouter/ + provider.order pattern as opus-4-6. sonnet-4.6
       # defaults to Google Vertex (which supports cache), so pinning is
@@ -214,10 +214,10 @@ data:
         litellm_params:
           model: openrouter/anthropic/claude-sonnet-4.6
           api_key: os.environ/OPENROUTER_API_KEY
-          input_cost_per_token: 0.000006
-          output_cost_per_token: 0.00003
-          cache_read_input_token_cost: 0.0000006
-          cache_creation_input_token_cost: 0.0000075
+          input_cost_per_token: 1.5e-05
+          output_cost_per_token: 7.5e-05
+          cache_read_input_token_cost: 1.5e-06
+          cache_creation_input_token_cost: 1.875e-05
           extra_body:
             provider:
               order: ["anthropic", "google-vertex"]
@@ -238,20 +238,20 @@ data:
                 ttl: "1h"
         model_info:
           id: openrouter/claude-sonnet-4-6
-          input_cost_per_token: 0.000006
-          output_cost_per_token: 0.00003
-          cache_read_input_token_cost: 0.0000006
-          cache_creation_input_token_cost: 0.0000075
+          input_cost_per_token: 1.5e-05
+          output_cost_per_token: 7.5e-05
+          cache_read_input_token_cost: 1.5e-06
+          cache_creation_input_token_cost: 1.875e-05
 
       # Same openrouter/ + provider.order pattern as opus-4-6.
       - model_name: openrouter-claude-opus-4-7
         litellm_params:
           model: openrouter/anthropic/claude-opus-4.7
           api_key: os.environ/OPENROUTER_API_KEY
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
           extra_body:
             provider:
               order: ["anthropic", "google-vertex"]
@@ -272,10 +272,10 @@ data:
                 ttl: "1h"
         model_info:
           id: openrouter/claude-opus-4-7
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
 
       # ═══════════════════════════════════════════
       # Fallback: Wangsu (网宿) OpenAI compat for GPT / Gemini
@@ -393,10 +393,10 @@ data:
           model: anthropic/anthropic.claude-sonnet-4-6
           api_key: os.environ/WANGSU_DIRECT5_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
-          input_cost_per_token: 0.000006
-          output_cost_per_token: 0.00003
-          cache_read_input_token_cost: 0.0000006
-          cache_creation_input_token_cost: 0.0000075
+          input_cost_per_token: 1.5e-05
+          output_cost_per_token: 7.5e-05
+          cache_read_input_token_cost: 1.5e-06
+          cache_creation_input_token_cost: 1.875e-05
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:
@@ -413,20 +413,20 @@ data:
                 ttl: "1h"
         model_info:
           id: wangsu-direct5/claude-sonnet-4-6
-          input_cost_per_token: 0.000006
-          output_cost_per_token: 0.00003
-          cache_read_input_token_cost: 0.0000006
-          cache_creation_input_token_cost: 0.0000075
+          input_cost_per_token: 1.5e-05
+          output_cost_per_token: 7.5e-05
+          cache_read_input_token_cost: 1.5e-06
+          cache_creation_input_token_cost: 1.875e-05
 
       - model_name: anthropic.claude-opus-4-6
         litellm_params:
           model: anthropic/anthropic.claude-opus-4-6
           api_key: os.environ/WANGSU_DIRECT5_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:
@@ -443,20 +443,20 @@ data:
                 ttl: "1h"
         model_info:
           id: wangsu-direct5/claude-opus-4-6
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
 
       - model_name: anthropic.claude-haiku-4-5
         litellm_params:
           model: anthropic/anthropic.claude-haiku-4-5
           api_key: os.environ/WANGSU_DIRECT5_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
-          input_cost_per_token: 0.000002
-          output_cost_per_token: 0.00001
-          cache_read_input_token_cost: 0.0000002
-          cache_creation_input_token_cost: 0.0000025
+          input_cost_per_token: 5.0e-06
+          output_cost_per_token: 2.5e-05
+          cache_read_input_token_cost: 5.0e-07
+          cache_creation_input_token_cost: 6.25e-06
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:
@@ -473,10 +473,10 @@ data:
                 ttl: "1h"
         model_info:
           id: wangsu-direct5/claude-haiku-4-5
-          input_cost_per_token: 0.000002
-          output_cost_per_token: 0.00001
-          cache_read_input_token_cost: 0.0000002
-          cache_creation_input_token_cost: 0.0000025
+          input_cost_per_token: 5.0e-06
+          output_cost_per_token: 2.5e-05
+          cache_read_input_token_cost: 5.0e-07
+          cache_creation_input_token_cost: 6.25e-06
 
       # ═══════════════════════════════════════════
       # Provider: Wangsu Anthropic Direct Mode (v2 gateway) — cheliantianxia6
@@ -490,10 +490,10 @@ data:
           model: anthropic/anthropic.claude-opus-4-7
           api_key: os.environ/WANGSU_DIRECT5_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:
@@ -510,10 +510,10 @@ data:
                 ttl: "1h"
         model_info:
           id: wangsu-direct6/claude-opus-4-7
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
 
       # ═══════════════════════════════════════════
       # Provider: OpenRouter Anthropic-native (/v1/messages passthrough)
@@ -530,10 +530,10 @@ data:
           model: anthropic/anthropic/claude-sonnet-4.6
           api_base: https://openrouter.ai/api
           api_key: os.environ/OPENROUTER_API_KEY
-          input_cost_per_token: 0.000006
-          output_cost_per_token: 0.00003
-          cache_read_input_token_cost: 0.0000006
-          cache_creation_input_token_cost: 0.0000075
+          input_cost_per_token: 1.5e-05
+          output_cost_per_token: 7.5e-05
+          cache_read_input_token_cost: 1.5e-06
+          cache_creation_input_token_cost: 1.875e-05
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:
@@ -550,20 +550,20 @@ data:
                 ttl: "1h"
         model_info:
           id: openrouter-anthropic/claude-sonnet-4-6
-          input_cost_per_token: 0.000006
-          output_cost_per_token: 0.00003
-          cache_read_input_token_cost: 0.0000006
-          cache_creation_input_token_cost: 0.0000075
+          input_cost_per_token: 1.5e-05
+          output_cost_per_token: 7.5e-05
+          cache_read_input_token_cost: 1.5e-06
+          cache_creation_input_token_cost: 1.875e-05
 
       - model_name: anthropic.openrouter.claude-opus-4-6
         litellm_params:
           model: anthropic/anthropic/claude-opus-4.6
           api_base: https://openrouter.ai/api
           api_key: os.environ/OPENROUTER_API_KEY
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:
@@ -580,20 +580,20 @@ data:
                 ttl: "1h"
         model_info:
           id: openrouter-anthropic/claude-opus-4-6
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
 
       - model_name: anthropic.openrouter.claude-opus-4-7
         litellm_params:
           model: anthropic/anthropic/claude-opus-4.7
           api_base: https://openrouter.ai/api
           api_key: os.environ/OPENROUTER_API_KEY
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
           cache_control_injection_points:
@@ -610,10 +610,10 @@ data:
                 ttl: "1h"
         model_info:
           id: openrouter-anthropic/claude-opus-4-7
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
-          cache_read_input_token_cost: 0.000001
-          cache_creation_input_token_cost: 0.0000125
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
+          cache_read_input_token_cost: 2.5e-06
+          cache_creation_input_token_cost: 3.125e-05
 
       # ═══════════════════════════════════════════
       # OpenRouter-only models (no Wangsu equivalent)
@@ -685,12 +685,12 @@ data:
           model: openai/claude-opus-4-7
           api_base: https://kuaihuiai.com/v1
           api_key: os.environ/KUAIHUI_API_KEY
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
         model_info:
           id: kuaihui/claude-opus-4-7
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
 
       # ── Claude Opus 4.6 via Kuaihui ──
       - model_name: kuaihui-claude-opus-4-6
@@ -698,12 +698,12 @@ data:
           model: openai/claude-opus-4-6
           api_base: https://kuaihuiai.com/v1
           api_key: os.environ/KUAIHUI_API_KEY
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
         model_info:
           id: kuaihui/claude-opus-4-6
-          input_cost_per_token: 0.00001
-          output_cost_per_token: 0.00005
+          input_cost_per_token: 2.5e-05
+          output_cost_per_token: 1.25e-04
 
       # ── Claude Sonnet 4.6 via Kuaihui ──
       # Anthropic-native provider so /v1/messages clients (claude-code CLI,
@@ -722,12 +722,12 @@ data:
           api_key: os.environ/KUAIHUI_API_KEY
           extra_headers:
             anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
-          input_cost_per_token: 0.000006
-          output_cost_per_token: 0.00003
+          input_cost_per_token: 1.5e-05
+          output_cost_per_token: 7.5e-05
         model_info:
           id: kuaihui/claude-sonnet-4-6
-          input_cost_per_token: 0.000006
-          output_cost_per_token: 0.00003
+          input_cost_per_token: 1.5e-05
+          output_cost_per_token: 7.5e-05
 
       # ── Claude Haiku 4.5 (dated) via Kuaihui ──
       - model_name: kuaihui-claude-haiku-4-5-20251001
@@ -735,12 +735,12 @@ data:
           model: openai/claude-haiku-4-5-20251001
           api_base: https://kuaihuiai.com/v1
           api_key: os.environ/KUAIHUI_API_KEY
-          input_cost_per_token: 0.000002
-          output_cost_per_token: 0.00001
+          input_cost_per_token: 5.0e-06
+          output_cost_per_token: 2.5e-05
         model_info:
           id: kuaihui/claude-haiku-4-5-20251001
-          input_cost_per_token: 0.000002
-          output_cost_per_token: 0.00001
+          input_cost_per_token: 5.0e-06
+          output_cost_per_token: 2.5e-05
 
       # ── Claude Haiku 4.5 thinking via Kuaihui ──
       - model_name: kuaihui-claude-haiku-4-5-20251001-thinking
@@ -748,12 +748,12 @@ data:
           model: openai/claude-haiku-4-5-20251001-thinking
           api_base: https://kuaihuiai.com/v1
           api_key: os.environ/KUAIHUI_API_KEY
-          input_cost_per_token: 0.000002
-          output_cost_per_token: 0.00001
+          input_cost_per_token: 5.0e-06
+          output_cost_per_token: 2.5e-05
         model_info:
           id: kuaihui/claude-haiku-4-5-20251001-thinking
-          input_cost_per_token: 0.000002
-          output_cost_per_token: 0.00001
+          input_cost_per_token: 5.0e-06
+          output_cost_per_token: 2.5e-05
 
       # ── GPT-5.5 via Kuaihui ──
       # Standard tier (<272K ctx): $5 input / $30 output per 1M tokens

@@ -41,6 +41,39 @@ sleep 2 && kubectl get nodes >/dev/null
 MK=$(kubectl get secret litellm-secrets -n carher -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 ```
 
+### Provider env vars 的来源（**记住，不在 litellm-secrets**）
+
+litellm-proxy Deployment 用 `envFrom` 同时挂两个 secret：
+
+| Secret | 内容 |
+|---|---|
+| `litellm-secrets` | `LITELLM_MASTER_KEY` / `DATABASE_URL` / `KUAIHUI_API_KEY`（仅 aliyun） |
+| `carher-env-keys` | **`WANGSU_API_KEY` / `WANGSU_DIRECT_API_KEY` / `WANGSU_DIRECT5_API_KEY` / `WANGSU_DIRECT6_API_KEY` / `WANGSU_EMBEDDING_KEY` / `OPENROUTER_API_KEY` / `EMBEDDING_*` / `LITELLM_API_KEY`** |
+
+```bash
+# 看 / 改 wangsu key（aliyun + 198 prod + 198 dev 三套**共享同一把** WANGSU_API_KEY）
+kubectl get secret carher-env-keys -n <ns> -o jsonpath='{.data.WANGSU_API_KEY}' | base64 -d; echo
+kubectl patch secret carher-env-keys -n <ns> --type=json \
+  -p='[{"op":"replace","path":"/data/WANGSU_API_KEY","value":"'$(echo -n "<NEW_KEY>" | base64 -w0)'"}]'
+```
+
+不要去 `litellm-secrets` 找 `WANGSU_API_KEY` —— 不在那。
+
+### Pre-flight key probe（key 轮换 / 新通道首次接入必跑）
+
+网宿 cheliantianxia1 用 IP 白名单：`58.241.5.230`（198 出口）+ `47.84.112.136`（aliyun build server）。**直接从 build server curl 网宿验证 key 已激活**，再动 LiteLLM secret，否则轮换后才发现 key 没生效就 401 风暴：
+
+```bash
+scripts/jms ssh k8s-work-227 'curl -sS -X POST \
+  -H "Authorization: Bearer <NEW_WANGSU_KEY>" -H "Content-Type: application/json" \
+  https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1/chat/completions \
+  -d "{\"model\":\"<EXISTING_MODEL>\",\"messages\":[{\"role\":\"user\",\"content\":\"PONG only\"}],\"max_tokens\":20}" \
+  -w "\nHTTP=%{http_code}\n" --max-time 60' | tail -3
+```
+
+任何新模型也要在这一步逐一探针，HTTP 200 才能进入下一步。glm-5.1 / gemini-3.5-flash 等 reasoning 模型若 max_tokens=20 太小会出现 `content="" reasoning_tokens=N`，仍属 200 通过。
+
+
 ---
 
 ## 决策清单（开工前对齐）
@@ -289,7 +322,104 @@ base-config.yaml 改完用外科手术 patch（同上文步骤 3a），不要 `k
 
 ---
 
+## 网宿 cheliantianxia1 同步：三套环境一键流程
+
+> **触发场景**：网宿运营给你新的 cheliantianxia1 spec yaml（含 `tokens.value` 新值 + 模型清单变更），需要把变更同步到 **aliyun carher / 198 prod / 198 dev** 三套 LiteLLM。
+>
+> **作用域**：本 skill 上面的"上线顺序 5 步"主要服务 aliyun carher 全栈（含 her）。本节专门针对**网宿 cheliantianxia1 渠道**的批量更新（key 轮换 + 模型增删），三套环境共用同一把 WANGSU_API_KEY，必须同步轮换。
+
+### 推荐顺序（由小到大爆炸半径）
+
+```
+198 dev → 198 prod → aliyun carher
+```
+
+dev 最先，prod 双副本零中断兜底，aliyun 最后再走完整 her 暴露链路（步骤 3a/3b/2 = 步骤 6-15）。
+
+### Phase -1：Pre-flight（必跑）
+
+见上方"Pre-flight key probe"。三个目标，全 200 才进入下一步：
+1. 新 WANGSU_API_KEY + 一个**已存在**模型（验证 key 生效）
+2. 新 WANGSU_API_KEY + 每个**新增**模型（验证模型在网宿端已开）
+3. spec 没列出但仍在我们 ConfigMap 里的模型（验证不会因 spec 漏写导致丢通道）
+
+### Phase 1+2：198 dev 与 198 prod（同一脚本，仅 namespace 不同）
+
+198 manifest 格式坑：`30-cm-litellm-config.yaml` 实际是 **JSON 文件，`data["config.yaml"]` 是 yaml 字符串**。`kubectl apply` 旧 manifest 会因 stale resourceVersion 报 conflict（见 [[kubectl_apply_stale_resourceversion]] 类型经验）。**用 `kubectl get -o json` 拉 live → Python 解析 + splice → kubectl replace** 是最稳的姿势：
+
+```bash
+scripts/jms ssh AIYJY-litellm "bash -s" <<'REMOTE'
+set -euo pipefail
+NS=litellm-dev   # 或 litellm-product
+TS=$(date +%Y%m%d-%H%M%S)
+DIR=/root/litellm-dev   # 或 /root/litellm-product-manifests
+
+# (a) Backup live cm
+kubectl -n $NS get cm litellm-config -o yaml > $DIR/30-cm-litellm-config.yaml.bak-$TS
+
+# (b) Splice 新 model_list 条目
+python3 <<'PY'
+import yaml, json, subprocess, os
+ns=os.environ.get("NS")
+out = subprocess.check_output(["kubectl","-n",ns,"get","cm","litellm-config","-o","json"])
+cm = json.loads(out)
+cfg = yaml.safe_load(cm["data"]["config.yaml"])
+
+NEW = [
+  {"model_name":"wangsu-<NEW1>",
+   "litellm_params":{"model":"custom_openai/<NEW1>","api_key":"os.environ/WANGSU_API_KEY",
+     "api_base":"https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1",
+     "input_cost_per_token":<INPUT>,"output_cost_per_token":<OUTPUT>},
+   "model_info":{"id":"wangsu/<NEW1>","input_cost_per_token":<INPUT>,"output_cost_per_token":<OUTPUT>}},
+  # ... 其他新增同样格式
+]
+existing = {m.get("model_name") for m in cfg.get("model_list", [])}
+to_add = [m for m in NEW if m["model_name"] not in existing]
+
+ml = cfg["model_list"]
+# 在最后一个 wangsu cheliantianxia1 条目后插入（保持 grouping）
+insert_at = max((i+1 for i,m in enumerate(ml)
+                 if m.get("model_name","").startswith("wangsu-")
+                 and "cheliantianxia1" in str(m.get("litellm_params",{}).get("api_base",""))),
+                default=len(ml))
+for m in reversed(to_add):
+    ml.insert(insert_at, m)
+
+# Strip server-managed metadata 防 replace 冲突
+for k in ("resourceVersion","creationTimestamp","uid","managedFields"):
+    cm["metadata"].pop(k, None)
+cm["metadata"].get("annotations", {}).pop("kubectl.kubernetes.io/last-applied-configuration", None)
+cm["data"]["config.yaml"] = yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True)
+with open("/tmp/cm-new.yaml","w") as f:
+    yaml.safe_dump(cm, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+print("to_add:", [m["model_name"] for m in to_add])
+PY
+
+# (c) Replace + rotate secret + restart
+NS=$NS kubectl -n $NS replace -f /tmp/cm-new.yaml
+kubectl -n $NS patch secret carher-env-keys --type=json \
+  -p='[{"op":"replace","path":"/data/WANGSU_API_KEY","value":"'$(echo -n "<NEW_WANGSU_KEY>" | base64 -w0)'"}]'
+kubectl -n $NS rollout restart deployment/litellm-proxy
+kubectl -n $NS rollout status deployment/litellm-proxy --timeout=300s
+REMOTE
+```
+
+注意：**168 dev / 168 prod 的 `model_group_alias`** 把 `wangsu-gpt-5.4` / `wangsu-gpt-5.5` 等映射到 chatgpt-* 上（ChatGPT Pro 池），不是真的去 wangsu。这个跟本次同步无关，dev 即使没显式 model_list 条目也能通过 alias 工作。
+
+### Phase 3：aliyun carher LiteLLM proxy
+
+走本 skill 上面的"上线顺序步骤 1"标准流程（编辑 `k8s/litellm-proxy.yaml` → `kubectl apply` → restart）。**额外**做 secret 轮换 `kubectl patch secret carher-env-keys` 跟 198 同样。
+
+⚠️ **预期 rollout 时长 15-20 min**：aliyun litellm-proxy 用 `terminationGracePeriodSeconds: 600s` + `nodeAffinity` 限定 3 候选节点 + `hostPort: 4000` + `replicas: 2` + `maxSurge: 1`，**新 pod 必须等老 pod 完全终止才能调度上同一节点**。`deployment "litellm-proxy" exceeded its progress deadline` 报错是预期，不是失败 —— 看 `kubectl get pods` 双副本始终 ≥2 ready 即可，service 不中断。
+
+### Phase 4 + 5：her 侧 + 验证
+
+走 skill 上面"上线顺序步骤 2 / 3a / 3b"完整流程（仅 aliyun，198 不接 her）。
+
+---
+
 ## 仓库提交规则
+
 
 `carher-admin` **直接提交到 main**，不开 feature 分支不走 PR：
 
@@ -315,3 +445,7 @@ git push origin main
 | 部分 carher-* key 一直调不到新模型 | 这些 key models 数组原本是 `[]`（无限制），脚本误把它们覆写为白名单 | 跳过 `models == []` 的 key，保持其无限制状态 |
 | `kubectl apply k8s/base-config.yaml` 顺带推未授权改动 | 仓库 yaml 比 live ConfigMap 领先（有挂起的 fix） | 用 `kubectl patch --type=merge --patch-file=...` 单 key patch |
 | `/api/ci/trigger-build` 不构建 admin | 那个 workflow 只 build `her/carher` | 走 `k8s-work-227` 手动 nerdctl 构建 |
+| `kubectl exec deploy/litellm-proxy -- env MK=$MK python3 <<'PY' ... PY` 静默成功但 0 字节 stdout，0 个 key 被更新（"假成功"） | bash heredoc + python heredoc 多层 quoting，env / stdin 被 ssh / kubectl exec 的 wrapper 吞掉，python 根本没执行就 `exit 0` | 改用本地 `kubectl port-forward svc/litellm-proxy 14000:4000` + 本地 `python3 <<PY ... PY`；总跑完后**反查 LiteLLM `/spend/keys` 真实 allowlist 字段**确认，不要靠 exit code |
+| aliyun litellm-proxy `rollout status` 报 `exceeded its progress deadline` | `terminationGracePeriodSeconds: 600s` + nodeAffinity 限 3 节点 + hostPort 4000 + 2 副本：新 pod 必须等老 pod 完全终止才能调度上同一节点；老 pod 走完整 600s grace 才被 SIGKILL | 不是失败，等就行（总 15-20 min）。判断：`kubectl get pods -l app=litellm-proxy` 双副本始终 ≥2 ready，service 不中断 |
+| 网宿 cheliantianxia1 key 轮换后某些请求 401，但其他请求 200 | 三套环境（aliyun / 198 prod / 198 dev）共享同一把 `WANGSU_API_KEY`，只在一个 namespace 改了 secret 但其他没改 | 三套环境**同步**轮换 `kubectl patch secret carher-env-keys`（见上面"网宿 cheliantianxia1 同步"章节） |
+| 不知道 `WANGSU_API_KEY` 在哪 / 改了 `litellm-secrets` 但不生效 | wangsu 系列 env 在 `carher-env-keys` 不在 `litellm-secrets`（litellm-proxy `envFrom` 同时挂两个） | 见上面"前置 → Provider env vars 的来源" |

@@ -1,20 +1,32 @@
 ---
 name: her-memory-reindex-rescue
 description: >-
-  排查并救援 CarHer her 实例因 memory reindex 死循环 / 上游 embedding fail 引发的
-  OOM / 孤儿 tmp 文件 / 卡死实例 / event-loop 卡顿连锁反应。Use when the user mentions
-  "main.sqlite.tmp-*", "孤儿 tmp", "reindex 循环", "needsFullReindex",
-  "卡死的 her" + "main.sqlite 多天不更新"，或描述了
+  排查并救援 CarHer her 实例因 **memory pipeline（reindex / cache bloat）** 引发的
+  OOM / 孤儿 tmp 文件 / 卡死实例 / event-loop 卡顿 / **客户端 turn timeout（"model idle timeout"）** 连锁反应。
+  本 skill 覆盖两类失败模式（共享同一物理层：NFS NAS 上的 sqlite 同步调用 block event loop）：
+
+  **模式 A：reindex 死循环**。Use when the user mentions "main.sqlite.tmp-*", "孤儿 tmp",
+  "reindex 循环", "needsFullReindex", "卡死的 her" + "main.sqlite 多天不更新"，或
   "embedding 卡 → ws 断 → 错过消息 → 重连 → 又卡" / "[memory] embeddings rate limited" /
   "[memory] sync failed: memory embeddings batch timed out after 120s" /
   "bot-registry re-registered after key expiry" / "[ws] handshake timeout" /
   "litellm cooldown" 等 event-loop 被 reindex 同步循环 block 100-260s 或上游
   embedding 持续 429/超时 引发的连锁症状，or wants to scan/clean orphan tmp files
-  cluster-wide. **本 skill 仅处理 reindex 死循环这一种 OOM/卡顿场景**——
-  泛 OOM / 阿里云 ACK 阈值告警 / compaction archive 累积 / active session
-  巨大 等场景请先用 `her-oom-alert-triage` 做分诊；命中上游 LiteLLM fail
-  时跳到 `litellm-ops`。本 skill 提供从「7 个判断 → 全集群扫描 → 6 档修复方案
-  (A 原地清孤儿 / B 等自愈 / C 删 pod / D paused-toggle / E 修上游 / F 切 fts-only)」
+  cluster-wide.
+
+  **模式 B：embedding_cache / chunks 过大导致 prework cold scan stall**。Use when 用户报
+  "model idle timeout / Please try again / increase models.providers.<id>.timeoutSeconds"
+  这种 OpenClaw user-facing 错误文案；或 her 回复超时（120-130s 后才 surface_error）；或
+  LiteLLM SpendLogs 在 timeout 窗口内 **0 条** her 请求记录（请求根本没发出去）；或
+  main.sqlite 体积异常大（>500 MB，embedding_cache 主导）。
+
+  **本 skill 仅处理 memory pipeline 相关的 OOM / 卡顿 / timeout 场景**——
+  泛 OOM / 阿里云 ACK 阈值告警 / compaction archive 累积 / active session 巨大
+  请先用 `her-oom-alert-triage` 分诊；命中上游 LiteLLM fail 跳 `litellm-ops`；
+  纯 reply 失败分诊用 `carher-her-reply-failure-triage`。
+
+  本 skill 提供从「8 个判断 → 全集群扫描 → 模式 A 的 6 档修复（A 原地清孤儿 / B 等自愈 /
+  C 删 pod / D paused-toggle / E 修上游 / F 切 fts-only）+ 模式 B 的 GC + VACUUM 修复」
   的完整决策树；做运维层治标，不修后端代码根因。
 ---
 
@@ -239,9 +251,192 @@ kubectl logs -n carher "$POD" -c carher --since=1h --tail=5000 2>/dev/null \
 
 > 💡 **本次案例转折**：第一轮诊断把 her-8/74/2 误判成"内部 reindex 死循环"，差点重启。靠 7.1 + 7.2 看到 LiteLLM 已恢复 200 OK + 5min 内已无新 timeout 才识破——真因是 5.5h 前 LiteLLM cooldown 累积出循环，上游恢复后 pod 内本轮 reindex 已在自愈，**任何重启操作都会丢弃当前 250-618 MB 的进度，反作用**。
 
+### 判断 8：embedding_cache 是否过大（模式 B 入口）
+
+**触发条件**：tmp 文件为 0（不是 reindex 循环）、上游健康（LiteLLM 200 OK）、但用户报"超时 / model idle timeout / 半天不回复 / 回复"模型异常""。
+
+OpenClaw 在客户端 turn timeout（默认 120-130s）后会把 *任何* 卡顿包装成 `surface_error reason=timeout`，user-facing 文案是：
+
+```
+The model did not produce a response before the model idle timeout.
+Please try again, or increase models.providers.<id>.timeoutSeconds
+for slow local or self-hosted providers
+```
+
+> ⚠️ **这文案不是 Codex 自己的报错**，是 OpenClaw 借鉴了 Codex 的字段命名做 user-facing 兜底。看到这文案不要去查 Codex 客户端配置，先按本判断走。
+
+#### 8.1 反证：LiteLLM SpendLogs 是否真有这次请求
+
+`carher-30` 案例验证：客户端报 130s timeout 时，LiteLLM SpendLogs 在该时间窗里 **0 条** her-30 记录。
+
+> ⚠️ **重要订正（2026-05-16 晚 carher-30 复现后发现）**：**SpendLogs 0 条 ≠ 请求没发出去**。SpendLogs 在某些 fallback / 异常 / 流式中断路径下不写入（具体路径见 litellm-fork 源码 `_PROXY_track_cost_callback`）。**LiteLLM proxy access log（POST /v1/chat/completions 的 200 OK 行）才是请求是否进 proxy 的 ground truth**——必须用 her pod 的 podIP 在 proxy 容器日志里 grep，不能只看 SpendLogs。
+>
+> ```bash
+> # 必查：用 podIP 在 litellm-proxy access log 里反证
+> POD_IP=$(kubectl -n carher get pod "$POD" -o jsonpath='{.status.podIP}')
+> kubectl -n carher logs -l app=litellm-proxy --since=2h --tail=-1 \
+>   | grep "$POD_IP" | grep -E "POST /(v1/)?chat/completions"
+> ```
+>
+> **三种情况要分开判**：
+> - SpendLogs 0 + access log 0 → 请求**真没发出去**，进 8.2 量 DB 体积（模式 B）
+> - SpendLogs 0 + access log **有 200 OK 1-5s** → 请求发了 LiteLLM 也正常返回，但 carher 端 stream 没消费完 → **跳模式 C（session trajectory accumulation，见下文）**
+> - SpendLogs **有**记录 → 不是模式 B，回 [判断 7] 看上游
+
+```bash
+# 进 litellm-db Pod 查（数据库密码在 litellm-proxy 容器 DATABASE_URL env 里）
+HID=30
+HASH_PREFIX=$(kubectl -n carher exec litellm-db-0 -- bash -c "PGPASSWORD=<pw> psql -U litellm -d litellm -h localhost -tA -c \"
+  SELECT LEFT(token,20) FROM \\\"LiteLLM_VerificationToken\\\" WHERE key_alias='carher-$HID';\"" 2>&1)
+
+kubectl -n carher exec litellm-db-0 -- bash -c "PGPASSWORD=<pw> psql -U litellm -d litellm -h localhost -tA -c \"
+SELECT to_char(\\\"startTime\\\",'HH24:MI:SS'), model, completion_tokens
+  FROM \\\"LiteLLM_SpendLogs\\\"
+  WHERE api_key LIKE '${HASH_PREFIX}%'
+    AND \\\"startTime\\\" BETWEEN '<timeout-start>' AND '<timeout-end>';\""
+```
+
+零行 → 进 8.2 量 DB 体积；有行 → 不是模式 B，回 [判断 7] 看上游。
+
+#### 8.2 量 main.sqlite 体积 + 各表行数
+
+```bash
+HID=30
+POD=$(kubectl -n carher get pod --no-headers | grep "^carher-${HID}-" | head -1 | awk '{print $1}')
+
+kubectl -n carher exec "$POD" -c carher -- ls -lh /data/.openclaw/memory/main.sqlite
+kubectl -n carher exec "$POD" -c carher -- node -e "
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync('/data/.openclaw/memory/main.sqlite', {readOnly: true});
+for (const t of ['chunks','chunks_vec','chunks_fts','embedding_cache','files']) {
+  try {
+    const c = db.prepare('SELECT count(*) AS n FROM \"' + t + '\"').get().n;
+    console.log(t + ':', c, 'rows');
+  } catch(e) {}
+}
+console.log('embedding_cache MB:',
+  db.prepare(\"SELECT ROUND(sum(length(embedding))/1024.0/1024,1) AS mb FROM embedding_cache\").get().mb);
+"
+```
+
+| 阈值 | 含义 |
+|---|---|
+| main.sqlite ≥ 500 MB **且** embedding_cache ≥ 200 MB | **高度可疑**，进 8.3 做冷态 benchmark |
+| main.sqlite ≥ 1 GB | **确诊**，跳过 8.3 直接走模式 B 修复 |
+| < 500 MB **且** access log 有 200 OK | 跳模式 C（trajectory accumulation） |
+| < 500 MB **且** access log 也 0 | 不是模式 B，回 [判断 4] / [判断 7] 重新分诊 |
+
+#### 8.3 实测 cold scan / KNN 耗时（可选，确证用）
+
+```bash
+kubectl -n carher exec "$POD" -c carher -- node -e "
+const { DatabaseSync } = require('node:sqlite');
+const sqliteVec = require('/app/node_modules/sqlite-vec');
+const db = new DatabaseSync('/data/.openclaw/memory/main.sqlite', {readOnly: true, allowExtension: true});
+db.loadExtension(sqliteVec.getLoadablePath());
+const t1 = Date.now();
+db.prepare(\"SELECT count(*) FROM embedding_cache WHERE LENGTH(embedding)>0\").get();
+console.log('embedding_cache full scan:', Date.now()-t1, 'ms');
+const probe = db.prepare('SELECT embedding FROM chunks_vec LIMIT 1').get();
+const t2 = Date.now();
+db.prepare('SELECT id FROM chunks_vec WHERE embedding MATCH ? AND k=10').all(probe.embedding);
+console.log('vec0 KNN k=10 cold:', Date.now()-t2, 'ms');
+const t3 = Date.now();
+db.prepare('SELECT id FROM chunks_vec WHERE embedding MATCH ? AND k=10').all(probe.embedding);
+console.log('vec0 KNN k=10 warm:', Date.now()-t3, 'ms');
+"
+```
+
+| 指标 | 健康 | 模式 B 命中 |
+|---|---|---|
+| embedding_cache 全表 LENGTH 扫 | < 2s | 10-40s（`carher-30` 实测 38s） |
+| vec0 KNN k=10 冷态 | < 1s | 8-12s |
+| vec0 KNN k=10 热态 | < 50ms | < 50ms |
+
+冷热差距 > 100× 是 NFS page cache miss 的强指标 —— sqlite 走 NAS NFS，4KB 随机读全是 RPC round trip。
+
+#### 8.4 物理机制速记（用于解释和教训迁移）
+
+```
+NAS NFS（vers=3, rsize=1MB）→ 单页 4KB 读都要 GETATTR + READ round trip
+        ↓
+main.sqlite 1.1 GB 存在 NAS 上
+        ↓
+embedding_cache 698 MB / 33787 行（>>chunks 表的 111MB / 5360 行）
+        ↓
+单次 turn prework: embedding API + vec0 KNN（cold 10s）+ embedding_cache 操作 + chunks JOIN
+        ↓
+node:sqlite 是同步 API → 整段 prework 期间 event loop 完全 block
+        ↓
+NFS page cache 4h+ 不活跃后 evict（节点 200 Pod 共享 cache pressure 大）
+        ↓
+每次 cold path 累计 30-130s → 客户端 turn timeout（默认 120-130s）触发 surface_error
+```
+
+关键差异（vs 模式 A reindex 死循环）：
+
+| | 模式 A reindex 循环 | 模式 B cache bloat |
+|---|---|---|
+| 现象 | OOMKilled 反复 + tmp 堆积 | 偶发"超时不回复"，pod 不一定 restart |
+| main.sqlite mtime | 多天前（卡死） | 最近（正常更新） |
+| tmp-* 文件 | ≥1 个 | 0 个 |
+| 主诉关键词 | 卡死 / OOM / tmp / 重启 | "model idle timeout" / 半天不回 |
+| LiteLLM 上是否能看到请求 | 部分能看到 | **0 条**（请求没发出去） |
+| 修复方向 | 清孤儿 + 等自愈 / 重启 | **GC embedding_cache + VACUUM** |
+
+> ⚠️ **embedding_cache 是性能缓存，不是记忆本体**。记忆本体在 `chunks` 表（自带 `text` + `embedding` 列）+ `chunks_vec`（vec0 KNN 索引）+ `chunks_fts*`（FTS5 全文索引）—— 这三张表跟 embedding_cache 完全独立。删 cache 唯一影响是：下次相同 hash 的文本要重新调一次 LiteLLM `/embeddings`（bge-m3 ~1-3s + < $0.0001）。**不会丢失任何记忆。**
+
+### 判断 9：模式 C（假说，2026-05-16 引入，待验证）——session trajectory accumulation → stream consumer hang
+
+**触发条件**：
+- 文案是"model idle timeout"
+- DB 体积 < 500 MB（模式 B 不命中）或 **已经做过 GC + VACUUM 但 timeout 仍复现**
+- **LiteLLM proxy access log 看得到 200 OK 1-5s**（即 LiteLLM 正常返回），但 carher 端 stream 消费没完成 / 130s 后 surface_error
+
+**假说**：carher 把 LiteLLM 返回的 SSE chunk 喂进 `processOpenAICompletionsStream` / `sanitizeOpenAISdkSseResponse` / `buildGuardedModelFetch` 这几层包装时，遇到特定 schema 或累积过大的 session trajectory（`agents/main/sessions/<id>.trajectory.jsonl` 5+ MB + 单 turn `context.compiled` 接近 trajectory-event-size-limit=262144 截断阈值）时迭代器卡住不前进，OpenClaw `streamWithIdleTimeout(120s)` 到点报 surface_error。
+
+**carher-30 案例时间线（2026-05-16）**：
+- 早上 GC + VACUUM：main.sqlite 1.1 GB → 208 MB（embedding_cache 砍 90%）
+- **同日 20:33 同样 timeout 复现** → 仅靠 GC 没修住，cache bloat 不是充分根因
+- 该窗口 LiteLLM proxy access log：POST /v1/chat/completions 200 OK，TTFB 3 秒
+- 王丽花 07:12 切到 opus 模型，session 0b7c3096 trajectory.jsonl 累积 5.2 MB / 单 turn context.compiled 290 KB
+
+**临时修复（最小侵入）**：archive 老 session 文件 + 删 pod 让它起新 session
+```bash
+POD=$(kubectl -n carher get pod --no-headers | grep "^carher-${HID}-" | head -1 | awk '{print $1}')
+TS=$(date +%Y%m%d-%H%M)
+# 找最近修改的 session（要确认是用户实际在用的）
+kubectl -n carher exec "$POD" -c carher -- bash -c '
+  cd /data/.openclaw/agents/main/sessions
+  ls -lt *.jsonl 2>/dev/null | head -5
+'
+# 把 hot session 改名归档（OpenClaw 起新 session 自然走新 ID）
+SID=<above 选中的>
+kubectl -n carher exec "$POD" -c carher -- bash -c "
+  cd /data/.openclaw/agents/main/sessions
+  for f in ${SID}.jsonl ${SID}.trajectory.jsonl ${SID}.trajectory-path.json; do
+    [ -f \"\$f\" ] && mv \"\$f\" \"\$f.archive.${TS}\"
+  done
+  # 同步从 sessions.json 移除 agent:main:main → 该 session 的映射
+  node -e \"
+    const fs = require('fs');
+    const p = 'sessions.json';
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (j['agent:main:main'] === '${SID}') { delete j['agent:main:main']; fs.writeFileSync(p, JSON.stringify(j, null, 2)); }
+  \"
+"
+# pod 重启让 in-memory 状态归零
+kubectl -n carher delete pod "$POD"
+```
+
+**验证状态**：carher-30 fix 已部署，等用户下次自然使用后判断秒回 vs 仍卡。**如果秒回 → 写实模式 C，把"模式 B cache bloat" 的诊断顺序从 8.1 → 8.2 改成"先看 access log 区分 B/C"**。**如果仍卡** → 进一步挖 `processOpenAICompletionsStream` / openai SDK 包装层的具体卡点。
+
+**未确证之前不要把模式 C 当成首选诊断**——这是带证据但未闭环的假说。
+
 ## 修复方案决策树（按副作用从小到大）
 
 ```
+模式 A（有 tmp 文件 / OOM 循环）
                               ┌─ TMP_ACTIVE = 0 ────────────────────────────► A: inplace rm（零下线）
                               │
                               │                              ┌─ 上游健康 + 在前进 ──► B: 等自然完成
@@ -259,6 +454,11 @@ kubectl logs -n carher "$POD" -c carher --since=1h --tail=5000 2>/dev/null \
                               │
                               └── 实在修不了上游？ ──► F: 把受影响 her 临时切 fts-only
                                                           (config override: memorySearch.disabled=true 或换轻量 embedding)
+
+模式 B（无 tmp / "model idle timeout" / main.sqlite > 500MB）
+                              ┌─ 仅 1-2 个实例 ──► G1: 单实例 GC + VACUUM（先做 VACUUM INTO 备份）
+判断 8 命中 ──────────────────┤
+                              └─ 集群级多实例命中 ► G2: 批量 GC（结合判断 6 找触发因子）
 ```
 
 | 方案 | 适用 | 副作用 | 脚本 / 命令 |
@@ -269,6 +469,7 @@ kubectl logs -n carher "$POD" -c carher --since=1h --tail=5000 2>/dev/null \
 | **D paused-toggle SOP** | meta 11 字段不一致 OR 历史多次 OOM 想换 5Gi 缓冲 | 30-60s × 2 次下线 | `sop_phase_a/c.sh` |
 | **E 修上游** | 上游 LiteLLM 仍在 fail | 不影响 carher pod | `litellm-ops` skill |
 | **F 临时关 embedding** | 上游短时间内修不好且业务等不起 | 受影响实例失去向量记忆能力（只剩 fts），用户能感知 | `carher-instance-config-override` skill 加 memorySearch override |
+| **G GC embedding_cache + VACUUM** | 判断 8 命中：main.sqlite 异常大、prework cold scan stall | DB 加 sqlite 写锁约 1-3 分钟（VACUUM 期间），无 pod 重启 | 见下文 Phase G |
 
 **核心原则**：
 
@@ -487,6 +688,139 @@ $SKILL_DIR/scripts/sop_phase_c.sh $HID
 
 `paused` 触发的重启，operator 不会重新生成 deployment（仅 scale 0/1），所以 step 1 改的 3Gi 会保留。
 
+### Phase G: embedding_cache GC + VACUUM（模式 B 修复，零下线）
+
+适用前提：[判断 8] 命中（main.sqlite > 500MB、tmp=0、上游健康、用户报"超时/不回复"）。
+
+**核心思想**：embedding_cache 是性能缓存，删了不丢记忆。记忆本体在 `chunks` / `chunks_vec` / `chunks_fts*`。
+
+#### G1: 单实例（适合首次验证）
+
+整个流程在活 pod 内执行，**不重启 pod，不动 CRD**。期间 sqlite 短暂写锁（VACUUM 时主程序的 memory.sync 写入会排队 1-3 分钟，event loop 不至于 block 太久因为是后台 thread）。
+
+##### Step G1.1: 备份（强制，否则不要进下一步）
+
+```bash
+HID=30
+POD=$(kubectl -n carher get pod --no-headers | grep "^carher-${HID}-" | head -1 | awk '{print $1}')
+DATE=$(date +%Y%m%d)
+kubectl -n carher exec "$POD" -c carher -- node -e "
+const { DatabaseSync } = require('node:sqlite');
+const fs = require('fs');
+const BAK = '/data/.openclaw/memory/main.sqlite.bak.$DATE';
+if (fs.existsSync(BAK)) { console.log('ABORT: backup exists:', BAK); process.exit(2); }
+const db = new DatabaseSync('/data/.openclaw/memory/main.sqlite');
+const t = Date.now();
+db.exec(\`VACUUM INTO '\${BAK}'\`);
+console.log('VACUUM INTO done', Date.now()-t, 'ms');
+"
+# carher-30 实测：1.1GB → 903MB backup，~83 秒
+```
+
+`VACUUM INTO` 是 sqlite 原生命令，相当于做一个 defragmented 一致快照（即使主程序在并发写也安全 —— 用 backup API）。
+
+##### Step G1.2: 备份完整性校验
+
+```bash
+kubectl -n carher exec "$POD" -c carher -- node -e "
+const { DatabaseSync } = require('node:sqlite');
+const sqliteVec = require('/app/node_modules/sqlite-vec');
+const db = new DatabaseSync('/data/.openclaw/memory/main.sqlite.bak.$DATE', {readOnly: true, allowExtension: true});
+db.loadExtension(sqliteVec.getLoadablePath());
+console.log('integrity_check:', db.prepare('PRAGMA integrity_check').get());
+for (const t of ['chunks','chunks_vec','embedding_cache']) {
+  console.log(t + ':', db.prepare('SELECT count(*) AS n FROM \"' + t + '\"').get().n);
+}
+"
+# 期望：integrity_check=ok，chunks/chunks_vec/embedding_cache 行数与原库一致
+```
+
+如果 `integrity_check` 不是 `ok` 或行数对不上：删 backup 重做，**不要进 Step G1.3**。
+
+##### Step G1.3: GC
+
+激进版（保留 7 天）—— 推荐用于首次验证拿最大信号：
+
+```bash
+kubectl -n carher exec "$POD" -c carher -- node -e "
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync('/data/.openclaw/memory/main.sqlite');
+const cutoff = Date.now() - 7*86400*1000;
+const before = db.prepare('SELECT count(*) AS n, ROUND(sum(length(embedding))/1024.0/1024,1) AS mb FROM embedding_cache').get();
+const t = Date.now();
+const r = db.prepare('DELETE FROM embedding_cache WHERE updated_at < ?').run(cutoff);
+console.log('DELETE done', Date.now()-t, 'ms; rows deleted:', r.changes);
+const after = db.prepare('SELECT count(*) AS n, ROUND(sum(length(embedding))/1024.0/1024,1) AS mb FROM embedding_cache').get();
+console.log('before:', before, '→ after:', after);
+"
+```
+
+保守版（保留 30 天）：把 `7*86400*1000` 改成 `30*86400*1000`。
+
+##### Step G1.4: VACUUM 主库（回收磁盘空间 + 重建 b-tree）
+
+```bash
+kubectl -n carher exec "$POD" -c carher -- node -e "
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync('/data/.openclaw/memory/main.sqlite');
+const t = Date.now();
+db.exec('VACUUM');
+console.log('VACUUM done', Date.now()-t, 'ms');
+"
+# 1.1GB 库在 NAS 上 VACUUM 约 60-180 秒
+```
+
+> ⚠️ `VACUUM` 期间持 EXCLUSIVE 锁。其他 sqlite 写连接会排队等待（carher 主程序的 memory.sync 写入会被推迟 1-3 分钟）。读连接通常不受影响（WAL 模式下）。**carher 主程序在此期间能继续收消息**（feishu WS 不断），但 memory pipeline 会延迟，期间用户消息回复体感更慢——结束后立刻恢复。
+
+##### Step G1.5: 验证效果
+
+```bash
+kubectl -n carher exec "$POD" -c carher -- sh -c 'ls -lh /data/.openclaw/memory/main.sqlite*'
+# 再跑一遍 [判断 8.3] 的 benchmark 对比 cold scan 时间
+```
+
+期望：
+
+| 指标 | GC 前 | GC 后（7 天保留） |
+|---|---|---|
+| main.sqlite | 1.1 GB | ~50-100 MB |
+| embedding_cache rows | 33787 | 1500-2000 |
+| embedding_cache 全表扫 cold | 38s | < 2s |
+| vec0 KNN cold | 10s | 5-8s（chunks_vec 不变，但 page cache 友好度更高） |
+
+##### Step G1.6: 回滚预案（仅在 G1.4 后异常时用）
+
+```bash
+# 如果 VACUUM 异常 / 用户反映记忆丢失 / 行为退化，立刻回滚：
+kubectl -n carher exec "$POD" -c carher -- sh -c '
+mv /data/.openclaw/memory/main.sqlite /data/.openclaw/memory/main.sqlite.broken
+cp /data/.openclaw/memory/main.sqlite.bak.'$DATE' /data/.openclaw/memory/main.sqlite
+'
+kubectl -n carher delete pod "$POD"   # 让 carher 重新连库
+```
+
+##### Step G1.7: 清理备份（确认稳定 7 天后）
+
+```bash
+kubectl -n carher exec "$POD" -c carher -- rm /data/.openclaw/memory/main.sqlite.bak.$DATE
+```
+
+#### G2: 集群级巡检 + 批量 GC
+
+适用于 [判断 6] 集群级触发因子识别后发现多实例都是大 main.sqlite。建议先 G1 单实例验证完整收益 → 再批量。
+
+```bash
+# 巡检：找所有 main.sqlite > 500MB 的实例
+for POD in $(kubectl -n carher get pods --no-headers | awk '/^carher-[0-9]+-/{print $1}'); do
+  sz=$(kubectl -n carher exec "$POD" -c carher --request-timeout=10s -- \
+    stat -c '%s' /data/.openclaw/memory/main.sqlite 2>/dev/null)
+  [ -n "$sz" ] && [ "$sz" -gt 524288000 ] && \
+    printf "%s\t%s\n" "$POD" $((sz/1024/1024))MB
+done | sort -k2 -hr
+```
+
+批量 GC 时**严格串行**（不并发 VACUUM，避免 NAS 同时被多个 pod 大流量读写）。
+
 ## Step 4: 复扫验证
 
 重新跑 Step 1 的扫描，确认目标实例 TMP_COUNT=0、main.sqlite mtime 没倒退、MEM_MB 正常。
@@ -544,6 +878,8 @@ done
 
 ## 历史结果参考
 
+### 模式 A（reindex 死循环）
+
 - 一次完整跑通本 skill 的会话：清理 18 个 pod 的孤儿 tmp（10.82 GB）+ 救 9 个 B 类卡死实例（74/54/66/40/73/8/67/170/188）+ 总释放 ~13.5 GB + 操作总用时约 1 小时
 - 经验：**B 类清完后通常不再触发 reindex**，5Gi 是给意外 reindex 留的缓冲，绝大多数情况都用不上
 - **inplace 方案首跑**（继上次 4Gi 集群升级 5.5h 后引爆 7 个 CRITICAL）：
@@ -551,6 +887,27 @@ done
   - 3 个含 ACTIVE (her-8/74/2) → Phase 0 先清孤儿（释放 1.93 GB），ACTIVE 部分**等自愈**（不重启）
   - 关键诊断证据：sqlite readonly probe 在 her-8 卡 ≥2.5min（[判断 3](#判断-3sqlite-是否被-reindex-锁住判断主线程是否被殃及)）+ her-74 日志 10min 内 3 次 `bot-registry re-registered`（[判断 5](#判断-5从日志找-event-loop-被-block-的间接证据)）
   - 集群级触发因子识别（[判断 6](#判断-6集群级触发因子识别避免一个一个修反复出-case)）：6/7 实例 `TMP_OLDEST_AGE_H` 集中在 5.3-5.4h，对齐 RS AGE 5h29m → 锁定上次集群升 4Gi 部署同时引爆，4% 失败率
+
+### 模式 B（cache bloat / "model idle timeout"）
+
+- **carher-30 首例（2026-05-16）** 王丽花实例反复出现"model idle timeout"，3 次/2h（07:15 / 07:46 / 08:27 都是 130s timeout）。
+
+> ⚠️ **FOLLOWUP 2026-05-16 20:33**：上午做完 GC + VACUUM（1.1 GB → 208 MB）后同日 20:33 同样的 130s timeout 复现 → **cache bloat 不是 carher-30 的充分根因**。复盘发现该窗口 LiteLLM proxy access log 有 POST 200 OK / TTFB 3s 的记录（**SpendLogs 0 条但 access log 非 0**），证明请求发出去且 LiteLLM 正常返回，是 carher 端的 stream consumer 卡住。当晚补做 fix：archive 5.2 MB trajectory + 删 pod 重启（**模式 C 假说**，见判断 9）。fix 待王丽花下次使用验证。**别照搬"GC + VACUUM 就够"——必须先用 podIP 在 access log 反证**。
+
+- 关键诊断证据链：
+  1. carher logs：`embedded run failover decision: ... reason=timeout from=litellm/claude-sonnet-4-6` `next=none`
+  2. LiteLLM SpendLogs：08:00-09:00 期间 her-30 key（`carher-30`）**只有 1 条记录**且是手动 curl 测试时记的，timeout 窗口内 0 条 → 请求**根本没发出去**
+  3. LiteLLM proxy logs：同窗口对其他 key 都是 sonnet-4-6 / opus-4-7 200 OK 1-3s 正常 → 不是 LiteLLM 慢
+  4. main.sqlite **1.1 GB**，embedding_cache 33787 行 / **698 MB**（远大于 chunks 表 5360 行 / 111 MB）
+  5. 冷态实测：`SELECT count(*) FROM embedding_cache WHERE LENGTH(embedding)>0` 跑了 **38 秒**；vec0 KNN cold 9.6s，热 15ms
+  6. 物理层：PVC = NFS NAS（`alibabacloud-cnfs-nas`，vers=3）→ sqlite 每页 4KB 都是 NFS RPC round trip + node:sqlite 同步调用 block event loop
+- embedding_cache 时间分布：5-08 一天突增 9906 行 / 205 MB（推测当天有过 reindex），其余日子 100-500 行/天
+- GC 收益预估（按 updated_at）：
+  - 保留 7 天：删 32178 行 / 664 MB（最激进）
+  - 保留 30 天：删 15355 行 / 316 MB（保守）
+- VACUUM INTO 备份：1.1 GB → 903 MB（17% 自动压缩），耗时 83 秒
+- **教训**：用户截图里的 `models.providers.<id>.timeoutSeconds` 文案让人第一直觉去查 Codex / 客户端配置 —— 实际是 OpenClaw 的 surface_error 兜底模板，与 Codex 无关
+- **教训**：5-15 该 key 曾触发 budget exceeded（cost=$104 / max=$100，opus-4-6），日志里至今刷屏 `Key is blocked. Update via /key/unblock` —— 但那是**其他 key**的（用 `carher-30` key 的 hash prefix 比对 LiteLLM SpendLogs 反证 her-30 key 现在 `blocked=空 spend=$51.24/$100`，是另一些用户的 key 在反复 retry）。**看到 `Key is blocked` 不能直接归因到当前调查的实例**，必须用 podIP + LITELLM_API_KEY hash 对齐
 
 ### ⚠️ 同次会话的诊断转折（**重要教训**）
 
@@ -572,6 +929,7 @@ her-8/74/2 的 ACTIVE reindex **看起来像内部死循环**（meta.providerKey
 
 ## 相关 skill
 
+- **`s3-hermestest-memory-rescue`**：S3 (JSZX-AI-03) docker 容器版的 sibling。本 skill 是 K8s 版（NFS NAS + node:sqlite），那个是 S3 版（本地 ext4 + python3 sqlite3）。**S3 集群报"慢 / @-不回 / model idle timeout"必须用那个 skill**，本 skill 的 kubectl 命令完全不适用；同时它强调本 skill 未覆盖的**模式 D：session jsonl bloat → SessionWriteLockTimeoutError → event loop block**
 - **`her-oom-alert-triage`**：OOM / 内存告警的入口分诊。**先用它确认是不是 reindex 死循环**，再决定是否走本 skill。压制 compaction archive / 集群批量升 limit / 阿里云 ACK 阈值告警 都属于那个 skill 的范围
 - **`litellm-ops`**：LiteLLM proxy 状态、cooldown、429 排查。**[判断 7] 命中"上游 fail"时直接跳到这个 skill**——上游 fail 期间任何对 carher pod 的操作都是反作用
 - `check-instance-status`：单实例日志/状态/重启历史

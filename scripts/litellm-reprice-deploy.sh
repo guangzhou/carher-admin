@@ -25,7 +25,7 @@ if [ ! -x "$JMS" ]; then
 fi
 
 echo "=== syntax check ==="
-python3 -c "import yaml,sys; yaml.safe_load(open('$TARGET')); print('  ok')"
+python3 -c "import yaml,sys; list(yaml.safe_load_all(open('$TARGET'))); print('  ok')"
 
 echo
 echo "=== local md5 ==="

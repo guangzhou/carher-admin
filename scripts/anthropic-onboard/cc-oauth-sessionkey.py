@@ -28,11 +28,9 @@ ENV:
   SESSION_KEY     sk-ant-sid02-... (cookie value)
   CC_OAUTH_URL    https://claude.com/cai/oauth/authorize?...
 
-COOKIE NAME 候选 (按命中概率):
-  - sessionKey   (Anthropic CLI ~/.claude/.credentials.json 也用此 key)
-  - session_key
-  - claude_session
-  脚本一次性注入多个候选,domain 加 .claude.ai / .anthropic.com 都加。
+COOKIE NAME (2026-05-25 实测确认):
+  - **sessionKey + .claude.ai** = 生效组合 (跟 Anthropic CLI ~/.claude/.credentials.json key 名一致)
+  - 早期 12 候选 (4 name × 3 domain) 已精简掉, 多余的会被浏览器忽略不报错但徒增噪音
 """
 import os, re, time
 from patchright.sync_api import sync_playwright
@@ -79,23 +77,20 @@ with sync_playwright() as pw:
     ctx = br.new_context(viewport={"width": 1280, "height": 800}, locale="en-US")
 
     # ── Step 1: 注入 sessionKey cookie ─────────────────────────────
+    # 实测唯一生效组合: name=sessionKey + domain=.claude.ai (跟 Anthropic CLI 一致)
     print(f"[1] Inject sessionKey cookie (email={EMAIL}, key_len={len(SESSION_KEY)})", flush=True)
     expires = int(time.time()) + 30 * 86400  # 30 days
-    cookie_candidates = []
-    for name in ["sessionKey", "session_key", "claude_session", "anthropic_session"]:
-        for domain in [".claude.ai", ".claude.com", ".anthropic.com"]:
-            cookie_candidates.append({
-                "name": name,
-                "value": SESSION_KEY,
-                "domain": domain,
-                "path": "/",
-                "httpOnly": True,
-                "secure": True,
-                "sameSite": "Lax",
-                "expires": expires,
-            })
-    ctx.add_cookies(cookie_candidates)
-    print(f"  injected {len(cookie_candidates)} cookie variants", flush=True)
+    ctx.add_cookies([{
+        "name": "sessionKey",
+        "value": SESSION_KEY,
+        "domain": ".claude.ai",
+        "path": "/",
+        "httpOnly": True,
+        "secure": True,
+        "sameSite": "Lax",
+        "expires": expires,
+    }])
+    print(f"  injected 1 cookie (sessionKey on .claude.ai)", flush=True)
 
     claude_page = ctx.new_page()
 

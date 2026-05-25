@@ -132,20 +132,8 @@ RESP=$(ssh "$SSH_188" "curl -s https://api.anthropic.com/v1/messages \
   -d '{\"model\":\"claude-haiku-4-5\",\"max_tokens\":20,\"messages\":[{\"role\":\"user\",\"content\":\"reply OK\"}]}'")
 if echo "$RESP" | grep -q '"type":"message"'; then
     echo "  ✅ Haiku 探针 200 OK"
-    OPUS_RESP=$(ssh "$SSH_188" "curl -s https://api.anthropic.com/v1/messages \
-      -H 'Authorization: Bearer $TOKEN' \
-      -H 'anthropic-beta: oauth-2025-04-20' \
-      -H 'anthropic-dangerous-direct-browser-access: true' \
-      -H 'anthropic-version: 2023-06-01' \
-      -H 'content-type: application/json' \
-      -d '{\"model\":\"claude-opus-4-7\",\"max_tokens\":20,\"messages\":[{\"role\":\"user\",\"content\":\"reply OK\"}]}'")
-    if echo "$OPUS_RESP" | grep -q '"type":"message"'; then
-        echo "  ✅ Opus 4.7 探针也 200 OK — 完整可用"
-    elif echo "$OPUS_RESP" | grep -q 'rate_limit'; then
-        echo "  ⚠️ Opus 4.7 = rate_limit_error (Team 共享池打满)"
-    else
-        echo "  ⚠️ Opus 4.7 response: $(echo $OPUS_RESP | head -c 200)"
-    fi
+    # Opus/Sonnet 直调 429 = plan-agnostic OAuth allowlist (不是 token/账户问题),不再探针
+    # 真伪 plan 验证: 跑 ./cc-plan-verify.sh $ACCT (走 sessionKey 注入登 web 看)
     echo ""
     echo "🎉 $ACCT 上线完成"
     echo "   token: $ENV_REMOTE"
@@ -153,6 +141,7 @@ if echo "$RESP" | grep -q '"type":"message"'; then
     echo "     1. 把 $ACCT token 加进 188 claude-max-proxy 的 ACCT_TOKENS"
     echo "        ssh $SSH_188 \"sed -i.bak 's/^ACCT_TOKENS=.*/&,${ACCT}::$TOKEN/' /Data/claude-max-proxy/.env\""
     echo "     2. ssh $SSH_188 \"cd /Data/claude-max-proxy && docker compose up -d\""
+    echo "     3. (可选) ./scripts/anthropic-onboard/cc-plan-verify.py $ACCT  # 验 plan + 多 buyer"
     exit 0
 else
     echo "  ❌ 探针失败: $RESP"

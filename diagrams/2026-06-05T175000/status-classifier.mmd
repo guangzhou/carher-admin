@@ -1,0 +1,18 @@
+flowchart TD
+    A["单个验证 case"] --> B{"用户面是否符合预期"}
+    B -->|"是"| C["继续查 SpendLogs"]
+    B -->|"否"| F{"是否由 dev 上游导致"}
+
+    C --> D{"证据是否落到预期模型"}
+    D -->|"是"| PASS["PASS<br/>行为和证据一致"]
+    D -->|"否，落到 fallback"| BLOCK1["BLOCKED<br/>PRIMARY_NOT_VERIFIED"]
+    D -->|"否，内部模型暴露或误路由"| FAIL["FAIL<br/>配置或权限策略错误"]
+
+    F -->|"10.68.13.188:4002 refused"| BLOCK2["BLOCKED<br/>CHATGPT_PRIMARY_UNREACHABLE"]
+    F -->|"wangsu7 auth_failed"| BLOCK3["BLOCKED<br/>WANGSU7_AUTH_FAILED"]
+    F -->|"无已知环境阻塞"| FAIL
+
+    A --> G{"case 类型"}
+    G -->|"无 fallback 模型"| H["主失败时必须失败<br/>且不能出现 Wangsu/OpenRouter 路由"]
+    H -->|"满足"| PASS
+    H -->|"出现隐藏路由"| FAIL

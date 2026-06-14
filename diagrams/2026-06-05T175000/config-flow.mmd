@@ -1,0 +1,23 @@
+flowchart TD
+    A["启动 config.py"] --> B{"模式"}
+    B -->|"默认"| D["dry-run<br/>只输出 diff"]
+    B -->|"--apply"| E["读取当前状态"]
+    B -->|"--restore backup"| X["从远端备份恢复"]
+
+    E --> F["读取 ConfigMap<br/>config.yaml"]
+    E --> G["读取 DB runtime<br/>LiteLLM_Config.router_settings"]
+    F --> H["补齐 model_list<br/>chatgpt-pool-gpt-5.5<br/>wangsu7-gpt-5.3-codex"]
+    H --> I["设置产品 alias<br/>禁止直指 Wangsu/OpenRouter"]
+    I --> J["设置 GPT fallbacks<br/>spark/mini 不配置 fallback"]
+    G --> K["用同一目标规则<br/>修正 runtime alias/fallback"]
+
+    J --> L["备份 ConfigMap 与 manifest"]
+    K --> M["备份 DB router_settings"]
+    L --> N["kubectl apply ConfigMap"]
+    M --> O["UPDATE LiteLLM_Config"]
+    N --> P["rollout restart"]
+    O --> P
+    P --> Q["rollout status 完成"]
+
+    X --> R["识别备份类型<br/>ConfigMap 或 router_settings"]
+    R --> S["恢复并 rollout"]

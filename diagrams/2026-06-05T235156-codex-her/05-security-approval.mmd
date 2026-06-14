@@ -1,0 +1,19 @@
+flowchart TD
+    START["请求进入 Bridge"] --> WHO{"来源?"}
+    WHO -->|"Codex MCP"| MAUTH["校验 MCP token<br/>caller -> allowed Her"]
+    WHO -->|"Her Skill"| HAUTH["校验 her_uid/app_id/open_id<br/>chat -> allowed repo"]
+    MAUTH --> POLICY["统一策略引擎"]
+    HAUTH --> POLICY
+    POLICY --> RISK{"动作风险"}
+    RISK -->|"read"| ALLOW["自动允许<br/>写审计"]
+    RISK -->|"normal action"| APPROVE["需要一次审批<br/>飞书卡片 / Codex approval"]
+    RISK -->|"high risk"| CONFIRM["二次确认或拒绝<br/>kubectl/git push/ssh"]
+    RISK -->|"blocked"| DENY["直接拒绝<br/>rm -rf/git reset/kubectl delete pod"]
+    APPROVE --> DECIDE{"审批结果"}
+    CONFIRM --> DECIDE
+    DECIDE -->|"accept"| EXEC["下发 Worker / Her Gateway"]
+    DECIDE -->|"deny"| STOP["停止任务"]
+    ALLOW --> EXEC
+    DENY --> AUDIT["审计日志"]
+    EXEC --> AUDIT
+    STOP --> AUDIT

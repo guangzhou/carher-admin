@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1680" height="1060" viewBox="0 0 1680 1060">
+  <rect x="0" y="0" width="1680" height="1060" fill="#f7f3ea"/>
+  <path d="M0 930 C260 880, 360 980, 610 920 S1040 860, 1260 930 S1560 990, 1680 930 L1680 1060 L0 1060 Z" fill="#e3ead8"/>
+  <path d="M0 0 L1680 0 L1680 118 L0 156 Z" fill="#263238"/>
+  <text x="70" y="72" font-size="38" font-family="Noto Sans SC, sans-serif" fill="#ffffff" font-weight="700">Responses encrypted_content：两种路由方式对比</text>
+  <text x="72" y="118" font-size="18" font-family="Noto Sans SC, sans-serif" fill="#d8e2df">核心问题：加密 reasoning 不是普通文本，后续请求需要回到能解它的账号或同一边界</text>
+
+  <rect x="70" y="190" width="720" height="720" rx="22" fill="#fffaf0" stroke="#c6a15b" stroke-width="3"/>
+  <rect x="890" y="190" width="720" height="720" rx="22" fill="#eef8f4" stroke="#5d9b86" stroke-width="3"/>
+  <rect x="105" y="220" width="650" height="58" rx="15" fill="#f3c45d"/>
+  <rect x="925" y="220" width="650" height="58" rx="15" fill="#63b59a"/>
+  <text x="136" y="258" font-size="26" font-family="Noto Sans SC, sans-serif" fill="#2f2615" font-weight="700">方案 A：不加 affinity，宽松路由</text>
+  <text x="956" y="258" font-size="26" font-family="Noto Sans SC, sans-serif" fill="#10342b" font-weight="700">方案 B：加 affinity，严格回源</text>
+
+  <circle cx="158" cy="340" r="36" fill="#32434a"/>
+  <text x="143" y="350" font-size="28" font-family="Noto Sans SC, sans-serif" fill="#ffffff" font-weight="700">1</text>
+  <rect x="214" y="305" width="450" height="72" rx="16" fill="#ffffff" stroke="#d9c8a2" stroke-width="2"/>
+  <text x="238" y="334" font-size="20" font-family="Noto Sans SC, sans-serif" fill="#273238" font-weight="700">第一轮请求</text>
+  <text x="238" y="362" font-size="17" font-family="Noto Sans SC, sans-serif" fill="#5a5a5a">LiteLLM 负载均衡到 chatgpt-acct-22</text>
+
+  <polyline points="438,378 438,430" fill="none" stroke="#9a7a36" stroke-width="4"/>
+  <polygon points="438,448 427,428 449,428" fill="#9a7a36"/>
+  <circle cx="158" cy="490" r="36" fill="#32434a"/>
+  <text x="143" y="500" font-size="28" font-family="Noto Sans SC, sans-serif" fill="#ffffff" font-weight="700">2</text>
+  <rect x="214" y="455" width="450" height="86" rx="16" fill="#ffffff" stroke="#d9c8a2" stroke-width="2"/>
+  <text x="238" y="484" font-size="20" font-family="Noto Sans SC, sans-serif" fill="#273238" font-weight="700">模型返回 encrypted_content</text>
+  <text x="238" y="512" font-size="17" font-family="Noto Sans SC, sans-serif" fill="#5a5a5a">Cursor 下一轮把这段加密 reasoning</text>
+  <text x="238" y="535" font-size="17" font-family="Noto Sans SC, sans-serif" fill="#5a5a5a">作为 input 带回来</text>
+
+  <polyline points="438,542 438,592" fill="none" stroke="#9a7a36" stroke-width="4"/>
+  <polygon points="438,610 427,590 449,590" fill="#9a7a36"/>
+  <circle cx="158" cy="650" r="36" fill="#32434a"/>
+  <text x="143" y="660" font-size="28" font-family="Noto Sans SC, sans-serif" fill="#ffffff" font-weight="700">3</text>
+  <rect x="214" y="615" width="450" height="96" rx="16" fill="#ffffff" stroke="#d9c8a2" stroke-width="2"/>
+  <text x="238" y="644" font-size="20" font-family="Noto Sans SC, sans-serif" fill="#273238" font-weight="700">第二轮重新负载均衡</text>
+  <text x="238" y="672" font-size="17" font-family="Noto Sans SC, sans-serif" fill="#5a5a5a">可能被发到 acct-25 或 wangsu</text>
+  <text x="238" y="696" font-size="17" font-family="Noto Sans SC, sans-serif" fill="#b6452c">风险：新账号解不了旧加密内容</text>
+
+  <path d="M655 663 C700 650, 718 670, 746 640" fill="none" stroke="#cf513a" stroke-width="5"/>
+  <polygon points="758,628 734,633 751,652" fill="#cf513a"/>
+  <rect x="497" y="735" width="230" height="90" rx="18" fill="#ffe5dc" stroke="#cf513a" stroke-width="2"/>
+  <text x="523" y="770" font-size="19" font-family="Noto Sans SC, sans-serif" fill="#6b2117" font-weight="700">可能结果</text>
+  <text x="523" y="799" font-size="16" font-family="Noto Sans SC, sans-serif" fill="#6b2117">上游 400 / 流中断</text>
+  <text x="523" y="822" font-size="16" font-family="Noto Sans SC, sans-serif" fill="#6b2117">错误更晚、更隐蔽</text>
+
+  <circle cx="978" cy="340" r="36" fill="#193d35"/>
+  <text x="963" y="350" font-size="28" font-family="Noto Sans SC, sans-serif" fill="#ffffff" font-weight="700">1</text>
+  <rect x="1034" y="305" width="450" height="72" rx="16" fill="#ffffff" stroke="#b5d8cd" stroke-width="2"/>
+  <text x="1058" y="334" font-size="20" font-family="Noto Sans SC, sans-serif" fill="#173b32" font-weight="700">读取 input 里的 encrypted_content</text>
+  <text x="1058" y="362" font-size="17" font-family="Noto Sans SC, sans-serif" fill="#4d605a">LiteLLM 解出 origin model_id</text>
+
+  <polyline points="1258,378 1258,430" fill="none" stroke="#3a8d75" stroke-width="4"/>
+  <polygon points="1258,448 1247,428 1269,428" fill="#3a8d75"/>
+  <circle cx="978" cy="490" r="36" fill="#193d35"/>
+  <text x="963" y="500" font-size="28" font-family="Noto Sans SC, sans-serif" fill="#ffffff" font-weight="700">2</text>
+  <rect x="1034" y="455" width="450" height="86" rx="16" fill="#ffffff" stroke="#b5d8cd" stroke-width="2"/>
+  <text x="1058" y="484" font-size="20" font-family="Noto Sans SC, sans-serif" fill="#173b32" font-weight="700">优先回到原 deployment</text>
+  <text x="1058" y="512" font-size="17" font-family="Noto Sans SC, sans-serif" fill="#4d605a">例如 chatgpt-acct-22-gpt-5.5</text>
+  <text x="1058" y="535" font-size="17" font-family="Noto Sans SC, sans-serif" fill="#4d605a">或同一 api_base + api_key 边界</text>
+
+  <polyline points="1258,542 1258,592" fill="none" stroke="#3a8d75" stroke-width="4"/>
+  <polygon points="1258,610 1247,590 1269,590" fill="#3a8d75"/>
+  <circle cx="978" cy="650" r="36" fill="#193d35"/>
+  <text x="963" y="660" font-size="28" font-family="Noto Sans SC, sans-serif" fill="#ffffff" font-weight="700">3</text>
+  <rect x="1034" y="615" width="450" height="96" rx="16" fill="#ffffff" stroke="#b5d8cd" stroke-width="2"/>
+  <text x="1058" y="644" font-size="20" font-family="Noto Sans SC, sans-serif" fill="#173b32" font-weight="700">如果 origin 不在候选池</text>
+  <text x="1058" y="672" font-size="17" font-family="Noto Sans SC, sans-serif" fill="#4d605a">当前实现：提前 503，阻止错发</text>
+  <text x="1058" y="696" font-size="17" font-family="Noto Sans SC, sans-serif" fill="#b6452c">风险：老会话会被集中拦截</text>
+
+  <path d="M1484 662 C1530 650, 1548 675, 1570 635" fill="none" stroke="#cf513a" stroke-width="5"/>
+  <polygon points="1578,620 1555,628 1574,646" fill="#cf513a"/>
+  <rect x="1324" y="735" width="230" height="90" rx="18" fill="#e1f3ec" stroke="#3a8d75" stroke-width="2"/>
+  <text x="1350" y="770" font-size="19" font-family="Noto Sans SC, sans-serif" fill="#173b32" font-weight="700">收益</text>
+  <text x="1350" y="799" font-size="16" font-family="Noto Sans SC, sans-serif" fill="#173b32">错误更早、更确定</text>
+  <text x="1350" y="822" font-size="16" font-family="Noto Sans SC, sans-serif" fill="#173b32">防止跨账号错发</text>
+
+  <rect x="118" y="852" width="610" height="34" rx="17" fill="#fff0c6"/>
+  <text x="142" y="875" font-size="16" font-family="Noto Sans SC, sans-serif" fill="#69501d">适合：不带 encrypted_content、或临时止血、或上游能容忍跨账号</text>
+  <rect x="935" y="852" width="610" height="34" rx="17" fill="#dff2ec"/>
+  <text x="959" y="875" font-size="16" font-family="Noto Sans SC, sans-serif" fill="#1f5c4f">适合：origin 可稳定找回、账号池调整有兼容期、错误可解释</text>
+
+  <rect x="585" y="922" width="510" height="92" rx="22" fill="#263238"/>
+  <text x="635" y="953" font-size="20" font-family="Noto Sans SC, sans-serif" fill="#ffffff" font-weight="700">推荐落地：先止血，再做正确 affinity</text>
+  <text x="635" y="979" font-size="16" font-family="Noto Sans SC, sans-serif" fill="#d8e2df">短期关闭严格拦截；长期保证 origin 可回源</text>
+  <text x="635" y="1001" font-size="16" font-family="Noto Sans SC, sans-serif" fill="#d8e2df">带 encrypted_content 的请求不能跨 provider fallback</text>
+
+  <line x1="790" y1="545" x2="890" y2="545" stroke="#6f7b7d" stroke-width="3" stroke-dasharray="12 10"/>
+  <text x="812" y="522" font-size="17" font-family="Noto Sans SC, sans-serif" fill="#455255">分界点</text>
+</svg>

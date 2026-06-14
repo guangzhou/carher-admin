@@ -202,6 +202,8 @@ func (hc *HealthChecker) checkOne(ctx context.Context, her *herv1.HerInstance, p
 			if cs.State.Waiting != nil && strings.Contains(cs.State.Waiting.Reason, "CrashLoopBackOff") {
 				status.Phase = "Failed"
 				status.Message = fmt.Sprintf("CrashLoopBackOff (restarts: %d)", cs.RestartCount)
+			} else if strings.HasPrefix(status.Message, "CrashLoopBackOff ") {
+				status.Message = ""
 			}
 			break
 		}

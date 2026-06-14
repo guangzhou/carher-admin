@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -633,7 +634,8 @@ class TestImportFromConfigmap:
 
 class TestMetricsHistory:
     def test_insert_and_retrieve_pod_metrics(self, db):
-        db.insert_metrics_batch([("2026-04-28 10:00:00", "pod", 1, 100.0, 256.0)])
+        ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        db.insert_metrics_batch([(ts, "pod", 1, 100.0, 256.0)])
         rows = db.get_pod_metrics_history(1, hours=24)
         assert len(rows) == 1
         assert rows[0]["cpu_m"] == pytest.approx(100.0)
@@ -645,7 +647,7 @@ class TestMetricsHistory:
         assert len(rows) == 0
 
     def test_get_node_metrics_aggregated(self, db):
-        ts = "2026-04-28 10:00:00"
+        ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
         db.insert_metrics_batch([
             (ts, "node", 1, 200.0, 1024.0),
             (ts, "node", 2, 300.0, 2048.0),

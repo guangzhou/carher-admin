@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: claude-max-proxy
+  namespace: default
+  labels:
+    app: claude-max-proxy
+spec:
+  # Pin to the node where claude CLI binary is installed (host path /usr/local/bin/claude).
+  # See docs/claude-max-cli-proxy.md §"node prerequisites".
+  nodeName: ap-southeast-1.172.16.0.86
+  hostNetwork: true
+  restartPolicy: Always
+  containers:
+  - name: proxy
+    # Pre-cached on node 86; has python3 + bash. Could also use any python3-bearing image.
+    image: mcr.microsoft.com/playwright/python:v1.59.0-noble
+    command: ["/bin/bash", "-c"]
+    args:
+    - |
+      export CLAUDE_BIN=/host/usr/local/bin/claude
+      export PORT=3456
+      # Token sourcing strategy: ACCT_TOKENS env (preferred for prod) OR
+      # fallback to credentials file on host (dev/single-account).
+      if [ -z "$ACCT_TOKENS" ]; then
+        TOK=$(cat /host/root/.config/anthropic/claude_code/credentials \
+              | python3 -c 'import sys,json;print(json.load(sys.stdin)["claudeAiOauthToken"])')
+        export ACCT_TOKENS="acct-default::${TOK}"
+      fi
+      exec python3 /scripts/proxy.py
+    env:
+    # Override here for multi-account prod. Format:
+    #   "label1::sk-ant-oat01-...,label2::sk-ant-oat01-..."
+    # If unset, falls back to /host/root/.config/anthropic/claude_code/credentials.
+    - name: ACCT_TOKENS
+      value: ""
+    volumeMounts:
+    - name: host
+      mountPath: /host
+    - name: script
+      mountPath: /scripts
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits:   { cpu: 1000m, memory: 512Mi }
+  volumes:
+  - name: host
+    hostPath: { path: / }
+  - name: script
+    configMap: { name: claude-proxy-script }

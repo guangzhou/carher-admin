@@ -1,0 +1,20 @@
+flowchart LR
+    U["操作者<br/>本地仓库"] --> R["run.sh<br/>一键入口"]
+    R --> C["config.py<br/>目标配置收敛"]
+    R --> V["verify.py<br/>验证与报告"]
+
+    C --> J1["scripts/jms<br/>AIYJY-litellm"]
+    J1 --> CM["K8s ConfigMap<br/>litellm-dev/litellm-config"]
+    J1 --> DBR["Postgres<br/>LiteLLM_Config.router_settings"]
+    J1 --> RO["rollout restart<br/>litellm-proxy"]
+
+    V --> J2["scripts/jms<br/>AIYJY-litellm"]
+    J2 --> KEY["临时测试 key<br/>仅 allowlist 9 个产品模型"]
+    J2 --> PROXY["LiteLLM Dev Proxy<br/>localhost:30400/dev"]
+    PROXY --> MODELS["/v1/models<br/>可见性"]
+    PROXY --> RESP["/v1/responses<br/>正常路径与 fallback"]
+    PROXY --> LOGS["SpendLogs<br/>请求证据"]
+    V --> REPORT["reports/*.md<br/>reports/*.json"]
+
+    CM -. "重启后配置来源" .-> PROXY
+    DBR -. "store_model_in_db=true<br/>runtime router 来源" .-> PROXY

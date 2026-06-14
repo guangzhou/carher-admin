@@ -955,6 +955,24 @@ data:
           api_base: http://chatgpt-acct-11.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
         model_info: {mode: responses, id: chatgpt-acct-11/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-19/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-20/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-21.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-21/chatgpt-gpt-5.5}
 
       # ── gpt-5.4 (5 deployments) ──
       - model_name: gpt-5.4
@@ -987,6 +1005,24 @@ data:
           api_base: http://chatgpt-acct-11.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
         model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-21.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-21/gpt-5.4}
 
       # ── gpt-5.3-codex (5 deployments) ──
       - model_name: gpt-5.3-codex
@@ -1019,6 +1055,24 @@ data:
           api_base: http://chatgpt-acct-11.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
         model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-21.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-21/gpt-5.3-codex}
 
       # ── gpt-5.3-codex-spark (5 deployments) ──
       - model_name: gpt-5.3-codex-spark
@@ -1051,6 +1105,24 @@ data:
           api_base: http://chatgpt-acct-11.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
         model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-21.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+        model_info: {mode: responses, id: chatgpt-acct-21/gpt-5.3-codex-spark}
 
     router_settings:
       # ── tag-based routing ────────────────────────────────────────────

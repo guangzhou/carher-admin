@@ -1,0 +1,45 @@
+flowchart LR
+    U["飞书用户<br/>手机 / 群聊"] --> FS["飞书开放平台<br/>消息事件 / 卡片回调"]
+    FS -->|"HTTPS POST<br/>/feishu/events"| BS["Bridge Server<br/>codex-bridge.carher.net"]
+
+    subgraph CONTROL["公网控制平面"]
+        BS
+        AUTH["权限策略<br/>open_id / chat_id / her_uid"]
+        REG["Worker Registry<br/>在线状态 / repo 能力"]
+        Q["Session & Approval Queue<br/>任务 / 审批 / 审计"]
+        BS --- AUTH
+        BS --- REG
+        BS --- Q
+    end
+
+    subgraph MAC["Mac / Devbox 执行平面"]
+        W["Codex Worker<br/>主动反连 / 心跳 / 路由"]
+        AS["codex app-server<br/>127.0.0.1:4500"]
+        REPO["本地 Repo<br/>carher-admin / CarHer"]
+        CFG["本地配置<br/>~/.codex/config.toml<br/>CARHER_DEV_KEY"]
+        W -->|"local WebSocket"| AS
+        AS --> REPO
+        AS --> CFG
+    end
+
+    W <-->|"WSS 长连接<br/>Mac 主动拨出"| BS
+    BS -->|"飞书文本 / 卡片"| FS
+
+    subgraph ID["身份与路由"]
+        HER["Her 身份<br/>app_id -> her_uid"]
+        USER["用户身份<br/>open_id"]
+        SES["Session Key<br/>her_uid + chat_id + open_id + repo"]
+        HER --> SES
+        USER --> SES
+    end
+
+    BS --- ID
+
+    subgraph POLICY["安全边界"]
+        P1["app-server 只监听 127.0.0.1"]
+        P2["服务器不保存供应商 API key"]
+        P3["默认只开放 CodexOpsHer"]
+        P4["高风险命令强制审批 / 禁止"]
+    end
+
+    Q --- POLICY

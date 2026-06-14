@@ -64,8 +64,11 @@ OAUTH_URL=$(ssh "$SSH_188" "
     rm -f $LOG_REMOTE
     export PATH=\$HOME/.local/bin:\$PATH
     tmux new-session -d -s cc-oauth-$ACCT \"claude setup-token 2>&1 | tee $LOG_REMOTE\"
-    sleep 6
-    grep -oE 'https://claude\\.com/cai/oauth/authorize\\?[^[:space:]]+' $LOG_REMOTE | head -1
+    for i in {1..30}; do
+        URL=\$(python3 -c 'import re,sys; t=open(sys.argv[1], errors=\"ignore\").read().replace(\"\r\", \"\"); f=\"\".join(t.splitlines()); m=re.search(r\"https://claude\\.com/cai/oauth/authorize\\?[^ \t]*?state=[A-Za-z0-9_-]+\", f); print(m.group(0) if m else \"\")' $LOG_REMOTE)
+        [ -n \"\$URL\" ] && { printf \"%s\n\" \"\$URL\"; break; }
+        sleep 1
+    done
 ")
 [[ -n "$OAUTH_URL" ]] || { echo "❌ 没拿到 OAuth URL"; exit 2; }
 echo "  ✅ URL: ${OAUTH_URL:0:80}..."

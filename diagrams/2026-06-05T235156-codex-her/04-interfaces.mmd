@@ -1,0 +1,46 @@
+flowchart TB
+    subgraph CODEX["Codex 调 Her 接口"]
+        T1["MCP Tool: her_list"]
+        T2["MCP Tool: her_status"]
+        T3["MCP Tool: her_send"]
+        T4["MCP Tool: her_wait"]
+    end
+
+    subgraph BRIDGE["Bridge API"]
+        A1["POST /api/her-rpc/sessions"]
+        A2["GET /api/her-rpc/sessions/{id}"]
+        A3["POST /api/codex/tasks"]
+        A4["POST /api/codex/approvals/{id}"]
+        A5["WSS /workers/connect"]
+    end
+
+    subgraph HER["Her Skill 命令"]
+        C1["/codex repos"]
+        C2["/codex <repo> <task>"]
+        C3["/codex status"]
+        C4["/codex stop"]
+        C5["/codex approve / deny"]
+    end
+
+    subgraph WORKER["Worker 控制"]
+        W1["worker_hello"]
+        W2["start_task"]
+        W3["approval_required"]
+        W4["stream_delta"]
+        W5["task_done"]
+    end
+
+    T1 --> A2
+    T2 --> A2
+    T3 --> A1
+    T4 --> A2
+    C1 --> A3
+    C2 --> A3
+    C3 --> A3
+    C4 --> A3
+    C5 --> A4
+    A5 --> W1
+    A5 --> W2
+    W3 --> A4
+    W4 --> A3
+    W5 --> A3

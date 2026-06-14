@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1080" viewBox="0 0 1800 1080">
+  <rect width="1800" height="1080" fill="#F8FAFC"/>
+  <text x="80" y="86" font-family="Noto Sans SC, Arial" font-size="44" font-weight="800" fill="#102A43">V2 修订：先做 Her 调本地 Codex</text>
+  <text x="82" y="128" font-family="Noto Sans SC, Arial" font-size="23" fill="#52606D">评论采纳后的 MVP：收窄入口、收紧鉴权、把安全边界下沉到 Worker 执行层。</text>
+
+  <rect x="80" y="185" width="360" height="700" rx="26" fill="#FCE7F3" stroke="#DB2777" stroke-width="5"/>
+  <text x="120" y="245" font-family="Noto Sans SC, Arial" font-size="32" font-weight="800" fill="#9D174D">飞书 / Her 入口</text>
+  <rect x="120" y="315" width="280" height="105" rx="18" fill="#FFFFFF" stroke="#F9A8D4" stroke-width="3"/>
+  <text x="150" y="358" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">CodexOpsHer</text>
+  <text x="150" y="390" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">唯一 MVP 入口</text>
+  <rect x="120" y="470" width="280" height="130" rx="18" fill="#FFFFFF" stroke="#F9A8D4" stroke-width="3"/>
+  <text x="150" y="512" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">Skill 薄客户端</text>
+  <text x="150" y="545" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">只提交 repo + prompt</text>
+  <text x="150" y="573" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">不执行 shell</text>
+  <rect x="120" y="650" width="280" height="105" rx="18" fill="#FFFFFF" stroke="#F9A8D4" stroke-width="3"/>
+  <text x="150" y="692" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">open_id/chat_id</text>
+  <text x="150" y="724" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">审计与策略输入</text>
+
+  <rect x="520" y="185" width="360" height="700" rx="26" fill="#FFF7ED" stroke="#F97316" stroke-width="5"/>
+  <text x="560" y="245" font-family="Noto Sans SC, Arial" font-size="32" font-weight="800" fill="#9A3412">Bridge 控制面</text>
+  <rect x="560" y="315" width="280" height="105" rx="18" fill="#FFFFFF" stroke="#FDBA74" stroke-width="3"/>
+  <text x="590" y="358" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">per-Her token</text>
+  <text x="590" y="390" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">token -> her_uid</text>
+  <rect x="560" y="470" width="280" height="130" rx="18" fill="#FFFFFF" stroke="#FDBA74" stroke-width="3"/>
+  <text x="590" y="512" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">Policy Engine</text>
+  <text x="590" y="545" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">Her / user / repo 白名单</text>
+  <text x="590" y="573" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">二次确认升级</text>
+  <rect x="560" y="650" width="280" height="105" rx="18" fill="#FFFFFF" stroke="#FDBA74" stroke-width="3"/>
+  <text x="590" y="692" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">Audit</text>
+  <text x="590" y="724" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">session / command / diff</text>
+
+  <rect x="960" y="185" width="360" height="700" rx="26" fill="#ECFDF5" stroke="#10B981" stroke-width="5"/>
+  <text x="1000" y="245" font-family="Noto Sans SC, Arial" font-size="32" font-weight="800" fill="#065F46">Worker 执行层</text>
+  <rect x="1000" y="315" width="280" height="105" rx="18" fill="#FFFFFF" stroke="#6EE7B7" stroke-width="3"/>
+  <text x="1030" y="358" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">主动反连</text>
+  <text x="1030" y="390" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">WSS，无公网端口</text>
+  <rect x="1000" y="470" width="280" height="130" rx="18" fill="#FFFFFF" stroke="#6EE7B7" stroke-width="3"/>
+  <text x="1030" y="512" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">临时 worktree</text>
+  <text x="1030" y="545" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">per repo 串行</text>
+  <text x="1030" y="573" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">diff/patch 回传</text>
+  <rect x="1000" y="650" width="280" height="105" rx="18" fill="#FFFFFF" stroke="#6EE7B7" stroke-width="3"/>
+  <text x="1030" y="692" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">本地硬边界</text>
+  <text x="1030" y="724" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">allowlist / timeout / kill</text>
+
+  <rect x="1400" y="185" width="320" height="700" rx="26" fill="#EEF2FF" stroke="#4F46E5" stroke-width="5"/>
+  <text x="1440" y="245" font-family="Noto Sans SC, Arial" font-size="32" font-weight="800" fill="#312E81">本地 Codex</text>
+  <rect x="1440" y="340" width="240" height="120" rx="18" fill="#FFFFFF" stroke="#818CF8" stroke-width="3"/>
+  <text x="1470" y="384" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">app-server</text>
+  <text x="1470" y="416" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">127.0.0.1 only</text>
+  <rect x="1440" y="530" width="240" height="120" rx="18" fill="#FFFFFF" stroke="#818CF8" stroke-width="3"/>
+  <text x="1470" y="574" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">供应商 API key</text>
+  <text x="1470" y="606" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">只留本地</text>
+
+  <polyline points="440,535 520,535" fill="none" stroke="#DB2777" stroke-width="6"/>
+  <polygon points="520,535 500,523 500,547" fill="#DB2777"/>
+  <polyline points="880,535 960,535" fill="none" stroke="#F97316" stroke-width="6"/>
+  <polygon points="960,535 940,523 940,547" fill="#F97316"/>
+  <polyline points="1320,535 1400,535" fill="none" stroke="#10B981" stroke-width="6"/>
+  <polygon points="1400,535 1380,523 1380,547" fill="#10B981"/>
+
+  <rect x="100" y="925" width="760" height="72" rx="18" fill="#ECFDF5" stroke="#10B981" stroke-width="3"/>
+  <text x="135" y="970" font-family="Noto Sans SC, Arial" font-size="23" font-weight="800" fill="#065F46">先做：飞书安全触发本地 Codex，输出 diff 和审批结果</text>
+  <rect x="940" y="925" width="760" height="72" rx="18" fill="#FEF2F2" stroke="#EF4444" stroke-width="3"/>
+  <text x="975" y="970" font-family="Noto Sans SC, Arial" font-size="23" font-weight="800" fill="#991B1B">后做：Codex 调 Her；记忆/群聊类工具暂不开放</text>
+</svg>

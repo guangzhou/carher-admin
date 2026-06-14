@@ -23,7 +23,7 @@ from typing import Annotated
 import jwt
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -41,6 +41,7 @@ from . import sync_worker
 from . import deployer
 from . import cloudflare_ops
 from . import litellm_ops
+from . import fusion_diagnosis
 from .models import (
     HerAddRequest, HerBatchAction, HerBatchImport, HerUpdateRequest,
     DeployGroupCreate, DeployGroupUpdate, SetDeployGroupRequest,
@@ -199,7 +200,7 @@ JWT_SECRET = os.environ.get("JWT_SECRET", ADMIN_API_KEY or ADMIN_PASSWORD)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = 24
 
-AUTH_EXEMPT_PATHS = {"/api/auth/login", "/api/deploy/webhook"}
+AUTH_EXEMPT_PATHS = {"/api/auth/login", "/api/deploy/webhook", "/api/instances/self/restart", "/api/instances/self/spend"}
 
 
 class LoginRequest(BaseModel):
@@ -1131,6 +1132,231 @@ def api_start(uid: int):
     return {"id": uid, "action": "started"}
 
 
+@app.post("/api/instances/self/restart")
+async def api_self_restart(request: Request):
+    """Self-restart endpoint for in-cluster carher-user pods.
+
+    Auth: source IP must belong to a Pod labelled `app=carher-user` in the
+    `carher` namespace. The pod can only restart itself (uid derived from its
+    own `user-id` label). No JWT — relies on K8s CNI not letting pods spoof
+    each other's IPs.
+    """
+    caller_uid = _resolve_caller_uid(request)
+    return await api_restart(caller_uid)
+
+
+def _resolve_caller_uid(request: Request) -> int:
+    """Map source IP → carher-user pod → user-id label. Used by /self/* endpoints."""
+    src_ip = request.client.host if request.client else ""
+    if not src_ip:
+        raise HTTPException(400, "Missing source IP")
+
+    v1 = k8s_ops._core()
+    try:
+        pods = v1.list_namespaced_pod(k8s_ops.NS, label_selector="app=carher-user")
+    except K8sApiException as e:
+        raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+
+    for pod in pods.items:
+        if pod.status.pod_ip != src_ip:
+            continue
+        uid_str = (pod.metadata.labels or {}).get("user-id", "")
+        if uid_str.isdigit():
+            return int(uid_str)
+        break
+
+    raise HTTPException(403, f"Source IP {src_ip} does not match any carher-user pod")
+
+
+# ── Self-spend ─────────────────────────────────────────────────────────
+# Bitable wiki tokens (source of truth for owner / cursor-claude key mapping)
+HER_REGISTRY_BASE = "B6kubcpAfaW6ktsEOyGcrur3ncg"     # her用户申请记录
+HER_REGISTRY_TABLE = "tblcvJPRIFV91yHy"
+CURSOR_CLAUDE_BASE = "DlT9bsrwMad12VsogEpcK9Ptncc"   # cursor&claude code 账户表格
+CURSOR_CLAUDE_TABLE = "tblJT2s6Y6xjYj5A"
+
+# 198 Pro LiteLLM proxy (public, called per-user with their own key)
+PRO_LITELLM_URL = "https://cc.auto-link.com.cn/pro"
+
+
+def _lark_app_access_token(app_id: str, app_secret: str) -> str:
+    """Exchange app credentials for an app_access_token (cached briefly upstream by lark)."""
+    import urllib.request
+    import ssl
+    url = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
+    body = _json.dumps({"app_id": app_id, "app_secret": app_secret}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST",
+                                 headers={"Content-Type": "application/json; charset=utf-8"})
+    try:
+        with urllib.request.urlopen(req, timeout=8, context=ssl.create_default_context()) as r:
+            payload = _json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        raise HTTPException(502, f"app_access_token: {e}")
+    token = payload.get("app_access_token")
+    if not token:
+        raise HTTPException(502, f"app_access_token missing in response: {payload}")
+    return token
+
+
+def _bitable_search(base_token: str, table_id: str, lark_token: str,
+                    field_name: str, value: str) -> list[dict]:
+    """POST /open-apis/bitable/v1/apps/{base}/tables/{table}/records/search.
+    Returns raw items list (each item's `fields` map). Raises HTTPException on failure."""
+    import urllib.request
+    import ssl
+    body = _json.dumps({
+        "filter": {"conjunction": "and", "conditions": [
+            {"field_name": field_name, "operator": "is", "value": [value]}
+        ]},
+        "automatic_fields": False,
+    }).encode("utf-8")
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{base_token}/tables/{table_id}/records/search"
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "Authorization": f"Bearer {lark_token}",
+        "Content-Type": "application/json; charset=utf-8",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=8, context=ssl.create_default_context()) as r:
+            payload = _json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise HTTPException(502, f"bitable search {field_name}={value}: HTTP {e.code} {e.read().decode()[:200]}")
+    except Exception as e:
+        raise HTTPException(502, f"bitable search {field_name}={value}: {e}")
+    if payload.get("code") != 0:
+        raise HTTPException(502, f"bitable search returned code={payload.get('code')} msg={payload.get('msg')}")
+    return payload.get("data", {}).get("items", []) or []
+
+
+def _litellm_key_info(base_url: str, key: str) -> dict:
+    """GET /key/info?key=... → spend / max_budget / budget_duration. Empty dict on failure."""
+    import urllib.request
+    import urllib.parse
+    import ssl
+    try:
+        url = f"{base_url.rstrip('/')}/key/info?key={urllib.parse.quote(key)}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(req, timeout=8, context=ssl.create_default_context()) as r:
+            payload = _json.loads(r.read().decode("utf-8"))
+        info = payload.get("info") or {}
+        return {
+            "key_alias": info.get("key_alias"),
+            "spend": round(float(info.get("spend") or 0), 4),
+            "max_budget": info.get("max_budget"),
+            "budget_duration": info.get("budget_duration"),
+            "budget_reset_at": info.get("budget_reset_at"),
+            "blocked": info.get("blocked"),
+        }
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
+@app.post("/api/instances/self/spend")
+async def api_self_spend(request: Request):
+    """Self-spend lookup for in-cluster carher-user pods.
+
+    Auth: same as /self/restart (source IP → carher pod → user-id label).
+    Resolves owner + claude/cursor keys via the *her's own app credentials*
+    (K8s Secret carher-{uid}-secret + spec.appId on the HerInstance CRD).
+    The bot does not send any token — admin reads what it needs from K8s.
+
+    Body (JSON, optional): {"carher_litellm_key": "sk-..."} so we can also
+    return the her's own LiteLLM spend; if omitted, the her-self section is null.
+
+    Flow:
+      1. uid → CRD → appId + Secret → app_access_token
+      2. bitable her-registry → owner tenant open_id
+      3. bitable cursor&claude → [{type, alias, api_key}] for that owner
+      4. parallel: carher local LiteLLM (her self) + 198 Pro per-key (live spend)
+    """
+    caller_uid = _resolve_caller_uid(request)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    carher_key = (body.get("carher_litellm_key") or "").strip()
+
+    # Resolve her's own lark app credentials from K8s
+    try:
+        her_crd = crd_ops.get_her_instance(caller_uid)
+    except K8sApiException as e:
+        raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+    if not her_crd:
+        raise HTTPException(404, f"HerInstance her-{caller_uid} not found")
+    spec = her_crd.get("spec", {}) or {}
+    app_id = spec.get("appId")
+    secret_ref = spec.get("appSecretRef") or f"carher-{caller_uid}-secret"
+    if not app_id:
+        raise HTTPException(500, f"HerInstance her-{caller_uid} missing spec.appId")
+    v1 = k8s_ops._core()
+    try:
+        sec = v1.read_namespaced_secret(secret_ref, k8s_ops.NS)
+    except K8sApiException as e:
+        raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
+    import base64
+    raw = sec.data.get("app_secret")
+    if not raw:
+        raise HTTPException(500, f"Secret {secret_ref} missing 'app_secret' key")
+    app_secret = base64.b64decode(raw).decode("utf-8").strip()
+
+    lark_token = _lark_app_access_token(app_id, app_secret)
+
+    # Step 1: her registry → owner tenant open_id
+    her_rows = _bitable_search(HER_REGISTRY_BASE, HER_REGISTRY_TABLE, lark_token,
+                                "ID", str(caller_uid))
+    if not her_rows:
+        raise HTTPException(404, f"No her-registry row found for uid={caller_uid}")
+    owner_field = her_rows[0].get("fields", {}).get("使用用户", [])
+    if not owner_field or not isinstance(owner_field, list):
+        raise HTTPException(500, "her registry row missing 使用用户 field")
+    owner_open_id = owner_field[0].get("id")
+    owner_name = owner_field[0].get("name")
+    if not owner_open_id:
+        raise HTTPException(500, "her registry row missing owner open_id")
+
+    # Step 2: cursor/claude registry → key list
+    acct_rows = _bitable_search(CURSOR_CLAUDE_BASE, CURSOR_CLAUDE_TABLE, lark_token,
+                                 "open_id", owner_open_id)
+    accounts: list[dict] = []
+    for row in acct_rows:
+        f = row.get("fields", {})
+        api_key_field = f.get("API Key") or []
+        alias_field = f.get("key_alias") or []
+        type_field = f.get("账户类型") or []
+        status_field = f.get("状态")
+        if not api_key_field or not alias_field:
+            continue
+        accounts.append({
+            "type": (type_field[0] if isinstance(type_field, list) and type_field else type_field) or "Unknown",
+            "alias_in_sheet": (alias_field[0].get("text") if isinstance(alias_field[0], dict) else alias_field[0]),
+            "_key": (api_key_field[0].get("text") if isinstance(api_key_field[0], dict) else api_key_field[0]),
+            "status": status_field,
+        })
+
+    # Step 3a: her self spend via carher LiteLLM
+    her_spend = None
+    if carher_key:
+        her_spend = _litellm_key_info(litellm_ops.LITELLM_PROXY_URL, carher_key)
+
+    # Step 3b: each cursor/claude account → 198 Pro real-time
+    result_accounts = []
+    for acct in accounts:
+        live = _litellm_key_info(PRO_LITELLM_URL, acct["_key"]) if acct["_key"] else {"error": "no key"}
+        result_accounts.append({
+            "type": acct["type"],
+            "alias_in_sheet": acct["alias_in_sheet"],
+            "status_in_sheet": acct["status"],
+            "live": live,  # alias / spend / max_budget / budget_duration / budget_reset_at / blocked
+        })
+
+    return {
+        "uid": caller_uid,
+        "owner": {"open_id": owner_open_id, "name": owner_name},
+        "her_self": her_spend,
+        "subscriptions": result_accounts,
+    }
+
+
 @app.post("/api/instances/{uid}/restart")
 async def api_restart(uid: int):
     """Restart an instance. CRD: deletes Pod, Operator self-heals and recreates."""
@@ -1249,6 +1475,23 @@ async def api_batch_action(req: HerBatchAction):
 @app.get("/api/instances/{uid}/logs")
 def api_logs(uid: int, tail: int = Query(200)):
     return {"logs": k8s_ops.get_logs(uid, tail=tail)}
+
+
+@app.get("/api/instances/{uid}/fusion-diagnosis/demo", tags=["instances"])
+def api_fusion_diagnosis_demo(uid: int):
+    """Read-only carher-3 fusion diagnosis demo."""
+    if uid != fusion_diagnosis.DEMO_UID:
+        raise HTTPException(404, "Fusion diagnosis demo is only available for carher-3")
+    return fusion_diagnosis.build_demo_report(uid, instance=db.get_by_id(uid) or {})
+
+
+@app.get("/api/instances/{uid}/fusion-diagnosis/demo.md", tags=["instances"], response_class=PlainTextResponse)
+def api_fusion_diagnosis_demo_markdown(uid: int):
+    """Read-only carher-3 fusion diagnosis demo rendered as Markdown."""
+    if uid != fusion_diagnosis.DEMO_UID:
+        raise HTTPException(404, "Fusion diagnosis demo is only available for carher-3")
+    report = fusion_diagnosis.build_demo_report(uid, instance=db.get_by_id(uid) or {})
+    return PlainTextResponse(fusion_diagnosis.render_markdown(report), media_type="text/markdown; charset=utf-8")
 
 
 # ── API: Cluster status / Health / Sync ──

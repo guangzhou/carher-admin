@@ -1,0 +1,19 @@
+sequenceDiagram
+    participant C as Codex
+    participant M as carher-her-mcp
+    participant B as Bridge/Admin
+    participant P as Her Gateway Proxy
+    participant H as Target Her(OpenClaw)
+    participant F as Feishu/Tools
+
+    C->>M: her_send(her_uid, prompt)
+    M->>B: POST /api/her-rpc/sessions
+    B->>B: 校验 MCP token + her 权限
+    B->>P: route her_uid -> carher-{uid}-svc
+    P->>H: OpenClaw Gateway / A2A request
+    H->>F: 需要时使用飞书身份/skills/tools
+    F-->>H: 工具结果
+    H-->>P: streamed result / final result
+    P-->>B: session events
+    B-->>M: result / session_id
+    M-->>C: tool result

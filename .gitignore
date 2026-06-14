@@ -41,3 +41,4 @@ docs/litellm-raw-*.csv
 # Claude Code: project-level settings.json is committed,
 # but local-only overrides stay out of the repo
 .claude/settings.local.json
+.224-pre-reinstall-*/

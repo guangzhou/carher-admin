@@ -40,16 +40,20 @@ ENV:
   CC_OAUTH_URL    https://claude.com/cai/oauth/authorize?... (从 claude setup-token 拿)
 """
 import os, re, time
+from urllib.parse import quote
 from patchright.sync_api import sync_playwright
 
 EMAIL = os.environ["CC_EMAIL"]
 RELAY_TOKEN = os.environ["RELAY_TOKEN"]
 OAUTH_URL = os.environ["CC_OAUTH_URL"]
+MANUAL_MAGIC_LINK = os.environ.get("RELAY_MAGIC_LINK", "").strip()
 SS = "/work/screenshots"
 os.makedirs(SS, exist_ok=True)
 
-# 171mail relay URL — type=claude 锁定项目,token 用 page.fill 显式投递
+# 171mail relay URL — type=claude 锁定项目。新版 relay 支持 token URL 参数直出 magic-link；
+# 老版仍需要显式 fill 输入框再点 "获取验证码"。
 RELAY_URL = "https://b.171mail.com/#/home/code?type=claude"
+RELAY_URL_WITH_TOKEN = f"{RELAY_URL}&token={quote(RELAY_TOKEN)}"
 
 
 def shoot(p, name):
@@ -86,16 +90,50 @@ def scan_for_magic_link(page):
       - 邮件正文 <a href="https://claude.ai/..."> 直接渲染
       - 仅显示纯文本 URL (innerText 含 https://claude.ai/...)
     """
+    def maybe_link(text):
+        if not text:
+            return None
+        m = re.search(r"(https?://[^\s\"'<>]*claude[^\s\"'<>]*(?:login|magic|magic-link|verify|token=)[^\s\"'<>]*)", text, re.I)
+        return m.group(1) if m else None
+
     # 优先 a[href]
     for a in page.locator("a").all():
-        href = (a.get_attribute("href") or "").lower()
-        if "claude" in href and ("login" in href or "magic" in href or "verify" in href or "token=" in href):
-            return a.get_attribute("href")
+        href = a.get_attribute("href") or ""
+        found = maybe_link(href)
+        if found:
+            return found
+    # 新 171mail 会把 magic-link 放在 input/textarea value 里，旁边是可点击链接图标。
+    for sel in ["input", "textarea"]:
+        try:
+            for el in page.locator(sel).all():
+                value = el.get_attribute("value") or ""
+                found = maybe_link(value)
+                if found:
+                    return found
+        except Exception:
+            pass
     # 退化 innerText 正则
     body = page.inner_text("body")
-    m = re.search(r"(https?://[^\s\"'<>]*claude[^\s\"'<>]*(?:login|magic|verify|token=)[^\s\"'<>]*)", body, re.I)
-    if m:
-        return m.group(1)
+    found = maybe_link(body)
+    if found:
+        return found
+    return None
+
+
+def scan_for_verify_code(page):
+    text_parts = [page.inner_text("body")]
+    for sel in ["input", "textarea"]:
+        try:
+            for el in page.locator(sel).all():
+                text_parts.append(el.get_attribute("value") or "")
+        except Exception:
+            pass
+    text = "\n".join(text_parts)
+    # Avoid taking years or dates from the relay page; Claude email codes are 6 digits.
+    for m in re.finditer(r"(?<!\d)(\d{6})(?!\d)", text):
+        code = m.group(1)
+        if not code.startswith("202"):
+            return code
     return None
 
 
@@ -131,80 +169,92 @@ with sync_playwright() as pw:
     shoot(claude_page, "02-claude-after-email")
     print(f"  Triggered. trigger_ts={trigger_ts}", flush=True)
 
-    # ── Step 3: 新 tab 开 171mail relay (空 token 模板) ─────────────
-    print(f"[3] Open 171mail relay + fill token", flush=True)
-    relay_page = ctx.new_page()
+    # ── Step 3: 新 tab 开 171mail relay, 或使用人工复制的 magic-link ───
+    relay_page = None
+    secure_link = None
+    verify_code = None
+    if MANUAL_MAGIC_LINK:
+        print(f"[3] Use provided 171mail magic-link", flush=True)
+        secure_link = MANUAL_MAGIC_LINK
+    else:
+        print(f"[3] Open 171mail relay + fill token", flush=True)
+        relay_page = ctx.new_page()
     # 给 claude.ai 一点投递时间 (邮件链路通常 < 30s)
-    time.sleep(8)
-    relay_page.goto(RELAY_URL, wait_until="domcontentloaded", timeout=30000)
-    time.sleep(4)
-    shoot(relay_page, "03-relay-landing")
-    print(f"  relay url: {relay_page.url[:120]}", flush=True)
+        time.sleep(8)
+        relay_page.goto(RELAY_URL_WITH_TOKEN, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(4)
+        shoot(relay_page, "03-relay-landing")
+        print(f"  relay url: {relay_page.url[:120]}", flush=True)
+
+        secure_link = scan_for_magic_link(relay_page)
+        if secure_link:
+            print(f"  found link from token URL: {secure_link[:100]}", flush=True)
 
     # 找 "查询令牌" 输入框 + fill RELAY_TOKEN
     # 实测 SPA 元素特征:textarea 或 input[type=text] 在 "查询令牌" 标签附近
-    filled = False
-    for sel in [
-        "textarea",
-        "input[type='text']",
-        "input:not([type='hidden']):not([type='checkbox']):not([type='radio'])",
-    ]:
-        try:
-            inputs = relay_page.locator(sel).all()
-            for inp in inputs:
-                if inp.is_visible():
-                    inp.click()
-                    # 先清干净 (可能 SPA 默认填了占位)
-                    relay_page.keyboard.press("Control+a")
-                    relay_page.keyboard.press("Delete")
-                    inp.fill(RELAY_TOKEN)
-                    print(f"  [relay] filled token via selector '{sel}' (len={len(RELAY_TOKEN)})", flush=True)
-                    filled = True
+    if not secure_link:
+        filled = False
+        for sel in [
+            "textarea",
+            "input[type='text']",
+            "input:not([type='hidden']):not([type='checkbox']):not([type='radio'])",
+        ]:
+            try:
+                inputs = relay_page.locator(sel).all()
+                for inp in inputs:
+                    if inp.is_visible():
+                        inp.click()
+                        # 先清干净 (可能 SPA 默认填了占位)
+                        relay_page.keyboard.press("Control+a")
+                        relay_page.keyboard.press("Delete")
+                        inp.fill(RELAY_TOKEN)
+                        print(f"  [relay] filled token via selector '{sel}' (len={len(RELAY_TOKEN)})", flush=True)
+                        filled = True
+                        break
+                if filled:
                     break
-            if filled:
-                break
-        except Exception as e:
-            print(f"  selector {sel} failed: {e}", flush=True)
+            except Exception as e:
+                print(f"  selector {sel} failed: {e}", flush=True)
 
-    if not filled:
-        print(f"  ⚠️ no input found, dumping body for debug", flush=True)
-        print(f"  body: {relay_page.inner_text('body')[:1500]!r}", flush=True)
-        shoot(relay_page, "03b-no-input")
+        if not filled:
+            print(f"  ⚠️ no input found, dumping body for debug", flush=True)
+            print(f"  body: {relay_page.inner_text('body')[:1500]!r}", flush=True)
+            shoot(relay_page, "03b-no-input")
 
-    time.sleep(2)
-    shoot(relay_page, "03c-after-fill")
+        time.sleep(2)
+        shoot(relay_page, "03c-after-fill")
 
-    # 点 "获取验证码" 按钮
-    clicked = False
-    for label_pat in [r"^获取验证码$", r"获取验证码", r"^获取$", r"^fetch$", r"^submit$"]:
-        try:
-            b = relay_page.get_by_role("button", name=re.compile(label_pat, re.I))
-            if b.count() > 0 and b.first.is_visible():
-                print(f"  [relay] clicking '{label_pat}'", flush=True)
-                b.first.click()
-                clicked = True
-                break
-        except Exception:
-            pass
-    if not clicked:
-        # text fallback
-        try:
-            t = relay_page.get_by_text(re.compile(r"获取验证码", re.I))
-            if t.count() > 0:
-                t.first.click()
-                clicked = True
-                print(f"  [relay] clicked via text fallback", flush=True)
-        except Exception:
-            pass
+        # 点 "获取验证码" 按钮
+        clicked = False
+        for label_pat in [r"^获取验证码$", r"获取验证码", r"^获取$", r"^fetch$", r"^submit$"]:
+            try:
+                b = relay_page.get_by_role("button", name=re.compile(label_pat, re.I))
+                if b.count() > 0 and b.first.is_visible():
+                    print(f"  [relay] clicking '{label_pat}'", flush=True)
+                    b.first.click()
+                    clicked = True
+                    break
+            except Exception:
+                pass
+        if not clicked:
+            # text fallback
+            try:
+                t = relay_page.get_by_text(re.compile(r"获取验证码", re.I))
+                if t.count() > 0:
+                    t.first.click()
+                    clicked = True
+                    print(f"  [relay] clicked via text fallback", flush=True)
+            except Exception:
+                pass
 
-    time.sleep(6)
-    shoot(relay_page, "03d-after-click-fetch")
+        time.sleep(6)
+        shoot(relay_page, "03d-after-click-fetch")
 
-    # ── Step 4: 在 relay_page 找 claude.ai magic-link ──────────────
-    print(f"[4] Scan relay page for claude magic-link", flush=True)
-    secure_link = None
-    deadline = time.time() + 120
-    while time.time() < deadline:
+    # ── Step 4: 在 relay_page 找 claude.ai magic-link 或 6 位验证码 ───
+    if not secure_link:
+        print(f"[4] Scan relay page for claude magic-link or verify code", flush=True)
+    deadline = time.time() + 240
+    while relay_page is not None and not secure_link and not verify_code and time.time() < deadline:
         # 检查无效令牌
         body_now = relay_page.inner_text("body")
         if "无效的令牌" in body_now or "令牌错误" in body_now or "token" in body_now.lower() and "invalid" in body_now.lower():
@@ -217,9 +267,13 @@ with sync_playwright() as pw:
         if secure_link:
             print(f"  found link: {secure_link[:100]}", flush=True)
             break
+        verify_code = scan_for_verify_code(relay_page)
+        if verify_code:
+            print(f"  found verify code len={len(verify_code)}", flush=True)
+            break
 
         # 邮件可能 30-60s 才到, 多试 "获取验证码"
-        time.sleep(8)
+        time.sleep(12)
         try:
             b = relay_page.get_by_role("button", name=re.compile(r"获取验证码|^获取$", re.I))
             if b.count() > 0 and b.first.is_visible() and b.first.is_enabled():
@@ -228,14 +282,59 @@ with sync_playwright() as pw:
         except Exception:
             pass
 
-    shoot(relay_page, "04-relay-fetched")
+    if relay_page is not None:
+        shoot(relay_page, "04-relay-fetched")
 
-    if not secure_link:
+    if not secure_link and not verify_code:
         body = relay_page.inner_text("body")[:2500]
-        print(f"  ❌ No claude magic-link in relay. body excerpt: {body!r}", flush=True)
+        print(f"  ❌ No claude magic-link or verify code in relay. body excerpt: {body!r}", flush=True)
         shoot(relay_page, "04-fail")
         br.close()
-        raise SystemExit("NO_SECURE_LINK")
+        raise SystemExit("NO_RELAY_RESULT")
+
+    if verify_code and not secure_link:
+        print(f"[5] Fill Claude verify code", flush=True)
+        claude_page.bring_to_front()
+        code_input = claude_page.locator(
+            "input[autocomplete='one-time-code'], input[name*='code'], input[type='text'], input:not([type])"
+        ).first
+        code_input.click()
+        code_input.fill(verify_code)
+        btn = claude_page.get_by_role("button", name=re.compile(r"verify|continue|submit", re.I))
+        if btn.count() > 0:
+            btn.first.click()
+        else:
+            claude_page.keyboard.press("Enter")
+        time.sleep(8)
+        shoot(claude_page, "05-after-verify-code")
+
+        if "/new" in claude_page.url or "claude.ai/projects" in claude_page.url or "claude.ai/chats" in claude_page.url:
+            print(f"  [5c] At /new — navigate back to OAuth URL", flush=True)
+            claude_page.goto(OAUTH_URL, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(6)
+            shoot(claude_page, "05d-back-to-oauth")
+
+        print(f"[6] Click Authorize", flush=True)
+        auth_btn = claude_page.get_by_role("button", name=re.compile(r"authorize|allow|approve", re.I))
+        if auth_btn.count() > 0:
+            shoot(claude_page, "06-authorize-page")
+            auth_btn.first.click()
+            time.sleep(6)
+        shoot(claude_page, "07-after-authorize")
+        print(f"  url={claude_page.url[:150]}", flush=True)
+
+        body_text = claude_page.inner_text("body")
+        m = re.search(r"[?&]code=([^&\s]+)", claude_page.url)
+        if m:
+            print(f"\n✅ CALLBACK_CODE={m.group(1)}", flush=True)
+        else:
+            m = re.search(r"\b([a-zA-Z0-9_-]{50,}#[a-zA-Z0-9_-]{20,})\b", body_text)
+            if m:
+                print(f"\n✅ CALLBACK_CODE={m.group(1)}", flush=True)
+            else:
+                print(f"\n❌ No code found. body: {body_text[:1500]!r}", flush=True)
+        br.close()
+        raise SystemExit(0)
 
     # ── Step 5: claude_page goto magic-link ───────────────────────
     print(f"[5] Open magic-link in claude_page", flush=True)

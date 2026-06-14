@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant U as 飞书用户
+    participant H as CodexOpsHer
+    participant S as codex-remote-control Skill
+    participant B as Bridge Server
+    participant W as Mac Worker
+    participant A as codex app-server
+    participant R as 本地 repo/shell
+
+    U->>H: /codex carher-admin 查 deploy 风险
+    H->>S: 命令硬路由 / Skill
+    S->>B: POST /api/codex/tasks
+    B->>B: 校验 her_uid/open_id/repo
+    B->>W: WSS start_task
+    W->>A: thread/start + turn/start
+    A->>R: 读文件 / 搜索 / 申请命令审批
+    A-->>W: streamed events
+    W-->>B: output / approval / diff
+    B-->>H: 飞书消息 / 卡片
+    H-->>U: 输出和审批按钮

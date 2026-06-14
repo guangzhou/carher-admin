@@ -4,5 +4,22 @@
       "Bash(lark-cli im *)",
       "Bash(npx skills *)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd=$(jq -r '.tool_input.command // \"\"'); if echo \"$cmd\" | grep -qE 'kubectl[[:space:]]+([^|;&]*[[:space:]])?delete[[:space:]]+(pod|pods)([[:space:]]|$)' && echo \"$cmd\" | grep -qE '(-n[[:space:]]+carher|--namespace[[:space:]]*=?[[:space:]]*carher)'; then echo 'BLOCKED: 禁止手动 kubectl delete pod -n carher（CLAUDE.md 零中断规则）。改用 kubectl rollout restart deployment/<name> 或 patch image。如真要删，在命令前手动加 # confirmed-zero-downtime-override 注释绕过本 hook。' >&2; echo \"$cmd\" | grep -q 'confirmed-zero-downtime-override' && exit 0 || exit 2; fi; exit 0"
+          },
+          {
+            "type": "command",
+            "command": "cmd=$(jq -r '.tool_input.command // \"\"'); if echo \"$cmd\" | grep -qE '(ssh|scp|rsync)[[:space:]]+([^|;&]*[[:space:]])?(root@47\\.84\\.112\\.136|root@43\\.98\\.160\\.216)'; then echo 'BLOCKED: 禁止直连堡垒机（root@47.84.112.136 / root@43.98.160.216）。必须走 scripts/jms 包装器，见 k8s-via-bastion skill。例：scripts/jms ssh AIYJY-litellm ...' >&2; exit 2; fi; exit 0"
+          }
+        ]
+      }
+    ]
   }
 }

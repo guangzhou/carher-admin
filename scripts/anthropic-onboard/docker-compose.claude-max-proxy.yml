@@ -1,0 +1,36 @@
+# Claude Max transparent proxy — 188 内网部署
+#
+# Deploy to /Data/claude-max-proxy/ on 188:
+#   1. cp claude-max-proxy.py    /Data/claude-max-proxy/proxy.py
+#   2. cp claude-max-proxy.Dockerfile /Data/claude-max-proxy/Dockerfile
+#   3. cp docker-compose.claude-max-proxy.yml /Data/claude-max-proxy/docker-compose.yml
+#   4. echo "ACCT_TOKENS=acct-1::sk-ant-oat01-...,acct-2::sk-ant-oat01-..." > /Data/claude-max-proxy/.env
+#   5. cd /Data/claude-max-proxy && docker compose up -d --build
+#
+# Port 3456 → 内网可访问 http://10.68.13.188:3456 (Anthropic Messages 协议)
+# 公网不暴露 (188 无公网 EIP)。
+
+services:
+  claude-max-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: claude-max-proxy:local
+    container_name: claude-max-proxy
+    restart: unless-stopped
+    ports:
+      - "3456:3456"
+    environment:
+      # 多账号 token (label::token,label::token); sticky-by-conversation + RR fallback
+      - PORT=3456
+      - ACCT_TOKENS=${ACCT_TOKENS}
+      # 可选入站 auth (空 = 开放,内网无所谓)
+      - API_KEYS=${API_KEYS:-}
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:3456/health\", timeout=3)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      # 热挂 proxy.py: 改代码后只需 docker compose restart 不用 rebuild
+      - ./proxy.py:/home/node/proxy.py:ro

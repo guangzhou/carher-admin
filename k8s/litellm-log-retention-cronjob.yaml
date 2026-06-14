@@ -1,0 +1,174 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: litellm-log-retention
+  namespace: carher
+  labels:
+    app: litellm-log-retention
+spec:
+  schedule: "0 5 * * *"
+  timeZone: "Asia/Shanghai"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 21600
+      template:
+        metadata:
+          labels:
+            app: litellm-log-retention
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: acr-vpc-secret
+            - name: acr-secret
+          containers:
+            - name: cleanup
+              image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher:postgres-16-litellm-retention-20260604
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: PGHOST
+                  value: litellm-db.carher.svc
+                - name: PGPORT
+                  value: "5432"
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: litellm-db-credentials
+                      key: POSTGRES_USER
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: litellm-db-credentials
+                      key: POSTGRES_PASSWORD
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: litellm-db-credentials
+                      key: POSTGRES_DB
+                - name: RETENTION_INTERVAL
+                  value: 14 days
+                - name: BATCH_SIZE
+                  value: "50000"
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              command:
+                - bash
+                - -ceu
+                - |
+                  log() {
+                    printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$*"
+                  }
+
+                  psql_atq() {
+                    psql -v ON_ERROR_STOP=1 -Atq -c "$1"
+                  }
+
+                  psql_stdin() {
+                    psql -v ON_ERROR_STOP=1
+                  }
+
+                  trim_count() {
+                    tr -d '[:space:]'
+                  }
+
+                  delete_by_ctid_batches() {
+                    table="$1"
+                    time_col="$2"
+                    total=0
+
+                    while true; do
+                      deleted="$(psql_atq "
+                        SET lock_timeout = '5s';
+                        SET statement_timeout = '10min';
+                        WITH doomed AS (
+                          SELECT ctid
+                          FROM \"${table}\"
+                          WHERE \"${time_col}\" < TIMESTAMP '${CUTOFF_TS}'
+                          ORDER BY \"${time_col}\", request_id
+                          LIMIT ${BATCH_SIZE}
+                        ), deleted AS (
+                          DELETE FROM \"${table}\" t
+                          USING doomed d
+                          WHERE t.ctid = d.ctid
+                          RETURNING 1
+                        )
+                        SELECT count(*) FROM deleted;
+                      " | trim_count)"
+
+                      if [ -z "$deleted" ] || [ "$deleted" = "0" ]; then
+                        break
+                      fi
+
+                      total=$((total + deleted))
+                      log "${table}: deleted batch=${deleted}, total=${total}"
+                    done
+
+                    log "${table}: deleted total=${total}"
+                  }
+
+                  delete_audit_batches() {
+                    total=0
+
+                    while true; do
+                      deleted="$(psql_atq "
+                        SET lock_timeout = '5s';
+                        SET statement_timeout = '10min';
+                        WITH doomed AS (
+                        SELECT id
+                        FROM \"LiteLLM_AuditLog\"
+                        WHERE updated_at < TIMESTAMP '${CUTOFF_TS}'
+                        ORDER BY updated_at, id
+                        LIMIT ${BATCH_SIZE}
+                        ), deleted AS (
+                          DELETE FROM \"LiteLLM_AuditLog\" t
+                          USING doomed d
+                          WHERE t.id = d.id
+                          RETURNING 1
+                        )
+                        SELECT count(*) FROM deleted;
+                      " | trim_count)"
+
+                      if [ -z "$deleted" ] || [ "$deleted" = "0" ]; then
+                        break
+                      fi
+
+                      total=$((total + deleted))
+                      log "LiteLLM_AuditLog: deleted batch=${deleted}, total=${total}"
+                    done
+
+                    log "LiteLLM_AuditLog: deleted total=${total}"
+                  }
+
+                  vacuum_table() {
+                    table="$1"
+                    log "VACUUM ANALYZE ${table}"
+                    psql_stdin <<SQL
+                  SET maintenance_work_mem = '256MB';
+                  SET max_parallel_maintenance_workers = 0;
+                  VACUUM (ANALYZE) "${table}";
+                  SQL
+                  }
+
+                  log "starting LiteLLM log retention: host=${PGHOST}, database=${PGDATABASE}, retention='${RETENTION_INTERVAL}', batch_size=${BATCH_SIZE}"
+                  psql_atq "SELECT 1;" >/dev/null
+                  CUTOFF_TS="$(psql_atq "SELECT (now() - interval '${RETENTION_INTERVAL}')::timestamp(3);")"
+                  log "fixed cleanup cutoff: ${CUTOFF_TS}"
+
+                  delete_by_ctid_batches LiteLLM_SpendLogs startTime
+                  delete_by_ctid_batches LiteLLM_ErrorLogs startTime
+                  delete_audit_batches
+
+                  log "running low-memory VACUUM ANALYZE on log tables"
+                  vacuum_table LiteLLM_SpendLogs
+                  vacuum_table LiteLLM_ErrorLogs
+                  vacuum_table LiteLLM_AuditLog
+
+                  log "completed LiteLLM log retention"

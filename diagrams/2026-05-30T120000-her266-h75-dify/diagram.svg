@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1420" viewBox="0 0 1800 1420">
+  <rect x="0" y="0" width="1800" height="1420" fill="#F7F8F3"/>
+  <rect x="42" y="36" width="1716" height="132" rx="24" fill="#E7F4EC" stroke="#1E5B55" stroke-width="3"/>
+  <text x="82" y="86" font-family="Noto Sans SC, sans-serif" font-size="34" font-weight="700" fill="#101820">her-266 H75/Dify 行为对齐复盘</text>
+  <text x="84" y="128" font-family="Noto Sans SC, sans-serif" font-size="20" fill="#31423D">目标：只让 ACK her-266 对齐 S3 hermestest-75 的 OpenClaw/Hermes/Dify 能力；旧 Her 保持默认路径</text>
+  <rect x="1370" y="62" width="326" height="78" rx="18" fill="#D4F2A8"/>
+  <text x="1400" y="94" font-family="Noto Sans SC, sans-serif" font-size="18" font-weight="700" fill="#101820">完成状态</text>
+  <text x="1400" y="124" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">H75_HER=1 · Hermes 可切 · Dify OK</text>
+
+  <rect x="58" y="205" width="1060" height="360" rx="22" fill="#FFFFFF" stroke="#1E5B55" stroke-width="3"/>
+  <text x="88" y="248" font-family="Noto Sans SC, sans-serif" font-size="26" font-weight="700" fill="#1E5B55">1. 架构总览</text>
+  <rect x="88" y="288" width="220" height="92" rx="18" fill="#E7F4EC" stroke="#1E5B55" stroke-width="2"/>
+  <text x="114" y="322" font-family="Noto Sans SC, sans-serif" font-size="18" font-weight="700" fill="#101820">S3 hermestest-75</text>
+  <text x="114" y="352" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#31423D">live H75 source</text>
+  <rect x="345" y="288" width="210" height="92" rx="18" fill="#FFF2D7" stroke="#B86D11" stroke-width="2"/>
+  <text x="373" y="322" font-family="Noto Sans SC, sans-serif" font-size="18" font-weight="700" fill="#101820">S2 Dify 1.4.2</text>
+  <text x="373" y="352" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#4F3920">bootstrap + lifecycle</text>
+  <rect x="620" y="288" width="220" height="92" rx="18" fill="#EAF0FF" stroke="#4568B2" stroke-width="2"/>
+  <text x="648" y="322" font-family="Noto Sans SC, sans-serif" font-size="18" font-weight="700" fill="#101820">ACK Dify</text>
+  <text x="648" y="352" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#263759">dify-k8s.carher.net</text>
+  <rect x="900" y="288" width="185" height="92" rx="18" fill="#F2EAFE" stroke="#7D5BBE" stroke-width="2"/>
+  <text x="928" y="322" font-family="Noto Sans SC, sans-serif" font-size="18" font-weight="700" fill="#101820">Cloudflare</text>
+  <text x="928" y="352" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#3F2D60">UI/API/Bootstrap</text>
+  <rect x="88" y="440" width="220" height="82" rx="18" fill="#EFF7FF" stroke="#2D78A8" stroke-width="2"/>
+  <text x="116" y="472" font-family="Noto Sans SC, sans-serif" font-size="18" font-weight="700" fill="#101820">Admin API</text>
+  <text x="116" y="500" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#243B4D">UID=266 only</text>
+  <rect x="368" y="440" width="230" height="82" rx="18" fill="#F0F7E6" stroke="#6D8F2D" stroke-width="2"/>
+  <text x="396" y="472" font-family="Noto Sans SC, sans-serif" font-size="18" font-weight="700" fill="#101820">Operator</text>
+  <text x="396" y="500" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#35471F">profile=h75-openclaw</text>
+  <rect x="658" y="428" width="220" height="106" rx="22" fill="#D4F2A8" stroke="#1E5B55" stroke-width="3"/>
+  <text x="690" y="466" font-family="Noto Sans SC, sans-serif" font-size="20" font-weight="700" fill="#101820">carher-266</text>
+  <text x="690" y="496" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#31423D">H75 runtime · beta</text>
+  <rect x="940" y="440" width="145" height="82" rx="18" fill="#F3F4F5" stroke="#9299A1" stroke-width="2" stroke-dasharray="8 8"/>
+  <text x="970" y="472" font-family="Noto Sans SC, sans-serif" font-size="18" font-weight="700" fill="#30363D">旧 Her</text>
+  <text x="970" y="500" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#59636E">默认路径</text>
+  <polyline points="308,334 345,334" fill="none" stroke="#778089" stroke-width="3"/>
+  <polyline points="555,334 620,334" fill="none" stroke="#778089" stroke-width="3"/>
+  <polyline points="840,334 900,334" fill="none" stroke="#778089" stroke-width="3"/>
+  <polyline points="308,480 368,480" fill="none" stroke="#778089" stroke-width="3"/>
+  <polyline points="598,480 658,480" fill="none" stroke="#778089" stroke-width="3"/>
+  <polyline points="878,480 940,480" fill="none" stroke="#B4BBC2" stroke-width="3" stroke-dasharray="8 8"/>
+
+  <rect x="1160" y="205" width="580" height="360" rx="22" fill="#FFFFFF" stroke="#B86D11" stroke-width="3"/>
+  <text x="1190" y="248" font-family="Noto Sans SC, sans-serif" font-size="26" font-weight="700" fill="#B86D11">2. Dify 联动数据流</text>
+  <rect x="1202" y="286" width="230" height="58" rx="16" fill="#FFF5E5" stroke="#B86D11" stroke-width="2"/>
+  <text x="1228" y="322" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">CARHER_DIFY_* env</text>
+  <rect x="1468" y="286" width="220" height="58" rx="16" fill="#FFF5E5" stroke="#B86D11" stroke-width="2"/>
+  <text x="1494" y="322" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">dify-bootstrap-init</text>
+  <rect x="1202" y="392" width="230" height="70" rx="16" fill="#EAF0FF" stroke="#4568B2" stroke-width="2"/>
+  <text x="1228" y="421" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">/v1/bootstrap</text>
+  <text x="1228" y="448" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#263759">workspace/app/key</text>
+  <rect x="1468" y="392" width="220" height="70" rx="16" fill="#E7F4EC" stroke="#1E5B55" stroke-width="2"/>
+  <text x="1494" y="421" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">workflow config</text>
+  <text x="1494" y="448" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#263759">bot_id=carher-266</text>
+  <rect x="1202" y="492" width="486" height="46" rx="14" fill="#F3F4F5" stroke="#9299A1" stroke-width="2"/>
+  <text x="1230" y="522" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">her-workflow-dify-creator / mcp → lifecycle proxy</text>
+  <polyline points="1432,315 1468,315" fill="none" stroke="#B86D11" stroke-width="3"/>
+  <polyline points="1578,344 1578,366 1317,366 1317,392" fill="none" stroke="#B86D11" stroke-width="3"/>
+  <polyline points="1432,427 1468,427" fill="none" stroke="#4568B2" stroke-width="3"/>
+  <polyline points="1578,462 1578,492" fill="none" stroke="#1E5B55" stroke-width="3"/>
+
+  <rect x="58" y="600" width="820" height="330" rx="22" fill="#FFFFFF" stroke="#7D5BBE" stroke-width="3"/>
+  <text x="88" y="642" font-family="Noto Sans SC, sans-serif" font-size="26" font-weight="700" fill="#7D5BBE">3. /hermes 引擎切换时序</text>
+  <line x1="145" y1="700" x2="145" y2="882" stroke="#D0D5DA" stroke-width="3"/>
+  <line x1="340" y1="700" x2="340" y2="882" stroke="#D0D5DA" stroke-width="3"/>
+  <line x1="540" y1="700" x2="540" y2="882" stroke="#D0D5DA" stroke-width="3"/>
+  <line x1="735" y1="700" x2="735" y2="882" stroke="#D0D5DA" stroke-width="3"/>
+  <text x="100" y="690" font-family="Noto Sans SC, sans-serif" font-size="16" font-weight="700" fill="#101820">飞书</text>
+  <text x="290" y="690" font-family="Noto Sans SC, sans-serif" font-size="16" font-weight="700" fill="#101820">OpenClaw</text>
+  <text x="488" y="690" font-family="Noto Sans SC, sans-serif" font-size="16" font-weight="700" fill="#101820">engine-swap</text>
+  <text x="696" y="690" font-family="Noto Sans SC, sans-serif" font-size="16" font-weight="700" fill="#101820">Hermes</text>
+  <rect x="98" y="724" width="96" height="42" rx="12" fill="#F2EAFE" stroke="#7D5BBE" stroke-width="2"/>
+  <text x="116" y="751" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#101820">/hermes</text>
+  <polyline points="194,745 300,745" fill="none" stroke="#7D5BBE" stroke-width="3"/>
+  <rect x="268" y="724" width="144" height="42" rx="12" fill="#F2EAFE" stroke="#7D5BBE" stroke-width="2"/>
+  <text x="288" y="751" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#101820">hook 拦截命令</text>
+  <polyline points="412,745 470,745" fill="none" stroke="#7D5BBE" stroke-width="3"/>
+  <rect x="468" y="724" width="146" height="42" rx="12" fill="#F2EAFE" stroke="#7D5BBE" stroke-width="2"/>
+  <text x="486" y="751" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#101820">chat_id fallback</text>
+  <polyline points="614,745 685,745" fill="none" stroke="#7D5BBE" stroke-width="3"/>
+  <rect x="666" y="724" width="138" height="42" rx="12" fill="#D4F2A8" stroke="#1E5B55" stroke-width="2"/>
+  <text x="692" y="751" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#101820">Hermes active</text>
+  <rect x="116" y="810" width="658" height="64" rx="16" fill="#F3F4F5" stroke="#9299A1" stroke-width="2"/>
+  <text x="144" y="836" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#30363D">关键修复：H75 runtime chat_id fallback + Operator 注入 home channel/profile</text>
+  <text x="144" y="860" font-family="Noto Sans SC, sans-serif" font-size="15" fill="#30363D">成功信号：日志出现 command intercepted / swap-card started / active engine=hermes</text>
+
+  <rect x="920" y="600" width="820" height="330" rx="22" fill="#FFFFFF" stroke="#2D78A8" stroke-width="3"/>
+  <text x="950" y="642" font-family="Noto Sans SC, sans-serif" font-size="26" font-weight="700" fill="#2D78A8">4. 单点灰度执行泳道</text>
+  <rect x="960" y="690" width="720" height="54" rx="14" fill="#EFF7FF" stroke="#2D78A8" stroke-width="2"/>
+  <text x="982" y="724" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">本机：确认 source-of-truth → 上传脚本 → 发起短命命令</text>
+  <rect x="960" y="760" width="720" height="54" rx="14" fill="#F0F7E6" stroke="#6D8F2D" stroke-width="2"/>
+  <text x="982" y="794" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">k8s-work-227：长任务构建 runtime/operator → 推 ACR VPC</text>
+  <rect x="960" y="830" width="720" height="54" rx="14" fill="#FFF5E5" stroke="#B86D11" stroke-width="2"/>
+  <text x="982" y="864" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">ACK：apply profile → Admin API UID=266 → watch/verify → audit</text>
+
+  <rect x="58" y="965" width="1682" height="360" rx="22" fill="#FFFFFF" stroke="#101820" stroke-width="3"/>
+  <text x="88" y="1008" font-family="Noto Sans SC, sans-serif" font-size="26" font-weight="700" fill="#101820">5. 风险、回滚与后续优化</text>
+  <rect x="92" y="1052" width="380" height="210" rx="18" fill="#FFF0F0" stroke="#C94B4B" stroke-width="2"/>
+  <text x="122" y="1088" font-family="Noto Sans SC, sans-serif" font-size="19" font-weight="700" fill="#8D2424">回滚触发</text>
+  <text x="122" y="1124" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">Pod 不 Ready / WS 断连</text>
+  <text x="122" y="1154" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">Dify bootstrap 或 lifecycle 失败</text>
+  <text x="122" y="1184" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">H75 profile 出现在非目标 Her</text>
+  <text x="122" y="1214" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">/hermes 无法切换</text>
+  <rect x="520" y="1052" width="390" height="210" rx="18" fill="#F2EAFE" stroke="#7D5BBE" stroke-width="2"/>
+  <text x="550" y="1088" font-family="Noto Sans SC, sans-serif" font-size="19" font-weight="700" fill="#513483">一条命令回滚</text>
+  <text x="550" y="1124" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">移除 h75-openclaw annotation</text>
+  <text x="550" y="1154" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">Admin API 改回 stable</text>
+  <text x="550" y="1184" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">image=fix-compact-eb348941</text>
+  <text x="550" y="1214" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">复测 WS 与基础回复</text>
+  <rect x="960" y="1052" width="720" height="210" rx="18" fill="#E7F4EC" stroke="#1E5B55" stroke-width="2"/>
+  <text x="990" y="1088" font-family="Noto Sans SC, sans-serif" font-size="19" font-weight="700" fill="#1E5B55">后续优化</text>
+  <text x="990" y="1124" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">审计脚本 Job 化；H75 build pipeline 化；切换命令回归测试</text>
+  <text x="990" y="1154" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">Dify bootstrap 增加 readiness、tenant cache、lifecycle 观测</text>
+  <text x="990" y="1184" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">灰度路径标准化：beta → canary → early → stable</text>
+  <text x="990" y="1214" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#101820">Secret 来源和轮换流程文档化</text>
+
+  <text x="72" y="1370" font-family="Noto Sans SC, sans-serif" font-size="16" fill="#59636E">脱敏原则：不在画板、文档、脚本输出中展示真实 token、key、完整 chat_id、Cookie 或临时登录链接。</text>
+</svg>

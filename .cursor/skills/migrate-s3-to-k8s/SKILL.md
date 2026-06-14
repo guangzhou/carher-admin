@@ -33,6 +33,8 @@ description: >-
 | 工作目录 | /Data/CarHer |
 | 用户配置 | /Data/CarHer/docker/users.csv |
 | 数据卷路径 | /Data/docker/volumes/carher-{id}-data/_data/ |
+| **容器命名** | **`hermestest-{id}`**（不是 `carher-{id}`，历史命名）。用户说 "carher-14" 时实际容器是 `hermestest-14`。`docker ps -a | grep hermestest-` 列全部 |
+| docker 权限 | `cltx` 用户在 docker group，**不需要 sudo**；`docker exec`/`docker inspect`/`docker logs` 直接跑；只有 `ls /Data/docker/volumes/...` 需要 sudo（PermissionDenied）|
 
 > S3 上 sudo 操作走 JMS 登录账号的默认 sudoers；如果 sudo 提示输入密码，
 > 联系管理员在 `/etc/sudoers.d/` 加 `NOPASSWD`。

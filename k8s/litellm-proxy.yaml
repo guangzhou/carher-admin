@@ -120,6 +120,36 @@ data:
           cache_read_input_token_cost: 2.0e-06
           cache_creation_input_token_cost: 2.5e-05
 
+      - model_name: claude-opus-4-8
+        litellm_params:
+          model: anthropic/anthropic.claude-opus-4-8
+          api_key: os.environ/WANGSU_DIRECT5_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
+          input_cost_per_token: 2.0e-05
+          output_cost_per_token: 1.0e-04
+          cache_read_input_token_cost: 2.0e-06
+          cache_creation_input_token_cost: 2.5e-05
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: wangsu-direct5/claude-opus-4-8
+          input_cost_per_token: 2.0e-05
+          output_cost_per_token: 1.0e-04
+          cache_read_input_token_cost: 2.0e-06
+          cache_creation_input_token_cost: 2.5e-05
+
       # ═══════════════════════════════════════════
       # GPT / Gemini: OpenRouter — primary (unchanged)
       # ═══════════════════════════════════════════
@@ -277,6 +307,67 @@ data:
           cache_read_input_token_cost: 2.0e-06
           cache_creation_input_token_cost: 2.5e-05
 
+      # Historical OpenRouter alias kept for compatibility; upstream is Wangsu.
+      - model_name: openrouter-claude-opus-4-8
+        litellm_params:
+          model: anthropic/anthropic.claude-opus-4-8
+          api_key: os.environ/WANGSU_DIRECT5_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: wangsu-direct5/claude-opus-4-8
+          input_cost_per_token: 0.000005
+          output_cost_per_token: 0.000025
+          cache_read_input_token_cost: 0.0000005
+          cache_creation_input_token_cost: 0.00000625
+
+      - model_name: openrouter-claude-opus-4-8-fast
+        litellm_params:
+          model: anthropic/anthropic.claude-opus-4-8
+          api_key: os.environ/WANGSU_DIRECT5_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
+          input_cost_per_token: 0.00001
+          output_cost_per_token: 0.00005
+          cache_read_input_token_cost: 0.000001
+          cache_creation_input_token_cost: 0.0000125
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: wangsu-direct5/claude-opus-4-8
+          input_cost_per_token: 0.00001
+          output_cost_per_token: 0.00005
+          cache_read_input_token_cost: 0.000001
+          cache_creation_input_token_cost: 0.0000125
+
       # ═══════════════════════════════════════════
       # Fallback: Wangsu (网宿) OpenAI compat for GPT / Gemini
       # Use custom_openai/* so LiteLLM stays on chat/completions.
@@ -390,6 +481,36 @@ data:
 
       - model_name: anthropic.claude-sonnet-4-6
         litellm_params:
+          model: anthropic/claude-sonnet-4-6
+          api_key: os.environ/KUAIHUI_API_KEY
+          api_base: https://kuaihuiai.com
+          input_cost_per_token: 1.2e-05
+          output_cost_per_token: 6.0e-05
+          cache_read_input_token_cost: 1.2e-06
+          cache_creation_input_token_cost: 1.5e-05
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: kuaihui/anthropic.claude-sonnet-4-6
+          input_cost_per_token: 1.2e-05
+          output_cost_per_token: 6.0e-05
+          cache_read_input_token_cost: 1.2e-06
+          cache_creation_input_token_cost: 1.5e-05
+
+      - model_name: anthropic.wangsu.claude-sonnet-4-6
+        litellm_params:
           model: anthropic/anthropic.claude-sonnet-4-6
           api_key: os.environ/WANGSU_DIRECT5_API_KEY
           api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
@@ -479,13 +600,47 @@ data:
           cache_creation_input_token_cost: 5.0e-06
 
       # ═══════════════════════════════════════════
-      # Provider: Wangsu Anthropic Direct Mode (v2 gateway) — cheliantianxia6
-      # Gateway id: af1ho8mp. Initially opt-in only: restricted to specific
-      # virtual keys via per-key `models` allowlist (e.g. carher-1000 and
-      # claude-code-liuguoxian-50gj). Pricing identical to Opus 4.6.
+      # Provider: Kuaihui primary for Anthropic-native Opus 4.7.
+      # Wangsu Direct6 is kept as the first explicit fallback under
+      # anthropic.wangsu.claude-opus-4-7 below.
       # ═══════════════════════════════════════════
 
       - model_name: anthropic.claude-opus-4-7
+        litellm_params:
+          model: anthropic/claude-opus-4-7
+          api_key: os.environ/KUAIHUI_API_KEY
+          api_base: https://kuaihuiai.com
+          input_cost_per_token: 2.0e-05
+          output_cost_per_token: 1.0e-04
+          cache_read_input_token_cost: 2.0e-06
+          cache_creation_input_token_cost: 2.5e-05
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: kuaihui/anthropic.claude-opus-4-7
+          input_cost_per_token: 2.0e-05
+          output_cost_per_token: 1.0e-04
+          cache_read_input_token_cost: 2.0e-06
+          cache_creation_input_token_cost: 2.5e-05
+
+      # ═══════════════════════════════════════════
+      # Provider: Wangsu Anthropic Direct Mode (v2 gateway) — cheliantianxia6
+      # Gateway id: af1ho8mp. Internal fallback alias for Opus 4.7.
+      # ═══════════════════════════════════════════
+
+      - model_name: anthropic.wangsu.claude-opus-4-7
         litellm_params:
           model: anthropic/anthropic.claude-opus-4-7
           api_key: os.environ/WANGSU_DIRECT5_API_KEY
@@ -510,6 +665,36 @@ data:
                 ttl: "1h"
         model_info:
           id: wangsu-direct6/claude-opus-4-7
+          input_cost_per_token: 2.0e-05
+          output_cost_per_token: 1.0e-04
+          cache_read_input_token_cost: 2.0e-06
+          cache_creation_input_token_cost: 2.5e-05
+
+      - model_name: anthropic.claude-opus-4-8
+        litellm_params:
+          model: anthropic/anthropic.claude-opus-4-8
+          api_key: os.environ/WANGSU_DIRECT5_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/sqix2pnh/anthropic
+          input_cost_per_token: 2.0e-05
+          output_cost_per_token: 1.0e-04
+          cache_read_input_token_cost: 2.0e-06
+          cache_creation_input_token_cost: 2.5e-05
+          extra_headers:
+            anthropic-beta: "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+          cache_control_injection_points:
+            - location: message
+              role: system
+              control:
+                type: ephemeral
+                ttl: "1h"
+            - location: message
+              role: user
+              index: -1
+              control:
+                type: ephemeral
+                ttl: "1h"
+        model_info:
+          id: wangsu-direct5/claude-opus-4-8
           input_cost_per_token: 2.0e-05
           output_cost_per_token: 1.0e-04
           cache_read_input_token_cost: 2.0e-06
@@ -982,15 +1167,12 @@ data:
       # (`chatgpt-gpt-5.5` etc) so 500+ existing carher-* virtual keys' gpt-5.4
       # traffic stays on openrouter unless their allowlist is later updated.
       # ═══════════════════════════════════════════
-      # ── chatgpt-gpt-5.5 (5 deployments) ──
-      - model_name: chatgpt-gpt-5.5
-        litellm_params:
-          model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-7.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-7/chatgpt-gpt-5.5}
+      # ── ChatGPT Pro account pool (2026-06-02 healthy Aliyun acct sync) ──
+      # Source of truth for prod routing: only upstream-healthy Aliyun acct pods.
+      # Healthy on 2026-06-08: acct-8/9/10/11/18/19/20/21.
+      # Excluded: acct-7/17 token_invalidated. wangsu-gpt-* remains fallback.
+
+      # chatgpt-gpt-5.5 (8 healthy deployments)
       - model_name: chatgpt-gpt-5.5
         litellm_params:
           model: openai/chatgpt-gpt-5.5
@@ -1023,16 +1205,106 @@ data:
           input_cost_per_token: 0.000001
           output_cost_per_token: 0.000006
         model_info: {mode: responses, id: chatgpt-acct-11/chatgpt-gpt-5.5}
-
-      # ── chatgpt-gpt-5.4 (5 deployments) ──
-      - model_name: chatgpt-gpt-5.4
+      - model_name: chatgpt-gpt-5.5
         litellm_params:
-          model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-7.carher.svc:4000
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-18.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-7/gpt-5.4}
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000006
+        model_info: {mode: responses, id: chatgpt-acct-18/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000006
+        model_info: {mode: responses, id: chatgpt-acct-19/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000006
+        model_info: {mode: responses, id: chatgpt-acct-20/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-21.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000006
+        model_info: {mode: responses, id: chatgpt-acct-21/chatgpt-gpt-5.5}
+
+      # chatgpt-pool-gpt-5.5 (8 healthy deployments)
+      - model_name: chatgpt-pool-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-8.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000006
+        model_info: {mode: responses, id: chatgpt-acct-8/chatgpt-pool-gpt-5.5}
+      - model_name: chatgpt-pool-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-9.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000006
+        model_info: {mode: responses, id: chatgpt-acct-9/chatgpt-pool-gpt-5.5}
+      - model_name: chatgpt-pool-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-10.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000006
+        model_info: {mode: responses, id: chatgpt-acct-10/chatgpt-pool-gpt-5.5}
+      - model_name: chatgpt-pool-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-11.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000006
+        model_info: {mode: responses, id: chatgpt-acct-11/chatgpt-pool-gpt-5.5}
+      - model_name: chatgpt-pool-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-18.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000006
+        model_info: {mode: responses, id: chatgpt-acct-18/chatgpt-pool-gpt-5.5}
+      - model_name: chatgpt-pool-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000006
+        model_info: {mode: responses, id: chatgpt-acct-19/chatgpt-pool-gpt-5.5}
+      - model_name: chatgpt-pool-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000006
+        model_info: {mode: responses, id: chatgpt-acct-20/chatgpt-pool-gpt-5.5}
+      - model_name: chatgpt-pool-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-21.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.000001
+          output_cost_per_token: 0.000006
+        model_info: {mode: responses, id: chatgpt-acct-21/chatgpt-pool-gpt-5.5}
+
+      # chatgpt-gpt-5.4 (8 healthy deployments)
       - model_name: chatgpt-gpt-5.4
         litellm_params:
           model: openai/gpt-5.4
@@ -1065,16 +1337,98 @@ data:
           input_cost_per_token: 0.0000005
           output_cost_per_token: 0.000003
         model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.4}
-
-      # ── chatgpt-gpt-5.3-codex (5 deployments) ──
-      - model_name: chatgpt-gpt-5.3-codex
+      - model_name: chatgpt-gpt-5.4
         litellm_params:
-          model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-7.carher.svc:4000
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-18.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
+          input_cost_per_token: 0.0000005
           output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-7/gpt-5.3-codex}
+        model_info: {mode: responses, id: chatgpt-acct-18/gpt-5.4}
+      - model_name: chatgpt-gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000005
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.4}
+      - model_name: chatgpt-gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000005
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.4}
+      - model_name: chatgpt-gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-21.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000005
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-21/gpt-5.4}
+
+      # gpt-5.4 (7 healthy deployments)
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-8.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000005
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-8/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-9.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000005
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-9/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-10.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000005
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-10/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-11.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000005
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-18.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000005
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-18/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000005
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000005
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.4}
+
+      # chatgpt-gpt-5.3-codex (8 healthy deployments)
       - model_name: chatgpt-gpt-5.3-codex
         litellm_params:
           model: openai/gpt-5.3-codex
@@ -1107,16 +1461,98 @@ data:
           input_cost_per_token: 0.0000006
           output_cost_per_token: 0.000003
         model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.3-codex}
-
-      # ── chatgpt-gpt-5.3-codex-spark (5 deployments) ──
-      - model_name: chatgpt-gpt-5.3-codex-spark
+      - model_name: chatgpt-gpt-5.3-codex
         litellm_params:
-          model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-7.carher.svc:4000
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-18.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
           input_cost_per_token: 0.0000006
           output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-7/gpt-5.3-codex-spark}
+        model_info: {mode: responses, id: chatgpt-acct-18/gpt-5.3-codex}
+      - model_name: chatgpt-gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.3-codex}
+      - model_name: chatgpt-gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.3-codex}
+      - model_name: chatgpt-gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-21.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-21/gpt-5.3-codex}
+
+      # gpt-5.3-codex (7 healthy deployments)
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-8.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-8/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-9.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-9/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-10.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-10/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-11.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-18.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-18/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.3-codex}
+
+      # chatgpt-gpt-5.3-codex-spark (8 healthy deployments)
       - model_name: chatgpt-gpt-5.3-codex-spark
         litellm_params:
           model: openai/gpt-5.3-codex-spark
@@ -1149,6 +1585,96 @@ data:
           input_cost_per_token: 0.0000006
           output_cost_per_token: 0.000003
         model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.3-codex-spark}
+      - model_name: chatgpt-gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-18.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-18/gpt-5.3-codex-spark}
+      - model_name: chatgpt-gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.3-codex-spark}
+      - model_name: chatgpt-gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.3-codex-spark}
+      - model_name: chatgpt-gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-21.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-21/gpt-5.3-codex-spark}
+
+      # gpt-5.3-codex-spark (7 healthy deployments)
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-8.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-8/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-9.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-9/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-10.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-10/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-11.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-18.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-18/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 0.0000006
+          output_cost_per_token: 0.000003
+        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.3-codex-spark}
 
     router_settings:
       # ── DualCache backend: Redis (2026-05-20) ────────────────────────
@@ -1237,23 +1763,27 @@ data:
         - gpt-5.4: ["wangsu-gpt-5.4"]
         - chatgpt-gpt-5.5: ["wangsu-gpt-5.5"]
         - gemini-3.1-pro-preview: ["wangsu-gemini-3.1-pro-preview"]
-        # opus-4-7 primary lives on Wangsu cheliantianxia6 (af1ho8mp).
+        # opus-4-7 primary lives on Kuaihui; Wangsu Direct6 is first fallback.
         # Fallback chain (in order, each tried once):
-        #   1) anthropic.openrouter.claude-opus-4-7
+        #   1) anthropic.wangsu.claude-opus-4-7
+        #      Wangsu Direct6, SAME model, original production provider.
+        #   2) anthropic.openrouter.claude-opus-4-7
         #      OpenRouter Anthropic-native, SAME model, alternative provider.
         #      Verified live 2026-04-27 (status 200, gen-* id, both stream &
         #      non-stream, content_block_delta + message_stop intact).
-        #      Covers Wangsu pre-headers stalls / 5xx without quality loss.
-        #   2) anthropic.claude-opus-4-6
-        #      One-tier downgrade if both opus-4-7 paths are dead. Native
+        #      Covers provider pre-headers stalls / 5xx without quality loss.
+        #   3) anthropic.claude-opus-4-6
+        #      One-tier downgrade if all opus-4-7 paths are dead. Native
         #      protocol, no provider switch.
-        #   3) openrouter-claude-opus-4-6
+        #   4) openrouter-claude-opus-4-6
         #      Last resort: opus-4-6 via OpenRouter OpenAI-compat. Note that
         #      Router fallbacks are flat (the chain is tried left-to-right
         #      against the originating request); this is a manual mirror
         #      of `claude-opus-4-6: ["openrouter-claude-opus-4-6"]` so users
         #      never see a hard 5xx even if both Wangsu paths are down.
-        - anthropic.claude-opus-4-7: ["anthropic.openrouter.claude-opus-4-7", "anthropic.claude-opus-4-6", "openrouter-claude-opus-4-6"]
+        - claude-opus-4-8: ["claude-opus-4-7"]
+        - anthropic.claude-opus-4-8: ["anthropic.claude-opus-4-7"]
+        - anthropic.claude-opus-4-7: ["anthropic.wangsu.claude-opus-4-7", "anthropic.openrouter.claude-opus-4-7", "anthropic.claude-opus-4-6", "openrouter-claude-opus-4-6"]
         # ── Wangsu-primary Claude (Anthropic-native, Claude Code cohort) ──
         # 2026-04-27: prior to this addition the /v1/messages path's
         # ``anthropic.claude-*-4-6`` aliases had NO router-level fallback.
@@ -1267,7 +1797,7 @@ data:
         # design; those are handled by streaming_bridge's synthetic
         # error frames so SDK-level retries kick in.
         - anthropic.claude-opus-4-6: ["anthropic.openrouter.claude-opus-4-6"]
-        - anthropic.claude-sonnet-4-6: ["anthropic.openrouter.claude-sonnet-4-6"]
+        - anthropic.claude-sonnet-4-6: ["anthropic.wangsu.claude-sonnet-4-6", "anthropic.openrouter.claude-sonnet-4-6"]
         # ── OpenRouter-primary Claude (OpenAI-compat, opt-in cohort) ──
         # Symmetric fallback to Wangsu Direct5 when OpenRouter fails.
         - openrouter-claude-opus-4-7: ["anthropic.claude-opus-4-7"]

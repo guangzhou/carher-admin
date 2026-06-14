@@ -1,0 +1,53 @@
+flowchart LR
+    subgraph LOCAL["本地 Codex 环境"]
+        CX["Codex CLI / App"]
+        MCP["carher-her-mcp<br/>MCP server"]
+        CW["Mac Worker<br/>主动反连"]
+        CAS["codex app-server<br/>127.0.0.1:4500"]
+        REPO["本地 repo / shell / git"]
+        CX --> MCP
+        CW --> CAS
+        CAS --> REPO
+    end
+
+    subgraph CONTROL["公网控制面"]
+        BR["Bridge Server<br/>API / WSS / 审计"]
+        REG["Worker Registry"]
+        POL["权限策略<br/>open_id / her_uid / repo"]
+        AUD["Audit Log"]
+        BR --- REG
+        BR --- POL
+        BR --- AUD
+    end
+
+    subgraph K8S["K8s carher namespace"]
+        HGP["Her Gateway Proxy"]
+        ADM["carher-admin<br/>实例 / 配置 / 审计"]
+        subgraph HER["Her Pods"]
+            H1["CodexOpsHer<br/>OpenClaw + Feishu"]
+            HN["普通 Her<br/>默认不开 Codex"]
+        end
+        HGP --> H1
+        HGP -.白名单后.-> HN
+        ADM --- HGP
+    end
+
+    subgraph FEISHU["飞书"]
+        USER["用户 / 群聊"]
+        FS["飞书开放平台<br/>事件 / 卡片"]
+        USER --> FS
+    end
+
+    MCP -->|"Codex 调 Her"| BR
+    BR --> HGP
+    FS -->|"Her 收消息"| H1
+    H1 -->|"Skill 调 Bridge"| BR
+    BR <-->|"WSS 长连接"| CW
+    BR -->|"飞书卡片 / 输出"| FS
+
+    classDef safe fill:#E8F5E9,stroke:#2E7D32,color:#1B5E20;
+    classDef risk fill:#FFF3E0,stroke:#EF6C00,color:#E65100;
+    classDef ctrl fill:#E3F2FD,stroke:#1565C0,color:#0D47A1;
+    class BR,REG,POL,AUD ctrl;
+    class H1,CW,CAS safe;
+    class HN risk;

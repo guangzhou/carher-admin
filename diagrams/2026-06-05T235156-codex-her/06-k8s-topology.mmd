@@ -1,0 +1,39 @@
+flowchart LR
+    subgraph EXT["外部 / 本地"]
+        FEI["飞书开放平台"]
+        MAC["Mac Worker<br/>Codex app-server 本地"]
+        CODEX["Codex MCP client"]
+    end
+
+    subgraph ACK["ACK K8s 集群"]
+        subgraph NS["namespace: carher"]
+            BR["codex-bridge Deployment"]
+            HGP["her-gateway-proxy Deployment"]
+            ADMIN["carher-admin"]
+            OP["carher-operator"]
+            CM["base-config / shared skills PVC"]
+            CRD["HerInstance CRDs"]
+            SVC1["carher-266-svc"]
+            POD1["carher-266 Pod<br/>CodexOpsHer"]
+            SVCN["carher-N-svc"]
+            PODN["普通 Her Pods"]
+        end
+    end
+
+    FEI --> BR
+    MAC <-->|WSS| BR
+    CODEX --> BR
+    BR --> HGP
+    HGP --> SVC1 --> POD1
+    HGP -.白名单.-> SVCN --> PODN
+    ADMIN --> CRD
+    OP --> CRD
+    OP --> SVC1
+    OP --> SVCN
+    CM --> POD1
+    CM --> PODN
+
+    classDef new fill:#E8F5E9,stroke:#2E7D32,color:#1B5E20;
+    classDef existing fill:#E3F2FD,stroke:#1565C0,color:#0D47A1;
+    class BR,HGP new;
+    class ADMIN,OP,CM,CRD,SVC1,POD1,SVCN,PODN existing;

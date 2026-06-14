@@ -1,6 +1,19 @@
 # ChatGPT Pro 账号 OAuth 自动绑定
 
-## 目标
+> **⚠️ 实验残骸 — 2026-05-18 已验证走不通，不要再花时间试**
+>
+> 卡死在 `auth.openai.com` 的 **Cloudflare Turnstile + API 层 bot detection 双重拦截**。
+> Cloudflare Turnstile 首屏可以用 playwright stealth 绕过；但 email 提交后 OpenAI 后端
+> 对 headless agent 返回 HTML 拦截页（不是 JSON），前端报 `Oops! Unexpected token '<', '<!DOCTYPE'... is not valid JSON`。
+> 这层无法绕过。
+>
+> **当前实际流程**：见 [`chatgpt-pro-litellm` skill SKILL.md](~/.claude/skills/chatgpt-pro-litellm/SKILL.md)
+> 「prod 多账号上线 SOP」章节 —— OAuth 浏览器侧必须真人完成（每账号 ~30 秒），
+> 198 prod admin API 注册可以全自动。
+>
+> 保留此目录仅作历史参考（如果未来 OpenAI 放宽 bot detection 可重启评估）。
+
+## 目标（原始设想，已废弃）
 
 10–50 个 ChatGPT Pro 账号扩容时，**避免人工绑定设备 + 输验证码**。
 单账号上线时间从 5min → 30s，无人值守。

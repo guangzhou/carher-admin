@@ -26,8 +26,8 @@ import (
 )
 
 const (
-	Namespace = "carher"
-	ACR       = "cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher"
+	Namespace           = "carher"
+	ACR                 = "cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher"
 	UserPVCStorageClass = "alibabacloud-cnfs-nas"
 	UserPVCStorageSize  = "20Gi"
 
@@ -40,7 +40,27 @@ const (
 	// LiteLLM models beyond the default set. Value: comma-separated model ids
 	// registered in extraLitellmModelRegistry (e.g. "anthropic.claude-opus-4-7").
 	// Only takes effect when spec.provider=litellm. Unknown ids are ignored.
-	AnnotationExtraLitellmModels = "carher.io/extra-litellm-models"
+	AnnotationExtraLitellmModels   = "carher.io/extra-litellm-models"
+	AnnotationFeishuHomeChannel    = "carher.io/feishu-home-channel"
+	AnnotationHermesProvider       = "carher.io/hermes-provider"
+	AnnotationHermesConfigTemplate = "carher.io/hermes-config-template"
+
+	// AnnotationRuntimeProfile opts a single HerInstance into an alternate
+	// runtime contract without changing the default operator path.
+	AnnotationRuntimeProfile  = "carher.io/runtime-profile"
+	RuntimeProfileH75Openclaw = "h75-openclaw"
+	BaseConfigDefault         = "carher-base-config"
+	BaseConfigCleanTest       = "carher-base-config-67ffa406-test"
+	BaseConfigH75Openclaw     = "carher-base-config-h75"
+	DifyBootstrapTokenSecret  = "carher-dify-bootstrap-token"
+	DifyBootstrapTokenKey     = "token"
+	InternalDifyBaseURL       = "http://dify-nginx.dify.svc.cluster.local"
+	InternalDifyBootstrapURL  = "http://dify-bootstrap.dify.svc.cluster.local:5688/v1/bootstrap/carher-bot"
+	InternalLiteLLMBaseURL    = "http://litellm-proxy.carher.svc.cluster.local:4000/v1"
+	H75RuntimeSecret          = "carher-h75-runtime-secrets"
+	H75ACPSecret              = "carher-h75-acp-secrets"
+	H75RuntimePodSpecRevision = "a2a-acp-engine-v19-hermes-feishu-deps"
+	HermesFeishuDepsPath      = "/data/.openclaw/local/hermes-python-packages"
 
 	initScript = `
 const fs = require('fs');
@@ -80,6 +100,72 @@ type HerInstanceReconciler struct {
 	client.Client
 	Scheme    *runtime.Scheme
 	KnownBots *KnownBotsManager
+}
+
+func runtimeProfile(her *herv1.HerInstance) string {
+	if her == nil || her.Annotations == nil {
+		return ""
+	}
+	return her.Annotations[AnnotationRuntimeProfile]
+}
+
+func feishuHomeChannel(her *herv1.HerInstance) string {
+	if her == nil || her.Annotations == nil {
+		return ""
+	}
+	return her.Annotations[AnnotationFeishuHomeChannel]
+}
+
+func hermesProvider(her *herv1.HerInstance) string {
+	if her == nil || her.Annotations == nil {
+		return "chatgpt-pro"
+	}
+	if v := strings.TrimSpace(her.Annotations[AnnotationHermesProvider]); v != "" {
+		return v
+	}
+	return "chatgpt-pro"
+}
+
+func hermesConfigTemplate(her *herv1.HerInstance) string {
+	if her == nil || her.Annotations == nil {
+		return "/opt/carher-runtime/templates/hermes-config.carher-pro.yaml"
+	}
+	if v := strings.TrimSpace(her.Annotations[AnnotationHermesConfigTemplate]); v != "" {
+		return v
+	}
+	return "/opt/carher-runtime/templates/hermes-config.carher-pro.yaml"
+}
+
+func hermesPodSpecKey(her *herv1.HerInstance) string {
+	if her == nil || her.Annotations == nil {
+		return ""
+	}
+	if _, ok := her.Annotations[AnnotationHermesProvider]; !ok {
+		if _, ok := her.Annotations[AnnotationHermesConfigTemplate]; !ok {
+			return ""
+		}
+	}
+	return "|hermes-provider=" + hermesProvider(her) + "|hermes-template=" + hermesConfigTemplate(her)
+}
+
+func runtimeProfilePodSpecKey(profile string) string {
+	if profile == "" {
+		return ""
+	}
+	if profile == RuntimeProfileH75Openclaw {
+		return "|profile=" + profile + "|" + H75RuntimePodSpecRevision
+	}
+	return "|profile=" + profile
+}
+
+func baseConfigNameForRuntimeProfile(imageTag, profile string) string {
+	if profile == RuntimeProfileH75Openclaw {
+		return BaseConfigH75Openclaw
+	}
+	if imageTag == "67ffa406-clean" {
+		return BaseConfigCleanTest
+	}
+	return BaseConfigDefault
 }
 
 func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -158,6 +244,13 @@ func (r *HerInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	desiredPodSpecKey := fmt.Sprintf("%s|%s|%s|%s",
 		resolveImage(her.Spec.Image), resolvePrefix(her.Spec.Prefix), secretName_, her.Spec.DeployGroup)
+	if her.Spec.EnableLivenessProbe {
+		desiredPodSpecKey += "|lp=1"
+	}
+	desiredPodSpecKey += runtimeProfilePodSpecKey(runtimeProfile(&her))
+	if runtimeProfile(&her) == RuntimeProfileH75Openclaw {
+		desiredPodSpecKey += hermesPodSpecKey(&her)
+	}
 
 	if deployErr != nil || deploy == nil {
 		needRollout = true
@@ -348,7 +441,7 @@ func (r *HerInstanceReconciler) applyConfig(ctx context.Context, her *herv1.HerI
 // herContainerEnv returns the env vars for the main carher container.
 // When litellmKey is set, LITELLM_API_KEY is injected explicitly so it
 // overrides the master key from the shared carher-env-keys Secret.
-func herContainerEnv(uid int, pfx, litellmKey string) []corev1.EnvVar {
+func herContainerEnv(uid int, pfx, litellmKey, profile, appID, secretName, feishuHomeChannel, hermesProviderName, hermesTemplatePath, larkStrictMode string) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "HOME", Value: "/data"},
 		{Name: "OPENCLAW_INSTANCE_ID", Value: fmt.Sprintf("carher-%d-k8s", uid)},
@@ -361,7 +454,327 @@ func herContainerEnv(uid int, pfx, litellmKey string) []corev1.EnvVar {
 	if litellmKey != "" {
 		env = append(env, corev1.EnvVar{Name: "LITELLM_API_KEY", Value: litellmKey})
 	}
+	if profile == RuntimeProfileH75Openclaw {
+		botID := fmt.Sprintf("carher-%d", uid)
+		env = append(env,
+			corev1.EnvVar{Name: "FEISHU_APP_ID", Value: appID},
+			corev1.EnvVar{
+				Name: "FEISHU_APP_SECRET",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "app_secret",
+					},
+				},
+			},
+		)
+		if litellmKey != "" {
+			env = append(env, corev1.EnvVar{Name: "CARHER_PROD_KEY", Value: litellmKey})
+		} else {
+			env = append(env, corev1.EnvVar{
+				Name: "CARHER_PROD_KEY",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "carher-env-keys"},
+						Key:                  "LITELLM_API_KEY",
+					},
+				},
+			})
+		}
+		env = append(env,
+			corev1.EnvVar{Name: "NODE_ENV", Value: "production"},
+			corev1.EnvVar{Name: "PATH", Value: "/carher-fastbin:/opt/hermes/venv/bin:/opt/hermes/.venv/bin:/opt/node22/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+			corev1.EnvVar{Name: "NPM_CONFIG_PREFIX", Value: "/data/.openclaw/local"},
+			corev1.EnvVar{Name: "OPENAI_BASE_URL", Value: InternalLiteLLMBaseURL},
+			corev1.EnvVar{Name: "HERMES_HOME", Value: "/opt/data/.hermes"},
+			corev1.EnvVar{Name: "HERMES_DATA_DIR", Value: "/opt/data"},
+			corev1.EnvVar{Name: "HERMES_YOLO_MODE", Value: "1"},
+			corev1.EnvVar{Name: "HERMES_ACCEPT_HOOKS", Value: "1"},
+			corev1.EnvVar{Name: "HERMES_INFERENCE_PROVIDER", Value: hermesProviderName},
+			corev1.EnvVar{Name: "PYTHONPATH", Value: HermesFeishuDepsPath},
+			corev1.EnvVar{Name: "CARHER_REQUIRED_SECRET_ENVS", Value: "CARHER_PROD_KEY"},
+			corev1.EnvVar{Name: "CARHER_HERMES_VOLUME_ROOT", Value: "/opt/data"},
+			corev1.EnvVar{Name: "CARHER_HERMES_CONFIG_TEMPLATE", Value: hermesTemplatePath},
+			corev1.EnvVar{Name: "OPENCLAW_LARK_VERSION", Value: "2026.4.10"},
+			corev1.EnvVar{Name: "CARHER_RUNTIME_OPENCLAW_LARK_VERSION", Value: "2026.4.10"},
+			corev1.EnvVar{Name: "CARHER_ACP_ENABLED", Value: "1"},
+			corev1.EnvVar{Name: "CARHER_DIFY_ENABLED", Value: "1"},
+			corev1.EnvVar{Name: "CARHER_DIFY_BOT_ID", Value: botID},
+			corev1.EnvVar{Name: "HERMESTEST_CARHER_ID", Value: botID},
+			corev1.EnvVar{Name: "CARHER_DIFY_BASE_URL", Value: InternalDifyBaseURL},
+			corev1.EnvVar{Name: "CARHER_DIFY_BOOTSTRAP_URL", Value: InternalDifyBootstrapURL},
+			corev1.EnvVar{Name: "CARHER_DIFY_WORKSPACE_SLUG", Value: botID},
+			corev1.EnvVar{Name: "CARHER_DIFY_MODEL", Value: "chatgpt-gpt-5.5"},
+			corev1.EnvVar{Name: "CARHER_DIFY_CODEX_BASE_URL", Value: InternalLiteLLMBaseURL},
+			corev1.EnvVar{Name: "CARHER_DIFY_CODEX_KEY_ENV", Value: "CARHER_PROD_KEY"},
+			corev1.EnvVar{Name: "CARHER_RUNTIME_PLUGINS_REFRESH", Value: "1"},
+			corev1.EnvVar{Name: "FEISHU_ALLOW_ALL_USERS", Value: "true"},
+			corev1.EnvVar{Name: "FEISHU_GROUP_POLICY", Value: "open"},
+			corev1.EnvVar{Name: "CARHER_LAN_IP", Value: fmt.Sprintf("carher-%d-svc.%s.svc.cluster.local", uid, Namespace)},
+			corev1.EnvVar{Name: "CARHER_A2A_PORT", Value: "18800"},
+			corev1.EnvVar{Name: "HERMESTEST_A2A_ENABLED", Value: "1"},
+			corev1.EnvVar{Name: "HERMESTEST_A2A_HOST", Value: "0.0.0.0"},
+			corev1.EnvVar{Name: "HERMESTEST_A2A_PORT", Value: "18800"},
+			corev1.EnvVar{Name: "HERMESTEST_A2A_PUBLIC_URL", Value: fmt.Sprintf("http://carher-%d-svc.%s.svc.cluster.local:18800", uid, Namespace)},
+			corev1.EnvVar{Name: "HERMESTEST_A2A_AUTH", Value: "none"},
+			corev1.EnvVar{Name: "HERMESTEST_A2A_REGISTER_REDIS", Value: "1"},
+			corev1.EnvVar{Name: "CARHER_SERVER", Value: "ack"},
+			corev1.EnvVar{
+				Name: "CARHER_GATEWAY_TOKEN",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: H75RuntimeSecret},
+						Key:                  "CARHER_GATEWAY_TOKEN",
+					},
+				},
+			},
+			corev1.EnvVar{
+				Name: "ANTHROPIC_AUTH_TOKEN",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: H75ACPSecret},
+						Key:                  "ANTHROPIC_AUTH_TOKEN",
+					},
+				},
+			},
+			corev1.EnvVar{
+				Name: "ANTHROPIC_BASE_URL",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: H75ACPSecret},
+						Key:                  "ANTHROPIC_BASE_URL",
+					},
+				},
+			},
+			corev1.EnvVar{
+				Name: "CARHER_DIFY_BOOTSTRAP_TOKEN",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: DifyBootstrapTokenSecret},
+						Key:                  DifyBootstrapTokenKey,
+					},
+				},
+			},
+		)
+		if feishuHomeChannel != "" {
+			env = append(env, corev1.EnvVar{Name: "FEISHU_HOME_CHANNEL", Value: feishuHomeChannel})
+		}
+		if larkStrictMode != "" {
+			env = append(env, corev1.EnvVar{Name: "CARHER_LARK_CLI_STRICT_MODE", Value: larkStrictMode})
+		}
+	}
 	return env
+}
+
+func runtimeProfileVolumeMounts(profile string) []corev1.VolumeMount {
+	if profile != RuntimeProfileH75Openclaw {
+		return nil
+	}
+	return []corev1.VolumeMount{
+		{Name: "user-data", MountPath: "/opt/data"},
+		{Name: "user-data", MountPath: "/data/.engine", SubPath: ".engine"},
+		{Name: "h75-fastbin", MountPath: "/carher-fastbin", ReadOnly: true},
+		{Name: "h75-agent-skills", MountPath: "/data/.agents/skills"},
+		{Name: "h75-openclaw-local", MountPath: "/data/.openclaw/local"},
+		{Name: "h75-runtime-plugins", MountPath: "/data/.openclaw/runtime-plugins"},
+		{Name: "h75-openclaw-extensions", MountPath: "/data/.openclaw/extensions"},
+		{Name: "h75-openclaw-skills", MountPath: "/data/.openclaw/skills"},
+		{Name: "h75-hermes-skills", MountPath: "/opt/data/.hermes/skills"},
+		{Name: "h75-hermes-opt-skills", MountPath: "/opt/data/skills"},
+	}
+}
+
+func runtimeProfileVolumes(profile string) []corev1.Volume {
+	if profile != RuntimeProfileH75Openclaw {
+		return nil
+	}
+	emptyDir := func() corev1.VolumeSource {
+		return corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}
+	}
+	return []corev1.Volume{
+		{Name: "h75-fastbin", VolumeSource: emptyDir()},
+		{Name: "h75-agent-skills", VolumeSource: emptyDir()},
+		{Name: "h75-openclaw-local", VolumeSource: emptyDir()},
+		{Name: "h75-runtime-plugins", VolumeSource: emptyDir()},
+		{Name: "h75-openclaw-extensions", VolumeSource: emptyDir()},
+		{Name: "h75-openclaw-skills", VolumeSource: emptyDir()},
+		{Name: "h75-hermes-skills", VolumeSource: emptyDir()},
+		{Name: "h75-hermes-opt-skills", VolumeSource: emptyDir()},
+	}
+}
+
+func runtimeProfileInitContainers(profile, image string) []corev1.Container {
+	if profile != RuntimeProfileH75Openclaw {
+		return nil
+	}
+	return []corev1.Container{{
+		Name:    "copy-hermes-feishu-deps",
+		Image:   image,
+		Command: []string{"sh", "-lc", hermesFeishuDepsInitScript},
+		VolumeMounts: []corev1.VolumeMount{{
+			Name:      "h75-openclaw-local",
+			MountPath: "/data/.openclaw/local",
+		}},
+	}}
+}
+
+const hermesFeishuDepsInitScript = `set -eu
+DST=/data/.openclaw/local/hermes-python-packages
+rm -rf "$DST"
+mkdir -p "$DST"
+uv pip install --target "$DST" --link-mode=copy "lark-oapi==1.6.7" "aiohttp-socks==0.11.0"
+PYTHONPATH="$DST" /opt/hermes/.venv/bin/python3 -c 'import lark_oapi, aiohttp_socks; print("hermes-feishu-deps=ok")'
+`
+
+const h75FastbinInitScript = `
+set -eu
+mkdir -p /carher-fastbin
+cat > /carher-fastbin/chown <<'EOF'
+#!/bin/sh
+real=/usr/bin/chown
+[ -x "$real" ] || real=/bin/chown
+stamp="${CARHER_FAST_CHOWN_STAMP:-/data/.engine/fast-chown-ready}"
+if [ "$1" = "-R" ] && [ "$#" -eq 3 ] && [ -f "$stamp" ]; then
+  case "$2 $3" in
+    "hermes:hermes /data/.openclaw/workspace"|"hermes:hermes /data/.openclaw/agents"|"hermes:hermes /data/.openclaw/sessions"|"hermes:hermes /opt/data/.hermes"|"hermes:hermes /data/.agents"|"hermes:hermes /data/.openclaw/skills"|"hermes:hermes /data/.openclaw/local"|"hermes:hermes /data/.openclaw/runtime-plugins"|"hermes:hermes /data/.openclaw/extensions"|"hermes:hermes /opt/data/skills")
+      "$real" "$2" "$3" 2>/dev/null || true
+      exit 0
+      ;;
+    "0:0 /data/.openclaw/runtime-plugins")
+      ready="$3/.carher-root-owned-ready"
+      [ -f "$ready" ] && exit 0
+      "$real" "$2" "$3" 2>/dev/null || true
+      touch "$ready" 2>/dev/null || true
+      exit 0
+      ;;
+  esac
+fi
+exec "$real" "$@"
+EOF
+cat > /carher-fastbin/chmod <<'EOF'
+#!/bin/sh
+real=/bin/chmod
+if [ "$1" = "-R" ] && [ "$#" -eq 3 ] && [ "$2" = "go-w" ] && [ "$3" = "/data/.openclaw/runtime-plugins" ]; then
+  ready="$3/.carher-chmod-ready"
+  [ -f "$ready" ] && exit 0
+  "$real" "$@"
+  status=$?
+  [ "$status" -eq 0 ] && touch "$ready" 2>/dev/null || true
+  exit "$status"
+fi
+exec "$real" "$@"
+EOF
+cat > /carher-fastbin/rm <<'EOF'
+#!/bin/sh
+real=/bin/rm
+if [ "$1" = "-rf" ] && [ "$#" -eq 2 ] && [ "$2" = "/data/.openclaw/runtime-plugins" ]; then
+  [ -f "$2/.carher-prepared-v3" ] && exit 0
+  find "$2" -mindepth 1 -maxdepth 1 -exec "$real" -rf {} +
+  exit 0
+fi
+if [ "$1" = "-rf" ] && [ "$#" -eq 2 ]; then
+  case "$2" in
+    /data/.openclaw/local/lib/node_modules/*)
+      exit 0
+      ;;
+    /data/.agents/skills/lark-*)
+      [ -d "$2" ] && [ ! -L "$2" ] && [ -f "$2/.carher-fast-cache-ready" ] && exit 0
+      ;;
+    /opt/data/.hermes/skills/dogfood/*|/opt/data/skills/dogfood/*|/data/.openclaw/extensions/node_modules)
+      base="$(basename "$2")"
+      case "$base" in
+        lark-*) ;;
+        *) [ -d "$2" ] && [ ! -L "$2" ] && [ -f "$2/.carher-fast-cache-ready" ] && exit 0 ;;
+      esac
+      ;;
+  esac
+fi
+exec "$real" "$@"
+EOF
+cat > /carher-fastbin/cp <<'EOF'
+#!/bin/sh
+real=/bin/cp
+mark_ready() {
+  [ -n "$1" ] && [ -d "$1" ] && touch "$1/.carher-fast-cache-ready" 2>/dev/null || true
+}
+if { [ "$1" = "-a" ] || [ "$1" = "-R" ]; } && [ "$#" -eq 3 ]; then
+  src="$2"
+  dst="$3"
+  target=""
+  case "$src $dst" in
+    /opt/carher-acp/lib/node_modules/acpx\ /data/.openclaw/local/lib/node_modules/acpx)
+      target="$dst"
+      ;;
+    /opt/carher-runtime/vendor/acp-adapters/node_modules/*\ /data/.openclaw/local/lib/node_modules/)
+      base="$(basename "$src")"
+      target="$dst/$base"
+      ;;
+    /opt/carher-lark-cli-skills/.agents/skills/lark-*\ /data/.agents/skills/*)
+      target="$dst"
+      ;;
+    /opt/carher-shared-skills/*\ /opt/data/.hermes/skills/dogfood/*|/opt/carher-shared-skills/*\ /opt/data/skills/dogfood/*)
+      target="$dst"
+      ;;
+    /opt/hermestest/skills/*\ /opt/data/.hermes/skills/dogfood/*|/opt/hermestest/skills/*\ /opt/data/skills/dogfood/*)
+      target="$dst"
+      ;;
+    /opt/carher-runtime/openclaw-extensions/node_modules\ /data/.openclaw/extensions/node_modules)
+      target="$dst"
+      ;;
+    /mounted-carher-plugins/*\ /data/.openclaw/runtime-plugins/*|/openclaw-plugins/carher-engine-swap\ /data/.openclaw/runtime-plugins/carher-engine-swap|/opt/carher-runtime/plugins/carher-engine-swap\ /data/.openclaw/runtime-plugins/carher-engine-swap)
+      target="$dst"
+      ;;
+  esac
+  if [ -n "$target" ] && [ -f "$target/.carher-fast-cache-ready" ]; then
+    exit 0
+  fi
+  "$real" "$@"
+  status=$?
+  [ "$status" -eq 0 ] && mark_ready "$target"
+  exit "$status"
+fi
+exec "$real" "$@"
+EOF
+chmod 0755 /carher-fastbin/chown /carher-fastbin/chmod /carher-fastbin/rm /carher-fastbin/cp
+`
+
+func runtimeProfileContainerPorts(profile string) []corev1.ContainerPort {
+	if profile != RuntimeProfileH75Openclaw {
+		return nil
+	}
+	return []corev1.ContainerPort{
+		{ContainerPort: 18800, Name: "a2a-http"},
+		{ContainerPort: 18801, Name: "a2a-grpc"},
+	}
+}
+
+func servicePortsForRuntimeProfile(profile string) []corev1.ServicePort {
+	ports := []corev1.ServicePort{
+		{Name: "gateway", Port: 18789, TargetPort: intstr.FromInt(18789), Protocol: corev1.ProtocolTCP},
+		{Name: "realtime", Port: 18790, TargetPort: intstr.FromInt(18790), Protocol: corev1.ProtocolTCP},
+		{Name: "frontend", Port: 8000, TargetPort: intstr.FromInt(8000), Protocol: corev1.ProtocolTCP},
+		{Name: "ws-proxy", Port: 8080, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
+		{Name: "oauth", Port: 18891, TargetPort: intstr.FromInt(18891), Protocol: corev1.ProtocolTCP},
+		{Name: "a2a", Port: 18795, TargetPort: intstr.FromInt(18795), Protocol: corev1.ProtocolTCP},
+	}
+	if profile == RuntimeProfileH75Openclaw {
+		ports = append(ports,
+			corev1.ServicePort{Name: "a2a-http", Port: 18800, TargetPort: intstr.FromInt(18800), Protocol: corev1.ProtocolTCP},
+			corev1.ServicePort{Name: "a2a-grpc", Port: 18801, TargetPort: intstr.FromInt(18801), Protocol: corev1.ProtocolTCP},
+		)
+	}
+	return ports
+}
+
+func withoutVolumeMount(mounts []corev1.VolumeMount, name, mountPath string) []corev1.VolumeMount {
+	filtered := mounts[:0]
+	for _, mount := range mounts {
+		if mount.Name == name && mount.MountPath == mountPath {
+			continue
+		}
+		filtered = append(filtered, mount)
+	}
+	return filtered
 }
 
 // ── Deployment lifecycle ──
@@ -382,6 +795,7 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 	prefix := resolvePrefix(her.Spec.Prefix)
 	pfx := prefix + "-"
 	uidStr := strconv.Itoa(uid)
+	profile := runtimeProfile(her)
 
 	secretName := her.Spec.AppSecretRef
 	if secretName == "" {
@@ -398,16 +812,32 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 	//   3) 挂 carher-patches ConfigMap，含 R-9/R-10 footer & history-fill patch + 新 entrypoint
 	// 默认 image (fix-compact-eb348941 等) 行为不变。
 	cleanImage := imageTag == "67ffa406-clean"
-	baseConfigName := "carher-base-config"
-	if cleanImage {
-		baseConfigName = "carher-base-config-67ffa406-test"
-	}
+	baseConfigName := baseConfigNameForRuntimeProfile(imageTag, profile)
 
 	labels := map[string]string{
 		"app":        "carher-user",
 		"user-id":    uidStr,
 		"managed-by": "carher-operator",
 	}
+
+	initContainers := append(runtimeProfileInitContainers(profile, image), corev1.Container{
+		Name:    "inject-secret",
+		Image:   image,
+		Command: []string{"node", "-e", initScript},
+		Env: []corev1.EnvVar{{
+			Name: "FEISHU_APP_SECRET",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+					Key:                  "app_secret",
+				},
+			},
+		}},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "user-config-template", MountPath: "/config-template"},
+			{Name: "merged-config", MountPath: "/merged-config"},
+		},
+	})
 
 	podTemplate := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -425,24 +855,7 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 			ReadinessGates: []corev1.PodReadinessGate{{
 				ConditionType: FeishuWSReadinessGate,
 			}},
-			InitContainers: []corev1.Container{{
-				Name:    "inject-secret",
-				Image:   image,
-				Command: []string{"node", "-e", initScript},
-				Env: []corev1.EnvVar{{
-					Name: "FEISHU_APP_SECRET",
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-							Key:                  "app_secret",
-						},
-					},
-				}},
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "user-config-template", MountPath: "/config-template"},
-					{Name: "merged-config", MountPath: "/merged-config"},
-				},
-			}},
+			InitContainers: initContainers,
 			Containers: []corev1.Container{{
 				Name:  "carher",
 				Image: image,
@@ -454,7 +867,7 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 					{ContainerPort: 18891, Name: "oauth"},
 					{ContainerPort: 18795, Name: "a2a"},
 				},
-			Env: herContainerEnv(uid, pfx, her.Spec.LitellmKey),
+				Env: herContainerEnv(uid, pfx, her.Spec.LitellmKey, profile, her.Spec.AppID, secretName, feishuHomeChannel(her), hermesProvider(her), hermesConfigTemplate(her), her.Spec.LarkStrictMode),
 				EnvFrom: []corev1.EnvFromSource{{
 					SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "carher-env-keys"}},
 				}},
@@ -526,6 +939,45 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 			},
 		},
 	}
+	podTemplate.Spec.Volumes = append(podTemplate.Spec.Volumes, runtimeProfileVolumes(profile)...)
+
+	if profile == RuntimeProfileH75Openclaw {
+		podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers, corev1.Container{
+			Name:    "prepare-h75-runtime-dirs",
+			Image:   image,
+			Command: []string{"sh", "-lc", "mkdir -p /user-data/.engine"},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "user-data", MountPath: "/user-data"},
+			},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("10m"),
+					corev1.ResourceMemory: resource.MustParse("32Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("50m"),
+					corev1.ResourceMemory: resource.MustParse("64Mi"),
+				},
+			},
+		}, corev1.Container{
+			Name:    "prepare-h75-fastbin",
+			Image:   image,
+			Command: []string{"sh", "-lc", h75FastbinInitScript},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "h75-fastbin", MountPath: "/carher-fastbin"},
+			},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("10m"),
+					corev1.ResourceMemory: resource.MustParse("32Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("50m"),
+					corev1.ResourceMemory: resource.MustParse("64Mi"),
+				},
+			},
+		})
+	}
 
 	// CarHer-1000-style additions: env + carher-patches volume + mount.
 	if cleanImage {
@@ -551,6 +1003,59 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 		)
 	}
 
+	if profile == RuntimeProfileH75Openclaw {
+		podTemplate.Spec.Containers[0].VolumeMounts = withoutVolumeMount(
+			podTemplate.Spec.Containers[0].VolumeMounts,
+			"dept-skills",
+			"/data/.agents/skills",
+		)
+		podTemplate.Spec.Containers[0].VolumeMounts = withoutVolumeMount(
+			podTemplate.Spec.Containers[0].VolumeMounts,
+			"shared-skills",
+			"/data/.openclaw/skills",
+		)
+	}
+	podTemplate.Spec.Containers[0].Ports = append(
+		podTemplate.Spec.Containers[0].Ports,
+		runtimeProfileContainerPorts(profile)...,
+	)
+	podTemplate.Spec.Containers[0].VolumeMounts = append(
+		podTemplate.Spec.Containers[0].VolumeMounts,
+		runtimeProfileVolumeMounts(profile)...,
+	)
+
+	// Opt-in livenessProbe (per HerInstance.spec.enableLivenessProbe). Default off.
+	// /healthz on 18789 is served by OpenClaw gateway on the same Node event loop;
+	// when the loop blocks (reindex storm, sync sqlite stall) the probe times out
+	// and kubelet recycles the container via restartPolicy=Always.
+	// Conservative thresholds: ≈ failureThreshold × (period + timeout) ≈ 240s of
+	// continuous unresponsiveness before kill, to tolerate normal reindex bursts.
+	if her.Spec.EnableLivenessProbe {
+		podTemplate.Spec.Containers[0].LivenessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path:   "/healthz",
+					Port:   intstr.FromInt(18789),
+					Scheme: corev1.URISchemeHTTP,
+				},
+			},
+			InitialDelaySeconds: 180,
+			PeriodSeconds:       30,
+			TimeoutSeconds:      10,
+			FailureThreshold:    6,
+			SuccessThreshold:    1,
+		}
+	}
+
+	podSpecKeyVal := fmt.Sprintf("%s|%s|%s|%s", imageTag, prefix, secretName, her.Spec.DeployGroup)
+	if her.Spec.EnableLivenessProbe {
+		podSpecKeyVal += "|lp=1"
+	}
+	podSpecKeyVal += runtimeProfilePodSpecKey(profile)
+	if profile == RuntimeProfileH75Openclaw {
+		podSpecKeyVal += hermesPodSpecKey(her)
+	}
+
 	desired := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("carher-%d", uid),
@@ -558,7 +1063,7 @@ func (r *HerInstanceReconciler) ensureDeployment(ctx context.Context, her *herv1
 			Labels:    labels,
 			Annotations: map[string]string{
 				"carher.io/live-config-hash": configHash,
-				"carher.io/pod-spec-key":     fmt.Sprintf("%s|%s|%s|%s", imageTag, prefix, secretName, her.Spec.DeployGroup),
+				"carher.io/pod-spec-key":     podSpecKeyVal,
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion:         "carher.io/v1alpha1",
@@ -682,6 +1187,7 @@ func (r *HerInstanceReconciler) ensurePVC(ctx context.Context, uid int) error {
 func (r *HerInstanceReconciler) ensureService(ctx context.Context, her *herv1.HerInstance) error {
 	uid := her.Spec.UserID
 	svcName := fmt.Sprintf("carher-%d-svc", uid)
+	profile := runtimeProfile(her)
 
 	isController := true
 	blockOwnerDeletion := true
@@ -709,14 +1215,7 @@ func (r *HerInstanceReconciler) ensureService(ctx context.Context, her *herv1.He
 				"app":     "carher-user",
 				"user-id": strconv.Itoa(uid),
 			},
-			Ports: []corev1.ServicePort{
-				{Name: "gateway", Port: 18789, TargetPort: intstr.FromInt(18789), Protocol: corev1.ProtocolTCP},
-				{Name: "realtime", Port: 18790, TargetPort: intstr.FromInt(18790), Protocol: corev1.ProtocolTCP},
-				{Name: "frontend", Port: 8000, TargetPort: intstr.FromInt(8000), Protocol: corev1.ProtocolTCP},
-				{Name: "ws-proxy", Port: 8080, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
-				{Name: "oauth", Port: 18891, TargetPort: intstr.FromInt(18891), Protocol: corev1.ProtocolTCP},
-				{Name: "a2a", Port: 18795, TargetPort: intstr.FromInt(18795), Protocol: corev1.ProtocolTCP},
-			},
+			Ports: servicePortsForRuntimeProfile(profile),
 		},
 	}
 

@@ -80,6 +80,14 @@ spec:
                 contextTokens:
                   type: integer
                   description: "Override agents.defaults.contextTokens in generated openclaw.json. Omit/0 = inherit base-config (1M)."
+                enableLivenessProbe:
+                  type: boolean
+                  default: false
+                  description: "When true, operator injects a livenessProbe on /healthz:18789 so kubelet auto-restarts the container on event-loop hangs. Default off; opt-in per instance."
+                larkStrictMode:
+                  type: string
+                  enum: [bot, user, "off"]
+                  description: "Override CARHER_LARK_CLI_STRICT_MODE env var. 'bot'=bot commands only (zero-auth doc creation), 'user'=user commands only, 'off'=both. Omit = entrypoint default (user)."
             status:
               type: object
               properties:

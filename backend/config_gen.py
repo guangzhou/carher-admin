@@ -43,6 +43,7 @@ MODEL_MAP_LITELLM = {
     "minimax": "litellm/minimax-m2.7",
     "glm": "litellm/glm-5",
     "codex": "litellm/gpt-5.3-codex",
+    "opus4.8": "litellm/openrouter-claude-opus-4-8",
 }
 
 GOOGLE_ANTHROPIC_ROUTING = {
@@ -86,6 +87,7 @@ def generate_openclaw_json(instance: dict) -> dict:
             "litellm/minimax-m2.7": {"alias": "minimax"},
             "litellm/glm-5": {"alias": "glm"},
             "litellm/gpt-5.3-codex": {"alias": "codex"},
+            "litellm/openrouter-claude-opus-4-8": {"alias": "opus4.8"},
             "litellm/wangsu-gpt-5.5": {"alias": "gpt55"},
             "litellm/wangsu-deepseek-v4-pro": {"alias": "ds-pro"},
             "litellm/wangsu-deepseek-v4-flash": {"alias": "ds-flash"},
@@ -144,6 +146,7 @@ def generate_openclaw_json(instance: dict) -> dict:
                 {"id": "minimax-m2.7", "name": "MiniMax M2.7", "api": "openai-completions", "input": ["text"], "contextWindow": 200000, "maxTokens": 128000, "cost": {"input": 0.5, "output": 1.5}},
                 {"id": "glm-5", "name": "GLM-5", "api": "openai-completions", "input": ["text"], "contextWindow": 128000, "maxTokens": 32000, "cost": {"input": 1, "output": 3}},
                 {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "api": "openai-completions", "reasoning": True, "input": ["text"], "contextWindow": 200000, "maxTokens": 128000, "cost": {"input": 3, "output": 15}},
+                {"id": "openrouter-claude-opus-4-8", "name": "Claude Opus 4.8 (OpenRouter)", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 128000, "cost": {"input": 5, "output": 25, "cacheRead": 0.5}},
                 {"id": "wangsu-gpt-5.5", "name": "GPT-5.5 (Wangsu)", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 128000, "cost": {"input": 5, "output": 30}},
                 {"id": "wangsu-deepseek-v4-pro", "name": "DeepSeek V4 Pro (Wangsu)", "api": "openai-completions", "reasoning": True, "input": ["text"], "contextWindow": 1000000, "maxTokens": 384000, "cost": {"input": 1.71, "output": 3.43}},
                 {"id": "wangsu-deepseek-v4-flash", "name": "DeepSeek V4 Flash (Wangsu)", "api": "openai-completions", "reasoning": True, "input": ["text"], "contextWindow": 1000000, "maxTokens": 384000, "cost": {"input": 0.143, "output": 0.286}},

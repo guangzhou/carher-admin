@@ -93,7 +93,7 @@ if [[ ! -f /tmp/chatgpt-litellm-oauth.py ]]; then
     echo "❌ /tmp/chatgpt-litellm-oauth.py not found — re-upload from carher-admin/scripts/chatgpt-onboard/"
     exit 1
 fi
-if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
+if [[ "${GEN_ONLY:-}" != "1" ]] && ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
     echo "❌ container $CONTAINER not found"
     exit 1
 fi
@@ -112,6 +112,8 @@ docker run --rm \
   -e CHATGPT_PW_FILE=/run/chatgpt_pw.txt \
   -e "AUTH_JSON_OUTPUT=/work/out/auth-${ACCT}.json" \
   -e SCREENSHOT_DIR=/work/screenshots \
+  -e "PHONE_NUMBER=${PHONE_NUMBER:-}" \
+  -e "SMS_API_URL=${SMS_API_URL:-}" \
   -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
   -e DISPLAY=:99 \
   mcr.microsoft.com/playwright/python:v1.60.0-noble \
@@ -139,6 +141,15 @@ if missing:
     print(f'❌ auth.json missing fields: {missing}'); sys.exit(1)
 print(f'  ✅ auth.json valid: account_id={d[\"account_id\"]}, expires_at={d[\"expires_at\"]}')
 "
+
+# GEN_ONLY: stop here — auth.json produced, no local container to deploy into
+# (used for Aliyun accounts whose container lives on K8s; caller kubectl cp's it)
+if [[ "${GEN_ONLY:-}" == "1" ]]; then
+    cp "$OUT_FILE" "${AUTH_DIR}/auth.json" 2>/dev/null || true
+    echo ""
+    echo "🎉 $ACCT GEN_ONLY done — auth.json at $OUT_FILE (and $AUTH_DIR/auth.json)"
+    exit 0
+fi
 
 # ── 5. Deploy ──────────────────────────────────────────────────────────
 echo ""

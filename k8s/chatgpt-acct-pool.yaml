@@ -14,7 +14,7 @@
 # Resources:
 #   - Secret chatgpt-pool-master-key: shared LITELLM_MASTER_KEY for all 5 pods
 #   - ConfigMap chatgpt-pool-config: shared LiteLLM config.yaml (4 chatgpt models)
-#   - PVC chatgpt-acct-{N}-auth: persistent auth.json per account (N=7..11)
+#   - PVC chatgpt-acct-{N}-auth: persistent auth.json per account (N=7..11,21)
 #   - Deployment chatgpt-acct-{N}: 1 LiteLLM container per account
 #   - Service chatgpt-acct-{N}: ClusterIP :4000 per account
 #
@@ -74,7 +74,7 @@ data:
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
 ---
-# ── PVCs (5 accounts, each 1Gi RWO on NAS) ──
+# -- PVCs (Aliyun accounts, each 1Gi RWO on NAS) --
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: {name: chatgpt-acct-7-auth, namespace: carher, labels: {pool: chatgpt-acct, account: "7"}}
@@ -95,6 +95,11 @@ kind: PersistentVolumeClaim
 metadata: {name: chatgpt-acct-10-auth, namespace: carher, labels: {pool: chatgpt-acct, account: "10"}}
 spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: alibabacloud-cnfs-nas}
 # acct-11-auth PVC already created (re-used from earlier canary mount; see k8s/litellm-proxy-canary.yaml)
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-21-auth, namespace: carher, labels: {pool: chatgpt-acct, account: "21"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: alibabacloud-cnfs-nas}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -404,4 +409,66 @@ metadata:
 spec:
   type: ClusterIP
   selector: {app: chatgpt-acct-11}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-21
+  namespace: carher
+  labels:
+    app: chatgpt-acct-21
+    pool: chatgpt-acct
+    account: "21"
+spec:
+  replicas: 1
+  strategy: {type: Recreate}        # RWO PVC: one writer
+  selector:
+    matchLabels: {app: chatgpt-acct-21}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-21, pool: chatgpt-acct, account: "21"}
+    spec:
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - name: CHATGPT_TOKEN_DIR
+              value: /chatgpt-auth
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: {path: /health/liveliness, port: 4000}
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml, readOnly: true}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-21-auth}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chatgpt-acct-21
+  namespace: carher
+  labels: {app: chatgpt-acct-21, pool: chatgpt-acct, account: "21"}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-21}
   ports: [{port: 4000, targetPort: 4000}]

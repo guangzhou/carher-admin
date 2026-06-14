@@ -1,0 +1,37 @@
+flowchart LR
+  classDef prep fill:#E8F3FF,stroke:#1456F0,color:#0F1F3D,stroke-width:2px;
+  classDef delivery fill:#E8F8F0,stroke:#00A870,color:#0F1F3D,stroke-width:3px;
+  classDef paid fill:#FFF7E6,stroke:#F59E0B,color:#0F1F3D,stroke-width:2px;
+  classDef guard fill:#F5F7FA,stroke:#8F959E,color:#0F1F3D,stroke-width:1.5px,stroke-dasharray: 6 4;
+
+  A["0527-0609<br/>售卖准备期<br/>确定卖哪两个 API<br/>报价口径 / 商品页 / 接入文档 / 试用 key"]:::prep
+  B["0610 起<br/>两周后开始尝试交付<br/>奇瑞/吉利小场景<br/>真实 API 调用 + 基础支持"]:::delivery
+  C["0610-0621<br/>试交付复盘<br/>调用量 / 成功率 / 延迟 / 成本 / 客户反馈"]:::delivery
+  D["0621-0630<br/>转付费推进<br/>正式报价 / 合同边界 / 包月或超量计费"]:::paid
+  E["0630<br/>首个付费签约目标<br/>API 售卖打法跑通"]:::paid
+
+  A --> B --> C --> D --> E
+
+  subgraph S["商务侧动作"]
+    S1["老杨/金龙<br/>三句话话术"]
+    S2["客户场景确认<br/>3-7 天可验证"]
+    S3["试用成功标准<br/>达到即进入付费沟通"]
+  end
+
+  subgraph T["交付保障"]
+    T1["公网 API 入口<br/>鉴权 / 限流 / 日志"]
+    T2["LiteLLM public<br/>客户 vkey / 预算 / Provider 策略"]
+    T3["主力池 + 兜底池<br/>ChatGPT / Claude Max / 网宿 / OR / Kuaihui"]
+    T4["安全边界<br/>低敏或脱敏数据先跑"]
+  end
+
+  S1 -.支撑售卖.-> A
+  S2 -.进入试交付.-> B
+  S3 -.驱动转付费.-> D
+  T1 -.保障.-> B
+  T2 -.保障.-> C
+  T3 -.保障.-> C
+  T4 -.降低顾虑.-> B
+
+  class S1,S2,S3 guard
+  class T1,T2,T3,T4 guard

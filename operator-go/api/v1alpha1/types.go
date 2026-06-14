@@ -7,23 +7,25 @@ import (
 
 // HerInstanceSpec defines the desired state.
 type HerInstanceSpec struct {
-	UserID       int    `json:"userId"`
-	Name         string `json:"name"`
-	Model        string `json:"model,omitempty"`
-	AppID        string `json:"appId"`
-	AppSecretRef string `json:"appSecretRef,omitempty"`
-	Prefix       string `json:"prefix,omitempty"`
-	Owner        string `json:"owner,omitempty"`
-	Provider     string `json:"provider,omitempty"`
-	BotOpenID         string `json:"botOpenId,omitempty"`
-	OAuthRedirectUri  string `json:"oauthRedirectUri,omitempty"`
-	DeployGroup       string `json:"deployGroup,omitempty"`
-	LitellmKey        string `json:"litellmKey,omitempty"`
-	LitellmUrl        string `json:"litellmUrl,omitempty"`
-	LitellmRoutePolicy string `json:"litellmRoutePolicy,omitempty"`
-	Image             string `json:"image,omitempty"`
-	Paused            bool   `json:"paused,omitempty"`
-	ContextTokens     int    `json:"contextTokens,omitempty"`
+	UserID              int    `json:"userId"`
+	Name                string `json:"name"`
+	Model               string `json:"model,omitempty"`
+	AppID               string `json:"appId"`
+	AppSecretRef        string `json:"appSecretRef,omitempty"`
+	Prefix              string `json:"prefix,omitempty"`
+	Owner               string `json:"owner,omitempty"`
+	Provider            string `json:"provider,omitempty"`
+	BotOpenID           string `json:"botOpenId,omitempty"`
+	OAuthRedirectUri    string `json:"oauthRedirectUri,omitempty"`
+	DeployGroup         string `json:"deployGroup,omitempty"`
+	LitellmKey          string `json:"litellmKey,omitempty"`
+	LitellmUrl          string `json:"litellmUrl,omitempty"`
+	LitellmRoutePolicy  string `json:"litellmRoutePolicy,omitempty"`
+	Image               string `json:"image,omitempty"`
+	Paused              bool   `json:"paused,omitempty"`
+	ContextTokens       int    `json:"contextTokens,omitempty"`
+	EnableLivenessProbe bool   `json:"enableLivenessProbe,omitempty"`
+	LarkStrictMode      string `json:"larkStrictMode,omitempty"`
 }
 
 // HerInstanceStatus defines the observed state.

@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1050" viewBox="0 0 1800 1050">
+  <rect width="1800" height="1050" fill="#F8FAFC"/>
+  <text x="80" y="86" font-family="Noto Sans SC, Arial" font-size="44" font-weight="800" fill="#111827">权限与安全边界</text>
+  <text x="82" y="128" font-family="Noto Sans SC, Arial" font-size="23" fill="#52606D">这张图回答：哪些东西能跨边界，哪些东西永远不能跨边界。</text>
+
+  <rect x="90" y="190" width="380" height="700" rx="28" fill="#EEF2FF" stroke="#4F46E5" stroke-width="5"/>
+  <text x="130" y="250" font-family="Noto Sans SC, Arial" font-size="33" font-weight="800" fill="#312E81">本地私域</text>
+  <text x="130" y="292" font-family="Noto Sans SC, Arial" font-size="22" fill="#4338CA">Mac / devbox</text>
+  <rect x="135" y="350" width="290" height="110" rx="18" fill="#FFFFFF" stroke="#818CF8" stroke-width="3"/>
+  <text x="165" y="394" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">供应商 API key</text>
+  <text x="165" y="426" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">只在本地环境变量 / config</text>
+  <rect x="135" y="510" width="290" height="110" rx="18" fill="#FFFFFF" stroke="#818CF8" stroke-width="3"/>
+  <text x="165" y="554" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">repo / shell / git</text>
+  <text x="165" y="586" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">由 Codex app-server 操作</text>
+  <rect x="135" y="670" width="290" height="110" rx="18" fill="#FFFFFF" stroke="#818CF8" stroke-width="3"/>
+  <text x="165" y="714" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">app-server token</text>
+  <text x="165" y="746" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">只给 Mac Worker 使用</text>
+
+  <rect x="540" y="190" width="380" height="700" rx="28" fill="#FFF7ED" stroke="#F97316" stroke-width="5"/>
+  <text x="580" y="250" font-family="Noto Sans SC, Arial" font-size="33" font-weight="800" fill="#9A3412">公网控制面</text>
+  <text x="580" y="292" font-family="Noto Sans SC, Arial" font-size="22" fill="#C2410C">Bridge Server</text>
+  <rect x="585" y="350" width="290" height="110" rx="18" fill="#FFFFFF" stroke="#FDBA74" stroke-width="3"/>
+  <text x="615" y="394" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">短期任务 token</text>
+  <text x="615" y="426" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">MCP token / Her token</text>
+  <rect x="585" y="510" width="290" height="110" rx="18" fill="#FFFFFF" stroke="#FDBA74" stroke-width="3"/>
+  <text x="615" y="554" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">Policy Engine</text>
+  <text x="615" y="586" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">open_id / her_uid / repo</text>
+  <rect x="585" y="670" width="290" height="110" rx="18" fill="#FFFFFF" stroke="#FDBA74" stroke-width="3"/>
+  <text x="615" y="714" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">Audit Log</text>
+  <text x="615" y="746" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">命令、审批、结果摘要</text>
+
+  <rect x="990" y="190" width="330" height="700" rx="28" fill="#ECFDF5" stroke="#10B981" stroke-width="5"/>
+  <text x="1030" y="250" font-family="Noto Sans SC, Arial" font-size="33" font-weight="800" fill="#065F46">K8s Her 域</text>
+  <text x="1030" y="292" font-family="Noto Sans SC, Arial" font-size="22" fill="#047857">OpenClaw / Feishu</text>
+  <rect x="1035" y="350" width="240" height="110" rx="18" fill="#FFFFFF" stroke="#6EE7B7" stroke-width="3"/>
+  <text x="1065" y="394" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">Her appSecret</text>
+  <text x="1065" y="426" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">仍在 K8s Secret</text>
+  <rect x="1035" y="510" width="240" height="110" rx="18" fill="#FFFFFF" stroke="#6EE7B7" stroke-width="3"/>
+  <text x="1065" y="554" font-family="Noto Sans SC, Arial" font-size="22" font-weight="700" fill="#111827">OpenClaw 工具</text>
+  <text x="1065" y="586" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">由 Her 自己执行</text>
+  <rect x="1035" y="670" width="240" height="110" rx="18" fill="#FFFFFF" stroke="#6EE7B7" stroke-width="3"/>
+  <text x="1065" y="714" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">Skill 代理</text>
+  <text x="1065" y="746" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">只调 Bridge API</text>
+
+  <rect x="1390" y="190" width="330" height="700" rx="28" fill="#FDF2F8" stroke="#DB2777" stroke-width="5"/>
+  <text x="1430" y="250" font-family="Noto Sans SC, Arial" font-size="33" font-weight="800" fill="#9D174D">飞书用户域</text>
+  <text x="1430" y="292" font-family="Noto Sans SC, Arial" font-size="22" fill="#BE185D">群聊 / 卡片 / 审批</text>
+  <rect x="1435" y="375" width="240" height="110" rx="18" fill="#FFFFFF" stroke="#F9A8D4" stroke-width="3"/>
+  <text x="1465" y="419" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">open_id</text>
+  <text x="1465" y="451" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">身份与权限映射</text>
+  <rect x="1435" y="560" width="240" height="110" rx="18" fill="#FFFFFF" stroke="#F9A8D4" stroke-width="3"/>
+  <text x="1465" y="604" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#111827">审批动作</text>
+  <text x="1465" y="636" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">allow once / deny</text>
+
+  <polyline points="470,405 540,405" fill="none" stroke="#EF4444" stroke-width="5" stroke-dasharray="14 10"/>
+  <text x="492" y="382" font-family="Noto Sans SC, Arial" font-size="20" font-weight="800" fill="#B91C1C">禁止</text>
+  <text x="478" y="438" font-family="Noto Sans SC, Arial" font-size="17" fill="#B91C1C">API key 不出本地</text>
+
+  <polyline points="920,565 990,565" fill="none" stroke="#10B981" stroke-width="5"/>
+  <polygon points="990,565 970,553 970,577" fill="#10B981"/>
+  <text x="930" y="542" font-family="Noto Sans SC, Arial" font-size="18" fill="#047857">受控路由</text>
+
+  <polyline points="1390,615 1320,615 1320,725 920,725" fill="none" stroke="#DB2777" stroke-width="5"/>
+  <polygon points="920,725 940,713 940,737" fill="#DB2777"/>
+  <text x="1095" y="705" font-family="Noto Sans SC, Arial" font-size="18" fill="#9D174D">审批结果只回 Bridge</text>
+
+  <rect x="110" y="930" width="1590" height="70" rx="18" fill="#111827"/>
+  <text x="145" y="974" font-family="Noto Sans SC, Arial" font-size="25" font-weight="800" fill="#FFFFFF">结论：Bridge 是唯一跨域控制面；秘密留在产生它的域；普通 Her 默认没有本地执行权。</text>
+</svg>

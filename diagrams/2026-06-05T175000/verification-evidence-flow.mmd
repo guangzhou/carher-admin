@@ -1,0 +1,28 @@
+sequenceDiagram
+    participant Local as 本地 verify.py
+    participant Remote as AIYJY-litellm
+    participant Proxy as LiteLLM Dev Proxy
+    participant DB as Postgres SpendLogs
+    participant Report as 本地报告
+
+    Local->>Remote: 上传远程验证脚本
+    Remote->>Proxy: /key/generate 临时测试 key
+    Remote->>Proxy: /v1/models
+    Proxy-->>Remote: 只返回 9 个产品模型
+    loop 内部模型直连
+        Remote->>Proxy: 请求 hidden/internal model
+        Proxy-->>Remote: 403 或 model not found
+    end
+    loop 每个产品模型
+        Remote->>Proxy: 正常 /v1/responses
+        Proxy->>DB: 写 SpendLogs
+        Remote->>DB: 查询 model_group/model_id/api_base/status
+    end
+    loop 每个 fallback case
+        Remote->>Proxy: mock_testing_fallbacks=true
+        Proxy->>DB: 写主失败与 fallback 结果
+        Remote->>DB: 轮询 case_id 或时间窗证据
+    end
+    Remote->>Proxy: finally /key/delete
+    Remote-->>Local: JSON 验证结果
+    Local->>Report: 写 Markdown + JSON

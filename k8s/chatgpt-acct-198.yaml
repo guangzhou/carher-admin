@@ -1,0 +1,1007 @@
+# 198 K3s chatgpt-acct 池（litellm-product ns）
+# 用途：把 188 docker-compose 上 wk% >95% 的账号搬到同集群，对齐阿里云 carher 模板
+# 关联 skill: chatgpt-pro-litellm + chatgpt-pool-aliyun-canary
+# 部署：kubectl apply -f k8s/chatgpt-acct-198.yaml
+# OAuth：每 acct 起来后 kubectl logs 看 user_code，浏览器 auth.openai.com/codex 输入
+# 接入 198 prod LiteLLM：UPDATE LiteLLM_ProxyModelTable SET litellm_params.api_base='http://chatgpt-acct-N.litellm-product.svc:4000'
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: chatgpt-pool-master-key
+  namespace: litellm-product
+  labels:
+    pool: chatgpt-acct
+type: Opaque
+stringData:
+  # 各 acct pod 的 LiteLLM master key（pod 内部使用，不对外）。198 prod LiteLLM 调它时用同一个 key 作 api_key。
+  LITELLM_MASTER_KEY: REPLACE_ME_FROM_RUNTIME_SECRET
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chatgpt-pool-config
+  namespace: litellm-product
+  labels:
+    pool: chatgpt-acct
+data:
+  config.yaml: |
+    model_list:
+      - model_name: chatgpt-gpt-5.5
+        litellm_params: {model: chatgpt/gpt-5.5}
+        model_info: {mode: responses}
+      - model_name: chatgpt-gpt-5.4
+        litellm_params: {model: chatgpt/gpt-5.4}
+        model_info: {mode: responses}
+      - model_name: chatgpt-gpt-5.4-pro
+        litellm_params: {model: chatgpt/gpt-5.4-pro}
+        model_info: {mode: responses}
+      - model_name: chatgpt-gpt-5.3-codex
+        litellm_params: {model: chatgpt/gpt-5.3-codex}
+        model_info: {mode: responses}
+      - model_name: chatgpt-gpt-5.3-codex-spark
+        litellm_params: {model: chatgpt/gpt-5.3-codex-spark}
+        model_info: {mode: responses}
+      - model_name: chatgpt-gpt-5.3-instant
+        litellm_params: {model: chatgpt/gpt-5.3-instant}
+        model_info: {mode: responses}
+      - model_name: chatgpt-gpt-5.3-chat-latest
+        litellm_params: {model: chatgpt/gpt-5.3-chat-latest}
+        model_info: {mode: responses}
+
+    litellm_settings:
+      drop_params: true
+      num_retries: 1
+      request_timeout: 120
+
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-1-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "1"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-24-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "24"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-25-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "25"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-2-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "2"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-15-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "15"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-17-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "17"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-1
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-1, pool: chatgpt-acct, account: "1"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-1}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-1, pool: chatgpt-acct, account: "1"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-1-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-1, namespace: litellm-product, labels: {app: chatgpt-acct-1, pool: chatgpt-acct, account: "1"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-1}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-24
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-24, pool: chatgpt-acct, account: "24"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-24}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-24, pool: chatgpt-acct, account: "24"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-24-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-24, namespace: litellm-product, labels: {app: chatgpt-acct-24, pool: chatgpt-acct, account: "24"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-24}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-25
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-25, pool: chatgpt-acct, account: "25"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-25}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-25, pool: chatgpt-acct, account: "25"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-25-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-25, namespace: litellm-product, labels: {app: chatgpt-acct-25, pool: chatgpt-acct, account: "25"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-25}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+# === 第二批迁入：187 → 198，2026-06-13 ===
+# acct-2 / acct-15 / acct-17（acct-15 上 187 OAuth 未完成需到 198 后重做）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-2
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-2, pool: chatgpt-acct, account: "2"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-2}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-2, pool: chatgpt-acct, account: "2"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-2-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-2, namespace: litellm-product, labels: {app: chatgpt-acct-2, pool: chatgpt-acct, account: "2"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-2}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-15
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-15, pool: chatgpt-acct, account: "15"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-15}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-15, pool: chatgpt-acct, account: "15"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-15-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-15, namespace: litellm-product, labels: {app: chatgpt-acct-15, pool: chatgpt-acct, account: "15"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-15}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-17
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-17, pool: chatgpt-acct, account: "17"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-17}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-17, pool: chatgpt-acct, account: "17"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-17-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-17, namespace: litellm-product, labels: {app: chatgpt-acct-17, pool: chatgpt-acct, account: "17"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-17}
+  ports: [{port: 4000, targetPort: 4000}]
+
+# === 第三批迁入：188 → 198 K3s，2026-06-13 ===
+# acct-3/4/5/6/12/13/14/16/22/23（188 docker-compose 整批迁入）
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-3-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "3"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-5-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "5"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-6-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "6"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-14-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "14"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-16-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "16"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-3
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-3, pool: chatgpt-acct, account: "3"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-3}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-3, pool: chatgpt-acct, account: "3"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-3-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-3, namespace: litellm-product, labels: {app: chatgpt-acct-3, pool: chatgpt-acct, account: "3"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-3}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-5
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-5, pool: chatgpt-acct, account: "5"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-5}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-5, pool: chatgpt-acct, account: "5"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-5-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-5, namespace: litellm-product, labels: {app: chatgpt-acct-5, pool: chatgpt-acct, account: "5"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-5}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-6
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-6, pool: chatgpt-acct, account: "6"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-6}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-6, pool: chatgpt-acct, account: "6"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-6-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-6, namespace: litellm-product, labels: {app: chatgpt-acct-6, pool: chatgpt-acct, account: "6"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-6}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-14
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-14, pool: chatgpt-acct, account: "14"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-14}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-14, pool: chatgpt-acct, account: "14"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-14-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-14, namespace: litellm-product, labels: {app: chatgpt-acct-14, pool: chatgpt-acct, account: "14"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-14}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-16
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-16, pool: chatgpt-acct, account: "16"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-16}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-16, pool: chatgpt-acct, account: "16"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-16-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-16, namespace: litellm-product, labels: {app: chatgpt-acct-16, pool: chatgpt-acct, account: "16"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-16}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-4-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "4"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-4
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-4, pool: chatgpt-acct, account: "4"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-4}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-4, pool: chatgpt-acct, account: "4"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-4-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-4, namespace: litellm-product, labels: {app: chatgpt-acct-4, pool: chatgpt-acct, account: "4"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-4}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-12-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "12"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-12
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-12, pool: chatgpt-acct, account: "12"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-12}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-12, pool: chatgpt-acct, account: "12"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-12-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-12, namespace: litellm-product, labels: {app: chatgpt-acct-12, pool: chatgpt-acct, account: "12"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-12}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-13-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "13"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-13
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-13, pool: chatgpt-acct, account: "13"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-13}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-13, pool: chatgpt-acct, account: "13"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-13-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-13, namespace: litellm-product, labels: {app: chatgpt-acct-13, pool: chatgpt-acct, account: "13"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-13}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-22-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "22"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-22
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-22, pool: chatgpt-acct, account: "22"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-22}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-22, pool: chatgpt-acct, account: "22"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-22-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-22, namespace: litellm-product, labels: {app: chatgpt-acct-22, pool: chatgpt-acct, account: "22"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-22}
+  ports: [{port: 4000, targetPort: 4000}]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-23-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "23"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-23
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-23, pool: chatgpt-acct, account: "23"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-23}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-23, pool: chatgpt-acct, account: "23"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.85.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-23-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-23, namespace: litellm-product, labels: {app: chatgpt-acct-23, pool: chatgpt-acct, account: "23"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-23}
+  ports: [{port: 4000, targetPort: 4000}]

@@ -165,6 +165,54 @@ LiteLLM Key 映射（共 N 个 litellm 实例）:
 
 ---
 
+## 重新生成 key（明文 sk- key 丢失）
+
+LiteLLM **只存 SHA-256 hash**，不存明文。key 一旦创建后忘记记录，无法从 DB 恢复原始 `sk-` 值。唯一路径是删旧 key → 重新生成。
+
+### 1. 查现有 key 的配置（先留底）
+
+```bash
+MASTER_KEY=$(kubectl get secret litellm-secrets -n carher -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+
+# 用 token hash（Key ID）查
+curl -s "https://litellm.carher.net/key/info?key=<token-hash>" \
+  -H "Authorization: Bearer $MASTER_KEY" | python3 -m json.tool
+# 记下 models / max_budget / budget_duration / metadata
+```
+
+### 2. 删旧 key
+
+```bash
+curl -s -X POST "https://litellm.carher.net/key/delete" \
+  -H "Authorization: Bearer $MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"keys": ["<token-hash>"]}'
+```
+
+### 3. 生成新 key（保持原配置）
+
+```bash
+curl -s -X POST "https://litellm.carher.net/key/generate" \
+  -H "Authorization: Bearer $MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key_alias": "carher-<N>",
+    "user_id": "carher-<N>",
+    "models": [...],
+    "max_budget": 100.0,
+    "budget_duration": "1d",
+    "metadata": {"instance": "carher-<N>", "litellm_route_policy": "wangsu_first"}
+  }' | python3 -c "import sys,json; d=json.load(sys.stdin); print('key:', d.get('key'))"
+# 输出的 key: sk-... 就是新明文 key，立刻记录
+```
+
+> **注意**：如果实例有对应 K8s CRD（`her-<N>`），还需要 patch CRD `spec.litellmKey` 让 Operator 重新注入：
+> ```bash
+> kubectl patch her her-<N> -n carher --type=merge -p '{"spec":{"litellmKey":"sk-...新key..."}}'
+> ```
+
+---
+
 ## 删除虚拟 key（按 key_alias，含非 Her 账户）
 
 用于撤销某批账户的 API key（例如离职、轮换、误发 key）。**破坏性操作**：删除后该 key 立即失效，需重新走生成流程。

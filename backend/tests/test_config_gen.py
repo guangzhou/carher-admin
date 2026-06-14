@@ -80,6 +80,7 @@ class TestPrimaryModel:
         ("litellm",     "minimax","litellm/minimax-m2.7"),
         ("litellm",     "glm",    "litellm/glm-5"),
         ("litellm",     "codex",  "litellm/gpt-5.3-codex"),
+        ("litellm",     "opus4.8","litellm/openrouter-claude-opus-4-8"),
     ])
     def test_primary_model(self, provider, model, expected_primary):
         cfg = generate_openclaw_json(_inst({"provider": provider, "model": model}))
@@ -114,7 +115,7 @@ class TestModelAliases:
     def test_litellm_has_all_core_aliases(self):
         models = self._models("litellm")
         alias_set = {v["alias"] for v in models.values()}
-        assert {"opus", "sonnet", "gpt", "gemini", "minimax", "glm", "codex"}.issubset(alias_set)
+        assert {"opus", "sonnet", "gpt", "gemini", "minimax", "glm", "codex", "opus4.8"}.issubset(alias_set)
 
     def test_litellm_has_wangsu_relay_aliases(self):
         # New cheliantianxia1 models added 2026-05-08 (gpt-5.5 + DeepSeek V4)
@@ -338,3 +339,9 @@ class TestLitellmProviderSection:
         ids = {m["id"] for m in cfg["models"]["providers"]["litellm"]["models"]}
         assert {"wangsu-gpt-5.5", "wangsu-deepseek-v4-pro", "wangsu-deepseek-v4-flash",
                 "wangsu-glm-5.1", "wangsu-gemini-3.5-flash"}.issubset(ids)
+
+    def test_litellm_provider_exposes_openrouter_opus_48_but_not_fast(self):
+        cfg = self._litellm_cfg()
+        ids = {m["id"] for m in cfg["models"]["providers"]["litellm"]["models"]}
+        assert "openrouter-claude-opus-4-8" in ids
+        assert "openrouter-claude-opus-4-8-fast" not in ids

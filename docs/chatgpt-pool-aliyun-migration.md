@@ -1,6 +1,6 @@
-# ChatGPT Pro 账户池迁移到阿里云 K8s — C-2 五账号池金丝雀方案（最终版）
+# ChatGPT Pro 账户池迁移到阿里云 K8s — 五账号池 + 全集群 promote（最终版）
 
-> 2026-05-20 完成。**C-2 是最终落地方案**（B-1 / B-2 / C-1 已迭代废弃，第 1 节有演进史）。
+> 2026-05-20 完成。本文档覆盖两阶段：**C-2 金丝雀验证** + **D 全集群 promote 到 prod**。
 
 ## 1. 方案演进
 
@@ -9,7 +9,8 @@
 | ~~B-2~~ | 阿里云独立 1 个 chatgpt-acct-11 Pod，主 litellm-proxy 通过 ClusterIP 调它 | 多一层架构无收益 |
 | ~~B-1~~ | 主 litellm-proxy replicas=2→1 直跑 `chatgpt/` provider | 会影响 500+ her 实例 |
 | ~~C-1~~ | canary（独立 ConfigMap）自跑 `chatgpt/` provider 服务 1 账号 acct-11 | 后续要扩 5 账号，单进程 `CHATGPT_TOKEN_DIR` 是全局 env，1 进程 = 1 账号 |
-| **C-2** | 5 个独立 `chatgpt-acct-N` Pod（each 1 account）+ canary 作 openai/ 代理 simple-shuffle LB；her-1000 通过 `spec.litellmUrl` 切 canary | **采纳，已落地** |
+| **C-2** | 5 个独立 `chatgpt-acct-N` Pod（each 1 account）+ canary 作 openai/ 代理 simple-shuffle LB；her-1000 通过 `spec.litellmUrl` 切 canary | **已落地（金丝雀验证阶段）** |
+| **D** | 把 C-2 配置 promote 到 prod litellm-proxy（同 ConfigMap 升级 + 镜像 1.85.0 + operator alias rename + 217 her 默认改 gpt）| **已落地（全集群推广）** |
 
 ## 2. 最终拓扑
 
@@ -196,3 +197,130 @@ sequenceDiagram
 | routing latency-based | 用默认 simple-shuffle | 5 个 acct 一致性强，simple-shuffle 配 LiteLLM 自带 cooldown 已足够；latency-based 是全局开关会影响其他 multi-deployment 组 |
 | master key 复用 188 的 | 新建 `sk-chatgpt-aliyun-...`（按推荐） | 公网/内网 master key 隔离 |
 | 通过 188 公网 NAT 调用 | 全部搬到阿里云内网（C-2 升级） | 阿里云能出国，无需中转 |
+
+---
+
+## 10. 阶段 D：promote 到 prod（全集群推广）
+
+C-2 阶段 her-1000 单实例验证通过后，将 chatgpt 池接入推广到全集群。
+
+### 10.1 prod litellm-proxy 升级 + 加 chatgpt 池
+
+`k8s/litellm-proxy.yaml` 改 4 处：
+
+1. **image 升级到 `ghcr.io/berriai/litellm:v1.85.0`**（vs 原 `cltx-her-ck-registry-vpc.../her/litellm-proxy:v1.83.14-stable.patch.3-20260513`），`imagePullPolicy: Never → IfNotPresent`。prod 的旧镜像本就 `imagePullPolicy: Never + nodeSelector pin`，跟 ACR VPC 红线已经实际打破；用 ghcr 公网跟 canary 同款。
+2. **加 4 个 chatgpt-* model_list × 5 deployment**（共 20 条），代理调 chatgpt-acct-{7..11}.carher.svc。**保留 openrouter `gpt-5.4` / `gpt-5.3-codex`**（不删，避免 500+ her 流量瞬间打到 5 acct 池打爆）。
+3. **加 fallback** `chatgpt-gpt-5.5 → wangsu-gpt-5.5`（`gpt-5.4 → wangsu-gpt-5.4` 原有）。
+4. **加 env `CHATGPT_POOL_KEY`** 从 Secret `chatgpt-pool-master-key` 注入。
+
+### 10.2 operator alias 重命名
+
+`operator-go/internal/controller/config_gen.go` 改两个 map：
+
+**modelMapLitellm**（her CRD `spec.model` → 实际 model_id）：
+- `gpt`: `litellm/gpt-5.4` → `litellm/chatgpt-gpt-5.5`（核心改动：默认 gpt 走 chatgpt 池 5.5）
+- 新增 `gpt-5.4`: `litellm/chatgpt-gpt-5.4`
+- `codex`: `litellm/gpt-5.3-codex` → `litellm/chatgpt-gpt-5.3-codex`
+- 删 `gpt-5.5`（被 `gpt` 覆盖）
+- 新增 `opus4.7`: `litellm/claude-opus-4-7`
+
+**models[] alias map**（per-her user-config 的 `agents.defaults.models.<id>.alias`）：
+- `litellm/chatgpt-gpt-5.5`: alias `gpt-5.5` → `gpt`
+- 删 `litellm/gpt-5.4`（替换为 `litellm/chatgpt-gpt-5.4 → gpt-5.4`）
+- `litellm/gpt-5.3-codex` → `litellm/chatgpt-gpt-5.3-codex`（alias `codex` 保留）
+- 删 `litellm/wangsu-gpt-5.5`（alias `gpt55` 移除）
+
+### 10.3 全集群 her 默认模型改 `gpt`
+
+批量 `kubectl patch her <name> -n carher --type=merge -p '{"spec":{"model":"gpt"}}'`：
+- 217 个 `model=sonnet` 的实例 → patch 成 `gpt`
+- 7 个 `model=opus` 的实例 → **保留**（用户主动选的）
+
+operator reconcile 自动重新生成每个 her 的 user-config，`primary` 字段从 `litellm/claude-sonnet-4-6` 改成 `litellm/chatgpt-gpt-5.5`。
+
+### 10.4 vkey allowlist 批量更新
+
+229 个 carher-* virtual key 批量加 4 个 chatgpt-* model 到 allowlist（不删现有）。用 add-litellm-model skill 步骤 2 脚本（拉 → union → /key/update 逐个发，不用 /key/bulk_update 避免同质化丢条目）。
+
+### 10.5 backend/litellm_ops.py 默认 allowlist 升级
+
+`_BASE_MODELS` 加 `chatgpt-gpt-5.5/5.4/5.3-codex/5.3-codex-spark`，新创建的 carher-* key 默认就含 4 个 chatgpt-*。
+
+### 10.6 撤 her-1000 切流
+
+prod 现在也有 chatgpt 池，her-1000 不再需要走 canary：
+```bash
+kubectl patch her her-1000 -n carher --type=merge -p '{"spec":{"litellmUrl":""}}'
+```
+canary 资源（`litellm-proxy-canary` + 独立 ConfigMap + PVC）保留作未来实验。
+
+### 10.7 最终全集群架构
+
+```mermaid
+flowchart LR
+  subgraph ALL_HER["所有 carher her 实例"]
+    direction TB
+    NORMAL["217 个 spec.model=gpt<br/>默认 litellm/chatgpt-gpt-5.5"]
+    OPUS["7 个 spec.model=opus<br/>用户主动选 opus"]
+  end
+
+  subgraph PROD["litellm-proxy (prod, replicas=2, ghcr 1.85.0)"]
+    direction TB
+    R["alias map (operator-rendered):<br/>gpt → chatgpt-gpt-5.5<br/>gpt-5.4 → chatgpt-gpt-5.4<br/>codex → chatgpt-gpt-5.3-codex<br/>opus/sonnet/opus4.7/gemini/<br/>glm/minimax/ds-pro/ds-flash → 不变"]
+    LB["chatgpt-* model_list:<br/>每个 model_name × 5 deployment<br/>simple-shuffle LB"]
+  end
+
+  subgraph POOL["chatgpt-acct pool"]
+    direction TB
+    P7["chatgpt-acct-7"]
+    P8["chatgpt-acct-8"]
+    P9["chatgpt-acct-9"]
+    P10["chatgpt-acct-10"]
+    P11["chatgpt-acct-11"]
+  end
+
+  NORMAL --> R
+  OPUS --> R
+  R --> LB
+  LB --> P7
+  LB --> P8
+  LB --> P9
+  LB --> P10
+  LB --> P11
+  P7 --> OAI[("ChatGPT Pro<br/>acct-7~11")]
+  P8 --> OAI
+  P9 --> OAI
+  P10 --> OAI
+  P11 --> OAI
+```
+
+### 10.8 验证结果
+
+| 项 | 结果 |
+|---|---|
+| prod litellm-proxy 2/2 副本 | ✅ Running v1.85.0 |
+| prod 4 个 chatgpt-* 模型直接 curl | ✅ 全部 200 + content |
+| operator 镜像 push ACR + rollout | ✅ `v20260520-f223ab2` |
+| her-1000 user-config primary | ✅ `litellm/chatgpt-gpt-5.5` |
+| 217 个 sonnet her patch → gpt | ✅ 0 失败 |
+| 7 个 opus her 保留不动 | ✅ |
+| 229 vkey allowlist 加 4 chatgpt-* | ✅ 0 失败 |
+| canary 资源保留 | ✅ |
+
+### 10.9 阶段 D 的潜在风险
+
+| 风险 | 状态 |
+|------|------|
+| 5 acct 上游容量被 217 her 默认 gpt 流量打爆 | ⚠️ **需密切监控**。chatgpt-gpt-5.5 撞限 fallback wangsu，业务不挂；但 wangsu 流量瞬间放大 |
+| ghcr 公网 first pull 失败 | ✅ 已验证 OK（canary 先跑了几小时） |
+| LiteLLM 1.85 vs 1.83 patch 行为差异 | ⚠️ vanilla 1.85 不带 carher 自定义 patch.3（如 count_tokens fix）；如有回退到 1.83 的需求，需要 push patch 镜像（账号 push 权限阻塞需先解决）|
+| 5 acct 中任一 token_invalidated | ⚠️ 影响 1/5 容量；其他 4 acct 接管；需 re-OAuth |
+
+### 10.10 阶段 D 回滚路径
+
+| 失败 | 回滚 |
+|------|------|
+| prod 业务大量 fail | `git revert f223ab2 && kubectl apply -f k8s/litellm-proxy.yaml`（恢复 1.83.14 镜像 + 旧 ConfigMap） |
+| 5 acct 容量爆掉 | 选 (a) 批量 patch 部分 her 回 `sonnet`/`opus`；(b) 把 chatgpt-* model_list 改成 fallback-only（移除 5 acct deployment 仅保留 fallback wangsu-gpt-5.5） |
+| operator 行为异常 | `kubectl set image deploy/carher-operator operator=<prev-tag> -n carher` |
+| 想完全撤回 chatgpt 池 | 全套：(1) git revert (2) 批量 patch her spec.model 回 sonnet (3) operator image 回滚 (4) vkey 移除 4 个 chatgpt-* (5) chatgpt-acct-pool 资源 delete |

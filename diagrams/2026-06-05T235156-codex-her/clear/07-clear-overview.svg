@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1100" viewBox="0 0 1800 1100">
+  <rect width="1800" height="1100" fill="#F7FAFC"/>
+  <text x="80" y="90" font-family="Noto Sans SC, Arial" font-size="46" font-weight="800" fill="#102A43">Codex 与 Her 双向调用：清晰总览</text>
+  <text x="82" y="135" font-family="Noto Sans SC, Arial" font-size="24" fill="#52606D">核心原则：Codex 调 Her 走 MCP；Her 调 Codex 走 Skill + Bridge + Mac Worker。供应商 API key 只留在本地 Worker。</text>
+
+  <rect x="80" y="190" width="360" height="760" rx="24" fill="#E3F2FD" stroke="#1976D2" stroke-width="4"/>
+  <text x="115" y="245" font-family="Noto Sans SC, Arial" font-size="34" font-weight="800" fill="#0D47A1">本地 Codex</text>
+  <text x="115" y="285" font-family="Noto Sans SC, Arial" font-size="22" fill="#244A6B">代码、repo、shell 在这里</text>
+  <rect x="120" y="340" width="280" height="96" rx="16" fill="#FFFFFF" stroke="#64B5F6" stroke-width="3"/>
+  <text x="150" y="382" font-family="Noto Sans SC, Arial" font-size="25" font-weight="700" fill="#102A43">Codex CLI / App</text>
+  <text x="150" y="414" font-family="Noto Sans SC, Arial" font-size="18" fill="#52606D">MCP + app-server client</text>
+  <rect x="120" y="480" width="280" height="96" rx="16" fill="#FFFFFF" stroke="#64B5F6" stroke-width="3"/>
+  <text x="150" y="522" font-family="Noto Sans SC, Arial" font-size="25" font-weight="700" fill="#102A43">carher-her-mcp</text>
+  <text x="150" y="554" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">把 Her 暴露成 Codex 工具</text>
+  <rect x="120" y="620" width="280" height="120" rx="16" fill="#FFFFFF" stroke="#64B5F6" stroke-width="3"/>
+  <text x="150" y="662" font-family="Noto Sans SC, Arial" font-size="25" font-weight="700" fill="#102A43">Mac Worker</text>
+  <text x="150" y="694" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">主动 WSS 反连 Bridge</text>
+  <text x="150" y="724" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">连接 127.0.0.1:4500</text>
+
+  <rect x="520" y="190" width="360" height="760" rx="24" fill="#FFF8E1" stroke="#F9A825" stroke-width="4"/>
+  <text x="555" y="245" font-family="Noto Sans SC, Arial" font-size="34" font-weight="800" fill="#8D5B00">Bridge 控制面</text>
+  <text x="555" y="285" font-family="Noto Sans SC, Arial" font-size="22" fill="#6B4E16">唯一公网入口与审计中心</text>
+  <rect x="560" y="335" width="280" height="118" rx="16" fill="#FFFFFF" stroke="#FBC02D" stroke-width="3"/>
+  <text x="590" y="377" font-family="Noto Sans SC, Arial" font-size="25" font-weight="700" fill="#102A43">Bridge API</text>
+  <text x="590" y="409" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">/api/codex/tasks</text>
+  <text x="590" y="435" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">/api/her-rpc/sessions</text>
+  <rect x="560" y="500" width="280" height="118" rx="16" fill="#FFFFFF" stroke="#FBC02D" stroke-width="3"/>
+  <text x="590" y="542" font-family="Noto Sans SC, Arial" font-size="25" font-weight="700" fill="#102A43">Policy + Audit</text>
+  <text x="590" y="574" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">open_id / her_uid / repo</text>
+  <text x="590" y="600" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">命令审批与审计</text>
+  <rect x="560" y="665" width="280" height="118" rx="16" fill="#FFFFFF" stroke="#FBC02D" stroke-width="3"/>
+  <text x="590" y="707" font-family="Noto Sans SC, Arial" font-size="25" font-weight="700" fill="#102A43">Registry</text>
+  <text x="590" y="739" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">Worker 在线状态</text>
+  <text x="590" y="765" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">Her / repo 白名单</text>
+
+  <rect x="960" y="190" width="360" height="760" rx="24" fill="#E8F5E9" stroke="#43A047" stroke-width="4"/>
+  <text x="995" y="245" font-family="Noto Sans SC, Arial" font-size="34" font-weight="800" fill="#1B5E20">K8s Her 平面</text>
+  <text x="995" y="285" font-family="Noto Sans SC, Arial" font-size="22" fill="#33691E">Her 是 OpenClaw 飞书智能体</text>
+  <rect x="1000" y="335" width="280" height="118" rx="16" fill="#FFFFFF" stroke="#81C784" stroke-width="3"/>
+  <text x="1030" y="377" font-family="Noto Sans SC, Arial" font-size="23" font-weight="700" fill="#102A43">Her Gateway</text>
+  <text x="1030" y="409" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">her_uid -> carher-{uid}-svc</text>
+  <text x="1030" y="435" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">只允许 Bridge 访问</text>
+  <rect x="1000" y="500" width="280" height="118" rx="16" fill="#FFFFFF" stroke="#81C784" stroke-width="3"/>
+  <text x="1030" y="542" font-family="Noto Sans SC, Arial" font-size="25" font-weight="700" fill="#102A43">CodexOpsHer</text>
+  <text x="1030" y="574" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">第一版唯一入口 Her</text>
+  <text x="1030" y="600" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">Skill: codex-remote-control</text>
+  <rect x="1000" y="665" width="280" height="118" rx="16" fill="#FFFFFF" stroke="#81C784" stroke-width="3"/>
+  <text x="1030" y="707" font-family="Noto Sans SC, Arial" font-size="25" font-weight="700" fill="#102A43">普通 Her</text>
+  <text x="1030" y="739" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">默认不开 /codex</text>
+  <text x="1030" y="765" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">逐步白名单灰度</text>
+
+  <rect x="1400" y="190" width="320" height="760" rx="24" fill="#FCE4EC" stroke="#D81B60" stroke-width="4"/>
+  <text x="1435" y="245" font-family="Noto Sans SC, Arial" font-size="34" font-weight="800" fill="#880E4F">飞书入口</text>
+  <text x="1435" y="285" font-family="Noto Sans SC, Arial" font-size="22" fill="#6A1B9A">手机、群聊、审批卡片</text>
+  <rect x="1440" y="360" width="240" height="110" rx="16" fill="#FFFFFF" stroke="#F06292" stroke-width="3"/>
+  <text x="1470" y="405" font-family="Noto Sans SC, Arial" font-size="25" font-weight="700" fill="#102A43">用户 / 群</text>
+  <text x="1470" y="438" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">/codex 触发任务</text>
+  <rect x="1440" y="545" width="240" height="110" rx="16" fill="#FFFFFF" stroke="#F06292" stroke-width="3"/>
+  <text x="1470" y="590" font-family="Noto Sans SC, Arial" font-size="25" font-weight="700" fill="#102A43">审批卡片</text>
+  <text x="1470" y="623" font-family="Noto Sans SC, Arial" font-size="19" fill="#52606D">允许一次 / 拒绝</text>
+
+  <polyline points="400,528 520,528" fill="none" stroke="#1976D2" stroke-width="6"/>
+  <polygon points="520,528 500,516 500,540" fill="#1976D2"/>
+
+  <polyline points="880,560 960,560" fill="none" stroke="#43A047" stroke-width="6"/>
+  <polygon points="960,560 940,548 940,572" fill="#43A047"/>
+  <text x="890" y="532" font-family="Noto Sans SC, Arial" font-size="21" fill="#1B5E20">路由到 Her</text>
+
+  <polyline points="1440,600 1320,600 1320,710 880,710" fill="none" stroke="#D81B60" stroke-width="6"/>
+  <polygon points="880,710 900,698 900,722" fill="#D81B60"/>
+
+  <rect x="80" y="990" width="1640" height="64" rx="18" fill="#102A43"/>
+  <text x="120" y="1032" font-family="Noto Sans SC, Arial" font-size="24" font-weight="700" fill="#FFFFFF">两条链路：Codex -> Her 走 MCP；Her -> Codex 走 Skill + Bridge。app-server 只监听 127.0.0.1。</text>
+</svg>

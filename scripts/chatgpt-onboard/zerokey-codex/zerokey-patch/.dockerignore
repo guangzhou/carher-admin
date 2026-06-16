@@ -1,0 +1,6 @@
+.git
+*.log
+temp/profile
+temp/*.log
+zerokey-src
+.DS_Store

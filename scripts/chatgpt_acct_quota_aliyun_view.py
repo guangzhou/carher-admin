@@ -302,21 +302,58 @@ def render(*, summary: bool, as_json: bool) -> None:
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 
-    print(
-        f"{'acct':12s} {'pod':50s} {'email':32s} {'ready':>5s} {'rst':>3s} "
-        f"{'age':>7s} {'plan':>5s} {'sub_until':>10s} {'sub_left':>8s} {'tok_left':>9s} "
-        f"{'5h%':>5s} {'p_reset':>9s} {'7d%':>5s} {'7d_reset':>10s} "
-        f"{'cx5h%':>6s} {'cx7d%':>6s} "
-        f"{'5h_n':>6s} {'5h$':>7s} {'24h_n':>7s} {'24h$':>8s}  notes"
-    )
-    print("-" * 260)
+    def status_of(p: dict[str, Any]) -> str:
+        if not p.get("ready"):
+            return "OFFLINE"
+        if p.get("probe_err") == "token_invalidated":
+            return "TOKEN_X"
+        if isinstance(p.get("p7d"), (int, float)) and p["p7d"] >= 100:
+            return "QUOTA"
+        if isinstance(p.get("p5h"), (int, float)) and p["p5h"] >= 100:
+            return "QUOTA"
+        return "ONLINE"
 
-    total_5h_calls = total_5h_spend = 0.0
-    total_24h_calls = total_24h_spend = 0.0
+    def take_of(p: dict[str, Any]) -> str:
+        return "yes" if status_of(p) == "ONLINE" else "-"
+
+    def cause_of(p: dict[str, Any]) -> str:
+        causes = []
+        if p.get("probe_err"):
+            causes.append(p["probe_err"])
+        if isinstance(p.get("expires_at"), int) and p["expires_at"] - now <= 0:
+            causes.append("token_expired")
+        elif isinstance(p.get("expires_at"), int) and p["expires_at"] - now < 3 * 86400:
+            causes.append("token<3d")
+        if p.get("sub_until") and p["sub_until"] <= now:
+            causes.append("sub_expired")
+        elif p.get("sub_until") and p["sub_until"] - now < 7 * 86400:
+            causes.append("sub<7d")
+        if isinstance(p.get("p5h"), (int, float)) and p["p5h"] >= 100:
+            causes.append("5h_full")
+        if isinstance(p.get("p7d"), (int, float)) and p["p7d"] >= 100:
+            causes.append("7d_full")
+        s24 = spend_24h.get(p["acct"], {})
+        if int(s24.get("calls") or 0) == 0:
+            causes.append("idle_24h")
+        if p.get("restarts", 0) > 0:
+            causes.append(f"restarts={p['restarts']}")
+        return ",".join(causes)
+
+    print(
+        f"{'acct':9s} {'email':32s} {'take':>4s} {'status':>8s} "
+        f"{'5h%':>5s} {'5h_n':>6s} {'5h$':>7s} {'5h_reset':>9s} "
+        f"{'7d%':>5s} {'7d_reset':>10s} "
+        f"{'tok_left':>9s} {'sub_until':>10s} {'sub_left':>8s}  cause"
+    )
+    print("-" * 200)
+
     silent: list[str] = []
     expiring: list[str] = []
     sub_expiring: list[str] = []
     quota_high: list[str] = []
+    total_5h_calls = total_5h_spend = 0.0
+    total_24h_calls = total_24h_spend = 0.0
+
     for p in sorted(pods, key=lambda x: acct_sort_key(x["acct"])):
         acct = p["acct"]
         s5 = spend_5h.get(acct, {})
@@ -328,56 +365,30 @@ def render(*, summary: bool, as_json: bool) -> None:
         total_5h_calls += c5; total_5h_spend += v5
         total_24h_calls += c24; total_24h_spend += v24
 
-        notes = []
-        if not p.get("ready"):
-            notes.append("POD_NOT_READY")
-        if p.get("restarts", 0) > 0:
-            notes.append(f"restarts={p['restarts']}")
         if c24 == 0:
-            notes.append("idle_24h")
             silent.append(acct)
-        elif c5 == 0 and c24 > 0:
-            notes.append("idle_5h")
-        if c24 > 0 and v24 == 0:
-            notes.append("price$0?")
-        tok_left = fmt_expires(p.get("expires_at"), now)
         if isinstance(p.get("expires_at"), int) and p["expires_at"] - now < 3 * 86400:
-            notes.append("token_soon")
             expiring.append(acct)
         sub_until_ts = p.get("sub_until")
-        sub_left = fmt_expires(sub_until_ts, now)
-        if sub_until_ts and sub_until_ts - now < 7 * 86400 and sub_until_ts > now:
-            notes.append("sub_soon")
+        if sub_until_ts and sub_until_ts - now < 7 * 86400:
             sub_expiring.append(acct)
-        elif sub_until_ts and sub_until_ts <= now:
-            notes.append("sub_expired")
-            sub_expiring.append(acct)
-        p5h = p.get("p5h")
-        p7d = p.get("p7d")
-        if isinstance(p5h, (int, float)) and p5h >= 90:
-            notes.append(f"5h>={int(p5h)}%")
+        p5h = p.get("p5h"); p7d = p.get("p7d")
+        if (isinstance(p5h, (int, float)) and p5h >= 90) or (isinstance(p7d, (int, float)) and p7d >= 90):
             quota_high.append(acct)
-        if isinstance(p7d, (int, float)) and p7d >= 90:
-            notes.append(f"7d>={int(p7d)}%")
-            quota_high.append(acct)
-        if p.get("probe_err"):
-            notes.append(f"probe:{p['probe_err']}")
 
         def pct(v):
             return f"{int(v)}%" if isinstance(v, (int, float)) else "-"
 
         print(
-            f"{acct:12s} {p['pod']:50s} {(p.get('email') or '-'):32s} "
-            f"{('Y' if p.get('ready') else 'N'):>5s} "
-            f"{str(p.get('restarts', 0)):>3s} {fmt_age(p.get('started_at'), now):>7s} "
-            f"{(p.get('plan') or '-'):>5s} {fmt_sub_until(sub_until_ts):>10s} "
-            f"{sub_left:>8s} {tok_left:>9s} "
-            f"{pct(p5h):>5s} {fmt_expires(p.get('p_reset'), now):>9s} "
-            f"{pct(p7d):>5s} {fmt_expires(p.get('w_reset'), now):>10s} "
-            f"{pct(p.get('codex_5h')):>6s} {pct(p.get('codex_7d')):>6s} "
+            f"{acct:9s} {(p.get('email') or '-'):32s} "
+            f"{take_of(p):>4s} {status_of(p):>8s} "
+            f"{pct(p5h):>5s} "
             f"{(str(c5) if c5 else '-'):>6s} {(f'{v5:.1f}' if c5 else '-'):>7s} "
-            f"{(str(c24) if c24 else '-'):>7s} {(f'{v24:.1f}' if c24 else '-'):>8s}  "
-            f"{','.join(notes)}"
+            f"{fmt_expires(p.get('p_reset'), now):>9s} "
+            f"{pct(p7d):>5s} {fmt_expires(p.get('w_reset'), now):>10s} "
+            f"{fmt_expires(p.get('expires_at'), now):>9s} "
+            f"{fmt_sub_until(sub_until_ts):>10s} {fmt_expires(sub_until_ts, now):>8s}  "
+            f"{cause_of(p)}"
         )
 
     print()
@@ -399,11 +410,18 @@ def render(*, summary: bool, as_json: bool) -> None:
 
     if not summary:
         return
-    ready = [p["acct"] for p in pods if p.get("ready")]
-    not_ready = [p["acct"] for p in pods if not p.get("ready")]
+    takers = [p["acct"] for p in pods if take_of(p) == "yes"]
+    online = [p["acct"] for p in pods if status_of(p) == "ONLINE"]
+    quota = [p["acct"] for p in pods if status_of(p) == "QUOTA"]
+    token_x = [p["acct"] for p in pods if status_of(p) == "TOKEN_X"]
+    offline = [p["acct"] for p in pods if status_of(p) == "OFFLINE"]
+    sort = lambda rows: sorted(rows, key=acct_sort_key)
     print()
-    print(f"ready    ={len(ready):2d}  {sorted(ready, key=acct_sort_key)}")
-    print(f"not_ready={len(not_ready):2d}  {sorted(not_ready, key=acct_sort_key)}")
+    print(f"take    ={len(takers):2d}  {sort(takers)}")
+    print(f"online  ={len(online):2d}  {sort(online)}")
+    print(f"quota   ={len(quota):2d}  {sort(quota)} (5h/7d 撞顶)")
+    print(f"token_x ={len(token_x):2d}  {sort(token_x)} (token_invalidated, 走 re-OAuth)")
+    print(f"offline ={len(offline):2d}  {sort(offline)} (pod not ready)")
 
 
 def main() -> int:

@@ -199,11 +199,12 @@ import json, os, subprocess
 os.environ["KUBECONFIG"] = os.path.expanduser("~/.kube/config")
 sql = (
     "SELECT split_part(model_id, '-gpt-', 1) AS acct, "
+    "CASE WHEN model_id LIKE '%gpt-5.3%' THEN 'codex' ELSE 'main' END AS bucket, "
     "COUNT(*) AS n, ROUND(SUM(spend)::numeric, 2) AS spend "
     "FROM \"LiteLLM_SpendLogs\" "
     "WHERE model_id LIKE 'chatgpt-acct-%-gpt-%' "
     "AND \"startTime\" > NOW() - INTERVAL '5 hours' "
-    "GROUP BY acct;"
+    "GROUP BY acct, bucket;"
 )
 try:
     raw = subprocess.check_output(
@@ -217,13 +218,16 @@ else:
     out = {}
     for line in raw.splitlines():
         parts = line.strip().split("|")
-        if len(parts) < 3:
+        if len(parts) < 4:
             continue
         acct = parts[0].replace("chatgpt-", "", 1)
+        bucket = parts[1]
         try:
-            out[acct] = {"calls": int(parts[1]), "spend": float(parts[2])}
+            calls = int(parts[2])
+            spend = float(parts[3])
         except ValueError:
             continue
+        out.setdefault(acct, {})[bucket] = {"calls": calls, "spend": spend}
     print(json.dumps(out))
 '''
 
@@ -272,30 +276,36 @@ def render_table(state: dict[str, dict[str, Any]], *, summary: bool) -> None:
     spend_5h = remote_198_spend_5h()
     print(
         f"{'acct':9s} {'email':32s} {'take':>4s} {'status':>7s} {'tier':>16s} "
-        f"{'5h%':>5s} {'5h_calls':>8s} {'5h$':>7s} {'5h_reset':>12s} "
+        f"{'5h%':>5s} {'main_n':>7s} {'main$':>7s} {'codex_n':>8s} {'codex$':>7s} {'5h_reset':>12s} "
         f"{'7d%':>5s} {'7d_reset':>12s} "
         f"{'next_reset':>12s} {'restore':>9s} {'sub_until':>20s} {'sub_left':>8s}  cause"
     )
-    print("-" * 230)
+    print("-" * 250)
     for acct in sorted(state, key=acct_sort_key):
         row = state[acct]
-        sp = spend_5h.get(acct) or {}
-        calls = sp.get("calls")
-        spend = sp.get("spend")
+        buckets = spend_5h.get(acct) or {}
+        main = buckets.get("main") or {}
+        codex = buckets.get("codex") or {}
+        main_calls = main.get("calls")
+        main_spend = main.get("spend")
+        codex_calls = codex.get("calls")
+        codex_spend = codex.get("spend")
         try:
             p_pct = int(row.get("primary_pct") or 0)
         except (TypeError, ValueError):
             p_pct = 0
         pct_cell = str(row.get("primary_pct", ""))
-        # 上游 probe 0% 但 LiteLLM 1h+ 有流量 → 上游 usage 落后 / probe stale
-        if calls and calls >= 50 and p_pct < 5:
+        # 上游 probe 0% 但 LiteLLM main pool ≥50 calls → 上游 usage 落后 / probe stale
+        if main_calls and main_calls >= 50 and p_pct < 5:
             pct_cell = f"{pct_cell}*"
-        calls_cell = f"{calls}" if calls else "-"
-        spend_cell = f"{spend:.1f}" if spend is not None else "-"
+        main_n_cell = f"{main_calls}" if main_calls else "-"
+        main_s_cell = f"{main_spend:.1f}" if main_spend is not None else "-"
+        codex_n_cell = f"{codex_calls}" if codex_calls else "-"
+        codex_s_cell = f"{codex_spend:.1f}" if codex_spend is not None else "-"
         print(
             f"{acct:9s} {emails.get(acct, '-'):32s} {take(row):>4s} {status(row):>7s} "
             f"{str(row.get('tier', '-')):>16s} {pct_cell:>5s} "
-            f"{calls_cell:>8s} {spend_cell:>7s} "
+            f"{main_n_cell:>7s} {main_s_cell:>7s} {codex_n_cell:>8s} {codex_s_cell:>7s} "
             f"{duration(row.get('primary_reset_at'), now):>12s} {str(row.get('weekly_pct', '')):>5s} "
             f"{duration(row.get('weekly_reset_at'), now):>12s} {next_reset(row, now):>12s} "
             f"{duration(row.get('restore_at'), now, days=False):>9s} "
@@ -306,13 +316,31 @@ def render_table(state: dict[str, dict[str, Any]], *, summary: bool) -> None:
     stale = [
         acct
         for acct, row in state.items()
-        if (spend_5h.get(acct, {}).get("calls") or 0) >= 50
+        if ((spend_5h.get(acct, {}).get("main") or {}).get("calls") or 0) >= 50
         and int(row.get("primary_pct") or 0) < 5
     ]
     if stale:
         print()
-        print(f"⚠ probe-stale ({len(stale)}): 上游 5h%≈0 但 LiteLLM 5h 流量≥50 calls → "
+        print(f"⚠ probe-stale ({len(stale)}): 上游 5h%≈0 但 LiteLLM main pool 5h 流量≥50 calls → "
               f"{sorted(stale, key=acct_sort_key)}")
+
+    codex_total_calls = sum(
+        ((spend_5h.get(acct, {}).get("codex") or {}).get("calls") or 0)
+        for acct in state
+    )
+    codex_total_spend = sum(
+        ((spend_5h.get(acct, {}).get("codex") or {}).get("spend") or 0.0)
+        for acct in state
+    )
+    if codex_total_calls:
+        codex_active = [
+            acct for acct in state
+            if ((spend_5h.get(acct, {}).get("codex") or {}).get("calls") or 0) > 0
+        ]
+        print()
+        print(f"ⓘ codex (gpt-5.3) 独立配额池 5h: "
+              f"{codex_total_calls} calls / ${codex_total_spend:.1f}, "
+              f"active={len(codex_active)} {sorted(codex_active, key=acct_sort_key)}")
 
     if not summary:
         return

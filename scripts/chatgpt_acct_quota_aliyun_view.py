@@ -67,21 +67,41 @@ def list_pods() -> list[dict[str, Any]]:
     return pods
 
 
-def email_from_auth(auth: dict[str, Any]) -> str:
+def claims_from_id_token(auth: dict[str, Any]) -> dict[str, Any]:
     token = auth.get("id_token") or ""
     if token.count(".") < 2:
-        return ""
+        return {}
     try:
         segment = token.split(".")[1]
         segment += "=" * (-len(segment) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(segment))
-        return claims.get("email") or ""
+        return json.loads(base64.urlsafe_b64decode(segment))
     except Exception:
-        return ""
+        return {}
 
 
-def probe_auth(pod: str) -> tuple[str, int | None]:
-    """Return (email, expires_at_epoch) via kubectl exec cat auth.json."""
+def email_from_auth(auth: dict[str, Any]) -> str:
+    return claims_from_id_token(auth).get("email") or ""
+
+
+def subscription_info(auth: dict[str, Any]) -> tuple[str, float | None]:
+    """Extract (plan_type, subscription_active_until_epoch) from id_token claims."""
+    claims = claims_from_id_token(auth)
+    oai = claims.get("https://api.openai.com/auth") or {}
+    plan = oai.get("chatgpt_plan_type") or ""
+    until_raw = oai.get("chatgpt_subscription_active_until")
+    until_ts: float | None = None
+    if until_raw:
+        try:
+            until_ts = datetime.fromisoformat(
+                str(until_raw).replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
+            until_ts = None
+    return plan, until_ts
+
+
+def probe_auth(pod: str) -> dict[str, Any]:
+    """Return {email, expires_at, plan, sub_until} via kubectl exec cat auth.json."""
     try:
         raw = subprocess.check_output(
             ["kubectl", "-n", NS, "exec", pod, "--", "cat", AUTH_PATH],
@@ -90,9 +110,15 @@ def probe_auth(pod: str) -> tuple[str, int | None]:
             stderr=subprocess.DEVNULL,
         )
         auth = json.loads(raw)
-        return email_from_auth(auth), auth.get("expires_at")
+        plan, sub_until = subscription_info(auth)
+        return {
+            "email": email_from_auth(auth),
+            "expires_at": auth.get("expires_at"),
+            "plan": plan,
+            "sub_until": sub_until,
+        }
     except Exception:
-        return "", None
+        return {"email": "", "expires_at": None, "plan": "", "sub_until": None}
 
 
 def gather_auth(pods: list[dict[str, Any]]) -> None:
@@ -101,11 +127,9 @@ def gather_auth(pods: list[dict[str, Any]]) -> None:
         for fut in concurrent.futures.as_completed(futs):
             p = futs[fut]
             try:
-                email, exp = fut.result()
+                p.update(fut.result())
             except Exception:
-                email, exp = "", None
-            p["email"] = email
-            p["expires_at"] = exp
+                p.update({"email": "", "expires_at": None, "plan": "", "sub_until": None})
 
 
 def db_query(sql: str) -> str:
@@ -172,7 +196,7 @@ def fmt_age(iso: str | None, now: float) -> str:
     return f"{hour}h{minute:02d}m"
 
 
-def fmt_expires(epoch: int | None, now: float) -> str:
+def fmt_expires(epoch: float | int | None, now: float) -> str:
     if not epoch:
         return "-"
     seconds = int(epoch - now)
@@ -183,6 +207,12 @@ def fmt_expires(epoch: int | None, now: float) -> str:
     if day:
         return f"{day}d{hour:02d}h"
     return f"{hour}h{(rem % 3600) // 60:02d}m"
+
+
+def fmt_sub_until(epoch: float | int | None) -> str:
+    if not epoch:
+        return "-"
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d")
 
 
 def render(*, summary: bool, as_json: bool) -> None:
@@ -211,15 +241,16 @@ def render(*, summary: bool, as_json: bool) -> None:
 
     print(
         f"{'acct':12s} {'pod':50s} {'email':32s} {'ready':>5s} {'rst':>3s} "
-        f"{'age':>7s} {'tok_left':>9s} "
+        f"{'age':>7s} {'plan':>5s} {'sub_until':>10s} {'sub_left':>8s} {'tok_left':>9s} "
         f"{'5h_n':>6s} {'5h$':>7s} {'24h_n':>7s} {'24h$':>8s}  notes"
     )
-    print("-" * 180)
+    print("-" * 210)
 
     total_5h_calls = total_5h_spend = 0.0
     total_24h_calls = total_24h_spend = 0.0
     silent: list[str] = []
     expiring: list[str] = []
+    sub_expiring: list[str] = []
     for p in sorted(pods, key=lambda x: acct_sort_key(x["acct"])):
         acct = p["acct"]
         s5 = spend_5h.get(acct, {})
@@ -247,12 +278,21 @@ def render(*, summary: bool, as_json: bool) -> None:
         if isinstance(p.get("expires_at"), int) and p["expires_at"] - now < 3 * 86400:
             notes.append("token_soon")
             expiring.append(acct)
+        sub_until_ts = p.get("sub_until")
+        sub_left = fmt_expires(sub_until_ts, now)
+        if sub_until_ts and sub_until_ts - now < 7 * 86400 and sub_until_ts > now:
+            notes.append("sub_soon")
+            sub_expiring.append(acct)
+        elif sub_until_ts and sub_until_ts <= now:
+            notes.append("sub_expired")
+            sub_expiring.append(acct)
 
         print(
             f"{acct:12s} {p['pod']:50s} {(p.get('email') or '-'):32s} "
             f"{('Y' if p.get('ready') else 'N'):>5s} "
             f"{str(p.get('restarts', 0)):>3s} {fmt_age(p.get('started_at'), now):>7s} "
-            f"{tok_left:>9s} "
+            f"{(p.get('plan') or '-'):>5s} {fmt_sub_until(sub_until_ts):>10s} "
+            f"{sub_left:>8s} {tok_left:>9s} "
             f"{(str(c5) if c5 else '-'):>6s} {(f'{v5:.1f}' if c5 else '-'):>7s} "
             f"{(str(c24) if c24 else '-'):>7s} {(f'{v24:.1f}' if c24 else '-'):>8s}  "
             f"{','.join(notes)}"
@@ -268,6 +308,9 @@ def render(*, summary: bool, as_json: bool) -> None:
         print(f"⚠ idle 24h ({len(silent)}): {sorted(silent, key=acct_sort_key)}")
     if expiring:
         print(f"⚠ token <3d ({len(expiring)}): {sorted(expiring, key=acct_sort_key)}")
+    if sub_expiring:
+        print(f"⚠ 订阅 <7d/已过期 ({len(sub_expiring)}): "
+              f"{sorted(sub_expiring, key=acct_sort_key)}")
 
     if not summary:
         return

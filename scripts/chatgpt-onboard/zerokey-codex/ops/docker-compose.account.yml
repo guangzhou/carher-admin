@@ -1,0 +1,21 @@
+# Per-account zerokey server (copy to ~/zerokey-codex-accounts/<account>/docker-compose.yml).
+# Uses the shared image built from ~/zerokey-codex/zerokey — do not rebuild per account.
+services:
+  zerokey:
+    image: zerokey-codex:latest
+    container_name: zerokey-codex-${ACCOUNT:-timothy}
+    restart: always
+    ports:
+      - "${PORT:-8124}:${PORT:-8124}"
+    environment:
+      - PORT=${PORT:-8124}
+      - ZK_USER=${ZK_USER:-timothy}
+      - ZK_DEFAULT_MODEL=${ZK_DEFAULT_MODEL:-gpt-5-5}
+    volumes:
+      - ./state/users.json:/app/temp/users.json:rw
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:${PORT:-8124}/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

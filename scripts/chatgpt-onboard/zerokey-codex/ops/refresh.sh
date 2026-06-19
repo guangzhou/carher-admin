@@ -23,6 +23,10 @@
 set -uo pipefail
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "$BASE/ops.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$BASE/ops.env"
+fi
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG_DIR="$BASE/logs"; mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/refresh-$TS.log"
@@ -32,8 +36,8 @@ MAIL_USER="${MAIL_USER:-kristine_free517@mail.com}"
 ZK_USER="${ZK_USER:-kristine}"
 CAPTURE_TIMEOUT="${CAPTURE_TIMEOUT:-300}"
 OTP_FILE_WAIT="${OTP_FILE_WAIT:-45}"
-SERVER_CONTAINER="zerokey-codex"
-CAPTURE_IMAGE="zerokey-capture:latest"
+SERVER_CONTAINER="${SERVER_CONTAINER:-zerokey-codex}"
+CAPTURE_IMAGE="${CAPTURE_IMAGE:-zerokey-capture:latest}"
 
 OUT_DIR="$BASE/state/out"; mkdir -p "$OUT_DIR" "$BASE/state/profile"
 OUT_JSON="$OUT_DIR/zerokey-users.json"

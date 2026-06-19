@@ -41,6 +41,10 @@ ZK_USER    = os.environ.get("ZK_USER", "kristine")
 PROMPT     = os.environ.get("CAPTURE_PROMPT", "hi")
 OTP_FILE   = os.environ.get("OTP_FILE", "/work/out/otp.txt")
 OTP_FILE_WAIT = int(os.environ.get("OTP_FILE_WAIT", "600"))
+OTP_AUTO_ONLY = os.environ.get("OTP_AUTO_ONLY", "0") == "1"
+OTP_AUTO_MAX = int(os.environ.get("OTP_AUTO_MAX", "240"))
+OTP_RE = re.compile(r"\b(\d{6})\b")
+SENDER_HINTS_RE = re.compile(r"openai|chatgpt|noreply", re.I)
 
 os.makedirs(SS_DIR, exist_ok=True)
 
@@ -122,9 +126,73 @@ def mailcom_login(ctx):
     return p
 
 
-def get_otp(mail_page, max_wait=180):
-    deadline = time.time() + max_wait
+def find_mail_frame(page):
+    """Return mail.com inbox iframe (name=mail), polling up to ~25s."""
+    deadline = time.time() + 25
     while time.time() < deadline:
+        for fr in page.frames:
+            if fr.name == "mail":
+                return fr
+        time.sleep(2)
+    return None
+
+
+def extract_otp_from_open_mail(mail_frame, page):
+    """Extract 6-digit OTP from opened message body (skip inbox list frame)."""
+    texts = []
+    for fr in page.frames:
+        try:
+            if fr.name == "mail":
+                continue
+            texts.append(fr.evaluate("() => document.body.innerText"))
+        except Exception:
+            pass
+    try:
+        texts.append(mail_frame.evaluate("() => document.body.innerText"))
+    except Exception:
+        pass
+    for text in texts:
+        if not SENDER_HINTS_RE.search(text) and "code" not in text.lower():
+            continue
+        m = OTP_RE.search(text)
+        if m:
+            return m.group(1)
+    return None
+
+
+def get_otp(mail_page, max_wait=None):
+    """Poll mail.com inbox for OpenAI OTP — fully automated (chatgpt-login-session pattern)."""
+    if max_wait is None:
+        max_wait = OTP_AUTO_MAX
+    deadline = time.time() + max_wait
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        frame = find_mail_frame(mail_page)
+        if frame:
+            try:
+                text = frame.evaluate("() => document.body.innerText")
+            except Exception:
+                text = ""
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            for ln in lines:
+                if not SENDER_HINTS_RE.search(ln):
+                    continue
+                m = OTP_RE.search(ln)
+                if m:
+                    print(f"  OTP found in inbox list (attempt {attempt})", flush=True)
+                    return m.group(1)
+                try:
+                    frame.get_by_text(ln, exact=False).first.click(timeout=5000)
+                    time.sleep(5)
+                    ss(mail_page, "mailcom-message-opened")
+                    code = extract_otp_from_open_mail(frame, mail_page)
+                    if code:
+                        print(f"  OTP found in opened mail (attempt {attempt})", flush=True)
+                        return code
+                except Exception:
+                    pass
+        # legacy frame scan fallback
         for fr in mail_page.frames:
             try:
                 text = fr.evaluate("() => document.body.innerText")
@@ -132,36 +200,19 @@ def get_otp(mail_page, max_wait=180):
                 continue
             if not text or len(text) < 50:
                 continue
-            if not re.search(r"openai|chatgpt|noreply|inbox", text, re.I):
+            if not SENDER_HINTS_RE.search(text):
                 continue
-            for ln in text.splitlines():
-                if not re.search(r"openai|chatgpt|noreply", ln, re.I):
-                    continue
-                try:
-                    fr.get_by_text(ln, exact=False).first.click()
-                    time.sleep(2)
-                except Exception:
-                    continue
-                all_text = ""
-                for f2 in mail_page.frames:
-                    try:
-                        all_text += f2.evaluate("() => document.body.innerText") + "\n"
-                    except Exception:
-                        pass
-                for m in re.finditer(r"\b(\d{6})\b", all_text):
-                    ctx_s = max(0, m.start() - 100)
-                    ctx = all_text[ctx_s: m.start() + 100]
-                    if re.search(r"code|verify|openai|login", ctx, re.I):
-                        return m.group(1)
-        print("  OTP not yet, retry in 5s...", flush=True)
+            for m in OTP_RE.finditer(text):
+                ctx = text[max(0, m.start() - 100): m.start() + 100]
+                if re.search(r"code|verify|openai|login", ctx, re.I):
+                    print(f"  OTP found via frame scan (attempt {attempt})", flush=True)
+                    return m.group(1)
+        print(f"  OTP not yet, retry in 5s... (attempt {attempt})", flush=True)
         time.sleep(5)
-        for fr in mail_page.frames:
-            if "mail.com" not in (fr.url or ""):
-                continue
-            try:
-                fr.evaluate("() => document.location.reload()")
-            except Exception:
-                pass
+        try:
+            mail_page.reload(wait_until="domcontentloaded", timeout=20000)
+        except Exception:
+            pass
         mail_page.wait_for_timeout(3000)
     return None
 
@@ -326,20 +377,19 @@ def login_chatgpt(ctx, page):
                 break
             time.sleep(1)
     if need_otp:
-        print("  need OTP - trying mail.com auto first", flush=True)
+        print("  need OTP - mail.com auto (OTP_AUTO_ONLY=%s)" % OTP_AUTO_ONLY, flush=True)
         otp = None
         try:
             mp = mailcom_login(ctx)
-            otp = get_otp(mp, max_wait=120)
+            otp = get_otp(mp)
             try:
                 mp.close()
             except Exception:
                 pass
         except Exception as e:
             print(f"  mail.com auto error: {e}", flush=True)
-        if not otp:
-            # file fallback: a human reads kristine_free517@mail.com and writes
-            # the 6-digit code into OTP_FILE. We poll it (browser stays alive).
+        if not otp and not OTP_AUTO_ONLY:
+            # file fallback when not in strict auto mode
             try:
                 if os.path.exists(OTP_FILE):
                     os.remove(OTP_FILE)
@@ -359,6 +409,8 @@ def login_chatgpt(ctx, page):
                 except Exception:
                     pass
                 time.sleep(3)
+        elif not otp and OTP_AUTO_ONLY:
+            print("  OTP auto failed (OTP_AUTO_ONLY=1, no manual fallback)", flush=True)
         if otp:
             print(f"  OTP={otp}", flush=True)
             page.locator("input").first.click()

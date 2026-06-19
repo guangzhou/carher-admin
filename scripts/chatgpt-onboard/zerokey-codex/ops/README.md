@@ -79,9 +79,15 @@ inserted before `router_settings:` in `model_list`:
     model: openai/gpt-5-5                 # web slug; openai/ provider
     api_base: http://10.68.13.188:8123/v1
     api_key: raw                          # literal -> Bearer raw -> raw passthrough
+    use_chat_completions_api: true        # Codex wire_api=responses bridge
     input_cost_per_token: 0
     output_cost_per_token: 0
 ```
+
+**Codex 2026+** must use `wire_api = "responses"` against LiteLLM (not direct 188 +
+`wire_api = "chat"`). See `docs/chatgpt-web-to-codex-zerokey.md` §Codex.
+
+Register/repair on 198: `ops/litellm-register-zerokey.py --apply --sync-manifest`
 
 Edit safely (cm is JSON-in-JSON, don't `kubectl apply` the stale manifest):
 `kubectl get cm ... -o json` → string-splice the yaml → `kubectl replace` →
@@ -105,6 +111,22 @@ curl -s -X POST localhost:30402/v1/chat/completions -H "Authorization: Bearer $M
 > For per-user access, add the `zerokey-*` names to the relevant key `models`
 > allowlist via `/key/update` (see `litellm-pro-ops`); master key works already.
 
+### Multi-account (separate ports)
+
+| Account | Port | LiteLLM prefix | Host path |
+|---|---|---|---|
+| kristine | 8123 | `zerokey-gpt-5.5` … | `~/zerokey-codex/` |
+| timothy | 8124 | `zerokey-timothy-gpt-5.5` … | `~/zerokey-codex-accounts/timothy/` |
+
+Add another account (full-auto mail.com OTP on first capture):
+
+```bash
+cd ~/zerokey-codex/ops
+./add-account.sh <id> <email> '<mail_pw>' '<chatgpt_pw>' [port]
+```
+
+See skill `.codex/skills/chatgpt-login-session/SKILL.md` for OTP/login details.
+
 ## Session refresh (auto)
 
 `ops/refresh.sh` re-captures a fresh session reusing `state/profile` (no OTP
@@ -112,10 +134,14 @@ while the login is alive), validates it, atomically swaps `state/users.json`,
 and restarts the server. On failure it keeps the old session, writes
 `state/REFRESH_STALE`, and pings `ZK_ALERT_WEBHOOK` if set.
 
-Cron (every 6h):
+Cron (every 6h) — one line per account:
+
 ```cron
-0 */6 * * * ZK_ALERT_WEBHOOK="<feishu-bot-url>" ~/zerokey-codex/ops/refresh.sh >/dev/null 2>&1
+0 */6 * * * ~/zerokey-codex/ops/refresh.sh >/dev/null 2>&1
+0 */6 * * * ~/zerokey-codex-accounts/timothy/ops/refresh.sh >/dev/null 2>&1
 ```
+
+Optional alert on failure: prefix with `ZK_ALERT_WEBHOOK="<feishu-bot-url>"` (see `refresh.sh`).
 
 The cf_clearance cookie / sentinel proof are short-lived and IP-bound to 188, so
 6h keeps them fresh. The underlying web login lasts much longer; when it finally

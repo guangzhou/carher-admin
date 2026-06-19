@@ -42,6 +42,9 @@ cp "$HERE/capture/Dockerfile"                   "$TARGET/capture/Dockerfile"
 cp "$HERE/capture/zerokey-web-capture.py"       "$TARGET/capture/zerokey-web-capture.py"
 cp "$HERE/ops/refresh.sh"                        "$TARGET/ops/refresh.sh"
 cp "$HERE/ops/capture-manual.sh"                 "$TARGET/ops/capture-manual.sh"
+cp "$HERE/ops/add-account.sh"                    "$TARGET/ops/add-account.sh"
+cp "$HERE/ops/litellm-register-zerokey.py"        "$TARGET/ops/litellm-register-zerokey.py"
+cp "$HERE/ops/docker-compose.account.yml"        "$TARGET/ops/docker-compose.account.yml"
 cp "$HERE/ops/README.md"                         "$TARGET/ops/README.md"
 chmod +x "$TARGET/ops/"*.sh
 

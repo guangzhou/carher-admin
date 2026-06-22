@@ -164,7 +164,71 @@ INTERVAL = int(device_data.get("interval", "5"))
 print(f"  ✅ user_code={USER_CODE}  device_auth_id={DEVICE_AUTH_ID[:30]}...", flush=True)
 
 # ── Step 2: browser - navigate to verify page, fill user_code ────────────────
+# OTP provider switch:
+#   MAIL_OTP_PROVIDER=mailcom (default)  → browser-driven www.mail.com webmail
+#   MAIL_OTP_PROVIDER=imap_qq            → imaplib + imap.qq.com:993 (字段A = QQ 16-char auth code)
+#   MAIL_OTP_PROVIDER=imap               → generic IMAP (set IMAP_HOST/IMAP_PORT)
+MAIL_OTP_PROVIDER = os.environ.get("MAIL_OTP_PROVIDER", "mailcom").lower()
+
+def imap_host_port():
+    if MAIL_OTP_PROVIDER == "imap_qq":
+        return ("imap.qq.com", 993)
+    return (os.environ.get("IMAP_HOST", "imap.qq.com"), int(os.environ.get("IMAP_PORT", "993")))
+
+def imap_fetch_otp(since_ts, max_wait=180):
+    """Poll IMAP for the latest OpenAI/ChatGPT login OTP. Returns (otp, ctx) or (None, None).
+    `since_ts` filters mails newer than this Unix timestamp."""
+    import imaplib, email as _email
+    from email.header import decode_header as _dh
+    host, port = imap_host_port()
+    deadline = time.time() + max_wait
+    last_seen_uid = None
+    while time.time() < deadline:
+        try:
+            M = imaplib.IMAP4_SSL(host, port, timeout=20)
+            M.login(EMAIL, MAIL_PW)
+            M.select("INBOX")
+            typ, data = M.search(None, "FROM", "tm.openai.com", "SUBJECT", "temporary")
+            ids = data[0].split()
+            # newest first
+            for mid in reversed(ids[-5:]):
+                typ, msg_data = M.fetch(mid, "(RFC822)")
+                msg = _email.message_from_bytes(msg_data[0][1])
+                # parse date
+                try:
+                    mail_ts = _email.utils.mktime_tz(_email.utils.parsedate_tz(msg["Date"]))
+                except Exception:
+                    mail_ts = 0
+                if mail_ts < since_ts - 30:
+                    continue  # too old
+                body = ""
+                for part in msg.walk():
+                    if part.get_content_type() in ("text/plain", "text/html"):
+                        b = part.get_payload(decode=True)
+                        if b:
+                            body = b.decode(part.get_content_charset() or "utf-8", errors="replace")
+                            break
+                m = re.search(r"\b(\d{6})\b", body)
+                if m:
+                    code = m.group(1)
+                    print(f"  IMAP: got OTP {code} from mail dated {msg['Date']}", flush=True)
+                    try: M.logout()
+                    except: pass
+                    return code, body[:200]
+            try: M.logout()
+            except: pass
+        except Exception as e:
+            print(f"  IMAP fetch err: {e}", flush=True)
+        print(f"  IMAP: OTP not yet (since_ts={since_ts}), retry in 10s...", flush=True)
+        time.sleep(10)
+    return None, None
+
 def mailcom_login(ctx):
+    if MAIL_OTP_PROVIDER == "outlook":
+        return outlook_login(ctx)
+    if MAIL_OTP_PROVIDER != "mailcom":
+        print(f"  [skip] mailcom_login — using OTP provider={MAIL_OTP_PROVIDER}", flush=True)
+        return None  # sentinel; get_otp will route by provider
     p = ctx.new_page()
     p.goto("https://www.mail.com/", wait_until="domcontentloaded")
     p.locator("a:has-text('Log in')").first.click()
@@ -203,13 +267,15 @@ def mailcom_login(ctx):
         except Exception:
             pass
     # wait for the actual mail iframe (name='mail') to appear and have content
+    # 2026-06-18: mail.com 把邮件列表迁到 Shadow DOM, innerText 返回空,
+    # 改用 [class*='mail-item'] 选择器探测 row 是否到位
     for attempt in range(20):
         mail_frame = next((fr for fr in p.frames if fr.name == "mail"), None)
         if mail_frame:
             try:
-                txt = mail_frame.evaluate("() => document.body.innerText")
-                if txt and len(txt) > 50:  # inbox loaded with content
-                    print(f"  mail.com: inbox loaded ({len(txt)} chars)", flush=True)
+                n = mail_frame.locator("[class*='mail-item']").count()
+                if n > 0:
+                    print(f"  mail.com: inbox loaded (mail-item rows={n})", flush=True)
                     break
             except Exception:
                 pass
@@ -218,48 +284,218 @@ def mailcom_login(ctx):
     ss(p, "mailcom-inbox")
     return p
 
-def get_otp(mail_page, since_ts, max_wait=180):
-    """Find topmost OpenAI/ChatGPT email, click it, extract 6-digit OTP from body.
-    Reverted to original simple logic (proven to work — got 815911 first run).
-    `since_ts` kept for signature compat, not currently used."""
+# ── outlook.live.com provider (2026-06-22: hotmail acct) ────────────────────
+# 走 login.live.com → outlook.live.com inbox; 邮件 subject + body 都明文(没 Shadow DOM)
+# 用 div[role='option']/div[role='listitem'] 拿 row text, regex 6位 OTP
+def outlook_login(ctx):
+    if MAIL_OTP_PROVIDER != "outlook":
+        return None
+    p = ctx.new_page()
+    entry = ("https://login.live.com/login.srf?wa=wsignin1.0&rpsnv=13&ct=" + str(int(time.time()))
+             + "&rver=7.0.6738.0&wp=MBI_SSL&wreply=https%3a%2f%2foutlook.live.com%2fowa%2f%3frealm%3dhotmail.com&id=292841&aadredir=1&CBCXT=out&lw=1&fl=dob,easi2&cobrandid=90015")
+    p.goto(entry, timeout=30000)
+    time.sleep(3)
+    ss(p, "outlook-landing")
+    # email
+    e = p.locator("input[type='email'], input[name='loginfmt'], input#i0116").first
+    e.wait_for(timeout=20000); e.click(); e.fill(""); e.type(EMAIL, delay=60)
+    nb = p.get_by_role("button", name="Next", exact=True)
+    if nb.count() == 0:
+        nb = p.locator("input[type='submit'], input#idSIButton9, button[type='submit']")
+    nb.first.click(); time.sleep(4)
+    # password
+    pwi = p.locator("input[type='password'], input#i0118, input[name='passwd']").first
+    pwi.wait_for(timeout=20000); pwi.click(); pwi.type(MAIL_PW, delay=60)
+    sb = p.get_by_role("button", name="Next", exact=True)
+    if sb.count() == 0:
+        sb = p.get_by_role("button", name="Sign in", exact=True)
+    if sb.count() == 0:
+        sb = p.locator("input[type='submit'], input#idSIButton9, button[type='submit']")
+    sb.first.click(); time.sleep(6)
+    # KMSI "Stay signed in?" — click No
+    for sf in [
+        lambda: p.get_by_role("button", name="No", exact=True),
+        lambda: p.locator("input#idBtn_Back"),
+        lambda: p.locator("button:has-text('No')"),
+    ]:
+        try:
+            loc = sf()
+            if loc.count() > 0 and loc.first.is_visible():
+                print("  outlook: KMSI click No", flush=True)
+                loc.first.click(); time.sleep(4)
+                break
+        except Exception:
+            pass
+    # 等 inbox 渲染
+    for _ in range(20):
+        if "outlook.live.com" in p.url and "/mail/" in p.url:
+            break
+        time.sleep(2)
+    ss(p, "outlook-inbox")
+    print(f"  outlook: inbox url={p.url[:80]}", flush=True)
+    return p
+
+def outlook_get_otp(mail_page, since_ts, max_wait=180):
+    """outlook inbox 找最新 OpenAI OTP 邮件. subject 含 6位数字 + 必须含相对时间(今日)."""
     deadline = time.time() + max_wait
     while time.time() < deadline:
-        for fr in mail_page.frames:
-            if fr.name != "mail":
-                continue
+        try:
+            mail_page.reload(wait_until="domcontentloaded"); time.sleep(5)
+        except Exception:
+            pass
+        ss(mail_page, "outlook-poll")
+        items = mail_page.locator("div[role='option'], div[role='listitem']").all()
+        for it in items[:10]:  # 倒序最新在前
             try:
-                text = fr.evaluate("() => document.body.innerText")
+                txt = it.inner_text(timeout=2000)
             except Exception:
                 continue
-            for ln in text.splitlines():
-                if not re.search(r"openai|chatgpt|noreply", ln, re.I):
-                    continue
+            tl = txt.lower()
+            if ("openai" not in tl) and ("chatgpt" not in tl):
+                continue
+            if ("login code" not in tl) and ("verification code" not in tl) and ("temporary" not in tl):
+                continue
+            # 今日邮件: "1:36" 时钟 或 "now"/"min ago"
+            has_recent = any(m in tl for m in ["now", "min ago", "minute", "sec", "几秒", "几分", "刚刚"])
+            has_clock = bool(re.search(r"\b\d{1,2}:\d{2}\b", tl))
+            if not (has_recent or has_clock):
+                continue
+            m = re.search(r"\b(\d{6})\b", txt)
+            if m:
+                code = m.group(1)
+                print(f"  outlook: OTP candidate {code} from row {txt[:80]!r}", flush=True)
+                # 点开邮件正文确认
                 try:
-                    fr.get_by_text(ln, exact=False).first.click()
-                    time.sleep(2)
-                except Exception:
-                    continue
-                all_text = ""
-                for f2 in mail_page.frames:
-                    if f2.name == "mail":
-                        continue
-                    try:
-                        all_text += f2.evaluate("() => document.body.innerText") + "\n"
-                    except Exception:
-                        pass
-                for m in re.finditer(r"\b(\d{6})\b", all_text):
-                    ctx_s = max(0, m.start() - 100)
-                    ctx = all_text[ctx_s: m.start() + 100]
-                    if re.search(r"code|verify|openai|login", ctx, re.I):
-                        return m.group(1), ctx.strip()
-        print("  OTP not yet, retry in 5s...", flush=True)
+                    it.click(); time.sleep(3)
+                    ss(mail_page, "outlook-open")
+                    body_loc = mail_page.locator("div[role='document'], div[role='region']").first
+                    body = body_loc.inner_text(timeout=3000) if body_loc.count() > 0 else mail_page.content()
+                    m2 = re.search(r"\b(\d{6})\b", body)
+                    if m2:
+                        return m2.group(1), body[:200]
+                    return code, txt[:200]
+                except Exception as e:
+                    print(f"  outlook: open err {e}", flush=True)
+                    return code, txt[:200]
+        print(f"  outlook: no fresh OTP, retry 8s (elapsed {int(time.time() - (deadline - max_wait))}s)", flush=True)
+        time.sleep(8)
+    return None, None
+
+def get_otp(mail_page, since_ts, max_wait=180):
+    """Find topmost OpenAI/ChatGPT email, click it, extract 6-digit OTP from body.
+
+    2026-06-18: mail.com 把邮件列表 + body 都迁到 Shadow DOM,evaluate(innerText)
+    返回空。改用:
+      - 列表行: mf.locator("[class*='mail-item']") 枚举,text_content() 穿透 Shadow
+      - 邮件正文: 实测在 frame name='detail-body-iframe' 里;直接 outerHTML 拿
+        到 OTP (不能跨所有 frame 扫,否则 ad 的 siteId/mid 全是 6 位 false positive)
+    `since_ts` kept for signature compat, not currently used.
+    """
+    if MAIL_OTP_PROVIDER == "outlook":
+        return outlook_get_otp(mail_page, since_ts, max_wait=max_wait)
+    if MAIL_OTP_PROVIDER != "mailcom":
+        return imap_fetch_otp(since_ts, max_wait=max_wait)
+
+    def find_body_frame():
+        # mail.com 邮件正文 iframe name='detail-body-iframe'
+        # (R&D mailcom-otp-extract-rnd.py 实证)
+        return next(
+            (
+                f
+                for f in mail_page.frames
+                if "detail-body" in (f.name or "") or "detail-body" in (f.url or "")
+            ),
+            None,
+        )
+
+    def extract_otp_from_body():
+        bf = find_body_frame()
+        if not bf:
+            return None, None
+        try:
+            html = bf.evaluate("() => document.documentElement.outerHTML") or ""
+        except Exception:
+            return None, None
+        # 邮件正文里 OTP 是唯一 6 位数字。优先找 "code is" / "verification" 附近的;
+        # 兜底取 outerHTML 里第一个独立 6 位 token。
+        for m in re.finditer(r"\b(\d{6})\b", html):
+            ctx_s = max(0, m.start() - 200)
+            ctx_e = min(len(html), m.end() + 200)
+            ctx = html[ctx_s:ctx_e]
+            if re.search(r"code|verify|verification|login|openai|chatgpt", ctx, re.I):
+                return m.group(1), ctx
+        m = re.search(r"\b(\d{6})\b", html)
+        if m:
+            return m.group(1), html[max(0, m.start()-100):m.end()+100]
+        return None, None
+
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        mf = next((fr for fr in mail_page.frames if fr.name == "mail"), None)
+        if not mf:
+            print("  mail frame missing, retry 5s", flush=True)
+            time.sleep(5)
+            continue
+        try:
+            rows = mf.locator("[class*='mail-item']")
+            cnt = rows.count()
+        except Exception as e:
+            print(f"  rows count err: {e}", flush=True)
+            cnt = 0
+        clicked = False
+        for i in range(min(cnt, 15)):
+            try:
+                t = (rows.nth(i).text_content(timeout=1500) or "").strip()
+            except Exception:
+                continue
+            if not re.search(r"openai|chatgpt|noreply", t, re.I):
+                continue
+            print(f"  candidate row[{i}]: {t[:120]!r}", flush=True)
+            row_el = rows.nth(i)
+            opened = False
+            try:
+                row_el.scroll_into_view_if_needed(timeout=3000)
+            except Exception:
+                pass
+            for action_name, do_action in [
+                ("dblclick", lambda: row_el.dblclick(timeout=4000)),
+                ("subj-link-click", lambda: row_el.locator(":scope a, :scope [role='link'], :scope span").first.click(timeout=3000)),
+                ("evaluate-dispatch", lambda: row_el.evaluate(
+                    "el => { el.dispatchEvent(new MouseEvent('dblclick', {bubbles:true, cancelable:true, view:window})); }")),
+            ]:
+                try:
+                    do_action()
+                    time.sleep(3.5)
+                    bf = find_body_frame()
+                    if bf:
+                        print(f"  ✓ {action_name} opened body frame", flush=True)
+                        opened = True
+                        break
+                    print(f"  {action_name} no body frame yet", flush=True)
+                except Exception as e:
+                    print(f"  {action_name} err: {e}", flush=True)
+            if opened:
+                clicked = True
+                break
+        if clicked:
+            # 等 detail-body-iframe 出现 (mail.com 异步加载邮件正文)
+            bf = None
+            for _ in range(10):
+                bf = find_body_frame()
+                if bf:
+                    break
+                time.sleep(1)
+            print(f"  body frame: {bf.name if bf else 'NONE'} (frames_total={len(mail_page.frames)})", flush=True)
+            otp, ctx = extract_otp_from_body()
+            if otp:
+                return otp, ctx.strip() if ctx else ""
+            print("  clicked but no OTP in detail-body-iframe, continue", flush=True)
+        print(f"  OTP not yet (rows={cnt}), retry in 5s...", flush=True)
         time.sleep(5)
-        for fr in mail_page.frames:
-            if fr.name == "mail":
-                try:
-                    fr.evaluate("() => document.location.reload()")
-                except Exception:
-                    pass
+        try:
+            mf.evaluate("() => document.location.reload()")
+        except Exception:
+            pass
         mail_page.wait_for_timeout(3000)
     return None, None
 
@@ -276,10 +512,12 @@ with sync_playwright() as pw:
     )
     page = ctx.new_page()
 
-    # ── PHASE 1.5: chatgpt.com login → 启用 device code authorization toggle ──
-    # 必须先做这一步,否则 OAuth phase 2 consent 页 Continue 会 disabled
-    # 同 ctx 共享 auth.openai.com session,phase 2 不重复 OTP
-    print("[1.5] chatgpt.com login + enable device code authorization toggle", flush=True)
+    # ── PHASE 1.5: chatgpt.com login ────────────────────────────────────────
+    # 2026-06-18: ChatGPT Settings → Security no longer exposes a reliable
+    # Codex/device-code toggle. Do not click generic Security switches here:
+    # they are MFA/session controls. The real device binding is the
+    # auth.openai.com/codex/device flow below.
+    print("[1.5] chatgpt.com login (no settings switch click)", flush=True)
 
     def _submit_form(p_page):
         """触发 React form submit: 优先 click 黑色 Continue 按钮,fallback Enter, fallback requestSubmit"""
@@ -399,7 +637,8 @@ with sync_playwright() as pw:
             print("  need OTP - fetching from mail.com", flush=True)
             mp = mailcom_login(ctx)
             otp, _ = get_otp(mp, int(time.time()) - 600)
-            mp.close()
+            if mp is not None:
+                mp.close()
             if otp:
                 print(f"  ✅ OTP={otp}", flush=True)
                 p_page.locator("input").first.click()
@@ -416,7 +655,8 @@ with sync_playwright() as pw:
                     print("  need OTP (after retry) - fetching from mail.com", flush=True)
                     mp = mailcom_login(ctx)
                     otp, _ = get_otp(mp, int(time.time()) - 600)
-                    mp.close()
+                    if mp is not None:
+                        mp.close()
                     if otp:
                         print(f"  ✅ OTP={otp}", flush=True)
                         p_page.locator("input").first.click()
@@ -447,86 +687,64 @@ with sync_playwright() as pw:
     ss(chat_page, "p15b-chatgpt-logged-in")
     logged = "chatgpt.com" in chat_page.url and "/auth" not in chat_page.url
     if logged:
-        chat_page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded")
-        time.sleep(6)
-        ss(chat_page, "p15c-settings")
-        # 直接用 Playwright locator click toggle (而非 mouse coord),触发 React onChange 更稳
-        toggle_enabled = False
+        print("  chatgpt.com login ok; enabling Codex device-code toggle...", flush=True)
         try:
-            # 候选 selector
-            switch_loc = chat_page.locator("button[role='switch'][aria-checked='false']")
-            n = switch_loc.count()
-            print(f"  role=switch off candidates: {n}", flush=True)
-            if n > 0:
-                # 找含 "device code" or "codex" 标签的 switch
-                target = None
-                for i in range(n):
-                    sw = switch_loc.nth(i)
-                    try:
-                        # 找最近的 parent text 含 device code/codex
-                        parent_text = sw.evaluate("""el => {
-                            let p = el;
-                            for (let i = 0; i < 8; i++) {
-                                if (!p.parentElement) break;
-                                p = p.parentElement;
-                                const t = (p.innerText||'').toLowerCase();
-                                if (t.includes('device code') || t.includes('codex') || t.includes('device authorization')) return t.slice(0,150);
-                            }
-                            return '';
-                        }""")
-                        if "device" in parent_text or "codex" in parent_text:
-                            target = sw
-                            print(f"  matched switch [{i}]: parent_text={parent_text[:100]!r}", flush=True)
-                            break
-                    except Exception as e:
-                        print(f"  switch [{i}] parent lookup fail: {e}", flush=True)
-                if target is None and n > 0:
-                    target = switch_loc.first
-                    print(f"  fallback: clicking first switch off", flush=True)
-                if target:
-                    target.click(force=True)
-                    print(f"  ✓ Playwright locator.click(force=True) on toggle", flush=True)
-                    time.sleep(4)
-                    # verify aria-checked 变 true
-                    new_aria = target.get_attribute("aria-checked")
-                    print(f"  toggle aria-checked after click: {new_aria}", flush=True)
-                    if new_aria == "true":
-                        toggle_enabled = True
-                        # 等 chatgpt 后端 save (PATCH /backend-api/...)
-                        time.sleep(5)
-                    else:
-                        # 再试一次 mouse click
-                        print(f"  retry: mouse click", flush=True)
-                        box = target.bounding_box()
-                        if box:
-                            chat_page.mouse.click(box['x']+box['width']/2, box['y']+box['height']/2)
-                            time.sleep(4)
-                            new_aria = target.get_attribute("aria-checked")
-                            print(f"  toggle aria after mouse click: {new_aria}", flush=True)
-                            if new_aria == "true":
-                                toggle_enabled = True
-                                time.sleep(5)
+            chat_page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded", timeout=45000)
+            time.sleep(7)
+            ss(chat_page, "p15c-security")
+            # scroll panel to bottom so all switches are loaded
+            try:
+                chat_page.evaluate("""() => {
+                    const nodes = [...document.querySelectorAll('*')].filter(el => {
+                        const s = getComputedStyle(el);
+                        return /(auto|scroll)/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 20;
+                    });
+                    nodes.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+                    if (nodes[0]) nodes[0].scrollTop = nodes[0].scrollHeight;
+                }""")
+                time.sleep(2)
+            except Exception:
+                pass
+            switches = chat_page.locator("button[role='switch']")
+            exact_re = re.compile(r"codex|device\s*code|device-code|device authorization|device auth|设备代码|设备授权|设备码", re.I)
+            reject_re = re.compile(r"mfa|authenticator|text message|password|passkey|security key|session|多因素|身份验证|短信|密码|通行密钥|安全密钥|会话|受信任设备|活跃会话", re.I)
+            target_sw = None
+            for idx in range(switches.count()):
+                sw = switches.nth(idx)
+                try:
+                    label = sw.evaluate("""el => {
+                        const parts = [];
+                        let p = el;
+                        for (let i = 0; i < 5; i++) {
+                            if (!p) break;
+                            const text = (p.innerText || '').trim();
+                            if (text) parts.push(text);
+                            p = p.parentElement;
+                        }
+                        return parts.join('\\n---\\n');
+                    }""")
+                    if exact_re.search(label) and not reject_re.search(label):
+                        target_sw = sw
+                        print(f"  matched Codex switch idx={idx} aria={sw.get_attribute('aria-checked')}", flush=True)
+                        break
+                except Exception:
+                    pass
+            if target_sw is None:
+                print("  ⚠ Codex toggle not found in Security panel", flush=True)
+            else:
+                before = target_sw.get_attribute("aria-checked")
+                if before != "true":
+                    target_sw.click(force=True)
+                    time.sleep(5)
+                after = target_sw.get_attribute("aria-checked")
+                print(f"  Codex toggle: {before} → {after}", flush=True)
+                ss(chat_page, "p15d-toggle-set")
         except Exception as e:
-            print(f"  toggle click fail: {e}", flush=True)
-        ss(chat_page, "p15d-after-toggle")
-        # final verify by re-reading
-        try:
-            still_off = chat_page.locator("button[role='switch'][aria-checked='false']").count()
-            on = chat_page.locator("button[role='switch'][aria-checked='true']").count()
-            print(f"  final: off-switches={still_off} on-switches={on}", flush=True)
-            if not toggle_enabled and on > 0:
-                toggle_enabled = True  # at least one switch turned on
-        except: pass
-        if not toggle_enabled:
-            print("  ⚠ toggle 状态未能确认为 true (但 phase 2 仍尝试)", flush=True)
-        try:
-            txt = chat_page.evaluate("() => document.body.innerText")[:2500]
-            print(f"  settings body:\n{txt}", flush=True)
-        except: pass
+            print(f"  ⚠ toggle step exception: {e}", flush=True)
     else:
-        print("  ❌ chatgpt.com 未登录, toggle 跳过", flush=True)
+        print("  ❌ chatgpt.com 未登录; proceeding to device flow may require full login", flush=True)
     chat_page.close()
-    print("[1.5] done — proceeding to OAuth device flow (session 复用)", flush=True)
+    print("[1.5] done — proceeding to OAuth device flow", flush=True)
 
     # ── 2a. Navigate to verify page (会跳转到 /log-in) ──────────────────
     print("[2] Open auth.openai.com/codex/device...", flush=True)
@@ -650,18 +868,38 @@ with sync_playwright() as pw:
         print(f"  url={page.url}", flush=True)
 
     # ── 2c. Fill password (字段B) — OR skip if session 已建立 ─────────────
-    # passkey challenge → switch to password
+    # passkey challenge → click "Try another way" → password page
     if "passkey" in page.url.lower() or "auth_challenge" in page.url.lower():
-        print(f"[3.5] Passkey challenge detected, switching to password...", flush=True)
-        try:
-            alt = page.locator("a, button").filter(has_text=re.compile(r"password|another.*(way|method)", re.I))
-            if alt.count() > 0:
-                alt.first.click()
-                time.sleep(4)
-                ss(page, "03b-passkey-bypass")
-                print(f"  url after passkey bypass={page.url}", flush=True)
-        except Exception as e:
-            print(f"  passkey bypass failed: {e}", flush=True)
+        print(f"[3.5] Passkey challenge detected, clicking 'Try another way'...", flush=True)
+        before_url = page.url
+        clicked = False
+        for strat in ("role-button", "role-link", "text-exact", "text-regex"):
+            try:
+                if strat == "role-button":
+                    loc = page.get_by_role("button", name=re.compile(r"try another way", re.I))
+                elif strat == "role-link":
+                    loc = page.get_by_role("link", name=re.compile(r"try another way", re.I))
+                elif strat == "text-exact":
+                    loc = page.locator("text=Try another way")
+                else:
+                    loc = page.get_by_text(re.compile(r"try another way", re.I))
+                if loc.count() > 0 and loc.first.is_visible():
+                    loc.first.click()
+                    clicked = True
+                    print(f"  ✓ clicked Try another way via {strat}", flush=True)
+                    break
+            except Exception as e:
+                print(f"  {strat} failed: {e}", flush=True)
+        if clicked:
+            for _ in range(15):
+                time.sleep(1)
+                if page.url != before_url:
+                    break
+            ss(page, "03b-passkey-bypass")
+            print(f"  url after passkey bypass={page.url}", flush=True)
+        else:
+            print(f"  ⚠ no Try another way control found", flush=True)
+            ss(page, "03b-passkey-bypass-noclick")
     if "password" in page.url.lower():
         print(f"[4] Fill password 字段B (len={len(CHATGPT_PW)})", flush=True)
         page.wait_for_selector("input[type='password']", timeout=20000)
@@ -695,7 +933,8 @@ with sync_playwright() as pw:
         SCRIPT_START = int(time.time())  # passed to get_otp for staleness check
         mail_page = mailcom_login(ctx)
         otp, ctx_snip = get_otp(mail_page, SCRIPT_START)
-        mail_page.close()
+        if mail_page is not None:
+            mail_page.close()
         if not otp:
             ss(page, "06-otp-timeout")
             sys.exit("❌ No OTP within 120s")
@@ -828,128 +1067,14 @@ with sync_playwright() as pw:
         # consent button is "Continue" (dark button)
         consent_btn = page.locator("button:has-text('Continue'), button:has-text('Allow'), button:has-text('Authorize')")
 
-        # NEW (2026-05-28): 新账号默认 "Enable device code authorization for Codex" OFF
-        # → consent 页 Continue 按钮 disabled。同 ctx 开 chatgpt.com 启用 toggle 再回来
         if consent_btn.count() > 0 and not consent_btn.first.is_enabled():
-            print("  ⚠️ Continue disabled — 新账号需先启用 device code authorization", flush=True)
-            # Step A: chatgpt.com login picker → email + Enter → 利用 auth.openai.com session 自动 callback
-            print("  [enable-A] goto chatgpt.com/auth/login + fill email + Enter (SSO via existing session)", flush=True)
-            settings_page = ctx.new_page()
+            ss(page, "07a-consent-disabled")
             try:
-                settings_page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded")
-                time.sleep(3)
-                for _ in range(3):
-                    try: settings_page.keyboard.press("Escape"); time.sleep(0.5)
-                    except: pass
-                # 等 picker email input
-                try:
-                    settings_page.wait_for_selector("input[type='email'], input[name='username'], input[placeholder*='mail' i]", timeout=15000)
-                    settings_page.locator("input[type='email']").first.fill(EMAIL)
-                    settings_page.screenshot(path=f"{SS_DIR}/05a-picker-email-filled.png")
-                    # chatgpt.com picker form: 底部 submit Continue (排除 Continue with Google/Apple/phone)
-                    submitted = False
-                    for sel in [
-                        "form button[type='submit']",
-                        "button[type='submit']:not(:has-text('Google')):not(:has-text('Apple')):not(:has-text('phone'))",
-                    ]:
-                        try:
-                            loc = settings_page.locator(sel).first
-                            if loc.is_visible(timeout=2000):
-                                print(f"    click {sel}", flush=True)
-                                loc.click(); submitted = True; break
-                        except: pass
-                    if not submitted:
-                        # fallback: dispatch form submit
-                        settings_page.evaluate("() => { const f = document.querySelector('form'); if (f) f.submit(); }")
-                        print("    fallback: form.submit()", flush=True)
-                except Exception as e:
-                    print(f"  ⚠ email input fail: {e}", flush=True)
-                # 等 SSO redirect chain
-                last_url = ""
-                for i in range(30):
-                    time.sleep(1)
-                    u = settings_page.url
-                    if u != last_url:
-                        print(f"    [{i}s] url={u[:100]}", flush=True)
-                        last_url = u
-                    # 已登 chatgpt.com 主页 (不带 /auth)
-                    if "chatgpt.com" in u and "/auth" not in u and "/login" not in u:
-                        break
-                    # 卡在 password 页 → session 可能没共享, 试填密码
-                    if "auth.openai.com" in u and "password" in u.lower():
-                        try:
-                            settings_page.locator("input[type='password']").first.fill(CHATGPT_PW)
-                            settings_page.locator("input[type='password']").first.press("Enter")
-                            time.sleep(4)
-                        except: pass
-                    # 卡在 OTP 页 → mail.com rate limit, 放弃
-                    if "email-verification" in u:
-                        print("    ❌ chatgpt.com login 要 OTP - mail.com rate limit 5min, 跳过", flush=True)
-                        break
-                print(f"    final url={settings_page.url[:100]}", flush=True)
-                settings_page.screenshot(path=f"{SS_DIR}/05b-chatgpt-after-login.png")
-
-                # Step B: 已 logged-in chatgpt.com → goto settings hash route
-                logged_in = "chatgpt.com" in settings_page.url and "/auth" not in settings_page.url and "/login" not in settings_page.url
-                if logged_in:
-                    print("  [enable-B] goto chatgpt.com/#settings/Security", flush=True)
-                    settings_page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded")
-                    time.sleep(5)
-                    settings_page.screenshot(path=f"{SS_DIR}/05c-settings-modal.png")
-                    cl = settings_page.content().lower()
-                    print(f"    url={settings_page.url} dc={('device code' in cl)} codex={('codex' in cl)} security={('security' in cl)}", flush=True)
-
-                    # Step C: 找 toggle
-                    toggle_clicked = False
-                    try:
-                        candidates = settings_page.evaluate("""() => {
-                            const out = [];
-                            const txts = [...document.querySelectorAll('*')].filter(el => {
-                                const t = (el.innerText||'').toLowerCase();
-                                return (t.includes('device code') || t.includes('device authorization') || t.includes('codex')) && t.length < 500;
-                            });
-                            for (const t of txts.slice(0, 30)) {
-                                const p = t.closest('div,section,li,fieldset,article') || t.parentElement;
-                                if (!p) continue;
-                                const sw = p.querySelector('[role="switch"], button[aria-checked], input[type="checkbox"]');
-                                if (sw) {
-                                    const r = sw.getBoundingClientRect();
-                                    out.push({txt: (t.innerText||'').slice(0,100), aria: sw.getAttribute('aria-checked'),
-                                              role: sw.getAttribute('role'), tag: sw.tagName,
-                                              x: r.x, y: r.y, w: r.width, h: r.height});
-                                }
-                            }
-                            return out;
-                        }""")
-                        print(f"  toggle candidates: {len(candidates)}", flush=True)
-                        for c in candidates:
-                            print(f"    {c}", flush=True)
-                        for c in candidates:
-                            if c.get('aria') == 'false' or c.get('aria') is None:
-                                cx = c['x'] + c['w']/2; cy = c['y'] + c['h']/2
-                                settings_page.mouse.click(cx, cy)
-                                toggle_clicked = True
-                                print(f"  ✓ clicked toggle @ ({int(cx)},{int(cy)})", flush=True)
-                                time.sleep(2)
-                                break
-                    except Exception as e:
-                        print(f"  toggle find failed: {e}", flush=True)
-                    settings_page.screenshot(path=f"{SS_DIR}/05d-after-toggle.png")
-                    if not toggle_clicked:
-                        txt = settings_page.evaluate("() => document.body.innerText")
-                        print(f"  settings body text (first 3000):\n{txt[:3000]}", flush=True)
-                else:
-                    print("  ❌ chatgpt.com 未登录,跳过 settings", flush=True)
-            finally:
-                try: settings_page.close()
-                except: pass
-            # reload consent page
-            page.reload()
-            time.sleep(4)
-            consent_btn = page.locator("button:has-text('Continue'), button:has-text('Allow'), button:has-text('Authorize')")
-            ss(page, "07a-consent-after-toggle")
-            if consent_btn.count() > 0 and not consent_btn.first.is_enabled():
-                sys.exit("❌ toggle 启用后 consent Continue 仍 disabled — 见 screenshots")
+                txt = page.evaluate("() => document.body.innerText")[:3000]
+                print(f"  consent body text:\n{txt}", flush=True)
+            except Exception:
+                pass
+            sys.exit("❌ consent Continue disabled; not clicking Security/MFA switches")
 
         if consent_btn.count() > 0:
             consent_btn.first.click()

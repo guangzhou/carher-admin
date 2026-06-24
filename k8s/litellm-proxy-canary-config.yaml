@@ -1315,7 +1315,7 @@ data:
       # contribute no per-request behavior).
       # Source files live under k8s/litellm-callbacks/ and are mounted into
       # /app/<file>.py by the litellm-callbacks ConfigMap + pod volumeMounts.
-      callbacks: ["opus_47_fix.thinking_schema_fix", "embedding_sanitize.embedding_sanitize", "force_stream.force_stream", "streaming_bridge.streaming_bridge", "null_byte_sanitize.null_byte_sanitize", "anthropic_passthrough_pingfix.anthropic_passthrough_pingfix"]
+      callbacks: ["mock_heartbeat.mock_heartbeat", "opus_47_fix.thinking_schema_fix", "embedding_sanitize.embedding_sanitize", "force_stream.force_stream", "streaming_bridge.streaming_bridge", "null_byte_sanitize.null_byte_sanitize", "anthropic_passthrough_pingfix.anthropic_passthrough_pingfix"]
 
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY

@@ -20,6 +20,7 @@ description: >-
 |---|---|---|---|
 | `k8s/litellm-callbacks/opus_47_fix.py` | 把老的 `thinking.type=enabled` / `reasoning_effort` 改写成 opus-4-7+ 的 adaptive schema + 强制 streaming | `async_pre_call_hook` (chat/completion) | `call_type` + 模型名前缀 |
 | `k8s/litellm-callbacks/embedding_sanitize.py` | 清洗 embedding input 里的 lone UTF-16 surrogate（Node.js bot 脏数据防御）| `async_pre_call_hook` (embedding) | `call_type` |
+| `k8s/litellm-callbacks/mock_heartbeat.py` | 短路 OpenClaw `[OpenClaw heartbeat poll]` 心跳，设 `data["mock_response"]="ok"` 不打上游零计费 | `async_pre_call_hook` (responses/completion) | 内容 marker + `MOCK_HEARTBEAT_DISABLED` env |
 | `k8s/litellm-callbacks/streaming_bridge.py` | 1) 全局 monkey-patch `BaseAnthropicMessagesStreamingIterator.__init__` 修正 `startTime`（所有 `anthropic_messages` 请求）<br>2) SSE 心跳防 Cloudflare 524 + 首个 `content_block_delta` 打 `completion_start_time` 修 TTFT（按 `key_alias` 前缀 gate）<br>3) 出口流过滤 OpenRouter `data: [DONE]` 残留（带 32B carry-over 处理跨 chunk 边界）| `async_post_call_streaming_iterator_hook` + 模块级 monkey-patch | `STREAMING_BRIDGE_KEY_PREFIXES` / `STREAMING_BRIDGE_KEY_ALIASES` env |
 
 **所有 hook 挂到同一个 ConfigMap `litellm-callbacks` 里，写在 `litellm_settings.callbacks` 列表里按顺序执行。**
@@ -239,6 +240,60 @@ indented = '\n'.join('    ' + l for l in py.splitlines())
 - **pre-call hook 改不了 streaming 注入**——`stream_options.include_usage` 要走 `general_settings.always_include_stream_usage`，不是 pre-call hook
 - **Hook 改 data 是就地修改**（直接修改传入的 dict），不要返回新 dict
 - **Hook 顺序执行**：如果多个 hook 操作同一字段，注意 callbacks 列表顺序
+- **新 hook 必须显式加 `volumeMounts` subPath**（参考主 deploy `force_stream.py` 同款），仅写 ConfigMap 不加 mount 启动直接 `ImportError: Could not import <hook> from <hook>` 全部 Pod CrashLoopBackOff。prod **和 canary** 两套 deploy 都要加
+- **Prod rollout 死锁陷阱（aliyun carher litellm-proxy）**：deploy 用 `hostPort=4000` + `nodeAffinity` 锁 226/227/229 三节点，maxSurge 起新 Pod 时常因端口未释放 Pending，老 Pod 反而被 deployment 保留接流量 → 你以为新版生效，实际 spend log 还从老 Pod 走。改完 ConfigMap **必须** `kubectl get pods | grep litellm-proxy` 确认无 Pending / Terminating 卡死项；卡死时 force-delete 已 Terminating 的老 Pod（新 RS 至少 1 个 Ready 在另一节点保可用）
+- **canary deploy 跟 prod 用不同 ConfigMap（`litellm-config-canary`）**：很多模型不在 canary 注册，直接 smoke `gpt-5.5` 会回 `Invalid model name`；通用 hook 想在 canary smoke，先看 canary CM 的 `model_list` 选个真存在的
+
+## Pre-call mock_response 短路模式
+
+### 用途
+
+某些请求**根本不该打上游**：典型如 OpenClaw heartbeat poll（270 实例每轮 ~50K prompt + 47 tools / ~$0.22/次，命中 tool_call 比例极低纯浪费）。pre-call hook 设 `data["mock_response"] = "..."`，LiteLLM 在 `litellm/responses/main.py::aresponses` / `litellm/main.py::acompletion` 里 **provider 解析前** 检测到这个字段就直接构造合成响应返回，零 upstream call、零 token 计费。
+
+### 骨架
+
+```python
+class MockHeartbeat(CustomLogger):
+    _MARKER = "[OpenClaw heartbeat poll]"
+    _TARGET_CALL_TYPES = frozenset({"responses","aresponses","acompletion","completion"})
+
+    async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
+        try:
+            if os.environ.get("MOCK_HEARTBEAT_DISABLED") == "1": return data
+            if call_type not in self._TARGET_CALL_TYPES: return data
+            if not isinstance(data, dict): return data
+            # 关键：必须从尾向前找 last role=user，跳过 assistant/tool；
+            # 心跳触发 tool_call 后回流的请求 last role 是 tool，但 last user 仍是 marker
+            text = _last_user_text(data)
+            if self._MARKER not in text: return data
+            data["mock_response"] = "ok"
+        except Exception: pass
+        return data
+```
+
+`_last_user_text(data)` 必须同时支持两种 schema：
+- **Responses API**：`data["input"]`——可能是 `str` 也可能是 `list[{role,content}]`，content 可能是 `str` 或 `list[{type,text|input_text}]` 多段
+- **Chat completion**：`data["messages"]`——同上 content 可 str/list 多段
+
+从尾向前遍历，**找到第一条 `role=="user"` 就停**，不能匹配 assistant/tool（否则像 `# HEARTBEAT.md` 这种 tool result 也会被误判）。
+
+### 识别 mock 是否生效
+
+LiteLLM 用静态 fixture：input_tokens=36 / output_tokens=87 / **total_tokens=123**。
+
+- **硬指纹**：`usage.total_tokens == 123` AND `output[0].content[0].text == "ok"`
+- **id 不可靠**：fixture id 是 `resp_67ccd2bed1ec8190b14f964abc0542670bb6a6b452d3795b`，但 LiteLLM proxy 会把它重 base64 编码成 `resp_fvgQXp4vqZwH...` / `resp_8iknZ7...` 之类的新 id，**前缀判 mocked 100% 假阴**
+
+### 灰度方式
+
+mock_response 短路场景不太适合独立 canary deploy 验证——本质是请求级判断，prod 直接挂 + env 总开关 `MOCK_HEARTBEAT_DISABLED=1` 兜底即可：
+
+```bash
+# 紧急关闭
+kubectl -n carher set env deploy/litellm-proxy MOCK_HEARTBEAT_DISABLED=1
+```
+
+Per-key opt-out：客户端在 `litellm_metadata._skip_mock_heartbeat: true` 标记，hook 内部检查跳过。
 
 ## Post-call streaming iterator hook 模式
 

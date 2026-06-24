@@ -216,6 +216,10 @@ spec:
               subPath: force_stream.py
               readOnly: true
             - name: callbacks
+              mountPath: /app/mock_heartbeat.py
+              subPath: mock_heartbeat.py
+              readOnly: true
+            - name: callbacks
               mountPath: /app/null_byte_sanitize.py
               subPath: null_byte_sanitize.py
               readOnly: true

@@ -98,15 +98,31 @@ def fmt(j):
     p = rl.get("primary_window") or {}
     s = rl.get("secondary_window") or {}
     c = (j.get("rate_limit_reset_credits") or {}).get("available_count")
+    # 子配额 (additional_rate_limits[]) — banked redeem 不动这里。
+    # 主 vs 子区分见 memory feedback_chatgpt_usage_main_vs_addl_rate_limits。
+    addl = []
+    for entry in (j.get("additional_rate_limits") or []):
+        a_rl = entry.get("rate_limit") or {}
+        a_p = a_rl.get("primary_window") or {}
+        a_s = a_rl.get("secondary_window") or {}
+        addl.append({
+            "name": entry.get("limit_name"),
+            "5h": a_p.get("used_percent"),
+            "7d": a_s.get("used_percent"),
+            "7d_reset_at": a_s.get("reset_at"),
+        })
     return {
         "email": j.get("email"),
         "plan": j.get("plan_type"),
+        # main quota — banked redeem 清这两个
         "5h": p.get("used_percent"),
         "7d": s.get("used_percent"),
         "allowed": rl.get("allowed"),
         "credits": c,
         "5h_reset_at": p.get("reset_at"),
         "7d_reset_at": s.get("reset_at"),
+        # additional rate limits — banked redeem 不动
+        "addl": addl,
     }
 
 

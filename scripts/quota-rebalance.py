@@ -46,6 +46,7 @@ import random
 import subprocess
 import urllib.request
 import urllib.error
+import socket
 import os
 import sys
 import time
@@ -339,6 +340,24 @@ def parse_account_198(acct):
         f"{SSH_198_USER}@{SSH_198_HOST}",
         kc_cmd,
     ]
+    mux_path = f"/tmp/cm-quota-198-{SSH_198_USER}@{SSH_198_HOST}:22"
+
+    def _reset_mux():
+        # ssh -O exit 优雅关 master, 失败再 unlink socket 文件兜底（死 socket 占位）
+        try:
+            subprocess.run(
+                ["ssh", "-O", "exit", "-o", f"ControlPath={mux_path}",
+                 f"{SSH_198_USER}@{SSH_198_HOST}"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            pass
+        try:
+            if Path(mux_path).exists():
+                Path(mux_path).unlink()
+        except Exception:
+            pass
+
     last_err = None
     for attempt in range(1, 4):  # 总共最多 3 次（仅对瞬态网络错误重试）
         try:
@@ -349,7 +368,16 @@ def parse_account_198(acct):
                 # Pod 不存在：确定性失败，不重试
                 raise FileNotFoundError(f"pod chatgpt-{acct} not found on 198")
             if result.returncode != 0:
-                last_err = FileNotFoundError(f"ssh+kubectl failed: {result.stderr.strip()[:200]}")
+                stderr = result.stderr.strip()
+                last_err = FileNotFoundError(f"ssh+kubectl failed: {stderr[:200]}")
+                # mux 死掉的典型字串 → 下轮重试前先重建 master
+                if any(s in stderr for s in (
+                    "Session open refused",
+                    "mux_client_request_session",
+                    "disabling multiplexing",
+                    "ControlSocket",
+                )):
+                    _reset_mux()
                 if attempt < 3:
                     time.sleep(0.5 * attempt)
                     continue
@@ -456,6 +484,9 @@ def api_request(method, path, body=None):
             return r.status, json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode(errors="ignore")[:300]
+    except (urllib.error.URLError, ConnectionError, TimeoutError, socket.timeout, OSError) as e:
+        # transient socket / connection-reset / timeout → 0 让 caller 按"无 200"分支走，不抛 traceback
+        return 0, f"{type(e).__name__}: {str(e)[:200]}"
 
 
 def router_has_entries(acct, meta):
@@ -554,18 +585,18 @@ def pause_acct(acct, meta):
     # 通过 api_base 匹配删除（比 ID 匹配更可靠）
     status, data = api_request("GET", "/v1/model/info")
     if status != 200:
-        log(f"  pause {acct}: /model/info failed HTTP {status}")
+        log(f"  pause {acct}: /model/info failed HTTP {status} {str(data)[:120]}")
         return 0
     for e in data.get("data", []):
         e_ab = (e.get("litellm_params") or {}).get("api_base", "")
         e_id = (e.get("model_info") or {}).get("id", "")
         if e_ab == ab:
-            s2, _ = api_request("POST", "/model/delete", {"id": e_id})
+            s2, resp2 = api_request("POST", "/model/delete", {"id": e_id})
             if s2 == 200:
                 deleted += 1
                 log(f"  deleted {e_id}")
             else:
-                log(f"  delete {e_id} failed: HTTP {s2}")
+                log(f"  delete {e_id} failed: HTTP {s2} {str(resp2)[:120]}")
     log(f"  {acct} paused: {deleted} entries deleted")
     return deleted
 
@@ -577,26 +608,53 @@ def resume_acct(acct, meta):
     ab = acct_api_base(acct, meta)
     ak = acct_api_key(meta)
     created = 0
+    # 幂等：先拿一次 /model/info, 后续 POST /model/new 失败时按 id 判定 DB 残留
+    status, info = api_request("GET", "/v1/model/info")
+    existing = {}  # id → api_base
+    if status == 200:
+        for e in info.get("data", []):
+            eid = (e.get("model_info") or {}).get("id", "")
+            eab = (e.get("litellm_params") or {}).get("api_base", "")
+            if eid:
+                existing[eid] = eab
     for m in CHATGPT_MODELS:
         mid = f"chatgpt-{acct}-{m['model_name'].replace('chatgpt-','')}"
+        # LiteLLM v1.89 /model/new 校验：litellm_params.api_key 必须带 `Bearer ` 前缀,
+        # 否则 HTTP 401 "Malformed API Key"；现有 router entry 已不带 api_key（下游 acct
+        # proxy 内网信任）。保持与现存 entry 一致，不再传 api_key 字段。
         entry = {
             "model_name": m["model_name"],
             "litellm_params": {
                 "model": m["litellm_model"],
                 "api_base": ab,
-                "api_key": ak,
             },
             "model_info": {"id": mid, "mode": "responses"},
         }
+        # 已存在且 api_base 一致 → 真正幂等 skip（视为 created，状态就是想要的）
+        if existing.get(mid) == ab:
+            created += 1
+            log(f"  skip existing {mid} (router & db in sync)")
+            continue
+        # 已存在但 api_base 不同（旧 acct 漂移 / 历史残留）→ 先 delete 再 create
+        if mid in existing:
+            ds, dr = api_request("POST", "/model/delete", {"id": mid})
+            log(f"  pre-delete drifted {mid} (was {existing[mid]}): HTTP {ds} {str(dr)[:80]}")
         status, resp = api_request("POST", "/model/new", entry)
         if status == 200:
             created += 1
             log(f"  created {mid}")
-        elif "already exists" in str(resp).lower():
-            log(f"  skip existing {mid}")
-        else:
-            log(f"  create {mid} failed: HTTP {status} {str(resp)[:100]}")
-    log(f"  {acct} resumed: {created} entries created")
+            continue
+        # POST 失败：fallback 一次 — 大概率是 DB 历史残留 (router 未持有但 ProxyModelTable 有)
+        if status == 500 or "already exists" in str(resp).lower() or "failed to add" in str(resp).lower():
+            ds, dr = api_request("POST", "/model/delete", {"id": mid})
+            log(f"  retry: pre-delete {mid} HTTP {ds} {str(dr)[:80]}")
+            status, resp = api_request("POST", "/model/new", entry)
+            if status == 200:
+                created += 1
+                log(f"  created {mid} (after pre-delete)")
+                continue
+        log(f"  create {mid} failed: HTTP {status} {str(resp)[:160]}")
+    log(f"  {acct} resumed: {created}/{len(CHATGPT_MODELS)} entries in router")
     return created
 
 

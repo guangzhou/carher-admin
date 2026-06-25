@@ -41,6 +41,7 @@ quota-rebalance.py — ChatGPT Pro 198 prod 池智能自动调度
   DRY_RUN           =1 只打印不操作
 """
 import json
+import re
 import base64
 import random
 import subprocess
@@ -80,11 +81,6 @@ CHATGPT_MODELS = [
 # location=188 → auth.json 在本机 /Data/chatgpt-auth/acct-N/
 # location=187 → auth.json 在 187，通过 SSH 远程读取探测
 POOL_ACCOUNTS = {
-    "acct-1":  {"port": 4001, "location": "198"},
-    "acct-3":  {"port": 4003, "location": "198"},
-    "acct-4":  {"port": 4004, "location": "198"},
-    "acct-5":  {"port": 4005, "location": "198"},
-    "acct-6":  {"port": 4006, "location": "198"},
     "acct-13": {"port": 4013, "location": "198"},
     "acct-14": {"port": 4014, "location": "198"},
     "acct-16": {"port": 4016, "location": "198"},
@@ -92,10 +88,7 @@ POOL_ACCOUNTS = {
     "acct-23": {"port": 4023, "location": "198"},
     "acct-24": {"port": 4024, "location": "198"},
     "acct-25": {"port": 4025, "location": "198"},
-    "acct-2":  {"port": 4002, "location": "198"},
-    "acct-15": {"port": 4015, "location": "198"},
     "acct-17": {"port": 4017, "location": "198"},
-    "acct-26": {"port": 4026, "location": "198"},
     "acct-27": {"port": 4027, "location": "198"},
     "acct-28": {"port": 4028, "location": "198"},
     "acct-29": {"port": 4029, "location": "198"},
@@ -128,7 +121,6 @@ POOL_ACCOUNTS = {
     "acct-56": {"port": 4056, "location": "198"},
     "acct-57": {"port": 4057, "location": "198"},
     "acct-58": {"port": 4058, "location": "198"},
-    "acct-59": {"port": 4059, "location": "198"},
     "acct-60": {"port": 4060, "location": "198"},
     "acct-61": {"port": 4061, "location": "198"},
     "acct-62": {"port": 4062, "location": "198"},
@@ -136,6 +128,8 @@ POOL_ACCOUNTS = {
     "acct-64": {"port": 4064, "location": "198"},
     "acct-65": {"port": 4065, "location": "198"},
     "acct-66": {"port": 4066, "location": "198"},
+    "acct-67": {"port": 4067, "location": "198"},
+    "acct-68": {"port": 4068, "location": "198"},
 }
 
 SSH_187_HOST = os.environ.get("SSH_187_HOST", "10.68.13.187")
@@ -460,8 +454,8 @@ def classify(usage):
     if w_reset_at is None and sw.get("reset_after_seconds") is not None:
         w_reset_at = int(now + sw["reset_after_seconds"])
 
-    if w_pct >= 99:
-        return "OFFLINE-WEEK", f"wk={w_pct}%>=99", p_pct, w_pct, w_reset_at, p_reset_at, w_reset_at
+    if w_pct >= 100:
+        return "OFFLINE-WEEK", f"wk={w_pct}%>=100", p_pct, w_pct, w_reset_at, p_reset_at, w_reset_at
     if p_pct >= 99:
         return "OFFLINE-5H", f"5h={p_pct}%>=99", p_pct, w_pct, p_reset_at, p_reset_at, w_reset_at
     if p_pct >= 50 or w_pct >= 50:
@@ -520,6 +514,49 @@ def acct_api_base(acct, meta):
         return f"http://localhost:{meta['port']}"
 
 
+
+def deploy_scale_snapshot():
+    """一次拉 198 K3s namespace 全部 chatgpt-acct-* deploy 的 spec.replicas。
+
+    返回 {"acct-N": spec_replicas}。任何 ssh/kubectl 失败 → 返回 {} (空 dict)，
+    主 loop 会保持现有 probe 行为（不会因此 pause 健康 acct）。
+
+    Source of truth：deploy.spec.replicas（不是 status.readyReplicas，避免新 pod 没 ready
+    时被误判 scale=0）。spec=0 等价"操作人/手动 scale 0 释放内存"显式意图。
+    """
+    cmd = (
+        "export KUBECONFIG=$HOME/.kube/config; "
+        f"kubectl -n {K8S_198_NS} get deploy -o json 2>/dev/null"
+    )
+    ssh_args = [
+        "ssh",
+        "-o", "ConnectTimeout=5",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ControlMaster=auto",
+        "-o", "ControlPath=/tmp/cm-quota-198-%r@%h:%p",
+        "-o", "ControlPersist=10m",
+        f"{SSH_198_USER}@{SSH_198_HOST}",
+        cmd,
+    ]
+    try:
+        result = subprocess.run(ssh_args, capture_output=True, text=True, timeout=20)
+        if result.returncode != 0:
+            log(f"  deploy_scale_snapshot ssh failed rc={result.returncode}: {result.stderr.strip()[:120]}")
+            return {}
+        d = json.loads(result.stdout)
+    except Exception as e:
+        log(f"  deploy_scale_snapshot error {type(e).__name__}: {str(e)[:120]}")
+        return {}
+    out = {}
+    for it in d.get("items", []):
+        name = (it.get("metadata") or {}).get("name", "")
+        m = re.match(r"chatgpt-(acct-\d+)$", name)
+        if not m:
+            continue
+        out[m.group(1)] = (it.get("spec") or {}).get("replicas", 1)
+    return out
+
+
 def acct_api_key(meta):
     if meta["location"] == "188":
         return LITELLM_MK_188
@@ -576,6 +613,68 @@ def probe_acct(acct):
     return False, last
 
 
+
+AUTO_SCALE_ON_PAUSE = os.environ.get("AUTO_SCALE_ON_PAUSE", "1") == "1"
+
+
+def scale_deploy(acct, replicas, wait_ready=False, timeout=120):
+    """198 only。kubectl scale --replicas=N + 可选 wait endpoint ready。
+
+    返回 True=成功（含已是目标态）/ False=失败（ssh 报错或 wait 超时）。
+    AUTO_SCALE_ON_PAUSE=0 时整体 no-op（返回 True）。
+
+    wait_ready=True 用于 resume_acct：必须等 svc 有 endpoint 再让 router 注册 entry，
+    否则 simple-shuffle 路由到 0 endpoint svc 立刻超时（同 §0b scale=0 ghost 问题反向）。
+    """
+    if not AUTO_SCALE_ON_PAUSE:
+        return True
+    if DRY_RUN:
+        log(f"  [DRY_RUN] would kubectl scale chatgpt-{acct} --replicas={replicas} (wait_ready={wait_ready})")
+        return True
+    scale_cmd = (
+        f"export KUBECONFIG=$HOME/.kube/config; "
+        f"kubectl -n {K8S_198_NS} scale deploy/chatgpt-{acct} --replicas={replicas}"
+    )
+    if wait_ready and replicas > 0:
+        # endpoint 有 IP = 至少 1 个 ready pod；比 rollout status 更精准（rollout 看 replica
+        # 计数，可能 Running 但 readinessProbe 没过；endpoint 是 router 真实能路由的口径）
+        wait_cmd = (
+            f" && end=$(($(date +%s)+{timeout})); "
+            f"while [ $(date +%s) -lt $end ]; do "
+            f"ips=$(kubectl -n {K8S_198_NS} get endpoints chatgpt-{acct} "
+            f"-o jsonpath='{{.subsets[*].addresses[*].ip}}' 2>/dev/null); "
+            f"if [ -n \"$ips\" ]; then echo \"ready ips=$ips\"; exit 0; fi; "
+            f"sleep 3; "
+            f"done; echo timeout; exit 1"
+        )
+        cmd = scale_cmd + wait_cmd
+    else:
+        cmd = scale_cmd
+    mux_path = f"/tmp/cm-quota-198-{SSH_198_USER}@{SSH_198_HOST}:22"
+    ssh_args = [
+        "ssh",
+        "-o", "ConnectTimeout=5",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ControlMaster=auto",
+        "-o", f"ControlPath={mux_path}",
+        "-o", "ControlPersist=10m",
+        f"{SSH_198_USER}@{SSH_198_HOST}",
+        cmd,
+    ]
+    try:
+        result = subprocess.run(ssh_args, capture_output=True, text=True, timeout=timeout + 30)
+    except Exception as e:
+        log(f"  scale_deploy {acct}={replicas} ssh err {type(e).__name__}: {str(e)[:120]}")
+        return False
+    if result.returncode != 0:
+        log(f"  scale_deploy {acct}={replicas} rc={result.returncode} "
+            f"stderr={result.stderr.strip()[:200]} stdout={result.stdout.strip()[:160]}")
+        return False
+    out = result.stdout.strip()
+    log(f"  scaled chatgpt-{acct} -> replicas={replicas}{' (wait_ready)' if wait_ready and replicas > 0 else ''}: {out[:200]}")
+    return True
+
+
 def pause_acct(acct, meta):
     if DRY_RUN:
         log(f"  [DRY_RUN] would pause {acct}")
@@ -590,14 +689,27 @@ def pause_acct(acct, meta):
     for e in data.get("data", []):
         e_ab = (e.get("litellm_params") or {}).get("api_base", "")
         e_id = (e.get("model_info") or {}).get("id", "")
-        if e_ab == ab:
-            s2, resp2 = api_request("POST", "/model/delete", {"id": e_id})
-            if s2 == 200:
-                deleted += 1
-                log(f"  deleted {e_id}")
-            else:
-                log(f"  delete {e_id} failed: HTTP {s2} {str(resp2)[:120]}")
+        e_name = e.get("model_name", "")
+        if e_ab != ab:
+            continue
+        # VIP 独占 entry (chatgpt-vip-<group>-gpt-5.X) 不删: 撞限走 CM router_settings.fallbacks
+        # (vip -> 主池 -> wangsu), 跟 pause 协同；删了就 BadRequest no healthy deployments
+        if e_name.startswith("chatgpt-vip-"):
+            log(f"  skip vip entry {e_id} ({e_name}) — pause leaves it for fallback chain")
+            continue
+        s2, resp2 = api_request("POST", "/model/delete", {"id": e_id})
+        if s2 == 200:
+            deleted += 1
+            log(f"  deleted {e_id}")
+        else:
+            log(f"  delete {e_id} failed: HTTP {s2} {str(resp2)[:120]}")
     log(f"  {acct} paused: {deleted} entries deleted")
+    # 2026-06-25: cooldown / quota-hit / scale=0 preflight 都走 pause；删完 entry 后顺手
+    # 把 pod 也 scale=0 释放 198 内存（等价 [[feedback_198_mem_released_by_scaling_paused_acct_deploys]]
+    # 的人工动作）。preflight 分支 deploy 已是 0 → kubectl scale 是 no-op，幂等。
+    # 198 only；187/188 location 跳过（不存在 K3s deploy）。
+    if meta.get("location") == "198":
+        scale_deploy(acct, 0, wait_ready=False)
     return deleted
 
 
@@ -605,6 +717,13 @@ def resume_acct(acct, meta):
     if DRY_RUN:
         log(f"  [DRY_RUN] would resume {acct}")
         return 0
+    # 2026-06-25: 先 scale=1 + 等 endpoint ready 再注册 entry。entry 一进 router
+    # simple-shuffle 立即可被选中，pod 没起来 = 路由到空 svc → 客户端撞 fallback chain。
+    # 198 only；如果 scale/wait 失败：不 register（避免 ghost entry 复发，跟 §0b 同源）。
+    if meta.get("location") == "198":
+        if not scale_deploy(acct, 1, wait_ready=True, timeout=120):
+            log(f"  resume {acct}: scale=1 / wait endpoint failed → skip register (next cron will retry)")
+            return 0
     ab = acct_api_base(acct, meta)
     ak = acct_api_key(meta)
     created = 0
@@ -619,14 +738,16 @@ def resume_acct(acct, meta):
                 existing[eid] = eab
     for m in CHATGPT_MODELS:
         mid = f"chatgpt-{acct}-{m['model_name'].replace('chatgpt-','')}"
-        # LiteLLM v1.89 /model/new 校验：litellm_params.api_key 必须带 `Bearer ` 前缀,
-        # 否则 HTTP 401 "Malformed API Key"；现有 router entry 已不带 api_key（下游 acct
-        # proxy 内网信任）。保持与现存 entry 一致，不再传 api_key 字段。
+        # 下游 chatgpt-acct sub-proxy 也跑 LiteLLM，要求 Authorization: Bearer $POOL_KEY 经
+        # user_api_key_auth；router 转发时 entry 没设 api_key → 不带 header → 下游 400
+        # "No connected db."（2026-06-25 acct-67/68 + 18 acct 全集群事故实证）。
+        # v1.89 入参层接收裸值会自动补 Bearer，不要手动拼前缀（双前缀）。
         entry = {
             "model_name": m["model_name"],
             "litellm_params": {
                 "model": m["litellm_model"],
                 "api_base": ab,
+                "api_key": ak,
             },
             "model_info": {"id": mid, "mode": "responses"},
         }
@@ -908,6 +1029,11 @@ def main():
         time.sleep(jitter)
 
     state = load_state()
+    # 2026-06-25: scale=0 preflight。pod 不存在的 acct 走 pause_acct 清 router entry，
+    # 防 simple-shuffle 把流量打到死 svc → wangsu fallback。dict 为空说明 ssh/kubectl 失败 → 跳过本轮 preflight。
+    scale_snap = deploy_scale_snapshot()
+    if scale_snap:
+        log(f"deploy_scale_snapshot: total={len(scale_snap)} zero={sum(1 for v in scale_snap.values() if v == 0)}")
     probed = 0
     skipped = 0
     transitions = []
@@ -923,6 +1049,50 @@ def main():
             continue
 
         refresh_subscription_meta_if_needed(acct, meta, state)
+        # 2026-06-25: scale 反向 (0→1) 恢复 — 手动 kubectl scale 起 pod 后，清掉
+        # SCALED_DOWN 标记 + paused=False，让 should_probe 下一轮当作正常 paused
+        # 走探测→resume 流程（resume_acct 自己会再调 scale_deploy 确保活体 + 注册 entry）。
+        # 不直接在这里调 resume_acct：probe 一次重新校准 quota 更稳，且 router-drift self-heal
+        # 兜底任何遗漏。
+        if (meta.get("location") == "198"
+                and scale_snap.get(acct, 0) > 0
+                and state.get(acct, {}).get("tier") == "SCALED_DOWN"):
+            old_s = state.get(acct, {})
+            log(f"{acct}: scale=0→{scale_snap[acct]} detected, clearing SCALED_DOWN tier")
+            transitions.append(f"🟡 {acct} scale 0→{scale_snap[acct]} → clear SCALED_DOWN, awaiting probe")
+            state[acct] = {
+                **old_s,
+                "paused": False,
+                "tier": None,
+                "cause": "scaled_back_up",
+                # 强制 ts 推到 6h+1s 前让 should_probe 立刻打开探测
+                "ts": now_ts() - MANUAL_OFFLINE_RETRY_INTERVAL - 1,
+            }
+            # 不 continue — 让下面 should_probe 直接探一次决定要不要 resume
+
+        # 2026-06-25: scale=0 detect (198 only)。pod 不存在不能服务流量，必须
+        # pause_acct 清 router entry（否则 simple-shuffle 仍会路由到死 svc → fallback wangsu）。
+        # 之后 SKIP probe — scale=0 期间 codex/usage 数值毫无意义。
+        if meta.get("location") == "198" and scale_snap.get(acct) == 0:
+            old_s = state.get(acct, {})
+            had_entries = router_has_entries(acct, meta)
+            if had_entries and not old_s.get("paused"):
+                pause_acct(acct, meta)
+                transitions.append(f"🔴 {acct} scale=0 (pod=0) ghost entries → pause")
+                log(f"{acct}: scale=0 detected → pause (ghost entries cleared)")
+            elif not old_s.get("paused"):
+                log(f"{acct}: scale=0, no router entries, sync state.paused=True")
+            # 写 state.paused=True + tier SCALED_DOWN（不动 manual_offline，让 scale=1 时自然 resume）
+            state[acct] = {
+                **old_s,
+                "paused": True,
+                "tier": "SCALED_DOWN",
+                "cause": "deploy.spec.replicas=0",
+                "ts": now_ts(),
+            }
+            skipped += 1
+            continue
+
         do_probe, reason = should_probe(acct, meta, state)
 
         if not do_probe:
@@ -997,7 +1167,12 @@ def main():
         quota_high = tier in ("OFFLINE-5H", "OFFLINE-WEEK")
         should_offline = False
         probe_detail = None
-        if quota_high and not was_paused:
+        if tier == "OFFLINE-WEEK" and not was_paused:
+            # 周 quota 撞 100% 是硬上限不会瞬态恢复，跳过 probe-validation 立即下线
+            should_offline = True
+            probe_detail = "wk=100 no-probe"
+        elif quota_high and not was_paused:
+            # OFFLINE-5H 仍走双 probe（5h 窗口边沿 + codex 子池易误判）
             ok, probe_detail = probe_acct(acct)
             log(f"  {acct}: upstream {tier} ({cause}) — probe {probe_detail}")
             if not ok:

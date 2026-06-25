@@ -483,7 +483,26 @@ def api_request(method, path, body=None):
         return 0, f"{type(e).__name__}: {str(e)[:200]}"
 
 
-def router_has_entries(acct, meta):
+def model_info_snapshot():
+    """一次拉 /v1/model/info → dict[api_base] = list[model_name]。
+
+    返回 None 表示拉取失败（5xx/network），调用方应回退到"假设健康"避免风暴 /model/new。
+    主 loop 开头调用一次，传给 router_has_entries / SCALE0 preflight 避免 N×720KB 重复拉。
+    存 list[model_name] 而非 bool，便于排除 chatgpt-vip-* (pause_acct 不删) 后判定真 ghost。
+    """
+    status, data = api_request("GET", "/v1/model/info")
+    if status != 200:
+        return None
+    by_base = {}
+    for e in data.get("data", []):
+        ab = (e.get("litellm_params") or {}).get("api_base", "")
+        name = e.get("model_name", "")
+        if ab:
+            by_base.setdefault(ab, []).append(name)
+    return by_base
+
+
+def router_has_entries(acct, meta, snapshot=None, exclude_vip=False):
     """Return True if LiteLLM router currently has any entry whose api_base matches this acct.
 
     Self-heal guard: pause/resume only mutates router via /model/delete + /model/new and
@@ -491,15 +510,29 @@ def router_has_entries(acct, meta):
     (manual /model/delete, DB corruption, restore_at race) while state.paused stays False,
     cron never rebuilds them — the acct goes silently dark. This check makes the main
     loop notice that drift on the next probe.
+
+    snapshot: optional dict[api_base]=list[model_name] from model_info_snapshot(); when
+    supplied skip the per-call HTTP roundtrip. snapshot=None → live GET (legacy path).
+    exclude_vip: skip chatgpt-vip-* entries when judging "has entries" — needed for the
+    SCALE0 ghost detect so it doesn't infinitely re-pause VIP acct (whose vip entries are
+    intentionally kept across pause for CM fallback chain).
     """
     ab = acct_api_base(acct, meta)
+    if snapshot is not None:
+        names = snapshot.get(ab, [])
+        if exclude_vip:
+            names = [n for n in names if not (n or "").startswith("chatgpt-vip-")]
+        return bool(names)
     status, data = api_request("GET", "/v1/model/info")
     if status != 200:
         # don't auto-heal on transient 5xx — better to skip than spam /model/new
         return True
     for e in data.get("data", []):
-        if (e.get("litellm_params") or {}).get("api_base", "") == ab:
-            return True
+        if (e.get("litellm_params") or {}).get("api_base", "") != ab:
+            continue
+        if exclude_vip and (e.get("model_name", "") or "").startswith("chatgpt-vip-"):
+            continue
+        return True
     return False
 
 
@@ -708,9 +741,15 @@ def pause_acct(acct, meta):
     # 把 pod 也 scale=0 释放 198 内存（等价 [[feedback_198_mem_released_by_scaling_paused_acct_deploys]]
     # 的人工动作）。preflight 分支 deploy 已是 0 → kubectl scale 是 no-op，幂等。
     # 198 only；187/188 location 跳过（不存在 K3s deploy）。
+    # 2026-06-26: 失败不再静默 — 写 state.pending_scale_down=True，下一轮 cron 顶部重试，
+    # 否则 transient ssh 抖动 → entry 删了 pod 没缩 → 永远占内存（SCALE0 preflight 因
+    # replicas=1 不会再 fire，pause 分支因 paused=True 也不会再 fire 这一段）。
+    scaled_ok = True
     if meta.get("location") == "198":
-        scale_deploy(acct, 0, wait_ready=False)
-    return deleted
+        scaled_ok = scale_deploy(acct, 0, wait_ready=False)
+        if not scaled_ok:
+            log(f"  ⚠️  {acct} pause: scale=0 FAILED — state.pending_scale_down=True for next cron retry")
+    return {"deleted": deleted, "scaled_ok": scaled_ok}
 
 
 def resume_acct(acct, meta):
@@ -1034,6 +1073,13 @@ def main():
     scale_snap = deploy_scale_snapshot()
     if scale_snap:
         log(f"deploy_scale_snapshot: total={len(scale_snap)} zero={sum(1 for v in scale_snap.values() if v == 0)}")
+    # 2026-06-26: 一次拉 /v1/model/info 全表（720KB），供 SCALE0 preflight 和 router-drift
+    # self-heal 用，避免 N×45 重复 GET。None=拉取失败 → 下面相关分支按 "假设健康" 跳过自愈。
+    mi_snap = model_info_snapshot()
+    if mi_snap is None:
+        log("model_info_snapshot: failed; router-drift self-heal & SCALE0 ghost detect skipped this tick")
+    else:
+        log(f"model_info_snapshot: {len(mi_snap)} distinct api_base entries")
     probed = 0
     skipped = 0
     transitions = []
@@ -1063,6 +1109,13 @@ def main():
             state[acct] = {
                 **old_s,
                 "paused": False,
+                # 2026-06-26: 反向恢复时同步清 manual_offline / consecutive_401 / pending_scale_down，
+                # 否则 should_probe 走 manual_offline 6h gate → 看起来"scale 上来了但 cron 不 resume"。
+                # 手动 scale 上来本身就是操作人对 token 有效性的隐式确认（OAuth 已重做 / token 已修），
+                # 这里清掉跟"应用层 reset state.json" 等价，免去额外手动步骤。
+                "manual_offline": False,
+                "consecutive_401": 0,
+                "pending_scale_down": False,
                 "tier": None,
                 "cause": "scaled_back_up",
                 # 强制 ts 推到 6h+1s 前让 should_probe 立刻打开探测
@@ -1070,16 +1123,40 @@ def main():
             }
             # 不 continue — 让下面 should_probe 直接探一次决定要不要 resume
 
+        # 2026-06-26: pending_scale_down retry — 上一轮 pause_acct 的 scale_deploy 失败
+        # （ssh 抖动 / kubectl timeout），现在 paused=True 但 deploy.replicas>0 还在烧内存。
+        # 此处单独重试 scale=0，成功就清 flag，失败就保留下一轮再试。不参与下面的 SCALE0 detect
+        # 分支（那是 ghost entry 清理，已经 paused 的 acct entry 也已删完无 ghost）。
+        if (meta.get("location") == "198"
+                and state.get(acct, {}).get("pending_scale_down")
+                and scale_snap.get(acct, 0) > 0):
+            old_s = state.get(acct, {})
+            log(f"{acct}: retry pending scale=0 (replicas={scale_snap[acct]})")
+            if scale_deploy(acct, 0, wait_ready=False):
+                state[acct] = {**old_s, "pending_scale_down": False}
+                transitions.append(f"🟦 {acct} pending scale=0 retry → ok")
+            else:
+                log(f"{acct}: pending scale=0 retry FAILED — will try again next cron")
+            skipped += 1
+            continue
+
         # 2026-06-25: scale=0 detect (198 only)。pod 不存在不能服务流量，必须
         # pause_acct 清 router entry（否则 simple-shuffle 仍会路由到死 svc → fallback wangsu）。
         # 之后 SKIP probe — scale=0 期间 codex/usage 数值毫无意义。
+        # 2026-06-26: ghost-entry 清理不再 gate 在 not paused — operator/audit --fix 给
+        # 已 paused acct 重新 /model/new 注册过的 entry，老版本永远漏；只要 router 实测有
+        # 残留就 pause_acct（pause_acct 自己幂等：state.paused 已 True 也会扫 entry 删干净）。
         if meta.get("location") == "198" and scale_snap.get(acct) == 0:
             old_s = state.get(acct, {})
-            had_entries = router_has_entries(acct, meta)
-            if had_entries and not old_s.get("paused"):
+            had_entries = router_has_entries(acct, meta, snapshot=mi_snap, exclude_vip=True)
+            if had_entries:
                 pause_acct(acct, meta)
-                transitions.append(f"🔴 {acct} scale=0 (pod=0) ghost entries → pause")
-                log(f"{acct}: scale=0 detected → pause (ghost entries cleared)")
+                if not old_s.get("paused"):
+                    transitions.append(f"🔴 {acct} scale=0 (pod=0) ghost entries → pause")
+                    log(f"{acct}: scale=0 detected → pause (ghost entries cleared)")
+                else:
+                    transitions.append(f"🔴 {acct} scale=0 ghost entries (paused re-add) → re-clean")
+                    log(f"{acct}: scale=0 + paused but ghost entries → re-clean")
             elif not old_s.get("paused"):
                 log(f"{acct}: scale=0, no router entries, sync state.paused=True")
             # 写 state.paused=True + tier SCALED_DOWN（不动 manual_offline，让 scale=1 时自然 resume）
@@ -1123,10 +1200,13 @@ def main():
                     state[acct] = {**old_s, "consecutive_401": cnt, "ts": now_ts()}
                 else:
                     # 连续 N 次 → 真死，下线（仍允许 manual_offline 6h 自愈）
+                    pause_pending = False
                     if not old_s.get("manual_offline"):
-                        pause_acct(acct, meta)
+                        pr = pause_acct(acct, meta)
+                        pause_pending = not pr.get("scaled_ok", True)
                         transitions.append(
                             f"🔴 {acct} token_invalidated x{cnt} → auto pause"
+                            + (" (scale=0 retry pending)" if pause_pending else "")
                         )
                     state[acct] = {
                         **old_s,
@@ -1135,6 +1215,7 @@ def main():
                         "tier": "TOKEN_INVALID",
                         "consecutive_401": cnt,
                         "ts": now_ts(),
+                        "pending_scale_down": pause_pending,
                     }
             else:
                 log(f"{acct}: HTTP {e.code}, keeping state")
@@ -1168,9 +1249,19 @@ def main():
         should_offline = False
         probe_detail = None
         if tier == "OFFLINE-WEEK" and not was_paused:
-            # 周 quota 撞 100% 是硬上限不会瞬态恢复，跳过 probe-validation 立即下线
-            should_offline = True
-            probe_detail = "wk=100 no-probe"
+            # 2026-06-26: 周 quota 100% 是硬上限不瞬态恢复，但 fetch_usage 偶发返坏 100 →
+            # 单次就 pause + scale=0 太激进；改为连续 2 次才下线（间隔 5min cron，最坏延迟 5min
+            # 才真下线，可接受）。计数器进 state，下面成功探测重置为 0。
+            old_wk_cnt = old.get("consecutive_week_offline", 0) + 1
+            if old_wk_cnt >= 2:
+                should_offline = True
+                probe_detail = f"wk=100 x{old_wk_cnt} no-probe"
+            else:
+                probe_detail = f"wk=100 x{old_wk_cnt} (need 2 for offline)"
+                transitions.append(
+                    f"⚠️ {acct} wk=100 first hit — defer offline, recheck next cron"
+                )
+                log(f"  {acct}: {probe_detail}")
         elif quota_high and not was_paused:
             # OFFLINE-5H 仍走双 probe（5h 窗口边沿 + codex 子池易误判）
             ok, probe_detail = probe_acct(acct)
@@ -1178,10 +1269,13 @@ def main():
             if not ok:
                 should_offline = True
 
+        pause_pending = False
         if should_offline and not was_paused:
-            pause_acct(acct, meta)
+            pr = pause_acct(acct, meta)
+            pause_pending = not pr.get("scaled_ok", True)
             transitions.append(
                 f"🔴 {acct} {cause} + probe fail ({probe_detail}) → pause (reset ~{fmt_eta(restore_at)})"
+                + (" [scale=0 retry pending]" if pause_pending else "")
             )
         elif quota_high and not was_paused and not should_offline:
             # ≥99% 但 probe 通过 — 不动 entry，仅 transitions 留痕，下轮 cron 再 probe
@@ -1199,7 +1293,7 @@ def main():
             # Router-drift self-heal: 上游健康 + state 标 online，但 LiteLLM router 没 entry。
             # 触发场景：手工 /model/delete、ProxyModelTable 历史 bug、resume_acct 半成功。
             # 不依赖 state.paused（一旦失同步会永远漏） — 直接看 router 真实状态。
-            if not router_has_entries(acct, meta):
+            if not router_has_entries(acct, meta, snapshot=mi_snap):
                 log(f"  {acct}: router-drift detected (online but no entries) → resume")
                 resume_acct(acct, meta)
                 transitions.append(
@@ -1232,6 +1326,13 @@ def main():
             "consecutive_401": 0,
             "consecutive_probe_err": 0,
             "probe_err_alerted": False,
+            "pending_scale_down": pause_pending,
+            # 2026-06-26: wk=100 计数器：未撞顶或已 should_offline 都重置；只有"撞 100 但 defer"那次保留
+            "consecutive_week_offline": (
+                old.get("consecutive_week_offline", 0) + 1
+                if (tier == "OFFLINE-WEEK" and not was_paused and not should_offline)
+                else 0
+            ),
             # 探到健康/quota 限速即清理 repair 状态（自动修复链路完成）
             "repair_attempts": 0,
             "last_repair_at": 0,

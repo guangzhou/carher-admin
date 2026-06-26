@@ -867,6 +867,8 @@ def _pick_otp_provider(email):
         return "imap_qq"
     if dom == "mail.com":
         return "mailcom"
+    if dom in ("hotmail.com", "outlook.com"):
+        return "outlook"
     return None
 
 

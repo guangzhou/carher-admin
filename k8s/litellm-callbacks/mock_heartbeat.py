@@ -53,7 +53,7 @@ def _last_user_text(data: dict) -> str:
         for item in reversed(inp):
             if not isinstance(item, dict):
                 continue
-            if item.get("role") and item.get("role") != "user":
+            if item.get("role") != "user":
                 continue
             content = item.get("content")
             if isinstance(content, str):

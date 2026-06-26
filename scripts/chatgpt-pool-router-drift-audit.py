@@ -28,14 +28,18 @@ Run via:
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
 import urllib.request
 
 PRD = "http://10.68.13.198:30402/pro"
-MK = "sk-pro-litellm-ce077e2b0721bb419a633e4d"
-POOL_KEY = "sk-chatgpt-198-d8a3f4e62b9c1057ef324918a7b6d3e0"
+MK = os.environ.get("LITELLM_MK_198", "")
+POOL_KEY = os.environ.get("LITELLM_POOL_KEY_198", "")
+if not MK or not POOL_KEY:
+    print("FATAL: LITELLM_MK_198 and LITELLM_POOL_KEY_198 must be set", file=sys.stderr)
+    sys.exit(2)
 NS = "litellm-product"
 STATE_JSON = "/home/cltx/.chatgpt-quota/state/state.json"
 EXPECTED = {

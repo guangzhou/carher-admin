@@ -49,8 +49,8 @@ print('auth.json ok: access_token + refresh_token 齐全')
 NS=litellm-product
 DEPLOY=chatgpt-acct-$ACCT
 SVC_DNS="http://chatgpt-acct-$ACCT.litellm-product.svc.cluster.local:4000"
-POOL_KEY=sk-chatgpt-198-d8a3f4e62b9c1057ef324918a7b6d3e0
-PROD_MK=sk-pro-litellm-ce077e2b0721bb419a633e4d
+POOL_KEY="${LITELLM_POOL_KEY_198:?LITELLM_POOL_KEY_198 must be set}"
+PROD_MK="${LITELLM_MK_198:?LITELLM_MK_198 must be set}"
 PROD_ENDPOINT=https://cc.auto-link.com.cn/pro
 SKILLS_DIR="$HOME/.claude/skills"
 PATCH_ACLOSE="$SKILLS_DIR/chatgpt-acct-close-wait-restart/scripts/patch-aclose-198.sh"
@@ -102,9 +102,9 @@ fi
 # Step 2: wait Pod ready (但 OAuth pending 时不会 Ready，超时即继续)
 # ────────────────────────────────────────────────────────────
 if should_run wait; then
-  log "STEP wait"
-  jms ssh AIYJY-litellm "kubectl -n $NS wait pod -l app=$DEPLOY --for=condition=Ready --timeout=120s" || \
-    log "  ⚠️  Pod not Ready in 120s (PVC 空 → 首次 OAuth flow hang 是正常的，cp-auth 后会 ready)"
+  log "STEP wait (60s soft — auth.json 还没注入时不会 Ready, 这是预期)"
+  jms ssh AIYJY-litellm "kubectl -n $NS wait pod -l app=$DEPLOY --for=condition=Ready --timeout=60s" 2>/dev/null || \
+    log "  ⚠️  Pod not Ready in 60s (PVC 空 → 首次 OAuth flow hang 是预期，cp-auth 后会 ready)"
 fi
 
 # ────────────────────────────────────────────────────────────
@@ -132,7 +132,13 @@ if should_run cp-auth; then
     echo \"  in-pod md5 ok\"
     rm /tmp/auth-acct-$ACCT.json
     kubectl -n $NS rollout restart deploy/$DEPLOY
-    kubectl -n $NS rollout status deploy/$DEPLOY --timeout=180s
+    # 用 until-loop 等 1/1 ready 替代 rollout status --timeout (180s 上限误判 + jms 隧道 flake)
+    for i in \$(seq 1 60); do
+      R=\$(kubectl -n $NS get deploy $DEPLOY -o jsonpath='{.status.readyReplicas}/{.spec.replicas}' 2>/dev/null)
+      [ \"\$R\" = '1/1' ] && { echo \"  ✅ $DEPLOY ready (\$R)\"; break; }
+      sleep 5
+    done
+    [ \"\$R\" = '1/1' ] || { echo \"FATAL: $DEPLOY not 1/1 after 300s (last=\$R)\" >&2; exit 7; }
   "
 fi
 
@@ -159,8 +165,9 @@ fi
 # ────────────────────────────────────────────────────────────
 if should_run aclose; then
   log "STEP aclose"
-  # patch-aclose-198.sh 直接 kubectl，必须在 198 host 上跑；198 上已有 /root/patch-aclose-198.sh
-  jms ssh AIYJY-litellm "bash /root/patch-aclose-198.sh --apply --only $ACCT"
+  # patch-aclose-198.sh 末尾 `[ -n "$FAILED_LIST" ]` / `[ "$APPLY" = 0 ]` 在 OK 路径会返非零
+  # 不杀 onboard，让下面 verify block 决断
+  jms ssh AIYJY-litellm "bash /root/patch-aclose-198.sh --apply --only $ACCT" || true
   # verify
   jms ssh AIYJY-litellm "
     POD=\$(kubectl -n $NS get pod -l app=$DEPLOY -o jsonpath='{.items[0].metadata.name}')
@@ -211,7 +218,14 @@ if should_run rollout; then
   log "STEP rollout (litellm-proxy)"
   jms ssh AIYJY-litellm "
     kubectl -n $NS rollout restart deploy/litellm-proxy
-    kubectl -n $NS rollout status deploy/litellm-proxy --timeout=180s
+    # 4-replica rolling update 平均 3-5min, --timeout=180s 高发误判 + jms 隧道 TLS flake;
+    # 改 until-loop polling直到 4/4 ready (最多 600s)
+    for i in \$(seq 1 120); do
+      R=\$(kubectl -n $NS get deploy litellm-proxy -o jsonpath='{.status.readyReplicas}/{.spec.replicas}' 2>/dev/null)
+      [ \"\$R\" = '4/4' ] && { echo \"  ✅ litellm-proxy 4/4 ready\"; break; }
+      sleep 5
+    done
+    [ \"\$R\" = '4/4' ] || { echo \"FATAL: litellm-proxy not 4/4 after 600s (last=\$R)\" >&2; exit 8; }
   "
 fi
 
@@ -226,11 +240,14 @@ if should_run smoke; then
     -d "{\"model\":\"chatgpt-acct-$ACCT-gpt-5.5\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true,\"max_tokens\":5}" \
     > "$RESP" || true
   log "  response headers:"
-  grep -iE 'x-litellm-(model-api-base|attempted-fallbacks|model-id)' "$RESP" | sed 's/^/    /'
+  # grep 没匹配返非零 + set -e 会中断脚本，必须 || true 兜底
+  grep -iE 'x-litellm-(model-api-base|attempted-fallbacks|model-id)' "$RESP" | sed 's/^/    /' || true
   if grep -q "chatgpt-acct-$ACCT.litellm-product.svc" "$RESP"; then
     log "  ✅ api_base matches svc DNS"
   else
     log "  ⚠️  api_base 没有命中预期 svc DNS，可能 sticky 缓存中（10min 后再试）"
+    log "  ⚠️  也可能是上游 token_invalidated（chatgpt.com web 同账号登入会 revoke OAuth session）"
+    log "       排查: kubectl exec pod -- python3 -c 'import urllib.request,json;tok=json.load(open(\"/chatgpt-auth/auth.json\"))[\"access_token\"];print(urllib.request.urlopen(urllib.request.Request(\"https://api.openai.com/v1/me\",headers={\"Authorization\":\"Bearer \"+tok}),timeout=10).status)'"
   fi
   rm -f "$RESP"
 fi

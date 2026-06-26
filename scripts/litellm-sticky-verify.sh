@@ -34,7 +34,7 @@ JMS="$REPO_ROOT/scripts/jms"
 
 # 取 vkey + label
 if [[ "$CLUSTER" == "198" ]]; then
-  VK="sk-pro-litellm-ce077e2b0721bb419a633e4d"   # 198 prod master key
+  VK="${LITELLM_MK_198:?LITELLM_MK_198 must be set}"   # 198 prod master key
   LABEL="198 prod master key"
 else
   POD=$(kubectl get pod -n carher -l user-id=${HER#her-} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)

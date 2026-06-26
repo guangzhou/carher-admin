@@ -61,9 +61,9 @@ STATE_FILE = f"{STATE_DIR}/state.json"
 
 LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://10.68.13.198:30402/pro")
 LITELLM_MK = os.environ.get("LITELLM_MK", "")
-LITELLM_MK_188 = os.environ.get("LITELLM_MK_188", "sk-chatgpt-188-6ff3fb109ac61cc1ea23f278bab8d838")
-LITELLM_MK_187 = os.environ.get("LITELLM_MK_187", "sk-chatgpt-187-a3d9e7c1f45b82069d1c3f7a")
-LITELLM_MK_198 = os.environ.get("LITELLM_MK_198", "sk-chatgpt-198-d8a3f4e62b9c1057ef324918a7b6d3e0")
+LITELLM_MK_188 = os.environ.get("LITELLM_MK_188", "")
+LITELLM_MK_187 = os.environ.get("LITELLM_MK_187", "")
+LITELLM_MK_198 = os.environ.get("LITELLM_MK_198", "")
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
 JITTER_MAX = int(os.environ.get("REBALANCE_JITTER", "180"))
 DRY_RUN = os.environ.get("DRY_RUN", "") == "1"
@@ -605,9 +605,7 @@ def acct_api_key(meta):
 PROBE_ENDPOINT  = os.environ.get(
     "PROBE_ENDPOINT", "https://cc.auto-link.com.cn/pro/v1/chat/completions"
 )
-PROBE_MK        = os.environ.get(
-    "PROBE_MK", "sk-pro-litellm-ce077e2b0721bb419a633e4d"
-)
+PROBE_MK        = os.environ.get("PROBE_MK", "")
 PROBE_TIMEOUT   = 20
 PROBE_MAX_TRIES = 2  # 一轮内最多 2 次；都失败才视为 fail
 
@@ -1062,6 +1060,12 @@ def attempt_repair_198(acct, meta, state, transitions):
 # ---- main ----
 
 def main():
+    missing = [n for n in ("LITELLM_MK_188", "LITELLM_MK_187", "LITELLM_MK_198", "PROBE_MK")
+               if not os.environ.get(n)]
+    if missing:
+        print(f"FATAL: required env unset: {','.join(missing)}", file=sys.stderr)
+        sys.exit(2)
+
     if JITTER_MAX > 0 and not DRY_RUN:
         jitter = random.randint(0, JITTER_MAX)
         log(f"jitter sleep {jitter}s")

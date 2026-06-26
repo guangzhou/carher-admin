@@ -23,7 +23,7 @@ REDIS_POD="litellm-redis-0"
 # 198 hop for smoke
 JUMP_198="cltx@10.68.13.198"
 PROXY_URL_INTERNAL="http://10.68.13.198:30402/pro"
-MASTER_KEY="sk-pro-litellm-ce077e2b0721bb419a633e4d"
+MASTER_KEY="${LITELLM_MK_198:?LITELLM_MK_198 must be set}"
 
 SHORT_NAMES=(gpt-5.5 gpt-5.4 gpt-5.3-codex)
 

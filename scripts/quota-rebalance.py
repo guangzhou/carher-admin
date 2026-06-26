@@ -709,14 +709,14 @@ def scale_deploy(acct, replicas, wait_ready=False, timeout=120):
 def pause_acct(acct, meta):
     if DRY_RUN:
         log(f"  [DRY_RUN] would pause {acct}")
-        return 0
+        return {"deleted": 0, "scaled_ok": True}
     ab = acct_api_base(acct, meta)
     deleted = 0
     # 通过 api_base 匹配删除（比 ID 匹配更可靠）
     status, data = api_request("GET", "/v1/model/info")
     if status != 200:
         log(f"  pause {acct}: /model/info failed HTTP {status} {str(data)[:120]}")
-        return 0
+        return {"deleted": 0, "scaled_ok": True}
     for e in data.get("data", []):
         e_ab = (e.get("litellm_params") or {}).get("api_base", "")
         e_id = (e.get("model_info") or {}).get("id", "")

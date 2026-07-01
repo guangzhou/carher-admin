@@ -47,8 +47,8 @@ def duration(epoch: Any, now: float, *, days: bool = True) -> str:
 
 def past_label(row: dict[str, Any], window: str) -> str:
     """裸 'past' 拆三类后缀，让用户一眼读出来根因：
-      past⊘ = state 冻结（manual_offline TOKEN 死 / deploy.scale=0），probe 不再写
-      past· = 该窗口自然过但被对侧窗口卡 paused（5h 过但 wk=100%，或反之）
+      past⊘ = state 冻结（manual_offline / scale=0 / SCALED_DOWN 且 reset 已过），probe 不再写
+      past· = 该窗口自然过但被对侧窗口卡 paused（5h 过但 wk=100%，或反之，且 pod 仍在 probe）
       past! = ONLINE 但 probe stale，cron 下一 tick 会刷新
     """
     if row.get("manual_offline"):
@@ -56,8 +56,14 @@ def past_label(row: dict[str, Any], window: str) -> str:
     cause = (row.get("cause") or "")
     if cause == "deploy.spec.replicas=0":
         return "past⊘"
+    tier = str(row.get("tier") or "").upper()
+    # SCALED_DOWN + 窗口 reset 已过 = snapshot 冻结未刷新。
+    # rebalance preflight 检测 replicas=0 直接短路不 probe，state 里的 reset 时刻是 pause 时刻的死快照。
+    # 用 past· 会误导为"对侧配对窗口副作用"（那是 ONLINE-paused 的语义），SCALED_DOWN 时是 stale。
+    if tier == "SCALED_DOWN":
+        return "past⊘"
     if row.get("paused"):
-        # paused but not manual_offline → 7d/5h 自然 cap
+        # paused but not manual_offline / not SCALED_DOWN → 5h/7d 自然 cap，pod 仍存活可 probe
         # window=='5h' & cause 主要是 wk=100% → 5h 列 past 是配对窗口的副作用
         # window=='7d' & cause 主要是 5h=100% → 反之
         if window == "5h" and "wk=" in cause:
@@ -66,6 +72,22 @@ def past_label(row: dict[str, Any], window: str) -> str:
             return "past·"
         return "past·"
     return "past!"
+
+
+def stale_notes(row: dict[str, Any], now: float) -> list[str]:
+    """SCALED_DOWN 状态 rebalance preflight 短路不 probe，state.json 里的 reset 时刻是
+    pause 时刻的快照。任一 reset 已过 = 该窗口配额其实已重置但 state 冻结未刷新。
+    在 cause 列点出来，避免用户看着 past·/past⊘ 却读不出"要重新 probe"。"""
+    if str(row.get("tier") or "").upper() != "SCALED_DOWN":
+        return []
+    notes: list[str] = []
+    p_reset = row.get("primary_reset_at")
+    w_reset = row.get("weekly_reset_at")
+    if p_reset and float(p_reset) < now:
+        notes.append("5h_reset elapsed")
+    if w_reset and float(w_reset) < now:
+        notes.append("7d_reset elapsed")
+    return notes
 
 
 def next_reset(row: dict[str, Any], now: float) -> str:
@@ -326,7 +348,7 @@ def render_table(state: dict[str, dict[str, Any]], *, summary: bool) -> None:
     ts = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     total = len(state)
     print(f"=== BEGIN chatgpt-acct-quota @ {ts} | source=198:state.json | rows={total} ===")
-    print("legend: past⊘=state 冻结 (TOKEN/scale=0)  past·=另一窗口卡 paused  past!=ONLINE probe stale")
+    print("legend: past⊘=state 冻结 (TOKEN/scale=0/SCALED_DOWN)  past·=另一窗口卡 paused(pod 活)  past!=ONLINE probe stale")
     print(
         f"{'acct':9s} {'email':32s} {'take':>4s} {'status':>7s} {'tier':>16s} "
         f"{'5h%':>5s} {'main_n':>7s} {'main$':>7s} {'codex_n':>8s} {'codex$':>7s} {'5h_reset':>12s} "
@@ -385,6 +407,9 @@ def render_table(state: dict[str, dict[str, Any]], *, summary: bool) -> None:
         # 之前的 pct 反推逻辑（pct≥95 → pause 触发；pct<95 → manual scale=0）已删 ——
         # 真因写入后反推 stale state pct 既不准也误导（多维数据压一维标签）。
         cause = row.get("cause", "")
+        notes = stale_notes(row, now)
+        if notes:
+            cause = f"{cause} [stale: {', '.join(notes)}]" if cause else f"[stale: {', '.join(notes)}]"
         restore_cell = duration(row.get('restore_at'), now, days=False)
         if restore_cell == "past":
             restore_cell = past_label(row, "restore")

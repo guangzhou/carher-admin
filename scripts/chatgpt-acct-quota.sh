@@ -16,13 +16,15 @@ VIEW="$SCRIPT_DIR/chatgpt_acct_quota_view.py"
 JSON=0
 SUMMARY=0
 QUIET=0
+RAW=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --json) JSON=1; shift ;;
     --summary) SUMMARY=1; shift ;;
     --quiet) QUIET=1; shift ;;
+    --raw) RAW=1; shift ;;      # 关闭 code-fence（管道/awk 场景用）
     -h|--help)
-      sed -n '2,11p' "$0"
+      sed -n '2,12p' "$0"
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -39,9 +41,20 @@ fi
 ARGS=""
 [[ $SUMMARY -eq 1 ]] && ARGS="--summary"
 
-# 跑脚本 → tee 到 stdout + 副本文件
-"$JMS" ssh JSZX-AI-03 "python3 - $ARGS" < "$VIEW" | tee "$OUT"
-RC=${PIPESTATUS[0]}
+# stdout 默认自带 ```text fence — markdown 客户端才能保排版；
+# 副本 /tmp/chatgpt-acct-quota-last.txt 永远存 raw 无 fence 版，供 awk/自检用。
+if [[ $RAW -eq 1 ]]; then
+  "$JMS" ssh JSZX-AI-03 "python3 - $ARGS" < "$VIEW" | tee "$OUT"
+  RC=${PIPESTATUS[0]}
+else
+  "$JMS" ssh JSZX-AI-03 "python3 - $ARGS" < "$VIEW" > "$OUT"
+  RC=${PIPESTATUS[0]}
+  if [[ $RC -eq 0 ]]; then
+    echo '```text'
+    cat "$OUT"
+    echo '```'
+  fi
+fi
 
 if [[ $RC -ne 0 ]]; then
   echo "[chatgpt-acct-quota] ERROR rc=$RC (副本=$OUT)" >&2

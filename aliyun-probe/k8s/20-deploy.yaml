@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-probe
+  namespace: carher
+  labels:
+    app: chatgpt-acct-probe
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: chatgpt-acct-probe
+  template:
+    metadata:
+      labels:
+        app: chatgpt-acct-probe
+    spec:
+      serviceAccountName: chatgpt-acct-probe
+      imagePullSecrets:
+        - name: acr-vpc-secret
+      containers:
+        - name: probe
+          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher-admin:probe-v0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: PROBE_NS
+              value: carher
+            - name: PROBE_POD_LABEL
+              value: pool=chatgpt-acct
+            - name: PROBE_DB_POD
+              value: litellm-db-0
+            - name: PROBE_DB_USER
+              value: litellm
+            - name: PROBE_DB_NAME
+              value: litellm
+            - name: PROBE_CACHE_TTL
+              value: "300"
+            - name: PROBE_LIVE_THROTTLE
+              value: "30"
+            - name: PROBE_EXEC_TIMEOUT
+              value: "25"
+            - name: PROBE_WORKERS
+              value: "4"
+            - name: PROBE_BEARER
+              valueFrom:
+                secretKeyRef:
+                  name: chatgpt-acct-probe
+                  key: PROBE_BEARER
+            - name: PROBE_DB_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: chatgpt-acct-probe
+                  key: PROBE_DB_PWD
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chatgpt-acct-probe
+  namespace: carher
+spec:
+  selector:
+    app: chatgpt-acct-probe
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

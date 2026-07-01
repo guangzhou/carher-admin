@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1760" height="1040" viewBox="0 0 1760 1040">
+  <rect x="0" y="0" width="1760" height="1040" fill="#f4f1e8"/>
+  <rect x="42" y="34" width="1676" height="972" rx="34" fill="#fffaf0" stroke="#20302c" stroke-width="3"/>
+
+  <text x="84" y="96" font-size="34" font-weight="700" fill="#17211f">198 ChatGPT Pro 账号池 Gateway 化：吸收优化版</text>
+  <text x="86" y="134" font-size="18" fill="#53615e">FastAPI/httpx gateway + LiteLLM fallbacks + 188 active / 198 backup + 账号状态机</text>
+
+  <rect x="78" y="178" width="386" height="690" rx="24" fill="#e8f4ef" stroke="#2f7256" stroke-width="2"/>
+  <text x="112" y="224" font-size="25" font-weight="700" fill="#1c503d">198 LiteLLM 主代理</text>
+  <rect x="124" y="266" width="292" height="110" rx="18" fill="#ffffff" stroke="#2f7256" stroke-width="2"/>
+  <text x="154" y="304" font-size="20" font-weight="700" fill="#1c503d">用户入口</text>
+  <text x="154" y="335" font-size="15" fill="#5a6762">Cursor / Codex / API Key</text>
+  <text x="154" y="359" font-size="15" fill="#5a6762">模型名、key、allowlist 不变</text>
+
+  <rect x="124" y="420" width="292" height="154" rx="18" fill="#ffffff" stroke="#2f7256" stroke-width="2"/>
+  <text x="154" y="458" font-size="20" font-weight="700" fill="#1c503d">model_list</text>
+  <text x="154" y="490" font-size="15" fill="#5a6762">chatgpt-pool → gateway-a</text>
+  <text x="154" y="516" font-size="15" fill="#5a6762">chatgpt-pool-backup → gateway-b</text>
+  <text x="154" y="542" font-size="15" fill="#5a6762">spend logs / audit 保留</text>
+
+  <rect x="124" y="620" width="292" height="118" rx="18" fill="#fff2d4" stroke="#b6801d" stroke-width="2"/>
+  <text x="154" y="659" font-size="20" font-weight="700" fill="#744b05">router fallbacks</text>
+  <text x="154" y="690" font-size="15" fill="#645a49">active 5xx / timeout</text>
+  <text x="154" y="716" font-size="15" fill="#645a49">自动转 backup，不加新 controller</text>
+
+  <rect x="538" y="178" width="710" height="690" rx="24" fill="#edf4ff" stroke="#315d9d" stroke-width="2"/>
+  <text x="572" y="224" font-size="25" font-weight="700" fill="#244a7d">Gateway 运行时</text>
+  <text x="572" y="254" font-size="16" fill="#56636e">自写 FastAPI + asyncio + httpx，不 patch LiteLLM chatgpt/ provider</text>
+
+  <rect x="602" y="302" width="288" height="180" rx="24" fill="#ffffff" stroke="#315d9d" stroke-width="3"/>
+  <text x="632" y="340" font-size="22" font-weight="700" fill="#244a7d">gateway-a ACTIVE</text>
+  <text x="632" y="371" font-size="16" font-weight="700" fill="#244a7d">部署：188</text>
+  <text x="632" y="400" font-size="15" fill="#59656f">继承现有 IP 信誉</text>
+  <text x="632" y="426" font-size="15" fill="#59656f">默认承接全部流量</text>
+  <text x="632" y="452" font-size="15" fill="#59656f">readiness = 至少 1 个 healthy acct</text>
+
+  <rect x="924" y="302" width="288" height="180" rx="24" fill="#ffffff" stroke="#6f7f91" stroke-width="2" stroke-dasharray="10 8"/>
+  <text x="954" y="340" font-size="22" font-weight="700" fill="#425064">gateway-b BACKUP</text>
+  <text x="954" y="371" font-size="16" font-weight="700" fill="#425064">部署：198</text>
+  <text x="954" y="400" font-size="15" fill="#59656f">跨节点容灾</text>
+  <text x="954" y="426" font-size="15" fill="#59656f">active 故障时接管</text>
+  <text x="954" y="452" font-size="15" fill="#59656f">同镜像，同账号 registry</text>
+
+  <rect x="646" y="546" width="520" height="126" rx="22" fill="#ffffff" stroke="#315d9d" stroke-width="2"/>
+  <text x="676" y="584" font-size="21" font-weight="700" fill="#244a7d">Gateway 内部逻辑</text>
+  <text x="676" y="617" font-size="15" fill="#59656f">picker：healthy 优先 + weight + inflight + recent failure</text>
+  <text x="676" y="643" font-size="15" fill="#59656f">状态机：cooling / offline / token_invalidated / disabled</text>
+
+  <rect x="646" y="722" width="520" height="82" rx="20" fill="#dce9ff" stroke="#315d9d" stroke-width="2"/>
+  <text x="676" y="754" font-size="18" font-weight="700" fill="#244a7d">对外接口</text>
+  <text x="676" y="780" font-size="14" fill="#53615e">OpenAI-compatible /v1/responses 与 /v1/chat/completions，SSE 透传</text>
+
+  <rect x="1322" y="178" width="354" height="690" rx="24" fill="#fff0e7" stroke="#b8542a" stroke-width="2"/>
+  <text x="1354" y="224" font-size="25" font-weight="700" fill="#813511">账号与外部依赖</text>
+
+  <rect x="1364" y="270" width="270" height="104" rx="18" fill="#ffffff" stroke="#b8542a" stroke-width="2"/>
+  <text x="1392" y="306" font-size="19" font-weight="700" fill="#813511">Account Registry</text>
+  <text x="1392" y="336" font-size="14" fill="#68594f">YAML / SQLite</text>
+  <text x="1392" y="360" font-size="14" fill="#68594f">acct 状态、权重、reset_at</text>
+
+  <rect x="1364" y="412" width="270" height="104" rx="18" fill="#ffffff" stroke="#b8542a" stroke-width="2"/>
+  <text x="1392" y="448" font-size="19" font-weight="700" fill="#813511">Auth Secrets</text>
+  <text x="1392" y="478" font-size="14" fill="#68594f">chatgpt-auth-acct-N</text>
+  <text x="1392" y="502" font-size="14" fill="#68594f">按账号粒度收紧 RBAC</text>
+
+  <rect x="1364" y="554" width="270" height="104" rx="18" fill="#ffffff" stroke="#b8542a" stroke-width="2"/>
+  <text x="1392" y="590" font-size="19" font-weight="700" fill="#813511">Quota Probe</text>
+  <text x="1392" y="620" font-size="14" fill="#68594f">/codex/usage 低频探测</text>
+  <text x="1392" y="644" font-size="14" fill="#68594f">429 cooldown，401 invalidated</text>
+
+  <rect x="1364" y="696" width="270" height="82" rx="18" fill="#ffffff" stroke="#b8542a" stroke-width="2"/>
+  <text x="1392" y="737" font-size="19" font-weight="700" fill="#813511">ChatGPT Backend</text>
+
+  <path d="M416 498 H538" stroke="#20302c" stroke-width="4" fill="none"/>
+  <polygon points="538,498 522,489 522,507" fill="#20302c"/>
+  <path d="M1248 392 H1322" stroke="#20302c" stroke-width="4" fill="none"/>
+  <polygon points="1322,392 1306,383 1306,401" fill="#20302c"/>
+  <path d="M1248 610 H1322" stroke="#20302c" stroke-width="4" fill="none"/>
+  <polygon points="1322,610 1306,601 1306,619" fill="#20302c"/>
+
+  <path d="M1499 374 V412" stroke="#b8542a" stroke-width="4" fill="none"/>
+  <polygon points="1499,412 1490,396 1508,396" fill="#b8542a"/>
+  <path d="M1499 516 V554" stroke="#b8542a" stroke-width="4" fill="none"/>
+  <polygon points="1499,554 1490,538 1508,538" fill="#b8542a"/>
+  <path d="M1499 658 V696" stroke="#b8542a" stroke-width="4" fill="none"/>
+  <polygon points="1499,696 1490,680 1508,680" fill="#b8542a"/>
+
+  <path d="M270 738 V790 H646" stroke="#2f7256" stroke-width="3" fill="none" stroke-dasharray="10 8"/>
+  <polygon points="646,790 630,781 630,799" fill="#2f7256"/>
+  <text x="302" y="780" font-size="13" fill="#2f7256">fallback 仍在 198</text>
+
+  <rect x="104" y="894" width="410" height="70" rx="16" fill="#20302c"/>
+  <text x="130" y="924" font-size="16" font-weight="700" fill="#ffffff">MVP：先接 acct-22/23/24 canary</text>
+  <text x="130" y="950" font-size="16" font-weight="700" fill="#ffffff">主路径不动，观察 48h</text>
+
+  <rect x="546" y="894" width="470" height="70" rx="16" fill="#315d9d"/>
+  <text x="572" y="924" font-size="16" font-weight="700" fill="#ffffff">回滚：原 chatgpt-acct-N Service 保留 7 天</text>
+  <text x="572" y="950" font-size="16" font-weight="700" fill="#ffffff">api_base 分钟级切回，不重启 proxy</text>
+
+  <rect x="1048" y="894" width="520" height="70" rx="16" fill="#b8542a"/>
+  <text x="1074" y="924" font-size="16" font-weight="700" fill="#ffffff">拆 shard 条件：QPS、内存、故障域</text>
+  <text x="1074" y="950" font-size="16" font-weight="700" fill="#ffffff">或 token 半径；第一版先不拆</text>
+</svg>

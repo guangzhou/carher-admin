@@ -1,0 +1,76 @@
+# NOTE: ConfigMap mock-chatgpt-src 由 scripts/sync-mock-cm.sh 单独生成，不写在 manifest 内
+#       避免 manifest apply 覆盖真实代码内容。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-chatgpt-upstream
+  namespace: litellm-dev
+  labels:
+    app: mock-chatgpt-upstream
+    purpose: chatgpt-pool-gateway-validation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-chatgpt-upstream
+  template:
+    metadata:
+      labels:
+        app: mock-chatgpt-upstream
+    spec:
+      # 钉到 standby 节点（225），避免影响 prod 节点（198）
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      containers:
+        - name: server
+          image: 127.0.0.1:5000/litellm-carher:vanilla-v1.89.0
+          imagePullPolicy: IfNotPresent
+          command: ["/app/.venv/bin/python3"]
+          args: ["/src/mock_chatgpt.py"]
+          ports:
+            - containerPort: 4101
+          env:
+            - name: MOCK_ACCOUNTS
+              value: "mock-1,mock-2,mock-3,mock-4,mock-5"
+            - name: N_DELTAS
+              value: "5"
+            - name: DELAY_MS
+              value: "5"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 4101
+            initialDelaySeconds: 3
+            periodSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: src
+              mountPath: /src
+      volumes:
+        - name: src
+          configMap:
+            name: mock-chatgpt-src
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-chatgpt-upstream
+  namespace: litellm-dev
+spec:
+  selector:
+    app: mock-chatgpt-upstream
+  ports:
+    - port: 4101
+      targetPort: 4101
+      name: http

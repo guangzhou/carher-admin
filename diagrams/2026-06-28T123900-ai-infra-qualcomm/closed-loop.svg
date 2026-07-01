@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1080" viewBox="0 0 1800 1080">
+  <rect x="0" y="0" width="1800" height="1080" fill="#FAFAF7"/>
+  <rect x="34" y="34" width="1732" height="1012" rx="30" fill="#FFFFFF" stroke="#21352F" stroke-width="4"/>
+
+  <text x="86" y="108" font-family="Noto Sans SC, Arial" font-size="48" font-weight="800" fill="#101828">一键开通到组织治理闭环</text>
+  <text x="88" y="153" font-family="Noto Sans SC, Arial" font-size="25" fill="#5D6B66">真正的产品能力不是“发账号”，而是把申请、开通、使用、计量、复盘和扩散连成闭环</text>
+
+  <g>
+    <rect x="110" y="250" width="250" height="150" rx="22" fill="#EAF7F2" stroke="#16A085" stroke-width="3"/>
+    <text x="150" y="304" font-family="Noto Sans SC, Arial" font-size="28" font-weight="800" fill="#0F3D36">1. 申请</text>
+    <text x="150" y="350" font-family="Noto Sans SC, Arial" font-size="22" fill="#4B5C57">成员 / 部门</text>
+    <text x="150" y="382" font-family="Noto Sans SC, Arial" font-size="22" fill="#4B5C57">试点范围 / 预算</text>
+
+    <rect x="430" y="250" width="250" height="150" rx="22" fill="#EDF4FF" stroke="#2563EB" stroke-width="3"/>
+    <text x="470" y="304" font-family="Noto Sans SC, Arial" font-size="28" font-weight="800" fill="#0B356D">2. 自动开通</text>
+    <text x="470" y="350" font-family="Noto Sans SC, Arial" font-size="22" fill="#4B5C57">账号 / key / 实例</text>
+    <text x="470" y="382" font-family="Noto Sans SC, Arial" font-size="22" fill="#4B5C57">模型 / 路由 / 域名</text>
+
+    <rect x="750" y="250" width="250" height="150" rx="22" fill="#FFF7E6" stroke="#F59E0B" stroke-width="3"/>
+    <text x="790" y="304" font-family="Noto Sans SC, Arial" font-size="28" font-weight="800" fill="#8A4B00">3. 使用</text>
+    <text x="790" y="350" font-family="Noto Sans SC, Arial" font-size="22" fill="#4B5C57">Codex / Her</text>
+    <text x="790" y="382" font-family="Noto Sans SC, Arial" font-size="22" fill="#4B5C57">代码 / 测试 / 文档</text>
+
+    <rect x="1070" y="250" width="250" height="150" rx="22" fill="#F4F1FF" stroke="#7C3AED" stroke-width="3"/>
+    <text x="1110" y="304" font-family="Noto Sans SC, Arial" font-size="28" font-weight="800" fill="#4C1D95">4. 计量</text>
+    <text x="1110" y="350" font-family="Noto Sans SC, Arial" font-size="22" fill="#4B5C57">token / 费用</text>
+    <text x="1110" y="382" font-family="Noto Sans SC, Arial" font-size="22" fill="#4B5C57">活跃 / 失败 / 缓存</text>
+
+    <rect x="1390" y="250" width="250" height="150" rx="22" fill="#EEF2F6" stroke="#475467" stroke-width="3"/>
+    <text x="1430" y="304" font-family="Noto Sans SC, Arial" font-size="28" font-weight="800" fill="#1D2939">5. 复盘扩散</text>
+    <text x="1430" y="350" font-family="Noto Sans SC, Arial" font-size="22" fill="#4B5C57">部门看板 / 预算</text>
+    <text x="1430" y="382" font-family="Noto Sans SC, Arial" font-size="22" fill="#4B5C57">培训 / 扩容 / 续费</text>
+  </g>
+
+  <g stroke="#98A2B3" stroke-width="5" fill="none">
+    <polyline points="360,325 430,325"/>
+    <polyline points="680,325 750,325"/>
+    <polyline points="1000,325 1070,325"/>
+    <polyline points="1320,325 1390,325"/>
+    <polyline points="1515,400 1515,530 235,530 235,400"/>
+  </g>
+  <g fill="#98A2B3">
+    <polygon points="430,325 400,308 400,342"/>
+    <polygon points="750,325 720,308 720,342"/>
+    <polygon points="1070,325 1040,308 1040,342"/>
+    <polygon points="1390,325 1360,308 1360,342"/>
+    <polygon points="235,400 218,430 252,430"/>
+  </g>
+
+  <rect x="110" y="610" width="1530" height="250" rx="28" fill="#F5FBF8" stroke="#B7D9CE" stroke-width="3"/>
+  <text x="150" y="672" font-family="Noto Sans SC, Arial" font-size="34" font-weight="800" fill="#0F3D36">闭环里的三类角色视角</text>
+
+  <rect x="150" y="715" width="440" height="105" rx="18" fill="#FFFFFF" stroke="#D0D5DD" stroke-width="2"/>
+  <circle cx="190" cy="768" r="18" fill="#16A085"/>
+  <text x="222" y="758" font-family="Noto Sans SC, Arial" font-size="24" font-weight="800" fill="#101828">用户关心</text>
+  <text x="222" y="794" font-family="Noto Sans SC, Arial" font-size="21" fill="#53645F">入口是否顺、模型是否强、响应是否稳定</text>
+
+  <rect x="680" y="715" width="440" height="105" rx="18" fill="#FFFFFF" stroke="#D0D5DD" stroke-width="2"/>
+  <circle cx="720" cy="768" r="18" fill="#2563EB"/>
+  <text x="752" y="758" font-family="Noto Sans SC, Arial" font-size="24" font-weight="800" fill="#101828">部门领导关心</text>
+  <text x="752" y="794" font-family="Noto Sans SC, Arial" font-size="21" fill="#53645F">谁在用、花多少钱、是否产生真实产出</text>
+
+  <rect x="1210" y="715" width="390" height="105" rx="18" fill="#FFFFFF" stroke="#D0D5DD" stroke-width="2"/>
+  <circle cx="1250" cy="768" r="18" fill="#F59E0B"/>
+  <text x="1282" y="758" font-family="Noto Sans SC, Arial" font-size="24" font-weight="800" fill="#101828">运维关心</text>
+  <text x="1282" y="794" font-family="Noto Sans SC, Arial" font-size="21" fill="#53645F">额度、失败、限流、缓存、上游健康</text>
+
+  <rect x="110" y="920" width="1530" height="64" rx="32" fill="#0F3D36"/>
+  <text x="150" y="961" font-family="Noto Sans SC, Arial" font-size="24" font-weight="800" fill="#FFFFFF">关键表达：一键开通只是入口，真正的壁垒是把使用数据变成预算决策、路由优化、培训扩散和续费依据。</text>
+</svg>

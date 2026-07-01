@@ -1,5 +1,8 @@
 # ChatGPT Web → Codex/OpenAI API bridge (zerokey on 188)
 
+> **沉淀索引**（skill / 脚本 / 验证命令）：[zerokey-codex-artifacts.md](./zerokey-codex-artifacts.md)  
+> **Agent 全能力（规划中）**：[zerokey-codex-agent-bridge-plan.md](./zerokey-codex-agent-bridge-plan.md)
+
 将 ChatGPT **网页版聊天额度**桥接成 OpenAI 兼容 API，给 Codex / VS Code / 任意
 OpenAI 客户端使用。用于 Codex 自身的 5h/7d 额度耗尽、但网页对话仍可用时，借网页
 额度继续跑。
@@ -32,6 +35,7 @@ scripts/chatgpt-onboard/zerokey-codex/
     capture-manual.sh            # 需 OTP 的交互式重抓
     add-account.sh               # 新账号 onboarding（全自动 OTP + 812x 端口）
     docker-compose.account.yml   # 每账号 compose 模板
+    litellm-register-zerokey.py  # 198 幂等注册 zerokey 模型 + manifest 同步
     README.md                    # 运维手册（部署/客户端/刷新/排错）
 ```
 
@@ -102,6 +106,16 @@ curl -s -X POST "$BASE/v1/responses" -H "Authorization: Bearer $MK" \
   -d '{"model":"zerokey-gpt-5.5","input":"Say hi","stream":true}'
 ```
 
+> **Codex IDE（桌面 GUI）对自定义模型基本不可用**（调研 `openai/codex` issues，2026-06）：
+> - picker 被 `requiresAuth` 门控：自定义 provider 设 `requires_openai_auth=false` 时
+>   选择器 UI **直接不渲染**（#10867、#15138）。逼出来需 `requires_openai_auth=true` + 假 key。
+> - 对话模型列表来自 OpenAI 账号维度的 Statsig 远程 allowlist；自定义 provider 返回空，
+>   picker 无内容（#15138）。
+> - `model_catalog_json` 只接受 OpenAI 已知 slug，`zerokey-pool` 等自定义 ID 会被过滤丢弃
+>   （#10867、#19694）。
+> → **Codex 这边请用 CLI/TUI**（`codex -p zerokey-pool` / `-p zkagent`），名字任意原样透传，
+>   不受 GUI allowlist 限制。**Cursor 不受此限**，可自由添加自定义模型名。
+
 ### 直连 188 zerokey（仅旧版 Codex / 非 Codex 客户端）
 
 若客户端仍走 OpenAI **Chat Completions**（Cursor 部分路径、curl 测试），可直连 188：
@@ -115,8 +129,10 @@ wire_api = "chat"                            # 新版 Codex 已不支持此值
 
 `export ZK_KEY=raw` → `Authorization: Bearer raw`（raw 直通档）。
 
-**限制**：Codex agent 依赖 structured tool_calls；zerokey web 模型主要是纯文本 chat，
-适合问答/生成代码，完整 autonomous 改文件能力有限。
+**限制（当前）**：经 LiteLLM + `Bearer raw` 时，Codex Agent 的 `apply_patch` / `shell`
+工具链不完整（LiteLLM 桥会 drop 工具，raw 无 ToolCompiler）。对话与代码生成正常；
+**完整 Agent 改文件**需专用 `Responses ↔ ToolCompiler` 桥（见
+[zerokey-codex-agent-bridge-plan.md](./zerokey-codex-agent-bridge-plan.md)）。
 
 ## 接入 198 LiteLLM Pro（litellm-product）
 
@@ -144,12 +160,24 @@ NodePort 30402）。任意 LiteLLM 消费者（Cursor / Codex / claude-code 的 
 | `zerokey-gpt-5.5-thinking` | gpt-5-5-thinking |
 | `zerokey-gpt-5.5-pro` | gpt-5-5-pro |
 | `zerokey-o3` | o3 |
+| `zerokey-timothy-gpt-5.5` | gpt-5-5（`:8124`） |
+| `zerokey-timothy-gpt-5.5-thinking` | gpt-5-5-thinking |
+| `zerokey-timothy-gpt-5.5-pro` | gpt-5-5-pro |
+| `zerokey-timothy-o3` | o3 |
 
-改 cm 的安全姿势（cm 是 JSON-in-JSON，**别** `kubectl apply` 旧 manifest）：
-`kubectl get cm ... -o json` → 字符串拼接 yaml → `kubectl replace` →
-`kubectl rollout restart deployment/litellm-proxy -n litellm-product`（4 副本
-RollingUpdate 零中断）。198 上有幂等 helper `/tmp/zk-add-models.py`，会先备份到
-`~/zerokey-litellm-backups/`。
+**标准注册**（仓库 `ops/litellm-register-zerokey.py`，仅 touch zerokey 条目）：
+
+```bash
+./scripts/jms scp scripts/chatgpt-onboard/zerokey-codex/ops/litellm-register-zerokey.py \
+  AIYJY-litellm:/tmp/litellm-register-zerokey.py
+./scripts/jms ssh AIYJY-litellm 'python3 /tmp/litellm-register-zerokey.py --apply --sync-manifest'
+```
+
+手动改 cm（cm 是 JSON-in-JSON，**别** `kubectl apply` 旧 manifest）：
+`kubectl get cm ... -o json` → splice → `kubectl replace` →
+`kubectl rollout restart deployment/litellm-proxy -n litellm-product`。
+脚本会先备份 cm 到 `~/zerokey-litellm-backups/` 并同步
+`~/litellm-product-manifests/30-cm-litellm-config.yaml`。
 
 验证（NodePort 30402，master key 取自 `litellm-secrets`）：
 
@@ -174,6 +202,15 @@ per-user 访问：master key 已可用；普通 key 要调，需把 `zerokey-*` 
 |---|---|---|---|
 | kristine（默认） | 8123 | `zerokey-gpt-5.5` 等 | `~/zerokey-codex/` |
 | timothy | 8124 | `zerokey-timothy-gpt-5.5` 等 | `~/zerokey-codex-accounts/timothy/` |
+| zyq | 8125 | `zerokey-zyq-gpt-5.5` 等 | `~/zerokey-codex-accounts/zyq/` |
+| owp | 8126 | `zerokey-owp-gpt-5.5` 等 | `~/zerokey-codex-accounts/owp/` |
+| hgg | 8127 | `zerokey-hgg-gpt-5.5` 等 | `~/zerokey-codex-accounts/hgg/` |
+| dvo | 8128 | `zerokey-dvo-gpt-5.5` 等 | `~/zerokey-codex-accounts/dvo/` |
+
+**`zerokey-pool`（负载均衡）**：6 个账号同时挂在 litellm-dev（198 NodePort `30400`）的
+router 下，模型名 `zerokey-pool` 会在 6 个端口间轮询/故障转移，适合多人共享、提高单账号
+限流上限。本机 Codex 用 `codex -p zerokey-pool`（profile 见 `~/.codex/config.toml`，
+provider `carher_dev_k8s` → `http://10.68.13.198:30400/v1`）。
 
 新增账号（188 上，全自动 mail.com OTP + 首次 capture）：
 
@@ -212,6 +249,10 @@ curl -s localhost:8123/v1/models | head
 ```cron
 0 */6 * * * ~/zerokey-codex/ops/refresh.sh >/dev/null 2>&1
 0 */6 * * * ~/zerokey-codex-accounts/timothy/ops/refresh.sh >/dev/null 2>&1
+0 */6 * * * ~/zerokey-codex-accounts/zyq/ops/refresh.sh >/dev/null 2>&1
+0 */6 * * * ~/zerokey-codex-accounts/owp/ops/refresh.sh >/dev/null 2>&1
+0 */6 * * * ~/zerokey-codex-accounts/hgg/ops/refresh.sh >/dev/null 2>&1
+0 */6 * * * ~/zerokey-codex-accounts/dvo/ops/refresh.sh >/dev/null 2>&1
 ```
 
 需 OTP 时（`REFRESH_STALE` / 告警）：`ops/capture-manual.sh` 然后
@@ -265,7 +306,15 @@ curl -s localhost:8123/v1/models | head
   改后须 `docker compose up -d --build` rebuild。验证：经 198 非流式 → `PONG-NS`，
   流式 → token 增量正常。
 
-## 现状（截至 2026-06-17，全部完成）
+## 相关 Skill
+
+| Skill | 路径 |
+|-------|------|
+| zerokey 主 skill | `.codex/skills/chatgpt-web-to-codex-zerokey/SKILL.md` |
+| zerokey 主 skill（中文详版） | `.claude/skills/chatgpt-web-to-codex-zerokey/SKILL.md` |
+| 登录 / OTP / 新账号 | `.codex/skills/chatgpt-login-session/SKILL.md` |
+
+## 现状（截至 2026-06-18）
 
 - ✅ vscode 路径不变（`VSCODE_OK`，grammar promptLength 2925）。
 - ✅ raw 直通（`gpt-5-mini→42`、`PROD_OK`、流式 SSE 干净）。
@@ -276,7 +325,19 @@ curl -s localhost:8123/v1/models | head
 - ✅ cron 已装（每 6h）：kristine `~/zerokey-codex/ops/refresh.sh`；timothy `~/zerokey-codex-accounts/timothy/ops/refresh.sh`（与 quota-rebalance cron 并存）。
 - ✅ 接入 198 LiteLLM Pro：`zerokey-gpt-5.5 / -thinking / -pro / zerokey-o3` 四个模型，
   经 NodePort 30402 流式 + 非流式均验证通过；修复了 raw.js 的 stream 默认值（trap 5）。
-- ✅ 第二账号 **timothy**（`timothy_mossey871@mail.com`）：188:8124、`zerokey-codex-timothy`，
-  198 侧 `zerokey-timothy-*` 四模型已接入并验证推理。
+- ✅ 第二账号 **timothy**：188:8124、`zerokey-codex-timothy`；198 侧 `zerokey-timothy-*`
+  四模型；manifest 已 `--sync-manifest` 防 stale apply 回滚。
+- ✅ Codex `wire_api=responses` 经 198 `/v1/responses` → zerokey 对话路径验证通过。
+- ✅ **扩容到 6 账号（2026-06-21）**：新增 zyq:8125 / owp:8126 / hgg:8127 / dvo:8128，
+  注册进 **litellm-dev**（198 NodePort `30400`），并加 `zerokey-pool` router 负载均衡组。
+  Mac 直连 `30400/v1/responses` 实测 `zerokey-pool` 返回原生 Responses 对象（OK）。
+  本机 `~/.codex/config.toml` 已加 `[profiles.zerokey-pool]`（provider `carher_dev_k8s`）。
+- ✅ 新账号（zyq/owp/hgg/dvo）的 6h cron refresh 已在 188 安装（crontab 共 6 行，每账号一行）。
+- ✅ **promote 到 litellm-product（2026-06-21）**：`ops/litellm-register-zerokey.py` 已含
+  6 账号全量 + `zerokey-pool`（router 负载均衡 6 端口），`--apply --sync-manifest` 在 198
+  执行；rollout 4/4 健康；NodePort `30402` master key 实测 `zerokey-pool` chat/completions
+  返回 `PONG`、responses 返回原生对象。Cursor 用原 key + 原地址选模型 `zerokey-pool` 即可。
+- ⏳ 按需把 `zerokey-pool` 加进具体用户 key 的 `models` allowlist（master 已可用）。
+- ⏳ **Agent 全能力**：落地方案见 [zerokey-codex-agent-bridge-plan.md](./zerokey-codex-agent-bridge-plan.md)（未实现）。
 - 兜底：profile 若最终彻底过期，refresh 会失败并写 `state/REFRESH_STALE`（设了
   `ZK_ALERT_WEBHOOK` 则告警），届时跑 `ops/capture-manual.sh` + 喂一次 OTP 重新 seed。

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# chatgpt-acct-report.sh — one entrypoint for ChatGPT Pro upstream quota and downstream spend.
+# chatgpt-acct-report.sh — one entrypoint for ChatGPT Pro quota and downstream spend.
 #
 # Usage:
-#   ./scripts/chatgpt-acct-report.sh                         # upstream quota, retry 3
-#   ./scripts/chatgpt-acct-report.sh upstream --all-accounts
+#   ./scripts/chatgpt-acct-report.sh                         # upstream quota state
+#   ./scripts/chatgpt-acct-report.sh upstream
 #   ./scripts/chatgpt-acct-report.sh downstream 24h
 #   ./scripts/chatgpt-acct-report.sh all 7d --raw
 #
-# The underlying scripts are read-only probes. Keep this wrapper thin so fixes
-# stay in the source scripts instead of being duplicated here.
+# The underlying scripts are read-only probes. Upstream quota uses
+# chatgpt-acct-quota.sh, which reads quota-rebalance state for the current
+# 198 K3s litellm-product/chatgpt-acct-* pool. The historical usage probe is
+# debug-only and misses/misroutes current 198 accounts after the migration.
 
 set -euo pipefail
 
@@ -22,18 +24,18 @@ SKIP_ALIYUN=""
 
 usage() {
   cat <<'EOF'
-chatgpt-acct-report.sh — one entrypoint for ChatGPT Pro upstream quota and downstream spend.
+chatgpt-acct-report.sh — one entrypoint for ChatGPT Pro quota and downstream spend.
 
 Usage:
-  ./scripts/chatgpt-acct-report.sh                         # upstream quota, retry 3
-  ./scripts/chatgpt-acct-report.sh upstream --all-accounts
+  ./scripts/chatgpt-acct-report.sh                         # upstream quota state
+  ./scripts/chatgpt-acct-report.sh upstream
   ./scripts/chatgpt-acct-report.sh downstream 24h
   ./scripts/chatgpt-acct-report.sh all 7d --raw
 
 Modes:
-  upstream|usage|quota|capacity   ChatGPT Pro 5h/week quota waterline
+  upstream|usage|quota|capacity   ChatGPT Pro 198 K3s quota state
   downstream|spend|traffic        LiteLLM calls/spend/tokens
-  all|both|full                   Run both probes
+  all|both|full                   Run quota first, then downstream spend
 EOF
 }
 
@@ -59,10 +61,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-USAGE_SCRIPT="$SCRIPT_DIR/chatgpt-acct-usage.sh"
+QUOTA_SCRIPT="$SCRIPT_DIR/chatgpt-acct-quota.sh"
 SPEND_SCRIPT="$SCRIPT_DIR/chatgpt-acct-spend.sh"
 
-for f in "$USAGE_SCRIPT" "$SPEND_SCRIPT"; do
+for f in "$QUOTA_SCRIPT" "$SPEND_SCRIPT"; do
   if [[ ! -x "$f" ]]; then
     echo "missing executable script: $f" >&2
     exit 1
@@ -71,10 +73,7 @@ done
 
 run_upstream() {
   echo "### ChatGPT Pro upstream quota"
-  local args=(--retry "$RETRY" --timeout "$HTTP_TIMEOUT")
-  [[ -n "$USAGE_ALL" ]] && args+=("$USAGE_ALL")
-  [[ -n "$SKIP_ALIYUN" ]] && args+=("$SKIP_ALIYUN")
-  "$USAGE_SCRIPT" "${args[@]}"
+  "$QUOTA_SCRIPT"
 }
 
 run_downstream() {

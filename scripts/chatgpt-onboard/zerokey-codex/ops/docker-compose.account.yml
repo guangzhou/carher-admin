@@ -2,6 +2,11 @@
 # Uses the shared image built from ~/zerokey-codex/zerokey — do not rebuild per account.
 services:
   zerokey:
+    # zerokey is a lightweight node HTTP translation layer (idle ~30-46MiB).
+    # Cap memory so a runaway/large request can't eat the host; 128m leaves
+    # >2x headroom over observed serving peak. memswap_limit==mem_limit => no swap.
+    mem_limit: 128m
+    memswap_limit: 128m
     image: zerokey-codex:latest
     container_name: zerokey-codex-${ACCOUNT:-timothy}
     restart: always

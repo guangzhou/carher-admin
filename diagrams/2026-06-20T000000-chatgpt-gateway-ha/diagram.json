@@ -1,0 +1,1993 @@
+{
+  "code": 0,
+  "data": {
+    "to": "openapi",
+    "result": {
+      "nodes": [
+        {
+          "id": "o001:1",
+          "type": "composite_shape",
+          "x": 0,
+          "y": 0,
+          "width": 1680,
+          "height": 980,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_style": "none",
+            "fill_opacity": 100,
+            "fill_color": "#f5f1e8",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "rect"
+          }
+        },
+        {
+          "id": "o001:2",
+          "type": "composite_shape",
+          "x": 40.5,
+          "y": 34.5,
+          "width": 1599,
+          "height": 911,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#1f2d2a",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#fffaf1",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:1",
+          "type": "text_shape",
+          "x": 82,
+          "y": 55.999001264572144,
+          "width": 1127,
+          "height": 49.231998443603516,
+          "text": {
+            "text": "198 ChatGPT Pro 账号池：Active + Backup Gateway 架构",
+            "font_weight": "bold",
+            "font_size": 34,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#17211f",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:2",
+          "type": "text_shape",
+          "x": 84,
+          "y": 112.82300066947937,
+          "width": 871,
+          "height": 26.06399917602539,
+          "text": {
+            "text": "第一版不做多 shard：一个 active gateway 承载全量账号，一个 backup gateway 热备；需要时再拆分片",
+            "font_weight": "regular",
+            "font_size": 18,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#53615e",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:3",
+          "type": "composite_shape",
+          "x": 77,
+          "y": 175,
+          "width": 352,
+          "height": 652,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#2e7256",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#e8f4ef",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:3",
+          "type": "text_shape",
+          "x": 110,
+          "y": 192.58750015497208,
+          "width": 187,
+          "height": 36.19999980926514,
+          "text": {
+            "text": "调用与路由层",
+            "font_weight": "bold",
+            "font_size": 25,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1c503d",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:4",
+          "type": "composite_shape",
+          "x": 119,
+          "y": 263,
+          "width": 268,
+          "height": 92,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#2e7256",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#ffffff",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:4",
+          "type": "text_shape",
+          "x": 150,
+          "y": 280.82300066947937,
+          "width": 208,
+          "height": 26.06399917602539,
+          "text": {
+            "text": "Cursor / Codex Key",
+            "font_weight": "bold",
+            "font_size": 18,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1c503d",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:5",
+          "type": "text_shape",
+          "x": 150,
+          "y": 312.3525005578995,
+          "width": 143,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "用户模型名保持不变",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#5a6762",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:5",
+          "type": "composite_shape",
+          "x": 119,
+          "y": 401,
+          "width": 268,
+          "height": 126,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#2e7256",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#ffffff",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:6",
+          "type": "text_shape",
+          "x": 150,
+          "y": 418.47000113129616,
+          "width": 227,
+          "height": 28.959998607635498,
+          "text": {
+            "text": "198 LiteLLM 主代理",
+            "font_weight": "bold",
+            "font_size": 20,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1c503d",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:7",
+          "type": "text_shape",
+          "x": 150,
+          "y": 456.3525005578995,
+          "width": 194,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "key / allowlist / spend logs",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#5a6762",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:8",
+          "type": "text_shape",
+          "x": 150,
+          "y": 482.3525005578995,
+          "width": 208,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "alias / fallback / audit 不重写",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#5a6762",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:6",
+          "type": "composite_shape",
+          "x": 119,
+          "y": 579,
+          "width": 268,
+          "height": 106,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#b6801d",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#fff3d4",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:9",
+          "type": "text_shape",
+          "x": 150,
+          "y": 596.4700011312962,
+          "width": 102,
+          "height": 28.959998607635498,
+          "text": {
+            "text": "回滚保护",
+            "font_weight": "bold",
+            "font_size": 20,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#744b05",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:10",
+          "type": "text_shape",
+          "x": 150,
+          "y": 634.3525005578995,
+          "width": 198,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "api_base 可切回原账号 Pod",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#645a49",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:7",
+          "type": "composite_shape",
+          "x": 499,
+          "y": 175,
+          "width": 562,
+          "height": 652,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#315d9d",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#edf4ff",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:11",
+          "type": "text_shape",
+          "x": 532,
+          "y": 192.58750015497208,
+          "width": 235,
+          "height": 36.19999980926514,
+          "text": {
+            "text": "Gateway 运行时",
+            "font_weight": "bold",
+            "font_size": 25,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#244a7d",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:12",
+          "type": "text_shape",
+          "x": 532,
+          "y": 233.17600059509277,
+          "width": 439,
+          "height": 23.167999267578125,
+          "text": {
+            "text": "核心：少量 Pod 管全部账号，避免几十个常驻 LiteLLM Pod",
+            "font_weight": "regular",
+            "font_size": 16,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#56636e",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:8",
+          "type": "composite_shape",
+          "x": 568.5,
+          "y": 298.5,
+          "width": 423,
+          "height": 163,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#315d9d",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#ffffff",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:13",
+          "type": "text_shape",
+          "x": 612,
+          "y": 311.7640001177788,
+          "width": 355,
+          "height": 34.751999855041504,
+          "text": {
+            "text": "chatgpt-pool-gateway-a",
+            "font_weight": "bold",
+            "font_size": 24,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#244a7d",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:14",
+          "type": "text_shape",
+          "x": 612,
+          "y": 350.82300066947937,
+          "width": 279,
+          "height": 26.06399917602539,
+          "text": {
+            "text": "ACTIVE：默认承接全部流量",
+            "font_weight": "bold",
+            "font_size": 18,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#244a7d",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:15",
+          "type": "text_shape",
+          "x": 612,
+          "y": 386.3525005578995,
+          "width": 278,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "内存状态表：healthy / cooling / offline",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#59656f",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:16",
+          "type": "text_shape",
+          "x": 612,
+          "y": 412.3525005578995,
+          "width": 295,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "按 quota、inflight、recent failure 选账号",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#59656f",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:9",
+          "type": "composite_shape",
+          "x": 569,
+          "y": 525,
+          "width": 422,
+          "height": 152,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#6f7f91",
+            "border_color_type": 1,
+            "border_style": "dash",
+            "fill_opacity": 100,
+            "fill_color": "#ffffff",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:17",
+          "type": "text_shape",
+          "x": 612,
+          "y": 536.7640001177788,
+          "width": 357,
+          "height": 34.751999855041504,
+          "text": {
+            "text": "chatgpt-pool-gateway-b",
+            "font_weight": "bold",
+            "font_size": 24,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#425064",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:18",
+          "type": "text_shape",
+          "x": 612,
+          "y": 574.8230006694794,
+          "width": 341,
+          "height": 26.06399917602539,
+          "text": {
+            "text": "BACKUP：低权重热备或 standby",
+            "font_weight": "bold",
+            "font_size": 18,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#425064",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:19",
+          "type": "text_shape",
+          "x": 612,
+          "y": 610.3525005578995,
+          "width": 274,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "挂同一批账号 auth，只在主故障时接管",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#59656f",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:20",
+          "type": "text_shape",
+          "x": 612,
+          "y": 636.3525005578995,
+          "width": 325,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "可通过 LiteLLM weight 或 health failover 控制",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#59656f",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:10",
+          "type": "composite_shape",
+          "x": 607,
+          "y": 723,
+          "width": 346,
+          "height": 68,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#315d9d",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#dce9ff",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:21",
+          "type": "text_shape",
+          "x": 638,
+          "y": 729.8230006694794,
+          "width": 313,
+          "height": 26.06399917602539,
+          "text": {
+            "text": "统一 OpenAI-compatible 接口",
+            "font_weight": "bold",
+            "font_size": 18,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#244a7d",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:22",
+          "type": "text_shape",
+          "x": 638,
+          "y": 759.5290005207062,
+          "width": 250,
+          "height": 20.27199935913086,
+          "text": {
+            "text": "/v1/responses /v1/chat/completions",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#53615e",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:11",
+          "type": "composite_shape",
+          "x": 1129,
+          "y": 175,
+          "width": 452,
+          "height": 652,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#b8542a",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#fff0e7",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:23",
+          "type": "text_shape",
+          "x": 1162,
+          "y": 192.58750015497208,
+          "width": 218,
+          "height": 36.19999980926514,
+          "text": {
+            "text": "账号状态与依赖",
+            "font_weight": "bold",
+            "font_size": 25,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#813511",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:12",
+          "type": "composite_shape",
+          "x": 1185,
+          "y": 269,
+          "width": 338,
+          "height": 114,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#b8542a",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#ffffff",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:24",
+          "type": "text_shape",
+          "x": 1216,
+          "y": 283.47000113129616,
+          "width": 208,
+          "height": 28.959998607635498,
+          "text": {
+            "text": "Account Registry",
+            "font_weight": "bold",
+            "font_size": 20,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#813511",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:25",
+          "type": "text_shape",
+          "x": 1216,
+          "y": 320.3525005578995,
+          "width": 185,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "acct-1..acct-N 全量注册表",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#68594f",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:26",
+          "type": "text_shape",
+          "x": 1216,
+          "y": 344.3525005578995,
+          "width": 268,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "权重、状态、reset_at、owner 元数据",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#68594f",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:13",
+          "type": "composite_shape",
+          "x": 1185,
+          "y": 423,
+          "width": 338,
+          "height": 114,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#b8542a",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#ffffff",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:27",
+          "type": "text_shape",
+          "x": 1216,
+          "y": 437.47000113129616,
+          "width": 212,
+          "height": 28.959998607635498,
+          "text": {
+            "text": "Auth PVC / Secret",
+            "font_weight": "bold",
+            "font_size": 20,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#813511",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:28",
+          "type": "text_shape",
+          "x": 1216,
+          "y": 474.3525005578995,
+          "width": 153,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "每账号独立 auth.json",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#68594f",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:29",
+          "type": "text_shape",
+          "x": 1216,
+          "y": 498.3525005578995,
+          "width": 220,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "active 与 backup 均可挂载读取",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#68594f",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:14",
+          "type": "composite_shape",
+          "x": 1185,
+          "y": 577,
+          "width": 338,
+          "height": 114,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#b8542a",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#ffffff",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:30",
+          "type": "text_shape",
+          "x": 1216,
+          "y": 591.4700011312962,
+          "width": 246,
+          "height": 28.959998607635498,
+          "text": {
+            "text": "Quota / Health Loop",
+            "font_weight": "bold",
+            "font_size": 20,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#813511",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:31",
+          "type": "text_shape",
+          "x": 1216,
+          "y": 628.3525005578995,
+          "width": 167,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "/codex/usage 低频探测",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#68594f",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:32",
+          "type": "text_shape",
+          "x": 1216,
+          "y": 652.3525005578995,
+          "width": 242,
+          "height": 21.719999313354492,
+          "text": {
+            "text": "401 标记，429 冷却，reset 后恢复",
+            "font_weight": "regular",
+            "font_size": 15,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#68594f",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:15",
+          "type": "composite_shape",
+          "x": 1185,
+          "y": 731,
+          "width": 338,
+          "height": 70,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#1f2329",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#b8542a",
+            "border_color_type": 1,
+            "border_style": "solid",
+            "fill_opacity": 100,
+            "fill_color": "#ffffff",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:33",
+          "type": "text_shape",
+          "x": 1216,
+          "y": 748.4700011312962,
+          "width": 315,
+          "height": 28.959998607635498,
+          "text": {
+            "text": "ChatGPT / Codex Backend",
+            "font_weight": "bold",
+            "font_size": 20,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#813511",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "c001:1",
+          "type": "connector",
+          "x": 386,
+          "y": 464,
+          "width": 114,
+          "height": 0,
+          "style": {
+            "border_opacity": 100,
+            "border_width": "medium",
+            "border_color": "#1f2d2a",
+            "border_color_type": 1,
+            "border_style": "solid"
+          },
+          "connector": {
+            "start": {
+              "position": {
+                "x": 386,
+                "y": 464
+              },
+              "arrow_style": "none"
+            },
+            "end": {
+              "position": {
+                "x": 500,
+                "y": 464
+              },
+              "arrow_style": "none"
+            },
+            "shape": "straight",
+            "turning_points": [],
+            "caption_auto_direction": false,
+            "specified_coordinate": true
+          }
+        },
+        {
+          "id": "d001:1",
+          "type": "svg",
+          "x": 481.5,
+          "y": 452.5,
+          "width": 21,
+          "height": 23,
+          "style": {
+            "border_style": "none"
+          },
+          "svg": {
+            "svg_code": "<svg viewBox=\"481.5 452.5 21 23\" width=\"21\" height=\"23\" xmlns=\"http://www.w3.org/2000/svg\"><polygon points=\"500,464 484,455 484,473\" fill=\"#1F2D2A\" /></svg>"
+          }
+        },
+        {
+          "id": "c001:2",
+          "type": "connector",
+          "x": 386,
+          "y": 494,
+          "width": 184,
+          "height": 106,
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#6f7f91",
+            "border_color_type": 1,
+            "border_style": "dash"
+          },
+          "connector": {
+            "start": {
+              "position": {
+                "x": 386,
+                "y": 494
+              },
+              "arrow_style": "none"
+            },
+            "end": {
+              "position": {
+                "x": 570,
+                "y": 600
+              },
+              "arrow_style": "none"
+            },
+            "shape": "right_angled_polyline",
+            "turning_points": [
+              {
+                "x": 150,
+                "y": 0
+              },
+              {
+                "x": 150,
+                "y": 106
+              }
+            ],
+            "caption_auto_direction": false,
+            "specified_coordinate": true
+          }
+        },
+        {
+          "id": "d001:2",
+          "type": "svg",
+          "x": 551.5,
+          "y": 588.5,
+          "width": 21,
+          "height": 23,
+          "style": {
+            "border_style": "none"
+          },
+          "svg": {
+            "svg_code": "<svg viewBox=\"551.5 588.5 21 23\" width=\"21\" height=\"23\" xmlns=\"http://www.w3.org/2000/svg\"><polygon points=\"570,600 554,591 554,609\" fill=\"#6F7F91\" /></svg>"
+          }
+        },
+        {
+          "id": "c001:3",
+          "type": "connector",
+          "x": 990,
+          "y": 380,
+          "width": 140,
+          "height": 0,
+          "style": {
+            "border_opacity": 100,
+            "border_width": "medium",
+            "border_color": "#1f2d2a",
+            "border_color_type": 1,
+            "border_style": "solid"
+          },
+          "connector": {
+            "start": {
+              "position": {
+                "x": 990,
+                "y": 380
+              },
+              "arrow_style": "none"
+            },
+            "end": {
+              "position": {
+                "x": 1130,
+                "y": 380
+              },
+              "arrow_style": "none"
+            },
+            "shape": "straight",
+            "turning_points": [],
+            "caption_auto_direction": false,
+            "specified_coordinate": true
+          }
+        },
+        {
+          "id": "d001:3",
+          "type": "svg",
+          "x": 1111.5,
+          "y": 368.5,
+          "width": 21,
+          "height": 23,
+          "style": {
+            "border_style": "none"
+          },
+          "svg": {
+            "svg_code": "<svg viewBox=\"1111.5 368.5 21 23\" width=\"21\" height=\"23\" xmlns=\"http://www.w3.org/2000/svg\"><polygon points=\"1130,380 1114,371 1114,389\" fill=\"#1F2D2A\" /></svg>"
+          }
+        },
+        {
+          "id": "c001:4",
+          "type": "connector",
+          "x": 990,
+          "y": 602,
+          "width": 140,
+          "height": 0,
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#6f7f91",
+            "border_color_type": 1,
+            "border_style": "dash"
+          },
+          "connector": {
+            "start": {
+              "position": {
+                "x": 990,
+                "y": 602
+              },
+              "arrow_style": "none"
+            },
+            "end": {
+              "position": {
+                "x": 1130,
+                "y": 602
+              },
+              "arrow_style": "none"
+            },
+            "shape": "straight",
+            "turning_points": [],
+            "caption_auto_direction": false,
+            "specified_coordinate": true
+          }
+        },
+        {
+          "id": "d001:4",
+          "type": "svg",
+          "x": 1111.5,
+          "y": 590.5,
+          "width": 21,
+          "height": 23,
+          "style": {
+            "border_style": "none"
+          },
+          "svg": {
+            "svg_code": "<svg viewBox=\"1111.5 590.5 21 23\" width=\"21\" height=\"23\" xmlns=\"http://www.w3.org/2000/svg\"><polygon points=\"1130,602 1114,593 1114,611\" fill=\"#6F7F91\" /></svg>"
+          }
+        },
+        {
+          "id": "c001:5",
+          "type": "connector",
+          "x": 1354,
+          "y": 382,
+          "width": 0,
+          "height": 42,
+          "style": {
+            "border_opacity": 100,
+            "border_width": "medium",
+            "border_color": "#b8542a",
+            "border_color_type": 1,
+            "border_style": "solid"
+          },
+          "connector": {
+            "start": {
+              "position": {
+                "x": 1354,
+                "y": 382
+              },
+              "arrow_style": "none"
+            },
+            "end": {
+              "position": {
+                "x": 1354,
+                "y": 424
+              },
+              "arrow_style": "none"
+            },
+            "shape": "straight",
+            "turning_points": [],
+            "caption_auto_direction": false,
+            "specified_coordinate": true
+          }
+        },
+        {
+          "id": "d001:5",
+          "type": "svg",
+          "x": 1342.5,
+          "y": 405.5,
+          "width": 23,
+          "height": 21,
+          "style": {
+            "border_style": "none"
+          },
+          "svg": {
+            "svg_code": "<svg viewBox=\"1342.5 405.5 23 21\" width=\"23\" height=\"21\" xmlns=\"http://www.w3.org/2000/svg\"><polygon points=\"1354,424 1345,408 1363,408\" fill=\"#B8542A\" /></svg>"
+          }
+        },
+        {
+          "id": "c001:6",
+          "type": "connector",
+          "x": 1354,
+          "y": 536,
+          "width": 0,
+          "height": 42,
+          "style": {
+            "border_opacity": 100,
+            "border_width": "medium",
+            "border_color": "#b8542a",
+            "border_color_type": 1,
+            "border_style": "solid"
+          },
+          "connector": {
+            "start": {
+              "position": {
+                "x": 1354,
+                "y": 536
+              },
+              "arrow_style": "none"
+            },
+            "end": {
+              "position": {
+                "x": 1354,
+                "y": 578
+              },
+              "arrow_style": "none"
+            },
+            "shape": "straight",
+            "turning_points": [],
+            "caption_auto_direction": false,
+            "specified_coordinate": true
+          }
+        },
+        {
+          "id": "d001:6",
+          "type": "svg",
+          "x": 1342.5,
+          "y": 559.5,
+          "width": 23,
+          "height": 21,
+          "style": {
+            "border_style": "none"
+          },
+          "svg": {
+            "svg_code": "<svg viewBox=\"1342.5 559.5 23 21\" width=\"23\" height=\"21\" xmlns=\"http://www.w3.org/2000/svg\"><polygon points=\"1354,578 1345,562 1363,562\" fill=\"#B8542A\" /></svg>"
+          }
+        },
+        {
+          "id": "c001:7",
+          "type": "connector",
+          "x": 1354,
+          "y": 690,
+          "width": 0,
+          "height": 42,
+          "style": {
+            "border_opacity": 100,
+            "border_width": "medium",
+            "border_color": "#b8542a",
+            "border_color_type": 1,
+            "border_style": "solid"
+          },
+          "connector": {
+            "start": {
+              "position": {
+                "x": 1354,
+                "y": 690
+              },
+              "arrow_style": "none"
+            },
+            "end": {
+              "position": {
+                "x": 1354,
+                "y": 732
+              },
+              "arrow_style": "none"
+            },
+            "shape": "straight",
+            "turning_points": [],
+            "caption_auto_direction": false,
+            "specified_coordinate": true
+          }
+        },
+        {
+          "id": "d001:7",
+          "type": "svg",
+          "x": 1342.5,
+          "y": 713.5,
+          "width": 23,
+          "height": 21,
+          "style": {
+            "border_style": "none"
+          },
+          "svg": {
+            "svg_code": "<svg viewBox=\"1342.5 713.5 23 21\" width=\"23\" height=\"21\" xmlns=\"http://www.w3.org/2000/svg\"><polygon points=\"1354,732 1345,716 1363,716\" fill=\"#B8542A\" /></svg>"
+          }
+        },
+        {
+          "id": "c001:8",
+          "type": "connector",
+          "x": 253,
+          "y": 526,
+          "width": 355,
+          "height": 224,
+          "style": {
+            "border_opacity": 100,
+            "border_width": "narrow",
+            "border_color": "#2e7256",
+            "border_color_type": 1,
+            "border_style": "dash"
+          },
+          "connector": {
+            "start": {
+              "position": {
+                "x": 253,
+                "y": 526
+              },
+              "arrow_style": "none"
+            },
+            "end": {
+              "position": {
+                "x": 608,
+                "y": 750
+              },
+              "arrow_style": "none"
+            },
+            "shape": "right_angled_polyline",
+            "turning_points": [
+              {
+                "x": 0,
+                "y": 224
+              }
+            ],
+            "caption_auto_direction": false,
+            "specified_coordinate": true
+          }
+        },
+        {
+          "id": "d001:8",
+          "type": "svg",
+          "x": 589.5,
+          "y": 738.5,
+          "width": 21,
+          "height": 23,
+          "style": {
+            "border_style": "none"
+          },
+          "svg": {
+            "svg_code": "<svg viewBox=\"589.5 738.5 21 23\" width=\"21\" height=\"23\" xmlns=\"http://www.w3.org/2000/svg\"><polygon points=\"608,750 592,741 592,759\" fill=\"#2E7256\" /></svg>"
+          }
+        },
+        {
+          "id": "a001:34",
+          "type": "text_shape",
+          "x": 286,
+          "y": 724.7055000960827,
+          "width": 108,
+          "height": 18.823999881744385,
+          "text": {
+            "text": "fallback 仍在 198",
+            "font_weight": "regular",
+            "font_size": 13,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#2e7256",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:16",
+          "type": "composite_shape",
+          "x": 118,
+          "y": 852,
+          "width": 400,
+          "height": 68,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#ffffff",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_style": "none",
+            "fill_opacity": 100,
+            "fill_color": "#1f2d2a",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:35",
+          "type": "text_shape",
+          "x": 142,
+          "y": 862.1760005950928,
+          "width": 247,
+          "height": 23.167999267578125,
+          "text": {
+            "text": "第一版：2 个 gateway Pod",
+            "font_weight": "bold",
+            "font_size": 16,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#ffffff",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:36",
+          "type": "text_shape",
+          "x": 142,
+          "y": 888.1760005950928,
+          "width": 189,
+          "height": 23.167999267578125,
+          "text": {
+            "text": "替代几十个 acct Pod",
+            "font_weight": "bold",
+            "font_size": 16,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#ffffff",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:17",
+          "type": "composite_shape",
+          "x": 548,
+          "y": 852,
+          "width": 430,
+          "height": 68,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#ffffff",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_style": "none",
+            "fill_opacity": 100,
+            "fill_color": "#315d9d",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:37",
+          "type": "text_shape",
+          "x": 572,
+          "y": 862.1760005950928,
+          "width": 309,
+          "height": 23.167999267578125,
+          "text": {
+            "text": "收益：简单、集中、可快速 canary",
+            "font_weight": "bold",
+            "font_size": 16,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#ffffff",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:38",
+          "type": "text_shape",
+          "x": 572,
+          "y": 888.1760005950928,
+          "width": 302,
+          "height": 23.167999267578125,
+          "text": {
+            "text": "风险：active 是账号池运行时单点",
+            "font_weight": "bold",
+            "font_size": 16,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#ffffff",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "o001:18",
+          "type": "composite_shape",
+          "x": 1008,
+          "y": 852,
+          "width": 520,
+          "height": 68,
+          "text": {
+            "text": "",
+            "font_weight": "regular",
+            "font_size": 14,
+            "horizontal_align": "center",
+            "vertical_align": "mid",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#ffffff",
+            "text_color_type": 0,
+            "text_background_color_type": 0,
+            "theme_text_color_code": -1,
+            "theme_text_background_color_code": -1
+          },
+          "style": {
+            "border_style": "none",
+            "fill_opacity": 100,
+            "fill_color": "#b8542a",
+            "fill_color_type": 1
+          },
+          "composite_shape": {
+            "type": "round_rect"
+          }
+        },
+        {
+          "id": "a001:39",
+          "type": "text_shape",
+          "x": 1032,
+          "y": 862.1760005950928,
+          "width": 481,
+          "height": 23.167999267578125,
+          "text": {
+            "text": "后续触发拆 shard：QPS、内存、故障域或 token 半径",
+            "font_weight": "bold",
+            "font_size": 16,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#ffffff",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        },
+        {
+          "id": "a001:40",
+          "type": "text_shape",
+          "x": 1032,
+          "y": 888.1760005950928,
+          "width": 219,
+          "height": 23.167999267578125,
+          "text": {
+            "text": "不提前引入多分片复杂度",
+            "font_weight": "bold",
+            "font_size": 16,
+            "horizontal_align": "left",
+            "vertical_align": "top",
+            "line_through": false,
+            "underline": false,
+            "italic": false,
+            "angle": 0,
+            "text_color": "#ffffff",
+            "text_color_type": 1,
+            "text_background_color_type": 0,
+            "theme_text_background_color_code": -1
+          }
+        }
+      ]
+    },
+    "metadata": {
+      "width": 0,
+      "height": 0,
+      "nodeCount": 74,
+      "connectorCount": 8
+    }
+  },
+  "error": ""
+}

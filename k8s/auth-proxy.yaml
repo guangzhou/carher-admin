@@ -32,13 +32,13 @@ data:
       proxy_set_header X-Forwarded-Proto https;
       proxy_http_version 1.1;
 
-      # Auth domains: s{prefix}-u{id}-auth.carher.net -> carher-{id}-svc:18891
+      # Auth domains: s{prefix}-u{id}-auth.carher.net -> OpenClaw gateway.
       server {
         listen 80;
         server_name ~^s\d+-u(?<uid>\d+)-auth\.carher\.net$;
 
         location / {
-          set $backend "carher-${uid}-svc.carher.svc.cluster.local:18891";
+          set $backend "carher-${uid}-svc.carher.svc.cluster.local:18789";
           proxy_pass http://$backend;
         }
 
@@ -48,13 +48,13 @@ data:
         }
       }
 
-      # Frontend domains: s{prefix}-u{id}-fe.carher.net -> carher-{id}-svc:8000
+      # Frontend domains: s{prefix}-u{id}-fe.carher.net -> OpenClaw gateway.
       server {
         listen 80;
         server_name ~^s\d+-u(?<uid>\d+)-fe\.carher\.net$;
 
         location / {
-          set $backend "carher-${uid}-svc.carher.svc.cluster.local:8000";
+          set $backend "carher-${uid}-svc.carher.svc.cluster.local:18789";
           proxy_pass http://$backend;
         }
 

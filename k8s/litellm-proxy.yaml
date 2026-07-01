@@ -1176,30 +1176,6 @@ data:
       - model_name: chatgpt-gpt-5.5
         litellm_params:
           model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-8.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-8/chatgpt-gpt-5.5}
-      - model_name: chatgpt-gpt-5.5
-        litellm_params:
-          model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-9.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-9/chatgpt-gpt-5.5}
-      - model_name: chatgpt-gpt-5.5
-        litellm_params:
-          model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-10.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-10/chatgpt-gpt-5.5}
-      - model_name: chatgpt-gpt-5.5
-        litellm_params:
-          model: openai/chatgpt-gpt-5.5
           api_base: http://chatgpt-acct-11.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
           input_cost_per_token: 0.000001
@@ -1208,61 +1184,85 @@ data:
       - model_name: chatgpt-gpt-5.5
         litellm_params:
           model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-18.carher.svc:4000
+          api_base: http://chatgpt-acct-69.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-18/chatgpt-gpt-5.5}
+          input_cost_per_token: 2.5e-06
+          output_cost_per_token: 1.5e-05
+        model_info: {mode: responses, id: chatgpt-acct-69/chatgpt-gpt-5.5}
       - model_name: chatgpt-gpt-5.5
         litellm_params:
           model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_base: http://chatgpt-acct-70.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-19/chatgpt-gpt-5.5}
+          input_cost_per_token: 2.5e-06
+          output_cost_per_token: 1.5e-05
+        model_info: {mode: responses, id: chatgpt-acct-70/chatgpt-gpt-5.5}
       - model_name: chatgpt-gpt-5.5
         litellm_params:
           model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_base: http://chatgpt-acct-71.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-20/chatgpt-gpt-5.5}
+          input_cost_per_token: 2.5e-06
+          output_cost_per_token: 1.5e-05
+        model_info: {mode: responses, id: chatgpt-acct-71/chatgpt-gpt-5.5}
       - model_name: chatgpt-gpt-5.5
         litellm_params:
           model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-21.carher.svc:4000
+          api_base: http://chatgpt-acct-72.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-21/chatgpt-gpt-5.5}
+          input_cost_per_token: 2.5e-06
+          output_cost_per_token: 1.5e-05
+        model_info: {mode: responses, id: chatgpt-acct-72/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-73.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 2.5e-06
+          output_cost_per_token: 1.5e-05
+        model_info: {mode: responses, id: chatgpt-acct-73/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-74.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 2.5e-06
+          output_cost_per_token: 1.5e-05
+        model_info: {mode: responses, id: chatgpt-acct-74/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-75.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 2.5e-06
+          output_cost_per_token: 1.5e-05
+        model_info: {mode: responses, id: chatgpt-acct-75/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-76.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 2.5e-06
+          output_cost_per_token: 1.5e-05
+        model_info: {mode: responses, id: chatgpt-acct-76/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-77.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 2.5e-06
+          output_cost_per_token: 1.5e-05
+        model_info: {mode: responses, id: chatgpt-acct-77/chatgpt-gpt-5.5}
+      - model_name: chatgpt-gpt-5.5
+        litellm_params:
+          model: openai/chatgpt-gpt-5.5
+          api_base: http://chatgpt-acct-78.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 2.5e-06
+          output_cost_per_token: 1.5e-05
+        model_info: {mode: responses, id: chatgpt-acct-78/chatgpt-gpt-5.5}
 
       # chatgpt-pool-gpt-5.5 (8 healthy deployments)
-      - model_name: chatgpt-pool-gpt-5.5
-        litellm_params:
-          model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-8.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-8/chatgpt-pool-gpt-5.5}
-      - model_name: chatgpt-pool-gpt-5.5
-        litellm_params:
-          model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-9.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-9/chatgpt-pool-gpt-5.5}
-      - model_name: chatgpt-pool-gpt-5.5
-        litellm_params:
-          model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-10.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-10/chatgpt-pool-gpt-5.5}
       - model_name: chatgpt-pool-gpt-5.5
         litellm_params:
           model: openai/chatgpt-gpt-5.5
@@ -1271,64 +1271,6 @@ data:
           input_cost_per_token: 0.000001
           output_cost_per_token: 0.000006
         model_info: {mode: responses, id: chatgpt-acct-11/chatgpt-pool-gpt-5.5}
-      - model_name: chatgpt-pool-gpt-5.5
-        litellm_params:
-          model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-18.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-18/chatgpt-pool-gpt-5.5}
-      - model_name: chatgpt-pool-gpt-5.5
-        litellm_params:
-          model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-19.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-19/chatgpt-pool-gpt-5.5}
-      - model_name: chatgpt-pool-gpt-5.5
-        litellm_params:
-          model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-20.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-20/chatgpt-pool-gpt-5.5}
-      - model_name: chatgpt-pool-gpt-5.5
-        litellm_params:
-          model: openai/chatgpt-gpt-5.5
-          api_base: http://chatgpt-acct-21.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.000001
-          output_cost_per_token: 0.000006
-        model_info: {mode: responses, id: chatgpt-acct-21/chatgpt-pool-gpt-5.5}
-
-      # chatgpt-gpt-5.4 (8 healthy deployments)
-      - model_name: chatgpt-gpt-5.4
-        litellm_params:
-          model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-8.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-8/gpt-5.4}
-      - model_name: chatgpt-gpt-5.4
-        litellm_params:
-          model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-9.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-9/gpt-5.4}
-      - model_name: chatgpt-gpt-5.4
-        litellm_params:
-          model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-10.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-10/gpt-5.4}
       - model_name: chatgpt-gpt-5.4
         litellm_params:
           model: openai/gpt-5.4
@@ -1337,64 +1279,6 @@ data:
           input_cost_per_token: 0.0000005
           output_cost_per_token: 0.000003
         model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.4}
-      - model_name: chatgpt-gpt-5.4
-        litellm_params:
-          model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-18.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-18/gpt-5.4}
-      - model_name: chatgpt-gpt-5.4
-        litellm_params:
-          model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-19.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.4}
-      - model_name: chatgpt-gpt-5.4
-        litellm_params:
-          model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-20.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.4}
-      - model_name: chatgpt-gpt-5.4
-        litellm_params:
-          model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-21.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-21/gpt-5.4}
-
-      # gpt-5.4 (7 healthy deployments)
-      - model_name: gpt-5.4
-        litellm_params:
-          model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-8.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-8/gpt-5.4}
-      - model_name: gpt-5.4
-        litellm_params:
-          model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-9.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-9/gpt-5.4}
-      - model_name: gpt-5.4
-        litellm_params:
-          model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-10.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-10/gpt-5.4}
       - model_name: gpt-5.4
         litellm_params:
           model: openai/gpt-5.4
@@ -1406,119 +1290,93 @@ data:
       - model_name: gpt-5.4
         litellm_params:
           model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-18.carher.svc:4000
+          api_base: http://chatgpt-acct-69.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-18/gpt-5.4}
+          input_cost_per_token: 1.25e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-69/gpt-5.4}
       - model_name: gpt-5.4
         litellm_params:
           model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_base: http://chatgpt-acct-70.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.4}
+          input_cost_per_token: 1.25e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-70/gpt-5.4}
       - model_name: gpt-5.4
         litellm_params:
           model: openai/gpt-5.4
-          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_base: http://chatgpt-acct-71.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000005
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.4}
+          input_cost_per_token: 1.25e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-71/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-72.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.25e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-72/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-73.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.25e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-73/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-74.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.25e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-74/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-75.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.25e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-75/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-76.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.25e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-76/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-77.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.25e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-77/gpt-5.4}
+      - model_name: gpt-5.4
+        litellm_params:
+          model: openai/gpt-5.4
+          api_base: http://chatgpt-acct-78.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.25e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-78/gpt-5.4}
 
       # chatgpt-gpt-5.3-codex (8 healthy deployments)
       - model_name: chatgpt-gpt-5.3-codex
         litellm_params:
           model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-8.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-8/gpt-5.3-codex}
-      - model_name: chatgpt-gpt-5.3-codex
-        litellm_params:
-          model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-9.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-9/gpt-5.3-codex}
-      - model_name: chatgpt-gpt-5.3-codex
-        litellm_params:
-          model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-10.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-10/gpt-5.3-codex}
-      - model_name: chatgpt-gpt-5.3-codex
-        litellm_params:
-          model: openai/gpt-5.3-codex
           api_base: http://chatgpt-acct-11.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
           input_cost_per_token: 0.0000006
           output_cost_per_token: 0.000003
         model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.3-codex}
-      - model_name: chatgpt-gpt-5.3-codex
-        litellm_params:
-          model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-18.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-18/gpt-5.3-codex}
-      - model_name: chatgpt-gpt-5.3-codex
-        litellm_params:
-          model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-19.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.3-codex}
-      - model_name: chatgpt-gpt-5.3-codex
-        litellm_params:
-          model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-20.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.3-codex}
-      - model_name: chatgpt-gpt-5.3-codex
-        litellm_params:
-          model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-21.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-21/gpt-5.3-codex}
-
-      # gpt-5.3-codex (7 healthy deployments)
-      - model_name: gpt-5.3-codex
-        litellm_params:
-          model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-8.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-8/gpt-5.3-codex}
-      - model_name: gpt-5.3-codex
-        litellm_params:
-          model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-9.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-9/gpt-5.3-codex}
-      - model_name: gpt-5.3-codex
-        litellm_params:
-          model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-10.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-10/gpt-5.3-codex}
       - model_name: gpt-5.3-codex
         litellm_params:
           model: openai/gpt-5.3-codex
@@ -1530,119 +1388,93 @@ data:
       - model_name: gpt-5.3-codex
         litellm_params:
           model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-18.carher.svc:4000
+          api_base: http://chatgpt-acct-69.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-18/gpt-5.3-codex}
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-69/gpt-5.3-codex}
       - model_name: gpt-5.3-codex
         litellm_params:
           model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_base: http://chatgpt-acct-70.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.3-codex}
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-70/gpt-5.3-codex}
       - model_name: gpt-5.3-codex
         litellm_params:
           model: openai/gpt-5.3-codex
-          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_base: http://chatgpt-acct-71.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.3-codex}
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-71/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-72.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-72/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-73.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-73/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-74.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-74/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-75.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-75/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-76.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-76/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-77.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-77/gpt-5.3-codex}
+      - model_name: gpt-5.3-codex
+        litellm_params:
+          model: openai/gpt-5.3-codex
+          api_base: http://chatgpt-acct-78.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-78/gpt-5.3-codex}
 
       # chatgpt-gpt-5.3-codex-spark (8 healthy deployments)
       - model_name: chatgpt-gpt-5.3-codex-spark
         litellm_params:
           model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-8.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-8/gpt-5.3-codex-spark}
-      - model_name: chatgpt-gpt-5.3-codex-spark
-        litellm_params:
-          model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-9.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-9/gpt-5.3-codex-spark}
-      - model_name: chatgpt-gpt-5.3-codex-spark
-        litellm_params:
-          model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-10.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-10/gpt-5.3-codex-spark}
-      - model_name: chatgpt-gpt-5.3-codex-spark
-        litellm_params:
-          model: openai/gpt-5.3-codex-spark
           api_base: http://chatgpt-acct-11.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
           input_cost_per_token: 0.0000006
           output_cost_per_token: 0.000003
         model_info: {mode: responses, id: chatgpt-acct-11/gpt-5.3-codex-spark}
-      - model_name: chatgpt-gpt-5.3-codex-spark
-        litellm_params:
-          model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-18.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-18/gpt-5.3-codex-spark}
-      - model_name: chatgpt-gpt-5.3-codex-spark
-        litellm_params:
-          model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-19.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.3-codex-spark}
-      - model_name: chatgpt-gpt-5.3-codex-spark
-        litellm_params:
-          model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-20.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.3-codex-spark}
-      - model_name: chatgpt-gpt-5.3-codex-spark
-        litellm_params:
-          model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-21.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-21/gpt-5.3-codex-spark}
-
-      # gpt-5.3-codex-spark (7 healthy deployments)
-      - model_name: gpt-5.3-codex-spark
-        litellm_params:
-          model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-8.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-8/gpt-5.3-codex-spark}
-      - model_name: gpt-5.3-codex-spark
-        litellm_params:
-          model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-9.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-9/gpt-5.3-codex-spark}
-      - model_name: gpt-5.3-codex-spark
-        litellm_params:
-          model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-10.carher.svc:4000
-          api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-10/gpt-5.3-codex-spark}
       - model_name: gpt-5.3-codex-spark
         litellm_params:
           model: openai/gpt-5.3-codex-spark
@@ -1654,27 +1486,83 @@ data:
       - model_name: gpt-5.3-codex-spark
         litellm_params:
           model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-18.carher.svc:4000
+          api_base: http://chatgpt-acct-69.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-18/gpt-5.3-codex-spark}
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-69/gpt-5.3-codex-spark}
       - model_name: gpt-5.3-codex-spark
         litellm_params:
           model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-19.carher.svc:4000
+          api_base: http://chatgpt-acct-70.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-19/gpt-5.3-codex-spark}
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-70/gpt-5.3-codex-spark}
       - model_name: gpt-5.3-codex-spark
         litellm_params:
           model: openai/gpt-5.3-codex-spark
-          api_base: http://chatgpt-acct-20.carher.svc:4000
+          api_base: http://chatgpt-acct-71.carher.svc:4000
           api_key: os.environ/CHATGPT_POOL_KEY
-          input_cost_per_token: 0.0000006
-          output_cost_per_token: 0.000003
-        model_info: {mode: responses, id: chatgpt-acct-20/gpt-5.3-codex-spark}
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-71/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-72.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-72/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-73.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-73/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-74.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-74/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-75.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-75/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-76.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-76/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-77.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-77/gpt-5.3-codex-spark}
+      - model_name: gpt-5.3-codex-spark
+        litellm_params:
+          model: openai/gpt-5.3-codex-spark
+          api_base: http://chatgpt-acct-78.carher.svc:4000
+          api_key: os.environ/CHATGPT_POOL_KEY
+          input_cost_per_token: 1.5e-06
+          output_cost_per_token: 7.5e-06
+        model_info: {mode: responses, id: chatgpt-acct-78/gpt-5.3-codex-spark}
 
     router_settings:
       # ── DualCache backend: Redis (2026-05-20) ────────────────────────

@@ -1,0 +1,43 @@
+<h4>深层产品架构：从工具可用到组织可落地</h4>
+<callout emoji="📌" background-color="light-blue" border-color="blue">
+  <p><b>更准确的表达：</b>AutoLink AI Infra 的核心不是“把 Codex、Her、LiteLLM、Open WebUI 放在一起”，而是把研发组织使用 AI 时必然遇到的五件事产品化：入口统一、账号开通、模型供应、权限预算、数据复盘。只有这五件事闭环，AI 才能从个人助手进入多人、多任务、多系统协同的研发主流程。</p>
+</callout>
+<p><b>产品架构深化图：</b>左侧是合作伙伴和用户可感知的服务入口，中间是 AI Infra 控制面，右侧是已经运行的规模化底座与组织级证明。图中数字来自 2026-06-28 的只读运行态观测，用于证明系统已经在真实环境中运转，不作为对外 SLA 承诺。</p>
+<whiteboard type="blank"></whiteboard>
+<table>
+  <colgroup><col width="160"/><col width="300"/><col width="330"/></colgroup>
+  <thead>
+    <tr>
+      <th background-color="light-blue" vertical-align="top">能力层</th>
+      <th background-color="light-blue" vertical-align="top">为什么是产品能力</th>
+      <th background-color="light-blue" vertical-align="top">可追问的技术支撑</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td vertical-align="top">入口统一</td>
+      <td vertical-align="top">客户不是购买单点工具，而是获得 Codex、Her、Web Chat、管理后台组成的统一 AI 研发服务。</td>
+      <td vertical-align="top">Codex/Claude Code 负责本地工程执行，Her 承载飞书与组织流程，Open WebUI 提供浏览器入口，Admin 提供管理入口。</td>
+    </tr>
+    <tr>
+      <td vertical-align="top">开通自动化</td>
+      <td vertical-align="top">“一键开通”不是发一个账号，而是自动完成实例、key、权限、配置、域名、路由和状态管理。</td>
+      <td vertical-align="top">Admin 创建 LiteLLM virtual key 和 HerInstance CRD，Operator 生成 ConfigMap、Secret、PVC、Pod、Service，并同步 Cloudflare 回调路由。</td>
+    </tr>
+    <tr>
+      <td vertical-align="top">模型供应链</td>
+      <td vertical-align="top">客户不需要理解不同模型供应商、账号池、限额、缓存和 fallback 的复杂度，只需要稳定使用。</td>
+      <td vertical-align="top">LiteLLM 统一模型别名、per-key allowlist、fallback、sticky cache routing、prompt cache key、上游账号池和 SpendLogs 计量。</td>
+    </tr>
+    <tr>
+      <td vertical-align="top">Agent 场景承载</td>
+      <td vertical-align="top">AI 能力不是只停留在问答或 IDE 内，而是进入代码、测试、排障、文档、任务协同和知识复盘。</td>
+      <td vertical-align="top">Her 连接飞书、知识、任务、文档和 skill pack；Codex/Claude Code 连接本地仓库、shell、git、MCP 和工程系统。</td>
+    </tr>
+    <tr>
+      <td vertical-align="top">组织治理闭环</td>
+      <td vertical-align="top">管理层要看的不是“用了多少 token”，而是谁在用、花多少钱、是否稳定、哪些部门值得继续扩散。</td>
+      <td vertical-align="top">SpendLogs、end_user、key alias、模型成本、缓存命中、错误率、限流、上游健康、部门活跃和预算数据可以进入统一看板。</td>
+    </tr>
+  </tbody>
+</table>

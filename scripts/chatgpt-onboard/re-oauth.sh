@@ -114,6 +114,7 @@ docker run --rm \
   -e SCREENSHOT_DIR=/work/screenshots \
   -e "PHONE_NUMBER=${PHONE_NUMBER:-}" \
   -e "SMS_API_URL=${SMS_API_URL:-}" \
+  -e "MAIL_OTP_PROVIDER=${MAIL_OTP_PROVIDER:-mailcom}" \
   -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
   -e DISPLAY=:99 \
   mcr.microsoft.com/playwright/python:v1.60.0-noble \

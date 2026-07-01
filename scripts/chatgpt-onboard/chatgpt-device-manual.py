@@ -41,11 +41,22 @@ def http_post(url, body, extra_headers=None, timeout=20):
         headers.update(extra_headers)
     data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        resp = urllib.request.urlopen(req, timeout=timeout)
-        return resp.status, resp.read().decode()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode(errors="replace")
+    # SSL/网络抖动重试：199 prod -> auth.openai.com 间歇性 handshake timeout
+    # 不能让一次抖动把整个 poll 进程崩了（20min 浏览器侧已 Authorize 后才发现）
+    last_exc = None
+    for attempt in range(4):
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode(errors="replace")
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+            last_exc = e
+            if attempt < 3:
+                time.sleep(2 + attempt * 3)
+                continue
+            return 0, f"NETWORK_ERROR after 4 attempts: {type(e).__name__}: {e}"
+    return 0, f"NETWORK_ERROR: {last_exc}"
 
 
 # ── 1. Request user_code ────────────────────────────────────────────────────

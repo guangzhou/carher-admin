@@ -1,5 +1,8 @@
 services:
   zerokey:
+    # Cap memory (idle ~40MiB); 128m leaves >2x headroom. No swap.
+    mem_limit: 128m
+    memswap_limit: 128m
     build:
       context: .
       dockerfile: Dockerfile

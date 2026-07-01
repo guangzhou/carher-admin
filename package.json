@@ -1,0 +1,27 @@
+{
+  "name": "carher-admin",
+  "version": "1.0.0",
+  "description": "管理 500+ CarHer (飞书 AI 助手) 实例的全生命周期：声明式管理、自动自愈、灰度部署、实时监控。",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/guangzhou/carher-admin.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/guangzhou/carher-admin/issues"
+  },
+  "homepage": "https://github.com/guangzhou/carher-admin#readme",
+  "dependencies": {
+    "pptxgenjs": "^4.0.1"
+  }
+}

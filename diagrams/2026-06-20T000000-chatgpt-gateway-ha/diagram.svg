@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1680" height="980" viewBox="0 0 1680 980">
+  <rect x="0" y="0" width="1680" height="980" fill="#f5f1e8"/>
+  <rect x="42" y="36" width="1596" height="908" rx="34" fill="#fffaf1" stroke="#1f2d2a" stroke-width="3"/>
+
+  <text x="82" y="96" font-size="34" font-weight="700" fill="#17211f">198 ChatGPT Pro 账号池：Active + Backup Gateway 架构</text>
+  <text x="84" y="134" font-size="18" fill="#53615e">第一版不做多 shard：一个 active gateway 承载全量账号，一个 backup gateway 热备；需要时再拆分片</text>
+
+  <rect x="78" y="176" width="350" height="650" rx="24" fill="#e8f4ef" stroke="#2e7256" stroke-width="2"/>
+  <text x="110" y="222" font-size="25" font-weight="700" fill="#1c503d">调用与路由层</text>
+
+  <rect x="120" y="264" width="266" height="90" rx="18" fill="#ffffff" stroke="#2e7256" stroke-width="2"/>
+  <text x="150" y="302" font-size="18" font-weight="700" fill="#1c503d">Cursor / Codex Key</text>
+  <text x="150" y="330" font-size="15" fill="#5a6762">用户模型名保持不变</text>
+
+  <rect x="120" y="402" width="266" height="124" rx="18" fill="#ffffff" stroke="#2e7256" stroke-width="2"/>
+  <text x="150" y="442" font-size="20" font-weight="700" fill="#1c503d">198 LiteLLM 主代理</text>
+  <text x="150" y="474" font-size="15" fill="#5a6762">key / allowlist / spend logs</text>
+  <text x="150" y="500" font-size="15" fill="#5a6762">alias / fallback / audit 不重写</text>
+
+  <rect x="120" y="580" width="266" height="104" rx="18" fill="#fff3d4" stroke="#b6801d" stroke-width="2"/>
+  <text x="150" y="620" font-size="20" font-weight="700" fill="#744b05">回滚保护</text>
+  <text x="150" y="652" font-size="15" fill="#645a49">api_base 可切回原账号 Pod</text>
+
+  <rect x="500" y="176" width="560" height="650" rx="24" fill="#edf4ff" stroke="#315d9d" stroke-width="2"/>
+  <text x="532" y="222" font-size="25" font-weight="700" fill="#244a7d">Gateway 运行时</text>
+  <text x="532" y="252" font-size="16" fill="#56636e">核心：少量 Pod 管全部账号，避免几十个常驻 LiteLLM Pod</text>
+
+  <rect x="570" y="300" width="420" height="160" rx="24" fill="#ffffff" stroke="#315d9d" stroke-width="3"/>
+  <text x="612" y="340" font-size="24" font-weight="700" fill="#244a7d">chatgpt-pool-gateway-a</text>
+  <text x="612" y="372" font-size="18" font-weight="700" fill="#244a7d">ACTIVE：默认承接全部流量</text>
+  <text x="612" y="404" font-size="15" fill="#59656f">内存状态表：healthy / cooling / offline</text>
+  <text x="612" y="430" font-size="15" fill="#59656f">按 quota、inflight、recent failure 选账号</text>
+
+  <rect x="570" y="526" width="420" height="150" rx="24" fill="#ffffff" stroke="#6f7f91" stroke-width="2" stroke-dasharray="10 8"/>
+  <text x="612" y="565" font-size="24" font-weight="700" fill="#425064">chatgpt-pool-gateway-b</text>
+  <text x="612" y="596" font-size="18" font-weight="700" fill="#425064">BACKUP：低权重热备或 standby</text>
+  <text x="612" y="628" font-size="15" fill="#59656f">挂同一批账号 auth，只在主故障时接管</text>
+  <text x="612" y="654" font-size="15" fill="#59656f">可通过 LiteLLM weight 或 health failover 控制</text>
+
+  <rect x="608" y="724" width="344" height="66" rx="18" fill="#dce9ff" stroke="#315d9d" stroke-width="2"/>
+  <text x="638" y="751" font-size="18" font-weight="700" fill="#244a7d">统一 OpenAI-compatible 接口</text>
+  <text x="638" y="776" font-size="14" fill="#53615e">/v1/responses /v1/chat/completions</text>
+
+  <rect x="1130" y="176" width="450" height="650" rx="24" fill="#fff0e7" stroke="#b8542a" stroke-width="2"/>
+  <text x="1162" y="222" font-size="25" font-weight="700" fill="#813511">账号状态与依赖</text>
+
+  <rect x="1186" y="270" width="336" height="112" rx="18" fill="#ffffff" stroke="#b8542a" stroke-width="2"/>
+  <text x="1216" y="307" font-size="20" font-weight="700" fill="#813511">Account Registry</text>
+  <text x="1216" y="338" font-size="15" fill="#68594f">acct-1..acct-N 全量注册表</text>
+  <text x="1216" y="362" font-size="15" fill="#68594f">权重、状态、reset_at、owner 元数据</text>
+
+  <rect x="1186" y="424" width="336" height="112" rx="18" fill="#ffffff" stroke="#b8542a" stroke-width="2"/>
+  <text x="1216" y="461" font-size="20" font-weight="700" fill="#813511">Auth PVC / Secret</text>
+  <text x="1216" y="492" font-size="15" fill="#68594f">每账号独立 auth.json</text>
+  <text x="1216" y="516" font-size="15" fill="#68594f">active 与 backup 均可挂载读取</text>
+
+  <rect x="1186" y="578" width="336" height="112" rx="18" fill="#ffffff" stroke="#b8542a" stroke-width="2"/>
+  <text x="1216" y="615" font-size="20" font-weight="700" fill="#813511">Quota / Health Loop</text>
+  <text x="1216" y="646" font-size="15" fill="#68594f">/codex/usage 低频探测</text>
+  <text x="1216" y="670" font-size="15" fill="#68594f">401 标记，429 冷却，reset 后恢复</text>
+
+  <rect x="1186" y="732" width="336" height="68" rx="18" fill="#ffffff" stroke="#b8542a" stroke-width="2"/>
+  <text x="1216" y="772" font-size="20" font-weight="700" fill="#813511">ChatGPT / Codex Backend</text>
+
+  <path d="M386 464 H500" stroke="#1f2d2a" stroke-width="4" fill="none"/>
+  <polygon points="500,464 484,455 484,473" fill="#1f2d2a"/>
+
+  <path d="M386 494 H536 V600 H570" stroke="#6f7f91" stroke-width="3" fill="none" stroke-dasharray="9 7"/>
+  <polygon points="570,600 554,591 554,609" fill="#6f7f91"/>
+
+  <path d="M990 380 H1130" stroke="#1f2d2a" stroke-width="4" fill="none"/>
+  <polygon points="1130,380 1114,371 1114,389" fill="#1f2d2a"/>
+  <path d="M990 602 H1130" stroke="#6f7f91" stroke-width="3" fill="none" stroke-dasharray="9 7"/>
+  <polygon points="1130,602 1114,593 1114,611" fill="#6f7f91"/>
+
+  <path d="M1354 382 V424" stroke="#b8542a" stroke-width="4" fill="none"/>
+  <polygon points="1354,424 1345,408 1363,408" fill="#b8542a"/>
+  <path d="M1354 536 V578" stroke="#b8542a" stroke-width="4" fill="none"/>
+  <polygon points="1354,578 1345,562 1363,562" fill="#b8542a"/>
+  <path d="M1354 690 V732" stroke="#b8542a" stroke-width="4" fill="none"/>
+  <polygon points="1354,732 1345,716 1363,716" fill="#b8542a"/>
+
+  <path d="M253 526 V750 H608" stroke="#2e7256" stroke-width="3" fill="none" stroke-dasharray="10 8"/>
+  <polygon points="608,750 592,741 592,759" fill="#2e7256"/>
+  <text x="286" y="740" font-size="13" fill="#2e7256">fallback 仍在 198</text>
+
+  <rect x="118" y="852" width="400" height="68" rx="16" fill="#1f2d2a"/>
+  <text x="142" y="881" font-size="16" font-weight="700" fill="#ffffff">第一版：2 个 gateway Pod</text>
+  <text x="142" y="907" font-size="16" font-weight="700" fill="#ffffff">替代几十个 acct Pod</text>
+
+  <rect x="548" y="852" width="430" height="68" rx="16" fill="#315d9d"/>
+  <text x="572" y="881" font-size="16" font-weight="700" fill="#ffffff">收益：简单、集中、可快速 canary</text>
+  <text x="572" y="907" font-size="16" font-weight="700" fill="#ffffff">风险：active 是账号池运行时单点</text>
+
+  <rect x="1008" y="852" width="520" height="68" rx="16" fill="#b8542a"/>
+  <text x="1032" y="881" font-size="16" font-weight="700" fill="#ffffff">后续触发拆 shard：QPS、内存、故障域或 token 半径</text>
+  <text x="1032" y="907" font-size="16" font-weight="700" fill="#ffffff">不提前引入多分片复杂度</text>
+</svg>

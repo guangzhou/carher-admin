@@ -1,0 +1,19 @@
+flowchart TD
+    A([OpenClaw]) --> B[Responses]
+    B --> C[LiteLLM dev]
+    C --> D{ChatGPT 5.5}
+    D -->|否| Z[原样路由]
+    D -->|是| E[Normalize]
+    E --> F[System 压平]
+    E --> G[保留 Summary]
+    E --> H[丢裸密文]
+    F --> I[ChatGPT 池]
+    G --> I
+    H --> I
+    I --> J{返回}
+    J -->|200| K[账户池成功]
+    J -->|4xx| L[Guard]
+    L --> M{非重试错}
+    M -->|是| N[阻止网宿]
+    M -->|否| O[原策略]
+    O --> P[可用性策略]

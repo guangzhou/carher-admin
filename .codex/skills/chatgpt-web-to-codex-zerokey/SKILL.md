@@ -1,6 +1,6 @@
 ---
 name: chatgpt-web-to-codex-zerokey
-description: Use when bridging a ChatGPT Pro web-chat quota into an OpenAI-compatible API on server 188 (10.68.13.188:8123+) via zerokey — i.e. Codex/VS Code/any OpenAI client should keep working after the Codex 5h/7d quota is exhausted but web chat still works. Covers deploy/containerize, multi-account onboarding (add-account.sh), raw-passthrough vs VS Code mode, per-request model selection, capturing/refreshing the web session, wiring zerokey models into the 198 LiteLLM Pro proxy (litellm-product), and the known traps (xvfb-run PID1 hang, anonymous-after-OTP, raw.js stream-default vs OpenAI spec). For mail.com OTP automation see chatgpt-login-session skill.
+description: Use when bridging a ChatGPT Pro web-chat quota into an OpenAI-compatible API on server 188 (10.68.13.188:8123+) via zerokey — i.e. Codex/VS Code/any OpenAI client should keep working when web chat quota is available on a separate pool from Codex-native backend. Covers deploy/containerize, multi-account onboarding (add-account.sh), 198 registration (litellm-register-zerokey.py), raw vs vscode ToolCompiler, Codex wire_api=responses via LiteLLM, session capture/refresh, known traps, and planned Agent bridge (docs/zerokey-codex-agent-bridge-design.md). For mail.com OTP see chatgpt-login-session. Index: docs/zerokey-codex-artifacts.md.
 ---
 
 # ChatGPT Web → Codex/OpenAI API bridge (zerokey on 188)
@@ -18,7 +18,8 @@ plus body) against chatgpt.com's web backend, exposing `/v1/chat/completions`.
 
 Repo bundle: `scripts/chatgpt-onboard/zerokey-codex/` (install.sh, zerokey-patch/,
 capture/, ops/). Full design + runbook: `docs/chatgpt-web-to-codex-zerokey.md`.
-On-host runbook: `~/zerokey-codex/ops/README.md`.
+**Artifact index:** `docs/zerokey-codex-artifacts.md`. On-host runbook:
+`~/zerokey-codex/ops/README.md`.
 
 ## Hard rules
 
@@ -116,13 +117,84 @@ Each account = own port + container + profile + `~/zerokey-codex-accounts/<id>/`
 
 ```bash
 cd ~/zerokey-codex/ops
-./add-account.sh timothy timothy_mossey871@mail.com '<mail_pw>' '<gpt_pw>' 8124
+./add-account.sh <zk_id> <email> '<mail_pw>' '<gpt_pw>' <port>   # e.g. acct50 ... 8144
 ```
 
-Uses `OTP_AUTO_ONLY=1` + enhanced mail.com OTP in `zerokey-web-capture.py`.
+- **Credential store (188 only):** `/Data/chatgpt-auth/acct-N/.creds` holds
+  `email=`, `mail_pw=`, `chatgpt_pw=`, `mail_provider=`. **198 has NO creds** — all live
+  on 188 (`jms ssh JSZX-AI-03`). Batch onboarding reads these, never hard-code secrets.
+- **Only `mail.com` accounts auto-onboard.** `OTP_AUTO_ONLY=1` auto-reads the ChatGPT
+  OTP from mail.com webmail (`OTP_AUTO_MAX`s window). qq/hotmail/outlook have **no auto
+  OTP reader** → manual OTP only. Filter candidates on `mail_provider=mailcom`.
+- **acct↔port↔acct-N map:** `scripts/zerokey_acct_port_map.py` (live, has `chatgpt_acct`
+  column). Pool members 8123-8136 = 14 accounts; next free port 8137+.
+
+### Onboarding is flaky — verify each, don't blind-batch (diagnosis discipline)
+
+- **Failure mode (seen 2026-06-25, acct-7):** mail.com login OK, but ChatGPT's **fresh
+  OTP email never arrives** within `OTP_AUTO_MAX` (only a stale prior-day code in inbox).
+  Capture then falls to the SSO path, lands on `accounts.google.com` sign-in, `composer
+  not found`, exit 124.
+  - **Hypothesis:** OpenAI **rate-limits OTP sends** after repeated login attempts on the
+    same account (acct-7 had a prior-day attempt). Falsification: a never-attempted account
+    gets its OTP promptly. (Untested across the batch — treat onboarding as best-effort.)
+  - Longer `OTP_AUTO_MAX` does **not** fix a rate-limited/SSO account; also check the
+    mail.com **Spam** folder (the auto-reader only scans Inbox).
+- **Run a single onboard first** to confirm the flow works in the current env before a
+  background batch; batch with continue-on-fail + per-account health check, then register
+  only the healthy ports.
+
+### 198 registration — model_id MUST be readable `acct-N`
+
+- Per-account models: add `zerokey-<account>-*` with `api_base: http://10.68.13.188:<port>/v1`,
+  then `litellm-register-zerokey.py --apply --sync-manifest`.
+- **Load-balanced `zerokey-pool` group:** each member is one CM `model_list` block that
+  differs only by `api_base` port. **Always set `model_info.id: acct-N`** (the account
+  behind that port, per `zerokey_acct_port_map.py`). Without `model_info` LiteLLM auto-hashes
+  the id (e.g. `1dd9af…`), which is unreadable in `x-litellm-model-id` **and in 429
+  `cooldown_list`**. Edit the CM (add `model_info.id`) → `kubectl rollout restart
+  deployment/litellm-proxy` (4 replicas, ~90s startup each; zero-downtime). Verified
+  2026-06-25: 8123→acct-39, 8124→acct-36, 8125→acct-48, 8126→acct-45, 8127→acct-46,
+  8128→acct-47, 8129→acct-40, 8130→acct-41, 8131→acct-42, 8132→acct-43, 8133→acct-44,
+  8134→acct-37, 8135→acct-32, 8136→acct-34.
+
 Login/OTP skill: `.codex/skills/chatgpt-login-session/SKILL.md`.
 
-198 LiteLLM: add `zerokey-<account>-*` models with `api_base: http://10.68.13.188:<port>/v1`.
+## codex (198 OAuth) + zerokey (188 web) coexist on the SAME account
+
+The same ChatGPT account can run **both** the 198 chatgpt-acct codex pool (OAuth,
+`/v1/responses`) **and** the 188 zerokey web-chat pool simultaneously — they consume **two
+independent quota buckets** (Codex 5h/7d vs web-chat hourly). This is the **intended
+dual-bucket design**, not a conflict: onboard Codex-quota-exhausted accounts into zerokey to
+harvest their still-fresh web bucket.
+
+- **Verified 2026-06-25:** acct-36 had traffic on **both** sides in the same 48h window
+  (codex `chatgpt-acct-36-gpt-5.5` 2167 calls + zerokey port 8124 50 calls).
+- The `auth.json 互踢` rule applies only to **two OAuth holders** of the same account, NOT
+  web-cookie + OAuth. So a `0/0` or `1/1` 198 codex deployment for a candidate is **not** a
+  blocker for adding it to zerokey.
+
+## Agent capabilities (current vs planned)
+
+- **Shipped:** Codex `wire_api=responses` → 198 LiteLLM → zerokey **raw** → web chat
+  quota. Good for chat, Q&A, code generation in prose.
+- **Not shipped:** Full Codex Agent (`apply_patch`, `shell` loop). LiteLLM drops
+  Responses-only tools; raw skips ToolCompiler. Plan: local
+  `zerokey-codex-responses-bridge` + `Bearer vscode`/`codex` — see
+  `docs/zerokey-codex-agent-bridge-design.md`.
+- **Alternative (MCP):** [gpt2agent](https://github.com/robotlearning123/gpt2agent)
+  exposes web `agent-mode` as MCP tools alongside Codex (different architecture).
+
+## Scripts quick reference
+
+| Script | Role |
+|--------|------|
+| `install.sh` | First deploy on 188 |
+| `ops/add-account.sh` | New account + port + container |
+| `ops/refresh.sh` | Cron refresh (per-account copy under accounts dir) |
+| `ops/capture-manual.sh` | OTP re-seed |
+| `ops/litellm-register-zerokey.py` | 198 cm + manifest (8 models, both accounts) |
+| `capture/zerokey-web-capture.py` | Login + OTP + capture |
 
 ## Capture / refresh
 
@@ -162,6 +234,27 @@ Login/OTP skill: `.codex/skills/chatgpt-login-session/SKILL.md`.
    LiteLLM's OpenAI SDK omits `stream` on non-stream calls → zerokey returned SSE →
    LiteLLM couldn't parse it. Fix: default `stream = false` in `routes/raw.js`
    (explicit `stream:true` still streams), then `docker compose up -d --build`.
+
+## Per-account consumption / spend
+
+zerokey deployments set `input/output_cost_per_token: 0` (web quota, not paid API), so
+LiteLLM **`spend`=0 for every zerokey row** — $ tells you nothing. Real consumption =
+**calls + tokens** (zerokey also doesn't report prompt tokens; `total_tokens` ≈ output).
+
+The pool accounts (14 as of 2026-06-25: ports 8123-8136, growing) share one model_name
+`zerokey-pool`, distinguished only by `api_base` (port) — and now by `model_info.id=acct-N`.
+Per-account split is on the **198 litellm-product DB** (`LiteLLM_SpendLogs`, group by
+`api_base`). `/global/spend/models` only gives the pool aggregate. There is **no per-account
+quota probe** for zerokey (unlike chatgpt-acct's `state.json`); a saturated account shows up
+as its port's calls going flat while siblings take over (429 → router removes / cooldown,
+now shown as `acct-N` in the `cooldown_list`).
+
+```bash
+python3 scripts/zerokey-account-usage.py [--hours N] [--json]   # per-port calls/tokens, with name map
+```
+
+For Aliyun her → zerokey-pool routing/rollout/capacity see skill
+`carher-aliyun-her-zerokey-rollout`.
 
 ## Verify
 

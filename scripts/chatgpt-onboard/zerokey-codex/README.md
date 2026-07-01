@@ -1,36 +1,51 @@
-# zerokey-codex — ChatGPT web → Codex/OpenAI API bridge
+# zerokey-codex — ChatGPT web → OpenAI API bridge
 
-Self-contained bundle to deploy the ChatGPT **web-chat** → OpenAI-compatible API
-bridge on `188` / `10.68.13.188:8123` (for when the Codex 5h/7d quota is spent but
-web chat still works). Standalone Docker stack; does not touch K8s / carher-admin.
+Self-contained bundle for **ChatGPT web chat quota** → OpenAI-compatible API on
+`188` / `10.68.13.188:8123+`. Standalone Docker; does not touch K8s / carher-admin.
 
-- **Design + full runbook:** `docs/chatgpt-web-to-codex-zerokey.md`
-- **Skill:** `.codex/skills/chatgpt-web-to-codex-zerokey/SKILL.md`
-- **On-host ops:** `ops/README.md`
+## Documentation
+
+| Doc | Content |
+|-----|---------|
+| [docs/zerokey-codex-artifacts.md](../../../docs/zerokey-codex-artifacts.md) | **Index** — skills, scripts, verify commands |
+| [docs/chatgpt-web-to-codex-zerokey.md](../../../docs/chatgpt-web-to-codex-zerokey.md) | Design, traps, 198 integration |
+| [docs/zerokey-codex-agent-bridge-design.md](../../../docs/zerokey-codex-agent-bridge-design.md) | Planned Codex Agent bridge |
+
+## Skills
+
+- `.codex/skills/chatgpt-web-to-codex-zerokey/SKILL.md`
+- `.codex/skills/chatgpt-login-session/SKILL.md`
+- `.claude/skills/chatgpt-web-to-codex-zerokey/SKILL.md` (中文详版)
 
 ## Contents
 
-```
-install.sh          clone upstream zerokey + overlay patches + build dir layout
-zerokey-patch/      our minimal changes + new files over upstream zerokey
-  routes/raw.js       NEW: raw passthrough + model resolver
-  routes/chatgpt.js   raw branch + model passthrough (VS Code path unchanged)
-  core/chatgpt/api.js per-request model override
-  config/constants.js real /v1/models slugs
-  zerokey-serve-codex.js  headless launcher (Bearer → vscode | raw)
-  Dockerfile / .dockerignore / docker-compose.yml
+```text
+install.sh                         # clone upstream + overlay patches
+zerokey-patch/                     # raw.js, chatgpt.js, Docker, compose
 capture/
-  Dockerfile          patchright capture image (xvfb-run PID1 fix)
-  zerokey-web-capture.py  login chatgpt.com + capture /backend-api/f/conversation
+  Dockerfile
+  zerokey-web-capture.py           # login + OTP + f/conversation capture
 ops/
-  refresh.sh          re-capture → validate → atomic swap → restart + alert
-  capture-manual.sh   interactive (OTP) re-capture
-  README.md
+  refresh.sh                       # cron refresh
+  capture-manual.sh
+  add-account.sh                   # multi-account onboarding
+  docker-compose.account.yml
+  litellm-register-zerokey.py      # 198 LiteLLM register (8 models)
+  README.md                        # on-host runbook
 ```
 
-## Quick start
+## Quick start (on 188)
 
 ```bash
-./install.sh                 # → ~/zerokey-codex (on 188)
-# then follow install.sh's printed next steps (secrets, build, capture, up)
+./install.sh
+# secrets + docker build + capture + compose up — see install.sh output
+```
+
+## 198 LiteLLM (from Mac)
+
+```bash
+./scripts/jms scp scripts/chatgpt-onboard/zerokey-codex/ops/litellm-register-zerokey.py \
+  AIYJY-litellm:/tmp/litellm-register-zerokey.py
+./scripts/jms ssh AIYJY-litellm \
+  'python3 /tmp/litellm-register-zerokey.py --apply --sync-manifest'
 ```

@@ -1,0 +1,135 @@
+# chatgpt-pool-gateway dev deployment
+# - litellm-dev namespace (不影响 litellm-product, CLAUDE.md 零中断)
+# - 1 replica, 不带 HA
+# - 指向 mock-chatgpt-upstream.litellm-dev.svc:4101 (Phase 1 期间)
+# - 镜像走 198 本机 registry 127.0.0.1:5000 (198 独立集群, 与阿里云 ACR 无关)
+#
+# 部署: jms ssh AIYJY-litellm 'kubectl apply -f /tmp/gateway-dev.yaml'
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: litellm-dev
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gateway-internal-key
+  namespace: litellm-dev
+type: Opaque
+stringData:
+  # gateway <-> LiteLLM 内部链路的 Bearer; dev 用 sk-pool-internal-dev
+  INTERNAL_API_KEY: "sk-pool-internal-dev"
+---
+# 持久化 SQLite registry (重启不丢账号) + auth.json 副本
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chatgpt-pool-gateway-data
+  namespace: litellm-dev
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-path  # k3s 默认; 仅 dev, prod 走 NAS
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-pool-gateway
+  namespace: litellm-dev
+  labels:
+    app: chatgpt-pool-gateway
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: chatgpt-pool-gateway
+  template:
+    metadata:
+      labels:
+        app: chatgpt-pool-gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: gateway
+          image: 127.0.0.1:5000/chatgpt-pool-gateway:dev-6f1d011
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: GATEWAY_PORT
+              value: "8080"
+            - name: UPSTREAM_BASE
+              value: "http://mock-chatgpt-upstream.litellm-dev.svc.cluster.local:4101"
+            - name: UPSTREAM_RESPONSES_PATH
+              value: "/v1/responses"
+            - name: UPSTREAM_WHAM_USAGE_PATH
+              value: "/backend-api/wham/usage"
+            - name: UPSTREAM_TOKEN_PATH
+              value: "http://mock-chatgpt-upstream.litellm-dev.svc.cluster.local:4101/oauth/token"
+            - name: INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-internal-key
+                  key: INTERNAL_API_KEY
+            - name: REGISTRY_DB
+              value: "/data/gateway-registry.db"
+            - name: AUTH_FILES_DIR
+              value: "/data/auth"
+            - name: OPENAI_CLIENT_ID
+              value: "app_EMoamEEZ73f0CkXaXp7hrann"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          readinessProbe:
+            httpGet:
+              path: /health/liveness
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health/liveness
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: chatgpt-pool-gateway-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chatgpt-pool-gateway
+  namespace: litellm-dev
+  labels:
+    app: chatgpt-pool-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: chatgpt-pool-gateway
+  ports:
+    - name: http
+      port: 4000     # 给 LiteLLM 调用; 跟 sub-proxy 的 4000 对齐
+      targetPort: 8080

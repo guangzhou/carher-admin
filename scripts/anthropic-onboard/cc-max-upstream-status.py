@@ -7,9 +7,10 @@ sends a tiny Haiku probe to api.anthropic.com/v1/messages?beta=true using the
 Claude-Code identification preamble, parses the `anthropic-ratelimit-unified-*`
 headers, prints a colored table.
 
-This script is meant to run ON 188 (where the .env files live). From a dev
-machine, use the bash wrapper `cc-max-upstream-status.sh` which pipes it via
-`jms ssh JSZX-AI-03 python3`.
+This script is meant to run on the active CC Max runtime host (currently 198,
+unless CC_MAX_QUOTA_ASSET points the wrapper at another host). From a dev
+machine, use the bash wrapper `cc-max-upstream-status.sh` which uploads this
+file through the JumpServer asset selected by the wrapper.
 
 Options:
   --watch <seconds>    Refresh every N seconds (Ctrl-C to stop)

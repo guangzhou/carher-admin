@@ -72,6 +72,92 @@ def mailcom_login(ctx):
     ss(p, "mailcom-inbox")
     return p
 
+def get_reset_otp(mail_page, max_wait=180):
+    """Find topmost OpenAI temporary-password email, extract 6-digit OTP from body.
+    Ported from chatgpt-litellm-oauth.py get_otp() — uses Shadow-DOM-aware locators
+    + detail-body-iframe (mail.com migrated everything to Shadow DOM 2026-06-18).
+    """
+    def find_body_frame():
+        return next((f for f in mail_page.frames
+                     if "detail-body" in (f.name or "") or "detail-body" in (f.url or "")), None)
+
+    def extract_otp_from_body():
+        bf = find_body_frame()
+        if not bf:
+            return None
+        try:
+            html = bf.evaluate("() => document.documentElement.outerHTML") or ""
+        except Exception:
+            return None
+        for m in re.finditer(r"\b(\d{6})\b", html):
+            ctx_s = max(0, m.start() - 200); ctx_e = min(len(html), m.end() + 200)
+            ctx = html[ctx_s:ctx_e]
+            if re.search(r"code|verify|verification|password|openai|chatgpt|reset", ctx, re.I):
+                return m.group(1)
+        m = re.search(r"\b(\d{6})\b", html)
+        return m.group(1) if m else None
+
+    deadline = time.time() + max_wait
+    seen_rows = set()
+    while time.time() < deadline:
+        mf = next((fr for fr in mail_page.frames if fr.name == "mail"), None)
+        if not mf:
+            print("  mail frame missing, retry 5s", flush=True); time.sleep(5); continue
+        try:
+            rows = mf.locator("[class*='mail-item']"); cnt = rows.count()
+        except Exception as e:
+            print(f"  rows err: {e}", flush=True); cnt = 0
+        clicked = False
+        for i in range(min(cnt, 15)):
+            try:
+                t = (rows.nth(i).text_content(timeout=1500) or "").strip()
+            except Exception:
+                continue
+            if not re.search(r"openai|chatgpt|noreply|temporary", t, re.I):
+                continue
+            row_key = f"{i}:{t[:80]}"
+            if row_key in seen_rows:
+                continue
+            seen_rows.add(row_key)
+            print(f"  candidate row[{i}]: {t[:100]!r}", flush=True)
+            row_el = rows.nth(i)
+            try: row_el.scroll_into_view_if_needed(timeout=3000)
+            except Exception: pass
+            opened = False
+            for action_name, do_action in [
+                ("dblclick", lambda: row_el.dblclick(timeout=4000)),
+                ("subj-link-click", lambda: row_el.locator(":scope a, :scope [role='link'], :scope span").first.click(timeout=3000)),
+                ("evaluate-dispatch", lambda: row_el.evaluate(
+                    "el => { el.dispatchEvent(new MouseEvent('dblclick', {bubbles:true, cancelable:true, view:window})); }")),
+            ]:
+                try:
+                    do_action(); time.sleep(3.5)
+                    if find_body_frame():
+                        print(f"  ✓ {action_name} opened body frame", flush=True); opened = True; break
+                except Exception as e:
+                    print(f"  {action_name} err: {e}", flush=True)
+            if opened:
+                clicked = True; break
+        if clicked:
+            for _ in range(10):
+                if find_body_frame(): break
+                time.sleep(1)
+            otp = extract_otp_from_body()
+            if otp:
+                return otp
+            print("  clicked but no OTP in body, continue", flush=True)
+        print(f"  OTP not yet (rows={cnt}), retry 5s", flush=True)
+        time.sleep(5)
+        try:
+            # refresh inbox list
+            if mf:
+                mf.evaluate("() => document.location.reload()")
+        except Exception:
+            pass
+        mail_page.wait_for_timeout(3000)
+    return None
+
+
 def get_reset_link(mail_page, max_wait=180):
     """Find topmost OpenAI password-reset email, open it, extract the reset URL."""
     def valid_reset_href(h):
@@ -261,20 +347,79 @@ with sync_playwright() as pw:
     ss(page, "04-after-forgot")
     print(f"  url after forgot: {page.url}", flush=True)
 
-    # ── 3. read reset link from mail.com ──
-    print("[3] login mail.com, fetch reset link", flush=True)
+    # ── 2b. click "Continue" on /reset-password interstitial to actually dispatch the email ──
+    if "reset-password" in page.url.lower():
+        print("[2b] click Continue on /reset-password interstitial", flush=True)
+        clicked2 = False
+        for sel in ["button:has-text('Continue')", "button[type='submit']",
+                    "button:has-text('Reset password')", "a:has-text('Continue')"]:
+            try:
+                loc = page.locator(sel)
+                if loc.count() > 0 and loc.first.is_visible():
+                    loc.first.click(); clicked2 = True
+                    print(f"  clicked {sel}", flush=True); break
+            except Exception:
+                pass
+        if not clicked2:
+            print("  WARN: no Continue button visible on /reset-password", flush=True)
+        time.sleep(4)
+        ss(page, "04b-after-continue-interstitial")
+        print(f"  url after interstitial: {page.url}", flush=True)
+
+    # ── 3. fetch OTP code (new flow) or reset link (legacy) from mail.com ──
+    print("[3] login mail.com", flush=True)
     mp = mailcom_login(ctx)
-    link = get_reset_link(mp)
-    mp.close()
-    if not link:
-        ss(page, "05-no-reset-link"); sys.exit("❌ no reset link found in mailbox within timeout")
-    print(f"  reset link: {link[:120]}", flush=True)
+
+    # detect which flow the OpenAI page wants: OTP "Check your inbox" vs link
+    use_otp = False
+    try:
+        if page.locator("text=/Check your inbox/i").count() > 0 or \
+           page.locator("input[placeholder='Code'], input[name='code']").count() > 0:
+            use_otp = True
+    except Exception:
+        pass
+
+    if use_otp:
+        print("[3-otp] fetching 6-digit OTP from mailbox", flush=True)
+        code = get_reset_otp(mp)
+        mp.close()
+        if not code:
+            ss(page, "05-no-reset-link"); sys.exit("❌ no reset OTP found in mailbox within timeout")
+        print(f"  OTP: {code}", flush=True)
+        # type into Code field and click Continue
+        for sel in ["input[name='code']", "input[placeholder='Code']", "input[type='text']:visible"]:
+            try:
+                loc = page.locator(sel)
+                if loc.count() > 0 and loc.first.is_visible():
+                    loc.first.fill(code); print(f"  filled {sel}", flush=True); break
+            except Exception:
+                pass
+        time.sleep(1)
+        for sel in ["button:has-text('Continue')", "button[type='submit']"]:
+            try:
+                loc = page.locator(sel)
+                if loc.count() > 0 and loc.first.is_visible():
+                    loc.first.click(); print(f"  clicked {sel}", flush=True); break
+            except Exception:
+                pass
+        page.wait_for_timeout(5000)
+        ss(page, "05b-after-otp")
+        print(f"  url after OTP: {page.url}", flush=True)
+        link = None  # signal: we're already on the reset page, skip page.goto
+    else:
+        print("[3-link] fetching reset link (legacy flow)", flush=True)
+        link = get_reset_link(mp)
+        mp.close()
+        if not link:
+            ss(page, "05-no-reset-link"); sys.exit("❌ no reset link found in mailbox within timeout")
+        print(f"  reset link: {link[:120]}", flush=True)
 
     # ── 4. open reset link, set new password ──
     print("[4] open reset link, set new password", flush=True)
-    page.goto(link, wait_until="domcontentloaded")
-    page.wait_for_timeout(4000)
-    wait_through_cf(page)
+    if link:
+        page.goto(link, wait_until="domcontentloaded")
+        page.wait_for_timeout(4000)
+        wait_through_cf(page)
     ss(page, "06-reset-page")
     # fill all visible password fields
     pws = page.locator("input[type='password']")

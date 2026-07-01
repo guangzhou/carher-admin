@@ -43,10 +43,71 @@ OTP_FILE   = os.environ.get("OTP_FILE", "/work/out/otp.txt")
 OTP_FILE_WAIT = int(os.environ.get("OTP_FILE_WAIT", "600"))
 OTP_AUTO_ONLY = os.environ.get("OTP_AUTO_ONLY", "0") == "1"
 OTP_AUTO_MAX = int(os.environ.get("OTP_AUTO_MAX", "240"))
+OTP_SHOT = os.environ.get("OTP_SHOT", "0") == "1"
+OTP_SHOT_PATH = os.environ.get("OTP_SHOT_PATH", "/work/out/otpshot.png")
 OTP_RE = re.compile(r"\b(\d{6})\b")
 SENDER_HINTS_RE = re.compile(r"openai|chatgpt|noreply", re.I)
+MAIL_OTP_PROVIDER = os.environ.get("MAIL_OTP_PROVIDER", "").lower()
+if not MAIL_OTP_PROVIDER:
+    MAIL_OTP_PROVIDER = "imap_qq" if EMAIL.endswith("@qq.com") else "mailcom"
 
 os.makedirs(SS_DIR, exist_ok=True)
+
+
+def imap_host_port():
+    if MAIL_OTP_PROVIDER == "imap_qq":
+        return ("imap.qq.com", 993)
+    return (os.environ.get("IMAP_HOST", "imap.qq.com"), int(os.environ.get("IMAP_PORT", "993")))
+
+
+def imap_fetch_otp(since_ts, max_wait=180):
+    """Poll IMAP for the latest OpenAI/ChatGPT login OTP (QQ: mail_pw = 16-char auth code)."""
+    import imaplib
+    import email as _email
+
+    host, port = imap_host_port()
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        try:
+            M = imaplib.IMAP4_SSL(host, port, timeout=20)
+            M.login(EMAIL, MAIL_PW)
+            M.select("INBOX")
+            typ, data = M.search(None, "FROM", "tm.openai.com", "SUBJECT", "temporary")
+            ids = data[0].split()
+            for mid in reversed(ids[-5:]):
+                typ, msg_data = M.fetch(mid, "(RFC822)")
+                msg = _email.message_from_bytes(msg_data[0][1])
+                try:
+                    mail_ts = _email.utils.mktime_tz(_email.utils.parsedate_tz(msg["Date"]))
+                except Exception:
+                    mail_ts = 0
+                if mail_ts < since_ts - 30:
+                    continue
+                body = ""
+                for part in msg.walk():
+                    if part.get_content_type() in ("text/plain", "text/html"):
+                        b = part.get_payload(decode=True)
+                        if b:
+                            body = b.decode(part.get_content_charset() or "utf-8", errors="replace")
+                            break
+                m = OTP_RE.search(body)
+                if m:
+                    code = m.group(1)
+                    print(f"  IMAP: got OTP {code} from mail dated {msg['Date']}", flush=True)
+                    try:
+                        M.logout()
+                    except Exception:
+                        pass
+                    return code, body[:200]
+            try:
+                M.logout()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"  IMAP fetch err: {e}", flush=True)
+        print(f"  IMAP: OTP not yet (since_ts={since_ts}), retry in 10s...", flush=True)
+        time.sleep(10)
+    return None, None
 
 
 def ss(page, name):
@@ -377,17 +438,60 @@ def login_chatgpt(ctx, page):
                 break
             time.sleep(1)
     if need_otp:
-        print("  need OTP - mail.com auto (OTP_AUTO_ONLY=%s)" % OTP_AUTO_ONLY, flush=True)
+        print("  need OTP - provider=%s (OTP_AUTO_ONLY=%s, OTP_AUTO_MAX=%s)" % (
+            MAIL_OTP_PROVIDER, OTP_AUTO_ONLY, OTP_AUTO_MAX), flush=True)
         otp = None
-        try:
-            mp = mailcom_login(ctx)
-            otp = get_otp(mp)
+        if MAIL_OTP_PROVIDER in ("imap_qq", "imap"):
+            since_ts = int(time.time()) - 60
+            otp, _ = imap_fetch_otp(since_ts, max_wait=min(OTP_FILE_WAIT, 180))
+        elif OTP_AUTO_MAX > 0:
             try:
-                mp.close()
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"  mail.com auto error: {e}", flush=True)
+                mp = mailcom_login(ctx)
+                otp = get_otp(mp)
+                try:
+                    mp.close()
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"  mail.com auto error: {e}", flush=True)
+        elif OTP_SHOT:
+            # Use the capture's working mail.com session to OPEN the newest code
+            # email (via a cross-origin-safe frame locator) and screenshot it, so
+            # an external reader can read the 6-digit code and inject it via file.
+            try:
+                mp = mailcom_login(ctx)
+                opened = False
+                for fsel in ["iframe[name='mail']", "iframe[src*='mail']", "iframe"]:
+                    try:
+                        fl = mp.frame_locator(fsel)
+                        for needle in ["temporary ChatGPT login code", "ChatGPT login code", "login code"]:
+                            loc = fl.get_by_text(needle, exact=False)
+                            if loc.count() > 0:
+                                loc.first.click(timeout=8000)
+                                mp.wait_for_timeout(4000)
+                                opened = True
+                                break
+                    except Exception as e:
+                        print(f"  otpshot fl {fsel} err: {str(e)[:80]}", flush=True)
+                    if opened:
+                        break
+                # the 6-digit code sits below the fold in the reading pane — scroll
+                # down (mouse wheel over the message area) before screenshotting.
+                try:
+                    mp.mouse.move(700, 400)
+                    for _ in range(5):
+                        mp.mouse.wheel(0, 500)
+                        mp.wait_for_timeout(400)
+                except Exception as e:
+                    print(f"  otpshot scroll err: {str(e)[:60]}", flush=True)
+                mp.screenshot(path=OTP_SHOT_PATH, full_page=False)
+                print(f"  OTP_SHOT saved: {OTP_SHOT_PATH} (opened={opened})", flush=True)
+            except Exception as e:
+                print(f"  OTP_SHOT error: {e}", flush=True)
+        else:
+            # OTP_AUTO_MAX=0 → skip the brittle webmail scraper entirely and go
+            # straight to file-wait so a reliable external reader can inject the code.
+            print("  OTP auto disabled (OTP_AUTO_MAX=0) → file-wait", flush=True)
         if not otp and not OTP_AUTO_ONLY:
             # file fallback when not in strict auto mode
             try:
@@ -419,6 +523,17 @@ def login_chatgpt(ctx, page):
             time.sleep(8)
             print(f"    after OTP url={page.url[:100]}", flush=True)
             ss(page, "otp-submitted")
+            # OpenAI rate-limits OTP submission on auth.openai.com/email-verification:
+            # repeated capture retries → "Too many attempts / max_check_attempts".
+            # Detect and fail-fast (cooldown ~10min) rather than fall through to SSO,
+            # which would bounce us onto accounts.google.com sign-in (no composer).
+            try:
+                body_txt = page.inner_text("body", timeout=3000)
+            except Exception:
+                body_txt = ""
+            if "max_check_attempts" in body_txt or "Too many attempts" in body_txt or "Too many tries" in body_txt:
+                ss(page, "otp-rate-limited")
+                sys.exit("❌ OpenAI OTP submission rate-limited (max_check_attempts) — wait ≥10min before retrying this account")
             # wait for the auth→chatgpt.com session callback to fully complete,
             # otherwise navigating away lands us in anonymous (logged-out) mode
             for _ in range(40):
@@ -478,12 +593,18 @@ def main():
         clear_cf(page)
         time.sleep(2)
         logged_in = True
-        try:
-            li = page.locator("button:has-text('Log in'), a:has-text('Log in')")
-            if li.count() > 0 and li.first.is_visible():
-                logged_in = False
-        except Exception:
-            pass
+        if os.environ.get("FORCE_LOGIN") == "1":
+            # Deterministic onboarding: never trust the persisted-session
+            # heuristic (it false-positives on CF / /auth/login pages).
+            logged_in = False
+            print("[1] FORCE_LOGIN=1 → forcing full password+OTP login", flush=True)
+        else:
+            try:
+                li = page.locator("button:has-text('Log in'), a:has-text('Log in')")
+                if li.count() > 0 and li.first.is_visible():
+                    logged_in = False
+            except Exception:
+                pass
         if not logged_in:
             print("[1] not logged in → running login flow", flush=True)
             login_chatgpt(ctx, page)

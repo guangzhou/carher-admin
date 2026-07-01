@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
-# chatgpt-acct-usage.sh — per-source ChatGPT Pro /codex/usage probe.
+# chatgpt-acct-usage.sh — legacy per-source ChatGPT Pro /codex/usage probe.
+#
+# 2026-06-15: the current 198 prod pool has moved to 198 K3s and the default
+# upstream quota view is scripts/chatgpt-acct-quota.sh, backed by
+# JSZX-AI-03:/home/cltx/.chatgpt-quota/state/state.json.
+#
+# This script is kept only for legacy/raw field inspection. Normal invocations
+# redirect to chatgpt-acct-quota.sh so callers do not accidentally probe old
+# 187/188/Aliyun paths and misreport the 198 pool.
+#
+# Current default:
+#   ./scripts/chatgpt-acct-usage.sh          # redirects to chatgpt-acct-quota.sh
+#   ./scripts/chatgpt-acct-usage.sh --json   # redirects to chatgpt-acct-quota.sh --json
+#
+# Legacy raw mode:
+#   ./scripts/chatgpt-acct-usage.sh --legacy-raw --all --json
 #
 # Source-of-truth rule:
 #   - 188 docker accounts are queried from 188.
@@ -15,6 +30,13 @@
 #   ./scripts/chatgpt-acct-usage.sh --skip-aliyun  # only 188 accounts
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ "${1:-}" != "--legacy-raw" ]]; then
+  exec "$SCRIPT_DIR/chatgpt-acct-quota.sh" "$@"
+fi
+shift
 
 JSON=""
 RETRY="${USAGE_RETRY:-3}"
@@ -42,7 +64,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY_LOCAL="$SCRIPT_DIR/chatgpt-acct-usage-raw.py"
 PY_REMOTE="/tmp/chatgpt-acct-usage-raw.py"
 SSH_188="cltx@10.68.13.188"

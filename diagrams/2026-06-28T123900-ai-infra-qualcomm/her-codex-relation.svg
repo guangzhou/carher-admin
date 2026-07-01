@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1080" viewBox="0 0 1800 1080">
+  <rect x="0" y="0" width="1800" height="1080" fill="#F6F8FB"/>
+  <rect x="38" y="38" width="1724" height="1004" rx="30" fill="#FFFFFF" stroke="#1D2939" stroke-width="4"/>
+
+  <text x="86" y="108" font-family="Noto Sans SC, Arial" font-size="48" font-weight="800" fill="#101828">Her、Codex 与 AI Infra 的关系</text>
+  <text x="88" y="153" font-family="Noto Sans SC, Arial" font-size="25" fill="#5B677A">Codex 是强执行器，Her 是组织级研发 Agent 入口，AI Infra 是统一供应、权限、计量和运维底座</text>
+
+  <rect x="115" y="235" width="700" height="260" rx="30" fill="#EAF4FF" stroke="#2563EB" stroke-width="4"/>
+  <text x="160" y="298" font-family="Noto Sans SC, Arial" font-size="38" font-weight="800" fill="#0B356D">Codex / Claude Code</text>
+  <text x="160" y="350" font-family="Noto Sans SC, Arial" font-size="25" fill="#334155">高强度编码执行器</text>
+  <rect x="160" y="385" width="270" height="54" rx="16" fill="#FFFFFF" stroke="#8CB7F5" stroke-width="2"/>
+  <text x="190" y="420" font-family="Noto Sans SC, Arial" font-size="22" fill="#1D2939">代码生成 / 修 Bug</text>
+  <rect x="460" y="385" width="270" height="54" rx="16" fill="#FFFFFF" stroke="#8CB7F5" stroke-width="2"/>
+  <text x="490" y="420" font-family="Noto Sans SC, Arial" font-size="22" fill="#1D2939">重构 / 工程任务</text>
+  <text x="160" y="462" font-family="Noto Sans SC, Arial" font-size="22" fill="#53645F">适合开发者深度执行，把复杂代码任务做完</text>
+
+  <rect x="985" y="235" width="700" height="260" rx="30" fill="#EAF7F2" stroke="#16A085" stroke-width="4"/>
+  <text x="1030" y="298" font-family="Noto Sans SC, Arial" font-size="38" font-weight="800" fill="#0B4B3F">Her / Her+</text>
+  <text x="1030" y="350" font-family="Noto Sans SC, Arial" font-size="25" fill="#334155">组织级研发 Agent 与流程入口</text>
+  <rect x="1030" y="385" width="270" height="54" rx="16" fill="#FFFFFF" stroke="#80D8C4" stroke-width="2"/>
+  <text x="1060" y="420" font-family="Noto Sans SC, Arial" font-size="22" fill="#1D2939">需求 / 任务 / 协同</text>
+  <rect x="1330" y="385" width="270" height="54" rx="16" fill="#FFFFFF" stroke="#80D8C4" stroke-width="2"/>
+  <text x="1360" y="420" font-family="Noto Sans SC, Arial" font-size="22" fill="#1D2939">知识 / 文档 / 复盘</text>
+  <text x="1030" y="462" font-family="Noto Sans SC, Arial" font-size="22" fill="#53645F">适合组织流程承载，把 AI 融入日常研发工作</text>
+
+  <polyline points="815,365 985,365" fill="none" stroke="#98A2B3" stroke-width="6"/>
+  <polygon points="985,365 955,348 955,382" fill="#98A2B3"/>
+  <text x="842" y="340" font-family="Noto Sans SC, Arial" font-size="22" fill="#475467">协同而非替代</text>
+
+  <rect x="115" y="590" width="1570" height="230" rx="34" fill="#111827"/>
+  <text x="160" y="655" font-family="Noto Sans SC, Arial" font-size="38" font-weight="800" fill="#FFFFFF">AI Infra 底座</text>
+  <text x="160" y="704" font-family="Noto Sans SC, Arial" font-size="25" fill="#D1D5DB">统一模型供应、账号与密钥、权限、预算、token 计量、路由、缓存、fallback、日志、指标、灰度和自愈</text>
+
+  <g>
+    <rect x="160" y="740" width="210" height="48" rx="14" fill="#26374D" stroke="#6EA8FE" stroke-width="2"/>
+    <text x="193" y="772" font-family="Noto Sans SC, Arial" font-size="20" fill="#EAF4FF">LiteLLM 路由</text>
+    <rect x="405" y="740" width="210" height="48" rx="14" fill="#26374D" stroke="#6EE7B7" stroke-width="2"/>
+    <text x="438" y="772" font-family="Noto Sans SC, Arial" font-size="20" fill="#EAF4FF">Admin 控制面</text>
+    <rect x="650" y="740" width="210" height="48" rx="14" fill="#26374D" stroke="#FBBF24" stroke-width="2"/>
+    <text x="683" y="772" font-family="Noto Sans SC, Arial" font-size="20" fill="#EAF4FF">Operator 自愈</text>
+    <rect x="895" y="740" width="210" height="48" rx="14" fill="#26374D" stroke="#C4B5FD" stroke-width="2"/>
+    <text x="928" y="772" font-family="Noto Sans SC, Arial" font-size="20" fill="#EAF4FF">费用与看板</text>
+    <rect x="1140" y="740" width="210" height="48" rx="14" fill="#26374D" stroke="#FCA5A5" stroke-width="2"/>
+    <text x="1173" y="772" font-family="Noto Sans SC, Arial" font-size="20" fill="#EAF4FF">权限与准入</text>
+    <rect x="1385" y="740" width="210" height="48" rx="14" fill="#26374D" stroke="#93C5FD" stroke-width="2"/>
+    <text x="1418" y="772" font-family="Noto Sans SC, Arial" font-size="20" fill="#EAF4FF">系统连接</text>
+  </g>
+
+  <polyline points="465,590 465,495" fill="none" stroke="#2563EB" stroke-width="5"/>
+  <polygon points="465,495 448,525 482,525" fill="#2563EB"/>
+  <polyline points="1335,590 1335,495" fill="none" stroke="#16A085" stroke-width="5"/>
+  <polygon points="1335,495 1318,525 1352,525" fill="#16A085"/>
+
+  <rect x="115" y="890" width="1570" height="90" rx="24" fill="#FFF7E6" stroke="#F59E0B" stroke-width="3"/>
+  <text x="160" y="945" font-family="Noto Sans SC, Arial" font-size="28" font-weight="800" fill="#8A4B00">长期逻辑：</text>
+  <text x="315" y="945" font-family="Noto Sans SC, Arial" font-size="25" fill="#4A3A1E">Her+ 不是脱离 token 的新生意，而是把 token 消费嵌入客户研发流程，让使用频次、留存和组织依赖更稳定。</text>
+</svg>

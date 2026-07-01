@@ -28,6 +28,8 @@ metadata:
 
 ## 关键陷阱（不读会跌坑）
 
+0. **审/汇总报价时必须双扫 `litellm_params` + `model_info`**：本 skill 的 `add` op 默认把 cost 字段插到 `model_info`（chatgpt-* 全池都是这样标价的）；而 `multiply` op 改的是已有字段位置不变。审计脚本若只扫 `litellm_params` 会把 model_info 标价的池子全报"未标价 / None"，反过来只扫 model_info 会漏掉手写在 litellm_params 的条目。审计 / 截图前必须 `val = p.get(k) or mi.get(k)` 两位置取并集。运行时 LiteLLM 自动把 litellm_params 镜像到 model_info，所以两边都"对"，但静态扫只看一边一定漏。2026-06-29 阿里云 carher chatgpt-acct × 30 行误判"未标价"实证。详见 `feedback_litellm_pricing_dual_location_scan.md` / `feedback_litellm_pro_pricing_via_litellm_params.md`（DB-registered 模型反过来必须 litellm_params，是 special case）。
+
 1. **`SpendLogs.model` 带 provider 前缀**：yaml 里写 `model_name: chatgpt-gpt-5.5`，但 SpendLogs 真实行是 `openai/chatgpt-gpt-5.5`。查询用 `model LIKE '%X%'` 或先 `SELECT DISTINCT model FROM "LiteLLM_SpendLogs" WHERE "startTime" > NOW() - INTERVAL '1 hour'`，否则会漏所有流量再下错结论（2026-05-20 实战教训）。
 2. **cache_read_input_token_cost / cache_creation_input_token_cost 也是真 cost 字段**——它们决定 Anthropic prompt cache 命中部分的折扣价。重定价时漏掉这两个，cache 折扣比例会失真。本 skill 默认 4 字段同步动。
 3. **多 model 共享同价数值很常见**（Opus input 0.000005 跟 Haiku output 0.000005 同值，Sonnet 跟 gpt-5.3-codex 同 0.000003/0.000015）。**禁止 sed/replace_all**，必须按 model_name context 逐行处理——本 skill `litellm-reprice.py` 已实现。

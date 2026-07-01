@@ -63,12 +63,16 @@ jms_retry() {
 [[ "$N" =~ ^[0-9]+$ ]] || { echo "FATAL: N 必须是数字" >&2; exit 1; }
 [ "$N" -ge 26 ] || { echo "FATAL: N 必须 ≥ 26" >&2; exit 1; }
 
-# 188 disk preflight
-DISK_USE=$(jms ssh JSZX-AI-03 'df --output=pcent / | tail -1 | tr -dc 0-9' 2>/dev/null || echo "0")
-if [ "${DISK_USE:-0}" -ge 95 ]; then
-  echo "FATAL: 188 / ${DISK_USE}% ≥ 95%; clear /tmp + journal first" >&2; exit 1
+# 188 disk preflight (踩坑 #25 v2 2026-06-25): 硬阻塞看 /Data (docker root + patchright 容器
+# + auth.json 真实写入处, 492G), 不看 / (vda3 39G OS 稳态 88-94% 永远贴线但不会被 onboard 撑高)
+DISK_INFO=$(jms ssh JSZX-AI-03 'df --output=pcent,target /Data / 2>/dev/null | tail -n +2' 2>/dev/null || echo "")
+DATA_USE=$(echo "$DISK_INFO" | awk '$2=="/Data"{gsub(/%/,"",$1); print $1}')
+ROOT_USE=$(echo "$DISK_INFO" | awk '$2=="/"{gsub(/%/,"",$1); print $1}')
+if [ "${DATA_USE:-0}" -ge 95 ]; then
+  echo "FATAL: 188 /Data ${DATA_USE}% ≥ 95% (docker layers + patchright 容器写不进去)" >&2; exit 1
 fi
-log "188 / ${DISK_USE}% (ok)"
+[ "${ROOT_USE:-0}" -ge 97 ] && log "⚠️  188 / ${ROOT_USE}% (软警告: OS 稳态, onboard 不写 /, 可继续)"
+log "188 /Data ${DATA_USE}% / ${ROOT_USE}% (ok)"
 
 if jms_retry 5 jms ssh AIYJY-litellm "kubectl -n $NS get deploy chatgpt-acct-$N >/dev/null 2>&1"; then
   log "⚠️  chatgpt-acct-$N 已存在 — skip manifest/apply"

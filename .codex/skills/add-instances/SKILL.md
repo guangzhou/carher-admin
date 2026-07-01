@@ -55,6 +55,42 @@ kubectl exec -n carher deploy/carher-admin -- \
 | app_secret | 飞书 App Secret | VJJMhZlJ2XYad3Dl4jxTJcj5nTiU1ESq |
 | owner | 所属用户（中文名或 ou_xxx，多人用 `\|` 分隔） | 辛永康 |
 
+### Bot open_id 必填校验
+
+新建 Her 后必须给 CRD/实例补 `bot_open_id` / `spec.botOpenId`，否则 `openclaw.json`
+不会包含 `channels.feishu.botOpenId`，群聊 `@机器人` 识别和 known bot 映射可能不完整。
+症状可能表现为 Pod、WS、Cloudflare 都正常，但群里发消息没有回复。
+
+用该实例自己的 app 凭据查询 bot open_id：
+
+```bash
+TOKEN=$(curl -s -X POST "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" \
+  -H "Content-Type: application/json" \
+  -d '{"app_id":"cli_xxx","app_secret":"xxx"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['tenant_access_token'])")
+
+curl -s "https://open.feishu.cn/open-apis/bot/v3/info" \
+  -H "Authorization: Bearer $TOKEN" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); b=d.get('bot') or d.get('data',{}).get('bot') or {}; print(b['open_id'])"
+```
+
+写回实例：
+
+```bash
+curl -s -X PUT "https://admin.carher.net/api/instances/<ID>" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"bot_open_id":"ou_xxx"}'
+```
+
+kubectl 可用时也要确认已落到运行配置：
+
+```bash
+kubectl get her her-<ID> -n carher -o jsonpath='{.spec.botOpenId}{"\n"}'
+kubectl exec -n carher deploy/carher-<ID> -c carher -- \
+  python3 -c 'import json; print(json.load(open("/data/.openclaw/openclaw.json"))["channels"]["feishu"].get("botOpenId"))'
+```
+
 ### Owner open_id 查找规则
 
 > **关键**：飞书 open_id 是 per-app 的，同一个用户在不同飞书应用下有不同的 open_id。
@@ -274,6 +310,11 @@ curl -s -H "X-API-Key: $API_KEY" "https://admin.carher.net/api/instances/201"
 
 按照上面「Owner open_id 查找规则」的三步流程操作。**每个实例都必须用自己的 app 凭据查**。
 
+### Step 2.5: 查询 bot open_id（强制）
+
+按「Bot open_id 必填校验」查询每个新 app 自己的 bot open_id。创建后必须写回
+`bot_open_id` 并确认运行 Pod 的 `openclaw.json` 包含 `channels.feishu.botOpenId`。
+
 ### Step 3: batch-import 创建实例
 
 **必须显式指定 `provider` 和 `model`**，不要依赖后端默认值。
@@ -357,6 +398,49 @@ scripts/litellm-key-budget.py --inspect
 预期看到 `✓ carher-NNN → $100.0/1d (was 无限额)`。`/key/update` 是热更新无需重启。
 
 3 个特批高额度白名单（不会被覆盖）：carher-2 ($300), carher-11 ($200), carher-94 ($150)。要给某个 her 改成非默认值，用 `scripts/litellm-key-budget.py --apply --force --key carher-NNN --budget 200`。
+
+### Step 3.7: H75/OpenClaw 新实例 post-create 收敛（强制，272-280 教训）
+
+如果本批实例是 H75/OpenClaw runtime，创建成功不等于可用。必须在创建后把 CRD 收敛到当前已验证的 H75 基线，并逐个写入 bot open_id。否则会出现 Pod/WS/Cloudflare 看似正常，但群里 `@bot` 不回复；或旧 H75 镜像在启动时尝试删除挂载目录导致 `Device or resource busy`。
+
+每次先重查当前已验证 H75 样板（例如 carher-66 / carher-281），不要盲目沿用旧 tag。2026-06-20 已验证基线示例：
+
+- `spec.image=h75-runtime-4321dd-her75-20260619-thinkingmaxfix2`
+- `metadata.annotations.carher.io/runtime-profile=h75-openclaw`
+- `metadata.annotations.carher.io/hermes-provider=litellm`
+- `metadata.annotations.carher.io/hermes-config-template=/opt/data/.hermes/config-litellm.yaml`
+- `spec.botOpenId=<该实例自己的 bot.open_id>`，来自 Step 2.5，不是 owner open_id
+
+kubectl 可用时直接 patch HerInstance，确保 operator 渲染的是持久 CRD 状态，而不是只给 Deployment 打一次性 command hotfix：
+
+```bash
+TARGET_IMAGE="h75-runtime-4321dd-her75-20260619-thinkingmaxfix2"  # 每次先按已验证样板重查
+for id in 272 273 274; do
+  BOT_OPEN_ID="ou_xxx_for_this_app"  # 来自 Step 2.5，每个 app 单独查询
+  kubectl patch her "her-$id" -n carher --type=merge -p '{
+    "metadata":{"annotations":{
+      "carher.io/runtime-profile":"h75-openclaw",
+      "carher.io/hermes-provider":"litellm",
+      "carher.io/hermes-config-template":"/opt/data/.hermes/config-litellm.yaml",
+      "carher.io/reconcile-poke":"'"$(date +%s)"'"
+    }},
+    "spec":{
+      "image":"'"$TARGET_IMAGE"'",
+      "deployGroup":"beta-h75-'"$id"'",
+      "botOpenId":"'"$BOT_OPEN_ID"'"
+    }
+  }'
+done
+```
+
+H75 批量验收必须比普通新建更严格：
+
+- CRD `spec.image` 等于目标 H75 image，`spec.botOpenId` 非空。
+- Deployment 由 operator 渲染，无残留 `command` 临时热修 wrapper。
+- Pod `2/2 Running`，新 pod 主容器 restart count 为 `0`。
+- `/data/.openclaw/openclaw.json` 包含 `channels.feishu.botOpenId`。
+- main container `127.0.0.1:18789/healthz` 返回 live。
+- 近 10 分钟日志没有 `cannot remove|Device or resource busy|CrashLoop|BackOff|Unknown provider|No adapter available|reload still deferred`。
 
 ### Step 4: 验证创建结果
 

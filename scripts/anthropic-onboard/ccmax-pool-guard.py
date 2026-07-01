@@ -185,11 +185,18 @@ def compute_state(
     old_state = old.get("state", "UNKNOWN")
     state = old_state if old_state != "UNKNOWN" else "ACTIVE"
     reason = old.get("drained_reason")
+    manual_mode = item.get("manual_mode") or old.get("manual_mode") or "auto"
     cooldown_until = int(old.get("cooldown_until") or 0)
     consecutive_over = int(old.get("consecutive_over_limit") or 0)
     consecutive_healthy = int(old.get("consecutive_healthy") or 0)
 
-    if not item.get("enabled", True):
+    if manual_mode == "manual_offline":
+        state = "DISABLED"
+        reason = "manual_offline via acct web"
+        cooldown_until = 0
+        consecutive_over = 0
+        consecutive_healthy = 0
+    elif not item.get("enabled", True):
         state = "DISABLED"
         reason = "config_disabled"
         cooldown_until = 0
@@ -254,9 +261,15 @@ def compute_state(
             reason = None
             cooldown_until = 0
 
+    if manual_mode == "manual_online" and item.get("enabled", True) and state != "HARD_DOWN":
+        state = "ACTIVE"
+        reason = "manual_online via acct web"
+        cooldown_until = 0
+
     return {
         "acct": acct,
         "enabled": bool(item.get("enabled", True)),
+        "manual_mode": manual_mode,
         "state": state,
         "previous_state": old_state,
         "status": result.status,

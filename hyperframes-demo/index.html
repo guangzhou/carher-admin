@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1920, height=1080">
+    <title>CarHer Admin Pulse Demo</title>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      :root {
+        --bg: #071512;
+        --panel: #10221d;
+        --panel-strong: #173229;
+        --fg: #f3eadc;
+        --muted: #a8b8aa;
+        --accent: #d8863b;
+        --signal: #72d2a3;
+        --danger: #f06449;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: #071512;
+        color: #f3eadc;
+        font-family: "Space Mono", monospace;
+      }
+
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: #071512;
+      }
+
+      .scene {
+        position: absolute;
+        inset: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background-color: #071512;
+      }
+
+      #scene-1 {
+        z-index: 1;
+      }
+
+      #scene-2 {
+        z-index: 2;
+        opacity: 0;
+      }
+
+      #scene-3 {
+        z-index: 3;
+        opacity: 0;
+      }
+
+      .scene-content {
+        position: relative;
+        z-index: 5;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        width: 100%;
+        height: 100%;
+        padding: 86px 118px;
+        gap: 42px;
+      }
+
+      .grain {
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        opacity: 0.16;
+        background-image:
+          radial-gradient(circle at 18% 22%, rgba(216, 134, 59, 0.2), rgba(216, 134, 59, 0) 28%),
+          radial-gradient(circle at 82% 72%, rgba(114, 210, 163, 0.2), rgba(114, 210, 163, 0) 30%),
+          repeating-linear-gradient(0deg, rgba(243, 234, 220, 0.03) 0 1px, rgba(7, 21, 18, 0) 1px 9px),
+          repeating-linear-gradient(90deg, rgba(243, 234, 220, 0.025) 0 1px, rgba(7, 21, 18, 0) 1px 11px);
+      }
+
+      .glow {
+        position: absolute;
+        width: 760px;
+        height: 760px;
+        border-radius: 50%;
+        filter: blur(12px);
+        opacity: 0.5;
+        background: radial-gradient(circle, rgba(216, 134, 59, 0.26) 0%, rgba(216, 134, 59, 0) 66%);
+      }
+
+      .glow.right {
+        right: -220px;
+        bottom: -190px;
+        background: radial-gradient(circle, rgba(114, 210, 163, 0.24) 0%, rgba(114, 210, 163, 0) 64%);
+      }
+
+      .ghost {
+        position: absolute;
+        z-index: 2;
+        color: rgba(243, 234, 220, 0.38);
+        font-family: Georgia, serif;
+        font-size: 196px;
+        font-weight: 900;
+        line-height: 0.9;
+        letter-spacing: 0.01em;
+        white-space: nowrap;
+        pointer-events: none;
+      }
+
+      .topline,
+      .bottomline {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        color: #a8b8aa;
+        font-size: 22px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .rule {
+        display: block;
+        width: 100%;
+        height: 3px;
+        background: #d8863b;
+        transform-origin: left center;
+      }
+
+      .hero-row {
+        display: grid;
+        grid-template-columns: 1.1fr 0.9fr;
+        align-items: end;
+        gap: 76px;
+        min-height: 600px;
+      }
+
+      .eyebrow {
+        color: #d8863b;
+        font-size: 24px;
+        text-transform: uppercase;
+        letter-spacing: 0.11em;
+      }
+
+      h1,
+      h2 {
+        margin: 0;
+        font-family: Georgia, serif;
+        font-weight: 900;
+        line-height: 0.9;
+        letter-spacing: 0.01em;
+      }
+
+      .mega {
+        margin-top: 52px;
+        font-size: 250px;
+        color: #f3eadc;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .title {
+        margin-top: 24px;
+        max-width: 930px;
+        font-size: 86px;
+      }
+
+      .copy {
+        max-width: 720px;
+        color: #c8d2c5;
+        font-size: 34px;
+        line-height: 1.28;
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 18px;
+      }
+
+      .stat {
+        display: grid;
+        grid-template-columns: 170px 1fr;
+        align-items: center;
+        gap: 24px;
+        padding: 26px 30px;
+        border: 2px solid rgba(216, 134, 59, 0.72);
+        background: rgba(16, 34, 29, 0.78);
+      }
+
+      .stat-value {
+        color: #72d2a3;
+        font-size: 48px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .stat-label {
+        color: #f3eadc;
+        font-size: 24px;
+        line-height: 1.25;
+      }
+
+      .pulse-field {
+        position: absolute;
+        right: 110px;
+        top: 150px;
+        z-index: 3;
+        display: grid;
+        grid-template-columns: repeat(9, 18px);
+        gap: 20px;
+        opacity: 0.9;
+      }
+
+      .dot {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #72d2a3;
+        box-shadow: 0 0 24px rgba(114, 210, 163, 0.52);
+      }
+
+      .path-layout {
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        gap: 40px;
+        height: 100%;
+      }
+
+      .scene-heading {
+        max-width: 1080px;
+        font-size: 92px;
+      }
+
+      .flow {
+        position: relative;
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        align-items: center;
+        gap: 24px;
+        min-height: 420px;
+      }
+
+      .route-line {
+        position: absolute;
+        left: 7%;
+        right: 7%;
+        top: 50%;
+        height: 5px;
+        background: #d8863b;
+        transform-origin: left center;
+      }
+
+      .node {
+        position: relative;
+        z-index: 2;
+        min-height: 250px;
+        padding: 34px 26px;
+        border: 2px solid rgba(168, 184, 170, 0.5);
+        background: rgba(16, 34, 29, 0.92);
+      }
+
+      .node strong {
+        display: block;
+        color: #f3eadc;
+        font-family: Georgia, serif;
+        font-size: 42px;
+        line-height: 1;
+      }
+
+      .node span {
+        display: block;
+        margin-top: 20px;
+        color: #a8b8aa;
+        font-size: 22px;
+        line-height: 1.35;
+      }
+
+      .live-dot {
+        position: absolute;
+        right: 22px;
+        bottom: 22px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #72d2a3;
+        box-shadow: 0 0 20px rgba(114, 210, 163, 0.56);
+      }
+
+      .scanner {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: -70px;
+        z-index: 4;
+        height: 5px;
+        background: #72d2a3;
+        box-shadow: 0 0 34px rgba(114, 210, 163, 0.68);
+      }
+
+      .ops-strip {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 18px;
+      }
+
+      .pill {
+        padding: 20px 24px;
+        border: 2px solid rgba(216, 134, 59, 0.54);
+        color: #c8d2c5;
+        font-size: 22px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .final-layout {
+        display: grid;
+        grid-template-columns: 1fr 0.82fr;
+        align-items: center;
+        gap: 86px;
+        height: 100%;
+      }
+
+      .final-title {
+        max-width: 1040px;
+        font-size: 116px;
+      }
+
+      .final-copy {
+        max-width: 780px;
+        margin-top: 34px;
+        color: #c8d2c5;
+        font-size: 36px;
+        line-height: 1.25;
+      }
+
+      .status-board {
+        display: grid;
+        gap: 22px;
+      }
+
+      .capsule {
+        padding: 30px;
+        background: rgba(16, 34, 29, 0.9);
+        border: 2px solid rgba(168, 184, 170, 0.5);
+      }
+
+      .capsule .label {
+        color: #a8b8aa;
+        font-size: 20px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .capsule .value {
+        margin-top: 14px;
+        color: #72d2a3;
+        font-size: 46px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .bar {
+        position: relative;
+        height: 34px;
+        overflow: hidden;
+        border: 2px solid #d8863b;
+        background: rgba(216, 134, 59, 0.12);
+      }
+
+      .bar-fill {
+        width: 100%;
+        height: 100%;
+        background: #d8863b;
+        transform-origin: left center;
+      }
+
+      .cta {
+        margin-top: 32px;
+        color: #f3eadc;
+        font-size: 30px;
+      }
+
+      .corner {
+        position: absolute;
+        z-index: 4;
+        width: 78px;
+        height: 78px;
+        border-color: #d8863b;
+        border-style: solid;
+        opacity: 0.9;
+      }
+
+      .corner.tl {
+        top: 70px;
+        left: 70px;
+        border-width: 3px 0 0 3px;
+      }
+
+      .corner.br {
+        right: 70px;
+        bottom: 70px;
+        border-width: 0 3px 3px 0;
+      }
+
+      .wipe {
+        position: absolute;
+        inset: 0;
+        z-index: 20;
+        background: #d8863b;
+      }
+
+      .blackout {
+        position: absolute;
+        inset: 0;
+        z-index: 30;
+        background: #071512;
+        opacity: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div data-hf-id="hf-5n5r" id="root" data-composition-id="main" data-width="1920" data-height="1080" data-start="0" data-duration="9">
+      <section data-hf-id="hf-px3q" id="scene-1" class="scene" data-layout-allow-overlap="">
+        <div data-hf-id="hf-ryn8" class="grain" data-layout-ignore=""></div>
+        <div data-hf-id="hf-9m5d" class="glow" style="left: -210px; top: -180px" data-layout-ignore=""></div>
+        <div data-hf-id="hf-tkr4" class="glow right" data-layout-ignore=""></div>
+        <div data-hf-id="hf-t2zm" class="ghost" style="left: 580px; top: 40px" data-layout-ignore="">HERINSTANCE</div>
+        <div data-hf-id="hf-4q1t" class="pulse-field" data-layout-ignore="">
+          <span data-hf-id="hf-9gry" class="dot"></span><span data-hf-id="hf-zcc2" class="dot"></span><span data-hf-id="hf-zqn3" class="dot"></span><span data-hf-id="hf-04y4" class="dot"></span><span data-hf-id="hf-0j95" class="dot"></span><span data-hf-id="hf-0xk6" class="dot"></span><span data-hf-id="hf-1bv7" class="dot"></span><span data-hf-id="hf-1q68" class="dot"></span><span data-hf-id="hf-vrkt" class="dot"></span>
+          <span data-hf-id="hf-w5vu" class="dot"></span><span data-hf-id="hf-mnty" class="dot"></span><span data-hf-id="hf-m9ix" class="dot"></span><span data-hf-id="hf-ngg0" class="dot"></span><span data-hf-id="hf-n24z" class="dot"></span><span data-hf-id="hf-l2lu" class="dot"></span><span data-hf-id="hf-koat" class="dot"></span><span data-hf-id="hf-lv7w" class="dot"></span><span data-hf-id="hf-lgwv" class="dot"></span>
+          <span data-hf-id="hf-jhdq" class="dot"></span><span data-hf-id="hf-j32p" class="dot"></span><span data-hf-id="hf-96d9" class="dot"></span><span data-hf-id="hf-9koa" class="dot"></span><span data-hf-id="hf-9yzb" class="dot"></span><span data-hf-id="hf-adac" class="dot"></span><span data-hf-id="hf-arld" class="dot"></span><span data-hf-id="hf-b5we" class="dot"></span><span data-hf-id="hf-bk7f" class="dot"></span>
+        </div>
+        <div data-hf-id="hf-cn5c" class="scene-content">
+          <div data-hf-id="hf-o5lv" class="topline">
+            <span data-hf-id="hf-j64h">carher-admin / operator / cloudflared</span>
+            <span data-hf-id="hf-jjgw">live fleet surface</span>
+          </div>
+          <span data-hf-id="hf-6o6j" class="rule"></span>
+          <div data-hf-id="hf-dw8f" class="hero-row">
+            <div data-hf-id="hf-yeow">
+              <div data-hf-id="hf-95ey" class="eyebrow">single control plane</div>
+              <h1 data-hf-id="hf-zoco" class="mega">500+</h1>
+              <h2 data-hf-id="hf-azua" class="title">CarHer instances under one reconcile loop</h2>
+            </div>
+            <div data-hf-id="hf-rhep" class="stats">
+              <div data-hf-id="hf-xa0m" class="stat">
+                <div data-hf-id="hf-33p5" class="stat-value">60+</div>
+                <div data-hf-id="hf-6wiw" class="stat-label">REST APIs for lifecycle control</div>
+              </div>
+              <div data-hf-id="hf-tx7e" class="stat">
+                <div data-hf-id="hf-56sy" class="stat-value">30s</div>
+                <div data-hf-id="hf-feqs" class="stat-label">operator health check cadence</div>
+              </div>
+              <div data-hf-id="hf-ubif" class="stat">
+                <div data-hf-id="hf-2wca" class="stat-value">0</div>
+                <div data-hf-id="hf-ojqc" class="stat-label">manual pod deletes in rollout flow</div>
+              </div>
+            </div>
+          </div>
+          <div data-hf-id="hf-gc0b" class="bottomline">
+            <span data-hf-id="hf-dhrp">source of truth: HerInstance CRD</span>
+            <span data-hf-id="hf-r6v3">state: observed, patched, reconciled</span>
+          </div>
+        </div>
+      </section>
+
+      <section data-hf-id="hf-lyzp" id="scene-2" class="scene" data-layout-allow-overlap="">
+        <div data-hf-id="hf-3obg" class="grain" data-layout-ignore=""></div>
+        <div data-hf-id="hf-1kqy" class="glow" style="left: 640px; top: 360px" data-layout-ignore=""></div>
+        <div data-hf-id="hf-1ur0" class="ghost" style="left: 90px; bottom: 80px" data-layout-ignore="">RECONCILE</div>
+        <div data-hf-id="hf-cjhj" class="scanner" data-layout-ignore=""></div>
+        <div data-hf-id="hf-sfgo" class="scene-content path-layout">
+          <div data-hf-id="hf-pz6r" class="topline">
+            <span data-hf-id="hf-2l29">request path</span>
+            <span data-hf-id="hf-d3r7">config hash / pvc / service / pod</span>
+          </div>
+          <h2 data-hf-id="hf-90pg" class="scene-heading">A config change becomes a running bot.</h2>
+          <div data-hf-id="hf-ck2w" class="flow">
+            <span data-hf-id="hf-uxyb" class="route-line"></span>
+            <div data-hf-id="hf-cdek" class="node">
+              <strong data-hf-id="hf-gsyh">Admin API</strong>
+              <span data-hf-id="hf-vr89">validates instance spec and app secret ownership</span>
+              <i data-hf-id="hf-erv9" class="live-dot" aria-hidden="true"></i>
+            </div>
+            <div data-hf-id="hf-7gt0" class="node">
+              <strong data-hf-id="hf-ll2l">CRD</strong>
+              <span data-hf-id="hf-lxgm">HerInstance stores desired config in etcd</span>
+              <i data-hf-id="hf-yy89" class="live-dot" aria-hidden="true"></i>
+            </div>
+            <div data-hf-id="hf-vam3" class="node" id="operator-node">
+              <strong data-hf-id="hf-x7ve">Operator</strong>
+              <span data-hf-id="hf-srwv">calculates hash, marks dirty, reconciles status</span>
+              <i data-hf-id="hf-055c" class="live-dot" aria-hidden="true"></i>
+            </div>
+            <div data-hf-id="hf-69vx" class="node">
+              <strong data-hf-id="hf-bj11">Pod</strong>
+              <span data-hf-id="hf-pnyb">mounts PVC, ConfigMap, skills, sessions</span>
+              <i data-hf-id="hf-zqub" class="live-dot" aria-hidden="true"></i>
+            </div>
+            <div data-hf-id="hf-6o6y" class="node">
+              <strong data-hf-id="hf-a8m9">Ingress</strong>
+              <span data-hf-id="hf-wm1w">cloudflared maps stable public route</span>
+              <i data-hf-id="hf-xrb6" class="live-dot" aria-hidden="true"></i>
+            </div>
+          </div>
+          <div data-hf-id="hf-ao29" class="ops-strip">
+            <div data-hf-id="hf-kem2" class="pill">apply, never delete</div>
+            <div data-hf-id="hf-75zy" class="pill">rolling status watched</div>
+            <div data-hf-id="hf-5d0r" class="pill">acr vpc image pulls</div>
+            <div data-hf-id="hf-2v4d" class="pill">sqlite backed up to nas</div>
+          </div>
+        </div>
+      </section>
+
+      <section data-hf-id="hf-l7bw" id="scene-3" class="scene" data-layout-allow-overlap="">
+        <div data-hf-id="hf-2hed" class="grain" data-layout-ignore=""></div>
+        <div data-hf-id="hf-gs2w" class="glow right" data-layout-ignore=""></div>
+        <div data-hf-id="hf-ofrz" class="ghost" style="right: -40px; top: 78px" data-layout-ignore="">ROLLING</div>
+        <div data-hf-id="hf-3iiw" class="corner tl" data-layout-ignore=""></div>
+        <div data-hf-id="hf-mum8" class="corner br" data-layout-ignore=""></div>
+        <div data-hf-id="hf-o0eg" class="scene-content">
+          <div data-hf-id="hf-pkvq" class="topline">
+            <span data-hf-id="hf-roef">rollout state</span>
+            <span data-hf-id="hf-ej8i">ready / routed / observable</span>
+          </div>
+          <div data-hf-id="hf-pk5j" class="final-layout">
+            <div data-hf-id="hf-y7yw">
+              <h2 data-hf-id="hf-meom" class="final-title">Ship changes without losing the fleet.</h2>
+              <p data-hf-id="hf-w2zh" class="final-copy">
+                Admin owns intent. Operator owns convergence. Every instance keeps its data, route, and runtime contract.
+              </p>
+              <div data-hf-id="hf-zt8a" class="cta">codex demo / hyperframes composition / 9s</div>
+            </div>
+            <div data-hf-id="hf-b38p" class="status-board">
+              <div data-hf-id="hf-phjp" class="capsule">
+                <div data-hf-id="hf-vdg4" class="label">deployment mode</div>
+                <div data-hf-id="hf-pi30" class="value">zero interruption</div>
+              </div>
+              <div data-hf-id="hf-hirt" class="capsule">
+                <div data-hf-id="hf-t999" class="label">health source</div>
+                <div data-hf-id="hf-a76s" class="value">crd status</div>
+              </div>
+              <div data-hf-id="hf-ipow" class="capsule">
+                <div data-hf-id="hf-3jee" class="label">rollout progress</div>
+                <div data-hf-id="hf-ufsv" class="bar"><div data-hf-id="hf-sf97" class="bar-fill"></div></div>
+              </div>
+            </div>
+          </div>
+          <div data-hf-id="hf-6xij" class="bottomline">
+            <span data-hf-id="hf-3ge6">kubectl rollout status</span>
+            <span data-hf-id="hf-1fop">dashboard stays live</span>
+          </div>
+        </div>
+      </section>
+
+      <div data-hf-id="hf-5yhw" class="wipe" data-layout-ignore=""></div>
+      <div data-hf-id="hf-tfqf" class="blackout"></div>
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      var tl = gsap.timeline({ paused: true });
+
+      function breathe(selector, time, duration, scale, y) {
+        tl.to(selector, {
+          scale: scale,
+          y: y,
+          duration: duration,
+          repeat: Math.max(0, Math.floor(9 / duration) - 1),
+          yoyo: true,
+          ease: "sine.inOut"
+        }, time);
+      }
+
+      function diagonalWipe(time) {
+        tl.fromTo(".wipe", { xPercent: -120, skewX: -12 }, { xPercent: 120, skewX: -12, duration: 0.55, ease: "power3.inOut" }, time);
+        tl.set("#scene-2", { opacity: 1, clipPath: "polygon(0 0, 0 0, 0 100%, 0 100%)" }, time + 0.2);
+        tl.to("#scene-2", { clipPath: "polygon(0 0, 100% 0, 100% 100%, 0 100%)", duration: 0.46, ease: "power2.out" }, time + 0.18);
+        tl.set("#scene-1", { opacity: 0 }, time + 0.72);
+        tl.set(".wipe", { xPercent: -120, skewX: -12 }, time + 0.78);
+      }
+
+      function irisReveal(time) {
+        tl.set("#scene-3", { opacity: 1, clipPath: "circle(0% at 58% 50%)" }, time);
+        tl.to("#scene-3", { clipPath: "circle(142% at 58% 50%)", duration: 0.7, ease: "expo.inOut" }, time);
+        tl.set("#scene-2", { opacity: 0 }, time + 0.72);
+      }
+
+      breathe("#scene-1 .glow", 0, 1.8, 1.06, 12);
+      breathe("#scene-1 .ghost", 0, 2.3, 1, -18);
+      breathe("#scene-2 .glow", 3.05, 1.6, 1.04, -16);
+      breathe("#scene-3 .glow", 6.25, 1.9, 1.05, 14);
+      breathe("#scene-3 .ghost", 6.25, 2.2, 1, -14);
+
+      tl.fromTo("#scene-1 .topline span", { opacity: 0, y: -22 }, { opacity: 1, y: 0, duration: 0.38, stagger: 0.12, ease: "power3.out" }, 0.18);
+      tl.fromTo("#scene-1 .rule", { scaleX: 0 }, { scaleX: 1, duration: 0.58, ease: "expo.out" }, 0.32);
+      tl.fromTo("#scene-1 .eyebrow", { opacity: 0, x: -54 }, { opacity: 1, x: 0, duration: 0.42, ease: "back.out(1.4)" }, 0.48);
+      tl.fromTo("#scene-1 .mega", { opacity: 0, y: 90, scale: 0.9 }, { opacity: 1, y: 0, scale: 1, duration: 0.72, ease: "power4.out" }, 0.62);
+      tl.fromTo("#scene-1 .title", { opacity: 0, x: -70 }, { opacity: 1, x: 0, duration: 0.56, ease: "circ.out" }, 0.92);
+      tl.fromTo("#scene-1 .stat", { opacity: 0, x: 76, rotation: 1.8 }, { opacity: 1, x: 0, rotation: 0, duration: 0.48, stagger: 0.13, ease: "expo.out" }, 0.86);
+      tl.fromTo("#scene-1 .dot", { opacity: 0, scale: 0.35 }, { opacity: 1, scale: 1, duration: 0.24, stagger: 0.025, ease: "back.out(2)" }, 1.2);
+      tl.fromTo("#scene-1 .bottomline span", { opacity: 0, y: 22 }, { opacity: 1, y: 0, duration: 0.36, stagger: 0.1, ease: "power2.out" }, 1.54);
+      tl.to("#scene-1 .dot", { scale: 1.45, opacity: 0.55, duration: 0.52, repeat: 3, yoyo: true, stagger: 0.018, ease: "sine.inOut" }, 1.8);
+
+      diagonalWipe(2.68);
+
+      tl.fromTo("#scene-2 .topline span", { opacity: 0, y: -28 }, { opacity: 1, y: 0, duration: 0.36, stagger: 0.11, ease: "power2.out" }, 3.22);
+      tl.fromTo("#scene-2 .scene-heading", { opacity: 0, x: -92, filter: "blur(14px)" }, { opacity: 1, x: 0, filter: "blur(0px)", duration: 0.62, ease: "expo.out" }, 3.32);
+      tl.fromTo("#scene-2 .route-line", { scaleX: 0 }, { scaleX: 1, duration: 0.82, ease: "power4.out" }, 3.76);
+      tl.fromTo("#scene-2 .node", { opacity: 0, y: 70, scale: 0.94 }, { opacity: 1, y: 0, scale: 1, duration: 0.5, stagger: 0.12, ease: "back.out(1.25)" }, 3.88);
+      tl.fromTo("#scene-2 .pill", { opacity: 0, x: -34 }, { opacity: 1, x: 0, duration: 0.34, stagger: 0.08, ease: "circ.out" }, 4.72);
+      tl.to("#scene-2 .scanner", { y: 1210, duration: 2.05, ease: "none" }, 3.4);
+      tl.to("#scene-2 .live-dot", { opacity: 0.4, duration: 0.5, repeat: 3, yoyo: true, stagger: 0.08, ease: "sine.inOut" }, 4.82);
+
+      irisReveal(5.88);
+
+      tl.fromTo("#scene-3 .topline span", { opacity: 0, y: -24 }, { opacity: 1, y: 0, duration: 0.38, stagger: 0.1, ease: "power3.out" }, 6.48);
+      tl.fromTo("#scene-3 .final-title", { opacity: 0, scale: 0.9, x: -34 }, { opacity: 1, scale: 1, x: 0, duration: 0.74, ease: "expo.out" }, 6.58);
+      tl.fromTo("#scene-3 .final-copy", { opacity: 0, y: 42 }, { opacity: 1, y: 0, duration: 0.48, ease: "circ.out" }, 6.98);
+      tl.fromTo("#scene-3 .capsule", { opacity: 0, x: 78 }, { opacity: 1, x: 0, duration: 0.46, stagger: 0.13, ease: "back.out(1.35)" }, 6.78);
+      tl.fromTo("#scene-3 .bar-fill", { scaleX: 0 }, { scaleX: 1, duration: 0.76, ease: "power4.out" }, 7.38);
+      tl.fromTo("#scene-3 .cta", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.42, ease: "power2.out" }, 7.64);
+      tl.fromTo("#scene-3 .bottomline span", { opacity: 0, y: 18 }, { opacity: 1, y: 0, duration: 0.34, stagger: 0.1, ease: "sine.out" }, 7.82);
+      tl.to(".blackout", { opacity: 1, duration: 0.5, ease: "power2.inOut" }, 8.5);
+
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

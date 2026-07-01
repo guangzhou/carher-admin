@@ -362,6 +362,11 @@ def update_remote_ingress(
     managed_hostnames: set[str] = set()
     unresolved_hostnames: set[str] = set()
     unresolved_uids: list[int] = []
+    proxy_ip = _get_svc_cluster_ip(AUTH_PROXY_SVC)
+    if not proxy_ip:
+        raise RuntimeError(f"{AUTH_PROXY_SVC} service not found")
+    proxy_service = f"http://{proxy_ip}:80"
+
     for uid, prefix in target_instances:
         auth_host, fe_host, proxy_host = _build_instance_hostnames(uid, prefix)
         hostnames = [auth_host, fe_host, proxy_host]
@@ -376,9 +381,9 @@ def update_remote_ingress(
 
         managed_hostnames.update(hostnames)
         desired_rules.extend([
-            {"hostname": auth_host, "service": f"http://{svc_ip}:18891", "originRequest": {}},
-            {"hostname": fe_host, "service": f"http://{svc_ip}:8000", "originRequest": {}},
-            {"hostname": proxy_host, "service": f"http://{svc_ip}:8080", "originRequest": {}},
+            {"hostname": auth_host, "service": proxy_service, "originRequest": {}},
+            {"hostname": fe_host, "service": proxy_service, "originRequest": {}},
+            {"hostname": proxy_host, "service": proxy_service, "originRequest": {}},
         ])
 
     infra_rules, unresolved_infra_hostnames = _resolve_infra_rules(include_origin_request=True)

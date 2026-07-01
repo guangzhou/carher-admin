@@ -1,0 +1,293 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-memory-rebalancer
+  namespace: carher
+  labels:
+    app: node-memory-rebalancer
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-memory-rebalancer-script
+  namespace: carher
+  labels:
+    app: node-memory-rebalancer
+data:
+  rebalance.py: |
+    import json
+    import os
+    import re
+    import ssl
+    import time
+    import urllib.error
+    import urllib.request
+
+    API = "https://kubernetes.default.svc"
+    TOKEN = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read().strip()
+    CA = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    NS = os.environ.get("TARGET_NAMESPACE", "carher")
+    THRESHOLD = float(os.environ.get("MEM_THRESHOLD_PERCENT", "85"))
+    TARGET = float(os.environ.get("MEM_TARGET_PERCENT", "78"))
+    MAX_ROLLOUTS = int(os.environ.get("MAX_ROLLOUTS_PER_NODE", "3"))
+    WAIT_SECONDS = int(os.environ.get("ROLLOUT_WAIT_SECONDS", "240"))
+    DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+
+    ctx = ssl.create_default_context(cafile=CA)
+
+    def log(msg):
+        print(time.strftime("[%Y-%m-%d %H:%M:%S %z]"), msg, flush=True)
+
+    def quantity_to_bytes(value):
+        value = str(value)
+        match = re.match(r"^([0-9.]+)([A-Za-z]*)$", value)
+        if not match:
+            return 0
+        number = float(match.group(1))
+        suffix = match.group(2)
+        powers = {
+            "Ki": 1024,
+            "Mi": 1024**2,
+            "Gi": 1024**3,
+            "Ti": 1024**4,
+            "K": 1000,
+            "M": 1000**2,
+            "G": 1000**3,
+            "T": 1000**4,
+            "": 1,
+        }
+        return int(number * powers.get(suffix, 1))
+
+    def request(method, path, body=None):
+        data = None
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/merge-patch+json" if method == "PATCH" else "application/json"
+        req = urllib.request.Request(API + path, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else {}
+
+    def get(path):
+        return request("GET", path)
+
+    def patch(path, body):
+        if DRY_RUN:
+            log(f"DRY_RUN patch {path}: {body}")
+            return {}
+        return request("PATCH", path, body)
+
+    def node_capacity_bytes(node):
+        for item in node["status"].get("allocatable", {}), node["status"].get("capacity", {}):
+            mem = item.get("memory")
+            if mem:
+                return quantity_to_bytes(mem)
+        return 0
+
+    def deployment_name_from_pod(pod_name):
+        match = re.match(r"^(carher-[0-9]+)-", pod_name)
+        return match.group(1) if match else ""
+
+    def pod_ready(pod):
+        if pod.get("status", {}).get("phase") != "Running":
+            return False
+        statuses = pod.get("status", {}).get("containerStatuses", [])
+        if statuses and not all(status.get("ready") for status in statuses):
+            return False
+        gates = [
+            cond for cond in pod.get("status", {}).get("conditions", [])
+            if cond.get("type") == "carher.io/feishu-ws-ready"
+        ]
+        return not gates or all(cond.get("status") == "True" for cond in gates)
+
+    def wait_deployment_available(name):
+        deadline = time.time() + WAIT_SECONDS
+        while time.time() < deadline:
+            deploy = get(f"/apis/apps/v1/namespaces/{NS}/deployments/{name}")
+            status = deploy.get("status", {})
+            generation = deploy.get("metadata", {}).get("generation")
+            observed = status.get("observedGeneration", 0)
+            available = status.get("availableReplicas", 0)
+            updated = status.get("updatedReplicas", 0)
+            if observed >= generation and available >= 1 and updated >= 1:
+                return True
+            time.sleep(5)
+        return False
+
+    def rebalance_node(node_name, current_pct):
+        log(f"node {node_name} memory={current_pct:.2f}% exceeds threshold={THRESHOLD:.2f}%")
+        patch(f"/api/v1/nodes/{node_name}", {"spec": {"unschedulable": True}})
+        try:
+            pod_metrics = {
+                item["metadata"]["name"]: quantity_to_bytes(item["containers"][0]["usage"]["memory"])
+                for item in get(f"/apis/metrics.k8s.io/v1beta1/namespaces/{NS}/pods").get("items", [])
+                if item.get("containers")
+            }
+            pods = get(f"/api/v1/namespaces/{NS}/pods?fieldSelector=spec.nodeName={node_name}").get("items", [])
+            candidates = []
+            for pod in pods:
+                pod_name = pod["metadata"]["name"]
+                deploy = deployment_name_from_pod(pod_name)
+                if not deploy or not pod_ready(pod):
+                    continue
+                candidates.append((pod_metrics.get(pod_name, 0), deploy, pod_name))
+            candidates.sort(reverse=True)
+            if not candidates:
+                log(f"node {node_name}: no ready carher deployment candidates")
+                return
+            for memory_bytes, deploy, pod_name in candidates[:MAX_ROLLOUTS]:
+                stamp = str(int(time.time()))
+                log(f"rollout {deploy} from {pod_name}, memory={memory_bytes // 1024 // 1024}Mi")
+                patch(
+                    f"/apis/apps/v1/namespaces/{NS}/deployments/{deploy}",
+                    {
+                        "spec": {
+                            "template": {
+                                "metadata": {
+                                    "annotations": {
+                                        "carher.io/node-memory-rebalance-ts": stamp,
+                                        "carher.io/node-memory-rebalance-source-node": node_name,
+                                    }
+                                }
+                            }
+                        }
+                    },
+                )
+                if not wait_deployment_available(deploy):
+                    log(f"rollout wait timeout for {deploy}; stop this node")
+                    break
+                nodes = current_node_percentages()
+                new_pct = nodes.get(node_name, current_pct)
+                log(f"node {node_name} memory after rollout={new_pct:.2f}%")
+                if new_pct <= TARGET:
+                    break
+        finally:
+            patch(f"/api/v1/nodes/{node_name}", {"spec": {"unschedulable": False}})
+            log(f"node {node_name} uncordoned")
+
+    def current_node_percentages():
+        nodes = {item["metadata"]["name"]: item for item in get("/api/v1/nodes").get("items", [])}
+        metrics = get("/apis/metrics.k8s.io/v1beta1/nodes").get("items", [])
+        result = {}
+        for item in metrics:
+            name = item["metadata"]["name"]
+            capacity = node_capacity_bytes(nodes.get(name, {}))
+            usage = quantity_to_bytes(item["usage"]["memory"])
+            if capacity:
+                result[name] = usage * 100 / capacity
+        return result
+
+    def main():
+        percentages = current_node_percentages()
+        if not percentages:
+            raise SystemExit("no node metrics found")
+        for node, pct in sorted(percentages.items(), key=lambda item: item[1], reverse=True):
+            log(f"node {node} memory={pct:.2f}%")
+        hot_nodes = [(node, pct) for node, pct in percentages.items() if pct >= THRESHOLD]
+        if not hot_nodes:
+            log("no node exceeds threshold")
+            return
+        for node, pct in sorted(hot_nodes, key=lambda item: item[1], reverse=True):
+            rebalance_node(node, pct)
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-memory-rebalancer
+  labels:
+    app: node-memory-rebalancer
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: node-memory-rebalancer
+  labels:
+    app: node-memory-rebalancer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: node-memory-rebalancer
+subjects:
+  - kind: ServiceAccount
+    name: node-memory-rebalancer
+    namespace: carher
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: node-memory-rebalancer
+  namespace: carher
+  labels:
+    app: node-memory-rebalancer
+spec:
+  schedule: "*/30 * * * *"
+  timeZone: "Asia/Shanghai"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: node-memory-rebalancer
+        spec:
+          serviceAccountName: node-memory-rebalancer
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: acr-vpc-secret
+            - name: acr-secret
+          containers:
+            - name: rebalancer
+              image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher-admin:v20260522-000124-7d25930
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: TARGET_NAMESPACE
+                  value: carher
+                - name: MEM_THRESHOLD_PERCENT
+                  value: "85"
+                - name: MEM_TARGET_PERCENT
+                  value: "78"
+                - name: MAX_ROLLOUTS_PER_NODE
+                  value: "3"
+                - name: ROLLOUT_WAIT_SECONDS
+                  value: "240"
+                - name: DRY_RUN
+                  value: "false"
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              command:
+                - python3
+                - /opt/node-memory-rebalancer/rebalance.py
+              volumeMounts:
+                - name: script
+                  mountPath: /opt/node-memory-rebalancer
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                name: node-memory-rebalancer-script

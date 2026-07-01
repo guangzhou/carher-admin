@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1080" viewBox="0 0 1800 1080">
+  <rect x="0" y="0" width="1800" height="1080" fill="#F7FAF8"/>
+  <rect x="28" y="28" width="1744" height="1024" rx="30" fill="#FFFFFF" stroke="#173B35" stroke-width="4"/>
+
+  <text x="88" y="100" font-family="Noto Sans SC, Arial" font-size="48" font-weight="800" fill="#101828">AutoLink AI Infra 产品架构</text>
+  <text x="90" y="145" font-family="Noto Sans SC, Arial" font-size="25" fill="#53645F">统一入口、统一模型、统一权限、统一计量、统一运维，把 AI 从个人工具推进到组织级研发流程</text>
+
+  <rect x="86" y="190" width="1628" height="80" rx="18" fill="#0F3D36"/>
+  <text x="122" y="240" font-family="Noto Sans SC, Arial" font-size="28" font-weight="700" fill="#FFFFFF">客户看到的是一套 AI 研发服务</text>
+  <text x="548" y="240" font-family="Noto Sans SC, Arial" font-size="24" fill="#CFE9E3">全员 Codex · 全员 Her · Web Chat · 管理后台 · 费用与效果看板</text>
+
+  <g>
+    <rect x="92" y="315" width="278" height="150" rx="20" fill="#EAF7F2" stroke="#1C8B73" stroke-width="3"/>
+    <text x="126" y="365" font-family="Noto Sans SC, Arial" font-size="28" font-weight="800" fill="#123D35">统一入口层</text>
+    <text x="126" y="410" font-family="Noto Sans SC, Arial" font-size="22" fill="#42534F">Codex / Claude Code</text>
+    <text x="126" y="442" font-family="Noto Sans SC, Arial" font-size="22" fill="#42534F">Her / Open WebUI</text>
+
+    <rect x="418" y="315" width="278" height="150" rx="20" fill="#EDF4FF" stroke="#2563EB" stroke-width="3"/>
+    <text x="452" y="365" font-family="Noto Sans SC, Arial" font-size="28" font-weight="800" fill="#123D35">组织控制面</text>
+    <text x="452" y="410" font-family="Noto Sans SC, Arial" font-size="22" fill="#42534F">一键开通 / 批量开通</text>
+    <text x="452" y="442" font-family="Noto Sans SC, Arial" font-size="22" fill="#42534F">权限 / 部门 / 预算</text>
+
+    <rect x="744" y="315" width="278" height="150" rx="20" fill="#FFF7E6" stroke="#F59E0B" stroke-width="3"/>
+    <text x="778" y="365" font-family="Noto Sans SC, Arial" font-size="28" font-weight="800" fill="#123D35">Agent 场景层</text>
+    <text x="778" y="410" font-family="Noto Sans SC, Arial" font-size="22" fill="#42534F">代码 / 测试 / 排障</text>
+    <text x="778" y="442" font-family="Noto Sans SC, Arial" font-size="22" fill="#42534F">文档 / 任务 / 协同</text>
+
+    <rect x="1070" y="315" width="278" height="150" rx="20" fill="#F4F1FF" stroke="#7C3AED" stroke-width="3"/>
+    <text x="1104" y="365" font-family="Noto Sans SC, Arial" font-size="28" font-weight="800" fill="#123D35">模型路由层</text>
+    <text x="1104" y="410" font-family="Noto Sans SC, Arial" font-size="22" fill="#42534F">LiteLLM / 上游账号池</text>
+    <text x="1104" y="442" font-family="Noto Sans SC, Arial" font-size="22" fill="#42534F">fallback / cache / 计量</text>
+
+    <rect x="1396" y="315" width="278" height="150" rx="20" fill="#EEF2F6" stroke="#475467" stroke-width="3"/>
+    <text x="1430" y="365" font-family="Noto Sans SC, Arial" font-size="28" font-weight="800" fill="#123D35">运行运维层</text>
+    <text x="1430" y="410" font-family="Noto Sans SC, Arial" font-size="22" fill="#42534F">K8s / Operator / CRD</text>
+    <text x="1430" y="442" font-family="Noto Sans SC, Arial" font-size="22" fill="#42534F">Redis / DB / Cloudflare</text>
+  </g>
+
+  <g stroke="#B9C7C1" stroke-width="5" fill="none">
+    <polyline points="370,390 418,390"/>
+    <polyline points="696,390 744,390"/>
+    <polyline points="1022,390 1070,390"/>
+    <polyline points="1348,390 1396,390"/>
+  </g>
+
+  <rect x="92" y="540" width="1582" height="120" rx="24" fill="#E6F4EF" stroke="#1C8B73" stroke-width="3"/>
+  <text x="124" y="590" font-family="Noto Sans SC, Arial" font-size="30" font-weight="800" fill="#0F3D36">产品化封装</text>
+  <text x="335" y="590" font-family="Noto Sans SC, Arial" font-size="24" fill="#344B45">客户不用理解供应商、账号池、模型差异、网络与路由复杂度</text>
+  <text x="335" y="630" font-family="Noto Sans SC, Arial" font-size="24" fill="#344B45">客户只需要确认人数和试点范围，就能获得可开通、可管理、可复盘的 AI 研发能力</text>
+
+  <g>
+    <rect x="92" y="720" width="370" height="190" rx="20" fill="#FFFFFF" stroke="#CFD8D4" stroke-width="3"/>
+    <circle cx="132" cy="768" r="20" fill="#16A085"/>
+    <text x="168" y="778" font-family="Noto Sans SC, Arial" font-size="27" font-weight="800" fill="#101828">规模化实例运行</text>
+    <text x="126" y="828" font-family="Noto Sans SC, Arial" font-size="22" fill="#53645F">阿里云 ACK 运行 272 个 HerInstance</text>
+    <text x="126" y="862" font-family="Noto Sans SC, Arial" font-size="22" fill="#53645F">8 个节点承载组织级 Agent 服务</text>
+
+    <rect x="512" y="720" width="370" height="190" rx="20" fill="#FFFFFF" stroke="#CFD8D4" stroke-width="3"/>
+    <circle cx="552" cy="768" r="20" fill="#2563EB"/>
+    <text x="588" y="778" font-family="Noto Sans SC, Arial" font-size="27" font-weight="800" fill="#101828">模型供应治理</text>
+    <text x="546" y="828" font-family="Noto Sans SC, Arial" font-size="22" fill="#53645F">LiteLLM 统一路由、计量、fallback</text>
+    <text x="546" y="862" font-family="Noto Sans SC, Arial" font-size="22" fill="#53645F">198 产品环境 4 副本承接入口流量</text>
+
+    <rect x="932" y="720" width="370" height="190" rx="20" fill="#FFFFFF" stroke="#CFD8D4" stroke-width="3"/>
+    <circle cx="972" cy="768" r="20" fill="#F59E0B"/>
+    <text x="1008" y="778" font-family="Noto Sans SC, Arial" font-size="27" font-weight="800" fill="#101828">组织入口闭环</text>
+    <text x="966" y="828" font-family="Noto Sans SC, Arial" font-size="22" fill="#53645F">Open WebUI、key-swap、Lark MCP</text>
+    <text x="966" y="862" font-family="Noto Sans SC, Arial" font-size="22" fill="#53645F">把 SSO、准入、工具调用接入平台</text>
+
+    <rect x="1352" y="720" width="322" height="190" rx="20" fill="#FFFFFF" stroke="#CFD8D4" stroke-width="3"/>
+    <circle cx="1392" cy="768" r="20" fill="#7C3AED"/>
+    <text x="1428" y="778" font-family="Noto Sans SC, Arial" font-size="27" font-weight="800" fill="#101828">数据复盘</text>
+    <text x="1386" y="828" font-family="Noto Sans SC, Arial" font-size="22" fill="#53645F">人数、费用、token、模型</text>
+    <text x="1386" y="862" font-family="Noto Sans SC, Arial" font-size="22" fill="#53645F">失败率、限流、缓存、产出</text>
+  </g>
+
+  <rect x="92" y="965" width="1582" height="52" rx="26" fill="#102A43"/>
+  <text x="128" y="999" font-family="Noto Sans SC, Arial" font-size="23" font-weight="700" fill="#FFFFFF">结论：AutoLink AI Infra 的技术优势不是“工具多”，而是已经把组织级 AI 落地需要的入口、控制、路由、运维和数据闭环产品化。</text>
+</svg>

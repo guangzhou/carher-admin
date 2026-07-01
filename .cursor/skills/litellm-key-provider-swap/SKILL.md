@@ -1,10 +1,12 @@
 ---
 name: litellm-key-provider-swap
 description: >-
-  对单个 LiteLLM virtual key 对调首选/备选供应商（如 Wangsu Direct ↔ OpenRouter），
+  对单个 LiteLLM virtual key 改路由：对调首选/备选供应商（Wangsu Direct ↔ OpenRouter），
+  或让某 key 首选某模型组/池（如 cursor key 首选 zerokey-pool，挂了回退账户池/网宿），
   不影响其他用户。Use when the user mentions "换供应商" / "对调首选备选" / "swap
-  provider" / "改路由" + 某人名字或 key alias，或想让某个 claude-code / cursor key
-  的主供应商从 A 切到 B。
+  provider" / "改路由" / "首选 zerokey-pool" / "首选某模型" / "只对某人的 key 生效"
+  + 某人名字或 key alias，或想让某个 claude-code / cursor key 的主供应商/主模型从 A 切到 B。
+  覆盖 carher（命名空间 carher）与 litellm-product（198·NodePort 30402）两套环境。
 ---
 
 # LiteLLM 单 Key 供应商对调
@@ -130,9 +132,159 @@ curl -s -X POST "http://127.0.0.1:4000/key/update" \
 | Carher bot: Wangsu → OpenRouter | `{"claude-opus-4-6": "openrouter-claude-opus-4-6", "claude-sonnet-4-6": "openrouter-claude-sonnet-4-6"}` |
 | 恢复默认 | `{}` |
 
+## 场景：把 key B 的路由配置克隆成 key A 同款（litellm-product / 198·30402 实战）
+
+> 案例：「把王忠伟的 claude key 改成和刘国现的 claude key 配置一样」。2026-06-25 实测定型。
+
+### 该克隆什么 / 不该克隆什么
+
+| 字段 | 是否克隆 | 说明 |
+|---|---|---|
+| `models` (allowlist) | ✅ | 决定可访问模型集 |
+| `aliases` | ✅ | 决定首选 provider |
+| `router_settings.fallbacks` | ✅ | 决定备选链 |
+| `max_budget` / `budget_duration` | ❌ | 用户额度，跨人复制 = 越权扩 budget，单独问 |
+| `metadata` / `email` / `user_id` / `team_id` / `display_name` / `organization_id` | ❌ | 身份字段 |
+| `spend` / `created_at` / `key_name` | ❌ | 服务端字段 |
+
+### 一键步骤
+
+```bash
+MKP=$(jms ssh AIYJY-litellm 'kubectl get secret litellm-secrets -n litellm-product -o jsonpath="{.data.LITELLM_MASTER_KEY}" | base64 -d')
+
+# 1. 拿到 A、B 两 key 的 token（按人名搜，/spend/keys 比 /key/aliases 信息全）
+jms ssh AIYJY-litellm "MKP='$MKP'; curl -s 'http://127.0.0.1:30402/spend/keys?limit=2000' -H \"Authorization: Bearer \$MKP\" | python3 -c '
+import sys, json
+for r in json.load(sys.stdin):
+    ka=(r.get(\"key_alias\") or \"\").lower()
+    if \"<NAME_A>\" in ka or \"<NAME_B>\" in ka:
+        print(r[\"key_alias\"], r[\"token\"])'"
+
+# 2. 拿 A 的 /key/info，提取 models + aliases + router_settings 三字段
+#    （/spend/keys 不返 router_settings.fallbacks，必须走 /key/info）
+jms ssh AIYJY-litellm "MKP='$MKP'; curl -s 'http://127.0.0.1:30402/key/info?key=<TOKEN_A>' -H \"Authorization: Bearer \$MKP\"" \
+  | jq '.info | {models, aliases, router_settings}' > /tmp/key-a-config.json
+
+# 3. 把 A 的三字段套到 B（注意 router_settings 整体替换，不要只传 fallbacks）
+jms ssh AIYJY-litellm "MKP='$MKP'; curl -s -X POST 'http://127.0.0.1:30402/key/update' \
+  -H \"Authorization: Bearer \$MKP\" -H 'Content-Type: application/json' \
+  -d '{\"key\":\"<TOKEN_B>\", $(cat /tmp/key-a-config.json | jq -r 'to_entries | map(\"\\\"\\(.key)\\\":\\(.value|tojson)\") | join(\",\")')}'"
+
+# 4. 验证：sha256 算 A/B 两 key 的「models+aliases+fallbacks」摘要，必须相等
+jms ssh AIYJY-litellm "MKP='$MKP'
+for T in <TOKEN_A> <TOKEN_B>; do
+  curl -s \"http://127.0.0.1:30402/key/info?key=\$T\" -H \"Authorization: Bearer \$MKP\" | python3 -c '
+import sys, json, hashlib
+d=json.load(sys.stdin)[\"info\"]
+sub={k:d[k] for k in [\"models\",\"aliases\",\"router_settings\"]}
+sub[\"models\"]=sorted(sub[\"models\"])
+sub[\"router_settings\"][\"fallbacks\"]=sorted(sub[\"router_settings\"][\"fallbacks\"], key=lambda x:list(x.keys())[0])
+print(d[\"key_alias\"], hashlib.sha256(json.dumps(sub,sort_keys=True).encode()).hexdigest()[:16])'
+done"
+```
+
+两边 sha256 完全相等才算克隆成功。
+
+## 场景：把 key 收窄到模型子集（"只保留这 4 个，其他全删"）
+
+把 `models` allowlist 收窄时，**必须同步清理 `aliases` 和 per-key `fallbacks` 里指向已删模型的条目**，否则：
+- alias 源模型已不在 allowlist → alias 形同虚设但占字段
+- fallback 条目里指向 wangsu-* / 网宿 target 不再相关 → 后续 audit 误导
+
+```bash
+# 收窄到 4 个国产模型（含 4 条 alias），清空 per-key fallbacks
+curl -s -X POST "http://127.0.0.1:30402/key/update" \
+  -H "Authorization: Bearer $MKP" -H "Content-Type: application/json" \
+  -d '{
+    "key":"<TOKEN>",
+    "models":["claude-deepseek-v4-pro","claude-kimi-k2.7-code","claude-minimax-m3","claude-qwen3.7-plus"],
+    "aliases":{
+      "claude-deepseek-v4-pro":"deepseek-v4-pro",
+      "claude-kimi-k2.7-code":"wangsu-claude-kimi-k2.7-code",
+      "claude-minimax-m3":"minimax-m3",
+      "claude-qwen3.7-plus":"wangsu-claude-qwen3.7-plus"
+    },
+    "router_settings":{"fallbacks":[]}
+  }'
+```
+
+⚠️ `models` / `aliases` / `router_settings` 都是**整体替换**不是增量 merge。少传字段 = 该字段保持原值。
+
+## 场景：改 key 的每日预算
+
+```bash
+curl -s -X POST "http://127.0.0.1:30402/key/update" \
+  -H "Authorization: Bearer $MKP" -H "Content-Type: application/json" \
+  -d '{"key":"<TOKEN>","max_budget":30,"budget_duration":"1d"}' \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print({k:d[k] for k in ["max_budget","budget_duration","budget_reset_at","spend"]})'
+```
+
+要点：
+- `max_budget` 单位是 **USD**；`budget_duration` 走 `1d` / `7d` / `30d`，不是 cron 表达式
+- 改 budget **不会清 `spend`**——当前 spend 已超新 budget 时，仍被挡到下次 `budget_reset_at`
+- 想立即放行：单独 `POST /key/update` 带 `{"spend":0}` 重置，或等 reset 时间
+
+## 场景：让单 key「首选某模型组 + 兜底链」（litellm-product / 198·30402 实战）
+
+> 案例：让 `cursor-liuguoxian` 这把 key 首选 `zerokey-pool`，挂了再回退账户池 / 网宿，
+> 其它 key 与全局路由零影响。2026-06-23 实测定型。脚本：`scripts/prod-patch-key-primary-zerokey.py`。
+
+目标链路（仅该 key）：
+
+```
+客户端发 gpt-5.5 / chatgpt-gpt-5.5
+  → zerokey-pool        (per-key alias，首选)
+  →(挂) chatgpt-gpt-5.5  (ChatGPT 账户池，全局 fallback)
+  →(再挂) wangsu-gpt-5.5 (全局 fallback)
+```
+
+### ⚠️ 关键认知（实测，别踩）
+
+| # | 认知 | 证据 |
+|---|---|---|
+| 1 | **「首选」用 per-key `aliases`**：优先级高于全局 `model_group_alias`，只影响该 key | 带 alias 的 throwaway key 调 `gpt-5.5` → 落 zerokey deployment；master 调 `gpt-5.5` → 落 `chatgpt-acct-*`（隔离成立） |
+| 2 | **「兜底链」必须写全局 `router_settings.fallbacks`**：litellm-product **不认 per-key fallback** | per-key `router_settings.fallbacks` 兜底实测**未生效**（2026-06-23，alias 到不存在组 + per-key fallback→wangsu，请求 25s 超时无 200）。⚠️ 与本文档上方 anthropic（carher 命名空间）的描述不同——**不同 LiteLLM 部署行为可能不同，以实测为准** |
+| 3 | 全局给 `zerokey-pool` 加 fallback **不影响其他 key**：别人根本不调 `zerokey-pool`，只有设了 alias 的 key 会触发该条目 | buyitian 等默认 key 仍 `gpt-5.5 →alias→ chatgpt-gpt-5.5 →fallback→ wangsu-gpt-5.5` |
+| 4 | **防 manifest 漂移**：直接 `kubectl apply` live cm 会让源文件 `/root/litellm-product-manifests/30-cm-litellm-config.yaml` 落后；下次谁重 apply 该文件会冲掉改动 | 必须把 cm 改动同步回写该 manifest（脚本已处理） |
+
+### 全局路由配置文件（"每个 key 的路由"其实在这里）
+
+- prod 没有"每 key 一个路由文件"；路由 = **全局** `litellm-config`（源文件 `/root/litellm-product-manifests/30-cm-litellm-config.yaml`） + 每 key 的 `models` allowlist / `aliases`。
+- 账户池 `chatgpt-gpt-5.5`（多个 `chatgpt-acct-*`）是 **DB-managed**（`/model/new` 动态加）。
+  **更正 2026-06-25：`zerokey-pool` 在 prod (198 litellm-product) 是 *config-managed*——14 个成员
+  在 `litellm-config` ConfigMap 的 `config.yaml` `model_list` 里，DB `LiteLLM_ProxyModelTable`
+  无 zerokey 行**（实测 + `scripts/prod-add-zerokey-accounts.py` docstring 确认）。改成员（加端口 /
+  设 `model_info.id=acct-N`）要改 CM + `kubectl rollout restart deployment/litellm-proxy`。
+  无论如何，查真实 deployment 都用 `GET /v1/model/info`，别只看 config 文件。
+
+### 一键执行（推荐）
+
+```bash
+# 预览
+python3 scripts/prod-patch-key-primary-zerokey.py --key-match cursor-liuguoxian
+# 执行：补 per-key alias(gpt-5.5/chatgpt-gpt-5.5→zerokey-pool) + 确保全局 fallback + 同步 manifest
+python3 scripts/prod-patch-key-primary-zerokey.py --key-match cursor-liuguoxian --apply
+# 回滚（清 alias，回全局默认链）
+python3 scripts/prod-patch-key-primary-zerokey.py --key-match cursor-liuguoxian --rollback --apply
+```
+
+幂等：全局 fallback 已存在则不重启 proxy；只有 cm 真变了才滚动。
+
+### 手动版（litellm-product master key 在 `litellm-secrets -n litellm-product`，NodePort 30402）
+
+```bash
+MKP=$(kubectl get secret litellm-secrets -n litellm-product -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+# 1) per-key alias（aliases 是完整替换）
+curl -s -X POST localhost:30402/key/update -H "Authorization: Bearer $MKP" -H 'Content-Type: application/json' \
+  -d '{"key":"<TOKEN>","models":[...,"zerokey-pool"],"aliases":{"gpt-5.5":"zerokey-pool","chatgpt-gpt-5.5":"zerokey-pool"}}'
+# 2) 全局 fallback：在 router_settings.fallbacks 加 {"zerokey-pool":["chatgpt-gpt-5.5","wangsu-gpt-5.5"]}
+#    改 live cm 后必须同步回写 manifest 源文件，再 rollout（仅当之前没有该条目时）
+```
+
 ## 注意事项
 
 - **aliases 只影响单个 key**，是最安全的路由切换方式
-- **不要改全局 YAML** 的 `model_group_alias`/`fallbacks` 来实现单用户切换
+- **不要改全局 `model_group_alias`** 来实现单用户切换（那会动所有人）；但**兜底链 `fallbacks` 只能是全局**（per-key fallback 在 litellm-product 不可靠），靠"只有该 key 调该组"来保证隔离
 - 如果目标模型组不在 key 的 `models` allowlist 里，需要先用 `/key/update` 加上
-- per-key `router_settings.fallbacks` 和 `aliases` 是独立字段，更新一个不会清另一个
+- per-key `router_settings.fallbacks` 和 `aliases` 是独立字段，更新一个不会清另一个（但前者在 litellm-product 实测不被路由采用，别依赖）
+- 改 live configmap 后**务必同步回写 `/root/litellm-product-manifests/30-cm-litellm-config.yaml`**，否则漂移

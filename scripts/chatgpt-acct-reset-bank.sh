@@ -59,8 +59,13 @@ ship_py() {
 }
 
 pod_of() {
-  local n="$1"
-  ssh198 "kubectl -n $NS get pod -l app=chatgpt-acct-$n -o jsonpath='{.items[0].metadata.name}'" 2>/dev/null
+  local n="$1" pod=""
+  for _try in 1 2 3; do
+    pod=$(ssh198 "kubectl -n $NS get pod -l app=chatgpt-acct-$n -o jsonpath='{.items[0].metadata.name}'" 2>/dev/null)
+    [[ -n "$pod" ]] && { echo "$pod"; return 0; }
+    sleep 3
+  done
+  return 1
 }
 
 exec_py() {

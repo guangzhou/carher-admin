@@ -331,6 +331,36 @@ def main():
     transitions = []
 
     for acct, meta in POOL_ACCOUNTS.items():
+        current = state.get(acct, {})
+        manual_mode = current.get("manual_mode", "auto")
+        if manual_mode == "manual_offline":
+            if not current.get("paused") or not current.get("manual_offline"):
+                pause_acct(acct, meta)
+                transitions.append(f"🔴 {acct} manual_offline lock → pause")
+            state[acct] = {
+                **current,
+                "manual_mode": "manual_offline",
+                "manual_offline": True,
+                "paused": True,
+                "tier": current.get("tier", "MANUAL_OFFLINE"),
+                "cause": "manual_offline via acct web",
+                "ts": now_ts(),
+            }
+            skipped += 1
+            log(f"{acct}: SKIP (manual_offline lock)")
+            continue
+        if manual_mode == "manual_online" and (current.get("paused") or current.get("manual_offline")):
+            resume_acct(acct, meta)
+            transitions.append(f"🟢 {acct} manual_online lock → resume")
+            state[acct] = {
+                **current,
+                "manual_mode": "manual_online",
+                "manual_offline": False,
+                "paused": False,
+                "cause": "manual_online via acct web",
+                "ts": now_ts(),
+            }
+
         do_probe, reason = should_probe(acct, state)
 
         if not do_probe:
@@ -365,8 +395,12 @@ def main():
         probed += 1
         tier, cause, restore_at = classify(h5, d7, r5, r7)
         old = state.get(acct, {})
+        manual_mode = old.get("manual_mode", "auto")
         was_paused = old.get("paused", False)
         should_offline = tier in ("OFFLINE-5H", "OFFLINE-7D")
+        if manual_mode == "manual_online":
+            should_offline = False
+            cause = f"{cause}; manual_online lock" if cause else "manual_online lock"
 
         if should_offline and not was_paused:
             pause_acct(acct, meta)
@@ -382,6 +416,7 @@ def main():
         state[acct] = {
             "tier": tier,
             "cause": cause,
+            "manual_mode": manual_mode,
             "h5_pct": h5 * 100,
             "d7_pct": d7 * 100,
             "paused": should_offline,

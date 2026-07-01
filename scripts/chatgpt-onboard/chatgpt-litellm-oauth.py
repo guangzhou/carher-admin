@@ -917,6 +917,27 @@ with sync_playwright() as pw:
     else:
         print(f"[4] password step skipped (url={page.url[:80]})", flush=True)
 
+    # ── 2c.5 Push-auth verification ("Approve on your iPhone") downgrade ──
+    # Some accounts have ChatGPT mobile push-auth enabled — after password the
+    # flow lands on /push-auth-verification/... with "Approve on your iPhone" +
+    # "Try with email" fallback button. We can't approve from a headless browser,
+    # so click "Try with email" to fall back to email OTP.
+    if "push-auth-verification" in page.url:
+        print("[4.5] push-auth detected — clicking 'Try with email' to fall back to email OTP", flush=True)
+        try:
+            btn = page.locator("button:has-text('Try with email'), a:has-text('Try with email')")
+            if btn.count() > 0:
+                btn.first.click()
+                time.sleep(4)
+                ss(page, "04c-after-try-with-email")
+                print(f"  url after Try-with-email={page.url[:120]}", flush=True)
+            else:
+                ss(page, "04c-no-try-with-email-btn")
+                sys.exit("❌ push-auth page but no 'Try with email' button")
+        except Exception as e:
+            ss(page, "04c-try-with-email-err")
+            sys.exit(f"❌ push-auth Try-with-email click failed: {e}")
+
     # ── 2d. OTP if needed ────────────────────────────────────────────────
     body_text = page.content().lower()
     # NB: the /add-phone page text also contains "one-time code"/"we'll send",

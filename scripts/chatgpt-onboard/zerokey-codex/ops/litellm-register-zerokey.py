@@ -45,7 +45,53 @@ ACCOUNTS = [
             ("zerokey-timothy-o3", "o3"),
         ],
     ),
+    (
+        "zyq",
+        "8125",
+        [
+            ("zerokey-zyq-gpt-5.5", "gpt-5-5"),
+            ("zerokey-zyq-gpt-5.5-thinking", "gpt-5-5-thinking"),
+            ("zerokey-zyq-gpt-5.5-pro", "gpt-5-5-pro"),
+            ("zerokey-zyq-o3", "o3"),
+        ],
+    ),
+    (
+        "owp",
+        "8126",
+        [
+            ("zerokey-owp-gpt-5.5", "gpt-5-5"),
+            ("zerokey-owp-gpt-5.5-thinking", "gpt-5-5-thinking"),
+            ("zerokey-owp-gpt-5.5-pro", "gpt-5-5-pro"),
+            ("zerokey-owp-o3", "o3"),
+        ],
+    ),
+    (
+        "hgg",
+        "8127",
+        [
+            ("zerokey-hgg-gpt-5.5", "gpt-5-5"),
+            ("zerokey-hgg-gpt-5.5-thinking", "gpt-5-5-thinking"),
+            ("zerokey-hgg-gpt-5.5-pro", "gpt-5-5-pro"),
+            ("zerokey-hgg-o3", "o3"),
+        ],
+    ),
+    (
+        "dvo",
+        "8128",
+        [
+            ("zerokey-dvo-gpt-5.5", "gpt-5-5"),
+            ("zerokey-dvo-gpt-5.5-thinking", "gpt-5-5-thinking"),
+            ("zerokey-dvo-gpt-5.5-pro", "gpt-5-5-pro"),
+            ("zerokey-dvo-o3", "o3"),
+        ],
+    ),
 ]
+
+# zerokey-pool: one model_name, many deployments → LiteLLM router load-balances
+# across all healthy accounts (gpt-5-5 slug). Ports must match ACCOUNTS above.
+POOL_NAME = "zerokey-pool"
+POOL_SLUG = "gpt-5-5"
+POOL_PORTS = ["8123", "8124", "8125", "8126", "8127", "8128"]
 
 
 def block(name: str, slug: str, port: str) -> str:
@@ -66,6 +112,8 @@ def desired_blocks() -> list[str]:
     for _acct, port, models in ACCOUNTS:
         for name, slug in models:
             out.append(block(name, slug, port))
+    for port in POOL_PORTS:
+        out.append(block(POOL_NAME, POOL_SLUG, port))
     return out
 
 

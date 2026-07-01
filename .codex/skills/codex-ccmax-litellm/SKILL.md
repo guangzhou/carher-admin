@@ -42,7 +42,7 @@ Read only the reference needed for the current task:
 - `docs/codex-via-litellm-setup.md` - Codex CLI provider config and Responses API details.
 - `docs/cc_max_litellm.md` - historical OAuth-direct research; useful for quota economics only, not the current prod path.
 - `scripts/anthropic-onboard/claude-max-grant-key.sh` - single-key grant/revoke wrapper.
-- `scripts/anthropic-onboard/cc-max-upstream-status.sh` - legacy 188 upstream 5h/7d quota snapshot; use the active runtime host probe for Malaysia or 224 Astrill accounts.
+- `scripts/anthropic-onboard/cc-max-upstream-status.sh` - upstream 5h/7d quota snapshot for the active CC Max runtime; defaults to 198 `AIYJY-litellm`, override `CC_MAX_QUOTA_ASSET` for legacy 188 or other egress hosts.
 - `scripts/anthropic-onboard/patch-litellm-claude-max.py` - global LiteLLM model entry patcher.
 
 ## Safety Rules
@@ -513,10 +513,13 @@ Start with quota:
 ```
 
 This is an upstream Anthropic header probe, not a LiteLLM SpendLogs query. By
-default it only reads 188 `/Data/anthropic-auth/acct-*/.env`; ACK isolated K8s
-accounts are invisible unless explicitly exported to a controlled auth dir or
-probed with a K8s-safe variant. Use SpendLogs to prove which user/key created
-traffic, and use `cc-max-upstream-status.sh` to see account-level 5h/7d pressure.
+default the wrapper runs on 198 `AIYJY-litellm` and reads that runtime host's
+`/Data/anthropic-auth/acct-*/.env`. Set `CC_MAX_QUOTA_ASSET=<asset>` only when
+the active pool is elsewhere, such as legacy 188, Malaysia, or 224 Astrill.
+ACK isolated K8s accounts remain invisible unless explicitly exported to a
+controlled auth dir or probed with a K8s-safe variant. Use SpendLogs to prove
+which user/key created traffic, and use `cc-max-upstream-status.sh` to see
+account-level 5h/7d pressure.
 
 Interpretation:
 

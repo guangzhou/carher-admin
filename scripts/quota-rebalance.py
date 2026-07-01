@@ -61,9 +61,9 @@ STATE_FILE = f"{STATE_DIR}/state.json"
 
 LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://10.68.13.198:30402/pro")
 LITELLM_MK = os.environ.get("LITELLM_MK", "")
-LITELLM_MK_188 = os.environ.get("LITELLM_MK_188", "")
-LITELLM_MK_187 = os.environ.get("LITELLM_MK_187", "")
-LITELLM_MK_198 = os.environ.get("LITELLM_MK_198", "")
+LITELLM_MK_188 = os.environ.get("LITELLM_MK_188", "sk-chatgpt-188-6ff3fb109ac61cc1ea23f278bab8d838")
+LITELLM_MK_187 = os.environ.get("LITELLM_MK_187", "sk-chatgpt-187-a3d9e7c1f45b82069d1c3f7a")
+LITELLM_MK_198 = os.environ.get("LITELLM_MK_198", "sk-chatgpt-198-d8a3f4e62b9c1057ef324918a7b6d3e0")
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
 JITTER_MAX = int(os.environ.get("REBALANCE_JITTER", "180"))
 DRY_RUN = os.environ.get("DRY_RUN", "") == "1"
@@ -130,6 +130,15 @@ POOL_ACCOUNTS = {
     "acct-66": {"port": 4066, "location": "198"},
     "acct-67": {"port": 4067, "location": "198"},
     "acct-68": {"port": 4068, "location": "198"},
+    "acct-70": {"port": 4070, "location": "198"},
+    "acct-71": {"port": 4071, "location": "198"},
+    "acct-72": {"port": 4072, "location": "198"},
+    "acct-73": {"port": 4073, "location": "198"},
+    "acct-74": {"port": 4074, "location": "198"},
+    "acct-75": {"port": 4075, "location": "198"},
+    "acct-76": {"port": 4076, "location": "198"},
+    "acct-77": {"port": 4077, "location": "198"},
+    "acct-78": {"port": 4078, "location": "198"},
 }
 
 SSH_187_HOST = os.environ.get("SSH_187_HOST", "10.68.13.187")
@@ -182,7 +191,11 @@ def load_state():
 
 def save_state(state):
     Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
-    Path(STATE_FILE).write_text(json.dumps(state, indent=2))
+    # Atomic write: tmp + rename。盘满 / 进程死也不会把 STATE_FILE 截零
+    # （Path.write_text 用 "w" 先 truncate → 写 → 写一半挂掉留空文件）
+    tmp = Path(STATE_FILE).with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    tmp.replace(STATE_FILE)
 
 
 # ---- 探测频率决策 ----
@@ -400,6 +413,47 @@ def parse_account_198(acct):
     raise last_err
 
 
+def probe_upstream_via_tmp(acct):
+    """auto-revive 决策路径专用：纯读 188:/tmp/auth-{acct}.json 直调 chatgpt.com /codex/usage，
+    不挂 pod、不依赖 K3s exec。返回 (primary_pct, secondary_pct, error_str)。
+    success: (int, int, None)；err 时 pct 都 None。
+    """
+    p = TMP_AUTH_TMPL.format(acct=acct)
+    if not Path(p).exists():
+        return (None, None, "no_tmp_auth")
+    try:
+        auth = json.load(open(p))
+    except Exception as e:
+        return (None, None, f"bad_json:{type(e).__name__}")
+    try:
+        tok, aid, _sub = parse_auth_json(auth)
+    except Exception as e:
+        return (None, None, f"parse_err:{type(e).__name__}")
+    req = urllib.request.Request(
+        "https://chatgpt.com/backend-api/codex/usage",
+        headers={
+            "Authorization": f"Bearer {tok}",
+            "chatgpt-account-id": aid,
+            "OpenAI-Beta": "codex-1",
+            "Originator": "codex_cli_rs",
+            "User-Agent": "codex_cli_rs/0.30.0 (Linux; x86_64)",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return (None, None, f"http_{e.code}")
+    except Exception as e:
+        return (None, None, f"{type(e).__name__}")
+    rl = body.get("rate_limit") or {}
+    pp = (rl.get("primary_window") or {}).get("used_percent")
+    ww = (rl.get("secondary_window") or {}).get("used_percent")
+    if pp is None or ww is None:
+        return (None, None, "no_pct_field")
+    return (int(pp), int(ww), None)
+
+
 def fetch_usage(tok, aid):
     req = urllib.request.Request(
         "https://chatgpt.com/backend-api/codex/usage",
@@ -456,8 +510,8 @@ def classify(usage):
 
     if w_pct >= 100:
         return "OFFLINE-WEEK", f"wk={w_pct}%>=100", p_pct, w_pct, w_reset_at, p_reset_at, w_reset_at
-    if p_pct >= 99:
-        return "OFFLINE-5H", f"5h={p_pct}%>=99", p_pct, w_pct, p_reset_at, p_reset_at, w_reset_at
+    if p_pct >= 100:
+        return "OFFLINE-5H", f"5h={p_pct}%>=100", p_pct, w_pct, p_reset_at, p_reset_at, w_reset_at
     if p_pct >= 50 or w_pct >= 50:
         return "SLOW", f"5h={p_pct}%/wk={w_pct}%", p_pct, w_pct, None, p_reset_at, w_reset_at
     return "HEALTHY", None, p_pct, w_pct, None, p_reset_at, w_reset_at
@@ -605,7 +659,9 @@ def acct_api_key(meta):
 PROBE_ENDPOINT  = os.environ.get(
     "PROBE_ENDPOINT", "https://cc.auto-link.com.cn/pro/v1/chat/completions"
 )
-PROBE_MK        = os.environ.get("PROBE_MK", "")
+PROBE_MK        = os.environ.get(
+    "PROBE_MK", "sk-pro-litellm-ce077e2b0721bb419a633e4d"
+)
 PROBE_TIMEOUT   = 20
 PROBE_MAX_TRIES = 2  # 一轮内最多 2 次；都失败才视为 fail
 
@@ -646,6 +702,14 @@ def probe_acct(acct):
 
 
 AUTO_SCALE_ON_PAUSE = os.environ.get("AUTO_SCALE_ON_PAUSE", "1") == "1"
+# 2026-06-29: SCALED_DOWN acct 当 5h/7d reset 都已 past 时自动 scale=1 + 清 tier 让下一轮
+# probe→resume。否则配额已回血的 acct 永远卡在 pod=0，cron preflight 短路又不探测，
+# 池子持续缩水。每轮最多 revive N 个防内存炸（一个 pod ~1-3G）。
+AUTO_REVIVE_ON_RESET = os.environ.get("AUTO_REVIVE_ON_RESET", "1") == "1"
+MAX_REVIVE_PER_TICK = int(os.environ.get("MAX_REVIVE_PER_TICK", "3"))
+# 老 preflight 覆盖 cause='deploy.spec.replicas=0' 的 SCALED_DOWN acct 不能用 stale state
+# 反推真因，必须 probe 上游兜底。probe ~5-15s/acct，35 个全跑撞 cron tick → 限速。
+PROBE_REVIVE_PER_TICK = int(os.environ.get("PROBE_REVIVE_PER_TICK", "8"))
 
 
 def scale_deploy(acct, replicas, wait_ready=False, timeout=120):
@@ -709,14 +773,14 @@ def scale_deploy(acct, replicas, wait_ready=False, timeout=120):
 def pause_acct(acct, meta):
     if DRY_RUN:
         log(f"  [DRY_RUN] would pause {acct}")
-        return {"deleted": 0, "scaled_ok": True}
+        return 0
     ab = acct_api_base(acct, meta)
     deleted = 0
     # 通过 api_base 匹配删除（比 ID 匹配更可靠）
     status, data = api_request("GET", "/v1/model/info")
     if status != 200:
         log(f"  pause {acct}: /model/info failed HTTP {status} {str(data)[:120]}")
-        return {"deleted": 0, "scaled_ok": True}
+        return 0
     for e in data.get("data", []):
         e_ab = (e.get("litellm_params") or {}).get("api_base", "")
         e_id = (e.get("model_info") or {}).get("id", "")
@@ -867,8 +931,6 @@ def _pick_otp_provider(email):
         return "imap_qq"
     if dom == "mail.com":
         return "mailcom"
-    if dom in ("hotmail.com", "outlook.com"):
-        return "outlook"
     return None
 
 
@@ -1062,12 +1124,6 @@ def attempt_repair_198(acct, meta, state, transitions):
 # ---- main ----
 
 def main():
-    missing = [n for n in ("LITELLM_MK_188", "LITELLM_MK_187", "LITELLM_MK_198", "PROBE_MK")
-               if not os.environ.get(n)]
-    if missing:
-        print(f"FATAL: required env unset: {','.join(missing)}", file=sys.stderr)
-        sys.exit(2)
-
     if JITTER_MAX > 0 and not DRY_RUN:
         jitter = random.randint(0, JITTER_MAX)
         log(f"jitter sleep {jitter}s")
@@ -1089,6 +1145,8 @@ def main():
     probed = 0
     skipped = 0
     transitions = []
+    revived_this_tick = [0]  # 单元素 list：本轮 cron 已 revive 的 SCALED_DOWN 数（防内存爆）
+    probes_this_tick = [0]   # 单元素 list：本轮 cron 已对 unknown_cause SCALED_DOWN 做的 upstream probe 数
     repair_lock = [False]  # 单元素 list：本轮 cron 最多触发 1 个 re-OAuth（防并发触 CF Turnstile）
 
     for acct, meta in POOL_ACCOUNTS.items():
@@ -1146,6 +1204,102 @@ def main():
             skipped += 1
             continue
 
+        # 2026-06-29: SCALED_DOWN auto-revive — 真因 + upstream probe 双校验，scale=1 让下一轮
+        # reverse-recovery (1111) → probe → resume 自然把 entry 加回 router。
+        # 为什么不直接 resume：scale=1 等 pod ready ~30-60s + endpoint 出 IP 才能注册 entry，
+        # 直接在这里 resume_acct 会 wait blocking 整个 cron tick；交给下一轮异步收尾更稳。
+        #
+        # 判据（必须全部满足）：
+        #   1. tier == SCALED_DOWN AND not manual_offline AND tier != TOKEN_INVALID
+        #   2. 订阅有效 (sub_until is None or > now)
+        #   3. cause ∈ {OFFLINE-5H, OFFLINE-WEEK, OFFLINE_5H_*, OFFLINE_WEEK_*}
+        #      (preflight 已 patch 不覆盖原 cause；老 state 兼容兜底)
+        #   4. 对应 reset_at 已 past
+        #   5. probe_upstream_via_tmp(acct) 返 (p, w) 且都 <100 — 钦定真空才 revive
+        #
+        # 老 pct≥95 反推 / pct<95 当 manual scale=0 的逻辑全部废弃 — 内存已扩一倍不再为内存
+        # 牺牲准确性；真 manual offline 改用 manual_offline=True 标记（操作人显式意图）。
+        if (AUTO_REVIVE_ON_RESET
+                and meta.get("location") == "198"
+                and scale_snap.get(acct) == 0
+                and revived_this_tick[0] < MAX_REVIVE_PER_TICK):
+            s = state.get(acct, {})
+            tier_now = str(s.get("tier") or "").upper()
+            cause_now = str(s.get("cause") or "")
+            p_pct = int(s.get("primary_pct") or 0)
+            w_pct = int(s.get("weekly_pct") or 0)
+            p_reset = s.get("primary_reset_at", 0) or 0
+            w_reset = s.get("weekly_reset_at", 0) or 0
+            now = now_ts()
+            sub_until_raw = s.get("subscription_active_until")
+            sub_until_ts = None
+            if sub_until_raw:
+                try:
+                    if isinstance(sub_until_raw, (int, float)):
+                        sub_until_ts = float(sub_until_raw)
+                    else:
+                        sub_until_ts = datetime.fromisoformat(
+                            str(sub_until_raw).replace("Z", "+00:00")
+                        ).timestamp()
+                except (ValueError, TypeError):
+                    sub_until_ts = None
+
+            # 真因解析（patch A 保留了首因；老数据没保留就是 deploy.spec.replicas=0 兜底走 pct）
+            cause_upper = cause_now.upper()
+            is_5h_pause = ("OFFLINE-5H" in cause_upper or "OFFLINE_5H" in cause_upper
+                           or "5H=" in cause_upper)
+            is_wk_pause = ("OFFLINE-WEEK" in cause_upper or "OFFLINE_WEEK" in cause_upper
+                           or "WK=" in cause_upper)
+            # 2026-06-29: 老 state 兼容 — cause 是 'deploy.spec.replicas=0' / 空 时
+            # state.pct/reset 都是 SCALED_DOWN 进入前的 stale 值，反推 reset_due 不可靠。
+            # 改成 unknown_cause 标记，下方走 upstream probe 兜底判定（不依赖 state 字段）。
+            unknown_cause = (not is_5h_pause and not is_wk_pause)
+
+            reset_due = False
+            if is_5h_pause and is_wk_pause:
+                reset_due = bool(p_reset and w_reset and now > p_reset and now > w_reset)
+            elif is_wk_pause:
+                reset_due = bool(w_reset and now > w_reset)
+            elif is_5h_pause:
+                reset_due = bool(p_reset and now > p_reset)
+
+            base_ok = (tier_now == "SCALED_DOWN"
+                       and not s.get("manual_offline")
+                       and tier_now != "TOKEN_INVALID"
+                       and (sub_until_ts is None or sub_until_ts > now)
+                       and (reset_due or unknown_cause))
+
+            if base_ok:
+                # upstream probe：cron 自带 fallback (parse_account_198) 已涵盖类似逻辑，
+                # 这里只在 revive 决策路径单独 probe 一次（不依赖 K3s exec，纯 188:/tmp 副本），
+                # 防止 reset 字段 stale → 真实上游仍 cap → revive 起 pod 浪费内存又被 pause。
+                # unknown_cause 路径限速防 cron tick 超时（probe ~5-15s/acct）。
+                if unknown_cause and probes_this_tick[0] >= PROBE_REVIVE_PER_TICK:
+                    pass  # 本轮已超 probe 配额 → 跌入下方 SCALE0 detect 原路径
+                else:
+                    probes_this_tick[0] += 1
+                    up_p, up_w, probe_err = probe_upstream_via_tmp(acct)
+                    if probe_err:
+                        log(f"{acct}: SCALED_DOWN auto-revive defer — upstream probe err: {probe_err}")
+                    elif up_p is None or up_w is None:
+                        log(f"{acct}: SCALED_DOWN auto-revive defer — no upstream pct")
+                    elif up_p >= 100 or up_w >= 100:
+                        log(f"{acct}: SCALED_DOWN auto-revive defer — upstream still full 5h={up_p}%/wk={up_w}%")
+                    else:
+                        tag = "unknown-cause" if unknown_cause else f"cause='{cause_now}'"
+                        log(f"{acct}: SCALED_DOWN auto-revive — {tag} upstream 5h={up_p}%/wk={up_w}%")
+                        if scale_deploy(acct, 1, wait_ready=False):
+                            revived_this_tick[0] += 1
+                            transitions.append(
+                                f"🟢 {acct} SCALED_DOWN auto-revive ({tag} "
+                                f"upstream 5h={up_p}%/wk={up_w}%) → scale=1"
+                            )
+                        else:
+                            log(f"{acct}: auto-revive scale=1 FAILED — will retry next cron")
+                        skipped += 1
+                        continue
+            # 不满足 revive 条件 → 跌入下面的 scale=0 detect 走原路径（pause + SKIP）
+
         # 2026-06-25: scale=0 detect (198 only)。pod 不存在不能服务流量，必须
         # pause_acct 清 router entry（否则 simple-shuffle 仍会路由到死 svc → fallback wangsu）。
         # 之后 SKIP probe — scale=0 期间 codex/usage 数值毫无意义。
@@ -1166,13 +1320,23 @@ def main():
             elif not old_s.get("paused"):
                 log(f"{acct}: scale=0, no router entries, sync state.paused=True")
             # 写 state.paused=True + tier SCALED_DOWN（不动 manual_offline，让 scale=1 时自然 resume）
-            state[acct] = {
+            # 2026-06-29 patch A: cause 只在缺失时写，保留首因（OFFLINE-5H / OFFLINE-WEEK 等）。
+            # 老 cause 被覆盖成 deploy.spec.replicas=0 → auto-revive 无法判断该不该 scale=1 →
+            # 17 个真空 acct 卡在 SCALED_DOWN 不动。
+            prior_cause = old_s.get("cause")
+            new_s = {
                 **old_s,
                 "paused": True,
                 "tier": "SCALED_DOWN",
-                "cause": "deploy.spec.replicas=0",
                 "ts": now_ts(),
             }
+            if not prior_cause or prior_cause == "deploy.spec.replicas=0":
+                # 完全没有原因（首次 preflight 短路 / 老脏数据） → 写兜底
+                new_s["cause"] = prior_cause or "deploy.spec.replicas=0"
+            else:
+                # 保留首因 — auto-revive 判据需要从 cause 反推 5h 满 / wk 满
+                new_s["cause"] = prior_cause
+            state[acct] = new_s
             skipped += 1
             continue
 

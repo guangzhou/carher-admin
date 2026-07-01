@@ -111,8 +111,11 @@ fi
 # Step 3: cp auth.json + rollout restart
 # ────────────────────────────────────────────────────────────
 if should_run cp-auth; then
-  log "STEP cp-auth"
-  # mac bash 3.2 + jms scp 文件路径限制，用 stdin 传
+  log "STEP cp-auth (scale=0 → busybox attach PVC → scale=1)"
+  # 关键：必须 scale=0 先把 pod 杀掉，否则 LiteLLM 启动时（PVC 还空）会写
+  # 48-byte `{"device_code_requested_at": ...}` 占位到 auth.json，
+  # 跟我们 cp 进去的真 token race，赢家是它（实证 2026-06-29 acct-74）。
+  # 走 busybox 直挂 PVC 写文件，pod 完全不在 PVC mount 期间触碰 auth.json。
   cat "$AUTH_FILE" | jms scp - AIYJY-litellm:/tmp/auth-acct-$ACCT.json
   LOCAL_MD5=$(md5sum "$AUTH_FILE" | awk '{print $1}')
   REMOTE_MD5=$(jms ssh AIYJY-litellm "md5sum /tmp/auth-acct-$ACCT.json | awk '{print \$1}'")
@@ -123,16 +126,43 @@ if should_run cp-auth; then
   log "  md5 ok: $LOCAL_MD5"
 
   jms ssh AIYJY-litellm "
-    POD=\$(kubectl -n $NS get pod -l app=$DEPLOY -o jsonpath='{.items[0].metadata.name}')
-    [ -z \"\$POD\" ] && { echo 'FATAL: no pod for $DEPLOY' >&2; exit 1; }
-    kubectl -n $NS cp /tmp/auth-acct-$ACCT.json \$POD:/chatgpt-auth/auth.json
-    # 校验 in-pod md5
-    POD_MD5=\$(kubectl -n $NS exec \$POD -- md5sum /chatgpt-auth/auth.json | awk '{print \$1}')
-    [ \"\$POD_MD5\" != \"$LOCAL_MD5\" ] && { echo \"FATAL: pod md5 mismatch \$POD_MD5\" >&2; exit 1; }
-    echo \"  in-pod md5 ok\"
-    rm /tmp/auth-acct-$ACCT.json
-    kubectl -n $NS rollout restart deploy/$DEPLOY
-    # 用 until-loop 等 1/1 ready 替代 rollout status --timeout (180s 上限误判 + jms 隧道 flake)
+    set -e
+    # 1) scale=0 等 pod 真消失
+    kubectl -n $NS scale deploy/$DEPLOY --replicas=0
+    for i in \$(seq 1 30); do
+      N=\$(kubectl -n $NS get pod -l app=$DEPLOY --no-headers 2>/dev/null | wc -l)
+      [ \"\$N\" = 0 ] && break
+      sleep 2
+    done
+    [ \"\$N\" = 0 ] || { echo 'FATAL: pod did not terminate in 60s' >&2; exit 1; }
+
+    # 2) busybox attach PVC, stdin → /a/auth.json, 校验 md5
+    cat > /tmp/cp-overrides-$ACCT.json <<JSON
+{
+  \"spec\": {
+    \"containers\": [{
+      \"name\": \"cp\",
+      \"image\": \"busybox\",
+      \"stdin\": true,
+      \"stdinOnce\": true,
+      \"tty\": false,
+      \"command\": [\"sh\",\"-c\",\"cat > /a/auth.json && md5sum /a/auth.json\"],
+      \"volumeMounts\": [{\"name\": \"pvc\", \"mountPath\": \"/a\"}]
+    }],
+    \"volumes\": [{\"name\": \"pvc\", \"persistentVolumeClaim\": {\"claimName\": \"$DEPLOY-auth\"}}],
+    \"restartPolicy\": \"Never\"
+  }
+}
+JSON
+    PVC_MD5=\$(kubectl -n $NS run cp-$DEPLOY --rm -i --restart=Never --image=busybox \
+      --overrides=\"\$(cat /tmp/cp-overrides-$ACCT.json)\" \
+      < /tmp/auth-acct-$ACCT.json 2>&1 | grep -E '^[a-f0-9]{32}' | awk '{print \$1}')
+    rm -f /tmp/cp-overrides-$ACCT.json /tmp/auth-acct-$ACCT.json
+    [ \"\$PVC_MD5\" != \"$LOCAL_MD5\" ] && { echo \"FATAL: PVC md5 mismatch \$PVC_MD5 != $LOCAL_MD5\" >&2; exit 1; }
+    echo \"  ✅ PVC md5 ok: \$PVC_MD5\"
+
+    # 3) scale=1 等 1/1 ready
+    kubectl -n $NS scale deploy/$DEPLOY --replicas=1
     for i in \$(seq 1 60); do
       R=\$(kubectl -n $NS get deploy $DEPLOY -o jsonpath='{.status.readyReplicas}/{.spec.replicas}' 2>/dev/null)
       [ \"\$R\" = '1/1' ] && { echo \"  ✅ $DEPLOY ready (\$R)\"; break; }

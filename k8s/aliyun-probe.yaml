@@ -1,0 +1,132 @@
+# aliyun-probe — ServiceAccount + RBAC + Secret + Deployment + Service
+#
+# Deploys into ns=carher. acct-admin (188) pulls via cloudflared:
+#   GET https://chatgpt-acct-probe.carher.net/probe
+#
+# Bearer token + db password come from the chatgpt-acct-probe Secret (created
+# out-of-band — see docs/aliyun-probe-deploy.md). Image lives in ACR VPC.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: chatgpt-acct-probe
+  namespace: carher
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chatgpt-acct-probe
+  namespace: carher
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chatgpt-acct-probe
+  namespace: carher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: chatgpt-acct-probe
+subjects:
+- kind: ServiceAccount
+  name: chatgpt-acct-probe
+  namespace: carher
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-probe
+  namespace: carher
+  labels:
+    app: chatgpt-acct-probe
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: chatgpt-acct-probe
+  template:
+    metadata:
+      labels:
+        app: chatgpt-acct-probe
+    spec:
+      serviceAccountName: chatgpt-acct-probe
+      containers:
+      - name: probe
+        image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/chatgpt-acct-probe:v0.1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: PROBE_NS
+          value: carher
+        - name: PROBE_POD_LABEL
+          value: pool=chatgpt-acct
+        - name: PROBE_DB_POD
+          value: litellm-db-0
+        - name: PROBE_DB_USER
+          value: litellm
+        - name: PROBE_DB_NAME
+          value: litellm
+        - name: PROBE_CACHE_TTL
+          value: "300"
+        - name: PROBE_LIVE_THROTTLE
+          value: "30"
+        - name: PROBE_EXEC_TIMEOUT
+          value: "25"
+        - name: PROBE_WORKERS
+          value: "4"
+        - name: PROBE_BEARER
+          valueFrom:
+            secretKeyRef:
+              name: chatgpt-acct-probe
+              key: bearer
+        - name: PROBE_DB_PWD
+          valueFrom:
+            secretKeyRef:
+              name: chatgpt-acct-probe
+              key: db_pwd
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chatgpt-acct-probe
+  namespace: carher
+  labels:
+    app: chatgpt-acct-probe
+spec:
+  type: ClusterIP
+  selector:
+    app: chatgpt-acct-probe
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000

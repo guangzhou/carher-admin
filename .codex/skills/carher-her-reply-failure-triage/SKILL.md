@@ -121,6 +121,195 @@ kubectl -n carher get deploy -l app=carher-user -o json \
     $d + " " + .name + " " + .mountPath)'
 ```
 
+### 4. H75 runtime tries to remove mounted runtime-plugins
+
+**Signature**:
+
+```text
+rm: cannot remove '/data/.openclaw/runtime-plugins': Device or resource busy
+```
+
+**Root cause**: older H75 runtime image or partial hotfix still runs an entrypoint path that
+`rm -rf`s `/data/.openclaw/runtime-plugins`. On ACK H75 this path is an EmptyDir mount, so
+the delete exits with EBUSY and the main container restarts or never becomes ready.
+
+**Fix**:
+
+- Prefer a durable CRD/image alignment to the current fixed H75 image, instead of a one-off
+  Deployment command wrapper.
+- Match the known-good H75 target's Hermes annotations when the target uses LiteLLM:
+
+```bash
+kubectl patch her her-$HER_ID -n carher --type=merge -p '{
+  "metadata":{"annotations":{
+    "carher.io/runtime-profile":"h75-openclaw",
+    "carher.io/hermes-provider":"litellm",
+    "carher.io/hermes-config-template":"/opt/data/.hermes/config-litellm.yaml",
+    "carher.io/reconcile-poke":"'"$(date +%s)"'"
+  }},
+  "spec":{
+    "image":"h75-runtime-4321dd-her75-20260619-thinkingmaxfix2",
+    "deployGroup":"beta-h75-'"$HER_ID"'"
+  }
+}'
+kubectl rollout status deploy/carher-$HER_ID -n carher --timeout=600s
+```
+
+**Verify**:
+
+```bash
+kubectl get pod -n carher -l user-id=$HER_ID \
+  -o custom-columns='NAME:.metadata.name,READY:.status.containerStatuses[*].ready,STATUS:.status.phase,RESTARTS:.status.containerStatuses[*].restartCount'
+kubectl exec -n carher deploy/carher-$HER_ID -c carher -- \
+  curl -fsS -m 10 http://127.0.0.1:18789/healthz
+kubectl logs -n carher deploy/carher-$HER_ID -c carher --since=10m \
+  | rg -i 'cannot remove|Device or resource busy|CrashLoop|BackOff'
+```
+
+Do not close from `rollout status` alone; require `2/2 Running`, zero new restarts,
+`gateway ready`, `ws client ready`, and no matching failure signature after the rollout.
+
+### 5. Missing botOpenId after instance creation
+
+**Signature**:
+
+- Pod is `2/2 Running`, `feishuWS=Connected`, Cloudflare/auth-proxy path is healthy.
+- Group messages or `@bot` still do not produce a reply.
+- `spec.botOpenId` is empty and `/data/.openclaw/openclaw.json` lacks
+  `channels.feishu.botOpenId`.
+
+**Root cause**: new instance was created without the bot's own Feishu open_id. Owner open_id
+and bot open_id are different fields. Without `botOpenId`, group `@bot` recognition and
+known bot mapping can be incomplete.
+
+**Fix**:
+
+1. Use the instance's own app credentials to call `GET /open-apis/bot/v3/info`.
+2. Write the returned `bot.open_id` to `spec.botOpenId` / Admin `bot_open_id`.
+3. Verify the running config contains `channels.feishu.botOpenId`.
+
+```bash
+kubectl get her her-$HER_ID -n carher -o jsonpath='{.spec.botOpenId}{"\n"}'
+kubectl exec -n carher deploy/carher-$HER_ID -c carher -- \
+  python3 -c 'import json; print(bool(json.load(open("/data/.openclaw/openclaw.json"))["channels"]["feishu"].get("botOpenId")))'
+```
+
+### 6. Batch regression after one new H75 Her fails
+
+Use this when one recently added H75 Her has no-reply, CrashLoop, missing `botOpenId`, or
+Cloudflare callback symptoms. Do not fix only the reported UID; scan the whole recent wave
+such as `272-280`.
+
+**Audit the wave**:
+
+```bash
+kubectl get her -n carher -o json > /tmp/carher-hers.json
+kubectl get pod -n carher -l app=carher-user -o json > /tmp/carher-pods.json
+kubectl get deploy -n carher -l app=carher-user -o json > /tmp/carher-deploys.json
+
+python3 - <<'PY'
+import json
+wanted = set(range(272, 281))  # adjust to the user-provided wave
+hers = json.load(open("/tmp/carher-hers.json"))["items"]
+pods = json.load(open("/tmp/carher-pods.json"))["items"]
+deploys = {d["metadata"]["name"]: d for d in json.load(open("/tmp/carher-deploys.json"))["items"]}
+pods_by_uid = {}
+for p in pods:
+    uid = (p.get("metadata", {}).get("labels", {}) or {}).get("user-id")
+    if uid and uid.isdigit():
+        pods_by_uid.setdefault(int(uid), []).append(p)
+for h in sorted(hers, key=lambda x: x.get("spec", {}).get("userId", 0)):
+    spec = h.get("spec", {})
+    uid = spec.get("userId")
+    if uid not in wanted:
+        continue
+    d = deploys.get(f"carher-{uid}", {})
+    c = next((x for x in d.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []) if x.get("name") == "carher"), {})
+    env = {e.get("name"): e.get("value", "") for e in c.get("env", [])}
+    pod_states = []
+    for p in pods_by_uid.get(uid, []):
+        css = p.get("status", {}).get("containerStatuses") or []
+        pod_states.append({
+            "pod": p["metadata"]["name"],
+            "ready": [cs.get("ready") for cs in css],
+            "restarts": [cs.get("restartCount") for cs in css],
+        })
+    print(uid, {
+        "image": spec.get("image"),
+        "botOpenId": bool(spec.get("botOpenId")),
+        "phase": h.get("status", {}).get("phase"),
+        "ws": h.get("status", {}).get("feishuWS"),
+        "hermesProvider": env.get("HERMES_INFERENCE_PROVIDER"),
+        "hermesTemplate": env.get("CARHER_HERMES_CONFIG_TEMPLATE"),
+        "commandHotfix": bool(c.get("command")),
+        "pods": pod_states,
+    })
+PY
+```
+
+**Batch fix durable CRD state**:
+
+- Resolve every target's `bot.open_id` with its own app credentials using
+  `GET /open-apis/bot/v3/info`; never use owner open_id as bot open_id.
+- Patch the whole affected wave to the known-good fixed H75 image and LiteLLM Hermes
+  annotations. Keep a JSON snapshot of HerInstance specs before patching.
+
+```bash
+kubectl patch her her-$HER_ID -n carher --type=merge -p '{
+  "metadata":{"annotations":{
+    "carher.io/runtime-profile":"h75-openclaw",
+    "carher.io/hermes-provider":"litellm",
+    "carher.io/hermes-config-template":"/opt/data/.hermes/config-litellm.yaml",
+    "carher.io/reconcile-poke":"'"$(date +%s)"'"
+  }},
+  "spec":{
+    "image":"h75-runtime-4321dd-her75-20260619-thinkingmaxfix2",
+    "deployGroup":"beta-h75-'"$HER_ID"'",
+    "botOpenId":"'"$BOT_OPEN_ID"'"
+  }
+}'
+```
+
+**Batch verification gates**:
+
+For every target, require:
+
+- Deployment rolled out from operator-rendered state, with no `command` hotfix wrapper.
+- Pod is `2/2 Running`, main container restart count is `0` after rollout.
+- CRD is `Running`, `feishuWS=Connected`.
+- `/data/.openclaw/openclaw.json` contains `channels.feishu.botOpenId`.
+- `curl -fsS http://127.0.0.1:18789/healthz` returns live.
+- Recent logs have zero matches for:
+
+```text
+cannot remove|Device or resource busy|CrashLoop|BackOff|SecretRefResolutionError|required secret|Invalid config|Traceback|ModuleNotFoundError|No adapter available|Unknown provider|reload still deferred
+```
+
+**Cloudflare batch check**:
+
+Confirm all `auth` / `fe` / `proxy` hostnames in the wave point to `auth-proxy:80`,
+not per-instance `:18891`, `:8000`, or `:8080`:
+
+```bash
+AUTH_PROXY_IP=$(kubectl get svc auth-proxy -n carher -o jsonpath='{.spec.clusterIP}')
+kubectl exec -n carher deploy/carher-admin -- env EXPECT_AUTH_PROXY="http://$AUTH_PROXY_IP:80" python - <<'PY'
+import json, os, urllib.request
+account = "67e6618e6af7e4342cbd1de02536fa2f"
+tunnel = "0e83a70f-93d9-4c17-86cc-7600f52696a2"
+expect = os.environ["EXPECT_AUTH_PROXY"]
+wanted = {f"s1-u{i}-{s}.carher.net" for i in range(272, 281) for s in ("auth", "fe", "proxy")}
+url = f"https://api.cloudflare.com/client/v4/accounts/{account}/cfd_tunnel/{tunnel}/configurations"
+req = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ["CLOUDFLARE_API_TOKEN"]})
+with urllib.request.urlopen(req, timeout=20) as r:
+    cfg = json.load(r)["result"]["config"]
+found = {x.get("hostname"): x.get("service") for x in cfg.get("ingress", []) if x.get("hostname") in wanted}
+missing = sorted(wanted - set(found))
+bad = {h: s for h, s in found.items() if s != expect}
+print({"found": len(found), "missing": missing, "bad": bad})
+assert not missing and not bad
+PY
+```
+
 ## 用户症状到根因的快速映射
 
 收到 her "Something went wrong while processing your request. Please try again, or use /new..." → 这是 OpenClaw `agent-runner.runtime` 的 `GENERIC_EXTERNAL_RUN_FAILURE_TEXT`,**多类根因都会触发同一句兜底**。要分诊不能只看消息文字。

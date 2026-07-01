@@ -67,7 +67,7 @@ Load only what the task needs:
 - `scripts/anthropic-onboard/docker-compose.claude-max-proxy.yml` - Docker deployment template.
 - `scripts/anthropic-onboard/patch-litellm-claude-max.py` - add global `claude-max-*` model entries to 198 prod.
 - `scripts/anthropic-onboard/claude-max-grant-key.sh` - grant/revoke per-key CC Max access.
-- `scripts/anthropic-onboard/cc-max-upstream-status.sh` - quota and upstream account status.
+- `scripts/anthropic-onboard/cc-max-upstream-status.sh` - quota and upstream account status for the active runtime host; defaults to 198 `AIYJY-litellm`.
 
 ## Onboarding Flow Selection
 
@@ -243,10 +243,13 @@ Primary command:
 
 What it actually does:
 
-- Uploads `scripts/anthropic-onboard/cc-max-upstream-status.py` to 188
-  (`JSZX-AI-03`) and runs it there.
+- Uploads `scripts/anthropic-onboard/cc-max-upstream-status.py` to the active
+  runtime host and runs it there. The wrapper defaults to 198
+  `AIYJY-litellm`; set `CC_MAX_QUOTA_ASSET=<asset>` only for legacy 188 or
+  another active egress host.
 - Reads `ANTHROPIC_OAUTH_TOKEN` from `/Data/anthropic-auth/acct-*/.env` by
-  default. It does not automatically inspect ACK/K8s Secrets or 198 LiteLLM.
+  default on that runtime host. It does not automatically inspect ACK/K8s
+  Secrets or unrelated runtime hosts.
 - Sends one tiny Haiku probe per account to
   `https://api.anthropic.com/v1/messages?beta=true`.
 - Uses Claude Code identity headers and system preamble, including
@@ -282,17 +285,18 @@ Important caveats:
 
 - Each run consumes a negligible Haiku request per account, but do not poll
   faster than 30 seconds. `--watch` enforces a 30s minimum.
-- The script's default scope is 188 Docker pool only. For ACK isolated accounts
-  such as `ccmax-proxy-acct-N-test`, either add that account to a controlled
-  auth directory and run with `--auth-dir`, or make a separate K8s-safe probe
-  that reads the OAuth Secret without printing it.
+- The script's default scope is the active 198 runtime auth directory. For ACK
+  isolated accounts such as `ccmax-proxy-acct-N-test`, either add that account
+  to a controlled auth directory and run with `--auth-dir`, or make a separate
+  K8s-safe probe that reads the OAuth Secret without printing it.
 - `sk-ant-oat` direct Opus/Sonnet 429 is not a reliable plan/quota check because
   OAuth direct calls are model-allowlisted. Use the v3 transparent proxy path
   for Sonnet/Opus functional checks, and use the Haiku header probe for unified
   5h/7d utilization.
-- If the script reports only `acct-1` and `acct-2`, that means only those
-  `.env` files exist under the default 188 auth dir. It says nothing about ACK
-  isolated K8s accounts unless they have been explicitly included.
+- If the script reports fewer accounts than expected, first verify you are on
+  the intended runtime host (`AIYJY-litellm` by default, or
+  `CC_MAX_QUOTA_ASSET=<asset>` for another backend). Then check which `.env`
+  files exist under that host's `/Data/anthropic-auth`.
 
 Multi-buyer diagnosis:
 
@@ -728,9 +732,10 @@ Verification bar:
 
 #### 4d. Malaysia quota and upstream pressure checks
 
-For the Malaysia pool, the old 188 quota script does not automatically see the
-tokens unless they are exported to its auth directory. Prefer a Malaysia-aware
-probe that runs on `cc-proxy` against:
+For the Malaysia pool, the default 198 quota wrapper does not automatically see
+tokens unless that runtime has the matching auth directory. Point the same
+wrapper at the Malaysia runtime with `CC_MAX_QUOTA_ASSET=<cc-proxy asset>` when
+available, or run the Python probe on `cc-proxy` against:
 
 ```text
 /Data/anthropic-auth/acct-16/.env
@@ -892,6 +897,88 @@ Fable 5 notes:
   return HTTP 200 with no text. Verify Fable with `max_tokens >= 128` and a
   prompt such as `Say exactly OK`.
 
+Astrill node-change SOP:
+
+- Restart only the Astrill GUI/VPN processes when the user wants to switch VPN
+  nodes. Do not restart the machine, `x11vnc`, `openbox`, the per-account proxy,
+  or the 198 tunnel.
+- Before touching Astrill, record:
+
+  ```bash
+  pgrep -af 'Astrill|astrill|asproxy|asovpnc' || true
+  ss -lntp 2>/dev/null | grep -E '(:5901|:3456)' || true
+  ip route get 10.68.13.198 || true
+  ip route get 1.1.1.1 || true
+  ```
+
+- To reset the UI to an OFF/choose-node state:
+
+  ```bash
+  pkill -u cltx -f '^/usr/local/Astrill/astrill$' || true
+  pkill -u cltx -f '/usr/local/Astrill/asproxy' || true
+  pkill -u cltx -f '/usr/local/Astrill/asovpnc' || true
+  sleep 2
+  rm -f /run/astrill-gui/astrill.pid /tmp/astrill-manual-restart.pid 2>/dev/null || true
+  DISPLAY=:99 HOME=/home/cltx nohup /usr/local/Astrill/astrill \
+    >/tmp/astrill-manual-restart.log 2>&1 &
+  ```
+
+- After restart, `127.0.0.1:5901` and `:3456` must still be listening. If they
+  are not, fix the GUI/VNC/proxy separately; do not continue changing VPN nodes.
+- When Astrill is connected, expect `tun0`, `asproxy`, and `asovpnc`. External
+  routes such as `1.1.1.1` should go via `tun0`; management traffic to
+  `10.68.13.198` must stay on `ens1`.
+- To identify the exit location, prefer two independent Geo services because
+  some IP-check endpoints reset under Astrill:
+
+  ```bash
+  curl -m 12 -sS https://ipinfo.io/json || true
+  curl -m 12 -sS 'http://ip-api.com/json/?fields=status,country,countryCode,regionName,city,isp,org,as,query,timezone' || true
+  curl -m 12 -sS https://ipapi.co/json || true
+  ```
+
+- If `api.ipify.org`, `api.myip.com`, or `ipapi.co` times out/resets but
+  `ipinfo.io` and `ip-api.com` agree, use the agreeing results and note the
+  failed endpoint. A failed endpoint is not by itself proof the VPN is broken.
+- If there is no `tun0`, no `asproxy/asovpnc`, and the public IP is still the
+  China Unicom LAN egress, Astrill is only open in the GUI and is not connected.
+  Ask the user to select a node and click ON in VNC.
+
+SSH/VNC access when Astrill changes routes:
+
+- Local direct SSH to `10.68.13.224` can fail while Astrill is connected, even
+  when 198-to-224 remains healthy. Distinguish these cases:
+
+  ```bash
+  # From local workstation
+  ping -c 1 -W 2 10.68.13.224 || true
+  nc -vz -w 3 10.68.13.224 22 || true
+
+  # From 198
+  scripts/jms ssh AIYJY-litellm \
+    'ping -c 1 -W 2 10.68.13.224 >/dev/null && echo ok || echo fail; nc -vz -w 3 10.68.13.224 22'
+  ```
+
+- If local direct access fails but 198 access succeeds, continue through 198.
+  The helper script is:
+
+  ```bash
+  scripts/ssh-224-via-198.sh check
+  scripts/ssh-224-via-198.sh ssh
+  scripts/ssh-224-via-198.sh cmd 'hostname; whoami; ip route get 10.68.13.198 | head -1'
+  scripts/ssh-224-via-198.sh vnc
+  ```
+
+- The helper uses `scripts/jms proxy AIYJY-litellm ... 10.68.13.224:22` and
+  then SSHes to the local proxy port. It must not store the 224 password; SSH
+  prompts interactively. `check` should show `proxy_ok` and either
+  `ssh_login_ok` or `ssh_port_ok_password_required`.
+- For VNC, keep the tunnel command running. The VNC URL is
+  `vnc://127.0.0.1:<local-port>`. If the default local `5901` is already in use,
+  the helper chooses a free local port.
+- Do not conclude SSH is broken from local failure alone. Confirm whether
+  `198 -> 224:22` works, then log in through the helper if needed.
+
 198 cleanup when the user says "only acct-19":
 
 - Prefer `/model/info` and systemd state to understand the live config; use SQL
@@ -917,6 +1004,8 @@ systemd on 198: only ccmax-acct19-224-tunnel.service active
 ss on 198: only 10.68.13.198:3467 for ccmax
 224 /health: {"ok": true, "accounts": ["acct-19"], ...}
 224 egress IP: external IP from Astrill, not the LAN host
+224 route to 10.68.13.198: ens1, not tun0
+224 route to public internet: tun0 when Astrill is ON
 representative calls:
   claude-max-opus
   claude-max-my-random-opus-4-8

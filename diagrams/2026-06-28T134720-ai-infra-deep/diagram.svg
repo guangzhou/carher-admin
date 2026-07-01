@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="1180" viewBox="0 0 1900 1180">
+  <rect x="0" y="0" width="1900" height="1180" fill="#F4F8F7"/>
+  <rect x="32" y="32" width="1836" height="1116" rx="28" fill="#FFFFFF" stroke="#153A35" stroke-width="4"/>
+
+  <text x="86" y="102" font-family="Noto Sans SC, Arial" font-size="47" font-weight="800" fill="#101828">AutoLink AI Infra 产品架构</text>
+  <text x="88" y="148" font-family="Noto Sans SC, Arial" font-size="25" fill="#52645F">不是几件工具的拼装，而是一套支撑全员 Codex、全员 Her 和组织级 AI 研发流程的底座</text>
+
+  <rect x="86" y="188" width="1728" height="76" rx="18" fill="#0F3D36"/>
+  <text x="122" y="236" font-family="Noto Sans SC, Arial" font-size="28" font-weight="800" fill="#FFFFFF">对合作伙伴可感知的产品形态</text>
+  <text x="545" y="236" font-family="Noto Sans SC, Arial" font-size="24" fill="#CFE9E3">统一入口 · 一键开通 · 组织治理 · 成本可见 · 研发场景可落地</text>
+
+  <g>
+    <rect x="90" y="322" width="330" height="664" rx="24" fill="#F5FBF8" stroke="#B7D9CE" stroke-width="3"/>
+    <text x="128" y="376" font-family="Noto Sans SC, Arial" font-size="30" font-weight="800" fill="#0F3D36">使用入口层</text>
+    <text x="128" y="418" font-family="Noto Sans SC, Arial" font-size="21" fill="#546863">把 AI 放进真实研发入口</text>
+
+    <rect x="128" y="462" width="254" height="72" rx="16" fill="#EAF4FF" stroke="#2563EB" stroke-width="2"/>
+    <text x="158" y="506" font-family="Noto Sans SC, Arial" font-size="23" font-weight="800" fill="#0B356D">Codex / Claude Code</text>
+    <text x="158" y="528" font-family="Noto Sans SC, Arial" font-size="15" fill="#53645F">本地代码执行、修 Bug、重构</text>
+
+    <rect x="128" y="556" width="254" height="72" rx="16" fill="#EAF7F2" stroke="#16A085" stroke-width="2"/>
+    <text x="158" y="600" font-family="Noto Sans SC, Arial" font-size="23" font-weight="800" fill="#0B4B3F">Her / Her+</text>
+    <text x="158" y="622" font-family="Noto Sans SC, Arial" font-size="15" fill="#53645F">飞书入口、知识、任务、协同</text>
+
+    <rect x="128" y="650" width="254" height="72" rx="16" fill="#FFF7E6" stroke="#F59E0B" stroke-width="2"/>
+    <text x="158" y="690" font-family="Noto Sans SC, Arial" font-size="22" font-weight="800" fill="#8A4B00">Web Chat</text>
+    <text x="158" y="714" font-family="Noto Sans SC, Arial" font-size="17" font-weight="700" fill="#8A4B00">Open WebUI</text>
+
+    <rect x="128" y="744" width="254" height="72" rx="16" fill="#EEF2F6" stroke="#475467" stroke-width="2"/>
+    <text x="158" y="788" font-family="Noto Sans SC, Arial" font-size="23" font-weight="800" fill="#1D2939">Admin / Dashboard</text>
+    <text x="158" y="810" font-family="Noto Sans SC, Arial" font-size="15" fill="#53645F">人数、费用、活跃、风险</text>
+
+    <rect x="128" y="858" width="254" height="72" rx="16" fill="#FFFFFF" stroke="#B7D9CE" stroke-width="2"/>
+    <text x="158" y="902" font-family="Noto Sans SC, Arial" font-size="23" font-weight="800" fill="#0F3D36">客户只看到服务</text>
+    <text x="158" y="924" font-family="Noto Sans SC, Arial" font-size="15" fill="#53645F">不关心账号池和模型细节</text>
+  </g>
+
+  <g>
+    <rect x="500" y="322" width="820" height="664" rx="28" fill="#FFFFFF" stroke="#173B35" stroke-width="4"/>
+    <rect x="532" y="356" width="756" height="74" rx="18" fill="#102A43"/>
+    <text x="570" y="404" font-family="Noto Sans SC, Arial" font-size="31" font-weight="800" fill="#FFFFFF">AI Infra 控制面</text>
+    <text x="842" y="404" font-family="Noto Sans SC, Arial" font-size="22" fill="#CFE9E3">把工具、模型、账号、权限和数据治理产品化</text>
+
+    <rect x="548" y="466" width="330" height="104" rx="18" fill="#EAF7F2" stroke="#16A085" stroke-width="2"/>
+    <text x="584" y="508" font-family="Noto Sans SC, Arial" font-size="25" font-weight="800" fill="#0F3D36">账号与实例自动化</text>
+    <text x="584" y="541" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">申请后自动生成 key、实例、配置</text>
+    <text x="584" y="565" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">域名、Service、状态和生命周期</text>
+
+    <rect x="912" y="466" width="330" height="104" rx="18" fill="#EDF4FF" stroke="#2563EB" stroke-width="2"/>
+    <text x="948" y="508" font-family="Noto Sans SC, Arial" font-size="25" font-weight="800" fill="#0B356D">组织权限与预算</text>
+    <text x="948" y="541" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">按用户、部门、key 控访问范围</text>
+    <text x="948" y="565" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">预算、额度、模型 allowlist 可治理</text>
+
+    <rect x="548" y="602" width="330" height="104" rx="18" fill="#FFF7E6" stroke="#F59E0B" stroke-width="2"/>
+    <text x="584" y="644" font-family="Noto Sans SC, Arial" font-size="25" font-weight="800" fill="#8A4B00">模型供应链</text>
+    <text x="584" y="677" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">LiteLLM 多模型路由、fallback</text>
+    <text x="584" y="701" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">账号池、cache、sticky、上游健康</text>
+
+    <rect x="912" y="602" width="330" height="104" rx="18" fill="#F4F1FF" stroke="#7C3AED" stroke-width="2"/>
+    <text x="948" y="644" font-family="Noto Sans SC, Arial" font-size="25" font-weight="800" fill="#4C1D95">Agent 场景编排</text>
+    <text x="948" y="677" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">Her、skill pack、workflow</text>
+    <text x="948" y="701" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">连接代码、测试、文档、任务协同</text>
+
+    <rect x="548" y="738" width="330" height="104" rx="18" fill="#EEF2F6" stroke="#475467" stroke-width="2"/>
+    <text x="584" y="780" font-family="Noto Sans SC, Arial" font-size="25" font-weight="800" fill="#1D2939">运行与自愈</text>
+    <text x="584" y="813" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">K8s、Operator、HerInstance CRD</text>
+    <text x="584" y="837" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">灰度、回滚、健康检查、日志</text>
+
+    <rect x="912" y="738" width="330" height="104" rx="18" fill="#FDF2F8" stroke="#DB2777" stroke-width="2"/>
+    <text x="948" y="780" font-family="Noto Sans SC, Arial" font-size="25" font-weight="800" fill="#9D174D">数据与复盘</text>
+    <text x="948" y="813" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">SpendLogs、token、成本、失败率</text>
+    <text x="948" y="837" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">缓存命中、活跃、部门扩散效果</text>
+
+    <rect x="548" y="886" width="694" height="58" rx="18" fill="#F5FBF8" stroke="#B7D9CE" stroke-width="2"/>
+    <text x="586" y="923" font-family="Noto Sans SC, Arial" font-size="22" font-weight="800" fill="#0F3D36">关键壁垒：</text>
+    <text x="708" y="923" font-family="Noto Sans SC, Arial" font-size="21" fill="#344B45">控制面把一次开通变成持续治理，把一次调用变成组织可复盘的数据资产</text>
+  </g>
+
+  <g>
+    <rect x="1400" y="322" width="414" height="664" rx="24" fill="#F7F9FC" stroke="#C9D3DF" stroke-width="3"/>
+    <text x="1438" y="376" font-family="Noto Sans SC, Arial" font-size="30" font-weight="800" fill="#1D2939">运行底座与规模证明</text>
+    <text x="1438" y="418" font-family="Noto Sans SC, Arial" font-size="21" fill="#546863">真实系统已跑在两类环境中</text>
+
+    <rect x="1438" y="462" width="338" height="108" rx="18" fill="#FFFFFF" stroke="#16A085" stroke-width="2"/>
+    <text x="1472" y="506" font-family="Noto Sans SC, Arial" font-size="25" font-weight="800" fill="#0F3D36">阿里云 ACK</text>
+    <text x="1472" y="541" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">8 节点承载 Her 运行面</text>
+    <text x="1472" y="565" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">272 个 HerInstance + Operator 双副本</text>
+
+    <rect x="1438" y="600" width="338" height="108" rx="18" fill="#FFFFFF" stroke="#2563EB" stroke-width="2"/>
+    <text x="1472" y="644" font-family="Noto Sans SC, Arial" font-size="25" font-weight="800" fill="#0B356D">198 产品环境</text>
+    <text x="1472" y="679" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">LiteLLM product 4 副本</text>
+    <text x="1472" y="703" font-family="Noto Sans SC, Arial" font-size="19" fill="#435650">25 个运行中 ChatGPT account pod</text>
+
+    <rect x="1438" y="738" width="338" height="108" rx="18" fill="#FFFFFF" stroke="#F59E0B" stroke-width="2"/>
+    <text x="1472" y="782" font-family="Noto Sans SC, Arial" font-size="25" font-weight="800" fill="#8A4B00">组织入口组件</text>
+    <text x="1472" y="817" font-family="Noto Sans SC, Arial" font-size="18" fill="#435650">Open WebUI、SSO、key-swap</text>
+    <text x="1472" y="841" font-family="Noto Sans SC, Arial" font-size="18" fill="#435650">Lark MCP、账号池管理、审计</text>
+
+    <rect x="1438" y="876" width="338" height="76" rx="18" fill="#111827" stroke="#111827" stroke-width="2"/>
+    <text x="1472" y="908" font-family="Noto Sans SC, Arial" font-size="21" font-weight="800" fill="#FFFFFF">对外表达边界</text>
+    <text x="1472" y="936" font-family="Noto Sans SC, Arial" font-size="18" fill="#D1D5DB">讲能力与规模，不暴露内部拓扑细节</text>
+  </g>
+
+  <g stroke="#8AA29B" stroke-width="5" fill="none">
+    <polyline points="420,654 500,654"/>
+    <polyline points="1320,654 1400,654"/>
+  </g>
+  <g fill="#8AA29B">
+    <polygon points="500,654 472,638 472,670"/>
+    <polygon points="1400,654 1372,638 1372,670"/>
+  </g>
+
+  <g>
+    <rect x="90" y="1034" width="1724" height="70" rx="28" fill="#0F3D36"/>
+    <text x="130" y="1078" font-family="Noto Sans SC, Arial" font-size="25" font-weight="800" fill="#FFFFFF">一句话结论：</text>
+    <text x="292" y="1078" font-family="Noto Sans SC, Arial" font-size="24" fill="#FFFFFF">AutoLink AI Infra 的技术优势，是把模型供应、Agent 能力、账号开通、权限治理和数据反馈做成可规模化交付的研发 AI 产品。</text>
+  </g>
+</svg>

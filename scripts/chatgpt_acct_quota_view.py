@@ -91,12 +91,32 @@ def stale_notes(row: dict[str, Any], now: float) -> list[str]:
 
 
 def next_reset(row: dict[str, Any], now: float) -> str:
-    candidates = []
-    for key in ("primary_reset_at", "weekly_reset_at"):
-        ts = row.get(key)
-        if ts and ts > now:
-            candidates.append(ts)
-    return duration(min(candidates), now) if candidates else "-"
+    """真正阻塞的窗口的 reset，不是"两个窗口最早的那个"。
+    acct-36 反例：5h=100% 触发 scale=0，primary_reset 早过（stale 冻结未 probe），wk 才 35%
+    却 weekly_reset=5d17h future。取 min 会返 5d17h → 用户读成"要等 5 天才重开"，
+    但实际是 primary 早已 reset，只等 rebalance 重新 probe（该 tick 就复活）。
+    正确语义：SCALED_DOWN 且 cause 声明 blocker 窗口 → 只看 blocker；其余场景取 min。"""
+    cause = str(row.get("cause") or "").lower()
+    tier = str(row.get("tier") or "").upper()
+    p_reset = row.get("primary_reset_at")
+    w_reset = row.get("weekly_reset_at")
+
+    if tier == "SCALED_DOWN" and ("5h=" in cause or "wk=" in cause):
+        # cause 里点名了 blocker，只看它的 reset。past = state 冻结待 probe。
+        blocker = p_reset if "5h=" in cause else w_reset
+        if not blocker:
+            return "-"
+        if float(blocker) <= now:
+            return "past⊘"     # blocker 已过，等 rebalance 重新 probe
+        return duration(blocker, now)
+
+    # 兜底：两个 reset 都取，选最早的 future；两个都过则 past⊘
+    future = [float(ts) for ts in (p_reset, w_reset) if ts and float(ts) > now]
+    if future:
+        return duration(min(future), now)
+    if p_reset or w_reset:
+        return "past⊘"
+    return "-"
 
 
 def parse_subscription_until(value: Any) -> float | None:

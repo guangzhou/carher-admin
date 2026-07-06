@@ -287,24 +287,102 @@ def mailcom_login(ctx):
 # ── outlook.live.com provider (2026-06-22: hotmail acct) ────────────────────
 # 走 login.live.com → outlook.live.com inbox; 邮件 subject + body 都明文(没 Shadow DOM)
 # 用 div[role='option']/div[role='listitem'] 拿 row text, regex 6位 OTP
+def _outlook_dismiss_interstitials(p, rounds=4):
+    """Skip Microsoft post-login interstitials (Let's protect / Add security info /
+    Stay signed in / Verify your email recovery-email prompts).
+
+    We never want to fill the recovery-email input — it locks the flow. Click any
+    "Skip for now" / "Not now" / "Cancel" / "Back" control and loop until inbox
+    URL or no control found.
+    """
+    skip_selectors = [
+        "a:has-text('Skip for now')",
+        "button:has-text('Skip for now')",
+        "a:has-text('Not now')",
+        "button:has-text('Not now')",
+        "input[value='Skip for now']",
+        "input[value='Cancel']",
+        "input#iCancel",
+        "input#idBtn_Back",
+        "button:has-text('Cancel')",
+        "button:has-text('Back')",
+        "[role='button']:has-text('Skip')",
+        "text=Skip for now",
+    ]
+    for i in range(rounds):
+        if "outlook.live.com" in p.url and "/mail/" in p.url:
+            return True
+        clicked = False
+        for sel in skip_selectors:
+            try:
+                loc = p.locator(sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    print(f"  outlook: dismiss interstitial via {sel!r}", flush=True)
+                    loc.click(timeout=5000)
+                    clicked = True
+                    time.sleep(4)
+                    ss(p, f"outlook-skip-{i}")
+                    break
+            except Exception as e:
+                print(f"  outlook: skip sel {sel!r} err {e}", flush=True)
+        if not clicked:
+            return False
+    return False
+
+
 def outlook_login(ctx):
     if MAIL_OTP_PROVIDER != "outlook":
         return None
     p = ctx.new_page()
+
+    # (a) Try direct inbox — if a previous login left session cookies, skip re-auth.
+    try:
+        p.goto("https://outlook.live.com/mail/0/", timeout=30000)
+        time.sleep(4)
+        ss(p, "outlook-inbox-try")
+        _outlook_dismiss_interstitials(p, rounds=3)
+        if "outlook.live.com" in p.url and "/mail/" in p.url:
+            print(f"  outlook: session live, direct inbox url={p.url[:80]}", flush=True)
+            ss(p, "outlook-inbox")
+            return p
+    except Exception as e:
+        print(f"  outlook: direct inbox try failed {e}", flush=True)
+
     entry = ("https://login.live.com/login.srf?wa=wsignin1.0&rpsnv=13&ct=" + str(int(time.time()))
              + "&rver=7.0.6738.0&wp=MBI_SSL&wreply=https%3a%2f%2foutlook.live.com%2fowa%2f%3frealm%3dhotmail.com&id=292841&aadredir=1&CBCXT=out&lw=1&fl=dob,easi2&cobrandid=90015")
     p.goto(entry, timeout=30000)
     time.sleep(3)
     ss(p, "outlook-landing")
-    # email
-    e = p.locator("input[type='email'], input[name='loginfmt'], input#i0116").first
-    e.wait_for(timeout=20000); e.click(); e.fill(""); e.type(EMAIL, delay=60)
-    nb = p.get_by_role("button", name="Next", exact=True)
-    if nb.count() == 0:
-        nb = p.locator("input[type='submit'], input#idSIButton9, button[type='submit']")
-    nb.first.click(); time.sleep(4)
-    # password
+
+    # If already partway through (email pre-filled + "protect account" prompt), skip it.
+    if _outlook_dismiss_interstitials(p, rounds=2):
+        print(f"  outlook: post-goto interstitial dismissed url={p.url[:80]}", flush=True)
+
+    # email — only if the email field is actually present (otherwise we're on a
+    # post-login interstitial and typing would corrupt recovery-email input).
+    email_field = p.locator("input[type='email'], input[name='loginfmt'], input#i0116").first
+    if email_field.count() > 0 and email_field.is_visible():
+        email_field.click(); email_field.fill(""); email_field.type(EMAIL, delay=60)
+        nb = p.get_by_role("button", name="Next", exact=True)
+        if nb.count() == 0:
+            nb = p.locator("input[type='submit'], input#idSIButton9, button[type='submit']")
+        nb.first.click(); time.sleep(4)
+    else:
+        print("  outlook: email field absent — likely on interstitial or logged in", flush=True)
+
+    _outlook_dismiss_interstitials(p, rounds=2)
+
+    # password (may be absent if session was live or interstitial redirected to inbox)
     pwi = p.locator("input[type='password'], input#i0118, input[name='passwd']").first
+    if pwi.count() == 0 or not pwi.is_visible():
+        print(f"  outlook: password field absent, url={p.url[:80]}", flush=True)
+        _outlook_dismiss_interstitials(p, rounds=4)
+        for _ in range(20):
+            if "outlook.live.com" in p.url and "/mail/" in p.url:
+                break
+            time.sleep(2)
+        ss(p, "outlook-inbox")
+        return p
     pwi.wait_for(timeout=20000); pwi.click(); pwi.type(MAIL_PW, delay=60)
     sb = p.get_by_role("button", name="Next", exact=True)
     if sb.count() == 0:
@@ -872,34 +950,74 @@ with sync_playwright() as pw:
     if "passkey" in page.url.lower() or "auth_challenge" in page.url.lower():
         print(f"[3.5] Passkey challenge detected, clicking 'Try another way'...", flush=True)
         before_url = page.url
-        clicked = False
-        for strat in ("role-button", "role-link", "text-exact", "text-regex"):
+
+        def _try_another_locator():
+            """Return first visible 'Try another way' locator, or None."""
+            for strat in ("role-button", "role-link", "text-exact", "text-regex"):
+                try:
+                    if strat == "role-button":
+                        loc = page.get_by_role("button", name=re.compile(r"try another way", re.I))
+                    elif strat == "role-link":
+                        loc = page.get_by_role("link", name=re.compile(r"try another way", re.I))
+                    elif strat == "text-exact":
+                        loc = page.locator("text=Try another way")
+                    else:
+                        loc = page.get_by_text(re.compile(r"try another way", re.I))
+                    if loc.count() > 0 and loc.first.is_visible():
+                        return loc.first
+                except Exception as e:
+                    print(f"  locate {strat} failed: {e}", flush=True)
+            return None
+
+        # 关键：普通 click 常「声称成功但页面不动」(patchright 对该文字链接不触发)。
+        # 必须 click 后校验 url/DOM 真的变了，没变就升级点击方式重试——与
+        # toggle 的 6-strategy cascade 同理。
+        def _url_advanced():
+            u = page.url.lower()
+            return ("passkey" not in u) and ("auth_challenge" not in u)
+
+        advanced = False
+        for attempt in range(6):
+            loc = _try_another_locator()
+            if loc is None:
+                print(f"  attempt {attempt}: no 'Try another way' control visible yet", flush=True)
+                time.sleep(1.5)
+                continue
+            # 逐级升级点击方式
+            how = ["normal", "force", "dispatch", "mouse", "enter"][min(attempt, 4)]
             try:
-                if strat == "role-button":
-                    loc = page.get_by_role("button", name=re.compile(r"try another way", re.I))
-                elif strat == "role-link":
-                    loc = page.get_by_role("link", name=re.compile(r"try another way", re.I))
-                elif strat == "text-exact":
-                    loc = page.locator("text=Try another way")
-                else:
-                    loc = page.get_by_text(re.compile(r"try another way", re.I))
-                if loc.count() > 0 and loc.first.is_visible():
-                    loc.first.click()
-                    clicked = True
-                    print(f"  ✓ clicked Try another way via {strat}", flush=True)
-                    break
+                if how == "normal":
+                    loc.click(timeout=5000)
+                elif how == "force":
+                    loc.click(force=True, timeout=5000)
+                elif how == "dispatch":
+                    loc.dispatch_event("click")
+                elif how == "mouse":
+                    box = loc.bounding_box()
+                    if box:
+                        page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                else:  # enter
+                    loc.focus()
+                    page.keyboard.press("Enter")
+                print(f"  clicked 'Try another way' via {how} (attempt {attempt})", flush=True)
             except Exception as e:
-                print(f"  {strat} failed: {e}", flush=True)
-        if clicked:
-            for _ in range(15):
+                print(f"  click {how} failed: {e}", flush=True)
                 time.sleep(1)
-                if page.url != before_url:
+                continue
+            # 校验是否真的前进了
+            for _ in range(8):
+                time.sleep(1)
+                if _url_advanced() or "password" in page.url.lower():
+                    advanced = True
                     break
-            ss(page, "03b-passkey-bypass")
-            print(f"  url after passkey bypass={page.url}", flush=True)
-        else:
-            print(f"  ⚠ no Try another way control found", flush=True)
-            ss(page, "03b-passkey-bypass-noclick")
+            if advanced:
+                print(f"  ✓ passkey page advanced via {how}: url={page.url}", flush=True)
+                break
+            print(f"  ⚠ {how} did not advance page (still {page.url[:60]}), escalating", flush=True)
+
+        ss(page, "03b-passkey-bypass")
+        if not advanced:
+            print(f"  ❌ could not get past passkey page after cascade", flush=True)
     if "password" in page.url.lower():
         print(f"[4] Fill password 字段B (len={len(CHATGPT_PW)})", flush=True)
         page.wait_for_selector("input[type='password']", timeout=20000)

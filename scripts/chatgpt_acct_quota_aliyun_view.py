@@ -136,36 +136,49 @@ def probe_auth(pod: str) -> dict[str, Any]:
         "codex_5h": None, "codex_7d": None,
         "probe_err": None,
     }
-    try:
-        raw = subprocess.check_output(
-            ["kubectl", "-n", NS, "exec", pod, "--", "cat", AUTH_PATH],
-            text=True, timeout=20, stderr=subprocess.DEVNULL,
-        )
-        auth = json.loads(raw)
-        plan, sub_until = subscription_info(auth)
-        info.update({
-            "email": email_from_auth(auth),
-            "expires_at": auth.get("expires_at"),
-            "plan": plan,
-            "sub_until": sub_until,
-        })
-    except Exception:
+    # 读 auth.json 拿身份。并发 kubectl exec 走 jms 隧道时偶发单个 exec
+    # 超时/reset，必须重试；彻底失败要标 probe_err（否则 p5h/p7d 为 None
+    # 会 fall through 到 ONLINE，把打满的号误判成可接单）。
+    auth_exc = ""
+    for attempt in range(3):
+        try:
+            raw = subprocess.check_output(
+                ["kubectl", "-n", NS, "exec", pod, "--", "cat", AUTH_PATH],
+                text=True, timeout=20, stderr=subprocess.DEVNULL,
+            )
+            auth = json.loads(raw)
+            plan, sub_until = subscription_info(auth)
+            info.update({
+                "email": email_from_auth(auth),
+                "expires_at": auth.get("expires_at"),
+                "plan": plan,
+                "sub_until": sub_until,
+            })
+            break
+        except Exception as e:
+            auth_exc = type(e).__name__
+            time.sleep(1.5 * (attempt + 1))
+    else:
+        info["probe_err"] = f"auth_read_fail:{auth_exc}"
         return info
 
-    try:
-        raw = subprocess.check_output(
-            ["kubectl", "-n", NS, "exec", "-i", pod, "--", "python3", "-c",
-             USAGE_PROBE_CODE],
-            text=True, timeout=25, stderr=subprocess.DEVNULL,
-        )
-        usage = json.loads(raw)
-        if usage.get("_err") is not None:
-            body = (usage.get("_body") or "")
-            if "token_invalidated" in body or usage["_err"] == 401:
-                info["probe_err"] = "token_invalidated"
-            else:
-                info["probe_err"] = f"HTTP {usage['_err']}"
-        else:
+    last_exc = ""
+    for attempt in range(3):
+        try:
+            raw = subprocess.check_output(
+                ["kubectl", "-n", NS, "exec", "-i", pod, "--", "python3", "-c",
+                 USAGE_PROBE_CODE],
+                text=True, timeout=25, stderr=subprocess.DEVNULL,
+            )
+            usage = json.loads(raw)
+            if usage.get("_err") is not None:
+                body = (usage.get("_body") or "")
+                if "token_invalidated" in body or usage["_err"] == 401:
+                    info["probe_err"] = "token_invalidated"
+                    return info
+                last_exc = f"HTTP {usage['_err']}"
+                time.sleep(1.5 * (attempt + 1))
+                continue
             rl = usage.get("rate_limit") or {}
             pw = rl.get("primary_window") or {}
             sw = rl.get("secondary_window") or {}
@@ -179,20 +192,27 @@ def probe_auth(pod: str) -> dict[str, Any]:
                     info["codex_5h"] = (erl.get("primary_window") or {}).get("used_percent")
                     info["codex_7d"] = (erl.get("secondary_window") or {}).get("used_percent")
                     break
-    except Exception:
-        pass
+            return info
+        except Exception as e:
+            last_exc = type(e).__name__
+            time.sleep(1.5 * (attempt + 1))
+    info["probe_err"] = f"probe_fail:{last_exc}"
     return info
 
 
 def gather_auth(pods: list[dict[str, Any]]) -> None:
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         futs = {pool.submit(probe_auth, p["pod"]): p for p in pods}
         for fut in concurrent.futures.as_completed(futs):
             p = futs[fut]
             try:
                 p.update(fut.result())
-            except Exception:
-                p.update({"email": "", "expires_at": None, "plan": "", "sub_until": None})
+            except Exception as e:
+                p.update({
+                    "email": "", "expires_at": None, "plan": "", "sub_until": None,
+                    "p5h": None, "p7d": None,
+                    "probe_err": f"gather_fail:{type(e).__name__}",
+                })
 
 
 def db_query(sql: str) -> str:
@@ -307,6 +327,13 @@ def render(*, summary: bool, as_json: bool) -> None:
             return "OFFLINE"
         if p.get("probe_err") == "token_invalidated":
             return "TOKEN_X"
+        # fail-closed：探针出错，或没拿到任一窗口用量，就不能断言可接单。
+        # 否则 p5h/p7d 为 None 会 fall through 到 ONLINE，把打满/探测失败的号
+        # 误判成 take=yes。
+        if p.get("probe_err"):
+            return "PROBE_ERR"
+        if not isinstance(p.get("p5h"), (int, float)) and not isinstance(p.get("p7d"), (int, float)):
+            return "PROBE_ERR"
         if isinstance(p.get("p7d"), (int, float)) and p["p7d"] >= 100:
             return "QUOTA"
         if isinstance(p.get("p5h"), (int, float)) and p["p5h"] >= 100:
@@ -415,12 +442,14 @@ def render(*, summary: bool, as_json: bool) -> None:
     quota = [p["acct"] for p in pods if status_of(p) == "QUOTA"]
     token_x = [p["acct"] for p in pods if status_of(p) == "TOKEN_X"]
     offline = [p["acct"] for p in pods if status_of(p) == "OFFLINE"]
+    probe_err = [p["acct"] for p in pods if status_of(p) == "PROBE_ERR"]
     sort = lambda rows: sorted(rows, key=acct_sort_key)
     print()
     print(f"take    ={len(takers):2d}  {sort(takers)}")
     print(f"online  ={len(online):2d}  {sort(online)}")
     print(f"quota   ={len(quota):2d}  {sort(quota)} (5h/7d 撞顶)")
     print(f"token_x ={len(token_x):2d}  {sort(token_x)} (token_invalidated, 走 re-OAuth)")
+    print(f"probe_err={len(probe_err):2d}  {sort(probe_err)} (探针失败, 状态未知不计入 take)")
     print(f"offline ={len(offline):2d}  {sort(offline)} (pod not ready)")
 
 

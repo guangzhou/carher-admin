@@ -132,6 +132,7 @@ def probe_auth(pod: str) -> dict[str, Any]:
     """
     info = {
         "email": "", "expires_at": None, "plan": "", "sub_until": None,
+        "live_plan": None,
         "p5h": None, "p7d": None, "p_reset": None, "w_reset": None,
         "codex_5h": None, "codex_7d": None,
         "probe_err": None,
@@ -182,6 +183,9 @@ def probe_auth(pod: str) -> dict[str, Any]:
             rl = usage.get("rate_limit") or {}
             pw = rl.get("primary_window") or {}
             sw = rl.get("secondary_window") or {}
+            # live plan_type：上游实时会员档，比 id_token 缓存的 plan 准
+            # （订阅到期后 id_token 仍写 pro，但这里会回 free）。
+            info["live_plan"] = usage.get("plan_type")
             info["p5h"] = pw.get("used_percent")
             info["p7d"] = sw.get("used_percent")
             info["p_reset"] = pw.get("reset_at")
@@ -334,6 +338,13 @@ def render(*, summary: bool, as_json: bool) -> None:
             return "PROBE_ERR"
         if not isinstance(p.get("p5h"), (int, float)) and not isinstance(p.get("p7d"), (int, float)):
             return "PROBE_ERR"
+        # 订阅已过期，或上游实时会员档掉成非 pro：不是有效 pro 号，不该接单。
+        # sub_until 来自 id_token 缓存（过期后仍写 pro，靠 sub_until 揭穿）；
+        # live_plan 来自实时 /codex/usage（掉档后直接回 free），二者任一命中即判死。
+        if p.get("sub_until") and p["sub_until"] <= now:
+            return "SUB_EXP"
+        if p.get("live_plan") and p["live_plan"] != "pro":
+            return "SUB_EXP"
         if isinstance(p.get("p7d"), (int, float)) and p["p7d"] >= 100:
             return "QUOTA"
         if isinstance(p.get("p5h"), (int, float)) and p["p5h"] >= 100:
@@ -355,6 +366,8 @@ def render(*, summary: bool, as_json: bool) -> None:
             causes.append("sub_expired")
         elif p.get("sub_until") and p["sub_until"] - now < 7 * 86400:
             causes.append("sub<7d")
+        if p.get("live_plan") and p["live_plan"] != "pro":
+            causes.append(f"live_{p['live_plan']}")
         if isinstance(p.get("p5h"), (int, float)) and p["p5h"] >= 100:
             causes.append("5h_full")
         if isinstance(p.get("p7d"), (int, float)) and p["p7d"] >= 100:
@@ -441,6 +454,7 @@ def render(*, summary: bool, as_json: bool) -> None:
     online = [p["acct"] for p in pods if status_of(p) == "ONLINE"]
     quota = [p["acct"] for p in pods if status_of(p) == "QUOTA"]
     token_x = [p["acct"] for p in pods if status_of(p) == "TOKEN_X"]
+    sub_exp = [p["acct"] for p in pods if status_of(p) == "SUB_EXP"]
     offline = [p["acct"] for p in pods if status_of(p) == "OFFLINE"]
     probe_err = [p["acct"] for p in pods if status_of(p) == "PROBE_ERR"]
     sort = lambda rows: sorted(rows, key=acct_sort_key)
@@ -448,6 +462,7 @@ def render(*, summary: bool, as_json: bool) -> None:
     print(f"take    ={len(takers):2d}  {sort(takers)}")
     print(f"online  ={len(online):2d}  {sort(online)}")
     print(f"quota   ={len(quota):2d}  {sort(quota)} (5h/7d 撞顶)")
+    print(f"sub_exp ={len(sub_exp):2d}  {sort(sub_exp)} (订阅过期/非pro, 需续订或摘除)")
     print(f"token_x ={len(token_x):2d}  {sort(token_x)} (token_invalidated, 走 re-OAuth)")
     print(f"probe_err={len(probe_err):2d}  {sort(probe_err)} (探针失败, 状态未知不计入 take)")
     print(f"offline ={len(offline):2d}  {sort(offline)} (pod not ready)")

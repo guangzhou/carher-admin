@@ -51,6 +51,7 @@ import socket
 import os
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -157,7 +158,54 @@ CONSECUTIVE_401_THRESHOLD = 3  # 连续 401 ≥ 3 次才标记 manual_offline
 SSH_FAIL_ALERT_THRESHOLD = 3   # 187 SSH 连续失败 ≥ 3 次才告警（边沿）
 SUBSCRIPTION_META_TTL = 12 * 3600  # 订阅到期元数据每天最多刷新两次
 PAUSED_FORCE_PROBE_INTERVAL = 6 * 3600  # paused acct 即便 restore_at 未到，至少 6h 强制 probe 一次（防 cron-SKIP 把 stale 卡死）
-TMP_AUTH_TMPL = "/tmp/auth-{acct}.json"  # 188:/tmp 备用 token 副本（K3s exec 失败 fallback）
+# 2026-07-01 patch D: /tmp/auth-{acct}.json 老残留是 root 属主 (历史 sudo 写)，
+# cltx cron 无法 os.replace 覆盖 → sync_tmp_fail EPERM (acct-47/76 实证)。
+# 迁到 ~/.chatgpt-quota/auth/ (cltx 自己拥有)，写永远走新目录；
+# 读时若新目录 miss 则 fallback 老 /tmp 位置，让老数据自然过渡不动搬迁。
+AUTH_DIR = os.path.expanduser("~/.chatgpt-quota/auth")
+TMP_AUTH_TMPL = os.path.join(AUTH_DIR, "auth-{acct}.json")
+LEGACY_TMP_AUTH_TMPL = "/tmp/auth-{acct}.json"
+
+
+def resolve_auth_path(acct):
+    """读路径：新目录优先，老 /tmp 兜底。返回 str（即便都不存在也返回新目录路径）。"""
+    p = TMP_AUTH_TMPL.format(acct=acct)
+    if Path(p).exists():
+        return p
+    legacy = LEGACY_TMP_AUTH_TMPL.format(acct=acct)
+    if Path(legacy).exists():
+        return legacy
+    return p  # 都不存在时返回新目录，让 caller open 时报 FileNotFoundError
+
+# ---- Revive-by-pod-probe 配置（2026-07-01：副本丢/stale 时起 pod 探再决定复活） ----
+# 场景：SCALED_DOWN + reset 已过，但 /tmp/auth-{acct}.json 不存在或 mtime > 6h。
+# 老逻辑 defer 到永远（acct-36/17/24/58/63/64/65 存量 7 个案例）。
+# 新逻辑：scale=1 → 从 pod 内 kubectl exec 读 auth.json 顺手回补 /tmp 副本
+#          → 打 /codex/usage 拿 OpenAI 真值（used_percent + reset_at）
+#          → alive 就 resume_acct 注册 entry；still cap 用真 reset_at 刷 state 再 scale=0；
+#          → 401 → manual_offline 告警；其他 err → 冷却+失败计数，3 次升 manual_offline
+REVIVE_PROBE_COOLDOWN = 30 * 60         # 单 acct 失败后 30min 冷却，防雪崩
+REVIVE_PROBE_MAX_FAILS = 3              # 连续 3 次失败 → manual_offline + 飞书告警
+TMP_AUTH_STALE_SEC = 6 * 3600           # 副本 mtime > 6h 视为 stale，走 pod-probe 补新副本
+REVIVE_POD_WAIT_TIMEOUT = 120           # scale=1 等 endpoint ready 上限
+
+# ---- 自动 banked reset (BANK_RESET) 配置 (2026-07-04) ----
+# OFFLINE-WEEK 撞 100% 时，若 wham/usage 报 credits>=1 就 POST /wham/.../consume 而不是
+# pause_acct → SCALED_DOWN 死等 61h。老逻辑等自然滑窗浪费库存;新逻辑烧掉一张 credit
+# 立即把 7d 拉回 0 + allowed=true，pod 保留 scale=1 继续服务。
+# 触发条件（全部满足）：
+#   1. tier==OFFLINE-WEEK (5h/子池撞顶不能靠 wham 清；wham 只清主 5h+7d)
+#   2. sub_left >= BANK_RESET_MIN_SUB_LEFT (剩不到 N 天订阅不烧,续订价值更高)
+#   3. 单 acct 距上次 BANK_RESET 成功 >= BANK_RESET_COOLDOWN
+#   4. 本轮 cron tick 已 BANK_RESET 次数 < MAX_BANK_RESET_PER_TICK
+#   5. wham/usage HTTP=200 且 credits>=1
+# 失败/无库存/token 死 → 跌回原 pause_acct 路径,保留旧行为
+BANK_RESET_ENABLED = int(os.environ.get("BANK_RESET_ENABLED", "1"))
+BANK_RESET_MIN_SUB_LEFT = int(os.environ.get("BANK_RESET_MIN_SUB_LEFT", "2")) * 86400  # 默认 2 天
+BANK_RESET_COOLDOWN = int(os.environ.get("BANK_RESET_COOLDOWN", "3")) * 3600           # 默认 3h/acct
+MAX_BANK_RESET_PER_TICK = int(os.environ.get("MAX_BANK_RESET_PER_TICK", "8"))          # 单 tick 上限
+WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+WHAM_CONSUME_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
 
 # ---- TOKEN_INVALID 自动修复配置 ----
 # 触发条件：tier=TOKEN_INVALID + manual_offline + 距上次修复 ≥12h + 累计 <5 次
@@ -401,8 +449,9 @@ def parse_account_198(acct):
             # JSON 解析错说明 stdout 已返回但格式坏，重试无意义
             raise RuntimeError(f"invalid JSON from 198 {acct}: {e}")
 
-    # 3 次 ssh+kubectl 全失败 → 回落 188:/tmp/auth-{acct}.json 副本（feedback_chatgpt_48b_check_198_tmp_first）
-    fallback = TMP_AUTH_TMPL.format(acct=acct)
+    # 3 次 ssh+kubectl 全失败 → 回落 auth 副本（feedback_chatgpt_48b_check_198_tmp_first）
+    # patch D: 新目录 miss 时兜底老 /tmp 位置
+    fallback = resolve_auth_path(acct)
     if Path(fallback).exists():
         try:
             auth = json.load(open(fallback))
@@ -418,7 +467,7 @@ def probe_upstream_via_tmp(acct):
     不挂 pod、不依赖 K3s exec。返回 (primary_pct, secondary_pct, error_str)。
     success: (int, int, None)；err 时 pct 都 None。
     """
-    p = TMP_AUTH_TMPL.format(acct=acct)
+    p = resolve_auth_path(acct)
     if not Path(p).exists():
         return (None, None, "no_tmp_auth")
     try:
@@ -452,6 +501,331 @@ def probe_upstream_via_tmp(acct):
     if pp is None or ww is None:
         return (None, None, "no_pct_field")
     return (int(pp), int(ww), None)
+
+
+def tmp_auth_status(acct):
+    """返回 (state, mtime)：'missing' / 'stale' / 'fresh'。stale = mtime > 6h。
+    revive 决策：missing/stale 都走 pod-probe 路径补新副本。
+    patch D: 新目录 miss 时兜底老 /tmp 位置的 mtime。
+    """
+    p = Path(resolve_auth_path(acct))
+    if not p.exists():
+        return ("missing", 0)
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return ("missing", 0)
+    age = time.time() - mtime
+    if age > TMP_AUTH_STALE_SEC:
+        return ("stale", mtime)
+    return ("fresh", mtime)
+
+
+def sync_tmp_auth_from_pod(acct):
+    """ssh 198 → kubectl exec pod cat auth.json → 写 188:/tmp/auth-{acct}.json。
+    幂等：pod 内 auth 老于 /tmp 副本时也 overwrite（相信 pod 是权威源）。
+    返回 (ok: bool, err: str|None)。
+    """
+    kc_cmd = (
+        "export KUBECONFIG=$HOME/.kube/config; "
+        f"POD=$(kubectl -n {K8S_198_NS} get pod -l app=chatgpt-{acct} "
+        "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null); "
+        "if [ -z \"$POD\" ]; then echo POD_NOT_FOUND >&2; exit 42; fi; "
+        # 不吞 stderr — 需要真错定位失败原因
+        f"kubectl -n {K8S_198_NS} exec $POD -c litellm -- "
+        "cat /chatgpt-auth/auth.json"
+    )
+    mux_path = f"/tmp/cm-quota-198-{SSH_198_USER}@{SSH_198_HOST}:22"
+    ssh_args = [
+        "ssh",
+        "-o", "ConnectTimeout=5",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ControlMaster=auto",
+        "-o", f"ControlPath={mux_path}",
+        "-o", "ControlPersist=10m",
+        f"{SSH_198_USER}@{SSH_198_HOST}",
+        kc_cmd,
+    ]
+    try:
+        result = subprocess.run(ssh_args, capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        return False, f"ssh_err:{type(e).__name__}"
+    if result.returncode == 42:
+        return False, "pod_not_found"
+    if result.returncode != 0:
+        return False, f"exec_rc={result.returncode}:{result.stderr.strip()[:80]}"
+    try:
+        auth = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False, "bad_pod_json"
+    if not auth.get("access_token"):
+        return False, "no_access_token"
+    # patch D: 写到 cltx-owned AUTH_DIR，回避 /tmp 老 root-owned 文件 EPERM
+    out = TMP_AUTH_TMPL.format(acct=acct)
+    try:
+        os.makedirs(AUTH_DIR, exist_ok=True)
+        tmp = out + ".new"
+        Path(tmp).write_text(json.dumps(auth))
+        os.replace(tmp, out)
+    except OSError as e:
+        return False, f"write_err:{e}"
+    return True, None
+
+
+def probe_upstream_via_pod(acct):
+    """副本丢/stale 时的 revive 决策路径：
+    1) scale=1 + 等 endpoint ready
+    2) sync_tmp_auth_from_pod：从 pod 内 auth.json 回补 /tmp 副本
+    3) probe_upstream_via_tmp：拿新副本打 /codex/usage
+    返回 (result, primary_pct, weekly_pct, primary_reset_at, weekly_reset_at, err_str)。
+    result: 'alive' | 'still_cap' | 'token_invalid' | 'error'
+    调用方拿 result 分诊：
+      alive → resume_acct + 用 reset_at 刷 state
+      still_cap → scale=0 + 用 reset_at 刷 state.primary_reset_at + cause=REVIVE_PROBE_STILL_CAP
+      token_invalid → scale=0 + manual_offline + cause=REVIVE_PROBE_401 + 飞书告警
+      error → scale=0 + cause=REVIVE_PROBE_ERROR + 冷却
+    """
+    if DRY_RUN:
+        log(f"  [DRY_RUN] would revive-probe {acct} via pod")
+        return ("alive", 0, 0, None, None, None)
+
+    if not scale_deploy(acct, 1, wait_ready=True, timeout=REVIVE_POD_WAIT_TIMEOUT):
+        return ("error", None, None, None, None, "scale1_wait_fail")
+
+    sync_ok, sync_err = sync_tmp_auth_from_pod(acct)
+    if not sync_ok:
+        # pod 起来了但 auth.json 抠不出（PVC 空/pod 未 ready 等）
+        return ("error", None, None, None, None, f"sync_tmp_fail:{sync_err}")
+
+    # 用新副本打上游拿真值
+    p = resolve_auth_path(acct)
+    try:
+        auth = json.load(open(p))
+        tok, aid, _ = parse_auth_json(auth)
+    except Exception as e:
+        return ("error", None, None, None, None, f"parse_new_tmp:{type(e).__name__}")
+
+    req = urllib.request.Request(
+        "https://chatgpt.com/backend-api/codex/usage",
+        headers={
+            "Authorization": f"Bearer {tok}",
+            "chatgpt-account-id": aid,
+            "OpenAI-Beta": "codex-1",
+            "Originator": "codex_cli_rs",
+            "User-Agent": "codex_cli_rs/0.30.0 (Linux; x86_64)",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return ("token_invalid", None, None, None, None, "http_401")
+        return ("error", None, None, None, None, f"http_{e.code}")
+    except Exception as e:
+        return ("error", None, None, None, None, f"{type(e).__name__}")
+
+    rl = body.get("rate_limit") or {}
+    pw = rl.get("primary_window") or {}
+    sw = rl.get("secondary_window") or {}
+    pp = pw.get("used_percent")
+    ww = sw.get("used_percent")
+    if pp is None or ww is None:
+        return ("error", None, None, None, None, "no_pct_field")
+
+    now = time.time()
+    p_reset = pw.get("reset_at")
+    if p_reset is None and pw.get("reset_after_seconds") is not None:
+        p_reset = int(now + pw["reset_after_seconds"])
+    w_reset = sw.get("reset_at")
+    if w_reset is None and sw.get("reset_after_seconds") is not None:
+        w_reset = int(now + sw["reset_after_seconds"])
+
+    pp_i, ww_i = int(pp), int(ww)
+    if pp_i >= 100 or ww_i >= 100:
+        return ("still_cap", pp_i, ww_i, p_reset, w_reset, None)
+    return ("alive", pp_i, ww_i, p_reset, w_reset, None)
+
+
+def _wham_auth_from_tmp(acct):
+    """读 188 auth 副本拿 (tok, aid, sub_until) — wham 端点用同一套 token。
+    失败返 (None, None, None, err)。
+    """
+    p = resolve_auth_path(acct)
+    if not Path(p).exists():
+        return None, None, None, "no_tmp_auth"
+    try:
+        auth = json.load(open(p))
+        tok, aid, sub = parse_auth_json(auth)
+        return tok, aid, sub, None
+    except Exception as e:
+        return None, None, None, f"parse:{type(e).__name__}"
+
+
+def _wham_headers(tok, aid, post=False):
+    """wham 端点专用 4 header (缺一就静默裁字段) — 见 memory
+    feedback_chatgpt_banked_reset_headers_verbatim.md。"""
+    h = {
+        "Authorization": f"Bearer {tok}",
+        "ChatGPT-Account-ID": aid,
+        "OpenAI-Beta": "codex-1",
+        "originator": "codex_cli_rs",
+        "User-Agent": "codex_cli_rs/0.41.0 (chatgpt-acct-quota-rebalance)",
+        "Accept": "application/json",
+    }
+    if post:
+        h["Content-Type"] = "application/json"
+    return h
+
+
+def _wham_probe(tok, aid):
+    """GET /wham/usage → (payload, err)。"""
+    req = urllib.request.Request(WHAM_USAGE_URL, headers=_wham_headers(tok, aid))
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read()), None
+    except urllib.error.HTTPError as e:
+        return None, f"http_{e.code}"
+    except Exception as e:
+        return None, f"{type(e).__name__}"
+
+
+def _wham_consume(tok, aid):
+    """POST /wham/.../consume with fresh uuid → (http_code, payload_or_str)。"""
+    rid = str(uuid.uuid4())
+    body = json.dumps({"redeem_request_id": rid}).encode()
+    req = urllib.request.Request(
+        WHAM_CONSUME_URL, data=body, method="POST",
+        headers=_wham_headers(tok, aid, post=True),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status, json.loads(r.read()), rid
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()[:800], rid
+    except Exception as e:
+        return -1, f"{type(e).__name__}:{str(e)[:120]}", rid
+
+
+def try_bank_reset(acct, meta, state):
+    """OFFLINE-WEEK 触发前的自动 banked reset。
+
+    Contract:
+      - 只用 /tmp 副本 tok（fresh 时；stale/missing 直接返 skip 交给原 pause 路径）
+      - probe wham/usage：credits<1 或 error → skip
+      - POST consume → code=reset+windows_reset>=1 视为成功
+      - 复探 wham/usage 拿 after 值写回 state（primary_pct/weekly_pct/reset_at）
+
+    返回 dict:
+      {"status": "success"|"skip"|"error",
+       "reason": "<short tag>",
+       "credits_before": int|None,
+       "credits_after":  int|None,
+       "windows_reset":  int|None,
+       "up_p": int|None, "up_w": int|None,
+       "p_reset": int|None, "w_reset": int|None}
+
+    调用方语义:
+      status=='success' → 跳过 pause_acct，保留 scale=1，写 state 复位 wk_pct/reset_at
+      其他 → 交回原 pause 分支，不改行为
+    """
+    if DRY_RUN:
+        log(f"  [DRY_RUN] would try_bank_reset {acct}")
+        return {"status": "skip", "reason": "dry_run"}
+    if not BANK_RESET_ENABLED:
+        return {"status": "skip", "reason": "disabled"}
+    now = now_ts()
+    s = state.setdefault(acct, {})
+
+    # 冷却：单 acct 3h 内不重复烧
+    cd_until = int(s.get("bank_reset_cooldown_until", 0) or 0)
+    if cd_until and now < cd_until:
+        return {"status": "skip", "reason": f"cooldown {(cd_until-now)//60}min"}
+
+    # 订阅剩余门槛
+    sub_left = 0
+    sub_raw = s.get("subscription_active_until")
+    if sub_raw:
+        try:
+            if isinstance(sub_raw, (int, float)):
+                sub_left = int(sub_raw) - now
+            else:
+                sub_left = int(datetime.fromisoformat(
+                    str(sub_raw).replace("Z", "+00:00")).timestamp()) - now
+        except Exception:
+            sub_left = 0
+    if BANK_RESET_MIN_SUB_LEFT > 0 and sub_left < BANK_RESET_MIN_SUB_LEFT:
+        return {"status": "skip", "reason": f"sub_left {sub_left//86400}d < min"}
+
+    # /tmp 副本 fresh 才试；stale/missing 时先尝试从 pod 现拉一次（此时 pod 还 scale=1，exec 能过）。
+    # 拉成功→用新副本继续；仍失败→skip，交回 pause 分支（等 auto-revive 走 pod-probe）。
+    tmp_state, _ = tmp_auth_status(acct)
+    if tmp_state != "fresh":
+        ok, sync_err = sync_tmp_auth_from_pod(acct)
+        if not ok:
+            return {"status": "skip", "reason": f"tmp_auth_{tmp_state}+sync_fail:{sync_err}"}
+        log(f"  {acct}: BANK_RESET synced fresh tmp_auth from pod (was {tmp_state})")
+
+    tok, aid, _sub, err = _wham_auth_from_tmp(acct)
+    if err:
+        return {"status": "error", "reason": f"auth:{err}"}
+
+    before, err = _wham_probe(tok, aid)
+    if err:
+        return {"status": "error", "reason": f"probe:{err}"}
+    credits = ((before.get("rate_limit_reset_credits") or {}).get("available_count") or 0)
+    if credits < 1:
+        # 无库存 = 硬事实，写 24h 冷却避免下轮 cron 再来空跑
+        s["bank_reset_cooldown_until"] = now + 24 * 3600
+        return {"status": "skip", "reason": "no_credits", "credits_before": credits}
+
+    log(f"  {acct}: BANK_RESET consume start (credits={credits})")
+    code, resp, rid = _wham_consume(tok, aid)
+    if code != 200 or not isinstance(resp, dict):
+        s["bank_reset_cooldown_until"] = now + BANK_RESET_COOLDOWN
+        s["bank_reset_last_err"] = f"http_{code}:{str(resp)[:120]}"
+        log(f"  {acct}: BANK_RESET consume FAIL http={code} resp={str(resp)[:200]}")
+        return {"status": "error", "reason": f"consume_http_{code}", "credits_before": credits}
+    r_code = resp.get("code")
+    r_win = resp.get("windows_reset") or 0
+    log(f"  {acct}: BANK_RESET consume ok code={r_code} windows_reset={r_win} rid={rid}")
+    if r_code != "reset" or r_win < 1:
+        # nothing_to_reset / already_redeemed / no_credit — 24h 冷却
+        s["bank_reset_cooldown_until"] = now + 24 * 3600
+        return {"status": "skip", "reason": f"api_{r_code}", "credits_before": credits}
+
+    # 成功 → 复探拿 after 真值
+    time.sleep(2)
+    after, err = _wham_probe(tok, aid)
+    up_p = up_w = None
+    p_reset = w_reset = None
+    credits_after = None
+    if after and not err:
+        rl = after.get("rate_limit") or {}
+        pw = rl.get("primary_window") or {}
+        sw = rl.get("secondary_window") or {}
+        up_p = pw.get("used_percent")
+        up_w = sw.get("used_percent")
+        p_reset = pw.get("reset_at")
+        w_reset = sw.get("reset_at")
+        credits_after = ((after.get("rate_limit_reset_credits") or {}).get("available_count") or 0)
+
+    s["bank_reset_cooldown_until"] = now + BANK_RESET_COOLDOWN
+    s["bank_reset_last_success_ts"] = now
+    s["bank_reset_last_rid"] = rid
+    s["bank_reset_total"] = int(s.get("bank_reset_total", 0)) + 1
+    s.pop("bank_reset_last_err", None)
+    return {
+        "status": "success",
+        "reason": f"consumed windows={r_win}",
+        "credits_before": credits,
+        "credits_after": credits_after,
+        "windows_reset": r_win,
+        "up_p": int(up_p) if up_p is not None else None,
+        "up_w": int(up_w) if up_w is not None else None,
+        "p_reset": int(p_reset) if p_reset else None,
+        "w_reset": int(w_reset) if w_reset else None,
+    }
 
 
 def fetch_usage(tok, aid):
@@ -843,13 +1217,17 @@ def resume_acct(acct, meta):
         # user_api_key_auth；router 转发时 entry 没设 api_key → 不带 header → 下游 400
         # "No connected db."（2026-06-25 acct-67/68 + 18 acct 全集群事故实证）。
         # v1.89 入参层接收裸值会自动补 Bearer，不要手动拼前缀（双前缀）。
-        entry = {
-            "model_name": m["model_name"],
-            "litellm_params": {
+        _lp = {
                 "model": m["litellm_model"],
                 "api_base": ab,
                 "api_key": ak,
-            },
+        }
+        _dw = meta.get("desired_weight")
+        if _dw is not None:
+            _lp["weight"] = int(_dw)
+        entry = {
+            "model_name": m["model_name"],
+            "litellm_params": _lp,
             "model_info": {"id": mid, "mode": "responses"},
         }
         # 已存在且 api_base 一致 → 真正幂等 skip（视为 created，状态就是想要的）
@@ -1142,13 +1520,70 @@ def main():
         log("model_info_snapshot: failed; router-drift self-heal & SCALE0 ghost detect skipped this tick")
     else:
         log(f"model_info_snapshot: {len(mi_snap)} distinct api_base entries")
+
+    # 2026-07-01 patch C: cause 由每 tick 从多维字段派生，不再依赖历史残值。
+    # 优先级从上到下取第一命中 —— tier != SCALED_DOWN/TOKEN_INVALID 时不动 cause
+    # （由 classify() 的 probe 路径管）。
+    causes_rewritten = 0
+    for a, s in state.items():
+        tier = str(s.get("tier") or "").upper()
+        if tier not in ("SCALED_DOWN", "TOKEN_INVALID"):
+            continue
+        old_cause = s.get("cause") or ""
+        c401 = int(s.get("consecutive_401") or 0)
+        p_pct = s.get("primary_pct")
+        w_pct = s.get("weekly_pct")
+        sub_until_raw = s.get("subscription_active_until")
+        sub_ts = None
+        if sub_until_raw:
+            try:
+                sub_ts = datetime.fromisoformat(str(sub_until_raw).replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                sub_ts = None
+        replicas0 = scale_snap and scale_snap.get(a) == 0
+        now = time.time()
+
+        if s.get("manual_offline") and (tier == "TOKEN_INVALID" or c401 >= CONSECUTIVE_401_THRESHOLD):
+            new_cause = f"token_dead_401 (consecutive x{c401 or 3})"
+        elif s.get("manual_offline"):
+            new_cause = "manual_offline"
+        elif sub_ts and sub_ts < now:
+            new_cause = "sub_expired"
+        elif isinstance(w_pct, (int, float)) and w_pct >= 100:
+            new_cause = f"wk={int(w_pct)}%>=100"
+        elif isinstance(p_pct, (int, float)) and p_pct >= 100:
+            new_cause = f"5h={int(p_pct)}%>=100"
+        elif replicas0:
+            new_cause = "deploy.spec.replicas=0"
+        else:
+            new_cause = "unknown (needs probe)"
+
+        if new_cause != old_cause:
+            s["cause"] = new_cause
+            causes_rewritten += 1
+    if causes_rewritten:
+        log(f"cause_normalize: rewrote {causes_rewritten} entries")
+
     probed = 0
     skipped = 0
     transitions = []
     revived_this_tick = [0]  # 单元素 list：本轮 cron 已 revive 的 SCALED_DOWN 数（防内存爆）
     probes_this_tick = [0]   # 单元素 list：本轮 cron 已对 unknown_cause SCALED_DOWN 做的 upstream probe 数
+    bank_reset_this_tick = [0]  # 单元素 list：本轮 cron 已 BANK_RESET 次数（MAX_BANK_RESET_PER_TICK 上限）
     repair_lock = [False]  # 单元素 list：本轮 cron 最多触发 1 个 re-OAuth（防并发触 CF Turnstile）
 
+    # 2026-07-04: canonical auth dir 缺失扫描 — orchestrator 读 ~/.chatgpt-quota/auth
+    # 找不到 auth 就 probe fail，dashboard online 会漏；scale=1 稳定 acct 平时不触发
+    # sync_tmp_auth_from_pod（只在 SCALED_DOWN 复活路径调），需要主动补齐。
+    if not DRY_RUN:
+        missing_auth = [a for a in POOL_ACCOUNTS if not Path(TMP_AUTH_TMPL.format(acct=a)).exists()
+                        and not Path(LEGACY_TMP_AUTH_TMPL.format(acct=a)).exists()]
+        if missing_auth:
+            log(f"canonical auth sweep: {len(missing_auth)} acct missing, syncing…")
+            for a in missing_auth[:20]:  # 每 tick 最多 20，避免 kubectl storm
+                ok, err = sync_tmp_auth_from_pod(a)
+                if not ok:
+                    log(f"  {a}: sync fail ({err})")
     for acct, meta in POOL_ACCOUNTS.items():
         # 优先：TOKEN_INVALID 自动修复（meta+state 条件全满足才进入；不阻塞下方 probe 逻辑——
         # 修复后强制把 ts 推回 6h+1s 前，下一轮 5min 后 should_probe 会立刻打开验证）
@@ -1263,39 +1698,183 @@ def main():
             elif is_5h_pause:
                 reset_due = bool(p_reset and now > p_reset)
 
+            # 2026-07-04: wk=100 时 reset_due 通常 False（要等 7d），但 BANK_RESET 是替代等待的手段。
+            # 只要 credits 还在就该起 pod probe 让 still_cap→BANK_RESET 分支救人，别被 reset_at gate 挡门外。
+            credits_maybe = (w_pct >= 100 or is_wk_pause)
+
             base_ok = (tier_now == "SCALED_DOWN"
                        and not s.get("manual_offline")
                        and tier_now != "TOKEN_INVALID"
                        and (sub_until_ts is None or sub_until_ts > now)
-                       and (reset_due or unknown_cause))
+                       and (reset_due or unknown_cause or credits_maybe))
 
             if base_ok:
-                # upstream probe：cron 自带 fallback (parse_account_198) 已涵盖类似逻辑，
-                # 这里只在 revive 决策路径单独 probe 一次（不依赖 K3s exec，纯 188:/tmp 副本），
-                # 防止 reset 字段 stale → 真实上游仍 cap → revive 起 pod 浪费内存又被 pause。
-                # unknown_cause 路径限速防 cron tick 超时（probe ~5-15s/acct）。
-                if unknown_cause and probes_this_tick[0] >= PROBE_REVIVE_PER_TICK:
+                # 冷却检查：上轮 pod-probe 失败进入的 acct，30min 内不重复起 pod
+                cd_until = s.get("revive_probe_cooldown_until", 0) or 0
+                if cd_until and now < cd_until:
+                    remain = int(cd_until - now) // 60
+                    log(f"{acct}: SCALED_DOWN auto-revive SKIP — pod-probe cooldown ({remain}min left)")
+                    # 跌入下方 SCALE0 detect 原路径（pause + SKIP）
+                elif unknown_cause and probes_this_tick[0] >= PROBE_REVIVE_PER_TICK:
                     pass  # 本轮已超 probe 配额 → 跌入下方 SCALE0 detect 原路径
                 else:
-                    probes_this_tick[0] += 1
-                    up_p, up_w, probe_err = probe_upstream_via_tmp(acct)
-                    if probe_err:
-                        log(f"{acct}: SCALED_DOWN auto-revive defer — upstream probe err: {probe_err}")
-                    elif up_p is None or up_w is None:
-                        log(f"{acct}: SCALED_DOWN auto-revive defer — no upstream pct")
-                    elif up_p >= 100 or up_w >= 100:
-                        log(f"{acct}: SCALED_DOWN auto-revive defer — upstream still full 5h={up_p}%/wk={up_w}%")
-                    else:
-                        tag = "unknown-cause" if unknown_cause else f"cause='{cause_now}'"
-                        log(f"{acct}: SCALED_DOWN auto-revive — {tag} upstream 5h={up_p}%/wk={up_w}%")
-                        if scale_deploy(acct, 1, wait_ready=False):
-                            revived_this_tick[0] += 1
-                            transitions.append(
-                                f"🟢 {acct} SCALED_DOWN auto-revive ({tag} "
-                                f"upstream 5h={up_p}%/wk={up_w}%) → scale=1"
-                            )
+                    # ---- Fast path: /tmp 副本新鲜 → 不起 pod 就能探 ----
+                    tmp_state, tmp_mtime = tmp_auth_status(acct)
+                    if tmp_state == "fresh":
+                        probes_this_tick[0] += 1
+                        up_p, up_w, probe_err = probe_upstream_via_tmp(acct)
+                        if probe_err:
+                            log(f"{acct}: SCALED_DOWN fast-probe defer — err: {probe_err}")
+                        elif up_p is None or up_w is None:
+                            log(f"{acct}: SCALED_DOWN fast-probe defer — no upstream pct")
+                        elif up_p >= 100 or up_w >= 100:
+                            log(f"{acct}: SCALED_DOWN fast-probe defer — upstream still full 5h={up_p}%/wk={up_w}%")
                         else:
-                            log(f"{acct}: auto-revive scale=1 FAILED — will retry next cron")
+                            tag = "unknown-cause" if unknown_cause else f"cause='{cause_now}'"
+                            log(f"{acct}: SCALED_DOWN auto-revive (fast) — {tag} upstream 5h={up_p}%/wk={up_w}%")
+                            if scale_deploy(acct, 1, wait_ready=False):
+                                revived_this_tick[0] += 1
+                                # 清冷却/失败计数（如果之前有）
+                                st = state.setdefault(acct, {})
+                                st["revive_probe_cooldown_until"] = 0
+                                st["revive_probe_consecutive_fails"] = 0
+                                transitions.append(
+                                    f"🟢 {acct} SCALED_DOWN auto-revive fast ({tag} "
+                                    f"upstream 5h={up_p}%/wk={up_w}%) → scale=1"
+                                )
+                            else:
+                                log(f"{acct}: auto-revive scale=1 FAILED — will retry next cron")
+                            skipped += 1
+                            continue
+                    else:
+                        # ---- Slow path: 副本丢/stale → 起 pod 探再决定复活 ----
+                        # (副本会顺手回补,下次走 fast path)
+                        probes_this_tick[0] += 1
+                        tag_pre = "unknown-cause" if unknown_cause else f"cause='{cause_now}'"
+                        log(f"{acct}: SCALED_DOWN pod-probe start — /tmp {tmp_state}, {tag_pre}")
+                        result, up_p, up_w, up_p_reset, up_w_reset, err = probe_upstream_via_pod(acct)
+                        st = state.setdefault(acct, {})
+
+                        if result == "alive":
+                            # 真活 → resume_acct 注册 router entry；顺手用真值刷 state
+                            log(f"{acct}: pod-probe ALIVE 5h={up_p}%/wk={up_w}%, resume")
+                            n = resume_acct(acct, meta)
+                            if n > 0:
+                                st["paused"] = False
+                                st["tier"] = "HEALTHY" if up_p < 50 and up_w < 50 else "SLOW"
+                                st["cause"] = ""
+                                st["primary_pct"] = up_p
+                                st["weekly_pct"] = up_w
+                                if up_p_reset:
+                                    st["primary_reset_at"] = int(up_p_reset)
+                                if up_w_reset:
+                                    st["weekly_reset_at"] = int(up_w_reset)
+                                st["revive_probe_cooldown_until"] = 0
+                                st["revive_probe_consecutive_fails"] = 0
+                                st["ts"] = now_ts()
+                                revived_this_tick[0] += 1
+                                transitions.append(
+                                    f"🟢 {acct} SCALED_DOWN pod-probe alive → resume ({n} entries)"
+                                )
+                            else:
+                                log(f"{acct}: pod-probe alive but resume_acct returned 0 — leave pod up, next cron retries register")
+                            skipped += 1
+                            continue
+
+                        if result == "still_cap":
+                            # 起来了但真的还没解禁 → 先试 BANK_RESET 烧一张 credit（tmp_auth 副本刚被
+                            # pod-probe 顺手回补，此时 pod=1 还没 scale=0，是烧 credit 的最佳窗口）。
+                            # 2026-07-04: SCALED_DOWN + wk=100 存量 acct 复活主路径。
+                            if (up_w is not None and up_w >= 100
+                                    and bank_reset_this_tick[0] < MAX_BANK_RESET_PER_TICK):
+                                br = try_bank_reset(acct, meta, state)
+                                if br.get("status") == "success":
+                                    bank_reset_this_tick[0] += 1
+                                    new_p = br.get("up_p") if br.get("up_p") is not None else 0
+                                    new_w = br.get("up_w") if br.get("up_w") is not None else 0
+                                    log(f"{acct}: pod-probe STILL_CAP + BANK_RESET success "
+                                        f"5h={up_p}%→{new_p}% wk={up_w}%→{new_w}%, resume")
+                                    n = resume_acct(acct, meta)
+                                    if n > 0:
+                                        st["paused"] = False
+                                        st["tier"] = "HEALTHY" if new_p < 50 and new_w < 50 else "SLOW"
+                                        st["cause"] = f"BANK_RESET post-pause credits→{br.get('credits_after')}"
+                                        st["primary_pct"] = new_p
+                                        st["weekly_pct"] = new_w
+                                        if br.get("p_reset"):
+                                            st["primary_reset_at"] = int(br["p_reset"])
+                                        if br.get("w_reset"):
+                                            st["weekly_reset_at"] = int(br["w_reset"])
+                                        st["revive_probe_cooldown_until"] = 0
+                                        st["revive_probe_consecutive_fails"] = 0
+                                        st["ts"] = now_ts()
+                                        revived_this_tick[0] += 1
+                                        transitions.append(
+                                            f"🟢 {acct} SCALED_DOWN pod-probe still_cap → BANK_RESET → resume "
+                                            f"(credits→{br.get('credits_after')} wk={new_w}%)"
+                                        )
+                                        skipped += 1
+                                        continue
+                                    else:
+                                        log(f"{acct}: BANK_RESET ok but resume_acct returned 0 — leave pod up")
+                                        skipped += 1
+                                        continue
+                                elif br.get("status") == "skip":
+                                    log(f"{acct}: pod-probe STILL_CAP + BANK_RESET skip ({br.get('reason')}) → scale=0")
+                                elif br.get("status") == "error":
+                                    log(f"{acct}: pod-probe STILL_CAP + BANK_RESET error ({br.get('reason')}) → scale=0")
+                            log(f"{acct}: pod-probe STILL_CAP 5h={up_p}%/wk={up_w}%, scale=0")
+                            if up_p_reset:
+                                st["primary_reset_at"] = int(up_p_reset)
+                            if up_w_reset:
+                                st["weekly_reset_at"] = int(up_w_reset)
+                            st["primary_pct"] = up_p
+                            st["weekly_pct"] = up_w
+                            st["cause"] = f"REVIVE_PROBE_STILL_CAP 5h={up_p}%/wk={up_w}%"
+                            st["revive_probe_cooldown_until"] = now_ts() + REVIVE_PROBE_COOLDOWN
+                            st["revive_probe_consecutive_fails"] = 0  # 上游明确 cap 不算 fail
+                            st["ts"] = now_ts()
+                            scale_deploy(acct, 0, wait_ready=False)
+                            transitions.append(
+                                f"🟡 {acct} pod-probe still_cap → scale=0 (real reset_at refreshed)"
+                            )
+                            skipped += 1
+                            continue
+
+                        if result == "token_invalid":
+                            # 401 → token 死，manual_offline + 飞书告警
+                            log(f"{acct}: pod-probe TOKEN_INVALID (401) → manual_offline + alert")
+                            st["manual_offline"] = True
+                            st["cause"] = "REVIVE_PROBE_401 (token invalid, need re-OAuth)"
+                            st["revive_probe_cooldown_until"] = now_ts() + REVIVE_PROBE_COOLDOWN
+                            st["ts"] = now_ts()
+                            scale_deploy(acct, 0, wait_ready=False)
+                            alert_feishu(
+                                f"🚨 chatgpt-{acct}: pod-probe 401 → 需要重新 OAuth\n"
+                                f"cause={st['cause']}"
+                            )
+                            transitions.append(f"🔴 {acct} pod-probe 401 → manual_offline")
+                            skipped += 1
+                            continue
+
+                        # result == "error" (含 scale1_wait_fail / sync_tmp_fail / http_xxx / 网络)
+                        st["revive_probe_consecutive_fails"] = int(st.get("revive_probe_consecutive_fails", 0)) + 1
+                        st["revive_probe_cooldown_until"] = now_ts() + REVIVE_PROBE_COOLDOWN
+                        st["cause"] = f"REVIVE_PROBE_ERROR:{err}"
+                        st["ts"] = now_ts()
+                        fails = st["revive_probe_consecutive_fails"]
+                        log(f"{acct}: pod-probe ERROR ({err}) fail#{fails} → cooldown {REVIVE_PROBE_COOLDOWN//60}min")
+                        # 尝试 scale=0 收尾（可能已 =1 也可能没起来）
+                        scale_deploy(acct, 0, wait_ready=False)
+                        if fails >= REVIVE_PROBE_MAX_FAILS:
+                            st["manual_offline"] = True
+                            alert_feishu(
+                                f"🚨 chatgpt-{acct}: pod-probe 连续 {fails} 次失败 → manual_offline\n"
+                                f"last_err={err}"
+                            )
+                            transitions.append(f"🔴 {acct} pod-probe fail x{fails} → manual_offline")
+                        else:
+                            transitions.append(f"🟠 {acct} pod-probe error ({err}) → cooldown")
                         skipped += 1
                         continue
             # 不满足 revive 条件 → 跌入下面的 scale=0 detect 走原路径（pause + SKIP）
@@ -1323,6 +1902,9 @@ def main():
             # 2026-06-29 patch A: cause 只在缺失时写，保留首因（OFFLINE-5H / OFFLINE-WEEK 等）。
             # 老 cause 被覆盖成 deploy.spec.replicas=0 → auto-revive 无法判断该不该 scale=1 →
             # 17 个真空 acct 卡在 SCALED_DOWN 不动。
+            # 2026-07-01 patch B: 不再兜底 "deploy.spec.replicas=0" —— 该字符串会覆盖真因
+            # （例如 401 pause 分支在旧版本没写 cause 时，preflight 会补上 replicas=0，
+            #  把真正的 token_dead_401 掩盖）。真没首因就留空，view 层按 tier 判断。
             prior_cause = old_s.get("cause")
             new_s = {
                 **old_s,
@@ -1330,12 +1912,10 @@ def main():
                 "tier": "SCALED_DOWN",
                 "ts": now_ts(),
             }
-            if not prior_cause or prior_cause == "deploy.spec.replicas=0":
-                # 完全没有原因（首次 preflight 短路 / 老脏数据） → 写兜底
-                new_s["cause"] = prior_cause or "deploy.spec.replicas=0"
-            else:
-                # 保留首因 — auto-revive 判据需要从 cause 反推 5h 满 / wk 满
+            if prior_cause and prior_cause != "deploy.spec.replicas=0":
                 new_s["cause"] = prior_cause
+            elif not old_s.get("cause"):
+                new_s["cause"] = ""
             state[acct] = new_s
             skipped += 1
             continue
@@ -1383,6 +1963,7 @@ def main():
                         "manual_offline": True,
                         "paused": True,
                         "tier": "TOKEN_INVALID",
+                        "cause": f"token_dead_401 (consecutive x{cnt})",
                         "consecutive_401": cnt,
                         "ts": now_ts(),
                         "pending_scale_down": pause_pending,
@@ -1440,6 +2021,50 @@ def main():
                 should_offline = True
 
         pause_pending = False
+        # 2026-07-04: OFFLINE-WEEK 撞 100% 时，先试烧一张 banked credit 而不是直接 pause+SCALED_DOWN 等 61h。
+        # 触发条件：
+        #   - should_offline (真 wk=100 x2)
+        #   - tier==OFFLINE-WEEK (5h 撞顶不能靠 wham 清)
+        #   - 本 tick 未超 MAX_BANK_RESET_PER_TICK
+        # 成功后跳过 pause_acct，保留 scale=1，用 after 值刷 state 让 next tick 认为"周窗回落"。
+        # 失败/无库存/token 死 → 跌回原 pause 路径，行为跟老版一致。
+        if (should_offline and not was_paused
+                and tier == "OFFLINE-WEEK"
+                and bank_reset_this_tick[0] < MAX_BANK_RESET_PER_TICK):
+            br = try_bank_reset(acct, meta, state)
+            if br.get("status") == "success":
+                bank_reset_this_tick[0] += 1
+                # 用 after 值 override，避免 wk=100 x2 counter 累积 → 下轮又 pause
+                new_wk = br.get("up_w")
+                new_p = br.get("up_p")
+                new_p_reset = br.get("p_reset") or p_reset_at
+                new_w_reset = br.get("w_reset") or w_reset_at
+                if new_wk is not None:
+                    w_pct = new_wk
+                if new_p is not None:
+                    p_pct = new_p
+                p_reset_at = new_p_reset
+                w_reset_at = new_w_reset
+                # 重跑 classify 语义：wk<100 && 5h<100 → HEALTHY/SLOW
+                if p_pct >= 50 or w_pct >= 50:
+                    tier = "SLOW"
+                else:
+                    tier = "HEALTHY"
+                cause = f"BANK_RESET credits {br.get('credits_before')}→{br.get('credits_after')}"
+                restore_at = None
+                quota_high = False  # 后续 keep-online 分支走不到 pause
+                should_offline = False
+                transitions.append(
+                    f"🟢 {acct} OFFLINE-WEEK → BANK_RESET consumed "
+                    f"(windows={br.get('windows_reset')} credits→{br.get('credits_after')}) "
+                    f"upstream 5h={p_pct}%/wk={w_pct}% → keep online"
+                )
+                log(f"  {acct}: BANK_RESET success — bypass pause, keep scale=1")
+            elif br.get("status") == "skip":
+                log(f"  {acct}: BANK_RESET skip ({br.get('reason')}) → fall through to pause")
+            elif br.get("status") == "error":
+                log(f"  {acct}: BANK_RESET error ({br.get('reason')}) → fall through to pause")
+
         if should_offline and not was_paused:
             pr = pause_acct(acct, meta)
             pause_pending = not pr.get("scaled_ok", True)
@@ -1507,8 +2132,24 @@ def main():
             "repair_attempts": 0,
             "last_repair_at": 0,
             "repair_frozen": False,
+            "desired_weight": old.get("desired_weight"),
             "ts": now_ts(),
         }
+
+        # 2026-07-07: 权重对齐 — state.desired_weight 是权威。在线 acct 每 tick 把
+        # 线上 entry 的 weight 拉回 desired_weight（撞 cap 重建后 resume_acct 已带回，
+        # 这里兜住裸 curl 漂移 / 部分 entry 未同步）。None=不管（用 router 默认）。
+        _dw = old.get("desired_weight")
+        if _dw is not None and not new_paused and not DRY_RUN:
+            for _m in CHATGPT_MODELS:
+                _mid = f"chatgpt-{acct}-{_m['model_name'].replace('chatgpt-','')}"
+                try:
+                    _st, _r = api_request("PATCH", f"/model/{_mid}/update",
+                                          {"litellm_params": {"weight": int(_dw)}})
+                    if _st != 200:
+                        log(f"  weight-align {_mid} -> {_dw} HTTP {_st} {str(_r)[:80]}")
+                except Exception as _e:
+                    log(f"  weight-align {_mid} err {type(_e).__name__}: {str(_e)[:80]}")
 
         log(f"{acct}: {tier} 5h={p_pct}% wk={w_pct}% paused={new_paused}")
         time.sleep(random.uniform(0.5, 2.0))
@@ -1517,6 +2158,17 @@ def main():
         log("DRY_RUN: state not saved")
     else:
         save_state(state)
+        # 2026-07-04: sync POOL_ACCOUNTS -> quota-engine pool.json (single source of truth).
+        # dashboard M1 pool.json 手写只 29 acct 漂移，改成 rebalance tick 覆盖成 58 acct 全集。
+        try:
+            engine_pool = "/Data/quota-engine-run/pool.json"
+            if os.path.isdir(os.path.dirname(engine_pool)):
+                tmp = engine_pool + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(POOL_ACCOUNTS, f, indent=2, sort_keys=True)
+                os.replace(tmp, engine_pool)
+        except Exception as e:
+            log(f"pool.json sync warn: {e}")
     log(f"done: probed={probed} skipped={skipped} transitions={len(transitions)}")
 
     if transitions:

@@ -23,13 +23,16 @@ APPLY=0
 REG=cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher
 SERVE_IMG="$REG:zerokey-serve-aliyun-20260707"
 CAP_IMG="$REG:zerokey-capture-aliyun-20260707-otp3"
-# EIP-bearing nodes (round-robin to spread load / EIP egress)
-NODES=(ap-southeast-1.172.16.0.86 ap-southeast-1.172.16.16.122)
+# EIP-bearing nodes. Pin per-account by N%2 so capture+serve land on the SAME
+# node (cf_clearance is egress-IP-bound → must share the node EIP) and the 8
+# accounts split across the two EIPs .86/.122. Explicit case avoids shell
+# array-indexing differences (bash 0-idx vs zsh 1-idx).
+node_for() { case $(( $1 % 2 )) in 0) echo ap-southeast-1.172.16.0.86;; 1) echo ap-southeast-1.172.16.16.122;; esac; }
 
 TMP=$(mktemp)
 i=0
 for N in "$@"; do
-  NODE=${NODES[$(( i % ${#NODES[@]} ))]}
+  NODE=$(node_for "$N")
   PORT=$(( 8100 + N ))
   i=$((i+1))
   cat >> "$TMP" <<YAML

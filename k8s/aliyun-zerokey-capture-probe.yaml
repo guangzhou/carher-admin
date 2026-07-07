@@ -1,0 +1,56 @@
+# Aliyun 原生 zerokey-pool — Step 1 可行性验证 Job (PVC-backed profile)
+# 目的：验证阿里云 EIP 节点(hostNetwork, 节点独立 EIP)能过 CF 抓到 acct-69 web session。
+# run1 已证 CF 放行(SSO success, logged_in=True, 无 challenge)；本 PVC 版让 profile 落盘，
+# 复用 warm session 走 profile-reuse 分支 -> composer -> [CAPTURED] -> ✅ wrote OUT_JSON。
+# 隔离：hostNetwork 钉 EIP 节点 .86 -> 节点 EIP 47.236.200.98，与线上 codex NAT 隔离。
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: zerokey-capture-probe-69
+  namespace: carher
+  labels: {app: zerokey-capture-probe, account: "69"}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1200
+  template:
+    metadata:
+      labels: {app: zerokey-capture-probe, account: "69"}
+    spec:
+      restartPolicy: Never
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeName: ap-southeast-1.172.16.0.86
+      imagePullSecrets: [{name: acr-vpc-secret}]
+      containers:
+        - name: capture
+          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher:zerokey-capture-aliyun-20260707-otp
+          env:
+            - {name: MAIL_USER, valueFrom: {secretKeyRef: {name: zerokey-acct-69-creds, key: MAIL_USER}}}
+            - {name: MAIL_LOGIN_PW_FILE, value: /run/creds/mail_pw}
+            - {name: CHATGPT_PW_FILE, value: /run/creds/chatgpt_pw}
+            - {name: OUT_JSON, value: /work/out/zerokey-users.json}
+            - {name: ZK_USER, value: acct69}
+            - {name: SCREENSHOT_DIR, value: /work/screenshots}
+            - {name: PROFILE_DIR, value: /work/profile}
+            - {name: OTP_FILE, value: /work/out/otp.txt}
+            # 188 add-account.sh proven first-capture recipe: force full login,
+            # mail.com auto-OTP only, no manual file-wait.
+            - {name: FORCE_LOGIN, value: "1"}
+            - {name: LOGIN_MODE, value: "otp"}
+            - {name: OTP_AUTO_ONLY, value: "0"}
+            - {name: OTP_AUTO_MAX, value: "0"}
+            - {name: OTP_SHOT, value: "1"}
+            - {name: OTP_FILE_WAIT, value: "600"}
+          volumeMounts:
+            - {name: creds, mountPath: /run/creds, readOnly: true}
+            - {name: work, mountPath: /work}
+      volumes:
+        - name: creds
+          secret:
+            secretName: zerokey-acct-69-creds
+            items:
+              - {key: MAIL_PW, path: mail_pw}
+              - {key: CHATGPT_PW, path: chatgpt_pw}
+        - name: work
+          persistentVolumeClaim:
+            claimName: zerokey-acct-69-state

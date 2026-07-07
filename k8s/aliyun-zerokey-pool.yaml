@@ -1,0 +1,148 @@
+# Aliyun 原生 zerokey-pool — Step 2 生产 manifest（serve Deployment + capture CronJob）
+#
+# 架构（已验证前提）：
+#   her → 阿里云 litellm-proxy → zerokey-pool(同名混入,DB-managed) → 本地 serve svc
+#        → serve pod (hostNetwork 钉 EIP 节点 .86 → 节点 EIP 47.236.200.98,与线上 codex NAT 隔离)
+#        → chatgpt.com web (acct-69 session)
+#
+# serve 读 /app/temp/users.json（boot 时一次 readFileSync）→ capture 刷新后需 rollout restart serve。
+# capture CronJob：跑 zerokey-web-capture.py(LOGIN_MODE=otp) → 原子换 users.json → rollout restart serve。
+#
+# 每 acct 一套（本文件 = acct-69 模板；70-78 复制改编号+nodeName 分散）。
+---
+# ── serve Deployment（acct-69）─────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zerokey-serve-69
+  namespace: carher
+  labels: {app: zerokey-serve-69, pool: zerokey, account: "69"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}   # hostPort-like单实例;避免两 pod 抢同 users.json
+  selector: {matchLabels: {app: zerokey-serve-69}}
+  template:
+    metadata:
+      labels: {app: zerokey-serve-69, pool: zerokey, account: "69"}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeName: ap-southeast-1.172.16.0.86   # EIP 节点 47.236.200.98
+      imagePullSecrets: [{name: acr-vpc-secret}]
+      containers:
+        - name: serve
+          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher:zerokey-serve-aliyun-20260707
+          env:
+            - {name: PORT, value: "8169"}     # 唯一端口(8100+acct);hostNetwork 避免撞
+            - {name: ZK_USER, value: acct69}
+            - {name: ZK_DEFAULT_MODEL, value: gpt-5-5}
+          command: ["sh","-c","mkdir -p /app/temp && cp /state/users.json /app/temp/users.json && exec node zerokey-serve-codex.js"]
+          ports: [{containerPort: 8169, hostPort: 8169}]
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 500m, memory: 256Mi}}
+          volumeMounts:
+            - {name: state, mountPath: /state, readOnly: true}
+      volumes:
+        - {name: state, persistentVolumeClaim: {claimName: zerokey-acct-69-state}}
+---
+# serve 无独立 Service：hostNetwork + hostPort 8169，litellm 直接 http://<node-ip>:8169
+# （节点 .86 internalIP 172.16.0.86）。若要 ClusterIP，需去 hostNetwork 但那样丢 EIP 隔离——
+# 故本设计走 node hostPort，litellm api_base = http://172.16.0.86:8169/v1。
+---
+# ── capture CronJob（acct-69）──────────────────────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: zerokey-capture-69
+  namespace: carher
+  labels: {app: zerokey-capture-69, pool: zerokey, account: "69"}
+spec:
+  schedule: "17 */6 * * *"     # 每 6h（错开整点）;复用 profile 免 OTP
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 900
+      template:
+        spec:
+          restartPolicy: Never
+          hostNetwork: true
+          dnsPolicy: ClusterFirstWithHostNet
+          nodeName: ap-southeast-1.172.16.0.86
+          serviceAccountName: zerokey-capture   # rollout restart 权限
+          imagePullSecrets: [{name: acr-vpc-secret}]
+          containers:
+            - name: capture
+              image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/carher:zerokey-capture-aliyun-20260707-otp
+              env:
+                - {name: MAIL_USER, valueFrom: {secretKeyRef: {name: zerokey-acct-69-creds, key: MAIL_USER}}}
+                - {name: MAIL_LOGIN_PW_FILE, value: /run/creds/mail_pw}
+                - {name: CHATGPT_PW_FILE, value: /run/creds/chatgpt_pw}
+                - {name: OUT_JSON, value: /state/out/zerokey-users.json}
+                - {name: ZK_USER, value: acct69}
+                - {name: SCREENSHOT_DIR, value: /state/screenshots}
+                - {name: PROFILE_DIR, value: /state/profile}
+                - {name: LOGIN_MODE, value: "otp"}     # profile 过期时回退 email-code 登录
+                - {name: OTP_AUTO_ONLY, value: "1"}
+                - {name: OTP_AUTO_MAX, value: "240"}
+                - {name: OTP_FILE_WAIT, value: "0"}
+                - {name: LIVE_JSON, value: /state/users.json}
+                - {name: SERVE_DEPLOY, value: zerokey-serve-69}
+              # 抓 → 校验 → 原子换 users.json → rollout restart serve（用 serve 镜像里没 kubectl，
+              # 故 capture 镜像也没有；改用 in-pod SA token 直接 PATCH deploy 触发滚动重启）。
+              command:
+                - bash
+                - -lc
+                - |
+                  set -o pipefail
+                  xvfb-run -a python /capture/zerokey-web-capture.py; rc=$?
+                  if [ $rc -ne 0 ]; then echo "capture exit $rc — keeping live session"; : > /state/REFRESH_STALE; exit 1; fi
+                  node -e '
+                    const fs=require("fs");const p=process.env.OUT_JSON;const u=process.env.ZK_USER;
+                    const j=JSON.parse(fs.readFileSync(p));const pf=(j.chatgpt&&j.chatgpt[u]||{}).parsedFetch;
+                    if(!pf||!pf.headers||!pf.body){console.error("invalid capture");process.exit(2)}
+                    for(const h of ["authorization","cookie"]){if(!Object.keys(pf.headers).map(x=>x.toLowerCase()).includes(h)){console.error("missing "+h);process.exit(3)}}
+                    console.error("captured OK")' || { echo "invalid capture — keeping live"; : > /state/REFRESH_STALE; exit 1; }
+                  cp "$OUT_JSON" "$LIVE_JSON.tmp" && mv "$LIVE_JSON.tmp" "$LIVE_JSON"
+                  rm -f /state/REFRESH_STALE
+                  # trigger serve rollout via k8s API (in-pod SA)
+                  APISERVER=https://kubernetes.default.svc
+                  TOK=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                  CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                  NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+                  PATCH='{"spec":{"template":{"metadata":{"annotations":{"zerokey/restartedAt":"'$(date -u +%Y%m%dT%H%M%SZ)'"}}}}}'
+                  curl -sS --cacert $CA -H "Authorization: Bearer $TOK" -H "Content-Type: application/strategic-merge-patch+json" \
+                    -X PATCH "$APISERVER/apis/apps/v1/namespaces/$NS/deployments/$SERVE_DEPLOY" -d "$PATCH" -o /dev/null -w "rollout patch HTTP %{http_code}\n"
+                  echo "refresh done"
+              volumeMounts:
+                - {name: creds, mountPath: /run/creds, readOnly: true}
+                - {name: state, mountPath: /state}
+          volumes:
+            - name: creds
+              secret:
+                secretName: zerokey-acct-69-creds
+                items:
+                  - {key: MAIL_PW, path: mail_pw}
+                  - {key: CHATGPT_PW, path: chatgpt_pw}
+            - {name: state, persistentVolumeClaim: {claimName: zerokey-acct-69-state}}
+---
+# ── RBAC: capture SA 只允许 patch 自己的 serve deploy ──────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: zerokey-capture, namespace: carher}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: zerokey-capture-rollout, namespace: carher}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+    resourceNames: ["zerokey-serve-69","zerokey-serve-70","zerokey-serve-71","zerokey-serve-72","zerokey-serve-73","zerokey-serve-74","zerokey-serve-75","zerokey-serve-77","zerokey-serve-78"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: zerokey-capture-rollout, namespace: carher}
+subjects: [{kind: ServiceAccount, name: zerokey-capture, namespace: carher}]
+roleRef: {kind: Role, name: zerokey-capture-rollout, apiGroup: rbac.authorization.k8s.io}

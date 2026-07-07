@@ -43,6 +43,9 @@ OTP_FILE   = os.environ.get("OTP_FILE", "/work/out/otp.txt")
 OTP_FILE_WAIT = int(os.environ.get("OTP_FILE_WAIT", "600"))
 OTP_AUTO_ONLY = os.environ.get("OTP_AUTO_ONLY", "0") == "1"
 OTP_AUTO_MAX = int(os.environ.get("OTP_AUTO_MAX", "240"))
+# LOGIN_MODE: "password" (default, 188 behavior) or "otp" (passwordless email
+# one-time-code login — for accounts whose web password is unknown/stale).
+LOGIN_MODE = os.environ.get("LOGIN_MODE", "password").lower()
 OTP_SHOT = os.environ.get("OTP_SHOT", "0") == "1"
 OTP_SHOT_PATH = os.environ.get("OTP_SHOT_PATH", "/work/out/otpshot.png")
 OTP_RE = re.compile(r"\b(\d{6})\b")
@@ -218,6 +221,48 @@ def extract_otp_from_open_mail(mail_frame, page):
         m = OTP_RE.search(text)
         if m:
             return m.group(1)
+    return None
+
+
+def mailcom_open_and_read_otp(mp):
+    """Open the newest ChatGPT login-code email (frame_locator path that OTP_SHOT
+    proved reliable on mail.com) and read the 6-digit code from the reading pane.
+    Returns code str or None. This is the robust auto path (get_otp's list-item
+    click is flaky on mail.com's iframe layout)."""
+    opened = False
+    for fsel in ["iframe[name='mail']", "iframe[src*='mail']", "iframe"]:
+        try:
+            fl = mp.frame_locator(fsel)
+            for needle in ["temporary ChatGPT login code", "ChatGPT login code", "login code"]:
+                loc = fl.get_by_text(needle, exact=False)
+                if loc.count() > 0:
+                    loc.first.click(timeout=8000)
+                    mp.wait_for_timeout(4000)
+                    opened = True
+                    break
+        except Exception as e:
+            print(f"  otp-open fl {fsel} err: {str(e)[:80]}", flush=True)
+        if opened:
+            break
+    if not opened:
+        return None
+    # read reading-pane text across all frames; the code sits near "code"/openai
+    for _ in range(3):
+        for fr in mp.frames:
+            try:
+                txt = fr.evaluate("() => document.body.innerText")
+            except Exception:
+                continue
+            if not txt:
+                continue
+            low = txt.lower()
+            if "code" not in low and not SENDER_HINTS_RE.search(txt):
+                continue
+            for m in OTP_RE.finditer(txt):
+                ctx = txt[max(0, m.start() - 120): m.start() + 40]
+                if re.search(r"code|verify|temporary", ctx, re.I):
+                    return m.group(1)
+        mp.wait_for_timeout(1500)
     return None
 
 
@@ -421,16 +466,53 @@ def login_chatgpt(ctx, page):
             pass
     try:
         page.wait_for_selector("input[type='password']", timeout=15000)
-        page.locator("input[type='password']").first.click()
-        page.keyboard.type(CHATGPT_PW, delay=80)
-        ss(page, "pw-filled")
-        submit_form(page)
-        time.sleep(6)
-        print(f"    after pw url={page.url[:100]}", flush=True)
+        if LOGIN_MODE == "otp":
+            # Passwordless path: on the password page OpenAI shows a
+            # "Log in with a one-time code" button. Click it instead of typing
+            # the password, then fall through to the existing OTP-fetch machinery
+            # below (need_otp becomes true on the verification page). Used for
+            # accounts whose web password is unknown/stale but whose mailbox OTP
+            # works (e.g. Aliyun accts onboarded only via codex OAuth).
+            print("    LOGIN_MODE=otp → clicking 'Log in with a one-time code'", flush=True)
+            clicked = False
+            for _ in range(3):
+                try:
+                    otc = page.locator(
+                        "button:has-text('one-time code'), a:has-text('one-time code'), "
+                        "button:has-text('one time code'), a:has-text('one time code')")
+                    if otc.count() > 0 and otc.first.is_visible():
+                        otc.first.click()
+                        clicked = True
+                        time.sleep(4)
+                        break
+                except Exception as e:
+                    print(f"    one-time-code click err: {str(e)[:80]}", flush=True)
+                time.sleep(2)
+            if not clicked:
+                print("    one-time-code button not found → falling back to password", flush=True)
+                page.locator("input[type='password']").first.click()
+                page.keyboard.type(CHATGPT_PW, delay=80)
+                ss(page, "pw-filled")
+                submit_form(page)
+            else:
+                ss(page, "otc-requested")
+            time.sleep(6)
+            print(f"    after otc/pw url={page.url[:100]}", flush=True)
+        else:
+            page.locator("input[type='password']").first.click()
+            page.keyboard.type(CHATGPT_PW, delay=80)
+            ss(page, "pw-filled")
+            submit_form(page)
+            time.sleep(6)
+            print(f"    after pw url={page.url[:100]}", flush=True)
     except Exception as e:
         print(f"    password step skipped: {e}", flush=True)
 
     need_otp = "verification" in page.url or "verification" in page.content().lower()[:5000]
+    if LOGIN_MODE == "otp":
+        # In passwordless mode we deliberately requested an email code, so the
+        # verification page is expected even if the heuristic string isn't present.
+        need_otp = True
     if not need_otp:
         for _ in range(15):
             if "verification" in page.url or "verification" in page.content().lower()[:3000]:
@@ -447,7 +529,13 @@ def login_chatgpt(ctx, page):
         elif OTP_AUTO_MAX > 0:
             try:
                 mp = mailcom_login(ctx)
-                otp = get_otp(mp)
+                # robust path first (open newest code email + read reading pane);
+                # fall back to legacy get_otp list-item scan if that misses.
+                otp = mailcom_open_and_read_otp(mp)
+                if otp:
+                    print("  OTP via open-and-read reading pane", flush=True)
+                else:
+                    otp = get_otp(mp)
                 try:
                     mp.close()
                 except Exception:
@@ -695,6 +783,11 @@ def main():
                 "[data-testid='modal-close-button']",
                 "button[aria-label='Close']",
                 "button[aria-label='Close dialog']",
+                "div[role='dialog'] button:has-text(\"Okay, let's go\")",
+                "div[role='dialog'] button:has-text('Okay')",
+                "div[role='dialog'] button:has-text('Got it')",
+                "div[role='dialog'] button:has-text('Continue')",
+                "div[role='dialog'] button:has-text('Stay logged out')",
                 "div[role='dialog'] button:has(svg)",
             ]:
                 try:

@@ -100,10 +100,46 @@ async function rawComplete(req, res, chatgptApi) {
 
   await acquireSlot('ChatGPT')
 
+  // Long-prompt → file attachment. The web /f/conversation endpoint caps a
+  // single inline message (~128k chars → 413 message_length_exceeds_limit).
+  // Above ZK_INLINE_MAX chars, upload the prompt as a .txt attachment and send
+  // a short instruction inline. Zero-regression: short prompts unchanged.
+  const INLINE_MAX = parseInt(process.env.ZK_INLINE_MAX || '100000', 10)
+  let sendPrompt = prompt
+  let attachments = null
+  if (prompt.length > INLINE_MAX) {
+    try {
+      const buf = Buffer.from(prompt, 'utf8')
+      const up = await chatgptApi.uploadFile(buf, {
+        fileName: `conversation-${Date.now()}.txt`,
+        mimeType: 'text/plain',
+        useCase: 'my_files',
+      })
+      // Real web attachment structure: id + mimeType + name + size only.
+      // library_file_id is NOT needed (verified via gptchat2api-cf reference).
+      attachments = [
+        {
+          id: up.id,
+          size: up.size,
+          name: up.name,
+          mimeType: up.mimeType,
+        },
+      ]
+      sendPrompt =
+        'The full conversation/context is in the attached text file ' +
+        `(${up.name}). Read it and respond to the latest request in it.`
+      console.log(`[raw] long prompt ${prompt.length} chars → uploaded as ${up.id}`)
+    } catch (e) {
+      // Upload failed → fall back to inline (may 413, then litellm fallback
+      // handles it). Don't hard-fail the request here.
+      console.log(`[raw] file upload failed, falling back to inline: ${e.message}`)
+    }
+  }
+
   let upstream
   try {
     // Stateless: fresh conversation each call (chatSessionId=null), full history in prompt.
-    upstream = await chatgptApi.chatCompletion(prompt, null, 'client-created-root', model)
+    upstream = await chatgptApi.chatCompletion(sendPrompt, null, 'client-created-root', model, attachments)
   } catch (e) {
     return res.status(502).json({ error: { message: e.message, type: 'upstream_error' } })
   }

@@ -51,48 +51,76 @@ class ChatGPTAPI {
     this._ready = true
   }
 
-  async chatCompletion(prompt, chatSessionId, parentMessageId = 'client-created-root', model = null) {
+  async chatCompletion(prompt, chatSessionId, parentMessageId = 'client-created-root', model = null, attachments = null) {
     if (!this._ready) throw new Error('Not initialized')
 
     await this._refreshSentinel()
 
     // Always prepare conversation before sending — matches browser HAR flow.
-    // First turn: gets initial conduit_token. Follow-up turns: gets refreshed conduit_token.
-    await this._prepareConversation(chatSessionId, parentMessageId, model)
+    await this._prepareConversation(chatSessionId, parentMessageId, model, attachments)
 
     const messageId = crypto.randomUUID()
     const now = Date.now() / 1000
 
-    const body = JSON.parse(JSON.stringify(this._bodyTemplate))
-    body.action = 'next'
-    body.messages = [
-      {
-        id: messageId,
-        author: { role: 'user' },
-        create_time: now,
-        content: { content_type: 'text', parts: [prompt] },
-        metadata: {
-          selected_github_repos: [],
-          selected_all_github_repos: false,
-          serialization_metadata: { custom_symbol_offsets: [] },
-        },
-      },
-    ]
-    body.conversation_id = chatSessionId
-    body.parent_message_id = parentMessageId
-    body.client_prepare_state = 'success'
-    // Per-request model override (raw/model-select). Falls back to captured template model.
-    if (model) body.model = model
-    if (body.client_contextual_info) {
-      body.client_contextual_info.time_since_loaded =
-        (body.client_contextual_info.time_since_loaded || 0) + 1
+    // Build body from scratch (matching gptchat2api-cf startTextConversation).
+    // Cloning the captured _bodyTemplate caused file-attachment conversations to
+    // fail — stale fields in the template prevent the model from reading files.
+    const metadata = {
+      developer_mode_connector_ids: [],
+      selected_github_repos: [],
+      selected_all_github_repos: false,
+      serialization_metadata: { custom_symbol_offsets: [] },
     }
+    if (Array.isArray(attachments) && attachments.length) {
+      metadata.attachments = attachments.map((a) => ({
+        id: a.id,
+        mimeType: a.mimeType || 'text/plain',
+        name: a.name,
+        size: a.size,
+      }))
+    }
+    const body = {
+      action: 'next',
+      messages: [
+        {
+          id: messageId,
+          author: { role: 'user' },
+          create_time: now,
+          content: { content_type: 'text', parts: [prompt] },
+          metadata,
+        },
+      ],
+      parent_message_id: crypto.randomUUID(),
+      model: model || 'auto',
+      client_prepare_state: 'sent',
+      timezone_offset_min: -480,
+      timezone: 'Asia/Shanghai',
+      conversation_mode: { kind: 'primary_assistant' },
+      enable_message_followups: true,
+      system_hints: [],
+      supports_buffering: true,
+      supported_encodings: ['v1'],
+      paragen_cot_summary_display_override: 'allow',
+      force_parallel_switch: 'auto',
+      client_contextual_info: {
+        is_dark_mode: false,
+        time_since_loaded: 1200,
+        page_height: 1072,
+        page_width: 1724,
+        pixel_ratio: 1.2,
+        screen_height: 1440,
+        screen_width: 2560,
+        app_name: 'chatgpt.com',
+      },
+    }
+    if (chatSessionId) body.conversation_id = chatSessionId
 
     console.log('[PROMPT] REQ', {
       chatSessionId,
       parentMessageId,
       prompt,
       promptLength: prompt.length,
+      attachments: attachments ? attachments.length : 0,
     })
 
     const url = `${this.BASE_URL}/backend-api/f/conversation`
@@ -105,7 +133,6 @@ class ChatGPTAPI {
 
     console.log(res.status, res.statusText)
 
-    // On 403, refresh sentinel and retry once
     if (res.status !== 200) {
       console.log(`[ChatGPT] Got ${res.status}`)
     }
@@ -120,23 +147,146 @@ class ChatGPTAPI {
     return res.body
   }
 
+  // ─── File upload (3-step flow, verified via probe 2026-07-08) ──────
+  // Lets long text / images be sent as attachments instead of an inline
+  // message (web endpoint has a small per-message length cap → 413).
+  //   1) POST /backend-api/files → { file_id, upload_url }
+  //   2) PUT upload_url (raw bytes, BROWSER fingerprint headers only —
+  //      the signed URL is behind Cloudflare; oai/sentinel/cookie headers
+  //      trigger 403 error 1010) → 201
+  //   3) POST /backend-api/files/{id}/uploaded → registers, state=ready
+  // Returns { id, name, size, mimeType } for use as chatCompletion attachment.
+  async uploadFile(buf, { fileName, mimeType = 'text/plain', useCase = 'multimodal' } = {}) {
+    if (!this._ready) throw new Error('Not initialized')
+    const name = fileName || `${crypto.randomUUID()}.txt`
+    const size = buf.length
+
+    // Step 1: request upload URL
+    const createRes = await this._fetch(`${this.BASE_URL}/backend-api/files`, {
+      method: 'POST',
+      headers: this._buildHeaders(
+        { accept: '*/*', 'content-type': 'application/json' },
+        '/backend-api/files',
+      ),
+      body: JSON.stringify({
+        file_name: name,
+        file_size: size,
+        use_case: useCase,
+        timezone_offset_min: -480,
+        reset_rate_limits: false,
+        mime_type: mimeType,
+        store_in_library: true,
+        library_persistence_mode: 'opportunistic',
+      }),
+    })
+    if (!createRes.ok) {
+      throw new Error(`file create ${createRes.status}: ${(await createRes.text()).slice(0, 200)}`)
+    }
+    this._captureResponseHeaders(createRes)
+    const created = await createRes.json()
+    const fileId = created.file_id
+    const uploadUrl = created.upload_url
+    if (!fileId || !uploadUrl) {
+      throw new Error(`file create missing file_id/upload_url: ${JSON.stringify(created).slice(0, 150)}`)
+    }
+
+    // Step 2: PUT bytes to signed URL — browser fingerprint headers ONLY.
+    const src = this._headers
+    const putRes = await this._fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'content-type': mimeType,
+        'x-ms-blob-type': 'BlockBlob',
+        'user-agent': src['user-agent'] || '',
+        accept: '*/*',
+        'accept-language': src['accept-language'] || 'en-US,en;q=0.9',
+        origin: 'https://chatgpt.com',
+        referer: 'https://chatgpt.com/',
+        'sec-ch-ua': src['sec-ch-ua'] || '',
+        'sec-ch-ua-mobile': src['sec-ch-ua-mobile'] || '?0',
+        'sec-ch-ua-platform': src['sec-ch-ua-platform'] || '',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'cross-site',
+      },
+      body: buf,
+    })
+    if (putRes.status !== 200 && putRes.status !== 201) {
+      throw new Error(`file PUT ${putRes.status}: ${(await putRes.text()).slice(0, 150)}`)
+    }
+
+    // Step 3: register uploaded
+    const regRes = await this._fetch(`${this.BASE_URL}/backend-api/files/${fileId}/uploaded`, {
+      method: 'POST',
+      headers: this._buildHeaders(
+        { accept: '*/*', 'content-type': 'application/json' },
+        `/backend-api/files/${fileId}/uploaded`,
+      ),
+      body: JSON.stringify({}),
+    })
+    if (!regRes.ok) {
+      throw new Error(`file register ${regRes.status}: ${(await regRes.text()).slice(0, 150)}`)
+    }
+    this._captureResponseHeaders(regRes)
+
+    // Step 4: process/index the file so the model can actually READ its content.
+    // store_in_library + library_persistence_mode are required for the model to
+    // access the file via retrieval. Without them the file uploads but the model
+    // replies "I don't have access to the file".
+    const procRes = await this._fetch(`${this.BASE_URL}/backend-api/files/process_upload_stream`, {
+      method: 'POST',
+      headers: this._buildHeaders(
+        { accept: 'text/event-stream', 'content-type': 'application/json' },
+        '/backend-api/files/process_upload_stream',
+      ),
+      body: JSON.stringify({
+        file_id: fileId,
+        use_case: useCase,
+        index_for_retrieval: true,
+        file_name: name,
+        library_persistence_mode: 'opportunistic',
+        metadata: { store_in_library: true, is_temporary_chat: false },
+        entry_surface: 'chat_composer',
+      }),
+    })
+    if (procRes.ok) {
+      const procText = await procRes.text()
+      if (!procText.includes('indexing.completed')) {
+        console.log(`[ChatGPT] file indexing ambiguous: ${procText.slice(-150)}`)
+      }
+    } else {
+      console.log(`[ChatGPT] file process ${procRes.status} (continuing)`)
+    }
+
+    // Wait briefly for indexing to settle before the conversation references it
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+
+    console.log(`[ChatGPT] uploaded file ${fileId} (${size}B) name=${name}`)
+    return { id: fileId, name, size, mimeType }
+  }
+
   // ─── Conversation prepare (conduit token refresh) ───────────
   // HAR shows this is called before EVERY /f/conversation POST.
   // First call sends "x-conduit-token: no-token". Subsequent calls
   // send the previously returned conduit_token.
 
-  async _prepareConversation(conversationId, parentMessageId, model = null) {
+  async _prepareConversation(conversationId, parentMessageId, model = null, attachments = null) {
     const url = `${this.BASE_URL}/backend-api/f/conversation/prepare`
     const body = {
       action: 'next',
       fork_from_shared_post: false,
       parent_message_id: parentMessageId || 'client-created-root',
       model: model || 'auto',
-      client_prepare_state: conversationId ? 'success' : 'none',
-      timezone_offset_min: 420,
-      timezone: 'America/Los_Angeles',
+      client_prepare_state: conversationId ? 'success' : 'success',
+      timezone_offset_min: -480,
+      timezone: 'Asia/Shanghai',
       conversation_mode: { kind: 'primary_assistant' },
       system_hints: [],
+      partial_query: {
+        id: crypto.randomUUID(),
+        author: { role: 'user' },
+        content: { content_type: 'text', parts: [''] },
+      },
       supports_buffering: true,
       supported_encodings: ['v1'],
       client_contextual_info: { app_name: 'chatgpt.com' },
@@ -146,13 +296,19 @@ class ChatGPTAPI {
       body.conversation_id = conversationId
     }
 
+    if (Array.isArray(attachments) && attachments.length) {
+      body.attachments = attachments.map((a) => ({ file_id: a.id }))
+    }
+
+    const prepOverrides = {
+      accept: '*/*',
+      'x-conduit-token': this._headers['x-conduit-token'] || 'no-token',
+    }
+
     const res = await this._fetch(url, {
       method: 'POST',
       headers: this._buildHeaders(
-        {
-          accept: '*/*',
-          'x-conduit-token': this._headers['x-conduit-token'] || 'no-token',
-        },
+        prepOverrides,
         '/backend-api/f/conversation/prepare',
       ),
       body: JSON.stringify(body),
@@ -212,9 +368,6 @@ class ChatGPTAPI {
     if (data.turnstile?.dx) {
       this._headers['openai-sentinel-turnstile-token'] = data.turnstile.dx
     }
-
-    // Cookies captured automatically via _captureResponseHeaders → CookieJar
-    // console.log('[ChatGPT] Sentinel refreshed')
   }
 
   // ─── Response header capture ─────────────────────────────────
@@ -269,17 +422,11 @@ class ChatGPTAPI {
     h.push(['oai-client-version', src['oai-client-version'] || ''])
     h.push(['oai-device-id', src['oai-device-id'] || ''])
 
-    // ── Block 2: Conversation-only: echo-logs before language ──
-    if (isConversation) {
-      h.push(['oai-echo-logs', src['oai-echo-logs'] || ''])
-    }
-
     h.push(['oai-language', src['oai-language'] || 'en-US'])
     h.push(['oai-session-id', src['oai-session-id'] || ''])
 
-    // ── Block 3: Conversation-only: telemetry + sentinel tokens ──
+    // ── Block 3: Conversation-only: sentinel tokens ──
     if (isConversation) {
-      h.push(['oai-telemetry', src['oai-telemetry'] || ''])
       if (src['openai-sentinel-chat-requirements-prepare-token']) {
         h.push([
           'openai-sentinel-chat-requirements-prepare-token',
@@ -307,8 +454,17 @@ class ChatGPTAPI {
     h.push(['sec-fetch-site', 'same-origin'])
     h.push(['user-agent', src['user-agent'] || ''])
 
-    // ── Block 5: Prepare-only: conduit before oai-is ──
-    if (isPrepare) {
+    // ── Block 4b: Authorization (required on sentinel + prepare + conversation) ──
+    // The sentinel prepare_token is BOUND to whether authorization was present:
+    //   sentinel(auth) → prepare_token compatible with auth conversation
+    //   sentinel(no-auth) + conversation(auth) → 500 Internal Server Error
+    // All three calls must consistently include authorization.
+    if (src['authorization'] || src['Authorization']) {
+      h.push(['authorization', src['authorization'] || src['Authorization']])
+    }
+
+    // ── Block 5: Prepare + conversation: conduit token ──
+    if (isPrepare || isConversation) {
       h.push(['x-conduit-token', src['x-conduit-token'] || 'no-token'])
     }
 
@@ -322,7 +478,7 @@ class ChatGPTAPI {
       h.push(['x-oai-turn-trace-id', src['x-oai-turn-trace-id'] || ''])
     }
 
-    // ── Block 8: Target path/route (all) ──
+    // ── Block 8: Target path/route (all endpoints) ──
     if (targetPath) {
       h.push(['x-openai-target-path', targetPath])
       h.push(['x-openai-target-route', targetPath])

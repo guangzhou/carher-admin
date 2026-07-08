@@ -99,7 +99,9 @@ def reregister(mid, lp, new_model_name, apply):
     r = proxy_api("/model/new", {
         "model_name": new_model_name,
         "litellm_params": {"model": "openai/gpt-5-5", "api_base": api_base,
-                           "api_key": "raw", "rpm": rpm},
+                           "api_key": "raw", "rpm": rpm,
+                           "input_cost_per_token": 5e-6,
+                           "output_cost_per_token": 3e-5},
         "model_info": {"id": mid},
     }, method="POST")
     ok = r.get("model_id") == mid

@@ -76,7 +76,7 @@ UPSTREAM_SLUG = "gpt-5-5"
 
 LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://10.68.13.198:30402").rstrip("/")
 LITELLM_MK = os.environ.get("LITELLM_MK", "")
-POOL_MODEL = os.environ.get("POOL_MODEL", "chatgpt-gpt-5.5")
+POOL_MODEL = os.environ.get("POOL_MODEL", "zerokey-pool")
 RPM_PER_ACCT = int(os.environ.get("RPM_PER_ACCT", "30"))
 DEEP_PROBE = os.environ.get("DEEP_PROBE", "") == "1"
 DEEP_MIN = int(os.environ.get("DEEP_MIN", "300"))

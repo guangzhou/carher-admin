@@ -183,7 +183,7 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 
 	expectedAliases := map[string]string{
 		"litellm/claude-opus-4-6":            "opus",
-		"litellm/claude-sonnet-4-6":          "sonnet",
+		"litellm/claude-sonnet-5":            "sonnet",
 		"litellm/chatgpt-gpt-5.4":            "gpt-5.4",
 		"litellm/chatgpt-gpt-5.5":            "gpt",
 		"litellm/gemini-3.1-pro-preview":     "gemini",
@@ -228,8 +228,8 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 	providers := modelsSection["providers"].(map[string]interface{})
 	litellmProv := providers["litellm"].(map[string]interface{})
 	provModels := litellmProv["models"].([]interface{})
-	if len(provModels) != 14 {
-		t.Errorf("Expected 14 provider models, got %d", len(provModels))
+	if len(provModels) != 15 {
+		t.Errorf("Expected 15 provider models, got %d", len(provModels))
 	}
 
 	if litellmProv["apiKey"] != "sk-test-key" {
@@ -319,9 +319,9 @@ func TestGenerateOpenclawJSON_ExtraLitellmModels(t *testing.T) {
 
 	providers := cfg["models"].(map[string]interface{})["providers"].(map[string]interface{})
 	provModels := providers["litellm"].(map[string]interface{})["models"].([]interface{})
-	// 14 default + 1 test extra = 15
-	if len(provModels) != 15 {
-		t.Errorf("Expected 15 provider models (14 default + 1 extra), got %d", len(provModels))
+	// 15 default + 1 test extra = 16
+	if len(provModels) != 16 {
+		t.Errorf("Expected 16 provider models (15 default + 1 extra), got %d", len(provModels))
 	}
 	var found bool
 	for _, m := range provModels {

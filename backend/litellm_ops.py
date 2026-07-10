@@ -30,22 +30,43 @@ VALID_LITELLM_ROUTE_POLICIES = {
     WANGSU_FIRST_LITELLM_ROUTE_POLICY,
 }
 
-# Sonnet/Opus: Wangsu Direct primary → OpenRouter fallback
-# GPT/Gemini:  OpenRouter primary → Wangsu OpenAI-compat fallback
+# Sonnet/Opus: Wangsu Direct primary -> OpenRouter fallback
+# GPT products: account pool primary -> local DeepSeek fallback
+# Gemini:       OpenRouter primary -> Wangsu OpenAI-compat fallback
 MODEL_FALLBACK_MAP = {
     "claude-opus-4-6": "openrouter-claude-opus-4-6",
     "claude-sonnet-4-6": "openrouter-claude-sonnet-4-6",
-    "gpt-5.4": "wangsu-gpt-5.4",
+    "gpt-5.5": "deepseek-v4-flash",
+    "chatgpt-gpt-5.5": "deepseek-v4-flash",
+    "gpt-5.6-sol": "deepseek-v4-flash",
+    "chatgpt-gpt-5.6-sol": "deepseek-v4-flash",
+    "gpt-5.6-terra": "deepseek-v4-flash",
+    "chatgpt-gpt-5.6-terra": "deepseek-v4-flash",
+    "gpt-5.6-luna": "deepseek-v4-flash",
+    "chatgpt-gpt-5.6-luna": "deepseek-v4-flash",
+    "gpt-5.4": "deepseek-v4-flash",
+    "chatgpt-gpt-5.4": "deepseek-v4-flash",
+    "gpt-5.3-codex": "deepseek-v4-flash",
+    "chatgpt-gpt-5.3-codex": "deepseek-v4-flash",
+    "gpt-5.3-codex-spark": "deepseek-v4-flash",
+    "chatgpt-gpt-5.3-codex-spark": "deepseek-v4-flash",
     "gemini-3.1-pro-preview": "wangsu-gemini-3.1-pro-preview",
 }
 
 _BASE_MODELS = [
     "claude-opus-4-6",
+    "claude-sonnet-5",
     "claude-sonnet-4-6",
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-haiku-4-5",
+    "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.4",
+    "gpt-5.3-codex-spark",
+    "deepseek-v4-flash",
     "gemini-3.1-pro-preview",
     "minimax-m2.7",
     "glm-5",
@@ -63,6 +84,9 @@ _BASE_MODELS = [
     "anthropic.claude-opus-4-7",
     "anthropic.claude-opus-4-8",
     "chatgpt-gpt-5.5",
+    "chatgpt-gpt-5.6-sol",
+    "chatgpt-gpt-5.6-terra",
+    "chatgpt-gpt-5.6-luna",
     "chatgpt-gpt-5.4",
     "chatgpt-gpt-5.3-codex",
     "chatgpt-gpt-5.3-codex-spark",

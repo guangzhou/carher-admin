@@ -369,8 +369,10 @@ data:
           cache_creation_input_token_cost: 0.0000125
 
       # ═══════════════════════════════════════════
-      # Fallback: Wangsu (网宿) OpenAI compat for GPT / Gemini
-      # Use custom_openai/* so LiteLLM stays on chat/completions.
+      # Fallback: Wangsu (网宿) OpenAI compat for GPT / Gemini / misc
+      # cheliantianxia1 is now served by compat gateway 8abh1x4g.
+      # Keep a few legacy model_name aliases stable so existing callers and
+      # key allowlists do not break while the upstream model slugs move on.
       # ═══════════════════════════════════════════
 
       - model_name: wangsu-gpt-5.4
@@ -385,20 +387,15 @@ data:
 
       - model_name: wangsu-gemini-3.1-pro-preview
         litellm_params:
-          model: custom_openai/gemini-3.1-pro-preview
+          model: openai/gemini-3.5-flash
           api_key: os.environ/WANGSU_API_KEY
-          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/8abh1x4g/compat
         model_info:
           id: wangsu/gemini-3.1-pro-preview
           input_cost_per_token: 0.000002
           output_cost_per_token: 0.000012
 
-      # ── New on cheliantianxia1 (added 2026-05-08): GPT-5.5 + DeepSeek V4 ──
-      # Pricing rationale:
-      #   gpt-5.5     — OpenAI list price ($5/$30 per 1M); Wangsu pass-through.
-      #   deepseek-*  — DeepSeek official list price (cache_miss + output);
-      #                 the 75%-off promo ends 2026-05-31, so we book at full
-      #                 list to keep spend tracking conservative.
+      # ── cheliantianxia1 compat (8abh1x4g): GPT / DeepSeek / Gemini / GLM ──
       - model_name: wangsu-gpt-5.5
         litellm_params:
           model: custom_openai/gpt-5.5
@@ -413,9 +410,9 @@ data:
 
       - model_name: wangsu-deepseek-v4-pro
         litellm_params:
-          model: custom_openai/deepseek-v4-pro
+          model: openai/deepseek-v4-pro
           api_key: os.environ/WANGSU_API_KEY
-          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/8abh1x4g/compat
           input_cost_per_token: 0.00000171
           output_cost_per_token: 0.00000343
         model_info:
@@ -425,9 +422,9 @@ data:
 
       - model_name: wangsu-deepseek-v4-flash
         litellm_params:
-          model: custom_openai/deepseek-v4-flash
+          model: openai/deepseek-v4-flash
           api_key: os.environ/WANGSU_API_KEY
-          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/8abh1x4g/compat
           input_cost_per_token: 0.000000143
           output_cost_per_token: 0.000000286
         model_info:
@@ -435,16 +432,12 @@ data:
           input_cost_per_token: 0.000000143
           output_cost_per_token: 0.000000286
 
-      # ── New on cheliantianxia1 (added 2026-05-21): GLM-5.1 + Gemini-3.5-flash ──
-      # Pricing rationale: official list price (Wangsu pass-through, full list to keep
-      # spend tracking conservative if the upstream offers temporary promotions later).
-      #   glm-5.1            — Z.ai official: $1.40 / $4.40 per 1M tokens.
-      #   gemini-3.5-flash   — Google official: $1.50 / $9.00 per 1M tokens.
+      # Legacy alias preserved for callers that still ask for glm-5.1.
       - model_name: wangsu-glm-5.1
         litellm_params:
-          model: custom_openai/glm-5.1
+          model: openai/glm-5.2
           api_key: os.environ/WANGSU_API_KEY
-          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/8abh1x4g/compat
           input_cost_per_token: 0.0000014
           output_cost_per_token: 0.0000044
         model_info:
@@ -454,15 +447,65 @@ data:
 
       - model_name: wangsu-gemini-3.5-flash
         litellm_params:
-          model: custom_openai/gemini-3.5-flash
+          model: openai/gemini-3.5-flash
           api_key: os.environ/WANGSU_API_KEY
-          api_base: https://aigateway.edgecloudapp.com/v1/23dcb2866d219047ae6edd6a2724dbc2/cheliantianxia1
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/8abh1x4g/compat
           input_cost_per_token: 0.0000015
           output_cost_per_token: 0.000009
         model_info:
           id: wangsu/gemini-3.5-flash
           input_cost_per_token: 0.0000015
           output_cost_per_token: 0.000009
+
+      - model_name: wangsu-glm-5.2
+        litellm_params:
+          model: openai/glm-5.2
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/8abh1x4g/compat
+        model_info:
+          id: wangsu/glm-5.2
+
+      - model_name: wangsu-kimi-k2.7-code
+        litellm_params:
+          model: openai/kimi-k2.7-code
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/8abh1x4g/compat
+        model_info:
+          id: wangsu/kimi-k2.7-code
+
+      - model_name: wangsu-qwen3.7-plus
+        litellm_params:
+          model: openai/qwen3.7-plus
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/8abh1x4g/compat
+        model_info:
+          id: wangsu/qwen3.7-plus
+
+      # Her-facing canonical Sonnet 5 model name. Keep this as the exact
+      # allowlisted name on `carher-*` keys while routing it to Wangsu compat.
+      - model_name: claude-sonnet-5
+        litellm_params:
+          model: openai/claude-sonnet-5
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/8abh1x4g/compat
+        model_info:
+          id: wangsu/claude-sonnet-5-primary
+
+      - model_name: wangsu-claude-sonnet-5
+        litellm_params:
+          model: openai/claude-sonnet-5
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/8abh1x4g/compat
+        model_info:
+          id: wangsu/claude-sonnet-5
+
+      - model_name: wangsu-claude-fable-5
+        litellm_params:
+          model: openai/claude-fable-5
+          api_key: os.environ/WANGSU_API_KEY
+          api_base: https://aigateway.edgecloudapp.com/v2/gws/8abh1x4g/compat
+        model_info:
+          id: wangsu/claude-fable-5
 
       # ═══════════════════════════════════════════
       # Provider: Wangsu Anthropic Direct Mode (v2 gateway)
@@ -1130,6 +1173,46 @@ data:
       #     output_cost_per_token: 0.000005
 
       # ═══════════════════════════════════════════
+      # Claude Max OAuth passthrough (10.68.13.224 acct-16) — 2026-07-05
+      # VIP pool for liuguoxian only. `claude-code-liuguoxian-50gj` key aliases
+      # anthropic.claude-{opus-4-6/7/8,sonnet-4-6,haiku-4-5} -> these 3 groups.
+      # On rpm/tpm exhaustion the group falls back to the corresponding
+      # anthropic.claude-* (wangsu Anthropic-native) group (see fallbacks
+      # section below). 224 proxy strips LiteLLM fingerprint fields before
+      # forwarding to api.anthropic.com — see [[anti-fingerprint-strip-proxy]].
+      # ═══════════════════════════════════════════
+      - model_name: claude-max-liuguoxian-opus
+        litellm_params:
+          model: anthropic/claude-opus-4-7
+          api_base: http://10.68.13.224:3456
+          api_key: os.environ/CCMAX_224_API_KEY
+          rpm: 20
+          tpm: 60000
+        model_info:
+          id: 1906ef37-fd2b-4e66-8105-f03dcb8f3a54
+          description: "Claude Max OAuth proxy on 10.68.13.224 (acct-16). Liuguoxian VIP pool."
+      - model_name: claude-max-liuguoxian-sonnet
+        litellm_params:
+          model: anthropic/claude-sonnet-4-6
+          api_base: http://10.68.13.224:3456
+          api_key: os.environ/CCMAX_224_API_KEY
+          rpm: 40
+          tpm: 120000
+        model_info:
+          id: ef129ff8-b507-4ad1-8b39-2fc81d9ad62a
+          description: "Claude Max OAuth proxy on 10.68.13.224 (acct-16). Liuguoxian VIP pool."
+      - model_name: claude-max-liuguoxian-haiku
+        litellm_params:
+          model: anthropic/claude-haiku-4-5
+          api_base: http://10.68.13.224:3456
+          api_key: os.environ/CCMAX_224_API_KEY
+          rpm: 60
+          tpm: 200000
+        model_info:
+          id: 8cc6e24b-c01b-4721-bf13-3b0095204462
+          description: "Claude Max OAuth proxy on 10.68.13.224 (acct-16). Liuguoxian VIP pool."
+
+      # ═══════════════════════════════════════════
       # Embedding
       # ═══════════════════════════════════════════
 
@@ -1624,6 +1707,10 @@ data:
       # that group is correct — alias maps the request, not the cost row.
       model_group_alias:
         "claude-haiku-4-5-20251001": "anthropic.claude-haiku-4-5"
+        "gpt-5.5": "chatgpt-gpt-5.5"
+        "gpt-5.6-sol": "chatgpt-gpt-5.6-sol"
+        "gpt-5.6-terra": "chatgpt-gpt-5.6-terra"
+        "gpt-5.6-luna": "chatgpt-gpt-5.6-luna"
       # ── cooldowns: enabled (default) ─────────────────────────────────
       # 2026-04-27 ROLLBACK: 之前在此处设 ``disable_cooldowns: true``，
       # commit 0058214 论证为"zombie key 触发 bge-m3 cooldown 殃及 12 个
@@ -1648,8 +1735,22 @@ data:
         # ── Wangsu-primary Claude (OpenAI-compat, bot default) ──
         - claude-opus-4-6: ["openrouter-claude-opus-4-6"]
         - claude-sonnet-4-6: ["openrouter-claude-sonnet-4-6"]
-        - gpt-5.4: ["wangsu-gpt-5.4"]
-        - chatgpt-gpt-5.5: ["wangsu-gpt-5.5"]
+        - gpt-5.5: ["local-deepseek-v4-flash-responses"]
+        - chatgpt-gpt-5.5: ["local-deepseek-v4-flash-responses"]
+        - chatgpt-pool-gpt-5.5: ["local-deepseek-v4-flash-responses"]
+        - gpt-5.6-sol: ["local-deepseek-v4-flash-responses"]
+        - chatgpt-gpt-5.6-sol: ["local-deepseek-v4-flash-responses"]
+        - gpt-5.6-terra: ["local-deepseek-v4-flash-responses"]
+        - chatgpt-gpt-5.6-terra: ["local-deepseek-v4-flash-responses"]
+        - gpt-5.6-luna: ["local-deepseek-v4-flash-responses"]
+        - chatgpt-gpt-5.6-luna: ["local-deepseek-v4-flash-responses"]
+        - gpt-5.4: ["local-deepseek-v4-flash-responses"]
+        - chatgpt-gpt-5.4: ["local-deepseek-v4-flash-responses"]
+        - gpt-5.2: ["local-deepseek-v4-flash-responses"]
+        - gpt-5.3-codex: ["local-deepseek-v4-flash-responses"]
+        - chatgpt-gpt-5.3-codex: ["local-deepseek-v4-flash-responses"]
+        - gpt-5.4-mini: ["local-deepseek-v4-flash-responses"]
+        - chatgpt-gpt-5.3-codex-spark: ["local-deepseek-v4-flash-responses"]
         - gemini-3.1-pro-preview: ["wangsu-gemini-3.1-pro-preview"]
         # opus-4-7 primary lives on Kuaihui; Wangsu Direct6 is first fallback.
         # Fallback chain (in order, each tried once):
@@ -1695,6 +1796,12 @@ data:
         - anthropic.openrouter.claude-opus-4-7: ["anthropic.claude-opus-4-7"]
         - anthropic.openrouter.claude-opus-4-6: ["anthropic.claude-opus-4-6"]
         - anthropic.openrouter.claude-sonnet-4-6: ["anthropic.claude-sonnet-4-6"]
+        # ── Claude Max liuguoxian VIP pool (224 proxy) → wangsu Anthropic-native ──
+        # 2026-07-05: on rpm/tpm exhaustion at 224 (per-key throttle), fall back
+        # to the same Anthropic-native wangsu group used by the key's other paths.
+        - claude-max-liuguoxian-opus: ["anthropic.claude-opus-4-7"]
+        - claude-max-liuguoxian-sonnet: ["anthropic.claude-sonnet-4-6"]
+        - claude-max-liuguoxian-haiku: ["anthropic.claude-haiku-4-5"]
 
     litellm_settings:
       drop_params: true
@@ -1787,7 +1894,7 @@ data:
       # contribute no per-request behavior).
       # Source files live under k8s/litellm-callbacks/ and are mounted into
       # /app/<file>.py by the litellm-callbacks ConfigMap + pod volumeMounts.
-      callbacks: ["mock_heartbeat.mock_heartbeat", "opus_47_fix.thinking_schema_fix", "embedding_sanitize.embedding_sanitize", "force_stream.force_stream", "streaming_bridge.streaming_bridge", "null_byte_sanitize.null_byte_sanitize", "anthropic_passthrough_pingfix.anthropic_passthrough_pingfix", "inject_prompt_cache_key.inject_prompt_cache_key"]
+      callbacks: ["mock_heartbeat.mock_heartbeat", "opus_47_fix.thinking_schema_fix", "embedding_sanitize.embedding_sanitize", "force_stream.force_stream", "streaming_bridge.streaming_bridge", "null_byte_sanitize.null_byte_sanitize", "anthropic_passthrough_pingfix.anthropic_passthrough_pingfix", "inject_prompt_cache_key.inject_prompt_cache_key", "streaming_output_backfill.streaming_output_backfill"]
 
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY
@@ -4554,8 +4661,10 @@ data:
     ``litellm_metadata._skip_mock_heartbeat: true``.
 
     The detection is conservative: only short-circuits when the LAST user-role
-    message contains the literal marker ``[OpenClaw heartbeat poll]``. Any
-    other content (even mentions of heartbeats in conversation) passes through.
+    message contains the literal marker ``[OpenClaw heartbeat poll]``. Responses
+    API payloads sometimes omit ``role`` on the final input item, so role-less
+    final items are also inspected. Any other content (even mentions of heartbeats
+    in conversation history) passes through.
     """
 
     from __future__ import annotations
@@ -4572,6 +4681,12 @@ data:
     _TARGET_CALL_TYPES = frozenset({"responses", "aresponses", "acompletion", "completion"})
 
 
+    def _is_userish_item(item: dict) -> bool:
+        """Responses API sometimes omits role on final input-message items."""
+        role = item.get("role")
+        return role is None or role == "user"
+
+
     def _last_user_text(data: dict) -> str:
         """Pull the last user-role text out of either Responses-API ``input``
         or chat-style ``messages``. Returns empty string on any structural
@@ -4585,7 +4700,7 @@ data:
             for item in reversed(inp):
                 if not isinstance(item, dict):
                     continue
-                if item.get("role") and item.get("role") != "user":
+                if not _is_userish_item(item):
                     continue
                 content = item.get("content")
                 if isinstance(content, str):
@@ -4653,6 +4768,10 @@ data:
                     return data
 
                 data["mock_response"] = "ok"
+                md = data.setdefault("litellm_metadata", {})
+                if isinstance(md, dict):
+                    md["_mock_heartbeat"] = True
+                    md["_mock_heartbeat_marker"] = _MARKER
                 try:
                     key_alias = getattr(user_api_key_dict, "key_alias", None)
                     _log.info(
@@ -4671,6 +4790,158 @@ data:
 
 
     mock_heartbeat = MockHeartbeat()
+
+  streaming_output_backfill.py: |
+    """Monkey-patch litellm streaming iterator to backfill response.completed output.
+
+    ChatGPT Codex backend sends response.completed with output:[] — actual content
+    arrives via preceding response.output_item.done SSE events. Without accumulation,
+    SpendLogs stores empty output.  This patch intercepts the raw SSE JSON before
+    _process_chunk, accumulates output_item.done payloads, and injects them into
+    response.completed before the original code stores + logs it.
+
+    Ref: https://github.com/BerriAI/litellm/pull/31332
+    """
+    from __future__ import annotations
+
+    import json
+    import logging
+    from typing import Any
+
+    from litellm.integrations.custom_logger import CustomLogger
+
+    _log = logging.getLogger("streaming_output_backfill")
+
+
+    def _output_to_choices(output_items: list[dict]) -> list[dict]:
+        """Convert Responses API output items to Chat Completions choices format.
+
+        LiteLLM UI only reads response.choices[0].message — synthesise it so the
+        admin dashboard can render Responses API logs in pretty view.
+        """
+        parts: list[str] = []
+        tool_calls: list[dict] = []
+        for item in output_items:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "message":
+                for block in item.get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "output_text":
+                        parts.append(block.get("text", ""))
+            elif item_type == "reasoning":
+                for s in item.get("summary") or []:
+                    if isinstance(s, dict) and s.get("type") == "summary_text":
+                        parts.append(f"[reasoning] {s.get('text', '')}")
+            elif item_type == "function_call":
+                tool_calls.append(
+                    {
+                        "id": item.get("call_id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": item.get("name", ""),
+                            "arguments": item.get("arguments", ""),
+                        },
+                    }
+                )
+        if not parts and not tool_calls:
+            return []
+        msg: dict[str, Any] = {"role": "assistant"}
+        if parts:
+            msg["content"] = "\n\n".join(parts)
+        if tool_calls:
+            msg["tool_calls"] = tool_calls
+            if not parts:
+                msg["content"] = None
+        return [
+            {
+                "index": 0,
+                "message": msg,
+                "finish_reason": "tool_calls" if tool_calls else "stop",
+            }
+        ]
+
+
+    def _install_streaming_output_backfill() -> None:
+        try:
+            from litellm.responses.streaming_iterator import (
+                BaseResponsesAPIStreamingIterator,
+            )
+        except ImportError:
+            _log.warning("streaming_output_backfill: import failed, skip")
+            return
+
+        if getattr(BaseResponsesAPIStreamingIterator, "_output_backfill_patched", False):
+            return
+
+        _orig_init = BaseResponsesAPIStreamingIterator.__init__
+        _orig_process = BaseResponsesAPIStreamingIterator._process_chunk
+
+        def _patched_init(self, *args: Any, **kwargs: Any) -> None:
+            _orig_init(self, *args, **kwargs)
+            self._bp_output_items: dict[int, Any] = {}
+
+        def _patched_process_chunk(self, chunk: Any) -> Any:
+            if not chunk or chunk == "[DONE]":
+                return _orig_process(self, chunk)
+
+            if not hasattr(self, "_bp_output_items"):
+                self._bp_output_items = {}
+
+            try:
+                parsed = json.loads(chunk)
+            except (json.JSONDecodeError, TypeError):
+                return _orig_process(self, chunk)
+
+            event_type = parsed.get("type") if isinstance(parsed, dict) else None
+
+            if event_type == "response.output_item.done":
+                item = parsed.get("item")
+                output_index = parsed.get(
+                    "output_index", max(self._bp_output_items, default=-1) + 1
+                )
+                if item is not None and isinstance(output_index, int):
+                    self._bp_output_items[output_index] = item
+
+            elif event_type in ("response.completed", "response.incomplete"):
+                resp = parsed.get("response")
+                if isinstance(resp, dict):
+                    modified = False
+                    if not resp.get("output") and self._bp_output_items:
+                        sorted_items = [
+                            item
+                            for _, item in sorted(self._bp_output_items.items())
+                        ]
+                        resp["output"] = sorted_items
+                        modified = True
+                        _log.info(
+                            "streaming_output_backfill: backfilled %d output items into %s",
+                            len(self._bp_output_items),
+                            event_type,
+                        )
+                    output = resp.get("output")
+                    if output and not resp.get("choices"):
+                        resp["choices"] = _output_to_choices(output)
+                        modified = True
+                    if modified:
+                        chunk = json.dumps(parsed)
+
+            return _orig_process(self, chunk)
+
+        BaseResponsesAPIStreamingIterator.__init__ = _patched_init
+        BaseResponsesAPIStreamingIterator._process_chunk = _patched_process_chunk
+        BaseResponsesAPIStreamingIterator._output_backfill_patched = True
+        _log.info("streaming_output_backfill: patched BaseResponsesAPIStreamingIterator")
+
+
+    _install_streaming_output_backfill()
+
+
+    class StreamingOutputBackfillCallback(CustomLogger):
+        pass
+
+
+    streaming_output_backfill = StreamingOutputBackfillCallback()
 
 ---
 apiVersion: apps/v1
@@ -5089,6 +5360,10 @@ spec:
             - name: callbacks
               mountPath: /app/inject_prompt_cache_key.py
               subPath: inject_prompt_cache_key.py
+              readOnly: true
+            - name: callbacks
+              mountPath: /app/streaming_output_backfill.py
+              subPath: streaming_output_backfill.py
               readOnly: true
       volumes:
         - name: config

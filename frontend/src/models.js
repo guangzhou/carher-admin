@@ -4,23 +4,23 @@ export const DEFAULT_LITELLM_ROUTE_POLICY = "openrouter_first";
 export const PROVIDER_MODELS = {
   openrouter: [
     { value: "gpt", label: "GPT-5.4" },
-    { value: "sonnet", label: "Claude Sonnet 4.6" },
+    { value: "sonnet", label: "Claude Sonnet 5" },
     { value: "opus", label: "Claude Opus 4.6" },
     { value: "gemini", label: "Gemini 3.1 Pro" },
   ],
   anthropic: [
-    { value: "sonnet", label: "Claude Sonnet 4.6" },
+    { value: "sonnet", label: "Claude Sonnet 5" },
     { value: "opus", label: "Claude Opus 4.6" },
   ],
   wangsu: [
     { value: "gpt", label: "GPT-5.4" },
-    { value: "sonnet", label: "Claude Sonnet 4.6" },
+    { value: "sonnet", label: "Claude Sonnet 5" },
     { value: "opus", label: "Claude Opus 4.6" },
     { value: "gemini", label: "Gemini 3.1 Pro" },
   ],
   litellm: [
     { value: "gpt", label: "GPT-5.4" },
-    { value: "sonnet", label: "Claude Sonnet 4.6" },
+    { value: "sonnet", label: "Claude Sonnet 5" },
     { value: "opus", label: "Claude Opus 4.6" },
     { value: "opus4.7", label: "Claude Opus 4.7" },
     { value: "gemini", label: "Gemini 3.1 Pro" },
@@ -44,7 +44,7 @@ export const LITELLM_ROUTE_POLICY_OPTIONS = [
 
 export const ALL_MODELS = [
   { value: "gpt", label: "GPT-5.4" },
-  { value: "sonnet", label: "Claude Sonnet 4.6" },
+  { value: "sonnet", label: "Claude Sonnet 5" },
   { value: "opus", label: "Claude Opus 4.6" },
   { value: "gemini", label: "Gemini 3.1 Pro" },
 ];

@@ -32,11 +32,14 @@ var modelMapWangsu = map[string]string{
 }
 
 var modelMapLitellm = map[string]string{
-	"sonnet":  "litellm/claude-sonnet-4-6",
+	"sonnet":  "litellm/claude-sonnet-5",
 	"opus":    "litellm/claude-opus-4-6",
 	"opus4.7": "litellm/claude-opus-4-7",
-	"gpt":     "litellm/chatgpt-gpt-5.5",
-	"gpt-5.4": "litellm/chatgpt-gpt-5.4",
+	"gpt":         "litellm/chatgpt-gpt-5.5",
+	"gpt-5.4":     "litellm/chatgpt-gpt-5.4",
+	"gpt-5.6-sol":   "litellm/chatgpt-gpt-5.6-sol",
+	"gpt-5.6-terra": "litellm/chatgpt-gpt-5.6-terra",
+	"gpt-5.6-luna":  "litellm/chatgpt-gpt-5.6-luna",
 	"gemini":  "litellm/gemini-3.1-pro-preview",
 	"minimax": "litellm/minimax-m2.7",
 	"glm":     "litellm/glm-5",
@@ -120,9 +123,12 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 	switch input.Provider {
 	case "litellm":
 		models["litellm/claude-opus-4-6"] = alias("opus")
-		models["litellm/claude-sonnet-4-6"] = alias("sonnet")
+		models["litellm/claude-sonnet-5"] = alias("sonnet")
 		models["litellm/chatgpt-gpt-5.4"] = alias("gpt-5.4")
 		models["litellm/chatgpt-gpt-5.5"] = alias("gpt")
+		models["litellm/chatgpt-gpt-5.6-sol"] = alias("gpt-5.6-sol")
+		models["litellm/chatgpt-gpt-5.6-terra"] = alias("gpt-5.6-terra")
+		models["litellm/chatgpt-gpt-5.6-luna"] = alias("gpt-5.6-luna")
 		models["litellm/gemini-3.1-pro-preview"] = alias("gemini")
 		models["litellm/minimax-m2.7"] = alias("minimax")
 		models["litellm/glm-5"] = alias("glm")
@@ -220,7 +226,7 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		}
 		baseModels := []map[string]interface{}{
 			{"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 25, "cacheRead": 0.5}},
-			{"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 64000, "cost": map[string]interface{}{"input": 3, "output": 15, "cacheRead": 0.3}},
+			{"id": "claude-sonnet-5", "name": "Claude Sonnet 5", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 64000, "cost": map[string]interface{}{"input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5}},
 			{"id": "gpt-5.4", "name": "GPT-5.4", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 2.5, "output": 15, "cacheRead": 0.25}},
 			{"id": "chatgpt-gpt-5.5", "name": "GPT-5.5 (ChatGPT Pro)", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 260000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 0, "output": 0, "cacheRead": 0}},
 			{"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 65536, "cost": map[string]interface{}{"input": 2, "output": 12, "cacheRead": 0.2}},
@@ -256,7 +262,7 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 
 	if input.AppID != "" && input.AppSecret != "" {
 		feishuName := input.Name
-		if feishuName != "" && !strings.Contains(strings.ToLower(feishuName), "的her") {
+		if feishuName != "" && !strings.Contains(strings.ToLower(feishuName), "her") {
 			feishuName += "的her"
 		}
 		feishu := map[string]interface{}{

@@ -35,10 +35,13 @@ MODEL_MAP_WANGSU = {
     "gemini": "wangsu/gemini-3.1-pro-preview",
 }
 MODEL_MAP_LITELLM = {
-    "sonnet": "litellm/claude-sonnet-4-6",
+    "sonnet": "litellm/claude-sonnet-5",
     "opus": "litellm/claude-opus-4-6",
     "gpt": "litellm/gpt-5.4",
     "gpt-5.5": "litellm/chatgpt-gpt-5.5",  # 走 carher LiteLLM → 198 → 188 ChatGPT Pro 池
+    "gpt-5.6-sol": "litellm/chatgpt-gpt-5.6-sol",
+    "gpt-5.6-terra": "litellm/chatgpt-gpt-5.6-terra",
+    "gpt-5.6-luna": "litellm/chatgpt-gpt-5.6-luna",
     "gemini": "litellm/gemini-3.1-pro-preview",
     "minimax": "litellm/minimax-m2.7",
     "glm": "litellm/glm-5",
@@ -80,9 +83,12 @@ def generate_openclaw_json(instance: dict) -> dict:
     if provider == "litellm":
         models: dict[str, Any] = {
             "litellm/claude-opus-4-6": {"alias": "opus"},
-            "litellm/claude-sonnet-4-6": {"alias": "sonnet"},
+            "litellm/claude-sonnet-5": {"alias": "sonnet"},
             "litellm/gpt-5.4": {"alias": "gpt"},
             "litellm/chatgpt-gpt-5.5": {"alias": "gpt-5.5"},
+            "litellm/chatgpt-gpt-5.6-sol": {"alias": "gpt-5.6-sol"},
+            "litellm/chatgpt-gpt-5.6-terra": {"alias": "gpt-5.6-terra"},
+            "litellm/chatgpt-gpt-5.6-luna": {"alias": "gpt-5.6-luna"},
             "litellm/gemini-3.1-pro-preview": {"alias": "gemini"},
             "litellm/minimax-m2.7": {"alias": "minimax"},
             "litellm/glm-5": {"alias": "glm"},
@@ -139,7 +145,7 @@ def generate_openclaw_json(instance: dict) -> dict:
             "apiKey": api_key,
             "models": [
                 {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 128000, "cost": {"input": 5, "output": 25, "cacheRead": 0.5}},
-                {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 64000, "cost": {"input": 3, "output": 15, "cacheRead": 0.3}},
+                {"id": "claude-sonnet-5", "name": "Claude Sonnet 5", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 64000, "cost": {"input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5}},
                 {"id": "gpt-5.4", "name": "GPT-5.4", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 128000, "cost": {"input": 2.5, "output": 15, "cacheRead": 0.25}},
                 {"id": "chatgpt-gpt-5.5", "name": "GPT-5.5 (ChatGPT Pro)", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 400000, "maxTokens": 128000, "cost": {"input": 0, "output": 0, "cacheRead": 0}},
                 {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro", "api": "openai-completions", "reasoning": True, "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 65536, "cost": {"input": 2, "output": 12, "cacheRead": 0.2}},

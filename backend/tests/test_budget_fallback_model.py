@@ -30,11 +30,18 @@ def test_budget_fallback_group_is_zero_cost_and_responses_only():
     assert rows
     for row in rows:
         params = row["litellm_params"]
-        assert params["model"] == "openai/gpt-5.3-codex-spark"
+        assert params["model"] == "openai/chatgpt-gpt-5.3-codex-spark"
+        assert params["api_base"].endswith(
+            ".litellm-product.svc.cluster.local:4000"
+        )
+        assert ".carher.svc" not in params["api_base"]
         assert params["input_cost_per_token"] == 0
         assert params["output_cost_per_token"] == 0
         assert params["cache_read_input_token_cost"] == 0
         assert row["model_info"]["mode"] == "responses"
+
+    ids = [row["model_info"]["id"] for row in rows]
+    assert len(ids) == len(set(ids))
 
 
 def test_budget_fallback_group_has_no_paid_router_fallback():

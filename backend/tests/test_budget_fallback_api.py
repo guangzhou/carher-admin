@@ -57,6 +57,8 @@ class FakeStore:
     def __init__(self):
         self.policies = {}
         self.events = {}
+        self.lease_available = True
+        self.lease_calls = []
 
     def list_policies(self):
         return list(self.policies.values())
@@ -95,6 +97,13 @@ class FakeStore:
 
     def list_events(self, key_id, limit=100):
         return self.events.get(key_id, [])[:limit]
+
+    def acquire_lease(self, key_id, owner, now, ttl_seconds=30):
+        self.lease_calls.append(("acquire", key_id, ttl_seconds))
+        return self.lease_available
+
+    def release_lease(self, key_id, owner):
+        self.lease_calls.append(("release", key_id))
 
 
 class FakeController:
@@ -215,7 +224,7 @@ def test_enable_rejects_non_zero_cost_fallback_model_with_409():
 
 
 def test_manual_fallback_returns_resulting_state():
-    http, _, _ = make_client()
+    http, _, store = make_client()
     assert enable(http).status_code == 200
 
     response = http.post(
@@ -224,6 +233,57 @@ def test_manual_fallback_returns_resulting_state():
 
     assert response.status_code == 200
     assert response.json()["result"]["to_state"] == "FALLBACK_5_3"
+    assert store.lease_calls[0][0] == "acquire"
+    assert store.lease_calls[0][2] >= 120
+    assert store.lease_calls[-1] == ("release", "hash-1")
+
+
+def test_manual_action_returns_409_when_worker_holds_lease():
+    http, _, store = make_client()
+    assert enable(http).status_code == 200
+    store.lease_available = False
+
+    response = http.post(
+        "/api/litellm/budget-fallback/keys/hash-1/fallback", json={"reason": "test"}
+    )
+
+    assert response.status_code == 409
+    assert store.policies["hash-1"]["state"] == "NORMAL"
+
+
+def test_manual_fallback_rejects_an_already_active_policy():
+    http, _, store = make_client()
+    assert enable(http).status_code == 200
+    store.policies["hash-1"]["state"] = "FALLBACK_5_3"
+
+    response = http.post(
+        "/api/litellm/budget-fallback/keys/hash-1/fallback", json={"reason": "test"}
+    )
+
+    assert response.status_code == 409
+
+
+def test_restore_rejects_normal_policy():
+    http, _, _ = make_client()
+    assert enable(http).status_code == 200
+
+    response = http.post(
+        "/api/litellm/budget-fallback/keys/hash-1/restore", json={"reason": "test"}
+    )
+
+    assert response.status_code == 409
+
+
+def test_recapture_rejects_active_fallback():
+    http, _, store = make_client()
+    assert enable(http).status_code == 200
+    store.policies["hash-1"]["state"] = "FALLBACK_5_3"
+
+    response = http.post(
+        "/api/litellm/budget-fallback/keys/hash-1/recapture", json={"reason": "test"}
+    )
+
+    assert response.status_code == 409
 
 
 def test_disable_requires_explicit_restore_boolean():

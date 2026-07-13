@@ -166,11 +166,16 @@ def _sync_cloudflare_for_batch(instances: list[tuple[int, str]]) -> dict[int, di
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    k8s_ops.init_k8s()
+    skip_k8s = os.environ.get("CARHER_ADMIN_SKIP_K8S", "").lower() in {
+        "1", "true", "yes",
+    }
+    if not skip_k8s:
+        k8s_ops.init_k8s()
     db.init_db()
     start_budget_fallback_worker()
-    await sync_worker.start_workers()
-    metrics_mod.start_sampler(db)
+    if not skip_k8s:
+        await sync_worker.start_workers()
+        metrics_mod.start_sampler(db)
     logger.info("CarHer Admin started (DB + K8s + sync workers + metrics sampler)")
     yield
 

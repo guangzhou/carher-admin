@@ -4,6 +4,9 @@ import assert from "node:assert/strict";
 import {
   budgetPercent,
   canEnable,
+  canFallback,
+  canRecapture,
+  canRestore,
   formatResetCountdown,
   statusPresentation,
 } from "./budgetFallbackViewModel.js";
@@ -36,6 +39,17 @@ test("enablement requires backend eligibility and disabled policy", () => {
   assert.equal(canEnable({ eligible: true, enabled: false }), true);
   assert.equal(canEnable({ eligible: false, enabled: false }), false);
   assert.equal(canEnable({ eligible: true, enabled: true }), false);
+});
+
+
+test("manual actions follow controller state guards", () => {
+  assert.equal(canFallback({ enabled: true, state: "NORMAL" }), true);
+  assert.equal(canFallback({ enabled: true, state: "FALLBACK_5_3" }), false);
+  assert.equal(canRestore({ enabled: true, state: "NORMAL" }), false);
+  assert.equal(canRestore({ enabled: true, state: "FALLBACK_5_3" }), true);
+  assert.equal(canRecapture({ enabled: true, state: "NORMAL" }), true);
+  assert.equal(canRecapture({ enabled: true, state: "MANUAL_HOLD" }), true);
+  assert.equal(canRecapture({ enabled: true, state: "FALLBACK_5_3" }), false);
 });
 
 

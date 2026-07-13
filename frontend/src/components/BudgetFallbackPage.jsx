@@ -4,6 +4,9 @@ import { api } from "../api";
 import {
   budgetPercent,
   canEnable,
+  canFallback,
+  canRecapture,
+  canRestore,
   formatMoney,
   formatResetCountdown,
   statusPresentation,
@@ -145,8 +148,8 @@ function DetailPanel({ row, events, busy, onClose, onAction }) {
       <div><dt>下次恢复</dt><dd>{formatResetCountdown(row.budget_reset_at)}</dd></div><div><dt>自动控制</dt><dd>{row.automation_paused ? "已暂停" : row.enabled ? "运行中" : "未开启"}</dd></div></dl>
     <div className="budget-route-map"><p>FALLBACK ROUTE</p><div><span>原公开模型名</span><b>→</b><strong>chatgpt-budget-fallback-gpt-5.3</strong></div><small>客户端无需更换 API Key 或修改模型名；fallback 期间付费内部模型不可直达。</small></div>
     {row.eligibility_reason && !row.eligible ? <div className="budget-note danger">{row.eligibility_reason}</div> : null}{row.last_error ? <div className="budget-note danger">{row.last_error}</div> : null}
-    <div className="budget-actions"><button disabled={busy || !row.enabled} onClick={() => onAction("fallback")}>立即切到 5.3</button><button disabled={busy || !row.enabled} onClick={() => onAction("restore")}>恢复主模型</button>
-      <button disabled={busy || !row.enabled} onClick={() => onAction("recapture")}>重新采集配置</button><button disabled={busy || !row.enabled} onClick={() => onAction("pause")}>{row.automation_paused ? "恢复自动控制" : "暂停自动控制"}</button>
+    <div className="budget-actions"><button disabled={busy || !canFallback(row)} onClick={() => onAction("fallback")}>立即切到 5.3</button><button disabled={busy || !canRestore(row)} onClick={() => onAction("restore")}>恢复主模型</button>
+      <button disabled={busy || !canRecapture(row)} onClick={() => onAction("recapture")}>重新采集配置</button><button disabled={busy || !row.enabled} onClick={() => onAction("pause")}>{row.automation_paused ? "恢复自动控制" : "暂停自动控制"}</button>
       {row.state !== "NORMAL" ? <button className="budget-danger-action" disabled={busy || !row.enabled} onClick={() => onAction("disable-keep")}>仅关闭策略，保持当前路由</button> : null}</div>
     <div className="budget-events"><div className="budget-section-label">最近事件</div>{!events.length ? <p className="budget-events-empty">还没有策略事件</p> : events.slice(0, 12).map((event) => <div className="budget-event" key={event.id}><i /><div><strong>{event.event_type}</strong><small>{event.created_at}</small></div></div>)}</div>
   </aside>;

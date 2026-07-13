@@ -43,6 +43,10 @@ Do not enable any policy if either check fails.
 
 ## Deployment boundaries
 
+For local UI-only verification without a kubeconfig, set
+`CARHER_ADMIN_SKIP_K8S=1`. This skips K8s sync and metrics workers but still
+starts the database, budget-fallback worker, API, and built frontend.
+
 The repository has two independent deployment pipelines:
 
 1. Build and deploy `carher-admin` on build server `47.84.112.136` using the

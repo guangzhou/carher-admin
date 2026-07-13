@@ -169,6 +169,18 @@ def test_90_percent_only_records_observation():
     assert store.policy["last_observed_spend"] == 90
 
 
+def test_normal_observation_tracks_the_current_budget_reset_deadline():
+    current = key(spend=20, reset="2026-07-15T00:00:00+00:00")
+    policy = policy_for(current)
+    policy["original_budget_reset_at"] = "2026-07-14T00:00:00+00:00"
+    store = FakeStore(policy)
+    client = FakeClient(current)
+
+    BudgetFallbackController(store, client).run_policy("hash-1", NOW)
+
+    assert store.policy["original_budget_reset_at"] == current.budget_reset_at
+
+
 def test_98_percent_switches_and_verifies_fallback():
     current = key(spend=98)
     store = FakeStore(policy_for(current))
@@ -187,6 +199,24 @@ def test_98_percent_switches_and_verifies_fallback():
     assert store.policy["fallback_config_fingerprint"] == managed_fingerprint(
         client.current
     )
+
+
+def test_manual_fallback_rejects_an_already_active_fallback():
+    original = key(spend=98)
+    current = fallback_snapshot(original)
+    policy = policy_for(original, "FALLBACK_5_3")
+    policy["fallback_config_fingerprint"] = managed_fingerprint(current)
+    store = FakeStore(policy)
+    client = FakeClient(current)
+
+    result = BudgetFallbackController(store, client).force_fallback(
+        "hash-1", "admin", NOW
+    )
+
+    assert result.to_state == "FALLBACK_5_3"
+    assert result.changed is False
+    assert result.event_type == "invalid_action"
+    assert client.updates == []
 
 
 def test_blocked_key_enters_manual_hold_without_update():
@@ -265,6 +295,39 @@ def test_restore_sets_spend_zero_and_original_fields():
     assert client.updates[0]["budget_duration"] == "1d"
     assert client.updates[0]["spend"] == 0
     assert store.policy["original_budget_reset_at"] > NOW.isoformat()
+
+
+def test_manual_restore_rejects_normal_state_without_clearing_spend():
+    current = key(spend=65)
+    store = FakeStore(policy_for(current))
+    client = FakeClient(current)
+
+    result = BudgetFallbackController(store, client).force_restore(
+        "hash-1", "admin", NOW
+    )
+
+    assert result.to_state == "NORMAL"
+    assert result.changed is False
+    assert result.event_type == "invalid_action"
+    assert client.updates == []
+
+
+def test_recapture_rejects_active_fallback():
+    original = key(spend=98)
+    current = fallback_snapshot(original)
+    policy = policy_for(original, "FALLBACK_5_3")
+    policy["fallback_config_fingerprint"] = managed_fingerprint(current)
+    store = FakeStore(policy)
+    client = FakeClient(current)
+
+    try:
+        BudgetFallbackController(store, client).recapture("hash-1", "admin")
+    except ValueError as exc:
+        assert "fallback" in str(exc)
+    else:
+        raise AssertionError("recapture must reject an active fallback")
+
+    assert store.policy["state"] == "FALLBACK_5_3"
 
 
 def test_mismatched_fallback_fingerprint_enters_manual_hold():

@@ -9,7 +9,7 @@ import os
 import re
 import socket
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from . import database as db
 from .budget_fallback import BudgetFallbackController, TransitionResult
@@ -19,6 +19,7 @@ from .litellm_budget_client import LiteLLMBudgetClient
 
 logger = logging.getLogger("carher-admin")
 WORKER_TICK_SECONDS = 5
+POLICY_LEASE_SECONDS = 300
 _worker_task: asyncio.Task | None = None
 _worker_id = f"{socket.gethostname()}:{os.getpid()}"
 
@@ -53,8 +54,15 @@ def _policy_interval(policy: dict) -> int:
 
 
 def _is_due(policy: dict, now: datetime) -> bool:
+    next_retry = _parse_time(policy.get("next_retry_at"))
+    if next_retry is not None:
+        return now.astimezone(UTC) >= next_retry
     last = _parse_time(policy.get("last_observed_at"))
     return last is None or (now.astimezone(UTC) - last).total_seconds() >= _policy_interval(policy)
+
+
+def retry_delay_seconds(retry_count: int) -> int:
+    return min(300, 5 * (2 ** max(0, retry_count - 1)))
 
 
 def _sanitize(value: Exception | str) -> str:
@@ -80,13 +88,15 @@ async def run_budget_fallback_cycle(
         if not _is_due(policy, now):
             continue
         key_id = policy["key_id"]
-        if not store.acquire_lease(key_id, _worker_id, now, 30):
+        if not store.acquire_lease(key_id, _worker_id, now, POLICY_LEASE_SECONDS):
             continue
         try:
             try:
                 result = await asyncio.to_thread(controller.run_policy, key_id, now)
             except Exception as exc:
                 error = _sanitize(exc)
+                store.update_policy(key_id, last_error=error)
+                store.append_event(key_id, "worker_failed", {"error": error})
                 result = TransitionResult(
                     key_id,
                     policy.get("state") or "",
@@ -97,6 +107,16 @@ async def run_budget_fallback_cycle(
                 )
                 logger.error("Budget fallback worker failed for %s: %s", key_id, error)
             results.append(result)
+            if result.event_type in {"switch_failed", "restore_failed", "worker_failed", "fallback_unhealthy"}:
+                retry_count = int(policy.get("retry_count") or 0) + 1
+                delay = retry_delay_seconds(retry_count)
+                store.update_policy(
+                    key_id,
+                    retry_count=retry_count,
+                    next_retry_at=(now + timedelta(seconds=delay)).isoformat(),
+                )
+            else:
+                store.update_policy(key_id, retry_count=0, next_retry_at="")
             notify_transition(result)
         finally:
             store.release_lease(key_id, _worker_id)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 import urllib.parse
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -12,6 +13,7 @@ from . import litellm_ops
 
 
 FALLBACK_MODEL_GROUP = "chatgpt-budget-fallback-gpt-5.3"
+FALLBACK_HEALTH_CACHE_SECONDS = 60
 
 
 class Transport(Protocol):
@@ -51,6 +53,9 @@ class ModelHealth:
     zero_cost: bool
     deployment_count: int
     error: str = ""
+
+
+_fallback_health_cache: tuple[float, ModelHealth] | None = None
 
 
 def _sanitize_error(value: Exception | str) -> str:
@@ -150,12 +155,21 @@ class LiteLLMBudgetClient:
         return self.get_key(key_id)
 
     def check_fallback_model(self) -> ModelHealth:
+        global _fallback_health_cache
+        use_cache = isinstance(self.transport, _DefaultTransport)
+        if use_cache and _fallback_health_cache is not None:
+            cached_at, cached_health = _fallback_health_cache
+            if time.monotonic() - cached_at < FALLBACK_HEALTH_CACHE_SECONDS:
+                return cached_health
         try:
             payload = self._request("GET", "/v1/model/info")
             rows = payload.get("data", payload) if isinstance(payload, dict) else payload
             matches = [row for row in (rows or []) if row.get("model_name") == FALLBACK_MODEL_GROUP]
             if not matches:
-                return ModelHealth(False, False, 0, "fallback model group not found")
+                result = ModelHealth(False, False, 0, "fallback model group not found")
+                if use_cache:
+                    _fallback_health_cache = (time.monotonic(), result)
+                return result
             required = (
                 "input_cost_per_token",
                 "output_cost_per_token",
@@ -165,6 +179,32 @@ class LiteLLMBudgetClient:
                 all(field in (row.get("litellm_params") or {}) and float(row["litellm_params"][field]) == 0 for field in required)
                 for row in matches
             )
-            return ModelHealth(True, zero_cost, len(matches), "" if zero_cost else "fallback cost is not zero")
+            if not zero_cost:
+                result = ModelHealth(True, False, len(matches), "fallback cost is not zero")
+                if use_cache:
+                    _fallback_health_cache = (time.monotonic(), result)
+                return result
+            health_path = "/health?model=" + urllib.parse.quote(
+                FALLBACK_MODEL_GROUP, safe=""
+            )
+            health_payload = self._request("GET", health_path, timeout=45)
+            healthy_count = int(health_payload.get("healthy_count") or 0)
+            if healthy_count <= 0:
+                result = ModelHealth(
+                    False,
+                    True,
+                    0,
+                    "fallback model group has no healthy deployments",
+                )
+                if use_cache:
+                    _fallback_health_cache = (time.monotonic(), result)
+                return result
+            result = ModelHealth(True, True, healthy_count)
+            if use_cache:
+                _fallback_health_cache = (time.monotonic(), result)
+            return result
         except LiteLLMBudgetError as exc:
-            return ModelHealth(False, False, 0, str(exc))
+            result = ModelHealth(False, False, 0, str(exc))
+            if use_cache:
+                _fallback_health_cache = (time.monotonic(), result)
+            return result

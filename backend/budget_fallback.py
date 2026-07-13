@@ -140,6 +140,15 @@ class BudgetFallbackController:
         policy = self.store.get_policy(key_id)
         if policy is None:
             raise KeyError(key_id)
+        if policy["state"] != "NORMAL":
+            return TransitionResult(
+                key_id,
+                policy["state"],
+                policy["state"],
+                False,
+                "invalid_action",
+                "fallback is only allowed from NORMAL",
+            )
         return self._switch(policy, now, "manual_switch", actor)
 
     def force_restore(
@@ -148,10 +157,32 @@ class BudgetFallbackController:
         policy = self.store.get_policy(key_id)
         if policy is None:
             raise KeyError(key_id)
+        if policy["state"] not in {"FALLBACK_PENDING", "FALLBACK_5_3", "RESTORING"}:
+            return TransitionResult(
+                key_id,
+                policy["state"],
+                policy["state"],
+                False,
+                "invalid_action",
+                "restore is only allowed while fallback is active",
+            )
         return self._restore(policy, now, "manual_restore", actor, require_due=False)
 
     def recapture(self, key_id: str, actor: str) -> dict:
+        policy = self.store.get_policy(key_id)
+        if policy is None:
+            raise KeyError(key_id)
+        if policy["state"] not in {"NORMAL", "MANUAL_HOLD"}:
+            raise ValueError("cannot recapture while fallback is active")
         current = self.client.get_key(key_id)
+        if (
+            current.max_budget is None
+            or current.max_budget <= 0
+            or not current.budget_duration
+            or _parse_time(current.budget_reset_at) is None
+            or not public_generation_models(current)
+        ):
+            raise ValueError("current key is not a valid periodic-budget baseline")
         updated = self.store.update_policy(
             key_id,
             key_alias=current.key_alias,
@@ -175,11 +206,13 @@ class BudgetFallbackController:
         return updated
 
     def _observe(self, policy, current: KeySnapshot, now: datetime) -> None:
-        self.store.update_policy(
-            policy["key_id"],
-            last_observed_spend=current.spend,
-            last_observed_at=now.astimezone(UTC).isoformat(),
-        )
+        changes = {
+            "last_observed_spend": current.spend,
+            "last_observed_at": now.astimezone(UTC).isoformat(),
+        }
+        if policy["state"] == "NORMAL" and current.budget_reset_at:
+            changes["original_budget_reset_at"] = current.budget_reset_at
+        self.store.update_policy(policy["key_id"], **changes)
 
     def _manual_hold(self, policy, error: str, current=None) -> TransitionResult:
         from_state = policy["state"]

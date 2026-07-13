@@ -43,6 +43,8 @@ _UPDATABLE_FIELDS = {
     "last_observed_spend",
     "last_observed_at",
     "last_error",
+    "retry_count",
+    "next_retry_at",
     "automation_paused",
     "updated_by",
 }
@@ -119,10 +121,10 @@ class BudgetFallbackStore:
                     original_budget_duration, original_budget_reset_at,
                     original_blocked, original_config_fingerprint,
                     fallback_config_fingerprint, fallback_entered_at,
-                    last_observed_spend, last_observed_at, last_error,
+                    last_observed_spend, last_observed_at, last_error, retry_count, next_retry_at,
                     automation_paused, lease_owner, lease_expires_at,
                     created_by, updated_by, created_at, updated_at
-                ) VALUES (?, ?, 1, 'NORMAL', 98, ?, ?, ?, ?, ?, ?, ?, '', '', 0, '', '', 0, '', '', ?, ?, ?, ?)
+                ) VALUES (?, ?, 1, 'NORMAL', 98, ?, ?, ?, ?, ?, ?, ?, '', '', 0, '', '', 0, '', 0, '', '', ?, ?, ?, ?)
                 ON CONFLICT(key_id) DO UPDATE SET
                     key_alias = excluded.key_alias,
                     enabled = 1,
@@ -138,6 +140,8 @@ class BudgetFallbackStore:
                     fallback_config_fingerprint = '',
                     fallback_entered_at = '',
                     last_error = '',
+                    retry_count = 0,
+                    next_retry_at = '',
                     automation_paused = 0,
                     updated_by = excluded.updated_by,
                     updated_at = excluded.updated_at

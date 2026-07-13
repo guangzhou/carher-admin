@@ -22,6 +22,18 @@ export function canEnable(row) {
   return Boolean(row?.eligible) && !row?.enabled;
 }
 
+export function canFallback(row) {
+  return Boolean(row?.enabled) && row?.state === "NORMAL";
+}
+
+export function canRestore(row) {
+  return Boolean(row?.enabled) && ["FALLBACK_PENDING", "FALLBACK_5_3", "RESTORING"].includes(row?.state);
+}
+
+export function canRecapture(row) {
+  return Boolean(row?.enabled) && ["NORMAL", "MANUAL_HOLD"].includes(row?.state);
+}
+
 export function formatResetCountdown(resetAt, now = new Date()) {
   if (!resetAt) return "未提供";
   const target = new Date(resetAt);

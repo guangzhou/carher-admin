@@ -55,11 +55,15 @@ def test_update_policy_round_trips_json_and_boolean_fields(db):
         fallback_config_fingerprint="fallback-fingerprint",
         automation_paused=True,
         last_error="none",
+        retry_count=3,
+        next_retry_at="2026-07-13T00:05:00+00:00",
     )
 
     assert row["state"] == "FALLBACK_5_3"
     assert row["fallback_config_fingerprint"] == "fallback-fingerprint"
     assert row["automation_paused"] is True
+    assert row["retry_count"] == 3
+    assert row["next_retry_at"] == "2026-07-13T00:05:00+00:00"
 
 
 def test_lease_allows_only_one_owner_until_expiry(db):

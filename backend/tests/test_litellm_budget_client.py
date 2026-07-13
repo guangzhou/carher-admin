@@ -162,7 +162,8 @@ def test_fallback_health_requires_every_cost_field_to_be_zero():
                         },
                     },
                 ]
-            }
+            },
+            {"healthy_count": 2, "unhealthy_count": 0},
         ]
     )
 
@@ -171,6 +172,7 @@ def test_fallback_health_requires_every_cost_field_to_be_zero():
     assert health.available is True
     assert health.zero_cost is True
     assert health.deployment_count == 2
+    assert transport.calls[1][1] == f"/health?model={FALLBACK_MODEL_GROUP}"
 
 
 def test_fallback_health_rejects_nonzero_or_missing_costs():
@@ -194,6 +196,33 @@ def test_fallback_health_rejects_nonzero_or_missing_costs():
 
     assert health.available is True
     assert health.zero_cost is False
+
+
+def test_fallback_health_rejects_a_configured_group_with_no_healthy_deployment():
+    transport = FakeTransport(
+        [
+            {
+                "data": [
+                    {
+                        "model_name": FALLBACK_MODEL_GROUP,
+                        "litellm_params": {
+                            "input_cost_per_token": 0,
+                            "output_cost_per_token": 0,
+                            "cache_read_input_token_cost": 0,
+                        },
+                    }
+                ]
+            },
+            {"healthy_count": 0, "unhealthy_count": 1},
+        ]
+    )
+
+    health = LiteLLMBudgetClient(transport).check_fallback_model()
+
+    assert health.available is False
+    assert health.zero_cost is True
+    assert health.deployment_count == 0
+    assert "healthy" in health.error
 
 
 def test_transport_errors_are_sanitized():

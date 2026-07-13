@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import UTC, datetime
+from contextlib import contextmanager, nullcontext
+import os
+import socket
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -24,6 +28,7 @@ from .models import (
 
 
 router = APIRouter(prefix="/api/litellm/budget-fallback", tags=["litellm"])
+ACTION_LEASE_SECONDS = 300
 
 
 def get_budget_store() -> BudgetFallbackStore:
@@ -44,6 +49,19 @@ def get_budget_controller(
 def _actor(request: Request) -> str:
     auth = getattr(request.state, "auth", None) or {}
     return str(auth.get("sub") or request.headers.get("x-test-actor") or "admin")
+
+
+@contextmanager
+def _policy_lease(store: BudgetFallbackStore, key_id: str):
+    owner = f"api:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex}"
+    if not store.acquire_lease(
+        key_id, owner, datetime.now(UTC), ACTION_LEASE_SECONDS
+    ):
+        raise HTTPException(409, "policy is being updated; retry shortly")
+    try:
+        yield
+    finally:
+        store.release_lease(key_id, owner)
 
 
 def _eligibility(snapshot: KeySnapshot, health=None) -> tuple[bool, str]:
@@ -175,30 +193,33 @@ def enable_policy(
 ):
     if body.key_id != key_id:
         raise HTTPException(400, "path key_id does not match request body")
-    try:
-        snapshot = client.get_key(key_id)
-    except (LiteLLMBudgetError, StopIteration) as exc:
-        raise HTTPException(404, "LiteLLM key not found") from exc
-    health = client.check_fallback_model()
-    eligible, reason = _eligibility(snapshot, health)
-    if not eligible:
-        status = 409 if health.available and not health.zero_cost else 422
-        if not health.available:
-            status = 409
-        raise HTTPException(status, reason)
-    data = {
-        "key_id": snapshot.key_id,
-        "key_alias": snapshot.key_alias,
-        "models": list(snapshot.models),
-        "aliases": snapshot.aliases,
-        "max_budget": snapshot.max_budget,
-        "budget_duration": snapshot.budget_duration,
-        "budget_reset_at": snapshot.budget_reset_at,
-        "blocked": snapshot.blocked,
-        "spend": snapshot.spend,
-        "config_fingerprint": managed_fingerprint(snapshot),
-    }
-    policy = store.enable_policy(data, _actor(request))
+    existing = store.get_policy(key_id)
+    lease = _policy_lease(store, key_id) if existing is not None else nullcontext()
+    with lease:
+        try:
+            snapshot = client.get_key(key_id)
+        except (LiteLLMBudgetError, StopIteration) as exc:
+            raise HTTPException(404, "LiteLLM key not found") from exc
+        health = client.check_fallback_model()
+        eligible, reason = _eligibility(snapshot, health)
+        if not eligible:
+            status = 409 if health.available and not health.zero_cost else 422
+            if not health.available:
+                status = 409
+            raise HTTPException(status, reason)
+        data = {
+            "key_id": snapshot.key_id,
+            "key_alias": snapshot.key_alias,
+            "models": list(snapshot.models),
+            "aliases": snapshot.aliases,
+            "max_budget": snapshot.max_budget,
+            "budget_duration": snapshot.budget_duration,
+            "budget_reset_at": snapshot.budget_reset_at,
+            "blocked": snapshot.blocked,
+            "spend": snapshot.spend,
+            "config_fingerprint": managed_fingerprint(snapshot),
+        }
+        policy = store.enable_policy(data, _actor(request))
     return {"policy": policy, "live": _public_key_row(snapshot, policy)}
 
 
@@ -213,12 +234,13 @@ def disable_policy(
     policy = store.get_policy(key_id)
     if policy is None:
         raise HTTPException(404, "policy not found")
-    result = None
-    if body.restore and policy.get("state") in {"FALLBACK_PENDING", "FALLBACK_5_3", "RESTORING"}:
-        result = controller.force_restore(key_id, _actor(request), datetime.now(UTC))
-        if result.to_state != "NORMAL":
-            raise HTTPException(409, result.error or "restore did not complete")
-    policy = store.disable_policy(key_id, _actor(request))
+    with _policy_lease(store, key_id):
+        result = None
+        if body.restore and policy.get("state") in {"FALLBACK_PENDING", "FALLBACK_5_3", "RESTORING"}:
+            result = controller.force_restore(key_id, _actor(request), datetime.now(UTC))
+            if result.to_state != "NORMAL":
+                raise HTTPException(409, result.error or "restore did not complete")
+        policy = store.disable_policy(key_id, _actor(request))
     return {"policy": policy, "result": asdict(result) if result else None}
 
 
@@ -227,9 +249,18 @@ def force_fallback(
     key_id: str,
     body: BudgetFallbackActionRequest,
     request: Request,
+    store: BudgetFallbackStore = Depends(get_budget_store),
     controller: BudgetFallbackController = Depends(get_budget_controller),
 ):
-    result = controller.force_fallback(key_id, _actor(request), datetime.now(UTC))
+    policy = store.get_policy(key_id)
+    if policy is None:
+        raise HTTPException(404, "policy not found")
+    if policy.get("state") != "NORMAL":
+        raise HTTPException(409, "fallback is only allowed from NORMAL")
+    with _policy_lease(store, key_id):
+        result = controller.force_fallback(key_id, _actor(request), datetime.now(UTC))
+    if not result.changed and result.event_type == "invalid_action":
+        raise HTTPException(409, result.error)
     return {"result": asdict(result)}
 
 
@@ -238,9 +269,18 @@ def force_restore(
     key_id: str,
     body: BudgetFallbackActionRequest,
     request: Request,
+    store: BudgetFallbackStore = Depends(get_budget_store),
     controller: BudgetFallbackController = Depends(get_budget_controller),
 ):
-    result = controller.force_restore(key_id, _actor(request), datetime.now(UTC))
+    policy = store.get_policy(key_id)
+    if policy is None:
+        raise HTTPException(404, "policy not found")
+    if policy.get("state") not in {"FALLBACK_PENDING", "FALLBACK_5_3", "RESTORING"}:
+        raise HTTPException(409, "restore is only allowed while fallback is active")
+    with _policy_lease(store, key_id):
+        result = controller.force_restore(key_id, _actor(request), datetime.now(UTC))
+    if not result.changed and result.event_type == "invalid_action":
+        raise HTTPException(409, result.error)
     return {"result": asdict(result)}
 
 
@@ -249,9 +289,20 @@ def recapture(
     key_id: str,
     body: BudgetFallbackActionRequest,
     request: Request,
+    store: BudgetFallbackStore = Depends(get_budget_store),
     controller: BudgetFallbackController = Depends(get_budget_controller),
 ):
-    return {"policy": controller.recapture(key_id, _actor(request))}
+    policy = store.get_policy(key_id)
+    if policy is None:
+        raise HTTPException(404, "policy not found")
+    if policy.get("state") not in {"NORMAL", "MANUAL_HOLD"}:
+        raise HTTPException(409, "cannot recapture while fallback is active")
+    try:
+        with _policy_lease(store, key_id):
+            updated = controller.recapture(key_id, _actor(request))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"policy": updated}
 
 
 @router.post("/keys/{key_id}/pause")
@@ -262,7 +313,9 @@ def pause(
 ):
     if store.get_policy(key_id) is None:
         raise HTTPException(404, "policy not found")
-    return {"policy": store.update_policy(key_id, automation_paused=True, updated_by=_actor(request))}
+    with _policy_lease(store, key_id):
+        policy = store.update_policy(key_id, automation_paused=True, updated_by=_actor(request))
+    return {"policy": policy}
 
 
 @router.post("/keys/{key_id}/resume")
@@ -273,4 +326,6 @@ def resume(
 ):
     if store.get_policy(key_id) is None:
         raise HTTPException(404, "policy not found")
-    return {"policy": store.update_policy(key_id, automation_paused=False, updated_by=_actor(request))}
+    with _policy_lease(store, key_id):
+        policy = store.update_policy(key_id, automation_paused=False, updated_by=_actor(request))
+    return {"policy": policy}

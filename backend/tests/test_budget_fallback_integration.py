@@ -54,6 +54,8 @@ class StatefulLiteLLM:
                     }
                 ]
             }
+        if path == f"/health?model={FALLBACK_MODEL_GROUP}":
+            return {"healthy_count": 1, "unhealthy_count": 0}
         raise AssertionError(f"unexpected request: {method} {path}")
 
     def simulate_fallback_usage(self, tokens: int):

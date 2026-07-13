@@ -11,6 +11,7 @@ import logging
 import os
 import urllib.parse
 import urllib.request
+import urllib.error
 import json
 from typing import Any
 
@@ -124,25 +125,36 @@ def _build_key_payload(uid: int, name: str = "", route_policy: str | None = None
     }
 
 
-def _post_json(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+def request_json(
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    timeout: int = 15,
+) -> Any:
     if not LITELLM_MASTER_KEY:
-        logger.error("LITELLM_MASTER_KEY is not configured")
-        return None
-    body = json.dumps(payload).encode()
+        raise RuntimeError("LITELLM_MASTER_KEY is not configured")
+    body = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(
         f"{LITELLM_PROXY_URL}{path}",
         data=body,
-        method="POST",
+        method=method,
         headers={
             "Authorization": f"Bearer {LITELLM_MASTER_KEY}",
             "Content-Type": "application/json",
         },
     )
-    resp = urllib.request.urlopen(req, timeout=10)
-    raw = resp.read()
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
     if not raw:
         return {}
     return json.loads(raw)
+
+
+def _post_json(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    if not LITELLM_MASTER_KEY:
+        logger.error("LITELLM_MASTER_KEY is not configured")
+        return None
+    return request_json("POST", path, payload, timeout=10)
 
 
 def generate_key(uid: int, name: str = "", route_policy: str | None = None) -> str | None:

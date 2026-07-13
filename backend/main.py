@@ -42,6 +42,8 @@ from . import deployer
 from . import cloudflare_ops
 from . import litellm_ops
 from . import fusion_diagnosis
+from .budget_fallback_api import router as budget_fallback_router
+from .budget_fallback_worker import start_budget_fallback_worker
 from .models import (
     HerAddRequest, HerBatchAction, HerBatchImport, HerUpdateRequest,
     DeployGroupCreate, DeployGroupUpdate, SetDeployGroupRequest,
@@ -164,10 +166,16 @@ def _sync_cloudflare_for_batch(instances: list[tuple[int, str]]) -> dict[int, di
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    k8s_ops.init_k8s()
+    skip_k8s = os.environ.get("CARHER_ADMIN_SKIP_K8S", "").lower() in {
+        "1", "true", "yes",
+    }
+    if not skip_k8s:
+        k8s_ops.init_k8s()
     db.init_db()
-    await sync_worker.start_workers()
-    metrics_mod.start_sampler(db)
+    start_budget_fallback_worker()
+    if not skip_k8s:
+        await sync_worker.start_workers()
+        metrics_mod.start_sampler(db)
     logger.info("CarHer Admin started (DB + K8s + sync workers + metrics sampler)")
     yield
 
@@ -179,6 +187,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+app.include_router(budget_fallback_router)
 
 ALLOWED_ORIGINS = os.environ.get("CORS_ALLOW_ORIGINS", "https://admin.carher.net").split(",")
 
@@ -287,6 +296,7 @@ async def auth_middleware(request: Request, call_next):
     if not claims:
         return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 
+    request.state.auth = claims
     return await call_next(request)
 
 

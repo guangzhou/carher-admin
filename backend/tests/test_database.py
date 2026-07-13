@@ -32,6 +32,8 @@ class TestInitDb:
             "her_instances", "deploys", "audit_log",
             "deploy_groups", "acr_image_tags", "metrics_history",
             "branch_rules", "settings", "schema_version",
+            "litellm_budget_fallback_policies",
+            "litellm_budget_fallback_events",
         }
         assert required.issubset(tables)
 

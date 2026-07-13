@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.worktrees/
 
 # Build output
 frontend/dist/

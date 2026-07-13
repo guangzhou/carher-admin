@@ -75,9 +75,11 @@ spec:
             - name: LITELLM_MASTER_KEY
               valueFrom:
                 secretKeyRef:
-                  name: litellm-secrets
-                  key: LITELLM_MASTER_KEY
+                  name: carher-admin-secrets
+                  key: litellm-master-key
                   optional: true
+            - name: LITELLM_PROXY_URL
+              value: "https://cc.auto-link.com.cn/pro"
           resources:
             requests:
               cpu: "100m"

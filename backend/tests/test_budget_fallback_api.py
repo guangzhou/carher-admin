@@ -40,7 +40,7 @@ def snapshot(
 
 class FakeClient:
     def __init__(self, rows=None, health=None):
-        self.rows = rows or [snapshot()]
+        self.rows = [snapshot()] if rows is None else rows
         self.health = health or ModelHealth(True, True, 2)
 
     def list_budgeted_keys(self):
@@ -144,6 +144,39 @@ def test_list_never_returns_plaintext_token():
     assert "sk-" not in str(body)
 
 
+def test_list_keeps_fallback_policy_visible_when_live_budget_is_temporarily_cleared():
+    fallback = replace(
+        snapshot(),
+        models=("gpt-5.5", "chatgpt-budget-fallback-gpt-5.3"),
+        aliases={"gpt-5.5": "chatgpt-budget-fallback-gpt-5.3"},
+        max_budget=None,
+        budget_duration=None,
+        budget_reset_at=None,
+    )
+    client = FakeClient(rows=[])
+    client.get_key = lambda key_id: fallback
+    store = FakeStore()
+    store.policies["hash-1"] = {
+        "key_id": "hash-1",
+        "key_alias": "cursor-alice",
+        "enabled": True,
+        "state": "FALLBACK_5_3",
+        "threshold_percent": 98,
+        "original_max_budget": 100,
+        "original_budget_duration": "1d",
+        "original_budget_reset_at": (NOW + timedelta(hours=2)).isoformat(),
+        "automation_paused": False,
+        "last_error": "",
+    }
+    http, _, _ = make_client(client, store)
+
+    response = http.get("/api/litellm/budget-fallback/keys")
+
+    assert response.status_code == 200
+    assert response.json()["keys"][0]["state"] == "FALLBACK_5_3"
+    assert response.json()["keys"][0]["max_budget"] == 100
+
+
 def test_enable_captures_periodic_key_baseline():
     http, _, store = make_client()
 
@@ -156,6 +189,16 @@ def test_enable_captures_periodic_key_baseline():
 
 def test_enable_rejects_non_periodic_key_with_422():
     http, _, _ = make_client(FakeClient([snapshot(duration=None)]))
+
+    response = enable(http)
+
+    assert response.status_code == 422
+
+
+def test_enable_rejects_expired_reset_time_with_422():
+    http, _, _ = make_client(
+        FakeClient([snapshot(reset=(NOW - timedelta(minutes=1)).isoformat())])
+    )
 
     response = enable(http)
 
@@ -214,3 +257,21 @@ def test_event_detail_is_returned_redacted_by_store_contract():
 
     assert response.status_code == 200
     assert "secret" not in str(response.json()).lower()
+
+
+def test_metrics_endpoint_merges_policy_metrics_and_fallback_health():
+    http, client, store = make_client()
+    store.metrics_snapshot = lambda now=None: {
+        "enabled_policies": 2,
+        "states": {"NORMAL": 1, "FALLBACK_5_3": 1},
+        "transitions": {"automatic_switch": 3},
+        "failures": 1,
+        "current_fallback_seconds": 60,
+        "average_restore_delay_seconds": 4,
+    }
+
+    response = http.get("/api/litellm/budget-fallback/metrics")
+
+    assert response.status_code == 200
+    assert response.json()["enabled_policies"] == 2
+    assert response.json()["fallback_health"]["zero_cost"] is True

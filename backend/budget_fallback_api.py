@@ -59,6 +59,8 @@ def _eligibility(snapshot: KeySnapshot, health=None) -> tuple[bool, str]:
         return False, "预算重置时间格式无效"
     if reset_at.tzinfo is None:
         return False, "预算重置时间缺少时区"
+    if reset_at.astimezone(UTC) <= datetime.now(UTC):
+        return False, "预算重置时间已经过期"
     if snapshot.blocked:
         return False, "Key 已被手动停用"
     if snapshot.key_alias.lower() in {"master", "admin", "litellm-master"}:
@@ -101,6 +103,17 @@ def _public_key_row(snapshot: KeySnapshot, policy: dict | None) -> dict:
             "last_observed_at",
         ):
             row[field] = policy.get(field, row.get(field))
+        if snapshot.max_budget is None:
+            row["max_budget"] = policy.get("original_max_budget")
+            row["budget_duration"] = policy.get("original_budget_duration")
+            row["budget_reset_at"] = policy.get("original_budget_reset_at")
+            original_budget = float(policy.get("original_max_budget") or 0)
+            row["utilization_percent"] = round(
+                float(policy.get("last_observed_spend") or snapshot.spend or 0)
+                / original_budget
+                * 100,
+                2,
+            ) if original_budget > 0 else 0
     return row
 
 
@@ -112,8 +125,19 @@ def list_keys(
     try:
         snapshots = client.list_budgeted_keys()
         policies = {row["key_id"]: row for row in store.list_policies()}
+        snapshots_by_id = {row.key_id: row for row in snapshots}
+        for key_id, policy in policies.items():
+            if key_id in snapshots_by_id:
+                continue
+            try:
+                snapshots_by_id[key_id] = client.get_key(key_id)
+            except LiteLLMBudgetError:
+                continue
         return {
-            "keys": [_public_key_row(row, policies.get(row.key_id)) for row in snapshots],
+            "keys": [
+                _public_key_row(row, policies.get(row.key_id))
+                for row in sorted(snapshots_by_id.values(), key=lambda item: item.key_alias)
+            ],
             "fallback_health": asdict(client.check_fallback_model()),
             "observed_at": datetime.now(UTC).isoformat(),
         }
@@ -128,6 +152,17 @@ def list_events(
     store: BudgetFallbackStore = Depends(get_budget_store),
 ):
     return {"events": store.list_events(key_id, limit)}
+
+
+@router.get("/metrics")
+def metrics(
+    store: BudgetFallbackStore = Depends(get_budget_store),
+    client: LiteLLMBudgetClient = Depends(get_budget_client),
+):
+    result = store.metrics_snapshot()
+    result["fallback_health"] = asdict(client.check_fallback_model())
+    result["observed_at"] = datetime.now(UTC).isoformat()
+    return result
 
 
 @router.post("/keys/{key_id}/enable")

@@ -295,6 +295,23 @@ class BudgetFallbackController:
         self._observe(policy, current, now)
         if managed_fingerprint(current) != policy["fallback_config_fingerprint"]:
             return self._manual_hold(policy, "fallback key configuration changed", current)
+        health = self.client.check_fallback_model()
+        if not health.available or not health.zero_cost:
+            error = health.error or "fallback model is unavailable or not zero-cost"
+            self.store.update_policy(policy["key_id"], last_error=error)
+            self.store.append_event(
+                policy["key_id"], "fallback_unhealthy", {"error": error}
+            )
+            return TransitionResult(
+                policy["key_id"],
+                "FALLBACK_5_3",
+                "FALLBACK_5_3",
+                False,
+                "fallback_unhealthy",
+                error,
+            )
+        if policy.get("last_error"):
+            self.store.update_policy(policy["key_id"], last_error="")
         reset_at = _parse_time(policy.get("original_budget_reset_at"))
         if reset_at is None:
             return self._manual_hold(policy, "saved reset time is missing", current)
@@ -346,27 +363,13 @@ class BudgetFallbackController:
                 )
             updated = observed
         if managed_fingerprint(updated) != policy["original_config_fingerprint"]:
-            error = "restored configuration verification mismatch"
-            self.store.update_policy(
-                policy["key_id"], state="FALLBACK_5_3", last_error=error
-            )
-            self.store.append_event(
-                policy["key_id"], "restore_failed", {"error": error}
-            )
-            return TransitionResult(
-                policy["key_id"], from_state, "FALLBACK_5_3", False, "restore_failed", error
+            return self._restore_failed_cost_safe(
+                policy, from_state, updated, "restored configuration verification mismatch"
             )
         new_reset = _parse_time(updated.budget_reset_at)
         if updated.spend > 0.000001 or new_reset is None or new_reset <= now.astimezone(UTC):
-            error = "restored budget did not start a new period"
-            self.store.update_policy(
-                policy["key_id"], state="FALLBACK_5_3", last_error=error
-            )
-            self.store.append_event(
-                policy["key_id"], "restore_failed", {"error": error}
-            )
-            return TransitionResult(
-                policy["key_id"], from_state, "FALLBACK_5_3", False, "restore_failed", error
+            return self._restore_failed_cost_safe(
+                policy, from_state, updated, "restored budget did not start a new period"
             )
         self.store.update_policy(
             policy["key_id"],
@@ -382,7 +385,50 @@ class BudgetFallbackController:
         self.store.append_event(
             policy["key_id"],
             event_type,
-            {"after": _managed_fields(updated), "budget_reset_at": updated.budget_reset_at},
+            {
+                "after": _managed_fields(updated),
+                "budget_reset_at": updated.budget_reset_at,
+                "restore_delay_seconds": max(
+                    0,
+                    (now.astimezone(UTC) - reset_at).total_seconds(),
+                ) if reset_at else 0,
+                "fallback_duration_seconds": max(
+                    0,
+                    (
+                        now.astimezone(UTC)
+                        - (_parse_time(policy.get("fallback_entered_at")) or now.astimezone(UTC))
+                    ).total_seconds(),
+                ),
+            },
             actor,
         )
         return TransitionResult(policy["key_id"], from_state, "NORMAL", True, event_type)
+
+    def _restore_failed_cost_safe(
+        self,
+        policy,
+        from_state: str,
+        observed: KeySnapshot,
+        error: str,
+    ) -> TransitionResult:
+        try:
+            fields = fallback_fields(observed)
+            rolled_back = self.client.update_key(policy["key_id"], **fields)
+            if managed_fingerprint(rolled_back) != policy["fallback_config_fingerprint"]:
+                error += "; fallback rollback verification mismatch"
+        except Exception as exc:
+            error += f"; fallback rollback failed: {exc}"
+        self.store.update_policy(
+            policy["key_id"], state="FALLBACK_5_3", last_error=error
+        )
+        self.store.append_event(
+            policy["key_id"], "restore_failed", {"error": error}
+        )
+        return TransitionResult(
+            policy["key_id"],
+            from_state,
+            "FALLBACK_5_3",
+            False,
+            "restore_failed",
+            error,
+        )

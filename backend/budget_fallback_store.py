@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -263,3 +264,42 @@ class BudgetFallbackStore:
             )
         if cursor.rowcount:
             self.db.backup_to_nas()
+
+    def metrics_snapshot(self, now: datetime | None = None) -> dict:
+        now = (now or datetime.now(UTC)).astimezone(UTC)
+        policies = self.list_policies()
+        enabled = [row for row in policies if row["enabled"]]
+        states = Counter(row["state"] for row in enabled)
+        with self.db.get_db() as conn:
+            rows = conn.execute(
+                "SELECT event_type, detail FROM litellm_budget_fallback_events"
+            ).fetchall()
+        transitions = Counter()
+        failures = 0
+        restore_delays = []
+        for row in rows:
+            event_type = row["event_type"]
+            transitions[event_type] += 1
+            if event_type in {"switch_failed", "restore_failed", "worker_failed", "fallback_unhealthy"}:
+                failures += 1
+            detail = json.loads(row["detail"] or "{}")
+            if detail.get("restore_delay_seconds") is not None:
+                restore_delays.append(float(detail["restore_delay_seconds"]))
+        current_fallback_seconds = 0.0
+        for policy in enabled:
+            if policy["state"] != "FALLBACK_5_3" or not policy.get("fallback_entered_at"):
+                continue
+            entered = datetime.fromisoformat(policy["fallback_entered_at"])
+            if entered.tzinfo is None:
+                entered = entered.replace(tzinfo=UTC)
+            current_fallback_seconds += max(0, (now - entered.astimezone(UTC)).total_seconds())
+        return {
+            "enabled_policies": len(enabled),
+            "states": dict(states),
+            "transitions": dict(transitions),
+            "failures": failures,
+            "current_fallback_seconds": round(current_fallback_seconds, 3),
+            "average_restore_delay_seconds": round(
+                sum(restore_delays) / len(restore_delays), 3
+            ) if restore_delays else 0,
+        }

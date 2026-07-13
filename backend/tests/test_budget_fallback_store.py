@@ -119,3 +119,29 @@ def test_disable_policy_keeps_saved_snapshot(db):
 
     assert row["enabled"] is False
     assert row["original_models"] == ["gpt-5.5", "gpt-5.4"]
+
+
+def test_metrics_snapshot_counts_states_events_and_fallback_age(db):
+    store = BudgetFallbackStore(db)
+    store.enable_policy(snapshot(), actor="admin")
+    store.update_policy(
+        "hash-1",
+        state="FALLBACK_5_3",
+        fallback_entered_at="2026-07-13T00:00:00+00:00",
+    )
+    store.append_event("hash-1", "automatic_switch", {})
+    store.append_event(
+        "hash-1",
+        "automatic_restore",
+        {"restore_delay_seconds": 12, "fallback_duration_seconds": 3600},
+    )
+    store.append_event("hash-1", "restore_failed", {"error": "failed"})
+
+    metrics = store.metrics_snapshot(datetime(2026, 7, 13, 1, tzinfo=UTC))
+
+    assert metrics["enabled_policies"] == 1
+    assert metrics["states"] == {"FALLBACK_5_3": 1}
+    assert metrics["transitions"]["automatic_switch"] == 1
+    assert metrics["failures"] == 1
+    assert metrics["current_fallback_seconds"] == 3600
+    assert metrics["average_restore_delay_seconds"] == 12

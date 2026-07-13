@@ -229,6 +229,23 @@ def test_fallback_waits_until_saved_reset_deadline():
     assert client.updates == []
 
 
+def test_unhealthy_fallback_stays_cost_safe_and_reports_event():
+    original = key(spend=98)
+    current = fallback_snapshot(original)
+    policy = policy_for(original, "FALLBACK_5_3")
+    policy["fallback_config_fingerprint"] = managed_fingerprint(current)
+    store = FakeStore(policy)
+    client = FakeClient(current, ModelHealth(False, False, 0, "upstream missing"))
+
+    result = BudgetFallbackController(store, client).run_policy("hash-1", NOW)
+
+    assert result.to_state == "FALLBACK_5_3"
+    assert result.event_type == "fallback_unhealthy"
+    assert "upstream missing" in result.error
+    assert client.updates == []
+    assert store.policy["last_error"] == "upstream missing"
+
+
 def test_restore_sets_spend_zero_and_original_fields():
     original = key(spend=98)
     current = fallback_snapshot(original)
@@ -299,6 +316,32 @@ def test_failed_restore_keeps_fallback_state():
 
     assert result.to_state == "FALLBACK_5_3"
     assert result.event_type == "restore_failed"
+
+
+def test_invalid_new_budget_period_rolls_live_key_back_to_fallback():
+    original = key(spend=98)
+    current = fallback_snapshot(original)
+    policy = policy_for(original, "FALLBACK_5_3")
+    policy["fallback_config_fingerprint"] = managed_fingerprint(current)
+    policy["original_budget_reset_at"] = (NOW - timedelta(seconds=1)).isoformat()
+    store = FakeStore(policy)
+    client = FakeClient(current)
+
+    restored_without_new_period = replace(
+        original,
+        spend=0,
+        budget_reset_at=(NOW - timedelta(seconds=1)).isoformat(),
+    )
+    client.after_update = restored_without_new_period
+
+    result = BudgetFallbackController(store, client).run_policy("hash-1", NOW)
+
+    assert result.to_state == "FALLBACK_5_3"
+    assert result.event_type == "restore_failed"
+    assert len(client.updates) == 2
+    assert client.updates[1]["max_budget"] is None
+    assert set(client.updates[1]["aliases"].values()) == {FALLBACK_MODEL_GROUP}
+    assert managed_fingerprint(client.current) == policy["fallback_config_fingerprint"]
 
 
 def test_restart_from_fallback_pending_finishes_switch():

@@ -140,4 +140,15 @@ export const api = {
   // AI Agent
   sendAgentMessage: (message, context = null, dryRun = false) => request("/agent", { method: "POST", body: JSON.stringify({ message, context, dry_run: dryRun }) }),
   getAgentCapabilities: () => request("/agent/capabilities"),
+
+  // LiteLLM budget fallback
+  listBudgetFallbackKeys: () => request("/litellm/budget-fallback/keys"),
+  getBudgetFallbackEvents: (keyId) => request(`/litellm/budget-fallback/keys/${encodeURIComponent(keyId)}/events`),
+  enableBudgetFallback: (keyId) => request(`/litellm/budget-fallback/keys/${encodeURIComponent(keyId)}/enable`, { method: "POST", body: JSON.stringify({ key_id: keyId }) }),
+  disableBudgetFallback: (keyId, restore) => request(`/litellm/budget-fallback/keys/${encodeURIComponent(keyId)}/disable`, { method: "POST", body: JSON.stringify({ restore }) }),
+  forceBudgetFallback: (keyId, reason = "") => request(`/litellm/budget-fallback/keys/${encodeURIComponent(keyId)}/fallback`, { method: "POST", body: JSON.stringify({ reason }) }),
+  restoreBudgetFallback: (keyId, reason = "") => request(`/litellm/budget-fallback/keys/${encodeURIComponent(keyId)}/restore`, { method: "POST", body: JSON.stringify({ reason }) }),
+  recaptureBudgetFallback: (keyId, reason = "") => request(`/litellm/budget-fallback/keys/${encodeURIComponent(keyId)}/recapture`, { method: "POST", body: JSON.stringify({ reason }) }),
+  pauseBudgetFallback: (keyId) => request(`/litellm/budget-fallback/keys/${encodeURIComponent(keyId)}/pause`, { method: "POST" }),
+  resumeBudgetFallback: (keyId) => request(`/litellm/budget-fallback/keys/${encodeURIComponent(keyId)}/resume`, { method: "POST" }),
 };

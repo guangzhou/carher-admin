@@ -21,27 +21,13 @@ def load_litellm_config() -> dict:
     return yaml.safe_load(configmap["data"]["config.yaml"])
 
 
-def test_budget_fallback_group_is_zero_cost_and_responses_only():
+def test_carher_proxy_does_not_declare_cross_cluster_budget_fallback_rows():
     config = load_litellm_config()
     rows = [
         row for row in config["model_list"] if row["model_name"] == FALLBACK_GROUP
     ]
 
-    assert rows
-    for row in rows:
-        params = row["litellm_params"]
-        assert params["model"] == "openai/chatgpt-gpt-5.3-codex-spark"
-        assert params["api_base"].endswith(
-            ".litellm-product.svc.cluster.local:4000"
-        )
-        assert ".carher.svc" not in params["api_base"]
-        assert params["input_cost_per_token"] == 0
-        assert params["output_cost_per_token"] == 0
-        assert params["cache_read_input_token_cost"] == 0
-        assert row["model_info"]["mode"] == "responses"
-
-    ids = [row["model_info"]["id"] for row in rows]
-    assert len(ids) == len(set(ids))
+    assert rows == []
 
 
 def test_budget_fallback_group_has_no_paid_router_fallback():

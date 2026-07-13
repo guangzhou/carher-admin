@@ -1,8 +1,13 @@
 from backend.litellm_budget_client import (
+    FALLBACK_HEALTH_CACHE_SECONDS,
     FALLBACK_MODEL_GROUP,
     LiteLLMBudgetClient,
     LiteLLMBudgetError,
 )
+
+
+def test_fallback_health_probe_is_cached_for_at_least_five_minutes():
+    assert FALLBACK_HEALTH_CACHE_SECONDS >= 300
 
 
 class FakeTransport:
@@ -16,6 +21,10 @@ class FakeTransport:
         if isinstance(response, Exception):
             raise response
         return response
+
+    def request_json_with_headers(self, method, path, payload=None, timeout=15):
+        response = self.request_json(method, path, payload, timeout)
+        return response, {"x-litellm-model-id": "budget-fallback/zk-18-gpt-5.3-codex"}
 
 
 def test_list_budgeted_keys_filters_periodic_positive_budgets():
@@ -163,7 +172,7 @@ def test_fallback_health_requires_every_cost_field_to_be_zero():
                     },
                 ]
             },
-            {"healthy_count": 2, "unhealthy_count": 0},
+            {"id": "chatcmpl-1", "choices": [{"message": {"content": "pong"}}]},
         ]
     )
 
@@ -172,7 +181,16 @@ def test_fallback_health_requires_every_cost_field_to_be_zero():
     assert health.available is True
     assert health.zero_cost is True
     assert health.deployment_count == 2
-    assert transport.calls[1][1] == f"/health?model={FALLBACK_MODEL_GROUP}"
+    assert transport.calls[1] == (
+        "POST",
+        "/v1/chat/completions",
+        {
+            "model": FALLBACK_MODEL_GROUP,
+            "messages": [{"role": "user", "content": "Reply exactly pong"}],
+            "max_tokens": 8,
+        },
+        45,
+    )
 
 
 def test_fallback_health_rejects_nonzero_or_missing_costs():
@@ -198,7 +216,7 @@ def test_fallback_health_rejects_nonzero_or_missing_costs():
     assert health.zero_cost is False
 
 
-def test_fallback_health_rejects_a_configured_group_with_no_healthy_deployment():
+def test_fallback_health_rejects_a_configured_group_when_probe_fails():
     transport = FakeTransport(
         [
             {
@@ -213,7 +231,7 @@ def test_fallback_health_rejects_a_configured_group_with_no_healthy_deployment()
                     }
                 ]
             },
-            {"healthy_count": 0, "unhealthy_count": 1},
+            LiteLLMBudgetError("No connected db"),
         ]
     )
 
@@ -222,7 +240,61 @@ def test_fallback_health_rejects_a_configured_group_with_no_healthy_deployment()
     assert health.available is False
     assert health.zero_cost is True
     assert health.deployment_count == 0
-    assert "healthy" in health.error
+    assert "No connected db" in health.error
+
+
+def test_fallback_health_rejects_wrong_probe_route():
+    transport = FakeTransport(
+        [
+            {
+                "data": [
+                    {
+                        "model_name": FALLBACK_MODEL_GROUP,
+                        "litellm_params": {
+                            "input_cost_per_token": 0,
+                            "output_cost_per_token": 0,
+                            "cache_read_input_token_cost": 0,
+                        },
+                    }
+                ]
+            },
+            {"id": "chatcmpl-1", "choices": [{"message": {"content": "pong"}}]},
+        ]
+    )
+    transport.request_json_with_headers = lambda *args, **kwargs: (
+        transport.request_json(*args, **kwargs),
+        {"x-litellm-model-id": "local/paid-fallback"},
+    )
+
+    health = LiteLLMBudgetClient(transport).check_fallback_model()
+
+    assert health.available is False
+    assert "unexpected deployment" in health.error
+
+
+def test_fallback_health_rejects_empty_choices():
+    transport = FakeTransport(
+        [
+            {
+                "data": [
+                    {
+                        "model_name": FALLBACK_MODEL_GROUP,
+                        "litellm_params": {
+                            "input_cost_per_token": 0,
+                            "output_cost_per_token": 0,
+                            "cache_read_input_token_cost": 0,
+                        },
+                    }
+                ]
+            },
+            {"id": "chatcmpl-1", "choices": []},
+        ]
+    )
+
+    health = LiteLLMBudgetClient(transport).check_fallback_model()
+
+    assert health.available is False
+    assert "choices" in health.error
 
 
 def test_transport_errors_are_sanitized():

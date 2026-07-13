@@ -54,9 +54,18 @@ class StatefulLiteLLM:
                     }
                 ]
             }
-        if path == f"/health?model={FALLBACK_MODEL_GROUP}":
-            return {"healthy_count": 1, "unhealthy_count": 0}
+        if path == "/v1/chat/completions":
+            assert payload["model"] == FALLBACK_MODEL_GROUP
+            return {
+                "id": "chatcmpl-health",
+                "choices": [{"message": {"content": "pong"}}],
+            }
         raise AssertionError(f"unexpected request: {method} {path}")
+
+    def request_json_with_headers(self, method, path, payload=None, timeout=15):
+        return self.request_json(method, path, payload, timeout), {
+            "x-litellm-model-id": "budget-fallback/zk-18-gpt-5.3-codex"
+        }
 
     def simulate_fallback_usage(self, tokens: int):
         assert set(self.row["aliases"].values()) == {FALLBACK_MODEL_GROUP}

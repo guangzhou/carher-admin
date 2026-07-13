@@ -150,6 +150,30 @@ def request_json(
     return json.loads(raw)
 
 
+def request_json_with_headers(
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    timeout: int = 15,
+) -> tuple[Any, dict[str, str]]:
+    if not LITELLM_MASTER_KEY:
+        raise RuntimeError("LITELLM_MASTER_KEY is not configured")
+    body = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        f"{LITELLM_PROXY_URL}{path}",
+        data=body,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {LITELLM_MASTER_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        headers = {key.lower(): value for key, value in resp.headers.items()}
+    return (json.loads(raw) if raw else {}), headers
+
+
 def _post_json(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     if not LITELLM_MASTER_KEY:
         logger.error("LITELLM_MASTER_KEY is not configured")

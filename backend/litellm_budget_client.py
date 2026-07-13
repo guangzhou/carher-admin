@@ -13,7 +13,7 @@ from . import litellm_ops
 
 
 FALLBACK_MODEL_GROUP = "chatgpt-budget-fallback-gpt-5.3"
-FALLBACK_HEALTH_CACHE_SECONDS = 60
+FALLBACK_HEALTH_CACHE_SECONDS = 300
 
 
 class Transport(Protocol):
@@ -25,9 +25,18 @@ class Transport(Protocol):
         timeout: int = 15,
     ) -> Any: ...
 
+    def request_json_with_headers(
+        self,
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        timeout: int = 15,
+    ) -> tuple[Any, dict[str, str]]: ...
+
 
 class _DefaultTransport:
     request_json = staticmethod(litellm_ops.request_json)
+    request_json_with_headers = staticmethod(litellm_ops.request_json_with_headers)
 
 
 class LiteLLMBudgetError(RuntimeError):
@@ -106,6 +115,17 @@ class LiteLLMBudgetClient:
         except Exception as exc:
             raise LiteLLMBudgetError(_sanitize_error(exc)) from exc
 
+    def _request_with_headers(
+        self, method: str, path: str, payload: dict | None = None, timeout: int = 15
+    ) -> tuple[Any, dict[str, str]]:
+        try:
+            request = getattr(self.transport, "request_json_with_headers", None)
+            if request is None:
+                return self.transport.request_json(method, path, payload, timeout), {}
+            return request(method, path, payload, timeout)
+        except Exception as exc:
+            raise LiteLLMBudgetError(_sanitize_error(exc)) from exc
+
     def list_budgeted_keys(self, limit: int = 2000) -> list[KeySnapshot]:
         payload = self._request("GET", f"/spend/keys?limit={int(limit)}")
         rows = payload.get("data", payload) if isinstance(payload, dict) else payload
@@ -154,10 +174,10 @@ class LiteLLMBudgetClient:
         self._request("POST", "/key/update", body, timeout=45)
         return self.get_key(key_id)
 
-    def check_fallback_model(self) -> ModelHealth:
+    def check_fallback_model(self, force_refresh: bool = False) -> ModelHealth:
         global _fallback_health_cache
         use_cache = isinstance(self.transport, _DefaultTransport)
-        if use_cache and _fallback_health_cache is not None:
+        if not force_refresh and use_cache and _fallback_health_cache is not None:
             cached_at, cached_health = _fallback_health_cache
             if time.monotonic() - cached_at < FALLBACK_HEALTH_CACHE_SECONDS:
                 return cached_health
@@ -184,22 +204,33 @@ class LiteLLMBudgetClient:
                 if use_cache:
                     _fallback_health_cache = (time.monotonic(), result)
                 return result
-            health_path = "/health?model=" + urllib.parse.quote(
-                FALLBACK_MODEL_GROUP, safe=""
-            )
-            health_payload = self._request("GET", health_path, timeout=45)
-            healthy_count = int(health_payload.get("healthy_count") or 0)
-            if healthy_count <= 0:
-                result = ModelHealth(
-                    False,
-                    True,
-                    0,
-                    "fallback model group has no healthy deployments",
+            try:
+                probe, headers = self._request_with_headers(
+                    "POST",
+                    "/v1/chat/completions",
+                    {
+                        "model": FALLBACK_MODEL_GROUP,
+                        "messages": [
+                            {"role": "user", "content": "Reply exactly pong"}
+                        ],
+                        "max_tokens": 8,
+                    },
+                    timeout=45,
                 )
+                choices = probe.get("choices") if isinstance(probe, dict) else None
+                if not choices:
+                    raise LiteLLMBudgetError("fallback probe returned no choices")
+                model_id = str(headers.get("x-litellm-model-id") or "")
+                if not model_id.startswith("budget-fallback/zk-"):
+                    raise LiteLLMBudgetError(
+                        f"fallback probe used unexpected deployment: {model_id or 'missing'}"
+                    )
+            except LiteLLMBudgetError as exc:
+                result = ModelHealth(False, True, 0, str(exc))
                 if use_cache:
                     _fallback_health_cache = (time.monotonic(), result)
                 return result
-            result = ModelHealth(True, True, healthy_count)
+            result = ModelHealth(True, True, len(matches))
             if use_cache:
                 _fallback_health_cache = (time.monotonic(), result)
             return result

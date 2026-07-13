@@ -89,7 +89,7 @@ export default function BudgetFallbackPage() {
         <p>Key 达到周期预算 98% 后，无感切换到隔离的零成本 GPT-5.3；周期重置后恢复原模型。</p></div>
       <div className={`budget-health ${data.fallback_health?.zero_cost ? "is-ok" : "is-bad"}`}>
         <span className="budget-health-dot" /><div><strong>{data.fallback_health?.zero_cost ? "5.3 零成本通道就绪" : "5.3 通道未就绪"}</strong>
-          <small>{data.fallback_health?.deployment_count || 0} 个运行副本</small></div></div>
+          <small>{data.fallback_health?.deployment_count || 0} 个注册成员</small></div></div>
     </header>
     <div className="budget-summary">
       <Metric label="可启用" value={summary.eligible} tone="green" /><Metric label="已开启" value={summary.enabled} tone="white" />

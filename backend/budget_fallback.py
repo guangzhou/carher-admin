@@ -252,7 +252,7 @@ class BudgetFallbackController:
             return self._manual_hold(policy, "key is blocked", current)
         if managed_fingerprint(current) != policy["original_config_fingerprint"]:
             return self._manual_hold(policy, "original key configuration changed", current)
-        health = self.client.check_fallback_model()
+        health = self.client.check_fallback_model(force_refresh=True)
         if not health.available or not health.zero_cost:
             error = health.error or "fallback model is unavailable or not zero-cost"
             self.store.update_policy(policy["key_id"], last_error=error)

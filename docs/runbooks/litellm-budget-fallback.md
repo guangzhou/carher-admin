@@ -11,6 +11,8 @@ after the original budget reset time.
 
 - The client keeps the same API key and requested public model name.
 - The fallback target is `chatgpt-budget-fallback-gpt-5.3`.
+- Its members mirror the live `zerokey-pool-gpt-5.3-codex` deployments, but
+  are registered under isolated IDs with all monetary cost fields set to zero.
 - The isolated group has no paid router fallback.
 - Policies are disabled by default and enabled one key at a time.
 - Plaintext API keys are not stored in the admin database.
@@ -25,7 +27,8 @@ Inspect the manifest:
 python -m pytest backend/tests/test_budget_fallback_model.py -v
 ```
 
-After deploying LiteLLM, query `/v1/model/info` with the master key and verify
+Run the idempotent production sync, then query `/v1/model/info` with the master
+key and verify
 every `chatgpt-budget-fallback-gpt-5.3` row has:
 
 ```json
@@ -39,7 +42,22 @@ every `chatgpt-budget-fallback-gpt-5.3` row has:
 Inspect the running router configuration and confirm there is no fallback whose
 source is `chatgpt-budget-fallback-gpt-5.3`.
 
+Send one minimal `/v1/chat/completions` request to the isolated group and verify
+the selected model ID starts with `budget-fallback/zk-`. LiteLLM's generic
+`/health?model=` probe is not reliable for these Responses-backed zerokey
+members, so the Admin health check uses this same minimal real request.
+
 Do not enable any policy if either check fails.
+
+```bash
+LITELLM_BASE=https://cc.auto-link.com.cn/pro \
+LITELLM_MK="$LITELLM_MASTER_KEY" \
+python scripts/litellm-budget-fallback-sync.py sync --apply --probe
+```
+
+The `carher` namespace LiteLLM ConfigMap must not declare this group. The
+authoritative source and target groups live in the separate `litellm-product`
+cluster and are managed through LiteLLM's database-backed model API.
 
 ## Deployment boundaries
 

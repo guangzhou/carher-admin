@@ -74,7 +74,8 @@ class FakeClient:
         assert key_id == self.current.key_id
         return self.current
 
-    def check_fallback_model(self):
+    def check_fallback_model(self, force_refresh=False):
+        self.health_force_refresh = force_refresh
         return self.health
 
     def update_key(self, key_id, **fields):
@@ -190,6 +191,7 @@ def test_98_percent_switches_and_verifies_fallback():
 
     assert result.to_state == "FALLBACK_5_3"
     assert result.event_type == "automatic_switch"
+    assert client.health_force_refresh is True
     assert client.updates[0]["models"] == [
         "gpt-5.5",
         "gpt-5.4",

@@ -72,7 +72,7 @@ DRY_RUN = os.environ.get("DRY_RUN", "") == "1"
 #   aliases: anthropic.claude-opus-* → claude-max-opus；sonnet → claude-max-sonnet；
 #            haiku → claude-max-haiku；fable-5 → fable5）
 # per-model spec; entry_id is templated per account: ccmax-<acct>-compat-<suffix>.
-# Multi-acct pool: each acct registers its own 4 entries sharing the same
+# Multi-acct pool: each acct registers its own 5 entries sharing the same
 # model_name (claude-max-opus/sonnet/haiku, fable5), so LiteLLM round-robins
 # across accts per model_name, and pause/resume touches ONLY that acct's entries.
 CCMAX_MODEL_SPECS = [
@@ -80,6 +80,7 @@ CCMAX_MODEL_SPECS = [
     {"suffix": "sonnet", "model_name": "claude-max-sonnet", "litellm_model": "anthropic/claude-sonnet-4-6"},
     {"suffix": "haiku",  "model_name": "claude-max-haiku",  "litellm_model": "anthropic/claude-haiku-4-5"},
     {"suffix": "fable5", "model_name": "fable5",            "litellm_model": "anthropic/claude-fable-5"},
+    {"suffix": "sonnet5", "model_name": "claude-max-sonnet-5", "litellm_model": "anthropic/claude-sonnet-5"},
 ]
 
 
@@ -94,6 +95,9 @@ def entries_for(acct):
 # 账号池（目前只有 1 个）
 # api_base 是 198 上的 SSH tunnel 端口，LiteLLM 通过这个访问 224:3456 proxy
 POOL_ACCOUNTS = {
+    "acct-23": {"api_base": "http://10.68.13.198:3473", "egress_proxy": "http://38.175.220.46:8081"},
+    "acct-22": {"api_base": "http://10.68.13.198:3472", "egress_proxy": "http://38.175.220.46:8080"},
+    "acct-21": {"api_base": "http://10.68.13.198:3471", "egress_proxy": "http://38.175.220.46:8084"},
     "acct-20": {"api_base": "http://10.68.13.198:3470", "egress_proxy": "http://38.175.220.46:8083"},
     "acct-19": {"api_base": "http://10.68.13.198:3467", "egress_proxy": "http://38.175.220.46:8082"},
 }
@@ -103,6 +107,7 @@ PROXY_API_KEY = os.environ.get("PROXY_API_KEY", "d89f74ccaaa55b604a010c31be8e4c0
 
 PROBE_INTERVAL_LOW = 25 * 60   # 5h<50% → 至少 25min 间隔
 PROBE_INTERVAL_MID = 12 * 60   # 5h 50~80% → 至少 12min 间隔
+PAUSED_FORCE_PROBE_INTERVAL = 6 * 3600  # paused acct 即便 restore_at 未到，至少 6h 强制 probe 一次（防 reset epoch 错/stale 把号永久卡池外）
 
 # ---- Haiku 探针配置 ----
 PROBE_URL = "https://api.anthropic.com/v1/messages?beta=true"
@@ -170,6 +175,8 @@ def should_probe(acct, state):
     if s.get("paused"):
         restore_at = s.get("restore_at", 0)
         if restore_at and now < restore_at:
+            if elapsed >= PAUSED_FORCE_PROBE_INTERVAL:
+                return True, f"paused but {elapsed//3600}h since last probe, force re-check"
             remaining = (restore_at - now) // 60
             return False, f"paused, reset in {remaining}min"
         return True, "paused, reset window reached"
@@ -218,7 +225,9 @@ def probe_quota(token, egress_proxy=None):
         d7 = float(h.get("anthropic-ratelimit-unified-7d-utilization", -1))
         r5 = h.get("anthropic-ratelimit-unified-5h-reset", "")
         r7 = h.get("anthropic-ratelimit-unified-7d-reset", "")
-        return h5, d7, int(r5) if r5 else 0, int(r7) if r7 else 0
+        s5 = h.get("anthropic-ratelimit-unified-5h-status", "")
+        s7 = h.get("anthropic-ratelimit-unified-7d-status", "")
+        return h5, d7, int(r5) if r5 else 0, int(r7) if r7 else 0, s5, s7
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             raise
@@ -232,10 +241,17 @@ def probe_quota(token, egress_proxy=None):
         raise RuntimeError(f"HTTP {e.code}: {msg}")
 
 
-def classify(h5, d7, r5, r7):
-    """返回 (tier, cause, restore_at_epoch)"""
+def classify(h5, d7, r5, r7, s5="", s7=""):
+    """返回 (tier, cause, restore_at_epoch)。
+    优先用官方 status(allowed/rejected) 判硬下线，再退回 80% 预防性下线。"""
     h5_pct = h5 * 100
     d7_pct = d7 * 100
+    # 权威硬下线: status==rejected(不看%)
+    if str(s7).lower() == "rejected":
+        return "OFFLINE-7D", f"7d status=rejected (7d={d7_pct:.0f}%)", r7
+    if str(s5).lower() == "rejected":
+        return "OFFLINE-5H", f"5h status=rejected (5h={h5_pct:.0f}%)", r5
+    # 预防性下线: overage 已禁，撞硬429前提前摸(80%)
     if d7_pct >= 80:
         return "OFFLINE-7D", f"7d={d7_pct:.0f}%>=80", r7
     if h5_pct >= 80:
@@ -402,7 +418,7 @@ def main():
 
         try:
             token = load_token(acct)
-            h5, d7, r5, r7 = probe_quota(token, meta.get("egress_proxy"))
+            h5, d7, r5, r7, s5, s7 = probe_quota(token, meta.get("egress_proxy"))
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 log(f"{acct}: {e.code} → token_invalidated")
@@ -425,7 +441,7 @@ def main():
             continue
 
         probed += 1
-        tier, cause, restore_at = classify(h5, d7, r5, r7)
+        tier, cause, restore_at = classify(h5, d7, r5, r7, s5, s7)
         old = state.get(acct, {})
         was_paused = old.get("paused", False)
         should_offline = tier in ("OFFLINE-5H", "OFFLINE-7D")

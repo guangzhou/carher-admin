@@ -9,6 +9,9 @@
 #   scripts/anthropic-onboard/ccmax-onboard.sh alloc
 #
 #   # 1) prep: builds creds, setup-token, harness, magic-link login -> stops at Arkose
+#   #    NOTE: prep takes ~3-4 min (setup-token + patchright install + mail fetch).
+#   #    Run it in the BACKGROUND (it exceeds a 120s foreground window and would be
+#   #    killed mid-way, leaving the harness up but fill_email/goto un-sent).
 #   scripts/anthropic-onboard/ccmax-onboard.sh prep \
 #       --acct acct-21 --email x@y.com --sid02 sk-ant-sid02-... --mail-pw PW --egress-port 8084
 #
@@ -168,10 +171,13 @@ if [[ "$CMD" == "finish" ]]; then
   [[ -n "$CODE" ]] || { echo "❌ no code after wait; keep solving then re-run finish"; exit 2; }
   STATE=$(ssh -o BatchMode=yes "$S188" "cat $WORK/state.txt")
   echo "  code=${CODE:0:12}... state=${STATE:0:12}..."
+  # code.txt may already be the combined "code#state" (harness sometimes captures
+  # it off the callback page). Don't double-append state.
+  case "$CODE" in *"#"*) FULL="$CODE";; *) FULL="$CODE#$STATE";; esac
 
   echo "== paste code#state -> setup-token -> oat =="
   OAT=$(ssh -o BatchMode=yes "$S188" "export PATH=\$HOME/.local/bin:\$PATH; \
-    tmux send-keys -t cc-oauth-$ACCT -l '$CODE#$STATE'; sleep 1; tmux send-keys -t cc-oauth-$ACCT Enter; sleep 12; \
+    tmux send-keys -t cc-oauth-$ACCT -l '$FULL'; sleep 1; tmux send-keys -t cc-oauth-$ACCT Enter; sleep 12; \
     grep -oE 'sk-ant-oat[a-zA-Z0-9_-]+' /tmp/cc-oauth-$ACCT.log | tail -1")
   [[ "$OAT" == sk-ant-oat01-* ]] || { echo "❌ no oat (code may be expired; re-prep)"; exit 2; }
   echo "  oat: ${OAT:0:24}... (len ${#OAT})"

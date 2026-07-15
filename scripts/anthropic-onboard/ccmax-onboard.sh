@@ -117,8 +117,7 @@ E
   echo "  harness exit IP: ${EIP:-?} (expect $EXIT_IP)"
   [[ "$EIP" == "$EXIT_IP" ]] || { echo "❌ egress gate mismatch — abort"; exit 3; }
 
-  echo "== fill_email -> trigger magic-link =="
-  ssh -o BatchMode=yes "$S188" "echo '{\"actions\":[{\"type\":\"fill_email\",\"email\":\"$EMAIL\"},{\"type\":\"wait\",\"ms\":6000}]}' > $WORK/ctl/round-0.json"
+  echo "== email auto-submitted by harness; waiting for magic-link email =="
   sleep 14
 
   echo "== fetch magic-link (mail.com lightmailer via $EGRESS) =="
@@ -145,7 +144,7 @@ E
   echo "  direct magic-link: ${DIRECT:0:60}..."
 
   echo "== feed magic-link -> login -> Authorize (Arkose will pop) =="
-  ssh -o BatchMode=yes "$S188" "echo '{\"actions\":[{\"type\":\"goto\",\"url\":\"$DIRECT\"},{\"type\":\"wait\",\"ms\":9000},{\"type\":\"authorize\"},{\"type\":\"wait\",\"ms\":6000}]}' > $WORK/ctl/round-1.json"
+  ssh -o BatchMode=yes "$S188" "echo '{\"actions\":[{\"type\":\"goto\",\"url\":\"$DIRECT\"},{\"type\":\"wait\",\"ms\":9000},{\"type\":\"authorize\"},{\"type\":\"wait\",\"ms\":6000}]}' > $WORK/ctl/round-0.json"
   sleep 26
   echo ""
   echo "======================================================================"

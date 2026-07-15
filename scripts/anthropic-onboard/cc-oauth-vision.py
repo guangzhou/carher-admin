@@ -287,9 +287,18 @@ with sync_playwright() as pw:
     shoot(page, "01-authorize-page")
     log(f"  url: {page.url[:120]}")
 
+    # ── Fresh (INJECT_COOKIE=0) magic-link login: auto-submit the email so the
+    #    magic-link is sent WITHOUT depending on an external fill_email command.
+    #    (The external orchestrator only needs to fetch the link + feed goto.)
+    if is_login_page(page):
+        log(f"[login] auto-fill email {EMAIL}")
+        fill_email_and_submit(page, EMAIL)
+        time.sleep(5)
+        shoot(page, "01a-code-entry")
+
     # ── Click Authorize (may raise Arkose) ───────────────────────────
     code = extract_code(page)
-    if not code:
+    if not code and not is_login_page(page):
         log("[authorize] clicking")
         click_authorize(page)
         time.sleep(6)

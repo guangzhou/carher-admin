@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 
 SSH_188 = "cltx@10.68.13.188"
-DOCKER_IMAGE = "mcr.microsoft.com/playwright/python:v1.59.0-noble"
+DOCKER_IMAGE = "mcr.microsoft.com/playwright/python:v1.60.0-noble"
 
 PROBE_SCRIPT = r'''
 import os, time, json, re
@@ -229,7 +229,7 @@ def main() -> int:
           -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright -e DISPLAY=:99 \
           {DOCKER_IMAGE} \
           bash -c 'Xvfb :99 -screen 0 1366x900x24 >/dev/null 2>&1 & sleep 1 && \
-                   pip install patchright==1.59.1 -q --root-user-action=ignore 2>&1 | tail -1 && \
+                   pip install patchright==1.60.0 -q --root-user-action=ignore 2>&1 | tail -1 && \
                    python3 /work/script.py' 2>&1 | tee /tmp/cc-plan-verify-{acct}-runner.log
     """
     proc = subprocess.run(["ssh", SSH_188, docker_cmd], capture_output=True, text=True)

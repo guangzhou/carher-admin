@@ -87,9 +87,9 @@ CALLBACK=$(ssh "$SSH_188" "
       -e SESSION_KEY='$SESSION_KEY' \
       -e CC_OAUTH_URL='$OAUTH_URL' \
       -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright -e DISPLAY=:99 \
-      mcr.microsoft.com/playwright/python:v1.59.0-noble \
+      mcr.microsoft.com/playwright/python:v1.60.0-noble \
       bash -c 'Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 & sleep 1 && \
-               pip install patchright==1.59.1 -q --root-user-action=ignore 2>&1 | tail -1 && \
+               pip install patchright==1.60.0 -q --root-user-action=ignore 2>&1 | tail -1 && \
                python3 /work/script.py' 2>&1 | tee /tmp/cc-oauth-$ACCT-runner.log | grep '^✅ CALLBACK_CODE=' | tail -1 | sed 's/.*CALLBACK_CODE=//'
 ")
 if [[ -z "$CALLBACK" ]]; then

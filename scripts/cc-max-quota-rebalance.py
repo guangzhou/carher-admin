@@ -21,7 +21,7 @@ cc-max-quota-rebalance.py — CC Max 198 prod 智能自动调度
   │ online + 5h<50% + 7d<50%    │ 低频（上次<25min→SKIP）        │
   │ online + 5h 50~80%          │ 中频（上次<12min→SKIP）        │
   │ online + 5h>80%             │ 高频（每次都探）                │
-  │ 探测到 5h>=80% 或 7d>=80%    │ cooldown（/model/delete）      │
+  │ 探测到 5h>=95% 或 7d>=95%    │ cooldown（/model/delete）      │
   │ 探测到 401/403               │ manual_offline + cooldown      │
   └─────────────────────────────────────────────────────────────┘
 
@@ -60,21 +60,42 @@ FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
 JITTER_MAX = int(os.environ.get("REBALANCE_JITTER", "180"))
 DRY_RUN = os.environ.get("DRY_RUN", "") == "1"
 
-# CC Max 在 198 prod 注册的 model entries
-# 每个账号注册 6 个 entry（对应 6 个 model group）
-CCMAX_MODELS = [
-    {"model_name": "claude-max-my-random-opus-4-8", "litellm_model": "anthropic/claude-opus-4-8"},
-    {"model_name": "claude-max-my-random-opus-4-7", "litellm_model": "anthropic/claude-opus-4-7"},
-    {"model_name": "claude-max-my-random-opus-4-6", "litellm_model": "anthropic/claude-opus-4-6"},
-    {"model_name": "claude-max-my-random-sonnet", "litellm_model": "anthropic/claude-sonnet-4-6"},
-    {"model_name": "claude-max-my-random-haiku", "litellm_model": "anthropic/claude-haiku-4-5"},
-    {"model_name": "claude-max-my-random-fable-5", "litellm_model": "anthropic/claude-fable-5"},
+# CC Max 在 198 prod 注册的 model entries —— pause/resume 的真实管理对象。
+#
+# CRITICAL（2026-06-11 修正）：旧版这里是 claude-max-my-random-*，但线上真正承接
+# liuguoxian/buyitian alias 路由的是 ccmax-acct19-compat-*（model_name=claude-max-{opus,sonnet,haiku}）
+# + ccmax-my-random-fable5（model_name=fable5）。旧表导致 pause 时删的是不存在的 entry，
+# 而在服 entry 一个不删 → cooldown 形同虚设、撞顶不 fallback。
+#
+# entry_id 显式声明，不再靠 model_name 前缀拼（前缀拼是上一次脱节的根源）。
+# 对齐基准：alias target 见 ~/.claude/skills/anthropic-max-litellm（liuguoxian/buyitian
+#   aliases: anthropic.claude-opus-* → claude-max-opus；sonnet → claude-max-sonnet；
+#            haiku → claude-max-haiku；fable-5 → fable5）
+# per-model spec; entry_id is templated per account: ccmax-<acct>-compat-<suffix>.
+# Multi-acct pool: each acct registers its own 4 entries sharing the same
+# model_name (claude-max-opus/sonnet/haiku, fable5), so LiteLLM round-robins
+# across accts per model_name, and pause/resume touches ONLY that acct's entries.
+CCMAX_MODEL_SPECS = [
+    {"suffix": "opus",   "model_name": "claude-max-opus",   "litellm_model": "anthropic/claude-opus-4-8"},
+    {"suffix": "sonnet", "model_name": "claude-max-sonnet", "litellm_model": "anthropic/claude-sonnet-4-6"},
+    {"suffix": "haiku",  "model_name": "claude-max-haiku",  "litellm_model": "anthropic/claude-haiku-4-5"},
+    {"suffix": "fable5", "model_name": "fable5",            "litellm_model": "anthropic/claude-fable-5"},
 ]
+
+
+def entries_for(acct):
+    """3+1 LiteLLM entries for one account (entry_id namespaced by acct)."""
+    return [
+        {"entry_id": f"ccmax-{acct}-compat-{s['suffix']}",
+         "model_name": s["model_name"], "litellm_model": s["litellm_model"]}
+        for s in CCMAX_MODEL_SPECS
+    ]
 
 # 账号池（目前只有 1 个）
 # api_base 是 198 上的 SSH tunnel 端口，LiteLLM 通过这个访问 224:3456 proxy
 POOL_ACCOUNTS = {
-    "acct-16": {"api_base": "http://10.68.13.198:3467"},
+    "acct-20": {"api_base": "http://10.68.13.198:3470", "egress_proxy": "http://38.175.220.46:8083"},
+    "acct-19": {"api_base": "http://10.68.13.198:3467", "egress_proxy": "http://38.175.220.46:8082"},
 }
 
 # 198 prod LiteLLM 的 master key（用于注册的 api_key 字段，proxy 层的 API_KEYS）
@@ -178,13 +199,20 @@ def load_token(acct):
     raise ValueError(f"no ANTHROPIC_OAUTH_TOKEN in {env_file}")
 
 
-def probe_quota(token):
-    """Send Haiku probe, return (h5_util, d7_util, h5_reset, d7_reset) or raise."""
+def probe_quota(token, egress_proxy=None):
+    """Send Haiku probe, return (h5_util, d7_util, h5_reset, d7_reset) or raise.
+    Routes through the account's serving egress proxy so the probe exit IP
+    matches the serving IP (direct 224 egress = China -> 403)."""
     req = urllib.request.Request(
         PROBE_URL, data=PROBE_BODY,
         headers={**PROBE_HEADERS, "Authorization": f"Bearer {token}"})
+    if egress_proxy:
+        _opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": egress_proxy, "https": egress_proxy}))
+    else:
+        _opener = urllib.request.build_opener()
     try:
-        resp = urllib.request.urlopen(req, timeout=20)
+        resp = _opener.open(req, timeout=20)
         h = dict(resp.headers)
         h5 = float(h.get("anthropic-ratelimit-unified-5h-utilization", -1))
         d7 = float(h.get("anthropic-ratelimit-unified-7d-utilization", -1))
@@ -234,10 +262,38 @@ def api_request(method, path, body=None):
         return e.code, e.read().decode(errors="ignore")[:300]
 
 
-def entry_id(acct, model_name):
-    """生成 entry ID: ccmax-my-random-{model_suffix}"""
-    suffix = model_name.replace("claude-max-my-random-", "")
-    return f"ccmax-my-random-{suffix}"
+def tunnel_healthy(api_base):
+    """探活 LiteLLM Pod 实际走的 upstream 路径（api_base = 198:3467 隧道 listener）。
+
+    2026-06-11 加：旧版只读 api.anthropic.com 的 quota，对隧道死活完全盲。
+    私钥丢失导致隧道 down 时脚本照报 HEALTHY，liuguoxian/buyitian 持续 fallback wangsu
+    而 rebalance 毫无感知。返回 (ok: bool, detail: str)。
+
+    判定：能建立 TCP 连接且返回任意 HTTP 响应（含 4xx/5xx）即视为隧道通；
+    connection refused / timeout 视为隧道死。鉴权/模型错误不算隧道问题。
+    """
+    url = api_base.rstrip("/") + "/v1/messages"
+    body = json.dumps({
+        "model": "claude-haiku-4-5",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "ping"}],
+    }).encode()
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={
+            "Authorization": f"Bearer {PROXY_API_KEY}",
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return True, f"HTTP {r.status}"
+    except urllib.error.HTTPError as e:
+        # 收到 HTTP 响应 = 隧道+proxy 通，只是这一发请求被拒（鉴权/配额），不算隧道死
+        return True, f"HTTP {e.code} (tunnel up)"
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        return False, f"unreachable: {type(e).__name__}: {e}"
 
 
 def pause_acct(acct, meta):
@@ -246,8 +302,8 @@ def pause_acct(acct, meta):
         log(f"  [DRY_RUN] would pause {acct}")
         return 0
     deleted = 0
-    for m in CCMAX_MODELS:
-        eid = entry_id(acct, m["model_name"])
+    for m in entries_for(acct):
+        eid = m["entry_id"]
         status, resp = api_request("POST", "/model/delete", {"id": eid})
         if status == 200:
             deleted += 1
@@ -261,14 +317,20 @@ def pause_acct(acct, meta):
 
 
 def resume_acct(acct, meta):
-    """重新注册该账号的 6 个 CC Max entry"""
+    """重新注册该账号的 CC Max entry（注册前先验隧道通,死隧道不挂 entry）"""
     if DRY_RUN:
         log(f"  [DRY_RUN] would resume {acct}")
         return 0
     ab = meta["api_base"]
+    ok, detail = tunnel_healthy(ab)
+    if not ok:
+        log(f"  {acct} resume ABORTED: tunnel {ab} {detail}")
+        alert_feishu(f"🚧 {acct} 隧道不通,拒绝 resume（{ab} {detail}）"
+                     f"\n请检查 198 systemd ccmax-acct16-224-tunnel.service")
+        return 0
     created = 0
-    for m in CCMAX_MODELS:
-        eid = entry_id(acct, m["model_name"])
+    for m in entries_for(acct):
+        eid = m["entry_id"]
         entry = {
             "model_name": m["model_name"],
             "litellm_params": {
@@ -331,36 +393,6 @@ def main():
     transitions = []
 
     for acct, meta in POOL_ACCOUNTS.items():
-        current = state.get(acct, {})
-        manual_mode = current.get("manual_mode", "auto")
-        if manual_mode == "manual_offline":
-            if not current.get("paused") or not current.get("manual_offline"):
-                pause_acct(acct, meta)
-                transitions.append(f"🔴 {acct} manual_offline lock → pause")
-            state[acct] = {
-                **current,
-                "manual_mode": "manual_offline",
-                "manual_offline": True,
-                "paused": True,
-                "tier": current.get("tier", "MANUAL_OFFLINE"),
-                "cause": "manual_offline via acct web",
-                "ts": now_ts(),
-            }
-            skipped += 1
-            log(f"{acct}: SKIP (manual_offline lock)")
-            continue
-        if manual_mode == "manual_online" and (current.get("paused") or current.get("manual_offline")):
-            resume_acct(acct, meta)
-            transitions.append(f"🟢 {acct} manual_online lock → resume")
-            state[acct] = {
-                **current,
-                "manual_mode": "manual_online",
-                "manual_offline": False,
-                "paused": False,
-                "cause": "manual_online via acct web",
-                "ts": now_ts(),
-            }
-
         do_probe, reason = should_probe(acct, state)
 
         if not do_probe:
@@ -370,7 +402,7 @@ def main():
 
         try:
             token = load_token(acct)
-            h5, d7, r5, r7 = probe_quota(token)
+            h5, d7, r5, r7 = probe_quota(token, meta.get("egress_proxy"))
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 log(f"{acct}: {e.code} → token_invalidated")
@@ -395,12 +427,8 @@ def main():
         probed += 1
         tier, cause, restore_at = classify(h5, d7, r5, r7)
         old = state.get(acct, {})
-        manual_mode = old.get("manual_mode", "auto")
         was_paused = old.get("paused", False)
         should_offline = tier in ("OFFLINE-5H", "OFFLINE-7D")
-        if manual_mode == "manual_online":
-            should_offline = False
-            cause = f"{cause}; manual_online lock" if cause else "manual_online lock"
 
         if should_offline and not was_paused:
             pause_acct(acct, meta)
@@ -416,7 +444,6 @@ def main():
         state[acct] = {
             "tier": tier,
             "cause": cause,
-            "manual_mode": manual_mode,
             "h5_pct": h5 * 100,
             "d7_pct": d7 * 100,
             "paused": should_offline,
@@ -427,6 +454,30 @@ def main():
 
         log(f"{acct}: {tier} 5h={h5*100:.0f}% 7d={d7*100:.0f}% paused={should_offline}")
         time.sleep(random.uniform(0.5, 2.0))
+
+    # ---- 隧道健康检测（独立于 quota probe，边沿触发告警）----
+    # 只要有 online（未 paused/未 manual_offline）账号在挂 entry，就该验隧道；
+    # 隧道死时这些 entry 全是死链，LiteLLM 会静默 fallback wangsu。
+    online_accts = [
+        a for a in POOL_ACCOUNTS
+        if not state.get(a, {}).get("paused") and not state.get(a, {}).get("manual_offline")
+    ]
+    if online_accts:
+        ab = POOL_ACCOUNTS[online_accts[0]]["api_base"]  # 池内共用同一隧道
+        ok, detail = tunnel_healthy(ab)
+        tstate = state.setdefault("_tunnel", {})
+        was_ok = tstate.get("ok", True)
+        tstate.update({"ok": ok, "detail": detail, "ts": now_ts()})
+        log(f"tunnel {ab}: {'UP' if ok else 'DOWN'} ({detail})")
+        if not ok and was_ok:  # UP→DOWN 边沿
+            alert_feishu(
+                f"🔴 CC Max 隧道 DOWN：{ab} {detail}\n"
+                f"在服 entry（{','.join(online_accts)}）全变死链 → 流量静默 fallback wangsu。\n"
+                f"修复：198 上 `sudo systemctl status ccmax-acct16-224-tunnel`，"
+                f"私钥丢失见 cc-max-quota-rebalance skill §SSH tunnel 断开"
+            )
+        elif ok and not was_ok:  # DOWN→UP 恢复
+            alert_feishu(f"🟢 CC Max 隧道恢复：{ab} {detail}")
 
     save_state(state)
     log(f"done: probed={probed} skipped={skipped} transitions={len(transitions)}")

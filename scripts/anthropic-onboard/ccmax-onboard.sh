@@ -80,6 +80,7 @@ if [[ "$CMD" == "prep" ]]; then
 
   echo "== 188 .creds + work dirs =="
   ssh -o BatchMode=yes "$S188" "mkdir -p /Data/anthropic-auth/$ACCT $WORK/screenshots $WORK/ctl $WORK/out; \
+    rm -f $WORK/ctl/* $WORK/out/* $WORK/screenshots/* 2>/dev/null; \
     printf 'email=%s\nsession_key=%s\nmail_pw=%s\nmail_provider=sessionkey\n' '$EMAIL' '$SID02' '$MAILPW' > /Data/anthropic-auth/$ACCT/.creds; chmod 600 /Data/anthropic-auth/$ACCT/.creds; \
     printf %s '$MAILPW' > $WORK/mail_pw.txt"
 

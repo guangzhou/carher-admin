@@ -99,14 +99,18 @@ RestartSec=5
 WantedBy=multi-user.target
 U
 systemctl daemon-reload
+systemctl stop ccmax-proxy-$ACCT-224.service 2>/dev/null || true
+fuser -k $PROXY_PORT/tcp 2>/dev/null || true
+sleep 2
 systemctl enable --now ccmax-proxy-$ACCT-224.service
-sleep 3
+sleep 4
 systemctl is-active ccmax-proxy-$ACCT-224.service
 EOF
 )
 B64=$(printf '%s' "$SETUP" | base64 | tr -d '\n')
 s224 "echo $B64 | base64 -d > /tmp/setup-$ACCT.sh"
 s224_sudo "bash /tmp/setup-$ACCT.sh; shred -u /tmp/setup-$ACCT.sh" | tail -3
+sleep 3  # let proxy settle before probe (avoids activating-race 401)
 echo "  local Haiku probe :$PROXY_PORT ->"
 s224 "curl -s --max-time 45 -o /dev/null -w 'HTTP %{http_code}\n' http://127.0.0.1:$PROXY_PORT/v1/messages -H 'x-api-key: $PROXY_API_KEY' -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' -d '{\\\"model\\\":\\\"claude-haiku-4-5\\\",\\\"max_tokens\\\":8,\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"hi\\\"}]}'" | tail -1
 

@@ -7,8 +7,8 @@
 # What it automates (Steps 3-6 of the runbook):
 #   3. 224: /Data/claude-max-proxy-<acct>/ proxy.py + .env + systemd, start
 #   4. 198: SSH tunnel systemd  198:<TUNNEL_PORT> -> 224:<PROXY_PORT>, start
-#   5. 198 LiteLLM: register 4 entries ccmax-<acct>-compat-{opus,sonnet,haiku,fable5}
-#      (model_name claude-max-{opus,sonnet,haiku} + fable5, api_base 198:<TUNNEL_PORT>)
+#   5. 198 LiteLLM: register 5 entries ccmax-<acct>-compat-{opus,sonnet,haiku,fable5,sonnet5}
+#      (model_name claude-max-{opus,sonnet,haiku,sonnet-5} + fable5, api_base 198:<TUNNEL_PORT>)
 #   6. 224 quota-rebalance: append POOL_ACCOUNTS[<acct>] {api_base, egress_proxy}
 #   + verify: local proxy Haiku 200 / tunnel health 200 / routing model-id
 #
@@ -129,11 +129,12 @@ WantedBy=multi-user.target"
 TB64=$(printf '%s' "$TUNIT" | base64 | tr -d '\n')
 "$JMS" ssh AIYJY-litellm "echo '$TB64' | base64 -d | sudo tee /etc/systemd/system/ccmax-$ACCT-224-tunnel.service >/dev/null && sudo systemctl daemon-reload && sudo systemctl enable --now ccmax-$ACCT-224-tunnel.service && sleep 3 && curl -s --max-time 10 http://10.68.13.198:$TUNNEL_PORT/health" | tail -1
 
-echo "== [5/6] register 4 LiteLLM entries (api_base 198:$TUNNEL_PORT) =="
+echo "== [5/6] register 5 LiteLLM entries (api_base 198:$TUNNEL_PORT) =="
 for spec in "opus:claude-max-opus:anthropic/claude-opus-4-8" \
             "sonnet:claude-max-sonnet:anthropic/claude-sonnet-4-6" \
             "haiku:claude-max-haiku:anthropic/claude-haiku-4-5" \
-            "fable5:fable5:anthropic/claude-fable-5"; do
+            "fable5:fable5:anthropic/claude-fable-5" \
+            "sonnet5:claude-max-sonnet-5:anthropic/claude-sonnet-5"; do
   IFS=: read -r suf mname model <<<"$spec"
   "$JMS" ssh AIYJY-litellm "curl -s --max-time 15 -X POST http://localhost:30402/model/new -H 'Authorization: Bearer $MASTER_KEY' -H 'content-type: application/json' -d '{\"model_name\":\"$mname\",\"litellm_params\":{\"model\":\"$model\",\"api_base\":\"http://10.68.13.198:$TUNNEL_PORT\",\"api_key\":\"$PROXY_API_KEY\"},\"model_info\":{\"id\":\"ccmax-$ACCT-compat-$suf\",\"mode\":\"chat\"}}' -w ' [ccmax-$ACCT-compat-$suf HTTP %{http_code}]\n' -o /dev/null" | tail -1
 done

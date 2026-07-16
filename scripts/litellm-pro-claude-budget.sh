@@ -92,7 +92,7 @@ if [[ "$MODE" == "set" ]]; then
   [[ "$SET_BUDGET" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "--set must be numeric, got: $SET_BUDGET" >&2; exit 2; }
   [[ -n "$KEY_LIST" ]] || { echo "--set requires --keys a,b,c (explicit key_alias list)" >&2; exit 2; }
   [[ "$KEY_LIST" =~ ^[A-Za-z0-9._,-]+$ ]] || { echo "--keys contains invalid characters: $KEY_LIST" >&2; exit 2; }
-  KEYS_SQL="'${KEY_LIST//,/\',\'}'"
+  KEYS_SQL="'$(printf '%s' "$KEY_LIST" | sed "s/,/','/g")'"
   RESET_AT="$(date -u -v+1d '+%Y-%m-%d 00:00:00' 2>/dev/null || date -u -d 'tomorrow' '+%Y-%m-%d 00:00:00')"
   cat <<SQL | run_psql
 BEGIN;

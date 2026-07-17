@@ -17,9 +17,9 @@ quota-rebalance.py — ChatGPT Pro 198 prod 池智能自动调度
   │ manual_offline + ≥6h           │ PROBE 重试（自愈通道）         │
   │ paused + now < restore_at     │ SKIP（不探测，等 reset）       │
   │ paused + now >= restore_at    │ PROBE → 如果恢复则 resume      │
-  │ online + 5h<50% + wk<50%     │ 低频（上次<25min→SKIP）        │
-  │ online + 5h 50~80%           │ 中频（上次<12min→SKIP）        │
-  │ online + 5h>80%              │ 高频（每次都探）                │
+  │ online + 7d<50% + wk<50%     │ 低频（上次<25min→SKIP）        │
+  │ online + 7d 50~80%           │ 中频（上次<12min→SKIP）        │
+  │ online + 7d>80%              │ 高频（每次都探）                │
   │ 探测连续 401 < 3              │ consecutive_401++ 不删 entry   │
   │ 探测连续 401 ≥ 3              │ 标记 manual_offline + 下线     │
   │ probe error 连续 ≥3 (例如 SSH) │ 飞书边沿告警                  │
@@ -78,18 +78,25 @@ CHATGPT_MODELS = [
     # chatgpt-gpt-5.4-pro removed: 0/13 acct support upstream (Codex/ChatGPT plan limit)
 ]
 
+
+# 2026-07-18: 5.6 sol/terra/luna — 仅注册到 ACCTS_WITH_56。
+# 背景: 07-10 上线时批量注册 bug(36 号塞进同一 model_id)致 5.6 实际单点 acct-79;
+# 07-18 已补注册 54/57/62。pause 按 api_base 删全部 entry, resume 若只重建
+# CHATGPT_MODELS 会静默吃掉 5.6 entry, 故 resume/weight-align 都要带上这份表。
+CHATGPT_MODELS_56 = [
+    {"model_name": "chatgpt-gpt-5.6-sol",   "litellm_model": "openai/chatgpt-gpt-5.6-sol"},
+    {"model_name": "chatgpt-gpt-5.6-terra", "litellm_model": "openai/chatgpt-gpt-5.6-terra"},
+    {"model_name": "chatgpt-gpt-5.6-luna",  "litellm_model": "openai/chatgpt-gpt-5.6-luna"},
+]
+ACCTS_WITH_56 = {"acct-54", "acct-57", "acct-62", "acct-79"}
+
+def models_for(acct):
+    return CHATGPT_MODELS + (CHATGPT_MODELS_56 if acct in ACCTS_WITH_56 else [])
+
 # 198 prod pool 中的账号
 # location=188 → auth.json 在本机 /Data/chatgpt-auth/acct-N/
 # location=187 → auth.json 在 187，通过 SSH 远程读取探测
 POOL_ACCOUNTS = {
-    "acct-13": {"port": 4013, "location": "198"},
-    "acct-14": {"port": 4014, "location": "198"},
-    "acct-16": {"port": 4016, "location": "198"},
-    "acct-22": {"port": 4022, "location": "198"},
-    "acct-23": {"port": 4023, "location": "198"},
-    "acct-24": {"port": 4024, "location": "198"},
-    "acct-25": {"port": 4025, "location": "198"},
-    "acct-17": {"port": 4017, "location": "198"},
     "acct-27": {"port": 4027, "location": "198"},
     "acct-28": {"port": 4028, "location": "198"},
     "acct-29": {"port": 4029, "location": "198"},
@@ -140,6 +147,7 @@ POOL_ACCOUNTS = {
     "acct-76": {"port": 4076, "location": "198"},
     "acct-77": {"port": 4077, "location": "198"},
     "acct-78": {"port": 4078, "location": "198"},
+    "acct-79": {"port": 4079, "location": "198"},
 }
 
 SSH_187_HOST = os.environ.get("SSH_187_HOST", "10.68.13.187")
@@ -151,8 +159,8 @@ SSH_198_HOST = os.environ.get("SSH_198_HOST", "10.68.13.198")
 SSH_198_USER = os.environ.get("SSH_198_USER", "cltx")
 K8S_198_NS   = os.environ.get("K8S_198_NS", "litellm-product")
 
-PROBE_INTERVAL_LOW = 25 * 60   # 5h<50% → 至少 25min 间隔
-PROBE_INTERVAL_MID = 12 * 60   # 5h 50~80% → 至少 12min 间隔
+PROBE_INTERVAL_LOW = 25 * 60   # 7d<50% → 至少 25min 间隔
+PROBE_INTERVAL_MID = 12 * 60   # 7d 50~80% → 至少 12min 间隔
 MANUAL_OFFLINE_RETRY_INTERVAL = 6 * 3600  # manual_offline 每 6h 重新尝试一次
 CONSECUTIVE_401_THRESHOLD = 3  # 连续 401 ≥ 3 次才标记 manual_offline
 SSH_FAIL_ALERT_THRESHOLD = 3   # 187 SSH 连续失败 ≥ 3 次才告警（边沿）
@@ -274,18 +282,18 @@ def should_probe(acct, meta, state):
             return False, f"paused, reset in {remaining}min"
         return True, "paused, reset window reached"
 
-    # 在线 → 按上次 5h% 决定探测频率
+    # 在线 → 按上次 7d% 决定探测频率
     p_pct = s.get("primary_pct", 0)
     if p_pct >= 80:
-        return True, f"5h={p_pct}%>=80, high freq"
+        return True, f"7d={p_pct}%>=80, high freq"
     elif p_pct >= 50:
         if elapsed < PROBE_INTERVAL_MID:
-            return False, f"5h={p_pct}%, {elapsed//60}min ago (<12min)"
-        return True, f"5h={p_pct}%, interval ok"
+            return False, f"7d={p_pct}%, {elapsed//60}min ago (<12min)"
+        return True, f"7d={p_pct}%, interval ok"
     else:
         if elapsed < PROBE_INTERVAL_LOW:
-            return False, f"5h={p_pct}%, {elapsed//60}min ago (<25min)"
-        return True, f"5h={p_pct}%, interval ok"
+            return False, f"7d={p_pct}%, {elapsed//60}min ago (<25min)"
+        return True, f"7d={p_pct}%, interval ok"
 
 
 # ---- OpenAI usage 探测 ----
@@ -498,9 +506,9 @@ def probe_upstream_via_tmp(acct):
     rl = body.get("rate_limit") or {}
     pp = (rl.get("primary_window") or {}).get("used_percent")
     ww = (rl.get("secondary_window") or {}).get("used_percent")
-    if pp is None or ww is None:
+    if pp is None:
         return (None, None, "no_pct_field")
-    return (int(pp), int(ww), None)
+    return (int(pp), int(ww) if ww is not None else None, None)
 
 
 def tmp_auth_status(acct):
@@ -630,7 +638,7 @@ def probe_upstream_via_pod(acct):
     sw = rl.get("secondary_window") or {}
     pp = pw.get("used_percent")
     ww = sw.get("used_percent")
-    if pp is None or ww is None:
+    if pp is None:
         return ("error", None, None, None, None, "no_pct_field")
 
     now = time.time()
@@ -641,8 +649,9 @@ def probe_upstream_via_pod(acct):
     if w_reset is None and sw.get("reset_after_seconds") is not None:
         w_reset = int(now + sw["reset_after_seconds"])
 
-    pp_i, ww_i = int(pp), int(ww)
-    if pp_i >= 100 or ww_i >= 100:
+    pp_i = int(pp)
+    ww_i = int(ww) if ww is not None else None
+    if pp_i >= 100 or (ww_i is not None and ww_i >= 100):
         return ("still_cap", pp_i, ww_i, p_reset, w_reset, None)
     return ("alive", pp_i, ww_i, p_reset, w_reset, None)
 
@@ -864,7 +873,7 @@ def fetch_usage(tok, aid):
 def classify(usage):
     """返回 (tier, cause, p_pct, w_pct, restore_at_epoch, p_reset_at, w_reset_at)
 
-    p_reset_at / w_reset_at 是上游 /codex/usage 给的 5h 和 7d 窗口真实归零时间
+    p_reset_at / w_reset_at 是上游 /codex/usage 给的 7d 窗口真实归零时间
     (epoch seconds, 由 reset_after_seconds + ts 计算)；与 restore_at(cron 管控)区分。
     """
     rl = usage["rate_limit"]
@@ -885,9 +894,9 @@ def classify(usage):
     if w_pct >= 100:
         return "OFFLINE-WEEK", f"wk={w_pct}%>=100", p_pct, w_pct, w_reset_at, p_reset_at, w_reset_at
     if p_pct >= 100:
-        return "OFFLINE-5H", f"5h={p_pct}%>=100", p_pct, w_pct, p_reset_at, p_reset_at, w_reset_at
+        return "OFFLINE-7D", f"7d={p_pct}%>=100", p_pct, w_pct, p_reset_at, p_reset_at, w_reset_at
     if p_pct >= 50 or w_pct >= 50:
-        return "SLOW", f"5h={p_pct}%/wk={w_pct}%", p_pct, w_pct, None, p_reset_at, w_reset_at
+        return "SLOW", f"7d={p_pct}%", p_pct, w_pct, None, p_reset_at, w_reset_at
     return "HEALTHY", None, p_pct, w_pct, None, p_reset_at, w_reset_at
 
 
@@ -1211,7 +1220,8 @@ def resume_acct(acct, meta):
             eab = (e.get("litellm_params") or {}).get("api_base", "")
             if eid:
                 existing[eid] = eab
-    for m in CHATGPT_MODELS:
+    _models = models_for(acct)
+    for m in _models:
         mid = f"chatgpt-{acct}-{m['model_name'].replace('chatgpt-','')}"
         # 下游 chatgpt-acct sub-proxy 也跑 LiteLLM，要求 Authorization: Bearer $POOL_KEY 经
         # user_api_key_auth；router 转发时 entry 没设 api_key → 不带 header → 下游 400
@@ -1254,7 +1264,7 @@ def resume_acct(acct, meta):
                 log(f"  created {mid} (after pre-delete)")
                 continue
         log(f"  create {mid} failed: HTTP {status} {str(resp)[:160]}")
-    log(f"  {acct} resumed: {created}/{len(CHATGPT_MODELS)} entries in router")
+    log(f"  {acct} resumed: {created}/{len(_models)} entries in router")
     return created
 
 
@@ -1552,7 +1562,7 @@ def main():
         elif isinstance(w_pct, (int, float)) and w_pct >= 100:
             new_cause = f"wk={int(w_pct)}%>=100"
         elif isinstance(p_pct, (int, float)) and p_pct >= 100:
-            new_cause = f"5h={int(p_pct)}%>=100"
+            new_cause = f"7d={int(p_pct)}%>=100"
         elif replicas0:
             new_cause = "deploy.spec.replicas=0"
         else:
@@ -1647,7 +1657,7 @@ def main():
         # 判据（必须全部满足）：
         #   1. tier == SCALED_DOWN AND not manual_offline AND tier != TOKEN_INVALID
         #   2. 订阅有效 (sub_until is None or > now)
-        #   3. cause ∈ {OFFLINE-5H, OFFLINE-WEEK, OFFLINE_5H_*, OFFLINE_WEEK_*}
+        #   3. cause ∈ {OFFLINE-7D, OFFLINE-WEEK, OFFLINE_5H_*, OFFLINE_WEEK_*}
         #      (preflight 已 patch 不覆盖原 cause；老 state 兼容兜底)
         #   4. 对应 reset_at 已 past
         #   5. probe_upstream_via_tmp(acct) 返 (p, w) 且都 <100 — 钦定真空才 revive
@@ -1681,7 +1691,7 @@ def main():
 
             # 真因解析（patch A 保留了首因；老数据没保留就是 deploy.spec.replicas=0 兜底走 pct）
             cause_upper = cause_now.upper()
-            is_5h_pause = ("OFFLINE-5H" in cause_upper or "OFFLINE_5H" in cause_upper
+            is_5h_pause = ("OFFLINE-7D" in cause_upper or "OFFLINE_5H" in cause_upper
                            or "5H=" in cause_upper)
             is_wk_pause = ("OFFLINE-WEEK" in cause_upper or "OFFLINE_WEEK" in cause_upper
                            or "WK=" in cause_upper)
@@ -1725,13 +1735,13 @@ def main():
                         up_p, up_w, probe_err = probe_upstream_via_tmp(acct)
                         if probe_err:
                             log(f"{acct}: SCALED_DOWN fast-probe defer — err: {probe_err}")
-                        elif up_p is None or up_w is None:
+                        elif up_p is None:
                             log(f"{acct}: SCALED_DOWN fast-probe defer — no upstream pct")
-                        elif up_p >= 100 or up_w >= 100:
-                            log(f"{acct}: SCALED_DOWN fast-probe defer — upstream still full 5h={up_p}%/wk={up_w}%")
+                        elif up_p >= 100 or (up_w is not None and up_w >= 100):
+                            log(f"{acct}: SCALED_DOWN fast-probe defer — upstream still full 7d={up_p}%")
                         else:
                             tag = "unknown-cause" if unknown_cause else f"cause='{cause_now}'"
-                            log(f"{acct}: SCALED_DOWN auto-revive (fast) — {tag} upstream 5h={up_p}%/wk={up_w}%")
+                            log(f"{acct}: SCALED_DOWN auto-revive (fast) — {tag} upstream 7d={up_p}%")
                             if scale_deploy(acct, 1, wait_ready=False):
                                 revived_this_tick[0] += 1
                                 # 清冷却/失败计数（如果之前有）
@@ -1740,7 +1750,7 @@ def main():
                                 st["revive_probe_consecutive_fails"] = 0
                                 transitions.append(
                                     f"🟢 {acct} SCALED_DOWN auto-revive fast ({tag} "
-                                    f"upstream 5h={up_p}%/wk={up_w}%) → scale=1"
+                                    f"upstream 7d={up_p}%) → scale=1"
                                 )
                             else:
                                 log(f"{acct}: auto-revive scale=1 FAILED — will retry next cron")
@@ -1757,7 +1767,7 @@ def main():
 
                         if result == "alive":
                             # 真活 → resume_acct 注册 router entry；顺手用真值刷 state
-                            log(f"{acct}: pod-probe ALIVE 5h={up_p}%/wk={up_w}%, resume")
+                            log(f"{acct}: pod-probe ALIVE 7d={up_p}%, resume")
                             n = resume_acct(acct, meta)
                             if n > 0:
                                 st["paused"] = False
@@ -1793,7 +1803,7 @@ def main():
                                     new_p = br.get("up_p") if br.get("up_p") is not None else 0
                                     new_w = br.get("up_w") if br.get("up_w") is not None else 0
                                     log(f"{acct}: pod-probe STILL_CAP + BANK_RESET success "
-                                        f"5h={up_p}%→{new_p}% wk={up_w}%→{new_w}%, resume")
+                                        f"7d={up_p}%→{new_p}%, resume")
                                     n = resume_acct(acct, meta)
                                     if n > 0:
                                         st["paused"] = False
@@ -1823,14 +1833,14 @@ def main():
                                     log(f"{acct}: pod-probe STILL_CAP + BANK_RESET skip ({br.get('reason')}) → scale=0")
                                 elif br.get("status") == "error":
                                     log(f"{acct}: pod-probe STILL_CAP + BANK_RESET error ({br.get('reason')}) → scale=0")
-                            log(f"{acct}: pod-probe STILL_CAP 5h={up_p}%/wk={up_w}%, scale=0")
+                            log(f"{acct}: pod-probe STILL_CAP 7d={up_p}%, scale=0")
                             if up_p_reset:
                                 st["primary_reset_at"] = int(up_p_reset)
                             if up_w_reset:
                                 st["weekly_reset_at"] = int(up_w_reset)
                             st["primary_pct"] = up_p
                             st["weekly_pct"] = up_w
-                            st["cause"] = f"REVIVE_PROBE_STILL_CAP 5h={up_p}%/wk={up_w}%"
+                            st["cause"] = f"REVIVE_PROBE_STILL_CAP 7d={up_p}%"
                             st["revive_probe_cooldown_until"] = now_ts() + REVIVE_PROBE_COOLDOWN
                             st["revive_probe_consecutive_fails"] = 0  # 上游明确 cap 不算 fail
                             st["ts"] = now_ts()
@@ -1899,7 +1909,7 @@ def main():
             elif not old_s.get("paused"):
                 log(f"{acct}: scale=0, no router entries, sync state.paused=True")
             # 写 state.paused=True + tier SCALED_DOWN（不动 manual_offline，让 scale=1 时自然 resume）
-            # 2026-06-29 patch A: cause 只在缺失时写，保留首因（OFFLINE-5H / OFFLINE-WEEK 等）。
+            # 2026-06-29 patch A: cause 只在缺失时写，保留首因（OFFLINE-7D / OFFLINE-WEEK 等）。
             # 老 cause 被覆盖成 deploy.spec.replicas=0 → auto-revive 无法判断该不该 scale=1 →
             # 17 个真空 acct 卡在 SCALED_DOWN 不动。
             # 2026-07-01 patch B: 不再兜底 "deploy.spec.replicas=0" —— 该字符串会覆盖真因
@@ -1996,7 +2006,7 @@ def main():
         # - probe OK (≥1 次直命中)         → 留线，下轮 cron 5min 后再 probe
         # - probe 全失败 (2 次都 fail)     → 视为真超额，pause_acct() 删 entry
         # 已 paused 的 acct entry 已被删，probe 必失败 → 跳过 probe，仅靠上游数值回落自动 resume
-        quota_high = tier in ("OFFLINE-5H", "OFFLINE-WEEK")
+        quota_high = tier in ("OFFLINE-7D", "OFFLINE-WEEK")
         should_offline = False
         probe_detail = None
         if tier == "OFFLINE-WEEK" and not was_paused:
@@ -2014,7 +2024,7 @@ def main():
                 )
                 log(f"  {acct}: {probe_detail}")
         elif quota_high and not was_paused:
-            # OFFLINE-5H 仍走双 probe（5h 窗口边沿 + codex 子池易误判）
+            # OFFLINE-7D 仍走双 probe（7d 窗口边沿 + codex 子池易误判）
             ok, probe_detail = probe_acct(acct)
             log(f"  {acct}: upstream {tier} ({cause}) — probe {probe_detail}")
             if not ok:
@@ -2024,7 +2034,7 @@ def main():
         # 2026-07-04: OFFLINE-WEEK 撞 100% 时，先试烧一张 banked credit 而不是直接 pause+SCALED_DOWN 等 61h。
         # 触发条件：
         #   - should_offline (真 wk=100 x2)
-        #   - tier==OFFLINE-WEEK (5h 撞顶不能靠 wham 清)
+        #   - tier==OFFLINE-WEEK (7d 撞顶不能靠 wham 清)
         #   - 本 tick 未超 MAX_BANK_RESET_PER_TICK
         # 成功后跳过 pause_acct，保留 scale=1，用 after 值刷 state 让 next tick 认为"周窗回落"。
         # 失败/无库存/token 死 → 跌回原 pause 路径，行为跟老版一致。
@@ -2057,7 +2067,7 @@ def main():
                 transitions.append(
                     f"🟢 {acct} OFFLINE-WEEK → BANK_RESET consumed "
                     f"(windows={br.get('windows_reset')} credits→{br.get('credits_after')}) "
-                    f"upstream 5h={p_pct}%/wk={w_pct}% → keep online"
+                    f"upstream 7d={p_pct}% → keep online"
                 )
                 log(f"  {acct}: BANK_RESET success — bypass pause, keep scale=1")
             elif br.get("status") == "skip":
@@ -2082,7 +2092,7 @@ def main():
             resume_acct(acct, meta)
             tag = "manual_offline self-heal" if was_manual_offline else "quota recovered"
             transitions.append(
-                f"🟢 {acct} {tag} → resume (5h={p_pct}% wk={w_pct}%)"
+                f"🟢 {acct} {tag} → resume (7d={p_pct}%)"
             )
         elif not quota_high and not was_paused:
             # Router-drift self-heal: 上游健康 + state 标 online，但 LiteLLM router 没 entry。
@@ -2092,7 +2102,7 @@ def main():
                 log(f"  {acct}: router-drift detected (online but no entries) → resume")
                 resume_acct(acct, meta)
                 transitions.append(
-                    f"🟢 {acct} router-drift self-heal → resume (5h={p_pct}% wk={w_pct}%)"
+                    f"🟢 {acct} router-drift self-heal → resume (7d={p_pct}%)"
                 )
 
         # paused 状态落库：
@@ -2141,7 +2151,7 @@ def main():
         # 这里兜住裸 curl 漂移 / 部分 entry 未同步）。None=不管（用 router 默认）。
         _dw = old.get("desired_weight")
         if _dw is not None and not new_paused and not DRY_RUN:
-            for _m in CHATGPT_MODELS:
+            for _m in models_for(acct):
                 _mid = f"chatgpt-{acct}-{_m['model_name'].replace('chatgpt-','')}"
                 try:
                     _st, _r = api_request("PATCH", f"/model/{_mid}/update",
@@ -2151,7 +2161,7 @@ def main():
                 except Exception as _e:
                     log(f"  weight-align {_mid} err {type(_e).__name__}: {str(_e)[:80]}")
 
-        log(f"{acct}: {tier} 5h={p_pct}% wk={w_pct}% paused={new_paused}")
+        log(f"{acct}: {tier} 7d={p_pct}% paused={new_paused}")
         time.sleep(random.uniform(0.5, 2.0))
 
     if DRY_RUN:

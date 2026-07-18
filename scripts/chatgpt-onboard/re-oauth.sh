@@ -93,7 +93,7 @@ if [[ ! -f /tmp/chatgpt-litellm-oauth.py ]]; then
     echo "❌ /tmp/chatgpt-litellm-oauth.py not found — re-upload from carher-admin/scripts/chatgpt-onboard/"
     exit 1
 fi
-if [[ "${GEN_ONLY:-}" != "1" ]] && ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
+if [[ "${GEN_ONLY:-}" != "1" && "${BILLING_INSPECT:-}" != "1" && "${BILLING_RENEW:-}" != "1" ]] && ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
     echo "❌ container $CONTAINER not found"
     exit 1
 fi
@@ -115,14 +115,22 @@ docker run --rm \
   -e "PHONE_NUMBER=${PHONE_NUMBER:-}" \
   -e "SMS_API_URL=${SMS_API_URL:-}" \
   -e "MAIL_OTP_PROVIDER=${MAIL_OTP_PROVIDER:-mailcom}" \
+  -e "BILLING_INSPECT=${BILLING_INSPECT:-}" \
+  -e "BILLING_RENEW=${BILLING_RENEW:-}" \
   -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
   -e DISPLAY=:99 \
   mcr.microsoft.com/playwright/python:v1.60.0-noble \
   bash -c "Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 & sleep 1 && \
-           pip install patchright -q --root-user-action=ignore 2>&1 | tail -1 && \
+           pip install patchright==1.60.1 -q --root-user-action=ignore 2>&1 | tail -1 && \
            python3 /work/chatgpt-litellm-oauth.py" \
   2>&1 | grep -v "^The XKEY\|^> Warning\|^Errors from\|^\[notice\]" \
        | tail -80
+
+if [[ "${BILLING_INSPECT:-}" == "1" || "${BILLING_RENEW:-}" == "1" ]]; then
+    echo ""
+    echo "🔎 $ACCT BILLING done — see screenshots at $SCREENSHOT_DIR/"
+    exit 0
+fi
 
 if [[ ! -s "$OUT_FILE" ]]; then
     echo ""

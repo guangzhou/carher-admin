@@ -825,6 +825,71 @@ with sync_playwright() as pw:
     print(f"  after chatgpt.com login url={chat_page.url[:100]}", flush=True)
     ss(chat_page, "p15b-chatgpt-logged-in")
     logged = "chatgpt.com" in chat_page.url and "/auth" not in chat_page.url
+    if os.environ.get("BILLING_INSPECT") == "1" or os.environ.get("BILLING_RENEW") == "1":
+        do_renew = os.environ.get("BILLING_RENEW") == "1"
+        print(f"[BILLING] logged={logged} renew={do_renew}", flush=True)
+        try:
+            chat_page.goto("https://chatgpt.com/#settings/Billing",
+                           wait_until="domcontentloaded", timeout=45000)
+            time.sleep(6)
+            ss(chat_page, "bill-01")
+        except Exception as e:
+            print(f"[BILLING] goto err: {e}", flush=True)
+        def _btxt():
+            try: return chat_page.inner_text("body")
+            except Exception: return ""
+        before = _btxt()
+        canceled = bool(re.search(r"will be canceled|will be cancelled", before, re.I))
+        renews = bool(re.search(r"renews on|will renew", before, re.I))
+        print(f"[BILLING-STATE] canceled={canceled} renews={renews}", flush=True)
+        m = re.search(r"(will be cancel\w+ on [^\n]+|renews on [^\n]+|will renew[^\n]*)", before, re.I)
+        if m: print(f"[BILLING-LINE] {m.group(1).strip()[:80]}", flush=True)
+        plan_m = re.search(r"ChatGPT (Pro|Plus)[^\n]*", before)
+        if plan_m: print(f"[BILLING-PLAN] {plan_m.group(0).strip()[:60]}", flush=True)
+        pay_m = re.search(r"(Mastercard|Visa|American Express|card ending[^\n]*)", before, re.I)
+        print(f"[BILLING-PAY] {pay_m.group(0) if pay_m else 'NONE'}", flush=True)
+
+        if do_renew and canceled:
+            clicked = False
+            for getter in (
+                lambda: chat_page.get_by_role("button", name=re.compile(r"Renew", re.I)),
+                lambda: chat_page.get_by_text(re.compile(r"Renew Pro Plan|Renew Plan|Renew", re.I)),
+            ):
+                try:
+                    b = getter()
+                    if b.count() > 0:
+                        b.first.click(); clicked = True
+                        print("[BILLING] clicked Renew", flush=True); break
+                except Exception:
+                    pass
+            if not clicked:
+                print("[BILLING] ✗ Renew button not found", flush=True)
+            else:
+                time.sleep(3); ss(chat_page, "bill-02-after-renew-click")
+                # 可能弹确认框:点其中的确认按钮
+                for _ in range(2):
+                    try:
+                        dlg = chat_page.get_by_role("button",
+                              name=re.compile(r"Renew|Confirm|Continue|Resubscribe|Keep", re.I))
+                        if dlg.count() > 0 and dlg.first.is_visible():
+                            dlg.first.click(); print("[BILLING] confirm modal clicked", flush=True)
+                            time.sleep(3)
+                    except Exception:
+                        pass
+                time.sleep(5); ss(chat_page, "bill-03-final")
+                after = _btxt()
+                still_cancel = bool(re.search(r"will be cancel", after, re.I))
+                now_renew = bool(re.search(r"renews on|will renew", after, re.I))
+                am = re.search(r"(will be cancel\w+ on [^\n]+|renews on [^\n]+|will renew[^\n]*)", after, re.I)
+                print(f"[BILLING-RESULT] still_canceled={still_cancel} now_renews={now_renew} "
+                      f"line={am.group(1).strip()[:70] if am else '?'}", flush=True)
+                if not still_cancel:
+                    print("[BILLING] ✅ RENEW ENABLED", flush=True)
+                else:
+                    print("[BILLING] ⚠ still shows canceled — check screenshot bill-03-final", flush=True)
+        elif do_renew and not canceled:
+            print("[BILLING] already auto-renewing (no cancel notice) — nothing to do", flush=True)
+        sys.exit(0)
     if logged:
         print("  chatgpt.com login ok; enabling Codex device-code toggle...", flush=True)
         try:

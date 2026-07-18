@@ -79,19 +79,20 @@ CHATGPT_MODELS = [
 ]
 
 
-# 2026-07-18: 5.6 sol/terra/luna — 仅注册到 ACCTS_WITH_56。
+# 2026-07-18: 5.6 sol/terra/luna — 全池 acct 均注册。
 # 背景: 07-10 上线时批量注册 bug(36 号塞进同一 model_id)致 5.6 实际单点 acct-79;
-# 07-18 已补注册 54/57/62。pause 按 api_base 删全部 entry, resume 若只重建
-# CHATGPT_MODELS 会静默吃掉 5.6 entry, 故 resume/weight-align 都要带上这份表。
+# 07-18 先补注册 54/57/62 (ACCTS_WITH_56 白名单)，同日 pod 直连流式 smoke 验证
+# 全池 acct pod 共享同一 sub-proxy config、能力一致(acct-44 sol/terra/luna 3/3 PASS)，
+# 故取消白名单，models_for 对所有 acct 追加 5.6。pause 按 api_base 删全部 entry,
+# resume/weight-align 都走 models_for → 全池 pause/resume 一轮后不再静默丢 5.6 entry。
 CHATGPT_MODELS_56 = [
     {"model_name": "chatgpt-gpt-5.6-sol",   "litellm_model": "openai/chatgpt-gpt-5.6-sol"},
     {"model_name": "chatgpt-gpt-5.6-terra", "litellm_model": "openai/chatgpt-gpt-5.6-terra"},
     {"model_name": "chatgpt-gpt-5.6-luna",  "litellm_model": "openai/chatgpt-gpt-5.6-luna"},
 ]
-ACCTS_WITH_56 = {"acct-54", "acct-57", "acct-62", "acct-79"}
 
 def models_for(acct):
-    return CHATGPT_MODELS + (CHATGPT_MODELS_56 if acct in ACCTS_WITH_56 else [])
+    return CHATGPT_MODELS + CHATGPT_MODELS_56
 
 # 198 prod pool 中的账号
 # location=188 → auth.json 在本机 /Data/chatgpt-auth/acct-N/

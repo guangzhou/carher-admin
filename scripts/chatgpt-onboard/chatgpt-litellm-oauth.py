@@ -711,41 +711,102 @@ with sync_playwright() as pw:
                 print(f"    after pw submit url={p_page.url[:100]}", flush=True)
             except Exception as e:
                 print(f"    password step skipped: {e}", flush=True)
-        if "email-verification" in p_page.url or "verification" in p_page.content().lower()[:5000]:
-            print("  need OTP - fetching from mail.com", flush=True)
-            mp = mailcom_login(ctx)
-            otp, _ = get_otp(mp, int(time.time()) - 600)
-            if mp is not None:
-                mp.close()
-            if otp:
-                print(f"  ✅ OTP={otp}", flush=True)
-                p_page.locator("input").first.click()
-                p_page.keyboard.type(otp, delay=80)
-                _submit_form(p_page)
-                time.sleep(8)
-                print(f"    after OTP submit url={p_page.url[:100]}", flush=True)
-            else:
-                print("  ⚠ OTP fetch failed", flush=True)
-        else:
-            # retry: 等 url 变 email-verification (sleep 6 后可能还没 redirect)
-            for _ in range(15):
-                if "email-verification" in p_page.url or "verification" in p_page.content().lower()[:3000]:
-                    print("  need OTP (after retry) - fetching from mail.com", flush=True)
-                    mp = mailcom_login(ctx)
-                    otp, _ = get_otp(mp, int(time.time()) - 600)
-                    if mp is not None:
-                        mp.close()
-                    if otp:
-                        print(f"  ✅ OTP={otp}", flush=True)
-                        p_page.locator("input").first.click()
-                        p_page.keyboard.type(otp, delay=80)
-                        _submit_form(p_page)
-                        time.sleep(8)
-                        print(f"    after OTP submit url={p_page.url[:100]}", flush=True)
-                    else:
-                        print("  ⚠ OTP fetch failed", flush=True)
-                    break
-                time.sleep(1)
+        # ── robust OTP: 单框/6框布局 + auto-submit 感知 + fresh-OTP 重试 ──
+        # 旧版 bug: `input.first` 把 6 位塞进第一个框 / 不验证 advance / 不重试,
+        # 撞 OpenAI 当前 /email-verification(6 独立框 or auto-submit)必卡。
+        def _needs_otp(pg):
+            try:
+                return ("email-verification" in pg.url
+                        or "verification" in pg.content().lower()[:5000])
+            except Exception:
+                return False
+
+        def _otp_advanced(pg):
+            try:
+                return "verification" not in pg.url
+            except Exception:
+                return False
+
+        def _type_otp(pg, code):
+            """定位 OTP 输入并键入。单框直接键入;6 框点首格靠组件自动跳焦逐位键入。"""
+            loc, n = None, 0
+            for sel in ("input[autocomplete='one-time-code']",
+                        "input[inputmode='numeric']",
+                        "input[name='code']",
+                        "input[maxlength='1']",
+                        "input[type='tel']"):
+                try:
+                    cand = pg.locator(sel)
+                    if cand.count() > 0:
+                        loc, n = cand, cand.count(); break
+                except Exception:
+                    pass
+            if n == 0:  # 语义选择器没命中 → 兜底表单可见 input
+                try:
+                    loc = pg.locator("form input:visible")
+                    n = loc.count()
+                except Exception:
+                    n = 0
+            if n == 0:
+                return False
+            print(f"    OTP inputs located: n={n}", flush=True)
+            try:
+                loc.first.click()
+            except Exception:
+                pass
+            if n == 1:
+                try: loc.first.fill("")
+                except Exception: pass
+            pg.keyboard.type(code, delay=120)  # 逐位真键入,触发 React onChange + 6框自动跳焦
+            return True
+
+        # 等 verification 页出现(pw submit 后可能还没 redirect)
+        for _ in range(15):
+            if _needs_otp(p_page):
+                break
+            time.sleep(1)
+
+        if _needs_otp(p_page):
+            since = int(time.time()) - 600
+            otp_ok = False
+            for attempt in range(3):
+                mp = mailcom_login(ctx)
+                otp, _ = get_otp(mp, since)
+                if mp is not None:
+                    mp.close()
+                if not otp:
+                    print(f"  ⚠ OTP fetch failed (try {attempt+1}/3)", flush=True)
+                    time.sleep(5); continue
+                print(f"  ✅ OTP={otp} (try {attempt+1}/3)", flush=True)
+                if not _type_otp(p_page, otp):
+                    print("  ⚠ no OTP input located on page", flush=True)
+                ss(p_page, f"p15a3-otp-filled-{attempt}")
+                # 6 位常 auto-submit;先等自动 advance,不动再 fallback 点 Continue
+                advanced = False
+                for _ in range(5):
+                    time.sleep(1)
+                    if _otp_advanced(p_page):
+                        advanced = True; break
+                if not advanced:
+                    _submit_form(p_page)
+                    for _ in range(18):
+                        time.sleep(1)
+                        if _otp_advanced(p_page):
+                            advanced = True; break
+                print(f"    after OTP url={p_page.url[:100]} advanced={advanced}", flush=True)
+                if advanced:
+                    otp_ok = True; break
+                # 卡住 → 请求重发,后续只接受更新的 code
+                try:
+                    rl = p_page.locator("button, a").filter(
+                        has_text=re.compile(r"resend|send.*code|new code|didn.?t get", re.I))
+                    if rl.count() > 0:
+                        rl.first.click(); print("    clicked resend code", flush=True)
+                        time.sleep(4); since = int(time.time()) - 20
+                except Exception:
+                    pass
+            if not otp_ok:
+                print("  ⚠ OTP flow failed after 3 tries", flush=True)
 
     chat_page = ctx.new_page()
     chat_page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded")
@@ -1069,55 +1130,109 @@ with sync_playwright() as pw:
     print(f"[5] Need OTP: {need_otp}", flush=True)
     if need_otp:
         print("  Logging into mail.com 字段A...", flush=True)
-        SCRIPT_START = int(time.time())  # passed to get_otp for staleness check
-        mail_page = mailcom_login(ctx)
-        otp, ctx_snip = get_otp(mail_page, SCRIPT_START)
-        if mail_page is not None:
-            mail_page.close()
-        if not otp:
-            ss(page, "06-otp-timeout")
-            sys.exit("❌ No OTP within 120s")
-        print(f"  ✅ OTP: {otp}", flush=True)
-        page.bring_to_front()
-        # Prefer dedicated code inputs by priority (avoid grabbing a country-code
-        # search box inside a react-aria <Select> via a broad union .first).
-        otp_input = None
-        for _sel in ("input[autocomplete='one-time-code']", "input[name='code']",
-                     "input[inputmode='numeric']", "input[type='tel']"):
-            _loc = page.locator(_sel)
-            if _loc.count() > 0 and _loc.first.is_visible():
-                otp_input = _loc.first
-                break
-        if otp_input is None:
-            _vis = [i for i in page.locator("input").all() if i.is_visible()]
-            otp_input = _vis[0] if _vis else None
-        if otp_input is None:
-            ss(page, "06-no-otp-input")
-            sys.exit("❌ no OTP input found on verification page")
-        # Focus via JS (no pointer click → not blocked by a react-aria overlay)
-        # then keyboard.type to keep keyup events that enable the Continue button.
-        try:
-            otp_input.evaluate("el => el.focus()")
-        except Exception:
-            pass
-        page.keyboard.type(otp, delay=80)
-        ss(page, "06-otp-filled")
-        # submit
-        sb = page.locator("button:has-text('Continue'), button:has-text('Verify'), button[type='submit']")
-        if sb.count() > 0:
-            sb.first.click()
-        else:
-            page.keyboard.press("Enter")
-        # 等离开 /email-verification (最多 40s)
-        print("  Waiting for /email-verification → next page...", flush=True)
-        for _ in range(40):
-            if "email-verification" not in page.url:
-                break
-            time.sleep(1)
+
+        def _enter_otp(pg, code):
+            """定位 OTP 输入并键入。单框直接键入;6 独立框点首格逐位键入靠组件跳焦。"""
+            handle = None; n = 0
+            for _sel in ("input[autocomplete='one-time-code']", "input[name='code']",
+                         "input[inputmode='numeric']", "input[maxlength='1']",
+                         "input[type='tel']"):
+                _loc = pg.locator(_sel)
+                try:
+                    if _loc.count() > 0 and _loc.first.is_visible():
+                        handle, n = _loc, _loc.count(); break
+                except Exception:
+                    pass
+            if handle is None:  # 语义选择器没命中 → 兜底第一个可见 input
+                vis = [i for i in pg.locator("input").all() if i.is_visible()]
+                if not vis:
+                    return False
+                try: vis[0].evaluate("el => el.focus()")
+                except Exception: pass
+                pg.keyboard.type(code, delay=120)
+                return True
+            print(f"    OTP inputs located: n={n}", flush=True)
+            try:
+                handle.first.evaluate("el => el.focus()")
+                handle.first.click()
+            except Exception:
+                pass
+            if n == 1:
+                try: handle.first.fill("")
+                except Exception: pass
+            # 逐位真键入:触发 keyup 使 Continue 变可点 + 6 框自动跳焦
+            pg.keyboard.type(code, delay=120)
+            return True
+
+        def _otp_advanced(pg):
+            try:
+                return "email-verification" not in pg.url and "verification" not in pg.url
+            except Exception:
+                return False
+
+        # fresh-OTP 重试:单次 submit 卡住不再 sys.exit,重取新 code 再试
+        since = int(time.time()) - 600
+        otp_ok = False
+        for attempt in range(3):
+            mail_page = mailcom_login(ctx)
+            otp, ctx_snip = get_otp(mail_page, since)
+            if mail_page is not None:
+                mail_page.close()
+            if not otp:
+                print(f"  ⚠ OTP fetch failed (try {attempt+1}/3)", flush=True)
+                time.sleep(5); continue
+            print(f"  ✅ OTP: {otp} (try {attempt+1}/3)", flush=True)
+            page.bring_to_front()
+            if not _enter_otp(page, otp):
+                ss(page, "06-no-otp-input")
+                print("  ⚠ no OTP input located on page", flush=True)
+            ss(page, f"06-otp-filled-{attempt}")
+            # 6 位常 auto-submit;先等自动 advance,不动再 fallback 点 Continue
+            advanced = False
+            for _ in range(5):
+                time.sleep(1)
+                if _otp_advanced(page):
+                    advanced = True; break
+            if not advanced:
+                sb = page.locator("button:has-text('Continue'), button:has-text('Verify'), "
+                                  "button[type='submit']")
+                try:
+                    if sb.count() > 0 and sb.first.is_enabled():
+                        sb.first.click()
+                    else:
+                        page.keyboard.press("Enter")
+                except Exception:
+                    page.keyboard.press("Enter")
+                for _ in range(20):
+                    time.sleep(1)
+                    if _otp_advanced(page):
+                        advanced = True; break
+            print(f"    after OTP url={page.url[:100]} advanced={advanced}", flush=True)
+            # 停用/删除账号:OTP 已被验证但账号 deactivated → re-OAuth 救不了,立即退出勿重试
+            try:
+                _pc = page.content().lower()
+            except Exception:
+                _pc = ""
+            if ("account_deactivated" in _pc or "deleted or deactivated" in _pc
+                    or "account_deleted" in _pc):
+                ss(page, "07-account-deactivated")
+                print(f"  url={page.url}", flush=True)
+                sys.exit("❌ ACCOUNT_DEACTIVATED — 需新 email+新 Pro 订阅,re-OAuth 无法恢复")
+            if advanced:
+                otp_ok = True; break
+            # 卡住 → 请求重发,后续只接受更新 code
+            try:
+                rl = page.locator("button, a").filter(
+                    has_text=re.compile(r"resend|send.*code|new code|didn.?t get", re.I))
+                if rl.count() > 0:
+                    rl.first.click(); print("    clicked resend code", flush=True)
+                    time.sleep(4); since = int(time.time()) - 20
+            except Exception:
+                pass
         ss(page, "07-after-otp")
         print(f"  url={page.url}", flush=True)
-        if "email-verification" in page.url:
-            sys.exit("❌ OTP submit didn't advance past /email-verification")
+        if not otp_ok:
+            sys.exit("❌ OTP flow failed after 3 tries (still on /email-verification)")
 
     # ── 2d-phone. "Phone number required" risk-control challenge ─────────────
     # OpenAI sometimes forces phone binding (/add-phone) before re-issuing a

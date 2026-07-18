@@ -155,15 +155,17 @@ mode_rescue_acct() {
   creds=$(printf '%s' "$probe" | python3 -c "import json,sys;
 try: d=json.loads(sys.stdin.read().strip()); print(d.get('credits',0) or 0)
 except: print(0)")
+  # 2026-07-13 OpenAI 合并单 7d 窗口后主窗口用量落在 primary(=脚本 '5h' 字段),
+  # secondary('7d') 变 null。取 max(5h,7d) 兼容合并前后，否则 null→0 恒不 redeem。
   seven=$(printf '%s' "$probe" | python3 -c "import json,sys;
-try: d=json.loads(sys.stdin.read().strip()); print(d.get('7d',0) or 0)
+try: d=json.loads(sys.stdin.read().strip()); print(max(d.get('5h',0) or 0, d.get('7d',0) or 0))
 except: print(0)")
   if [[ "${creds:-0}" -ge 1 ]] 2>/dev/null && [[ "${seven:-0}" -ge 80 ]] 2>/dev/null; then
-    echo "→ REDEEM credits=$creds 7d=$seven"
+    echo "→ REDEEM credits=$creds usage=$seven"
     exec_py "$pod" redeem
     echo "→ leaving scale=1 for router"
   else
-    echo "→ scale back to 0 (credits=$creds 7d=$seven)"
+    echo "→ scale back to 0 (credits=$creds usage=$seven)"
     ssh198 "kubectl -n $NS scale deploy chatgpt-acct-$n --replicas=0" >/dev/null
   fi
 }

@@ -98,7 +98,6 @@ def models_for(acct):
 # location=188 → auth.json 在本机 /Data/chatgpt-auth/acct-N/
 # location=187 → auth.json 在 187，通过 SSH 远程读取探测
 POOL_ACCOUNTS = {
-    "acct-27": {"port": 4027, "location": "198"},
     "acct-28": {"port": 4028, "location": "198"},
     "acct-31": {"port": 4031, "location": "198"},
     "acct-33": {"port": 4033, "location": "198"},

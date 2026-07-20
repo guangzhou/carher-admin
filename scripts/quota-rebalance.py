@@ -117,9 +117,7 @@ POOL_ACCOUNTS = {
     "acct-66": {"port": 4066, "location": "198"},
     "acct-73": {"port": 4073, "location": "198"},
     "acct-74": {"port": 4074, "location": "198"},
-    "acct-75": {"port": 4075, "location": "198"},
     "acct-76": {"port": 4076, "location": "198"},
-    "acct-77": {"port": 4077, "location": "198"},
     "acct-78": {"port": 4078, "location": "198"},
     "acct-79": {"port": 4079, "location": "198"},
 }

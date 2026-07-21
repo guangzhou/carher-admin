@@ -84,12 +84,24 @@ for N in $ACCTS; do
     echo "  -> acct-$N att $att egress=$LBL auth_valid=${V:-0}"
     [ "${V:-0}" = "1" ] && { GOT=1; break; }
     # 两步法自动触发(skill #10): 连续 ≥2 次失败 且从没开过 toggle → 疑似 toggle off, 先开 toggle
+    # 注意: toggle docker 必须在 188(j8)上跑, 不是本地; toggle py 已在开头上传到 188 /tmp
     if [ "$att" -ge 2 ] && [ "$TOGGLE_TRIED" = 0 ]; then
       STUCK=$(j8 "docker ps -a --filter ancestor=$IMAGE --format '{{.ID}}' | head -1")
       if j8 "docker logs $STUCK 2>&1 | grep -qE 'toggle: false . false|aria_disabled=true|Enable device code' && echo Y" | grep -q Y; then
-        echo "  [两步法] acct-$N 疑似 Codex toggle off → 先跑独立 toggle enable"
-        OAUTH_PROXY="$PX" MAIL_OTP_PROVIDER=mailcom ACTION=enable-codex-toggle \
-          bash scripts/chatgpt-onboard/run-enable-codex-toggle-188.sh acct-$N 2>&1 | grep -E "acct-$N|ENABLED|FAILED"
+        echo "  [两步法] acct-$N 疑似 Codex toggle off → 在 188 内联跑独立 toggle enable (mouse-box-center 才点得动 radix switch)"
+        j8 "docker ps --filter ancestor=$IMAGE -q | xargs -r docker kill >/dev/null 2>&1
+sd=\$(mktemp -d /tmp/tgl-$N-XXXX)
+pw=\$(grep -E '^chatgpt_pw=' /Data/chatgpt-auth/acct-$N/.creds|head -1|cut -d= -f2-)
+mpw=\$(grep -E '^mail_pw=' /Data/chatgpt-auth/acct-$N/.creds|head -1|cut -d= -f2-)
+em=\$(grep -E '^email=' /Data/chatgpt-auth/acct-$N/.creds|head -1|cut -d= -f2-)
+printf '%s' \"\$pw\">\$sd/p.txt; printf '%s' \"\$mpw\">\$sd/m.txt
+docker run --rm -v /tmp/chatgpt-enable-codex-toggle.py:/work/script.py:ro \
+  -v \$sd/p.txt:/run/chatgpt_pw.txt:ro -v \$sd/m.txt:/run/mail_pw.txt:ro -v \$sd:/work/screenshots \
+  -e CHATGPT_EMAIL=\$em -e CHATGPT_PW_FILE=/run/chatgpt_pw.txt -e MAIL_PW_FILE=/run/mail_pw.txt \
+  -e SCREENSHOT_DIR=/work/screenshots -e ACTION=enable-codex-toggle -e MAIL_OTP_PROVIDER=mailcom \
+  -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright -e OAUTH_PROXY=$PX -e DISPLAY=:99 $IMAGE \
+  bash -c 'Xvfb :99 -screen 0 1440x1000x24 >/dev/null 2>&1 & sleep 1 && pip install patchright==1.60.0 -q --root-user-action=ignore >/dev/null 2>&1 && python3 /work/script.py' 2>&1 | grep -E 'RESULT|ENABLED|FAILED|aria-checked=true'
+rm -rf \$sd"
         TOGGLE_TRIED=1
       fi
     fi

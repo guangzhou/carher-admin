@@ -83,4 +83,4 @@ async function buildChatGPTRouter(parsedFetch, session, saveSession) {
   return router
 }
 
-module.exports = { buildChatGPTRouter }
+module.exports = { buildChatGPTRouter, chatgptApi }

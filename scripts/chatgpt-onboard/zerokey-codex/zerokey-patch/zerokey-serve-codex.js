@@ -20,7 +20,9 @@ const path = require('path')
 
 const modelsRouter = require('./routes/models')
 const healthRouter = require('./routes/health')
-const { buildChatGPTRouter } = require('./routes/chatgpt')
+const { buildChatGPTRouter, chatgptApi } = require('./routes/chatgpt')
+const { buildResponsesRoute } = require('./routes/responses')
+const { buildImagesRoute } = require('./routes/images')
 
 const PORT = parseInt(process.env.PORT || '8123', 10)
 const usersFile = path.join(__dirname, 'temp', 'users.json')
@@ -69,9 +71,13 @@ app.use('/', healthRouter)
   try {
     const r = await buildChatGPTRouter(user.parsedFetch, session, saveSession)
     app.use('/v1/chat/completions', r)
+    app.use('/v1/responses', buildResponsesRoute(chatgptApi))
+    app.use('/v1/images', buildImagesRoute(chatgptApi))
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`\n✅ zerokey-codex (user=${userKey}) on http://0.0.0.0:${PORT}`)
       console.log(`   POST http://0.0.0.0:${PORT}/v1/chat/completions`)
+      console.log(`   POST http://0.0.0.0:${PORT}/v1/responses`)
+      console.log(`   POST http://0.0.0.0:${PORT}/v1/images/generations`)
       console.log(`   Bearer vscode → ToolCompiler | Bearer raw → passthrough`)
     })
   } catch (e) {

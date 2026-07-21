@@ -1,7 +1,10 @@
 # 新增 ChatGPT 账户到 198 池 —— 上手手册（照做即可，不走弯路）
 
 > 面向下次直接执行的操作手册。先读完这一页，再动手。
-> 配套脚本：`add-chatgpt-acct-198-grinder.sh`（同目录）。
+> 配套脚本：`grinder.sh`（同目录）。
+> 本目录 `scripts/add-acct-198/` = 198 增容的**入口**（grinder + 本手册）。
+> grinder 依赖的浏览器脚本（`chatgpt-litellm-oauth.py`、`chatgpt-enable-codex-toggle.py`、`re-oauth.sh`）
+> 仍在 `scripts/chatgpt-onboard/`（被多处复用，未移动）；grinder 会自动引用，你不用管。
 > 深度原理/踩坑史：skill `add-chatgpt-acct-198`（v2.1.2+）+ memory `project_patchright_fullauto_us_proxy_onboard_2026_07_21`。
 
 ---
@@ -61,7 +64,7 @@ jms ssh JSZX-AI-03 "ls -l /Data/chatgpt-auth/re-oauth.sh"
 ```bash
 cd ~/codes/carher-admin
 GRIND_ACCTS="100 101" GRIND_CREDS=/tmp/grind-creds.csv \
-  nohup bash scripts/chatgpt-onboard/add-chatgpt-acct-198-grinder.sh > /tmp/grind-main.log 2>&1 &
+  nohup bash scripts/add-acct-198/grinder.sh > /tmp/grind-main.log 2>&1 &
 ```
 
 - `GRIND_ACCTS="100 101"` = 只跑这两个号；**不写这个变量就跑 CSV 里所有号**。
@@ -151,7 +154,7 @@ N=100   # 改成实际编号
 jms ssh JSZX-AI-03 "python3 -c \"import json,time;d=json.load(open('/Data/chatgpt-auth/acct-$N/auth.json'));print('access',len(d.get('access_token','')),'valid' if d.get('expires_at',0)>time.time() else 'EXPIRED')\""
 # 2) 送到 198 + scale=0 停覆写者 + hostPath 写回 + scale=1
 #    —— 这套就是 grinder finalize 的手法，嫌麻烦直接对这个号重跑 grinder 即可:
-GRIND_ACCTS="$N" GRIND_CREDS=/tmp/grind-creds.csv nohup bash scripts/chatgpt-onboard/add-chatgpt-acct-198-grinder.sh > /tmp/grind-$N.log 2>&1 &
+GRIND_ACCTS="$N" GRIND_CREDS=/tmp/grind-creds.csv nohup bash scripts/add-acct-198/grinder.sh > /tmp/grind-$N.log 2>&1 &
 ```
 
 > 最省事：**对单个坏号直接重跑 grinder**，它 finalize 会重写 PVC + 兜底校验，一遍过。
@@ -178,7 +181,7 @@ vi /tmp/grind-creds.csv
 # 2. 跑(先单个验证)
 cd ~/codes/carher-admin
 GRIND_ACCTS="100" GRIND_CREDS=/tmp/grind-creds.csv \
-  nohup bash scripts/chatgpt-onboard/add-chatgpt-acct-198-grinder.sh > /tmp/grind-main.log 2>&1 &
+  nohup bash scripts/add-acct-198/grinder.sh > /tmp/grind-main.log 2>&1 &
 
 # 3. 盯本地日志(别穿隧道)
 tail -f /tmp/grind-main.log
@@ -186,7 +189,7 @@ tail -f /tmp/grind-main.log
 
 # 4. 顺了就批量
 GRIND_ACCTS="101 102 103" GRIND_CREDS=/tmp/grind-creds.csv \
-  nohup bash scripts/chatgpt-onboard/add-chatgpt-acct-198-grinder.sh >> /tmp/grind-main.log 2>&1 &
+  nohup bash scripts/add-acct-198/grinder.sh >> /tmp/grind-main.log 2>&1 &
 ```
 
 **记住三条铁律：**

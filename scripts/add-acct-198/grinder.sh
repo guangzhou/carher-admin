@@ -1,5 +1,5 @@
 #!/bin/bash
-# add-chatgpt-acct-198-grinder.sh — 批量 OAuth 轮换 grinder (198 K3s litellm-product pool)
+# grinder.sh (scripts/add-acct-198/) — 批量 OAuth 轮换 grinder (198 K3s litellm-product pool)
 # ────────────────────────────────────────────────────────────────────────────
 # 用途: 把一批 ChatGPT 订阅号端到端接入 198 池, retry-until-success。
 #   phase1.5 login(+可选二次OTP) + device flow 各需一次 mail.com 取码成功, 靠 3-IP
@@ -18,7 +18,7 @@
 #
 # ── 用法 ──
 #   GRIND_ACCTS="93 94 95" GRIND_CREDS=/tmp/grind-creds.csv \
-#     nohup bash add-chatgpt-acct-198-grinder.sh > /tmp/grind-main.log 2>&1 &
+#     nohup bash scripts/add-acct-198/grinder.sh > /tmp/grind-main.log 2>&1 &
 #   # 监控: tail -f /tmp/grind-main.log  ← 读本地文件, 别穿 jms 隧道盯屏(隧道频繁2min超时)
 #   # 成败判定: 每号一行 "auth_valid=1/0"; 全部完成写 "GRINDER DONE ok=..."
 #   # 卡点根因才 docker logs(远端): j8 "docker logs \$CID"

@@ -51,7 +51,7 @@ class ChatGPTAPI {
     this._ready = true
   }
 
-  async chatCompletion(prompt, chatSessionId, parentMessageId = 'client-created-root', model = null, attachments = null) {
+  async chatCompletion(prompt, chatSessionId, parentMessageId = 'client-created-root', model = null, attachments = null, opts = {}) {
     if (!this._ready) throw new Error('Not initialized')
 
     await this._refreshSentinel()
@@ -114,6 +114,7 @@ class ChatGPTAPI {
       },
     }
     if (chatSessionId) body.conversation_id = chatSessionId
+    if (opts.forceSSE) body.force_use_sse = true
 
     console.log('[PROMPT] REQ', {
       chatSessionId,
@@ -501,6 +502,52 @@ class ChatGPTAPI {
 
   async _fetch(url, options = {}) {
     return fetch(url, { ...options, redirect: 'follow' })
+  }
+
+  // ─── Get conversation (for polling image results) ───────────
+  async getConversation(conversationId) {
+    const targetPath = `/backend-api/conversation/${conversationId}`
+    const res = await this._fetch(`${this.BASE_URL}${targetPath}`, {
+      method: 'GET',
+      headers: this._buildHeaders({ accept: '*/*' }, targetPath),
+    })
+    if (!res.ok) throw new Error(`getConversation ${res.status}`)
+    this._captureResponseHeaders(res)
+    return res.json()
+  }
+
+  // ─── Download file from image_asset_pointer ─────────────────
+  async downloadFile(fileId, conversationId, protocol = 'file-service') {
+    let targetPath
+    if (protocol === 'sediment') {
+      targetPath = `/backend-api/conversation/${conversationId}/attachment/${fileId}/download`
+    } else {
+      targetPath = `/backend-api/files/${fileId}/download`
+    }
+
+    const res = await this._fetch(`${this.BASE_URL}${targetPath}`, {
+      method: 'GET',
+      headers: this._buildHeaders({ accept: '*/*' }, targetPath),
+    })
+    if (!res.ok) throw new Error(`downloadFile ${res.status}`)
+    this._captureResponseHeaders(res)
+    const data = await res.json()
+
+    if (!data.download_url) throw new Error('No download_url in response')
+
+    // Estuary URLs (chatgpt.com/backend-api/estuary/...) need auth; CDN URLs don't.
+    const needsAuth = data.download_url.includes('chatgpt.com/backend-api/')
+    const imgRes = needsAuth
+      ? await this._fetch(data.download_url, {
+          method: 'GET',
+          headers: this._buildHeaders({ accept: '*/*' }, '/backend-api/estuary/content'),
+        })
+      : await this._fetch(data.download_url, { method: 'GET' })
+    if (!imgRes.ok) throw new Error(`image download ${imgRes.status}`)
+
+    const buf = Buffer.from(await imgRes.arrayBuffer())
+    console.log(`[ChatGPT] downloaded image ${fileId} (${buf.length} bytes)`)
+    return { base64: buf.toString('base64'), url: data.download_url }
   }
 
   isReady() {

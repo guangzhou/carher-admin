@@ -1,0 +1,300 @@
+// Responses API route for zerokey-serve.
+//
+// Accepts POST /v1/responses (OpenAI Responses API format), converts to
+// internal chatgptApi.chatCompletion(), and returns in Responses API format.
+// When tools[] is present and CODEX_TOKEN_DIR is configured, forwards to the
+// Codex endpoint (gpt-5.5) via round-robin OAuth tokens for native tool_call.
+
+const crypto = require('crypto')
+const { readSSE } = require('../utils/sse-reader')
+const { acquireSlot } = require('../utils/rate-limiter')
+const { resolveModel } = require('./raw')
+const { codexRequest, hasTokens } = require('./codex-pool')
+
+// ── Input parsing ──────────────────────────────────────────────
+
+function textOfContent(content) {
+  if (content == null) return ''
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((p) => {
+        if (typeof p === 'string') return p
+        if (p && p.type === 'input_text') return p.text || ''
+        if (p && p.type === 'output_text') return p.text || ''
+        if (p && p.text) return p.text
+        return ''
+      })
+      .join('')
+  }
+  return String(content)
+}
+
+function flattenInput(input, instructions) {
+  const parts = []
+  if (instructions) {
+    parts.push(`SYSTEM: ${instructions}`)
+  }
+  if (typeof input === 'string') {
+    parts.push(`USER: ${input}`)
+  } else if (Array.isArray(input)) {
+    for (const item of input) {
+      if (typeof item === 'string') {
+        parts.push(`USER: ${item}`)
+        continue
+      }
+      const role = String(item.role || 'user').toUpperCase()
+      const text = textOfContent(item.content)
+      parts.push(`${role}: ${text}`)
+    }
+  }
+  return parts.join('\n\n')
+}
+
+// ── Response builder ────────────────────────────────────────────
+
+function buildResponsesRoute(chatgptApi) {
+  const express = require('express')
+  const router = express.Router()
+
+  router.post('/', async (req, res) => {
+    const { input, instructions, stream = false } = req.body
+    if (input == null || (typeof input === 'string' && !input) ||
+        (Array.isArray(input) && input.length === 0)) {
+      return res.status(400).json({
+        error: { message: 'input is required', type: 'invalid_request_error' },
+      })
+    }
+
+    // ── Codex path: tools present → forward to Codex endpoint via OAuth pool ──
+    if (Array.isArray(req.body.tools) && req.body.tools.length > 0 && hasTokens()) {
+      return handleCodex(req, res)
+    }
+
+    const model = resolveModel(req.body.model)
+    const prompt = flattenInput(input, instructions)
+
+    await acquireSlot('ChatGPT')
+
+    const INLINE_MAX = parseInt(process.env.ZK_INLINE_MAX || '100000', 10)
+    let sendPrompt = prompt
+    let attachments = null
+    if (prompt.length > INLINE_MAX) {
+      try {
+        const buf = Buffer.from(prompt, 'utf8')
+        const up = await chatgptApi.uploadFile(buf, {
+          fileName: `conversation-${Date.now()}.txt`,
+          mimeType: 'text/plain',
+          useCase: 'my_files',
+        })
+        attachments = [{ id: up.id, size: up.size, name: up.name, mimeType: up.mimeType }]
+        sendPrompt =
+          'The full conversation/context is in the attached text file ' +
+          `(${up.name}). Read it and respond to the latest request in it.`
+        console.log(`[responses] long prompt ${prompt.length} chars → uploaded as ${up.id}`)
+      } catch (e) {
+        console.log(`[responses] file upload failed, falling back to inline: ${e.message}`)
+      }
+    }
+
+    let upstream
+    try {
+      upstream = await chatgptApi.chatCompletion(sendPrompt, null, 'client-created-root', model, attachments)
+    } catch (e) {
+      return res.status(502).json({ error: { message: e.message, type: 'upstream_error' } })
+    }
+
+    const respId = 'resp_' + crypto.randomBytes(12).toString('hex')
+    const msgId = 'msg_' + crypto.randomBytes(12).toString('hex')
+    const created = Math.floor(Date.now() / 1000)
+    const mdl = req.body.model || model || 'chatgpt-web'
+    let full = ''
+    let started = false
+    let finished = false
+
+    if (stream) {
+      res.setHeader('Content-Type', 'text/event-stream')
+      res.setHeader('Cache-Control', 'no-cache')
+      res.setHeader('Connection', 'keep-alive')
+      res.setHeader('Access-Control-Allow-Origin', '*')
+
+      // response.created
+      const respShell = {
+        id: respId, object: 'response', created_at: created, status: 'in_progress',
+        model: mdl, output: [],
+        usage: null,
+      }
+      res.write(`event: response.created\ndata: ${JSON.stringify(respShell)}\n\n`)
+
+      // output_item.added
+      const msgShell = {
+        type: 'message', id: msgId, role: 'assistant', content: [], status: 'in_progress',
+      }
+      res.write(`event: response.output_item.added\ndata: ${JSON.stringify({
+        type: 'response.output_item.added', item: msgShell, output_index: 0,
+      })}\n\n`)
+
+      // content_part.added
+      res.write(`event: response.content_part.added\ndata: ${JSON.stringify({
+        type: 'response.content_part.added', item_id: msgId,
+        output_index: 0, content_index: 0, part: { type: 'output_text', text: '' },
+      })}\n\n`)
+    }
+
+    const onText = (t) => {
+      if (!t) return
+      full += t
+      started = true
+      if (!stream) return
+      res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({
+        type: 'response.output_text.delta', item_id: msgId,
+        output_index: 0, content_index: 0, delta: t,
+      })}\n\n`)
+    }
+
+    const finish = () => {
+      if (finished) return
+      finished = true
+
+      const usage = {
+        input_tokens: 0, output_tokens: 0, total_tokens: 0,
+        input_token_details: { cached_tokens: 0 },
+        output_token_details: { reasoning_tokens: 0 },
+      }
+
+      if (stream) {
+        // output_text.done
+        res.write(`event: response.output_text.done\ndata: ${JSON.stringify({
+          type: 'response.output_text.done', item_id: msgId,
+          output_index: 0, content_index: 0, text: full,
+        })}\n\n`)
+
+        // content_part.done
+        res.write(`event: response.content_part.done\ndata: ${JSON.stringify({
+          type: 'response.content_part.done', item_id: msgId,
+          output_index: 0, content_index: 0, part: { type: 'output_text', text: full },
+        })}\n\n`)
+
+        // output_item.done
+        const doneMsg = {
+          type: 'message', id: msgId, role: 'assistant',
+          content: [{ type: 'output_text', text: full }], status: 'completed',
+        }
+        res.write(`event: response.output_item.done\ndata: ${JSON.stringify({
+          type: 'response.output_item.done', item: doneMsg, output_index: 0,
+        })}\n\n`)
+
+        // response.completed
+        res.write(`event: response.completed\ndata: ${JSON.stringify({
+          id: respId, object: 'response', created_at: created, status: 'completed',
+          model: mdl, output: [doneMsg], usage,
+        })}\n\n`)
+        res.end()
+      } else {
+        res.json({
+          id: respId, object: 'response', created_at: created, status: 'completed',
+          model: mdl,
+          output: [{
+            type: 'message', id: msgId, role: 'assistant',
+            content: [{ type: 'output_text', text: full }], status: 'completed',
+          }],
+          usage,
+        })
+      }
+    }
+
+    await readSSE(upstream, {
+      onData: (d) => {
+        if (!d || finished) return
+        if (d.p === '/message/content/parts/0' && d.o === 'append') return onText(d.v)
+        if (typeof d.v === 'string' && !d.o && !d.p) return onText(d.v)
+        if (d.o === 'patch' && Array.isArray(d.v)) {
+          for (const op of d.v) {
+            if (finished) break
+            if (op.p === '/message/content/parts/0' && op.o === 'append') onText(op.v)
+            if (op.p === '/message/status' && op.o === 'replace' && op.v === 'finished_successfully') finish()
+          }
+        }
+        if (d.type === 'message_stream_complete') finish()
+      },
+      onDone: finish,
+      onError: (err) => {
+        if (finished) return
+        finished = true
+        if (stream) {
+          res.write(`event: error\ndata: ${JSON.stringify({ error: { message: err.message } })}\n\n`)
+          res.end()
+        } else {
+          res.status(502).json({ error: { message: err.message, type: 'upstream_error' } })
+        }
+      },
+      isDone: () => finished,
+    })
+  })
+
+  // ── Codex forwarding (native tool_call via OAuth pool) ────────
+  async function handleCodex(req, res) {
+    const { stream = false } = req.body
+    let result
+    try {
+      result = await codexRequest(req.body)
+    } catch (e) {
+      return res.status(502).json({ error: { message: e.message, type: 'upstream_error' } })
+    }
+
+    const { upstream, acct, statusCode } = result
+    if (statusCode !== 200) {
+      let body = ''
+      upstream.on('data', (c) => (body += c))
+      upstream.on('end', () => {
+        console.log(`[codex] ${acct} error ${statusCode}: ${body.slice(0, 200)}`)
+        try {
+          res.status(statusCode).json(JSON.parse(body))
+        } catch (_) {
+          res.status(statusCode).json({ error: { message: body, type: 'upstream_error' } })
+        }
+      })
+      return
+    }
+
+    if (stream) {
+      res.setHeader('Content-Type', 'text/event-stream')
+      res.setHeader('Cache-Control', 'no-cache')
+      res.setHeader('Connection', 'keep-alive')
+      res.setHeader('Access-Control-Allow-Origin', '*')
+      res.setHeader('X-Codex-Account', acct)
+      upstream.pipe(res)
+      return
+    }
+
+    // Non-streaming: buffer Codex SSE → collect output items + response.completed → return JSON
+    let buf = ''
+    let completed = null
+    const outputItems = []
+    upstream.on('data', (chunk) => {
+      buf += chunk.toString()
+      const lines = buf.split('\n')
+      buf = lines.pop()
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const d = JSON.parse(line.slice(6))
+          if (d.type === 'response.output_item.done' && d.item) outputItems.push(d.item)
+          if (d.type === 'response.completed' && d.response) completed = d.response
+        } catch (_) {}
+      }
+    })
+    upstream.on('end', () => {
+      if (completed) {
+        if (outputItems.length) completed.output = outputItems
+        res.json(completed)
+      } else {
+        res.status(502).json({ error: { message: 'no completed response from Codex', type: 'upstream_error' } })
+      }
+    })
+  }
+
+  return router
+}
+
+module.exports = { buildResponsesRoute }

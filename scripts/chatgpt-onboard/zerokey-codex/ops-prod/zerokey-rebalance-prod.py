@@ -11,7 +11,7 @@ fork 自 ops/zerokey-rebalance.py（dev/188 版），部署在 188 主机 cronta
     * host-mode P2 : 8144/8146/8147 (3 acct，50/52/53)
   - LITELLM_BASE 默认 http://10.68.13.198:30402 (prod NodePort)
   - RPM_PER_ACCT 默认 30 (vs dev 10)，对齐 A 步骤 CM patch
-  - POOL_MODEL   保持 "zerokey-pool"（不改产品名 alias）
+  - POOL_MODEL   默认 "chatgpt-gpt-5.5"（并入主池轮询）
 
 前置条件（首次运行）：
   1. CM 里 zerokey-pool 静态块必须已删（否则 config+DB 双源路由不确定）
@@ -40,43 +40,41 @@ from pathlib import Path
 
 HOME = os.path.expanduser("~")
 
-# ---- prod POOL_ACCOUNTS: 20 桥全集 ----
-# dir: 账号根目录 (state/REFRESH_STALE + ops/refresh.sh)
-# cont: docker 容器名 (docker start / refresh 用)
+# ---- prod POOL_ACCOUNTS: 21 桥全集 (K3s on 225) ----
+# svc: K8s ClusterIP Service DNS（litellm 用）
+# cont: K8s Deployment 名（kubectl rollout 用）
+SVC_NS = "litellm-product"
+SVC_PORT = 8200
 POOL_ACCOUNTS = {
-    # bridge-mode legacy (8123 主容器 + 10 named acct)
-    8123: {"name": "kristine", "dir": f"{HOME}/zerokey-codex",                 "cont": "zerokey-codex"},
-    8124: {"name": "timothy",  "dir": f"{HOME}/zerokey-codex-accounts/timothy", "cont": "zerokey-codex-timothy"},
-    8125: {"name": "zyq",      "dir": f"{HOME}/zerokey-codex-accounts/zyq",     "cont": "zerokey-codex-zyq"},
-    8126: {"name": "owp",      "dir": f"{HOME}/zerokey-codex-accounts/owp",     "cont": "zerokey-codex-owp"},
-    8127: {"name": "hgg",      "dir": f"{HOME}/zerokey-codex-accounts/hgg",     "cont": "zerokey-codex-hgg"},
-    8128: {"name": "dvo",      "dir": f"{HOME}/zerokey-codex-accounts/dvo",     "cont": "zerokey-codex-dvo"},
-    8129: {"name": "elise",    "dir": f"{HOME}/zerokey-codex-accounts/elise",   "cont": "zerokey-codex-elise"},
-    8130: {"name": "herbert",  "dir": f"{HOME}/zerokey-codex-accounts/herbert", "cont": "zerokey-codex-herbert"},
-    8131: {"name": "olga",     "dir": f"{HOME}/zerokey-codex-accounts/olga",    "cont": "zerokey-codex-olga"},
-    8132: {"name": "tania",    "dir": f"{HOME}/zerokey-codex-accounts/tania",   "cont": "zerokey-codex-tania"},
-    8133: {"name": "iheyv",    "dir": f"{HOME}/zerokey-codex-accounts/iheyv",   "cont": "zerokey-codex-iheyv"},
-    # host-mode P0 (acct-32/34/37 双桥)
-    8134: {"name": "acct37",   "dir": f"{HOME}/zerokey-codex-accounts/acct37",  "cont": "zerokey-codex-acct37"},
-    8135: {"name": "acct32",   "dir": f"{HOME}/zerokey-codex-accounts/acct32",  "cont": "zerokey-codex-acct32"},
-    8136: {"name": "acct34",   "dir": f"{HOME}/zerokey-codex-accounts/acct34",  "cont": "zerokey-codex-acct34"},
-    # host-mode P1 (acct-18/19/20 纯 web)
-    8139: {"name": "acct18",   "dir": f"{HOME}/zerokey-codex-accounts/acct18",  "cont": "zerokey-codex-acct18"},
-    8140: {"name": "acct19",   "dir": f"{HOME}/zerokey-codex-accounts/acct19",  "cont": "zerokey-codex-acct19"},
-    8141: {"name": "acct20",   "dir": f"{HOME}/zerokey-codex-accounts/acct20",  "cont": "zerokey-codex-acct20"},
-    # host-mode P2 (acct-50/51/52/53 双桥)
-    8144: {"name": "acct50",   "dir": f"{HOME}/zerokey-codex-accounts/acct50",  "cont": "zerokey-codex-acct50"},
-    8145: {"name": "acct51",   "dir": f"{HOME}/zerokey-codex-accounts/acct51",  "cont": "zerokey-codex-acct51"},
-    8146: {"name": "acct52",   "dir": f"{HOME}/zerokey-codex-accounts/acct52",  "cont": "zerokey-codex-acct52"},
-    8147: {"name": "acct53",   "dir": f"{HOME}/zerokey-codex-accounts/acct53",  "cont": "zerokey-codex-acct53"},
+    8123: {"name": "kristine", "dir": f"{HOME}/zerokey-codex",                 "cont": "zero-39", "svc": f"zero-39.{SVC_NS}.svc.cluster.local"},
+    8124: {"name": "timothy",  "dir": f"{HOME}/zerokey-codex-accounts/timothy", "cont": "zero-36", "svc": f"zero-36.{SVC_NS}.svc.cluster.local"},
+    8125: {"name": "zyq",      "dir": f"{HOME}/zerokey-codex-accounts/zyq",     "cont": "zero-48", "svc": f"zero-48.{SVC_NS}.svc.cluster.local"},
+
+    8127: {"name": "hgg",      "dir": f"{HOME}/zerokey-codex-accounts/hgg",     "cont": "zero-46", "svc": f"zero-46.{SVC_NS}.svc.cluster.local"},
+    8128: {"name": "dvo",      "dir": f"{HOME}/zerokey-codex-accounts/dvo",     "cont": "zero-47", "svc": f"zero-47.{SVC_NS}.svc.cluster.local"},
+    8129: {"name": "elise",    "dir": f"{HOME}/zerokey-codex-accounts/elise",   "cont": "zero-40", "svc": f"zero-40.{SVC_NS}.svc.cluster.local"},
+    8130: {"name": "herbert",  "dir": f"{HOME}/zerokey-codex-accounts/herbert", "cont": "zero-41", "svc": f"zero-41.{SVC_NS}.svc.cluster.local"},
+    8131: {"name": "olga",     "dir": f"{HOME}/zerokey-codex-accounts/olga",    "cont": "zero-42", "svc": f"zero-42.{SVC_NS}.svc.cluster.local"},
+
+    8133: {"name": "iheyv",    "dir": f"{HOME}/zerokey-codex-accounts/iheyv",   "cont": "zero-44", "svc": f"zero-44.{SVC_NS}.svc.cluster.local"},
+    8134: {"name": "acct37",   "dir": f"{HOME}/zerokey-codex-accounts/acct37",  "cont": "zero-37", "svc": f"zero-37.{SVC_NS}.svc.cluster.local"},
+    8135: {"name": "acct32",   "dir": f"{HOME}/zerokey-codex-accounts/acct32",  "cont": "zero-32", "svc": f"zero-32.{SVC_NS}.svc.cluster.local"},
+
+    8139: {"name": "acct18",   "dir": f"{HOME}/zerokey-codex-accounts/acct18",  "cont": "zero-18", "svc": f"zero-18.{SVC_NS}.svc.cluster.local"},
+    8140: {"name": "acct19",   "dir": f"{HOME}/zerokey-codex-accounts/acct19",  "cont": "zero-19", "svc": f"zero-19.{SVC_NS}.svc.cluster.local"},
+    8141: {"name": "acct20",   "dir": f"{HOME}/zerokey-codex-accounts/acct20",  "cont": "zero-20", "svc": f"zero-20.{SVC_NS}.svc.cluster.local"},
+    8144: {"name": "acct50",   "dir": f"{HOME}/zerokey-codex-accounts/acct50",  "cont": "zero-50", "svc": f"zero-50.{SVC_NS}.svc.cluster.local"},
+
+    8146: {"name": "acct52",   "dir": f"{HOME}/zerokey-codex-accounts/acct52",  "cont": "zero-52", "svc": f"zero-52.{SVC_NS}.svc.cluster.local"},
+    8147: {"name": "acct53",   "dir": f"{HOME}/zerokey-codex-accounts/acct53",  "cont": "zero-53", "svc": f"zero-53.{SVC_NS}.svc.cluster.local"},
 }
 
-UPSTREAM_HOST = os.environ.get("ZK_UPSTREAM_HOST", "10.68.13.188")
+UPSTREAM_HOST = os.environ.get("ZK_UPSTREAM_HOST", "10.68.13.225")
 UPSTREAM_SLUG = "gpt-5-5"
 
 LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://10.68.13.198:30402").rstrip("/")
 LITELLM_MK = os.environ.get("LITELLM_MK", "")
-POOL_MODEL = os.environ.get("POOL_MODEL", "zerokey-pool")
+POOL_MODEL = os.environ.get("POOL_MODEL", "chatgpt-gpt-5.5")
 RPM_PER_ACCT = int(os.environ.get("RPM_PER_ACCT", "30"))
 DEEP_PROBE = os.environ.get("DEEP_PROBE", "") == "1"
 DEEP_MIN = int(os.environ.get("DEEP_MIN", "300"))
@@ -126,12 +124,12 @@ def save_state(state):
 
 
 def pool_id(port):
-    return f"zk-pool-{port}"
+    return POOL_ACCOUNTS[port]["cont"]
 
 
 def port_reachable(port):
     """本机探 /v1/models。"""
-    url = f"http://127.0.0.1:{port}/v1/models"
+    url = f"http://{UPSTREAM_HOST}:{port}/v1/models"
     req = urllib.request.Request(url)
     try:
         with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT) as r:
@@ -157,7 +155,7 @@ def deep_probe(port):
         "max_tokens": 1,
     }).encode()
     req = urllib.request.Request(
-        f"http://127.0.0.1:{port}/v1/chat/completions",
+        f"http://{UPSTREAM_HOST}:{port}/v1/chat/completions",
         data=body,
         headers={"Authorization": "Bearer raw", "Content-Type": "application/json"},
         method="POST",
@@ -233,36 +231,38 @@ def api_request(method, path, body=None):
 
 
 def current_pool_ids():
-    """返回本池 DB 部署 id 集合 (zk-pool-*)。db_model=False 的静态块不计。"""
+    """返回本池 DB 部署 id 集合 (zero-*)。db_model=False 的静态块不计。"""
     status, data = api_request("GET", "/v1/model/info")
     if status != 200 or not isinstance(data, dict):
         return False, set()
     ids = set()
+    pool_id_set = {meta["cont"] for meta in POOL_ACCOUNTS.values()}
     for e in data.get("data", []):
         if e.get("model_name") != POOL_MODEL:
             continue
         mid = (e.get("model_info") or {}).get("id", "")
-        if mid.startswith("zk-pool-"):
+        if mid in pool_id_set:
             ids.add(mid)
     return True, ids
 
 
 def add_pool(port):
+    meta = POOL_ACCOUNTS[port]
+    svc_base = f"http://{meta['svc']}:{SVC_PORT}/v1"
     if DRY_RUN:
-        log(f"  [DRY_RUN] would /model/new {pool_id(port)} -> {UPSTREAM_HOST}:{port}")
+        log(f"  [DRY_RUN] would /model/new {pool_id(port)} -> {svc_base}")
         return True
     entry = {
         "model_name": POOL_MODEL,
         "litellm_params": {
             "model": f"openai/{UPSTREAM_SLUG}",
-            "api_base": f"http://{UPSTREAM_HOST}:{port}/v1",
+            "api_base": svc_base,
             "api_key": "raw",
-            "use_chat_completions_api": True,
             "rpm": RPM_PER_ACCT,
             "input_cost_per_token": 5e-6,
             "output_cost_per_token": 3e-5,
         },
-        "model_info": {"id": pool_id(port)},
+        "model_info": {"id": pool_id(port), "mode": "responses"},
     }
     status, resp = api_request("POST", "/model/new", entry)
     if status == 200:
@@ -313,14 +313,14 @@ def trigger_refresh(port, meta, state, transitions):
 
 def try_revive(port, meta):
     if DRY_RUN or not REVIVE:
-        log(f"  [{'DRY_RUN' if DRY_RUN else 'REVIVE=0'}] would docker start {meta['cont']}")
+        log(f"  [{'DRY_RUN' if DRY_RUN else 'REVIVE=0'}] would kubectl rollout restart deploy/{meta['cont']}")
         return
     try:
-        subprocess.run(["docker", "start", meta["cont"]], timeout=30,
-                       capture_output=True, text=True)
-        log(f"  {meta['name']}: docker start {meta['cont']} issued")
+        subprocess.run(["kubectl", "rollout", "restart", f"deploy/{meta['cont']}", "-n", SVC_NS],
+                       timeout=30, capture_output=True, text=True)
+        log(f"  {meta['name']}: kubectl rollout restart deploy/{meta['cont']} issued")
     except Exception as e:
-        log(f"  {meta['name']}: docker start error {type(e).__name__}: {e}")
+        log(f"  {meta['name']}: kubectl rollout restart error {type(e).__name__}: {e}")
 
 
 def alert_feishu(text):

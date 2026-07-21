@@ -30,6 +30,8 @@ fi
 echo "[install] applying patches…"
 cp "$HERE/zerokey-patch/routes/raw.js"          "$TARGET/zerokey/routes/raw.js"
 cp "$HERE/zerokey-patch/routes/chatgpt.js"      "$TARGET/zerokey/routes/chatgpt.js"
+cp "$HERE/zerokey-patch/routes/responses.js"    "$TARGET/zerokey/routes/responses.js"
+cp "$HERE/zerokey-patch/routes/codex-pool.js"   "$TARGET/zerokey/routes/codex-pool.js"
 cp "$HERE/zerokey-patch/core/chatgpt/api.js"    "$TARGET/zerokey/core/chatgpt/api.js"
 cp "$HERE/zerokey-patch/config/constants.js"    "$TARGET/zerokey/config/constants.js"
 cp "$HERE/zerokey-patch/zerokey-serve-codex.js" "$TARGET/zerokey/zerokey-serve-codex.js"

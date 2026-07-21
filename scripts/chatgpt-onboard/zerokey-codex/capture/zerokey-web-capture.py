@@ -440,7 +440,7 @@ def login_chatgpt(ctx, page):
         try:
             loc = page.locator(sel)
             if loc.count() > 0 and loc.first.is_visible():
-                loc.first.click()
+                loc.first.click(force=True)
                 time.sleep(3)
                 break
         except Exception:
@@ -711,7 +711,7 @@ def main():
                 try:
                     lg = page.locator("button:has-text('Log in'), a:has-text('Log in')")
                     if lg.count() > 0:
-                        lg.first.click()
+                        lg.first.click(force=True)
                         time.sleep(4)
                         clear_cf(page)
                         # may show an account chooser / continue
@@ -731,7 +731,12 @@ def main():
                     if "chatgpt.com" in page.url and "auth" not in page.url:
                         break
                     time.sleep(2)
-                if is_logged_in(page):
+                # if stuck on auth.openai.com (OAuth callback), navigate back
+                if "chatgpt.com" not in page.url or "auth" in page.url:
+                    page.goto("https://chatgpt.com/", wait_until="domcontentloaded")
+                    time.sleep(5)
+                    clear_cf(page)
+                if is_logged_in(page) and "chatgpt.com" in page.url:
                     print("[1b] SSO success — now logged in", flush=True)
                     break
                 # if SSO bounced to full login, run the password+OTP flow

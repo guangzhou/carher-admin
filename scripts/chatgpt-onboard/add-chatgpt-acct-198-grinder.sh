@@ -118,6 +118,20 @@ rm -rf \$sd"
   OVR="{\"spec\":{\"nodeName\":\"$NODE\",\"restartPolicy\":\"Never\",\"volumes\":[{\"name\":\"a\",\"persistentVolumeClaim\":{\"claimName\":\"chatgpt-acct-$N-auth\"}},{\"name\":\"h\",\"hostPath\":{\"path\":\"/tmp/acct${N}stage.json\",\"type\":\"File\"}}],\"containers\":[{\"name\":\"x\",\"image\":\"busybox\",\"command\":[\"sh\",\"-c\",\"cp /h/src /a/auth.json; echo RESULT=\$(wc -c < /a/auth.json)\"],\"volumeMounts\":[{\"name\":\"a\",\"mountPath\":\"/a\"},{\"name\":\"h\",\"mountPath\":\"/h/src\"}]}]}}"
   jr "kubectl -n $NS run cp$N-h --restart=Never --image=busybox --overrides='$OVR' >/dev/null 2>&1; kubectl -n $NS wait --for=condition=Ready pod/cp$N-h --timeout=30s >/dev/null 2>&1; sleep 3; kubectl -n $NS logs cp$N-h 2>/dev/null|grep RESULT; kubectl -n $NS delete pod cp$N-h --force --grace-period=0 >/dev/null 2>&1"
   jr "kubectl -n $NS scale deploy chatgpt-acct-$N --replicas=1; kubectl -n $NS rollout status deploy/chatgpt-acct-$N --timeout=150s"
+  # 兜底: pod 首启若抢在 hostPath 写入前, 容器会自发 device_code 把有效 auth.json 覆写成
+  # 空壳 {device_code_requested_at}(实证 acct-98)。scale=1 后校验 pod 内 auth, 空壳则重写 PVC
+  # 再重启, 最多 2 轮。PVC 预置有效 token 后容器就不再触发 device_code。
+  for vfix in 1 2; do
+    sleep 12
+    VPOD=$(jr "kubectl -n $NS get pod -l app=chatgpt-acct-$N -o jsonpath='{.items[0].metadata.name}' 2>/dev/null" | tail -1)
+    [ -z "$VPOD" ] && { sleep 8; continue; }
+    PODTOK=$(jr "kubectl -n $NS exec $VPOD -- python3 -c \"import json;print(len(json.load(open('/chatgpt-auth/auth.json')).get('access_token','')))\" 2>/dev/null" | tr -dc 0-9)
+    if [ "${PODTOK:-0}" -gt 1000 ]; then echo "  ✓ acct-$N pod auth 有效 (access_len=$PODTOK)"; break; fi
+    echo "  ⚠ acct-$N pod auth 被覆写成空壳 (access_len=${PODTOK:-0}) — 第 $vfix 轮重写 PVC"
+    jr "kubectl -n $NS scale deploy chatgpt-acct-$N --replicas=0; for i in \$(seq 1 20); do [ \"\$(kubectl -n $NS get pod -l app=chatgpt-acct-$N --no-headers 2>/dev/null|wc -l)\" = 0 ] && break; sleep 3; done"
+    jr "kubectl -n $NS run cp$N-hv --restart=Never --image=busybox --overrides='$OVR' >/dev/null 2>&1; kubectl -n $NS wait --for=condition=Ready pod/cp$N-hv --timeout=30s >/dev/null 2>&1; sleep 3; kubectl -n $NS logs cp$N-hv 2>/dev/null|grep RESULT; kubectl -n $NS delete pod cp$N-hv --force --grace-period=0 >/dev/null 2>&1"
+    jr "kubectl -n $NS scale deploy chatgpt-acct-$N --replicas=1; kubectl -n $NS rollout status deploy/chatgpt-acct-$N --timeout=150s"
+  done
   # 注册进 quota-rebalance POOL_ACCOUNTS + state.json HEALTHY + resume_acct(6模型)
   j8 "grep -q '\"acct-$N\":' /home/cltx/quota-rebalance.py || sed -i '/\"acct-79\": {\"port\": 4079/a\\    \"acct-$N\": {\"port\": 40$N, \"location\": \"198\"},' /home/cltx/quota-rebalance.py"
   j8 "python3 -c 'import json,pathlib,time;p=pathlib.Path(\"/home/cltx/.chatgpt-quota/state/state.json\");d=json.loads(p.read_text());a=d.setdefault(\"acct-$N\",{});a.update({\"tier\":\"HEALTHY\",\"paused\":False,\"manual_offline\":False,\"consecutive_401\":0,\"consecutive_probe_err\":0,\"probe_err_alerted\":False,\"restore_at\":0,\"cause\":None,\"ts\":int(time.time())});p.write_text(json.dumps(d,indent=2,ensure_ascii=False))'"

@@ -1,0 +1,195 @@
+# 新增 ChatGPT 账户到 198 池 —— 上手手册（照做即可，不走弯路）
+
+> 面向下次直接执行的操作手册。先读完这一页，再动手。
+> 配套脚本：`add-chatgpt-acct-198-grinder.sh`（同目录）。
+> 深度原理/踩坑史：skill `add-chatgpt-acct-198`（v2.1.2+）+ memory `project_patchright_fullauto_us_proxy_onboard_2026_07_21`。
+
+---
+
+## 0. 这套东西是干什么的
+
+把一批 ChatGPT 订阅号（飞书表里的邮箱+密码）**端到端全自动**接入 198 K3s `litellm-product` 生产池：
+OAuth 拿 token → 写进 K8s PVC → 注册 6 个模型到 quota-rebalance → smoke 验证 200。
+
+**一个脚本 + 一个 CSV 搞定。** 中途 CF 拦截、toggle 没开、pod 覆写空壳等坑，脚本都自动处理。
+
+---
+
+## 1. 前置检查（第一次用/换机器时确认，平时可跳过）
+
+```bash
+# jms 两个别名能连(这是全流程的通道)
+jms ssh AIYJY-litellm "echo ok198"    # 198 kube host(跑 kubectl)
+jms ssh JSZX-AI-03    "echo ok188"    # 188 docker host(跑 patchright 浏览器)
+
+# 188 上 patchright 镜像在
+jms ssh JSZX-AI-03 "docker image inspect mcr.microsoft.com/playwright/python:v1.60.0-noble >/dev/null && echo image-ok"
+
+# 188 上 re-oauth.sh 在
+jms ssh JSZX-AI-03 "ls -l /Data/chatgpt-auth/re-oauth.sh"
+```
+
+三条都 ok 就能开跑。任何一条不 ok → 先解决通道/镜像，别硬跑。
+
+---
+
+## 2. 准备 CSV（唯一要手动填的东西）
+
+新建 `/tmp/grind-creds.csv`，**每行一个号，4 列逗号分隔**，顺序固定：
+
+```
+账号编号,邮箱,邮箱密码,GPT密码
+```
+
+例：
+
+```
+100,SomeUser@mail.com,mailpw123,gptpw456
+101,AnotherUser@mail.com,mailpw789,gptpwABC
+# 这行以 # 开头会被忽略
+```
+
+**注意事项：**
+- 编号接着现有最大号往后排（现在已到 99，下一个从 100 起）。别和已存在的号冲突。
+- 顺序**不能错**：第 3 列是邮箱密码，第 4 列是 GPT 密码。填反了登录必失败。
+- 从飞书表复制出来自己整理成这 4 列。不确定就把表格内容发给我，我帮你转。
+
+---
+
+## 3. 一条命令跑起来
+
+```bash
+cd ~/codes/carher-admin
+GRIND_ACCTS="100 101" GRIND_CREDS=/tmp/grind-creds.csv \
+  nohup bash scripts/chatgpt-onboard/add-chatgpt-acct-198-grinder.sh > /tmp/grind-main.log 2>&1 &
+```
+
+- `GRIND_ACCTS="100 101"` = 只跑这两个号；**不写这个变量就跑 CSV 里所有号**。
+- `nohup ... &` = 后台跑，串行处理，关终端也不断。
+- 每号最多重试 10 次（3 个出口 IP 轮换过 CF）。
+
+**建议：第一次先跑 1 个号**（`GRIND_ACCTS="100"`），确认流程顺，再批量。
+
+---
+
+## 4. 监控（铁律：只看本地日志文件，别自己穿 jms 隧道盯屏）
+
+```bash
+tail -f /tmp/grind-main.log
+```
+
+> ⚠️ **别用 `sleep + jms ssh` 循环去远端拉日志**。jms 隧道频繁 2 分钟超时，盯屏纯浪费时间。
+> grinder 的成败信号全写在**本地** `/tmp/grind-main.log`。
+
+看这几个关键信号：
+
+| 日志里看到 | 含义 |
+|-----------|------|
+| `auth_valid=1` | 这个号 OAuth 成功，token 拿到了 |
+| `[两步法] acct-N 疑似 Codex toggle off` | 自动去开 toggle 了（正常，别慌）|
+| `✓ acct-N pod auth 有效 (access_len=1745)` | 空壳兜底校验通过，PVC 里 token 是好的 |
+| `⚠ acct-N pod auth 被覆写成空壳 ... 重写 PVC` | 踩到 acct-98 那个坑，脚本自动修（正常）|
+| `resume: 6` | 6 个模型注册成功 |
+| `chatgpt-acct-N-gpt-5.5 -> HTTP 200` | smoke 通过，真能用了 |
+| `GRINDER DONE ok=100 101` | 全部完成，收工 |
+
+---
+
+## 5. 脚本自动处理的坑（你不用管）
+
+| 坑 | 脚本自动做什么 |
+|----|--------------|
+| CF Turnstile 拦浏览器 | 3 个出口 IP 轮换（美×2 + 日×1）重试 |
+| 密码+验证码号 Codex toggle 默认关 | 连续失败时自动先开 toggle 再继续 OAuth（两步法）|
+| pod 首启把 auth.json 覆写成空壳 | scale=1 后校验，空壳自动重写 PVC 再重启（最多 2 轮）|
+| 写 PVC（local-path node-bound）| hostPath busybox 中转写入 |
+| 注册模型 + state HEALTHY + smoke | 全自动 |
+
+---
+
+## 6. 需要你介入的情况（只有这几种）
+
+### A. 某号 `!!!! acct-N FAILED after 10`
+10 次都没成功。去看远端最后一次卡在哪：
+
+```bash
+jms ssh JSZX-AI-03 "docker logs \$(docker ps -alq) 2>&1 | tail -40"
+```
+
+常见原因：
+- **密码错**（CSV 填错，或飞书表里就是错的）→ 日志停在密码页反复。
+- **邮箱收不到验证码** → 日志 `device OTP fetch failed` 反复。换个时间重试或查邮箱本身。
+- **CF 一直拦** → 罕见，通常轮换能过；连续 10 次都被拦说明 IP 都被限了，等会儿再跑。
+
+### B. 全跑完但某号 smoke 不是 200
+先确认 pod 和 auth：
+
+```bash
+# 查 pod 内 auth.json 有没有真 token(access_len 应 >1000, 不是空壳)
+jms ssh AIYJY-litellm "POD=\$(kubectl -n litellm-product get pod -l account=N -o jsonpath='{.items[0].metadata.name}'); kubectl -n litellm-product exec \$POD -- python3 -c \"import json;print('access_len',len(json.load(open('/chatgpt-auth/auth.json')).get('access_token','')))\""
+```
+
+- `access_len=0` → 空壳没被兜底住（极少），手动救：见下方"手动救空壳"。
+- `access_len=1745` 但 smoke 非 200 → 可能 litellm 还没 reload，等 1-2 分钟；或直接问我。
+
+### C. 拿不准根因
+别自己瞎试。直接说 **"acct-N 卡了/报 X，帮我按三段式查"**，我来定位。
+
+---
+
+## 7. 手动救空壳（万一 #11 兜底没生效时的应急 SOP）
+
+症状：quota 探针报 `ValueError: no access_token`（**这不是 401**，别被误导），pod 却 1/1 Running，pod 内 auth.json 只有 `{"device_code_requested_at":...}`。
+
+原因：pod 首启抢在写 PVC 前，自己发 device_code 把好 token 覆写成空壳。
+
+修复（188 中转文件若还有效，直接复用，不用重 OAuth）：
+
+```bash
+N=100   # 改成实际编号
+# 1) 确认 188 中转 auth 还有效(access_len>1000, expires 未过期)
+jms ssh JSZX-AI-03 "python3 -c \"import json,time;d=json.load(open('/Data/chatgpt-auth/acct-$N/auth.json'));print('access',len(d.get('access_token','')),'valid' if d.get('expires_at',0)>time.time() else 'EXPIRED')\""
+# 2) 送到 198 + scale=0 停覆写者 + hostPath 写回 + scale=1
+#    —— 这套就是 grinder finalize 的手法，嫌麻烦直接对这个号重跑 grinder 即可:
+GRIND_ACCTS="$N" GRIND_CREDS=/tmp/grind-creds.csv nohup bash scripts/chatgpt-onboard/add-chatgpt-acct-198-grinder.sh > /tmp/grind-$N.log 2>&1 &
+```
+
+> 最省事：**对单个坏号直接重跑 grinder**，它 finalize 会重写 PVC + 兜底校验，一遍过。
+
+---
+
+## 8. 收尾核对（全批跑完后一次性确认）
+
+```bash
+# 所有号 1/1 Running
+jms ssh AIYJY-litellm "for N in 100 101; do echo acct-\$N: \$(kubectl -n litellm-product get deploy chatgpt-acct-\$N -o jsonpath='{.status.readyReplicas}/{.spec.replicas}' 2>/dev/null); done"
+```
+
+看到全 `1/1` + 日志里全 `HTTP 200` + `GRINDER DONE` = 完事。
+
+---
+
+## 速查卡（TL;DR）
+
+```bash
+# 1. 填 CSV: 编号,邮箱,邮箱密码,GPT密码
+vi /tmp/grind-creds.csv
+
+# 2. 跑(先单个验证)
+cd ~/codes/carher-admin
+GRIND_ACCTS="100" GRIND_CREDS=/tmp/grind-creds.csv \
+  nohup bash scripts/chatgpt-onboard/add-chatgpt-acct-198-grinder.sh > /tmp/grind-main.log 2>&1 &
+
+# 3. 盯本地日志(别穿隧道)
+tail -f /tmp/grind-main.log
+#   看 auth_valid=1 / HTTP 200 / GRINDER DONE
+
+# 4. 顺了就批量
+GRIND_ACCTS="101 102 103" GRIND_CREDS=/tmp/grind-creds.csv \
+  nohup bash scripts/chatgpt-onboard/add-chatgpt-acct-198-grinder.sh >> /tmp/grind-main.log 2>&1 &
+```
+
+**记住三条铁律：**
+1. CSV 4 列顺序别填反（邮箱密码在前，GPT 密码在后）。
+2. 监控只看本地 `/tmp/grind-main.log`，别自己穿 jms 隧道盯屏。
+3. 探针报 `no access_token` 是**空壳覆写，不是 401**；单号重跑 grinder 即修复。

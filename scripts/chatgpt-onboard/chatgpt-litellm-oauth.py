@@ -96,11 +96,142 @@ def ss(page, name):
     except Exception as e:
         print(f"  shot fail: {e}", flush=True)
 
+def _enter_email_resilient(p_page, email, label="email"):
+    """Enter an email into a login/device email field without the brittle
+    hard `.first.click()` that hangs 30s when the field is prefilled and the
+    page is auto-submitting (element 'not enabled' / 'detached from DOM').
+
+    Order: detect prefill (skip) → fill() → click+type → JS set+dispatch.
+    Never raises: if all fail the page is usually already auto-advancing, so
+    we log and let the caller proceed to the submit/next-page wait.
+    Returns True if the field ended up holding the email (or was prefilled)."""
+    sel = "input[type='email'], input[autocomplete='username'], input[name='email']"
+    try:
+        p_page.wait_for_selector(sel, timeout=20000)
+    except Exception as e:
+        print(f"    [{label}] no email field appeared: {str(e)[:60]}", flush=True)
+        return False
+    fld = p_page.locator(sel).first
+    try:
+        cur = (fld.input_value(timeout=3000) or "").strip()
+    except Exception:
+        cur = ""
+    if cur.lower() == email.lower():
+        print(f"    [{label}] email already prefilled ({cur}) — skip typing", flush=True)
+        return True
+    # click-type (真键入) 优先: fill() 不触发 React onChange → Continue 按钮不激活
+    # → email 提交无效 → 密码页永不出现 (实证 acct-93 密码号卡这, "email entered
+    # via fill" 后停在 /log-in 密码框不出)。真键入触发 onChange 才能前进。
+    for how in ("click-type", "fill", "js"):
+        try:
+            if how == "fill":
+                fld.fill(email, timeout=5000)
+            elif how == "click-type":
+                fld.click(timeout=5000)
+                p_page.keyboard.press("Control+a")
+                p_page.keyboard.type(email, delay=80)
+            else:
+                fld.evaluate(
+                    "(el,v)=>{el.value=v;"
+                    "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                    "el.dispatchEvent(new Event('change',{bubbles:true}));}", email)
+            # 校验真落值 (fill 偶尔静默失败)
+            try:
+                if (fld.input_value(timeout=2000) or "").strip().lower() != email.lower() and how != "js":
+                    continue
+            except Exception:
+                pass
+            print(f"    [{label}] email entered via {how}", flush=True)
+            return True
+        except Exception as e:
+            print(f"    [{label}] {how} failed: {str(e)[:60]}", flush=True)
+    print(f"    [{label}] all strategies failed; proceeding (page may auto-advance)", flush=True)
+    return False
+
+def _enter_otp_resilient(p_page, code, label="otp"):
+    """Type an OTP into either single-char boxes (maxlength=1) or one code
+    input, without a hard .click() that hangs 30s on a hidden/disabled field.
+    Order per single-input: fill() → click+type → JS set+dispatch. Best-effort."""
+    code = (code or "").strip()
+    if not code:
+        return False
+    boxes = [b for b in p_page.locator("input[maxlength='1']").all() if b.is_visible()]
+    if len(boxes) >= len(code):
+        for i, ch in enumerate(code):
+            try:
+                boxes[i].click(timeout=2500); p_page.keyboard.type(ch, delay=90)
+            except Exception:
+                try: boxes[i].fill(ch)
+                except Exception: pass
+        try: p_page.keyboard.press("Enter")
+        except Exception: pass
+        print(f"    [{label}] entered into {len(code)} boxes", flush=True)
+        return True
+    sel = ("input[autocomplete='one-time-code'], input[inputmode='numeric'], "
+           "input[name='code'], input[type='tel'], input[maxlength='6']")
+    cand = [c for c in p_page.locator(sel).all() if c.is_visible()]
+    if not cand:
+        cand = [c for c in p_page.locator("form input").all() if c.is_visible()]
+    if not cand:
+        print(f"    [{label}] no OTP input located", flush=True)
+        return False
+    fld = cand[0]
+    # click-type (真键入) 优先: fill() 不触发 React onChange → device-grant OTP 虽落值
+    # 但服务端从未收到提交 → deviceauth/token poll 永远 403 pending (实证 acct-96:
+    # "entered via fill" 后 34x 403 pending, 而 device grant 从未 authorize)。
+    # 真键入触发 onChange 才能提交。每种策略后校验 input_value 真落值。
+    for how in ("click-type", "fill", "js"):
+        try:
+            if how == "fill":
+                fld.fill(code, timeout=5000)
+            elif how == "click-type":
+                fld.click(timeout=5000); p_page.keyboard.press("Control+a")
+                p_page.keyboard.press("Backspace"); p_page.keyboard.type(code, delay=120)
+            else:
+                fld.evaluate(
+                    "(el,v)=>{el.value=v;"
+                    "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                    "el.dispatchEvent(new Event('change',{bubbles:true}));}", code)
+            # 校验真落值 (fill 静默失败时回退到下一策略)
+            try:
+                if (fld.input_value(timeout=2000) or "").strip() != code and how != "js":
+                    print(f"    [{label}] {how} value mismatch, next strategy", flush=True)
+                    continue
+            except Exception:
+                pass
+            try:
+                fld.press("Enter")
+            except Exception:
+                p_page.keyboard.press("Enter")
+            print(f"    [{label}] entered via {how}", flush=True)
+            return True
+        except Exception as e:
+            print(f"    [{label}] {how} failed: {str(e)[:50]}", flush=True)
+    return False
+
 def http_post(url, body, extra_headers=None, timeout=20):
     headers = dict(CODEX_HEADERS)
     if extra_headers:
         headers.update(extra_headers)
     data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+    # When OAUTH_PROXY is set, route these device-auth API calls through the 236 US
+    # SOCKS egress too (not just the browser) — 188-direct urllib gets CF 429 under
+    # load, and the US egress passes. urllib has no SOCKS support, so shell to curl.
+    _proxy = os.environ.get("OAUTH_PROXY", "").strip()
+    if _proxy:
+        px = _proxy.replace("socks5://", "socks5h://")
+        cmd = ["curl", "-s", "--max-time", str(timeout), "-x", px,
+               "-w", "\n%{http_code}", "-X", "POST", "-d", data.decode(errors="replace")]
+        for k, v in headers.items():
+            cmd += ["-H", f"{k}: {v}"]
+        cmd.append(url)
+        try:
+            import subprocess as _sp
+            out = _sp.run(cmd, capture_output=True, text=True, timeout=timeout + 10).stdout
+            b, _, code = out.rpartition("\n")
+            return int(code or 0), b
+        except Exception as e:
+            return 0, f"curl proxy error: {e}"
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)
@@ -520,15 +651,29 @@ def get_otp(mail_page, since_ts, max_wait=180):
         except Exception as e:
             print(f"  rows count err: {e}", flush=True)
             cnt = 0
+        # 登录会同时来两封 GPT 邮件: "验证码" + "新登录提醒(New sign-in)"。
+        # 提醒那封没有码/排最上会误选。先按主题挑真正的验证码邮件, 排除 sign-in 提醒。
+        CODE_SUBJ = re.compile(r"code|verification|登录代码|临时|temporary|验证码", re.I)
+        ALERT_SUBJ = re.compile(r"new sign-?in|new login|新登录|新的登录|sign-?in to your|security", re.I)
+        def _row_texts():
+            out = []
+            for i in range(min(cnt, 15)):
+                try:
+                    t = (rows.nth(i).text_content(timeout=1500) or "").strip()
+                except Exception:
+                    t = ""
+                out.append(t)
+            return out
+        _texts = _row_texts()
+        # 优先级: 是 OpenAI 发件人 + 主题含 code + 不是 sign-in 提醒 → 其次任意 OpenAI 行
+        order = [i for i, t in enumerate(_texts)
+                 if re.search(r"openai|chatgpt|noreply", t, re.I) and CODE_SUBJ.search(t) and not ALERT_SUBJ.search(t)]
+        order += [i for i, t in enumerate(_texts)
+                  if re.search(r"openai|chatgpt|noreply", t, re.I) and i not in order and not ALERT_SUBJ.search(t)]
         clicked = False
-        for i in range(min(cnt, 15)):
-            try:
-                t = (rows.nth(i).text_content(timeout=1500) or "").strip()
-            except Exception:
-                continue
-            if not re.search(r"openai|chatgpt|noreply", t, re.I):
-                continue
-            print(f"  candidate row[{i}]: {t[:120]!r}", flush=True)
+        for i in order:
+            t = _texts[i]
+            print(f"  candidate row[{i}] (code-email): {t[:120]!r}", flush=True)
             row_el = rows.nth(i)
             opened = False
             try:
@@ -578,17 +723,36 @@ def get_otp(mail_page, since_ts, max_wait=180):
     return None, None
 
 HEADLESS = os.environ.get("HEADLESS", "0") != "0"  # default headed (CF 2026: headless 被拒,headed via Xvfb 放行)
+# Through the 236 US SOCKS proxy the double-hop slows full page loads; widen goto budget.
+GOTO_MS = 120000 if os.environ.get("OAUTH_PROXY") else 45000
 
 with sync_playwright() as pw:
     browser = pw.chromium.launch(
         headless=HEADLESS,
         args=["--no-sandbox", "--disable-dev-shm-usage"],
+        **({"proxy": {"server": os.environ["OAUTH_PROXY"]}} if os.environ.get("OAUTH_PROXY") else {}),
     )
     ctx = browser.new_context(
         viewport={"width": 1280, "height": 800},
         locale="en-US",
     )
     page = ctx.new_page()
+
+    # Mail OTP fetch must NOT traverse the CF proxy: mail.com is neither
+    # geo- nor CF-gated, and the double-hop SOCKS latency hangs the webmail
+    # inbox load. When OAUTH_PROXY is set, run the mail webmail in a separate
+    # DIRECT (un-proxied) browser context; login/consent stay on the proxy.
+    if os.environ.get("OAUTH_PROXY"):
+        mail_browser = pw.chromium.launch(
+            headless=HEADLESS,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        mail_ctx = mail_browser.new_context(
+            viewport={"width": 1280, "height": 800}, locale="en-US"
+        )
+    else:
+        mail_browser = None
+        mail_ctx = ctx
 
     # ── PHASE 1.5: chatgpt.com login ────────────────────────────────────────
     # 2026-06-18: ChatGPT Settings → Security no longer exposes a reliable
@@ -680,9 +844,7 @@ with sync_playwright() as pw:
     def fill_login_and_otp(p_page, need_pwd=True):
         """复用 email→password→OTP 步骤"""
         wait_chatgpt_cf(p_page)
-        p_page.wait_for_selector("input[type='email'], input[autocomplete='username']", timeout=20000)
-        p_page.locator("input[type='email']").first.click()
-        p_page.keyboard.type(EMAIL, delay=80)
+        _enter_email_resilient(p_page, EMAIL, "login")
         _submit_form(p_page)
         time.sleep(5)
         print(f"    after email submit url={p_page.url[:100]}", flush=True)
@@ -728,7 +890,9 @@ with sync_playwright() as pw:
                 return False
 
         def _type_otp(pg, code):
-            """定位 OTP 输入并键入。单框直接键入;6 框点首格靠组件自动跳焦逐位键入。"""
+            """定位 OTP 输入并键入。单框直接 fill;6 框逐格 fill 并校验落位。
+            走 236 代理时 keyboard.type 的 delay 会被 React 自动跳焦抢拍丢位
+            (实测 6 位只落 3 位 '962'),故多框改逐格 fill + 落位校验 + 重试。"""
             loc, n = None, 0
             for sel in ("input[autocomplete='one-time-code']",
                         "input[inputmode='numeric']",
@@ -750,14 +914,48 @@ with sync_playwright() as pw:
             if n == 0:
                 return False
             print(f"    OTP inputs located: n={n}", flush=True)
-            try:
-                loc.first.click()
-            except Exception:
-                pass
+            code = code.strip()
             if n == 1:
-                try: loc.first.fill("")
-                except Exception: pass
-            pg.keyboard.type(code, delay=120)  # 逐位真键入,触发 React onChange + 6框自动跳焦
+                # 单框:必须真键入触发 React onChange (纯 fill 不触发 → Continue 不激活 →
+                # 提交无效, 实证 acct-86 OTP 820238 填了但 advanced=False)。键入后按 Enter。
+                for _ in range(3):
+                    try:
+                        loc.first.click()
+                        loc.first.press("Control+a"); pg.keyboard.press("Backspace")
+                        pg.keyboard.type(code, delay=140)   # 逐位真键入, 触发 onChange
+                        time.sleep(0.5)
+                        if (loc.first.input_value() or "").strip() == code:
+                            try:
+                                loc.first.press("Enter")     # 单框常靠 Enter 提交
+                            except Exception:
+                                pass
+                            return True
+                    except Exception:
+                        pass
+                    time.sleep(0.4)
+                return True
+            # 多框(每格 1 位):逐格 fill,避免自动跳焦抢拍
+            for attempt in range(3):
+                try:
+                    for i in range(min(n, len(code))):
+                        box = loc.nth(i)
+                        box.click()
+                        try: box.fill(code[i])
+                        except Exception:
+                            pg.keyboard.type(code[i], delay=60)
+                        time.sleep(0.08)
+                    # 校验:拼接每格值 == code
+                    got = "".join((loc.nth(i).input_value() or "") for i in range(min(n, len(code))))
+                    print(f"    OTP boxes filled got='{got}' want='{code}' (try {attempt+1})", flush=True)
+                    if got == code:
+                        return True
+                    # 清空每格重试
+                    for i in range(n):
+                        try: loc.nth(i).fill("")
+                        except Exception: pass
+                except Exception as e:
+                    print(f"    OTP box fill err: {e}", flush=True)
+                time.sleep(0.5)
             return True
 
         # 等 verification 页出现(pw submit 后可能还没 redirect)
@@ -766,11 +964,36 @@ with sync_playwright() as pw:
                 break
             time.sleep(1)
 
+        # OTP-login 账号: email 提交后停在 'Enter your password' 页(底部有
+        # 'Log in with a one-time code')。若还没进 OTP 页, 点该按钮切验证码登录。
+        if not _needs_otp(p_page):
+            for _sel in ("button:has-text('Log in with a one-time code')",
+                         "a:has-text('Log in with a one-time code')",
+                         "button:has-text('one-time code')",
+                         "a:has-text('one-time code')",
+                         "text=/log in with a one-time code|验证码登录|邮箱验证码/i"):
+                try:
+                    _l = p_page.locator(_sel).first
+                    if _l.count() > 0 and _l.is_visible(timeout=1500):
+                        _l.click(timeout=5000)
+                        print(f"    clicked OTP-mode switch {_sel!r}", flush=True)
+                        time.sleep(4)
+                        break
+                except Exception:
+                    pass
+
         if _needs_otp(p_page):
             since = int(time.time()) - 600
             otp_ok = False
+            # settle: let THIS login's OTP land before reading, so we don't grab a
+            # stale code from a prior attempt (mail.com piles up OTP emails →
+            # "代码不正确"). 用户 2026-07-20 要求: 等 1min → 刷新 → 再等 1min。
+            _settle = 0 if os.environ.get("OTP_FAST") else int(os.environ.get("OTP_SETTLE_SEC", "60"))
+            if _settle:
+                print(f"  [otp] settle {_settle}s x2 before reading login OTP...", flush=True)
+                time.sleep(_settle * 2)
             for attempt in range(3):
-                mp = mailcom_login(ctx)
+                mp = mailcom_login(mail_ctx)
                 otp, _ = get_otp(mp, since)
                 if mp is not None:
                     mp.close()
@@ -809,7 +1032,7 @@ with sync_playwright() as pw:
                 print("  ⚠ OTP flow failed after 3 tries", flush=True)
 
     chat_page = ctx.new_page()
-    chat_page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded")
+    chat_page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=GOTO_MS)
     time.sleep(3)
     for _ in range(30):
         t = chat_page.title()
@@ -830,7 +1053,7 @@ with sync_playwright() as pw:
         print(f"[BILLING] logged={logged} renew={do_renew}", flush=True)
         try:
             chat_page.goto("https://chatgpt.com/#settings/Billing",
-                           wait_until="domcontentloaded", timeout=45000)
+                           wait_until="domcontentloaded", timeout=GOTO_MS)
             time.sleep(6)
             ss(chat_page, "bill-01")
         except Exception as e:
@@ -893,7 +1116,7 @@ with sync_playwright() as pw:
     if logged:
         print("  chatgpt.com login ok; enabling Codex device-code toggle...", flush=True)
         try:
-            chat_page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded", timeout=45000)
+            chat_page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded", timeout=GOTO_MS)
             time.sleep(7)
             ss(chat_page, "p15c-security")
             # scroll panel to bottom so all switches are loaded
@@ -1057,15 +1280,16 @@ with sync_playwright() as pw:
         print(f"  after account click url={page.url[:100]}", flush=True)
         ss(page, "03-after-account")
     else:
-        email_sel = "input[type='email'], input[autocomplete='username'], input[name='email']"
-        page.wait_for_selector(email_sel, timeout=20000)
-        page.locator(email_sel).first.click()
-        page.keyboard.type(EMAIL, delay=80)
+        _enter_email_resilient(page, EMAIL, "device-email")
         ss(page, "02-email-filled")
         btn = page.locator("button:has-text('Continue'), button[type='submit']")
-        if btn.count() > 0:
-            btn.first.click()
-        else:
+        try:
+            if btn.count() > 0 and btn.first.is_enabled(timeout=2000):
+                btn.first.click(timeout=5000)
+            else:
+                page.keyboard.press("Enter")
+        except Exception as e:
+            print(f"  device-email submit fallback Enter ({str(e)[:50]})", flush=True)
             page.keyboard.press("Enter")
         time.sleep(6)
         ss(page, "03-after-email")
@@ -1217,16 +1441,40 @@ with sync_playwright() as pw:
                 pg.keyboard.type(code, delay=120)
                 return True
             print(f"    OTP inputs located: n={n}", flush=True)
-            try:
-                handle.first.evaluate("el => el.focus()")
-                handle.first.click()
-            except Exception:
-                pass
+            code = code.strip()
             if n == 1:
-                try: handle.first.fill("")
-                except Exception: pass
-            # 逐位真键入:触发 keyup 使 Continue 变可点 + 6 框自动跳焦
-            pg.keyboard.type(code, delay=120)
+                for _ in range(3):
+                    try:
+                        handle.first.click()
+                        handle.first.press("Control+a"); pg.keyboard.press("Backspace")
+                        pg.keyboard.type(code, delay=140)   # 真键入触发 onChange
+                        time.sleep(0.5)
+                        if (handle.first.input_value() or "").strip() == code:
+                            try: handle.first.press("Enter")
+                            except Exception: pass
+                            return True
+                    except Exception:
+                        pass
+                    time.sleep(0.4)
+                return True
+            # 多框逐格 fill + 落位校验 (代理下 keyboard.type 会丢位, 实测 6 位落 3 位)
+            for attempt in range(3):
+                try:
+                    for i in range(min(n, len(code))):
+                        b = handle.nth(i); b.click()
+                        try: b.fill(code[i])
+                        except Exception: pg.keyboard.type(code[i], delay=60)
+                        time.sleep(0.08)
+                    got = "".join((handle.nth(i).input_value() or "") for i in range(min(n, len(code))))
+                    print(f"    OTP boxes got='{got}' want='{code}' (try {attempt+1})", flush=True)
+                    if got == code:
+                        return True
+                    for i in range(n):
+                        try: handle.nth(i).fill("")
+                        except Exception: pass
+                except Exception as e:
+                    print(f"    OTP box fill err: {e}", flush=True)
+                time.sleep(0.5)
             return True
 
         def _otp_advanced(pg):
@@ -1237,16 +1485,29 @@ with sync_playwright() as pw:
 
         # fresh-OTP 重试:单次 submit 卡住不再 sys.exit,重取新 code 再试
         since = int(time.time()) - 600
+        MANUAL_OTP = os.environ.get("MANUAL_OTP", "").strip()
         otp_ok = False
+        # settle: 等本次 OAuth 触发的 OTP 落地再读 (等 1min → 刷新 → 再等 1min),
+        # 避免堆积旧码被判"代码不正确" (用户 2026-07-20 要求)。
+        if not MANUAL_OTP:
+            _settle5 = 0 if os.environ.get("OTP_FAST") else int(os.environ.get("OTP_SETTLE_SEC", "60"))
+            if _settle5:
+                print(f"  [5][otp] settle {_settle5}s x2 before reading OAuth OTP...", flush=True)
+                time.sleep(_settle5 * 2)
         for attempt in range(3):
-            mail_page = mailcom_login(ctx)
-            otp, ctx_snip = get_otp(mail_page, since)
-            if mail_page is not None:
-                mail_page.close()
-            if not otp:
-                print(f"  ⚠ OTP fetch failed (try {attempt+1}/3)", flush=True)
-                time.sleep(5); continue
-            print(f"  ✅ OTP: {otp} (try {attempt+1}/3)", flush=True)
+            if MANUAL_OTP:
+                # 手工注入 OTP(邮箱抓取不可用时);只用一次,失败即止
+                otp, ctx_snip = MANUAL_OTP, ""
+                print(f"  ✅ OTP (manual): {otp}", flush=True)
+            else:
+                mail_page = mailcom_login(mail_ctx)
+                otp, ctx_snip = get_otp(mail_page, since)
+                if mail_page is not None:
+                    mail_page.close()
+                if not otp:
+                    print(f"  ⚠ OTP fetch failed (try {attempt+1}/3)", flush=True)
+                    time.sleep(5); continue
+                print(f"  ✅ OTP: {otp} (try {attempt+1}/3)", flush=True)
             page.bring_to_front()
             if not _enter_otp(page, otp):
                 ss(page, "06-no-otp-input")
@@ -1285,6 +1546,10 @@ with sync_playwright() as pw:
                 sys.exit("❌ ACCOUNT_DEACTIVATED — 需新 email+新 Pro 订阅,re-OAuth 无法恢复")
             if advanced:
                 otp_ok = True; break
+            # 手工 OTP 只有一次(不能凭空再生),填了没过就止,避免空转
+            if MANUAL_OTP:
+                print("  ⚠ manual OTP didn't advance — stopping (code stale/invalid?)", flush=True)
+                break
             # 卡住 → 请求重发,后续只接受更新 code
             try:
                 rl = page.locator("button, a").filter(
@@ -1415,20 +1680,79 @@ with sync_playwright() as pw:
     user_code_clean = USER_CODE.replace("-", "")  # 9XBE-AG4JT → 9XBEAG4JT
     # 等页面渲染好(可能从 consent 跳过来)
     time.sleep(3)
+    # session 复用时会停在 /choose-an-account (点账号后不一定跳到 9-格页);
+    # 循环: 若在 choose-account 就点账号; 等到出现 >=1 个可见 input 再继续。
+    def _click_account_if_present():
+        for sel in ("button:has-text('@')", "[data-testid*='account']",
+                    "button:has-text('Continue')", "div[role='button']:has-text('@')"):
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and loc.is_visible(timeout=1200):
+                    loc.click(timeout=4000); return True
+            except Exception:
+                pass
+        return False
+    def _find_code_inputs():
+        """Return (kind, inputs) for an ACTUAL device-code field only.
+        kind='boxes' → 6-9 single-char boxes; 'single' → one code input."""
+        boxes = [b for b in page.locator("input[maxlength='1']").all() if b.is_visible()]
+        if len(boxes) >= 6:
+            return ("boxes", boxes)
+        code_sel = ("input[autocomplete='one-time-code'], input[name*='code' i], "
+                    "input[placeholder*='code' i], input[id*='code' i], "
+                    "input[inputmode='numeric']")
+        cin = [c for c in page.locator(code_sel).all() if c.is_visible()]
+        if cin:
+            return ("single", cin)
+        return (None, [])
+
+    inputs = []
+    kind = None
+    for _wait in range(20):  # up to ~40s
+        # A login/password page can appear here on session-reuse paths. Typing
+        # the user_code into its EMAIL field corrupts it (bud@mail.com →
+        # bud@maiii2f-y3ktpl.com). Detect + complete login instead of blind-typing.
+        try:
+            body_head = page.content()[:3000]
+        except Exception:
+            body_head = ""
+        if page.locator("input[type='password']").count() > 0 or re.search(r"enter your password", body_head, re.I):
+            print("  ⚠ login/password page at user_code step — completing login, NOT typing code here", flush=True)
+            try:
+                pw = page.locator("input[type='password']").first
+                pw.fill(CHATGPT_PW, timeout=5000)
+                b = page.locator("button:has-text('Continue'), button[type='submit']")
+                if b.count() > 0 and b.first.is_enabled(timeout=2000):
+                    b.first.click(timeout=5000)
+                else:
+                    page.keyboard.press("Enter")
+                time.sleep(5)
+            except Exception as e:
+                print(f"    pw fill failed: {str(e)[:60]}", flush=True)
+            continue
+        kind, inputs = _find_code_inputs()
+        if kind:
+            break
+        if "choose-an-account" in page.url or "choose-account" in page.url:
+            _click_account_if_present()
+        time.sleep(2)
     ss(page, "08-user-code-page")
-    # 尝试找 9 个 1-char boxes
-    inputs = [i for i in page.locator("input").all() if i.is_visible()]
-    print(f"  visible inputs on page: {len(inputs)}", flush=True)
-    if len(inputs) >= 9:
-        # 9 boxes mode — fill one char each
+    print(f"  code inputs: kind={kind} n={len(inputs)}", flush=True)
+    if kind == "boxes":
+        # per-cell fill (proxy latency drops chars with bulk keyboard.type)
+        for i, ch in enumerate(user_code_clean[:len(inputs)]):
+            try:
+                inputs[i].click(timeout=3000)
+                page.keyboard.type(ch, delay=60)
+            except Exception:
+                inputs[i].fill(ch)
+    elif kind == "single":
         inputs[0].click()
-        page.keyboard.type(user_code_clean, delay=80)
-    elif inputs:
-        inputs[0].click()
+        page.keyboard.press("Control+a")
         page.keyboard.type(USER_CODE, delay=80)  # try with dash
     else:
-        ss(page, "09-no-input")
-        sys.exit("❌ no input field found on user_code page")
+        ss(page, "09-no-code-input")
+        sys.exit("❌ no device-code input field found (likely stuck on a login page — see 08-user-code-page.png)")
     ss(page, "09-code-filled")
     time.sleep(2)
     # Click the Continue button (NOT Cancel) — use get_by_role to be safe
@@ -1448,12 +1772,223 @@ with sync_playwright() as pw:
 
     # ── 2f. Wait for completion ──────────────────────────────────────────
     print("[7] Wait for completion...", flush=True)
-    for _ in range(30):
+    # 有些账号在填完 user_code + Continue 后, 又弹一个 email-verification (设备授权
+    # 二次邮箱验证码)。若卡在这里, 取码 (settle→多frame→真键入+Enter) 再继续。
+    if "email-verification" in page.url or "verification" in page.content().lower()[:5000]:
+        print("  [7] device-grant email-verification detected — fetching OTP...", flush=True)
+        try:
+            _settle7 = 0 if os.environ.get("OTP_FAST") else int(os.environ.get("OTP_SETTLE_SEC", "60"))
+            if _settle7:
+                print(f"  [7] settle {_settle7}s x2 before reading device OTP...", flush=True)
+                time.sleep(_settle7 * 2)
+            since7 = int(time.time()) - 600
+            for a7 in range(3):
+                mp7 = mailcom_login(mail_ctx)
+                otp7, _ = get_otp(mp7, since7)
+                if mp7 is not None:
+                    mp7.close()
+                if not otp7:
+                    print(f"  [7] device OTP fetch failed ({a7+1}/3)", flush=True)
+                    time.sleep(5); continue
+                print(f"  [7] device OTP={otp7} ({a7+1}/3)", flush=True)
+                _enter_otp_resilient(page, otp7, "device-otp")
+                time.sleep(6)
+                if "email-verification" not in page.url:
+                    print(f"  [7] device OTP accepted, url={page.url[:80]}", flush=True)
+                    break
+                # 卡住 → resend + 取新码
+                try:
+                    rl = page.locator("button, a").filter(has_text=re.compile(r"resend|重新发送|didn.?t get", re.I))
+                    if rl.count() > 0:
+                        rl.first.click(); since7 = int(time.time()) - 20; time.sleep(4)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"  [7] device-verification handling err: {e}", flush=True)
+    # 设备 OTP 通过后, OpenAI 常把用户带回 9-格 "Use your device code to grant access"
+    # 页 (URL 含 /consent 但其实是 device-code grant 页, 9 格是空的)。必须重填 user_code
+    # + Continue, 否则 [8] Poll auth code 永远 403 (实证 acct-87)。9 格逐格键入防丢位。
+    for _grant_try in range(3):
+        _boxes = [i for i in page.locator("input").all() if i.is_visible()]
+        if len(_boxes) < 9:
+            break  # 不是 9 格 grant 页, 无需重填
+        print(f"[7c] re-fill 9-box device-code grant page (try {_grant_try+1})", flush=True)
+        ucode = USER_CODE.replace("-", "")
+        try:
+            for _i in range(min(9, len(ucode))):
+                b = _boxes[_i]; b.click()
+                try: b.fill(ucode[_i])
+                except Exception: page.keyboard.type(ucode[_i], delay=60)
+                time.sleep(0.1)
+            time.sleep(1.5)
+            cont = page.get_by_role("button", name="Continue", exact=True)
+            if cont.count() > 0 and cont.first.is_enabled():
+                cont.first.click(); print("  [7c] clicked Continue", flush=True)
+            else:
+                page.keyboard.press("Enter")
+            time.sleep(6)
+            print(f"  [7c] after grant url={page.url[:90]}", flush=True)
+            ss(page, "07c-after-grant")
+            if "device" not in page.url.lower() and "/consent" not in page.url:
+                break
+        except Exception as e:
+            print(f"  [7c] grant re-fill err: {e}", flush=True)
+    # [7d] 若落在 OAuth consent 页 (有 Continue 授权按钮, 非 9 格), 必须点 Continue
+    # 否则 [8] Poll auth code 永远 403 (acct-87 实证: 9 格不出现但停在 /consent)。
+    for _consent_try in range(3):
+        if "/consent" not in page.url and "codex/consent" not in page.url:
+            break
+        cbtn = page.locator("button:has-text('Continue'), button:has-text('Allow'), button:has-text('Authorize')")
+        if cbtn.count() == 0:
+            break
+        print(f"[7d] post-OTP consent Continue (try {_consent_try+1})", flush=True)
+        try:
+            # 多策略点击: force click → JS dispatch → focus+Enter → scroll+click
+            try:
+                cbtn.first.click(force=True, timeout=4000)
+            except Exception:
+                pass
+            time.sleep(2)
+            if "/consent" in page.url:
+                cbtn.first.evaluate("el => el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}))")
+            time.sleep(2)
+            if "/consent" in page.url:
+                try:
+                    cbtn.first.scroll_into_view_if_needed(timeout=2000); cbtn.first.click(timeout=4000)
+                except Exception:
+                    page.keyboard.press("Enter")
+            time.sleep(3)
+            print(f"  [7d] after consent url={page.url[:90]}", flush=True)
+            ss(page, "07d-after-consent")
+            if "/consent" not in page.url:
+                break
+            # 点击无效: dump 所有 button + checkbox + body 头部用于诊断真实 consent 页结构
+            try:
+                info = page.evaluate("""() => {
+                  const btns = [...document.querySelectorAll('button')].map(b => ({
+                    text: (b.innerText||'').trim().slice(0,40), disabled: b.disabled,
+                    aria_disabled: b.getAttribute('aria-disabled'), visible: b.offsetParent !== null
+                  })).filter(b => b.visible);
+                  const cbs = [...document.querySelectorAll('input[type=checkbox], [role=checkbox]')].map(c => ({
+                    label: (c.getAttribute('aria-label')||c.innerText||'').slice(0,60),
+                    checked: c.checked || c.getAttribute('aria-checked')
+                  }));
+                  const body = (document.body.innerText||'').slice(0,800);
+                  return {btns, cbs, body};
+                }""")
+                print(f"  [7d-dump] buttons={info.get('btns')}", flush=True)
+                print(f"  [7d-dump] checkboxes={info.get('cbs')}", flush=True)
+                print(f"  [7d-dump] body={info.get('body')[:400]!r}", flush=True)
+                # 若有未勾选的 consent checkbox, 勾上再点 Continue
+                if info.get('cbs'):
+                    for sel in ("input[type=checkbox]", "[role=checkbox]"):
+                        try:
+                            c = page.locator(sel).first
+                            if c.count() > 0 and c.is_visible(timeout=1000):
+                                c.check(timeout=2000); time.sleep(1)
+                                cbtn.first.click(force=True, timeout=3000); time.sleep(2)
+                                break
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"  [7d-dump] err: {e}", flush=True)
+            # consent "Continue disabled" 因 Codex device-code toggle 未开 (skill #23):
+            # 页面提示 "Enable device code authorization for Codex in ChatGPT Security Settings"。
+            # 直接去 chatgpt.com/#settings/Security 开 toggle, 再回 consent 重试。
+            _body_txt = info.get("body", "") if info else ""
+            if "enable device code authorization" in _body_txt.lower() or "device code authorization for codex" in _body_txt.lower():
+                print("  [7e] consent blocked by Codex toggle off — enabling via Security settings", flush=True)
+                try:
+                    consent_url = page.url
+                    page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded", timeout=GOTO_MS)
+                    # Security 页是 React SPA, 走美国代理渲染慢; 等 switch 真出现再找
+                    # (实证 acct-93: sleep 4 后 switch labels=[] 空, 页面还没渲染)。
+                    sw = None
+                    for _w in range(20):  # up to ~40s
+                        time.sleep(2)
+                        try:
+                            page.mouse.wheel(0, 600)  # 滚动触发懒加载
+                        except Exception:
+                            pass
+                        sw = page.locator("button[role='switch']")
+                        if sw.count() > 0:
+                            print(f"  [7e] security page: {sw.count()} switches after {(_w+1)*2}s", flush=True)
+                            break
+                    ss(page, "07e1-security-for-toggle")
+                    # 找 Codex/device-code 开关 (aria-checked=false 的, 排除 mfa/passkey)
+                    toggled = False
+                    for i in range(min(sw.count(), 12)):
+                        try:
+                            lbl = (sw.nth(i).evaluate("el => (el.getAttribute('aria-label')||'') + ' ' + (el.closest('div')?.parentElement?.innerText||el.parentElement?.innerText||'')")
+                                   or "")
+                            if not re.search(r"codex|device\s*code|device-code|device authorization|设备代码|设备授权", lbl, re.I):
+                                continue
+                            if re.search(r"mfa|authenticator|passkey|session|2fa", lbl, re.I):
+                                continue
+                            chk = sw.nth(i).get_attribute("aria-checked") or ""
+                            if chk == "true":
+                                print(f"  [7e] toggle idx={i} already on", flush=True); toggled = True; break
+                            sw.nth(i).click(force=True, timeout=4000); time.sleep(2)
+                            chk2 = sw.nth(i).get_attribute("aria-checked") or ""
+                            print(f"  [7e] toggle idx={i} {chk}→{chk2}", flush=True)
+                            ss(page, f"07e2-toggle-{i}")
+                            toggled = True; break
+                        except Exception:
+                            continue
+                    if not toggled:
+                        # fallback: dump 所有 switch label + 邻文本用于诊断, 并试点唯一非 mfa/passkey switch
+                        try:
+                            dump = page.evaluate("""() => [...document.querySelectorAll('button[role=switch]')].map(b => ({
+                                aria: b.getAttribute('aria-label')||'', checked: b.getAttribute('aria-checked'),
+                                near: (b.closest('div')?.parentElement?.innerText||'').slice(0,80)
+                            }))""")
+                            print(f"  [7e] no codex toggle matched; switches={dump[:12]}", flush=True)
+                            # 兜底: 邻文本含 codex/device 的 switch 点开
+                            for i in range(min(sw.count(), 12)):
+                                near = (dump[i].get("near","") if i < len(dump) else "")
+                                if re.search(r"codex|device", near, re.I) and dump[i].get("checked") != "true":
+                                    sw.nth(i).click(force=True, timeout=4000); time.sleep(2)
+                                    print(f"  [7e] fallback clicked switch idx={i} near={near[:40]!r}", flush=True)
+                                    toggled = True; break
+                        except Exception:
+                            pass
+                    page.goto(consent_url, wait_until="domcontentloaded", timeout=GOTO_MS)
+                    time.sleep(3)
+                    ss(page, "07e3-back-to-consent")
+                    # 回到 consent 再点 Continue (现在应 enabled)
+                    cbtn2 = page.locator("button:has-text('Continue'), button:has-text('Authorize'), button:has-text('Allow')")
+                    if cbtn2.count() > 0:
+                        try:
+                            cbtn2.first.click(force=True, timeout=4000); time.sleep(3)
+                            page.keyboard.press("Enter")
+                        except Exception:
+                            pass
+                    time.sleep(3)
+                    print(f"  [7e] after re-consent url={page.url[:90]}", flush=True)
+                except Exception as e:
+                    print(f"  [7e] toggle-enable err: {e}", flush=True)
+        except Exception as e:
+            print(f"  [7d] consent err: {e}", flush=True)
+        time.sleep(2)
+    # 注意: consent 后 URL 会变成 deviceauth/callback?code=ac_XXX。这个 callback 的
+    # ac_ code 是浏览器 PKCE 绑定的, **不能**用它换 token (实证 acct-96: 用它 [9] 返
+    # token_exchange_user_error 400)。真正可换的 authorization_code 由 [8] 的
+    # deviceauth/token poll 返回 (实证 acct-93/94: 同一 callback URL, 走 [8] poll → 200)。
+    # 关键: 落到 callback 页后**绝不能立刻 close** — 该页 JS 需时间 POST 完成 device grant
+    # 绑定, 过早关闭 → grant 一直 pending → [8] poll 永远 403 (实证 acct-96)。所以这里
+    # 停在页面等待完成文案 / 或耗尽 loop 给 callback JS 充足时间, 只等不捕获 callback code。
+    _seen_callback = False
+    for _w in range(30):
         body_lower = page.content().lower()
         if any(t in body_lower for t in ("may now return", "device authorized", "you can close",
                                           "signed in to codex", "successful", "all done", "successfully signed in")):
             print(f"  ✅ Browser shows success: url={page.url}", flush=True)
             break
+        if "callback" in page.url and "code=" in page.url:
+            if not _seen_callback:
+                print(f"  ⏳ on deviceauth/callback — waiting for grant-completion JS: {page.url[:80]}", flush=True)
+                _seen_callback = True
+            # 落到 callback 后再多等几轮让页面 JS 完成 device grant, 不 break
         time.sleep(2)
     ss(page, "11-final")
     browser.close()
@@ -1464,6 +1999,8 @@ auth_code = None
 code_challenge = None
 code_verifier = None
 for attempt in range(60):
+    if auth_code:
+        break
     status, body = http_post(
         f"{AUTH_BASE}/api/accounts/deviceauth/token",
         {"device_auth_id": DEVICE_AUTH_ID, "user_code": USER_CODE},
@@ -1484,13 +2021,15 @@ if not auth_code:
 
 # ── Step 4: exchange code for tokens ───────────────────────────────────
 print("[9] Exchange auth code → tokens at /oauth/token...", flush=True)
-form_body = "&".join([
+_form_parts = [
     "grant_type=authorization_code",
     f"code={urllib.parse.quote(auth_code)}",
     f"redirect_uri={urllib.parse.quote(f'{AUTH_BASE}/deviceauth/callback')}",
     f"client_id={CLIENT_ID}",
-    f"code_verifier={urllib.parse.quote(code_verifier or '')}",
-])
+]
+if code_verifier:  # device callback flow 无 code_verifier 时省略该参数 (发空串会 400)
+    _form_parts.append(f"code_verifier={urllib.parse.quote(code_verifier)}")
+form_body = "&".join(_form_parts)
 status, body = http_post(
     f"{AUTH_BASE}/oauth/token",
     form_body,

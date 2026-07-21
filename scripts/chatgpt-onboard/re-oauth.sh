@@ -85,7 +85,12 @@ chmod 600 "$MAIL_PW_FILE" "$CHATGPT_PW_FILE"
 
 SCREENSHOT_DIR="/tmp/screenshots-${ACCT}"
 OUT_FILE="/tmp/auth-${ACCT}.json"
-rm -rf "$SCREENSHOT_DIR" "$OUT_FILE"
+rm -rf "$SCREENSHOT_DIR" "$OUT_FILE" 2>/dev/null || true
+# OUT_FILE 可能是 root 属主的陈旧残留(旧 batch 遗留),rm 失败则换个可写路径
+if [[ -e "$OUT_FILE" ]] && ! : > "$OUT_FILE" 2>/dev/null; then
+    OUT_FILE="${SECRET_DIR}/auth-${ACCT}.json"
+    echo "  (OUT_FILE not writable, using $OUT_FILE)"
+fi
 mkdir -p "$SCREENSHOT_DIR"
 
 # ── 3. Sanity checks ────────────────────────────────────────────────────
@@ -115,9 +120,11 @@ docker run --rm \
   -e "PHONE_NUMBER=${PHONE_NUMBER:-}" \
   -e "SMS_API_URL=${SMS_API_URL:-}" \
   -e "MAIL_OTP_PROVIDER=${MAIL_OTP_PROVIDER:-mailcom}" \
+  -e "MANUAL_OTP=${MANUAL_OTP:-}" \
   -e "BILLING_INSPECT=${BILLING_INSPECT:-}" \
   -e "BILLING_RENEW=${BILLING_RENEW:-}" \
   -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+  -e "OAUTH_PROXY=${OAUTH_PROXY:-}" \
   -e DISPLAY=:99 \
   mcr.microsoft.com/playwright/python:v1.60.0-noble \
   bash -c "Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 & sleep 1 && \

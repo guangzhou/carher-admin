@@ -22,6 +22,9 @@ MAIL_PASSWORD = Path(os.environ.get("MAIL_PW_FILE", os.environ["CHATGPT_PW_FILE"
 SCREENSHOT_DIR = Path(os.environ.get("SCREENSHOT_DIR", "/work/screenshots"))
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 ACTION = os.environ.get("ACTION", "enable-codex-toggle")
+# Through the 236 US SOCKS proxy (OAUTH_PROXY set) the double-hop makes full page
+# loads slow; give goto() a longer budget so chatgpt.com doesn't time out at 45s.
+GOTO_MS = 120000 if os.environ.get("OAUTH_PROXY") else 45000
 OTP_RE = re.compile(r"\b(\d{6})\b")
 SENDER_HINTS_RE = re.compile(r"openai|chatgpt|noreply", re.I)
 
@@ -122,6 +125,31 @@ def type_first_visible(locator, page, value):
     return False
 
 
+def click_otp_mode_switch(page):
+    """OTP-login 账号在 email 提交后进 'Enter your password' 页, 但底部有
+    'Log in with a one-time code' 按钮 → 点它切到邮箱验证码登录 (这些卖号
+    默认验证码登录, 没设密码)。中英文案都覆盖。"""
+    sels = [
+        "button:has-text('Log in with a one-time code')",
+        "a:has-text('Log in with a one-time code')",
+        "button:has-text('one-time code')",
+        "a:has-text('one-time code')",
+        "button:has-text('验证码登录')",
+        "text=/log in with a one-time code|使用一次性代码|验证码登录|邮箱验证码/i",
+    ]
+    for sel in sels:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible(timeout=1500):
+                loc.click(timeout=5000)
+                print(f"  clicked OTP-mode switch via {sel!r}", flush=True)
+                time.sleep(4)
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def page_needs_otp(page):
     try:
         text = page.locator("body").inner_text(timeout=5000).lower()
@@ -193,15 +221,27 @@ def login_mailcom(page):
         body = ""
     if "invalid email address / password combination" in body:
         raise RuntimeError("mail.com invalid credentials")
-    sender_re = re.compile(r"(openai|chatgpt|noreply@tm\.openai|noreply@)", re.I)
+    sender_re = re.compile(r"(openai|chatgpt|noreply@tm\.openai|noreply@|登录代码|临时)", re.I)
+    def _any_frame_has_sender():
+        # mail.com list may render in the top page OR any nested frame (name varies:
+        # not always "mail"). Scan every frame's innerText, not just a frame named "mail".
+        try:
+            if sender_re.search(page.evaluate("() => document.body.innerText") or ""):
+                return True
+        except Exception:
+            pass
+        for fr in page.frames:
+            try:
+                if sender_re.search(fr.evaluate("() => document.body.innerText") or ""):
+                    return True
+            except Exception:
+                pass
+        return False
     for attempt in range(1, 46):
-        frame = find_mail_frame(page)
-        targets = [page] + ([frame] if frame is not None else [])
-        for target in targets:
-            if sender_re.search(visible_text(target)):
-                print(f"  mail.com inbox loaded attempt={attempt}", flush=True)
-                shot(page, "mailcom-inbox")
-                return
+        if _any_frame_has_sender():
+            print(f"  mail.com inbox loaded attempt={attempt}", flush=True)
+            shot(page, "mailcom-inbox")
+            return
         if attempt % 10 == 0:
             print(f"  mail.com inbox still loading; reload attempt={attempt}", flush=True)
             try:
@@ -312,20 +352,44 @@ def fetch_mailcom_otp(pw, request_ts, prev_otp=None):
     # request_ts: 期望邮件到达时间下界 (epoch); prev_otp: 上次拿到的 OTP, 用于检测 stale 邮件并跳过
     # mail.com 邮件正文不含时间戳, 用 prev_otp 跳过同值是最可靠的"新邮件"判据
     print(f"[otp] fetching code from mail.com (prev_otp={prev_otp or 'none'})", flush=True)
+    # 时序策略 (用户 2026-07-20 要求): 登录邮箱后先等 OTP 邮件落地, 取"最新一封"前
+    # 先 settle 1min → refresh → 再等 1min → 才读码。避免抓到上一次登录残留的旧码
+    # (mail.com 收件箱堆积多封 OTP 时旧码会被 ChatGPT 判"代码不正确")。
+    # 可用 OTP_SETTLE_SEC 覆盖 (默认 60s);OTP_FAST=1 时跳过 (调试用)。
+    settle = 0 if os.environ.get("OTP_FAST") else int(os.environ.get("OTP_SETTLE_SEC", "60"))
     browser = pw.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
     page = browser.new_page()
     try:
         login_mailcom(page)
+        if settle:
+            print(f"  [otp] settle {settle}s before first read (let this login's OTP land)...", flush=True)
+            time.sleep(settle)
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            print(f"  [otp] refreshed inbox; settle another {settle}s...", flush=True)
+            time.sleep(settle)
         for attempt in range(1, 25):  # ~ 3min: 24 * (reload+sleep ≈ 8s)
             if attempt > 1:
                 print(f"  mail.com poll {attempt}/24 (avoiding prev_otp={prev_otp})", flush=True)
                 page.reload(wait_until="domcontentloaded", timeout=30000)
                 time.sleep(8)
-            frame = find_mail_frame(page) or page
+            # mail.com 列表可能在顶层 page 或任意 frame(名字不一定叫 "mail"),
+            # 收集所有 frame + 顶层 page 的 innerText 拼一起再匹配, 否则 OTP 邮件
+            # 在 iframe 里时读不到 → 一直 "still loading"(实证 acct-86 卡这)。
+            texts = []
             try:
-                text = frame.evaluate("() => document.body.innerText")
+                texts.append(page.evaluate("() => document.body.innerText") or "")
             except Exception:
-                text = ""
+                pass
+            for _fr in page.frames:
+                try:
+                    texts.append(_fr.evaluate("() => document.body.innerText") or "")
+                except Exception:
+                    pass
+            text = "\n".join(texts)
+            frame = find_mail_frame(page) or page
             # New mail.com UI renders the inbox in the top page, and the list
             # often contains the OTP subject before the message is opened.
             candidate = None
@@ -343,7 +407,17 @@ def fetch_mailcom_otp(pw, request_ts, prev_otp=None):
             if candidate:
                 return candidate
             lines = [line.strip() for line in text.splitlines() if line.strip()]
-            if click_latest_otp_message(frame):
+            # 在所有 frame(+顶层 page)里试着点开最新 OpenAI 邮件, 不只 find_mail_frame
+            clicked = False
+            for _tgt in [page] + list(page.frames):
+                try:
+                    if click_latest_otp_message(_tgt):
+                        clicked = True
+                        frame = _tgt
+                        break
+                except Exception:
+                    pass
+            if clicked:
                 time.sleep(5)
                 shot(page, "mailcom-message-opened")
                 dump_mail_text(page, "mailcom-message-opened")
@@ -529,7 +603,7 @@ def wait_for_login_form(page):
 
 def login(page, pw):
     print(f"[1] login chatgpt.com as {EMAIL}", flush=True)
-    page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=45000)
+    page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=GOTO_MS)
     wait_for_login_form(page)
     shot(page, "01-login")
 
@@ -553,15 +627,19 @@ def login(page, pw):
         shot(page, "01c-no-email-or-password")
         raise RuntimeError("visible email field not found")
 
-    for _ in range(10):
+    for _ in range(30):
         if page.locator("input[type='password']").count() > 0:
             break
         if "passkey" in page.url.lower() or "auth_challenge" in page.url.lower():
             click_password_fallback(page)
-        time.sleep(1)
+        time.sleep(2)
 
     if page.locator("input[type='password']").count() == 0:
         if page_needs_otp(page):
+            otp_loop(page, pw)
+        elif click_otp_mode_switch(page):
+            # OTP-login account: switched password page → one-time-code mode
+            time.sleep(2)
             otp_loop(page, pw)
         else:
             raise RuntimeError("password field did not appear")
@@ -592,7 +670,7 @@ def login(page, pw):
 
 def enable_toggle(page):
     print("[2] open security settings", flush=True)
-    page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded", timeout=45000)
+    page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded", timeout=GOTO_MS)
     time.sleep(7)
     shot(page, "04-security")
     dump_page_text(page, "04-security")
@@ -726,7 +804,7 @@ def click_settings_close_if_visible(page):
 
 def disable_mfa(page):
     print("[2] disable accidentally enabled MFA switch if present", flush=True)
-    page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded", timeout=45000)
+    page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded", timeout=GOTO_MS)
     time.sleep(7)
     shot(page, "04-security-before-mfa-disable")
     switches = page.locator("button[role='switch']")
@@ -779,7 +857,7 @@ def disable_mfa(page):
 
 def probe_codex(page):
     print("[2] probe Codex/settings surfaces", flush=True)
-    page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=45000)
+    page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=GOTO_MS)
     time.sleep(6)
     shot(page, "04-app-home")
     dump_page_text(page, "04-app-home")
@@ -800,11 +878,11 @@ def probe_codex(page):
                 break
         except Exception as exc:
             print(f"  codex entry selector failed {sel}: {exc}", flush=True)
-    page.goto("https://chatgpt.com/#settings/Apps", wait_until="domcontentloaded", timeout=45000)
+    page.goto("https://chatgpt.com/#settings/Apps", wait_until="domcontentloaded", timeout=GOTO_MS)
     time.sleep(5)
     shot(page, "06-settings-apps")
     dump_page_text(page, "06-settings-apps")
-    page.goto("https://chatgpt.com/#settings/Account", wait_until="domcontentloaded", timeout=45000)
+    page.goto("https://chatgpt.com/#settings/Account", wait_until="domcontentloaded", timeout=GOTO_MS)
     time.sleep(5)
     shot(page, "07-settings-account")
     dump_page_text(page, "07-settings-account")
@@ -813,7 +891,7 @@ def probe_codex(page):
 
 def main():
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
+        browser = pw.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"], **({"proxy": {"server": os.environ["OAUTH_PROXY"]}} if os.environ.get("OAUTH_PROXY") else {}))
         ctx = browser.new_context(locale="zh-CN", viewport={"width": 1440, "height": 1000})
         page = ctx.new_page()
         try:

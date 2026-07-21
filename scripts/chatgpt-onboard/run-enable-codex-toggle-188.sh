@@ -65,6 +65,7 @@ for acct in "$@"; do
       -e SCREENSHOT_DIR=/work/screenshots \
       -e "ACTION=${ACTION:-enable-codex-toggle}" \
       -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+      -e "OAUTH_PROXY=${OAUTH_PROXY:-}" \
       -e DISPLAY=:99 \
       "$IMAGE" \
       bash -c 'Xvfb :99 -screen 0 1440x1000x24 >/dev/null 2>&1 & sleep 1 && pip install "patchright==1.60.0" -q --root-user-action=ignore >/dev/null 2>&1 && python3 /work/script.py' \

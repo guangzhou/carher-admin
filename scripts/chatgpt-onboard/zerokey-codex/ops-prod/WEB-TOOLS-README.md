@@ -1,6 +1,14 @@
-# Web tool-injection layer (sub2api-style) for zerokey web-only pods
+# Web-only zerokey pod capabilities (tool-call injection + native gpt-5.6)
 
-## What this is
+Two capabilities that make a **web-only** zerokey pod (no `CODEX_TOKEN_DIR`)
+functionally match the codex pool. Both ship via the same routes patch + deploy.
+
+1. **tool-call injection** (this doc's main subject) — sub2api-style, below.
+2. **native gpt-5.6 sol/terra/luna** — plain-slug passthrough, see the "gpt-5.6"
+   section near the end. TL;DR: web serves `gpt-5.6-{sol,terra,luna}` natively;
+   never append `-wm`.
+
+## What the tool-call injection is
 
 Lets a **web-only** zerokey-serve pod (one with **no `CODEX_TOKEN_DIR`**, i.e.
 the aliyun / 225 "web-for-all" blueprint) still serve arbitrary caller-defined
@@ -140,8 +148,37 @@ Levers, in order:
    best-effort *capacity supplement*, not a native replacement. The stubborn
    accounts are best used for no-tool chat traffic or given codex tokens.
 
+## gpt-5.6 sol/terra/luna on web pods (native, plain-slug passthrough)
+
+The ChatGPT web backend serves the sol/terra/luna tunings **natively** — send the
+PLAIN slug `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` (inline streaming,
+`stream_handoff=false`, real content). Verified live on aliyun serve-70 + 225.
+
+**Never append `-wm`.** `gpt-5.6-sol-wm` is the *with-memory* variant; it streams
+via a conduit `stream_handoff` (the first `/f/conversation` POST only returns a
+`resume_conversation_token` JWT; the body streams from an internal conduit our
+stateless replay can't follow) → empty. The `GET /backend-api/conversation/resume`
+endpoint exists but chasing it is a dead end — the plain slug just works.
+
+Debug rule: **HTTP 200 ≠ real content.** To confirm 5.6 actually worked, check the
+stream has `stream_handoff=false` AND non-empty content — not the status code.
+
+Wiring (already in the routes patch):
+- `raw.js` `resolveModel`: `gpt-5.6-{sol,terra,luna}` pass through verbatim;
+  `chatgpt-gpt-5.6-{sol,terra,luna}` → stripped to the plain slug; generic
+  `gpt-5.6` → `gpt-5-6-thinking`, `gpt-5.6-pro` → `gpt-5-6-pro`.
+- Register the 14 pods into the 5.6 groups:
+  ```bash
+  python3 ops-prod/register-web-pool.py --variants 5.6-sol 5.6-terra 5.6-luna
+  # or all groups (5.5 + 3x 5.6):  python3 ops-prod/register-web-pool.py
+  # remove:                         python3 ops-prod/register-web-pool.py --delete
+  ```
+  Each group ends with 15 members = 14 web (`zk-N-gpt-5.6-<v>`) + 1 `188` codex.
+
 ## Rollback
 
 Revert the CM keys (or the deploy args) → pods return to plain web replay.
+Remove LiteLLM entries with `register-web-pool.py --delete`.
 Zero effect on codex-pool pods (they never hit this branch).
+
 

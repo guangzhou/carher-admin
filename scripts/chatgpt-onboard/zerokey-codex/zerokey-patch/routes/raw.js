@@ -18,6 +18,8 @@ const { normalizeToolDefs, buildToolInstructions, extractToolCalls, newCallId } 
 
 // Real web slugs available to this account (chatgpt.com/backend-api/models).
 const WEB_MODELS = [
+  'gpt-5-6-thinking',
+  'gpt-5-6-pro',
   'gpt-5-5-pro',
   'gpt-5-5-thinking',
   'gpt-5-5',
@@ -40,7 +42,22 @@ const WEB_MODELS = [
 ]
 
 // Friendly aliases → web slug (OpenAI-ish names some clients hardcode).
+// NOTE on 5.6: the web backend DOES serve 5.6, but the sol/terra/luna tunings
+// are the `-wm` (with-memory) variants that stream via a conduit `stream_handoff`
+// our stateless replay can't follow (returns empty). The classic-streaming 5.6 is
+// `gpt-5-6-thinking`, which replays fine — so we map all 5.6 requests to it as the
+// working web-side 5.6. (When conduit-resume is implemented, sol/terra/luna can
+// map to their real `-wm` slugs.)
 const ALIASES = {
+  'gpt-5.6': 'gpt-5-6-thinking',
+  'gpt-5-6': 'gpt-5-6-thinking',
+  'gpt-5.6-sol': 'gpt-5-6-thinking',
+  'gpt-5.6-terra': 'gpt-5-6-thinking',
+  'gpt-5.6-luna': 'gpt-5-6-thinking',
+  'gpt-5.6-pro': 'gpt-5-6-pro',
+  'chatgpt-gpt-5.6-sol': 'gpt-5-6-thinking',
+  'chatgpt-gpt-5.6-terra': 'gpt-5-6-thinking',
+  'chatgpt-gpt-5.6-luna': 'gpt-5-6-thinking',
   'gpt-5.5': 'gpt-5-5',
   'gpt-5.5-pro': 'gpt-5-5-pro',
   'gpt-5.4': 'gpt-5-4-thinking',

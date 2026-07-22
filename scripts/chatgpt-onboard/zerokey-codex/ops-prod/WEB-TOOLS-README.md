@@ -58,10 +58,54 @@ no tools → plain web replay (unchanged)
 
 ## Deploy to a real web-only pod
 
-### 188 docker (throwaway/test or per-acct web pod)
+### 225 K3s web-only pods (zero-87..99) — ACTUAL DEPLOY MECHANISM (verified 2026-07-22, live)
+
+The pods do NOT bake routes into the image. Startup command copies patch files
+from ConfigMap `zk-image-patch` (mounted at `/patch`) into `/app` before `node`.
+So deploying = update the CM + extend the copy command. Access 225 via 198's
+`sudo k3s kubectl -n litellm-product` (direct kubectl context is aliyun, not this).
+
+```bash
+# 1. push the 3 files to 198 (scp broken → base64 pipe)
+for f in web-tools.js raw.js responses.js; do
+  base64 -i zerokey-patch/routes/$f | ssh cltx@10.68.13.198 "mkdir -p ~/zk-webtools && base64 -d > ~/zk-webtools/$f"
+done
+
+# 2. merge-patch the CM (preserves other keys: api.js/chatgpt.js/codex-pool.js/images.js/zerokey-serve-codex.js)
+ssh cltx@10.68.13.198 'python3 - <<PY
+import json
+data={k:open(f"/home/cltx/zk-webtools/{k}").read() for k in ["web-tools.js","raw.js","responses.js"]}
+open("/tmp/cm-patch.json","w").write(json.dumps({"data":data}))
+PY
+sudo k3s kubectl -n litellm-product patch cm zk-image-patch --type merge --patch-file /tmp/cm-patch.json'
+
+# 3. first-time only: extend each deploy's startup command to copy the new routes.
+#    Original args copy 3 files; add web-tools.js + raw.js + responses.js, then
+#    patch container "zerokey" args[1] and rollout (canary zero-93 first):
+#      cp /patch/zerokey-serve-codex.js /app/zerokey-serve-codex.js
+#      cp /patch/images.js /app/routes/images.js
+#      cp /patch/api.js /app/core/chatgpt/api.js
+#      cp /patch/web-tools.js /app/routes/web-tools.js       # NEW
+#      cp /patch/raw.js /app/routes/raw.js                   # NEW
+#      cp /patch/responses.js /app/routes/responses.js       # NEW
+#      exec node /app/zerokey-serve-codex.js
+#    After that first args change, later CM-only tweaks just need: rollout restart.
+
+# 4. smoke each pod (no curl in pod → hit podIP:8200 from the 198 host)
+IP=$(ssh cltx@10.68.13.198 "sudo k3s kubectl -n litellm-product get pod -o jsonpath='{range .items[*]}{.metadata.name} {.status.podIP}{\"\n\"}{end}' | grep '^zero-93-' | awk '{print \$2}'")
+ssh cltx@10.68.13.198 "curl -s http://$IP:8200/v1/chat/completions -H 'Authorization: Bearer raw' -H 'Content-Type: application/json' \
+  -d '{\"model\":\"gpt-5.5\",\"messages\":[{\"role\":\"user\",\"content\":\"read src/config.js\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}}],\"stream\":false}'" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["choices"][0]["finish_reason"])'   # → tool_calls
+```
+
+Do NOT set `CODEX_TOKEN_DIR` on these pods — that switches them to the codex path.
+These 13 pods are ALREADY members of LiteLLM group `zerokey-pool-gpt-5.5`
+(alongside `188:8200` codex-pool), so the fix takes effect for prod traffic
+immediately after rollout — no LiteLLM re-registration needed.
+
+### 188 docker (throwaway/test or standalone per-acct web pod)
 Mount the three files over the image and run WITHOUT `CODEX_TOKEN_DIR`:
 ```bash
-# push files (scp broken on 188 → base64 pipe)
 for f in web-tools.js raw.js responses.js; do
   base64 -i zerokey-patch/routes/$f | ssh cltx@10.68.13.188 "mkdir -p ~/zk-webtools-patch && base64 -d > ~/zk-webtools-patch/$f"
 done
@@ -75,22 +119,19 @@ ssh cltx@10.68.13.188 "docker run -d --name zk-web-acct-N --restart always --net
   $ZKIMG"
 ```
 
-### 225 K3s web-only pods (zero-N, blueprint = aliyun-zerokey-pool.yaml)
-The image is baked from the same source. Rebuild the image with these three
-routes files updated (build on 226 per repo red-lines), OR bind-mount via a
-ConfigMap of the three JS files onto `/app/routes/*.js`. Do NOT set
-`CODEX_TOKEN_DIR` on these pods — that would switch them to the codex path.
+## Reliability (measured across the fleet, 2026-07-22)
 
-Smoke (from inside cluster or via svc):
-```bash
-curl -s http://<pod>:8200/v1/chat/completions -H 'Authorization: Bearer raw' \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"read src/config.js"}],
-       "tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],"stream":false}' \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)["choices"][0]["finish_reason"])'   # → tool_calls
-```
+Best-effort, per-account variance. First-call hit rate ~90-100% with the
+hardened prompt (`buildToolInstructions`); a few accounts occasionally answer in
+plain text but recover on the next call. Agentic clients retry naturally, and
+codex-pool members in the same group are 100% native. Two levers if an account
+is stubborn:
+- `tool_choice: "required"` forces it (adds the "REQUIRES a function call" line).
+- Keep tool schemas simple; avoid weather/math prompts (they trip ChatGPT's
+  built-in search widget and override the injection).
 
 ## Rollback
 
-Remove the three bind-mounts (or revert the image) → pod returns to plain web
-replay. Zero effect on codex-pool pods (they never hit this branch).
+Revert the CM keys (or the deploy args) → pods return to plain web replay.
+Zero effect on codex-pool pods (they never hit this branch).
+

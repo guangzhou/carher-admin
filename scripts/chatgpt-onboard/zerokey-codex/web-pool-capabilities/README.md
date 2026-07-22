@@ -1,5 +1,13 @@
 # Web-only zerokey pod capabilities (tool-call injection + native gpt-5.6)
 
+> **This folder** (`zerokey-codex/web-pool-capabilities/`) is the hub for making a
+> web-only zerokey pod match the codex pool. Contents:
+> - `README.md` — this doc (mechanism, deploy, rollback, 5.6)
+> - `deploy.sh` — push route patches to 225 pods (CM + startup cp + rollout)
+> - `register-web-pool.py` — register pods into LiteLLM zerokey-pool groups
+> - route patches themselves live in `../zerokey-patch/routes/{web-tools,raw,responses}.js`
+>   (kept with the serve route overlay, not copied here, to avoid duplication)
+
 Two capabilities that make a **web-only** zerokey pod (no `CODEX_TOKEN_DIR`)
 functionally match the codex pool. Both ship via the same routes patch + deploy.
 
@@ -76,7 +84,7 @@ So deploying = update the CM + extend the copy command. Access 225 via 198's
 ```bash
 # 1. push the 3 files to 198 (scp broken → base64 pipe)
 for f in web-tools.js raw.js responses.js; do
-  base64 -i zerokey-patch/routes/$f | ssh cltx@10.68.13.198 "mkdir -p ~/zk-webtools && base64 -d > ~/zk-webtools/$f"
+  base64 -i ../zerokey-patch/routes/$f | ssh cltx@10.68.13.198 "mkdir -p ~/zk-webtools && base64 -d > ~/zk-webtools/$f"
 done
 
 # 2. merge-patch the CM (preserves other keys: api.js/chatgpt.js/codex-pool.js/images.js/zerokey-serve-codex.js)
@@ -115,7 +123,7 @@ immediately after rollout — no LiteLLM re-registration needed.
 Mount the three files over the image and run WITHOUT `CODEX_TOKEN_DIR`:
 ```bash
 for f in web-tools.js raw.js responses.js; do
-  base64 -i zerokey-patch/routes/$f | ssh cltx@10.68.13.188 "mkdir -p ~/zk-webtools-patch && base64 -d > ~/zk-webtools-patch/$f"
+  base64 -i ../zerokey-patch/routes/$f | ssh cltx@10.68.13.188 "mkdir -p ~/zk-webtools-patch && base64 -d > ~/zk-webtools-patch/$f"
 done
 ZKIMG=$(ssh cltx@10.68.13.188 'docker inspect zerokey-codex-pool --format "{{.Config.Image}}"')
 ssh cltx@10.68.13.188 "docker run -d --name zk-web-acct-N --restart always --network host \
@@ -169,9 +177,9 @@ Wiring (already in the routes patch):
   `gpt-5.6` → `gpt-5-6-thinking`, `gpt-5.6-pro` → `gpt-5-6-pro`.
 - Register the 14 pods into the 5.6 groups:
   ```bash
-  python3 ops-prod/register-web-pool.py --variants 5.6-sol 5.6-terra 5.6-luna
-  # or all groups (5.5 + 3x 5.6):  python3 ops-prod/register-web-pool.py
-  # remove:                         python3 ops-prod/register-web-pool.py --delete
+  python3 ./register-web-pool.py --variants 5.6-sol 5.6-terra 5.6-luna
+  # or all groups (5.5 + 3x 5.6):  python3 ./register-web-pool.py
+  # remove:                         python3 ./register-web-pool.py --delete
   ```
   Each group ends with 15 members = 14 web (`zk-N-gpt-5.6-<v>`) + 1 `188` codex.
 

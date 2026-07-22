@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# deploy-web-tools-225.sh — deploy/refresh the web tool-injection layer onto the
-# 225 K3s web-only zerokey pods (zero-87..99). Idempotent.
+# deploy.sh — deploy/refresh the web-pool capability patches (tool-call injection
+# + native gpt-5.6) onto the 225 K3s web-only zerokey pods. Idempotent.
 #
 # Mechanism: pods copy /patch/*.js (ConfigMap zk-image-patch) → /app on startup.
 # We update the CM with the 3 patched route files, ensure the startup command
-# copies them, then rollout. See ops-prod/WEB-TOOLS-README.md for the full story.
+# copies them, then rollout. Full story: ./README.md.
+# Route patches live in ../zerokey-patch/routes/{web-tools,raw,responses}.js
+# (kept there because they are part of the zerokey serve route overlay).
+# After deploy, register pods into LiteLLM pools with ./register-web-pool.py.
 #
 # Access 225 only via 198's `sudo k3s kubectl` (direct kubectl context = aliyun).
 #
 # Usage:
-#   ./deploy-web-tools-225.sh                # all zero-* pods
-#   ./deploy-web-tools-225.sh 93             # canary a single pod
-#   POD_HOST=cltx@10.68.13.198 ./deploy-web-tools-225.sh
+#   ./deploy.sh                # all zero-* pods
+#   ./deploy.sh 93             # canary a single pod
+#   POD_HOST=cltx@10.68.13.198 ./deploy.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"        # zerokey-codex/

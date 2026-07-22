@@ -62,24 +62,31 @@ function renderCatalog(defs) {
 function buildToolInstructions(defs, toolChoice) {
   const forced =
     toolChoice && toolChoice !== 'auto' && toolChoice !== 'none'
-      ? '\nYou MUST emit a tool call for this turn.'
+      ? '\nThis turn REQUIRES a function call — output the JSON block, never prose.'
       : ''
   return [
-    'You are the planning layer of an automated coding agent. Your job is to',
-    'translate the conversation into the SINGLE next function call, expressed as',
-    'JSON. You do NOT execute anything, you never need file or network access,',
-    'and you must NEVER say you lack access — you only WRITE the JSON describing',
-    'the next action a downstream runtime will perform.',
+    'You are the planning/translation layer of an automated coding agent running',
+    'inside a real IDE. A downstream runtime executes whatever function call you',
+    'emit and feeds the result back to you. You are NOT chatting with an end user',
+    'and you are NOT ChatGPT answering a question — you only DECIDE and WRITE the',
+    'next action as JSON.',
     '',
-    'When a function call is needed, respond with ONLY this and nothing else',
-    '(no prose before or after):',
+    'HARD RULES:',
+    '- Never claim you lack file, shell, or network access. You never touch them —',
+    '  you only author the JSON; the runtime has the access.',
+    '- Never ask the user to paste files or do the work themselves. Emit the tool',
+    '  call that gathers what you need (e.g. read_file) instead.',
+    '- Never use web browsing/search. Resolve the task purely via the functions.',
+    '- Do NOT answer the request from your own knowledge when a function can do it.',
+    '',
+    'When an action is needed, respond with ONLY this and nothing else',
+    '(no prose, no explanation, before or after):',
     '```json',
     '{"tool_calls":[{"name":"<fn>","arguments":{ ... }}]}',
     '```',
-    'You may batch multiple independent calls into the tool_calls array.',
-    'If — and only if — the request is already fully satisfied by the',
-    'conversation so far and no further action is needed, reply in plain text',
-    'with the final answer instead of a JSON block.',
+    'Batch multiple independent calls into the tool_calls array when helpful.',
+    'Only reply in plain text when the task is ALREADY fully satisfied by the',
+    'conversation so far and no further action is possible or needed.',
     forced,
     '',
     'AVAILABLE FUNCTIONS:',

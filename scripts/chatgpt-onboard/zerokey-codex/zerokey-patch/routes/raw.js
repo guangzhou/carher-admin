@@ -42,22 +42,18 @@ const WEB_MODELS = [
 ]
 
 // Friendly aliases → web slug (OpenAI-ish names some clients hardcode).
-// NOTE on 5.6: the web backend DOES serve 5.6, but the sol/terra/luna tunings
-// are the `-wm` (with-memory) variants that stream via a conduit `stream_handoff`
-// our stateless replay can't follow (returns empty). The classic-streaming 5.6 is
-// `gpt-5-6-thinking`, which replays fine — so we map all 5.6 requests to it as the
-// working web-side 5.6. (When conduit-resume is implemented, sol/terra/luna can
-// map to their real `-wm` slugs.)
+// 5.6: the web backend serves the sol/terra/luna tunings NATIVELY via the PLAIN
+// dot slugs `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` (inline streaming,
+// verified on aliyun + 225). Do NOT append `-wm` (that's the with-memory variant
+// which streams via a conduit handoff our replay can't follow → empty). So plain
+// sol/terra/luna pass through verbatim; only strip the litellm `chatgpt-` prefix.
 const ALIASES = {
   'gpt-5.6': 'gpt-5-6-thinking',
   'gpt-5-6': 'gpt-5-6-thinking',
-  'gpt-5.6-sol': 'gpt-5-6-thinking',
-  'gpt-5.6-terra': 'gpt-5-6-thinking',
-  'gpt-5.6-luna': 'gpt-5-6-thinking',
   'gpt-5.6-pro': 'gpt-5-6-pro',
-  'chatgpt-gpt-5.6-sol': 'gpt-5-6-thinking',
-  'chatgpt-gpt-5.6-terra': 'gpt-5-6-thinking',
-  'chatgpt-gpt-5.6-luna': 'gpt-5-6-thinking',
+  'chatgpt-gpt-5.6-sol': 'gpt-5.6-sol',
+  'chatgpt-gpt-5.6-terra': 'gpt-5.6-terra',
+  'chatgpt-gpt-5.6-luna': 'gpt-5.6-luna',
   'gpt-5.5': 'gpt-5-5',
   'gpt-5.5-pro': 'gpt-5-5-pro',
   'gpt-5.4': 'gpt-5-4-thinking',

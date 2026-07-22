@@ -82,13 +82,14 @@ function buildResponsesRoute(chatgptApi) {
     const useWebTools = _webToolDefs.length > 0 && !hasTokens()
 
     const model = resolveModel(req.body.model)
-    let prompt = flattenInput(input, instructions)
+    const basePrompt = flattenInput(input, instructions)
+    let prompt = basePrompt
 
     // Web tool-injection: prepend the reframed tool-authoring instructions +
     // the caller's tool catalog so the web model emits a parseable envelope.
     if (useWebTools) {
       const toolInstr = buildToolInstructions(_webToolDefs, req.body.tool_choice)
-      prompt = `${toolInstr}\n\n${prompt}`
+      prompt = `${toolInstr}\n\n${basePrompt}`
     }
 
     await acquireSlot('ChatGPT')
@@ -174,6 +175,36 @@ function buildResponsesRoute(chatgptApi) {
       })}\n\n`)
     }
 
+    // One-shot re-send for the web-tools retry: collect full text, no streaming.
+    async function collectWebTextR(promptText) {
+      let up
+      try {
+        up = await chatgptApi.chatCompletion(promptText, null, 'client-created-root', model, null)
+      } catch (e) {
+        return ''
+      }
+      let acc = ''
+      let done = false
+      await readSSE(up, {
+        onData: (d) => {
+          if (!d || done) return
+          if (d.p === '/message/content/parts/0' && d.o === 'append') return (acc += d.v || '')
+          if (typeof d.v === 'string' && !d.o && !d.p) return (acc += d.v)
+          if (d.o === 'patch' && Array.isArray(d.v)) {
+            for (const op of d.v) {
+              if (op.p === '/message/content/parts/0' && op.o === 'append') acc += op.v || ''
+              if (op.p === '/message/status' && op.o === 'replace' && op.v === 'finished_successfully') done = true
+            }
+          }
+          if (d.type === 'message_stream_complete') done = true
+        },
+        onDone: () => { done = true },
+        onError: () => { done = true },
+        isDone: () => done,
+      })
+      return acc
+    }
+
     const finish = () => {
       if (finished) return
       finished = true
@@ -187,7 +218,24 @@ function buildResponsesRoute(chatgptApi) {
       // ── Web-tools branch: parse the buffered text into function_call items ──
       if (useWebTools) {
         const parsed = extractToolCalls(full)
-        return finishWebTools(res, { stream, respId, msgId, created, mdl, usage, full, parsed })
+        if (parsed && parsed.calls.length) {
+          return finishWebTools(res, { stream, respId, msgId, created, mdl, usage, full, parsed })
+        }
+        // No envelope on the first pass → one escalated retry before falling
+        // back to plain text (fixes accounts whose harness refuses softly).
+        const escalated = `${buildToolInstructions(_webToolDefs, 'required', true)}\n\n${basePrompt}`
+        collectWebTextR(escalated)
+          .then((text2) => {
+            const p2 = extractToolCalls(text2)
+            finishWebTools(res, {
+              stream, respId, msgId, created, mdl, usage,
+              full: full || text2 || '', parsed: p2 && p2.calls.length ? p2 : null,
+            })
+          })
+          .catch(() =>
+            finishWebTools(res, { stream, respId, msgId, created, mdl, usage, full: full || '', parsed: null }),
+          )
+        return
       }
 
       if (stream) {

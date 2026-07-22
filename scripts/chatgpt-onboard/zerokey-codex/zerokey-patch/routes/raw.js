@@ -190,6 +190,78 @@ async function rawComplete(req, res, chatgptApi) {
     )
   }
 
+  // Collect the full web reply for one prompt (used by the web-tools retry).
+  // Returns accumulated text; never streams. Isolated from the main readSSE.
+  async function collectWebText(promptText) {
+    let up
+    try {
+      up = await chatgptApi.chatCompletion(promptText, null, 'client-created-root', model, null)
+    } catch (e) {
+      return ''
+    }
+    let acc = ''
+    let done = false
+    await readSSE(up, {
+      onData: (d) => {
+        if (!d || done) return
+        if (d.p === '/message/content/parts/0' && d.o === 'append') return (acc += d.v || '')
+        if (typeof d.v === 'string' && !d.o && !d.p) return (acc += d.v)
+        if (d.o === 'patch' && Array.isArray(d.v)) {
+          for (const op of d.v) {
+            if (op.p === '/message/content/parts/0' && op.o === 'append') acc += op.v || ''
+            if (op.p === '/message/status' && op.o === 'replace' && op.v === 'finished_successfully') done = true
+          }
+        }
+        if (d.type === 'message_stream_complete') done = true
+      },
+      onDone: () => { done = true },
+      onError: () => { done = true },
+      isDone: () => done,
+    })
+    return acc
+  }
+
+  // Emit the final chat/completions payload for the web-tools path given parsed
+  // calls (or null → plain text `content`).
+  const emitWebToolsResult = (parsed, content) => {
+    if (parsed && parsed.calls.length) {
+      const tool_calls = parsed.calls.map((c, i) => ({
+        index: i,
+        id: newCallId(c.name),
+        type: 'function',
+        function: {
+          name: c.name,
+          arguments: typeof c.arguments === 'string' ? c.arguments : JSON.stringify(c.arguments),
+        },
+      }))
+      if (stream) {
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: mdl,
+          choices: [{ index: 0, delta: { role: 'assistant', content: null, tool_calls }, finish_reason: null }] })}\n\n`)
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: mdl,
+          choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`)
+        res.write('data: [DONE]\n\n')
+        res.end()
+      } else {
+        res.json({ id, object: 'chat.completion', created, model: mdl,
+          choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls }, finish_reason: 'tool_calls' }],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } })
+      }
+      return
+    }
+    if (stream) {
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: mdl,
+        choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }] })}\n\n`)
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: mdl,
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`)
+      res.write('data: [DONE]\n\n')
+      res.end()
+    } else {
+      res.json({ id, object: 'chat.completion', created, model: mdl,
+        choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } })
+    }
+  }
+
   const finish = () => {
     if (finished) return
     finished = true
@@ -197,63 +269,18 @@ async function rawComplete(req, res, chatgptApi) {
     // ── Web-tools branch: parse buffered text → OpenAI tool_calls ──
     if (useWebTools) {
       const parsed = extractToolCalls(full)
-      if (parsed && parsed.calls.length) {
-        const tool_calls = parsed.calls.map((c, i) => ({
-          index: i,
-          id: newCallId(c.name),
-          type: 'function',
-          function: {
-            name: c.name,
-            arguments: typeof c.arguments === 'string' ? c.arguments : JSON.stringify(c.arguments),
-          },
-        }))
-        if (stream) {
-          res.write(
-            `data: ${JSON.stringify({
-              id, object: 'chat.completion.chunk', created, model: mdl,
-              choices: [{ index: 0, delta: { role: 'assistant', content: null, tool_calls }, finish_reason: null }],
-            })}\n\n`,
-          )
-          res.write(
-            `data: ${JSON.stringify({
-              id, object: 'chat.completion.chunk', created, model: mdl,
-              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
-            })}\n\n`,
-          )
-          res.write('data: [DONE]\n\n')
-          res.end()
-        } else {
-          res.json({
-            id, object: 'chat.completion', created, model: mdl,
-            choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls }, finish_reason: 'tool_calls' }],
-            usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-          })
-        }
-        return
-      }
-      // No envelope → plain answer. Emit `full` as normal content.
-      if (stream) {
-        res.write(
-          `data: ${JSON.stringify({
-            id, object: 'chat.completion.chunk', created, model: mdl,
-            choices: [{ index: 0, delta: { role: 'assistant', content: full }, finish_reason: null }],
-          })}\n\n`,
-        )
-        res.write(
-          `data: ${JSON.stringify({
-            id, object: 'chat.completion.chunk', created, model: mdl,
-            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-          })}\n\n`,
-        )
-        res.write('data: [DONE]\n\n')
-        res.end()
-      } else {
-        res.json({
-          id, object: 'chat.completion', created, model: mdl,
-          choices: [{ index: 0, message: { role: 'assistant', content: full }, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      if (parsed && parsed.calls.length) return emitWebToolsResult(parsed, null)
+      // No envelope on the first pass. One escalated retry before giving up as
+      // plain text — fixes accounts whose web harness refuses on the soft prompt.
+      const escalated = `${buildToolInstructions(webToolDefs, 'required', true)}\n\n${prompt}`
+      collectWebText(escalated)
+        .then((text2) => {
+          const p2 = extractToolCalls(text2)
+          if (p2 && p2.calls.length) return emitWebToolsResult(p2, null)
+          // Still nothing → return best plain text we have (prefer non-empty).
+          emitWebToolsResult(null, full || text2 || '')
         })
-      }
+        .catch(() => emitWebToolsResult(null, full || ''))
       return
     }
 

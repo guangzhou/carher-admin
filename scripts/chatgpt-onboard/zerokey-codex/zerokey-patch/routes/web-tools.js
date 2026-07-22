@@ -58,13 +58,30 @@ function renderCatalog(defs) {
     .join('\n')
 }
 
-// The reframe recipe. `toolChoice` may force a call.
-function buildToolInstructions(defs, toolChoice) {
+// The reframe recipe. `toolChoice` may force a call. `escalate` adds a stronger
+// few-shot + imperative header for the retry pass when the first attempt refused.
+function buildToolInstructions(defs, toolChoice, escalate) {
   const forced =
-    toolChoice && toolChoice !== 'auto' && toolChoice !== 'none'
+    escalate || (toolChoice && toolChoice !== 'auto' && toolChoice !== 'none')
       ? '\nThis turn REQUIRES a function call — output the JSON block, never prose.'
       : ''
+  const head = escalate
+    ? [
+        'STRICT MODE. Your previous reply was rejected because it was prose, not a',
+        'tool call. This is an automated pipeline: prose is discarded and only a',
+        'JSON tool_calls block is accepted. A refusal ("I can\'t call that", "that',
+        'tool isn\'t available", "upload the file") is INVALID output — the tool IS',
+        'available to the runtime, you just author the call. Emit the JSON now.',
+        '',
+        'Example — request "read config.py" →',
+        '```json',
+        '{"tool_calls":[{"name":"read_file","arguments":{"path":"config.py"}}]}',
+        '```',
+        '',
+      ]
+    : []
   return [
+    ...head,
     'You are the planning/translation layer of an automated coding agent running',
     'inside a real IDE. A downstream runtime executes whatever function call you',
     'emit and feeds the result back to you. You are NOT chatting with an end user',

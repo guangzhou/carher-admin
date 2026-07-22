@@ -14,6 +14,7 @@
 
 const { readSSE } = require('../utils/sse-reader')
 const { acquireSlot } = require('../utils/rate-limiter')
+const { normalizeToolDefs, buildToolInstructions, extractToolCalls, newCallId } = require('./web-tools')
 
 // Real web slugs available to this account (chatgpt.com/backend-api/models).
 const WEB_MODELS = [
@@ -98,6 +99,18 @@ async function rawComplete(req, res, chatgptApi) {
   const model = resolveModel(req.body.model)
   const prompt = flatten(messages)
 
+  // Web tool-injection (chat/completions): when the caller passes tools[], the
+  // web backend can't do native tool_calls, so inject the reframed catalog and
+  // parse the JSON envelope back out at finish(). Best-effort; see web-tools.js.
+  const webToolDefs =
+    Array.isArray(req.body.tools) && req.body.tools.length > 0
+      ? normalizeToolDefs(req.body.tools)
+      : []
+  const useWebTools = webToolDefs.length > 0
+  const promptForSend = useWebTools
+    ? `${buildToolInstructions(webToolDefs, req.body.tool_choice)}\n\n${prompt}`
+    : prompt
+
   await acquireSlot('ChatGPT')
 
   // Long-prompt → file attachment. The web /f/conversation endpoint caps a
@@ -105,11 +118,11 @@ async function rawComplete(req, res, chatgptApi) {
   // Above ZK_INLINE_MAX chars, upload the prompt as a .txt attachment and send
   // a short instruction inline. Zero-regression: short prompts unchanged.
   const INLINE_MAX = parseInt(process.env.ZK_INLINE_MAX || '100000', 10)
-  let sendPrompt = prompt
+  let sendPrompt = promptForSend
   let attachments = null
-  if (prompt.length > INLINE_MAX) {
+  if (promptForSend.length > INLINE_MAX) {
     try {
-      const buf = Buffer.from(prompt, 'utf8')
+      const buf = Buffer.from(promptForSend, 'utf8')
       const up = await chatgptApi.uploadFile(buf, {
         fileName: `conversation-${Date.now()}.txt`,
         mimeType: 'text/plain',
@@ -128,7 +141,7 @@ async function rawComplete(req, res, chatgptApi) {
       sendPrompt =
         'The full conversation/context is in the attached text file ' +
         `(${up.name}). Read it and respond to the latest request in it.`
-      console.log(`[raw] long prompt ${prompt.length} chars → uploaded as ${up.id}`)
+      console.log(`[raw] long prompt ${promptForSend.length} chars → uploaded as ${up.id}`)
     } catch (e) {
       // Upload failed → fall back to inline (may 413, then litellm fallback
       // handles it). Don't hard-fail the request here.
@@ -161,7 +174,9 @@ async function rawComplete(req, res, chatgptApi) {
   const onText = (t) => {
     if (!t) return
     full += t
-    if (!stream) return
+    // Web-tools: buffer silently — the text may be a JSON tool envelope that we
+    // only emit (as tool_calls) once complete.
+    if (!stream || useWebTools) return
     const delta = started ? { content: t } : { role: 'assistant', content: t }
     started = true
     res.write(
@@ -178,6 +193,70 @@ async function rawComplete(req, res, chatgptApi) {
   const finish = () => {
     if (finished) return
     finished = true
+
+    // ── Web-tools branch: parse buffered text → OpenAI tool_calls ──
+    if (useWebTools) {
+      const parsed = extractToolCalls(full)
+      if (parsed && parsed.calls.length) {
+        const tool_calls = parsed.calls.map((c, i) => ({
+          index: i,
+          id: newCallId(c.name),
+          type: 'function',
+          function: {
+            name: c.name,
+            arguments: typeof c.arguments === 'string' ? c.arguments : JSON.stringify(c.arguments),
+          },
+        }))
+        if (stream) {
+          res.write(
+            `data: ${JSON.stringify({
+              id, object: 'chat.completion.chunk', created, model: mdl,
+              choices: [{ index: 0, delta: { role: 'assistant', content: null, tool_calls }, finish_reason: null }],
+            })}\n\n`,
+          )
+          res.write(
+            `data: ${JSON.stringify({
+              id, object: 'chat.completion.chunk', created, model: mdl,
+              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            })}\n\n`,
+          )
+          res.write('data: [DONE]\n\n')
+          res.end()
+        } else {
+          res.json({
+            id, object: 'chat.completion', created, model: mdl,
+            choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls }, finish_reason: 'tool_calls' }],
+            usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+          })
+        }
+        return
+      }
+      // No envelope → plain answer. Emit `full` as normal content.
+      if (stream) {
+        res.write(
+          `data: ${JSON.stringify({
+            id, object: 'chat.completion.chunk', created, model: mdl,
+            choices: [{ index: 0, delta: { role: 'assistant', content: full }, finish_reason: null }],
+          })}\n\n`,
+        )
+        res.write(
+          `data: ${JSON.stringify({
+            id, object: 'chat.completion.chunk', created, model: mdl,
+            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          })}\n\n`,
+        )
+        res.write('data: [DONE]\n\n')
+        res.end()
+      } else {
+        res.json({
+          id, object: 'chat.completion', created, model: mdl,
+          choices: [{ index: 0, message: { role: 'assistant', content: full }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        })
+      }
+      return
+    }
+
     if (stream) {
       res.write(
         `data: ${JSON.stringify({

@@ -10,6 +10,7 @@ const { readSSE } = require('../utils/sse-reader')
 const { acquireSlot } = require('../utils/rate-limiter')
 const { resolveModel } = require('./raw')
 const { codexRequest, hasTokens } = require('./codex-pool')
+const { normalizeToolDefs, buildToolInstructions, extractToolCalls, newCallId } = require('./web-tools')
 
 // ── Input parsing ──────────────────────────────────────────────
 
@@ -71,8 +72,24 @@ function buildResponsesRoute(chatgptApi) {
       return handleCodex(req, res)
     }
 
+    // ── Web tool-injection path: tools present but NO Codex tokens (web-only
+    //    pod). Fall back to sub2api-style prompt-injection so agentic traffic
+    //    still gets tool_calls instead of silently degrading to plain chat. ──
+    const _webToolDefs =
+      Array.isArray(req.body.tools) && req.body.tools.length > 0
+        ? normalizeToolDefs(req.body.tools)
+        : []
+    const useWebTools = _webToolDefs.length > 0 && !hasTokens()
+
     const model = resolveModel(req.body.model)
-    const prompt = flattenInput(input, instructions)
+    let prompt = flattenInput(input, instructions)
+
+    // Web tool-injection: prepend the reframed tool-authoring instructions +
+    // the caller's tool catalog so the web model emits a parseable envelope.
+    if (useWebTools) {
+      const toolInstr = buildToolInstructions(_webToolDefs, req.body.tool_choice)
+      prompt = `${toolInstr}\n\n${prompt}`
+    }
 
     await acquireSlot('ChatGPT')
 
@@ -126,26 +143,31 @@ function buildResponsesRoute(chatgptApi) {
       }
       res.write(`event: response.created\ndata: ${JSON.stringify(respShell)}\n\n`)
 
-      // output_item.added
-      const msgShell = {
-        type: 'message', id: msgId, role: 'assistant', content: [], status: 'in_progress',
-      }
-      res.write(`event: response.output_item.added\ndata: ${JSON.stringify({
-        type: 'response.output_item.added', item: msgShell, output_index: 0,
-      })}\n\n`)
+      // Web-tools: we cannot stream raw text (it may be a JSON tool envelope) —
+      // buffer everything and emit the parsed result at finish(). Skip the
+      // message-shell preamble; the item type isn't known until parse time.
+      if (!useWebTools) {
+        // output_item.added
+        const msgShell = {
+          type: 'message', id: msgId, role: 'assistant', content: [], status: 'in_progress',
+        }
+        res.write(`event: response.output_item.added\ndata: ${JSON.stringify({
+          type: 'response.output_item.added', item: msgShell, output_index: 0,
+        })}\n\n`)
 
-      // content_part.added
-      res.write(`event: response.content_part.added\ndata: ${JSON.stringify({
-        type: 'response.content_part.added', item_id: msgId,
-        output_index: 0, content_index: 0, part: { type: 'output_text', text: '' },
-      })}\n\n`)
+        // content_part.added
+        res.write(`event: response.content_part.added\ndata: ${JSON.stringify({
+          type: 'response.content_part.added', item_id: msgId,
+          output_index: 0, content_index: 0, part: { type: 'output_text', text: '' },
+        })}\n\n`)
+      }
     }
 
     const onText = (t) => {
       if (!t) return
       full += t
       started = true
-      if (!stream) return
+      if (!stream || useWebTools) return
       res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({
         type: 'response.output_text.delta', item_id: msgId,
         output_index: 0, content_index: 0, delta: t,
@@ -160,6 +182,12 @@ function buildResponsesRoute(chatgptApi) {
         input_tokens: 0, output_tokens: 0, total_tokens: 0,
         input_token_details: { cached_tokens: 0 },
         output_token_details: { reasoning_tokens: 0 },
+      }
+
+      // ── Web-tools branch: parse the buffered text into function_call items ──
+      if (useWebTools) {
+        const parsed = extractToolCalls(full)
+        return finishWebTools(res, { stream, respId, msgId, created, mdl, usage, full, parsed })
       }
 
       if (stream) {
@@ -231,6 +259,74 @@ function buildResponsesRoute(chatgptApi) {
       isDone: () => finished,
     })
   })
+
+  // ── Web tool-injection finish: emit Responses function_call items (or a
+  //    plain message when the model chose to answer directly). ──
+  function finishWebTools(res, ctx) {
+    const { stream, respId, msgId, created, mdl, usage, full, parsed } = ctx
+    const output = []
+
+    if (parsed && parsed.calls.length) {
+      if (parsed.leadingText) {
+        output.push({
+          type: 'message', id: msgId, role: 'assistant',
+          content: [{ type: 'output_text', text: parsed.leadingText }], status: 'completed',
+        })
+      }
+      for (const c of parsed.calls) {
+        output.push({
+          type: 'function_call',
+          id: 'fc_' + crypto.randomBytes(12).toString('hex'),
+          call_id: newCallId(c.name),
+          name: c.name,
+          arguments: typeof c.arguments === 'string' ? c.arguments : JSON.stringify(c.arguments),
+          status: 'completed',
+        })
+      }
+    } else {
+      // No envelope → plain answer.
+      output.push({
+        type: 'message', id: msgId, role: 'assistant',
+        content: [{ type: 'output_text', text: full }], status: 'completed',
+      })
+    }
+
+    if (stream) {
+      let idx = 0
+      for (const item of output) {
+        res.write(`event: response.output_item.added\ndata: ${JSON.stringify({
+          type: 'response.output_item.added', item, output_index: idx,
+        })}\n\n`)
+        if (item.type === 'function_call') {
+          res.write(`event: response.function_call_arguments.delta\ndata: ${JSON.stringify({
+            type: 'response.function_call_arguments.delta', item_id: item.id,
+            output_index: idx, delta: item.arguments,
+          })}\n\n`)
+          res.write(`event: response.function_call_arguments.done\ndata: ${JSON.stringify({
+            type: 'response.function_call_arguments.done', item_id: item.id,
+            output_index: idx, arguments: item.arguments,
+          })}\n\n`)
+        }
+        res.write(`event: response.output_item.done\ndata: ${JSON.stringify({
+          type: 'response.output_item.done', item, output_index: idx,
+        })}\n\n`)
+        idx++
+      }
+      res.write(`event: response.completed\ndata: ${JSON.stringify({
+        type: 'response.completed',
+        response: {
+          id: respId, object: 'response', created_at: created, status: 'completed',
+          model: mdl, output, usage,
+        },
+      })}\n\n`)
+      res.end()
+    } else {
+      res.json({
+        id: respId, object: 'response', created_at: created, status: 'completed',
+        model: mdl, output, usage,
+      })
+    }
+  }
 
   // ── Codex forwarding (native tool_call via OAuth pool) ────────
   async function handleCodex(req, res) {

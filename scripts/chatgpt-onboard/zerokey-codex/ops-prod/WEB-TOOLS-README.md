@@ -121,14 +121,24 @@ ssh cltx@10.68.13.188 "docker run -d --name zk-web-acct-N --restart always --net
 
 ## Reliability (measured across the fleet, 2026-07-22)
 
-Best-effort, per-account variance. First-call hit rate ~90-100% with the
-hardened prompt (`buildToolInstructions`); a few accounts occasionally answer in
-plain text but recover on the next call. Agentic clients retry naturally, and
-codex-pool members in the same group are 100% native. Two levers if an account
-is stubborn:
-- `tool_choice: "required"` forces it (adds the "REQUIRES a function call" line).
-- Keep tool schemas simple; avoid weather/math prompts (they trip ChatGPT's
-  built-in search widget and override the injection).
+Best-effort, **per-account** variance — this is the crux. The web endpoint wraps
+the model in ChatGPT's consumer harness, and some accounts' sessions land in a
+stricter A/B bucket where the model refuses ("I don't have a read_file tool in
+this chat") even under escalation. With the hardened prompt + one internal
+escalated retry (`buildToolInstructions(..., escalate=true)` on no-envelope):
+
+- ~8/13 accounts (zero-87/88/90/91/92/94/95/97) hit reliably.
+- ~5/13 (zero-89/93/96/98/99) still refuse a large fraction of the time.
+
+This is the documented ceiling of prompt-injection tool calls (same as sub2api).
+Levers, in order:
+1. Internal retry — already automatic (escalated STRICT-mode re-send).
+2. `tool_choice: "required"` from the caller — forces the "REQUIRES a call" line.
+3. Keep tool schemas simple; avoid weather/math prompts (trip the search widget).
+4. **For guaranteed native tool_call, use the codex-pool path** (a pod WITH
+   `CODEX_TOKEN_DIR`, hitting `/backend-api/codex/responses`). Web injection is a
+   best-effort *capacity supplement*, not a native replacement. The stubborn
+   accounts are best used for no-tool chat traffic or given codex tokens.
 
 ## Rollback
 

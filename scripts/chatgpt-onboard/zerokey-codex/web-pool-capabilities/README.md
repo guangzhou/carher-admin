@@ -3,7 +3,8 @@
 > **This folder** (`zerokey-codex/web-pool-capabilities/`) is the hub for making a
 > web-only zerokey pod match the codex pool. Contents:
 > - `README.md` — this doc (mechanism, deploy, rollback, 5.6)
-> - `deploy.sh` — push route patches to 225 pods (CM + startup cp + rollout)
+> - `deploy.sh` — push route patches to EXISTING 225 pods (CM + startup cp + rollout)
+> - `new-pod.sh` — build a BRAND-NEW pod for an onboarded acct (capture → seed → deploy → register)
 > - `register-web-pool.py` — register pods into LiteLLM zerokey-pool groups
 > - route patches themselves live in `../zerokey-patch/routes/{web-tools,raw,responses}.js`
 >   (kept with the serve route overlay, not copied here, to avoid duplication)

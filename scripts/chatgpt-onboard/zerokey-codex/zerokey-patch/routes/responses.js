@@ -10,7 +10,7 @@ const { readSSE } = require('../utils/sse-reader')
 const { acquireSlot } = require('../utils/rate-limiter')
 const { resolveModel } = require('./raw')
 const { codexRequest, hasTokens } = require('./codex-pool')
-const { normalizeToolDefs, buildToolInstructions, extractToolCalls, newCallId } = require('./web-tools')
+const { normalizeToolDefs, buildToolInstructions, extractToolCalls, newCallId, detectShellTool, execCommandFromData, execToToolCall } = require('./web-tools')
 
 // ── Input parsing ──────────────────────────────────────────────
 
@@ -85,9 +85,14 @@ function buildResponsesRoute(chatgptApi) {
     const basePrompt = flattenInput(input, instructions)
     let prompt = basePrompt
 
-    // Web tool-injection: prepend the reframed tool-authoring instructions +
-    // the caller's tool catalog so the web model emits a parseable envelope.
-    if (useWebTools) {
+    // exec-harvest: shell-like caller tool → let the web model use its own
+    // code-interpreter and re-emit its container.exec command as the caller's
+    // shell tool_call. Otherwise fall back to JSON-envelope injection.
+    const shellTool = useWebTools ? detectShellTool(_webToolDefs) : null
+    let harvestedCmd = null
+    if (useWebTools && shellTool) {
+      prompt = `Use your shell to accomplish the task below. Prefer a single shell command.\n\n${basePrompt}`
+    } else if (useWebTools) {
       const toolInstr = buildToolInstructions(_webToolDefs, req.body.tool_choice)
       prompt = `${toolInstr}\n\n${basePrompt}`
     }
@@ -215,6 +220,14 @@ function buildResponsesRoute(chatgptApi) {
         output_token_details: { reasoning_tokens: 0 },
       }
 
+      // ── exec-harvest: re-emit the model's container.exec command as the
+      //    caller's shell function_call. ──
+      if (shellTool && harvestedCmd) {
+        const tc = execToToolCall(shellTool, harvestedCmd)
+        const parsed = { calls: [{ name: tc.name, arguments: tc.arguments }], leadingText: '' }
+        return finishWebTools(res, { stream, respId, msgId, created, mdl, usage, full: '', parsed })
+      }
+
       // ── Web-tools branch: parse the buffered text into function_call items ──
       if (useWebTools) {
         const parsed = extractToolCalls(full)
@@ -282,6 +295,11 @@ function buildResponsesRoute(chatgptApi) {
     await readSSE(upstream, {
       onData: (d) => {
         if (!d || finished) return
+        // exec-harvest: capture the model's first container.exec command and finish.
+        if (shellTool && !harvestedCmd) {
+          const cmd = execCommandFromData(d)
+          if (cmd) { harvestedCmd = cmd; return finish() }
+        }
         if (d.p === '/message/content/parts/0' && d.o === 'append') return onText(d.v)
         if (typeof d.v === 'string' && !d.o && !d.p) return onText(d.v)
         if (d.o === 'patch' && Array.isArray(d.v)) {

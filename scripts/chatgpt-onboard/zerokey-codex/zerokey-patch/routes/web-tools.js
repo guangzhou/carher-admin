@@ -223,9 +223,77 @@ function newCallId(name) {
   return `call_web_${Date.now().toString(36)}_${_callSeq}_${name}`.slice(0, 60)
 }
 
+// ── exec-harvest ───────────────────────────────────────────────
+// The web model can't be reliably forced to emit our JSON envelope, because it
+// has a server-side code-interpreter it PREFERS. So instead of fighting it, we
+// harvest the shell command it emits to its own sandbox (`container.exec`) and
+// re-emit it as the CALLER's shell tool_call — the caller runs it on the real
+// machine. Near-100% because it's the model's natural behavior.
+
+const SHELL_TOOL_HINTS = [
+  'shell', 'bash', 'run_shell', 'run_terminal', 'run_terminal_cmd', 'run_command',
+  'exec', 'exec_command', 'execute_command', 'terminal', 'shell_command', 'run',
+]
+
+// Return {name, key, isArray} for the caller's shell-like tool, or null.
+function detectShellTool(defs) {
+  if (!Array.isArray(defs)) return null
+  for (const d of defs) {
+    const n = String(d.name || '').toLowerCase()
+    if (!SHELL_TOOL_HINTS.some((h) => n === h || n.includes('shell') || n.includes('terminal') || n.includes('bash') || (n.includes('exec') && !n.includes('execute_sql')))) continue
+    // pick the string/array param most likely to be the command
+    const props = (d.parameters && d.parameters.properties) || {}
+    let key = null, isArray = false
+    for (const cand of ['command', 'cmd', 'script', 'input', 'args', 'commandLine']) {
+      if (props[cand]) { key = cand; isArray = props[cand].type === 'array'; break }
+    }
+    if (!key) {
+      const keys = Object.keys(props)
+      if (keys.length) { key = keys[0]; isArray = props[keys[0]] && props[keys[0]].type === 'array' }
+      else key = 'command'
+    }
+    return { name: d.name, key, isArray }
+  }
+  return null
+}
+
+// If a parsed SSE data object is a container.exec code message, return its raw
+// shell command string; else null.
+function execCommandFromData(d) {
+  if (!d) return null
+  const m = (d.v && d.v.message) || d.message
+  if (!m || !m.content) return null
+  if (m.content.content_type !== 'code') return null
+  const rec = m.recipient || (m.author && m.author.recipient)
+  if (rec && rec !== 'container.exec' && rec !== 'python') return null
+  const txt = m.content.text != null ? m.content.text : (m.content.parts || []).join('')
+  return txt && txt.trim() ? txt.trim() : null
+}
+
+// Turn a harvested `bash -lc <inner>` command into the caller shell tool's arg shape.
+function execToToolCall(shellTool, rawCmd) {
+  // Extract the inner command from `bash -lc <inner>` / `bash -c <inner>` if present.
+  let inner = rawCmd
+  const m = rawCmd.match(/^\s*(?:bash|sh)\s+-l?c\s+([\s\S]+)$/)
+  if (m) inner = m[1].trim()
+  let value
+  if (shellTool.isArray) value = ['bash', '-lc', inner]
+  else value = /^\s*(?:bash|sh)\s+-/.test(rawCmd) ? rawCmd : inner
+  const args = {}
+  args[shellTool.key] = value
+  return {
+    name: shellTool.name,
+    arguments: args,
+    id: newCallId(shellTool.name),
+  }
+}
+
 module.exports = {
   normalizeToolDefs,
   buildToolInstructions,
   extractToolCalls,
   newCallId,
+  detectShellTool,
+  execCommandFromData,
+  execToToolCall,
 }

@@ -14,7 +14,7 @@
 
 const { readSSE } = require('../utils/sse-reader')
 const { acquireSlot } = require('../utils/rate-limiter')
-const { normalizeToolDefs, buildToolInstructions, extractToolCalls, newCallId } = require('./web-tools')
+const { normalizeToolDefs, buildToolInstructions, extractToolCalls, newCallId, detectShellTool, execCommandFromData, execToToolCall } = require('./web-tools')
 
 // Real web slugs available to this account (chatgpt.com/backend-api/models).
 const WEB_MODELS = [
@@ -120,9 +120,15 @@ async function rawComplete(req, res, chatgptApi) {
       ? normalizeToolDefs(req.body.tools)
       : []
   const useWebTools = webToolDefs.length > 0
-  const promptForSend = useWebTools
-    ? `${buildToolInstructions(webToolDefs, req.body.tool_choice)}\n\n${prompt}`
-    : prompt
+  // exec-harvest: if the caller has a shell-like tool, don't fight the web model's
+  // built-in code-interpreter — let it emit its `container.exec` command and re-emit
+  // that as the caller's shell tool_call. Falls back to envelope injection otherwise.
+  const shellTool = useWebTools ? detectShellTool(webToolDefs) : null
+  const promptForSend = !useWebTools
+    ? prompt
+    : shellTool
+      ? `Use your shell to accomplish the task below. Prefer a single shell command.\n\n${prompt}`
+      : `${buildToolInstructions(webToolDefs, req.body.tool_choice)}\n\n${prompt}`
 
   await acquireSlot('ChatGPT')
 
@@ -176,6 +182,7 @@ async function rawComplete(req, res, chatgptApi) {
   let full = ''
   let started = false
   let finished = false
+  let harvestedCmd = null   // exec-harvest: first container.exec command seen
 
   if (stream) {
     res.setHeader('Content-Type', 'text/event-stream')
@@ -279,6 +286,27 @@ async function rawComplete(req, res, chatgptApi) {
     if (finished) return
     finished = true
 
+    // ── exec-harvest branch: re-emit the model's container.exec command as the
+    //    caller's shell tool_call. ──
+    if (shellTool && harvestedCmd) {
+      const tc = execToToolCall(shellTool, harvestedCmd)
+      const tool_calls = [{ index: 0, id: tc.id, type: 'function',
+        function: { name: tc.name, arguments: JSON.stringify(tc.arguments) } }]
+      if (stream) {
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: mdl,
+          choices: [{ index: 0, delta: { role: 'assistant', content: null, tool_calls }, finish_reason: null }] })}\n\n`)
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: mdl,
+          choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`)
+        res.write('data: [DONE]\n\n')
+        res.end()
+      } else {
+        res.json({ id, object: 'chat.completion', created, model: mdl,
+          choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls }, finish_reason: 'tool_calls' }],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } })
+      }
+      return
+    }
+
     // ── Web-tools branch: parse buffered text → OpenAI tool_calls ──
     if (useWebTools) {
       const parsed = extractToolCalls(full)
@@ -326,6 +354,11 @@ async function rawComplete(req, res, chatgptApi) {
   await readSSE(upstream, {
     onData: (d) => {
       if (!d || finished) return
+      // exec-harvest: grab the model's first container.exec shell command and finish.
+      if (shellTool && !harvestedCmd) {
+        const cmd = execCommandFromData(d)
+        if (cmd) { harvestedCmd = cmd; return finish() }
+      }
       if (d.p === '/message/content/parts/0' && d.o === 'append') return onText(d.v)
       if (typeof d.v === 'string' && !d.o && !d.p) return onText(d.v)
       if (d.o === 'patch' && Array.isArray(d.v)) {

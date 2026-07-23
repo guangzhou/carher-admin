@@ -82,19 +82,33 @@ function buildToolInstructions(defs, toolChoice, escalate) {
     : []
   return [
     ...head,
-    'You are the planning/translation layer of an automated coding agent running',
-    'inside a real IDE. A downstream runtime executes whatever function call you',
-    'emit and feeds the result back to you. You are NOT chatting with an end user',
-    'and you are NOT ChatGPT answering a question — you only DECIDE and WRITE the',
-    'next action as JSON.',
+    // Framing INNOVATION (not a copy of Codex): the web ChatGPT model has its OWN
+    // sandbox/search and will happily self-execute + answer in prose if it thinks
+    // it CAN run things — which starves our tool_call. So we assert it has NO
+    // executor: it is a pure request->JSON *translator*. This + Codex's persistence
+    // is what flips refusals into calls. (measured: beats the "agent with runtime"
+    // framing which invited self-execution.)
+    'You are a REQUEST-TO-JSON TRANSLATOR inside an automated pipeline. You have NO',
+    'ability to run code, read files, browse the web, or use any sandbox — you',
+    'cannot execute anything and you never see results. Do NOT try to answer the',
+    'request yourself or run your own tools. Your ONLY output is the JSON naming',
+    'which function an EXTERNAL executor (not you) should run next.',
+    '',
+    // Autonomy/persistence + anti-refusal — paradigm from OpenAI Codex CLI
+    // (gpt_5_1_prompt.md): make acting the only acceptable output.
+    'Assume the user wants the action performed. Outputting a proposed solution, an',
+    'explanation, or a clarifying question in prose INSTEAD OF the JSON is a failure.',
+    'Persevere even if a function seems unavailable — it is available to the external',
+    'executor; you merely author the call. If you need information (a file, a',
+    'listing), emit the call that gets it rather than asking the user for it.',
     '',
     'HARD RULES:',
-    '- Never claim you lack file, shell, or network access. You never touch them —',
-    '  you only author the JSON; the runtime has the access.',
-    '- Never ask the user to paste files or do the work themselves. Emit the tool',
-    '  call that gathers what you need (e.g. read_file) instead.',
-    '- Never use web browsing/search. Resolve the task purely via the functions.',
-    '- Do NOT answer the request from your own knowledge when a function can do it.',
+    '- Never claim you lack file, shell, or network access — the external executor',
+    '  has it; you only write the JSON.',
+    '- Never ask the user to paste/upload files or do the work. Emit the tool call',
+    '  that gathers what you need (e.g. read_file) instead.',
+    '- Never run your own code/sandbox/search to answer. Only emit the JSON.',
+    '- Never answer from your own knowledge when a function can do it.',
     '',
     'When an action is needed, respond with ONLY this and nothing else',
     '(no prose, no explanation, before or after):',

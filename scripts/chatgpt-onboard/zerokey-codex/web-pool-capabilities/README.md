@@ -1,54 +1,63 @@
-# Web-only zerokey pod capabilities (tool-call injection + native gpt-5.6)
+# Web-only zerokey pod capabilities (tool_call via exec-harvest + injection; native gpt-5.6)
 
 > **This folder** (`zerokey-codex/web-pool-capabilities/`) is the hub for making a
 > web-only zerokey pod match the codex pool. Contents:
-> - `README.md` — this doc (mechanism, deploy, rollback, 5.6)
+> - `README.md` — this doc (mechanisms, deploy, rollback, 5.6)
 > - `deploy.sh` — push route patches to EXISTING 225 pods (CM + startup cp + rollout)
 > - `new-pod.sh` — build a BRAND-NEW pod for an onboarded acct (capture → seed → deploy → register)
-> - `register-web-pool.py` — register pods into LiteLLM zerokey-pool groups
+> - `register-web-pool.py` — register pods into LiteLLM zerokey-pool groups (5.5/5.6-sol/terra/luna)
+> - `refresh-225.sh` — 188 cron: re-capture web sessions → kubectl-cp seed → rollout (keeps sessions fresh)
 > - route patches themselves live in `../zerokey-patch/routes/{web-tools,raw,responses}.js`
 >   (kept with the serve route overlay, not copied here, to avoid duplication)
 
-Two capabilities that make a **web-only** zerokey pod (no `CODEX_TOKEN_DIR`)
-functionally match the codex pool. Both ship via the same routes patch + deploy.
+Three capabilities that make a **web-only** zerokey pod (no `CODEX_TOKEN_DIR`)
+functionally match the codex pool. All ship via the same routes patch + deploy.
 
-1. **tool-call injection** (this doc's main subject) — sub2api-style, below.
-2. **native gpt-5.6 sol/terra/luna** — plain-slug passthrough, see the "gpt-5.6"
-   section near the end. TL;DR: web serves `gpt-5.6-{sol,terra,luna}` natively;
-   never append `-wm`.
+1. **tool_call — exec-harvest** (primary, for shell tools) + **envelope injection**
+   (fallback, for non-shell tools). See below.
+2. **native gpt-5.6 sol/terra/luna** — plain-slug passthrough (never `-wm`).
+3. Works with the standard deploy + register flow; sessions kept fresh by `refresh-225.sh`.
 
-## What the tool-call injection is
+## Tool calls — the core problem and the two mechanisms
 
-Lets a **web-only** zerokey-serve pod (one with **no `CODEX_TOKEN_DIR`**, i.e.
-the aliyun / 225 "web-for-all" blueprint) still serve arbitrary caller-defined
-`tools[]` and emit real OpenAI `tool_calls` / Responses `function_call`, instead
-of silently degrading agentic traffic to plain chat.
+The ChatGPT **web** backend (`/backend-api/f/conversation`) does NOT accept a
+`tools` field or emit native tool_calls, AND the model has a **server-side
+code-interpreter it prefers** — so naive prompt-injection is preempted (the model
+just runs `ls`/`git status` in its own sandbox and answers in prose). Two
+mechanisms, chosen automatically in `raw.js`/`responses.js`:
 
-Mechanism = the same technique every ChatGPT-web-subscription bridge
-(sub2api / chat2api) uses:
+### A. exec-harvest (PRIMARY — when the caller has a shell-like tool)
+**Don't fight the built-in code-interpreter; harvest it.** The model reliably
+emits its shell command as a `container.exec` code message in the SSE (e.g.
+`bash -lc git status`) *before* running it. We capture that first command and
+re-emit it as the caller's shell tool_call — the caller runs it on the REAL
+machine. Near-native because it's the model's preferred behavior.
+- `web-tools.js`: `detectShellTool` (matches shell/bash/exec/terminal/run_* and
+  its command param) / `execCommandFromData` (pull the command from the SSE) /
+  `execToToolCall` (map to the caller schema: string param → `bash -lc <cmd>`;
+  **array param → `["bash","-lc",<cmd>]`** = codex/cursor shell schema).
+- `raw.js`/`responses.js`: when a shell tool is present, send a light nudge
+  ("use your shell"), capture the first `container.exec` in `onData`, finish
+  immediately, emit as the caller's shell tool_call / function_call.
+- **Measured ~65-75%** E2E via LiteLLM (was ~0 with injection). Correct commands
+  (git status / ls / grep / cat / printf > file). Remaining misses = occasional
+  outright refusals (per-request variance).
+- ⚠️ Each exec spins a code-interpreter sandbox → **rate-limited**; do NOT hammer
+  one acct fast (burst → 429/empty). Real spread-out traffic is fine.
 
-1. Inject the caller's tool catalog into the prompt as text.
-2. Instruct the model to emit a single fenced `{"tool_calls":[...]}` JSON block.
-3. Parse that envelope back into OpenAI `tool_calls` (chat) or `function_call`
-   output items + `response.function_call_arguments.*` events (responses).
+### B. envelope injection (FALLBACK — non-shell / custom tools)
+sub2api-style: inject the caller's tool catalog + a reframe prompt, parse the
+model's `{"tool_calls":[...]}` back out. Prompt in `web-tools.js:
+buildToolInstructions()`. Key reframe (Codex paradigm + our innovation): frame
+the model as a **pure request→JSON translator with NO executor** (the "you have a
+runtime" wording invites self-execution) + Codex persistence/anti-refusal
+("acting is the only acceptable output; never say you lack access; never ask the
+user to paste files"). Best-effort; per-account variance; a `tool_choice:required`
+escalated retry fires on the first refusal.
 
-## The one reliability trick that makes it work (measured 2026-07-22)
-
-The web endpoint (`/backend-api/f/conversation`) wraps the model in ChatGPT's
-**consumer harness** (system prompt + auto web-search + answer widgets). The
-naive "you have a real runtime, call these tools" framing FAILS — the model
-refuses ("I don't have access to that runtime") or answers naturally, and
-weather/math even trigger its built-in search widgets.
-
-The framing that works reliably (4/4, multi-turn, coding tools): **reframe the
-task as *authoring the JSON for the next action*** — the model is a
-planner/translator that never executes and never needs file access. That prompt
-lives in `routes/web-tools.js: buildToolInstructions()`.
-
-Best-effort, not native. Simple coding tools (read/edit/shell) are reliable;
-keep schemas simple. **Whenever Codex tokens exist, the codex-pool path is
-strictly better and is used automatically** — this layer only activates when
-`hasTokens() === false`.
+**Priority (automatic):** codex tokens present → codex-pool native; else shell
+tool present → exec-harvest; else → envelope injection. Probe with real coding
+tools, never weather/math (those trip the web search widget — worst test case).
 
 ## Files (in zerokey-patch/routes/)
 
@@ -57,11 +66,12 @@ strictly better and is used automatically** — this layer only activates when
 - `responses.js` — responses path: activates when `tools[] && !hasTokens()`,
   parse → `function_call` items (stream + non-stream).
 
-Routing gate (unchanged priority):
+Routing gate (automatic priority):
 ```
 tools[] present?
- ├─ hasTokens()  → handleCodex()        (native, preferred)
- └─ !hasTokens() → web tool-injection   (this layer, best-effort)
+ ├─ hasTokens()               → handleCodex()      (codex-pool native, preferred)
+ ├─ !hasTokens() + shell tool → exec-harvest       (primary; ~65-75%)
+ └─ !hasTokens() + non-shell  → envelope injection (fallback; best-effort)
 no tools → plain web replay (unchanged)
 ```
 

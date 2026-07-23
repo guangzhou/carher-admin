@@ -10,7 +10,7 @@ const { readSSE } = require('../utils/sse-reader')
 const { acquireSlot } = require('../utils/rate-limiter')
 const { resolveModel } = require('./raw')
 const { codexRequest, hasTokens } = require('./codex-pool')
-const { normalizeToolDefs, buildToolInstructions, extractToolCalls, newCallId, detectShellTool, execCommandFromData, execToToolCall } = require('./web-tools')
+const { normalizeToolDefs, buildToolInstructions, extractToolCalls, newCallId, detectShellTool, execCommandFromData, execToToolCall, estimateTokens } = require('./web-tools')
 
 // ── Input parsing ──────────────────────────────────────────────
 
@@ -214,18 +214,26 @@ function buildResponsesRoute(chatgptApi) {
       if (finished) return
       finished = true
 
-      const usage = {
-        input_tokens: 0, output_tokens: 0, total_tokens: 0,
-        input_token_details: { cached_tokens: 0 },
-        output_token_details: { reasoning_tokens: 0 },
+      // Estimate usage — the web backend returns none, so without this LiteLLM
+      // bills 0 (esp. streaming). input from the sent prompt, output from the
+      // model's text/command (small; input dominates on agentic requests).
+      const mkUsage = (out) => {
+        const i = estimateTokens(prompt)
+        const o = estimateTokens(out)
+        return {
+          input_tokens: i, output_tokens: o, total_tokens: i + o,
+          input_token_details: { cached_tokens: 0 },
+          output_token_details: { reasoning_tokens: 0 },
+        }
       }
+      const usage = mkUsage(full)
 
       // ── exec-harvest: re-emit the model's container.exec command as the
       //    caller's shell function_call. ──
       if (shellTool && harvestedCmd) {
         const tc = execToToolCall(shellTool, harvestedCmd)
         const parsed = { calls: [{ name: tc.name, arguments: tc.arguments }], leadingText: '' }
-        return finishWebTools(res, { stream, respId, msgId, created, mdl, usage, full: '', parsed })
+        return finishWebTools(res, { stream, respId, msgId, created, mdl, usage: mkUsage(JSON.stringify(tc.arguments)), full: '', parsed })
       }
 
       // ── Web-tools branch: parse the buffered text into function_call items ──

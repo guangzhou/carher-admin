@@ -223,6 +223,23 @@ function newCallId(name) {
   return `call_web_${Date.now().toString(36)}_${_callSeq}_${name}`.slice(0, 60)
 }
 
+// ── usage estimation ───────────────────────────────────────────
+// The ChatGPT web backend does NOT return token usage, so the pod would report
+// 0 and LiteLLM would bill $0 (esp. for streaming). Estimate tokens from text
+// length (~4 chars/token — empirically close to LiteLLM's own prompt count on
+// large agentic requests) so billing is non-zero. Prompt from what we sent,
+// completion from what the model returned (text or serialized tool_calls).
+function estimateTokens(s) {
+  if (!s) return 0
+  const n = typeof s === 'string' ? s.length : String(s).length
+  return Math.max(1, Math.ceil(n / 4))
+}
+function buildUsage(promptText, completionText) {
+  const p = estimateTokens(promptText)
+  const c = estimateTokens(completionText)
+  return { prompt_tokens: p, completion_tokens: c, total_tokens: p + c }
+}
+
 // ── exec-harvest ───────────────────────────────────────────────
 // The web model can't be reliably forced to emit our JSON envelope, because it
 // has a server-side code-interpreter it PREFERS. So instead of fighting it, we
@@ -296,4 +313,6 @@ module.exports = {
   detectShellTool,
   execCommandFromData,
   execToToolCall,
+  estimateTokens,
+  buildUsage,
 }

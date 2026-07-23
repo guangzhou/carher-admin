@@ -14,7 +14,7 @@
 
 const { readSSE } = require('../utils/sse-reader')
 const { acquireSlot } = require('../utils/rate-limiter')
-const { normalizeToolDefs, buildToolInstructions, extractToolCalls, newCallId, detectShellTool, execCommandFromData, execToToolCall } = require('./web-tools')
+const { normalizeToolDefs, buildToolInstructions, extractToolCalls, newCallId, detectShellTool, execCommandFromData, execToToolCall, buildUsage } = require('./web-tools')
 
 // Real web slugs available to this account (chatgpt.com/backend-api/models).
 const WEB_MODELS = [
@@ -254,31 +254,33 @@ async function rawComplete(req, res, chatgptApi) {
           arguments: typeof c.arguments === 'string' ? c.arguments : JSON.stringify(c.arguments),
         },
       }))
+      const usage = buildUsage(promptForSend, JSON.stringify(tool_calls))
       if (stream) {
         res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: mdl,
           choices: [{ index: 0, delta: { role: 'assistant', content: null, tool_calls }, finish_reason: null }] })}\n\n`)
         res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: mdl,
-          choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`)
+          choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage })}\n\n`)
         res.write('data: [DONE]\n\n')
         res.end()
       } else {
         res.json({ id, object: 'chat.completion', created, model: mdl,
           choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls }, finish_reason: 'tool_calls' }],
-          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } })
+          usage })
       }
       return
     }
+    const usage = buildUsage(promptForSend, content)
     if (stream) {
       res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: mdl,
         choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }] })}\n\n`)
       res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: mdl,
-        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`)
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage })}\n\n`)
       res.write('data: [DONE]\n\n')
       res.end()
     } else {
       res.json({ id, object: 'chat.completion', created, model: mdl,
         choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } })
+        usage })
     }
   }
 
@@ -292,17 +294,18 @@ async function rawComplete(req, res, chatgptApi) {
       const tc = execToToolCall(shellTool, harvestedCmd)
       const tool_calls = [{ index: 0, id: tc.id, type: 'function',
         function: { name: tc.name, arguments: JSON.stringify(tc.arguments) } }]
+      const usage = buildUsage(promptForSend, JSON.stringify(tc.arguments))
       if (stream) {
         res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: mdl,
           choices: [{ index: 0, delta: { role: 'assistant', content: null, tool_calls }, finish_reason: null }] })}\n\n`)
         res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: mdl,
-          choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`)
+          choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage })}\n\n`)
         res.write('data: [DONE]\n\n')
         res.end()
       } else {
         res.json({ id, object: 'chat.completion', created, model: mdl,
           choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls }, finish_reason: 'tool_calls' }],
-          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } })
+          usage })
       }
       return
     }
@@ -333,6 +336,7 @@ async function rawComplete(req, res, chatgptApi) {
           created,
           model: mdl,
           choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage: buildUsage(promptForSend, full),
         })}\n\n`,
       )
       res.write('data: [DONE]\n\n')
@@ -346,7 +350,7 @@ async function rawComplete(req, res, chatgptApi) {
         choices: [
           { index: 0, message: { role: 'assistant', content: full }, finish_reason: 'stop' },
         ],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        usage: buildUsage(promptForSend, full),
       })
     }
   }

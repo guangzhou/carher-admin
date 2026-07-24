@@ -147,7 +147,13 @@ function buildResponsesRoute(chatgptApi) {
         model: mdl, output: [],
         usage: null,
       }
-      res.write(`event: response.created\ndata: ${JSON.stringify(respShell)}\n\n`)
+      // OpenAI spec shape: {type, response:{...}}. The bare object (no `type`)
+      // is unparseable by strict consumers — notably LiteLLM's responses
+      // streaming logger keys off data.type, so a missing `type` on the
+      // completed event means the spend log is never written (silent no-op).
+      res.write(`event: response.created\ndata: ${JSON.stringify({
+        type: 'response.created', response: respShell,
+      })}\n\n`)
 
       // Web-tools: we cannot stream raw text (it may be a JSON tool envelope) —
       // buffer everything and emit the parsed result at finish(). Skip the
@@ -281,10 +287,18 @@ function buildResponsesRoute(chatgptApi) {
           type: 'response.output_item.done', item: doneMsg, output_index: 0,
         })}\n\n`)
 
-        // response.completed
+        // response.completed — MUST carry `type` and wrap the response object
+        // in `response:{...}` (OpenAI spec). LiteLLM's responses streaming
+        // logger only fires spend-log accounting when it parses a chunk whose
+        // data.type == "response.completed"; the previous bare payload had no
+        // `type`, so plain-text completions were never billed/logged (only the
+        // finishWebTools path, which already used this shape, logged).
         res.write(`event: response.completed\ndata: ${JSON.stringify({
-          id: respId, object: 'response', created_at: created, status: 'completed',
-          model: mdl, output: [doneMsg], usage,
+          type: 'response.completed',
+          response: {
+            id: respId, object: 'response', created_at: created, status: 'completed',
+            model: mdl, output: [doneMsg], usage,
+          },
         })}\n\n`)
         res.end()
       } else {

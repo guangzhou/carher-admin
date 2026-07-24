@@ -194,6 +194,20 @@ Wiring (already in the routes patch):
   ```
   Each group ends with 15 members = 14 web (`zk-N-gpt-5.6-<v>`) + 1 `188` codex.
 
+## Spend-log accounting (responses streaming)
+
+`responses.js` streaming `finish()` MUST emit `response.created` / `response.completed`
+as `{type:'response.completed', response:{…}}` (OpenAI spec), NOT a bare
+`{id,object,status,usage}`. LiteLLM's `responses/streaming_iterator.py` only fires
+spend-log accounting when it parses a chunk whose **`data.type == "response.completed"`**;
+a bare payload (no `type`) means the request succeeds with a reply but is NEVER
+written to `LiteLLM_SpendLogs` (invisible in UI Logs / `/spend/logs`). The
+`finishWebTools` path already used the correct shape, so only tool-call requests
+logged — plain-text chat did not ("sometimes shows, sometimes not"). Fixed
+2026-07-23; verify by decoding SpendLogs `request_id` (`resp_<base64>`, NOT the
+`x-litellm-call-id` UUID) or querying `litellm-db-0` psql directly. Full
+root-cause: memory `project_198_litellm_spendlogs_disabled`.
+
 ## Rollback
 
 Revert the CM keys (or the deploy args) → pods return to plain web replay.

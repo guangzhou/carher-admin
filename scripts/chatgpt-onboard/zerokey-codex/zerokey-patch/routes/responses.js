@@ -79,6 +79,7 @@ function buildResponsesRoute(chatgptApi) {
       Array.isArray(req.body.tools) && req.body.tools.length > 0
         ? normalizeToolDefs(req.body.tools)
         : []
+    const _validNames = new Set(_webToolDefs.map((d) => d.name))
     const useWebTools = _webToolDefs.length > 0 && !hasTokens()
 
     const model = resolveModel(req.body.model)
@@ -244,7 +245,7 @@ function buildResponsesRoute(chatgptApi) {
 
       // ── Web-tools branch: parse the buffered text into function_call items ──
       if (useWebTools) {
-        const parsed = extractToolCalls(full)
+        const parsed = extractToolCalls(full, _validNames)
         if (parsed && parsed.calls.length) {
           return finishWebTools(res, { stream, respId, msgId, created, mdl, usage, full, parsed })
         }
@@ -253,7 +254,7 @@ function buildResponsesRoute(chatgptApi) {
         const escalated = `${buildToolInstructions(_webToolDefs, 'required', true)}\n\n${basePrompt}`
         collectWebTextR(escalated)
           .then((text2) => {
-            const p2 = extractToolCalls(text2)
+            const p2 = extractToolCalls(text2, _validNames)
             finishWebTools(res, {
               stream, respId, msgId, created, mdl, usage,
               full: full || text2 || '', parsed: p2 && p2.calls.length ? p2 : null,

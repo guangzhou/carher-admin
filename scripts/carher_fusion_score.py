@@ -17,8 +17,7 @@ from typing import Any
 
 LOW_CONFIDENCE_FIELDS = ["B3", "C1", "C2", "C3", "D1", "D2"]
 C_REVIEW_REQUIRED_FIELDS = ["C1", "C2", "C3"]
-PERIOD_START = "2026-05-01 00:00:00"
-PERIOD_END_DISPLAY = "2026-06-12 23:59:59"
+UNSCORABLE_WARNINGS = {"collection_unavailable", "no_backend_evidence"}
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -86,6 +85,19 @@ def confidence_for(record: dict[str, Any]) -> str:
     if "owner_alias_missing_owner_message_count_unavailable" in warnings:
         return "中"
     return "高"
+
+
+def is_scorable(record: dict[str, Any]) -> bool:
+    """Return whether a record has real backend evidence for scoring/reporting."""
+    if record.get("status") != "ok":
+        return False
+    bm = record.get("base_metrics") or {}
+    warnings = set(record.get("data_quality_warnings") or bm.get("data_quality_warnings") or [])
+    if warnings & UNSCORABLE_WARNINGS:
+        return False
+    if not bm.get("pod"):
+        return False
+    return True
 
 
 def score_a(record: dict[str, Any]) -> dict[str, Any]:
@@ -242,10 +254,15 @@ def score_record(record: dict[str, Any]) -> dict[str, Any]:
     total = total_a + total_b + total_c + total_d
     bm = record.get("base_metrics") or {}
     warnings = bm.get("data_quality_warnings") or []
+    period = record.get("period") or bm.get("period") or {}
     return {
         "uid": record.get("uid"),
         "her_id": record.get("her_id"),
-        "period": {"start": PERIOD_START, "end": PERIOD_END_DISPLAY},
+        "period": {
+            "start": period.get("start"),
+            "end": period.get("end"),
+            "timezone": period.get("timezone"),
+        },
         "scores": {
             **a,
             "A_total": total_a,
@@ -299,7 +316,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     records = load_jsonl(Path(args.input))
-    scored = [score_record(record) for record in records if record.get("status") == "ok"]
+    skipped = [
+        {"uid": record.get("uid"), "her_id": record.get("her_id"), "reason": "unscorable_no_backend_evidence"}
+        for record in records
+        if not is_scorable(record)
+    ]
+    scored = [score_record(record) for record in records if is_scorable(record)]
     scored.sort(key=lambda item: int(item.get("uid") or 0))
     Path(args.output).write_text("".join(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n" for item in scored))
     if args.summary_output:
@@ -315,6 +337,8 @@ def main() -> int:
             "grade_counts": dict(sorted(by_grade.items())),
             "source_summary": str(Path(args.summary)),
             "scoring_note": "System evidence score only; owner-reviewed final score is separate.",
+            "skipped_count": len(skipped),
+            "skipped_sample": skipped[:30],
         }
         Path(args.summary_output).write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

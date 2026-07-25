@@ -19,6 +19,7 @@ Command file schema (round-<i>.json), an object:
      {"type":"wait","ms":1500},
      {"type":"authorize"},          # (re)click the Authorize button
      {"type":"shot"},               # just re-screenshot (no-op action)
+     {"type":"goto","url":"..."},   # navigate current page (e.g. magic-link URL)
      {"type":"done_check"}
   ]}
 

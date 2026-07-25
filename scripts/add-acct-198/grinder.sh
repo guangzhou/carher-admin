@@ -41,6 +41,10 @@ cd "$REPO" || { echo "FATAL: repo not found $REPO"; exit 1; }
 # jms 重试包装(过滤 189 瞬态 Permission denied 抖动)
 jr(){ local o; for t in 1 2 3 4 5 6; do o=$(jms ssh AIYJY-litellm "$1" 2>&1); echo "$o"|grep -q "Permission denied (password" || { echo "$o"; return 0; }; sleep 3; done; echo "$o"; }
 j8(){ local o; for t in 1 2 3 4 5 6; do o=$(jms ssh JSZX-AI-03 "$1" 2>&1); echo "$o"|grep -q "Permission denied (password" || { echo "$o"; return 0; }; sleep 3; done; echo "$o"; }
+# manifest apply 带重试 + presence 校验。裸 `cat|jms ssh kubectl apply` 无重试, jms 189 抖动
+# (Connection reset/TLS)命中时静默丢 deploy → 号只注册 router 无 pod → smoke 500, 随后
+# quota-rebalance 摘 entry 变 400(实证 2026-07-22 acct-102/110)。返回 0=确认 deploy 存在。
+japply(){ local f="$1" dep="$2" t; for t in 1 2 3 4 5 6; do cat "$f" | jms ssh AIYJY-litellm "kubectl apply -f -" >/dev/null 2>&1; jr "kubectl -n $NS get deploy $dep -o jsonpath='{.metadata.name}' 2>/dev/null" | grep -q "^$dep$" && return 0; sleep 3; done; return 1; }
 
 # CSV 查字段
 csv_field(){ awk -F, -v n="$1" -v c="$2" '$1==n{print $c}' "$CREDS_CSV" | head -1; }
@@ -60,12 +64,16 @@ OK=""
 for N in $ACCTS; do
   EMAIL=$(email_for "$N"); GPW=$(gptpw_for "$N"); MPW=$(mailpw_for "$N"); GOT=0
   [ -n "$EMAIL" ] || { echo "!!!! acct-$N no creds in $CREDS_CSV, skip"; continue; }
-  printf 'email=%s\nmail_pw=%s\nchatgpt_pw=%s\n' "$EMAIL" "$MPW" "$GPW" > /tmp/creds-$N.txt
+  # 单引号包裹: 密码含 & $ % # ! * 等 shell 元字符, re-oauth.sh 用 `source <(... declare)` 读取,
+  # 不引号会把 & 当后台符、$x 当变量展开 → 密码被撕碎 (见 feedback_creds_single_quote_dollar)。
+  # 值本身若含单引号需转义, 目前批次无单引号密码。
+  printf "email='%s'\nmail_pw='%s'\nchatgpt_pw='%s'\n" "$EMAIL" "$MPW" "$GPW" > /tmp/creds-$N.txt
   for t in 1 2 3 4 5; do cat /tmp/creds-$N.txt | jms ssh JSZX-AI-03 "mkdir -p /Data/chatgpt-auth/acct-$N && cat > /Data/chatgpt-auth/acct-$N/.creds && chmod 600 /Data/chatgpt-auth/acct-$N/.creds && wc -l /Data/chatgpt-auth/acct-$N/.creds" 2>&1 | grep -q "3 " && break; sleep 3; done
-  # 确保 deployment 存在(以 acct-86 为模板)
-  if ! jr "kubectl -n $NS get deploy chatgpt-acct-$N >/dev/null 2>&1 && echo yes" | grep -q yes; then
+  # 确保 deployment 存在(以 acct-86 为模板)。apply 走 japply(重试+presence 校验),
+  # 建不成就 skip 该号防"半接入"(router 有 entry 但无 pod)。
+  if ! jr "kubectl -n $NS get deploy chatgpt-acct-$N -o jsonpath='{.metadata.name}' 2>/dev/null" | grep -q "^chatgpt-acct-$N$"; then
     sed "s/acct-86/acct-$N/g; s/account: \"86\"/account: \"$N\"/g" k8s/chatgpt-acct-86.yaml > k8s/chatgpt-acct-$N.yaml
-    cat k8s/chatgpt-acct-$N.yaml | jms ssh AIYJY-litellm "kubectl apply -f -" >/dev/null 2>&1
+    japply k8s/chatgpt-acct-$N.yaml chatgpt-acct-$N || { echo "!!!! acct-$N deploy apply 失败(jms 抖动?) — skip 防半接入, 稍后重跑该号"; continue; }
   fi
 
   TOGGLE_TRIED=0
@@ -73,7 +81,9 @@ for N in $ACCTS; do
     PX=$(egress_for $att); LBL=$([ -n "$PX" ] && echo "$PX" || echo "188-JP")
     echo "===== acct-$N attempt $att egress=$LBL $(date +%H:%M:%S) ====="
     j8 'docker ps --filter ancestor='"$IMAGE"' -q | xargs -r docker kill >/dev/null 2>&1'
-    j8 "rm -f /tmp/oauth-acct-$N.log /tmp/auth-acct-$N.json; rm -rf /tmp/screenshots-acct-$N; setsid bash -c 'OAUTH_PROXY=$PX MAIL_OTP_PROVIDER=mailcom GEN_ONLY=1 bash /Data/chatgpt-auth/re-oauth.sh acct-$N 2>&1 | stdbuf -oL tee /tmp/oauth-acct-$N.log' </dev/null >/dev/null 2>&1 & disown; sleep 2; echo launched"
+    # 每次 attempt 结束把日志/截图归档成 .att<N> 再清空; 否则下一 attempt 一 rm 就把
+    # 上一次的失败证据全毁了(诊断时只能干瞪眼, acct-112 实证)。
+    j8 "[ -s /tmp/oauth-acct-$N.log ] && cp -f /tmp/oauth-acct-$N.log /tmp/oauth-acct-$N.log.prev 2>/dev/null; [ -d /tmp/screenshots-acct-$N ] && { rm -rf /tmp/screenshots-acct-$N.prev; cp -a /tmp/screenshots-acct-$N /tmp/screenshots-acct-$N.prev 2>/dev/null; }; docker run --rm -v /tmp:/t busybox rm -rf /t/auth-acct-$N.json /t/oauth-acct-$N.log /t/screenshots-acct-$N >/dev/null 2>&1; rm -f /tmp/oauth-acct-$N.log /tmp/auth-acct-$N.json; rm -rf /tmp/screenshots-acct-$N; setsid bash -c 'OAUTH_PROXY=$PX MAIL_OTP_PROVIDER=mailcom GEN_ONLY=1 bash /Data/chatgpt-auth/re-oauth.sh acct-$N 2>&1 | stdbuf -oL tee /tmp/oauth-acct-$N.log' </dev/null >/dev/null 2>&1 & disown; sleep 2; echo launched"
     for w in $(seq 1 54); do
       sleep 10
       V=$(j8 "python3 -c 'import json;print(1 if len(json.load(open(\"/tmp/auth-acct-$N.json\")).get(\"access_token\",\"\"))>1000 else 0)' 2>/dev/null" | tr -dc 0-9)
@@ -86,22 +96,33 @@ for N in $ACCTS; do
     # 两步法自动触发(skill #10): 连续 ≥2 次失败 且从没开过 toggle → 疑似 toggle off, 先开 toggle
     # 注意: toggle docker 必须在 188(j8)上跑, 不是本地; toggle py 已在开头上传到 188 /tmp
     if [ "$att" -ge 2 ] && [ "$TOGGLE_TRIED" = 0 ]; then
-      STUCK=$(j8 "docker ps -a --filter ancestor=$IMAGE --format '{{.ID}}' | head -1")
-      if j8 "docker logs $STUCK 2>&1 | grep -qE 'toggle: false . false|aria_disabled=true|Enable device code' && echo Y" | grep -q Y; then
+      # 检测源用持久的 tee 日志 /tmp/oauth-acct-N.log, 不用易失的 docker logs $STUCK:
+      # OAuth 容器 --rm, 退出即删, docker logs 常拿到空 → 两步法从不触发(acct-112 实证)。
+      # consent-disabled 时 python 打印 "Enable device code authorization" 到该 tee 日志。
+      if j8 "grep -qE 'toggle: false . false|aria_disabled=true|Enable device code|consent Continue disabled' /tmp/oauth-acct-$N.log 2>/dev/null && echo Y" | grep -q Y; then
         echo "  [两步法] acct-$N 疑似 Codex toggle off → 在 188 内联跑独立 toggle enable (mouse-box-center 才点得动 radix switch)"
-        j8 "docker ps --filter ancestor=$IMAGE -q | xargs -r docker kill >/dev/null 2>&1
+        # toggle 也走 3-IP 轮换重试: 登录 chatgpt.com 同样会被 CF 概率拦(acct-112 实证),
+        # 单跑一次撞 CF 就废。最多 3 次, 命中 RESULT=ENABLED / aria-checked=true 即停。
+        # 密码用 sed 去掉外层单引号(.creds 现单引号包裹, cut -f2- 会连引号读进来 → 密码错)。
+        for tg in 1 2 3; do
+          TGPX=$(egress_for $tg)
+          echo "  [两步法] toggle attempt $tg egress=$([ -n "$TGPX" ] && echo "$TGPX" || echo 188-JP)"
+          TGOUT=$(j8 "docker ps --filter ancestor=$IMAGE -q | xargs -r docker kill >/dev/null 2>&1
 sd=\$(mktemp -d /tmp/tgl-$N-XXXX)
-pw=\$(grep -E '^chatgpt_pw=' /Data/chatgpt-auth/acct-$N/.creds|head -1|cut -d= -f2-)
-mpw=\$(grep -E '^mail_pw=' /Data/chatgpt-auth/acct-$N/.creds|head -1|cut -d= -f2-)
-em=\$(grep -E '^email=' /Data/chatgpt-auth/acct-$N/.creds|head -1|cut -d= -f2-)
+unq(){ grep -E \"^\$1=\" /Data/chatgpt-auth/acct-$N/.creds|head -1|cut -d= -f2-|sed -E \"s/^'(.*)'\\\$/\\\\1/\"; }
+pw=\$(unq chatgpt_pw); mpw=\$(unq mail_pw); em=\$(unq email)
 printf '%s' \"\$pw\">\$sd/p.txt; printf '%s' \"\$mpw\">\$sd/m.txt
 docker run --rm -v /tmp/chatgpt-enable-codex-toggle.py:/work/script.py:ro \
   -v \$sd/p.txt:/run/chatgpt_pw.txt:ro -v \$sd/m.txt:/run/mail_pw.txt:ro -v \$sd:/work/screenshots \
   -e CHATGPT_EMAIL=\$em -e CHATGPT_PW_FILE=/run/chatgpt_pw.txt -e MAIL_PW_FILE=/run/mail_pw.txt \
   -e SCREENSHOT_DIR=/work/screenshots -e ACTION=enable-codex-toggle -e MAIL_OTP_PROVIDER=mailcom \
-  -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright -e OAUTH_PROXY=$PX -e DISPLAY=:99 $IMAGE \
+  -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright -e OAUTH_PROXY=$TGPX -e DISPLAY=:99 $IMAGE \
   bash -c 'Xvfb :99 -screen 0 1440x1000x24 >/dev/null 2>&1 & sleep 1 && pip install patchright==1.60.0 -q --root-user-action=ignore >/dev/null 2>&1 && python3 /work/script.py' 2>&1 | grep -E 'RESULT|ENABLED|FAILED|aria-checked=true'
-rm -rf \$sd"
+rm -rf \$sd")
+          echo "$TGOUT" | sed 's/^/    tgl> /'
+          echo "$TGOUT" | grep -qE 'RESULT=ENABLED|aria-checked=true' && { echo "  [两步法] toggle 开启成功 (att $tg)"; break; }
+          sleep 3
+        done
         TOGGLE_TRIED=1
       fi
     fi

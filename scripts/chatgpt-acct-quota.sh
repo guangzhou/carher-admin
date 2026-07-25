@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# chatgpt-acct-quota.sh — 198 prod chatgpt-acct 池 5h/7d 配额完整列表
+# chatgpt-acct-quota.sh — 198 prod chatgpt-acct 池 7d 配额完整列表
 #
 # 数据源：JSZX-AI-03:/home/cltx/.chatgpt-quota/state/state.json
 # 默认输出完整列表；--summary 追加 grouped counts；--json 透传 state.json。
 # 输出带 `=== BEGIN ... rows=N ===` / `=== END ... rows=N ===` frame
-# 和 5h 流量 / 不健康汇总尾段，本身就是完整答复——直接原样贴回，不要追加 markdown。
+# 和流量 / 不健康汇总尾段，本身就是完整答复——直接原样贴回，不要追加 markdown。
 # 副本落 /tmp/chatgpt-acct-quota-last.txt，供"贴失败"时 cat 回放。
 set -euo pipefail
 

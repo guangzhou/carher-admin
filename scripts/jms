@@ -220,9 +220,129 @@ def _run_with_token(ssh_args: list[str], token_value: str, verbose: bool) -> int
     return subprocess.call(cmd, env=env)
 
 
+def _run_tty(cfg: dict, asset: dict, remote_cmd: str, verbose: bool,
+             timeout: int = 30) -> int:
+    """Run remote command via forced-TTY SSH session (stdin pipe).
+
+    Some KoKo assets hang on non-TTY exec channels.  This workaround
+    allocates a PTY with ``-tt``, waits for the shell prompt, pipes the
+    command via stdin, then collects stdout until the sentinel or timeout.
+    """
+    import re as _re
+    import threading
+    import time as _time
+
+    token = issue_token(asset)
+    if verbose:
+        print(f"# tty-mode token={token['id'][:8]}...", file=sys.stderr)
+
+    target = ssh_target(token["id"], cfg["ssh_host"])
+    sshpass = require_sshpass()
+    cmd = [
+        sshpass, "-e", "ssh",
+        "-p", str(cfg["ssh_port"]),
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ServerAliveInterval=15",
+        "-o", "PreferredAuthentications=password",
+        "-o", "PubkeyAuthentication=no",
+        "-o", "NumberOfPasswordPrompts=1",
+        "-o", "LogLevel=ERROR",
+        "-tt",
+        target,
+    ]
+    env = os.environ.copy()
+    env["SSHPASS"] = token["value"]
+    env["TERM"] = "xterm"
+
+    sentinel = "__JMS_TTY_DONE__"
+    script = f'{remote_cmd}\necho {sentinel}\nexit\n'
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, env=env, bufsize=0)
+
+    buf = bytearray()
+    sentinel_seen = threading.Event()
+    prompt_seen = threading.Event()
+
+    def _reader():
+        while True:
+            try:
+                chunk = proc.stdout.read(1)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                if buf.endswith(b'# ') or buf.endswith(b'$ '):
+                    prompt_seen.set()
+                if sentinel.encode() in buf:
+                    sentinel_seen.set()
+            except (OSError, ValueError):
+                break
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+
+    if not prompt_seen.wait(timeout=15):
+        if proc.poll() is not None:
+            sys.exit(f"tty-mode: ssh exited early (rc={proc.returncode})")
+
+    if proc.poll() is not None:
+        sys.exit(f"tty-mode: ssh process exited (rc={proc.returncode})")
+
+    try:
+        proc.stdin.write(script.encode())
+        proc.stdin.flush()
+    except BrokenPipeError:
+        sys.exit("tty-mode: ssh pipe broken (KoKo may have rejected the session)")
+
+    # Wait for sentinel or timeout
+    sentinel_seen.wait(timeout=timeout)
+    proc.kill()
+    t.join(timeout=3)
+    raw = bytes(buf).decode("utf-8", errors="replace")
+
+    # strip ANSI escapes + prompt lines
+    raw = _re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', raw)
+    raw = _re.sub(r'\x1b\][^\x07]*\x07', '', raw)
+    raw = _re.sub(r'\[\?2004[hl]', '', raw)
+
+    if verbose:
+        print(f"# tty raw ({len(raw)} chars)", file=sys.stderr)
+
+    # Extract output between first echo of our command and the sentinel.
+    # Prompt lines look like "root@hostname:~# ..." — skip them.
+    lines: list[str] = []
+    seen_cmd = False
+    prompt_re = _re.compile(r'^[a-zA-Z0-9_-]+@[^:]+:[^#$]*[#$]\s*')
+    for line in raw.split('\n'):
+        stripped = line.rstrip()
+        if sentinel in stripped:
+            break
+        if not seen_cmd:
+            if remote_cmd.split()[0] in stripped:
+                seen_cmd = True
+            continue
+        if prompt_re.match(stripped):
+            continue
+        lines.append(stripped)
+
+    output = '\n'.join(lines).strip()
+    if output:
+        print(output)
+    return proc.returncode or 0
+
+
 def cmd_ssh(args) -> int:
     asset = resolve_asset(args.asset)
     cfg = load_config()
+
+    remote_cmd_str = " ".join(args.remote_cmd) if args.remote_cmd else ""
+    use_tty = getattr(args, "tty", False)
+
+    # --tty mode: forced PTY for assets whose KoKo exec channel hangs
+    if use_tty and remote_cmd_str:
+        return _run_tty(cfg, asset, remote_cmd_str, args.verbose,
+                        timeout=getattr(args, "timeout", 30))
+
     token = issue_token(asset)
     if args.verbose:
         print(f"# token id={token['id']} expires_in={token.get('expire_time')}s",
@@ -237,8 +357,8 @@ def cmd_ssh(args) -> int:
 
     target = ssh_target(token["id"], cfg["ssh_host"])
     ssh_args = _build_ssh_base(cfg, extra) + [target]
-    if args.remote_cmd:
-        ssh_args.append(" ".join(args.remote_cmd))
+    if remote_cmd_str:
+        ssh_args.append(remote_cmd_str)
 
     return _run_with_token(ssh_args, token["value"], args.verbose)
 
@@ -496,6 +616,10 @@ def main() -> int:
     s.add_argument("asset")
     s.add_argument("remote_cmd", nargs="*",
                    help="optional remote command; pass extra ssh opts via $JMS_SSH_OPTS")
+    s.add_argument("-t", "--tty", action="store_true",
+                   help="force PTY allocation (workaround for KoKo exec-channel hangs)")
+    s.add_argument("--timeout", type=int, default=30,
+                   help="max seconds to wait in --tty mode (default 30)")
     s.set_defaults(func=cmd_ssh)
 
     s = sub.add_parser("scp", help="upload/download via SSH stream (KoKo SFTP is RO for tokens)")

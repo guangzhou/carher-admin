@@ -20,8 +20,6 @@ from typing import Any
 
 DEFAULT_BASE_TOKEN = "GBRPbLmFZaut74s8iFkcis8xnae"
 DEFAULT_TABLE_ID = "tblHoikuAaekwki5"
-DEFAULT_PERIOD_START = "2026-05-01 00:00:00"
-DEFAULT_PERIOD_END = "2026-06-12 23:59:59"
 
 FIELD_ORDER = [
     "Her ID",
@@ -128,11 +126,12 @@ def list_existing(base_token: str, table_id: str) -> dict[str, dict[str, Any]]:
 def score_fields(score: dict[str, Any], name_by_her: dict[str, str], include_report_link: bool) -> dict[str, Any]:
     scores = score["scores"]
     her_id = str(score["her_id"])
+    period = score.get("period") or {}
     row = {
         "Her ID": her_id,
         "Her 名称": name_by_her.get(her_id, her_id),
-        "检查周期开始": DEFAULT_PERIOD_START,
-        "检查周期结束": DEFAULT_PERIOD_END,
+        "检查周期开始": period.get("start"),
+        "检查周期结束": period.get("end"),
         "A1 交互频次": scores["A1"],
         "A2 场景覆盖": scores["A2"],
         "A3 时间分布": scores["A3"],

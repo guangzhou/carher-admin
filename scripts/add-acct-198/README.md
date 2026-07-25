@@ -54,6 +54,11 @@ jms ssh JSZX-AI-03 "ls -l /Data/chatgpt-auth/re-oauth.sh"
 
 **注意事项：**
 - 编号接着现有最大号往后排（现在已到 99，下一个从 100 起）。别和已存在的号冲突。
+- **编号前必须去重**：飞书表 `acct` 字段为空 **≠ 该邮箱没接入**——很可能接入过但没回写表。直接按"空=新号"分配会造 dup（同账号两 pod 互相轮换刷 token 掉线）。**分配前先 dump 集群现有邮箱交叉核对**：
+  ```bash
+  jms ssh JSZX-AI-03 "for d in /Data/chatgpt-auth/acct-*/; do n=\$(basename \$d); e=\$(grep -h '^email=' \$d/.creds 2>/dev/null|cut -d= -f2-); echo \$n \$e; done" | sort -t- -k2 -n
+  ```
+  待接入邮箱若已在列表里 → 跳过接入，只把已有编号回写飞书表即可。判 dup 用 pod 内 auth.json 的 `account_id`（不是编号）。
 - 顺序**不能错**：第 3 列是邮箱密码，第 4 列是 GPT 密码。填反了登录必失败。
 - 从飞书表复制出来自己整理成这 4 列。不确定就把表格内容发给我，我帮你转。
 
@@ -137,6 +142,17 @@ jms ssh AIYJY-litellm "POD=\$(kubectl -n litellm-product get pod -l account=N -o
 
 ### C. 拿不准根因
 别自己瞎试。直接说 **"acct-N 卡了/报 X，帮我按三段式查"**，我来定位。
+
+### D. 某号 smoke 500 或 400，但 OAuth 明明成功了（deploy 没建成）
+症状：grinder finalize 段出现 `error: no objects passed to scale` + `deployments.apps "chatgpt-acct-N" not found`，却仍打了 `resume: 6`；final smoke 该号 HTTP **500**（过一会儿被 quota-rebalance 摘 entry 后变 **400** `Invalid model name`）。
+
+根因：建 deploy 那步的 `kubectl apply` 撞了 jms 隧道瞬态抖动 → deploy/svc/pvc 没建成，但 OAuth 已拿到 token、router 也注册了（指向不存在的 svc）。**grinder v2.2 起已用 `japply`（重试+presence 校验）修掉，建不成会 skip 该号而非假成功**；老日志/老脚本仍可能中招。
+
+修复（**不用重 OAuth**，188 上 token 还在且有效）：直接对该号重跑 grinder 即可——
+```bash
+GRIND_ACCTS="N" GRIND_CREDS=/tmp/grind-creds.csv nohup bash scripts/add-acct-198/grinder.sh >> /tmp/grind-main.log 2>&1 &
+```
+grinder 会重建 deploy（这次带重试）。若想省掉重 OAuth 用现成 token 手动补：建资源(japply) → 等 PVC 绑定 → scale=0 → hostPath busybox 写 auth 进 PVC → scale=1 → 校验 access_len>1000 → `resume_acct` 重注册 → reset state.json HEALTHY 清 probe 计数 → rollout litellm-proxy → smoke。
 
 ---
 

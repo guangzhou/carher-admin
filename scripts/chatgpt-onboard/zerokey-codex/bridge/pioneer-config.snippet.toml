@@ -1,0 +1,24 @@
+# ── zerokey Codex bridge — 先锋用户配置片段 ────────────────────────────
+# 贴到 ~/.codex/config.toml。让 Codex(CLI + IDE)通过 zerokey 网页额度干活,
+# 不烧 codex 的 5h/7d 原生配额。
+#
+# 三个不变原则:
+#   1. 不改 model 名 —— 去哪由 provider base_url 决定,不由 model 名决定。
+#   2. 不关 multi_agent —— 靠 supports_websockets=false 强制走 HTTP,不降智。
+#   3. 不另造鉴权 —— 复用你已有的 litellm cursor key(CARHER_DEV_KEY)。
+#
+# 集群化后把 base_url 换成公网入口(见文末)。本机过渡期用 127.0.0.1:8788。
+
+# 顶层默认走 carher_dev(带 supports_websockets=false),IDE 默认路径也生效。
+model_provider = "carher_dev"
+
+[model_providers.carher_dev]
+name = "CarHer Dev"
+base_url = "http://127.0.0.1:8788/v1"   # 集群化后 → https://cc.auto-link.com.cn/zk/v1
+env_key = "CARHER_DEV_KEY"              # export CARHER_DEV_KEY=<你的 litellm cursor key>
+wire_api = "responses"
+supports_websockets = false             # ← 关键:强制 HTTP,multi_agent 照开不降智
+
+# 不需要:
+#   [features] multi_agent = false      ← 早期回避方案(降智),已废弃
+#   [agents]   enabled = false          ← 同上

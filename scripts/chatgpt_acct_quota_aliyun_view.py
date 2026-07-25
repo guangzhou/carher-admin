@@ -9,9 +9,13 @@
   2. kubectl -n carher exec <pod> -- cat /chatgpt-auth/auth.json
        → email / expires_at / plan_type / subscription_active_until
   3. kubectl -n carher exec <pod> -- python3 <probe>
-       → 上游 /codex/usage 拿 5h%/7d% 真实用量（pod 内出 CF, 带 ChatGPT-Account-ID
+       → 上游 /codex/usage 拿 7d% 真实用量（pod 内出 CF, 带 ChatGPT-Account-ID
          + Originator codex_cli_rs 头, 阿里云 SG IP 也通)
-  4. kubectl -n carher exec litellm-db-0 -- psql  → LiteLLM_SpendLogs 5h / 24h
+  4. kubectl -n carher exec litellm-db-0 -- psql  → LiteLLM_SpendLogs 24h
+
+2026-07-13: OpenAI Pro 配额从双窗口 (5h primary + 7d secondary) 合并为
+单 7d 窗口 (primary_window.limit_window_seconds=604800, secondary_window=null)。
+
 本脚本要求本地 kubectl 已通过 jms tunnel 连上 aliyun k8s (默认 127.0.0.1:16443);
 wrapper chatgpt-acct-quota-aliyun.sh 会负责拉起 tunnel。
 """
@@ -126,20 +130,20 @@ def subscription_info(auth: dict[str, Any]) -> tuple[str, float | None]:
 
 
 def probe_auth(pod: str) -> dict[str, Any]:
-    """Return {email, expires_at, plan, sub_until, p5h, p7d, p_reset, w_reset, codex_5h, codex_7d}
+    """Return {email, expires_at, plan, sub_until, p7d, p_reset, codex_7d}
     via kubectl exec.
-    auth.json gives identity; codex/usage gives rate-limit windows.
+    auth.json gives identity; codex/usage gives rate-limit window (single 7d).
     """
     info = {
         "email": "", "expires_at": None, "plan": "", "sub_until": None,
         "live_plan": None,
-        "p5h": None, "p7d": None, "p_reset": None, "w_reset": None,
-        "codex_5h": None, "codex_7d": None,
+        "p7d": None, "p_reset": None,
+        "codex_7d": None,
         "probe_err": None,
     }
     # 读 auth.json 拿身份。并发 kubectl exec 走 jms 隧道时偶发单个 exec
-    # 超时/reset，必须重试；彻底失败要标 probe_err（否则 p5h/p7d 为 None
-    # 会 fall through 到 ONLINE，把打满的号误判成可接单）。
+    # 超时/reset，必须重试；彻底失败要标 probe_err（否则 p7d 为 None
+    # 会 fall through 到 PROBE_ERR，fail-closed 不接单）。
     auth_exc = ""
     for attempt in range(3):
         try:
@@ -182,19 +186,13 @@ def probe_auth(pod: str) -> dict[str, Any]:
                 continue
             rl = usage.get("rate_limit") or {}
             pw = rl.get("primary_window") or {}
-            sw = rl.get("secondary_window") or {}
-            # live plan_type：上游实时会员档，比 id_token 缓存的 plan 准
-            # （订阅到期后 id_token 仍写 pro，但这里会回 free）。
             info["live_plan"] = usage.get("plan_type")
-            info["p5h"] = pw.get("used_percent")
-            info["p7d"] = sw.get("used_percent")
+            info["p7d"] = pw.get("used_percent")
             info["p_reset"] = pw.get("reset_at")
-            info["w_reset"] = sw.get("reset_at")
             for extra in usage.get("additional_rate_limits") or []:
                 if "codex" in (extra.get("limit_name") or "").lower():
                     erl = extra.get("rate_limit") or {}
-                    info["codex_5h"] = (erl.get("primary_window") or {}).get("used_percent")
-                    info["codex_7d"] = (erl.get("secondary_window") or {}).get("used_percent")
+                    info["codex_7d"] = (erl.get("primary_window") or {}).get("used_percent")
                     break
             return info
         except Exception as e:
@@ -214,7 +212,7 @@ def gather_auth(pods: list[dict[str, Any]]) -> None:
             except Exception as e:
                 p.update({
                     "email": "", "expires_at": None, "plan": "", "sub_until": None,
-                    "p5h": None, "p7d": None,
+                    "p7d": None,
                     "probe_err": f"gather_fail:{type(e).__name__}",
                 })
 
@@ -310,7 +308,6 @@ def render(*, summary: bool, as_json: bool) -> None:
         sys.exit(1)
     gather_auth(pods)
 
-    spend_5h = spend_window(5)
     spend_24h = spend_window(24)
 
     if as_json:
@@ -319,7 +316,6 @@ def render(*, summary: bool, as_json: bool) -> None:
             acct = p["acct"]
             row = {
                 **p,
-                "spend_5h": spend_5h.get(acct, {}),
                 "spend_24h": spend_24h.get(acct, {}),
             }
             out.append(row)
@@ -331,23 +327,15 @@ def render(*, summary: bool, as_json: bool) -> None:
             return "OFFLINE"
         if p.get("probe_err") == "token_invalidated":
             return "TOKEN_X"
-        # fail-closed：探针出错，或没拿到任一窗口用量，就不能断言可接单。
-        # 否则 p5h/p7d 为 None 会 fall through 到 ONLINE，把打满/探测失败的号
-        # 误判成 take=yes。
         if p.get("probe_err"):
             return "PROBE_ERR"
-        if not isinstance(p.get("p5h"), (int, float)) and not isinstance(p.get("p7d"), (int, float)):
+        if not isinstance(p.get("p7d"), (int, float)):
             return "PROBE_ERR"
-        # 订阅已过期，或上游实时会员档掉成非 pro：不是有效 pro 号，不该接单。
-        # sub_until 来自 id_token 缓存（过期后仍写 pro，靠 sub_until 揭穿）；
-        # live_plan 来自实时 /codex/usage（掉档后直接回 free），二者任一命中即判死。
         if p.get("sub_until") and p["sub_until"] <= now:
             return "SUB_EXP"
         if p.get("live_plan") and p["live_plan"] != "pro":
             return "SUB_EXP"
         if isinstance(p.get("p7d"), (int, float)) and p["p7d"] >= 100:
-            return "QUOTA"
-        if isinstance(p.get("p5h"), (int, float)) and p["p5h"] >= 100:
             return "QUOTA"
         return "ONLINE"
 
@@ -368,8 +356,6 @@ def render(*, summary: bool, as_json: bool) -> None:
             causes.append("sub<7d")
         if p.get("live_plan") and p["live_plan"] != "pro":
             causes.append(f"live_{p['live_plan']}")
-        if isinstance(p.get("p5h"), (int, float)) and p["p5h"] >= 100:
-            causes.append("5h_full")
         if isinstance(p.get("p7d"), (int, float)) and p["p7d"] >= 100:
             causes.append("7d_full")
         s24 = spend_24h.get(p["acct"], {})
@@ -381,28 +367,22 @@ def render(*, summary: bool, as_json: bool) -> None:
 
     print(
         f"{'acct':9s} {'email':32s} {'take':>4s} {'status':>8s} "
-        f"{'5h%':>5s} {'5h_n':>6s} {'5h$':>7s} {'5h_reset':>9s} "
-        f"{'7d%':>5s} {'7d_reset':>10s} "
+        f"{'7d%':>5s} {'24h_n':>6s} {'24h$':>7s} {'reset':>9s} "
         f"{'tok_left':>9s} {'sub_until':>10s} {'sub_left':>8s}  cause"
     )
-    print("-" * 200)
+    print("-" * 160)
 
     silent: list[str] = []
     expiring: list[str] = []
     sub_expiring: list[str] = []
     quota_high: list[str] = []
-    total_5h_calls = total_5h_spend = 0.0
     total_24h_calls = total_24h_spend = 0.0
 
     for p in sorted(pods, key=lambda x: acct_sort_key(x["acct"])):
         acct = p["acct"]
-        s5 = spend_5h.get(acct, {})
         s24 = spend_24h.get(acct, {})
-        c5 = int(s5.get("calls") or 0)
-        v5 = float(s5.get("spend") or 0.0)
         c24 = int(s24.get("calls") or 0)
         v24 = float(s24.get("spend") or 0.0)
-        total_5h_calls += c5; total_5h_spend += v5
         total_24h_calls += c24; total_24h_spend += v24
 
         if c24 == 0:
@@ -412,8 +392,8 @@ def render(*, summary: bool, as_json: bool) -> None:
         sub_until_ts = p.get("sub_until")
         if sub_until_ts and sub_until_ts - now < 7 * 86400:
             sub_expiring.append(acct)
-        p5h = p.get("p5h"); p7d = p.get("p7d")
-        if (isinstance(p5h, (int, float)) and p5h >= 90) or (isinstance(p7d, (int, float)) and p7d >= 90):
+        p7d = p.get("p7d")
+        if isinstance(p7d, (int, float)) and p7d >= 90:
             quota_high.append(acct)
 
         def pct(v):
@@ -422,10 +402,9 @@ def render(*, summary: bool, as_json: bool) -> None:
         print(
             f"{acct:9s} {(p.get('email') or '-'):32s} "
             f"{take_of(p):>4s} {status_of(p):>8s} "
-            f"{pct(p5h):>5s} "
-            f"{(str(c5) if c5 else '-'):>6s} {(f'{v5:.1f}' if c5 else '-'):>7s} "
+            f"{pct(p7d):>5s} "
+            f"{(str(c24) if c24 else '-'):>6s} {(f'{v24:.1f}' if c24 else '-'):>7s} "
             f"{fmt_expires(p.get('p_reset'), now):>9s} "
-            f"{pct(p7d):>5s} {fmt_expires(p.get('w_reset'), now):>10s} "
             f"{fmt_expires(p.get('expires_at'), now):>9s} "
             f"{fmt_sub_until(sub_until_ts):>10s} {fmt_expires(sub_until_ts, now):>8s}  "
             f"{cause_of(p)}"
@@ -433,8 +412,7 @@ def render(*, summary: bool, as_json: bool) -> None:
 
     print()
     print(
-        f"Σ 5h:  {int(total_5h_calls)} calls / ${total_5h_spend:.2f}    "
-        f"24h: {int(total_24h_calls)} calls / ${total_24h_spend:.2f}    "
+        f"Σ 24h: {int(total_24h_calls)} calls / ${total_24h_spend:.2f}    "
         f"pods: {sum(1 for p in pods if p.get('ready'))}/{len(pods)} ready"
     )
     if silent:
@@ -461,7 +439,7 @@ def render(*, summary: bool, as_json: bool) -> None:
     print()
     print(f"take    ={len(takers):2d}  {sort(takers)}")
     print(f"online  ={len(online):2d}  {sort(online)}")
-    print(f"quota   ={len(quota):2d}  {sort(quota)} (5h/7d 撞顶)")
+    print(f"quota   ={len(quota):2d}  {sort(quota)} (7d 撞顶)")
     print(f"sub_exp ={len(sub_exp):2d}  {sort(sub_exp)} (订阅过期/非pro, 需续订或摘除)")
     print(f"token_x ={len(token_x):2d}  {sort(token_x)} (token_invalidated, 走 re-OAuth)")
     print(f"probe_err={len(probe_err):2d}  {sort(probe_err)} (探针失败, 状态未知不计入 take)")
@@ -473,7 +451,7 @@ def main() -> int:
     parser.add_argument("--summary", action="store_true",
                         help="附加 ready/not_ready 分组")
     parser.add_argument("--json", dest="as_json", action="store_true",
-                        help="原样输出 JSON (pod + auth + 5h/24h spend)")
+                        help="原样输出 JSON (pod + auth + 24h spend)")
     args = parser.parse_args()
     render(summary=args.summary, as_json=args.as_json)
     return 0

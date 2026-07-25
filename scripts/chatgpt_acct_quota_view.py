@@ -3,6 +3,10 @@
 
 Runs on JSZX-AI-03. Reads the quota-rebalance state file locally and resolves
 emails from readable local creds plus 198 K3s pod auth claims.
+
+2026-07-13: OpenAI 将 Pro 配额从双窗口 (5h primary + 7d secondary) 合并为
+单 7d 窗口 (primary_window.limit_window_seconds=604800, secondary_window=null)。
+state.json 中 primary_pct / primary_reset_at 现在代表 7d 窗口，weekly_pct 不再更新。
 """
 
 from __future__ import annotations
@@ -29,6 +33,8 @@ def load_state() -> dict[str, dict[str, Any]]:
 
 
 def duration(epoch: Any, now: float, *, days: bool = True) -> str:
+    """未来时长 → "1d02h" / "3h45m"；过去或无效 → "-"。
+    reset/restore 本就该是未来时间；已过=数据无意义，统一 "-"。"""
     if not epoch:
         return "-"
     try:
@@ -36,7 +42,7 @@ def duration(epoch: Any, now: float, *, days: bool = True) -> str:
     except (TypeError, ValueError):
         return "-"
     if seconds <= 0:
-        return "past"
+        return "-"
     day, rem = divmod(seconds, 86400)
     hour, rem = divmod(rem, 3600)
     minute = rem // 60
@@ -45,77 +51,35 @@ def duration(epoch: Any, now: float, *, days: bool = True) -> str:
     return f"{day * 24 + hour}h{minute:02d}m"
 
 
-def past_label(row: dict[str, Any], window: str) -> str:
-    """裸 'past' 拆三类后缀，让用户一眼读出来根因：
-      past⊘ = state 冻结（manual_offline / scale=0 / SCALED_DOWN 且 reset 已过），probe 不再写
-      past· = 该窗口自然过但被对侧窗口卡 paused（5h 过但 wk=100%，或反之，且 pod 仍在 probe）
-      past! = ONLINE 但 probe stale，cron 下一 tick 会刷新
-    """
-    if row.get("manual_offline"):
-        return "past⊘"
-    cause = (row.get("cause") or "")
-    if cause == "deploy.spec.replicas=0":
-        return "past⊘"
-    tier = str(row.get("tier") or "").upper()
-    # SCALED_DOWN + 窗口 reset 已过 = snapshot 冻结未刷新。
-    # rebalance preflight 检测 replicas=0 直接短路不 probe，state 里的 reset 时刻是 pause 时刻的死快照。
-    # 用 past· 会误导为"对侧配对窗口副作用"（那是 ONLINE-paused 的语义），SCALED_DOWN 时是 stale。
-    if tier == "SCALED_DOWN":
-        return "past⊘"
-    if row.get("paused"):
-        # paused but not manual_offline / not SCALED_DOWN → 5h/7d 自然 cap，pod 仍存活可 probe
-        # window=='5h' & cause 主要是 wk=100% → 5h 列 past 是配对窗口的副作用
-        # window=='7d' & cause 主要是 5h=100% → 反之
-        if window == "5h" and "wk=" in cause:
-            return "past·"
-        if window == "7d" and "5h=" in cause:
-            return "past·"
-        return "past·"
-    return "past!"
-
-
 def stale_notes(row: dict[str, Any], now: float) -> list[str]:
-    """SCALED_DOWN 状态 rebalance preflight 短路不 probe，state.json 里的 reset 时刻是
-    pause 时刻的快照。任一 reset 已过 = 该窗口配额其实已重置但 state 冻结未刷新。
-    在 cause 列点出来，避免用户看着 past·/past⊘ 却读不出"要重新 probe"。"""
-    if str(row.get("tier") or "").upper() != "SCALED_DOWN":
-        return []
+    """SCALED_DOWN / TOKEN_INVALID 等冻结态的诊断注释。"""
+    tier = str(row.get("tier") or "").upper()
     notes: list[str] = []
-    p_reset = row.get("primary_reset_at")
-    w_reset = row.get("weekly_reset_at")
-    if p_reset and float(p_reset) < now:
-        notes.append("5h_reset elapsed")
-    if w_reset and float(w_reset) < now:
-        notes.append("7d_reset elapsed")
+    if tier == "SCALED_DOWN":
+        p_reset = row.get("primary_reset_at")
+        if p_reset and float(p_reset) < now:
+            notes.append("7d_reset elapsed")
+        revive_cooldown = row.get("revive_probe_cooldown_until")
+        if revive_cooldown:
+            cd = duration(revive_cooldown, now, days=False)
+            if cd != "-":
+                notes.append(f"REVIVE_PROBE cooldown {cd}")
+            else:
+                notes.append("REVIVE_PROBE_401")
+        if row.get("revive_probe_still_cap"):
+            notes.append("STILL_CAP")
+        if row.get("revive_probe_error"):
+            notes.append(f"ERROR: {row['revive_probe_error']}")
+    elif tier == "TOKEN_INVALID":
+        notes.append("需 re-OAuth")
     return notes
 
 
 def next_reset(row: dict[str, Any], now: float) -> str:
-    """真正阻塞的窗口的 reset，不是"两个窗口最早的那个"。
-    acct-36 反例：5h=100% 触发 scale=0，primary_reset 早过（stale 冻结未 probe），wk 才 35%
-    却 weekly_reset=5d17h future。取 min 会返 5d17h → 用户读成"要等 5 天才重开"，
-    但实际是 primary 早已 reset，只等 rebalance 重新 probe（该 tick 就复活）。
-    正确语义：SCALED_DOWN 且 cause 声明 blocker 窗口 → 只看 blocker；其余场景取 min。"""
-    cause = str(row.get("cause") or "").lower()
-    tier = str(row.get("tier") or "").upper()
+    """primary_reset_at 倒计时（现在代表单 7d 窗口）。已过="-"。"""
     p_reset = row.get("primary_reset_at")
-    w_reset = row.get("weekly_reset_at")
-
-    if tier == "SCALED_DOWN" and ("5h=" in cause or "wk=" in cause):
-        # cause 里点名了 blocker，只看它的 reset。past = state 冻结待 probe。
-        blocker = p_reset if "5h=" in cause else w_reset
-        if not blocker:
-            return "-"
-        if float(blocker) <= now:
-            return "past⊘"     # blocker 已过，等 rebalance 重新 probe
-        return duration(blocker, now)
-
-    # 兜底：两个 reset 都取，选最早的 future；两个都过则 past⊘
-    future = [float(ts) for ts in (p_reset, w_reset) if ts and float(ts) > now]
-    if future:
-        return duration(min(future), now)
-    if p_reset or w_reset:
-        return "past⊘"
+    if p_reset and float(p_reset) > now:
+        return duration(p_reset, now)
     return "-"
 
 
@@ -284,7 +248,7 @@ def remote_198_emails() -> dict[str, str]:
     return {}
 
 
-def remote_198_spend_5h_code() -> str:
+def remote_198_spend_recent_code() -> str:
     return r'''
 import json, os, subprocess
 os.environ["KUBECONFIG"] = os.path.expanduser("~/.kube/config")
@@ -294,7 +258,7 @@ sql = (
     "COUNT(*) AS n, ROUND(SUM(spend)::numeric, 2) AS spend "
     "FROM \"LiteLLM_SpendLogs\" "
     "WHERE model_id LIKE 'chatgpt-acct-%-gpt-%' "
-    "AND \"startTime\" > NOW() - INTERVAL '5 hours' "
+    "AND \"startTime\" > NOW() - INTERVAL '24 hours' "
     "GROUP BY acct, bucket;"
 )
 try:
@@ -323,7 +287,7 @@ else:
 '''
 
 
-def remote_198_spend_5h() -> dict[str, dict[str, float]]:
+def remote_198_spend_recent() -> dict[str, dict[str, float]]:
     try:
         result = subprocess.run(
             [
@@ -336,7 +300,7 @@ def remote_198_spend_5h() -> dict[str, dict[str, float]]:
                 "python3",
                 "-",
             ],
-            input=remote_198_spend_5h_code(),
+            input=remote_198_spend_recent_code(),
             capture_output=True,
             text=True,
             timeout=30,
@@ -364,21 +328,21 @@ def acct_sort_key(acct: str) -> int:
 def render_table(state: dict[str, dict[str, Any]], *, summary: bool) -> None:
     now = time.time()
     emails = email_map()
-    spend_5h = remote_198_spend_5h()
+    spend_recent = remote_198_spend_recent()
     ts = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     total = len(state)
     print(f"=== BEGIN chatgpt-acct-quota @ {ts} | source=198:state.json | rows={total} ===")
-    print("legend: past⊘=state 冻结 (TOKEN/scale=0/SCALED_DOWN)  past·=另一窗口卡 paused(pod 活)  past!=ONLINE probe stale")
+    print("legend: reset/restore 列显示未来倒计时或 '-'；已过时刻由下一 cron tick 触发 auto-revive")
     print(
         f"{'acct':9s} {'email':32s} {'take':>4s} {'status':>7s} {'tier':>16s} "
-        f"{'5h%':>5s} {'main_n':>7s} {'main$':>7s} {'codex_n':>8s} {'codex$':>7s} {'5h_reset':>12s} "
-        f"{'7d%':>5s} {'7d_reset':>12s} "
+        f"{'7d%':>5s} {'reset':>12s} "
+        f"{'main_n':>7s} {'main$':>7s} {'codex_n':>8s} {'codex$':>7s} "
         f"{'next_reset':>12s} {'restore':>9s} {'sub_until':>20s} {'sub_left':>8s}  cause"
     )
-    print("-" * 250)
+    print("-" * 210)
     for acct in sorted(state, key=acct_sort_key):
         row = state[acct]
-        buckets = spend_5h.get(acct) or {}
+        buckets = spend_recent.get(acct) or {}
         main = buckets.get("main") or {}
         codex = buckets.get("codex") or {}
         main_calls = main.get("calls")
@@ -390,24 +354,17 @@ def render_table(state: dict[str, dict[str, Any]], *, summary: bool) -> None:
         except (TypeError, ValueError):
             p_pct = 0
         # SCALED_DOWN: deploy.replicas=0 时 rebalance preflight 短路不 probe，
-        # primary_pct / weekly_pct 是 pause 时刻的快照（不再变化但有意义——能反推
-        # 当时是 5h 满还是 wk 满才被自动 scale=0）。reset 时刻是死数据，渲染。
-        # main/codex 流量列 mute——pod=0 无新流量；SpendLogs 5h 残留可能误导。
+        # primary_pct 是 pause 时刻的快照（不再变化但有意义——能反推
+        # 当时配额状态）。reset 时刻是死数据，渲染。
+        # main/codex 流量列 mute——pod=0 无新流量；SpendLogs 残留可能误导。
         is_scaled_down = str(row.get("tier") or "").upper() == "SCALED_DOWN"
         if is_scaled_down:
             main_n_cell = main_s_cell = codex_n_cell = codex_s_cell = "-"
             pct_cell = str(row.get("primary_pct") or "-")
-            w_pct_cell = str(row.get("weekly_pct") or "-")
             p_reset_cell = duration(row.get("primary_reset_at"), now)
-            w_reset_cell = duration(row.get("weekly_reset_at"), now)
-            if p_reset_cell == "past":
-                p_reset_cell = past_label(row, "5h")
-            if w_reset_cell == "past":
-                w_reset_cell = past_label(row, "7d")
             next_reset_cell = next_reset(row, now)
         else:
             pct_cell = str(row.get("primary_pct", ""))
-            # 上游 probe 0% 但 LiteLLM main pool ≥50 calls → 上游 usage 落后 / probe stale
             if main_calls and main_calls >= 50 and p_pct < 5:
                 pct_cell = f"{pct_cell}*"
             main_n_cell = f"{main_calls}" if main_calls else "-"
@@ -415,15 +372,9 @@ def render_table(state: dict[str, dict[str, Any]], *, summary: bool) -> None:
             codex_n_cell = f"{codex_calls}" if codex_calls else "-"
             codex_s_cell = f"{codex_spend:.1f}" if codex_spend is not None else "-"
             p_reset_cell = duration(row.get("primary_reset_at"), now)
-            w_reset_cell = duration(row.get("weekly_reset_at"), now)
-            if p_reset_cell == "past":
-                p_reset_cell = past_label(row, "5h")
-            if w_reset_cell == "past":
-                w_reset_cell = past_label(row, "7d")
             next_reset_cell = next_reset(row, now)
-            w_pct_cell = str(row.get("weekly_pct", ""))
         # cause 列：SCALED_DOWN 时优先显 state.cause（2026-06-29 后 cron preflight 保留首因
-        # OFFLINE-5H/OFFLINE-WEEK；老脏数据兜底 'deploy.spec.replicas=0' → 直接渲染原值）。
+        # OFFLINE 等；老脏数据兜底 'deploy.spec.replicas=0' → 直接渲染原值）。
         # 之前的 pct 反推逻辑（pct≥95 → pause 触发；pct<95 → manual scale=0）已删 ——
         # 真因写入后反推 stale state pct 既不准也误导（多维数据压一维标签）。
         cause = row.get("cause", "")
@@ -431,14 +382,15 @@ def render_table(state: dict[str, dict[str, Any]], *, summary: bool) -> None:
         if notes:
             cause = f"{cause} [stale: {', '.join(notes)}]" if cause else f"[stale: {', '.join(notes)}]"
         restore_cell = duration(row.get('restore_at'), now, days=False)
-        if restore_cell == "past":
-            restore_cell = past_label(row, "restore")
+        tier_display = str(row.get('tier', '-'))
+        if tier_display.upper() == "TOKEN_INVALID":
+            tier_display = "401 需re-OAuth"
         print(
             f"{acct:9s} {emails.get(acct, '-'):32s} {take(row):>4s} {status(row):>7s} "
-            f"{str(row.get('tier', '-')):>16s} {pct_cell:>5s} "
+            f"{tier_display:>16s} {pct_cell:>5s} "
+            f"{p_reset_cell:>12s} "
             f"{main_n_cell:>7s} {main_s_cell:>7s} {codex_n_cell:>8s} {codex_s_cell:>7s} "
-            f"{p_reset_cell:>12s} {w_pct_cell:>5s} "
-            f"{w_reset_cell:>12s} {next_reset_cell:>12s} "
+            f"{next_reset_cell:>12s} "
             f"{restore_cell:>9s} "
             f"{sub_until(row.get('subscription_active_until')):>20s} "
             f"{sub_left(row.get('subscription_active_until'), now):>8s}  {cause}"
@@ -447,29 +399,29 @@ def render_table(state: dict[str, dict[str, Any]], *, summary: bool) -> None:
     stale = [
         acct
         for acct, row in state.items()
-        if ((spend_5h.get(acct, {}).get("main") or {}).get("calls") or 0) >= 50
+        if ((spend_recent.get(acct, {}).get("main") or {}).get("calls") or 0) >= 50
         and int(row.get("primary_pct") or 0) < 5
     ]
     if stale:
         print()
-        print(f"⚠ probe-stale ({len(stale)}): 上游 5h%≈0 但 LiteLLM main pool 5h 流量≥50 calls → "
+        print(f"⚠ probe-stale ({len(stale)}): 上游 7d%≈0 但 LiteLLM 24h 流量≥50 calls → "
               f"{sorted(stale, key=acct_sort_key)}")
 
     codex_total_calls = sum(
-        ((spend_5h.get(acct, {}).get("codex") or {}).get("calls") or 0)
+        ((spend_recent.get(acct, {}).get("codex") or {}).get("calls") or 0)
         for acct in state
     )
     codex_total_spend = sum(
-        ((spend_5h.get(acct, {}).get("codex") or {}).get("spend") or 0.0)
+        ((spend_recent.get(acct, {}).get("codex") or {}).get("spend") or 0.0)
         for acct in state
     )
     if codex_total_calls:
         codex_active = [
             acct for acct in state
-            if ((spend_5h.get(acct, {}).get("codex") or {}).get("calls") or 0) > 0
+            if ((spend_recent.get(acct, {}).get("codex") or {}).get("calls") or 0) > 0
         ]
         print()
-        print(f"ⓘ codex (gpt-5.3) 独立配额池 5h: "
+        print(f"ⓘ codex (gpt-5.3) 独立配额池 24h: "
               f"{codex_total_calls} calls / ${codex_total_spend:.1f}, "
               f"active={len(codex_active)} {sorted(codex_active, key=acct_sort_key)}")
 
@@ -502,7 +454,7 @@ def render_table(state: dict[str, dict[str, Any]], *, summary: bool) -> None:
     print()
     print(f"take    ={len(takers):2d}  {sort(takers)}")
     print(f"online  ={len(online):2d}  {sort(online)}")
-    print(f"paused  ={len(paused):2d}  {sort(paused)} (5h/7d quota pause)")
+    print(f"paused  ={len(paused):2d}  {sort(paused)} (7d quota pause)")
     print(f"offline ={len(offline):2d}  {sort(offline)} (manual_offline)")
     if zombie:
         print(f"zombie  ={len(zombie):2d}  {sort(zombie)} (state placeholder; no probe data — likely deploy scale=0 + router cleared)")

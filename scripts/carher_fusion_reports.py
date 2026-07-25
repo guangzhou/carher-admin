@@ -124,6 +124,12 @@ def cell(value: Any) -> str:
     return f"<td>{e(value)}</td>"
 
 
+def period_title(period: dict[str, Any]) -> str:
+    start = str(period.get("start") or "unknown").split()[0]
+    end = str(period.get("end") or "unknown").split()[0]
+    return f"{start}～{end}"
+
+
 def score_comment(code: str, value: int, max_value: int, base: dict[str, Any], relative: dict[str, Any]) -> str:
     if code.startswith("A"):
         return {
@@ -163,7 +169,7 @@ def render_report(score: dict[str, Any], evidence: dict[str, Any], score_summary
     top_topics = base.get("topic_strength_top") or []
     privacy = base.get("privacy") or {}
 
-    title = f"{her_id} 融合体自诊断报告（2026-05-01～2026-06-12）"
+    title = f"{her_id} 融合体自诊断报告（{period_title(period)}）"
     low_fields = ", ".join(score.get("low_confidence_fields") or [])
     warning_text = "；".join(warnings) if warnings else "无数据质量告警"
 

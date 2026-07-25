@@ -21,12 +21,14 @@ MK = os.environ.get("LITELLM_MK", "sk-pro-litellm-ce077e2b0721bb419a633e4d")
 
 # variant -> (litellm model_name group, plain web slug sent as openai/<slug>)
 VARIANTS = {
+    "5.4":       ("zerokey-pool-gpt-5.4",       "gpt-5.4"),
     "5.5":       ("zerokey-pool-gpt-5.5",       "gpt-5.5"),
     "5.6-sol":   ("zerokey-pool-gpt-5.6-sol",   "gpt-5.6-sol"),
     "5.6-terra": ("zerokey-pool-gpt-5.6-terra", "gpt-5.6-terra"),
     "5.6-luna":  ("zerokey-pool-gpt-5.6-luna",  "gpt-5.6-luna"),
 }
-DEFAULT_PODS = [25, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99]
+DEFAULT_PODS = [25, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+                100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111]
 
 
 def api(method, path, data=None):

@@ -65,6 +65,7 @@ LITELLM_MK = os.environ.get("LITELLM_MK", "")
 LITELLM_MK_188 = os.environ.get("LITELLM_MK_188", "sk-chatgpt-188-6ff3fb109ac61cc1ea23f278bab8d838")
 LITELLM_MK_187 = os.environ.get("LITELLM_MK_187", "sk-chatgpt-187-a3d9e7c1f45b82069d1c3f7a")
 LITELLM_MK_198 = os.environ.get("LITELLM_MK_198", "sk-chatgpt-198-d8a3f4e62b9c1057ef324918a7b6d3e0")
+SHARED_PROXY_API_KEY = os.environ.get("SHARED_PROXY_API_KEY", "")
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
 JITTER_MAX = int(os.environ.get("REBALANCE_JITTER", "180"))
 DRY_RUN = os.environ.get("DRY_RUN", "") == "1"
@@ -91,8 +92,18 @@ CHATGPT_MODELS_56 = [
     {"model_name": "chatgpt-gpt-5.6-luna",  "litellm_model": "openai/chatgpt-gpt-5.6-luna"},
 ]
 
+# 2026-07-22: codex-auto-review — Codex Guardian 自动审查专用小模型（provider.rs
+# DEFAULT_APPROVAL_REVIEW_PREFERRED_MODEL）。全池 acct pod 共享 chatgpt-pool-config
+# 已含 chatgpt/codex-auto-review（mode: responses），能力与其它 5.x 一致。
+# 单独成组：由 group_alias `codex-auto-review` → `chatgpt-codex-auto-review` 承接
+# codex 客户端裸 slug，不污染 gpt-5.5 主组流量。必须进 models_for 否则 pause/resume
+# 一轮后 entry 被静默摘（同 5.6 教训）。
+CHATGPT_MODELS_REVIEW = [
+    {"model_name": "chatgpt-codex-auto-review", "litellm_model": "openai/chatgpt-codex-auto-review"},
+]
+
 def models_for(acct):
-    return CHATGPT_MODELS + CHATGPT_MODELS_56
+    return CHATGPT_MODELS + CHATGPT_MODELS_56 + CHATGPT_MODELS_REVIEW
 
 # 198 prod pool 中的账号
 # location=188 → auth.json 在本机 /Data/chatgpt-auth/acct-N/
@@ -130,6 +141,18 @@ SSH_187_AUTH_DIR = os.environ.get("SSH_187_AUTH_DIR", "/Data/chatgpt-auth")
 SSH_198_HOST = os.environ.get("SSH_198_HOST", "10.68.13.198")
 SSH_198_USER = os.environ.get("SSH_198_USER", "cltx")
 K8S_198_NS   = os.environ.get("K8S_198_NS", "litellm-product")
+SHARED_PROXY_URL = os.environ.get(
+    "SHARED_PROXY_URL",
+    "http://chatgpt-acct-proxy.litellm-product.svc.cluster.local:8000",
+).rstrip("/")
+SHARED_PROXY_ACCOUNTS = {
+    a.strip() for a in os.environ.get("SHARED_PROXY_ACCOUNTS", "").split(",") if a.strip()
+}
+SHARED_PROXY_AUTH_DIR = os.environ.get("SHARED_PROXY_AUTH_DIR", "/Data/chatgpt-auth-shared")
+
+
+def is_shared_proxy(acct):
+    return acct in SHARED_PROXY_ACCOUNTS
 
 PROBE_INTERVAL_LOW = 25 * 60   # 7d<50% → 至少 25min 间隔
 PROBE_INTERVAL_MID = 12 * 60   # 7d 50~80% → 至少 12min 间隔
@@ -355,14 +378,20 @@ def parse_account_198(acct):
     并对 ssh 网络瞬态失败做 2 次重试；JSON 解析失败不重试。
     Pod 不存在时远端返回 exit 42 → 立刻 raise，不进重试。
     """
-    # 远端 bash：先确认 Pod 存在，否则 exit 42（避免 kubectl exec 没 pod 名 hang 整个 timeout）
-    kc_cmd = (
-        f"set -e; export KUBECONFIG=$HOME/.kube/config; "
-        f"POD=$(kubectl -n {K8S_198_NS} get pod -l app=chatgpt-{acct} "
-        f"-o jsonpath='{{.items[0].metadata.name}}' 2>/dev/null); "
-        f'if [ -z "$POD" ]; then echo "pod chatgpt-{acct} not found" >&2; exit 42; fi; '
-        f"kubectl -n {K8S_198_NS} exec $POD -- cat /chatgpt-auth/auth.json"
-    )
+    if is_shared_proxy(acct):
+        p = f"{SHARED_PROXY_AUTH_DIR}/{acct}.json"
+        kc_cmd = (
+            f"set -e; test -f {p} || exit 42; cat {p}"
+        )
+    else:
+        # 远端 bash：先确认 Pod 存在，否则 exit 42（避免 kubectl exec 没 pod 名 hang 整个 timeout）
+        kc_cmd = (
+            f"set -e; export KUBECONFIG=$HOME/.kube/config; "
+            f"POD=$(kubectl -n {K8S_198_NS} get pod -l app=chatgpt-{acct} "
+            f"-o jsonpath='{{.items[0].metadata.name}}' 2>/dev/null); "
+            f'if [ -z "$POD" ]; then echo "pod chatgpt-{acct} not found" >&2; exit 42; fi; '
+            f"kubectl -n {K8S_198_NS} exec $POD -- cat /chatgpt-auth/auth.json"
+        )
     ssh_args = [
         "ssh",
         "-o", "ConnectTimeout=5",
@@ -927,8 +956,12 @@ def router_has_entries(acct, meta, snapshot=None, exclude_vip=False):
     intentionally kept across pause for CM fallback chain).
     """
     ab = acct_api_base(acct, meta)
+    prefix = f"chatgpt-{acct}-"
+    acct_prefix = f"chatgpt-acct-{acct.removeprefix('acct-')}-"
     if snapshot is not None:
         names = snapshot.get(ab, [])
+        if is_shared_proxy(acct):
+            return any((n or "").startswith((prefix, acct_prefix)) for n in names)
         if exclude_vip:
             names = [n for n in names if not (n or "").startswith("chatgpt-vip-")]
         return bool(names)
@@ -937,7 +970,11 @@ def router_has_entries(acct, meta, snapshot=None, exclude_vip=False):
         # don't auto-heal on transient 5xx — better to skip than spam /model/new
         return True
     for e in data.get("data", []):
-        if (e.get("litellm_params") or {}).get("api_base", "") != ab:
+        eid = (e.get("model_info") or {}).get("id", "")
+        if is_shared_proxy(acct):
+            if not eid.startswith((prefix, acct_prefix)):
+                continue
+        elif (e.get("litellm_params") or {}).get("api_base", "") != ab:
             continue
         if exclude_vip and (e.get("model_name", "") or "").startswith("chatgpt-vip-"):
             continue
@@ -950,6 +987,8 @@ def acct_api_base(acct, meta):
         return f"http://10.68.13.188:{meta['port']}"
     elif meta["location"] == "187":
         return f"http://10.68.13.187:{meta['port']}"
+    elif meta["location"] == "198" and is_shared_proxy(acct):
+        return SHARED_PROXY_URL
     elif meta["location"] == "198":
         return f"http://chatgpt-{acct}.{K8S_198_NS}.svc.cluster.local:4000"
     else:
@@ -999,12 +1038,14 @@ def deploy_scale_snapshot():
     return out
 
 
-def acct_api_key(meta):
+def acct_api_key(meta, acct=None):
     if meta["location"] == "188":
         return LITELLM_MK_188
     elif meta["location"] == "187":
         return LITELLM_MK_187
     elif meta["location"] == "198":
+        if acct and is_shared_proxy(acct):
+            return SHARED_PROXY_API_KEY
         return LITELLM_MK_198
     else:
         return LITELLM_MK_188
@@ -1076,6 +1117,8 @@ def scale_deploy(acct, replicas, wait_ready=False, timeout=120):
     wait_ready=True 用于 resume_acct：必须等 svc 有 endpoint 再让 router 注册 entry，
     否则 simple-shuffle 路由到 0 endpoint svc 立刻超时（同 §0b scale=0 ghost 问题反向）。
     """
+    if is_shared_proxy(acct):
+        return True
     if not AUTO_SCALE_ON_PAUSE:
         return True
     if DRY_RUN:
@@ -1140,7 +1183,11 @@ def pause_acct(acct, meta):
         e_ab = (e.get("litellm_params") or {}).get("api_base", "")
         e_id = (e.get("model_info") or {}).get("id", "")
         e_name = e.get("model_name", "")
-        if e_ab != ab:
+        owns_entry = e_id.startswith(f"chatgpt-{acct}-") or e_id.startswith(f"chatgpt-acct-{acct.removeprefix('acct-')}-")
+        if is_shared_proxy(acct):
+            if not owns_entry:
+                continue
+        elif e_ab != ab:
             continue
         # VIP 独占 entry (chatgpt-vip-<group>-gpt-5.X) 不删: 撞限走 CM router_settings.fallbacks
         # (vip -> 主池 -> wangsu), 跟 pause 协同；删了就 BadRequest no healthy deployments
@@ -1181,7 +1228,7 @@ def resume_acct(acct, meta):
             log(f"  resume {acct}: scale=1 / wait endpoint failed → skip register (next cron will retry)")
             return 0
     ab = acct_api_base(acct, meta)
-    ak = acct_api_key(meta)
+    ak = acct_api_key(meta, acct)
     created = 0
     # 幂等：先拿一次 /model/info, 后续 POST /model/new 失败时按 id 判定 DB 残留
     status, info = api_request("GET", "/v1/model/info")
@@ -1204,6 +1251,8 @@ def resume_acct(acct, meta):
                 "api_base": ab,
                 "api_key": ak,
         }
+        if is_shared_proxy(acct):
+            _lp["extra_headers"] = {"X-Codex-Account": acct}
         _dw = meta.get("desired_weight")
         if _dw is not None:
             _lp["weight"] = int(_dw)

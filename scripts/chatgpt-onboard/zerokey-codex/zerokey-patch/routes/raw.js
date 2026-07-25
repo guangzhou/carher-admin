@@ -119,6 +119,7 @@ async function rawComplete(req, res, chatgptApi) {
     Array.isArray(req.body.tools) && req.body.tools.length > 0
       ? normalizeToolDefs(req.body.tools)
       : []
+  const validNames = new Set(webToolDefs.map((d) => d.name))
   const useWebTools = webToolDefs.length > 0
   // exec-harvest: if the caller has a shell-like tool, don't fight the web model's
   // built-in code-interpreter — let it emit its `container.exec` command and re-emit
@@ -312,14 +313,14 @@ async function rawComplete(req, res, chatgptApi) {
 
     // ── Web-tools branch: parse buffered text → OpenAI tool_calls ──
     if (useWebTools) {
-      const parsed = extractToolCalls(full)
+      const parsed = extractToolCalls(full, validNames)
       if (parsed && parsed.calls.length) return emitWebToolsResult(parsed, null)
       // No envelope on the first pass. One escalated retry before giving up as
       // plain text — fixes accounts whose web harness refuses on the soft prompt.
       const escalated = `${buildToolInstructions(webToolDefs, 'required', true)}\n\n${prompt}`
       collectWebText(escalated)
         .then((text2) => {
-          const p2 = extractToolCalls(text2)
+          const p2 = extractToolCalls(text2, validNames)
           if (p2 && p2.calls.length) return emitWebToolsResult(p2, null)
           // Still nothing → return best plain text we have (prefer non-empty).
           emitWebToolsResult(null, full || text2 || '')

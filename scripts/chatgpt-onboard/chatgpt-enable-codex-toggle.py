@@ -653,6 +653,23 @@ def login(page, pw):
         print(f"  after password url={page.url[:120]}", flush=True)
         shot(page, "02c-after-password-submit")
 
+        # push-auth: 部分号密码提交后落 /push-auth-verification (手机批准),
+        # headless 无法批准 → 点 'Try with email' fallback 到邮箱 OTP。
+        # (与主 OAuth 脚本 [4.5] 同逻辑; 缺此步会在 push-auth 页干等超时 = acct-112 实证)
+        if "push-auth-verification" in page.url:
+            print("  push-auth detected — clicking 'Try with email' → email OTP", flush=True)
+            try:
+                btn = page.locator("button:has-text('Try with email'), a:has-text('Try with email')")
+                if btn.count() > 0:
+                    btn.first.click()
+                    time.sleep(4)
+                    shot(page, "02d-after-try-with-email")
+                    print(f"  url after Try-with-email={page.url[:120]}", flush=True)
+                else:
+                    shot(page, "02d-no-try-with-email-btn")
+            except Exception as e:
+                print(f"  Try-with-email click err: {e}", flush=True)
+
         if page_needs_otp(page):
             otp_loop(page, pw)
 

@@ -16,12 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 ACCOUNTS = [
-    ("acct-1",  "litellm-chatgpt",    4001),
     ("acct-2",  "litellm-chatgpt-2",  4002),
-    ("acct-3",  "litellm-chatgpt-3",  4003),
-    ("acct-4",  "litellm-chatgpt-4",  4004),
-    ("acct-5",  "litellm-chatgpt-5",  4005),
-    ("acct-6",  "litellm-chatgpt-6",  4006),
     ("acct-7",  "litellm-chatgpt-7",  4007),
     ("acct-8",  "litellm-chatgpt-8",  4008),
     ("acct-9",  "litellm-chatgpt-9",  4009),

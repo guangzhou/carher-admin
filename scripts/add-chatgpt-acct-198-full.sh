@@ -169,7 +169,7 @@ EXISTING=$(jms ssh JSZX-AI-03 "sed -n 's/^$ACCT *[^ ]* *//p' $TOGGLE_LOG 2>/dev/
 if [[ "$EXISTING" =~ ^(ENABLED|ALREADY_ENABLED)$ ]]; then
   log "  ✅ toggle 已完成 (existing log: $EXISTING) — 跳过 188 重跑"
 else
-  jms ssh JSZX-AI-03 "rm -f $TOGGLE_LOG && setsid bash -c 'bash /tmp/run-enable-codex-toggle-188.sh $ACCT 2>&1 | stdbuf -oL tee $TOGGLE_LOG' </dev/null >/dev/null 2>&1 & disown; sleep 2; echo 'toggle bg started'" 2>&1 || log "  ⚠️  toggle bg ssh rc=$? (transient, polling 阶段判定真伪)"
+  jms ssh JSZX-AI-03 "rm -f $TOGGLE_LOG && setsid bash -c 'OAUTH_PROXY=${OAUTH_PROXY:-} bash /tmp/run-enable-codex-toggle-188.sh $ACCT 2>&1 | stdbuf -oL tee $TOGGLE_LOG' </dev/null >/dev/null 2>&1 & disown; sleep 2; echo 'toggle bg started'" 2>&1 || log "  ⚠️  toggle bg ssh rc=$? (transient, polling 阶段判定真伪)"
 fi
 
 # 等结果（最多 6min: chatgpt.com login + mail OTP + Security 点 toggle）
@@ -185,7 +185,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   RESULT=$(echo "$RAW" | tr -d '[:space:]')
   case "$RESULT" in
     ENABLED|ALREADY_ENABLED) log "  ✅ toggle result: $RESULT (iter=$ITER, rc=$RC)"; break ;;
-    FAILED_*|MISSING_CREDS|INVALID_ACCT|BAD_CREDS_FIELDS)
+    FAILED_*|MISSING_CREDS|INVALID_ACCT|BAD_CREDS_FIELDS|ERROR*)
       log "  ❌ toggle result: $RESULT (iter=$ITER)"
       jms ssh JSZX-AI-03 "tail -20 $TOGGLE_LOG" >&2 || true
       set -e
@@ -212,7 +212,7 @@ log "[5] OAuth (GEN_ONLY=1 patchright)"
 OAUTH_LOG="/tmp/oauth-$ACCT.log"
 OTP_PROV="${MAIL_OTP_PROVIDER:-mailcom}"
 log "  MAIL_OTP_PROVIDER=$OTP_PROV (pass-through to re-oauth.sh)"
-jms ssh JSZX-AI-03 "rm -f $OAUTH_LOG /tmp/auth-$ACCT.json && setsid bash -c 'MAIL_OTP_PROVIDER=$OTP_PROV GEN_ONLY=1 bash /Data/chatgpt-auth/re-oauth.sh $ACCT 2>&1 | stdbuf -oL tee $OAUTH_LOG' </dev/null >/dev/null 2>&1 & disown; sleep 2; echo 'oauth bg started'"
+jms ssh JSZX-AI-03 "rm -f $OAUTH_LOG /tmp/auth-$ACCT.json && setsid bash -c 'OAUTH_PROXY=${OAUTH_PROXY:-} MAIL_OTP_PROVIDER=$OTP_PROV GEN_ONLY=1 bash /Data/chatgpt-auth/re-oauth.sh $ACCT 2>&1 | stdbuf -oL tee $OAUTH_LOG' </dev/null >/dev/null 2>&1 & disown; sleep 2; echo 'oauth bg started'"
 
 # 等 auth.json 落盘 (最多 8min)
 log "  等 OAuth 完成 (最多 8min)..."

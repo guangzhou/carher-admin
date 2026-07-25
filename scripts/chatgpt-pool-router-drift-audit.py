@@ -46,6 +46,9 @@ EXPECTED = {
     "gpt-5.5": "openai/chatgpt-gpt-5.5",
     "gpt-5.4": "openai/chatgpt-gpt-5.4",
     "gpt-5.3-codex": "openai/chatgpt-gpt-5.3-codex-spark",
+    "gpt-5.6-sol": "chatgpt/gpt-5.6-sol",
+    "gpt-5.6-terra": "chatgpt/gpt-5.6-terra",
+    "gpt-5.6-luna": "chatgpt/gpt-5.6-luna",
 }
 
 

@@ -41,7 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 YAML_PATH = REPO_ROOT / "k8s" / "litellm-proxy.yaml"
 SOURCE_DIR = REPO_ROOT / "k8s" / "litellm-callbacks"
 
-# The four callback modules currently mounted into /app/<file>.py.
+# The callback modules currently mounted into /app/<file>.py.
 # Order is irrelevant; the script finds each block by name.
 CALLBACK_FILES: Tuple[str, ...] = (
     "opus_47_fix.py",
@@ -50,6 +50,9 @@ CALLBACK_FILES: Tuple[str, ...] = (
     "force_stream.py",
     "null_byte_sanitize.py",
     "anthropic_passthrough_pingfix.py",
+    "mock_heartbeat.py",
+    "streaming_output_backfill.py",
+    "cursor_responses_shim.py",
 )
 
 # Indentation of the literal block's content. This MUST match the YAML

@@ -185,8 +185,8 @@ req = urllib.request.Request(\"http://localhost:4000/v1/models\", headers={\"Aut
 r = urllib.request.urlopen(req, timeout=10)
 print(len(json.load(r)[\"data\"]))
 ')
-    echo \"  /v1/models returned \$N entries (expect 7)\"
-    [ \"\$N\" = \"7\" ] || { echo 'FATAL: expected 7 models' >&2; exit 4; }
+    echo \"  /v1/models returned \$N entries (expect >=7; pool grew to 10 w/ 5.6)\"
+    [ \"\$N\" -ge 7 ] 2>/dev/null || { echo 'FATAL: expected >=7 models' >&2; exit 4; }
   "
 fi
 

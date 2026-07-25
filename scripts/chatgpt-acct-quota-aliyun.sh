@@ -4,10 +4,10 @@
 # 数据源:
 #   - kubectl -n carher get pod -l pool=chatgpt-acct       (pod readiness/restarts/age)
 #   - kubectl -n carher exec <pod> -- cat /chatgpt-auth/auth.json  (email + expires_at)
-#   - kubectl -n carher exec litellm-db-0 -- psql (LiteLLM_SpendLogs 5h/24h)
+#   - kubectl -n carher exec litellm-db-0 -- psql (LiteLLM_SpendLogs 24h)
 #
 # 跟 198 版 chatgpt-acct-quota.sh 的区别:
-#   - 没有 quota-rebalance state.json (5h%/7d%/tier/paused/restore 不可得)
+#   - 没有 quota-rebalance state.json (7d%/tier/paused/restore 不可得)
 #   - 阿里云 SG IP 直调 chatgpt.com /codex/usage 被 CF 403, 不做上游 usage 探针
 #   - 阿里云只跑 gpt-5.5 一档 (无 5.4 / 5.3-codex 池)
 #

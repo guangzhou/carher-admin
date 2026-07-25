@@ -225,6 +225,84 @@ def error_record(uid: int, her_id: str, error: str) -> dict[str, Any]:
     }
 
 
+def fallback_data(args: argparse.Namespace, uid: int, error: str) -> dict[str, Any]:
+    """Build an explicit no-evidence payload when K8s/PVC collection fails."""
+    return {
+        "uid": uid,
+        "period": {"start": args.start, "end": args.end, "timezone": "Asia/Shanghai"},
+        "pod": None,
+        "container": args.container,
+        "privacy": {
+            "raw_chat_content_included": False,
+            "secrets_included": False,
+            "path_hints_sanitized": True,
+        },
+        "files": {
+            "total_scanned": 0,
+            "total_by_area": {},
+            "recent_count": 0,
+            "recent_by_area": {},
+            "recent_active_days": 0,
+            "recent_by_day": {},
+            "recent_top_dirs": [],
+            "recent_ext_counts": {},
+            "recent_text_candidate_count": 0,
+            "recent_size_bytes_total": 0,
+        },
+        "feishu_group_cache": {
+            "total_recent_messages": 0,
+            "groups_with_recent_messages": 0,
+            "owner_aliases_configured": False,
+            "bot_aliases_configured": False,
+            "owner_messages": 0,
+            "bot_mentions": 0,
+            "messages_by_day": {},
+            "bot_mentions_by_day": {},
+            "keyword_counts": {},
+        },
+        "memory_db": {"status": "unavailable", "tables": {}, "keyword_fts_hits": {}},
+        "keyword_recent_file_hits": {},
+        "collection_error": error[:1000],
+    }
+
+
+def fallback_record(args: argparse.Namespace, uid: int, her_id: str, error: str) -> dict[str, Any]:
+    data = fallback_data(args, uid, error)
+    scoring = {
+        "schema_version": "2026-06-13.2",
+        "purpose": "Fallback aggregate evidence when K8s/PVC collection is unavailable.",
+        "period": data["period"],
+        "coverage_summary": {
+            "pod": None,
+            "container": args.container,
+            "files_recent_count": 0,
+            "files_recent_active_days": 0,
+            "group_recent_messages": 0,
+            "group_active_days": 0,
+            "group_bot_mentions": 0,
+            "bot_aliases_configured": False,
+            "owner_aliases_configured": False,
+            "groups_with_recent_messages": 0,
+            "memory_status": "unavailable",
+            "memory_files": 0,
+            "memory_chunks": 0,
+            "collection_status": "unavailable",
+            "collection_error": error[:500],
+        },
+        "privacy": data["privacy"],
+    }
+    data["scoring_evidence"] = scoring
+    record = compact_record(uid, her_id, data)
+    warnings = list(record.get("data_quality_warnings") or [])
+    for warning in ["collection_unavailable", "no_backend_evidence"]:
+        if warning not in warnings:
+            warnings.append(warning)
+    record["data_quality_warnings"] = warnings
+    record["base_metrics"]["data_quality_warnings"] = warnings
+    record["collection_error"] = error[:1000]
+    return record
+
+
 def collect_one(args: argparse.Namespace, uid: int, alias_map: dict[str, Any]) -> dict[str, Any]:
     her_id, owner_aliases, bot_aliases = alias_info(alias_map, uid)
     cmd = build_stats_cmd(args, uid, owner_aliases, bot_aliases)
@@ -233,8 +311,12 @@ def collect_one(args: argparse.Namespace, uid: int, alias_map: dict[str, Any]) -
         return compact_record(uid, her_id, json.loads(proc.stdout))
     except subprocess.CalledProcessError as exc:
         detail = "\n".join(part for part in [exc.stderr, exc.stdout, str(exc)] if part)
+        if args.fallback_on_error:
+            return fallback_record(args, uid, her_id, detail)
         return error_record(uid, her_id, detail)
     except Exception as exc:
+        if args.fallback_on_error:
+            return fallback_record(args, uid, her_id, str(exc))
         return error_record(uid, her_id, str(exc))
 
 
@@ -345,6 +427,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--keyword", action="append", default=[], help="Extra keyword to count. Can repeat.")
     parser.add_argument("--max-text-bytes", type=int, default=5_000_000)
     parser.add_argument("--workers", type=int, default=1, help="Number of concurrent Her collectors.")
+    parser.add_argument("--fallback-on-error", action="store_true", help="Emit ok rows with explicit no-evidence warnings when collection fails.")
     parser.add_argument("--fail-fast", action="store_true")
     return parser.parse_args(argv)
 

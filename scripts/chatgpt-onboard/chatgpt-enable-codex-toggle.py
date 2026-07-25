@@ -27,6 +27,108 @@ ACTION = os.environ.get("ACTION", "enable-codex-toggle")
 GOTO_MS = 120000 if os.environ.get("OAUTH_PROXY") else 45000
 OTP_RE = re.compile(r"\b(\d{6})\b")
 SENDER_HINTS_RE = re.compile(r"openai|chatgpt|noreply", re.I)
+# 2026-07-25: 带 authenticator-app 2FA 的号(飞书表 '2FA密钥' 列)。密码提交后落
+# authenticator 挑战页, 邮箱永远不会来码 → 必须本地算 TOTP。镜像无 pyotp, 自己算。
+TOTP_SECRET = (os.environ.get("TOTP_SECRET") or "").strip().replace(" ", "").upper()
+
+
+def totp_now(secret=None, t=None):
+    """RFC6238 TOTP-SHA1, 30s 窗口, 6 位。secret = base32(padding 可省)。"""
+    import base64, hmac, hashlib, struct
+    s = secret or TOTP_SECRET
+    if not s:
+        return None
+    s = s.replace(" ", "").upper()
+    s += "=" * ((8 - len(s) % 8) % 8)
+    key = base64.b32decode(s, casefold=True)
+    ctr = int((t if t is not None else time.time()) // 30)
+    mac = hmac.new(key, struct.pack(">Q", ctr), hashlib.sha1).digest()
+    off = mac[-1] & 0x0F
+    return f"{(struct.unpack('>I', mac[off:off + 4])[0] & 0x7FFFFFFF) % 1000000:06d}"
+
+
+def page_needs_push_auth(page):
+    """当前页是"手机批准"(push-auth)挑战?
+    URL 判定不够: 实测 acct-122 密码提交后 URL 仍停在 /log-in/password, 只有正文变成
+    "在你的 SM-T835 上批准 / 我们已向你的设备发送通知"。此时若按邮箱 OTP 走, 取到码却
+    找不到输入框 → RESULT=ERROR detail=OTP input not found。故必须按正文判定。"""
+    try:
+        if "push-auth" in (page.url or "").lower():
+            return True
+        body = (page.evaluate("() => document.body.innerText") or "").lower()
+    except Exception:
+        return False
+    return any(k in body for k in (
+        "approve on your", "we sent a notification", "open the chatgpt app",
+        "上批准", "向你的设备发送通知", "打开 chatgpt 应用", "重新发送提示",
+    ))
+
+
+def click_try_with_email(page):
+    """点 push-auth 页的 'Try with email' 退回邮箱 OTP。按钮文案会本地化
+    (中文 '试试电子邮件'), 只匹配英文会漏 → 干等超时。"""
+    pat = re.compile(r"try with email|use email|试试电子邮件|使用电子邮件|改用电子邮件|电子邮件", re.I)
+    for attempt in range(6):
+        for how in ("role-button", "role-link", "text", "any"):
+            try:
+                if how == "role-button":
+                    loc = page.get_by_role("button", name=pat)
+                elif how == "role-link":
+                    loc = page.get_by_role("link", name=pat)
+                elif how == "text":
+                    loc = page.get_by_text(pat)
+                else:
+                    loc = page.locator("button, a, [role='button']").filter(has_text=pat)
+                if loc.count() > 0 and loc.first.is_visible():
+                    try:
+                        loc.first.click(timeout=4000)
+                    except Exception:
+                        loc.first.click(timeout=4000, force=True)
+                    time.sleep(4)
+                    if not page_needs_push_auth(page):
+                        print(f"  [push-auth] fell back to email OTP via {how}", flush=True)
+                        return True
+            except Exception:
+                pass
+        time.sleep(1.5)
+    shot(page, "02d-no-try-with-email-btn")
+    print("  [push-auth] 'Try with email' not clickable", flush=True)
+    return False
+
+
+def page_needs_totp(page):
+    """当前页是 authenticator-app 挑战(而非邮箱 OTP)?"""
+    try:
+        url = (page.url or "").lower()
+        if any(k in url for k in ("authenticator", "/mfa", "totp")):
+            return True
+        body = (page.evaluate("() => document.body.innerText") or "").lower()
+    except Exception:
+        return False
+    return any(k in body for k in ("authenticator app", "authentication app", "验证器应用",
+                                   "身份验证器", "two-factor authentication code",
+                                   "code from your authenticator", "enter the code from your"))
+
+
+def totp_loop(page, max_windows=3):
+    """算 TOTP 填入并提交; 失败则等下一个 30s 窗口重试(同码重填必被拒)。"""
+    for i in range(max_windows):
+        code = totp_now()
+        if not code:
+            print("  [totp] no TOTP_SECRET set — cannot answer authenticator challenge", flush=True)
+            return False
+        print(f"  [totp] code={code} (window {i+1}/{max_windows})", flush=True)
+        try:
+            submit_otp(page, code)
+        except Exception as exc:
+            print(f"  [totp] submit err: {exc}", flush=True)
+        shot(page, f"02t-after-totp-{i}")
+        if not page_needs_totp(page):
+            print(f"  [totp] advanced url={page.url[:110]}", flush=True)
+            return True
+        time.sleep(31)
+    print("  [totp] failed after all windows", flush=True)
+    return False
 
 
 def shot(page, name):
@@ -461,6 +563,20 @@ def submit_otp(page, code):
             time.sleep(8)
             shot(page, "02b-after-otp")
             return
+    # 没有 OTP 输入框的常见真因: 其实停在 push-auth("手机批准")页, 不是邮箱 OTP 页。
+    # 直接 raise 会把整轮判死; 先退回邮箱 OTP 再重试一次输入(acct-122 实证)。
+    if page_needs_push_auth(page):
+        print("  [otp] no input — actually on push-auth; falling back to email", flush=True)
+        if click_try_with_email(page):
+            for locator in (
+                page.locator("input[name='code'], input[autocomplete='one-time-code'], input[inputmode='numeric']"),
+                page.locator("input[type='text']"),
+            ):
+                if fill_first_visible(locator, code):
+                    submit(page)
+                    time.sleep(8)
+                    shot(page, "02b-after-otp")
+                    return
     raise RuntimeError("OTP input not found")
 
 
@@ -635,7 +751,9 @@ def login(page, pw):
         time.sleep(2)
 
     if page.locator("input[type='password']").count() == 0:
-        if page_needs_otp(page):
+        if TOTP_SECRET and page_needs_totp(page):
+            totp_loop(page)
+        elif page_needs_otp(page):
             otp_loop(page, pw)
         elif click_otp_mode_switch(page):
             # OTP-login account: switched password page → one-time-code mode
@@ -653,24 +771,30 @@ def login(page, pw):
         print(f"  after password url={page.url[:120]}", flush=True)
         shot(page, "02c-after-password-submit")
 
+        # 密码提交后页面是异步渲染的: 立刻判定会全部落空(URL 还是 /log-in/password、
+        # body 还没换成 push-auth 文案)→ 直落邮箱 OTP 分支 → 取到码却没有输入框
+        # (acct-122 两轮实证 RESULT=ERROR detail=OTP input not found)。先轮询等挑战页定型。
+        for _ in range(20):
+            if page_needs_push_auth(page) or (TOTP_SECRET and page_needs_totp(page)) \
+                    or page_needs_otp(page) or page.locator("input[type='password']").count() == 0:
+                break
+            time.sleep(1.5)
+        print(f"  challenge settled url={page.url[:100]} push={page_needs_push_auth(page)}", flush=True)
+
         # push-auth: 部分号密码提交后落 /push-auth-verification (手机批准),
         # headless 无法批准 → 点 'Try with email' fallback 到邮箱 OTP。
         # (与主 OAuth 脚本 [4.5] 同逻辑; 缺此步会在 push-auth 页干等超时 = acct-112 实证)
-        if "push-auth-verification" in page.url:
+        if page_needs_push_auth(page):
             print("  push-auth detected — clicking 'Try with email' → email OTP", flush=True)
-            try:
-                btn = page.locator("button:has-text('Try with email'), a:has-text('Try with email')")
-                if btn.count() > 0:
-                    btn.first.click()
-                    time.sleep(4)
-                    shot(page, "02d-after-try-with-email")
-                    print(f"  url after Try-with-email={page.url[:120]}", flush=True)
-                else:
-                    shot(page, "02d-no-try-with-email-btn")
-            except Exception as e:
-                print(f"  Try-with-email click err: {e}", flush=True)
+            click_try_with_email(page)
+            shot(page, "02d-after-try-with-email")
+            print(f"  url after Try-with-email={page.url[:120]}", flush=True)
 
-        if page_needs_otp(page):
+        # TOTP 必须先判: authenticator 页 body 也含 "verification"/"enter the code",
+        # page_needs_otp 会误判成邮箱 OTP → 去 mail.com 空等(邮箱不会来码)。
+        if TOTP_SECRET and page_needs_totp(page):
+            totp_loop(page)
+        elif page_needs_otp(page):
             otp_loop(page, pw)
 
     deadline = time.time() + 60
@@ -679,7 +803,9 @@ def login(page, pw):
             print("  login ok", flush=True)
             shot(page, "03-logged-in")
             return
-        if page_needs_otp(page):
+        if TOTP_SECRET and page_needs_totp(page):
+            totp_loop(page)
+        elif page_needs_otp(page):
             otp_loop(page, pw)
         time.sleep(2)
     raise TimeoutError(f"login did not finish; url={page.url}")

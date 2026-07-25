@@ -39,6 +39,9 @@ for acct in "$@"; do
   pw="$(grep -E '^chatgpt_pw=' "$creds" | head -1 | cut -d= -f2- | sed "s/^'\\(.*\\)'$/\\1/; s/^\"\\(.*\\)\"$/\\1/" || true)"
   mail_pw="$(grep -E '^mail_pw=' "$creds" | head -1 | cut -d= -f2- | sed "s/^'\\(.*\\)'$/\\1/; s/^\"\\(.*\\)\"$/\\1/" || true)"
   [[ -n "$mail_pw" ]] || mail_pw="$pw"
+  # 带 authenticator-app 2FA 的号(飞书表 '2FA密钥' 列 → .creds totp_secret)。
+  # 不透传的话 toggle 脚本在 authenticator 挑战页会去邮箱空等(邮箱不会来码)。
+  totp_secret="$(grep -E '^totp_secret=' "$creds" | head -1 | cut -d= -f2- | sed "s/^'\\(.*\\)'$/\\1/; s/^\"\\(.*\\)\"$/\\1/" || true)"
   if [[ -z "$email" || -z "$pw" ]]; then
     printf "%-9s %-32s %s\n" "$acct" "${email:-?}" "BAD_CREDS_FIELDS"
     continue
@@ -62,6 +65,7 @@ for acct in "$@"; do
       -e "CHATGPT_EMAIL=$email" \
       -e CHATGPT_PW_FILE=/run/chatgpt_pw.txt \
       -e MAIL_PW_FILE=/run/mail_pw.txt \
+      -e "TOTP_SECRET=${totp_secret:-}" \
       -e SCREENSHOT_DIR=/work/screenshots \
       -e "ACTION=${ACTION:-enable-codex-toggle}" \
       -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \

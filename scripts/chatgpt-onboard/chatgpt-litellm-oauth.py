@@ -88,6 +88,128 @@ CODEX_HEADERS = {
     "User-Agent": "codex_cli_rs/0.30.0 (Linux 5.15; x86_64) unknown",
 }
 
+# ── TOTP (authenticator app 2FA) ────────────────────────────────────────────
+# 2026-07-25: acct-124..126 起飞书表带 2FA 密钥(base32 seed, 2fa.fun 同源)。
+# 这些号密码提交后落 authenticator-app 挑战页,没有 "Try with email" 退路,
+# 必须本地算 6 位 TOTP 填进去。无 pyotp 依赖(镜像里没有),用 hmac 自己算。
+TOTP_SECRET = (os.environ.get("TOTP_SECRET") or "").strip().replace(" ", "").upper()
+
+def totp_now(secret=None, t=None):
+    """RFC6238 TOTP-SHA1, 30s window, 6 digits。secret = base32(无 padding 亦可)。"""
+    import hmac, hashlib, struct
+    s = (secret or TOTP_SECRET)
+    if not s:
+        return None
+    s = s.replace(" ", "").upper()
+    s += "=" * ((8 - len(s) % 8) % 8)          # base32 需 8 的倍数 padding
+    key = base64.b32decode(s, casefold=True)
+    ctr = int((t if t is not None else time.time()) // 30)
+    mac = hmac.new(key, struct.pack(">Q", ctr), hashlib.sha1).digest()
+    off = mac[-1] & 0x0F
+    code = (struct.unpack(">I", mac[off:off + 4])[0] & 0x7FFFFFFF) % 1000000
+    return f"{code:06d}"
+
+PUSH_AUTH_BODY = (
+    "approve on your", "we sent a notification", "open the chatgpt app",
+    "上批准", "向你的设备发送通知", "打开 chatgpt 应用", "重新发送提示",
+)
+# 'Try with email' 会本地化(中文 '试试电子邮件'); 只匹配英文会漏点 → push-auth 页干等超时
+TRY_EMAIL_RE = re.compile(
+    r"try with email|use email|试试电子邮件|使用电子邮件|改用电子邮件|电子邮件", re.I)
+
+
+def _is_push_auth(pg):
+    """push-auth("手机批准")挑战页判定。URL 判定不够: 实测密码提交后 URL 可能仍停在
+    /log-in/password, 只有正文变成 "在你的 <设备> 上批准"(acct-122 2026-07-25)。"""
+    try:
+        if "push-auth" in (pg.url or "").lower():
+            return True
+        body = (pg.evaluate("() => document.body.innerText") or "").lower()
+    except Exception:
+        return False
+    return any(k in body for k in PUSH_AUTH_BODY)
+
+
+def _click_try_with_email(pg, label="push-auth"):
+    """点 push-auth 页的 'Try with email' 退回邮箱 OTP(多策略 + 多语言)。
+
+    必须先等页面渲染完: 密码提交后 URL 已经是 push-auth, 但正文/按钮还是空白
+    (acct-122 实证截图全白), 立刻去找按钮必然找不到, 6 轮全落空 → 误判"按钮不存在"。
+    """
+    try:
+        pg.wait_for_load_state("domcontentloaded", timeout=30000)
+    except Exception:
+        pass
+    # 等按钮真正出现(最长 ~30s), 顺带打印页面上的候选按钮文案便于诊断
+    for _w in range(20):
+        try:
+            texts = pg.evaluate(
+                "() => [...document.querySelectorAll(\"button,a,[role='button']\")]"
+                ".map(e => (e.innerText||'').trim()).filter(t => t && t.length < 40)")
+        except Exception:
+            texts = []
+        if texts:
+            if _w == 0 or any(TRY_EMAIL_RE.search(t) for t in texts):
+                print(f"  [{label}] page buttons: {texts[:8]}", flush=True)
+            if any(TRY_EMAIL_RE.search(t) for t in texts):
+                break
+        time.sleep(1.5)
+    for _ in range(6):
+        for how in ("role-button", "role-link", "text", "any"):
+            try:
+                if how == "role-button":
+                    loc = pg.get_by_role("button", name=TRY_EMAIL_RE)
+                elif how == "role-link":
+                    loc = pg.get_by_role("link", name=TRY_EMAIL_RE)
+                elif how == "text":
+                    loc = pg.get_by_text(TRY_EMAIL_RE)
+                else:
+                    loc = pg.locator("button, a, [role='button']").filter(has_text=TRY_EMAIL_RE)
+                if loc.count() > 0 and loc.first.is_visible():
+                    try:
+                        loc.first.click(timeout=4000)
+                    except Exception:
+                        loc.first.click(timeout=4000, force=True)
+                    # 点击后页面是异步切换的: 立刻判定往往还停在 push-auth 正文,
+                    # 会误判成"没点动"(acct-122 实证按钮明明找到了却报 not clickable)。
+                    # 轮询等它离开 push-auth / 出现验证码输入框, 最长 ~24s。
+                    for _c in range(16):
+                        time.sleep(1.5)
+                        if not _is_push_auth(pg):
+                            print(f"  [{label}] fell back to email OTP via {how}"
+                                  f" url={pg.url[:80]}", flush=True)
+                            return True
+                        try:
+                            if pg.locator("input[autocomplete='one-time-code'], "
+                                          "input[inputmode='numeric'], "
+                                          "input[name='code']").count() > 0:
+                                print(f"  [{label}] OTP input appeared via {how}", flush=True)
+                                return True
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        time.sleep(1.5)
+    print(f"  [{label}] 'Try with email' not clickable", flush=True)
+    return False
+
+
+def _is_totp_page(pg):
+    """当前页是否 authenticator-app 挑战(而非邮箱 OTP)。"""
+    try:
+        u = (pg.url or "").lower()
+        if "authenticator" in u or "mfa" in u or "totp" in u:
+            return True
+        body = (pg.evaluate("() => document.body.innerText") or "").lower()
+    except Exception:
+        return False
+    # 邮箱 OTP 页说 "sent to <email>"/"check your email";authenticator 页说 "authenticator app"
+    if any(k in body for k in ("authenticator app", "authentication app", "验证器应用",
+                               "身份验证器", "two-factor authentication code",
+                               "6-digit code from your", "enter the code from your")):
+        return True
+    return False
+
 def ss(page, name):
     path = f"{SS_DIR}/{name}.png"
     try:
@@ -720,6 +842,42 @@ def outlook_get_otp(mail_page, since_ts, max_wait=180):
         time.sleep(8)
     return None, None
 
+def settle_inbox(mail_page, label="otp"):
+    """收件箱 settle 规则(用户 2026-07-20 定的铁律): 等 1min → **刷新** → 再等 1min → 才读码。
+
+    为什么必须刷新: 本次登录触发的验证码邮件是在我们打开收件箱**之后**才到的,
+    不刷新就只能看到打开那一刻的旧列表 → 读到上一次残留的旧码(被判"代码不正确")
+    或者压根看不到新邮件 → 空转重试。
+    旧实现写成 time.sleep(60*2) 一口气睡完, 中间那次刷新从没执行过(2026-07-25 发现)。
+    """
+    secs = 0 if os.environ.get("OTP_FAST") else int(os.environ.get("OTP_SETTLE_SEC", "60"))
+    if not secs:
+        return
+    print(f"  [{label}] settle {secs}s (让本次验证码先到)...", flush=True)
+    time.sleep(secs)
+    # 刷新收件箱: 优先刷 mail frame, 拿不到就整页 reload
+    refreshed = False
+    try:
+        mf = next((fr for fr in mail_page.frames if fr.name == "mail"), None)
+        if mf:
+            mf.evaluate("() => document.location.reload()")
+            refreshed = True
+    except Exception:
+        pass
+    if not refreshed:
+        try:
+            mail_page.reload(wait_until="domcontentloaded", timeout=60000)
+            refreshed = True
+        except Exception as e:
+            print(f"  [{label}] inbox refresh err: {str(e)[:60]}", flush=True)
+    try:
+        mail_page.wait_for_timeout(3000)
+    except Exception:
+        pass
+    print(f"  [{label}] refreshed={refreshed}; settle another {secs}s...", flush=True)
+    time.sleep(secs)
+
+
 def get_otp(mail_page, since_ts, max_wait=180):
     """Find topmost OpenAI/ChatGPT email, click it, extract 6-digit OTP from body.
 
@@ -784,7 +942,12 @@ def get_otp(mail_page, since_ts, max_wait=180):
         # 登录会同时来两封 GPT 邮件: "验证码" + "新登录提醒(New sign-in)"。
         # 提醒那封没有码/排最上会误选。先按主题挑真正的验证码邮件, 排除 sign-in 提醒。
         CODE_SUBJ = re.compile(r"code|verification|登录代码|临时|temporary|验证码", re.I)
-        ALERT_SUBJ = re.compile(r"new sign-?in|new login|新登录|新的登录|sign-?in to your|security", re.I)
+        # 只排除**确定没有验证码**的 sign-in 提醒邮件。
+        # ⚠️ 不要往这里加"套餐/续订/账单"之类: 那些主题的邮件里**也是验证码邮件**
+        # (2026-07-25 用户纠正)。之前误加进排除表, 等于把真验证码邮件筛掉了。
+        # 读不到码的真因是"打开收件箱后没刷新"→ 看的是旧列表, 已由 settle_inbox 修掉。
+        ALERT_SUBJ = re.compile(
+            r"new sign-?in|new login|新登录|新的登录|sign-?in to your|security", re.I)
         def _row_texts():
             out = []
             for i in range(min(cnt, 15)):
@@ -827,10 +990,9 @@ def get_otp(mail_page, since_ts, max_wait=180):
                     print(f"  {action_name} no body frame yet", flush=True)
                 except Exception as e:
                     print(f"  {action_name} err: {e}", flush=True)
-            if opened:
-                clicked = True
-                break
-        if clicked:
+            if not opened:
+                continue
+            clicked = True
             # 等 detail-body-iframe 出现 (mail.com 异步加载邮件正文)
             bf = None
             for _ in range(10):
@@ -842,7 +1004,10 @@ def get_otp(mail_page, since_ts, max_wait=180):
             otp, ctx = extract_otp_from_body()
             if otp:
                 return otp, ctx.strip() if ctx else ""
-            print("  clicked but no OTP in detail-body-iframe, continue", flush=True)
+            # 这封点开了但正文没码(账单/提醒类) → 试**下一个**候选行, 别 break。
+            # 旧版在此 break 出候选循环, 外层重试又从头挑到同一封 → 死循环
+            # (acct-122 实证: 十几轮全卡在 "你的套餐将不会续订" 那封)。
+            print(f"  row[{i}] opened but no OTP in body — try next candidate", flush=True)
         print(f"  OTP not yet (rows={cnt}), retry in 5s...", flush=True)
         time.sleep(5)
         try:
@@ -1119,18 +1284,41 @@ with sync_playwright() as pw:
                     except Exception:
                         pass
 
+            # ── authenticator-app 2FA(飞书表带 2FA 密钥的号): 本地算 TOTP 填入 ──
+            # 必须在邮箱 OTP 分支之前: authenticator 页 body 也含 "verification",
+            # _needs_otp 会误判成邮箱 OTP → 去邮箱空等取不到码。
+            if TOTP_SECRET and _is_totp_page(p_page):
+                print("  [totp] authenticator-app challenge detected (login)", flush=True)
+                for _ta in range(3):
+                    _code = totp_now()
+                    print(f"  [totp] code={_code} (try {_ta+1}/3)", flush=True)
+                    _type_otp(p_page, _code)
+                    ss(p_page, f"p15a3-totp-filled-{_ta}")
+                    _adv = False
+                    for _ in range(5):
+                        time.sleep(1)
+                        if _otp_advanced(p_page):
+                            _adv = True; break
+                    if not _adv:
+                        _submit_form(p_page)
+                        for _ in range(18):
+                            time.sleep(1)
+                            if _otp_advanced(p_page):
+                                _adv = True; break
+                    print(f"  [totp] after fill url={p_page.url[:100]} advanced={_adv}", flush=True)
+                    if _adv:
+                        break
+                    time.sleep(31)   # 换下一个 30s 窗口再试(同码重填必然再拒)
+
             if _needs_otp(p_page):
                 since = int(time.time()) - 600
                 otp_ok = False
-                # settle: let THIS login's OTP land before reading, so we don't grab a
-                # stale code from a prior attempt (mail.com piles up OTP emails →
-                # "代码不正确"). 用户 2026-07-20 要求: 等 1min → 刷新 → 再等 1min。
-                _settle = 0 if os.environ.get("OTP_FAST") else int(os.environ.get("OTP_SETTLE_SEC", "60"))
-                if _settle:
-                    print(f"  [otp] settle {_settle}s x2 before reading login OTP...", flush=True)
-                    time.sleep(_settle * 2)
+                # settle 规则(用户 2026-07-20): 等 1min → 刷新 → 再等 1min → 才读码。
+                # 必须在**打开收件箱之后**做, 否则没有可刷新的列表(见 settle_inbox)。
                 for attempt in range(3):
                     mp = mailcom_login(mail_ctx)
+                    if attempt == 0:
+                        settle_inbox(mp, "otp")
                     otp, _ = get_otp(mp, since)
                     if mp is not None:
                         mp.close()
@@ -1185,13 +1373,10 @@ with sync_playwright() as pw:
             # push-auth(手机批准)会把 phase1.5 卡死在这里干等 40s → chatgpt.com 始终未登录
             # → 后面开 Codex toggle 没有 chatgpt.com 会话可用(acct-112 实证根因)。
             # 与主流程 [4.5] 同样点 'Try with email' 退回邮箱 OTP, 再让 fill_login_and_otp 收尾。
-            if "push-auth-verification" in u:
+            if _is_push_auth(chat_page):
                 print("  [p15-push-auth] detected — clicking 'Try with email'", flush=True)
                 try:
-                    b = chat_page.locator("button:has-text('Try with email'), a:has-text('Try with email')")
-                    if b.count() > 0:
-                        b.first.click(timeout=5000)
-                        time.sleep(4)
+                    if _click_try_with_email(chat_page, "p15-push-auth"):
                         ss(chat_page, "p15a4-after-try-with-email")
                         fill_login_and_otp(chat_page)
                     else:
@@ -1223,10 +1408,8 @@ with sync_playwright() as pw:
                         time.sleep(10)
                         print(f"  [p15-sso] after url={chat_page.url[:100]}", flush=True)
                         # 可能又落到 push-auth / OTP, 交给已有逻辑收尾
-                        if "push-auth-verification" in chat_page.url:
-                            b = chat_page.locator("button:has-text('Try with email'), a:has-text('Try with email')")
-                            if b.count() > 0:
-                                b.first.click(timeout=5000); time.sleep(4)
+                        if _is_push_auth(chat_page):
+                            _click_try_with_email(chat_page, "p15-sso-push-auth")
                         fill_login_and_otp(chat_page)
                         time.sleep(6)
                         chat_page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=GOTO_MS)
@@ -1740,21 +1923,68 @@ with sync_playwright() as pw:
     # flow lands on /push-auth-verification/... with "Approve on your iPhone" +
     # "Try with email" fallback button. We can't approve from a headless browser,
     # so click "Try with email" to fall back to email OTP.
-    if "push-auth-verification" in page.url:
+    if _is_push_auth(page):
         print("[4.5] push-auth detected — clicking 'Try with email' to fall back to email OTP", flush=True)
         try:
-            btn = page.locator("button:has-text('Try with email'), a:has-text('Try with email')")
-            if btn.count() > 0:
-                btn.first.click()
-                time.sleep(4)
+            if _click_try_with_email(page, "4.5-push-auth"):
                 ss(page, "04c-after-try-with-email")
                 print(f"  url after Try-with-email={page.url[:120]}", flush=True)
             else:
                 ss(page, "04c-no-try-with-email-btn")
                 sys.exit("❌ push-auth page but no 'Try with email' button")
+        except SystemExit:
+            raise
         except Exception as e:
             ss(page, "04c-try-with-email-err")
             sys.exit(f"❌ push-auth Try-with-email click failed: {e}")
+
+    # ── 2c.6 authenticator-app 2FA(TOTP)—— 必须在邮箱 OTP 判定之前 ──────
+    # 带 2FA 密钥的号(飞书表 '2FA密钥' 列)密码后落 authenticator 挑战页,
+    # 该页 body 也含 "verification"/"enter the code" → 会被 2d 的 need_otp
+    # 误判成邮箱 OTP,然后去 mail.com 空等(邮箱永远不会来码)。此处先接手。
+    if TOTP_SECRET and _is_totp_page(page):
+        print("[4.6] authenticator-app challenge detected (oauth consent flow)", flush=True)
+
+        def _totp_advanced(pg):
+            try:
+                u = (pg.url or "").lower()
+                return not any(k in u for k in ("authenticator", "mfa", "totp", "verification"))
+            except Exception:
+                return False
+
+        _tok = False
+        for _ta in range(3):
+            _code = totp_now()
+            print(f"  [totp] code={_code} (try {_ta+1}/3)", flush=True)
+            if not _enter_otp_resilient(page, _code, "totp"):
+                ss(page, "04d-no-totp-input")
+                print("  ⚠ no TOTP input located on page", flush=True)
+            ss(page, f"04d-totp-filled-{_ta}")
+            for _ in range(5):
+                time.sleep(1)
+                if _totp_advanced(page):
+                    _tok = True; break
+            if not _tok:
+                try:
+                    _sb = page.locator("button:has-text('Continue'), button:has-text('Verify'), "
+                                       "button[type='submit']")
+                    if _sb.count() > 0 and _sb.first.is_enabled():
+                        _sb.first.click()
+                    else:
+                        page.keyboard.press("Enter")
+                except Exception:
+                    page.keyboard.press("Enter")
+                for _ in range(20):
+                    time.sleep(1)
+                    if _totp_advanced(page):
+                        _tok = True; break
+            print(f"  [totp] after fill url={page.url[:100]} advanced={_tok}", flush=True)
+            if _tok:
+                break
+            time.sleep(31)   # 下一个 30s 窗口(同码重填必被拒)
+        ss(page, "04d-after-totp")
+        if not _tok:
+            sys.exit("❌ TOTP flow failed after 3 windows (still on authenticator challenge)")
 
     # ── 2d. OTP if needed ────────────────────────────────────────────────
     body_text = page.content().lower()
@@ -1837,13 +2067,8 @@ with sync_playwright() as pw:
         since = int(time.time()) - 600
         MANUAL_OTP = os.environ.get("MANUAL_OTP", "").strip()
         otp_ok = False
-        # settle: 等本次 OAuth 触发的 OTP 落地再读 (等 1min → 刷新 → 再等 1min),
-        # 避免堆积旧码被判"代码不正确" (用户 2026-07-20 要求)。
-        if not MANUAL_OTP:
-            _settle5 = 0 if os.environ.get("OTP_FAST") else int(os.environ.get("OTP_SETTLE_SEC", "60"))
-            if _settle5:
-                print(f"  [5][otp] settle {_settle5}s x2 before reading OAuth OTP...", flush=True)
-                time.sleep(_settle5 * 2)
+        # settle 规则(用户 2026-07-20): 等 1min → 刷新 → 再等 1min → 才读码。
+        # 必须在**打开收件箱之后**做(见 settle_inbox), 否则刷不到本次新到的验证码邮件。
         for attempt in range(3):
             if MANUAL_OTP:
                 # 手工注入 OTP(邮箱抓取不可用时);只用一次,失败即止
@@ -1851,6 +2076,8 @@ with sync_playwright() as pw:
                 print(f"  ✅ OTP (manual): {otp}", flush=True)
             else:
                 mail_page = mailcom_login(mail_ctx)
+                if attempt == 0:
+                    settle_inbox(mail_page, "5][otp")
                 otp, ctx_snip = get_otp(mail_page, since)
                 if mail_page is not None:
                     mail_page.close()
@@ -2174,13 +2401,13 @@ with sync_playwright() as pw:
     if "email-verification" in page.url or "verification" in page.content().lower()[:5000]:
         print("  [7] device-grant email-verification detected — fetching OTP...", flush=True)
         try:
-            _settle7 = 0 if os.environ.get("OTP_FAST") else int(os.environ.get("OTP_SETTLE_SEC", "60"))
-            if _settle7:
-                print(f"  [7] settle {_settle7}s x2 before reading device OTP...", flush=True)
-                time.sleep(_settle7 * 2)
+            # settle 规则(用户 2026-07-20): 等 1min → 刷新 → 再等 1min → 才读码。
+            # 必须在**打开收件箱之后**做(见 settle_inbox)。
             since7 = int(time.time()) - 600
             for a7 in range(3):
                 mp7 = mailcom_login(mail_ctx)
+                if a7 == 0:
+                    settle_inbox(mp7, "7")
                 otp7, _ = get_otp(mp7, since7)
                 if mp7 is not None:
                     mp7.close()

@@ -49,7 +49,7 @@ CHATGPT_PW=""
 
 if [[ -f "$CREDS_FILE" ]]; then
     # shellcheck disable=SC1090
-    source <(grep -E '^(email|mail_pw|chatgpt_pw)=' "$CREDS_FILE" | sed 's/^/declare /')
+    source <(grep -E '^(email|mail_pw|chatgpt_pw|totp_secret)=' "$CREDS_FILE" | sed 's/^/declare /')
     MAIL_USER="${email:-}"
     MAIL_PW="${mail_pw:-}"
     CHATGPT_PW="${chatgpt_pw:-}"
@@ -121,6 +121,7 @@ docker run --rm \
   -e "SMS_API_URL=${SMS_API_URL:-}" \
   -e "MAIL_OTP_PROVIDER=${MAIL_OTP_PROVIDER:-mailcom}" \
   -e "MANUAL_OTP=${MANUAL_OTP:-}" \
+  -e "TOTP_SECRET=${TOTP_SECRET:-${totp_secret:-}}" \
   -e "BILLING_INSPECT=${BILLING_INSPECT:-}" \
   -e "BILLING_RENEW=${BILLING_RENEW:-}" \
   -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \

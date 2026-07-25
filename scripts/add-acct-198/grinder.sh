@@ -63,12 +63,19 @@ MAXATT="${GRIND_MAX_ATT:-10}"
 OK=""
 for N in $ACCTS; do
   EMAIL=$(email_for "$N"); GPW=$(gptpw_for "$N"); MPW=$(mailpw_for "$N"); GOT=0
+  TSEC=$(csv_field "$N" 5)   # 第5列=飞书表「2FA密钥」(base32), 无则空
   [ -n "$EMAIL" ] || { echo "!!!! acct-$N no creds in $CREDS_CSV, skip"; continue; }
   # 单引号包裹: 密码含 & $ % # ! * 等 shell 元字符, re-oauth.sh 用 `source <(... declare)` 读取,
   # 不引号会把 & 当后台符、$x 当变量展开 → 密码被撕碎 (见 feedback_creds_single_quote_dollar)。
   # 值本身若含单引号需转义, 目前批次无单引号密码。
-  printf "email='%s'\nmail_pw='%s'\nchatgpt_pw='%s'\n" "$EMAIL" "$MPW" "$GPW" > /tmp/creds-$N.txt
-  for t in 1 2 3 4 5; do cat /tmp/creds-$N.txt | jms ssh JSZX-AI-03 "mkdir -p /Data/chatgpt-auth/acct-$N && cat > /Data/chatgpt-auth/acct-$N/.creds && chmod 600 /Data/chatgpt-auth/acct-$N/.creds && wc -l /Data/chatgpt-auth/acct-$N/.creds" 2>&1 | grep -q "3 " && break; sleep 3; done
+  # totp_secret: 带 2FA 的号密码后落 /mfa-challenge, 邮箱永不来码, 必须本地算 TOTP。
+  # 不写这行 → 该号必卡在 authenticator 页 (见 feedback_chatgpt_onboard_totp_2fa_support)。
+  {
+    printf "email='%s'\nmail_pw='%s'\nchatgpt_pw='%s'\n" "$EMAIL" "$MPW" "$GPW"
+    [ -n "$TSEC" ] && printf "totp_secret='%s'\n" "$TSEC"
+  } > /tmp/creds-$N.txt
+  CLINES=$(grep -c . /tmp/creds-$N.txt)
+  for t in 1 2 3 4 5; do cat /tmp/creds-$N.txt | jms ssh JSZX-AI-03 "mkdir -p /Data/chatgpt-auth/acct-$N && cat > /Data/chatgpt-auth/acct-$N/.creds && chmod 600 /Data/chatgpt-auth/acct-$N/.creds && grep -c . /Data/chatgpt-auth/acct-$N/.creds" 2>&1 | grep -q "^$CLINES$" && break; sleep 3; done
   # 确保 deployment 存在(以 acct-86 为模板)。apply 走 japply(重试+presence 校验),
   # 建不成就 skip 该号防"半接入"(router 有 entry 但无 pod)。
   if ! jr "kubectl -n $NS get deploy chatgpt-acct-$N -o jsonpath='{.metadata.name}' 2>/dev/null" | grep -q "^chatgpt-acct-$N$"; then
@@ -77,7 +84,15 @@ for N in $ACCTS; do
   fi
 
   TOGGLE_TRIED=0
+  # 已有有效 token(例如由官方 codex CLI device-auth 拿到, 人工绑定过 toggle)时
+  # 跳过 OAuth 直接 finalize, 否则重跑 OAuth 会把好 token 覆盖掉。
+  PRE=$(j8 "python3 -c 'import json;print(1 if len(json.load(open(\"/tmp/auth-acct-$N.json\")).get(\"access_token\",\"\"))>1000 else 0)' 2>/dev/null" | tr -dc 0-9)
+  if [ "${PRE:-0}" = "1" ]; then
+    echo "  ✓ acct-$N 已有有效 token (access_len>1000) → 跳过 OAuth, 直接 finalize"
+    GOT=1
+  fi
   for att in $(seq 1 "$MAXATT"); do
+    [ "$GOT" = "1" ] && break
     PX=$(egress_for $att); LBL=$([ -n "$PX" ] && echo "$PX" || echo "188-JP")
     echo "===== acct-$N attempt $att egress=$LBL $(date +%H:%M:%S) ====="
     j8 'docker ps --filter ancestor='"$IMAGE"' -q | xargs -r docker kill >/dev/null 2>&1'
@@ -116,7 +131,8 @@ docker run --rm -v /tmp/chatgpt-enable-codex-toggle.py:/work/script.py:ro \
   -v \$sd/p.txt:/run/chatgpt_pw.txt:ro -v \$sd/m.txt:/run/mail_pw.txt:ro -v \$sd:/work/screenshots \
   -e CHATGPT_EMAIL=\$em -e CHATGPT_PW_FILE=/run/chatgpt_pw.txt -e MAIL_PW_FILE=/run/mail_pw.txt \
   -e SCREENSHOT_DIR=/work/screenshots -e ACTION=enable-codex-toggle -e MAIL_OTP_PROVIDER=mailcom \
-  -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright -e OAUTH_PROXY=$TGPX -e DISPLAY=:99 $IMAGE \
+  -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright -e OAUTH_PROXY=$TGPX -e DISPLAY=:99 \
+  -e TOTP_SECRET='$TSEC' $IMAGE \
   bash -c 'Xvfb :99 -screen 0 1440x1000x24 >/dev/null 2>&1 & sleep 1 && pip install patchright==1.60.0 -q --root-user-action=ignore >/dev/null 2>&1 && python3 /work/script.py' 2>&1 | grep -E 'RESULT|ENABLED|FAILED|aria-checked=true'
 rm -rf \$sd")
           echo "$TGOUT" | sed 's/^/    tgl> /'

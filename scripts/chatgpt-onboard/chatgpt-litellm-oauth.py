@@ -2228,6 +2228,18 @@ with sync_playwright() as pw:
         # consent button is "Continue" (dark button)
         consent_btn = page.locator("button:has-text('Continue'), button:has-text('Allow'), button:has-text('Authorize')")
 
+        # Continue 是异步变可点的(React 渲染完才 enable)。立刻判 is_enabled() 往往为 False,
+        # 旧逻辑直接 sys.exit("not toggle-related") → 明明 toggle 已开、TOTP 已过, 仍整轮报废
+        # (acct-127/129 实证 2026-07-25: consent 正文已无 toggle 提示, 纯粹是判太早)。
+        # 先轮询等它变 enabled(~30s), 真等不到才走下面的 disabled 分支。
+        for _cw in range(20):
+            try:
+                if consent_btn.count() > 0 and consent_btn.first.is_enabled():
+                    break
+            except Exception:
+                pass
+            time.sleep(1.5)
+
         if consent_btn.count() > 0 and not consent_btn.first.is_enabled():
             ss(page, "07a-consent-disabled")
             txt = ""
@@ -2258,7 +2270,19 @@ with sync_playwright() as pw:
                 else:
                     sys.exit("❌ consent disabled and in-session toggle enable failed")
             else:
-                sys.exit("❌ consent Continue disabled (not toggle-related); not clicking Security/MFA switches")
+                # 非 toggle 原因的 disabled: 多为渲染/风控抖动。仍尝试强点一次再校验,
+                # 不要直接判死这一轮(grinder 会换出口重试, 但白等一整轮很贵)。
+                print("  [5b] Continue 仍 disabled(非 toggle 原因) — 尝试强点", flush=True)
+                try:
+                    consent_btn.first.click(timeout=5000, force=True)
+                    time.sleep(6)
+                    print(f"  [5b] after force-click url={page.url[:100]}", flush=True)
+                except Exception as e:
+                    print(f"  [5b] force-click err: {str(e)[:80]}", flush=True)
+                if "/consent" in page.url:
+                    ss(page, "07a-consent-still-disabled")
+                    sys.exit("❌ consent Continue disabled (not toggle-related); "
+                             "not clicking Security/MFA switches")
 
         if consent_btn.count() > 0:
             consent_btn.first.click()

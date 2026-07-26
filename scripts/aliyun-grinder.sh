@@ -48,6 +48,18 @@ egress_for(){ case $(( $1 % 3 )) in 1) echo 'socks5://10.68.13.236:17890';; 2) e
 # ── pre-check ──────────────────────────────────────────────────────────────
 echo "==[pre-check]=="
 kubectl get ns "$NS" >/dev/null 2>&1 || { echo "FATAL: kubectl 没连通阿里云 ACK"; exit 1; }
+# 188 只在**真要用它跑 OAuth** 时才检查/同步。走阿里云 EIP 路径(SKIP_OAUTH=1 +
+# 本机已有 auth.json)时 188 完全不参与, 不该因它磁盘满/掉线就 FATAL 退出。
+NEED_188=1
+if [ "$SKIP_OAUTH" = "1" ]; then
+  NEED_188=0
+  for N in ${GRIND_ACCTS:-}; do
+    [ -s "/tmp/auth-acct-$N.json" ] || NEED_188=1
+  done
+fi
+if [ "$NEED_188" = "0" ]; then
+  echo "  ✓ 走 EIP 路径(本机 auth.json 齐备), 跳过 188 检查"
+else
 DATA_USE=$(s8 'df --output=pcent /Data | tail -1' | tr -dc 0-9)
 echo "  188 /Data ${DATA_USE}%"
 [ "${DATA_USE:-100}" -ge 95 ] && { echo "FATAL: 188 /Data ${DATA_USE}% ≥95% — 先 docker image prune -f"; exit 1; }
@@ -59,6 +71,7 @@ for f in chatgpt-litellm-oauth.py chatgpt-enable-codex-toggle.py; do
 done
 cat scripts/chatgpt-onboard/re-oauth.sh | ssh -o ConnectTimeout=20 "$SSH_188" "cat > /Data/chatgpt-auth/re-oauth.sh && chmod +x /Data/chatgpt-auth/re-oauth.sh" 2>/dev/null
 echo "  ✓ 脚本已同步到 188"
+fi
 
 ACCTS="${GRIND_ACCTS:-$(awk -F, '/^[0-9]/{print $1}' "$CREDS_CSV" | tr '\n' ' ')}"
 OK=""
@@ -217,8 +230,16 @@ PY
     echo "  ✓ deploy 已存在"
   fi
 
-  # ── D. auth.json 落 PVC (188 → 本机 → kubectl cp), 空壳兜底校验 ────────
-  s8 "cat /tmp/auth-acct-$N.json" > /tmp/auth-acct-$N.json
+  # ── D. auth.json 落 PVC, 空壳兜底校验 ──────────────────────────────────
+  # 来源二选一:
+  #   走阿里云 EIP 路径(首选): auth.json 已由 aliyun-eip-onboard.sh 取回到本机
+  #     /tmp/auth-acct-N.json → 直接用, 不去 188 拉(188 上根本没有这文件)。
+  #   走 188 路径(fallback): 从 188 /tmp 拉回。
+  if [ -s "/tmp/auth-acct-$N.json" ] && python3 -c "import json,sys;sys.exit(0 if len(json.load(open('/tmp/auth-acct-$N.json')).get('access_token',''))>1000 else 1)" 2>/dev/null; then
+    echo "  ✓ acct-$N 用本机已有 auth.json (EIP 路径)"
+  else
+    s8 "cat /tmp/auth-acct-$N.json" > /tmp/auth-acct-$N.json
+  fi
   python3 -c "import json,sys; d=json.load(open('/tmp/auth-acct-$N.json')); sys.exit(0 if len(d.get('access_token',''))>1000 else 1)" \
     || { echo "!!!! acct-$N 本机 auth.json 无效 — skip"; continue; }
 

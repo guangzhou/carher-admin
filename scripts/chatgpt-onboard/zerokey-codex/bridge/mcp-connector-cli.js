@@ -173,6 +173,39 @@ async function register(h, opts) {
   return c.id || null;
 }
 
+/**
+ * 建 link —— 注册之后**必须**做这一步,否则模型在会话里看不到工具。
+ * 只 register 会得到 200,但对话里 recipient 永远只有 "all"(实测踩过)。
+ * 模型最终调用的 path 形如:
+ *   /<connector_name>/<link_id>/<action_name>
+ */
+async function link(h, id, opts) {
+  if (!id) die('link 需要 <connector_id>');
+
+  let names = (opts.actions || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!names.length) {
+    log('未指定 --actions,自动读取全部 action...');
+    const list = await actions(h, id);
+    names = list.filter(a => a.is_enabled !== false).map(a => a.name);
+    if (!names.length) return null;
+  }
+
+  const r = await call(h, 'POST', '/backend-api/aip/connectors/links/noauth', {
+    connector_id: id,
+    name: opts.name || 'link',
+    action_names: names,
+  });
+  log(explain(r));
+
+  if (r.plane !== 'OK') {
+    if (r.plane === 'SCHEMA') log('schema 报错: ' + JSON.stringify(r.json && r.json.detail));
+    return null;
+  }
+  const j = r.json || {};
+  log(`已建 link id=${j.id}  auth=${j.auth_type}  actions=[${(j.actions || []).join(', ')}]`);
+  return j.id || null;
+}
+
 async function actions(h, id) {
   if (!id) die('actions 需要 <connector_id>');
   const r = await call(h, 'GET', `/backend-api/aip/connectors/${encodeURIComponent(id)}/actions`);
@@ -197,31 +230,35 @@ async function del(h, id) {
   return r.plane === 'OK';
 }
 
-/** 端到端自检:注册 → 读 schema → 删除。用公开 MCP server,不动生产。 */
+/** 端到端自检:注册 → 读 schema → 建 link → 删除。用公开 MCP server,不动生产。 */
 async function probe(h) {
   const URL = 'https://mcp.deepwiki.com/mcp';
   log('=== MCP connector 通路自检 ===');
 
-  log('\n[1/4] developer mode');
+  log('\n[1/5] developer mode');
   if (!(await devmodeStatus(h))) {
     log('  → 尝试开启');
     if (!(await devmodeEnable(h))) return fail('无法开启 developer mode');
     if (!(await devmodeStatus(h))) return fail('开启后仍未生效');
   }
 
-  log(`\n[2/4] 注册探针 ${URL}`);
+  log(`\n[2/5] 注册探针 ${URL}`);
   const id = await register(h, { url: URL, name: 'probe_mcp', description: 'probe' });
   if (!id) return fail('注册失败');
 
   let ok = false;
   try {
-    log('\n[3/4] 读取 action schema');
+    log('\n[3/5] 读取 action schema');
     const list = await actions(h, id);
-    ok = list.length > 0;
-    if (!ok) log('  ⚠ 注册成功但没抓到 action');
+    if (!list.length) { log('  ⚠ 注册成功但没抓到 action'); return false; }
+
+    log('\n[4/5] 建 link(缺这步模型在会话里看不到工具)');
+    const linkId = await link(h, id, { name: 'probe_link' });
+    ok = !!linkId;
+    if (ok) log(`  会话内调用路径: /probe_mcp/${linkId}/${list[0].name}`);
   } finally {
     // 无论成败都清理,别在账号上留垃圾
-    log('\n[4/4] 清理探针');
+    log('\n[5/5] 清理探针');
     const gone = await del(h, id);
     if (!gone) log(`  ⚠ 删除失败,请手动清理: ${id}`);
   }
@@ -244,8 +281,10 @@ const HELP = `mcp-connector-cli.js — ChatGPT 网页版 MCP connector 管理
   devmode-enable              开启 developer mode(注册的前置条件)
   register --url U [--name N] 注册远程 MCP server
   actions <connector_id>      列出 OpenAI 抓到的 action schema
+  link <connector_id>         建 link(注册后必做,否则会话里看不到工具)
+                              [--actions a,b,c] 默认全部 [--name N]
   delete <connector_id>       删除 connector
-  probe                       端到端自检(注册→读schema→删除,自动清理)
+  probe                       端到端自检(注册→schema→link→删除,自动清理)
 
 选项:
   --session <sess.json>       必需。ChatGPT 会话头 bundle
@@ -288,6 +327,7 @@ async function main() {
     case 'devmode-enable': return (await devmodeEnable(h)) ? 0 : 1;
     case 'register':       return (await register(h, opts)) ? 0 : 1;
     case 'actions':        return (await actions(h, pos[1])).length ? 0 : 1;
+    case 'link':           return (await link(h, pos[1], opts)) ? 0 : 1;
     case 'delete':         return (await del(h, pos[1])) ? 0 : 1;
     case 'probe':          return (await probe(h)) ? 0 : 1;
     default: die(`未知命令: ${cmd}。用 --help 看用法。`);

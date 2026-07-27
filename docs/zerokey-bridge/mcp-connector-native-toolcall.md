@@ -113,7 +113,48 @@ GET /backend-api/aip/connectors/{id}/actions
 **这是 OpenAI 服务端主动去 MCP server 拉的真实 JSON Schema。**
 不是提示词,不是我们伪造的 —— 是协议级的工具定义。
 
-探针 connector 已 `DELETE` 清理(200)。
+### 2.5 建 link ← **必做,漏了会静默失败**
+
+只 register 会拿到 200,但**模型在会话里看不到这个工具**,
+`recipient` 永远只有 `"all"`。我第一次就踩了这个坑,差点误判成"注册无效"。
+
+```
+POST /backend-api/aip/connectors/links/noauth
+{ "connector_id":"asdk_app_...", "name":"deepwiki_link",
+  "action_names":["ask_question","read_wiki_contents","read_wiki_structure"] }
+→ 200 {"id":"link_6a677e7f...","auth_type":"NONE","actions":[...]}
+```
+
+### 2.6 会话内真实调用(已验证)
+
+建完 link 后同一个提问,SSE 里出现:
+
+```
+"recipient": "api_tool.call_tool"     ← 原生工具调用
+```
+
+模型发出的调用体:
+
+```json
+{"path":"/deepwiki_probe/link_6a677e7f29b88191a6acb9f7256dd1df/read_wiki_structure",
+ "args":{"repoName":"openai/openai-python"}}
+```
+
+`api_tool` 返回的**真实 MCP 数据**(`role:"tool"`, `content_type:"code"`):
+
+```
+{"result":"Available pages for openai/openai-python:\n\n- 1 Overview\n
+  - 1.1 Architecture Overview\n  - 1.2 Project Configuration...
+```
+
+**调用路径格式:`/<connector_name>/<link_id>/<action_name>`,
+参数是 JSON Schema 校验过的结构化 `args`。**
+
+这是完整闭环:我们注册的 server → OpenAI 抓 schema → 模型协议级调用 →
+真实数据返回。没有一个环节靠提示词。
+
+探针 connector 已 `DELETE` 清理(200,复查 `actions` 返回
+`"Connector not found"` 确认已消失)。
 
 ## 3. 这为什么是本质突破
 
@@ -144,8 +185,9 @@ lark-cli 背后是飞书开放 API —— **本来就是公网线上服务**,满
 
 ## 5. 尚未验证(不要当成已完成)
 
-- [ ] 注册后模型在会话里**实际调用** action 的完整 SSE(只验证了 schema 抓取)
-- [ ] 需不需要用户交互式授权(`is_consequential: true` 可能触发确认)
+- [x] ~~注册后模型在会话里实际调用~~ → **已验证**,见 §2.6
+- [x] ~~`is_consequential: true` 是否需交互授权~~ → **不需要**,
+      三个 action 全是 `is_consequential: true`,仍直接调用成功(无授权弹窗)
 - [ ] `developer_mode` 是否随 session 刷新失效;47 个 pod 账号要逐个开
 - [ ] 自建 lark MCP server 尚未实现
 - [ ] connector 是账号级 —— 与"每账号一进程"的池模型如何配合

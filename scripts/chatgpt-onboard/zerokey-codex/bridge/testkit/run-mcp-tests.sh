@@ -30,7 +30,7 @@ if node "$HERE/test-provision-rollback.js" >/tmp/_r.out 2>&1; then
 else
   echo "FAIL  test-provision-rollback.js"; tail -3 /tmp/_r.out; RC=1
 fi
-for t in test_decay.py test_fanout.py test_struct_stats.py; do
+for t in test_decay.py test_fanout.py test_struct_stats.py test_nudge.py; do
   if python3 "$HERE/$t" >/tmp/_t.out 2>&1; then
     echo "PASS  $t  $(tail -1 /tmp/_t.out)"
   else

@@ -1593,8 +1593,45 @@ def call_zerokey(messages, want_tools=True, max_rounds=2, on_delta=None,
         # abandoned future keeps the interpreter (and pod shutdown) waiting. We
         # bound each urlopen by the remaining deadline instead, so workers can
         # only outlive us briefly.
+        # On a structural retry, tell the model it forgot the tool instead of
+        # re-sending a byte-identical prompt to a different pod.
+        #
+        # Why this matters: the retry used to change ONLY the pod. `messages` is
+        # built once by the caller and never mutated, so the model saw the exact
+        # same input and had no reason to behave differently -- which is why
+        # production measured a rescue rate of at most 8.4% (83 fired, 76 still
+        # text). Cline solves the same stall by feeding the model an explicit
+        # error turn (apps/vscode/src/core/prompts/responses.ts:33 `noToolsUsed`:
+        # "[ERROR] You did not use a tool in your previous response!"), which is a
+        # signal change rather than a dice re-roll.
+        #
+        # Kept as an appended user turn (not a system edit) so the caller's
+        # instructions and prompt-cache prefix stay byte-identical.
+        #
+        # HONEST STATUS: the BENEFIT IS NOT YET MEASURED. I tried to A/B it by
+        # synthesising a mid-task stall (history ending in a tool result plus a
+        # "you would run: ..." narration) and both arms produced a tool call
+        # 9/9 -- the fixture could not reproduce the stall, so it could not
+        # discriminate. What justifies shipping it anyway is that it is
+        # cost-neutral: it does not add an upstream call, it only changes the
+        # input of a retry that was already going to happen. Read
+        # /health -> structural_retry.rescue_rate after this is deployed to get
+        # the real number, and compare against the pre-change bound of <=8.4%.
+        round_messages = messages
+        if struct_retries:
+            round_messages = messages + [{
+                "role": "user",
+                "content": (
+                    "[ERROR] You did not use a tool in your previous response. "
+                    "The task is not finished. Continue by calling the "
+                    "appropriate tool now. Do not describe what you would do -- "
+                    "issue the tool call. (Automated message; do not reply to it "
+                    "conversationally.)"
+                ),
+            }]
+
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(batch)))
-        futs = {ex.submit(_call_one, b, messages, deadline,
+        futs = {ex.submit(_call_one, b, round_messages, deadline,
                           speaker.for_pod(b) if speaker else None,
                           want_tools, model): b
                 for b in batch}

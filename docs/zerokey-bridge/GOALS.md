@@ -111,6 +111,27 @@
 下次调 `BRIDGE_STRUCT_RETRIES` 必须读这个归因数,不能用上界拍。
 这是"先量化再动手"而不是"看着像浪费就砍掉"。
 
+### 8.4% 的根因:重试只换 pod,不换信号
+
+读代码发现:`messages` 由调用方构造一次,循环内**从不修改**。
+所以结构重试对模型来说是**一字不差的同一个输入**,只是换了个账号 ——
+模型没有任何理由改变行为。这解释了为什么救回率这么低。
+
+Cline 对同一个问题的做法(`apps/vscode/src/core/prompts/responses.ts:33`
+`noToolsUsed`)是**喂一条显式错误轮**:
+
+> `[ERROR] You did not use a tool in your previous response! Please retry with a tool use.`
+> ... (This is an automated message, so do not respond to it conversationally.)
+
+即**改变信号**,而不是**再摇一次骰子**。已照此实现(追加 user 轮,
+不动 instructions,保持 prompt cache 前缀不变)。
+
+**收益尚未实证。** 我试过合成 mid-task stall 做 A/B,两组都 9/9 出命令 ——
+fixture 复现不出 stall,无法区分。上线它的理由是**零成本**:
+不增加调用次数,只改变一次本来就要发生的重试的输入。
+真实数字要看部署后的 `/health -> structural_retry.rescue_rate`,
+与改动前的上界 ≤8.4% 对比。
+
 ## 验收脚本(每轮改动后必跑)
 
 ```bash

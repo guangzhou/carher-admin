@@ -142,8 +142,10 @@ async function main() {
   log(`首页 ${html.length} 字节`);
 
   log('爬 bundle(首次较慢,之后走缓存)...');
-  await crawl(html, opts.cache, parseInt(opts.rounds, 10) || 2,
-              h['user-agent'] || 'Mozilla/5.0');
+  // 夹到 [1,4]:负数/NaN 会让爬取一轮不跑然后在空缓存上 die,
+  // 过大只是白下载(第 3 轮之后基本没有新 chunk)。
+  const rounds = Math.min(4, Math.max(1, parseInt(opts.rounds, 10) || 2));
+  await crawl(html, opts.cache, rounds, h['user-agent'] || 'Mozilla/5.0');
 
   const n = scan(opts.cache, opts);
   return n > 0 ? 0 : 1;

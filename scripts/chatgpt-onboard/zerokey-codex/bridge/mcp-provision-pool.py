@@ -16,16 +16,16 @@ pod 账号必须各自 register + link 一次。手工做不现实,也容易漏�
   # 3. 全量
   ./mcp-provision-pool.py --url ... --name lark --apply
 
-  # 4. 查现状 / 清理
+  # 4. 查现状
   ./mcp-provision-pool.py --list
-  ./mcp-provision-pool.py --name lark --delete --apply
 
 设计取舍:
   - session bundle 从每个 pod 的 users.json 现取,不缓存 —— 凭据会轮转
   - 串行执行。47 个账号并发注册会同时打 OpenAI,且失败难归因;
     每个约 3 次 HTTP,串行总耗时可接受
-  - 幂等性:register 会创建**新** connector 而非复用。所以先查 --list,
-    已有同名的默认跳过(除非 --force)
+  - **不幂等**:register 每次都会创建**新** connector,不会复用同名的。
+    重复跑会在账号上堆积 connector,需先用 CLI delete 清理。
+    (要做到幂等需要 list-by-account 接口,当前 API 未找到)
 """
 
 import argparse
@@ -56,10 +56,12 @@ def sh(cmd, timeout=180):
 def kube(inner, timeout=180):
     """Run a kubectl command on 198 via the jms hop."""
     jms = os.path.join(REPO, "scripts", "jms")
-    return sh("%s ssh %s %s" % (jms, JMS, json_quote(inner)), timeout=timeout)
+    return sh("%s ssh %s %s" % (jms, JMS, shq(inner)), timeout=timeout)
 
 
-def json_quote(s):
+def shq(s):
+    """POSIX shell single-quote. NOT json -- the old name `json_quote` was
+    misleading; this does shell quoting and is used for shell interpolation."""
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
 
@@ -121,7 +123,7 @@ def run_cli(headers, args, timeout=240):
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as fh:
             json.dump({"headers": headers}, fh)
-        return sh("node %s --session %s %s" % (json_quote(CLI), json_quote(path), args),
+        return sh("node %s --session %s %s" % (shq(CLI), shq(path), args),
                   timeout=timeout)
     finally:
         try:
@@ -144,19 +146,16 @@ def main():
     ap.add_argument("--apply", action="store_true",
                     help="真的执行。不给就是 dry-run")
     ap.add_argument("--list", action="store_true", help="只列 pod/账号,不动任何东西")
-    ap.add_argument("--delete", action="store_true", help="按 --name 删除 connector")
-    ap.add_argument("--force", action="store_true",
-                    help="即使已存在同名 connector 也重新注册")
     a = ap.parse_args()
 
-    if not a.list and not a.delete and not a.url:
-        die("register 需要 --url(或用 --list / --delete)")
+    if not a.list and not a.url:
+        die("register 需要 --url(或用 --list 只看现状)")
 
     pods = list_pods(a.only)
     if not pods:
         die("没有匹配的 pod(ns=%s)" % NS)
 
-    mode = "LIST" if a.list else ("DELETE" if a.delete else "PROVISION")
+    mode = "LIST" if a.list else "PROVISION"
     print("=== %s | ns=%s | %d 个 pod | %s ===" %
           (mode, NS, len(pods), "APPLY(会真写)" if a.apply else "DRY-RUN(不写)"))
     if a.url:
@@ -184,15 +183,8 @@ def main():
                 ok += 1
                 continue
 
-            if a.delete:
-                # 需要先知道 connector id;当前 CLI 无 list 接口,故明确报未实现,
-                # 而不是假装成功。
-                print("  N/A   %-40s --delete 需要 connector id,请用 CLI 单独删" % tag)
-                skip += 1
-                continue
-
             rc, out = run_cli(hdrs, "provision --url %s --name %s"
-                              % (json_quote(a.url), json_quote(a.name)))
+                              % (shq(a.url), shq(a.name)))
             if rc == 0 and "完成:" in out:
                 cid = ""
                 for line in out.splitlines():

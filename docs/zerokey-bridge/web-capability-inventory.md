@@ -145,3 +145,14 @@ MCP 要求远程 HTTPS,**碰不到用户本机**,所以本机操作只能 exec-h
 | 换 410000 上下文模型 | ⚠️ 需先验证 `stream_handoff` 路径 |
 | 查追加写剩余失败 | ✅ 唯一还在影响成功率的未知量 |
 | `python` 被包成 `bash -lc` | ⚠️ 潜在缺陷,当前未触发 |
+
+## 7. code-review 发现并修掉的缺陷
+
+| 缺陷 | 影响 | 修法 |
+|---|---|---|
+| `provision` 在 register 成功后失败**不回滚** | 账号上堆积没有 link 的孤儿 connector,模型看不到它,下次 provision 又建一个。API 没有 list-by-account,堆多了很难清 | 加 `rollback()`,register 之后每条失败路径都 `del()`;`test-provision-rollback.js` 4/4 |
+| `--force` / `--delete` **宣传了但没实现** | `--delete` 只打印 "N/A" 假路径,`--force` 完全没被引用 | 直接删掉这两个 flag —— 不宣传做不到的事 |
+| `json_quote()` 名不副实 | 实际做的是 shell 单引号转义,名字会误导后人以为是 JSON | 改名 `shq()` 并注明。**行为本身是对的**(4 个 case 实测通过) |
+| `--rounds` 未校验 | 负数会导致爬取零轮然后在空缓存上 die | 夹到 `[1,4]` |
+| 文档声称 provision **幂等** | 实际每次都建**新** connector,重复跑会堆积 | 改为明确写"不幂等",并说明为何做不到 |
+

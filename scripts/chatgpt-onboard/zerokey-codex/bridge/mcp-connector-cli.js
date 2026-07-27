@@ -251,11 +251,20 @@ async function provision(h, opts) {
   const id = await register(h, opts);
   if (!id) return fail('注册失败');
 
+  // register 成功后的每条失败路径都必须回滚 —— 否则账号上留下一个没有 link 的
+  // 孤儿 connector,模型看不到它,而下次 provision 又会再建一个,越堆越多。
+  // (API 没有 list-by-account,堆积后很难清理。)
+  const rollback = async (why) => {
+    log(`${why} —— 回滚刚创建的 connector ${id}`);
+    if (!(await del(h, id))) log(`  ⚠ 回滚失败,请手动删除: ${id}`);
+    return fail(why);
+  };
+
   const list = await actions(h, id);
-  if (!list.length) { log('⚠ 没抓到 action,不建 link'); return fail('无 action'); }
+  if (!list.length) return rollback('没抓到 action');
 
   const linkId = await link(h, id, { name: `${name}_link`, actions: opts.actions });
-  if (!linkId) return fail('建 link 失败');
+  if (!linkId) return rollback('建 link 失败');
 
   log(`\n完成: connector=${id}  link=${linkId}`);
   log(`会话内调用路径: /${name}/${linkId}/<action_name>`);

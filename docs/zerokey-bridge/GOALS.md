@@ -60,6 +60,31 @@
 → **所以 G2b 的解法必须是"提高单次成功率",不是"多试几次"。**
 这正好排除了 fanout/重试类方案,指向结构化方案(哨兵 / completion-as-tool)。
 
+### ⭐ G2b 的结构性解法已找到(2026-07-27)
+
+**网页版有协议级原生 tool call** —— 注册 MCP connector,不必靠提示词诱导。
+已实测跑通:开 developer mode → `POST /aip/connectors/mcp` → OpenAI 服务端
+主动抓到真实 JSON Schema。
+
+这直接消除 G2b 的根因:
+
+| | exec-harvest(现状) | MCP connector |
+|---|---|---|
+| 工具怎么来 | 提示词诱导 | 服务端注册,协议级 |
+| 工具名 | 服务端固定 | **我们定义** |
+| 参数 | 从命令文本 harvest | **JSON Schema 强校验** |
+| 多轮 | 靠 `_looks_like_refusal()` 正则猜 | 协议自带 |
+
+且**不违反 G3/G4 红线** —— 它提高的是单次成功率,不增加重试。
+
+边界:MCP 要求远程 HTTPS,不支持本地 stdio。飞书 API 满足;
+"在用户本机跑 shell"不满足,那部分仍需 exec-harvest。两者各管一段。
+
+- 文档: `mcp-connector-native-toolcall.md`
+- 工具: `scripts/chatgpt-onboard/zerokey-codex/bridge/mcp-connector-cli.js`
+- skill: `~/.claude/skills/chatgpt-web-mcp-connector/SKILL.md`
+- 未验证: 会话内实际调用的 SSE、是否需交互授权、47 账号逐个开、lark MCP server 未实现
+
 ---
 
 ## 验收脚本(每轮改动后必跑)

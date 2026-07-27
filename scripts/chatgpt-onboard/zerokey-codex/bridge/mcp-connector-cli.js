@@ -234,6 +234,34 @@ async function del(h, id) {
   return r.plane === 'OK';
 }
 
+/**
+ * 一条命令完成单账号全流程:devmode → register → link。
+ * connector 是账号级(owners: USER),所以 47 个账号要各跑一次 —— 这是批量入口。
+ * 幂等性说明:重复跑会创建**新的** connector,不会复用。要重跑先 delete。
+ */
+async function provision(h, opts) {
+  if (!opts.url) die('provision 需要 --url https://<host>/mcp');
+  const name = opts.name || 'connector';
+
+  if (!(await devmodeStatus(h))) {
+    log('  → 开启 developer mode');
+    if (!(await devmodeEnable(h))) return fail('无法开启 developer mode');
+  }
+
+  const id = await register(h, opts);
+  if (!id) return fail('注册失败');
+
+  const list = await actions(h, id);
+  if (!list.length) { log('⚠ 没抓到 action,不建 link'); return fail('无 action'); }
+
+  const linkId = await link(h, id, { name: `${name}_link`, actions: opts.actions });
+  if (!linkId) return fail('建 link 失败');
+
+  log(`\n完成: connector=${id}  link=${linkId}`);
+  log(`会话内调用路径: /${name}/${linkId}/<action_name>`);
+  return true;
+}
+
 /** 端到端自检:注册 → 读 schema → 建 link → 删除。用公开 MCP server,不动生产。 */
 async function probe(h) {
   const URL = 'https://mcp.deepwiki.com/mcp';
@@ -288,6 +316,8 @@ const HELP = `mcp-connector-cli.js — ChatGPT 网页版 MCP connector 管理
   link <connector_id>         建 link(注册后必做,否则会话里看不到工具)
                               [--actions a,b,c] 默认全部 [--name N]
   delete <connector_id>       删除 connector
+  provision --url U --name N  单账号全流程(devmode→register→link)
+                              connector 是账号级,47 个账号需各跑一次
   probe                       端到端自检(注册→schema→link→删除,自动清理)
 
 选项:
@@ -333,6 +363,7 @@ async function main() {
     case 'actions':        return (await actions(h, pos[1])).length ? 0 : 1;
     case 'link':           return (await link(h, pos[1], opts)) ? 0 : 1;
     case 'delete':         return (await del(h, pos[1])) ? 0 : 1;
+    case 'provision':      return (await provision(h, opts)) ? 0 : 1;
     case 'probe':          return (await probe(h)) ? 0 : 1;
     default: die(`未知命令: ${cmd}。用 --help 看用法。`);
   }

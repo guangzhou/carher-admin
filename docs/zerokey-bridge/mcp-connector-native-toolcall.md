@@ -188,7 +188,12 @@ lark-cli 背后是飞书开放 API —— **本来就是公网线上服务**,满
 - [x] ~~注册后模型在会话里实际调用~~ → **已验证**,见 §2.6
 - [x] ~~`is_consequential: true` 是否需交互授权~~ → **不需要**,
       三个 action 全是 `is_consequential: true`,仍直接调用成功(无授权弹窗)
-- [ ] `developer_mode` 是否随 session 刷新失效;47 个 pod 账号要逐个开
+- [x] ~~`developer_mode` 是否随 session 失效~~ → **账号级且持久**。
+      去掉全部一次性头(sentinel / turnstile / echo-logs / trace-id,34→27 个)
+      仍返回 `已开启` —— 说明只需身份凭证,**pod 侧自动化可行**
+- [x] ~~connector 作用域~~ → **`owners: [{"type":"USER","id":"user-..."}]`**,
+      即**每个账号必须各自注册一次**(47 账号 → 47 次注册 + 47 次建 link)。
+      好消息:操作幂等、可脚本化、无需人工点击
 - [ ] 自建 lark MCP server 尚未实现
 - [ ] connector 是账号级 —— 与"每账号一进程"的池模型如何配合
 

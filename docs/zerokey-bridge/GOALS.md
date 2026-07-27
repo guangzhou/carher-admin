@@ -83,7 +83,11 @@
 - 文档: `mcp-connector-native-toolcall.md`
 - 工具: `scripts/chatgpt-onboard/zerokey-codex/bridge/mcp-connector-cli.js`
 - skill: `~/.claude/skills/chatgpt-web-mcp-connector/SKILL.md`
-- 未验证: 会话内实际调用的 SSE、是否需交互授权、47 账号逐个开、lark MCP server 未实现
+- **已落地(2026-07-27)**: 飞书 MCP 已打通,返回真实数据,
+  **链式两步调用成功** → G2b 在协议层成立。
+  见 `lark-mcp-connector-deployed.md`
+- 仍未解决: 偶发 "blocked by safety checks"(间歇,需长跑统计,影响 G2 口径);
+  `docx_builtin_*` 需 user_access_token;47 账号需各自 provision
 
 ---
 

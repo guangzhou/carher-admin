@@ -42,49 +42,42 @@ _MARKER = "[OpenClaw heartbeat poll]"
 _TARGET_CALL_TYPES = frozenset({"responses", "aresponses", "acompletion", "completion"})
 
 
-# Role-less items in a Responses ``input[]`` are mostly NOT user messages —
-# function_call_output / reasoning / custom_tool_call_output all lack ``role``.
-# Accepting them broke the hook in both directions (measured 2026-07-27):
-#   - false negative: input=[{role:user, content:MARKER}, {type:"reasoning", …}]
-#     walked back onto the reasoning item, returned its text, missed the marker,
-#     and billed the ~50K-token heartbeat upstream — the exact payload shape the
-#     role-less widening was added for.
-#   - false positive: a role-less function_call_output whose content echoed the
-#     marker short-circuited a REAL request to "ok".
-# So accept a missing role only on an actual input message.
-_NON_MESSAGE_TYPES = frozenset({
-    "function_call",
-    "function_call_output",
-    "custom_tool_call",
-    "custom_tool_call_output",
-    "reasoning",
-    "computer_call",
-    "computer_call_output",
-    "file_search_call",
-    "web_search_call",
-    "code_interpreter_call",
-    "image_generation_call",
-    "local_shell_call",
-    "local_shell_call_output",
-    "mcp_call",
-    "mcp_list_tools",
-    "mcp_approval_request",
-    "mcp_approval_response",
-    "item_reference",
+# Positive allowlist of Responses ``input[]`` item types that ARE input messages.
+# Kept as an allowlist, not an exclusion list: an exclusion list has to enumerate
+# every non-message type or it silently treats an unknown type as a user message,
+# which is exactly how ``additional_tools`` slipped through and re-broke the hook.
+# Anything not named here fails closed (treated as NOT a user message), so a new
+# Responses item type degrades to "keep looking" rather than "stop and return the
+# wrong text".
+_MESSAGE_TYPES = frozenset({
+    "message",
+    "input_text",
 })
 
 
 def _is_userish_item(item: dict) -> bool:
-    """True for a user input message. Responses API sometimes omits ``role`` on
-    input-message items, so a missing role is accepted — but only when the item is
-    not one of the non-message types above."""
+    """True for a user input message.
+
+    Fails CLOSED on anything unrecognised. The previous version used
+    ``_NON_MESSAGE_TYPES`` as an exclusion list and returned True for any type not
+    on it, which is the same false-negative bug it was written to fix, merely
+    displaced onto every type nobody enumerated. ``additional_tools`` -- the type
+    Codex actually sends, and which this repo's own bridge reads in
+    ``_req_uses_exec_tool`` -- was absent, so a heartbeat whose input ended in an
+    additional_tools item walked onto it, found no text, and billed the ~50K-token
+    poll upstream. Any future Responses item type would do the same.
+
+    A role-less item is accepted ONLY when it is positively identifiable as an
+    input message: either it declares ``type: message`` / ``input_text``, or it
+    carries no ``type`` at all (the shape the role-less widening was added for).
+    """
     role = item.get("role")
     if role is not None:
         return role == "user"
     itype = item.get("type")
-    if isinstance(itype, str) and itype in _NON_MESSAGE_TYPES:
-        return False
-    return True
+    if itype is None:
+        return True
+    return isinstance(itype, str) and itype in _MESSAGE_TYPES
 
 
 def _last_user_text(data: dict) -> str:

@@ -405,22 +405,6 @@ def _text_of(content):
     return ""
 
 
-SYS_PREAMBLE = (
-    "You produce tool calls for an external executor. When a task needs to run a "
-    "command, read/inspect files, or create/edit a file, reply by CALLING the "
-    "matching tool — shell_enqueue_job (any shell command incl. cat/ls/grep and "
-    "running CLIs), create_file, or replace_string_in_file. A separate executor "
-    "runs the call and returns the result to you next turn; you never run "
-    "anything yourself and never see the result this turn.\n"
-    "Rules:\n"
-    "  - The executor HAS full access to the command line and filesystem. Never "
-    "say you lack a terminal, cannot access files/systems, or ask the user to run "
-    "a command and paste the output — instead CALL shell_enqueue_job with that "
-    "command.\n"
-    "  - Assume the user wants the action carried out. A plain-text answer or a "
-    "refusal INSTEAD OF a tool call is a failure.\n"
-    "  - Never emit a canvas / textdoc / document object as text; use create_file."
-)
 
 
 _FNAME_RE = re.compile(r'[\w./-]+\.[A-Za-z0-9]{1,8}')
@@ -630,7 +614,7 @@ def build_messages(instructions, inp, with_tools=True):
                 # Codex's developer prompts ("You are Codex… operating on a REAL
                 # local filesystem", multi_agent_mode, personality) make the web
                 # model refuse (it knows it has no filesystem). Drop them; our
-                # SYS_PREAMBLE + tools[] injection already frame the task
+                # GUIDE + tools[] injection already frame the task
                 # correctly for the web-injection pods.
                 continue
             elif role == "assistant":
@@ -640,7 +624,7 @@ def build_messages(instructions, inp, with_tools=True):
                 # <filesystem><workspace_roots>… which tells the web model it has
                 # a real filesystem — conflicting with the web pod's "no
                 # filesystem" self-image and triggering a refusal. The tools[] +
-                # SYS_PREAMBLE already frame execution correctly.
+                # GUIDE already frame execution correctly.
                 if "<environment_context>" in t or "<workspace_roots>" in t:
                     # Drop the block, but KEEP the platform facts. Without them
                     # the model guessed Windows and emitted PowerShell
@@ -1273,7 +1257,7 @@ def _looks_like_refusal(text):
 
 
 def call_zerokey(messages, want_tools=True, max_rounds=2, on_delta=None,
-                 model=None, key_hash=None):
+                 model=None, key_hash=None, budget=None):
     """Fan out to several pods concurrently; return the FIRST usable result and
     abandon the rest (don't block on slow/miss pods). "Usable" = a tool_call, or
     (when the model legitimately answers in text) the first substantive text.
@@ -1309,7 +1293,14 @@ def call_zerokey(messages, want_tools=True, max_rounds=2, on_delta=None,
     # already has to suppress all but one stream.
     if want_tools:
         fanout = max(fanout, int(os.environ.get('BRIDGE_TOOL_FANOUT', '3')))
-    deadline = time.time() + CALL_BUDGET  # hard wall-clock cap for the whole call
+    # Hard wall-clock cap. `budget` lets a CALLER pass the time it has left, which
+    # matters for the soft-brake follow-up: it calls back into call_zerokey from
+    # inside a request that has already spent most of CALL_BUDGET, and taking a
+    # fresh 150s window there could push a single client request to ~300s — well
+    # past Codex's stream timeout, so the user saw a stream error after the bridge
+    # had already done the work.
+    deadline = time.time() + (CALL_BUDGET if budget is None
+                              else max(5.0, min(CALL_BUDGET, float(budget))))
     # Transport errors (a burst of upstream 502s) are worth retrying on a
     # DIFFERENT pod, and with ~19 upstreams a flat 2 rounds threw the request
     # away whenever both picks landed in the bad batch — measured 3/8 failures
@@ -2265,7 +2256,18 @@ class H(BaseHTTPRequestHandler):
         # this thread's history, stop calling tools and return a plain text
         # answer so the agent loop converges. (Native upstream self-terminates;
         # web injection can't, so we enforce it here.)
-        if tcs and use_exec_custom:
+        # Gated on `tcs` only, NOT on use_exec_custom. It used to require the
+        # `exec` custom tool, which is False for any client that offers tools via
+        # a plain `tools[]` array instead of code_mode — so that whole class of
+        # client had NO repeat suppression: the GUIDE sentence that used to
+        # suppress it was deleted on the grounds "the brake handles it", the brake
+        # did not apply, and the replacement GUIDE plus the continuation nudge
+        # actively push the model to call again ("call the tool RIGHT NOW"). Net
+        # effect was a reintroduction of the `echo hi` x27 runaway for
+        # non-code_mode clients. The brake logic is protocol-independent —
+        # _history_commands already reads both custom_tool_call and function_call
+        # shapes (verified) — so only the emit shape needs use_exec_custom.
+        if tcs:
             # Only UNPRODUCTIVE prior commands arm the brake. A command that
             # already returned real output must not trigger it: braking there
             # discards work the bridge successfully did (measured: a Lark doc was
@@ -2336,9 +2338,13 @@ class H(BaseHTTPRequestHandler):
                                          "Do not run any more commands. Using ONLY "
                                          "the command output already shown above, "
                                          "answer the original request now."})
+                        # Pass the time THIS request has left, so the follow-up
+                        # cannot start a fresh CALL_BUDGET window on top of what
+                        # the first call already spent.
                         text2, _ = call_zerokey(followup, want_tools=False,
                                                 model=req.get("model"),
-                                                key_hash=key_hash)
+                                                key_hash=key_hash,
+                                                budget=CALL_BUDGET - (time.time() - _t0))
                         if text2 and text2.strip():
                             text = text2
                             _log("soft brake: synthesised answer from history "

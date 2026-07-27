@@ -126,11 +126,23 @@ Cline 对同一个问题的做法(`apps/vscode/src/core/prompts/responses.ts:33`
 即**改变信号**,而不是**再摇一次骰子**。已照此实现(追加 user 轮,
 不动 instructions,保持 prompt cache 前缀不变)。
 
-**收益尚未实证。** 我试过合成 mid-task stall 做 A/B,两组都 9/9 出命令 ——
-fixture 复现不出 stall,无法区分。上线它的理由是**零成本**:
-不增加调用次数,只改变一次本来就要发生的重试的输入。
-真实数字要看部署后的 `/health -> structural_retry.rescue_rate`,
-与改动前的上界 ≤8.4% 对比。
+**已部署并拿到首批归因数(2026-07-27 18:12,样本很小)**:
+
+```
+/health -> structural_retry: {"fired":2,"rescued":1,"wasted":1,"rescue_rate":0.5}
+日志:    HIT zero-88 r1 struct-rescued     ← 旧代码会丢掉这一次
+```
+
+对比改动前的上界 **≤8.4%**,首批是 **50%(1/2)**。
+⚠️ **n=2,不能当结论** —— 需要累积到 n≥30 再看。但至少证明:
+(a) 归因计数器工作正常,(b) nudge 确实救回过一次旧代码会丢的请求。
+
+部署验证(必须证明代码真在跑,踩过 6 次静默空操作):
+- `/proc/1/cmdline` = `python3 /code/bridge.py`
+- `/code/bridge.py` 155918 字节,`_STRUCT_STATS`×7、`round_messages`×3
+- md5 本地/远端一致 `8b8ef0a9...`
+- CM key 必须是 `bridge.py`(用 `--from-file=bridge.py=` 显式指定)
+- 冒烟:追加写 ✅、真多轮链 ✅、`tool_willing_pods` 47/47
 
 ## 验收脚本(每轮改动后必跑)
 

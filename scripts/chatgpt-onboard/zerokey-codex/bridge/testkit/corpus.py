@@ -86,12 +86,48 @@ KEEP = [
     "我运行了测试，3 个失败。你可以在终端里执行 pytest -v 看详细输出。",
     "我执行了 df -h，根分区没有剩余空间了，建议清理 /var/log。",
     "我查看了配置，这个字段无法直接读取环境变量，需要显式传入。",
+    # --- REGRESSION SET 2 (2026-07-27): the narration-first ordering plus three
+    # over-broad _NARRATION alternations reclassified 7/8 of these as refusals.
+    # Every one reports real output or is plain content; none contains an
+    # admission that the ASSISTANT has not acted. They are here because the
+    # previous KEEP set (16 samples) contained none of the trigger words, so the
+    # suite scored a clean 30/30 + 0/16 while the regression was live -- four
+    # different detector variants were indistinguishable on it.
+    #   (目前|现在)只(有|看到|完成)  -- matched ordinary counts
+    "我执行了 kubectl get deploy，目前只有 zero-88 在跑。",
+    "我跑了 git log，目前只看到 3 个 commit。",
+    #   需要继续执行 / 还需要执行  -- the twin of 下一步需要执行, already excluded
+    "扫描完成，3 个 Pod 异常。需要继续执行 kubectl rollout restart 才能生效。",
+    "磁盘 92% 已满，还需要执行 brew cleanup 才能释放空间。",
+    #   bare ^未完成 / mid-sentence 未完成  -- heading vs content
+    "未完成的任务有 3 个：登录、支付、退款。",
+    "我读完了 TODO.md。未完成：三项。",
+    "结果显示服务未完成初始化，这是配置问题导致的。",
+    "日志里有一行 '未完成: retry'，说明上游超时。",
+    #   English: next step would be to  -- same bare-suggestion class
+    "I ran the tests: 3 failed, 12 passed. The next step would be to fix test_foo.",
+    #   inanimate-subject 没有+verb, must not read as a capability denial
+    "该任务没有开始时间字段，所以我用了创建时间。",
+]
+
+# Replies that ARE stalls and must be caught even though they also report output
+# from an earlier setup step. These are why the result-report exemption cannot be
+# an unconditional early return: each ran something real (--help, a prerequisite)
+# and then admitted the actual task is still not done. Kept alongside KEEP above
+# so the two directions are always scored together -- optimising either one alone
+# is what produced two successive regressions.
+STALL = [
+    "已经完成了前置步骤，还没有实际执行读取该飞书文档的 docs +fetch",
+    "我已执行 lark-cli --help，下一步实际需要运行 docs +fetch 才能拿到内容",
+    "原始请求还没有被完全回答",
+    "已有输出只完成了 --help 的查看，还没有真正读到文档",
 ]
 
 
 def score(fn, verbose=False):
     tp = sum(1 for s in REFUSE if fn(s))
     fp = sum(1 for s in KEEP if fn(s))
+    st = sum(1 for s in STALL if fn(s))
     if verbose:
         for s in REFUSE:
             if not fn(s):
@@ -99,6 +135,11 @@ def score(fn, verbose=False):
         for s in KEEP:
             if fn(s):
                 print("  FALSE+ %s" % s[:78])
-    print("  caught %d/%d refusals | false-positives %d/%d"
-          % (tp, len(REFUSE), fp, len(KEEP)))
-    return tp, fp
+        for s in STALL:
+            if not fn(s):
+                print("  STALL- %s" % s[:78])
+    print("  caught %d/%d refusals | false-positives %d/%d | stalls %d/%d"
+          % (tp, len(REFUSE), fp, len(KEEP), st, len(STALL)))
+    ok = (tp == len(REFUSE) and fp == 0 and st == len(STALL))
+    print("  %s" % ("PASS" if ok else "FAIL"))
+    return tp, fp, st

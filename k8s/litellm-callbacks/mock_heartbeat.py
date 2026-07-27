@@ -22,8 +22,10 @@ Default: ON for all keys. Disable per-call by setting
 ``litellm_metadata._skip_mock_heartbeat: true``.
 
 The detection is conservative: only short-circuits when the LAST user-role
-message contains the literal marker ``[OpenClaw heartbeat poll]``. Any
-other content (even mentions of heartbeats in conversation) passes through.
+message contains the literal marker ``[OpenClaw heartbeat poll]``. Responses
+API payloads sometimes omit ``role`` on the final input item, so role-less
+final items are also inspected. Any other content (even mentions of heartbeats
+in conversation history) passes through.
 """
 
 from __future__ import annotations
@@ -40,6 +42,51 @@ _MARKER = "[OpenClaw heartbeat poll]"
 _TARGET_CALL_TYPES = frozenset({"responses", "aresponses", "acompletion", "completion"})
 
 
+# Role-less items in a Responses ``input[]`` are mostly NOT user messages —
+# function_call_output / reasoning / custom_tool_call_output all lack ``role``.
+# Accepting them broke the hook in both directions (measured 2026-07-27):
+#   - false negative: input=[{role:user, content:MARKER}, {type:"reasoning", …}]
+#     walked back onto the reasoning item, returned its text, missed the marker,
+#     and billed the ~50K-token heartbeat upstream — the exact payload shape the
+#     role-less widening was added for.
+#   - false positive: a role-less function_call_output whose content echoed the
+#     marker short-circuited a REAL request to "ok".
+# So accept a missing role only on an actual input message.
+_NON_MESSAGE_TYPES = frozenset({
+    "function_call",
+    "function_call_output",
+    "custom_tool_call",
+    "custom_tool_call_output",
+    "reasoning",
+    "computer_call",
+    "computer_call_output",
+    "file_search_call",
+    "web_search_call",
+    "code_interpreter_call",
+    "image_generation_call",
+    "local_shell_call",
+    "local_shell_call_output",
+    "mcp_call",
+    "mcp_list_tools",
+    "mcp_approval_request",
+    "mcp_approval_response",
+    "item_reference",
+})
+
+
+def _is_userish_item(item: dict) -> bool:
+    """True for a user input message. Responses API sometimes omits ``role`` on
+    input-message items, so a missing role is accepted — but only when the item is
+    not one of the non-message types above."""
+    role = item.get("role")
+    if role is not None:
+        return role == "user"
+    itype = item.get("type")
+    if isinstance(itype, str) and itype in _NON_MESSAGE_TYPES:
+        return False
+    return True
+
+
 def _last_user_text(data: dict) -> str:
     """Pull the last user-role text out of either Responses-API ``input``
     or chat-style ``messages``. Returns empty string on any structural
@@ -53,7 +100,7 @@ def _last_user_text(data: dict) -> str:
         for item in reversed(inp):
             if not isinstance(item, dict):
                 continue
-            if item.get("role") != "user":
+            if not _is_userish_item(item):
                 continue
             content = item.get("content")
             if isinstance(content, str):
@@ -121,6 +168,10 @@ class MockHeartbeat(CustomLogger):
                 return data
 
             data["mock_response"] = "ok"
+            md = data.setdefault("litellm_metadata", {})
+            if isinstance(md, dict):
+                md["_mock_heartbeat"] = True
+                md["_mock_heartbeat_marker"] = _MARKER
             try:
                 key_alias = getattr(user_api_key_dict, "key_alias", None)
                 _log.info(

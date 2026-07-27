@@ -115,10 +115,20 @@ _refuse = {u: 0.0 for u in UPSTREAMS}
 # is cheap to re-verify.
 REFUSE_ALPHA = float(os.environ.get("BRIDGE_REFUSE_ALPHA", 0.5))
 # Refusal rate above which a pod is EXCLUDED from tool turns (not merely ranked
-# last). Set above the level a single refusal produces (REFUSE_ALPHA = 0.3) so one
-# bad turn cannot bench a pod: it takes a sustained pattern. 0.7 is reached after
-# ~4 consecutive refusals and decays back below it after ~2 half-lives of not
-# refusing.
+# last). Set above the level a single refusal produces so one bad turn cannot bench
+# a pod. At the CURRENT REFUSE_ALPHA (0.5) that means TWO consecutive refusals
+# reach 0.75 >= 0.7; one success afterwards drops the score to 0.375 and
+# rehabilitates immediately.
+#
+# (This block used to claim "REFUSE_ALPHA = 0.3 … ~4 consecutive refusals" after
+# alpha was raised to 0.5 — a 2x error in the only stated safety argument for the
+# threshold. Recomputed and corrected 2026-07-27. If you change REFUSE_ALPHA,
+# recompute here: exclusion needs ceil(log(1-BAD)/log(1-ALPHA)) refusals.)
+#
+# Caveat worth knowing: rehabilitation-by-success needs a tool turn to produce a
+# `hit`, but an excluded pod is not offered tool turns — so in practice the only
+# exit is REFUSE_HALFLIFE_S decay. That is acceptable while exclusion is rare;
+# it is why the detector above must not produce false refusals.
 REFUSE_BAD = float(os.environ.get("BRIDGE_REFUSE_BAD", 0.7))
 # _refuse must decay for the same reason _err must (see ERR_HALFLIFE_S): an
 # excluded pod stops being sampled, so without time-decay its score freezes and
@@ -606,6 +616,22 @@ def build_messages(instructions, inp, with_tools=True):
         "authenticated CLIs installed. A URL in the request is not a blocker: "
         "reach it with the appropriate CLI. Call the tool first, then answer from "
         "its real output.\n"
+        # Borrowed from gpt4free's ToolSupportProvider, specifically the Qwen
+        # per-provider override (g4f/Provider/Qwen.py) — that project solves the
+        # same problem we do (faking tool calls on a chat endpoint with no native
+        # tool support), and its prompt reads as a list of scars from exactly our
+        # failure modes. sub2api, by contrast, targets the NATIVE codex endpoint
+        # (verified: 0 references to backend-api/f/conversation, 0 prompt-injection
+        # tool faking anywhere in its 2150 Go files), so none of its tool code
+        # transfers — only its account-health ideas do.
+        "Never fabricate a tool result: do not run, simulate, guess, or imagine "
+        "the command's output, and never write a fake result block. Emit the tool "
+        "call and let the executor return the real output next turn.\n"
+        "Never mix a normal answer and a tool call in the same reply — do one or "
+        "the other. Do not preface a tool call with narration like 'Here is the "
+        "command I will run' or 'I will now use a tool'; just call it.\n"
+        "Use only the tool names you were given. Do not invent, rename, or "
+        "abbreviate them.\n"
         # Hardcoding one lark-cli recipe (the docx one) only fixed docx: for any
         # other domain the model INVENTED subcommands — `lark-cli contact
         # get-user-info` doesn't exist, so it burned turns failing before it
@@ -1200,10 +1226,19 @@ _NARRATION = re.compile(
     # excluding "没有读取权限".
     r"(?:还|尚)(?:没有|没|未)\s*(?:真正|实际|成功|正式|完全)?\s*"
     r"(?:读到|拿到|获取到|取到|完成|执行|运行|开始|查看|读取|被查看)"
-    r"|^未完成|未完成[：:]"
-    r"|(?:目前|现在)只(?:有|看到|完成)"
+    # 未完成 must be a HEADING (followed by a colon), not prose. Bare `^未完成`
+    # matched "未完成的任务有 3 个：登录、支付、退款" — a correct answer listing
+    # items. Mid-sentence 未完成 is likewise almost always content
+    # ("服务未完成初始化").
+    r"|^未完成[：:]"
     r"|上一?次只是|上一步只是|目前只是|仅仅只是确认"
-    r"|需要继续执行|还需要执行|不能继续执行"
+    # REMOVED 2026-07-27: `(?:目前|现在)只(?:有|看到|完成)` and
+    # `需要继续执行|还需要执行|不能继续执行`. Neither requires any not-done
+    # admission about the ASSISTANT, so both matched ordinary report content
+    # ("目前只有 2 个 pod 在运行", "3 个 Pod 异常。需要继续执行 rollout restart").
+    # The 需要继续执行 family also directly contradicted the NOTE below, which
+    # already records why a bare next-step mention must not count as narration —
+    # the near-synonym 下一步需要执行 was deliberately excluded for this reason.
     # Measured live: "还没有完全回答" / "原始请求还没有被完全回答" / "已有输出只完成了"
     # / "目前已有的信息只证明" / "并伪造(输出|结果)" — all are the model explaining
     # that the task is unfinished while listing what earlier turns already did.
@@ -1251,8 +1286,12 @@ _EN_HANDOFF = re.compile(
     re.I)
 _EN_NARRATION = re.compile(
     r"i\s+haven'?t\s+(?:actually|yet)?\s*(?:read|run|fetched|retrieved|completed)"
-    r"|(?:the\s+)?next\s+step\s+would\s+be\s+to",
-    re.I)
+    # REMOVED 2026-07-27: `(?:the\s+)?next\s+step\s+would\s+be\s+to`. It is the
+    # English twin of 下一步需要执行, which the _NARRATION NOTE already excludes for
+    # this reason: a COMPLETED answer may close with a suggestion. Measured —
+    # "I ran the tests: 3 failed, 12 passed. The next step would be to fix
+    # test_foo." was scored a refusal and discarded.
+    , re.I)
 
 
 # Window: the old 200 was too tight -- real refusals lead with a cooperative
@@ -1283,25 +1322,45 @@ _REPORTED_RESULT = re.compile(
 def _looks_like_refusal(text):
     """True if the reply is the model declining to use its tools.
 
-    Order matters, and NARRATION outranks the result report. A reply that admits
-    the work is not finished is a stall even when it also lists what earlier turns
-    accomplished — measured live, four such replies said "已经完成了前置步骤" /
-    "已执行 lark-cli --help" and were exempted by the result-report check, so the
-    agent loop stopped after --help with the model describing the command it should
-    have run. Only after ruling out an explicit not-done admission does a
-    result-report mean "this is an answer".
+    Order matters, and the RESULT REPORT outranks narration. A reply that says
+    what it ran and what came back is an answer, even when it also notes what
+    remains.
+
+    Both orderings have now been measured, and this one is correct:
+      - report-first (c435aac, restored 2026-07-27): the four live stalls that
+        motivated the flip ("已经完成了前置步骤" / "已执行 lark-cli --help" then
+        describing the command it should have run) are caught instead by the
+        _NARRATION alternations that require an explicit 还/尚 not-yet admission,
+        which those replies also contain.
+      - narration-first (bb2bd57, reverted): reclassified 7/8 correct answers as
+        refusals across both languages, because several _NARRATION alternations
+        matched ordinary report CONTENT rather than any admission about the
+        assistant. Those alternations are removed above; a narration phrase that
+        needs the ordering to stay harmless is a phrase that is too loose.
+
+    The distinction is the ADMISSION, not the position: "还没有实际执行" is the
+    model saying it has not acted; "目前只有 2 个 pod" is the model reporting a
+    number. Keep new alternations on the admission side of that line.
     """
     if not text:
         return False
     head = text.strip()[:_HEAD]
-    # An explicit "not done yet" admission is decisive, and beats both the
-    # result-report exemption (the reported results belong to PREVIOUS turns) and
-    # the inanimate-subject exemption below.
-    if _NARRATION.search(head) or _EN_NARRATION.search(head):
-        return True
-    # An answer that reports real output is never a refusal — return early so no
-    # later pattern can discard it.
+    # A reply that reports real output is an answer — EXCEPT when it also makes an
+    # explicit not-yet admission, which means "here is the setup step I ran, and I
+    # have still not done the actual task".
+    #
+    # Both orderings were measured and both failed in their pure form; this is the
+    # conjunction that works, and it only works because the loose alternations were
+    # removed from _NARRATION above. Verified on the live regexes: after that
+    # removal _NARRATION matches the two real stalls ("已经完成了前置步骤，还没有
+    # 实际执行…", "已执行 --help，下一步实际需要运行…") and NONE of the four
+    # correct answers that report output ("我执行了 kubectl…目前只有 zero-88",
+    # "我运行了 ls…结果显示没有读取权限", …). So the admission can safely override
+    # the report exemption. If a future alternation makes _NARRATION match a
+    # report-style answer again, fix the alternation — do not reorder these.
     if _REPORTED_RESULT.search(head):
+        if _NARRATION.search(head) or _EN_NARRATION.search(head):
+            return True
         return False
     # Nor is a statement about what some THING cannot do. "该配置无法直接读取环境
     # 变量" / "这个脚本不能在容器里访问宿主机" describe the subject matter, not the
@@ -2319,8 +2378,18 @@ class H(BaseHTTPRequestHandler):
         if DEBUG:
             _log("REQ messages:", json.dumps(messages)[:2000])
         else:
-            _log("REQ items=%d stream=%s tools=%s"
-                 % (len(req.get("input") or []), stream, wants_tools))
+            # Log WHY wants_tools came out the way it did, so the decision is
+            # auditable from the log alone rather than by re-deriving it.
+            _at = [t.get("name") for it in (req.get("input") or [])
+                   if isinstance(it, dict) and it.get("type") == "additional_tools"
+                   for t in (it.get("tools") or []) if isinstance(t, dict)]
+            _log("REQ items=%d stream=%s tools=%s "
+                 "[top=%s additional=%s hist=%s]"
+                 % (len(req.get("input") or []), stream, wants_tools,
+                    [t.get("name") for t in (req.get("tools") or [])
+                     if isinstance(t, dict)] or "-",
+                    _at or "-",
+                    _history_has_tool_use(req.get("input"))))
         rid = new_rid()
         self._rid = rid
         # Keep-alive: in stream mode, open the SSE and emit response.created

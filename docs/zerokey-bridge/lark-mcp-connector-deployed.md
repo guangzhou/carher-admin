@@ -77,25 +77,83 @@ Accept: application/json, text/event-stream → 200
 
 修:nginx 边缘补齐 `proxy_set_header Accept "application/json, text/event-stream";`
 
-### 坑 2:keepalive 复用连接 → 200/400 **交替**
+**规范层结论(查了 MCP 官方 spec 2025-06-18 "Transports" 章)**:
+
+> 2. The client **MUST** include an `Accept` header, listing both `application/json` and
+>    `text/event-stream` as supported content types.
+
+所以 **`openai-mcp/1.0.0` 违反了 MCP 规范**,lark-mcp 拒绝它是**正确行为**。
+我们在 nginx 补 Accept 是给客户端擦屁股,不是绕过服务端 bug ——
+这个定性很重要:将来 OpenAI 修了客户端,这条 nginx 规则**仍然安全**
+(补一个本就该有的头,幂等)。
+
+顺带确认 spec 还要求 `MCP-Protocol-Version` 头,且服务端在缺失时
+**SHOULD** 假定 `2025-03-26`。lark-mcp 走 SDK 默认,当前无影响。
+
+### 坑 2:`Connection: $connection_upgrade` → 200/400 **交替**
+
+> **⚠️ 本节已修正。** 第一版我归因为"nginx keepalive 复用连接",
+> 后来做了变量隔离实验,证明**那个归因是错的**。修复恰好有效,但原因说错了。
+> 记录在此因为错误的原因说明会误导后人。
 
 修了坑 1 仍然 424。access.log 显示 OpenAI 每次发**两个**请求,
-第一个 200、第二个 400,且两个请求 **完全一样**(都 972 字节、无 session id)。
+第一个 200、第二个 400,两个请求**完全一样**(都 972 字节)。
 
-关键对照实验:
+**变量隔离实验**(每次只改一个变量):
 
-| 路径 | 连发结果 |
-|---|---|
-| 经 nginx(`keepalive 8`) | `200 400 200 400` —— 严格交替,与间隔无关(试过 3s) |
-| **直连 pod ClusterIP** | **`200 200 200 200`** |
+| 实验 | 配置 | 结果 |
+|---|---|---|
+| 直连 pod(裸 curl) | — | `200 200 200 200` |
+| 直连 pod + `Connection: upgrade` | — | `200 200` |
+| 直连 pod + `Connection: close` | — | `200 200 200` |
+| A | keepalive **on**,`Connection: ""` | **`200 200 200 200`** |
+| B | keepalive off,`Connection: $connection_upgrade` + `Upgrade` | **`200 400 200 400`** |
+| C | keepalive off,只留 `Connection: $connection_upgrade` | **`200 400 200 400`** |
 
-→ 不是 lark-mcp 的问题,是 nginx 复用上游连接导致的。
+→ **keepalive 不是原因(实验 A 全 200);`Connection: $connection_upgrade` 才是(C 复现)。**
 
-修:upstream 去掉 `keepalive`,并在 location 里 `proxy_set_header Connection "";`
-(原来的 `Connection $connection_upgrade` 会重新启用复用)。
-修完连发 6 次全 200。
+机制:配置里的 map 是
 
-**这里差点误判成"lark-mcp 有状态 bug"** —— 靠"直连 vs 经代理"的对照组才定位对。
+```nginx
+map $http_upgrade $connection_upgrade { default upgrade; ""  close; }
+```
+
+OpenAI 的 MCP client 不发 `Upgrade`,所以 `$http_upgrade=""` → 转发
+`Connection: close` 给上游。带调试日志抓到决定性证据:
+
+```
+POST /mcp st=200 ureq=keep-alive rlen=417 blen=223
+POST /mcp st=400 ureq=close     rlen=417 blen=0     ← 请求长度一样,响应体 0 字节
+```
+
+`blen=0` 很关键:**SDK 的三个 400 都带 JSON body**
+(`createJsonErrorResponse`),所以这个空 body 的 400 不是 SDK 发的,
+是 lark-mcp 的 Express 层在连接被判定关闭后产生的。
+
+**上游源码层面的根因**(读了 `@larksuiteoapi/lark-mcp` 0.5.1 +
+`@modelcontextprotocol/sdk` 1.29.0 源码):
+
+`transport/streamable.js` 每个 POST 都 `new StreamableHTTPServerTransport({sessionIdGenerator: undefined})`
+—— 即**无状态模式**,并且 `res.on('close', () => { transport.close(); server.close() })`。
+SDK `webStandardStreamableHttp.js:137-140`:
+
+```js
+// In stateless mode (no sessionIdGenerator), each request must use a fresh transport.
+if (!this.sessionIdGenerator && this._hasHandledRequest) {
+    throw new Error('Stateless transport cannot be reused across requests.')
+}
+```
+
+无状态 transport 一次性,而 `Connection: close` 让 `res` 的 close 事件时序
+与下一个请求交错,于是每隔一个请求就落在已 close 的 transport 上。
+
+修:`proxy_set_header Connection "";`(这是修复的**充分且必要**部分)。
+upstream 去掉 `keepalive` 是保守起见的冗余措施,实验 A 显示它并非必需。
+
+**方法论**:第一次我用"经 nginx vs 直连 pod"的对照组定位,那只证明了
+"nginx 加了什么东西",却把它误读成"keepalive"。**对照组只能缩小范围,
+要确定单个变量必须逐个开关。** 这正是本仓库
+`refusal-detection-postmortem.md` §8 反复强调的同一个错误。
 
 ### 坑 3:我自己把 `proxy_pass` 删掉了
 

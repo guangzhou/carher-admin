@@ -853,6 +853,21 @@ CALL_BUDGET = int(os.environ.get("BRIDGE_CALL_BUDGET", 150))
 # still fits G4's <=5 upstream calls, while giving one second opinion on the turn
 # where a stall is possible. Prose is deliberately not consulted.
 MAX_STRUCT_RETRIES = int(os.environ.get("BRIDGE_STRUCT_RETRIES", 1))
+
+# Structural-retry accounting, exposed on /health so its cost/benefit can be read
+# without grepping logs. Production logs could only bound the rescue rate from
+# above (<=8.4%) because refusal-retry and structural-retry rescues both land on
+# round 1; these counters attribute them.
+#   fired   -- a structural retry was spent (== extra upstream calls)
+#   rescued -- that request went on to produce a tool_call
+#   wasted  -- it retried and still ended on plain text
+_STRUCT_STATS = {"fired": 0, "rescued": 0, "wasted": 0}
+
+
+def _struct_stat(k):
+    # GIL makes += on a dict int safe enough for a counter; no lock needed and we
+    # must not add one on the hot path.
+    _STRUCT_STATS[k] = _STRUCT_STATS.get(k, 0) + 1
 BODY_DUMP = os.environ.get("BRIDGE_BODY_DUMP", "/tmp/codex_bridge_body.json")
 
 
@@ -1634,7 +1649,14 @@ def call_zerokey(messages, want_tools=True, max_rounds=2, on_delta=None,
                     # Worked: pin this caller here so the next turn reuses the
                     # same account (and whatever prompt cache it just built).
                     _affinity_set(key_hash, b, time.time())
-                    _log("HIT %s r%d" % (b, _round))
+                    # Attribute the win. `struct_retries` is only non-zero when a
+                    # structural retry actually happened on THIS request, so this
+                    # separates its rescues from refusal/error-retry rescues --
+                    # the ambiguity that made the log-derived rate an upper bound.
+                    if struct_retries:
+                        _struct_stat("rescued")
+                    _log("HIT %s r%d%s" % (b, _round,
+                                           " struct-rescued" if struct_retries else ""))
                     ex.shutdown(wait=False)
                     return text, tcs
                 # A bare `{"tool_calls":[]}` is not an answer -- it is a
@@ -1720,14 +1742,26 @@ def call_zerokey(messages, want_tools=True, max_rounds=2, on_delta=None,
             # `consecutiveNoToolUseCount >= 2` idea -- one stray prose turn is
             # silently corrected, and it is bounded so G4 (<=5 upstream calls per
             # task) still holds: at most one extra call per mid-task turn.
+            # Measured on production logs 2026-07-27 (861 lines, ~8h): the retry
+            # fired 83 times and 76 of those still had no tool_call on round 1,
+            # so it rescues AT MOST 7/83 = 8.4% while costing one upstream call
+            # every time. That is a poor G4 trade, but the log could not separate
+            # "structural retry rescued it" from "refusal/error retry rescued it"
+            # (both land on r1). _STRUCT_STATS closes that gap so the next tuning
+            # decision is made on attributed numbers instead of an upper bound.
             if (want_tools and mid_task
                     and struct_retries < MAX_STRUCT_RETRIES):
                 struct_retries += 1
+                _struct_stat("fired")
                 _log("round %d mid-task text, no tool_call -> structural retry "
                      "(%d/%d)" % (_round, struct_retries, MAX_STRUCT_RETRIES))
                 best_text = ""
                 got_text_this_round = False
                 continue
+            if struct_retries:
+                # Retried structurally and STILL ended on text -> the extra call
+                # bought nothing.
+                _struct_stat("wasted")
             _log("round %d no tool_call, has text -> return (skip retry)" % _round)
             return best_text, []
         # No text at all: the round was consumed by transport failures.
@@ -2355,6 +2389,15 @@ class H(BaseHTTPRequestHandler):
             "err_bad_threshold": ERR_BAD,
             "pods": pods,
             "tool_arg_fixes": stats,
+            # Structural-retry cost/benefit. `fired` is extra upstream calls spent
+            # (G4 cost); `rescued` is turns it actually saved. Production logs could
+            # only bound this from above (<=8.4%) because refusal-retry rescues land
+            # on the same round -- read these attributed numbers before tuning
+            # BRIDGE_STRUCT_RETRIES.
+            "structural_retry": dict(_STRUCT_STATS,
+                                     rescue_rate=(round(_STRUCT_STATS["rescued"]
+                                                        / _STRUCT_STATS["fired"], 3)
+                                                  if _STRUCT_STATS["fired"] else None)),
             "pinned_callers": pinned_now,
             "pods_in_use": spread,
             "affinity_ttl_s": AFFINITY_TTL,

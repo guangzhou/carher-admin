@@ -846,6 +846,11 @@ def _original_goal(inp):
 # this because the bridge opens the SSE and sends response.created immediately,
 # so the client is not waiting on a silent socket.
 CALL_BUDGET = int(os.environ.get("BRIDGE_CALL_BUDGET", 150))
+# How many times a MID-TASK plain-text reply may be re-asked on another pod before
+# being accepted as the final answer. 1 by default: bounded so a multi-command task
+# still fits G4's <=5 upstream calls, while giving one second opinion on the turn
+# where a stall is possible. Prose is deliberately not consulted.
+MAX_STRUCT_RETRIES = int(os.environ.get("BRIDGE_STRUCT_RETRIES", 1))
 BODY_DUMP = os.environ.get("BRIDGE_BODY_DUMP", "/tmp/codex_bridge_body.json")
 
 
@@ -1437,7 +1442,8 @@ def _looks_like_refusal(text):
 
 
 def call_zerokey(messages, want_tools=True, max_rounds=2, on_delta=None,
-                 model=None, key_hash=None, budget=None):
+                 model=None, key_hash=None, budget=None,
+                 mid_task=False):
     """Fan out to several pods concurrently; return the FIRST usable result and
     abandon the rest (don't block on slow/miss pods). "Usable" = a tool_call, or
     (when the model legitimately answers in text) the first substantive text.
@@ -1534,6 +1540,9 @@ def call_zerokey(messages, want_tools=True, max_rounds=2, on_delta=None,
     calls_made = 0
     err_rounds = 0
     refuse_rounds = 0
+    # Bounded at 1: a mid-task text reply gets exactly one second opinion. Two
+    # would risk G4's 5-call budget on a multi-command task.
+    struct_retries = 0
     tried = set()
     _round = -1
     while True:
@@ -1686,6 +1695,31 @@ def call_zerokey(messages, want_tools=True, max_rounds=2, on_delta=None,
                      % (_round, refuse_rounds, max_refuse_rounds))
                 last_refusal = best_text   # keep as a last resort, see below
                 best_text = ""          # don't fall back to it while pods remain
+                continue
+            # STRUCTURAL retry, independent of what the prose says.
+            #
+            # `mid_task` means the caller's history ends in a tool RESULT: the model
+            # was mid-way through an agent loop and had just been handed output.
+            # A plain-text reply there is either a legitimate final answer or a
+            # stall, and measured evidence says prose cannot tell them apart --
+            # seven comparable projects classify none of it (see
+            # docs/zerokey-bridge/refusal-detection-postmortem.md), and two of this
+            # detector's own cases are provably undecidable (testkit/corpus.py
+            # UNDECIDABLE).
+            #
+            # So stop asking "is this prose a refusal" and ask the structural
+            # question instead: on a mid-task turn, give ONE other pod a chance to
+            # produce a tool call before accepting text. This is Roo/Cline's
+            # `consecutiveNoToolUseCount >= 2` idea -- one stray prose turn is
+            # silently corrected, and it is bounded so G4 (<=5 upstream calls per
+            # task) still holds: at most one extra call per mid-task turn.
+            if (want_tools and mid_task
+                    and struct_retries < MAX_STRUCT_RETRIES):
+                struct_retries += 1
+                _log("round %d mid-task text, no tool_call -> structural retry "
+                     "(%d/%d)" % (_round, struct_retries, MAX_STRUCT_RETRIES))
+                best_text = ""
+                got_text_this_round = False
                 continue
             _log("round %d no tool_call, has text -> return (skip retry)" % _round)
             return best_text, []
@@ -2455,10 +2489,16 @@ class H(BaseHTTPRequestHandler):
         # some — and get real token-by-token output for conversational turns.
         sink = self._live_text_sink(rid) if streaming_open else None
         try:
+            # mid_task: history ends in a tool RESULT, i.e. the model is inside an
+            # agent loop and was just handed output. That is the only turn where a
+            # plain-text reply is ambiguous between "done" and "stalled", so it is
+            # the only turn that earns a structural second opinion.
             text, tcs = call_zerokey(messages, want_tools=wants_tools,
                                      on_delta=sink,
                                      model=req.get("model"),
-                                     key_hash=key_hash)
+                                     key_hash=key_hash,
+                                     mid_task=_ends_with_tool_result(
+                                         req.get("input")))
         except Exception as e:
             _log("UPSTREAM ERROR:", repr(e))
             if streaming_open:

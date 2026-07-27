@@ -181,6 +181,15 @@ heredoc 提前闭合,`rm -rf ~/IMPORTANT` 变成顶层命令,由 Codex 通过 `z
 
 ## 3.9 竞品对标 sub2api:采纳了什么(2026-07-25)
 
+> ⚠️ **2026-07-27 修正:本节关于"工具伪造"的前提是错的。**
+> 源码级核查(完整 clone,2150 个 Go 文件)确认:sub2api 打的是**原生 agent 端点**
+> `chatgpt.com/backend-api/codex/responses`,搜 `backend-api/f/conversation`
+> 命中 0 次,搜 prompt 注入伪造工具命中 0 次 —— **那个端点原生支持工具调用,
+> 它根本不需要伪造**。真正的同类项目是 gpt4free 的 `ToolSupportProvider` 和
+> chatgpt-adapter。**本节的选号/健康度对标仍然成立**,工具部分不成立。
+> 详见 [`refusal-detection-postmortem.md`](refusal-detection-postmortem.md)。
+
+
 读了 sub2api 的实际源码(`backend/internal/service/gateway_scheduling.go`,2499 行,Go+PG+Redis),不是 README 营销话术。**关键结论:它的选号策略和我这轮重写殊途同归,验证了方向正确**;但有一条我们缺,已补。
 
 ### 它的选号流水线(已核实源码)
@@ -498,6 +507,12 @@ if (tools.length > 0 && hasTokens()) return handleCodex(...)
 ---
 
 ## 5. 竞品调研:sub2api(避免闭门造车)
+
+> ⚠️ **2026-07-27 修正:** sub2api 走原生 codex 端点,其工具链路**不可迁移**到我们的
+> 网页注入方案;可借鉴的只有账号健康/调度部分。另外七个同类项目里
+> **没有一个用正则分类模型散文**来判断拒答 —— 我们曾经这么做,那是方向错误。
+> 详见 [`refusal-detection-postmortem.md`](refusal-detection-postmortem.md)。
+
 
 `Wei-Shaw/sub2api`(34k⭐)= 订阅版 AI 转 API 网关,架构印证并优化了本方案。
 

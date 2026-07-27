@@ -22,7 +22,7 @@ Three independent checks, because any one alone can lie:
 A pod can have the cp line but mount a STALE CM (zero-87 mounts its own
 zk-image-patch-stream87), so 1 and 2 must both be checked.
 """
-import json, subprocess, hashlib, sys
+import json, os, subprocess, hashlib, sys
 from concurrent.futures import ThreadPoolExecutor
 
 PW = "Hn8#mKLp3QxZ\n"
@@ -33,21 +33,34 @@ def kc(*a, timeout=120):
     return subprocess.run(["sudo", "kubectl", "-n", "litellm-product"] + list(a),
                           capture_output=True, text=True, input=PW, timeout=timeout)
 
+
+def kc_json(*a, **kw):
+    """kubectl -o json, with the failure surfaced. Parsing r.stdout blindly turned
+    an auth failure or a typo'd resource name into an opaque JSONDecodeError."""
+    r = kc(*a, **kw)
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        sys.exit("kubectl %s failed (rc=%s): %s"
+                 % (" ".join(a), r.returncode,
+                    (r.stderr or r.stdout or "no output").strip()[:300]))
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError as e:
+        sys.exit("kubectl %s returned unparseable output: %s"
+                 % (" ".join(a), e))
+
 def md5(s):
     return hashlib.md5(s.encode()).hexdigest()[:10] if s else "-"
 
 # --- gather all CM contents once ---
 cms = {}
-r = kc("get", "cm", "-o", "json")
-for it in json.loads(r.stdout)["items"]:
+for it in kc_json("get", "cm", "-o", "json")["items"]:
     n = it["metadata"]["name"]
     if "image-patch" in n:
         cms[n] = it.get("data") or {}
 
 # --- gather deploys ---
-r = kc("get", "deploy", "-o", "json")
 deploys = {}
-for it in json.loads(r.stdout)["items"]:
+for it in kc_json("get", "deploy", "-o", "json")["items"]:
     n = it["metadata"]["name"]
     if not n.startswith("zero-"):
         continue
@@ -61,14 +74,33 @@ for it in json.loads(r.stdout)["items"]:
             cm = v["configMap"]["name"]
     deploys[n] = {"script": script, "cm": cm}
 
-# --- reference = the newest content across all patch CMs, per key ---
-ref = {}
-for k in KEYS:
-    best = None
-    for cm, d in cms.items():
-        if k in d and (best is None or len(d[k]) > len(best)):
-            best = d[k]
-    ref[k] = best
+# --- reference = one explicitly PINNED ConfigMap ---
+#
+# This used to pick, per key, whichever ConfigMap held the LONGEST string. That
+# is not a notion of correctness, and it let the tool invert its own verdict: a
+# stale-but-longer CM silently became the reference, so correctly-patched pods
+# would be reported as MISMATCH (or a genuinely stale pod would pass). The bug was
+# latent only because zk-image-patch and zk-image-patch-stream87 happened to hold
+# byte-identical copies when the audit was first run.
+#
+# zk-image-patch is the shared CM that ~49 of the 50 deploys mount, so it is the
+# authoritative copy by construction. zero-87 mounts its own
+# zk-image-patch-stream87; that is deliberate, and it is compared against the same
+# reference so a divergence there is REPORTED rather than becoming the standard.
+#
+# NOT the git working tree: verified 2026-07-27 that
+# zerokey-patch/routes/responses.js in git is 101 lines BEHIND the deployed copy
+# (the progressive-streaming work was never committed back), so git would flag all
+# 50 pods. Override with REF_CM= if the authoritative CM ever changes.
+REF_CM = os.environ.get("REF_CM", "zk-image-patch")
+if REF_CM not in cms:
+    sys.exit("reference ConfigMap %r not found; saw %s"
+             % (REF_CM, sorted(cms) or "none"))
+ref = {k: cms[REF_CM].get(k) for k in KEYS}
+missing_in_ref = [k for k in KEYS if not ref.get(k)]
+if missing_in_ref:
+    print("WARNING: reference CM %s lacks %s -- those keys cannot be checked"
+          % (REF_CM, missing_in_ref))
 
 def check(name):
     d = deploys[name]

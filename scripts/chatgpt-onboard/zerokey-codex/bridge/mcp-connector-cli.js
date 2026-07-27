@@ -38,7 +38,11 @@ function loadSession(p) {
   } catch (e) {
     die(`session 不是合法 JSON: ${e.message}`);
   }
-  const h = s.headers || s;
+  // s 可能是 null / 数组 / 字符串 —— JSON.parse 都能过,但取不到 headers
+  if (!s || typeof s !== 'object' || Array.isArray(s)) {
+    die('session 顶层必须是 object(应是含 headers 的 bundle)。');
+  }
+  const h = (s.headers && typeof s.headers === 'object') ? s.headers : s;
   if (!h.authorization) die('session 里没有 authorization 头 —— 不是有效的 bundle。');
   if (!h.cookie) warn('session 里没有 cookie 头,可能会被 Cloudflare 拦。');
   return h;

@@ -131,7 +131,10 @@ async function main() {
   if (!fs.existsSync(opts.session)) die(`session 不存在: ${opts.session}`);
 
   const s = JSON.parse(fs.readFileSync(opts.session, 'utf8'));
-  const h = s.headers || s;
+  if (!s || typeof s !== 'object' || Array.isArray(s)) {
+    die('session 顶层必须是 object(应是含 headers 的 bundle)。');
+  }
+  const h = (s.headers && typeof s.headers === 'object') ? s.headers : s;
   if (!h.authorization) die('session 里没有 authorization');
 
   log('拉取首页...');

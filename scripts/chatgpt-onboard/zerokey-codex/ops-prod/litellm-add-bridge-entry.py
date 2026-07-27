@@ -44,7 +44,15 @@ CM = os.environ.get("LITELLM_CM", "litellm-config")
 DEPLOY = os.environ.get("LITELLM_DEPLOY", "litellm-proxy")
 BASE = os.environ.get("LITELLM_BASE", "http://10.68.13.198:30402").rstrip("/")
 MK = os.environ.get("MK", "")
-SUDO_PW = os.environ.get("SUDO_PW", "Hn8#mKLp3QxZ")
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))), "lib"))
+import carher_secrets  # noqa: E402
+
+# env -> .carher-secrets.json (gitignored) -> ~/.config/carher/secrets.json.
+# Was a hardcoded default; a plaintext production credential in a tracked file is
+# one `git push` from permanent disclosure.
+SUDO_PW = carher_secrets.require("SUDO_PW")
 
 ENTRY_ID = "zerokey-codex-bridge-01"
 MODEL_NAME = "zerokey-codex-bridge"

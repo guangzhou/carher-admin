@@ -13,7 +13,12 @@ production topology: remote bridge, local execution.
 import json, subprocess, sys, time, urllib.request, re, os
 
 BASE = os.environ.get("ZK_BASE", "https://cc.auto-link.com.cn/pro/v1")
-KEY = os.environ.get("ZK_KEY", "sk-seGuPVWItZNvNFaLYQ3UrQ")
+# No hardcoded key default: this file is committed. env -> .carher-secrets.json.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))), "lib"))
+import carher_secrets  # noqa: E402
+KEY = carher_secrets.require("ZK_KEY")
 MODEL = os.environ.get("ZK_MODEL", "gpt-5.6-sol")
 
 # The `exec` custom tool exactly as Codex declares it (code_mode). CRITICAL:

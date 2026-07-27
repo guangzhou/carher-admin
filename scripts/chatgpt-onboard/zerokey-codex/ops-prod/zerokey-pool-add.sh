@@ -14,11 +14,15 @@ set -uo pipefail
 
 LITELLM_HOST="10.68.13.198"
 LITELLM_PORT="30402"
-LITELLM_MK="sk-pro-litellm-ce077e2b0721bb419a633e4d"
+# Secrets come from the environment or the local gitignored .carher-secrets.json
+# (see scripts/lib/carher-secrets-init.sh). They used to be hardcoded here: two
+# production sudo passwords and a LiteLLM master key, in a tracked file.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../lib" && pwd)/carher-secrets.sh"
+LITELLM_MK="$(carher_secret LITELLM_MASTER_KEY)"
 K8S_HOST="10.68.13.198"
-K8S_PASS="Hn8#mKLp3QxZ"
+K8S_PASS="$(carher_secret SUDO_PW)"
 ZK_HOST="10.68.13.225"
-ZK_PASS="Rf6#pLm9KqXz"
+ZK_PASS="$(carher_secret ZK_SUDO_PW)"
 
 MODEL_NAME="chatgpt-gpt-5.5"
 MODEL_ID="openai/gpt-5-5"

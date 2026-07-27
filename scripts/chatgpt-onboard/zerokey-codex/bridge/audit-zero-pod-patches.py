@@ -25,7 +25,14 @@ zk-image-patch-stream87), so 1 and 2 must both be checked.
 import json, os, subprocess, hashlib, sys
 from concurrent.futures import ThreadPoolExecutor
 
-PW = "Hn8#mKLp3QxZ\n"
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))), "lib"))
+import carher_secrets  # noqa: E402
+
+# Never hardcode the production sudo password. Resolution order is env ->
+# .carher-secrets.json (gitignored) -> ~/.config/carher/secrets.json.
+PW = carher_secrets.require("SUDO_PW") + "\n"
 KEYS = ["responses.js", "web-tools.js", "raw.js", "zerokey-serve-codex.js",
         "images.js", "api.js"]
 

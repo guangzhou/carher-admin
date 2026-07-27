@@ -14,15 +14,22 @@ audit-zero-pod-patches.py.
 The cp lines are inserted immediately BEFORE `exec`, so any init gating already
 present (e.g. `until [ -f /app/temp/users.json ]`) is preserved verbatim.
 
-Set SUDO_PW in the environment; it is not stored here.
+The sudo password comes from SUDO_PW in the environment or from the local
+gitignored .carher-secrets.json (see scripts/lib/carher-secrets-init.sh).
 """
 import json
 import os
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))), "lib"))
+import carher_secrets  # noqa: E402
+
 NS = "litellm-product"
-PW = os.environ.get("SUDO_PW", "") + "\n"
+# env -> .carher-secrets.json (gitignored) -> ~/.config/carher/secrets.json
+PW = carher_secrets.require("SUDO_PW") + "\n"
 
 NEED = ["cp /patch/web-tools.js /app/routes/web-tools.js",
         "cp /patch/raw.js /app/routes/raw.js",
@@ -65,10 +72,6 @@ def main(argv):
     if unknown:
         sys.exit("unknown flag(s) %s -- did you mean --apply?" % unknown)
     dry = "--apply" not in flags
-
-    if not PW.strip():
-        print("  note: SUDO_PW is empty; kubectl will fail if sudo needs a password",
-              file=sys.stderr)
 
     r = kc_checked("get", "deploy", app, "-o", "json")
     try:

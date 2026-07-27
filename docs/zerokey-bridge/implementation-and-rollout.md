@@ -598,5 +598,9 @@ kubectl -n litellm-product exec $POD -- grep -c <本次新增的标识> /code/br
 - 落盘 SQL 生成:`~/.zerokey-bridge/mk_sql.py`
 - litellm SpendLogs:provider=`zerokey-web`,归属 key=`cursor-liuguoxian-l08v`(hash `70524ea8...`)
 - zero pod:198 litellm-product ns,`zero-N`(svc ClusterIP 稳定),打网页后端 `backend-api/f/conversation`
-- 198 直连:`sshpass -p 'Hn8#mKLp3QxZ' ssh cltx@10.68.13.198`,kubectl 需 `sudo -S`
+- 198 直连:`sshpass -p "$(python3 -c 'import sys;sys.path.insert(0,"scripts/lib");import carher_secrets as c;print(c.require("SUDO_PW"))')" ssh cltx@10.68.13.198`,kubectl 需 `sudo -S`
+  - 密码**不写进仓库**。放在本地 gitignore 的 `.carher-secrets.json`,用
+    `scripts/lib/carher-secrets-init.sh` 生成;脚本侧统一走
+    `scripts/lib/carher_secrets.py`(Python)或 `scripts/lib/carher-secrets.sh`(shell)。
+    环境变量 `SUDO_PW` 优先,便于 CI 和临时覆盖。
 - sub2api 参考:`github.com/Wei-Shaw/sub2api`(Go+postgres+redis 单镜像)

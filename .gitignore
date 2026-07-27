@@ -37,8 +37,14 @@ docs/*.tar.gz
 
 # Raw data exports (large + may contain sensitive info)
 docs/litellm-raw-*.csv
+docs/her-distillations/
 
 # Claude Code: project-level settings.json is committed,
 # but local-only overrides stay out of the repo
 .claude/settings.local.json
 .224-pre-reinstall-*/
+scripts/chatgpt-quota-engine-web/web/.env.local
+
+# Local operator secrets (sudo password, master keys). Never commit.
+# Create with scripts/lib/carher-secrets-init.sh
+.carher-secrets.json

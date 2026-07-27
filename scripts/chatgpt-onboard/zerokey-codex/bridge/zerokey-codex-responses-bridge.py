@@ -229,20 +229,33 @@ def lacks_tool_capability(u, now=None):
     return (now or time.time()) - ts < TOOLGATE_RECHECK_S
 
 
-def _decayed_refuse(u, now=None):
-    """`u`'s refusal rate, decayed toward 0 by elapsed time since its last
-    observation. Same rationale as _decayed_err: an excluded pod is no longer
-    sampled, so a frozen score would bench it permanently."""
-    rv = _refuse.get(u, 0.0)
-    if rv <= 0.0:
+def _decay(score_map, seen_map, u, halflife_s, now=None):
+    """Half-life decay of `u`'s score toward 0 by time since its last observation.
+
+    Single implementation shared by the error and refusal gates. They were two
+    near-identical copies; any fix (e.g. the dt<=0 clock-skew guard) had to be
+    applied twice and would silently drift apart if it wasn't.
+
+    Decay is what makes exclusion self-healing: an excluded pod stops being
+    sampled, so a frozen score would bench it permanently.
+    """
+    v = score_map.get(u, 0.0)
+    if v <= 0.0:
         return 0.0
-    seen = _refuse_seen.get(u)
+    seen = seen_map.get(u)
     if not seen:
-        return rv
+        return v
     dt = (now or time.time()) - seen
-    if dt <= 0:
-        return rv
-    return rv * (0.5 ** (dt / REFUSE_HALFLIFE_S))
+    if dt <= 0:                       # clock skew / same-instant read
+        return v
+    if halflife_s <= 0:               # guard: 0 would divide-by-zero
+        return 0.0
+    return v * (0.5 ** (dt / halflife_s))
+
+
+def _decayed_refuse(u, now=None):
+    """`u`'s refusal rate, decayed toward 0. See _decay."""
+    return _decay(_refuse, _refuse_seen, u, REFUSE_HALFLIFE_S, now)
 
 
 def cool_down(u, seconds=None):
@@ -288,24 +301,13 @@ def mark_health(u, hit, error=False, refused=False):
 
 
 def _decayed_err(u, now=None):
-    """`u`'s error rate, decayed toward 0 by elapsed time since its last
-    observation. Caller must hold _health_lock (or accept a slightly stale read,
-    as the health endpoint does).
+    """`u`'s error rate, decayed toward 0. See _decay.
 
-    This is what makes exclusion self-healing: a pod benched by one bad streak
-    drops back below ERR_BAD after roughly ERR_HALFLIFE_S of not being sampled
-    and rejoins the rotation on its own.
+    Caller must hold _health_lock (or accept a slightly stale read, as the health
+    endpoint does). A pod benched by one bad streak drops back below ERR_BAD after
+    roughly ERR_HALFLIFE_S of not being sampled and rejoins the rotation on its own.
     """
-    e = _err.get(u, 0.0)
-    if e <= 0.0:
-        return 0.0
-    seen = _err_seen.get(u)
-    if not seen:
-        return e
-    dt = (now or time.time()) - seen
-    if dt <= 0:
-        return e
-    return e * (0.5 ** (dt / ERR_HALFLIFE_S))
+    return _decay(_err, _err_seen, u, ERR_HALFLIFE_S, now)
 
 
 def error_rate(u):
@@ -1503,8 +1505,13 @@ def call_zerokey(messages, want_tools=True, max_rounds=2, on_delta=None,
     # 1+0.1+0.01 = 1.11 calls instead of 3.00 — a 2.7x quota reduction for
     # roughly +2-4s expected latency. Set BRIDGE_TOOL_FANOUT to override if a
     # specific workload ever justifies it.
+    # NOTE: assign, do not max(). Using max() made this a one-way ratchet -- an
+    # operator could raise fanout but never lower it below whatever the caller
+    # already passed, so BRIDGE_TOOL_FANOUT=1 could not undo a caller's fanout=3.
+    # That is the wrong direction for a quota guard (G4): the env var exists to
+    # CAP cost, so it must be able to reduce as well as raise.
     if want_tools:
-        fanout = max(fanout, int(os.environ.get('BRIDGE_TOOL_FANOUT', '1')))
+        fanout = max(1, int(os.environ.get('BRIDGE_TOOL_FANOUT', '1')))
     # Hard wall-clock cap. `budget` lets a CALLER pass the time it has left, which
     # matters for the soft-brake follow-up: it calls back into call_zerokey from
     # inside a request that has already spent most of CALL_BUDGET, and taking a

@@ -82,6 +82,25 @@ ERR_ALPHA = float(os.environ.get("BRIDGE_ERR_ALPHA", 0.2))
 ERR_BAD = float(os.environ.get("BRIDGE_ERR_BAD", 0.6))
 # A fresh pod starts at 0.0 (assumed good) so new capacity gets traffic at once.
 _err = {u: 0.0 for u in UPSTREAMS}      # upstream -> error-rate EWMA [0,1]
+_err_seen = {}                          # upstream -> ts of its last observation
+# Half-life for _err when a pod is NOT being sampled.
+#
+# Without this the EWMA is a one-way ratchet and the pool leaks capacity
+# permanently. The EWMA only moves inside mark_health(), mark_health() only runs
+# for a pod that was selected, and next_healthy_upstream() excludes any pod at or
+# above ERR_BAD — so an excluded pod is never sampled, its rate never falls, and
+# it stays benched until the process restarts. Measured with 5 upstreams: five
+# consecutive transport errors (one cluster-wide 502 blip) pushed 4 pods to
+# _err=0.672 >= ERR_BAD=0.6; over the next 200 selections they received 0 picks
+# and the survivor took 200/200, with _err frozen at 0.672. A served chat turn
+# could not rescue them either, because mark_health's `if error or hit:` guard
+# skips the plain-reply case entirely. On the 47-pod pool this shrinks capacity
+# monotonically and concentrates all quota on whichever pods dodged each blip.
+#
+# Decaying by wall-clock time restores the property the deleted _tier /
+# HEALTH_DECAY_S code provided ("a pod that hit -3 on one bad streak was
+# blacklisted forever and never retried"), without reintroducing tiers.
+ERR_HALFLIFE_S = float(os.environ.get("BRIDGE_ERR_HALFLIFE_S", 300))
 # Refusal-rate EWMA: how often this pod declines to use the tool harness on a
 # turn that offered tools. Separate from _err on purpose (see mark_health).
 _refuse = {u: 0.0 for u in UPSTREAMS}
@@ -207,19 +226,42 @@ def mark_health(u, hit, error=False, refused=False):
     the same prompt across 12 pods: 1 complied, 11 refused. Without this the
     bridge re-discovers that by trial and error on every single request.
     """
+    now = time.time()
     with _health_lock:
         if error or hit:
-            prev = _err.get(u, 0.0)
+            prev = _decayed_err(u, now)
             _err[u] = ERR_ALPHA * (1.0 if error else 0.0) + (1 - ERR_ALPHA) * prev
+            _err_seen[u] = now
         if refused or hit:
             prevr = _refuse.get(u, 0.0)
             _refuse[u] = (REFUSE_ALPHA * (1.0 if refused else 0.0)
                           + (1 - REFUSE_ALPHA) * prevr)
 
 
+def _decayed_err(u, now=None):
+    """`u`'s error rate, decayed toward 0 by elapsed time since its last
+    observation. Caller must hold _health_lock (or accept a slightly stale read,
+    as the health endpoint does).
+
+    This is what makes exclusion self-healing: a pod benched by one bad streak
+    drops back below ERR_BAD after roughly ERR_HALFLIFE_S of not being sampled
+    and rejoins the rotation on its own.
+    """
+    e = _err.get(u, 0.0)
+    if e <= 0.0:
+        return 0.0
+    seen = _err_seen.get(u)
+    if not seen:
+        return e
+    dt = (now or time.time()) - seen
+    if dt <= 0:
+        return e
+    return e * (0.5 ** (dt / ERR_HALFLIFE_S))
+
+
 def error_rate(u):
     with _health_lock:
-        return _err.get(u, 0.0)
+        return _decayed_err(u)
 
 
 # ── per-caller pod affinity ──────────────────────────────────────────
@@ -307,12 +349,12 @@ def next_healthy_upstream(n=1, prefer_compliant=False, key_hash=None):
             capable = [u for u in free if not lacks_tool_capability(u, now)]
             if capable:
                 free = capable
-        pool = [u for u in free if _err.get(u, 0.0) < ERR_BAD]
+        pool = [u for u in free if _decayed_err(u, now) < ERR_BAD]
         if prefer_compliant and pool:
             pool = sorted(pool, key=lambda u: _refuse.get(u, 0.0))
         if not pool:
             pool = sorted(free or list(UPSTREAMS),
-                          key=lambda u: _err.get(u, 0.0))
+                          key=lambda u: _decayed_err(u, now))
     # Honour this caller pinned pod, but only while it is still usable: a pin
     # must never hold a caller on a cooling or failing account. Applied AFTER
     # the health filtering above. Returned alone only when the caller wants a
@@ -2027,10 +2069,10 @@ class H(BaseHTTPRequestHandler):
         now = time.time()
         with _health_lock:
             pods = [{"upstream": u,
-                     "error_rate": round(_err.get(u, 0.0), 3),
+                     "error_rate": round(_decayed_err(u, now), 3),
                      "cooling_for_s": max(0, round(_cooldown.get(u, 0) - now, 1)),
                      "no_tool_capability": lacks_tool_capability(u, now),
-                     "usable": (_err.get(u, 0.0) < ERR_BAD
+                     "usable": (_decayed_err(u, now) < ERR_BAD
                                 and _cooldown.get(u, 0) <= now)}
                     for u in UPSTREAMS]
             stats = dict(_tool_fixes)

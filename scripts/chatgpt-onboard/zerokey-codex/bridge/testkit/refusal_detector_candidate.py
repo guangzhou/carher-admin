@@ -1,35 +1,39 @@
 #!/usr/bin/env python3
-"""Candidate refusal detector v2.
+"""Refusal detector, kept in sync with the shipped bridge implementation.
 
-Design change vs the shipped one: the shipped detector was a flat OR of "denial
-verb" regexes over a 200-char head. That failed both ways --
+Run it to score the corpus offline (milliseconds) instead of via 40s network
+round-trips.
 
-  * MISSED 7/14: real refusals lead with a cooperative clause ("我可以帮你处理
-    飞书文档内容，但...") so the denial lands at char 60-120 and, more
-    importantly, is phrased as "没有可用的 X 工具" / "不能直接替你运行" /
-    "无法进入", none of which the old alternation covered.
-  * FALSE-POSITIVE on "该配置无法直接读取环境变量" -- a denial about the SUBJECT
-    MATTER, not about the model's own capability.
+History worth keeping: the FIRST rewrite scored 17/17 on a corpus I had built
+myself and was still wrong in production, two ways at once:
+  * `_SELF` (the "denial must be about the assistant" guard) matched the bare
+    pronoun 我, which appears in nearly every Chinese reply -- so the guard was
+    vacuous and CORRECT answers that mentioned a missing permission, or closed
+    with a next-step suggestion, were discarded and re-asked.
+  * Requiring that same `_SELF` pairing lost every pronoun-less Chinese refusal
+    ("抱歉，这里没有终端可用"), and `_EN_DENIAL` was pinned to a leading "i" so it
+    missed "Unable to read...", "It can't open...", "Sorry, cannot run...".
+    Those scored as SUCCESS and were returned to the user verbatim.
 
-So instead of matching denial alone, require evidence that the denial is about
-THIS ASSISTANT's ability to act. Three independent triggers, any of which is
-sufficient:
+The discriminator that actually works is `_REPORTED_RESULT`: a reply stating what
+it RAN and what came BACK is an answer, however much hedging follows. Denials are
+then sufficient on their own.
 
-  DENIAL + SELF  -- a capability denial attributed to the model or its environment
-  HANDOFF        -- asking the user to run it and report back (always a refusal)
-  NARRATION      -- admitting the work isn't done and describing what it *would*
-                    do next (the multi-turn failure mode: model has the tool
-                    result in history and writes a status report instead of the
-                    next command)
+Lesson: a self-built corpus is not a regression baseline. When replacing a
+matcher, every phrasing the OLD one caught must be added as a test first.
 """
 import re
 
-# --- capability denial -------------------------------------------------------
+
 _DENIAL = re.compile(
     # 不能/无法/没法 + (直接|实际|替你|真正) + action verb
     # Allow an intervening phrase between the adverb and the verb: real replies
-    # say "不能直接在你的 macOS 环境里执行", where "在...里" sits in between. The
-    # old adjacency-only form missed those and cost a live retry.
+    # say "不能直接在你的 macOS 环境里执行", where "在...里" sits in between. An
+    # adjacency-only form missed those, and each miss costs a live retry -- one
+    # such miss made a request give up after a single retry instead of six.
+    # Safe to loosen because a bare denial is never sufficient on its own; it
+    # must also pass _SELF (see below), which is what keeps subject-matter
+    # denials like "这个脚本不能在容器里访问宿主机的网络" out.
     r"(?:无法|不能|没法|没有办法)\s*(?:直接|实际|替你|真正|亲自)?\s*"
     r"(?:[^。；！？\n]{0,24}?(?:里|上|中|内|下))?\s*"
     r"(?:查看|读取|访问|获取|打开|运行|执行|调用|进入|连接|拉取|抓取)"
@@ -65,14 +69,29 @@ _NARRATION = re.compile(
     r"(?:读到|拿到|获取到|取到|完成|执行|运行|开始)"
     r"|上一?次只是|上一步只是|目前只是|仅仅只是确认"
     r"|(?:所以)?不能说(?:已经)?(?:搞定|完成|做完)"
-    r"|下一步(?:需要|应该|要)(?:用|调用|执行|运行)",
+    r"|下一步(?:需要|应该|要)(?:用|调用|执行|运行)"
+    # Seen live: the model ran the command in its OWN web sandbox, it failed,
+    # and it reported the sandbox failure as if the task were impossible
+    # ("工具执行环境未能启动（命令未实际运行成功）"). That is a miss to retry on
+    # another pod, not an answer.
+    r"|(?:执行环境|工具环境|运行环境)[^。；！\n]{0,10}(?:未能|没能|无法|失败)"
+    r"|命令(?:未|没有)(?:实际)?(?:运行|执行)成功",
     re.I)
 
 # --- English equivalents -----------------------------------------------------
+# The subject must NOT be pinned to a literal leading "i": real refusals also
+# arrive as "Unable to read the file you referenced.", "It can't open external
+# links...", "Sorry, cannot run that command in this environment." The first
+# rewrite required `i`/`i'm` and so missed every one of those, scoring the pod as
+# a SUCCESS and returning the refusal verbatim to the user.
 _EN_DENIAL = re.compile(
     r"(?:i\s*(?:'m|am)\s*(?:not\s*able|unable)|i\s*(?:can(?:'t|not)|don'?t\s+have))"
     r"[^.;\n]{0,40}"
     r"(?:access|run|execute|read|open|view|reach|directly|shell|terminal|filesystem)"
+    # Subject-agnostic form: any "cannot/unable to <act>" clause.
+    r"|(?:can(?:'t|not)|could\s+not|couldn'?t|unable\s+to|not\s+able\s+to)"
+    r"[^.;\n]{0,30}"
+    r"(?:access|run|execute|read|open|view|reach|fetch|retrieve|browse)"
     r"|no\s+(?:access\s+to\s+a\s+)?(?:shell|terminal|sandbox|execution\s+tool)"
     r"|don'?t\s+have\s+(?:a\s+)?(?:shell|terminal|way\s+to\s+run)",
     re.I)
@@ -87,18 +106,62 @@ _EN_NARRATION = re.compile(
     re.I)
 
 
-# Window: the old 200 was too tight -- real refusals put the denial at char
-# 60-160 *after* a cooperative opener, and the narration form puts its tell in
-# the second or third sentence. 600 is safe now that DENIAL alone is not
-# sufficient (it must be paired with SELF), which is what previously made a
-# wide window dangerous.
+# Window: the old 200 was too tight -- real refusals lead with a cooperative
+# clause ("我可以帮你处理...但") and put the denial at char 60-160, and the
+# narration form puts its tell in the second or third sentence.
 _HEAD = 600
 
 
-def looks_like_refusal(text):
+# A reply that REPORTS A RESULT is not a refusal, however much hedging it
+# contains. This is the discriminator that actually separates the two classes;
+# the previous "denial must be paired with _SELF" guard was vacuous because
+# _SELF matches the bare pronoun 我, present in nearly every Chinese reply. That
+# made three measured cases of a CORRECT answer get discarded and re-asked:
+#   "我运行了 ls -la /etc/shadow，结果显示没有读取权限，需要 sudo。"
+#   "我读完文档了，标题是《…》。下一步需要执行 brew cleanup 清理缓存。"
+#   "我运行了测试，3 个失败。你可以在终端里执行 pytest -v 看详细输出。"
+# Each states what it DID and what came back — the opposite of a refusal.
+_REPORTED_RESULT = re.compile(
+    # past-tense execution claim followed by an outcome
+    r"(?:我(?:已经|刚)?(?:运行|执行|跑|查看|查|读|读取|拉取|获取)(?:了|完))"
+    r"|(?:已(?:经)?(?:运行|执行|读取|获取|拉取|查看|完成))"
+    r"|(?:结果(?:显示|是|为)|输出(?:显示|是|为)|返回(?:了|结果))"
+    r"|i\s+(?:ran|executed|checked|read|fetched|retrieved)\b"
+    r"|(?:the\s+)?(?:command|output|result)\s+(?:returned|shows|was)\b",
+    re.I)
+
+
+def _looks_like_refusal(text):
+    """True if the reply is the model declining to use its tools.
+
+    Order matters: the result-report check runs FIRST and wins, because a reply
+    that says what it ran and what came back is an answer even when it also
+    mentions a missing permission or suggests a next step. Everything after it
+    is a decline signal.
+    """
     if not text:
         return False
     head = text.strip()[:_HEAD]
+    # An answer that reports real output is never a refusal — return early so no
+    # later pattern can discard it.
+    if _REPORTED_RESULT.search(head):
+        return False
+    # Nor is a statement about what some THING cannot do. "该配置无法直接读取环境
+    # 变量" / "这个脚本不能在容器里访问宿主机" describe the subject matter, not the
+    # assistant's own capability, and both the old and the first rewritten
+    # detector flagged them.
+    #
+    # Two constraints keep this exemption from swallowing real refusals:
+    #  - the span must be pronoun-free: "该文档我无法访问" is a real refusal that
+    #    merely opens by naming the object;
+    #  - it must not be followed by 执行/运行 ("该操作无法直接执行" IS the model
+    #    declining to run something, whereas "该配置无法直接读取环境变量" is a fact
+    #    about the config). Executing is the assistant's job; being readable is a
+    #    property of the thing.
+    _m = re.search(r"(?:该|这个|那个|此)[^，。；！？\n我你]{0,12}?"
+                   r"(?:无法|不能|没法)\s*(?:直接)?\s*([^，。；！？\n]{0,6})", head)
+    if _m and not re.search(r"执行|运行|访问|打开", _m.group(1)):
+        return False
     if _HANDOFF.search(head) or _EN_HANDOFF.search(head):
         return True
     if _NARRATION.search(head) or _EN_NARRATION.search(head):
@@ -107,10 +170,13 @@ def looks_like_refusal(text):
     # it) and can appear with no pronoun at all, so it stands alone.
     if re.search(r"(?:不能|不会|无法)假装", head):
         return True
-    if (_DENIAL.search(head) or _EN_DENIAL.search(head)) and _SELF.search(head):
-        return True
-    # English is already first-person-anchored inside the pattern.
-    if _EN_DENIAL.search(head):
+    # A capability denial is sufficient on its own. Requiring a co-occurring
+    # self-reference lost every pronoun-less Chinese refusal ("抱歉，这里没有终端
+    # 可用", "拿不到这个链接的内容", "看不到该文档") — those were scored as
+    # SUCCESS, pinned the caller to that pod, and were returned to the user
+    # verbatim. False positives are now held off by _REPORTED_RESULT above,
+    # which is a far tighter guard than _SELF ever was.
+    if _DENIAL.search(head) or _EN_DENIAL.search(head):
         return True
     return False
 
@@ -119,4 +185,4 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, ".")
     import corpus
-    corpus.score(looks_like_refusal, verbose=True)
+    corpus.score(_looks_like_refusal, verbose=True)

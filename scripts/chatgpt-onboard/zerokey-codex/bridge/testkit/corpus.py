@@ -28,6 +28,21 @@ REFUSE = [
     "你可以在终端执行 df -h，把输出贴给我",
     "I don't have access to a shell, so I can't run that. Please paste the output.",
     "I'm unable to directly read files on your machine.",
+    # --- REGRESSION SET: these were caught by the DELETED _REFUSAL_PAT /
+    # _REFUSAL_EN and were MISSED by the first rewrite. Two blind spots:
+    # (a) Chinese denials with NO first-person pronoun, which the rewrite's
+    #     mandatory _SELF pairing rejected outright;
+    # (b) every English denial not phrased "I can't / I'm unable / I don't have".
+    # Found by an adversarial re-read of the diff, not by my own sampling --
+    # my corpus happened to be all first-person, which is exactly why the
+    # rewrite scored 17/17 while regressing in production.
+    "抱歉，这里没有终端可用，只能给出命令供参考。",
+    "该操作无法直接执行，需要在本地完成。",
+    "拿不到这个链接的内容。",
+    "看不到该文档。",
+    "Unable to read the file you referenced.",
+    "It can't open external links, so here is the command instead.",
+    "Sorry, cannot run that command in this environment.",
 ]
 
 # Replies that are legitimate and must NOT be retried.
@@ -45,6 +60,17 @@ KEEP = [
     "已经帮你创建了 report.md，内容包含三个小节。",
     "The disk has 926Gi total, 567Gi available.",
     "Quicksort picks a pivot and partitions the array around it.",
+    # --- REGRESSION SET: real, CORRECT answers that the first rewrite
+    # misclassified as refusals and threw away. Root cause: the 600-char window
+    # was justified by "a denial must also pass _SELF", but _SELF matches the
+    # bare pronoun 我, which appears in nearly every Chinese reply -- so the
+    # pairing guard was vacuous and any multi-sentence answer that mentioned a
+    # missing permission, or closed with a next-step suggestion, was discarded.
+    "我运行了 ls -la /etc/shadow，结果显示没有读取权限，需要 sudo。",
+    "我读完文档了，标题是《老杨的her》。下一步需要执行 brew cleanup 清理缓存。",
+    "我运行了测试，3 个失败。你可以在终端里执行 pytest -v 看详细输出。",
+    "我执行了 df -h，根分区没有剩余空间了，建议清理 /var/log。",
+    "我查看了配置，这个字段无法直接读取环境变量，需要显式传入。",
 ]
 
 

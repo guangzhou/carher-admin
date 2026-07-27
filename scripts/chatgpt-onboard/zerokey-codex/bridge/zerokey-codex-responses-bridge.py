@@ -1118,14 +1118,29 @@ _NARRATION = re.compile(
     r"(?:读到|拿到|获取到|取到|完成|执行|运行|开始)"
     r"|上一?次只是|上一步只是|目前只是|仅仅只是确认"
     r"|(?:所以)?不能说(?:已经)?(?:搞定|完成|做完)"
-    r"|下一步(?:需要|应该|要)(?:用|调用|执行|运行)",
+    r"|下一步(?:需要|应该|要)(?:用|调用|执行|运行)"
+    # Seen live: the model ran the command in its OWN web sandbox, it failed,
+    # and it reported the sandbox failure as if the task were impossible
+    # ("工具执行环境未能启动（命令未实际运行成功）"). That is a miss to retry on
+    # another pod, not an answer.
+    r"|(?:执行环境|工具环境|运行环境)[^。；！\n]{0,10}(?:未能|没能|无法|失败)"
+    r"|命令(?:未|没有)(?:实际)?(?:运行|执行)成功",
     re.I)
 
 # --- English equivalents -----------------------------------------------------
+# The subject must NOT be pinned to a literal leading "i": real refusals also
+# arrive as "Unable to read the file you referenced.", "It can't open external
+# links...", "Sorry, cannot run that command in this environment." The first
+# rewrite required `i`/`i'm` and so missed every one of those, scoring the pod as
+# a SUCCESS and returning the refusal verbatim to the user.
 _EN_DENIAL = re.compile(
     r"(?:i\s*(?:'m|am)\s*(?:not\s*able|unable)|i\s*(?:can(?:'t|not)|don'?t\s+have))"
     r"[^.;\n]{0,40}"
     r"(?:access|run|execute|read|open|view|reach|directly|shell|terminal|filesystem)"
+    # Subject-agnostic form: any "cannot/unable to <act>" clause.
+    r"|(?:can(?:'t|not)|could\s+not|couldn'?t|unable\s+to|not\s+able\s+to)"
+    r"[^.;\n]{0,30}"
+    r"(?:access|run|execute|read|open|view|reach|fetch|retrieve|browse)"
     r"|no\s+(?:access\s+to\s+a\s+)?(?:shell|terminal|sandbox|execution\s+tool)"
     r"|don'?t\s+have\s+(?:a\s+)?(?:shell|terminal|way\s+to\s+run)",
     re.I)
@@ -1140,18 +1155,62 @@ _EN_NARRATION = re.compile(
     re.I)
 
 
-# Window: the old 200 was too tight -- real refusals put the denial at char
-# 60-160 *after* a cooperative opener, and the narration form puts its tell in
-# the second or third sentence. 600 is safe now that DENIAL alone is not
-# sufficient (it must be paired with SELF), which is what previously made a
-# wide window dangerous.
+# Window: the old 200 was too tight -- real refusals lead with a cooperative
+# clause ("我可以帮你处理...但") and put the denial at char 60-160, and the
+# narration form puts its tell in the second or third sentence.
 _HEAD = 600
 
 
+# A reply that REPORTS A RESULT is not a refusal, however much hedging it
+# contains. This is the discriminator that actually separates the two classes;
+# the previous "denial must be paired with _SELF" guard was vacuous because
+# _SELF matches the bare pronoun 我, present in nearly every Chinese reply. That
+# made three measured cases of a CORRECT answer get discarded and re-asked:
+#   "我运行了 ls -la /etc/shadow，结果显示没有读取权限，需要 sudo。"
+#   "我读完文档了，标题是《…》。下一步需要执行 brew cleanup 清理缓存。"
+#   "我运行了测试，3 个失败。你可以在终端里执行 pytest -v 看详细输出。"
+# Each states what it DID and what came back — the opposite of a refusal.
+_REPORTED_RESULT = re.compile(
+    # past-tense execution claim followed by an outcome
+    r"(?:我(?:已经|刚)?(?:运行|执行|跑|查看|查|读|读取|拉取|获取)(?:了|完))"
+    r"|(?:已(?:经)?(?:运行|执行|读取|获取|拉取|查看|完成))"
+    r"|(?:结果(?:显示|是|为)|输出(?:显示|是|为)|返回(?:了|结果))"
+    r"|i\s+(?:ran|executed|checked|read|fetched|retrieved)\b"
+    r"|(?:the\s+)?(?:command|output|result)\s+(?:returned|shows|was)\b",
+    re.I)
+
+
 def _looks_like_refusal(text):
+    """True if the reply is the model declining to use its tools.
+
+    Order matters: the result-report check runs FIRST and wins, because a reply
+    that says what it ran and what came back is an answer even when it also
+    mentions a missing permission or suggests a next step. Everything after it
+    is a decline signal.
+    """
     if not text:
         return False
     head = text.strip()[:_HEAD]
+    # An answer that reports real output is never a refusal — return early so no
+    # later pattern can discard it.
+    if _REPORTED_RESULT.search(head):
+        return False
+    # Nor is a statement about what some THING cannot do. "该配置无法直接读取环境
+    # 变量" / "这个脚本不能在容器里访问宿主机" describe the subject matter, not the
+    # assistant's own capability, and both the old and the first rewritten
+    # detector flagged them.
+    #
+    # Two constraints keep this exemption from swallowing real refusals:
+    #  - the span must be pronoun-free: "该文档我无法访问" is a real refusal that
+    #    merely opens by naming the object;
+    #  - it must not be followed by 执行/运行 ("该操作无法直接执行" IS the model
+    #    declining to run something, whereas "该配置无法直接读取环境变量" is a fact
+    #    about the config). Executing is the assistant's job; being readable is a
+    #    property of the thing.
+    _m = re.search(r"(?:该|这个|那个|此)[^，。；！？\n我你]{0,12}?"
+                   r"(?:无法|不能|没法)\s*(?:直接)?\s*([^，。；！？\n]{0,6})", head)
+    if _m and not re.search(r"执行|运行|访问|打开", _m.group(1)):
+        return False
     if _HANDOFF.search(head) or _EN_HANDOFF.search(head):
         return True
     if _NARRATION.search(head) or _EN_NARRATION.search(head):
@@ -1160,10 +1219,13 @@ def _looks_like_refusal(text):
     # it) and can appear with no pronoun at all, so it stands alone.
     if re.search(r"(?:不能|不会|无法)假装", head):
         return True
-    if (_DENIAL.search(head) or _EN_DENIAL.search(head)) and _SELF.search(head):
-        return True
-    # English is already first-person-anchored inside the pattern.
-    if _EN_DENIAL.search(head):
+    # A capability denial is sufficient on its own. Requiring a co-occurring
+    # self-reference lost every pronoun-less Chinese refusal ("抱歉，这里没有终端
+    # 可用", "拿不到这个链接的内容", "看不到该文档") — those were scored as
+    # SUCCESS, pinned the caller to that pod, and were returned to the user
+    # verbatim. False positives are now held off by _REPORTED_RESULT above,
+    # which is a far tighter guard than _SELF ever was.
+    if _DENIAL.search(head) or _EN_DENIAL.search(head):
         return True
     return False
 
@@ -1507,19 +1569,43 @@ def tool_to_cmd(tc):
     #     breaks every call the moment it does — the mapper falls through and the
     #     command is lost.
     #  2. Pods sometimes echo a near-miss variant of the name they were given.
-    # A name containing any shell-ish token, or exactly our own job name, is a
-    # command to run. Checked BEFORE the file tools so `shell_enqueue_job`
-    # cannot be mistaken for anything else.
+    #
+    # But the name alone must NOT decide: a fuzzy match on "shell"/"exec" also
+    # catches `shell_create_file`, `execute_sql`, `run_in_powershell` and friends.
+    # Routing those to the shell branch returned "" (no `command` key in a
+    # file-tool's args), and "" is not None, so the empty string was emitted as
+    # `exec_command{cmd: ""}`: Codex ran nothing, the file was never written, and
+    # the user was told a command had run. The LOOP BRAKE could not stop the
+    # repeat either, because it tests `all(c and c in prev)` and "" is falsy.
+    #
+    # So: require an actual command argument, and let a call carrying file-tool
+    # arguments fall through to the file branches below.
     _n = (name or "").lower()
-    if ("shell" in _n or "terminal" in _n or "bash" in _n or "exec" in _n
-            or _n in ("enqueue_job", "run_command", "command", "run")):
-        return _strip_shell_wrapper(a.get("command") or a.get("cmd") or "")
-    if name in ("create_file", "write", "write_file", "new_file"):
+    _cmd_arg = a.get("command") or a.get("cmd")
+    _looks_shell = ("shell" in _n or "terminal" in _n or "bash" in _n
+                    or "exec" in _n
+                    or _n in ("enqueue_job", "run_command", "command", "run"))
+    if _looks_shell and _cmd_arg:
+        return _strip_shell_wrapper(_cmd_arg)
+    if _looks_shell and not _cmd_arg:
+        # Shell-ish name with no command. If it carries file-tool arguments the
+        # model meant a file operation, so fall through; otherwise there is
+        # nothing runnable and emitting an empty command is worse than refusing.
+        if not (path or a.get("content") or a.get("contents")
+                or a.get("oldString") or a.get("old_str")):
+            raise UnsafeToolArgs("%s without a command" % (name or "tool"))
+    # Match a *suffix* as well as the bare name, so a pod that echoes a blended
+    # variant ("shell_create_file") still lands on the right branch instead of
+    # being dropped. Ordering matters: replace/edit is checked after create, and
+    # both are reached only when the shell branch above declined.
+    _FILE_CREATE = ("create_file", "write", "write_file", "new_file")
+    _FILE_EDIT = ("replace_string_in_file", "edit_file", "insert_edit_into_file",
+                  "apply_patch", "str_replace")
+    if name in _FILE_CREATE or _n.endswith(_FILE_CREATE):
         if not path:
             raise UnsafeToolArgs("create_file without a path")
         return _add_file(path, a.get("content") or a.get("contents") or "")
-    if name in ("replace_string_in_file", "edit_file", "insert_edit_into_file",
-                "apply_patch", "str_replace"):
+    if name in _FILE_EDIT or _n.endswith(_FILE_EDIT):
         old = a.get("oldString") or a.get("old_str") or a.get("old") or ""
         new = a.get("newString") or a.get("new_str") or a.get("new") or a.get("content") or ""
         if not path:

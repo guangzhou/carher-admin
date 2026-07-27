@@ -124,6 +124,25 @@ STALL = [
 ]
 
 
+# --- KNOWN-UNDECIDABLE BY REGEX -------------------------------------------------
+# Kept out of the scored sets on purpose, and documented so nobody "fixes" it by
+# loosening a pattern and reintroducing false positives.
+#
+# These two are structurally IDENTICAL to this detector -- both match
+# _REPORTED_RESULT and both match _HANDOFF -- and differ only in meaning:
+#   REFUSAL: "我查看了 skill 说明，结果显示需要 lark-cli。你可以在终端执行 …，把输出贴给我。"
+#            (reports what is NEEDED; the work was not done)
+#   ANSWER:  "我运行了测试，3 个失败。你可以在终端里执行 pytest -v 看详细输出。"
+#            (reports the OUTCOME; the work was done, the suggestion is optional)
+# No regex can separate them. This is the concrete evidence for the conclusion in
+# docs/zerokey-bridge/refusal-detection-postmortem.md: compliance must become a
+# PARSE question (a sentinel, or completion-as-a-tool) rather than a semantic one.
+UNDECIDABLE = [
+    ("refusal", "我查看了 skill 说明，结果显示需要 lark-cli。你可以在终端执行 lark-cli docs +fetch，把输出贴给我。"),
+    ("answer",  "我运行了测试，3 个失败。你可以在终端里执行 pytest -v 看详细输出。"),
+]
+
+
 def score(fn, verbose=False):
     tp = sum(1 for s in REFUSE if fn(s))
     fp = sum(1 for s in KEEP if fn(s))

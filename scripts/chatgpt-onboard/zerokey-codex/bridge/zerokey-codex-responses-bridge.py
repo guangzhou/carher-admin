@@ -1345,6 +1345,24 @@ def _looks_like_refusal(text):
     if not text:
         return False
     head = text.strip()[:_HEAD]
+    # HANDOFF FIRST, and unconditionally. "把输出贴给我" / "you can run it yourself"
+    # is the least ambiguous signal in this function: a reply that asks the USER to
+    # run the command has not done the work, whatever else it contains. It used to
+    # sit below both exemptions, which shadowed it — measured, all three of these
+    # returned False while _HANDOFF matched every one:
+    #   "该文档无法直接读取，你可以在终端执行 lark-cli docs +fetch，把输出贴给我。"
+    #   "我查看了 skill 说明，结果显示需要 lark-cli。你可以在终端执行 …，把输出贴给我。"
+    #   "此环境不能提供 shell，请你自己在终端里执行 kubectl get pods 然后把输出贴给我。"
+    # Each shipped "paste the output back to me" to the user as a final answer, and
+    # recorded refused=False so the pod was never penalised.
+    # ...but only when the reply has NOT already reported a real result. "我运行了
+    # 测试，3 个失败。你可以在终端里执行 pytest -v 看详细输出。" reports the outcome
+    # and then offers an OPTIONAL follow-up; that is a complete answer, not a
+    # handoff. The distinction is whether the work was done, not whether the reply
+    # mentions the user running something.
+    if (_HANDOFF.search(head) or _EN_HANDOFF.search(head)) \
+            and not _REPORTED_RESULT.search(head):
+        return True
     # A reply that reports real output is an answer — EXCEPT when it also makes an
     # explicit not-yet admission, which means "here is the setup step I ran, and I
     # have still not done the actual task".
@@ -1378,9 +1396,26 @@ def _looks_like_refusal(text):
     # ("therefore I cannot tell"), not a statement about a thing. Measured live:
     # that match exempted a genuine narration reply and the agent loop stalled
     # after `--help` with the model describing its plan instead of running it.
+    # The verb test is an EXCLUSION list, not a whitelist. It used to re-admit only
+    # 执行|运行|访问|打开|判断, so every other verb escaped the detector entirely —
+    # measured False for 下载 / 抓取 / 列出 / 读取内容, e.g.
+    #   "该文档无法直接下载，你可以在终端执行 …，把输出贴给我。"       (下载)
+    #   "该文档无法直接读取内容，我还没有实际执行 docs +fetch。"        (读取内容,
+    #                                       also swallowing a not-yet admission)
+    # Now the exemption fires only for verbs that describe a PROPERTY of the thing
+    # ("该配置无法直接读取环境变量" — a fact about the config), and anything else is
+    # treated as the assistant declining to act. Erring toward "refusal" is the
+    # cheap direction: a false refusal costs one retry, a missed refusal is shipped
+    # to the user as an answer.
     _m = re.search(r"(?<![因由])(?:该|这个|那个|此)[^，。；！？\n我你]{0,12}?"
-                   r"(?:无法|不能|没法)\s*(?:直接)?\s*([^，。；！？\n]{0,6})", head)
-    if _m and not re.search(r"执行|运行|访问|打开|判断", _m.group(1)):
+                   r"(?:无法|不能|没法)\s*(?:直接)?\s*([^，。；！？\n]{0,8})", head)
+    if _m and re.search(r"支持|兼容|序列化|表示|包含|返回|承载|存储|表达"
+                        # A config/API "cannot read an env var" or "cannot get a
+                        # value" is a statement about the THING's capability, not
+                        # the assistant declining. These pair with an object
+                        # (环境变量 / 参数 / 字段), which the {0,8} span captures.
+                        r"|读取环境|读取配置|获取环境|获取配置|读取参数|读取字段",
+                        _m.group(1)):
         return False
     if _HANDOFF.search(head) or _EN_HANDOFF.search(head):
         return True

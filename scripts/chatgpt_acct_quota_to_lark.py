@@ -63,6 +63,9 @@ COLUMNS: list[tuple[str, str]] = [
     ("sub_left", "sub_left"),
     ("reset_cards", "reset_cards"),
     ("cause", "cause"),
+    # 数据采样时刻（payload.generated_at，UTC）。没有这列时，删 64 行重建 64 行后
+    # 屏幕上肉眼与上一版几乎一样（上游 7d% 基本不动），看表的人无法判断是否刷新过。
+    ("snapshot_at", "snapshot_at"),
 ]
 
 FIELDS = [name for name, _ in COLUMNS]
@@ -76,6 +79,7 @@ NEW_FIELD_SPECS = [
     {"name": "zk_lat_avg", "type": "number"},
     {"name": "zk_lat_p95", "type": "number"},
     {"name": "zk_empty%", "type": "number"},
+    {"name": "snapshot_at", "type": "text"},
 ]
 
 LARK_ENV = {
@@ -113,16 +117,22 @@ def load_rows(cards: dict | None = None) -> tuple[list[list], dict]:
         # 文本列的 '-' 是"无数据"占位，写进表格会被当成真值
         return None if v in ("", "-") else v
 
+    # 采样时刻取 payload.generated_at（数据实际采集时间），不用写入时刻 —— 两者可
+    # 差若干分钟（quota 脚本跑 198 要几分钟），表格该反映数据有多新，不是写得有多新。
+    snapshot_at = payload.get("generated_at")
+
     rows: list[list] = []
     for r in src_rows:
         # reset_cards: 从 cards dict 取 available_count(banked reset 卡数);
         # 探测失败/未探则 None(表格显示空)
         card_info = cards.get(r["acct"]) or {}
         r = {**r, "reset_cards": (card_info.get("credits")
-                                  if card_info.get("s") == "OK" else None)}
+                                  if card_info.get("s") == "OK" else None),
+             "snapshot_at": snapshot_at}
         rows.append([blank_to_none(r.get(key)) for _, key in COLUMNS])
 
-    print(f"[parse] {len(rows)} rows loaded from {ROWS_JSON}", file=sys.stderr)
+    print(f"[parse] {len(rows)} rows loaded from {ROWS_JSON} "
+          f"(generated_at={snapshot_at or '?'})", file=sys.stderr)
     return rows, payload
 
 
@@ -257,8 +267,20 @@ def batch_create_records(base_token: str, table_id: str, rows: list[list]) -> in
     return created
 
 
-def verify_records(base_token: str, table_id: str, expected: int) -> bool:
-    total = 0
+def verify_records(base_token: str, table_id: str, rows: list[list]) -> bool:
+    """读回表格并逐格比对，不只数条数。
+
+    只数条数会把「64 行全是空格子」也报成 OK —— 2026-07-27 就因此把一次成功写入
+    误当作可疑（真正的问题是表里没有采样时刻列，肉眼看不出刷新）。条数相等是必要
+    条件，不是充分条件，故这里比对内容。`+record-list` 是列式返回：`data.fields`
+    是表头、`data.data` 是行数组。
+    """
+    expected = len(rows)
+    idx = {name: i for i, (name, _) in enumerate(COLUMNS)}
+    want = {r[idx["acct"]]: r for r in rows}
+
+    got_rows: list[list] = []
+    header: list[str] = []
     page_token = None
     while True:
         cmd = [
@@ -270,17 +292,60 @@ def verify_records(base_token: str, table_id: str, expected: int) -> bool:
             cmd.extend(["--page-token", page_token])
         resp = lark_cli(cmd)
         d = resp.get("data", {})
-        ids = d.get("record_id_list", [])
-        total += len(ids)
+        header = d.get("fields") or header
+        got_rows.extend(d.get("data") or [])
         if not d.get("has_more"):
             break
         page_token = d.get("page_token", "")
         if not page_token:
             break
-    ok = total == expected
-    tag = "OK" if ok else "MISMATCH"
-    print(f"[verify] {tag}: {total} records in table, expected {expected}", file=sys.stderr)
-    return ok
+
+    if len(got_rows) != expected:
+        print(f"[verify] MISMATCH: {len(got_rows)} records in table, "
+              f"expected {expected}", file=sys.stderr)
+        return False
+    if "acct" not in header:
+        print("[verify] WARN: 读不到表头，跳过逐格比对", file=sys.stderr)
+        return False
+
+    # 表格列顺序与 COLUMNS 无关，按列名取
+    hpos = {name: i for i, name in enumerate(header)}
+    diffs: list[str] = []
+    for gr in got_rows:
+        acct = gr[hpos["acct"]]
+        exp = want.get(acct)
+        if exp is None:
+            diffs.append(f"{acct}: 表内多出的行")
+            continue
+        for col, src_i in idx.items():
+            if col not in hpos:
+                continue
+            e, g = exp[src_i], gr[hpos[col]]
+            if isinstance(g, list):  # select 列回读为 list
+                g = g[0] if g else None
+            if g in ("", []):
+                g = None
+            if isinstance(e, (int, float)) and isinstance(g, (int, float)):
+                if abs(float(e) - float(g)) > 1e-6:
+                    diffs.append(f"{acct}.{col}: 期望 {e} 实际 {g}")
+            elif (e if e not in ("", "-") else None) != g:
+                diffs.append(f"{acct}.{col}: 期望 {e!r} 实际 {g!r}")
+
+    missing = set(want) - {gr[hpos["acct"]] for gr in got_rows}
+    for a in sorted(missing):
+        diffs.append(f"{a}: 表内缺失")
+
+    if diffs:
+        print(f"[verify] MISMATCH: {len(got_rows)} 行数对得上，但 "
+              f"{len(diffs)} 处内容不符：", file=sys.stderr)
+        for d_ in diffs[:15]:
+            print(f"  {d_}", file=sys.stderr)
+        if len(diffs) > 15:
+            print(f"  ... 另有 {len(diffs) - 15} 处", file=sys.stderr)
+        return False
+
+    print(f"[verify] OK: {len(got_rows)} 行 × {len(idx)} 列逐格比对一致", file=sys.stderr)
+    return True
 
 
 def main() -> int:
@@ -324,11 +389,11 @@ def main() -> int:
         print(f"[WARN] created {created} != parsed {len(rows)}", file=sys.stderr)
         return 2
 
-    verify_records(args.base_token, args.table_id, len(rows))
+    ok = verify_records(args.base_token, args.table_id, rows)
 
     print(f"\n[DONE] {created} records written to Lark Base", file=sys.stderr)
     print(f"  https://t83dfrspj4.feishu.cn/base/{args.base_token}?table={args.table_id}")
-    return 0
+    return 0 if ok else 4
 
 
 if __name__ == "__main__":

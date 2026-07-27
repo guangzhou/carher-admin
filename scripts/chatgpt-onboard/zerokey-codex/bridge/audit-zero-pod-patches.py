@@ -25,20 +25,55 @@ zk-image-patch-stream87), so 1 and 2 must both be checked.
 import json, os, subprocess, hashlib, sys
 from concurrent.futures import ThreadPoolExecutor
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))))), "lib"))
-import carher_secrets  # noqa: E402
 
 # Never hardcode the production sudo password. Resolution order is env ->
 # .carher-secrets.json (gitignored) -> ~/.config/carher/secrets.json.
-PW = carher_secrets.require("SUDO_PW") + "\n"
+def _load_secret(name):
+    """Resolve a secret without a hand-counted dirname chain, and WITHOUT dying at
+    import time. Both defects were real: the old 4-level chain resolved to "/lib"
+    when this file was scp'd to 198:/tmp -- the very workflow the docstring above
+    documents -- and require() at module scope killed --help and the dry-run path
+    before argv was parsed. Walk up to the repo marker if present, else fall back to
+    the environment so a single-file copy still works."""
+    import os as _os
+    import sys as _sys
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    while True:
+        _cand = _os.path.join(_here, "scripts", "lib")
+        if _os.path.isfile(_os.path.join(_cand, "carher_secrets.py")):
+            if _cand not in _sys.path:
+                _sys.path.insert(0, _cand)
+            import carher_secrets
+            return carher_secrets.require(name)
+        _parent = _os.path.dirname(_here)
+        if _parent == _here:
+            break
+        _here = _parent
+    v = _os.environ.get(name)
+    if v:
+        return v
+    _sys.exit(
+        "missing secret %r.\n"
+        "  This copy cannot see scripts/lib (running standalone?), so set it in the\n"
+        "  environment:  export %s='...'\n"
+        "  Or run from a repo checkout, where .carher-secrets.json is picked up."
+        % (name, name))
+
+_PW_CACHE = []
+
+
+def _pw():
+    """Resolved on first use, not at import — so --help and the dry-run path work
+    with no credential configured at all."""
+    if not _PW_CACHE:
+        _PW_CACHE.append(_load_secret("SUDO_PW") + "\n")
+    return _PW_CACHE[0]
 KEYS = ["responses.js", "web-tools.js", "raw.js", "zerokey-serve-codex.js",
         "images.js", "api.js"]
 
 def kc(*a, timeout=120):
     return subprocess.run(["sudo", "kubectl", "-n", "litellm-product"] + list(a),
-                          capture_output=True, text=True, input=PW, timeout=timeout)
+                          capture_output=True, text=True, input=_pw(), timeout=timeout)
 
 
 def kc_json(*a, **kw):

@@ -271,3 +271,57 @@ heartbeat 那次我测了源文件说"10/10 通过",而 `litellm-proxy.yaml` 里
 - `scripts/chatgpt-onboard/zerokey-codex/bridge/testkit/README.md` —— 闭环测试工具
 - 记忆:`feedback_dont_trust_metric_moves_without_verifying_code_is_live`、
   `feedback_multiturn_bugs_need_closed_loop_harness`
+
+---
+
+## 8. 原生工具通道调研(2026-07-27,直连验证)
+
+### 起因
+
+我曾声称"网页端点连 tools 字段都没有,所以只能靠提示词伪造"。用户质疑:"不都是大模型吗?
+你的依据是什么?" —— 质疑是对的,我当时拿的是**我们 pod 的代码**,那只能证明我们没实现,
+不能证明协议没有。
+
+### 方法(这次做对的部分)
+
+**直连 `chatgpt.com`,跳过 zerokey pod**,自己构造 body,并对每个假设做**对照实验** ——
+要求"结果随变量变化"才承认因果。
+
+### 已排除的六个变量
+
+| 变量 | 对照方式 | 结果 |
+|---|---|---|
+| 账号权限 | `/backend-api/accounts/check` | **`plan_type: pro`**,排除 |
+| 模型名写法 | 发后端真实 slug(`gpt-5-5-pro` 连字符、`gpt-5.6-sol-wm` 带后缀) | `model_slug` 正确回显,排除 |
+| "模型被降级" | 请求 mini vs 请求 pro | `resolved` **恒为 `gpt-5-5-mini`** → **字段误读**,排除 |
+| `local_function_names` | 补上浏览器原值 `["local.continue_in_work"]` | 无变化,排除 |
+| `client_prepare_state` | `sent` → `success`(浏览器抓包值) | 无变化,排除 |
+| 凭证类型 | 带 session cookie vs 仅 bearer + 惰性 `oai-did` | 无变化,排除 |
+
+### 结论
+
+- **`api_tool.call_tool` 在我们账号上始终不出现**,六个变量全部排除后仍然如此。
+- **但 `container.exec` 出现过**(5.5 / 5.5-pro,**不给 wrapper 提示词**时)——
+  那是我们账号上**真实存在的原生工具通道**,而 exec-harvest 已经在用它。
+- 反直觉的一点:**加长 wrapper 提示词反而让 `container.exec` 消失**,模型改为复述指令。
+  → 提示词不是越多越好。
+
+### 尚未对齐的唯一差异
+
+modelgate 的成功案例 `resolved_model_slug: "i-cot"`,我们是 `gpt-5-5-mini`。
+但**已证明 `resolved` 不随请求模型变化**,所以它不是"服务了哪个模型"的证据 ——
+这个差异的含义**仍未知**,不能据此推断任何事。
+
+### 我在这一节里犯的三次同型错误(方法论)
+
+| 次数 | 我的断言 | 实际 |
+|---|---|---|
+| 1 | "网页端点没有 tools 字段" | 我们的实现没发,协议有 |
+| 2 | "账号权限不够" | `plan_type: pro` |
+| 3 | "上游把模型降级到 mini" | `resolved` 是运行时实现 ID,不是服务模型 |
+
+**共同结构:观测到异常值 → 直接归因给对方 → 继续往下推理,跳过了"这个字段是什么意思"。**
+
+**改进后的做法(已生效):任何异常观测,先构造对照证明"该值随我关心的变量变化",
+再谈归因。** 正是"请求 mini 和请求 pro 得到同样的 `resolved`"这个对照,一次性证伪了
+我的第三个断言 —— 那个对照本该是第一步,而不是第三步。

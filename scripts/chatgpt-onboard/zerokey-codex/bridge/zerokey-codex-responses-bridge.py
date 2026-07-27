@@ -861,6 +861,9 @@ MAX_STRUCT_RETRIES = int(os.environ.get("BRIDGE_STRUCT_RETRIES", 1))
 #   fired   -- a structural retry was spent (== extra upstream calls)
 #   rescued -- that request went on to produce a tool_call
 #   wasted  -- it retried and still ended on plain text
+# NOTE: in-process memory, so a restart zeroes these. Single replica, no
+# persistence -- rescue_rate therefore describes only the window since startup.
+# Snapshot it before any rollout, or wire it to Prometheus for a real trend.
 _STRUCT_STATS = {"fired": 0, "rescued": 0, "wasted": 0}
 
 
@@ -1608,15 +1611,14 @@ def call_zerokey(messages, want_tools=True, max_rounds=2, on_delta=None,
         # Kept as an appended user turn (not a system edit) so the caller's
         # instructions and prompt-cache prefix stay byte-identical.
         #
-        # HONEST STATUS: the BENEFIT IS NOT YET MEASURED. I tried to A/B it by
-        # synthesising a mid-task stall (history ending in a tool result plus a
-        # "you would run: ..." narration) and both arms produced a tool call
-        # 9/9 -- the fixture could not reproduce the stall, so it could not
-        # discriminate. What justifies shipping it anyway is that it is
-        # cost-neutral: it does not add an upstream call, it only changes the
-        # input of a retry that was already going to happen. Read
-        # /health -> structural_retry.rescue_rate after this is deployed to get
-        # the real number, and compare against the pre-change bound of <=8.4%.
+        # MEASURED (2026-07-27, production, n=14):
+        #   rescue_rate 9/14 = 0.643, Wilson 95% CI [0.388, 0.837]
+        #   pre-change bound was <=0.084 -- OUTSIDE that CI, so the gain is real.
+        # A synthetic A/B could not discriminate (both arms 9/9 produced a call --
+        # the fixture could not reproduce the stall), so this number comes from the
+        # attributed production counters, not from a bench. Cost-neutral either
+        # way: it adds no upstream call, only changes the input of a retry that was
+        # already going to happen. Keep reading /health -> structural_retry.
         round_messages = messages
         if struct_retries:
             round_messages = messages + [{

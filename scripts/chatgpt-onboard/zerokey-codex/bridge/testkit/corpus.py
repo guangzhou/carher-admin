@@ -21,6 +21,21 @@ REFUSE = [
     "我目前不能直接在你的 macOS 环境里执行 `lark-cli` 命令或访问该飞书文档。如果你在本机执行，可以按之前的方式：",
     "我不能直接在你的机器上运行这个命令。",
     "我无法在当前的沙箱环境中读取你本地的文件。",
+    # REGRESSION: the two narration replies that survived the fanout=3 -> 1 switch
+    # (fan-out had been masking them). Both admit the work is not done and then
+    # describe the next command instead of issuing it. The first was additionally
+    # exempted by the subject-matter rule matching "因此无法判断" -- the 此 in 因此 is
+    # a conjunction, not a demonstrative.
+    "未完成：目前只有 `lark-cli --help` 和 `lark-doc` skill 信息，还没有实际执行读取该飞书文档的 `docs +fetch`，因此无法判断文档内容。需要继续执行：",
+    "我目前只看到了 `lark-cli --help` 和 `lark-cli skills read lark-doc` 的输出，尚未实际执行读取文档的命令，所以这个飞书文档还没有被查看。",
+    # REGRESSION: the four narration replies that surfaced once fanout dropped to
+    # 1 (fan-out had been masking them). Each lists what EARLIER turns did
+    # ("已经完成了前置步骤" / "已执行 lark-cli --help") while admitting the task is
+    # unfinished -- so the result-report exemption must NOT outrank narration.
+    "我无法在当前这个对话环境中实际调用你机器上的 shell，因此不能继续执行 `lark-cli docs +fetch` 并伪造输出。你提供的信息里已经完成了前置步骤",
+    "还没有完全回答。已有输出只完成了 `lark-cli` 帮助查看和文档技能读取，还没有实际读取目标飞书文档内容。",
+    "NO。原始请求还没有被完全回答。目前已有的信息只证明： - 已执行 `lark-cli --help` - 已读取 `lark-doc` skill  但还没有看到 `docs +fetch` 的输出",
+    "我目前这个对话环境里没有可调用的 shell 工具，因此不能实际执行 `lark-cli docs +fetch` 并伪造结果。",
     # Older real ones the shipped detector did catch -- keep as regression.
     "我无法直接查看你电脑本地磁盘的大小",
     "我这边当前没有直接读取你本机磁盘信息的终端权限",

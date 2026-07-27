@@ -65,11 +65,35 @@ _HANDOFF = re.compile(
 # Requires an explicit admission that the work is NOT done. A genuine final
 # answer never says "还没有真正读到".
 _NARRATION = re.compile(
-    r"还(?:没有|没|未)\s*(?:真正|实际|成功)?\s*"
-    r"(?:读到|拿到|获取到|取到|完成|执行|运行|开始)"
+    # Allow an intervening adverb AND object between the negation and the verb:
+    # measured live, "还没有实际执行读取该飞书文档的 docs +fetch" slipped through an
+    # adjacency-only form and the loop stalled after `--help` with the model
+    # narrating its plan. Also accept 尚未/未 as the negation.
+    # The negation must be an explicit 还/尚 "not yet", NOT a bare 没有: "结果显示
+    # 没有读取权限" is a permission RESULT and matched a bare-没有 form, which
+    # discarded a correct answer. Requiring 还/尚 keeps "还没有实际执行" while
+    # excluding "没有读取权限".
+    r"(?:还|尚)(?:没有|没|未)\s*(?:真正|实际|成功|正式|完全)?\s*"
+    r"(?:读到|拿到|获取到|取到|完成|执行|运行|开始|查看|读取|被查看)"
+    r"|^未完成|未完成[：:]"
+    r"|(?:目前|现在)只(?:有|看到|完成)"
     r"|上一?次只是|上一步只是|目前只是|仅仅只是确认"
+    r"|需要继续执行|还需要执行|不能继续执行"
+    # Measured live: "还没有完全回答" / "原始请求还没有被完全回答" / "已有输出只完成了"
+    # / "目前已有的信息只证明" / "并伪造(输出|结果)" — all are the model explaining
+    # that the task is unfinished while listing what earlier turns already did.
+    r"|还(?:没有|没|未)(?:被)?(?:完全|全部)?回答"
+    r"|已有(?:的)?(?:输出|信息)只(?:完成|证明|包含|有)"
+    r"|(?:目前|现在)已有的信息只"
+    r"|并伪造(?:输出|结果|内容)"
+    r"|下一步(?:实际)?(?:需要|要)(?:运行|执行|调用)[^。；\n]{0,40}(?:并伪造|才能|以获取)"
+    r"|但还(?:没有|没|未)(?:看到|拿到|获取|读到)"
     r"|(?:所以)?不能说(?:已经)?(?:搞定|完成|做完)"
-    r"|下一步(?:需要|应该|要)(?:用|调用|执行|运行)"
+    # NOTE: a bare "下一步需要执行" is deliberately NOT here. A COMPLETED answer may
+    # suggest an optional follow-up ("我读完文档了，标题是…。下一步需要执行 brew
+    # cleanup"), and treating that as a stall discarded correct answers. A
+    # next-step mention only counts as narration when paired with an explicit
+    # not-done admission, which the other alternations already require.
     # Seen live: the model ran the command in its OWN web sandbox, it failed,
     # and it reported the sandbox failure as if the task were impossible
     # ("工具执行环境未能启动（命令未实际运行成功）"). That is a miss to retry on
@@ -134,14 +158,22 @@ _REPORTED_RESULT = re.compile(
 def _looks_like_refusal(text):
     """True if the reply is the model declining to use its tools.
 
-    Order matters: the result-report check runs FIRST and wins, because a reply
-    that says what it ran and what came back is an answer even when it also
-    mentions a missing permission or suggests a next step. Everything after it
-    is a decline signal.
+    Order matters, and NARRATION outranks the result report. A reply that admits
+    the work is not finished is a stall even when it also lists what earlier turns
+    accomplished — measured live, four such replies said "已经完成了前置步骤" /
+    "已执行 lark-cli --help" and were exempted by the result-report check, so the
+    agent loop stopped after --help with the model describing the command it should
+    have run. Only after ruling out an explicit not-done admission does a
+    result-report mean "this is an answer".
     """
     if not text:
         return False
     head = text.strip()[:_HEAD]
+    # An explicit "not done yet" admission is decisive, and beats both the
+    # result-report exemption (the reported results belong to PREVIOUS turns) and
+    # the inanimate-subject exemption below.
+    if _NARRATION.search(head) or _EN_NARRATION.search(head):
+        return True
     # An answer that reports real output is never a refusal — return early so no
     # later pattern can discard it.
     if _REPORTED_RESULT.search(head):
@@ -158,9 +190,13 @@ def _looks_like_refusal(text):
     #    declining to run something, whereas "该配置无法直接读取环境变量" is a fact
     #    about the config). Executing is the assistant's job; being readable is a
     #    property of the thing.
-    _m = re.search(r"(?:该|这个|那个|此)[^，。；！？\n我你]{0,12}?"
+    # `此` must not be preceded by 因/由 -- "因此无法判断文档内容" is a CONCLUSION
+    # ("therefore I cannot tell"), not a statement about a thing. Measured live:
+    # that match exempted a genuine narration reply and the agent loop stalled
+    # after `--help` with the model describing its plan instead of running it.
+    _m = re.search(r"(?<![因由])(?:该|这个|那个|此)[^，。；！？\n我你]{0,12}?"
                    r"(?:无法|不能|没法)\s*(?:直接)?\s*([^，。；！？\n]{0,6})", head)
-    if _m and not re.search(r"执行|运行|访问|打开", _m.group(1)):
+    if _m and not re.search(r"执行|运行|访问|打开|判断", _m.group(1)):
         return False
     if _HANDOFF.search(head) or _EN_HANDOFF.search(head):
         return True

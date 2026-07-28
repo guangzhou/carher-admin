@@ -239,14 +239,16 @@ def main():
                     n_actions = int(mm.group(1))
 
             if n_actions >= min_actions:
+                # 完整打印 cid:截断过的 id 无法用于后续 actions/delete 调用,
+                # 而日志正是唯一的"哪个账号装了哪个 connector"记录。
                 print("  OK    %-40s connector=%s  actions=%d"
-                      % (tag, cid[:34], n_actions))
+                      % (tag, cid, n_actions))
                 ok += 1
             else:
                 # 注册成功但 schema 抓不到 -> 这个 connector 是残废的,报 FAIL
                 # 而不是 OK,否则批量跑完会以为全好了。
                 print("  FAIL  %-40s connector=%s  actions=%d (期望>=%d)"
-                      % (tag, cid[:34], n_actions, min_actions))
+                      % (tag, cid, n_actions, min_actions))
                 fail += 1
 
     print("\n== ok=%d skip=%d fail=%d ==" % (ok, skip, fail))

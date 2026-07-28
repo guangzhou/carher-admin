@@ -854,6 +854,10 @@ CALL_BUDGET = int(os.environ.get("BRIDGE_CALL_BUDGET", 150))
 # where a stall is possible. Prose is deliberately not consulted.
 MAX_STRUCT_RETRIES = int(os.environ.get("BRIDGE_STRUCT_RETRIES", 1))
 
+# 命令重复且失败时,先告诉模型"这条命令坏了,换一条",而不是直接向用户放弃。
+# 每次恢复多花一次上游调用,故默认 1(G4: <=5 次/任务)。设 0 可关闭。
+MAX_BRAKE_RETRIES = int(os.environ.get("BRIDGE_BRAKE_RETRIES", 1))
+
 # Structural-retry accounting, exposed on /health so its cost/benefit can be read
 # without grepping logs. Production logs could only bound the rescue rate from
 # above (<=8.4%) because refusal-retry and structural-retry rescues both land on
@@ -2655,6 +2659,9 @@ class H(BaseHTTPRequestHandler):
             # fetched, then re-fetched, and the brake replaced the document with
             # an "I stopped..." message). Re-issuing a SUCCESSFUL command means
             # the model should be concluding, which the nudge below asks for.
+            # 本请求内的 brake 恢复次数。每次恢复多花一次上游调用,所以硬上限 1
+            # —— 与结构重试同样的 G4 约束(<=5 次/任务)。
+            brake_retries = 0
             prev_cmds = _history_commands(req.get("input"),
                                           only_unproductive=True)
             all_prev = _history_commands(req.get("input"))
@@ -2673,6 +2680,46 @@ class H(BaseHTTPRequestHandler):
                 # runaway loop (a loop has no new user turn between calls).
                 if _user_spoke_after_last_tool(req.get("input")):
                     _log("LOOP BRAKE skipped: user asked to re-run %r" % new_cmds[:1])
+                elif brake_retries < MAX_BRAKE_RETRIES:
+                    # The repeat targets a command that FAILED. Before giving up
+                    # on the user's behalf, tell the MODEL what went wrong and let
+                    # it write a different command.
+                    #
+                    # Why this branch exists: measured on the codex-side suite, the
+                    # multi-turn chain task failed because the model emitted a
+                    # buggy one-liner (`next=$(cat step1.txt) && cat "$next"` --
+                    # `$next` still held the whole `next_file: step2_X.txt` line,
+                    # so cat got a bogus path), retried it verbatim, and the brake
+                    # then handed the USER "check the command is valid ... tell me
+                    # how to proceed". The model was never told the command was
+                    # broken, so it had no chance to fix a trivially fixable bug.
+                    # Same lesson as the structural retry: change the SIGNAL, do
+                    # not just re-roll or bail out.
+                    brake_retries += 1
+                    failed_cmd = (new_cmds[0] or "").strip()[:200]
+                    _log("LOOP BRAKE: repeated FAILED cmd %r -> tell model to fix "
+                         "(%d/%d)" % (new_cmds[:1], brake_retries, MAX_BRAKE_RETRIES))
+                    fix_msg = (
+                        "[ERROR] You issued the same command twice and it did not "
+                        "produce usable output:\n\n    %s\n\nDo not repeat it. "
+                        "Diagnose why it failed and issue a DIFFERENT command that "
+                        "works. If it was a shell quoting or parsing mistake, fix "
+                        "the parsing (for example, extract just the field you need "
+                        "with sed/awk/cut instead of using the whole line). "
+                        "Call the tool now with the corrected command. "
+                        "(Automated message; do not reply to it conversationally.)"
+                        % failed_cmd)
+                    retry_messages = messages + [{"role": "user", "content": fix_msg}]
+                    text2, tcs2 = call_zerokey(
+                        retry_messages, want_tools=True, max_rounds=1,
+                        model=req.get("model"), key_hash=key_hash,
+                        mid_task=True)
+                    if tcs2:
+                        _log("LOOP BRAKE recovery: model produced a new tool call")
+                        tcs, text = tcs2, text2
+                    else:
+                        tcs = []
+                        text = text2 or text
                 else:
                     _log("LOOP BRAKE: repeated cmd %r -> converge to text"
                          % new_cmds[:1])

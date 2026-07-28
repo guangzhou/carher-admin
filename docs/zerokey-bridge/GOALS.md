@@ -191,6 +191,61 @@ Cline 对同一个问题的做法(`apps/vscode/src/core/prompts/responses.ts:33`
 - CM key 必须是 `bridge.py`(用 `--from-file=bridge.py=` 显式指定)
 - 冒烟:追加写 ✅、真多轮链 ✅、`tool_willing_pods` 47/47
 
+## ⭐ codex 侧端到端全功能回归(2026-07-28)
+
+用**用户 codex 自己的 key / model / base_url**(即 codex IDE 的真实路径)跑 8 项,
+每项独立校验磁盘或随机 token,**不看模型自述**:
+
+| 用例 | 判定方式 | 轮1 | 轮2 | 轮3 |
+|---|---|---|---|---|
+| write | 磁盘内容精确匹配 | ✅ | ✅ | ✅ |
+| read | 随机 token(模型猜不到) | ✅ | ✅ | ✅ |
+| edit-inplace | 逐字段校验 3 个键 | ✅ | ✅ | ✅ |
+| append | 行数+内容,不能覆盖 | ✅ | ✅ | ✅ |
+| read-compute-write | `sum.txt == 15` | ✅ | ✅ | ✅ |
+| **multiturn-chain** | 必须先读 step1 才知第二个文件名 | ❌ | ✅ | ✅ |
+| explore-tree | 目录树里找随机 needle | ✅ | ✅ | ✅ |
+| multi-step-build | 建目录+3 文件,查 listdir | ✅ | ✅ | ✅ |
+| | | **7/8** | **8/8** | **8/8** |
+
+脚本:`testkit/cx_suite.py`(依赖 `testkit/cx_e2e.py`)。
+
+### 轮1 唯一失败项的真因:brake 把问题甩给了用户
+
+`multiturn-chain` 只跑了 1 条命令就结束。**不是模型能力不足** ——
+模型写了个有 bug 的一行命令:
+
+```bash
+next=$(cat step1.txt) && cat "$next"   # $next 是整行 "next_file: step2_X.txt"
+```
+
+`cat` 拿到错路径 → 失败 → 模型重试同一条 → **LOOP BRAKE 触发** →
+brake 把 *"check the command is valid … tell me how to proceed"* 丢给**用户**。
+
+**模型从没被告知命令坏了**,所以没机会修一个一改就好的 bug。
+
+修法(与结构重试同一个思路:**改变信号**,不是再摇骰子也不是直接放弃):
+brake 命中"重复且失败"的命令时,先把失败命令回灌给模型并要求换一条,
+上限 1 次(`BRIDGE_BRAKE_RETRIES`,守住 G4 ≤5 次/任务)。
+超限才回落到原来的兜底文案。`testkit/test_brake_recovery.py` 14/14。
+
+修后 `multiturn-chain` 从 1 条命令变成 3 条,连续两轮通过。
+
+### ⚠️ 两个平面:codex 看不到 MCP connector
+
+| | 平面 A(codex 路径) | 平面 B(网页会话) |
+|---|---|---|
+| 工具机制 | **exec-harvest** | `api_tool.call_tool` |
+| 谁执行 | codex 在**你本机**跑 | **OpenAI 服务端**跑 |
+| 能力 | 任意本机命令 | 只能调远程 HTTPS |
+| 飞书怎么用 | **lark-cli**(本机 CLI) | MCP connector 24 工具 |
+
+实测:codex 侧请求的 `api_tool` 计数 **= 0**;问它"列出我的飞书群",
+它走的是 `lark-cli im +chat-list`,并正确答出真实公司群名。
+
+→ **MCP connector 不在 codex 请求路径上**,它服务的是网页会话场景。
+两者覆盖不同场景,不冲突。**给 52 账号装 MCP 不会改变 codex 的行为。**
+
 ## 验收脚本(每轮改动后必跑)
 
 ```bash

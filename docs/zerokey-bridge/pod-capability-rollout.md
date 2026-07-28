@@ -38,6 +38,27 @@ LiteLLM 的模型发现、IDE 的模型选择器都读这个接口,
 > ⚠️ 上游对这些退役 slug **仍然回 200**,所以"能不能调通"发现不了它们已下线。
 > 只能靠对齐 `/backend-api/models` 的清单挡住。
 
+### ⚠️ 修正:`-wm` 变体不进目录
+
+第一版我把上游返回的 `-wm` 变体照抄了进去,**错的**。`-wm`(with-memory)
+触发 conduit `stream_handoff`:首响应只回 `resume_conversation_token` JWT,
+正文从内网 conduit 异步流,无状态 replay 跟不了 → 空返。
+
+直连 chatgpt.com 实测:
+
+| slug | 结果 |
+|---|---|
+| `gpt-5.6-sol` | **17004 字节,有正文** |
+| `gpt-5.6-sol-wm` | **973 字节,只有 handoff,零正文** |
+
+**坑点:经 pod 时两种写法都能返回正文**,只测 pod 发现不了 ——
+差异只在直连路径暴露。
+
+这条规则 skill 里早就写了
+(`~/.claude/skills/zerokey-web-tool-injection/SKILL.md` "绝不加 `-wm`"),
+**是我没先读**。所以目录用 plain slug:`gpt-5.6-sol` / `terra` / `luna` /
+`gpt-5.5` / `gpt-5.5-cca`。`test-capabilities.js` 已加断言禁止 `-wm`。
+
 顺带在 `/v1/models` 每条加 `context_window`(410000 / 262144 / 196608 / …),
 客户端可以按上下文选模型而不是猜。
 
@@ -82,7 +103,20 @@ pod 通过 ConfigMap `zk-image-patch` 挂到 `/patch`,启动脚本 `cp` 到 `/ap
 
 只做 1 会静默无效 —— 文件在 `/patch` 里躺着但 `/app` 用的还是镜像内的旧版。
 
-**第二个坑:zero-87 挂的是另一个 CM。** 51 个 pod 用共享
+**第二个坑:我把两个 CM 从 9 key 塌成 1 key。** 用"导出全部 key 到临时目录 →
+加新文件 → `create cm --from-file=<目录>` 重建"时,内联 python 靠 shell 传路径失败
+(`KeyError`),导出目录是空的 —— 但 `--from-file=<空目录>` **仍然 create 成功**,
+整条链路无任何告警。幸好 CM 变更不触发 pod 重启,52 个 pod 仍跑已落盘的旧文件,
+**无服务影响**;但若当时有 pod 重启就会回退到镜像内默认实现。
+
+靠备份救回,且必须用 **`kubectl replace`** 而非 `apply`(备份里的
+`resourceVersion` 已过期,`apply` 报 `the object has been modified`),
+先删掉 `resourceVersion`/`uid`/`creationTimestamp` 再 replace。
+
+修法:写了带三道断言的 `cmadd.py`(导出数==原key数、目录数==期望数、
+`--dry-run` 生成物 key 数==期望数),任一不符立刻退出,绝不 apply。
+
+**第三个坑:zero-87 挂的是另一个 CM。** 51 个 pod 用共享
 `zk-image-patch`,**zero-87 单独用 `zk-image-patch-stream87`**(内容与共享版
 逐字节等长,是个陈旧克隆)。第一次 audit 抓到它 md5 陈旧才发现。
 → **不要假设所有 pod 挂同一个 CM,按 volume 实际引用枚举。**
@@ -101,16 +135,16 @@ pod 通过 ConfigMap `zk-image-patch` 挂到 `/patch`,启动脚本 `cp` 到 `/ap
 
 | 检查 | 结果 |
 |---|---|
-| `constants.js` md5 正确 | **52/52** |
+| `constants.js` md5 正确(`b88d4634`,去 `-wm` 版)| **52/52** |
 | `web-tools.js` md5 正确 | **52/52** |
-| pod `/v1/models` 含 `gpt-5.6-sol-wm` / `gpt-5-6-pro` | ✅ |
+| pod `/v1/models` 19 个,含 `gpt-5.6-sol` / `gpt-5-6-pro`,**0 个 `-wm`** | ✅ |
 | 已退役 `gpt-5-2` 已消失 | ✅ |
 | `gpt-5-6-pro` `context_window=410000` | ✅ |
 | exec-harvest 仍产出 tool_call(单 pod ×3) | **3/3** |
-| toolcall 跨 pod 抽样 | **7/8**(与改前基线相同,无退化) |
+| toolcall 跨 pod 抽样 | **8/8** |
 | 端到端(经 bridge,磁盘校验) | **3/3** |
 | bridge `tool_willing_pods` | **47/47** |
-| 离线测试 `test-capabilities.js` | **17/17** |
+| 离线测试 `test-capabilities.js` | **18/18**(含"不含 -wm"断言)|
 | bridge 离线套件 | **36 项全过** |
 
 `test-capabilities.js` 已验证**能抓退化**:故意塞回退役 slug + 多余 recipient → FAIL 2 条。

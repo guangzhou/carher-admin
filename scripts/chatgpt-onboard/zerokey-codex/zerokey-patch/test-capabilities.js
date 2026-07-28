@@ -30,8 +30,8 @@ function chk(name, cond, extra) {
 // 实测 GET https://chatgpt.com/backend-api/models,2026-07-27
 const EXPECTED = [
   'gpt-5-6-pro', 'gpt-5-5-pro', 'gpt-5-5-thinking', 'gpt-5-6-thinking',
-  'gpt-5.6-sol-wm', 'gpt-5.6-terra-wm', 'gpt-5.6-luna-wm',
-  'gpt-5.5-wm', 'gpt-5.5-cca-wm', 'gpt-5-4-t-mini',
+  'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+  'gpt-5.5', 'gpt-5.5-cca', 'gpt-5-4-t-mini',
   'o3', 'o3-pro',
   'gpt-5-5', 'gpt-5-5-instant', 'gpt-5-5-mini', 'gpt-5-3', 'gpt-5-3-instant',
   'gpt-5-3-mini', 'research',
@@ -52,13 +52,18 @@ chk('MODELS 与 SLUGS 一致', Object.keys(c.MODELS).length === got.length);
 // 最大上下文必须能查到 —— 客户端按上下文选模型时依赖它
 chk('gpt-5-6-pro 上下文 410000', c.MODELS['gpt-5-6-pro'].context_window === 410000,
     String(c.MODELS['gpt-5-6-pro'].context_window));
-chk('gpt-5.6-sol-wm 上下文 262144', c.MODELS['gpt-5.6-sol-wm'].context_window === 262144);
+chk('gpt-5.6-sol 上下文 262144', c.MODELS['gpt-5.6-sol'].context_window === 262144);
 const noCtx = got.filter((s) => !c.WEB_MODEL_CONTEXT[s]);
 chk('每个 slug 都有上下文', noCtx.length === 0, noCtx.join(','));
 
 // /v1/models 的 OpenAI 形状
 const m = c.MODELS['gpt-5-6-pro'];
 chk('模型对象形状正确', m.id === 'gpt-5-6-pro' && m.object === 'model' && !!m.owned_by);
+
+// -wm 变体绝不能进目录:它触发 conduit stream_handoff,直连时只回 973 字节
+// 的 resume token、零正文。实测 gpt-5.6-sol=17004 字节有正文 vs -wm=973 无正文。
+const wm = got.filter((s) => s.endsWith('-wm'));
+chk('不含 -wm 变体(会 stream_handoff 空返)', wm.length === 0, wm.join(','));
 
 // ── 2. harvest 白名单 ────────────────────────────────────────
 chk('harvest 白名单 = [container.exec, python]',

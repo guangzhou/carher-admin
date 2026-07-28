@@ -24,10 +24,18 @@ const CONFIG = {
 //   gpt-5-4-pro, gpt-5-4-thinking, gpt-5-2, gpt-5-1, gpt-5, gpt-5-mini,
 //   gpt-4-5, agent-mode
 //
-// NOTE on the two slug spellings: /backend-api/models returns BOTH dotted `-wm`
-// slugs (gpt-5.6-sol-wm) and hyphenated ones (gpt-5-5-pro). They are the same
-// family in different notations; both are listed because both are real entries
-// in the upstream catalogue.
+// ⚠️ `-wm` SLUGS ARE DELIBERATELY NOT ADVERTISED, even though /backend-api/models
+// returns them. `-wm` = with-memory variant, and it triggers a conduit
+// `stream_handoff`: the first response carries only a resume_conversation_token
+// JWT while the body streams asynchronously from an internal conduit. Our
+// stateless replay cannot follow that, so the caller sees an empty answer.
+// Measured direct against chatgpt.com, 2026-07-27:
+//   gpt-5.6-sol      -> 17004 bytes, real content
+//   gpt-5.6-sol-wm   ->   973 bytes, handoff only, ZERO content
+// So the plain slug is advertised instead. (Via the pod both spellings happen to
+// return content, which is why this is easy to get wrong -- the divergence only
+// shows on the direct path.) Long-standing rule, see
+// ~/.claude/skills/zerokey-web-tool-injection/SKILL.md line ~91.
 const WEB_MODEL_SLUGS = [
   // 410k context -- largest available
   'gpt-5-6-pro',
@@ -35,11 +43,11 @@ const WEB_MODEL_SLUGS = [
   'gpt-5-5-thinking',
   // 262k context
   'gpt-5-6-thinking',
-  'gpt-5.6-sol-wm',
-  'gpt-5.6-terra-wm',
-  'gpt-5.6-luna-wm',
-  'gpt-5.5-wm',
-  'gpt-5.5-cca-wm',
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'gpt-5.6-luna',
+  'gpt-5.5',
+  'gpt-5.5-cca',
   'gpt-5-4-t-mini',
   // 196k context
   'o3',
@@ -63,11 +71,11 @@ const WEB_MODEL_CONTEXT = {
   'gpt-5-5-pro': 410000,
   'gpt-5-5-thinking': 410000,
   'gpt-5-6-thinking': 262144,
-  'gpt-5.6-sol-wm': 262144,
-  'gpt-5.6-terra-wm': 262144,
-  'gpt-5.6-luna-wm': 262144,
-  'gpt-5.5-wm': 262144,
-  'gpt-5.5-cca-wm': 262144,
+  'gpt-5.6-sol': 262144,
+  'gpt-5.6-terra': 262144,
+  'gpt-5.6-luna': 262144,
+  'gpt-5.5': 262144,
+  'gpt-5.5-cca': 262144,
   'gpt-5-4-t-mini': 262144,
   o3: 196608,
   'o3-pro': 196608,

@@ -813,29 +813,66 @@ def _ends_with_tool_result(inp):
 
 
 def _original_goal(inp):
-    """The user's FIRST real request, to restate in the nudge.
+    """The user's CURRENT request, to restate in the nudge.
 
-    Uses the first user turn, not the last: by turn 3 the last user-role message
-    is a `[result of ...]` block we synthesised, and restating that as the goal
-    would tell the model its goal is to look at output it already has. Skips our
-    own synthetic turns and Codex's environment block."""
+    Scans BACKWARDS for the newest genuine user turn.
+
+    This used to scan forwards and return the FIRST user turn. That was wrong for
+    any conversation with more than one question, and it produced the worst
+    possible symptom: the bridge answered a STALE question. Captured verbatim from
+    a real session (~/.codex/archived_sessions/rollout-2026-07-28T09-12-52-*.jsonl):
+
+        line  7  USER  "快速排序"
+        line 10  ASST  <quicksort explanation>          # correct
+        line 26  USER  "本地磁盘大小"                    # NEW question
+        line 28  CALL  df -h                            # correct command!
+        line 33  ASST  <quicksort explanation again>    # WRONG
+
+    The tool call was right, so the model understood the new request -- but the
+    nudge told it `ORIGINAL REQUEST: 快速排序`, so on the turn where it had to
+    decide "is the request answered", it answered the goal we handed it instead of
+    the one the user actually asked. We overwrote the user's intent.
+
+    Skipped when scanning backwards:
+      - our own synthetic turns (`[result of ...]`, the nudge itself)
+      - Codex's <environment_context> block
+      - the AGENTS.md instruction preamble Codex injects as a user turn
+    Falling back to the first match keeps behaviour sane for single-question
+    threads where everything got filtered.
+    """
     if isinstance(inp, str):
         return inp.strip()[:400]
-    for it in inp or []:
+
+    def _candidate(it):
         if not isinstance(it, dict):
-            continue
+            return None
         if it.get("type") not in (None, "message"):
-            continue
+            return None
         if it.get("role") not in ("user", None):
-            continue
+            return None
         t = _text_of(it.get("content"))
         if not t or not t.strip():
-            continue
+            return None
         if "<environment_context>" in t or "<workspace_roots>" in t:
-            continue
-        if t.lstrip().startswith(("[result of", "[already ran]", "Execution environment")):
-            continue
+            return None
+        # Codex prepends the repo's AGENTS.md as a user turn; it is instructions,
+        # not the request.
+        if "AGENTS.md instructions" in t or "<INSTRUCTIONS>" in t:
+            return None
+        s = t.lstrip()
+        if s.startswith(("[result of", "[already ran]", "Execution environment")):
+            return None
+        # Our own injected turns must never be mistaken for the user's goal.
+        if s.startswith("[ERROR] You did not use a tool") \
+                or s.startswith("[ERROR] You issued the same command") \
+                or s.startswith("The command output above is the ONLY new"):
+            return None
         return t.strip()[:400]
+
+    for it in reversed(inp or []):
+        c = _candidate(it)
+        if c:
+            return c
     return ""
 
 

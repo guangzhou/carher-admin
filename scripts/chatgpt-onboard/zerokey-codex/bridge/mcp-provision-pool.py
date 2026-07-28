@@ -37,6 +37,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -58,10 +59,30 @@ def sh(cmd, timeout=180):
         return 1, "(runner error: %s)" % e
 
 
-def kube(inner, timeout=180):
-    """Run a kubectl command on 198 via the jms hop."""
+def kube(inner, timeout=180, tries=3):
+    """Run a kubectl command on 198 via the jms hop.
+
+    Retries on transport failure: the jms hop intermittently returns
+    "Permission denied (password,publickey)" -- observed repeatedly during this
+    work, and a single such blip made three pods report "读 users.json 失败" and
+    get SKIPped. A batch that silently under-covers is worse than one that stops,
+    so retry the transport before believing the pod is broken.
+    """
     jms = os.path.join(REPO, "scripts", "jms")
-    return sh("%s ssh %s %s" % (jms, JMS, shq(inner)), timeout=timeout)
+    cmd = "%s ssh %s %s" % (jms, JMS, shq(inner))
+    last = (1, "")
+    for i in range(max(1, tries)):
+        rc, out = sh(cmd, timeout=timeout)
+        if rc == 0:
+            return rc, out
+        # 只对"传输层"失败重试;kubectl 自己的错误(NotFound 等)直接返回
+        if "Permission denied" not in out and "Connection closed" not in out \
+                and "connect to host" not in out:
+            return rc, out
+        last = (rc, out)
+        if i + 1 < tries:
+            time.sleep(2 + 2 * i)
+    return last
 
 
 def shq(s):

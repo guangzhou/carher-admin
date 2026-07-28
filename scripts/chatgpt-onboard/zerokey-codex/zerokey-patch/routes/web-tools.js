@@ -2,13 +2,24 @@
 //
 // WHY
 // ---
-// The ChatGPT *web* backend (/backend-api/f/conversation) does NOT accept an
-// OpenAI `tools` field and never emits native tool_calls — it is a plain
-// chat surface wrapped in ChatGPT's consumer harness (system prompt + auto
-// web-search + answer widgets). The Codex backend (/backend-api/codex/responses)
-// DOES do native tool_calls, which is why zerokey's codex-pool path is
-// preferred. But a web-only pod (no CODEX_TOKEN_DIR) has no Codex tokens, so
-// its agentic (tools[]) traffic would otherwise silently degrade to plain chat.
+// The ChatGPT *web* backend (/backend-api/f/conversation) does not accept an
+// OpenAI `tools` field, so agentic traffic from a web-only pod (no
+// CODEX_TOKEN_DIR, hence no Codex tokens) would otherwise silently degrade to
+// plain chat. This adapter injects the tool contract as prompt text and harvests
+// the model's own code-interpreter call back out.
+//
+// CORRECTION (2026-07-27): this comment used to claim the web backend "never
+// emits native tool_calls". That is FALSE and it misled design decisions for a
+// while. The web plane DOES have protocol-level tool calls — via MCP connectors,
+// which surface as `recipient: "api_tool.call_tool"` with a JSON-Schema-validated
+// argument object. Measured end-to-end against a real Feishu MCP server: 24 tools
+// registered, real data returned, two chained calls in one turn.
+//   docs/zerokey-bridge/mcp-connector-native-toolcall.md
+//   docs/zerokey-bridge/lark-mcp-connector-deployed.md
+// The distinction that matters here: MCP requires a remote HTTPS server, so
+// OpenAI's side cannot reach the USER'S machine. Running commands locally is
+// therefore still exec-harvest's job. The two cover different halves, and
+// api_tool.call_tool needs no harvesting (OpenAI executes it server-side).
 //
 // This module lets a web-only pod still serve arbitrary caller-defined tools,
 // by the technique every web-subscription bridge (sub2api / chat2api) uses:
@@ -340,6 +351,11 @@ function buildUsage(promptText, completionText) {
 // re-emit it as the CALLER's shell tool_call — the caller runs it on the real
 // machine. Near-100% because it's the model's natural behavior.
 
+// Measured list of recipients whose `content_type:"code"` body we can harvest.
+// See config/constants.js for why it is exactly these two and not the ~34 the
+// model claims to have.
+const { HARVESTABLE_RECIPIENTS } = require('../config/constants')
+
 const SHELL_TOOL_HINTS = [
   'shell', 'bash', 'run_shell', 'run_terminal', 'run_terminal_cmd', 'run_command',
   'exec', 'exec_command', 'execute_command', 'terminal', 'shell_command', 'run',
@@ -375,7 +391,10 @@ function execCommandFromData(d) {
   if (!m || !m.content) return null
   if (m.content.content_type !== 'code') return null
   const rec = m.recipient || (m.author && m.author.recipient)
-  if (rec && rec !== 'container.exec' && rec !== 'python') return null
+  // Single source of truth in config/constants.js. This used to be a hardcoded
+  // pair here; keeping the measured list in one place stops this filter and the
+  // capability catalogue from drifting apart.
+  if (rec && !HARVESTABLE_RECIPIENTS.includes(rec)) return null
   const txt = m.content.text != null ? m.content.text : (m.content.parts || []).join('')
   return txt && txt.trim() ? txt.trim() : null
 }

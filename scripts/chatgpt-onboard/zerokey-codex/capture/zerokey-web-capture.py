@@ -431,6 +431,69 @@ def is_logged_in(page):
     return True
 
 
+def _totp_now(secret, digits=6, period=30):
+    """RFC-6238 TOTP from a base32 secret — pure stdlib (image has no pyotp)."""
+    import hmac, hashlib, struct, base64, time as _t
+    s = secret.strip().replace(" ", "").upper()
+    s += "=" * ((8 - len(s) % 8) % 8)
+    key = base64.b32decode(s)
+    ctr = int(_t.time()) // period
+    h = hmac.new(key, struct.pack(">Q", ctr), hashlib.sha1).digest()
+    o = h[-1] & 0x0F
+    code = (struct.unpack(">I", h[o:o + 4])[0] & 0x7FFFFFFF) % (10 ** digits)
+    return str(code).zfill(digits)
+
+
+def handle_mfa_challenge(page):
+    """If the post-OTP page is the TOTP authenticator challenge, compute the
+    6-digit code from TOTP_SECRET and submit. No-op if no MFA / no secret."""
+    import time as _t
+    for attempt in range(4):
+        if "mfa" not in page.url.lower() and "authenticator" not in page.url.lower():
+            return
+        secret = os.environ.get("TOTP_SECRET", "").strip()
+        if not secret:
+            print("  MFA challenge but no TOTP_SECRET env — cannot answer", flush=True)
+            return
+        code = _totp_now(secret)
+        print(f"  MFA challenge (try {attempt+1}) → TOTP={code}", flush=True)
+        try:
+            inp = None
+            for sel in ["input[autocomplete='one-time-code']", "input[inputmode='numeric']",
+                        "input[type='text']", "input[type='tel']", "input"]:
+                loc = page.locator(sel)
+                if loc.count() > 0 and loc.first.is_visible():
+                    inp = loc.first
+                    break
+            if inp is None:
+                print("  MFA: no input found", flush=True); return
+            inp.click()
+            inp.fill("")            # clear any stale email-OTP value
+            inp.fill(code)          # fill() clears+sets reliably
+            _t.sleep(0.5)
+            submit_form(page)
+            # wait for the challenge to clear (url leaves mfa-challenge)
+            for _ in range(10):
+                _t.sleep(1.5)
+                if "mfa" not in page.url.lower():
+                    print(f"    MFA cleared url={page.url[:100]}", flush=True)
+                    ss(page, "mfa-submitted")
+                    return
+            # still on mfa → check for incorrect-code, recompute next window
+            try:
+                bt = page.inner_text("body", timeout=2000).lower()
+            except Exception:
+                bt = ""
+            if "incorrect" in bt or "try again" in bt:
+                print("    MFA incorrect — waiting for next TOTP window", flush=True)
+                _t.sleep(31)        # roll to next 30s window for a fresh code
+            ss(page, "mfa-submitted")
+        except Exception as e:
+            print(f"  MFA submit err: {str(e)[:100]}", flush=True)
+            _t.sleep(3)
+    print("  MFA: exhausted attempts", flush=True)
+
+
 def login_chatgpt(ctx, page):
     page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded")
     time.sleep(3)
@@ -605,12 +668,33 @@ def login_chatgpt(ctx, page):
             print("  OTP auto failed (OTP_AUTO_ONLY=1, no manual fallback)", flush=True)
         if otp:
             print(f"  OTP={otp}", flush=True)
-            page.locator("input").first.click()
-            page.keyboard.type(otp, delay=80)
+            # 定位真正的 code 输入框:email-verification 页可能有 Email + Code 两个
+            # input,locator("input").first 会命中 Email 框→OTP 打错位置→Code 空→
+            # "verification code is required"。优先按 one-time-code/numeric 语义选,
+            # 再退回最后一个可见 input(code 在 email 之后),用 fill 清旧值再填。
+            otp_inp = None
+            for sel in ["input[autocomplete='one-time-code']", "input[inputmode='numeric']",
+                        "input[name='code']", "input[type='tel']"]:
+                loc = page.locator(sel)
+                if loc.count() > 0 and loc.first.is_visible():
+                    otp_inp = loc.first; break
+            if otp_inp is None:
+                vis = page.locator("input:visible")
+                otp_inp = vis.last if vis.count() > 0 else page.locator("input").first
+            try:
+                otp_inp.click()
+                otp_inp.fill("")
+                otp_inp.fill(otp)
+            except Exception:
+                page.locator("input").first.click()
+                page.keyboard.type(otp, delay=80)
             submit_form(page)
             time.sleep(8)
             print(f"    after OTP url={page.url[:100]}", flush=True)
             ss(page, "otp-submitted")
+            # 2FA accounts: post-OTP lands on auth.openai.com/mfa-challenge/...
+            # → answer the TOTP authenticator with a code from TOTP_SECRET.
+            handle_mfa_challenge(page)
             # OpenAI rate-limits OTP submission on auth.openai.com/email-verification:
             # repeated capture retries → "Too many attempts / max_check_attempts".
             # Detect and fail-fast (cooldown ~10min) rather than fall through to SSO,

@@ -1,158 +1,197 @@
-# ChatGPT 网页版能力清单(实测)
+# ChatGPT 网页版能力全清单(实测)
 
-acct87 直连 chatgpt.com,2026-07-27。**区分"模型自述可用"和"实测真的会触发"** ——
-这两者差别很大,只按前者做设计会踩空。
+acct87 直连 `chatgpt.com`,2026-07-27。**区分「模型自述可用」与「实测真的会触发」** ——
+只按前者做设计会踩空,本 session 已踩过。
 
-## 1. 模型(19 个)
+底层机制见 `mcp-connector-native-toolcall.md`,落地案例见 `lark-mcp-connector-deployed.md`。
 
-`GET /backend-api/models` 返回:
+---
 
-| slug | max_tokens | 备注 |
+## 1. 模型:19 个
+
+`GET /backend-api/models`(需 `x-openai-target-path`)
+
+| slug | max_tokens | 名称 |
 |---|---|---|
-| `gpt-5-6-pro` / `gpt-5-5-pro` | **410000** | 上下文最大 |
-| `gpt-5-5-thinking` | 410000 | |
-| `gpt-5-6-thinking` | 262144 | |
-| `gpt-5.6-sol-wm` / `terra-wm` / `luna-wm` | 262144 | 我们主用的 sol |
-| `gpt-5.5-wm` / `gpt-5.5-cca-wm` | 262144 | |
-| `gpt-5-4-t-mini` | 262144 | |
-| `gpt-5-5` / `gpt-5-5-instant` / `gpt-5-3` / `gpt-5-3-instant` | 137000 | |
-| `gpt-5-5-mini` | 137000 | |
-| `gpt-5-3-mini` | 128000 | |
-| `o3` / `o3-pro` | 196608 | |
-| `research` | 34815 | deep research |
+| `gpt-5-3` | 137000 | GPT-5.3 |
+| `gpt-5-3-instant` | 137000 | GPT-5.3 Instant |
+| `gpt-5-5` | 137000 | GPT-5.5 |
+| `gpt-5-5-instant` | 137000 | GPT-5.5 Instant |
+| `gpt-5-5-thinking` | 410000 | GPT-5.5 Thinking |
+| `gpt-5-6-thinking` | 262144 | GPT-5.6 Thinking |
+| `gpt-5.5-wm` | 262144 | GPT-5.5 |
+| `gpt-5.5-cca-wm` | 262144 | GPT-5.5 (CCA) |
+| `gpt-5.6-sol-wm` | 262144 | GPT-5.6 Sol |
+| `gpt-5.6-terra-wm` | 262144 | GPT-5.6 Terra |
+| `gpt-5.6-luna-wm` | 262144 | GPT-5.6 Luna |
+| `gpt-5-5-pro` | 410000 | GPT-5.5 Pro |
+| `gpt-5-6-pro` | 410000 | GPT-5.6 Pro |
+| `gpt-5-3-mini` | 128000 | GPT-5.3 Mini |
+| `gpt-5-5-mini` | 137000 | GPT-5.5 Mini |
+| `gpt-5-4-t-mini` | 262144 | GPT-5.4 Thinking Mini |
+| `o3` | 196608 | o3 |
+| `o3-pro` | 196608 | o3-pro |
+| `research` | 34815 | Deep Research |
 
-**`capabilities` 和 `product_features.tools` 全为空** —— 工具能力不在这个端点里,
-别指望从 `/models` 读出谁支持工具。`/models/config?slug=` 实测 404
-(前端走的是 `/models/config`,不带 `/backend-api` 前缀,我们的调法未命中)。
+**上下文最大 410000**:`gpt-5-6-pro` / `gpt-5-5-pro` / `gpt-5-5-thinking`。
 
-### ⚠️ 流式行为差异(踩过)
+### ⚠️ 两个坑
 
-- `gpt-5-5-pro`:SSE **内联返回**,直接读到 message
-- `gpt-5.6-sol-wm`:返回 **`stream_handoff`** + `resume_sse_endpoint`,
-  不跟进这个 handoff 就只拿到 973 字节的空壳
+1. **`capabilities` 和 `product_features.tools` 全为空** —— 工具能力**不在**这个端点里,
+   别指望从 `/models` 读出谁支持工具。`/models/config?slug=` 我们的调法实测 404。
+2. **流式行为按模型不同**:`gpt-5-5-pro` SSE **内联返回**;
+   `gpt-5.6-sol-wm` 返回 **`stream_handoff` + `resume_sse_endpoint`**,
+   不跟进 handoff 只能拿到 973 字节空壳。**换模型必须重测流式路径。**
 
-**所以换模型时必须重测流式路径**,不能假设一样。本 session 的探针脚本
-只处理内联,故用 `gpt-5-5-pro` 做能力探测。
+---
 
-## 2. 工具命名空间(模型自述 34 个)
+## 2. 工具命名空间:模型自述 33 个
 
-问模型"列出你能寻址的全部 recipient",它给出:
+问模型「列出你能寻址的全部 recipient」,它给出:
 
 ```
-api_tool                          ← MCP connector 通路(见下)
-bio.update                        ← 记忆写入
-container.exec                    ← 我们 exec-harvest 用的
+api_tool
+bio.update
+container.exec
 container.feed_chars
 container.open_image
 container.download
+gcal.create_event
+gcal.delete_event
+gcal.get_colors
+gcal.read_event
+gcal.respond_event
+gcal.search_events
+gcal.update_event
+gcontacts.search_contacts
+gmail.archive_emails
+gmail.apply_labels_to_emails
+gmail.batch_modify_email
+gmail.batch_read_email
+gmail.create_draft
+gmail.create_label
+gmail.delete_emails
+gmail.forward_emails
+gmail.list_drafts
+gmail.list_labels
+gmail.read_attachment
+gmail.read_email_thread
+gmail.search_email_ids
+gmail.search_emails
+gmail.send_draft
+gmail.send_email
+gmail.update_draft
 python.exec
 python_user_visible.exec
-web.run                           ← 联网搜索
-gcal.*        (7 个: create/delete/get_colors/read/respond/search/update_event)
-gcontacts.search_contacts
-gmail.*       (16 个: send/read/search/draft/label/archive/delete/forward...)
 ```
 
 ## 3. ⭐ 实测真正会触发的只有 5 个
 
 把本 session 全部 SSE 抓包聚合(`grep '"recipient"'`):
 
-| recipient | 出现次数 | 说明 |
+| recipient | 出现次数 | 用途 |
 |---|---|---|
 | `all` | 181 | 普通文本,非工具 |
 | `api_tool.list_resources` | 14 | 读服务端注册表 |
-| `api_tool.call_tool` | 7 | **调 MCP connector,我们的主通路** |
-| `web.run` | 2 | 联网 |
+| **`api_tool.call_tool`** | **7** | **调 MCP connector — 我们的主通路** |
+| `web.run` | 2 | 联网搜索 |
 | `python` | 2 | 代码解释器 |
-| `container.exec` | 1 | shell |
+| `container.exec` | 1 | shell(exec-harvest 用这个)|
 
-**`container.feed_chars` / `container.download` / `container.open_image`
-一次都没触发过。** 试过明确要求"给我下载链接",模型只回一个
-`sandbox:/mnt/data/report.csv` 文本链接,不发 `container.download`。
+**`container.feed_chars` / `container.download` / `container.open_image` 一次都没触发过。**
+明确要求「给我下载链接」时,模型只回一个 `sandbox:/mnt/data/x.csv` 文本链接,不发 `container.download`。
 
 → **结论:pod 侧 harvest 只需覆盖 `container.exec` + `python`(现状已覆盖),
 补其他 `container.*` 是无效工作量。**
 
-### `python` 的实际可用性
+---
 
-`python` recipient 确实会触发,且已在 pod 的 harvest 白名单里
-(`web-tools.js:378` 允许 `container.exec` 和 `python`)。但注意
-`execToToolCall()` 会把内容包成 `bash -lc <text>` —— **对 python 源码是错的**。
-实测中 python 的代码体没有出现在我们能拼到的 SSE patch 里,所以目前
-没有产生错误行为;但如果将来 python 开始返回可 harvest 的代码体,
-这里会把 python 源码当 shell 跑。**已记录为待办,不是当前故障。**
+## 4. api_tool 的资源注册表:40 个
 
-## 4. `api_tool` = MCP connector(唯一可扩展的通路)
+`api_tool.list_resources` 查根路径,返回的是**服务端已注册**的资源:
 
-`api_tool.list_resources` 返回的是**服务端注册表**:
-
-```
-Gmail, Google_Calendar, Google_Contacts, Plugin_Management, skills://plugins/
-```
-
-- 在会话里凭空声明自定义工具 → 被拒绝
-- `Plugin_Management` 的 4 个能力只能查权限/查依赖/卸载/改权限,**不能安装**
-- `skills://plugins/` 实测是 **artifact 模板**(presentation/pdf/document/
-  spreadsheet + 20 个 `artifact-template-*`),与工具注册无关
-
-**扩展方式只有一条:注册 MCP connector。**
-见 `mcp-connector-native-toolcall.md` 和 `lark-mcp-connector-deployed.md`。
-
-## 5. 本机文件读写(exec-harvest,非 MCP)
-
-MCP 要求远程 HTTPS,**碰不到用户本机**,所以本机操作只能 exec-harvest。
-实测(用 `testkit/agentloop.py` 闭环,每项都独立校验磁盘、不信模型自述):
-
-| 操作 | 结果 | 校验方式 |
+| 分组 | 数量 | 工具 |
 |---|---|---|
-| 写文件 | ✅ | 独立 `cat` 磁盘 |
-| 读文件 | ✅ | 随机 token,模型不可能猜 |
-| 读→算→写 | ✅ | `sum.txt == 15` |
-| **真多轮文件链** | ✅ **5/5** | 必须先读 step1 才知道第二个文件名 |
-| 原地改配置 | ✅ **3/3** | 磁盘校验 3 个字段 |
-| 目录树探索找文件 | ✅ | 随机 needle |
-| 追加写(保留原内容) | ⚠️ **6/10** | 磁盘校验行数 |
+| **Gmail** | 21 | `send_email` `read_email` `search_emails` `create_draft` `send_draft` `update_draft` `list_drafts` `forward_emails` `delete_emails` `archive_emails` `apply_labels_to_emails` `bulk_label_matching_emails` `create_label` `list_labels` `batch_modify_email` `batch_read_email` `batch_read_email_threads` `read_email_thread` `read_attachment` `search_email_ids` `get_profile` |
+| **Google Calendar** | 12 | `create_event` `read_event` `update_event` `delete_event` `respond_event` `search_events` `batch_read_event` `get_availability` `get_colors` `fetch` `search` `get_profile` |
+| **Google Contacts** | 3 | `search_contacts` `read_contact` `get_profile` |
+| **Plugin_Management** | 4 | `get_app_permissions` `get_plugin_dependencies` `uninstall_app` `update_app_permissions` |
 
-**真多轮 5/5 是关键结果** —— G2b 在本机路径上也成立。
+### ⚠️ Plugin_Management 不能装东西
 
-### 追加写 6/10 的归因(未完成)
+模型自述这 4 个能力的作用,并明确回答**没有任何能力能从 URL/OpenAPI 注册插件**:
+查权限 / 查依赖(明确不安装)/ 卸载 / 改权限。**对话层没有安装入口。**
 
-抓到一个失败样本,模型原话:
+---
 
-> "the execution environment returned an internal **container error (`ENOENT`)**"
+## 5. skills:`skills://plugins/` 实测是 artifact 模板
 
-`commands=0` = **模型压根没发命令**,因为上游沙箱自己报错。
-这**不是**"模型改成叙述"(那是 `_looks_like_refusal()` 处理的问题)。
+我原以为这是插件/skill 注册表 —— **不是**。实测返回 24 项:
 
-补测 16 次里只见 1 次 ENOENT(~6%),**所以 ENOENT 不足以解释 4/10 的失败**,
-剩余失败原因未查明。**不要把 6/10 全归因于上游。**
+**4 种输出格式**:`presentation` `pdf` `document` `spreadsheet`
 
-### 两个自查出来的测量错误(教训)
+**20 个 artifact 模板**:analytics-dashboard、business-review、design-report、
+experiment-analysis、financial-budget、investment-committee-memo、legal-memorandum、
+market-trends-report、minimal-letterhead、operating-calendar、operating-review、
+project-kickoff、project-tracker、sales-pipeline、simple-dark-mode、simple-light-mode、
+strategy-memorandum、system-design、team-alignment、three-statement-forecast
 
-1. 第一次跑追加写得 1/3 —— 是**我的测试脚本 bug**,`$i` 在单引号里没展开,
-   三次写到同一目录。修正 fixture 后是 6/10。
-   **测出异常低的数,先怀疑 fixture。**
-2. 以为模型把 token 截断了(`...B4D` vs `...B4D8`)—— 查 `agentloop.py:134`
-   发现是**我的 harness 打印限制 150 字符**。
-   **报缺陷前先确认不是自己的显示截断。**
+**与工具注册无关。**
 
-## 6. 结论:优化优先级
+---
 
-| 项 | 判断 |
+## 6. ⭐ 唯一可扩展通路:MCP connector
+
+在会话里凭空声明自定义工具会被拒绝(试过 `lark_docs_fetch`,模型明确说
+「available api_tool capabilities in this chat do not include ...」)。
+**扩展只有一条路:注册 MCP connector**(HTTP API 层,不是对话层)。
+
+```
+PATCH /backend-api/settings/account_user_setting?feature=developer_mode&value=true
+POST  /backend-api/aip/connectors/mcp          # 注册
+GET   /backend-api/aip/connectors/{id}/actions # OpenAI 抓到的真实 JSON Schema
+POST  /backend-api/aip/connectors/links/noauth # ← 必做,漏了模型看不到工具
+```
+
+已落地:**飞书 24 个工具**已通,返回真实数据,链式两步调用成功。
+工具:`scripts/chatgpt-onboard/zerokey-codex/bridge/mcp-connector-cli.js`
+
+**限制**:MCP 要求远程 HTTPS(不支持本地 stdio)→ 「在用户本机跑 shell」
+仍只能 exec-harvest。connector 是**账号级**,47 个账号需各自注册。
+
+`custom_headers` 被服务端 gate(`403 Custom MCP headers are not enabled`,
+非用户可开)→ 不能用密钥头鉴权。
+
+---
+
+## 7. 账号能力:plan=pro,66 个 feature flag
+
+| 分组 | flags |
 |---|---|
-| 补 `container.download` 等 harvest | ❌ 无效 —— 实测从不触发 |
-| 挂更多 MCP connector | ✅ 唯一可扩展方向 |
-| 换 410000 上下文模型 | ⚠️ 需先验证 `stream_handoff` 路径 |
-| 查追加写剩余失败 | ✅ 唯一还在影响成功率的未知量 |
-| `python` 被包成 `bash -lc` | ⚠️ 潜在缺陷,当前未触发 |
+| **模型** | `gpt5` `gpt5_mini` `gpt5_pro` `gpt4_1` `gpt4_1_mini` `gpt_4_5` `o1_launch` `o3` `o3-mini` `o3_pro` `o4_mini` `model_switcher` `model_ab_use_v2` |
+| **工具/执行** | `code_interpreter_available` `browsing_available` `search_tool` `image_gen_tool_enabled` `dalle_3` `voice_mode_tool_enabled` `canvas` `canvas_code_execution` `canvas_code_network_access` `canvas_o1` `canvas_opt_in` `chart_serialization` `d3_controls` `d3_editor` `d3_editor_gpts` |
+| **插件/connector** | `plugins_available` `new_plugin_oauth_endpoint` `bizmo_settings` `gizmo_canvas_toggle` `gizmo_reviews` `gizmo_support_emails` |
+| **语音/多模态** | `voice_advanced_ga` `voice_file_upload` `voice_image_upload_wingman` `voice_text_upload` `voice_text_upload_wingman` `video_screen_sharing` `share_multimodal_links` |
+| **账号/安全** | `mfa` `sentinel_enabled_for_subscription` `workspace_ip_allowlist` `chatgpt_ios_attest` `no_auth_training_enabled_by_default` `privacy_policy_nov_2023` `spend-controls-migrated-to-groups` |
+| 其他/内部代号 | `aura_available` `beta_features` `breeze_available` `cancellation_promotion` `caterpillar` `chat_preferences_available` `codex_sidebar_promotion_eligible` `golden_hour` `graphite` `mercury` `moonshine` `shareable_links` `snc` `starter_prompts` `sunshine_available` `user_settings_announcements` `wham` `writing_blocks_document_mode` |
 
-## 7. code-review 发现并修掉的缺陷
+**与我们相关的三个**:`plugins_available`、`new_plugin_oauth_endpoint`(MCP connector 前置)、
+`code_interpreter_available`(exec-harvest 依赖它)。
 
-| 缺陷 | 影响 | 修法 |
-|---|---|---|
-| `provision` 在 register 成功后失败**不回滚** | 账号上堆积没有 link 的孤儿 connector,模型看不到它,下次 provision 又建一个。API 没有 list-by-account,堆多了很难清 | 加 `rollback()`,register 之后每条失败路径都 `del()`;`test-provision-rollback.js` 4/4 |
-| `--force` / `--delete` **宣传了但没实现** | `--delete` 只打印 "N/A" 假路径,`--force` 完全没被引用 | 直接删掉这两个 flag —— 不宣传做不到的事 |
-| `json_quote()` 名不副实 | 实际做的是 shell 单引号转义,名字会误导后人以为是 JSON | 改名 `shq()` 并注明。**行为本身是对的**(4 个 case 实测通过) |
-| `--rounds` 未校验 | 负数会导致爬取零轮然后在空缓存上 die | 夹到 `[1,4]` |
-| 文档声称 provision **幂等** | 实际每次都建**新** connector,重复跑会堆积 | 改为明确写"不幂等",并说明为何做不到 |
+首页 HTML 里还能读到 `enabledConnectors` 含 **`mcp_connector`**,以及两个 workspace 权限
+`chatgpt.workspace.connector.mcp.create` / `chatgpt.workspace.connector.dev_mode`。
 
+---
+
+## 8. 怎么复现这份清单
+
+```bash
+cd scripts/chatgpt-onboard/zerokey-codex/bridge
+# 路由不要猜(猜了 30+ 个全 404),从前端 bundle 提取:
+node discover-chatgpt-routes.js --session sess.json --grep connector --enum DeveloperMode
+# MCP connector 端到端自检(自动清理探针)
+node mcp-connector-cli.js --session sess.json probe
+```
+
+模型/工具清单:问模型「List EVERY tool namespace available to you right now
+(the exact recipient names you can address)」—— 但**必须再用抓包验证哪些真触发**。

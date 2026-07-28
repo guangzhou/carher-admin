@@ -198,6 +198,40 @@ nginx 侧确认收到真实调用(`st=200` ×3,请求体 742/1140/1736 字节递
 **链式两步成功 = G2b(多步 toolcall)在协议层成立**,不需要
 `_looks_like_refusal()` 那套正则判定。
 
+## 4.5 最小闭环(pod 账号,2026-07-28)
+
+在**真实 pod 账号 acct100** 上跑通全链路,不只是 acct87 探针:
+
+```
+1. lark-mcp 公网端点           HTTP 200 (MCP initialize)
+2. provision --apply           connector=asdk_app_6a681563…  link=link_6a68157e…
+3. GET {id}/actions            OpenAI 抓到 24 个 action schema
+4. 会话内真调用                recipient: "api_tool.call_tool"  ✅
+5. 模型发出的调用体            {"path":"/lark/link_6a68157e…/im_v1_chat_list",
+                                "args":{"params":{"page_size":1,…}}}
+6. 返回真实飞书数据            has_more:true,items[].avatar=s3-imfile.feishucdn.com
+7. 模型最终回答                "…产品测试群"
+```
+
+### 闭环过程中修掉两个批量前必须修的问题
+
+**① 409 被误判成失败(会让批量误报)。** 同名 connector 已存在时 API 回:
+
+```json
+409 {"detail":{"message":"Connector with name 'lark' already exists",
+              "existing_connector_id":"asdk_app_6a681563…"}}
+```
+
+**这不是失败** —— 而且响应体直接给了既有 id。原先归到 `OTHER` → 批量重跑会把
+"已经装好了"报成"装不上"。现在归为 `EXISTS` 并复用该 id,**provision 变成幂等的**。
+(之前文档里"不幂等、重复跑会堆积"的说法据此更正。)
+
+**② 批量只信 provision 自己的输出。** `完成:` 只说明它三步都 2xx,
+不代表 OpenAI 侧真抓到了 schema —— 实测 `links/noauth` **接受不存在的 action 名
+仍回 200**,所以 link 成功 ≠ 工具可用。
+现在注册后**独立再查一次 `actions`**,低于 `--min-actions` 记 FAIL 而非 OK。
+lark-mcp 用 `--min-actions 24` 卡住。
+
 ## 5. 已知限制(不要当成已解决)
 
 1. **`docx_builtin_search` / `docx_builtin_import` 需要 user_access_token**,

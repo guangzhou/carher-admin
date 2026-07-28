@@ -78,7 +78,7 @@ expect "无 authorization"  2 "authorization"   node "$DISC" --session "$TMP/noa
 echo "=== 从异地 cwd 跑 ==="
 cd "$TMP" || exit 1
 expect "cwd=tmpdir --help" 0 "MCP connector"   node "$CLI" --help
-expect "平面分类回归"      0 "7/7"             node "$BRIDGE/testkit/test-plane-classify.js"
+expect "平面分类回归"      0 "通过"             node "$BRIDGE/testkit/test-plane-classify.js"
 
 echo
 echo "$PASS 通过 / $FAIL 失败"

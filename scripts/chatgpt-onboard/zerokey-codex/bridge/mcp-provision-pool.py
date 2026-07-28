@@ -23,14 +23,19 @@ pod 账号必须各自 register + link 一次。手工做不现实,也容易漏�
   - session bundle 从每个 pod 的 users.json 现取,不缓存 —— 凭据会轮转
   - 串行执行。47 个账号并发注册会同时打 OpenAI,且失败难归因;
     每个约 3 次 HTTP,串行总耗时可接受
-  - **不幂等**:register 每次都会创建**新** connector,不会复用同名的。
-    重复跑会在账号上堆积 connector,需先用 CLI delete 清理。
-    (要做到幂等需要 list-by-account 接口,当前 API 未找到)
+  - **幂等**:同名 connector 已存在时 API 回 409 且响应体带
+    existing_connector_id,CLI 会复用它。所以重复跑安全,不会堆积。
+    (最初以为不幂等,是因为把 409 归成了未分类错误。)
+  - **注册后独立复查 action 数**:provision 打印"完成"只说明它自己三步都 2xx;
+    真正要保证的是 OpenAI 侧抓到了 schema,所以单独再查一次 actions。
+    实测 links/noauth 会接受不存在的 action 名并仍回 200,
+    所以 link 成功 != 工具可用。lark-mcp 应为 24,用 --min-actions 24 卡住。
 """
 
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -145,12 +150,16 @@ def main():
     ap.add_argument("--only", nargs="*", help="只处理这些 pod 前缀")
     ap.add_argument("--apply", action="store_true",
                     help="真的执行。不给就是 dry-run")
+    ap.add_argument("--min-actions", type=int, default=1,
+                    help="注册后必须抓到的最少 action 数(默认 1);"
+                         "低于此数记 FAIL 而非 OK。lark-mcp 应为 24")
     ap.add_argument("--list", action="store_true", help="只列 pod/账号,不动任何东西")
     a = ap.parse_args()
 
     if not a.list and not a.url:
         die("register 需要 --url(或用 --list 只看现状)")
 
+    min_actions = a.min_actions
     pods = list_pods(a.only)
     if not pods:
         die("没有匹配的 pod(ns=%s)" % NS)
@@ -185,16 +194,38 @@ def main():
 
             rc, out = run_cli(hdrs, "provision --url %s --name %s"
                               % (shq(a.url), shq(a.name)))
-            if rc == 0 and "完成:" in out:
-                cid = ""
-                for line in out.splitlines():
-                    if line.startswith("完成:"):
-                        cid = line.strip()
-                print("  OK    %-40s %s" % (tag, cid[:70]))
-                ok += 1
-            else:
+            if rc != 0 or "完成:" not in out:
                 last = [l for l in out.strip().splitlines() if l.strip()]
                 print("  FAIL  %-40s %s" % (tag, (last[-1] if last else "无输出")[:80]))
+                fail += 1
+                continue
+
+            cid = ""
+            for line in out.splitlines():
+                m = re.search(r"connector=(\S+)", line)
+                if m:
+                    cid = m.group(1)
+
+            # 独立复查:provision 打印"完成"只说明它自己的三步都返回 2xx。
+            # 真正要保证的是"OpenAI 侧确实抓到了 action schema" —— 这一步单独查,
+            # 不复用上一步的输出。API 曾接受不存在的 action 名而仍返回 200
+            # (传 no_such_tool_xyz 也 200),所以 link 成功 != 工具可用。
+            n_actions = 0
+            if cid:
+                rc2, out2 = run_cli(hdrs, "actions %s" % shq(cid))
+                mm = re.search(r"抓到 (\d+) 个 action", out2)
+                if rc2 == 0 and mm:
+                    n_actions = int(mm.group(1))
+
+            if n_actions >= min_actions:
+                print("  OK    %-40s connector=%s  actions=%d"
+                      % (tag, cid[:34], n_actions))
+                ok += 1
+            else:
+                # 注册成功但 schema 抓不到 -> 这个 connector 是残废的,报 FAIL
+                # 而不是 OK,否则批量跑完会以为全好了。
+                print("  FAIL  %-40s connector=%s  actions=%d (期望>=%d)"
+                      % (tag, cid[:34], n_actions, min_actions))
                 fail += 1
 
     print("\n== ok=%d skip=%d fail=%d ==" % (ok, skip, fail))

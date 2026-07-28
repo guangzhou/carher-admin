@@ -113,6 +113,10 @@ function classify(status, isJson, json) {
   if (status === 404) return 'ROUTE_OK_BAD_ID'; // 如 "Connector not found"
   if (status === 405) return 'WRONG_METHOD';
   if (status === 422) return 'SCHEMA';          // 已达 handler,看 loc 改字段
+  // 同名 connector 已存在。这**不是失败** —— 幂等重跑会撞到它,而且响应体带
+  // existing_connector_id,可以直接复用。之前归到 OTHER 会让批量跑报 FAIL,
+  // 把"已经装好了"误报成"装不上"。
+  if (status === 409) return 'EXISTS';
   if (status >= 200 && status < 300) return 'OK';
   return 'OTHER';
 }
@@ -126,6 +130,7 @@ function explain(r) {
     ROUTE_OK_BAD_ID: '路由存在,路径段被当成 ID 解析了',
     WRONG_METHOD: '路由存在,method 不对',
     SCHEMA: '已到达目标 handler,只是字段不对(看 loc)',
+    EXISTS: '同名 connector 已存在(可复用,不是失败)',
     NETWORK: '网络层失败',
   }[r.plane] || '未分类';
   return `${r.status} [${r.plane}] ${hint}`;
@@ -167,6 +172,14 @@ async function register(h, opts) {
   const r = await call(h, 'POST', '/backend-api/aip/connectors/mcp', body);
   log(explain(r));
 
+  // 409 = 同名已存在。API 在响应体里给了 existing_connector_id,直接复用它 ——
+  // 这让 provision 变成幂等的,批量重跑不会堆积重复 connector 也不会误报失败。
+  if (r.plane === 'EXISTS') {
+    const ex = (r.json && r.json.detail && r.json.detail.existing_connector_id) || '';
+    if (ex) { log(`复用既有 connector id=${ex}`); return ex; }
+    log('同名已存在但响应体没给 existing_connector_id');
+    return null;
+  }
   if (r.plane !== 'OK') {
     if (r.plane === 'FEATURE_GATE') log('提示:先跑 devmode-enable');
     if (r.plane === 'SCHEMA') log('schema 报错: ' + JSON.stringify(r.json && r.json.detail));

@@ -17,6 +17,7 @@ const CASES=[
  ["method不对",405,true,{detail:"Method Not Allowed"},"WRONG_METHOD"],
  ["schema错(query)",422,true,{detail:[{loc:["query","feature"]}]},"SCHEMA"],
  ["成功",200,true,{tunnels:[]},"OK"],
+ ["同名已存在(可复用非失败)",409,true,{detail:{message:"Connector with name 'lark' already exists",existing_connector_id:"asdk_app_x"}},"EXISTS"],
 ];
 let bad=0;
 for(const [n,s,j,b,exp] of CASES){
@@ -24,5 +25,5 @@ for(const [n,s,j,b,exp] of CASES){
  const ok=got===exp; if(!ok)bad++;
  console.log((ok?"PASS":"FAIL")+"  "+n+" → "+got+(ok?"":" 期望 "+exp));
 }
-console.log(bad?("\n"+bad+" 条失败"):"\n7/7 通过");
+console.log(bad?("\n"+bad+" 条失败"):"\n"+CASES.length+"/"+CASES.length+" 通过");
 process.exit(bad?1:0);

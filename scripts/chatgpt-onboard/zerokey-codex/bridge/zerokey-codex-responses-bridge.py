@@ -1369,6 +1369,19 @@ def _looks_like_refusal(text):
     """
     if not text:
         return False
+    # Normalise typographic punctuation BEFORE any pattern runs. Every pattern in
+    # this function spells contractions with a straight quote ("can't", "don't"),
+    # but the model emits the TYPOGRAPHIC apostrophe U+2019, so those patterns
+    # silently missed real refusals. Measured on two production failures whose text
+    # was otherwise identical:
+    #   "I don't have access to a shell execution tool ..."  -> refusal (matched)
+    #   "I don’t have access to a shell execution tool ..."  -> NOT a refusal (!)
+    # Same for smart double quotes and the unicode ellipsis, which appear in the
+    # same replies. Fixing it here rather than in ~25 individual patterns is both
+    # smaller and cannot be forgotten when a new pattern is added.
+    text = (text.replace("’", "'").replace("‘", "'")
+                .replace("“", '"').replace("”", '"')
+                .replace("…", "..."))
     head = text.strip()[:_HEAD]
     # HANDOFF FIRST, and unconditionally. "把输出贴给我" / "you can run it yourself"
     # is the least ambiguous signal in this function: a reply that asks the USER to

@@ -1,0 +1,183 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# cursor-agents-shim — Cursor Cloud Agents API → OpenAI /v1/chat/completions
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# WHAT
+#   FastAPI bridge that makes Cursor's Cloud Agents API speak the
+#   OpenAI chat/completions dialect, so LiteLLM (and anything else that
+#   talks OpenAI) can consume Cursor-backed models as an ordinary upstream.
+#   Exposes /v1/models, /v1/chat/completions and /health on port 8901.
+#
+# WHY PINNED TO NODE 225 (aiyjy-litellm-standby, 10.68.13.225)
+#   Cursor applies a region gate on the Agents API keyed off the *caller's
+#   egress IP*. Only 225 carries the US egress; every other node in this
+#   cluster egresses from a region Cursor rejects. The rejection is NOT an
+#   auth error or an HTTP 403 — Cursor answers 200 with `invalid_model` for
+#   every Claude/GPT model, which reads like a bad model name and sends you
+#   debugging the wrong layer. So the nodeSelector below is load-bearing,
+#   not an optimisation: unpin it and the shim comes up "healthy" while
+#   returning invalid_model for the entire model list.
+#
+# BUILD & DEPLOY
+#   The image is built on 188 (docker) and side-loaded into 225's
+#   containerd — there is no registry push, hence imagePullPolicy: Never.
+#
+#     # on 188 — build and export
+#     cd scripts/cursor-agents-shim/
+#     docker build -t cursor-agents-shim:latest .
+#     docker save cursor-agents-shim:latest -o /tmp/cursor-agents-shim.tar
+#
+#     # copy the tar to 225, then on 225 — import into k3s containerd
+#     sudo k3s ctr -n k8s.io images import /tmp/cursor-agents-shim.tar
+#     sudo k3s ctr -n k8s.io images ls | grep cursor-agents-shim   # verify
+#
+#     # then, from anywhere with cluster access
+#     kubectl apply -f k8s/cursor-agents-shim.yaml
+#     kubectl -n litellm-product rollout status deploy/cursor-agents-shim
+#
+#   Re-importing a tar under the same tag does NOT restart the Pod; after an
+#   import you must `kubectl -n litellm-product rollout restart
+#   deploy/cursor-agents-shim` or the old image keeps serving.
+#
+# SOURCE
+#   scripts/cursor-agents-shim/ (app.py, Dockerfile, requirements.txt)
+#
+# NAMESPACE
+#   Uses the pre-existing `litellm-product` namespace. This file deliberately
+#   does not declare it — the namespace is shared with the zerokey pools and
+#   must not be created or mutated from here.
+# ═══════════════════════════════════════════════════════════════════════════
+---
+# Cursor API key for the shim's upstream calls.
+#
+# The key is deliberately NOT in this file — a Cursor key has write scope (it
+# can create, run and delete agents, i.e. spend quota), so committing one is
+# a real credential leak, not a placeholder. Create the Secret out-of-band:
+#
+#   kubectl -n litellm-product create secret generic cursor-shim-secret \
+#     --from-literal=CURSOR_API_KEY=crsr_xxxxxxxx
+#
+# To rotate: recreate the Secret (--dry-run=client -o yaml | kubectl apply -f -)
+# then `kubectl -n litellm-product rollout restart deploy/cursor-agents-shim`,
+# since env vars are read once at process start.
+#
+# `kubectl apply -f` on this file therefore does NOT provision the Secret; the
+# Deployment stays in CreateContainerConfigError until it exists. That failure
+# mode is intentional and visible, unlike a stale committed key.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cursor-agents-shim
+  namespace: litellm-product
+  labels:
+    app: cursor-agents-shim
+spec:
+  # Single replica: the shim is stateless, but Cursor rate-limits per API key
+  # and every extra replica multiplies concurrent agent runs against one key.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cursor-agents-shim
+  template:
+    metadata:
+      labels:
+        app: cursor-agents-shim
+    spec:
+      # ═══════════════════════════════════════════════════════════════════
+      # MANDATORY — DO NOT REMOVE OR RELAX
+      # ═══════════════════════════════════════════════════════════════════
+      # Only aiyjy-litellm-standby (10.68.13.225) has the US egress IP that
+      # Cursor's region gate accepts. Scheduled on any other node, the shim
+      # starts fine and passes its health probe, but Cursor answers every
+      # request with `invalid_model` for all Claude/GPT models — a silent,
+      # misleading failure that looks like a model-name bug.
+      # If 225 is down, this Deployment stays Pending on purpose: Pending is
+      # a visible failure, invalid_model everywhere is not.
+      # ═══════════════════════════════════════════════════════════════════
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      # 225 carries the taint `dedicated=standby:NoSchedule` so that ordinary
+      # workloads do not drift onto the standby node. Pinning via nodeSelector
+      # alone leaves the Pod Pending forever — the toleration is required to
+      # actually land. Same key/value/effect that litellm-proxy uses to place
+      # its 2 standby replicas there.
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      # An in-flight agent run can occupy up to AGENT_TIMEOUT (300s). Give the
+      # Pod slightly longer than that to drain so a rollout or node drain does
+      # not sever requests that were about to return.
+      terminationGracePeriodSeconds: 320
+      containers:
+        - name: shim
+          image: cursor-agents-shim:latest
+          # Never: the image is side-loaded into 225's containerd via
+          # `k3s ctr images import` and does not exist in any registry.
+          # IfNotPresent/Always would make the Pod ErrImagePull.
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8901
+              name: http
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8901"
+            # Upper bound on a single Cursor agent run. Kept in sync with
+            # terminationGracePeriodSeconds above and with LiteLLM's
+            # per-request timeout for this upstream.
+            - name: AGENT_TIMEOUT
+              value: "300"
+            - name: CURSOR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cursor-shim-secret
+                  key: CURSOR_API_KEY
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              # The shim only proxies and re-frames JSON/SSE; the generous CPU
+              # limit is headroom for streaming bursts, not steady-state need.
+              cpu: 1000m
+              memory: 512Mi
+          # /health is a local check only — it does not call Cursor, so it
+          # cannot detect a region-gate failure. Verify the egress separately
+          # via GET /v1/models after any reschedule.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8901
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8901
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cursor-agents-shim
+  namespace: litellm-product
+  labels:
+    app: cursor-agents-shim
+spec:
+  # ClusterIP is sufficient: the only consumer is LiteLLM inside the cluster.
+  # Point LiteLLM's api_base for Cursor-backed models at:
+  #
+  #   http://cursor-agents-shim.litellm-product.svc.cluster.local:8901/v1
+  #
+  type: ClusterIP
+  selector:
+    app: cursor-agents-shim
+  ports:
+    - name: http
+      port: 8901
+      targetPort: 8901
+      protocol: TCP

@@ -1,0 +1,431 @@
+"""Normalize OpenAI Responses items for the ChatGPT account pool."""
+from __future__ import annotations
+
+import hashlib
+import logging
+import re
+from typing import Any
+
+from litellm.integrations.custom_logger import CustomLogger
+
+_log = logging.getLogger("chatgpt_responses_normalize")
+_TARGET_MODEL_PARTS = ("gpt-5.5", "chatgpt-gpt-5.5", "chatgpt-pool-gpt-5.5", "gpt-5.6", "chatgpt-gpt-5.6", "image-2")
+_TARGET_ROLES = {"system", "developer"}
+_RESPONSE_CALL_TYPES = {"responses", "aresponses"}
+_DROP_ALL_REASONING_ALIASES = set()
+_MESSAGE_ONLY_ALIASES = set()
+
+# Cross-provider tool-call contamination cleanup.
+# A conversation history produced under an Anthropic model carries tool_use
+# ids like ``toolu_...`` and function names containing characters outside
+# ``^[a-zA-Z0-9_-]+$`` (e.g. Chinese / dots). Replaying such history to the
+# ChatGPT (OpenAI Responses) pool makes the upstream reject the whole request
+# with 400 ``invalid_request_error`` on ``input[N].id`` / ``input[N].name``,
+# which then cools the entire pool. We rewrite those fields deterministically
+# (same dirty value -> same clean value) so function_call<->output pairing and
+# name<->tool-definition linkage survive.
+_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
+_ID_STRIP_RE = re.compile(r"[^a-zA-Z0-9]")
+_TOOL_CALL_TYPES = {"function_call", "custom_tool_call", "tool_call", "local_shell_call"}
+
+
+def _sanitize_name(name: Any) -> tuple[Any, bool]:
+    if not isinstance(name, str) or _NAME_RE.search(name) is None:
+        return name, False
+    base = _NAME_RE.sub("_", name)
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    fixed = ("%s_%s" % (base, digest))[:64]
+    return fixed, True
+
+
+def _remap_tool_id(val: Any, prefix: str) -> tuple[Any, bool]:
+    if isinstance(val, str) and val.startswith("toolu_"):
+        rest = _ID_STRIP_RE.sub("", val[len("toolu_"):]) or "0"
+        return prefix + rest, True
+    return val, False
+
+
+# A prefix allowlist ("rewrite when it looks like toolu_") cannot hold: every
+# non-ChatGPT fallback target stamps its own shape. Observed on 198 prod:
+#   wangsu qwen3.7-plus via anthropic gw, non-streaming -> ``toolu_<24hex>``
+#   wangsu qwen3.7-plus via anthropic gw, *streaming*   -> ``call_<24hex>``
+#   any custom_openai/compat entry (glm-5.2, qwen3.7-plus) -> ``call_<24hex>``
+#   kimi-k3                                            -> ``shell_0``
+# Codex always streams, so the ``call_*`` shape is the common case and the old
+# toolu_-only rule let it through untouched -> upstream 400
+# ``Invalid 'input[N].id': 'call_...'. Expected an ID that begins with 'fc'.``
+#
+# The expected prefix is decided by the ITEM TYPE, not by one global constant:
+# ``function_call`` wants ``fc_`` but ``custom_tool_call`` wants ``ctc_``. A first
+# revision forced ``fc_`` on every tool-call type and broke codex custom tools
+# with ``Expected an ID that begins with 'ctc'`` (70 hits in 15 min) — worse than
+# the bug it fixed. Types whose expected prefix we have not confirmed upstream
+# are deliberately left to the legacy ``toolu_``-only rule rather than guessed.
+#
+# Pairing rides on ``call_id``, never on ``id``, so rewriting ``id`` is safe; the
+# rewrite is deterministic so a replayed history stays stable.
+_TOOL_ID_EXPECTED_PREFIX = {
+    "function_call": "fc_",
+    "custom_tool_call": "ctc_",
+}
+_TOOL_ID_KNOWN_PREFIXES = ("toolu_", "call_", "ctc_", "fc_")
+
+
+def _force_tool_id_prefix(val: Any, want: str) -> tuple[Any, bool]:
+    if not isinstance(val, str) or val.startswith(want):
+        return val, False
+    body = val
+    for prefix in _TOOL_ID_KNOWN_PREFIXES:
+        if body.startswith(prefix):
+            body = body[len(prefix):]
+            break
+    body = _ID_STRIP_RE.sub("", body) or "0"
+    return want + body, True
+
+
+def _is_target_model(model: Any) -> bool:
+    return isinstance(model, str) and any(part in model for part in _TARGET_MODEL_PARTS)
+
+
+
+def _content_to_text(content: Any) -> str | None:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+        elif isinstance(part, dict):
+            for key in ("text", "input_text", "output_text"):
+                value = part.get(key)
+                if isinstance(value, str):
+                    parts.append(value)
+                    break
+    text = "\n".join(p for p in parts if p).strip()
+    return text or None
+
+
+def _reasoning_has_summary_text(item: dict[str, Any]) -> bool:
+    summary = item.get("summary")
+    if isinstance(summary, str):
+        return bool(summary.strip())
+    if not isinstance(summary, list):
+        return False
+    for part in summary:
+        if isinstance(part, str) and part.strip():
+            return True
+        if isinstance(part, dict):
+            for key in ("text", "summary_text"):
+                value = part.get(key)
+                if isinstance(value, str) and value.strip():
+                    return True
+    return False
+
+
+def _normalize_item(item: Any, drop_all_reasoning: bool = False) -> tuple[Any | None, str | None]:
+    if not isinstance(item, dict):
+        return item, None
+
+    if drop_all_reasoning and item.get("type") == "reasoning":
+        return None, "key_scoped_reasoning_drop"
+
+    if item.get("type") == "compaction":
+        return None, "compaction_drop"
+
+    if item.get("type") == "message" and item.get("role") in _TARGET_ROLES:
+        text = _content_to_text(item.get("content"))
+        if text:
+            out = dict(item)
+            out.pop("type", None)
+            out["role"] = "system"
+            out["content"] = text
+            return out, "system_message"
+        return item, None
+
+    changed: list[str] = []
+    out = dict(item)
+
+    has_encrypted_content = "encrypted_content" in out
+    item_id = out.get("id")
+    if isinstance(item_id, str) and (item_id.startswith("encitem_") or (item.get("type") == "reasoning" and has_encrypted_content)):
+        out.pop("id", None)
+        changed.append("encrypted_item_id_strip")
+
+    if has_encrypted_content:
+        out.pop("encrypted_content", None)
+        changed.append("encrypted_content_strip")
+
+    # Anthropic->OpenAI tool-call contamination cleanup (see module docstring).
+    if item.get("type") in _TOOL_CALL_TYPES or isinstance(out.get("name"), str):
+        new_name, name_changed = _sanitize_name(out.get("name"))
+        if name_changed:
+            out["name"] = new_name
+            changed.append("func_name_sanitize")
+    want = _TOOL_ID_EXPECTED_PREFIX.get(item.get("type"))
+    if want:
+        new_id, id_changed = _force_tool_id_prefix(out.get("id"), want)
+        if id_changed:
+            out["id"] = new_id
+            changed.append("tool_id_prefix_force")
+    else:
+        new_id, id_changed = _remap_tool_id(out.get("id"), "fc_")
+        if id_changed:
+            out["id"] = new_id
+            changed.append("toolu_id_remap")
+    new_call_id, call_id_changed = _remap_tool_id(out.get("call_id"), "call_")
+    if call_id_changed:
+        out["call_id"] = new_call_id
+        changed.append("toolu_call_id_remap")
+
+    if item.get("type") == "reasoning" and not _reasoning_has_summary_text(out):
+        kind = "+".join(changed + ["empty_reasoning_drop"]) if changed else "empty_reasoning_drop"
+        return None, kind
+
+    if changed:
+        return out, "+".join(changed)
+
+    return item, None
+
+
+def _force_tool_ids_only(data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Model-agnostic minimal pass: only make tool-call ``id``s ``fc_``-prefixed.
+
+    ``_TARGET_MODEL_PARTS`` is a *name* allowlist and it misses model groups the
+    same way the old ``toolu_``-only id rule missed id shapes: 2026-08-02 the
+    ``fc``-prefix 400 kept firing for ``chatgpt-gpt-5.4`` / ``gpt-5.2`` after the
+    id fix landed, because normalization never ran for those groups at all.
+
+    Widening ``_TARGET_MODEL_PARTS`` would also switch on the heavy transforms
+    (previous_response_id drop, encrypted_content strip, empty-reasoning drop,
+    compaction drop) for traffic that has never seen them — too big a blast
+    radius for this defect. So the id rewrite, and only the id rewrite, runs for
+    every model; everything else stays gated as before.
+    """
+    items = data.get("input")
+    if not isinstance(items, list):
+        return data, 0
+    forced = 0
+    new_items: list[Any] = []
+    for item in items:
+        want = _TOOL_ID_EXPECTED_PREFIX.get(item.get("type")) if isinstance(item, dict) else None
+        if want:
+            new_id, changed = _force_tool_id_prefix(item.get("id"), want)
+            if changed:
+                item = dict(item)
+                item["id"] = new_id
+                forced += 1
+        new_items.append(item)
+    if forced:
+        data = dict(data)
+        data["input"] = new_items
+    return data, forced
+
+
+def _normalize_data(data: dict[str, Any], source: str) -> dict[str, Any]:
+    model = data.get("model")
+    if not _is_target_model(model):
+        data, forced = _force_tool_ids_only(data)
+        if forced:
+            _log.info("chatgpt_responses_normalize[%s] model=%s tool_id_fc_force=%d (untargeted model)",
+                      source, model, forced)
+        return data
+
+
+    counts: dict[str, int] = {}
+    out_data = dict(data)
+    md_in = data.get("litellm_metadata")
+    key_alias = md_in.get("user_api_key_alias") if isinstance(md_in, dict) else None
+    drop_all_reasoning = key_alias in _DROP_ALL_REASONING_ALIASES
+    message_only = key_alias in _MESSAGE_ONLY_ALIASES
+    if out_data.pop("previous_response_id", None) is not None:
+        counts["previous_response_id_drop"] = 1
+
+    input_items = out_data.get("input")
+    # The Responses API accepts ``input`` as EITHER a string or an item array,
+    # but the ChatGPT (codex) upstream only accepts the array form and hard-400s
+    # a bare string with ``{"detail":"Input must be a list"}`` (2026-08-02:
+    # 31 hits / 20 min, all on chatgpt-gpt-5.5). Clients are within spec here,
+    # so coerce to the canonical single user message instead of letting the whole
+    # request fail over to a fallback target.
+    if isinstance(input_items, str) and input_items:
+        input_items = [{"role": "user", "content": [{"type": "input_text", "text": input_items}]}]
+        out_data["input"] = input_items
+        counts["string_input_to_list"] = 1
+    if isinstance(input_items, list):
+        new_items: list[Any] = []
+        for item in input_items:
+            if message_only and isinstance(item, dict) and item.get("type") not in (None, "message"):
+                counts["key_scoped_non_message_drop"] = counts.get("key_scoped_non_message_drop", 0) + 1
+                continue
+            new_item, kind = _normalize_item(item, drop_all_reasoning=drop_all_reasoning)
+            if kind:
+                counts[kind] = counts.get(kind, 0) + 1
+            if new_item is not None:
+                new_items.append(new_item)
+        out_data["input"] = new_items
+
+    # Keep tool DEFINITION names in lockstep with the sanitized function_call
+    # names in the history, else the upstream rejects the tool schema or the
+    # model can no longer match a call to its definition.
+    tools = out_data.get("tools")
+    if isinstance(tools, list):
+        new_tools: list[Any] = []
+        tools_changed = False
+        for tool in tools:
+            if not isinstance(tool, dict):
+                new_tools.append(tool)
+                continue
+            tool_out = dict(tool)
+            new_name, name_changed = _sanitize_name(tool_out.get("name"))
+            if name_changed:
+                tool_out["name"] = new_name
+                tools_changed = True
+            fn = tool_out.get("function")
+            if isinstance(fn, dict):
+                fn_new_name, fn_changed = _sanitize_name(fn.get("name"))
+                if fn_changed:
+                    fn_out = dict(fn)
+                    fn_out["name"] = fn_new_name
+                    tool_out["function"] = fn_out
+                    tools_changed = True
+            new_tools.append(tool_out)
+        if tools_changed:
+            out_data["tools"] = new_tools
+            counts["tool_def_name_sanitize"] = counts.get("tool_def_name_sanitize", 0) + 1
+
+    if not counts:
+        return data
+
+    md = out_data.setdefault("litellm_metadata", {})
+    if isinstance(md, dict):
+        md["_chatgpt_responses_normalized"] = counts
+    _log.info("chatgpt_responses_normalize: source=%s model=%s counts=%s", source, model, counts)
+    return out_data
+
+
+class ChatGPTResponsesNormalize(CustomLogger):
+    async def async_pre_call_hook(self, user_api_key_dict: Any, cache: Any, data: dict, call_type: str) -> Any:
+        try:
+            if str(call_type) in _RESPONSE_CALL_TYPES and isinstance(data, dict):
+                return _normalize_data(data, "pre_call:%s" % call_type)
+        except Exception as exc:
+            _log.warning("chatgpt_responses_normalize: pre_call error: %r", exc)
+        return data
+
+    async def async_pre_call_deployment_hook(self, kwargs: dict[str, Any], call_type: Any) -> Any:
+        try:
+            if str(call_type) in _RESPONSE_CALL_TYPES and isinstance(kwargs, dict):
+                return _normalize_data(kwargs, "pre_deployment:%s" % call_type)
+        except Exception as exc:
+            _log.warning("chatgpt_responses_normalize: pre_deployment error: %r", exc)
+        return kwargs
+
+    async def async_pre_routing_hook(self, model: str, request_kwargs: dict, messages: Any = None, input: Any = None, specific_deployment: bool = False) -> Any:
+        try:
+            if _is_target_model(model) and isinstance(request_kwargs, dict):
+                request_kwargs = dict(request_kwargs)
+                request_kwargs.setdefault("model", model)
+                if "input" not in request_kwargs and input is not None:
+                    request_kwargs["input"] = input
+                return _normalize_data(request_kwargs, "pre_routing")
+        except Exception as exc:
+            _log.warning("chatgpt_responses_normalize: pre_routing error: %r", exc)
+        return request_kwargs
+
+
+# Dev guard: do not route ChatGPT account-pool request-shape errors to Wangsu.
+def _install_chatgpt_fallback_guard() -> None:
+    try:
+        import litellm.router as router_mod
+        import litellm.router_utils.fallback_event_handlers as fallback_mod
+    except Exception as exc:
+        _log.warning("chatgpt_responses_normalize: fallback guard import failed: %r", exc)
+        return
+
+    current = getattr(fallback_mod, "run_async_fallback", None)
+    if getattr(current, "_chatgpt_responses_guard", False):
+        return
+    original = current
+
+    def _targets_chatgpt_to_wangsu(original_model_group: Any, fallback_model_group: Any) -> bool:
+        if not _is_target_model(original_model_group):
+            return False
+        groups = fallback_model_group if isinstance(fallback_model_group, list) else [fallback_model_group]
+        return any(isinstance(group, str) and "wangsu" in group and "gpt-5.5" in group for group in groups)
+
+    def _is_non_retryable_request_error(exc: Exception) -> bool:
+        status = getattr(exc, "status_code", None)
+        text = str(exc)
+
+        # Availability / capacity errors are allowed to use the configured
+        # Wangsu fallback. Payload/schema errors are not.
+        retryable_needles = (
+            "rate limit",
+            "rate_limit",
+            "quota",
+            "quota_exceeded",
+            "timeout",
+            "timed out",
+            "connect",
+            "connection",
+            "upstream unavailable",
+            "service unavailable",
+            "temporarily unavailable",
+            "Too Many Requests",
+        )
+        if isinstance(status, int):
+            if status in (408, 429) or status >= 500:
+                return False
+            if status in (400, 401, 403, 404, 422):
+                return True
+        if any(needle.lower() in text.lower() for needle in retryable_needles):
+            return False
+
+        non_retryable_needles = (
+            "BadRequestError",
+            "invalid_request_error",
+            "missing required",
+            "Missing required",
+            "System messages are not allowed",
+            "deployment that produced this encrypted_content",
+            "stale encrypted_content",
+            "same encryption boundary",
+            "Re-issue the request without the stale encrypted_content",
+            "aresponses() missing",
+            "schema",
+            "unsupported",
+            "content_filter",
+            "policy",
+        )
+        return any(needle in text for needle in non_retryable_needles)
+
+    async def guarded_run_async_fallback(*args: Any, **kwargs: Any) -> Any:
+        original_model_group = kwargs.get("original_model_group")
+        fallback_model_group = kwargs.get("fallback_model_group")
+        original_exception = kwargs.get("original_exception")
+        if (
+            isinstance(original_exception, Exception)
+            and _targets_chatgpt_to_wangsu(original_model_group, fallback_model_group)
+            and _is_non_retryable_request_error(original_exception)
+        ):
+            _log.warning(
+                "chatgpt_responses_normalize: blocked non-retryable fallback original_model_group=%s fallback_model_group=%s error=%s",
+                original_model_group,
+                fallback_model_group,
+                type(original_exception).__name__,
+            )
+            raise original_exception
+        return await original(*args, **kwargs)
+
+    guarded_run_async_fallback._chatgpt_responses_guard = True
+    fallback_mod.run_async_fallback = guarded_run_async_fallback
+    router_mod.run_async_fallback = guarded_run_async_fallback
+    _log.info("chatgpt_responses_normalize: installed ChatGPT Responses fallback guard")
+
+
+_install_chatgpt_fallback_guard()
+
+
+chatgpt_responses_normalize = ChatGPTResponsesNormalize()

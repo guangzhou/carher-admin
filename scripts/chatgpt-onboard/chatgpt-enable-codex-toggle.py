@@ -811,41 +811,62 @@ def login(page, pw):
     raise TimeoutError(f"login did not finish; url={page.url}")
 
 
-def enable_toggle(page):
-    print("[2] open security settings", flush=True)
-    page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded", timeout=GOTO_MS)
-    time.sleep(7)
-    shot(page, "04-security")
-    dump_page_text(page, "04-security")
-    try:
-        page.evaluate(
-            """() => {
-                const nodes = [...document.querySelectorAll('*')].filter(el => {
-                    const s = getComputedStyle(el);
-                    return /(auto|scroll)/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 20;
-                });
-                nodes.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
-                if (nodes[0]) nodes[0].scrollTop = nodes[0].scrollHeight;
-            }"""
-        )
-        time.sleep(2)
-        shot(page, "04b-security-bottom")
-        dump_page_text(page, "04b-security-bottom")
-    except Exception as exc:
-        print(f"  security scroll probe failed: {exc}", flush=True)
+SWITCH_SETTLE_MAX = int(os.environ.get("SWITCH_SETTLE_MAX", "45"))
+SWITCH_SETTLE_QUIET = float(os.environ.get("SWITCH_SETTLE_QUIET", "3"))
 
+TOGGLE_EXACT_RE = re.compile(
+    r"codex|device\s*code|device-code|device authorization|device auth|设备代码|设备授权|设备码",
+    re.I,
+)
+TOGGLE_REJECT_RE = re.compile(
+    r"mfa|authenticator|text message|password|passkey|security key|session|"
+    r"多因素|身份验证|短信|密码|通行密钥|安全密钥|会话|受信任设备|活跃会话",
+    re.I,
+)
+
+
+def wait_switches_settled(page, max_wait=None, quiet=None):
+    """等 settings 面板渲染稳定：button[role='switch'] 数量连续 quiet 秒不变才算完。
+
+    为什么必须等：面板是 React 异步渲染的，原来固定 sleep 7 之后常常只渲染了一半
+    （2026-08-04 acct-132/134 实证：此时只枚举到 3 个开关，Codex 那个落在 index 2；
+    渲染完的对照组 acct-133 是 index 5）。在半渲染的 DOM 上取到的句柄随后会被重渲染
+    替换掉 —— 6 种点击全部无效、aria-checked 永远读回 false，看着像"号被 gate 了"。
+    见 memory feedback_codex_toggle_enable_failed_switch_index_means_partial_render。
+    """
+    max_wait = SWITCH_SETTLE_MAX if max_wait is None else max_wait
+    quiet = SWITCH_SETTLE_QUIET if quiet is None else quiet
+    sw = page.locator("button[role='switch']")
+    prev, stable_since, t0 = -1, None, time.time()
+    while time.time() - t0 < max_wait:
+        try:
+            cur = sw.count()
+        except Exception:
+            cur = -1
+        if cur > 0 and cur == prev:
+            if stable_since is None:
+                stable_since = time.time()
+            if time.time() - stable_since >= quiet:
+                print(f"  switches settled: {cur} (waited {int(time.time() - t0)}s)", flush=True)
+                return cur
+        else:
+            prev, stable_since = cur, None
+        time.sleep(1.0)
+    print(f"  ⚠ switches 未在 {max_wait}s 内稳定 (last={prev}) — 继续但可能是半渲染", flush=True)
+    return prev
+
+
+def find_codex_switch(page):
+    """在当前 DOM 里重新定位 Codex device-code 开关，返回 (locator, idx)。
+
+    ⚠ 每一轮都必须重新枚举拿新句柄，不能复用上一轮的 —— 上一轮那个可能已经 detached。
+    """
     switches = page.locator("button[role='switch']")
-    target = None
-    exact_re = re.compile(
-        r"codex|device\s*code|device-code|device authorization|device auth|设备代码|设备授权|设备码",
-        re.I,
-    )
-    reject_re = re.compile(
-        r"mfa|authenticator|text message|password|passkey|security key|session|"
-        r"多因素|身份验证|短信|密码|通行密钥|安全密钥|会话|受信任设备|活跃会话",
-        re.I,
-    )
-    for idx in range(switches.count()):
+    try:
+        total = switches.count()
+    except Exception:
+        total = 0
+    for idx in range(total):
         sw = switches.nth(idx)
         try:
             label = sw.evaluate(
@@ -863,66 +884,111 @@ def enable_toggle(page):
             )
             compact = " ".join(label.split())
             print(
-                f"  switch {idx}: aria={sw.get_attribute('aria-checked')} label={compact[:220]!r}",
+                f"  switch {idx}/{total}: aria={sw.get_attribute('aria-checked')} label={compact[:220]!r}",
                 flush=True,
             )
-            if exact_re.search(label) and not reject_re.search(label):
-                target = sw
-                print(f"  matched Codex/device-code switch {idx}", flush=True)
-                break
+            if TOGGLE_EXACT_RE.search(label) and not TOGGLE_REJECT_RE.search(label):
+                print(f"  matched Codex/device-code switch {idx} (共 {total} 个开关)", flush=True)
+                return sw, idx
         except Exception as exc:
             print(f"  switch {idx} inspect failed: {exc}", flush=True)
+    return None, -1
 
-    if target is None:
-        print("RESULT=TOGGLE_NOT_FOUND", flush=True)
-        sys.exit(30)
 
-    before = target.get_attribute("aria-checked")
-    print(f"  before aria-checked={before}", flush=True)
-    after = before
-
-    def _refresh_checked():
+def flip_switch(page, target):
+    """对已定位的开关轮流试 6 种点法，返回最终 aria-checked。"""
+    def _checked():
         try:
             return target.get_attribute("aria-checked")
         except Exception:
             return None
 
-    if before != "true":
-        attempts = [
-            ("click force", lambda: target.click(force=True, timeout=5000)),
-            ("scroll+click", lambda: (target.scroll_into_view_if_needed(timeout=3000), target.click(timeout=5000))[-1]),
-            ("dispatch", lambda: target.dispatch_event("click")),
-            ("mouse box center", lambda: (
-                target.bounding_box() and page.mouse.click(
-                    target.bounding_box()["x"] + target.bounding_box()["width"] / 2,
-                    target.bounding_box()["y"] + target.bounding_box()["height"] / 2,
-                )
-            )),
-            ("focus+space", lambda: (target.focus(), page.keyboard.press("Space"))),
-            ("parent label click", lambda: target.evaluate(
-                "el => { const p = el.closest('label,div[role=\"button\"],button'); (p||el).click(); }"
-            )),
-        ]
-        for name, fn in attempts:
-            try:
-                fn()
-            except Exception as exc:
-                print(f"  toggle attempt '{name}' raised: {exc}", flush=True)
-            time.sleep(2)
-            after = _refresh_checked()
-            print(f"  after '{name}' aria-checked={after}", flush=True)
-            if after == "true":
-                break
-        else:
-            time.sleep(3)
-            after = _refresh_checked()
+    before = _checked()
+    print(f"  before aria-checked={before}", flush=True)
+    if before == "true":
+        return before
 
-    print(f"  final aria-checked={after}", flush=True)
-    shot(page, "05-after-toggle")
+    attempts = [
+        ("click force", lambda: target.click(force=True, timeout=5000)),
+        ("scroll+click", lambda: (target.scroll_into_view_if_needed(timeout=3000), target.click(timeout=5000))[-1]),
+        ("dispatch", lambda: target.dispatch_event("click")),
+        ("mouse box center", lambda: (
+            target.bounding_box() and page.mouse.click(
+                target.bounding_box()["x"] + target.bounding_box()["width"] / 2,
+                target.bounding_box()["y"] + target.bounding_box()["height"] / 2,
+            )
+        )),
+        ("focus+space", lambda: (target.focus(), page.keyboard.press("Space"))),
+        ("parent label click", lambda: target.evaluate(
+            "el => { const p = el.closest('label,div[role=\"button\"],button'); (p||el).click(); }"
+        )),
+    ]
+    after = before
+    for name, fn in attempts:
+        try:
+            fn()
+        except Exception as exc:
+            print(f"  toggle attempt '{name}' raised: {exc}", flush=True)
+        time.sleep(2)
+        after = _checked()
+        print(f"  after '{name}' aria-checked={after}", flush=True)
+        if after == "true":
+            return after
+    time.sleep(3)
+    return _checked()
 
-    if after == "true":
-        print("RESULT=ENABLED", flush=True)
-        return
+
+def open_security_settings(page, tag):
+    page.goto("https://chatgpt.com/#settings/Security", wait_until="domcontentloaded", timeout=GOTO_MS)
+    time.sleep(7)
+    shot(page, f"04-security{tag}")
+    dump_page_text(page, f"04-security{tag}")
+    try:
+        page.evaluate(
+            """() => {
+                const nodes = [...document.querySelectorAll('*')].filter(el => {
+                    const s = getComputedStyle(el);
+                    return /(auto|scroll)/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 20;
+                });
+                nodes.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+                if (nodes[0]) nodes[0].scrollTop = nodes[0].scrollHeight;
+            }"""
+        )
+        time.sleep(2)
+        shot(page, f"04b-security-bottom{tag}")
+        dump_page_text(page, f"04b-security-bottom{tag}")
+    except Exception as exc:
+        print(f"  security scroll probe failed: {exc}", flush=True)
+
+
+def enable_toggle(page):
+    """两轮：每轮都重新打开面板 → 等开关数稳定 → 重新定位 → 点。
+
+    第二轮存在的意义：半渲染 DOM 上的句柄会被 React 替换成新节点，旧句柄点了不翻。
+    重新 goto + 重新枚举拿到的是新节点，本机实测（acct-132/134）第二次即 ENABLED。
+    以前没有第二轮，只能靠人肉重跑整个 Job（登录 + TOTP 全部重来 ~2min）。
+    """
+    print("[2] open security settings", flush=True)
+    after = None
+    for round_no in (1, 2):
+        tag = "" if round_no == 1 else f"-r{round_no}"
+        if round_no > 1:
+            print(f"  === toggle 第 {round_no} 轮：重开面板 + 重新定位（上一轮句柄疑似失效）", flush=True)
+        open_security_settings(page, tag)
+        wait_switches_settled(page)
+        target, _idx = find_codex_switch(page)
+        if target is None:
+            if round_no == 1:
+                continue
+            print("RESULT=TOGGLE_NOT_FOUND", flush=True)
+            sys.exit(30)
+        after = flip_switch(page, target)
+        print(f"  final aria-checked={after} (round {round_no})", flush=True)
+        shot(page, f"05-after-toggle{tag}")
+        if after == "true":
+            print("RESULT=ENABLED", flush=True)
+            return
+
     print("RESULT=ENABLE_FAILED", flush=True)
     sys.exit(31)
 

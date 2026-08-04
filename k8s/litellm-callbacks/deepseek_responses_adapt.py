@@ -1,0 +1,309 @@
+"""deepseek_responses_adapt.py — 让 deepseek 能接住「按 gpt 元数据构造」的请求。
+
+背景
+----
+``deepseek-v4-flash`` 官方原生支持 Responses API 并适配 Codex，但那条路径要求
+客户端加载 DeepSeek 的模型目录（``~/.codex/models.json``，``apply_patch_tool_type:
+"freeform"``）。**兜底场景下不成立**：请求是客户端按 gpt-5.x 元数据构造的，
+落到 deepseek 时形状对不上。2026-08-03 实测两处硬不兼容：
+
+1. custom tool **只支持小写 ``apply_patch``**，其它名字一律
+   ``400 Unsupported custom tool: 'X'. Only 'apply_patch' is supported.``
+   （实测 ``ApplyPatch`` / ``applyPatch`` / ``apply-patch`` / ``shell`` /
+   ``exec_command`` 全拒；与长度、前缀无关。）
+2. deepseek 是 thinking 模型，历史里出现工具调用轮次时要求回传配套推理，
+   且**格式必须是** ``reasoning.content:[{"type":"reasoning_text","text":...}]``。
+   chatgpt 的 ``encrypted_content`` 形状不算，缺了就
+   ``400 The `reasoning_text` in the thinking mode must be passed back to the API.``
+
+本模块做出站适配（deepseek 部署专属）：
+  * ``ApplyPatch`` 及变体 -> ``apply_patch``（工具定义 + 历史项同步改名）
+  * 其它 custom tool -> 标准 function（单 string 参数 ``input``），
+    与 ``codex_custom_tool_bridge`` 对 chat 目标的处理同构
+  * **每一轮**工具调用的**第一条**调用项前若无合规 reasoning，补一个占位
+    reasoning item；已有的 chatgpt encrypted reasoning 补上 ``content[]``
+    并剥掉读不了的密文
+
+离线验证（真打 api.deepseek.com，5 个真实 gpt 形状载荷）：转换前 2/5，转换后 5/5。
+
+2026-08-04：并行工具调用被补 reasoning 打断（生产故障）
+------------------------------------------------------
+DeepSeek 用「**相邻**的 tool call 属于同一轮」来给 call / output 配对。同一轮的
+两个 ``function_call`` 之间只要插进任何非 tool-call 的项（哪怕是它自己要求的
+reasoning），后面的 ``function_call_output`` 就配不上前面那条 call，整单 400::
+
+    No tool output found for tool call call_00_0WAoGDLwNnmouIVTqXki0916.
+
+原实现的补 reasoning 判据是「前一项不是带 reasoning_text 的 reasoning 就补」，
+对同一轮的第 2、3 条并行调用同样成立 —— 于是自己把 block 劈开了。
+
+api.deepseek.com 单变量实测（``call_id`` 全部配对齐全，只动中间那一项）：
+
+===================================================== ==========================
+input 形状                                             结果
+===================================================== ==========================
+``[msg, R, fc1, fc2, fco1, fco2]``                    200 completed
+``[msg, R, fc1, R, fc2, fco1, fco2]``                 **400 No tool output found**
+``[msg, R, fc1, fco1, fc2, fco2]``                    400 reasoning_text 必须回传
+``[msg, R, fc1, fco1, R, fc2, fco2]``                 200 completed
+===================================================== ==========================
+
+即：reasoning 要补在**每一轮的开头**，一轮内部一条都不能插。DeepSeek 一轮确实会
+返回多条 ``function_call``（实测 ``['reasoning','function_call','function_call']``），
+所以这条历史形状是常态而非边角料。
+
+作用域
+------
+``_is_deepseek()`` 只认 model 名里含 ``deepseek`` 的部署。其它任何模型（chatgpt
+池 / wangsu / anthropic / zerokey）**结构上不进入任何转换**，第一行就 return。
+
+未覆盖（诚实标注）
+------------------
+* 占位 reasoning 文本是常量，不是真实推理内容 —— 换模型兜底时上一轮的思考
+  本来就拿不到（chatgpt 的是加密的）。对模型是轻微上下文损失，换请求能活。
+* 入站不做反向还原：custom tool 被转成 function 后，模型回的是 ``function_call``。
+  客户端（Codex）声明的是 custom，可能不认这个形状。**兜底一轮能出结果，
+  但带 apply_patch 的多轮编辑链路未用真客户端闭环验证。**
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+from litellm.integrations.custom_logger import CustomLogger
+
+_log = logging.getLogger("deepseek_responses_adapt")
+
+_TOOL_CALL_TYPES = ("function_call", "custom_tool_call")
+_APPLY_PATCH_CANON = "apply_patch"
+_PLACEHOLDER = "(上一轮推理在跨模型兜底时不可用)"
+_RESPONSE_CALL_TYPES = {"responses", "aresponses", "_aresponses_websocket"}
+
+
+def _is_responses_call(call_type: Any) -> bool:
+    """必须取 ``.value``，不能用 ``str(call_type)``。
+
+    ``CallTypes`` 是 ``(str, Enum)``，Python 3.13 下
+    ``str(CallTypes.aresponses) == 'CallTypes.aresponses'``，
+    所以 ``str(call_type) in {"responses","aresponses"}`` **永远是 False**。
+    2026-08-03 实测：照抄 ``chatgpt_responses_normalize`` 的
+    ``str(call_type) in ...`` 写法后，pre_call / pre_deployment 两个钩子
+    零触发（连 no-op 日志都打不出来），因为门控在日志之前。
+    该文件同样的写法也是废的，它实际靠 pre_routing 的 model 门控工作。
+    """
+    v = getattr(call_type, "value", call_type)
+    return str(v) in _RESPONSE_CALL_TYPES
+
+
+def _norm(s: Any) -> str:
+    return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+
+def _is_apply_patch(name: Any) -> bool:
+    return "applypatch" in _norm(name)
+
+
+def _is_deepseek(model: Any) -> bool:
+    return isinstance(model, str) and "deepseek" in model.lower()
+
+
+def _has_reasoning_text(item: Any) -> bool:
+    if not isinstance(item, dict) or item.get("type") != "reasoning":
+        return False
+    content = item.get("content")
+    return isinstance(content, list) and any(
+        isinstance(p, dict) and p.get("type") == "reasoning_text" for p in content
+    )
+
+
+def _placeholder_reasoning() -> dict[str, Any]:
+    return {"type": "reasoning", "summary": [],
+            "content": [{"type": "reasoning_text", "text": _PLACEHOLDER}]}
+
+
+def _item_type(item: Any) -> Any:
+    return item.get("type") if isinstance(item, dict) else None
+
+
+def _drop_reasoning_between_calls(items: list[Any], counts: dict[str, int]) -> list[Any]:
+    """删掉夹在两条相邻 tool call 之间的 reasoning。
+
+    上面的补 reasoning 已经按「一轮只补开头」收敛，这里兜的是**客户端原样带上来**
+    的同一种形状（gpt-5.x 的历史里一轮内部可以出现 reasoning / call 交替）。触发
+    条件与自插完全相同，见模块头的形状表。
+
+    是否真的发生看 counts 里有没有 ``reasoning_between_calls_drop`` —— 不靠猜。
+    """
+    out: list[Any] = []
+    for idx, item in enumerate(items):
+        prev = items[idx - 1] if idx else None
+        nxt = items[idx + 1] if idx + 1 < len(items) else None
+        if (_item_type(item) == "reasoning"
+                and _item_type(prev) in _TOOL_CALL_TYPES
+                and _item_type(nxt) in _TOOL_CALL_TYPES):
+            counts["reasoning_between_calls_drop"] = counts.get("reasoning_between_calls_drop", 0) + 1
+            continue
+        out.append(item)
+    return out
+
+
+def _adapt_tools(tools: Any, counts: dict[str, int]) -> Any:
+    if not isinstance(tools, list):
+        return tools
+    out: list[Any] = []
+    seen_apply_patch = False
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "custom":
+            out.append(tool)
+            continue
+        name = tool.get("name")
+        if name == _APPLY_PATCH_CANON:
+            seen_apply_patch = True
+            out.append(tool)
+            continue
+        if _is_apply_patch(name):
+            if seen_apply_patch:
+                counts["custom_dup_apply_patch_drop"] = counts.get("custom_dup_apply_patch_drop", 0) + 1
+                continue
+            renamed = dict(tool)
+            renamed["name"] = _APPLY_PATCH_CANON
+            seen_apply_patch = True
+            counts["apply_patch_rename"] = counts.get("apply_patch_rename", 0) + 1
+            out.append(renamed)
+            continue
+        # deepseek 不接受任意 custom tool -> 转标准 function
+        out.append({
+            "type": "function",
+            "name": name,
+            "description": tool.get("description") or (name if isinstance(name, str) else "tool"),
+            "parameters": {"type": "object",
+                           "properties": {"input": {"type": "string"}},
+                           "required": ["input"]},
+        })
+        counts["custom_to_function"] = counts.get("custom_to_function", 0) + 1
+    return out
+
+
+def _adapt_input(items: Any, counts: dict[str, int]) -> Any:
+    if not isinstance(items, list):
+        return items
+    items = _drop_reasoning_between_calls(items, counts)
+    out: list[Any] = []
+    for item in items:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        typ = item.get("type")
+
+        if typ == "reasoning":
+            fixed = dict(item)
+            if not _has_reasoning_text(fixed):
+                fixed["content"] = [{"type": "reasoning_text", "text": _PLACEHOLDER}]
+                counts["reasoning_content_fill"] = counts.get("reasoning_content_fill", 0) + 1
+            if fixed.pop("encrypted_content", None) is not None:
+                counts["foreign_encrypted_strip"] = counts.get("foreign_encrypted_strip", 0) + 1
+            out.append(fixed)
+            continue
+
+        if typ in _TOOL_CALL_TYPES:
+            # 只有当这条调用**开启新一轮** assistant 输出时才补 reasoning。
+            # 前一项已经是 tool call = 同一轮的并行调用，中间插任何东西都会让
+            # DeepSeek 认为该轮结束 -> 后面的 output 配不上 -> 400
+            # "No tool output found for tool call <call_id>"（2026-08-04 生产故障，
+            # 单变量实测见模块头形状表）。
+            prev = out[-1] if out else None
+            if _item_type(prev) not in _TOOL_CALL_TYPES and not _has_reasoning_text(prev):
+                out.append(_placeholder_reasoning())
+                counts["reasoning_insert"] = counts.get("reasoning_insert", 0) + 1
+            call = dict(item)
+            name = call.get("name")
+            if typ == "custom_tool_call" and name != _APPLY_PATCH_CANON:
+                if _is_apply_patch(name):
+                    call["name"] = _APPLY_PATCH_CANON
+                    counts["apply_patch_rename"] = counts.get("apply_patch_rename", 0) + 1
+                else:
+                    call = {"type": "function_call", "id": call.get("id"),
+                            "call_id": call.get("call_id"), "name": name,
+                            "arguments": json.dumps({"input": call.get("input") or ""},
+                                                    ensure_ascii=False)}
+                    counts["custom_call_to_function"] = counts.get("custom_call_to_function", 0) + 1
+            out.append(call)
+            continue
+
+        if typ == "custom_tool_call_output":
+            out.append({"type": "function_call_output", "call_id": item.get("call_id"),
+                        "output": item.get("output") or ""})
+            counts["custom_out_to_function"] = counts.get("custom_out_to_function", 0) + 1
+            continue
+
+        out.append(item)
+    return out
+
+
+def _adapt(data: dict[str, Any], source: str) -> dict[str, Any]:
+    if not _is_deepseek(data.get("model")):
+        return data
+    counts: dict[str, int] = {}
+    out = dict(data)
+    tools = _adapt_tools(out.get("tools"), counts)
+    if tools is not out.get("tools"):
+        out["tools"] = tools
+    items = _adapt_input(out.get("input"), counts)
+    if items is not out.get("input"):
+        out["input"] = items
+    if not counts:
+        # 必须留这行:否则无法区分「钩子没被调用」和「调用了但无需转换」。
+        # 2026-08-03 就是因为静默 no-op,把「钩子选错、兜底路径 0 触发」误读成
+        # 「转换生效了」。deepseek 兜底流量不大,这条日志量可接受。
+        _log.warning("deepseek_responses_adapt: source=%s model=%s counts={} (no-op)", source, data.get("model"))
+        return data
+    _log.warning("deepseek_responses_adapt: source=%s model=%s counts=%s", source, data.get("model"), counts)
+    return out
+
+
+class DeepSeekResponsesAdapt(CustomLogger):
+    """三个钩子都挂，缺一不可。
+
+    ``async_pre_call_hook`` 只在请求入口跑一次，那时 ``model`` 还是原始 model
+    group（兜底场景下是 ``gpt-5.6-sol``），被 ``_is_deepseek`` 门控挡掉 —— 等
+    router fallback 换到 deepseek 时它不会再执行。2026-08-03 实测：只挂入口钩子
+    时兜底链上转换 0 次触发，``ApplyPatch`` 照旧 400。
+    ``async_pre_call_deployment_hook`` 在**选定 deployment 之后、发请求之前**跑，
+    fallback 换 deployment 会再跑一次，是兜底路径唯一可靠的挂载点
+    （与 ``chatgpt_responses_normalize`` 同构）。
+    """
+
+    async def async_pre_call_hook(self, user_api_key_dict: Any, cache: Any, data: dict, call_type: str) -> Any:
+        try:
+            if _is_responses_call(call_type) and isinstance(data, dict):
+                return _adapt(data, "pre_call:%s" % call_type)
+        except Exception as exc:
+            _log.warning("deepseek_responses_adapt: pre_call error: %r", exc)
+        return data
+
+    async def async_pre_call_deployment_hook(self, kwargs: dict[str, Any], call_type: Any) -> Any:
+        """兜底路径的关键钩子：此时 kwargs['model'] 已是实际 deployment。"""
+        try:
+            if _is_responses_call(call_type) and isinstance(kwargs, dict):
+                return _adapt(kwargs, "pre_deployment:%s" % call_type)
+        except Exception as exc:
+            _log.warning("deepseek_responses_adapt: pre_deployment error: %r", exc)
+        return kwargs
+
+    async def async_pre_routing_hook(self, model: str, request_kwargs: dict, messages: Any = None,
+                                     input: Any = None, specific_deployment: bool = False) -> Any:
+        try:
+            if _is_deepseek(model) and isinstance(request_kwargs, dict):
+                rk = dict(request_kwargs)
+                rk.setdefault("model", model)
+                if "input" not in rk and input is not None:
+                    rk["input"] = input
+                return _adapt(rk, "pre_routing")
+        except Exception as exc:
+            _log.warning("deepseek_responses_adapt: pre_routing error: %r", exc)
+        return request_kwargs
+
+
+deepseek_responses_adapt_instance = DeepSeekResponsesAdapt()
+deepseek_responses_adapt = deepseek_responses_adapt_instance

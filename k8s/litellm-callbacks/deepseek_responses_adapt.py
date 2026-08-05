@@ -63,8 +63,11 @@ input 形状                                             结果
 DeepSeek 的 ``tool_choice`` 是 **serde 的双形态**：``auto`` / ``none`` 只接受
 **裸字符串**；一旦写成对象 ``{"type": ...}``，就只走 tagged-enum 分支，只认
 ``function`` / ``web_search`` / ``web_search_2025_08_26`` / ``custom``。
-错误里那句 "expected one of" 列的是**对象分支**的合法 tag，不是全集 —— 照字面
-去构造 ``{"type":"function", ...}`` 反而撞另一堵墙（见下表 F/G）。
+错误里那句 "expected one of" 列的是**对象分支的 serde variant 名**，**不是
+"能用的值"** —— 照字面去构造 ``{"type":"function"}`` / ``{"type":"custom"}``
+反而撞另一堵墙（见下表 F/G/W1/W2）。这一点 2026-08-05 第一版补丁栽过：
+把 ``custom`` 当"内建 tag"放行，Codex 真载荷（``tool_choice``
+``{"type":"custom","name":"shell"}``）当场 400。
 
 api.deepseek.com 单变量实测（2026-08-05，其余字段全同）：
 
@@ -81,16 +84,22 @@ api.deepseek.com 单变量实测（2026-08-05，其余字段全同）：
 ``{"type":"function","name":"X"}``                    400 Thinking mode 不支持
 ``{"type":"function","function":{"name":"X"}}``       400 missing field ``name``
 ``{"type":"allowed_tools", ...}``                     400 unknown variant
+W1 ``{"type":"custom","name":"shell"}``               400 Unsupported custom tool
+W2 ``{"type":"custom","name":"apply_patch"}``         400 Thinking mode 不支持
+W3 ``{"type":"web_search"}``，tools 里**没有** ws     400 no web_search tool specified
+W4 ``{"type":"web_search"}``，tools 里**有** ws       **200**
+W5 ``{"type":"web_search_2025_08_26"}`` + ws tool     **200**
 ===================================================== ==========================
 
 穿过 198 proxy 打同一组载荷，字符串 200 / 对象 400，错误文本与生产日志逐字一致
 —— 即**网关原样透传，是客户端发的对象形状**（对照
 ``deepseek_responses_adapt ... counts={} (no-op)`` 紧跟 400，网关没动过手）。
 
-结论：thinking 模式下 DeepSeek **根本没有"强制用工具"这档**，能表达的只有
-"随便"和"别用"。所以本模块把 ``tool_choice`` 归一到「裸 ``auto`` / 裸 ``none`` /
-不带」三选一，任何强制类形状一律降级为不带（= 默认 auto），宁可少一个约束也不
-把 400 甩给用户 —— 该 model group 没有 fallback，400 直吐客户端。
+结论：thinking 模式下**唯一活着的强制形态是 ``web_search``，且 ``tools`` 里必须
+真有这个工具**；对 function / custom 的强制一概不支持。所以本模块把
+``tool_choice`` 归一为：裸 ``auto`` / 裸 ``none`` / 有依托的 web_search 强制 /
+不带，其余一律降级为不带（= 默认 auto）—— 宁可少一个约束，也不把 400 甩给
+用户，该 model group 没有 fallback，400 直吐客户端。
 
 作用域
 ------
@@ -120,8 +129,11 @@ _APPLY_PATCH_CANON = "apply_patch"
 _PLACEHOLDER = "(上一轮推理在跨模型兜底时不可用)"
 _RESPONSE_CALL_TYPES = {"responses", "aresponses", "_aresponses_websocket"}
 
-# 对象形态里 DeepSeek 真正认的 tag（内建工具），原样透传，别当成 function 处理。
-_NATIVE_TOOL_CHOICE_TAGS = {"web_search", "web_search_2025_08_26", "custom"}
+# 对象形态里唯一能活的 tag：强制 web_search。**但有前提** —— ``tools`` 里必须真的
+# 有 web_search 工具，否则 400 "no web_search tool was specified"。
+# ``custom`` 虽然出现在 DeepSeek 的错误文本 "expected one of" 里，却是**死的**
+# （见模块头 W1/W2 两格）—— 那串列表是 serde 的 variant 名，不是「能用的值」。
+_WEB_SEARCH_TAGS = {"web_search", "web_search_2025_08_26"}
 _SENTINEL = object()
 
 
@@ -192,8 +204,15 @@ def _drop_reasoning_between_calls(items: list[Any], counts: dict[str, int]) -> l
     return out
 
 
-def _adapt_tool_choice(choice: Any, counts: dict[str, int]) -> Any:
-    """归一到 DeepSeek thinking 模式真正接受的三种形态之一。
+def _has_web_search_tool(tools: Any) -> bool:
+    """``tools`` 里有没有 web_search —— 决定 web_search 强制能不能留。"""
+    if not isinstance(tools, list):
+        return False
+    return any(isinstance(t, dict) and t.get("type") in _WEB_SEARCH_TAGS for t in tools)
+
+
+def _adapt_tool_choice(choice: Any, tools: Any, counts: dict[str, int]) -> Any:
+    """归一到 DeepSeek thinking 模式真正接受的形态。
 
     返回 ``_SENTINEL`` 表示「把这个字段整个删掉」（等价于默认 auto）。
     形状表见模块头 2026-08-05 一节，每一格都是真打 api.deepseek.com 测出来的。
@@ -211,19 +230,25 @@ def _adapt_tool_choice(choice: Any, counts: dict[str, int]) -> Any:
 
     tag = choice.get("type")
 
-    # DeepSeek 自己的内建工具形态，原样透传
-    if tag in _NATIVE_TOOL_CHOICE_TAGS:
-        return choice
-
     # {"type":"auto"} / {"type":"none"} —— 生产真凶，拆成裸字符串
     if tag in ("auto", "none"):
         counts["tool_choice_unwrapped"] = counts.get("tool_choice_unwrapped", 0) + 1
         return tag
 
-    # 其余全是「强制用某个/某类工具」：{"type":"function",...}、{"type":"tool"}、
-    # {"type":"required"}、{"type":"allowed_tools",...}。thinking 模式一概不支持
-    # （function 形态是 400 Thinking mode，其它是 400 unknown variant），
-    # 只能降级为不带 —— 少一个约束，好过整单 400 直吐用户。
+    # 强制 web_search 是唯一活着的强制形态，但 tools 里必须真有这个工具，
+    # 否则 400 "no web_search tool was specified in the 'tools' parameter"。
+    if tag in _WEB_SEARCH_TAGS:
+        if _has_web_search_tool(tools):
+            return choice
+        counts["tool_choice_web_search_unbacked_dropped"] = (
+            counts.get("tool_choice_web_search_unbacked_dropped", 0) + 1)
+        return _SENTINEL
+
+    # 其余全是「强制用某个/某类工具」：{"type":"function",...}、{"type":"custom",...}、
+    # {"type":"tool"}、{"type":"required"}、{"type":"allowed_tools",...}。
+    # thinking 模式对 function / custom 一概不支持（function 与 custom 是
+    # 400 Thinking mode，其它是 400 unknown variant），只能降级为不带 ——
+    # 少一个约束，好过整单 400 直吐用户。
     counts["tool_choice_force_dropped"] = counts.get("tool_choice_force_dropped", 0) + 1
     return _SENTINEL
 
@@ -270,6 +295,8 @@ def _adapt_input(items: Any, counts: dict[str, int]) -> Any:
         return items
     items = _drop_reasoning_between_calls(items, counts)
     out: list[Any] = []
+    # 保持 custom 形态（= apply_patch）的 call_id，供 output 配对时判断类型。
+    kept_custom_call_ids: set[Any] = set()
     for item in items:
         if not isinstance(item, dict):
             out.append(item)
@@ -302,16 +329,29 @@ def _adapt_input(items: Any, counts: dict[str, int]) -> Any:
                 if _is_apply_patch(name):
                     call["name"] = _APPLY_PATCH_CANON
                     counts["apply_patch_rename"] = counts.get("apply_patch_rename", 0) + 1
+                    kept_custom_call_ids.add(call.get("call_id"))
                 else:
                     call = {"type": "function_call", "id": call.get("id"),
                             "call_id": call.get("call_id"), "name": name,
                             "arguments": json.dumps({"input": call.get("input") or ""},
                                                     ensure_ascii=False)}
                     counts["custom_call_to_function"] = counts.get("custom_call_to_function", 0) + 1
+            elif typ == "custom_tool_call":
+                # 官方形状：name 就是 apply_patch，原样放行
+                kept_custom_call_ids.add(call.get("call_id"))
             out.append(call)
             continue
 
         if typ == "custom_tool_call_output":
+            # 配对判据：**这条 output 对应的 call 有没有被转成 function_call**。
+            # 以前这里无条件转 function_call_output —— 对官方形状载荷来说，
+            # call 是 custom_tool_call（apply_patch 放行了）、output 却成了
+            # function_call_output，一对调用被拆成两种类型（2026-08-05 A/B
+            # 实测：官方形状穿 198 时 counts={'custom_out_to_function': 1}，
+            # 直连对照组则原样保留）。
+            if item.get("call_id") in kept_custom_call_ids:
+                out.append(item)
+                continue
             out.append({"type": "function_call_output", "call_id": item.get("call_id"),
                         "output": item.get("output") or ""})
             counts["custom_out_to_function"] = counts.get("custom_out_to_function", 0) + 1
@@ -333,7 +373,9 @@ def _adapt(data: dict[str, Any], source: str) -> dict[str, Any]:
     if items is not out.get("input"):
         out["input"] = items
     if "tool_choice" in out:
-        tc = _adapt_tool_choice(out["tool_choice"], counts)
+        # 用**转换后**的 tools 判断 web_search 是否有依托：_adapt_tools 会动
+        # custom 工具，虽然目前不碰 web_search，但判据必须跟出站载荷一致。
+        tc = _adapt_tool_choice(out["tool_choice"], out.get("tools"), counts)
         if tc is _SENTINEL:
             out.pop("tool_choice")
         elif tc is not out["tool_choice"]:

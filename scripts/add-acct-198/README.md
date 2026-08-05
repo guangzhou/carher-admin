@@ -7,6 +7,25 @@
 > 仍在 `scripts/chatgpt-onboard/`（被多处复用，未移动）；grinder 会自动引用，你不用管。
 > 深度原理/踩坑史：skill `add-chatgpt-acct-198`（v2.1.2+）+ memory `project_patchright_fullauto_us_proxy_onboard_2026_07_21`。
 
+> ## ⚠️ 先读这一段：拿 token 已不走 188
+>
+> 本手册第 3 节那条"一条命令"是**188 出口跑 OAuth**的老路径，188 已被 CF 限流很重。
+> **当前首选**：在**阿里云新加坡 EIP 节点**跑 toggle + OAuth 拿到 `auth.json`，
+> 再让 grinder 走"已有有效 token → 跳过 OAuth 直接 finalize"分支入池
+> （见 skill `add-chatgpt-acct-198` §v2.5，2026-08-05 acct-140~144 实证 5/5 全自动）：
+>
+> ```bash
+> CSV=/tmp/grind-creds-<批次>.csv        # ⚠️ 别用固定名, 见第 2 节
+> for N in <批次>; do                    # ⚠️⚠️ 严格一个一个来: 并发上限是「每 EIP 节点 1 个」
+>   SRC_CM=cgpt-onboard-src-a4df8c71tgl bash scripts/aliyun-eip-onboard-via-jms.sh toggle $N $CSV
+>   SRC_CM=cgpt-onboard-src-a4df8c71tgl bash scripts/aliyun-eip-onboard-via-jms.sh oauth  $N $CSV
+>   bash scripts/aliyun-eip-onboard-watch.sh $N oauth 60      # 取回 /tmp/auth-acct-$N.json
+> done
+> # auth.json 送 188 /tmp/auth-acct-<N>.json(先清 root 属主残留 + 核 sha), 再跑第 3 节的 grinder
+> ```
+>
+> 本手册其余部分（CSV 格式、去重纪律、监控纪律、finalize/验收）**全部仍然有效**。
+
 ---
 
 ## 0. 这套东西是干什么的
@@ -60,6 +79,10 @@ jms ssh JSZX-AI-03 "ls -l /Data/chatgpt-auth/re-oauth.sh"
   ```
   待接入邮箱若已在列表里 → 跳过接入，只把已有编号回写飞书表即可。判 dup 用 pod 内 auth.json 的 `account_id`（不是编号）。
 - 顺序**不能错**：第 3 列是邮箱密码，第 4 列是 GPT 密码。填反了登录必失败。
+- ⚠️ **别用固定文件名 `/tmp/grind-creds.csv`**：上一批的号还留在里面，`GRIND_ACCTS` 写漏一个
+  就会把旧号重跑一遍（`/tmp` 固定名读到陈旧文件，见 memory
+  `feedback_tmp_fixed_path_runs_stale_foreign_file`）。每批用 `/tmp/grind-creds-<批次>.csv`，
+  写完先 `awk` 打一遍确认行数和字段。用完即删（里面是明文密码）。
 - 从飞书表复制出来自己整理成这 4 列。不确定就把表格内容发给我，我帮你转。
 
 ---

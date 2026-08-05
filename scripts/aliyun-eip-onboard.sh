@@ -31,6 +31,11 @@ IMG="$REG:zerokey-capture-aliyun-20260707-otp3"     # 含 patchright + Xvfb
 PVC=chatgpt-onboard-work                            # RWX 工作区(存 auth.json/截图)
 # 偶数号钉 .86 / 奇数号钉 .122, 两个 EIP 分摊(cf_clearance 绑 IP, 同号务必同节点)
 if [ $((N % 2)) -eq 0 ]; then NODE=ap-southeast-1.172.16.0.86; else NODE=ap-southeast-1.172.16.16.122; fi
+# ⚠️ DISPLAY 按号唯一,不能固定 :99 —— hostNetwork 下 X 的抽象 unix socket
+# (@/tmp/.X11-unix/X<n>)和 TCP 端口(6000+n)都在**宿主 netns**,同节点第二个 Job 起 :99
+# 必然 "Cannot establish any listening sockets"(2026-08-05 acct-142/143/144 实证)。
+# 见 memory feedback_xvfb_display99_hostnetwork_collides_same_node。
+DISPNUM="$N"
 JOB="cgpt-onboard-${ACTION}-${N}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -92,7 +97,7 @@ spec:
             - {name: work, mountPath: /work}
             - {name: shm, mountPath: /dev/shm}
           env:
-            - {name: DISPLAY, value: ":99"}
+            - {name: DISPLAY, value: ":$DISPNUM"}
             - {name: PLAYWRIGHT_BROWSERS_PATH, value: /ms-playwright}
             - {name: MAIL_OTP_PROVIDER, value: mailcom}
             - {name: SCREENSHOT_DIR, value: /work/ss-$N}
@@ -121,8 +126,13 @@ spec:
               printf '%s' "\$_MPW" > /run/mail_pw && chmod 600 /run/mail_pw
               printf '%s' "\$_GPW" > /run/chatgpt_pw && chmod 600 /run/chatgpt_pw
               unset _MPW _GPW
-              Xvfb :99 -screen 0 1440x1000x24 >/dev/null 2>&1 &
-              sleep 2
+              Xvfb :$DISPNUM -screen 0 1440x1000x24 >/tmp/xvfb.log 2>&1 &
+              for i in \$(seq 1 30); do [ -S /tmp/.X11-unix/X$DISPNUM ] && break; sleep 1; done
+              [ -S /tmp/.X11-unix/X$DISPNUM ] || {
+                echo "FATAL: Xvfb 30s 未就绪(display :$DISPNUM)"; tail -20 /tmp/xvfb.log
+                grep -q "already running" /tmp/xvfb.log && \
+                  echo "HINT: 同节点已有 onboard Job 占着 X —— 串行跑, 别并行"
+                exit 1; }
               # ⚠️ 别 pip install patchright: 镜像已自带且 chromium 是 1.60.0,
               # 装 1.60.1 会找不到 chromium-1223 → BrowserType.launch 失败。
               python3 -c "import patchright; print('patchright ready')"

@@ -73,7 +73,8 @@ ssh cltx@10.68.13.188 'docker image prune -f; docker builder prune -f'
 188 出口已被 CF 限流（toggle 常撞"正在进行安全验证"）。改在**阿里云新加坡 EIP 节点**跑：
 
 ```bash
-# toggle 与 oauth 分两步, 同一批号可并行(偶数号钉 .86 / 奇数号钉 .122)
+# toggle 与 oauth 分两步。⚠️ **一个一个来** —— 并发上限是「每节点 1 个」,
+# 不是"同一批号可并行"(偶数号钉 .86 / 奇数号钉 .122, 一批 >2 个必然有号落同节点)
 ./scripts/aliyun-eip-onboard.sh toggle <N> <email> <mail_pw> <gpt_pw> [totp]
 ./scripts/aliyun-eip-onboard.sh oauth  <N> <email> <mail_pw> <gpt_pw> [totp]
 
@@ -97,7 +98,16 @@ kubectl -n carher cp authpull:/work/auth-acct-<N>.json /tmp/auth-acct-<N>.json
 - **别 `pip install patchright`**：镜像自带 chromium 1.60.0，装 1.60.1 会找不到 chromium。
 - 偶发 `TargetClosedError`（浏览器崩）= 同节点并行争抢，**单独重跑即过**。
 - 2FA 号**完全不需要邮箱取码**（TOTP 直接过 `/mfa-challenge`）。
-- 同节点别并两个 Job（偶数号 `.86` / 奇数号 `.122` 已分摊；同 parity 的号串行跑）。
+- **同节点只能跑 1 个 Job，串行提交**（等前一个 `S=1`/`F=1` 再交下一个）。两个原因：
+  1. **X 冲突（已修但别依赖）**：Job 是 `hostNetwork`，Xvfb 的抽象 unix socket +
+     TCP `6000+n` 在**宿主 netns**，原先固定 `:99` → 同节点第二个 Job 直接
+     `Cannot establish any listening sockets` + `FATAL: Xvfb 30s 未就绪`
+     （2026-08-05 acct-142/143/144 实证）。已改成 **DISPLAY 按号唯一** (`:$N`) +
+     **同节点占用预检**（`ALLOW_PARALLEL=1` 可跳过）。
+  2. **内存**：EIP 节点 memory limits 已 220% 超卖，两个 chromium 会互相 OOM kill
+     （症状就是上面那条 `TargetClosedError`，容器 exit=0 看不到 OOM 字样）。
+- **X 阶段挂掉的号零成本**：`kubectl logs` 只有 6 行且全是 X 报错 = 没走到网络、
+  没烧真号登录，原样重跑即可，别当"号有问题/CF 拦了"。
 
 ### 3b. B 路（本地 kubectl 不通时）：kubectl 在 226 上跑
 

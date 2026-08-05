@@ -157,3 +157,104 @@ class ParallelToolCallsStayContiguous(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class MessageSplitsParallelBlock(unittest.TestCase):
+    """2026-08-05 生产：assistant message 夹进并行块同样 400。
+
+    起因：sunqiang 的 cursor key 打 deepseek-v4-flash-responses，3 小时内
+    117 次 ``No tool output found``。日志判据显示是**网关自己插的**：36 条报错
+    里 35 条 ``reasoning_insert`` 非零（只有 1 条 no-op），其中
+    ``reasoning_insert: 1`` 出现 12 次 —— 只插一条就炸。
+
+    根因是 2026-08-04 那版修复漏了一格：它只认「前一项紧邻是 tool call」，
+    而 Codex 一轮的真实输出是 ``reasoning, message, fc, fc`` —— message 会夹进
+    并行块，判据认不出来，于是把第 2 条并行调用当成新一轮、在它前面补
+    reasoning，又一次劈开。
+
+    api.deepseek.com 单变量实测（call_id 全配对，只动并行块中间那一项）::
+
+        [R, fc1, fc2, fo1, fo2]        -> 200
+        [R, fc1, MSG, fc2, fo1, fo2]   -> 400 No tool output found   <- 本次真凶
+        [R, fc1, R,   fc2, fo1, fo2]   -> 400 No tool output found
+        [R, MSG, fc1, fc2, fo1, fo2]   -> 200   （轮开头，无害）
+        [MSG, R, fc1, fc2, fo1, fo2]   -> 200
+
+    即 message 与 reasoning 同罪：落在并行块**中间**致命，落在轮**开头**无害。
+    这一区别是实测出来的，不是推的 —— 所以下面两组断言必须同时成立。
+    """
+
+    R = {"type": "reasoning", "summary": [],
+         "content": [{"type": "reasoning_text", "text": "t"}]}
+    MSG = {"role": "assistant", "content": "Let me check."}
+
+    @staticmethod
+    def _fc(n):
+        return {"type": "function_call", "call_id": f"c{n}", "name": "f", "arguments": "{}"}
+
+    @staticmethod
+    def _fo(n):
+        return {"type": "function_call_output", "call_id": f"c{n}", "output": "ok"}
+
+    def _types(self, items):
+        return [i.get("type") or ("msg:" + i.get("role", "")) for i in items]
+
+    def test_message_inside_parallel_block_is_dropped(self):
+        """真凶格：并行块中间的 message 必须删掉，且不能反而补 reasoning。"""
+        items = [{"role": "user", "content": "q"}, self.R,
+                 self._fc(1), self.MSG, self._fc(2), self._fo(1), self._fo(2)]
+        counts = {}
+        out = MOD._adapt_input(items, counts)
+        types = self._types(out)
+        self.assertEqual(
+            types,
+            ["msg:user", "reasoning", "function_call", "function_call",
+             "function_call_output", "function_call_output"])
+        self.assertEqual(counts.get("message_between_calls_drop"), 1)
+        self.assertNotIn("reasoning_insert", counts,
+                         "并行块内部绝不能补 reasoning —— 那正是 400 的成因")
+
+    def test_message_at_turn_start_is_kept(self):
+        """反向对照：实测 200 的形状不许动。删过头会丢用户可见内容。"""
+        items = [{"role": "user", "content": "q"}, self.R, self.MSG,
+                 self._fc(1), self._fc(2), self._fo(1), self._fo(2)]
+        counts = {}
+        out = MOD._adapt_input(items, counts)
+        self.assertIn("msg:assistant", self._types(out),
+                      "轮开头的 message 实测无害（D/E 格 200），不能删")
+        self.assertEqual(counts, {})
+
+    def test_plain_conversation_untouched(self):
+        """没有工具调用的纯对话，一个字节都不能动。"""
+        items = [{"role": "user", "content": "q"}, self.MSG,
+                 {"role": "user", "content": "q2"}, self.MSG]
+        counts = {}
+        out = MOD._adapt_input(items, counts)
+        self.assertEqual(len(out), 4)
+        self.assertEqual(counts, {})
+
+    def test_three_way_parallel_with_two_messages(self):
+        """三条并行 + 中间两条 message：全删，块保持连续。"""
+        items = [{"role": "user", "content": "q"}, self.R,
+                 self._fc(1), self.MSG, self._fc(2), self.MSG, self._fc(3),
+                 self._fo(1), self._fo(2), self._fo(3)]
+        counts = {}
+        out = MOD._adapt_input(items, counts)
+        self.assertEqual(
+            self._types(out),
+            ["msg:user", "reasoning", "function_call", "function_call", "function_call",
+             "function_call_output", "function_call_output", "function_call_output"])
+        self.assertEqual(counts.get("message_between_calls_drop"), 2)
+
+    def test_message_and_reasoning_both_inside(self):
+        """双夹心：message 和 reasoning 一起删。"""
+        items = [{"role": "user", "content": "q"}, self.R,
+                 self._fc(1), self.MSG, self.R, self._fc(2), self._fo(1), self._fo(2)]
+        counts = {}
+        out = MOD._adapt_input(items, counts)
+        self.assertEqual(
+            self._types(out),
+            ["msg:user", "reasoning", "function_call", "function_call",
+             "function_call_output", "function_call_output"])
+        self.assertEqual(counts.get("message_between_calls_drop"), 1)
+        self.assertEqual(counts.get("reasoning_between_calls_drop"), 1)

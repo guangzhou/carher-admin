@@ -182,23 +182,80 @@ def _item_type(item: Any) -> Any:
     return item.get("type") if isinstance(item, dict) else None
 
 
-def _drop_reasoning_between_calls(items: list[Any], counts: dict[str, int]) -> list[Any]:
-    """删掉夹在两条相邻 tool call 之间的 reasoning。
+def _is_intra_turn_filler(item: Any) -> bool:
+    """轮内「不打断并行块」的项：assistant message / reasoning。
 
-    上面的补 reasoning 已经按「一轮只补开头」收敛，这里兜的是**客户端原样带上来**
-    的同一种形状（gpt-5.x 的历史里一轮内部可以出现 reasoning / call 交替）。触发
-    条件与自插完全相同，见模块头的形状表。
-
-    是否真的发生看 counts 里有没有 ``reasoning_between_calls_drop`` —— 不靠猜。
+    DeepSeek 按相邻关系配对，但 Codex 一轮的真实输出是
+    ``['reasoning','message','function_call','function_call']`` —— message 和
+    并行调用混在同一轮里。判断某条 call 是否「开启新一轮」时必须跳过这些项，
+    否则会把同一轮的第 2 条调用误判成新一轮、在它前面补 reasoning，
+    结果劈开并行块 -> 400 No tool output found。
     """
+    if not isinstance(item, dict):
+        return False
+    if item.get("type") == "reasoning":
+        return True
+    return item.get("type") is None and item.get("role") == "assistant"
+
+
+def _opens_new_turn(out: list[Any]) -> bool:
+    """当前位置要不要补 reasoning：往回跳过轮内填充项再看。
+
+    - 回溯遇到 tool call  -> 同一轮的并行调用，**不能补**
+    - 回溯遇到带 reasoning_text 的 reasoning -> 本轮开头已合规，不用补
+    - 其它（用户消息 / 空 / tool output）-> 确实是新一轮，要补
+    """
+    for item in reversed(out):
+        t = _item_type(item)
+        if t in _TOOL_CALL_TYPES:
+            return False
+        if t == "reasoning":
+            return not _has_reasoning_text(item)
+        if _is_intra_turn_filler(item):
+            continue
+        return True
+    return True
+
+
+def _drop_reasoning_between_calls(items: list[Any], counts: dict[str, int]) -> list[Any]:
+    """删掉夹在同一轮并行调用之间的 reasoning / assistant message。
+
+    DeepSeek 靠相邻关系配对，同一轮的两条 ``function_call`` 之间插进**任何**
+    非 tool-call 的项，后面的 output 就配不上前面那条 call，整单 400。
+
+    2026-08-05 单变量实测（call_id 全配对，只动并行块中间那一项）::
+
+        [R, fc1, fc2, fo1, fo2]        -> 200
+        [R, fc1, MSG, fc2, fo1, fo2]   -> 400 No tool output found   <- 本次真凶
+        [R, fc1, R,   fc2, fo1, fo2]   -> 400 No tool output found
+        [R, MSG, fc1, fc2, fo1, fo2]   -> 200   （轮开头，合法）
+        [MSG, R, fc1, fc2, fo1, fo2]   -> 200
+
+    即 message 与 reasoning 同罪 —— 只要落在并行块**中间**就致命，落在轮
+    **开头**无害。原实现只删 reasoning、且判据是「前后紧邻」，认不出
+    Codex 真实形状（一轮输出是 ``reasoning, message, fc, fc``，
+    message 会夹进并行块）。
+
+    是否真的发生看 counts 里有没有 ``reasoning_between_calls_drop`` /
+    ``message_between_calls_drop`` —— 不靠猜。
+    """
+    def _neighbor_is_call(seq: list[Any]) -> bool:
+        for it in seq:
+            if _item_type(it) in _TOOL_CALL_TYPES:
+                return True
+            if _is_intra_turn_filler(it):
+                continue
+            return False
+        return False
+
     out: list[Any] = []
     for idx, item in enumerate(items):
-        prev = items[idx - 1] if idx else None
-        nxt = items[idx + 1] if idx + 1 < len(items) else None
-        if (_item_type(item) == "reasoning"
-                and _item_type(prev) in _TOOL_CALL_TYPES
-                and _item_type(nxt) in _TOOL_CALL_TYPES):
-            counts["reasoning_between_calls_drop"] = counts.get("reasoning_between_calls_drop", 0) + 1
+        if (_is_intra_turn_filler(item)
+                and _neighbor_is_call(list(reversed(items[:idx])))
+                and _neighbor_is_call(items[idx + 1:])):
+            key = ("reasoning_between_calls_drop"
+                   if _item_type(item) == "reasoning" else "message_between_calls_drop")
+            counts[key] = counts.get(key, 0) + 1
             continue
         out.append(item)
     return out
@@ -319,8 +376,7 @@ def _adapt_input(items: Any, counts: dict[str, int]) -> Any:
             # DeepSeek 认为该轮结束 -> 后面的 output 配不上 -> 400
             # "No tool output found for tool call <call_id>"（2026-08-04 生产故障，
             # 单变量实测见模块头形状表）。
-            prev = out[-1] if out else None
-            if _item_type(prev) not in _TOOL_CALL_TYPES and not _has_reasoning_text(prev):
+            if _opens_new_turn(out):
                 out.append(_placeholder_reasoning())
                 counts["reasoning_insert"] = counts.get("reasoning_insert", 0) + 1
             call = dict(item)

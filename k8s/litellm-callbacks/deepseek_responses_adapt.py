@@ -52,6 +52,46 @@ input 形状                                             结果
 返回多条 ``function_call``（实测 ``['reasoning','function_call','function_call']``），
 所以这条历史形状是常态而非边角料。
 
+2026-08-05：``tool_choice`` 被当成 tagged enum 解析（生产故障）
+--------------------------------------------------------------
+生产 24h 内 ``deepseek-v4-flash-responses`` 只有一种错误，27 次，全是::
+
+    400 Failed to deserialize the JSON body into the target type: tool_choice:
+        unknown variant `auto`, expected one of `function`, `web_search`,
+        `web_search_2025_08_26`, `custom`
+
+DeepSeek 的 ``tool_choice`` 是 **serde 的双形态**：``auto`` / ``none`` 只接受
+**裸字符串**；一旦写成对象 ``{"type": ...}``，就只走 tagged-enum 分支，只认
+``function`` / ``web_search`` / ``web_search_2025_08_26`` / ``custom``。
+错误里那句 "expected one of" 列的是**对象分支**的合法 tag，不是全集 —— 照字面
+去构造 ``{"type":"function", ...}`` 反而撞另一堵墙（见下表 F/G）。
+
+api.deepseek.com 单变量实测（2026-08-05，其余字段全同）：
+
+===================================================== ==========================
+``tool_choice``                                        结果
+===================================================== ==========================
+（不带）                                               200，出 function_call
+``"auto"``                                            200，出 function_call
+``"none"``                                            200，只出 reasoning
+``"required"``                                        400 Thinking mode 不支持
+``{"type": "auto"}``                                  **400 unknown variant**（生产真凶）
+``{"type": "none"}``                                  400 unknown variant
+``{"type": "tool"}`` / ``{"type": "required"}``       400 unknown variant
+``{"type":"function","name":"X"}``                    400 Thinking mode 不支持
+``{"type":"function","function":{"name":"X"}}``       400 missing field ``name``
+``{"type":"allowed_tools", ...}``                     400 unknown variant
+===================================================== ==========================
+
+穿过 198 proxy 打同一组载荷，字符串 200 / 对象 400，错误文本与生产日志逐字一致
+—— 即**网关原样透传，是客户端发的对象形状**（对照
+``deepseek_responses_adapt ... counts={} (no-op)`` 紧跟 400，网关没动过手）。
+
+结论：thinking 模式下 DeepSeek **根本没有"强制用工具"这档**，能表达的只有
+"随便"和"别用"。所以本模块把 ``tool_choice`` 归一到「裸 ``auto`` / 裸 ``none`` /
+不带」三选一，任何强制类形状一律降级为不带（= 默认 auto），宁可少一个约束也不
+把 400 甩给用户 —— 该 model group 没有 fallback，400 直吐客户端。
+
 作用域
 ------
 ``_is_deepseek()`` 只认 model 名里含 ``deepseek`` 的部署。其它任何模型（chatgpt
@@ -79,6 +119,10 @@ _TOOL_CALL_TYPES = ("function_call", "custom_tool_call")
 _APPLY_PATCH_CANON = "apply_patch"
 _PLACEHOLDER = "(上一轮推理在跨模型兜底时不可用)"
 _RESPONSE_CALL_TYPES = {"responses", "aresponses", "_aresponses_websocket"}
+
+# 对象形态里 DeepSeek 真正认的 tag（内建工具），原样透传，别当成 function 处理。
+_NATIVE_TOOL_CHOICE_TAGS = {"web_search", "web_search_2025_08_26", "custom"}
+_SENTINEL = object()
 
 
 def _is_responses_call(call_type: Any) -> bool:
@@ -146,6 +190,42 @@ def _drop_reasoning_between_calls(items: list[Any], counts: dict[str, int]) -> l
             continue
         out.append(item)
     return out
+
+
+def _adapt_tool_choice(choice: Any, counts: dict[str, int]) -> Any:
+    """归一到 DeepSeek thinking 模式真正接受的三种形态之一。
+
+    返回 ``_SENTINEL`` 表示「把这个字段整个删掉」（等价于默认 auto）。
+    形状表见模块头 2026-08-05 一节，每一格都是真打 api.deepseek.com 测出来的。
+    """
+    # 裸字符串：auto / none 直通；required 及其它一律降级为不带
+    if isinstance(choice, str):
+        if choice in ("auto", "none"):
+            return choice
+        # "required" 实测 400 Thinking mode does not support this tool_choice
+        counts["tool_choice_force_dropped"] = counts.get("tool_choice_force_dropped", 0) + 1
+        return _SENTINEL
+
+    if not isinstance(choice, dict):
+        return choice
+
+    tag = choice.get("type")
+
+    # DeepSeek 自己的内建工具形态，原样透传
+    if tag in _NATIVE_TOOL_CHOICE_TAGS:
+        return choice
+
+    # {"type":"auto"} / {"type":"none"} —— 生产真凶，拆成裸字符串
+    if tag in ("auto", "none"):
+        counts["tool_choice_unwrapped"] = counts.get("tool_choice_unwrapped", 0) + 1
+        return tag
+
+    # 其余全是「强制用某个/某类工具」：{"type":"function",...}、{"type":"tool"}、
+    # {"type":"required"}、{"type":"allowed_tools",...}。thinking 模式一概不支持
+    # （function 形态是 400 Thinking mode，其它是 400 unknown variant），
+    # 只能降级为不带 —— 少一个约束，好过整单 400 直吐用户。
+    counts["tool_choice_force_dropped"] = counts.get("tool_choice_force_dropped", 0) + 1
+    return _SENTINEL
 
 
 def _adapt_tools(tools: Any, counts: dict[str, int]) -> Any:
@@ -252,6 +332,12 @@ def _adapt(data: dict[str, Any], source: str) -> dict[str, Any]:
     items = _adapt_input(out.get("input"), counts)
     if items is not out.get("input"):
         out["input"] = items
+    if "tool_choice" in out:
+        tc = _adapt_tool_choice(out["tool_choice"], counts)
+        if tc is _SENTINEL:
+            out.pop("tool_choice")
+        elif tc is not out["tool_choice"]:
+            out["tool_choice"] = tc
     if not counts:
         # 必须留这行:否则无法区分「钩子没被调用」和「调用了但无需转换」。
         # 2026-08-03 就是因为静默 no-op,把「钩子选错、兜底路径 0 触发」误读成

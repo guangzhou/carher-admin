@@ -1,7 +1,27 @@
 #!/bin/bash
 # build one zerokey on 225 co-located capture. usage: build225.sh <N>
+#
+# 取码预算可覆盖(2026-08-06 加):
+#   OTP_AUTO_MAX   取码轮询窗口秒数, 默认 240(= cap.py 默认)。
+#     ⚠️ 原先这里写死 50, 是 acct-141/144 失败的直接原因 —— 邮件明明已在收件箱
+#     (截图实证 noreply@tm.openai.com "Your temporary ChatGPT login code"),
+#     但 get_otp 的 deadline 只有 50s, 而它每轮要 find_mail_frame(最多 25s)
+#     + 逐行点开邮件读正文; 对照: 同日 chatgpt-litellm-oauth.py 在**同样这两个邮箱**
+#     取码成功, 靠的是 ~120s 的 settle(等60s→刷新→再等60s)。50s 是硬约束不是号的问题。
+#   OTP_AUTO_ONLY  1=纯自动无兜底(默认 1); 0=自动失败后等 /work/out/otp.txt 人工注入
+#   OTP_FILE_WAIT  OTP_AUTO_ONLY=0 时等文件的秒数, 默认 0
+#   LOGIN_MODE     otp(默认) | password。有 ChatGPT 密码时可试 password 绕开取码:
+#     cap.py 的 mail.com 取码器读不到自己截图里的收件箱(列表在跨域 iframe,
+#     frames 遍历 evaluate 抛异常被吞) → 45 轮判"inbox 没加载" + 取码 0 命中,
+#     加大 OTP_AUTO_MAX 到 240 也无效(实证 acct-141)。对照: 同邮箱同日被
+#     toggle.py/oauth.py 各成功取码一次 → 是这份实现的缺陷, 不是号/IP/预算问题。
 set -u
 N="$1"; K="sudo k3s kubectl -n litellm-product"
+OTP_AUTO_MAX="${OTP_AUTO_MAX:-240}"
+OTP_AUTO_ONLY="${OTP_AUTO_ONLY:-1}"
+OTP_FILE_WAIT="${OTP_FILE_WAIT:-0}"
+LOGIN_MODE="${LOGIN_MODE:-otp}"
+echo "[$N] LOGIN_MODE=$LOGIN_MODE OTP_AUTO_MAX=$OTP_AUTO_MAX OTP_AUTO_ONLY=$OTP_AUTO_ONLY OTP_FILE_WAIT=$OTP_FILE_WAIT"
 # 1. capture Job (co-located 225, patched script, write to hostPath)
 $K delete job zk-cap225-$N --ignore-not-found >/dev/null 2>&1
 cat <<Y | $K apply -f - >/dev/null 2>&1
@@ -34,10 +54,10 @@ spec:
             - {name: SCREENSHOT_DIR, value: /work/screenshots}
             - {name: PROFILE_DIR, value: /work/profile}
             - {name: FORCE_LOGIN, value: "1"}
-            - {name: LOGIN_MODE, value: "otp"}
-            - {name: OTP_AUTO_ONLY, value: "1"}
-            - {name: OTP_AUTO_MAX, value: "50"}
-            - {name: OTP_FILE_WAIT, value: "0"}
+            - {name: LOGIN_MODE, value: "$LOGIN_MODE"}
+            - {name: OTP_AUTO_ONLY, value: "$OTP_AUTO_ONLY"}
+            - {name: OTP_AUTO_MAX, value: "$OTP_AUTO_MAX"}
+            - {name: OTP_FILE_WAIT, value: "$OTP_FILE_WAIT"}
           volumeMounts:
             - {name: script, mountPath: /script, readOnly: true}
             - {name: creds, mountPath: /run/creds, readOnly: true}

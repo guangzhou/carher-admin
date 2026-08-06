@@ -148,12 +148,49 @@ rm -rf \$sd")
 
   echo "===== acct-$N finalize ====="
   # auth.json 经 188→本地→198 中转, hostPath busybox 写 PVC(local-path node-bound)
-  j8 "cat /tmp/auth-acct-$N.json" > /tmp/auth-acct-$N.json
-  cat /tmp/auth-acct-$N.json | jms ssh AIYJY-litellm "cat > /tmp/acct${N}stage.json" 2>/dev/null
+  # ⚠️ 不能无条件拿 188 的输出覆盖本地文件, 两个理由(都实证过 2026-08-06):
+  #   1. jms 会话抖动会返回空/截断, 把 watch 脚本刚 sha 校验过的好文件冲掉(acct-153)。
+  #   2. 即使成功, `jms ssh "cat f" > f` 这趟往返会给文件**尾部追加一个 \n**
+  #      (实证 acct-154: 188 上 3796B 末字节 7d '}', 拉回本地变 3797B 末字节 0a)。
+  #      JSON 仍可解析所以不报错, 但此后任何 sha/字节比对都会失真。
+  #   → 本地已是有效 token 就完全不走这趟往返。
+  LOCAL_OK=$(python3 -c "
+import json
+try:
+    d = json.load(open('/tmp/auth-acct-$N.json'))
+    print(1 if len(d.get('access_token','')) > 1000 else 0)
+except Exception:
+    print(0)" 2>/dev/null | tr -dc 0-9)
+  if [ "${LOCAL_OK:-0}" != "1" ]; then
+    echo "  本地 auth-acct-$N.json 无效/缺失 → 从 188 拉"
+    j8 "cat /tmp/auth-acct-$N.json" > /tmp/auth-acct-$N.json
+  fi
+  # 中转文件必须**先落地并核字节数**再 scale=0。旧版推完不校验:jms 静默失败 →
+  # /tmp/acctNstage.json 不存在 → hostPath type:File 挂不上 → cp pod 起不来 →
+  # 日志无 RESULT= → 脚本却继续 scale=1 → pod 首启自发 device_code 把 PVC 写成空壳
+  # {device_code_requested_at} → smoke 000, 而 GRINDER DONE 仍报 ok(假阳性)。
+  # 实证 2026-08-06 acct-153。放在 scale=0 之前, 失败就不会留下 0 副本的半死状态。
+  LSZ=$(wc -c < /tmp/auth-acct-$N.json | tr -d ' ')
+  STAGED=0
+  for t in 1 2 3 4 5; do
+    cat /tmp/auth-acct-$N.json | jms ssh AIYJY-litellm "cat > /tmp/acct${N}stage.json" >/dev/null 2>&1
+    RSZ=$(jr "echo SZ=\$(wc -c < /tmp/acct${N}stage.json 2>/dev/null)" | grep -oE 'SZ=[0-9]+' | tail -1 | cut -d= -f2)
+    [ "${RSZ:-0}" = "$LSZ" ] && { STAGED=1; echo "  ✓ acct-$N 中转文件已落 198 (${LSZ}B)"; break; }
+    echo "  ⚠ acct-$N 中转文件未落地(198=${RSZ:-0}B / 应为 ${LSZ}B) — 重推 $t/5"
+    sleep 3
+  done
+  [ "$STAGED" = 1 ] || { echo "!!!! acct-$N 中转文件推不上 198 — skip 防半接入(deploy 未动, 稍后重跑该号)"; continue; }
   jr "kubectl -n $NS scale deploy chatgpt-acct-$N --replicas=0; for i in \$(seq 1 20); do [ \"\$(kubectl -n $NS get pod -l app=chatgpt-acct-$N --no-headers 2>/dev/null|wc -l)\" = 0 ] && break; sleep 3; done"
   NODE=$(jr "PV=\$(kubectl -n $NS get pvc chatgpt-acct-$N-auth -o jsonpath='{.spec.volumeName}'); kubectl get pv \$PV -o jsonpath='{.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]}'"|tail -1)
   OVR="{\"spec\":{\"nodeName\":\"$NODE\",\"restartPolicy\":\"Never\",\"volumes\":[{\"name\":\"a\",\"persistentVolumeClaim\":{\"claimName\":\"chatgpt-acct-$N-auth\"}},{\"name\":\"h\",\"hostPath\":{\"path\":\"/tmp/acct${N}stage.json\",\"type\":\"File\"}}],\"containers\":[{\"name\":\"x\",\"image\":\"busybox\",\"command\":[\"sh\",\"-c\",\"cp /h/src /a/auth.json; echo RESULT=\$(wc -c < /a/auth.json)\"],\"volumeMounts\":[{\"name\":\"a\",\"mountPath\":\"/a\"},{\"name\":\"h\",\"mountPath\":\"/h/src\"}]}]}}"
-  jr "kubectl -n $NS run cp$N-h --restart=Never --image=busybox --overrides='$OVR' >/dev/null 2>&1; kubectl -n $NS wait --for=condition=Ready pod/cp$N-h --timeout=30s >/dev/null 2>&1; sleep 3; kubectl -n $NS logs cp$N-h 2>/dev/null|grep RESULT; kubectl -n $NS delete pod cp$N-h --force --grace-period=0 >/dev/null 2>&1"
+  CPOUT=$(jr "kubectl -n $NS run cp$N-h --restart=Never --image=busybox --overrides='$OVR' >/dev/null 2>&1; kubectl -n $NS wait --for=condition=Ready pod/cp$N-h --timeout=30s >/dev/null 2>&1; sleep 3; kubectl -n $NS logs cp$N-h 2>/dev/null|grep RESULT; kubectl -n $NS delete pod cp$N-h --force --grace-period=0 >/dev/null 2>&1")
+  echo "$CPOUT" | grep -oE 'RESULT=[0-9]+' | tail -1
+  # RESULT 缺失 或 字节数不对 = PVC 根本没写成, 别继续(继续必得空壳)
+  if ! echo "$CPOUT" | grep -qE "RESULT=$LSZ\b"; then
+    echo "!!!! acct-$N PVC 写入未确认(期望 RESULT=$LSZ) — scale 回 1 后 skip, 稍后重跑该号"
+    jr "kubectl -n $NS scale deploy chatgpt-acct-$N --replicas=1" >/dev/null 2>&1
+    continue
+  fi
   jr "kubectl -n $NS scale deploy chatgpt-acct-$N --replicas=1; kubectl -n $NS rollout status deploy/chatgpt-acct-$N --timeout=150s"
   # 兜底: pod 首启若抢在 hostPath 写入前, 容器会自发 device_code 把有效 auth.json 覆写成
   # 空壳 {device_code_requested_at}(实证 acct-98)。scale=1 后校验 pod 内 auth, 空壳则重写 PVC
@@ -178,5 +215,19 @@ done
 
 echo "===== final rollout ====="
 jr "kubectl -n $NS rollout restart deploy/litellm-proxy; for i in \$(seq 1 100); do R=\$(kubectl -n $NS get deploy litellm-proxy -o jsonpath='{.status.readyReplicas}/{.spec.replicas}' 2>/dev/null); [ \"\$R\" = 4/4 ] && break; sleep 5; done"
-for N in $OK; do for M in gpt-5.5 gpt-5.6-sol; do R=$(jr "curl -sS -m40 -o /dev/null -w '%{http_code}' https://cc.auto-link.com.cn/pro/v1/chat/completions -H 'Authorization: Bearer $LITELLM_MK_198' -H 'Content-Type: application/json' -d '{\"model\":\"chatgpt-acct-$N-$M\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":5}'" | grep -oE '^[0-9]{3}$'); echo "chatgpt-acct-$N-$M -> HTTP $R"; done; done
-echo "GRINDER DONE ok=$OK $(date +%H:%M:%S)"
+# 收尾 smoke 走**流式**并判有没有真字符。旧版只看非流式 HTTP 码, 而 200 空返是静默
+# 黑洞、000 也照样被算进 ok(2026-08-06 acct-153: smoke 000 但 GRINDER DONE ok=153)。
+# 判据: sse 行数>0 **且** content 里有非空字符, 否则进 BAD 名单单独列出。
+GOOD=""; BAD=""
+for N in $OK; do
+  nok=0
+  for M in gpt-5.5 gpt-5.6-sol; do
+    T=$(jr "curl -sS -N -m60 https://cc.auto-link.com.cn/pro/v1/chat/completions -H 'Authorization: Bearer $LITELLM_MK_198' -H 'Content-Type: application/json' -d '{\"model\":\"chatgpt-acct-$N-$M\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}' 2>/dev/null | grep -o '\"content\":\"[^\"]*\"' | head -20 | tr -d '\n'")
+    C=$(printf '%s' "$T" | sed 's/\"content\":\"//g; s/\"//g' | tr -d ' \r\n' | head -c 40)
+    if [ -n "$C" ]; then echo "chatgpt-acct-$N-$M -> STREAM OK ('$C')"; nok=$((nok+1))
+    else echo "chatgpt-acct-$N-$M -> !! 空返/无字符(不算通过)"; fi
+  done
+  [ "$nok" -ge 1 ] && GOOD="$GOOD $N" || BAD="$BAD $N"
+done
+echo "GRINDER DONE ok=$GOOD $(date +%H:%M:%S)"
+[ -n "$BAD" ] && echo "!!!! 以下号 finalize 走完但流式无输出, 必须单独查(空壳/被摘 entry/配额打满):$BAD"

@@ -542,12 +542,108 @@ def _hoist_additional_tools(data: dict[str, Any], counts: dict[str, int]) -> dic
     return out
 
 
+# ============ Codex remote compaction v2 ============
+#
+# 2026-08-06 生产：用户 Codex 长会话触发压缩时报
+#
+#     Fatal error: remote compaction v2 expected exactly one compaction
+#     output item, got 0 from 3 output items
+#
+# **协议**（读 openai/codex `codex-rs/core/src/compact_remote_v2.rs` 与
+# `protocol/src/models.rs` 确认，不是猜的）：
+#
+#   * compaction v2 **不打 `/v1/responses/compact`**（那是 V1）。它复用标准
+#     Responses 流，只在 ``input`` 末尾追加一项 ``{"type":"compaction_trigger"}``。
+#   * 服务端见到该标记应切换到压缩模式，输出**恰好一个** ``compaction`` item::
+#
+#         Compaction {
+#             id: Option<ResponseItemId>,          // 可选
+#             encrypted_content: String,           // 必需
+#             internal_chat_message_metadata_passthrough: Option<..>,  // 可选
+#         }
+#
+#     serde 上还有 ``#[serde(alias = "compaction_summary")]``。
+#   * **``encrypted_content`` 只是普通 String**，Codex 当不透明字符串存、
+#     下一轮原样回传 —— 不是 OpenAI 私有加密格式，塞明文摘要即可。
+#     （这一条是方案可行的关键，读源码才敢确认。）
+#   * 计数只认 ``ResponseEvent::OutputItemDone`` 里的 Compaction 变体，
+#     且 ``compaction_count != 1`` 就 Fatal。
+#
+# **DeepSeek 的实际行为**（真打 api.deepseek.com 单变量实测）::
+#
+#     带 compaction_trigger  -> reasoning+message，内容是「继续对话」
+#     不带（对照组）          -> reasoning+message，内容同样是「继续对话」
+#     显式要摘要             -> message 内容是**真摘要**
+#
+# 即 **DeepSeek 完全忽略 compaction_trigger**（A 与 B 无差异），但只要明说
+# 就能做压缩。所以本模块的做法：拦下该标记 -> 换成显式摘要指令 -> 出站再把
+# 结果包装成 compaction item（包装在 deepseek_id_prefix 的 SSE 层做）。
+#
+# 同类问题竞品参考：CCX issue #179 / commit 5e322fe7（他们的做法是「规范化成
+# 单个 message item」，**并未真正构造 compaction item**，所以又出了 v2.9.2
+# 改走本地 compact）。我们这里按官方 schema 造真 compaction item。
+
+_COMPACTION_TRIGGER_TYPE = "compaction_trigger"
+
+_COMPACT_INSTRUCTION = (
+    "请把以上完整对话压缩成一份结构化摘要，供后续对话继续使用。要求：\n"
+    "1. 保留所有关键结论、已确认的事实、代码/文件/路径等具体标识；\n"
+    "2. 保留尚未完成的待办事项和用户明确的偏好约束；\n"
+    "3. 丢弃寒暄、重复内容和已被推翻的中间结论；\n"
+    "4. 直接输出摘要正文，不要任何前言、解释或 markdown 代码块包裹。"
+)
+
+
+def _has_compaction_trigger(items: Any) -> bool:
+    if not isinstance(items, list):
+        return False
+    return any(isinstance(i, dict) and i.get("type") == _COMPACTION_TRIGGER_TYPE
+               for i in items)
+
+
+def _rewrite_compaction_request(data: dict[str, Any], counts: dict[str, int]) -> dict[str, Any]:
+    """把 compaction_trigger 换成显式摘要指令。
+
+    DeepSeek 不认 ``compaction_trigger`` 这个 item type，留着它等于让上游把
+    这一轮当普通对话续写（实测 A/B 无差异）。换成一条 user message 明确要求
+    压缩，上游就能产出真摘要。
+    """
+    items = data.get("input")
+    if not _has_compaction_trigger(items):
+        return data
+
+    kept = [i for i in items if not (isinstance(i, dict)
+                                     and i.get("type") == _COMPACTION_TRIGGER_TYPE)]
+    kept.append({
+        "type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": _COMPACT_INSTRUCTION}],
+    })
+    out = dict(data)
+    out["input"] = kept
+    # 摘要要完整,别被默认 max_output_tokens 截断（实测 300 会 incomplete）
+    try:
+        cur = out.get("max_output_tokens")
+        if not isinstance(cur, int) or cur < 4096:
+            out["max_output_tokens"] = 4096
+    except Exception:
+        pass
+    # 标记给出站侧：这一轮的输出要包装成 compaction item
+    meta = out.get("litellm_metadata")
+    meta = dict(meta) if isinstance(meta, dict) else {}
+    meta["deepseek_compaction_v2"] = True
+    out["litellm_metadata"] = meta
+    counts["compaction_trigger_rewritten"] = counts.get("compaction_trigger_rewritten", 0) + 1
+    return out
+
+
 def _adapt(data: dict[str, Any], source: str) -> dict[str, Any]:
     if not _is_deepseek(data.get("model")):
         return data
     counts: dict[str, int] = {}
     # 必须最先做：先把 additional_tools 提上来，后面的 tools 改写才看得到它们
     data = _hoist_additional_tools(data, counts)
+    # compaction_trigger 换成显式摘要指令（DeepSeek 不认这个 item type）
+    data = _rewrite_compaction_request(data, counts)
     out = dict(data)
     tools = _adapt_tools(out.get("tools"), counts)
     if tools is not out.get("tools"):

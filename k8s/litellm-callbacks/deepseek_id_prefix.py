@@ -254,6 +254,23 @@ def _fix_event(evt: Any, counts: dict[str, int], id_map: dict | None = None) -> 
 # custom_out_to_function 恒为 0，即客户端从没回传过 output）。
 # 故出站要按请求里客户端的原始声明还原回 custom_tool_call。
 
+def _is_compaction_request(it: Any) -> bool:
+    """本请求是不是 compaction v2 —— 靠入站打在 litellm_metadata 的标记。"""
+    lo = getattr(it, "logging_obj", None)
+    if lo is None:
+        return False
+    for holder in (getattr(lo, "model_call_details", None),
+                   getattr(lo, "litellm_params", None),
+                   getattr(lo, "optional_params", None)):
+        if not isinstance(holder, dict):
+            continue
+        for key in ("litellm_metadata", "metadata"):
+            meta = holder.get(key)
+            if isinstance(meta, dict) and meta.get("deepseek_compaction_v2"):
+                return True
+    return False
+
+
 def _custom_names_from_iterator(it: Any) -> set:
     """取「被从 custom 降级成 function 的工具名」。
 
@@ -503,6 +520,8 @@ def _install_process_chunk_patch() -> None:
                     active = _ACTIVE_CUSTOM.get()
                     if active is None or active[0] != cn:
                         _ACTIVE_CUSTOM.set((cn, set()))
+                if not _ACTIVE_COMPACTION.get() and _is_compaction_request(self):
+                    _ACTIVE_COMPACTION.set(True)
                 # **不在这里改 type** —— 事件对象是 pydantic 模型，改了 type
                 # 会让它的序列化器失配，`response.completed` 那一帧序列化时崩
                 # PydanticSerializationError: 'MockValSer' object is not an
@@ -660,6 +679,122 @@ def _restore_custom_in_sse(text: str, names: set, ids: set, counts: dict) -> str
     return "\n".join(out_lines) if changed_any else text
 
 
+# ============ Codex compaction v2 出站包装 ============
+#
+# 入站侧（deepseek_responses_adapt._rewrite_compaction_request）已把
+# compaction_trigger 换成显式摘要指令，并在 litellm_metadata 打了
+# deepseek_compaction_v2 标记。这里负责把上游返回的摘要包装成 Codex 要的形状。
+#
+# 官方 schema（openai/codex protocol/src/models.rs）::
+#
+#     Compaction { id: Option<..>, encrypted_content: String, ... }
+#
+# 判据（compact_remote_v2.rs）：只认 OutputItemDone 里的 Compaction 变体，
+# 且 compaction_count **必须恰好 1**，否则 Fatal。
+#
+# 所以出站要做两件事：
+#   1. 把 message item 改写成 compaction item（摘要文本塞 encrypted_content）
+#   2. **丢掉 reasoning item** —— 它会占 output_item_count，且对压缩语义无用
+#      （Codex 存的是 compaction，reasoning 留着只会污染下一轮上下文）
+
+_COMPACTION_ITEM_TYPE = "compaction"
+
+
+def _extract_text(item: Any) -> str:
+    """从 message item 里取纯文本。"""
+    m = _as_mapping(item)
+    if m is None:
+        return ""
+    parts = m.get("content")
+    if isinstance(parts, str):
+        return parts
+    if not isinstance(parts, list):
+        return ""
+    buf = []
+    for p in parts:
+        pm = _as_mapping(p)
+        if pm is None:
+            continue
+        t = pm.get("text")
+        if isinstance(t, str):
+            buf.append(t)
+    return "".join(buf)
+
+
+def _to_compaction_item(item: dict, counts: dict) -> bool:
+    """message -> compaction（就地改，只在纯 dict 上调用）。"""
+    if not isinstance(item, dict) or item.get("type") != "message":
+        return False
+    text = _extract_text(item)
+    if not text.strip():
+        return False
+    item.clear()
+    item["type"] = _COMPACTION_ITEM_TYPE
+    item["encrypted_content"] = text
+    counts["compaction_wrapped"] = counts.get("compaction_wrapped", 0) + 1
+    return True
+
+
+def _wrap_compaction_in_sse(text: str, counts: dict) -> str:
+    """SSE 帧层：message -> compaction，并丢掉 reasoning item。
+
+    与 custom tool 还原同理，必须在字节层做 —— 改 pydantic 事件对象的 type
+    会炸 response.completed 那一帧的序列化。
+    """
+    if "data: " not in text:
+        return text
+    out_lines = []
+    changed = False
+    drop_ids: set = set()
+    for line in text.split("\n"):
+        if not line.startswith("data: "):
+            out_lines.append(line)
+            continue
+        payload = line[6:].strip()
+        if not payload or payload == "[DONE]":
+            out_lines.append(line)
+            continue
+        try:
+            obj = json.loads(payload)
+        except Exception:
+            out_lines.append(line)
+            continue
+
+        etype = str(obj.get("type") or "")
+        item = obj.get("item")
+
+        # reasoning 相关的事件整条丢掉
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            if item.get("id"):
+                drop_ids.add(item["id"])
+            changed = True
+            continue
+        if obj.get("item_id") in drop_ids or "reasoning" in etype:
+            changed = True
+            continue
+
+        if isinstance(item, dict) and _to_compaction_item(item, counts):
+            changed = True
+
+        resp = obj.get("response")
+        if isinstance(resp, dict):
+            kept = []
+            for o in resp.get("output") or []:
+                if isinstance(o, dict) and o.get("type") == "reasoning":
+                    changed = True
+                    continue
+                if isinstance(o, dict) and _to_compaction_item(o, counts):
+                    changed = True
+                kept.append(o)
+            if kept != (resp.get("output") or []):
+                resp["output"] = kept
+                changed = True
+
+        out_lines.append("data: " + json.dumps(obj, ensure_ascii=False)
+                         if changed else line)
+    return "\n".join(out_lines) if changed else text
+
+
 def _install_sse_format_patch() -> None:
     """patch ``proxy_server._format_streaming_sse_chunk`` —— SSE 的单一收口。"""
     try:
@@ -677,6 +812,16 @@ def _install_sse_format_patch() -> None:
     def _patched(chunk):
         out = _orig(chunk)
         try:
+            if _ACTIVE_COMPACTION.get():
+                counts: dict = {}
+                if isinstance(out, bytes):
+                    out = _wrap_compaction_in_sse(
+                        out.decode("utf-8", "replace"), counts).encode("utf-8")
+                elif isinstance(out, str):
+                    out = _wrap_compaction_in_sse(out, counts)
+                if counts:
+                    _log.warning("deepseek_id_prefix: compaction %s", counts)
+                return out
             active = _ACTIVE_CUSTOM.get()
             if active:
                 names, ids = active
@@ -708,6 +853,12 @@ def _install_sse_format_patch() -> None:
 # 供后续只带 item_id 的 delta 事件对齐。
 _ACTIVE_CUSTOM: "contextvars.ContextVar[tuple | None]" = contextvars.ContextVar(
     "dsidp_active_custom", default=None
+)
+
+# 本请求是不是 Codex compaction v2（入站已把 trigger 换成摘要指令）。
+# 同样用 contextvar 按协程隔离，非 deepseek 请求恒为 False。
+_ACTIVE_COMPACTION: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "dsidp_active_compaction", default=False
 )
 
 

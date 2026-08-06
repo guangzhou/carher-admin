@@ -255,3 +255,162 @@ class PydanticEventObjects(unittest.TestCase):
                           item_id=REAL_FC_ID, delta="{")
         self.assertFalse(MOD._fix_event(delta, {}, {}))
         self.assertEqual(delta.item_id, REAL_FC_ID)
+
+
+class RestoreCustomToolCall(unittest.TestCase):
+    """出站把降级过的 custom tool 还原回 custom_tool_call。
+
+    DeepSeek 只接受 ``apply_patch`` 一个 custom tool（实测
+    ``custom/exec`` -> 400 "Unsupported custom tool: 'exec'. Only
+    'apply_patch' is supported."），所以 ``deepseek_responses_adapt`` 把
+    Codex 的 ``exec`` 降级成了 function —— 上游没得选。
+
+    但**客户端声明的是 custom**：Codex 收到 ``function_call`` 不认这条调用，
+    表现为「命令执行被中断，一条都跑不了」（2026-08-06 实测：46 次 hoist
+    生效、模型正常多轮调用，但 ``custom_out_to_function`` 恒为 0 ——
+    客户端从没回传过 output，即它根本没执行）。
+
+    故出站要按客户端**原始**声明还原。
+    """
+
+    class _Obj:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    AT_ITEM = {"type": "additional_tools", "role": "developer", "tools": [
+        {"type": "custom", "name": "exec",
+         "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.*/"}},
+        {"type": "function", "name": "wait", "parameters": {"type": "object"}},
+    ]}
+
+    def test_custom_names_read_from_additional_tools(self):
+        """必须从 input 的 additional_tools 里取 —— 顶层 tools 已被降级过。"""
+        data = {"model": "deepseek-v4-flash", "tools": [],
+                "input": [self.AT_ITEM, {"role": "user", "content": "hi"}]}
+        self.assertEqual(MOD._client_custom_tool_names(data), {"exec"})
+
+    def test_custom_names_from_top_level_tools(self):
+        data = {"model": "deepseek-v4-flash", "input": [],
+                "tools": [{"type": "custom", "name": "apply_patch"}]}
+        self.assertEqual(MOD._client_custom_tool_names(data), {"apply_patch"})
+
+    def test_namespace_nested_custom_found(self):
+        data = {"model": "deepseek-v4-flash", "input": [], "tools": [
+            {"type": "namespace", "name": "ns", "tools": [
+                {"type": "custom", "name": "inner"}]}]}
+        self.assertIn("inner", MOD._client_custom_tool_names(data))
+
+    def test_function_call_restored_to_custom(self):
+        """真凶格：exec 的 function_call 还原成 custom_tool_call。"""
+        item = self._Obj(type="function_call", id="fc_x", call_id="call_1",
+                         name="exec", arguments=json.dumps({"input": "ls -la"}))
+        counts = {}
+        self.assertTrue(MOD._restore_custom_call(item, {"exec"}, counts))
+        self.assertEqual(item.type, "custom_tool_call")
+        self.assertEqual(item.input, "ls -la")
+        self.assertEqual(item.call_id, "call_1", "call_id 不能动")
+        self.assertEqual(counts, {"custom_call_restored": 1})
+
+    def test_non_custom_tool_untouched(self):
+        """客户端声明为 function 的工具不能被改成 custom。"""
+        item = self._Obj(type="function_call", id="fc_y", call_id="c2",
+                         name="wait", arguments='{"ms":100}')
+        self.assertFalse(MOD._restore_custom_call(item, {"exec"}, {}))
+        self.assertEqual(item.type, "function_call")
+
+    def test_malformed_arguments_fall_back_to_raw(self):
+        """参数不是合法 JSON 时原样带过去，不能丢内容。"""
+        item = self._Obj(type="function_call", id="fc_z", call_id="c3",
+                         name="exec", arguments="not-json{")
+        MOD._restore_custom_call(item, {"exec"}, {})
+        self.assertEqual(item.input, "not-json{")
+
+    def test_empty_custom_names_is_noop(self):
+        item = self._Obj(type="function_call", id="fc_w", call_id="c4",
+                         name="exec", arguments='{"input":"ls"}')
+        self.assertFalse(MOD._restore_custom_call(item, set(), {}))
+        self.assertEqual(item.type, "function_call")
+
+
+class SSERestoreIsolation(unittest.TestCase):
+    """SSE 字节层还原 —— 作用域必须严格限定在 deepseek。
+
+    为什么改在字节层：事件对象是 pydantic 模型，改它的 ``type`` 会让序列化器
+    失配，``response.completed`` 那一帧崩 ``PydanticSerializationError:
+    'MockValSer' object is not an instance of 'SchemaSerializer'``，整条流断在
+    最后一帧（2026-08-06 实测：无 response.completed、无 [DONE]，比原故障更严重）。
+
+    为什么用 contextvar 而不是模块级 dict：198 上常态 40+ 并发，全局字典会把
+    deepseek 的还原规则串到同时在跑的 chatgpt/anthropic 请求上。
+    """
+
+    FN_DELTA = ('data: {"type":"response.function_call_arguments.delta",'
+                '"item_id":"fc_1","delta":"ls "}')
+
+    def _added(self, name="exec", iid="fc_1"):
+        return ('data: {"type":"response.output_item.added","output_index":1,'
+                '"item":{"type":"function_call","id":"%s","call_id":"c1",'
+                '"name":"%s","arguments":"{\\"input\\":\\"ls -la\\"}"}}' % (iid, name))
+
+    def test_function_call_restored_in_sse(self):
+        ids, counts = set(), {}
+        out = MOD._restore_custom_in_sse(self._added(), {"exec"}, ids, counts)
+        evt = json.loads(out.split("data: ", 1)[1])
+        self.assertEqual(evt["item"]["type"], "custom_tool_call")
+        self.assertEqual(evt["item"]["input"], "ls -la")
+        self.assertNotIn("arguments", evt["item"])
+        self.assertEqual(evt["item"]["call_id"], "c1", "call_id 不能动")
+
+    def test_arg_delta_event_renamed(self):
+        """item 成了 custom，delta 事件名必须跟着换，否则客户端拼不起来。"""
+        ids, counts = set(), {}
+        MOD._restore_custom_in_sse(self._added(), {"exec"}, ids, counts)
+        out = MOD._restore_custom_in_sse(self.FN_DELTA, {"exec"}, ids, counts)
+        evt = json.loads(out.split("data: ", 1)[1])
+        self.assertEqual(evt["type"], "response.custom_tool_call_input.delta")
+
+    def test_delta_of_other_item_untouched(self):
+        """同一响应里可能同时有普通 function_call —— 不是被还原那条就别动。"""
+        ids, counts = set(), {}
+        MOD._restore_custom_in_sse(self._added(), {"exec"}, ids, counts)
+        other = ('data: {"type":"response.function_call_arguments.delta",'
+                 '"item_id":"fc_OTHER","delta":"x"}')
+        out = MOD._restore_custom_in_sse(other, {"exec"}, ids, counts)
+        self.assertEqual(json.loads(out.split("data: ", 1)[1])["type"],
+                         "response.function_call_arguments.delta")
+
+    def test_non_downgraded_tool_untouched(self):
+        """客户端本来就声明为 function 的工具不能被改成 custom。"""
+        ids, counts = set(), {}
+        out = MOD._restore_custom_in_sse(self._added(name="wait"), {"exec"}, ids, counts)
+        self.assertEqual(json.loads(out.split("data: ", 1)[1])["item"]["type"],
+                         "function_call")
+
+    def test_empty_names_is_bytewise_noop(self):
+        """作用域对照组：非 deepseek 请求 names 为空,必须原样返回同一个对象。"""
+        raw = self._added()
+        self.assertIs(MOD._restore_custom_in_sse(raw, set(), set(), {}), raw)
+
+    def test_done_sentinel_and_malformed_pass_through(self):
+        for raw in ("data: [DONE]", 'data: {"broken', "event: ping", ""):
+            self.assertEqual(MOD._restore_custom_in_sse(raw, {"exec"}, set(), {}), raw)
+
+    def test_completed_frame_output_restored(self):
+        """response.completed 里的 output[] 也要还原,否则前后不一致。"""
+        raw = ('data: {"type":"response.completed","response":{"status":"completed",'
+               '"output":[{"type":"function_call","id":"fc_9","call_id":"c9",'
+               '"name":"exec","arguments":"{\\"input\\":\\"pwd\\"}"}]}}')
+        out = MOD._restore_custom_in_sse(raw, {"exec"}, set(), {})
+        evt = json.loads(out.split("data: ", 1)[1])
+        self.assertEqual(evt["response"]["output"][0]["type"], "custom_tool_call")
+
+    def test_contextvar_defaults_to_none(self):
+        """默认必须是 None —— SSE patch 靠它判断「本请求不归我管」。"""
+        self.assertIsNone(MOD._ACTIVE_CUSTOM.get())
+
+    def test_utf8_preserved(self):
+        raw = ('data: {"type":"response.output_item.added","item":{"type":"function_call",'
+               '"id":"fc_2","call_id":"c2","name":"exec",'
+               '"arguments":"{\\"input\\":\\"echo 中文\\"}"}}')
+        out = MOD._restore_custom_in_sse(raw, {"exec"}, set(), {})
+        self.assertIn("中文", out)

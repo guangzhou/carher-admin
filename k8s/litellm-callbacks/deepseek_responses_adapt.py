@@ -333,6 +333,12 @@ def _adapt_tool_choice(choice: Any, tools: Any, counts: dict[str, int]) -> Any:
     return _SENTINEL
 
 
+# _adapt 一次调用内，被从 custom 降级成 function 的工具名。
+# key 用 counts 的 id —— 同一次 _adapt 内 counts 是同一个对象，天然隔离；
+# _adapt 末尾会把它转存进 litellm_metadata 再清掉，不留全局状态。
+_DOWNGRADED_NAMES: "dict[int, set]" = {}
+
+
 def _adapt_tools(tools: Any, counts: dict[str, int]) -> Any:
     if not isinstance(tools, list):
         return tools
@@ -358,6 +364,9 @@ def _adapt_tools(tools: Any, counts: dict[str, int]) -> Any:
             out.append(renamed)
             continue
         # deepseek 不接受任意 custom tool -> 转标准 function
+        # 记下降级过的名字：出站要按客户端原始声明还原成 custom_tool_call，
+        # 否则 Codex 认不出这条调用（表现为「命令执行被中断」）。
+        _DOWNGRADED_NAMES.setdefault(id(counts), set()).add(name)
         out.append({
             "type": "function",
             "name": name,
@@ -558,8 +567,19 @@ def _adapt(data: dict[str, Any], source: str) -> dict[str, Any]:
         # 必须留这行:否则无法区分「钩子没被调用」和「调用了但无需转换」。
         # 2026-08-03 就是因为静默 no-op,把「钩子选错、兜底路径 0 触发」误读成
         # 「转换生效了」。deepseek 兜底流量不大,这条日志量可接受。
+        _DOWNGRADED_NAMES.pop(id(counts), None)
         _log.warning("deepseek_responses_adapt: source=%s model=%s counts={} (no-op)", source, data.get("model"))
         return data
+    # 把降级过的名字传给出站还原侧（deepseek_id_prefix）。
+    # litellm_metadata 会跟着请求走到流式迭代器，是这两层之间唯一可靠的通道
+    # —— 2026-08-06 实测 optional_params/litellm_params 里 tools 已是转换后的
+    # 形态，input 里的 additional_tools 也已被 hoist 掉，下游无从还原。
+    downgraded = _DOWNGRADED_NAMES.pop(id(counts), None)
+    if downgraded:
+        meta = out.get("litellm_metadata")
+        meta = dict(meta) if isinstance(meta, dict) else {}
+        meta["deepseek_downgraded_custom_tools"] = sorted(downgraded)
+        out["litellm_metadata"] = meta
     _log.warning("deepseek_responses_adapt: source=%s model=%s counts=%s", source, data.get("model"), counts)
     return out
 

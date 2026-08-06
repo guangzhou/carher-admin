@@ -60,6 +60,7 @@ Wei-Shaw/sub2api ``openai_codex_transform.go``：「id 必须以 "fc" 开头，
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import re
@@ -244,6 +245,140 @@ def _fix_event(evt: Any, counts: dict[str, int], id_map: dict | None = None) -> 
     return changed
 
 
+# ---- 出站把降级过的 custom tool 还原 ----
+# DeepSeek 只接受 apply_patch 一个 custom tool（实测 custom/exec ->
+# 400 "Unsupported custom tool: 'exec'. Only 'apply_patch' is supported."），
+# 所以 deepseek_responses_adapt 把其它 custom 工具降级成了 function。
+# 但**客户端声明的是 custom** —— Codex 收到 function_call 不认这条调用，
+# 表现为「命令执行被中断」（2026-08-06 实测：counts 里
+# custom_out_to_function 恒为 0，即客户端从没回传过 output）。
+# 故出站要按请求里客户端的原始声明还原回 custom_tool_call。
+
+def _custom_names_from_iterator(it: Any) -> set:
+    """取「被从 custom 降级成 function 的工具名」。
+
+    2026-08-06 依次排除了三条路，每条都有实测判据：
+
+    * ``async_pre_call_hook`` 登记 + 按 ``litellm_call_id`` 取回 —— 该钩子在
+      deepseek 这条路上不跑，登记表实测恒为 ``regsize=0``。
+    * ``logging_obj.optional_params`` / ``litellm_params`` 的 ``tools`` ——
+      拿到的是**转换后**的形态（``[('function','exec'), ...]``），
+      客户端原本的 custom 声明已经没了。
+    * ``model_call_details.input`` 里的 ``additional_tools`` —— 也已被 hoist
+      掉，实测 ``inputtypes=['message'] additional_tools=None``。
+
+    可靠通道只有 ``litellm_metadata``：``deepseek_responses_adapt`` 在降级那
+    一刻写入，它跟着请求一路走到流式迭代器。
+    """
+    lo = getattr(it, "logging_obj", None)
+    if lo is None:
+        return set()
+    for holder in (getattr(lo, "model_call_details", None),
+                   getattr(lo, "litellm_params", None),
+                   getattr(lo, "optional_params", None)):
+        if not isinstance(holder, dict):
+            continue
+        for key in ("litellm_metadata", "metadata"):
+            meta = holder.get(key)
+            if isinstance(meta, dict):
+                names = meta.get("deepseek_downgraded_custom_tools")
+                if names:
+                    return set(names)
+    return set()
+
+
+def _client_custom_tool_names(request_data: Any) -> set:
+    """客户端**原始**声明为 custom 的工具名。
+
+    注意要看 ``input`` 里的 additional_tools（Codex responses-lite 形态），
+    不能只看顶层 ``tools`` —— 顶层那份已经被 hoist + 降级过了。
+    """
+    names: set = set()
+    if not isinstance(request_data, dict):
+        return names
+
+    def _scan(tools: Any) -> None:
+        if not isinstance(tools, list):
+            return
+        for t in tools:
+            if not isinstance(t, dict):
+                continue
+            if t.get("type") == "namespace":
+                _scan(t.get("tools"))
+            elif t.get("type") == "custom" and t.get("name"):
+                names.add(t["name"])
+
+    _scan(request_data.get("tools"))
+    for item in request_data.get("input") or []:
+        if isinstance(item, dict) and item.get("type") == "additional_tools":
+            _scan(item.get("tools"))
+    return names
+
+
+def _downgraded_names_from_data(data: Any) -> set:
+    """从请求 dict 的 metadata 里取降级过的名字（非流式路径用）。"""
+    if not isinstance(data, dict):
+        return set()
+    for key in ("litellm_metadata", "metadata"):
+        meta = data.get(key)
+        if isinstance(meta, dict):
+            names = meta.get("deepseek_downgraded_custom_tools")
+            if names:
+                return set(names)
+    return set()
+
+
+def _restore_custom_call(item: Any, custom_names: set, counts: dict) -> bool:
+    """``function_call`` -> ``custom_tool_call``（仅限客户端声明为 custom 的名字）。
+
+    降级时参数被包成 ``{"input": "..."}``，还原时要把它摊回 custom 的
+    ``input`` 字符串字段。
+    """
+    m = _as_mapping(item)
+    if m is None or m.get("type") != "function_call":
+        return False
+    name = m.get("name")
+    if name not in custom_names:
+        return False
+    raw = m.get("arguments")
+    text = ""
+    if isinstance(raw, str) and raw:
+        try:
+            parsed = json.loads(raw)
+            text = parsed.get("input", "") if isinstance(parsed, dict) else raw
+        except Exception:
+            text = raw
+    m["type"] = "custom_tool_call"
+    m["input"] = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
+    try:
+        m["arguments"] = None
+    except Exception:
+        pass
+    counts["custom_call_restored"] = counts.get("custom_call_restored", 0) + 1
+    return True
+
+
+# litellm_call_id -> 客户端声明为 custom 的工具名集合。
+# 流式迭代器拿不到原始请求，只能靠 pre_call 钩子登记、_process_chunk 时按
+# call id 取回。带上限，防止长跑进程无界增长。
+_CUSTOM_NAMES_BY_CALL: "dict[str, set]" = {}
+_CUSTOM_NAMES_MAX = 512
+
+
+def _remember_custom_names(request_data: Any) -> None:
+    if not isinstance(request_data, dict):
+        return
+    cid = request_data.get("litellm_call_id")
+    if not cid:
+        return
+    names = _client_custom_tool_names(request_data)
+    if not names:
+        return
+    if len(_CUSTOM_NAMES_BY_CALL) >= _CUSTOM_NAMES_MAX:
+        _CUSTOM_NAMES_BY_CALL.clear()
+    _CUSTOM_NAMES_BY_CALL[str(cid)] = names
+
+
 class DeepSeekIdPrefix(CustomLogger):
     """出站补前缀。流式 / 非流式两个钩子都要挂。"""
 
@@ -257,6 +392,25 @@ class DeepSeekIdPrefix(CustomLogger):
             return response.get("model")
         return None
 
+    async def async_pre_call_hook(
+        self, user_api_key_dict: Any, cache: Any, data: dict, call_type: str
+    ) -> Any:
+        """只做登记：记下客户端原始声明为 custom 的工具名，供出站还原用。
+
+        必须在这里取 —— 到了流式迭代器那层，``tools`` 已经被
+        ``deepseek_responses_adapt`` hoist + 降级过，看不到原始 custom 声明了。
+        """
+        try:
+            # **不能按 model 门控** —— pre_call 时 model 还是原始 model group
+            # （兜底场景下是 gpt-5.6-sol 之类），2026-08-06 实测门控在这里
+            # 一次都不放行，登记表恒为空。改为无条件登记：只记「客户端声明为
+            # custom 的工具名」，对非 deepseek 请求也无副作用（出站还原那侧
+            # 仍由 _is_deepseek 门控）。
+            _remember_custom_names(data)
+        except Exception as exc:
+            _log.warning("deepseek_id_prefix: pre_call error: %r", exc)
+        return data
+
     async def async_post_call_success_hook(
         self, data: dict, user_api_key_dict: Any, response: Any
     ) -> Any:
@@ -265,6 +419,23 @@ class DeepSeekIdPrefix(CustomLogger):
             if not _is_deepseek(self._model_of(data, response)):
                 return response
             counts: dict[str, int] = {}
+            # 非流式同样要还原 custom 形态（流式那侧在 _process_chunk 里做）。
+            cn = _client_custom_tool_names(data) or _downgraded_names_from_data(data)
+            if cn:
+                out_items = None
+                if isinstance(response, dict):
+                    out_items = response.get("output")
+                elif hasattr(response, "output"):
+                    out_items = getattr(response, "output", None)
+                for _o in out_items or []:
+                    # 只在**纯 dict** item 上还原。改 pydantic 对象的 type 会让
+                    # 它的序列化器失配：非流式响应体走 model_dump 时崩
+                    # TypeError: 'MockValSer' object is not an instance of
+                    # 'SchemaSerializer'（2026-08-06 实测 500）。pydantic 的
+                    # serializer 按声明类型缓存，改 type 字段等于换了模型。
+                    # 流式那侧事件本身就是 dict 视图，不受影响。
+                    if isinstance(_o, dict):
+                        _restore_custom_call(_o, cn, counts)
             target = response
             # litellm 可能给的是 pydantic 对象，取其 dict 视图就地改
             if not isinstance(target, dict) and hasattr(target, "output"):
@@ -318,6 +489,26 @@ def _install_process_chunk_patch() -> None:
                 if id_map is None:
                     id_map = {}
                     self._dsidp_ids = id_map
+                # 先还原 custom 形态,再补前缀 —— 顺序不能反,
+                # 还原会改 type,而前缀是按 type 选的
+                cn = getattr(self, "_dsidp_custom_names", None)
+                if cn is None:
+                    cn = _custom_names_from_iterator(self)
+                    self._dsidp_custom_names = cn
+                # 把「本请求要还原哪些名字」放进 contextvar，供下游 SSE
+                # 格式化函数取用。**只在 _is_deepseek 门控内设置** ——
+                # 其它模型的请求这里根本不会执行到，contextvar 保持 None，
+                # SSE patch 第一行就 return，一个字节都不碰。
+                if cn:
+                    active = _ACTIVE_CUSTOM.get()
+                    if active is None or active[0] != cn:
+                        _ACTIVE_CUSTOM.set((cn, set()))
+                # **不在这里改 type** —— 事件对象是 pydantic 模型，改了 type
+                # 会让它的序列化器失配，`response.completed` 那一帧序列化时崩
+                # PydanticSerializationError: 'MockValSer' object is not an
+                # instance of 'SchemaSerializer'，整条流断在最后一帧
+                # （2026-08-06 实测：无 response.completed / 无 [DONE]）。
+                # custom 形态的还原改在 SSE 字节层做，见 _restore_in_sse_bytes。
                 _fix_event(evt, counts, id_map)
                 if counts:
                     tot = getattr(self, "_dsidp_counts", None)
@@ -373,3 +564,152 @@ def _rewrite_sse_bytes(buf: bytes, counts: dict[str, int]) -> bytes:
 
 deepseek_id_prefix_instance = DeepSeekIdPrefix()
 deepseek_id_prefix = deepseek_id_prefix_instance
+
+
+# ---------------- SSE 字节层还原 custom_tool_call ----------------
+# 为什么必须在字节层做：事件对象是 pydantic 模型，改它的 ``type`` 字段会让
+# 序列化器失配 —— ``response.completed`` 那一帧序列化时崩
+# ``PydanticSerializationError: 'MockValSer' object is not an instance of
+# 'SchemaSerializer'``，整条流断在最后一帧（2026-08-06 实测：无
+# response.completed、无 [DONE]，比原故障更严重）。
+# 到了 SSE 字节这一层已经是纯 JSON 文本，改它不碰任何 pydantic 机制。
+
+_FN_TO_CUSTOM_EVENT = {
+    "response.function_call_arguments.delta": "response.custom_tool_call_input.delta",
+    "response.function_call_arguments.done": "response.custom_tool_call_input.done",
+}
+
+
+def _restore_custom_in_obj(obj: Any, names: set, ids: set, counts: dict) -> bool:
+    """在**纯 dict** 的事件对象上把 function_call 还原成 custom_tool_call。"""
+    if not isinstance(obj, dict):
+        return False
+    changed = False
+
+    def _fix_one(it: Any) -> bool:
+        if not isinstance(it, dict) or it.get("type") != "function_call":
+            return False
+        if it.get("name") not in names:
+            return False
+        raw = it.get("arguments")
+        text = ""
+        if isinstance(raw, str) and raw:
+            try:
+                parsed = json.loads(raw)
+                text = parsed.get("input", "") if isinstance(parsed, dict) else raw
+            except Exception:
+                text = raw
+        it["type"] = "custom_tool_call"
+        it["input"] = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
+        it.pop("arguments", None)
+        if it.get("id"):
+            ids.add(it["id"])
+        counts["custom_call_restored"] = counts.get("custom_call_restored", 0) + 1
+        return True
+
+    item = obj.get("item")
+    if _fix_one(item):
+        changed = True
+
+    resp = obj.get("response")
+    if isinstance(resp, dict):
+        for o in resp.get("output") or []:
+            if _fix_one(o):
+                changed = True
+
+    # 参数增量事件跟着换名 —— item 成了 custom，delta 还叫 function_call_*
+    # 的话客户端拼不起来
+    t = obj.get("type")
+    new_t = _FN_TO_CUSTOM_EVENT.get(str(t))
+    if new_t and obj.get("item_id") in ids:
+        obj["type"] = new_t
+        if "delta" in obj:
+            pass  # 两种事件的增量字段同名，都是 delta
+        if "arguments" in obj:
+            obj["input"] = obj.pop("arguments")
+        counts["arg_event_renamed"] = counts.get("arg_event_renamed", 0) + 1
+        changed = True
+
+    return changed
+
+
+def _restore_custom_in_sse(text: str, names: set, ids: set, counts: dict) -> str:
+    """逐 SSE 帧还原。解析不了的原样放行，绝不吞流。"""
+    if not names or "data: " not in text:
+        return text
+    out_lines = []
+    changed_any = False
+    for line in text.split("\n"):
+        if not line.startswith("data: "):
+            out_lines.append(line)
+            continue
+        payload = line[6:].strip()
+        if not payload or payload == "[DONE]":
+            out_lines.append(line)
+            continue
+        try:
+            obj = json.loads(payload)
+        except Exception:
+            out_lines.append(line)
+            continue
+        if _restore_custom_in_obj(obj, names, ids, counts):
+            changed_any = True
+            out_lines.append("data: " + json.dumps(obj, ensure_ascii=False))
+        else:
+            out_lines.append(line)
+    return "\n".join(out_lines) if changed_any else text
+
+
+def _install_sse_format_patch() -> None:
+    """patch ``proxy_server._format_streaming_sse_chunk`` —— SSE 的单一收口。"""
+    try:
+        from litellm.proxy import proxy_server as _ps
+    except Exception as exc:
+        _log.warning("deepseek_id_prefix: sse patch import failed: %r", exc)
+        return
+    if getattr(_ps, "_dsidp_sse_patched", False):
+        return
+    _orig = getattr(_ps, "_format_streaming_sse_chunk", None)
+    if _orig is None:
+        _log.warning("deepseek_id_prefix: _format_streaming_sse_chunk missing, sse patch skipped")
+        return
+
+    def _patched(chunk):
+        out = _orig(chunk)
+        try:
+            active = _ACTIVE_CUSTOM.get()
+            if active:
+                names, ids = active
+                counts: dict = {}
+                if isinstance(out, bytes):
+                    new = _restore_custom_in_sse(out.decode("utf-8", "replace"), names, ids, counts)
+                    out = new.encode("utf-8")
+                elif isinstance(out, str):
+                    out = _restore_custom_in_sse(out, names, ids, counts)
+                if counts:
+                    _log.warning("deepseek_id_prefix: sse restore %s", counts)
+        except Exception as exc:
+            _log.warning("deepseek_id_prefix: sse patch error: %r", exc)
+        return out
+
+    _ps._format_streaming_sse_chunk = _patched
+    _ps._dsidp_sse_patched = True
+    _log.warning("deepseek_id_prefix: _format_streaming_sse_chunk patched")
+
+
+# 当前请求里「被降级过的 custom 工具名」。
+#
+# **必须用 contextvar，不能用模块级 dict** —— SSE 格式化函数是模块级自由函数，
+# 拿不到请求上下文；若用全局字典，高并发下会把 deepseek 的还原规则串到同时在
+# 跑的 chatgpt / anthropic 请求上（198 上常态 40+ 并发）。ContextVar 按协程
+# 隔离，一请求一份，天生不串。
+#
+# 存 (names, ids)：names = 被降级的工具名；ids = 已还原 item 的 id，
+# 供后续只带 item_id 的 delta 事件对齐。
+_ACTIVE_CUSTOM: "contextvars.ContextVar[tuple | None]" = contextvars.ContextVar(
+    "dsidp_active_custom", default=None
+)
+
+
+_install_sse_format_patch()
+

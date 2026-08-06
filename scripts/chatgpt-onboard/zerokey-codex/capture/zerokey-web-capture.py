@@ -157,25 +157,24 @@ def mailcom_login(ctx):
                 p.wait_for_timeout(2000)
         except Exception:
             pass
-    # wait for inbox content to actually render (mail.com shows a skeleton
-    # screen first; poll frames for a real sender keyword, force-reload to
-    # break skeleton stall) — ported from chatgpt-litellm-oauth.py
-    SENDER_RE = re.compile(r"(openai|chatgpt|noreply@tm\.openai|noreply@)", re.I)
+    # wait for inbox content to actually render.
+    # ⚠️ 不能用 document.body.innerText 判: mail.com 2026-06-18 起把**邮件列表和正文
+    # 都搬进了 Shadow DOM**, innerText 返回空 → 45 轮全判"没加载"、取码 0 命中,
+    # 而同一时刻脚本自己拍的截图上收件箱和验证码邮件清清楚楚(2026-08-06 acct-141
+    # 实证, 累计 8 个号同一签名)。判据改成数 Shadow DOM 能穿透的列表行
+    # (与 chatgpt-litellm-oauth.py 一致 —— 那份实现同期在同样这些邮箱上取码成功)。
     loaded = False
     for attempt in range(45):
-        for fr in p.frames:
+        sc = mail_scope(p, dump=(attempt == 0))
+        if sc:
             try:
-                txt = fr.evaluate("() => document.body.innerText")
+                n = sc.locator("[class*='mail-item']").count()
             except Exception:
-                continue
-            if not txt or len(txt) < 200:
-                continue
-            if SENDER_RE.search(txt):
-                print(f"  mail.com: inbox loaded ({len(txt)} chars)", flush=True)
+                n = 0
+            if n > 0:
+                print(f"  mail.com: inbox loaded ({n} rows, scope={sc.name or 'main'})", flush=True)
                 loaded = True
                 break
-        if loaded:
-            break
         if attempt > 0 and attempt % 10 == 0:
             print(f"  mail.com: skeleton stall — reload (attempt {attempt})", flush=True)
             try:
@@ -185,18 +184,186 @@ def mailcom_login(ctx):
         print(f"  mail.com: waiting inbox... [{attempt+1}/45]", flush=True)
         time.sleep(2)
     if not loaded:
-        print("  mail.com: WARN inbox keyword never appeared — proceeding anyway", flush=True)
+        print("  mail.com: WARN inbox rows never appeared — proceeding anyway", flush=True)
     ss(p, "mailcom-inbox")
     return p
 
 
+def mail_scope(mail_page, dump=False):
+    """返回**能数到邮件列表行**的 scope(主文档或某个 iframe)。
+
+    ⚠️ 不能假设存在 name='mail' 的 iframe。2026-08-07 实证: cap.py 打开的 mail.com
+    页面里根本没有这个 frame, 旧实现(以及刚移植进来的版本)恒打
+    `mail frame missing, retry 5s` 空转到超时 —— 而同一时刻截图上收件箱是渲染好的。
+    新版 mail.com 把列表挪到了主文档/别名 frame。按"哪个 scope 数得到行"来找。
+    """
+    cands = [mail_page.main_frame] + [f for f in mail_page.frames if f != mail_page.main_frame]
+    if dump:
+        print("  [frames] " + " | ".join(
+            f"name={f.name!r} url={(f.url or '')[:60]}" for f in cands[:8]), flush=True)
+    for fr in cands:
+        try:
+            if fr.locator("[class*='mail-item']").count() > 0:
+                return fr
+        except Exception:
+            continue
+    return None
+
+
+def settle_inbox(mail_page, label="otp"):
+    """等 N 秒 → **刷新** → 再等 N 秒 → 才读码。
+
+    本次登录触发的验证码是在打开收件箱**之后**才到的; 不刷新只能看到打开那一刻的
+    旧列表 → 读到上一次的旧码或压根看不到新邮件。中间那次刷新不能省
+    (ported from chatgpt-litellm-oauth.py)。
+    """
+    secs = 0 if os.environ.get("OTP_FAST") else int(os.environ.get("OTP_SETTLE_SEC", "60"))
+    if not secs:
+        return
+    print(f"  [{label}] settle {secs}s (让本次验证码先到)...", flush=True)
+    time.sleep(secs)
+    refreshed = False
+    try:
+        sc = mail_scope(mail_page)
+        if sc:
+            sc.evaluate("() => document.location.reload()")
+            refreshed = True
+    except Exception:
+        pass
+    if not refreshed:
+        try:
+            mail_page.reload(wait_until="domcontentloaded", timeout=60000)
+            refreshed = True
+        except Exception as e:
+            print(f"  [{label}] inbox refresh err: {str(e)[:60]}", flush=True)
+    try:
+        mail_page.wait_for_timeout(3000)
+    except Exception:
+        pass
+    print(f"  [{label}] refreshed={refreshed}; settle another {secs}s...", flush=True)
+    time.sleep(secs)
+
+
+def mailcom_get_otp_shadowdom(mail_page, max_wait=None):
+    """穿透 Shadow DOM 取 mail.com 验证码 —— 移植自 chatgpt-litellm-oauth.py 的 get_otp。
+
+    与本文件旧实现的区别(旧实现是 8 个号取码失败的直接原因):
+      列表行 : mf.locator("[class*='mail-item']").text_content()  ← 穿透 Shadow DOM
+               (旧: 遍历 frames 取 document.body.innerText → 恒为空)
+      邮件正文: frame name 含 'detail-body' 的 iframe 的 outerHTML
+               (旧: 跨所有 frame 扫 innerText → 既取不到、又会把广告的 6 位数字误当码)
+    """
+    if max_wait is None:
+        max_wait = OTP_AUTO_MAX
+    CODE_SUBJ = re.compile(r"code|verification|登录代码|临时|temporary|验证码", re.I)
+    # 只排除**确定没有验证码**的 sign-in 提醒。别往这里加"套餐/续订/账单":
+    # 那些主题的邮件里也是验证码, 加了等于把真码筛掉。
+    ALERT_SUBJ = re.compile(r"new sign-?in|new login|新登录|新的登录|sign-?in to your|security", re.I)
+
+    def find_body_frame():
+        return next((f for f in mail_page.frames
+                     if "detail-body" in (f.name or "") or "detail-body" in (f.url or "")), None)
+
+    def extract_otp_from_body():
+        bf = find_body_frame()
+        if not bf:
+            return None
+        try:
+            html = bf.evaluate("() => document.documentElement.outerHTML") or ""
+        except Exception:
+            return None
+        for m in re.finditer(r"\b(\d{6})\b", html):
+            ctx = html[max(0, m.start() - 200): m.end() + 200]
+            if re.search(r"code|verify|verification|login|openai|chatgpt", ctx, re.I):
+                return m.group(1)
+        m = re.search(r"\b(\d{6})\b", html)
+        return m.group(1) if m else None
+
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        mf = mail_scope(mail_page, dump=(time.time() > deadline - max_wait + 1))
+        if not mf:
+            print("  mail list scope not found (无任何 scope 数得到 mail-item), retry 5s", flush=True)
+            time.sleep(5)
+            continue
+        try:
+            rows = mf.locator("[class*='mail-item']")
+            cnt = rows.count()
+        except Exception as e:
+            print(f"  rows count err: {str(e)[:60]}", flush=True)
+            cnt = 0
+        texts = []
+        for i in range(min(cnt, 15)):
+            try:
+                texts.append((rows.nth(i).text_content(timeout=1500) or "").strip())
+            except Exception:
+                texts.append("")
+        order = [i for i, t in enumerate(texts)
+                 if re.search(r"openai|chatgpt|noreply", t, re.I)
+                 and CODE_SUBJ.search(t) and not ALERT_SUBJ.search(t)]
+        order += [i for i, t in enumerate(texts)
+                  if re.search(r"openai|chatgpt|noreply", t, re.I)
+                  and i not in order and not ALERT_SUBJ.search(t)]
+        for i in order:
+            print(f"  candidate row[{i}]: {texts[i][:100]!r}", flush=True)
+            row_el = rows.nth(i)
+            try:
+                row_el.scroll_into_view_if_needed(timeout=3000)
+            except Exception:
+                pass
+            opened = False
+            for name, act in [
+                ("dblclick", lambda: row_el.dblclick(timeout=4000)),
+                ("subj-link-click", lambda: row_el.locator(":scope a, :scope [role='link'], :scope span").first.click(timeout=3000)),
+                ("evaluate-dispatch", lambda: row_el.evaluate(
+                    "el => { el.dispatchEvent(new MouseEvent('dblclick', {bubbles:true, cancelable:true, view:window})); }")),
+            ]:
+                try:
+                    act()
+                    time.sleep(3.5)
+                    if find_body_frame():
+                        print(f"  ✓ {name} opened body frame", flush=True)
+                        opened = True
+                        break
+                except Exception as e:
+                    print(f"  {name} err: {str(e)[:60]}", flush=True)
+            if not opened:
+                continue
+            for _ in range(10):
+                if find_body_frame():
+                    break
+                time.sleep(1)
+            code = extract_otp_from_body()
+            if code:
+                print(f"  OTP via shadow-dom reader: {code}", flush=True)
+                return code
+            # 点开了但正文没码(账单/提醒类) → 试下一个候选, **别 break**:
+            # break 会让外层重试又从头挑到同一封 → 死循环。
+            print(f"  row[{i}] opened but no OTP in body — try next candidate", flush=True)
+        print(f"  OTP not yet (rows={cnt}), retry in 5s...", flush=True)
+        time.sleep(5)
+        try:
+            mf.evaluate("() => document.location.reload()")
+        except Exception:
+            pass
+        mail_page.wait_for_timeout(3000)
+    return None
+
+
 def find_mail_frame(page):
-    """Return mail.com inbox iframe (name=mail), polling up to ~25s."""
+    """Return mail.com inbox iframe (name=mail), polling up to ~25s.
+
+    新版 mail.com 已没有 name='mail' 这个 frame(2026-08-07 实证), 找不到时回落到
+    mail_scope() 按"哪个 scope 数得到 mail-item"来定位, 否则这条兜底路径必然空转。
+    """
     deadline = time.time() + 25
     while time.time() < deadline:
         for fr in page.frames:
             if fr.name == "mail":
                 return fr
+        sc = mail_scope(page)
+        if sc:
+            return sc
         time.sleep(2)
     return None
 
@@ -592,13 +759,23 @@ def login_chatgpt(ctx, page):
         elif OTP_AUTO_MAX > 0:
             try:
                 mp = mailcom_login(ctx)
-                # robust path first (open newest code email + read reading pane);
-                # fall back to legacy get_otp list-item scan if that misses.
-                otp = mailcom_open_and_read_otp(mp)
+                # ① settle: 等→**刷新**→再等。本次的码是打开收件箱之后才到的,
+                #    不刷新只看得到旧列表。
+                settle_inbox(mp, "otp")
+                # ② 穿透 Shadow DOM 的取码器(移植自 oauth.py, 同期在同样这些邮箱上
+                #    取码成功)。mail.com 已把列表/正文搬进 Shadow DOM, innerText 恒空,
+                #    所以它必须排在旧的 innerText 系实现**前面**。
+                otp = mailcom_get_otp_shadowdom(mp)
                 if otp:
-                    print("  OTP via open-and-read reading pane", flush=True)
+                    print("  OTP via shadow-dom reader", flush=True)
                 else:
-                    otp = get_otp(mp)
+                    # ③ 旧路径仅作兜底(innerText 系, 对当前 mail.com 基本无效,
+                    #    留着是因为对老版页面/其他 webmail 仍可能命中)。
+                    otp = mailcom_open_and_read_otp(mp)
+                    if otp:
+                        print("  OTP via open-and-read reading pane (legacy)", flush=True)
+                    else:
+                        otp = get_otp(mp)
                 try:
                     mp.close()
                 except Exception:

@@ -124,7 +124,30 @@ from litellm.integrations.custom_logger import CustomLogger
 
 _log = logging.getLogger("deepseek_responses_adapt")
 
-_TOOL_CALL_TYPES = ("function_call", "custom_tool_call")
+# 「一条工具调用」的全部类型 —— 并行块判定全靠它，漏一种就判瞎。
+# 2026-08-05：原来只认前两种，对照 sub2api（Wei-Shaw/sub2api，
+# backend/internal/service/openai_codex_transform.go 的
+# isCodexToolCallInputType）补齐到 6 种。Codex/Cursor 真实会发
+# local_shell_call / mcp_tool_call —— 这些落在并行块里时，旧判据认不出是
+# tool call，于是把后面的调用当成新一轮、在中间补 reasoning，劈开并行块。
+_TOOL_CALL_TYPES = (
+    "function_call",
+    "custom_tool_call",
+    "tool_call",
+    "local_shell_call",
+    "tool_search_call",
+    "mcp_tool_call",
+)
+
+# 对应的 output 类型，配对时同样不能漏。
+_TOOL_OUTPUT_TYPES = (
+    "function_call_output",
+    "custom_tool_call_output",
+    "mcp_tool_call_output",
+    "tool_search_output",
+    "local_shell_call_output",
+)
+
 _APPLY_PATCH_CANON = "apply_patch"
 _PLACEHOLDER = "(上一轮推理在跨模型兜底时不可用)"
 _RESPONSE_CALL_TYPES = {"responses", "aresponses", "_aresponses_websocket"}
@@ -417,10 +440,105 @@ def _adapt_input(items: Any, counts: dict[str, int]) -> Any:
     return out
 
 
+def _is_additional_tools_item(item: Any) -> bool:
+    """Codex "responses lite" 的工具声明项。
+
+    形状（实测 2026-08-06 生产抓包）::
+
+        {"type": "additional_tools", "role": "developer",
+         "tools": [{"type":"custom","name":"exec", ...},
+                   {"type":"function","name":"wait", ...}]}
+    """
+    return isinstance(item, dict) and item.get("type") == "additional_tools"
+
+
+def _flatten_tool_entries(tools: Any) -> list[Any]:
+    """展开工具列表；``namespace`` 类型把嵌套的 tools 摊平。
+
+    上游 PR #33228 的测试里出现 ``{"type":"namespace","name":"collaboration",
+    "tools":[...]}`` —— 不摊平就整包丢给 DeepSeek，它不认这个 type。
+    """
+    out: list[Any] = []
+    if not isinstance(tools, list):
+        return out
+    for t in tools:
+        if isinstance(t, dict) and t.get("type") == "namespace":
+            out.extend(_flatten_tool_entries(t.get("tools")))
+        else:
+            out.append(t)
+    return out
+
+
+def _hoist_additional_tools(data: dict[str, Any], counts: dict[str, int]) -> dict[str, Any]:
+    """把 ``input`` 里的 ``additional_tools`` 项提升为顶层 ``tools``。
+
+    2026-08-06 生产故障（**本条是真凶**）：用户本地 Codex 打
+    ``deepseek-v4-flash-responses``，输出里出现裸文本工具调用::
+
+        <｜｜DSML｜｜tool_calls>
+        <｜｜DSML｜｜invoke name="exec">
+
+    抓包判据 —— 同一时段 39 个 deepseek 请求，38 个正常、只有他那一条异常::
+
+        正常:  tools=['function/execute_shell_command', ...]  tool_choice=None
+        异常:  tools=[]  tool_choice='auto'  seq_in=['additional_tools', ...]
+               DSAT itemkeys=['role','tools','type'] n=3
+                    names=['custom/exec','function/wait','function/request_user_input']
+
+    即 **Codex 的 "responses lite" 线路把工具塞在 input 里，顶层 tools 是空的**。
+    LiteLLM 1.90.2 全库 grep ``additional_tools`` 为 0 处，原样透传；DeepSeek
+    也不认这个 input item，于是**收到零个工具**。
+
+    模型想调工具却无工具可用 -> 把调用**写成文本**。单变量实测（只改
+    ``tools`` 是否为空，其余全同，打 api.deepseek.com 3 次）::
+
+        tools=[]        -> 第 2 次直接吐出 <｜｜DSML｜｜invoke name="list_files">
+        tools=[真工具]  -> 5/5 干净，全部结构化 function_call
+
+    这同时解释了「模型编造不存在的工具名」（``list_files`` / ``exec_command``
+    每次都不一样）—— 没有工具声明可依据，只能瞎编，不是历史污染。
+
+    做法与上游 PR #33228（``bedrock_mantle`` 侧同一问题）一致：摘出 items ->
+    工具提到顶层 -> 从 input 删掉这些项。上游只在 bedrock_mantle 做了，
+    **openai provider（deepseek 走这条）没有**，所以升级 LiteLLM 也修不了。
+    """
+    items = data.get("input")
+    if not isinstance(items, list):
+        return data
+    at_items = [i for i in items if _is_additional_tools_item(i)]
+    if not at_items:
+        return data
+
+    hoisted: list[Any] = []
+    for it in at_items:
+        hoisted.extend(_flatten_tool_entries(it.get("tools")))
+    if not hoisted:
+        # 空的 additional_tools 项照样要删 —— DeepSeek 不认这个 item type
+        counts["additional_tools_empty_dropped"] = (
+            counts.get("additional_tools_empty_dropped", 0) + len(at_items))
+        data = dict(data)
+        data["input"] = [i for i in items if not _is_additional_tools_item(i)]
+        return data
+
+    out = dict(data)
+    out["input"] = [i for i in items if not _is_additional_tools_item(i)]
+    existing = out.get("tools")
+    existing = list(existing) if isinstance(existing, list) else []
+    # 顶层已有同名工具时不重复添加（Codex 两种形态混发的兜底）
+    seen = {t.get("name") for t in existing if isinstance(t, dict)}
+    added = [t for t in hoisted
+             if not (isinstance(t, dict) and t.get("name") in seen)]
+    out["tools"] = existing + added
+    counts["additional_tools_hoisted"] = counts.get("additional_tools_hoisted", 0) + len(added)
+    return out
+
+
 def _adapt(data: dict[str, Any], source: str) -> dict[str, Any]:
     if not _is_deepseek(data.get("model")):
         return data
     counts: dict[str, int] = {}
+    # 必须最先做：先把 additional_tools 提上来，后面的 tools 改写才看得到它们
+    data = _hoist_additional_tools(data, counts)
     out = dict(data)
     tools = _adapt_tools(out.get("tools"), counts)
     if tools is not out.get("tools"):

@@ -55,10 +55,28 @@ _DESKTOP_RE = re.compile(
 # 而其它 546 把 cursor key 的 gpt 请求经全局 model_group_alias 之后正好都变成
 # `chatgpt-gpt-*` —— 等于把全员的 gpt 流量都扳去了 zerokey。
 # 所以：只对白名单里的 key 生效，其余一律原样放行。
+# 两种写法，命中任一即生效：
+#   UA_ROUTE_KEY_ALIASES  = 精确名单，逗号分隔（灰度单把 key 用）
+#   UA_ROUTE_KEY_PREFIXES = 前缀名单，逗号分隔（如 "cursor-" 覆盖全部 cursor key，
+#                           **包括以后新建的**，不用每次改名单）
+# 两个都为空 = 本模块完全不生效（这就是一键回退的落点）。
+# 默认两个都空 = **不配置就完全不生效**（fail-safe）。
+# 第一版把默认值写成某把 key 的名字，导致"删掉环境变量"反而回到单 key 生效，
+# 一键回退不干净。范围一律由部署上的环境变量显式声明。
 _ALLOWED_KEY_ALIASES = {
-    a.strip() for a in os.environ.get(
-        "UA_ROUTE_KEY_ALIASES", "cursor-liuguoxian02-7w7g").split(",") if a.strip()
+    a.strip() for a in os.environ.get("UA_ROUTE_KEY_ALIASES", "").split(",") if a.strip()
 }
+_ALLOWED_KEY_PREFIXES = tuple(
+    p.strip() for p in os.environ.get("UA_ROUTE_KEY_PREFIXES", "").split(",") if p.strip()
+)
+
+
+def key_in_scope(alias: str) -> bool:
+    if not alias:
+        return False
+    if alias in _ALLOWED_KEY_ALIASES:
+        return True
+    return bool(_ALLOWED_KEY_PREFIXES) and alias.startswith(_ALLOWED_KEY_PREFIXES)
 
 # alias 之后可能出现的名字 -> 两个真池子。
 # key 写全两种形态（`gpt-5.6-x` 和 `chatgpt-gpt-5.6-x`），因为 per-key alias 可能
@@ -131,7 +149,7 @@ def pick_pool(model: Any, ua: str) -> str | None:
 def route(data: dict[str, Any], source: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         return data
-    if _key_alias(data) not in _ALLOWED_KEY_ALIASES:
+    if not key_in_scope(_key_alias(data)):
         return data
     ua = _user_agent(data)
     target = pick_pool(data.get("model"), ua)
@@ -154,5 +172,5 @@ class CodexUaPoolRoute(CustomLogger):
 
 
 codex_ua_pool_route = CodexUaPoolRoute()
-_log.warning("codex_ua_pool_route: loaded, gated on key aliases=%s",
-             sorted(_ALLOWED_KEY_ALIASES))
+_log.warning("codex_ua_pool_route: loaded, aliases=%s prefixes=%s (both empty = inert)",
+             sorted(_ALLOWED_KEY_ALIASES), list(_ALLOWED_KEY_PREFIXES))

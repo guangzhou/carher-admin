@@ -50,6 +50,8 @@ def _load():
     return m
 
 
+# 默认是 inert（不配置不生效），测路由逻辑前先把范围打开
+os.environ.setdefault("UA_ROUTE_KEY_ALIASES", "cursor-liuguoxian02-7w7g")
 M = _load()
 
 
@@ -163,3 +165,61 @@ class RotationImmunity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DefaultIsInert(unittest.TestCase):
+    """不配置环境变量时必须完全不生效 —— 这是一键回退能退干净的前提。
+
+    第一版默认值写的是某把 key 的名字，导致 `off`（删环境变量）反而回到
+    单 key 生效，退不干净。
+    """
+
+    def test_no_env_means_no_routing(self):
+        os.environ.pop("UA_ROUTE_KEY_ALIASES", None)
+        os.environ.pop("UA_ROUTE_KEY_PREFIXES", None)
+        m = _load()
+        try:
+            self.assertFalse(m.key_in_scope("cursor-liuguoxian02-7w7g"))
+            d = {"model": "gpt-5.6-sol", "metadata": {
+                "user_agent": DESKTOP, "user_api_key_alias": "cursor-liuguoxian02-7w7g"}}
+            self.assertEqual(m.route(d, "t")["model"], "gpt-5.6-sol")
+        finally:
+            os.environ["UA_ROUTE_KEY_ALIASES"] = "cursor-liuguoxian02-7w7g"
+
+
+class ScopeSwitch(unittest.TestCase):
+    """门控范围：单 key 灰度 / 全 cursor / 完全关闭，三档都要能切。"""
+
+    def _reload(self, aliases, prefixes):
+        os.environ["UA_ROUTE_KEY_ALIASES"] = aliases
+        os.environ["UA_ROUTE_KEY_PREFIXES"] = prefixes
+        return _load()
+
+    def tearDown(self):
+        os.environ.pop("UA_ROUTE_KEY_ALIASES", None)
+        os.environ.pop("UA_ROUTE_KEY_PREFIXES", None)
+
+    def test_prefix_covers_all_cursor_keys_including_future_ones(self):
+        m = self._reload("", "cursor-")
+        for alias in ("cursor-liuguoxian02-7w7g", "cursor-zhouqifeng-d255",
+                      "cursor-brand-new-key-9999"):
+            self.assertTrue(m.key_in_scope(alias), alias)
+
+    def test_prefix_does_not_leak_to_other_key_families(self):
+        m = self._reload("", "cursor-")
+        for alias in ("claude-code-liuguoxian02-7w7g", "carher-h75", "", "x-cursor-fake"):
+            self.assertFalse(m.key_in_scope(alias), repr(alias))
+
+    def test_both_empty_means_inert(self):
+        """一键回退的落点：两个都清空 = 模块完全不动任何请求。"""
+        m = self._reload("", "")
+        self.assertFalse(m.key_in_scope("cursor-liuguoxian02-7w7g"))
+        d = {"model": "gpt-5.6-sol",
+             "metadata": {"user_agent": DESKTOP, "user_api_key_alias": "cursor-x"}}
+        self.assertEqual(m.route(d, "t")["model"], "gpt-5.6-sol")
+
+    def test_exact_and_prefix_can_coexist(self):
+        m = self._reload("carher-special", "cursor-")
+        self.assertTrue(m.key_in_scope("carher-special"))
+        self.assertTrue(m.key_in_scope("cursor-anything"))
+        self.assertFalse(m.key_in_scope("carher-other"))

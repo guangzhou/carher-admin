@@ -176,11 +176,78 @@ function buildResponsesRoute(chatgptApi) {
       }
     }
 
+    // ── Web-tools progressive streaming ──────────────────────────────
+    // Previously a web-tools turn buffered EVERYTHING and emitted only at
+    // finish(): measured 26.5s of blank screen, then the whole answer in 1.9s.
+    // The reason for buffering is real (the text may be a JSON tool envelope and
+    // the item type is unknown until parsed), but it is decidable early: the
+    // envelope instructions demand "ONLY this block and nothing before or after
+    // it", so a reply that begins with prose is an answer, not a call.
+    //
+    // Two-stage safety, because extractToolCalls also supports `leadingText`
+    // (an envelope AFTER some prose):
+    //   1. buffer DECIDE_AT chars, then commit to streaming only if the text
+    //      cannot be an envelope start;
+    //   2. keep watching: the instant envelope markers appear, FREEZE (emit no
+    //      more deltas) and let finish() decide. Anything already streamed is
+    //      exactly the leadingText, so no output is lost or duplicated.
+    const DECIDE_AT = 80
+    const HOLD_TAIL = 24
+    let wtDecided = false     // have we committed to streaming?
+    let wtFrozen = false      // envelope spotted -> stop streaming
+    let wtSent = 0            // chars of `full` already streamed
+    let wtOpened = false      // message shell emitted?
+
+    const looksLikeEnvelope = (txt) => {
+      const h = txt.replace(/^[\s\uFEFF]+/, '')
+      if (h.startsWith('```') || h.startsWith('{') || h.startsWith('[')) return true
+      return txt.indexOf('tool_calls') !== -1
+    }
+
+    const wtOpen = () => {
+      if (wtOpened) return
+      wtOpened = true
+      const msgShell = {
+        type: 'message', id: msgId, role: 'assistant', content: [], status: 'in_progress',
+      }
+      res.write(`event: response.output_item.added\ndata: ${JSON.stringify({
+        type: 'response.output_item.added', item: msgShell, output_index: 0,
+      })}\n\n`)
+      res.write(`event: response.content_part.added\ndata: ${JSON.stringify({
+        type: 'response.content_part.added', item_id: msgId,
+        output_index: 0, content_index: 0, part: { type: 'output_text', text: '' },
+      })}\n\n`)
+    }
+
+    const wtPump = (isFinal) => {
+      if (!stream || wtFrozen) return
+      if (!wtDecided) {
+        if (!isFinal && full.length < DECIDE_AT) return
+        if (looksLikeEnvelope(full)) { wtFrozen = true; return }
+        wtDecided = true
+      } else if (looksLikeEnvelope(full.slice(wtSent))) {
+        // Envelope started mid-answer: freeze; finish() emits the calls and
+        // treats what we streamed as leadingText.
+        wtFrozen = true
+        return
+      }
+      const upto = isFinal ? full.length : Math.max(0, full.length - HOLD_TAIL)
+      if (upto <= wtSent) return
+      const chunk = full.slice(wtSent, upto)
+      wtSent = upto
+      wtOpen()
+      res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({
+        type: 'response.output_text.delta', item_id: msgId,
+        output_index: 0, content_index: 0, delta: chunk,
+      })}\n\n`)
+    }
+
     const onText = (t) => {
       if (!t) return
       full += t
       started = true
-      if (!stream || useWebTools) return
+      if (useWebTools) { wtPump(false); return }
+      if (!stream) return
       res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({
         type: 'response.output_text.delta', item_id: msgId,
         output_index: 0, content_index: 0, delta: t,
@@ -240,14 +307,14 @@ function buildResponsesRoute(chatgptApi) {
       if (shellTool && harvestedCmd) {
         const tc = execToToolCall(shellTool, harvestedCmd)
         const parsed = { calls: [{ name: tc.name, arguments: tc.arguments }], leadingText: '' }
-        return finishWebTools(res, { stream, respId, msgId, created, mdl, usage: mkUsage(JSON.stringify(tc.arguments)), full: '', parsed })
+        return finishWebTools(res, { stream, respId, msgId, created, mdl, usage: mkUsage(JSON.stringify(tc.arguments)), full: '', parsed, wt: { sent: wtSent, opened: wtOpened } })
       }
 
       // ── Web-tools branch: parse the buffered text into function_call items ──
       if (useWebTools) {
         const parsed = extractToolCalls(full, _validNames)
         if (parsed && parsed.calls.length) {
-          return finishWebTools(res, { stream, respId, msgId, created, mdl, usage, full, parsed })
+          return finishWebTools(res, { stream, respId, msgId, created, mdl, usage, full, parsed, wt: { sent: wtSent, opened: wtOpened } })
         }
         // No envelope on the first pass → one escalated retry before falling
         // back to plain text (fixes accounts whose harness refuses softly).
@@ -258,10 +325,11 @@ function buildResponsesRoute(chatgptApi) {
             finishWebTools(res, {
               stream, respId, msgId, created, mdl, usage,
               full: full || text2 || '', parsed: p2 && p2.calls.length ? p2 : null,
+              wt: { sent: wtSent, opened: wtOpened },
             })
           })
           .catch(() =>
-            finishWebTools(res, { stream, respId, msgId, created, mdl, usage, full: full || '', parsed: null }),
+            finishWebTools(res, { stream, respId, msgId, created, mdl, usage, full: full || '', parsed: null, wt: { sent: wtSent, opened: wtOpened } }),
           )
         return
       }
@@ -352,7 +420,9 @@ function buildResponsesRoute(chatgptApi) {
   // ── Web tool-injection finish: emit Responses function_call items (or a
   //    plain message when the model chose to answer directly). ──
   function finishWebTools(res, ctx) {
-    const { stream, respId, msgId, created, mdl, usage, full, parsed } = ctx
+    const { stream, respId, msgId, created, mdl, usage, full, parsed, wt } = ctx
+    const wtSentLen = (wt && wt.sent) || 0
+    const wtWasOpen = !!(wt && wt.opened)
     const output = []
 
     if (parsed && parsed.calls.length) {
@@ -380,8 +450,39 @@ function buildResponsesRoute(chatgptApi) {
       })
     }
 
+    // Reconcile with whatever was already streamed live. Without this the
+    // client would receive the answer twice: once as deltas, once as a fresh
+    // message item here.
+    if (stream && wtWasOpen) {
+      const first = output[0]
+      if (first && first.type === 'message') {
+        const whole = first.content[0].text || ''
+        const rest = whole.length > wtSentLen ? whole.slice(wtSentLen) : ''
+        if (rest) {
+          // flush the held-back tail as one final delta
+          res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({
+            type: 'response.output_text.delta', item_id: msgId,
+            output_index: 0, content_index: 0, delta: rest,
+          })}\n\n`)
+        }
+        res.write(`event: response.output_text.done\ndata: ${JSON.stringify({
+          type: 'response.output_text.done', item_id: msgId,
+          output_index: 0, content_index: 0, text: whole,
+        })}\n\n`)
+        res.write(`event: response.content_part.done\ndata: ${JSON.stringify({
+          type: 'response.content_part.done', item_id: msgId, output_index: 0,
+          content_index: 0, part: { type: 'output_text', text: whole },
+        })}\n\n`)
+        res.write(`event: response.output_item.done\ndata: ${JSON.stringify({
+          type: 'response.output_item.done', output_index: 0,
+          item: { ...first, content: [{ type: 'output_text', text: whole }] },
+        })}\n\n`)
+        output.shift()          // already delivered; don't re-emit below
+      }
+    }
+
     if (stream) {
-      let idx = 0
+      let idx = wtWasOpen ? 1 : 0
       for (const item of output) {
         res.write(`event: response.output_item.added\ndata: ${JSON.stringify({
           type: 'response.output_item.added', item, output_index: idx,

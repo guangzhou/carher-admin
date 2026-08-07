@@ -215,6 +215,9 @@ fi
 # ────────────────────────────────────────────────────────────
 if should_run register; then
   log "STEP register"
+  # base_model 必填: entry 的 model_name 是别名 (chatgpt-gpt-5.5), 不在 litellm 内置价表里。
+  # 少了它, /v1/messages (call_type=anthropic_messages) 这条路径会把价表键解析成别名 ->
+  # 命中空壳条目 (cost=0) -> 流量照跑但 spend 记 0。$SHORT 正好等于价表键。
   for SHORT in gpt-5.5 gpt-5.4 gpt-5.3-codex; do
     MID="chatgpt-acct-$ACCT-$SHORT"
     REAL=$(upstream_for "$SHORT")
@@ -229,7 +232,7 @@ if should_run register; then
       -d "{
         \"model_name\":\"$MNAME\",
         \"litellm_params\":{\"model\":\"$REAL\",\"api_base\":\"$SVC_DNS\",\"api_key\":\"$POOL_KEY\"},
-        \"model_info\":{\"id\":\"$MID\",\"mode\":\"responses\"}
+        \"model_info\":{\"id\":\"$MID\",\"mode\":\"responses\",\"base_model\":\"$SHORT\"}
       }")
     if [ "$HTTP" != "200" ]; then
       echo "FATAL: /model/new failed HTTP=$HTTP" >&2

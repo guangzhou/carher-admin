@@ -143,7 +143,13 @@ echo "==[5/7]== 注册到 198 prod LiteLLM (admin API)"
 MK=$(jms ssh AIYJY-litellm "kubectl get secret litellm-secrets -n litellm-product -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d")
 for model in chatgpt-gpt-5.5 chatgpt-gpt-5.4 chatgpt-gpt-5.3-codex chatgpt-gpt-5.3-codex-spark; do
   MID="chatgpt-${ACCT}-${model#chatgpt-}"
-  echo "  注册 model_name=$model id=$MID"
+  # base_model 必填: model_name 是别名, 不在内置价表里。少了它 /v1/messages 路径会按别名
+  # 查价 -> 空壳条目 cost=0 -> 只记 token 不记钱。codex-spark 价表无独立条目, 归到 gpt-5.3-codex。
+  case "$model" in
+    chatgpt-gpt-5.3-codex-spark) BASE_MODEL="gpt-5.3-codex" ;;
+    *)                           BASE_MODEL="${model#chatgpt-}" ;;
+  esac
+  echo "  注册 model_name=$model id=$MID base_model=$BASE_MODEL"
   jms ssh AIYJY-litellm "curl -fsS -X POST http://localhost:30402/model/new \
     -H 'Authorization: Bearer $MK' -H 'Content-Type: application/json' \
     -d '{
@@ -153,7 +159,7 @@ for model in chatgpt-gpt-5.5 chatgpt-gpt-5.4 chatgpt-gpt-5.3-codex chatgpt-gpt-5
         \"api_base\": \"http://10.68.13.188:$PORT\",
         \"api_key\": \"$MASTER_KEY\"
       },
-      \"model_info\": {\"id\":\"$MID\",\"mode\":\"responses\"}
+      \"model_info\": {\"id\":\"$MID\",\"mode\":\"responses\",\"base_model\":\"$BASE_MODEL\"}
     }'" >/dev/null
 done
 echo "  ✅ 4 个 deployment 已注册"

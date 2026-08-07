@@ -80,7 +80,9 @@ Codex CLI 打 ``gpt-5.6-sol``（该 key 的 per-key alias 指向 ``zerokey-pool-
 不碰，避免双重包装；两边并存时也是幂等的（先跑的那个把 message 换成
 compaction，后跑的找不到 message，自然 no-op）。
 
-部署：litellm-callbacks ConfigMap + Deployment 里加一条 subPath volumeMount
+部署（脚本 ``scripts/litellm-callback-install.py``，skill
+``codex-compaction-v2-nonnative``）：litellm-callbacks ConfigMap + Deployment
+里加一条 subPath volumeMount
 （**光加 CM key 不够**，litellm 按 ``/app/<module>.py`` 找文件，缺挂载会
 ``Could not find module file`` 导致 pod 起不来）+ ``litellm_settings.callbacks``
 里加一项，无需重建镜像。

@@ -300,8 +300,14 @@ function prepareCodexInput(items) {
     (i) => i && i.type !== 'additional_tools'
       && !((i.role === 'developer' || i.role === 'system') && isEnvironmentPrompt(textOf(i))),
   )
-  kept.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: handsBlock(cwd) }] })
-  return kept
+  // 回程：工具调用/结果 -> 文本，否则 flattenInput 会把它们拼成空的 "USER: "
+  const replayed = kept.map((i) => {
+    const r = replayItemToText(i)
+    if (!r) return i
+    return { type: 'message', role: r.role, content: [{ type: 'input_text', text: r.text }] }
+  })
+  replayed.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: handsBlock(cwd) }] })
+  return replayed
 }
 
 module.exports.prepareCodexInput = prepareCodexInput
@@ -336,3 +342,66 @@ const ESCALATE = [
 module.exports.needsEscalation = needsEscalation
 module.exports.ESCALATE = ESCALATE
 module.exports.REFUSAL_RE = REFUSAL_RE
+
+// ── 回程：把工具执行结果拼回 prompt ──────────────────────────────
+//
+// 2026-08-07 生产实测，这是"调用成功了却等于没调"的真凶：
+//
+//     15 [CALL] exec  -> tools.exec_command({cmd:"ls -la ..."})
+//     16 [OUT ] exit_code:0  output:"total 512 drwxr-xr-x 63 ..."   ← 真的执行了
+//     22 [assistant] hi，有什么需要我帮你处理的？                    ← 却答非所问
+//
+// 因为 Codex 把结果作为 `custom_tool_call_output` 项回传，而 zerokey 的
+// flattenInput 只认 `item.role` + `item.content`：这个 item **两样都没有**
+// （结果在 `output` 字段，且没有 role），于是被拼成一行空的 "USER: "。
+// 模型问了一句、什么都没收到，只能重问或胡答。
+//
+// 上游对应实现是 compiler.js:55-60（role:'tool' -> `BPI(name): <output>`）。
+
+function toolOutputText(item) {
+  const o = item && item.output
+  if (typeof o === 'string') return o
+  if (!Array.isArray(o)) return ''
+  return o.map((p) => (p && p.text) || '').join('\n')
+}
+
+/** exec 的返回体是一坨 JSON，把真正的 stdout 摘出来，别把 chunk_id 之类喂给模型。 */
+function distillExecOutput(text) {
+  const out = []
+  for (const line of String(text).split('\n')) {
+    const t = line.trim()
+    if (!t) continue
+    if (/^(Script completed|Wall time|Output:)/.test(t)) continue
+    if (t.startsWith('{') && t.includes('"output"')) {
+      try {
+        const j = JSON.parse(t)
+        if (typeof j.output === 'string') { out.push(j.output.trimEnd()) ; continue }
+      } catch (_) { /* 不是完整 JSON 就原样保留 */ }
+    }
+    out.push(line)
+  }
+  return out.join('\n').trim()
+}
+
+/**
+ * 把 custom_tool_call / custom_tool_call_output 两类 item 换成模型看得懂的文本。
+ * 其它 item 原样返回 null（调用方保留原项）。
+ */
+function replayItemToText(item) {
+  if (!item || typeof item !== 'object') return null
+  if (item.type === 'custom_tool_call') {
+    // 模型自己发起的那一步，回放成它当初写的块，保持"一问一答"的形状
+    const marks = String(item.input || '').match(/BPI\(([a-z_]+)\):/g) || []
+    const names = marks.map((m) => m.slice(4, -2))
+    return { role: 'assistant', text: names.length ? names.map((n) => `⟦${n}…⟧`).join(' ') : '⟦…⟧' }
+  }
+  if (item.type === 'custom_tool_call_output' || item.type === 'function_call_output') {
+    const body = distillExecOutput(toolOutputText(item))
+    return { role: 'user', text: body ? `BPI result:\n${body}` : 'BPI result: (无输出)' }
+  }
+  return null
+}
+
+module.exports.replayItemToText = replayItemToText
+module.exports.distillExecOutput = distillExecOutput
+module.exports.toolOutputText = toolOutputText

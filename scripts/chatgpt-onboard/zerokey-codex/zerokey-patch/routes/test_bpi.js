@@ -161,4 +161,44 @@ t4('content 是纯字符串时 textOf 不炸',()=>{
   assert.ok(P.isEnvironmentPrompt('<permissions instructions> x'))
 })
 console.log(`\n=== LiteLLM 形态 ${p4} passed, ${f4} failed ===`)
-process.exit(fail+f2+f3+f4?1:0)
+
+console.log('\n-- 回程（工具结果拼回 prompt）--')
+let p5=0,f5=0
+function t5(n,fn){try{fn();p5++;console.log('  ✅',n)}catch(e){f5++;console.log('  ❌',n,'\n     ',e.message)}}
+// 用户真实会话第 16 行的 output 原样
+const realOut={type:'custom_tool_call_output',call_id:'c1',output:[
+  {type:'input_text',text:'Script completed\nWall time 0.2 seconds\nOutput:\n'},
+  {type:'input_text',text:'BPI(ls):'},
+  {type:'input_text',text:'{"chunk_id":"ca0b05","wall_time_seconds":0.0000019,"exit_code":0,"original_token_count":1180,"output":"total 512\\ndrwxr-xr-x 63 Liuguoxian staff 2016 Aug 7 11:07 .\\ndrwxr-xr-x 21 Liuguoxian staff 672 .."}'}]}
+t5('工具结果能被提取成模型看得懂的文本（这就是之前丢掉的东西）',()=>{
+  const r=P.replayItemToText(realOut)
+  assert.equal(r.role,'user')
+  assert.ok(r.text.includes('total 512'),'真正的 stdout 必须出现: '+r.text.slice(0,80))
+  assert.ok(r.text.includes('drwxr-xr-x'),'目录内容必须出现')
+  assert.ok(!r.text.includes('chunk_id'),'chunk_id 这类噪声不该喂给模型')
+  assert.ok(!r.text.includes('Wall time'),'Wall time 也是噪声')
+})
+t5('调用项回放成块的形状',()=>{
+  const r=P.replayItemToText({type:'custom_tool_call',name:'exec',
+    input:'text("BPI(ls):"); text(await tools.exec_command({cmd:"ls"}));'})
+  assert.equal(r.role,'assistant'); assert.ok(r.text.includes('⟦ls'))
+})
+t5('普通 item 不动',()=>{
+  assert.equal(P.replayItemToText({type:'message',role:'user',content:[]}),null)
+})
+t5('端到端：带工具结果的 input 走完 prepareCodexInput 后结果还在',()=>{
+  const inp=[{type:'additional_tools',role:'developer',tools:[]},
+    {type:'message',role:'user',content:[{type:'input_text',text:'ls'}]},
+    {type:'custom_tool_call',name:'exec',input:'text("BPI(ls):");'},
+    realOut]
+  const out=P.prepareCodexInput(inp)
+  const flat=JSON.stringify(out)
+  assert.ok(flat.includes('total 512'),'回程内容丢了 —— 这正是线上那个 bug')
+  assert.ok(!out.some(i=>i.type==='custom_tool_call_output'),'原始 item 应已被替换')
+})
+t5('空输出不炸',()=>{
+  const r=P.replayItemToText({type:'custom_tool_call_output',output:[]})
+  assert.ok(r.text.includes('无输出'))
+})
+console.log(`\n=== 回程 ${p5} passed, ${f5} failed ===`)
+process.exit(fail+f2+f3+f4+f5?1:0)

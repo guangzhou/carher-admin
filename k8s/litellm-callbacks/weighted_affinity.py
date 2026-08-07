@@ -381,6 +381,32 @@ class WeightedAffinityRouter(CustomLogger):
             )
             return deployments
 
+        # ---- 让路：候选里有 tag_regex（按 User-Agent 分流的组）----
+        # 2026-08-07 实测：本 hook 在 router 里跑在 tag 路由**之前**
+        # （router.py:11150 async_callback_filter_deployments -> :11168
+        # get_deployments_for_tag）。它把候选钉成 1 台之后，tag 过滤只能在这 1 台
+        # 上做取舍，UA 分流直接失效：
+        #   * Desktop 用户被钉在 zk 台 -> 那台带 tags:["default"] -> 照样返回
+        #     -> 该走 acct 的流量落到了 zerokey（实测 8 发里 5 发）。
+        #   * 反过来非 Desktop 被钉在 acct 台 -> 既不匹配 regex 又没有 default
+        #     -> 候选清空 -> raise no_deployments_with_tag_routing。
+        # 亲和性的缓存键是 (group, user)，没有 UA 这一维，补上也救不了第一发。
+        # 所以这种组直接让路，由 tag 路由决定，本 hook 不参与。
+        # 对其他组完全无感：全库只有按 UA 分流的那个组带 tag_regex。
+        if any(
+            isinstance(d, dict)
+            and isinstance(d.get("litellm_params"), dict)
+            and d["litellm_params"].get("tag_regex")
+            for d in deployments
+        ):
+            verbose_router_logger.info(
+                "WeightedAffinityRouter: tag_regex present in candidates for model=%s "
+                "-> yield to tag routing, returning all %d deployments",
+                model,
+                len(deployments),
+            )
+            return deployments
+
         # scoping：model_map_key 必须整组稳定一致，否则放弃决策原样返回
         model_group = self._get_stable_model_map_key_from_deployments(deployments)
         if model_group is None:

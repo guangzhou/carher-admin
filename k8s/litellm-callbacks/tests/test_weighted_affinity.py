@@ -112,7 +112,30 @@ async def run():
     ok4 = isinstance(res, list) and len(res) == 3
     print(f"[T4 previous_response_id 让路] 返回台数={len(res)} (期望3=不收窄)  T4 {'PASS' if ok4 else 'FAIL'}")
 
-    print(f"\n=== 汇总: T1={'P' if ok1 else 'F'} T2={'P' if ok2 else 'F'} T3={'P' if ok3 else 'F'} T4={'P' if ok4 else 'F'} ===")
+    # ---- 测试5: 候选里有 tag_regex 时让路（按 UA 分流的组，本 hook 不参与）----
+    # 2026-08-07 实测：本 hook 跑在 tag 路由之前，钉成 1 台会让 UA 分流失效
+    # （Desktop 落 zerokey 8 发中 5 发），反向还会把候选清空触发
+    # no_deployments_with_tag_routing。故这种组必须整组让路。
+    dps = make_deployments()
+    dps[0]["litellm_params"]["tag_regex"] = ["^User-Agent: Codex Desktop/"]
+    res = await handler.async_filter_deployments(
+        model="wtest", healthy_deployments=dps,
+        messages=[{"role": "user", "content": "hi"}],
+        request_kwargs=kwargs_for("%064x" % 515151),
+    )
+    ok5 = isinstance(res, list) and len(res) == 3
+    print(f"[T5 tag_regex 让路] 返回台数={len(res)} (期望3=不收窄)  T5 {'PASS' if ok5 else 'FAIL'}")
+
+    # ---- 测试6: 没有 tag_regex 的组不受影响（仍然钉单台）----
+    res = await handler.async_filter_deployments(
+        model="wtest", healthy_deployments=make_deployments(),
+        messages=[{"role": "user", "content": "hi"}],
+        request_kwargs=kwargs_for("%064x" % 616161),
+    )
+    ok6 = isinstance(res, list) and len(res) == 1
+    print(f"[T6 无 tag_regex 照旧] 返回台数={len(res)} (期望1=收窄)  T6 {'PASS' if ok6 else 'FAIL'}")
+
+    print(f"\n=== 汇总: T1={'P' if ok1 else 'F'} T2={'P' if ok2 else 'F'} T3={'P' if ok3 else 'F'} T4={'P' if ok4 else 'F'} T5={'P' if ok5 else 'F'} T6={'P' if ok6 else 'F'} ===")
 
 
 asyncio.run(run())

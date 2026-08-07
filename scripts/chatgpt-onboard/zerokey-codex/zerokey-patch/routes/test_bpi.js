@@ -55,5 +55,49 @@ t('生成的 JS 语法合法',()=>{
   const r=B.compileToExec('⟦cmd¦run=echo "hi" && ls⟧\n⟦write¦path=/tmp/b¦content=x⟧')
   new Function('tools','text','return (async()=>{'+r.js+'})')  // 只做语法解析
 })
-console.log(`\n=== ${pass} passed, ${fail} failed ===`)
-process.exit(fail?1:0)
+console.log(`\n=== 编译器 ${pass} passed, ${fail} failed ===`)
+
+// ── 入站改造 ──
+const P=require('./bpi-codex.js')
+console.log('\n-- 入站改造 --')
+let p2=0,f2=0
+function t2(n,fn){try{fn();p2++;console.log('  ✅',n)}catch(e){f2++;console.log('  ❌',n,'\n     ',e.message)}}
+const codexInput=[
+  {type:'additional_tools',role:'developer',tools:[{type:'custom',name:'exec'}]},
+  {type:'message',role:'developer',content:[{type:'input_text',text:'<permissions instructions> sandbox_mode ...'}]},
+  {type:'message',role:'user',content:[{type:'input_text',text:'# AGENTS.md instructions for /Users/lgx/codes/carher-admin\n<INSTRUCTIONS>...'}]},
+  {type:'message',role:'user',content:[{type:'input_text',text:'ls'}]},
+]
+t2('剥掉 additional_tools 和 developer 消息',()=>{
+  const out=P.prepareCodexInput(codexInput)
+  assert.ok(!out.some(i=>i.type==='additional_tools'))
+  assert.ok(!out.some(i=>i.role==='developer'))
+})
+t2('AGENTS.md（user 角色）必须保留',()=>{
+  const out=P.prepareCodexInput(codexInput)
+  assert.ok(JSON.stringify(out).includes('AGENTS.md instructions'),'AGENTS.md 被误删')
+})
+t2('工作目录能从 AGENTS.md 抬头抽出来',()=>{
+  assert.equal(P.extractCwd(codexInput),'/Users/lgx/codes/carher-admin')
+})
+t2('末尾追加交手块，且带上 cwd',()=>{
+  const out=P.prepareCodexInput(codexInput)
+  const last=out[out.length-1].content[0].text
+  assert.ok(last.includes('[本轮可用的手]'))
+  assert.ok(last.includes('/Users/lgx/codes/carher-admin'))
+  assert.ok(last.includes('不要用内建的代码解释器'),'必须明确禁止伸自己的沙箱')
+})
+t2('非 Codex 载荷原样返回（Cursor 等零影响）',()=>{
+  const plain=[{type:'message',role:'user',content:[{type:'input_text',text:'hi'}]}]
+  assert.strictEqual(P.prepareCodexInput(plain),plain,'应返回同一个对象引用')
+})
+t2('没有 AGENTS.md 时不写路径，也不崩',()=>{
+  const noagents=[{type:'additional_tools',role:'developer',tools:[]},
+                  {type:'message',role:'user',content:[{type:'input_text',text:'hi'}]}]
+  const out=P.prepareCodexInput(noagents)
+  const last=out[out.length-1].content[0].text
+  assert.ok(last.includes('[本轮可用的手]'))
+  assert.ok(!last.includes('当前工作目录'))
+})
+console.log(`\n=== 入站 ${p2} passed, ${f2} failed ===`)
+process.exit(fail+f2?1:0)

@@ -16,8 +16,9 @@ const { codexRequest, hasTokens } = require('./codex-pool')
 // 硬 require 会让它直接起不来（今天已经在 litellm 回调上踩过同款）。
 // 找不到就退化成"永不编译"，行为与改动前完全一致。
 let compileToExec = () => ({ js: null, blocks: [], leftover: null })
+let prepareCodexInput = (items) => items
 try {
-  ;({ compileToExec } = require('./bpi-codex'))
+  ;({ compileToExec, prepareCodexInput } = require('./bpi-codex'))
 } catch (e) {
   console.warn('[bpi] bpi-codex.js not mounted, BPI compilation disabled:', e.message)
 }
@@ -94,7 +95,12 @@ function buildResponsesRoute(chatgptApi) {
     const useWebTools = _webToolDefs.length > 0 && !hasTokens()
 
     const model = resolveModel(req.body.model)
-    const basePrompt = flattenInput(input, instructions)
+    // Codex responses-lite 载荷：剥掉它写给真 codex 后端的 developer 指令，
+    // 末尾补一句"本轮你连着用户这台机器"。非 Codex 载荷原样返回。
+    // 实测（真实 82KB 载荷，n>=3）：原样 1/3 出工具、只交手 2/3、
+    // 去指令+交手 5/6 且零拒答。
+    const codexInput = prepareCodexInput(input)
+    const basePrompt = flattenInput(codexInput, instructions)
     let prompt = basePrompt
 
     // exec-harvest: shell-like caller tool → let the web model use its own

@@ -169,3 +169,74 @@ function compileToExec(text) {
 }
 
 module.exports = { compileToExec, extractBlocks, blockToJs, addFilePatch, updateFilePatch, OPEN, CLOSE, SEP }
+
+
+// ── 入站：把 Codex 形状的请求改造成网页模型能接住的样子 ──────────────
+//
+// 2026-08-07 用用户真实 82KB 载荷做的 A/B（每组 n>=3，判据=有没有出
+// custom_tool_call）：
+//
+//     A 原样                                  1/3   拒答 2/3
+//     B 只在末尾交手                          2/3   拒答 1/3
+//     C 去掉 Codex 的 developer 指令 + 交手   5/6   拒答 0      ← 采用
+//     D 只去指令、不交手                      1/3   拒答 2/3
+//
+// 两件事缺一不可：
+//  1. **剥掉 developer 消息**。那 22KB 是 Codex 写给**真 codex 后端**的运行环境
+//     说明（sandbox_mode / 审批策略 / 它自己的工具），喂给网页会话等于告诉模型
+//     "你在另一个环境里"，它就会去伸自己的代码解释器，然后如实报告
+//     「运行环境中该路径不可用，命令未执行成功」。
+//     AGENTS.md 是 **user** 角色，不受影响，仍然保留。
+//  2. **本轮明确交手**。账号级契约给的是通用词表，但没说"你现在连着哪台机器、
+//     工作目录在哪"。补一句就够。
+
+const HANDS_HEAD = '[本轮可用的手]'
+
+function extractCwd(items) {
+  // AGENTS.md 那条 user 消息的抬头形如
+  // "# AGENTS.md instructions for /Users/xxx/codes/repo"
+  for (const it of items || []) {
+    if (!it || it.type === 'additional_tools') continue
+    const parts = it.content
+    if (!Array.isArray(parts)) continue
+    for (const p of parts) {
+      const t = (p && p.text) || ''
+      const m = t.match(/AGENTS\.md instructions for (\/[^\s\n]+)/)
+      if (m) return m[1]
+    }
+  }
+  return null
+}
+
+function handsBlock(cwd) {
+  return [
+    HANDS_HEAD,
+    '你现在连着用户那台机器。下面这些块由一个外部执行器真实执行 —— 不是示例，',
+    '也不是你自己的沙箱；不要用内建的代码解释器去试，那里没有用户的文件。',
+    '⟦ls¦path={abs}⟧ ⟦read¦path={abs}⟧ ⟦write¦path={abs}¦content={str}⟧ ⟦cmd¦run={shell}⟧',
+    cwd ? `当前工作目录 ${cwd}。` : '',
+    '要动手时只输出块本身，不要解释，不要声称自己没有权限。',
+  ].filter(Boolean).join('\n')
+}
+
+/** 是不是 Codex 的 responses-lite 载荷（工具塞在 input 里）。 */
+function isCodexLite(items) {
+  return Array.isArray(items) && items.some((i) => i && i.type === 'additional_tools')
+}
+
+/**
+ * 返回改造后的 input；非 Codex 载荷原样返回（其它客户端零影响）。
+ */
+function prepareCodexInput(items) {
+  if (!isCodexLite(items)) return items
+  const cwd = extractCwd(items)
+  const kept = items.filter(
+    (i) => i && i.type !== 'additional_tools' && !(i.type === 'message' && i.role === 'developer'),
+  )
+  kept.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: handsBlock(cwd) }] })
+  return kept
+}
+
+module.exports.prepareCodexInput = prepareCodexInput
+module.exports.isCodexLite = isCodexLite
+module.exports.extractCwd = extractCwd

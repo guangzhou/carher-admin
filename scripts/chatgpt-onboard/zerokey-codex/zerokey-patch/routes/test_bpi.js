@@ -201,4 +201,23 @@ t5('空输出不炸',()=>{
   assert.ok(r.text.includes('无输出'))
 })
 console.log(`\n=== 回程 ${p5} passed, ${f5} failed ===`)
-process.exit(fail+f2+f3+f4+f5?1:0)
+
+console.log('\n-- 拿到结果后要肯讲 --')
+let p6=0,f6=0
+function t6(n,fn){try{fn();p6++;console.log('  ✅',n)}catch(e){f6++;console.log('  ❌',n,'\n     ',e.message)}}
+t6('交手提示词里"只输出块"必须带条件，不能是无条件的',()=>{
+  const h=P.handsBlock('/tmp/x')
+  assert.ok(h.includes('还需要动手'),'要显式区分"还没动手"')
+  assert.ok(h.includes(P.RESULT_HEAD),'要显式提到"已有结果"的情形')
+  assert.ok(h.includes('不要再输出块'),'有结果时要禁止继续吐块')
+  assert.ok(/ll|ls/.test(h),'要点明 ll/ls 这类简写是让它执行')
+})
+t6('回程结果带抬头和"据此回答"的指示',()=>{
+  const r=P.replayItemToText({type:'custom_tool_call_output',output:[
+    {type:'input_text',text:'{"exit_code":0,"output":"a.txt\\nb.txt"}'}]})
+  assert.ok(r.text.startsWith(P.RESULT_HEAD),'抬头要和提示词里那个常量一致')
+  assert.ok(r.text.includes('a.txt'))
+  assert.ok(r.text.includes('直接据此回答'),'要明确要求它讲出来')
+})
+console.log(`\n=== 讲结果 ${p6} passed, ${f6} failed ===`)
+process.exit(fail+f2+f3+f4+f5+f6?1:0)

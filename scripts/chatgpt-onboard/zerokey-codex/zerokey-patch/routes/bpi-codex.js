@@ -229,6 +229,7 @@ module.exports = { compileToExec, extractBlocks, blockToJs, addFilePatch, update
 //     工作目录在哪"。补一句就够。
 
 const HANDS_HEAD = '[本轮可用的手]'
+const RESULT_HEAD = '[上一步执行结果]'
 
 function extractCwd(items) {
   // AGENTS.md 那条 user 消息的抬头形如
@@ -246,6 +247,11 @@ function extractCwd(items) {
   return null
 }
 
+// 两种情形必须分开说。
+// 2026-08-07 用户实测：第一版只写了"要动手时只输出块本身，不要解释"，模型把这条
+// 也套到了**拿到结果之后**——`ll` 那轮工具跑了、目录列出来了，模型却回一句
+// 「请下达具体任务」，闷着不肯把结果讲给用户。而换成更明确的自然语言提问
+// （"罗列下本地的文件夹"）就正常。所以要显式区分"还没动手"和"已有结果"。
 function handsBlock(cwd) {
   return [
     HANDS_HEAD,
@@ -253,7 +259,12 @@ function handsBlock(cwd) {
     '也不是你自己的沙箱；不要用内建的代码解释器去试，那里没有用户的文件。',
     '⟦ls¦path={abs}⟧ ⟦read¦path={abs}⟧ ⟦write¦path={abs}¦content={str}⟧ ⟦cmd¦run={shell}⟧',
     cwd ? `当前工作目录 ${cwd}。` : '',
-    '要动手时只输出块本身，不要解释，不要声称自己没有权限。',
+    '两种情形，选一种：',
+    '1) 还需要动手 —— 只输出块本身，不要解释，不要声称自己没有权限。',
+    '2) 上面已经出现 “' + RESULT_HEAD + '” —— 说明活已经干完了，'
+      + '**直接用那些结果回答用户**（比如把目录列表整理出来）。',
+    '   此时不要再输出块，也不要反问用户要干什么。',
+    '像 `ll`、`ls`、`pwd` 这种简写就是让你执行它，不是让你解释它是什么命令。',
   ].filter(Boolean).join('\n')
 }
 
@@ -397,11 +408,18 @@ function replayItemToText(item) {
   }
   if (item.type === 'custom_tool_call_output' || item.type === 'function_call_output') {
     const body = distillExecOutput(toolOutputText(item))
-    return { role: 'user', text: body ? `BPI result:\n${body}` : 'BPI result: (无输出)' }
+    return {
+      role: 'user',
+      text: body
+        ? `${RESULT_HEAD}\n${body}\n(以上是真实执行结果，请直接据此回答用户。)`
+        : `${RESULT_HEAD} (无输出)`,
+    }
   }
   return null
 }
 
 module.exports.replayItemToText = replayItemToText
+module.exports.RESULT_HEAD = RESULT_HEAD
+module.exports.handsBlock = handsBlock
 module.exports.distillExecOutput = distillExecOutput
 module.exports.toolOutputText = toolOutputText

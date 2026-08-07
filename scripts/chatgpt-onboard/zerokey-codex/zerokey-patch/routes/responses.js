@@ -10,6 +10,17 @@ const { readSSE } = require('../utils/sse-reader')
 const { acquireSlot } = require('../utils/rate-limiter')
 const { resolveModel } = require('./raw')
 const { codexRequest, hasTokens } = require('./codex-pool')
+// 容错 require：本 CM 被 26 个 zero pod 共用，但把 bpi-codex.js 从 /patch cp 到
+// /app/routes 的那行是**逐个 Deployment 的启动参数**。只更新 CM 而没改某个 pod 的
+// 启动参数时，那个 pod 一旦因别的原因重启就会加载到这份新代码却找不到模块 ——
+// 硬 require 会让它直接起不来（今天已经在 litellm 回调上踩过同款）。
+// 找不到就退化成"永不编译"，行为与改动前完全一致。
+let compileToExec = () => ({ js: null, blocks: [], leftover: null })
+try {
+  ;({ compileToExec } = require('./bpi-codex'))
+} catch (e) {
+  console.warn('[bpi] bpi-codex.js not mounted, BPI compilation disabled:', e.message)
+}
 const { normalizeToolDefs, buildToolInstructions, extractToolCalls, newCallId, detectShellTool, execCommandFromData, execToToolCall, estimateTokens } = require('./web-tools')
 
 // ── Input parsing ──────────────────────────────────────────────
@@ -194,6 +205,11 @@ function buildResponsesRoute(chatgptApi) {
     const DECIDE_AT = 80
     const HOLD_TAIL = 24
     let wtDecided = false     // have we committed to streaming?
+    // 账号级 agent 契约生效后，模型吐的是 ⟦…⟧ 块而不是散文。一旦认出来就停止
+    // 往外吐 text delta —— 否则客户端会先看到一段块文本、再收到工具调用。
+    // 与下面 wtFrozen 是同一个套路，只是判据不同（这条不依赖 tools 是否存在，
+    // 因为 Codex responses-lite 的顶层 tools 恒为空）。
+    let bpiFrozen = false
     let wtFrozen = false      // envelope spotted -> stop streaming
     let wtSent = 0            // chars of `full` already streamed
     let wtOpened = false      // message shell emitted?
@@ -248,6 +264,7 @@ function buildResponsesRoute(chatgptApi) {
       started = true
       if (useWebTools) { wtPump(false); return }
       if (!stream) return
+      if (bpiFrozen || full.trimStart().startsWith('\u27E6')) { bpiFrozen = true; return }
       res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({
         type: 'response.output_text.delta', item_id: msgId,
         output_index: 0, content_index: 0, delta: t,
@@ -301,6 +318,37 @@ function buildResponsesRoute(chatgptApi) {
         }
       }
       const usage = mkUsage(full)
+
+      // ── BPI -> Codex exec：账号级契约生效后模型吐 ⟦…⟧ 块，编译成
+      //    custom_tool_call(exec)。没开契约的号不会吐这种块，compileToExec
+      //    返回 js=null，下面原样走普通文本路径，行为完全不变。 ──
+      const bpi = compileToExec(full)
+      if (bpi.js) {
+        const callId = 'call_' + crypto.randomBytes(12).toString('hex')
+        const item = {
+          type: 'custom_tool_call', id: 'ctc_' + crypto.randomBytes(12).toString('hex'),
+          call_id: callId, name: 'exec', input: bpi.js, status: 'completed',
+        }
+        console.log(`[bpi] compiled ${bpi.blocks.length} block(s) -> exec`)
+        if (stream) {
+          res.write(`event: response.output_item.added\ndata: ${JSON.stringify({
+            type: 'response.output_item.added', item, output_index: 0,
+          })}\n\n`)
+          res.write(`event: response.output_item.done\ndata: ${JSON.stringify({
+            type: 'response.output_item.done', item, output_index: 0,
+          })}\n\n`)
+          res.write(`event: response.completed\ndata: ${JSON.stringify({
+            type: 'response.completed',
+            response: { id: respId, object: 'response', created_at: created,
+                        status: 'completed', model: mdl, output: [item], usage },
+          })}\n\n`)
+          res.end()
+        } else {
+          res.json({ id: respId, object: 'response', created_at: created,
+                     status: 'completed', model: mdl, output: [item], usage })
+        }
+        return
+      }
 
       // ── exec-harvest: re-emit the model's container.exec command as the
       //    caller's shell function_call. ──

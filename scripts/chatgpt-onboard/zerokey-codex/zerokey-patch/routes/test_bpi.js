@@ -114,6 +114,15 @@ console.log(`\n=== 入站 ${p2} passed, ${f2} failed ===`)
 console.log('\n-- 拒答检测 / ask 映射 --')
 let p3=0,f3=0
 function t3(n,fn){try{fn();p3++;console.log('  ✅',n)}catch(e){f3++;console.log('  ❌',n,'\n     ',e.message)}}
+t3('印刷体撇号必须认出来（2026-08-08 漏判现场）',()=>{
+  // 模型用的是 U+2019，不是 ASCII '。写 don't 匹配不上，重试就不会点火。
+  const real="I can draft the AGENTS.md content, but I don\u2019t have an active "+
+             "file-editing tool connection in this chat to inspect /Users/x or create the file safely."
+  assert.ok(P.needsEscalation(real),'印刷体撇号漏判 —— 这正是线上那次直接把拒答返回给用户的原因')
+  assert.ok(P.needsEscalation("I don't have access to your filesystem"),'ASCII 撇号也要认')
+  assert.ok(P.needsEscalation('unable to access the repo'))
+  assert.ok(P.needsEscalation('I cannot write files'))
+})
 t3('用户实际遇到的三句拒答都要认出来',()=>{
   for(const s of ['我这里当前没有可用的终端执行权限，不能直接运行 ls 查看目录。',
                   '当前对话环境里我仍没有可调用的本地终端执行接口',
@@ -123,6 +132,19 @@ t3('用户实际遇到的三句拒答都要认出来',()=>{
 t3('已经吐块了就不重试',()=>{
   assert.ok(!P.needsEscalation('⟦ls¦path=/tmp⟧'))
   assert.ok(!P.needsEscalation('⟦write¦path=/tmp/a¦content=x⟧ 我没有权限'))
+})
+t3('措辞无关判据：没吐块却提到绝对路径 -> 重试',()=>{
+  // 2026-08-08：修了 don’t 之后又冒出 couldn’t access、以及"I checked for
+  // AGENTS.md at /Users/… but…"这种声称查过其实没调工具的。追词追不完。
+  assert.ok(P.needsEscalation('I checked for AGENTS.md at /Users/x/codes/y/AGENTS.md, but that path is unreachable'))
+  assert.ok(P.needsEscalation('目录 /home/user/proj 下有 3 个文件'))
+  assert.ok(P.ABS_PATH_RE.test('/tmp/a.txt'))
+})
+t3('纯问答不会被误判成要重试',()=>{
+  for (const s of ['快速排序的平均复杂度是 O(n log n)。',
+                   'AGENTS.md 已存在，按要求未覆盖。',
+                   'ls 用于列出目录内容。'])
+    assert.ok(!P.needsEscalation(s), '误判: '+s)
 })
 t3('正常回答不误判',()=>{
   assert.ok(!P.needsEscalation('快速排序的平均复杂度是 O(n log n)。'))

@@ -333,13 +333,32 @@ module.exports.isEnvironmentPrompt = isEnvironmentPrompt
 // escalate 重试（措辞："you are only WRITING the request; a separate worker
 // fulfills it"），BPI 这条路照搬。
 
-const REFUSAL_RE = /(没有|无法|不能|尚未|未能)[^。\n]{0,20}(权限|终端|执行|访问|接口|环境|工具|落盘|文件系统)|(don't|do not|cannot|can't|unable to)\s+(have|access|execute|run|write)/i
+// 撇号必须写成 ['’]：模型输出用的是**印刷体撇号 U+2019**，不是 ASCII 的 '。
+// 2026-08-08 实测漏判现场（用户第一轮被直接拒答、重试没点火）：
+//   "I do’t have an active file-editing tool connection in this chat"
+//                ^ 这个撇号是 ’，写 don't 匹配不上。
+// 这个坑我在记忆里记过（typographic apostrophe breaks text patterns）又踩了一次。
+const AP = "['\u2019\u02bc]"
+const REFUSAL_RE = new RegExp(
+  "(没有|无法|不能|尚未|未能)[^。\n]{0,20}(权限|终端|执行|访问|接口|环境|工具|落盘|文件系统)"
+  + "|(do" + AP + "?n" + AP + "?t|do not|cannot|can" + AP + "?t|could" + AP + "?n" + AP + "?t|could not"
+  + "|did" + AP + "?n" + AP + "?t|failed to|unable to|no active|not connected)"
+  + "\\s*(have|access|execute|run|write|edit|tool|file)"
+  , "i")
+
+// 追措辞是追不完的（2026-08-08 实测：修了 don’t 之后又冒出 couldn’t access、
+// 以及"I checked for AGENTS.md at /Users/…, but…"这种**声称查过其实没调工具**的）。
+// 所以加一条与措辞无关的判据：**没吐块、却在回答里提到了绝对路径**。
+// 那种内容只有真执行过才可能知道，没执行就必然是编的或拒答 —— 一律重试。
+// 纯问答（"快速排序复杂度"）不会出现绝对路径，不受影响。
+const ABS_PATH_RE = /(?:\/(?:Users|home|opt|var|etc|tmp)\/[^\s'"`)]+)|(?:[A-Za-z]:\\\\)/
 
 /** 这一轮是不是"该动手却没动手"。 */
 function needsEscalation(text) {
   if (typeof text !== 'string' || !text.trim()) return false
   if (extractBlocks(text).length) return false   // 已经吐块了
-  return REFUSAL_RE.test(text)
+  if (REFUSAL_RE.test(text)) return true
+  return ABS_PATH_RE.test(text)                  // 提到了路径却一次工具都没调
 }
 
 const ESCALATE = [
@@ -353,6 +372,7 @@ const ESCALATE = [
 module.exports.needsEscalation = needsEscalation
 module.exports.ESCALATE = ESCALATE
 module.exports.REFUSAL_RE = REFUSAL_RE
+module.exports.ABS_PATH_RE = ABS_PATH_RE
 
 // ── 回程：把工具执行结果拼回 prompt ──────────────────────────────
 //

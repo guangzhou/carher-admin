@@ -57,11 +57,20 @@ function parseBlock(body) {
   const parts = body.split(SEP)
   const name = parts.shift().trim()
   const params = {}
+  // 重复键：BPI 用 `¦option=A¦option=B` 表达多个选项，直接对象赋值会后者覆盖前者
+  // （2026-08-07 被单测抓到：两个 option 只剩一个，request_user_input 的 schema
+  // 要求 2-3 个，于是 options 整个被丢掉）。所以既留"最后一个"给普通参数用，
+  // 也把全部值收进 _multi 供 ask 这类需要重复键的块使用。
+  const multi = {}
   for (const p of parts) {
     const i = p.indexOf('=')
     if (i < 0) continue
-    params[p.slice(0, i).trim()] = p.slice(i + 1)
+    const k = p.slice(0, i).trim()
+    const v = p.slice(i + 1)
+    params[k] = v
+    ;(multi[k] = multi[k] || []).push(v)
   }
+  params._multi = multi
   return { name, params }
 }
 
@@ -168,7 +177,36 @@ function compileToExec(text) {
   return { js: lines.join('\n'), blocks, leftover: leftover.trim() }
 }
 
-module.exports = { compileToExec, extractBlocks, blockToJs, addFilePatch, updateFilePatch, OPEN, CLOSE, SEP }
+/**
+ * ⟦ask⟧ -> Codex 原生 request_user_input 的 function_call。
+ *
+ * 之前 ask 被排除在编译之外，结果整块 `⟦ask¦question=…⟧` 原样流给用户当文本看
+ * （2026-08-07 用户实测第 18 行）。Codex 的 additional_tools 里本来就声明了
+ * request_user_input，映射过去就是原生提问 UI。
+ * schema（读声明原文）：questions[] 里每项 {id, header(<=12字), question, options[]}。
+ */
+function askToFunctionCall(blk) {
+  const q = blk.params.question
+  if (!q) return null
+  const opts = ((blk.params._multi && blk.params._multi.option) || [])
+    .map((v) => ({ label: String(v).slice(0, 60) }))
+  const questions = [{
+    id: 'bpi_ask',
+    header: '需要确认',
+    question: String(q),
+    ...(opts.length >= 2 ? { options: opts.slice(0, 3) } : {}),
+  }]
+  return { name: 'request_user_input', arguments: { questions } }
+}
+
+/** 从整段文本里抽第一个 ask 块（若有）。 */
+function firstAsk(text) {
+  const b = extractBlocks(text).find((x) => x.name === 'ask')
+  return b ? askToFunctionCall(b) : null
+}
+
+module.exports = { compileToExec, extractBlocks, blockToJs, addFilePatch, updateFilePatch,
+                   askToFunctionCall, firstAsk, OPEN, CLOSE, SEP }
 
 
 // ── 入站：把 Codex 形状的请求改造成网页模型能接住的样子 ──────────────
@@ -227,11 +265,40 @@ function isCodexLite(items) {
 /**
  * 返回改造后的 input；非 Codex 载荷原样返回（其它客户端零影响）。
  */
+// 只剥"描述运行环境"的那条 developer 消息，**保留把模型配置成 agent 的那条**。
+//
+// 2026-08-07 更正：第一版把 developer 消息一刀全剥了，理由是"它们描述的是另一个
+// 环境"。这是拿 3 个样本做的决定，太草率 —— 那批消息里第一条 17.7KB 是
+// "You are Codex, an agent based on GPT-5…"，正是把大脑配置成 agent 的系统提示
+// 词，剥掉等于自断一臂。真正该剥的只有 22KB 那条 `<permissions instructions>`：
+// 它讲的是 sandbox_mode / 审批升级 / `sandbox_permissions` 参数，全是真 Codex
+// 运行时才存在的东西，喂给网页会话只会逼模型去想"我该在哪个沙箱里执行"，
+// 然后如实报告「运行环境中该路径不可用」。
+function isEnvironmentPrompt(text) {
+  return /^\s*<permissions instructions>/.test(text) || /`sandbox_mode`\s*is/.test(text)
+}
+
+function textOf(item) {
+  const parts = item && item.content
+  // normalize 之后 content 会从数组摊平成字符串，两种都要认
+  if (typeof parts === 'string') return parts
+  if (!Array.isArray(parts)) return ''
+  return parts.map((p) => (p && p.text) || '').join('')
+}
+
 function prepareCodexInput(items) {
   if (!isCodexLite(items)) return items
   const cwd = extractCwd(items)
+  // 判据只看 role + 内容，**不要求 type==='message'**。
+  // 2026-08-07 实测：经 LiteLLM 时 chatgpt_responses_normalize 会把
+  // {type:'message', role:'developer'} 改写成 {role:'system'} 并**删掉 type**
+  // （它的 _normalize_item 对 _TARGET_ROLES={system,developer} 走 system_message
+  // 分支）。第一版按 type+developer 匹配，于是经 LiteLLM 时一条都匹配不上，
+  // 22KB 环境说明原样喂进去 —— 直连 pod 5/5、经 LiteLLM 只有 2~3/6 的差距
+  // 就是这么来的，不是模型随机。
   const kept = items.filter(
-    (i) => i && i.type !== 'additional_tools' && !(i.type === 'message' && i.role === 'developer'),
+    (i) => i && i.type !== 'additional_tools'
+      && !((i.role === 'developer' || i.role === 'system') && isEnvironmentPrompt(textOf(i))),
   )
   kept.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: handsBlock(cwd) }] })
   return kept
@@ -240,3 +307,32 @@ function prepareCodexInput(items) {
 module.exports.prepareCodexInput = prepareCodexInput
 module.exports.isCodexLite = isCodexLite
 module.exports.extractCwd = extractCwd
+module.exports.isEnvironmentPrompt = isEnvironmentPrompt
+
+// ── 拒答检测与升级重试 ────────────────────────────────────────────
+//
+// 上线后实测：契约 + 剥指令 + 交手之后仍有约 1/3 的轮次既不吐块也不干活，
+// 其中一半是"我没有权限/终端"这类拒答。web-tools.js 的 JSON 那条路早有
+// escalate 重试（措辞："you are only WRITING the request; a separate worker
+// fulfills it"），BPI 这条路照搬。
+
+const REFUSAL_RE = /(没有|无法|不能|尚未|未能)[^。\n]{0,20}(权限|终端|执行|访问|接口|环境|工具|落盘|文件系统)|(don't|do not|cannot|can't|unable to)\s+(have|access|execute|run|write)/i
+
+/** 这一轮是不是"该动手却没动手"。 */
+function needsEscalation(text) {
+  if (typeof text !== 'string' || !text.trim()) return false
+  if (extractBlocks(text).length) return false   // 已经吐块了
+  return REFUSAL_RE.test(text)
+}
+
+const ESCALATE = [
+  '上一次回复被丢弃了：你回的是说明文字，不是块。',
+  '说"没有权限/没有终端/访问不了"在这里是无效的 —— 你不需要执行任何东西，',
+  '你只负责把要执行的块写出来，外部执行器会在用户机器上真实运行它并把结果贴回来。',
+  '现在只输出块本身，不要任何前言和解释。',
+  '例：要看目录 -> ⟦ls¦path=/abs/dir⟧；要写文件 -> ⟦write¦path=/abs/f¦content=…⟧',
+].join('\n')
+
+module.exports.needsEscalation = needsEscalation
+module.exports.ESCALATE = ESCALATE
+module.exports.REFUSAL_RE = REFUSAL_RE

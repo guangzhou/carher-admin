@@ -17,8 +17,11 @@ const { codexRequest, hasTokens } = require('./codex-pool')
 // 找不到就退化成"永不编译"，行为与改动前完全一致。
 let compileToExec = () => ({ js: null, blocks: [], leftover: null })
 let prepareCodexInput = (items) => items
+let needsEscalation = () => false
+let firstAsk = () => null
+let ESCALATE = ''
 try {
-  ;({ compileToExec, prepareCodexInput } = require('./bpi-codex'))
+  ;({ compileToExec, prepareCodexInput, needsEscalation, firstAsk, ESCALATE } = require('./bpi-codex'))
 } catch (e) {
   console.warn('[bpi] bpi-codex.js not mounted, BPI compilation disabled:', e.message)
 }
@@ -100,6 +103,8 @@ function buildResponsesRoute(chatgptApi) {
     // 实测（真实 82KB 载荷，n>=3）：原样 1/3 出工具、只交手 2/3、
     // 去指令+交手 5/6 且零拒答。
     const codexInput = prepareCodexInput(input)
+    const codexLite = codexInput !== input   // prepareCodexInput 对非 Codex 载荷返回同一引用
+    let bpiRetried = false
     const basePrompt = flattenInput(codexInput, instructions)
     let prompt = basePrompt
 
@@ -307,6 +312,30 @@ function buildResponsesRoute(chatgptApi) {
       return acc
     }
 
+    // 统一的"发一组 output item"出口，避免流式/非流式两份重复代码。
+    function emitItems(res, ctx) {
+      const { stream, respId, created, mdl, usage, items } = ctx
+      if (stream) {
+        items.forEach((item, idx) => {
+          res.write(`event: response.output_item.added\ndata: ${JSON.stringify({
+            type: 'response.output_item.added', item, output_index: idx,
+          })}\n\n`)
+          res.write(`event: response.output_item.done\ndata: ${JSON.stringify({
+            type: 'response.output_item.done', item, output_index: idx,
+          })}\n\n`)
+        })
+        res.write(`event: response.completed\ndata: ${JSON.stringify({
+          type: 'response.completed',
+          response: { id: respId, object: 'response', created_at: created,
+                      status: 'completed', model: mdl, output: items, usage },
+        })}\n\n`)
+        res.end()
+      } else {
+        res.json({ id: respId, object: 'response', created_at: created,
+                   status: 'completed', model: mdl, output: items, usage })
+      }
+    }
+
     const finish = () => {
       if (finished) return
       finished = true
@@ -328,6 +357,32 @@ function buildResponsesRoute(chatgptApi) {
       // ── BPI -> Codex exec：账号级契约生效后模型吐 ⟦…⟧ 块，编译成
       //    custom_tool_call(exec)。没开契约的号不会吐这种块，compileToExec
       //    返回 js=null，下面原样走普通文本路径，行为完全不变。 ──
+      // ── 拒答升级重试（一次）──
+      // 上线实测：契约+剥指令+交手之后仍有约 1/3 轮次不动手，其中一半是
+      // "我没有权限/终端"。这类回复对客户端毫无价值，重发一次比原样返回强。
+      // 与 web-tools.js 里 JSON 那条路的 escalate 是同一思路。
+      if (codexLite && !bpiRetried && needsEscalation(full)) {
+        bpiRetried = true
+        console.log('[bpi] refusal detected -> escalated retry')
+        const esc = `${basePrompt}\n\n${ESCALATE}`
+        collectWebTextR(esc)
+          .then((t2) => { if (t2 && t2.trim()) full = t2; finished = false; finish() })
+          .catch(() => { finished = false; finish() })
+        return
+      }
+
+      // ⟦ask⟧ -> Codex 原生 request_user_input（否则整块会当文本漏给用户看）
+      const ask = firstAsk(full)
+      if (ask && !compileToExec(full).js) {
+        const fc = {
+          type: 'function_call', id: 'fc_' + crypto.randomBytes(12).toString('hex'),
+          call_id: 'call_' + crypto.randomBytes(12).toString('hex'),
+          name: ask.name, arguments: JSON.stringify(ask.arguments), status: 'completed',
+        }
+        console.log('[bpi] ask -> request_user_input')
+        return emitItems(res, { stream, respId, created, mdl, usage, items: [fc] })
+      }
+
       const bpi = compileToExec(full)
       if (bpi.js) {
         const callId = 'call_' + crypto.randomBytes(12).toString('hex')

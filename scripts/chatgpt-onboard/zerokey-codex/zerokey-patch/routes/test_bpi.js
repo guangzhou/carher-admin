@@ -68,10 +68,20 @@ const codexInput=[
   {type:'message',role:'user',content:[{type:'input_text',text:'# AGENTS.md instructions for /Users/lgx/codes/carher-admin\n<INSTRUCTIONS>...'}]},
   {type:'message',role:'user',content:[{type:'input_text',text:'ls'}]},
 ]
-t2('剥掉 additional_tools 和 developer 消息',()=>{
-  const out=P.prepareCodexInput(codexInput)
-  assert.ok(!out.some(i=>i.type==='additional_tools'))
-  assert.ok(!out.some(i=>i.role==='developer'))
+t2('只剥环境说明，保留 agent 身份提示词',()=>{
+  const inp=[...codexInput,
+    {type:'message',role:'developer',content:[{type:'input_text',
+      text:'You are Codex, an agent based on GPT-5. You and the user share one workspace...'}]}]
+  const out=P.prepareCodexInput(inp)
+  assert.ok(!out.some(i=>i.type==='additional_tools'),'additional_tools 要剥')
+  const devs=out.filter(i=>i.role==='developer').map(i=>i.content[0].text)
+  assert.ok(devs.some(t=>t.startsWith('You are Codex')),'agent 提示词必须保留')
+  assert.ok(!devs.some(t=>t.includes('<permissions instructions>')),'环境说明必须剥掉')
+})
+t2('sandbox_mode 那种写法也认得出来',()=>{
+  assert.ok(P.isEnvironmentPrompt('<permissions instructions>\nFilesystem...'))
+  assert.ok(P.isEnvironmentPrompt('Note: `sandbox_mode` is `danger-full-access`'))
+  assert.ok(!P.isEnvironmentPrompt('You are Codex, an agent based on GPT-5.'))
 })
 t2('AGENTS.md（user 角色）必须保留',()=>{
   const out=P.prepareCodexInput(codexInput)
@@ -100,4 +110,55 @@ t2('没有 AGENTS.md 时不写路径，也不崩',()=>{
   assert.ok(!last.includes('当前工作目录'))
 })
 console.log(`\n=== 入站 ${p2} passed, ${f2} failed ===`)
-process.exit(fail+f2?1:0)
+
+console.log('\n-- 拒答检测 / ask 映射 --')
+let p3=0,f3=0
+function t3(n,fn){try{fn();p3++;console.log('  ✅',n)}catch(e){f3++;console.log('  ❌',n,'\n     ',e.message)}}
+t3('用户实际遇到的三句拒答都要认出来',()=>{
+  for(const s of ['我这里当前没有可用的终端执行权限，不能直接运行 ls 查看目录。',
+                  '当前对话环境里我仍没有可调用的本地终端执行接口',
+                  '无法访问当前工作目录 /Users/x 执行 ls（运行环境中该路径不可用，命令未执行成功）'])
+    assert.ok(P.needsEscalation(s),'漏判: '+s.slice(0,20))
+})
+t3('已经吐块了就不重试',()=>{
+  assert.ok(!P.needsEscalation('⟦ls¦path=/tmp⟧'))
+  assert.ok(!P.needsEscalation('⟦write¦path=/tmp/a¦content=x⟧ 我没有权限'))
+})
+t3('正常回答不误判',()=>{
+  assert.ok(!P.needsEscalation('快速排序的平均复杂度是 O(n log n)。'))
+  assert.ok(!P.needsEscalation(''))
+})
+t3('ask -> request_user_input，schema 对得上',()=>{
+  const fc=P.firstAsk('⟦ask¦question=要用哪个路径？¦option=/tmp/a.txt¦option=其他⟧')
+  assert.equal(fc.name,'request_user_input')
+  const q=fc.arguments.questions[0]
+  assert.equal(q.question,'要用哪个路径？')
+  assert.ok(q.header.length<=12,'header 要 <=12 字符')
+  assert.equal(q.options.length,2)
+})
+t3('只有一个 option 时不塞 options（schema 要求 2-3 个）',()=>{
+  const fc=P.firstAsk('⟦ask¦question=继续吗？¦option=好⟧')
+  assert.ok(!('options' in fc.arguments.questions[0]))
+})
+console.log(`\n=== 拒答/ask ${p3} passed, ${f3} failed ===`)
+
+console.log('\n-- 经 LiteLLM 改写后的形态 --')
+let p4=0,f4=0
+function t4(n,fn){try{fn();p4++;console.log('  ✅',n)}catch(e){f4++;console.log('  ❌',n,'\n     ',e.message)}}
+t4('normalize 把 developer 改成 system 且删掉 type，仍要能剥掉',()=>{
+  const afterNormalize=[
+    {type:'additional_tools',role:'developer',tools:[]},
+    {role:'system',content:'<permissions instructions>\nFilesystem sandboxing... `sandbox_mode` is `danger-full-access`'},
+    {role:'system',content:'You are Codex, an agent based on GPT-5.'},
+    {type:'message',role:'user',content:[{type:'input_text',text:'ls'}]},
+  ]
+  const out=P.prepareCodexInput(afterNormalize)
+  const txt=JSON.stringify(out)
+  assert.ok(!txt.includes('permissions instructions'),'环境说明没被剥掉（这就是经 LiteLLM 时失效的原因）')
+  assert.ok(txt.includes('You are Codex'),'agent 提示词被误删')
+})
+t4('content 是纯字符串时 textOf 不炸',()=>{
+  assert.ok(P.isEnvironmentPrompt('<permissions instructions> x'))
+})
+console.log(`\n=== LiteLLM 形态 ${p4} passed, ${f4} failed ===`)
+process.exit(fail+f2+f3+f4?1:0)

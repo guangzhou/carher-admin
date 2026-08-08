@@ -311,8 +311,13 @@ function prepareCodexInput(items) {
     (i) => i && i.type !== 'additional_tools'
       && !((i.role === 'developer' || i.role === 'system') && isEnvironmentPrompt(textOf(i))),
   )
+  // 结构压缩：照 Codex 本地 auto-compact（compact.rs:348-368, collect_user_messages:520）
+  // —— 上下文快满时，丢工具调用/结果，只留最近 N 条 user 原文 + 最后 assistant。
+  // 纯本地操作，不调模型，0 额外调用。详见 .claude/plans/zerokey-structural-compaction.md
+  const compacted = compactInput(kept)
   // 回程：工具调用/结果 -> 文本，否则 flattenInput 会把它们拼成空的 "USER: "
-  const replayed = kept.map((i) => {
+  // 压缩后剩下的工具项（最近一轮的）照常 replay；更早的被丢了，不 replay。
+  const replayed = compacted.map((i) => {
     const r = replayItemToText(i)
     if (!r) return i
     return { type: 'message', role: r.role, content: [{ type: 'input_text', text: r.text }] }
@@ -321,7 +326,89 @@ function prepareCodexInput(items) {
   return replayed
 }
 
+// ── 结构压缩（照 Codex 本地 auto-compact）──────────────────────────────
+//
+// Codex 怎么让长会话不爆：上下文到窗口 90% 时，collect_user_messages 只挑 user 消息，
+// 工具调用/结果/assistant 全丢，新历史 = 最近 N 条 user 原文 + 最后 assistant
+// (compact.rs:348-368, collect_user_messages:520, COMPACT_USER_MESSAGE_MAX_TOKENS=20000)。
+// 纯本地、0 额外调用。
+//
+// 我们的天然优势：网页会话每次本就是新会话（responses.js:257 传 null）。
+// 所以网关收到 Codex 客户端全量 input 后、发给网页后端前，做一次同样的结构压缩：
+// 丢早的工具结果（撑爆的主因），留最近 N 条 user + 最后 assistant。
+//
+// 基线实测（每轮工具结果 3 万字符）：改前第 2 轮就撞 10 万附件阈值 → filecite；
+// 改后稳态 6.2 万字符、不随轮次增长。从线性变常数。
+//
+// 硬约束（已查实，踩了就出事）：
+//  - AGENTS.md 那条 user 必留（extractCwd 从它取工作目录，丢了模型瞎猜路径）
+//  - developer/system 系统指令必留（模型人格，剥掉=自断一臂，8/8 vs 7/8 已证伪）
+//  - 只在总长超阈值才压，短会话原样返回（不无谓丢历史）
+const COMPACT_TRIGGER_CHARS = 70000   // 附件阈值的 70%，对齐 Codex "90% 窗口才压"
+const KEEP_RECENT_USERS = 8           // 保留最近 N 条 user 原文（Codex 2万token≈放宽）
+
+function isAgentsMdItem(it) {
+  return /AGENTS\.md instructions for \//.test(textOf(it).slice(0, 200))
+}
+
+function compactInput(items) {
+  // 估算总长：textOf 只看 content，但工具结果的文本在 output、工具调用的在 input。
+  // 第一版只用 textOf，漏算了几万字符的工具结果，导致没触发压缩。用真实文本长度。
+  const itemLen = (it) => {
+    if (it.type === 'custom_tool_call' || it.type === 'function_call')
+      return String(it.input || '').length
+    if (it.type === 'custom_tool_call_output' || it.type === 'function_call_output')
+      return toolOutputText(it).length
+    return textOf(it).length
+  }
+  const total = items.reduce((s, it) => s + itemLen(it), 0)
+  if (total <= COMPACT_TRIGGER_CHARS) return items   // 短会话不压
+
+  // 1) 系统指令（developer/system）全留 —— 模型人格不能丢
+  // 2) AGENTS.md 那条 user 必留 —— cwd 来源
+  // 3) 最近 N 条 user 消息（不含 AGENTS.md，它单列）
+  // 4) 最后一条 assistant（若有）
+  // 丢：所有 custom_tool_call / custom_tool_call_output + 早于最近 N 条的 user
+  const systemMsgs = items.filter((i) => i.role === 'developer' || i.role === 'system')
+  const agentsMsg = items.find(isAgentsMdItem)
+  const userMsgs = items.filter((i) => i.role === 'user' && !isAgentsMdItem(i))
+  const recentUsers = userMsgs.slice(-KEEP_RECENT_USERS)
+  const lastAssistant = [...items].reverse().find((i) => i.role === 'assistant')
+
+  // 保持原顺序：系统指令 → AGENTS → (最近user + 最后assistant 按原相对顺序)
+  const tail = [agentsMsg, ...recentUsers, lastAssistant]
+    .filter(Boolean)
+    // 去重（agentsMsg 可能也在 recentUsers 里，已排除；lastAssistant 不会跟 user 重复）
+  // 按它们在原 items 里的出现顺序排
+  const order = new Map(items.map((it, i) => [it, i]))
+  tail.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
+
+  const result = [...systemMsgs.filter((s) => !tail.includes(s)), ...tail]
+  // 去重（systemMsgs 与 tail 不会有交集，但保险）
+  const seen = new Set()
+  const dedup = result.filter((it) => {
+    if (seen.has(it)) return false; seen.add(it); return true
+  })
+
+  // 只打 type/role 计数，不打内容
+  const before = countShapes(items), after = countShapes(dedup)
+  const afterSize = dedup.reduce((s, it) => s + itemLen(it), 0)
+  console.log(`[compact] ${total} -> ${afterSize} chars  ${before} => ${after}`)
+  return dedup
+}
+
+function countShapes(items) {
+  const n = {}
+  for (const it of items || []) {
+    if (!it) continue
+    const k = `${it.type || 'msg'}/${it.role || '-'}`
+    n[k] = (n[k] || 0) + 1
+  }
+  return Object.entries(n).map(([k, v]) => `${k}:${v}`).join(',')
+}
+
 module.exports.prepareCodexInput = prepareCodexInput
+module.exports.compactInput = compactInput
 module.exports.isCodexLite = isCodexLite
 module.exports.extractCwd = extractCwd
 module.exports.isEnvironmentPrompt = isEnvironmentPrompt

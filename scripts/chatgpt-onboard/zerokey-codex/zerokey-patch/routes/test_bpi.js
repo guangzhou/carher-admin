@@ -436,4 +436,57 @@ t9('真实多轮：工具结果不再撑爆下一轮 input',()=>{
   assert.ok(r.text.length < 32000,'5万字符没压回3万: '+r.text.length)
 })
 console.log(`\n=== 工具截断 ${p9} passed, ${f9} failed ===`)
-process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9?1:0)
+
+
+console.log('\n-- 结构压缩 --')
+let p10=0,f10=0
+function t10(n,fn){try{fn();p10++;console.log('  ✅',n)}catch(e){f10++;console.log('  ❌',n,'\n     ',e.message)}}
+const bigItem=(role,txt)=>({type:'message',role,content:[{type:'input_text',text:txt}]})
+const dev=bigItem('developer','You are Codex'+'x'.repeat(17000))
+const ag=bigItem('user','# AGENTS.md instructions for /Users/lgx/repo\n'+'y'.repeat(22000))
+const tool=()=>({type:'custom_tool_call_output',call_id:'c',output:[{type:'input_text',text:'Output:\n'+'z'.repeat(30000)}]})
+
+t10('短会话不压（原样返回同一个数组）',()=>{
+  const s=[bigItem('user','hi')]
+  assert.strictEqual(P.compactInput(s),s)
+})
+t10('长会话压缩：33万 -> 4万内，工具结果全丢',()=>{
+  const items=[dev,ag]
+  for(let i=0;i<10;i++){items.push(bigItem('user','看模块'+i));items.push(tool());items.push(bigItem('assistant','没问题'+i))}
+  const out=P.compactInput(items)
+  assert.ok(!out.some(it=>it.type==='custom_tool_call_output'),'工具结果没丢')
+  const sz=out.reduce((s,it)=>{if(it.type==='custom_tool_call_output')return s+30000;return s+(((it.content||[])[0]&&it.content[0].text||'').length)},0)
+  assert.ok(sz<50000,'没压到 5 万内: '+sz)
+})
+t10('AGENTS.md 必留（cwd 来源，丢了模型瞎猜路径）',()=>{
+  const items=[dev,ag,bigItem('user','看模块'),tool(),bigItem('assistant','好')]
+  // 加大到超阈值
+  for(let i=0;i<8;i++){items.push(bigItem('user','看'+i));items.push(tool());items.push(bigItem('assistant','ok'))}
+  const out=P.compactInput(items)
+  assert.ok(out.some(it=>/AGENTS\.md instructions/.test(((it.content||[])[0]&&it.content[0].text||'').slice(0,200))),'AGENTS 丢了')
+})
+t10('系统指令必留（模型人格，剥掉=自断一臂）',()=>{
+  const items=[dev,ag]
+  for(let i=0;i<8;i++){items.push(bigItem('user','看'+i));items.push(tool())}
+  const out=P.compactInput(items)
+  assert.ok(out.some(it=>it.role==='developer'),'系统指令丢了')
+})
+t10('保留最近 N 条 user + 最后 assistant',()=>{
+  const items=[dev,ag]
+  for(let i=0;i<20;i++){items.push(bigItem('user','看'+i));items.push(tool());items.push(bigItem('assistant','a'+i))}
+  const out=P.compactInput(items)
+  const users=out.filter(it=>it.role==='user')
+  assert.ok(users.some(it=>{const t=(it.content||[])[0];return t&&t.text&&t.text.includes('看19')}),'最新 user 丢了')
+  assert.ok(!users.some(it=>{const t=(it.content||[])[0];return t&&t.text&&t.text.includes('看0')}),'很早的 user 没丢（应该丢）')
+  const ass=out.filter(it=>it.role==='assistant')
+  assert.equal(ass.length,1,'应只留最后一条 assistant')
+  assert.ok((((ass[0].content||[])[0]||{}).text||'').includes('a19'))
+})
+t10('不超阈值时多轮也原样（短会话零成本）',()=>{
+  const items=[dev,ag,bigItem('user','看1'),tool(),bigItem('assistant','ok')]
+  // 总长 < 7 万
+  const out=P.compactInput(items)
+  assert.strictEqual(out,items,'没超阈值不该压')
+})
+console.log(`\n=== 结构压缩 ${p10} passed, ${f10} failed ===`)
+process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9+f10?1:0)

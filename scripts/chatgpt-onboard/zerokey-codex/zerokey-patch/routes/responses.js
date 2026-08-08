@@ -175,7 +175,13 @@ function buildResponsesRoute(chatgptApi) {
     //    (turn.rs:2613 `error_or_panic("ReasoningSummaryDelta without active item")`)。
     //    所以顺序是 output_item.added(reasoning) -> delta -> output_item.done。
     //    正文 message 因此排到 output_index 1。
-    const SHOW_PROGRESS = stream && !useWebTools && process.env.ZK_PROGRESS !== '0'
+    // **默认关闭，只给排障用**（`ZK_PROGRESS=1` 打开）。
+    // 2026-08-08 上线当天用户就撞上了：他在做正经事（"写到飞书文档"），状态行却
+    // 挂着「正在排队等号」——那是**运维视角的调试话**，不该出现在用户界面上。
+    // 而且更糟的是状态行会**一直停留在最后一句**（TUI 只在有新的加粗标题时才换，
+    // tui/src/chatwidget/streaming.rs:244-268），于是"正在排队等号"会一直挂着读秒，
+    // 比什么都不显示还差。Codex 自带的 "Working" 反而更得体。
+    const SHOW_PROGRESS = stream && !useWebTools && process.env.ZK_PROGRESS === '1'
     const rsnId = 'rs_' + crypto.randomBytes(12).toString('hex')
     let rsnOpen = false
     let progressSteps = 0
@@ -214,7 +220,7 @@ function buildResponsesRoute(chatgptApi) {
     }
 
     // 排队等一个空闲账号 —— 池子忙的时候这一步就能等好几秒，得让用户看到
-    progress('正在排队等号', '等待一个空闲的 ChatGPT 会话')
+    progress('Preparing', null)
     await acquireSlot('ChatGPT')
 
     const INLINE_MAX = parseInt(process.env.ZK_INLINE_MAX || '100000', 10)
@@ -222,7 +228,7 @@ function buildResponsesRoute(chatgptApi) {
     let attachments = null
     if (prompt.length > INLINE_MAX) {
       // 3MB 级别的上传能花十几秒，这是最需要播报的一段
-      progress('正在上传会话附件', `${Math.round(prompt.length / 1024)}KB，超过内联上限`)
+      progress('Reading context', null)
       try {
         const buf = Buffer.from(prompt, 'utf8')
         const up = await chatgptApi.uploadFile(buf, {
@@ -231,7 +237,7 @@ function buildResponsesRoute(chatgptApi) {
           useCase: 'my_files',
         })
         attachments = [{ id: up.id, size: up.size, name: up.name, mimeType: up.mimeType }]
-        progress('附件已上传', `${Math.round(prompt.length / 1024)}KB 会话内容`)
+        // (进度点已移除：上传完成不值得单独报一条)
         sendPrompt =
           'The full conversation/context is in the attached text file ' +
           `(${up.name}). Read it and respond to the latest request in it.` +
@@ -245,7 +251,7 @@ function buildResponsesRoute(chatgptApi) {
       }
     }
 
-    progress('正在请求模型', null)
+    progress('Thinking', null)
     let upstream
     try {
       upstream = await chatgptApi.chatCompletion(sendPrompt, null, 'client-created-root', model, attachments)

@@ -456,6 +456,67 @@ module.exports.toolOutputText = toolOutputText
  * 顺带一个副作用是好的：107KB 里那些互相打架的上下文（Codex 自己的 agent 提示词
  * 等）被去掉了，合规概率反而更高。
  */
+// 诉求短于这个长度时**额外**附上对话尾部（不是替换掉诉求）。
+//
+// ⚠️ 这里第一版写的是 `MIN_ASK = 40`、且短诉求就"当没提取到"丢掉，理由是
+// "真实诉求几乎不会短于 40 字符" —— 拍脑袋，而且手里的数据当场就反驳它：
+// 单测里那条真实诉求「把结构写到 /tmp/a.md」15 字符，用户本人用过的
+// `ll`(2) / `罗列下本地的文件夹`(9) 更短。线上失败那两次 ask 长度其实是 **0**
+// （568 = 交手块含 cwd 371 + 升级指令 190 + 空 `USER: ` + 换行）。
+// 所以：短诉求照留，只是补上尾部；长诉求（>=200）路径**逐字节不变**，
+// 保住已经实测 4/4 成功的那条路。
+const ASK_ENOUGH = 200
+
+/**
+ * 对话尾部摘要 —— 提取不到用户诉求时的兜底。
+ *
+ * 2026-08-08 线上实测，上线首日 6 次重试 4 成 2 败，两次失败共享同一签名：
+ *
+ *     zero-116  escalate prompt 572 chars (was 164086)  -> 之后没有 compiled
+ *     zero-84   escalate prompt 568 chars (was 161594)  -> 之后没有 compiled
+ *     （成功的都是 2416 chars）
+ *
+ * 交手块 346 + 升级指令 190 + "USER: " ≈ 545，也就是说**诉求那段只剩 20 来个
+ * 字符**：16 万字符的会话里一条用户消息都没提取到，等于让模型闭着眼重试。
+ *
+ * 为什么会提取不到，目前只有形状可推（长 agent 循环里本轮的 input 尾部是工具
+ * 结果、不是新的用户提问，而更早那条原始提问可能已被客户端压缩掉了），**没有
+ * 现场数据**，所以不去猜着改提取逻辑。这里只做一件有据可依的事：诉求为空时，
+ * 用对话尾部的真实内容顶上，让模型至少知道刚刚发生了什么。
+ */
+function tailDigest(items, limit = 3, cap = 600) {
+  const picked = []
+  for (let i = (items || []).length - 1; i >= 0 && picked.length < limit; i--) {
+    const it = items[i]
+    if (!it || it.type === 'additional_tools') continue
+    // developer/system 一律不算"对话" —— 那是客户端脚手架（17.7KB agent 提示词、
+    // 22KB permissions 说明）。第一版忘了这条，兜底把刚剥掉的打架上下文原地拖了
+    // 回来，被单测「剔除打架的上下文」抓到。
+    if (it.role === 'developer' || it.role === 'system') continue
+    let t = textOf(it)
+    if (!t) {
+      const r = replayItemToText(it)   // 工具调用/结果没有 content，得先还原成文本
+      t = (r && r.text) || ''
+    }
+    t = t.trim()
+    if (!t || t.startsWith(HANDS_HEAD)) continue   // 交手块是我们自己塞的，不算内容
+    if (t.length > cap) t = t.slice(-cap)
+    picked.push(`${it.role || it.type || '?'}: ${t}`)
+  }
+  return picked.reverse().join('\n')
+}
+
+/** 形状摘要（只有 type/role 计数，**不含任何会话内容**），用于事后定位。 */
+function shapeOf(items) {
+  const n = {}
+  for (const it of items || []) {
+    if (!it) continue
+    const k = `${it.type || 'message'}/${it.role || '-'}`
+    n[k] = (n[k] || 0) + 1
+  }
+  return Object.entries(n).map(([k, v]) => `${k}:${v}`).join(',')
+}
+
 function escalatePrompt(items, escalateText) {
   const cwd = extractCwd(items)
   let lastUser = ''
@@ -469,7 +530,19 @@ function escalatePrompt(items, escalateText) {
   }
   // AGENTS.md 那条抬头很长，只留头部足够定位仓库
   if (lastUser.length > 4000) lastUser = lastUser.slice(-4000)
-  return [handsBlock(cwd), '', 'USER: ' + lastUser, '', escalateText].join('\n')
+
+  const body = []
+  if (lastUser) body.push('USER: ' + lastUser)
+  // 诉求够长就到此为止（这条路已实测 4/4，不去动它）；短或为空才补尾部
+  const tail = lastUser.length >= ASK_ENOUGH ? '' : tailDigest(items)
+  if (tail) body.push('[对话尾部]', tail)
+  // 只打长度和形状，不打内容 —— 下次再遇到空诉求时能直接看出是什么形状导致的
+  console.log(`[bpi] escalate ask=${lastUser.length} tail=${tail.length}`
+    + ` shapes=${shapeOf(items)}`)
+  return [handsBlock(cwd), '', ...body, '', escalateText].join('\n')
 }
 
 module.exports.escalatePrompt = escalatePrompt
+module.exports.tailDigest = tailDigest
+module.exports.ASK_ENOUGH = ASK_ENOUGH
+module.exports.shapeOf = shapeOf

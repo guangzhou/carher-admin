@@ -267,13 +267,73 @@ t7('剔除打架的上下文（Codex 自己的 agent 提示词 / sandbox 说明�
   assert.ok(!esc.includes('You are Codex'))
   assert.ok(!esc.includes('permissions instructions'))
 })
+const REAL_ASK='真正的诉求：把 src 目录下所有 handler 罗列出来并写进 /tmp/h.md'
 t7('不把我们自己塞的块当成用户诉求',()=>{
   const items=[{type:'additional_tools',role:'developer',tools:[]},
-    {type:'message',role:'user',content:[{type:'input_text',text:'真正的诉求'}]},
+    {type:'message',role:'user',content:[{type:'input_text',text:REAL_ASK}]},
     {type:'message',role:'user',content:[{type:'input_text',text:'[本轮可用的手]\nblah'}]},
     {type:'message',role:'user',content:[{type:'input_text',text:'[上一步执行结果]\nfoo'}]}]
   const esc=P.escalatePrompt(items,'RETRY')
-  assert.ok(esc.includes('USER: 真正的诉求'),'应回到真正的最后一条用户消息')
+  assert.ok(esc.includes('USER: '+REAL_ASK),'应回到真正的最后一条用户消息')
+  // 诉求本身不许被交手块/结果块顶掉；至于要不要再附尾部，看长度，见后两个用例
+  assert.ok(!/USER: \[/.test(esc),'诉求位上出现了我们自己塞的块')
+})
+
+// ── 空诉求兜底（2026-08-08 线上：6 次重试 2 次因此作废）────────────────
+// 签名：escalate prompt 568~572 chars（= 交手块 346 + 升级指令 190 + 空 USER:），
+// 之后再没有 compiled。长 agent 循环里本轮尾部是工具结果、不是新的用户提问。
+t7('短诉求照留，但要补上对话尾部（阈值不能拍脑袋）',()=>{
+  const items=[{type:'additional_tools',role:'developer',tools:[]},
+    {type:'message',role:'developer',content:[{type:'input_text',text:'<permissions instructions>\nsandbox'}]},
+    {type:'message',role:'user',content:[{type:'input_text',text:'ll'}]},
+    {type:'custom_tool_call_output',output:'src\npkg.json'}]
+  const esc=P.escalatePrompt(items,'RETRY')
+  assert.ok(esc.includes('USER: ll'),'ll 是真诉求，不许因为"太短"被丢掉')
+  assert.ok(esc.includes('[对话尾部]'),'短诉求要补尾部')
+  assert.ok(!esc.includes('permissions instructions'),'尾部不许把脚手架拖回来')
+})
+t7('长诉求路径逐字节不变（保住已实测 4/4 的那条路）',()=>{
+  const ask='x'.repeat(300)
+  const items=[{type:'additional_tools',role:'developer',tools:[]},
+    {type:'message',role:'user',content:[{type:'input_text',text:ask}]},
+    {type:'custom_tool_call_output',output:'noise'}]
+  const esc=P.escalatePrompt(items,'RETRY')
+  assert.ok(esc.includes('USER: '+ask))
+  assert.ok(!esc.includes('[对话尾部]'),'诉求够长就不该再拖尾部进来')
+})
+t7('提取不到诉求时用对话尾部顶上，而不是发一句空的 USER:',()=>{
+  const items=[{type:'additional_tools',role:'developer',tools:[]},
+    {type:'message',role:'assistant',content:[{type:'output_text',text:'我看一下目录'}]},
+    {type:'custom_tool_call',name:'exec',input:'tools.exec_command({cmd:["ls"]})'},
+    {type:'custom_tool_call_output',output:'src\npackage.json'}]
+  const esc=P.escalatePrompt(items,'RETRY')
+  assert.ok(esc.includes('[对话尾部]'),'该走兜底')
+  assert.ok(!/USER:\s*$/m.test(esc),'不许出现空的 USER:')
+  assert.ok(esc.includes('package.json'),'尾部要带上真实的工具结果，模型才知道刚发生了什么')
+  assert.ok(esc.includes('[本轮可用的手]')&&esc.includes('RETRY'))
+  // 判据不能写死字符数（会随 fixture 大小变）：只要求尾部真的贡献了内容
+  const empty=P.escalatePrompt([{type:'additional_tools',role:'developer',tools:[]}],'RETRY')
+  assert.ok(esc.length>empty.length+50,'兜底没贡献内容，还是 568/572 那种空壳')
+})
+t7('兜底也要有体积上限',()=>{
+  const items=[{type:'additional_tools',role:'developer',tools:[]}]
+  for(let i=0;i<40;i++) items.push({type:'message',role:'assistant',
+    content:[{type:'output_text',text:'x'.repeat(5000)}]})
+  const esc=P.escalatePrompt(items,'RETRY')
+  assert.ok(esc.length<5000,'兜底不能把长会话又拖回来: '+esc.length)
+})
+t7('兜底不把交手块回读成"对话内容"',()=>{
+  const items=[{type:'additional_tools',role:'developer',tools:[]},
+    {type:'message',role:'assistant',content:[{type:'output_text',text:'唯一的真内容'}]},
+    {type:'message',role:'user',content:[{type:'input_text',text:P.handsBlock('/x')}]}]
+  const d=P.tailDigest(items)
+  assert.ok(d.includes('唯一的真内容'))
+  assert.ok(!d.includes('[本轮可用的手]'),'交手块是我们自己塞的，回读等于自问自答')
+})
+t7('形状日志不含会话内容',()=>{
+  const items=[{type:'message',role:'user',content:[{type:'input_text',text:'机密内容XYZ'}]}]
+  const s=P.shapeOf?P.shapeOf(items):''
+  if(s) assert.ok(!s.includes('机密内容'),'形状摘要泄漏了内容')
 })
 console.log(`\n=== 精简重试 ${p7} passed, ${f7} failed ===`)
 process.exit(fail+f2+f3+f4+f5+f6+f7?1:0)

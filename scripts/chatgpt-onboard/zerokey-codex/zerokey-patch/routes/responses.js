@@ -123,6 +123,35 @@ function buildResponsesRoute(chatgptApi) {
       prompt = `${toolInstr}\n\n${basePrompt}`
     }
 
+    // ── 先开流，再去等上游 ────────────────────────────────────────
+    // 2026-08-08 实测：从客户端发出到收到第一个事件，短请求 3.55s、长材料
+    // 5.53s，全程白屏。原因是 acquireSlot(排队等号) + chatCompletion(建网页会话、
+    // 可能还要上传附件) **全部 await 完**才写第一个字节。
+    // 而 `response.created` 里没有一个字段依赖上游（id 是本地生成的），
+    // 完全可以立刻发 —— Codex 收到它就会把 spinner 点亮，白屏消失。
+    const respId = 'resp_' + crypto.randomBytes(12).toString('hex')
+    const msgId = 'msg_' + crypto.randomBytes(12).toString('hex')
+    const created = Math.floor(Date.now() / 1000)
+    const mdl = req.body.model || model || 'chatgpt-web'
+
+    if (stream) {
+      res.setHeader('Content-Type', 'text/event-stream')
+      res.setHeader('Cache-Control', 'no-cache')
+      res.setHeader('Connection', 'keep-alive')
+      res.setHeader('Access-Control-Allow-Origin', '*')
+      if (res.flushHeaders) res.flushHeaders()
+      res.write(`event: response.created\ndata: ${JSON.stringify({
+        type: 'response.created',
+        response: { id: respId, object: 'response', created_at: created,
+                    status: 'in_progress', model: mdl, output: [], usage: null },
+      })}\n\n`)
+      res.write(`event: response.in_progress\ndata: ${JSON.stringify({
+        type: 'response.in_progress',
+        response: { id: respId, object: 'response', created_at: created,
+                    status: 'in_progress', model: mdl, output: [], usage: null },
+      })}\n\n`)
+    }
+
     await acquireSlot('ChatGPT')
 
     const INLINE_MAX = parseInt(process.env.ZK_INLINE_MAX || '100000', 10)
@@ -154,37 +183,26 @@ function buildResponsesRoute(chatgptApi) {
     try {
       upstream = await chatgptApi.chatCompletion(sendPrompt, null, 'client-created-root', model, attachments)
     } catch (e) {
+      // 流已经开了（头早已发出），不能再改状态码 —— 只能在流里报错并收尾，
+      // 否则客户端会拿到一个"半开着又突然断掉"的连接。
+      if (stream) {
+        res.write(`event: error\ndata: ${JSON.stringify({
+          type: 'error', error: { message: e.message, type: 'upstream_error' },
+        })}\n\n`)
+        res.write('data: [DONE]\n\n')
+        return res.end()
+      }
       return res.status(502).json({ error: { message: e.message, type: 'upstream_error' } })
     }
 
-    const respId = 'resp_' + crypto.randomBytes(12).toString('hex')
-    const msgId = 'msg_' + crypto.randomBytes(12).toString('hex')
-    const created = Math.floor(Date.now() / 1000)
-    const mdl = req.body.model || model || 'chatgpt-web'
     let full = ''
     let started = false
     let finished = false
 
     if (stream) {
-      res.setHeader('Content-Type', 'text/event-stream')
-      res.setHeader('Cache-Control', 'no-cache')
-      res.setHeader('Connection', 'keep-alive')
-      res.setHeader('Access-Control-Allow-Origin', '*')
-
-      // response.created
-      const respShell = {
-        id: respId, object: 'response', created_at: created, status: 'in_progress',
-        model: mdl, output: [],
-        usage: null,
-      }
-      // OpenAI spec shape: {type, response:{...}}. The bare object (no `type`)
-      // is unparseable by strict consumers — notably LiteLLM's responses
-      // streaming logger keys off data.type, so a missing `type` on the
-      // completed event means the spend log is never written (silent no-op).
-      res.write(`event: response.created\ndata: ${JSON.stringify({
-        type: 'response.created', response: respShell,
-      })}\n\n`)
-
+      // 头和 response.created / in_progress 已经在上游调用之前发过了（见上方）。
+      // 严格消费者要求 {type, response:{...}} 这个形状：LiteLLM 的 responses
+      // 流式记账 keys off data.type，缺 type 会导致 spend log 静默不写。
       // Web-tools: we cannot stream raw text (it may be a JSON tool envelope) —
       // buffer everything and emit the parsed result at finish(). Skip the
       // message-shell preamble; the item type isn't known until parse time.
@@ -666,6 +684,8 @@ function buildResponsesRoute(chatgptApi) {
     try {
       result = await codexRequest(req.body)
     } catch (e) {
+      // 这条路由（Codex OAuth 直连）此时**还没开流**，头也没发，
+      // 所以正常返回 502 JSON。别照抄网页会话那条的"往流里报错"。
       return res.status(502).json({ error: { message: e.message, type: 'upstream_error' } })
     }
 

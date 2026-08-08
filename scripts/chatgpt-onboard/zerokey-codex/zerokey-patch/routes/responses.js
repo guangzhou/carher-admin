@@ -124,11 +124,17 @@ function buildResponsesRoute(chatgptApi) {
     }
 
     // ── 先开流，再去等上游 ────────────────────────────────────────
-    // 2026-08-08 实测：从客户端发出到收到第一个事件，短请求 3.55s、长材料
-    // 5.53s，全程白屏。原因是 acquireSlot(排队等号) + chatCompletion(建网页会话、
-    // 可能还要上传附件) **全部 await 完**才写第一个字节。
-    // 而 `response.created` 里没有一个字段依赖上游（id 是本地生成的），
-    // 完全可以立刻发 —— Codex 收到它就会把 spinner 点亮，白屏消失。
+    // 2026-08-08 实测：从客户端发出到收到第一个事件，短请求 3.55s、长材料 5.53s。
+    // 原因是 acquireSlot(排队等号) + chatCompletion(建网页会话、可能还要上传附件)
+    // **全部 await 完**才写第一个字节。而 `response.created` 里没有一个字段依赖
+    // 上游（id 本地生成），完全可以立刻发。改后 0.17s。
+    //
+    // ⚠️ 别把这个当成"UI 白屏被治好了"。读源码证伪过：`response.created` 在客户端
+    //    是**空操作**(core/src/session/turn.rs:2251)，也不计入首 token
+    //    (turn_timing.rs:388)；转圈是本地 TurnStarted 在发请求**之前**就点亮的
+    //    (core/src/tasks/regular.rs:49)。所以这一改的实际收益是**传输层**的：
+    //    头早发出、连接早建立，中间的代理/CDN 不会因为迟迟没有字节而掐断，
+    //    也让下面的进度通道有机会在等待期播报。想改界面文案得靠 progress()。
     const respId = 'resp_' + crypto.randomBytes(12).toString('hex')
     const msgId = 'msg_' + crypto.randomBytes(12).toString('hex')
     const created = Math.floor(Date.now() / 1000)
@@ -152,12 +158,71 @@ function buildResponsesRoute(chatgptApi) {
       })}\n\n`)
     }
 
+    // ── 把等待期变成"有进度的等待" ────────────────────────────────
+    // 读 Codex 源码确认的三件事：
+    //  1. `response.created` 在客户端是**空操作**(core/src/session/turn.rs:2251
+    //     `ResponseEvent::Created => {}`)，也不计入首 token(turn_timing.rs:388)。
+    //     转圈是本地 TurnStarted 点亮的(core/src/tasks/regular.rs:49)，跟服务端无关。
+    //     —— 所以想改界面，得靠别的通道。
+    //  2. 唯一能改状态行文案的是 `response.reasoning_summary_text.delta`
+    //     (codex-api/src/sse/responses.rs:358)，**必须同时带 delta 和 summary_index**，
+    //     缺一个整条事件被丢弃。
+    //  3. TUI 用 `extract_first_bold` 从文本里抠 `**...**` 当状态行
+    //     (tui/src/chatwidget/streaming.rs:244-248)，没有加粗就一直显示 "Working"。
+    // zerokey 本来一条推理都不产出，这个通道完全空着，正好拿来播报网关状态。
+    //
+    // ⚠️ delta 前必须先有 active reasoning item，否则 debug 版直接 panic
+    //    (turn.rs:2613 `error_or_panic("ReasoningSummaryDelta without active item")`)。
+    //    所以顺序是 output_item.added(reasoning) -> delta -> output_item.done。
+    //    正文 message 因此排到 output_index 1。
+    const SHOW_PROGRESS = stream && !useWebTools && process.env.ZK_PROGRESS !== '0'
+    const rsnId = 'rs_' + crypto.randomBytes(12).toString('hex')
+    let rsnOpen = false
+    let progressSteps = 0
+    function progress(bold, detail) {
+      if (!SHOW_PROGRESS) return
+      try {
+        if (!rsnOpen) {
+          rsnOpen = true
+          res.write(`event: response.output_item.added\ndata: ${JSON.stringify({
+            type: 'response.output_item.added', output_index: 0,
+            item: { type: 'reasoning', id: rsnId, summary: [], content: [] },
+          })}\n\n`)
+          res.write(`event: response.reasoning_summary_part.added\ndata: ${JSON.stringify({
+            type: 'response.reasoning_summary_part.added', item_id: rsnId,
+            output_index: 0, summary_index: 0, part: { type: 'summary_text', text: '' },
+          })}\n\n`)
+        }
+        progressSteps += 1
+        res.write(`event: response.reasoning_summary_text.delta\ndata: ${JSON.stringify({
+          type: 'response.reasoning_summary_text.delta', item_id: rsnId,
+          output_index: 0, summary_index: 0,
+          delta: `**${bold}**${detail ? '\n' + detail : ''}\n`,
+        })}\n\n`)
+      } catch (_) { /* 进度是锦上添花，绝不能因此把主流程搞挂 */ }
+    }
+    function progressClose() {
+      if (!rsnOpen) return 0
+      rsnOpen = false
+      try {
+        res.write(`event: response.output_item.done\ndata: ${JSON.stringify({
+          type: 'response.output_item.done', output_index: 0,
+          item: { type: 'reasoning', id: rsnId, summary: [], content: [] },
+        })}\n\n`)
+      } catch (_) { /* 同上 */ }
+      return 1
+    }
+
+    // 排队等一个空闲账号 —— 池子忙的时候这一步就能等好几秒，得让用户看到
+    progress('正在排队等号', '等待一个空闲的 ChatGPT 会话')
     await acquireSlot('ChatGPT')
 
     const INLINE_MAX = parseInt(process.env.ZK_INLINE_MAX || '100000', 10)
     let sendPrompt = prompt
     let attachments = null
     if (prompt.length > INLINE_MAX) {
+      // 3MB 级别的上传能花十几秒，这是最需要播报的一段
+      progress('正在上传会话附件', `${Math.round(prompt.length / 1024)}KB，超过内联上限`)
       try {
         const buf = Buffer.from(prompt, 'utf8')
         const up = await chatgptApi.uploadFile(buf, {
@@ -166,6 +231,7 @@ function buildResponsesRoute(chatgptApi) {
           useCase: 'my_files',
         })
         attachments = [{ id: up.id, size: up.size, name: up.name, mimeType: up.mimeType }]
+        progress('附件已上传', `${Math.round(prompt.length / 1024)}KB 会话内容`)
         sendPrompt =
           'The full conversation/context is in the attached text file ' +
           `(${up.name}). Read it and respond to the latest request in it.` +
@@ -179,6 +245,7 @@ function buildResponsesRoute(chatgptApi) {
       }
     }
 
+    progress('正在请求模型', null)
     let upstream
     try {
       upstream = await chatgptApi.chatCompletion(sendPrompt, null, 'client-created-root', model, attachments)
@@ -186,8 +253,24 @@ function buildResponsesRoute(chatgptApi) {
       // 流已经开了（头早已发出），不能再改状态码 —— 只能在流里报错并收尾，
       // 否则客户端会拿到一个"半开着又突然断掉"的连接。
       if (stream) {
-        res.write(`event: error\ndata: ${JSON.stringify({
-          type: 'error', error: { message: e.message, type: 'upstream_error' },
+        progressClose()
+        // ⚠️ 必须用 `response.failed`，不能用 `{type:'error'}`。
+        // 读 Codex 源码确认（codex-api/src/sse/responses.rs:330-472）：客户端只认
+        // 12 个事件 type，**里面没有 `error`** —— 未知 type 走 `_ =>` 分支被静默
+        // 忽略(:470)。然后流一关，客户端判定"stream closed before
+        // response.completed"(:519-523) → 这是**可重试**错误 → 把整个请求重发一遍。
+        // 我们的载荷动辄十几万字符，白白再打一趟。
+        // 另外 error 必须挂在 `response` 对象里，客户端是 `event.response.get("error")`
+        // 才读得到(:393)。code 也别乱填：`context_length_exceeded` /
+        // `insufficient_quota` / `server_is_overloaded` / `slow_down` 都是
+        // **不重试**的语义(:628-647)，上游只是抽风的话不该用它们。
+        res.write(`event: response.failed\ndata: ${JSON.stringify({
+          type: 'response.failed',
+          response: {
+            id: respId, object: 'response', created_at: created, status: 'failed',
+            model: mdl, output: [], usage: null,
+            error: { code: 'upstream_error', message: e.message },
+          },
         })}\n\n`)
         res.write('data: [DONE]\n\n')
         return res.end()
@@ -207,6 +290,13 @@ function buildResponsesRoute(chatgptApi) {
       // buffer everything and emit the parsed result at finish(). Skip the
       // message-shell preamble; the item type isn't known until parse time.
       if (!useWebTools) {
+        // 进度用的 reasoning item 必须在正文 message 开始**之前**关掉 ——
+        // 客户端只维护一个 active_item(turn.rs:2363-2439)，两个同时开着会让
+        // 后面的 output_text.delta 挂到错的 item 上。
+        // （output_index 客户端根本不读：它的 SSE 结构体里没声明这个字段，
+        //   codex-api/src/sse/responses.rs:163-178，全库解析层 0 次引用。
+        //   所以正文不用改成 index 1，只要保证先关再开。）
+        progressClose()
         // output_item.added
         const msgShell = {
           type: 'message', id: msgId, role: 'assistant', content: [], status: 'in_progress',

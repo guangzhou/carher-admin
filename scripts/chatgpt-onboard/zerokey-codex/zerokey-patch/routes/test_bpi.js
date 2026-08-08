@@ -242,4 +242,38 @@ t6('回程结果带抬头和"据此回答"的指示',()=>{
   assert.ok(r.text.includes('直接据此回答'),'要明确要求它讲出来')
 })
 console.log(`\n=== 讲结果 ${p6} passed, ${f6} failed ===`)
-process.exit(fail+f2+f3+f4+f5+f6?1:0)
+
+console.log('\n-- 精简重试 prompt --')
+let p7=0,f7=0
+function t7(n,fn){try{fn();p7++;console.log('  ✅',n)}catch(e){f7++;console.log('  ❌',n,'\n     ',e.message)}}
+const bigItems=[{type:'additional_tools',role:'developer',tools:[]},
+ {type:'message',role:'developer',content:[{type:'input_text',text:'You are Codex, an agent based on GPT-5. '.repeat(500)}]},
+ {type:'message',role:'developer',content:[{type:'input_text',text:'<permissions instructions> sandbox stuff'}]},
+ {type:'message',role:'user',content:[{type:'input_text',text:'# AGENTS.md instructions for /Users/lgx/codes/repo\n'+'x'.repeat(9000)}]},
+ {type:'message',role:'user',content:[{type:'input_text',text:'把结构写到 /tmp/a.md'}]}]
+t7('体积砍到原来的百分之几（重试不该跟首轮一样贵）',()=>{
+  const esc=P.escalatePrompt(bigItems,'RETRY')
+  assert.ok(esc.length<2000,'重试 prompt 还是太大: '+esc.length)
+})
+t7('保留必要三件：交手块 / 工作目录 / 用户最后诉求',()=>{
+  const esc=P.escalatePrompt(bigItems,'RETRY')
+  assert.ok(esc.includes('[本轮可用的手]'))
+  assert.ok(esc.includes('/Users/lgx/codes/repo'),'工作目录丢了模型会瞎猜路径')
+  assert.ok(esc.includes('把结构写到 /tmp/a.md'))
+  assert.ok(esc.includes('RETRY'))
+})
+t7('剔除打架的上下文（Codex 自己的 agent 提示词 / sandbox 说明）',()=>{
+  const esc=P.escalatePrompt(bigItems,'RETRY')
+  assert.ok(!esc.includes('You are Codex'))
+  assert.ok(!esc.includes('permissions instructions'))
+})
+t7('不把我们自己塞的块当成用户诉求',()=>{
+  const items=[{type:'additional_tools',role:'developer',tools:[]},
+    {type:'message',role:'user',content:[{type:'input_text',text:'真正的诉求'}]},
+    {type:'message',role:'user',content:[{type:'input_text',text:'[本轮可用的手]\nblah'}]},
+    {type:'message',role:'user',content:[{type:'input_text',text:'[上一步执行结果]\nfoo'}]}]
+  const esc=P.escalatePrompt(items,'RETRY')
+  assert.ok(esc.includes('USER: 真正的诉求'),'应回到真正的最后一条用户消息')
+})
+console.log(`\n=== 精简重试 ${p7} passed, ${f7} failed ===`)
+process.exit(fail+f2+f3+f4+f5+f6+f7?1:0)

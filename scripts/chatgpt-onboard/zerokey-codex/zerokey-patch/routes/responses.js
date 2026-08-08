@@ -20,8 +20,10 @@ let prepareCodexInput = (items) => items
 let needsEscalation = () => false
 let firstAsk = () => null
 let ESCALATE = ''
+let escalatePrompt = null
 try {
-  ;({ compileToExec, prepareCodexInput, needsEscalation, firstAsk, ESCALATE } = require('./bpi-codex'))
+  ;({ compileToExec, prepareCodexInput, needsEscalation, firstAsk, ESCALATE,
+      escalatePrompt } = require('./bpi-codex'))
 } catch (e) {
   console.warn('[bpi] bpi-codex.js not mounted, BPI compilation disabled:', e.message)
 }
@@ -364,7 +366,11 @@ function buildResponsesRoute(chatgptApi) {
       if (codexLite && !bpiRetried && needsEscalation(full)) {
         bpiRetried = true
         console.log('[bpi] refusal detected -> escalated retry')
-        const esc = `${basePrompt}\n\n${ESCALATE}`
+        // 只带"最后一条用户消息 + 交手 + 升级指令"，不要把 107KB 全history 再发一遍
+        const esc = escalatePrompt
+          ? escalatePrompt(codexInput, ESCALATE)
+          : `${basePrompt}\n\n${ESCALATE}`
+        console.log(`[bpi] escalate prompt ${esc.length} chars (was ${basePrompt.length})`)
         collectWebTextR(esc)
           .then((t2) => { if (t2 && t2.trim()) full = t2; finished = false; finish() })
           .catch(() => { finished = false; finish() })

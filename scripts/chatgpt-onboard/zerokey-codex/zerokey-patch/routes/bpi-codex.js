@@ -443,3 +443,33 @@ module.exports.RESULT_HEAD = RESULT_HEAD
 module.exports.handsBlock = handsBlock
 module.exports.distillExecOutput = distillExecOutput
 module.exports.toolOutputText = toolOutputText
+
+/**
+ * 重试用的**精简 prompt**。
+ *
+ * 2026-08-08 实测：近 60 分钟 18 台合计 12 次成功编译 / 5 次拒答重试 ——
+ * 约四成"要动手"的轮次要跑两趟。而第一版重试是把 basePrompt（真实场景 107KB）
+ * 整个再发一遍，代价与首轮相同，用户直接感知为卡顿。
+ *
+ * 重试其实不需要全部历史：模型第一轮已经"理解了任务但不肯动手"，缺的只是
+ * 「你有手、照格式输出」这件事。所以只带**最后一条用户消息 + 交手块 + 升级指令**。
+ * 顺带一个副作用是好的：107KB 里那些互相打架的上下文（Codex 自己的 agent 提示词
+ * 等）被去掉了，合规概率反而更高。
+ */
+function escalatePrompt(items, escalateText) {
+  const cwd = extractCwd(items)
+  let lastUser = ''
+  for (const it of items || []) {
+    if (!it || it.type === 'additional_tools') continue
+    if (it.role !== 'user') continue
+    const t = textOf(it)
+    // 跳过我们自己塞进去的块，别把它当成用户诉求
+    if (!t || t.startsWith(HANDS_HEAD) || t.startsWith(RESULT_HEAD)) continue
+    lastUser = t
+  }
+  // AGENTS.md 那条抬头很长，只留头部足够定位仓库
+  if (lastUser.length > 4000) lastUser = lastUser.slice(-4000)
+  return [handsBlock(cwd), '', 'USER: ' + lastUser, '', escalateText].join('\n')
+}
+
+module.exports.escalatePrompt = escalatePrompt

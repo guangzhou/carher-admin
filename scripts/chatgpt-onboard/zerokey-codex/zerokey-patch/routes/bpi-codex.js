@@ -414,6 +414,33 @@ function distillExecOutput(text) {
   return out.join('\n').trim()
 }
 
+// ── 工具输出截断（对齐 Codex）─────────────────────────────────────────
+//
+// Codex 给模型看工具输出时按 1 万 token 中间截断，保头尾 + 提示
+// (utils/output-truncation/src/lib.rs:12-28)。我们现在 distillExecOutput 不截断，
+// 一次 ls/grep 几万字符全塞下一轮 → 9 轮就撞 10 万字符附件阈值 → filecite/
+// "说一半就停"。这里对齐 Codex：超阈值就保头尾、省中间，并告诉模型"截了、原多大"。
+//
+// 阈值取 30000 字符（≈7500 token，按 4 字符/token 估，留余量到 Codex 的 1 万 token
+// 线）。没装 tiktoken，字符近似够用——截断是"别撑爆"，不是精确计量。
+//   Codex 截断提示: "Warning: truncated output (original token count: N)"
+//   这里用中文，跟 RESULT_HEAD 一个风格。
+const TOOL_OUTPUT_MAX_CHARS = 30000
+const TOOL_OUTPUT_HEAD = 14000   // 保头 14k
+const TOOL_OUTPUT_TAIL = 14000   // 保尾 14k
+
+/** 中间截断保头尾，加提示。不超阈值原样返回。 */
+function truncateToolOutput(text) {
+  const s = String(text || '')
+  if (s.length <= TOOL_OUTPUT_MAX_CHARS) return s
+  const head = s.slice(0, TOOL_OUTPUT_HEAD)
+  const tail = s.slice(s.length - TOOL_OUTPUT_TAIL)
+  const lines = s.split('\n').length
+  return head
+    + `\n\n…（已截断，原文 ${s.length} 字符 / ${lines} 行；如需中间部分请分块或缩小范围重新获取）…\n\n`
+    + tail
+}
+
 /**
  * 把 custom_tool_call / custom_tool_call_output 两类 item 换成模型看得懂的文本。
  * 其它 item 原样返回 null（调用方保留原项）。
@@ -427,7 +454,9 @@ function replayItemToText(item) {
     return { role: 'assistant', text: names.length ? names.map((n) => `⟦${n}…⟧`).join(' ') : '⟦…⟧' }
   }
   if (item.type === 'custom_tool_call_output' || item.type === 'function_call_output') {
-    const body = distillExecOutput(toolOutputText(item))
+    // 截断在 distill 之后、喂回之前 —— 大输出不撑爆下一轮上下文。
+    // 对齐 Codex utils/output-truncation/src/lib.rs:12-28（中间截断保头尾+提示）。
+    const body = truncateToolOutput(distillExecOutput(toolOutputText(item)))
     return {
       role: 'user',
       text: body
@@ -442,6 +471,8 @@ module.exports.replayItemToText = replayItemToText
 module.exports.RESULT_HEAD = RESULT_HEAD
 module.exports.handsBlock = handsBlock
 module.exports.distillExecOutput = distillExecOutput
+module.exports.truncateToolOutput = truncateToolOutput
+module.exports.TOOL_OUTPUT_MAX_CHARS = TOOL_OUTPUT_MAX_CHARS
 module.exports.toolOutputText = toolOutputText
 
 /**

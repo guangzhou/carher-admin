@@ -390,4 +390,50 @@ t8('不引用提示存在且是纯文本',()=>{
   assert.ok(!/[-]/.test(P.CITE_FREE_HINT))
 })
 console.log(`\n=== 引用剥离 ${p8} passed, ${f8} failed ===`)
-process.exit(fail+f2+f3+f4+f5+f6+f7+f8?1:0)
+
+
+console.log('\n-- 工具输出截断 --')
+let p9=0,f9=0
+function t9(n,fn){try{fn();p9++;console.log('  ✅',n)}catch(e){f9++;console.log('  ❌',n,'\n     ',e.message)}}
+t9('小输出逐字节不变（绝大多数请求）',()=>{
+  assert.strictEqual(P.truncateToolOutput('一行结果\n两行结果'), '一行结果\n两行结果')
+  assert.strictEqual(P.truncateToolOutput('x'.repeat(30000)), 'x'.repeat(30000))
+})
+t9('超阈值：保头尾 + 提示，且总长被压回阈值内',()=>{
+  const big='x'.repeat(100000)
+  const out=P.truncateToolOutput(big)
+  assert.ok(out.length < 32000, '截断后没压回来: '+out.length)
+  assert.ok(out.startsWith('x'.repeat(100)),'头部丢了')
+  assert.ok(out.endsWith('x'.repeat(100)),'尾部丢了')
+  assert.ok(out.includes('已截断'),'缺截断提示')
+  assert.ok(out.includes('100000 字符'),'提示里没写原大小')
+})
+t9('截断边界落在中间，头尾内容不串',()=>{
+  // 头是 AAA...、尾是 ZZZ...，截断后头尾应各自完整、中间是提示
+  const big='A'.repeat(20000)+'M'.repeat(60000)+'Z'.repeat(20000)
+  const out=P.truncateToolOutput(big)
+  assert.ok(out.slice(0,20000).startsWith('AAAA'),'头部不是 A')
+  assert.ok(out.slice(-20000).endsWith('ZZZZ'),'尾部不是 Z')
+  assert.ok(!out.includes('M'.repeat(50)),'中间的 M 没截干净')
+})
+t9('回程真的截断了：replayItemToText 喂回去的不超阈值',()=>{
+  // 模拟一次大 ls：10 万字符输出
+  const item={type:'custom_tool_call_output',call_id:'c1',
+    output:[{type:'input_text',text:'Script completed\nWall time 0.3s\nOutput:\n'+('line\n'.repeat(20000))}]}
+  const r=P.replayItemToText(item)
+  assert.ok(r.text.length < 35000,'回程没截: '+r.text.length)
+  assert.ok(r.text.includes('已截断'),'回程缺截断提示')
+  assert.ok(r.text.includes(P.RESULT_HEAD),'截断后丢了结果抬头')
+})
+t9('真实多轮：工具结果不再撑爆下一轮 input',()=>{
+  // 第一轮工具结果 5 万字符，截断后喂回去应 < 阈值
+  // 第二轮要把"第一轮结果 + 第二轮诉求"都发出去 ——
+  // 改前这一项就 5 万，几轮累加撞附件阈值；改后被压回 3 万内
+  const big='line\n'.repeat(12500)  // 5 万字符
+  const item={type:'custom_tool_call_output',call_id:'c1',
+    output:[{type:'input_text',text:'Output:\n'+big}]}
+  const r=P.replayItemToText(item)
+  assert.ok(r.text.length < 32000,'5万字符没压回3万: '+r.text.length)
+})
+console.log(`\n=== 工具截断 ${p9} passed, ${f9} failed ===`)
+process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9?1:0)

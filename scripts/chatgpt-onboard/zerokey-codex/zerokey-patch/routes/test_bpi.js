@@ -336,4 +336,58 @@ t7('形状日志不含会话内容',()=>{
   if(s) assert.ok(!s.includes('机密内容'),'形状摘要泄漏了内容')
 })
 console.log(`\n=== 精简重试 ${p7} passed, ${f7} failed ===`)
-process.exit(fail+f2+f3+f4+f5+f6+f7?1:0)
+
+
+console.log('\n-- 引用标记剥离 --')
+let p8=0,f8=0
+function t8(n,fn){try{fn();p8++;console.log('  ✅',n)}catch(e){f8++;console.log('  ❌',n,'\n     ',e.message)}}
+const CO='', CS='', CE=''
+const SAMPLE='甲=ZEBRA-7741 '+CO+'filecite'+CS+'turn0file0'+CS+'L3-L3'+CE+' 完毕'
+
+t8('完整标记整段剥掉，正文一字不动',()=>{
+  const out=P.stripCitations(SAMPLE)
+  assert.ok(!/[-]/.test(out),'还有私有区字符: '+JSON.stringify(out))
+  assert.ok(!out.includes('filecite')&&!out.includes('turn0file0'))
+  assert.ok(out.includes('甲=ZEBRA-7741')&&out.includes('完毕'),'正文被误删: '+out)
+})
+t8('跨分片到达也不漏（逐片正则会切两半，各漏一截）',()=>{
+  const f=P.makeCitationFilter()
+  let out=''
+  for(const c of ['甲=ZEBRA-7741 '+CO+'file','cite'+CS+'turn0','file0'+CS+'L3-L3'+CE+' 完','毕']) out+=f.push(c)
+  assert.ok(!/[-]/.test(out)&&!out.includes('cite'),JSON.stringify(out))
+  assert.ok(out.includes('甲=ZEBRA-7741')&&out.includes('完毕'))
+})
+t8('上游断在标记中间：残段丢弃 + flush 报 truncated',()=>{
+  // 用户现场就是这个形状：status=completed 但只有起始符没有结束符
+  const f=P.makeCitationFilter()
+  const out=f.push('三个标记值如下：'+CO+'filecite'+CS+'turn0')
+  assert.equal(out,'三个标记值如下：','残段不许漏给用户: '+JSON.stringify(out))
+  const r=f.flush()
+  assert.ok(r.truncated,'该报 truncated，否则这种静默截断没人知道')
+  assert.ok(r.dropped>0)
+})
+t8('落单的分隔符/结束符也不放行',()=>{
+  assert.equal(P.stripCitations('答案'+CS+'x'+CE+'y'),'答案xy')
+})
+t8('没有标记的正文逐字节不变（绝大多数请求走这条）',()=>{
+  for(const s of ['普通回答，没有任何标记。','⟦ls¦path=/tmp⟧','']) 
+    assert.strictEqual(P.stripCitations(s),s,JSON.stringify(s))
+})
+t8('不是标记的超长内容要放行，不能永久扣在缓冲区',()=>{
+  const f=P.makeCitationFilter()
+  const out=f.push(CO+'x'.repeat(400))
+  assert.ok(out.length>300,'正文被永久扣住了，用户会看到回答凭空少一段')
+})
+t8('BPI 块混引用标记时，块要能照常编译',()=>{
+  // 剥离发生在编译之前，块里若混进标记会导致参数带脏字符
+  const dirty='⟦ls¦path=/tmp'+CO+'filecite'+CS+'turn0file0'+CE+'⟧'
+  const r=P.compileToExec(P.stripCitations(dirty))
+  assert.equal(r.blocks.length,1)
+  assert.ok(!/[-]/.test(r.js),'编译产物里带了私有区字符: '+r.js)
+})
+t8('不引用提示存在且是纯文本',()=>{
+  assert.ok(P.CITE_FREE_HINT&&P.CITE_FREE_HINT.includes('不要引用'))
+  assert.ok(!/[-]/.test(P.CITE_FREE_HINT))
+})
+console.log(`\n=== 引用剥离 ${p8} passed, ${f8} failed ===`)
+process.exit(fail+f2+f3+f4+f5+f6+f7+f8?1:0)

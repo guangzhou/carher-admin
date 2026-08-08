@@ -23,7 +23,8 @@ let ESCALATE = ''
 let escalatePrompt = null
 try {
   ;({ compileToExec, prepareCodexInput, needsEscalation, firstAsk, ESCALATE,
-      escalatePrompt } = require('./bpi-codex'))
+      escalatePrompt, makeCitationFilter, stripCitations,
+      CITE_FREE_HINT } = require('./bpi-codex'))
 } catch (e) {
   console.warn('[bpi] bpi-codex.js not mounted, BPI compilation disabled:', e.message)
 }
@@ -138,7 +139,11 @@ function buildResponsesRoute(chatgptApi) {
         attachments = [{ id: up.id, size: up.size, name: up.name, mimeType: up.mimeType }]
         sendPrompt =
           'The full conversation/context is in the attached text file ' +
-          `(${up.name}). Read it and respond to the latest request in it.`
+          `(${up.name}). Read it and respond to the latest request in it.` +
+          // 网页版一引用文件就吐私有区引用标记，而且流经常**断在标记中间**
+          // （实测 status=completed 却只有起始符没有结束符）。从源头少产生：
+          // A/B n=16，截断 9/16 -> 2/16，三标记全中 1/16 -> 16/16。
+          (CITE_FREE_HINT ? '\n' + CITE_FREE_HINT : '')
         console.log(`[responses] long prompt ${prompt.length} chars → uploaded as ${up.id}`)
       } catch (e) {
         console.log(`[responses] file upload failed, falling back to inline: ${e.message}`)
@@ -271,6 +276,10 @@ function buildResponsesRoute(chatgptApi) {
       })}\n\n`)
     }
 
+    // 引用标记会**跨分片**到达（'file' 一片、'cite\ue202turn0' 又一片），
+    // 所以整条流共用一个剥离器实例，由它缓冲；逐片正则会把标记切两半各漏一截。
+    const citeFilter = makeCitationFilter ? makeCitationFilter() : null
+
     const onText = (t) => {
       if (!t) return
       full += t
@@ -278,9 +287,11 @@ function buildResponsesRoute(chatgptApi) {
       if (useWebTools) { wtPump(false); return }
       if (!stream) return
       if (bpiFrozen || full.trimStart().startsWith('\u27E6')) { bpiFrozen = true; return }
+      const delta = citeFilter ? citeFilter.push(t) : t
+      if (!delta) return          // 整片都是标记内容，这一片不发
       res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({
         type: 'response.output_text.delta', item_id: msgId,
-        output_index: 0, content_index: 0, delta: t,
+        output_index: 0, content_index: 0, delta,
       })}\n\n`)
     }
 
@@ -341,6 +352,21 @@ function buildResponsesRoute(chatgptApi) {
     const finish = () => {
       if (finished) return
       finished = true
+
+      // 剥掉网页版引用标记（\ue200filecite\ue202turn0file0\ue201 这类）。
+      // 在这里统一剥一次，下游全部受益：BPI 编译、拒答检测、最终 output text。
+      // 流式那条已经逐片剥过了，这里剥的是 `full`（用于 output/编译），
+      // 两者不冲突 —— 客户端看到的和 output 里记的因此一致。
+      if (stripCitations) {
+        const before = full.length
+        full = stripCitations(full)
+        // 未闭合的残段（"末尾只剩 filecite"那种）在 flush 里丢弃并计数
+        const tail = citeFilter ? citeFilter.flush() : { truncated: false, dropped: 0 }
+        if (before !== full.length || tail.truncated) {
+          console.log(`[cite] 剥离 ${before - full.length} 字符`
+            + (tail.truncated ? `，上游断在标记中间(丢弃 ${tail.dropped})` : ''))
+        }
+      }
 
       // Estimate usage — the web backend returns none, so without this LiteLLM
       // bills 0 (esp. streaming). input from the sent prompt, output from the

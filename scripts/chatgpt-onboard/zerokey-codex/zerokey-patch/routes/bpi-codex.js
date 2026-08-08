@@ -546,3 +546,109 @@ module.exports.escalatePrompt = escalatePrompt
 module.exports.tailDigest = tailDigest
 module.exports.ASK_ENOUGH = ASK_ENOUGH
 module.exports.shapeOf = shapeOf
+
+
+// ── 网页版引用标记：剥掉 + 从源头少产生 ──────────────────────────────
+//
+// 2026-08-08 用户现场：回答里出现 `filecite<PUA>turn0file0`，或者末尾只剩
+// `filecite` 然后整个停住。抓到的原始码点：
+//
+//     \ue200 filecite \ue202 turn0file0 \ue202 L3-L3 \ue201
+//      ↑起始           ↑分隔      ↑文件编号  ↑分隔  ↑行号    ↑结束
+//
+// 这是 ChatGPT **网页版**的引用标记，用私有区字符包住，网页前端负责渲染成引用
+// 卡片。我们直接透传，Codex 客户端不认，就当普通文字显示了。
+//
+// 只在**走了附件上传**那条路时才出现（`responses.js` 里 prompt 超过
+// ZK_INLINE_MAX 就把整段会话当 .txt 传上去）。实测 5 万字符直接发那档 0/4 发生，
+// 一超过阈值就 16/16 发生。
+//
+// 为什么它同时造成"然后就停止"（实测 n=16，A/B 见 CITE_FREE_HINT 注释）：
+// 上游 8/8 都报 `status=completed`、`incomplete_details=None`，但 9/16 的回复里
+// 标记**只有开始没有结束** —— 流走到引用标记那里就不往下发了。不是超时、不是
+// token 上限、也不是我们截的（累加逻辑只有 append）。
+//
+// 所以两头都要治：这里剥字符（治脏），CITE_FREE_HINT 从源头少产生（治截断）。
+
+const CITE_OPEN = '\ue200'   // 引用标记起始
+const CITE_END = '\ue201'    // 引用标记结束
+const CITE_SEP = '\ue202'    // 标记内分隔
+// 私有区兜底：上面三个是实测到的，同族还有别的（\ue203…）用于其它卡片类型。
+// 与其逐个追（追措辞追不完，这教训吃过），不如整段私有区一律不放行。
+const PUA_RE = /[\ue000-\uf8ff]/g
+// 一个引用标记实测 30~60 字符。给足余量；超过就认定不是标记，原样放行，
+// 避免把正文永久扣在缓冲区里。
+const CITE_MAX = 200
+
+/**
+ * 流式安全的引用剥离器。
+ *
+ * 标记会**跨分片**到达（`\ue200file` 一片、`cite\ue202turn0` 又一片），所以不能
+ * 逐片正则替换 —— 那样会把标记切成两半，各自漏出一截。这里遇到起始符就把后续
+ * 内容扣住，等到结束符再整段丢弃。
+ *
+ * 用法::
+ *
+ *     const f = makeCitationFilter()
+ *     res.write(f.push(chunk))   // 每片
+ *     res.write(f.flush())       // 收尾（未闭合的残留在此丢弃）
+ */
+function makeCitationFilter() {
+  let held = ''      // 已经看到起始符、正在等结束符的内容
+  return {
+    push(chunk) {
+      if (!chunk) return ''
+      let out = ''
+      for (const ch of String(chunk)) {
+        if (held) {
+          held += ch
+          if (ch === CITE_END) { held = '' }            // 完整标记，整段丢弃
+          else if (held.length > CITE_MAX) {            // 不像标记，别扣着正文
+            out += held.replace(PUA_RE, ''); held = ''
+          }
+          continue
+        }
+        if (ch === CITE_OPEN) { held = ch; continue }
+        // 落单的分隔符/其它私有区字符（标记被上游截断时会剩下）一律不放行
+        if (ch === CITE_SEP || PUA_RE.test(ch)) { PUA_RE.lastIndex = 0; continue }
+        out += ch
+      }
+      return out
+    },
+    /** 收尾。未闭合的那截**丢掉** —— 那正是"末尾只剩 filecite"的来源。 */
+    flush() {
+      const dangling = held
+      held = ''
+      return { text: '', truncated: Boolean(dangling), dropped: dangling.length }
+    },
+    get pending() { return held.length },
+  }
+}
+
+/** 非流式的一把梭版本。 */
+function stripCitations(text) {
+  if (typeof text !== 'string' || !text) return text
+  const f = makeCitationFilter()
+  const out = f.push(text)
+  f.flush()
+  return out
+}
+
+// 加在附件提示后面，从源头少产生引用。
+//
+// A/B 实测（同一份材料、交替发控漂移，只改这一个变量，每组 n=16）：
+//
+//                     引用漏出   断在标记中间   三标记全中
+//     A 原样           16/16      9/16          1/16
+//     B 要求不引用     13/16      2/16         16/16
+//
+// 截断 56% -> 12.5%，答对率 6% -> 100%。但**引用仍会漏出 13/16** —— 模型嘴上
+// 答应不引用照样带标记，所以出站剥离那一层省不掉，两个都要。
+const CITE_FREE_HINT =
+  '直接给出纯文本答案，不要引用来源、不要标注文件名或行号、不要添加任何引用角标。'
+
+module.exports.makeCitationFilter = makeCitationFilter
+module.exports.stripCitations = stripCitations
+module.exports.CITE_FREE_HINT = CITE_FREE_HINT
+module.exports.CITE_OPEN = CITE_OPEN
+module.exports.CITE_END = CITE_END

@@ -19,13 +19,14 @@ let compileToExec = () => ({ js: null, blocks: [], leftover: null })
 let prepareCodexInput = (items) => items
 let needsEscalation = () => false
 let firstAsk = () => null
+let extractSpawns = () => []
 let ESCALATE = ''
 let escalatePrompt = null
 let stripCanvas = (t) => t
 try {
   ;({ compileToExec, prepareCodexInput, needsEscalation, firstAsk, ESCALATE,
       escalatePrompt, makeCitationFilter, stripCitations, stripCanvas,
-      CITE_FREE_HINT } = require('./bpi-codex'))
+      extractSpawns, CITE_FREE_HINT } = require('./bpi-codex'))
 } catch (e) {
   console.warn('[bpi] bpi-codex.js not mounted, BPI compilation disabled:', e.message)
 }
@@ -545,6 +546,21 @@ function buildResponsesRoute(chatgptApi) {
         }
         console.log('[bpi] ask -> request_user_input')
         return emitItems(res, { stream, respId, created, mdl, usage, items: [fc] })
+      }
+
+      // ⟦spawn⟧ -> Codex 原生 spawn_agent（agents 层，架构与 ask 完全对称）。
+      // 编排在客户端：Codex 自己 fork 上下文、跑子线程、把结果回灌 —— 我们零编排。
+      // 与 exec 互斥判据同 ask：同轮既有 spawn 又有可执行块时，exec 优先
+      //（模型自己能干的活不该转包，spawn 只在"独立子任务"时有意义）。
+      const spawns = extractSpawns(full)
+      if (spawns.length && !compileToExec(full).js) {
+        const items = spawns.map((s) => ({
+          type: 'function_call', id: 'fc_' + crypto.randomBytes(12).toString('hex'),
+          call_id: 'call_' + crypto.randomBytes(12).toString('hex'),
+          name: s.name, arguments: JSON.stringify(s.arguments), status: 'completed',
+        }))
+        console.log(`[bpi] ${items.length} spawn(s) -> spawn_agent`)
+        return emitItems(res, { stream, respId, created, mdl, usage, items })
       }
 
       const bpi = compileToExec(full)

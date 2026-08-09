@@ -690,4 +690,39 @@ t14('不再有 ⟦done⟧ 概念（对齐 Codex：不发明 sentinel）',()=>{
 })
 console.log(`\n=== 结构分类 ${p14} passed, ${f14} failed ===`)
 
-process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9+f10+f11+f12+f13+f14?1:0)
+
+console.log('\n-- agents 层（⟦spawn⟧ -> spawn_agent）--')
+let p15=0,f15=0
+function t15(n,fn){try{fn();p15++;console.log('  ✅',n)}catch(e){f15++;console.log('  ❌',n,'\n     ',e.message)}}
+t15('spawn 块 -> spawn_agent 调用，schema 对得上真实载荷',()=>{
+  const s=P.extractSpawns('⟦spawn¦task_name=code review¦message=审查 /repo 的改动并汇报问题⟧')
+  assert.equal(s.length,1)
+  assert.equal(s[0].name,'spawn_agent')
+  assert.equal(s[0].arguments.task_name,'code_review','task_name 要规整成小写下划线')
+  assert.ok(s[0].arguments.message.includes('审查'))
+})
+t15('可选参数透传，缺 task_name/message 的丢弃',()=>{
+  const s=P.extractSpawns('⟦spawn¦task_name=t1¦message=做事¦fork_turns=none¦model=gpt-5.6¦reasoning_effort=high⟧')
+  assert.equal(s[0].arguments.fork_turns,'none')
+  assert.equal(s[0].arguments.model,'gpt-5.6')
+  assert.equal(P.extractSpawns('⟦spawn¦task_name=t1⟧').length,0,'缺 message 该丢')
+})
+t15('多个 spawn 块全部编译（并行子任务）',()=>{
+  const s=P.extractSpawns('⟦spawn¦task_name=a¦message=任务甲⟧\n⟦spawn¦task_name=b¦message=任务乙⟧')
+  assert.equal(s.length,2)
+})
+t15('spawn 归入结构分类，不被 needsEscalation 当编造打回',()=>{
+  const t='⟦spawn¦task_name=probe¦message=去 /Users/x/repo 里查一下测试失败原因⟧'
+  assert.equal(P.classifyResponse(t),'spawn')
+  // spawn 消息里带绝对路径是常态 —— 修 ABS_PATH_RE 误杀那类 bug 的同款保护
+  assert.ok(!P.needsEscalation(t,false),'spawn 被 ABS_PATH_RE 误杀')
+})
+t15('function_call 回放成文本（客户端回灌 ask/spawn 调用时不拼成空串）',()=>{
+  const r=P.replayItemToText({type:'function_call',call_id:'c',name:'spawn_agent',
+    arguments:JSON.stringify({task_name:'t',message:'查测试失败'})})
+  assert.ok(r&&r.role==='assistant')
+  assert.ok(r.text.includes('spawn_agent')&&r.text.includes('查测试失败'))
+})
+console.log(`\n=== agents层 ${p15} passed, ${f15} failed ===`)
+
+process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9+f10+f11+f12+f13+f14+f15?1:0)

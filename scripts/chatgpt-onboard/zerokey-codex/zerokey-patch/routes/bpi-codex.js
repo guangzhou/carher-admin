@@ -334,6 +334,9 @@ function handsBlock(env) {
     '你现在连着用户那台机器。下面这些块由一个外部执行器真实执行 —— 不是示例，',
     '也不是你自己的沙箱；不要用内建的代码解释器去试，那里没有用户的文件。',
     '⟦ls¦path={abs}⟧ ⟦read¦path={abs}⟧ ⟦write¦path={abs}¦content={str}⟧ ⟦cmd¦run={shell}⟧',
+    // agents 层：委派独立子任务给子 agent（编排在 Codex 客户端）。只在任务确实
+    // 可拆、且自己做完更慢时用 —— 自己能顺手做的活不要转包。
+    '需要并行独立子任务时可用 ⟦spawn¦task_name={名}¦message={子任务描述}⟧ 委派子 agent。',
     // cwd 来自协议块 <environment_context>，任何仓库都有 —— 别再让模型反问路径。
     cwd ? `当前工作目录（绝对路径）：${cwd}` : '',
     cwd ? `相对路径一律相对它解析；**不要反问用户工作目录**，上面就是。` : '',
@@ -626,6 +629,9 @@ function classifyResponse(text) {
   const blocks = extractBlocks(text)
   if (blocks.some((b) => EXECUTABLE.has(b.name))) return 'act'
   if (blocks.some((b) => b.name === 'ask')) return 'ask'
+  // spawn = 委派子 agent，也是"这轮要动手"的结构（编排在客户端）。不归入 act
+  // 会被当纯文本 -> needsEscalation 的 ABS_PATH_RE 可能把它当编造打回。
+  if (blocks.some((b) => b.name === 'spawn')) return 'spawn'
   return 'text'
 }
 
@@ -668,7 +674,7 @@ function needsEscalation(text, hadToolResult) {
   // ── 对齐 Codex 隐式协议：有块=继续，无块=turn 结束 ──
   // 有可执行块或 ask 块 -> 结构合法，放行（Codex 里 tool call 即 needs_follow_up）。
   const cls = classifyResponse(text)
-  if (cls === 'act' || cls === 'ask') return false
+  if (cls === 'act' || cls === 'ask' || cls === 'spawn') return false
   // cls === 'text'：没有块。在 Codex 里这就是"最终答复"、正常收尾。
   // 但网页模型的"没块"有两种：真·最终答复 vs 假·拒答/谎报/画布。用兜底判据区分。
   // 这几条不是可塌缩的 if-else，是弥补"网页模型会撒谎"的必要判据（见 classifyResponse 注释）。
@@ -811,6 +817,17 @@ function truncateToolOutput(text) {
  */
 function replayItemToText(item) {
   if (!item || typeof item !== 'object') return null
+  if (item.type === 'function_call') {
+    // ask/spawn 编译出的原生调用被客户端回灌时长这样。不认它会掉进 flattenInput
+    // 的默认分支拼成空 "USER: "（与 custom_tool_call_output 当年同一个坑）。
+    const name = item.name || 'tool'
+    let gist = ''
+    try {
+      const a = JSON.parse(item.arguments || '{}')
+      gist = a.message || (a.questions && a.questions[0] && a.questions[0].question) || ''
+    } catch (_) { /* 参数不是 JSON 就不摘要 */ }
+    return { role: 'assistant', text: `(已调用 ${name}) ` + String(gist).slice(0, 160) }
+  }
   if (item.type === 'custom_tool_call') {
     // 回放成 assistant "(已执行) <命令摘要>"，保留"这步是你自己干的"绑定。
     // 2026-08-09 实测：原来回放成模糊的 ⟦…⟧，模型认不出自己干了啥 -> 重发同一条。

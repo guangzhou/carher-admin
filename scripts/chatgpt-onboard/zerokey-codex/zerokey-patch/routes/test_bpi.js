@@ -576,4 +576,42 @@ t12('升级指令明确禁止画布',()=>{
 })
 console.log(`\n=== 画布 ${p12} passed, ${f12} failed ===`)
 
-process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9+f10+f11+f12?1:0)
+
+console.log('\n-- 环境从协议块读（不是猜）--')
+let p13=0,f13=0
+function t13(n,fn){try{fn();p13++;console.log('  ✅',n)}catch(e){f13++;console.log('  ❌',n,'\n     ',e.message)}}
+const ENVBLOB='<environment_context>\n  <cwd>/Users/x/codes/repo</cwd>\n  <shell>zsh</shell>\n'+
+  '  <filesystem><workspace_roots><root>/Users/x/codes/repo</root></workspace_roots></filesystem>\n</environment_context>'
+const envItem={type:'message',role:'user',content:[{type:'input_text',text:ENVBLOB}]}
+t13('从 <environment_context> 拿 cwd/shell/roots',()=>{
+  const e=P.parseEnvironment([envItem])
+  assert.equal(e.cwd,'/Users/x/codes/repo')
+  assert.equal(e.shell,'zsh')
+  assert.deepEqual(e.roots,['/Users/x/codes/repo'])
+})
+t13('★没有 AGENTS.md 时照样有 cwd（/init 的鸡生蛋现场）',()=>{
+  // 用户 /init 现场：仓库还没 AGENTS.md -> 老逻辑刮不到抬头 -> cwd=null -> 模型反问路径
+  const e=P.parseEnvironment([envItem])
+  assert.ok(e.cwd,'协议块存在时 cwd 不该为空')
+  const hb=P.handsBlock(e)
+  assert.ok(hb.includes('/Users/x/codes/repo'),'交手块必须带绝对路径')
+  assert.ok(hb.includes('不要反问用户工作目录'),'要明确禁止反问')
+})
+t13('老式 AGENTS.md 抬头作为 fallback 仍可用',()=>{
+  const old=[{type:'message',role:'user',content:[{type:'input_text',
+    text:'# AGENTS.md instructions for /Users/y/proj\n...'}]}]
+  assert.equal(P.parseEnvironment(old).cwd,'/Users/y/proj')
+})
+t13('两者都没有时不崩、不编路径',()=>{
+  const e=P.parseEnvironment([{type:'message',role:'user',content:[{type:'input_text',text:'hi'}]}])
+  assert.equal(e.cwd,null)
+  const hb=P.handsBlock(e)
+  assert.ok(!hb.includes('当前工作目录'),'没 cwd 就别写路径行')
+})
+t13('handsBlock 向后兼容裸字符串',()=>{
+  assert.ok(P.handsBlock('/tmp/x').includes('/tmp/x'))
+  assert.ok(P.handsBlock(null).includes('[本轮可用的手]'))
+})
+console.log(`\n=== 环境协议 ${p13} passed, ${f13} failed ===`)
+
+process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9+f10+f11+f12+f13?1:0)

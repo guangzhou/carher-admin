@@ -231,20 +231,56 @@ module.exports = { compileToExec, extractBlocks, blockToJs, addFilePatch, update
 const HANDS_HEAD = '[本轮可用的手]'
 const RESULT_HEAD = '[上一步执行结果]'
 
-function extractCwd(items) {
-  // AGENTS.md 那条 user 消息的抬头形如
-  // "# AGENTS.md instructions for /Users/xxx/codes/repo"
+// ── 环境：从协议块读，不要去猜 ────────────────────────────────────────
+//
+// Codex 在 input 里发了一个**结构化**的环境块（真实抓包）：
+//
+//   <environment_context>
+//     <cwd>/Users/x/codes/repo</cwd>
+//     <shell>zsh</shell>
+//     <current_date>2026-08-08</current_date>
+//     <timezone>Asia/Shanghai</timezone>
+//     <filesystem><workspace_roots><root>/Users/x/codes/repo</root></workspace_roots>...
+//   </environment_context>
+//
+// 2026-08-09 用户 /init 现场：模型反问"需要当前仓库的绝对路径"。根因是这里
+// **原来只去正则刮 "# AGENTS.md instructions for /path" 那行**，而那行只有
+// 仓库**已经有** AGENTS.md 时才存在 —— 而 `/init` 恰恰是"还没有 AGENTS.md"
+// 时才跑的命令。鸡生蛋：cwd 恒为 null -> 交手块不带路径 -> 模型只能反问。
+//
+// 改成读协议块：结构化、任何仓库都有、不依赖任何文件是否存在。
+// AGENTS.md 那行退化成 fallback（老客户端/被裁剪的载荷）。
+function parseEnvironment(items) {
+  let blob = ''
   for (const it of items || []) {
     if (!it || it.type === 'additional_tools') continue
-    const parts = it.content
-    if (!Array.isArray(parts)) continue
-    for (const p of parts) {
-      const t = (p && p.text) || ''
-      const m = t.match(/AGENTS\.md instructions for (\/[^\s\n]+)/)
-      if (m) return m[1]
+    const t = textOf(it)
+    if (t.includes('<environment_context>')) { blob = t; break }
+  }
+  const pick = (tag) => {
+    const m = blob.match(new RegExp('<' + tag + '>([^<]*)</' + tag + '>'))
+    return m ? m[1].trim() : null
+  }
+  const roots = []
+  const rootsBlock = blob.match(/<workspace_roots>([\s\S]*?)<\/workspace_roots>/)
+  if (rootsBlock) {
+    for (const m of rootsBlock[1].matchAll(/<root>([^<]*)<\/root>/g)) roots.push(m[1].trim())
+  }
+  let cwd = pick('cwd') || roots[0] || null
+  if (!cwd) {
+    // fallback：老式抬头（仅当仓库已有 AGENTS.md 时存在）
+    for (const it of items || []) {
+      if (!it || it.type === 'additional_tools') continue
+      const m = textOf(it).match(/AGENTS\.md instructions for (\/[^\s\n]+)/)
+      if (m) { cwd = m[1]; break }
     }
   }
-  return null
+  return { cwd, shell: pick('shell'), roots }
+}
+
+/** 向后兼容：只要 cwd。 */
+function extractCwd(items) {
+  return parseEnvironment(items).cwd
 }
 
 // 两种情形必须分开说。
@@ -252,13 +288,19 @@ function extractCwd(items) {
 // 也套到了**拿到结果之后**——`ll` 那轮工具跑了、目录列出来了，模型却回一句
 // 「请下达具体任务」，闷着不肯把结果讲给用户。而换成更明确的自然语言提问
 // （"罗列下本地的文件夹"）就正常。所以要显式区分"还没动手"和"已有结果"。
-function handsBlock(cwd) {
+// env 可以是字符串(旧调用，只有 cwd) 或 parseEnvironment() 的结果
+function handsBlock(env) {
+  const e = (typeof env === 'string' || env == null) ? { cwd: env } : env
+  const cwd = e.cwd
   return [
     HANDS_HEAD,
     '你现在连着用户那台机器。下面这些块由一个外部执行器真实执行 —— 不是示例，',
     '也不是你自己的沙箱；不要用内建的代码解释器去试，那里没有用户的文件。',
     '⟦ls¦path={abs}⟧ ⟦read¦path={abs}⟧ ⟦write¦path={abs}¦content={str}⟧ ⟦cmd¦run={shell}⟧',
-    cwd ? `当前工作目录 ${cwd}。` : '',
+    // cwd 来自协议块 <environment_context>，任何仓库都有 —— 别再让模型反问路径。
+    cwd ? `当前工作目录（绝对路径）：${cwd}` : '',
+    cwd ? `相对路径一律相对它解析；**不要反问用户工作目录**，上面就是。` : '',
+    e.shell ? `shell 是 ${e.shell}。` : '',
     '两种情形，选一种：',
     '1) 还需要动手 —— 只输出块本身，不要解释，不要声称自己没有权限。',
     '2) 上面已经出现 “' + RESULT_HEAD + '” —— 说明活已经干完了，'
@@ -299,7 +341,8 @@ function textOf(item) {
 
 function prepareCodexInput(items) {
   if (!isCodexLite(items)) return items
-  const cwd = extractCwd(items)
+  const env = parseEnvironment(items)
+  const cwd = env.cwd
   // 判据只看 role + 内容，**不要求 type==='message'**。
   // 2026-08-07 实测：经 LiteLLM 时 chatgpt_responses_normalize 会把
   // {type:'message', role:'developer'} 改写成 {role:'system'} 并**删掉 type**
@@ -322,7 +365,7 @@ function prepareCodexInput(items) {
     if (!r) return i
     return { type: 'message', role: r.role, content: [{ type: 'input_text', text: r.text }] }
   })
-  replayed.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: handsBlock(cwd) }] })
+  replayed.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: handsBlock(env) }] })
   return replayed
 }
 
@@ -411,6 +454,7 @@ module.exports.prepareCodexInput = prepareCodexInput
 module.exports.compactInput = compactInput
 module.exports.isCodexLite = isCodexLite
 module.exports.extractCwd = extractCwd
+module.exports.parseEnvironment = parseEnvironment
 module.exports.isEnvironmentPrompt = isEnvironmentPrompt
 
 // ── 拒答检测与升级重试 ────────────────────────────────────────────
@@ -724,7 +768,8 @@ function shapeOf(items) {
 }
 
 function escalatePrompt(items, escalateText) {
-  const cwd = extractCwd(items)
+  const env = parseEnvironment(items)
+  const cwd = env.cwd
   let lastUser = ''
   for (const it of items || []) {
     if (!it || it.type === 'additional_tools') continue

@@ -614,4 +614,32 @@ t13('handsBlock 向后兼容裸字符串',()=>{
 })
 console.log(`\n=== 环境协议 ${p13} passed, ${f13} failed ===`)
 
-process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9+f10+f11+f12+f13?1:0)
+
+console.log('\n-- 结构分类器(对齐 Codex 隐式协议) --')
+let p14=0,f14=0
+function t14(n,fn){try{fn();p14++;console.log('  ✅',n)}catch(e){f14++;console.log('  ❌',n,'\n     ',e.message)}}
+t14('可执行块->act, ask块->ask, 纯文本->text',()=>{
+  assert.equal(P.classifyResponse('⟦write¦path=/tmp/a¦content=x⟧'),'act')
+  assert.equal(P.classifyResponse('⟦ls¦path=/tmp⟧'),'act')
+  assert.equal(P.classifyResponse('⟦ask¦question=哪个?¦option=a¦option=b⟧'),'ask')
+  assert.equal(P.classifyResponse('快速排序是 O(n log n)'),'text')
+})
+t14('对齐 Codex：没块=turn结束，真最终答复/闲聊不重试',()=>{
+  // Codex 隐式协议：这一轮没 tool call 就是 turn 结束
+  assert.ok(!P.needsEscalation('快速排序的平均复杂度是 O(n log n)。',false))
+  assert.ok(!P.needsEscalation('你好，有什么可以帮你？',true))
+})
+t14('网页模型才需要的兜底：拒答/画布/谎报仍重试',()=>{
+  assert.ok(P.needsEscalation('我没有权限访问文件系统',false),'拒答')
+  assert.ok(P.needsEscalation(':::writing{variant="document"}\n#x\n:::',false),'画布')
+  assert.ok(P.needsEscalation('已创建 add.py，测试通过。',false),'无工具史谎报')
+  assert.ok(!P.needsEscalation('已创建 add.py，测试通过。',true),'有工具史=合法报告')
+})
+t14('不再有 ⟦done⟧ 概念（对齐 Codex：不发明 sentinel）',()=>{
+  // done 块现在就是个未知块名 -> 无可执行块 -> text
+  assert.equal(P.classifyResponse('⟦done¦summary=完成了⟧'),'text')
+  assert.equal(typeof P.extractDone,'undefined','extractDone 应已移除')
+})
+console.log(`\n=== 结构分类 ${p14} passed, ${f14} failed ===`)
+
+process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9+f10+f11+f12+f13+f14?1:0)

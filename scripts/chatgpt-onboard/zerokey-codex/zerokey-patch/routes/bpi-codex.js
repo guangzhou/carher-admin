@@ -484,6 +484,31 @@ const REFUSAL_RE = new RegExp(
 // 纯问答（"快速排序复杂度"）不会出现绝对路径，不受影响。
 const ABS_PATH_RE = /(?:\/(?:Users|home|opt|var|etc|tmp)\/[^\s'"`)]+)|(?:[A-Za-z]:\\\\)/
 
+// ── 结构分类器（对齐 Codex 的隐式 turn 协议）─────────────────────────
+// 读 Codex 源码确认（core/src/stream_events_utils.rs:298-329, turn.rs:465-514）：
+// Codex 的 turn 结束是**纯隐式协议 —— 这一轮解析出 0 个 tool call 就是 turn 结束**，
+// 没有 sentinel、没有"完成工具"（attempt_completion 那类），`end_turn` 字段也只是
+// 服务端单向否决(Some(false)=强制续跑)、不是模型声明完成的通道。
+// 所以**不发明 ⟦done⟧**（少一个模型会忘记发的 sentinel = 少一类 hang 死的 bug）。
+//
+// 一轮回复按**结构**归类：
+//   'act'  含至少一个可执行块（read/write/cmd…）  -> 要动手，执行它
+//   'ask'  含 ⟦ask¦…⟧                            -> 需要用户澄清
+//   'text' 没有任何块（纯文本）                    -> turn 结束，这就是最终答复
+// 对齐 Codex：'text' = "这一轮没 tool call" = 正常收尾。
+//
+// ⚠️ 与 Codex 唯一的差别、也是那几个兜底正则**无法被塌缩掉**的根本原因：
+// Codex 的模型不会拒答/谎报，所以"没块=真最终答复"永远成立。网页模型会拒答/
+// 谎报/走画布，于是 'text' 有两种含义：真·最终答复 vs 假·没动手。needsEscalation
+// 用兜底判据区分这两者 —— 这不是可省的 if-else，是弥补"网页模型不如原生模型可信"
+// 的必要代价。协议对齐能塌缩"正常路径"，但塌缩不掉"网页模型会撒谎"这个事实。
+function classifyResponse(text) {
+  const blocks = extractBlocks(text)
+  if (blocks.some((b) => EXECUTABLE.has(b.name))) return 'act'
+  if (blocks.some((b) => b.name === 'ask')) return 'ask'
+  return 'text'
+}
+
 // ChatGPT 网页版"文档/画布"标记（2026-08-09 用户 /init 现场）：
 // 模型没吐 ⟦write⟧ 块，而是调了**网页产品自己的文档功能**，输出形如
 //     :::writing{variant="document" id="58391"}
@@ -520,15 +545,18 @@ const CLAIM_DONE_RE = new RegExp(
 /** 这一轮是不是"该动手却没动手"。hadToolResult=整段对话此前是否已有工具结果。 */
 function needsEscalation(text, hadToolResult) {
   if (typeof text !== 'string' || !text.trim()) return false
-  if (extractBlocks(text).length) return false   // 已经吐块了
-  if (REFUSAL_RE.test(text)) return true
-  if (ABS_PATH_RE.test(text)) return true         // 提到了路径却一次工具都没调
-  // 网页版画布 = 模型走了产品的"写文档"功能，文件并没有被创建 -> 必须重试逼它吐块
-  if (CANVAS_OPEN_RE.test(text)) return true
-  // 假完成：声称做了文件/命令动作，但整段对话没跑过任何工具 = 编的。
-  // 真跑过工具再报告（hadToolResult=true）是合法的，放行。
-  if (!hadToolResult && CLAIM_DONE_RE.test(text)) return true
-  return false
+  // ── 对齐 Codex 隐式协议：有块=继续，无块=turn 结束 ──
+  // 有可执行块或 ask 块 -> 结构合法，放行（Codex 里 tool call 即 needs_follow_up）。
+  const cls = classifyResponse(text)
+  if (cls === 'act' || cls === 'ask') return false
+  // cls === 'text'：没有块。在 Codex 里这就是"最终答复"、正常收尾。
+  // 但网页模型的"没块"有两种：真·最终答复 vs 假·拒答/谎报/画布。用兜底判据区分。
+  // 这几条不是可塌缩的 if-else，是弥补"网页模型会撒谎"的必要判据（见 classifyResponse 注释）。
+  if (REFUSAL_RE.test(text)) return true          // 拒答："我没有权限/终端"
+  if (ABS_PATH_RE.test(text)) return true         // 提到绝对路径却一次工具都没调 = 编的
+  if (CANVAS_OPEN_RE.test(text)) return true      // 画布 = 走了网页写文档功能，文件没创建
+  if (!hadToolResult && CLAIM_DONE_RE.test(text)) return true  // 谎报完成（全程 0 工具）
+  return false                                    // 其余"没块" = 真·最终答复/正常闲聊，收尾
 }
 
 const ESCALATE = [
@@ -543,6 +571,7 @@ const ESCALATE = [
 ].join('\n')
 
 module.exports.needsEscalation = needsEscalation
+module.exports.classifyResponse = classifyResponse
 module.exports.ESCALATE = ESCALATE
 module.exports.REFUSAL_RE = REFUSAL_RE
 module.exports.ABS_PATH_RE = ABS_PATH_RE

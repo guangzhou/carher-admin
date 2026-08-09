@@ -535,20 +535,32 @@ function truncateToolOutput(text) {
 function replayItemToText(item) {
   if (!item || typeof item !== 'object') return null
   if (item.type === 'custom_tool_call') {
-    // 模型自己发起的那一步，回放成它当初写的块，保持"一问一答"的形状
-    const marks = String(item.input || '').match(/BPI\(([a-z_]+)\):/g) || []
-    const names = marks.map((m) => m.slice(4, -2))
-    return { role: 'assistant', text: names.length ? names.map((n) => `⟦${n}…⟧`).join(' ') : '⟦…⟧' }
+    // 回放成 assistant "(已执行) <命令摘要>"，保留"这步是你自己干的"绑定。
+    // 2026-08-09 实测：原来回放成模糊的 ⟦…⟧，模型认不出自己干了啥 -> 重发同一条。
+    // 摘要出真实命令后，模型能识别"这步做过了"。
+    const js = String(item.input || '')
+    const cmds = []
+    for (const m of js.matchAll(/exec_command\(\{cmd:\s*("(?:[^"\\]|\\.)*")\}\)/g)) {
+      try { cmds.push(JSON.parse(m[1]).split('\n')[0].slice(0, 80)) } catch (_) { /* skip */ }
+    }
+    for (const m of js.matchAll(/Add File: ([^\\\n"]+)/g)) cmds.push('写文件 ' + m[1])
+    const summary = cmds.length ? cmds.join(' ; ') : '(工具调用)'
+    return { role: 'assistant', text: '(已执行) ' + summary }
   }
   if (item.type === 'custom_tool_call_output' || item.type === 'function_call_output') {
     // 截断在 distill 之后、喂回之前 —— 大输出不撑爆下一轮上下文。
-    // 对齐 Codex utils/output-truncation/src/lib.rs:12-28（中间截断保头尾+提示）。
     const body = truncateToolOutput(distillExecOutput(toolOutputText(item)))
+    // 关键：明确框定"这是你上一条命令的真实返回 + 循环纪律"。
+    // 2026-08-09 实测（回程绑定假设，n=5）：原来只写"[上一步执行结果]...请据此回答"，
+    // 模型在看到 "all tests passed" 后仍重发同一条命令，4~12 轮才停（甚至卡死）。
+    // 改成把"你那条命令已执行完毕 / 成功就别重发 / 完成就直接答复"讲清楚后，
+    // 5/5 在 2~4 轮干净收尾，真产物全对 —— 从"卡顿重做"变"像 acct 一样利落"。
+    if (!body) return { role: 'user', text: `${RESULT_HEAD} (无输出，命令已执行)` }
     return {
       role: 'user',
-      text: body
-        ? `${RESULT_HEAD}\n${body}\n(以上是真实执行结果，请直接据此回答用户。)`
-        : `${RESULT_HEAD} (无输出)`,
+      text: `${RESULT_HEAD}\n${body}\n\n`
+        + '（这是你上一条命令的真实返回。若结果表明成功，该步已完成——**不要重发同一条命令**；'
+        + '若整个任务已完成，直接给最终答复结束本轮；否则只发下一步还没做的命令。）',
     }
   }
   return null

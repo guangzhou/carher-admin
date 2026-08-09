@@ -200,10 +200,12 @@ t5('工具结果能被提取成模型看得懂的文本（这就是之前丢掉�
   assert.ok(!r.text.includes('chunk_id'),'chunk_id 这类噪声不该喂给模型')
   assert.ok(!r.text.includes('Wall time'),'Wall time 也是噪声')
 })
-t5('调用项回放成块的形状',()=>{
+t5('调用项回放成"已执行+命令摘要"（模型认得出自己干了啥）',()=>{
   const r=P.replayItemToText({type:'custom_tool_call',name:'exec',
-    input:'text("BPI(ls):"); text(await tools.exec_command({cmd:"ls"}));'})
-  assert.equal(r.role,'assistant'); assert.ok(r.text.includes('⟦ls'))
+    input:'text("BPI(ls):"); text(await tools.exec_command({cmd:"ls -la /tmp"}));'})
+  assert.equal(r.role,'assistant')
+  assert.ok(r.text.includes('已执行'),'要标明这步是模型自己干的')
+  assert.ok(r.text.includes('ls -la /tmp'),'要摘出真实命令，别再用模糊的 ⟦…⟧')
 })
 t5('普通 item 不动',()=>{
   assert.equal(P.replayItemToText({type:'message',role:'user',content:[]}),null)
@@ -234,12 +236,14 @@ t6('交手提示词里"只输出块"必须带条件，不能是无条件的',()=
   assert.ok(h.includes('不要再输出块'),'有结果时要禁止继续吐块')
   assert.ok(/ll|ls/.test(h),'要点明 ll/ls 这类简写是让它执行')
 })
-t6('回程结果带抬头和"据此回答"的指示',()=>{
+t6('回程结果带抬头 + 循环纪律（成功别重发、完成就答复）',()=>{
   const r=P.replayItemToText({type:'custom_tool_call_output',output:[
     {type:'input_text',text:'{"exit_code":0,"output":"a.txt\\nb.txt"}'}]})
   assert.ok(r.text.startsWith(P.RESULT_HEAD),'抬头要和提示词里那个常量一致')
   assert.ok(r.text.includes('a.txt'))
-  assert.ok(r.text.includes('直接据此回答'),'要明确要求它讲出来')
+  // 2026-08-09 回程绑定实测：这两句把 4~12 轮重做降到 2~4 轮利落收尾
+  assert.ok(r.text.includes('不要重发同一条命令'),'必须明确禁止重发成功过的命令')
+  assert.ok(r.text.includes('直接给最终答复'),'必须明确"完成就答复结束"')
 })
 console.log(`\n=== 讲结果 ${p6} passed, ${f6} failed ===`)
 

@@ -110,9 +110,19 @@ function updateFilePatch(path, oldStr, newStr) {
 function blockToJs(blk) {
   const p = blk.params
   switch (blk.name) {
-    case 'cmd':
+    case 'cmd': {
       if (!p.run) return null
-      return `await tools.exec_command({cmd: ${jsStr(p.run)}})`
+      // 剥对称的外层引号：模型常发 ⟦cmd¦run='git status --short'⟧（带引号）。
+      // 2026-08-09 用户现场：整串带引号进了 shell -> zsh 把 "git status --short"
+      // 当成**一个**命令名 -> command not found。BPI 参数本身就是字面值，
+      // 外层引号永远是多余的。
+      let run = String(p.run).trim()
+      const q = run[0]
+      if ((q === "'" || q === '"' || q === '`') && run.endsWith(q) && run.length > 1) {
+        run = run.slice(1, -1)
+      }
+      return `await tools.exec_command({cmd: ${jsStr(run)}})`
+    }
     case 'ls':
       if (!p.path) return null
       return `await tools.exec_command({cmd: ${jsStr('ls -la ' + shq(p.path))}})`
@@ -668,6 +678,21 @@ const CLAIM_DONE_RE = new RegExp(
   + "(file|test|\\.(py|js|ts|md|txt|json|sh|go|rs))",
   "i")
 
+// ── 空承诺/拖延判据（2026-08-09 用户现场：创建飞书文档）────────────────
+// 现场：用户"那你现在创建一个文档" -> 模型「可以继续」；"创建了吗？" ->
+// 「我现在直接用本机已授权的 lark-cli 创建飞书文档…」—— 全程零块，
+// 用户连问三轮才被戳穿。这在协议里是**结构非法**的：宣告"我现在就去做 X"
+// 的回复必须携带做 X 的块；纯文本只能是最终答复或提问。判据是结构性的：
+//   第一人称即时意图 + 动作动词 + 零块 = 拖延，重试。
+// 动词表收紧："我可以帮你生成内容"（能力陈述，无"现在"类词头）不触发；
+// "你可以运行 X"（第二人称）不触发；正常最终答复"已完成 X"走 CLAIM_DONE 通道。
+const STALL_INTENT_RE = new RegExp(
+  '(我现在|我将|我这就|接下来我?|让我|我马上|随即|现在直接|我先|正在)'
+  + '[^。\\n]{0,30}'
+  + '(创建|执行|运行|读取|检查|安装|升级|写入|调用|查询|下载|上传|打开|删除|列出)')
+// 纯敷衍：整条回复就是一句应答词，零信息零动作（现场原句「可以继续」）。
+const FILLER_RE = /^(可以|好的|收到|明白|嗯|OK|ok)[。！!，,\s]*(继续|了解|开始)?[。！!\s]*$/
+
 /** 这一轮是不是"该动手却没动手"。hadToolResult=整段对话此前是否已有工具结果。 */
 function needsEscalation(text, hadToolResult) {
   if (typeof text !== 'string' || !text.trim()) return false
@@ -680,6 +705,10 @@ function needsEscalation(text, hadToolResult) {
   // 这几条不是可塌缩的 if-else，是弥补"网页模型会撒谎"的必要判据（见 classifyResponse 注释）。
   if (REFUSAL_RE.test(text)) return true          // 拒答："我没有权限/终端"（任何时候都不合法）
   if (CANVAS_OPEN_RE.test(text)) return true      // 画布 = 走了网页写文档功能，文件没创建
+  // 拖延：承诺"我现在就去做 X"却零块，或整条就一句敷衍（"可以继续"）。
+  // 不分阶段 —— 工具跑没跑过，空承诺都非法（现场就是有过工具结果后继续拖）。
+  if (STALL_INTENT_RE.test(text)) return true     // 空承诺："我现在直接用 lark-cli 创建…"
+  if (FILLER_RE.test(text.trim())) return true    // 纯敷衍："可以继续"
   // ── 谎报判据只在"全程 0 工具"时生效 ──
   // 2026-08-09 /init 死循环的直接扳机就在这里：模型真把 AGENTS.md 写完了、
   // 给出合法最终答复"已在 /Users/…/AGENTS.md 创建…"——最终答复**必然**提到
@@ -710,6 +739,8 @@ module.exports.ESCALATE = ESCALATE
 module.exports.REFUSAL_RE = REFUSAL_RE
 module.exports.ABS_PATH_RE = ABS_PATH_RE
 module.exports.CLAIM_DONE_RE = CLAIM_DONE_RE
+module.exports.STALL_INTENT_RE = STALL_INTENT_RE
+module.exports.FILLER_RE = FILLER_RE
 module.exports.stripCanvas = stripCanvas
 module.exports.CANVAS_OPEN_RE = CANVAS_OPEN_RE
 

@@ -120,5 +120,27 @@ scenario('S10 画布围栏 -> 判"没动手"，剥围栏保正文', () => {
   assert.ok(stripped.includes('正文') && !stripped.includes(':::'))
 })
 
+// ── 2026-08-09 深夜：创建飞书文档 —— 空承诺拖延三连 ──
+scenario('S11 空承诺/敷衍 -> 判拖延重试；能力陈述/收尾不误伤', () => {
+  // 现场原句，全是拖延（有无工具史都非法）
+  assert.ok(P.needsEscalation('可以继续', true), '「可以继续」放过了')
+  assert.ok(P.needsEscalation('我现在直接用本机已授权的 lark-cli 创建飞书文档，并先读取文档技能说明以确保调用方式正确。', true))
+  assert.ok(P.needsEscalation('好的，接下来我先检查 lark-cli 当前可用的文档创建接口', false))
+  // 不该误伤的：能力陈述 / 第二人称 / 真收尾 / 提问
+  assert.ok(!P.needsEscalation('我可以协助创建、整理和写入飞书文档，请告诉我标题。', false), '能力陈述被误伤')
+  assert.ok(!P.needsEscalation('你可以运行 lark-cli doc create 来创建。', false), '第二人称被误伤')
+  assert.ok(!P.needsEscalation('已创建飞书文档，标题《周报》，文档 ID doccnXXXX。', true), '真收尾被误伤')
+})
+
+// ── 2026-08-09 深夜：⟦cmd⟧ 参数带引号 -> zsh 当成一个命令名 ──
+scenario('S12 cmd 参数外层引号剥掉，不再 command not found', () => {
+  const r = P.compileToExec("⟦cmd¦run='git status --short'⟧")
+  assert.ok(r.js.includes('"git status --short"'), '外层单引号没剥: ' + r.js)
+  assert.ok(!r.js.includes("'git"), '引号还在')
+  // 内部引号（合法 shell 引用）不能动
+  const r2 = P.compileToExec('⟦cmd¦run=grep -r \'TODO\' src/⟧')
+  assert.ok(r2.js.includes("grep -r 'TODO' src/"), '内部引号被误剥: ' + r2.js)
+})
+
 console.log(`\n=== 场景回放 ${pass} passed, ${fail} failed ===`)
 process.exit(fail ? 1 : 0)

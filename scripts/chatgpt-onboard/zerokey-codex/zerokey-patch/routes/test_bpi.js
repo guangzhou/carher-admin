@@ -161,6 +161,17 @@ t3('真跑过工具后报告完成 -> 放行（不是谎报）',()=>{
   assert.ok(!P.needsEscalation('已创建 add.py 和 test_add.py，测试通过。', true),'真做过不该被当谎报')
   assert.ok(!P.needsEscalation('Created add.py, tests pass.', true))
 })
+t3('★/init 收尾回归：真干完活、答复带绝对路径 -> 放行',()=>{
+  // 2026-08-09 /init 死循环的直接扳机：最终答复必然带绝对路径（"已在
+  // /Users/…/AGENTS.md 创建…"），旧版 ABS_PATH_RE 无条件生效把真答复判成编造
+  // → 升级重试逼模型只输出块 → 又发 ⟦ls⟧ → Explored ×20 死循环。
+  const finalAnswer='已在 /Users/Liuguoxian/codes/codex/AGENTS.md 创建仓库贡献指南，包含项目结构、构建命令等章节。'
+  assert.ok(!P.needsEscalation(finalAnswer, true),'真干过活的最终答复被误杀 -> 死循环')
+  // 但 0 工具就报绝对路径，仍然是编的，照拦
+  assert.ok(P.needsEscalation(finalAnswer, false),'0 工具报路径应拦截')
+  // 拒答不分阶段，任何时候都拦
+  assert.ok(P.needsEscalation('我没有权限访问文件系统', true))
+})
 t3('纯问答即使没跑工具也不误判成假完成',()=>{
   for (const s of ['快速排序的平均复杂度是 O(n log n)。',
                    'AGENTS.md 已存在，按要求未覆盖。',
@@ -472,13 +483,50 @@ t10('短会话不压（原样返回同一个数组）',()=>{
   const s=[bigItem('user','hi')]
   assert.strictEqual(P.compactInput(s),s)
 })
-t10('长会话压缩：33万 -> 4万内，工具结果全丢',()=>{
+t10('长会话压缩：老工具结果→台账，最近一次工具交换保留',()=>{
   const items=[dev,ag]
-  for(let i=0;i<10;i++){items.push(bigItem('user','看模块'+i));items.push(tool());items.push(bigItem('assistant','没问题'+i))}
+  for(let i=0;i<10;i++){
+    items.push({type:'custom_tool_call',call_id:'c'+i,name:'exec',
+      input:`text("BPI(ls):");\ntext(await tools.exec_command({cmd: "ls -la /repo/dir${i}"}));`})
+    items.push({...tool(),call_id:'c'+i})
+    items.push(bigItem('assistant','没问题'+i))
+  }
   const out=P.compactInput(items)
-  assert.ok(!out.some(it=>it.type==='custom_tool_call_output'),'工具结果没丢')
-  const sz=out.reduce((s,it)=>{if(it.type==='custom_tool_call_output')return s+30000;return s+(((it.content||[])[0]&&it.content[0].text||'').length)},0)
-  assert.ok(sz<50000,'没压到 5 万内: '+sz)
+  // 老的工具结果全丢，但**最近一次**必须留（模型要看到刚刚那条命令的真实返回）
+  const outs=out.filter(it=>it.type==='custom_tool_call_output')
+  assert.equal(outs.length,1,'应恰好保留最近一次工具输出，实际 '+outs.length)
+  assert.equal(outs[0].call_id,'c9','留错了：'+outs[0].call_id)
+  // 被丢的 9 次要有台账 —— 否则模型对自己做过的事失忆，从头再探（/init 死循环现场）
+  const flat=out.map(it=>(((it.content||[])[0]||{}).text||'')).join('\n')
+  assert.ok(flat.includes(P.LEDGER_HEAD),'没有台账')
+  assert.ok(flat.includes('dir0')&&flat.includes('dir8'),'台账缺了早期动作')
+  assert.ok(flat.includes('不要重复执行'),'台账没写循环纪律')
+  // 压缩仍然有效：33万 -> 10万附件阈值之下（留一次 3 万的原文是有意的）
+  const sz=out.reduce((s,it)=>{
+    if(it.type==='custom_tool_call')return s+String(it.input||'').length
+    if(it.type==='custom_tool_call_output')return s+P.toolOutputText(it).length
+    return s+(((it.content||[])[0]&&it.content[0].text||'').length)},0)
+  assert.ok(sz<90000,'没压到 9 万内: '+sz)
+})
+t10('/init 失忆循环回归：write 成功后压缩，模型仍知道文件已写',()=>{
+  // 2026-08-09 现场：AGENTS.md 写入成功后，压缩把 write 结果连同记忆一起抹掉，
+  // 模型从头再探（"Explored→List codex" ×20）。修复后：write 是最近一次交换，
+  // 原文保留；更早的 5 次 ls 进台账。
+  const items=[dev,ag]
+  for(let i=0;i<5;i++){
+    items.push({type:'custom_tool_call',call_id:'c'+i,name:'exec',
+      input:`text("BPI(ls):");\ntext(await tools.exec_command({cmd: "ls -la /repo/d${i}"}));`})
+    items.push({...tool(),call_id:'c'+i})
+  }
+  items.push({type:'custom_tool_call',call_id:'cw',name:'exec',
+    input:'text("BPI(write):");\ntext(await tools.apply_patch("*** Begin Patch\\n*** Add File: /repo/AGENTS.md\\n+# x\\n*** End Patch"));'})
+  items.push({type:'custom_tool_call_output',call_id:'cw',output:[{type:'input_text',text:'{}'}]})
+  const out=P.compactInput(items)
+  const outs=out.filter(it=>it.type==='custom_tool_call_output')
+  assert.equal(outs.length,1)
+  assert.equal(outs[0].call_id,'cw','write 那次交换必须保留')
+  const flat=out.map(it=>(((it.content||[])[0]||{}).text||'')).join('\n')
+  assert.ok(flat.includes(P.LEDGER_HEAD),'ls 历史该进台账')
 })
 t10('AGENTS.md 必留（cwd 来源，丢了模型瞎猜路径）',()=>{
   const items=[dev,ag,bigItem('user','看模块'),tool(),bigItem('assistant','好')]

@@ -205,8 +205,45 @@ function firstAsk(text) {
   return b ? askToFunctionCall(b) : null
 }
 
+// ── agents 层：⟦spawn⟧ -> Codex 原生 spawn_agent（协议对齐，不自造编排）─────
+//
+// 架构对称：我们已经把 ⟦write⟧ 编译成 custom_tool_call(exec)，同理把
+// ⟦spawn¦task_name=…¦message=…⟧ 编译成 function_call(spawn_agent)。
+// spawn_agent **本来就在客户端发来的 additional_tools.collaboration 命名空间里**，
+// 客户端**自己会编排子 agent**（fork 上下文、跑子线程、把结果回灌）—— 我们这边
+// 零编排逻辑，只做"文本块 -> 原生调用"的翻译，跟 exec 一模一样。
+//
+// schema（读真实载荷 spawn_agent.parameters 原文，非推测）：
+//   required: task_name(小写字母/数字/下划线), message(纯文本任务)
+//   optional: fork_turns("none"|"all"|正整数字符串, 默认 all), model, reasoning_effort
+//
+// ⚠️ 为什么保守：实测网页模型**不主动**发委派块（给了也不用，它偏好自己 batch），
+// 所以这条路平时是**休眠**的 —— 只有用户明确要求子 agent、且账号契约教了 ⟦spawn⟧
+// 时才会走到。它的价值是：真需要时**走原生编排**（结果由客户端保证回灌），
+// 而不是让模型用 exec 假装并行。客户端侧编排是 Codex 自己的代码，我们不重造。
+function spawnToFunctionCall(blk) {
+  const p = blk.params
+  const taskName = (p.task_name || p.name || '').trim()
+  const message = (p.message || p.task || '').trim()
+  if (!taskName || !message) return null
+  const args = { task_name: taskName.toLowerCase().replace(/[^a-z0-9_]/g, '_'), message }
+  if (p.fork_turns) args.fork_turns = String(p.fork_turns)
+  if (p.model) args.model = String(p.model)
+  if (p.reasoning_effort) args.reasoning_effort = String(p.reasoning_effort)
+  return { name: 'spawn_agent', arguments: args }
+}
+
+/** 抽出所有 ⟦spawn⟧ 块，编译成 spawn_agent 调用列表（可并行多个）。 */
+function extractSpawns(text) {
+  return extractBlocks(text)
+    .filter((b) => b.name === 'spawn')
+    .map(spawnToFunctionCall)
+    .filter(Boolean)
+}
+
 module.exports = { compileToExec, extractBlocks, blockToJs, addFilePatch, updateFilePatch,
-                   askToFunctionCall, firstAsk, OPEN, CLOSE, SEP }
+                   askToFunctionCall, firstAsk, spawnToFunctionCall, extractSpawns,
+                   OPEN, CLOSE, SEP }
 
 
 // ── 入站：把 Codex 形状的请求改造成网页模型能接住的样子 ──────────────
@@ -369,26 +406,84 @@ function prepareCodexInput(items) {
   return replayed
 }
 
-// ── 结构压缩（照 Codex 本地 auto-compact）──────────────────────────────
+// ── 结构压缩（对齐 Codex auto-compact 的**完整**协议）───────────────────
 //
-// Codex 怎么让长会话不爆：上下文到窗口 90% 时，collect_user_messages 只挑 user 消息，
-// 工具调用/结果/assistant 全丢，新历史 = 最近 N 条 user 原文 + 最后 assistant
-// (compact.rs:348-368, collect_user_messages:520, COMPACT_USER_MESSAGE_MAX_TOKENS=20000)。
-// 纯本地、0 额外调用。
+// Codex 压缩后的历史是**两样东西**，缺一不可（compact.rs:345-348）：
+//   new_history = user_messages + **summary_text**
+// summary 的前缀原文（prompts/templates/compact/summary_prefix.md）明说：
+// "Another language model started to solve this problem… Use this to build on
+//  the work that has already been done and **avoid duplicating work**."
 //
-// 我们的天然优势：网页会话每次本就是新会话（responses.js:257 传 null）。
-// 所以网关收到 Codex 客户端全量 input 后、发给网页后端前，做一次同样的结构压缩：
-// 丢早的工具结果（撑爆的主因），留最近 N 条 user + 最后 assistant。
+// 2026-08-09 用户 /init 现场（"Explored→List codex"重复 20+ 次）就是只抄了一半
+// 的代价：第一版只留 user 消息、把工具调用/结果**全部丢掉且不留任何摘要**。
+// 本地复现（见 test_bpi.js）：98151 字符压到 187，"AGENTS.md 已写入"那条结果
+// 一起被抹掉 → 模型对自己做过的一切失忆 → 从头再探 → 每轮都超阈值 → 死循环。
+//
+// Codex 的 summary 靠再调一次模型生成；网关的位置优势是**亲眼看到每个工具调用
+// 和结果**，可以 0 额外调用地生成确定性"工作台账"（toolLedger），并把**最近一次
+// 工具交换原文保留**（模型必须看到刚刚那条命令的真实返回，否则永远不知道上一步
+// 成功没有）。
 //
 // 基线实测（每轮工具结果 3 万字符）：改前第 2 轮就撞 10 万附件阈值 → filecite；
-// 改后稳态 6.2 万字符、不随轮次增长。从线性变常数。
+// 改后稳态 6 万+ 字符、不随轮次增长。从线性变常数。
 //
 // 硬约束（已查实，踩了就出事）：
 //  - AGENTS.md 那条 user 必留（extractCwd 从它取工作目录，丢了模型瞎猜路径）
 //  - developer/system 系统指令必留（模型人格，剥掉=自断一臂，8/8 vs 7/8 已证伪）
 //  - 只在总长超阈值才压，短会话原样返回（不无谓丢历史）
+//  - 台账必留 + 最近一次工具交换必留（丢了=失忆循环，/init 现场已实测）
 const COMPACT_TRIGGER_CHARS = 70000   // 附件阈值的 70%，对齐 Codex "90% 窗口才压"
 const KEEP_RECENT_USERS = 8           // 保留最近 N 条 user 原文（Codex 2万token≈放宽）
+const LEDGER_HEAD = '[已完成的工作台账]'
+const LEDGER_MAX_CHARS = 6000         // 台账封顶；超了丢最老的行（最近的动作价值最高）
+
+/**
+ * 确定性台账：把被压缩丢弃的工具调用/结果对，压成"命令 → 结果要点"清单。
+ * 对齐 Codex summary 的语义（"这些工作已经做过了，别重复"），但不调模型。
+ */
+function toolLedger(pairs) {
+  const lines = []
+  for (const { call, output } of pairs) {
+    const r = replayItemToText(call)
+    const did = r ? r.text.replace(/^\(已执行\) /, '') : '(工具调用)'
+    // 结果要点：蒸馏后的第一行足够判断成败（"✓ 文件已写入" / "total 512 …" / 报错头）
+    const gist = output
+      ? (distillExecOutput(toolOutputText(output)).split('\n')[0] || '').slice(0, 120)
+      : '(无返回)'
+    lines.push(`- ${did.slice(0, 160)} → ${gist}`)
+  }
+  // 封顶：保最近的行
+  let body = lines.join('\n')
+  while (body.length > LEDGER_MAX_CHARS && lines.length > 1) {
+    lines.shift()
+    body = '- …（更早的动作已省略）\n' + lines.join('\n')
+  }
+  return [
+    LEDGER_HEAD,
+    '（历史被压缩。以下动作**已经真实执行过**，结果如后 —— 不要重复执行；',
+    '基于这些结果继续下一步，或直接给最终答复。）',
+    body,
+  ].join('\n')
+}
+
+/** 把 items 里的工具项按 call_id 配成 {call, output} 对，保持出现顺序。 */
+function collectToolPairs(items) {
+  const pairs = []
+  const byId = new Map()
+  for (const it of items || []) {
+    if (!it) continue
+    if (it.type === 'custom_tool_call' || it.type === 'function_call') {
+      const p = { call: it, output: null }
+      pairs.push(p)
+      if (it.call_id) byId.set(it.call_id, p)
+    } else if (it.type === 'custom_tool_call_output' || it.type === 'function_call_output') {
+      const p = it.call_id && byId.get(it.call_id)
+      if (p) p.output = it
+      else pairs.push({ call: null, output: it })   // 孤儿输出也别丢
+    }
+  }
+  return pairs
+}
 
 function isAgentsMdItem(it) {
   return /AGENTS\.md instructions for \//.test(textOf(it).slice(0, 200))
@@ -411,17 +506,24 @@ function compactInput(items) {
   // 2) AGENTS.md 那条 user 必留 —— cwd 来源
   // 3) 最近 N 条 user 消息（不含 AGENTS.md，它单列）
   // 4) 最后一条 assistant（若有）
-  // 丢：所有 custom_tool_call / custom_tool_call_output + 早于最近 N 条的 user
+  // 5) **最近一次工具交换原文必留** —— 模型必须看到刚刚那条命令的真实返回
+  // 6) 更早的工具交换 → 确定性台账（对齐 Codex summary 的"别重复已做的工作"语义）
   const systemMsgs = items.filter((i) => i.role === 'developer' || i.role === 'system')
   const agentsMsg = items.find(isAgentsMdItem)
   const userMsgs = items.filter((i) => i.role === 'user' && !isAgentsMdItem(i))
   const recentUsers = userMsgs.slice(-KEEP_RECENT_USERS)
   const lastAssistant = [...items].reverse().find((i) => i.role === 'assistant')
 
-  // 保持原顺序：系统指令 → AGENTS → (最近user + 最后assistant 按原相对顺序)
-  const tail = [agentsMsg, ...recentUsers, lastAssistant]
+  const pairs = collectToolPairs(items)
+  const lastPair = pairs.length ? pairs[pairs.length - 1] : null
+  const olderPairs = pairs.slice(0, -1)
+  const keepToolItems = lastPair
+    ? [lastPair.call, lastPair.output].filter(Boolean)
+    : []
+
+  // 保持原顺序：系统指令 → AGENTS → (最近user + 最后assistant + 最近工具交换 按原相对顺序)
+  const tail = [agentsMsg, ...recentUsers, lastAssistant, ...keepToolItems]
     .filter(Boolean)
-    // 去重（agentsMsg 可能也在 recentUsers 里，已排除；lastAssistant 不会跟 user 重复）
   // 按它们在原 items 里的出现顺序排
   const order = new Map(items.map((it, i) => [it, i]))
   tail.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
@@ -433,10 +535,25 @@ function compactInput(items) {
     if (seen.has(it)) return false; seen.add(it); return true
   })
 
+  // 台账插在最近工具交换（或对话尾部）**之前** —— 语序上先"你已经做过这些"，
+  // 再"这是刚刚那条的返回"，模型顺着读就是 Codex summary + 现场的关系。
+  if (olderPairs.length) {
+    const ledgerItem = {
+      type: 'message', role: 'user',
+      content: [{ type: 'input_text', text: toolLedger(olderPairs) }],
+    }
+    const firstKept = keepToolItems.length
+      ? dedup.indexOf(keepToolItems[0])
+      : -1
+    if (firstKept >= 0) dedup.splice(firstKept, 0, ledgerItem)
+    else dedup.push(ledgerItem)
+  }
+
   // 只打 type/role 计数，不打内容
   const before = countShapes(items), after = countShapes(dedup)
   const afterSize = dedup.reduce((s, it) => s + itemLen(it), 0)
-  console.log(`[compact] ${total} -> ${afterSize} chars  ${before} => ${after}`)
+  console.log(`[compact] ${total} -> ${afterSize} chars  ${before} => ${after}`
+    + `  ledger=${olderPairs.length} kept_last_tool=${keepToolItems.length > 0}`)
   return dedup
 }
 
@@ -452,6 +569,9 @@ function countShapes(items) {
 
 module.exports.prepareCodexInput = prepareCodexInput
 module.exports.compactInput = compactInput
+module.exports.toolLedger = toolLedger
+module.exports.collectToolPairs = collectToolPairs
+module.exports.LEDGER_HEAD = LEDGER_HEAD
 module.exports.isCodexLite = isCodexLite
 module.exports.extractCwd = extractCwd
 module.exports.parseEnvironment = parseEnvironment
@@ -552,10 +672,18 @@ function needsEscalation(text, hadToolResult) {
   // cls === 'text'：没有块。在 Codex 里这就是"最终答复"、正常收尾。
   // 但网页模型的"没块"有两种：真·最终答复 vs 假·拒答/谎报/画布。用兜底判据区分。
   // 这几条不是可塌缩的 if-else，是弥补"网页模型会撒谎"的必要判据（见 classifyResponse 注释）。
-  if (REFUSAL_RE.test(text)) return true          // 拒答："我没有权限/终端"
-  if (ABS_PATH_RE.test(text)) return true         // 提到绝对路径却一次工具都没调 = 编的
+  if (REFUSAL_RE.test(text)) return true          // 拒答："我没有权限/终端"（任何时候都不合法）
   if (CANVAS_OPEN_RE.test(text)) return true      // 画布 = 走了网页写文档功能，文件没创建
-  if (!hadToolResult && CLAIM_DONE_RE.test(text)) return true  // 谎报完成（全程 0 工具）
+  // ── 谎报判据只在"全程 0 工具"时生效 ──
+  // 2026-08-09 /init 死循环的直接扳机就在这里：模型真把 AGENTS.md 写完了、
+  // 给出合法最终答复"已在 /Users/…/AGENTS.md 创建…"——最终答复**必然**提到
+  // 绝对路径和"已创建 xx.md"。旧版 ABS_PATH_RE 无条件生效，把真答复判成编造
+  // → 升级重试逼模型"只输出块" → 模型只好又发 ⟦ls⟧ → 客户端显示 Explored →
+  // 下轮又想收尾又被打回 → 无限循环。
+  // 判据的本意（"没调工具却说出绝对路径=编的"）只在 hadToolResult=false 时成立；
+  // 工具真跑过之后，路径正是从工具结果里学来的，是最终答复的**应有内容**。
+  if (!hadToolResult && ABS_PATH_RE.test(text)) return true   // 0 工具却报路径 = 编的
+  if (!hadToolResult && CLAIM_DONE_RE.test(text)) return true // 0 工具却宣告完成 = 编的
   return false                                    // 其余"没块" = 真·最终答复/正常闲聊，收尾
 }
 

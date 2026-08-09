@@ -418,6 +418,31 @@ t8('BPI 块混引用标记时，块要能照常编译',()=>{
   assert.equal(r.blocks.length,1)
   assert.ok(!/[-]/.test(r.js),'编译产物里带了私有区字符: '+r.js)
 })
+t8('★起始符后是中文正文=立即吐出，不扣到 flush 丢掉',()=>{
+  // 2026-08-09 用户现场："需要指定目标飞书文档（"之后整段没了。
+  // 起始符后跟的是正文（断流重接/半个标记），旧版扣满 200 才放行、
+  // 流在 60 字符处结束 -> flush 把正文当未闭合标记整段丢弃（59字符只剩11）。
+  // 判据：标记体只含 ASCII+PUA，出现中文/全角即证明不是标记。
+  const s='需要指定目标飞书文档（'+CO+'链接或文档ID以及要追加到文档的位置例如末尾新建文档指定章节我会写入内容'
+  const want='需要指定目标飞书文档（链接或文档ID以及要追加到文档的位置例如末尾新建文档指定章节我会写入内容'
+  assert.equal(P.stripCitations(s),want,'正文被引用剥离器吞掉')
+  // 流式逐字符推 + flush 也一致
+  const f=P.makeCitationFilter()
+  let out=''
+  for(const ch of s) out+=f.push(ch)
+  out+=f.flush().text
+  assert.equal(out,want,'流式路径吞正文')
+})
+t8('★flush 只丢真像标记的残段，ASCII 正文也抢救',()=>{
+  const f=P.makeCitationFilter()
+  const out=f.push('see '+CO+'main.py has the fix')
+  const r=f.flush()
+  assert.equal(out+r.text,'see main.py has the fix','ASCII 正文残段该抢救')
+  const f2=P.makeCitationFilter()
+  f2.push('结论：'+CO+'filecite'+CS+'turn0')
+  const r2=f2.flush()
+  assert.ok(r2.truncated&&!r2.text,'真标记残段该丢弃')
+})
 t8('不引用提示存在且是纯文本',()=>{
   assert.ok(P.CITE_FREE_HINT&&P.CITE_FREE_HINT.includes('不要引用'))
   assert.ok(!/[-]/.test(P.CITE_FREE_HINT))

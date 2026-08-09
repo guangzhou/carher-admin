@@ -1004,6 +1004,11 @@ const PUA_RE = /[\ue000-\uf8ff]/g
 // 一个引用标记实测 30~60 字符。给足余量；超过就认定不是标记，原样放行，
 // 避免把正文永久扣在缓冲区里。
 const CITE_MAX = 200
+// 引用标记体只含 ASCII（filecite/turn0file0/L3-L3）+ 私有区分隔符。
+// 出现任何非 ASCII 非 PUA 字符（中文/全角标点）即证明扣住的不是标记。
+const CITE_BODY_CH = /^[\x20-\x7e-]$/
+// flush 时残段长这样才是"断在标记中间"（丢弃合法）；其它内容一律抢救。
+const CITE_TAIL_RE = /^[a-z]*cite|^turn\d|^L\d+(-L\d+)?$|^[\s\x20-\x2f]*$/
 
 /**
  * 流式安全的引用剥离器。
@@ -1026,9 +1031,21 @@ function makeCitationFilter() {
       let out = ''
       for (const ch of String(chunk)) {
         if (held) {
+          // ── 2026-08-09 用户现场（"需要指定目标飞书文档（"后整段没了）：
+          // 上游发了个孤立的 （断流重接/半个标记），后面跟的是**正文**。
+          // 旧逻辑扣满 CITE_MAX=200 才放行、流又在 60 字符处结束 -> flush 把
+          // 正文当"未闭合标记"整段丢弃。复现：59 字符只剩 11。
+          // 判据收紧：标记体只含 ASCII + PUA 分隔符（filecite/turn0file0/L3-L3），
+          // 出现任何中文/全角字符即证明扣住的不是标记 —— 立即吐出，别等 200。
+          if (ch === CITE_END) { held = ''; continue }   // 完整标记，整段丢弃
+          if (ch === CITE_SEP || PUA_RE.test(ch)) { PUA_RE.lastIndex = 0; held += ch; continue }
+          if (!CITE_BODY_CH.test(ch)) {
+            out += held.replace(PUA_RE, '') + ch
+            held = ''
+            continue
+          }
           held += ch
-          if (ch === CITE_END) { held = '' }            // 完整标记，整段丢弃
-          else if (held.length > CITE_MAX) {            // 不像标记，别扣着正文
+          if (held.length > CITE_MAX) {            // 不像标记，别扣着正文
             out += held.replace(PUA_RE, ''); held = ''
           }
           continue
@@ -1040,11 +1057,17 @@ function makeCitationFilter() {
       }
       return out
     },
-    /** 收尾。未闭合的那截**丢掉** —— 那正是"末尾只剩 filecite"的来源。 */
+    /**
+     * 收尾。残段**只有真像标记时才丢**（filecite…/turn0…/L3-L3 或纯分隔符）——
+     * 那正是"末尾只剩 filecite"的来源。其它内容是被误扣的正文，抢救回来。
+     */
     flush() {
       const dangling = held
       held = ''
-      return { text: '', truncated: Boolean(dangling), dropped: dangling.length }
+      const body = dangling.replace(PUA_RE, '')
+      if (!dangling) return { text: '', truncated: false, dropped: 0 }
+      if (CITE_TAIL_RE.test(body)) return { text: '', truncated: true, dropped: dangling.length }
+      return { text: body, truncated: false, dropped: dangling.length - body.length }
     },
     get pending() { return held.length },
   }
@@ -1055,8 +1078,8 @@ function stripCitations(text) {
   if (typeof text !== 'string' || !text) return text
   const f = makeCitationFilter()
   const out = f.push(text)
-  f.flush()
-  return out
+  const tail = f.flush()
+  return out + (tail.text || '')
 }
 
 // 加在附件提示后面，从源头少产生引用。

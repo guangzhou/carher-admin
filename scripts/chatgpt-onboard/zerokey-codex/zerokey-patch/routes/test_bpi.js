@@ -511,4 +511,42 @@ t10('不超阈值时多轮也原样（短会话零成本）',()=>{
   assert.strictEqual(out,items,'没超阈值不该压')
 })
 console.log(`\n=== 结构压缩 ${p10} passed, ${f10} failed ===`)
-process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9+f10?1:0)
+
+console.log('\n-- apply_patch 空返回 / BPI 标记泄漏 --')
+let p11=0,f11=0
+function t11(n,fn){try{fn();p11++;console.log('  ✅',n)}catch(e){f11++;console.log('  ❌',n,'\n     ',e.message)}}
+// 2026-08-09 用户 /init 真实现场：连着 4~5 次"已完成"重复宣告 +
+// 把 "BPI(write) 返回 {}" 这句内部噪声讲给用户听。
+t11('apply_patch 成功返回 {} 要翻译成人话（否则模型判断不了成功->重做）',()=>{
+  assert.equal(P.distillExecOutput('BPI(write):\n{}'),'✓ 文件已写入')
+  assert.equal(P.distillExecOutput('BPI(replace):\n{}'),'✓ 内容已替换')
+})
+t11('真实 Codex 包装（Script completed/Wall time/Output:）也能认',()=>{
+  const real='Script completed\nWall time 0.4 seconds\nOutput:\nBPI(write):\n{}'
+  assert.equal(P.distillExecOutput(real),'✓ 文件已写入')
+})
+t11('内部标记 BPI(name): 绝不能漏给模型',()=>{
+  for(const raw of ['BPI(write):\n{}','BPI(ls):\n'+JSON.stringify({exit_code:0,output:'a.py'})]){
+    const d=P.distillExecOutput(raw)
+    assert.ok(!d.includes('BPI('),'标记漏出: '+d)
+  }
+  // 回程整体也不能带
+  const back=P.replayItemToText({type:'custom_tool_call_output',
+    output:[{type:'input_text',text:'BPI(write):\n{}'}]})
+  assert.ok(!back.text.includes('BPI('),'回程漏出内部标记: '+back.text)
+})
+t11('exec_command 正常输出不受影响',()=>{
+  assert.equal(P.distillExecOutput('BPI(ls):\n'+JSON.stringify({exit_code:0,output:'a.py\nb.py'})),'a.py\nb.py')
+  assert.equal(P.distillExecOutput('BPI(cmd):\n'+JSON.stringify({exit_code:1,output:'error: nope'})),'error: nope')
+})
+t11('命令成功但无输出也给明确信号（不留空让模型犯疑）',()=>{
+  assert.ok(P.distillExecOutput('BPI(cmd):\n'+JSON.stringify({exit_code:0,output:''})).includes('成功'))
+  assert.ok(P.distillExecOutput('BPI(mkdir):\n'+JSON.stringify({exit_code:0,output:''})).includes('目录已创建'))
+})
+t11('多块混合各自翻译',()=>{
+  const d=P.distillExecOutput('BPI(ls):\n'+JSON.stringify({exit_code:0,output:'x.py'})+'\nBPI(write):\n{}')
+  assert.ok(d.includes('x.py')&&d.includes('文件已写入'),d)
+})
+console.log(`\n=== 空返回/标记 ${p11} passed, ${f11} failed ===`)
+
+process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9+f10+f11?1:0)

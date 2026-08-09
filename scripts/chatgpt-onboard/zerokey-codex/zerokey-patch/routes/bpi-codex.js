@@ -505,20 +505,51 @@ function toolOutputText(item) {
   return o.map((p) => (p && p.text) || '').join('\n')
 }
 
+// BPI 操作 -> 成功时的人话。apply_patch 在 code-mode 里**成功返回空对象 `{}`**
+// （codex-rs/core/src/tools/context.rs:275 `code_mode_result` -> 空 Map），
+// 原样喂回去模型根本看不出成功。
+// 2026-08-09 用户 /init 现场：模型连着 4~5 次"已完成"重复宣告，并把
+// `BPI(write) 返回 {}` 这句内部噪声讲给用户听 —— 就是这里。
+const OP_OK = {
+  write: '✓ 文件已写入',
+  replace: '✓ 内容已替换',
+  mkdir: '✓ 目录已创建',
+}
+
 /** exec 的返回体是一坨 JSON，把真正的 stdout 摘出来，别把 chunk_id 之类喂给模型。 */
 function distillExecOutput(text) {
   const out = []
+  let lastOp = null
   for (const line of String(text).split('\n')) {
     const t = line.trim()
     if (!t) continue
     if (/^(Script completed|Wall time|Output:)/.test(t)) continue
+    // `BPI(name):` 是我们编译时自己塞的标记，不是模型/系统的输出。
+    // 记下是哪个操作（下一行的结果要用），但**不要喂给模型** —— 它会当成
+    // 真实输出转述给用户（用户现场就看到了 "BPI(write) 返回 {}"）。
+    const mk = t.match(/^BPI\(([a-z_]+)\):$/)
+    if (mk) { lastOp = mk[1]; continue }
+    // 空对象 = apply_patch 成功。翻译成人话，否则模型判断不了成功与否 -> 重做。
+    if (t === '{}') {
+      out.push(OP_OK[lastOp] || '✓ 执行成功')
+      lastOp = null
+      continue
+    }
     if (t.startsWith('{') && t.includes('"output"')) {
       try {
         const j = JSON.parse(t)
-        if (typeof j.output === 'string') { out.push(j.output.trimEnd()) ; continue }
+        if (typeof j.output === 'string') {
+          const body = j.output.trimEnd()
+          // exec_command 成功但无输出（如 mkdir）也要给个明确信号
+          out.push(body || (j.exit_code === 0 || j.exit_code === undefined
+            ? (OP_OK[lastOp] || '✓ 命令执行成功（无输出）') : `(exit ${j.exit_code})`))
+          lastOp = null
+          continue
+        }
       } catch (_) { /* 不是完整 JSON 就原样保留 */ }
     }
     out.push(line)
+    lastOp = null
   }
   return out.join('\n').trim()
 }

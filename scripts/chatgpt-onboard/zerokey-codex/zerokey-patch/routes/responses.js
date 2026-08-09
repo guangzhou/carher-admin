@@ -346,6 +346,8 @@ function buildResponsesRoute(chatgptApi) {
     // 与下面 wtFrozen 是同一个套路，只是判据不同（这条不依赖 tools 是否存在，
     // 因为 Codex responses-lite 的顶层 tools 恒为空）。
     let bpiFrozen = false
+    // codexLite 会话全程缓冲正文（见 onText 注释）
+    const bpiBuffered = codexLite && stream
     let wtFrozen = false      // envelope spotted -> stop streaming
     let wtSent = 0            // chars of `full` already streamed
     let wtOpened = false      // message shell emitted?
@@ -404,6 +406,14 @@ function buildResponsesRoute(chatgptApi) {
       started = true
       if (useWebTools) { wtPump(false); return }
       if (!stream) return
+      // codexLite（真 Codex agent 会话）：**全程缓冲，不边流边发**。
+      // 2026-08-09 用户 /init 现场：模型先说"已完成：AGENTS.md 已写入…"再吐 ⟦write⟧ 块。
+      // 旧判据只认"块在开头"，那段散文已经流给用户了、块又被编译执行 ——
+      // 用户看到"已完成"但活还在做，下一轮再来一遍，连着 4~5 次重复宣告，
+      // 还把 "BPI(write) 返回 {}" 这种内部叙述漏了出去。
+      // 账号契约规定"要么只输出块、要么只答话，绝不混"，流完之前判断不了是哪种，
+      // 那就别猜 —— 缓冲到 finish() 再定。普通聊天(非 codexLite)不受影响，照旧逐片流。
+      if (bpiBuffered) return
       if (bpiFrozen || full.trimStart().startsWith('\u27E6')) { bpiFrozen = true; return }
       const delta = citeFilter ? citeFilter.push(t) : t
       if (!delta) return          // 整片都是标记内容，这一片不发
@@ -594,6 +604,15 @@ function buildResponsesRoute(chatgptApi) {
       }
 
       if (stream) {
+        // codexLite 全程缓冲的，最后一次性把正文作为一个 delta 补发出去
+        // （不发 delta 的话客户端只能靠 done 事件拿全文，渲染时机会怪）。
+        if (bpiBuffered && full) {
+          // full 在 finish() 开头已经过 stripCitations，直接发
+          res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({
+            type: 'response.output_text.delta', item_id: msgId,
+            output_index: 0, content_index: 0, delta: full,
+          })}\n\n`)
+        }
         // output_text.done
         res.write(`event: response.output_text.done\ndata: ${JSON.stringify({
           type: 'response.output_text.done', item_id: msgId,

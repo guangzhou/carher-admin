@@ -107,6 +107,10 @@ function buildResponsesRoute(chatgptApi) {
     // 去指令+交手 5/6 且零拒答。
     const codexInput = prepareCodexInput(input)
     const codexLite = codexInput !== input   // prepareCodexInput 对非 Codex 载荷返回同一引用
+    // 整段对话此前是否已经跑过工具（有 custom_tool_call_output / function_call_output）。
+    // 假完成判据要用它：没跑过工具却说"已创建/测试通过" = 编的。
+    const hadToolResult = Array.isArray(input) && input.some(
+      (it) => it && (it.type === 'custom_tool_call_output' || it.type === 'function_call_output'))
     let bpiRetried = false
     const basePrompt = flattenInput(codexInput, instructions)
     let prompt = basePrompt
@@ -503,9 +507,9 @@ function buildResponsesRoute(chatgptApi) {
       // 上线实测：契约+剥指令+交手之后仍有约 1/3 轮次不动手，其中一半是
       // "我没有权限/终端"。这类回复对客户端毫无价值，重发一次比原样返回强。
       // 与 web-tools.js 里 JSON 那条路的 escalate 是同一思路。
-      if (codexLite && !bpiRetried && needsEscalation(full)) {
+      if (codexLite && !bpiRetried && needsEscalation(full, hadToolResult)) {
         bpiRetried = true
-        console.log('[bpi] refusal detected -> escalated retry')
+        console.log('[bpi] refusal/false-complete detected -> escalated retry')
         // 只带"最后一条用户消息 + 交手 + 升级指令"，不要把 107KB 全history 再发一遍
         const esc = escalatePrompt
           ? escalatePrompt(codexInput, ESCALATE)

@@ -87,7 +87,10 @@ def run_task(task):
     if os.path.exists(SBX): shutil.rmtree(SBX)
     os.makedirs(SBX)
     inp = []
-    if WANT_TOOLS:
+    # 真 Codex 客户端**永远**在 responses-lite 载荷里带 additional_tools。
+    # 缺了它，网关的 prepareCodexInput 判不出是 Codex 载荷 -> codexLite=false ->
+    # 假完成拦截/重试全被跳过。所以尺子必须带（除非显式 TOOLS=0 测裸路径）。
+    if os.environ.get("TOOLS") != "0":
         t = load_tools_item()
         if t: inp.append(t)
     inp.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": task}]})

@@ -440,26 +440,48 @@ const REFUSAL_RE = new RegExp(
 // 纯问答（"快速排序复杂度"）不会出现绝对路径，不受影响。
 const ABS_PATH_RE = /(?:\/(?:Users|home|opt|var|etc|tmp)\/[^\s'"`)]+)|(?:[A-Za-z]:\\\\)/
 
-/** 这一轮是不是"该动手却没动手"。 */
-function needsEscalation(text) {
+// 假完成判据（2026-08-09 闭环尺子实测的最大残留）：模型第 0 轮**一个工具都没调**，
+// 却直接说"已创建 add.py / 测试通过 / 已完成"。文件根本不存在，是编的。
+// 纯 prompt 治不动（契约里写"别谎报"反而更糟，4/6），但网关有硬信号：
+//   声称做了文件/命令动作  +  整段对话里没有任何工具结果  =  必然是编的。
+// 判据保守：必须**动作词 + 文件/测试产物**同时出现，否则纯问答会被误伤
+//（"AGENTS.md 已存在"没有动作词，不触发；"快速排序完成排序"没有文件产物，不触发）。
+const CLAIM_DONE_RE = new RegExp(
+  "(已|我已|我)?(创建|新建|生成|写入|保存|修改|更新|运行|执行)了?"
+  + "[^。\\n]{0,40}"
+  + "(\\.(py|js|ts|jsx|tsx|mjs|cjs|md|txt|json|ya?ml|toml|sh|go|rs|c|cpp|h|hpp|java|rb|php|html|css|sql)"
+  + "|测试.{0,6}(通过|完成)|test.{0,10}(pass|ok))"
+  + "|(created|wrote|added|saved|generated|ran|executed)\\s+[^.\\n]{0,40}"
+  + "(file|test|\\.(py|js|ts|md|txt|json|sh|go|rs))",
+  "i")
+
+/** 这一轮是不是"该动手却没动手"。hadToolResult=整段对话此前是否已有工具结果。 */
+function needsEscalation(text, hadToolResult) {
   if (typeof text !== 'string' || !text.trim()) return false
   if (extractBlocks(text).length) return false   // 已经吐块了
   if (REFUSAL_RE.test(text)) return true
-  return ABS_PATH_RE.test(text)                  // 提到了路径却一次工具都没调
+  if (ABS_PATH_RE.test(text)) return true         // 提到了路径却一次工具都没调
+  // 假完成：声称做了文件/命令动作，但整段对话没跑过任何工具 = 编的。
+  // 真跑过工具再报告（hadToolResult=true）是合法的，放行。
+  if (!hadToolResult && CLAIM_DONE_RE.test(text)) return true
+  return false
 }
 
 const ESCALATE = [
-  '上一次回复被丢弃了：你回的是说明文字，不是块。',
-  '说"没有权限/没有终端/访问不了"在这里是无效的 —— 你不需要执行任何东西，',
-  '你只负责把要执行的块写出来，外部执行器会在用户机器上真实运行它并把结果贴回来。',
-  '现在只输出块本身，不要任何前言和解释。',
-  '例：要看目录 -> ⟦ls¦path=/abs/dir⟧；要写文件 -> ⟦write¦path=/abs/f¦content=…⟧',
+  '上一次回复被丢弃了：你没有真正动手 —— 要么在说明/拒绝，要么声称做完了却一个块都没发。',
+  '重要：文件在你发出块、且看到"[上一步执行结果]"之前**根本不存在**。',
+  '你不需要自己执行任何东西，也没有"没有权限"这回事 —— 你只负责把要执行的块写出来，',
+  '外部执行器会在用户机器上真实运行它，再把结果贴回来给你。',
+  '现在只输出块本身，不要任何前言、解释、或"已完成"之类的话。',
+  '例：要看目录 -> ⟦ls¦path=/abs/dir⟧；要写文件 -> ⟦write¦path=/abs/f¦content=…⟧；',
+  '要跑命令 -> ⟦cmd¦run=…⟧。可以一次发多个独立的块。',
 ].join('\n')
 
 module.exports.needsEscalation = needsEscalation
 module.exports.ESCALATE = ESCALATE
 module.exports.REFUSAL_RE = REFUSAL_RE
 module.exports.ABS_PATH_RE = ABS_PATH_RE
+module.exports.CLAIM_DONE_RE = CLAIM_DONE_RE
 
 // ── 回程：把工具执行结果拼回 prompt ──────────────────────────────
 //

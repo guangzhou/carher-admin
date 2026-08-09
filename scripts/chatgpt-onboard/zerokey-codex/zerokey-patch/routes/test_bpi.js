@@ -150,6 +150,24 @@ t3('正常回答不误判',()=>{
   assert.ok(!P.needsEscalation('快速排序的平均复杂度是 O(n log n)。'))
   assert.ok(!P.needsEscalation(''))
 })
+t3('假完成：没跑过工具却说"已创建/测试通过" -> 重试',()=>{
+  // 2026-08-09 闭环尺子最大残留：第0轮0工具却谎报完成
+  assert.ok(P.needsEscalation('已创建 add.py 和 test_add.py，测试通过。', false),'谎报建文件+测试通过要抓')
+  assert.ok(P.needsEscalation('Created add.py and test_add.py, all tests pass.', false),'英文谎报也抓')
+  assert.ok(P.needsEscalation('我已生成 /tmp/x 下的 main.py 并运行成功', false))
+})
+t3('真跑过工具后报告完成 -> 放行（不是谎报）',()=>{
+  // hadToolResult=true：工具真跑过，模型报告完成是合法的
+  assert.ok(!P.needsEscalation('已创建 add.py 和 test_add.py，测试通过。', true),'真做过不该被当谎报')
+  assert.ok(!P.needsEscalation('Created add.py, tests pass.', true))
+})
+t3('纯问答即使没跑工具也不误判成假完成',()=>{
+  for (const s of ['快速排序的平均复杂度是 O(n log n)。',
+                   'AGENTS.md 已存在，按要求未覆盖。',
+                   'ls 用于列出目录内容。',
+                   'Python 的 GIL 是全局解释器锁。'])
+    assert.ok(!P.needsEscalation(s, false), '纯问答被误判成假完成: '+s)
+})
 t3('ask -> request_user_input，schema 对得上',()=>{
   const fc=P.firstAsk('⟦ask¦question=要用哪个路径？¦option=/tmp/a.txt¦option=其他⟧')
   assert.equal(fc.name,'request_user_input')

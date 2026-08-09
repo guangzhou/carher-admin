@@ -604,7 +604,11 @@ module.exports.isEnvironmentPrompt = isEnvironmentPrompt
 // 这个坑我在记忆里记过（typographic apostrophe breaks text patterns）又踩了一次。
 const AP = "['\u2019\u02bc]"
 const REFUSAL_RE = new RegExp(
-  "(没有|无法|不能|尚未|未能)[^。\n]{0,20}(权限|终端|执行|访问|接口|环境|工具|落盘|文件系统)"
+  "(没有|无法|不能|尚未|未能)[^。\n]{0,20}(权限|终端|执行|访问|接口|环境|工具|落盘|文件系统|连接|通道|入口)"
+  // "我/目前/当前…不能直接" —— 第一人称语境的"不能直接"只出现在拒答里
+  //（2026-08-10 现场原句"我目前不能直接在"，被截断也要能命中）。
+  // 必须带第一人称/现况词头：纯问答"快速排序不能直接比较字符串"不能误伤。
+  + "|(我|目前|当前|这边|本会话)[^。\n]{0,12}(不能|无法)直接"
   + "|(do" + AP + "?n?" + AP + "?t|do not|cannot|can" + AP + "?t|could" + AP + "?n?" + AP + "?t|could not"
   + "|did" + AP + "?n?" + AP + "?t|failed to|unable to|no active|not connected)"
   + "\\s*(have|access|execute|run|write|edit|tool|file)"
@@ -695,7 +699,11 @@ const FILLER_RE = /^(可以|好的|收到|明白|嗯|OK|ok)[。！!，,\s]*(继�
 
 /** 这一轮是不是"该动手却没动手"。hadToolResult=整段对话此前是否已有工具结果。 */
 function needsEscalation(text, hadToolResult) {
-  if (typeof text !== 'string' || !text.trim()) return false
+  if (typeof text !== 'string') return false
+  // 空回复对 Codex 客户端永远无用（客户端拿到 0 字节只能干瞪眼）。
+  // 2026-08-10 遥测现场：5 发里 2 发 out=0、retried=0 —— 旧版把空文本当
+  // "合法收尾"放行。这是最硬的结构信号，比任何措辞判据都可靠。
+  if (!text.trim()) return true
   // ── 对齐 Codex 隐式协议：有块=继续，无块=turn 结束 ──
   // 有可执行块或 ask 块 -> 结构合法，放行（Codex 里 tool call 即 needs_follow_up）。
   const cls = classifyResponse(text)

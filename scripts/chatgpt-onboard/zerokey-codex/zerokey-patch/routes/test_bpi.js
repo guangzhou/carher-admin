@@ -148,7 +148,10 @@ t3('纯问答不会被误判成要重试',()=>{
 })
 t3('正常回答不误判',()=>{
   assert.ok(!P.needsEscalation('快速排序的平均复杂度是 O(n log n)。'))
-  assert.ok(!P.needsEscalation(''))
+  // 空回复改判"要重试"：2026-08-10 遥测现场 5 发 2 发 out=0 —— 0 字节对
+  // Codex 客户端永远无用，是最硬的"没干活"结构信号。
+  assert.ok(P.needsEscalation(''),'空回复该重试')
+  assert.ok(P.needsEscalation('   \n '),'纯空白同上')
 })
 t3('假完成：没跑过工具却说"已创建/测试通过" -> 重试',()=>{
   // 2026-08-09 闭环尺子最大残留：第0轮0工具却谎报完成

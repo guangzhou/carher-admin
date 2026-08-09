@@ -23,10 +23,12 @@ let extractSpawns = () => []
 let ESCALATE = ''
 let escalatePrompt = null
 let stripCanvas = (t) => t
+let guardOutbound = null
+let describeUnknownItem = () => null
 try {
   ;({ compileToExec, prepareCodexInput, needsEscalation, firstAsk, ESCALATE,
       escalatePrompt, makeCitationFilter, stripCitations, stripCanvas,
-      extractSpawns, CITE_FREE_HINT } = require('./bpi-codex'))
+      extractSpawns, guardOutbound, describeUnknownItem, CITE_FREE_HINT } = require('./bpi-codex'))
 } catch (e) {
   console.warn('[bpi] bpi-codex.js not mounted, BPI compilation disabled:', e.message)
 }
@@ -53,6 +55,7 @@ function textOfContent(content) {
 
 function flattenInput(input, instructions) {
   const parts = []
+  const unknownShapes = {}
   if (instructions) {
     parts.push(`SYSTEM: ${instructions}`)
   }
@@ -66,8 +69,26 @@ function flattenInput(input, instructions) {
       }
       const role = String(item.role || 'user').toUpperCase()
       const text = textOfContent(item.content)
+      // ── 入站形状封闭（系统性防御）：没 role 没文本的 item 不再拼成空
+      // "USER: "（历史 14 bug 中 4 个是这条静默路径：custom_tool_call_output
+      // 无 role、function_call 回放、normalize 删 type…）。改成可见占位+计数：
+      // 新形状第一次出现就在日志现形，模型也知道"这里有个没转译的东西"。
+      if (!text && !item.role) {
+        const ph = describeUnknownItem(item)
+        if (ph) {
+          const k = item.type || '?'
+          unknownShapes[k] = (unknownShapes[k] || 0) + 1
+          parts.push(`USER: ${ph}`)
+          continue
+        }
+      }
       parts.push(`${role}: ${text}`)
     }
+  }
+  const unk = Object.entries(unknownShapes)
+  if (unk.length) {
+    console.warn(`[shape] 未转译的 item 形状: ${unk.map(([k, v]) => k + 'x' + v).join(', ')}`
+      + ' —— 需要在 prepareCodexInput/replayItemToText 里补转译')
   }
   return parts.join('\n\n')
 }
@@ -483,21 +504,44 @@ function buildResponsesRoute(chatgptApi) {
       if (finished) return
       finished = true
 
+      // ── 每请求一行决策摘要（系统性防御：让误判可度量）───────────────
+      // 以前每类误判（收尾被打回/正文被吞/形状拼空）都要等用户撞上才知道。
+      // 这行让"网关对这轮做了什么决定"可 grep 可统计：
+      //   grep '\[turn\]' | 统计 outcome 分布 -> escalate 率异常升高 = 判据坏了；
+      //   fellback>0 = 守卫拦到了新的吃正文 bug。字段稳定，别改名。
+      const turnLog = (outcome, extra) => {
+        if (!codexLite) return
+        console.log(`[turn] outcome=${outcome} in=${basePrompt.length}`
+          + ` out=${(full || '').length} retried=${bpiRetried ? 1 : 0}`
+          + (extra ? ' ' + extra : ''))
+      }
+
       // 剥掉网页版引用标记（\ue200filecite\ue202turn0file0\ue201 这类）。
       // 在这里统一剥一次，下游全部受益：BPI 编译、拒答检测、最终 output text。
       // 流式那条已经逐片剥过了，这里剥的是 `full`（用于 output/编译），
       // 两者不冲突 —— 客户端看到的和 output 里记的因此一致。
       if (stripCitations) {
+        const rawFull = full
         const before = full.length
         full = stripCitations(full)
+        const citeDropped = before - full.length   // 引用剥离的申报删除量
         // 画布围栏（网页版文档功能）也剥掉，别把 ":::writing{...}" 漏给用户。
         // 注意只剥围栏、保留正文 —— 内容本身是用户要的东西。
+        const beforeCanvas = full.length
         if (stripCanvas) full = stripCanvas(full)
+        const canvasDropped = beforeCanvas - full.length  // 画布围栏的申报删除量
         // 未闭合的残段（"末尾只剩 filecite"那种）在 flush 里丢弃并计数
         const tail = citeFilter ? citeFilter.flush() : { truncated: false, dropped: 0 }
         if (before !== full.length || tail.truncated) {
           console.log(`[cite] 剥离 ${before - full.length} 字符`
             + (tail.truncated ? `，上游断在标记中间(丢弃 ${tail.dropped})` : ''))
+        }
+        // ── 出站守恒守卫：过滤器申报的删除量对不上实际丢失时，回退到最小
+        // 安全清洗的原文。对"过滤器静默吃正文"这一整类 bug 的系统性防御
+        //（历史 14 bug 中 8 个属于此类）。守卫零正则零启发式，纯算术。 ──
+        if (typeof guardOutbound === 'function') {
+          const g = guardOutbound(rawFull, full, citeDropped + canvasDropped)
+          if (g.fellBack) { full = g.text; turnLog('guard_fallback', `unexplained=${g.unexplained}`) }
         }
       }
 
@@ -524,7 +568,7 @@ function buildResponsesRoute(chatgptApi) {
       // 与 web-tools.js 里 JSON 那条路的 escalate 是同一思路。
       if (codexLite && !bpiRetried && needsEscalation(full, hadToolResult)) {
         bpiRetried = true
-        console.log('[bpi] refusal/false-complete detected -> escalated retry')
+        turnLog('escalate', `hadToolResult=${hadToolResult ? 1 : 0}`)
         // 只带"最后一条用户消息 + 交手 + 升级指令"，不要把 107KB 全history 再发一遍
         const esc = escalatePrompt
           ? escalatePrompt(codexInput, ESCALATE)
@@ -545,6 +589,7 @@ function buildResponsesRoute(chatgptApi) {
           name: ask.name, arguments: JSON.stringify(ask.arguments), status: 'completed',
         }
         console.log('[bpi] ask -> request_user_input')
+        turnLog('ask')
         return emitItems(res, { stream, respId, created, mdl, usage, items: [fc] })
       }
 
@@ -560,6 +605,7 @@ function buildResponsesRoute(chatgptApi) {
           name: s.name, arguments: JSON.stringify(s.arguments), status: 'completed',
         }))
         console.log(`[bpi] ${items.length} spawn(s) -> spawn_agent`)
+        turnLog('spawn', `n=${items.length}`)
         return emitItems(res, { stream, respId, created, mdl, usage, items })
       }
 
@@ -571,6 +617,7 @@ function buildResponsesRoute(chatgptApi) {
           call_id: callId, name: 'exec', input: bpi.js, status: 'completed',
         }
         console.log(`[bpi] compiled ${bpi.blocks.length} block(s) -> exec`)
+        turnLog('exec', `blocks=${bpi.blocks.length}`)
         if (stream) {
           res.write(`event: response.output_item.added\ndata: ${JSON.stringify({
             type: 'response.output_item.added', item, output_index: 0,
@@ -624,6 +671,7 @@ function buildResponsesRoute(chatgptApi) {
       }
 
       if (stream) {
+        turnLog('text')
         // codexLite 全程缓冲的，最后一次性把正文作为一个 delta 补发出去
         // （不发 delta 的话客户端只能靠 done 事件拿全文，渲染时机会怪）。
         if (bpiBuffered && full) {
@@ -669,6 +717,7 @@ function buildResponsesRoute(chatgptApi) {
         })}\n\n`)
         res.end()
       } else {
+        turnLog('text')
         res.json({
           id: respId, object: 'response', created_at: created, status: 'completed',
           model: mdl,

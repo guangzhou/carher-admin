@@ -595,8 +595,8 @@ module.exports.isEnvironmentPrompt = isEnvironmentPrompt
 const AP = "['\u2019\u02bc]"
 const REFUSAL_RE = new RegExp(
   "(没有|无法|不能|尚未|未能)[^。\n]{0,20}(权限|终端|执行|访问|接口|环境|工具|落盘|文件系统)"
-  + "|(do" + AP + "?n" + AP + "?t|do not|cannot|can" + AP + "?t|could" + AP + "?n" + AP + "?t|could not"
-  + "|did" + AP + "?n" + AP + "?t|failed to|unable to|no active|not connected)"
+  + "|(do" + AP + "?n?" + AP + "?t|do not|cannot|can" + AP + "?t|could" + AP + "?n?" + AP + "?t|could not"
+  + "|did" + AP + "?n?" + AP + "?t|failed to|unable to|no active|not connected)"
   + "\\s*(have|access|execute|run|write|edit|tool|file)"
   , "i")
 
@@ -1100,3 +1100,60 @@ module.exports.stripCitations = stripCitations
 module.exports.CITE_FREE_HINT = CITE_FREE_HINT
 module.exports.CITE_OPEN = CITE_OPEN
 module.exports.CITE_END = CITE_END
+
+// ── 出站守恒守卫（系统性防御，2026-08-09）──────────────────────────────
+//
+// 复盘：本网关历史上 14 个 bug 里 8 个的本质都是**转换点静默吃正文**
+// （引用剥离器扣留吞尾、画布剥离、flatten 拼空串、compact 全丢、buffer 不放…）。
+// 逐个修补丁堵不完 —— 任何未来新增的过滤器都可能再引入同款。
+//
+// 架构解法：在**最终出口**设一条守恒不变量：
+//     交付给客户端的文本量 ≈ 模型产出的文本量 - 可解释的删除量
+// 各过滤器自己申报删了多少（accounting）；不变量被打破（丢失超过申报 + 容差）
+// 时，**放弃过滤结果、回退到只做最小安全清洗的原文**（剥 PUA 字符 —— 这一步
+// 永远无害），并响亮记录。宁可漏一个标记给用户，不可吞一段正文。
+// 这把"静默吃正文"这一整类 bug 从「用户撞上+复现才知道」降级为
+// 「自动回退+一行日志」。
+const GUARD_TOLERANCE = 80        // 绝对容差（标记本体、空白折叠等零碎）
+const GUARD_RATIO = 0.10          // 相对容差：未申报丢失超过原文 10% 才回退
+const PUA_ALL_RE = /[-]/g
+
+/**
+ * @param raw        过滤前的模型原文
+ * @param processed  过滤后的文本
+ * @param accounted  各过滤器申报的合法删除量（字符数），如引用标记长度
+ * @returns {text, fellBack, unexplained}
+ */
+function guardOutbound(raw, processed, accounted) {
+  const r = String(raw || ''), p = String(processed || '')
+  const lost = r.length - p.length
+  const unexplained = lost - (accounted || 0)
+  if (unexplained <= GUARD_TOLERANCE || unexplained <= r.length * GUARD_RATIO) {
+    return { text: p, fellBack: false, unexplained: Math.max(0, unexplained) }
+  }
+  // 不变量被打破：过滤器吃了没申报的正文。回退到最小安全清洗。
+  const safe = r.replace(PUA_ALL_RE, '')
+  console.error(`[guard] 出站守恒被打破: raw=${r.length} processed=${p.length}`
+    + ` accounted=${accounted || 0} unexplained=${unexplained} -> 回退最小清洗`)
+  return { text: safe, fellBack: true, unexplained }
+}
+
+module.exports.guardOutbound = guardOutbound
+
+// ── 入站形状封闭（系统性防御，2026-08-09）──────────────────────────────
+//
+// 复盘：4/14 个 bug 是"不认识的 item 形状被拼成空串"（custom_tool_call_output
+// 无 role、function_call 回放、normalize 后 type 被删…）。每来一个新形状翻车
+// 一次，翻车形态永远是**静默**的（模型收到空 "USER: "，答非所问）。
+//
+// 架构解法：把"默认分支"从「返回空」改成「可见占位 + 计数」。任何未被显式
+// 处理的形状都会在日志里现形（unknownShapes），第一次出现就能定位，
+// 而模型至少知道"这里有个东西没转译"而不是收到空行。
+function describeUnknownItem(item) {
+  if (!item || typeof item !== 'object') return null
+  const t = item.type || (item.role ? null : 'unknown')
+  if (!t || t === 'message') return null
+  return `[未转译项 type=${t}${item.name ? ' name=' + item.name : ''}]`
+}
+
+module.exports.describeUnknownItem = describeUnknownItem

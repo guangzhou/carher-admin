@@ -25,10 +25,12 @@ let escalatePrompt = null
 let stripCanvas = (t) => t
 let guardOutbound = null
 let describeUnknownItem = () => null
+let measureItems = null
 try {
   ;({ compileToExec, prepareCodexInput, needsEscalation, firstAsk, ESCALATE,
       escalatePrompt, makeCitationFilter, stripCitations, stripCanvas,
-      extractSpawns, guardOutbound, describeUnknownItem, CITE_FREE_HINT } = require('./bpi-codex'))
+      extractSpawns, guardOutbound, describeUnknownItem, measureItems,
+      CITE_FREE_HINT } = require('./bpi-codex'))
 } catch (e) {
   console.warn('[bpi] bpi-codex.js not mounted, BPI compilation disabled:', e.message)
 }
@@ -511,7 +513,8 @@ function buildResponsesRoute(chatgptApi) {
       //   fellback>0 = 守卫拦到了新的吃正文 bug。字段稳定，别改名。
       const turnLog = (outcome, extra) => {
         if (!codexLite) return
-        console.log(`[turn] outcome=${outcome} in=${basePrompt.length}`
+        const ctxChars = measureItems ? measureItems(input) : 0
+        console.log(`[turn] outcome=${outcome} ctx=${ctxChars} sent=${basePrompt.length}`
           + ` out=${(full || '').length} retried=${bpiRetried ? 1 : 0}`
           + (extra ? ' ' + extra : ''))
       }
@@ -546,10 +549,25 @@ function buildResponsesRoute(chatgptApi) {
       }
 
       // Estimate usage — the web backend returns none, so without this LiteLLM
-      // bills 0 (esp. streaming). input from the sent prompt, output from the
-      // model's text/command (small; input dominates on agentic requests).
+      // bills 0 (esp. streaming).
+      //
+      // ⚠️ 这里报的**必须是客户端手里那份历史的大小，不是我们压缩后发出去的**。
+      // 2026-08-10 架构级发现（读 Codex 源码 + 现场数据）：
+      //   Codex 的原生自动压缩由 sess.get_total_token_usage() 驱动，而它的值
+      //   来源就是 `last_token_usage.total_tokens` —— **服务端回报的 usage**
+      //   (context_manager/history.rs:323，客户端不自己重算历史)。
+      //   旧代码报 estimateTokens(prompt)，prompt 是 prepareCodexInput **压缩后**
+      //   那份。用户现场：客户端手里 72742 字符，我们只报 18186 tokens ->
+      //   客户端以为只用了 272k 窗口的 6.7% -> **它的原生压缩永远不触发**。
+      // 后果是我们把自己逼进死角：客户端历史无限涨，全靠网关这边的确定性台账
+      // 硬扛，台账再好也不如 Codex 原生压缩（它会调模型生成真摘要）。
+      // 报真值之后，客户端在 90% 窗口时自己 compact —— 这是**唯一**能让长会话
+      // 真正收敛的杠杆，比网关侧任何压缩策略都根本。
       const mkUsage = (out) => {
-        const i = estimateTokens(prompt)
+        // 入站真实上下文（客户端那份），不是压缩后发给网页的那份
+        const realIn = (measureItems ? measureItems(input) : 0)
+          + (instructions ? String(instructions).length : 0)
+        const i = Math.max(estimateTokens(prompt), Math.ceil(realIn / 4))
         const o = estimateTokens(out)
         return {
           input_tokens: i, output_tokens: o, total_tokens: i + o,

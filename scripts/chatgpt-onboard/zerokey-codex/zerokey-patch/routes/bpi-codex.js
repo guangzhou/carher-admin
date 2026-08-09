@@ -502,17 +502,30 @@ function isAgentsMdItem(it) {
   return /AGENTS\.md instructions for \//.test(textOf(it).slice(0, 200))
 }
 
+// 单个 item 的真实文本长度。textOf 只看 content，但工具结果的文本在 output、
+// 工具调用的在 input；两者都漏算过（第一版只用 textOf，几万字符的工具结果
+// 没被计入，压缩根本没触发）。未知形状退化成 JSON 长度 —— 宁可高估也不静默算 0。
+function itemChars(it) {
+  if (!it || typeof it !== 'object') return String(it || '').length
+  if (it.type === 'custom_tool_call' || it.type === 'function_call')
+    return String(it.input || '').length + String(it.arguments || '').length
+  if (it.type === 'custom_tool_call_output' || it.type === 'function_call_output')
+    return toolOutputText(it).length
+  const t = textOf(it)
+  if (t) return t.length
+  try { return JSON.stringify(it).length } catch (_) { return 0 }
+}
+
+/** 一组 item 的总字符数（客户端真实上下文大小的度量）。 */
+function measureItems(items) {
+  if (typeof items === 'string') return items.length
+  if (!Array.isArray(items)) return 0
+  return items.reduce((s, it) => s + itemChars(it), 0)
+}
+
 function compactInput(items) {
-  // 估算总长：textOf 只看 content，但工具结果的文本在 output、工具调用的在 input。
-  // 第一版只用 textOf，漏算了几万字符的工具结果，导致没触发压缩。用真实文本长度。
-  const itemLen = (it) => {
-    if (it.type === 'custom_tool_call' || it.type === 'function_call')
-      return String(it.input || '').length
-    if (it.type === 'custom_tool_call_output' || it.type === 'function_call_output')
-      return toolOutputText(it).length
-    return textOf(it).length
-  }
-  const total = items.reduce((s, it) => s + itemLen(it), 0)
+  const itemLen = itemChars
+  const total = measureItems(items)
   if (total <= COMPACT_TRIGGER_CHARS) return items   // 短会话不压
 
   // 1) 系统指令（developer/system）全留 —— 模型人格不能丢
@@ -582,6 +595,8 @@ function countShapes(items) {
 
 module.exports.prepareCodexInput = prepareCodexInput
 module.exports.compactInput = compactInput
+module.exports.itemChars = itemChars
+module.exports.measureItems = measureItems
 module.exports.toolLedger = toolLedger
 module.exports.collectToolPairs = collectToolPairs
 module.exports.LEDGER_HEAD = LEDGER_HEAD

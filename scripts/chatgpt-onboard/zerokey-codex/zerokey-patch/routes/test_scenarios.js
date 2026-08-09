@@ -132,7 +132,29 @@ scenario('S11 空承诺/敷衍 -> 判拖延重试；能力陈述/收尾不误伤
   assert.ok(!P.needsEscalation('已创建飞书文档，标题《周报》，文档 ID doccnXXXX。', true), '真收尾被误伤')
 })
 
-// ── 2026-08-09 深夜：⟦cmd⟧ 参数带引号 -> zsh 当成一个命令名 ──
+// ── 2026-08-10 架构级：usage 必须报客户端真实上下文，否则原生自动压缩瞎掉 ──
+scenario('S13 usage 口径：报真实上下文（不是压缩后 prompt）', () => {
+  // Codex 的原生 auto-compact 由 last_token_usage.total_tokens 驱动
+  //（context_manager/history.rs:323）—— 也就是我们回报的 usage。
+  // 报压缩后的值 = 客户端永远以为上下文没满 = 它的原生压缩永远不触发。
+  const big = JSON.stringify({ output: 'x'.repeat(30000), exit_code: 0 })
+  const items = [msg('developer', 'sys'), ENV, msg('user', '任务')]
+  for (let i = 0; i < 4; i++) {
+    items.push(toolCall('c' + i, `text(await tools.exec_command({cmd:"ls /d${i}"}));`))
+    items.push(toolOut('c' + i, big))
+  }
+  const realChars = P.measureItems(items)
+  assert.ok(realChars > 100000, '度量应看到真实体量: ' + realChars)
+  // 压缩后发出去的远小于真实历史 —— 这正是不能拿它当 usage 的原因
+  const compacted = P.compactInput(items)
+  assert.ok(P.measureItems(compacted) < realChars / 2, '压缩确实缩小了发送量')
+  // 工具结果/调用都必须被计入（历史上漏算过，导致压缩不触发）
+  assert.ok(P.itemChars(toolOut('x', big)) > 29000, '工具结果没被计入度量')
+  assert.ok(P.itemChars(toolCall('x', 'abc')) > 0, '工具调用没被计入度量')
+  // 未知形状不许静默算 0（宁可高估）
+  assert.ok(P.itemChars({ type: 'brand_new_shape', payload: 'y'.repeat(500) }) > 400,
+    '未知形状被算成 0 -> 又一次静默漏算')
+})
 scenario('S12 cmd 参数外层引号剥掉，不再 command not found', () => {
   const r = P.compileToExec("⟦cmd¦run='git status --short'⟧")
   assert.ok(r.js.includes('"git status --short"'), '外层单引号没剥: ' + r.js)

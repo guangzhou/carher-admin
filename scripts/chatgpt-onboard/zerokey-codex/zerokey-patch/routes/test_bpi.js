@@ -549,4 +549,31 @@ t11('多块混合各自翻译',()=>{
 })
 console.log(`\n=== 空返回/标记 ${p11} passed, ${f11} failed ===`)
 
-process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9+f10+f11?1:0)
+
+console.log('\n-- 网页版画布(文档功能) --')
+let p12=0,f12=0
+function t12(n,fn){try{fn();p12++;console.log('  ✅',n)}catch(e){f12++;console.log('  ❌',n,'\n     ',e.message)}}
+// 2026-08-09 用户 /init 现场：模型调网页版"文档"功能而不是吐 ⟦write⟧ 块，
+// 结果 AGENTS.md 根本没创建，且 :::writing{...} 原样漏给用户。
+const CANVAS=':::writing{variant="document" id="58391"}\n# Repository Guidelines\n\n正文内容\n:::'
+t12('画布 = 没动手 -> 必须重试',()=>{
+  assert.ok(P.needsEscalation(CANVAS,false),'画布没被判成"该动手却没动手"')
+})
+t12('剥掉围栏但保留正文（内容是用户要的）',()=>{
+  const out=P.stripCanvas(CANVAS)
+  assert.ok(!out.includes(':::'),'围栏没剥干净: '+out)
+  assert.ok(out.includes('# Repository Guidelines')&&out.includes('正文内容'),'正文被误删: '+out)
+})
+t12('已经吐块了就不因画布误判',()=>{
+  assert.ok(!P.needsEscalation('⟦write¦path=/tmp/a¦content=x⟧',false))
+})
+t12('普通文本/代码围栏不受影响',()=>{
+  for(const s of ['正常回答。','这里有代码：\n```js\nconst a=1\n```\n完毕'])
+    assert.strictEqual(P.stripCanvas(s),s,'误伤: '+s)
+})
+t12('升级指令明确禁止画布',()=>{
+  assert.ok(P.ESCALATE.includes('不会创建文件'),'ESCALATE 没讲清画布不写文件')
+})
+console.log(`\n=== 画布 ${p12} passed, ${f12} failed ===`)
+
+process.exit(fail+f2+f3+f4+f5+f6+f7+f8+f9+f10+f11+f12?1:0)

@@ -440,6 +440,24 @@ const REFUSAL_RE = new RegExp(
 // 纯问答（"快速排序复杂度"）不会出现绝对路径，不受影响。
 const ABS_PATH_RE = /(?:\/(?:Users|home|opt|var|etc|tmp)\/[^\s'"`)]+)|(?:[A-Za-z]:\\\\)/
 
+// ChatGPT 网页版"文档/画布"标记（2026-08-09 用户 /init 现场）：
+// 模型没吐 ⟦write⟧ 块，而是调了**网页产品自己的文档功能**，输出形如
+//     :::writing{variant="document" id="58391"}
+//     # Repository Guidelines ...
+//     :::
+// 后果：**文件根本没被创建**（模型自己也只说 "ready to be created"），
+// 而且这段标记原样漏给用户看。这跟 filecite 同类 —— 网页产品功能漏进 API 路径。
+// 复现不出来（zk-115 上 8 发全正常），推测是**账号级功能差异**：某些号开了画布。
+// 但判据是硬的：**吐画布 = 没动手**，所以一律当"该动手却没动手"处理并重试。
+const CANVAS_OPEN_RE = /^:::\s*\w+\s*\{[^}]*\}\s*$/m
+const CANVAS_ANY_RE = /^:::\s*\w*\s*\{?[^}\n]*\}?\s*$/gm
+
+/** 剥掉画布围栏但保留里面的正文（内容本身是有用的）。 */
+function stripCanvas(text) {
+  if (typeof text !== 'string' || text.indexOf(':::') < 0) return text
+  return text.replace(CANVAS_ANY_RE, '').replace(/\n{3,}/g, '\n\n').trim()
+}
+
 // 假完成判据（2026-08-09 闭环尺子实测的最大残留）：模型第 0 轮**一个工具都没调**，
 // 却直接说"已创建 add.py / 测试通过 / 已完成"。文件根本不存在，是编的。
 // 纯 prompt 治不动（契约里写"别谎报"反而更糟，4/6），但网关有硬信号：
@@ -461,6 +479,8 @@ function needsEscalation(text, hadToolResult) {
   if (extractBlocks(text).length) return false   // 已经吐块了
   if (REFUSAL_RE.test(text)) return true
   if (ABS_PATH_RE.test(text)) return true         // 提到了路径却一次工具都没调
+  // 网页版画布 = 模型走了产品的"写文档"功能，文件并没有被创建 -> 必须重试逼它吐块
+  if (CANVAS_OPEN_RE.test(text)) return true
   // 假完成：声称做了文件/命令动作，但整段对话没跑过任何工具 = 编的。
   // 真跑过工具再报告（hadToolResult=true）是合法的，放行。
   if (!hadToolResult && CLAIM_DONE_RE.test(text)) return true
@@ -472,6 +492,7 @@ const ESCALATE = [
   '重要：文件在你发出块、且看到"[上一步执行结果]"之前**根本不存在**。',
   '你不需要自己执行任何东西，也没有"没有权限"这回事 —— 你只负责把要执行的块写出来，',
   '外部执行器会在用户机器上真实运行它，再把结果贴回来给你。',
+  '也不要使用文档/画布功能（``:::writing`` 之类）—— 那只是在聊天里排版，**不会创建文件**。',
   '现在只输出块本身，不要任何前言、解释、或"已完成"之类的话。',
   '例：要看目录 -> ⟦ls¦path=/abs/dir⟧；要写文件 -> ⟦write¦path=/abs/f¦content=…⟧；',
   '要跑命令 -> ⟦cmd¦run=…⟧。可以一次发多个独立的块。',
@@ -482,6 +503,8 @@ module.exports.ESCALATE = ESCALATE
 module.exports.REFUSAL_RE = REFUSAL_RE
 module.exports.ABS_PATH_RE = ABS_PATH_RE
 module.exports.CLAIM_DONE_RE = CLAIM_DONE_RE
+module.exports.stripCanvas = stripCanvas
+module.exports.CANVAS_OPEN_RE = CANVAS_OPEN_RE
 
 // ── 回程：把工具执行结果拼回 prompt ──────────────────────────────
 //

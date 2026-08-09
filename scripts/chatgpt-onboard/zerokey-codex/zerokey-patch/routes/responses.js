@@ -21,9 +21,10 @@ let needsEscalation = () => false
 let firstAsk = () => null
 let ESCALATE = ''
 let escalatePrompt = null
+let stripCanvas = (t) => t
 try {
   ;({ compileToExec, prepareCodexInput, needsEscalation, firstAsk, ESCALATE,
-      escalatePrompt, makeCitationFilter, stripCitations,
+      escalatePrompt, makeCitationFilter, stripCitations, stripCanvas,
       CITE_FREE_HINT } = require('./bpi-codex'))
 } catch (e) {
   console.warn('[bpi] bpi-codex.js not mounted, BPI compilation disabled:', e.message)
@@ -488,6 +489,9 @@ function buildResponsesRoute(chatgptApi) {
       if (stripCitations) {
         const before = full.length
         full = stripCitations(full)
+        // 画布围栏（网页版文档功能）也剥掉，别把 ":::writing{...}" 漏给用户。
+        // 注意只剥围栏、保留正文 —— 内容本身是用户要的东西。
+        if (stripCanvas) full = stripCanvas(full)
         // 未闭合的残段（"末尾只剩 filecite"那种）在 flush 里丢弃并计数
         const tail = citeFilter ? citeFilter.flush() : { truncated: false, dropped: 0 }
         if (before !== full.length || tail.truncated) {

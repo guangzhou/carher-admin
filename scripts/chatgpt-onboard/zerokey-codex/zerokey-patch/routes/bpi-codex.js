@@ -722,6 +722,10 @@ const FILLER_RE = /^(可以|好的|收到|明白|嗯|OK|ok)[。！!，,\s]*(继�
 // 标点（"好的。"走 FILLER）要么是数字/单词答案（问答场景 hadToolResult 无关）。
 // 只在 codexLite 会话生效（由调用方保证），残句对客户端零价值，重试必赚。
 const TRUNCATED_SHORT_RE = /^[^。！？!?.\n⟦]{1,19}$/
+// 自认未完成（2026-08-10 zk-140 现场）：探测成功后回"已确认可用，但…尚未实际
+// 创建或写入"——**自己承认任务没完成**却零块收尾。协议上这是结构非法：要么发块
+// 继续干、要么真完成了收尾；"承认没干完然后停手"不存在合法场景。
+const ADMIT_UNDONE_RE = /(尚未|还没有?|仍未|并未|没有真正)[^。\n]{0,16}(创建|写入|执行|完成|运行|实际|落地)/
 
 /** 这一轮是不是"该动手却没动手"。hadToolResult=整段对话此前是否已有工具结果。 */
 function needsEscalation(text, hadToolResult) {
@@ -744,6 +748,7 @@ function needsEscalation(text, hadToolResult) {
   if (STALL_INTENT_RE.test(text)) return true     // 空承诺："我现在直接用 lark-cli 创建…"
   if (FILLER_RE.test(text.trim())) return true    // 纯敷衍："可以继续"
   if (TRUNCATED_SHORT_RE.test(text.trim())) return true  // 疑似截断残句："可以创建"（无句末标点）
+  if (ADMIT_UNDONE_RE.test(text)) return true     // 自认未完成却停手："尚未实际创建…"
   // ── 谎报判据只在"全程 0 工具"时生效 ──
   // 2026-08-09 /init 死循环的直接扳机就在这里：模型真把 AGENTS.md 写完了、
   // 给出合法最终答复"已在 /Users/…/AGENTS.md 创建…"——最终答复**必然**提到

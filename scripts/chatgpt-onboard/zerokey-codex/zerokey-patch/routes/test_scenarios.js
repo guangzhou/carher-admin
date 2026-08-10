@@ -172,5 +172,13 @@ scenario('S14 疑似截断残句 -> 重试；带标点短收尾不误伤', () =>
     assert.ok(!P.needsEscalation(t, true), '合法短收尾被误伤: ' + t)
 })
 
+// ── 2026-08-10 zk-140 现场：探测成功后自认"尚未实际创建"却停手 ──
+scenario('S15 自认未完成+零块 -> 重试；真收尾/知识句不误伤', () => {
+  assert.ok(P.needsEscalation('已确认 lark-cli 可用，但当前返回只完成了工具探测，尚未实际创建或写入飞书文档。', true))
+  assert.ok(P.needsEscalation('文件尚未创建，我先看看目录结构', true))
+  assert.ok(!P.needsEscalation('已完成：文档已创建并写入内容。', true))
+  assert.ok(!P.needsEscalation('该功能尚未上线，属于规划中特性。', true))
+})
+
 console.log(`\n=== 场景回放 ${pass} passed, ${fail} failed ===`)
 process.exit(fail ? 1 : 0)

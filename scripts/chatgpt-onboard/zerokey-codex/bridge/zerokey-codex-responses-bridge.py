@@ -36,7 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 LISTEN = os.environ.get("BRIDGE_LISTEN", "127.0.0.1:8788")
 UPSTREAMS = [u.strip().rstrip("/") for u in os.environ.get(
     "BRIDGE_UPSTREAMS", "http://10.68.13.188:8124/v1").split(",") if u.strip()]
-UP_AUTH = os.environ.get("BRIDGE_UPSTREAM_AUTH", "vscode")
+UP_AUTH = os.environ.get("BRIDGE_UPSTREAM_AUTH", "raw")
 UP_MODEL = os.environ.get("BRIDGE_MODEL", "gpt-5-5")
 LOGFILE = os.environ.get("BRIDGE_LOG", "/tmp/zk_bridge.log")
 DEBUG = os.environ.get("BRIDGE_DEBUG", "0") == "1"
@@ -567,7 +567,7 @@ def salvage_tool_from_text(text, hint_text=""):
             "arguments": json.dumps({"filePath": name, "content": content})}
 
 
-def build_messages(instructions, inp, with_tools=True):
+def build_messages(instructions, inp, with_tools=True, client_tools=None):
     """Flatten Codex's input[] into upstream chat messages.
 
     with_tools=False means this turn offers NO tools (plain chat), so the
@@ -576,6 +576,12 @@ def build_messages(instructions, inp, with_tools=True):
     the user just wanted an answer — it must not be sent when no tool exists to
     call. This mirrors how native clients behave: the tool preamble travels with
     the tools, not with every request.
+
+    client_tools: the top-level `tools` array from the Codex Responses request.
+    On the native endpoint these are structured JSON Schema declarations the
+    model sees in a dedicated API field. The web endpoint has no such field, so
+    we serialize them into the GUIDE prompt — giving the model the same
+    parameter-level awareness it gets natively.
     """
     # A SHORT, permissive guide (not the old forcing job-queue framing which made
     # pods refuse). It only tells the model WHEN to use a tool vs reply in text —
@@ -659,14 +665,49 @@ def build_messages(instructions, inp, with_tools=True):
         "raw calls; `lark-cli api GET <path>` is the escape hatch when no typed "
         "command fits. Reading help output is a normal, cheap tool call — always "
         "cheaper than guessing wrong.")
-    msgs = [{"role": "system", "content": GUIDE}] if with_tools else []
-    # The client's own `instructions` (the Responses API's system prompt) used to
-    # be accepted as a parameter and then never used — so a caller that set a
-    # persona or hard rules had them silently ignored. Verified: asking for
-    # "English only, prefix every sentence with [BOT]" produced plain Chinese
-    # with no prefix. It goes in AFTER the GUIDE so the user's intent wins on
-    # conflict, and it is forwarded even on tool-less turns.
+    # ── Inject client tool schemas into the GUIDE ──
+    # On native Codex the model sees tools as structured JSON Schema in a
+    # dedicated `tools` API field. The web endpoint has no such field, so we
+    # serialize the schemas into the prompt — the model then knows exactly
+    # what tools exist, their parameter names, types, and which are required.
+    if with_tools and client_tools:
+        schema_lines = ["\n\n## Tool Schemas (declared by IDE)\n"
+                        "The following tools are available for you to call. "
+                        "Use the exact names and parameter shapes shown.\n"]
+        for t in client_tools:
+            if not isinstance(t, dict):
+                continue
+            fn = t.get("function") or t  # Responses vs Chat format
+            name = t.get("name") or fn.get("name") or ""
+            desc = t.get("description") or fn.get("description") or ""
+            params = t.get("parameters") or fn.get("parameters")
+            fmt = t.get("format")  # freeform tools (apply_patch)
+            if not name:
+                continue
+            schema_lines.append("### %s" % name)
+            if desc:
+                schema_lines.append(desc[:300])
+            if params:
+                schema_lines.append("Parameters: %s" % json.dumps(params, ensure_ascii=False))
+            elif fmt:
+                schema_lines.append("Format: %s (freeform)" % fmt.get("type", "grammar"))
+            schema_lines.append("")
+        if len(schema_lines) > 2:
+            GUIDE += "\n".join(schema_lines)
+    # ── Merge client instructions into the GUIDE as one system turn ──
+    # Previously instructions were a separate system turn — the web model
+    # sometimes deprioritized the second system block. Merging ensures the
+    # skill catalog and trigger rules carry the same weight as the GUIDE.
     if instructions:
+        txt = instructions if isinstance(instructions, str) else _text_of(instructions)
+        if txt and txt.strip():
+            if with_tools:
+                GUIDE += "\n\n" + txt.strip()
+            else:
+                # No GUIDE on tool-less turns, but instructions still matter
+                pass  # handled below
+    msgs = [{"role": "system", "content": GUIDE}] if with_tools else []
+    if not with_tools and instructions:
         txt = instructions if isinstance(instructions, str) else _text_of(instructions)
         if txt and txt.strip():
             msgs.append({"role": "system", "content": txt.strip()})
@@ -755,6 +796,17 @@ def build_messages(instructions, inp, with_tools=True):
             cmd = _json_unquote(m.group(1)) if m else js
             call_names[cid] = cmd[:40]
             add("assistant", f"[already ran]: {cmd}")
+        elif typ == "additional_tools":
+            # Codex injects dynamically-discovered tools (MCP lazy-load via
+            # tool_search) as input items. On the native endpoint these become
+            # real tool declarations; here we surface the names so the model
+            # knows new capabilities appeared mid-conversation.
+            tool_list = it.get("tools", [])
+            if tool_list:
+                names = [t.get("name", "?") for t in tool_list
+                         if isinstance(t, dict) and t.get("name")]
+                if names:
+                    add("user", "[Tools available]: " + ", ".join(names))
         elif typ == "reasoning":
             continue
         else:
@@ -854,6 +906,9 @@ def _original_goal(inp):
         if not t or not t.strip():
             return None
         if "<environment_context>" in t or "<workspace_roots>" in t:
+            return None
+        # Skill injections are instructions, not the user's question.
+        if "<skill>" in t and "</skill>" in t:
             return None
         # Codex prepends the repo's AGENTS.md as a user turn; it is instructions,
         # not the request.
@@ -1189,7 +1244,7 @@ def _call_one(base, messages, deadline=None, on_delta=None, want_tools=True,
             pass
     req = urllib.request.Request(
         f"{base}/responses", data=body, method="POST",
-        headers={"Authorization": "Bearer raw",
+        headers={"Authorization": "Bearer " + UP_AUTH,
                  "Content-Type": "application/json"})
     text_parts, tools = [], {}
     # Bounded by the caller's remaining deadline, not a flat 240s: the executor
@@ -2586,7 +2641,8 @@ class H(BaseHTTPRequestHandler):
         wants_tools = (bool(req.get("tools")) or _req_uses_exec_tool(req)
                        or _history_has_tool_use(req.get("input")))
         messages = build_messages(req.get("instructions"), req.get("input"),
-                                  with_tools=wants_tools)
+                                  with_tools=wants_tools,
+                                  client_tools=req.get("tools"))
         if DEBUG:
             _log("REQ messages:", json.dumps(messages)[:2000])
         else:

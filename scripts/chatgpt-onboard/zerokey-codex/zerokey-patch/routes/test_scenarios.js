@@ -164,5 +164,13 @@ scenario('S12 cmd 参数外层引号剥掉，不再 command not found', () => {
   assert.ok(r2.js.includes("grep -r 'TODO' src/"), '内部引号被误剥: ' + r2.js)
 })
 
+// ── 2026-08-10：上游截断残句反复出现（out=4~14 无句末标点）──
+scenario('S14 疑似截断残句 -> 重试；带标点短收尾不误伤', () => {
+  for (const t of ['可以创建', '我目前在这个对话环境里没有可', '我可以协助创建飞'])
+    assert.ok(P.needsEscalation(t, true), '残句放过了: ' + t)
+  for (const t of ['已完成。', 'O(n log n)。'])
+    assert.ok(!P.needsEscalation(t, true), '合法短收尾被误伤: ' + t)
+})
+
 console.log(`\n=== 场景回放 ${pass} passed, ${fail} failed ===`)
 process.exit(fail ? 1 : 0)

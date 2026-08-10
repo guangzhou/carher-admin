@@ -717,6 +717,11 @@ const STALL_INTENT_RE = new RegExp(
   + '(创建|执行|运行|读取|检查|安装|升级|写入|调用|查询|下载|上传|打开|删除|列出)')
 // 纯敷衍：整条回复就是一句应答词，零信息零动作（现场原句「可以继续」）。
 const FILLER_RE = /^(可以|好的|收到|明白|嗯|OK|ok)[。！!，,\s]*(继续|了解|开始)?[。！!\s]*$/
+// 疑似上游截断：极短且没有句末标点的残句（遥测反复出现 out=4~14 的
+// 「可以创建」「我目前在这个对话环境里没有可」）。合法的极短答复要么带句末
+// 标点（"好的。"走 FILLER）要么是数字/单词答案（问答场景 hadToolResult 无关）。
+// 只在 codexLite 会话生效（由调用方保证），残句对客户端零价值，重试必赚。
+const TRUNCATED_SHORT_RE = /^[^。！？!?.\n⟦]{1,19}$/
 
 /** 这一轮是不是"该动手却没动手"。hadToolResult=整段对话此前是否已有工具结果。 */
 function needsEscalation(text, hadToolResult) {
@@ -738,6 +743,7 @@ function needsEscalation(text, hadToolResult) {
   // 不分阶段 —— 工具跑没跑过，空承诺都非法（现场就是有过工具结果后继续拖）。
   if (STALL_INTENT_RE.test(text)) return true     // 空承诺："我现在直接用 lark-cli 创建…"
   if (FILLER_RE.test(text.trim())) return true    // 纯敷衍："可以继续"
+  if (TRUNCATED_SHORT_RE.test(text.trim())) return true  // 疑似截断残句："可以创建"（无句末标点）
   // ── 谎报判据只在"全程 0 工具"时生效 ──
   // 2026-08-09 /init 死循环的直接扳机就在这里：模型真把 AGENTS.md 写完了、
   // 给出合法最终答复"已在 /Users/…/AGENTS.md 创建…"——最终答复**必然**提到

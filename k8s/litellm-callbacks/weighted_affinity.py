@@ -107,6 +107,37 @@ class WeightedAffinityRouter(CustomLogger):
     """
 
     CACHE_KEY_PREFIX = "weighted_affinity:v2"
+    FAIL_MARK_KEY_PREFIX = "weighted_affinity:fail:v1"
+
+    # ---- [2026-08-13] 故障标记分类（修「悬挂黑洞」）----
+    # 背景：CrashLoop/悬挂型 zerokey 成员失败节奏 ~1次/90s，永远凑不够
+    # allowed_fails=3/min 的冷却阈值 → 成员始终"健康" → 亲和 pin 反复把
+    # session 送回黑洞（实测 3×180s 全超时零换号）。
+    # 修法：本 hook 自己听失败事件（async_log_failure_event 每次尝试都触发），
+    # 传输/服务端类故障给 deployment 打短 TTL 标记；选路时 pin 命中带标记
+    # 成员 → 立即 re-pick 迁移，MISS 加权选台也避开带标记成员。
+    # 分类红线（同 08-10 sob 哲学）：4xx 客户端/鉴权/内容类**绝不标记**——
+    # 否则一个坏请求会把无辜 deployment 上的所有 session 都赶走（缓存踩踏）。
+    _NEVER_MARK_SUBSTRINGS = (
+        "BadRequest",
+        "Authentication",
+        "PermissionDenied",
+        "NotFound",
+        "ContentPolicy",
+        "InvalidRequest",
+        "UnprocessableEntity",
+        "UnsupportedParams",
+    )
+    _TRANSIENT_MARK_SUBSTRINGS = (
+        "Timeout",
+        "APIConnection",
+        "ConnectionError",
+        "InternalServerError",
+        "ServiceUnavailable",
+        "RateLimit",
+        "MidStreamFallback",
+        "APIError",
+    )
 
     def __init__(
         self,
@@ -128,6 +159,7 @@ class WeightedAffinityRouter(CustomLogger):
         if ttl_seconds is None:
             ttl_seconds = int(os.getenv("WEIGHTED_AFFINITY_TTL", "120"))
         self.ttl_seconds = ttl_seconds
+        self.fail_mark_ttl = int(os.getenv("WEIGHTED_AFFINITY_FAIL_MARK_TTL", "180"))
         verbose_router_logger.info(
             "WeightedAffinityRouter: initialized (ttl=%ss, injected_cache=%s)",
             self.ttl_seconds,
@@ -380,6 +412,74 @@ class WeightedAffinityRouter(CustomLogger):
         return None
 
     # ------------------------------------------------------------------
+    # 故障标记（2026-08-13：修悬挂黑洞，见类头注释）
+    # ------------------------------------------------------------------
+    @classmethod
+    def get_fail_mark_key(cls, model_id: str) -> str:
+        return f"{cls.FAIL_MARK_KEY_PREFIX}:{model_id}"
+
+    @staticmethod
+    def _get_deployment_id_from_failure_kwargs(kwargs: dict) -> Optional[str]:
+        litellm_params = kwargs.get("litellm_params")
+        if isinstance(litellm_params, dict):
+            model_info = litellm_params.get("model_info")
+            if isinstance(model_info, dict) and model_info.get("id"):
+                return str(model_info["id"])
+        model_info = kwargs.get("model_info")
+        if isinstance(model_info, dict) and model_info.get("id"):
+            return str(model_info["id"])
+        return None
+
+    @classmethod
+    def _failure_should_mark(cls, exception: Any) -> bool:
+        """
+        只标记传输/服务端类故障；4xx 客户端/鉴权/内容类绝不标记。
+        未知类型不标记（保守：宁可漏标靠冷却兜底，不误标踩踏无辜成员缓存）。
+        """
+        if exception is None:
+            return False
+        text = f"{type(exception).__name__} {exception}"
+        if any(s in text for s in cls._NEVER_MARK_SUBSTRINGS):
+            return False
+        return any(s in text for s in cls._TRANSIENT_MARK_SUBSTRINGS)
+
+    async def _is_fail_marked(self, model_id: str) -> bool:
+        try:
+            return bool(
+                await self.cache.async_get_cache(key=self.get_fail_mark_key(str(model_id)))
+            )
+        except Exception:
+            return False
+
+    async def async_log_failure_event(
+        self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any
+    ) -> None:
+        """
+        每次上游调用失败（含 router 重试的每一轮）都会触发。
+        传输/服务端类故障 → 给该 deployment 打 fail-mark（短 TTL），
+        让后续选路立即避开，不等 allowed_fails 阈值冷却。
+        """
+        try:
+            exception = kwargs.get("exception")
+            if not self._failure_should_mark(exception):
+                return
+            model_id = self._get_deployment_id_from_failure_kwargs(kwargs)
+            if model_id is None:
+                return
+            await self.cache.async_set_cache(
+                self.get_fail_mark_key(model_id), "1", ttl=self.fail_mark_ttl
+            )
+            verbose_router_logger.info(
+                "WeightedAffinityRouter: fail-marked deployment=%s for %ss (%s)",
+                model_id,
+                self.fail_mark_ttl,
+                type(exception).__name__,
+            )
+        except Exception:
+            # 日志钩子绝不影响主流程
+            pass
+
+    # ------------------------------------------------------------------
     # 加权随机选台
     # ------------------------------------------------------------------
     def _weighted_pick(self, healthy_deployments: List[dict]) -> Optional[dict]:
@@ -544,7 +644,30 @@ class WeightedAffinityRouter(CustomLogger):
 
         if pinned_model_id:
             deployment = self._find_deployment_by_model_id(deployments, pinned_model_id)
-            if deployment is not None:
+            if deployment is None:
+                # 钉的台已不在健康集合 → 视为失效，走 MISS 重选
+                verbose_router_logger.info(
+                    "WeightedAffinityRouter: pinned deployment=%s not in healthy set "
+                    "(group=%s), re-picking",
+                    pinned_model_id,
+                    model_group,
+                )
+            elif await self._is_fail_marked(pinned_model_id):
+                # pin 指向刚报过传输类故障的成员 → 立即迁移（悬挂黑洞修复）。
+                # 从候选剔除后落入下方 MISS 重选并改写 pin；若它是唯一候选则保留。
+                verbose_router_logger.info(
+                    "WeightedAffinityRouter: pinned deployment=%s fail-marked "
+                    "(group=%s), re-picking",
+                    pinned_model_id,
+                    model_group,
+                )
+                _kept = [
+                    d for d in deployments
+                    if str(self._get_model_id(d)) != str(pinned_model_id)
+                ]
+                if _kept:
+                    deployments = _kept
+            else:
                 # 滑动续期：活跃会话的 pin 永不过期，idle 超 TTL 才重摇。
                 # 失败不阻断（等同这次没续上）。
                 try:
@@ -568,16 +691,30 @@ class WeightedAffinityRouter(CustomLogger):
                     pinned_model_id,
                 )
                 return [deployment]
-            # 钉的台已不在健康集合 → 视为失效，走 MISS 重选
-            verbose_router_logger.info(
-                "WeightedAffinityRouter: pinned deployment=%s not in healthy set "
-                "(group=%s), re-picking",
-                pinned_model_id,
-                model_group,
-            )
 
-        # ---- 2) MISS → weighted 选台 + 写缓存 ----
-        chosen = self._weighted_pick(deployments)
+        # ---- 2) MISS → weighted 选台（避开 fail-marked 成员）+ 写缓存 ----
+        pick_pool = list(deployments)
+        chosen: Optional[dict] = None
+        for _ in range(3):
+            candidate = self._weighted_pick(pick_pool)
+            if candidate is None:
+                break
+            candidate_id = self._get_model_id(candidate)
+            if (
+                candidate_id is not None
+                and len(pick_pool) > 1
+                and await self._is_fail_marked(candidate_id)
+            ):
+                pick_pool = [
+                    d for d in pick_pool
+                    if str(self._get_model_id(d)) != str(candidate_id)
+                ]
+                continue
+            chosen = candidate
+            break
+        if chosen is None:
+            # 兜底：全被标记/重摇耗尽 → 从原始候选里直接选，绝不返回空
+            chosen = self._weighted_pick(deployments)
         if chosen is None:
             # 理论上不会发生（_weighted_pick 有兜底），保险起见原样返回
             return deployments

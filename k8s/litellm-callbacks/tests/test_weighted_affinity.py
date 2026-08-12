@@ -223,7 +223,80 @@ async def run():
     ok10 = repicked10 is not None and repicked10 != pinned10 and after10 == repicked10
     print(f"[T10 failover 改写 pin] 原={pinned10} 重挑={repicked10} 后续={after10}  T10 {'PASS' if ok10 else 'FAIL'}")
 
-    oks = [ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8, ok9, ok10]
+    # ---- 测试11: 传输类故障标记 → pin 立即迁移 + 改写（悬挂黑洞修复）----
+    class Timeout(Exception):
+        pass
+
+    key11 = "%064x" % 111111
+    kw = kwargs_for(key11)
+    kw["prompt_cache_key"] = "sess-failmark"
+    res = await handler.async_filter_deployments(
+        model="wtest", healthy_deployments=make_deployments(),
+        messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+    )
+    pinned11 = pick_id(res)
+    await handler.async_log_failure_event(
+        {"exception": Timeout("hang"), "litellm_params": {"model_info": {"id": pinned11}}},
+        None, None, None,
+    )
+    kw = kwargs_for(key11)
+    kw["prompt_cache_key"] = "sess-failmark"
+    res = await handler.async_filter_deployments(
+        model="wtest", healthy_deployments=make_deployments(),
+        messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+    )
+    moved11 = pick_id(res)
+    kw = kwargs_for(key11)
+    kw["prompt_cache_key"] = "sess-failmark"
+    res = await handler.async_filter_deployments(
+        model="wtest", healthy_deployments=make_deployments(),
+        messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+    )
+    stay11 = pick_id(res)
+    ok11 = moved11 is not None and moved11 != pinned11 and stay11 == moved11
+    print(f"[T11 故障标记迁移] 原={pinned11} 迁移={moved11} 后续={stay11}  T11 {'PASS' if ok11 else 'FAIL'}")
+
+    # ---- 测试12: 4xx 客户端错误不标记 → pin 不动 ----
+    class BadRequestError(Exception):
+        pass
+
+    key12 = "%064x" % 121212
+    kw = kwargs_for(key12)
+    kw["prompt_cache_key"] = "sess-badreq"
+    res = await handler.async_filter_deployments(
+        model="wtest", healthy_deployments=make_deployments(),
+        messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+    )
+    pinned12 = pick_id(res)
+    await handler.async_log_failure_event(
+        {"exception": BadRequestError("bad tools"), "litellm_params": {"model_info": {"id": pinned12}}},
+        None, None, None,
+    )
+    kw = kwargs_for(key12)
+    kw["prompt_cache_key"] = "sess-badreq"
+    res = await handler.async_filter_deployments(
+        model="wtest", healthy_deployments=make_deployments(),
+        messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+    )
+    ok12 = pick_id(res) == pinned12
+    print(f"[T12 4xx不标记] 原={pinned12} 后续={pick_id(res)}  T12 {'PASS' if ok12 else 'FAIL'}")
+
+    # ---- 测试13: 全部成员被标记 → 仍返回 1 台不为空 ----
+    for dep in ("wtest-a", "wtest-b", "wtest-c"):
+        await handler.async_log_failure_event(
+            {"exception": Timeout("hang"), "litellm_params": {"model_info": {"id": dep}}},
+            None, None, None,
+        )
+    kw = kwargs_for("%064x" % 131313)
+    kw["prompt_cache_key"] = "sess-allmarked"
+    res = await handler.async_filter_deployments(
+        model="wtest", healthy_deployments=make_deployments(),
+        messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+    )
+    ok13 = isinstance(res, list) and len(res) == 1
+    print(f"[T13 全标记兜底] 返回台数={len(res)} (期望1)  T13 {'PASS' if ok13 else 'FAIL'}")
+
+    oks = [ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13]
     print(f"\n=== 汇总: " + " ".join(f"T{i+1}={'P' if v else 'F'}" for i, v in enumerate(oks)) + " ===")
     if not all(oks):
         sys.exit(1)

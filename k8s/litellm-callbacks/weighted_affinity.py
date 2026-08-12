@@ -1,32 +1,38 @@
 """
-weighted_affinity.py — LiteLLM v1.90 自定义路由 Hook
+weighted_affinity.py — LiteLLM v1.90 自定义路由 Hook（v3：session 亲和 + Redis 共享 + 滑动 TTL）
 
-目标：替代内置 `deployment_affinity`，实现「weight 加权的首次分配 + 会话黏性」。
-
-问题背景
---------
-LiteLLM 内置的 `deployment_affinity` 在命中缓存时会 `return [deployment]`，把候选
-砍成 1 台，导致后续 simple-shuffle 的 weight 完全不生效。而 MISS 时它把整份
-`healthy_deployments` 原样返回给下游 simple-shuffle —— simple-shuffle 的 weight 语义
-只在「第一次」体现，之后被 affinity 钉死，两者其实是割裂的。
+目标：替代内置 `deployment_affinity`，实现「weight 加权的首次分配 + 会话黏性」，
+最大化上游（ChatGPT org 级）prompt cache 命中率。
 
 本 Hook 的行为
 --------------
-- **affinity MISS**（该 user_api_key 第一次请求该 model group）：
-  在 `async_filter_deployments` 里，直接按各 deployment 的 `litellm_params.weight`
-  做加权随机选 1 台，把 user_key_hash → 选中 model_id 写进缓存（TTL 可配），并
-  `return [该 deployment]`。
-  —— weight 决定「新会话初始落在哪台」的概率分布。
-- **affinity HIT**（该 key 已有缓存）：
-  直接返回缓存钉的那台，`return [该 deployment]`。
-  —— 维持「同一 key 的会话不跳台」。
-- **无 user_key / 无法决策**（比如 model group 内 model_map_key 不稳定、缓存钉的台
-  已不在 healthy set 里）：`return` 原始 `healthy_deployments` 不做任何过滤。
+黏性键（按优先级）：
+1. **session 级**：请求体带 `prompt_cache_key`（Codex CLI 每个会话发一个 UUID）或
+   metadata 带 `session_id`（`x-litellm-session-id` 头）时，黏性键 =
+   (model_group, user_key_hash, session_fp)。同一会话所有请求钉同一 acct；
+   同一用户的**不同会话**各自独立加权选台 → 负载在会话粒度上分散。
+2. **key 级兜底**：没有 session 指纹的客户端（chat-completions 路径等）退回
+   (model_group, user_key_hash)，行为同 v2。
 
-设计上把「选台 + 写缓存」都放在 `async_filter_deployments` 里（而不是像内置那样
-在 `async_pre_call_deployment_hook` 里 post-select 写缓存），因为我们要的正是「由本
-Hook 亲自决定初始落台」，而不是让下游 simple-shuffle 决定后再记录。这样 weight
-的加权语义完全由本 Hook 控制，可复现、可观测。
+- **affinity MISS**：按 `litellm_params.weight` 加权随机选 1 台，写缓存并 `return [该台]`。
+- **affinity HIT**：返回缓存钉的那台，并**滑动续期**（重写 TTL）——活跃会话永不过期，
+  只有 idle 超过 TTL 才重新摇号。（v2 不续期，pin 创建 120s 后必过期重摇，是
+  「同 session 落点随机」的根因之一。）
+- **无 user_key / 无法决策**：原样返回，不做过滤。
+
+缓存后端（v3 修复重点）
+----------------------
+v2 的解析链 `litellm.cache → 内存 dict` 在 198 生产退化为**每 worker 一份内存缓存**
+（litellm_settings 没配全局 cache），4 pod × 2 worker = 8 份互相矛盾的 pin，同一
+用户 30 秒内被 4 个不同 acct 接走（2026-08-12 实测）。v3 优先取 router 的
+RedisCache（router_settings.redis_host 已配）：
+1. 构造注入的 cache
+2. `litellm.proxy.proxy_server.llm_router.cache.redis_cache`（纯 Redis，跨 pod/worker
+   强一致；刻意绕过 DualCache 的 in-memory 层，避免 failover 改 pin 后其它 worker
+   读到本地陈旧 pin）
+3. `llm_router.cache`（DualCache，redis 未配时）
+4. `litellm.cache`
+5. 内存 dict（永不崩兜底，仅单 worker 黏性）
 
 接口约束（v1.90.2 源码已确认）
 ------------------------------
@@ -37,6 +43,8 @@ Hook 亲自决定初始落台」，而不是让下游 simple-shuffle 决定后�
 - `healthy_deployments[i]["litellm_params"]["weight"]` = int（可能缺失，缺省视为 1）。
 - user_api_key 从 `request_kwargs` 的 metadata 里取（`metadata` 或 `litellm_metadata`
   下的 `user_api_key_hash`，已是 sha256）。
+- `/v1/responses` 路径请求体顶层字段（`previous_response_id`、`prompt_cache_key`）
+  原样出现在 `request_kwargs` 顶层（proxy 端点 `llm_router.aresponses(**data)` 直传）。
 """
 
 import hashlib
@@ -98,7 +106,7 @@ class WeightedAffinityRouter(CustomLogger):
     作为 proxy callback 挂载：`callbacks: ["weighted_affinity.proxy_handler_instance"]`
     """
 
-    CACHE_KEY_PREFIX = "weighted_affinity:v1"
+    CACHE_KEY_PREFIX = "weighted_affinity:v2"
 
     def __init__(
         self,
@@ -108,12 +116,15 @@ class WeightedAffinityRouter(CustomLogger):
         """
         Args:
             cache: DualCache 实例。作为 callback 挂载时通常拿不到 router 的 DualCache，
-                   此时留空，运行期从 `litellm.cache` 惰性获取；再拿不到就退化到内存 dict。
-            ttl_seconds: 黏性 TTL。缺省读 env `WEIGHTED_AFFINITY_TTL`，再缺省 120s。
+                   此时留空，运行期从 router 的 RedisCache / litellm.cache 惰性获取；
+                   再拿不到就退化到内存 dict。
+            ttl_seconds: 黏性 idle TTL（HIT 会滑动续期）。缺省读 env
+                   `WEIGHTED_AFFINITY_TTL`，再缺省 120s。
         """
         super().__init__()
         self._injected_cache = cache
         self._memory_cache = _InMemoryTTLCache()
+        self._resolved_backend_name: Optional[str] = None
         if ttl_seconds is None:
             ttl_seconds = int(os.getenv("WEIGHTED_AFFINITY_TTL", "120"))
         self.ttl_seconds = ttl_seconds
@@ -130,22 +141,49 @@ class WeightedAffinityRouter(CustomLogger):
     def cache(self) -> Any:
         """
         缓存后端优先级：
-          1. 构造时注入的 DualCache（`Router(optional_pre_call_checks=[...])` 路径能拿到）
-          2. `litellm.cache`（proxy 配了 cache: type: redis 时全局可用）
-          3. 内存 dict fallback（保证永不为 None，import/运行都不崩）
+          1. 构造时注入的实例
+          2. router 的 RedisCache（`llm_router.cache.redis_cache`）——纯 Redis，
+             跨 pod/worker 强一致。刻意绕过 DualCache 的 in-memory 层：failover
+             re-pick 改写 pin 后，其它 worker 的本地层会继续吐陈旧 pin 直到 TTL 过期。
+          3. router 的 DualCache（redis 未配时聊胜于无）
+          4. `litellm.cache`（proxy 配了 cache: type: redis 时全局可用）
+          5. 内存 dict fallback（保证永不为 None，import/运行都不崩）
 
-        每次访问都惰性解析，避免 import 期 litellm.cache 尚未初始化的时序问题。
+        每次访问都惰性解析，避免 import 期 proxy router 尚未初始化的时序问题。
+        首次解析成功打一条 INFO 注明落在哪个后端（看门狗可断言 backend=redis）。
         """
         if self._injected_cache is not None:
             return self._injected_cache
         try:
+            from litellm.proxy.proxy_server import llm_router
+
+            router_cache = getattr(llm_router, "cache", None)
+            if router_cache is not None:
+                redis_cache = getattr(router_cache, "redis_cache", None)
+                if redis_cache is not None:
+                    self._log_backend_once("redis")
+                    return redis_cache
+                self._log_backend_once("dualcache")
+                return router_cache
+        except Exception:
+            pass
+        try:
             import litellm
 
             if getattr(litellm, "cache", None) is not None:
+                self._log_backend_once("litellm.cache")
                 return litellm.cache
         except Exception:
             pass
+        self._log_backend_once("memory")
         return self._memory_cache
+
+    def _log_backend_once(self, name: str) -> None:
+        if self._resolved_backend_name != name:
+            self._resolved_backend_name = name
+            verbose_router_logger.info(
+                "WeightedAffinityRouter: cache backend resolved -> %s", name
+            )
 
     # ------------------------------------------------------------------
     # user_key 提取（兼容 metadata / litellm_metadata 两处，照抄内置写法）
@@ -183,6 +221,26 @@ class WeightedAffinityRouter(CustomLogger):
             user_key = metadata.get("user_api_key_hash")
             if user_key is not None:
                 return str(user_key)
+        return None
+
+    @staticmethod
+    def _get_session_fingerprint(request_kwargs: dict) -> Optional[str]:
+        """
+        提取会话指纹（优先级）：
+        1. 请求体顶层 `prompt_cache_key` —— Codex CLI 每个会话发一个 UUID，
+           /v1/responses 路径 proxy 直传 kwargs（与 previous_response_id 同层）。
+        2. metadata / litellm_metadata 的 `session_id` —— proxy 从
+           `x-litellm-session-id` / `x-litellm-trace-id` 头填充。
+
+        两者都没有 → None，退回 key 级黏性。
+        """
+        pck = request_kwargs.get("prompt_cache_key")
+        if isinstance(pck, str) and pck:
+            return pck
+        for metadata in WeightedAffinityRouter._iter_metadata_dicts(request_kwargs):
+            session_id = metadata.get("session_id")
+            if session_id is not None and str(session_id):
+                return str(session_id)
         return None
 
     # ------------------------------------------------------------------
@@ -271,8 +329,18 @@ class WeightedAffinityRouter(CustomLogger):
         return hashlib.sha256(user_key.encode("utf-8")).hexdigest()
 
     @classmethod
-    def get_affinity_cache_key(cls, model_group: str, user_key: str) -> str:
+    def get_affinity_cache_key(
+        cls, model_group: str, user_key: str, session_fp: Optional[str] = None
+    ) -> str:
+        """
+        session_fp 存在 → session 级键（同一会话钉台，不同会话独立选台）；
+        否则 → key 级键（v2 语义）。session_fp 先 sha256 截 32 位：
+        指纹可能是任意客户端字符串，避免把原文写进 Redis key / 日志。
+        """
         hashed = cls._hash_user_key(user_key)
+        if session_fp:
+            session_hash = hashlib.sha256(session_fp.encode("utf-8")).hexdigest()[:32]
+            return f"{cls.CACHE_KEY_PREFIX}:{model_group}:{hashed}:s:{session_hash}"
         return f"{cls.CACHE_KEY_PREFIX}:{model_group}:{hashed}"
 
     @staticmethod
@@ -359,6 +427,32 @@ class WeightedAffinityRouter(CustomLogger):
         request_kwargs = request_kwargs or {}
         deployments = cast(List[dict], healthy_deployments)
 
+        # ---- [2026-08-10] 尊重 weighted-failover 的排除名单（修中流竞态）----
+        # 同组重挑时 router 在 request_kwargs 上带 _excluded_deployment_ids
+        # （router.py 在本 hook **之后**才 pop 并做排除过滤）。若不在这里避开，
+        # 当亲和 pin 恰好指向刚失败的账号（其 cooldown 尚未登记完成）时，本 hook
+        # 会把候选钉成 [失败账号]，随后 router 的排除过滤把它清空 → 误报
+        # "No deployments available"，组里明明还有几十个健康账号却一个没试。
+        # 生产事故：2026-08-10 05:11:27 carher-13 (proxy 554cj)，同秒对照请求
+        # cursor-xingtianxing 因 cooldown 已登记而重挑成功。只读不 pop —— pop
+        # 是 router 的事；全部被排除时保持原样，让 router 报准确错误。
+        _excluded_raw = request_kwargs.get("_excluded_deployment_ids")
+        if _excluded_raw:
+            _excluded = {str(x) for x in _excluded_raw}
+            _kept = [
+                d
+                for d in deployments
+                if str(self._get_model_id(d)) not in _excluded
+            ]
+            if _kept and len(_kept) < len(deployments):
+                verbose_router_logger.info(
+                    "WeightedAffinityRouter: dropped %d excluded deployment(s) "
+                    "(weighted-failover retry) before pin/pick for model=%s",
+                    len(deployments) - len(_kept),
+                    model,
+                )
+                deployments = _kept
+
         # 没有候选或只有 1 台，无需决策
         if not deployments:
             return deployments
@@ -429,9 +523,11 @@ class WeightedAffinityRouter(CustomLogger):
             )
             return deployments
 
-        cache_key = self.get_affinity_cache_key(model_group, user_key)
+        # session 指纹（prompt_cache_key / session_id）；None → key 级黏性
+        session_fp = self._get_session_fingerprint(request_kwargs)
+        cache_key = self.get_affinity_cache_key(model_group, user_key, session_fp)
 
-        # ---- 1) 尝试命中缓存（HIT → 返回钉的台）----
+        # ---- 1) 尝试命中缓存（HIT → 返回钉的台 + 滑动续期）----
         try:
             cache_result = await self.cache.async_get_cache(key=cache_key)
         except Exception as e:
@@ -449,10 +545,26 @@ class WeightedAffinityRouter(CustomLogger):
         if pinned_model_id:
             deployment = self._find_deployment_by_model_id(deployments, pinned_model_id)
             if deployment is not None:
+                # 滑动续期：活跃会话的 pin 永不过期，idle 超 TTL 才重摇。
+                # 失败不阻断（等同这次没续上）。
+                try:
+                    await self.cache.async_set_cache(
+                        cache_key,
+                        {"model_id": pinned_model_id},
+                        ttl=self.ttl_seconds,
+                    )
+                except Exception as e:
+                    verbose_router_logger.debug(
+                        "WeightedAffinityRouter: sliding-refresh failed key=%s err=%s",
+                        cache_key,
+                        e,
+                    )
                 verbose_router_logger.info(
-                    "WeightedAffinityRouter: HIT group=%s user=%s -> pinned deployment=%s",
+                    "WeightedAffinityRouter: HIT group=%s user=%s session=%s -> "
+                    "pinned deployment=%s",
                     model_group,
                     self._shorten_for_logs(user_key),
+                    "yes" if session_fp else "no",
                     pinned_model_id,
                 )
                 return [deployment]
@@ -491,10 +603,11 @@ class WeightedAffinityRouter(CustomLogger):
             )
 
         verbose_router_logger.info(
-            "WeightedAffinityRouter: MISS group=%s user=%s -> weighted-pick "
+            "WeightedAffinityRouter: MISS group=%s user=%s session=%s -> weighted-pick "
             "deployment=%s weight=%s (total_candidates=%d, ttl=%ss)",
             model_group,
             self._shorten_for_logs(user_key),
+            "yes" if session_fp else "no",
             chosen_id,
             self._get_weight(chosen),
             len(deployments),

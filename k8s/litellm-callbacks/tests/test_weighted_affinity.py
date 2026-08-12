@@ -135,7 +135,98 @@ async def run():
     ok6 = isinstance(res, list) and len(res) == 1
     print(f"[T6 无 tag_regex 照旧] 返回台数={len(res)} (期望1=收窄)  T6 {'PASS' if ok6 else 'FAIL'}")
 
-    print(f"\n=== 汇总: T1={'P' if ok1 else 'F'} T2={'P' if ok2 else 'F'} T3={'P' if ok3 else 'F'} T4={'P' if ok4 else 'F'} T5={'P' if ok5 else 'F'} T6={'P' if ok6 else 'F'} ===")
+    # ---- 测试7: session 黏性（同 user + 同 prompt_cache_key 连发 10 次全同台）----
+    key7 = "%064x" % 700700
+    ids7 = []
+    for _ in range(10):
+        kw = kwargs_for(key7)
+        kw["prompt_cache_key"] = "sess-uuid-alpha"
+        res = await handler.async_filter_deployments(
+            model="wtest", healthy_deployments=make_deployments(),
+            messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+        )
+        ids7.append(pick_id(res))
+    ok7 = len(set(x for x in ids7 if x)) == 1 and all(ids7)
+    print(f"[T7 session 黏性] 10 次 ids={ids7}  T7 {'PASS' if ok7 else 'FAIL'}")
+
+    # ---- 测试8: 不同 session 独立选台（40 个 session ≥2 台；已有 session pin 不被扰动）----
+    key8 = "%064x" % 800800
+    first_pins = {}
+    for i in range(40):
+        kw = kwargs_for(key8)
+        kw["prompt_cache_key"] = f"sess-{i}"
+        res = await handler.async_filter_deployments(
+            model="wtest", healthy_deployments=make_deployments(),
+            messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+        )
+        first_pins[f"sess-{i}"] = pick_id(res)
+    spread = set(first_pins.values())
+    # 重放 sess-0..4，pin 不因其它 session 改变
+    stable = True
+    for i in range(5):
+        kw = kwargs_for(key8)
+        kw["prompt_cache_key"] = f"sess-{i}"
+        res = await handler.async_filter_deployments(
+            model="wtest", healthy_deployments=make_deployments(),
+            messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+        )
+        if pick_id(res) != first_pins[f"sess-{i}"]:
+            stable = False
+    ok8 = len(spread) >= 2 and stable
+    print(f"[T8 多 session 分散+互不扰动] 40 session 落 {len(spread)} 台, 重放稳定={stable}  T8 {'PASS' if ok8 else 'FAIL'}")
+
+    # ---- 测试9: 滑动续期（ttl=1s：0.7s 间隔连打 3 次超过原始 TTL 仍 HIT 同台；静默 1.3s 后过期）----
+    import time as _time
+    h9 = mod.WeightedAffinityRouter(ttl_seconds=1)
+    key9 = "%064x" % 900900
+    ids9 = []
+    for _ in range(3):
+        kw = kwargs_for(key9)
+        kw["prompt_cache_key"] = "sess-sliding"
+        res = await h9.async_filter_deployments(
+            model="wtest", healthy_deployments=make_deployments(),
+            messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+        )
+        ids9.append(pick_id(res))
+        await asyncio.sleep(0.7)  # 3 次跨 1.4s > ttl=1s，只有续期才能全 HIT 同台
+    same9 = len(set(ids9)) == 1
+    await asyncio.sleep(1.3)  # 静默超 ttl → pin 应过期
+    ck9 = h9.get_affinity_cache_key("wtest", key9, "sess-sliding")
+    expired = (await h9.cache.async_get_cache(key=ck9)) is None
+    ok9 = same9 and expired
+    print(f"[T9 滑动续期] 跨TTL连打同台={same9} ids={ids9}, 静默后过期={expired}  T9 {'PASS' if ok9 else 'FAIL'}")
+
+    # ---- 测试10: failover 排除名单改写 session pin（排除钉的台 → 换台并保持新台）----
+    key10 = "%064x" % 101010
+    kw = kwargs_for(key10)
+    kw["prompt_cache_key"] = "sess-failover"
+    res = await handler.async_filter_deployments(
+        model="wtest", healthy_deployments=make_deployments(),
+        messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+    )
+    pinned10 = pick_id(res)
+    kw = kwargs_for(key10)
+    kw["prompt_cache_key"] = "sess-failover"
+    kw["_excluded_deployment_ids"] = {pinned10}  # 模拟 weighted-failover 重试
+    res = await handler.async_filter_deployments(
+        model="wtest", healthy_deployments=make_deployments(),
+        messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+    )
+    repicked10 = pick_id(res)
+    kw = kwargs_for(key10)
+    kw["prompt_cache_key"] = "sess-failover"
+    res = await handler.async_filter_deployments(
+        model="wtest", healthy_deployments=make_deployments(),
+        messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+    )
+    after10 = pick_id(res)
+    ok10 = repicked10 is not None and repicked10 != pinned10 and after10 == repicked10
+    print(f"[T10 failover 改写 pin] 原={pinned10} 重挑={repicked10} 后续={after10}  T10 {'PASS' if ok10 else 'FAIL'}")
+
+    oks = [ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8, ok9, ok10]
+    print(f"\n=== 汇总: " + " ".join(f"T{i+1}={'P' if v else 'F'}" for i, v in enumerate(oks)) + " ===")
+    if not all(oks):
+        sys.exit(1)
 
 
 asyncio.run(run())

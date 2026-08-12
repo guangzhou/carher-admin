@@ -58,4 +58,18 @@ if [ "$ENC" -gt 3 ]; then
   exit 1
 fi
 
-echo "[watchdog] OK (init=$INIT decisions=$DECISIONS enc_err=$ENC)"
+# 4) [v3] 缓存后端退化检测：hook 解析到非 redis 后端 = Redis 失联 →
+#    黏性退化成每 worker 一份内存缓存（同 session 重新随机落台），必须告警。
+#    正常态每个 worker 首个请求打一条 "cache backend resolved -> redis"。
+DEGRADED=0
+for P in $PODS; do
+  D=$(kubectl -n "$NS" logs "${P#pod/}" --tail="$LOG_TAIL" 2>/dev/null | grep -c "cache backend resolved -> \(memory\|litellm.cache\|dualcache\)")
+  DEGRADED=$((DEGRADED+D))
+done
+echo "[watchdog] non-redis backend resolutions: $DEGRADED"
+if [ "$DEGRADED" -gt 0 ]; then
+  echo "[watchdog] ALERT: hook 缓存后端退化(非 redis $DEGRADED 次)！检查 litellm-redis svc / router_settings.redis_host"
+  exit 1
+fi
+
+echo "[watchdog] OK (init=$INIT decisions=$DECISIONS enc_err=$ENC backend_degraded=$DEGRADED)"

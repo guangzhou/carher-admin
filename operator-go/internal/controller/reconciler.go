@@ -495,8 +495,9 @@ func herContainerEnv(uid int, pfx, litellmKey, profile, appID, secretName, feish
 			corev1.EnvVar{Name: "CARHER_REQUIRED_SECRET_ENVS", Value: "CARHER_PROD_KEY"},
 			corev1.EnvVar{Name: "CARHER_HERMES_VOLUME_ROOT", Value: "/opt/data"},
 			corev1.EnvVar{Name: "CARHER_HERMES_CONFIG_TEMPLATE", Value: hermesTemplatePath},
-			corev1.EnvVar{Name: "OPENCLAW_LARK_VERSION", Value: "2026.4.10"},
-			corev1.EnvVar{Name: "CARHER_RUNTIME_OPENCLAW_LARK_VERSION", Value: "2026.4.10"},
+			// 不再硬编码 lark 版本 env: 旧镜像 entrypoint 默认 2026.4.10、新镜像默认 2026.7.16,
+			// 各自等于自身 baked 版本。硬塞单一版本会覆盖新镜像的正确默认 → entrypoint 版本检查
+			// 报 "✗ baked openclaw-lark@... missing" exit 71 → CrashLoop(2026-08-13 carher-35/303)。
 			corev1.EnvVar{Name: "CARHER_ACP_ENABLED", Value: "1"},
 			corev1.EnvVar{Name: "CARHER_DIFY_ENABLED", Value: "1"},
 			corev1.EnvVar{Name: "CARHER_DIFY_BOT_ID", Value: botID},

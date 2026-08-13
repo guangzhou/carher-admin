@@ -31,20 +31,22 @@ var modelMapWangsu = map[string]string{
 	"gemini": "wangsu/gemini-3.1-pro-preview",
 }
 
+// modelMapLitellm resolves spec.model -> primary model path.
+// Names here MUST match the per-key LiteLLM allowlist (unprefixed), verified
+// 200 on carher-1000 (2026-08-13). Fleet spec.model is either "gpt-5.6-terra"
+// (328 instances) or "gpt" (1); both resolve to litellm/gpt-5.6-terra.
 var modelMapLitellm = map[string]string{
-	"sonnet":  "litellm/claude-sonnet-5",
-	"opus":    "litellm/claude-opus-4-6",
-	"opus4.7": "litellm/claude-opus-4-7",
-	"gpt":         "litellm/chatgpt-gpt-5.5",
-	"gpt-5.4":     "litellm/chatgpt-gpt-5.4",
-	"gpt-5.6-sol":   "litellm/chatgpt-gpt-5.6-sol",
-	"gpt-5.6-terra": "litellm/chatgpt-gpt-5.6-terra",
-	"gpt-5.6-luna":  "litellm/chatgpt-gpt-5.6-luna",
-	"gemini":  "litellm/gemini-3.1-pro-preview",
-	"minimax": "litellm/minimax-m2.7",
-	"glm":     "litellm/glm-5",
-	"codex":   "litellm/chatgpt-gpt-5.3-codex",
-	"opus4.8": "litellm/openrouter-claude-opus-4-8",
+	"gpt":           "litellm/gpt-5.6-terra",
+	"gpt-5.6-terra": "litellm/gpt-5.6-terra",
+	"gpt-5.6-sol":   "litellm/gpt-5.6-sol",
+	"gpt-5.6-luna":  "litellm/gpt-5.6-luna",
+	"gpt5.5":        "litellm/gpt-5.5",
+	"opus":          "litellm/claude-opus-4-8",
+	"sonnet":        "litellm/claude-sonnet-5",
+	"gemini":        "litellm/gemini-3.5-flash",
+	"glm":           "litellm/glm-5",
+	"ds-flash":      "litellm/deepseek-v4-flash",
+	"ds-pro":        "litellm/deepseek-v4-pro",
 }
 
 // extraLitellmModelRegistry holds metadata for opt-in LiteLLM models that are
@@ -122,23 +124,19 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 	models := make(map[string]interface{})
 	switch input.Provider {
 	case "litellm":
-		models["litellm/claude-opus-4-6"] = alias("opus")
+		// Aliases MUST use unprefixed model ids matching the per-key LiteLLM
+		// allowlist. Verified 200 (tools+stream) on carher-1000 key 2026-08-13.
+		// One model = one alias (openclaw keys the alias block by model id).
+		models["litellm/gpt-5.6-terra"] = alias("gpt")
+		models["litellm/gpt-5.5"] = alias("gpt5.5")
+		models["litellm/gpt-5.6-sol"] = alias("gpt-5.6-sol")
+		models["litellm/gpt-5.6-luna"] = alias("gpt-5.6-luna")
+		models["litellm/claude-opus-4-8"] = alias("opus")
 		models["litellm/claude-sonnet-5"] = alias("sonnet")
-		models["litellm/chatgpt-gpt-5.4"] = alias("gpt-5.4")
-		models["litellm/chatgpt-gpt-5.5"] = alias("gpt")
-		models["litellm/chatgpt-gpt-5.6-sol"] = alias("gpt-5.6-sol")
-		models["litellm/chatgpt-gpt-5.6-terra"] = alias("gpt-5.6-terra")
-		models["litellm/chatgpt-gpt-5.6-luna"] = alias("gpt-5.6-luna")
-		models["litellm/gemini-3.1-pro-preview"] = alias("gemini")
-		models["litellm/minimax-m2.7"] = alias("minimax")
+		models["litellm/gemini-3.5-flash"] = alias("gemini")
 		models["litellm/glm-5"] = alias("glm")
-		models["litellm/chatgpt-gpt-5.3-codex"] = alias("codex")
-		models["litellm/claude-opus-4-7"] = alias("opus4.7")
-		models["litellm/openrouter-claude-opus-4-8"] = alias("opus4.8")
-		models["litellm/wangsu-deepseek-v4-pro"] = alias("ds-pro")
-		models["litellm/wangsu-deepseek-v4-flash"] = alias("ds-flash")
-		models["litellm/wangsu-glm-5.1"] = alias("glm51")
-		models["litellm/wangsu-gemini-3.5-flash"] = alias("gemini35")
+		models["litellm/deepseek-v4-flash"] = alias("ds-flash")
+		models["litellm/deepseek-v4-pro"] = alias("ds-pro")
 	case "anthropic":
 		models["anthropic/claude-opus-4-6"] = alias("opus")
 		models["anthropic/claude-sonnet-4-6"] = alias("sonnet")
@@ -225,24 +223,16 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 			apiKey = input.LitellmKey
 		}
 		baseModels := []map[string]interface{}{
-			{"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 25, "cacheRead": 0.5}},
+			{"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 260000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 2.5, "output": 15}},
+			{"id": "gpt-5.5", "name": "GPT-5.5", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 260000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 0, "output": 0, "cacheRead": 0}},
+			{"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 260000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 30}},
+			{"id": "gpt-5.6-luna", "name": "GPT-5.6 Luna", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 260000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 1, "output": 6}},
+			{"id": "claude-opus-4-8", "name": "Claude Opus 4.8", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 25, "cacheRead": 0.5}},
 			{"id": "claude-sonnet-5", "name": "Claude Sonnet 5", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 64000, "cost": map[string]interface{}{"input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5}},
-			{"id": "gpt-5.4", "name": "GPT-5.4", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 2.5, "output": 15, "cacheRead": 0.25}},
-			{"id": "chatgpt-gpt-5.5", "name": "GPT-5.5 (ChatGPT Pro)", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 260000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 0, "output": 0, "cacheRead": 0}},
-			{"id": "chatgpt-gpt-5.6-sol", "name": "GPT-5.6 Sol", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 260000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 30}},
-			{"id": "chatgpt-gpt-5.6-terra", "name": "GPT-5.6 Terra", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 260000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 2.5, "output": 15}},
-			{"id": "chatgpt-gpt-5.6-luna", "name": "GPT-5.6 Luna", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 260000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 1, "output": 6}},
-			{"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 65536, "cost": map[string]interface{}{"input": 2, "output": 12, "cacheRead": 0.2}},
-			{"id": "minimax-m2.7", "name": "MiniMax M2.7", "api": "openai-completions", "input": []string{"text"}, "contextWindow": 200000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 0.5, "output": 1.5}},
+			{"id": "gemini-3.5-flash", "name": "Gemini 3.5 Flash", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1048576, "maxTokens": 65536, "cost": map[string]interface{}{"input": 1.5, "output": 9}},
 			{"id": "glm-5", "name": "GLM-5", "api": "openai-completions", "input": []string{"text"}, "contextWindow": 128000, "maxTokens": 32000, "cost": map[string]interface{}{"input": 1, "output": 3}},
-			{"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 200000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 3, "output": 15}},
-			{"id": "claude-opus-4-7", "name": "Claude Opus 4.7", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 25, "cacheRead": 0.5}},
-			{"id": "openrouter-claude-opus-4-8", "name": "Claude Opus 4.8 (OpenRouter)", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 25, "cacheRead": 0.5}},
-			{"id": "wangsu-gpt-5.5", "name": "GPT-5.5 (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1000000, "maxTokens": 128000, "cost": map[string]interface{}{"input": 5, "output": 30}},
-			{"id": "wangsu-deepseek-v4-pro", "name": "DeepSeek V4 Pro (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 1000000, "maxTokens": 384000, "cost": map[string]interface{}{"input": 1.71, "output": 3.43}},
-			{"id": "wangsu-deepseek-v4-flash", "name": "DeepSeek V4 Flash (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 1000000, "maxTokens": 384000, "cost": map[string]interface{}{"input": 0.143, "output": 0.286}},
-			{"id": "wangsu-glm-5.1", "name": "GLM-5.1 (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 203008, "maxTokens": 65536, "cost": map[string]interface{}{"input": 1.4, "output": 4.4}},
-			{"id": "wangsu-gemini-3.5-flash", "name": "Gemini 3.5 Flash (Wangsu)", "api": "openai-completions", "reasoning": true, "input": []string{"text", "image"}, "contextWindow": 1048576, "maxTokens": 65536, "cost": map[string]interface{}{"input": 1.5, "output": 9}},
+			{"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 1000000, "maxTokens": 384000, "cost": map[string]interface{}{"input": 0.143, "output": 0.286}},
+			{"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "api": "openai-completions", "reasoning": true, "input": []string{"text"}, "contextWindow": 1000000, "maxTokens": 384000, "cost": map[string]interface{}{"input": 1.71, "output": 3.43}},
 		}
 		providerModels := append(baseModels, extraProviderModels...)
 		cfg["models"] = map[string]interface{}{
@@ -287,6 +277,10 @@ func GenerateOpenclawJSON(input ConfigInput) string {
 		}
 		if len(owners) > 0 {
 			feishu["dm"] = map[string]interface{}{"allowFrom": owners}
+			// The current Feishu plugin reads the top-level policy/list fields.
+			// Keep the legacy dm.allowFrom shape for older runtime builds.
+			feishu["dmPolicy"] = "allowlist"
+			feishu["allowFrom"] = owners
 		}
 		cfg["channels"] = map[string]interface{}{"feishu": feishu}
 	}

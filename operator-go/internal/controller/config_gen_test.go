@@ -175,27 +175,23 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 	agents := cfg["agents"].(map[string]interface{})
 	defaults := agents["defaults"].(map[string]interface{})
 	model := defaults["model"].(map[string]interface{})
-	if model["primary"] != "litellm/claude-opus-4-6" {
+	if model["primary"] != "litellm/claude-opus-4-8" {
 		t.Errorf("Wrong primary model: %v", model["primary"])
 	}
 
 	models := defaults["models"].(map[string]interface{})
 
 	expectedAliases := map[string]string{
-		"litellm/claude-opus-4-6":            "opus",
-		"litellm/claude-sonnet-5":            "sonnet",
-		"litellm/chatgpt-gpt-5.4":            "gpt-5.4",
-		"litellm/chatgpt-gpt-5.5":            "gpt",
-		"litellm/gemini-3.1-pro-preview":     "gemini",
-		"litellm/minimax-m2.7":               "minimax",
-		"litellm/glm-5":                      "glm",
-		"litellm/chatgpt-gpt-5.3-codex":      "codex",
-		"litellm/claude-opus-4-7":            "opus4.7",
-		"litellm/openrouter-claude-opus-4-8": "opus4.8",
-		"litellm/wangsu-deepseek-v4-pro":     "ds-pro",
-		"litellm/wangsu-deepseek-v4-flash":   "ds-flash",
-		"litellm/wangsu-glm-5.1":             "glm51",
-		"litellm/wangsu-gemini-3.5-flash":    "gemini35",
+		"litellm/gpt-5.6-terra":     "gpt",
+		"litellm/gpt-5.5":           "gpt5.5",
+		"litellm/gpt-5.6-sol":       "gpt-5.6-sol",
+		"litellm/gpt-5.6-luna":      "gpt-5.6-luna",
+		"litellm/claude-opus-4-8":   "opus",
+		"litellm/claude-sonnet-5":   "sonnet",
+		"litellm/gemini-3.5-flash":  "gemini",
+		"litellm/glm-5":             "glm",
+		"litellm/deepseek-v4-flash": "ds-flash",
+		"litellm/deepseek-v4-pro":   "ds-pro",
 	}
 	for mid, wantAlias := range expectedAliases {
 		m, ok := models[mid]
@@ -209,8 +205,8 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 		}
 	}
 
-	if len(models) != 14 {
-		t.Errorf("Expected exactly 14 models for litellm, got %d", len(models))
+	if len(models) != 10 {
+		t.Errorf("Expected exactly 10 models for litellm, got %d", len(models))
 		for k := range models {
 			t.Logf("  model: %s", k)
 		}
@@ -223,13 +219,13 @@ func TestGenerateOpenclawJSON_Litellm(t *testing.T) {
 		}
 	}
 
-	// Verify litellm provider is defined with 14 models
+	// Verify litellm provider is defined with 10 models
 	modelsSection := cfg["models"].(map[string]interface{})
 	providers := modelsSection["providers"].(map[string]interface{})
 	litellmProv := providers["litellm"].(map[string]interface{})
 	provModels := litellmProv["models"].([]interface{})
-	if len(provModels) != 15 {
-		t.Errorf("Expected 15 provider models, got %d", len(provModels))
+	if len(provModels) != 10 {
+		t.Errorf("Expected 10 provider models, got %d", len(provModels))
 	}
 
 	if litellmProv["apiKey"] != "sk-test-key" {
@@ -319,9 +315,9 @@ func TestGenerateOpenclawJSON_ExtraLitellmModels(t *testing.T) {
 
 	providers := cfg["models"].(map[string]interface{})["providers"].(map[string]interface{})
 	provModels := providers["litellm"].(map[string]interface{})["models"].([]interface{})
-	// 15 default + 1 test extra = 16
-	if len(provModels) != 16 {
-		t.Errorf("Expected 16 provider models (15 default + 1 extra), got %d", len(provModels))
+	// 10 default + 1 test extra = 11
+	if len(provModels) != 11 {
+		t.Errorf("Expected 11 provider models (10 default + 1 extra), got %d", len(provModels))
 	}
 	var found bool
 	for _, m := range provModels {

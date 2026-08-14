@@ -118,6 +118,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 from litellm.integrations.custom_logger import CustomLogger
@@ -158,6 +159,29 @@ _RESPONSE_CALL_TYPES = {"responses", "aresponses", "_aresponses_websocket"}
 # （见模块头 W1/W2 两格）—— 那串列表是 serde 的 variant 名，不是「能用的值」。
 _WEB_SEARCH_TAGS = {"web_search", "web_search_2025_08_26"}
 _SENTINEL = object()
+
+# 裸产品名 -> 官方原生 Responses 组的 endpoint 级改写（2026-08-14）。
+# 动机：让 Codex 用户**不装 DeepSeek 官方 models.json** 就能用（挪到 litellm 侧）。
+# 无 catalog 的 Codex 只能选裸名 `deepseek-v4-flash`，但该产品名是 mode:chat 组，
+# /v1/responses 进来走 responses→chat bridge —— Codex 降级元数据的工具形状会把
+# bridge 打死或 400（codex 0.147 实测 400；namespace 工具挂死见
+# feedback_codex_namespace_tools_hang_litellm_chat_bridge）。同一客户端打同名
+# -responses 组（官方原生透传）E2E 全通。所以在请求入口把 /v1/responses 的
+# 裸名改写到 -responses 组：
+#   * 只动 responses 调用；/chat/completions 的 Cursor / her 流量不受影响
+#     （7d 日志裸名 responses 流量≈0，全是探针）。
+#   * 挂点与 codex_ua_pool_route 相同：per-key alias 之后、路由之前。key 白名单
+#     校验用入站名（裸名已在 558 把 cursor key 白名单里），无需给 key 补
+#     -responses 名单。
+#   * fallback 路径不经过本改写（fallback 走 pre_deployment），既有兜底行为不变。
+#   * DEEPSEEK_RESPONSES_REWRITE=off 一键停用。
+_REWRITE_ENABLED = os.environ.get(
+    "DEEPSEEK_RESPONSES_REWRITE", "on").strip().lower() not in {"off", "0", "false"}
+_RESPONSES_GROUP_REWRITE = {
+    "deepseek-v4-flash": "deepseek-v4-flash-responses",
+    "deepseek-v4-pro": "deepseek-v4-pro-responses",
+}
+
 
 
 def _is_responses_call(call_type: Any) -> bool:
@@ -695,6 +719,13 @@ class DeepSeekResponsesAdapt(CustomLogger):
     async def async_pre_call_hook(self, user_api_key_dict: Any, cache: Any, data: dict, call_type: str) -> Any:
         try:
             if _is_responses_call(call_type) and isinstance(data, dict):
+                target = _RESPONSES_GROUP_REWRITE.get(data.get("model")) if _REWRITE_ENABLED else None
+                if target:
+                    _log.warning(
+                        "deepseek_responses_adapt: model rewrite %s -> %s (responses entry)",
+                        data.get("model"), target)
+                    data = dict(data)
+                    data["model"] = target
                 return _adapt(data, "pre_call:%s" % call_type)
         except Exception as exc:
             _log.warning("deepseek_responses_adapt: pre_call error: %r", exc)

@@ -55,7 +55,17 @@ _zk = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_zk)
 api, list_all_keys = _zk.api, _zk.list_all_keys
 
-TARGET = "zai-coding-glm-5.3"
+# Target group. We route to the ANTHROPIC-format glm-5.3 group, not the
+# openai-format coding group. Measured 2026-08-15 (10 samples each via /chat):
+#   zai-coding-glm-5.3 (openai @ /api/coding/paas/v4)  -> 3/10 200, 7/10 500
+#   zai-claude-glm-5.3 (anthropic @ /api/anthropic)    -> 10/10 200
+#   zai-max-glm-5.3    (anthropic @ /api/anthropic)    -> 10/10 200
+# The z.ai coding endpoint is flaky (intermittent 500) AND, being openai-shaped,
+# it 500s/404s when reached via the Anthropic /v1/messages path that Claude Code
+# uses. The anthropic-format group is stable on BOTH entrypoints (litellm
+# converts openai /chat -> anthropic and anthropic /v1/messages -> anthropic),
+# so a single target serves Cursor (/chat), Xcode, and Claude Code (/v1/messages).
+TARGET = "zai-claude-glm-5.3"
 FALLBACK_TARGET = "openrouter-glm-5.2"
 # names that get an alias -> TARGET (bare + reasoning variants + claude- prefix)
 ALIAS_NAMES = ["glm-5.3", "glm-5.3-high", "glm-5.3-medium", "glm-5.3-low",
@@ -94,6 +104,10 @@ def main() -> None:
     ap.add_argument("--backup", help="write pre-change key snapshot here (required with --apply)")
     ap.add_argument("--only", action="append", default=[], help="restrict to these key_alias(es)")
     ap.add_argument("--limit", type=int, help="canary: only the first N planned keys")
+    ap.add_argument("--prefix", default="cursor-",
+                    help="key_alias prefix to target (cursor- for Cursor/Xcode, "
+                         "claude-code- for Claude Code; CC only lists claude-* names "
+                         "so the claude-glm-5.3 alias is the one that matters there)")
     ap.add_argument("--restore", help="restore aliases/models from a backup json")
     args = ap.parse_args()
 
@@ -118,11 +132,11 @@ def main() -> None:
         return
 
     keys = list_all_keys()
-    cursor = [k for k in keys if str(k.get("key_alias") or "").startswith("cursor-")]
+    cursor = [k for k in keys if str(k.get("key_alias") or "").startswith(args.prefix)]
     if args.only:
         want = set(args.only)
         cursor = [k for k in cursor if k.get("key_alias") in want]
-    print(f"{len(cursor)} cursor-* keys in scope")
+    print(f"{len(cursor)} {args.prefix}* keys in scope")
 
     planned = []
     for k in cursor:

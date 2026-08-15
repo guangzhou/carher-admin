@@ -245,6 +245,135 @@ def _is_intra_turn_filler(item: Any) -> bool:
     return item.get("type") is None and item.get("role") == "assistant"
 
 
+# 占位 output 的类型按 call 类型配对（repair 用）。tool_search_call 的 output
+# 类型没有 _call 后缀，不能机械替换字符串。
+_CALL_TO_OUTPUT_TYPE = {
+    "function_call": "function_call_output",
+    "custom_tool_call": "custom_tool_call_output",
+    "tool_call": "function_call_output",
+    "local_shell_call": "local_shell_call_output",
+    "tool_search_call": "tool_search_output",
+    "mcp_tool_call": "mcp_tool_call_output",
+}
+
+_ORPHAN_OUTPUT_TEXT = "(tool output was lost during session truncation; proceed without it)"
+
+
+def _repair_tool_pairing(items: Any, counts: dict[str, int]) -> Any:
+    """孤儿 tool call / output 修复 —— gpt 兜底落 deepseek 的 400 真凶之一。
+
+    DeepSeek 严格校验 call/output 配对，gpt 上游全都容忍（2026-08-15 生产 48h
+    82 次 400 "No tool output found for tool call ..."，且 deepseek 是兜底链
+    最后一跳，400 直吐用户）。单变量实测（api.deepseek.com，其余字段全同）::
+
+        [U, fc, fco, U2]        -> 200
+        [U, fc, U2]             -> 400 No tool output found          <- 孤儿 call
+        [U, fco, U2]            -> 400 No tool call found            <- 孤儿 output
+        [U, fc, fco, fc2]（末尾）-> 400 No tool output found
+        [U, fc1, fc2, fco2, fco1, U2] -> 200（块内 output 乱序被容忍，
+                                        所以占位 output 追加块尾即可，不用重排）
+
+    修法：孤儿 output 直接删；孤儿 call 在其所在块的末尾（下一个非
+    call/output/轮内填充项之前，或列表结尾）补一条占位 output。
+    """
+    if not isinstance(items, list):
+        return items
+
+    call_ids: set = set()
+    for item in items:
+        if isinstance(item, dict) and item.get("type") in _TOOL_CALL_TYPES:
+            cid = item.get("call_id")
+            if cid:
+                call_ids.add(cid)
+
+    out: list[Any] = []
+    changed = False
+    # pending: 当前块里还没见到 output 的 call（id -> call 类型）
+    pending: dict[Any, str] = {}
+    # 已补过占位的 call：其"迟到"的真 output（与 call 隔了块边界，DeepSeek
+    # 反正配不上）要删掉，否则占位+真身双 output 又是一种坏形状
+    placeholdered: set = set()
+
+    def _flush() -> None:
+        nonlocal changed
+        for cid, ctype in pending.items():
+            out.append({
+                "type": _CALL_TO_OUTPUT_TYPE.get(ctype, "function_call_output"),
+                "call_id": cid,
+                "output": _ORPHAN_OUTPUT_TEXT,
+            })
+            placeholdered.add(cid)
+            counts["orphan_call_output_inserted"] = counts.get("orphan_call_output_inserted", 0) + 1
+            changed = True
+        pending.clear()
+
+    for item in items:
+        t = _item_type(item)
+        if t in _TOOL_CALL_TYPES:
+            cid = item.get("call_id")
+            if cid:
+                pending[cid] = t
+            out.append(item)
+            continue
+        if t in _TOOL_OUTPUT_TYPES:
+            cid = item.get("call_id")
+            if cid and cid not in call_ids:
+                counts["orphan_output_dropped"] = counts.get("orphan_output_dropped", 0) + 1
+                changed = True
+                continue
+            if cid in placeholdered:
+                counts["late_output_dropped"] = counts.get("late_output_dropped", 0) + 1
+                changed = True
+                continue
+            pending.pop(cid, None)
+            out.append(item)
+            continue
+        if _is_intra_turn_filler(item):
+            out.append(item)
+            continue
+        # 块边界（用户消息等）：把本块缺 output 的 call 补齐在边界之前
+        _flush()
+        out.append(item)
+    _flush()
+
+    return out if changed else items
+
+
+# 兜底请求体积保护（2026-08-15）。gpt 长会话（350k+ token）兜底落 deepseek 会
+# 撞两堵墙：>1M token 上游报 ContextWindowExceeded；body 再大直接被
+# api.deepseek.com 边缘 openresty 413（HTML）拒收 —— 48h 生产 127 次，且 413
+# 会被 WA 误标 deployment 180s 殃及他人。字节预算是粗尺（≈3~4 chars/token，
+# 3MB 对应 ~0.8-1M token 的典型 Codex 载荷），目的不是精确计数，是让兜底
+# 在超限前把最老历史裁掉、保住可用性；裁剪产生的孤儿由 _repair_tool_pairing
+# 收尾。DEEPSEEK_INPUT_BYTE_BUDGET=0 停用。
+_INPUT_BYTE_BUDGET = int(os.environ.get("DEEPSEEK_INPUT_BYTE_BUDGET", "3000000"))
+
+
+def _trim_oversize_input(data: dict[str, Any], counts: dict[str, int]) -> dict[str, Any]:
+    if _INPUT_BYTE_BUDGET <= 0:
+        return data
+    items = data.get("input")
+    if not isinstance(items, list) or len(items) < 2:
+        return data
+    try:
+        sizes = [len(json.dumps(it, ensure_ascii=False)) for it in items]
+    except (TypeError, ValueError):
+        return data
+    total = sum(sizes)
+    if total <= _INPUT_BYTE_BUDGET:
+        return data
+    keep_from = 0
+    while keep_from < len(items) - 1 and total > _INPUT_BYTE_BUDGET:
+        total -= sizes[keep_from]
+        keep_from += 1
+    counts["oversize_items_trimmed"] = keep_from
+    counts["oversize_bytes_after"] = total
+    out = dict(data)
+    out["input"] = items[keep_from:]
+    return out
+
+
+
 def _opens_new_turn(out: list[Any]) -> bool:
     """当前位置要不要补 reasoning：往回跳过轮内填充项再看。
 
@@ -668,6 +797,13 @@ def _adapt(data: dict[str, Any], source: str) -> dict[str, Any]:
     data = _hoist_additional_tools(data, counts)
     # compaction_trigger 换成显式摘要指令（DeepSeek 不认这个 item type）
     data = _rewrite_compaction_request(data, counts)
+    # 体积保护在配对修复**之前**：裁剪掉最老历史可能产生孤儿 output，
+    # 由紧随其后的 _repair_tool_pairing 收尾
+    data = _trim_oversize_input(data, counts)
+    repaired = _repair_tool_pairing(data.get("input"), counts)
+    if repaired is not data.get("input"):
+        data = dict(data)
+        data["input"] = repaired
     out = dict(data)
     tools = _adapt_tools(out.get("tools"), counts)
     if tools is not out.get("tools"):

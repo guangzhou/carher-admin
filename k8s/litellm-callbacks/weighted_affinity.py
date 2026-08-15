@@ -127,6 +127,15 @@ class WeightedAffinityRouter(CustomLogger):
         "InvalidRequest",
         "UnprocessableEntity",
         "UnsupportedParams",
+        # 2026-08-15：请求级失败 ≠ 节点故障。gpt 长会话兜底落 deepseek 时，
+        # 超大 body 被上游边缘 openresty 拒收（413 HTML）被 litellm 包成
+        # APIError（命中 TRANSIENT 的 "APIError"），把 deepseek deployment
+        # 误标 180s，殃及其他用户的兜底。NEVER 先于 TRANSIENT 判定，故在
+        # 此排除。ContextWindowExceeded 通常带 BadRequestError 文本已被
+        # 排除，仍显式列出防止上游改包装。
+        "Request Entity Too Large",
+        "ContextWindowExceeded",
+        "maximum context length",
     )
     _TRANSIENT_MARK_SUBSTRINGS = (
         "Timeout",

@@ -50,6 +50,7 @@ RedisCache（router_settings.redis_host 已配）：
 import hashlib
 import os
 import random
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -148,6 +149,24 @@ class WeightedAffinityRouter(CustomLogger):
         "APIError",
     )
 
+    # ---- [2026-08-16] 配额撞顶单独判（修 fallback 风暴）----
+    # codex 上游 7d 窗口打满时返回 429 body:
+    #   {"error":{"type":"usage_limit_reached","message":"The usage limit has
+    #    been reached","resets_in_seconds":534428,...}}
+    # 原逻辑把它当 TRANSIENT("RateLimit") 只标 180s → 撞顶号每 3 分钟回池
+    # 挨打一轮。2026-08-15/16 实测 17 个撞顶号 + 4 proxy 副本打出 ~66 次/分钟
+    # 的 fallback 风暴（storm 采样: 15min 内 984 次 "Falling back"）。
+    # 修法：命中下面签名 → 标记 TTL 直接用 body 里的 resets_in_seconds
+    # （+60s 缓冲，封顶 7d）；解析不到时退 env
+    # WEIGHTED_AFFINITY_QUOTA_MARK_TTL（默认 6h，quota 引擎 scale0 是
+    # 更持久的兜底）。签名足够特异（codex backend 专属 JSON），且撞顶号上
+    # 任何请求都必失败，不存在"殃及无辜"，故先于 NEVER 判定。
+    _QUOTA_CAP_SUBSTRINGS = (
+        "usage_limit_reached",
+        "The usage limit has been reached",
+    )
+    _QUOTA_RESET_RE = re.compile(r'"resets_in_seconds"\s*:\s*(\d+)')
+
     def __init__(
         self,
         cache: Optional[Any] = None,
@@ -169,10 +188,15 @@ class WeightedAffinityRouter(CustomLogger):
             ttl_seconds = int(os.getenv("WEIGHTED_AFFINITY_TTL", "120"))
         self.ttl_seconds = ttl_seconds
         self.fail_mark_ttl = int(os.getenv("WEIGHTED_AFFINITY_FAIL_MARK_TTL", "180"))
+        self.quota_mark_ttl_default = int(
+            os.getenv("WEIGHTED_AFFINITY_QUOTA_MARK_TTL", "21600")
+        )
         verbose_router_logger.info(
-            "WeightedAffinityRouter: initialized (ttl=%ss, injected_cache=%s)",
+            "WeightedAffinityRouter: initialized (ttl=%ss, injected_cache=%s, "
+            "quota_mark_ttl_default=%ss)",
             self.ttl_seconds,
             "yes" if cache is not None else "no",
+            self.quota_mark_ttl_default,
         )
 
     # ------------------------------------------------------------------
@@ -452,6 +476,27 @@ class WeightedAffinityRouter(CustomLogger):
             return False
         return any(s in text for s in cls._TRANSIENT_MARK_SUBSTRINGS)
 
+    def _failure_mark_ttl(self, exception: Any) -> Optional[Tuple[int, str]]:
+        """
+        返回 (fail-mark TTL, 原因标签)；None = 不标记。
+
+        [2026-08-16] 配额撞顶（见 _QUOTA_CAP_SUBSTRINGS 注释）优先判定：
+        TTL 用 body 的 resets_in_seconds+60（封顶 7d），解析不到退
+        quota_mark_ttl_default。其余沿用 _failure_should_mark 的
+        NEVER/TRANSIENT 语义，TTL = fail_mark_ttl（短标记）。
+        """
+        if exception is None:
+            return None
+        text = f"{type(exception).__name__} {exception}"
+        if any(s in text for s in self._QUOTA_CAP_SUBSTRINGS):
+            m = self._QUOTA_RESET_RE.search(text)
+            if m:
+                return (min(int(m.group(1)) + 60, 7 * 86400), "quota-cap")
+            return (self.quota_mark_ttl_default, "quota-cap")
+        if not self._failure_should_mark(exception):
+            return None
+        return (self.fail_mark_ttl, "transient")
+
     async def _is_fail_marked(self, model_id: str) -> bool:
         try:
             return bool(
@@ -465,24 +510,27 @@ class WeightedAffinityRouter(CustomLogger):
     ) -> None:
         """
         每次上游调用失败（含 router 重试的每一轮）都会触发。
-        传输/服务端类故障 → 给该 deployment 打 fail-mark（短 TTL），
-        让后续选路立即避开，不等 allowed_fails 阈值冷却。
+        传输/服务端类故障 → 短 TTL fail-mark（不等 allowed_fails 阈值冷却）；
+        配额撞顶 → 长 TTL（到官方 reset），让撞顶号立即退出选路。
         """
         try:
             exception = kwargs.get("exception")
-            if not self._failure_should_mark(exception):
+            mark = self._failure_mark_ttl(exception)
+            if mark is None:
                 return
+            ttl, reason = mark
             model_id = self._get_deployment_id_from_failure_kwargs(kwargs)
             if model_id is None:
                 return
             await self.cache.async_set_cache(
-                self.get_fail_mark_key(model_id), "1", ttl=self.fail_mark_ttl
+                self.get_fail_mark_key(model_id), "1", ttl=ttl
             )
             verbose_router_logger.info(
-                "WeightedAffinityRouter: fail-marked deployment=%s for %ss (%s)",
+                "WeightedAffinityRouter: fail-marked deployment=%s for %ss (%s, %s)",
                 model_id,
-                self.fail_mark_ttl,
+                ttl,
                 type(exception).__name__,
+                reason,
             )
         except Exception:
             # 日志钩子绝不影响主流程

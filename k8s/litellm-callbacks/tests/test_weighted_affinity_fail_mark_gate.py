@@ -122,5 +122,49 @@ class FailMarkGateTest(unittest.TestCase):
         self.assertFalse(self._mark(BadRequestError("No tool output found")))
 
 
+class QuotaCapMarkTTLTest(unittest.TestCase):
+    """[2026-08-16] 配额撞顶 429 → 长 TTL 标记（到官方 reset），修 fallback 风暴。
+
+    真实 body（acct-194 实测 2026-08-16）:
+      {"error":{"type":"usage_limit_reached","message":"The usage limit has
+       been reached","plan_type":"pro","resets_at":1787387541,
+       "resets_in_seconds":534428}}
+    """
+
+    def setUp(self):
+        self.inst = _CLS()
+
+    def _ttl(self, exc):
+        return self.inst._failure_mark_ttl(exc)
+
+    def test_quota_cap_with_resets_uses_official_reset_plus_cushion(self):
+        exc = _APIError(
+            'RateLimitError: OpenAIException - {"error":{"type":"usage_limit_reached",'
+            '"message":"The usage limit has been reached","plan_type":"pro",'
+            '"resets_at":1787387541,"eligible_promo":null,"resets_in_seconds":534428}}')
+        self.assertEqual(self._ttl(exc), (534428 + 60, "quota-cap"))
+
+    def test_quota_cap_without_resets_falls_back_to_default(self):
+        exc = _APIError('429 usage_limit_reached upstream said no')
+        self.assertEqual(self._ttl(exc), (self.inst.quota_mark_ttl_default, "quota-cap"))
+
+    def test_quota_cap_ttl_capped_at_7d(self):
+        exc = _APIError(
+            '{"error":{"type":"usage_limit_reached","resets_in_seconds":99999999}}')
+        self.assertEqual(self._ttl(exc), (7 * 86400, "quota-cap"))
+
+    def test_transient_keeps_short_ttl(self):
+        self.assertEqual(self._ttl(_Timeout("Request timed out")),
+                         (self.inst.fail_mark_ttl, "transient"))
+        # 普通 TPM 抖动型 RateLimit（无 usage_limit_reached 签名）仍是短标记
+        self.assertEqual(self._ttl(_APIError("RateLimitError: slow down")),
+                         (self.inst.fail_mark_ttl, "transient"))
+
+    def test_never_mark_still_none(self):
+        self.assertIsNone(self._ttl(_APIError(
+            "413 Request Entity Too Large openresty")))
+        self.assertIsNone(self._ttl(None))
+
+
 if __name__ == "__main__":
     unittest.main()

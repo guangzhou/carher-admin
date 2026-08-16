@@ -134,6 +134,17 @@ def _patch_responses_api_streaming_iterator() -> None:
         Safe to call multiple times. Safe to call after __anext__ has
         already raised StopAsyncIteration or an exception. Each close
         attempt is isolated so one failure does not block the other.
+
+        [2026-08-16] Aborted-stream accounting: if this iterator never saw a
+        terminal chunk (RESPONSE_COMPLETED / RESPONSE_FAILED) and no failure
+        handler has fired, the client disconnected mid-stream. Upstream
+        (chatgpt backend) has already metered the full input; without this
+        block LiteLLM writes **no SpendLogs row at all** — the request is
+        invisible. Route through self._handle_failure() so the standard
+        failure path records a row (status=failure, full request metadata,
+        proxy_server_request payload for offline token estimation).
+        _handle_failure is idempotent (_failure_handled guard), so streams
+        that already logged success/failure are untouched.
         """
         # Mark finished first so any in-flight __anext__ on another
         # task exits the inner while-True loop instead of trying to
@@ -142,6 +153,35 @@ def _patch_responses_api_streaming_iterator() -> None:
             self.finished = True
         except Exception:
             pass
+
+        # -- aborted-stream accounting (before sockets are torn down) --
+        try:
+            if (
+                getattr(self, "completed_response", None) is None
+                and not getattr(self, "_completed_response_logged", False)
+                and not getattr(self, "_failure_handled", False)
+                and getattr(self, "logging_obj", None) is not None
+            ):
+                import litellm as _litellm
+
+                _exc = _litellm.APIError(
+                    status_code=499,
+                    message=(
+                        "AbortedStream: client disconnected before the upstream "
+                        "stream completed; upstream input tokens were consumed "
+                        "(synthetic accounting row, not an upstream error)"
+                    ),
+                    llm_provider=getattr(self, "custom_llm_provider", "") or "",
+                    model=getattr(self, "model", "") or "",
+                )
+                self._handle_failure(_exc)
+                _log.info(
+                    "responses_aclose: aborted stream recorded for model=%s",
+                    getattr(self, "model", "?"),
+                )
+        except BaseException as exc:
+            # Accounting must never block socket cleanup.
+            _log.debug("responses_aclose: abort accounting raised: %r", exc)
 
         stream_iterator = getattr(self, "stream_iterator", None)
         if stream_iterator is not None:

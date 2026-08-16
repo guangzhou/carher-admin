@@ -177,6 +177,13 @@ class QuotaCapMarkTTLTest(unittest.TestCase):
             "413 Request Entity Too Large openresty")))
         self.assertIsNone(self._ttl(None))
 
+    def test_aborted_stream_accounting_row_never_marks(self):
+        # responses_aclose.py 中断流补记账用 APIError("AbortedStream: ...")；
+        # 客户端取消是请求级事件，绝不能标记 deployment。
+        self.assertIsNone(self._ttl(_APIError(
+            "AbortedStream: client disconnected before the upstream stream "
+            "completed; upstream input tokens were consumed")))
+
 
 if __name__ == "__main__":
     unittest.main()

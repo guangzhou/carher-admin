@@ -137,6 +137,11 @@ class WeightedAffinityRouter(CustomLogger):
         "Request Entity Too Large",
         "ContextWindowExceeded",
         "maximum context length",
+        # 2026-08-16：responses_aclose.py 的中断流补记账会以 APIError(499,
+        # "AbortedStream: ...") 走 failure 路径落 SpendLogs。客户端取消是
+        # 请求级事件，与节点健康无关 —— 绝不能因此标记 deployment
+        # （否则用户一次 Ctrl-C 就赶走该 acct 上所有 session，缓存踩踏）。
+        "AbortedStream",
     )
     _TRANSIENT_MARK_SUBSTRINGS = (
         "Timeout",

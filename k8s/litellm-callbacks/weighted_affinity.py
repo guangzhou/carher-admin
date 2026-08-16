@@ -165,7 +165,10 @@ class WeightedAffinityRouter(CustomLogger):
         "usage_limit_reached",
         "The usage limit has been reached",
     )
-    _QUOTA_RESET_RE = re.compile(r'"resets_in_seconds"\s*:\s*(\d+)')
+    # 生产实测（2026-08-16 acct-204 SpendLogs error_information）：异常是双层
+    # 包裹的转义 JSON —— `\"resets_in_seconds\":534428`（引号前带反斜杠），
+    # 裸引号正则匹配不上会静默退 6h 默认 TTL。故引号/反斜杠都按可选杂质处理。
+    _QUOTA_RESET_RE = re.compile(r'resets_in_seconds[\\"\s]*:[\\"\s]*(\d+)')
 
     def __init__(
         self,

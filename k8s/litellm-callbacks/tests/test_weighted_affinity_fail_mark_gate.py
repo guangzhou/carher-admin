@@ -144,6 +144,18 @@ class QuotaCapMarkTTLTest(unittest.TestCase):
             '"resets_at":1787387541,"eligible_promo":null,"resets_in_seconds":534428}}')
         self.assertEqual(self._ttl(exc), (534428 + 60, "quota-cap"))
 
+    def test_quota_cap_double_wrapped_escaped_json_from_production(self):
+        # 2026-08-16 acct-204 SpendLogs error_information 原文形态：外层
+        # OpenAIException 包内层 ChatgptException，内层 JSON 引号全转义。
+        exc = _APIError(
+            'litellm.RateLimitError: RateLimitError: OpenAIException - '
+            '{"error":{"message":"litellm.RateLimitError: RateLimitError: '
+            'ChatgptException - {\\"error\\":{\\"type\\":\\"usage_limit_reached\\",'
+            '\\"message\\":\\"The usage limit has been reached\\",'
+            '\\"plan_type\\":\\"pro\\",\\"resets_at\\":1787461425,'
+            '\\"eligible_promo\\":null,\\"resets_in_seconds\\":534428}}"}}')
+        self.assertEqual(self._ttl(exc), (534428 + 60, "quota-cap"))
+
     def test_quota_cap_without_resets_falls_back_to_default(self):
         exc = _APIError('429 usage_limit_reached upstream said no')
         self.assertEqual(self._ttl(exc), (self.inst.quota_mark_ttl_default, "quota-cap"))

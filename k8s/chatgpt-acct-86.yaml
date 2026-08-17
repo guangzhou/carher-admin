@@ -1,0 +1,61 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: chatgpt-acct-86-auth, namespace: litellm-product, labels: {pool: chatgpt-acct, account: "86"}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}, storageClassName: local-path}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatgpt-acct-86
+  namespace: litellm-product
+  labels: {app: chatgpt-acct-86, pool: chatgpt-acct, account: "86"}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: chatgpt-acct-86}
+  template:
+    metadata:
+      labels: {app: chatgpt-acct-86, pool: chatgpt-acct, account: "86"}
+    spec:
+      dnsPolicy: "None"
+      dnsConfig:
+        nameservers: ["1.1.1.1", "8.8.8.8"]
+      containers:
+        - name: litellm
+          # acct-stable = registry 别名，永远指向当前已验收的 acct 池镜像（补丁升级只动别名）。
+          # 勿钉具体版本：裸 vanilla-v1.90.2 跑 acct 非流式必坏，v1.89.0 缺缓存 session 修复。
+          image: 127.0.0.1:5000/litellm-carher:acct-stable
+          imagePullPolicy: Always
+          args: ["--config", "/app/config.yaml", "--port", "4000"]
+          ports: [{containerPort: 4000}]
+          env:
+            - {name: CHATGPT_TOKEN_DIR, value: /chatgpt-auth}
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {name: chatgpt-pool-master-key, key: LITELLM_MASTER_KEY}
+          resources:
+            requests: {cpu: 30m, memory: 128Mi}
+            limits: {cpu: "1", memory: 2Gi}
+          readinessProbe:
+            httpGet: {path: /health/readiness, port: 4000}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 8
+          volumeMounts:
+            - {name: config, mountPath: /app/config.yaml, subPath: config.yaml}
+            - {name: auth, mountPath: /chatgpt-auth}
+      volumes:
+        - name: config
+          configMap: {name: chatgpt-pool-config}
+        - name: auth
+          persistentVolumeClaim: {claimName: chatgpt-acct-86-auth}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: chatgpt-acct-86, namespace: litellm-product, labels: {app: chatgpt-acct-86, pool: chatgpt-acct, account: "86"}}
+spec:
+  type: ClusterIP
+  selector: {app: chatgpt-acct-86}
+  ports: [{port: 4000, targetPort: 4000}]

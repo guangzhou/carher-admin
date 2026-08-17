@@ -316,3 +316,85 @@ WHERE key_alias LIKE 'carher-%' OR key_alias LIKE 'claude-code-%';
 - [ ] canary 验证（见 [litellm-hook-dev](../litellm-hook-dev/SKILL.md) 的 canary 流程）
 - [ ] rollout 主 Deployment
 - [ ] 验证实测一次新 model 调用 HTTP 200
+
+---
+
+## 198 prod：把一个新模型暴露给同事三客户端（Cursor / Codex IDE / Claude Code）
+
+> **场景**：198（namespace `litellm-product`，NodePort 30402）新加了一个模型，
+> 要让同事在三种客户端里都能用。与上面 aliyun/psql 路径不同，198 走 **REST
+> `/key/update` + 按 key_alias 前缀分组**，脚本 `scripts/litellm-grok-key-allowlist.py`
+> 是可复用范式（首用 2026-08-15 grok 订阅号，见 [[project_grok_subscription_litellm_live_2026_08_15]]）。
+
+### 关键认知（少写 3/4 的 entry）
+
+- **一个 `openai/<model>` chat entry 就服务全部三协议**（实测）：
+  `/v1/chat/completions`（Cursor）、`/v1/responses`（Codex，litellm 自适配）、
+  `/v1/messages`（Claude Code，litellm 自动 anthropic↔openai 转换）。**不需要**
+  额外的 `-responses`/`mode: responses` 条目。
+- **Claude Code 的模型选择器只列含 `claude` 名字的 model** → 必须再克隆一条
+  `claude-<model>`（同样 `openai/<model>` 指同一上游），CC 才能选到。Cursor/Codex
+  直接用裸名 `<model>`。
+- **provider 前缀必须 `openai/` 不能 `custom_openai/`**：后者触发
+  `functools.partial() got multiple values for keyword argument 'acompletion'`，
+  请求根本不发 HTTP。详见 [litellm-chatgpt-provider-prefix-fix](../../.claude/skills/litellm-chatgpt-provider-prefix-fix/SKILL.md)。
+- **单账户订阅/单上游 = 无 fallback**（没有第二个上游可退，别硬配）。
+  多上游的新模型仍应配 fallback（否则单点打用户，见 [[feedback_new_model_group_without_fallback_single_upstream_hits_users]]）。
+
+### key 白名单是准入开关（v1.89 strict）
+
+198 的 colleague key 全部带显式 `models` allowlist。gate 实测：key 列了
+`grok-4.5` → 200；同 key 未列的 `grok-4.6` → 403 `key_model_access_denied`。
+所以**光加 config.yaml 的 model entry 不够**，必须把模型名并进各 key 的 allowlist。
+
+三个前缀组，各自并入不同名字：
+
+| 前缀 | 客户端 | 加入 allowlist 的名字 |
+|---|---|---|
+| `cursor-` | Cursor / Xcode | 裸名（`grok-4.5`, `grok-4.6`） |
+| `codex-`  | Codex IDE | 裸名（同上） |
+| `claude-code-` | Claude Code | `claude-` 前缀名（`claude-grok-4.5`, `claude-grok-4.6`） |
+
+> grok 名是**真 deployment**（config.yaml 里 model_name 就叫这些），所以只需
+> allowlist 并集、**无需 aliases**。若目标是"用户打 A、实际路由到别名组 B"
+> （如 glm-5.3 的 `zai-claude-glm-5.3`），才需要 per-key `aliases`——那走
+> `scripts/litellm-cursor-glm53.py` 范式（多一层 alias 合并）。
+
+### 执行范式（脚本已内建全部纪律）
+
+`scripts/litellm-grok-key-allowlist.py`：dry-run 默认 / `--apply` 必带 `--backup` /
+读-并-写（`models` 是整字段 REPLACE，客户端合并）/ **跳过 `models==[]` 的 key**
+（`[]`=不限制，写列表会把全权 key 收窄成白名单）/ 2 连败中止 / 写后 readback 自校验。
+
+```bash
+# 在 198 host 跑；base=NodePort，master key 从 secret 取
+jms ssh AIYJY-litellm 'MK=$(kubectl -n litellm-product get secret litellm-secrets \
+  -o jsonpath="{.data.LITELLM_MASTER_KEY}" | base64 -d)
+LITELLM_BASE=http://127.0.0.1:30402 LITELLM_MASTER_KEY=$MK \
+  python3 /root/litellm-grok-key-allowlist.py'                 # dry-run 看各组计数
+
+# canary 一把自己的 key（cursor + claude-code 各一）
+... --only cursor-<me> --only claude-code-<me> --backup /root/grok-canary.json --apply
+
+# gate 自证：临时 key 只列 grok-4.5 → grok-4.5=200 / grok-4.6=403 → 删掉
+# 全量
+... --backup /root/grok-key-full.json --apply
+# 回滚
+... --restore /root/grok-key-full.json --apply
+```
+
+改脚本适配新模型：改顶部 `GROUPS`（前缀→要加的名字）即可。实测 grok 一轮
+1130 把（567 cursor + 1 codex + 562 claude-code）readback 全通、0 mismatch。
+
+### 上线顺序（198）
+
+1. config.yaml 加 4 条 entry（bare×2 + `claude-`×2，全 `openai/<model>`）→ 单键
+   `kubectl patch cm litellm-config`（**只 patch config.yaml 键**，保住 raw.js/
+   responses.js/web-tools.js）→ 同步 JSON 源 manifest `/root/litellm-product-manifests/`
+   防漂移（别 apply 整文件会清掉 .js 键）。
+2. `kubectl rollout restart deploy/litellm-proxy`（滚 4 副本，零中断，~5min；config
+   模型启动时 load，即使 `store_model_in_db:true`）。
+3. master key E2E 验 4 名字 × 3 协议全 200（chat 返 content、responses 返
+   `status:completed`、messages 返 anthropic content——注意 content[0] 可能是
+   thinking 块，正文在后面的 text 块）。
+4. 再跑上面的 key allowlist rollout。**顺序不能反**：先 proxy 有模型、再 key 放行。

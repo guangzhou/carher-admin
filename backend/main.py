@@ -445,7 +445,14 @@ def api_list_instances(
 
     # DB-managed instances (legacy, not yet migrated to CRD)
     instances = _db_instances_excluding_crds()
-    pod_statuses = k8s_ops.get_all_pod_statuses()
+    try:
+        pod_statuses = k8s_ops.get_all_pod_statuses()
+    except Exception as e:
+        # The CRD list above is still useful when the Pod status call is
+        # temporarily unavailable. Do not turn the entire instance list into a
+        # 500 just because legacy runtime enrichment failed.
+        logger.warning("Pod status list failed; returning CRD/DB metadata only: %s", e)
+        pod_statuses = {}
 
     for inst in instances:
         if inst["status"] == "deleted":
@@ -671,6 +678,17 @@ def api_add_instance(req: HerAddRequest):
         except Exception:
             pass
         uid = max(db_next, crd_max + 1)
+
+    # An explicit ID is a create request, not an update. Check before creating
+    # a LiteLLM key so retries cannot be reported as misleading key failures.
+    if req.id is not None:
+        try:
+            if crd_ops.get_her_instance(uid) is not None or db.get_by_id(uid) is not None:
+                raise HTTPException(409, f"Instance her-{uid} already exists; use PUT /api/instances/{uid}")
+        except HTTPException:
+            raise
+        except K8sApiException as e:
+            raise HTTPException(e.status or 500, detail=_k8s_error_detail(e))
 
     data = {
         "id": uid, "name": req.name, "model": req.model,

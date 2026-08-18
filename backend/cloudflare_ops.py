@@ -286,8 +286,11 @@ def register_dns_routes(uid: int, prefix: str = "s1"):
 
     for hostname in hostnames:
         try:
+            # stream() mutates its ApiClient for WebSocket traffic; never
+            # reuse the cached HTTP client after an exec request.
+            exec_v1 = client.CoreV1Api()
             resp = stream(
-                v1.connect_get_namespaced_pod_exec,
+                exec_v1.connect_get_namespaced_pod_exec,
                 pod_name,
                 NS,
                 command=["cloudflared", "tunnel", "route", "dns", "--overwrite-dns", TUNNEL_NAME, hostname],

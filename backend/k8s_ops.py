@@ -404,8 +404,11 @@ def check_pod_health(uid: int) -> dict:
     has_memory = False
     if pod_name:
         try:
+            # stream() changes the ApiClient transport to WebSocket mode. Keep
+            # it off the cached client used by ordinary HTTP status requests.
+            exec_v1 = client.CoreV1Api()
             stream(
-                v1.connect_get_namespaced_pod_exec,
+                exec_v1.connect_get_namespaced_pod_exec,
                 pod_name, NS,
                 container="carher",
                 command=["test", "-f", "/data/.openclaw/memory/main.sqlite"],

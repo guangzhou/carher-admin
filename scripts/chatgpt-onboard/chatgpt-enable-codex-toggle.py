@@ -27,9 +27,46 @@ ACTION = os.environ.get("ACTION", "enable-codex-toggle")
 GOTO_MS = 120000 if os.environ.get("OAUTH_PROXY") else 45000
 OTP_RE = re.compile(r"\b(\d{6})\b")
 SENDER_HINTS_RE = re.compile(r"openai|chatgpt|noreply", re.I)
+# 2026-08-19 acct-233 probe3 实证根因: mail.com "poseidon" webmail 把收件箱列表
+# 画在 Shadow DOM web components 里。document.body.innerText **不穿透 shadowRoot**
+# → 老 scraper 读到的永远只是 portal chrome (空/导航条) → 判"inbox still loading" x45
+# → 盲点 y=180 (广告/表头行) → 永远读不到码。修复: 用下面这个递归下降进
+# shadowRoot 的 deep_text() 取文本; OTP 行用 Playwright locator (穿透 open shadow)
+# 按视觉 y 排序点最新一封, 排除广告行; 正文码从 detail-body-iframe 里 deep_text 读。
+DEEP_TEXT_JS = r"""
+() => {
+  function deep(node, acc){
+    if(!node) return;
+    if(node.nodeType===3){ acc.push(node.textContent); return; }
+    if(node.shadowRoot) deep(node.shadowRoot, acc);
+    const kids = node.childNodes||[];
+    for(const c of kids) deep(c, acc);
+  }
+  const acc=[];
+  deep(document.body, acc);
+  return acc.join(' ').replace(/\s+/g,' ').trim();
+}
+"""
+# 收件箱列表里标记"真 ChatGPT/OpenAI 登录码邮件"的主题 (中英)。
+OTP_SUBJ_RE = re.compile(r"(登录代码|登入代码|临时.*代码|login code|verification code|code.*ChatGPT|ChatGPT.*代码)", re.I)
+# 广告行 (mail.com 列表顶部常插广告, 老实现盲点 y=180 就是点到它)。
+AD_RE = re.compile(r"(anzeige|mail\.com games|play for free|sponsored|advertisement|book of buffalo|qantas)", re.I)
+
+
+def deep_text(target):
+    """Shadow-piercing innerText: descends into shadowRoot (innerText does not)."""
+    try:
+        return target.evaluate(DEEP_TEXT_JS) or ""
+    except Exception:
+        return ""
 # 2026-07-25: 带 authenticator-app 2FA 的号(飞书表 '2FA密钥' 列)。密码提交后落
 # authenticator 挑战页, 邮箱永远不会来码 → 必须本地算 TOTP。镜像无 pyotp, 自己算。
 TOTP_SECRET = (os.environ.get("TOTP_SECRET") or "").strip().replace(" ", "").upper()
+# 2026-08-15: 卖号商给的 GPT 密码搞不定(实测停在 /log-in/password 报
+# "Incorrect email address or password")的号, 强制走"使用一次性验证码登录":
+# 即使密码框出现也不填密码, 点 'Log in with a one-time code' 切邮箱 OTP 模式。
+# 不设此 env 时默认行为不变(先试密码), 只对指定号生效。
+FORCE_OTP_LOGIN = os.environ.get("FORCE_OTP_LOGIN") == "1"
 
 
 def totp_now(secret=None, t=None):
@@ -281,15 +318,17 @@ def find_mail_frame(page):
 
 
 def visible_text(target):
-    try:
-        return target.evaluate("() => document.body.innerText")
-    except Exception:
-        return ""
+    # shadow-piercing: mail.com list lives in shadowRoot, plain innerText is blind.
+    return deep_text(target)
 
 
 def login_mailcom(page):
     page.goto("https://www.mail.com/", wait_until="domcontentloaded", timeout=45000)
-    time.sleep(2)
+    # 2026-08-17 acct-210 实证: 首页 2s 不够, mail.com 首页含大量广告脚本/A-B UI,
+    # 头 60-120s 内 "Log in" 链接可能延迟出现 → 后面找不到 email/password/submit button,
+    # 报 "mail.com email input not found" 或 "submit button not found" (踩坑 #46)。
+    # 可用 MAILCOM_HOME_SETTLE_SEC 覆盖 (默认 120s)。
+    time.sleep(int(os.environ.get("MAILCOM_HOME_SETTLE_SEC", "120")))
     try:
         page.locator("a:has-text('Log in')").first.click(timeout=10000)
     except Exception:
@@ -326,19 +365,60 @@ def login_mailcom(page):
     sender_re = re.compile(r"(openai|chatgpt|noreply@tm\.openai|noreply@|登录代码|临时)", re.I)
     def _any_frame_has_sender():
         # mail.com list may render in the top page OR any nested frame (name varies:
-        # not always "mail"). Scan every frame's innerText, not just a frame named "mail".
+        # not always "mail"). Scan every frame's SHADOW-PIERCING text (deep_text),
+        # not plain innerText — the poseidon list is inside shadowRoot (2026-08-19).
         try:
-            if sender_re.search(page.evaluate("() => document.body.innerText") or ""):
+            if sender_re.search(deep_text(page)):
                 return True
         except Exception:
             pass
         for fr in page.frames:
             try:
-                if sender_re.search(fr.evaluate("() => document.body.innerText") or ""):
+                if sender_re.search(deep_text(fr)):
                     return True
             except Exception:
                 pass
         return False
+    # 2026-08-18: mail.com now lands on a portal hub after login (top nav:
+    # "Email / Photos & Files / Services / Upgrade") instead of the inbox. The
+    # webmail app only opens after clicking the "Email" entry. Without this,
+    # every account stalls on the portal ("inbox still loading" x45, sender
+    # keyword never visible, no OTP) — confirmed acct-231/232 (both showed the
+    # portal navigator/init page + ad frames in mailcom-message-opened.txt,
+    # ChatGPT had sent the code, but no inbox ever rendered). An empty frame
+    # named "mail" exists even on the portal, so find_mail_frame() can't tell
+    # portal from inbox; gate on the portal-only "Photos & Files" nav instead.
+    def _portal_hub_showing():
+        try:
+            t = page.evaluate("() => document.body.innerText") or ""
+        except Exception:
+            t = ""
+        return ("Photos & Files" in t) or ("navigator/init" in (page.url or ""))
+    for _ptry in range(4):
+        if _any_frame_has_sender() or not _portal_hub_showing():
+            break
+        clicked_email = False
+        for sel in ("a[href*='mailintern']", "a[href*='/mail/']",
+                    "a[href$='/mail']", "a[data-portal='mail']",
+                    "a:has-text('Email')", "button:has-text('Email')"):
+            try:
+                loc = page.locator(sel).first
+                if loc.count() and loc.is_visible(timeout=1200):
+                    loc.click(timeout=5000)
+                    clicked_email = True
+                    print(f"  mail.com portal->inbox: clicked Email via {sel!r}", flush=True)
+                    break
+            except Exception:
+                pass
+        if not clicked_email:
+            print("  mail.com portal hub shown but no 'Email' entry matched", flush=True)
+            break
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=20000)
+        except Exception:
+            pass
+        time.sleep(8)
+        shot(page, "mailcom-inbox")
     for attempt in range(1, 46):
         if _any_frame_has_sender():
             print(f"  mail.com inbox loaded attempt={attempt}", flush=True)
@@ -357,22 +437,27 @@ def login_mailcom(page):
 
 
 def extract_otp_from_open_mail(mail_frame, page):
+    # 2026-08-19: opened message body renders in a nested 'detail-body-iframe'
+    # inside the poseidon shadow tree. Read every frame with deep_text (shadow-
+    # piercing) — plain innerText returned "" for that iframe (probe3 proof).
     texts = []
     for frame in page.frames:
         try:
             # Avoid stale codes in the inbox list after opening a message.
             if mail_frame is not page and frame.name == "mail":
                 continue
-            texts.append(frame.evaluate("() => document.body.innerText"))
+            texts.append(deep_text(frame))
         except Exception:
             pass
     try:
-        texts.append(mail_frame.evaluate("() => document.body.innerText"))
+        texts.append(deep_text(mail_frame))
     except Exception:
         pass
     for text in texts:
-        if not SENDER_HINTS_RE.search(text) and "code" not in text.lower() and "验证码" not in text:
-            continue
+        if not SENDER_HINTS_RE.search(text) and "code" not in text.lower() and "验证码" not in text and "验证码" not in text:
+            # also accept the ChatGPT body phrasing ("输入此临时验证码以继续")
+            if "临时验证码" not in text and "登录代码" not in text:
+                continue
         match = OTP_RE.search(text)
         if match:
             return match.group(1)
@@ -382,12 +467,12 @@ def extract_otp_from_open_mail(mail_frame, page):
 def dump_mail_text(page, name, limit=20000):
     parts = []
     try:
-        parts.append(("page", page.evaluate("() => document.body.innerText")))
+        parts.append(("page", deep_text(page)))
     except Exception:
         pass
     for idx, frame in enumerate(page.frames):
         try:
-            parts.append((f"frame:{idx}:{frame.name}", frame.evaluate("() => document.body.innerText")))
+            parts.append((f"frame:{idx}:{frame.name}", deep_text(frame)))
         except Exception:
             pass
     out = SCREENSHOT_DIR / f"{name}.txt"
@@ -401,7 +486,7 @@ def dump_mail_text(page, name, limit=20000):
 def dump_page_text(page, name, limit=20000):
     out = SCREENSHOT_DIR / f"{name}.txt"
     try:
-        text = page.evaluate("() => document.body.innerText")
+        text = deep_text(page)
         out.write_text(text[:limit], encoding="utf-8")
         print(f"  dump: {out}", flush=True)
     except Exception as exc:
@@ -409,44 +494,71 @@ def dump_page_text(page, name, limit=20000):
 
 
 def click_latest_otp_message(target):
-    patterns = [
-        r"Your temporary ChatGPT login code",
-        r"临时 ChatGPT 登录代码",
-        r"OpenAI.*code",
-        r"ChatGPT.*code",
-        r"noreply@tm\.openai\.com",
-    ]
-    for pattern in patterns:
-        try:
-            loc = target.get_by_text(re.compile(pattern, re.I)).first
-            if loc.is_visible(timeout=1500):
-                loc.click(timeout=5000)
-                return True
-        except Exception:
-            pass
-    # Fallback for the new mail.com split-row layout: click around the first
-    # visible OpenAI/ChatGPT sender/subject in the message list.
-    for selector in ("text=ChatGPT", "text=OpenAI", "text=noreply@tm.openai.com"):
-        try:
-            loc = target.locator(selector).first
-            if loc.is_visible(timeout=1500):
-                loc.click(timeout=5000)
-                return True
-        except Exception:
-            pass
+    """Click the visually TOPMOST ChatGPT/OpenAI OTP email in mail.com list.
+
+    2026-08-19 acct-233 probe3 实证重写: Playwright/patchright 的 get_by_text 定位器
+    **穿透 open shadow root**, 所以能命中 poseidon 收件箱里的行 (deep_text 之外的第二
+    条穿透路径)。老实现的坑有二: (1) 模式过宽 (OpenAI.*code / ChatGPT.*code) 会匹配到
+    一个大容器/表头, 其 bounding_box y≈180(表头), 于是"点最顶"点到广告/表头而非真行;
+    (2) 不排除广告行。修复: 只按 OTP_SUBJ_RE(登录代码/临时代码/login code…) 精确匹配
+    邮件主题文本, 枚举全部匹配 → 排除广告行(AD_RE) → 按视觉 y 排序 → 点 y 最小(最新
+    一封在最顶)那条。probe3 实测: 4 个匹配 y=[351,806,936,1001] 全 vis 且非广告,
+    点 k=0(y=351)成功打开, 正文 detail-body-iframe 读到 380341。
+    """
+    # scroll list container to top, best-effort (mail.com SPA 常保留 scroll 位置)
     try:
-        handles = target.locator("text=/ChatGPT|OpenAI|noreply@tm\\.openai\\.com/i")
-        for idx in range(min(handles.count(), 8)):
-            loc = handles.nth(idx)
-            if not loc.is_visible(timeout=500):
-                continue
-            box = loc.bounding_box()
-            if not box:
-                continue
-            loc.click(timeout=3000)
-            return True
+        target.evaluate("() => { try{window.scrollTo(0,0);}catch(e){} document.querySelectorAll('[class*=\"scroll\"],[class*=\"list\"],[class*=\"mail-list\"]').forEach(el=>{try{el.scrollTop=0;}catch(e){}}); }")
     except Exception:
         pass
+    candidates = []  # (y, index, text)
+    try:
+        loc_group = target.get_by_text(OTP_SUBJ_RE)
+        count = loc_group.count()
+        for i in range(min(count, 25)):
+            loc = loc_group.nth(i)
+            try:
+                if not loc.is_visible(timeout=500):
+                    continue
+                txt = (loc.inner_text(timeout=1000) or "").strip().replace("\n", " ")[:60]
+                if AD_RE.search(txt):
+                    continue
+                box = loc.bounding_box()
+                if not box:
+                    continue
+                candidates.append((box["y"], i, txt))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    candidates.sort(key=lambda t: t[0])
+    for y, i, txt in candidates:
+        try:
+            print(f"  click topmost otp row at y={y:.0f} txt={txt!r}", flush=True)
+            target.get_by_text(OTP_SUBJ_RE).nth(i).click(timeout=5000)
+            return True
+        except Exception:
+            continue
+    # Fallback: 老的宽匹配兜底 (OTP_SUBJ_RE 一个都没命中时才走, 排除广告)
+    for pattern in (r"临时 ChatGPT 登录代码", r"Your temporary ChatGPT login code",
+                    r"OpenAI.*code", r"ChatGPT.*code", r"noreply@tm\.openai\.com"):
+        try:
+            loc_group = target.get_by_text(re.compile(pattern, re.I))
+            for i in range(min(loc_group.count(), 8)):
+                loc = loc_group.nth(i)
+                if not loc.is_visible(timeout=500):
+                    continue
+                try:
+                    txt = (loc.inner_text(timeout=800) or "")
+                    if AD_RE.search(txt):
+                        continue
+                except Exception:
+                    pass
+                if not loc.bounding_box():
+                    continue
+                loc.click(timeout=3000)
+                return True
+        except Exception:
+            pass
     return False
 
 
@@ -482,12 +594,12 @@ def fetch_mailcom_otp(pw, request_ts, prev_otp=None):
             # 在 iframe 里时读不到 → 一直 "still loading"(实证 acct-86 卡这)。
             texts = []
             try:
-                texts.append(page.evaluate("() => document.body.innerText") or "")
+                texts.append(deep_text(page))
             except Exception:
                 pass
             for _fr in page.frames:
                 try:
-                    texts.append(_fr.evaluate("() => document.body.innerText") or "")
+                    texts.append(deep_text(_fr))
                 except Exception:
                     pass
             text = "\n".join(texts)
@@ -761,6 +873,17 @@ def login(page, pw):
             otp_loop(page, pw)
         else:
             raise RuntimeError("password field did not appear")
+    elif FORCE_OTP_LOGIN:
+        # GPT 密码搞不定的号: 密码框虽出现, 但不填密码, 直接切一次性验证码登录。
+        print("  FORCE_OTP_LOGIN=1 — skip password, switch to one-time-code", flush=True)
+        if not click_otp_mode_switch(page):
+            raise RuntimeError("FORCE_OTP_LOGIN set but 'one-time code' switch not found")
+        time.sleep(2)
+        # 切换后可能仍需先点一次 Continue 触发发码, 或直接进 OTP 页
+        if not page_needs_otp(page):
+            submit(page)
+            time.sleep(3)
+        otp_loop(page, pw)
     else:
         if not type_first_visible(page.locator("input[type='password']"), page, PASSWORD):
             raise RuntimeError("visible password field not found")
@@ -895,33 +1018,96 @@ def find_codex_switch(page):
     return None, -1
 
 
+def _dialog_open(page):
+    """只识别**真正挡路的确认小弹窗**(如"要开启锁定模式吗?"),返回 (locator, title)。
+
+    ⚠️ ChatGPT 的**设置主面板本身就是 div[role='dialog']** —— 早期版本把它也当成"挡路弹窗"
+    去点关闭/Escape,结果把设置面板整个关掉,switch 定位随即全部超时(aria=None)。
+    (2026-08-18 acct-230 patched run 实证:switch 5 本已 aria=true,却因面板被关而无法确认。)
+    所以这里必须**排除设置主面板**(靠导航项文本识别),只认短小的确认框。"""
+    NAV_MARKERS = ("快捷键", "受信任联系人", "家长控制", "账户安全与登录")
+    for sel in ("div[role='alertdialog']", "div[role='dialog']"):
+        try:
+            loc = page.locator(sel)
+            n = loc.count()
+        except Exception:
+            n = 0
+        for i in range(n):
+            d = loc.nth(i)
+            try:
+                if not d.is_visible(timeout=300):
+                    continue
+                txt = " ".join((d.inner_text(timeout=400) or "").split())
+            except Exception:
+                continue
+            if any(m in txt for m in NAV_MARKERS):
+                continue                     # 这是设置主面板,绝不动
+            # 真正的确认框:短 + 带取消/关闭语义(锁定模式确认框正是这形态)
+            if len(txt) < 700 and any(k in txt for k in ("取消", "Cancel", "以后再说", "暂不", "关闭")):
+                return d, txt[:120]
+    return None, ""
+
+
+def _dismiss_stray_confirm(page, tag=""):
+    """点掉挡路的确认弹窗。**绝不点"开启/启用/确认/Enable/Confirm"** —— 尤其
+    "开启锁定模式"(锁定模式切断与外部网站/服务/工具的连接,确认了这号就废了 API 用途)。
+    只点取消/以后再说/关闭/Cancel;都没有就按 Escape。返回是否清掉了一个弹窗。
+
+    2026-08-18 acct-230(Pro 号)实证:Pro 的"账户安全与登录"页更高,坐标/祖先型点法
+    (mouse box center / parent label click)会误触邻近控件弹出锁定模式确认框,其半透明
+    背板随后挡死对 Codex 开关的所有后续点击 → 6 种点法全部 aria-checked=false 假象。"""
+    dlg, title = _dialog_open(page)
+    if dlg is None:
+        return False
+    print(f"  [modal-guard{tag}] 挡路弹窗: {title!r} → 只点取消/关闭(绝不确认)", flush=True)
+    for txt in ("取消", "以后再说", "暂不", "关闭", "Cancel", "Not now", "Later", "Close"):
+        try:
+            btn = dlg.locator(f"button:has-text('{txt}')")
+            if btn.count() > 0 and btn.first.is_visible(timeout=400):
+                btn.first.click(timeout=3000)
+                time.sleep(1.5)
+                return True
+        except Exception:
+            pass
+    try:
+        page.keyboard.press("Escape")
+        time.sleep(1.0)
+    except Exception:
+        pass
+    return True
+
+
 def flip_switch(page, target):
-    """对已定位的开关轮流试 6 种点法，返回最终 aria-checked。"""
+    """对已定位的开关轮流试点法，返回最终 aria-checked。
+
+    每次点完**立刻清掉误触弹窗**再读 aria —— 否则某个坐标型点法误触锁定模式确认框后,
+    其背板会挡死后面所有点法(见 _dismiss_stray_confirm 注释, acct-230 Pro 实证)。"""
     def _checked():
         try:
             return target.get_attribute("aria-checked")
         except Exception:
             return None
 
+    _dismiss_stray_confirm(page, "-pre")   # 进来先清场:上一步可能留了弹窗挡着
+
     before = _checked()
-    print(f"  before aria-checked={before}", flush=True)
+    dis = None
+    try:
+        dis = target.get_attribute("disabled") or target.get_attribute("aria-disabled")
+    except Exception:
+        pass
+    print(f"  before aria-checked={before} disabled={dis}", flush=True)
     if before == "true":
         return before
 
     attempts = [
+        # ⚠️ 只用**元素定向**点法,精确命中 switch 5。
+        # 坐标/祖先型(mouse box center / parent label click)在 Pro 更高的安全页会误触
+        # 邻近的**锁定模式**开关(switch 2)弹确认框 —— acct-230 实证,已删除,绝不再加。
+        ("scroll+real click", lambda: (target.scroll_into_view_if_needed(timeout=3000), target.click(timeout=5000))[-1]),
         ("click force", lambda: target.click(force=True, timeout=5000)),
-        ("scroll+click", lambda: (target.scroll_into_view_if_needed(timeout=3000), target.click(timeout=5000))[-1]),
         ("dispatch", lambda: target.dispatch_event("click")),
-        ("mouse box center", lambda: (
-            target.bounding_box() and page.mouse.click(
-                target.bounding_box()["x"] + target.bounding_box()["width"] / 2,
-                target.bounding_box()["y"] + target.bounding_box()["height"] / 2,
-            )
-        )),
         ("focus+space", lambda: (target.focus(), page.keyboard.press("Space"))),
-        ("parent label click", lambda: target.evaluate(
-            "el => { const p = el.closest('label,div[role=\"button\"],button'); (p||el).click(); }"
-        )),
     ]
     after = before
     for name, fn in attempts:
@@ -929,12 +1115,17 @@ def flip_switch(page, target):
             fn()
         except Exception as exc:
             print(f"  toggle attempt '{name}' raised: {exc}", flush=True)
-        time.sleep(2)
+        time.sleep(1.5)
+        dlg, title = _dialog_open(page)      # 点完立刻查误触弹窗
+        if dlg is not None:
+            print(f"  after '{name}': 触发弹窗 {title!r}(本次点法误触) → 取消", flush=True)
+            _dismiss_stray_confirm(page, f"-{name}")
         after = _checked()
         print(f"  after '{name}' aria-checked={after}", flush=True)
         if after == "true":
             return after
-    time.sleep(3)
+    time.sleep(2)
+    _dismiss_stray_confirm(page, "-post")
     return _checked()
 
 

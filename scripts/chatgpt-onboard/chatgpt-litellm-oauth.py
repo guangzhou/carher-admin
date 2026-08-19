@@ -93,6 +93,29 @@ CODEX_HEADERS = {
 # 这些号密码提交后落 authenticator-app 挑战页,没有 "Try with email" 退路,
 # 必须本地算 6 位 TOTP 填进去。无 pyotp 依赖(镜像里没有),用 hmac 自己算。
 TOTP_SECRET = (os.environ.get("TOTP_SECRET") or "").strip().replace(" ", "").upper()
+# 2026-08-15: GPT 密码搞不定(停在 /log-in/password 报 "Incorrect email address
+# or password")的号, 强制走一次性验证码登录: 即使落到密码页也不填密码, 点
+# 'Log in with a one-time code' 切邮箱 OTP。不设此 env 默认行为不变。
+FORCE_OTP_LOGIN = os.environ.get("FORCE_OTP_LOGIN") == "1"
+
+
+def _click_one_time_code_switch(page):
+    """密码页底部点 'Log in with a one-time code' 切验证码登录。成功返回 True。"""
+    for _sel in ("button:has-text('Log in with a one-time code')",
+                 "a:has-text('Log in with a one-time code')",
+                 "button:has-text('one-time code')",
+                 "a:has-text('one-time code')",
+                 "text=/log in with a one-time code|验证码登录|邮箱验证码/i"):
+        try:
+            _l = page.locator(_sel).first
+            if _l.count() > 0 and _l.is_visible(timeout=1500):
+                _l.click(timeout=5000)
+                print(f"  clicked one-time-code switch {_sel!r}", flush=True)
+                time.sleep(4)
+                return True
+        except Exception:
+            pass
+    return False
 
 def totp_now(secret=None, t=None):
     """RFC6238 TOTP-SHA1, 30s window, 6 digits。secret = base32(无 padding 亦可)。"""
@@ -614,6 +637,10 @@ def mailcom_login(ctx):
         return None  # sentinel; get_otp will route by provider
     p = ctx.new_page()
     p.goto("https://www.mail.com/", wait_until="domcontentloaded")
+    # 2026-08-17 acct-210 实证 (踩坑 #46): 首页 1.5s 不够, "Log in" 链接晚出现 →
+    # 后续 email/password/submit selector 全 miss (submit button not found)。
+    # 可用 MAILCOM_HOME_SETTLE_SEC 覆盖 (默认 120s)。
+    p.wait_for_timeout(int(os.environ.get("MAILCOM_HOME_SETTLE_SEC", "120")) * 1000)
     p.locator("a:has-text('Log in')").first.click()
     p.wait_for_timeout(1500)
     p.locator("input[placeholder='Email address']").first.fill(EMAIL)
@@ -1457,6 +1484,12 @@ with sync_playwright() as pw:
             if plan_m: print(f"[BILLING-PLAN] {plan_m.group(0).strip()[:60]}", flush=True)
             pay_m = re.search(r"(Mastercard|Visa|American Express|card ending[^\n]*)", before, re.I)
             print(f"[BILLING-PAY] {pay_m.group(0) if pay_m else 'NONE'}", flush=True)
+            if os.environ.get("BILLING_DUMP") == "1":
+                _keep = [l.strip() for l in before.split("\n") if l.strip()]
+                print("[BILLING-DUMP-BEGIN]", flush=True)
+                for l in _keep[:120]:
+                    print("  | " + l[:160], flush=True)
+                print("[BILLING-DUMP-END]", flush=True)
 
             if do_renew and canceled:
                 clicked = False
@@ -1840,7 +1873,23 @@ with sync_playwright() as pw:
         ss(page, "03b-passkey-bypass")
         if not advanced:
             print(f"  ❌ could not get past passkey page after cascade", flush=True)
-    if "password" in page.url.lower():
+    if "password" in page.url.lower() and FORCE_OTP_LOGIN:
+        print("[4] FORCE_OTP_LOGIN=1 — skip password, switch to one-time-code", flush=True)
+        if not _click_one_time_code_switch(page):
+            sys.exit("❌ FORCE_OTP_LOGIN set but 'one-time code' switch not found on password page")
+        # 切换后可能需先点一次 Continue 触发发码 (用 Enter + 按钮兜底, 不依赖嵌套 _submit_form)
+        try:
+            if "email-verification" not in page.url and "verification" not in page.content().lower()[:5000]:
+                page.keyboard.press("Enter")
+                time.sleep(2)
+                _cb = page.locator("button:has-text('Continue'), button[type='submit']")
+                if _cb.count() > 0 and _cb.first.is_enabled():
+                    _cb.first.click(timeout=4000)
+                time.sleep(3)
+        except Exception:
+            pass
+        ss(page, "04-otp-mode-switched")
+    elif "password" in page.url.lower():
         print(f"[4] Fill password 字段B (len={len(CHATGPT_PW)})", flush=True)
         page.wait_for_selector("input[type='password']", timeout=20000)
         page.locator("input[type='password']").first.click()
@@ -2284,10 +2333,19 @@ with sync_playwright() as pw:
                     sys.exit("❌ consent Continue disabled (not toggle-related); "
                              "not clicking Security/MFA switches")
 
-        if consent_btn.count() > 0:
-            consent_btn.first.click()
-        else:
-            page.keyboard.press("Enter")
+        # 2026-08-20 acct-241 实证: 上面 [5b] disabled 分支 force-click 成功后 URL 已离开
+        # /consent(跳到 deviceauth/callback → 渲染 9 位 user_code 输入页, 见 [2e] 注释),
+        # 但此处旧逻辑无条件 consent_btn.first.click() 又硬点一次仍 disabled 的 Continue →
+        # 默认 30s timeout 抛**未捕获**异常 → 脚本在到达 [2e] 填 user_code 前崩溃(auth.json 空)。
+        # 改为: 仅当 Continue 真 enabled 才点; disabled(已 force-click 跳走)则直接落 [2e]。
+        try:
+            if consent_btn.count() > 0 and consent_btn.first.is_enabled():
+                consent_btn.first.click()
+            elif consent_btn.count() == 0:
+                page.keyboard.press("Enter")
+            # else: Continue 仍在但 disabled → 不硬点(会 30s timeout 崩), 交给 [2e] 填 user_code
+        except Exception as e:
+            print(f"  [5b] final consent click skipped: {str(e)[:80]}", flush=True)
         # wait to leave consent
         for _ in range(30):
             if "/consent" not in page.url:

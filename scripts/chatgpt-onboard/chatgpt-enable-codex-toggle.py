@@ -1109,13 +1109,20 @@ def flip_switch(page, target):
         ("dispatch", lambda: target.dispatch_event("click")),
         ("focus+space", lambda: (target.focus(), page.keyboard.press("Space"))),
     ]
+    # 2026-08-20 用户指令「点击前等30s 点击后也等50s 不要着急慢慢来」:
+    # 假阳性根因是点太快(React 未挂载→scroll+real click 没命中,落到 click force 假翻 DOM)
+    # + 读太快(服务端未存库就读到乐观 aria=true)。点前 30s 让页面真渲染完,
+    # 让**第一下真实点击**就命中并触发 onChange→网络保存;点后 50s 等服务端落地再读。
+    print("  ⏳ 点击前 settle 30s(等页面渲染完 / React 挂载)...", flush=True)
+    time.sleep(30)
     after = before
     for name, fn in attempts:
         try:
             fn()
         except Exception as exc:
             print(f"  toggle attempt '{name}' raised: {exc}", flush=True)
-        time.sleep(1.5)
+        print(f"  ⏳ 点击后 settle 50s(等服务端存库落地再读 aria)...", flush=True)
+        time.sleep(50)
         dlg, title = _dialog_open(page)      # 点完立刻查误触弹窗
         if dlg is not None:
             print(f"  after '{name}': 触发弹窗 {title!r}(本次点法误触) → 取消", flush=True)

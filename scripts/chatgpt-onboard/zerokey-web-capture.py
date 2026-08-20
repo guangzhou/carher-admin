@@ -20,7 +20,9 @@ ENV:
   OUT_JSON            /work/out/zerokey-users.json   (zerokey temp/users.json)
   ZK_USER             username key inside users.json (default: kristine)
   SCREENSHOT_DIR      /work/screenshots
-  CAPTURE_PROMPT      message to send to trigger the request (default "hi")
+  CAPTURE_PROMPT      message to send to trigger the request
+                      (default: a random natural greeting, e.g. "hello" /
+                      "hey there" / "what's your name?")
 
 OUTPUT (OUT_JSON), zerokey temp/users.json shape:
   { "chatgpt": { "<ZK_USER>": {
@@ -29,8 +31,16 @@ OUTPUT (OUT_JSON), zerokey temp/users.json shape:
       "sessions": [] } } }
 """
 
-import os, re, sys, json, time
+import os, re, sys, json, time, random
 from patchright.sync_api import sync_playwright
+
+# A repeated "hihihihi…" seed makes it obvious a bot is driving capture. Pick a
+# short natural greeting at random instead, so the trigger message looks human.
+GREETINGS = [
+    "hi", "hello", "hey", "hey there", "yo", "hiya",
+    "good morning", "how's it going", "what's up",
+    "what's your name?", "how are you today?", "nice to meet you",
+]
 
 EMAIL      = os.environ["MAIL_USER"]
 MAIL_PW    = open(os.environ["MAIL_LOGIN_PW_FILE"]).read().strip()
@@ -38,7 +48,7 @@ CHATGPT_PW = open(os.environ["CHATGPT_PW_FILE"]).read().strip()
 SS_DIR     = os.environ.get("SCREENSHOT_DIR", "/work/screenshots")
 OUT_JSON   = os.environ.get("OUT_JSON", "/work/out/zerokey-users.json")
 ZK_USER    = os.environ.get("ZK_USER", "kristine")
-PROMPT     = os.environ.get("CAPTURE_PROMPT", "hi")
+PROMPT     = os.environ.get("CAPTURE_PROMPT") or random.choice(GREETINGS)
 OTP_FILE   = os.environ.get("OTP_FILE", "/work/out/otp.txt")
 OTP_FILE_WAIT = int(os.environ.get("OTP_FILE_WAIT", "600"))
 

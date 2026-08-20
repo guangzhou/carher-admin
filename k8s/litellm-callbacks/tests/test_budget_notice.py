@@ -87,6 +87,31 @@ def _ensure_stubs():
         sys.modules["litellm.litellm_core_utils"] = core_utils
         sys.modules["litellm.litellm_core_utils.litellm_logging"] = logging_mod
 
+    if "litellm.responses.streaming_iterator" not in sys.modules:
+        responses_pkg = types.ModuleType("litellm.responses")
+        si = types.ModuleType("litellm.responses.streaming_iterator")
+
+        class CachedResponsesAPIStreamingIterator:
+            def __init__(self, response, logging_obj=None, request_data=None,
+                         call_type=None):
+                self._events = ["EV1:" + type(response).__name__, "EV2:done"]
+
+            def __aiter__(self):
+                self._i = 0
+                return self
+
+            async def __anext__(self):
+                if self._i >= len(self._events):
+                    raise StopAsyncIteration
+                self._i += 1
+                return self._events[self._i - 1]
+
+        si.CachedResponsesAPIStreamingIterator = CachedResponsesAPIStreamingIterator
+        responses_pkg.streaming_iterator = si
+        litellm.responses = responses_pkg
+        sys.modules["litellm.responses"] = responses_pkg
+        sys.modules["litellm.responses.streaming_iterator"] = si
+
     if "litellm.proxy.common_request_processing" not in sys.modules:
         proxy_mod = sys.modules.get("litellm.proxy")
         if proxy_mod is None:
@@ -451,6 +476,28 @@ class AnthropicInjectTest(unittest.TestCase):
         out = b"".join(_run_stream([wire[:9], wire[9:]], _warn_key("tok-a-2")))
         self.assertEqual(out, wire)
         self.assertNotIn("今日额度已用".encode(), out)
+
+
+class NonIterableGuardTest(unittest.TestCase):
+    """responses mock 返回完整对象混进流式 hook 链时,守卫必须转成事件流。"""
+
+    def test_wraps_plain_object_into_events(self):
+        class ResponsesAPIResponse:
+            pass
+
+        out = _run_stream_raw(ResponsesAPIResponse(), _Key(token="tok-g-1"))
+        self.assertEqual(out, ["EV1:ResponsesAPIResponse", "EV2:done"])
+
+
+def _run_stream_raw(response_obj, key):
+    async def go():
+        out = []
+        gen = M.budget_notice.async_post_call_streaming_iterator_hook(
+            key, response_obj, {})
+        async for x in gen:
+            out.append(x)
+        return out
+    return _with_env(PREFIX_ENV, lambda: asyncio.run(go()))
 
 
 class UsageTextTest(unittest.TestCase):

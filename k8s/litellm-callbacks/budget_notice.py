@@ -352,6 +352,37 @@ class BudgetNotice(CustomLogger):
     async def async_post_call_streaming_iterator_hook(
         self, user_api_key_dict, response, request_data,
     ):
+        # 非可迭代守卫(必须最先跑):responses 的 mock 分支无视 stream 参数、
+        # 返回完整 ResponsesAPIResponse 对象(v1.90.2 responses/main.py MOCK
+        # RESPONSE LOGIC),它进入流式 hook 链会让第一个 async-for 的 hook 500
+        # (2026-08-20 Cursor /查余额 实测)。用 litellm 自己的 cache-hit 流式
+        # 包装器把对象转成合法事件流;转换失败退化为单项透传,绝不抛。
+        if not hasattr(response, "__aiter__"):
+            events = None
+            try:
+                from litellm.responses.streaming_iterator import (
+                    CachedResponsesAPIStreamingIterator,
+                )
+
+                rd = request_data if isinstance(request_data, dict) else {}
+                wrapped = CachedResponsesAPIStreamingIterator(
+                    response=response,
+                    logging_obj=rd.get("litellm_logging_obj"),
+                    request_data=rd,
+                )
+                events = [e async for e in wrapped]
+                _log.warning(
+                    "budget_notice: wrapped non-iterable %s into %d events",
+                    type(response).__name__, len(events))
+            except Exception as exc:
+                _log.warning("budget_notice: non-iterable wrap failed %r", exc)
+            if events:
+                for e in events:
+                    yield e
+            else:
+                yield response
+            return
+
         inject = False
         notice = ""
         token = ""
@@ -470,3 +501,59 @@ def _make_notice_chunk(finish_chunk: Any, notice: str) -> Optional[Any]:
 
 
 budget_notice = BudgetNotice()
+
+
+# ------------------------------------------------------- 模块级 monkey-patch
+# responses 的 mock 分支无视 stream 参数、返回完整 ResponsesAPIResponse 对象
+# (v1.90.2 responses/main.py MOCK RESPONSE LOGIC)。它进入流式 hook 链后,
+# **链条最内层**(第一个注册的流式 hook 或 ProxyLogging 自己的快路径)一执行
+# `async for` 就 TypeError 500 —— 在本 hook 里加守卫没用,我们不在最内层
+# (2026-08-20 prod 实测:T0 两 callback 链守卫有效,prod 27 callback 链照崩)。
+# 唯一收口是 ProxyLogging.async_post_call_streaming_iterator_hook:进链之前
+# 用 litellm 自己的 cache-hit 包装器把对象转成合法事件流。
+
+
+def _wrap_nonstream_responses_obj(response, request_data):
+    try:
+        from litellm.responses.streaming_iterator import (
+            CachedResponsesAPIStreamingIterator,
+        )
+
+        rd = request_data if isinstance(request_data, dict) else {}
+        return CachedResponsesAPIStreamingIterator(
+            response=response,
+            logging_obj=rd.get("litellm_logging_obj"),
+            request_data=rd,
+        )
+    except Exception as exc:
+        _log.warning("budget_notice: choke wrap failed %r", exc)
+        return None
+
+
+def _patch_proxy_streaming_choke():
+    try:
+        from litellm.proxy.utils import ProxyLogging
+    except Exception:
+        return  # 单测/精简环境没有 proxy.utils,静默跳过
+    orig = ProxyLogging.async_post_call_streaming_iterator_hook
+    if getattr(orig, "_bn_nonstream_mock_patched", False):
+        return
+
+    async def patched(self, response, user_api_key_dict, request_data):
+        if response is not None and not hasattr(response, "__aiter__") \
+                and type(response).__name__ == "ResponsesAPIResponse":
+            wrapped = _wrap_nonstream_responses_obj(response, request_data)
+            if wrapped is not None:
+                _log.warning(
+                    "budget_notice: choke wrapped ResponsesAPIResponse for streaming")
+                response = wrapped
+        async for chunk in orig(self, response=response,
+                                user_api_key_dict=user_api_key_dict,
+                                request_data=request_data):
+            yield chunk
+
+    patched._bn_nonstream_mock_patched = True
+    ProxyLogging.async_post_call_streaming_iterator_hook = patched
+
+
+_patch_proxy_streaming_choke()

@@ -1310,6 +1310,14 @@ with sync_playwright() as pw:
                             break
                     except Exception:
                         pass
+                # 切 OTP 后 → /email-verification 导航可能 >4s。必须补等 _needs_otp 变真,
+                # 否则下面 1340 的取码门会在导航完成前判 False → 整个取码块被跳过 → 直接
+                # 返回落匿名页(实证 acct-93/94/96/97/98: 点了开关却没跑 [otp] settle)。
+                for _ in range(15):
+                    if _needs_otp(p_page):
+                        print(f"    OTP page arrived after switch (url={p_page.url[:80]})", flush=True)
+                        break
+                    time.sleep(1)
 
             # ── authenticator-app 2FA(飞书表带 2FA 密钥的号): 本地算 TOTP 填入 ──
             # 必须在邮箱 OTP 分支之前: authenticator 页 body 也含 "verification",
@@ -1508,17 +1516,48 @@ with sync_playwright() as pw:
                     print("[BILLING] ✗ Renew button not found", flush=True)
                 else:
                     time.sleep(3); ss(chat_page, "bill-02-after-renew-click")
-                    # 可能弹确认框:点其中的确认按钮
-                    for _ in range(2):
+                    # "Confirm plan changes" 确认框内容是**异步加载**的(新加坡双跳更慢),
+                    # 过早找确认按钮会扑空 → 续订从不提交(acct-99 2026-08-20 实证: 旧代码
+                    # sleep(3)+sleep(5) 后 bill-03 仍在转圈, still_canceled=True)。改为轮询
+                    # 等 dialog 里出现可点确认按钮(最长 ~40s), 点完再等框消失+状态刷新。
+                    confirm_clicked = False
+                    CONFIRM_RE = re.compile(r"Confirm|Renew|Resubscribe|Continue|Subscribe|Keep", re.I)
+                    SKIP_RE = re.compile(r"cancel|close|dismiss|back", re.I)
+                    for _w in range(20):
+                        time.sleep(2)
                         try:
-                            dlg = chat_page.get_by_role("button",
-                                  name=re.compile(r"Renew|Confirm|Continue|Resubscribe|Keep", re.I))
-                            if dlg.count() > 0 and dlg.first.is_visible():
-                                dlg.first.click(); print("[BILLING] confirm modal clicked", flush=True)
-                                time.sleep(3)
+                            dlg = chat_page.get_by_role("dialog")
+                            btns = dlg.get_by_role("button") if dlg.count() > 0 \
+                                   else chat_page.get_by_role("button")
+                            cand = btns.filter(has_text=CONFIRM_RE)
+                            picked = None
+                            for i in range(cand.count()):
+                                b = cand.nth(i)
+                                try:
+                                    txt = (b.inner_text() or "").strip()
+                                except Exception:
+                                    txt = ""
+                                if b.is_visible() and b.is_enabled() and not SKIP_RE.search(txt):
+                                    picked = (b, txt); break
+                            if picked is not None:
+                                picked[0].click()
+                                print(f"[BILLING] confirm modal clicked: {picked[1][:30]!r} "
+                                      f"(after {(_w+1)*2}s)", flush=True)
+                                confirm_clicked = True
+                                break
                         except Exception:
                             pass
-                    time.sleep(5); ss(chat_page, "bill-03-final")
+                    if not confirm_clicked:
+                        print("[BILLING] ⚠ confirm-modal button not found within 40s", flush=True)
+                    ss(chat_page, "bill-02b-after-confirm")
+                    # 等确认框消失 + 页面状态刷新(最长 ~30s)
+                    for _w in range(15):
+                        time.sleep(2)
+                        a = _btxt()
+                        if re.search(r"renews on|will renew", a, re.I) or \
+                           not re.search(r"will be cancel", a, re.I):
+                            break
+                    ss(chat_page, "bill-03-final")
                     after = _btxt()
                     still_cancel = bool(re.search(r"will be cancel", after, re.I))
                     now_renew = bool(re.search(r"renews on|will renew", after, re.I))

@@ -47,6 +47,7 @@ import datetime
 import json
 import logging
 import os
+import re as _re
 from typing import Any, List, Optional, Tuple
 
 from litellm.integrations.custom_logger import CustomLogger
@@ -98,6 +99,14 @@ def _gated(user_api_key_dict: Any) -> bool:
 
 _TRIGGERS_EXACT = ("/查余额", "查余额")
 _TRIGGERS_CI = ("/quota",)
+# Cursor 等客户端会把用户输入包成单行 <user_query>查余额</user_query>；剥掉
+# XML 风格标签后整行仍须全等，精确度不降。
+_TAG_RE = _re.compile(r"<[^<>]{1,64}>")
+
+
+def _debug_aliases() -> set:
+    raw = os.environ.get("BUDGET_NOTICE_DEBUG_LOG_ALIASES", "")
+    return {x.strip() for x in raw.split(",") if x.strip()}
 
 
 def _block_texts(content: Any) -> List[str]:
@@ -137,10 +146,11 @@ def _is_quota_query(text: str) -> bool:
         return False
     for line in text.splitlines():
         s = line.strip()
-        if s in _TRIGGERS_EXACT:
-            return True
-        if s.lower() in _TRIGGERS_CI:
-            return True
+        for cand in (s, _TAG_RE.sub("", s).strip()):
+            if cand in _TRIGGERS_EXACT:
+                return True
+            if cand.lower() in _TRIGGERS_CI:
+                return True
     return False
 
 
@@ -311,11 +321,16 @@ class BudgetNotice(CustomLogger):
                 "anthropic_messages", "aanthropic_messages",
             ):
                 return data
-            if not _is_quota_query(_last_user_text(data)):
+            alias = getattr(user_api_key_dict, "key_alias", "") or ""
+            text = _last_user_text(data)
+            if alias in _debug_aliases():
+                _log.warning(
+                    "budget_notice: debug last_user_text alias=%s ct=%s head=%r",
+                    alias, v, text[:300])
+            if not _is_quota_query(text):
                 return data
 
             text = _usage_text(user_api_key_dict)
-            alias = getattr(user_api_key_dict, "key_alias", "")
             if v in ("anthropic_messages", "aanthropic_messages"):
                 from litellm.exceptions import ModifyResponseException
 
@@ -340,8 +355,10 @@ class BudgetNotice(CustomLogger):
         inject = False
         notice = ""
         token = ""
+        route = getattr(user_api_key_dict, "request_route", "") or ""
+        injectable_route = ("chat/completions" in route) or ("messages" in route)
         try:
-            if not _disabled() and _gated(user_api_key_dict):
+            if injectable_route and not _disabled() and _gated(user_api_key_dict):
                 spend = float(getattr(user_api_key_dict, "spend", None) or 0.0)
                 max_budget = getattr(user_api_key_dict, "max_budget", None)
                 if max_budget and spend / float(max_budget) >= _warn_ratio() \

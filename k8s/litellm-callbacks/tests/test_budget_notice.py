@@ -173,6 +173,18 @@ class TriggerMatchTest(unittest.TestCase):
         text = "<context>...</context>\n/查余额\n<system-reminder>x</system-reminder>"
         self.assertTrue(M._is_quota_query(text))
 
+    def test_tag_wrapped_line_triggers(self):
+        """Cursor 把用户输入包成单行 <user_query>…</user_query>。"""
+        for t in ("<user_query>查余额</user_query>",
+                  "<user_query>/查余额</user_query>",
+                  "ctx\n<user_query>/quota</user_query>\nmore"):
+            self.assertTrue(M._is_quota_query(t), t)
+
+    def test_tag_wrapped_prose_does_not_trigger(self):
+        for t in ("<user_query>帮我看下查余额的实现</user_query>",
+                  "<user_query>quota 报表</user_query>"):
+            self.assertFalse(M._is_quota_query(t), t)
+
     def test_substring_does_not_trigger(self):
         for t in ("帮我看下 /查余额 的实现", "查余额功能坏了", "quota", "/quotas",
                   "", "x" * 30000):

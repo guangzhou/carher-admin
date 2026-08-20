@@ -303,6 +303,81 @@ def _notice_delta_bytes(notice: str, index) -> bytes:
             + json.dumps(obj, ensure_ascii=False).encode() + b"\n\n")
 
 
+# ---- responses 事件流注入(Codex / Cursor agent 走 /v1/responses)----
+# hook 层拿到的是 pydantic 事件对象(ResponseCreatedEvent 等,2026-08-20 T0
+# 实测)。与 anthropic 同款课题:提醒必须进最后一个 output_text part 内部,
+# 且 done/completed 事件里的全文要同步补上(客户端可能从任一源渲染)。
+# 红线:绝不改事件的 type 字段(序列化器按类型缓存);注入的 delta 事件用
+# deepcopy 流里真实 delta 改文本,类型/ID 天然正确。
+
+def _ev_type(ev) -> str:
+    t = getattr(ev, "type", None)
+    return str(getattr(t, "value", t) or "")
+
+
+def _append_text_attr(obj, attr: str, notice: str) -> None:
+    try:
+        cur = getattr(obj, attr, None)
+        if isinstance(cur, str):
+            setattr(obj, attr, cur + notice)
+    except Exception:
+        pass
+
+
+def _patch_done_event(ev, notice: str) -> None:
+    """text.done / part.done / item.done 三种事件里补全文,best effort。"""
+    try:
+        v = _ev_type(ev)
+        if v == "response.output_text.done":
+            _append_text_attr(ev, "text", notice)
+        elif v == "response.content_part.done":
+            part = getattr(ev, "part", None)
+            if part is not None:
+                _append_text_attr(part, "text", notice)
+        elif v == "response.output_item.done":
+            item = getattr(ev, "item", None)
+            _patch_message_item(item, notice)
+    except Exception:
+        pass
+
+
+def _patch_message_item(item, notice: str) -> None:
+    try:
+        content = item.get("content") if isinstance(item, dict) \
+            else getattr(item, "content", None)
+        if not isinstance(content, list):
+            return
+        for part in reversed(content):
+            ptype = part.get("type") if isinstance(part, dict) \
+                else getattr(part, "type", None)
+            if str(getattr(ptype, "value", ptype)) == "output_text":
+                if isinstance(part, dict):
+                    if isinstance(part.get("text"), str):
+                        part["text"] = part["text"] + notice
+                else:
+                    _append_text_attr(part, "text", notice)
+                return
+    except Exception:
+        pass
+
+
+def _patch_completed_event(ev, notice: str) -> None:
+    try:
+        resp = getattr(ev, "response", None)
+        output = resp.get("output") if isinstance(resp, dict) \
+            else getattr(resp, "output", None)
+        if not isinstance(output, list):
+            return
+        for item in reversed(output):
+            itype = item.get("type") if isinstance(item, dict) \
+                else getattr(item, "type", None)
+            if str(getattr(itype, "value", itype)) == "message":
+                _patch_message_item(item, notice)
+                return
+    except Exception:
+        pass
+
+
 class BudgetNotice(CustomLogger):
     # ---------------------------------------------------------------- ①
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
@@ -387,7 +462,22 @@ class BudgetNotice(CustomLogger):
         notice = ""
         token = ""
         route = getattr(user_api_key_dict, "request_route", "") or ""
-        injectable_route = ("chat/completions" in route) or ("messages" in route)
+        injectable_route = ("chat/completions" in route) or ("messages" in route) \
+            or ("responses" in route)
+        if getattr(user_api_key_dict, "key_alias", "") in _debug_aliases():
+            # 形态侦察:responses 路由注入前先搞清 hook 层 item 到底长什么样
+            seen = []
+            async for item in response:
+                if len(seen) < 4:
+                    t = type(item).__name__
+                    extra = getattr(item, "type", None) or getattr(
+                        getattr(item, "choices", [None])[0] if getattr(item, "choices", None) else None,
+                        "finish_reason", None)
+                    seen.append(f"{t}:{extra}")
+                yield item
+            _log.warning("budget_notice: debug stream shapes route=%s items=%s",
+                         route, seen)
+            return
         try:
             if injectable_route and not _disabled() and _gated(user_api_key_dict):
                 spend = float(getattr(user_api_key_dict, "spend", None) or 0.0)
@@ -417,10 +507,12 @@ class BudgetNotice(CustomLogger):
         injected = False
         try:
             buf = b""
-            held_stop = None       # 持有中的 text block stop 事件（bytes）
+            held_stop = None       # anthropic:持有中的 text block stop 事件
             held_index = None
             block_types = {}       # index -> content_block type
-            route = getattr(user_api_key_dict, "request_route", "") or ""
+            r_holding = False      # responses:持有 text.done/part.done/item.done
+            r_held = []
+            r_last_delta = None    # responses:最近一个真实 output_text.delta 事件
             chat_route = "chat/completions" in route
             async for item in response:
                 if isinstance(item, (bytes, bytearray)):
@@ -446,10 +538,54 @@ class BudgetNotice(CustomLogger):
                             yield ev_full
                     continue
 
-                # 非 bytes：chat 路径的 ModelResponseStream 对象。仅在明确是
-                # chat/completions 路由时注入 —— responses 路径的 hook 层也是
-                # chat 形状（见 litellm-hook-dev skill），贸然注入会污染
-                # responses 事件转换。
+                # ---- responses 事件对象(type 形如 response.*)----
+                v = _ev_type(item)
+                if v.startswith("response."):
+                    if v == "response.output_text.delta":
+                        r_last_delta = item
+                        if r_holding:  # 不该发生,防御性放行
+                            for h in r_held:
+                                yield h
+                            r_held, r_holding = [], False
+                        yield item
+                        continue
+                    if (v == "response.output_text.done" and not injected
+                            and r_last_delta is not None and not r_holding):
+                        r_held, r_holding = [item], True
+                        continue
+                    if r_holding and v in ("response.content_part.done",
+                                           "response.output_item.done"):
+                        r_held.append(item)
+                        continue
+                    if r_holding and v == "response.completed":
+                        import copy
+
+                        d = copy.deepcopy(r_last_delta)
+                        try:
+                            d.delta = notice
+                        except Exception:
+                            setattr(d, "delta", notice)
+                        yield d
+                        injected = True
+                        for h in r_held:
+                            _patch_done_event(h, notice)
+                            yield h
+                        _patch_completed_event(item, notice)
+                        r_held, r_holding = [], False
+                        yield item
+                        continue
+                    if r_holding:
+                        # 后面还有别的事件(新 item 等)→ 刚才那个不是最后的
+                        # text part,原样放行,继续找
+                        for h in r_held:
+                            yield h
+                        r_held, r_holding = [], False
+                        yield item
+                        continue
+                    yield item
+                    continue
+
+                # ---- chat 路径的 ModelResponseStream 对象 ----
                 if not injected and chat_route and _finish_chunk(item):
                     synthetic = _make_notice_chunk(item, notice)
                     if synthetic is not None:
@@ -458,6 +594,8 @@ class BudgetNotice(CustomLogger):
                 yield item
             if held_stop is not None:
                 yield held_stop
+            for h in r_held:
+                yield h
             if buf:
                 yield buf
         except GeneratorExit:

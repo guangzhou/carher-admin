@@ -500,6 +500,90 @@ def _run_stream_raw(response_obj, key):
     return _with_env(PREFIX_ENV, lambda: asyncio.run(go()))
 
 
+class _REvent:
+    """responses pydantic 事件的形状替身:type + 任意属性。"""
+
+    def __init__(self, type, **kw):
+        self.type = type
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+class _RPart:
+    def __init__(self, text):
+        self.type = "output_text"
+        self.text = text
+
+
+def _responses_events(final="text"):
+    evs = [
+        _REvent("response.created"),
+        _REvent("response.output_item.added", output_index=0),
+        _REvent("response.content_part.added", output_index=0, content_index=0),
+        _REvent("response.output_text.delta", delta="mock ", item_id="m1"),
+        _REvent("response.output_text.delta", delta="answer", item_id="m1"),
+        _REvent("response.output_text.done", text="mock answer", item_id="m1"),
+        _REvent("response.content_part.done", part=_RPart("mock answer")),
+        _REvent("response.output_item.done",
+                item={"type": "message",
+                      "content": [{"type": "output_text", "text": "mock answer"}]}),
+    ]
+    if final == "tool":
+        evs += [
+            _REvent("response.output_item.added", output_index=1),
+            _REvent("response.output_item.done",
+                    item={"type": "function_call", "name": "bash"}),
+        ]
+    evs.append(_REvent("response.completed",
+                       response={"output": [
+                           {"type": "message",
+                            "content": [{"type": "output_text",
+                                         "text": "mock answer"}]}]}))
+    return evs
+
+
+def _rkey(token):
+    return _Key(alias="cursor-u9", spend=65.0, max_budget=70.0, token=token,
+                route="/v1/responses")
+
+
+class ResponsesInjectTest(unittest.TestCase):
+    def test_inject_into_last_text_part(self):
+        evs = _responses_events()
+        key = _rkey("tok-r-1")
+        out = _run_stream(list(evs), key)
+        notice = M._warn_text(key)
+        self.assertEqual(len(out), len(evs) + 1)
+        # 注入的 delta 紧跟在最后一个真实 delta 之后、text.done 之前
+        types = [M._ev_type(e) for e in out]
+        inj_pos = 5
+        self.assertEqual(types[inj_pos], "response.output_text.delta")
+        self.assertEqual(out[inj_pos].delta, notice)
+        self.assertEqual(types[inj_pos + 1], "response.output_text.done")
+        # done/completed 四处全文都补上了
+        self.assertTrue(out[inj_pos + 1].text.endswith(notice))
+        self.assertTrue(out[inj_pos + 2].part.text.endswith(notice))
+        self.assertTrue(out[inj_pos + 3].item["content"][0]["text"].endswith(notice))
+        self.assertTrue(out[-1].response["output"][0]["content"][0]["text"]
+                        .endswith(notice))
+
+    def test_dedupe_second_stream_untouched(self):
+        evs = _responses_events()
+        _run_stream(list(evs), _rkey("tok-r-2"))
+        out2 = _run_stream(list(_responses_events()), _rkey("tok-r-2"))
+        self.assertEqual(len(out2), len(evs))
+
+    def test_tool_final_skips_and_releases(self):
+        evs = _responses_events(final="tool")
+        out = _run_stream(list(evs), _rkey("tok-r-3"))
+        self.assertEqual(len(out), len(evs))
+        notice = M._warn_text(_rkey("tok-r-3"))
+        self.assertFalse(any(getattr(e, "delta", None) == notice for e in out))
+        # 名额已释放:下一个 text 收尾的流要能注入
+        out2 = _run_stream(list(_responses_events()), _rkey("tok-r-3"))
+        self.assertEqual(len(out2), len(_responses_events()) + 1)
+
+
 class UsageTextTest(unittest.TestCase):
     def test_reset_time_is_beijing(self):
         key = _Key(reset_at=datetime.datetime(2026, 8, 19, 16, 0))

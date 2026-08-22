@@ -104,6 +104,31 @@ captured 会话，换号必伴随 pod 重启/session 重抓，两条路都自然
 `[conv] delta send K new items, M chars`=增量真省了（客户端全量几万字符只透传 M）；
 `[conv] delta send failed -> full resend`=失效兜底触发（该分支尚无 live 样本，代码层保证）。
 
+### 官方口径核对（2026-08-22，platform.openai.com/docs/guides/conversation-state 原文）
+
+- **省的是传输不是计费 token**："Even when using previous_response_id, all previous
+  input tokens for responses in the chain are **billed as input tokens in the API**."
+  ——服务端有状态 ≠ 模型少读上下文；metered 面只有 prompt caching 折扣（cached 档）。
+  bpi 走**网页订阅额度面**（按消息/速率，不按 token），少传的几万字符才是净赚。
+- **安全地板有官方背书**："If an uncached ID cannot be resolved, send a new turn with
+  previous_response_id set to **null and pass full input context**."——失效→null+全量
+  就是 OpenAI 自己规定的 fallback，不是我们的私设。
+- 网页面 `conversation_id`+`parent_message_id` 与计价面 Conversations API/
+  `previous_response_id` 是**同构不同 API**（都是服务端有状态树），引用官方文档只能
+  证架构，不能直接证 bpi 行为——bpi 的正证据是 pod live 日志（delta send 53 chars）。
+- 裸脚本打 `chatgpt.com/backend-api/conversation*`/`sentinel` = CF 边缘 403 挑战页
+  （188 实测），这就是必须捕获真实浏览器 session 的原因；198 宿主机 DNS 对
+  chatgpt.com 投毒（face:b00c 段），文档验证走 platform.openai.com 不受影响。
+
+### 压缩次数与体感（分两个"压缩"回答，别混）
+
+- **网关 ①diet/②histdiet：结构性省**——只在全量轮跑，命中增量时无工作对象。
+  30 轮长会话 ≈ 1-2 次全量压缩 + 28 次增量（旧模式=30 次全量）。
+- **Cursor 自身 compaction：不省，故意不省**——usage 上报客户端真实上下文，
+  客户端 compaction 是防会话无限长的唯一闸（低报=永不触发=长会话失控，codex 侧实证）。
+- **体感收益在最坏情况**：附件上传悬崖（>100K，十几秒+实测零输出）结构性消除；
+  常规轮 TTFB 大头是上游 thinking（3.5-5.5s），少传几万字符只省几百 ms，体感有限。
+
 ## 高频坑（每条都真踩过）
 
 - delta 数 ≠ done 数先想 **UTF-16 vs 码点**（emoji JS 计 2 / Python 计 1），不是丢字。

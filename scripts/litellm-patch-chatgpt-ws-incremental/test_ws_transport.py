@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""
+ws_transport 离线单测：用 FakeWS 回放脚本化帧，验证 7 闸门 / 账本 / delta / expected_echo，
+完全不碰生产。注入 fake 模块顶掉 litellm._logging / streaming_iterator / types.utils / aiohttp。
+
+run: python3 test_ws_transport.py
+"""
+import asyncio
+import json
+import os
+import sys
+import types
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+# ---- fake litellm._logging ----
+_logging = types.ModuleType("litellm._logging")
+class _VL:
+    def info(self, *a, **k): pass
+    def warning(self, *a, **k): pass
+    def debug(self, *a, **k): pass
+_logging.verbose_logger = _VL()
+sys.modules["litellm"] = types.ModuleType("litellm")
+sys.modules["litellm._logging"] = _logging
+
+# ---- fake litellm.responses.streaming_iterator.ResponsesAPIStreamingIterator ----
+# 忠实复刻 v1.90.2 stock 迭代器：用 response.aiter_bytes() 读 SSE 字节流，剥 `data: ` 前缀，
+# 得到帧 JSON 文本供断言。这样离线单测能抓住 shim 接口（aiter_bytes vs aiter_lines）漂移。
+resp_mod = types.ModuleType("litellm.responses.streaming_iterator")
+class ResponsesAPIStreamingIterator:
+    def __init__(self, *, response, model, logging_obj, responses_api_provider_config,
+                 litellm_metadata, custom_llm_provider, request_data, call_type):
+        self.response = response
+        self._it = response.aiter_bytes()
+        self.frames = []
+    def __aiter__(self): return self
+    async def __anext__(self):
+        raw = await self._it.__anext__()           # bytes: b"data: <json>\n\n"
+        line = raw.decode("utf-8")
+        for ln in line.splitlines():
+            if ln.startswith("data: "):
+                line = ln[6:]
+                break
+        self.frames.append(line)
+        return line
+resp_mod.ResponsesAPIStreamingIterator = ResponsesAPIStreamingIterator
+sys.modules["litellm.responses"] = types.ModuleType("litellm.responses")
+sys.modules["litellm.responses.streaming_iterator"] = resp_mod
+
+# ---- fake litellm.types.utils.CallTypes ----
+types_utils = types.ModuleType("litellm.types.utils")
+class CallTypes:
+    responses = types.SimpleNamespace(value="responses")
+types_utils.CallTypes = CallTypes
+sys.modules["litellm.types"] = types.ModuleType("litellm.types")
+sys.modules["litellm.types.utils"] = types_utils
+
+# ---- fake aiohttp with scripted WS ----
+aiohttp = types.ModuleType("aiohttp")
+class WSMsgType:
+    TEXT = "TEXT"; CLOSED = "CLOSED"; CLOSING = "CLOSING"; CLOSE = "CLOSE"; ERROR = "ERROR"
+    PING = "PING"; PONG = "PONG"
+aiohttp.WSMsgType = WSMsgType
+class ClientWSTimeout:
+    def __init__(self, **k): pass
+aiohttp.ClientWSTimeout = ClientWSTimeout
+class WSServerHandshakeError(Exception):
+    def __init__(self, status=None, message=""):
+        self.status = status; self.message = message; super().__init__(message)
+aiohttp.WSServerHandshakeError = WSServerHandshakeError
+
+class _Msg:
+    def __init__(self, mtype, data): self.type = mtype; self.data = data
+
+class FakeWS:
+    """按 turn 脚本回放帧。每次 send_str 触发下一批帧入队。"""
+    def __init__(self, turns):
+        self.turns = list(turns)   # list[list[dict]]  每 turn 一批帧
+        self.closed = False
+        self.sent = []
+        self._queue = []
+    async def send_str(self, s):
+        self.sent.append(json.loads(s))
+        batch = self.turns.pop(0) if self.turns else []
+        self._queue.extend(_Msg(WSMsgType.TEXT, json.dumps(f)) for f in batch)
+    async def receive(self):
+        if self._queue:
+            return self._queue.pop(0)
+        return _Msg(WSMsgType.CLOSED, None)
+    async def close(self): self.closed = True
+
+class FakeClientSession:
+    _script = None  # class-level: 下一个 ws_connect 用的 turns
+    def __init__(self): self.closed = False
+    async def ws_connect(self, url, **k):
+        return FakeWS(FakeClientSession._script or [])
+    async def close(self): self.closed = True
+aiohttp.ClientSession = FakeClientSession
+sys.modules["aiohttp"] = aiohttp
+
+# asyncio.wait_for passthrough already fine.
+
+import ws_transport as W  # noqa: E402
+
+os.environ["CHATGPT_WS_INCREMENTAL"] = "1"
+os.environ["CHATGPT_WS_INCREMENTAL_LOG"] = "0"
+
+PCFG = object()
+
+def _ctx(pck): return {"prompt_cache_key": pck, "litellm_params": {}}
+
+def _u(t): return {"type": "message", "role": "user",
+                   "content": [{"type": "input_text", "text": t}]}
+def _a(t, rid): return {"type": "message", "role": "assistant", "id": rid,
+                        "content": [{"type": "output_text", "text": t}]}
+def _reason(enc): return {"type": "reasoning", "encrypted_content": enc}
+
+def _item_done(item):
+    # 实测：输出项经 response.output_item.done 逐个流出（store:false 下 completed.output 恒空）。
+    return {"type": "response.output_item.done", "item": item}
+
+def _completed(rid, output=None):
+    # 忠实生产：completed.output 恒空 []（输出项走 output_item.done）。
+    return {"type": "response.completed",
+            "response": {"id": rid, "status": "completed", "output": output or []}}
+def _created(rid):
+    return {"type": "response.created", "response": {"id": rid, "status": "in_progress"}}
+
+def _rate_limits(allowed=True, limit_reached=False, used_percent=12.0):
+    # 实测：上游 WS 第一帧恒为 codex.rate_limits 前导（配额元数据，非生命周期事件）。
+    return {"type": "codex.rate_limits",
+            "rate_limits": {"allowed": allowed, "limit_reached": limit_reached,
+                            "primary": {"used_percent": used_percent,
+                                        "reset_after_seconds": 3600}}}
+
+async def _drain(it):
+    frames = []
+    try:
+        async for line in it:
+            frames.append(line)
+    except StopAsyncIteration:
+        pass
+    return frames
+
+def _base_data(input_items):
+    return {"model": "gpt-5.6-sol", "input": input_items, "stream": True,
+            "store": False, "instructions": "x", "include": ["reasoning.encrypted_content"]}
+
+async def _call(data, pck):
+    return await W.try_ws_incremental(
+        data=data, headers={"Authorization": "Bearer x", "ChatGPT-Account-Id": "acc"},
+        api_base="https://chatgpt.com/backend-api/codex/responses", model="gpt-5.6-sol",
+        logging_obj=types.SimpleNamespace(model_call_details={}, start_time=None,
+                                          pre_call=lambda **k: None),
+        responses_api_provider_config=PCFG, litellm_metadata={}, custom_llm_provider="chatgpt",
+        request_context=_ctx(pck))
+
+results = []
+def check(name, cond):
+    results.append((name, cond))
+    print(("PASS " if cond else "FAIL ") + name)
+
+async def main():
+    W._REGISTRY.clear()
+
+    # === T1 full → T2 incremental happy path ===
+    # T1: server 流 rate_limits 前导 + created(提交信号) + output_item.done(assistant)
+    #     + output_item.done(reasoning-enc) + completed(output=[] 恒空)。
+    #     输出项只在 done 事件里，completed.output 为空；rate_limits 前导须被 shim 透传。
+    FakeClientSession._script = [[_rate_limits(),
+                                  _created("resp_1"),
+                                  _item_done(_a("55", "msg_1")),
+                                  _item_done(_reason("gAAA")),
+                                  _completed("resp_1")]]
+    it1 = await _call(_base_data([_u("17*3+4?")]), "pckA")
+    check("T1 returns iterator", it1 is not None)
+    frames1 = await _drain(it1)
+    check("T1 shim yields rate_limits preamble to client",
+          any('"codex.rate_limits"' in f for f in frames1))
+    sess = W._REGISTRY.get("pckA")
+    check("T1 session registered", sess is not None)
+    check("T1 last_response_id set", sess.last_response_id == "resp_1")
+    # ledger = hash([u1]) + expected_echo([assistant]) (reasoning-enc dropped)
+    check("T1 ledger len == 2 (u1 + assistant, reasoning dropped)", len(sess.item_hashes) == 2)
+
+    # T2: client echoes [u1, assistant, u2]; expect incremental, delta=[u2], prev_id=resp_1
+    FakeClientSession._script = None  # reuse existing WS
+    sess.ws.turns = [[_created("resp_2"), _item_done(_a("110", "msg_2")), _completed("resp_2")]]
+    data2 = _base_data([_u("17*3+4?"), _a("55", "msg_1"), _u("*2?")])
+    it2 = await _call(data2, "pckA")
+    check("T2 returns iterator (incremental)", it2 is not None)
+    await _drain(it2)
+    sent2 = sess.ws.sent[-1]
+    check("T2 sent only delta (1 input item)", len(sent2.get("input", [])) == 1)
+    check("T2 delta is the new user msg", sent2["input"][0]["content"][0]["text"] == "*2?")
+    check("T2 carried previous_response_id=resp_1", sent2.get("previous_response_id") == "resp_1")
+    check("T2 frame has generate=true", sent2.get("generate") is True)
+    check("T2 frame type=response.create", sent2.get("type") == "response.create")
+    check("T2 last_response_id advanced to resp_2", sess.last_response_id == "resp_2")
+
+    # === gate: client-supplied previous_response_id → None (HTTP passthrough) ===
+    W._REGISTRY.clear()
+    d = _base_data([_u("hi")]); d["previous_response_id"] = "resp_x"
+    it = await _call(d, "pckB")
+    check("client previous_response_id → None", it is None)
+
+    # === gate: no pck → None ===
+    itn = await W.try_ws_incremental(
+        data=_base_data([_u("hi")]), headers={}, api_base="https://chatgpt.com/backend-api/codex/responses",
+        model="gpt-5.6-sol",
+        logging_obj=types.SimpleNamespace(model_call_details={}, start_time=None, pre_call=lambda **k: None),
+        responses_api_provider_config=PCFG, litellm_metadata={}, custom_llm_provider="chatgpt",
+        request_context={"litellm_params": {}})
+    check("no pck → None", itn is None)
+
+    # === gate: feature off → None ===
+    os.environ["CHATGPT_WS_INCREMENTAL"] = "0"
+    W._REGISTRY.clear()
+    itoff = await _call(_base_data([_u("hi")]), "pckC")
+    check("feature off → None", itoff is None)
+    os.environ["CHATGPT_WS_INCREMENTAL"] = "1"
+
+    # === gate: properties change → full reset (not incremental) ===
+    W._REGISTRY.clear()
+    FakeClientSession._script = [[_created("resp_p1"), _completed("resp_p1", [_a("ok", "m1")])]]
+    it = await _call(_base_data([_u("q1")]), "pckD"); await _drain(it)
+    sessD = W._REGISTRY["pckD"]
+    sessD.ws.turns = [[_created("resp_p2"), _completed("resp_p2", [_a("ok2", "m2")])]]
+    # change model in props → properties_hash mismatch → full replay (input full, prev_id None)
+    d2 = _base_data([_u("q1"), _a("ok", "m1"), _u("q2")]); d2["model"] = "gpt-5.6-terra"
+    # model change also means _model_allowed still true; provider config same
+    it = await _call(d2, "pckD"); await _drain(it)
+    # after props change we destroy+recreate; new session is fresh
+    newD = W._REGISTRY.get("pckD")
+    check("props change created fresh session", newD is not None and newD is not sessD)
+
+    # === gate: prefix break → full reset ===
+    W._REGISTRY.clear()
+    FakeClientSession._script = [[_created("resp_x1"), _completed("resp_x1", [_a("a", "m1")])]]
+    it = await _call(_base_data([_u("q1")]), "pckE"); await _drain(it)
+    sessE = W._REGISTRY["pckE"]
+    # T2 with DIFFERENT first item (prefix break)
+    FakeClientSession._script = [[_created("resp_x2"), _completed("resp_x2", [_a("b", "m2")])]]
+    d = _base_data([_u("DIFFERENT"), _a("a", "m1"), _u("q2")])
+    it = await _call(d, "pckE"); await _drain(it)
+    newE = W._REGISTRY.get("pckE")
+    check("prefix break → fresh session, full replay", newE is not None and newE is not sessE)
+    check("prefix-break full frame sent all items + no prev_id",
+          newE is not None and len(newE.ws.sent[-1]["input"]) == 3
+          and newE.ws.sent[-1].get("previous_response_id") is None)
+
+    # === first-frame error → None (HTTP fallback), session destroyed ===
+    W._REGISTRY.clear()
+    FakeClientSession._script = [[{"type": "error", "status": 429,
+                                   "error": {"message": "usage_limit_reached"}}]]
+    it = await _call(_base_data([_u("hi")]), "pckF")
+    check("first-frame error → None (HTTP fallback)", it is None)
+    check("errored session not left in registry", W._REGISTRY.get("pckF") is None)
+
+    # === 硬约束1: rate_limits(blocked) 前导 → None (桶满早退 → HTTP → 外层换号) ===
+    W._REGISTRY.clear()
+    FakeClientSession._script = [[_rate_limits(allowed=False, limit_reached=True, used_percent=100.0)]]
+    it = await _call(_base_data([_u("hi")]), "pckG")
+    check("rate_limits(blocked) preamble → None (fail closed)", it is None)
+    check("blocked session not left in registry", W._REGISTRY.get("pckG") is None)
+
+    # === 硬约束1 承重: rate_limits 前导 → error(桶满) 在 created 之前 → None，绝不进流态 ===
+    # 这是修复前的致命 bug：旧代码把 rate_limits 当首帧成功提交，桶满 error 会被吐给客户端
+    # 而非让外层换号。现在必须等 created 提交信号，created 前的 error → None → HTTP。
+    W._REGISTRY.clear()
+    FakeClientSession._script = [[_rate_limits(),   # 良性前导（allowed）
+                                  {"type": "error", "status": 429,
+                                   "error": {"message": "usage_limit_reached"}}]]
+    it = await _call(_base_data([_u("hi")]), "pckH")
+    check("rate_limits→error before created → None (no premature commit)", it is None)
+    check("late-error session not left in registry", W._REGISTRY.get("pckH") is None)
+
+    # === rate_limits 前导 → close 在 created 之前 → None ===
+    W._REGISTRY.clear()
+    FakeClientSession._script = [[_rate_limits()]]  # 之后 FakeWS.receive 返 CLOSED
+    it = await _call(_base_data([_u("hi")]), "pckI")
+    check("rate_limits→close before created → None", it is None)
+    check("closed session not left in registry", W._REGISTRY.get("pckI") is None)
+
+    print("\n%d/%d passed" % (sum(1 for _, c in results if c), len(results)))
+    if not all(c for _, c in results):
+        sys.exit(1)
+
+asyncio.run(main())

@@ -78,6 +78,32 @@ pod 日志决策行可 grep：`[chat-only] [conv] [diet] [harvest] [act] [te] [c
    `cursor-web-fc-terra-high`(→extended)/`-max`(xhigh→max)，Cursor 切模型名即切档；
 3. pod `ZK_TE_DEFAULT` 默认档。映射：low/medium→standard, high→extended, xhigh→max。
 
+## 会话复用机制（指纹/会话id/增量续发——常被误解为"加密压缩"）
+
+**省输入的不是加密，是服务端状态**。网页 ChatGPT 后端有状态（`conversation_id` +
+`parent_message_id`，pod `api.js:119` 原生支持，原作者三处调 `chatCompletion` 全传
+null 把它废了）。命中复用时只发 conv id + 新增 items，上文由服务端会话自己记得——
+不存在"把上文加密后发过去"（密文同样耗 token，上游也解不了）。
+
+三个组件的分工：
+
+| 组件 | 作用 | 关键约束 |
+|---|---|---|
+| SHA-1 逐项指纹（`_itemDigest`） | **本地防错闸，不出网关**：缓存记上轮每条 item 指纹，下轮逐项比对前缀，全等才敢增量 | cache key 只用稳定锚点 `sha1(input[0])+sha1(instructions)`——**input[1] 之后每轮都变，进 key 必永久 miss**（踩过）；正确性靠 find 时逐项前缀校验 |
+| `conversation_id`/`parentId`（`_cvSeen`/`_pmSeen`） | 续会话线索，`finish()` 时 `saveConvSession` 存入缓存 | **重试/fallback 轮开的新交换必须回传 id 重存**（r15），否则下轮 fork 回旧分支，模型看不见自己上轮说的话 |
+| 增量 `_convDelta` | `input.slice(count)` 后 `_stripAssistantItems`（剔 assistant/reasoning/function_call，留工具结果+新用户消息） | 增量轮无新 `<user_query>` 时要换 continue 框架语（r11） |
+
+**异常全部收敛到"退化成第一次输入"，构造上不会发错上下文**：
+- 换账号/会话失效 → 上游报错 → `catch(_convErr)` 删缓存+**同请求内**全量重发新会话；
+- pod 重启 → 内存缓存清空 → 天然 miss；TTL(240min)过期/前缀指纹不符 → miss 回落全量；
+- 重试通道续会话失败 → `collectWebTextR` 自 catch 返空 → 交付首轮文本。
+诚实边界：缓存不记"conv 属于哪个账号"，跨账号正确性靠上游报错触发兜底（bpi 单
+captured 会话，换号必伴随 pod 重启/session 重抓，两条路都自然清缓存）。
+
+日志判读：`[conv] saved items=N conv=xxx`=全量后建会话存指纹；
+`[conv] delta send K new items, M chars`=增量真省了（客户端全量几万字符只透传 M）；
+`[conv] delta send failed -> full resend`=失效兜底触发（该分支尚无 live 样本，代码层保证）。
+
 ## 高频坑（每条都真踩过）
 
 - delta 数 ≠ done 数先想 **UTF-16 vs 码点**（emoji JS 计 2 / Python 计 1），不是丢字。

@@ -185,6 +185,7 @@ class WsSession:
 
     def __init__(self, pck: str, ws_url: str, ws_headers: Dict[str, str]):
         self.pck = pck
+        self.pck_src = "-"        # pck 来源字段标记（诊断：识别服务端注入的共享键）
         self.ws_url = ws_url
         self.ws_headers = ws_headers
         self._aio_session = None  # aiohttp.ClientSession
@@ -447,7 +448,7 @@ async def try_ws_incremental(
         return None
 
     # pck：无 pck 绝不用匿名/共享会话 → None 走 HTTP（非 Codex 常态，静默）。
-    pck = _resolve_pck(request_context, litellm_metadata, data)
+    pck, pck_src = _resolve_pck(request_context, litellm_metadata, data)
     if not pck:
         return None
 
@@ -485,7 +486,7 @@ async def try_ws_incremental(
         if sess is not None:
             await sess.destroy()
         return await _full_ws_turn(
-            pck=pck, ws_url=ws_url, ws_headers=ws_headers, data=data,
+            pck=pck, pck_src=pck_src, ws_url=ws_url, ws_headers=ws_headers, data=data,
             cur_hashes=cur_hashes, props_hash=props_hash, total_items=total_items,
             model=model, logging_obj=logging_obj,
             responses_api_provider_config=responses_api_provider_config,
@@ -508,7 +509,7 @@ async def try_ws_incremental(
             _log(f"ws_incr_reconnect reason=preflight_dead pck={_pck8(pck)} close_code={getattr(sess.ws, 'close_code', None)}")
             await sess.destroy()
             return await _full_ws_turn(
-                pck=pck, ws_url=ws_url, ws_headers=ws_headers, data=data,
+                pck=pck, pck_src=pck_src, ws_url=ws_url, ws_headers=ws_headers, data=data,
                 cur_hashes=cur_hashes, props_hash=props_hash, total_items=total_items,
                 model=model, logging_obj=logging_obj,
                 responses_api_provider_config=responses_api_provider_config,
@@ -561,12 +562,13 @@ async def _ws_alive_preflight(sess: WsSession) -> bool:
         return False
 
 
-async def _full_ws_turn(*, pck, ws_url, ws_headers, data, cur_hashes, props_hash,
+async def _full_ws_turn(*, pck, pck_src, ws_url, ws_headers, data, cur_hashes, props_hash,
                         total_items, model, logging_obj, responses_api_provider_config,
                         litellm_metadata, custom_llm_provider, request_context, headers):
     """全量 WS 轮：新建连接发全量 input。need_full 与 preflight 重建共用。
     失败一律 None → 调用方落原生 HTTP POST（字节级不变）。"""
     sess = WsSession(pck, ws_url, ws_headers)
+    sess.pck_src = pck_src
     await sess.lock.acquire()
     handed_off = False
     try:
@@ -600,40 +602,42 @@ async def _full_ws_turn(*, pck, ws_url, ws_headers, data, cur_hashes, props_hash
             sess.lock.release()
 
 
-def _resolve_pck(request_context, litellm_metadata, data) -> Optional[str]:
+def _resolve_pck(request_context, litellm_metadata, data):
     """会话键：只认**跨轮稳定**的键——prompt_cache_key / litellm_session_id / session_id。
     与 acct provider 的 prompt_cache_key→session_id 亲和口径、外层 WA(pck) 一致。
+    返回 (pck, 来源标记)；来源进日志——若来源是服务端注入的共享值（非客户端 body），
+    多个会话会共用一个 WS 身份互踢全量，必须能从日志一眼看出。
 
     ⚠ 绝不用 litellm_call_id / litellm_trace_id：它们每请求唯一，用作会话键 = 每请求
     新开一条 WS 且永不复用（纯 churn），彻底抵消增量收益。找不到稳定键 → None 走 HTTP。"""
     stable_keys = ("prompt_cache_key", "litellm_session_id", "session_id")
 
-    def _scan(src) -> Optional[str]:
+    def _scan(src, tag):
         if not isinstance(src, dict):
             return None
         for k in stable_keys:
             v = src.get(k)
             if v:
-                return str(v)
+                return (str(v), f"{tag}.{k}")
         meta = src.get("metadata")
         if isinstance(meta, dict):
             for k in stable_keys:
                 v = meta.get(k)
                 if v:
-                    return str(v)
+                    return (str(v), f"{tag}.metadata.{k}")
         return None
 
     # request_context 顶层 + 其 metadata；其 litellm_params（provider 从这里取 session_id）
-    for src in (
-        request_context or {},
-        (request_context or {}).get("litellm_params"),
-        litellm_metadata or {},
-        data if isinstance(data, dict) else {},
+    for src, tag in (
+        (request_context or {}, "ctx"),
+        ((request_context or {}).get("litellm_params"), "ctx.lp"),
+        (litellm_metadata or {}, "meta"),
+        (data if isinstance(data, dict) else {}, "data"),
     ):
-        found = _scan(src)
+        found = _scan(src, tag)
         if found:
             return found
-    return None
+    return (None, "-")
 
 
 async def _send_and_await_first(sess: WsSession, frame: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
@@ -651,10 +655,18 @@ async def _send_and_await_first(sess: WsSession, frame: Dict[str, Any]) -> Optio
     返回：截至并含提交信号的帧列表（供 shim 依序先吐，保真——客户端仍收到 rate_limits）；或 None。"""
     import aiohttp
 
+    # 帧特征（诊断归因用：1009/关闭到底和什么相关——大小/条数/加密块/pck 来源）。
+    _f_items = frame.get("input") or []
+    _f_stats = (
+        f"src={sess.pck_src} frame_kb={len(json.dumps(frame)) // 1024} "
+        f"items={len(_f_items)} enc_items={sum(1 for it in _f_items if _has_encrypted_content(it))} "
+        f"prev={'y' if frame.get('previous_response_id') else 'n'}"
+    )
+
     try:
         await sess.ws.send_str(json.dumps(frame))
     except Exception as e:
-        _log(f"ws_incr_fallback reason=send_exc pck={_pck8(sess.pck)} err={type(e).__name__}")
+        _log(f"ws_incr_fallback reason=send_exc pck={_pck8(sess.pck)} err={type(e).__name__} {_f_stats}")
         return None
 
     preamble: List[Dict[str, Any]] = []
@@ -697,15 +709,15 @@ async def _send_and_await_first(sess: WsSession, frame: Dict[str, Any]) -> Optio
                 _log(
                     f"ws_incr_fallback reason=first_frame_closed pck={_pck8(sess.pck)} "
                     f"type={msg.type} close_code={getattr(sess.ws, 'close_code', None)} "
-                    f"exc={_ws_exc_summary(sess)}"
+                    f"exc={_ws_exc_summary(sess)} {_f_stats}"
                 )
                 return None
             # 其它类型（PING/PONG）忽略，继续等 TEXT
     except asyncio.TimeoutError:
-        _log(f"ws_incr_fallback reason=first_frame_timeout pck={_pck8(sess.pck)}")
+        _log(f"ws_incr_fallback reason=first_frame_timeout pck={_pck8(sess.pck)} {_f_stats}")
         return None
     except Exception as e:
-        _log(f"ws_incr_fallback reason=first_frame_exc pck={_pck8(sess.pck)} err={type(e).__name__}")
+        _log(f"ws_incr_fallback reason=first_frame_exc pck={_pck8(sess.pck)} err={type(e).__name__} {_f_stats}")
         return None
 
 
@@ -834,7 +846,7 @@ def _commit_if_completed(sess, ev, collected_output, pending_hashes, props_hash,
     sess.touch()
     dt_ms = int((time.time() - t_start) * 1000)
     _log(
-        f"ws_incr mode={mode} pck={_pck8(sess.pck)} delta_items={delta_count} "
+        f"ws_incr mode={mode} pck={_pck8(sess.pck)} src={sess.pck_src} delta_items={delta_count} "
         f"total_input_items={total_items} out_items={len(output_items)} echo_items={len(echo)} "
         f"frame_bytes={frame_bytes} ledger_len={len(sess.item_hashes)} "
         f"prev_resp={orig_rid} elapsed_ms={dt_ms}"

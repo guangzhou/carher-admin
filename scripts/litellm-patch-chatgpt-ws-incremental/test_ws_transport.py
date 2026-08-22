@@ -74,17 +74,25 @@ class _Msg:
     def __init__(self, mtype, data): self.type = mtype; self.data = data
 
 class FakeWS:
-    """按 turn 脚本回放帧。每次 send_str 触发下一批帧入队。"""
+    """按 turn 脚本回放帧。每次 send_str 触发下一批帧入队。
+    队空时先小睡再返 CLOSED：模拟真实 WS「无帧可读=阻塞」，让 preflight（毫秒级
+    非阻塞探测）对健康连接判活；真死连接用预先入队的 CLOSED 帧模拟。"""
     def __init__(self, turns):
         self.turns = list(turns)   # list[list[dict]]  每 turn 一批帧
         self.closed = False
+        self.close_code = None
         self.sent = []
         self._queue = []
+    def exception(self):
+        return None
     async def send_str(self, s):
         self.sent.append(json.loads(s))
         batch = self.turns.pop(0) if self.turns else []
         self._queue.extend(_Msg(WSMsgType.TEXT, json.dumps(f)) for f in batch)
     async def receive(self):
+        if self._queue:
+            return self._queue.pop(0)
+        await asyncio.sleep(0.2)   # 健康连接队空=阻塞；preflight 0.02s 超时→判活
         if self._queue:
             return self._queue.pop(0)
         return _Msg(WSMsgType.CLOSED, None)
@@ -105,6 +113,7 @@ import ws_transport as W  # noqa: E402
 
 os.environ["CHATGPT_WS_INCREMENTAL"] = "1"
 os.environ["CHATGPT_WS_INCREMENTAL_LOG"] = "0"
+W._PREFLIGHT_TIMEOUT_S = 0.02  # FakeWS 队空睡 0.2s → 判活；真死用预入队 CLOSED → 判死
 
 PCFG = object()
 
@@ -282,6 +291,47 @@ async def main():
     it = await _call(_base_data([_u("hi")]), "pckI")
     check("rate_limits→close before created → None", it is None)
     check("closed session not left in registry", W._REGISTRY.get("pckI") is None)
+
+    # === preflight：闲置期上游 CLOSE 已入队 → 判死 → 重建全量 WS（留在 WS 上，不掉 HTTP）===
+    W._REGISTRY.clear()
+    FakeClientSession._script = [[_created("resp_j1"), _item_done(_a("7", "mj1")), _completed("resp_j1")]]
+    it = await _call(_base_data([_u("q1")]), "pckJ"); await _drain(it)
+    sessJ = W._REGISTRY["pckJ"]
+    sessJ.ws._queue.append(_Msg(WSMsgType.CLOSED, None))   # 模拟闲断：CLOSE 已在本地队列
+    FakeClientSession._script = [[_created("resp_j2"), _item_done(_a("8", "mj2")), _completed("resp_j2")]]
+    d = _base_data([_u("q1"), _a("7", "mj1"), _u("q2")])
+    it = await _call(d, "pckJ")
+    check("preflight-dead → rebuilt on WS (iterator returned)", it is not None)
+    await _drain(it)
+    newJ = W._REGISTRY.get("pckJ")
+    check("preflight-dead → fresh session replaces old", newJ is not None and newJ is not sessJ)
+    check("preflight rebuild sent FULL input, no prev_id",
+          newJ is not None and len(newJ.ws.sent[-1]["input"]) == 3
+          and newJ.ws.sent[-1].get("previous_response_id") is None)
+    check("preflight-dead old session destroyed", sessJ.destroyed)
+    check("rebuilt session ledger correct (3 input + 1 echo)",
+          newJ is not None and len(newJ.item_hashes) == 4)
+
+    # === GC 豁免 in-flight：TTL 过期但 lock 被持有 → 绝不驱逐（否则杀正在流式的会话）===
+    W._REGISTRY.clear()
+    s1 = W.WsSession("p1", "wss://x", {}); s2 = W.WsSession("p2", "wss://x", {})
+    W._REGISTRY["p1"] = s1; W._REGISTRY["p2"] = s2
+    s1.last_used = 0; s2.last_used = 0          # 双双"古老"
+    await s1.lock.acquire()                      # s1 in-flight
+    W._gc_registry()
+    check("GC TTL evicts idle, spares in-flight", "p1" in W._REGISTRY and "p2" not in W._REGISTRY)
+    s1.lock.release()
+
+    # === GC LRU 超限：最旧但 in-flight → 跳过，驱逐下一个空闲的 ===
+    W._REGISTRY.clear()
+    old_cap = W._MAX_SESSIONS; W._MAX_SESSIONS = 1
+    sa = W.WsSession("pa", "wss://x", {}); sb = W.WsSession("pb", "wss://x", {})
+    W._REGISTRY["pa"] = sa; W._REGISTRY["pb"] = sb   # pa 最旧
+    await sa.lock.acquire()
+    W._gc_registry()
+    check("GC LRU spares locked oldest, evicts idle next", "pa" in W._REGISTRY and "pb" not in W._REGISTRY)
+    sa.lock.release(); W._MAX_SESSIONS = old_cap
+    W._REGISTRY.clear()
 
     print("\n%d/%d passed" % (sum(1 for _, c in results if c), len(results)))
     if not all(c for _, c in results):

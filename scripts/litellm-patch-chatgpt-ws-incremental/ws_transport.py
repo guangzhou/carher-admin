@@ -46,7 +46,11 @@ _CONNECT_BUDGET_S = float(os.getenv("CHATGPT_WS_CONNECT_BUDGET_S", "10"))
 _FIRST_FRAME_BUDGET_S = float(os.getenv("CHATGPT_WS_FIRST_FRAME_BUDGET_S", "12"))
 _RECV_IDLE_TIMEOUT_S = float(os.getenv("CHATGPT_WS_RECV_IDLE_S", "120"))
 _SESSION_TTL_S = float(os.getenv("CHATGPT_WS_SESSION_TTL_S", "600"))
-_MAX_SESSIONS = int(os.getenv("CHATGPT_WS_MAX_SESSIONS", "8"))
+# 会话上限只为兜内存（每会话 ≈ 一条 WS + ~20KB 账本）。32 × 该量级可忽略；
+# 上限过小会把还热的会话驱逐掉、白丢增量命中（实测单 pod 6h 窗见 12 个 distinct pck）。
+_MAX_SESSIONS = int(os.getenv("CHATGPT_WS_MAX_SESSIONS", "32"))
+# 复用前微探测预算：闲置期上游已发的 CLOSE 帧就在本地队列里，毫秒级即可吸出。
+_PREFLIGHT_TIMEOUT_S = float(os.getenv("CHATGPT_WS_PREFLIGHT_S", "0.05"))
 _FLAG_FILE = os.getenv("CHATGPT_WS_INCREMENTAL_FLAG", "/app/chatgpt_ws_incremental.flag")
 
 # 进程级单向熔断：握手 426（上游明说不支持）→ 之后全走 HTTP，不再自动重探（codex 单点熔断纪律）。
@@ -267,19 +271,44 @@ def _pck8(pck: str) -> str:
     return hashlib.sha1(pck.encode("utf-8", "replace")).hexdigest()[:8]
 
 
+def _ws_exc_summary(sess: "WsSession") -> str:
+    """WS 底层异常摘要（ERROR 帧归因：RST / pong 超时 / TLS 等）。无异常返回 '-'。"""
+    try:
+        exc = sess.ws.exception() if sess.ws is not None else None
+    except Exception:
+        return "-"
+    if exc is None:
+        return "-"
+    return f"{type(exc).__name__}:{str(exc)[:80]}"
+
+
 def _gc_registry() -> None:
-    """LRU 上限 + idle TTL。每次调用顺带 GC。销毁是异步的，这里只标记摘除、调度关闭。"""
+    """LRU 上限 + idle TTL。每次调用顺带 GC。销毁是异步的，这里只标记摘除、调度关闭。
+
+    ⚠ **绝不驱逐 in-flight 会话**（lock 被持有 = 正在流式/正在用）：驱逐会关掉正在给
+    客户端吐帧的 WS → 客户端收到截断流。这是层内唯一可能"自己杀自己"的路径，必须豁免；
+    代价只是 registry 短暂超上限（受并发数自然约束）。"""
     now = time.time()
-    # TTL 过期
+    # TTL 过期（跳过 in-flight）
     for pck in list(_REGISTRY.keys()):
         sess = _REGISTRY[pck]
+        if sess.lock.locked():
+            continue
         if now - sess.last_used > _SESSION_TTL_S:
             _REGISTRY.pop(pck, None)
             _schedule_close(sess)
-    # LRU 超限（OrderedDict：最旧在前）
-    while len(_REGISTRY) > _MAX_SESSIONS:
-        _pck, sess = _REGISTRY.popitem(last=False)
-        _schedule_close(sess)
+            _log(f"ws_incr_gc evict=ttl pck={_pck8(pck)} idle_s={int(now - sess.last_used)}")
+    # LRU 超限（OrderedDict：最旧在前；跳过 in-flight）
+    if len(_REGISTRY) > _MAX_SESSIONS:
+        for pck in list(_REGISTRY.keys()):
+            if len(_REGISTRY) <= _MAX_SESSIONS:
+                break
+            sess = _REGISTRY[pck]
+            if sess.lock.locked():
+                continue
+            _REGISTRY.pop(pck, None)
+            _schedule_close(sess)
+            _log(f"ws_incr_gc evict=lru pck={_pck8(pck)}")
 
 
 def _schedule_close(sess: WsSession) -> None:
@@ -455,39 +484,14 @@ async def try_ws_incremental(
         # 旧会话若在则销毁重建（reset = 干净重连，保证服务端上下文清白）。
         if sess is not None:
             await sess.destroy()
-        sess = WsSession(pck, ws_url, ws_headers)
-        await sess.lock.acquire()
-        handed_off = False
-        try:
-            ok = await sess.connect()
-            if not ok:
-                return None
-            frame = _make_frame(data, data["input"], previous_response_id=None)
-            frame_bytes = len(json.dumps(frame).encode("utf-8", "replace"))
-            first_frames = await _send_and_await_first(sess, frame)
-            if first_frames is None:
-                await sess.destroy()
-                return None
-            # 成功进流态：登记 registry，构造账本预备值，交给 shim 生成器。
-            _REGISTRY[pck] = sess
-            _REGISTRY.move_to_end(pck)
-            sess.touch()
-            pending_hashes = cur_hashes  # 本轮全部 input 项即下轮前缀基线
-            it = _build_iterator(
-                sess=sess, first_frames=first_frames, mode="full_ws",
-                pending_hashes=pending_hashes, props_hash=props_hash,
-                delta_count=total_items, total_items=total_items, frame_bytes=frame_bytes,
-                model=model, logging_obj=logging_obj,
-                responses_api_provider_config=responses_api_provider_config,
-                litellm_metadata=litellm_metadata, custom_llm_provider=custom_llm_provider,
-                request_context=request_context, headers=headers,
-            )
-            handed_off = True
-            sess.turns_full += 1
-            return it
-        finally:
-            if not handed_off:
-                sess.lock.release()
+        return await _full_ws_turn(
+            pck=pck, ws_url=ws_url, ws_headers=ws_headers, data=data,
+            cur_hashes=cur_hashes, props_hash=props_hash, total_items=total_items,
+            model=model, logging_obj=logging_obj,
+            responses_api_provider_config=responses_api_provider_config,
+            litellm_metadata=litellm_metadata, custom_llm_provider=custom_llm_provider,
+            request_context=request_context, headers=headers,
+        )
 
     # ---- incremental ----
     # 抢锁：抢不到（并发同 pck）→ None 走 HTTP，绝不排队卡请求。
@@ -497,8 +501,20 @@ async def try_ws_incremental(
     await sess.lock.acquire()
     handed_off = False
     try:
-        if sess.destroyed or not sess.is_ws_open():   # 抢锁瞬间被 GC/关闭
-            return None
+        # 复用前微探测（官方纪律：连接闲断是常态 → 重建连接 + 本请求全量、**留在 WS 上**）。
+        # 闲置期上游已发的 CLOSE/ERROR 帧就在本地队列，毫秒级吸出即可判死；判死不走 HTTP
+        # 白丢一轮，而是原地重建全量 WS。判活非承诺——send 后死亡仍由提交点前 fail-closed 兜住。
+        if sess.destroyed or not sess.is_ws_open() or not await _ws_alive_preflight(sess):
+            _log(f"ws_incr_reconnect reason=preflight_dead pck={_pck8(pck)} close_code={getattr(sess.ws, 'close_code', None)}")
+            await sess.destroy()
+            return await _full_ws_turn(
+                pck=pck, ws_url=ws_url, ws_headers=ws_headers, data=data,
+                cur_hashes=cur_hashes, props_hash=props_hash, total_items=total_items,
+                model=model, logging_obj=logging_obj,
+                responses_api_provider_config=responses_api_provider_config,
+                litellm_metadata=litellm_metadata, custom_llm_provider=custom_llm_provider,
+                request_context=request_context, headers=headers,
+            )
         prev_len = len(sess.item_hashes)
         delta_items = data["input"][prev_len:]
         prev_rid = sess.last_response_id
@@ -523,6 +539,61 @@ async def try_ws_incremental(
         )
         handed_off = True
         sess.turns_incremental += 1
+        return it
+    finally:
+        if not handed_off:
+            sess.lock.release()
+
+
+async def _ws_alive_preflight(sess: WsSession) -> bool:
+    """复用前微探测：非阻塞吸干本地已到队的帧。CLOSE/CLOSED/ERROR → 死；
+    TEXT（轮间不该有帧，视为状态可疑）→ 保守判死重建；队空（超时）→ 判活。"""
+    import aiohttp
+    while True:
+        try:
+            msg = await asyncio.wait_for(sess.ws.receive(), timeout=_PREFLIGHT_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            return True
+        except Exception:
+            return False
+        if msg.type in (aiohttp.WSMsgType.PING, aiohttp.WSMsgType.PONG):
+            continue
+        return False
+
+
+async def _full_ws_turn(*, pck, ws_url, ws_headers, data, cur_hashes, props_hash,
+                        total_items, model, logging_obj, responses_api_provider_config,
+                        litellm_metadata, custom_llm_provider, request_context, headers):
+    """全量 WS 轮：新建连接发全量 input。need_full 与 preflight 重建共用。
+    失败一律 None → 调用方落原生 HTTP POST（字节级不变）。"""
+    sess = WsSession(pck, ws_url, ws_headers)
+    await sess.lock.acquire()
+    handed_off = False
+    try:
+        ok = await sess.connect()
+        if not ok:
+            return None
+        frame = _make_frame(data, data["input"], previous_response_id=None)
+        frame_bytes = len(json.dumps(frame).encode("utf-8", "replace"))
+        first_frames = await _send_and_await_first(sess, frame)
+        if first_frames is None:
+            await sess.destroy()
+            return None
+        # 成功进流态：登记 registry，构造账本预备值，交给 shim 生成器。
+        _REGISTRY[pck] = sess
+        _REGISTRY.move_to_end(pck)
+        sess.touch()
+        it = _build_iterator(
+            sess=sess, first_frames=first_frames, mode="full_ws",
+            pending_hashes=cur_hashes, props_hash=props_hash,
+            delta_count=total_items, total_items=total_items, frame_bytes=frame_bytes,
+            model=model, logging_obj=logging_obj,
+            responses_api_provider_config=responses_api_provider_config,
+            litellm_metadata=litellm_metadata, custom_llm_provider=custom_llm_provider,
+            request_context=request_context, headers=headers,
+        )
+        handed_off = True
+        sess.turns_full += 1
         return it
     finally:
         if not handed_off:
@@ -623,7 +694,11 @@ async def _send_and_await_first(sess: WsSession, frame: Dict[str, Any]) -> Optio
                     return None
             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
                               aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
-                _log(f"ws_incr_fallback reason=first_frame_closed pck={_pck8(sess.pck)} type={msg.type}")
+                _log(
+                    f"ws_incr_fallback reason=first_frame_closed pck={_pck8(sess.pck)} "
+                    f"type={msg.type} close_code={getattr(sess.ws, 'close_code', None)} "
+                    f"exc={_ws_exc_summary(sess)}"
+                )
                 return None
             # 其它类型（PING/PONG）忽略，继续等 TEXT
     except asyncio.TimeoutError:
@@ -696,7 +771,17 @@ def _build_iterator(*, sess, first_frames, mode, pending_hashes, props_hash,
                                 break
                     elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
                                       aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
-                        raise RuntimeError(f"ws closed mid-stream: {msg.type}")
+                        # 中流断（已吐字节后）——协议层无恢复原语（上游按 policy 掐长连接是常态，
+                        # 官方客户端的恢复=轮级重试；我们的下游 codex CLI 同款重试）。这里唯一
+                        # 职责是**可归因**：close_code/exception/流龄全记，1008 policy、RST、
+                        # pong 超时一眼定案。
+                        detail = (
+                            f"type={msg.type} close_code={getattr(sess.ws, 'close_code', None)} "
+                            f"exc={_ws_exc_summary(sess)} age_s={int(time.time() - t_start)} "
+                            f"mode={mode} pck={_pck8(sess.pck)}"
+                        )
+                        _log(f"ws_incr_midstream_break {detail}")
+                        raise RuntimeError(f"ws closed mid-stream: {detail}")
         finally:
             # 正常完成 → 保活会话给下轮；异常/中途退出（含客户端断开 GeneratorExit）→ 销毁。
             if not committed:

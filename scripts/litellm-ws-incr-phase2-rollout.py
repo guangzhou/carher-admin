@@ -42,7 +42,7 @@ ELIGIBLE_IMAGES = {
     "127.0.0.1:5000/litellm-carher:vanilla-v1.90.2.cache-session-fix-v2-20260817-103630",
 }
 CANARY = "chatgpt-acct-82"          # 已在 Phase 1，排除
-BACKUP_DIR = "/root/ws-incr-rollout"
+BACKUP_DIR = os.path.expanduser("~/ws-incr-rollout")   # 以 cltx 跑，/root 不可写
 # 波次定义：first 小步试水，后续放量。按 deploy 名排序后切片。
 WAVES = [3, 8, None]                 # wave1=3 台, wave2=8 台, wave3=其余全部
 

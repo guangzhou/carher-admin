@@ -50,7 +50,6 @@ _KEEP_ENCRYPTED_ALIASES = {"enc-canary-01"}
 # 上游本就把超上下文部分截断扔掉——裁剪只是把"扔"提前到网关，省双向带宽+计费 tokens。
 _COMPACT_ALIASES = {"compact-canary-01"}
 _COMPACT_MIN_BYTES = 2 * 1024 * 1024     # 触发：input 序列化 >2MB
-_COMPACT_TARGET_BYTES = 640 * 1024       # 压后目标（≈160K tokens 等价，宽于官方64K留质量余量）
 _COMPACT_ASSISTANT_MAX_BYTES = 40 * 1024 # assistant 单条上限（≈官方10K tokens）
 
 
@@ -68,22 +67,21 @@ def _compact_input_items(items: list[Any]) -> tuple[list[Any], dict[str, int]]:
         return items, {}
     if total < _COMPACT_MIN_BYTES or len(items) < 8:
         return items, {}
-    budget = _COMPACT_TARGET_BYTES
     marker_prefix = "[gateway-truncated:"
     out = list(items)
     counts: dict[str, int] = {"compact_kb_before": total // 1024}
     cur = total
-    # 逐项(从最老开始)改写工具输出内容；保留 call_id/name/配对结构
+    # 确定性逐项规则（K5 修正）：触发后对**所有**超阈值项统一变换，绝不按预算提前停——
+    # 预算驱动会让掏空前沿逐轮前移，同一 item 两轮内容不同 → acct pod WS 增量前缀账本
+    # 必然 prefix_break → 压缩会话永远全量。恒同变换 ⇒ 前缀稳定 ⇒ 与增量兼容。
     for i, it in enumerate(out):
-        if cur <= budget:
-            break
         if not isinstance(it, dict):
             continue
         t = str(it.get("type") or "")
         if t in ("function_call_output", "custom_tool_call_output", "local_shell_call_output"):
             o = it.get("output")
             osz = len(json.dumps(o, ensure_ascii=False)) if o is not None else 0
-            if osz < 2048:
+            if osz < 8192:
                 continue
             ostr = o if isinstance(o, str) else json.dumps(o, ensure_ascii=False)
             if ostr.startswith(marker_prefix):

@@ -75,5 +75,16 @@ out, c = C([u("h" * 3000000)] * 3 + [u("t")] * 6)
 check("degenerate huge user msgs: untouched (users never cut), no crash",
     isinstance(out, list))
 
+# 6. K5 前缀稳定性: 会话追加一轮后, 旧 item 的变换结果逐字节不变(确定性规则)
+sess = [u("TASK")]
+for i in range(40):
+    sess += [u(f"turn-{i}"), fc(f"k{i}"), fco(f"k{i}", "w" * 80000)]
+out_a, _ = C(list(sess))
+sess_b = list(sess) + [fc("k99"), fco("k99", "w" * 80000), u("next-q")]
+out_b, _ = C(sess_b)
+check("K5: old items transform identically after session grows",
+    all(json.dumps(out_a[i], sort_keys=True) == json.dumps(out_b[i], sort_keys=True)
+        for i in range(len(out_a))))
+
 print(f"\n{ok}/{total} passed")
 sys.exit(0 if ok == total else 1)

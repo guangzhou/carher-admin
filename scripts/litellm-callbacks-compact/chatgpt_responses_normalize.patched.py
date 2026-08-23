@@ -50,46 +50,81 @@ _KEEP_ENCRYPTED_ALIASES = {"enc-canary-01"}
 # 上游本就把超上下文部分截断扔掉——裁剪只是把"扔"提前到网关，省双向带宽+计费 tokens。
 _COMPACT_ALIASES = {"compact-canary-01"}
 _COMPACT_MIN_BYTES = 2 * 1024 * 1024     # 触发：input 序列化 >2MB
-_COMPACT_TAIL_BYTES = 512 * 1024         # 保留尾部预算
+_COMPACT_TARGET_BYTES = 640 * 1024       # 压后目标（≈160K tokens 等价，宽于官方64K留质量余量）
+_COMPACT_ASSISTANT_MAX_BYTES = 40 * 1024 # assistant 单条上限（≈官方10K tokens）
 
 
 def _compact_input_items(items: list[Any]) -> tuple[list[Any], dict[str, int]]:
-    """纯函数：超阈值历史 → [首条锚点, 折叠标记, 预算内尾部]。孤儿工具输出保护：
-    尾部开头的 *_output 项（其 call 已被裁掉）一并丢弃，防上游 400。失败原样返回。"""
+    """网关压缩（结构参照 codex harness，2026-08-23 源码级调研）：
+    ① 绝不删项、绝不破坏工具调用配对——只把陈旧工具输出的 output **内容**替换为
+       截断占位（同官方 trim_function_call_history_to_fit_context_window 思路）；
+    ② 用户消息全保（官方 build_compacted_history：用户消息是任务定义，预算内倒序优先最新）；
+    ③ 超长 assistant 消息截到 ~10K tokens 等价（官方 MAX_RETAINED_AGENT_MESSAGE_TOKENS）；
+    ④ 从最老的工具输出开始改写，直到总量入预算；改写不足以达标时不再硬删（保结构安全）。
+    幂等：已被本函数改写过的输出带占位前缀，跳过。失败原样返回。"""
     try:
         total = len(json.dumps(items, ensure_ascii=False))
     except Exception:
         return items, {}
     if total < _COMPACT_MIN_BYTES or len(items) < 8:
         return items, {}
-    head = items[:1]
-    tail: list[Any] = []
-    acc = 0
-    for it in reversed(items[1:]):
-        try:
-            b = len(json.dumps(it, ensure_ascii=False))
-        except Exception:
-            b = 4096
-        if acc + b > _COMPACT_TAIL_BYTES and tail:
+    budget = _COMPACT_TARGET_BYTES
+    marker_prefix = "[gateway-truncated:"
+    out = list(items)
+    counts: dict[str, int] = {"compact_kb_before": total // 1024}
+    cur = total
+    # 逐项(从最老开始)改写工具输出内容；保留 call_id/name/配对结构
+    for i, it in enumerate(out):
+        if cur <= budget:
             break
-        tail.insert(0, it)
-        acc += b
-    dropped_orphans = 0
-    while tail and isinstance(tail[0], dict) and "output" in str(tail[0].get("type") or ""):
-        tail.pop(0)
-        dropped_orphans += 1
-    omitted = len(items) - len(head) - len(tail)
-    if omitted <= 0:
+        if not isinstance(it, dict):
+            continue
+        t = str(it.get("type") or "")
+        if t in ("function_call_output", "custom_tool_call_output", "local_shell_call_output"):
+            o = it.get("output")
+            osz = len(json.dumps(o, ensure_ascii=False)) if o is not None else 0
+            if osz < 2048:
+                continue
+            ostr = o if isinstance(o, str) else json.dumps(o, ensure_ascii=False)
+            if ostr.startswith(marker_prefix):
+                continue  # 幂等
+            new_it = dict(it)
+            new_it["output"] = "%s %d chars omitted; head] %s" % (marker_prefix, osz, ostr[:512])
+            out[i] = new_it
+            cur -= osz - len(new_it["output"])
+            counts["compact_tool_outputs_truncated"] = counts.get("compact_tool_outputs_truncated", 0) + 1
+        elif t in ("message", "") and it.get("role") == "assistant":
+            try:
+                c = it.get("content")
+                csz = len(json.dumps(c, ensure_ascii=False)) if c is not None else 0
+            except Exception:
+                continue
+            if csz <= _COMPACT_ASSISTANT_MAX_BYTES:
+                continue
+            txt = None
+            if isinstance(c, list) and c and isinstance(c[0], dict):
+                txt = c[0].get("text")
+            elif isinstance(c, str):
+                txt = c
+            if not isinstance(txt, str) or txt.startswith(marker_prefix):
+                continue
+            new_it = dict(it)
+            head = txt[:_COMPACT_ASSISTANT_MAX_BYTES]
+            new_txt = "%s assistant msg %d chars omitted; head] %s" % (marker_prefix, len(txt), head)
+            if isinstance(c, str):
+                new_it["content"] = new_txt
+            else:
+                nc = [dict(c[0]) if isinstance(c[0], dict) else c[0]] + list(c[1:])
+                if isinstance(nc[0], dict):
+                    nc[0]["text"] = new_txt
+                new_it["content"] = nc
+            out[i] = new_it
+            cur -= csz - len(new_txt)
+            counts["compact_assistant_truncated"] = counts.get("compact_assistant_truncated", 0) + 1
+        # 用户消息/reasoning/调用项: 一律不动（任务定义与执行骨架）
+    if len(counts) <= 1:
         return items, {}
-    marker = {"type": "message", "role": "user", "content": [{"type": "input_text", "text":
-        "[gateway-compacted: %d earlier items (~%dKB) omitted; ask if earlier details are needed]"
-        % (omitted, max(0, total - acc) // 1024)}]}
-    out = head + [marker] + tail
-    counts = {"compact_items_omitted": omitted,
-              "compact_kb_before": total // 1024,
-              "compact_kb_after": (acc + 1023) // 1024}
-    if dropped_orphans:
-        counts["compact_orphan_outputs_dropped"] = dropped_orphans
+    counts["compact_kb_after"] = max(0, cur) // 1024
     return out, counts
 
 

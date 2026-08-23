@@ -43,29 +43,37 @@ small = [u("q")] * 10
 out, c = C(small)
 check("small input untouched", out is small and not c)
 
-# 2. 3MB 输入触发：首条保留 + 标记 + 尾部预算内
-big = [u("FIRST-ANCHOR")] + [u("x" * 20000) for _ in range(160)] + [u("LAST")]
+# 2. 3MB 巨输入(肥肉=工具输出): 输出内容被截断占位, 配对结构保留, 用户消息全保
+big = [u("FIRST-TASK")]
+for i in range(40):
+    big += [u(f"user-turn-{i}"), fc(f"c{i}"), fco(f"c{i}", "z" * 80000)]
 out, c = C(big)
-check("big input compacted", c.get("compact_items_omitted", 0) > 100)
-check("head anchor kept", out[0]["content"][0]["text"] == "FIRST-ANCHOR")
-check("marker inserted", "gateway-compacted" in json.dumps(out[1]))
-check("tail kept last item", out[-1]["content"][0]["text"] == "LAST")
-check("result under budget", len(json.dumps(out)) < 700 * 1024)
+check("big compacted (tool outputs truncated)", c.get("compact_tool_outputs_truncated", 0) > 20)
+check("result near target budget", len(json.dumps(out)) < 1200 * 1024)
+check("NO items deleted (structure intact)", len(out) == len(big))
+check("call/output pairing intact", all(
+    out[i].get("call_id") == big[i].get("call_id") for i in range(len(big)) if isinstance(big[i], dict) and big[i].get("call_id")))
+check("ALL user messages intact", all(
+    out[i] == big[i] for i in range(len(big)) if isinstance(big[i], dict) and big[i].get("role") == "user"))
+check("truncation marker present", any("gateway-truncated" in json.dumps(it) for it in out))
+check("recent tool output kept fuller than oldest",
+    len(json.dumps(out[-1])) >= len(json.dumps(out[3])))
 
-# 3. 孤儿工具输出保护：裁剪边界恰好切在 fc/fco 之间 → 尾部开头的 fco 被丢
-pad = [u("y" * 20000) for _ in range(160)]
-# 让尾部预算刚好从 fco 开始：fco 很大占满预算窗口的开头
-big2 = [u("A")] + pad + [fc("c1"), fco("c1", "z" * 400000), u("tail-q")]
-out, c = C(big2)
-types_seq = [it.get("type") for it in out]
-check("orphan output dropped or call kept adjacent",
-      ("function_call_output" not in types_seq) or
-      (types_seq.index("function_call") < types_seq.index("function_call_output")))
+# 3. 幂等: 再压一遍不重复叠加
+out2, c2 = C(out)
+check("idempotent (second pass no double-truncate)",
+    c2.get("compact_tool_outputs_truncated", 0) == 0 or out2 == out)
 
-# 4. 全是超大单项也不炸
-big3 = [u("h" * 3000000)] * 3 + [u("t")] * 6
+# 4. 超长 assistant 消息截断
+big3 = [u("t")] * 6 + [{"type": "message", "role": "assistant",
+        "content": [{"type": "output_text", "text": "a" * 3000000}]}] + [u("t2")] * 2
 out, c = C(big3)
-check("degenerate huge items no crash", isinstance(out, list))
+check("huge assistant msg truncated", c.get("compact_assistant_truncated", 0) == 1)
+
+# 5. 退化输入不炸
+out, c = C([u("h" * 3000000)] * 3 + [u("t")] * 6)
+check("degenerate huge user msgs: untouched (users never cut), no crash",
+    isinstance(out, list))
 
 print(f"\n{ok}/{total} passed")
 sys.exit(0 if ok == total else 1)

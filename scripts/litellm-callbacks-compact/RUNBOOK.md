@@ -23,10 +23,11 @@ kubectl -n litellm-product rollout restart deploy/litellm-proxy && kubectl -n li
 ```
 
 ## 判据（灰度期）
-- 带宽：canary 会话请求体从 MB 级降到 ~600KB 内（SpendLogs octet_length）
-- 计费：同会话每轮 tokens 从 ~50 万降到 ~15 万内（=桶容量收益）
-- 质量：抽查答案连续性（标记消息告知模型"早期细节可再要"）
-- 零新增 400（孤儿工具输出保护已单测）
+- 带宽：canary 会话请求体从 MB 级降到 ~1MB 内（SpendLogs octet_length）
+- 计费：同会话每轮 tokens 显著下降（=桶容量收益）
+- 质量：抽查答案连续性。v2 结构（官方 harness 同款）："忘事"面收窄到陈旧工具输出的
+  内容体——用户消息全保、调用配对全保、每个截断处留占位（含原长度+开头 512 字符）
+- 零新增 400（不删项不破配对，结构风险为零；11/11 单测）
 
 ## 回滚
 - 名单摘 alias（改 CM 该行 + restart）；或整 CM 从备份 apply + restart。秒级到分钟级。

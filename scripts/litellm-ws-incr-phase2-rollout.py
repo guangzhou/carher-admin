@@ -122,7 +122,7 @@ def verify_pod(name, expect_ws_lines):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", choices=["inventory", "a", "b"])
+    ap.add_argument("--stage", choices=["inventory", "a", "b", "all"])
     ap.add_argument("--wave", type=int, default=1)
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--rollback-env", action="store_true")
@@ -153,6 +153,36 @@ def main():
             if args.apply:
                 sh(cmd)
                 verify_pod(name, expect_ws_lines=False)
+        return
+
+    if args.stage == "all":
+        # 循环直到清零（2026-08-23 教训: eligible/done 双列表动态切片会漂移漏台）。
+        # 每轮取前 batch 台做 stage a+b, 重新盘点, 直到 eligible 空。
+        batch = 8
+        rounds = 0
+        while True:
+            eligible, skipped, done = active_eligible()
+            names = [n for n, _ in eligible]
+            if not names:
+                print(f"ALL DONE: eligible=0 done={len(done)} skipped={len(skipped)}")
+                break
+            rounds += 1
+            targets = names[:batch]
+            print(f"round {rounds}: {len(names)} left, doing {targets}")
+            if args.apply:
+                backup(targets)
+            for name in targets:
+                for cmd, exp in (
+                    (f"kubectl -n {NS} set image deploy/{name} litellm={WS_IMG}", False),
+                    (f"kubectl -n {NS} set env deploy/{name} CHATGPT_WS_INCREMENTAL=1 CHATGPT_WS_INCREMENTAL_LOG=1", True),
+                ):
+                    print(("APPLY " if args.apply else "DRY   ") + cmd)
+                    if args.apply:
+                        sh(cmd)
+                        verify_pod(name, expect_ws_lines=exp)
+            if not args.apply:
+                print("(dry-run 只演示第一轮)")
+                break
         return
 
     if args.stage == "inventory" or args.stage is None:

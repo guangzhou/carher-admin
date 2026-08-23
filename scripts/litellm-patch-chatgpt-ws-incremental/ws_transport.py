@@ -171,7 +171,16 @@ def _expected_echo(output_items: List[Any]) -> List[Any]:
             out.append(item)
             continue
         itype = item.get("type")
-        if itype in ("reasoning", "compaction"):
+        if itype == "compaction":
+            continue
+        if itype == "reasoning":
+            # 外层 normalize 的**实际**行为（prod8 差异快照实锤，勿凭想象）：剥掉
+            # encrypted_content 字段、保留带非空 summary 的 reasoning 项；剥后空壳才整项丢。
+            # 预测必须镜像同一变换，否则每个带思考摘要的会话都在首个 reasoning 位置
+            # prefix_break → 每轮全量。
+            stripped = {k: v for k, v in item.items() if k != "encrypted_content"}
+            if stripped.get("summary"):
+                out.append(stripped)
             continue
         if _has_encrypted_content(item):
             continue

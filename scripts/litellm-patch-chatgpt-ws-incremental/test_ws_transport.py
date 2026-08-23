@@ -372,6 +372,29 @@ async def main():
     sessN.lock.release()
     W._REGISTRY.clear()
 
+    # === reasoning(summary) 回显预测：镜像 normalize 真实变换（prod8 差异快照实锤）===
+    # 上游输出 reasoning{summary+enc} → normalize 剥 enc 字段保留项 → 客户端回显剥后版。
+    # 预测须一致，否则该会话每轮 prefix_break 全量。
+    W._REGISTRY.clear()
+    rsn_full = {"type": "reasoning", "encrypted_content": "gAAA",
+                "summary": [{"type": "summary_text", "text": "thinking..."}]}
+    rsn_echoed = {"type": "reasoning",
+                  "summary": [{"type": "summary_text", "text": "thinking..."}]}
+    FakeClientSession._script = [[_created("resp_r1"), _item_done(rsn_full),
+                                  _item_done(_a("77", "mr1")), _completed("resp_r1")]]
+    it = await _call(_base_data([_u("q1")]), "pckR"); await _drain(it)
+    sessR = W._REGISTRY["pckR"]
+    check("reasoning(summary) kept in ledger (stripped form)", len(sessR.item_hashes) == 3)
+    # T2: 客户端回显 [u1, reasoning(剥enc), assistant, u2] → 应命中增量
+    sessR.ws.turns = [[_created("resp_r2"), _item_done(_a("154", "mr2")), _completed("resp_r2")]]
+    d = _base_data([_u("q1"), rsn_echoed, _a("77", "mr1"), _u("*2?")])
+    it = await _call(d, "pckR")
+    check("echoed stripped-reasoning matches prediction → incremental",
+          it is not None and sessR.ws.sent[-1].get("previous_response_id") == "resp_r1"
+          and len(sessR.ws.sent[-1]["input"]) == 1)
+    await _drain(it)
+    W._REGISTRY.clear()
+
     print("\n%d/%d passed" % (sum(1 for _, c in results if c), len(results)))
     if not all(c for _, c in results):
         sys.exit(1)

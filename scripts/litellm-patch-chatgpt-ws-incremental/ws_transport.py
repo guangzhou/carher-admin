@@ -469,18 +469,26 @@ async def try_ws_incremental(
 
     sess = _REGISTRY.get(pck)
 
-    # 决定 full 还是 incremental（闸门 ②③④⑤⑥）。
+    # 决定 full 还是 incremental（闸门 ②③④⑤⑥）。full_reason 记录哪道闸触发全量——
+    # 反复全量的会话（投资每轮重复、增量收获为零）靠它定位该修哪道闸的判定/预测。
     need_full = False
-    if sess is None or sess.destroyed or not sess.is_ws_open() or sess.loop_id != id(asyncio.get_event_loop()):
-        need_full = True
+    full_reason = None
+    if sess is None:
+        need_full, full_reason = True, "no_session"
+    elif sess.destroyed or not sess.is_ws_open():
+        need_full, full_reason = True, "ws_closed"
+    elif sess.loop_id != id(asyncio.get_event_loop()):
+        need_full, full_reason = True, "loop_changed"
     elif not sess.last_response_id:                       # ③ 上轮未干净完成
-        need_full = True
+        need_full, full_reason = True, "no_receipt"
     elif sess.properties_hash != props_hash:             # ④ 属性变
-        need_full = True
+        need_full, full_reason = True, "props_change"
     elif total_items <= len(sess.item_hashes):           # ⑤ 没有严格新增
-        need_full = True
+        need_full, full_reason = True, f"shorter_input:{total_items}vs{len(sess.item_hashes)}"
     elif cur_hashes[: len(sess.item_hashes)] != sess.item_hashes:  # ⑥ 前缀不匹配
-        need_full = True
+        mism = next((i for i, (a, b) in enumerate(zip(cur_hashes, sess.item_hashes)) if a != b),
+                    len(sess.item_hashes))
+        need_full, full_reason = True, f"prefix_break@{mism}/{len(sess.item_hashes)}"
 
     ws_url = _ws_url_from_api_base(api_base)
     ws_headers = _build_ws_headers(headers)
@@ -496,7 +504,7 @@ async def try_ws_incremental(
                 return None
             await sess.destroy()
         return await _full_ws_turn(
-            pck=pck, pck_src=pck_src, ws_url=ws_url, ws_headers=ws_headers, data=data,
+            pck=pck, pck_src=pck_src, full_reason=full_reason, ws_url=ws_url, ws_headers=ws_headers, data=data,
             cur_hashes=cur_hashes, props_hash=props_hash, total_items=total_items,
             model=model, logging_obj=logging_obj,
             responses_api_provider_config=responses_api_provider_config,
@@ -519,7 +527,7 @@ async def try_ws_incremental(
             _log(f"ws_incr_reconnect reason=preflight_dead pck={_pck8(pck)} close_code={getattr(sess.ws, 'close_code', None)}")
             await sess.destroy()
             return await _full_ws_turn(
-                pck=pck, pck_src=pck_src, ws_url=ws_url, ws_headers=ws_headers, data=data,
+                pck=pck, pck_src=pck_src, full_reason="preflight_dead", ws_url=ws_url, ws_headers=ws_headers, data=data,
                 cur_hashes=cur_hashes, props_hash=props_hash, total_items=total_items,
                 model=model, logging_obj=logging_obj,
                 responses_api_provider_config=responses_api_provider_config,
@@ -580,13 +588,14 @@ async def _ws_alive_preflight(sess: WsSession) -> bool:
         return False
 
 
-async def _full_ws_turn(*, pck, pck_src, ws_url, ws_headers, data, cur_hashes, props_hash,
+async def _full_ws_turn(*, pck, pck_src, full_reason, ws_url, ws_headers, data, cur_hashes, props_hash,
                         total_items, model, logging_obj, responses_api_provider_config,
                         litellm_metadata, custom_llm_provider, request_context, headers):
     """全量 WS 轮：新建连接发全量 input。need_full 与 preflight 重建共用。
     失败一律 None → 调用方落原生 HTTP POST（字节级不变）。"""
     sess = WsSession(pck, ws_url, ws_headers)
     sess.pck_src = pck_src
+    sess.full_reason = full_reason or "-"
     await sess.lock.acquire()
     handed_off = False
     try:
@@ -877,7 +886,7 @@ def _commit_if_completed(sess, ev, collected_output, pending_hashes, props_hash,
     sess.touch()
     dt_ms = int((time.time() - t_start) * 1000)
     _log(
-        f"ws_incr mode={mode} pck={_pck8(sess.pck)} src={sess.pck_src} delta_items={delta_count} "
+        f"ws_incr mode={mode} pck={_pck8(sess.pck)} src={sess.pck_src} full_reason={getattr(sess, 'full_reason', '-') if mode != 'incremental' else '-'} delta_items={delta_count} "
         f"total_input_items={total_items} out_items={len(output_items)} echo_items={len(echo)} "
         f"frame_bytes={frame_bytes} ledger_len={len(sess.item_hashes)} "
         f"prev_resp={orig_rid} elapsed_ms={dt_ms}"

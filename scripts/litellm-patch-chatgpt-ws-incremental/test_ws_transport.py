@@ -419,6 +419,20 @@ async def main():
     await _drain(it)
     W._REGISTRY.clear()
 
+    # === internal_* 客户端注入元数据不参与比对（prod11 分歧快照实锤）===
+    W._REGISTRY.clear()
+    FakeClientSession._script = [[_created("resp_i1"), _item_done(_a("hi", "mi1")), _completed("resp_i1")]]
+    it = await _call(_base_data([_u("q1")]), "pckI2"); await _drain(it)
+    sessI = W._REGISTRY["pckI2"]
+    sessI.ws.turns = [[_created("resp_i2"), _item_done(_a("ok", "mi2")), _completed("resp_i2")]]
+    echoed = {"role": "assistant", "content": [{"type": "output_text", "text": "hi"}],
+              "internal_chat_message_metadata_passthrough": {"turn_id": "01a02cf4-xxx"}}
+    it = await _call(_base_data([_u("q1"), echoed, _u("q2")]), "pckI2")
+    check("internal_* metadata injection still matches → incremental",
+          it is not None and sessI.ws.sent[-1].get("previous_response_id") == "resp_i1")
+    await _drain(it)
+    W._REGISTRY.clear()
+
     print("\n%d/%d passed" % (sum(1 for _, c in results if c), len(results)))
     if not all(c for _, c in results):
         sys.exit(1)

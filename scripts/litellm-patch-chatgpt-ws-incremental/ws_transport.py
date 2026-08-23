@@ -115,6 +115,11 @@ def _strip_volatile(obj: Any) -> Any:
                 continue
             if k == "type" and v == "message":
                 continue
+            if k.startswith("internal_"):
+                # prod11 分歧快照实锤：客户端往回显项里注入 internal_chat_message_
+                # metadata_passthrough:{turn_id} 等每轮易变的内部元数据——纯客户端侧
+                # 调试字段，不参与内容比对。
+                continue
             sv = _strip_volatile(v)
             if sv is None or sv == [] or sv == {}:
                 continue

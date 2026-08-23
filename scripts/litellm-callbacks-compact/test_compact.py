@@ -45,11 +45,11 @@ check("small input untouched", out is small and not c)
 
 # 2. 3MB 巨输入(肥肉=工具输出): 输出内容被截断占位, 配对结构保留, 用户消息全保
 big = [u("FIRST-TASK")]
-for i in range(40):
-    big += [u(f"user-turn-{i}"), fc(f"c{i}"), fco(f"c{i}", "z" * 80000)]
+for i in range(700):
+    big += [u(f"user-turn-{i}"), fc(f"c{i}"), fco(f"c{i}", "z" * 3000)]
 out, c = C(big)
-check("big compacted (tool outputs truncated)", c.get("compact_tool_outputs_truncated", 0) > 20)
-check("result near target budget", len(json.dumps(out)) < 1200 * 1024)
+check("big compacted (tool outputs truncated)", c.get("compact_tool_outputs_truncated", 0) > 300)
+check("result near target budget", len(json.dumps(out)) < 900 * 1024)
 check("NO items deleted (structure intact)", len(out) == len(big))
 check("call/output pairing intact", all(
     out[i].get("call_id") == big[i].get("call_id") for i in range(len(big)) if isinstance(big[i], dict) and big[i].get("call_id")))
@@ -77,10 +77,10 @@ check("degenerate huge user msgs: untouched (users never cut), no crash",
 
 # 6. K5 前缀稳定性: 会话追加一轮后, 旧 item 的变换结果逐字节不变(确定性规则)
 sess = [u("TASK")]
-for i in range(40):
-    sess += [u(f"turn-{i}"), fc(f"k{i}"), fco(f"k{i}", "w" * 80000)]
+for i in range(700):
+    sess += [u(f"turn-{i}"), fc(f"k{i}"), fco(f"k{i}", "w" * 3000)]
 out_a, _ = C(list(sess))
-sess_b = list(sess) + [fc("k99"), fco("k99", "w" * 80000), u("next-q")]
+sess_b = list(sess) + [fc("k99"), fco("k99", "w" * 3000), u("next-q")]
 out_b, _ = C(sess_b)
 check("K5: old items transform identically after session grows",
     all(json.dumps(out_a[i], sort_keys=True) == json.dumps(out_b[i], sort_keys=True)

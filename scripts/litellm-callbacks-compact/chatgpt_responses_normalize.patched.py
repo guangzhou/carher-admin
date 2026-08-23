@@ -48,7 +48,15 @@ _KEEP_ENCRYPTED_ALIASES = {"enc-canary-01"}
 # （狂耗账号 7d 桶）；>16MiB 连 WS 增量都上不去。v1=inline 裁剪（参照 codex harness
 # auto-compact 思路）：保首条锚点 + 尾部预算内最近项，中间折叠为一条标记消息。
 # 上游本就把超上下文部分截断扔掉——裁剪只是把"扔"提前到网关，省双向带宽+计费 tokens。
-_COMPACT_ALIASES = {"compact-canary-01"}
+_COMPACT_ALIASES = {
+    "compact-canary-01",
+    # 2026-08-24 S3 全过(计费-80.6%/答案双对/零400)后按用户指令挂入实测巨会话 key
+    # (6h 窗 >10MB 发送方, SpendLogs 实查):
+    "cursor-youxun-v4u8",
+    "cursor-zhuge-zlcb",
+    "claude-code-ff550a8b-bmo0",
+    "cursor-02debe47-9nx2",
+}
 _COMPACT_MIN_BYTES = 2 * 1024 * 1024     # 触发：input 序列化 >2MB
 _COMPACT_ASSISTANT_MAX_BYTES = 40 * 1024 # assistant 单条上限（≈官方10K tokens）
 
@@ -81,7 +89,9 @@ def _compact_input_items(items: list[Any]) -> tuple[list[Any], dict[str, int]]:
         if t in ("function_call_output", "custom_tool_call_output", "local_shell_call_output"):
             o = it.get("output")
             osz = len(json.dumps(o, ensure_ascii=False)) if o is not None else 0
-            if osz < 8192:
+            if osz < 2048:
+                # 阈值 2KB（v2.2）：真实巨会话是 6000×~3KB 小项聚合（实测 avg 3KB/项），
+                # 8KB 阈值对它们完全无效（S3 探针抓到的假阳性上线）。2KB 才咬得到肥肉。
                 continue
             ostr = o if isinstance(o, str) else json.dumps(o, ensure_ascii=False)
             if ostr.startswith(marker_prefix):

@@ -516,14 +516,22 @@ async def try_ws_incremental(
         # 把预测项与实收项并排打出（canonical 剥易变键后），一次流量即可定位差异字段。
         try:
             got = _strip_volatile(data["input"][mism])
-            got_s = json.dumps(got, sort_keys=True, ensure_ascii=False)[:300]
+            got_c = json.dumps(got, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
             if region == "echo" and (mism - sess.echo_start) < len(sess.last_echo_items):
                 exp = _strip_volatile(sess.last_echo_items[mism - sess.echo_start])
-                exp_s = json.dumps(exp, sort_keys=True, ensure_ascii=False)[:300]
-                _log(f"ws_incr_prefix_diff pck={_pck8(pck)} idx={mism} region=echo "
-                     f"expected={exp_s} got={got_s}")
+                exp_c = json.dumps(exp, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                # 定位到首个分歧字节，截 ±150：长工具参数的深处差异（头部 300 字符全同）
+                # 只有这样才看得见。div= 分歧偏移 / len= 两侧长度差也一并给出。
+                div = next((i for i, (a, b) in enumerate(zip(exp_c, got_c)) if a != b),
+                           min(len(exp_c), len(got_c)))
+                lo = max(0, div - 150)
+                _log(
+                    f"ws_incr_prefix_diff pck={_pck8(pck)} idx={mism} region=echo "
+                    f"div={div} len_exp={len(exp_c)} len_got={len(got_c)} "
+                    f"expected[{lo}:]={exp_c[lo:div + 150]!r} got[{lo}:]={got_c[lo:div + 150]!r}"
+                )
             else:
-                _log(f"ws_incr_prefix_diff pck={_pck8(pck)} idx={mism} region={region} got={got_s}")
+                _log(f"ws_incr_prefix_diff pck={_pck8(pck)} idx={mism} region={region} got={got_c[:300]}")
         except Exception:
             pass
 

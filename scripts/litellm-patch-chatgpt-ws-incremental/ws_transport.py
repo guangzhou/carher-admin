@@ -104,12 +104,22 @@ def _log(msg: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _strip_volatile(obj: Any) -> Any:
+    """canonical 化：剥 id/status（易变）+ 空值字段（None/[]/{}）+ 缺省 `type:"message"`。
+    依据 prod9 差异快照实锤：客户端回显时会省略空数组字段（annotations:[]/logprobs:[]/
+    content:[]）与缺省 item 类型——只差这些的两个 item 语义相同，不许它们打断前缀匹配。
+    （list 内元素不删，位置有语义；只删 dict 字段。）"""
     if isinstance(obj, dict):
-        return {
-            k: _strip_volatile(v)
-            for k, v in obj.items()
-            if k not in _VOLATILE_TOP_KEYS
-        }
+        out = {}
+        for k, v in obj.items():
+            if k in _VOLATILE_TOP_KEYS:
+                continue
+            if k == "type" and v == "message":
+                continue
+            sv = _strip_volatile(v)
+            if sv is None or sv == [] or sv == {}:
+                continue
+            out[k] = sv
+        return out
     if isinstance(obj, list):
         return [_strip_volatile(v) for v in obj]
     return obj

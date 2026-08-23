@@ -395,6 +395,30 @@ async def main():
     await _drain(it)
     W._REGISTRY.clear()
 
+    # === canonical 空值/缺省字段不敏感（prod9 快照实锤的回显省略形态）===
+    # 上游原样: content 带 annotations:[]/logprobs:[] + type:"message"; 客户端回显全省略。
+    W._REGISTRY.clear()
+    a_full = {"type": "message", "role": "assistant", "id": "mv1", "phase": "commentary",
+              "content": [{"type": "output_text", "text": "done",
+                           "annotations": [], "logprobs": []}]}
+    a_echo = {"role": "assistant", "phase": "commentary",
+              "content": [{"type": "output_text", "text": "done"}]}
+    rsn_v = {"type": "reasoning", "content": [], "encrypted_content": "gAAA",
+             "summary": [{"type": "summary_text", "text": "think"}]}
+    rsn_e = {"type": "reasoning", "summary": [{"type": "summary_text", "text": "think"}]}
+    FakeClientSession._script = [[_created("resp_v1"), _item_done(rsn_v), _item_done(a_full),
+                                  _completed("resp_v1")]]
+    it = await _call(_base_data([_u("q1")]), "pckV"); await _drain(it)
+    sessV = W._REGISTRY["pckV"]
+    sessV.ws.turns = [[_created("resp_v2"), _item_done(_a("ok", "mv2")), _completed("resp_v2")]]
+    d = _base_data([_u("q1"), rsn_e, a_echo, _u("q2")])
+    it = await _call(d, "pckV")
+    check("empty-field/default-type omission still matches → incremental",
+          it is not None and sessV.ws.sent[-1].get("previous_response_id") == "resp_v1"
+          and len(sessV.ws.sent[-1]["input"]) == 1)
+    await _drain(it)
+    W._REGISTRY.clear()
+
     print("\n%d/%d passed" % (sum(1 for _, c in results if c), len(results)))
     if not all(c for _, c in results):
         sys.exit(1)

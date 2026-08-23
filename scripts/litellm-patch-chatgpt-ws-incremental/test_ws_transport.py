@@ -333,6 +333,50 @@ async def main():
     sa.lock.release(); W._MAX_SESSIONS = old_cap
     W._REGISTRY.clear()
 
+    # === 分块引导：全量帧超上限 → k-1 个 generate:false 预热块(prev 链) + 终块 generate:true ===
+    # 依据 2026-08-23 实测：上游单消息上限 16MiB(1009)；prewarm 链可累积上下文。
+    W._REGISTRY.clear()
+    old_limit = W._WS_MAX_FRAME_B
+    W._WS_MAX_FRAME_B = 2600   # 逼出分块：信封 ~600B + 每条 ~600B → 每块最多 3 条
+    big_items = [_u(f"item-{i}-" + "z" * 500) for i in range(7)]   # 7 条 → 预期 3+ 块
+    # FakeWS 脚本：每次 send 弹一批。预热块 → [completed(rid_cN)]；终块 → created+item+completed。
+    FakeClientSession._script = None
+    prewarm_batches = [[_completed("rid_c1")], [_completed("rid_c2")]]
+    final_batch = [[_created("resp_ck"), _item_done(_a("done", "mck")), _completed("resp_ck")]]
+    # 无法预知块数：给足预热批，终批放最后。塞 4 个预热批以防分块更碎。
+    FakeClientSession._script = [[_completed(f"rid_c{i}")] for i in range(1, 5)]
+    it = None
+    # 手动拼装：先算实际块数，重设脚本为 (块数-1) 预热批 + 终批
+    chunks = W._split_items_for_limit({"model": "gpt-5.6-sol", "stream": True, "store": False,
+                                       "instructions": "x", "include": ["reasoning.encrypted_content"]},
+                                      big_items, W._WS_MAX_FRAME_B)
+    check("chunked: splitter yields multi chunks", chunks is not None and len(chunks) >= 3)
+    FakeClientSession._script = [[_completed(f"rid_c{i}")] for i in range(1, len(chunks))] + final_batch
+    it = await _call(_base_data(big_items), "pckK")
+    check("chunked bootstrap returns iterator", it is not None)
+    await _drain(it)
+    sessK = W._REGISTRY.get("pckK")
+    check("chunked session committed", sessK is not None and sessK.last_response_id == "resp_ck")
+    sent = sessK.ws.sent
+    check("chunked sent k frames", len(sent) == len(chunks))
+    check("chunked prewarm frames generate=false + prev chain",
+          all(f.get("generate") is False for f in sent[:-1])
+          and sent[0].get("previous_response_id") is None
+          and sent[1].get("previous_response_id") == "rid_c1")
+    check("chunked final frame generate=true + prev=last prewarm",
+          sent[-1].get("generate") is True
+          and sent[-1].get("previous_response_id") == f"rid_c{len(chunks) - 1}")
+    check("chunked ledger covers ALL input + echo",
+          len(sessK.item_hashes) == len(big_items) + 1)
+    # 预热块失败 → None(HTTP 兜底) + registry 干净
+    W._REGISTRY.clear()
+    FakeClientSession._script = [[{"type": "error", "status": 400, "error": {"message": "boom"}}]]
+    it = await _call(_base_data(big_items), "pckL")
+    check("chunked prewarm error → None (fail closed)", it is None)
+    check("chunked failed session not in registry", W._REGISTRY.get("pckL") is None)
+    W._WS_MAX_FRAME_B = old_limit
+    W._REGISTRY.clear()
+
     print("\n%d/%d passed" % (sum(1 for _, c in results if c), len(results)))
     if not all(c for _, c in results):
         sys.exit(1)

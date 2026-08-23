@@ -51,6 +51,11 @@ _SESSION_TTL_S = float(os.getenv("CHATGPT_WS_SESSION_TTL_S", "600"))
 _MAX_SESSIONS = int(os.getenv("CHATGPT_WS_MAX_SESSIONS", "32"))
 # 复用前微探测预算：闲置期上游已发的 CLOSE 帧就在本地队列里，毫秒级即可吸出。
 _PREFLIGHT_TIMEOUT_S = float(os.getenv("CHATGPT_WS_PREFLIGHT_S", "0.05"))
+# 上游 WS 单消息上限（2026-08-23 二分实测：15MB ACCEPT / 16MB REJECT 1009 → 上限 16MiB）。
+# 默认 14MiB 留余量（实测用 ASCII，多字节内容序列化尺寸有方差）。超限帧走分块引导。
+_WS_MAX_FRAME_B = int(os.getenv("CHATGPT_WS_MAX_FRAME_B", str(14 * 1024 * 1024)))
+# 预热块（generate:false）等 completed 的预算：块可达 14MiB，服务端摄取需时。
+_PREWARM_BUDGET_S = float(os.getenv("CHATGPT_WS_PREWARM_BUDGET_S", "30"))
 _FLAG_FILE = os.getenv("CHATGPT_WS_INCREMENTAL_FLAG", "/app/chatgpt_ws_incremental.flag")
 
 # 进程级单向熔断：握手 426（上游明说不支持）→ 之后全走 HTTP，不再自动重探（codex 单点熔断纪律）。
@@ -522,6 +527,14 @@ async def try_ws_incremental(
         sess.last_response_id = None                  # 收据纪律：发送即清
         frame = _make_frame(data, delta_items, previous_response_id=prev_rid)
         frame_bytes = len(json.dumps(frame).encode("utf-8", "replace"))
+        if frame_bytes > _WS_MAX_FRAME_B:
+            cp = await _chunk_and_prewarm(sess, data, delta_items, prev_rid)
+            if cp is None:
+                await sess.destroy()
+                return None
+            final_items, prev = cp
+            frame = _make_frame(data, final_items, previous_response_id=prev)
+            frame_bytes = len(json.dumps(frame).encode("utf-8", "replace"))
         first_frames = await _send_and_await_first(sess, frame)
         if first_frames is None:
             await sess.destroy()
@@ -577,6 +590,15 @@ async def _full_ws_turn(*, pck, pck_src, ws_url, ws_headers, data, cur_hashes, p
             return None
         frame = _make_frame(data, data["input"], previous_response_id=None)
         frame_bytes = len(json.dumps(frame).encode("utf-8", "replace"))
+        if frame_bytes > _WS_MAX_FRAME_B:
+            # 超上游 16MiB 单消息上限（实测）→ 分块引导：预热块建立上下文，终块才生成。
+            cp = await _chunk_and_prewarm(sess, data, data["input"], None)
+            if cp is None:
+                await sess.destroy()
+                return None
+            final_items, prev = cp
+            frame = _make_frame(data, final_items, previous_response_id=prev)
+            frame_bytes = len(json.dumps(frame).encode("utf-8", "replace"))
         first_frames = await _send_and_await_first(sess, frame)
         if first_frames is None:
             await sess.destroy()
@@ -638,6 +660,97 @@ def _resolve_pck(request_context, litellm_metadata, data):
         if found:
             return found
     return (None, "-")
+
+
+def _split_items_for_limit(data: Dict[str, Any], items: List[Any], limit_b: int):
+    """按序列化大小贪心分块，保证「信封+块」每帧 ≤ limit_b。单条+信封已超限 → None（放弃走 HTTP）。"""
+    env_b = len(json.dumps(_make_frame(data, [], None)).encode("utf-8", "replace")) + 64
+    chunks: List[List[Any]] = []
+    cur: List[Any] = []
+    cur_b = 0
+    for it in items:
+        try:
+            ib = len(json.dumps(it, ensure_ascii=False).encode("utf-8", "replace")) + 2
+        except Exception:
+            return None
+        if env_b + ib > limit_b:
+            return None
+        if cur and env_b + cur_b + ib > limit_b:
+            chunks.append(cur)
+            cur, cur_b = [], 0
+        cur.append(it)
+        cur_b += ib
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+async def _send_prewarm(sess: WsSession, frame: Dict[str, Any]) -> Optional[str]:
+    """预热块（generate:false，官方 prewarm 语义，不生成）：发送并等 response.completed，
+    返回其原始 id 作为下一块的 previous_response_id 锚。任何异常/错误/关闭/超时 → None
+    （调用方销毁会话走 HTTP，fail-closed 不变）。
+
+    依据（2026-08-23 实测）：generate:false 块 + previous_response_id 链在服务端**累积**
+    连接上下文——终块 generate:true 能取回首块内容。这让 >16MiB（上游单消息上限，二分实测）
+    的超巨历史也能引导上 WS：k-1 个预热块 + 1 个生成块。"""
+    import aiohttp
+
+    try:
+        await sess.ws.send_str(json.dumps(frame))
+    except Exception as e:
+        _log(f"ws_incr_fallback reason=prewarm_send_exc pck={_pck8(sess.pck)} err={type(e).__name__}")
+        return None
+    try:
+        while True:
+            msg = await asyncio.wait_for(sess.ws.receive(), timeout=_PREWARM_BUDGET_S)
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    ev = json.loads(msg.data)
+                except Exception:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                if _frame_is_error(ev) or _rate_limit_blocked(ev):
+                    _log(f"ws_incr_fallback reason=prewarm_error pck={_pck8(sess.pck)} type={ev.get('type')}")
+                    return None
+                if ev.get("type") == "response.completed":
+                    rid = (ev.get("response") or {}).get("id")
+                    if not rid:
+                        _log(f"ws_incr_fallback reason=prewarm_no_id pck={_pck8(sess.pck)}")
+                    return rid or None
+                # created/in_progress/rate_limits/metadata 等：继续等 completed
+            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                              aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+                _log(
+                    f"ws_incr_fallback reason=prewarm_closed pck={_pck8(sess.pck)} "
+                    f"type={msg.type} close_code={getattr(sess.ws, 'close_code', None)}"
+                )
+                return None
+    except asyncio.TimeoutError:
+        _log(f"ws_incr_fallback reason=prewarm_timeout pck={_pck8(sess.pck)}")
+        return None
+
+
+async def _chunk_and_prewarm(sess: WsSession, data: Dict[str, Any], items: List[Any],
+                             prev_rid: Optional[str]):
+    """超限帧的分块引导：k-1 个 generate:false 预热块（prev 链）→ 返回 (终块 items, 终块 prev)。
+    失败返回 None。"""
+    chunks = _split_items_for_limit(data, items, _WS_MAX_FRAME_B)
+    if not chunks or len(chunks) == 1:
+        _log(f"ws_incr_fallback reason=frame_oversize_unsplittable pck={_pck8(sess.pck)} items={len(items)}")
+        return None
+    prev = prev_rid
+    for ch in chunks[:-1]:
+        pf = _make_frame(data, ch, previous_response_id=prev)
+        pf["generate"] = False
+        prev = await _send_prewarm(sess, pf)
+        if not prev:
+            return None
+    _log(
+        f"ws_incr_chunked_bootstrap pck={_pck8(sess.pck)} chunks={len(chunks)} "
+        f"total_items={len(items)} final_items={len(chunks[-1])}"
+    )
+    return chunks[-1], prev
 
 
 async def _send_and_await_first(sess: WsSession, frame: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:

@@ -35,7 +35,7 @@ import sys
 import time
 
 NS = "litellm-product"
-WS_IMG = "127.0.0.1:5000/litellm-carher:vanilla-v1.90.2.cache-session-fix-v2.ws-incr-prod2-20260823"
+WS_IMG = "127.0.0.1:5000/litellm-carher:vanilla-v1.90.2.cache-session-fix-v2.ws-incr-prod12-20260823"
 # 仅迁移与 ws-incr 镜像同 base 的 pod（digest 已核对 acct-stable == 该 tag）：
 ELIGIBLE_IMAGES = {
     "127.0.0.1:5000/litellm-carher:acct-stable",

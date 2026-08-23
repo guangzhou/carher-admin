@@ -487,7 +487,13 @@ async def try_ws_incremental(
 
     if need_full:
         # 旧会话若在则销毁重建（reset = 干净重连，保证服务端上下文清白）。
+        # ⚠ 但绝不销毁 in-flight 会话（lock 被持有 = 正在给客户端吐帧）：并发同 pck 且
+        # 本请求判定全量重置时，销毁会把现役流掐成中流断（客户端截断）。本请求走 HTTP，
+        # 不动现役流——与增量分支的 lock_busy 同一纪律（drill 演练器抓出的真实并发 bug）。
         if sess is not None:
+            if sess.lock.locked():
+                _log(f"ws_incr_fallback reason=lock_busy_full pck={_pck8(pck)}")
+                return None
             await sess.destroy()
         return await _full_ws_turn(
             pck=pck, pck_src=pck_src, ws_url=ws_url, ws_headers=ws_headers, data=data,

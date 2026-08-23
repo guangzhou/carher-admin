@@ -357,6 +357,21 @@ async def main():
     W._WS_MAX_FRAME_B = old_limit
     W._REGISTRY.clear()
 
+    # === 并发同 pck + need_full：绝不销毁 in-flight 会话（drill 抓出的真实 bug）===
+    # 请求 A 正在流式（lock 持有），请求 B 同 pck 但输入更短（触发 need_full 闸⑤）：
+    # B 必须返 None 走 HTTP，A 的会话不被销毁、流不被掐。
+    W._REGISTRY.clear()
+    FakeClientSession._script = [[_created("resp_n1"), _item_done(_a("a1", "mn1")), _completed("resp_n1")]]
+    it = await _call(_base_data([_u("q1")]), "pckN"); await _drain(it)
+    sessN = W._REGISTRY["pckN"]
+    await sessN.lock.acquire()          # 模拟 A 在流式中
+    itB = await _call(_base_data([_u("SHORTER")]), "pckN")   # B: 前缀断+更短 → need_full
+    check("need_full while in-flight → None (no destroy of live stream)", itB is None)
+    check("in-flight session survives concurrent need_full",
+          W._REGISTRY.get("pckN") is sessN and not sessN.destroyed)
+    sessN.lock.release()
+    W._REGISTRY.clear()
+
     print("\n%d/%d passed" % (sum(1 for _, c in results if c), len(results)))
     if not all(c for _, c in results):
         sys.exit(1)

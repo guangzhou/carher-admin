@@ -203,6 +203,9 @@ class WsSession:
         self.destroyed = False
         self.created_at = time.time()
         self.last_used = time.time()
+        # 回显预测明细（诊断 prefix_break：断点落在回显区时可打差异快照）
+        self.echo_start = 0
+        self.last_echo_items: List[Any] = []
         # 计数器
         self.turns_full = 0
         self.turns_incremental = 0
@@ -488,7 +491,22 @@ async def try_ws_incremental(
     elif cur_hashes[: len(sess.item_hashes)] != sess.item_hashes:  # ⑥ 前缀不匹配
         mism = next((i for i, (a, b) in enumerate(zip(cur_hashes, sess.item_hashes)) if a != b),
                     len(sess.item_hashes))
-        need_full, full_reason = True, f"prefix_break@{mism}/{len(sess.item_hashes)}"
+        region = "echo" if mism >= sess.echo_start else "input"
+        need_full, full_reason = True, f"prefix_break@{mism}/{len(sess.item_hashes)}:{region}"
+        # 差异快照：断点在回显区 = 我们对"客户端会怎么回显上轮输出"的预测错了——
+        # 把预测项与实收项并排打出（canonical 剥易变键后），一次流量即可定位差异字段。
+        try:
+            got = _strip_volatile(data["input"][mism])
+            got_s = json.dumps(got, sort_keys=True, ensure_ascii=False)[:300]
+            if region == "echo" and (mism - sess.echo_start) < len(sess.last_echo_items):
+                exp = _strip_volatile(sess.last_echo_items[mism - sess.echo_start])
+                exp_s = json.dumps(exp, sort_keys=True, ensure_ascii=False)[:300]
+                _log(f"ws_incr_prefix_diff pck={_pck8(pck)} idx={mism} region=echo "
+                     f"expected={exp_s} got={got_s}")
+            else:
+                _log(f"ws_incr_prefix_diff pck={_pck8(pck)} idx={mism} region={region} got={got_s}")
+        except Exception:
+            pass
 
     ws_url = _ws_url_from_api_base(api_base)
     ws_headers = _build_ws_headers(headers)
@@ -881,6 +899,8 @@ def _commit_if_completed(sess, ev, collected_output, pending_hashes, props_hash,
         output_items = resp.get("output")
     echo = _expected_echo(output_items)
     sess.item_hashes = list(pending_hashes) + _hash_items(echo)
+    sess.echo_start = len(pending_hashes)
+    sess.last_echo_items = list(echo)
     sess.properties_hash = props_hash
     sess.last_response_id = orig_rid
     sess.touch()

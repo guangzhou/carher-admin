@@ -63,9 +63,13 @@ async def main():
     base = f"http://127.0.0.1:{gw_server.port}"
 
     async with ClientSession() as s:
-        # 0. 非 WS POST → 405（codex 回落 HTTP 的触发条件）
-        async with s.post(f"{base}/v1/responses") as r:
-            check("plain POST -> 405 (http fallback trigger)", r.status == 405)
+        # 0. HTTP POST 回落必须真正可服务(透传上游) —— 405 只属于 WS 升级探测语义
+        async with s.post(f"{base}/v1/responses",
+                          json={"model": "m", "input": [u("fallback")], "stream": True},
+                          headers={"Authorization": "Bearer sk-test"}) as r:
+            body = await r.text()
+            check("plain POST -> proxied to upstream (200 + stream)",
+                  r.status == 200 and "response.completed" in body)
         # 0b. 无 Bearer → 401
         try:
             await s.ws_connect(f"{base}/v1/responses")
@@ -112,6 +116,44 @@ async def main():
         check("upstream 429 -> error frame to client", evs[-1]["type"] == "error"
               and evs[-1].get("status") == 429)
         await ws.close()
+
+        # 6. 超限帧(>WS_MAX_MSG) → 服务端关连接(客户端将回落 HTTP)
+        G_ws = await s.ws_connect(f"{base}/v1/responses",
+                                  headers={"Authorization": "Bearer sk-test"},
+                                  max_msg_size=0)
+        big = {"type": "response.create", "generate": True, "model": "m",
+               "input": [{"type": "message", "role": "user",
+                          "content": [{"type": "input_text", "text": "x" * (17 * 1024 * 1024)}]}]}
+        try:
+            await G_ws.send_str(json.dumps(big))
+            msg = await asyncio.wait_for(G_ws.receive(), timeout=10)
+            check("oversize frame -> connection closed", msg.type != WSMsgType.TEXT)
+        except Exception:
+            check("oversize frame -> connection closed", True)
+        # 7. 账本上限: cap=3 → 提交后超限清空 → 下一轮 prev 命中但 ledger 空 → 走全量
+        G.LEDGER_MAX_ITEMS = 3
+        ws2 = await s.ws_connect(f"{base}/v1/responses",
+                                 headers={"Authorization": "Bearer sk-test"})
+        evs = await drive(ws2, {"type": "response.create", "generate": True, "model": "m",
+                                "input": [u("a"), u("b"), u("c")]})
+        ridc = evs[-1]["response"]["id"]
+        evs = await drive(ws2, {"type": "response.create", "generate": True, "model": "m",
+                                "input": [u("d")], "previous_response_id": ridc})
+        check("ledger cap reset -> next turn treated as client-full (1 item)",
+              len(SEEN_BODIES[-1]["input"]) == 1)
+        G.LEDGER_MAX_ITEMS = 20000
+        await ws2.close()
+        # 8. 双连接隔离: 各自账本互不串
+        wa = await s.ws_connect(f"{base}/v1/responses", headers={"Authorization": "Bearer sk-a"})
+        wb = await s.ws_connect(f"{base}/v1/responses", headers={"Authorization": "Bearer sk-b"})
+        ea = await drive(wa, {"type": "response.create", "generate": True, "model": "m", "input": [u("A1")]})
+        eb = await drive(wb, {"type": "response.create", "generate": True, "model": "m", "input": [u("B1")]})
+        ra, rb = ea[-1]["response"]["id"], eb[-1]["response"]["id"]
+        await drive(wa, {"type": "response.create", "generate": True, "model": "m",
+                         "input": [u("A2")], "previous_response_id": ra})
+        check("connection isolation: A's full has A-history only (3 items)",
+              len(SEEN_BODIES[-1]["input"]) == 3 and "A1" in json.dumps(SEEN_BODIES[-1]))
+        await wa.close(); await wb.close()
 
     await gw_server.close(); await up_server.close()
     ok = sum(1 for r in RESULTS if r)

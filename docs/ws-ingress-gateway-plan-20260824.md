@@ -7,6 +7,19 @@
 
 ---
 
+## 〇、执行状态（2026-08-24 上午）
+
+- **S1 ✅**：真 codex 0.147 端到端打通（答案正确/计费透传/4.6s）。K1-K3 全部实测：
+  v2 头同款、`supports_websockets=true` 单独即触发（feature 已 Stage::Removed）、
+  Bearer 透传、**明文 ws:// 可用**。排障中修掉原型真 bug：POST 回落曾被 405 顶死。
+- **S2 ✅**：16MiB 收包上限/账本上限/连接 TTL/生命周期与中断日志；演练 13/13
+  （超限帧关连接/账本清空/双连接隔离等）。
+- **S3 ✅**：正式部署 `k8s/ws-ingress.yaml`（CM 挂代码+base 镜像，零新镜像）；
+  真 codex 经 svc 复验通过（3.3s）。
+- **S4 ▶**：canary 通路=你本地 codex 一行配置（隧道或后续 nginx 正门）；
+  增量命中验证需交互式多轮会话（exec 单轮进程按设计不触发增量）。
+- 遗留观察项：exec 场景的双 response.create 帧现象。
+
 ## 一、复述真实目标
 
 你要的不是"网关支持一下 WebSocket"，而是：

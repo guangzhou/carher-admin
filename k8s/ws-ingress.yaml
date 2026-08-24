@@ -1,0 +1,42 @@
+# WS ingress 网关（#24）—— 客户端→网关 增量终结器
+# 代码: scripts/ws-ingress-gateway/app.py 经 CM 挂载, 无需专用镜像(base 自带 aiohttp)。
+# 设计/判据: docs/ws-ingress-gateway-plan-20260824.md
+apiVersion: v1
+kind: Service
+metadata:
+  name: ws-ingress
+  namespace: litellm-product
+spec:
+  selector: {app: ws-ingress}
+  ports: [{port: 8799, targetPort: 8799}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ws-ingress
+  namespace: litellm-product
+  labels: {app: ws-ingress}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: ws-ingress}}
+  template:
+    metadata: {labels: {app: ws-ingress}}
+    spec:
+      containers:
+      - name: gw
+        image: 127.0.0.1:5000/litellm-carher:vanilla-v1.90.2.cache-session-fix-v2-20260817-103630
+        command: ["python3", "/appcfg/app.py"]
+        env:
+        - {name: LITELLM_URL, value: "http://litellm-proxy:4000"}
+        - {name: LISTEN_PORT, value: "8799"}
+        # canary 期观测开; 稳定后可摘
+        - {name: WS_INGRESS_DEBUG, value: "1"}
+        ports: [{containerPort: 8799}]
+        volumeMounts: [{name: appcfg, mountPath: /appcfg}]
+        readinessProbe: {httpGet: {path: /healthz, port: 8799}, initialDelaySeconds: 3, periodSeconds: 5}
+        resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+      volumes:
+      - name: appcfg
+        configMap: {name: ws-ingress-app}
+# 更新代码: kubectl -n litellm-product create cm ws-ingress-app --from-file=app.py=<path> \
+#   --dry-run=client -o yaml | kubectl apply -f -  && kubectl rollout restart deploy/ws-ingress

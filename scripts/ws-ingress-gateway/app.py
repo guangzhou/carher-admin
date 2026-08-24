@@ -36,6 +36,11 @@ from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 LITELLM_URL = os.getenv("LITELLM_URL", "http://litellm-proxy.litellm-product.svc:4000")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "8799"))
 TURN_TIMEOUT_S = float(os.getenv("TURN_TIMEOUT_S", "600"))
+# K4: aiohttp 默认收包 4MiB 会掐断巨会话 T1；对齐上游 16MiB 上限（超限=连接关，
+# 客户端协议内建回落 HTTP——与今天行为一致）。
+WS_MAX_MSG = int(os.getenv("WS_MAX_MSG", str(16 * 1024 * 1024)))
+CONN_IDLE_S = float(os.getenv("CONN_IDLE_S", "3600"))
+LEDGER_MAX_ITEMS = int(os.getenv("LEDGER_MAX_ITEMS", "20000"))
 
 
 def _now_rid() -> str:
@@ -106,6 +111,9 @@ async def _forward_turn(ws: web.WebSocketResponse, st: ConnState, frame: Dict[st
                         completed_rid = (ev.get("response") or {}).get("id")
     if completed_rid:
         st.ledger = full + outputs
+        if len(st.ledger) > LEDGER_MAX_ITEMS:
+            print(f"ws_ingress ledger cap hit ({len(st.ledger)}) -> reset", flush=True)
+            st.ledger = []
         st.last_rid = completed_rid
         st.turns += 1
         print(f"ws_ingress turn mode={mode} in={len(delta)} full={len(full)} "
@@ -124,9 +132,10 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return web.Response(status=401, text="missing bearer")
-    ws = web.WebSocketResponse(heartbeat=30)
+    ws = web.WebSocketResponse(heartbeat=30, max_msg_size=WS_MAX_MSG, receive_timeout=CONN_IDLE_S)
     await ws.prepare(request)
     st = ConnState()
+    print("ws_ingress conn open", flush=True)
     async with ClientSession() as http:
         async for msg in ws:
             if msg.type != WSMsgType.TEXT:
@@ -155,12 +164,14 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
                 await _forward_turn(ws, st, frame, auth, http)
             except Exception as e:
                 # 一切异常：告知后关连接——客户端协议内建回落 HTTP 全量。
+                print(f"ws_ingress turn aborted reason={type(e).__name__}:{str(e)[:80]}", flush=True)
                 try:
                     await ws.send_str(_ev({"type": "error",
                                            "error": {"message": f"gateway: {type(e).__name__}"}}))
                 except Exception:
                     pass
                 break
+    print(f"ws_ingress conn close turns={st.turns}", flush=True)
     return ws
 
 

@@ -325,6 +325,29 @@ state.vscdb 实证)→ 不带 effort → 桥断。**"抄作业"必须抄全链�
   (`user is not a function`)。terra 同样暴露于此(冻结名共病)。备选加固=lane chatgpt.js
   RAW_IDES 加 `sk-zerokey-web-noop` 走 raw 透传,未做,等触发事件或用户点头。
 
+#### Step 9 第三刀(2026-08-24 21:3x):收割器 B 类漏洞——刚性信封兜底(已落地已验收)
+
+**症状定性(live 收割器真值表)**:简单命令 ✅ / 规范转义 ✅ / 围栏包裹 ✅ / **heredoc+shell
+引号舞蹈 `'"'"'` ❌ MISS**——模型把任意 shell 塞进 JSON 字符串是契约缺陷(不是模型"写歪"):
+未转义双引号让 JSON.parse 与修复器双双解歪 → `extractToolCalls` 返 null → `envelope miss` →
+原文 JSON 当正文漏到界面。这就是"简单命令必过、写文件必漏"的稳定复现规律。codex 无此类问题
+(原生 FC 参数走结构化通道,从不从散文解析)——借的灵感=**结构头与裸载荷分离**。
+
+**修复**:`web-tools.js` 新增 `rigidEnvelopeFallback`——JSON 解析全失败时,按**我们自己规定的**
+信封骨架(`"tool_calls":[{"name":"X","arguments":{"command":"` … 尾部 `"}`)整段切出命令原文;
+限单 call + `command|cmd` 单字符串键(多键形状如 Write path+content 无法无歧义切割,保持 MISS);
+幻觉工具名照旧丢弃;含 JSON 转义且无真实换行时先反转义。**部署门在测试退出码**:预部署单测
+6 case(A 简单/B 引号舞蹈/C 转义/D 围栏/E 带前导散文围栏舞蹈/F 幻觉名)全 PASS 才推。
+CM 备份 `/Data/backups/zk-cursor-bpi-cm-20260824-213405-pre-rigid-envelope.json`,merge patch
+12 key 校验,滚动两 lane。
+
+**验收**:前门重放当初必漏的原任务(heredoc 写快排文件,含中英文注释+引号字符串)——sol/pro
+**2/2 返回结构化 tool_calls、零正文泄漏**;82 线真实流量当场踩中新兜底
+(`[envelope] rigid-skeleton fallback: Shell.command (837 chars)`),TypeError=0。
+
+**治本(待办,下一步)**:契约改造为 codex 式载荷分离——命令放独立 ```bash 围栏,JSON 信封只留
+引用,根除 shell-in-JSON;届时兜底降级为保险丝。
+
 #### 反思:为什么走偏(对着本文档 review,2026-08-24)
 
 1. **验收标准错了(主因)**。Step 4 用 `/v1/responses` 合成探针验收——但真实 Cursor 发的是

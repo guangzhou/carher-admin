@@ -436,6 +436,44 @@ CM 备份 `/Data/backups/zk-cursor-bpi-cm-20260824-213405-pre-rigid-envelope.jso
 - Step 0 基线与备份(§Step 0 实测结果);首次备份事故与修复(密码泄漏文件已删)。
 - 本轮调研消耗:acct101 约 12 条网页消息(4+4+4 探针),临时 key/探针模型已清零。
 
+## 七、同事一键安装器(`scripts/zk-cursor-web/cursor_team_setup.py`,2026-08-24)
+
+**目标**:同事不再需要「装 CursorX 应用 + 开面板配 provider + 单跑排队补丁脚本」三步两工具,
+一条命令搞定。`python3 cursor_team_setup.py --apply` → 重启 Cursor → 设置里粘一次 key → 就绪。
+
+**它做什么(6 件,全幂等 + 自动备份 + 失败即拒)**:版本闸 3.16.x → 确认 Cursor 已退出 →
+两条 workbench bundle(desktop+glass)打 3 处解锁补丁(gate/localagent/dedicated)+ 排队泵补丁 →
+写 BYOK 配置进 state.vscdb applicationUser blob(openAIBaseUrl/useOpenAIKey/cursor-g-* 并入
+userAddedModels+modelOverrideEnabled,读旧去重) → settings.json 写 `update.mode:none` →
+打印唯一人工步(粘 key)。`--apply`/`--revert`/dry-run(默认)。
+
+**比 CursorX 更小 —— 只复刻 3 处补丁而非 5 处(数据支撑)**:
+- CursorX 打 5 处 bundle 补丁,但读 `~/.cursorx/runtime.json`=`byok:false`、`providers:[]`,
+  且 `loaderHook.js` **每条 fetch 拦截路径都 `if(!isByokEnabled())return realFetch(...)`**、
+  `applyByokAutoSync` 在 byok:false / 空 providers 下 no-op → **byok-autosync bundle 补丁 +
+  loaderHook + main.js/bootstrap-fork loader 注入这 2 处对我们是死代码**。
+- 真正让 cursor-g 路由到 litellm 的是 **Cursor 原生 OpenAI base-URL 覆盖**
+  (useOpenAIKey+openAIBaseUrl+aiSettings.userAddedModels);CursorX 的 3 处补丁(free-tier-gate /
+  free-tier-localagent / dedicated-host-bypass)只是把它在非 Pro 档解锁 + 钉本地 agent 执行路径。
+- **等价性已证(byte 级)**:我这 3 处补丁(锚点=稳定语义地标 + 通用捕获 minify 尾巴,不写死
+  x4g/p3s/Cl/Op 这类每版会变的名)在 pristine 备份 bundle 上各命中恰好 1 次,node --check 过,
+  markers 剥离后与 CursorX 产出**逐字节相同**(desktop+glass 两条各 gate 668/localagent 47/
+  dedicated 80 字符,全 True)。所以新同事机器跑本脚本 = 得到 CursorX 同款结果。
+
+**两条诚实边界(不许假绿)**:
+1. **baseUrl 是公网网关 `https://cc.auto-link.com.cn/pro/v1`**(同事在公司外网,读 live 配置确认,
+   非 198 内网 IP——内网 IP 同事够不着)。
+2. **OpenAI key 是 macOS 钥匙串加密的**(`secret://cursorAuth/openAIKey`=`v10`+AES 密文,钥匙串
+   条目「Cursor Safe Storage」;实测读它会弹 GUI 授权框)。外部脚本写它要么弹框、要么自复刻
+   OSCrypt 加密(脆,一错就是"看着登录其实 401"的假绿)→ **key 这一步交给 Cursor 自己**:
+   同事在设置里粘一次,Cursor 正确加密。base-url/模型/开关全预填,只剩粘 key 一个框。
+
+**与现有 CursorX 机器共存**:本脚本 3 处锚点在 CursorX 已改写的 bundle 上命中 0 次 → 自动拒绝
+(防重复打)。要在装过 CursorX 的机器用本脚本,先还原 pristine bundle(CursorX 备份),再跑。
+排队泵用 `@cx-queue-pump:v1` 同 marker,与已单装的 `cursor_queue_pump_patch.py` 幂等可互换。
+
+## 八、事实 vs 推测
+
 **推测(不当结论用)**:
 - luna/pro/instant/5.5 上 `thinking_effort` 生效与否未验(先单档)。
 - pro 真实编码负载下"明显慢"从机制推得(探针 3.3s 因问题太短),未实测长任务。

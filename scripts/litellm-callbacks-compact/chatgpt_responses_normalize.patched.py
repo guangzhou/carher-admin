@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import logging
 import re
 from typing import Any
@@ -48,15 +49,13 @@ _KEEP_ENCRYPTED_ALIASES = {"enc-canary-01"}
 # （狂耗账号 7d 桶）；>16MiB 连 WS 增量都上不去。v1=inline 裁剪（参照 codex harness
 # auto-compact 思路）：保首条锚点 + 尾部预算内最近项，中间折叠为一条标记消息。
 # 上游本就把超上下文部分截断扔掉——裁剪只是把"扔"提前到网关，省双向带宽+计费 tokens。
-_COMPACT_ALIASES = {
-    "compact-canary-01",
-    # 2026-08-24 S3 全过(计费-80.6%/答案双对/零400)后按用户指令挂入实测巨会话 key
-    # (6h 窗 >10MB 发送方, SpendLogs 实查):
-    "cursor-youxun-v4u8",
-    "cursor-zhuge-zlcb",
-    "claude-code-ff550a8b-bmo0",
-    "cursor-02debe47-9nx2",
-}
+# 2026-08-24 用户拍板: 默认全量开(>2MB 闸内所有 key)。依据: 12h 灰度零事故 +
+# 线上 armed-check(名单精确) + 合成 A/B 计费 -80.6% + 今晨 900+ 真请求验证
+# "未超线不动"。豁免名单留作质量敏感 key 的退出通道; 秒级回滚 =
+# env CHATGPT_COMPACT_DEFAULT_ON=0 (proxy deploy set env) 或 CM 恢复备份。
+_COMPACT_DEFAULT_ON = os.getenv("CHATGPT_COMPACT_DEFAULT_ON", "1") == "1"
+_COMPACT_EXEMPT_ALIASES: set = set()          # 默认开模式下的退出名单
+_COMPACT_ALIASES = {"compact-canary-01"}      # 默认关模式下的准入名单(回滚态用)
 _COMPACT_MIN_BYTES = 2 * 1024 * 1024     # 触发：input 序列化 >2MB
 _COMPACT_ASSISTANT_MAX_BYTES = 40 * 1024 # assistant 单条上限（≈官方10K tokens）
 
@@ -385,7 +384,9 @@ def _normalize_data(data: dict[str, Any], source: str) -> dict[str, Any]:
         out_data["input"] = input_items
         counts["string_input_to_list"] = 1
     if isinstance(input_items, list):
-        if key_alias in _COMPACT_ALIASES:
+        _compact_on = (key_alias not in _COMPACT_EXEMPT_ALIASES) if _COMPACT_DEFAULT_ON \
+            else (key_alias in _COMPACT_ALIASES)
+        if _compact_on:
             input_items, _ccounts = _compact_input_items(input_items)
             for _ck, _cv in _ccounts.items():
                 counts[_ck] = counts.get(_ck, 0) + _cv

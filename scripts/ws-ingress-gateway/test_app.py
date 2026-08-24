@@ -17,11 +17,25 @@ def check(name, cond, extra=""):
 
 SEEN_BODIES = []
 
+UPSTREAM_STATE = {"cancelled": False}
+
 async def mock_upstream(request: web.Request) -> web.StreamResponse:
     body = await request.json()
     SEEN_BODIES.append(body)
     if body.get("model") == "boom":
         return web.Response(status=429, text="rate limited")
+    if body.get("model") == "slow":
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        try:
+            await resp.write(b'data: {"type": "response.created", "response": {"id": "r_slow", "status": "in_progress"}}\n\n')
+            for _ in range(50):
+                await asyncio.sleep(0.2)
+                await resp.write(b'data: {"type": "response.output_text.delta", "delta": "x"}\n\n')
+        except (asyncio.CancelledError, ConnectionResetError):
+            UPSTREAM_STATE["cancelled"] = True
+            raise
+        return resp
     rid = f"resp_up_{len(SEEN_BODIES)}"
     resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
     await resp.prepare(request)
@@ -163,6 +177,17 @@ async def main():
         check("connection isolation: A's full has A-history only (3 items)",
               len(SEEN_BODIES[-1]["input"]) == 3 and "A1" in json.dumps(SEEN_BODIES[-1]))
         await wa.close(); await wb.close()
+
+        # 9. 客户端中途断线 → 上游转发被取消(不悬挂不泄漏)
+        UPSTREAM_STATE["cancelled"] = False
+        wc = await s.ws_connect(f"{base}/v1/responses", headers={"Authorization": "Bearer sk-c"})
+        await wc.send_str(json.dumps({"type": "response.create", "generate": True,
+                                      "model": "slow", "input": [u("x")]}))
+        msg = await asyncio.wait_for(wc.receive(), timeout=10)   # 收到首帧后掐线
+        await wc.close()
+        await asyncio.sleep(1.5)
+        check("client disconnect mid-stream -> upstream forward cancelled",
+              UPSTREAM_STATE["cancelled"])
 
     await gw_server.close(); await up_server.close()
     ok = sum(1 for r in RESULTS if r)

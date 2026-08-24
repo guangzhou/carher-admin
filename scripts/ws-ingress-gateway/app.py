@@ -176,7 +176,29 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
                 st.ledger = list(frame.get("input") or [])
                 continue
             try:
-                await _forward_turn(ws, st, frame, auth, http)
+                # 转发期并发监听客户端连接: 轮中客户端断线时, close 帧只有被 receive
+                # 才会被处理——否则我们会继续把上游流写进死管道直到 TCP 报错(白烧上游)。
+                # 客户端一断 → 立即取消上游转发。
+                fwd = asyncio.ensure_future(_forward_turn(ws, st, frame, auth, http))
+                watch = asyncio.ensure_future(ws.receive())
+                done, _ = await asyncio.wait({fwd, watch}, return_when=asyncio.FIRST_COMPLETED)
+                if fwd in done:
+                    watch.cancel()
+                    try:
+                        await watch
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    await fwd  # 冒泡转发中的异常
+                else:
+                    fwd.cancel()
+                    try:
+                        await fwd
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    print("ws_ingress turn aborted reason=client_closed_mid_turn", flush=True)
+                    st.ledger = []
+                    st.last_rid = None
+                    break
             except Exception as e:
                 # 一切异常：告知后关连接——客户端协议内建回落 HTTP 全量。
                 print(f"ws_ingress turn aborted reason={type(e).__name__}:{str(e)[:80]}", flush=True)

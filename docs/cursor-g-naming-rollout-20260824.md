@@ -345,8 +345,26 @@ CM 备份 `/Data/backups/zk-cursor-bpi-cm-20260824-213405-pre-rigid-envelope.jso
 **2/2 返回结构化 tool_calls、零正文泄漏**;82 线真实流量当场踩中新兜底
 (`[envelope] rigid-skeleton fallback: Shell.command (837 chars)`),TypeError=0。
 
-**治本(待办,下一步)**:契约改造为 codex 式载荷分离——命令放独立 ```bash 围栏,JSON 信封只留
-引用,根除 shell-in-JSON;届时兜底降级为保险丝。
+**治本(2026-08-24 22:1x 已落地):v2 载荷分离契约(codex apply_patch 哲学)**
+- **原理调研结论**(全文见飞书文档附二):API 面 JSON 从不坏是因为**约束解码**(schema 编译成
+  CFG、非法 token 概率置 0,结构由构造保证)——网页面没有这层,转义全靠模型自觉,双层转义
+  (shell 引号舞蹈套 JSON)非确定失败(同任务 pro 对/sol 错实测)。且 codex 源码三证表明
+  **即使有约束解码,OpenAI 也不让代码进 JSON 字符串**:shell 参数=argv 数组(approvals.rs:70)、
+  apply_patch 载荷=裸文本 `*** Begin Patch`(invocation.rs:463)、新模型用 Freeform/custom
+  工具+语法定义(tool_spec.rs:54, responses_api.rs:25)。**行业共识=结构与代码载荷分离。**
+- **落地**:①指令加 PAYLOAD RULE——命令/代码/含引号换行的值不进 JSON,值写占位符 `@@1@@`,
+  载荷放 json 块后的独立围栏(原文零转义);②抽取器加 `resolvePayloadPlaceholders`——占位符
+  按序回填围栏原文(信封自身围栏按含 `"tool_calls"` 排除;占位符无围栏可回填→按 miss 走
+  act-retry);③rigidEnvelopeFallback 降级为保险丝。防线现为四层:合法 JSON 直parse →
+  占位符+围栏回填 → 刚性骨架切片 → act-retry。
+- **门禁与验收**:预部署单测 11 case(旧 6 回归 + 占位符回填/双占位/缺围栏 miss/无占位符时
+  旁侧围栏不污染 + 指令含 RULE 自检)全 PASS 才推;曾拦下一次测试自身断言错误。E2E heredoc
+  任务(含中英文注释+单双引号)sol/pro **2/2 结构化 tool_calls、零泄漏、零占位残留**。
+  备份 `/Data/backups/zk-cursor-bpi-cm-20260824-221036-pre-payload-v2.json`。
+- 诚实边界:①新协议是"教"不是"锁"(网页面无解码约束),模型可自由选直写合法 JSON 或
+  占位符围栏——两条路都能收割,坏 JSON 还有保险丝;②老会话(服务端有状态)里模型可能沿用
+  旧格式,由保险丝+act-retry 兜到会话自然轮换;③围栏体内嵌 ``` 的极端 case 会切歪(与一切
+  围栏协议同族限制,codex apply_patch 同样存在)。
 
 #### 反思:为什么走偏(对着本文档 review,2026-08-24)
 

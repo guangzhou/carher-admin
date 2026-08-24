@@ -16,8 +16,26 @@
   （超限帧关连接/账本清空/双连接隔离等）。
 - **S3 ✅**：正式部署 `k8s/ws-ingress.yaml`（CM 挂代码+base 镜像，零新镜像）；
   真 codex 经 svc 复验通过（3.3s）。
-- **S4 ▶**：canary 通路=你本地 codex 一行配置（隧道或后续 nginx 正门）；
-  增量命中验证需交互式多轮会话（exec 单轮进程按设计不触发增量）。
+- **S4 ✅（端到端正门已通，2026-08-24）**：canary 通路=客户端一行配置 `supports_websockets=true`
+  （base_url 不动，仍是 `https://cc.auto-link.com.cn/pro/v1`）。
+  - **隧道腿 ✅**：真实使用中 2h 窗口 27 轮里 26 轮 `mode=incremental`（命中 96%），
+    `full=` 跨轮单增到 68，无超时/崩溃。唯一 `mode=full` 是重连首轮(设计正确)。
+  - **198 本机正门分流 ✅**：`ws-ingress-nodeport`(30403) + cc.auto-link.com.cn.conf 加
+    `map $http_upgrade $pro_responses_backend`(default→litellm_product / ~*websocket→ws_ingress)
+    + `location = /pro/v1/responses` 补 Upgrade 头。直打 198:80 明文 ws:// 端到端两轮 PASS
+    (T1 full in=1/full=1, T2 incremental in=1/full=3, rid 与客户端一致)。POST 回归 401 不变。
+  - **正门最后一跳 ✅ IT 已透传**：IT 在 `58.241.5.230` 的 cc.auto-link.com.cn 加了
+    `proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; Connection $connection_upgrade;
+    proxy_read_timeout 3600s`（`map $http_upgrade $connection_upgrade` 那块**其环境本已定义**，无需再加——
+    否则引用未定义变量 `nginx -t` 直接失败、回不了 101）。**实测 `wss://cc.auto-link.com.cn/pro/v1/responses`
+    握手返 `101 Switching Protocols`**（无效 key 照样 101，网关先升级、转发时才校验 key）→ 入口机 Upgrade
+    透传 → 198 nginx 分流 → ws-ingress 全链路通。ssh 隧道可撤。
+- **全员推广的边界（S6 决策项）**：内容上**只需在 provider 加一行 `supports_websockets=true`**，
+  其它（计费/路由/换号/base_url）全不动；HTTP POST 与 WS 共用同一 URL，靠 nginx 按 Upgrade 头分流。
+  但这行在**每个用户自己的 `~/.codex/config.toml`**（客户端配置，服务端无法替客户端决定开不开 WS）——
+  「用户零改动」能否做到取决于**是否有集中下发 config 的通道**（装机脚本/内网模板/共享 CODEX_HOME）；
+  无则等价于每人加一行。版本地板 **codex ≥0.118**（0.147 实测单行即触发，无需 feature flag）；
+  低版本加了不生效但**继续走 HTTP、协议自带回落**，故全员开是安全的（最坏=老版本享受不到）。
 - 遗留观察项：exec 场景的双 response.create 帧现象。
 
 ## 一、复述真实目标

@@ -96,5 +96,7 @@ SpendLogs 30 分钟窗（acct aresponses，`proxy_server_request` 逻辑体大�
 - **降延迟（缓存实证）**：同时段昨今对比（分段控制大小），上游缓存命中
   大上下文 58.5%→74.3%、中型 30.1%→65.7%、**加权总体 ≈55%→74%（+18pp）**。
 - 三硬约束全程有效：真桶满换号/12+15 演练/5 次实战秒级回滚/帧级日志归因。
-- **本目标书宣布关闭**。后续接力：压缩已默认全量开（docs/gateway-compaction-*）、
-  WS ingress 待 S4（docs/ws-ingress-*）。
+- **本目标书宣布关闭**。后续接力：压缩已默认全量开（docs/gateway-compaction-*，
+  2026-08-24 DEFAULT-ON 上线，监控无 BREACH）、WS ingress 客户端→网关腿正门已通
+  （docs/ws-ingress-* S4 ✅，IT 已透传 Upgrade，实测 101；全员推广只差一行
+  `supports_websockets=true` 的客户端配置分发）。

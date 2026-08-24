@@ -40,3 +40,22 @@ spec:
         configMap: {name: ws-ingress-app}
 # 更新代码: kubectl -n litellm-product create cm ws-ingress-app --from-file=app.py=<path> \
 #   --dry-run=client -o yaml | kubectl apply -f -  && kubectl rollout restart deploy/ws-ingress
+---
+# NodePort: 供 198 本机 nginx(listen 80) 反代访问(ClusterIP 主机侧打不到)。
+# 对照 litellm-proxy-nodeport(30402)。正门分流靠 198 nginx cc.auto-link.com.cn.conf:
+#   map $http_upgrade $pro_responses_backend { default litellm_product; ~*websocket ws_ingress; }
+#   location = /pro/v1/responses { proxy_pass http://$pro_responses_backend; +Upgrade头 }
+# ✅ 端到端正门已通(2026-08-24): IT 已在公网入口 58.241.5.230 的 cc.auto-link.com.cn 加
+#   Upgrade 透传(proxy_http_version 1.1 + Upgrade/Connection + read_timeout 3600s);
+#   实测 wss://cc.auto-link.com.cn/pro/v1/responses 握手返 101。验收脚本:
+#   scripts/ws-ingress-gateway/frontdoor_probe.py。客户端只需 supports_websockets=true。
+apiVersion: v1
+kind: Service
+metadata:
+  name: ws-ingress-nodeport
+  namespace: litellm-product
+  labels: {app: ws-ingress}
+spec:
+  type: NodePort
+  selector: {app: ws-ingress}
+  ports: [{port: 8799, targetPort: 8799, nodePort: 30403}]

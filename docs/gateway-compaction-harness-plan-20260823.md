@@ -7,6 +7,28 @@
 
 ---
 
+## 〇、执行状态（2026-08-24）
+
+- **S1–S4 ✅**：确定性逐项规则落码 + 单测；激活零中断；合成 E2E 与真实 key 灰度过闸。
+- **S5 缺省化 ✅ 已上线**：用户拍板后，**默认全量开**（DEFAULT-ON）对**所有 key**中
+  `input 序列化 >2MB` 的请求自动压缩，2026-08-24 ~12:25（北京）经 `set env deploy/litellm-proxy`
+  生效（env 缺省=默认开；回滚杠杆 `CHATGPT_COMPACT_DEFAULT_ON=0`，改 env 即可，无需动 CM）。
+- **上线后监控（task #25，durable cron，约 2h 窗口，无 BREACH）**：
+  - **fires**：2h 内全池 160 次触发，跨 gpt-5.6-sol(87)/5.5(46)/terra(20)/5.2(4)/luna(1)；
+    压缩比 median 1.6×、max 30.2×；15 次大请求（kb_before 8000–19833KB）被压（如 `19833→657KB`）。
+  - **failures**：last2h 0.85%（221/25712），与上线前包络（0–1.51%）同水平；**按小时 trend 在
+    04:25 UTC 切换点无阶跃**（切换前 02h=1.13%/15h=1.51% 反而更高）→ 无失败尖峰。
+  - **误报排除**：日志有 `Invalid input[2].call_id: string too long (85>64)`（~93/2h），经切换点无关联
+    falsification 确认是**既有客户端/id 编码问题，非压缩引入**（压缩只掏空输出、不会加长 call_id），
+    非回滚项，留待单独 triage。
+  - **big-req 计费**：>1MB 存储体的 12 个成功请求均 total_tokens **246K**（远低于原始体 tokenize
+    出的数百万量级）→ 压缩确在为大请求降计费。
+  - **pods**：4/4 Running、0 重启。
+- **待**：满 24h 且指标持续干净 → 宣布 DEFAULT-ON SUCCESS、收口 cron。主目标书出网/降延迟
+  收益已在 `acct-multiaccount-incremental-transport-goal.md` 收官报告量化。
+
+---
+
 ## 一、为什么做（真实目标，非"做一个压缩功能"）
 
 1. **止血账号额度**：6.5% 的畸形会话（单轮 2-18MB 历史回放）烧掉全池 1/3+ 的 7 天桶额度

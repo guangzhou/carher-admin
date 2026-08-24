@@ -1,8 +1,47 @@
 # zk-cursor-bpi web 通道 responses.js 迭代 SOP（Cursor web 份额 function-calling）
 
 r8→r18 十轮实战沉淀。对象：CM `zk-cursor-bpi-patch` 的 `responses.js` key（namespace
-`litellm-product`，唯一消费者 deploy/zero-cursor-bpi，端口 8201），承载
-`cursor-web-fc-terra{,-high,-max}` 三个模型的 web 份额工具调用。
+`litellm-product`，消费者 deploy/zero-cursor-bpi + zero-cursor-bpi-82（可克隆扩线），端口 8201），
+承载 `cursor-web-fc-*` 全族的 web 份额工具调用：单线模型 `cursor-web-fc[-N]-terra{,-high,-max}` +
+组池别名 `cursor-web-fc-pool-terra{,-high,-max}`（双线加权，见"组池"节）。
+
+> **命名换装（2026-08-24 上线）**：面向用户的菜单已从内部代号 `cursor-web-fc*` 换成 `cursor-g-*`
+> （见名知意、不暴露 "web"、池名无数字不暴露账号拓扑）。**旧 9 名全部冻结、零改零删，当调试工具**；
+> 本 SOP 的迭代对象(responses.js/CM/env)完全不变。命名换装这一件事的活文档 =
+> `docs/cursor-g-naming-rollout-20260824.md`。下面"cursor-g 命名换装"一节是速查。
+
+## cursor-g 命名换装速查（2026-08-24 上线）
+
+**hook gate 已扩成元组（唯一共享面改动）**：`cursor_web_fc_sys_rewrite.py`
+`_TARGET_PREFIX = ("cursor-web-fc-", "cursor-g-")`（`str.startswith` 原生吃元组）。两前缀都 fire，
+旧名行为零变化。改 gate 后必滚 proxy 盯 `rollout status` 到全就绪。
+
+**上线 6 池别名（真身 slug，2026-08-24 model_slug 铁证）**：
+
+| 池别名（用户面，无数字） | 真身 slug | reasoning_effort |
+|---|---|---|
+| `cursor-g-5.6-sol` | `openai/gpt-5-6` | 不设(standard) |
+| `cursor-g-5.6-sol-high` | `openai/gpt-5-6` | `high`(→web extended) |
+| `cursor-g-5.6-luna` | `openai/gpt-5-6-t-mini` | 不设 |
+| `cursor-g-5.6-pro` | `openai/gpt-5-6-pro` | 不设 |
+| `cursor-g-5.6-instant` | `openai/gpt-5-6-instant` | 不设 |
+| `cursor-g-5.5` | `openai/gpt-5-5-thinking` | 不设 |
+
+- 每名各挂 101+82 两 deployment（`model_info.id=zerokey-cursor-g-{101,82}-<变体>`，weight:1、
+  `api_key:sk-zerokey-web-noop` 占位符必带、`mode:chat`），WA 自动跨线负载+容灾。已授权 key03/key04。
+- 运维直连名（带账号号,钉单线调试,自新号启用）：`cursor-g-<N>-5.6-sol…`。
+- **⚠️ xhigh 已退役=第三个虚构档**（继 terra/sol/luna dot-slug、`-max` 之后）：`xhigh`→web
+  `thinking_effort=max` 对真身 `gpt-5-6` **确定性空 completion**（output_tokens=0，跨 4 次一致）；
+  旧 `-max` 能出字仅因走虚构 `openai/gpt-5.6-terra` fallback 丢弃 max。**上线档止于 sol/sol-high。
+  以后加档前先临时真 key 打实质 prompt 验出字,空回显=红旗别上。**
+
+**v2 克隆脚本 = `scripts/zk-cursor-web/clone_web_fc_lane_v2.py`**（v1 保留当 terra 冻结era 参照）：
+一键出新线——step3 建 6 直连名 `cursor-g-<N>-*`（真身 slug、幂等）、step5 挂 6 池成员进别名、
+grant 读旧合并 12 名、step6 临时真 key 自动验收（禁 master）。真身 slug 表内置、无 xhigh。
+两前提写进 docstring：①新号首次必须手抓 web seed（非 WS 成员时 `--live-from-ws` 不可用）；
+②全部 lane 钉 standby 单 node（seed 是 hostPath）。live token 经 **ssh stdin** 传（不过 argv/命令
+串，防 ps 泄漏）。dry-run 默认，`--apply` 执行。回滚=`/model/delete` 12 个 `zerokey-cursor-g-<N>-*`。
+
 
 ## 心智模型（改代码前必读）
 
@@ -129,6 +168,49 @@ captured 会话，换号必伴随 pod 重启/session 重抓，两条路都自然
 - **体感收益在最坏情况**：附件上传悬崖（>100K，十几秒+实测零输出）结构性消除；
   常规轮 TTFB 大头是上游 thinking（3.5-5.5s），少传几万字符只省几百 ms，体感有限。
 
+## 克隆到新账号（多账号扩池，2026-08-24 acct-82 实战跑通）
+
+单条 bpi/101 线 acquireSlot 串行是瓶颈。加一条独立线 = 复制一份 deploy/svc + 一份 web
+seed + 三档模型 + 授权 key。一键脚本 `scripts/zk-cursor-web/clone_web_fc_lane.py`
+（dry-run 默认；`--apply` 执行）。四步，每步都有各自的假绿陷阱：
+
+1. **web seed 的登录态：直接借 WS 线的活 token**。zero-N web seed
+   （standby `/Data/zerokey-sessions/zero-N/users.json`）里 `parsedFetch.headers.authorization`
+   那个 bearer 是手抓的、会失效——**token 里的 exp ≠ 上游还认它**（zero-82 的 JWT exp 在
+   未来，握手仍 `Sentinel 401 token_invalidated`；唯一判据是真去 sentinel 握手，见高频坑）。
+   若该号同时是 `chatgpt-acct-N` WS 线成员，它 PVC `/chatgpt-auth/auth.json` 里有一份
+   **带 refresh_token+offline_access、会自动续**的 codex OAuth `access_token`（同一账号）——
+   把这份灌进 web seed 的 authorization 头即可，**web 端点 `/backend-api/f/conversation`
+   接受这个 codex OAuth token**（live 实证）。这就是"两套登录态、WS 的能驱动 web 线"。
+   脚本 `--live-from-ws` 走这条；改前自动备份到 `/Data/backups/zero-N-users-pre-livetoken-*`。
+2. **deploy/svc `zero-cursor-bpi-N`**：照 bpi 模板逐字节，只换 name/labels/selector、
+   `ZK_USER=acctN`、seed hostPath `/Data/zerokey-sessions/zero-N`。同一 patch CM
+   `zk-cursor-bpi-patch`、同镜像、同 8201、nodeName aiyjy-litellm-standby、dnsPolicy None、
+   strategy Recreate。（账号可与 WS 增量线共用——各走各的额度，用户已确认。）
+3. **三档模型 `cursor-web-fc-N-terra{,-high,-max}`**：`openai/gpt-5.6-terra`，api_base 指
+   新 svc，`-high`→reasoning_effort high、`-max`→xhigh。**必带 `api_key` 占位符**
+   （见下"假绿①②"）；`model_info` 必带 `id`+`mode`（漏了 /model/update 报 400
+   "model_info not provided"）。模型名前缀 `cursor-web-fc-` 不能改——hook
+   `cursor_web_fc_sys_rewrite` gate 在 `model.startswith("cursor-web-fc-")`，改名 hook 不 fire。
+4. **授权 key**：`/key/update` 把三个模型名 append 到目标 key（acct-82 给了
+   `cursor-liuguoxian04-5rub`，41→44）。
+
+### 假绿三连（本次真踩，验收纪律）
+
+- **假绿①：openai/ 模型漏 api_key，真流量 401、master key 测不出**。openai/ provider 的
+  真实调用路径要求 litellm_params 里有 api_key，否则抛
+  `AuthenticationError: api_key client option must be set`。占位符
+  `sk-zerokey-web-noop` 即可（bpi 不校验，登录态在 seed 里）。**用 master key 测会走另一条
+  分支绕过这个 gate → HTTP 200 假绿**，真用户 "hi" 却 401。101 老线一直带 api_key，82 漏了
+  就是 "hi 无回复" 的根因。
+- **假绿②：`/model/info` 对 api_key 脱敏，两条线都显示 `has api_key: False`**。要对比配置
+  差异**只能读 DB raw `litellm_params`**（101 有、82 无，肉眼可辨），信 /model/info 的
+  decrypt 视图必被带偏。（同记忆 `feedback_hardcoded_log_string` 脱敏陷阱家族。）
+- **假绿③：验收必须走真 key 路径，不能用 master key**。master key 绕过 per-key 鉴权与
+  api_key gate。正确做法：`/key/generate` 建个临时 scoped key → 打 `/v1/responses` 带暗号
+  → 看 200+暗号回显 + grep `zero-cursor-bpi-N` pod 日志 conversation/200 → `/key/delete`。
+  （DB `LiteLLM_VerificationToken.token` 是 hash，不能当 bearer；/key/info 只能拿它查不能用它发。）
+
 ## 高频坑（每条都真踩过）
 
 - delta 数 ≠ done 数先想 **UTF-16 vs 码点**（emoji JS 计 2 / Python 计 1），不是丢字。
@@ -141,9 +223,140 @@ captured 会话，换号必伴随 pod 重启/session 重抓，两条路都自然
 - 合成探针全绿 ≠ 真流量能过：真实 payload 才有 instructions/hook 注入层；端到端验收必须
   走 LiteLLM 前门 + 真实抓包重放，最终 ground truth 是 Cursor GUI 点击。
 - cap 抓包字段表可能缺 `instructions`——"字段为空"的结论先确认抓包器抓没抓。
+- web seed 里 bearer 的 **JWT `exp` 在未来 ≠ 上游还认它**：zero-82 exp 未过期仍
+  `Sentinel 401 token_invalidated`（外部 re-capture 批把 seed 判死）。唯一判据是真去
+  sentinel 握手，别拿 exp 当活证。修法见"克隆到新账号 step1"——借 WS 线的活 OAuth token。
+
+## 从 codex 真源码搬用 —— 落地作业单（2026-08-24 精读 ~/codes/codex commit 343074d）
+
+> **审计判决（2026-08-24，198 实拉 hook + responses.js 逐条三段式**静态审计**，非运行时计数）：
+> 作业 1–4 判决全部"已实现 / 架构不适用"，bpi 线无需因 codex 学习改代码。** 其中作业2/3 是架构层
+> 定论可直接信；**作业1 的"无累积"已经 live 闭环坐实**（08-24 组池回归：`[conv] delta send 1
+> items, 96 chars`，注入块零累积）；作业4 的"已实现"仍是数据流推断（usage 未逐轮核对）。详细
+> file:line 证据表见 `docs/cursor-ide-chatgpt-web-status-and-plan-20260823.md` §4.0。速查：
+> - **作业1（证伪+已实现）**：hook 有 `_already_done` 哨兵幂等；`responses.js:371-372` delta 轮
+>   `flattenInput(...,null)` 不发 instructions；`:407` `_chatOnlyize` 已识别+剥 `[EXECUTION ENVIRONMENT]`。
+> - **作业2（架构 N/A）**：`responses.js:95-101` 把 call/output 转文本发网页，上游非结构化，无 400。
+> - **作业3（已满足）**：无原生 FC 无 delta 可拼；`:1400-1415` 出站 delta==done 纯 UI。
+> - **作业4（核心已实现）**：`:936-957` r9 已报客户端真实上下文；web 面无 per-token 权威数可锚。
+>
+> 下面保留原作业单描述作**推导依据留档**（怎么从 codex 机制推出这些假设）；要动手前先看上面的判决，
+> 别重复实现。真正未做的杠杆是**组池**（doc §4.1）与**跨线压缩 skill**（doc §4.2，另一 codebase）。
+
+对照 OpenAI codex 真源码（源码锚点地图见记忆
+[[reference_codex_source_harness_anchors_2026_08_24]]）。**先确认：我们的代理形状、增量前缀
+校验+全量兜底、工具结果在 output 无 role，都与官方同构，方向对**。下面是可搬的改进，每条给
+输入/动作/预期/验收。诚实边界：codex 消费的是 `/backend-api/codex/responses`（codex 份额面），
+我们 web 线消费 `/backend-api/f/conversation`（网页订阅面）的 SSE 再转译成 responses 事件发给
+Cursor——**能借的是上下文管理思路，不是端点或事件形状**，逐条标注是否直接适用。
+
+### 作业 1：hook 注入打标记再回收（直接适用，最高优先）
+- **输入**：hook `cursor_web_fc_sys_rewrite` 当前把 `[EXECUTION ENVIRONMENT]` 无标记注入
+  input；conv 复用/增量路径会把它重复累积。
+- **动作**：给注入块包一对哨兵（如 `<!--ZKENV_START-->…<!--ZKENV_END-->`）；注入前先扫
+  input 里有没有上一轮留下的同名块，有则**先整块删掉再注入一次**（照 codex
+  `ContextualUserFragment` 的 markers + `matches_text` 回收，`context-fragments/src/fragment.rs:30`）。
+- **预期输出**：无论第几轮，发往上游/缓存 key 的 payload 里 ZKENV 块**恰好 1 个**；增量轮不因
+  注入而逐轮增长。
+- **验收**：`loop_ls.py`/`loop_dl.py` 跑 ≥5 轮闭环 → 抓每轮实发 payload，`grep -c ZKENV_START`
+  恒 =1；`[conv] delta send … chars` 不含注入块体积的逐轮累加。回归 `cmp_delta_done.py` 散文
+  场景仍逐字符相等。
+
+### 作业 2：发送前配对体检 normalize（直接适用）
+- **输入**：responses.js 构造上游请求前的 input items 数组（可能含被打断的孤儿 tool call）。
+- **动作**：实现 `normalizePairing(items)`——每个 function_call 必须有匹配 call_id 的
+  function_call_output，否则丢弃该 call（或补一条空 output）；每个 output 必须有对应 call，
+  否则丢弃；裁最旧项时连带删配对项（照 codex `history.rs:446 normalize_history` +
+  `remove_first_item:279`）。
+- **预期输出**：发出的 payload 无孤儿 call/output。
+- **验收**：构造"工具调用后中断"场景（call 无 output）→ 重放，断言上游不再 400、pod 日志显示
+  规整后计数；回归 `loop_ls.py` 已有闭环仍 PASS（不能把正常的 call/output 对误删）。
+
+### 作业 3：工具参数只认 done item，delta 仅 UI（需先审计，可能已满足）
+- **输入**：responses.js 对上游流的消费逻辑。
+- **动作**：审计是否在自行累加 `function_call_arguments.delta` 拼最终参数；codex 明确把 arg
+  delta 当 trace-only（`sse/responses.rs:501`），只认 `response.output_item.done` 的完整 item。
+  若我们在拼 delta，改成以 done item 的参数为准，delta 只用于界面增量。**注意**：web 面 SSE
+  形状与 codex /responses 不同，本条先审计确认是否适用，别盲改。
+- **预期输出**：最终工具参数来源于 done item。
+- **验收**：`sse_dump.py <tool场景>` → 断言交付给 Cursor 的最终 args == done item 的 args；
+  `loop_ls.py` 工具闭环 PASS。
+
+### 作业 4：usage 上报对齐"服务端末轮 + 本地估后续"（直接适用）
+- **输入**：responses.js 回给 Cursor 的 usage 字段来源。
+- **动作**：口径改为"服务端权威的上一轮 total + 本地估算该轮之后追加项（工具输出等）"，而非纯
+  客户端计数（照 codex `history.rs:421 get_total_token_usage`）。**保持对客户端诚实上报**——
+  低报会让 Cursor 原生 compaction 永不触发（见高频坑与
+  [[feedback_gateway_usage_must_report_client_context_not_sent_prompt]]）。
+- **预期输出**：usage.outputTokens/inputTokens 反映客户端真实上下文。
+- **验收**：长会话 ≥20 轮，Cursor 侧最终能触发自身 compaction；`timing.py` 显示 usage 单调
+  合理，不出现"实发压缩后小数字"。
+
+### 跨线（压缩线，不落 bpi）：token 触发 + 留一条总结当账本
+- **不适用 bpi**（bpi 靠服务端会话态 conv-reuse + ZK_DIET/HISTDIET 结构瘦身，无模型总结压缩）。
+  **目标文件**是压缩线 skill：`~/.claude/skills/codex-compaction-v2-nonnative/SKILL.md`、
+  `codex-deepseek-tool-triage` 相关压缩。
+- **动作**：压缩触发改**按 token 阈值**（如上下文窗口 90%，codex `openai_models.rs:486`），不按
+  轮数；保留法照 codex `compact.rs:639`——只留最近 user 消息（≤20K token，newest→oldest）+
+  **一条总结**（模型自写的该轮末条 assistant），推理/工具历史丢掉，**总结即账本**（解开
+  [[feedback_compaction_without_ledger_causes_amnesia_loop]]）。
+- **验收**：压缩前后闭环 harness 不失忆（能引用被压掉轮次的关键结论）；token 触发点可复现。
+
+### 作业 5：上游流空闲超时兜底（2026-08-24 精读补审，此前从未审过）
+- **codex 怎么做**：SSE 面**完全不靠心跳**，`timeout(idle_timeout, stream.next())` 每读一 chunk 套
+  空闲超时（默认 300s，`sse/responses.rs:554`），超时→可重试 `Stream` 错→**整轮从历史重建**；
+  耗尽 max_retries 后 WS→HTTPS session 级兜底。锚点全表见记忆
+  [[reference_codex_transport_resilience_anchors_2026_08_24]]。
+- **bpi 现状**：responses.js `_fetch`=裸 `fetch()` 无 AbortController；`ZK_HB`(5s) 是**下游**保活
+  （保 Cursor 连接不死，检测不到上游已死）；`[stall]` 日志只在下一 chunk 到时**回溯打印**、不 abort
+  不重试；唯一兜底 = undici 默认 `bodyTimeout≈300s`（与 codex 300s 同量级）。
+- **判决（三段式）**：假设"上游卡死挂死 turn"——**数据不支持**（主线 `[stall]` 0 次、bpi-82 3 次
+  3–6s 短空档全自恢复、0 终端挂死）。代码路径存在≠在咬人（CLAUDE.md 红线）→**不盲打生产**。
+- **唯一隔离安全候选**：`ZK_IDLE_ABORT`（**默认关**）——仅在**首字节前 `started===false`** 窗口计时，
+  超阈值（>最坏 thinking 20s+，取 120s，<undici 300s）→ abort 上游 + **单次干净重试**。零重复风险
+  （尚未吐字节，重试铁律见记忆）。改动触及 api.js(`_fetch` 挂 AbortController)+responses.js(计时器)，
+  **两文件都在 CM `zk-cursor-bpi-patch`，隔离仍只碰 bpi 两 pod**。**要上须走六步 + 临时真 key 回归，
+  且需用户点头**（预防性硬化、当前无触发事件）。
+- **第二轮深读补判（08-24，中断/缓存/生命周期三区）**：bpi 对**客户端断连零处理**（live grep 全 0）
+  ——但**构造安全**：上游消费到完整结束+conv 照常存（与服务端一致），下轮指纹 miss 退全量，与
+  codex"WS 基线只在 Completed 提交→打断必回全量"同构。代价有界（slot 占用+白烧一条已计入消息），
+  **判决不改**；蹲证据可加 `req.on('close')` 观测计数。缓存前缀纪律/截断 middle-out/配对靠 call_id
+  均已同构或 N/A。两轮合计 **0 必改**，锚点全表见 doc §4.3/§4.4 + 记忆
+  [[reference_codex_transport_resilience_anchors_2026_08_24]]。
+
+## 组池（2026-08-24 已落地：cursor-web-fc-pool-terra{,-high,-max} 双线加权池）
+
+3 个共享别名各挂 bpi+bpi-82 两 deployment（`model_info.id=zerokey-cursor-web-fc-pool-{101,82}-terra*`，
+weight:1，api_key 占位符必带）。**零代码改动**：weighted_affinity 钩子对任何多 deployment group
+自动生效——Cursor 不发 session 头 → **key 级亲和**（同 key 钉同 pod，conv-reuse 缓存局部性不受损）。
+**fail-over 已演练（08-24 scale0 实测）**：①终止宽限期 30s 内 Terminating pod 带病服务（K8s
+ProxyTerminatingEndpoints 兜底），请求照常 200；②pod 死透后钉死 key = **前门 0 字节黑洞 ≈120s**
+（时钟=litellm `stream_timeout:120`，无 HTTP 头无心跳，客户端只能靠自己超时）；③120s 抛
+InternalServerError → WA fail-mark 180s + re-picking → **下一发自动甩健康线**（MISS→重选→200）。
+最坏代价=钉线 key 一发挂 ~2min，自愈无需人工。换线安全性=构造保证（新 pod 无缓存→指纹 miss→退化
+全量新会话）。已授权 key03/key04。三个纠偏：
+- **"acquireSlot 串行"说法不准**：镜像内 rate-limiter.js 是滑动窗限速器（每 pod 每 label 15s 放 5 个），
+  非互斥锁；单 pod 突发 >5/15s 才排队。
+- `/key/list` 的 `size` 上限 100（200→422）；**422 被 try/except 包住会伪装成"没找到 key"假阴性**。
+- `/key/update` 的 models 是**整表覆盖**：必须先读现有列表合并再写回。
+验收范式（同假绿③）：临时 scoped key 打暗号 ≥4 次 → 200+回显 + proxy 日志 WA MISS→HIT 链 +
+两 pod grep 暗号归属（本次 4:0）→ 删 key。回滚=`/model/delete` 6 个 pool id，旧 6 名全程未动。
+
+### 新账号入池清单（以后加号照抄，两步）
+
+1. **克隆新线**：`clone_web_fc_lane.py --apply --live-from-ws`（四步+假绿三连见"克隆到新账号"节）。
+2. **挂进池**：3 个 `/model/new`——`model_name` 用 pool 别名原名（同名即入池），`api_base` 指新线
+   svc，`model_info.id=zerokey-cursor-web-fc-pool-N-terra{,-high,-max}`（唯一），`weight:1`、
+   `api_key` 占位符、`mode:chat`、`-high/-max` 加 `reasoning_effort: high/xhigh`。模板=仓库
+   `scripts/zk-cursor-web/pool_register.py`（LANES 字典加一行即可）。**不用动 WA/hook/key**——钩子自动纳入加权，
+   已授权 pool 别名的 key 无需再授权；已有用户黏在原线（TTL 1h 过期后重新加权摊匀）。
+3. 验收走上面的范式，重点 grep **新** pod 日志确认真有流量落它（防"注册了但没人路由到"假绿）。
+   权重想不均衡（好号多吃）就在该 deployment 的 `litellm_params.weight` 调大，WA 实时生效。
 
 ## 未做的下一层杠杆
 
 acct101 账号级契约（行动协议写进 ChatGPT 账号自定义指令，优先级压过 Cursor persona）；
-多账号扩池破 acquireSlot 串行；codex 原生 FC（快+100%，烧 codex 份额，见
+~~多账号扩池破 acquireSlot 串行~~（已做首例 acct-82，见"克隆到新账号"）；~~多条线组池~~（已落地
++fail-over 已演练，见"组池"节）；第三条线克隆（clone_web_fc_lane.py + 入池只需 /model/new 挂进
+pool 别名）；codex 原生 FC（快+100%，烧 codex 份额，见
 `.claude/plans/indexed-riding-mountain.md` 的 cursor-fc-* plan）。

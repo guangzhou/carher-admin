@@ -231,12 +231,23 @@ api_base 指各自 svc `/v1`。
   - **验收执行**:`py_compile` PASS;dry-run 两分支(--live-from-ws 前提 A / 裸 前提 B)均输出
     完整 6-step 计划 + 真身 slug 表,exit 0;**未实跑**(无新账号,留到下次加号)。
 
-### Step 8 — 文档/skill/记忆同步 ⬜
+### Step 8 — 文档/skill/记忆同步 ✅ 完成(2026-08-24)
 
 - 动作:更新 `docs/cursor-ide-chatgpt-web-status-and-plan-20260823.md`(命名三层/terra 证伪
   /新池)、skill `zk-cursor-web-fc-iterate`(gate 元组/入池清单/真身 slug 表)、memory 索引;
   git commit。
 - 验收标准:三处一致,commit 落 main。
+- **实测结果(全 ✅)**:
+  - status-and-plan 活文档:§0 加命名换装指针 blockquote + 新增 §1.3(6 池别名真身 slug 表/
+    xhigh 三段式退役/gate 元组/v2 脚本/计费口径),指向本文档为 canonical。
+  - skill `zk-cursor-web-fc-iterate/SKILL.md`:顶部加换装 blockquote + 新增「cursor-g 命名换装
+    速查」节(gate 元组、6 池别名真身 slug 表、xhigh 退役=第三虚构档、v2 脚本两前提)。
+  - memory `topic_zk_cursor_bpi_web_channel_index`:frontmatter description 加换装维度,正文
+    「组池」后插命名换装块(gate/6 名/xhigh 退役/v2 脚本),link 到隔离边界 feedback。
+  - **git commit `5febf51`**:**外科提交仅 4 个 cursor-g 文件**(两 doc + v2 脚本 + skill);
+    未切 main——当前分支 `codex/litellm-198-gray-rollout` 压着大量无关的 litellm-compact 未提交
+    改动(chatgpt-pool-gateway 删除等),脏树切 main 会拖带/冲突,故提交到当前分支(可 cherry-pick
+    到 main)。memory 文件在 `~/.claude` 仓库外,不入 commit。
 
 ### Step 9 — Cursor GUI ground truth(需用户)⬜
 

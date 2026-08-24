@@ -375,6 +375,26 @@ CM 备份 `/Data/backups/zk-cursor-bpi-cm-20260824-213405-pre-rigid-envelope.jso
   (1754/1188 chars)。代价=竞态轮失去增量收益+多烧网页消息,正确性无损。
 - 用户本机日志复核:**21:40(保险丝)/22:11(v2)上线后零失败请求**;20:23 的失败样本属修复前。
 
+**客户端"连发消息被吞"竞态(2026-08-24 23:4x,源码级定位+本地补丁已落)**:
+- **病根(Cursor 3.16.29 原厂代码,本地 agent 通道)**:回复刚结束几秒内快速发下一条 →
+  composer.status 仍 "generating"(轮末后台摘要任务再置位;对自定义模型该任务撞
+  `Failed to resolve hook model legacy slug` 中断,复位被跳过)→ 消息进 `addToQueue()`
+  队列(输入框清空,像发出去了)→ 但补发器 `tryDispatchNextQueueItem()` 只挂在流结束/
+  状态复位事件上,那班车已过 → **队列孤儿=静默丢消息**。本机 3 例全同型,0 自动补发;
+  网关三重排除(SSE 收尾教科书级/连接秒关/转录 turn_ended success)。CursorX 的 5 个补丁
+  点均不碰此代码(逐一 diff 原版备份核实)——bug 是原厂的,CursorX 只是把我们带上这条
+  官方没打磨的实验通道(用自定义模型的必要代价)。
+- **修复=看门狗补丁 `scripts/zk-cursor-web/cursor_queue_pump_patch.py`**(CursorX 同款手术,
+  只加不改):`addToQueue()` 入口挂自清理泵——入队后每秒调官方补发器,≤60 次,队列空即停,
+  哨兵防重复武装;每 tick 先做官方同款状态自愈(status=generating 且 chatGenerationUUID 空
+  且 generatingBubbleIds 空 → 置回 completed,条件抄自 Cursor 自己的 summarization finally)。
+  补发器内部守卫 I1k 原样生效 → 幂等,真在生成时不抢发。锚点断言唯一+snippet 过 node --check
+  才写;dry-run 默认,--apply 打,--revert 回滚;备份 `~/.cursor-queue-pump-backup/`。
+  **同事机器照跑同一脚本即可**;跑 CursorX cli update 前须先 --revert;update.mode=none 必须保持。
+- 状态:本机已 --apply(3.16.29,双 bundle 各 +750B),待重启 Cursor 后 GUI 验证
+  (复现法:回复刚落地 1s 内发下一条,应 ~1-2s 自动补发;自愈踩中时结构化日志出
+  `[cx-queue-pump] healed stuck generating status`)。
+
 #### 反思:为什么走偏(对着本文档 review,2026-08-24)
 
 1. **验收标准错了(主因)**。Step 4 用 `/v1/responses` 合成探针验收——但真实 Cursor 发的是

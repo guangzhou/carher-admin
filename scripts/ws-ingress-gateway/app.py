@@ -116,6 +116,11 @@ async def _forward_turn(ws: web.WebSocketResponse, st: ConnState, frame: Dict[st
 
 
 async def ws_handler(request: web.Request) -> web.StreamResponse:
+    if os.getenv("WS_INGRESS_DEBUG") == "1":
+        print("== HANDSHAKE ==", request.method, request.path_qs, flush=True)
+        for k, v in request.headers.items():
+            vv = (v[:12] + "...") if k.lower() == "authorization" else v[:200]
+            print(f"  H {k}: {vv}", flush=True)
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return web.Response(status=401, text="missing bearer")
@@ -126,6 +131,8 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
         async for msg in ws:
             if msg.type != WSMsgType.TEXT:
                 break
+            if os.getenv("WS_INGRESS_DEBUG") == "1":
+                print(f"== FRAME ({len(msg.data)}B) ==", msg.data[:1500], flush=True)
             try:
                 frame = json.loads(msg.data)
             except Exception:
@@ -160,9 +167,34 @@ async def ws_handler(request: web.Request) -> web.StreamResponse:
 def make_app() -> web.Application:
     app = web.Application(client_max_size=64 * 1024 * 1024)
     app.router.add_get("/v1/responses", ws_handler)
+    app.router.add_get("/responses", ws_handler)
     # 非 WS 客户端打到这里 → 405，codex 秒回落 HTTP（实测我们外层现行为同款）。
-    app.router.add_post("/v1/responses", lambda r: web.Response(status=405))
+    # HTTP 回落路径必须**真正可服务**（官方语义: 405 只属于 WS 升级探测; 把 POST 也 405
+    # 会顶死 codex 的回落重试 → 客户端假死）。透明透传到内部 litellm。
+    async def _post_proxy(r: web.Request) -> web.StreamResponse:
+        if os.getenv("WS_INGRESS_DEBUG") == "1":
+            print(f"== HTTP-POST fallback == len={r.content_length}", flush=True)
+        body = await r.read()
+        async with ClientSession() as http:
+            async with http.post(f"{LITELLM_URL}/v1/responses", data=body,
+                                 headers={"Authorization": r.headers.get("Authorization", ""),
+                                          "Content-Type": "application/json"},
+                                 timeout=ClientTimeout(total=TURN_TIMEOUT_S)) as up:
+                resp = web.StreamResponse(status=up.status, headers={
+                    "Content-Type": up.headers.get("Content-Type", "text/event-stream")})
+                await resp.prepare(r)
+                async for chunk in up.content.iter_any():
+                    await resp.write(chunk)
+                await resp.write_eof()
+                return resp
+    app.router.add_post("/v1/responses", _post_proxy)
     app.router.add_get("/healthz", lambda r: web.Response(text="ok"))
+    if os.getenv("WS_INGRESS_DEBUG") == "1":
+        # 捕获打到别的 path 的握手尝试（K1）。必须最后注册,否则吞掉上面的路由。
+        async def _unmatched(r):
+            print(f"== UNMATCHED == {r.method} {r.path_qs} upgrade={r.headers.get('Upgrade')}", flush=True)
+            return web.Response(status=405)
+        app.router.add_route("*", "/{tail:.*}", _unmatched)
     return app
 
 

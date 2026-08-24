@@ -32,15 +32,19 @@
 
 **本次上线的池别名(6 名 × 2 线 = 12 deployment):**
 
-| 池别名 | 上游真身 slug(2026-08-24 model_slug 铁证) | reasoning_effort |
-|---|---|---|
-| `cursor-g-5.6-sol` | `gpt-5-6`(官方 title=GPT-5.6 Sol) | 不设 |
-| `cursor-g-5.6-sol-high` | `gpt-5-6` | `high`(→web `extended`) |
-| ~~`cursor-g-5.6-sol-xhigh`~~ **已退役** | `gpt-5-6` + `xhigh`(→web `max`)| **虚构档,见 Step 4** |
-| `cursor-g-5.6-luna` | `gpt-5-6-t-mini`(title=GPT-5.6 Luna) | 不设 |
-| `cursor-g-5.6-pro` | `gpt-5-6-pro` | 不设 |
-| `cursor-g-5.6-instant` | `gpt-5-6-instant` | 不设 |
-| `cursor-g-5.5` | `gpt-5-5-thinking` | 不设 |
+> ⚠️ **Step 9 修正(2026-08-24)**:下表"真身 slug"直接注册进 litellm 会拆掉 litellm 的
+> chat→responses 桥(版本解析只认点号)导致 GUI 全崩——litellm 层现注册**点分载体 slug**,
+> 真身由 lane ALIASES 映射回来(名实相符在 lane 层保证)。详见 §Step 9 事故与修复。
+
+| 池别名 | litellm 载体 slug(桥接承重) | lane 映射真身(上游实跑) | reasoning_effort |
+|---|---|---|---|
+| `cursor-g-5.6-sol` | `openai/gpt-5.6-sol` | `gpt-5-6`(官方 title=GPT-5.6 Sol) | 不设 |
+| `cursor-g-5.6-sol-high` | `openai/gpt-5.6-sol` | `gpt-5-6` | `high`(→web `extended`) |
+| ~~`cursor-g-5.6-sol-xhigh`~~ **已退役** | — | `gpt-5-6` + `xhigh`(→web `max`)| **虚构档,见 Step 4** |
+| `cursor-g-5.6-luna` | `openai/gpt-5.6-luna` | `gpt-5-6-t-mini`(title=GPT-5.6 Luna) | 不设 |
+| `cursor-g-5.6-pro` | `openai/gpt-5.6-pro` | `gpt-5-6-pro`(lane 原有映射) | 不设 |
+| `cursor-g-5.6-instant` | `openai/gpt-5.6-instant` | `gpt-5-6-instant` | 不设 |
+| `cursor-g-5.5` | `openai/gpt-5.5-thinking` | `gpt-5-5-thinking` | 不设 |
 
 `model_info.id` 规范:`zerokey-cursor-g-{101|82}-<变体>[-high]`。
 注册参数(每条):`api_key: sk-zerokey-web-noop`(假绿①)、`mode: chat`、`weight: 1`、
@@ -249,10 +253,66 @@ api_base 指各自 svc `/v1`。
     改动(chatgpt-pool-gateway 删除等),脏树切 main 会拖带/冲突,故提交到当前分支(可 cherry-pick
     到 main)。memory 文件在 `~/.claude` 仓库外,不入 commit。
 
-### Step 9 — Cursor GUI ground truth(需用户)⬜
+### Step 9 — Cursor GUI ground truth(需用户)⬜(修复已落地,待用户复测)
 
 - 动作:用户在 Cursor 模型名填 `cursor-g-5.6-sol`,真实点一次含工具调用的任务。
 - 验收标准:正常出字 + 工具真的动手。前 8 步全绿也替代不了这一步。
+
+#### Step 9 事故与修复(2026-08-24,GUI 首测失败 → 根因三反转 → 已修)
+
+**症状**:GUI 发 "hi"/「快速排序」无响应,后台 `No deployments available … cooldown_list=[zerokey-cursor-g-101-sol, zerokey-cursor-g-82-sol]`,每试必复现。
+
+**根因链(四环,每环有数据,前两次归因是错的)**:
+1. **Cursor 对所有自定义模型一律发 `/v1/chat/completions`**(不发 /responses)。证据:①事发 SpendLogs
+   traceback 入口帧 = proxy `chat_completion`;②反编译本机 Cursor 3.16.29 `cursor-agent-exec` 的端点
+   决策函数:`(baseUrl 为 api.openai.com 且名以 gpt-5 开头) || 名含 codex → responses,否则 chat`,
+   且 `/models` 目录 `api_types` 字段可显式覆盖(198 的 /v1/models 不带该字段)。terra 和 cursor-g
+   **都发 chat**——"Cursor直发/v1/responses"的旧认知对本线不成立。
+2. **旧 terra 名能走通是歪打正着**:litellm `responses_api_bridge_check`(main.py:955)对
+   **点分 gpt-5.4+ 版本名** + tools + reasoning_effort 的 chat 请求自动桥接成 responses → 打到 lane
+   `/v1/responses`(responses.js 正路)。函数级真值表实测:`gpt-5.6-*`/`gpt-5.5*`(点分)→ BRIDGE。
+3. **换装的真身 slug 拆了这座桥**:litellm 版本解析器只认点号,`is_model_gpt_5_4_plus("gpt-5-6")=False`
+   (横杠全 False,实测)→ 不桥接 → chat 直达 lane 坏路 chatgpt.js(把 litellm api_key 当 IDE 名查表,
+   fallback mapper 缺 `user` 函数)→ `TypeError: user is not a function`(lane 栈帧)→ 500 × litellm
+   重试 → 两 deployment 冷却 60s → "No deployments available"。
+4. Cursor 本地重试第 5 发赶上冷却结束、且 resume 消息末条非 user 恰好绕开崩溃行 → 只吐 14 token
+   垃圾,即用户看到的"成功但没内容"。
+
+**修复(两层配合,只碰 cursor-g + bpi 专属 CM,已验收)**:
+- **A. litellm 层**:12 条 cursor-g deployment 的 slug 换**点分载体**(桥接承重):sol/sol-high→
+  `openai/gpt-5.6-sol`、luna→`openai/gpt-5.6-luna`、pro→`openai/gpt-5.6-pro`、instant→
+  `openai/gpt-5.6-instant`、5.5→`openai/gpt-5.5-thinking`。`/model/update` 全量重建 litellm_params
+  (api_key 占位符保住),12/12 OK,复读确认。
+- **B. lane 层(名实相符)**:bpi CM `zk-cursor-bpi-patch` 的 `raw.js` ALIASES 加 4 行
+  **载体→真实预设**映射:`gpt-5.6-sol→gpt-5-6`、`gpt-5.6-luna→gpt-5-6-t-mini`、
+  `gpt-5.6-instant→gpt-5-6-instant`、`gpt-5.5-thinking→gpt-5-5-thinking`(pro 已有现成映射)。
+  SOP 六步:锚点断言唯一性 + node --check + CM 备份
+  `/Data/backups/zk-cursor-bpi-cm-20260824-200228-pre-cursor-g-alias.json` + merge patch(12 key
+  校验)+ 滚动两 lane。**旧名零变化**:`gpt-5.6-terra` 依旧原样透传(live 复核)。
+- **验收(标准已修正,见下)**:临时 scoped key 按 **Cursor 真实线型**(`/v1/chat/completions` +
+  stream:true + tools + reasoning_effort + user 结尾)打 6 变体 → **6/6 200+暗号逐字回显**
+  (6.6–8.4s);lane 重启后 **TypeError=0、[RES] DONE×12**(全走桥→responses.js 正路);live pod
+  `resolveModel` 函数真值 4 载体全中、旧名全原样。
+- 诚实边界:①本轮探针因 key 级亲和全落 82 线,101 线未直接吃到端到端流量(同 CM 同代码,机制层
+  由 live 函数真值佐证);②各变体上游实跑模型未重新烧探针回显(载体→真身映射是确定性代码 + 真身
+  slug 上游 honor 已由 §六 昨日 4/4 slug 回显铁证),最终以 GUI ground truth 收口;③桥接触发依赖
+  客户端带 reasoning_effort(Cursor agent 实测恒带——terra 能通即证明;若未来 Cursor 不带,chat
+  坏路仍在,备选加固=RAW_IDES 加占位 key 让误入流量走 raw 透传,未做)。
+
+#### 反思:为什么走偏(对着本文档 review,2026-08-24)
+
+1. **验收标准错了(主因)**。Step 4 用 `/v1/responses` 合成探针验收——但真实 Cursor 发的是
+   `/v1/chat/completions`。**验的不是真实流量走的那条路**,9/9 全绿全是假绿。讽刺的是红线早就写在
+   §3:「前门全绿 ≠ Cursor GUI 能过」、skill 里「合成探针全绿 ≠ 真流量能过」——我把 Step 9(GUI)
+   当成"最后补一下的手续",而不是把 Step 4 的探针**设计成复刻真实线型**。教训固化:**验收探针的
+   形状必须逐字段对齐真实客户端的线型(端点/stream/tools/effort/消息形状),否则不算验收**。
+2. **换装前提没做全链路审计**。计划把"虚构 slug→真身 slug"当纯正名操作,没有先回答"旧名为什么能
+   通"——虚构 slug 恰是触发 litellm 桥接的承重件。§三"缺少的关键信息"里从来没有"Cursor 实际发哪个
+   端点/litellm 内部走哪条路"这一行,它是未经检验的假设。教训:**改名/换 slug 也要先画请求全链路,
+   每一跳标"实测/假设"**。
+3. **诊断期连续三次无据归因**(litellm 桥接方向说反两次、"Cursor 对不同名字发不同端点"),都是
+   拿部分数据编完整故事。入口铁证(traceback 首帧=chat_completion)一直躺在 SpendLogs 里,却最后
+   才去拉。教训:**"X 导致 Y"先拉请求入口的原始记录(traceback/access log),再谈机制**。
 
 ## 五、风险与回滚总表
 
@@ -266,8 +326,12 @@ api_base 指各自 svc `/v1`。
 ## 六、事实 vs 推测
 
 **事实(live 实测,2026-08-24)**:
-- terra/sol/luna dot-slug 全部静默降级 `gpt-5-6`;`model_slug` 尺子有效(控制组
-  `gpt-5-5`/`-thinking`/`-mini` 逐一跟变);`-wm` 变体空流。
+- **Cursor 3.16.29 对本线所有名字一律发 `/v1/chat/completions`**(反编译端点决策函数 + 事发
+  traceback 双证);litellm `responses_api_bridge_check` 只对**点分 gpt-5.4+ 名**+tools+effort
+  桥接到 responses(函数真值表);横杠真身 slug 解析 False → 直達 chat 坏路崩(Step 9 事故)。
+- terra/sol/luna dot-slug 直发上游会静默降级 `gpt-5-6`;`model_slug` 尺子有效(控制组
+  `gpt-5-5`/`-thinking`/`-mini` 逐一跟变);`-wm` 变体空流。**但 dot-slug 在 litellm 层是桥接
+  承重件**(Step 9)——"虚构名"在两层各有一真一假两重身份。
 - 两账号(acct101/acct82)`/backend-api/models` 清单一致(均 Pro,20 slug);
   luna 真身=`gpt-5-6-t-mini`、sol 真身=`gpt-5-6`(官方 title 佐证)。
 - 新增 4 slug(pro/instant/t-mini/5-5-thinking)经管线 4/4 出流+slug 回显。

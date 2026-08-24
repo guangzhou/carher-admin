@@ -16,16 +16,25 @@ r8→r18 十轮实战沉淀。对象：CM `zk-cursor-bpi-patch` 的 `responses.j
 `_TARGET_PREFIX = ("cursor-web-fc-", "cursor-g-")`（`str.startswith` 原生吃元组）。两前缀都 fire，
 旧名行为零变化。改 gate 后必滚 proxy 盯 `rollout status` 到全就绪。
 
-**上线 6 池别名（真身 slug，2026-08-24 model_slug 铁证）**：
+**上线 6 池别名（2026-08-24 Step 9 修正：litellm 层=点分载体，真身在 lane ALIASES 映射）**：
 
-| 池别名（用户面，无数字） | 真身 slug | reasoning_effort |
-|---|---|---|
-| `cursor-g-5.6-sol` | `openai/gpt-5-6` | 不设(standard) |
-| `cursor-g-5.6-sol-high` | `openai/gpt-5-6` | `high`(→web extended) |
-| `cursor-g-5.6-luna` | `openai/gpt-5-6-t-mini` | 不设 |
-| `cursor-g-5.6-pro` | `openai/gpt-5-6-pro` | 不设 |
-| `cursor-g-5.6-instant` | `openai/gpt-5-6-instant` | 不设 |
-| `cursor-g-5.5` | `openai/gpt-5-5-thinking` | 不设 |
+> ⚠️ **桥接承重机制（Step 9 事故教训）**：Cursor 对本线所有名字一律发 `/v1/chat/completions`
+> （反编译 3.16.29 端点决策：非 api.openai.com host 且名不含 codex → chat）。能走 responses.js
+> 正路全靠 **litellm `responses_api_bridge_check` 的 chat→responses 桥**，它只认**点分 gpt-5.4+
+> slug**（`is_model_gpt_5_4_plus("gpt-5-6")=False`，横杠全 False）且要求 tools+reasoning_effort。
+> **litellm 层注册横杠真身 slug = 拆桥 = chat 直达 lane chatgpt.js 坏路**（ToolCompiler 把
+> api_key 当 IDE 名，`user is not a function` 崩→冷却→"No deployments available"）。名实相符由
+> bpi CM `raw.js` ALIASES 载体→真身映射保证。**验收探针必须复刻 Cursor 真实线型**
+> （chat+stream+tools+effort）——`/v1/responses` 合成探针全绿是假绿。
+
+| 池别名（用户面，无数字） | litellm 载体 slug | lane 映射真身 | reasoning_effort |
+|---|---|---|---|
+| `cursor-g-5.6-sol` | `openai/gpt-5.6-sol` | `gpt-5-6` | 不设(standard) |
+| `cursor-g-5.6-sol-high` | `openai/gpt-5.6-sol` | `gpt-5-6` | `high`(→web extended) |
+| `cursor-g-5.6-luna` | `openai/gpt-5.6-luna` | `gpt-5-6-t-mini` | 不设 |
+| `cursor-g-5.6-pro` | `openai/gpt-5.6-pro` | `gpt-5-6-pro` | 不设 |
+| `cursor-g-5.6-instant` | `openai/gpt-5.6-instant` | `gpt-5-6-instant` | 不设 |
+| `cursor-g-5.5` | `openai/gpt-5.5-thinking` | `gpt-5-5-thinking` | 不设 |
 
 - 每名各挂 101+82 两 deployment（`model_info.id=zerokey-cursor-g-{101,82}-<变体>`，weight:1、
   `api_key:sk-zerokey-web-noop` 占位符必带、`mode:chat`），WA 自动跨线负载+容灾。已授权 key03/key04。
@@ -36,8 +45,9 @@ r8→r18 十轮实战沉淀。对象：CM `zk-cursor-bpi-patch` 的 `responses.j
   以后加档前先临时真 key 打实质 prompt 验出字,空回显=红旗别上。**
 
 **v2 克隆脚本 = `scripts/zk-cursor-web/clone_web_fc_lane_v2.py`**（v1 保留当 terra 冻结era 参照）：
-一键出新线——step3 建 6 直连名 `cursor-g-<N>-*`（真身 slug、幂等）、step5 挂 6 池成员进别名、
-grant 读旧合并 12 名、step6 临时真 key 自动验收（禁 master）。真身 slug 表内置、无 xhigh。
+一键出新线——step3 建 6 直连名 `cursor-g-<N>-*`（点分载体 slug、幂等）、step5 挂 6 池成员进别名、
+grant 读旧合并 12 名、step6 临时真 key 自动验收（禁 master）。载体 slug 表内置、无 xhigh；
+新线共用 bpi CM，ALIASES 真身映射自动生效。
 两前提写进 docstring：①新号首次必须手抓 web seed（非 WS 成员时 `--live-from-ws` 不可用）；
 ②全部 lane 钉 standby 单 node（seed 是 hostPath）。live token 经 **ssh stdin** 传（不过 argv/命令
 串，防 ps 泄漏）。dry-run 默认，`--apply` 执行。回滚=`/model/delete` 12 个 `zerokey-cursor-g-<N>-*`。

@@ -12,15 +12,16 @@ Cursor 本地 agent 通道(CursorX 启用的 BYOK 路径)下:
     那班车已经开走 → 队列里的消息永远无人补发 = 静默丢失。
   - 本机观测:3 次全部同型(22:23:54/22:24:05/22:38:26),0 次自动补发。
 
-═══ 修法(只加不改,CursorX 同款手术) ═══
-在 addToQueue() 入口挂一个自清理看门狗:
-  - 入队 1s 后开始,每秒调一次官方补发器 tryDispatchNextQueueItem(),
-    最多 60 次;队列一空立即停;不重复武装(this._cxQP 哨兵)。
-  - 每次 tick 先做官方同款状态自愈:status==="generating" 且
-    chatGenerationUUID 为空 且 generatingBubbleIds 为空(= Cursor 自己在
-    summarization finally 里判定"实际无生成"的原条件)→ 置回 completed。
-  - 补发器内部守卫 I1k 原样生效:真在生成时照样拒发 → 本补丁幂等,
-    不会重复发、不会抢发,只是把错过的 pump 补上。
+═══ 修法 v3(2026-08-25 端到端实测定型;v1 只救一半) ═══
+在 addToQueue() 入口挂一个自清理看门狗,每秒 tick(最多 120 次,队列空即停):
+  - v1 只敢清「无 uuid」的卡死;实测真实卡死是**流已完成但 chatGenerationUUID 残留**
+    (诊断 tick:status=generating/hasUUID=true/bubbles=0 持续 2min+,队列 1→3 永不派发)。
+  - v3 判活口径抄 bundle 自己的:aiService.streamingAbortControllers.has(uuid)
+    (流一结束控制器必被删)。uuid 在但表里没它=僵尸标记,连续 3 tick 确认后清;
+    表里有它=真在生成,绝不碰(实测 70s 长生成全程未误杀);摸不到表=退化 v1(fail-safe)。
+  - 每次 tick 调官方补发器 tryDispatchNextQueueItem(),内部守卫原样生效 → 幂等不抢发。
+端到端验证(2026-08-25 01:17,本机):4 次 heal 全部 hadUUID=true,积压队列逐条自动
+派发(完成→~3s heal→派发→完成…),真生成不受影响。
 
 ═══ 用法 ═══
   python3 cursor_queue_pump_patch.py            # dry-run:验锚点,不写
@@ -40,24 +41,66 @@ BUNDLES = [
     "Contents/Resources/app/out/vs/workbench/workbench.glass.main.js",
 ]
 BACKUP_ROOT = os.path.expanduser("~/.cursor-queue-pump-backup")
-MARKER = "@cx-queue-pump:v1"
+MARKER = "@cx-queue-pump:v3"
 
 # 锚点:addToQueue 方法入口(仅参数名被 minify,用捕获组适配)
 ANCHOR = re.compile(r"(addToQueue\((\w+)\)\{if\(!this\.isValidQueueItem\(\2\)\)return;)")
 
-# 看门狗(只引用类方法名与 this 成员,与 minify 变量无关;全 try/catch fail-open)
+# v3(2026-08-25 实测定型):卡死实为「流已完成但 chatGenerationUUID 残留」——
+# tick 实测 status=generating/hasUUID=true/bubbles=0 持续 2min+,队列 1→3 永不派发。
+# 判活口径抄 bundle 自己的:aiService.streamingAbortControllers.has(uuid)
+# (流一结束控制器必被删)。uuid 在但表里没它=僵尸,连续 3 tick 确认后清标记;
+# 表里有它=真在生成,绝不碰;摸不到表=只按 v1 老条件走(fail-safe 不更坏)。
 SNIPPET = (
-    "/*" + MARKER + "*/try{if(this._cxQP===void 0){let _cxN=0;const _cxT=()=>{"
+    "/*" + MARKER + "*/try{if(this._cxQP===void 0){let _cxN=0,_cxS=0;const _cxT=()=>{"
     "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
     "const _h=this.getComposerHandleIfLoaded();"
     "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
-    'if(_d&&_d.status==="generating"&&_d.chatGenerationUUID===void 0&&(_d.generatingBubbleIds??[]).length===0){'
-    "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",generatingBubbleIds:[]});"
-    'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId})}catch(_e){}}'
+    'if(_d&&_d.status==="generating"&&(_d.generatingBubbleIds??[]).length===0){'
+    "const _u=_d.chatGenerationUUID;"
+    "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;"
+    "const _stale=_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u));"
+    "_cxS=_stale?_cxS+1:0;"
+    "if(_u===void 0||_cxS>=3){"
+    "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",chatGenerationUUID:void 0,generatingBubbleIds:[]});"
+    'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0})}catch(_e){}}}'
+    "else{_cxS=0}"
     "this.tryDispatchNextQueueItem();"
-    "if(this.getQueueItems().length>0&&++_cxN<60){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
+    "if(this.getQueueItems().length>0&&++_cxN<120){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
     "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
 )
+
+# 旧版本 snippet 原文(逐字节),--apply 时若在场则原地替换升级
+OLD_SNIPPETS = {
+    "@cx-queue-pump:v1": (
+        "/*@cx-queue-pump:v1*/try{if(this._cxQP===void 0){let _cxN=0;const _cxT=()=>{"
+        "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
+        "const _h=this.getComposerHandleIfLoaded();"
+        "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
+        'if(_d&&_d.status==="generating"&&_d.chatGenerationUUID===void 0&&(_d.generatingBubbleIds??[]).length===0){'
+        "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",generatingBubbleIds:[]});"
+        'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId})}catch(_e){}}'
+        "this.tryDispatchNextQueueItem();"
+        "if(this.getQueueItems().length>0&&++_cxN<60){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
+        "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
+    ),
+    "@cx-queue-diag:v2": (
+        "/*@cx-queue-diag:v2*/try{if(this._cxQP===void 0){let _cxN=0;const _cxT=()=>{"
+        "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
+        "const _h=this.getComposerHandleIfLoaded();"
+        "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
+        'try{this.structuredLogService.info("composer","[cx-queue-diag] tick",'
+        "{composerId:this.composerId,n:_cxN,queueLen:this.getQueueItems().length,"
+        "status:(_d&&_d.status)||null,hasUUID:!!(_d&&_d.chatGenerationUUID),"
+        "bubbleIds:((_d&&_d.generatingBubbleIds)||[]).length})}catch(_e){}"
+        'if(_d&&_d.status==="generating"&&_d.chatGenerationUUID===void 0&&(_d.generatingBubbleIds??[]).length===0){'
+        "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",generatingBubbleIds:[]});"
+        'this.structuredLogService.info("composer","[cx-queue-diag] healed stuck generating status",{composerId:this.composerId})}catch(_e){}}'
+        "this.tryDispatchNextQueueItem();"
+        "if(this.getQueueItems().length>0&&++_cxN<120){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
+        "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
+    ),
+}
 
 
 def cursor_version():
@@ -110,11 +153,17 @@ def main():
         p = os.path.join(APP, rel)
         src = open(p, encoding="utf8", errors="replace").read()
         if MARKER in src:
-            print("SKIP(已打过):", rel); continue
-        hits = ANCHOR.findall(src)
-        assert len(hits) == 1, "%s 锚点数=%d != 1,版本不匹配,拒绝动手" % (rel, len(hits))
-        plans.append((p, rel, src))
-        print("锚点 OK:", rel)
+            print("SKIP(已是 v3):", rel); continue
+        old = next((s for mk, s in OLD_SNIPPETS.items() if mk in src), None)
+        if old is not None:
+            assert src.count(old) == 1, "%s 旧 snippet 命中 !=1,拒绝" % rel
+            plans.append((p, rel, src, ("upgrade", old)))
+            print("旧版在场,将原地升级到 v3:", rel)
+        else:
+            hits = ANCHOR.findall(src)
+            assert len(hits) == 1, "%s 锚点数=%d != 1,版本不匹配,拒绝动手" % (rel, len(hits))
+            plans.append((p, rel, src, ("inject", None)))
+            print("锚点 OK:", rel)
     if not plans:
         print("无事可做。"); return
     if not a.apply:
@@ -124,12 +173,15 @@ def main():
     ts = time.strftime("%Y%m%d-%H%M%S")
     bdir = os.path.join(BACKUP_ROOT, "%s-%s" % (ver, ts))
     os.makedirs(bdir, exist_ok=True)
-    for p, rel, src in plans:
+    for p, rel, src, (mode, old) in plans:
         shutil.copy2(p, os.path.join(bdir, os.path.basename(rel)))
-        patched = ANCHOR.sub(lambda m: m.group(1) + SNIPPET, src, count=1)
-        assert patched.count(MARKER) == 1 and len(patched) > len(src)
+        if mode == "upgrade":
+            patched = src.replace(old, SNIPPET, 1)
+        else:
+            patched = ANCHOR.sub(lambda m: m.group(1) + SNIPPET, src, count=1)
+        assert patched.count(MARKER) == 1
         open(p, "w", encoding="utf8").write(patched)
-        print("patched: %s (+%d bytes)" % (rel, len(patched) - len(src)))
+        print("patched(%s): %s (%+d bytes)" % (mode, rel, len(patched) - len(src)))
     print("备份在:", bdir)
     print("完成。重启 Cursor 生效;回滚: python3 %s --revert" % sys.argv[0])
 

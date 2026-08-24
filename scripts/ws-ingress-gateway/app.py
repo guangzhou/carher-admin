@@ -63,9 +63,20 @@ async def _forward_turn(ws: web.WebSocketResponse, st: ConnState, frame: Dict[st
     """一轮：重建全量 → 内部 HTTP → SSE 逐帧转 WS → 提交账本。"""
     delta = frame.get("input") or []
     prev = frame.get("previous_response_id")
-    if prev and prev == st.last_rid and st.ledger:
-        full = st.ledger + list(delta)
-        mode = "incremental"
+    if prev:
+        if prev == st.last_rid and st.ledger:
+            full = st.ledger + list(delta)
+            mode = "incremental"
+        else:
+            # 客户端带 prev_id=认为我们持有历史，而我们无法重建（账本清空/错位/prev 不识）。
+            # **绝不能拿 delta 当全量转发**——那是静默失忆(模型只见最后一句还返回 200)。
+            # 官方纪律的安全动作=关连接：codex 自动重连并整份全量重发，零失忆。
+            print(f"ws_ingress turn aborted reason=unreconstructable_prev "
+                  f"(prev={str(prev)[:20]} ledger={len(st.ledger)})", flush=True)
+            st.ledger = []
+            st.last_rid = None
+            await ws.close(code=1011, message=b"gateway state lost; reconnect with full history")
+            raise ConnectionResetError("unreconstructable prev_id")
     else:
         full = list(delta)
         mode = "full"
@@ -112,9 +123,13 @@ async def _forward_turn(ws: web.WebSocketResponse, st: ConnState, frame: Dict[st
     if completed_rid:
         st.ledger = full + outputs
         if len(st.ledger) > LEDGER_MAX_ITEMS:
-            print(f"ws_ingress ledger cap hit ({len(st.ledger)}) -> reset", flush=True)
+            # 上限清账本时必须**连 last_rid 一起清**——否则下轮 delta+prev 匹配成功
+            # 却无账本可拼 → 掉进失忆分支。清了 rid, 下轮 prev 不识 → 关连接 → 客户端全量重发。
+            print(f"ws_ingress ledger cap hit ({len(st.ledger)}) -> reset(ledger+rid)", flush=True)
             st.ledger = []
-        st.last_rid = completed_rid
+            st.last_rid = None
+        else:
+            st.last_rid = completed_rid
         st.turns += 1
         print(f"ws_ingress turn mode={mode} in={len(delta)} full={len(full)} "
               f"out={len(outputs)} rid={completed_rid[:20]} dt={time.time()-t0:.1f}s", flush=True)

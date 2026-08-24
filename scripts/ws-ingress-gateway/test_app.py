@@ -104,11 +104,19 @@ async def main():
         check("T2 reconstructed full history (4 items, delta was 1)",
               len(SEEN_BODIES[-1]["input"]) == 4)
 
-        # 4. prev 不匹配 → 按全量对待
+        # 4. prev 不识 → **关连接**(绝不拿 delta 当全量=静默失忆); 客户端将重连全量
+        n4 = len(SEEN_BODIES)
         evs = await drive(ws, {"type": "response.create", "generate": True, "model": "m",
                                "input": [u("A"), u("B")], "previous_response_id": "resp_bogus"})
-        check("mismatched prev -> treated as client-full (2 items)",
-              len(SEEN_BODIES[-1]["input"]) == 2)
+        check("unreconstructable prev -> connection closed, NOT forwarded",
+              len(SEEN_BODIES) == n4 and evs and evs[-1][0] == "WS")
+        # 重连后客户端按纪律发全量 → 正常
+        ws = await s.ws_connect(f"{base}/v1/responses",
+                                headers={"Authorization": "Bearer sk-test"})
+        evs = await drive(ws, {"type": "response.create", "generate": True, "model": "m",
+                               "input": [u("A"), u("B")]})
+        check("reconnect + client-full works", evs[-1]["type"] == "response.completed"
+              and len(SEEN_BODIES[-1]["input"]) == 2)
 
         # 5. 上游 429 → error 帧 + 账本清空(下一轮全量)
         evs = await drive(ws, {"type": "response.create", "generate": True, "model": "boom",
@@ -137,10 +145,11 @@ async def main():
         evs = await drive(ws2, {"type": "response.create", "generate": True, "model": "m",
                                 "input": [u("a"), u("b"), u("c")]})
         ridc = evs[-1]["response"]["id"]
+        n7 = len(SEEN_BODIES)
         evs = await drive(ws2, {"type": "response.create", "generate": True, "model": "m",
                                 "input": [u("d")], "previous_response_id": ridc})
-        check("ledger cap reset -> next turn treated as client-full (1 item)",
-              len(SEEN_BODIES[-1]["input"]) == 1)
+        check("ledger-cap reset -> delta+prev CLOSED not amnesia-forwarded",
+              len(SEEN_BODIES) == n7 and evs and evs[-1][0] == "WS")
         G.LEDGER_MAX_ITEMS = 20000
         await ws2.close()
         # 8. 双连接隔离: 各自账本互不串

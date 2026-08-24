@@ -51,18 +51,21 @@ STANDBY = "10.68.13.225"
 SSH = ["sshpass", "-p", "Hn8#mKLp3QxZ", "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=20"]
 KUBECONFIG_EXPORT = "export KUBECONFIG=/home/cltx/.kube/config; "
 
-# 载体 slug 表(2026-08-24 Step 9 修正:litellm 层必须注册**点分载体**——litellm 的
+# 载体 slug 表(2026-08-24 Step 9 两轮修正:litellm 层必须注册**点分载体**——litellm 的
 # chat→responses 桥只认点分 gpt-5.4+ 名(is_model_gpt_5_4_plus 横杠全 False),Cursor 真实
 # 流量全走 /v1/chat/completions,不桥接就掉进 lane chatgpt.js 坏路崩。真身由 bpi CM raw.js
-# 的 ALIASES 映射(gpt-5.6-sol→gpt-5-6 等,新线共用同一 CM,映射自动生效)。xhigh 已退役。
+# 的 ALIASES 映射(gpt-5.6-sol→gpt-5-6 等,新线共用同一 CM,映射自动生效)。
+# ⚠️ effort 必须钉在 deployment(桥第二道门 reasoning_effort is not None 不能依赖客户端:
+# Cursor 模型 parameters 为空时不发 effort)。base 档钉 medium(lane 映射→web standard=默认档)。
+# xhigh 已退役。
 # (variant_key, 直连名后缀, 池别名, litellm 载体 slug, reasoning_effort)
 VARIANTS = [
-    ("sol",      "5.6-sol",      "cursor-g-5.6-sol",      "openai/gpt-5.6-sol",      None),
+    ("sol",      "5.6-sol",      "cursor-g-5.6-sol",      "openai/gpt-5.6-sol",      "medium"),
     ("sol-high", "5.6-sol-high", "cursor-g-5.6-sol-high", "openai/gpt-5.6-sol",      "high"),
-    ("luna",     "5.6-luna",     "cursor-g-5.6-luna",     "openai/gpt-5.6-luna",     None),
-    ("pro",      "5.6-pro",      "cursor-g-5.6-pro",      "openai/gpt-5.6-pro",      None),
-    ("instant",  "5.6-instant",  "cursor-g-5.6-instant",  "openai/gpt-5.6-instant",  None),
-    ("v5.5",     "5.5",          "cursor-g-5.5",          "openai/gpt-5.5-thinking", None),
+    ("luna",     "5.6-luna",     "cursor-g-5.6-luna",     "openai/gpt-5.6-luna",     "medium"),
+    ("pro",      "5.6-pro",      "cursor-g-5.6-pro",      "openai/gpt-5.6-pro",      "medium"),
+    ("instant",  "5.6-instant",  "cursor-g-5.6-instant",  "openai/gpt-5.6-instant",  "medium"),
+    ("v5.5",     "5.5",          "cursor-g-5.5",          "openai/gpt-5.5-thinking", "medium"),
 ]
 
 COMMON = {

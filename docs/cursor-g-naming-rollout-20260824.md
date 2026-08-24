@@ -293,11 +293,37 @@ api_base 指各自 svc `/v1`。
   stream:true + tools + reasoning_effort + user 结尾)打 6 变体 → **6/6 200+暗号逐字回显**
   (6.6–8.4s);lane 重启后 **TypeError=0、[RES] DONE×12**(全走桥→responses.js 正路);live pod
   `resolveModel` 函数真值 4 载体全中、旧名全原样。
-- 诚实边界:①本轮探针因 key 级亲和全落 82 线,101 线未直接吃到端到端流量(同 CM 同代码,机制层
-  由 live 函数真值佐证);②各变体上游实跑模型未重新烧探针回显(载体→真身映射是确定性代码 + 真身
-  slug 上游 honor 已由 §六 昨日 4/4 slug 回显铁证),最终以 GUI ground truth 收口;③桥接触发依赖
-  客户端带 reasoning_effort(Cursor agent 实测恒带——terra 能通即证明;若未来 Cursor 不带,chat
-  坏路仍在,备选加固=RAW_IDES 加占位 key 让误入流量走 raw 透传,未做)。
+- 诚实边界:①各变体上游实跑模型未重新烧探针回显(载体→真身映射是确定性代码 + 真身
+  slug 上游 honor 已由 §六 昨日 4/4 slug 回显铁证),最终以 GUI ground truth 收口;②~~桥接触发
+  依赖客户端带 reasoning_effort~~ **← 该缺口已在第二轮修复中封死,见下**。
+
+#### Step 9 第二轮(2026-08-24 20:2x,用户 GUI 复测仍崩 → 抄作业没抄全 → effort 钉死)
+
+**症状**:slug 修复后用户 GUI 再测,首发仍 `[MESSAGES] 6`+TypeError(chat 坏路),Cursor resume
+重试恰好末条非 user 绕开崩溃行,把 lane 工具文法 `⟦ask¦question=…⟧` 当正文漏给用户。
+
+**两个验收错误(承认在案)**:
+1. 第一轮验收探针带了 `reasoning_effort:"medium"` —— **真实 Cursor(该模型 parameters 为空时)
+   不发 effort**,桥的第二道门(`reasoning_effort is not None`)不过,又是形状不符的假绿。
+2. "[RES] DONE 只属于 responses.js"是错尺子——chat 路径成功时也打 `[RES] DONE`(时间戳分离
+   实证),第一轮"流量全走正路"的判据无效(结论侥幸未翻:探针带 effort 确实桥接了,否则
+   user 结尾必崩)。
+
+**为什么 terra 行而 cursor-g 不行(最终解)**:v1 作业原文(clone_web_fc_lane.py:189)证明 terra
+的 api_key 同为 `sk-zerokey-web-noop`、参数与 cursor-g 等价——唯一剩余变量是**客户端侧**:用户
+Cursor 里 terra 配过 thinking 参数(请求带 effort → 桥通),cursor-g 新名 `parameters:[]`(本机
+state.vscdb 实证)→ 不带 effort → 桥断。**"抄作业"必须抄全链路两侧:服务端参数 + 客户端配置。**
+
+**修复(第二刀,决定性实验先行)**:
+- 决定性实验:`cursor-g-5.6-sol-high`(deployment 自带 eff=high)按真形状(chat+tools+**无**
+  client effort)打 → 200+回显 → **证明 deployment 级 reasoning_effort 能喂进桥**。
+- `/model/update` 给 10 条 base deployment 钉 `reasoning_effort:"medium"`(lane `_CARHER_TE_MAP`
+  medium→standard=网页默认档,行为不变;sol-high 保持 high)→ 桥接不再依赖客户端。10/10 OK。
+- **验收(真形状:chat+tools+无 effort+user 结尾——修复前此形状必崩)**:6/6 200+暗号回显;
+  两 lane TypeError=0;本轮 101/82 两线均实际吃到端到端流量(10/4 枚暗号)。
+- 残余风险:Cursor 若发**不带 tools** 的请求(如纯 Ask 无工具)→ 桥仍不触发 → chat 坏路
+  (`user is not a function`)。terra 同样暴露于此(冻结名共病)。备选加固=lane chatgpt.js
+  RAW_IDES 加 `sk-zerokey-web-noop` 走 raw 透传,未做,等触发事件或用户点头。
 
 #### 反思:为什么走偏(对着本文档 review,2026-08-24)
 

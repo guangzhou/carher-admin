@@ -1,6 +1,6 @@
 #!/bin/sh
 # 打包同事分发用的 cursor-g 安装包(零依赖跨平台)。产物:cursor-g-setup.zip
-# 内含:引擎(js+sh+cmd)+ 双击安装器(Mac .command / Windows .cmd)+ README。
+# 内含:引擎(js+sh+cmd)+ 双击安装器(Mac .command / Windows .cmd)+ 双击修复器 + README。
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 STAGE="$(mktemp -d)/cursor-g-setup"
@@ -10,7 +10,7 @@ cp "$HERE/cursor_team_setup.js"  "$STAGE/"
 cp "$HERE/cursor_team_setup.sh"  "$STAGE/"
 cp "$HERE/cursor_team_setup.cmd" "$STAGE/"
 
-# 双击安装器(Mac):调用引擎并带 --apply,跑完暂停等回车
+# 双击安装器(Mac):调用引擎并带 --apply(装完会提示粘一次 Key),跑完暂停等回车
 cat > "$STAGE/INSTALL-Mac.command" <<'MAC'
 #!/bin/sh
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -18,7 +18,6 @@ sh "$DIR/cursor_team_setup.sh" --apply
 echo ""
 printf "按回车键关闭本窗口…"; read _
 MAC
-chmod +x "$STAGE/INSTALL-Mac.command" "$STAGE/cursor_team_setup.sh"
 
 # 双击安装器(Windows):调用引擎并带 --apply,跑完 pause
 cat > "$STAGE/INSTALL-Windows.cmd" <<'WIN'
@@ -28,6 +27,26 @@ call "%~dp0cursor_team_setup.cmd" --apply
 echo.
 pause
 WIN
+
+# 双击修复器(Mac):Cursor 升级后 cursor-g 没了,双击它一键重打补丁(不碰配置/Key)
+cat > "$STAGE/REPAIR-Mac.command" <<'MACR'
+#!/bin/sh
+DIR="$(cd "$(dirname "$0")" && pwd)"
+sh "$DIR/cursor_team_setup.sh" --repair
+echo ""
+printf "按回车键关闭本窗口…"; read _
+MACR
+
+# 双击修复器(Windows)
+cat > "$STAGE/REPAIR-Windows.cmd" <<'WINR'
+@echo off
+chcp 65001 >nul
+call "%~dp0cursor_team_setup.cmd" --repair
+echo.
+pause
+WINR
+
+chmod +x "$STAGE/INSTALL-Mac.command" "$STAGE/REPAIR-Mac.command" "$STAGE/cursor_team_setup.sh"
 
 cat > "$STAGE/README.txt" <<'RD'
 cursor-g 一键安装(零依赖,不用装 Python / Node)
@@ -42,9 +61,14 @@ cursor-g 一键安装(零依赖,不用装 Python / Node)
   Windows :双击 INSTALL-Windows.cmd
            (若弹安全提示,选"仍要运行")
 
-看到"完成"就装好了。最后一步在 Cursor 里:
-  设置 → Models → OpenAI API Key,粘贴你的 key,点 Verify。
-  然后模型菜单里选 cursor-g-5.6-sol 即可用。
+  安装过程中窗口会让你「粘贴 API Key 后回车」——粘一次就好,脚本自动写进去。
+  (Windows 上若自动写 Key 跳过了,按提示在 Cursor 设置里手动粘一次即可。)
+
+看到"完成"就装好了:启动 Cursor,模型菜单默认就是 cursor-g-5.6-sol,直接用。
+
+Cursor 升级后 cursor-g 不见了怎么办?
+  不用回滚升级。双击 REPAIR-Mac.command(Windows: REPAIR-Windows.cmd)一键修复,
+  重启 Cursor 即可。你的 Key 和配置都还在,修复只重打补丁。
 
 出问题看飞书文档的"常见问题",或找管理员。
 RD

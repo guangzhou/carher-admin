@@ -66,6 +66,7 @@ DEFAULT_MODELS = [
     "cursor-g-5.6-sol", "cursor-g-5.6-sol-high", "cursor-g-5.6-luna",
     "cursor-g-5.6-pro", "cursor-g-5.6-instant", "cursor-g-5.5",
 ]
+DEFAULT_MODEL = "cursor-g-5.6-sol"  # 装完直接选中它,用户不用在菜单里挑
 
 # ── bundle 补丁定义:每处一个 (name, marker, compiled_regex, replace_fn) ──
 # 锚点全部挂在稳定语义地标上(getModelPickerDisplayConfiguration / clientSupportsRoutedModelUpdate /
@@ -195,8 +196,21 @@ def merge_config(dry):
     ai["userAddedModels"] = dedup(ai.get("userAddedModels"))
     ai["modelOverrideEnabled"] = dedup(ai.get("modelOverrideEnabled"))
     added = [m for m in ARGS.models if m not in uam_before]
-    print("   config diff: baseUrl %r -> %r ; useOpenAIKey %r -> True ; +models %s"
-          % (before["baseUrl"], ARGS.base_url, before["useKey"], added or "(none, all present)"))
+    # #3 默认模型:装完直接选中 cursor-g-5.6-sol。保守——仅当当前选中的不是任一 cursor-g 时才设。
+    mc = ai.setdefault("modelConfig", {})
+    cur_name = (mc.get("composer") or {}).get("modelName")
+    if not (isinstance(cur_name, str) and cur_name.startswith("cursor-g")):
+        for feat in ("composer", "cmd-k"):
+            f = dict(mc.get(feat) or {})
+            f["modelName"] = DEFAULT_MODEL
+            f["selectedModels"] = [{"modelId": DEFAULT_MODEL, "parameters": []}]
+            mc[feat] = f
+        def_model_set = DEFAULT_MODEL
+    else:
+        def_model_set = "(skip, 已是 %s)" % cur_name
+    print("   config diff: baseUrl %r -> %r ; useOpenAIKey %r -> True ; +models %s ; defaultModel -> %s"
+          % (before["baseUrl"], ARGS.base_url, before["useKey"],
+             added or "(none, all present)", def_model_set))
     if not dry:
         cur.execute("UPDATE ItemTable SET value=? WHERE key=?",
                     (json.dumps(d, ensure_ascii=False), APP_USER_KEY))
@@ -230,7 +244,8 @@ def do_backup(ver, bundle_plans, old_blob, old_settings):
     os.makedirs(bdir, exist_ok=True)
     for p, _ in bundle_plans:
         shutil.copy2(p, os.path.join(bdir, os.path.basename(p)))
-    open(os.path.join(bdir, "applicationUser.blob.json"), "w", encoding="utf8").write(old_blob)
+    if old_blob is not None:
+        open(os.path.join(bdir, "applicationUser.blob.json"), "w", encoding="utf8").write(old_blob)
     if os.path.exists(SETTINGS_JSON):
         shutil.copy2(SETTINGS_JSON, os.path.join(bdir, "settings.json"))
     print("   备份 ->", bdir)
@@ -268,6 +283,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--revert", action="store_true")
+    ap.add_argument("--repair", action="store_true", help="只重打 bundle(Cursor 升级后失效用;不碰配置)")
+    ap.add_argument("--pin-update", action="store_true", help="写 update.mode:none 锁定不升级(默认不写)")
     ap.add_argument("--base-url", default=DEFAULT_BASE_URL)
     ap.add_argument("--models", default=",".join(DEFAULT_MODELS),
                     type=lambda s: [x.strip() for x in s.split(",") if x.strip()])
@@ -287,8 +304,9 @@ def main():
         return revert()
 
     if not ver.startswith(SUPPORTED_MAJOR_MINOR + ".") and not ARGS.force_version:
-        print("!! 只支持 Cursor %s.x;当前 %s。加 --force-version 自担风险,或等适配。"
-              % (SUPPORTED_MAJOR_MINOR, ver)); sys.exit(2)
+        # #4 软版本闸:只告警不拒;真正安全阀=plan_bundle 里锚点必须 exactly-1。
+        print("⚠️  本安装器按 Cursor %s.x 设计,当前 %s。将继续尝试;bundle 结构变了认不出锚点会自动拒绝(不改坏)。"
+              % (SUPPORTED_MAJOR_MINOR, ver))
     if cursor_running():
         print("!! Cursor 正在运行 —— 请先完全退出(⌘Q)再跑,否则 state.vscdb 写入会被内存覆盖。"); sys.exit(2)
 
@@ -303,10 +321,25 @@ def main():
         if not ok:
             print("   !! 语法校验不过,终止,未落任何盘。"); sys.exit(4)
         print("   node --check OK:", os.path.basename(p))
+
+    # #4 修复模式:只重打 bundle,不碰配置/Key。
+    if ARGS.repair:
+        if not plans:
+            print("\n✅ bundle 补丁都在,无需修复。"); return
+        print("--- 修复:重打 bundle ---")
+        do_backup(ver, plans, None, None)
+        for p, txt in plans:
+            open(p, "w", encoding="utf8").write(txt); print("   patched:", os.path.basename(p))
+        print("\n✅ 修复完成,重启 Cursor 即可继续用 cursor-g。"); return
+
     print("--- 3) BYOK 配置差异 ---")
     old_blob = merge_config(dry=not ARGS.apply)
     print("--- 4) update.mode ---")
-    old_settings = set_update_none(dry=not ARGS.apply)
+    if ARGS.pin_update:
+        old_settings = set_update_none(dry=not ARGS.apply)
+    else:
+        old_settings = None
+        print("   跳过(允许 Cursor 自动升级;升级后失效跑 --repair)。加 --pin-update 可锁定不升级。")
 
     if not ARGS.apply:
         print("\n[dry-run] 以上全部通过。加 --apply 执行(会先备份到 %s)。" % BACKUP_ROOT)
@@ -325,11 +358,13 @@ def main():
         open(os.path.join(bdir, "applicationUser.blob.json"), "w", encoding="utf8").write(old_blob)
         print("   备份(仅配置)->", bdir)
 
-    print("\n✅ 完成。还差一步(只此一步,交给 Cursor 自己做——key 是钥匙串加密的):")
+    # Python 版不自动写 Key:本进程非 Cursor 签名,读钥匙串会弹框(JS 版走 in-process keytar 才不弹)。
+    print("\n✅ 完成。还差一步(只此一步,交给 Cursor 自己做——key 是钥匙串加密的,Python 版不自动写):")
     print("   1. 启动 Cursor → Settings → Models → OpenAI API Key,粘贴你的 key,点 Verify。")
-    print("      (base-url、模型列表、开关都已预填好,你只需粘 key。)")
-    print("   2. 就绪。菜单里选 cursor-g-5.6-sol 等即可用。")
-    print("   回滚整包:python3 %s --revert" % os.path.basename(sys.argv[0]))
+    print("      (base-url、模型列表、开关都已预填好,默认模型已是 cursor-g-5.6-sol,你只需粘 key。)")
+    print("   2. 就绪。(想让脚本自动写 Key 请用 JS 版 cursor_team_setup.sh --apply。)")
+    print("   回滚整包:python3 %s --revert;Cursor 升级后失效:python3 %s --repair"
+          % (os.path.basename(sys.argv[0]), os.path.basename(sys.argv[0])))
 
 
 if __name__ == "__main__":

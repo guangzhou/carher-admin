@@ -41,37 +41,107 @@ BUNDLES = [
     "Contents/Resources/app/out/vs/workbench/workbench.glass.main.js",
 ]
 BACKUP_ROOT = os.path.expanduser("~/.cursor-queue-pump-backup")
-MARKER = "@cx-queue-pump:v3"
+MARKER = "@cx-queue-pump:v3.4"
 
 # 锚点:addToQueue 方法入口(仅参数名被 minify,用捕获组适配)
 ANCHOR = re.compile(r"(addToQueue\((\w+)\)\{if\(!this\.isValidQueueItem\(\2\)\)return;)")
 
-# v3(2026-08-25 实测定型):卡死实为「流已完成但 chatGenerationUUID 残留」——
-# tick 实测 status=generating/hasUUID=true/bubbles=0 持续 2min+,队列 1→3 永不派发。
-# 判活口径抄 bundle 自己的:aiService.streamingAbortControllers.has(uuid)
-# (流一结束控制器必被删)。uuid 在但表里没它=僵尸,连续 3 tick 确认后清标记;
-# 表里有它=真在生成,绝不碰;摸不到表=只按 v1 老条件走(fail-safe 不更坏)。
+# v3.4(2026-08-25 修 v3.3 误杀:折叠/漏答的真凶):
+# 实测证据链:heal 后 85ms 即 "Aborted current chat" + 空助手气泡 + 两问挤一轮。
+# 机制:官方派发启动新轮的前 2-3s(pre_network 窗口)status=generating 但 uuid 未登记,
+# 旧判活 `_u===void 0 立刻 heal` 把起跑轮误判为僵尸 → heal → 官方派发下一条 →
+# submitChatMaybeAbortCurrent 掐死起跑轮(空回复)→ 下一轮带着两问 → 折叠/漏答。
+# 修法(仍全走官方件):
+#   ① 官方在飞标记 inFlightDispatchItemIds 非空(官方派发从入队到流结束全程置位)= 起跑/
+#     生成中,绝不判僵尸;
+#   ② 取消"无 uuid 立刻判死"特权(v1 遗留),一律连续 3 tick 确认。
+# 其余同 v3.3:队列非空就守(无寿命上限),派发全走官方 tryDispatchNextQueueItem()。
 SNIPPET = (
-    "/*" + MARKER + "*/try{if(this._cxQP===void 0){let _cxN=0,_cxS=0;const _cxT=()=>{"
+    "/*" + MARKER + "*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{"
     "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
     "const _h=this.getComposerHandleIfLoaded();"
     "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
     'if(_d&&_d.status==="generating"&&(_d.generatingBubbleIds??[]).length===0){'
     "const _u=_d.chatGenerationUUID;"
     "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;"
-    "const _stale=_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u));"
+    "const _fl=this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0;"
+    "const _stale=!_fl&&(_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u)));"
     "_cxS=_stale?_cxS+1:0;"
-    "if(_u===void 0||_cxS>=3){"
+    "if(_cxS>=3){"
     "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",chatGenerationUUID:void 0,generatingBubbleIds:[]});"
     'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0})}catch(_e){}}}'
     "else{_cxS=0}"
     "this.tryDispatchNextQueueItem();"
-    "if(this.getQueueItems().length>0&&++_cxN<120){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
+    "if(this.getQueueItems().length>0){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
     "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
 )
 
 # 旧版本 snippet 原文(逐字节),--apply 时若在场则原地替换升级
 OLD_SNIPPETS = {
+    "@cx-queue-pump:v3.3": (
+        "/*@cx-queue-pump:v3.3*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{"
+        "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
+        "const _h=this.getComposerHandleIfLoaded();"
+        "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
+        'if(_d&&_d.status==="generating"&&(_d.generatingBubbleIds??[]).length===0){'
+        "const _u=_d.chatGenerationUUID;"
+        "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;"
+        "const _stale=_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u));"
+        "_cxS=_stale?_cxS+1:0;"
+        "if(_u===void 0||_cxS>=3){"
+        "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",chatGenerationUUID:void 0,generatingBubbleIds:[]});"
+        'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0})}catch(_e){}}}'
+        "else{_cxS=0}"
+        "this.tryDispatchNextQueueItem();"
+        "if(this.getQueueItems().length>0){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
+        "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
+    ),
+    "@cx-queue-pump:v3": (
+        "/*@cx-queue-pump:v3*/try{if(this._cxQP===void 0){let _cxN=0,_cxS=0;const _cxT=()=>{"
+        "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
+        "const _h=this.getComposerHandleIfLoaded();"
+        "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
+        'if(_d&&_d.status==="generating"&&(_d.generatingBubbleIds??[]).length===0){'
+        "const _u=_d.chatGenerationUUID;"
+        "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;"
+        "const _stale=_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u));"
+        "_cxS=_stale?_cxS+1:0;"
+        "if(_u===void 0||_cxS>=3){"
+        "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",chatGenerationUUID:void 0,generatingBubbleIds:[]});"
+        'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0})}catch(_e){}}}'
+        "else{_cxS=0}"
+        "this.tryDispatchNextQueueItem();"
+        "if(this.getQueueItems().length>0&&++_cxN<120){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
+        "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
+    ),
+    "@cx-queue-diag:v3.2": (
+        "/*@cx-queue-diag:v3.2*/try{if(this._cxQP===void 0){let _cxN=0,_cxS=0;const _cxT=()=>{"
+        "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
+        "const _h=this.getComposerHandleIfLoaded();"
+        "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
+        'if(_d&&_d.status==="generating"&&(_d.generatingBubbleIds??[]).length===0){'
+        "const _u=_d.chatGenerationUUID;"
+        "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;"
+        "const _stale=_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u));"
+        "_cxS=_stale?_cxS+1:0;"
+        "if(_u===void 0||_cxS>=3){"
+        "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",chatGenerationUUID:void 0,generatingBubbleIds:[]});"
+        'this.structuredLogService.info("composer","[cx-queue-diag] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0})}catch(_e){}}}'
+        "else{_cxS=0}"
+        "var _qb;try{_qb=this.getQueueItems()}catch(_e){_qb=[]}"
+        "var _qids;try{_qids=_qb.map(function(q){"
+        "var _id=q&&(q.id||q.bubbleId||q.messageId||q.requestId)||\"?\";"
+        "var _dl;try{_dl=(q&&q.delivery===void 0)?\"none\":(((q.delivery&&q.delivery.kind)||\"set\")+\"/sc=\"+!!(q.delivery&&q.delivery.serverConfirmed===true))}catch(_e){_dl=\"err\"}"
+        "return _id+\"|\"+_dl})}catch(_e){_qids=[]}"
+        "var _if;try{var _mm=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;_if=_mm&&_mm.size!==void 0?_mm.size:-1}catch(_e){_if=-2}"
+        "this.tryDispatchNextQueueItem();"
+        "try{var _qa=this.getQueueItems();this.structuredLogService.info(\"composer\",\"[cx-queue-diag] tick\","
+        "{composerId:this.composerId,n:_cxN,status:(_d&&_d.status)||null,hasUUID:!!(_d&&_d.chatGenerationUUID),"
+        "bubbleIds:((_d&&_d.generatingBubbleIds)||[]).length,inflight:_if,"
+        "qlenBefore:_qb.length,qlenAfter:_qa.length,dispatched:_qb.length-_qa.length,qids:_qids})}catch(_e){}"
+        "if(this.getQueueItems().length>0&&++_cxN<120){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
+        "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
+    ),
     "@cx-queue-pump:v1": (
         "/*@cx-queue-pump:v1*/try{if(this._cxQP===void 0){let _cxN=0;const _cxT=()=>{"
         "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
@@ -153,12 +223,12 @@ def main():
         p = os.path.join(APP, rel)
         src = open(p, encoding="utf8", errors="replace").read()
         if MARKER in src:
-            print("SKIP(已是 v3):", rel); continue
+            print("SKIP(已是 %s):" % MARKER, rel); continue
         old = next((s for mk, s in OLD_SNIPPETS.items() if mk in src), None)
         if old is not None:
             assert src.count(old) == 1, "%s 旧 snippet 命中 !=1,拒绝" % rel
             plans.append((p, rel, src, ("upgrade", old)))
-            print("旧版在场,将原地升级到 v3:", rel)
+            print("旧版在场,将原地升级到 %s:" % MARKER, rel)
         else:
             hits = ANCHOR.findall(src)
             assert len(hits) == 1, "%s 锚点数=%d != 1,版本不匹配,拒绝动手" % (rel, len(hits))

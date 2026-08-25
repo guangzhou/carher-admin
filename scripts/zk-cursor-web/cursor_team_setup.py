@@ -84,27 +84,30 @@ GATE_FN = ("(function(c){if(!c)return c;const o={...c};"
     "delete o.routedModelViewConfig.routedModelViewToNamedViewToggle;"
     "o.routedModelViewConfig.hideRoutedModelView=false;}return o;})")
 
-# 队列泵:与 cursor_queue_pump_patch.py v3 逐字节相同(同 marker 保幂等/可互换)
-# v3 判活:uuid 在但 streamingAbortControllers 里没它的控制器=僵尸标记(流一结束控制器必删),
-# 连续 3 tick 确认后清;控制器在=真生成,绝不碰;摸不到表=退化 v1 条件(fail-safe)。
-QP_MARKER = "@cx-queue-pump:v3"
+# 队列泵:与 cursor_queue_pump_patch.py v3.4 逐字节相同(同 marker 保幂等/可互换)
+# v3.4 修 v3.3 误杀(折叠/漏答真凶):官方派发起跑窗口(2-3s)status=generating 但 uuid
+# 未登记,旧"无 uuid 立刻 heal"把起跑轮误判僵尸→heal→派发下一条→掐死起跑轮→两问挤一轮。
+# 修:①官方在飞标记 inFlightDispatchItemIds 非空=起跑中,绝不判僵尸;②一律 3 tick 确认。
+# 其余同 v3.3:队列非空就守(无寿命上限),派发全走官方 tryDispatchNextQueueItem()。
+QP_MARKER = "@cx-queue-pump:v3.4"
 QP_ANCHOR = re.compile(r"(addToQueue\((\w+)\)\{if\(!this\.isValidQueueItem\(\2\)\)return;)")
 QP_SNIPPET = (
-    "/*" + QP_MARKER + "*/try{if(this._cxQP===void 0){let _cxN=0,_cxS=0;const _cxT=()=>{"
+    "/*" + QP_MARKER + "*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{"
     "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
     "const _h=this.getComposerHandleIfLoaded();"
     "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
     'if(_d&&_d.status==="generating"&&(_d.generatingBubbleIds??[]).length===0){'
     "const _u=_d.chatGenerationUUID;"
     "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;"
-    "const _stale=_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u));"
+    "const _fl=this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0;"
+    "const _stale=!_fl&&(_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u)));"
     "_cxS=_stale?_cxS+1:0;"
-    "if(_u===void 0||_cxS>=3){"
+    "if(_cxS>=3){"
     "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",chatGenerationUUID:void 0,generatingBubbleIds:[]});"
     'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0})}catch(_e){}}}'
     "else{_cxS=0}"
     "this.tryDispatchNextQueueItem();"
-    "if(this.getQueueItems().length>0&&++_cxN<120){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
+    "if(this.getQueueItems().length>0){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
     "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
 )
 

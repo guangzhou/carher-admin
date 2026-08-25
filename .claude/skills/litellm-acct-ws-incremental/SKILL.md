@@ -113,6 +113,17 @@ DATABASE_URL，sitecustomize 在 acct 侧惰性。
 - ⚠ pod 日志按大小滚动：跨窗绝对计数不可比，只有同窗比率有效。
 - ⚠ 每轮 set image/env 都重启 pod（Recreate，秒级断该号，外层换号兜住）；诊断迭代别忘最后留静默 soak 窗。
 - ⚠ 探针纪律：大 payload 探针（prewarm）真耗账号桶配额，量入为出；`generate:false` 不生成但计 input。
+- ❌ **会话 LRU 默认 32 在高流量 pod 上被打穿=命中率归零（2026-08-25 复验实锤）**：80 系 7 个池主力
+  pod（81-84/89-91）5h 活跃 distinct pck 48–109 > 32 → `evict=lru` 与 full 发送几乎 1:1（84 号
+  2234 full / 2229 evict）→ 会话在用户两轮之间被挤出 → **持续 0 命中**；低流量 pod（pck≤8）94-97%
+  正常。**流量越大的 pod 收益越该大，却恰好全灭——soak 只在低流量 canary 上测过，规模效应看不到。**
+  修法=`CHATGPT_WS_MAX_SESSIONS=512`（kubectl set env，Recreate 秒断由外层兜住）；内存无虞（会话只存
+  SHA-1 账本，512 个 ≈ 几十 MB vs 2Gi），日常回收靠 idle TTL 600s，LRU 上限应设到正常运行永远碰不到。
+  修后 10min 实测：7 pod 命中 84-88%、evict_lru=0、增量样例 delta 1/129 items frame 8KB。
+  **现状（08-25）**：全部 acct deploy 已推平 env=512（含 scale0 号，重新上线自动带上）；
+  仓库 `ws_transport.py` 源码默认也已 32→512（以后烘镜像不再带旧默认），单测 43/43。
+  ⚠ env 只在集群态，acct deploy 无 repo manifest——**重建 deploy 的脚本要带上这个 env**。
+  **诊断范式**：命中率异常先按 pod 分桶看二态分布，再对 `evict_lru:full` 比率——1:1 即 thrash 指纹。
 
 ## 关联
 

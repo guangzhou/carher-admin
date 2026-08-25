@@ -46,9 +46,11 @@ _CONNECT_BUDGET_S = float(os.getenv("CHATGPT_WS_CONNECT_BUDGET_S", "10"))
 _FIRST_FRAME_BUDGET_S = float(os.getenv("CHATGPT_WS_FIRST_FRAME_BUDGET_S", "12"))
 _RECV_IDLE_TIMEOUT_S = float(os.getenv("CHATGPT_WS_RECV_IDLE_S", "120"))
 _SESSION_TTL_S = float(os.getenv("CHATGPT_WS_SESSION_TTL_S", "600"))
-# 会话上限只为兜内存（每会话 ≈ 一条 WS + ~20KB 账本）。32 × 该量级可忽略；
-# 上限过小会把还热的会话驱逐掉、白丢增量命中（实测单 pod 6h 窗见 12 个 distinct pck）。
-_MAX_SESSIONS = int(os.getenv("CHATGPT_WS_MAX_SESSIONS", "32"))
+# 会话上限只为兜内存（每会话 ≈ 一条 WS + ~20KB 账本），必须按最高流量 pod 的实测并发定：
+# 2026-08-25 复验：池主力 pod 5h 活跃 pck 48–109，旧默认 32 被打穿 → evict:full≈1:1 thrash、
+# 命中率持续 0（全池 21%）；设 512 后 10min 恢复 84-88%。512 × ~150KB ≈ 80MB vs 2Gi 限额，
+# 目标=正常运行永远碰不到 LRU，日常回收靠 idle TTL 600s。
+_MAX_SESSIONS = int(os.getenv("CHATGPT_WS_MAX_SESSIONS", "512"))
 # 复用前微探测预算：闲置期上游已发的 CLOSE 帧就在本地队列里，毫秒级即可吸出。
 _PREFLIGHT_TIMEOUT_S = float(os.getenv("CHATGPT_WS_PREFLIGHT_S", "0.05"))
 # 上游 WS 单消息上限（2026-08-23 二分实测：15MB ACCEPT / 16MB REJECT 1009 → 上限 16MiB）。

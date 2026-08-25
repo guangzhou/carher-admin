@@ -1,4 +1,4 @@
-# Cursor 客户端 bundle 补丁 SOP(macOS / 3.16.x)
+# Cursor 客户端 bundle 补丁 SOP(3.16.x;安装器跨平台,诊断/日志路径示例为 macOS)
 
 对象:同事/本机 **Cursor.app 本体**的 workbench bundle 补丁与 BYOK 配置,与网关线
 (zk-cursor-web-fc-iterate,改 198 CM)完全分层:**这边改的是用户 Mac 上的 Cursor,
@@ -6,9 +6,27 @@
 
 | 脚本 | 用途 | marker |
 |---|---|---|
-| `cursor_team_setup.py` | 同事一键装 cursor-g(3 解锁补丁+排队泵+BYOK 配置+update.mode:none) | `@cxteam-*` + `@cx-queue-pump:v3` |
+| `cursor_team_setup.js` + `.sh`/`.cmd` | **首选**:同事一键装 cursor-g,零依赖跨平台(Win/mac/Linux) | `@cxteam-*` + `@cx-queue-pump:v3` |
+| `cursor_team_setup.py` | 同上,mac 本地/CI 用的 Python 版(与 JS 同源、备份互通) | 同上 |
 | `cursor_queue_pump_patch.py` | 单独打/升级排队泵(支持 v1/v2diag 原地升级 v3) | `@cx-queue-pump:v3` |
 | `cursor_queue_diag_patch.py` | 诊断用:把泵换成"每秒打 tick 日志"版,只观测不改行为 | `@cx-queue-diag:v2` |
+
+## 零依赖跨平台安装器(2026-08-25,首选路径)
+
+同事不一定装了 Python,也可能是 Windows。解法:**Cursor 本体就是 Electron,自带完整 Node
+运行时**(`ELECTRON_RUN_AS_NODE=1 <Cursor 可执行文件> setup.js`)+ 内置 `node:sqlite`
+(备胎 Cursor 自带 `@vscode/sqlite3`)→ 用 Cursor 自己跑自己,不装任何东西。
+- 启动器 `cursor_team_setup.sh`(mac/Linux)/`cursor_team_setup.cmd`(Win)只做一件事:
+  找到 Cursor 可执行文件,以 node 模式跑 `cursor_team_setup.js`。`CURSOR_BIN=/path` 可覆盖。
+- 安装目录/用户目录**全从 `process.execPath` 推导**(darwin `../Resources/app`、win/linux
+  `resources/app`;用户目录按平台 Application Support / %APPDATA% / ~/.config),不猜路径。
+- 退出检测排除**自身 pid**(脚本本就跑在 Cursor 二进制上,pgrep/tasklist 会看到自己)。
+- 与 Python 版**逐字节等价**(合成 bundle 4 锚点补丁输出、GATE_FN/QP_SNIPPET/QP_OLD/baseUrl
+  常量均 byte 相同)、**备份格式互通**(同 `~/.cursor-team-setup-backup`,可互相 revert)。
+- 测试钩子(env 门,随脚本发布无副作用):`CX_DUMP_CONSTANTS` 打常量、`CX_APPLY_TO_FILE`/
+  `CX_APPLY_OUT` 对任意文件跑真实 PATCHES、`CURSOR_APP_ROOT`/`CURSOR_USER_DIR` 指假 app/user 目录、
+  `CX_SKIP_RUNNING_CHECK` 跳退出检测——假 app 端到端回归全靠这几个,live Cursor 不用退。
+- **Windows 路径分支未在 Mac 实测**(按标准安装布局写),诚实标注;逻辑已平台分叉。
 
 ## 排队卡死 bug(原厂,2026-08-25 v3 端到端闭环)
 
@@ -46,9 +64,11 @@ composer 运行时状态只活在 renderer 内存,workspace state.vscdb 里没�
 - **锚点纪律**:稳定语义地标+通用捕获 minify 尾巴,全文件命中 ≠1 → 拒绝动手;
   落盘前整 bundle `node --check`。装过 CursorX 的机器 3 解锁锚点命中 0 → 自动拒(防重复打)。
 - **`update.mode:none` 必须保持**:Cursor 自动升级掀翻一切 bundle 补丁。
-- **snippet 单一来源**:`cursor_team_setup.py` 的 QP_SNIPPET 必须与 `cursor_queue_pump_patch.py`
-  的 SNIPPET 逐字节一致(改一处必同步另一处并跑等价断言);升级泵版本时把旧版原文加进
-  OLD_SNIPPETS 以支持原地升级。
+- **snippet 单一来源**:三处 QP_SNIPPET(`cursor_team_setup.py`、`cursor_team_setup.js`、
+  `cursor_queue_pump_patch.py`)必须逐字节一致(改一处必同步另两处并跑等价断言 `CX_DUMP_CONSTANTS`);
+  升级泵版本时把旧版原文加进 OLD_SNIPPETS/QP_OLD 以支持原地升级。
+- **revert 选备份**:优先选「含 bundle 的最新备份」,跳过 `-cfgonly`(幂等重跑只存配置的备份)
+  ——否则二次 `--apply` 后 `--revert` 会漏还原 bundle(两版已同步修)。
 - 回滚:各脚本 `--revert`(备份链 `~/.cursor-team-setup-backup` / `~/.cursor-queue-pump-backup`
   / `~/.cursor-queue-diag-backup`)。
 - key 不自动写(macOS 钥匙串加密,外部写=弹框或假绿 401),唯一人工步=Cursor 设置里粘 key。

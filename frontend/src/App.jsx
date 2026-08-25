@@ -8,9 +8,11 @@ import DeployPage from "./components/DeployPage";
 import AdminPanel from "./components/AdminPanel";
 import SettingsPage from "./components/SettingsPage";
 import LoginPage from "./components/LoginPage";
+import BudgetFallbackPage from "./components/BudgetFallbackPage";
 import { setAuthFailureHandler } from "./api";
 
 const TABS = [
+  { id: "budget-routing", label: "预算路由", icon: "↳" },
   { id: "dashboard", label: "仪表盘", icon: "◐" },
   { id: "instances", label: "实例管理", icon: "☰" },
   { id: "deploy", label: "部署", icon: "▶" },
@@ -198,6 +200,7 @@ export default function App() {
         {tab === "instances" && subTab === "import" && <BatchImport onDone={() => { setTab("instances"); setSubTab("list"); }} />}
         {tab === "instances" && subTab === "health" && <HealthCheck />}
         {tab === "deploy" && <DeployPage />}
+        {tab === "budget-routing" && <BudgetFallbackPage />}
         {tab === "admin" && <AdminPanel />}
         {tab === "settings" && <SettingsPage />}
       </main>

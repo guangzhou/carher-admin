@@ -27,7 +27,7 @@ DB_DIR = Path(os.environ.get("CARHER_ADMIN_DB_DIR", "/data/carher-admin"))
 DB_PATH = DB_DIR / "admin.db"
 BACKUP_DIR = Path(os.environ.get("CARHER_ADMIN_BACKUP_DIR", "/nas-backup/carher-admin"))
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS her_instances (
@@ -128,6 +128,51 @@ CREATE TABLE IF NOT EXISTS settings (
     is_secret   INTEGER NOT NULL DEFAULT 0,
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS litellm_budget_fallback_policies (
+    key_id TEXT PRIMARY KEY,
+    key_alias TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL DEFAULT 'NORMAL',
+    threshold_percent REAL NOT NULL DEFAULT 98,
+    original_models TEXT NOT NULL DEFAULT '[]',
+    original_aliases TEXT NOT NULL DEFAULT '{}',
+    original_max_budget REAL,
+    original_budget_duration TEXT NOT NULL DEFAULT '',
+    original_budget_reset_at TEXT NOT NULL DEFAULT '',
+    original_blocked INTEGER NOT NULL DEFAULT 0,
+    original_config_fingerprint TEXT NOT NULL DEFAULT '',
+    fallback_config_fingerprint TEXT NOT NULL DEFAULT '',
+    fallback_entered_at TEXT NOT NULL DEFAULT '',
+    last_observed_spend REAL NOT NULL DEFAULT 0,
+    last_observed_at TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT NOT NULL DEFAULT '',
+    automation_paused INTEGER NOT NULL DEFAULT 0,
+    lease_owner TEXT NOT NULL DEFAULT '',
+    lease_expires_at TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    updated_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS litellm_budget_fallback_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'system',
+    detail TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY(key_id) REFERENCES litellm_budget_fallback_policies(key_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_budget_fallback_state
+ON litellm_budget_fallback_policies(enabled, state);
+
+CREATE INDEX IF NOT EXISTS idx_budget_fallback_events_key
+ON litellm_budget_fallback_events(key_id, id DESC);
 
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
@@ -266,6 +311,47 @@ MIGRATIONS = {
     ],
     12: [
         "ALTER TABLE her_instances ADD COLUMN litellm_route_policy TEXT NOT NULL DEFAULT 'openrouter_first'",
+    ],
+    13: [
+        """CREATE TABLE IF NOT EXISTS litellm_budget_fallback_policies (
+            key_id TEXT PRIMARY KEY,
+            key_alias TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            state TEXT NOT NULL DEFAULT 'NORMAL',
+            threshold_percent REAL NOT NULL DEFAULT 98,
+            original_models TEXT NOT NULL DEFAULT '[]',
+            original_aliases TEXT NOT NULL DEFAULT '{}',
+            original_max_budget REAL,
+            original_budget_duration TEXT NOT NULL DEFAULT '',
+            original_budget_reset_at TEXT NOT NULL DEFAULT '',
+            original_blocked INTEGER NOT NULL DEFAULT 0,
+            original_config_fingerprint TEXT NOT NULL DEFAULT '',
+            fallback_config_fingerprint TEXT NOT NULL DEFAULT '',
+            fallback_entered_at TEXT NOT NULL DEFAULT '',
+            last_observed_spend REAL NOT NULL DEFAULT 0,
+            last_observed_at TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            next_retry_at TEXT NOT NULL DEFAULT '',
+            automation_paused INTEGER NOT NULL DEFAULT 0,
+            lease_owner TEXT NOT NULL DEFAULT '',
+            lease_expires_at TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )""",
+        """CREATE TABLE IF NOT EXISTS litellm_budget_fallback_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor TEXT NOT NULL DEFAULT 'system',
+            detail TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(key_id) REFERENCES litellm_budget_fallback_policies(key_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_budget_fallback_state ON litellm_budget_fallback_policies(enabled, state)",
+        "CREATE INDEX IF NOT EXISTS idx_budget_fallback_events_key ON litellm_budget_fallback_events(key_id, id DESC)",
     ],
 }
 

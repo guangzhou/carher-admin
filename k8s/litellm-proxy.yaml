@@ -1647,6 +1647,7 @@ data:
           output_cost_per_token: 7.5e-06
         model_info: {mode: responses, id: chatgpt-acct-78/gpt-5.3-codex-spark}
 
+
     router_settings:
       # ── DualCache backend: Redis (2026-05-20) ────────────────────────
       # litellm-proxy runs 2 replicas. pre_call_checks (deployment_affinity /

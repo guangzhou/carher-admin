@@ -124,6 +124,18 @@ class HerBatchAction(BaseModel):
     params: HerUpdateRequest | None = None
 
 
+class BudgetFallbackEnableRequest(BaseModel):
+    key_id: str = Field(..., min_length=1)
+
+
+class BudgetFallbackDisableRequest(BaseModel):
+    restore: bool = Field(..., description="Restore saved routing before disabling")
+
+
+class BudgetFallbackActionRequest(BaseModel):
+    reason: str = Field("", max_length=500)
+
+
 class CloudflareSyncResult(BaseModel):
     ok: bool = Field(..., description="Whether Cloudflare DNS + remote tunnel ingress sync completed")
     message: str = Field(

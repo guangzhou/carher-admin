@@ -12,16 +12,17 @@ Cursor 本地 agent 通道(CursorX 启用的 BYOK 路径)下:
     那班车已经开走 → 队列里的消息永远无人补发 = 静默丢失。
   - 本机观测:3 次全部同型(22:23:54/22:24:05/22:38:26),0 次自动补发。
 
-═══ 修法 v3(2026-08-25 端到端实测定型;v1 只救一半) ═══
-在 addToQueue() 入口挂一个自清理看门狗,每秒 tick(最多 120 次,队列空即停):
-  - v1 只敢清「无 uuid」的卡死;实测真实卡死是**流已完成但 chatGenerationUUID 残留**
-    (诊断 tick:status=generating/hasUUID=true/bubbles=0 持续 2min+,队列 1→3 永不派发)。
-  - v3 判活口径抄 bundle 自己的:aiService.streamingAbortControllers.has(uuid)
-    (流一结束控制器必被删)。uuid 在但表里没它=僵尸标记,连续 3 tick 确认后清;
-    表里有它=真在生成,绝不碰(实测 70s 长生成全程未误杀);摸不到表=退化 v1(fail-safe)。
-  - 每次 tick 调官方补发器 tryDispatchNextQueueItem(),内部守卫原样生效 → 幂等不抢发。
-端到端验证(2026-08-25 01:17,本机):4 次 heal 全部 hadUUID=true,积压队列逐条自动
-派发(完成→~3s heal→派发→完成…),真生成不受影响。
+═══ 修法演进(v1→v3→v3.4→v3.5→v4;当前=v4,2026-08-25 3.17.19 实测定型) ═══
+在 addToQueue() 入口挂一个自清理看门狗,每秒 tick(队列空即停,无寿命上限):
+  - 僵尸判活(v3 定型):口径抄 bundle 自己的 aiService.streamingAbortControllers.has(uuid),
+    uuid 在但表里没它=僵尸,连续 3 tick 确认后清;表里有它=真在生成,绝不碰。
+  - 在飞防护(v3.4):inFlightDispatchItemIds 非空=官方派发在飞,不判僵尸。
+  - 派发收敛(v3.5):只在 ①刚 heal 完 ②空闲且无在飞派发 时才调 tryDispatchNextQueueItem。
+  - 官方让路(v4,治折叠真凶):官方 3.17 在 turnEnded 事件里【原生接力队列】
+    (removeFromQueue+appendQueuedHumanMessage+新请求),不走 dispatch 机制、不碰
+    inFlightDispatchItemIds → 泵在它起跑窗口里 heal+抢发下一条 = 一请求两问只答后一条。
+    v4 每 tick 对比队列长度,发现被别人消费 → 让路 5 tick(不 heal 不派发)。
+    官方不管的场景(真僵尸/用户停止饿死)泵照旧兜底。
 
 ═══ 用法 ═══
   python3 cursor_queue_pump_patch.py            # dry-run:验锚点,不写
@@ -41,43 +42,90 @@ BUNDLES = [
     "Contents/Resources/app/out/vs/workbench/workbench.glass.main.js",
 ]
 BACKUP_ROOT = os.path.expanduser("~/.cursor-queue-pump-backup")
-MARKER = "@cx-queue-pump:v3.4"
+MARKER = "@cx-queue-pump:v4"
 
 # 锚点:addToQueue 方法入口(仅参数名被 minify,用捕获组适配)
 ANCHOR = re.compile(r"(addToQueue\((\w+)\)\{if\(!this\.isValidQueueItem\(\2\)\)return;)")
 
-# v3.4(2026-08-25 修 v3.3 误杀:折叠/漏答的真凶):
-# 实测证据链:heal 后 85ms 即 "Aborted current chat" + 空助手气泡 + 两问挤一轮。
-# 机制:官方派发启动新轮的前 2-3s(pre_network 窗口)status=generating 但 uuid 未登记,
-# 旧判活 `_u===void 0 立刻 heal` 把起跑轮误判为僵尸 → heal → 官方派发下一条 →
-# submitChatMaybeAbortCurrent 掐死起跑轮(空回复)→ 下一轮带着两问 → 折叠/漏答。
-# 修法(仍全走官方件):
-#   ① 官方在飞标记 inFlightDispatchItemIds 非空(官方派发从入队到流结束全程置位)= 起跑/
-#     生成中,绝不判僵尸;
-#   ② 取消"无 uuid 立刻判死"特权(v1 遗留),一律连续 3 tick 确认。
-# 其余同 v3.3:队列非空就守(无寿命上限),派发全走官方 tryDispatchNextQueueItem()。
+# v4(2026-08-25 修 v3.5 残留折叠;3.17 实测定型):
+# 真凶=官方 3.17 在 turnEnded 事件里【原生接力队列】:removeFromQueue(队首)+
+# appendQueuedHumanMessage(直接写进对话)+发起新请求。这条路不走
+# dispatchQueueItemKeepingRowUntilOwned,不碰 inFlightDispatchItemIds → 泵的在飞守卫全瞎。
+# 实测形态(17:49:06):上轮攒满的僵尸计数器让泵在官方接力起跑的 74ms 内 heal+派发下一条,
+# 后枪掐前枪 → 一请求两问(convLen 每轮+2 用户气泡)→ 模型只答后一条;末条被 heal 踩死。
+# 修:泵每 tick 对比队列长度,发现【被别人消费】(掉了但不是自己派的)→ 让路 5 tick
+# (不 heal 不派发),官方接力起跑窗(实测预网络 2.1-3.4s)全程不受干扰;
+# 官方不管的场景(真僵尸卡死/用户停止后饿死)泵照旧兜底。僵尸判活同 v3.5。
 SNIPPET = (
-    "/*" + MARKER + "*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{"
-    "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
+    "/*" + MARKER + "*/try{if(this._cxQP===void 0){let _cxS=0,_lq=-1,_cool=0,_pfl=!1;const _cxT=()=>{"
+    "this._cxQP=void 0;try{const _q=this.getQueueItems().length;if(_q===0)return;"
+    "const _fl=this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0;"
+    "if(_lq>=0&&_q<_lq&&!_pfl){_cool=5;_cxS=0;"
+    "try{this.structuredLogService.info(\"composer\",\"[cx-queue-pump] queue consumed externally, yielding\",{composerId:this.composerId,from:_lq,to:_q})}catch(_e){}}"
+    "_lq=_q;_pfl=_fl;"
+    "if(_cool>0){_cool--}else{"
     "const _h=this.getComposerHandleIfLoaded();"
     "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
-    'if(_d&&_d.status==="generating"&&(_d.generatingBubbleIds??[]).length===0){'
+    "let _go=!1;"
+    'if(_d&&_d.status==="generating"){'
+    "if(!_fl&&(_d.generatingBubbleIds??[]).length===0){"
     "const _u=_d.chatGenerationUUID;"
     "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;"
-    "const _fl=this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0;"
-    "const _stale=!_fl&&(_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u)));"
+    "const _stale=_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u));"
     "_cxS=_stale?_cxS+1:0;"
-    "if(_cxS>=3){"
+    "if(_cxS>=3){_cxS=0;"
     "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",chatGenerationUUID:void 0,generatingBubbleIds:[]});"
-    'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0})}catch(_e){}}}'
-    "else{_cxS=0}"
-    "this.tryDispatchNextQueueItem();"
+    'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0});_go=!0}catch(_e){}}}'
+    "else{_cxS=0}}"
+    "else{_cxS=0;_go=!_fl}"
+    "if(_go)this.tryDispatchNextQueueItem()}"
     "if(this.getQueueItems().length>0){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
     "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
 )
 
 # 旧版本 snippet 原文(逐字节),--apply 时若在场则原地替换升级
 OLD_SNIPPETS = {
+    "@cx-queue-pump:v3.5": (
+        "/*@cx-queue-pump:v3.5*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{"
+        "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
+        "const _h=this.getComposerHandleIfLoaded();"
+        "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
+        "const _fl=this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0;"
+        "let _go=!1;"
+        'if(_d&&_d.status==="generating"){'
+        "if(!_fl&&(_d.generatingBubbleIds??[]).length===0){"
+        "const _u=_d.chatGenerationUUID;"
+        "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;"
+        "const _stale=_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u));"
+        "_cxS=_stale?_cxS+1:0;"
+        "if(_cxS>=3){_cxS=0;"
+        "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",chatGenerationUUID:void 0,generatingBubbleIds:[]});"
+        'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0});_go=!0}catch(_e){}}}'
+        "else{_cxS=0}}"
+        "else{_cxS=0;_go=!_fl}"
+        "if(_go)this.tryDispatchNextQueueItem();"
+        "if(this.getQueueItems().length>0){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
+        "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
+    ),
+    "@cx-queue-pump:v3.4": (
+        "/*@cx-queue-pump:v3.4*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{"
+        "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
+        "const _h=this.getComposerHandleIfLoaded();"
+        "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
+        'if(_d&&_d.status==="generating"&&(_d.generatingBubbleIds??[]).length===0){'
+        "const _u=_d.chatGenerationUUID;"
+        "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;"
+        "const _fl=this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0;"
+        "const _stale=!_fl&&(_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u)));"
+        "_cxS=_stale?_cxS+1:0;"
+        "if(_cxS>=3){"
+        "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",chatGenerationUUID:void 0,generatingBubbleIds:[]});"
+        'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0})}catch(_e){}}}'
+        "else{_cxS=0}"
+        "this.tryDispatchNextQueueItem();"
+        "if(this.getQueueItems().length>0){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
+        "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
+    ),
     "@cx-queue-pump:v3.3": (
         "/*@cx-queue-pump:v3.3*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{"
         "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"

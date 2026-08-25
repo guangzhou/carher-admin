@@ -84,32 +84,68 @@ GATE_FN = ("(function(c){if(!c)return c;const o={...c};"
     "delete o.routedModelViewConfig.routedModelViewToNamedViewToggle;"
     "o.routedModelViewConfig.hideRoutedModelView=false;}return o;})")
 
-# 队列泵:与 cursor_queue_pump_patch.py v3.4 逐字节相同(同 marker 保幂等/可互换)
-# v3.4 修 v3.3 误杀(折叠/漏答真凶):官方派发起跑窗口(2-3s)status=generating 但 uuid
-# 未登记,旧"无 uuid 立刻 heal"把起跑轮误判僵尸→heal→派发下一条→掐死起跑轮→两问挤一轮。
-# 修:①官方在飞标记 inFlightDispatchItemIds 非空=起跑中,绝不判僵尸;②一律 3 tick 确认。
-# 其余同 v3.3:队列非空就守(无寿命上限),派发全走官方 tryDispatchNextQueueItem()。
-QP_MARKER = "@cx-queue-pump:v3.4"
+# 队列泵:与 cursor_queue_pump_patch.py v4 逐字节相同(同 marker 保幂等/可互换)
+# v4 修 v3.5 残留折叠(真凶):官方 3.17 在 turnEnded 事件里原生接力队列
+# (removeFromQueue+appendQueuedHumanMessage+新请求),不走 dispatch、不碰
+# inFlightDispatchItemIds → 泵在它起跑窗口里 heal+抢发下一条 = 一请求两问只答后一条。
+# 修:泵每 tick 对比队列长度,发现被别人消费 → 让路 5 tick(不 heal 不派发);
+# 官方不管的场景(真僵尸/用户停止饿死)照旧兜底。
+QP_MARKER = "@cx-queue-pump:v4"
 QP_ANCHOR = re.compile(r"(addToQueue\((\w+)\)\{if\(!this\.isValidQueueItem\(\2\)\)return;)")
 QP_SNIPPET = (
-    "/*" + QP_MARKER + "*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{"
-    "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
+    "/*" + QP_MARKER + "*/try{if(this._cxQP===void 0){let _cxS=0,_lq=-1,_cool=0,_pfl=!1;const _cxT=()=>{"
+    "this._cxQP=void 0;try{const _q=this.getQueueItems().length;if(_q===0)return;"
+    "const _fl=this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0;"
+    "if(_lq>=0&&_q<_lq&&!_pfl){_cool=5;_cxS=0;"
+    "try{this.structuredLogService.info(\"composer\",\"[cx-queue-pump] queue consumed externally, yielding\",{composerId:this.composerId,from:_lq,to:_q})}catch(_e){}}"
+    "_lq=_q;_pfl=_fl;"
+    "if(_cool>0){_cool--}else{"
     "const _h=this.getComposerHandleIfLoaded();"
     "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
-    'if(_d&&_d.status==="generating"&&(_d.generatingBubbleIds??[]).length===0){'
+    "let _go=!1;"
+    'if(_d&&_d.status==="generating"){'
+    "if(!_fl&&(_d.generatingBubbleIds??[]).length===0){"
     "const _u=_d.chatGenerationUUID;"
     "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;"
-    "const _fl=this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0;"
-    "const _stale=!_fl&&(_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u)));"
+    "const _stale=_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u));"
     "_cxS=_stale?_cxS+1:0;"
-    "if(_cxS>=3){"
+    "if(_cxS>=3){_cxS=0;"
     "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",chatGenerationUUID:void 0,generatingBubbleIds:[]});"
-    'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0})}catch(_e){}}}'
-    "else{_cxS=0}"
-    "this.tryDispatchNextQueueItem();"
+    'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0});_go=!0}catch(_e){}}}'
+    "else{_cxS=0}}"
+    "else{_cxS=0;_go=!_fl}"
+    "if(_go)this.tryDispatchNextQueueItem()}"
     "if(this.getQueueItems().length>0){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
     "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
 )
+
+# 旧版泵 snippet(逐字节)——plan_bundle 里 queue-pump 若发现旧版在场,原地替换升级
+# (没有这个,--repair 会在旧泵仍在时按锚点二次注入 = 双泵)。更老版本用
+# cursor_queue_pump_patch.py 升级(它带完整 OLD_SNIPPETS 清单)。
+QP_OLD_SNIPPETS = [
+    (  # v3.5
+        "/*@cx-queue-pump:v3.5*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{"
+        "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;"
+        "const _h=this.getComposerHandleIfLoaded();"
+        "const _d=_h?this.composerDataService.getComposerData(_h):void 0;"
+        "const _fl=this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0;"
+        "let _go=!1;"
+        'if(_d&&_d.status==="generating"){'
+        "if(!_fl&&(_d.generatingBubbleIds??[]).length===0){"
+        "const _u=_d.chatGenerationUUID;"
+        "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;"
+        "const _stale=_u===void 0||(_m&&typeof _m.has===\"function\"&&!_m.has(_u));"
+        "_cxS=_stale?_cxS+1:0;"
+        "if(_cxS>=3){_cxS=0;"
+        "try{this.composerDataService.updateComposerData(_h,{status:\"completed\",chatGenerationUUID:void 0,generatingBubbleIds:[]});"
+        'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0});_go=!0}catch(_e){}}}'
+        "else{_cxS=0}}"
+        "else{_cxS=0;_go=!_fl}"
+        "if(_go)this.tryDispatchNextQueueItem();"
+        "if(this.getQueueItems().length>0){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};"
+        "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}"
+    ),
+]
 
 
 def _gate_sub(m):
@@ -129,6 +165,40 @@ PATCHES = [
          sub=lambda m: "(/*@cxteam-dedicated*/!1)" + m.group(2)),
     dict(name="queue-pump", marker=QP_MARKER,
          rx=QP_ANCHOR, sub=lambda m: m.group(1) + QP_SNIPPET),
+    # qserial(2026-08-25):官方 tryDispatchNextQueueItem 的闸门 Vyb 只看 status,不看
+    # "是否已有派发在飞"。实测竞态:heal 写 status 触发响应式监听,官方派发器与泵在 30ms 内
+    # 各派一条,后枪的 submitChatMaybeAbortCurrent 掐死前枪的预网络轮 → 两问挤一轮/前问无答。
+    # 修:入口加官方自家 inFlightDispatchItemIds 在飞守卫 → 派发严格串行(所有调用方生效)。
+    # 兜底:若守卫挡掉了"轮完成事件"的那次派发,泵 1s 内以空闲态补发,最多多等 1-2s。
+    dict(name="qserial", marker="@cxteam-qserial",
+         rx=re.compile(r"(tryDispatchNextQueueItem\(\)\{const (\w+)=this\.getComposerHandleIfLoaded\(\);if\(!\2\)return;)"),
+         sub=lambda m: m.group(1) + "/*@cxteam-qserial*/if(this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0)return;"),
+    # nosteer-mod(2026-08-25 真凶):官方把「配置=queue 但按修饰键发送」设计为强制 steer
+    # (⌘+回车正是修饰键!)→ 生成中发的每条都被注入当前轮 → 两问挤一轮/前问无答。
+    # 本团队发送手势就是 ⌘+回车,故掐掉该 override:修饰键照常发送,但行为仍是 queue。
+    dict(name="nosteer-mod", marker="@cxteam-nosteermod",
+         rx=re.compile(r'(case"send":case"queue":return \w+&&\w+\(\w+\)\?\{behavior:")steer(",isModifierOverride:!0\})'),
+         sub=lambda m: m.group(1) + 'queue' + m.group(2) + '/*@cxteam-nosteermod*/'),
+    # nopromote(2026-08-25 终极 steer 封口):3.17 自动把排队消息 steer 注入当前轮(预网络
+    # 窗口内注入 → 一请求两问 → 模型只答最后一条)。promoteQueueItemToSteer 是所有 steer
+    # 注入的总入口(gate/自动/NUX),短路=全部走老实排队。multi:glass 打包多份 composer,
+    # 全部命中都要打(count>=1 即可,逐处插入)。
+    dict(name="nopromote", marker="@cxteam-nopromote", multi=True,
+         rx=re.compile(r'(async promoteQueueItemToSteer\(\w+\)\{)'),
+         sub=lambda m: m.group(1) + '/*@cxteam-nopromote*/return!1;'),
+    # norelay(2026-08-25 真·根因,3.17.19 五轮实测闭环):官方 turnEnded 里的「轮内接力」——
+    # 有排队消息时弹队首+写气泡+submitConversationAction 续进当前 agent 循环,然后 break
+    # (不走后面的 status 复位)。官方设计:接力=同轮继续,status 该留 generating。
+    # 但 BYOK 本地线轮末 agent 循环已退出("Request successful"即收摊),接力消息没人接:
+    #   ① status 永卡 generating(僵尸真身=接力分支 break 掉复位代码);
+    #   ② 弹队的消息成孤儿气泡,被下一请求 "prepending user messages" 捎走
+    #      → 一请求两问只答后一条(甲乙丙丁戊己/壬癸子丑寅卯 折叠真身)。
+    # 能力闸门 k_d(agentBackend==="cursor-agent"&&!isLocalMode&&!isAgentHostEnabled&&
+    # !isNewRequestIdGateEnabled())在本线误判为真。修:调用点恒 false → turnEnded 走
+    # 复位分支 → status 正常复位,官方队列机制逐条各自成轮,僵尸+折叠同根拔除。
+    dict(name="norelay", marker="@cxteam-norelay",
+         rx=re.compile(r'(if\()(\w+\(\{agentBackend:\w+,isLocalMode:\w+\.localMode,isAgentHostEnabled:\w+,isNewRequestIdGateEnabled:\(\)=>this\.isQueuedPromptNewRequestIdEnabled\(\)\}\))(\)\{)'),
+         sub=lambda m: m.group(1) + '/*@cxteam-norelay*/!1&&' + m.group(2) + m.group(3)),
 ]
 
 
@@ -165,7 +235,21 @@ def plan_bundle(rel):
     for pt in PATCHES:
         if pt["marker"] in out:
             print("   SKIP %-11s(已打过)" % pt["name"]); continue
+        if pt["name"] == "queue-pump":
+            old = next((s for s in QP_OLD_SNIPPETS if s in out), None)
+            if old is not None:
+                if out.count(old) != 1:
+                    print("   !! queue-pump 旧版命中!=1 → 拒绝"); sys.exit(2)
+                out = out.replace(old, QP_SNIPPET, 1)
+                applied.append("queue-pump(升级)")
+                continue
         hits = pt["rx"].findall(out)
+        if pt.get("multi"):
+            if len(hits) < 1:
+                print("   !! %-11s 锚点命中=0 → 拒绝动手" % pt["name"]); sys.exit(2)
+            out = pt["rx"].sub(pt["sub"], out)  # multi:全部命中逐处打
+            applied.append("%s(x%d)" % (pt["name"], len(hits)))
+            continue
         if len(hits) != 1:
             print("   !! %-11s 锚点命中=%d != 1 → 拒绝动手(版本不匹配或已被 CursorX 改写)"
                   % (pt["name"], len(hits)))

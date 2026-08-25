@@ -87,14 +87,62 @@ const GATE_FN = "(function(c){if(!c)return c;const o={...c};" +
   "delete o.routedModelViewConfig.routedModelViewToNamedViewToggle;" +
   "o.routedModelViewConfig.hideRoutedModelView=false;}return o;})";
 
-const QP_MARKER = "@cx-queue-pump:v3.4";
+const QP_MARKER = "@cx-queue-pump:v4";
 const QP_ANCHOR = /(addToQueue\((\w+)\)\{if\(!this\.isValidQueueItem\(\2\)\)return;)/g;
-// v3.4 修 v3.3 误杀(折叠/漏答真凶):官方派发起跑窗口(2-3s)status=generating 但 uuid
-// 未登记,旧"无 uuid 立刻 heal"把起跑轮误判僵尸→heal→派发下一条→掐死起跑轮→两问挤一轮。
-// 修:①官方在飞标记 inFlightDispatchItemIds 非空=起跑中,绝不判僵尸;②一律 3 tick 确认。
-// 其余同 v3.3:队列非空就守(无寿命上限),派发全走官方 tryDispatchNextQueueItem()。
+// v4 修 v3.5 残留折叠(真凶):官方 3.17 在 turnEnded 事件里原生接力队列
+// (removeFromQueue+appendQueuedHumanMessage+新请求),不走 dispatch、不碰
+// inFlightDispatchItemIds → 泵在它起跑窗口里 heal+抢发下一条 = 一请求两问只答后一条。
+// 修:泵每 tick 对比队列长度,发现被别人消费 → 让路 5 tick(不 heal 不派发);
+// 官方不管的场景(真僵尸/用户停止饿死)照旧兜底。
 const QP_SNIPPET =
-  "/*" + QP_MARKER + "*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{" +
+  "/*" + QP_MARKER + "*/try{if(this._cxQP===void 0){let _cxS=0,_lq=-1,_cool=0,_pfl=!1;const _cxT=()=>{" +
+  "this._cxQP=void 0;try{const _q=this.getQueueItems().length;if(_q===0)return;" +
+  "const _fl=this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0;" +
+  "if(_lq>=0&&_q<_lq&&!_pfl){_cool=5;_cxS=0;" +
+  'try{this.structuredLogService.info("composer","[cx-queue-pump] queue consumed externally, yielding",{composerId:this.composerId,from:_lq,to:_q})}catch(_e){}}' +
+  "_lq=_q;_pfl=_fl;" +
+  "if(_cool>0){_cool--}else{" +
+  "const _h=this.getComposerHandleIfLoaded();" +
+  "const _d=_h?this.composerDataService.getComposerData(_h):void 0;" +
+  "let _go=!1;" +
+  'if(_d&&_d.status==="generating"){' +
+  "if(!_fl&&(_d.generatingBubbleIds??[]).length===0){" +
+  "const _u=_d.chatGenerationUUID;" +
+  "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;" +
+  'const _stale=_u===void 0||(_m&&typeof _m.has==="function"&&!_m.has(_u));' +
+  "_cxS=_stale?_cxS+1:0;" +
+  "if(_cxS>=3){_cxS=0;" +
+  'try{this.composerDataService.updateComposerData(_h,{status:"completed",chatGenerationUUID:void 0,generatingBubbleIds:[]});' +
+  'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0});_go=!0}catch(_e){}}}' +
+  "else{_cxS=0}}" +
+  "else{_cxS=0;_go=!_fl}" +
+  "if(_go)this.tryDispatchNextQueueItem()}" +
+  "if(this.getQueueItems().length>0){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};" +
+  "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}";
+
+// 旧版排队泵原文(逐字节),在场则原地升级 v4
+const QP_OLD = [
+  "/*@cx-queue-pump:v3.5*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{" +
+  "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;" +
+  "const _h=this.getComposerHandleIfLoaded();" +
+  "const _d=_h?this.composerDataService.getComposerData(_h):void 0;" +
+  "const _fl=this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0;" +
+  "let _go=!1;" +
+  'if(_d&&_d.status==="generating"){' +
+  "if(!_fl&&(_d.generatingBubbleIds??[]).length===0){" +
+  "const _u=_d.chatGenerationUUID;" +
+  "const _m=this.composerChatService&&this.composerChatService._aiService&&this.composerChatService._aiService.streamingAbortControllers;" +
+  'const _stale=_u===void 0||(_m&&typeof _m.has==="function"&&!_m.has(_u));' +
+  "_cxS=_stale?_cxS+1:0;" +
+  "if(_cxS>=3){_cxS=0;" +
+  'try{this.composerDataService.updateComposerData(_h,{status:"completed",chatGenerationUUID:void 0,generatingBubbleIds:[]});' +
+  'this.structuredLogService.info("composer","[cx-queue-pump] healed stuck generating status",{composerId:this.composerId,hadUUID:_u!==void 0});_go=!0}catch(_e){}}}' +
+  "else{_cxS=0}}" +
+  "else{_cxS=0;_go=!_fl}" +
+  "if(_go)this.tryDispatchNextQueueItem();" +
+  "if(this.getQueueItems().length>0){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};" +
+  "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}",
+  "/*@cx-queue-pump:v3.4*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{" +
   "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;" +
   "const _h=this.getComposerHandleIfLoaded();" +
   "const _d=_h?this.composerDataService.getComposerData(_h):void 0;" +
@@ -110,10 +158,7 @@ const QP_SNIPPET =
   "else{_cxS=0}" +
   "this.tryDispatchNextQueueItem();" +
   "if(this.getQueueItems().length>0){this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}};" +
-  "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}";
-
-// 旧版排队泵原文(逐字节),在场则原地升级 v3.4
-const QP_OLD = [
+  "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}",
   "/*@cx-queue-pump:v3.3*/try{if(this._cxQP===void 0){let _cxS=0;const _cxT=()=>{" +
   "this._cxQP=void 0;try{if(this.getQueueItems().length===0)return;" +
   "const _h=this.getComposerHandleIfLoaded();" +
@@ -189,6 +234,37 @@ const PATCHES = [
     sub: (m) => "(/*@cxteam-dedicated*/!1)" + m[2],
   },
   { name: "queue-pump", marker: QP_MARKER, rx: QP_ANCHOR, sub: (m) => m[1] + QP_SNIPPET },
+  // qserial(2026-08-25):官方 tryDispatchNextQueueItem 闸门只看 status,不看"在飞派发"。
+  // 实测竞态:heal 写 status 触发响应式监听,双派发 30ms 内齐发,后枪掐死前枪预网络轮 →
+  // 两问挤一轮。修:入口加官方自家 inFlightDispatchItemIds 守卫,派发严格串行。
+  {
+    name: "qserial", marker: "@cxteam-qserial",
+    rx: /(tryDispatchNextQueueItem\(\)\{const (\w+)=this\.getComposerHandleIfLoaded\(\);if\(!\2\)return;)/g,
+    sub: (m) => m[1] + "/*@cxteam-qserial*/if(this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0)return;",
+  },
+  // nosteer-mod(2026-08-25 真凶):官方把「配置=queue 但按修饰键发送」设计为强制 steer
+  // (⌘+回车正是修饰键!)→ 生成中发的每条都被注入当前轮 → 两问挤一轮/前问无答。
+  {
+    name: "nosteer-mod", marker: "@cxteam-nosteermod",
+    rx: /(case"send":case"queue":return \w+&&\w+\(\w+\)\?\{behavior:")steer(",isModifierOverride:!0\})/g,
+    sub: (m) => m[1] + "queue" + m[2] + "/*@cxteam-nosteermod*/",
+  },
+  // nopromote(2026-08-25 终极 steer 封口):promoteQueueItemToSteer=所有 steer 注入总入口,
+  // 短路后排队消息全部老实排队。multi:glass 打包多份 composer,全部命中逐处打。
+  {
+    name: "nopromote", marker: "@cxteam-nopromote", multi: true,
+    rx: /(async promoteQueueItemToSteer\(\w+\)\{)/g,
+    sub: (m) => m[1] + "/*@cxteam-nopromote*/return!1;",
+  },
+  // norelay(2026-08-25 真·根因):官方 turnEnded 的「轮内接力」在 BYOK 本地线必死
+  // (agent 循环轮末已退,接力消息成孤儿,status 复位被 break 跳过=僵尸;孤儿被下一请求
+  // prepend 捎走=一请求两问只答后一条)。能力闸门 k_d 在本线误判为真 → 调用点恒 false,
+  // turnEnded 走复位分支,官方队列机制逐条各自成轮。僵尸+折叠同根拔除。
+  {
+    name: "norelay", marker: "@cxteam-norelay",
+    rx: /(if\()(\w+\(\{agentBackend:\w+,isLocalMode:\w+\.localMode,isAgentHostEnabled:\w+,isNewRequestIdGateEnabled:\(\)=>this\.isQueuedPromptNewRequestIdEnabled\(\)\}\))(\)\{)/g,
+    sub: (m) => m[1] + "/*@cxteam-norelay*/!1&&" + m[2] + m[3],
+  },
 ];
 
 /* ── 测试钩子:打印常量供与 Python 版做逐字节等价断言 ── */
@@ -261,6 +337,11 @@ function planBundle(rel) {
       }
     }
     const hits = countMatches(pt.rx, out);
+    if (pt.multi) {
+      if (hits < 1) { console.log("   !! %s 锚点命中=0 → 拒绝动手", pt.name.padEnd(11)); process.exit(2); }
+      out = out.replace(pt.rx, (...a) => pt.sub(a)); // sub 吃 exec 风格数组(a[1]=组1)
+      applied.push(pt.name + "(x" + hits + ")"); continue;
+    }
     if (hits !== 1) {
       console.log("   !! %s 锚点命中=%d != 1 → 拒绝动手(版本不匹配或已被 CursorX 改写)", pt.name.padEnd(11), hits);
       process.exit(2);

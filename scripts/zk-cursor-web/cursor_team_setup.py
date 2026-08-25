@@ -241,7 +241,11 @@ def revert():
     baks = sorted(os.listdir(BACKUP_ROOT)) if os.path.isdir(BACKUP_ROOT) else []
     if not baks:
         print("!! 无备份可回滚"); sys.exit(1)
-    b = os.path.join(BACKUP_ROOT, baks[-1])
+    # 优先选「含 bundle 的最新备份」(跳过 -cfgonly:那种只存了配置,回滚它会漏掉 bundle);都没有再退回最新
+    def has_bundle(d):
+        return any(os.path.exists(os.path.join(BACKUP_ROOT, d, os.path.basename(rel))) for rel in BUNDLES)
+    pick = next((d for d in reversed(baks) if has_bundle(d)), baks[-1])
+    b = os.path.join(BACKUP_ROOT, pick)
     print("从备份回滚:", b)
     for rel in BUNDLES:
         src = os.path.join(b, os.path.basename(rel))

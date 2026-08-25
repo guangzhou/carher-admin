@@ -100,3 +100,9 @@ SpendLogs 30 分钟窗（acct aresponses，`proxy_server_request` 逻辑体大�
   2026-08-24 DEFAULT-ON 上线，监控无 BREACH）、WS ingress 客户端→网关腿正门已通
   （docs/ws-ingress-* S4 ✅，IT 已透传 Upgrade，实测 101；全员推广只差一行
   `supports_websockets=true` 的客户端配置分发）。
+
+> **⚠ 时点注记（2026-08-25）**：上述收官数字为 08-24 周末口径，且当时会话 LRU=32 在
+> 高流量 pod 上被打穿（7 个主力 pod 命中为 0，被均值掩盖）。08-25 全池修复
+> `CHATGPT_WS_MAX_SESSIONS=512` 后现役口径：**命中 84.4%、工作日出网削减 ≈18.8GB/6h、
+> 上游缓存 88-92%**。引用请以 skill `litellm-acct-ws-incremental` 的现役口径为准；
+> 复验详情见记忆 `feedback_ws_incr_lru32_thrash_zero_hit_high_traffic`。

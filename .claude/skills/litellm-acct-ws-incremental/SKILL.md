@@ -11,7 +11,11 @@ description: |
 
 > 一句话：acct pod 内给 LiteLLM 打补丁，同一条持久 `wss://chatgpt.com/backend-api/codex/responses`
 > 上只发「新增 input 项 + previous_response_id」，服务端拼回历史。增量轮 8-40KB vs HTTP 全量 ~400KB，
-> **实测削减 90.3%**（预言 90%+ 精确命中）；计价不变（上游重建全上下文照旧计费）；缓存命中 +12.8pp。
+> 计价不变（上游重建全上下文照旧计费）。
+> **现役口径（2026-08-25 全池实测，LRU 修复后）**：全池命中 84.4%（6h 26489/31375）、
+> 工作日出网削减 ≈18.8GB/6h、上游缓存命中 88-92%（昨日同窗对照 +5~8pp 坐实）。
+> （历史口径备查：Phase-1 canary 削减 90.3%/缓存+12.8pp、收官报告 79.2%/6.3GB 天——均为
+> LRU 修复前或单 pod 窗口，引用时注意时点。）
 
 ## 架构与安全属性（承重墙，改动前必读）
 
@@ -40,6 +44,7 @@ description: |
 | `.../test_ws_transport.py` | 离线单测 43/43（FakeWS 剧本回放） |
 | `.../drill_ws_fallbacks.py` | **异常演练器**：pod 内 mock 上游打 12 条异常剧本于已安装真实模块 |
 | `.../probe_ws_incr.py` | pod 内两轮探针（T1 全量→T2 增量+计价单增断言） |
+| `.../ws_incr_fleet_audit.sh` | **全池体检**（per-pod 分桶/thrash 指纹/出网估算/缓存+昨日对照，ssh 管道进 198 跑） |
 | `scripts/litellm-ws-incr-phase2-rollout.py` | 全池波次编排（dry-run 默认/备份/秒级回滚） |
 
 ## 迭代 SOP（一轮 ≈ 5 分钟）
@@ -103,6 +108,40 @@ python3 /tmp/litellm-ws-incr-phase2-rollout.py --stage inventory        # 只读
 差异必须恰为本补丁两处。运行时补丁（callbacks CM 挂 `/app/sitecustomize.py`+`responses_aclose.py`+
 PYTHONPATH=/app）只在 81/82/83 老 deployment，`set image` 不动 mounts/env 天然保留；acct pod 无
 DATABASE_URL，sitecustomize 在 acct 侧惰性。
+
+## 全池复验/审计 SOP（2026-08-25 LRU 事故后固化）
+
+```bash
+ssh cltx@10.68.13.198 'export KUBECONFIG=/home/cltx/.kube/config; bash -s' \
+  < scripts/litellm-patch-chatgpt-ws-incremental/ws_incr_fleet_audit.sh [窗口,默认2h]
+```
+
+四段输出对应四条纪律，每条都是本次真踩出来的：
+
+1. **per-pod 分桶，别看全池均值**。均值 21% 背后是"7 台 0% + 其余 95%"的二态分布——
+   全灭的恰是流量最大、收益本应最大的 pod。判据：单 pod sends>50 且 hit<30% → 查。
+2. **thrash 指纹 = `evict_lru : full ≈ 1:1`**。distinct pck > MAX_SESSIONS 时每个请求
+   挤掉一个会话 → 同 pck 账本已提交（ledger_len 递增）却连轮 `full_reason=no_session`。
+3. **出网削减用同窗数据折算**（inc 次数 × 本窗全量帧均值 − inc 实发字节），与收官报告
+   同方法论；跨窗绝对数不可比（工作日 vs 周末差量级）。
+4. **缓存归因必须过昨日同窗对照**。"早高峰天然高"这类对立解释，用同 UTC 小时 +
+   流量量级相当的昨日数据一查即证伪/坐实；口径唯一认 SpendLogs
+   `metadata->usage_object->prompt_tokens_details->cached_tokens`。
+   缓存抬升是增量复活的**副产品**：previous_response_id 让上游从自家会话态拼上下文，
+   前缀字节级稳定 → prompt cache 必中；全量重发则任何字节漂移都断缓存。
+
+**容量参数现状（08-25）**：全部 165 acct deploy env `CHATGPT_WS_MAX_SESSIONS=512`
+（含 scale0，重新上线自动带）；源码默认同步 512（commit 8a4bc26）。上限定值纪律：
+**用最高流量 pod 的实测并发定，不用 canary 的**（32 是 canary 时代的值，主力 pod 实测
+并发 48-109）。同类病已排查：ws-ingress（`scripts/ws-ingress-gateway/app.py`）是每连接
+私有账本（LEDGER_MAX_ITEMS=20000，连接断即清）无共享 LRU，不在此坑类。
+
+**全池 env 推平模式**（照抄可用）：遍历 deploy → 已是目标值 SKIP → scale0 只写 env 不等 →
+活号 `set env` + `rollout status` 逐台门禁 → 收尾断言"缺目标值的 deploy=0 + pod 全 1/1"。
+
+**未结尾巴（08-25，未归因，别当结论引用）**：acct-91 重启后数小时零业务流量（健康检查
+正常、重启前 5h 有 800+ 发）。候选解释=WA 在其重启窗口把用户改钉别处+黏性驻留；
+**下一步**=查路由层实时权重是否被 weight-align 调 0，蹲新会话是否可选中它。
 
 ## 踩坑清单
 

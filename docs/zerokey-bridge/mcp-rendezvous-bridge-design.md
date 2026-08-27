@@ -127,11 +127,11 @@ MCP 桥**不删**现有 ⟦⟧ 通道:
 | Phase | 内容 | 闸 | 状态 |
 |-------|------|----|------|
 | **0.1** | 通路 probe(注册→抓 schema→删) | 5/5 通过 + plan 够格 | ✅ **已过**(acct82,deepwiki schema 抓到) |
-| **0.2** | 临时 echo server + 公网入口 | server 起 + 公网可达 | 🟡 server 起了,nginx `/mcp-echo/` 502 待修 |
-| **0.3** | 挂起超时(10/30/60s) | 拿到窗口数字 | ⏳ 待 0.2 |
-| **0.4** | 一轮连环调用 | 拿到连环行为 | ⏳ 待 0.2 |
-| **0.5** | 结果 moderation 干扰 | 拿到干扰形状 | ⏳ 待 0.2 |
-| **0 裁决** | 三前提 GO/NO-GO | 前提①②过才进 Phase 1 | ⏳ |
+| **0.2** | 临时 echo server + 公网入口 | server 起 + 公网可达 | ✅ **已过**(echo server 起 + nginx `/mcp-echo/` 通;502 是 reload 竞态,自愈) |
+| **0.3** | 挂起超时(10/30/60s) | 拿到窗口数字 | ✅ **已过**:窗口 **30-60s**(delay 0/15/30s marker 原样回;60/90s completed=0 空返) |
+| **0.4** | 一轮连环调用 | 拿到连环行为 | ✅ **已过**:一轮内连调 chain_step ×3 全 ack(核心塌缩收益成立);**但 server 见 retry-storm(同 call_id 每 ~60s 重发)** |
+| **0.5** | 结果 moderation 干扰 | 拿到干扰形状 | ✅ **已过(利好)**:A(无 url)/B(带 url)均 completed,URL **原样穿透**(`url_intact=True`)→ **MCP 路不走 prose 路的 url-moderation** |
+| **0 裁决** | 三前提 GO/NO-GO | 前提①②过才进 Phase 1 | ✅ **GO**(见 §12) |
 | **1** | 会合桥最小实现(§3-5,配对用 B) | 端到端一次 MCP 调用打通 | 未开工 |
 | **2** | 82 canary(注册 connector + 开门控) | 离线全绿 + 复杂任务探针 + s3h + codex 一票否决 | 未开工 |
 | **3** | soak 数据裁决(MCP 轮 vs 作文轮分别统计) | 成功率/时延达标 | 未开工 |
@@ -162,3 +162,23 @@ MCP 桥**不删**现有 ⟦⟧ 通道:
 - 删 nginx `/mcp-echo/` location + reload(备份在 `/home/cltx/backups-nginx/chat.*.pre-mcpecho.conf`)。
 - 删 pod 内 `/tmp/sess82.json`、`/tmp/mcp-cli.js`(含凭据)。
 - 若 Phase 0 期间为测试注册过 connector,`mcp-connector-cli.js delete` 清掉。
+  - 本轮实测注册物:connector `asdk_app_6a8ff151eb2c8191806fbd7b4c0b5315`、link `link_6a8ff18fdce481918361bd73021244d0`(name `zk_echo_phase0`,actions echo/long_result/chain_step)。
+
+## 12. Phase 0 裁决(2026-08-27)—— **GO**
+
+三前提逐条落地(全走 82 lane 无 tools 声明的干净直通,scoped key 用完即删):
+
+| 前提 | 闸门 | 实测 | 裁决 |
+|------|------|------|------|
+| ①挂起窗口 | 够普通命令一口气跑完 | **30-60s**(0/15/30s marker 原样回;60/90s 空返) | ✅ 普通命令直通;长命令(>30s)走取号降级 |
+| ②一轮连环 | 同 turn 内连续 call_tool | chain_step ×3 一轮内全 ack,正文逐条复述 | ✅ **核心塌缩收益成立** |
+| ③结果 moderation | 工具结果不被换字/拦截 | A/B 均 completed,URL `url_intact=True` 原样穿透 | ✅ **利好**:MCP 路不走 prose url-moderation |
+
+**裁决:GO 进 Phase 1。** 三前提无一 NO-GO,且 ③ 反而消掉一整类 prose 路病(url-moderation 占位)。
+
+### Phase 0 数据强制的 Phase 1 设计修正
+
+1. **会合表必须按 call_id 幂等去重**(0.4 硬发现)。server 日志见 ChatGPT 后端对同 `call_id` **每 ~60s 重发** tools/call(与 ① 的 60s 超时同源:窗口内没等到应答就重试)。会合桥若不去重,一条命令会被下发 Cursor 多次 → 重复执行。**Map key = call_id,重发命中在途 entry 直接挂起复用同一 resolve,不新建 function_call。**
+2. **应答目标 ≤30s,不吃满 60s**(0.3 硬发现)。挂起在 30s 内没等到 Cursor output → 立即走**取号降级**:MCP result 回 "执行中,call_id=X,稍后用 poll action 查",别让 ChatGPT 后端撞 60s 超时触发 retry-storm。
+3. **url-safe 回填 MCP 路免做**(0.5 硬发现)。工具结果里的 URL 原样穿透,§5.5 前提③的担忧不成立;现有 prose 路 url-safe 逻辑不需移植到 MCP result 路径。
+4. **broken-pipe 容错**:echo server 实测被 ChatGPT 后端在应答前掐连接(BrokenPipeError)。会合桥 `/mcp` 写回时必须 try/catch,连接已断则把结果暂存(下次同 call_id 重发时直接返),不崩进程。

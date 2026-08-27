@@ -49,6 +49,9 @@ function backfill(fullIn, frames) {
         if (op && typeof op.p === 'string' && op.p.includes('content_references')) harvestUrlRefs(op.v, _urlRefs)
       }
     }
+    // 第三投递形状:引用实体挂在 message 快照的 metadata 里(2026-08-27 真流量补路)
+    const _mdRefs = d.v && d.v.message && d.v.message.metadata && d.v.message.metadata.content_references
+    if (Array.isArray(_mdRefs) && _mdRefs.length) harvestUrlRefs(_mdRefs, _urlRefs)
   }
   let full = fullIn
   let _ui = 0, _subbed = 0
@@ -58,7 +61,17 @@ function backfill(fullIn, frames) {
       const _url = _urlModUrls[_ui]
       let _hit = false
       if (_r.matched && full.indexOf(_r.matched) >= 0) {
-        full = full.replace(_r.matched, _url); _hit = true
+        const _at = full.indexOf(_r.matched)
+        let _rep = _url
+        if (_r.matched.slice(0, 3).toLowerCase() === 'url') {
+          let _anchor = _r.matched.slice(3)
+          const _hi = _anchor.indexOf('http')
+          if (_hi >= 0 && _url.startsWith(_anchor.slice(_hi))) _anchor = _anchor.slice(0, _hi)
+          _anchor = _anchor.trim()
+          _rep = _anchor ? `[${_anchor}](${_url})` : _url
+        }
+        full = full.slice(0, _at) + _rep + full.slice(_at + _r.matched.length)
+        _hit = true
       } else {
         const _s = _r.start
         if (typeof _s === 'number' && (full || '').slice(_s, _s + 3).toLowerCase() === 'url') {
@@ -80,12 +93,28 @@ const CREF_STANDALONE = (refs) => ({ p: '/message/content/parts/0/content_refere
 const cases = [
   {
     // 实锤形状(canary 82 抓帧):matched_text 含占位"url"+锚文本+截断真链片段,full 里字面存在 → 整段换真链。
-    name: 'real-matched-replace',
+    name: 'real-matched-rebuild-markdown',
     full: '创建成功。文档链接：url打开飞书测试文档https://t83dfrspj4',
     frames: [
       CREF_PATCH([{ matched_text: 'url打开飞书测试文档https://t83dfrspj4', start_idx: 52, end_idx: 84, safe_urls: [], invalid: true, type: 'hidden' }]),
       MOD(REAL),
     ],
+    wantSub: 1, wantHasReal: true, wantNoLiteralUrl: true,
+    wantExact: '创建成功。文档链接：[打开飞书测试文档](' + REAL + ')',
+  },
+  {
+    // 2026-08-27 真流量形状:残链只到 "https" 就断(是真链前缀)→ 照样重建 [锚](真链)。
+    name: 'user-incident-shape-rebuild',
+    full: '文档地址：url打开飞书文档https',
+    frames: [ CREF_STANDALONE([{ matched_text: 'url打开飞书文档https', start_idx: 5, safe_urls: [] }]), MOD(REAL) ],
+    wantSub: 1, wantHasReal: true, wantNoLiteralUrl: true,
+    wantExact: '文档地址：[打开飞书文档](' + REAL + ')',
+  },
+  {
+    // 第三投递路径:refs 挂 message.metadata(非 p 路径)→ 也能捕获回填。
+    name: 'metadata-path-harvest',
+    full: '链接：url',
+    frames: [ { o: 'add', v: { message: { id: 'm1', metadata: { content_references: [{ matched_text: 'url', start_idx: 3, safe_urls: [] }] } } } }, MOD(REAL) ],
     wantSub: 1, wantHasReal: true, wantNoLiteralUrl: true,
   },
   {
@@ -93,7 +122,8 @@ const cases = [
     name: 'standalone-cref-matched',
     full: '文档链接：url查看',
     frames: [ CREF_STANDALONE([{ matched_text: 'url查看', start_idx: 5, safe_urls: [] }]), MOD(REAL) ],
-    wantSub: 1, wantHasReal: true, wantNoLiteralUrl: false, // "查看"保留,"url"被换
+    wantSub: 1, wantHasReal: true, wantNoLiteralUrl: true,
+    wantExact: '文档链接：[查看](' + REAL + ')',   // 锚文本保留,重建 markdown
   },
   {
     // matched_text 缺失 → 退回 start_idx + slice==='url' 兜底。
@@ -149,6 +179,9 @@ for (const c of cases) {
   }
   if (ok && c.wantEqualInput) {
     if (r.full !== c.full) { ok = false; why += ` MUTATED full=${JSON.stringify(r.full)}` }
+  }
+  if (ok && c.wantExact !== undefined) {
+    if (r.full !== c.wantExact) { ok = false; why += ` EXACT-MISMATCH got=${JSON.stringify(r.full)}` }
   }
   if (ok) { pass++ } else { fail++; fails.push({ name: c.name, why }) }
   console.log(`[${ok ? 'PASS' : 'FAIL'}] ${c.name} — ${why}`)

@@ -381,6 +381,50 @@ Gate-2 问的是:"给真实 serve 路**持久**挂 connector"对 codex CLI 有�
 基线证据 json(留 `/home/cltx/backups-bpi/gate2_codex_baseline.json`)。**未 attach 任何 connector,无 mutation,
 无需拆除。** codex 线的 `makeCitationFilter` bug + 池 429/401 属 codex 账号面/代码,本线不碰,如实上报由 owner 处置。
 
+### 13.6-Gate-2b 连接器可见性机制实测(2026-08-28,授权 acct 上执行,codex 面零接触)—— 🔒 **NO-GO 从结构论证升级为机制硬证**
+
+Gate-2 裁决靠"acct82 是 codex 池成员"的结构事实判死方案 B;但**替代路 ①/②ろ能否成立,取决于一个此前
+未测的机制问题**:账号级注册的 connector,对 `developer_mode_connector_ids=[]`(codex serve 恒定形状,api.js L57)
+的轮次到底可不可见/可不可调?§13.3 曾**推断**"[]=账号面隔离",但那次探针**每轮都注入了 connector 且连接器是 linked**,
+从没跑过真正的 `[]` 臂 —— 隔离是**推断,不是实测**。本节在 **acct93(codex 无关账号,全程不碰 acct82/codex)**
+用双臂探针把这一格数据补满。
+
+**探针**(`fconv_vis_probe.js`,pod 自带 `ChatGPTAPI` 真实 serve 路,host echo server + nginx `/mcp` 公网可达,
+逐轮独立新会话):唯一变量 = `body.metadata.developer_mode_connector_ids`。臂A=`[connector]`(注入/正对照)、
+臂B=`[]`(codex 形状)。**判据 = ground truth 只认 echo-server 是否真收到 `tools/call`**(SSE 子串探测器已证会把
+prompt 字面 `ZK7391` / `NO_ECHO_TOOL` 误报,弃用其自动裁决)。
+
+- **假设**:linked 与 register-only 两种注册模式,`[]` 轮的可见性一致。
+- **证伪条件**:若两模式行为不同,echo-server 命中在两模式的臂A/臂B 上会呈现不同图样。
+- **数据(echo-server 日志,决定性)**:
+  | 注册模式 | 臂A(注入 `[connector]`) | 臂B(`[]`,codex 形状) | echo-server 命中 |
+  |---------|--------------------------|------------------------|------------------|
+  | **linked**(`link <id>` 后) | ✅ `tools/call`@16:24:00.880Z | ✅ `tools/call`@16:24:12.082Z | **两臂都真调到 echo** |
+  | **register-only**(仅注册不 link) | ❌ 模型直接 `NO_ECHO_TOOL`,工具未端上 | ❌ 模型试 `api_tool.search_plugins{"query":"echo"}` 未果 → `NO_ECHO_TOOL` | **两臂都零命中** |
+
+**机制定论(三段式数据栏满)**:
+1. **`link`(账号级挂载)是连接器"在对话里可被调用"的开关**。一旦 linked,`developer_mode_connector_ids` 不再是门 ——
+   `[]` 轮(= codex serve 恒定形状)也能看到并**真的调用**它(臂B echo 命中 16:24:12,落在臂B 窗口 16:24:04+ 内)。
+   **这推翻 §13.3 的"[]=账号面隔离"推断**:linked 连接器泄漏到 `[]` 轮。
+2. **register-only(仅注册不 link)的 schema 可被发现**(`actions` 返回 echo/long_result/chain_step 全 `enabled=true`),
+   **但无法通过 `developer_mode_connector_ids` 注入变为可调用** —— 注入臂(正对照)工具根本没端上模型,零 echo 命中。
+   故"register-only + 逐轮注入"作为**桥的工具投递机制**是**死的**(端不上工具)。
+
+**对两条替代路的硬收窄**:
+- **方案 B(账号级 linked 持久 connector)**:唯一可调用形态,但 linked 必泄漏到 `[]` 轮 → 在 **codex-shared 账号(acct82)**
+  上 = codex 看得到/能调 = NO-GO(结构 + 机制双证)。**在任何 codex-shared 账号上,不存在"可调用且不泄漏给 codex"的配置**。
+- **方案 A(register-only + 逐轮注入,想借此避开账号级 link)**:经验证**端不上工具,投递失败** → 此路作为 §5.1 方案A 的
+  一种实现**不可行**。§5.1 方案A 若要活,只能是**"逐会话 link + 用完即 unlink"**形态(而非 register-only),但 link 窗口内
+  仍对该账号所有 `[]` 轮泄漏 → **只在独立(非 codex-shared)账号上才安全**。
+- **净结论**:**MCP 桥唯一安全路 = 独立账号面**(专用一个不在 codex 池、不与 codex CLI 共享的 ChatGPT 账号,
+  在其上 link 桥连接器;"泄漏到 `[]`"因该账号 codex 从不使用而无害)。§13.6 veto-fallback ①(独立账号面)由"首选"
+  **升级为"必需"**;②(register-only 方案A)判死。**Branch-A 流缝合代码在备妥独立账号面 + 显式拍板前不写。**
+
+**遗留物(全量拆除,回 pre-probe)**:acct93 上两个测试连接器(linked `asdk_app_6a9064…` + register-only
+`asdk_app_6a9065a3d788819193be2801be9c5743`)均 delete 复验 404;host echo server(:18901)kill(`NONE_18901`);
+nginx 从 `chat.auto-link.com.cn.conf.pre-gate1.20260827-222139.bak` 还原(0 个 `/mcp` 块,`nginx -t` OK,外部 `/mcp`→502);
+pod + host `/tmp` 探针物擦净;`mcp-echo.log`(19KB)作证据留存 `/home/cltx/`。**全程未碰 acct82 / codex 面。**
+
 ### 13.5 本轮结论
 
 会合桥两个可离线证的承重件已 GO(33/33 + 25/25)。**流缝合的 A/B 承重未知已由 canary 探针裁决 =

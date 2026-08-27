@@ -247,8 +247,13 @@ complete。**证伪条件(本轮 SSE drain 到底后 tool 调用只记进会话�
 **对设计的硬含义**:§13.3 分支 A 成立 = 流缝合走**较重的分支** —— 网关须持一个**跨 Cursor 轮存活**的
 ChatGPT SSE reader,其"输出目标 Cursor socket"可重指针(turn-1 socket 用 `finishWebTools` 发完
 function_call 关闭后,把 held reader 续流重定向到 turn-2 socket)。现有 per-turn drain(§13.2)**不直接支持**,
-须新增。⚠️ 本探针 `/mcp` 秒回;真实桥的 `/mcp` 会挂 30-60s(Phase0 实测窗口)等 Cursor 执行 + 下一轮
-output —— held reader 必须在这段挂起里保活(broken-pipe 容错见 §12 修正 4)。
+须新增。
+
+⚠️ **诚实旗:长挂起时长未测(数据栏空)**。本探针 `/mcp` **秒回**,实测证的是"流能挂起-再续"(挂 <1s)。
+真实桥 `/mcp` 要挂 **30-60s** 等 Cursor 干完 + 下一轮 output。那个 30-60s 数字来自 **ChatGPT 自家网页
+界面**调工具的观测(Phase0),**不是网关这条 SSE 路的观测** —— 把"流能扛 30-60s 长挂起"当已知,是拿两条
+不同路子的数据拼出来的**假设**,非本路证据。按 CLAUDE.md 纪律:这不是"实现要求",是**动手前必须先补的一次
+测量**(见 §13.6 Gate-1)。
 
 **探针遗留物清理(已执行,回到 pre-probe)**:connector 已 `delete`(200,复验 404 "Connector not
 found");zero-93 `/tmp` 凭据/CLI/probe/SSE-log 擦净;probe server(zero-140)kill、文件删净;nginx
@@ -257,14 +262,46 @@ reload,外部复验 502 = block 已移除)。**残留**:noauth link `link_6a903a
 单删,connector 删后该 link 指向死 connector = 模型调不动 = 已知无害残渣(与 Phase0 `asdk_app_6a8ff151…`
 同性质)。
 
-### 13.4 账号面风险旗(已评估,探针窗口内已消化)
+### 13.4 账号面风险旗(**探针期已消化,但上线期重新打开** —— 见 §13.6 Gate-2)
 
-分支判定探针要在 **acct82 账号上注册 MCP connector**。acct82 与 codex CLI 线共享账号面(custom instructions/memory/token)。connector 是 ChatGPT-web 侧特性,理论上不触碰 codex 的 `/responses` 用法,但"注册 connector 是否对 codex CLI 可见/有副作用"尚无数据 → **注册前须先验证对 codex 零影响**(codex 回归一票否决)。Phase 0 曾注册过 `asdk_app_6a8ff151…`(§11 清理清单在案),说明短期注册被判可接受,但那不等于常驻安全。
+探针**安全**靠的是:真实 serve 路 `developer_mode_connector_ids` 恒为 `[]`(api.js L57),真实用户看不到
+connector,探针只在注入字段的那一轮可见 → 账号面零副作用,已验(connector 删复验 404)。
+
+**但这份安全不能平移到上线。** 生产的桥要工作,**恰恰必须往真实 serve 路持久塞 connector**,否则模型看
+不到工具、桥即死。也就是:让探针安全的那道隔离,正是上线时必须打破的东西。一旦打破,真实服务每轮都带
+connector,acct 与 codex CLI 线共享账号面(custom instructions/memory/token) → **"给真实 serve 路持久
+挂 connector 是否对 codex CLI 可见/有副作用"仍无数据**。探针期的"安全"≠ 上线期的安全,**不得用前者当后者
+的证据**。动手前须单独验(§13.6 Gate-2,codex 一票否决)。
+
+### 13.6 动手前的两道数据闸(Branch-A 实现的前置,数据栏现为空)
+
+Review(2026-08-27)钉出:§13.3 裁决对(A 站得住),但"能开工"这个结论还差两格数据。补齐前不写任何
+Branch-A 流缝合代码。两闸均设计成**最小、可回滚、用完即拆**的探针,不动线上代码。
+
+- **Gate-1 长挂起保活(可现在跑,不碰账号面加号)**:把 `mcp_probe_server.js` 的 `callTool` 从秒回改成
+  **可配置延迟**(`ZK_MCP_PROBE_DELAY_MS`,取 30000/45000/60000),复用 §13.3 同一 canary 形态发一轮,
+  观测:held 期间 f/conversation SSE **reader 是否断 / 心跳帧形态 / broken-pipe 时刻**。
+  - **证伪条件**:若流在 30-60s 挂起中被上游掐(READ_ERROR / done 提前 / 无 keepalive 帧)→ Branch-A
+    "同连接保活"在真实时长下**不成立**,须改设计(如网关侧 keepalive 注入 / 或退回研究 Branch-B 式续接)。
+  - **通过判据**:delay 30/45/60s 三档,tool 结果回注仍在**同一条** SSE、drain 到 complete、reader 未提前
+    断 → 长挂起保活成立,Gate-1 绿。
+- **Gate-2 codex 零影响(账号面,须显式授权 + 一票否决)**:验"给真实 serve 路**持久**挂 connector"对
+  codex CLI 的影响。**注意与探针期不同**:探针只在注入字段那轮可见,Gate-2 要测的是**常驻可见**的形态。
+  - 做法:在授权账号挂 connector 后,**不注入** `developer_mode_connector_ids`,跑 codex CLI 回归
+    (compare 三跑,工具轮 item 结构 `["function_call","reasoning"]` + called_tool=true 与基线逐字对齐)。
+  - **一票否决**:任一结构漂移 / codex 侧看到 connector / 账号面异常 → 立即 delete connector、Branch-A
+    路**账号面配对方案作废**,回退研究"不碰 serve 路 connector"的替代(如独立账号面 / 方案 A 专属 link token)。
+  - 未获显式授权前 **Gate-2 不跑**;Gate-1 与 Gate-2 均绿才谈动工。
 
 ### 13.5 本轮结论
 
 会合桥两个可离线证的承重件已 GO(33/33 + 25/25)。**流缝合的 A/B 承重未知已由 canary 探针裁决 =
 Branch A(挂起-续流,见 §13.3-裁决,2026-08-27)**,双侧对时数据钉死,证伪条件未出现。探针本身已按最小/
-可回滚/账号面零副作用形态执行完并全量拆除,回到 pre-probe。**下一步(未开工,须显式授权)**:实现 Branch-A
-流缝合 —— 跨 Cursor 轮存活的 SSE reader + 可重指针输出 socket,全程锁在 `ZK_MCP_BRIDGE==='1'` 默认关后,
-codex 一票否决。此为显著新建,`装` 授权只覆盖探针本身,动工前须拍板。
+可回滚/账号面零副作用形态执行完并全量拆除,回到 pre-probe。
+
+**但 review(2026-08-27)钉出"能开工"结论还差两格数据(§13.6)**:①长挂起(30-60s)保活未在网关这条 SSE
+路实测过——秒回探针只证了 <1s 的挂起-再续,30-60s 数字借自 ChatGPT 网页界面,非本路证据(Gate-1);
+②让探针安全的账号面隔离(serve 路 connector 字段恒空)正是上线时必须打破的东西,持久挂 connector 对
+codex 的影响仍无数据(Gate-2)。**Gate-1、Gate-2 均绿前不写 Branch-A 流缝合代码。** 实现全程锁在
+`ZK_MCP_BRIDGE==='1'` 默认关后,codex 一票否决。`装` 授权只覆盖判定探针,Gate-1 可现在跑(不碰账号面),
+Gate-2 与动工均须显式拍板。

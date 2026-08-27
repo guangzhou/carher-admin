@@ -132,7 +132,7 @@ MCP 桥**不删**现有 ⟦⟧ 通道:
 | **0.4** | 一轮连环调用 | 拿到连环行为 | ✅ **已过**:一轮内连调 chain_step ×3 全 ack(核心塌缩收益成立);**但 server 见 retry-storm(同 call_id 每 ~60s 重发)** |
 | **0.5** | 结果 moderation 干扰 | 拿到干扰形状 | ✅ **已过(利好)**:A(无 url)/B(带 url)均 completed,URL **原样穿透**(`url_intact=True`)→ **MCP 路不走 prose 路的 url-moderation** |
 | **0 裁决** | 三前提 GO/NO-GO | 前提①②过才进 Phase 1 | ✅ **GO**(见 §12) |
-| **1** | 会合桥最小实现(§3-5,配对用 B) | 端到端一次 MCP 调用打通 | 未开工 |
+| **1** | 会合桥最小实现(§3-5,配对用 B) | 端到端一次 MCP 调用打通 | 🔶 3 承重件绿(33/33+25/25+17/17);**A/B 已裁决=Branch A(§13.3-裁决)**;剩 Branch-A 流缝合(跨轮 SSE reader+可重指针 socket)未开工,待拍板 |
 | **2** | 82 canary(注册 connector + 开门控) | 离线全绿 + 复杂任务探针 + s3h + codex 一票否决 | 未开工 |
 | **3** | soak 数据裁决(MCP 轮 vs 作文轮分别统计) | 成功率/时延达标 | 未开工 |
 | **4** | 全量(47 号)+ 101 切换 + 收敛删补丁 | 每删一项标注被 MCP 哪个机制替代 | 未开工 |
@@ -212,12 +212,59 @@ Explore 机械测绘 `/tmp/resp_live_82_20260827.js`(md5 `2f94ed79`,2192 行)得
 - **数据**:**无**。Phase 0 只证了 ChatGPT **自家 web UI** 打 connector 时 `/mcp` HTTP 请求被挂起 ~60s;那不是网关 `chatCompletion` 路的观测。两分支的缝合设计完全不同:
   - **分支 A(挂起-续流)**:需新增一个**跨 Cursor 轮存活**的 ChatGPT SSE reader,其"输出目标 Cursor socket"是可重指针 —— turn-1 socket 用 `finishWebTools` 发完 function_call 关闭后,把 reader 续流重定向到 turn-2 socket。这是比会合表更重的改造,现有 per-turn drain 模式不直接支持。
   - **分支 B(轮末-续轮)**:直接复用现有 `_convCache` 续接机械 —— `rendezvous.complete` → 触发一次新的 `chatCompletion`(delta=function_call 记录+结果)→ drain → 灌进 turn-2 Cursor socket。几乎全是已有字节。
-- **合法下一步(不跳过数据)**:分支判定需一次**针对性探针**——在网关挂最小 `/mcp`(仅接 `tools/list`+`tools/call`,`callTool` 先只记录不真会合),让 acct82 账号注册的 connector 在网关 `chatCompletion` 驱动的一轮里被模型选中,**观测 `chatCompletion` SSE 帧**:本轮是 drain 到底(→B)还是在 tool-call 处停住不出 `message_stream_complete`(→A)。此探针**离线做不到**(要 ChatGPT 后端真的经网关路调 connector),属 Phase 1 canary 实验,须走完整闸门 + 显式 canary go 才点。
+- **合法下一步(不跳过数据)**:分支判定需一次**针对性探针**——在网关挂最小 `/mcp`(仅接 `tools/list`+`tools/call`,`callTool` 先只记录不真会合),让账号注册的 connector 在 `chatCompletion` 驱动的一轮里被模型选中,**观测 SSE 帧**:本轮是 drain 到底(→B)还是在 tool-call 处停住不出 `message_stream_complete`(→A)。此探针**离线做不到**(要 ChatGPT 后端真的经网关路调 connector),属 Phase 1 canary 实验,须走完整闸门 + 显式 canary go 才点。
 
-### 13.4 账号面风险旗(未点,待评估)
+### 13.3-裁决(2026-08-27,canary 探针实测)—— ✅ **Branch A(挂起-续流)**
+
+探针形态遵 §13.5(最小、可回滚、账号面零副作用):
+- **最小 `/mcp`**:`scripts/zk-cursor-web/mcp_probe_server.js`,单工具 `zk_probe`,`callTool` **秒回**固定
+  marker `ZK7391`(不真会合),每请求落 `/tmp/mcp-probe.log` 带时间戳。挂 198 host nginx
+  `location ^~ /mcp-probe` → 公网 `https://chat.auto-link.com.cn/mcp-probe`。
+- **connector**:在 **acct93**(授权"装",web-quota resale 活字号,devmode 已开)`provision`
+  → connector `asdk_app_6a903a86…` + noauth link `link_6a903a8f…`。
+- **驱动一轮**:用 pod 自带 `ChatGPTAPI`(=真实 serve 路,内部 `_refreshSentinel` PoW +
+  `_prepareConversation`,解决 raw replay 的 403 "unusual activity")发**一轮** f/conversation,
+  唯一改动 `body.metadata.developer_mode_connector_ids=[connector]` 让模型本轮看得到 `zk_probe`。
+  **真实 serve 路该字段恒为 `[]`**(api.js L57),故真实用户看不到本工具 = 账号面隔离。观测唯一。
+
+**双侧对时数据(三段式"数据"栏,不再空):**
+
+| 侧 | 事件 | 相对/绝对时刻 |
+|----|------|------|
+| f/conversation SSE(zero-93,**单条 HTTP,55 帧**) | `api_tool.call_tool` 发出(模型调 zk_probe) | @10.311s |
+| probe server(zero-140,`/tmp/mcp-probe.log`) | OpenAI 后端 POST `/mcp-probe`:`initialize`+`tools/call zk_probe args{}` | 13:30:10.494Z(**turn 进行中**) |
+| **同一** f/conversation SSE | tool 结果回注同流(`author.role:"tool" name:"api_tool.call_tool"`,content_type code,`ZKPROBE_RESULT…marker=ZK7391`) | @10.989s |
+| **同一** SSE | 模型正文续接(`data:{"v":"-alive marker=ZK7391"}`) | @12.554s |
+| **同一** SSE | `message_stream_complete` / 收尾(末帧 17.140s) | @16.511s |
+
+SSE VERDICT(探针自打印):`{"frames":55,"sawToolCall":true,"toolCallAt":"10.311s","markerAfterToolCall":true,"sawComplete":true,"completeAt":"16.511s"}`
+
+**裁决 = Branch A**。call→result→continue→complete 全生命周期在**一条** f/conversation 连接上:
+模型对网关的 SSE 在同连接挂起等 `/mcp` 结果,拿到后回注 tool result、在同流续接模型正文、drain 到
+complete。**证伪条件(本轮 SSE drain 到底后 tool 调用只记进会话、靠后续请求续接 = B)未出现** —— marker
+在 tool-call **之后**、于**同一流内**出现,而非下一轮 delta。
+
+**对设计的硬含义**:§13.3 分支 A 成立 = 流缝合走**较重的分支** —— 网关须持一个**跨 Cursor 轮存活**的
+ChatGPT SSE reader,其"输出目标 Cursor socket"可重指针(turn-1 socket 用 `finishWebTools` 发完
+function_call 关闭后,把 held reader 续流重定向到 turn-2 socket)。现有 per-turn drain(§13.2)**不直接支持**,
+须新增。⚠️ 本探针 `/mcp` 秒回;真实桥的 `/mcp` 会挂 30-60s(Phase0 实测窗口)等 Cursor 执行 + 下一轮
+output —— held reader 必须在这段挂起里保活(broken-pipe 容错见 §12 修正 4)。
+
+**探针遗留物清理(已执行,回到 pre-probe)**:connector 已 `delete`(200,复验 404 "Connector not
+found");zero-93 `/tmp` 凭据/CLI/probe/SSE-log 擦净;probe server(zero-140)kill、文件删净;nginx
+`/mcp-probe` 从 backup `chat.auto-link.com.cn.conf.pre-mcpprobe.20260827-210819.bak` 还原(`-t` OK +
+reload,外部复验 502 = block 已移除)。**残留**:noauth link `link_6a903a8f…` 无 list-by-account 无法
+单删,connector 删后该 link 指向死 connector = 模型调不动 = 已知无害残渣(与 Phase0 `asdk_app_6a8ff151…`
+同性质)。
+
+### 13.4 账号面风险旗(已评估,探针窗口内已消化)
 
 分支判定探针要在 **acct82 账号上注册 MCP connector**。acct82 与 codex CLI 线共享账号面(custom instructions/memory/token)。connector 是 ChatGPT-web 侧特性,理论上不触碰 codex 的 `/responses` 用法,但"注册 connector 是否对 codex CLI 可见/有副作用"尚无数据 → **注册前须先验证对 codex 零影响**(codex 回归一票否决)。Phase 0 曾注册过 `asdk_app_6a8ff151…`(§11 清理清单在案),说明短期注册被判可接受,但那不等于常驻安全。
 
 ### 13.5 本轮结论
 
-会合桥两个可离线证的承重件已 GO(33/33 + 25/25)。**流缝合卡在一个真实的经验未知(A/B 分支)上,该未知只能由 canary 探针判定,不能靠推理消解**。在点探针之前(需完整闸门 + codex 零影响验证 + 显式 canary go),Phase 1 不再往 responses.js 嫁接缝合逻辑 —— 先把判定探针本身设计成最小、可回滚、账号面零副作用的形态。
+会合桥两个可离线证的承重件已 GO(33/33 + 25/25)。**流缝合的 A/B 承重未知已由 canary 探针裁决 =
+Branch A(挂起-续流,见 §13.3-裁决,2026-08-27)**,双侧对时数据钉死,证伪条件未出现。探针本身已按最小/
+可回滚/账号面零副作用形态执行完并全量拆除,回到 pre-probe。**下一步(未开工,须显式授权)**:实现 Branch-A
+流缝合 —— 跨 Cursor 轮存活的 SSE reader + 可重指针输出 socket,全程锁在 `ZK_MCP_BRIDGE==='1'` 默认关后,
+codex 一票否决。此为显著新建,`装` 授权只覆盖探针本身,动工前须拍板。

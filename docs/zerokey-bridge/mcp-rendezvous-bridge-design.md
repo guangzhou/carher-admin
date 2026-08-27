@@ -327,14 +327,59 @@ Branch-A 流缝合代码。两闸均设计成**最小、可回滚、用完即拆
 action 查",别让 ChatGPT 后端撞 60s 触发 retry-storm(否则一条命令被重复下发 Cursor + 本轮拿不到结果)。
 普通命令(<30s)走"一口气";长命令(build/大扫描)**强制取号**,非可选优化。
 
-⚠️ **诚实旗**:本档只证了"held reader 在 30-60s 不被上游掐"+"≥60s 应答窗口关死"。**未证** Gate-2(持久挂
-connector 对 codex 的账号面影响)——那仍是动工前的第二格空数据,须显式授权 + 一票否决(§13.6 Gate-2)。
+⚠️ **诚实旗**:本档只证了"held reader 在 30-60s 不被上游掐"+"≥60s 应答窗口关死"。Gate-2 见下 §13.6-Gate-2 裁决。
 
 **探针遗留物清理(已执行,回到 pre-probe)**:connector 已 `delete`(200,复验 404 "Connector not found");
 nginx `/mcp-probe` location 从 backup `chat.auto-link.com.cn.conf.pre-gate1.20260827-222139.bak` 还原(`-t`
 OK + reload,外部复验 502 = block 已移除);zero-93 / zero-140 `/tmp` 凭据/CLI/probe/SSE-log 擦净。**残留**:
 noauth link `link_6a90489d…` 无 list-by-account 无法单删 = connector 删后指向死 id 的已知无害残渣(同
 Phase0/A-B 探针性质);probe server 孤儿监听(镜像沙箱拦 kill,无公网路由后无害,随下次 pod rollout 消)。
+
+### 13.6-Gate-2 裁决(2026-08-27,授权 "go" 后执行)—— ❌ **NO-GO(acct82 账号面配对方案作废)**
+
+Gate-2 问的是:"给真实 serve 路**持久**挂 connector"对 codex CLI 有无影响。裁决**不是**由拟议中的
+经验回归(attach + compare)给出的,而是被一条**结构事实**直接判死 —— 且这条事实**推翻了本轮开工前
+(context 续写摘要)的"两账号相互独立"去风险结论**。
+
+**先跑基线(codex_regress.py,acct 侧,scoped key 用完即删),基线自身 500(数据栏):**
+- 两轮(chat / tool)均 `response.created → response.in_progress → {"error":{"message":"API 异常
+  (req: 0efcef49 / bf75b2da)","code":"500"}}`,`no_completed`,retried 仍 500。
+- **根因(读 `zero-cursor-101` pod 日志,只读,非探针流量)**:① `ReferenceError: makeCitationFilter is
+  not defined at /app/routes/responses.js:439:24` —— 该 pod(7d4h uptime,**未含修复字节**,与 ROI #1
+  gate 记录的 `makeCitationFilter` 同源)流中抛错 → 外层脱敏成 `API 异常 code 500`;② pool 全员不可用:
+  `[codex-pool] acct-82 → 429` / `acct-175 → 401 (marked dead)` / `acct-81 → 429`(loaded 3 tokens 全 429/401)。
+  **均是 codex serve 线既存故障,非我的探针所致,亦非本线可碰(codex CLI 代码 + 账号面双禁)。**
+
+**判死 Gate-2 的结构事实(三段式,数据栏满):**
+- **假设**:codex serve(`cursor-fc-5.6-sol`)与 cursor-g canary 用**不同** ChatGPT 账号 → 给 acct82 挂
+  connector 不碰 codex(续写摘要据此"去风险")。
+- **证伪条件**:若同账号,codex serve pod 的运行日志会把 acct82 列进它的上游池。
+- **数据**:`zero-cursor-101`(serve `cursor-fc-5.6-sol`)pod 日志实录 `[codex-pool] acct-82 → 429` ——
+  **acct-82 是 codex serve 池的活跃成员**;且 acct-82 正是 cursor-g canary(`zero-cursor-bpi-82`)的账号;
+  且本仓 ROI 路线图 header 写死的长期约束即 **"acct82 与 codex 线共享 custom instructions/memory/token"**。
+  三者一致 → **假设被证伪**:codex 与 cursor-g **共享 acct82**。续写摘要的"两账号独立(acct101 vs acct82)"
+  建立在一次 `users.json` 误读上,被运行日志 + 仓库约束双双推翻。
+
+**裁决 = NO-GO(触发 §13.6 Gate-2 一票否决的"账号面共享 → 作废 acct82 配对"分支,靠结构证据、在任何
+有风险的 mutation 之前)**:
+- Branch-A §5.1 方案 B(**按账号配对**,给 serve 账号持久挂 connector)= 给 **acct82** 持久挂 connector
+  = 给一个 **codex 服务中的账号** 挂 connector = §13.4 担忧的正身,**不是**"上线才打破的隔离",而是
+  **一开始就落在 codex 账号面上**。故 acct82 账号面配对方案**作废**。
+- **不 attach connector**(已遵守;且此刻 codex 线本就 500,attach 也无法做干净的 before/after 隔离测量,
+  强行 attach 反而可能扰动正在 429 冷却的 codex 池 —— 一票否决明令禁止)。经验回归(compare 三跑)**moot**:
+  结论由结构事实给出,无需(也无法在 codex 500 期间)用经验回归复证。
+
+**对实现的硬含义(替代路线,均须各自开闸)**:
+1. **独立账号面**:给 cursor-g 桥**专用**一个**不在 codex 池、不与 codex CLI 共享**的 ChatGPT 账号,
+   connector 只挂该账号 → 结构上与 codex 绝缘。这是 §13.6 veto fallback 明列的首选。
+2. **§5.1 方案 A(每会话专属 link token,不在共享账号做账号级持久 connector)**:需验证 link path 动态
+   透传可行性 + 其自身账号面足迹,另设闸门。
+- 两条替代**均须**:先备妥一个非 codex-shared 账号 / 或验通方案 A,再谈 Branch-A 流缝合动工。**在此之前
+  Branch-A 代码不写。**
+
+**遗留物**:本 Gate-2 仅推送只读 harness `codex_regress.py`(已删)+ scoped key(脚本 finally 自删)+
+基线证据 json(留 `/home/cltx/backups-bpi/gate2_codex_baseline.json`)。**未 attach 任何 connector,无 mutation,
+无需拆除。** codex 线的 `makeCitationFilter` bug + 池 429/401 属 codex 账号面/代码,本线不碰,如实上报由 owner 处置。
 
 ### 13.5 本轮结论
 
@@ -343,9 +388,11 @@ Branch A(挂起-续流,见 §13.3-裁决,2026-08-27)**,双侧对时数据钉死,
 可回滚/账号面零副作用形态执行完并全量拆除,回到 pre-probe。
 
 **但 review(2026-08-27)钉出"能开工"结论还差两格数据(§13.6)——Gate-1 已补齐(§13.6-裁决,有条件绿),
-Gate-2 仍空**:①长挂起(30-60s)保活**已在网关这条 SSE 路实测**:reader 三档(30/45/60s)均未被上游掐 →
-"同连接保活"成立;但应答窗口**硬顶 <60s**(≥60s 触发 retry-storm、本轮拿不到结果)→ 会合桥 `/mcp` 应答
-**≤30s 强制取号降级**(§12 修正 #2 由假设升为本路要求)。②让探针安全的账号面隔离(serve 路 connector
-字段恒空)正是上线时必须打破的东西,持久挂 connector 对 codex 的影响**仍无数据**(Gate-2)。**Gate-2 绿前
-不写 Branch-A 流缝合代码。** 实现全程锁在 `ZK_MCP_BRIDGE==='1'` 默认关后,codex 一票否决。`装` 授权只覆盖
-判定探针 + Gate-1(均不碰账号面加号),**Gate-2 与动工均须显式拍板**。
+Gate-2 已跑并判死(§13.6-Gate-2 裁决,NO-GO)**:①长挂起(30-60s)保活**已在网关这条 SSE 路实测**:reader
+三档(30/45/60s)均未被上游掐 → "同连接保活"成立;但应答窗口**硬顶 <60s**(≥60s 触发 retry-storm、本轮拿
+不到结果)→ 会合桥 `/mcp` 应答 **≤30s 强制取号降级**(§12 修正 #2 由假设升为本路要求)。②**Gate-2 = NO-GO**:
+运行日志实证 **acct82 是 codex serve 池的活跃成员**(`[codex-pool] acct-82 → 429`)+ 仓库约束"acct82 与 codex
+线共享" → 续写摘要"两账号独立"去风险**被推翻**;给 serve 账号(acct82)持久挂 connector = 落在 codex 账号面
+上 = 一票否决,**方案 B(按账号配对)作废**。**Branch-A 流缝合代码不写**,除非先备妥**独立(非 codex-shared)
+账号面** 或验通 **§5.1 方案 A(每会话专属 link token)**,且各自开闸。实现全程锁在 `ZK_MCP_BRIDGE==='1'`
+默认关后,codex 一票否决。`装` 授权只覆盖判定探针 + Gate-1 + Gate-2 基线(均只读/未 attach connector)。

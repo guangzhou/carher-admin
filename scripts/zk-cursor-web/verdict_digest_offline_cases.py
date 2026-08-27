@@ -75,10 +75,40 @@ check("complete_run_no_shell=1", v["complete_run_no_shell"] == 1, f'got {v["comp
 check("other=0 (no misclassify)", v["other"] == 0, f'got {v["other"]}')
 check("verdict_total=10", s["verdict_total"] == 10, f'got {s["verdict_total"]}')
 
-# —— ② ack_rate ——
+# —— ② ack_rate(会话口径 vs attempt 口径)——
+#    样本:2 行 ack ok(2 个成功会话)+ 1 行 no-ack try=1(非末次 → 不计降级会话)。
+#    会话口径:ack_rate = 2/(2+0)=1.0(no-ack try=1 是"先败后成"会话的中间步,不算失败会话)。
+#    attempt 口径:ack_rate_attempt = 2/(2+1)=0.6667(诊断对照用)。
 check("ack_ok=2", s["handshake"]["ack_ok"] == 2, f'got {s["handshake"]["ack_ok"]}')
 check("no_ack=1", s["handshake"]["no_ack"] == 1, f'got {s["handshake"]["no_ack"]}')
-check("ack_rate=0.6667", abs(s["handshake"]["ack_rate"] - 0.6667) < 1e-4, f'got {s["handshake"]["ack_rate"]}')
+check("no_ack_final=0", s["handshake"]["no_ack_final"] == 0, f'got {s["handshake"]["no_ack_final"]}')
+check("ack_rate(session)=1.0", abs(s["handshake"]["ack_rate"] - 1.0) < 1e-9, f'got {s["handshake"]["ack_rate"]}')
+check("ack_rate_attempt=0.6667", abs(s["handshake"]["ack_rate_attempt"] - 0.6667) < 1e-4,
+      f'got {s["handshake"]["ack_rate_attempt"]}')
+
+# —— ②bis 核心 bug 复现:先败后成会话不该被记成失败 ——
+#    一个会话 try=1 no-ack → try=2 ack ok = **成功会话**;旧 attempt 口径把它算 50%(假 ALARM)。
+BUG = [
+    '[handshake] no-ack try=1 head="garbage"',
+    "[handshake] ack ok try=2 conv=aaaa1111",
+]
+sb = vd.summarize(vd.aggregate(BUG))
+check("先败后成: ack_rate(session)=1.0 不假警", abs(sb["handshake"]["ack_rate"] - 1.0) < 1e-9,
+      f'session-based must be 1.0 (one successful session), got {sb["handshake"]["ack_rate"]}')
+check("先败后成: no_ack_final=0", sb["handshake"]["no_ack_final"] == 0, f'got {sb["handshake"]["no_ack_final"]}')
+check("先败后成: attempt 口径确记 0.5(对照证明旧口径会误判)",
+      abs(sb["handshake"]["ack_rate_attempt"] - 0.5) < 1e-9, f'got {sb["handshake"]["ack_rate_attempt"]}')
+
+# —— ②ter 真降级会话(两次都失败,末次 try=2)才计入分母 ——
+DEG = [
+    '[handshake] no-ack try=1 head="x"',
+    '[handshake] no-ack try=2 head="y"',
+    "[handshake] ack ok try=1 conv=bbbb2222",
+]
+sd = vd.summarize(vd.aggregate(DEG))
+check("降级会话: no_ack_final=1", sd["handshake"]["no_ack_final"] == 1, f'got {sd["handshake"]["no_ack_final"]}')
+check("降级会话: ack_rate(session)=0.5 (1成功/1降级)", abs(sd["handshake"]["ack_rate"] - 0.5) < 1e-9,
+      f'got {sd["handshake"]["ack_rate"]}')
 
 # —— ③ 派生率 ——
 r = s["rates"]

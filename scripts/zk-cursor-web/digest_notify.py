@@ -62,8 +62,8 @@ def format_card(summary, lane="82", window="24h"):
         f"  run={v.get('complete_run', 0)} prose={v.get('complete_prose', 0)} "
         f"announce_retry={v.get('announce_retry', 0)} "
         f"viol_resend={v.get('violation_resend', 0)} viol_honest={v.get('violation_honest', 0)}",
-        f"handshake ack={hs.get('ack_ok', 0)}/{hs.get('ack_ok', 0) + hs.get('no_ack', 0)} "
-        f"(rate={hs.get('ack_rate')})",
+        f"handshake ack={hs.get('ack_ok', 0)}/{hs.get('ack_ok', 0) + hs.get('no_ack_final', 0)}会话 "
+        f"(rate={hs.get('ack_rate')}; attempt={hs.get('ack_rate_attempt')})",
         f"conv saved={conv.get('saved', 0)} delta_send(复用)={conv.get('delta_send', 0)} "
         f"persist_loaded={conv.get('persist_loaded', 0)}",
     ]

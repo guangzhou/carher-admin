@@ -14,29 +14,34 @@
   [turn-verdict-v2] violation (still empty after resend) -> honest error raw=<json>
                                                 → verdict.violation_honest + 收 raw 样本
   [handshake] ack ok try=N conv=xxxx            → hs.ack_ok
-  [handshake] no-ack try=N head=<json>          → hs.no_ack
+  [handshake] no-ack try=N head=<json>          → hs.no_ack(总)、no_ack_final(try==HS_MAX_TRY)
   [conv] saved items=N conv=xxxx                → conv.saved
   [conv] delta send N new items ...             → conv.delta_send(握手税穿越/复用)
   [conv-persist] loaded N skipped M ...         → conv.persist_loaded(累加 N)
 
 派生指标:
-  ack_rate       = ack_ok / (ack_ok + no_ack)
+  ack_rate       = ack_ok / (ack_ok + no_ack_final)   ← **按会话**,门控口径(见下)
+  ack_rate_attempt = ack_ok / (ack_ok + no_ack)       ← 按 attempt,仅诊断对照,不用于门控
   act_retry_rate = announce_retry / verdict_total
   violation_rate = (violation_resend + violation_honest) / verdict_total
   conv_reuse     = delta_send  (复用会话、免握手的轮数)
 
-用法:
-  kubectl logs -l app=zero-cursor-bpi-82 --tail=-1 | python3 verdict_digest.py
-  python3 verdict_digest.py /path/to/pod.log [more.log ...]
-  # --raw-max N 控制每类 violation 保留的 raw 样本数(默认 5)
+**ack_rate 会话口径推导(耦合 82 活字节握手循环 `_hsTry <= HS_MAX_TRY && !convSess`)**:
+ack 成功即置 convSess 退出 → 每个**成功握手会话**恰好产 1 行 `ack ok`(任意 try);只有两次都
+失败的**降级会话**才走到 `no-ack try=HS_MAX_TRY`(先败后成会话的末次是 ack ok)。故
+`ack_ok 行数 = 成功会话数`、`no-ack try==HS_MAX_TRY 行数 = 降级会话数`,两者皆不依赖行相邻、
+不受并发交织干扰。旧口径按 attempt(ack_ok+no_ack)会把"先 no-ack 后 ack ok"的**成功**会话
+记成 50%,产假 ALARM——这正是本次修复点。HS_MAX_TRY 必须与 82 字节握手上限同步(现=2)。
 """
 import json
 import re
 import sys
 
+HS_MAX_TRY = 2  # 与 82 活字节握手循环上限 `_hsTry <= 2` 同步;字节改上限必须同步改此常量
+
 VERDICT_RE = re.compile(r'\[turn-verdict-v2\]\s+(.*)$')
 HS_ACK_RE = re.compile(r'\[handshake\]\s+ack ok\b')
-HS_NOACK_RE = re.compile(r'\[handshake\]\s+no-ack\b')
+HS_NOACK_RE = re.compile(r'\[handshake\]\s+no-ack try=(\d+)')
 CONV_SAVED_RE = re.compile(r'\[conv\]\s+saved\b')
 CONV_DELTA_RE = re.compile(r'\[conv\]\s+delta send\b')
 PERSIST_LOADED_RE = re.compile(r'\[conv-persist\]\s+loaded\s+(\d+)\s+skipped\s+(\d+)')
@@ -55,7 +60,7 @@ def new_acc():
             "complete_run_no_shell": 0,
             "other": 0,
         },
-        "hs": {"ack_ok": 0, "no_ack": 0},
+        "hs": {"ack_ok": 0, "no_ack": 0, "no_ack_final": 0},
         "conv": {"saved": 0, "delta_send": 0, "persist_loaded": 0},
         "violation_samples": [],
     }
@@ -98,8 +103,12 @@ def aggregate(lines, raw_max=5):
         if HS_ACK_RE.search(line):
             acc["hs"]["ack_ok"] += 1
             continue
-        if HS_NOACK_RE.search(line):
+        nm = HS_NOACK_RE.search(line)
+        if nm:
             acc["hs"]["no_ack"] += 1
+            if int(nm.group(1)) >= HS_MAX_TRY:
+                # 末次 attempt 仍 no-ack = 该会话降级(唯一、按会话准确);先败后成的会话末次是 ack ok
+                acc["hs"]["no_ack_final"] += 1
             continue
         if CONV_SAVED_RE.search(line):
             acc["conv"]["saved"] += 1
@@ -122,11 +131,17 @@ def summarize(acc):
     v = acc["verdict"]
     vt = sum(v.values())
     hs = acc["hs"]
-    hs_total = hs["ack_ok"] + hs["no_ack"]
+    # 会话口径:分母 = 成功会话(ack_ok 行)+ 降级会话(no-ack 末次行);不含"先败后成"的中间失败
+    hs_sessions = hs["ack_ok"] + hs["no_ack_final"]
+    hs_attempts = hs["ack_ok"] + hs["no_ack"]
     return {
         "verdict_total": vt,
         "verdict": v,
-        "handshake": {**hs, "ack_rate": _rate(hs["ack_ok"], hs_total)},
+        "handshake": {
+            **hs,
+            "ack_rate": _rate(hs["ack_ok"], hs_sessions),           # 会话口径,门控用
+            "ack_rate_attempt": _rate(hs["ack_ok"], hs_attempts),   # attempt 口径,仅诊断对照
+        },
         "conv": acc["conv"],
         "rates": {
             "act_retry_rate": _rate(v["announce_retry"], vt),

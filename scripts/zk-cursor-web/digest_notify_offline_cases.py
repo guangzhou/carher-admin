@@ -39,7 +39,8 @@ def S(vr=0.0, ar=0.0, ack=1.0, total=10, samples=None):
         "verdict": {"complete_run": 5, "complete_prose": 4, "announce_retry": 1,
                     "violation_resend": 0, "violation_honest": 0,
                     "self_answer_suppressed": 0, "complete_run_no_shell": 0, "other": 0},
-        "handshake": {"ack_ok": 9, "no_ack": 1, "ack_rate": ack},
+        "handshake": {"ack_ok": 9, "no_ack": 1, "no_ack_final": 1, "ack_rate": ack,
+                      "ack_rate_attempt": ack},
         "conv": {"saved": 3, "delta_send": 2, "persist_loaded": 4},
         "rates": {"act_retry_rate": ar, "violation_rate": vr, "complete_rate": 0.9},
         "violation_samples": samples or [],
@@ -80,7 +81,7 @@ check("act-retry boundary 0.05 WARN", lvl == "WARN", lvl)
 card = dn.format_card(S(vr=0.05, samples=[{"kind": "violation_honest", "raw": '""'}]), lane="82", window="24h")
 check("card has lane/window", "cursor-g 82 soak · 24h" in card, card[:60])
 check("card ALARM line", card.startswith("[cursor-g 82 soak · 24h] ALARM"), card.split(chr(10))[0])
-check("card has handshake", "handshake ack=9/10" in card, "no handshake line")
+check("card has handshake", "handshake ack=9/10会话" in card, "no handshake line")
 check("card has conv reuse", "delta_send(复用)=2" in card, "no conv line")
 check("card shows violation sample", "[violation_honest]" in card, "sample missing")
 

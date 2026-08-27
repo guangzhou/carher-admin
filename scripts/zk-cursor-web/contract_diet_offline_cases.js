@@ -45,18 +45,28 @@ function grabConstExpr(name, endMarker) {
 }
 const V2_CONTRACT = grabConstExpr('V2_CONTRACT', 'const V2_HANDSHAKE')
 const V2_CONTRACT_MINI = grabConstExpr('V2_CONTRACT_MINI', 'const V2_RUN_RE')
+// 隐式握手常量引用了 V2_CONTRACT,eval 时注入
+function grabConstExprWith(name, endMarker, deps) {
+  const re = new RegExp('const\\s+' + name + '\\s*=\\s*([\\s\\S]*?)\\n' + endMarker)
+  const m = code.match(re)
+  if (!m) throw new Error('cannot grab const ' + name)
+  const expr = m[1].split('\n').filter((ln) => !/^\s*\/\//.test(ln)).join('\n').trim()
+  // eslint-disable-next-line no-new-func
+  return new Function(...Object.keys(deps), 'return (' + expr + ')')(...Object.values(deps))
+}
+const V2_HANDSHAKE_IMPLICIT = grabConstExprWith('V2_HANDSHAKE_IMPLICIT', 'const V2_CONTRACT_MINI', { V2_CONTRACT })
 
 // 用真分支构造 driver:注入依赖,返回 prompt
 function runGate(env, convSess, basePrompt, convDelta) {
   const fakeProc = { env }
   // eslint-disable-next-line no-new-func
   const fn = new Function(
-    'process', 'convSess', 'basePrompt', '_convDelta', 'V2_CONTRACT', 'V2_CONTRACT_MINI', 'console',
+    'process', 'convSess', 'basePrompt', '_convDelta', 'V2_CONTRACT', 'V2_CONTRACT_MINI', 'V2_HANDSHAKE_IMPLICIT', 'console',
     'let prompt; const proto2 = true; ' + protoBlock + '\n return prompt'
   )
   const quietConsole = { log() {} }
   return fn(fakeProc, convSess, basePrompt, convDelta === undefined ? [{ type: 'message', role: 'user' }] : convDelta,
-    V2_CONTRACT, V2_CONTRACT_MINI, quietConsole)
+    V2_CONTRACT, V2_CONTRACT_MINI, V2_HANDSHAKE_IMPLICIT, quietConsole)
 }
 
 let pass = 0, fail = 0
@@ -137,6 +147,29 @@ const TOOLFEED = [{ type: 'function_call_output', call_id: 'c1', output: 'big ls
   const ratio = V2_CONTRACT_MINI.length / V2_CONTRACT.length
   check('mini-≥50%-shorter', ratio <= 0.5, `mini/full=${ratio.toFixed(2)} (full=${V2_CONTRACT.length} mini=${V2_CONTRACT_MINI.length})`)
 })()
+
+// ⑩ 隐式握手(HS=2)首轮:preamble+契约+就地服从指令,含整份契约
+{
+  const p = runGate({ ZK_HANDSHAKE: '2' }, null, BASE)
+  check('hs2-first-turn-implicit', p.includes('gateway-mediated agent session') && p.includes(V2_CONTRACT) && p.includes('starting with this very reply'), 'implicit preamble/contract/apply-line missing')
+  check('hs2-first-turn-no-ack-demand', !p.includes('⟦ack⟧'), 'implicit first turn must not demand ack')
+}
+// ⑪ HS=2 + 增量轮:diet 语义原样(无 preamble)
+{
+  const p = runGate({ ZK_HANDSHAKE: '2', ZK_CONTRACT_DIET: '2' }, SESS, BASE)
+  check('hs2-delta-diet-unchanged', p === BASE, 'implicit mode must not touch delta turns')
+}
+// ⑫ HS=2 + 工具回灌轮(convSess 有):豁免全份,无 preamble
+{
+  const p = runGate({ ZK_HANDSHAKE: '2', ZK_CONTRACT_DIET: '2' }, SESS, BASE, TOOLFEED)
+  check('hs2-toolfeed-plain-full', p.includes(V2_CONTRACT) && !p.includes('gateway-mediated'), 'toolfeed turn must carry plain full contract')
+}
+// ⑬ HS=1/未设:首轮走老路(纯 V2_CONTRACT,无 preamble)= 零行为差
+{
+  const p1 = runGate({ ZK_HANDSHAKE: '1' }, null, BASE)
+  const p0 = runGate({}, null, BASE)
+  check('hs1-and-off-unchanged', p1 === BASE + V2_CONTRACT && p0 === BASE + V2_CONTRACT, 'HS=1/off first-turn behavior drifted')
+}
 
 console.log(`\n== ${pass}/${pass + fail} PASS ==`)
 if (fail) { console.log('FAILS:', JSON.stringify(fails, null, 2)); process.exit(1) }

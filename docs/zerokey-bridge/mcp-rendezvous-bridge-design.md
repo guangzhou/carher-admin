@@ -293,15 +293,59 @@ Branch-A 流缝合代码。两闸均设计成**最小、可回滚、用完即拆
     路**账号面配对方案作废**,回退研究"不碰 serve 路 connector"的替代(如独立账号面 / 方案 A 专属 link token)。
   - 未获显式授权前 **Gate-2 不跑**;Gate-1 与 Gate-2 均绿才谈动工。
 
+### 13.6-裁决(Gate-1 实测,2026-08-27)—— 🟡 **有条件绿:同连接保活成立,但应答窗口硬顶 <60s**
+
+探针形态遵 §13.5(最小/可回滚/账号面零副作用):`mcp_probe_server.js` `callTool` 挂 `ZK_MCP_PROBE_DELAY_MS`
+再回 marker;在 **acct93**(授权"装")重注册 connector,用 §13.3 同一 `ChatGPTAPI`(真实 serve 路 sentinel)
+驱动**一轮** f/conversation,`developer_mode_connector_ids=[connector]` 让模型本轮看得到 `zk_probe`,裸
+读 SSE(`res.body.getReader()`)三档对时。**先排除自证污染**:pod `api.js` L506 `_fetch` 是裸
+`fetch(...redirect:'follow')` 无 timeout/AbortController(undici bodyTimeout 默认 300s)→ 客户端不会掐
+30-60s 空档,断流只可能来自上游。
+
+**三档实测(单条 f/conversation SSE,探针自打印 VERDICT):**
+
+| delay | tool-call | marker 回注 | complete | reader | 裁决 |
+|-------|-----------|-------------|----------|--------|------|
+| **30s** | @19.83s | **同流** @49.86s(gap 30.03s) | @54.77s | 未断 | ✅ 绿 |
+| **45s** | @13.5s | **同流** @58.56s(gap ~45s) | @59.05s | 未断 | ✅ 绿 |
+| **60s** | @9.13s | **从未回注**(`sawMarker:false`) | @258.69s | 未断但**空转** | ❌ 红 |
+
+**60s 档的形态 = retry-storm 而非断流**:probe server 日志见 OpenAI 后端在 60s 内没等到应答就**放弃本次
+`/mcp` 并每 ~60s 重发** `initialize`+`tools/call zk_probe`(id 复用 0/1),连打 3 轮;SSE 侧本轮 reader **没被
+掐**(未 READ_ERROR、未提前 done),但因始终没拿到 tool 结果,一直空转到 258.69s 才 drain 到 complete、
+**正文里没有 marker**。
+
+**裁决 = 有条件绿(不是纯绿也不是红)**:
+- **证伪条件(30-60s 挂起中流被上游掐:READ_ERROR/done 提前/无 keepalive)未出现** → Branch-A "同连接
+  保活"在真实时长下**成立**(reader 三档均未断)。这一格数据到位,§13.3 裁决可落地。
+- **但应答窗口有硬顶**:tool 结果必须在 **~45-50s 内**回注,否则(≥60s)ChatGPT 后端放弃本次 `/mcp` 触发
+  retry-storm,该轮**拿不到结果**。这在**网关 SSE 路**实测复现了 Phase-0 §0.4 的 60s retry(§12 修正 #2 从
+  "借自 ChatGPT 网页界面的假设"升为**本路证据**)。
+
+**对实现的硬含义(把 §12 修正 #2 从假设升为要求)**:会合桥 `/mcp` **应答目标 ≤30s、绝不吃满 60s**。挂起在
+~30s 内没等到 Cursor output → **立即走取号(ticket)降级**:MCP result 回 "执行中,call_id=X,稍后用 poll
+action 查",别让 ChatGPT 后端撞 60s 触发 retry-storm(否则一条命令被重复下发 Cursor + 本轮拿不到结果)。
+普通命令(<30s)走"一口气";长命令(build/大扫描)**强制取号**,非可选优化。
+
+⚠️ **诚实旗**:本档只证了"held reader 在 30-60s 不被上游掐"+"≥60s 应答窗口关死"。**未证** Gate-2(持久挂
+connector 对 codex 的账号面影响)——那仍是动工前的第二格空数据,须显式授权 + 一票否决(§13.6 Gate-2)。
+
+**探针遗留物清理(已执行,回到 pre-probe)**:connector 已 `delete`(200,复验 404 "Connector not found");
+nginx `/mcp-probe` location 从 backup `chat.auto-link.com.cn.conf.pre-gate1.20260827-222139.bak` 还原(`-t`
+OK + reload,外部复验 502 = block 已移除);zero-93 / zero-140 `/tmp` 凭据/CLI/probe/SSE-log 擦净。**残留**:
+noauth link `link_6a90489d…` 无 list-by-account 无法单删 = connector 删后指向死 id 的已知无害残渣(同
+Phase0/A-B 探针性质);probe server 孤儿监听(镜像沙箱拦 kill,无公网路由后无害,随下次 pod rollout 消)。
+
 ### 13.5 本轮结论
 
 会合桥两个可离线证的承重件已 GO(33/33 + 25/25)。**流缝合的 A/B 承重未知已由 canary 探针裁决 =
 Branch A(挂起-续流,见 §13.3-裁决,2026-08-27)**,双侧对时数据钉死,证伪条件未出现。探针本身已按最小/
 可回滚/账号面零副作用形态执行完并全量拆除,回到 pre-probe。
 
-**但 review(2026-08-27)钉出"能开工"结论还差两格数据(§13.6)**:①长挂起(30-60s)保活未在网关这条 SSE
-路实测过——秒回探针只证了 <1s 的挂起-再续,30-60s 数字借自 ChatGPT 网页界面,非本路证据(Gate-1);
-②让探针安全的账号面隔离(serve 路 connector 字段恒空)正是上线时必须打破的东西,持久挂 connector 对
-codex 的影响仍无数据(Gate-2)。**Gate-1、Gate-2 均绿前不写 Branch-A 流缝合代码。** 实现全程锁在
-`ZK_MCP_BRIDGE==='1'` 默认关后,codex 一票否决。`装` 授权只覆盖判定探针,Gate-1 可现在跑(不碰账号面),
-Gate-2 与动工均须显式拍板。
+**但 review(2026-08-27)钉出"能开工"结论还差两格数据(§13.6)——Gate-1 已补齐(§13.6-裁决,有条件绿),
+Gate-2 仍空**:①长挂起(30-60s)保活**已在网关这条 SSE 路实测**:reader 三档(30/45/60s)均未被上游掐 →
+"同连接保活"成立;但应答窗口**硬顶 <60s**(≥60s 触发 retry-storm、本轮拿不到结果)→ 会合桥 `/mcp` 应答
+**≤30s 强制取号降级**(§12 修正 #2 由假设升为本路要求)。②让探针安全的账号面隔离(serve 路 connector
+字段恒空)正是上线时必须打破的东西,持久挂 connector 对 codex 的影响**仍无数据**(Gate-2)。**Gate-2 绿前
+不写 Branch-A 流缝合代码。** 实现全程锁在 `ZK_MCP_BRIDGE==='1'` 默认关后,codex 一票否决。`装` 授权只覆盖
+判定探针 + Gate-1(均不碰账号面加号),**Gate-2 与动工均须显式拍板**。

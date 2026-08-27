@@ -47,15 +47,16 @@ const V2_CONTRACT = grabConstExpr('V2_CONTRACT', 'const V2_HANDSHAKE')
 const V2_CONTRACT_MINI = grabConstExpr('V2_CONTRACT_MINI', 'const V2_RUN_RE')
 
 // 用真分支构造 driver:注入依赖,返回 prompt
-function runGate(env, convSess, basePrompt) {
+function runGate(env, convSess, basePrompt, convDelta) {
   const fakeProc = { env }
   // eslint-disable-next-line no-new-func
   const fn = new Function(
-    'process', 'convSess', 'basePrompt', 'V2_CONTRACT', 'V2_CONTRACT_MINI', 'console',
+    'process', 'convSess', 'basePrompt', '_convDelta', 'V2_CONTRACT', 'V2_CONTRACT_MINI', 'console',
     'let prompt; const proto2 = true; ' + protoBlock + '\n return prompt'
   )
   const quietConsole = { log() {} }
-  return fn(fakeProc, convSess, basePrompt, V2_CONTRACT, V2_CONTRACT_MINI, quietConsole)
+  return fn(fakeProc, convSess, basePrompt, convDelta === undefined ? [{ type: 'message', role: 'user' }] : convDelta,
+    V2_CONTRACT, V2_CONTRACT_MINI, quietConsole)
 }
 
 let pass = 0, fail = 0
@@ -85,6 +86,44 @@ const SESS = { convId: 'conv-aaaa1111', count: 8 }
 ;(function dietOff() {
   const p = runGate({}, SESS, BASE)
   check('diet-off-full-on-delta', p.includes(V2_CONTRACT) && !p.includes(V2_CONTRACT_MINI), 'default-off leaked mini (behavior drift)')
+})()
+
+// —— ⑥ DIET=2(零档)+ convSess → 零附加(既无 full 也无 mini,只剩 basePrompt)——
+;(function dietZeroDelta() {
+  const p = runGate({ ZK_CONTRACT_DIET: '2' }, SESS, BASE)
+  check('diet2-delta-zero-append', p === BASE, `expected bare basePrompt, got len=${p.length}`)
+})()
+
+// —— ⑦ DIET=2 但首轮(convSess=null)→ 仍全份 ——
+;(function dietZeroFirstTurn() {
+  const p = runGate({ ZK_CONTRACT_DIET: '2' }, null, BASE)
+  check('diet2-first-turn-full', p.includes(V2_CONTRACT), 'first turn under diet=2 must still carry full contract')
+})()
+
+// —— ⑧ DIET=2 不误伤 DIET=1 语义(=1 仍走 mini)——
+;(function dietOneStillMini() {
+  const p = runGate({ ZK_CONTRACT_DIET: '1' }, SESS, BASE)
+  check('diet1-unchanged-mini', p.includes(V2_CONTRACT_MINI) && !p.includes(V2_CONTRACT), 'diet=1 semantics drifted after adding tier 2')
+})()
+
+// —— ⑨ 工具回灌轮豁免:delta 含 function_call_output → 两档都强制全份 ——
+//    (实测依据:s3h tool.r2 五连 hollow,收尾轮靠全份契约的结果消化语言,瘦不得)
+const TOOLFEED = [{ type: 'function_call_output', call_id: 'c1', output: 'big ls...' }]
+;(function toolFeedExemptZero() {
+  const p = runGate({ ZK_CONTRACT_DIET: '2' }, SESS, BASE, TOOLFEED)
+  check('diet2-toolfeed-full', p.includes(V2_CONTRACT), 'tool-feed delta under diet=2 must carry full contract')
+})()
+;(function toolFeedExemptMini() {
+  const p = runGate({ ZK_CONTRACT_DIET: '1' }, SESS, BASE, TOOLFEED)
+  check('diet1-toolfeed-full', p.includes(V2_CONTRACT) && !p.includes(V2_CONTRACT_MINI), 'tool-feed delta under diet=1 must carry full contract, not mini')
+})()
+;(function toolFeedCustom() {
+  const p = runGate({ ZK_CONTRACT_DIET: '2' }, SESS, BASE, [{ type: 'custom_tool_call_output', output: 'x' }])
+  check('diet2-customtoolfeed-full', p.includes(V2_CONTRACT), 'custom_tool_call_output delta must also be exempt')
+})()
+;(function toolFeedOffNoop() {
+  const p = runGate({}, SESS, BASE, TOOLFEED)
+  check('dietoff-toolfeed-full-unchanged', p.includes(V2_CONTRACT) && !p.includes(V2_CONTRACT_MINI), 'diet off + toolfeed must stay full (no drift)')
 })()
 
 // —— ④ MINI 含 6 条不变量 ——

@@ -31,11 +31,14 @@ function grabIfBlock(a) {
 }
 const block = grabIfBlock(anchor)
 
-function run(env, convSess, prompt) {
+function run(env, convSess, prompt, convDelta) {
   const logs = []
+  const delta = convDelta === undefined
+    ? [{ type: 'message', role: 'user' }, { type: 'function_call_output' }]  // 默认混合轮:行标应保留
+    : convDelta
   // eslint-disable-next-line no-new-func
-  const fn = new Function('process', 'convSess', 'prompt', 'console', block + '\n return prompt')
-  const out = fn({ env }, convSess, prompt, { log: (s) => logs.push(s) })
+  const fn = new Function('process', 'convSess', 'prompt', '_convDelta', 'console', block + '\n return prompt')
+  const out = fn({ env }, convSess, prompt, delta, { log: (s) => logs.push(s) })
   return { out, logs }
 }
 
@@ -82,6 +85,24 @@ const PROSE = 'the user request is denoted by the <user_query> tag in the messag
   const plain = 'USER: just text, no tags'
   const { out, logs } = run({ ZK_STRIP_UQ: '1' }, SESS, plain)
   check('no-tags-noop-silent', out === plain && logs.length === 0, JSON.stringify({ out, logs }))
+}
+
+// ⑦ 单条用户消息增量轮:USER: 行标也剥
+{
+  const SOLO = [{ type: 'message', role: 'user' }]
+  const { out } = run({ ZK_STRIP_UQ: '1' }, SESS, WRAPPED, SOLO)
+  check('solo-user-strips-label', out === '帮我梳理代码结构 go', JSON.stringify(out))
+}
+// ⑧ 混合轮(含工具结果):行标保留
+{
+  const { out } = run({ ZK_STRIP_UQ: '1' }, SESS, WRAPPED)
+  check('mixed-delta-keeps-label', out === 'USER: 帮我梳理代码结构 go', JSON.stringify(out))
+}
+// ⑨ 单条但非 user 角色:行标保留(保守)
+{
+  const AST = [{ type: 'message', role: 'assistant' }]
+  const { out } = run({ ZK_STRIP_UQ: '1' }, SESS, WRAPPED, AST)
+  check('solo-nonuser-keeps-label', out === 'USER: 帮我梳理代码结构 go', JSON.stringify(out))
 }
 
 console.log(`\n== ${pass}/${pass + fail} PASS ==`)

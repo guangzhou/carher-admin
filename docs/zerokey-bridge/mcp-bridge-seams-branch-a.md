@@ -13,9 +13,15 @@
 
 | 文件 | CM key | 基线 md5(活) | 缝合后 md5 | 部署目标 |
 |------|--------|--------------|-----------|---------|
-| responses.js | `responses.js` | `2f94ed79` | `39a08ba4` | CM(共享)+ 仅 82 lane 生效(101 容错 stub+无 env) |
+| responses.js | `responses.js` | `2f94ed79` | `39a08ba4`(三缝合口)→ **`128e67e6`(+piece#3 桥模式契约)** | CM(共享)+ 仅 82 lane 生效(101 容错 stub+无 env) |
 | zerokey-serve-codex.js | `zerokey-serve-codex.js` | `d256ecaf` | `8f28510e` | 同上 |
-| mcp_bridge.js | `mcp_bridge.js`(**新增 key**) | —(新) | 见仓库 | 仅 `zero-cursor-bpi-82` Deployment args 加 `cp /patch/mcp_bridge.js /app/routes/mcp_bridge.js` |
+| mcp_bridge.js | `mcp_bridge.js`(**新增 key**) | —(新) | **活 md5 `e8b70ed9`**(21777B) | 仅 `zero-cursor-bpi-82` Deployment args 加 `cp /patch/mcp_bridge.js /app/routes/mcp_bridge.js` |
+
+> **piece #3(桥模式契约)**:三缝合口只搭了运输管道,但 turn-1 挂起口 fire 时,若模型仍收到旧
+> `V2_CONTRACT` 的 `⟦cmd¦run⟧` 方言,它会写 `⟦cmd⟧` 散文 → 无 tool call → reader 到底 → `finishPlain`
+> 把 `⟦cmd¦run=ls⟧` **裸漏**给用户(实测回归)。piece #3 在 prompt 级联首位加 `BRIDGE_CONTRACT`
+> 分支(见缝合口 4/4),桥开时用"调 linked connector 的 shell 工具"替代 `⟦cmd⟧` 教学 → 模型改走
+> 原生工具调用。修后探针 `LEAK=False`、正文纯净。
 
 ## 缝合口 1/3 —— responses.js 容错 require(接在 bpi-codex require 块之后)
 
@@ -90,6 +96,50 @@ if (mcpBridge.isEnabled() && useWebTools && !chatOnly && stream) {
 }
 ```
 
+## 缝合口 4/4 —— responses.js 桥模式契约(BRIDGE_CONTRACT,piece #3)
+
+`BRIDGE_CONTRACT` 常量(L337)+ prompt 级联分支(L592)。桥开且 `useWebTools && !chatOnly` 时,
+用"调 linked connector 的 `shell` 工具"替代 `V2_CONTRACT` 的 `⟦cmd¦run⟧` 方言教学 → 模型改走原生
+工具调用,turn-1 挂起口才有 inject 可等;否则模型写 `⟦cmd⟧` 散文 → 无 tool call → `finishPlain` 裸漏。
+
+```js
+// L337
+const BRIDGE_CONTRACT = `\n\nYou can run shell commands on the user's machine by calling the ` +
+  `connector tool named "shell" (argument: the command string). Call it as a real tool — do NOT ` +
+  `write ⟦cmd¦run=…⟧ prose, do NOT emit tool_calls text, and do NOT simulate the result with your ` +
+  `own python/analysis tools (their output is FAKE to this user). The only real execution path is ` +
+  `the connector shell tool; wait for its result, then continue.`
+
+// L592
+if (mcpBridge.isEnabled() && useWebTools && !chatOnly) {
+  prompt = basePrompt + BRIDGE_CONTRACT
+  console.log('[mcp-bridge] prompt: native-connector shell mode (⟦cmd⟧ contract suppressed)')
+}
+```
+
+## Round-trip 实测 —— 端到端已证(canary 82,WEB 路由)
+
+`/tmp/mcp_roundtrip_probe.py`(MODEL=`cursor-web-fc-82-terra`,1h scoped key 用完即删):
+
+- **turn-1**:`completed=1 failed=0 text_len=0`,`fc={"call_id":"9a30cec0b3ba0f50","name":"Shell","arguments":"{\"cmd\":\"ls\"}"}` — 模型调了 linked connector,inject 把 function_call 打到 turn-1 SSE。
+- **turn-2**:回 `function_call_output(call_id, FAKE_LS)`,`FAKE_LS` 含独创串 `ZKPROBE_ALPHA.txt` → `completed=1 failed=0 text_len=45`,续流正文 = `"ZKPROBE_ALPHA.txt\nZKPROBE_BRAVO.log\nREADME.md"` → **PASS**(模型复述了只有我发明的假输出 = tool output 确实回流且续流建立其上)。
+- **pod seam 日志**:`/mcp mounted (ZK_MCP_BRIDGE=1)`、`prompt: native-connector shell mode`(×3)、`turn-1 injected call_id=9a30cec0b3ba0f50`、`turn-2 continuation call_id=9a30cec0b3ba0f50` — **同一 call_id 跨两口**,证 `deriveCallId`(sha1(session\0tool\0canonical(args)).slice(0,16))跨轮稳定(JSON-RPC id 是连接内计数器,做不了 key)。
+- **验后清理**:连接器 `delete`→200,`actions <id>`→404,pod 内临时 session bundle + CLI 擦除 → acct-82 账号面回基线。
+
+## 已知缺口(投产前必补)
+
+1. **参数形状不匹配(`cmd` vs `command`)**:serve `bridgeTools` 声明 `required:['cmd']`,模型按此发
+   `{cmd:"ls"}`;桥 inject function_call `name=Shell args={"cmd":"ls"}` 给 Cursor,但 Cursor 真 `Shell`
+   执行器读 `{command, working_directory, block_until_ms}` → 读 `command` 得 undefined。探针 harness 泛型解析
+   所以过了,**真 Cursor 会断**。修:(a) MCP 工具 schema 直接用 `command` 参数对齐 Cursor,或
+   (b) inject 时 remap `cmd→command`。
+2. **codex-shared 账号面挂持久连接器 = Gate-2 一票否决**:acct-82/acct-93 都是 codex serve 池上游
+   (`BRIDGE_UPSTREAMS` 含 zero-82 + zero-93)。用户已豁免 Gate-2 结构否决,但持久 account-level 连接器仍落
+   codex 账号面 → 生产唯一安全形态是 **§5.1 方案 A(每会话 link/unlink,活动窗口内挂、用完即摘 + 复验 404)**,
+   不留持久连接器。本次实测即遵此:provision→round-trip→立即 delete。
+3. **codex 非回归验证受阻(诚实标注,非造绿)**:codex 池当前退化(429/401)+ 禁止加载 + 连接器已删(无可测)
+   → 依据 Gate-2c 先证(基模不自发调未请求连接器)+ 瞬时足迹(~分钟级)+ 即时删除;**不宣称已跑绿**。
+
 ## 缝合口(serve)—— zerokey-serve-codex.js
 
 容错 require(接在 `buildImagesRoute` require 之后):
@@ -117,7 +167,7 @@ if (mcpBridge.isEnabled()) {
 
 ## 部署纪律(仅 82 lane)
 
-1. 本地/staging 字节 md5 校验(responses `39a08ba4` / serve `8f28510e`)。
+1. 本地/staging 字节 md5 校验(responses 活 `128e67e6`(含 piece #3)/ serve `8f28510e` / mcp_bridge.js 活 `e8b70ed9`)。
 2. 备份现 CM 三键到 `/home/cltx/backups-bpi/`。
 3. `kubectl patch cm zk-cursor-bpi-patch --type merge --patch-file <file in /home/cltx/>`:更新 responses.js +
    zerokey-serve-codex.js,新增 mcp_bridge.js。(不重启在跑 pod。)

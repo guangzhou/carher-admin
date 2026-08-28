@@ -1,0 +1,57 @@
+# zerokey-codex-bridge — 集群内 Deployment + Service
+# codex(/v1/responses)→ 本服务翻译 → zero-N 网页 pod 池。集群内直连 svc DNS,无隧道。
+#
+# 镜像:必须在 47.84.112.136 用 nerdctl 构建,推到 ACR VPC 内网,禁公网仓库。
+#   cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/zerokey-codex-bridge:latest
+#
+# 部署:kubectl -n litellm-product apply -f zerokey-bridge-deploy.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zerokey-codex-bridge
+  namespace: litellm-product
+  labels: {app: zerokey-codex-bridge}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: zerokey-codex-bridge}
+  template:
+    metadata:
+      labels: {app: zerokey-codex-bridge}
+    spec:
+      imagePullSecrets: [{name: acr-vpc-secret}]
+      containers:
+        - name: bridge
+          image: cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/her/zerokey-codex-bridge:latest
+          env:
+            - name: BRIDGE_LISTEN
+              value: "0.0.0.0:8788"
+            - name: BRIDGE_FANOUT
+              value: "1"
+            - name: BRIDGE_MODEL
+              value: "gpt-5.6-terra"
+            # 上游:全部 26 个 zero-N svc DNS(集群内直连,健康追踪自动挑好的)
+            - name: BRIDGE_UPSTREAMS
+              value: >-
+                http://zero-25.litellm-product.svc.cluster.local:8200/v1,http://zero-87.litellm-product.svc.cluster.local:8200/v1,http://zero-88.litellm-product.svc.cluster.local:8200/v1,http://zero-89.litellm-product.svc.cluster.local:8200/v1,http://zero-90.litellm-product.svc.cluster.local:8200/v1,http://zero-91.litellm-product.svc.cluster.local:8200/v1,http://zero-92.litellm-product.svc.cluster.local:8200/v1,http://zero-93.litellm-product.svc.cluster.local:8200/v1,http://zero-94.litellm-product.svc.cluster.local:8200/v1,http://zero-95.litellm-product.svc.cluster.local:8200/v1,http://zero-96.litellm-product.svc.cluster.local:8200/v1,http://zero-97.litellm-product.svc.cluster.local:8200/v1,http://zero-98.litellm-product.svc.cluster.local:8200/v1,http://zero-99.litellm-product.svc.cluster.local:8200/v1,http://zero-100.litellm-product.svc.cluster.local:8200/v1,http://zero-101.litellm-product.svc.cluster.local:8200/v1,http://zero-102.litellm-product.svc.cluster.local:8200/v1,http://zero-103.litellm-product.svc.cluster.local:8200/v1,http://zero-104.litellm-product.svc.cluster.local:8200/v1,http://zero-105.litellm-product.svc.cluster.local:8200/v1,http://zero-106.litellm-product.svc.cluster.local:8200/v1,http://zero-107.litellm-product.svc.cluster.local:8200/v1,http://zero-108.litellm-product.svc.cluster.local:8200/v1,http://zero-109.litellm-product.svc.cluster.local:8200/v1,http://zero-110.litellm-product.svc.cluster.local:8200/v1,http://zero-111.litellm-product.svc.cluster.local:8200/v1
+          ports:
+            - {containerPort: 8788}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          readinessProbe:
+            httpGet: {path: /v1/models, port: 8788}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zerokey-codex-bridge
+  namespace: litellm-product
+  labels: {app: zerokey-codex-bridge}
+spec:
+  selector: {app: zerokey-codex-bridge}
+  ports:
+    - {port: 8788, targetPort: 8788, protocol: TCP}
+  type: ClusterIP

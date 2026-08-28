@@ -295,8 +295,18 @@ class BridgeContext {
     this.continued = false;
     this.callId = null;
     this.pendingCall = null;             // {name,args}
-    this.streamed1 = '';                 // turn-1(pre-tool)已流文本
-    this.streamed2 = '';                 // turn-2(post-tool)已流文本
+    this.streamed1 = '';                 // turn-1(pre-tool)上游全文(含未流出的部分)
+    this.streamed2 = '';                 // turn-2(post-tool)上游全文
+    // [bridge-v2] ⟦ 冻结:上游一出现 U+27E6 就停止实时下发(与主路 looksLikeEnvelope 同思想),
+    // sentN 只记真正流出的前缀;收口由 finishPlainText/finishWithCall/verdict2 按剥净文本 reconcile,
+    // 杜绝 ⟦cmd¦run⟧ 方言裸流给用户(旧 finishPlain 直通是 gate-on 回归的机械面)。
+    this.sent1 = '';
+    this.sent2 = '';
+    this.frozen1 = false;
+    this.frozen2 = false;
+    // [bridge-v2] turn-2 收口裁决钩(responses.js 注入;缺省 null = 原样交付,零行为差):
+    // (fullText) => {kind:'call',callId,name,argumentsJson,leadingText} | {kind:'text',text} | null
+    this.verdict2 = opts.verdict2 || null;
     this.pending2 = '';                  // turn-2 sink 就绪前的缓冲
     this.upstreamDone = false;
     this.readerPromise = null;
@@ -304,18 +314,36 @@ class BridgeContext {
     let r; this.injectedPromise = new Promise((res) => { r = res; }); this._injectedResolve = r;
   }
 
+  // [bridge-v2] 统一流出口:累积全文,未冻结时只下发到 ⟦ 之前;which: 1|2。
+  _stream(delta, which) {
+    const msgId = which === 1 ? this.msgId : this.msg2Id;
+    const buf = which === 1 ? (this.streamed1 += delta) : (this.streamed2 += delta);
+    const fk = which === 1 ? 'frozen1' : 'frozen2';
+    const sk = which === 1 ? 'sent1' : 'sent2';
+    if (this[fk]) return;
+    const bi = buf.indexOf('⟦');
+    if (bi < 0) {
+      const part = buf.slice(this[sk].length);
+      if (part) emitTextDelta(this.sink, msgId, part, 0);
+      this[sk] = buf;
+    } else {
+      this[fk] = true;
+      const part = buf.slice(this[sk].length, bi);
+      if (part) emitTextDelta(this.sink, msgId, part, 0);
+      this[sk] = buf.slice(0, bi);
+    }
+  }
+
   // 上游可见正文增量(由 responses.js 的 read 回调过滤后喂入)。
   onText(delta) {
     if (!delta) return;
     if (!this.injected) {
-      // pre-tool:流到 turn-1 sink
+      // pre-tool:流到 turn-1 sink(经 ⟦ 冻结)
       if (!this.msgOpen) { emitOpenMessage(this.sink, this.msgId); this.msgOpen = true; }
-      this.streamed1 += delta;
-      emitTextDelta(this.sink, this.msgId, delta, 0);
+      this._stream(delta, 1);
     } else if (this.phase === 'turn2') {
-      // post-tool:流到 turn-2 sink
-      this.streamed2 += delta;
-      emitTextDelta(this.sink, this.msg2Id, delta, 0);
+      // post-tool:流到 turn-2 sink(经 ⟦ 冻结)
+      this._stream(delta, 2);
     } else {
       // suspended 且 turn-2 sink 未就绪:缓冲,beginContinuation 时冲刷
       this.pending2 += delta;
@@ -344,9 +372,11 @@ class BridgeContext {
     const output = [];
     let idx = 0;
     if (this.msgOpen) {
-      emitCloseMessage(this.sink, this.msgId, this.streamed1, 0);
+      // [bridge-v2] 冻结轮只交付已流出的净前缀(⟦…⟧ 残片不进 done 文本)。
+      const _t1 = this.frozen1 ? this.sent1 : this.streamed1;
+      emitCloseMessage(this.sink, this.msgId, _t1, 0);
       output.push({ type: 'message', id: this.msgId, role: 'assistant', status: 'completed',
-        content: [{ type: 'output_text', text: this.streamed1 }] });
+        content: [{ type: 'output_text', text: _t1 }] });
       idx = 1;
     }
     const fcId = 'fc_' + randHex(12);
@@ -375,9 +405,10 @@ class BridgeContext {
     emitCreated(this.sink, this.env);
     emitOpenMessage(this.sink, this.msg2Id);
     if (this.pending2) {
-      this.streamed2 += this.pending2;
-      emitTextDelta(this.sink, this.msg2Id, this.pending2, 0);
+      // [bridge-v2] 冲刷也走统一冻结出口(挂起期缓冲里可能已含 ⟦cmd⟧)。
+      const _p = this.pending2;
       this.pending2 = '';
+      this._stream(_p, 2);
     }
   }
 
@@ -385,15 +416,43 @@ class BridgeContext {
     if (this._finished2) return;
     this._finished2 = true;
     this.phase = 'done';
-    emitCloseMessage(this.sink, this.msg2Id, this.streamed2, 0);
+    // [bridge-v2] turn-2 收口裁决:responses.js 注入 verdict2 时按其裁决交付
+    // (run 块→function_call 兜底续链;方言残片→剥净 prose);缺省 null=原样,零行为差。
+    let _v = null;
+    if (this.verdict2) { try { _v = this.verdict2(this.streamed2); } catch (_) { _v = null; } }
+    if (_v && _v.kind === 'call') {
+      const lead = _v.leadingText || '';
+      if (lead.startsWith(this.sent2)) {
+        const rest = lead.slice(this.sent2.length);
+        if (rest) emitTextDelta(this.sink, this.msg2Id, rest, 0);
+      }
+      emitCloseMessage(this.sink, this.msg2Id, lead, 0);
+      const output = [{ type: 'message', id: this.msg2Id, role: 'assistant', status: 'completed',
+        content: [{ type: 'output_text', text: lead }] }];
+      const fcItem = emitFunctionCall(this.sink, {
+        fcId: 'fc_' + randHex(12), callId: _v.callId, name: _v.name, arguments: _v.argumentsJson,
+      }, 1);
+      output.push(fcItem);
+      emitCompleted(this.sink, this.env, output);
+      this.registry.forget(this);
+      return;
+    }
+    const _t2 = (_v && _v.kind === 'text') ? _v.text : this.streamed2;
+    if (_t2.startsWith(this.sent2)) {
+      const rest = _t2.slice(this.sent2.length);
+      if (rest) emitTextDelta(this.sink, this.msg2Id, rest, 0);
+    }
+    emitCloseMessage(this.sink, this.msg2Id, _t2, 0);
     emitCompleted(this.sink, this.env, [{
       type: 'message', id: this.msg2Id, role: 'assistant', status: 'completed',
-      content: [{ type: 'output_text', text: this.streamed2 }],
+      content: [{ type: 'output_text', text: _t2 }],
     }]);
     this.registry.forget(this);
   }
 
   // 模型没调工具的普通答:turn-1 直接收口交付(由 responses.js 在 race 后调)。
+  // [bridge-v2] 注意:冻结轮 streamed1 可能含 ⟦…⟧ 残片;新代码应改用 finishPlainText
+  // (剥净后交付)。保留本方法零参形态供旧离线用例与降级路径(行为=交付全文,与旧版一致)。
   finishPlain() {
     if (this.injected || this._finishedPlain) return;
     this._finishedPlain = true;
@@ -404,6 +463,55 @@ class BridgeContext {
       type: 'message', id: this.msgId, role: 'assistant', status: 'completed',
       content: [{ type: 'output_text', text: this.streamed1 }],
     }]);
+    this.registry.deactivate(this);
+  }
+
+  // [bridge-v2] 按给定净文本收口 turn-1(调用方已做三态裁决/剥方言)。
+  // reconcile:净文本若以已流出前缀开头,只补发余量 delta;否则不补(done 文本为准)。
+  finishPlainText(text) {
+    if (this.injected || this._finishedPlain) return;
+    this._finishedPlain = true;
+    this.phase = 'done';
+    if (!this.msgOpen) { emitOpenMessage(this.sink, this.msgId); this.msgOpen = true; }
+    const _t = (text == null) ? this.streamed1 : String(text);
+    if (_t.startsWith(this.sent1)) {
+      const rest = _t.slice(this.sent1.length);
+      if (rest) emitTextDelta(this.sink, this.msgId, rest, 0);
+    }
+    emitCloseMessage(this.sink, this.msgId, _t, 0);
+    emitCompleted(this.sink, this.env, [{
+      type: 'message', id: this.msgId, role: 'assistant', status: 'completed',
+      content: [{ type: 'output_text', text: _t }],
+    }]);
+    this.registry.deactivate(this);
+  }
+
+  // [bridge-v2] turn-1 收口成 function_call(⟦cmd¦run⟧ 兜底轮的转译交付)。
+  // 与 inject 的关键差异:不 registerCallId —— 该调用的 turn-2 回流按设计走 normal flow
+  // (byCallId miss → 常规 tool-feed 轮),不做会合;桥只在模型真调 connector 时会合。
+  finishWithCall(opts) {
+    if (this.injected || this._finishedPlain) return;
+    this._finishedPlain = true;
+    this.phase = 'done';
+    const lead = (opts && opts.leadingText) || '';
+    const output = [];
+    let idx = 0;
+    if (this.msgOpen || lead) {
+      if (!this.msgOpen) { emitOpenMessage(this.sink, this.msgId); this.msgOpen = true; }
+      if (lead.startsWith(this.sent1)) {
+        const rest = lead.slice(this.sent1.length);
+        if (rest) emitTextDelta(this.sink, this.msgId, rest, 0);
+      }
+      emitCloseMessage(this.sink, this.msgId, lead, 0);
+      output.push({ type: 'message', id: this.msgId, role: 'assistant', status: 'completed',
+        content: [{ type: 'output_text', text: lead }] });
+      idx = 1;
+    }
+    const fcItem = emitFunctionCall(this.sink, {
+      fcId: 'fc_' + randHex(12), callId: opts.callId, name: opts.name, arguments: opts.argumentsJson,
+    }, idx);
+    output.push(fcItem);
+    emitCompleted(this.sink, this.env, output);
     this.registry.deactivate(this);
   }
 }

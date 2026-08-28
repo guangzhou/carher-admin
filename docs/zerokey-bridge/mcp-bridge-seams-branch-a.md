@@ -202,3 +202,58 @@ if (mcpBridge.isEnabled()) {
 5. 再 patch 82 env 加 `ZK_MCP_BRIDGE=1` → rollout → 集成测(acct-93 端到端 / acct-82 canary,连接器只在
    活动窗口 link、用完 unlink 复验 404)。
 6. 回滚:82 env 去 `ZK_MCP_BRIDGE` / args 去 cp 行 + CM 从 `/home/cltx/backups-bpi/` 还原。101 全程不动。
+
+---
+
+## 【2026-08-28】bridge-v2 重设计 + canary-82 Stage 1/2 验收
+
+### 病根(为什么要 v2)
+phase-0 的 `BRIDGE_CONTRACT` 教模型"自带工具输出对本用户是 FAKE"。真 Cursor turn-2 发原生
+`call_web_*_Shell`、其 call_id 与网关 turn-1 注入的 deriveCallId **必然不同** → `byCallId` MISS →
+旧契约让模型弃掉真工具输出 → 编造无 URL 的飞书文档(memory `feedback_mcp_bridge_breaks_real_cursor_native_toolcalls`,
+上次 ON 即回归、已回滚 82)。合成 probe 因为忠实回显网关 call_id 恒 HIT = 假绿陷阱。
+
+### v2 机制(全部离线可测)
+- **V2B_CONTRACT 双通道**替换互斥的 BRIDGE_CONTRACT:`PREFERRED — call the connected tool "shell"`(同轮会合)
+  / `FALLBACK — ⟦cmd¦run=<bash>⟧`(下一轮);关键一句 **`Results returned through EITHER channel are REAL`**——
+  byCallId miss 降级到常规 proto2 flow 时,模型照常消化真输出,不再判 FAKE。
+- **`_stream` 冻结**:turn-1/turn-2 一见 `⟦`(U+27E6)停流,只下发净前缀(frozenN/sentN/streamedN)。
+- **verdict2 三态收口**(finishContinuation):`kind:'call'`→兜底续链发 function_call+forget;
+  `kind:'text'`→剥净 prose;`null`→原样交付(back-compat)。
+- **finishWithCall**:⟦cmd¦run⟧ 兜底轮发 message+function_call+completed,**不 registerCallId**
+  → turn-2 走常规 tool-feed(byCallId 有意 miss → 降级消化)。
+- **ticketText steer 安全红线**:仅 `callId==null`(无活跃桥)才 steer;真超时(callId 非空=inject 已发)
+  保"稍后重试",绝不 steer(杜绝双执行)。
+
+### 离线覆盖
+- 新增 `scripts/zk-cursor-web/mcp_bridge_v2_offline_cases.js` **13/13**(冻结/verdict2 三态/finishPlainText
+  reconcile/finishWithCall 不注册/ticketText steer 红线,注入双时钟 rendezvous.now+now)。
+- 新增 `scripts/zk-cursor-web/mcp_bridge_v2_responses_cases.js` **43/43**(V2B 三常量/9 双通道不变量/
+  proto2 5 装配选择器/seam3 三态收口/turn-2 续流/steer 条件/acquire 门/rebuild 选择器)。
+- 全 16 套件回归 BATTERY_FAIL=0。
+
+### 部署(deploy-source = CM live bytes;repo copy STALE)
+- responses.js → md5 `0b665ea1`;`routes/mcp_bridge.js`(tracked repo 源)→ md5 `c7463c8c`。
+- 备份 `/home/cltx/backups-bpi/*.20260828-224031.pre-bridgev2.*`(responses `ff57424c` / mcp_bridge `41b19c39`)。
+- **Stage 1**(字节,gate OFF):CM merge patch → rollout 82 → 活字节 `0b665ea1`,ZK_MCP_BRIDGE unset,
+  boot 干净,101 未动 = 行为惰性(全部桥码在 `isEnabled()=false` 后)。
+- **Stage 2**(翻闸):`set env ZK_MCP_BRIDGE=1 ZK_MCP_PUBLIC_URL=…zkmcp-95aeab5c… ZK_MCP_ACCOUNT=acct82
+  ZK_MCP_GRACE_MS=30000`(单次 rollout)→ boot:`[conn-mgr] wired`/`[mcp-bridge] /mcp mounted`/
+  `recoverOrphans verified404=true`。
+
+### Stage 2 验收(gate ON,scoped 3h key 用完即删)
+| 闸 | 结果 |
+|----|------|
+| gate-on 首轮(真 Cursor 载荷) | ✅ 3/3 非空 |
+| FALLBACK ⟦cmd¦run⟧ → Shell function_call | ✅ 3/3(`turn-1 fallback ⟦cmd⟧ -> function_call Shell, normal-flow turn-2, no rendezvous`) |
+| **事故回归:降级 → 逐字 URL、零编造** | ✅ 喂 `REGRESSIONPROBE_A1B2C3D4` → turn-2 `[turn-verdict-v2] complete-prose` 回逐字链接、`HAS_VERBATIM_URL=True` |
+| 连接器 teardown verified404(每会话 link/unlink) | ✅ `teardown … verified404=true`,窗口外零连接器 |
+| s3h 8/8(101 对照 + 82 桥) | ✅ PASS |
+| codex 物理隔离(101 pod 早于 rollout + 活 md5 ≠ 本线) | ✅ 101 startTime 2026-08-27、md5 `2f94ed79` |
+
+### 唯一未闭合(如实标注)
+**rendezvous PREFERRED 路(模型调连接器 shell → 同轮续流)在合成验收里从未 fire**——模型每次走 ⟦cmd¦run⟧
+FALLBACK。此路只能打真 Cursor 客户端证(合成 probe = 假绿,memory 判据)。但 FALLBACK+降级路 = 真实生产路
+(真 Cursor 发自己的原生工具、不调 web 连接器),正是上次回归点、现已实证降级安全。gate 留 ON 在 canary-82
+soak,真客户端 rendezvous 活体证 = soak 观察项。回滚:`set env ZK_MCP_BRIDGE-` + rollout;或 CM 从
+pre-bridgev2 bak 还原。

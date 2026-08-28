@@ -279,3 +279,23 @@ execenv+桥感知契约(同 conv 失效重建路公式)。救回按 `_bridgeVerd
 ——V2B 契约下**模型自发选择调 MCP 连接器**,rendezvous PREFERRED 路模型侧首次真实 fire
 (~2/11 轮,随机)。此前合成验收它从未 fire(模型总走 ⟦cmd⟧ 兜底)。完整会合(注入→真
 Cursor 执行→turn-2 byCallId HIT→同轮续流)仍待真客户端,但"模型会不会选这条路"已有肯定答案。
+
+## 【2026-08-29 凌晨】conn-watchdog:injected 轮引用泄漏(PREFERRED 首 fire 即暴露)
+
+**实锤**:PREFERRED 首 fire ×2 的那个 pod,conn-mgr 全窗口 1 provisioned / 0 release /
+0 teardown,连接器存活 40min 不死。机制:seam3 injected 提前 return 不 release(设计上等
+turn-2 HIT 路配平),turn-2 永不来(弃单/探针不喂)→ refCount 永卡 ≥1 → 违"用完即拆",
+orphan 只有 pod 重启 recoverOrphans 才清。真 Cursor 流量 turn-2 正常会来,泄漏只在弃单轮
+——但弃单轮真实存在,不能赌。
+
+**修(commit 0231b83,CM `bcd3d4b4`,bak `pre-connwatchdog` 旧 `b9fc7d16`)**:turn-1
+injected 在 ctx 挂幂等 `connRelease` + 看门狗 setTimeout(`ZK_MCP_REL_WATCHDOG_MS` 默认
+10min/下限 60s/unref);turn-2 HIT 走同一幂等出口,先到先放不双放;非 injected 路原样。
+看门狗放掉后连接器 grace→拆,后续轮自动重 provision,晚到的 turn-2 byCallId miss → 降级网
+兜住(不悬挂)。
+
+**验收**:离线 conn_watchdog 15/15 + 控制组 8 FAIL;全套 BATTERY_FAIL=0;boot recoverOrphans
+删掉泄漏连接器 verified404=true;探针后 release→grace 恢复配平。s3h 两跑 flake 判定:82
+tool.r2 首跑 hollow 二跑 508c OK,**对照组 101(未改字节)二跑同病 133c** = 上游惜字波动
+非本字节。同窗 empty-retry 梯子 live-fire 双向实锤:rescued attempt 2 → function_call
+(原本是用户可见报错);一例三连空仍诚实报错(当前窗口 acct82 空率 ≈71%)→ `ZK_EMPTY_RETRY=3`。

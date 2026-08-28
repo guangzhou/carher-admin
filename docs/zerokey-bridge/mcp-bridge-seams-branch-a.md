@@ -257,3 +257,25 @@ FALLBACK。此路只能打真 Cursor 客户端证(合成 probe = 假绿,memory �
 (真 Cursor 发自己的原生工具、不调 web 连接器),正是上次回归点、现已实证降级安全。gate 留 ON 在 canary-82
 soak,真客户端 rendezvous 活体证 = soak 观察项。回滚:`set env ZK_MCP_BRIDGE-` + rollout;或 CM 从
 pre-bridgev2 bak 还原。
+
+## 【2026-08-28 深夜】empty-retry 空轮梯子 + rendezvous PREFERRED 模型侧首 fire
+
+**病根(用户实锤 15:12:10→15:12:28)**:gate-ON 后 web 任务轮全走 seam3,而 seam3 的 turn-1
+真空分支此前直达 `finishPlainText('本轮上游未产出内容')`——**没接老重发网**(非桥 violation 路
+有同会话重发预算 1)。单次尝试 18s 即报错,窗口内 5 次空轮全此形态。
+
+**修(commit dda731d,CM `b9fc7d16`,bak `pre-emptyretry` 旧 `0b665ea1`)**:`ZK_EMPTY_RETRY=N`
+(默认 0=关,82 上 =2)fresh-conv 全量重掷梯子——同会话重发对空轮实测无效(两例死轮重发同样
+200+零正文),换新会话才是换信号。首轮逐字节复用已装配 prompt;增量轮全量 flatten 重建+剥
+execenv+桥感知契约(同 conv 失效重建路公式)。救回按 `_bridgeVerdict` 三态收口 +
+`saveConvSession` 收养新会话(r15);violation 路同会话重发后仍空同样重掷(共享 `emptyRerolls`
+计数跨 finish() 重入有界)。守卫:`res.writableEnded` 弃单即停;心跳 `: empty-retry` 2s 帧。
+
+**验收**:离线 empty_retry 29/29 + 控制组未改字节 20 FAIL;全 16 套件 BATTERY_FAIL=0;
+首轮探针 6/6 非空;降级链 turn-2 逐字消化零编造;s3h 8/8;101 未动(startTime 08-27 不变)。
+天然空轮未在验收窗口出现→梯子 live-fire 归 soak(`[empty-retry]` 行可 grep 统计)。
+
+**重大观测**:`[mcp-bridge] turn-1 injected call_id=e8b100d3…/c832f2e3…`(15:32:33/15:33:15)
+——V2B 契约下**模型自发选择调 MCP 连接器**,rendezvous PREFERRED 路模型侧首次真实 fire
+(~2/11 轮,随机)。此前合成验收它从未 fire(模型总走 ⟦cmd⟧ 兜底)。完整会合(注入→真
+Cursor 执行→turn-2 byCallId HIT→同轮续流)仍待真客户端,但"模型会不会选这条路"已有肯定答案。

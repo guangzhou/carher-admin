@@ -416,14 +416,60 @@ prompt 字面 `ZK7391` / `NO_ECHO_TOOL` 误报,弃用其自动裁决)。
 - **方案 A(register-only + 逐轮注入,想借此避开账号级 link)**:经验证**端不上工具,投递失败** → 此路作为 §5.1 方案A 的
   一种实现**不可行**。§5.1 方案A 若要活,只能是**"逐会话 link + 用完即 unlink"**形态(而非 register-only),但 link 窗口内
   仍对该账号所有 `[]` 轮泄漏 → **只在独立(非 codex-shared)账号上才安全**。
-- **净结论**:**MCP 桥唯一安全路 = 独立账号面**(专用一个不在 codex 池、不与 codex CLI 共享的 ChatGPT 账号,
-  在其上 link 桥连接器;"泄漏到 `[]`"因该账号 codex 从不使用而无害)。§13.6 veto-fallback ①(独立账号面)由"首选"
-  **升级为"必需"**;②(register-only 方案A)判死。**Branch-A 流缝合代码在备妥独立账号面 + 显式拍板前不写。**
+- **净结论(经 §13.6-Gate-2c 修正,见下)**:linked → `[]` 可见/可调是**已证的可见性事实**;但"可见 ≠ 被调"——
+  §13.6-Gate-2c 实测普通流量下自发调用率为 0。故"独立账号面"是**风险最低的首选**(消掉可见性足迹),
+  **不是被机制判死后的唯一必需**。register-only(方案A)投递失败判死仍成立(端不上工具)。**Branch-A 流缝合代码
+  在显式拍板前不写**(账号面选型由 Gate-2c 数据 + owner 拍板共同决定)。
 
 **遗留物(全量拆除,回 pre-probe)**:acct93 上两个测试连接器(linked `asdk_app_6a9064…` + register-only
 `asdk_app_6a9065a3d788819193be2801be9c5743`)均 delete 复验 404;host echo server(:18901)kill(`NONE_18901`);
 nginx 从 `chat.auto-link.com.cn.conf.pre-gate1.20260827-222139.bak` 还原(0 个 `/mcp` 块,`nginx -t` OK,外部 `/mcp`→502);
 pod + host `/tmp` 探针物擦净;`mcp-echo.log`(19KB)作证据留存 `/home/cltx/`。**全程未碰 acct82 / codex 面。**
+
+### 13.6-Gate-2c 可见性的**行为后果**实测(2026-08-28,acct93,codex 面零接触)—— ⚖️ **"可调用 ≠ 被调用",普通流量自发调用率 = 0**
+
+Gate-2b 证了"linked 连接器对 `[]` 轮**可见/可调**"(显式让调就命中)。但 owner 追问的是**后果**:一个**只是挂在
+账号上**的连接器,对**不提它、模型自主决定**的普通轮次,会不会被**自发**调用?—— 这是 Gate-2b 数据栏里**空着的一格**
+(把"可达"当成了"有害",越了三段式红线)。本节把它补满。
+
+**探针**(`consequence_probe.js`,同 §13.3 pod `ChatGPTAPI` 真实 serve 路 + host echo server;连接器 **linked**;
+每臂独立新会话;ground truth **只认 echo-server 真收 `tools/call`**):5 臂,唯一变量 = `developer_mode_connector_ids`
+形状 + prompt 是否提工具。
+
+- **假设**:一个 linked 连接器,只要"可见",就会污染/扰动普通轮次(自发被调)。
+- **证伪条件**:若"可见"不等于"被调",则**不提工具的普通轮次(`[]` 形状,codex 恒定形状)echo-server 零命中**,
+  只有**显式让调**的臂命中。
+- **数据(echo-server RPC 日志 `mcp-echo.stdout`,决定性)**:
+
+  | 臂 | dev_ids | prompt | echo-server `tools/call` |
+  |----|---------|--------|--------------------------|
+  | ARM1 注入+显式 | `[connector]` | "call echo {ARM1MARK}" | ✅ 01:31:58 |
+  | ARM2 空+显式 | `[]` | "call echo {ARM2MARK}" | ✅ 01:32:26 |
+  | **ARM3 空+知识题** | `[]` | "法国首都?" | ❌ 无 |
+  | **ARM4 空+回声诱饵** | `[]` | "原样复述:banana"(最诱人) | ❌ 无 |
+  | **ARM5 空+任务** | `[]` | "给条打印日期的 bash" | ❌ 无 |
+  | DMOFF 空+显式(devmode 关不掉后复验) | `[]` | "call echo {DMOFFMARK}" | ✅ 01:35:37 |
+
+**机制定论(三段式数据栏满)**:
+1. **`[]` 形状(= codex serve 恒定形状)在连接器 linked 时确实可达**:ARM2 + DMOFF 两次 `[]` 显式让调都真命中
+   echo(01:32:26 / 01:35:37)。→ 复现并加固 Gate-2b 的可见性泄漏结论(link 是门,`developer_mode_connector_ids` 不是)。
+2. **但"可达"不等于"被调"**:3 个 codex 忠实的普通臂(`[]`、不提工具、模型自主)—— 知识题、**最大诱惑的"复述 banana"**、
+   bash 任务 —— echo-server **零命中**,`sawConnectorFrame=false` 全三臂。基座模型对**未被请求的连接器**的倾向明确是
+   "不碰"。→ **owner 的直觉"能调用不带来后果"在普通流量上被数据支持**。
+3. **残余风险 = 上下文足迹,不是自发调用**:linked 连接器的工具 schema 确实进了 `[]` 请求的可用工具上下文(ARM2 证其
+   "被问就能到"),即每请求多 3 条 schema 的 token 足迹 + 一个小尾概率;且 codex 真实 harness(自带 system prompt + 自带
+   工具集)无法在 acct93 复刻(碰不得 codex 面),故不能断言 codex 全 harness 与此逐字一致。但**基座倾向 = 不主动碰
+   未请求连接器**这一条是数据钉死的。
+
+**诚实旗(两条未闭)**:①**session 隔离假设未 100% 关死**——fleet 里 acct93 只有单一 session,没测"物理另一台设备
+的另一 session 看不看得到"(link/devmode 都是账号级服务器对象,机制上指向账号级;但缺一个跨设备 session 的直证)。
+②**devmode 关不掉**——`account_user_setting?feature=developer_mode` POST value=false → 405、DELETE → 403
+"Only OpenAI internal users can delete user settings",无法从客户端复位;因连接器已删、无物附着,判为**无害残渣**。
+
+**对账号面选型的净修正**:Gate-2b 的"唯一安全路=独立账号面(**必需**)"是**越界结论**——它把"可见性泄漏"直接
+等同于"扰动 codex",而 Gate-2c 证明普通流量下的扰动(自发调用)**为 0**。修正为:**独立账号面是风险最低的首选**
+(彻底消掉可见性足迹),**共享账号桥并非被判死**——残余仅上下文足迹,可用 §5.1 方案A"仅在桥激活窗口逐会话 link、
+用完 unlink"把足迹压到最小。**codex 一票否决与 Branch-A 拍板门不变**;账号面最终选型交 owner 依本数据定。
 
 ### 13.5 本轮结论
 

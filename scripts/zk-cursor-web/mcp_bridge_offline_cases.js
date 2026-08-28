@@ -203,6 +203,20 @@ t('injectedPromise 在 inject 时 resolve(turn-1 race 依据)', async () => {
   assert.strictEqual(resolved, true);
 });
 
+t('toolName 映射:openTurn 带 toolName → function_call.name 用它,callId 仍按 MCP 名', async () => {
+  const reg = new M.BridgeRegistry({ now: () => 0 });
+  const sink = mkSink();
+  // MCP 工具名 'shell';Cursor 侧执行器名 'run_terminal_cmd'
+  const ctx = reg.openTurn({ session: 'convX', sink, respId: 'r', created: 1, model: 'm', toolName: 'run_terminal_cmd' });
+  reg.makeCallTool()('shell', { cmd: 'ls' });
+  await new Promise((r) => setImmediate(r));
+  const fcEv = sink.events().find((e) => e.event === 'response.output_item.done' && e.data.item && e.data.item.type === 'function_call');
+  assert.ok(fcEv, 'function_call 已发');
+  assert.strictEqual(fcEv.data.item.name, 'run_terminal_cmd', 'name 用 Cursor 执行器名');
+  // callId 仍是 deriveCallId(session, MCP名, args),与 toolName 正交
+  assert.strictEqual(ctx.callId, M.deriveCallId('convX', 'shell', { cmd: 'ls' }), 'callId 按 MCP 名');
+});
+
 // ── ③ 降级 ────────────────────────────────────────────────────
 t('降级:无活跃桥 → callTool 取号 isError', async () => {
   const reg = new M.BridgeRegistry({ now: () => 0 });

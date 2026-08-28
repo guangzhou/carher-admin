@@ -253,6 +253,11 @@ class BridgeContext {
     this.sink = opts.sink;               // 当前输出 sink(turn-1 → turn-2 重指)
     this.env = { respId: opts.respId, created: opts.created, model: opts.model, usage: opts.usage };
     this.msgId = opts.msgId || ('msg_' + randHex(12));
+    // Cursor turn-2 靠 function_call.name 在自己的工具表里查执行器;MCP 连接器暴露给
+    // ChatGPT 的工具名(如 'shell')未必等于 Cursor 的 shell 工具名。turn-1 seam 从
+    // req.body.tools 里挑出 Cursor 的执行工具名传入,inject 时用它发 function_call;
+    // 缺省(离线/acct93 自控端)回落 MCP 名。会合键 deriveCallId 仍用 MCP 名,与此正交。
+    this.toolName = opts.toolName || null;
     this.phase = 'turn1';
     this.msgOpen = false;
     this.injected = false;
@@ -311,8 +316,11 @@ class BridgeContext {
       idx = 1;
     }
     const fcId = 'fc_' + randHex(12);
+    // 发给 Cursor 的 function_call.name 用 Cursor 侧执行器名(toolName),缺省回落 MCP 名;
+    // 会合键 callId 与之正交(仍 = deriveCallId(session, MCP名, args))。
+    const emitName = this.toolName || name;
     const fcItem = emitFunctionCall(this.sink, {
-      fcId, callId, name, arguments: this.pendingCall.args,
+      fcId, callId, name: emitName, arguments: this.pendingCall.args,
     }, idx);
     output.push(fcItem);
     emitCompleted(this.sink, this.env, output);

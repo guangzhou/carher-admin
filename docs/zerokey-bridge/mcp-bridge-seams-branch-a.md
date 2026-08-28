@@ -142,10 +142,19 @@ if (mcpBridge.isEnabled() && useWebTools && !chatOnly) {
    `{"call_id":"9a30cec0b3ba0f50","name":"Shell","arguments":"{\"command\":\"ls\"}"}` —— 发给 Cursor 的
    `arguments` 已是 **`{"command":"ls"}`**(修前 `{"cmd":"ls"}`);`call_id` 与修前**逐字一致** = 证 remap 不动会合键;
    ROUND-TRIP PASS(续流复述 `ZKPROBE_ALPHA/BRAVO`)。**缺口#1 闭合。**
-2. **codex-shared 账号面挂持久连接器 = Gate-2 一票否决**:acct-82/acct-93 都是 codex serve 池上游
-   (`BRIDGE_UPSTREAMS` 含 zero-82 + zero-93)。用户已豁免 Gate-2 结构否决,但持久 account-level 连接器仍落
-   codex 账号面 → 生产唯一安全形态是 **§5.1 方案 A(每会话 link/unlink,活动窗口内挂、用完即摘 + 复验 404)**,
-   不留持久连接器。本次实测即遵此:provision→round-trip→立即 delete。
+2. **codex-shared 账号面挂持久连接器 = Gate-2 一票否决 —— ✅ 离线核心已产品化(2026-08-28,commit `516ffb9`)**:
+   acct-82/acct-93 都是 codex serve 池上游(`BRIDGE_UPSTREAMS` 含 zero-82 + zero-93)。用户已豁免 Gate-2 结构否决,
+   但持久 account-level 连接器仍落 codex 账号面 → 生产唯一安全形态是 **§5.1 方案 A(每会话 link/unlink,活动窗口内挂、
+   用完即摘 + 复验 404)**,不留持久连接器。本次实测即遵此:provision→round-trip→立即 delete。
+   **产品化**:`routes/mcp_connector_mgr.js`(293 行)`ConnectorManager` 引用计数五态机(IDLE/PROVISIONING/LINKED/
+   GRACE/TEARDOWN):`acquire`(首会话 provision 全链 devmode→register→actions→link,并发单飞,grace 中取回则取消拆)/
+   `release`(refCount→0 进 grace)/`sweep`(过 idleGraceMs 拆:del + verify actions 落 GONE_PLANES=404 复验)。
+   硬约束落地:无 list-by-account → register 一成功即 `store.save`(崩在 link 前也留可回收孤儿),`recoverOrphans()`
+   启动删旧;409 EXISTS 幂等复用;rollback(actions 空/无 enabled/link 失败)→del 回滚。副作用全注入(adapter+store+
+   注入时钟),核心零网络零磁盘。**离线** `scripts/zk-cursor-web/mcp_connector_mgr_offline_cases.js` **19/19**;
+   sibling `mcp_bridge` 19/19 无回归。`makeLiveAdapter` 逐字镜像 `mcp-connector-cli.js` 请求形状(live-enable 前不接线)。
+   **网关接线未做**(把管理器挂进 turn-1 seam 的 provision/release + 启动 recoverOrphans + sweep 定时器):
+   待 codex 池恢复(非回归可验)+ 运行时 in-pod 会话凭据供给 + 拍板后动工。全程 `ZK_MCP_BRIDGE` 默认关。
 3. **codex 非回归验证受阻(诚实标注,非造绿)**:codex 池当前退化(429/401)+ 禁止加载 + 连接器已删(无可测)
    → 依据 Gate-2c 先证(基模不自发调未请求连接器)+ 瞬时足迹(~分钟级)+ 即时删除;**不宣称已跑绿**。
 

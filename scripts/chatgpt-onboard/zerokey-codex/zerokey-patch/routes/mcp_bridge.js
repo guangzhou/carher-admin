@@ -243,6 +243,33 @@ function emitCompleted(sink, env, output) {
   sink.end();
 }
 
+// MCP 连接器暴露给 ChatGPT 的 shell 工具参数是 {cmd:...},而 Cursor 本机执行器
+// (Shell,required=['command'])读 {command:...}。inject 发给 Cursor 前把命令值映射到
+// Cursor 的参数名(toolParam,由 turn-1 seam 从 shellTool.key 传入)。只在真 Cursor 路
+// (有 toolParam)remap;缺省(离线/自控端)原样透传 = 零行为差。deriveCallId 用的是
+// ChatGPT 侧原始 args,remap 只改发给 Cursor 的那一份,不影响会合键。
+function remapArgsForCursor(rawArgs, toolParam, toolParamArray) {
+  if (!toolParam) return rawArgs;
+  let obj = rawArgs;
+  if (typeof rawArgs === 'string') { try { obj = JSON.parse(rawArgs); } catch (_) { return rawArgs; } }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return rawArgs;
+  // 命令值:优先 Cursor 参数名本身 → cmd → command → 首个字符串值。
+  let cmdVal = obj[toolParam];
+  if (cmdVal === undefined) cmdVal = obj.cmd;
+  if (cmdVal === undefined) cmdVal = obj.command;
+  if (cmdVal === undefined) {
+    for (const k of Object.keys(obj)) { if (typeof obj[k] === 'string') { cmdVal = obj[k]; break; } }
+  }
+  if (cmdVal === undefined) return rawArgs;               // 找不到命令:透传,不吞
+  const mapped = {};
+  mapped[toolParam] = (toolParamArray && typeof cmdVal === 'string') ? [cmdVal] : cmdVal;
+  // 透传 Cursor Shell 认得的可选字段(若模型给了)。
+  for (const k of ['working_directory', 'block_until_ms', 'description']) {
+    if (obj[k] !== undefined && k !== toolParam) mapped[k] = obj[k];
+  }
+  return mapped;
+}
+
 // ── 跨轮桥上下文 ────────────────────────────────────────────────────────────
 // 一条 Cursor 会话的一次 MCP 缝合。phase: turn1 → suspended → turn2 → done。
 // pre-tool 正文流到 turn-1 sink;工具后续答流到 turn-2 sink(sink 可重指针)。
@@ -258,6 +285,10 @@ class BridgeContext {
     // req.body.tools 里挑出 Cursor 的执行工具名传入,inject 时用它发 function_call;
     // 缺省(离线/acct93 自控端)回落 MCP 名。会合键 deriveCallId 仍用 MCP 名,与此正交。
     this.toolName = opts.toolName || null;
+    // Cursor 执行器的命令参数名(shellTool.key,如 'command')+ 是否 array 型。
+    // inject 时把 MCP 的 {cmd} 映射成 {command}(见 remapArgsForCursor)。
+    this.toolParam = opts.toolParam || null;
+    this.toolParamArray = !!opts.toolParamArray;
     this.phase = 'turn1';
     this.msgOpen = false;
     this.injected = false;
@@ -305,7 +336,10 @@ class BridgeContext {
     this.injected = true;
     this.phase = 'suspended';
     this.callId = callId;
-    this.pendingCall = { name, args: (typeof args === 'string' ? args : JSON.stringify(args || {})) };
+    // 发给 Cursor 的 args 映射成 Cursor 执行器参数形状({cmd}→{command});
+    // 真 Cursor 路(有 toolParam)才 remap,缺省透传。
+    const cursorArgs = remapArgsForCursor(args, this.toolParam, this.toolParamArray);
+    this.pendingCall = { name, args: (typeof cursorArgs === 'string' ? cursorArgs : JSON.stringify(cursorArgs || {})) };
 
     const output = [];
     let idx = 0;
@@ -537,7 +571,7 @@ module.exports = {
   // 门控 + 装配
   isEnabled, buildMcpRoute, getRegistry, findFunctionCallOutput,
   // 供 responses.js 缝合钩 + 离线测试
-  BridgeRegistry, BridgeContext, RendezvousTable, deriveCallId, canonical, dispatch, envelope,
+  BridgeRegistry, BridgeContext, RendezvousTable, deriveCallId, canonical, dispatch, envelope, remapArgsForCursor,
   emitCreated, emitOpenMessage, emitTextDelta, emitCloseMessage, emitFunctionCall, emitCompleted,
   PENDING, TICKETED, RESOLVED, PROTOCOL_VERSION_DEFAULT,
 };

@@ -13,9 +13,9 @@
 
 | 文件 | CM key | 基线 md5(活) | 缝合后 md5 | 部署目标 |
 |------|--------|--------------|-----------|---------|
-| responses.js | `responses.js` | `2f94ed79` | `39a08ba4`(三缝合口)→ **`128e67e6`(+piece#3 桥模式契约)** | CM(共享)+ 仅 82 lane 生效(101 容错 stub+无 env) |
+| responses.js | `responses.js` | `2f94ed79` | `39a08ba4`(三缝合口)→ `128e67e6`(+piece#3 桥模式契约)→ **`5432d09253c23252dae58fb90e5485c4`(+缺口#1 seam 传 toolParam/toolParamArray)** | CM(共享)+ 仅 82 lane 生效(101 容错 stub+无 env) |
 | zerokey-serve-codex.js | `zerokey-serve-codex.js` | `d256ecaf` | `8f28510e` | 同上 |
-| mcp_bridge.js | `mcp_bridge.js`(**新增 key**) | —(新) | **活 md5 `e8b70ed9`**(21777B) | 仅 `zero-cursor-bpi-82` Deployment args 加 `cp /patch/mcp_bridge.js /app/routes/mcp_bridge.js` |
+| mcp_bridge.js | `mcp_bridge.js`(**新增 key**) | —(新) | `e8b70ed9` → **`41b19c394e63962c8939c26206d7edfa`(+缺口#1 remapArgsForCursor)** | 仅 `zero-cursor-bpi-82` Deployment args 加 `cp /patch/mcp_bridge.js /app/routes/mcp_bridge.js` |
 
 > **piece #3(桥模式契约)**:三缝合口只搭了运输管道,但 turn-1 挂起口 fire 时,若模型仍收到旧
 > `V2_CONTRACT` 的 `⟦cmd¦run⟧` 方言,它会写 `⟦cmd⟧` 散文 → 无 tool call → reader 到底 → `finishPlain`
@@ -128,11 +128,20 @@ if (mcpBridge.isEnabled() && useWebTools && !chatOnly) {
 
 ## 已知缺口(投产前必补)
 
-1. **参数形状不匹配(`cmd` vs `command`)**:serve `bridgeTools` 声明 `required:['cmd']`,模型按此发
-   `{cmd:"ls"}`;桥 inject function_call `name=Shell args={"cmd":"ls"}` 给 Cursor,但 Cursor 真 `Shell`
-   执行器读 `{command, working_directory, block_until_ms}` → 读 `command` 得 undefined。探针 harness 泛型解析
-   所以过了,**真 Cursor 会断**。修:(a) MCP 工具 schema 直接用 `command` 参数对齐 Cursor,或
-   (b) inject 时 remap `cmd→command`。
+1. **参数形状不匹配(`cmd` vs `command`)—— ✅ 已修 + 生产实测(2026-08-28)**:serve `bridgeTools` 声明
+   `required:['cmd']`(实测连接器 `actions` 亦回 `required:[cmd]`),模型按此发 `{cmd:"ls"}`;修前桥 inject
+   function_call `name=Shell args={"cmd":"ls"}` 给 Cursor,但 Cursor 真 `Shell` 执行器 `required=['command']`
+   → 读 `command` 得 undefined,真 Cursor 会断(探针泛型解析所以旧证过了)。
+   **修**:取 (b) inject 时 remap —— `mcp_bridge.js` 新增纯函数 `remapArgsForCursor(rawArgs, toolParam, toolParamArray)`
+   (helper + `BridgeContext` 构造存 `toolParam/toolParamArray` + `inject` 发 Cursor 前 remap + 导出);
+   `responses.js` turn-1 seam 从 `shellTool.key`/`.isArray` 透传 `toolParam/toolParamArray`(Cursor Shell → `command`/非数组)。
+   **自适应**:有 `toolParam`(真 Cursor 路)才 remap,缺省(离线/自控端)原样透传 = 零行为差;`deriveCallId` 用
+   ChatGPT 侧**原始** args,remap 只改发给 Cursor 的那一份,不动会合键。
+   **离线**:`mcp_bridge_offline_cases.js` 19/19(+`remapArgsForCursor` 纯函数 7 断言 + inject remap 端到端)。
+   **生产实测**(canary-82,provision→round-trip→即删):turn-1 fc
+   `{"call_id":"9a30cec0b3ba0f50","name":"Shell","arguments":"{\"command\":\"ls\"}"}` —— 发给 Cursor 的
+   `arguments` 已是 **`{"command":"ls"}`**(修前 `{"cmd":"ls"}`);`call_id` 与修前**逐字一致** = 证 remap 不动会合键;
+   ROUND-TRIP PASS(续流复述 `ZKPROBE_ALPHA/BRAVO`)。**缺口#1 闭合。**
 2. **codex-shared 账号面挂持久连接器 = Gate-2 一票否决**:acct-82/acct-93 都是 codex serve 池上游
    (`BRIDGE_UPSTREAMS` 含 zero-82 + zero-93)。用户已豁免 Gate-2 结构否决,但持久 account-level 连接器仍落
    codex 账号面 → 生产唯一安全形态是 **§5.1 方案 A(每会话 link/unlink,活动窗口内挂、用完即摘 + 复验 404)**,
@@ -167,7 +176,7 @@ if (mcpBridge.isEnabled()) {
 
 ## 部署纪律(仅 82 lane)
 
-1. 本地/staging 字节 md5 校验(responses 活 `128e67e6`(含 piece #3)/ serve `8f28510e` / mcp_bridge.js 活 `e8b70ed9`)。
+1. 本地/staging 字节 md5 校验(responses 活 `5432d092`(含 piece #3 + 缺口#1 seam)/ serve `8f28510e` / mcp_bridge.js 活 `41b19c39`(含缺口#1 remap))。
 2. 备份现 CM 三键到 `/home/cltx/backups-bpi/`。
 3. `kubectl patch cm zk-cursor-bpi-patch --type merge --patch-file <file in /home/cltx/>`:更新 responses.js +
    zerokey-serve-codex.js,新增 mcp_bridge.js。(不重启在跑 pod。)

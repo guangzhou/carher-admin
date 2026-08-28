@@ -217,6 +217,41 @@ t('toolName 映射:openTurn 带 toolName → function_call.name 用它,callId �
   assert.strictEqual(ctx.callId, M.deriveCallId('convX', 'shell', { cmd: 'ls' }), 'callId 按 MCP 名');
 });
 
+// ── ②b arg 形状 remap(坑#1:MCP {cmd} → Cursor {command}) ──────────
+t('remapArgsForCursor:有 toolParam → cmd 映射到 command,可选字段透传,callId 与其正交', () => {
+  // 纯函数:MCP {cmd} → Cursor {command}
+  assert.deepStrictEqual(M.remapArgsForCursor({ cmd: 'ls' }, 'command', false), { command: 'ls' });
+  // 已是 command 形状 → 原样(优先 toolParam 键)
+  assert.deepStrictEqual(M.remapArgsForCursor({ command: 'ls -la' }, 'command', false), { command: 'ls -la' });
+  // 可选字段透传
+  assert.deepStrictEqual(
+    M.remapArgsForCursor({ cmd: 'ls', working_directory: '/tmp', block_until_ms: 5000 }, 'command', false),
+    { command: 'ls', working_directory: '/tmp', block_until_ms: 5000 });
+  // string args → parse 后映射
+  assert.deepStrictEqual(M.remapArgsForCursor('{"cmd":"pwd"}', 'command', false), { command: 'pwd' });
+  // array 型 command → 包成数组
+  assert.deepStrictEqual(M.remapArgsForCursor({ cmd: 'ls' }, 'command', true), { command: ['ls'] });
+  // 无 toolParam(离线/自控端)→ 原样透传(零行为差)
+  assert.deepStrictEqual(M.remapArgsForCursor({ cmd: 'ls' }, null, false), { cmd: 'ls' });
+  // 找不到命令字符串 → 透传不吞
+  assert.deepStrictEqual(M.remapArgsForCursor({ x: 1 }, 'command', false), { x: 1 });
+});
+
+t('inject remap:openTurn 带 toolParam → 发给 Cursor 的 function_call.arguments 用 command', async () => {
+  const reg = new M.BridgeRegistry({ now: () => 0 });
+  const sink = mkSink();
+  const ctx = reg.openTurn({ session: 'convR', sink, respId: 'r', created: 1, model: 'm',
+    toolName: 'Shell', toolParam: 'command', toolParamArray: false });
+  reg.makeCallTool()('shell', { cmd: 'ls -la' });
+  await new Promise((r) => setImmediate(r));
+  const fcEv = sink.events().find((e) => e.event === 'response.output_item.done' && e.data.item && e.data.item.type === 'function_call');
+  assert.ok(fcEv, 'function_call 已发');
+  assert.strictEqual(fcEv.data.item.name, 'Shell', 'name 用 Cursor 执行器名');
+  assert.strictEqual(fcEv.data.item.arguments, JSON.stringify({ command: 'ls -la' }), 'args 已 remap 成 {command}');
+  // callId 仍按 MCP 侧原始 args(deriveCallId 与 remap 正交)
+  assert.strictEqual(ctx.callId, M.deriveCallId('convR', 'shell', { cmd: 'ls -la' }), 'callId 按 MCP 原始 args');
+});
+
 // ── ③ 降级 ────────────────────────────────────────────────────
 t('降级:无活跃桥 → callTool 取号 isError', async () => {
   const reg = new M.BridgeRegistry({ now: () => 0 });

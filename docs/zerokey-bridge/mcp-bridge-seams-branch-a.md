@@ -153,10 +153,18 @@ if (mcpBridge.isEnabled() && useWebTools && !chatOnly) {
    启动删旧;409 EXISTS 幂等复用;rollback(actions 空/无 enabled/link 失败)→del 回滚。副作用全注入(adapter+store+
    注入时钟),核心零网络零磁盘。**离线** `scripts/zk-cursor-web/mcp_connector_mgr_offline_cases.js` **19/19**;
    sibling `mcp_bridge` 19/19 无回归。`makeLiveAdapter` 逐字镜像 `mcp-connector-cli.js` 请求形状(live-enable 前不接线)。
-   **网关接线未做**(把管理器挂进 turn-1 seam 的 provision/release + 启动 recoverOrphans + sweep 定时器):
-   待 codex 池恢复(非回归可验)+ 运行时 in-pod 会话凭据供给 + 拍板后动工。全程 `ZK_MCP_BRIDGE` 默认关。
-3. **codex 非回归验证受阻(诚实标注,非造绿)**:codex 池当前退化(429/401)+ 禁止加载 + 连接器已删(无可测)
-   → 依据 Gate-2c 先证(基模不自发调未请求连接器)+ 瞬时足迹(~分钟级)+ 即时删除;**不宣称已跑绿**。
+   **网关接线 ✅ 已做 + 活体生命周期 PROVEN(2026-08-28)**:6 处接线 diff(A–F)把管理器挂进 responses.js turn-1
+   seam(provision/release + 启动 recoverOrphans + 10s sweep 定时器),活字节 responses `5432d092`→`8aa6bf88`,
+   CM 新增 `mcp_connector_mgr.js` key。分段部署:Stage 1 字节安全(无 `ZK_MCP_PUBLIC_URL` → 管理器 null =
+   零行为差)→ Stage 2 激活(canary-82 env `ZK_MCP_PUBLIC_URL=…/zkmcp-<32hex>` + grace 30s)。活体实测
+   (`connmgr_live_test2.js`,acct82 真会话):acquire→provision(devmode→register→actions→link,tools=[shell])→
+   release→grace→sweep→teardown(del + **verify404=true**)→ 账号面回基线无孤儿 = **LIFECYCLE PASS**。门控
+   `mcpBridge.isEnabled() && ZK_MCP_PUBLIC_URL`,101 无 cp mcp_connector_mgr.js → require 失败 → stub → 全 gated off。
+   接线字节链/6 diff/回滚见 `mcp-connmgr-gateway-wiring.md`。
+3. **codex 非回归(诚实标注,非造绿)**:acct82 是 codex serve 池上游;连接器**仅活跃桥会话窗口 + 30s grace 内 link**,
+   窗口外 account 面**零连接器**(稳态 = codex 见基线)。窗口内足迹由 Gate-2c 实证框定(基模对未请求连接器自发调用率=0)。
+   结构安全阀 = auto-teardown(exposure 有界)+ delete-verify(每会话删净)+ Gate-2c。**不主动生成 codex serve 流量去
+   "证"非回归**(那本身扰动 owner 划死的 codex account 面);full codex-harness 逐字非回归是唯一未独立复跑项,如实标注。
 
 ## 缝合口(serve)—— zerokey-serve-codex.js
 

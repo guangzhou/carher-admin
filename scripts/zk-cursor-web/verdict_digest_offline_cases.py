@@ -151,8 +151,42 @@ s5 = vd.summarize(vd.aggregate([]))
 check("empty-safe", s5["verdict_total"] == 0 and s5["rates"]["act_retry_rate"] is None
       and s5["handshake"]["ack_rate"] is None, f'{s5["rates"]}')
 
+# —— ⑨ 08-29 ISSUE-1:dialect-translated 按 kind 分桶(write/replace 首次出现即证修法生效) ——
+acc6 = vd.aggregate([
+    "[turn-verdict-v2] complete-run (dialect-translated write, prose 0 chars)",
+    "[turn-verdict-v2] complete-run (dialect-translated read,replace, prose 12 chars)",
+    "[turn-verdict-v2] complete-run (Shell, cmd 40 chars, prose 5 chars)",  # 非方言不入桶
+])
+s6 = vd.summarize(acc6)
+check("dialect_kinds counts by kind",
+      s6["dialect_kinds"] == {"write": 1, "read": 1, "replace": 1},
+      f'{s6["dialect_kinds"]}')
+
+# —— ⑩ violation raw 首标记方言分类(修法覆盖内的写族记录到 hist) ——
+acc7 = vd.aggregate([
+    '[turn-verdict-v2] violation (empty/undeliverable) -> same-conv resend (budget 1) raw="⟦write¦path=/tmp/a¦content=hi⟧"',
+    '[turn-verdict-v2] violation (empty/undeliverable) -> same-conv resend (budget 1) raw="⟦replace¦path=/tmp/b¦old=x¦new=y⟧"',
+])
+s7 = vd.summarize(acc7)
+check("violation_dialect_hist counts",
+      s7["violation_dialect_hist"] == {"write": 1, "replace": 1},
+      f'{s7["violation_dialect_hist"]}')
+check("known dialects no alarm",
+      s7["unknown_dialect_alarm"] == [],
+      f'{s7["unknown_dialect_alarm"]}')
+
+# —— ⑪ 未知方言告警(soak 期发现新变体的信号:如 ⟦edit⟧/⟦patch⟧/⟦append⟧) ——
+acc8 = vd.aggregate([
+    '[turn-verdict-v2] violation (empty/undeliverable) -> same-conv resend (budget 1) raw="⟦edit¦path=/tmp/x⟧"',
+    '[turn-verdict-v2] violation (still empty after resend) -> honest error raw="⟦append¦path=/tmp/y¦content=hi⟧"',
+])
+s8 = vd.summarize(acc8)
+check("unknown_dialect_alarm fires",
+      s8["unknown_dialect_alarm"] == ["append", "edit"],
+      f'{s8["unknown_dialect_alarm"]}')
+
 print(f"\n== {_pass}/{_pass + _fail} PASS ==")
 if _fail:
     print("FAILS:", json.dumps(_fails, ensure_ascii=False, indent=2))
     sys.exit(1)
-print("VERDICT: GO (五态归桶/ack率/三派生率/violation样本/conv三事件/噪音不误计/方言归并/raw截断/空安全)")
+print("VERDICT: GO (五态归桶/ack率/三派生率/violation样本/conv三事件/噪音不误计/方言归并/raw截断/空安全/dialect_kinds/violation_dialect_hist/unknown_alarm)")

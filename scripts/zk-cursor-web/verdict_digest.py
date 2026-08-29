@@ -46,6 +46,11 @@ CONV_SAVED_RE = re.compile(r'\[conv\]\s+saved\b')
 CONV_DELTA_RE = re.compile(r'\[conv\]\s+delta send\b')
 PERSIST_LOADED_RE = re.compile(r'\[conv-persist\]\s+loaded\s+(\d+)\s+skipped\s+(\d+)')
 RAW_RE = re.compile(r'\braw=(.*)$')
+DIALECT_TR_RE = re.compile(r'\(dialect-translated ([a-z,]+)')
+RAW_DIALECT_RE = re.compile(r'"⟦([a-z_]+)')
+# 已知方言族(2026-08-29):只读 ls/glob/read/grep + 写族 write/replace + 内建 cmd/ask/spawn。
+# violation raw 里出现这之外的方言 = 新变体未覆盖 → 未知方言告警(见 ISSUE-1 修法进队列)。
+KNOWN_DIALECTS = frozenset(["ls", "glob", "read", "grep", "write", "replace", "cmd", "ask", "spawn"])
 
 
 def new_acc():
@@ -63,6 +68,12 @@ def new_acc():
         "hs": {"ack_ok": 0, "no_ack": 0, "no_ack_final": 0},
         "conv": {"saved": 0, "delta_send": 0, "persist_loaded": 0},
         "violation_samples": [],
+        # 08-29 ISSUE-1 修法上线后新增(digest 只读观测,不影响主 verdict 桶):
+        # dialect_kinds:complete-run(dialect-translated ...)按 kind 分桶,write/replace 首次
+        # 出现即证 ZK_WRITE_DIALECT=1 修法生效;violation_dialect_hist:violation raw 首标记
+        # 分类,未知方言即 unknown_dialect_alarm(修法覆盖不全的信号)。
+        "dialect_kinds": {},
+        "violation_dialect_hist": {},
     }
 
 
@@ -94,11 +105,24 @@ def aggregate(lines, raw_max=5):
             tail = m.group(1).strip()
             bucket = _classify_verdict(tail)
             acc["verdict"][bucket] += 1
+            # dialect-translated 计数(complete-run subset,不影响主桶)
+            if bucket == "complete_run":
+                dm = DIALECT_TR_RE.search(tail)
+                if dm:
+                    for kind in dm.group(1).split(','):
+                        k = kind.strip()
+                        if k:
+                            acc["dialect_kinds"][k] = acc["dialect_kinds"].get(k, 0) + 1
             if bucket in ("violation_resend", "violation_honest"):
                 rm = RAW_RE.search(tail)
                 sample = rm.group(1).strip() if rm else tail
                 if len(acc["violation_samples"]) < raw_max:
                     acc["violation_samples"].append({"kind": bucket, "raw": sample})
+                # violation raw 首标记方言分类(用来发现新变体)
+                dm = RAW_DIALECT_RE.search(sample)
+                if dm:
+                    d = dm.group(1)
+                    acc["violation_dialect_hist"][d] = acc["violation_dialect_hist"].get(d, 0) + 1
             continue
         if HS_ACK_RE.search(line):
             acc["hs"]["ack_ok"] += 1
@@ -149,6 +173,14 @@ def summarize(acc):
             "complete_rate": _rate(v["complete_run"] + v["complete_prose"], vt),
         },
         "violation_samples": acc["violation_samples"],
+        # 08-29 新增:方言修法监控信号
+        "dialect_kinds": acc["dialect_kinds"],
+        "violation_dialect_hist": acc["violation_dialect_hist"],
+        # unknown_dialect_alarm:violation raw 出现 KNOWN_DIALECTS 之外的方言首标记
+        # = ISSUE-1 修法覆盖不全,soak 期看到即评估扩展白名单/翻译分支。
+        "unknown_dialect_alarm": sorted(
+            k for k in acc["violation_dialect_hist"] if k not in KNOWN_DIALECTS
+        ),
     }
 
 

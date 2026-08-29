@@ -40,8 +40,11 @@ check('regex-same-source-x3', reCount === 3, `found ${reCount} literal occurrenc
 const fnM = /const _stripExecEnv = \(p\) => \{[\s\S]*?\n    \}/.exec(code)
 check('helper-present', !!fnM, 'const _stripExecEnv not found')
 
-// proto2 主分支:抠 `} else if (proto2) {` 到下一个 `} else if (chatOnly) {`
-const p2i = code.indexOf('} else if (proto2) {')
+// proto2 主分支:抠级联头 `if (proto2) {`(mcp 桥 v2 删掉了它前面那个门控关闭的互斥
+// _bridgeReady/BRIDGE_CONTRACT 分支 → proto2 从 `} else if (proto2)` 升为级联头 `if (proto2)`,
+// 见 responses.js L702)到下一个 `} else if (chatOnly) {`。用 `\n    if (proto2) {`(4 空格缩进)
+// 唯一锚到级联头,避开 finish() 里 L1589 的 `      if (proto2) {`(6 空格)。
+const p2i = code.indexOf('\n    if (proto2) {')
 const p2j = code.indexOf('} else if (chatOnly) {', p2i)
 check('proto2-branch-found', p2i >= 0 && p2j > p2i, `p2i=${p2i} p2j=${p2j}`)
 const p2 = code.slice(p2i, p2j)
@@ -54,8 +57,8 @@ check('proto2-no-raw-baseprompt-assign', !/prompt = basePrompt/.test(p2),
 check('proto2-strip-applied-once', /const _p2base = _stripExecEnv\(basePrompt\)/.test(p2),
   '_p2base = _stripExecEnv(basePrompt) not found')
 
-// 重建路(r9):proto2 分支必须剥 _fp0
-check('rebuild-path-stripped', /const _fp = proto2 \? \(_stripExecEnv\(_fp0\) \+ V2_CONTRACT\)/.test(code),
+// 重建路(r9):proto2 分支必须剥 _fp0(桥 commit 后契约端由 mcpBridge.isEnabled() 选 V2B/V2)
+check('rebuild-path-stripped', /const _fp = proto2 \? \(_stripExecEnv\(_fp0\) \+ \(mcpBridge\.isEnabled\(\) \? V2B_CONTRACT : V2_CONTRACT\)/.test(code), // 2026-08-29: 尾部容忍 B线 V2_CALL_ADDON 追加,剥的断言不变
   'rebuild path does not strip _fp0')
 
 // —— (b) 行为断言:eval 抠出的 helper,按真实病例形状喂 ——

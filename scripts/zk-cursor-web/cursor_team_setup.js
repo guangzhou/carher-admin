@@ -267,6 +267,60 @@ const PATCHES = [
   },
 ];
 
+/* ── 件B @cx-chain:v3 链式增量(exthost bundle fetch seam;与 cursor_chain_patch.py 逐字节一致) ──
+   目标 bundle 与 workbench 那三条无关:这是 extension-host 进程里真发 /responses 的两条 dist/main.js。
+   在工厂底层 fetch(锚 customHeaders:d}=e,m=,括号配平包住 builder 调用)+ responses SDK 客户端
+   fetch:t.fetch 双处包 __cxWrap;force-responses 让 terra 模型也走 /responses。shim base64 内嵌:
+   含正则反斜杠(\s \/ \n),JS 字符串字面量会吃掉未识别转义 → 必须 base64 运行时解码才能逐字节搬运。
+   门控 CX_CHAIN=0 关;幂等靠 CHAIN_MARKER;非致命(锚点没了只告警跳过,不阻断核心解锁补丁)。 */
+const CHAIN_MARKER = "@cx-chain:v3";
+const CHAIN_ANCHOR = "customHeaders:d}=e,m=";
+const CHAIN_TARGETS = [
+  path.join("extensions", "cursor-agent-exec", "dist", "main.js"),
+  path.join("extensions", "cursor-local-agent-runtime", "dist", "main.js"),
+];
+const CHAIN_SHIM_B64 =
+  "LyogQGN4LWNoYWluOnYzIOKAlCBwcmV2aW91c19yZXNwb25zZV9pZCDpk77lvI/lop7ph48o5bel5Y6C5bqV5bGCIGZldGNoIHNlYW07Q1hfQ0hBSU49MCDlhbMpICovCjsoKCk9Pnt0cnl7CmlmKGdsb2JhbFRoaXMuX19jeFdyYXApcmV0dXJuOwpjb25zdCBzdD1uZXcgTWFwKCk7CmNvbnN0IFRSQUNFPScvdG1wL2N4LWNoYWluLXRyYWNlLmxvZyc7CmNvbnN0IHRyYWNlPShvKT0+e3RyeXtyZXF1aXJlKCdmcycpLmFwcGVuZEZpbGVTeW5jKFRSQUNFLEpTT04uc3RyaW5naWZ5KE9iamVjdC5hc3NpZ24oe3RzOkRhdGUubm93KCl9LG8pKSsnXG4nKX1jYXRjaChfKXt9fTsKdHJhY2Uoe2V2OidpbnN0YWxsZWQnLHBpZDooZ2xvYmFsVGhpcy5wcm9jZXNzJiZwcm9jZXNzLnBpZCl8fDB9KTsKY29uc3QgSD0ocyk9PntsZXQgaD01MzgxO2ZvcihsZXQgaT0wO2k8cy5sZW5ndGg7aSsrKWg9KChoPDw1KStoK3MuY2hhckNvZGVBdChpKSk+Pj4wO3JldHVybiBoLnRvU3RyaW5nKDM2KX07CmNvbnN0IERKPShvKT0+e3RyeXtyZXR1cm4gSChKU09OLnN0cmluZ2lmeShvKSl9Y2F0Y2goXyl7cmV0dXJuICd4J319OwpnbG9iYWxUaGlzLl9fY3hXcmFwPWZ1bmN0aW9uKE9SSUcpewogIGlmKHR5cGVvZiBPUklHIT09J2Z1bmN0aW9uJylyZXR1cm4gT1JJRzsKICByZXR1cm4gYXN5bmMgZnVuY3Rpb24odXJsLGluaXQpewogICAgdHJ5ewogICAgICB0cnl7aWYocHJvY2Vzcy5lbnYuQ1hfQ0hBSU49PT0nMCcpcmV0dXJuIE9SSUcodXJsLGluaXQpfWNhdGNoKF8pe30KICAgICAgY29uc3QgdT1TdHJpbmcodHlwZW9mIHVybD09PSdzdHJpbmcnP3VybDoodXJsJiZ1cmwudXJsKXx8JycpOwogICAgICB0cnl7CiAgICAgICAgbGV0IGJsPShpbml0JiZ0eXBlb2YgaW5pdC5ib2R5PT09J3N0cmluZycpP2luaXQuYm9keS5sZW5ndGg6LTEsIG1jPS0xLCBpYz0tMSwgaGFzUHJldj1mYWxzZSwgbW9kZWw9Jyc7CiAgICAgICAgaWYoYmw+MCl7dHJ5e2NvbnN0IGpiPUpTT04ucGFyc2UoaW5pdC5ib2R5KTttYz1BcnJheS5pc0FycmF5KGpiLm1lc3NhZ2VzKT9qYi5tZXNzYWdlcy5sZW5ndGg6LTE7aWM9QXJyYXkuaXNBcnJheShqYi5pbnB1dCk/amIuaW5wdXQubGVuZ3RoOi0xO2hhc1ByZXY9ISFqYi5wcmV2aW91c19yZXNwb25zZV9pZDttb2RlbD1TdHJpbmcoamIubW9kZWx8fCcnKX1jYXRjaChfKXt9fQogICAgICAgIHRyYWNlKHtldjond3JhcC1lbnRyeScsdTp1LnNsaWNlKDAsNjApLGJvZHlMZW46YmwsbXNnQ291bnQ6bWMsaW5wdXRDb3VudDppYyxoYXNQcmV2LG1vZGVsfSk7CiAgICAgIH1jYXRjaChfKXt9CiAgICAgIGlmKCEvXC9yZXNwb25zZXMoXD98JCkvLnRlc3QodSkpcmV0dXJuIE9SSUcodXJsLGluaXQpOwogICAgICBpZighaW5pdHx8dHlwZW9mIGluaXQuYm9keSE9PSdzdHJpbmcnKXJldHVybiBPUklHKHVybCxpbml0KTsKICAgICAgbGV0IGJvZHk7dHJ5e2JvZHk9SlNPTi5wYXJzZShpbml0LmJvZHkpfWNhdGNoKF8pe3JldHVybiBPUklHKHVybCxpbml0KX0KICAgICAgaWYoIUFycmF5LmlzQXJyYXkoYm9keS5pbnB1dCl8fGJvZHkuaW5wdXQubGVuZ3RoPDF8fGJvZHkucHJldmlvdXNfcmVzcG9uc2VfaWQpcmV0dXJuIE9SSUcodXJsLGluaXQpOwogICAgICBjb25zdCBrZXk9REooYm9keS5pbnB1dFswXSkrJzonK1N0cmluZyhib2R5Lm1vZGVsfHwnJyk7CiAgICAgIGNvbnN0IGRpZ3M9Ym9keS5pbnB1dC5tYXAoREopOwogICAgICBjb25zdCBzPXN0LmdldChrZXkpOwogICAgICBsZXQgY2hhaW5lZD1mYWxzZSxzZW5kSW5pdD1pbml0OwogICAgICBpZihzJiZzLnJpZCYmYm9keS5pbnB1dC5sZW5ndGg+cy5jb3VudCl7CiAgICAgICAgbGV0IG9rPXRydWU7Zm9yKGxldCBpPTA7aTxzLmNvdW50O2krKylpZihkaWdzW2ldIT09cy5kaWdzW2ldKXtvaz1mYWxzZTticmVha30KICAgICAgICBpZihvayl7CiAgICAgICAgICBjb25zdCBuYj1PYmplY3QuYXNzaWduKHt9LGJvZHkse2lucHV0OmJvZHkuaW5wdXQuc2xpY2Uocy5jb3VudCkscHJldmlvdXNfcmVzcG9uc2VfaWQ6cy5yaWR9KTsKICAgICAgICAgIHNlbmRJbml0PU9iamVjdC5hc3NpZ24oe30saW5pdCx7Ym9keTpKU09OLnN0cmluZ2lmeShuYil9KTsKICAgICAgICAgIGNoYWluZWQ9dHJ1ZTt0cmFjZSh7ZXY6J2NoYWluZWQnLGRlbHRhOmJvZHkuaW5wdXQubGVuZ3RoLXMuY291bnQsdG90YWw6Ym9keS5pbnB1dC5sZW5ndGgscmlkOnMucmlkLnNsaWNlKDAsMTYpfSk7CiAgICAgICAgfQogICAgICB9CiAgICAgIGlmKCFjaGFpbmVkKXRyYWNlKHtldjoncGFzc3Rocm91Z2gtZnVsbCcsaW5wdXRMZW46Ym9keS5pbnB1dC5sZW5ndGgsaGFkU3RvcmVkOiEhcyx1OnUuc2xpY2UoMCw2MCl9KTsKICAgICAgbGV0IHJlcz1hd2FpdCBPUklHKHVybCxzZW5kSW5pdCk7CiAgICAgIGlmKGNoYWluZWQmJnJlcyYmKHJlcy5zdGF0dXM9PT00MDB8fHJlcy5zdGF0dXM9PT00MDQpKXtzdC5kZWxldGUoa2V5KTt0cmFjZSh7ZXY6J2ZhbGxiYWNrLWZ1bGwnLHN0YXR1czpyZXMuc3RhdHVzfSk7cmVzPWF3YWl0IE9SSUcodXJsLGluaXQpfQogICAgICBpZihyZXMmJnJlcy5vayl7CiAgICAgICAgdHJ5ewogICAgICAgICAgcmVzLmNsb25lKCkudGV4dCgpLnRoZW4oKHQpPT57CiAgICAgICAgICAgIHRyeXsKICAgICAgICAgICAgICBjb25zdCBtPXQubWF0Y2goLyJpZCJccyo6XHMqIihyZXNwX1teIl0rKSIvKTsKICAgICAgICAgICAgICBpZihtKXtzdC5zZXQoa2V5LHtjb3VudDpib2R5LmlucHV0Lmxlbmd0aCxkaWdzLHJpZDptWzFdfSk7aWYoc3Quc2l6ZT41MClzdC5kZWxldGUoc3Qua2V5cygpLm5leHQoKS52YWx1ZSk7dHJhY2Uoe2V2OidzYXZlZC1yaWQnLGNvdW50OmJvZHkuaW5wdXQubGVuZ3RoLHJpZDptWzFdLnNsaWNlKDAsMjApfSl9CiAgICAgICAgICAgICAgZWxzZXt0cmFjZSh7ZXY6J25vLXJpZCcsc2FtcGxlOnQuc2xpY2UoMCwxMDApfSl9CiAgICAgICAgICAgIH1jYXRjaChfKXt9CiAgICAgICAgICB9KS5jYXRjaCgoKT0+e30pOwogICAgICAgIH1jYXRjaChfKXt9CiAgICAgIH0KICAgICAgcmV0dXJuIHJlczsKICAgIH1jYXRjaChlKXt0cnl7cmV0dXJuIE9SSUcodXJsLGluaXQpfWNhdGNoKF8pe3Rocm93IGV9fQogIH07Cn07Cn1jYXRjaChfKXt9fSkoKTsK";
+const CHAIN_SHIM = Buffer.from(CHAIN_SHIM_B64, "base64").toString("utf8");
+
+// 括号配平包住工厂 builder 调用(与 cursor_chain_patch.py 的 wrap_builder_call 同逻辑)。
+// 返回 {ok, out?, why}。锚点 count!=1 / 括号不配平 → ok=false(调用方告警跳过,不改坏)。
+function wrapBuilderCall(src) {
+  const n = src.split(CHAIN_ANCHOR).length - 1;
+  if (n !== 1) return { ok: false, why: "锚 count=" + n };
+  const i = src.indexOf(CHAIN_ANCHOR), j = i + CHAIN_ANCHOR.length, k = src.indexOf("(", j);
+  if (k < 0) return { ok: false, why: "锚后无 (" };
+  let depth = 0, p = k;
+  for (; p < src.length; p++) { const c = src[p]; if (c === "(") depth++; else if (c === ")") { depth--; if (depth === 0) break; } }
+  if (depth !== 0) return { ok: false, why: "括号不配平" };
+  const call = src.slice(j, p + 1);
+  const wrapped = CHAIN_ANCHOR + "(globalThis.__cxWrap||(f=>f))(" + call + ")";
+  return { ok: true, out: src.slice(0, i) + wrapped + src.slice(p + 1), why: call.slice(0, 40) };
+}
+
+// 两条 exthost bundle 同名 main.js → 备份/回滚必须用扁平化文件名防碰撞。
+function chainBakName(rel) { return "cxchain__" + rel.split(path.sep).join("__"); }
+
+// 计算一条 chain bundle 的补丁(不落盘)。返回 {p, out, bakName, applied} 或 null(跳过)。
+function planChainBundle(rel) {
+  const p = path.join(RES, rel);
+  if (!fs.existsSync(p)) { console.log("   SKIP chain %s(不存在)", rel); return null; }
+  const src = fs.readFileSync(p, "utf8");
+  if (src.includes(CHAIN_MARKER)) { console.log("   SKIP chain %s(已打过)", path.basename(path.dirname(path.dirname(rel)))); return null; }
+  const wb = wrapBuilderCall(src);
+  if (!wb.ok) { console.log("   ⚠️  chain %s 锚点问题(%s)→ 跳过(不阻断解锁补丁)", rel, wb.why); return null; }
+  let out = wb.out; const applied = ["wrap:" + wb.why];
+  const rOld = "baseURL:t.baseUrl,apiKey:t.apiKey,fetch:t.fetch})";
+  const rNew = "baseURL:t.baseUrl,apiKey:t.apiKey,fetch:(globalThis.__cxWrap||(f=>f))(t.fetch)})";
+  if (out.split(rOld).length - 1 === 1) { out = out.replace(rOld, rNew); applied.push("resp:t.fetch"); }
+  const ufOld = '?"responses":"chat_completions"', ufNew = '?"responses":"responses"';
+  if (out.split(ufOld).length - 1 === 1) { out = out.replace(ufOld, ufNew); applied.push("force-responses"); }
+  out = CHAIN_SHIM + "\n" + out;
+  const dir2 = path.basename(path.dirname(path.dirname(rel)));
+  console.log("   chain %s: 将打 [%s]", dir2, applied.join(", "));
+  return { p, out, bakName: chainBakName(rel), applied };
+}
+
 /* ── 测试钩子:打印常量供与 Python 版做逐字节等价断言 ── */
 if (process.env.CX_DUMP_CONSTANTS) {
   process.stdout.write(JSON.stringify({ GATE_FN, QP_SNIPPET, QP_OLD, DEFAULT_BASE_URL, DEFAULT_MODELS }));
@@ -281,6 +335,21 @@ if (process.env.CX_APPLY_TO_FILE) {
     t = subOnce(pt.rx, t, pt.sub);
   }
   fs.writeFileSync(process.env.CX_APPLY_OUT || (process.env.CX_APPLY_TO_FILE + ".jsout"), t);
+  process.exit(0);
+}
+// 测试钩子:对任意 exthost bundle 跑真实 chain 补丁,写出到 CX_CHAIN_APPLY_OUT,供与 cursor_chain_patch.py 逐字节等价断言
+if (process.env.CX_CHAIN_APPLY_TO_FILE) {
+  const src = fs.readFileSync(process.env.CX_CHAIN_APPLY_TO_FILE, "utf8");
+  const wb = wrapBuilderCall(src);
+  if (!wb.ok) { console.error("chain wrap 失败:" + wb.why); process.exit(12); }
+  let out = wb.out;
+  const rOld = "baseURL:t.baseUrl,apiKey:t.apiKey,fetch:t.fetch})";
+  const rNew = "baseURL:t.baseUrl,apiKey:t.apiKey,fetch:(globalThis.__cxWrap||(f=>f))(t.fetch)})";
+  if (out.split(rOld).length - 1 === 1) out = out.replace(rOld, rNew);
+  const ufOld = '?"responses":"chat_completions"', ufNew = '?"responses":"responses"';
+  if (out.split(ufOld).length - 1 === 1) out = out.replace(ufOld, ufNew);
+  out = CHAIN_SHIM + "\n" + out;
+  fs.writeFileSync(process.env.CX_CHAIN_APPLY_OUT || (process.env.CX_CHAIN_APPLY_TO_FILE + ".jsout"), out);
   process.exit(0);
 }
 
@@ -490,7 +559,7 @@ function ts() { const d = new Date(), z = (n) => String(n).padStart(2, "0");
 async function doBackup(ver, plans, oldBlob) {
   const bdir = path.join(BACKUP_ROOT, `${ver}-${ts()}`);
   fs.mkdirSync(bdir, { recursive: true });
-  for (const { p } of plans) fs.copyFileSync(p, path.join(bdir, path.basename(p)));
+  for (const pl of plans) fs.copyFileSync(pl.p, path.join(bdir, pl.bakName || path.basename(pl.p)));
   if (oldBlob != null) fs.writeFileSync(path.join(bdir, "applicationUser.blob.json"), oldBlob);
   if (fs.existsSync(SETTINGS_JSON)) fs.copyFileSync(SETTINGS_JSON, path.join(bdir, "settings.json"));
   // #2 备份现有 Key secret(若有),便于 --revert 还原
@@ -503,13 +572,19 @@ async function revert() {
   const baks = fs.existsSync(BACKUP_ROOT) ? fs.readdirSync(BACKUP_ROOT).sort() : [];
   if (!baks.length) { console.log("!! 无备份可回滚"); process.exit(1); }
   // 优先选「含 bundle 的最新备份」(跳过 -cfgonly:那种只存了配置,回滚它会漏掉 bundle);都没有再退回最新
-  const hasBundle = (d) => BUNDLES.some((rel) => fs.existsSync(path.join(BACKUP_ROOT, d, path.basename(rel))));
+  const hasBundle = (d) => BUNDLES.some((rel) => fs.existsSync(path.join(BACKUP_ROOT, d, path.basename(rel)))) ||
+    CHAIN_TARGETS.some((rel) => fs.existsSync(path.join(BACKUP_ROOT, d, chainBakName(rel))));
   const pick = [...baks].reverse().find(hasBundle) || baks[baks.length - 1];
   const b = path.join(BACKUP_ROOT, pick);
   console.log("从备份回滚:", b);
   for (const rel of BUNDLES) {
     const src = path.join(b, path.basename(rel));
     if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(RES, rel)); console.log("  restored bundle:", path.basename(rel)); }
+  }
+  // 件B chain bundle:扁平化名回滚(两条同名 main.js 靠 chainBakName 区分)
+  for (const rel of CHAIN_TARGETS) {
+    const src = path.join(b, chainBakName(rel));
+    if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(RES, rel)); console.log("  restored chain:", chainBakName(rel)); }
   }
   const blob = path.join(b, "applicationUser.blob.json");
   if (fs.existsSync(blob)) {
@@ -561,6 +636,7 @@ async function main() {
   console.log("--- 1) bundle 补丁计划 ---");
   const plans = [];
   for (const rel of BUNDLES) { const r = planBundle(rel); if (r) plans.push(r); }
+  for (const rel of CHAIN_TARGETS) { const r = planChainBundle(rel); if (r) plans.push(r); }
   console.log("--- 2) 语法校验补后 bundle ---");
   for (const { p, out } of plans) {
     if (!syntaxCheck(out, path.basename(p).split(".")[1])) { console.log("   !! 语法校验不过,终止,未落任何盘。"); process.exit(4); }

@@ -1,0 +1,306 @@
+'use strict'
+/*
+ * zk-delta/sidecar/sidecar.js  —— 本机小代理
+ *
+ * Cursor 把 BYOK 地址指到 http://127.0.0.1:8788/v1，其余什么都不改。
+ * 小代理负责：把这一轮相对上一轮新增的那几条消息挑出来，只把新增的发到 198。
+ *
+ * 三条硬规矩，写死在代码里：
+ *
+ *  1) 不能逐字节复现的请求，一律原样透传。
+ *     每一发请求都先在本地做一次 拆开→重建→序列化 的往返，
+ *     只有结果与 Cursor 原始字节完全相同，才允许走增量。
+ *     不相同就当没有 zk-delta 这回事，原样发给今天的地址。门① 因此不可破。
+ *
+ *  2) 认不出基线一律硬报错，不静默降级。
+ *     服务端回 409 时，小代理立刻重发全量并拿新 handle，同时两侧各记一条计数。
+ *     绝不出现"服务端悄悄少发了历史、上游看到的东西变了、我们还以为一切正常"。
+ *
+ *  3) 会话身份靠全前缀摘要匹配，不靠任何有损哈希。
+ *     Cursor 每条会话的第 0 条框架消息都一样，按它建 key 会让所有会话撞在一起。
+ *
+ * 环境变量：
+ *   ZKD_PORT       本机监听端口，默认 8788
+ *   ZKD_DELTA_URL  增量服务端地址（新加的 location）
+ *   ZKD_UPSTREAM   今天在用的地址的 base（不含 /v1），回落时走它
+ *   ZKD_OFF=1      整体关掉增量，退化成纯透传（等于今天的形态）
+ *   ZKD_CAPTURE    设成目录名则把原始 body 落盘，用来做金样测试
+ *   ZKD_MAX_CONV   本地记多少条会话，默认 60
+ */
+
+const http = require('http')
+const https = require('https')
+const fs = require('fs')
+const path = require('path')
+const { URL } = require('url')
+const F = require('../common/framing')
+
+const PORT = parseInt(process.env.ZKD_PORT || '8788', 10)
+const DELTA_URL = process.env.ZKD_DELTA_URL || 'https://cc.auto-link.com.cn/zkd/v1/delta'
+const UPSTREAM = process.env.ZKD_UPSTREAM || 'https://cc.auto-link.com.cn/pro'
+const OFF = process.env.ZKD_OFF === '1'
+const CAPTURE = process.env.ZKD_CAPTURE || ''
+const MAX_CONV = parseInt(process.env.ZKD_MAX_CONV || '60', 10)
+
+const dUrl = new URL(DELTA_URL)
+const uUrl = new URL(UPSTREAM)
+
+const M = {
+  started_at: new Date().toISOString(),
+  req_total: 0,
+  delta_sent: 0,
+  full_sent: 0,
+  passthru: 0,
+  fallback_by_reason: {},
+  conflict_409: 0,
+  conflict_by_reason: {},
+  delta_server_error: 0,
+  bytes_original: 0,   // Cursor 本来要发出去的字节
+  bytes_uplink: 0,     // 实际出网字节
+  conv_live: 0
+}
+function bump (o, k) { o[k] = (o[k] || 0) + 1 }
+function log (ev, kv) {
+  const p = ['[zkd-sidecar]', ev]
+  for (const k of Object.keys(kv || {})) p.push(k + '=' + kv[k])
+  console.log(p.join(' '))
+}
+
+// ---------- 本地会话表 ----------
+/** handle -> { handle, digests, count, templateDigest, arrayKey, busy, ts } */
+const convs = new Map()
+function convList () { return Array.from(convs.values()) }
+function trimConvs () {
+  while (convs.size > MAX_CONV) {
+    const k = convs.keys().next().value
+    if (k === undefined) break
+    convs.delete(k)
+  }
+  M.conv_live = convs.size
+}
+
+// ---------- 工具 ----------
+function readBody (req) {
+  return new Promise((resolve, reject) => {
+    const cs = []
+    req.on('data', (c) => cs.push(c))
+    req.on('end', () => resolve(Buffer.concat(cs)))
+    req.on('error', reject)
+  })
+}
+
+function outHeaders (req, len, targetHost) {
+  const h = {}
+  for (const k of Object.keys(req.headers)) {
+    const lk = k.toLowerCase()
+    if (lk === 'host' || lk === 'content-length' || lk === 'connection' ||
+        lk === 'transfer-encoding') continue
+    h[k] = req.headers[k]
+  }
+  h['content-length'] = String(len)
+  h['host'] = targetHost
+  return h
+}
+
+function doRequest (target, method, headers, bodyBuf, onResponse, onError) {
+  const mod = target.protocol === 'https:' ? https : http
+  const r = mod.request({
+    protocol: target.protocol,
+    hostname: target.hostname,
+    port: target.port || (target.protocol === 'https:' ? 443 : 80),
+    method,
+    path: target.pathname + (target.search || ''),
+    headers
+  }, onResponse)
+  r.on('error', onError)
+  M.bytes_uplink += bodyBuf.length
+  r.end(bodyBuf)
+  return r
+}
+
+function pipeBack (res, ures) {
+  const h = Object.assign({}, ures.headers)
+  delete h['transfer-encoding']
+  delete h['connection']
+  res.writeHead(ures.statusCode, h)
+  ures.pipe(res)
+}
+
+// ---------- 原样透传（等于今天的形态） ----------
+function passthru (req, res, subPath, raw, reason) {
+  M.passthru++
+  if (reason) { bump(M.fallback_by_reason, reason); log('passthru', { reason, bytes: raw.length, path: subPath }) }
+  const t = new URL(uUrl.toString())
+  t.pathname = uUrl.pathname.replace(/\/$/, '') + subPath
+  doRequest(t, req.method, outHeaders(req, raw.length, t.host), raw,
+    (ures) => pipeBack(res, ures),
+    (e) => { log('passthru_error', { msg: e.message }); if (!res.headersSent) { res.writeHead(502, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'zk-delta sidecar passthru failed: ' + e.message, code: '502' } })) } })
+}
+
+// ---------- 发一个 envelope ----------
+function sendEnvelope (req, res, env, meta, onConflict) {
+  const buf = Buffer.from(JSON.stringify(env), 'utf8')
+  const h = outHeaders(req, buf.length, dUrl.host)
+  h['content-type'] = 'application/json'
+  h['x-zkd-client'] = 'sidecar/1'
+
+  doRequest(dUrl, 'POST', h, buf, (ures) => {
+    if (ures.statusCode === 409) {
+      const cs = []
+      ures.on('data', (c) => cs.push(c))
+      ures.on('end', () => {
+        let reason = 'unknown'
+        try { reason = JSON.parse(Buffer.concat(cs).toString('utf8')).error.reason || 'unknown' } catch (e) {}
+        M.conflict_409++
+        bump(M.conflict_by_reason, reason)
+        log('conflict409', { reason, handle: String(env.handle).slice(0, 12) })
+        if (env.handle) convs.delete(env.handle)
+        onConflict(reason)
+      })
+      return
+    }
+    if (ures.statusCode >= 500 && !res.headersSent) {
+      M.delta_server_error++
+      const cs = []
+      ures.on('data', (c) => cs.push(c))
+      ures.on('end', () => {
+        log('delta_server_5xx', { code: ures.statusCode })
+        passthru(req, res, meta.subPath, meta.raw, 'delta_server_5xx')
+      })
+      return
+    }
+    // 成功：记账并把响应原样回吐
+    const nh = ures.headers['x-zk-handle']
+    if (nh && ures.statusCode >= 200 && ures.statusCode < 300) {
+      convs.delete(nh)
+      convs.set(nh, {
+        handle: nh,
+        digests: meta.digests,
+        count: meta.digests.length,
+        templateDigest: meta.templateDigest,
+        arrayKey: meta.arrayKey,
+        ts: Date.now()
+      })
+      trimConvs()
+    }
+    if (meta.mode === 'delta') M.delta_sent++; else M.full_sent++
+    log('turn', {
+      mode: meta.mode,
+      handle: String(nh || '').slice(0, 12),
+      items: meta.digests.length,
+      base: env.base_count || 0,
+      orig: meta.raw.length,
+      up: buf.length,
+      save: meta.raw.length ? (100 - buf.length * 100 / meta.raw.length).toFixed(1) + '%' : '-',
+      code: ures.statusCode
+    })
+    pipeBack(res, ures)
+  }, (e) => {
+    M.delta_server_error++
+    log('delta_server_error', { msg: e.message })
+    if (!res.headersSent) passthru(req, res, meta.subPath, meta.raw, 'delta_server_unreachable')
+  })
+}
+
+// ---------- 主处理 ----------
+async function handle (req, res) {
+  const u = new URL(req.url, 'http://x')
+  const p = u.pathname
+
+  if (p === '/healthz') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    return res.end(JSON.stringify({ ok: true, off: OFF, delta_url: DELTA_URL, upstream: UPSTREAM, conv_live: convs.size }))
+  }
+  if (p === '/metrics.json') {
+    M.conv_live = convs.size
+    res.writeHead(200, { 'content-type': 'application/json' })
+    return res.end(JSON.stringify(M, null, 2))
+  }
+
+  const isDeltaPath = req.method === 'POST' && /^\/v1\/(chat\/completions|responses)$/.test(p)
+  const raw = await readBody(req)
+  M.req_total++
+  M.bytes_original += raw.length
+
+  if (CAPTURE) {
+    try {
+      fs.mkdirSync(CAPTURE, { recursive: true })
+      const fn = path.join(CAPTURE, `${Date.now()}-${String(M.req_total).padStart(4, '0')}${p.replace(/\//g, '_')}.json`)
+      fs.writeFileSync(fn, raw)
+    } catch (e) { log('capture_error', { msg: e.message }) }
+  }
+
+  if (OFF || !isDeltaPath) return passthru(req, res, p + (u.search || ''), raw, OFF ? 'off' : null)
+
+  // ---- 第 1 环：本地自证往返 ----
+  const proof = F.proveRoundTrip(raw)
+  if (!proof.ok) return passthru(req, res, p, raw, 'roundtrip_' + proof.reason)
+
+  const digests = F.itemDigests(proof.items)
+  const tdig = F.templateDigest(proof.template)
+
+  const sendFull = (why) => {
+    const env = {
+      v: F.PROTO_VERSION,
+      path: p,
+      array_key: proof.arrayKey,
+      handle: null,
+      base_count: 0,
+      base_digest: F.prefixDigest([], 0),
+      template_digest: tdig,
+      template: proof.template,
+      delta: proof.items,
+      expect_bytes: raw.length
+    }
+    sendEnvelope(req, res, env,
+      { mode: 'full', raw, subPath: p, digests, templateDigest: tdig, arrayKey: proof.arrayKey },
+      () => passthru(req, res, p, raw, 'full_also_409'))
+    if (why) log('full_because', { why })
+  }
+
+  // ---- 找最长前缀会话 ----
+  const cand = convList().filter((c) => c.arrayKey === proof.arrayKey && !c.busy)
+  const best = F.findLongestPrefix(cand, digests)
+  if (!best) return sendFull('no_prefix_match')
+
+  const env = {
+    v: F.PROTO_VERSION,
+    path: p,
+    array_key: proof.arrayKey,
+    handle: best.handle,
+    base_count: best.count,
+    base_digest: F.prefixDigest(digests, best.count),
+    template_digest: tdig,
+    delta: proof.items.slice(best.count),
+    expect_bytes: raw.length
+  }
+  // template 变了才带上（工具集/参数变化时）
+  if (tdig !== best.templateDigest) env.template = proof.template
+
+  best.busy = true
+  const clearBusy = () => { const c = convs.get(best.handle); if (c) c.busy = false }
+  res.on('close', clearBusy)
+  res.on('finish', clearBusy)
+
+  sendEnvelope(req, res, env,
+    { mode: 'delta', raw, subPath: p, digests, templateDigest: tdig, arrayKey: proof.arrayKey },
+    (reason) => { clearBusy(); sendFull('after_409_' + reason) })
+}
+
+const server = http.createServer((req, res) => {
+  handle(req, res).catch((e) => {
+    log('handler_error', { msg: e.message })
+    if (!res.headersSent) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'zk-delta sidecar: ' + e.message, code: '500' } })) }
+  })
+})
+server.requestTimeout = 0
+server.headersTimeout = 0
+server.timeout = 0
+
+if (require.main === module) {
+  server.listen(PORT, '127.0.0.1', () => {
+    log('listen', { port: PORT, delta: DELTA_URL, upstream: UPSTREAM, off: OFF, capture: CAPTURE || '-' })
+  })
+}
+
+module.exports = { server, M, convs }

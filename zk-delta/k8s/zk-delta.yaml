@@ -1,0 +1,87 @@
+# zk-delta 集群侧部署
+#
+# 刻意不建新镜像：代码是纯 Node 标准库，直接复用节点上已有的 zerokey-codex 镜像，
+# 源码用 ConfigMap 挂进去。这样既不用在构建服务器上出镜像，也不碰任何公网仓库。
+# imagePullPolicy 写死 Never，杜绝回落到 docker.io 去拉。
+#
+# 镜像只存在于 aiyjy-litellm-standby（225），所以 nodeSelector 钉在那台。
+# 本服务没有 PVC，不会踩 "nodeName 钉死 + WaitForFirstConsumer PVC 永不绑定" 那个坑。
+#
+# ConfigMap zk-delta-src 由 make-configmap 生成，见 zk-delta/k8s/apply.sh
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zk-delta
+  namespace: litellm-product
+  labels: { app: zk-delta }
+spec:
+  type: NodePort
+  selector: { app: zk-delta }
+  ports:
+    - name: http
+      port: 8788
+      targetPort: 8788
+      nodePort: 30404
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zk-delta
+  namespace: litellm-product
+  labels: { app: zk-delta }
+spec:
+  replicas: 1          # 会话状态在进程内存里，多副本会让 handle 认不出而狂 409。
+                       # 要扩副本必须先把 store 挪到 Redis，那是另一件事。
+  strategy:
+    type: Recreate     # 同理：滚动更新期间新旧副本并存也会导致 409 风暴。
+                       # 409 不会出错，只会退化成全量，但没必要制造噪声。
+  selector:
+    matchLabels: { app: zk-delta }
+  template:
+    metadata:
+      labels: { app: zk-delta }
+      annotations:
+        zk-delta/src-sha: "REPLACED_BY_APPLY_SH"
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        # standby 节点带 dedicated=standby:NoSchedule。
+        # zero-cursor-bpi 是用 nodeName 直接绕过调度器来落地的；这里走正规 toleration，
+        # 不用 nodeName，免得以后哪天加了 PVC 撞上 WaitForFirstConsumer 永不绑定那个坑。
+        - { key: dedicated, operator: Equal, value: standby, effect: NoSchedule }
+      containers:
+        - name: zk-delta
+          image: docker.io/library/zerokey-codex:latest
+          imagePullPolicy: Never
+          command: ["node", "/zkd/server/server.js"]
+          env:
+            - { name: ZKD_PORT,     value: "8788" }
+            - { name: ZKD_UPSTREAM, value: "http://litellm-proxy.litellm-product.svc.cluster.local:4000" }
+            - { name: ZKD_MAX_CONV, value: "400" }
+            - { name: ZKD_TTL_MIN,  value: "240" }
+            - { name: NODE_OPTIONS, value: "--max-old-space-size=1536" }
+          ports:
+            - { containerPort: 8788, name: http }
+          volumeMounts:
+            - { name: src, mountPath: /zkd, readOnly: true }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8788 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8788 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "2",    memory: "2Gi" }
+      volumes:
+        - name: src
+          configMap:
+            name: zk-delta-src
+            items:
+              - { key: framing.js, path: common/framing.js }
+              - { key: server.js,  path: server/server.js }

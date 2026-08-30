@@ -43,3 +43,21 @@ check('S8 ZK_DIET=0 时不跑,IDE 保留', diet(input1)[0].content.includes('ope
 
 console.log(`\n${pass} pass / ${fail} fail`)
 if (fail) process.exit(1)
+
+// —— 2026-08-30 补丁 v2:增量路径也剥(用户老会话实锤:v1 只剥全量路径)——
+const m2 = code.match(/function _stripIdeHint\(items\) \{[\s\S]*?\n\}/)
+check('S9 _stripIdeHint 函数存在', !!m2)
+check('S10 增量路径调用点', /flattenInput\(prepareCodexInput\(_stripIdeHint\(_convDelta\)\)/.test(code))
+if (m2) {
+  const src2 = 'function textOfContent(c){return typeof c==="string"?c:(Array.isArray(c)?c.map(x=>x.text||"").join(""):"")}\n' + m2[0] + '\nreturn _stripIdeHint'
+  const strip = new Function('process','console', src2)({env:{}},{log:()=>{}})
+  const IDE = '<open_and_recently_viewed_files>\nfoo\n</open_and_recently_viewed_files>'
+  const items = [
+    { type:'message', role:'user', content: IDE + '冒泡排序' },
+    { type:'function_call_output', output: 'x' + IDE + 'y' },
+  ]
+  const out = strip(items)
+  check('S11 增量 message 剥完', out[0].content === '冒泡排序')
+  check('S12 增量非 message 不动', out[1].output.includes('open_and_recently'))
+  check('S13 无标签 message 不动', strip([{type:'message', content:'普通'}])[0].content === '普通')
+}

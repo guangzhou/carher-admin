@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 440" width="900" height="440" font-family="Helvetica, Arial, sans-serif">
+  <rect x="0" y="0" width="900" height="440" fill="#ffffff"/>
+  <text x="450" y="32" text-anchor="middle" font-size="19" font-weight="bold" fill="#1f2329">为什么没拿到真实抓包，也能把这条风险验掉</text>
+
+  <!-- 左：Cursor 写出的字节，两条轴 -->
+  <rect x="30" y="60" width="300" height="228" rx="10" fill="#f7f8fa" stroke="#c9cdd4"/>
+  <text x="180" y="86" text-anchor="middle" font-size="14" font-weight="bold" fill="#1f2329">Cursor 写出来的那串字节</text>
+  <text x="180" y="106" text-anchor="middle" font-size="11.5" fill="#8f959e">可以拆成互不相干的两条轴</text>
+
+  <rect x="52" y="124" width="256" height="66" rx="7" fill="#ffffff" stroke="#c9cdd4"/>
+  <text x="68" y="148" font-size="13" font-weight="bold" fill="#8f959e">内容轴：它说了什么</text>
+  <text x="68" y="168" font-size="11.5" fill="#a9aeb8">哪些 message、什么工具、多长</text>
+  <text x="68" y="184" font-size="11.5" fill="#a9aeb8">—— 只有真实抓包才知道</text>
+
+  <rect x="52" y="204" width="256" height="66" rx="7" fill="#fff7e8" stroke="#ff9a2e" stroke-width="2"/>
+  <text x="68" y="228" font-size="13" font-weight="bold" fill="#d4700a">编码轴：它怎么序列化</text>
+  <text x="68" y="248" font-size="11.5" fill="#7a5a2a">1.0 / 1e400 / é / 重复键 / 缩进</text>
+  <text x="68" y="264" font-size="11.5" fill="#7a5a2a">—— 我自己就能穷举</text>
+
+  <!-- 中间：判据 -->
+  <path d="M336 181 L 386 181" stroke="#4e5969" stroke-width="2.5" marker-end="url(#a1)"/>
+  <defs>
+    <marker id="a1" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#4e5969"/>
+    </marker>
+  </defs>
+
+  <rect x="392" y="112" width="230" height="138" rx="10" fill="#ffffff" stroke="#3370ff" stroke-width="2"/>
+  <text x="507" y="138" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#1f2329">proveRoundTrip 的全部判据</text>
+  <rect x="410" y="152" width="194" height="34" rx="5" fill="#f2f5ff"/>
+  <text x="507" y="174" text-anchor="middle" font-size="12.5" font-family="Menlo, monospace" fill="#1d3fa8">stringify(...) === raw</text>
+  <text x="507" y="208" text-anchor="middle" font-size="12" fill="#4e5969">没有任何一处读 item 的</text>
+  <text x="507" y="226" text-anchor="middle" font-size="12" fill="#4e5969">语义字段（role / content / …）</text>
+  <text x="507" y="243" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#00934a">⇒ 它只落在编码轴上</text>
+
+  <path d="M628 181 L 678 181" stroke="#4e5969" stroke-width="2.5" marker-end="url(#a1)"/>
+
+  <!-- 右：结论 -->
+  <rect x="684" y="112" width="186" height="138" rx="10" fill="#f2f8f4" stroke="#00b42a" stroke-width="2"/>
+  <text x="777" y="140" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#1f2329">所以能脱离抓包穷举</text>
+  <text x="777" y="166" text-anchor="middle" font-size="12" fill="#4e5969">6025 条对抗性样本</text>
+  <text x="777" y="186" text-anchor="middle" font-size="12" fill="#4e5969">全部写成 JSON 源文本</text>
+  <text x="777" y="206" text-anchor="middle" font-size="12" fill="#4e5969">而不是 JS 值</text>
+  <text x="777" y="234" text-anchor="middle" font-size="13" font-weight="bold" fill="#00934a">8 绿 / 0 红</text>
+
+  <!-- 底部：两条边界 -->
+  <rect x="30" y="306" width="418" height="112" rx="9" fill="#fff2f0" stroke="#f53f3f"/>
+  <text x="48" y="330" font-size="13.5" font-weight="bold" fill="#c9302c">它不替代 ⑨</text>
+  <text x="48" y="352" font-size="12" fill="#7a3230">内容轴上仍有一件事只有真实抓包能答：</text>
+  <text x="48" y="372" font-size="12" fill="#7a3230">Cursor 真的会写出这些编码形态里的哪几种。</text>
+  <text x="48" y="394" font-size="12" fill="#7a3230">⑨ 保持红。这一组只是让「没采到」不等于「没验过」。</text>
+
+  <rect x="464" y="306" width="406" height="112" rx="9" fill="#f2f8f4" stroke="#00b42a"/>
+  <text x="482" y="330" font-size="13.5" font-weight="bold" fill="#00934a">它守住的那条唯一致命线</text>
+  <text x="482" y="352" font-size="12" fill="#2e5c42">「说 ok 却重建错」是唯一会静默污染上游的失败模式。</text>
+  <text x="482" y="372" font-size="12" fill="#2e5c42">拒绝是安全的（退回原样透传），说错才要命。</text>
+  <text x="482" y="394" font-size="12" font-weight="bold" fill="#2e5c42">2283 条被判 ok 的样本，零反例。</text>
+</svg>

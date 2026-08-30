@@ -48,3 +48,5 @@ scripts/chatgpt-quota-engine-web/web/.env.local
 # Local operator secrets (sudo password, master keys). Never commit.
 # Create with scripts/lib/carher-secrets-init.sh
 .carher-secrets.json
+.gstack/
+docs/assets/.preview/

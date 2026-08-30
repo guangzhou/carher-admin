@@ -1,0 +1,33 @@
+# 198 (aiyjy-litellm k3s, namespace litellm-product) 核心有状态基础设施防死锁
+#
+# 背景 / 事故 (2026-08-30):
+#   LiteLLM_SpendLogs 撑到 336G(几乎全在 TOAST/request_response 正文)填满 /Data
+#   → 可用 <10% → 节点 aiyjy-litellm 打 disk-pressure:NoSchedule taint。
+#   litellm-db / litellm-redis 无 toleration + 另两节点带 dedicated taint(db/redis 不容忍)
+#   → 两者只能落 198 本机却被 disk-pressure 挡住 → 永久 Pending → proxy 无后端 → 对外 502。
+#   自噬闭环:撑爆盘的正是 db 自己的 PV,要删数据得先起 db,而 db 起不来。
+#
+# 修复几何:给 db/redis 永久 disk-pressure toleration + 高优先级,
+#   使其即便盘满也不被驱逐、始终可调度,从而能自愈式删数据而非自锁。
+#
+# ⚠️ SOT 说明:198 是独立 k3s,live 资源为权威(不走 kubectl apply 整份 manifest)。
+#   本文件仅为仓库留档 / 可追溯,已通过 kubectl patch 在 live 生效。
+#   镜像/凭据 vs 主集群(namespace carher)不同,勿混用 litellm-log-retention-cronjob.yaml。
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: litellm-infra-critical
+value: 1000000
+globalDefault: false
+description: "Core litellm stateful infra (db/redis) on 198 - survives node disk-pressure eviction so it can self-heal instead of deadlocking."
+---
+# 以下为 patch 语义留档(已用 kubectl patch sts 打到 live,STS volumeClaimTemplates 不可变故不整份 apply):
+#
+# kubectl -n litellm-product patch sts litellm-db --type=merge -p '{"spec":{"template":{"spec":{
+#   "priorityClassName":"litellm-infra-critical",
+#   "tolerations":[{"key":"node.kubernetes.io/disk-pressure","operator":"Exists","effect":"NoSchedule"}]}}}}'
+#
+# kubectl -n litellm-product patch sts litellm-redis --type=merge -p '{"spec":{"template":{"spec":{
+#   "priorityClassName":"litellm-infra-critical",
+#   "tolerations":[{"key":"node.kubernetes.io/disk-pressure","operator":"Exists","effect":"NoSchedule"}]}}}}'

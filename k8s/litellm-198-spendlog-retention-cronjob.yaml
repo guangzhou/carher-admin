@@ -1,0 +1,98 @@
+# 198 (aiyjy-litellm k3s, namespace litellm-product) LiteLLM SpendLogs 保留期清理
+#
+# 背景 (2026-08-30):198 从未有过 retention,SpendLogs 无限堆积撑到 336G 填满 /Data
+#   触发 disk-pressure 死锁(详见 litellm-198-infra-priority.yaml)。本 CronJob 是 198 首个
+#   保留机制。注意与主集群 litellm-log-retention-cronjob.yaml(namespace carher / ACR 镜像 /
+#   litellm-db-credentials secret)区分:198 用公共 postgres:16 + litellm-secrets.DATABASE_URL。
+#
+# 保留期 10 天。分批 ctid 删除(避免单条 DELETE 长时间锁表)+ 删后 VACUUM ANALYZE 回收。
+# 优先级/toleration 同 db,确保盘满时清理任务本身也能调度(自愈)。
+#
+# ⚠️ SOT:198 live 为权威。本文件仅留档,已 kubectl apply 到 live。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: spendlog-retention
+  namespace: litellm-product
+  labels:
+    app: spendlog-retention
+spec:
+  schedule: "17 3 * * *"
+  timeZone: "Asia/Shanghai"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 7200
+      template:
+        metadata:
+          labels:
+            app: spendlog-retention
+        spec:
+          restartPolicy: Never
+          priorityClassName: litellm-infra-critical
+          tolerations:
+            - key: node.kubernetes.io/disk-pressure
+              operator: Exists
+              effect: NoSchedule
+          containers:
+            - name: retention
+              image: postgres:16
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: litellm-secrets
+                      key: DATABASE_URL
+                - name: RETENTION_DAYS
+                  value: "10"
+                - name: BATCH_SIZE
+                  value: "50000"
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: "1"
+                  memory: 512Mi
+              command:
+                - bash
+                - -ceu
+                - |
+                  log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$*"; }
+                  # Prisma 连接串带 connection_limit/pool_timeout 等 query 参数,psql 不认 → 剥掉
+                  export PGURL="${DATABASE_URL%%\?*}"
+                  q() { psql "$PGURL" -v ON_ERROR_STOP=1 -Atq -c "$1"; }
+
+                  log "start retention: RETENTION_DAYS=${RETENTION_DAYS} BATCH_SIZE=${BATCH_SIZE}"
+                  q "SELECT 1;" >/dev/null
+                  CUTOFF="$(q "SELECT (now() - make_interval(days => ${RETENTION_DAYS}))::timestamp(3);")"
+                  log "cutoff=${CUTOFF}"
+
+                  total=0
+                  while true; do
+                    n="$(q "
+                      SET lock_timeout='5s'; SET statement_timeout='10min';
+                      WITH doomed AS (
+                        SELECT ctid FROM \"LiteLLM_SpendLogs\"
+                        WHERE \"startTime\" < TIMESTAMP '${CUTOFF}'
+                        ORDER BY \"startTime\" LIMIT ${BATCH_SIZE}
+                      ), d AS (
+                        DELETE FROM \"LiteLLM_SpendLogs\" t USING doomed x
+                        WHERE t.ctid = x.ctid RETURNING 1
+                      ) SELECT count(*) FROM d;" | tr -d '[:space:]')"
+                    [ -z "$n" ] || [ "$n" = "0" ] && break
+                    total=$((total + n)); log "deleted batch=${n} total=${total}"
+                  done
+                  log "delete done total=${total}"
+
+                  log "VACUUM ANALYZE LiteLLM_SpendLogs"
+                  psql "$PGURL" -v ON_ERROR_STOP=1 <<'SQL'
+                  SET maintenance_work_mem='256MB';
+                  SET max_parallel_maintenance_workers=0;
+                  VACUUM (ANALYZE) "LiteLLM_SpendLogs";
+                  SQL
+                  log "completed"

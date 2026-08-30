@@ -6,15 +6,16 @@
 
 | 脚本 | 用途 | marker |
 |---|---|---|
-| `cursor_team_setup.js` + `.sh`/`.cmd` | **首选**:同事一键装 cursor-g,零依赖跨平台(Win/mac/Linux) | 8 补丁全家(见下) |
-| `cursor_team_setup.py` | 同上,mac 本地/CI 用的 Python 版(与 JS 同源、备份互通) | 同上 |
+| `cursor_team_setup.js` + `.sh`/`.cmd` | **首选**:同事一键装 cursor-g,零依赖跨平台(Win/mac/Linux) | 8 补丁全家(见下)+ `@cx-chain:v3` |
+| `cursor_team_setup.py` | 同上,mac 本地/CI 用的 Python 版(与 JS 同源、备份互通) | 8 补丁全家(**无 chain**,legacy 不分发) |
+| `cursor_chain_patch.py` | 件B 链式增量独立源(exthost fetch seam),移植进 `.js` 安装器的字节基准 | `@cx-chain:v3` |
 | `cursor_queue_pump_patch.py` | 单独打/升级排队泵(旧版 v1→v3.5 全支持原地升级) | `@cx-queue-pump:v4` |
 | `cursor_queue_diag_patch.py` | 诊断用:把泵换成"每秒打 tick 日志"版,只观测不改行为 | `@cx-queue-diag:v3.2` |
 | `regress_queue_pump.js` | 泵离线回归台架(注入真发货 snippet,17 判据+负对照) | — |
 
-**补丁全家(3.17.19 现行 8 处)**:gate / localagent / dedicated(解锁三件套)+
+**补丁全家(3.17.19 现行 8 处 workbench + 1 处 exthost chain)**:gate / localagent / dedicated(解锁三件套)+
 `@cx-queue-pump:v4`(兜底泵)+ qserial / nosteermod / nopromote(排队纵深防御)+
-**`@cxteam-norelay`(2026-08-25 连发折叠+僵尸真根因修,见下节)**。
+**`@cxteam-norelay`(2026-08-25 连发折叠+僵尸真根因修)** + **`@cx-chain:v3`(2026-08-30 件B 链式增量,见末节)**。
 
 ## 零依赖跨平台安装器(2026-08-25,首选路径)
 
@@ -104,6 +105,33 @@ v3 之后仍复发「两问挤一轮只答后一条」(甲乙丙丁戊己/壬癸
   ③`prepending user messages` 出现=有孤儿 ④队列掉但无派发日志=接力在弹队。
   记忆:`feedback_cursor_turnended_relay_orphan_fold_norelay_root_fix`。
 
+## 件B 链式增量 @cx-chain:v3(2026-08-30,已并入安装器全员发)
+
+配套服务端件A(网关 chain-srv 重建),让 Cursor 长会话发 delta+`previous_response_id` 而非全量重放,
+根治 LiteLLM pre-call 1.05M 上限(400 ContextWindowExceededError)与上游 413。独立源
+`cursor_chain_patch.py` 是**字节基准**,已逐字节移植进 `cursor_team_setup.js` 随 zip 全员分发。
+
+- **打的是另一批 bundle**:不是 workbench,是 **exthost** 两条 `extensions/{cursor-agent-exec,
+  cursor-local-agent-runtime}/dist/main.js`(ai-sdk 管道 fetch seam 在这)。安装器 `CHAIN_TARGETS`。
+- **三处变换**(`planChainBundle`/`wrapBuilderCall`):①锚 `customHeaders:d}=e,m=` 后**括号配平**
+  包住工厂底层 fetch → `(globalThis.__cxWrap||(f=>f))(builder(...))`;②SDK 客户端 `fetch:t.fetch` 包 wrap;
+  ③**force-responses**:`?"responses":"chat_completions"`→`?"responses":"responses"`(不强制则 terra
+  模型走 chat_completions,shim 无请求可拦)。shim 前置 prepend。
+- **shim 必须 base64 内嵌**(`CHAIN_SHIM_B64`,运行时 `Buffer.from(...,'base64')` 解码):shim 含正则
+  反斜杠 `\s \/ \n`,直接写 JS 字面量会被吃转义 → base64 是唯一逐字节等价搬运法。这是与 QP_SNIPPET
+  "三处逐字节一致"同源的纪律,只是介质换成 b64。
+- **碰撞坑**:两条 bundle 都叫 `main.js` → 备份/回滚用扁平名 `cxchain__extensions__…__main.js`
+  (`chainBakName`),不能按 basename 存(会互相覆盖)。workbench/blob/settings 备份格式**未动**,
+  与 py 版 revert 互通保持。
+- **非致命降级**:`planChainBundle` 锚点没了(未来版本改结构)只 `warn+skip`,**不阻断**核心解锁补丁
+  ——链式是增益,失配时 shim 自身也全量回退(`CX_CHAIN=0` 关 + 前缀 digest 失配/400/404 回退全量,不劣化)。
+- **逐字节自测判据**(`node --check` + 等价钩子):安装器 `CX_CHAIN_APPLY_TO_FILE` 钩子在
+  `.pre-cxchain.bak` 上跑变换 → 与当前真实 main.js(=py 产物)`cmp -s` **BYTE-EQUAL** 两条全过
+  (md5 `4e416c21`/`24acdab1`)。改任一处必重跑此钩子对齐 py 基准。
+- **验收只认网关** `[chain-srv] hit stored=N delta=M -> full=K`——**答案对不算证据**(acct82 账号级
+  memory 会假阳性)。客户端 trace `passthrough-full` bodyLen>1.05M 是双 wrap 记账假象,别据此判 400。
+- 记忆:[[project_cx_chain_client_shim_verified_2026_08_30]]、[[project_chain_srv_gateway_deployed_2026_08_30]]。
+
 ## 诊断方法论(内存态读不到时,可复用)
 
 composer 运行时状态只活在 renderer 内存,workspace state.vscdb 里没有——**磁盘取证无效**。
@@ -121,7 +149,9 @@ composer 运行时状态只活在 renderer 内存,workspace state.vscdb 里没�
   (锚点=语义地标,3.16→3.17.19 全部存活);要锁死不升级才用 `--pin-update`。
 - **snippet 单一来源**:三处 QP_SNIPPET(`cursor_team_setup.py`、`cursor_team_setup.js`、
   `cursor_queue_pump_patch.py`)必须逐字节一致(改一处必同步另两处并跑等价断言 `CX_DUMP_CONSTANTS`);
-  升级泵版本时把旧版原文加进 OLD_SNIPPETS/QP_OLD 以支持原地升级。
+  升级泵版本时把旧版原文加进 OLD_SNIPPETS/QP_OLD 以支持原地升级。**同理 chain shim 单一来源**:
+  `cursor_chain_patch.py` 的 SHIM 是基准,`cursor_team_setup.js` 里是它的 base64(`CHAIN_SHIM_B64`),
+  改 shim 必重生 b64 并跑 `CX_CHAIN_APPLY_TO_FILE` 对齐 py 产物 byte-equal(见末节)。
 - **revert 选备份**:优先选「含 bundle 的最新备份」,跳过 `-cfgonly`(幂等重跑只存配置的备份)
   ——否则二次 `--apply` 后 `--revert` 会漏还原 bundle(两版已同步修)。
 - 回滚:各脚本 `--revert`(备份链 `~/.cursor-team-setup-backup` / `~/.cursor-queue-pump-backup`
@@ -134,7 +164,8 @@ composer 运行时状态只活在 renderer 内存,workspace state.vscdb 里没�
 `@cx-queue-pump:v1`(只清无 uuid,救一半)→ `@cx-queue-diag:v2`(诊断 tick)→
 `v3`(僵尸 uuid 判活)→ `v3.3`(去 120-tick 寿命上限)→ `v3.4`(在飞防护)→
 `v3.5`(派发收敛:仅 heal 后/空闲派)→ **`v4`(现行:队列被外部消费让路 5 tick+
-自家在飞豁免,退居纯兜底)**;根治靠 `@cxteam-norelay`(泵不再是主派发器)。
+自家在飞豁免,退居纯兜底)**;根治靠 `@cxteam-norelay`(泵不再是主派发器);
+链式增量线独立演进:**`@cx-chain:v3`**(exthost fetch seam,件B,见末节)。
 记忆:`feedback_cursor_queue_stuck_zombie_uuid_v3_liveness`、
 `feedback_cursor_turnended_relay_orphan_fold_norelay_root_fix`;安装器设计与等价性证明:
 `docs/cursor-g-naming-rollout-20260824.md` §七。

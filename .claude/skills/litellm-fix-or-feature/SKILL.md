@@ -25,6 +25,8 @@ description: 198 prod LiteLLM 池修 bug / 加新功能的完整 SOP。Tier 0/1/
 4. **副作用 4 问**任一答不上 → 回 Phase 1。
 5. **改动偏好**：配置 > callback > patch（生效快 / 回滚便宜 / 影响面小）。
 6. **canary 通过 ≠ 全集群跑过**。SKILL 必双态：tested-on-canary vs executed-cluster-wide。[[feedback_carher_converge_cluster_wide_2026_06_26]]
+7. **协议桥接 bug 必须做形状矩阵**：同一功能字段常有两层翻译（如 Claude Messages web_search：`tools` 与 `tool_choice`）。修完第一个 400 后错误换形态，不代表根因已闭环；必须 inner provider 直打 + outer 协议 E2E 双验证。
+8. **直改 `LiteLLM_ProxyModelTable` 后必须 rollout restart + 回归探针**。任何直写该表（哪怕只动 model_info 一个 key）都会 bump `updated_at` 触发 proxy 热重注册 deployment，热重注册后的内存路由**不可信**——08-30 实锤：只加了 `max_input_tokens`，82 lane 流量被劈到 pod 另一入口（chatgpt.js）踩潜伏雷，11 连 InternalServerError。SOP：写表 → `kubectl -n litellm-product rollout restart deployment/litellm-proxy`（4 副本零中断）→ mint scoped key（15m 自灭）打受影响 lane 一发验证 → 删 key。回归脚本：`scripts/zk-cursor-web/lane82_regress_probe.sh`。[[feedback_proxymodeltable_write_reroutes_deployment_needs_restart_regress]]
 
 ---
 
@@ -157,6 +159,39 @@ kubectl exec -n litellm-product <proxy-pod> -- grep -rn 'def transform_response\
 
 **信号必须 `verbose_router_logger`，不是 `print`**。
 
+### 1.5 "no healthy deployments" 秒级黑洞 / model 表写入风暴指纹（2026-08-21 实证）
+
+**指纹**：单 proxy pod 上 1~3s 窗口内，所有命中请求、所有组（含整条 fallback 链，连 deepseek 这种独立上游）同报
+`You passed in model=X. There are no healthy deployments`，Duration 0s / tokens 0；窗口外同组正常；
+甚至同 pod 22ms 内一败一成。→ 这是 **router 内存查表按请求空集**，抛错点在
+`_common_checks_available_deployment`（cooldown 过滤和 pre-call check **之前**）。
+**不是**上游宕机 / cooldown / WA fail-mark——先别去查账号池。
+
+**归因流水线**（每步可拷贝复现，全在 [[project_198_router_nohealthy_blackhole_weight_align_2026_08_21]]）：
+1. SpendLogs 按小时 count 该错误串 → 定起病时间；
+2. `LiteLLM_ProxyModelTable` `updated_at` 按分钟直方图 → 找写入波次；失败分钟 vs 波次分钟对齐；
+   ⚠️ updated_at 只留最后一次，早期波次会被后续波次**覆盖痕迹**——查不到写入 ≠ 当时没写；
+3. 写入顺序指纹锁代码家族：entry 更新顺序（如 5.5→5.4→5.3-codex→sol→terra→luna→auto-review
+   = quota-rebalance `models_for()` 顺序）比任何日志都可靠；
+4. `updated_by=default_user_id` = master key / proxy 内部写，区分不了调用方——别指望它。
+
+**已证伪歧路（别再走）**：188 quota-engine cron "applied=609" 是真 dry-run（模拟计数）；
+register_pricing.py 只改内存价目表；198 每小时 base_model 清扫 cron 待补=0 时零写入。
+
+**机制**：每次 `/model/*` 写 DB → 4 个 proxy pod 各自重载（`Loading N search tool(s)` 标记从 30s 一次
+变 2~10s 一次 = 重载风暴）→ 重载窗口内查表偶发空集。写入风暴的量级参考：weight-align 曾每
+5min 静默 PATCH 204 行（HTTP 200 不留日志，grep cron.log 完全隐身）。
+
+**写入类外挂纪律**（任何周期性写 model 表的脚本）：
+- **diff-before-write**：先读实测值（复用本来就拉的 `/v1/model/info` 快照），相等不写；
+- **写必留日志**（成功也留）——静默成功让写入路径在排查时隐身；
+- 快照拉取失败 → 整 tick 跳过，绝不回退到无条件写。
+
+**修复验证纪律**：改长跑 cron 脚本后，**已启动的旧代码实例还会跑完整轮**（python 加载进内存）。
+修后立刻看指标会遇到"假恶化"（旧实例排水期反而更密）。判修复效果必须等 drain：
+写入归零时刻 = 最后一个旧实例退出；之后失败随之归零才算闭环。[[feedback_fix_verify_must_wait_old_process_drain]]
+
+
 **产物**：根因 + 形态矩阵 + 老 patch 审计。**无此文档不进 Phase 2**。
 
 ---
@@ -262,6 +297,12 @@ docker compose restart litellm
 
 ⚠️ **T0 mount 单文件方便迭代，但最终交付必须是 image rebuild**。  
 [[project_litellm_198_pro_capacity_patch]]：dev 用 prod 文件覆盖会 ModuleNotFoundError，必须从 vanilla 整 build。
+
+⚠️ **callback / monkey-patch / 流式管线类改动：T0 必须带 prod 完整 callback 链**
+（2026-08-20/21 两次实证）。2-callback 精简链假阴性：流式 bug 取决于 hook 在链条
+里的位置（守卫在精简链恰好最内层有效，prod 29-callback 链照崩）；monkey-patch
+与其它 callback 有加载顺序交互。现成工具：`scripts/litellm-198-t0-fullchain.sh`
+（dump prod CM 全部 callback + 实时提取 prod callbacks 列表，只换待验文件）。
 
 ---
 
@@ -448,6 +489,7 @@ Memory 纪律：feedback 含 **Why** + **How to apply**；project 用绝对日�
 | 5a ConfigMap diff 业务字段不等 | T2 验证物 ≠ T1 验证物 | 回 T1 |
 | 5b prometheus 反向 | canary 把指标搞坏了 | 立刻回滚 |
 | 6b 24h 报告异常 | 没稳定 | 不算 GA |
+| 修复上线后指标先恶化 | 长跑 cron 的旧代码实例仍在排水（§1.5）| 等 drain 完成再判，别急着回滚 |
 
 ---
 
@@ -477,6 +519,11 @@ Memory 纪律：feedback 含 **Why** + **How to apply**；project 用绝对日�
 | 双引擎（openclaw/hermes）PVC 硬编码 | 必同步 [[carher-litellm-product-name-converge]] §hermes PVC |
 | DRY_RUN ≠ real run | DB schema / cache 类只在 real run 暴露 |
 | 跨集群 schema 不同（jsonb vs text[]）| 写前 `SELECT pg_typeof(<col>)` |
+| 周期脚本静默写 model 表（200 不留日志）| 判写入者用 DB updated_at 波形 + entry 顺序指纹，别信 grep 日志（§1.5）|
+| 每次 /model 写触发 4 pod 重载，写入风暴=秒级路由黑洞 | 写入类外挂必须 diff-before-write（§1.5）|
+| `PATCH /model/{id}/update` 对带斜杠 id（如 `deepseek-official/...`）404 | 改走 `POST /model/update`（merge 语义：新值覆盖、未提字段保留，源码 update_model 证实）|
+| 客户端毒参数（如 `enable_prefix_cache`）经 custom_openai 透传炸 OpenAI SDK，且每炸一次 WA fail-mark 180s 殃及全池 | per-entry `litellm_params.additional_drop_params`（DB 用 POST /model/update、CM 条目手改+滚动重启；已实测）|
+| `litellm_settings.additional_drop_params` 全局路径疑似死配置（源码只从 kwargs 读）| drop 参数一律走 per-entry，别赌全局 |
 
 ---
 

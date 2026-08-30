@@ -25,6 +25,8 @@
  *   ZKD_UPSTREAM   今天在用的地址的 base（不含 /v1），回落时走它
  *   ZKD_OFF=1      整体关掉增量，退化成纯透传（等于今天的形态）
  *   ZKD_CAPTURE    设成目录名则把原始 body 落盘，用来做金样测试
+ *   ZKD_CAPTURE_MAX      最多采几条，默认 40（金样几十条就够，别把磁盘写爆）
+ *   ZKD_CAPTURE_MAX_MB   最多采多少 MB，默认 512
  *   ZKD_MAX_CONV   本地记多少条会话，默认 60
  */
 
@@ -40,6 +42,11 @@ const DELTA_URL = process.env.ZKD_DELTA_URL || 'https://cc.auto-link.com.cn/zkd/
 const UPSTREAM = process.env.ZKD_UPSTREAM || 'https://cc.auto-link.com.cn/pro'
 const OFF = process.env.ZKD_OFF === '1'
 const CAPTURE = process.env.ZKD_CAPTURE || ''
+// 采集必须封顶：真实 body 每条几 MB、Cursor 每轮一发，不封顶跑一天能把本机磁盘写爆。
+// 而 ⑨ 那条金样测试几十条样本就够用了。
+const CAP_MAX = parseInt(process.env.ZKD_CAPTURE_MAX || '40', 10)
+let capLeft = CAP_MAX
+let capBytesLeft = parseInt(process.env.ZKD_CAPTURE_MAX_MB || '512', 10) * 1048576
 const MAX_CONV = parseInt(process.env.ZKD_MAX_CONV || '60', 10)
 
 const dUrl = new URL(DELTA_URL)
@@ -213,6 +220,12 @@ async function handle (req, res) {
   }
   if (p === '/metrics.json') {
     M.conv_live = convs.size
+    if (CAPTURE) {
+      // 采集进度也露出来，否则"到底采够没有"只能去 ls 目录
+      M.capture_dir = CAPTURE
+      M.capture_taken = CAP_MAX - capLeft
+      M.capture_left = capLeft
+    }
     res.writeHead(200, { 'content-type': 'application/json' })
     return res.end(JSON.stringify(M, null, 2))
   }
@@ -222,11 +235,18 @@ async function handle (req, res) {
   M.req_total++
   M.bytes_original += raw.length
 
-  if (CAPTURE) {
+  if (CAPTURE && capLeft > 0 && capBytesLeft > 0) {
     try {
       fs.mkdirSync(CAPTURE, { recursive: true })
       const fn = path.join(CAPTURE, `${Date.now()}-${String(M.req_total).padStart(4, '0')}${p.replace(/\//g, '_')}.json`)
       fs.writeFileSync(fn, raw)
+      capLeft--
+      capBytesLeft -= raw.length
+      if (capLeft === 0 || capBytesLeft <= 0) {
+        // 采够了就自己停手。真实 body 每条几 MB，Cursor 每轮一发，
+        // 不封顶的话跑一天能把本机磁盘写爆——而金样测试几十条就够了。
+        log('capture_done', { dir: CAPTURE, files: CAP_MAX - capLeft, why: capLeft === 0 ? 'file_cap' : 'byte_cap' })
+      }
     } catch (e) { log('capture_error', { msg: e.message }) }
   }
 

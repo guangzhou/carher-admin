@@ -50,3 +50,6 @@ scripts/chatgpt-quota-engine-web/web/.env.local
 .carher-secrets.json
 .gstack/
 docs/assets/.preview/
+
+# zk-delta 采集到的真实 Cursor body —— 里面是你的真实会话正文和代码，绝不入库
+zk-delta/tests/fixtures/*.json

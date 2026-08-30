@@ -24,6 +24,14 @@ DELTA_URL="http://127.0.0.1:8788/v1"
 PLIST="$HOME/Library/LaunchAgents/com.zkdelta.sidecar.plist"
 LOG="$HOME/Library/Logs/zk-delta-sidecar.log"
 
+# 采集：切过去之后自动攒真实 Cursor body，攒够就把离线金样第 ⑨ 项从红转绿。
+# 默认开着——不开的话「切过去」和「验完」之间还差一步手工设环境变量，
+# 那一步之前一直没人做，⑨ 就一直红着。封顶 40 条，采够自己停手。
+# 不想采：CAPTURE_MAX=0 ./zk-delta/switch.sh on
+CAPTURE_DIR="${ZKD_CAPTURE:-$HERE/tests/fixtures}"
+CAPTURE_MAX="${CAPTURE_MAX:-40}"
+[[ "$CAPTURE_MAX" == "0" ]] && CAPTURE_DIR=""
+
 NODE_BIN="$(command -v node || true)"
 [[ -n "$NODE_BIN" ]] || { echo "找不到 node"; exit 2; }
 
@@ -55,6 +63,8 @@ install_agent () {
     <key>ZKD_PORT</key><string>8788</string>
     <key>ZKD_DELTA_URL</key><string>https://cc.auto-link.com.cn/zkd/v1/delta</string>
     <key>ZKD_UPSTREAM</key><string>https://cc.auto-link.com.cn/pro</string>
+    <key>ZKD_CAPTURE</key><string>${CAPTURE_DIR}</string>
+    <key>ZKD_CAPTURE_MAX</key><string>${CAPTURE_MAX}</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -83,6 +93,12 @@ case "${1:-status}" in
     echo
     echo "好了。开 Cursor，随便聊几轮。"
     echo "看省了多少：curl -s http://127.0.0.1:8788/metrics.json"
+    if [[ -n "$CAPTURE_DIR" ]]; then
+      echo
+      echo "顺便在采真实 body（$CAPTURE_DIR，上限 $CAPTURE_MAX 条，采够自停）。"
+      echo "聊几轮之后跑一次，离线金样第 ⑨ 项就能从红转绿："
+      echo "    node $HERE/tests/run.js"
+    fi
     echo "要回退：$0 off"
     ;;
   off)

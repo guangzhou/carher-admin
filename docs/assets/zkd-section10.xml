@@ -1,0 +1,165 @@
+<h1>10. 落地结果（2026-08-31 凌晨）</h1>
+
+<callout emoji="✅" background-color="light-green"><p><b>这一节是事后补写的，全部内容都是实测数据，不是计划。</b>本文前 9 节写的是方案设计；这一节写的是照方案做完之后，实际测出来的东西，以及哪些刻意没做、为什么。</p></callout>
+
+<h2>10.1 先把两件事分开</h2>
+
+<p>前面的分析把「长会话撞 400」和「跨公网带宽浪费」写在一起，实际动手才发现它们是两件独立的事，修法也完全不同，必须分开验收：</p>
+
+<table>
+<thead><tr><th><p>问题</p></th><th><p>真正的原因</p></th><th><p>修法</p></th><th><p>状态</p></th></tr></thead>
+<tbody>
+<tr><td><p>长会话稳定返回 400</p></td><td><p>请求在 LiteLLM 入口就被闸门毙了，根本没到网关</p></td><td><p>给模型行显式配上限（改数据库，一次性）</p></td><td><p>已修，已验证</p></td></tr>
+<tr><td><p>每轮往公网重推整个会话</p></td><td><p>Cursor 客户端行为，改不了它</p></td><td><p>zk-delta：公网只发增量，集群侧重建</p></td><td><p>已上线，已验证</p></td></tr>
+</tbody>
+</table>
+
+<h2>10.2 400 那一半：已修</h2>
+
+<p>根因是 <code>cursor-web-fc-82-terra</code> 这一族模型行没有配 <code>max_input_tokens</code>。没配的时候，LiteLLM 会按 <code>litellm_params.model</code> 的 slug 去它内置的价格表里继承一个值——继承到的是 <code>gpt-5.6-terra</code> 这个上游 API 的 context window，1,050,000。</p>
+
+<p>但我们这条通道走的是 GPT 网页端，网关对超过 20 万字符的 prompt 是<b>走文件上传</b>的，压根不按 token 塞 context。<b>拿上游 API 的窗口去卡一个走文件上传的网页通道，等于把网关本来能处理的请求提前毙掉。</b></p>
+
+<p>改法：对 <code>model_info-&gt;&gt;'id'</code> 匹配 <code>zerokey-cursor%</code> 的 <b>36 行</b>全部显式写入 <code>max_input_tokens = 10000000</code>，然后 <code>rollout restart</code>。</p>
+
+<table>
+<thead><tr><th><p>验证项</p></th><th><p>改前</p></th><th><p>改后</p></th></tr></thead>
+<tbody>
+<tr><td><p>同一条 9,100,484 字节的负载</p></td><td><p>400 ContextWindowExceeded（1.2 秒就被打回）</p></td><td><p>200（跑了 50.6 秒，正常出结果）</p></td></tr>
+<tr><td><p><code>cursor-web-fc-82-terra</code> / <code>-high</code> / <code>-max</code> 真实线型回归</p></td><td><p>—</p></td><td><p>全 200</p></td></tr>
+</tbody>
+</table>
+
+<p><b>注意一个坑</b>：继承是按 slug 而不是按行发生的，所以同一个 slug 下的所有行会一起继承同一个值。要配就得<b>整族全配上</b>，只配一行会留下静默继承的漏网行。</p>
+
+<p>为此配了巡检脚本 <code>scripts/litellm-198-max-input-tokens-audit.sh</code>：全配上退出码 0，有行为空退出码 1 并打印是哪一行。这把「没配就静默继承」从一件看不见的事变成了会告警的事。</p>
+
+<h2>10.3 带宽那一半：zk-delta 已上线</h2>
+
+<whiteboard type="svg" path="@./zk-delta-arch.svg"></whiteboard>
+
+<p>核心设计：<b>压缩只发生在跨公网那一跳</b>。到了集群里，zk-delta 会把完整请求<b>逐字节重建</b>出来再交给 LiteLLM。所以 LiteLLM、网关、GPT 网页收到的字节和没有 zk-delta 时<b>完全一样</b>，它们根本不知道中间发生过压缩。</p>
+
+<p>这一点是它敢在凌晨直接上线的唯一理由——<b>它结构上不可能碰门①</b>（发给 GPT 的载荷必须干净原样）。因为它压根不改那些字节。</p>
+
+<h3>凭什么敢说「逐字节相同」</h3>
+
+<p><code>JSON.stringify</code> <b>并不保证</b>能还原你读进来的那串文本：<code>1.0</code> 会变成 <code>1</code>，<code>1e3</code> 变成 <code>1000</code>，转义过的字符会变成字面字符，美化过的空白会被吃掉。所以「重建结果等于原文」<b>不能当设计假设</b>，只能当每一条请求的<b>运行时事实</b>去证。</p>
+
+<p>三环证明链：</p>
+
+<ol>
+<li>本机小代理对<b>每一条请求</b>本地自证一次：<code>JSON.stringify(重建(模板, 条目)) === 原始字节</code>。证不出来就原样透传并计数，绝不硬上。</li>
+<li>前缀摘要相等 ⇒ 服务端存的每一条历史条目，其序列化结果与客户端的逐字符相同。</li>
+<li>增量条目和模板以 JSON 原样传输 ⇒ 两边序列化结果相同。</li>
+</ol>
+
+<p>服务端还会把重建结果的字节数回填在响应头 <code>x-zk-rebuilt-bytes</code> 里，客户端逐轮核对。</p>
+
+<h3>失效了怎么办：硬报错，绝不静默</h3>
+
+<callout emoji="⚠️" background-color="light-orange"><p>任何认不出基线的情况一律返回 <code>409 delta_base_not_found</code>，客户端收到就重发全量。<b>绝不把认不出的增量当全量转发</b>——静默失忆正是 08-30 那次回滚的根因。14 种失效原因各自独立计数，在 <code>/metrics</code> 里看得见。</p></callout>
+
+<h3>实测：16 轮真实会话</h3>
+
+<whiteboard type="svg" path="@./zk-delta-bandwidth.svg"></whiteboard>
+
+<table>
+<thead><tr><th><p>轮次</p></th><th><p>原始体积</p></th><th><p>实际跨公网上行</p></th><th><p>省下</p></th></tr></thead>
+<tbody>
+<tr><td><p>第 1 轮</p></td><td><p>369,358 B</p></td><td><p>369,658 B</p></td><td><p>—（首轮必须发全量）</p></td></tr>
+<tr><td><p>第 2 轮</p></td><td><p>492,489 B</p></td><td><p>123,451 B</p></td><td><p>74.9%</p></td></tr>
+<tr><td><p>第 16 轮</p></td><td><p>2,216,366 B</p></td><td><p>123,459 B</p></td><td><p>94.4%</p></td></tr>
+<tr><td><p><b>累计</b></p></td><td><p><b>19.73 MB</b></p></td><td><p><b>2.12 MB</b></p></td><td><p><b>89.3%</b></p></td></tr>
+</tbody>
+</table>
+
+<p>关键不是「省了 89%」这个数，而是<b>出网字节不随轮次增长</b>：第 16 轮 ÷ 第 1 轮 = 0.334 倍。原始体积一路线性涨到 2.22MB，出网一直钉在 12 万字节上下。</p>
+
+<p>另外：这 16 轮里模型一路数到了 sixteen。数错就说明历史丢了，所以这本身就是重建正确性的一个旁证。16/16 轮重建逐字节相同，400 计数为 0。</p>
+
+<p>集群侧同期看到的是反过来的账：广域网收进 2.43MB，内网发出 21.18MB，<b>放大 8.7 倍</b>——被省掉的那部分在集群内部原样补回去了。</p>
+
+<h2>10.4 门① 验收：发给 GPT 的载荷有没有变脏</h2>
+
+<p>光讲机制不算数。做了网关侧对照：同一个 <code>ls</code> 请求，只有一个随机串不同，分别走基准腿和 zk-delta 腿，然后 diff 网关 <code>zero-cursor-bpi-82</code> 实际记下来的日志。</p>
+
+<table>
+<thead><tr><th><p>对照项</p></th><th><p>结果</p></th></tr></thead>
+<tbody>
+<tr><td><p>两条腿的网关日志块（48 行）</p></td><td><p>把随机串归一化后 <b>diff 零差异</b></p></td></tr>
+<tr><td><p><code>promptLength</code></p></td><td><p>3487（几乎全是网关自己的协议前言，用户内容就一行）</p></td></tr>
+<tr><td><p><code>attachments</code></p></td><td><p>0（没触发文件上传路径）</p></td></tr>
+<tr><td><p>转录体行标 / 大 item</p></td><td><p>无</p></td></tr>
+</tbody>
+</table>
+
+<p><b>门① = 通过。</b>判据是网关日志的 diff，不是模型答得对不对。</p>
+
+<h2>10.5 门② 验收：功能有没有回退</h2>
+
+<p>用真的 agent 循环跑——模型吐 tool_call，测试真的去执行，把结果喂回去。两条腿跑同一个任务。</p>
+
+<table>
+<thead><tr><th><p>任务</p></th><th><p>基准腿</p></th><th><p>zk-delta 腿</p></th></tr></thead>
+<tbody>
+<tr><td><p>shell 跑 <code>ls</code> 并复述全部条目</p></td><td><p>2 步 / 1 次工具调用 / 11.1s / 3 项全中</p></td><td><p>2 步 / 1 次工具调用 / 9.1s / <b>答案逐字相同</b></p></td></tr>
+<tr><td><p>调 lark-cli 在飞书真建一篇文档</p></td><td><p>2 步 / 12.0s / 返回真实文档链接</p></td><td><p>2 步 / 10.7s / 返回真实文档链接</p></td></tr>
+</tbody>
+</table>
+
+<p><b>门② = 通过。</b>判据写死为：<b>只有「基准能做到、而 zk-delta 做不到」才算回退</b>；两条腿都失败就输出「无结论」，不输出「通过」——不给自己留兜底解释的口子。</p>
+
+<h2>10.6 运行计数器（全程真流量）</h2>
+
+<table>
+<thead><tr><th><p>位置</p></th><th><p>计数</p></th></tr></thead>
+<tbody>
+<tr><td><p>集群侧</p></td><td><p>请求 20（全量 3 / 增量 17），重建成功 20，<b>409 拒绝 0</b>，上游 2xx 20，非 2xx 0</p></td></tr>
+<tr><td><p>本机小代理</p></td><td><p>请求 22（增量 18 / 全量 4），<b>透传 0，回落 0，409 冲突 0，服务端错误 0</b></p></td></tr>
+<tr><td><p>字节</p></td><td><p>原始 21,182,102 → 上行 2,430,703，<b>省 88.5%</b>；22 条请求全部逐字节自证通过</p></td></tr>
+<tr><td><p>zk-delta pod</p></td><td><p>重启次数 0，无异常事件</p></td></tr>
+<tr><td><p>离线金样测试</p></td><td><p><b>36 绿 / 1 红</b></p></td></tr>
+</tbody>
+</table>
+
+<h2>10.7 一个被推翻的验收判据</h2>
+
+<p>方案里原先写的验收标准之一是「第 9 轮出网小于原始的 1%」。对着实测数据一算就站不住：<b>增量的下限就是这一轮真正新增的内容本身</b>。Cursor 每轮恒定新增约 505,700 字节，第 14 轮总量 7MB，占比天然就是 7%，永远到不了 1%。</p>
+
+<p>这个数当初是拍脑袋定的。改成三条有数据支撑的：协议开销小于 5%（实测 0.10%）、增长倍数小于 2 倍（实测 0.419 倍）、累计节省大于 50%（实测 81.9%）。</p>
+
+<h2>10.8 还没做完的</h2>
+
+<table>
+<thead><tr><th><p>项</p></th><th><p>状态</p></th><th><p>为什么</p></th></tr></thead>
+<tbody>
+<tr><td><p>离线金样第 ⑨ 项（真实 Cursor 抓包）</p></td><td><p><b>红</b></p></td><td><p>fixtures 目录是空的。采集要求先把 Cursor 指到小代理，而那要求 Cursor 完全退出。切过去后设 <code>ZKD_CAPTURE</code> 会自动攒，回灌重跑即转绿。</p></td></tr>
+<tr><td><p>网关账本行 + 瘦身器按形状判断</p></td><td><p><b>刻意没做</b></p></td><td><p>瘦身器那一半会<b>改变发给 GPT 的 payload</b>，而门① 的定义就是 payload 不许变。它必须走自己的一轮门① 验证，不能搭 zk-delta 的车。</p></td></tr>
+<tr><td><p>并入全员安装器</p></td><td><p><b>刻意没做</b></p></td><td><p>对全体同事生效，留人工点头。</p></td></tr>
+<tr><td><p>服务端会话状态持久化</p></td><td><p>未做</p></td><td><p>状态在进程内存里，pod 重启会全丢。丢了不出错，只是每条会话下一发退化成全量。要扩副本必须先把它挪到 Redis。</p></td></tr>
+<tr><td><p>当日 UA=Cursor 的 246 个 500</p></td><td><p>未查</p></td><td><p>与本文的 400 是两回事。</p></td></tr>
+</tbody>
+</table>
+
+<h2>10.9 怎么用</h2>
+
+<p>本机切换（<code>on</code> / <code>off</code> 都要求 Cursor 完全退出——外部写 <code>state.vscdb</code> 有内存覆盖竞态，Cursor 开着改了也会被它写回去）：</p>
+
+<pre lang="bash"><code>./zk-delta/switch.sh on</code></pre>
+<pre lang="bash"><code>./zk-delta/switch.sh off</code></pre>
+<pre lang="bash"><code>./zk-delta/switch.sh status</code></pre>
+
+<p>重新部署（源码指纹会进 pod 注解，指纹变了才滚，避免对着旧代码调半天）：</p>
+
+<pre lang="bash"><code>ZKD_SSH_PASS=... ./zk-delta/k8s/apply.sh --dry-run</code></pre>
+
+<p>刻意<b>不建新镜像</b>：代码是纯 Node 标准库，复用节点上已有的镜像，源码用 ConfigMap 挂进去。既不用上构建服务器出镜像，也不碰公网仓库。</p>
+
+<p><code>replicas: 1</code> + <code>Recreate</code> 也是刻意的：会话状态在进程内存里，多副本或滚动更新期间新旧并存会让 handle 认不出而狂 409。</p>
+
+<h2>10.10 事实与推测的分界</h2>
+
+<p><b>以上全部是实测事实</b>，每一条都能从下列位置复现：<code>zk-delta/tests/</code> 的三个测试、网关 pod 日志、<code>/metrics</code> 计数器、以及 LiteLLM 数据库里那 36 行。</p>
+
+<p><b>唯一的推测</b>是：推广到全员之后带宽收益仍保持在同一量级。这个只在一条会话、一台机器上测过，多人并发下服务端内存里的会话数会上升，还没有数据。</p>

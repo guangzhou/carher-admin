@@ -337,3 +337,14 @@ req 22 · delta 18 · full 4 · passthru 0 · fallback 0 · conflict_409 0 · de
 
 zk-delta 之所以敢在凌晨上，正是因为它对上游**零字节差异**、结构上不可能碰门①。
 瘦身器改动没有这个性质，它属于另一件事，不该混在这次交付里赶工。
+
+### S7 · 收口（已完成）
+
+| 动作 | 结果 |
+|---|---|
+| 飞书评审稿补写落地结果 | 已追加 §10（10.1–10.10），revision 13 → 14，两块画板均 `warnings: []` |
+| 画板 | 自绘 SVG 两张：`docs/assets/zk-delta-arch.svg`（管线形状）、`docs/assets/zk-delta-bandwidth.svg`（16 轮曲线）。已导出预览逐张肉眼核过，修掉一处标注压线后原地 `whiteboard +update` 复用同一 token，未新建空白画板 |
+| memory | 新增 `project_zk_delta_deployed_2026_08_31`、`feedback_falsification_leg_must_confirm_rows_affected`；`project_cursor_chat_fullresend_context_gate_400_2026_08_30` 补「已修」一节；`MEMORY.md` 三处索引 |
+| 仓库 | `zk-delta/` 全量 + 本文 + 巡检脚本，提交 `26e46d7`；画板资产与 §10 原文另提交 |
+
+飞书 §10 的正文与本文 §5 同源，两边数字一致；图里的每个数值都取自实测，没有示意值。

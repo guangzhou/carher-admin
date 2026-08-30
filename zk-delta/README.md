@@ -142,8 +142,19 @@ zk-delta 的正确性不是靠代码写得对来保证的，是靠几条**运行
 
 `on`/`off` 都要求 Cursor 完全退出——外部写 `state.vscdb` 有内存覆盖竞态，Cursor 开着改了也会被它写回去。
 
+`on` 默认**顺便开采集**：真实 body 落到 `tests/fixtures/`，上限 40 条 / 512MB，采够自己停手
+（`CAPTURE_MAX=0 ./zk-delta/switch.sh on` 可以关掉）。聊几轮之后跑一次 `node zk-delta/tests/run.js`，
+离线金样第 ⑨ 项就从红转绿。
+
+封顶不是可选项：真实 body 每条几 MB、Cursor 每轮一发，不封顶跑一天能把本机磁盘写爆，
+而金样几十条就够用。采集进度露在 `/metrics.json` 的 `capture_taken` / `capture_left` 里。
+
+`tests/fixtures/*.json` 在 `.gitignore` 里——**采到的是你的真实会话正文和代码，绝不入库。**
+
 ## 还没做完的
 
 - `tests/fixtures/` 是空的，所以 `run.js` 的第 ⑨ 项（真实抓包金样）是红的。
-  切到 zk-delta 之后，`ZKD_CAPTURE=<目录>` 会自动攒真实 body，回灌重跑就能转绿。
+  跑一次 `./zk-delta/switch.sh on`（要求 Cursor 完全退出）、聊几轮、再跑 `node zk-delta/tests/run.js`
+  就转绿——采集已经默认接进 `on` 了，不用再手工设环境变量。
+  这条路验过：拿 3 条抓包回灌 → 45 绿 0 红；删掉再跑 → 回到 44 绿 1 红。
 - 服务端会话状态在内存里，pod 重启会全丢。丢了不出错，只是每条会话下一发退化成全量。

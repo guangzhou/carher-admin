@@ -81,9 +81,23 @@ Cursor(/v1/responses, 19工具+9.4K instructions)
    `assert src.count(anchor)==K` 锚点唯一性硬校验，产出 `/tmp/responses.rN.js`，
    **必过 `node --check`**。
 3. **备份**：`kubectl get cm -o json` → `/Data/backups/zk-cursor-bpi-cm-<ts>-pre-rN.json`。
-4. **部署**：CM 有 12 个 key，**只能 `kubectl patch cm --type merge --patch-file`**
-   （`create --from-file` 会抹掉另外 11 个）。patch 后校验 key 数=12，再
-   `rollout restart deploy/zero-cursor-bpi` + `rollout status`。
+4. **部署**：CM 现有 **15 个 key**（会长，patch 前先 `get cm -o json | jq '.data|length'`
+   记下当前值），**只能 `kubectl patch cm --type merge --patch-file`**
+   （`create --from-file` 会抹掉其余所有 key）。patch 后校验 key 数没变，再
+   **对池里每一条 lane** 依次 `rollout restart` + `rollout status`。
+   > ⚠️ **改 CM 必须全 lane 重启，不是只重启有流量的那条。** 两条 lane
+   > （`zero-cursor-bpi` = 101、`zero-cursor-bpi-82`）挂的是同一个 CM，但 pod 只有重启才
+   > 把新文件 cp 进 `/app/routes/`。2026-08-31 只重启了 82，101 静默跑旧代码 27h —— 它当时
+   > 零流量所以没人发现，可一旦 key 级亲和换绑或 82 被 fail-mark，bug 原样复发。
+   >
+   > **收尾硬门（退出码即判据）**：
+   > ```bash
+   > python3 scripts/zk-cursor-web/pool_consistency.py     # 0=通过，1=有 lane 在跑旧代码
+   > ```
+   > 它从「谁挂了这个 CM」反查 lane，**新克隆的 lane 自动进检查范围**，不用改脚本；
+   > 比的是容器内 `responses.js` 的 sha256 与 CM 逐字节是否相等（不是"我记得重启过"），
+   > 顺带查池别名的 lane 覆盖（dangling / 孤儿 lane / 各档腿数不齐）。
+   > 门本身的双向实测：`pool_consistency_selftest.py`（注入坏 CM 与假 lane，4/4 必红）。
 5. **回归**（litellm-proxy pod `/tmp/cw/`，`MK=$LITELLM_MASTER_KEY`；源码备份在仓库
    `scripts/zk-cursor-web/` 与 198 `/Data/backups/zk-cursor-web-harness-*.tgz`，pod 重启后
    `kubectl cp` 回去）：
@@ -388,6 +402,19 @@ InternalServerError → WA fail-mark 180s + re-picking → **下一发自动甩�
    已授权 pool 别名的 key 无需再授权；已有用户黏在原线（TTL 1h 过期后重新加权摊匀）。
 3. 验收走上面的范式，重点 grep **新** pod 日志确认真有流量落它（防"注册了但没人路由到"假绿）。
    权重想不均衡（好号多吃）就在该 deployment 的 `litellm_params.weight` 调大，WA 实时生效。
+4. **收尾跑 `pool_consistency.py`**：新 lane 挂了同一个 CM，克隆出来时是新 pod、代码天然是新的，
+   但这一步能立刻暴露两件事——①别名少挂了某一档（各档腿数不齐 → 那一档没有 fallback）；
+   ②`/model/new` 写了 lane 但 deployment 名没对上（dangling → 打到它必超时/502）。
+
+### fallback 的真实形态（别当成无缝，2026-08-24 演练实测）
+
+路由是 **key 级黏性**（Cursor 不发 session 头，WA 按 key 钉 lane，为的是保住会话缓存局部性）。
+所以平时流量可能长期只压一条 lane，另一条零流量——**那是设计，不是故障**，但也意味着
+静默故障（比如跑着旧代码）只在切换那一刻才暴露，这正是 `pool_consistency.py` 存在的理由。
+
+一条 lane 出问题时的时间线：上游 0 字节黑洞 → litellm `stream_timeout:120` → InternalServerError
+→ WA 打 fail-mark **180s** → 之后的请求自动甩到健康 lane。**代价 = 挂掉的那一发（≈2min）
+打到用户脸上，之后自愈。** 加 lane 买到的是"不会全线挂死"，不是"用户无感"。
 
 ## 未做的下一层杠杆
 

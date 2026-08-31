@@ -94,12 +94,57 @@ CASES_MULTI = {
          "ID = 《{n}-A》\n用 lark-cli 建一篇飞书文档,标题必须是上面这个 ID,一字不差。正文一句话。工作目录 /tmp。", "complete-run"),
         ("把刚建的文档标题精确改成:《{n}-B》\n注意:必须逐字使用 {n}-B,不要发明新的时间戳。改完把链接发我。", "complete-run"),
     ],
+    # 2026-08-31 会话复用「最长严格前缀」修复的真机验收:一条 chat 连问 8 轮。
+    # R4 判据 = 全程一个 convId(pod 日志 [conv] saved conv=xxxx 只出现一个值);
+    # R5 门① = 第 2 轮起 [execenv-strip] 后的实发字符是小量级(ls/问候不许膨胀);
+    # R6 门② = 第 2/5/8 轮 shell 出结果、第 6 轮飞书文档真的建出来。
+    "conv8": [
+        ("{n} 你好", "complete-prose"),
+        ("在 /tmp 目录执行 ls,把结果给我(只读,别改任何文件)。", "complete-run"),
+        ("快速排序的平均时间复杂度是多少?一句话。", "complete-prose"),
+        ("那归并排序呢?", "complete-prose"),
+        ("再执行一次:ls /tmp | head -3", "complete-run"),
+        ("用 lark-cli 建一篇飞书文档,标题就叫《{n}》,正文一句话。工作目录 /tmp,别动我项目。", "complete-run"),
+        ("把刚才那篇文档的链接再发我一次。", "complete-prose"),
+        ("最后执行 pwd 给我。", "complete-run"),
+    ],
 }
+
+def _bigblob(turn: int, chars: int) -> str:
+    """生成一段约 chars 字的、每轮唯一的中文材料(前缀稳定利于 shim prefix 匹配:
+    turn 只体现在段尾,段体是可复现填充)。"""
+    head = f"【材料段 #{turn}】以下是需要你确认收到的第 {turn} 段长文本。\n"
+    unit = ("这是一段用于链式增量回归的填充文本,内容本身无意义,只为把请求体撑到目标体积,"
+            "以复现或证伪 LiteLLM pre-call check 在全量重发下撞 1.05M 上限的 400。")
+    body = (unit * ((chars // len(unit)) + 1))[:chars]
+    return head + body + f"\n【第 {turn} 段结束,请只回一句『收到第{turn}段』,不要复述正文。】"
+
+
+def bigtext(case, turns_n, chars, gap):
+    """20 轮同会话大文字复现:第 1 轮 Cmd+N 建新会话,其余同会话累积。
+    每轮粘贴一段 ~chars 字的唯一材料。无 shim 时历史累积撞 1.05M→400;
+    有 @cx-chain shim 时 turn2+ 发 delta+previous_response_id→体积恒定不撞。"""
+    nonce = f"ZK-{case}-{int(time.time())}"
+    for t in range(1, turns_n + 1):
+        prompt = f"{nonce}#t{t} " + _bigblob(t, chars)
+        ok = fire(prompt, new_chat=(t == 1))
+        logrec(nonce, case, t, "complete-prose", ok, t == 1)
+        print(f"  [bigtext] turn {t}/{turns_n} fired={ok} chars≈{len(prompt)}", flush=True)
+        time.sleep(gap)
+
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "help"
     if mode == "reset":
         open(MANIFEST, "w").close(); print("manifest cleared"); return
+    if mode == "bigtext":
+        turns_n = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+        chars = int(sys.argv[3]) if len(sys.argv) > 3 else 300000
+        gap = int(sys.argv[4]) if len(sys.argv) > 4 else 22
+        print(f"bigtext: {turns_n} 轮同会话, 每轮≈{chars}字, gap={gap}s "
+              f"(总时长≈{turns_n*gap//60}min+处理), 现在别碰键鼠", flush=True)
+        bigtext("bigtext", turns_n, chars, gap)
+        return
     if mode == "help":
         print(__doc__)
         print("cases_single:", list(CASES_SINGLE.keys()))

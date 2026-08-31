@@ -70,10 +70,12 @@ function reset() { try { fs.rmSync(FILE, { force: true }); fs.rmSync(FILE + '.tm
   const B = build(true, FILE)
   B._loadConvCache()
   check('roundtrip-count', B._convCache.size === 2, `size=${B._convCache.size}`)
-  const g = B._convCache.get('k1')
-  check('roundtrip-fields', !!g && g.convId === 'conv-aaaa1111' && g.count === 3 && g.parentId === 'client-created-root' && g.digests.length === 3, `k1=${JSON.stringify(g)}`)
-  const g2 = B._convCache.get('k2')
-  check('roundtrip-fields2', !!g2 && g2.convId === 'conv-bbbb2222' && g2.parentId === 'pm-xyz', `k2=${JSON.stringify(g2)}`)
+  // 2026-08-31:槽键从 (input[0],instructions) 改成 convId,加载时按 convId 重建。
+  // 所以这里按 convId 取,不再按写进去的那个 key。
+  const g = B._convCache.get('conv-aaaa1111')
+  check('roundtrip-fields', !!g && g.convId === 'conv-aaaa1111' && g.count === 3 && g.parentId === 'client-created-root' && g.digests.length === 3, `conv-aaaa1111=${JSON.stringify(g)}`)
+  const g2 = B._convCache.get('conv-bbbb2222')
+  check('roundtrip-fields2', !!g2 && g2.convId === 'conv-bbbb2222' && g2.parentId === 'pm-xyz', `conv-bbbb2222=${JSON.stringify(g2)}`)
 })()
 
 // —— ② TTL 过期项跳过 ——
@@ -87,7 +89,7 @@ function reset() { try { fs.rmSync(FILE, { force: true }); fs.rmSync(FILE + '.tm
   fs.writeFileSync(FILE, JSON.stringify(arr))
   const B = build(true, FILE)
   B._loadConvCache()
-  check('expired-skipped', B._convCache.size === 1 && B._convCache.has('fresh') && !B._convCache.has('old'), `size=${B._convCache.size} keys=${[...B._convCache.keys()]}`)
+  check('expired-skipped', B._convCache.size === 1 && B._convCache.has('conv-fresh') && !B._convCache.has('conv-old'), `size=${B._convCache.size} keys=${[...B._convCache.keys()]}`)
 })()
 
 // —— ③ 损坏 JSON 冷启动不崩 ——
@@ -127,7 +129,7 @@ function reset() { try { fs.rmSync(FILE, { force: true }); fs.rmSync(FILE + '.tm
   fs.writeFileSync(FILE, JSON.stringify(arr))
   const B = build(true, FILE)
   B._loadConvCache()
-  check('malformed-only-good', B._convCache.size === 1 && B._convCache.has('good'), `size=${B._convCache.size} keys=${[...B._convCache.keys()]}`)
+  check('malformed-only-good', B._convCache.size === 1 && B._convCache.has('conv-good'), `size=${B._convCache.size} keys=${[...B._convCache.keys()]}`)
 })()
 
 // —— ⑥ 非数组冷启动 ——
@@ -148,6 +150,27 @@ function reset() { try { fs.rmSync(FILE, { force: true }); fs.rmSync(FILE + '.tm
   A._convCache.set('k', { convId: 'c', parentId: 'client-created-root', count: 1, digests: ['a'], ts: Date.now() })
   A._persistConvCache()
   check('atomic-no-tmp-left', !fs.existsSync(FILE + '.tmp'), '.tmp residue after persist')
+})()
+
+// —— ⑨ 老文件迁移(2026-08-31):旧 key 是 "sha1(input0):sha1(instructions)",
+//    提示词一漂同一条会话会占多个槽。加载时按 convId 重建 → 自动去重、自动改键。——
+;(function legacyMigrate() {
+  reset()
+  const now = Date.now()
+  const arr = [
+    { key: 'aaaa:1111', convId: 'conv-dup', parentId: 'client-created-root', count: 2, digests: ['a', 'b'], ts: now - 1000 },
+    { key: 'aaaa:2222', convId: 'conv-dup', parentId: 'pm-later', count: 4, digests: ['a', 'b', 'c', 'd'], ts: now },
+    { key: 'bbbb:1111', convId: 'conv-other', parentId: 'client-created-root', count: 1, digests: ['z'], ts: now },
+  ]
+  fs.writeFileSync(FILE, JSON.stringify(arr))
+  const B = build(true, FILE)
+  B._loadConvCache()
+  check('legacy-rekeyed-by-convid', B._convCache.has('conv-dup') && B._convCache.has('conv-other'),
+    `keys=${[...B._convCache.keys()]}`)
+  check('legacy-no-old-keys', !B._convCache.has('aaaa:1111') && !B._convCache.has('bbbb:1111'),
+    `keys=${[...B._convCache.keys()]}`)
+  check('legacy-dedup', B._convCache.size === 2, `size=${B._convCache.size} —— 同一 convId 的两个旧槽应合成一个`)
+  check('legacy-last-wins', B._convCache.get('conv-dup').count === 4, `count=${B._convCache.get('conv-dup').count}`)
 })()
 
 // —— ⑧ 默认关(_CONV_PERSIST=false):不读不写 ——

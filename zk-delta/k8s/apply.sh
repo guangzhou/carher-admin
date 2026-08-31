@@ -11,9 +11,15 @@
 #       对 litellm-proxy 用 apply 会同时回退 image 和内嵌 ConfigMap —— 那是另一条铁律）。
 #
 # 用法：
-#   ./zk-delta/k8s/apply.sh              部署/更新
+#   ./zk-delta/k8s/apply.sh              部署/更新（先跑离线回归，退出码不为 0 就不推）
 #   ./zk-delta/k8s/apply.sh --dry-run    只打印会做什么
+#   ZKD_SKIP_TESTS=1 ./...apply.sh       跳过回归（救火用，会大声打印；平时别用）
 set -euo pipefail
+
+# 本地临时文件一律 mktemp。**不要用 /tmp 固定路径**：生成那一步万一失败，
+# 固定路径上会躺着上一次（甚至别人）的陈旧文件，然后被原样推上生产。
+TMPD="$(mktemp -d)"
+trap 'rm -rf "$TMPD"' EXIT
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -36,11 +42,30 @@ echo "源码指纹 = $SRC_SHA"
 
 if [[ -n "$DRY" ]]; then
   echo "[dry-run] 会做："
+  echo "  0. 跑 tests/run.js 离线回归，退出码不为 0 就停在这里"
   echo "  1. 在 198 上重建 ConfigMap zk-delta-src（framing.js + server.js）"
   echo "  2. apply zk-delta.yaml，把 src-sha 注解换成 $SRC_SHA"
   echo "  3. rollout status deploy/zk-delta"
   echo "  4. 打 /healthz 自检"
   exit 0
+fi
+
+# ---- 0. 回归门 ----
+# 这一步存在的理由：语法检查只能证明"文件能被 parse"，证明不了"重建出来的字节还对"。
+# 而这个服务的全部价值就是**重建出来的字节要和客户端原始 body 逐字节相同**——
+# 那件事只有 run.js 验得了。没有这道门的时候，链式命令会无条件把坏文件推上生产，
+# 绿灯全靠人记得手动跑一遍；人是会忘的，门不会。
+if [[ "${ZKD_SKIP_TESTS:-}" == "1" ]]; then
+  echo "!! ZKD_SKIP_TESTS=1 —— 跳过离线回归直接推。这是救火开关，正常上线不该出现。"
+else
+  echo "==> 离线回归（门在退出码上）"
+  if node "$ROOT/tests/run.js" > "$TMPD/run.log" 2>&1; then
+    tail -1 "$TMPD/run.log" | sed 's/^/  /'
+  else
+    echo "  回归没过，不推。最后 25 行："
+    tail -25 "$TMPD/run.log" | sed 's/^/  | /'
+    exit 1
+  fi
 fi
 
 # ---- 1. 传源码 + 建 ConfigMap ----
@@ -68,15 +93,20 @@ fi
 echo "  sha256 与本地一致"
 
 echo "==> 重建 ConfigMap zk-delta-src"
-K "create configmap zk-delta-src --from-file=framing.js=/tmp/zkd-src/framing.js --from-file=server.js=/tmp/zkd-src/server.js --dry-run=client -o yaml" > /tmp/zkd-cm.yaml
-[[ -s /tmp/zkd-cm.yaml ]] || { echo "生成 ConfigMap yaml 失败"; exit 1; }
-B64_CM="$(base64 < /tmp/zkd-cm.yaml | tr -d '\n')"
+K "create configmap zk-delta-src --from-file=framing.js=/tmp/zkd-src/framing.js --from-file=server.js=/tmp/zkd-src/server.js --dry-run=client -o yaml" > "$TMPD/zkd-cm.yaml"
+[[ -s "$TMPD/zkd-cm.yaml" ]] || { echo "生成 ConfigMap yaml 失败"; exit 1; }
+B64_CM="$(base64 < "$TMPD/zkd-cm.yaml" | tr -d '\n')"
 r198 "echo '$B64_CM' | base64 -d > /tmp/zkd-cm.yaml && echo '$SSH_PASS' | sudo -S k3s kubectl -n $NS apply -f /tmp/zkd-cm.yaml" 2>/dev/null
 
 # ---- 2. apply Deployment/Service ----
 echo "==> apply Deployment / Service"
-sed "s#REPLACED_BY_APPLY_SH#$SRC_SHA#" "$HERE/zk-delta.yaml" > /tmp/zkd-deploy.yaml
-B64_D="$(base64 < /tmp/zkd-deploy.yaml | tr -d '\n')"
+sed "s#REPLACED_BY_APPLY_SH#$SRC_SHA#" "$HERE/zk-delta.yaml" > "$TMPD/zkd-deploy.yaml"
+# 生成失败时必须停，否则会把一个空文件 / 陈旧文件推上生产
+[[ -s "$TMPD/zkd-deploy.yaml" ]] || { echo "生成 Deployment yaml 失败"; exit 1; }
+if grep -q "REPLACED_BY_APPLY_SH" "$TMPD/zkd-deploy.yaml"; then
+  echo "src-sha 占位符没被替换掉，停"; exit 1
+fi
+B64_D="$(base64 < "$TMPD/zkd-deploy.yaml" | tr -d '\n')"
 r198 "echo '$B64_D' | base64 -d > /tmp/zkd-deploy.yaml && echo '$SSH_PASS' | sudo -S k3s kubectl -n $NS apply -f /tmp/zkd-deploy.yaml" 2>/dev/null
 
 # ---- 3. 等就绪 ----

@@ -35,6 +35,8 @@ cursor_team_setup.js — 一条命令给同事装好 cursor-g(Cursor 3.16.x / ma
   --revert           从最近备份回滚(bundle+blob+settings+Key secret,并卸掉小代理)
   --key <k>          直接给 Key(CI/无人值守;否则 TTY 下交互粘)
   --pin-update       写 "update.mode":"none" 锁定不升级(默认不写)
+  --chain            装 @cx-chain:v3 链式增量(默认**不装**:服务端那半已下线,装了只会
+                     让上游静默少收上下文。不给这个开关时,安装器会把已装的自动摘掉。)
   --no-zk-delta      不装小代理 / 把已装的卸掉,BYOK 地址退回公网直连
   --zk-delta-only    **只**装小代理 + 改 BYOK 地址:不碰 bundle、不碰模型、不碰 Key
                      (给已经装好的机器加增量传输用;也是唯一不会换掉选中模型的模式)
@@ -329,6 +331,94 @@ function planChainBundle(rel) {
   const dir2 = path.basename(path.dirname(path.dirname(rel)));
   console.log("   chain %s: 将打 [%s]", dir2, applied.join(", "));
   return { p, out, bakName: chainBakName(rel), applied };
+}
+
+/* ── @cx-chain:v3 下线(2026-09-01):默认不再安装,装过的机器跑一次就自动摘掉 ──────────
+   为什么下线:服务端那半(解析 previous_response_id)已经不在线上了。实测三条腿——
+   ① 线上 responses.js 只解构 {input,instructions,stream},全文 grep previous_response_id = 0 次;
+   ② 带一个**伪造**的 previous_response_id 打过去仍返 HTTP 200(字段被端到端忽略);
+   ③ 本机 trace 里 fallback-full = 0 次(shim 唯一的兜底是 400/404,服务端返 200 就永不触发)。
+   于是客户端这半的净效果是「只发增量,而服务端把增量当成整段上下文」= 静默丢历史,
+   而且丢了不报错。收益为零、风险非零 ⇒ 摘掉。
+   服务端那半回来时用 --chain 重新装上即可(代码原样保留,没删)。
+   摘除是 planChainBundle 的**精确逆操作**(含 force-responses 那处端点还原),
+   逆完必须 ①不含 CHAIN_MARKER ②不含 __cxWrap ③过语法校验 才落盘;
+   任一条不满足就保持原样并提示走 --revert 从备份还原(绝不留半截)。 */
+function unwrapChainCall(src) {
+  const WP = CHAIN_ANCHOR + "(globalThis.__cxWrap||(f=>f))(";
+  const n = src.split(WP).length - 1;
+  if (n !== 1) return { ok: false, why: "wrap 锚 count=" + n };
+  const i = src.indexOf(WP);
+  const openAt = i + WP.length - 1; // 包装器自己那个 "("
+  let depth = 0, p = openAt;
+  for (; p < src.length; p++) { const c = src[p]; if (c === "(") depth++; else if (c === ")") { depth--; if (depth === 0) break; } }
+  if (depth !== 0) return { ok: false, why: "括号不配平" };
+  const call = src.slice(openAt + 1, p); // 原始 builder 调用,原样放回
+  return { ok: true, out: src.slice(0, i) + CHAIN_ANCHOR + call + src.slice(p + 1), why: call.slice(0, 40) };
+}
+
+// 纯函数:从一段已打过 chain 的源码里逆出原始源码。{ok,out?,why,removed[]}
+function chainRemoveFromSource(src) {
+  let out = src, removed = [];
+  const head = CHAIN_SHIM + "\n";
+  if (!out.startsWith(head)) return { ok: false, why: "头部 shim 形状不符" };
+  out = out.slice(head.length); removed.push("shim");
+  const uw = unwrapChainCall(out);
+  if (!uw.ok) return { ok: false, why: uw.why };
+  out = uw.out; removed.push("unwrap");
+  const rOld = "baseURL:t.baseUrl,apiKey:t.apiKey,fetch:t.fetch})";
+  const rNew = "baseURL:t.baseUrl,apiKey:t.apiKey,fetch:(globalThis.__cxWrap||(f=>f))(t.fetch)})";
+  if (out.split(rNew).length - 1 === 1) { out = out.replace(rNew, rOld); removed.push("resp:t.fetch"); }
+  // force-responses 还原:摘掉链式后端点回到 chat_completions,即 litellm chat→responses 桥那条
+  // 设计内的路(载体是点分 slug 就是为它准备的)。留着 force-responses 等于留半截改动。
+  const ufOld = '?"responses":"chat_completions"', ufNew = '?"responses":"responses"';
+  if (out.split(ufNew).length - 1 === 1) { out = out.replace(ufNew, ufOld); removed.push("force-responses"); }
+  if (out.includes(CHAIN_MARKER)) return { ok: false, why: "逆完仍含 marker" };
+  if (out.includes("__cxWrap")) return { ok: false, why: "逆完仍含 __cxWrap" };
+  return { ok: true, out, removed };
+}
+
+// 计算一条 chain bundle 的**摘除**(不落盘)。没装过 → null(静默,不刷屏)。
+function planChainRemoval(rel) {
+  const p = path.join(RES, rel);
+  if (!fs.existsSync(p)) return null;
+  const src = fs.readFileSync(p, "utf8");
+  if (!src.includes(CHAIN_MARKER)) return null;
+  const dir2 = path.basename(path.dirname(path.dirname(rel)));
+  const r = chainRemoveFromSource(src);
+  if (!r.ok) {
+    console.log("   ⚠️  chain %s 摘除失败(%s)→ 保持原样。想清干净请跑 --revert 从备份还原。", dir2, r.why);
+    return null;
+  }
+  console.log("   chain %s: 将摘除 [%s]", dir2, r.removed.join(", "));
+  return { p, out: r.out, bakName: chainBakName(rel), removed: r.removed };
+}
+
+// 测试钩子:对任意 exthost bundle 跑「装 → 摘」往返,断言逐字节回到原样。
+// 这是摘除逻辑唯一可信的判据——只看"没报错"会放行留半截的逆操作。
+// 退出码:0=往返逐字节相同 / 14=装不上(锚点) / 15=摘失败 / 16=往返有差异。
+if (process.env.CX_CHAIN_ROUNDTRIP) {
+  const f = process.env.CX_CHAIN_ROUNDTRIP;
+  const orig = fs.readFileSync(f, "utf8");
+  const wb = wrapBuilderCall(orig);
+  if (!wb.ok) { console.error("装不上:" + wb.why); process.exit(14); }
+  let patched = wb.out;
+  const rOld = "baseURL:t.baseUrl,apiKey:t.apiKey,fetch:t.fetch})";
+  const rNew = "baseURL:t.baseUrl,apiKey:t.apiKey,fetch:(globalThis.__cxWrap||(f=>f))(t.fetch)})";
+  if (patched.split(rOld).length - 1 === 1) patched = patched.replace(rOld, rNew);
+  const ufOld = '?"responses":"chat_completions"', ufNew = '?"responses":"responses"';
+  if (patched.split(ufOld).length - 1 === 1) patched = patched.replace(ufOld, ufNew);
+  patched = CHAIN_SHIM + "\n" + patched;
+  const back = chainRemoveFromSource(patched);
+  if (!back.ok) { console.error("摘失败:" + back.why); process.exit(15); }
+  if (back.out !== orig) {
+    let i = 0; while (i < Math.min(back.out.length, orig.length) && back.out[i] === orig[i]) i++;
+    console.error("往返有差异 @%d: orig=%j back=%j (len %d vs %d)",
+      i, orig.slice(i, i + 60), back.out.slice(i, i + 60), orig.length, back.out.length);
+    process.exit(16);
+  }
+  console.log("ROUNDTRIP OK: %s (%d chars, 摘除 [%s])", path.basename(f), orig.length, back.removed.join(", "));
+  process.exit(0);
 }
 
 /* ── 测试钩子:打印常量供与 Python 版做逐字节等价断言 ── */
@@ -770,6 +860,9 @@ async function main() {
   const args = {
     apply: has("--apply"), revert: has("--revert"), repair: has("--repair"),
     forceVersion: has("--force-version"), pinUpdate: has("--pin-update"),
+    // @cx-chain:v3 链式增量:默认**关**(服务端那半已下线)。不给这个开关时,
+    // 安装器会把已装的 chain 补丁摘掉;服务端那半回来再用 --chain 装回去。
+    chain: has("--chain"),
     key: opt("--key", ""),
     // zk-delta：默认**开**。理由是它对上游逐字节透明（重建在 LiteLLM 之前），
     // 门① 不可能被它破坏，而省的那一跳是同事每天都在付的成本。
@@ -806,7 +899,12 @@ async function main() {
     console.log("   跳过（--zk-delta-only：只装小代理 + 改 BYOK 地址，不碰 bundle / 模型 / Key）");
   } else {
   for (const rel of BUNDLES) { const r = planBundle(rel); if (r) plans.push(r); }
-  for (const rel of CHAIN_TARGETS) { const r = planChainBundle(rel); if (r) plans.push(r); }
+  // @cx-chain:v3 默认**不装**(服务端那半已下线,见 planChainRemoval 上面的三条腿)。
+  // 不带 --chain 时反过来做:装过的机器在这里被摘干净,同事只要跑一次安装器就恢复。
+  for (const rel of CHAIN_TARGETS) {
+    const r = args.chain ? planChainBundle(rel) : planChainRemoval(rel);
+    if (r) plans.push(r);
+  }
   console.log("--- 2) 语法校验补后 bundle ---");
   for (const { p, out } of plans) {
     if (!syntaxCheck(out, path.basename(p).split(".")[1])) { console.log("   !! 语法校验不过,终止,未落任何盘。"); process.exit(4); }

@@ -44,9 +44,10 @@ function grabConstExpr(name, endMarker) {
   return new Function('return (' + expr + ')')()
 }
 const V2_CONTRACT = grabConstExpr('V2_CONTRACT', 'const V2_HANDSHAKE')
-// endMarker 用 BRIDGE_CONTRACT:mcp 桥 commit 在 MINI 与 V2_RUN_RE 之间插入了该常量,
-// 旧 marker(V2_RUN_RE)会把整个 BRIDGE_CONTRACT 声明抠进表达式导致 SyntaxError(既存断裂,08-28 修)。
-const V2_CONTRACT_MINI = grabConstExpr('V2_CONTRACT_MINI', 'const BRIDGE_CONTRACT')
+// endMarker 用 V2B_CONTRACT:mcp 桥 v2 commit 删掉了旧 BRIDGE_CONTRACT、在 MINI 与 V2_RUN_RE
+// 之间插入 V2B_CONTRACT/_MINI/_HANDSHAKE 三常量。抠 MINI 时以首个 `\nconst V2B_CONTRACT`
+// (=388 行 V2B_CONTRACT 声明)收尾,正好圈住 MINI 值,不越界到 V2B。
+const V2_CONTRACT_MINI = grabConstExpr('V2_CONTRACT_MINI', 'const V2B_CONTRACT')
 // 隐式握手常量引用了 V2_CONTRACT,eval 时注入
 function grabConstExprWith(name, endMarker, deps) {
   const re = new RegExp('const\\s+' + name + '\\s*=\\s*([\\s\\S]*?)\\n' + endMarker)
@@ -63,13 +64,15 @@ function runGate(env, convSess, basePrompt, convDelta) {
   const fakeProc = { env }
   // eslint-disable-next-line no-new-func
   const fn = new Function(
-    'process', 'convSess', 'basePrompt', '_convDelta', 'V2_CONTRACT', 'V2_CONTRACT_MINI', 'V2_HANDSHAKE_IMPLICIT', 'console', '_stripExecEnv',
+    'process', 'convSess', 'basePrompt', '_convDelta', 'V2_CONTRACT', 'V2_CONTRACT_MINI', 'V2_HANDSHAKE_IMPLICIT', 'console', '_stripExecEnv', 'mcpBridge',
     'let prompt; const proto2 = true; ' + protoBlock + '\n return prompt'
   )
   const quietConsole = { log() {} }
   // _stripExecEnv 注入为恒等:本套件只测 DIET 门控逻辑;strip 行为由 execenv_strip_offline_cases 独立覆盖。
+  // mcpBridge 桩恒返 isEnabled()=false:本套件测 bridge-OFF 的 DIET 分档(级联 ternary 假支
+  //   V2B_* 不被求值,无需注入);bridge-ON 选 V2B 的结构由 mcp_bridge/responses 结构套件覆盖。
   return fn(fakeProc, convSess, basePrompt, convDelta === undefined ? [{ type: 'message', role: 'user' }] : convDelta,
-    V2_CONTRACT, V2_CONTRACT_MINI, V2_HANDSHAKE_IMPLICIT, quietConsole, (p) => p)
+    V2_CONTRACT, V2_CONTRACT_MINI, V2_HANDSHAKE_IMPLICIT, quietConsole, (p) => p, { isEnabled: () => false })
 }
 
 let pass = 0, fail = 0

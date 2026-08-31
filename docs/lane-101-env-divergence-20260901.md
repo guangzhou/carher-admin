@@ -25,7 +25,11 @@
 - CM 15 个 key 里 `ZK_CHAIN_SRV` 出现 **0 次**；
 - 101 活 pod 里 `grep -rl ZK_CHAIN_SRV /app` **无任何文件命中**。
 
-即**没有消费者**，是 08-30 chain-srv（那是独立服务，不是 lane）留下的死配置。
+即**没有消费者**。删是对的，但当时给的理由写错了，更正如下：chain-srv 的服务端那半
+**不是独立服务，它就在 `responses.js` 里**（`ZK_CHAIN_SRV` 门控的四个补丁点，08-30 在 lane 82
+做 canary）。这条 env 之所以成了死配置，是因为**那段代码后来被回滚了**，不是因为它属于别的服务。
+判据不变（CM 0 次命中 + pod 内 0 文件命中），结论不变，只是归因当时说错了。
+配套的下线决定见 `docs/cx-chain-shim-decommission-20260901.md`。
 
 ```bash
 kubectl -n litellm-product set env deploy/zero-cursor-bpi ZK_CHAIN_SRV-

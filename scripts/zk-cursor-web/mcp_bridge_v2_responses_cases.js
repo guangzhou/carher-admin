@@ -67,10 +67,16 @@ check('proto2-selector-bOn', /const _bOn = mcpBridge\.isEnabled\(\)/.test(protoB
 check('proto2-selector-V2C', /const _V2C = _bOn \? V2B_CONTRACT : V2_CONTRACT/.test(protoBlock), '_V2C selector missing')
 check('proto2-selector-V2M', /const _V2M = _bOn \? V2B_CONTRACT_MINI : V2_CONTRACT_MINI/.test(protoBlock), '_V2M selector missing')
 check('proto2-selector-V2H', /const _V2H = _bOn \? V2B_HANDSHAKE_IMPLICIT : V2_HANDSHAKE_IMPLICIT/.test(protoBlock), '_V2H selector missing')
-// 5 处 prompt 装配:DIET-EXEMPT(_V2C)/DIET-ZERO(_p2base)/DIET(_V2M)/handshake(_V2H)/default(_V2C)
+// 6 处 prompt 装配:DIET-EXEMPT-MINI(_V2M)/DIET-EXEMPT(_V2C)/DIET-ZERO(_p2base)/
+// DIET(_V2M)/handshake(_V2H)/default(_V2C)。**别写死条数**:08-30 加第 6 槽
+// DIET-EXEMPT-MINI 时这条就把 want 5 报成缺陷(09-01 实际踩到)。真不变量是
+// 「每一处装配都从 _p2base 起手」+「没有裸 V2_* 常量」,加槽位不假绿、绕过选择器照样红。
 const nAssign = (protoBlock.match(/\bprompt = /g) || []).length
-check('proto2-five-assignments', nAssign === 5, `assignments=${nAssign}, want 5`)
-check('proto2-exempt-V2C', /prompt = _p2base \+ _V2C\n[\s\S]*?DIET-ZERO/.test(protoBlock), 'DIET-EXEMPT slot not _p2base + _V2C')
+const nFromBase = (protoBlock.match(/\bprompt = _p2base/g) || []).length
+check('proto2-assignments-all-from-p2base', nAssign === nFromBase && nAssign >= 6,
+  `assignments=${nAssign} 其中从 _p2base 起手=${nFromBase}, want 相等且 >=6`)
+// 各槽位形状:尾部允许 ` + _cAdd`(registry 契约增补),不许换掉选择器。
+check('proto2-exempt-V2C', /prompt = _p2base \+ _V2C( \+ _cAdd)?\n/.test(protoBlock), 'DIET-EXEMPT slot not _p2base + _V2C')
 check('proto2-zero-bare', /DIET-ZERO[\s\S]*?prompt = _p2base\n/.test(protoBlock), 'DIET-ZERO slot not bare _p2base')
 check('proto2-mini-V2M', /prompt = _p2base \+ '\\n\\n' \+ _V2M/.test(protoBlock), 'DIET mini slot not _V2M')
 check('proto2-handshake-V2H', /prompt = _p2base \+ '\\n\\n' \+ _V2H/.test(protoBlock), 'handshake slot not _V2H')
@@ -82,7 +88,8 @@ const bareAssign = (protoBlock.match(/prompt = _p2base \+ V2_CONTRACT\b/g) || []
 check('proto2-no-bare-const-assign', bareAssign === 0, `proto2 still assigns bare V2_* constant ${bareAssign}x (selector bypassed)`)
 
 // —— ④ 会话失效重建路(r9):proto2 端剥 execenv + 按桥选 V2B/V2 ——
-check('rebuild-selector', /const _fp = proto2 \? \(_stripExecEnv\(_fp0\) \+ \(mcpBridge\.isEnabled\(\) \? V2B_CONTRACT : V2_CONTRACT\)\)/.test(code),
+// 尾部允许 registry 增补(`+ (process.env.ZK_TOOL_REGISTRY === '1' ? … )`),故不锚 `))`。
+check('rebuild-selector', /const _fp = proto2 \? \(_stripExecEnv\(_fp0\) \+ \(mcpBridge\.isEnabled\(\) \? V2B_CONTRACT : V2_CONTRACT\)/.test(code),
   'rebuild path selector missing')
 
 // —— ⑤ seam3(_bridgeReady):三态收口用 _bridgeVerdict/finishWithCall/finishPlainText ——

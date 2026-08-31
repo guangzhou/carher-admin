@@ -16,6 +16,7 @@ feedback_new_lane_gate_must_be_relative_and_clone_from_live)。
 判据(单轮服从率,与 2026-08-27 那次 101/82 对照同口径):
   ACTED = 本轮吐出了 >=1 个可执行的 function_call。
   EMPTY = 既无正文也无 call 且流正常收口(200 装作成功)——最坏形态。
+  ERR 过半 → 退出码 2(INVALID),不给相对判据:两臂都没打通时「0/4 vs 0/4」不是「一样好」。
 
 用法:
   python3 lane_task_ab.py --arms 101=cursor-web-fc-terra 82=cursor-web-fc-82-terra --shots 6
@@ -212,6 +213,16 @@ def main():
     print("\n  相对判据(第一臂 vs 第二臂):turn1 ACTED %d/%d vs %d/%d;turn2 OK %d/%d vs %d/%d" %
           (a0["acted"], a0["n"], a1["acted"], a1["n"],
            a0["t2ok"], a0["t2n"], a1["t2ok"], a1["t2n"]))
+    # ERR 占多数时这组数据压根不是「服从率」,是「没打通」。相对判据在这里会给出
+    # 「0/4 vs 0/4 → 不比对照差 → PASS」的假绿(09-01 用错模型名全 400 时真踩到)。
+    # 尺子先得证明自己量到了东西,才轮得到比大小。
+    for lab in labs:
+        s = summ[lab]
+        if s["n"] and s["err"] * 2 > s["n"]:
+            print("\n  => INVALID:臂 %s 有 %d/%d 发是 ERR(模型名写错/上游不通),"
+                  "这组数据不能当服从率比。先把 ERR 清零再比。" % (lab, s["err"], s["n"]))
+            return 2
+
     bad = []
     if a0["acted"] < a1["acted"]:
         bad.append("turn1 服从率低于对照臂")

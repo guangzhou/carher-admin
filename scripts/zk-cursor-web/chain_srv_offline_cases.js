@@ -8,6 +8,19 @@ const fs = require('fs')
 const file = process.argv[2] || '/tmp/resp_chain_work.js'
 const src = fs.readFileSync(file, 'utf8')
 
+// ── 目标闸:喂错文件要说"不适用",不能吐一串误导性 FAIL ──────────────────────
+// 09-01 实际踩到:批量回归把线上 responses.js 喂进来,于是 8 条断言集体红。
+// 那不是缺陷,是量错了对象——而这种红最危险:下一步很容易变成"改产品去满足断言"。
+// chain-srv 是 ZK_CHAIN_SRV 门控的服务端补丁,只存在于补丁后的工作产物里;
+// 线上 responses.js 压根没有这段(2026-09-01 起服务端那半已回滚)。
+// 退出码分家:0=全过 / 1=真缺陷 / 2=喂错对象(N/A)。
+if (!src.includes('_CHAIN_SRV') && !src.includes('chain-srv')) {
+  console.log('N/A: %s 里没有 chain-srv 补丁痕迹(ZK_CHAIN_SRV/_chainRemember)。', file)
+  console.log('    本套件只测 chain-srv 工作产物(如 /tmp/resp_chain_work.js);')
+  console.log('    线上 responses.js 不含这段(服务端那半已回滚)→ 无可测对象,不算缺陷。')
+  process.exit(2)
+}
+
 let pass = 0, fail = 0
 const fails = []
 function check(name, cond, why) {

@@ -130,8 +130,21 @@ Cursor(/v1/responses, 19工具+9.4K instructions)
 | ZK_TE_DEFAULT | web-tools 轮默认 thinking 档(standard) | r17 |
 | ZK_HB | 主路径 5s 保活注释帧 | r18 |
 | ZK_WEB_RETRY=1 | 旧版 envelope 升级重试(默认关) | - |
+| ZK_HANDOFF_POLL=0 | 关掉 `stream_handoff` 转轮询兜底(默认开) | 09-01 |
+| ZK_HANDOFF_MAX_MS / ZK_HANDOFF_POLL_MS | 轮询总预算(默认 240000)/ 间隔(默认 2500) | 09-01 |
 
-pod 日志决策行可 grep：`[chat-only] [conv] [diet] [harvest] [act] [te] [cite] [stall] [turn]`。
+pod 日志决策行可 grep：`[chat-only] [conv] [diet] [harvest] [act] [te] [cite] [stall] [turn] [handoff]`。
+
+**`cursor-g-5.6-pro` 为什么需要 `[handoff]` 这条路**：`gpt-5-6-pro` 的主 SSE 走到
+`stream_handoff` 事件就收口（options `resume_sse_endpoint` / `subscribe_ws_topic`），
+正文在另一条通道继续生成 → 不跟就是 HTTP 200 + `output_tokens=0`（用户面"点了没反应"）。
+resume 端点参数形状未知（7 种组合全 400/404/405），**实测可行的是轮询
+`/backend-api/conversation/<id>`**。隔离性是构造性的：只有流里真出现 `stream_handoff` 才进得去，
+而 sol / luna / instant / 5.5 **从不产生**该事件（实测对照：`gpt-5-6` 21 事件收在
+`message_stream_complete`，pro 12 事件无该事件）。判读：`[handoff] stream_handoff …
+-> 主流收口后转轮询` 然后 `[handoff] done in 13s polls=4 chars=15`。
+补丁脚本 `scripts/zk-cursor-web/patch_handoff_poll.py`（3 个 `assert count==1` 锚点），
+活文档 `docs/cursor-g-pro-stream-handoff-20260901.md`。
 
 ## thinking 档位三通道（全部 live 实证）
 

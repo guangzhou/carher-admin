@@ -50,8 +50,11 @@ check('proto2-branch-found', p2i >= 0 && p2j > p2i, `p2i=${p2i} p2j=${p2j}`)
 const p2 = code.slice(p2i, p2j)
 const nAssign = (p2.match(/prompt = /g) || []).length
 const nP2base = (p2.match(/prompt = _p2base/g) || []).length
-check('proto2-all-assignments-stripped', nAssign === 5 && nP2base === 5,
-  `assignments=${nAssign} via _p2base=${nP2base}, want 5/5`)
+// 真不变量是「**每一处**装配都经过 _p2base」,不是「恰好 N 处」。写死 N 会随产品加槽位
+// 而变成假红:08-30 加了第 6 槽 DIET-EXEMPT-MINI,这条断言就把 want 5/5 报成缺陷
+// (09-01 实际踩到)。改成结构性:相等 + 有下限,新增绕过 _p2base 的槽位照样红。
+check('proto2-all-assignments-stripped', nAssign === nP2base && nAssign >= 5,
+  `assignments=${nAssign} via _p2base=${nP2base}, want 相等且 >=5`)
 check('proto2-no-raw-baseprompt-assign', !/prompt = basePrompt/.test(p2),
   'raw `prompt = basePrompt` still present in proto2 branch')
 check('proto2-strip-applied-once', /const _p2base = _stripExecEnv\(basePrompt\)/.test(p2),

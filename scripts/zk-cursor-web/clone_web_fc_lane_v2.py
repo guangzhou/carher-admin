@@ -261,6 +261,9 @@ def _register(acct, mode):
         import os,json,urllib.request
         mk=os.environ["LITELLM_MASTER_KEY"]; BASE="http://localhost:4000"
         rows=json.loads(%r)
+        def get(path):
+            req=urllib.request.Request(BASE+path,headers={"Authorization":"Bearer "+mk})
+            return json.loads(urllib.request.urlopen(req,timeout=30).read().decode())
         def post(path,payload):
             req=urllib.request.Request(BASE+path,data=json.dumps(payload).encode(),
                 headers={"Authorization":"Bearer "+mk,"Content-Type":"application/json"})
@@ -269,11 +272,20 @@ def _register(acct, mode):
             except urllib.error.HTTPError as e:
                 b=e.read().decode()[:160]
                 return "SKIP(exists)" if e.code in (400,409) and "already" in b.lower() else ("ERR %%d %%s"%%(e.code,b))
+        # 幂等靠**先查已有 id**,不靠猜错误文案:重复注册时 /model/new 返的是
+        # 500 "Failed to add model to db"(不含 already),按文案判会当成真错误报 6 个 ERR。
+        # 只取 model_info.id —— litellm_params 里是加密凭据 blob,不拉。
+        try:
+            have={ (m.get("model_info") or {}).get("id") for m in get("/model/info").get("data",[]) }
+            have.discard(None)
+        except Exception as e:
+            have=set(); print("WARN: /model/info 预查失败(%%s)-> 退回按错误文案判"%%e)
         ok=0
         for row in rows:
-            r=post("/model/new",row)
+            mid=row["model_info"]["id"]
+            r="SKIP(exists)" if mid in have else post("/model/new",row)
             if r in ("OK","SKIP(exists)"): ok+=1
-            print(row["model_info"]["id"],"=>",r)
+            print(mid,"=>",r)
         print("SUMMARY: %%d/%%d ok"%%(ok,len(rows)))
     ''' % payload_json)
     out, _ = proxy_py(script)

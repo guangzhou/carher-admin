@@ -406,15 +406,40 @@ InternalServerError → WA fail-mark 180s + re-picking → **下一发自动甩�
    但这一步能立刻暴露两件事——①别名少挂了某一档（各档腿数不齐 → 那一档没有 fallback）；
    ②`/model/new` 写了 lane 但 deployment 名没对上（dangling → 打到它必超时/502）。
 
-### fallback 的真实形态（别当成无缝，2026-08-24 演练实测）
+### fallback 的真实形态（2026-08-31 实测重写，旧版"≈2min 打脸"已作废）
 
 路由是 **key 级黏性**（Cursor 不发 session 头，WA 按 key 钉 lane，为的是保住会话缓存局部性）。
 所以平时流量可能长期只压一条 lane，另一条零流量——**那是设计，不是故障**，但也意味着
 静默故障（比如跑着旧代码）只在切换那一刻才暴露，这正是 `pool_consistency.py` 存在的理由。
 
-一条 lane 出问题时的时间线：上游 0 字节黑洞 → litellm `stream_timeout:120` → InternalServerError
-→ WA 打 fail-mark **180s** → 之后的请求自动甩到健康 lane。**代价 = 挂掉的那一发（≈2min）
-打到用户脸上，之后自愈。** 加 lane 买到的是"不会全线挂死"，不是"用户无感"。
+**一条 lane 挂了，这一发会当场换台，用户基本无感**——已实测，不是推断：
+
+| 坏法 | 线型 | 首字节 vs 控制组 |
+|---|---|---|
+| dns 解析不到 | 非流式 / 流式 | +0～1s |
+| hang（连得上永不回）| 流式 | +10s（连接超时踩下去就换，不撞 300s 天花板）|
+
+日志形状：`weighted-pick deployment=<坏>` → 失败 → `Selected deployment: <好>` → 正常出字。
+全局配置：`num_retries=5` / `enable_weighted_failover=true` / `cooldown_time=60` /
+`allowed_fails=3` / `router_settings.timeout=300`；**544 个 deployment 没有一个设
+`stream_timeout`**（旧文档里的 `stream_timeout:120` 在当前 DB 不成立）。
+08-24 那个"≈2min"讲的是**下一发**才甩到健康线，不是这一发的代价，别再引用。
+
+**还没实测**：lane 返回 200 但空流 / 吐了字节后中途死。读源码
+`/app/streaming_output_backfill.py`、`/app/midstream_fallback_loop.py` **无模型名闸门**
+（文件里的 `acct` 全在注释里）→ cursor-g 吃的是和 acct 同一套。这是读代码不是实测，别当结论用。
+
+#### 演练脚本
+
+```bash
+python3 scripts/zk-cursor-web/failover_drill.py [B段发几次=3] [间隔秒=200] [--stream] [--hang]
+```
+
+不碰 82/101、不改 router_settings；`/model/new` 临时注册自用组 + 20m 临时 key，跑完全删。
+**读结果只认 `SAVED` / `DROPPED`，`NOT_EXERCISED` 是没考到、不算数。**
+`成功率高` 本身不是证据——第一版就是这么报出 "4/4 ✅" 假绿的（A 段先跑打了 180s fail-mark，
+坏 lane 一次都没被挑到）。改脚本前先读文件头那四条约束（B 在 A 前 / 每发换 key /
+间隔过 fail-mark / 逐发日志取证）。
 
 ## 未做的下一层杠杆
 

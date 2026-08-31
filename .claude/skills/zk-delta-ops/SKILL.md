@@ -101,6 +101,10 @@ ZKD_MAX_CONV=400 单独 → 1847MB store → RSS ≈ 2471MB → 拦不住，会 
 ⇒ 真正在拦的是**字节上限**，两条都得留着
 ```
 
+**"哪条上限在拦"随会话大小翻转，别背结论**：巡检那句话是**当场按均值算的**——
+`400 × 均值`；均值 4.6MB（长会话）时字节上限先到，均值 0.8MB（刚重启、都是短会话）时
+条数上限先到。上面那个"会 OOM"的算例取的是长会话，是**坏情况**，所以两条都得留。
+
 **不许用 `rss/store` 这个总倍率**——它被固定基座污染，store 小时飙到 20x，
 照它算出来的上限小得荒唐。要拟合"多存 1MB，RSS 多涨多少"。
 重算用 `node zk-delta/tests/capacity_probe.js`（纯本地，**一发不打上游**）。
@@ -167,6 +171,7 @@ zip 里禁中文名（跨平台乱码）。
 
 ## 活文档
 
-`docs/zk-delta-plan-20260831.md`（S1–S11 全程）、
+`docs/zk-delta-plan-20260831.md`（S1–S12 全程）、
 `docs/zk-delta-regression-20260831.md`（R0–R9 回归）、`zk-delta/README.md`。
 飞书：`https://t83dfrspj4.feishu.cn/docx/CINndAwmqoDqLuxiTqGcoYVkn2S` 第 12–13 章。
+记忆总入口：`topic_zk_delta_index`（含"尺子本身会坏的五种形状"判据表）。

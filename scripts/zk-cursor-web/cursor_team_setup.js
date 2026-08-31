@@ -23,13 +23,23 @@ cursor_team_setup.js — 一条命令给同事装好 cursor-g(Cursor 3.16.x / ma
      secret://cursorAuth/openAIKey。写前两道自检(能解开现有 Key + 加密回环)才落盘,
      否则回退手填(防假绿 401)。win=DPAPI 未实测→回退手填;linux=best-effort。
   6. 默认允许 Cursor 自动升级(升级后失效跑 --repair 一键重打补丁);--pin-update 才锁不升级。
+  7. zk-delta 本机小代理(默认开,只 macOS 实测):Cursor → 127.0.0.1:8788 → 公网只发增量
+     → 198 上重建出逐字节相同的全量 → LiteLLM。**上游收到的字节和不装它时完全一样**,
+     省的只是"你家宽带 → 机房"这一跳(实测 12 轮省 86.2%)。小代理用 Cursor 自带 Electron 跑
+     (同事不用装 Node);同事机器上抓包硬关(不往你磁盘写任何请求体);
+     集群挂→小代理自动回落直连,进程挂→launchd KeepAlive 拉起,想彻底退→--no-zk-delta。
 
 用法(不带参数=dry-run 只检查不写):
   --apply            执行(末尾会提示粘一次 Key;可用 --key <k> 无人值守)
   --repair           只重打 bundle 补丁(Cursor 升级后失效用;不碰配置/Key)
-  --revert           从最近备份回滚(bundle+blob+settings+Key secret)
+  --revert           从最近备份回滚(bundle+blob+settings+Key secret,并卸掉小代理)
   --key <k>          直接给 Key(CI/无人值守;否则 TTY 下交互粘)
   --pin-update       写 "update.mode":"none" 锁定不升级(默认不写)
+  --no-zk-delta      不装小代理 / 把已装的卸掉,BYOK 地址退回公网直连
+  --zk-delta-only    **只**装小代理 + 改 BYOK 地址:不碰 bundle、不碰模型、不碰 Key
+                     (给已经装好的机器加增量传输用;也是唯一不会换掉选中模型的模式)
+  --keep-model       不覆盖当前选中模型(默认逻辑是"不是 cursor-g 就换成 cursor-g-5.6-sol",
+                     在基准机上那等于换掉量具)
   --base-url <url> / --models a,b,c / --force-version
 回滚备份在 ~/.cursor-team-setup-backup(与 Python 版同格式,互相可 revert)。
 ⚠️ 装过 CursorX 的机器:3 解锁锚点命中 0 → 自动拒绝(防重复打),先还原 pristine bundle。
@@ -455,22 +465,31 @@ async function mergeConfig(args, dry) {
   d.openAIBaseUrl = args.baseUrl;
   d.useOpenAIKey = true;
   const ai = (d.aiSettings = d.aiSettings || {});
+  // --zk-delta-only 连模型清单都不加：那台机器要么已经装好了，要么就是我的基准机，
+  // 这一趟的唯一目的是把网络路径换成小代理。少动一样东西，少一个变量。
+  const wantModels = args.zkDeltaOnly ? [] : args.models;
   const dedup = (existing) => {
     const seen = new Set(), outl = [];
-    for (const x of [...(existing || []), ...args.models]) if (typeof x === "string" && !seen.has(x)) { seen.add(x); outl.push(x); }
+    for (const x of [...(existing || []), ...wantModels]) if (typeof x === "string" && !seen.has(x)) { seen.add(x); outl.push(x); }
     return outl;
   };
   const uamBefore = [...(ai.userAddedModels || [])];
   ai.userAddedModels = dedup(ai.userAddedModels);
   ai.modelOverrideEnabled = dedup(ai.modelOverrideEnabled);
-  const added = args.models.filter((m) => !uamBefore.includes(m));
+  const added = wantModels.filter((m) => !uamBefore.includes(m));
   // #3 默认模型:装完直接选中 cursor-g-5.6-sol,用户不用在菜单里挑。
   // 保守——仅当当前选中的不是任一 cursor-g 时才设,不覆盖用户自己已选的 cursor-g。
+  // --keep-model / --zk-delta-only：一个字都不动选中模型。
+  //   为什么要有这条：这台机器上 composer 现在是 cursor-web-fc-82-terra（基准），
+  //   而这个函数默认逻辑「不是 cursor-g 就换成 cursor-g-5.6-sol」正好会把它换掉。
+  //   拿安装器当 zk-delta 的开关用 = 顺手换掉量具，测出来的东西就不是同一个东西了。
   const mc = (ai.modelConfig = ai.modelConfig || {});
   const curName = mc.composer && mc.composer.modelName;
   const alreadyCursorG = typeof curName === "string" && curName.startsWith("cursor-g");
   let defModelSet = "(skip, 已是 " + (curName || "?") + ")";
-  if (!alreadyCursorG) {
+  if (args.keepModel) {
+    defModelSet = "(skip, --keep-model：保持 " + (curName || "?") + " 不动)";
+  } else if (!alreadyCursorG) {
     for (const feat of ["composer", "cmd-k"]) {
       mc[feat] = { ...(mc[feat] || {}), modelName: DEFAULT_MODEL, selectedModels: [{ modelId: DEFAULT_MODEL, parameters: [] }] };
     }
@@ -601,6 +620,146 @@ async function revert() {
     db.close(); console.log("  restored openAIKey secret");
   }
   console.log("回滚完成,重启 Cursor 生效。");
+  // 回滚会把 BYOK 地址还原成备份里那个（公网直连），此时再留着小代理服务就是个孤儿：
+  // 没人连它，但它还占着 8788、还在 KeepAlive。一起收掉。
+  zkdUninstall(false);
+}
+
+/* ── zk-delta：本机小代理（只发增量到公网）────────────────────────────────────
+   形状：Cursor → 127.0.0.1:8788（小代理）→ 公网只发增量 → 198 上的 zk-delta
+        → 那边重建出逐字节相同的全量 → LiteLLM → 网关 → GPT。
+   重建发生在 LiteLLM **之前**，所以上游收到的字节和不装它时完全一样 ——
+   模型看到的东西没变，省的只是「你家宽带 → 机房」这一跳。
+
+   为什么小代理要用 Cursor 自带的 Electron 跑，而不是 node：
+     分发包的整个卖点是「不用装 Node」。plist 里写 `node` 的话，同事机器上没有 node
+     就起不来，而 Cursor 的 BYOK 地址已经指到 127.0.0.1:8788 了 → 直接连不上，
+     **等于把 Cursor 弄坏**。所以复用本安装器同一个技巧：ELECTRON_RUN_AS_NODE=1 + Cursor 本体。
+     已实测：sidecar 在 Cursor 3.17.19 的 Electron 下正常起来并服务 /healthz。
+
+   为什么同事这边一定要关掉抓包：
+     开发机上小代理默认把请求体存到 tests/fixtures 攒金样。那是给我自己验证用的，
+     同事机器上开着就是**把别人的真实工作内容写到他自己磁盘上**。这里硬写 MAX=0。
+
+   失效怎么办（三层，逐层都不需要人介入）：
+     1) 集群那边挂了 → 小代理自己回落成直连上游（passthru），Cursor 照用，只是不省流量。
+     2) 小代理进程挂了 → launchd KeepAlive 拉起来。实测 kill 后 ~1s 回来，
+        代价是内存里的会话句柄丢了，每条会话下一发 409 → 重发一次全量。
+     3) 想彻底退回去 → --no-zk-delta：卸服务 + 把 BYOK 地址改回公网直连。
+
+   诚实边界：**只在 macOS 实测过。** Windows/Linux 没有 launchd，本步骤直接跳过并说明，
+   不写一个没验证过的服务定义假装支持。 */
+const ZKD_HOME = path.join(os.homedir(), ".zk-delta");
+const ZKD_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", "com.zkdelta.sidecar.plist");
+const ZKD_LOG = path.join(os.homedir(), "Library", "Logs", "zk-delta-sidecar.log");
+const ZKD_LOCAL_URL = "http://127.0.0.1:8788/v1";
+const ZKD_DELTA_URL = "https://cc.auto-link.com.cn/zkd/v1/delta";
+const ZKD_UPSTREAM = "https://cc.auto-link.com.cn/pro";
+// 源文件在包里的位置。装的时候必须保住这个相对结构：sidecar.js 里写的是 require('../common/framing')。
+const ZKD_FILES = [
+  ["zk-delta/sidecar/sidecar.js", path.join("sidecar", "sidecar.js")],
+  ["zk-delta/common/framing.js", path.join("common", "framing.js")],
+];
+
+function zkdSupported() { return process.platform === "darwin"; }
+
+function zkdInstall(dry) {
+  if (!zkdSupported()) {
+    console.log("   跳过：zk-delta 的服务定义只在 macOS 实测过（launchd）。当前 %s —— 不写没验证过的东西。", process.platform);
+    console.log("   → 本机仍走公网直连，功能不受影响，只是不省流量。");
+    return { ok: false, reason: "platform_" + process.platform };
+  }
+  // 源文件必须齐。缺一个就拒绝，不半装 —— 半装的后果是 BYOK 指向一个起不来的端口。
+  const srcs = [];
+  for (const [rel, dst] of ZKD_FILES) {
+    const p = path.join(__dirname, rel);
+    if (!fs.existsSync(p)) {
+      console.log("   !! 包里缺 %s —— 拒绝安装 zk-delta（半装会把 Cursor 指到一个起不来的端口）。", rel);
+      return { ok: false, reason: "missing_" + rel };
+    }
+    srcs.push([p, path.join(ZKD_HOME, dst)]);
+  }
+  const shas = srcs.map(([p]) => crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex").slice(0, 12));
+  console.log("   小代理源码 sha256[:12] = %s", shas.join(" / "));
+  console.log("   装到 %s，服务定义 %s", ZKD_HOME, ZKD_PLIST);
+  console.log("   Cursor BYOK 地址 → %s（增量端点 %s）", ZKD_LOCAL_URL, ZKD_DELTA_URL);
+  console.log("   抓包：关（ZKD_CAPTURE_MAX=0）—— 不往你磁盘上写任何请求体");
+  if (dry) return { ok: true, dry: true };
+
+  for (const [p, dst] of srcs) {
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.copyFileSync(p, dst);
+  }
+  // 先清掉占着 8788 的游离进程，否则 launchd 拉起来的那个会因端口被占反复重启，
+  // 而 KeepAlive 会把这种失败藏起来（看着像"服务在跑"，其实一直在崩溃循环）。
+  try {
+    const pg = spawnSync("pgrep", ["-f", "zk-delta.*sidecar\\.js"], { encoding: "utf8" });
+    const pids = (pg.stdout || "").trim().split("\n").filter(Boolean).filter((x) => x !== String(process.pid));
+    if (pids.length) { console.log("   清掉占着 8788 的旧进程:", pids.join(",")); spawnSync("kill", pids); }
+  } catch (e) { /* pgrep 没有也无所谓 */ }
+  spawnSync("launchctl", ["unload", ZKD_PLIST], { stdio: "ignore" });
+
+  fs.mkdirSync(path.dirname(ZKD_PLIST), { recursive: true });
+  fs.mkdirSync(path.dirname(ZKD_LOG), { recursive: true });
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  fs.writeFileSync(ZKD_PLIST, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.zkdelta.sidecar</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${esc(EXEC)}</string>
+    <string>${esc(path.join(ZKD_HOME, "sidecar", "sidecar.js"))}</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>ELECTRON_RUN_AS_NODE</key><string>1</string>
+    <key>ZKD_PORT</key><string>8788</string>
+    <key>ZKD_DELTA_URL</key><string>${esc(ZKD_DELTA_URL)}</string>
+    <key>ZKD_UPSTREAM</key><string>${esc(ZKD_UPSTREAM)}</string>
+    <key>ZKD_CAPTURE</key><string></string>
+    <key>ZKD_CAPTURE_MAX</key><string>0</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${esc(ZKD_LOG)}</string>
+  <key>StandardErrorPath</key><string>${esc(ZKD_LOG)}</string>
+</dict></plist>
+`);
+  const lr = spawnSync("launchctl", ["load", ZKD_PLIST], { encoding: "utf8" });
+  if (lr.status !== 0) {
+    console.log("   !! launchctl load 失败: %s", (lr.stderr || "").trim());
+    return { ok: false, reason: "launchctl_load" };
+  }
+  // 自检：起不来就必须当场说，不能装完就走 —— BYOK 已经指过去了，
+  // 起不来的话同事下一次用 Cursor 就是连不上，而他不会知道是这一步的问题。
+  let alive = "";
+  for (let i = 0; i < 12; i++) {
+    const c = spawnSync("curl", ["-fsS", "-m", "3", "http://127.0.0.1:8788/healthz"], { encoding: "utf8" });
+    if (c.status === 0 && /"ok":true/.test(c.stdout || "")) { alive = c.stdout.trim(); break; }
+    spawnSync("sleep", ["1"]);
+  }
+  if (!alive) {
+    console.log("   !! 小代理起不来（12 秒内 /healthz 无响应）。日志: %s", ZKD_LOG);
+    try { console.log(fs.readFileSync(ZKD_LOG, "utf8").split("\n").slice(-8).join("\n")); } catch (e) {}
+    console.log("   → 为了不把 Cursor 指到一个死端口，本次**不改** BYOK 地址。");
+    return { ok: false, reason: "healthz_timeout" };
+  }
+  console.log("   ✅ 小代理已起来: %s", alive);
+  return { ok: true };
+}
+
+function zkdUninstall(dry) {
+  if (!zkdSupported()) { console.log("   （非 macOS，本来就没装）"); return; }
+  console.log("   卸掉 %s，BYOK 地址改回公网直连", ZKD_PLIST);
+  if (dry) return;
+  spawnSync("launchctl", ["unload", ZKD_PLIST], { stdio: "ignore" });
+  try { fs.unlinkSync(ZKD_PLIST); } catch (e) {}
+  try {
+    const pg = spawnSync("pgrep", ["-f", "zk-delta.*sidecar\\.js"], { encoding: "utf8" });
+    const pids = (pg.stdout || "").trim().split("\n").filter(Boolean);
+    if (pids.length) spawnSync("kill", pids);
+  } catch (e) {}
+  console.log("   ✅ 已卸。%s 里的源码没删（想重装不用再解包）。", ZKD_HOME);
 }
 
 /* ── main ── */
@@ -612,7 +771,15 @@ async function main() {
     apply: has("--apply"), revert: has("--revert"), repair: has("--repair"),
     forceVersion: has("--force-version"), pinUpdate: has("--pin-update"),
     key: opt("--key", ""),
-    baseUrl: opt("--base-url", DEFAULT_BASE_URL),
+    // zk-delta：默认**开**。理由是它对上游逐字节透明（重建在 LiteLLM 之前），
+    // 门① 不可能被它破坏，而省的那一跳是同事每天都在付的成本。
+    // 三条退路都验过了（集群挂→回落直连 / 进程挂→KeepAlive / 想彻底退→--no-zk-delta）。
+    zkDelta: !has("--no-zk-delta"),
+    zkDeltaOnly: has("--zk-delta-only"),
+    // 已经在用某个模型的机器（比如我这台基准机是 cursor-web-fc-82-terra），
+    // 不许被安装器顺手换成 cursor-g-5.6-sol —— 换掉选中模型等于换掉量具。
+    keepModel: has("--keep-model") || has("--zk-delta-only"),
+    baseUrl: opt("--base-url", ""),
     models: opt("--models", DEFAULT_MODELS.join(",")).split(",").map((s) => s.trim()).filter(Boolean),
   };
 
@@ -635,12 +802,16 @@ async function main() {
 
   console.log("--- 1) bundle 补丁计划 ---");
   const plans = [];
+  if (args.zkDeltaOnly) {
+    console.log("   跳过（--zk-delta-only：只装小代理 + 改 BYOK 地址，不碰 bundle / 模型 / Key）");
+  } else {
   for (const rel of BUNDLES) { const r = planBundle(rel); if (r) plans.push(r); }
   for (const rel of CHAIN_TARGETS) { const r = planChainBundle(rel); if (r) plans.push(r); }
   console.log("--- 2) 语法校验补后 bundle ---");
   for (const { p, out } of plans) {
     if (!syntaxCheck(out, path.basename(p).split(".")[1])) { console.log("   !! 语法校验不过,终止,未落任何盘。"); process.exit(4); }
     console.log("   syntax OK:", path.basename(p));
+  }
   }
 
   // #4 修复模式:只重打 bundle(配置/Key 在库里,升级不动它们),不碰 config/update.mode/Key。
@@ -652,6 +823,24 @@ async function main() {
     console.log("\n✅ 修复完成,重启 Cursor 即可继续用 cursor-g。");
     return;
   }
+
+  // ── 2.5) zk-delta 小代理。**必须在 mergeConfig 之前**：
+  //    BYOK 地址要不要指到 127.0.0.1，取决于小代理有没有真起来。
+  //    顺序倒过来的后果是：小代理起不来，而地址已经改过去了 → Cursor 直接连不上。
+  console.log("--- 2.5) zk-delta 本机小代理（只发增量到公网）---");
+  let zkdOn = false;
+  if (!args.zkDelta) {
+    zkdUninstall(!args.apply);
+  } else {
+    const r = zkdInstall(!args.apply);
+    zkdOn = !!r.ok;
+    if (!zkdOn && args.apply) console.log("   → 地址保持公网直连（%s），功能不受影响。", DEFAULT_BASE_URL);
+  }
+  // dry-run 下 zkdInstall 返回 {ok:true,dry:true} = "这些前置条件都满足，真跑能装上"；
+  // 返回 ok:false（缺文件 / 非 mac / 起不来）就必须**一路影响到地址**，
+  // 否则会出现"上面说拒绝安装，下面又说地址改成 127.0.0.1"这种自相矛盾的预览。
+  const wantLocal = args.zkDelta && zkdOn;
+  if (!args.baseUrl) args.baseUrl = wantLocal ? ZKD_LOCAL_URL : DEFAULT_BASE_URL;
 
   console.log("--- 3) BYOK 配置差异 ---");
   const oldBlob = await mergeConfig(args, !args.apply);
@@ -677,11 +866,16 @@ async function main() {
   // #2 写 Key:命令行给了 --key 用它,否则 TTY 下提示粘一次;空/非 TTY → 回退手填。
   console.log("--- 5) 写入 API Key ---");
   let rawKey = args.key;
+  if (args.zkDeltaOnly) {
+    console.log("   跳过（--zk-delta-only：Key 已经在库里，不动它）");
+  } else {
   if (!rawKey && process.stdin.isTTY) {
     rawKey = await promptLine("   请粘贴你的 API Key 后回车(直接回车=稍后自己在 Cursor 里填): ");
   }
+  }
   let keyDone = false;
-  if (rawKey) {
+  if (args.zkDeltaOnly) { keyDone = true; }
+  else if (rawKey) {
     const r = await writeOpenAIKey(rawKey, RES, false);
     if (r.ok) { keyDone = true; console.log("   ✅ Key 已写入" + (r.confirmed ? "(方案已用现有 Key 校验一致)" : "")); }
     else console.log("   ⚠️  自动写 Key 跳过:%s —— 请稍后在 Cursor 里手动粘一次。", r.reason);
@@ -689,9 +883,16 @@ async function main() {
     console.log("   (没输入 Key,跳过——稍后在 Cursor 里粘一次即可)");
   }
 
-  console.log("\n✅ 完成。" + (keyDone
+  console.log("\n✅ 完成。" + (args.zkDeltaOnly
+    ? "启动 Cursor 即可，选中的模型没被动过。"
+    : keyDone
     ? "启动 Cursor,模型菜单默认就是 cursor-g-5.6-sol,直接用。"
     : "还差一步:启动 Cursor → Settings → Models → OpenAI API Key,粘贴你的 key 点 Verify。"));
+  if (zkdOn) {
+    console.log("   zk-delta 已开：Cursor → 127.0.0.1:8788 → 公网只发增量。");
+    console.log("     看省了多少: curl -s http://127.0.0.1:8788/metrics.json");
+    console.log("     想退回公网直连: 启动器加 --no-zk-delta（Cursor 要先退出）");
+  }
   console.log("   回滚整包:启动器加 --revert;Cursor 升级后失效:双击 REPAIR 或跑 --repair。");
 }
 

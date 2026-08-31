@@ -169,6 +169,74 @@ PY
   if [[ $? -eq 0 ]]; then ok "计数器全部正常"; else bad "计数器异常（原因见上）"; fi
 fi
 
+# ---------- 7. 容量：离 OOM 还有多远 ----------
+# 为什么这条必须在事故**之前**就能红：
+#   单副本 + 会话状态在进程内存里 → OOMKill 一次是所有人的会话全丢，
+#   而且**不报错**，只是每条会话下一发退化成全量。事后只能从 restartCount 反推，
+#   那时候已经丢过一轮了。所以要盯活的 RSS，不是盯重启次数。
+#
+# 斜率 1.24 的出处：zk-delta/tests/capacity_probe.js 本地实测（08-31，60 条 ~4.6MB 会话，
+#   最小二乘 rss ≈ 175MB + 1.13×store，取相邻点最大边际斜率 1.24 做保守值）。
+#   **不许用 rss/store 这个总倍率**——它被固定基座污染，store 小时会飙到 20x。
+#   从当前这个实测点按边际斜率外推，就不需要猜基座是多少。
+echo
+echo "[7] 容量（离 OOM 还有多远）"
+MEM_LIM="$(jqd 'd["spec"]["template"]["spec"]["containers"][0].get("resources",{}).get("limits",{}).get("memory","")')"
+if [[ -z "$M" ]]; then
+  soft "上一步没读到 /metrics.json，这条跳过"
+elif [[ -z "$MEM_LIM" ]]; then
+  bad "容器没设 memory limit —— 撑爆会连累整个节点（198 有过 disk/mem 压力把 proxy 拖 Pending 的先例）"
+else
+  python3 - "$M" "$MEM_LIM" <<'PY'
+import sys,json,re
+m=json.loads(sys.argv[1]); lim=sys.argv[2]
+mult={"Ki":1024,"Mi":1048576,"Gi":1073741824,"K":1000,"M":10**6,"G":10**9}
+mo=re.match(r'^(\d+)([A-Za-z]*)$', lim)
+if not mo: print(f'  异常：memory limit "{lim}" 解析不了'); sys.exit(1)
+LIM=int(mo.group(1))*mult.get(mo.group(2),1)
+rss=m.get("rss_bytes"); store=m.get("store_bytes",0); cap=m.get("store_max_bytes")
+if rss is None or cap is None:
+    print('  异常：服务端 /metrics.json 里没有 rss_bytes/store_max_bytes —— '
+          '跑的是加这两个字段之前的旧源码，容量这条腿量不了（先 apply.sh 推新源码）')
+    sys.exit(1)
+MB=1048576.0
+K_MARGINAL=1.24          # 出处见上面注释
+HEADROOM=400*MB          # 并发请求各自持有一份重建出的全量 buffer，给它留的空间
+print(f'     limit {LIM/MB:.0f}MB，当前 RSS {rss/MB:.0f}MB（{rss*100/LIM:.0f}%），'
+      f'会话状态 {store/MB:.1f}MB / 上限 {cap/MB:.0f}MB')
+bads=[]; warns=[]
+# 腿一：眼下这一刻的水位
+if rss > LIM*0.85: bads.append(f'RSS 已到 limit 的 {rss*100/LIM:.0f}%（>85%），随时可能 OOMKill')
+elif rss > LIM*0.70: warns.append(f'RSS 到 limit 的 {rss*100/LIM:.0f}%（>70%），该看是不是要调小 ZKD_MAX_BYTES 或加 limit')
+# 腿二：把配的上限**撑满**会怎样。从当前实测点按边际斜率外推。
+proj = rss + K_MARGINAL*max(0, cap-store)
+print(f'     把 {cap/MB:.0f}MB 上限撑满 → RSS ≈ {proj/MB:.0f}MB（按实测边际 {K_MARGINAL}x 外推），'
+      f'再留 {HEADROOM/MB:.0f}MB 给并发全量 buffer')
+if proj+HEADROOM > LIM:
+    want=int((LIM-HEADROOM-rss)/K_MARGINAL/MB + store/MB)
+    bads.append(f'撑满会超 limit（{proj/MB:.0f}+{HEADROOM/MB:.0f} > {LIM/MB:.0f}）→ '
+                f'ZKD_MAX_BYTES 要调到 {want}MB 以下，或把 limit 加上去')
+else:
+    print(f'     ✓ 撑满也在 limit 内')
+# 腿三：条数上限单独拦不住。实测 400 条 × 4.6MB = 1847MB store，早越过 800MB 字节上限。
+avg=m.get("conv_avg_bytes",0); cm=m.get("conv_max",0)
+if avg and cm:
+    conv_only=avg*cm
+    print(f'     条数上限 {cm} × 当前均值 {avg/MB:.2f}MB = {conv_only/MB:.0f}MB '
+          f'{"＞" if conv_only>cap else "≤"} 字节上限 {cap/MB:.0f}MB '
+          f'→ 真正在拦的是{"字节上限（条数上限单独拦不住，两条都得留）" if conv_only>cap else "条数上限，字节上限兜底"}')
+ev=m.get("conv_evicted",0)
+if ev: print(f'     已淘汰 {ev} 条会话（被淘汰那条下一发退化成全量，不出错——这是设计行为，不是故障）')
+for w in warns: print("  留意：" + w)
+for b in bads: print("  异常：" + b)
+sys.exit(1 if bads else (3 if warns else 0))
+PY
+  rc=$?
+  if   [[ $rc -eq 0 ]]; then ok "容量有余量"
+  elif [[ $rc -eq 3 ]]; then soft "容量偏紧（见上）"
+  else bad "容量不安全（见上）"; fi
+fi
+
 # ---------- 汇总 ----------
 echo
 echo "============================================================"

@@ -56,6 +56,24 @@ const M = {
 }
 function bump (obj, k) { obj[k] = (obj[k] || 0) + 1 }
 
+// store_bytes 记的是**序列化后的字节数**，而 store 里实际躺着的是 JS 对象和字符串——
+// 真实 RSS 是它的若干倍，倍率看代码看不出来。这个服务是单副本 + 会话状态在进程内存里，
+// OOMKill 一次就是所有人的会话全丢，而且**不报错**，只是每条会话下一发退化成全量。
+// 所以「离 OOM 还有多远」必须在发生之前就看得见，不能事后从 restartCount 反推。
+// max_bytes / limit 一起吐出来，巡检才判得动「上限设得对不对」。
+function memStats () {
+  const mu = process.memoryUsage()
+  return {
+    store_bytes: storeBytes,
+    store_max_bytes: MAX_BYTES,
+    conv_max: MAX_CONV,
+    rss_bytes: mu.rss,
+    heap_used_bytes: mu.heapUsed,
+    // 单条会话的平均字节数：全员发之后要按人数估容量，靠的就是这个数
+    conv_avg_bytes: store.size ? Math.round(storeBytes / store.size) : 0
+  }
+}
+
 // ---------- 会话存储 ----------
 /** handle -> { items, template, templateDigest, digests, arrayKey, authHash, bytes, ts } */
 const store = new Map()
@@ -300,7 +318,7 @@ const server = http.createServer((req, res) => {
   }
   if (bare === '/metrics.json') {
     M.conv_live = store.size
-    return sendJson(res, 200, Object.assign({}, M, { store_bytes: storeBytes }))
+    return sendJson(res, 200, Object.assign({}, M, memStats()))
   }
   if (bare === '/metrics') {
     M.conv_live = store.size
@@ -309,7 +327,8 @@ const server = http.createServer((req, res) => {
       if (typeof M[k] === 'number') lines.push(`zkd_${k} ${M[k]}`)
     }
     for (const k of Object.keys(M.reject_by_reason)) lines.push(`zkd_reject{reason="${k}"} ${M.reject_by_reason[k]}`)
-    lines.push(`zkd_store_bytes ${storeBytes}`)
+    const mem = memStats()
+    for (const k of Object.keys(mem)) lines.push(`zkd_${k} ${mem[k]}`)
     const b = Buffer.from(lines.join('\n') + '\n', 'utf8')
     res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4', 'content-length': b.length })
     return res.end(b)

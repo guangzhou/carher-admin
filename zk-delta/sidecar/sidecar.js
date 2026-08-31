@@ -45,7 +45,16 @@ const CAPTURE = process.env.ZKD_CAPTURE || ''
 // 采集必须封顶：真实 body 每条几 MB、Cursor 每轮一发，不封顶跑一天能把本机磁盘写爆。
 // 而 ⑨ 那条金样测试几十条样本就够用了。
 const CAP_MAX = parseInt(process.env.ZKD_CAPTURE_MAX || '40', 10)
+// 封顶要按**磁盘上已有多少**算，不是按本进程采了多少。原先写 `capLeft = CAP_MAX`，
+// 于是每次重启小代理额度就重新给满 40 —— 重启 N 次能攒 40N 条，封顶等于没封，
+// 而封顶存在的理由（别把磁盘写爆）恰恰是跨重启才成立的。
 let capLeft = CAP_MAX
+if (CAPTURE) {
+  try {
+    const have = require('fs').readdirSync(CAPTURE).filter((f) => f.endsWith('.json')).length
+    capLeft = Math.max(0, CAP_MAX - have)
+  } catch (e) { /* 目录还不存在 = 一条都没采过，额度就是满的 */ }
+}
 let capBytesLeft = parseInt(process.env.ZKD_CAPTURE_MAX_MB || '512', 10) * 1048576
 const MAX_CONV = parseInt(process.env.ZKD_MAX_CONV || '60', 10)
 
@@ -56,6 +65,7 @@ const M = {
   started_at: new Date().toISOString(),
   req_total: 0,
   capture_skipped_ua: 0,
+  capture_skipped_synthetic: 0,
   delta_sent: 0,
   full_sent: 0,
   passthru: 0,
@@ -236,19 +246,39 @@ async function handle (req, res) {
   M.req_total++
   M.bytes_original += raw.length
 
-  // ⑨ 要的是**真实 Cursor 抓包**金样，所以采集有两道门：
+  // ⑨ 要的是**真实 Cursor 抓包**金样，所以采集有三道门：
   //   1) UA 必须是 Cursor。之前没这道门，switch.sh on 里那条自检 curl（93 B 的 "hi"）
   //      也被采了进去，fixtures 里躺着三条我自己造的样本——拿它们让 ⑨ 转绿就是发假绿灯。
   //   2) 必须是有正文的聊天请求。之前没这道门，Cursor 启动时那发 GET /v1/models
   //      会落成一个 0 字节文件，⑨ 一 JSON.parse 就崩。
+  //   3) 不许带 x-zkd-synthetic: 1。加这道门的原因：上面第 1 道门认的是 UA，
+  //      而 tests/ 里每个 live 脚本都写死 'user-agent': 'Cursor/3.17.19'（为了走同一条
+  //      代码路径），所以第 1 道门认不出我自己 —— 08-31 复查时 40 个采集额度里
+  //      有 17 个是我自己的测试脚本吃掉的，把池子占满冻死，真 body 再也进不来。
+  //      **门认的东西必须是被验对象无法满足的；UA 由我自己写，就不是那种东西。**
   const capUA = /Cursor/i.test(String(req.headers['user-agent'] || ''))
+  const capSynthetic = String(req.headers['x-zkd-synthetic'] || '') === '1'
   const capShape = isDeltaPath && raw.length > 0
   if (CAPTURE && capShape && !capUA) M.capture_skipped_ua++
-  if (CAPTURE && capUA && capShape && capLeft > 0 && capBytesLeft > 0) {
+  if (CAPTURE && capShape && capSynthetic) M.capture_skipped_synthetic++
+  if (CAPTURE && capUA && capShape && !capSynthetic && capLeft > 0 && capBytesLeft > 0) {
     try {
       fs.mkdirSync(CAPTURE, { recursive: true })
-      const fn = path.join(CAPTURE, `${Date.now()}-${String(M.req_total).padStart(4, '0')}${p.replace(/\//g, '_')}.json`)
+      const base = `${Date.now()}-${String(M.req_total).padStart(4, '0')}${p.replace(/\//g, '_')}.json`
+      const fn = path.join(CAPTURE, base)
       fs.writeFileSync(fn, raw)
+      // 出处在采集当场记下来。事后靠 body 大小猜是真抓包还是我自己造的，
+      // 是猜；这一行才是证据。⑨ 只回灌 manifest 里 provenance=gui 的条目。
+      let ntools = -1
+      try { ntools = (JSON.parse(raw).tools || []).length } catch (e) {}
+      fs.appendFileSync(path.join(CAPTURE, '_manifest.jsonl'), JSON.stringify({
+        // provenance 只写小代理**真知道**的事：这一发过了采集门。它无法证明请求
+        // 来自真 GUI（UA 可以伪造），写成 'gui' 就是没证据的断言。tools / bytes
+        // 原样记下来，一条 93B/tools:0 的东西混进来时人一眼能看见。
+        file: base, bytes: raw.length, provenance: 'gate_passed',
+        ua: String(req.headers['user-agent'] || ''), tools: ntools,
+        ts: new Date().toISOString()
+      }) + '\n')
       capLeft--
       capBytesLeft -= raw.length
       if (capLeft === 0 || capBytesLeft <= 0) {

@@ -49,7 +49,9 @@ function post (port, p, body, headers) {
       'content-type': 'application/json',
       'content-length': b.length,
       'authorization': 'Bearer sk-test-zkd',
-      'user-agent': 'Cursor/3.17.19'
+      'user-agent': 'Cursor/3.17.19',
+      // 我不是真 Cursor：这行让采集门认出我，别把测试流量攒成 ⑨ 的金样
+      'x-zkd-synthetic': '1'
     }, headers || {})
   }, b)
 }

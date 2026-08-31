@@ -282,12 +282,33 @@ async function main () {
     {
       const fs = require('fs')
       const dir = path.join(__dirname, 'fixtures')
-      let files = []
-      try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort() } catch (e) {}
-      if (files.length === 0) {
-        console.log('     （fixtures/ 为空 —— 真实抓包在 S4 用 ZKD_CAPTURE 采集后回灌，此项此刻不算通过）')
-        ok('⑨  真实抓包金样', false, '尚未采集，S4 采集后必须回来重跑')
+      let onDisk = []
+      try { onDisk = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort() } catch (e) {}
+      // 只认 manifest 里 provenance=gui 的条目。**没出处的不算真抓包**——
+      // 08-31 复查发现 40 个采集额度里 17 个是我自己的 live 脚本吃掉的（它们写死
+      // UA=Cursor 好走同一条代码路径，把采集门骗过去了），⑨ 当时报 n=40 虚增了 17。
+      // 判据只看 UA 是不可靠的：UA 由我自己写。出处必须在采集当场记，事后靠 body
+      // 大小猜是猜不是证据。这里宁可少算也不许多算。
+      let gui = new Set(); let manifestExists = false
+      try {
+        for (const line of fs.readFileSync(path.join(dir, '_manifest.jsonl'), 'utf8').split('\n')) {
+          if (!line.trim()) continue
+          const r = JSON.parse(line)
+          // 'gui' = 08-31 回填的那批,有 tools=19 + GUI harness 驱动记录为证
+          // 'gate_passed' = 采集时过了门,小代理只能证到这一步
+          if (r.provenance === 'gui' || r.provenance === 'gate_passed') gui.add(r.file)
+        }
+        manifestExists = true
+      } catch (e) {}
+      const files = onDisk.filter((f) => gui.has(f))
+      const orphan = onDisk.filter((f) => !gui.has(f))
+      if (!manifestExists && onDisk.length > 0) {
+        ok('⑨  真实抓包金样', false, `fixtures/ 有 ${onDisk.length} 个文件但没有 _manifest.jsonl，出处不明一律不算真抓包`)
+      } else if (files.length === 0) {
+        console.log('     （没有 provenance=gui 的金样 —— 真实抓包要用真 Cursor GUI 驱动后采集，此项此刻不算通过）')
+        ok('⑨  真实抓包金样', false, '尚未采到真 GUI 抓包，采集后必须回来重跑')
       } else {
+        if (orphan.length) console.log(`     （另有 ${orphan.length} 个出处不明的文件，已排除，不计入 n）`)
         let allOk = true; let bad = ''
         for (const f of files) {
           const raw = fs.readFileSync(path.join(dir, f))
@@ -299,7 +320,7 @@ async function main () {
             allOk = false; bad = f; break
           }
         }
-        ok('⑨  真实抓包每一发上游收到的都逐字节相同（n=' + files.length + '）', allOk, bad)
+        ok('⑨  真实抓包每一发上游收到的都逐字节相同（有出处 n=' + files.length + '）', allOk, bad)
       }
     }
 

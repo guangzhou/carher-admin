@@ -128,6 +128,17 @@ ZKD_SSH_PASS=... ./zk-delta/k8s/apply.sh --dry-run
 ZKD_SSH_PASS=... ./zk-delta/k8s/apply.sh
 ```
 
+**步骤 0 是回归门**：`apply.sh` 先跑 `tests/run.js`，退出码不为 0 就不推。
+这道门不能用 `node --check` 代替——语法检查只证明文件能被 parse，证明不了
+**重建出来的字节还对**，而那是这个服务的全部价值。实测：往 `framing.js` 注入
+一个行为性错误（重建时丢掉最后一条 item），`node --check` 照样过，回归门拦住
+（退出码 1，日志里「传源码到 198」出现 0 次）。`ZKD_SKIP_TESTS=1` 是救火开关，
+会大声打印，正常上线不该出现。
+
+**推之前先算代价**：`Recreate` + 单副本 ⇒ 活着的会话丢掉内存里的 handle，
+每条下一发退化成一次全量重发（设计行为，不是故障）。先读 `/metrics.json` 的
+`req_total`，与上次读数相同说明期间没有新流量，那些会话是自己的，随便重启。
+
 刻意不建新镜像：代码是纯 Node 标准库，复用节点上已有的 `zerokey-codex` 镜像，
 源码用 ConfigMap 挂进去，`imagePullPolicy: Never`。既不用在构建服务器出镜像，也不碰公网仓库。
 

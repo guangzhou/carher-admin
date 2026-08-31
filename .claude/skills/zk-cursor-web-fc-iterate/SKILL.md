@@ -138,7 +138,7 @@ null 把它废了）。命中复用时只发 conv id + 新增 items，上文由�
 
 | 组件 | 作用 | 关键约束 |
 |---|---|---|
-| SHA-1 逐项指纹（`_itemDigest`） | **本地防错闸，不出网关**：缓存记上轮每条 item 指纹，下轮逐项比对前缀，全等才敢增量 | cache key 只用稳定锚点 `sha1(input[0])+sha1(instructions)`——**input[1] 之后每轮都变，进 key 必永久 miss**（踩过）；正确性靠 find 时逐项前缀校验 |
+| SHA-1 逐项指纹（`_itemDigest`） | **本地防错闸，不出网关**：缓存记上轮每条 item 指纹，下轮逐项比对前缀，全等才敢增量 | **不做单键查表**（2026-08-31 改）：在所有候选里找「是当前 items 的**严格前缀**且最长」那条，等长再按 `ts` 取最近；缓存槽键 = `convId` |
 | `conversation_id`/`parentId`（`_cvSeen`/`_pmSeen`） | 续会话线索，`finish()` 时 `saveConvSession` 存入缓存 | **重试/fallback 轮开的新交换必须回传 id 重存**（r15），否则下轮 fork 回旧分支，模型看不见自己上轮说的话 |
 | 增量 `_convDelta` | `input.slice(count)` 后 `_stripAssistantItems`（剔 assistant/reasoning/function_call，留工具结果+新用户消息） | 增量轮无新 `<user_query>` 时要换 continue 框架语（r11） |
 
@@ -151,7 +151,33 @@ captured 会话，换号必伴随 pod 重启/session 重抓，两条路都自然
 
 日志判读：`[conv] saved items=N conv=xxx`=全量后建会话存指纹；
 `[conv] delta send K new items, M chars`=增量真省了（客户端全量几万字符只透传 M）；
-`[conv] delta send failed -> full resend`=失效兜底触发（该分支尚无 live 样本，代码层保证）。
+`[conv] delta send failed -> full resend`=失效兜底触发（该分支尚无 live 样本，代码层保证）；
+`[conv] miss items=… cands=… stale=… notprefix=… mismatch=…`=没命中及其原因
+（`items<=2` 的 miss 是**真·新会话**，正常；`items>2` 的 miss 才是断链）。
+
+> ⚠️ **`delta send … M chars` 是 `execenv-strip` 之前的数**。判门①要看后一行
+> `[execenv-strip] M -> M' chars` 里的 **M'** 才是实发上游的量。实测同一轮
+> `delta send 660 chars` → `execenv-strip 660 -> 145 chars`，拿 660 判门①会误判成膨胀。
+> 另有 `[proto2] v2 contract DIET-ZERO (delta turn, 0c vs 3019c full)`=增量轮完全不发契约。
+
+### key 的构成：踩过两次，别再回去（2026-08-31）
+
+1. **不许把 `instructions` 放进 key**。它来自 `req.body`、由 Cursor 客户端产生、
+   同一个 chat 内隔几轮就变。key 一变 `get()` 直接 `undefined`，**连逐项前缀校验都走不到**，
+   判成首轮 → 全量重发 → 网页新开会话。实测 19h/63 条会话里 12 条由此产生。
+   附带矛盾：复用路径是 `flattenInput(..., null)`，`instructions` 压根不发上游——
+   它被当"稳定锚点"写进 key，却既不稳定、也不参与复用路径的内容。
+2. **也不许 key 只留 `input[0]`**。Cursor 每条会话第 0 条框架消息都一样，
+   所有 chat 会撞成同一个槽互相覆盖，比现状更糟（`zk-delta/common/framing.js` 注释里
+   写过这条）。
+3. **等长前缀平局必须按 `ts` 取最近**。两条会话有等长严格前缀不是理论问题——
+   同一句开场白问两次就够了；平局取先遇到的那条会把新一轮接到旧会话上（实测抓到）。
+
+改 key 的构成前先跑 `scripts/zk-cursor-web/conv_prefix_offline_cases.js`（13 组 41 断言，
+从产物里逐字抠真函数体 eval 驱动）；现场验收用
+`scripts/zk-cursor-web/conv_prefix_live_probe.py`（多轮 + 每轮换 instructions），
+但**合成绿不算数**，真验收在真 Cursor 一条 chat 连问 ≥8 轮看是不是全程一个 convId。
+详见 `docs/conv-reuse-prefix-match-20260831.md`。
 
 ### 官方口径核对（2026-08-22，platform.openai.com/docs/guides/conversation-state 原文）
 

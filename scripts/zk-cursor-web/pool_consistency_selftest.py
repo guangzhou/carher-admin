@@ -8,9 +8,14 @@
   ① 正常     → 必须 PASS(退出码 0)
   ② CM 内容改一个字节 → A 段必须 FAIL(证明它比的是字节,不是"我记得重启过")
   ③ DB 里插一条指向 lane 99 的别名 → B 段必须报 dangling FAIL(证明池覆盖真在算差集)
+  ④ 基线 env(带允许清单)→ 必须 PASS
+  ⑤ 给某条 lane 塞一个别人没有的 env → C 段必须 FAIL(证明它真在逐项比众数)
+  ⑥ 把允许清单清空 → C 段必须 FAIL(证明 101 那 15 条分歧是被**允许清单**放行的,
+     不是 C 段压根没看见 —— 否则允许清单等于装饰)
 
 用法: python3 scripts/zk-cursor-web/pool_consistency_selftest.py
 """
+import copy
 import importlib.util
 import os
 import sys
@@ -64,6 +69,30 @@ pc.sh = sh_dangling
 ok_b3 = pc.check_pool(lanes)
 pc.sh = ORIG_SH
 record('dangling-lane-must-fail', ok_b3, False)
+
+print('\n④ 基线 env(带 ACCEPTED_ENV_DRIFT 允许清单)')
+deploys = ORIG_KJSON('get deploy')['items']
+record('baseline-env-pass', pc.check_env(copy.deepcopy(deploys)), True)
+
+print('\n⑤ 注入:某条 lane 多一个别人没有的 env(未决策)')
+d5 = copy.deepcopy(deploys)
+victim = None
+for d in d5:
+    vols = d['spec']['template']['spec'].get('volumes') or []
+    if any((v.get('configMap') or {}).get('name') == pc.CM for v in vols):
+        victim = d['metadata']['name']
+        d['spec']['template']['spec']['containers'][0].setdefault('env', []).append(
+            {'name': 'ZK_SELFTEST_DRIFT', 'value': '1'})
+        break
+print('  (被注入的 lane = %s)' % victim)
+record('undecided-env-drift-must-fail', pc.check_env(d5), False)
+
+print('\n⑥ 注入:清空允许清单 → 真实存在的 101 分歧必须变红')
+saved = dict(pc.ACCEPTED_ENV_DRIFT)
+pc.ACCEPTED_ENV_DRIFT = {}
+ok_c6 = pc.check_env(copy.deepcopy(deploys))
+pc.ACCEPTED_ENV_DRIFT = saved
+record('empty-allowlist-must-fail', ok_c6, False)
 
 print('\n' + '=' * 72)
 bad = [r for r in results if not r[1]]

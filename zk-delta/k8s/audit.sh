@@ -133,7 +133,7 @@ if [[ -z "$M" ]]; then
   bad "/metrics.json 读不到"
 else
   python3 - "$M" <<'PY'
-import sys,json
+import sys,json,time
 m=json.loads(sys.argv[1])
 tot=m.get("req_total",0); r409=m.get("reject_409",0)
 non2=m.get("upstream_non2xx",0); rb=m.get("rebuild_ok",0)
@@ -143,7 +143,7 @@ print(f'     请求 {tot}（增量 {m.get("req_delta",0)} / 全量 {m.get("req_f
 if bi: print(f'     广域网收进 {bi/1048576:.2f}MB → 内网发出 {bo/1048576:.2f}MB = 放大 {bo/bi:.1f}x')
 print(f'     活跃会话 {m.get("conv_live",0)}，被挤掉 {m.get("conv_evicted",0)}，'
       f'状态占用 {m.get("store_bytes",0)/1048576:.2f}MB')
-bads=[]
+bads=[]; warns=[]
 if tot and rb != tot - r409:
     bads.append(f'重建成功 {rb} != 请求 {tot} - 409 {r409}：有请求既没重建也没被拒，说明有第三条路径')
 # 非 2xx 按状态码分开判，别一锅炖：
@@ -156,17 +156,49 @@ if byst:
     auth=sum(v for k,v in byst.items() if k in ("401","403"))
     hard={k:v for k,v in byst.items() if k not in ("401","403")}
     if auth: print(f'     其中 {auth} 发是 401/403（凭据问题，非漂移，不计入异常）')
-    if hard: bads.append(f'上游硬失败 {json.dumps(hard, ensure_ascii=False)}（400 尤其要查）')
+    if hard:
+        # 计数器是累计的，"一次历史事故"和"正在持续出事"长得一样，一发 413 会让巡检永远红下去
+        # 直到有人重启 pod —— 警报关不掉等于没有警报。所以用服务端补的两个字段问一句
+        # "它还在发生吗"：最后一发硬失败多久以前、之后连续多少发是干净的。
+        # **不是把阈值放松**：400 依旧一发就红（那是我们专门在猎的形状），
+        # 判为"历史事件"的门也开得很紧（≥100 发连续干净 且 ≥2 小时没再犯），
+        # 而且降级成 ! 之后照样每次都把它打出来，不会让人忘了它发生过。
+        #
+        # 一条要自己知道的话：计数器活在进程里，pod 一重启就全部归零，
+        # 历史那发 413 会**直接消失**而不是被这段逻辑判成历史事件。
+        # 所以推完新版之后看到的绿，是"计数器被清空"的绿，不是"这段逻辑生效"的绿。
+        # 这段逻辑真正管的是**下一次**——服务跑着跑着偶发一发硬失败，
+        # 巡检不会因此永远红到有人去重启它。
+        at=m.get("upstream_last_hard_at") or 0
+        okc=m.get("upstream_ok_since_hard")
+        desc=json.dumps(hard, ensure_ascii=False)
+        if "400" in hard:
+            bads.append(f'上游硬失败 {desc} —— 含 400，这是要盯死的那个形状，一发都要查')
+        elif at and okc is not None:
+            ago=(time.time()*1000-at)/3600000.0
+            if okc>=100 and ago>=2:
+                warns.append(f'上游硬失败 {desc}，但最后一发在 {ago:.1f} 小时前，'
+                             f'之后连续 {okc} 发全 2xx —— 按历史事件处理，不是正在发生')
+            else:
+                bads.append(f'上游硬失败 {desc}（最后一发 {ago:.1f} 小时前，'
+                            f'之后只有 {okc} 发干净，还不能判定已经过去）')
+        else:
+            bads.append(f'上游硬失败 {desc}（该服务端版本没有 upstream_last_hard_at，'
+                        f'分不清是历史一次还是正在持续）')
 elif non2:
     # 老版本服务端没有 upstream_by_status，退回粗判，免得静默放过
     bads.append(f'上游非 2xx {non2} 发（该服务端版本没有分状态码计数，无法细分）')
 if tot >= 20 and r409 / tot > 0.30:
     bads.append(f'409 占比 {r409*100/tot:.0f}% > 30%：基线一直在失效，收益会被吃光')
 if m.get("reject_by_reason"): print("     拒绝原因分布：", json.dumps(m["reject_by_reason"], ensure_ascii=False))
+for w in warns: print("  留意：" + w)
 for b in bads: print("  异常：" + b)
-sys.exit(1 if bads else 0)
+sys.exit(1 if bads else (3 if warns else 0))
 PY
-  if [[ $? -eq 0 ]]; then ok "计数器全部正常"; else bad "计数器异常（原因见上）"; fi
+  rc=$?
+  if   [[ $rc -eq 0 ]]; then ok "计数器全部正常"
+  elif [[ $rc -eq 3 ]]; then soft "计数器有历史事件，但当下没在发生（见上）"
+  else bad "计数器异常（原因见上）"; fi
 fi
 
 # ---------- 7. 容量：离 OOM 还有多远 ----------

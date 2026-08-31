@@ -49,6 +49,13 @@ const M = {
   // 400 才是要盯死的那个形状（Cursor 长会话撞入口闸门那条线）；5xx 是真出事。
   // 混成一个数的后果：巡检见 401 就报漂移，喊几次狼之后就没人看了。
   upstream_by_status: {},
+  // 计数器是**累计**的，没有时间信息，于是"一次历史事故"和"正在持续出事"长得一模一样：
+  // 一发 413 会让巡检永远红下去，直到有人重启 pod。那正是上面那句"喊几次狼就没人看了"
+  // 的另一种形状——只不过这次是狼真来过一次，然后警报再也关不掉。
+  // 所以补两个字段让巡检能问"它还在发生吗"：最后一发硬失败是什么时候、之后连续多少发是干净的。
+  // 注意 401/403 不进这两个字段（它们本来就不算硬失败），否则语义又被稀释了。
+  upstream_last_hard_at: 0,   // epoch ms；0 = 从来没有过
+  upstream_ok_since_hard: 0,  // 自最后一发硬失败以来连续 2xx 的发数
   bytes_in: 0,          // 客户端 → 本服务（广域网这一跳）
   bytes_out: 0,         // 本服务 → LiteLLM（集群内这一跳）
   conv_live: 0,
@@ -172,8 +179,14 @@ function forward (req, res, path, bodyBuf, extraRespHeaders) {
   }
 
   const ureq = upMod.request(opts, (ures) => {
-    if (ures.statusCode >= 200 && ures.statusCode < 300) M.upstream_2xx++
-    else { M.upstream_non2xx++; bump(M.upstream_by_status, String(ures.statusCode)) }
+    if (ures.statusCode >= 200 && ures.statusCode < 300) { M.upstream_2xx++; M.upstream_ok_since_hard++ }
+    else {
+      M.upstream_non2xx++; bump(M.upstream_by_status, String(ures.statusCode))
+      // 401/403 是凭据问题，不算硬失败，不重置"从上次硬失败以来干净了多少发"这个计数
+      if (ures.statusCode !== 401 && ures.statusCode !== 403) {
+        M.upstream_last_hard_at = Date.now(); M.upstream_ok_since_hard = 0
+      }
+    }
     const h = Object.assign({}, ures.headers, extraRespHeaders || {})
     delete h['transfer-encoding']
     delete h['connection']

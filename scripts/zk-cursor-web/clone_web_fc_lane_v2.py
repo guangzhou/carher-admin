@@ -121,16 +121,24 @@ def api_base_of(acct):
 
 # ── 登录态:live token 经 ssh stdin 传,绝不进 argv/命令串 ──
 def refresh_seed_from_ws(acct):
-    A_out, _, _ = kubectl("get pod -l app=chatgpt-acct-%s -o jsonpath={.items[0].metadata.name}" % acct)
+    # ⚠️ 必须钉 Running:acct pod 常留着几个 Failed 的旧 ReplicaSet 残骸(acct-85 实测 2 Failed
+    # + 1 Running),取 items[0] 会挑到 Failed 那个 → exec 出空串 → 报成"auth.json 读不出",
+    # 看起来像"token 坏了"其实是挑错了 pod。
+    A_out, _, _ = kubectl("get pod -l app=chatgpt-acct-%s --field-selector=status.phase=Running "
+                          "-o jsonpath={.items[0].metadata.name}" % acct)
     A = A_out.strip()
     if not A:
-        print("!! chatgpt-acct-%s pod 不存在 → 前提 A 不满足;走前提 B(手抓 seed),去掉 --live-from-ws" % acct)
+        print("!! chatgpt-acct-%s 没有 Running 的 pod → 前提 A 不满足;"
+              "走前提 B(手抓 seed),去掉 --live-from-ws" % acct)
         sys.exit(1)
-    tok_out, _, _ = kubectl("exec %s -- sh -c 'cat /chatgpt-auth/auth.json'" % A)
+    tok_out, tok_err, _ = kubectl("exec %s -- sh -c 'cat /chatgpt-auth/auth.json'" % A)
+    if not tok_out.strip():
+        print("!! acct-%s pod %s 上 /chatgpt-auth/auth.json 读出空(不是 token 坏,是没读到):%s"
+              % (acct, A, (tok_err or "")[:200])); sys.exit(1)
     try:
         live = json.loads(tok_out)["access_token"]
     except Exception as e:
-        print("!! 读 acct-%s /chatgpt-auth/auth.json 失败:%s" % (acct, e)); sys.exit(1)
+        print("!! 解析 acct-%s /chatgpt-auth/auth.json 失败:%s" % (acct, e)); sys.exit(1)
     # python -c 内联脚本(无秘密);token 只经 ssh stdin 进 remote python 的 sys.stdin
     py = (
         "import json,sys;"

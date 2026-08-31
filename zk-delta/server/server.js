@@ -45,6 +45,10 @@ const M = {
   reject_by_reason: {},
   upstream_2xx: 0,
   upstream_non2xx: 0,
+  // 非 2xx 不能一锅炖。401/403 是客户端凭据问题，我们只是忠实透传，不算 zk-delta 的毛病；
+  // 400 才是要盯死的那个形状（Cursor 长会话撞入口闸门那条线）；5xx 是真出事。
+  // 混成一个数的后果：巡检见 401 就报漂移，喊几次狼之后就没人看了。
+  upstream_by_status: {},
   bytes_in: 0,          // 客户端 → 本服务（广域网这一跳）
   bytes_out: 0,         // 本服务 → LiteLLM（集群内这一跳）
   conv_live: 0,
@@ -151,7 +155,7 @@ function forward (req, res, path, bodyBuf, extraRespHeaders) {
 
   const ureq = upMod.request(opts, (ures) => {
     if (ures.statusCode >= 200 && ures.statusCode < 300) M.upstream_2xx++
-    else M.upstream_non2xx++
+    else { M.upstream_non2xx++; bump(M.upstream_by_status, String(ures.statusCode)) }
     const h = Object.assign({}, ures.headers, extraRespHeaders || {})
     delete h['transfer-encoding']
     delete h['connection']

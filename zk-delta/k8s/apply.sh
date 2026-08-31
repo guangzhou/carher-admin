@@ -45,10 +45,27 @@ fi
 
 # ---- 1. 传源码 + 建 ConfigMap ----
 # 走 base64 而不是直接 heredoc：源码里有引号、反斜杠、中文注释，heredoc 一路转义太脆。
+# 语法在本地查（198 上没装 node），传过去之后比 sha256 —— 那才是这一跳真正要证的事：
+# 落在 198 上的字节和本地一模一样。
+echo "==> 本地语法检查"
+node --check "$ROOT/common/framing.js" || { echo "framing.js 语法不过"; exit 1; }
+node --check "$ROOT/server/server.js"  || { echo "server.js 语法不过"; exit 1; }
+echo "  两个文件都过了 node --check"
+
 echo "==> 传源码到 198"
 B64_F="$(base64 < "$ROOT/common/framing.js" | tr -d '\n')"
 B64_S="$(base64 < "$ROOT/server/server.js" | tr -d '\n')"
-r198 "mkdir -p /tmp/zkd-src && echo '$B64_F' | base64 -d > /tmp/zkd-src/framing.js && echo '$B64_S' | base64 -d > /tmp/zkd-src/server.js && node --check /tmp/zkd-src/framing.js && node --check /tmp/zkd-src/server.js && echo '  两个文件都过了 node --check'"
+SHA_F="$(shasum -a 256 < "$ROOT/common/framing.js" | cut -d' ' -f1)"
+SHA_S="$(shasum -a 256 < "$ROOT/server/server.js" | cut -d' ' -f1)"
+r198 "mkdir -p /tmp/zkd-src && echo '$B64_F' | base64 -d > /tmp/zkd-src/framing.js && echo '$B64_S' | base64 -d > /tmp/zkd-src/server.js"
+REMOTE_SHA="$(r198 "sha256sum /tmp/zkd-src/framing.js /tmp/zkd-src/server.js | cut -d' ' -f1 | tr '\n' ' '")"
+if [[ "$REMOTE_SHA" != *"$SHA_F"* || "$REMOTE_SHA" != *"$SHA_S"* ]]; then
+  echo "!! 传过去的字节和本地不一致，停"
+  echo "   本地 framing=$SHA_F server=$SHA_S"
+  echo "   198  $REMOTE_SHA"
+  exit 1
+fi
+echo "  sha256 与本地一致"
 
 echo "==> 重建 ConfigMap zk-delta-src"
 K "create configmap zk-delta-src --from-file=framing.js=/tmp/zkd-src/framing.js --from-file=server.js=/tmp/zkd-src/server.js --dry-run=client -o yaml" > /tmp/zkd-cm.yaml

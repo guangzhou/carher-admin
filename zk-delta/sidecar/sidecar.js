@@ -55,6 +55,7 @@ const uUrl = new URL(UPSTREAM)
 const M = {
   started_at: new Date().toISOString(),
   req_total: 0,
+  capture_skipped_ua: 0,
   delta_sent: 0,
   full_sent: 0,
   passthru: 0,
@@ -235,7 +236,15 @@ async function handle (req, res) {
   M.req_total++
   M.bytes_original += raw.length
 
-  if (CAPTURE && capLeft > 0 && capBytesLeft > 0) {
+  // ⑨ 要的是**真实 Cursor 抓包**金样，所以采集有两道门：
+  //   1) UA 必须是 Cursor。之前没这道门，switch.sh on 里那条自检 curl（93 B 的 "hi"）
+  //      也被采了进去，fixtures 里躺着三条我自己造的样本——拿它们让 ⑨ 转绿就是发假绿灯。
+  //   2) 必须是有正文的聊天请求。之前没这道门，Cursor 启动时那发 GET /v1/models
+  //      会落成一个 0 字节文件，⑨ 一 JSON.parse 就崩。
+  const capUA = /Cursor/i.test(String(req.headers['user-agent'] || ''))
+  const capShape = isDeltaPath && raw.length > 0
+  if (CAPTURE && capShape && !capUA) M.capture_skipped_ua++
+  if (CAPTURE && capUA && capShape && capLeft > 0 && capBytesLeft > 0) {
     try {
       fs.mkdirSync(CAPTURE, { recursive: true })
       const fn = path.join(CAPTURE, `${Date.now()}-${String(M.req_total).padStart(4, '0')}${p.replace(/\//g, '_')}.json`)

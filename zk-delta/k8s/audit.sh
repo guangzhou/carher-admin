@@ -146,7 +146,20 @@ print(f'     活跃会话 {m.get("conv_live",0)}，被挤掉 {m.get("conv_evicte
 bads=[]
 if tot and rb != tot - r409:
     bads.append(f'重建成功 {rb} != 请求 {tot} - 409 {r409}：有请求既没重建也没被拒，说明有第三条路径')
-if non2: bads.append(f'上游非 2xx {non2} 发')
+# 非 2xx 按状态码分开判，别一锅炖：
+#   401/403 = 客户端凭据问题（比如 switch.sh 自检不带 Key），我们只是忠实透传，不是漂移；
+#   400     = 要盯死的那个形状（Cursor 长会话撞入口闸门那条线），一发都要报；
+#   其余 4xx/5xx = 真出事。
+byst=m.get("upstream_by_status") or {}
+if byst:
+    print("     上游非2xx 分布：", json.dumps(byst, ensure_ascii=False))
+    auth=sum(v for k,v in byst.items() if k in ("401","403"))
+    hard={k:v for k,v in byst.items() if k not in ("401","403")}
+    if auth: print(f'     其中 {auth} 发是 401/403（凭据问题，非漂移，不计入异常）')
+    if hard: bads.append(f'上游硬失败 {json.dumps(hard, ensure_ascii=False)}（400 尤其要查）')
+elif non2:
+    # 老版本服务端没有 upstream_by_status，退回粗判，免得静默放过
+    bads.append(f'上游非 2xx {non2} 发（该服务端版本没有分状态码计数，无法细分）')
 if tot >= 20 and r409 / tot > 0.30:
     bads.append(f'409 占比 {r409*100/tot:.0f}% > 30%：基线一直在失效，收益会被吃光')
 if m.get("reject_by_reason"): print("     拒绝原因分布：", json.dumps(m["reject_by_reason"], ensure_ascii=False))

@@ -71,6 +71,12 @@ ACCEPTED_ENV_DRIFT = {
               'ZK_STRIP_UQ', 'ZK_STRIP_GENUI', 'ZK_EMPTY_RETRY', 'ZK_CONV_PERSIST',
               'ZK_URL_PRIOR', 'ZK_URL_DEBUG', 'ZK_MCP_REL_WATCHDOG_MS')
 }
+# 2026-09-01 灰度中:act-kick v3(执行机制显式化文案)先只在 85 开,同窗口交错 A/B
+# 对照 83(旧文案)。**这条是临时的** —— 灰度收敛后要么六条全开(那时它不再是 drift,
+# 本条必须删掉,否则就成了消音器),要么 unset 回滚。见
+# memory project_proto2_act_retry_rescue_gap_2026_09_01。
+ACCEPTED_ENV_DRIFT[('zero-cursor-bpi-85', 'ZK_ACT_KICK2')] = (
+    '09-01 act-kick v3 单 lane 灰度中,对照 83;收敛后本条必删')
 
 
 def sh(cmd, timeout=180):

@@ -73,10 +73,12 @@ chmod +x "$STAGE/INSTALL-Mac.command" "$STAGE/REPAIR-Mac.command" "$STAGE/TURN-O
 cat > "$STAGE/README.txt" <<'RD'
 cursor-g 一键安装(零依赖,不用装 Python / Node)
 
-━━━ 已经装过的同事:请双击一次 REPAIR-Mac.command(Windows: REPAIR-Windows.cmd)━━━
+━━━ 已经装过的同事:请重新跑一次 INSTALL(不是 REPAIR)━━━
   8-31 那版里有一个"链式增量"的实验补丁,它的服务端那半已经下线了,留在客户端会让
   机房那边少收到一部分对话上下文(不报错、但模型可能忘事)。本版会自动把它摘掉。
-  你的 Key、配置、选中的模型都不动;摘完重启 Cursor 即可。要先完全退出 Cursor。
+  另外本版还更新了省流量的小代理(会话匹配的一处边界情况)。
+  **这两件事只有 INSTALL 全做,REPAIR 只重打 Cursor 补丁、不更新小代理。**
+  Key 那一步直接回车跳过就行,你的 Key、配置都不会丢。要先完全退出 Cursor(Cmd+Q)。
 
 准备:
   1) 先拿到你的 API Key(找管理员,或用飞书「个人账户」表查)。

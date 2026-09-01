@@ -93,7 +93,12 @@ function proveRoundTrip (rawBuf) {
 
 /** 在候选会话里找「是当前 items 的严格前缀」且最长的那一个。
  *  刻意不按 messages[0] 建索引 —— Cursor 每条会话的第 0 条框架消息都一样，
- *  按它建索引会让所有会话撞成同一个 key（这正是网关旧 _convKeyOf 的缺陷）。 */
+ *  按它建索引会让所有会话撞成同一个 key（这正是网关旧 _convKeyOf 的缺陷）。
+ *
+ *  等长平局按 ts 取最近（2026-09-01 补）：两条会话有等长严格前缀不是理论问题——
+ *  同一句开场白问两次就够了。convList() 是 Map 插入序（旧的在前），平局取先遇到的
+ *  那条 = 取到**旧会话**，新一轮会被接到旧分支上。网关侧同款写法当天被实测抓出真
+ *  bug（见 memory feedback_prefix_match_tie_break_by_recency），这里是同一个缺陷。 */
 function findLongestPrefix (candidates, digests) {
   let best = null
   for (const c of candidates) {
@@ -104,7 +109,10 @@ function findLongestPrefix (candidates, digests) {
       if (c.digests[i] !== digests[i]) { ok = false; break }
     }
     if (!ok) continue
-    if (!best || c.count > best.count) best = c
+    if (!best) { best = c; continue }
+    if (c.count > best.count) { best = c; continue }
+    // 平局：ts 大的（更近的）赢；缺 ts 当 0，永远输给有 ts 的
+    if (c.count === best.count && (c.ts || 0) > (best.ts || 0)) best = c
   }
   return best
 }

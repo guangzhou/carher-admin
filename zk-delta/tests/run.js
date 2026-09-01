@@ -73,6 +73,21 @@ async function main () {
       [{ count: 1, digests: ds.slice(0, 1) }, { count: 2, digests: ds.slice(0, 2) }], ds)
     ok('取最长前缀', best && best.count === 2)
     ok('等长不算严格前缀', F.findLongestPrefix([{ count: 3, digests: ds }], ds) === null)
+    // 平局按 ts 取最近（2026-09-01）：convList() 是 Map 插入序，旧的在前。
+    // 修之前 `c.count > best.count` 让平局保留先遇到的那条 = 旧会话，新一轮被接到旧分支。
+    {
+      const old = { count: 2, digests: ds.slice(0, 2), ts: 1000, tag: 'old' }
+      const fresh = { count: 2, digests: ds.slice(0, 2), ts: 2000, tag: 'fresh' }
+      ok('等长平局取 ts 最近的（旧的排在前）',
+        F.findLongestPrefix([old, fresh], ds).tag === 'fresh')
+      ok('等长平局取 ts 最近的（新的排在前，顺序无关）',
+        F.findLongestPrefix([fresh, old], ds).tag === 'fresh')
+      ok('更长的前缀仍然优先于更新的短前缀',
+        F.findLongestPrefix([{ count: 2, digests: ds.slice(0, 2), ts: 1, tag: 'long' },
+          { count: 1, digests: ds.slice(0, 1), ts: 9999, tag: 'short' }], ds).tag === 'long')
+      ok('缺 ts 的候选输给有 ts 的',
+        F.findLongestPrefix([{ count: 2, digests: ds.slice(0, 2), tag: 'nots' }, fresh], ds).tag === 'fresh')
+    }
   }
 
   // ---------- 起链路 ----------

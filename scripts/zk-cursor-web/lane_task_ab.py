@@ -1,6 +1,28 @@
 #!/usr/bin/env python3
 """lane_task_ab.py — 两条 lane 的「工具服从率」单变量 A/B(198 上跑)。
 
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ ⚠️ 2026-09-01:这把尺子出过一次大事,用它之前先读完这一段。                    ║
+║                                                                              ║
+║ 它**不是门②**,红了不等于产品坏了。它当天量出「81~85 动手率只有 8~26%」,      ║
+║ 我据此写补丁、上灰度、并告诉用户"大部分人吃的是坏的"——**全是假的**。用户在真 ║
+║ Cursor 里 ls 一直正常。事后查出两处硬伤:                                     ║
+║                                                                              ║
+║  ① 端点错:下面 _run() 打的是 /v1/responses,而这些模型 /model/info 实查全是    ║
+║     mode:chat —— 真 Cursor 发 /v1/chat/completions,靠 LiteLLM 的 chat→        ║
+║     responses 桥才进 responses.js 正路。直打 /v1/responses = 绕过承重的桥。   ║
+║     skill zk-cursor-web-fc-iterate 原文:「/v1/responses 合成探针全绿是假绿」。║
+║  ② 两臂没配平:cursor-web-fc-*-terra 挂 gpt-5.6-terra 无 effort,               ║
+║     cursor-g-<N>-5.6-sol 挂 gpt-5.6-sol + effort=medium。跨族比 = 三个变量    ║
+║     一起变,下面 docstring 里"只有 model 名不同→只有 lane 不同"这句就不成立。  ║
+║                                                                              ║
+║ 用它之前必须先做的两件事:                                                    ║
+║  · 查 /model/info 核对两臂的载体 slug 与 reasoning_effort **完全相同**;       ║
+║  · 记住合成红与合成绿是同一把尺子——不拿绿当验收,就不许拿红当结论。          ║
+║ 真判据永远是门②(真 Cursor GUI 跑 shell + 飞书建文档)。                       ║
+║ 案发记录:memory feedback_synthetic_red_is_as_untrusted_as_synthetic_green    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
 用途:某条 lane 的 env/代码与池里其余 lane 不一致时,证明「它到底比在池的老 lane 差不差」。
 判据是**相对的**——不比在池的老 lane 差就算过(见 memory
 feedback_new_lane_gate_must_be_relative_and_clone_from_live)。

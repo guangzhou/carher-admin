@@ -10,6 +10,33 @@ r8→r18 十轮实战沉淀。对象：CM `zk-cursor-bpi-patch` 的 `responses.j
 > 本 SOP 的迭代对象(responses.js/CM/env)完全不变。命名换装这一件事的活文档 =
 > `docs/cursor-g-naming-rollout-20260824.md`。下面"cursor-g 命名换装"一节是速查。
 
+## ⛔ 动手前必看：现网是三代命名共存 + lane→CM 已分叉（2026-09-02 11:53 实测）
+
+**这两张表比本 SOP 其余任何一节都优先。** 底下大量段落写于 08-24~08-31，那时只有一份共用 CM、
+只有 `cursor-g-*` 一代名字；照旧执行会**静默改不到 82**。
+
+### 三代名字同时在现网（DB `LiteLLM_ProxyModelTable`，两个 proxy 副本一致）
+
+| 代 | 行数 / 名字数 | 在哪 | 状态 |
+|---|---|---|---|
+| `cr-g-*` | 16 行 / 14 名 | **只在 lane 82** | 现役菜单（09-02 灰度中） |
+| `cursor-g-*` | 55 行 / 31 名 | 6 个池别名（各挂 81/82/83/84/85 五条腿）+ 81/83/84/85 直连名 + 遗留 `cursor-g-82-sol` | 同事在用 |
+| `cursor-web-fc-*` | 8 行 / 8 名 | — | terra 冻结期，调试用 |
+
+### lane → CM 拓扑（**2026-09-03 01:30 实测**，以此为准；上一版表已过期）
+
+| lane | 挂的 CM | `responses.js` sha | `ZK_SKILL_HINT` |
+|---|---|---|---|
+| `-135` `-136` `-137` `-138` `-139` `-140`（六腿） | **`zk-cursor-bpi-patch-135`** | `fc77f9e90e134981` = pool 版 + skill-hint/kick 五刀 | 1 |
+| `-84` | `zk-cursor-bpi-patch-pool` | `6a1c249e33fc7467`（含 skill-hint v1 常量，默认关） | unset |
+| `-82`（canary，**不许动**） | `zk-cursor-bpi-patch-82` | `ba2f5e77955b8893` | unset |
+| `zero-cursor-bpi`(101，只读对照) | `zk-cursor-bpi-patch` | `701a7f50` 退化版 | unset |
+
+⇒ **改 `-135` = 六条腿必须全滚**（`pool_consistency.py` 逐条验字节）；改 `-pool` 现在只影响 84。
+⇒ 池名：13 个 `cr-g-*` 池名 7 腿（84+135~140），**`cr-g-5.6` 6 腿（无 84）**；直连名只有 `cr-g-*-135` 14 个和 `-82`，
+136~140 **没有直连名**——要精准打某条腿得先建。池名按 key 钉一条腿，"只有 135 在动、别的没反应"多半是流量没到（看 lane `[PROMPT] REQ` 计数），不是坏。
+真源 = `pool_consistency.py` 的 `FORKED_CM` + 跑一遍门；别背这张表。
+
 ## cursor-g 命名换装速查（2026-08-24 上线）
 
 **hook gate 已扩成元组（唯一共享面改动）**：`cursor_web_fc_sys_rewrite.py`
@@ -29,20 +56,97 @@ r8→r18 十轮实战沉淀。对象：CM `zk-cursor-bpi-patch` 的 `responses.j
 
 | 池别名（用户面，无数字） | litellm 载体 slug | lane 映射真身 | reasoning_effort |
 |---|---|---|---|
-| `cursor-g-5.6-sol` | `openai/gpt-5.6-sol` | `gpt-5-6` | 不设(standard) |
+| `cursor-g-5.6-sol` | `openai/gpt-5.6-sol` | `gpt-5-6` | `medium` |
 | `cursor-g-5.6-sol-high` | `openai/gpt-5.6-sol` | `gpt-5-6` | `high`(→web extended) |
-| `cursor-g-5.6-luna` | `openai/gpt-5.6-luna` | `gpt-5-6-t-mini` | 不设 |
-| `cursor-g-5.6-pro` | `openai/gpt-5.6-pro` | `gpt-5-6-pro` | 不设 |
-| `cursor-g-5.6-instant` | `openai/gpt-5.6-instant` | `gpt-5-6-instant` | 不设 |
-| `cursor-g-5.5` | `openai/gpt-5.5-thinking` | `gpt-5-5-thinking` | 不设 |
+| `cursor-g-5.6-luna` | `openai/gpt-5.6-luna` | `gpt-5-6-t-mini` | `medium` |
+| `cursor-g-5.6-pro` | `openai/gpt-5.6-pro` | `gpt-5-6-pro` | `medium` |
+| `cursor-g-5.6-instant` | `openai/gpt-5.6-instant` | `gpt-5-6-instant` | `medium` |
+| `cursor-g-5.5` | `openai/gpt-5.5-thinking` | `gpt-5-5-thinking` | `medium` |
+
+> ⚠️ **本表 effort 一栏 2026-09-01 订正**：原写「不设(standard)」是错的，且这个错误直接导致了当天
+> 的 82 事故（见下节）。**线上实测（`/model/info` 全量审计，63 行）：`cursor-g-*` 61 行
+> 全部带 `reasoning_effort`（medium/high），一行不落**；唯二不带的 2 行是老 terra 线
+> （`cursor-web-fc-terra`/`cursor-web-fc-pool-terra`，已弃用）。
+> **`reasoning_effort` 不是"档位偏好"，它是桥的触发条件之一 —— 漏了这一行就崩（见上方承重机制）。**
+> 建/改任何 `cursor-g-*` 行时它是**必填字段**，不是可选项。
 
 - 每名各挂 101+82 两 deployment（`model_info.id=zerokey-cursor-g-{101,82}-<变体>`，weight:1、
   `api_key:sk-zerokey-web-noop` 占位符必带、`mode:chat`），WA 自动跨线负载+容灾。已授权 key03/key04。
 - 运维直连名（带账号号,钉单线调试,自新号启用）：`cursor-g-<N>-5.6-sol…`。
-- **⚠️ xhigh 已退役=第三个虚构档**（继 terra/sol/luna dot-slug、`-max` 之后）：`xhigh`→web
-  `thinking_effort=max` 对真身 `gpt-5-6` **确定性空 completion**（output_tokens=0，跨 4 次一致）；
-  旧 `-max` 能出字仅因走虚构 `openai/gpt-5.6-terra` fallback 丢弃 max。**上线档止于 sol/sol-high。
-  以后加档前先临时真 key 打实质 prompt 验出字,空回显=红旗别上。**
+- **⚠️ 「xhigh = 第三个虚构档」这条判决 2026-09-01 已撤回，别再照着它砍档**：当时的实测对象是
+  真身 `gpt-5-6`，而上游 `/backend-api/models` 对它报 `configurable_thinking_effort: false` /
+  `thinking_efforts: []` —— **它本来就一个档都没有**，测的是"给无档模型传 max"，结论**不能外推**。
+  `gpt-5-6-thinking` 与 `gpt-5.6-{sol,terra,luna}-wm` 上游明确给 `[min,standard,extended,max]`。
+  且当时的判据 `output_tokens=0` 与 `cursor-g-5.6-pro` 的空回显**同形态**，而 pro 那次已定因为
+  **`stream_handoff` 第二通道没收割到**并修好了（见灵魂律令：空回显 = 我没接住，不是上游没产出）。
+  **现在的正确说法**：`gpt-5-6` 无档（事实）；有档模型在 max 下的行为**没测过**（未知）。
+  同理 `cursor-g-5.6-sol-high` 是**假档**（真身 `gpt-5-6` 无档，effort 传下去没有对应物）。
+  加档前仍然要临时真 key 打实质 prompt，但**空回显的第一动作是打原始 SSE 帧看身份，不是判它虚构**。
+
+> 📐 **本节 6 名的整表已被 `cr-g-` 22 名重构取代（2026-09-01 定稿，尚未动手）**：命名规则收敛成
+> 一条——名字 = `cr-g-` + 真身点分写法 + 档位后缀，载体 = `openai/` + 真身点分写法（逐字等于真身）。
+> 22 名 = 5 无档 + 1 pro + 4 thinking + 12 memory，覆盖 10 个真身。四处代码改动（hook
+> `_TARGET_PREFIX` 加 `"cr-g-"`、raw.js ALIASES 改 1 加 4、WEB_MODELS 加 3 个 `-wm`、档位表加
+> `minimal→min`）与三条未验证风险见记忆 `project_cr_g_22_name_menu_design_2026_09_01` 与飞书
+> 文档 `G4x4dOqTmoqr1WxYn1uc5wd9nlb`。**上面这 6 名在 cutover 完成前照常有效，退役是最后一步。**
+
+## 改一行现有模型（改名 / 换载体）—— 2026-09-01 事故后固化，必须逐条照做
+
+用户说"把 A 改成 B"时，**这是加法，不是替换**。当天把它做成替换 + 默写，代价是用户生产两次中断、
+一次 50~75s/发的全线报错，一句话的活修了两小时。
+
+### 四步，顺序不许换
+
+1. **add**：`/model/new` 建新名。**新行的 `litellm_params` 必须从一条活的同类行整份拷贝下来，
+   只改要改的那一个键**（改名就只改 `model_name`；换载体就只改 `model`；换 lane 就只改 `api_base`）。
+   **禁止凭记忆重新填一份** —— 当天就是默写漏了 `reasoning_effort`（顺带还漏了 `weight`、
+   `use_chat_completions_api`），漏的那项恰好是桥的触发条件。参照行取法：`/model/info` 里
+   `cursor-g-<别的号>-<同档>`（如 `cursor-g-81-5.6-sol`）。
+2. **verify**：**逐 proxy 副本**查（当前 4 副本），不是"我 exec 进去的那台能用"。
+   ```bash
+   for P in $(kubectl get pod -n litellm-product --no-headers|awk '{print $1}'|grep ^litellm-proxy-); do
+     kubectl exec -n litellm-product $P -- python3 -c '...读 /model/info 断言新名在且 effort 非空...'
+   done
+   ```
+   `/model/new` 之后**必须 `kubectl rollout restart deploy/litellm-proxy` + `rollout status`**
+   （禁 `kubectl apply`），否则新行只进了被打到的那个副本的内存路由表，其余副本报
+   `No fallback model group found for original model_group=<新名>` → 走 fallback 链空等 → 用户
+   体感"奇慢无比"，SpendLogs 里长这样：`n=1 avg=0.0s` 且 `model_id` 为空（压根没到 deployment）。
+3. **cutover**：让用户在 Cursor 里切到新名，用他的日常用法确认好用。
+4. **remove**：只有 3 过了才 `/model/delete` 旧行。**remove 永远不与 add 在同一个脚本里。**
+
+### 硬门（当天缺这两个门才炸的）
+
+- **`/model/new` 返 500 必须中止，不许继续往下删。** 500 的响应体是不透明的
+  `{'error': 'Failed to add model to db...'}`，**真因只在 proxy pod 日志里**：
+  `prisma.errors.UniqueViolationError: Unique constraint failed on the fields: (model_id)`
+  ——`model_info.id` 全局唯一，而 `zerokey-cursor-g-82-sol` 早被池别名 `cursor-g-5.6-sol` 的 82 腿占了。
+  直连行的 id 用 `zerokey-cursor-g-<N>-direct-<档>` 才不撞（81/83/84/85 全是这个命名，照抄即可）。
+- **`/model/info` 是内存视图，会滞后于 DB**：删掉的行可能还在里面。判"到底有没有"以 DB + 逐副本为准。
+
+### 验收探针的红线（当天第二次被自己的尺子骗）
+
+**探针里绝不许出现真实 Cursor 不会发的字段。** Cursor **不发** `reasoning_effort`（它靠模型行注入）。
+当天我在探针 body 里手写了 `reasoning_effort:"medium"`，于是探针替配置行补上了它缺的那一项 →
+探针 TTFB 2.1s 全绿，用户同时在收 500。**量具含有被测对象缺的成分 = 红被构造性屏蔽，加多少发都绿。**
+正确形状：`chat + stream + tools`，**不带 effort**，模型名带 `cursor-g-`/`cursor-web-fc-` 前缀
+（否则 hook `cursor_web_fc_sys_rewrite` 不 fire），走 `/key/generate` 临时真 key（禁 master）。
+
+### 报错签名速查（拿到用户截图先对这张表）
+
+| 用户/客户端看到的 | 服务端真实错误 | 含义与修法 |
+|---|---|---|
+| `API 异常 (req: xxxxxxxx)` | 被 08-08 上线的对外脱敏改写了 | 拿 req id 去 proxy 日志 grep `error_sanitize: masked req=<id>` 取 `original=` |
+| Cursor `Error in consumeStream: Failed after 3 attempts` + 每发 50~75s + `outputTokens 0` | 见下行 | 不是"慢"，是**在失败重试**；Cursor 重试 3 次 × LiteLLM 重试 5 次 |
+| `TypeError: user is not a function at ToolCompiler.formatPrompt at /app/routes/chatgpt.js:52` | 同上 | **chat→responses 桥没触发**，请求直冲 lane 的 `chatgpt.js` 坏路。第一件事查该行 `litellm_params.reasoning_effort` 是不是丢了（其次查载体 slug 是不是被写成横杠真身） |
+| `No fallback model group found for original model_group=<名>`（只有部分副本报） | — | 新/改的行没加载到全部副本 → `rollout restart` |
+
+### Cursor 客户端日志才是这条线的判据
+
+`~/Library/Application Support/Cursor/logs/<ts>/window*/exthost/anysphere.cursor-always-local/Cursor Structured Logs*.log`
+——`key=composer|agent_exec` 那两类行带 `modelName`、`usedTokens/outputTokens`、
+`Error in consumeStream` 与 req id，**是模型伪造不了的本机账本**。用户喊慢/喊坏时先读它，
+再拿 req id 回服务端对账；不要先跑自己的探针。
 
 **v2 克隆脚本 = `scripts/zk-cursor-web/clone_web_fc_lane_v2.py`**（v1 保留当 terra 冻结era 参照）：
 一键出新线——step3 建 6 直连名 `cursor-g-<N>-*`（点分载体 slug、幂等）、step5 挂 6 池成员进别名、
@@ -81,10 +185,24 @@ Cursor(/v1/responses, 19工具+9.4K instructions)
    `assert src.count(anchor)==K` 锚点唯一性硬校验，产出 `/tmp/responses.rN.js`，
    **必过 `node --check`**。
 3. **备份**：`kubectl get cm -o json` → `/Data/backups/zk-cursor-bpi-cm-<ts>-pre-rN.json`。
-4. **部署**：CM 现有 **15 个 key**（会长，patch 前先 `get cm -o json | jq '.data|length'`
+4. **部署**：
+   > 🔴 **第 0 个动作：先查这条 lane 挂的是哪份 CM，别默认只有一份。**
+   > ```bash
+   > sudo -n kubectl -n litellm-product get deploy -o json \
+   >   | jq -r '.items[]|select(.metadata.name|startswith("zero-cursor-bpi"))
+   >            |"\(.metadata.name)  \([.spec.template.spec.volumes[].configMap.name//empty]|join(","))"'
+   > ```
+   > 09-02 起 82 走自己那份 `zk-cursor-bpi-patch-82`（见开头的分叉表）。
+   > **patch 共用 CM + 全 lane rollout 这条老配方对 82 完全无效**——它会成功、会绿、
+   > 而 82 一个字节都没变。要同时改两边就 patch 两份 CM，不要靠"重启一下应该就好了"。
+   >
+   > fork 出去的 CM **必须登记进 `pool_consistency.py` 的 `FORKED_CM`**（带日期 + 收敛条件），
+   > 否则那条 lane 悄悄退出一致性门：A 段不再逐字节比对、B 段还会误报 dangling。
+
+   CM 现有 **15 个 key**（会长，patch 前先 `get cm -o json | jq '.data|length'`
    记下当前值），**只能 `kubectl patch cm --type merge --patch-file`**
    （`create --from-file` 会抹掉其余所有 key）。patch 后校验 key 数没变，再
-   **对池里每一条 lane** 依次 `rollout restart` + `rollout status`。
+   **对挂了这份 CM 的每一条 lane** 依次 `rollout restart` + `rollout status`。
    > ⚠️ **改 CM 必须全 lane 重启，不是只重启有流量的那条。** 两条 lane
    > （`zero-cursor-bpi` = 101、`zero-cursor-bpi-82`）挂的是同一个 CM，但 pod 只有重启才
    > 把新文件 cp 进 `/app/routes/`。2026-08-31 只重启了 82，101 静默跑旧代码 27h —— 它当时
@@ -112,6 +230,113 @@ Cursor(/v1/responses, 19工具+9.4K instructions)
 6. **记账**：memory 长log（feedback_cursor_gpt_web_toolcall_collapses_under_full_payload）
    追加本轮条目：根因/修法/验收/备份路径/诚实项。
 
+## 迭代循环之后：真 Cursor 验收（门①门②，唯一算数的那把尺子）
+
+上面第 5 步的 harness 全是**合成**的。合成绿不构成上线依据，**合成红也不构成结论**——
+09-01 那次「81~85 动手率 8~26%」就是合成红，据它改了文案、上了灰度、告诉了用户，全是假的
+（探针打 `/v1/responses`，而这些名字全是 `mode:chat`）。**判据只能是真 Cursor。**
+
+两个门：
+- **门①（干净载荷）**：`ls` / `hello` 这种简单请求发到 GPT 网页端必须干净原样——
+  不加转录体行标、不塞大 item、不触发 >20 万字符的文件上传路径。
+- **门②（功能不准回退）**：shell 命令和飞书文档创建必须稳定出结果。
+
+```bash
+bash scripts/zk-cursor-web/crg_gate12_run.sh              # 八轮同一 chat，三处判据对齐
+EXPECT_MODEL=cr-g-5.6-thinking-82 bash …/crg_gate12_run.sh # 验别的名字
+python3 scripts/zk-cursor-web/crg_family_gate.py --list    # 先看覆盖有没有陈旧
+```
+
+**顺序是硬的，别跳**：
+
+| 门 | 判据 | 跳过的后果 |
+|---|---|---|
+| ⓪ 屏幕锁没锁 | `ioreg -n Root -d1 -a` 里 `CGSSessionScreenIsLocked` | 锁着时 osascript 键击**全打在锁屏上**，`fired_ok` 照样 true，红是假红（09-02 01:03 踩过：六分钟零 `[PROMPT]`） |
+| ① 选中模型对不对 | `state.vscdb` **两个**存储面，且**重启之后**再验 | 见下 |
+| ② 阳性对照 | 先发一发 `hi`，nonce 必须出现在 82 的 pod 日志里 | 量具在答案已知的样本上都复现不出，后面的数一律不算 |
+| ③ 三方对账 | pod 日志 + **Cursor 客户端执行账本** + 飞书逐 nonce 精确直搜 | 只看一处 = 假绿 |
+
+**换选中模型有两个存储面，只改一个会被启动还原**（09-02 实测，比红更坏）：
+
+| 面 | 路径 | 角色 |
+|---|---|---|
+| `ItemTable / applicationUser` | `.aiSettings.modelConfig.composer.{modelName,selectedModels[].modelId}` | 运行时 |
+| `cursorDiskKV / composerData:empty-state-draft` | `.modelConfig.{modelName,selectedModels[].modelId}` | **启动还原源** |
+
+只改前者：写盘成功、写后复查通过、门放行 → **启动 26s 后被改回旧值**
+（11:11:15 写 / 11:11:16 启动 / 11:11:42 被改回），于是拿旧模型跑完一整轮还记成新模型的成绩。
+⇒ 顺序必须是 **退出 Cursor → 两个面一起改 → 重启 → sleep 35s → 再复查 → 不符直接退出**。
+零额度自检：`crg_family_gate.py --swaptest <名字>`（只换模型不发请求）。
+
+其余纪律：
+- 提示词里**不许加我自己发明的免责/限域从句**（`只读别改`、`别动我项目`、`工作目录 /tmp`）——
+  实测那些从句恰好在教模型别动手。
+- 三方对账的**时间窗口必须不重叠**：给每个系列的右边界加 settle 会串到下一个系列，
+  命令长度和 convId 互相污染。正确右边界 = 下一个系列第一发 − 20s。
+- 飞书判据**逐 nonce 精确直搜**，泛搜 15 条分页会撒谎。
+- `pro`（走 `stream_handoff` 第二通道）与 `research`（deep research）**慢不等于红**，
+  给它们更长的落地预算（`crg_family_gate.py` 的 `SLOW` 表：150s / 240s）。
+- **覆盖别吹**：`crg_family_gate.py` 的 `FAMILIES` 按**载体（真身）**分系列，
+  一个载体下还有 `-min`/`-high`/`-max` 三个走不同 `reasoning_effort` 的**档位变体**。
+  「按载体各挑一个跑完」= 载体维度验过，**档位维度没验过**。`--list` 会把两者分开报，别混成"全绿"。
+
+## skill-hint / skill-kick：让网页模型会搜本机 skill（2026-09-03 上线，六腿）
+
+**问题**：用户说"建个飞书文档"，模型答「我没有飞书工具」收工——机器上明明有 `lark-cli` 和 27 个 `lark-*` skill。
+**答案层选择**（都实测过，别再走回头路）：
+- ❌ hook 层注入：lane 三处正则剥 `[EXECUTION ENVIRONMENT]…\n\n`（`_chatOnlyize`/`_stripExecEnv`/r15），写什么都被剥。
+- ❌ 照搬 codex 全量目录（`render.rs` 一行一 skill）：本机 478 个 skill，光 `.cursor/skills` 45 个就 20721 字 vs 首轮 6803，撞门④；且那 45 条没一条匹配"建飞书文档"。
+- ✅ lane `responses.js` 首轮握手支拼一段提示（`_sHint`，门 `ZK_SKILL_HINT=1`），只首轮发一次，增量轮 DIET-ZERO 不带。
+
+**光有提示不够（三版实测）**：807c/1279c 文案模型都读到了仍拒（「当前环境没连你本机终端」）。翻转它的是**一条真实工具结果**。
+所以 **skill-kick**：首轮拒绝（`_REFUSE_RE`）且无新鲜工具结果 → 流式层冻住拒绝词（复用 `wtFrozen`）+ 用 `execToToolCall(shellTool, grep…)`
+发真 Shell 调用给 Cursor 跑；kw 由 `extractUserQuery` 推（飞书→`lark`、k8s、litellm、carher，否则 `ls` 三处目录）。
+独立预算 `_skillKicked`（不吃 `actRetried`，搜完仍拒还能 prose 重问一次）；`_skillKickedConv` 记 convId，后续轮拒绝词也冻。
+提示词末尾两句管啰嗦：「照 skill 干活只发块不播报」「本会话读过 SKILL.md 不重读」——中间步骤 `prose 0 chars`、同会话第二次 0 命令直接答。
+
+**判据（真 Cursor，读 lane 日志）**：`[handshake] … skill-hint 1578c`；`[skill-kick] refusal spotted in stream … -> hold`；
+`[skill-kick] refusal without tool result … -> real search call kw=lark (n=1)`；随后 `complete-run … prose 0 chars` 串；
+`[url-prior]` 出 docx 链接（**日志截掉 URL 末字符**，拿会话原文全 token 用 `lark-cli docs +fetch --as user --doc <url>` 独立打开）。
+Cursor 客户端账本 `nal.tool_call.start→success` 对数要等于 lane 的 `complete-run` 数。
+
+**探针形状硬门**：打 `cr-g-*` 必须 chat + `stream:true` + **tools 非空**，不手填 `reasoning_effort`（配置提供）。
+不带 tools → 不走 chat→responses 桥 → lane `chatgpt.js` 报 `TypeError: user is not a function` 500，且 LiteLLM 重试+fallback 会把六条腿各撞一次、留 60s `weighted_affinity:fail:v1` 标记。那是探针错，不是腿坏。
+
+**补丁脚本**：`scripts/zk-cursor-web/skill-hint/patch_skill{hint,hint_v2,kick,kick_v2,kick_v3}.py`（anchor-assert，顺序执行）。
+**回滚**：`docs/skill-hint-rollback-20260903.md`（秒关 = `set env deploy/zero-cursor-bpi-<N> ZK_SKILL_HINT-`）。
+**GUI 驱动坑**：`cursor_gui_e2e_driver.fire()` 靠 pbcopy+Cmd+V，用户同时在用 Cursor/剪贴板会把我那发顶掉——发后必查网关收到的 `<user_query>` 是不是我的 nonce。
+
+## 给同事开通（装机包 v3 + key 授权，2026-09-03 定稿）
+
+**三件事缺一不可，且顺序固定**：①key 授权 → ②领取表里有 API Key + 飞书 App Secret → ③同事按文档装。
+09-03 查过：~640 把 `cursor-*` key 里只有 4 把有 `cr-g-*`（我、shangwensheng、linsen×2）。**文档默认"已授权"，
+没授权的人选 `cr-g-5.6` 直接 401** —— 同事报"用不了"先查这一条，不查代码。
+
+1. **授权**：`scripts/zk-cursor-web/crg_key_grant.py --alias cursor-<name> [--alias …] --apply`。
+   只加 14 个池名；不给 `-82/-135` 直连名（那是钉单腿调试用的）；不动 aliases（同事的 glm/kimi 映射是团队标配，
+   我 key 上 8 条 `chatgpt-*→sa-gpt-*` 是个人实验别照搬）。判据 = DB 直读 `models` unnest 计数，不认 API 自述。
+   `sa-grok-4.5/4.6` 同事 key 里早就有，进菜单不需要额外授权。
+2. **装机包**：`scripts/zk-cursor-web/package_team_setup.sh` 出 `cursor-g-setup.zip`（1.9MB）。菜单 = cr-g 14 名 +
+   `sa-grok-4.5/4.6`；`MODEL_PREFIXES=["cr-g-","sa-grok-"]`（单前缀会把选了 grok 的人 REPAIR 时打回默认）。
+   第 6 步 lark **默认关（09-03 下午用户拍板：同事被飞书那步搞糊涂），`--lark` 显式才做，包默认不带 lark-skills**。做时全部有就跳过：lark-cli 1.0.90 从 `registry.npmmirror.com/-/binary/lark-cli/v1.0.90/` 拉官方二进制
+   （sha256 = npm 包 `checksums.txt`；同事机器没 npm、GitHub 不通，这是唯一不依赖两者的路）→ 28 个官方 `lark-*` skill
+   随包（`cp -RL ~/.agents/skills/lark-*`）拷到 `~/.claude/skills`，一个不覆盖 → `config init --app-id cli_a91569fab9b81bc6
+   --app-secret-stdin`（提示粘，只走 stdin）→ `auth login` Device Flow。判活用 `auth status --json`（`appId` /
+   `identities.user.status==ready`），`config show` 不认 `--json`。裸机路径与全有路径 09-03 本机都跑过；**Windows 分支未实测**。
+**Cursor 版本兼容（09-03 3.18.25 事故）**：同事报「The model you chose is not available」→ 先 `bundle_anchor_probe.js`
+（只读，不用退 Cursor）数 8 个锚点命中；任一 hits=0 安装器就整体拒绝 → gate 补丁没打 → 选择器拒自定义模型。
+修法 = 正则 `(?:旧形状|新形状)` 两代都认、仍要求恰好 1 次；js/py 两份 + `setup_impl_parity.py` 一起过；重打包换附件。
+已验版本：3.16.x / 3.17.19 / 3.18.25。新版本出来先跑探针。
+**"Cursor 正在运行"假阳（09-03）**：zk-delta 小代理借 Cursor 二进制当 node 跑，第一次 INSTALL 装上后第二次跑安装器
+`pgrep -f …/MacOS/Cursor` 把它当 GUI；`cursorRunning()` 已改成排除自身 pid + 带 `.js` 参数的进程。同事说"我明明退了"先想到这个。
+**key 编辑三件套**：`crg_key_grant.py --alias`（14 池名）/ `crg_key_grant_all.py`（全量，pod 内跑，跳过 models 空的 key）/
+`litellm_key_add.py --alias X --models … --copy-from Y`（任意 models+aliases 照参照 key 抄）。全部读-合并-写、备份、回读；判据 DB 直读。
+
+3. **文档** `OQCPdLd4MovEVoxGzdMcD3CJnCf`：一页纸，用户无感的一律不写（小代理/增量/skill 机制/sha/备份目录）。
+   换附件正解 = `cd` 到 zip 目录后 `docs +update --command append --content '<figure view-type="Card"><source path="@./x.zip" name="x.zip"/></figure>'`；
+   `docs +media-insert` 会把 zip 插成 `<img>` 块。`block_replace` 大范围会撞"中间兄弟没 block id"，整篇重写用 `overwrite` +
+   `<source token=…>` 把附件带回。
+
 ## 环境与访问
 
 - 直连 SSH：`sshpass -p '<pw>' ssh cltx@10.68.13.198`；`echo '<pw>' | sudo -S kubectl ...`
@@ -119,6 +344,11 @@ Cursor(/v1/responses, 19工具+9.4K instructions)
 - 回滚：apply 备份 CM + rollout restart；或 env 开关秒关（见下表）。
 
 ## env 开关总表（kubectl set env deploy/zero-cursor-bpi X=0 即关）
+
+> ⚠️ **开关不在 deploy 的 env 里 ≠ 它是关的。** 不在 env = 走代码里的默认值，
+> 而下面这些**默认全是开**。实测 82 的 env 里根本没有 `ZK_HANDOFF_*` / `CURSOR_G_*` 四个，
+> 它们照样在生效。要确认某个特性开没开，判据是 pod 日志里那个 tag 的**命中计数 n>0**，
+> 不是"我在 env 里没看见"，也不是"代码在那儿"。
 
 | 开关 | 功能 | 轮次 |
 |---|---|---|
@@ -129,11 +359,30 @@ Cursor(/v1/responses, 19工具+9.4K instructions)
 | ZK_ACT_RETRY | "只说不做"强制行动重问 | r14 |
 | ZK_TE_DEFAULT | web-tools 轮默认 thinking 档(standard) | r17 |
 | ZK_HB | 主路径 5s 保活注释帧 | r18 |
+| ZK_SKILL_HINT=1 | 首轮 skill 提示 + 拒绝→真 grep 调用(skill-kick)，见专节 | 09-03 |
 | ZK_WEB_RETRY=1 | 旧版 envelope 升级重试(默认关) | - |
 | ZK_HANDOFF_POLL=0 | 关掉 `stream_handoff` 转轮询兜底(默认开) | 09-01 |
 | ZK_HANDOFF_MAX_MS / ZK_HANDOFF_POLL_MS | 轮询总预算(默认 240000)/ 间隔(默认 2500) | 09-01 |
+| ZK_HANDOFF_STALE_GUARD=0 | 关掉轮询**抢跑闸**(默认开)：按 convId 比对上一轮交付正文，逐字相同则继续轮询 | 09-02 |
+| ZK_HANDOFF_STALE_MS | 抢跑闸最长等待 | 09-02 |
+| CURSOR_G_DECONFLICT=0 | 关掉「剥 Cursor rule3 禁自定义工具格式」那一刀(默认开) | 09-01 |
+| CURSOR_G_STRIP_PLAN=0 | 关掉「剥现役 task_management / mode_selection 段」那一刀(默认开) | 09-01 |
 
-pod 日志决策行可 grep：`[chat-only] [conv] [diet] [harvest] [act] [te] [cite] [stall] [turn] [handoff]`。
+pod 日志决策行可 grep：`[chat-only] [conv] [diet] [harvest] [act] [te] [cite] [stall] [turn] [handoff]`
+`[handoff-stale]` `[execenv-strip]` `[proto2]`。
+
+> ⚠️ **同一个功能在不同分支可能打不同 tag**：强制行动重问在两条分支上分别是 `[act]` 和
+> `[turn-verdict-v2]`。只 grep 一个 tag 就断言"这条 lane 没触发"是假结论（09-01 踩过）。
+> 同理，**没有命中计数的过滤器可以空转任意久**——判据是 `n>0`，不是"代码在那儿"。
+
+**`[handoff-stale]`（09-02 补的抢跑闸）**：上面那个轮询原本"取最新一条"，没判是不是**本轮**的，
+于是会抢跑取到**上一轮**的消息 —— 用户面症状是同一条命令跑 2~3 次、问快排答 `ls`。
+修法 = 按 convId 比对上一轮交付正文，逐字相同就继续轮询。判据只认 `[handoff-stale]` 那两行日志。
+补丁 `patch_handoff_stale.py`；**注意它只落在 82 的 fork CM 里**（共用 CM 里 `stream_handoff`
+出现 0 次）。
+
+**82 的 responses.js 里有一句陈旧注释**：写着「只有 pro 产生 `stream_handoff`」——
+09-02 实测为假（`-wm` 族也走这条通道）。下次动 82 时顺手改掉，别照它推断隔离性。
 
 **`cursor-g-5.6-pro` 为什么需要 `[handoff]` 这条路**：`gpt-5-6-pro` 的主 SSE 走到
 `stream_handoff` 事件就收口（options `resume_sse_endpoint` / `subscribe_ws_topic`），
@@ -453,6 +702,21 @@ python3 scripts/zk-cursor-web/failover_drill.py [B段发几次=3] [间隔秒=200
 `成功率高` 本身不是证据——第一版就是这么报出 "4/4 ✅" 假绿的（A 段先跑打了 180s fail-mark，
 坏 lane 一次都没被挑到）。改脚本前先读文件头那四条约束（B 在 A 前 / 每发换 key /
 间隔过 fail-mark / 逐发日志取证）。
+
+## 已撤回的结论（写进过这份 SOP / 记忆 / 甚至告诉过用户，后来被证伪）
+
+留着不是为了自责，是因为**这些结论当时都"看起来自洽"，不标出来就会被下一个人捡回去**。
+
+| 结论 | 当时的依据 | 怎么塌的 | 现在的状态 |
+|---|---|---|---|
+| 「81~85 的动手率只有 8~26%，大部分同事吃的是坏的」 | `lane_task_ab.py` 两臂 A/B | 探针打 `/v1/responses`，而这些名字全是 `mode:chat`（真 Cursor 走 chat + 桥）；两臂 slug/effort 也没配平 | **假**。用户日常真 Cursor 里 `ls` 一直正常。脚本顶部已刻警告框 |
+| proto2「拒绝动手」定向文案补丁（act-kick v3） | 上面那个假数 | 修的是假病，灰度失败 | 当天回退，CM 回到 `df9506` |
+| 「xhigh 是第三个虚构档」 | 空 completion，跨 4 次一致 | 测的 `gpt-5-6` 本来就没有档；空回显与 pro 同形态，而 pro 是**我没收割到** | 09-01 撤回（详见第 75 行那条） |
+| 「82 只宣告不动手是硬通道关着」 | 计划文档里的推断 | 09-01 定因为**系统提示词冲突**，hook 两刀修好（首轮 announce 5/5→0/1） | 计划文档 `.claude/plans/mellow-fluttering-giraffe.md` 已整篇标作废 |
+| 「`-wm` 只有 handoff、零正文，救不回」 | 07-27 直测留档 | 缺的是 `stream_handoff` 轮询那段代码，恢复后就能收割到正文 | 09-02 闭 |
+
+**共同形状**：每一条都能解释用户当时正在抱怨的症状，所以我审查得最少。
+**能解释症状的第一个机制不是结论**——说出口前先花一次查询打它的证伪腿。
 
 ## 未做的下一层杠杆
 

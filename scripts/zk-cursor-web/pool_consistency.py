@@ -10,9 +10,11 @@
   A. 代码一致性(硬门):凡挂载 CM `zk-cursor-bpi-patch` 的 deployment,其**每个 pod 内**
      /app/routes/responses.js 的 sha256 必须等于 CM 里 responses.js 的 sha256。
      lane 是从「谁挂了这个 CM」反查出来的,新克隆的 lane 自动进检查范围,不用改本文件。
-  B. 池覆盖(硬门 + 提示):DB 里 cursor-g-* / cursor-web-fc-pool-* 各别名挂了哪些 lane。
+     **换成 fork CM 的 lane 必须登记进 FORKED_CM**,否则它会静悄悄退出检查范围
+     (A 段不再验它的字节、B 段把它误报成 dangling)—— 登记后照样验,只是基准换成它自己那份。
+  B. 池覆盖(硬门 + 提示):DB 里 cursor-g-* / cr-g-* / cursor-web-fc-pool-* 各别名挂了哪些 lane。
      · 别名指向的 lane 在集群里没有对应 deployment → 红(dangling,会 502/超时)
-     · deployment 存在但没进任何池别名 → 黄(孤儿 lane,白养着不分流)
+     · deployment 存在但没进任何池别名 → 黄(孤儿 lane,白养着不分流);**CANARY_LANES 除外**
      · 同一别名下各 lane 数量不齐 → 黄(某档少一条腿,fallback 不对称)
      只取 model_name + model_info->>'id' 两列 —— **禁止拉 litellm_params**,那列是加密凭据。
   C. env 一致性(硬门 + 决策记录,2026-08-31 补):**同一份代码 + 不同 env = 不同行为**。
@@ -72,6 +74,81 @@ ACCEPTED_ENV_DRIFT = {
               'ZK_URL_PRIOR', 'ZK_URL_DEBUG', 'ZK_MCP_REL_WATCHDOG_MS')
 }
 
+# 2026-09-03:[skill-hint] 首轮握手多带一段"本机有 skill 库,说自己没能力前先搜"的提示 +
+# 首轮拒绝时网关直接把 grep 编成真 Shell 调用(skill-kick)。真 Cursor 验收:一条 chat 8 轮,
+# hi/ls/建飞书文档(lark-cli 独立打开核对)/增量全程一个 conv,全过。
+# 01:16 起铺到 135~140 六条腿(用户指令"以 135 为模板改造 136~140")。众数因此翻成 1;
+# 下面三条是**没开**的:82 是 canary(用户明令不动)、84 用户这次没点名、101 是只读对照。
+# 收敛条件:84 何时跟进由用户定;82 永远按 canary 规矩单独决策。
+ACCEPTED_ENV_DRIFT[('zero-cursor-bpi-82', 'ZK_SKILL_HINT')] = '09-03 82 是 canary,用户明令不动;skill-hint 铺池不含 82'
+ACCEPTED_ENV_DRIFT[('zero-cursor-bpi-84', 'ZK_SKILL_HINT')] = '09-03 用户只点名 136~140 跟 135;84 未跟进,待用户决定'
+ACCEPTED_ENV_DRIFT[('zero-cursor-bpi', 'ZK_SKILL_HINT')] = '09-03 101 是只读对照线,不铺新东西'
+
+
+# 已知且**已决策**的 CM fork。键 = deployment 名,值 = (它自己的 CM 名, 原因(必须带日期))。
+# 为什么需要这一项:lane 是靠「谁挂了 CM zk-cursor-bpi-patch」反查的,一条 lane 换成
+# fork 出来的 CM 之后就**从检查范围里消失**了 —— A 段不再校验它的字节(最危险的那部分),
+# B 段还会把它报成 dangling。所以 fork 必须在这里登记:登记之后它照样进 A 段,只是
+# 比对基准换成它自己那份 CM。**这不是消音器**:82 的 pod 与 82 的 CM 不一致照样红。
+FORKED_CM = {
+    'zero-cursor-bpi-82': (
+        'zk-cursor-bpi-patch-82',
+        '2026-09-01:82 是 canary,新改动先在它身上试。共用 CM 改不动单线,故 fork。'
+        '收敛条件=灰度结论出来后要么推广到池 CM(见下面四条)、要么整条回滚'
+        '(deploy 改回挂 %s,删本条)。' % CM),
+}
+# 2026-09-03:135 是 skill-hint 的灰度靶子,fork 了自己的 CM(第一版错误地改了共用 `-pool` 并
+# 重启了六条有流量的腿 —— 单条 lane 的小闭环测试不该让别人停机,这条教训留着)。
+# 同日 01:16 用户拍板"以 135 为模板改造 136~140":五条腿改挂 `-135` 这份 CM + ZK_SKILL_HINT=1,
+# 逐条 rollout、逐条核对容器内 sha == CM。**现在 `-135` 是六条腿共用的 CM,改它必须六条全滚**
+# (pool_consistency 会逐条验字节)。84 仍挂 `-pool`。
+# 收敛条件:84 也跟进后把 `-135` 的内容推回 `-pool`、六条腿改回挂 `-pool`、删 `-135`;
+# 或者反过来把 `-pool` 废掉。回滚见 docs/skill-hint-rollback-20260903.md。
+FORKED_CM.update({
+    'zero-cursor-bpi-%s' % n: (
+        'zk-cursor-bpi-patch-135',
+        '2026-09-03:skill-hint 六腿(135~140)共用 `-135`;84 未跟进仍在 `-pool`;82 canary 不动。')
+    for n in ('135', '136', '137', '138', '139', '140')
+})
+# 2026-09-02:池腿从共用 CM 迁到 `-pool`(= `-82` 的逐字节拷贝)。
+# 起因:共用 CM 的 responses.js 是退化版(701a7f50),缺会话复用最长前缀修复、
+# stream_handoff 轮询、handoff 抢跑闸;82 那份(ba2f5e77)是验好的。同事被 WA 亲和到
+# 哪条腿就随机拿到好代码还是坏代码。
+# 三份 CM 各管各的:`-82`=canary,`-pool`=生产池,`zk-cursor-bpi-patch`=101(旧方案只读对照)。
+# **收敛条件**:`-pool` 与 `-82` 出现差异时,要么是 82 在灰度新东西(暂时的,验完推 pool),
+# 要么是漏推(缺陷)。判别方法写在 docs/cr-g-pool-rollback-20260902.md,不要靠猜。
+#
+# **腿表当天换过一次(2026-09-02 傍晚)**:原池腿 81/83/84/85 里的 81/83/85 背后账号是
+# **free 档**(`/backend-api/models` 只有 10 个 slug,没有 thinking/pro/instant)——
+# 它们**物理上答不出**菜单里的大多数名字,不是"慢"也不是"账号不稳"。已从全部池别名摘腿、
+# deploy/svc 删除(备份 /Data/backups/zk-bpi-{deploy,svc}-{81,83,85}-20260902-174450-pre-delete.json)。
+# 换成 135~140 六个 pro 号 + 保留 84 = 七腿。入池门 = lane_model_catalog.py:19+ slug 且
+# 含 thinking/pro/instant,六条新腿实测 19~20 slug,全是 84 的超集。
+FORKED_CM.update({
+    'zero-cursor-bpi-84': (
+        'zk-cursor-bpi-patch-pool',
+        '2026-09-02:生产池腿,挂 `-pool`(= 82 那份验好的代码逐字节拷贝)。'
+        '09-03 起 135~140 迁到 `-135`(见上),84 是唯一还在 `-pool` 的腿,待用户决定是否跟进。'),
+})
+
+# B 段用:canary lane 不参与池分流,**它不在池别名里是设计不是缺陷**。
+# 不登记的话它会被报成"孤儿 lane(白养着不分流)",而那句提示会诱导人把它塞回池里 ——
+# 恰好销毁 canary。
+CANARY_LANES = {'82'}
+
+
+def lane_cm(d):
+    """这条 deployment 该拿哪份 CM 当基准;都没挂返回 None(不是本池的 lane)。"""
+    name = d['metadata']['name']
+    mounted = {(v.get('configMap') or {}).get('name')
+               for v in (d['spec']['template']['spec'].get('volumes') or [])}
+    if CM in mounted:
+        return CM
+    fk = FORKED_CM.get(name)
+    if fk and fk[0] in mounted:
+        return fk[0]
+    return None
+
 
 def sh(cmd, timeout=180):
     r = subprocess.run(SSH + [cmd], capture_output=True, text=True, timeout=timeout)
@@ -86,34 +163,50 @@ def kjson(args, timeout=120):
 
 
 def check_code():
-    """A. CM ↔ 每个 pod 内文件逐字节一致。"""
+    """A. CM ↔ 每个 pod 内文件逐字节一致。fork 出去的 lane 比对它自己那份 CM。"""
     print('=' * 72)
-    print('A. 代码一致性(CM %s ↔ 容器内文件)' % CM)
+    print('A. 代码一致性(CM ↔ 容器内文件)')
     print('=' * 72)
-    cm = kjson('get cm ' + CM)
-    want = {}
-    for key, path in WATCH.items():
-        if key not in cm['data']:
-            print('  ❌ CM 里没有 key %s' % key)
-            return False, []
-        want[path] = hashlib.sha256(cm['data'][key].encode()).hexdigest()
-        print('  CM %-16s sha256=%s  chars=%d' % (key, want[path][:16] + '…',
-                                                  len(cm['data'][key])))
+
+    cm_want = {}          # cm 名 → {容器内路径: sha256}
+
+    def want_for(cmname):
+        if cmname in cm_want:
+            return cm_want[cmname]
+        cm = kjson('get cm ' + cmname)
+        w = {}
+        for key, path in WATCH.items():
+            if key not in cm['data']:
+                print('  ❌ CM %s 里没有 key %s' % (cmname, key))
+                return None
+            w[path] = hashlib.sha256(cm['data'][key].encode()).hexdigest()
+            print('  CM %-24s %-16s sha256=%s  chars=%d'
+                  % (cmname, key, w[path][:16] + '…', len(cm['data'][key])))
+        cm_want[cmname] = w
+        return w
 
     deploys = kjson('get deploy')['items']
-    lanes = []
+    lanes = []            # [(deployment 名, 它的 CM 名)]
     for d in deploys:
-        vols = d['spec']['template']['spec'].get('volumes') or []
-        if not any((v.get('configMap') or {}).get('name') == CM for v in vols):
-            continue
-        lanes.append(d['metadata']['name'])
+        c = lane_cm(d)
+        if c:
+            lanes.append((d['metadata']['name'], c))
     if not lanes:
-        print('  ❌ 没有任何 deployment 挂载 %s —— 检查范围为空,不算通过' % CM)
+        print('  ❌ 没有任何 deployment 挂载 %s(或其已登记 fork) —— 检查范围为空,不算通过' % CM)
         return False, []
-    print('\n  挂载该 CM 的 deployment: %s\n' % ', '.join(sorted(lanes)))
+    for dname, cmname in sorted(lanes):
+        if cmname != CM:
+            print('  ⚠️  %s 用的是 fork 出来的 CM %s(已决策,照样验字节)\n     ∵ %s'
+                  % (dname, cmname, FORKED_CM[dname][1]))
+    print('\n  纳入检查的 deployment: %s\n'
+          % ', '.join('%s→%s' % t for t in sorted(lanes)))
 
     ok = True
-    for dname in sorted(lanes):
+    for dname, cmname in sorted(lanes):
+        want = want_for(cmname)
+        if want is None:
+            ok = False
+            continue
         d = next(x for x in deploys if x['metadata']['name'] == dname)
         sel = ','.join('%s=%s' % kv for kv in d['spec']['selector']['matchLabels'].items())
         pods = kjson("get pods -l '%s'" % sel)['items']
@@ -147,7 +240,7 @@ def check_code():
                     print('       → 该 lane 在跑旧代码,修法: kubectl -n %s '
                           'rollout restart deploy/%s' % (NS, dname))
                     ok = False
-    return ok, sorted(lanes)
+    return ok, sorted(n for n, _ in lanes)
 
 
 def check_pool(lane_deploys):
@@ -156,8 +249,12 @@ def check_pool(lane_deploys):
     print('=' * 72)
     print('B. 池覆盖(别名 → lane)')
     print('=' * 72)
+    # `cr-g-%` 里要排掉 `%-82`:那些是 canary 的**直连名**(一名一腿,钉死 82),不是池别名。
+    # 混进来有两个后果,都是把门变成噪音源:①「各别名 lane 数不齐」会常态告警(1 腿 vs 4 腿);
+    # ②它们的 id(`zerokey-cr-g-5.6-82`、裸载体名 `gpt-5.6-luna-wm`)抽不出 lane 号,报成 `?`。
     sql = ("select model_name, model_info->>'id' from \\\"LiteLLM_ProxyModelTable\\\" "
            "where model_name like 'cursor-g-%' or model_name like 'cursor-web-fc-pool-%' "
+           "or (model_name like 'cr-g-%' and model_name not like '%-82') "
            "order by model_name;")
     out = sh(SUDO + "exec litellm-db-0 -- env PGPASSWORD='%s' psql -U litellm -d litellm "
              "-At -F'|' -c \"%s\" 2>/dev/null" % (PG_PW, sql))
@@ -184,16 +281,25 @@ def check_pool(lane_deploys):
     if len(counts) > 1:
         print('\n  ⚠️  各别名的 lane 数不齐(%s) —— 少腿的那档 fallback 不对称' % counts)
 
-    # dangling:别名指向的 lane 没有对应 deployment
+    # dangling:别名指向的 lane 没有对应 deployment。
+    # ⚠️ lane_deploys 来自 A 段,含**登记正确**的 fork lane。这里刻意不额外兜底:
+    # 09-03 曾给 have 并上 FORKED_CM 的键去消 135 的"假 dangling",结果那根本不是假红 ——
+    # 是 135 的 fork 登记被批量表覆盖成 `-pool`、CM 名对不上而退出了 A 段,B 段的红是
+    # 唯一还在喊的那张嘴。兜底一加,两段一起哑,门照样 PASS。
+    # ⇒ 这里报 dangling 时先查那条 lane 是不是掉出了 A 段,别急着改这一行。
     have = {d.split('zero-cursor-bpi')[-1].lstrip('-') or '101' for d in lane_deploys}
     dangling = sorted(referenced - have)
-    orphan = sorted(have - referenced)
+    orphan = sorted(have - referenced - CANARY_LANES)
+    canary_idle = sorted((have - referenced) & CANARY_LANES)
     print()
     print('  集群里挂 CM 的 lane : %s' % ','.join(sorted(have)))
     print('  池别名引用的 lane   : %s' % ','.join(sorted(referenced)))
     if dangling:
         print('  ❌ dangling(池里有、集群没有): %s → 打到它必超时/502' % ','.join(dangling))
         ok = False
+    if canary_idle:
+        print('  ℹ️  canary lane(不进池是设计,不是孤儿): %s —— 只挂直连名,'
+              '新改动先在它身上验' % ','.join(canary_idle))
     if orphan:
         print('  ⚠️  孤儿 lane(集群有、没进任何池): %s → 白养着不分流,'
               '入池用 pool_register.py' % ','.join(orphan))
@@ -211,8 +317,7 @@ def lane_envs(deploys=None):
         deploys = kjson('get deploy')['items']
     out = {}
     for d in deploys:
-        vols = d['spec']['template']['spec'].get('volumes') or []
-        if not any((v.get('configMap') or {}).get('name') == CM for v in vols):
+        if not lane_cm(d):
             continue
         env = {}
         for c in d['spec']['template']['spec'].get('containers') or []:

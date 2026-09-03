@@ -12,6 +12,8 @@
   ⑤ 给某条 lane 塞一个别人没有的 env → C 段必须 FAIL(证明它真在逐项比众数)
   ⑥ 把允许清单清空 → C 段必须 FAIL(证明 101 那 15 条分歧是被**允许清单**放行的,
      不是 C 段压根没看见 —— 否则允许清单等于装饰)
+  ⑦ 把某条 lane 偷偷换成没登记的 fork CM → 必须 FAIL(2026-09-01 补:82 换 fork CM 后
+     它一度整条退出 A 段检查范围,那种"少一条 lane 也照样绿"是最危险的形状)
 
 用法: python3 scripts/zk-cursor-web/pool_consistency_selftest.py
 """
@@ -93,6 +95,66 @@ pc.ACCEPTED_ENV_DRIFT = {}
 ok_c6 = pc.check_env(copy.deepcopy(deploys))
 pc.ACCEPTED_ENV_DRIFT = saved
 record('empty-allowlist-must-fail', ok_c6, False)
+
+print('\n⑦ 注入:某条 lane 偷偷换成**没登记**的 fork CM → 必须红'
+      '(fork 不登记就等于退出检查范围,这正是要防的)')
+
+# 注入目标**不能写死 lane 名**。这条 fixture 已经被陈旧咬过两次:
+#   · 2026-09-02 上午:写死成"挂 pc.CM 的那条 lane",而池化后 83 挂的是 `-pool`
+#     (已登记的 fork),if 一个字都匹配不上 —— 注入变成空操作,门当然不红。
+#   · 2026-09-02 傍晚:83 因为背后是 free 号被整条删掉,靶子直接不存在了,这条检测
+#     从此每次都 N/A —— **不吐假红,但也永远测不到东西**,等于静默失测。
+# 现在改成**运行时从活着的 deploy 里挑**:优先挑池腿(挂已登记 fork 的),挑不到再退而
+# 求其次挑挂共用 CM 的。这样删腿/加腿都不会让它失效。
+# 仍然保留"没注入到就报 N/A 不报 FAIL"那一层:喂错对象的套件说 N/A,
+# 别让人去改产品迎合断言。
+def pick_stealth_lane():
+    """挑一条此刻真挂着受检 CM 的 lane 当靶子;挑不到返回 None。"""
+    try:
+        items = ORIG_KJSON('get deploy')['items']
+    except Exception:
+        return None
+    forked, plain = [], []
+    for d in items:
+        base = pc.lane_cm(d)
+        if not base:
+            continue
+        (forked if base != pc.CM else plain).append(d['metadata']['name'])
+    # 优先池腿:它们是"fork 已登记"那条路径,正是本用例要防的那种偷换
+    return sorted(forked)[0] if forked else (sorted(plain)[0] if plain else None)
+
+
+STEALTH_LANE = pick_stealth_lane()
+_stealth_hits = []
+
+
+def kjson_stealth_fork(args, timeout=120):
+    out = ORIG_KJSON(args, timeout)
+    if args.startswith('get deploy') and STEALTH_LANE:
+        for d in out['items']:
+            if d['metadata']['name'] != STEALTH_LANE:
+                continue
+            base = pc.lane_cm(d)          # 它此刻的基准 CM(共用的或已登记的 fork)
+            if not base:
+                continue
+            for v in d['spec']['template']['spec'].get('volumes') or []:
+                if (v.get('configMap') or {}).get('name') == base:
+                    v['configMap']['name'] = base + '-stealth'
+                    _stealth_hits.append(base)
+    return out
+
+
+pc.kjson = kjson_stealth_fork
+ok_a7, lanes7 = pc.check_code()
+ok_b7 = pc.check_pool(lanes7)
+pc.kjson = ORIG_KJSON
+if not _stealth_hits:
+    print('  ⏭  N/A stealth-fork:%s —— 注入无对象(集群里没有挂受检 CM 的 lane?),'
+          '这不是门的红,是套件喂错了对象' % (STEALTH_LANE or '没挑到靶子'))
+else:
+    print('  (注入生效:%s 的 %s → %s-stealth)'
+          % (STEALTH_LANE, _stealth_hits[0], _stealth_hits[0]))
+    record('stealth-fork-must-fail', ok_a7 and ok_b7, False)
 
 print('\n' + '=' * 72)
 bad = [r for r in results if not r[1]]

@@ -40,7 +40,7 @@ Cursor 把 OpenAI key 存在 `secret://cursorAuth/openAIKey`,值是 `v10`+AES �
   python3 cursor_team_setup.py --revert             # 从最近备份回滚(bundle+vscdb行+settings)
   python3 cursor_team_setup.py --apply \
       --base-url https://cc.auto-link.com.cn/pro/v1 \
-      --models cursor-g-5.6-sol,cursor-g-5.6-sol-high,cursor-g-5.6-luna,cursor-g-5.6-pro,cursor-g-5.6-instant,cursor-g-5.5
+      --models cr-g-5.6,cr-g-5.6-instant,cr-g-5.6-mini,cr-g-5.6-pro,cr-g-5.6-thinking,cr-g-5.6-luna
 
 打完必须重启 Cursor(bundle 只在窗口启动时加载;vscdb 改动也要重启才读)。
 ⚠️ 若这台机器装过 CursorX:本脚本的 3 处补丁锚点会因 CursorX 已改写而命中 0 次 → 自动拒绝
@@ -62,11 +62,24 @@ BACKUP_ROOT = os.path.expanduser("~/.cursor-team-setup-backup")
 
 SUPPORTED_MAJOR_MINOR = "3.16"
 DEFAULT_BASE_URL = "https://cc.auto-link.com.cn/pro/v1"
+# 菜单 = cr-g 池的 14 个名字(2026-09-02 换代)。**必须与 cursor_team_setup.js 的
+# DEFAULT_MODELS 逐字相等** —— 两份实现分叉过一次(js 已换代、py 还留着旧 6 名)。
+# 前 8 个是载体代表,在真 Cursor 里跑过;后 6 个是档位变体,只共用了已验过的载体、
+# reasoning_effort 不同 —— 装机文档里标「实验档」。
 DEFAULT_MODELS = [
-    "cursor-g-5.6-sol", "cursor-g-5.6-sol-high", "cursor-g-5.6-luna",
-    "cursor-g-5.6-pro", "cursor-g-5.6-instant", "cursor-g-5.5",
+    "cr-g-5.6", "cr-g-5.6-instant", "cr-g-5.6-mini", "cr-g-5.6-t-mini",
+    "cr-g-5.6-pro", "cr-g-research", "cr-g-5.6-thinking", "cr-g-5.6-luna",
+    "cr-g-5.6-thinking-min", "cr-g-5.6-thinking-high", "cr-g-5.6-thinking-max",
+    "cr-g-5.6-luna-min", "cr-g-5.6-luna-high", "cr-g-5.6-luna-max",
+    "sa-grok-4.5", "sa-grok-4.6",
 ]
-DEFAULT_MODEL = "cursor-g-5.6-sol"  # 装完直接选中它,用户不用在菜单里挑
+# 装完直接选中它。**只有它跑过八轮 conv8 门**,别改成别的名字。
+DEFAULT_MODEL = "cr-g-5.6"
+# 判断"当前选中的是不是本方案的名字"用这个前缀。
+# ⚠️ 改 DEFAULT_MODEL 时必须一起改这里:漏改的后果是老用户升级后被打回旧名。
+MODEL_PREFIXES = ["cr-g-", "sa-grok-"]
+def is_ours(name):
+    return isinstance(name, str) and any(name.startswith(p) for p in MODEL_PREFIXES)
 
 # ── bundle 补丁定义:每处一个 (name, marker, compiled_regex, replace_fn) ──
 # 锚点全部挂在稳定语义地标上(getModelPickerDisplayConfiguration / clientSupportsRoutedModelUpdate /
@@ -158,7 +171,7 @@ PATCHES = [
          rx=re.compile(r"(modelPickerDisplayConfiguration\?\?\w+;return )(\w+\([a-z]\))(\}resolveModelNameToCatalog)"),
          sub=_gate_sub),
     dict(name="localagent", marker="@cxteam-localagent",
-         rx=re.compile(r"(clientSupportsRoutedModelUpdate:!0\};if\()(\w+\.localMode)(\)\{try\{)"),
+         rx=re.compile(r"((?:clientSupportsRoutedModelUpdate:!0\}|localMode:\w+\.localMode\}\));if\()(\w+\.localMode)(\)\{try\{)"),  # 3.18.25 前缀变了,两代都认
          sub=lambda m: m.group(1) + "/*@cxteam-localagent*/!0" + m.group(3)),
     dict(name="dedicated", marker="@cxteam-dedicated",
          rx=re.compile(r"(\w+\(this\.storageService,\"useDedicatedLocalAgentRuntimeHost\"\))(\?await this\.runLocalAgentInDedicatedExtensionHost\()"),
@@ -197,7 +210,7 @@ PATCHES = [
     # !isNewRequestIdGateEnabled())在本线误判为真。修:调用点恒 false → turnEnded 走
     # 复位分支 → status 正常复位,官方队列机制逐条各自成轮,僵尸+折叠同根拔除。
     dict(name="norelay", marker="@cxteam-norelay",
-         rx=re.compile(r'(if\()(\w+\(\{agentBackend:\w+,isLocalMode:\w+\.localMode,isAgentHostEnabled:\w+,isNewRequestIdGateEnabled:\(\)=>this\.isQueuedPromptNewRequestIdEnabled\(\)\}\))(\)\{)'),
+         rx=re.compile(r'(if\()(\w+\(\{(?:agentBackend:\w+,)?isLocalMode:\w+\.localMode,isAgentHostEnabled:\w+,isNewRequestIdGateEnabled:\(\)=>this\.isQueuedPromptNewRequestIdEnabled\(\)\}\))(\)\{)'),  # 3.18.25 起无 agentBackend
          sub=lambda m: m.group(1) + '/*@cxteam-norelay*/!1&&' + m.group(2) + m.group(3)),
 ]
 
@@ -283,10 +296,11 @@ def merge_config(dry):
     ai["userAddedModels"] = dedup(ai.get("userAddedModels"))
     ai["modelOverrideEnabled"] = dedup(ai.get("modelOverrideEnabled"))
     added = [m for m in ARGS.models if m not in uam_before]
-    # #3 默认模型:装完直接选中 cursor-g-5.6-sol。保守——仅当当前选中的不是任一 cursor-g 时才设。
+    # #3 默认模型:装完直接选中 DEFAULT_MODEL。保守——仅当当前选中的不是本方案的名字时才设。
+    # 注意 "cursor-g-*"(旧代)不以 MODEL_PREFIXES 之一开头,所以老用户升级会被换到新名 —— 这是换代想要的。
     mc = ai.setdefault("modelConfig", {})
     cur_name = (mc.get("composer") or {}).get("modelName")
-    if not (isinstance(cur_name, str) and cur_name.startswith("cursor-g")):
+    if not is_ours(cur_name):
         for feat in ("composer", "cmd-k"):
             f = dict(mc.get(feat) or {})
             f["modelName"] = DEFAULT_MODEL
@@ -448,7 +462,7 @@ def main():
     # Python 版不自动写 Key:本进程非 Cursor 签名,读钥匙串会弹框(JS 版走 in-process keytar 才不弹)。
     print("\n✅ 完成。还差一步(只此一步,交给 Cursor 自己做——key 是钥匙串加密的,Python 版不自动写):")
     print("   1. 启动 Cursor → Settings → Models → OpenAI API Key,粘贴你的 key,点 Verify。")
-    print("      (base-url、模型列表、开关都已预填好,默认模型已是 cursor-g-5.6-sol,你只需粘 key。)")
+    print("      (base-url、模型列表、开关都已预填好,默认模型已是 %s,你只需粘 key。)" % DEFAULT_MODEL)
     print("   2. 就绪。(想让脚本自动写 Key 请用 JS 版 cursor_team_setup.sh --apply。)")
     print("   回滚整包:python3 %s --revert;Cursor 升级后失效:python3 %s --repair"
           % (os.path.basename(sys.argv[0]), os.path.basename(sys.argv[0])))

@@ -140,23 +140,45 @@ def refresh_seed_from_ws(acct):
     except Exception as e:
         print("!! 解析 acct-%s /chatgpt-auth/auth.json 失败:%s" % (acct, e)); sys.exit(1)
     # python -c 内联脚本(无秘密);token 只经 ssh stdin 进 remote python 的 sys.stdin
+    #
+    # ⚠️ 2026-09-02 修三个洞(lane 82 实踩,把一个"401 但还站着"的 pod 变成 CrashLoop):
+    #   ① seed 属 root,不带 sudo 写 → PermissionError。原来 cp 带 `2>/dev/null || true`、
+    #      python 不带 sudo,于是备份静默不做、写盘直接失败。
+    #   ② 失败被 `r.stderr[:300]` 截断,300 字符正好切在回显的代码中间,**异常类型看不到**,
+    #      现场只剩一句无信息量的 Traceback 头。
+    #   ③ 最严重:失败了函数照样返回,调用方接着 rollout restart。pod 启动时就去 sentinel
+    #      握手、失败即 `[fatal] failed to start` 退出 ⇒ 旧 token 的 pod 本来还在带病服务,
+    #      restart 之后再也起不来。**写 seed 不成功,绝不许碰 restart。**
+    # 备份改成硬前提(不再 `|| true`),写盘改成临时文件 + os.replace 原子替换,
+    # 中途失败不会留下半个 json。
     py = (
-        "import json,sys;"
+        "import json,os,sys;"
         "live=sys.stdin.read().strip();"
+        'assert live, "stdin 空:没收到 token";'
         'p="/Data/zerokey-sessions/zero-%s/users.json";'
         "d=json.load(open(p));"
         'd["chatgpt"]["acct%s"]["parsedFetch"]["headers"]["authorization"]="Bearer "+live;'
-        'json.dump(d,open(p,"w"),ensure_ascii=False,indent=2);'
+        't=p+".tmp";'
+        'json.dump(d,open(t,"w"),ensure_ascii=False,indent=2);'
+        "json.load(open(t));"
+        "os.replace(t,p);"
         'print("seed authorization refreshed, head:",live[:12])'
     ) % (acct, acct)
     remote_cmd = (
         "set -e; "
         'SEED=/Data/zerokey-sessions/zero-%s/users.json; '
-        'cp "$SEED" /Data/backups/zero-%s-users-pre-livetoken-$(date +%%Y%%m%%d-%%H%%M%%S).json 2>/dev/null || true; '
-        "python3 -c '%s'"
+        'sudo -n cp "$SEED" /Data/backups/zero-%s-users-pre-livetoken-$(date +%%Y%%m%%d-%%H%%M%%S).json; '
+        "sudo -n python3 -c '%s'"
     ) % (acct, acct, py)
     r = subprocess.run(SSH + ["cltx@%s" % STANDBY, remote_cmd], input=live, capture_output=True, text=True)
-    print(r.stdout.strip() or r.stderr[:300])
+    if r.returncode != 0 or "refreshed" not in r.stdout:
+        print("!! lane %s 写 seed 失败,rc=%d —— **不要重启这条 lane**"
+              "(pod 启动即握手,起不来会从'带病服务'变成 CrashLoop)" % (acct, r.returncode))
+        print("   stdout:", r.stdout.strip()[:400])
+        print("   stderr:", r.stderr.strip()[-800:])   # 取尾:异常类型在末尾,取头只会拿到代码回显
+        return False
+    print(r.stdout.strip())
+    return True
 
 
 # ── 新 lane 的 spec 从**活着的参照 lane** 拷,不再用冻结模板 ──
@@ -501,7 +523,10 @@ def main():
         print("  slug 表(真身,无 xhigh): %s" % ", ".join("%s=%s%s" % (d, s, "/"+r if r else "") for _, d, _, s, r in VARIANTS))
         return
     if a.live_from_ws:
-        print("--- step0: refresh web seed from WS live token ---"); refresh_seed_from_ws(a.acct)
+        print("--- step0: refresh web seed from WS live token ---")
+        if not refresh_seed_from_ws(a.acct):
+            print("!! seed 没刷成功，后面的步骤全无意义（lane 起不来），停手。")
+            sys.exit(1)
     print("--- step1: apply deploy/svc (cloned from live lane %s) ---" % a.ref_lane); apply_deploy(a.acct, a.ref_lane)
     print("--- step3: register 6 direct names (WITH api_key placeholder) ---"); register_direct(a.acct)
     print("--- grant: merge 6 direct names into key ---")

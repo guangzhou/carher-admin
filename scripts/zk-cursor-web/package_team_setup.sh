@@ -20,6 +20,14 @@ cp "$ZKD_SRC/common/framing.js"   "$STAGE/zk-delta/common/"
 ( cd "$STAGE/zk-delta" && shasum -a 256 sidecar/sidecar.js common/framing.js > SHA256SUMS.txt )
 echo "zk-delta 源码指纹:"; sed 's/^/  /' "$STAGE/zk-delta/SHA256SUMS.txt"
 
+# lark-* skills 09-03 起**不随包**(用户:同事被飞书那步搞糊涂)。要带上:LARK_SKILLS=1 sh package_team_setup.sh,
+# 且安装器要显式 --lark 才会用到它。
+if [ "${LARK_SKILLS:-0}" = "1" ]; then
+  LARK_SK_SRC="${LARK_SKILLS_SRC:-$HOME/.agents/skills}"; mkdir -p "$STAGE/lark-skills"; n=0
+  for d in "$LARK_SK_SRC"/lark-*; do [ -d "$d" ] || continue; cp -RL "$d" "$STAGE/lark-skills/"; n=$((n+1)); done
+  echo "lark-skills: $n 个"
+fi
+
 # 双击安装器(Mac):调用引擎并带 --apply(装完会提示粘一次 Key),跑完暂停等回车
 cat > "$STAGE/INSTALL-Mac.command" <<'MAC'
 #!/bin/sh
@@ -71,7 +79,7 @@ MACZ
 chmod +x "$STAGE/INSTALL-Mac.command" "$STAGE/REPAIR-Mac.command" "$STAGE/TURN-OFF-DELTA-Mac.command" "$STAGE/cursor_team_setup.sh"
 
 cat > "$STAGE/README.txt" <<'RD'
-cursor-g 一键安装(零依赖,不用装 Python / Node)
+__MODEL_PREFIX__ 一键安装(零依赖,不用装 Python / Node)
 
 ━━━ 已经装过的同事:请重新跑一次 INSTALL(不是 REPAIR)━━━
   8-31 那版里有一个"链式增量"的实验补丁,它的服务端那半已经下线了,留在客户端会让
@@ -93,7 +101,7 @@ cursor-g 一键安装(零依赖,不用装 Python / Node)
   安装过程中窗口会让你「粘贴 API Key 后回车」——粘一次就好,脚本自动写进去。
   (Windows 上若自动写 Key 跳过了,按提示在 Cursor 设置里手动粘一次即可。)
 
-看到"完成"就装好了:启动 Cursor,模型菜单默认就是 cursor-g-5.6-sol,直接用。
+看到"完成"就装好了:启动 Cursor,模型菜单默认就是 __DEFAULT_MODEL__,直接用。
 
 关于"增量传输"(装完自动开着,Mac 才有)
   装完之后你的 Cursor 不再直接连公网,而是先连本机一个小程序(127.0.0.1:8788),
@@ -106,12 +114,26 @@ cursor-g 一键安装(零依赖,不用装 Python / Node)
   - 想看省了多少:浏览器打开 http://127.0.0.1:8788/metrics.json
   - 不想用了:双击 TURN-OFF-DELTA-Mac.command(要先退出 Cursor),立刻退回直连公网。
 
-Cursor 升级后 cursor-g 不见了怎么办?
+Cursor 升级后 __MODEL_PREFIX__ 的模型不见了怎么办?
   不用回滚升级。双击 REPAIR-Mac.command(Windows: REPAIR-Windows.cmd)一键修复,
   重启 Cursor 即可。你的 Key 和配置都还在,修复只重打补丁。
 
 出问题看飞书文档的"常见问题",或找管理员。
 RD
+
+# README.txt 里的模型名**不写死** —— 从安装器常量里抠。写死的后果是换代之后
+# 说明书对同事报旧真相(2026-09-02 就踩到:菜单已是 cr-g-*,README 还写 cursor-g-5.6-sol)。
+DEF_MODEL=$(grep -m1 '^const DEFAULT_MODEL = ' "$HERE/cursor_team_setup.js" | sed 's/.*"\(.*\)".*/\1/')
+MODEL_PFX=$(grep -m1 '^const MODEL_PREFIXES = ' "$HERE/cursor_team_setup.js" | sed 's/.*\["\([^"]*\)".*/\1/')
+if [ -z "$DEF_MODEL" ] || [ -z "$MODEL_PFX" ]; then
+  echo "FATAL: 从 cursor_team_setup.js 抠不到 DEFAULT_MODEL / MODEL_PREFIX(常量改名了?)" >&2; exit 1
+fi
+sed -e "s/__DEFAULT_MODEL__/$DEF_MODEL/g" -e "s/__MODEL_PREFIX__/${MODEL_PFX%-}/g" \
+    "$STAGE/README.txt" > "$STAGE/README.txt.new" && mv "$STAGE/README.txt.new" "$STAGE/README.txt"
+if grep -q "__DEFAULT_MODEL__\|__MODEL_PREFIX__" "$STAGE/README.txt"; then
+  echo "FATAL: README.txt 占位符没替换干净" >&2; exit 1
+fi
+echo "README.txt: 默认模型=$DEF_MODEL 前缀=${MODEL_PFX%-}"
 
 # 先删旧包。zip -r 是**往已有归档里追加**，不是重建：改过文件名之后旧名字会留在包里，
 # 同事解出来会多一个乱码文件(第一次改名时实测踩到)。

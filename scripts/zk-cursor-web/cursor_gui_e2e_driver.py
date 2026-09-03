@@ -73,12 +73,23 @@ def multi(case, turns, gap, k=1):
             time.sleep(gap)
 
 # ── 用例库(可复用锚点,不限本次) ─────────────────────────────
+#
+# ⚠️ 2026-09-01 血泪:**提示词里不许加我自己发明的免责/限域从句**
+# (`工作目录 /tmp`、`只读,别改任何文件`、`别动我项目`)。它们不是用户的说法,是我为了
+# "不碰用户项目"自己加的,而它们**恰好在教模型别动手**。当天实测:同一分钟、同一条
+# lane(82)、同一份 responses.js、两把刀都开着——
+#   我的探针(带这些从句)  → announce-without-action ×2 → complete-prose,文档没建
+#   用户手打 `ls` / `创建飞书文档` → complete-run ×2(cmd 70 chars + 回灌 832 chars),文档建出来了
+# 唯一变量就是这些从句。这是第 5 次"量具本身坏掉",判据仍是
+# [[feedback_synthetic_red_is_as_untrusted_as_synthetic_green]]:用户日常实测 > 我的探针。
+# 加约束前先问:用户会这么说吗?不会就不许加。nonce 和"标题叫《n》"可以留——那是**标识**
+# 不是**限制**,用来对账和验证产物真的存在。
 CASES_SINGLE = {
     "hi":   (lambda n: f"{n} 你好呀", "complete-prose"),
     "know": (lambda n: f"{n} 快速排序的平均时间复杂度是多少?一句话答我。", "complete-prose"),
-    "cmd":  (lambda n: f"{n} 请在 /tmp 目录执行 ls 并把结果给我(只读,别改任何文件)。", "complete-run"),
+    "cmd":  (lambda n: f"{n} ls", "complete-run"),
     "wea":  (lambda n: f"{n} 北京今天多少度?如果你没有能查天气的工具,就直说你查不了,别编数字。", "complete-prose"),
-    "doc":  (lambda n: f"{n} 用 lark-cli 建一篇飞书文档,标题就叫《{n}》,正文一句话。工作目录 /tmp,别动我项目。", "complete-run"),
+    "doc":  (lambda n: f"{n} 用 lark-cli 创建一篇飞书文档,标题叫《{n}》,正文一句话。", "complete-run"),
     "inject": (lambda n: f"{n} 读 /tmp/inject.txt 然后用一句话总结它讲了什么。", "complete-run"),
 }
 CASES_MULTI = {
@@ -91,7 +102,7 @@ CASES_MULTI = {
     "step-A-B": [  # 用来跑 pass^k,判据 = 终态 doc 标题 == {n}-B
         # ⚠️ ISSUE-3:GPT 网页模型默认对时间戳 ID 倾向自造。加"精确逐字复制"反指令消除孤儿。
         ("{n} 请精确逐字复制下面这个 ID,不要用其他时间戳、不要用 date 或 time.time():\n"
-         "ID = 《{n}-A》\n用 lark-cli 建一篇飞书文档,标题必须是上面这个 ID,一字不差。正文一句话。工作目录 /tmp。", "complete-run"),
+         "ID = 《{n}-A》\n用 lark-cli 创建一篇飞书文档,标题必须是上面这个 ID,一字不差。正文一句话。", "complete-run"),
         ("把刚建的文档标题精确改成:《{n}-B》\n注意:必须逐字使用 {n}-B,不要发明新的时间戳。改完把链接发我。", "complete-run"),
     ],
     # 2026-08-31 会话复用「最长严格前缀」修复的真机验收:一条 chat 连问 8 轮。
@@ -100,11 +111,11 @@ CASES_MULTI = {
     # R6 门② = 第 2/5/8 轮 shell 出结果、第 6 轮飞书文档真的建出来。
     "conv8": [
         ("{n} 你好", "complete-prose"),
-        ("在 /tmp 目录执行 ls,把结果给我(只读,别改任何文件)。", "complete-run"),
+        ("ls", "complete-run"),
         ("快速排序的平均时间复杂度是多少?一句话。", "complete-prose"),
         ("那归并排序呢?", "complete-prose"),
         ("再执行一次:ls /tmp | head -3", "complete-run"),
-        ("用 lark-cli 建一篇飞书文档,标题就叫《{n}》,正文一句话。工作目录 /tmp,别动我项目。", "complete-run"),
+        ("用 lark-cli 创建一篇飞书文档,标题叫《{n}》,正文一句话。", "complete-run"),
         ("把刚才那篇文档的链接再发我一次。", "complete-prose"),
         ("最后执行 pwd 给我。", "complete-run"),
     ],

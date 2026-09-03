@@ -167,3 +167,4 @@
 - `crg_key_grant_all.py`：在 proxy pod 内批量（env `TOKENS_FILE`=`alias<TAB>token` 文件），09-03 645 把 83 秒跑完，**跳过 models 为空的 key**（空 = 全部可用，加名单反而收窄）。备份 `/Data/backups/keys-cursor-all-20260903-112011-pre-crg-pool.json`（638 条）。
 - `litellm_key_add.py --alias X --models a,b [--aliases JSON | --copy-from Y] [--apply]`：通用追加 models/aliases，先查 /model/info 名字能否解析，备份 `key-<alias>-<ts>-pre-add.json`。09-03 用它照 carher-1 给 carher-13 加 `claude-fable-5.1`/`claude-opus-5`。
 - 判据一律 **DB 直读**（`unnest(models)` 计数、`aliases` 键数），不认 API 自述。
+- **Windows「Cursor.exe not found」（09-03 下午，同事报）**：旧 `.cmd` 只认两个固定路径。现在按 CURSOR_BIN → 8 个常见目录（含 x86 / D 盘）→ 注册表 App Paths → Uninstall DisplayIcon → 开始菜单快捷方式 → 最后让用户粘路径。`.cmd` 必须 CRLF。**未在真 Windows 上实测**，同事再报把窗口第一行 `Cursor.exe = …` 一起发。

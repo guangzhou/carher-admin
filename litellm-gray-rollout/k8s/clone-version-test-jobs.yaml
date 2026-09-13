@@ -1,0 +1,231 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-new-version-test
+  namespace: litellm-clone
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app: litellm-new-version-test
+        litellm.carher.io/role: version-test
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: test
+          image: 127.0.0.1:5000/litellm-carher@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CLONE_DB_HOST
+              value: litellm-clone-a
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-clone-a-credentials
+                  key: DATABASE_URL
+            - name: DISABLE_SCHEMA_UPDATE
+              value: "True"
+          command: ["sh", "-ceu"]
+          args: ["echo 'replace with audited new-version read/write gate'; exit 64"]
+          resources:
+            requests:
+              cpu: 500m
+              memory: 3Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-old-version-test
+  namespace: litellm-clone
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app: litellm-old-version-test
+        litellm.carher.io/role: version-test
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: test
+          image: 127.0.0.1:5000/litellm-carher@sha256:1111111111111111111111111111111111111111111111111111111111111111
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CLONE_DB_HOST
+              value: litellm-clone-b
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-clone-b-credentials
+                  key: DATABASE_URL
+            - name: DISABLE_SCHEMA_UPDATE
+              value: "True"
+          command: ["sh", "-ceu"]
+          args: ["echo 'replace with audited old-version read/write gate'; exit 64"]
+          resources:
+            requests:
+              cpu: 500m
+              memory: 3Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-concurrent-new-test
+  namespace: litellm-clone
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app: litellm-concurrent-new-test
+        litellm.carher.io/role: version-test
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: test
+          image: 127.0.0.1:5000/litellm-carher@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CLONE_DB_HOST
+              value: litellm-clone-c
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-clone-c-credentials
+                  key: DATABASE_URL
+            - name: DISABLE_SCHEMA_UPDATE
+              value: "True"
+          command: ["sh", "-ceu"]
+          args: ["echo 'replace with synchronized concurrent new-version gate'; exit 64"]
+          resources:
+            requests:
+              cpu: 500m
+              memory: 3Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-concurrent-old-test
+  namespace: litellm-clone
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app: litellm-concurrent-old-test
+        litellm.carher.io/role: version-test
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: test
+          image: 127.0.0.1:5000/litellm-carher@sha256:1111111111111111111111111111111111111111111111111111111111111111
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CLONE_DB_HOST
+              value: litellm-clone-c
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-clone-c-credentials
+                  key: DATABASE_URL
+            - name: DISABLE_SCHEMA_UPDATE
+              value: "True"
+          command: ["sh", "-ceu"]
+          args: ["echo 'replace with synchronized concurrent old-version gate'; exit 64"]
+          resources:
+            requests:
+              cpu: 500m
+              memory: 3Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]

@@ -1,0 +1,120 @@
+worker_processes 1;
+pid @@PID_FILE@@;
+error_log @@ERROR_LOG@@ notice;
+
+events { worker_connections 128; }
+
+http {
+    upstream litellm_product { server 127.0.0.1:@@PROD_PORT@@; }
+    upstream litellm_gray { server 127.0.0.1:@@GRAY_PORT@@; }
+    upstream litellm_guarded_old { server 127.0.0.1:@@BRIDGE_PORT@@; }
+
+    map $http_authorization $auth_token {
+        default "";
+        "~*^\s*Bearer\s+(?<auth_token_value>sk-[A-Za-z0-9._~-]{8,512})\s*$" $auth_token_value;
+    }
+    map $http_authorization $auth_present { "" 0; default 1; }
+    map $http_x_api_key $x_api_token {
+        default "";
+        "~^\s*(?<x_api_token_value>sk-[A-Za-z0-9._~-]{8,512})\s*$" $x_api_token_value;
+    }
+    map "$auth_present:$auth_token" $canonical_key {
+        "0:" $x_api_token;
+        ~^1:.+ $auth_token;
+        default "";
+    }
+    map $canonical_key $bucket_key { "" ""; default $canonical_key; }
+
+    map $canonical_key $protected_prod {
+        default 0;
+        include @@GENERATION_DIR@@/protected-prod.map;
+    }
+    map $canonical_key $force_prod {
+        default 0;
+        include @@GENERATION_DIR@@/force-prod.map;
+    }
+    map $canonical_key $force_gray {
+        default 0;
+        include @@GENERATION_DIR@@/force-gray.map;
+    }
+    map $canonical_key $key_sid {
+        default "-";
+        include @@GENERATION_DIR@@/key-sid.map;
+    }
+
+    split_clients "$bucket_key" $pct_pool_raw {
+@@SPLIT_RULES@@
+    }
+    map "$bucket_key:$pct_pool_raw" $pct_pool {
+        ~^: litellm_product;
+        default $pct_pool_raw;
+    }
+    map "$protected_prod:$force_prod:$force_gray:$pct_pool" $normal_inference_upstream {
+        ~^1: litellm_product;
+        ~^0:1: litellm_product;
+        ~^0:0:1: litellm_gray;
+        "0:0:0:litellm_gray" litellm_gray;
+        default litellm_product;
+    }
+
+    map "" $convergence_mode {
+        include @@GENERATION_DIR@@/convergence-mode.map;
+    }
+    map "" $bridge_override {
+        include @@GENERATION_DIR@@/bridge-override.map;
+    }
+    map $uri $normal_route_upstream {
+        ~^/(pro/)?(v1/)?(messages|responses|chat/completions|completions|embeddings|images/generations)(/|$) $normal_inference_upstream;
+        default litellm_product;
+    }
+    map "$bridge_override:$convergence_mode:$normal_route_upstream" $effective_upstream {
+        ~^guarded-old: litellm_guarded_old;
+        ~^off:1: litellm_gray;
+        default $normal_route_upstream;
+    }
+    map $effective_upstream $pool_label {
+        litellm_gray canary;
+        litellm_guarded_old guarded-old;
+        default stable;
+    }
+    map $uri $uri_class {
+        ~*/embeddings embedding;
+        ~*/images/ image;
+        ~*/messages messages;
+        ~*/responses responses;
+        ~*/chat/ chat;
+        default other;
+    }
+    geo $gray_debug_source { default 0; 127.0.0.1/32 1; }
+    map "$gray_debug_source:$http_x_llm_debug" $pool_hdr {
+        default "";
+        "1:@@DEBUG_TOKEN@@" $pool_label;
+    }
+
+    log_format gray 'ts=$time_iso8601 $remote_addr $status $request_time '
+                    'pool=$pool_label upstream=$upstream_addr rt=$upstream_response_time '
+                    'uri_class=$uri_class sid=$key_sid';
+
+    server {
+        listen 127.0.0.1:@@LISTEN_PORT@@;
+        access_log @@ACCESS_LOG@@ gray;
+
+        location ~ ^/pro/(v1/(messages|responses|chat/completions|completions|embeddings|images/generations)(/|$)|messages(/|$)|responses(/|$)|chat/completions(/|$)|completions(/|$)|embeddings(/|$)|images/generations(/|$)) {
+            rewrite ^/pro/(.*)$ /$1 break;
+            proxy_http_version 1.1;
+            proxy_buffering off;
+            proxy_read_timeout 570s;
+            proxy_pass http://$effective_upstream;
+            add_header X-LLM-Pool $pool_hdr always;
+        }
+
+        location /pro/ {
+            rewrite ^/pro/(.*)$ /$1 break;
+            proxy_http_version 1.1;
+            proxy_buffering off;
+            proxy_read_timeout 570s;
+            proxy_pass http://$effective_upstream;
+            add_header X-LLM-Pool $pool_hdr always;
+        }
+    }
+}

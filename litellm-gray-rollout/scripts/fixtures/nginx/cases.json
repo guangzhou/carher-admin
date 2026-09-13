@@ -1,0 +1,132 @@
+[
+  {
+    "name": "empty-key-fails-to-stable",
+    "path": "/pro/v1/messages",
+    "headers": {},
+    "split_percent": 100,
+    "expected_pool": "prod"
+  },
+  {
+    "name": "invalid-authorization-does-not-fallback",
+    "path": "/pro/v1/responses",
+    "headers": {"authorization": "Basic nope", "x-api-key": "sk-forcegray0001"},
+    "force_gray": ["sk-forcegray0001"],
+    "expected_pool": "prod"
+  },
+  {
+    "name": "invalid-x-api-key-fails-to-stable",
+    "path": "/pro/v1/messages",
+    "headers": {"x-api-key": "not-a-litellm-key"},
+    "split_percent": 100,
+    "expected_pool": "prod"
+  },
+  {
+    "name": "x-api-key-used-without-authorization",
+    "path": "/pro/v1/embeddings",
+    "headers": {"x-api-key": "sk-forcegray0001"},
+    "force_gray": ["sk-forcegray0001"],
+    "expected_pool": "gray"
+  },
+  {
+    "name": "force-gray-image-generation",
+    "path": "/pro/v1/images/generations",
+    "headers": {"authorization": "Bearer sk-forcegray0001"},
+    "force_gray": ["sk-forcegray0001"],
+    "expected_pool": "gray"
+  },
+  {
+    "name": "force-prod-beats-force-gray",
+    "path": "/pro/v1/chat/completions",
+    "headers": {"authorization": "Bearer sk-incident0001"},
+    "force_prod": ["sk-incident0001"],
+    "force_gray": ["sk-incident0001"],
+    "expected_pool": "prod"
+  },
+  {
+    "name": "protected-prod-beats-force-gray",
+    "path": "/pro/v1/messages",
+    "headers": {"authorization": "Bearer sk-protected0001"},
+    "protected_prod": ["sk-protected0001"],
+    "force_gray": ["sk-protected0001"],
+    "expected_pool": "prod"
+  },
+  {
+    "name": "split-routes-neutral-key-to-gray",
+    "path": "/pro/v1/chat/completions",
+    "headers": {"authorization": "Bearer sk-neutral00000001"},
+    "split_percent": 50,
+    "expected_pool": "gray"
+  },
+  {
+    "name": "split-zero-keeps-neutral-key-stable",
+    "path": "/pro/v1/messages",
+    "headers": {"authorization": "Bearer sk-neutral00000001"},
+    "split_percent": 0,
+    "expected_pool": "prod"
+  },
+  {
+    "name": "pro-prefix-control-stays-stable",
+    "path": "/pro/model/new",
+    "headers": {"authorization": "Bearer sk-forcegray0001"},
+    "force_gray": ["sk-forcegray0001"],
+    "expected_pool": "prod"
+  },
+  {
+    "name": "convergence-routes-control-to-canary",
+    "path": "/pro/model/info",
+    "headers": {"authorization": "Bearer sk-protected0001"},
+    "protected_prod": ["sk-protected0001"],
+    "convergence_mode": true,
+    "expected_pool": "gray"
+  },
+  {
+    "name": "key-control-stays-stable",
+    "path": "/pro/key/update",
+    "headers": {"authorization": "Bearer sk-forcegray0001"},
+    "force_gray": ["sk-forcegray0001"],
+    "expected_pool": "prod"
+  },
+  {
+    "name": "team-control-stays-stable",
+    "path": "/pro/team/new",
+    "headers": {"authorization": "Bearer sk-forcegray0001"},
+    "force_gray": ["sk-forcegray0001"],
+    "expected_pool": "prod"
+  },
+  {
+    "name": "budget-control-stays-stable",
+    "path": "/pro/budget/list",
+    "headers": {"authorization": "Bearer sk-forcegray0001"},
+    "force_gray": ["sk-forcegray0001"],
+    "expected_pool": "prod"
+  },
+  {
+    "name": "convergence-routes-ui-to-canary",
+    "path": "/pro/ui/",
+    "convergence_mode": true,
+    "expected_pool": "gray"
+  },
+  {
+    "name": "bridge-override-beats-convergence",
+    "path": "/pro/v1/responses",
+    "headers": {"authorization": "Bearer sk-forcegray0001"},
+    "force_gray": ["sk-forcegray0001"],
+    "convergence_mode": true,
+    "bridge_override": true,
+    "expected_pool": "guarded-old"
+  },
+  {
+    "name": "unlisted-path-fails-to-stable",
+    "path": "/pro/v1/audio/transcriptions",
+    "headers": {"authorization": "Bearer sk-forcegray0001"},
+    "force_gray": ["sk-forcegray0001"],
+    "expected_pool": "prod"
+  },
+  {
+    "name": "pro-prefix-force-gray",
+    "path": "/pro/v1/messages",
+    "headers": {"authorization": "Bearer sk-forcegray0001"},
+    "force_gray": ["sk-forcegray0001"],
+    "expected_pool": "gray"
+  }
+]

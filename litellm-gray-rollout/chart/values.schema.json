@@ -1,0 +1,580 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifactTemplate",
+    "allowTemplateRender",
+    "nameOverride",
+    "replicas",
+    "image",
+    "service",
+    "networkPolicy",
+    "selectorLabels",
+    "command",
+    "args",
+    "schemaUpdateEnabled",
+    "productionRouteEnabled",
+    "config",
+    "callbacks",
+    "additionalSnapshots",
+    "workloadContract",
+    "schedulerSafety",
+    "backgroundTasks",
+    "secretRefs",
+    "podSecurityContext",
+    "containerSecurityContext",
+    "lifecycle",
+    "drain",
+    "extraEnv",
+    "initContainers",
+    "podAnnotations",
+    "podLabels",
+    "nodeSelector",
+    "tolerations",
+    "affinity",
+    "resources",
+    "terminationGracePeriodSeconds",
+    "probes"
+  ],
+  "properties": {
+    "artifactTemplate": {
+      "type": "boolean"
+    },
+    "allowTemplateRender": {
+      "type": "boolean"
+    },
+    "nameOverride": {
+      "type": "string",
+      "enum": [
+        "litellm-proxy",
+        "litellm-proxy-gray",
+        "litellm-proxy-guarded-old"
+      ]
+    },
+    "replicas": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "pullPolicy"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^127\\.0\\.0\\.1:5000/[a-z0-9._/-]+$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "not": {
+            "enum": [
+              "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+            ]
+          }
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["IfNotPresent", "Always", "Never"]
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodePort"],
+      "properties": {
+        "nodePort": {
+          "type": "integer",
+          "enum": [30402, 30405, 30406]
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "ingressFrom"],
+      "properties": {
+        "enabled": {"const": true},
+        "ingressFrom": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["namespaceSelector", "podSelector"],
+                "properties": {
+                  "namespaceSelector": {"type": "object"},
+                  "podSelector": {"type": "object"}
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["ipBlock"],
+                "properties": {
+                  "ipBlock": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["cidr"],
+                    "properties": {
+                      "cidr": {
+                        "type": "string",
+                        "pattern": "^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$"
+                      },
+                      "except": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runAsNonRoot", "seccompProfile"],
+      "properties": {
+        "runAsNonRoot": {"const": true},
+        "seccompProfile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {"type": {"const": "RuntimeDefault"}}
+        }
+      }
+    },
+    "containerSecurityContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowPrivilegeEscalation", "capabilities"],
+      "properties": {
+        "allowPrivilegeEscalation": {"const": false},
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["drop"],
+          "properties": {
+            "drop": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"const": "ALL"}}
+          }
+        }
+      }
+    },
+    "selectorLabels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["app"],
+      "properties": {
+        "app": {
+          "type": "string",
+          "enum": [
+            "litellm-proxy",
+            "litellm-proxy-gray",
+            "litellm-proxy-guarded-old"
+          ]
+        }
+      }
+    },
+    "command": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "args": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "schemaUpdateEnabled": {
+      "const": false
+    },
+    "productionRouteEnabled": {
+      "type": "boolean"
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data"],
+      "properties": {
+        "data": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"type": "string"},
+          "required": ["config.yaml"]
+        }
+      }
+    },
+    "callbacks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data"],
+      "properties": {
+        "data": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"type": "string"},
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9._-]+$"
+          }
+        }
+      }
+    },
+    "additionalSnapshots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "mountPath", "data"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 50,
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+          },
+          "mountPath": {
+            "type": "string",
+            "pattern": "^/[^[:cntrl:]]+$"
+          },
+          "data": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {"type": "string"},
+            "propertyNames": {
+              "pattern": "^[A-Za-z0-9._-]+$"
+            }
+          }
+        }
+      }
+    },
+    "workloadContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["containers", "managedInitContainers", "optionalInitContainers"],
+      "properties": {
+        "containers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {"const": "litellm"}
+        },
+        "managedInitContainers": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "optionalInitContainers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {"const": "config-check"}
+        }
+      }
+    },
+    "schedulerSafety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "evidenceSha256",
+        "configSha256",
+        "callbacksSha256",
+        "runtimeSha256",
+        "sourcePayloadSha256",
+        "capturedAt",
+        "source"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["unverified", "primary", "disabled", "externally-coordinated"]
+        },
+        "evidenceSha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "configSha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "callbacksSha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "runtimeSha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "sourcePayloadSha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "capturedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^(?:clone|direct):[A-Za-z0-9._:-]+$"
+        }
+      }
+    },
+    "backgroundTasks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "secretRefs": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+      }
+    },
+    "drain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preStopSeconds", "streamDrainSeconds"],
+      "properties": {
+        "preStopSeconds": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 300
+        },
+        "streamDrainSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3570
+        }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preStop"],
+      "properties": {
+        "preStop": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["exec"],
+          "properties": {
+            "exec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["command"],
+              "properties": {
+                "command": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {"type": "string", "minLength": 1}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "extraEnv": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "oneOf": [
+          {"required": ["name", "value"]},
+          {"required": ["name", "valueFrom"]}
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Z_][A-Z0-9_]*$",
+            "not": {
+              "enum": ["DISABLE_SCHEMA_UPDATE"]
+            }
+          },
+          "value": {"type": "string"},
+          "valueFrom": {
+            "type": "object",
+            "additionalProperties": false,
+            "oneOf": [
+              {"required": ["secretKeyRef"]},
+              {"required": ["configMapKeyRef"]}
+            ],
+            "properties": {
+              "secretKeyRef": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "key"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+                  },
+                  "key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 253
+                  },
+                  "optional": {"type": "boolean"}
+                }
+              },
+              "configMapKeyRef": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "key"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+                  },
+                  "key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 253
+                  },
+                  "optional": {"type": "boolean"}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "initContainers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approvedNames", "items"],
+      "properties": {
+        "approvedNames": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["config-check"]
+          }
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "enum": ["config-check"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "additionalProperties": {"type": "string"},
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "litellm.carher.io/config-checksum",
+            "litellm.carher.io/callbacks-checksum",
+            "litellm.carher.io/scheduler-evidence-checksum"
+          ]
+        }
+      }
+    },
+    "podLabels": {
+      "type": "object",
+      "additionalProperties": {"type": "string"},
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "app",
+            "app.kubernetes.io/instance",
+            "carher.net/litellm-production-route"
+          ]
+        }
+      }
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    },
+    "tolerations": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "affinity": {
+      "type": "object"
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpu", "memory"],
+          "properties": {
+            "cpu": {"type": "string"},
+            "memory": {"type": "string"}
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpu", "memory"],
+          "properties": {
+            "cpu": {"type": "string"},
+            "memory": {"type": "string"}
+          }
+        }
+      }
+    },
+    "terminationGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 3600
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "initialDelaySeconds",
+        "periodSeconds",
+        "failureThreshold",
+        "timeoutSeconds"
+      ],
+      "properties": {
+        "initialDelaySeconds": {"type": "integer", "minimum": 0},
+        "periodSeconds": {"type": "integer", "minimum": 1},
+        "failureThreshold": {"type": "integer", "minimum": 1},
+        "timeoutSeconds": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

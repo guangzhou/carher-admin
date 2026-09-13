@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: clone-network-allowed-probe
+  namespace: litellm-clone
+  labels:
+    app: clone-network-allowed-probe
+    litellm.carher.io/role: network-probe
+spec:
+  automountServiceAccountToken: false
+  nodeSelector:
+    kubernetes.io/hostname: aiyjy-litellm-standby
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: standby
+      effect: NoSchedule
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-ceu"]
+      args:
+        - |
+          getent hosts litellm-clone-a >/dev/null
+          for attempt in $(seq 1 30); do
+            pg_isready -h litellm-clone-a -p 5432 -t 2 && exit 0
+            test "$attempt" -lt 30
+            sleep 2
+          done
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: clone-network-attacker-probe
+  namespace: litellm-clone
+  labels:
+    app: clone-network-attacker-probe
+spec:
+  automountServiceAccountToken: false
+  nodeSelector:
+    kubernetes.io/hostname: aiyjy-litellm-standby
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: standby
+      effect: NoSchedule
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-ceu"]
+      args:
+        - |
+          getent hosts litellm-clone-a >/dev/null
+          if pg_isready -h litellm-clone-a -p 5432 -t 5; then
+            echo "FATAL: default-deny is not enforced" >&2
+            exit 1
+          fi
+          echo "PASS: unlabelled pod cannot reach clone DB"
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]

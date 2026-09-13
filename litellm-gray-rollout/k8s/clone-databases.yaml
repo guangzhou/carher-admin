@@ -1,0 +1,284 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-clone-a
+  namespace: litellm-clone
+spec:
+  type: ClusterIP
+  selector:
+    app: litellm-clone-a
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: litellm-clone-a
+  namespace: litellm-clone
+spec:
+  serviceName: litellm-clone-a
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-clone-a
+  template:
+    metadata:
+      labels:
+        app: litellm-clone-a
+        litellm.carher.io/component: clone-db
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm"]
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm"]
+            periodSeconds: 5
+            failureThreshold: 6
+          envFrom:
+            - secretRef:
+                name: litellm-clone-a-credentials
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          litellm.carher.io/sensitive-clone-data: "true"
+      spec:
+        storageClassName: local-path
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 4Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-clone-b
+  namespace: litellm-clone
+spec:
+  type: ClusterIP
+  selector:
+    app: litellm-clone-b
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: litellm-clone-b
+  namespace: litellm-clone
+spec:
+  serviceName: litellm-clone-b
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-clone-b
+  template:
+    metadata:
+      labels:
+        app: litellm-clone-b
+        litellm.carher.io/component: clone-db
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm"]
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm"]
+            periodSeconds: 5
+            failureThreshold: 6
+          envFrom:
+            - secretRef:
+                name: litellm-clone-b-credentials
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          litellm.carher.io/sensitive-clone-data: "true"
+      spec:
+        storageClassName: local-path
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 4Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-clone-c
+  namespace: litellm-clone
+spec:
+  type: ClusterIP
+  selector:
+    app: litellm-clone-c
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: litellm-clone-c
+  namespace: litellm-clone
+spec:
+  serviceName: litellm-clone-c
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-clone-c
+  template:
+    metadata:
+      labels:
+        app: litellm-clone-c
+        litellm.carher.io/component: clone-db
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm"]
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm"]
+            periodSeconds: 5
+            failureThreshold: 6
+          envFrom:
+            - secretRef:
+                name: litellm-clone-c-credentials
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          litellm.carher.io/sensitive-clone-data: "true"
+      spec:
+        storageClassName: local-path
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 4Gi

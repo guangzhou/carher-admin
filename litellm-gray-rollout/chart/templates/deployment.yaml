@@ -1,0 +1,144 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "litellm-proxy.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "litellm-proxy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "litellm-proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        litellm.carher.io/config-checksum: {{ include "litellm-proxy.configChecksum" . | quote }}
+        litellm.carher.io/callbacks-checksum: {{ include "litellm-proxy.callbacksChecksum" . | quote }}
+        litellm.carher.io/scheduler-evidence-checksum: {{ .Values.schedulerSafety.evidenceSha256 | quote }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "litellm-proxy.selectorLabels" . | nindent 8 }}
+        litellm.carher.io/background-tasks-enabled: {{ .Values.backgroundTasks.enabled | quote }}
+        {{- if .Values.productionRouteEnabled }}
+        carher.net/litellm-production-route: "true"
+        {{- end }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- if .Values.initContainers.items }}
+      initContainers:
+        {{- range .Values.initContainers.items }}
+        - name: {{ .name }}
+          image: {{ printf "%s@%s" $.Values.image.repository $.Values.image.digest | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["python", "-c"]
+          args:
+            - |
+              import pathlib
+              import yaml
+              yaml.safe_load(pathlib.Path("/app/config.yaml").read_text())
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: litellm
+          image: {{ printf "%s@%s" .Values.image.repository .Values.image.digest | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command:
+            {{- toYaml .Values.command | nindent 12 }}
+          args:
+            {{- toYaml .Values.args | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 4000
+              protocol: TCP
+          env:
+            - name: DISABLE_SCHEMA_UPDATE
+              value: "True"
+            {{- range .Values.extraEnv }}
+            - name: {{ .name }}
+              {{- if hasKey . "value" }}
+              value: {{ .value | quote }}
+              {{- else }}
+              valueFrom:
+                {{- toYaml .valueFrom | nindent 16 }}
+              {{- end }}
+            {{- end }}
+          envFrom:
+            {{- range .Values.secretRefs }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: http
+            {{- toYaml .Values.probes | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: http
+            {{- toYaml .Values.probes | nindent 12 }}
+          lifecycle:
+            {{- toYaml .Values.lifecycle | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            {{- range $filename, $_ := .Values.callbacks.data }}
+            - name: callbacks
+              mountPath: {{ printf "/app/%s" $filename | quote }}
+              subPath: {{ $filename | quote }}
+              readOnly: true
+            {{- end }}
+            {{- range .Values.additionalSnapshots }}
+            - name: {{ printf "snapshot-%s" .name }}
+              mountPath: {{ .mountPath | quote }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "litellm-proxy.configName" . }}
+        - name: callbacks
+          configMap:
+            name: {{ include "litellm-proxy.callbacksName" . }}
+        {{- range .Values.additionalSnapshots }}
+        - name: {{ printf "snapshot-%s" .name }}
+          configMap:
+            name: {{ include "litellm-proxy.snapshotName" (dict "root" $ "snapshot" .) }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

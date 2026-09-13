@@ -1,0 +1,67 @@
+# Removes only known failed-run artifacts from the metadata dump PVC. This Job
+# has no network access and must be deleted after its evidence is archived.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-clone-dump-artifact-cleanup
+  namespace: litellm-clone
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: litellm-clone-dump-artifact-cleanup
+        litellm.carher.io/role: storage-cleanup
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cleanup
+          image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-ceu"]
+          args:
+            - |
+              cd /dump
+              for artifact in litellm-metadata.dump litellm-metadata.list litellm-metadata.dump.sha256 baseline-counts.tsv baseline-counts.json snapshot-ready clone-a-restored-counts.tsv; do
+                if test -e "$artifact"; then
+                  test -f "$artifact"
+                  rm -f -- "$artifact"
+                fi
+              done
+              test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)"
+              echo CLEANUP_OK
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: dump
+              mountPath: /dump
+      volumes:
+        - name: dump
+          persistentVolumeClaim:
+            claimName: litellm-clone-dump

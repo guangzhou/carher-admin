@@ -1,0 +1,6 @@
+apiVersion: v2
+name: litellm-product-proxy
+description: Parameterized LiteLLM proxy chart for prod, gray, and guarded-old releases
+type: application
+version: 0.1.0
+appVersion: "1.95.0"

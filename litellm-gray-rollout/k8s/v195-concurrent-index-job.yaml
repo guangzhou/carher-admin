@@ -1,0 +1,89 @@
+# This production Job is intentionally suspended. Run inspect first; create
+# requires production-scale timing/I/O approval bound by checksum.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-v195-spend-tool-start-time-index-template
+  namespace: litellm-product
+  labels:
+    litellm.carher.io/template: "true"
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 21600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: litellm-v195-concurrent-index
+        litellm.carher.io/role: production-migration
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: index
+          image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+          imagePullPolicy: IfNotPresent
+          command: ["/opt/litellm-gray/v195-concurrent-index-runner.sh"]
+          args: ["inspect"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-production-migration-credentials
+                  key: DATABASE_URL
+            - name: PGOPTIONS
+              value: -c lock_timeout=5s -c statement_timeout=6h
+            - name: RESULT_PATH
+              value: /evidence/v195-index-result.json
+            - name: GRAY_RUN_ID
+              value: REPLACE_WITH_RUN_ID
+            - name: GRAY_GENERATION
+              value: REPLACE_WITH_GENERATION
+            - name: GRAY_INDEX_APPROVAL_SHA256
+              value: sha256:0000000000000000000000000000000000000000000000000000000000000000
+            # create-mode headroom gates. No defaults live in the runner: leaving a
+            # placeholder here fails the gate instead of passing on a number nobody
+            # measured. Free/required bytes come from `df` on the DB data volume and
+            # from the index size measured on the clone rehearsal.
+            - name: GRAY_INDEX_MAX_XACT_AGE_SECONDS
+              value: REPLACE_WITH_APPROVED_MAX_XACT_AGE_SECONDS
+            - name: GRAY_INDEX_MAX_DEAD_TUP_PERCENT
+              value: REPLACE_WITH_APPROVED_MAX_DEAD_TUP_PERCENT
+            - name: GRAY_INDEX_MAX_VACUUM_AGE_SECONDS
+              value: REPLACE_WITH_APPROVED_MAX_VACUUM_AGE_SECONDS
+            - name: GRAY_INDEX_FREE_BYTES
+              value: REPLACE_WITH_MEASURED_FREE_BYTES
+            - name: GRAY_INDEX_REQUIRED_BYTES
+              value: REPLACE_WITH_MEASURED_INDEX_BYTES
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: runner
+              mountPath: /opt/litellm-gray
+              readOnly: true
+            - name: evidence
+              mountPath: /evidence
+      volumes:
+        - name: runner
+          configMap:
+            name: REPLACE_WITH_IMMUTABLE_RUNNER_CONFIGMAP
+            defaultMode: 365
+        - name: evidence
+          emptyDir: {}

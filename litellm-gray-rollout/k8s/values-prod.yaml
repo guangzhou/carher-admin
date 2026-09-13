@@ -1,0 +1,33 @@
+artifactTemplate: true
+allowTemplateRender: false
+nameOverride: litellm-proxy
+replicas: 4
+
+image:
+  repository: 127.0.0.1:5000/litellm-carher
+  digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+  pullPolicy: IfNotPresent
+
+service:
+  nodePort: 30402
+
+networkPolicy:
+  enabled: true
+
+selectorLabels:
+  app: litellm-proxy
+
+schemaUpdateEnabled: false
+productionRouteEnabled: true
+workloadContract:
+  containers:
+    - litellm
+  managedInitContainers:
+    []
+  optionalInitContainers:
+    - config-check
+backgroundTasks:
+  enabled: true
+initContainers:
+  approvedNames: []
+  items: []

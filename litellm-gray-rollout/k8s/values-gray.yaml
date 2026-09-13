@@ -1,0 +1,43 @@
+artifactTemplate: true
+allowTemplateRender: false
+nameOverride: litellm-proxy-gray
+replicas: 2
+
+image:
+  repository: 127.0.0.1:5000/litellm-carher
+  digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+  pullPolicy: IfNotPresent
+
+service:
+  nodePort: 30405
+
+networkPolicy:
+  enabled: true
+
+selectorLabels:
+  app: litellm-proxy-gray
+
+schemaUpdateEnabled: false
+productionRouteEnabled: false
+workloadContract:
+  containers:
+    - litellm
+  managedInitContainers:
+    []
+  optionalInitContainers:
+    - config-check
+backgroundTasks:
+  enabled: false
+initContainers:
+  approvedNames: []
+  items: []
+
+# The no-traffic qualification starts on the 225 standby node. Remove this
+# pin only in a separately frozen capacity values file after both nodes pass.
+nodeSelector:
+  kubernetes.io/hostname: aiyjy-litellm-standby
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: standby
+    effect: NoSchedule

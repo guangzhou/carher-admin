@@ -1,0 +1,1843 @@
+"""Offline contract tests for LiteLLM gray-rollout evidence tools."""
+
+from __future__ import annotations
+
+import json
+import copy
+import hashlib
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+TOOLS = ROOT / "litellm-gray-rollout" / "scripts"
+RUNBOOK = ROOT / "litellm-gray-rollout" / "docs" / "litellm-198-gray-rollout-runbook.md"
+
+
+def run_tool(name: str, payload: object) -> tuple[subprocess.CompletedProcess[str], dict]:
+    # Existing contract fixtures are wrapped in the same strict evidence
+    # envelope used by the production CLI.
+    if (
+        name == "metrics.py"
+        and isinstance(payload, dict)
+        and payload.get("rollout_percent", 0) > 0
+        and "spend_reconciliation" not in payload
+    ):
+        payload = {
+            **payload,
+            "spend_reconciliation": {
+                "expected_request_ids": ["r-001"],
+                "terminal_request_ids": ["r-001"],
+                "failed_request_ids": [],
+                "observed_lag_seconds": 1,
+            },
+        }
+    if name == "audit-runtime.py" and isinstance(payload, dict):
+        _refresh_runtime_sources(payload)
+    if isinstance(payload, dict) and "evidence" not in payload:
+        payload = _with_evidence(payload)
+    result = subprocess.run(
+        [sys.executable, str(TOOLS / name), "--input", "-"],
+        input=json.dumps(payload),
+        capture_output=True,
+        check=False,
+        cwd=ROOT,
+        text=True,
+    )
+    output = json.loads(result.stdout)
+    return result, output
+
+
+def _payload_digest(payload: dict) -> str:
+    canonical = {key: value for key, value in payload.items() if key != "evidence"}
+    rendered = json.dumps(canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(rendered.encode()).hexdigest()
+
+
+def _value_digest(value: object) -> str:
+    rendered = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(rendered.encode()).hexdigest()
+
+
+def _refresh_runtime_sources(payload: dict) -> None:
+    for item in payload.get("sources", []):
+        section = item.get("section")
+        if section in payload:
+            item["payload_sha256"] = _value_digest(payload[section])
+
+
+def _with_evidence(
+    payload: dict,
+    *,
+    captured_at: datetime | None = None,
+    checksum: str | None = None,
+    run_id: str | None = "run-test",
+    generation: str | None = "generation-test",
+    config_checksum: str | None = "test-mode",
+) -> dict:
+    result = copy.deepcopy(payload)
+    captured_at = captured_at or datetime.now(timezone.utc)
+    evidence = {
+        "schema_version": 1,
+        "captured_at": captured_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "payload_sha256": checksum or _payload_digest(result),
+    }
+    if run_id is not None:
+        evidence["run_id"] = run_id
+    if generation is not None:
+        evidence["generation"] = generation
+    if config_checksum is not None:
+        evidence["config_checksum"] = config_checksum
+    result["evidence"] = evidence
+    return result
+
+
+def run_strict_tool(name: str, payload: dict) -> tuple[subprocess.CompletedProcess[str], dict]:
+    if name == "audit-runtime.py":
+        _refresh_runtime_sources(payload)
+    wrapped = _with_evidence(payload)
+    if name == "audit-runtime.py":
+        captured_at = datetime.fromisoformat(
+            wrapped["evidence"]["captured_at"].replace("Z", "+00:00")
+        )
+        for item in wrapped.get("sources", []):
+            source_time = datetime.fromisoformat(item["captured_at"].replace("Z", "+00:00"))
+            item["freshness_seconds"] = max(
+                0, round((captured_at - source_time).total_seconds(), 3)
+            )
+        wrapped["evidence"]["payload_sha256"] = _payload_digest(wrapped)
+    return run_tool_raw(name, wrapped)
+
+
+def run_tool_raw(name: str, payload: object) -> tuple[subprocess.CompletedProcess[str], dict]:
+    result = subprocess.run(
+        [sys.executable, str(TOOLS / name), "--input", "-"],
+        input=json.dumps(payload),
+        capture_output=True,
+        check=False,
+        cwd=ROOT,
+        text=True,
+    )
+    output = json.loads(result.stdout)
+    return result, output
+
+
+def runtime_payload() -> dict:
+    captured_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    callback_names = ["streaming_output_backfill", "weighted_affinity"]
+    surfaces = ["chat", "responses", "images"]
+    acct_fields = ["deployments", "services", "active_ready", "quota_take", "registered", "recent_requests"]
+    def mutation(operation: str, writer: str, reader: str, request_id: str) -> dict:
+        return {
+            "operation": operation,
+            "writer": writer,
+            "reader": reader,
+            "request_id": request_id,
+            "written_at": captured_at,
+            "observed_at": captured_at,
+            "latency_ms": 0,
+            "sla_ms": 5000,
+            "result_sha256": "sha256:" + "d" * 64,
+            "status": "PASS",
+        }
+    scheduler = {
+        "mode": "disabled",
+        "profile": "gray",
+        "image_digest": "sha256:" + "a" * 64,
+        "config_sha256": "sha256:" + "b" * 64,
+        "callbacks_sha256": "sha256:" + "c" * 64,
+        "captured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source": "clone:gray-scheduler-observation",
+        "observations": {
+            "duplicate_scheduler_runs": 0,
+            "duplicate_background_jobs": 0,
+            "unexpected_control_writes": 0,
+        },
+    }
+    scheduler["source_payload_sha256"] = _value_digest(scheduler)
+    payload = {
+        "expected_inventory": {
+            "callbacks": callback_names,
+            "api_surfaces": surfaces,
+            "acct_fields": acct_fields,
+            "mutation_operations": {
+                "stable_to_gray": ["model_new"],
+                "gray_to_stable": ["key_update"],
+            },
+        },
+        "references": [
+            {
+                "source": "scripts/update-model.py",
+                "text": "POST http://10.68.13.198:30402/model/new",
+            },
+            {
+                "source": "scripts/model-audit.py",
+                "text": "GET http://10.68.13.198:30402/model/info",
+            },
+            {
+                "source": "scripts/probe.sh",
+                "text": "POST http://10.68.13.198:30402/v1/chat/completions",
+            },
+        ],
+        "callbacks": [
+            {
+                "name": name, "import_ok": True, "behavior_ok": True,
+                "probe_sha256": "sha256:" + "1" * 64,
+                "image_digest": "sha256:" + "a" * 64,
+                "config_sha256": "sha256:" + "b" * 64,
+                "captured_at": captured_at,
+            }
+            for name in callback_names
+        ],
+        "api_surfaces": {
+            "expected": ["chat", "responses", "images"],
+            "observed": ["images", "responses", "chat"],
+            "smoke": {
+                name: {
+                    "status": "PASS", "request_id": f"req-{name}",
+                    "captured_at": captured_at, "response_sha256": "sha256:" + "2" * 64,
+                }
+                for name in surfaces
+            },
+        },
+        "acct": {
+            "deployments": ["acct-01", "acct-02"],
+            "services": ["acct-01", "acct-02"],
+            "active_ready": ["acct-01"],
+            "quota_take": ["acct-01"],
+            "registered": ["acct-01"],
+            "recent_requests": ["acct-01"],
+            "explanations": {},
+        },
+        "redis": {"compatible": True},
+        "scheduler": scheduler,
+        "mutation_visibility": {
+            "stable_to_gray": mutation("model_new", "stable", "gray", "req-stable-gray"),
+            "gray_to_stable": mutation("key_update", "gray", "stable", "req-gray-stable"),
+            "freeze": False,
+        },
+    }
+    payload["sources"] = [
+        {
+            "section": section,
+            "source": f"fixture:{section}",
+            "captured_at": captured_at,
+            "freshness_seconds": 0,
+            "payload_sha256": _value_digest(payload[section]),
+        }
+        for section in (
+            "expected_inventory",
+            "references",
+            "callbacks",
+            "api_surfaces",
+            "acct",
+            "redis",
+            "scheduler",
+            "mutation_visibility",
+        )
+    ]
+    return payload
+
+
+def migration_payload() -> dict:
+    change = 'ALTER TABLE "LiteLLM_ProxyModelTable" ADD COLUMN "dcr_bridge" JSONB DEFAULT \'{}\''
+    return {
+        "schema": {
+            "before_checksum": "sha256:" + "1" * 64,
+            "after_checksum": "sha256:" + "2" * 64,
+            "expected_after_checksum": "sha256:" + "2" * 64,
+            "changes": [change],
+        },
+        "ddl_ledger": {
+            "partial_state": "none",
+            "lock_timeout_ms": 5000,
+            "statement_timeout_ms": 120000,
+            "migration_duration_ms": 12,
+            "workload_p95_ratio": 1.01,
+            "network_policy": {
+                "allowed_probe": "PASS",
+                "denied_probe": "PASS",
+            },
+            "snapshot_counts": {
+                "expected": {"SpendLogs": 845870, "VerificationToken": 1322},
+                "restored": {"SpendLogs": 845870, "VerificationToken": 1322},
+            },
+            "entries": [
+                {
+                    "id": "ddl-001",
+                    "statement": change,
+                    "status": "completed",
+                    "online_safe": True,
+                    "observed_in_schema": True,
+                    "duration_ms": 12,
+                    "lock_wait_ms": 0,
+                    "lock_mode": "ACCESS EXCLUSIVE",
+                    "table_rewrite": False,
+                }
+            ],
+        },
+        "thresholds": {
+            "max_migration_duration_ms": 900000,
+            "max_workload_p95_ratio": 1.20,
+            "max_lock_wait_ms": 5000,
+        },
+        "compatibility": {
+            "A": {"status": "PASS"},
+            "B": {"status": "PASS"},
+            "C": {"status": "PASS"},
+        },
+    }
+
+
+def metric_records(pool: str, uri_class: str, count: int, status: int, latency: float) -> list[dict]:
+    return [
+        {
+            "pool_label": pool,
+            "uri_class": uri_class,
+            "status": status,
+            "response_time": latency,
+        }
+        for _ in range(count)
+    ]
+
+
+def test_audit_runtime_classifies_bypasses_and_passes_closed_sets():
+    result, output = run_tool("audit-runtime.py", runtime_payload())
+
+    assert result.returncode == 0, result.stderr
+    assert output["tool"] == "audit-runtime"
+    assert output["status"] == "PASS"
+    assert output["bypass_summary"]["counts"] == {
+        "control_read": 1,
+        "control_write": 1,
+        "inference_probe": 1,
+    }
+    assert output["callbacks"]["count"] == 2
+    assert output["acct"]["unexplained_differences"] == []
+
+
+def test_audit_runtime_fails_on_unexplained_drift_and_never_echoes_secrets():
+    payload = runtime_payload()
+    payload["references"][0]["text"] += " Authorization: Bearer sk-secret-value"
+    payload["callbacks"][0]["import_ok"] = False
+    payload["acct"]["services"] = ["acct-01"]
+
+    result, output = run_tool("audit-runtime.py", payload)
+    rendered = json.dumps(output, sort_keys=True)
+
+    assert result.returncode == 1
+    assert output["status"] == "FAIL"
+    assert "CALLBACK_EVIDENCE_INVALID" in output["reason_codes"]
+    assert "ACCT_SET_DRIFT" in output["reason_codes"]
+    assert output["acct"]["unexplained_differences"]
+    assert "sk-secret-value" not in rendered
+    assert "Authorization" not in rendered
+
+
+def test_audit_runtime_accepts_documented_mutation_freeze_decision():
+    payload = runtime_payload()
+    payload["mutation_visibility"]["stable_to_gray"]["status"] = "FAIL"
+    payload["mutation_visibility"]["gray_to_stable"]["status"] = "FAIL"
+    payload["mutation_visibility"]["freeze"] = True
+    payload["sources"] = [
+        item if item["section"] != "mutation_visibility"
+        else {**item, "payload_sha256": _value_digest(payload["mutation_visibility"])}
+        for item in payload["sources"]
+    ]
+
+    result, output = run_tool("audit-runtime.py", payload)
+
+    assert result.returncode == 1
+    assert output["status"] == "FAIL"
+    assert output["mutation_visibility"]["decision"] == "freeze"
+
+
+def test_audit_runtime_explanations_close_known_acct_set_differences():
+    payload = runtime_payload()
+    payload["acct"]["registered"] = ["acct-01", "acct-02"]
+    payload["acct"]["explanations"] = {
+        "acct-02": "registered standby intentionally scaled down"
+    }
+
+    result, output = run_tool("audit-runtime.py", payload)
+
+    assert result.returncode == 0
+    assert output["status"] == "PASS"
+    assert output["acct"]["unexplained_differences"] == []
+
+
+def test_audit_runtime_requires_smoke_for_every_expected_surface():
+    payload = runtime_payload()
+    payload["api_surfaces"]["smoke"].pop("images")
+    payload["sources"] = [
+        item
+        if item["section"] != "api_surfaces"
+        else {**item, "payload_sha256": _value_digest(payload["api_surfaces"])}
+        for item in payload["sources"]
+    ]
+
+    result, output = run_strict_tool("audit-runtime.py", payload)
+
+    assert result.returncode == 1
+    assert "API_SMOKE_COVERAGE_MISSING" in output["reason_codes"]
+
+
+def test_audit_runtime_rejects_string_booleans_and_missing_mutation_direction():
+    for section, key in (("redis", "compatible"), ("scheduler", "safe")):
+        payload = runtime_payload()
+        payload[section][key] = "false"
+        payload["sources"] = [
+            item
+            if item["section"] != section
+            else {**item, "payload_sha256": _value_digest(payload[section])}
+            for item in payload["sources"]
+        ]
+        result, output = run_strict_tool("audit-runtime.py", payload)
+        assert result.returncode == 1
+        assert f"{section.upper()}_EVIDENCE_INVALID" in output["reason_codes"]
+
+    payload = runtime_payload()
+    del payload["mutation_visibility"]["gray_to_stable"]
+    payload["sources"] = [
+        item
+        if item["section"] != "mutation_visibility"
+        else {**item, "payload_sha256": _value_digest(payload["mutation_visibility"])}
+        for item in payload["sources"]
+    ]
+    result, output = run_strict_tool("audit-runtime.py", payload)
+    assert result.returncode == 1
+    assert "MUTATION_EVIDENCE_INVALID" in output["reason_codes"]
+
+    payload = runtime_payload()
+    payload["callbacks"][0]["import_ok"] = "false"
+    result, output = run_strict_tool("audit-runtime.py", payload)
+    assert result.returncode == 1
+    assert "CALLBACK_EVIDENCE_INVALID" in output["reason_codes"]
+
+    payload = runtime_payload()
+    payload["references"][0]["direct_30402"] = "false"
+    result, output = run_strict_tool("audit-runtime.py", payload)
+    assert result.returncode == 1
+    assert "BYPASS_REFERENCE_INVALID" in output["reason_codes"]
+
+
+def test_audit_runtime_rejects_opaque_scheduler_self_attestation():
+    payload = runtime_payload()
+    payload["scheduler"] = {"safe": True}
+    result, output = run_strict_tool("audit-runtime.py", payload)
+
+    assert result.returncode == 1
+    assert "SCHEDULER_EVIDENCE_INVALID" in output["reason_codes"]
+
+
+def test_audit_runtime_requires_observed_proof_for_disabled_scheduler():
+    payload = runtime_payload()
+    result, output = run_strict_tool("audit-runtime.py", payload)
+    assert result.returncode == 0, result.stderr
+    assert output["status"] == "PASS"
+
+    payload["scheduler"]["observations"]["duplicate_background_jobs"] = 1
+    source_payload = {
+        key: value
+        for key, value in payload["scheduler"].items()
+        if key != "source_payload_sha256"
+    }
+    payload["scheduler"]["source_payload_sha256"] = _value_digest(source_payload)
+    result, output = run_strict_tool("audit-runtime.py", payload)
+    assert result.returncode == 1
+    assert "SCHEDULER_UNSAFE" in output["reason_codes"]
+
+
+def test_audit_runtime_rejects_stale_or_tampered_individual_sources():
+    payload = runtime_payload()
+    payload["sources"][0]["captured_at"] = (
+        datetime.now(timezone.utc) - timedelta(hours=1)
+    ).isoformat().replace("+00:00", "Z")
+    result, output = run_strict_tool("audit-runtime.py", payload)
+    assert result.returncode == 1
+    assert "RUNTIME_SOURCE_STALE" in output["reason_codes"]
+
+    payload = runtime_payload()
+    payload["sources"][0]["payload_sha256"] = "sha256:" + "0" * 64
+    result, output = run_tool_raw("audit-runtime.py", _with_evidence(payload))
+    assert result.returncode == 1
+    assert "RUNTIME_SOURCE_CHECKSUM_MISMATCH" in output["reason_codes"]
+
+
+def test_check_migration_passes_accounted_additive_path_a():
+    result, output = run_tool("check-migration.py", migration_payload())
+
+    assert result.returncode == 0, result.stderr
+    assert output["tool"] == "check-migration"
+    assert output["status"] == "PASS"
+    assert output["path"] == "A"
+    assert output["schema"]["change_count"] == 1
+    assert output["ddl_ledger"]["completed_ids"] == ["ddl-001"]
+    assert set(output["compatibility"]) == {"A", "B", "C"}
+    assert "statement" not in json.dumps(output)
+
+
+def test_check_migration_rejects_destructive_partial_or_incomplete_evidence():
+    payload = migration_payload()
+    destructive = 'ALTER TABLE "LiteLLM_ProxyModelTable" DROP COLUMN "model_name"'
+    payload["schema"]["changes"] = [destructive]
+    payload["ddl_ledger"]["entries"][0]["statement"] = destructive
+    payload["ddl_ledger"]["partial_state"] = "unknown"
+    del payload["compatibility"]["C"]
+
+    result, output = run_tool("check-migration.py", payload)
+
+    assert result.returncode == 1
+    assert output["status"] == "FAIL"
+    assert {
+        "DESTRUCTIVE_DDL",
+        "PARTIAL_DDL_UNKNOWN",
+        "COMPATIBILITY_RESULT_MISSING",
+    }.issubset(output["reason_codes"])
+
+
+def test_check_migration_rejects_unaccounted_schema_change_and_set_not_null():
+    payload = migration_payload()
+    payload["schema"]["changes"] = [
+        'ALTER TABLE "LiteLLM_ProxyModelTable" ALTER COLUMN "model_name" SET NOT NULL'
+    ]
+
+    result, output = run_tool("check-migration.py", payload)
+
+    assert result.returncode == 1
+    assert output["status"] == "FAIL"
+    assert "DESTRUCTIVE_DDL" in output["reason_codes"]
+    assert "DDL_SCHEMA_RECONCILIATION_FAILED" in output["reason_codes"]
+
+
+def test_check_migration_selects_path_b_only_for_empty_diff_and_ledger():
+    payload = migration_payload()
+    payload["schema"]["after_checksum"] = payload["schema"]["before_checksum"]
+    payload["schema"]["expected_after_checksum"] = payload["schema"]["before_checksum"]
+    payload["schema"]["changes"] = []
+    payload["ddl_ledger"]["entries"] = []
+
+    result, output = run_tool("check-migration.py", payload)
+
+    assert result.returncode == 0
+    assert output["status"] == "PASS"
+    assert output["path"] == "B"
+
+
+def test_check_migration_rejects_online_unsafe_or_failed_clone_result():
+    payload = migration_payload()
+    payload["ddl_ledger"]["entries"][0]["online_safe"] = False
+    payload["compatibility"]["B"] = {"status": "FAIL"}
+
+    result, output = run_tool("check-migration.py", payload)
+
+    assert result.returncode == 1
+    assert {"ONLINE_DDL_UNSAFE", "COMPATIBILITY_RESULT_FAILED"}.issubset(
+        output["reason_codes"]
+    )
+
+
+def test_check_migration_rejects_exceeded_thresholds_and_table_rewrite():
+    payload = migration_payload()
+    payload["ddl_ledger"]["migration_duration_ms"] = 900001
+    payload["ddl_ledger"]["workload_p95_ratio"] = 1.21
+    payload["ddl_ledger"]["entries"][0]["lock_wait_ms"] = 5001
+    payload["ddl_ledger"]["entries"][0]["table_rewrite"] = True
+
+    result, output = run_tool("check-migration.py", payload)
+
+    assert result.returncode == 1
+    assert {
+        "MIGRATION_DURATION_THRESHOLD_EXCEEDED",
+        "WORKLOAD_P95_THRESHOLD_EXCEEDED",
+        "DDL_LOCK_WAIT_THRESHOLD_EXCEEDED",
+        "DDL_TABLE_REWRITE_DETECTED",
+    }.issubset(output["reason_codes"])
+
+
+def test_check_migration_requires_bound_thresholds_and_rejects_unapproved_locks():
+    payload = migration_payload()
+    del payload["thresholds"]
+    result, output = run_strict_tool("check-migration.py", payload)
+    assert result.returncode == 2
+    assert "MIGRATION_THRESHOLDS_MISSING" in output["reason_codes"]
+
+    payload = migration_payload()
+    payload["ddl_ledger"]["entries"][0]["lock_mode"] = "SHARE UPDATE EXCLUSIVE"
+    result, output = run_strict_tool("check-migration.py", payload)
+    assert result.returncode == 1
+    assert "DDL_UNAPPROVED_LOCK_MODE" in output["reason_codes"]
+
+
+def test_check_migration_rejects_any_partial_ddl_state():
+    payload = migration_payload()
+    payload["ddl_ledger"]["partial_state"] = "reconciled"
+    result, output = run_strict_tool("check-migration.py", payload)
+    assert result.returncode == 1
+    assert "PARTIAL_DDL_DETECTED" in output["reason_codes"]
+
+
+def test_metrics_recommends_rollback_for_qualified_normal_gray_breach():
+    records = metric_records("stable", "chat", 100, 200, 0.1)
+    records += metric_records("canary", "chat", 100, 500, 0.2)
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": records,
+        "hard_errors": {},
+        "backend_health": {"gray": True, "prod": True},
+        "spend_reconciliation": {
+            "expected_request_ids": ["r-001"],
+            "terminal_request_ids": ["r-001"],
+            "failed_request_ids": [],
+            "observed_lag_seconds": 1,
+        },
+    }
+
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 1
+    assert output["tool"] == "metrics"
+    assert output["status"] == "FAIL"
+    assert output["dispatcher_recommendation"]["action"] == "rollback"
+    assert output["dispatcher_recommendation"]["hard_trigger"] is True
+    assert "FIVE_XX_DELTA" in output["dispatcher_recommendation"]["reason_codes"]
+    assert output["groups"] == sorted(
+        output["groups"], key=lambda group: (group["pool_label"], group["uri_class"])
+    )
+
+
+def test_metrics_sample_guard_alerts_without_triggering_rollback():
+    records = metric_records("stable", "responses", 500, 200, 0.1)
+    records += metric_records("canary", "responses", 99, 500, 2.0)
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 5,
+        "records": records,
+        "hard_errors": {},
+        "backend_health": {"gray": True, "prod": True},
+    }
+
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 0
+    assert output["status"] == "PASS"
+    assert output["dispatcher_recommendation"] == {
+        "action": "alert_only",
+        "hard_trigger": False,
+        "reason_codes": ["INSUFFICIENT_GRAY_SAMPLE"],
+    }
+
+
+def test_metrics_uses_frozen_baseline_at_100_percent_not_prod():
+    records = metric_records("canary", "images", 100, 200, 0.4)
+    records += metric_records("stable", "images", 100, 200, 99.0)
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 100,
+        "records": records,
+        "baseline": [
+            {
+                "uri_class": "images",
+                "count": 1000,
+                "five_xx_rate": 0.0,
+                "p95": 0.1,
+                "p99": 0.1,
+            }
+        ],
+        "hard_errors": {},
+        "backend_health": {"gray": True, "prod": True},
+    }
+
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 1
+    assert output["comparison_mode"] == "baseline"
+    assert output["dispatcher_recommendation"]["action"] == "rollback"
+    assert "P95_RATIO" in output["dispatcher_recommendation"]["reason_codes"]
+    assert all(item["reference"] == "baseline" for item in output["comparisons"])
+
+
+def test_metrics_never_recommends_rollback_to_an_unhealthy_prod():
+    records = metric_records("stable", "chat", 100, 200, 0.1)
+    records += metric_records("canary", "chat", 100, 500, 0.2)
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": records,
+        "hard_errors": {},
+        "backend_health": {"gray": False, "prod": False},
+        "spend_reconciliation": {
+            "expected_request_ids": ["r-001"],
+            "terminal_request_ids": ["r-001"],
+            "failed_request_ids": [],
+            "observed_lag_seconds": 1,
+        },
+    }
+
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 1
+    assert output["status"] == "FAIL"
+    assert output["dispatcher_recommendation"]["action"] == "alert_only"
+    assert output["dispatcher_recommendation"]["hard_trigger"] is True
+    assert "PROD_NOT_HEALTHY_FOR_ROLLBACK" in output["dispatcher_recommendation"]["reason_codes"]
+
+
+def test_metrics_aborts_to_bridge_for_hard_error_while_prod_is_offline():
+    payload = {
+        "phase": "prod_offline_upgrading",
+        "rollout_percent": 100,
+        "records": metric_records("canary", "chat", 10, 200, 0.1),
+        "hard_errors": {"callback_import_error": 1},
+        "backend_health": {"prod": False, "gray": False, "bridge": True},
+    }
+
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 1
+    assert output["dispatcher_recommendation"] == {
+        "action": "abort_to_bridge",
+        "hard_trigger": True,
+        "reason_codes": ["CALLBACK_IMPORT_ERROR"],
+    }
+
+
+def test_metrics_holds_gray_when_prod_is_offline_and_gray_is_healthy():
+    payload = {
+        "phase": "prod_offline_upgrading",
+        "rollout_percent": 100,
+        "records": metric_records("canary", "chat", 100, 200, 0.1),
+        "baseline": [
+            {"uri_class": "chat", "count": 1000, "five_xx_rate": 0, "p95": 0.1, "p99": 0.1}
+        ],
+        "hard_errors": {},
+        "backend_health": {"gray": True, "prod": False},
+    }
+
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 0
+    assert output["status"] == "PASS"
+    assert output["dispatcher_recommendation"] == {
+        "action": "hold_gray",
+        "hard_trigger": False,
+        "reason_codes": ["PROD_OFFLINE_GRAY_HEALTHY"],
+    }
+
+
+def test_metrics_rejects_invalid_record_instead_of_silently_dropping_it():
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 5,
+        "records": [{"pool_label": "canary", "uri_class": "chat", "status": "secret"}],
+        "hard_errors": {},
+    }
+
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 2
+    assert output["status"] == "ERROR"
+    assert output["errors"] == ["INVALID_RECORD"]
+
+
+def test_metrics_normalizes_legacy_pool_aliases_to_nginx_contract():
+    records = metric_records("prod", "chat", 100, 200, 0.1)
+    records += metric_records("gray", "chat", 100, 200, 0.1)
+    records += metric_records("guarded-old", "chat", 1, 200, 0.1)
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": records,
+        "hard_errors": {},
+    }
+
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 0
+    assert {group["pool_label"] for group in output["groups"]} == {
+        "stable",
+        "canary",
+        "guarded-old",
+    }
+    assert output["comparison_mode"] == "stable"
+    assert all(item["reference"] == "stable" for item in output["comparisons"])
+
+
+def test_metrics_unknown_pool_is_invalid_evidence():
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": metric_records("surprise-pool", "chat", 1, 200, 0.1),
+        "hard_errors": {},
+    }
+
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 2
+    assert output["status"] == "ERROR"
+    assert output["errors"] == ["INVALID_RECORD"]
+
+
+def test_metrics_alerts_when_canary_or_baseline_reference_is_missing():
+    no_canary = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": metric_records("stable", "chat", 100, 200, 0.1),
+        "hard_errors": {},
+    }
+    result, output = run_tool("metrics.py", no_canary)
+
+    assert result.returncode == 0
+    assert output["dispatcher_recommendation"]["action"] == "alert_only"
+    assert output["dispatcher_recommendation"]["reason_codes"] == [
+        "CANARY_SAMPLE_MISSING"
+    ]
+
+    no_baseline = {
+        "phase": "normal_gray",
+        "rollout_percent": 100,
+        "records": metric_records("canary", "chat", 100, 200, 0.1),
+        "hard_errors": {},
+    }
+    result, output = run_tool("metrics.py", no_baseline)
+
+    assert result.returncode == 2
+    assert output["status"] == "ERROR"
+    assert output["errors"] == ["BASELINE_EVIDENCE_MISSING"]
+
+
+def test_metrics_hard_errors_require_numeric_counts_and_known_names():
+    base = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": metric_records("stable", "chat", 100, 200, 0.1)
+        + metric_records("canary", "chat", 100, 200, 0.1),
+    }
+    for hard_errors in (
+        {"callback_import_error": "many"},
+        {"totally_unknown_probe": 1},
+    ):
+        result, output = run_tool("metrics.py", {**base, "hard_errors": hard_errors})
+
+        assert result.returncode == 2
+        assert output["status"] == "ERROR"
+        assert output["errors"] == ["INVALID_HARD_ERRORS"]
+
+
+def test_tools_report_invalid_json_without_echoing_input():
+    secret = "sk-invalid-json-secret"
+    result = subprocess.run(
+        [sys.executable, str(TOOLS / "metrics.py"), "--input", "-"],
+        input=f'{{"authorization":"Bearer {secret}"',
+        capture_output=True,
+        check=False,
+        cwd=ROOT,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    output = json.loads(result.stdout)
+    assert output["status"] == "ERROR"
+    assert output["errors"] == ["INVALID_JSON"]
+    assert secret not in result.stdout
+
+
+def test_audit_runtime_rejects_smoke_results_outside_expected_surface_set():
+    payload = runtime_payload()
+    payload["api_surfaces"]["smoke"]["unreviewed-surface"] = "PASS"
+    result, output = run_tool("audit-runtime.py", payload)
+    assert result.returncode == 1
+    assert "API_SMOKE_EVIDENCE_INVALID" in output["reason_codes"]
+
+
+def test_evidence_tools_fail_closed_when_envelope_is_missing_or_empty():
+    for name, payload in (
+        ("audit-runtime.py", runtime_payload()),
+        ("check-migration.py", migration_payload()),
+        (
+            "metrics.py",
+            {
+                "phase": "normal_gray",
+                "rollout_percent": 10,
+                "records": metric_records("stable", "chat", 100, 200, 0.1),
+                "hard_errors": {},
+            },
+        ),
+    ):
+        result, output = run_tool_raw(name, payload)
+        assert result.returncode == 2
+        assert output["status"] == "ERROR"
+        assert "EVIDENCE_MISSING" in output["errors"]
+
+        empty = dict(payload, evidence={})
+        result, output = run_tool_raw(name, empty)
+        assert result.returncode == 2
+        assert "EVIDENCE_INVALID" in output["errors"]
+
+
+def test_evidence_tools_reject_stale_and_tampered_envelopes():
+    cases = (
+        ("audit-runtime.py", runtime_payload(), timedelta(hours=2)),
+        ("check-migration.py", migration_payload(), timedelta(hours=25)),
+        (
+            "metrics.py",
+            {
+                "phase": "normal_gray",
+                "rollout_percent": 0,
+                "records": [],
+                "hard_errors": {},
+            },
+            timedelta(minutes=11),
+        ),
+    )
+    for name, payload, age in cases:
+        stale = _with_evidence(payload, captured_at=datetime.now(timezone.utc) - age)
+        result, output = run_tool_raw(name, stale)
+        assert result.returncode == 2
+        assert "EVIDENCE_STALE" in output["errors"]
+
+        tampered = _with_evidence(payload, checksum="sha256:" + "0" * 64)
+        result, output = run_tool_raw(name, tampered)
+        assert result.returncode == 2
+        assert "EVIDENCE_CHECKSUM_MISMATCH" in output["errors"]
+
+
+def test_evidence_tools_reject_unknown_top_level_fields():
+    for name, payload in (
+        ("audit-runtime.py", runtime_payload()),
+        ("check-migration.py", migration_payload()),
+        (
+            "metrics.py",
+            {"phase": "normal_gray", "rollout_percent": 0, "records": [], "hard_errors": {}},
+        ),
+    ):
+        payload["surprise"] = True
+        result, output = run_strict_tool(name, payload)
+        assert result.returncode == 2
+        assert output["errors"] == ["EVIDENCE_SCHEMA_UNKNOWN_FIELD"]
+
+
+def test_evidence_tools_require_valid_run_state_binding():
+    for name, payload in (
+        ("audit-runtime.py", runtime_payload()),
+        ("check-migration.py", migration_payload()),
+        (
+            "metrics.py",
+            {"phase": "normal_gray", "rollout_percent": 0, "records": [], "hard_errors": {}},
+        ),
+    ):
+        unbound = _with_evidence(payload, run_id=None, generation=None, config_checksum=None)
+        result, output = run_tool_raw(name, unbound)
+        assert result.returncode == 2
+        assert output["errors"] == ["EVIDENCE_INVALID"]
+
+        invalid = _with_evidence(payload, config_checksum="not-a-checksum")
+        result, output = run_tool_raw(name, invalid)
+        assert result.returncode == 2
+        assert output["errors"] == ["EVIDENCE_INVALID"]
+
+
+def test_audit_runtime_classifies_user_organization_customer_control_writes():
+    payload = runtime_payload()
+    payload["references"] += [
+        {"source": "a", "text": "POST http://10.68.13.198:30402/user/new"},
+        {"source": "b", "text": "PATCH http://10.68.13.198:30402/organization/update"},
+        {"source": "c", "text": "DELETE http://10.68.13.198:30402/customer/delete"},
+    ]
+    result, output = run_strict_tool("audit-runtime.py", payload)
+    assert result.returncode == 0
+    assert output["bypass_summary"]["counts"]["control_write"] == 4
+    writes = [
+        item
+        for item in output["bypass_summary"]["references"]
+        if item["category"] == "control_write"
+    ]
+    assert {item["surface"] for item in writes} == {"model", "user", "organization", "customer"}
+
+
+def test_audit_runtime_extracts_api_path_after_absolute_script_path():
+    payload = runtime_payload()
+    payload["references"] = [
+        {
+            "source": "task",
+            "text": "python /root/task.py POST http://10.68.13.198:30402/model/new",
+        }
+    ]
+    result, output = run_strict_tool("audit-runtime.py", payload)
+    assert result.returncode == 0, result.stderr
+    reference = output["bypass_summary"]["references"][0]
+    assert reference["path"] == "/model/new"
+    assert reference["category"] == "control_write"
+
+
+def test_check_migration_rejects_duplicate_or_malformed_ledger_ids_and_timings():
+    payload = migration_payload()
+    payload["ddl_ledger"]["entries"].append(dict(payload["ddl_ledger"]["entries"][0], duration_ms=-1))
+    payload["ddl_ledger"]["entries"][1]["id"] = "ddl-001"
+    result, output = run_strict_tool("check-migration.py", payload)
+    assert result.returncode == 1
+    assert {
+        "DDL_LEDGER_DUPLICATE_ID",
+        "DDL_LEDGER_INVALID_DURATION",
+    }.issubset(output["reason_codes"])
+
+
+def test_check_migration_rejects_invalid_schema_checksum_format():
+    payload = migration_payload()
+    payload["schema"]["before_checksum"] = "sha256:not-a-digest"
+    result, output = run_strict_tool("check-migration.py", payload)
+    assert result.returncode == 1
+    assert "SCHEMA_CHECKSUM_INVALID" in output["reason_codes"]
+
+
+def test_check_migration_accepts_not_null_when_default_precedes_constraint():
+    payload = migration_payload()
+    change = 'ALTER TABLE "LiteLLM_ProxyModelTable" ADD COLUMN "enabled" BOOLEAN DEFAULT TRUE NOT NULL'
+    payload["schema"]["changes"] = [change]
+    payload["ddl_ledger"]["entries"][0]["statement"] = change
+    result, output = run_strict_tool("check-migration.py", payload)
+    assert result.returncode == 0
+    assert "NOT_NULL_NO_DEFAULT" not in output["schema"]["destructive_kinds"]
+
+
+def test_check_migration_requires_lock_and_rewrite_evidence_for_every_ddl():
+    payload = migration_payload()
+    del payload["ddl_ledger"]["entries"][0]["lock_wait_ms"]
+    result, output = run_strict_tool("check-migration.py", payload)
+    assert result.returncode == 1
+    assert "DDL_LEDGER_INVALID_LOCK_EVIDENCE" in output["reason_codes"]
+
+    payload = migration_payload()
+    del payload["ddl_ledger"]["entries"][0]["table_rewrite"]
+    result, output = run_strict_tool("check-migration.py", payload)
+    assert result.returncode == 1
+    assert "DDL_LEDGER_INVALID_REWRITE_EVIDENCE" in output["reason_codes"]
+
+
+def test_check_migration_rejects_missing_online_gate_summary():
+    payload = migration_payload()
+    del payload["ddl_ledger"]["network_policy"]
+    result, output = run_strict_tool("check-migration.py", payload)
+    assert result.returncode == 1
+    assert "ONLINE_GATE_EVIDENCE_MISSING" in output["reason_codes"]
+
+
+def test_check_migration_rejects_snapshot_or_network_policy_mismatch():
+    payload = migration_payload()
+    payload["ddl_ledger"]["network_policy"]["denied_probe"] = "FAIL"
+    payload["ddl_ledger"]["snapshot_counts"]["restored"]["SpendLogs"] -= 1
+    result, output = run_strict_tool("check-migration.py", payload)
+    assert result.returncode == 1
+    assert {
+        "NETWORK_POLICY_NOT_ENFORCED",
+        "SNAPSHOT_COUNT_MISMATCH",
+    }.issubset(output["reason_codes"])
+
+
+def test_metrics_rejects_status_codes_outside_http_range():
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": [{"pool_label": "canary", "uri_class": "chat", "status": 999, "response_time": 0.1}],
+        "hard_errors": {},
+    }
+    result, output = run_tool_raw("metrics.py", _with_evidence(payload))
+    assert result.returncode == 2
+    assert output["errors"] == ["INVALID_RECORD"]
+
+
+def test_metrics_rejects_unknown_phase_non_integer_split_and_missing_baseline():
+    base = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": metric_records("stable", "chat", 100, 200, 0.1),
+        "hard_errors": {},
+        "spend_reconciliation": {
+            "expected_request_ids": ["r-1"],
+            "terminal_request_ids": ["r-1"],
+            "failed_request_ids": [],
+            "observed_lag_seconds": 1,
+        },
+    }
+    for mutation, reason in (
+        ({"phase": "not-a-phase"}, "INVALID_PHASE"),
+        ({"rollout_percent": 10.5}, "INVALID_SPLIT"),
+    ):
+        payload = dict(base, **mutation)
+        result, output = run_strict_tool("metrics.py", payload)
+        assert result.returncode == 2
+        assert reason in output["errors"]
+
+    payload = dict(base, phase="normal_gray", rollout_percent=100)
+    result, output = run_tool_raw("metrics.py", _with_evidence(payload))
+    assert result.returncode == 2
+    assert "BASELINE_EVIDENCE_MISSING" in output["errors"]
+
+
+def test_metrics_reconciles_request_ids_and_triggers_on_missing_terminal_rows():
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": metric_records("stable", "chat", 100, 200, 0.1)
+        + metric_records("canary", "chat", 100, 200, 0.1),
+        "hard_errors": {},
+        "spend_reconciliation": {
+            "expected_request_ids": ["r-1", "r-2"],
+            "terminal_request_ids": ["r-1"],
+            "failed_request_ids": [],
+            "observed_lag_seconds": 2,
+        },
+    }
+    result, output = run_strict_tool("metrics.py", payload)
+    assert result.returncode == 1
+    assert "SPEND_RECONCILIATION_FAILED" in output["dispatcher_recommendation"]["reason_codes"]
+    assert output["spend_reconciliation"]["missing_request_ids"] == ["r-2"]
+
+
+def test_metrics_requires_spend_reconciliation_when_gray_has_traffic():
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": metric_records("stable", "chat", 100, 200, 0.1)
+        + metric_records("canary", "chat", 100, 200, 0.1),
+        "hard_errors": {},
+    }
+    result, output = run_strict_tool("metrics.py", payload)
+    assert result.returncode == 2
+    assert output["errors"] == ["SPEND_RECONCILIATION_MISSING"]
+
+
+def test_metrics_emits_dispatcher_state_binding_from_evidence():
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 0,
+        "records": [],
+        "hard_errors": {},
+    }
+    wrapped = _with_evidence(payload, run_id="run-123", generation="gen-009")
+    result, output = run_tool_raw("metrics.py", wrapped)
+    assert result.returncode == 0
+    assert output["run_id"] == "run-123"
+    assert output["generation"] == "gen-009"
+    assert output["captured_at"] == wrapped["evidence"]["captured_at"]
+    assert output["phase"] == "normal_gray"
+
+
+def test_metrics_output_has_strict_dispatcher_schema_and_checksum():
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 0,
+        "records": [],
+        "hard_errors": {},
+    }
+    result, output = run_tool_raw("metrics.py", _with_evidence(payload))
+    assert result.returncode == 0
+    assert output["tool"] == "metrics"
+    assert output["schema_version"] == 1
+    checksum = output.pop("payload_sha256")
+    assert checksum == _value_digest(output)
+    assert output["status"] == "PASS"
+    assert output["dispatcher_recommendation"]["hard_trigger"] is False
+    assert output["dispatcher_recommendation"]["action"] in {
+        "none",
+        "alert_only",
+        "hold_gray",
+    }
+
+
+def _write_source(path: Path, source: str, data: object, *, captured_at: datetime | None = None) -> None:
+    captured_at = captured_at or datetime.now(timezone.utc)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": source,
+                "captured_at": captured_at.isoformat().replace("+00:00", "Z"),
+                "payload_sha256": _value_digest(data),
+                "data": data,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _collect_runtime_command(tmp_path: Path) -> tuple[list[str], Path]:
+    sources = {
+        "expected-inventory": runtime_payload()["expected_inventory"],
+        "bypass-inventory": ["POST http://10.68.13.198:30402/model/new"],
+        "callbacks": runtime_payload()["callbacks"],
+        "api-surfaces": runtime_payload()["api_surfaces"],
+        "acct": runtime_payload()["acct"],
+        "redis": runtime_payload()["redis"],
+        "scheduler": runtime_payload()["scheduler"],
+        "mutation-visibility": runtime_payload()["mutation_visibility"],
+    }
+    arguments: list[str] = []
+    for option, data in sources.items():
+        path = tmp_path / f"{option}.json"
+        _write_source(path, f"capture:{option}", data)
+        arguments += [f"--{option}", str(path)]
+    output = tmp_path / "run" / "runtime.json"
+    command = [
+        sys.executable,
+        str(TOOLS / "collect-runtime.py"),
+        "--run-id",
+        "run-001",
+        "--generation",
+        "gen-001",
+        "--config-checksum",
+        "a" * 64,
+        *arguments,
+        "--output",
+        str(output),
+    ]
+    return command, output
+
+
+def test_collect_runtime_preserves_source_freshness_and_rejects_stale_rewrap(tmp_path: Path):
+    command, output = _collect_runtime_command(tmp_path)
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    collected = json.loads(output.read_text(encoding="utf-8"))
+    assert {item["section"] for item in collected["sources"]} == {
+        "expected_inventory",
+        "references",
+        "callbacks",
+        "api_surfaces",
+        "acct",
+        "redis",
+        "scheduler",
+        "mutation_visibility",
+    }
+    assert all(item["source"].startswith("capture:") for item in collected["sources"])
+    assert all(item["freshness_seconds"] >= 0 for item in collected["sources"])
+    assert output.stat().st_mode & 0o777 == 0o600
+
+    stale_path = Path(command[command.index("--redis") + 1])
+    _write_source(
+        stale_path,
+        "capture:redis",
+        runtime_payload()["redis"],
+        captured_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    stale_output = tmp_path / "stale" / "runtime.json"
+    stale_command = [*command[: command.index("--output") + 1], str(stale_output)]
+    rejected = subprocess.run(stale_command, capture_output=True, text=True, check=False)
+    assert rejected.returncode != 0
+    assert "stale" in rejected.stderr.lower()
+
+
+def test_collect_runtime_refuses_symlink_or_existing_output(tmp_path: Path):
+    command, output = _collect_runtime_command(tmp_path)
+    output.parent.mkdir(parents=True)
+    target = tmp_path / "target.json"
+    target.write_text("untouched", encoding="utf-8")
+    output.symlink_to(target)
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert target.read_text(encoding="utf-8") == "untouched"
+
+
+def _prepare_values_command(tmp_path: Path, config_text: str, env_block: str) -> tuple[list[str], Path]:
+    config = tmp_path / "config.yaml"
+    config.write_text(config_text, encoding="utf-8")
+    callbacks = tmp_path / "callbacks"
+    callbacks.mkdir()
+    (callbacks / "smoke.py").write_text("def callback():\n    return True\n", encoding="utf-8")
+    deployment = tmp_path / "deployment.yaml"
+    deployment.write_text(
+        f"""apiVersion: apps/v1
+kind: Deployment
+metadata: {{name: litellm-proxy}}
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 600
+      containers:
+        - name: litellm
+          command: [/app/docker/prod_entrypoint.sh]
+          args: [--config, /app/config.yaml]
+          env:
+{env_block}
+          envFrom:
+            - secretRef: {{name: litellm-secrets}}
+          resources: {{}}
+          readinessProbe: &probe
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            failureThreshold: 5
+            timeoutSeconds: 15
+          livenessProbe: *probe
+          lifecycle:
+            preStop:
+              exec:
+                command: [sh, -c, sleep 15]
+""",
+        encoding="utf-8",
+    )
+    config_sha = "sha256:" + hashlib.sha256(config.read_bytes()).hexdigest()
+    scheduler = tmp_path / "scheduler.json"
+    callback_data = {"smoke.py": (callbacks / "smoke.py").read_text(encoding="utf-8")}
+    callback_text = json.dumps(
+        callback_data, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
+    extra_env = [
+        {
+            "name": "ROUTER_MODE",
+            **(
+                {"valueFrom": {"configMapKeyRef": {"name": "runtime-flags", "key": "ROUTER_MODE"}}}
+                if "configMapKeyRef" in env_block
+                else {"value": "safe"}
+            ),
+        }
+    ]
+    runtime_payload = {
+        "args": ["--config", "/app/config.yaml"],
+        "command": ["/app/docker/prod_entrypoint.sh"],
+        "extraEnv": extra_env,
+        "secretRefs": ["litellm-secrets"],
+        "secretMetadata": [{
+            "name": "litellm-secrets", "uid": "secret-uid-1",
+            "resource_version": "123", "data_sha256": "sha256:" + "e" * 64,
+        }],
+    }
+    scheduler_payload = {
+        "schema_version": 1,
+        "profile": "gray",
+        "mode": "disabled",
+        "image_digest": "sha256:" + "a" * 64,
+        "config_sha256": config_sha,
+        "callbacks_sha256": "sha256:" + hashlib.sha256(callback_text.encode()).hexdigest(),
+        "runtime_sha256": _value_digest(runtime_payload),
+        "captured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source": "clone:scheduler-observation",
+        "observations": {
+            "duplicate_scheduler_runs": 0,
+            "duplicate_background_jobs": 0,
+            "unexpected_control_writes": 0,
+        },
+    }
+    scheduler_payload["source_payload_sha256"] = _value_digest(scheduler_payload)
+    scheduler.write_text(json.dumps(scheduler_payload), encoding="utf-8")
+    secret_metadata = tmp_path / "secret-metadata.json"
+    secret_metadata.write_text(json.dumps(runtime_payload["secretMetadata"]), encoding="utf-8")
+    output = tmp_path / "run" / "values.yaml"
+    command = [
+        sys.executable,
+        str(TOOLS / "prepare-values.py"),
+        "--ingress-cidr",
+        "10.68.13.242/32",
+        "--profile",
+        str(ROOT / "litellm-gray-rollout" / "k8s" / "values-gray.yaml"),
+        "--repository",
+        "127.0.0.1:5000/litellm-carher",
+        "--digest",
+        "sha256:" + "a" * 64,
+        "--config",
+        str(config),
+        "--callbacks-dir",
+        str(callbacks),
+        "--deployment",
+        str(deployment),
+        "--scheduler-evidence",
+        str(scheduler),
+        "--secret-metadata",
+        str(secret_metadata),
+        "--output",
+        str(output),
+    ]
+    return command, output
+
+
+def test_prepare_values_rejects_inline_credentials_and_preserves_configmap_refs(tmp_path: Path):
+    command, _ = _prepare_values_command(
+        tmp_path,
+        "general_settings:\n  master_key: raw-master-secret\n",
+        "            - name: ROUTER_MODE\n              value: safe\n",
+    )
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "credential" in result.stderr.lower()
+
+    safe_dir = tmp_path / "safe"
+    safe_dir.mkdir()
+    command, output = _prepare_values_command(
+        safe_dir,
+        "general_settings:\n  master_key: os.environ/LITELLM_MASTER_KEY\n",
+        "            - name: ROUTER_MODE\n              valueFrom:\n                configMapKeyRef:\n                  name: runtime-flags\n                  key: ROUTER_MODE\n",
+    )
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert "configMapKeyRef" in output.read_text(encoding="utf-8")
+
+
+def test_prepare_values_rejects_inline_sensitive_env_and_existing_output(tmp_path: Path):
+    command, output = _prepare_values_command(
+        tmp_path,
+        "model_list: []\n",
+        "            - name: OPENAI_API_KEY\n              value: provider-secret\n",
+    )
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "credential" in result.stderr.lower()
+
+    safe_dir = tmp_path / "safe"
+    safe_dir.mkdir()
+    command, output = _prepare_values_command(
+        safe_dir,
+        "model_list: []\n",
+        "            - name: ROUTER_MODE\n              value: safe\n",
+    )
+    output.parent.mkdir(parents=True)
+    output.write_text("do-not-overwrite", encoding="utf-8")
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert output.read_text(encoding="utf-8") == "do-not-overwrite"
+
+
+def _prepare_migration_command(tmp_path: Path, *, target: str | None = None) -> tuple[list[str], Path]:
+    ledger = {
+        "schema_version": 1,
+        "statements": [
+            {
+                "id": "ddl-001",
+                "sql": 'ALTER TABLE "LiteLLM_ProxyModelTable" ADD COLUMN "gray_gate_probe" TEXT',
+                "online_safe": True,
+                "lock_mode": "ACCESS EXCLUSIVE",
+                "table_rewrite": False,
+            }
+        ],
+    }
+    ledger_path = tmp_path / "migration-ledger.json"
+    ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+    output = tmp_path / "run"
+    command = [
+        sys.executable,
+        str(TOOLS / "prepare-migration-run.py"),
+        "--migration-template",
+        str(ROOT / "litellm-gray-rollout" / "k8s" / "migration-job.yaml"),
+        "--version-template",
+        str(ROOT / "litellm-gray-rollout" / "k8s" / "clone-version-test-jobs.yaml"),
+        "--target-image",
+        "127.0.0.1:5000/litellm-carher@sha256:" + "a" * 64,
+        "--stable-image",
+        "127.0.0.1:5000/litellm-carher@sha256:" + "b" * 64,
+        "--migration-ledger",
+        str(ledger_path),
+        "--output-dir",
+        str(output),
+        "--run-id",
+        "run-audit",
+        "--generation",
+        "g000001",
+    ]
+    if target is not None:
+        command += ["--migration-target", target]
+    return command, output
+
+
+def test_prepare_migration_defaults_to_clone_and_requires_explicit_prod(tmp_path: Path):
+    command, output = _prepare_migration_command(tmp_path)
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    migration = (output / "migration-job.yaml").read_text(encoding="utf-8")
+    assert "namespace: litellm-clone" in migration
+    assert "name: litellm-clone-a-credentials" in migration
+    assert "production-schema-migration" not in migration
+    assert json.loads(result.stdout)["migration_target"] == "clone"
+
+    prod_dir = tmp_path / "prod"
+    prod_dir.mkdir()
+    command, output = _prepare_migration_command(prod_dir, target="prod")
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "live schema" in result.stderr.lower() or "clone qualification" in result.stderr.lower()
+
+    ledger_path = Path(command[command.index("--migration-ledger") + 1])
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    qualification = prod_dir / "clone-qualification.json"
+    live_schema = prod_dir / "live-schema.sql"
+    live_schema.write_text("normalized-live-schema\n", encoding="utf-8")
+    migration = migration_payload()
+    statement = ledger["statements"][0]["sql"]
+    migration["schema"]["before_checksum"] = (
+        "sha256:" + hashlib.sha256(live_schema.read_bytes()).hexdigest()
+    )
+    migration["schema"]["changes"] = [statement]
+    migration["ddl_ledger"]["entries"][0]["statement"] = statement
+    migration["binding"] = {
+        "ledger_sha256": _value_digest(ledger),
+        "target_image": command[command.index("--target-image") + 1],
+        "stable_image": command[command.index("--stable-image") + 1],
+        "attestations_sha256": "sha256:" + "0" * 64,
+        "runner_sha256": "sha256:" + "1" * 64,
+        "db_targets_sha256": {
+            "migration": "sha256:" + "2" * 64,
+            "new": "sha256:" + "3" * 64,
+            "old": "sha256:" + "4" * 64,
+            "concurrent-new": "sha256:" + "5" * 64,
+            "concurrent-old": "sha256:" + "6" * 64,
+        },
+    }
+    migration["compatibility"] = {
+        clone: {
+            "status": "PASS",
+            "checks": sorted(checks),
+            "result_sha256": "sha256:" + clone.lower() * 64,
+        }
+        for clone, checks in {
+            "A": {"proxy_startup", "key_api", "proxy_model_api", "auth", "spend_logs"},
+            "B": {"proxy_startup", "key_api", "proxy_model_api", "auth", "spend_logs"},
+            "C": {"concurrent_budget", "concurrent_spend_logs", "concurrent_proxy_model"},
+        }.items()
+    }
+    migration = _with_evidence(
+        migration,
+        run_id="run-audit",
+        generation="g000001",
+        config_checksum="a" * 64,
+    )
+    checked = subprocess.run(
+        [sys.executable, str(TOOLS / "check-migration.py"), "--input", "-"],
+        input=json.dumps(migration),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert checked.returncode == 0, checked.stderr
+    qualification.write_text(checked.stdout, encoding="utf-8")
+    result = subprocess.run(
+        [
+            *command,
+            "--clone-qualification",
+            str(qualification),
+            "--live-schema",
+            str(live_schema),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    migration = (output / "migration-job.yaml").read_text(encoding="utf-8")
+    assert "namespace: litellm-product" in migration
+    assert "name: litellm-production-migration-credentials" in migration
+    assert "clone-schema-migration" not in migration
+
+
+def test_prepare_migration_refuses_existing_output(tmp_path: Path):
+    command, output = _prepare_migration_command(tmp_path)
+    output.mkdir(parents=True)
+    existing = output / "migration-job.yaml"
+    existing.write_text("do-not-overwrite", encoding="utf-8")
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert existing.read_text(encoding="utf-8") == "do-not-overwrite"
+
+
+def test_runbook_covers_frozen_artifacts_phases_gates_evidence_and_rollback():
+    text = RUNBOOK.read_text(encoding="utf-8")
+
+    required = {
+        "Run identity",
+        "Owner matrix",
+        "Frozen artifacts and checksums",
+        "Phase ledger",
+        "Migration gate",
+        "Runtime gate",
+        "Gray traffic gates",
+        "Convergence gates",
+        "Evidence index",
+        "Rollback and abort",
+        "Observation and cleanup",
+        "chart package SHA-256",
+        "guarded-old",
+        "prod_offline_upgrading",
+        "gray-auto-dispatch.sh",
+        "gray-monitor-cycle.sh",
+    }
+    assert not {item for item in required if item not in text}
+
+
+def test_runbook_forbids_credentials_and_records_only_secret_metadata():
+    text = RUNBOOK.read_text(encoding="utf-8")
+
+    assert "Never paste credentials" in text
+    assert "Secret resourceVersion/checksum only" in text
+    assert "sk-" not in text
+    assert "Bearer " not in text
+
+
+def _write_manifest(path: Path, objects: list[tuple[str, str, str]]) -> Path:
+    path.write_text(
+        "\n---\n".join(
+            f"apiVersion: {api}\nkind: {kind}\nmetadata:\n"
+            f"  name: {name}\n  namespace: litellm-product\n"
+            for api, kind, name in objects
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _deletion_set(tmp_path: Path, *extra: str, live=None, target=None):
+    live_objects = live if live is not None else [
+        ("apps/v1", "Deployment", "litellm-proxy"),
+        ("v1", "Service", "litellm-proxy-nodeport"),
+        ("policy/v1", "PodDisruptionBudget", "litellm-proxy-pdb"),
+    ]
+    target_objects = target if target is not None else [
+        ("apps/v1", "Deployment", "litellm-proxy"),
+        ("v1", "Service", "litellm-proxy-nodeport"),
+    ]
+    command = [
+        sys.executable,
+        str(TOOLS / "check-release-deletion-set.py"),
+        "--live-manifest",
+        str(_write_manifest(tmp_path / "live.yaml", live_objects)),
+        "--target-manifest",
+        str(_write_manifest(tmp_path / "target.yaml", target_objects)),
+        "--release",
+        "litellm-product-proxy",
+        "--namespace",
+        "litellm-product",
+        "--run-id",
+        "run-1",
+        "--generation",
+        "gen-1",
+        *extra,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    return result, json.loads(result.stdout)
+
+
+def test_release_deletion_set_fails_closed_on_an_unapproved_deletion(tmp_path: Path):
+    """`helm upgrade --reset-values` onto a new chart deletes what it no longer renders."""
+    result, payload = _deletion_set(tmp_path)
+    assert result.returncode == 1
+    assert payload["status"] == "FAIL"
+    assert payload["errors"] == ["UNAPPROVED_DELETIONS"]
+    assert payload["unapproved_deletions"] == [
+        "policy/PodDisruptionBudget/litellm-product/litellm-proxy-pdb"
+    ]
+    # A PDB disappearing is invisible to `kubectl rollout status`.
+    assert payload["critical_deletions"] == payload["unapproved_deletions"]
+
+
+def test_release_deletion_set_requires_a_named_consumer_and_a_matching_diff(tmp_path: Path):
+    pdb = "policy/PodDisruptionBudget/litellm-product/litellm-proxy-pdb"
+    approval = tmp_path / "approval.json"
+
+    def approve(entries: list[dict]) -> list[str]:
+        approval.write_text(json.dumps({"deletions": entries}), encoding="utf-8")
+        return ["--approval", str(approval)]
+
+    # An unnamed consumer is the empty data column: refused.
+    for placeholder in ("unknown", "TBD", "n/a", "  "):
+        _, payload = _deletion_set(
+            tmp_path,
+            *approve(
+                [
+                    {
+                        "object": pdb,
+                        "consumer": placeholder,
+                        "disposition": "drop",
+                        "approver": "commander",
+                    }
+                ]
+            ),
+        )
+        assert payload["status"] == "FAIL", placeholder
+
+    good = {
+        "object": pdb,
+        "consumer": "prod availability during node drain",
+        "disposition": "recreate-after-upgrade",
+        "approver": "change-commander",
+    }
+    result, payload = _deletion_set(tmp_path, *approve([good]))
+    assert result.returncode == 0
+    assert payload["status"] == "PASS"
+    assert payload["deleted"][0]["consumer"] == good["consumer"]
+
+    # An approval written against a different render must not silently pass.
+    _, payload = _deletion_set(
+        tmp_path,
+        *approve([good, {**good, "object": "v1/ConfigMap/litellm-product/stale"}]),
+    )
+    assert payload["status"] == "FAIL"
+    assert "APPROVAL_DOES_NOT_MATCH_DIFF" in payload["errors"]
+
+
+def test_release_deletion_set_reports_additions_without_failing(tmp_path: Path):
+    result, payload = _deletion_set(
+        tmp_path,
+        live=[("apps/v1", "Deployment", "litellm-proxy")],
+        target=[
+            ("apps/v1", "Deployment", "litellm-proxy"),
+            ("networking.k8s.io/v1", "NetworkPolicy", "litellm-proxy-ingress"),
+        ],
+    )
+    assert result.returncode == 0
+    assert payload["status"] == "PASS"
+    assert payload["added"] == [
+        "networking.k8s.io/NetworkPolicy/litellm-product/litellm-proxy-ingress"
+    ]
+    assert payload["deleted"] == []
+
+
+def _heartbeat_ledger(
+    tmp_path: Path, offsets_seconds: list[int], *, run_id: str = "run-1", status: str = "PASS"
+) -> Path:
+    """Write a heartbeat ledger with cycles at `now - offset` for each offset."""
+    now = datetime.now(timezone.utc)
+    path = tmp_path / "monitor-heartbeat.jsonl"
+    lines = []
+    for index, offset in enumerate(sorted(offsets_seconds, reverse=True)):
+        stamp = now - timedelta(seconds=offset)
+        lines.append(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "tool": "gray-monitor-cycle",
+                    "cycle_completed_at": stamp.isoformat(timespec="seconds").replace(
+                        "+00:00", "Z"
+                    ),
+                    "run_id": run_id,
+                    "generation": "gen-1",
+                    "metrics_status": status,
+                    "evidence": f"metrics-{index}.json",
+                },
+                sort_keys=True,
+            )
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def _continuity(ledger: Path, *extra: str, window_seconds: int = 1800):
+    window_start = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOLS / "check-monitor-continuity.py"),
+            "--ledger",
+            str(ledger),
+            "--run-id",
+            "run-1",
+            "--generation",
+            "gen-1",
+            "--config-checksum",
+            "test-mode",
+            "--window-start",
+            window_start.isoformat().replace("+00:00", "Z"),
+            "--cycle-interval-seconds",
+            "300",
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, json.loads(result.stdout)
+
+
+def test_monitor_continuity_passes_only_when_every_cycle_landed(tmp_path: Path):
+    """A ramp step claims the previous window was observed; prove it with data."""
+    cycles = list(range(120, 1800, 300))
+    result, payload = _continuity(_heartbeat_ledger(tmp_path, cycles))
+
+    assert result.returncode == 0, result.stdout
+    assert payload["status"] == "PASS"
+    assert payload["gaps"] == []
+    assert payload["cycles_in_window"] == len(cycles)
+    assert payload["gate"] == "split_monitor_continuity"
+    assert payload["max_allowed_gap_seconds"] == 600
+
+
+def test_monitor_continuity_fails_closed_on_a_silent_scheduler(tmp_path: Path):
+    # The scheduler died 25 minutes ago: no evidence file records the gap, which
+    # is exactly why the gap has to be derived from the ledger.
+    result, payload = _continuity(_heartbeat_ledger(tmp_path, [1700, 1500]))
+
+    assert result.returncode == 1
+    assert payload["status"] == "FAIL"
+    assert payload["errors"] == ["MONITORING_GAP"]
+    assert payload["gaps"][-1]["seconds"] >= 1500
+
+    # An entirely empty window is not "no news is good news" either.
+    stale, stale_payload = _continuity(_heartbeat_ledger(tmp_path, [9000]))
+    assert stale.returncode == 1
+    assert "NO_CYCLES_IN_WINDOW" in stale_payload["errors"]
+
+
+def test_monitor_continuity_rejects_a_foreign_run_or_a_failed_cycle(tmp_path: Path):
+    cycles = list(range(120, 1800, 300))
+    _, foreign = _continuity(_heartbeat_ledger(tmp_path, cycles, run_id="run-other"))
+    assert foreign["status"] == "FAIL"
+    assert "FOREIGN_RUN_ID" in foreign["errors"]
+
+    _, failed = _continuity(_heartbeat_ledger(tmp_path, cycles, status="FAIL"))
+    assert failed["status"] == "FAIL"
+    assert "FAILED_CYCLE_IN_WINDOW" in failed["errors"]
+
+
+def test_monitor_continuity_refuses_a_group_readable_or_forged_ledger(tmp_path: Path):
+    ledger = _heartbeat_ledger(tmp_path, list(range(120, 1800, 300)))
+    ledger.chmod(0o644)
+    loose = subprocess.run(
+        [
+            sys.executable,
+            str(TOOLS / "check-monitor-continuity.py"),
+            "--ledger",
+            str(ledger),
+            "--run-id",
+            "run-1",
+            "--generation",
+            "gen-1",
+            "--config-checksum",
+            "test-mode",
+            "--window-start",
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "--cycle-interval-seconds",
+            "300",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert loose.returncode != 0
+    assert "group/world" in loose.stderr
+
+    ledger.chmod(0o600)
+    ledger.write_text(
+        json.dumps({"schema_version": 1, "tool": "hand-written", "x": 1}) + "\n",
+        encoding="utf-8",
+    )
+    forged = subprocess.run(
+        [
+            sys.executable,
+            str(TOOLS / "check-monitor-continuity.py"),
+            "--ledger",
+            str(ledger),
+            "--run-id",
+            "run-1",
+            "--generation",
+            "gen-1",
+            "--config-checksum",
+            "test-mode",
+            "--window-start",
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "--cycle-interval-seconds",
+            "300",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert forged.returncode != 0
+    assert "unexpected shape" in forged.stderr

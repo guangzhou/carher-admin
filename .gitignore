@@ -54,3 +54,4 @@ docs/assets/.preview/
 # zk-delta 采集到的真实 Cursor body —— 里面是你的真实会话正文和代码，绝不入库
 # 整个目录一起挡：原先只写 *.json，而 _manifest.jsonl 不匹配 *.json，差一个字母就漏出去了
 zk-delta/tests/fixtures/
+.pytest_cache/

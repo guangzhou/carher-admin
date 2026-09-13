@@ -1,0 +1,67 @@
+# Root-only run copy must replace the database credential Secret before use.
+# This probe proves the dump role can read metadata but cannot write production.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-production-readonly-db-probe
+  namespace: litellm-clone
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: litellm-production-readonly-db-probe
+        litellm.carher.io/role: dump
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: readonly-db-probe
+          image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-production-readonly-dump-credentials
+                  key: DATABASE_URL
+          command: ["sh", "-ceu"]
+          args:
+            - |
+              mode="$(psql --dbname="$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c 'SHOW transaction_read_only')"
+              test "$mode" = "on"
+              table_count="$(psql --dbname="$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM pg_tables WHERE schemaname='public'")"
+              test "$table_count" -gt 0
+              if psql --dbname="$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c 'CREATE TABLE public.litellm_clone_probe_must_not_exist(id integer)' >/tmp/write.out 2>/tmp/write.err; then
+                echo "readonly role unexpectedly created a production table" >&2
+                exit 1
+              fi
+              grep -Eq 'read-only transaction|permission denied' /tmp/write.err
+              printf 'READONLY_DB_PROBE_OK mode=%s public_tables=%s\n' "$mode" "$table_count"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi

@@ -1,0 +1,50 @@
+{{- include "litellm-proxy.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "litellm-proxy.configName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "litellm-proxy.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+immutable: true
+data:
+  {{- range $key, $value := .Values.config.data }}
+  {{ $key }}: |-
+{{ $value | nindent 4 }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "litellm-proxy.callbacksName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "litellm-proxy.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+immutable: true
+data:
+  {{- range $key, $value := .Values.callbacks.data }}
+  {{ $key }}: |-
+{{ $value | nindent 4 }}
+  {{- end }}
+{{- range .Values.additionalSnapshots }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "litellm-proxy.snapshotName" (dict "root" $ "snapshot" .) }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "litellm-proxy.labels" $ | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+immutable: true
+data:
+  {{- range $key, $value := .data }}
+  {{ $key }}: |-
+{{ $value | nindent 4 }}
+  {{- end }}
+{{- end }}

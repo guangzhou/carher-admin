@@ -1,0 +1,76 @@
+# Safe one-shot probe for the metadata dump PVC. This Job does not connect to
+# PostgreSQL; it only proves that the claim is writable on the 225 /Data-backed
+# local-path provisioner before any dump Job may be resumed.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-clone-dump-storage-probe
+  namespace: litellm-clone
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: litellm-clone-dump-storage-probe
+        litellm.carher.io/role: storage-probe
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: storage-probe
+          image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-ceu"]
+          args:
+            - |
+              min_free_bytes=21474836480
+              probe="/dump/.storage-probe-$(date +%s)-$$"
+              trap 'rm -f "$probe"' EXIT HUP INT TERM
+              umask 077
+              printf '%s\n' "storage-probe" >"$probe"
+              test "$(wc -c <"$probe")" -gt 0
+              filesystem="$(df -PB1 /dump | awk 'NR == 2 {print $1}')"
+              total_bytes="$(df -PB1 /dump | awk 'NR == 2 {print $2}')"
+              available_bytes="$(df -PB1 /dump | awk 'NR == 2 {print $4}')"
+              test -n "$filesystem"
+              test "$available_bytes" -ge "$min_free_bytes" || {
+                echo "clone storage has less than 20 GiB available" >&2
+                exit 1
+              }
+              stat -c 'PROBE_FILE device=%d mode=%a uid=%u gid=%g bytes=%s' "$probe"
+              printf 'PROBE_OK filesystem=%s total_bytes=%s available_bytes=%s min_free_bytes=%s\n' \
+                "$filesystem" "$total_bytes" "$available_bytes" "$min_free_bytes"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: dump
+              mountPath: /dump
+      volumes:
+        - name: dump
+          persistentVolumeClaim:
+            claimName: litellm-clone-dump

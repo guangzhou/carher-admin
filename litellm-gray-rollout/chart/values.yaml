@@ -1,0 +1,138 @@
+artifactTemplate: true
+allowTemplateRender: false
+nameOverride: litellm-proxy-gray
+replicas: 2
+
+image:
+  repository: 127.0.0.1:5000/litellm-carher
+  digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+  pullPolicy: IfNotPresent
+
+service:
+  nodePort: 30405
+
+networkPolicy:
+  enabled: true
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
+
+selectorLabels:
+  app: litellm-proxy-gray
+
+command:
+  - /app/docker/prod_entrypoint.sh
+args:
+  - --config
+  - /app/config.yaml
+  - --port
+  - "4000"
+  - --num_workers
+  - "2"
+
+schemaUpdateEnabled: false
+productionRouteEnabled: false
+
+config:
+  data:
+    config.yaml: |
+      model_list: []
+      general_settings: {}
+
+callbacks:
+  data:
+    README.txt: |
+      Replace this frozen snapshot with the audited callbacks for the rollout run.
+
+additionalSnapshots: []
+
+workloadContract:
+  containers:
+    - litellm
+  managedInitContainers:
+    []
+  optionalInitContainers:
+    - config-check
+
+schedulerSafety:
+  mode: disabled
+  evidenceSha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  configSha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  callbacksSha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  runtimeSha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  sourcePayloadSha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  capturedAt: "1970-01-01T00:00:00Z"
+  source: clone:unverified
+
+backgroundTasks:
+  enabled: false
+
+secretRefs:
+  - litellm-secrets
+  - carher-env-keys
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+
+extraEnv: []
+
+# 排水预算是一条推导链，不是三个独立旋钮：
+#   terminationGracePeriodSeconds >= preStopSeconds + streamDrainSeconds
+#   nginx proxy_read_timeout      == streamDrainSeconds
+# preStop 期间 Pod 已 Terminating，Endpoints/NodePort 停止送新请求；SIGTERM 之后
+# 只剩 streamDrainSeconds 让在途 SSE 自然收尾，到点就是 SIGKILL。
+# 所以 nginx 承诺等待的时间绝不能长于 Pod 还能活的时间：原先 nginx 写 3600s 而
+# grace 只有 600s，等于把「干净的 504」换成「无错误码的 SSE 中途截断」，客户端看
+# 到的是回答突然没了，而不是一次失败。
+#
+# 截断成本（必须在执行单里写明，不许默认它等于 0）：一条运行超过
+# streamDrainSeconds 的流会在滚动更新时被砍断。当前 570s 是按 grace 600s 反推的
+# 预算上限，不是实测的最长 SSE 时长。每次 run 必须从 access log 量出 p100
+# upstream_response_time：若实测超过 570s，就同步抬高 terminationGracePeriodSeconds
+# 与 nginx proxy_read_timeout（两者一起改，否则关系断裂）；若决定接受截断，在执行单
+# 里记录被截断的请求比例和受影响的消费者。
+drain:
+  preStopSeconds: 30
+  streamDrainSeconds: 570
+
+lifecycle:
+  preStop:
+    exec:
+      command: ["sh", "-c", "sleep 30"]
+
+initContainers:
+  approvedNames: []
+  items: []
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi
+
+terminationGracePeriodSeconds: 600
+
+probes:
+  initialDelaySeconds: 90
+  periodSeconds: 15
+  failureThreshold: 5
+  timeoutSeconds: 15

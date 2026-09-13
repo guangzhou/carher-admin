@@ -1,0 +1,577 @@
+# Fail-closed metadata-clone templates. The dump preserves the complete schema
+# and all non-log data, but omits historical rows from the two large spend-log
+# tables. It must be destroyed with the clone namespace after qualification.
+# Documents are deliberately self-contained; YAML anchors cannot cross `---`.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: litellm-clone-dump
+  namespace: litellm-clone
+  labels:
+    litellm.carher.io/sensitive-clone-data: "true"
+spec:
+  storageClassName: local-path
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-production-metadata-dump-template
+  namespace: litellm-clone
+  labels:
+    litellm.carher.io/template: "true"
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: litellm-production-metadata-dump
+        litellm.carher.io/role: dump
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dump
+          image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-production-readonly-dump-credentials
+                  key: DATABASE_URL
+          command: ["sh", "-ceu"]
+          args:
+            - |
+              umask 077
+              for artifact in litellm-metadata.dump litellm-metadata.list litellm-metadata.dump.sha256 baseline-counts.tsv baseline-counts.json snapshot-ready; do
+                test ! -e "/dump/$artifact"
+              done
+
+              pipe_dir="$(mktemp -d)"
+              snapshot_in="$pipe_dir/in"
+              snapshot_out="$pipe_dir/out"
+              exporter_pid=""
+              cleanup() {
+                if test -n "$exporter_pid"; then
+                  kill "$exporter_pid" 2>/dev/null || true
+                fi
+                rm -rf "$pipe_dir"
+              }
+              trap cleanup EXIT HUP INT TERM
+              mkfifo "$snapshot_in" "$snapshot_out"
+
+              psql --dbname="$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 <"$snapshot_in" >"$snapshot_out" &
+              exporter_pid=$!
+              exec 3>"$snapshot_in"
+              exec 4<"$snapshot_out"
+              printf '%s\n' 'BEGIN ISOLATION LEVEL REPEATABLE READ;' "SELECT 'SNAPSHOT=' || pg_export_snapshot();" >&3
+              IFS= read -r snapshot_line <&4
+              case "$snapshot_line" in
+                SNAPSHOT=*) snapshot="${snapshot_line#SNAPSHOT=}" ;;
+                *) echo "failed to export MVCC snapshot" >&2; exit 1 ;;
+              esac
+
+              included_bytes="$(psql --dbname="$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c "SELECT coalesce(sum(pg_total_relation_size(format('%I.%I', schemaname, tablename)::regclass)), 0) FROM pg_tables WHERE schemaname = 'public' AND tablename NOT IN ('LiteLLM_SpendLogs', 'LiteLLM_SpendLogToolIndex')")"
+              test "$included_bytes" -le 1073741824 || {
+                echo "non-log source data exceeds the 1 GiB qualification limit" >&2
+                exit 1
+              }
+              available_bytes="$(df -PB1 /dump | awk 'NR == 2 {print $4}')"
+              test "$available_bytes" -ge 2147483648 || {
+                echo "dump filesystem has less than 2 GiB available" >&2
+                exit 1
+              }
+
+              psql --dbname="$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -v snapshot="$snapshot" <<'SQL'
+              BEGIN ISOLATION LEVEL REPEATABLE READ;
+              SET TRANSACTION SNAPSHOT :'snapshot';
+              \pset tuples_only on
+              \pset format unaligned
+              \pset fieldsep '\t'
+              \o /dump/baseline-counts.tsv
+              SELECT string_agg(format('SELECT %L, count(*)::bigint FROM %I.%I', tablename, schemaname, tablename), ' UNION ALL ' ORDER BY tablename) || ' ORDER BY 1;'
+                FROM pg_tables
+               WHERE schemaname = 'public'
+                 AND tablename NOT IN ('LiteLLM_SpendLogs', 'LiteLLM_SpendLogToolIndex')
+              \gexec
+              \o /dump/baseline-counts.json
+              SELECT 'WITH counts AS (' || string_agg(format('SELECT %L AS table_name, count(*)::bigint AS row_count FROM %I.%I', tablename, schemaname, tablename), ' UNION ALL ' ORDER BY tablename) || ') SELECT jsonb_object_agg(table_name, row_count ORDER BY table_name)::text FROM counts;'
+                FROM pg_tables
+               WHERE schemaname = 'public'
+                 AND tablename NOT IN ('LiteLLM_SpendLogs', 'LiteLLM_SpendLogToolIndex')
+              \gexec
+              \o
+              COMMIT;
+              SQL
+
+              printf '%s\n' "$snapshot" >/dump/snapshot-ready
+              pg_dump --snapshot="$snapshot" --dbname="$DATABASE_URL" -Fc --schema=public \
+                --exclude-table-data='public."LiteLLM_SpendLogs"' \
+                --exclude-table-data='public."LiteLLM_SpendLogToolIndex"' \
+                --file=/dump/litellm-metadata.dump
+              printf '%s\n' 'ROLLBACK;' >&3
+              exec 3>&-
+              wait "$exporter_pid"
+              exporter_pid=""
+              exec 4<&-
+
+              pg_restore --list /dump/litellm-metadata.dump >/dump/litellm-metadata.list
+              test -s /dump/litellm-metadata.dump
+              test -s /dump/litellm-metadata.list
+              test -s /dump/baseline-counts.tsv
+              test -s /dump/baseline-counts.json
+              dump_bytes="$(stat -c %s /dump/litellm-metadata.dump)"
+              test "$dump_bytes" -le 2147483648 || {
+                echo "metadata dump exceeds the 2 GiB safety limit" >&2
+                exit 1
+              }
+              (cd /dump && sha256sum litellm-metadata.dump >litellm-metadata.dump.sha256)
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: dump
+              mountPath: /dump
+      volumes:
+        - name: dump
+          persistentVolumeClaim:
+            claimName: litellm-clone-dump
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-clone-a-restore-template
+  namespace: litellm-clone
+  labels:
+    litellm.carher.io/template: "true"
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: litellm-clone-a-restore
+        litellm.carher.io/role: restore
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: restore
+          image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-clone-a-credentials
+                  key: DATABASE_URL
+          command: ["sh", "-ceu"]
+          args:
+            - |
+              for attempt in $(seq 1 60); do
+                pg_isready --dbname="$DATABASE_URL" && break
+                test "$attempt" -lt 60
+                sleep 2
+              done
+              expected="$(awk 'NR == 1 {print $1}' /dump/litellm-metadata.dump.sha256)"
+              actual="$(sha256sum /dump/litellm-metadata.dump | awk '{print $1}')"
+              test "$expected" = "$actual"
+              psql --dbname="$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 \
+                -c 'DROP SCHEMA IF EXISTS public CASCADE' \
+                -c 'CREATE SCHEMA public'
+              pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges --dbname="$DATABASE_URL" /dump/litellm-metadata.dump
+              psql --dbname="$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 <<'SQL'
+              \pset tuples_only on
+              \pset format unaligned
+              \pset fieldsep '\t'
+              \o /dump/clone-a-restored-counts.tsv
+              SELECT string_agg(format('SELECT %L, count(*)::bigint FROM %I.%I', tablename, schemaname, tablename), ' UNION ALL ' ORDER BY tablename) || ' ORDER BY 1;'
+                FROM pg_tables
+               WHERE schemaname = 'public'
+                 AND tablename NOT IN ('LiteLLM_SpendLogs', 'LiteLLM_SpendLogToolIndex')
+              \gexec
+              \o
+              SQL
+              log_rows="$(psql --dbname="$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c 'SELECT (SELECT count(*) FROM "LiteLLM_SpendLogs") + (SELECT count(*) FROM "LiteLLM_SpendLogToolIndex")')"
+              test "$log_rows" = 0
+              cmp -s /dump/baseline-counts.tsv /dump/clone-a-restored-counts.tsv
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: dump
+              mountPath: /dump
+      volumes:
+        - name: dump
+          persistentVolumeClaim:
+            claimName: litellm-clone-dump
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-clone-a-post-migration-dump-template
+  namespace: litellm-clone
+  labels:
+    litellm.carher.io/template: "true"
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: litellm-clone-a-post-migration-dump
+        litellm.carher.io/role: migration
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dump
+          image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-clone-a-credentials
+                  key: DATABASE_URL
+          command: ["sh", "-ceu"]
+          args:
+            - |
+              umask 077
+              for attempt in $(seq 1 60); do
+                pg_isready --dbname="$DATABASE_URL" && break
+                test "$attempt" -lt 60
+                sleep 2
+              done
+              for artifact in litellm-migrated.dump litellm-migrated.list litellm-migrated.dump.sha256 migrated-baseline-counts.tsv; do
+                test ! -e "/dump/$artifact"
+              done
+
+              pipe_dir="$(mktemp -d)"
+              snapshot_in="$pipe_dir/in"
+              snapshot_out="$pipe_dir/out"
+              exporter_pid=""
+              cleanup() {
+                if test -n "$exporter_pid"; then
+                  kill "$exporter_pid" 2>/dev/null || true
+                fi
+                rm -rf "$pipe_dir"
+              }
+              trap cleanup EXIT HUP INT TERM
+              mkfifo "$snapshot_in" "$snapshot_out"
+
+              psql --dbname="$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 <"$snapshot_in" >"$snapshot_out" &
+              exporter_pid=$!
+              exec 3>"$snapshot_in"
+              exec 4<"$snapshot_out"
+              printf '%s\n' 'BEGIN ISOLATION LEVEL REPEATABLE READ;' "SELECT 'SNAPSHOT=' || pg_export_snapshot();" >&3
+              IFS= read -r snapshot_line <&4
+              case "$snapshot_line" in
+                SNAPSHOT=*) snapshot="${snapshot_line#SNAPSHOT=}" ;;
+                *) echo "failed to export post-migration MVCC snapshot" >&2; exit 1 ;;
+              esac
+
+              psql --dbname="$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -v snapshot="$snapshot" <<'SQL'
+              BEGIN ISOLATION LEVEL REPEATABLE READ;
+              SET TRANSACTION SNAPSHOT :'snapshot';
+              \pset tuples_only on
+              \pset format unaligned
+              \pset fieldsep '\t'
+              \o /dump/migrated-baseline-counts.tsv
+              SELECT string_agg(format('SELECT %L, count(*)::bigint FROM %I.%I', tablename, schemaname, tablename), ' UNION ALL ' ORDER BY tablename) || ' ORDER BY 1;'
+                FROM pg_tables
+               WHERE schemaname = 'public'
+                 AND tablename NOT IN ('LiteLLM_SpendLogs', 'LiteLLM_SpendLogToolIndex')
+              \gexec
+              \o
+              COMMIT;
+              SQL
+
+              pg_dump --snapshot="$snapshot" --dbname="$DATABASE_URL" -Fc --schema=public \
+                --exclude-table-data='public."LiteLLM_SpendLogs"' \
+                --exclude-table-data='public."LiteLLM_SpendLogToolIndex"' \
+                --file=/dump/litellm-migrated.dump
+              printf '%s\n' 'ROLLBACK;' >&3
+              exec 3>&-
+              wait "$exporter_pid"
+              exporter_pid=""
+              exec 4<&-
+
+              pg_restore --list /dump/litellm-migrated.dump >/dump/litellm-migrated.list
+              test -s /dump/litellm-migrated.dump
+              test -s /dump/litellm-migrated.list
+              test -s /dump/migrated-baseline-counts.tsv
+              sha256sum /dump/litellm-migrated.dump >/dump/litellm-migrated.dump.sha256
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: dump
+              mountPath: /dump
+      volumes:
+        - name: dump
+          persistentVolumeClaim:
+            claimName: litellm-clone-dump
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-clone-b-restore-template
+  namespace: litellm-clone
+  labels:
+    litellm.carher.io/template: "true"
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: litellm-clone-b-restore
+        litellm.carher.io/role: restore
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: restore
+          image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-clone-b-credentials
+                  key: DATABASE_URL
+          command: ["sh", "-ceu"]
+          args:
+            - |
+              for attempt in $(seq 1 60); do
+                pg_isready --dbname="$DATABASE_URL" && break
+                test "$attempt" -lt 60
+                sleep 2
+              done
+              expected="$(awk 'NR == 1 {print $1}' /dump/litellm-migrated.dump.sha256)"
+              actual="$(sha256sum /dump/litellm-migrated.dump | awk '{print $1}')"
+              test "$expected" = "$actual"
+              psql --dbname="$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 \
+                -c 'DROP SCHEMA IF EXISTS public CASCADE' \
+                -c 'CREATE SCHEMA public'
+              pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges --dbname="$DATABASE_URL" /dump/litellm-migrated.dump
+              psql --dbname="$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 <<'SQL'
+              \pset tuples_only on
+              \pset format unaligned
+              \pset fieldsep '\t'
+              \o /dump/clone-b-restored-counts.tsv
+              SELECT string_agg(format('SELECT %L, count(*)::bigint FROM %I.%I', tablename, schemaname, tablename), ' UNION ALL ' ORDER BY tablename) || ' ORDER BY 1;'
+                FROM pg_tables
+               WHERE schemaname = 'public'
+                 AND tablename NOT IN ('LiteLLM_SpendLogs', 'LiteLLM_SpendLogToolIndex')
+              \gexec
+              \o
+              SQL
+              log_rows="$(psql --dbname="$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c 'SELECT (SELECT count(*) FROM "LiteLLM_SpendLogs") + (SELECT count(*) FROM "LiteLLM_SpendLogToolIndex")')"
+              test "$log_rows" = 0
+              cmp -s /dump/migrated-baseline-counts.tsv /dump/clone-b-restored-counts.tsv
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: dump
+              mountPath: /dump
+      volumes:
+        - name: dump
+          persistentVolumeClaim:
+            claimName: litellm-clone-dump
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-clone-c-restore-template
+  namespace: litellm-clone
+  labels:
+    litellm.carher.io/template: "true"
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: litellm-clone-c-restore
+        litellm.carher.io/role: restore
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-standby
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: standby
+          effect: NoSchedule
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: restore
+          image: 127.0.0.1:5000/postgres@sha256:adaa8b0891d74ee64cc97119c96b4826190ada4644a41d69dfb6c2d96a27f7a3
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-clone-c-credentials
+                  key: DATABASE_URL
+          command: ["sh", "-ceu"]
+          args:
+            - |
+              for attempt in $(seq 1 60); do
+                pg_isready --dbname="$DATABASE_URL" && break
+                test "$attempt" -lt 60
+                sleep 2
+              done
+              expected="$(awk 'NR == 1 {print $1}' /dump/litellm-migrated.dump.sha256)"
+              actual="$(sha256sum /dump/litellm-migrated.dump | awk '{print $1}')"
+              test "$expected" = "$actual"
+              psql --dbname="$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 \
+                -c 'DROP SCHEMA IF EXISTS public CASCADE' \
+                -c 'CREATE SCHEMA public'
+              pg_restore --exit-on-error --clean --if-exists --no-owner --no-privileges --dbname="$DATABASE_URL" /dump/litellm-migrated.dump
+              psql --dbname="$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 <<'SQL'
+              \pset tuples_only on
+              \pset format unaligned
+              \pset fieldsep '\t'
+              \o /dump/clone-c-restored-counts.tsv
+              SELECT string_agg(format('SELECT %L, count(*)::bigint FROM %I.%I', tablename, schemaname, tablename), ' UNION ALL ' ORDER BY tablename) || ' ORDER BY 1;'
+                FROM pg_tables
+               WHERE schemaname = 'public'
+                 AND tablename NOT IN ('LiteLLM_SpendLogs', 'LiteLLM_SpendLogToolIndex')
+              \gexec
+              \o
+              SQL
+              log_rows="$(psql --dbname="$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 -c 'SELECT (SELECT count(*) FROM "LiteLLM_SpendLogs") + (SELECT count(*) FROM "LiteLLM_SpendLogToolIndex")')"
+              test "$log_rows" = 0
+              cmp -s /dump/migrated-baseline-counts.tsv /dump/clone-c-restored-counts.tsv
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: dump
+              mountPath: /dump
+      volumes:
+        - name: dump
+          persistentVolumeClaim:
+            claimName: litellm-clone-dump

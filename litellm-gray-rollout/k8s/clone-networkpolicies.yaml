@@ -1,0 +1,135 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: litellm-clone
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-qualified-clients-to-clone-db
+  namespace: litellm-clone
+spec:
+  podSelector:
+    matchLabels:
+      litellm.carher.io/component: clone-db
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: litellm.carher.io/role
+                operator: In
+                values: [migration, restore, version-test, network-probe]
+      ports:
+        - port: 5432
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-production-dump-readonly-egress
+  namespace: litellm-clone
+spec:
+  podSelector:
+    matchLabels:
+      litellm.carher.io/role: dump
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: litellm-product
+          podSelector:
+            matchLabels:
+              app: litellm-db
+      ports:
+        - port: 5432
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-qualified-clients-to-dns
+  namespace: litellm-clone
+spec:
+  podSelector:
+    matchExpressions:
+      - key: litellm.carher.io/role
+        operator: In
+        values: [dump, migration, restore, version-test, network-probe]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-version-tests-to-clone-redis
+  namespace: litellm-clone
+spec:
+  podSelector:
+    matchLabels:
+      litellm.carher.io/component: clone-redis
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              litellm.carher.io/role: version-test
+      ports:
+        - port: 6379
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-version-tests-egress-to-clone-redis
+  namespace: litellm-clone
+spec:
+  podSelector:
+    matchLabels:
+      litellm.carher.io/role: version-test
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              litellm.carher.io/component: clone-redis
+      ports:
+        - port: 6379
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-qualified-clients-egress-to-clone-db
+  namespace: litellm-clone
+spec:
+  podSelector:
+    matchExpressions:
+      - key: litellm.carher.io/role
+        operator: In
+        values: [migration, restore, version-test, network-probe]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              litellm.carher.io/component: clone-db
+      ports:
+        - port: 5432
+          protocol: TCP

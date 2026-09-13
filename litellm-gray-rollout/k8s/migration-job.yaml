@@ -1,0 +1,119 @@
+# Templates only. The renderer emits exactly one selected suspended Job:
+# clone by default, or production only after an explicit Path A target.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-clone-schema-migration-template
+  namespace: litellm-clone
+  labels:
+    app: litellm-clone-schema-migration
+    litellm.carher.io/template: "true"
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: litellm-clone-schema-migration
+        litellm.carher.io/role: migration
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: 127.0.0.1:5000/litellm-carher@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CLONE_DB_HOST
+              value: litellm-clone-a
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-clone-a-credentials
+                  key: DATABASE_URL
+            - name: PGOPTIONS
+              value: -c lock_timeout=5s -c statement_timeout=15min
+          command: ["sh", "-ceu"]
+          args:
+            - |
+              echo "Refusing automatic schema convergence."
+              echo "Replace this command with the approved migration ledger."
+              echo "Each DDL statement must write start/done state and a schema checksum."
+              exit 64
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: litellm-production-schema-migration-template
+  namespace: litellm-product
+  labels:
+    app: litellm-production-schema-migration
+    litellm.carher.io/template: "true"
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: litellm-production-schema-migration
+        litellm.carher.io/role: production-migration
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: 127.0.0.1:5000/litellm-carher@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-production-migration-credentials
+                  key: DATABASE_URL
+            - name: PGOPTIONS
+              value: -c lock_timeout=5s -c statement_timeout=15min
+          command: ["sh", "-ceu"]
+          args:
+            - |
+              echo "Refusing automatic production schema convergence."
+              echo "Replace this command with the clone-qualified approved migration ledger."
+              echo "Each DDL statement must write start/done state and a schema checksum."
+              exit 64
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi

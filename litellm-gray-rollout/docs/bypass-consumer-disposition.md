@@ -57,13 +57,14 @@ A 类写消费者。**那不是 198 干净，是尺子瞎了。**
 | 1 | `acct-base-model-sweep.sh` → `litellm-acct-base-model-fix.py --apply` | 198 | cron 每小时 `:23`，`flock -n /tmp/acct-bm-sweep.lock` | `GET /model/info`<br>`POST /model/{id}/update` | **A 控制面写** |
 | 2 | `zerokey-meta-collector.py` | 188 | cron 每 2 分钟 | `GET /pro/v1/model/info` | **B 控制面读** |
 | 3 | `acct-admin-backend` 容器 | 188 | 常驻服务，**按用户点击触发** | `GET /v1/model/info`；pause/resume → `POST /model/delete` + `/model/new` | **A 控制面写**（on-demand） |
-| 4 | `quota-rebalance.py` | 188 | cron —— **已暂停** | `/pro` | A（已冻结） |
-| 5 | `zerokey-rebalance.py run-dev` | 188 | cron 每 2 分钟 | **30400（dev）** | **不在范围** |
+| 4 | `quota-rebalance.py` | 188 | cron 每 5 分钟 —— 09-13 暂停，**09-14 00:10 已恢复，窗口前须重停**（§1.4） | `/model/delete` `/model/new` `PATCH /model/{id}/update` | **A 控制面写** |
+| 5 | `cron-wrapper.sh` → `orchestrator.py --dry-run` | 188 | cron 每 5 分钟（`2,7,12,…`） | `GET /model/info` `/health` `/spend/logs`；写入口被 `dry_run` 分支挡在 `requests` 之前（§1.5） | **B 控制面读** |
+| 6 | `zerokey-rebalance.py run-dev` | 188 | cron 每 2 分钟 | **30400（dev）** | **不在范围** |
 
 分类口径（方案 §5.6）：**A** = 控制面写（`/model/*` `/key/*` `/team/*` `/budget/*`）；
 **B** = 控制面读/对账；**C** = 推理/探活。
 
-### 1.1 第 5 条是证伪腿，不是漏网之鱼
+### 1.1 第 6 条是证伪腿，不是漏网之鱼
 
 `zerokey-rebalance.py` 看起来该进清单——它每 2 分钟跑一次，脚本里确实有 LiteLLM 调用。
 但它 `source` 的是 `/home/cltx/.zerokey-rebalance/dev.env`，里面写死
@@ -101,6 +102,48 @@ prod 消费者列进来，然后在窗口内被无谓地冻结。反过来说—
 
 消费者 4（`quota-rebalance.py`）本次扫描**未出现在任何 crontab 中**，
 与"已暂停"的记录一致，构成一次独立复核。
+
+### 1.4 执行当天重扫（`captured_at=2026-09-13T17:11:58Z` = 北京时间 09-14 01:11，41 行）
+
+§5 第 1、2 步的落实。去掉 `SKIP-LARGE` / `cannot statx` 后的全部命中：
+
+| # | 证据行 | 与 09-13 相比 |
+|---|---|---|
+| 1 | `[198] litellm-acct-base-model-fix.py:35:EP = "http://127.0.0.1:30402"` | 不变 |
+| 2 | `[188] zerokey-meta/zerokey-meta-collector.py:44` | 不变 |
+| 3 | `[188] CONTAINER acct-admin-backend: ...=http://10.68.13.198:30402/pro` | 不变 |
+| 4 | `[188] quota-rebalance.py:63`（出现 2 次） | **新增：它回到 crontab 了** |
+| 5 | `[188] /Data/quota-engine-run/cron-wrapper.sh:12:LITELLM_BASE=...:30402` | **新增，此前从未列过** |
+
+两台机的 `@@SYSTEMD@@` / `@@PROC@@` 段依旧为空。
+
+**差异成因不是第三方漂移，是我自己**：2026-09-14 00:10 我把 09-13 暂停的三条 188 cron
+按 `#GRAY-PAUSE-20260913-172109` 标记外科式恢复了（`*/5` quota-rebalance、
+`2,7,…` quota-engine `cron-wrapper.sh`、`3-59/5` quota-watchdog）。所以：
+
+- **§4 消费者 4 那句"本次扫描确认它不在 crontab 中"从 2026-09-14 00:10 起不再成立**，
+  窗口开始前必须按同一方法**重新暂停**。
+- 第 5 条是同一次恢复带出来的，09-13 扫描看不到它，因为那时它也是暂停的 ——
+  **它不是新长出来的消费者，是一直都在、只是上次被我自己挡住了**。
+
+### 1.5 第 5 条分类 = **B 控制面读**，判据是代码 + 现场日志，不是命令行里那个 `--dry-run`
+
+`cron-wrapper.sh` 调 `orchestrator.py --dry-run`。**"参数里有 --dry-run" 不等于"它不写"** ——
+这和「代码存在 ≠ 该路径被执行」是同一条红线的反向用法。两腿都量过：
+
+| 腿 | 证据 |
+|---|---|
+| 代码 | `litellm_patch.py:130 patch_weight()` 里 `if self.dry_run:` **在** `requests` 调用之前返回；写入口只有这一个 |
+| 现场 | `cron.log` 最近一轮 650 个目标全部打印 `[DRY_RUN] PATCH http://…/model/<id>/update body={…}`，无任何真实请求 |
+
+⚠️ 它的 summary 写 `"applied": 650` —— **那个词是"本该改的条数"，不是"改成功的条数"**。
+只读 summary 会把一个只读消费者读成 A 类写。分类必须落到 `patch_weight` 那个分支上。
+
+⇒ 处置同消费者 2（不冻结，留作活性量具）；但它每 5 分钟打一次 `/model/info`，
+**§5.7 若要求 prod 零请求，第 2、5 两条必须一起在最后阶段停掉**。
+
+`quota-watchdog.sh`（同一批恢复的第三条）扫描**零命中** 30402，独立确认：
+它不碰 LiteLLM，不进本清单。
 
 ---
 
@@ -168,12 +211,38 @@ prod 消费者列进来，然后在窗口内被无谓地冻结。反过来说—
 | 冻结影响 | 窗口内不能暂停/恢复 ChatGPT 账号 |
 | 补偿/恢复 | 窗口结束后照常操作；若期间有账号必须紧急暂停，走 §5.6 例外流程并记录到 evidence |
 
-### 消费者 4 —— `quota-rebalance.py`（188，已暂停）
+### 消费者 4 —— `quota-rebalance.py`（188，A 类写）
 
-已于本轮准备阶段暂停，**本次扫描确认它不在 crontab 中**。
-恢复方式：`crontab /home/cltx/.chatgpt-quota/crontab.bak.20260913-172109`。
+⚠️ **09-13 写的"已暂停"在 2026-09-14 00:10 失效了**（我自己按 §5 之外的理由恢复了那批 cron，
+见 §1.4）。当天重扫在 crontab 第 16 行实测到 `*/5 * * * * … quota-rebalance.py`。
 
-### 消费者 5 —— `zerokey-rebalance.py run-dev`（188，dev）
+写能力已逐条量过（不是从注释推的）：`/model/delete`(1222/1299/1308)、
+`/model/new`(1301/1310)、`PATCH /model/{id}/update`(2206) —— **每 5 分钟一轮的 A 类写**，
+窗口内必须冻结。
+
+| 项 | 内容 |
+|---|---|
+| 处置方式 | 与 09-13 同法：给该行加 `#GRAY-PAUSE-<ts>` 前缀注释，**不删行、不改脚本** |
+| 动了什么 | 只动 `188:cltx` 的 crontab 那一行；先 `crontab -l > /home/cltx/.chatgpt-quota/crontab.bak.<ts>` |
+| 怎么回滚 | 外科式去掉前缀（**不要整份还原备份**，期间可能有别人加的行） |
+| 冻结影响 | 窗口内撞限账号不会自动下线、reset 后不会自动上线 |
+| 补偿/恢复 | 收敛后去前缀，并确认下一轮 `cron.log` 正常产出；恢复也要留证 |
+| ⏱ 时点 | **窗口开始（§5.3 gray 收流量）前才暂停**，不在 preflight 阶段就停 —— 提前停只是白白多冻结几小时配额管理 |
+
+### 消费者 5 —— `cron-wrapper.sh` → `orchestrator.py --dry-run`（188，B 类读）
+
+09-13 清单里没有它，因为那天它同样处于暂停状态（见 §1.4）。分类依据见 §1.5
+（代码腿 + 现场日志腿，**不采信命令行里的 `--dry-run` 字样**）。
+
+| 项 | 内容 |
+|---|---|
+| owner | 188 / quota-engine |
+| 原入口 | `http://10.68.13.198:30402`，cron `2,7,12,…`（每 5 分钟） |
+| 处置方式 | **不冻结**，同消费者 2：只读 `/model/info`、`/health`、`/spend/logs` |
+| 风险 | 与消费者 2 同：§5.7 若要求 prod **零请求**，第 2、5 条必须一起在窗口最后阶段停 |
+| 怎么回滚 | 未改动，无需回滚 |
+
+### 消费者 6 —— `zerokey-rebalance.py run-dev`（188，dev）
 
 不在范围，不处置。窗口内保持原样。
 

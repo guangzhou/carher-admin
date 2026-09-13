@@ -76,9 +76,11 @@
 | `litellm-gray-rollout/scripts/collect-job-attestation.py` / `collect-migration-evidence.py` | 先把 runner 结果绑定 Job/Pod UID、实际 imageID、runner checksum、DB fingerprint、run/generation，再组装 normalized schema、DDL 与 clone A/B/C 证据 |
 | `litellm-gray-rollout/scripts/check-migration.py` | clone、schema diff、DDL ledger、锁等待和新旧版本 A/B/C 兼容证据 |
 | `litellm-gray-rollout/scripts/check-release-deletion-set.py` | 换 chart 前对 live release manifest 与目标渲染做对象级 diff；每个待删对象必须有具名消费者，否则 fail-closed |
+| `litellm-gray-rollout/scripts/check-pod-spec-shape.py` | 换 chart 前对 live Deployment 与目标渲染做**挂载级** diff（volumeMounts 按 (容器,mountPath,subPath)、volumes、lifecycle、command/args、env 名字）；消失或被换源的挂载点必须有具名消费者。删除集 gate 只看对象，看不见 Pod spec 内部；env **值一个都不读**。可选 `--live-configmaps` 只用来摘要**挂载进去的字节**：chart 的 CM 名字是内容寻址的，现网是手写的，不给这份快照时同一份字节的换名会全部读成 changed，审批退化成橡皮章；给了之后只有字节确实相同才 inert，**removed 的挂载永远不能被内容豁免**，Secret 一律不摘要 |
 | `litellm-gray-rollout/scripts/collect-metrics.py` | 从带 `ts=` 的 nginx 日志最近 5 分钟窗口及带时间/checksum 的辅助快照生成脱敏、状态绑定的 metrics 输入 |
 | `litellm-gray-rollout/scripts/metrics.py` | 按 `pool_label + uri_class` 计算样本量、5xx、p95/p99，并输出 dispatcher 可消费的结构化结果 |
-| `litellm-gray-rollout/scripts/prepare-values.py` / `prepare-migration-run.py` | 从 live workload/config/callback 和 clone qualification 生成不可直接误用的冻结 values/Job 产物 |
+| `litellm-gray-rollout/scripts/prepare-values.py` / `prepare-migration-run.py` | 从 live workload/config/callback 和 clone qualification 生成不可直接误用的冻结 values/Job 产物。`--emit-bindings` 只打印 artefact 摘要、不写任何文件，供下一行的证据生产者调用 |
+| `litellm-gray-rollout/scripts/collect-scheduler-evidence.py` | 生成 `prepare-values.py --scheduler-evidence` 要的证据文件。摘要一律转调 `prepare-values.py --emit-bindings` 取（不做第二份实现，否则就是第二个会漂的东西；那三个摘要没有一个是人能手算的，缺了生产者就只能从报错里抄 = 橡皮章）；三个 `observations` 计数必须显式传、`--source` 必须记下 `clone:`/`direct:` 来源——**没量过的 0 比没有证据更糟，它读起来是干净的绿**。非零计数只记录不裁决，由 `prepare-values.py` fail-closed；已存在的证据文件拒绝覆盖 |
 | `litellm-gray-rollout/scripts/migration-ledger-runner.py` / `compatibility-runner.py` | Job 内固定执行受审 `ADD COLUMN` ledger 与 rollback-only 新旧版本 A/B/C 数据路径探针 |
 | `litellm-gray-rollout/scripts/verify-readiness.py` | 生产模式 fail-closed 汇总 pytest、ShellCheck、Helm、正式 renderer nginx HTTP fixture 和固定 K8s 版本 kubeconform 证据 |
 | `litellm-gray-rollout/scripts/fixtures/nginx/` | nginx 1.18.0 完整候选配置和假 key 路由矩阵 |
@@ -102,10 +104,14 @@
 7. runtime evidence 必须冻结 expected callback/API/acct/mutation inventory。callback 每项需 import/behavior 探针摘要和目标 image/config；API smoke 每项需 request-id/时间/响应摘要；双向 mutation 需 operation、writer/reader、request-id、时间、SLA 和结果摘要。名称字符串或方向级 `PASS` 一律无效。
 8. 冻结执行单已填实且无 digest、chart package、debug token 等占位符；所有证据有路径、owner、时间和 checksum。
 9. 单次 run 主链只允许文档状态图中的转换。Path A bridge 子链先 `bridge_preparing`（bridge=off，直连验证），只有 `verified` 事务才切全量 bridge。成功提交后的旧版回滚只允许 `committed → post_commit_bridge → post_commit_prod_verified → post_commit_rolled_back`。终态关闭后重试必须创建新 run id。
-10. **NodePort 可达性 gate（NetworkPolicy 与真实流量路径对齐）**。宿主 nginx 是经 NodePort 打到 Pod 的，kube-proxy 会把源地址呈现为节点地址，因此只有 namespace/pod selector 的 `ingressFrom` 会把真实流量全部黑洞掉。冻结 values 必须由 `prepare-values.py --ingress-cidr` 显式声明节点地址（每节点一条，`/24` 或更窄，禁 `0.0.0.0/0`），并在应用 NetworkPolicy 后、承接任何真实流量前完成两条实测：
+10. **NodePort 可达性 gate（NetworkPolicy 与真实流量路径对齐）**。宿主 nginx 是经 NodePort 打到 Pod 的，kube-proxy 会把源地址呈现为节点地址，因此只有 namespace/pod selector 的 `ingressFrom` 会把真实流量全部黑洞掉。冻结 values 必须由 `prepare-values.py --ingress-cidr` 显式声明（`/24` 或更窄，禁 `0.0.0.0/0`）。
+    ⚠️ **声明的不是节点的业务 IP，也不是"每节点一条"，而是"每条转发路径一条"**。2026-09-13 实测（`docs/nodeport-source-cidr-evidence.md`，conntrack + 4 个 pod 的 `/proc/net/tcp` 双证据）：跨节点 SNAT 成 198 的 `flannel.1` = `10.42.0.0`，同节点 SNAT 成 198 的 `cni0` = `10.42.0.1`，`10.68.13.198` 在 2072 条里**一次都没出现**。所以是 `--ingress-cidr 10.42.0.0/32 --ingress-cidr 10.42.0.1/32` 两条，都属于 198 一台机器；242/standby 的地址一条都不需要。同节点那条不能省：今天 4 个 pod 恰好都不在 198，哪天调度器放一个上去，那个实例就单独失联。
+    应用 NetworkPolicy 后、承接任何真实流量前完成两条实测：
     - **阳性**：从宿主 nginx 所在节点 `curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:<nodePort>/health/liveliness` 必须 200。
-    - **证伪腿**：源地址不在声明列表内的一次同样请求（例如从另一台未声明节点发起）必须超时/拒绝。两条都拿到才算 gate 通过；只做阳性无法区分"策略生效"和"策略压根没匹配上"。
-      实测到的源地址必须回写执行单（`kubectl logs` 里 nginx 侧 `$remote_addr`，或 Pod 侧抓包），与 `--ingress-cidr` 声明逐条对上；对不上就停，禁止靠放宽 CIDR 让它通过。
+    - **证伪腿**：源地址不在声明列表内的一次同样请求必须超时/拒绝。两条都拿到才算 gate 通过；只做阳性无法区分"策略生效"和"策略压根没匹配上"。
+      ⛔ **不能用"从另一台未声明节点经 NodePort 发起"当证伪腿** —— 实测 188 跨机打 `10.68.13.198:30402`，源地址同样被换成 `10.42.0.0`，属于**已声明**，必然放行 ⇒ 读出假绿，而且假绿的方向恰好是"策略看起来很严"。真正的未声明源要在 pod 网络里找：临时起一个普通 pod 直连 `10.42.x.y:4000`（绕开 NodePort，不经过 SNAT）。
+      实测到的源地址必须回写执行单（Pod 侧 `/proc/net/tcp` 或宿主 `conntrack -L` 的回复元组），与 `--ingress-cidr` 声明逐条对上；对不上就停，禁止靠放宽 CIDR 让它通过。
+    ⚠️ **冻结 values 本身是窗口内产物，不能提前生成**：`prepare-values.py` 的 `MAX_SCHEDULER_EVIDENCE_AGE = timedelta(minutes=15)` 让 scheduler evidence 15 分钟过期（设计如此，防陈旧 values 把已漂移的 schema 偷渡进窗口）。窗口前能定死的只有上面两个 CIDR 值。
 
 状态转换由 `litellm-gray-rollout/scripts/gray-phase.sh` 拒绝所有未列出的边：
 
@@ -832,7 +838,7 @@ esac
 5. 🟢 **起 gray**（不接线上流量），`rollout status`；校验 gray 无 prod-route label、prod `endpoints litellm-proxy-nodeport` 仍只 4 个 prod endpoint。
 6. 🟢 **gray 直连 smoke + runtime compatibility gate**（走 30405 不经 nginx）：readiness + 2.4 固定请求集 + runtime callbacks/fallbacks/Redis/scheduler/acct 双向 mutation 基线；不得只比较 callback 数量。若 mutation 交叉可见性不通过，此处即启用从 gray 接流量到收敛结束的控制面写冻结，而非等到步骤 12。
 7. 🟢 **回滚演练** + **5-10min 同 QPS 压测**（gray vs prod 同 payload）。
-8. 🔴 **初始化 run + 提交首个 0% generation**：先按 `litellm-gray-rollout/scripts/production-nginx/README.md` 从完整 live 配置制作并审核一次 root-only base template（两个 marker 各一次），冻结 debug token 文件与真实候选路径；`gray-run-init.sh` 从执行单/live 摘要建立 `preflight` generation，随后经 `render-production-nginx.py` 生成候选。执行前提供冻结的 `GRAY_RENDER_CMD`、`GRAY_NGINX_TEST_CMD`、`GRAY_RELOAD_CMD`、`GRAY_POST_RELOAD_CMD`、`GRAY_INITIAL_ROLLBACK_CMD`、`GRAY_ABORT_VERIFY_CMD` 与 evidence freshness `GRAY_GATE_MAX_AGE_SECONDS`。初始化把这些值的 checksum 写入 generation input manifest；后续生产路由事务在 stage/render/test/switch 前拒绝 test/reload/post hook 漂移，abort 在切 bridge 前拒绝 verification hook 漂移，gate/metrics evidence 也拒绝 freshness 窗口漂移，初始 rollback 只绑定本次 init。脚本必须完成 `render → nginx -t → active symlink 切换 → reload → worker/探针检查`。失败时先由 rollback command 恢复原 live 配置并 reload，再移除 active；恢复失败则保留 active 供紧急诊断并返回失败。
+8. 🔴 **初始化 run + 提交首个 0% generation**：先按 `litellm-gray-rollout/scripts/production-nginx/README.md` 从完整 live 配置制作并审核一次 root-only base template（HTTP marker 恰好 1 次；**product proxy marker 每个可匹配 `/pro` 的 location 各 1 次，不是"一共 1 次"** —— 2026-09-13 实测 198 上共 9 个可匹配 location，其中 `= /pro`、`= /pro/ui` 是无条件 `return 301` 属渲染器豁免且**禁止**插 marker，故需插 **7** 个；执行当天用 `scripts/production-nginx/README.md` 里那个探针重量）；冻结 debug token 文件与真实候选路径；`gray-run-init.sh` 从执行单/live 摘要建立 `preflight` generation，随后经 `render-production-nginx.py` 生成候选。执行前提供冻结的 `GRAY_RENDER_CMD`、`GRAY_NGINX_TEST_CMD`、`GRAY_RELOAD_CMD`、`GRAY_POST_RELOAD_CMD`、`GRAY_INITIAL_ROLLBACK_CMD`、`GRAY_ABORT_VERIFY_CMD` 与 evidence freshness `GRAY_GATE_MAX_AGE_SECONDS`。初始化把这些值的 checksum 写入 generation input manifest；后续生产路由事务在 stage/render/test/switch 前拒绝 test/reload/post hook 漂移，abort 在切 bridge 前拒绝 verification hook 漂移，gate/metrics evidence 也拒绝 freshness 窗口漂移，初始 rollback 只绑定本次 init。脚本必须完成 `render → nginx -t → active symlink 切换 → reload → worker/探针检查`。失败时先由 rollback command 恢复原 live 配置并 reload，再移除 active；恢复失败则保留 active 供紧急诊断并返回失败。
 9. 🔴 **验证 0% 行为不变**：确认 prod `/pro/health`、`/pro/v1/models` 与全部控制面仍走 prod；随后在 gray 直连与路由 smoke 全绿后，由带结构化 `gray_entry` evidence 的状态工具进入 `normal_gray`。
 10. 🔴 **指定 key 灰度闭环**（3.6 前两档）：用 `litellm-gray-rollout/scripts/gray-key-route.sh` 将内部测试 key 送 gray → 验证 → 切回 prod → 重新送 gray；再加少量低风险真实 key。全程盯 3.6 阈值，其它用户不受影响。
 11. 🔴 **比例放量 1%→5%→10%**，只通过 `litellm-gray-rollout/scripts/gray-split-update.sh` 变更，每档盯 3.6 阈值；50%/100% 前先做 3.7 扩容。到 100% 时 force-gray 语义不再增加覆盖面，可保留作审计，但全局回滚仍必须按第 7 节批量迁移名单；此时 prod 推理对照样本不再同质，按 3.6 的 100% 基线规则判定。
@@ -887,6 +893,24 @@ NS=litellm-product; export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 litellm-gray-rollout/scripts/gray-phase.sh set prod_offline_upgrading
 test "$(shasum -a 256 "$FROZEN_CHART_PACKAGE" | awk '{print $1}')" = "$FROZEN_CHART_SHA256"
 # 2a. 删除集 gate（必过，缺此不得执行 helm upgrade）。
+#     🔴 2026-09-13 彩排结论：**这条 gate 只看对象，看不见 Pod spec 内部**，
+#     而生产的补丁能力全部活在 Pod spec 内部（40 个 volumeMount，其中 38 个 subPath
+#     单文件覆盖、4 个直接覆盖 site-packages 上游库文件、postStart 跑
+#     `python3 /patches/patch.py`）。
+#     换上去之后 ConfigMap 一个都不删 ⇒ 删除集 gate 绿；Deployment 正常收敛 ⇒
+#     rollout status 绿；/health 200 ⇒ 探针绿；而**所有运行时补丁静默失效**。
+#     三把尺子没有一把能看见 ⇒ 已新增第四把尺子 2c（check-pod-spec-shape.py）。
+#     chart 也已改到能表达现网形状（additionalSnapshots[].subPath / callbacks.mountPaths
+#     / 可选 lifecycle.postStart，preStop 强等式不动）。
+#     ✅ 2026-09-13 晚：阻塞已解除。prepare-values.py 现在会把那 40 条挂载连同源 CM 内容
+#     一起冻结进 values，chart 能渲染出与现网**逐条对齐**的形状（40 挂载 / 38 subPath /
+#     8 卷 / postStart+preStop），2c 对真实 prod 实测 `status PASS`（红从 73 收敛到 0：
+#     73→48 chart 表达力，48→12 CM 内容解包 + 模板字节修复，12→10 CRLF 保真，
+#     10→0 审批文件 k8s/prod-pod-spec-approval.json）。`mount_removals: 0`。
+#     ⚠️ 审批文件里 approver 是 `<FILL-APPROVER>`，**未签字时 2c 仍然红**；
+#     且它会与当天实际 diff 对账，对不上报 APPROVAL_DOES_NOT_MATCH_DIFF ——
+#     **窗口当天必须重跑，对不上时改的是调查方向，不是那张清单。**
+#     证据与修法见 docs/prepare-values-prod-rehearsal-2026-09-13.md §5.3/§6/§7。
 #     `--reset-values` 换 chart 会把「旧 release 拥有、新 chart 不渲染」的对象全部删掉，
 #     PDB / 额外 Service / ConfigMap 消失时 rollout status 照样会绿。
 #     先归档 live manifest，再对目标渲染做对象级 diff；每个待删对象必须在审批文件里
@@ -906,6 +930,34 @@ litellm-gray-rollout/scripts/check-release-deletion-set.py \
 kubectl apply --dry-run=server -f /root/litellm-gray-run/prod-target-manifest.yaml
 if kubectl diff -f /root/litellm-gray-run/prod-target-manifest.yaml; then rc=0; else rc=$?; fi
 [ "$rc" -le 1 ] || { echo "FATAL: kubectl diff error rc=$rc"; exit 1; }
+# 2c. Pod spec 形状 gate（必过，缺此不得执行 helm upgrade）。
+#     删除集 gate 比的是对象，这条比的是**挂载点**：volumeMounts 按
+#     (容器, mountPath, subPath) 成集合，值里带上背后的 ConfigMap/Secret 名字，
+#     所以「同一个 mountPath 换了一个 ConfigMap」也算变更而不是匹配。
+#     另外比 volumes / lifecycle(postStart+preStop) / command / args /
+#     env **名字**（值一个都不读，凭据不可能进 diff 或审批文件）。
+#     ⚠️ live 一侧必须是 `kubectl get deploy -o yaml`，**不是** `helm get manifest`：
+#        后者是 helm 以为自己 apply 过的东西，而 litellm-proxy 只用 set image/patch
+#        从不 apply，两者会漂。喂错会拿目标跟自己比 ⇒ 结构性假绿，脚本对两个方向
+#        都 fail-closed（LIVE_SIDE_IS_NOT_A_LIVE_OBJECT / TARGET_SIDE_IS_NOT_A_RENDER）。
+kubectl -n "$NS" get deploy litellm-proxy -o yaml \
+  > /root/litellm-gray-run/prod-live-deployment.yaml
+#     chart 对自己的 ConfigMap 做内容寻址命名（<release>-<snapshot>-<checksum>），
+#     现网是手写名字，所以**同样的字节**会换一个 ConfigMap 名字出现。不喂这份快照，
+#     40 条挂载会全部读成 changed，审批文件退化成 40 行「是的，同一份字节」=橡皮章。
+#     喂了之后只有**字节确实相同**的差异才被标成 inert；解析不出摘要的一律不 inert。
+#     ⚠️ 这份快照含 ConfigMap 全文，0600、用完即删；工具只输出 sha256，Secret 一律不摘要。
+umask 077 && kubectl -n "$NS" get configmap -o yaml \
+  > /root/litellm-gray-run/prod-live-configmaps.yaml
+litellm-gray-rollout/scripts/check-pod-spec-shape.py \
+  --live /root/litellm-gray-run/prod-live-deployment.yaml \
+  --target /root/litellm-gray-run/prod-target-manifest.yaml \
+  --live-configmaps /root/litellm-gray-run/prod-live-configmaps.yaml \
+  --name litellm-proxy --namespace "$NS" \
+  --run-id "$GRAY_RUN_ID" --generation "$GRAY_GENERATION" \
+  --approval /root/litellm-gray-run/prod-pod-spec-approval.json \
+  --output /root/litellm-gray-run/prod-pod-spec-shape.json
+shred -u /root/litellm-gray-run/prod-live-configmaps.yaml
 helm upgrade litellm-product-proxy "$FROZEN_CHART_PACKAGE" -n "$NS" \
   --values /root/litellm-gray-run/prod-target-values.yaml \
   --reset-values --atomic=false

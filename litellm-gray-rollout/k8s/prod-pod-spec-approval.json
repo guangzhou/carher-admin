@@ -1,0 +1,74 @@
+{
+  "_comment": [
+    "Approval template for scripts/check-pod-spec-shape.py at gate 2c.",
+    "Produced by the 2026-09-13 prod rehearsal: 80 live shape items converge to",
+    "these 10 once the ConfigMap content capture is fed in (38 inert by content,",
+    "6 renamed volumes, 0 mount removals).",
+    "RE-RUN THE GATE ON THE DAY. If the diff does not match this list exactly the",
+    "tool reports APPROVAL_DOES_NOT_MATCH_DIFF; do not edit the list to fit --",
+    "investigate what drifted.",
+    "approver must be replaced with the real signer; <FILL-APPROVER> is rejected."
+  ],
+  "shape_changes": [
+    {
+      "item": "container/litellm/mount//app/.venv/lib/python3.13/site-packages/sitecustomize.py/sitecustomize.py",
+      "consumer": "Python interpreter startup hook (loads the two-layer patch set)",
+      "disposition": "readOnly widens false -> true. Spec-field change only: measured 2026-09-13 inside the live pod litellm-proxy-677b5474-68jjb, all 40 mounts already show `ro` in /proc/mounts and zero match `rw,`, so the kernel mount is unchanged. kubelet mounts ConfigMap volumes read-only regardless of the spec flag; the container never had write access to lose.",
+      "approver": "<FILL-APPROVER>"
+    },
+    {
+      "item": "container/litellm/mount//app/anthropic_bridge_error_surface.py/anthropic_bridge_error_surface.py",
+      "consumer": "anthropic bridge error-surface callback",
+      "disposition": "readOnly widens false -> true. Spec-field change only: measured 2026-09-13 inside the live pod litellm-proxy-677b5474-68jjb, all 40 mounts already show `ro` in /proc/mounts and zero match `rw,`, so the kernel mount is unchanged. kubelet mounts ConfigMap volumes read-only regardless of the spec flag; the container never had write access to lose.",
+      "approver": "<FILL-APPROVER>"
+    },
+    {
+      "item": "container/litellm/mount//app/chatgpt_responses_normalize.py/chatgpt_responses_normalize.py",
+      "consumer": "chatgpt /v1/responses normalizer callback",
+      "disposition": "readOnly widens false -> true. Spec-field change only: measured 2026-09-13 inside the live pod litellm-proxy-677b5474-68jjb, all 40 mounts already show `ro` in /proc/mounts and zero match `rw,`, so the kernel mount is unchanged. kubelet mounts ConfigMap volumes read-only regardless of the spec flag; the container never had write access to lose.",
+      "approver": "<FILL-APPROVER>"
+    },
+    {
+      "item": "container/litellm/mount//app/client_metadata_strip.py/client_metadata_strip.py",
+      "consumer": "client metadata strip callback",
+      "disposition": "readOnly widens false -> true. Spec-field change only: measured 2026-09-13 inside the live pod litellm-proxy-677b5474-68jjb, all 40 mounts already show `ro` in /proc/mounts and zero match `rw,`, so the kernel mount is unchanged. kubelet mounts ConfigMap volumes read-only regardless of the spec flag; the container never had write access to lose.",
+      "approver": "<FILL-APPROVER>"
+    },
+    {
+      "item": "container/litellm/mount//app/codex_custom_tool_bridge.py/codex_custom_tool_bridge.py",
+      "consumer": "codex custom-tool bridge callback",
+      "disposition": "readOnly widens false -> true. Spec-field change only: measured 2026-09-13 inside the live pod litellm-proxy-677b5474-68jjb, all 40 mounts already show `ro` in /proc/mounts and zero match `rw,`, so the kernel mount is unchanged. kubelet mounts ConfigMap volumes read-only regardless of the spec flag; the container never had write access to lose.",
+      "approver": "<FILL-APPROVER>"
+    },
+    {
+      "item": "container/litellm/mount//app/cursor_web_fc_sys_rewrite.py/cursor_web_fc_sys_rewrite.py",
+      "consumer": "cursor-web function-call system rewrite callback",
+      "disposition": "readOnly widens false -> true. Spec-field change only: measured 2026-09-13 inside the live pod litellm-proxy-677b5474-68jjb, all 40 mounts already show `ro` in /proc/mounts and zero match `rw,`, so the kernel mount is unchanged. kubelet mounts ConfigMap volumes read-only regardless of the spec flag; the container never had write access to lose.",
+      "approver": "<FILL-APPROVER>"
+    },
+    {
+      "item": "container/litellm/mount//app/dead_deployment_retry.py/dead_deployment_retry.py",
+      "consumer": "dead-deployment retry callback",
+      "disposition": "readOnly widens false -> true. Spec-field change only: measured 2026-09-13 inside the live pod litellm-proxy-677b5474-68jjb, all 40 mounts already show `ro` in /proc/mounts and zero match `rw,`, so the kernel mount is unchanged. kubelet mounts ConfigMap volumes read-only regardless of the spec flag; the container never had write access to lose.",
+      "approver": "<FILL-APPROVER>"
+    },
+    {
+      "item": "container/litellm/mount//app/openrouter_provider_pin.py/openrouter_provider_pin.py",
+      "consumer": "openrouter provider pin callback",
+      "disposition": "readOnly widens false -> true. Spec-field change only: measured 2026-09-13 inside the live pod litellm-proxy-677b5474-68jjb, all 40 mounts already show `ro` in /proc/mounts and zero match `rw,`, so the kernel mount is unchanged. kubelet mounts ConfigMap volumes read-only regardless of the spec flag; the container never had write access to lose.",
+      "approver": "<FILL-APPROVER>"
+    },
+    {
+      "item": "container/litellm/mount//app/pricing_overlay.py/pricing_overlay.py",
+      "consumer": "pricing overlay callback",
+      "disposition": "readOnly widens false -> true. Spec-field change only: measured 2026-09-13 inside the live pod litellm-proxy-677b5474-68jjb, all 40 mounts already show `ro` in /proc/mounts and zero match `rw,`, so the kernel mount is unchanged. kubelet mounts ConfigMap volumes read-only regardless of the spec flag; the container never had write access to lose.",
+      "approver": "<FILL-APPROVER>"
+    },
+    {
+      "item": "volume/config",
+      "consumer": "LiteLLM proxy main config (config.yaml); the unmounted raw.js / responses.js / web-tools.js keys have no consumer in this Deployment",
+      "disposition": "The chart's content-addressed config ConfigMap carries only the mounted key config.yaml. Prod's hand-named litellm-config additionally holds raw.js (15284 B), responses.js (18904 B) and web-tools.js (16807 B), none of which this Deployment mounts -- the only mount off this volume is subPath config.yaml, which the gate already marks inert (identical bytes). litellm-config is not owned by this release and is not deleted by the upgrade, so any other consumer of those three keys keeps reading them from the object they read today.",
+      "approver": "<FILL-APPROVER>"
+    }
+  ]
+}

@@ -49,6 +49,7 @@ PYTHON_TOOLS = (
     "audit-runtime.py",
     "check-migration.py",
     "check-monitor-continuity.py",
+    "check-pod-spec-shape.py",
     "check-release-deletion-set.py",
     "collect-metrics.py",
     "collect-migration-evidence.py",
@@ -606,6 +607,114 @@ def test_production_nginx_renderer_rejects_shared_environment_regex_location(
 
     assert rejected.returncode != 0
     assert "shared" in rejected.stderr.lower() or "unmanaged /pro" in rejected.stderr.lower()
+
+
+def _render_command(tmp_path, template) -> list[str]:
+    generation = tmp_path / "generation"
+    if not generation.exists():
+        generation.mkdir(mode=0o700)
+        for filename, content in {
+            "protected-prod.map": "",
+            "force-prod.map": "",
+            "force-gray.map": "",
+            "key-sid.map": "",
+            "convergence-mode.map": "default 0;\n",
+            "bridge-override.map": "default off;\n",
+            "split.conf": "* litellm_product;\n",
+        }.items():
+            path = generation / filename
+            path.write_text(content)
+            path.chmod(0o600)
+        token = tmp_path / "debug.token"
+        token.write_text("debug-token-0001\n")
+        token.chmod(0o600)
+    return [
+        "python3",
+        str(SCRIPT_DIR / "render-production-nginx.py"),
+        "--base-template",
+        str(template),
+        "--generation",
+        str(generation),
+        "--output",
+        str(tmp_path / "nginx.conf"),
+        "--debug-token-file",
+        str(tmp_path / "debug.token"),
+    ]
+
+
+def test_production_nginx_renderer_exempts_redirect_only_pro_locations(tmp_path) -> None:
+    """Live 198 has `= /pro` and `= /pro/ui` as bare `return 301` blocks.
+
+    They cannot reach the product upstream, so demanding a marker there is not
+    just noise: the marker expands to `access_log ... litellm_gray`, and
+    collect-metrics.py samples every matching line, so instant 301s would
+    dilute the 5xx denominator and depress p95/p99 — false green on both axes.
+    """
+    template = tmp_path / "nginx.template.conf"
+    template.write_text(
+        "http { upstream litellm_product { server 127.0.0.1:30402; }\n"
+        "# @@LITELLM_GRAY_HTTP_DIRECTIVES@@\nserver {\n"
+        "location = /pro { return 301 /pro/; }\n"
+        "location = /pro/ui { return 302 /pro/ui/; }\n"
+        "location /pro/ { # @@LITELLM_GRAY_PRODUCT_PROXY_DIRECTIVES@@\n }\n"
+        "} }\n"
+    )
+    template.chmod(0o600)
+    command = _render_command(tmp_path, template)
+
+    accepted = subprocess.run(command, text=True, capture_output=True, check=False)
+
+    assert accepted.returncode == 0, accepted.stderr
+    rendered = (tmp_path / "nginx.conf").read_text()
+    assert rendered.count("proxy_pass http://$product_upstream;") == 1
+    assert rendered.count("access_log /var/log/nginx/cc-auto-link.gray.log litellm_gray;") == 1
+
+
+def test_production_nginx_renderer_rejects_a_marker_inside_a_redirect_only_location(
+    tmp_path,
+) -> None:
+    template = tmp_path / "nginx.template.conf"
+    template.write_text(
+        "http { upstream litellm_product { server 127.0.0.1:30402; }\n"
+        "# @@LITELLM_GRAY_HTTP_DIRECTIVES@@\nserver {\n"
+        "location = /pro { return 301 /pro/;\n"
+        "# @@LITELLM_GRAY_PRODUCT_PROXY_DIRECTIVES@@\n }\n"
+        "location /pro/ { # @@LITELLM_GRAY_PRODUCT_PROXY_DIRECTIVES@@\n }\n"
+        "} }\n"
+    )
+    template.chmod(0o600)
+
+    rejected = subprocess.run(
+        _render_command(tmp_path, template), text=True, capture_output=True, check=False
+    )
+
+    assert rejected.returncode != 0
+    assert "redirect-only" in rejected.stderr.lower()
+
+
+def test_production_nginx_renderer_still_manages_a_conditional_redirect_location(
+    tmp_path,
+) -> None:
+    """A `return` inside `if {}` is conditional — the fallthrough may proxy."""
+    template = tmp_path / "nginx.template.conf"
+    template.write_text(
+        "http { upstream litellm_product { server 127.0.0.1:30402; }\n"
+        "# @@LITELLM_GRAY_HTTP_DIRECTIVES@@\nserver {\n"
+        "location ^~ /pro/ui/ {\n"
+        "  if ($http_user_agent = bad) { return 301 /pro/; }\n"
+        "  proxy_pass http://litellm_product;\n"
+        "}\n"
+        "location /pro/ { # @@LITELLM_GRAY_PRODUCT_PROXY_DIRECTIVES@@\n }\n"
+        "} }\n"
+    )
+    template.chmod(0o600)
+
+    rejected = subprocess.run(
+        _render_command(tmp_path, template), text=True, capture_output=True, check=False
+    )
+
+    assert rejected.returncode != 0
+    assert "unmanaged /pro location" in rejected.stderr.lower()
 
 
 def test_production_nginx_renderer_attaches_the_gray_log_format(tmp_path) -> None:

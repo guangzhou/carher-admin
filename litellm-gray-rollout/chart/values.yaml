@@ -47,7 +47,18 @@ callbacks:
   data:
     README.txt: |
       Replace this frozen snapshot with the audited callbacks for the rollout run.
+  # Each key mounts at /app/<key> by default. Override per key when the file has
+  # to land somewhere else -- prod keeps sitecustomize.py under site-packages/,
+  # where /app/ is not on the import path. A key that is not in `data` is a
+  # render-time failure, not a silent no-op.
+  # mountPaths:
+  #   sitecustomize.py: /usr/lib/python3.13/site-packages/sitecustomize.py
 
+# Each entry is one ConfigMap. Without `subPath` the whole ConfigMap is mounted
+# as a directory at mountPath, which replaces an upstream package directory
+# instead of one file inside it; with `subPath` it is a single-file overlay and
+# mountPath is the target file. `subPath` must name a key in `data`, otherwise
+# the kubelet mounts an empty path over the target and says nothing.
 additionalSnapshots: []
 
 workloadContract:
@@ -64,6 +75,10 @@ schedulerSafety:
   configSha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
   callbacksSha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
   runtimeSha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  # Digest of the Secret snapshot (name + uid + resourceVersion + data digest)
+  # that prepare-values.py audited. The chart cannot recompute this one -- it
+  # never sees Secret contents -- so it only rejects the placeholder below.
+  secretMetadataSha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
   sourcePayloadSha256: sha256:0000000000000000000000000000000000000000000000000000000000000000
   capturedAt: "1970-01-01T00:00:00Z"
   source: clone:unverified
@@ -100,9 +115,13 @@ extraEnv: []
 #   nginx proxy_read_timeout      == streamDrainSeconds
 # preStop 期间 Pod 已 Terminating，Endpoints/NodePort 停止送新请求；SIGTERM 之后
 # 只剩 streamDrainSeconds 让在途 SSE 自然收尾，到点就是 SIGKILL。
-# 所以 nginx 承诺等待的时间绝不能长于 Pod 还能活的时间：原先 nginx 写 3600s 而
-# grace 只有 600s，等于把「干净的 504」换成「无错误码的 SSE 中途截断」，客户端看
-# 到的是回答突然没了，而不是一次失败。
+#
+# ⚠️ proxy_read_timeout 是**两次读之间**的间隔上限，**不是**一次请求的总时长上限。
+#    2026-09-13 实测：现网该值 600s，同窗口却跑出 81,665s(22.7h) 的请求 —— 不矛盾，
+#    是定义：SSE 只要持续吐 chunk，间隔永远小于超时。所以把它调小**防不住截断**。
+#    它的真实作用是：当上游因 Pod 正在死而**变哑**时，nginx 赶在 SIGKILL(600s)
+#    之前放弃(570s)，给客户端干净的 504，而不是 Pod 死后收 RST、把截断伪装成
+#    "回答突然没了"。570 < 600 这个差值就是这条契约本身，不是笔误。
 #
 # 截断成本（必须在执行单里写明，不许默认它等于 0）：一条运行超过
 # streamDrainSeconds 的流会在滚动更新时被砍断。当前 570s 是按 grace 600s 反推的
@@ -110,6 +129,12 @@ extraEnv: []
 # upstream_response_time：若实测超过 570s，就同步抬高 terminationGracePeriodSeconds
 # 与 nginx proxy_read_timeout（两者一起改，否则关系断裂）；若决定接受截断，在执行单
 # 里记录被截断的请求比例和受影响的消费者。
+#
+# 2026-09-13 实测结论（docs/drain-budget-evidence-2026-09-13.md）：
+#   p100=81,665s、p99(responses)=1,442s ⇒ 抬 grace 到覆盖 p100 需要 22.7 小时，不可行。
+#   ⇒ 选"接受截断"：比例 0.0940%(1,169/1,243,452)，消费者全是
+#     Codex Desktop / codex-tui 打 /pro/v1/responses 的长 agent 会话。
+#   日志在 /var/log/nginx/zkreq.log(格式 zkreq)，**不是** access.log(combined,无 upstream 时间)。
 drain:
   preStopSeconds: 30
   streamDrainSeconds: 570
@@ -118,6 +143,11 @@ lifecycle:
   preStop:
     exec:
       command: ["sh", "-c", "sleep 30"]
+  # preStop is derived from drain.preStopSeconds and validated by equality.
+  # postStart is optional and additive: prod loads its two patch layers here.
+  # postStart:
+  #   exec:
+  #     command: ["python3", "/patches/patch.py"]
 
 initContainers:
   approvedNames: []
@@ -139,8 +169,20 @@ resources:
 
 terminationGracePeriodSeconds: 600
 
+# readiness 与 liveness 是两套独立时序，不是一套。
+# 2026-09-13 实测现网 litellm-proxy：readiness 60/10/12/5、liveness 180/30/10/8。
+# 旧版 chart 只有一个 `probes` 块给两个探针共用，prepare-values.py 因此在真实
+# Deployment 上硬红（"readiness and liveness timing must match"）。那条等式没有
+# 任何安全理由——k8s 故意把两者分开：readiness 要快（尽早摘流量），liveness 要慢
+# （别在 GC/冷启动时误杀）。强行取齐等于对线上探针做一次真实行为变更。
 probes:
-  initialDelaySeconds: 90
-  periodSeconds: 15
-  failureThreshold: 5
-  timeoutSeconds: 15
+  readiness:
+    initialDelaySeconds: 60
+    periodSeconds: 10
+    failureThreshold: 12
+    timeoutSeconds: 5
+  liveness:
+    initialDelaySeconds: 180
+    periodSeconds: 30
+    failureThreshold: 10
+    timeoutSeconds: 8

@@ -8,6 +8,15 @@
 §1–§6 是迁移窗口本身的成本；§7 是迁移**之后**的兼容性（老版本能不能对着新 schema 跑、
 新旧能不能同时连同一个库），同样全部是实测。
 
+> ⚠️ **表大小口径已于 2026-09-13 20:5x 变更**：两张日志表已按 skill
+> `litellm-198-diskpressure-502` 做过一次紧急 TRUNCATE（`LiteLLM_SpendLogs` 142 GB → 18 MB，
+> `LiteLLM_SpendLogToolIndex` 27 GB → 64 kB，`/Data` 264G used → 96G used）。
+> **下文 §2/§3/§4/§6 里的行数与字节数是 TRUNCATE 之前的实测值，按原样保留**——它们是
+> 迁移成本论证的输入，不能事后改写。对迁移结论的影响是**单向变好**：唯一那条尺寸相关语句
+> （§4 的 `CREATE INDEX`）的目标表现在几乎是空的，§6 的预建索引仍 `indisvalid = true`
+> （TRUNCATE 会换索引的 relfilenode 但保留索引定义），所以 migration 里那句
+> `CREATE INDEX IF NOT EXISTS` **依旧是 no-op**。
+
 ---
 
 ## 1. 待执行的迁移是哪些

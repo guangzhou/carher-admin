@@ -67,6 +67,27 @@ Record the output of `helm lint`, frozen-package `helm template`, nginx 1.18.0
 fixture tests, pytest, and shellcheck in the evidence index. Rebuilding a chart
 package after approval creates a new run; do not silently replace the checksum.
 
+⚠️ **The chart package checksum is not reproducible on 198 — the `.tgz` is the
+artifact, not the source tree.** Measured 2026-09-13:
+
+| 打包环境 | 同一份 chart 源，两次连续打包 |
+|---|---|
+| 198 (`helm v3.17.3`) | **checksum 不同**（`0beba529…` vs `eaaca078…`） |
+| 本机 (`helm v4.2.3`) | checksum 相同 |
+
+gzip 头的 mtime 两边都被归零（`1f 8b 08 14 00 00 00 00`），差异在**内层 tar**：
+helm 3 把打包时刻写进每个成员的 tar header ModTime（两次相隔 2 s，`tar -tv`
+分钟级显示一致而字节不同）。成员的 size/mode/owner 全部相同。
+
+因此：
+
+- ⛔ 不许在本机预算出 checksum 再拿到 198 上比对 —— **helm 3 与 helm 4 打出的包
+  本来就不同**（`ab5e125f…` vs `a3de2bd5…`），这个"不匹配"读起来像被篡改，其实是量具错。
+- ⛔ 不许用"重新打一次包、看 checksum 对不对"来验证冻结产物的完整性；在 198 上
+  这个动作**必然**报假红。
+- ✅ 执行当天在 198 上 `helm package` **一次**，立刻 `sha256sum` 写进上表，
+  之后每一步都引用**那个文件**。校验完整性用 `sha256sum -c` 比对该文件本身。
+
 Phase ledger
 
 Every transition must be performed by the rollout scripts, then copied from the
@@ -142,18 +163,19 @@ Runtime gate
 | Enabled/recent API surface discovery | `FILL` | `FILL` | `FILL` |
 | All surface smoke including images | `FILL` | `FILL` | `FILL` |
 | Redis format/prefix/TTL compatibility | `FILL` | `FILL` | `FILL` |
-| Measured p100 `upstream_response_time` per `uri_class` (window + access-log path) | `FILL` | `FILL` | `FILL` |
-| Drain budget holds: `terminationGracePeriodSeconds >= drain.preStopSeconds + drain.streamDrainSeconds` and nginx `proxy_read_timeout == drain.streamDrainSeconds` | `FILL` | `FILL` | `PASS/FAIL` |
-| If measured p100 exceeds `drain.streamDrainSeconds`: grace and nginx timeout raised together, or truncation explicitly accepted with the affected request share and consumers named | `FILL` | `FILL` | `FILL` |
-| Declared NodePort source CIDRs (`prepare-values.py --ingress-cidr`, one per node, `/24` or narrower) | `FILL` | `FILL` | `FILL` |
+| Measured p100 `upstream_response_time` per `uri_class` (window + access-log path) | window = `zkreq.log` + `.1` (2 days, N=1,243,452 `/pro`); path `/var/log/nginx/zkreq.log` (format `zkreq`, **not** `access.log`) | `docs/drain-budget-evidence-2026-09-13.md` | p100 = **81,665 s** (`responses`); p99 = 1,442 s. **Re-measure on the day** |
+| Drain budget holds: `terminationGracePeriodSeconds >= drain.preStopSeconds + drain.streamDrainSeconds` and nginx `proxy_read_timeout == drain.streamDrainSeconds` | `600 >= 30 + 570` ✅ / live nginx is **600 s**, must be lowered to **570 s** (a real behavior change, not a template copy) | `docs/drain-budget-evidence-2026-09-13.md` §4 | `PASS` on arithmetic; nginx change **pending** |
+| ⚠️ `proxy_read_timeout` is an **inter-read** timeout, not a total-duration cap — it does not bound stream length and cannot prevent truncation of an actively streaming SSE. Its real job is to make nginx give up **before** the Pod is SIGKILLed (570 < 600) so a dying upstream yields a clean 504 instead of a silent cut | measured: 600 s timeout coexists with an 81,665 s request | `docs/drain-budget-evidence-2026-09-13.md` §4 | `NOTED` |
+| If measured p100 exceeds `drain.streamDrainSeconds`: grace and nginx timeout raised together, or truncation explicitly accepted with the affected request share and consumers named | **Truncation explicitly accepted.** Share = **0.0940%** (1,169 / 1,243,452). Consumers = **Codex Desktop / codex-tui on `/pro/v1/responses`** (no other lane in the tail). Grace NOT raised: covering p100 would need ~22.7 h | `docs/drain-budget-evidence-2026-09-13.md` §3.1–3.2 | `ACCEPTED` — needs sign-off |
+| Declared NodePort source CIDRs (`prepare-values.py --ingress-cidr`, **one per forwarding path, not one per node**, `/24` or narrower) | `10.42.0.0/32` (198 `flannel.1`, cross-node) + `10.42.0.1/32` (198 `cni0`, same-node) | `docs/nodeport-source-cidr-evidence.md` | 2026-09-13 measured; **re-measure on the day** |
 | NodePort reachability positive leg: `curl 127.0.0.1:<nodePort>/health/liveliness` from the host-nginx node returns 200 after the policy is applied | `FILL` | `FILL` | `PASS/FAIL` |
-| NodePort reachability falsification leg: same request from an undeclared source times out / is refused | `FILL` | `FILL` | `PASS/FAIL` |
+| NodePort reachability falsification leg: same request from an undeclared source times out / is refused. ⚠️ 188 is **not** an undeclared source — it SNATs to `10.42.0.0` like everything else; use a pod-network client hitting `10.42.x.y:4000` directly | `FILL` | `FILL` | `PASS/FAIL` |
 | Observed source address at the Pod matches the declared CIDR list line by line | `FILL` | `FILL` | `PASS/FAIL` |
 | Scheduler/background task safety | `FILL` | `FILL` | `FILL` |
 | Stable-to-gray control mutation visibility | `FILL` | `FILL` | `PASS/FREEZE` |
 | Gray-to-stable control mutation visibility | `FILL` | `FILL` | `PASS/FREEZE` |
 | Same-batch acct deployment/service/quota/model/request snapshot | `FILL` | `FILL` | `FILL` |
-| 30402 bypass inventory and classification | `FILL` | `FILL` | `FILL` |
+| 30402 bypass inventory and classification | `scripts/collect-bypass-inventory.sh --output <run-dir>/bypass-raw.txt` (read-only) | `docs/bypass-consumer-disposition.md` | 2026-09-13 rehearsed: 3 live consumers (2×A-write, 1×B-read); **re-scan on the day and diff against §1 line by line** |
 
 Each callback record must contain import/behavior PASS, probe digest, image
 digest, config digest, and timestamp. Each API smoke record must contain a
@@ -226,6 +248,10 @@ Convergence gates
 | Prod rendered manifest and all target digests frozen | `FILL` | `FILL` | `FILL` |
 | `check-release-deletion-set.py` PASS for `litellm-product-proxy` (live manifest vs frozen target render) | `FILL` | `FILL` | `PASS/FAIL` |
 | Every object in the deletion set has a named consumer and disposition; approval file checksum | `FILL` | `FILL` | `FILL` |
+| `check-pod-spec-shape.py` PASS for `litellm-proxy` (live `kubectl get deploy -o yaml` vs the same frozen target render — **not** `helm get manifest`) | `FILL` | `FILL` | `PASS/FAIL` |
+| Live ConfigMap capture (`--live-configmaps`, 0600, shredded after the run) supplied, so a content-addressed rename is provably inert instead of demanding 40 identical approvals | `FILL` | `FILL` | `YES/NO` |
+| `inert_by_content` entries spot-checked: each one is a rename of the **same bytes**, and no removed mount appears among them (the tool errors `INTERNAL_MOUNT_REMOVAL_MARKED_INERT` if it ever does) | `FILL` | `FILL` | `PASS/FAIL` |
+| Every removed/swapped volumeMount, volume, lifecycle hook and env name has a named consumer; approval file checksum | `FILL` | `FILL` | `FILL` |
 | `kubectl apply --dry-run=server` and `kubectl diff` run against the prod chart swap, not only the gray render | `FILL` | `FILL` | `PASS/FAIL` |
 | Prod 4/4 target digest and full direct smoke | `FILL` | `FILL` | `FILL` |
 | `gray-convergence-commit.sh` atomically returned all traffic | `FILL` | `FILL` | `FILL` |

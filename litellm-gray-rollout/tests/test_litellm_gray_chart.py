@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import itertools
 import re
 import shutil
 import subprocess
@@ -24,6 +25,32 @@ ACR_PREFIX = "cltx-her-ck-registry-vpc.ap-southeast-1.cr.aliyuncs.com/"
 IDC_REGISTRY_PREFIX = "127.0.0.1:5000/"
 ZERO_DIGEST = "sha256:" + ("0" * 64)
 ONE_DIGEST = "sha256:" + ("1" * 64)
+
+
+def _load_prepare_values():
+    """Import prepare-values.py so the tests reuse its encoder, not a copy of it.
+
+    These helpers used to re-implement the canonical JSON encoding with
+    `ensure_ascii=True`. That is a second implementation of a contract whose
+    entire purpose is to equal Helm's `toRawJson`, and on 2026-09-13 it hid a
+    defect that made the real production values file unrenderable: every fixture
+    here is pure ASCII, so `ensure_ascii` never mattered *in the tests* while
+    30 of prod's 33 callbacks are non-ASCII and could never match. The test
+    suite was green and the artefact could not render. Importing the real
+    encoder removes the place where that drift lived.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "prepare_values_under_test", SCRIPTS / "prepare-values.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+PREPARE_VALUES = _load_prepare_values()
+
 
 def create_secret_metadata(tmp_path: Path, names: list[str] | None = None) -> Path:
     """Create secret metadata file for prepare-values tests.
@@ -151,8 +178,8 @@ def test_metadata_clone_storage_is_bounded_and_pinned_off_production_node():
 
 
 def value_digest(value: object) -> str:
-    rendered = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(rendered.encode()).hexdigest()
+    # prepare-values.py's own encoder; see _load_prepare_values().
+    return PREPARE_VALUES.raw_json_sha256(value)
 
 
 def frozen_scheduler_overrides(
@@ -178,9 +205,14 @@ def frozen_scheduler_overrides(
         f"schedulerSafety.callbacksSha256={callbacks_sha}",
         "--set-string",
         f"schedulerSafety.runtimeSha256={runtime_sha}",
+        # The chart cannot recompute this one (it never sees Secret contents),
+        # it only rejects the placeholder. Any non-placeholder value renders.
+        "--set-string",
+        "schedulerSafety.secretMetadataSha256=sha256:" + ("c" * 64),
         "--set-string",
         "schedulerSafety.sourcePayloadSha256=sha256:" + ("b" * 64),
     ]
+
 
 
 def load_yaml(path: Path):
@@ -211,9 +243,7 @@ def scheduler_evidence(
         for path in sorted(callbacks.iterdir())
         if path.is_file()
     }
-    callback_text = json.dumps(
-        callback_data, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-    )
+    callback_text = PREPARE_VALUES.raw_json(callback_data)
     if runtime_sha256 is None:
         if deployment is None:
             runtime_sha256 = "sha256:" + ("d" * 64)
@@ -248,10 +278,13 @@ def scheduler_evidence(
                 "extraEnv": extra_env,
                 "secretRefs": secret_refs,
             }
-            if secret_metadata is not None:
-                runtime_payload["secretMetadata"] = sorted(
-                    secret_metadata, key=lambda item: item["name"]
-                )
+            # `secret_metadata` deliberately does NOT go in here. The chart's
+            # `litellm-proxy.runtimeChecksum` digests exactly these four keys,
+            # so folding the Secret snapshot in made every real values file
+            # unrenderable (measured 2026-09-13). The snapshot is recorded in
+            # `schedulerSafety.secretMetadataSha256` instead, which the chart
+            # only placeholder-checks. The parameter is kept so callers can
+            # still assert prepare-values consumed the file.
             runtime_sha256 = value_digest(runtime_payload)
     payload = {
         "schema_version": 1,
@@ -259,7 +292,7 @@ def scheduler_evidence(
         "mode": mode,
         "image_digest": image_digest,
         "config_sha256": "sha256:" + hashlib.sha256(config.read_bytes()).hexdigest(),
-        "callbacks_sha256": "sha256:" + hashlib.sha256(callback_text.encode()).hexdigest(),
+        "callbacks_sha256": "sha256:" + hashlib.sha256(callback_text.encode("utf-8")).hexdigest(),
         "runtime_sha256": runtime_sha256,
         "captured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "source": "clone:scheduler-observation",
@@ -269,8 +302,8 @@ def scheduler_evidence(
             "unexpected_control_writes": 0,
         },
     }
-    canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    payload["source_payload_sha256"] = "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+    canonical = PREPARE_VALUES.raw_json(payload)
+    payload["source_payload_sha256"] = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return payload
 
 
@@ -525,6 +558,243 @@ def test_chart_rejects_a_grace_period_below_the_drain_budget(tmp_path: Path):
     assert "prestop" in drifted.stderr.lower()
 
 
+@pytest.mark.skipif(
+    HELM is None or YQ is None, reason="helm and yq are required to render the chart"
+)
+def test_readiness_and_liveness_are_rendered_as_two_independent_schedules():
+    """The two probes must carry their own timings, not one block reused twice.
+
+    The old chart had a single `probes` block that `deployment.yaml` fed to both
+    probes via `toYaml`, so the two schedules were equal by construction and no
+    test could tell the difference -- every fixture in this file was written to
+    satisfy that shape (several still use a `&probe`/`*probe` YAML anchor), which
+    is exactly why the constraint survived until it met a real Deployment.
+    Production runs readiness 60/10/12/5 and liveness 180/30/10/8 (measured
+    2026-09-13): readiness is fast so a sick Pod leaves the Endpoints quickly,
+    liveness is slow so a GC pause or a cold start does not get it killed.
+    Collapsing them again is a real behaviour change to a live probe, so assert
+    on the difference and not only on the values.
+    """
+    values = load_yaml(CHART / "values.yaml")
+    readiness = values["probes"]["readiness"]
+    liveness = values["probes"]["liveness"]
+    assert readiness != liveness, "fixture no longer exercises two distinct schedules"
+
+    documents = render_profile("gray")
+    deployment = find_doc(documents, "Deployment", "litellm-proxy-gray")
+    containers = deployment["spec"]["template"]["spec"]["containers"]
+    container = next(item for item in containers if item["name"] == "litellm")
+
+    fields = ("initialDelaySeconds", "periodSeconds", "failureThreshold", "timeoutSeconds")
+    for probe_key, expected in (
+        ("readinessProbe", readiness),
+        ("livenessProbe", liveness),
+    ):
+        rendered = container[probe_key]
+        assert {key: rendered[key] for key in fields} == {
+            key: expected[key] for key in fields
+        }, probe_key
+
+    assert container["readinessProbe"]["httpGet"]["path"] == "/health/readiness"
+    assert container["livenessProbe"]["httpGet"]["path"] == "/health/liveliness"
+
+
+@pytest.mark.skipif(HELM is None, reason="helm is not installed")
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # The pre-split flat shape. Its keys land directly under `probes`, where
+        # `additionalProperties: false` catches them.
+        {
+            "probes": {
+                "initialDelaySeconds": 90,
+                "periodSeconds": 15,
+                "failureThreshold": 5,
+                "timeoutSeconds": 15,
+            }
+        },
+        # A whole schedule removed. `null` is the only way to express "absent":
+        # helm merges user values *over* chart defaults, so an override that
+        # simply omits a key inherits it instead of dropping it -- which is also
+        # why the schema's `required` here is a backstop against editing
+        # chart/values.yaml, not against an operator's `--set`.
+        {"probes.liveness": None},
+        # One timing removed. A missing field is not a zero, it is an unreviewed
+        # kubelet default.
+        {"probes.readiness.timeoutSeconds": None},
+    ],
+)
+def test_chart_rejects_probe_timings_that_are_not_two_complete_schedules(overrides: dict):
+    rejected = _render_gray_with_overrides(overrides)
+    assert rejected.returncode != 0
+    assert "probes" in rejected.stderr.lower()
+
+
+# Production's runtime patches are all mount-level, and until 2026-09-13 the
+# chart could not express a single one of them: `additionalSnapshots` mounted
+# whole directories only, `callbacks` hard-coded `/app/<key>`, and the schema
+# forbade `postStart`. The measured prod shape is 40 mounts, 38 of them single
+# files via subPath, 4 of those overwriting files inside `site-packages/`, all
+# loaded by a `postStart` hook. See docs/prepare-values-prod-rehearsal-2026-09-13.md.
+# Measured on litellm-product/litellm-proxy 2026-09-13; the earlier
+# `/usr/lib/python3.13/site-packages` here was a guess, and a fixture whose
+# shape is guessed proves nothing about the artefact's shape.
+SITE_PACKAGES = "/app/.venv/lib/python3.13/site-packages"
+PROD_SHAPE_OVERRIDES = {
+    "callbacks.mountPaths": {"README.txt": f"{SITE_PACKAGES}/sitecustomize.py"},
+    "additionalSnapshots": [
+        {
+            "name": "streaming-handler-patch",
+            "mountPath": f"{SITE_PACKAGES}/litellm/litellm_core_utils/streaming_handler.py",
+            "subPath": "streaming_handler.py",
+            "data": {"streaming_handler.py": "# patched\n"},
+        },
+        {
+            "name": "deepcopy-patch",
+            "mountPath": "/patches",
+            "data": {"patch.py": "# loader\n"},
+        },
+    ],
+    "lifecycle.postStart": {"exec": {"command": ["python3", "/patches/patch.py"]}},
+}
+
+
+@pytest.mark.skipif(HELM is None, reason="helm is not installed")
+def test_chart_expresses_single_file_overlays_and_the_patch_loader():
+    """The three shapes production needs: subPath, a callbacks path, postStart.
+
+    Each one is a distinct silent-failure mode if the chart cannot express it.
+    A whole-directory mount where prod has a single-file subPath replaces the
+    upstream directory instead of one file inside it; a callbacks key forced to
+    `/app/` lands nowhere Python imports from; and a missing `postStart` means
+    every patch is mounted and none is loaded. All three converge, pass the
+    probes, and serve 200 -- which is why `check-pod-spec-shape.py` exists.
+    """
+    documents = render_profile(
+        "gray",
+        *itertools.chain.from_iterable(
+            ("--set-json", f"{key}={json.dumps(value)}")
+            for key, value in PROD_SHAPE_OVERRIDES.items()
+        ),
+    )
+    deployment = find_doc(documents, "Deployment", "litellm-proxy-gray")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    container = next(item for item in pod_spec["containers"] if item["name"] == "litellm")
+    mounts = {
+        (item["mountPath"], item.get("subPath")): item["name"]
+        for item in container["volumeMounts"]
+    }
+
+    # The callbacks key left /app/ entirely, and did not also stay behind.
+    assert mounts[(f"{SITE_PACKAGES}/sitecustomize.py", "README.txt")] == "callbacks"
+    assert ("/app/README.txt", "README.txt") not in mounts
+
+    # A single-file overlay on top of an upstream package file.
+    overlay = f"{SITE_PACKAGES}/litellm/litellm_core_utils/streaming_handler.py"
+    assert mounts[(overlay, "streaming_handler.py")] == "snapshot-streaming-handler-patch"
+
+    # subPath stays optional: a whole-directory snapshot renders without one.
+    assert mounts[("/patches", None)] == "snapshot-deepcopy-patch"
+
+    # postStart is additive -- the preStop drain equality is untouched.
+    assert container["lifecycle"]["postStart"]["exec"]["command"] == [
+        "python3",
+        "/patches/patch.py",
+    ]
+    preStop = container["lifecycle"]["preStop"]["exec"]["command"]
+    assert preStop == ["sh", "-c", f"sleep {load_yaml(CHART / 'values.yaml')['drain']['preStopSeconds']}"]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm is not installed")
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        # A subPath that is not a key in the snapshot does not fail in Kubernetes:
+        # the kubelet mounts an empty path over the target, so the upstream file is
+        # replaced by nothing. That is a silent overlay of an empty file.
+        (
+            {
+                "additionalSnapshots": [
+                    {
+                        "name": "patch",
+                        "mountPath": "/a/b.py",
+                        "subPath": "typo.py",
+                        "data": {"b.py": "x"},
+                    }
+                ]
+            },
+            "subPath typo.py is not a key in its data",
+        ),
+        # An override naming a key callbacks.data does not have is a no-op that
+        # reads exactly like a configured mount.
+        (
+            {"callbacks.mountPaths": {"ghost.py": "/app/ghost.py"}},
+            "callbacks.mountPaths references a key that is not in callbacks.data",
+        ),
+        # Two volumeMounts on one path: the kubelet picks one and says nothing.
+        (
+            {
+                "callbacks.mountPaths": {"README.txt": "/a/b.py"},
+                "additionalSnapshots": [
+                    {
+                        "name": "patch",
+                        "mountPath": "/a/b.py",
+                        "subPath": "b.py",
+                        "data": {"b.py": "x"},
+                    }
+                ],
+            },
+            "duplicate additionalSnapshots mountPath: /a/b.py",
+        ),
+        # The per-key override is a new way to reach config.yaml, so the existing
+        # conflict check has to cover it too.
+        (
+            {"callbacks.mountPaths": {"README.txt": "/app/config.yaml"}},
+            "callbacks mountPath collides with config",
+        ),
+        # A relative path silently resolves against the container's workdir.
+        (
+            {"callbacks.mountPaths": {"README.txt": "relative/path"}},
+            "/callbacks/mountPaths/README.txt",
+        ),
+        # subPath is one key, never a nested path: `..` in a subPath escapes the
+        # volume, and a slash cannot match the flat ConfigMap key namespace.
+        (
+            {
+                "additionalSnapshots": [
+                    {
+                        "name": "patch",
+                        "mountPath": "/a/b.py",
+                        "subPath": "../../etc/b.py",
+                        "data": {"../../etc/b.py": "x"},
+                    }
+                ]
+            },
+            "/additionalSnapshots/0/subPath",
+        ),
+        # Allowing postStart must not soften the preStop equality with the drain.
+        (
+            {
+                "lifecycle.postStart": {"exec": {"command": ["python3", "/patches/patch.py"]}},
+                "lifecycle.preStop": {"exec": {"command": ["sh", "-c", "sleep 5"]}},
+            },
+            "lifecycle.preStop.exec.command must be exactly",
+        ),
+        # postStart carries the same exec-only shape as preStop; nothing else.
+        (
+            {"lifecycle.postStart": {"httpGet": {"path": "/load", "port": 4000}}},
+            "/lifecycle/postStart",
+        ),
+    ],
+)
+def test_chart_rejects_mount_shapes_that_would_silently_overlay_nothing(
+    overrides: dict, expected: str
+):
+    rejected = _render_gray_with_overrides(overrides)
+    assert rejected.returncode != 0, overrides
+    assert expected in rejected.stderr, rejected.stderr
+
+
 def test_chart_and_rollout_artifact_set_is_complete():
     expected = {
         CHART / "Chart.yaml",
@@ -616,6 +886,11 @@ def test_values_schema_rejects_public_or_tag_only_images_and_unknown_fields():
         "configSha256",
         "callbacksSha256",
         "runtimeSha256",
+        # The chart cannot recompute this one -- it never sees Secret contents --
+        # so it only rejects the placeholder. It is still required: dropping it
+        # would make `--secret-metadata` decorative and unbind the frozen values
+        # from the Secret revision they were audited against.
+        "secretMetadataSha256",
         "sourcePayloadSha256",
         "capturedAt",
         "source",
@@ -720,16 +995,16 @@ spec:
             limits: {cpu: '2', memory: 4Gi}
           livenessProbe:
             httpGet: {path: /health/liveliness, port: 4000}
-            initialDelaySeconds: 90
-            periodSeconds: 15
-            failureThreshold: 5
-            timeoutSeconds: 15
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 10
+            timeoutSeconds: 8
           readinessProbe:
             httpGet: {path: /health/readiness, port: 4000}
-            initialDelaySeconds: 90
-            periodSeconds: 15
-            failureThreshold: 5
-            timeoutSeconds: 15
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 12
+            timeoutSeconds: 5
           lifecycle:
             preStop:
               exec:
@@ -777,7 +1052,16 @@ spec:
     assert values["artifactTemplate"] is False
     assert values["allowTemplateRender"] is False
     assert values["image"]["digest"] == "sha256:" + ("a" * 64)
-    assert values["callbacks"]["data"] == {"smoke.py": "def callback():\n    return True\n"}
+    # `README.txt: null` is a tombstone, not content: Helm merges user values *over*
+    # chart defaults additively, so a key that exists only in chart/values.yaml would
+    # otherwise ride into the render alongside the frozen set. prepare-values emits an
+    # explicit null for every chart default it did not freeze, which is how Helm is
+    # told to delete it. Assert it by name -- if it silently disappeared, the chart
+    # default would silently come back.
+    assert values["callbacks"]["data"] == {
+        "smoke.py": "def callback():\n    return True\n",
+        "README.txt": None,
+    }
     assert values["extraEnv"][0]["valueFrom"]["secretKeyRef"]["name"] == "chatgpt-pool-master-key"
     assert values["schedulerSafety"]["mode"] == "disabled"
     # The NodePort path must survive the default-deny posture: kube-proxy shows
@@ -809,6 +1093,132 @@ spec:
     )
     assert rejected.returncode != 0
     assert "placeholder" in rejected.stderr.lower()
+
+
+def _prepare_values_with_probes(
+    tmp_path: Path, readiness: str, liveness: str
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run prepare-values.py against a Deployment carrying the given probe blocks."""
+    config = tmp_path / "config.yaml"
+    config.write_text("model_list: []\n", encoding="utf-8")
+    callbacks = tmp_path / "callbacks"
+    callbacks.mkdir()
+    (callbacks / "smoke.py").write_text("def callback():\n    return True\n", encoding="utf-8")
+    deployment = tmp_path / "deployment.yaml"
+    deployment.write_text(
+        f"""apiVersion: apps/v1
+kind: Deployment
+metadata: {{name: litellm-proxy}}
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 600
+      containers:
+        - name: litellm
+          envFrom: [{{secretRef: {{name: litellm-secrets}}}}]
+          resources: {{requests: {{cpu: 200m, memory: 1Gi}}, limits: {{cpu: '2', memory: 4Gi}}}}
+          readinessProbe: {readiness}
+          livenessProbe: {liveness}
+          lifecycle: {{preStop: {{exec: {{command: [sh, -c, sleep 15]}}}}}}
+""",
+        encoding="utf-8",
+    )
+    secret_metadata_file = create_secret_metadata(tmp_path, names=["litellm-secrets"])
+    secret_metadata = json.loads(secret_metadata_file.read_text(encoding="utf-8"))
+    scheduler = tmp_path / "scheduler.json"
+    scheduler.write_text(
+        json.dumps(
+            scheduler_evidence(
+                config, callbacks, deployment=deployment, secret_metadata=secret_metadata
+            )
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "run" / "values.yaml"
+    result = subprocess.run(
+        [
+            "python3",
+            str(ROOT / "litellm-gray-rollout" / "scripts" / "prepare-values.py"),
+            "--ingress-cidr",
+            "10.42.0.0/32",
+            "--profile",
+            str(ROLLOUT / "values-gray.yaml"),
+            "--repository",
+            IDC_REGISTRY_PREFIX + "litellm-carher",
+            "--digest",
+            "sha256:" + ("a" * 64),
+            "--config",
+            str(config),
+            "--callbacks-dir",
+            str(callbacks),
+            "--deployment",
+            str(deployment),
+            "--scheduler-evidence",
+            str(scheduler),
+            "--secret-metadata",
+            str(secret_metadata_file),
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, output
+
+
+# Production's real timings, measured 2026-09-13 on litellm-product/litellm-proxy.
+PROD_READINESS = "{httpGet: {path: /health/readiness, port: 4000}, initialDelaySeconds: 60, periodSeconds: 10, failureThreshold: 12, timeoutSeconds: 5}"
+PROD_LIVENESS = "{httpGet: {path: /health/liveliness, port: 4000}, initialDelaySeconds: 180, periodSeconds: 30, failureThreshold: 10, timeoutSeconds: 8}"
+
+
+def test_prepare_values_freezes_readiness_and_liveness_separately(tmp_path: Path) -> None:
+    """A real Deployment has two different schedules; freeze both, change neither.
+
+    The earlier gate required the two to be equal and so rejected the live
+    Deployment outright. Every other fixture in this file happens to set them
+    equal, which is why the suite was green while the gate could not have run on
+    the day. These are the measured production numbers.
+    """
+    result, output = _prepare_values_with_probes(tmp_path, PROD_READINESS, PROD_LIVENESS)
+    assert result.returncode == 0, result.stderr
+    values = load_yaml(output)
+    assert values["probes"] == {
+        "readiness": {
+            "initialDelaySeconds": 60,
+            "periodSeconds": 10,
+            "failureThreshold": 12,
+            "timeoutSeconds": 5,
+        },
+        "liveness": {
+            "initialDelaySeconds": 180,
+            "periodSeconds": 30,
+            "failureThreshold": 10,
+            "timeoutSeconds": 8,
+        },
+    }
+    # Only the timings are frozen; the probe endpoints stay the chart's business.
+    assert "httpGet" not in values["probes"]["readiness"]
+
+
+@pytest.mark.parametrize(
+    ("readiness", "liveness", "label"),
+    [
+        (
+            "{httpGet: {path: /health/readiness, port: 4000}, initialDelaySeconds: 60, periodSeconds: 10, failureThreshold: 12}",
+            PROD_LIVENESS,
+            "readiness",
+        ),
+        (PROD_READINESS, "{httpGet: {path: /health/liveliness, port: 4000}}", "liveness"),
+    ],
+)
+def test_prepare_values_rejects_a_probe_missing_its_timings(
+    tmp_path: Path, readiness: str, liveness: str, label: str
+) -> None:
+    """An absent timing is a kubelet default nobody reviewed, not a zero."""
+    result, _ = _prepare_values_with_probes(tmp_path, readiness, liveness)
+    assert result.returncode != 0
+    assert f"deployment {label} probe is missing timing fields" in result.stderr
 
 
 def test_prepare_values_preserves_config_map_key_ref_environment(tmp_path: Path) -> None:
@@ -1980,6 +2390,10 @@ def test_chart_rejects_scheduler_role_mismatch(tmp_path: Path, profile: str, ena
                 "secretRefs": values["secretRefs"],
             }
         ),
+        # Not a placeholder, or the Secret-snapshot fuse fires first and this test
+        # reads green on the wrong error. It exists to assert the
+        # `backgroundTasks.enabled` mismatch specifically.
+        "secretMetadataSha256": "sha256:" + ("c" * 64),
         "sourcePayloadSha256": "sha256:" + ("b" * 64),
         "capturedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "source": "clone:scheduler-observation",

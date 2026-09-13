@@ -99,6 +99,36 @@ def regex_can_match_product(value: str) -> bool:
     return any(token in compact for token in product_tokens)
 
 
+def is_redirect_only(body: str) -> bool:
+    """True for a /pro location that unconditionally redirects and never proxies.
+
+    Such a location cannot reach the product upstream, so it cannot bypass
+    convergence/bridge overrides — the entire reason the other /pro locations
+    must be managed.  Requiring a marker here would be actively harmful, not
+    merely redundant: the marker expands to `access_log ... litellm_gray`, so
+    every instant 301 would enter the gray metric sample as a record with
+    status=301 and rt=`-`.  `collect-metrics.py` turns every matching line into
+    a sample, so those 301s would dilute the 5xx denominator and drag p95/p99
+    down — both directions push the gate toward **false green**.
+
+    Deliberately narrow, because a wrong `True` here silently un-manages a real
+    proxy path:
+      - any proxy/dispatch directive disqualifies (it can reach an upstream);
+      - any nested block disqualifies, because a `return` inside `if {}` is
+        conditional and the fallthrough path may still proxy.
+    Live 198 hits exactly two of these: `= /pro` and `= /pro/ui`, both
+    one-liner `{ return 301 ...; }`.
+    """
+    masked = syntax_mask(body)
+    if any(token in masked for token in ("proxy_pass", "try_files", "fastcgi_pass",
+                                         "uwsgi_pass", "scgi_pass", "grpc_pass",
+                                         "error_page")):
+        return False
+    if "{" in masked:
+        return False
+    return re.search(r"\breturn\s+30[12]\b", masked) is not None
+
+
 def validate_product_locations(base: str) -> None:
     blocks = location_blocks(base)
     marker_count = base.count(PROXY_MARKER)
@@ -122,6 +152,15 @@ def validate_product_locations(base: str) -> None:
         if not is_literal_product and not is_regex_product:
             if markers:
                 fail("product proxy marker must be inside a literal /pro location")
+            continue
+        if is_redirect_only(body):
+            # Exempt, but not a free pass: a marker here would still emit the
+            # gray access_log into a non-upstream path and poison the sample.
+            if markers:
+                fail(
+                    "redirect-only /pro location must not carry the product proxy "
+                    f"marker (its 301s would enter the gray metric sample): {header}"
+                )
             continue
         if markers != 1:
             fail(f"unmanaged /pro location: {header}")

@@ -13,6 +13,30 @@ The fixture renderer is not a production installer. For each rollout run:
    A regex shared by product and another prefix (for example `dev|pro`) must
    be split first; replacing it wholesale would route the other environment
    through the product state machine.
+
+   **Exception — redirect-only locations.** A `/pro` location whose body is an
+   unconditional `return 30[12]` with no `proxy_pass`/`try_files`/`*_pass`/
+   `error_page` and no nested block cannot reach the product upstream, so it
+   cannot bypass convergence/bridge overrides. The renderer exempts it, and
+   **rejects** it if it carries a marker anyway: the marker expands to
+   `access_log … litellm_gray`, and `collect-metrics.py` turns every matching
+   line into a sample, so instant 301s would land in `uri_class=other` — they
+   dilute the 5xx denominator *and* drag p95/p99 down. Both directions bias the
+   gate toward false green. A `return` inside `if {}` is **not** exempt; the
+   fallthrough path may still proxy.
+
+   Measured on 198 (2026-09-13, `sites-enabled/cc.auto-link.com.cn.conf`), by
+   running the renderer's own `location_blocks`/`parse_location_header`/
+   `is_redirect_only` against the live file:
+
+   | | count |
+   |---|---:|
+   | locations that can match `/pro` | 9 |
+   | of which redirect-only (`= /pro`, `= /pro/ui`) — **exempt** | 2 |
+   | **product proxy markers the base template must carry** | **7** |
+   | literal `/pro/` catch-all (renderer requires exactly 1) | 1 |
+
+   Re-run that probe on the day; the live config changes.
 3. Review and checksum that base template. Do not regenerate it from an
    unreviewed `nginx -T` during a routing transaction.
 4. Configure `GRAY_RENDER_CMD` to invoke `render-production-nginx.py` with

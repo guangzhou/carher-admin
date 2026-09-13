@@ -242,18 +242,58 @@ litellm-gray-rollout/scripts/gray-phase.sh verify
 values 模板中的 digest、Secret 和配置快照必须先由 `prepare-values.py` 生成到
 root-only run 目录，再执行 Helm。`prepare-values.py` 还要求 `--ingress-cidr`：
 宿主 nginx 走 NodePort，kube-proxy 把源地址呈现为**节点地址**，只有 selector
-的 NetworkPolicy 会把真实流量黑洞掉。每个节点写一条，`/24` 或更窄，禁 `0.0.0.0/0`：
+的 NetworkPolicy 会把真实流量黑洞掉。`/24` 或更窄，禁 `0.0.0.0/0`。
+
+⚠️ **写一条 per 转发路径，不是 per 节点**，而且**不是节点的业务 IP**。2026-09-13
+实测（`docs/nodeport-source-cidr-evidence.md`）：pod 侧看到的源地址跨节点是 198 的
+`flannel.1`、同节点是 198 的 `cni0`，`10.68.13.198` **一次都没出现过**；
+连 188 跨机打进来也被换成同一个 flannel 地址。填 `10.68.13.198/32` = 全站黑洞。
 
 ```bash
+# ① 先产调度器证据（15 分钟有效期，所以这一步就在窗口里跑）。
+#    三个 observations 计数**必须自己量过**再填：没量过的 0 读起来是干净的绿，
+#    比没有证据更糟。--source 记下是直连生产控制面（direct:）还是 qualification
+#    clone（clone:）量的。
+#    摘要不用手算也**不许手算**：本脚本转调 prepare-values.py --emit-bindings，
+#    余下参数原样透传给它（所以下面 prepare-values 的参数在这里也要写一遍）。
+litellm-gray-rollout/scripts/collect-scheduler-evidence.py \
+  --mode disabled \
+  --source 'direct:<HOW-MEASURED>' \
+  --duplicate-scheduler-runs 0 \
+  --duplicate-background-jobs 0 \
+  --unexpected-control-writes 0 \
+  --evidence-output /root/litellm-gray-run/gray-scheduler-evidence.json \
+  --profile litellm-gray-rollout/k8s/values-gray.yaml \
+  --ingress-cidr '10.42.0.0/32' --ingress-cidr '10.42.0.1/32' \
+  ...
+
+# ② 再冻结 values。--scheduler-evidence 不能省略。
 litellm-gray-rollout/scripts/prepare-values.py \
   --profile litellm-gray-rollout/k8s/values-gray.yaml \
-  --ingress-cidr '<NODE-A-IP>/32' --ingress-cidr '<NODE-B-IP>/32' \
+  --ingress-cidr '10.42.0.0/32' \
+  --ingress-cidr '10.42.0.1/32' \
+  --scheduler-evidence /root/litellm-gray-run/gray-scheduler-evidence.json \
   ... \
   --output /root/litellm-gray-run/gray-values.yaml
 ```
 
+> `--mode`：prod release 填 `primary`（它拥有 scheduler），gray 与 guarded-old
+> 填 `disabled`（绝不能第二次跑起来）。脚本会和 profile 对账，填反直接红。
+> 证据文件**拒绝覆盖**：陈旧证据悄悄变成新鲜证据正是这道闸门要防的，
+> 重跑请先改文件名。
+
+> 这两个值**执行当天必须重取**（集群重建后 flannel 的 `/32` 会变）：
+> `ip -4 -o addr show dev flannel.1; ip -4 -o addr show dev cni0`。
+
+⚠️ **frozen values 本身不能提前生成**：`prepare-values.py` 的
+`MAX_SCHEDULER_EVIDENCE_AGE = timedelta(minutes=15)` 让 evidence 15 分钟就过期
+（设计如此，防陈旧 values 偷渡漂移的 schema）。窗口前能定死的只有上面这两个 CIDR。
+
 策略生效后、接真实流量前必须做完 §0.2 第 10 条的两条实测（阳性 + 证伪腿），
 并把 Pod 侧实际看到的源地址回写执行单。
+⚠️ 证伪腿**不能拿 188 当"未声明源"**——它经 NodePort 进来后同样被 SNAT 成
+`10.42.0.0`，属于已声明，会读出假绿；要在 pod 网络里找一个客户端直连
+`10.42.x.y:4000`。
 
 ```bash
 CHART=/root/litellm-gray-run/litellm-gray-rollout-<VERSION>.tgz
@@ -453,6 +493,29 @@ litellm-gray-rollout/scripts/check-release-deletion-set.py \
   --run-id "$GRAY_RUN_ID" --generation "$GRAY_GENERATION" \
   --approval /root/litellm-gray-run/prod-deletion-approval.json \
   --output /root/litellm-gray-run/prod-deletion-set.json
+#    再过 Pod spec 形状 gate：删除集看的是对象，补丁活在 Pod spec 内部（40 个
+#    volumeMount / 38 个 subPath 单文件覆盖 / postStart）。这些 ConfigMap 一个都不删，
+#    所以删除集绿、rollout status 绿、/health 200 探针也绿，而补丁全部静默失效。
+#    live 一侧必须是 kubectl 读的活对象，不是 helm get manifest（后者会跟 set image
+#    造成的漂移对不上，喂错就是拿目标跟自己比）。
+kubectl -n litellm-product get deploy litellm-proxy -o yaml \
+  > /root/litellm-gray-run/prod-live-deployment.yaml
+#    ConfigMap 快照是为了摘要「挂载进去的字节」：chart 的 CM 名字是内容寻址的
+#    （<release>-<snapshot>-<checksum>），现网是手写的，所以同一份字节会换名字出现，
+#    不喂快照时 40 条挂载会全部读成 changed，审批退化成 40 行「同一份字节」橡皮章。
+#    不喂 = 什么都不 inert（工具行为退回旧版），只是审批会很长；喂错（例如喂渲染出来的
+#    CM）会硬红 LIVE_CONFIGMAPS_ARE_NOT_LIVE_OBJECTS。0600、用完即删；输出只有 sha256。
+umask 077 && kubectl -n litellm-product get configmap -o yaml \
+  > /root/litellm-gray-run/prod-live-configmaps.yaml
+litellm-gray-rollout/scripts/check-pod-spec-shape.py \
+  --live /root/litellm-gray-run/prod-live-deployment.yaml \
+  --target /root/litellm-gray-run/prod-target-manifest.yaml \
+  --live-configmaps /root/litellm-gray-run/prod-live-configmaps.yaml \
+  --name litellm-proxy --namespace litellm-product \
+  --run-id "$GRAY_RUN_ID" --generation "$GRAY_GENERATION" \
+  --approval /root/litellm-gray-run/prod-pod-spec-approval.json \
+  --output /root/litellm-gray-run/prod-pod-spec-shape.json
+shred -u /root/litellm-gray-run/prod-live-configmaps.yaml
 kubectl apply --dry-run=server -f /root/litellm-gray-run/prod-target-manifest.yaml
 if kubectl diff -f /root/litellm-gray-run/prod-target-manifest.yaml; then rc=0; else rc=$?; fi
 [ "$rc" -le 1 ] || { echo "FATAL: kubectl diff error rc=$rc"; exit 1; }

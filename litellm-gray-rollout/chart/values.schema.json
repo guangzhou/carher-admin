@@ -236,6 +236,13 @@
           "propertyNames": {
             "pattern": "^[A-Za-z0-9._-]+$"
           }
+        },
+        "mountPaths": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "pattern": "^/[^[:cntrl:]]+$"},
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9._-]+$"
+          }
         }
       }
     },
@@ -255,6 +262,11 @@
           "mountPath": {
             "type": "string",
             "pattern": "^/[^[:cntrl:]]+$"
+          },
+          "subPath": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._-]+$"
           },
           "data": {
             "type": "object",
@@ -299,6 +311,7 @@
         "configSha256",
         "callbacksSha256",
         "runtimeSha256",
+        "secretMetadataSha256",
         "sourcePayloadSha256",
         "capturedAt",
         "source"
@@ -321,6 +334,10 @@
           "pattern": "^sha256:[a-f0-9]{64}$"
         },
         "runtimeSha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "secretMetadataSha256": {
           "type": "string",
           "pattern": "^sha256:[a-f0-9]{64}$"
         },
@@ -379,25 +396,8 @@
       "additionalProperties": false,
       "required": ["preStop"],
       "properties": {
-        "preStop": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["exec"],
-          "properties": {
-            "exec": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["command"],
-              "properties": {
-                "command": {
-                  "type": "array",
-                  "minItems": 1,
-                  "items": {"type": "string", "minLength": 1}
-                }
-              }
-            }
-          }
-        }
+        "preStop": {"$ref": "#/$defs/execHook"},
+        "postStart": {"$ref": "#/$defs/execHook"}
       }
     },
     "extraEnv": {
@@ -564,6 +564,17 @@
     "probes": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["readiness", "liveness"],
+      "properties": {
+        "readiness": {"$ref": "#/$defs/probeTiming"},
+        "liveness": {"$ref": "#/$defs/probeTiming"}
+      }
+    }
+  },
+  "$defs": {
+    "probeTiming": {
+      "type": "object",
+      "additionalProperties": false,
       "required": [
         "initialDelaySeconds",
         "periodSeconds",
@@ -575,6 +586,25 @@
         "periodSeconds": {"type": "integer", "minimum": 1},
         "failureThreshold": {"type": "integer", "minimum": 1},
         "timeoutSeconds": {"type": "integer", "minimum": 1}
+      }
+    },
+    "execHook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exec"],
+      "properties": {
+        "exec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["command"],
+          "properties": {
+            "command": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1}
+            }
+          }
+        }
       }
     }
   }

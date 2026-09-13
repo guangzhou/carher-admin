@@ -7,6 +7,7 @@ import copy
 import hashlib
 import subprocess
 import sys
+import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -50,15 +51,35 @@ def run_tool(name: str, payload: object) -> tuple[subprocess.CompletedProcess[st
     return result, output
 
 
+def _load_prepare_values():
+    """Reuse prepare-values.py's encoder instead of keeping a copy of it here.
+
+    A contract whose whole purpose is to equal Helm's `toRawJson` must have
+    exactly one implementation. The copy that used to live here hard-coded
+    `ensure_ascii=True`, which is invisible against ASCII-only fixtures and
+    unconditionally fatal against production content (30 of prod's 33 callbacks
+    are non-ASCII). See docs/prepare-values-prod-rehearsal-2026-09-13.md §6.2.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "prepare_values_for_audit_tests", TOOLS / "prepare-values.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_PREPARE_VALUES = _load_prepare_values()
+
+
 def _payload_digest(payload: dict) -> str:
     canonical = {key: value for key, value in payload.items() if key != "evidence"}
-    rendered = json.dumps(canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(rendered.encode()).hexdigest()
+    return _PREPARE_VALUES.raw_json_sha256(canonical)
 
 
 def _value_digest(value: object) -> str:
-    rendered = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(rendered.encode()).hexdigest()
+    return _PREPARE_VALUES.raw_json_sha256(value)
 
 
 def _refresh_runtime_sources(payload: dict) -> None:
@@ -1265,12 +1286,16 @@ spec:
           envFrom:
             - secretRef: {{name: litellm-secrets}}
           resources: {{}}
-          readinessProbe: &probe
-            initialDelaySeconds: 90
-            periodSeconds: 15
-            failureThreshold: 5
-            timeoutSeconds: 15
-          livenessProbe: *probe
+          readinessProbe:
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 12
+            timeoutSeconds: 5
+          livenessProbe:
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 10
+            timeoutSeconds: 8
           lifecycle:
             preStop:
               exec:
@@ -1281,9 +1306,7 @@ spec:
     config_sha = "sha256:" + hashlib.sha256(config.read_bytes()).hexdigest()
     scheduler = tmp_path / "scheduler.json"
     callback_data = {"smoke.py": (callbacks / "smoke.py").read_text(encoding="utf-8")}
-    callback_text = json.dumps(
-        callback_data, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-    )
+    callback_text = _PREPARE_VALUES.raw_json(callback_data)
     extra_env = [
         {
             "name": "ROUTER_MODE",
@@ -1294,23 +1317,28 @@ spec:
             ),
         }
     ]
+    # Exactly the four keys the chart's `litellm-proxy.runtimeChecksum` digests.
+    # The Secret snapshot used to be folded in here too, which made every real
+    # values file unrenderable; it now travels as its own recorded field,
+    # `schedulerSafety.secretMetadataSha256`, which the chart only
+    # placeholder-checks because it never sees Secret contents.
     runtime_payload = {
         "args": ["--config", "/app/config.yaml"],
         "command": ["/app/docker/prod_entrypoint.sh"],
         "extraEnv": extra_env,
         "secretRefs": ["litellm-secrets"],
-        "secretMetadata": [{
-            "name": "litellm-secrets", "uid": "secret-uid-1",
-            "resource_version": "123", "data_sha256": "sha256:" + "e" * 64,
-        }],
     }
+    secret_metadata_payload = [{
+        "name": "litellm-secrets", "uid": "secret-uid-1",
+        "resource_version": "123", "data_sha256": "sha256:" + "e" * 64,
+    }]
     scheduler_payload = {
         "schema_version": 1,
         "profile": "gray",
         "mode": "disabled",
         "image_digest": "sha256:" + "a" * 64,
         "config_sha256": config_sha,
-        "callbacks_sha256": "sha256:" + hashlib.sha256(callback_text.encode()).hexdigest(),
+        "callbacks_sha256": "sha256:" + hashlib.sha256(callback_text.encode("utf-8")).hexdigest(),
         "runtime_sha256": _value_digest(runtime_payload),
         "captured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "source": "clone:scheduler-observation",
@@ -1323,7 +1351,7 @@ spec:
     scheduler_payload["source_payload_sha256"] = _value_digest(scheduler_payload)
     scheduler.write_text(json.dumps(scheduler_payload), encoding="utf-8")
     secret_metadata = tmp_path / "secret-metadata.json"
-    secret_metadata.write_text(json.dumps(runtime_payload["secretMetadata"]), encoding="utf-8")
+    secret_metadata.write_text(json.dumps(secret_metadata_payload), encoding="utf-8")
     output = tmp_path / "run" / "values.yaml"
     command = [
         sys.executable,
@@ -1687,6 +1715,501 @@ def test_release_deletion_set_reports_additions_without_failing(tmp_path: Path):
         "networking.k8s.io/NetworkPolicy/litellm-product/litellm-proxy-ingress"
     ]
     assert payload["deleted"] == []
+
+
+POD_SPEC_LIVE = """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-proxy
+  namespace: litellm-product
+  uid: 11111111-2222-3333-4444-555555555555
+  resourceVersion: "987654"
+  annotations:
+    deployment.kubernetes.io/revision: "42"
+spec:
+  template:
+    spec:
+      volumes:
+        - name: config
+          configMap: {name: litellm-config}
+        - name: callbacks
+          configMap: {name: litellm-callbacks}
+        - name: streaming-handler-patch
+          configMap: {name: litellm-streaming-handler-patch}
+        - name: deepcopy-patch
+          configMap: {name: litellm-deepcopy-patch}
+      containers:
+        - name: litellm
+          command: [/app/docker/prod_entrypoint.sh]
+          args: [--config, /app/config.yaml]
+          env:
+            - name: STORE_PROMPTS_IN_SPEND_LOGS
+              value: "True"
+          envFrom:
+            - secretRef: {name: litellm-secrets}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: callbacks
+              mountPath: /app/budget_notice.py
+              subPath: budget_notice.py
+            - name: streaming-handler-patch
+              mountPath: /app/.venv/lib/python3.13/site-packages/litellm/litellm_core_utils/streaming_handler.py
+              subPath: streaming_handler.py
+            - name: deepcopy-patch
+              mountPath: /patches
+          lifecycle:
+            postStart:
+              exec:
+                command: [python3, /patches/patch.py]
+status:
+  readyReplicas: 4
+"""
+
+# The chart render: same object, same name, converges fine, health checks pass --
+# and every single-file overlay is gone.
+POD_SPEC_TARGET = """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-proxy
+  namespace: litellm-product
+spec:
+  template:
+    spec:
+      volumes:
+        - name: config
+          configMap: {name: litellm-product-proxy-config-fcc2a2ad}
+        - name: callbacks
+          configMap: {name: litellm-product-proxy-callbacks-e718bd18}
+      containers:
+        - name: litellm
+          command: [/app/docker/prod_entrypoint.sh]
+          args: [--config, /app/config.yaml]
+          env:
+            - name: STORE_PROMPTS_IN_SPEND_LOGS
+              value: "True"
+          envFrom:
+            - secretRef: {name: litellm-secrets}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: callbacks
+              mountPath: /app/budget_notice.py
+              subPath: budget_notice.py
+          lifecycle:
+            preStop:
+              exec:
+                command: [sh, -c, sleep 30]
+"""
+
+
+def _pod_spec_shape(
+    tmp_path: Path, *extra: str, live: str = POD_SPEC_LIVE, target: str = POD_SPEC_TARGET
+):
+    live_path = tmp_path / "live.yaml"
+    live_path.write_text(live, encoding="utf-8")
+    target_path = tmp_path / "target.yaml"
+    target_path.write_text(target, encoding="utf-8")
+    command = [
+        sys.executable,
+        str(TOOLS / "check-pod-spec-shape.py"),
+        "--live",
+        str(live_path),
+        "--target",
+        str(target_path),
+        "--name",
+        "litellm-proxy",
+        "--namespace",
+        "litellm-product",
+        "--run-id",
+        "run-1",
+        "--generation",
+        "gen-1",
+        *extra,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    return result, json.loads(result.stdout)
+
+
+def test_pod_spec_shape_catches_the_mount_loss_every_other_gate_reads_green(tmp_path: Path):
+    """The object set is unchanged, the Deployment converges, /health is 200.
+
+    Measured against the real production Deployment on 2026-09-13: 39 mounts
+    removed, 1 swapped, the postStart patch runner gone. The deletion-set gate
+    sees nothing because no ConfigMap is deleted -- they simply stop being
+    mounted.
+    """
+    result, payload = _pod_spec_shape(tmp_path)
+    assert result.returncode == 1
+    assert payload["status"] == "FAIL"
+    assert payload["errors"] == ["UNAPPROVED_SHAPE_CHANGES"]
+
+    assert payload["mount_removals"] == [
+        "container/litellm/mount//app/.venv/lib/python3.13/site-packages/litellm/"
+        "litellm_core_utils/streaming_handler.py/streaming_handler.py",
+        "container/litellm/mount//patches/",
+    ]
+    removed = {entry["item"] for entry in payload["removed"]}
+    assert "container/litellm/lifecycle/postStart" in removed
+    assert "volume/streaming-handler-patch" in removed
+
+    # Same mountPath, different ConfigMap behind it: a silent content swap, which
+    # a present/absent comparison alone would pair up and call unchanged.
+    changed = {entry["item"]: entry for entry in payload["changed"]}
+    swap = changed["container/litellm/mount//app/config.yaml/config.yaml"]
+    assert swap["live"] == "configMap/litellm-config|ro"
+    assert swap["target"] == "configMap/litellm-product-proxy-config-fcc2a2ad|ro"
+
+
+def test_pod_spec_shape_never_reads_an_environment_variable_value(tmp_path: Path):
+    """Only names enter the diff, so an approval file needs no redaction."""
+    live = POD_SPEC_LIVE.replace(
+        '            - name: STORE_PROMPTS_IN_SPEND_LOGS\n              value: "True"\n',
+        '            - name: LITELLM_MASTER_KEY\n              value: "sk-live-must-never-appear"\n',
+    )
+    result, payload = _pod_spec_shape(tmp_path, live=live)
+    assert result.returncode == 1
+    assert "sk-live-must-never-appear" not in result.stdout
+    assert "container/litellm/env/LITELLM_MASTER_KEY" in {
+        entry["item"] for entry in payload["removed"]
+    }
+    assert all(entry["live"] == "set" for entry in payload["removed"]
+               if "/env/" in entry["item"])
+
+
+def test_pod_spec_shape_refuses_to_compare_a_render_against_itself(tmp_path: Path):
+    """Both self-comparisons are false green, so both fail closed.
+
+    `helm get manifest` reports what Helm believes it applied. litellm-proxy is
+    changed with `set image`/`patch` and never `apply`, so the live object can
+    have drifted away from it -- feeding a render as the live side compares the
+    target against itself and passes by construction.
+    """
+    _, render_as_live = _pod_spec_shape(tmp_path, live=POD_SPEC_TARGET)
+    assert render_as_live["status"] == "FAIL"
+    assert "LIVE_SIDE_IS_NOT_A_LIVE_OBJECT" in render_as_live["errors"]
+
+    _, live_as_target = _pod_spec_shape(tmp_path, target=POD_SPEC_LIVE)
+    assert live_as_target["status"] == "FAIL"
+    assert "TARGET_SIDE_IS_NOT_A_RENDER" in live_as_target["errors"]
+    assert live_as_target["counts"]["removed"] == 0  # would have been a clean green
+
+    # A live capture with no volumes at all is a broken capture, not a workload
+    # that stopped mounting things.
+    _, no_volumes = _pod_spec_shape(
+        tmp_path,
+        live="""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-proxy
+  namespace: litellm-product
+  uid: 11111111-2222-3333-4444-555555555555
+spec:
+  template:
+    spec:
+      containers:
+        - name: litellm
+          command: [/app/docker/prod_entrypoint.sh]
+""",
+    )
+    assert "LIVE_SIDE_HAS_NO_VOLUMES" in no_volumes["errors"]
+
+
+def test_pod_spec_shape_requires_a_named_consumer_and_a_matching_diff(tmp_path: Path):
+    _, baseline = _pod_spec_shape(tmp_path)
+    items = sorted(
+        {entry["item"] for entry in baseline["removed"]}
+        | {entry["item"] for entry in baseline["changed"]}
+    )
+    approval = tmp_path / "approval.json"
+
+    def approve(entries: list[dict]) -> list[str]:
+        approval.write_text(json.dumps({"shape_changes": entries}), encoding="utf-8")
+        return ["--approval", str(approval)]
+
+    def entry(item: str, consumer: str = "codex /pro/v1/responses long sessions") -> dict:
+        return {
+            "item": item,
+            "consumer": consumer,
+            "disposition": "re-expressed via additionalSnapshots subPath",
+            "approver": "change-commander",
+        }
+
+    # Every removal approved but one: still red. A gate that only checks "is
+    # there an approval file" is not a gate.
+    _, partial = _pod_spec_shape(tmp_path, *approve([entry(item) for item in items[:-1]]))
+    assert partial["status"] == "FAIL"
+    assert partial["unapproved_shape_changes"] == [items[-1]]
+
+    result, passed = _pod_spec_shape(tmp_path, *approve([entry(item) for item in items]))
+    assert result.returncode == 0
+    assert passed["status"] == "PASS"
+
+    for placeholder in ("unknown", "TBD", "n/a", "  "):
+        _, payload = _pod_spec_shape(
+            tmp_path,
+            *approve([entry(item) for item in items[:-1]] + [entry(items[-1], placeholder)]),
+        )
+        assert payload["status"] == "FAIL", placeholder
+
+    # An approval written against a different render must not silently pass.
+    _, stale = _pod_spec_shape(
+        tmp_path, *approve([entry(item) for item in items] + [entry("volume/does-not-exist")])
+    )
+    assert stale["status"] == "FAIL"
+    assert "APPROVAL_DOES_NOT_MATCH_DIFF" in stale["errors"]
+
+
+# The chart content-addresses its ConfigMaps (`<release>-<snapshot>-<checksum>`)
+# while production names them by hand, so the *same bytes* arrive under a
+# different ConfigMap name. Captured contents let the gate tell that apart from a
+# real content swap; without them every mount reads as changed and the approval
+# file becomes 40 lines of "yes, same bytes" -- a rubber stamp, not a gate.
+CONFIG_BYTES = "model_list: []\n"
+CALLBACK_BYTES = "def notice():\n    return None\n"
+PATCH_BYTES = "# deepcopy patch\n"
+
+LIVE_CONFIGMAPS = f"""apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: litellm-product
+  uid: aaaaaaaa-0000-0000-0000-000000000001
+  resourceVersion: "111"
+data:
+  config.yaml: |
+    {CONFIG_BYTES.strip()}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-callbacks
+  namespace: litellm-product
+  uid: aaaaaaaa-0000-0000-0000-000000000002
+  resourceVersion: "112"
+data:
+  budget_notice.py: |
+{textwrap.indent(CALLBACK_BYTES.rstrip(), " " * 4)}
+"""
+
+TARGET_CONFIGMAPS = f"""apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-product-proxy-config-fcc2a2ad
+  namespace: litellm-product
+data:
+  config.yaml: |
+    {CONFIG_BYTES.strip()}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-product-proxy-callbacks-e718bd18
+  namespace: litellm-product
+data:
+  budget_notice.py: |
+{textwrap.indent(CALLBACK_BYTES.rstrip(), " " * 4)}
+"""
+
+
+def _with_configmaps(tmp_path: Path, live: str, target: str) -> list[str]:
+    live_path = tmp_path / "live-cm.yaml"
+    live_path.write_text(live, encoding="utf-8")
+    target_path = tmp_path / "target-cm.yaml"
+    target_path.write_text(target, encoding="utf-8")
+    return [
+        "--live-configmaps",
+        str(live_path),
+        "--target-configmaps",
+        str(target_path),
+    ]
+
+
+def test_pod_spec_shape_separates_a_content_addressed_rename_from_a_content_swap(
+    tmp_path: Path,
+):
+    """Same bytes under a new ConfigMap name is inert; one changed byte is not.
+
+    Without this the gate is technically correct and practically useless: the
+    chart renames every ConfigMap it owns, so all 40 prod mounts would demand an
+    approval that says nothing, and the real removals would be buried among them.
+    """
+    baseline_unapproved = set(_pod_spec_shape(tmp_path)[1]["unapproved_shape_changes"])
+
+    _, inert = _pod_spec_shape(
+        tmp_path, *_with_configmaps(tmp_path, LIVE_CONFIGMAPS, TARGET_CONFIGMAPS)
+    )
+    config_mount = "container/litellm/mount//app/config.yaml/config.yaml"
+    assert config_mount in set(inert["inert_by_content"])
+    assert "volume/config" in set(inert["inert_by_content"])
+    assert config_mount not in set(inert["unapproved_shape_changes"])
+    # The item still appears in the diff, flagged -- it is excused, not hidden.
+    assert {entry["item"]: entry["inert"] for entry in inert["changed"]}[config_mount] is True
+
+    # And the genuine losses are untouched by any of this.
+    assert set(inert["mount_removals"]) <= set(inert["unapproved_shape_changes"])
+    assert set(inert["unapproved_shape_changes"]) < baseline_unapproved
+
+    # One byte different in the mounted key: back to a change that needs a human.
+    swapped_target = TARGET_CONFIGMAPS.replace("model_list: []", "model_list: [{}]")
+    _, swap = _pod_spec_shape(
+        tmp_path, *_with_configmaps(tmp_path, LIVE_CONFIGMAPS, swapped_target)
+    )
+    assert config_mount not in set(swap["inert_by_content"])
+    assert config_mount in set(swap["unapproved_shape_changes"])
+
+
+def test_pod_spec_shape_refuses_rendered_configmaps_as_the_live_capture(tmp_path: Path):
+    """Feeding the render as the live capture would manufacture content matches.
+
+    This is the nastier twin of LIVE_SIDE_IS_NOT_A_LIVE_OBJECT: a self-comparison
+    here does not just read green, it converts a real content swap into a
+    *proven* inert difference.
+    """
+    _, payload = _pod_spec_shape(
+        tmp_path, *_with_configmaps(tmp_path, TARGET_CONFIGMAPS, TARGET_CONFIGMAPS)
+    )
+    assert payload["status"] == "FAIL"
+    assert "LIVE_CONFIGMAPS_ARE_NOT_LIVE_OBJECTS" in payload["errors"]
+    assert payload["inert_by_content"] == []
+
+    _, reversed_sides = _pod_spec_shape(
+        tmp_path, *_with_configmaps(tmp_path, LIVE_CONFIGMAPS, LIVE_CONFIGMAPS)
+    )
+    assert "TARGET_CONFIGMAPS_ARE_NOT_A_RENDER" in reversed_sides["errors"]
+    assert reversed_sides["inert_by_content"] == []
+
+
+def test_pod_spec_shape_never_excuses_a_removed_mount_by_its_content(tmp_path: Path):
+    """A digest cannot excuse a patch that stopped being mounted at all.
+
+    The ConfigMap still exists with identical content on both sides -- that is
+    exactly the production failure shape, and precisely why content equality is
+    only allowed to excuse a *changed* item, never a removed mount.
+    """
+    patch_cm = f"""---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-deepcopy-patch
+  namespace: litellm-product
+  uid: aaaaaaaa-0000-0000-0000-000000000003
+  resourceVersion: "113"
+data:
+  patch.py: |
+{textwrap.indent(PATCH_BYTES.rstrip(), " " * 4)}
+"""
+    _, payload = _pod_spec_shape(
+        tmp_path,
+        *_with_configmaps(
+            tmp_path,
+            LIVE_CONFIGMAPS + patch_cm,
+            TARGET_CONFIGMAPS + patch_cm.replace("\n  uid: aaaaaaaa-0000-0000-0000-000000000003\n  resourceVersion: \"113\"", ""),
+        ),
+    )
+    assert payload["status"] == "FAIL"
+    assert "container/litellm/mount//patches/" in set(payload["unapproved_shape_changes"])
+    assert "container/litellm/mount//patches/" not in set(payload["inert_by_content"])
+
+
+def test_pod_spec_shape_pairs_a_renamed_volume_only_when_the_pairing_is_unambiguous(
+    tmp_path: Path,
+):
+    """The chart prefixes snapshot volumes, so the volume *name* moves too.
+
+    A rename is excused only on a 1:1 content match. Two removals with the same
+    digest mean the pairing is a guess, and a guess is not evidence.
+    """
+    # The chart's `snapshot-` prefix: same ConfigMap content, new volume name,
+    # same mountPath.
+    target = POD_SPEC_TARGET.replace(
+        """        - name: callbacks
+          configMap: {name: litellm-product-proxy-callbacks-e718bd18}""",
+        """        - name: callbacks
+          configMap: {name: litellm-product-proxy-callbacks-e718bd18}
+        - name: snapshot-deepcopy-patch
+          configMap: {name: litellm-product-proxy-deepcopy-patch-aa11bb22}""",
+    ).replace(
+        """            - name: callbacks
+              mountPath: /app/budget_notice.py
+              subPath: budget_notice.py""",
+        """            - name: callbacks
+              mountPath: /app/budget_notice.py
+              subPath: budget_notice.py
+            - name: snapshot-deepcopy-patch
+              mountPath: /patches""",
+    )
+    live_patch = f"""---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-deepcopy-patch
+  namespace: litellm-product
+  uid: aaaaaaaa-0000-0000-0000-000000000003
+  resourceVersion: "113"
+data:
+  patch.py: |
+{textwrap.indent(PATCH_BYTES.rstrip(), " " * 4)}
+"""
+    target_patch = f"""---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-product-proxy-deepcopy-patch-aa11bb22
+  namespace: litellm-product
+data:
+  patch.py: |
+{textwrap.indent(PATCH_BYTES.rstrip(), " " * 4)}
+"""
+    _, renamed = _pod_spec_shape(
+        tmp_path,
+        target=target,
+        *_with_configmaps(
+            tmp_path, LIVE_CONFIGMAPS + live_patch, TARGET_CONFIGMAPS + target_patch
+        ),
+    )
+    assert renamed["renamed_volumes"] == [
+        {
+            "live": "volume/deepcopy-patch",
+            "target": "volume/snapshot-deepcopy-patch",
+            "content": renamed["renamed_volumes"][0]["content"],
+        }
+    ]
+    assert "volume/deepcopy-patch" in set(renamed["inert_by_content"])
+    assert "volume/deepcopy-patch" not in set(renamed["unapproved_shape_changes"])
+    # The mount itself matched by path and by bytes, so it is not even a change.
+    assert "container/litellm/mount//patches/" not in set(
+        renamed["unapproved_shape_changes"]
+    )
+
+    # Two removed volumes carrying the same bytes: the pairing is a guess.
+    live_twin = POD_SPEC_LIVE.replace(
+        """        - name: deepcopy-patch
+          configMap: {name: litellm-deepcopy-patch}""",
+        """        - name: deepcopy-patch
+          configMap: {name: litellm-deepcopy-patch}
+        - name: deepcopy-patch-twin
+          configMap: {name: litellm-deepcopy-patch-twin}""",
+    )
+    twin_cm = live_patch.replace(
+        "litellm-deepcopy-patch\n", "litellm-deepcopy-patch-twin\n"
+    ).replace("000000000003", "000000000004")
+    _, ambiguous = _pod_spec_shape(
+        tmp_path,
+        live=live_twin,
+        target=target,
+        *_with_configmaps(
+            tmp_path,
+            LIVE_CONFIGMAPS + live_patch + twin_cm,
+            TARGET_CONFIGMAPS + target_patch,
+        ),
+    )
+    assert ambiguous["renamed_volumes"] == []
+    assert "volume/deepcopy-patch" in set(ambiguous["unapproved_shape_changes"])
 
 
 def _heartbeat_ledger(

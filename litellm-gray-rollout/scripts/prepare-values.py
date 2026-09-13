@@ -30,8 +30,23 @@ SENSITIVE_NAME_RE = re.compile(
     re.I,
 )
 INLINE_SECRET_RE = re.compile(
-    r"(?:Bearer\s+\S+|sk-[A-Za-z0-9._~-]{8,}|postgres(?:ql)?://[^\s'\"]+|"
-    r"(?:master_key|api_key|password|token|secret|cookie|database_url|dsn)\s*:\s*(?!os\.environ/)[^\s{}\[\],]+)",
+    r"Bearer[ \t]+(?P<bearer>[A-Za-z0-9._~+/-]{8,}=*)"
+    r"|(?P<sk>sk-[A-Za-z0-9._~-]{8,})"
+    r"|(?P<dsn>postgres(?:ql)?://[^\s'\"]+)"
+    r"|(?:master_key|api_key|password|token|secret|cookie|database_url|dsn)"
+    r"[ \t]*:[ \t]*(?!os\.environ/)(?![-+0-9][0-9.eE+-]*(?:$|[\s,}\]\)]))"
+    r"(?P<pair>[^\s{}\[\],]{8,})",
+    re.I,
+)
+# A value that literally spells out that it is not a value. Measured against
+# today's prod snapshots (2026-09-13): the tightened pattern above still fires
+# on `cookie: __oailb=<JWT>` (a redaction template in error_sanitize.py) and on
+# four `api_key: dummy-local` entries in config.yaml pointing at no-auth local
+# endpoints. Neither can be "fixed" -- they are prod's actual bytes -- so
+# without this the gate has no disposition path at all and the operator would
+# reach for an override flag, which is worse than the exemption.
+PLACEHOLDER_VALUE_RE = re.compile(
+    r"<[^<>]*>|^(?:dummy|placeholder|changeme|redacted|example|unset|none)[-_.a-z0-9]*$",
     re.I,
 )
 SCHEDULER_EVIDENCE_KEYS = {
@@ -61,6 +76,79 @@ def fail(message: str) -> NoReturn:
     raise SystemExit(f"prepare-values: {message}")
 
 
+def raw_json(value: object) -> str:
+    """Reproduce Helm's `toRawJson` byte-for-byte.
+
+    Any digest this script writes into `schedulerSafety` is re-derived by the
+    chart at render time and compared for equality, so the two encoders have to
+    agree exactly. Go's `json.Marshal` sorts map keys, emits raw UTF-8, adds no
+    trailing newline, and `toRawJson` (unlike `toJson`) does not HTML-escape
+    `<`, `>` or `&`.
+
+    The `ensure_ascii` default is the trap. Measured 2026-09-13 against the real
+    prod callback snapshot: 30 of the 33 callbacks contain non-ASCII bytes, so
+    `ensure_ascii=True` escapes them to `\\uXXXX` and the digest can never equal
+    the chart's -- `helm template` fails unconditionally on the real artefact.
+    Every fixture in the test suite is pure ASCII, which is exactly why 276
+    tests passed while the production values file could not render.
+    """
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def raw_json_sha256(value: object) -> str:
+    return "sha256:" + hashlib.sha256(raw_json(value).encode("utf-8")).hexdigest()
+
+
+PLAIN_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]*$")
+
+
+def is_plain_filesystem_path(value: str) -> bool:
+    """True for an absolute POSIX path that cannot itself be a credential.
+
+    `SENSITIVE_NAME_RE` matches on the variable NAME, which is a proxy, not the
+    thing being protected. Prod's `CHATGPT_TOKEN_DIR` trips it on `_TOKEN_`
+    while holding an absolute directory path — rejecting it is a false positive
+    that would have blocked the run on the day (measured 2026-09-13).
+
+    The exemption is deliberately narrow: leading `/`, and only path-safe
+    characters, so there is no room for a `Bearer …`, an `sk-…`, a DSN, or a
+    URL. The value is still checked against `INLINE_SECRET_RE` first, so this
+    can only ever widen the NAME heuristic, never the value check.
+    """
+    return bool(PLAIN_PATH_RE.fullmatch(value))
+
+
+def find_inline_credential(text: str) -> str | None:
+    """First match that is shaped like a credential and is not a placeholder.
+
+    The old pattern was written for `config.yaml`-shaped key/value config and
+    then applied to 537 KB of Python callbacks and a pricing-heavy config.
+    Measured against today's prod snapshots (2026-09-13) it fired 388 times,
+    every single one a false positive: `token: str` annotations,
+    `input_cost_per_token: 0.0000012`, and `f"Bearer {token}"` where `\\S+`
+    matched the closing quote. A gate that reds 388 times on the real artefact
+    is not a gate -- it trains the operator to route around it.
+
+    Three tightenings, each aimed at one of those shapes: the value must be at
+    least 8 characters (`str`, `int`, `0.0` cannot be credentials), it must not
+    be numeric, and `name:value` no longer spans a newline, so a Python
+    parameter list broken after the colon stops matching the next line. The
+    high-precision alternatives (`sk-`, a Postgres DSN) are untouched.
+    Re-measured after the change: 388 -> 5.
+    """
+    for match in INLINE_SECRET_RE.finditer(text):
+        value = (
+            match.group("bearer")
+            or match.group("sk")
+            or match.group("dsn")
+            or match.group("pair")
+        )
+        if PLACEHOLDER_VALUE_RE.search(value):
+            continue
+        return match.group(0)
+    return None
+
+
 def load_yaml(path: Path) -> dict:
     value = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -79,14 +167,30 @@ def merge_values(base: dict, override: dict) -> dict:
 
 
 def read_text(path: Path, label: str) -> str:
-    text = path.read_text(encoding="utf-8")
+    """Read a snapshot without letting Python rewrite it.
+
+    `Path.read_text()` opens in text mode, so universal-newline translation
+    turns every CRLF into LF. That is a silent content mutation in the one tool
+    whose job is to freeze production bytes exactly.
+
+    Measured 2026-09-13: prod's live `litellm-passthrough-streaming-handler-patch`
+    holds `streaming_handler.py` with CRLF endings (14016 bytes). Read through
+    `read_text()` it came back as 13728 bytes of LF, and the frozen values would
+    have rewritten a file that overlays a site-packages module. Python tolerates
+    either ending, so nothing would have crashed -- it would just no longer be
+    the file that is running.
+    """
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{label} snapshot is not valid UTF-8; the chart can only carry text")
     if not text.strip() or FILL_RE.search(text):
         fail(f"{label} snapshot is empty or contains a placeholder")
     return text
 
 
 def reject_inline_credentials(text: str, label: str) -> None:
-    if INLINE_SECRET_RE.search(text):
+    if find_inline_credential(text) is not None:
         fail(f"{label} contains an inline credential")
 
 
@@ -195,8 +299,18 @@ def freeze_runtime_shape(values: dict, deployment: dict) -> list[str]:
             continue
         if not isinstance(name, str) or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name):
             fail("deployment contains an invalid environment variable name")
+        if set(item) == {"name"}:
+            # A bare `{name: X}` is legal Kubernetes and means the empty string.
+            # Prod carries two of these (UA_ROUTE_KEY_ALIASES,
+            # UA_ROUTE_KEY_PREFIXES). Rejecting them as "unsupported value
+            # source" was a gate gap, not a real finding: the empty string
+            # cannot be a credential, and dropping the variable instead would
+            # silently change the container's environment.
+            item = {"name": name, "value": ""}
         if set(item) == {"name", "value"} and isinstance(item.get("value"), str):
-            if SENSITIVE_NAME_RE.search(name) or INLINE_SECRET_RE.search(item["value"]):
+            if find_inline_credential(item["value"]) is not None:
+                fail(f"environment variable {name} contains an inline credential")
+            if SENSITIVE_NAME_RE.search(name) and not is_plain_filesystem_path(item["value"]):
                 fail(f"environment variable {name} contains an inline credential")
             extra_env.append({"name": name, "value": item["value"]})
             continue
@@ -251,10 +365,229 @@ def freeze_runtime_shape(values: dict, deployment: dict) -> list[str]:
     probe = container.get("readinessProbe", {})
     liveness = container.get("livenessProbe", {})
     fields = ("initialDelaySeconds", "periodSeconds", "failureThreshold", "timeoutSeconds")
-    if any(probe.get(key) != liveness.get(key) for key in fields):
-        fail("readiness and liveness timing must match the chart probe contract")
-    values["probes"] = {key: probe.get(key) for key in fields}
+    # readiness and liveness are two independent schedules, not one. Prod runs
+    # readiness 60/10/12/5 and liveness 180/30/10/8 (measured 2026-09-13);
+    # forcing them equal would have been a real change to a live probe, with no
+    # safety argument behind it — k8s separates them on purpose.
+    for label, source in (("readiness", probe), ("liveness", liveness)):
+        missing = [key for key in fields if not isinstance(source.get(key), int)]
+        if missing:
+            fail(f"deployment {label} probe is missing timing fields: {', '.join(missing)}")
+    values["probes"] = {
+        "readiness": {key: probe[key] for key in fields},
+        "liveness": {key: liveness[key] for key in fields},
+    }
     return secret_refs
+
+
+CONFIG_MOUNT_PATH = "/app/config.yaml"
+CONFIG_SUB_PATH = "config.yaml"
+SNAPSHOT_KEY_RE = re.compile(r"[A-Za-z0-9._-]+")
+SNAPSHOT_NAME_RE = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
+
+
+def read_snapshot_dir(directory: Path, label: str) -> dict[str, str]:
+    if not directory.is_dir():
+        fail(f"{label} snapshot directory does not exist: {directory}")
+    data: dict[str, str] = {}
+    for path in sorted(directory.iterdir()):
+        if path.is_file() and SNAPSHOT_KEY_RE.fullmatch(path.name):
+            text = read_text(path, f"{label} {path.name}")
+            reject_inline_credentials(text, f"{label} {path.name}")
+            data[path.name] = text
+    if not data:
+        fail(f"{label} snapshot directory has no usable files")
+    return data
+
+
+def freeze_mount_shape(
+    values: dict,
+    deployment: dict,
+    snapshot_dirs: dict[str, Path],
+    callbacks_volume: str,
+) -> dict:
+    """Freeze the container's mount shape from the live Deployment.
+
+    The mount list is where prod's capability actually lives -- 40 volumeMounts
+    on 2026-09-13, 38 of them single-file `subPath` overlays, 4 of those landing
+    on top of upstream library files under site-packages. None of the other
+    gates can see it: the deletion-set gate compares objects, `rollout status`
+    and the probes all read green while every runtime patch quietly fails to be
+    mounted at all.
+
+    Content still comes from the audited snapshot directories, never from the
+    live cluster, so nothing unreviewed can be frozen into the values. Only the
+    *shape* -- which key lands on which path, and which volume carries it -- is
+    read off the live object, because transcribing 40 rows by hand is itself a
+    silent-failure mechanism.
+
+    Everything the chart cannot express is a hard failure here rather than a
+    dropped mount: an unmanaged volume source, a volume with no audited
+    snapshot, a `subPath` that is not a key in its data. `readOnly` is not
+    frozen -- the chart always mounts read-only -- but every mount that widens
+    is reported, so it reaches the 2c approval instead of disappearing.
+    """
+    pod_spec, container = main_container(deployment)
+    mounts = container.get("volumeMounts") or []
+    if not isinstance(mounts, list) or not all(isinstance(item, dict) for item in mounts):
+        fail("deployment volumeMounts must be a list of objects")
+    if not mounts:
+        if snapshot_dirs:
+            fail("--snapshot was supplied but the deployment snapshot mounts nothing")
+        return {"mounts": 0, "snapshots": 0, "readonly_widened": []}
+
+    volume_sources: dict[str, str | None] = {}
+    for volume in pod_spec.get("volumes") or []:
+        if not isinstance(volume, dict) or not isinstance(volume.get("name"), str):
+            fail("deployment volumes must be named objects")
+        kinds = sorted(key for key in volume if key != "name")
+        if len(kinds) != 1:
+            fail(f"volume {volume['name']} must declare exactly one source")
+        source = volume[kinds[0]]
+        volume_sources[volume["name"]] = (
+            source.get("name") if kinds[0] == "configMap" and isinstance(source, dict) else None
+        )
+        if volume_sources[volume["name"]] is None:
+            volume_sources[volume["name"]] = f"!{kinds[0]}"
+
+    grouped: dict[str, list[tuple[str, str | None, bool]]] = {}
+    seen_paths: dict[str, str] = {}
+    for mount in mounts:
+        name = mount.get("name")
+        mount_path = mount.get("mountPath")
+        if not isinstance(name, str) or name not in volume_sources:
+            fail(f"volumeMount references an undeclared volume: {name!r}")
+        if not isinstance(mount_path, str) or not mount_path.startswith("/"):
+            fail(f"volumeMount on volume {name} has no absolute mountPath")
+        if mount_path in seen_paths:
+            fail(f"two volumeMounts share mountPath {mount_path}; the kubelet picks one silently")
+        seen_paths[mount_path] = name
+        sub_path = mount.get("subPath")
+        if sub_path is not None and (
+            not isinstance(sub_path, str) or not SNAPSHOT_KEY_RE.fullmatch(sub_path)
+        ):
+            fail(f"volumeMount {mount_path} has an unsupported subPath")
+        grouped.setdefault(name, []).append((mount_path, sub_path, bool(mount.get("readOnly"))))
+
+    config_volume = seen_paths.get(CONFIG_MOUNT_PATH)
+    if config_volume is None:
+        fail(f"deployment snapshot does not mount the LiteLLM config at {CONFIG_MOUNT_PATH}")
+    config_mounts = grouped.pop(config_volume)
+    if len(config_mounts) != 1 or config_mounts[0][1] != CONFIG_SUB_PATH:
+        fail(
+            f"volume {config_volume} must carry exactly one mount: "
+            f"{CONFIG_MOUNT_PATH} subPath {CONFIG_SUB_PATH}"
+        )
+
+    widened = [
+        mount_path
+        for entries in grouped.values()
+        for mount_path, _, read_only in entries
+        if not read_only
+    ]
+
+    callbacks_data = values["callbacks"]["data"]
+    mount_paths: dict[str, str] = {}
+    mounted_callbacks: set[str] = set()
+    for mount_path, sub_path, _ in grouped.pop(callbacks_volume, []):
+        if sub_path is None:
+            fail(
+                f"volume {callbacks_volume} mounts {mount_path} as a whole directory; "
+                "the chart mounts callbacks one file at a time"
+            )
+        mounted_callbacks.add(sub_path)
+        if sub_path not in callbacks_data:
+            fail(f"callbacks volume mounts {sub_path}, which the audited callbacks directory lacks")
+        if mount_path != f"/app/{sub_path}":
+            mount_paths[sub_path] = mount_path
+    # An audited callback that prod does not mount is the silent shape in the
+    # other direction: it renders into the chart's ConfigMap and lands on
+    # /app/<key>, which is a mount prod does not have today.
+    if mounted_callbacks and mounted_callbacks != set(callbacks_data):
+        missing = sorted(set(callbacks_data) - mounted_callbacks)
+        fail(
+            "audited callbacks the deployment does not mount: " + ", ".join(missing)
+        )
+
+    snapshots = []
+    for name in sorted(grouped):
+        entries = grouped[name]
+        if not SNAPSHOT_NAME_RE.fullmatch(name):
+            fail(f"volume {name} is not a usable snapshot name")
+        source = volume_sources[name]
+        if source.startswith("!"):
+            fail(
+                f"volume {name} is backed by {source[1:]}, which the chart cannot express; "
+                "adopting the chart would drop it"
+            )
+        if len(entries) != 1:
+            fail(
+                f"volume {name} has {len(entries)} mounts; the chart expresses one mountPath "
+                "per snapshot, so split it into that many snapshot entries"
+            )
+        directory = snapshot_dirs.pop(name, None)
+        if directory is None:
+            fail(f"volume {name} is mounted but has no --snapshot {name}=<dir> content snapshot")
+        data = read_snapshot_dir(directory, f"snapshot {name}")
+        mount_path, sub_path, _ = entries[0]
+        if sub_path is not None and sub_path not in data:
+            fail(
+                f"volume {name} mounts subPath {sub_path}, which its snapshot directory lacks; "
+                "the kubelet would mount an empty path over the target"
+            )
+        entry = {"name": name, "mountPath": mount_path, "data": data}
+        if sub_path is not None:
+            entry["subPath"] = sub_path
+        snapshots.append(entry)
+    if snapshot_dirs:
+        fail(
+            "--snapshot named volumes the deployment does not mount: "
+            + ", ".join(sorted(snapshot_dirs))
+        )
+
+    if mount_paths:
+        values["callbacks"]["mountPaths"] = dict(sorted(mount_paths.items()))
+    values["additionalSnapshots"] = snapshots
+    return {
+        "mounts": len(mounts),
+        "snapshots": len(snapshots),
+        "readonly_widened": sorted(widened),
+    }
+
+
+def shadow_chart_default_keys(values: dict) -> list[str]:
+    """Delete chart-default content keys this run did not freeze.
+
+    Helm merges a user values file *over* the chart defaults, and for maps that
+    merge is **additive**: a key present only in `chart/values.yaml` survives
+    into the render even though the frozen values file never mentions it.
+
+    Measured 2026-09-13 against the real prod snapshot: a values file carrying
+    prod's 33 callbacks rendered a callbacks ConfigMap with **34** keys, because
+    `chart/values.yaml` ships a placeholder `callbacks.data["README.txt"]`. The
+    chart mounts every callbacks key, so that placeholder would have been
+    mounted into the production container. Writing `README.txt: null` in the
+    user file deletes it (measured: 33 keys, README absent).
+
+    Today the stray key also breaks `callbacksSha256`, so it happens to fail
+    loudly -- but that is a side effect of a checksum that exists for another
+    reason. Any chart default the checksums do not cover rides in silently, so
+    the deletion is done here rather than left to the checksum.
+
+    Returns the deleted `section.key` names for the run report.
+    """
+    defaults = load_yaml(CHART_DEFAULTS)
+    shadowed: list[str] = []
+    for section in ("config", "callbacks"):
+        default_data = (defaults.get(section) or {}).get("data")
+        frozen_data = (values.get(section) or {}).get("data")
+        if not isinstance(default_data, dict) or not isinstance(frozen_data, dict):
+            continue
+        for key in sorted(default_data):
+            if key not in frozen_data:
+                frozen_data[key] = None
+                shadowed.append(f"{section}.{key}")
+    return shadowed
 
 
 def scheduler_safety(
@@ -265,6 +598,7 @@ def scheduler_safety(
     callbacks: dict[str, str],
     image_digest: str,
     runtime_sha: str,
+    secret_metadata_sha: str,
 ) -> dict:
     if path is None:
         if profile != "prod":
@@ -282,10 +616,7 @@ def scheduler_safety(
         captured = datetime.fromisoformat(str(captured_at).replace("Z", "+00:00"))
     except ValueError:
         captured = None
-    callbacks_text = json.dumps(
-        callbacks, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-    )
-    callbacks_sha = "sha256:" + hashlib.sha256(callbacks_text.encode()).hexdigest()
+    callbacks_sha = raw_json_sha256(callbacks)
     if (
         payload.get("schema_version") != 1
         or payload.get("profile") != profile
@@ -320,20 +651,29 @@ def scheduler_safety(
     source_payload = {
         key: value for key, value in payload.items() if key != "source_payload_sha256"
     }
-    source_payload_sha = "sha256:" + hashlib.sha256(
-        json.dumps(
-            source_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-        ).encode()
-    ).hexdigest()
+    # One encoder for every JSON digest in this file. Two of them are re-derived
+    # by the chart and must match Helm byte-for-byte; the rest are free, but a
+    # per-call-site encoding choice is exactly how the callbacks digest ended up
+    # unable to ever match. No choice, no drift.
+    source_payload_sha = raw_json_sha256(source_payload)
     if payload.get("source_payload_sha256") != source_payload_sha:
         fail("scheduler evidence source payload checksum mismatch")
-    evidence_text = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return {
         "mode": mode,
-        "evidenceSha256": "sha256:" + hashlib.sha256(evidence_text.encode()).hexdigest(),
+        "evidenceSha256": raw_json_sha256(payload),
         "configSha256": config_sha,
         "callbacksSha256": callbacks_sha,
         "runtimeSha256": runtime_sha,
+        # The chart recomputes runtimeSha256 from {args,command,extraEnv,
+        # secretRefs} and refuses to render on mismatch, so that digest cannot
+        # carry anything the chart does not have. The Secret snapshot (uid +
+        # resourceVersion + per-Secret data digest) is exactly such a thing, and
+        # it used to be folded into runtimeSha256 -- which is why the real
+        # values file could never render. It gets its own recorded field here
+        # instead: the chart cannot verify it, but dropping it outright would
+        # have made `--secret-metadata` decorative and unbound the frozen values
+        # from the Secret revision they were audited against.
+        "secretMetadataSha256": secret_metadata_sha,
         "sourcePayloadSha256": source_payload_sha,
         "capturedAt": captured.isoformat().replace("+00:00", "Z"),
         "source": source,
@@ -378,6 +718,24 @@ def main() -> int:
     parser.add_argument("--digest", required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--callbacks-dir", type=Path, required=True)
+    parser.add_argument(
+        "--snapshot",
+        action="append",
+        default=[],
+        metavar="VOLUME=DIR",
+        help=(
+            "audited content for one ConfigMap-backed volume the deployment "
+            "mounts besides config and callbacks (prod 2026-09-13: hooks, "
+            "chatgpt-noauth, deepcopy-patch and the three site-packages "
+            "overlays). Every such volume needs one, or the run fails rather "
+            "than adopting a chart that silently drops the mount"
+        ),
+    )
+    parser.add_argument(
+        "--callbacks-volume",
+        default="callbacks",
+        help="name of the live volume carrying the audited callbacks directory",
+    )
     parser.add_argument("--deployment", type=Path, required=True)
     parser.add_argument("--scheduler-evidence", type=Path)
     parser.add_argument("--secret-metadata", type=Path, required=True)
@@ -387,12 +745,29 @@ def main() -> int:
         required=True,
         metavar="CIDR",
         help=(
-            "node address allowed to reach the proxy through the NodePort; "
-            "repeat once per node, /24 or narrower"
+            "SNAT source the pod actually sees for NodePort traffic; repeat "
+            "once per FORWARDING PATH, not per node (198 measured 2026-09-13: "
+            "10.42.0.0/32 flannel.1 cross-node + 10.42.0.1/32 cni0 same-node; "
+            "the node business IP never appears). /24 or narrower"
         ),
     )
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--emit-bindings",
+        action="store_true",
+        help=(
+            "compute the artefact digests that scheduler evidence must carry "
+            "and print them instead of writing values. Needed because those "
+            "digests are not hand-computable: the runtime one is Helm's own "
+            "toRawJson over four post-merge values, and the callbacks one "
+            "covers 33 files. Writes nothing and does not touch --output"
+        ),
+    )
     args = parser.parse_args()
+    # --output stays optional in the parser only so --emit-bindings can omit
+    # it; every path that writes a values file still demands it.
+    if args.output is None and not args.emit_bindings:
+        parser.error("the following arguments are required: --output")
 
     if not IDC_REGISTRY_RE.fullmatch(args.repository):
         fail("repository must use the verified 198 K3s local registry alias")
@@ -400,6 +775,14 @@ def main() -> int:
         fail("digest must be a non-placeholder immutable sha256")
     if not args.callbacks_dir.is_dir():
         fail("callbacks directory does not exist")
+    snapshot_dirs: dict[str, Path] = {}
+    for item in args.snapshot:
+        volume, separator, directory = str(item).partition("=")
+        if not separator or not volume or not directory:
+            fail(f"--snapshot must be VOLUME=DIR, got {item!r}")
+        if volume in snapshot_dirs:
+            fail(f"--snapshot given twice for volume {volume}")
+        snapshot_dirs[volume] = Path(directory)
 
     profile_values = load_yaml(args.profile)
     if profile_values.get("artifactTemplate") is not True:
@@ -429,21 +812,46 @@ def main() -> int:
         "pullPolicy": values.get("image", {}).get("pullPolicy", "IfNotPresent"),
     }
     values["config"] = {"data": {"config.yaml": config_text}}
-    values["callbacks"] = {"data": callbacks}
-    secret_refs = freeze_runtime_shape(values, load_deployment(args.deployment))
+    # Copy, don't alias: shadow_chart_default_keys() adds null keys to
+    # values["callbacks"]["data"], and sharing the object with `callbacks`
+    # would poison both the run report's count and the digest.
+    values["callbacks"] = {"data": dict(callbacks)}
+    deployment = load_deployment(args.deployment)
+    secret_refs = freeze_runtime_shape(values, deployment)
+    mount_report = freeze_mount_shape(
+        values, deployment, snapshot_dirs, args.callbacks_volume
+    )
     secret_metadata = load_secret_metadata(args.secret_metadata, secret_refs)
-    runtime_payload = {
-        "args": values["args"],
-        "command": values["command"],
-        "extraEnv": values["extraEnv"],
-        "secretRefs": values["secretRefs"],
-        "secretMetadata": secret_metadata,
-    }
-    runtime_sha = "sha256:" + hashlib.sha256(
-        json.dumps(
-            runtime_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-        ).encode()
-    ).hexdigest()
+    # Exactly the four keys `litellm-proxy.runtimeChecksum` digests, in Helm's
+    # own encoding. Anything extra here renders the chart unbuildable; see the
+    # secretMetadataSha256 comment in scheduler_safety().
+    runtime_sha = raw_json_sha256(
+        {
+            "args": values["args"],
+            "command": values["command"],
+            "extraEnv": values["extraEnv"],
+            "secretRefs": values["secretRefs"],
+        }
+    )
+    config_sha = "sha256:" + hashlib.sha256(config_text.encode("utf-8")).hexdigest()
+    if args.emit_bindings:
+        print(
+            json.dumps(
+                {
+                    "tool": "prepare-values",
+                    "mode": "emit-bindings",
+                    "profile": profile_name,
+                    "image_digest": args.digest,
+                    "config_sha256": config_sha,
+                    "callbacks_sha256": raw_json_sha256(callbacks),
+                    "runtime_sha256": runtime_sha,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 0
+
     values["schedulerSafety"] = scheduler_safety(
         args.scheduler_evidence,
         profile=profile_name,
@@ -451,7 +859,10 @@ def main() -> int:
         callbacks=callbacks,
         image_digest=args.digest,
         runtime_sha=runtime_sha,
+        secret_metadata_sha=raw_json_sha256(secret_metadata),
     )
+
+    shadowed = shadow_chart_default_keys(values)
 
     rendered = yaml.safe_dump(values, sort_keys=False, allow_unicode=False)
     if FILL_RE.search(rendered):
@@ -464,6 +875,19 @@ def main() -> int:
         "output": str(args.output),
         "sha256": hashlib.sha256(rendered.encode()).hexdigest(),
         "callbacks": len(callbacks),
+        "mounts": mount_report["mounts"],
+        "snapshots": mount_report["snapshots"],
+        # Mounts that prod declares read-write and the chart mounts read-only.
+        # Measured 2026-09-13 inside the live pod: all 40 mounts already show
+        # `ro` in /proc/mounts regardless of the spec flag, so this is a spec
+        # field change with no observed behaviour change -- but it is still a
+        # change, so it is reported here and must be signed off at gate 2c
+        # rather than quietly normalised away.
+        "readonly_widened": mount_report["readonly_widened"],
+        # Chart-default content keys this run explicitly deleted. Non-empty is
+        # normal, not a warning: chart/values.yaml ships placeholder content and
+        # a frozen run must not inherit any of it.
+        "shadowed_chart_keys": shadowed,
     }
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return 0

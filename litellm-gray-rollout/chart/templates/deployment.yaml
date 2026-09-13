@@ -94,12 +94,12 @@ spec:
             httpGet:
               path: /health/liveliness
               port: http
-            {{- toYaml .Values.probes | nindent 12 }}
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /health/readiness
               port: http
-            {{- toYaml .Values.probes | nindent 12 }}
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
           lifecycle:
             {{- toYaml .Values.lifecycle | nindent 12 }}
           volumeMounts:
@@ -109,13 +109,16 @@ spec:
               readOnly: true
             {{- range $filename, $_ := .Values.callbacks.data }}
             - name: callbacks
-              mountPath: {{ printf "/app/%s" $filename | quote }}
+              mountPath: {{ include "litellm-proxy.callbackMountPath" (dict "root" $ "filename" $filename) | quote }}
               subPath: {{ $filename | quote }}
               readOnly: true
             {{- end }}
             {{- range .Values.additionalSnapshots }}
             - name: {{ printf "snapshot-%s" .name }}
               mountPath: {{ .mountPath | quote }}
+              {{- with .subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
               readOnly: true
             {{- end }}
       volumes:

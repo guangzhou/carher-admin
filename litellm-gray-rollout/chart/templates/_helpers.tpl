@@ -38,6 +38,17 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
 {{- printf "%s-callbacks-%s" .Release.Name (include "litellm-proxy.callbacksChecksum" .) -}}
 {{- end -}}
 
+{{/* Default is /app/<filename>; callbacks.mountPaths overrides per key, because
+     prod keeps sitecustomize.py under site-packages/, not under /app. */}}
+{{- define "litellm-proxy.callbackMountPath" -}}
+{{- $override := get (default (dict) .root.Values.callbacks.mountPaths) .filename -}}
+{{- if $override -}}
+{{- $override -}}
+{{- else -}}
+{{- printf "/app/%s" .filename -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "litellm-proxy.snapshotName" -}}
 {{- $checksum := toYaml .snapshot.data | sha256sum | trunc 12 -}}
 {{- $prefix := printf "%s-%s" .root.Release.Name .snapshot.name | trunc 50 | trimSuffix "-" -}}
@@ -81,6 +92,9 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
 {{- if or (eq .Values.schedulerSafety.sourcePayloadSha256 "sha256:0000000000000000000000000000000000000000000000000000000000000000") (eq .Values.schedulerSafety.sourcePayloadSha256 "sha256:1111111111111111111111111111111111111111111111111111111111111111") -}}
 {{- fail "schedulerSafety source payload checksum is a placeholder" -}}
 {{- end -}}
+{{- if or (eq .Values.schedulerSafety.secretMetadataSha256 "sha256:0000000000000000000000000000000000000000000000000000000000000000") (eq .Values.schedulerSafety.secretMetadataSha256 "sha256:1111111111111111111111111111111111111111111111111111111111111111") -}}
+{{- fail "schedulerSafety secret metadata checksum is a placeholder" -}}
+{{- end -}}
 {{- if eq $name "litellm-proxy" -}}
 {{- if ne .Values.schedulerSafety.mode "primary" -}}
 {{- fail "prod schedulerSafety.mode must be primary" -}}
@@ -111,20 +125,46 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
 {{- if ne (toJson $approved) (toJson $actual) -}}
 {{- fail "initContainers.items names must exactly match initContainers.approvedNames" -}}
 {{- end -}}
+{{/* One mountPath namespace for every ConfigMap-backed file the container gets.
+     Now that additionalSnapshots can be single-file (subPath), a snapshot can
+     land on exactly the same path as a callbacks key; two volumeMounts on one
+     path is silently resolved by kubelet, so it must be a hard failure here. */}}
 {{- $snapshotNames := dict -}}
-{{- $snapshotMounts := dict -}}
+{{- $snapshotMounts := dict "/app/config.yaml" "config" -}}
+{{- range $filename, $_ := .Values.callbacks.data -}}
+{{- $path := include "litellm-proxy.callbackMountPath" (dict "root" $ "filename" $filename) -}}
+{{- if hasKey $snapshotMounts $path -}}
+{{- fail (printf "callbacks mountPath collides with %s: %s" (get $snapshotMounts $path) $path) -}}
+{{- end -}}
+{{- $_ := set $snapshotMounts $path (printf "callbacks/%s" $filename) -}}
+{{- end -}}
+{{/* An override that names a key callbacks.data does not have is a no-op that
+     reads like a configured mount. Fail instead of silently ignoring it. */}}
+{{- range $filename, $path := (default (dict) .Values.callbacks.mountPaths) -}}
+{{- if not (hasKey $.Values.callbacks.data $filename) -}}
+{{- fail (printf "callbacks.mountPaths references a key that is not in callbacks.data: %s" $filename) -}}
+{{- end -}}
+{{- end -}}
 {{- range .Values.additionalSnapshots -}}
 {{- if hasKey $snapshotNames .name -}}
 {{- fail (printf "duplicate additionalSnapshots name: %s" .name) -}}
 {{- end -}}
-{{- if hasKey $snapshotMounts .mountPath -}}
-{{- fail (printf "duplicate additionalSnapshots mountPath: %s" .mountPath) -}}
-{{- end -}}
 {{- if or (eq .mountPath "/app/config.yaml") (eq .mountPath "/app") -}}
 {{- fail (printf "additionalSnapshots mountPath conflicts with LiteLLM config: %s" .mountPath) -}}
 {{- end -}}
+{{- if hasKey $snapshotMounts .mountPath -}}
+{{- fail (printf "duplicate additionalSnapshots mountPath: %s" .mountPath) -}}
+{{- end -}}
+{{/* subPath selects one key out of the snapshot. A subPath that is not a key
+     mounts an empty path instead of failing, which is exactly the silent
+     shape this chart exists to make impossible. */}}
+{{- if .subPath -}}
+{{- if not (hasKey .data .subPath) -}}
+{{- fail (printf "additionalSnapshots %s subPath %s is not a key in its data" .name .subPath) -}}
+{{- end -}}
+{{- end -}}
 {{- $_ := set $snapshotNames .name true -}}
-{{- $_ := set $snapshotMounts .mountPath true -}}
+{{- $_ := set $snapshotMounts .mountPath (printf "snapshot/%s" .name) -}}
 {{- end -}}
 {{/* Drain budget is one derivation, not three independent knobs:
      grace >= preStop + streamDrain, and nginx proxy_read_timeout == streamDrain.

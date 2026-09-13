@@ -1964,6 +1964,76 @@ def test_pod_spec_shape_requires_a_named_consumer_and_a_matching_diff(tmp_path: 
     assert "APPROVAL_DOES_NOT_MATCH_DIFF" in stale["errors"]
 
 
+def test_pod_spec_shape_rejects_a_fill_me_approver(tmp_path: Path):
+    """An unsigned approval must be louder than a missing one -- it reads signed.
+
+    Measured 2026-09-14: `k8s/prod-pod-spec-approval.json` shipped with
+    `"approver": "<FILL-APPROVER>"` and `load_approval` accepted all 10 entries
+    with zero errors. The property everyone was relying on -- "the checked-in
+    list cannot rubber-stamp itself, someone has to sign it" -- existed only in
+    the prose describing this tool. The `consumer` column had a placeholder
+    blacklist; the `approver` column had nothing but a non-empty check, and
+    `<FILL-APPROVER>` is non-empty.
+
+    That is this gate's own failure mode turned on itself: green while enforcing
+    nothing. Hence a structural rule (anything wrapped in <>, {{}} or [] is a
+    replace-me marker) plus a word blacklist, and this test.
+    """
+    _, baseline = _pod_spec_shape(tmp_path)
+    items = sorted(
+        {entry["item"] for entry in baseline["removed"]}
+        | {entry["item"] for entry in baseline["changed"]}
+    )
+    approval = tmp_path / "approval.json"
+
+    def run(approver: str):
+        approval.write_text(
+            json.dumps(
+                {
+                    "shape_changes": [
+                        {
+                            "item": item,
+                            "consumer": "codex /pro/v1/responses long sessions",
+                            "disposition": "re-expressed via additionalSnapshots subPath",
+                            "approver": approver,
+                        }
+                        for item in items
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return _pod_spec_shape(tmp_path, "--approval", str(approval))[1]
+
+    # A real name signs. Non-ASCII on purpose: the approver of record here is a
+    # person whose name does not fit in ASCII, and a rule that only rejects
+    # placeholders must not reject them too.
+    signed = run("刘国现")
+    assert signed["status"] == "PASS", signed.get("errors")
+
+    for unsigned in (
+        "<FILL-APPROVER>",   # the exact value that shipped
+        "{{approver}}",
+        "[your name]",
+        "TBD",
+        "unsigned",
+        "placeholder",
+    ):
+        payload = run(unsigned)
+        assert payload["status"] == "FAIL", unsigned
+        assert any(
+            error.startswith("APPROVAL_UNSIGNED:") for error in payload["errors"]
+        ), (unsigned, payload["errors"])
+
+    # Blank is rejected too, but by the earlier non-empty rule -- asserting
+    # APPROVAL_UNSIGNED here would be pinning the error code rather than the
+    # behaviour, and would go red the day the ordering changes harmlessly.
+    blank = run("  ")
+    assert blank["status"] == "FAIL"
+    assert "APPROVAL_ENTRY_INVALID" in blank["errors"]
+
+
 # The chart content-addresses its ConfigMaps (`<release>-<snapshot>-<checksum>`)
 # while production names them by hand, so the *same bytes* arrive under a
 # different ConfigMap name. Captured contents let the gate tell that apart from a

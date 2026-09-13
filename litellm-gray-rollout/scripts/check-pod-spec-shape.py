@@ -53,6 +53,22 @@ TOOL = "check-pod-spec-shape"
 SCHEMA_VERSION = 2
 STATE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 UNNAMED_CONSUMER = {"unknown", "none", "n/a", "na", "-", "tbd", ""}
+# An approver that is a fill-me marker is worse than a missing one: the file
+# looks signed.  Measured 2026-09-14: the checked-in approval carrying
+# `<FILL-APPROVER>` was accepted with zero errors, so the "the committed list
+# cannot rubber-stamp itself" property existed only in the prose describing this
+# tool, not in the tool.  A gate reading green while it enforces nothing is the
+# exact defect shape this whole gate exists to catch.
+UNSIGNED_APPROVER = {
+    "unknown", "none", "n/a", "na", "-", "tbd", "todo", "fixme", "xxx",
+    "fill", "fill-me", "fillme", "approver", "name", "signature", "sign",
+    "unsigned", "pending", "someone", "test", "example", "placeholder",
+}
+# Angle/brace/square-bracket wrapping is the universal "replace this" shape
+# (`<FILL-APPROVER>`, `{{approver}}`, `[your name]`), so reject it structurally
+# rather than trying to enumerate every wording.
+FILL_MARKER_RE = re.compile(r"^[<\[{]+.*[>\]}]+$")
+
 # Volume source kinds worth naming in the diff. Everything else collapses to its
 # own key name, which is enough to notice that the source changed shape.
 VOLUME_SOURCE_KEYS = (
@@ -356,6 +372,12 @@ def load_approval(path: Path | None) -> tuple[dict[str, dict[str, str]], list[st
         # discipline forbids: nobody analysed who loses this mount.
         if entry["consumer"].strip().lower() in UNNAMED_CONSUMER:
             errors.append(f"APPROVAL_CONSUMER_UNNAMED:{entry['item']}")
+            continue
+        # A fill-me approver means nobody has actually signed this off.  It must
+        # be louder than a missing entry, not quieter: the file reads signed.
+        approver = entry["approver"].strip()
+        if approver.lower() in UNSIGNED_APPROVER or FILL_MARKER_RE.match(approver):
+            errors.append(f"APPROVAL_UNSIGNED:{entry['item']}")
             continue
         if entry["item"] in approved:
             errors.append(f"APPROVAL_DUPLICATE:{entry['item']}")

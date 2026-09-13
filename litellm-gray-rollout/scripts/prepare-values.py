@@ -68,6 +68,34 @@ SCHEDULER_OBSERVATION_KEYS = {
     "unexpected_control_writes",
 }
 SECRET_METADATA_KEYS = {"name", "uid", "resource_version", "data_sha256"}
+# The three scheduled jobs a non-prod release can actually be stopped from
+# running *through its Pod spec*. Measured 2026-09-14 by reading
+# `ProxyStartupEvent.initialize_scheduled_background_jobs` in both the live
+# image (v1.90.2, digest 7286aa2d) and the target image (v1.95.0, digest
+# 50e647bd) -- the job set is identical in the two versions:
+#
+#   PROXY_BATCH_POLLING_ENABLED               default "true"  => check_batch_cost_job
+#                                                             +  check_responses_cost_job
+#   LITELLM_KEY_ROTATION_ENABLED              default "false" => key_rotation_job
+#   LITELLM_EXPIRED_UI_SESSION_KEY_CLEANUP_ENABLED  default "false"
+#                                                             => expired UI session cleanup
+#
+# The last two are already off on prod today, but they are off *by default*,
+# which is not the same as off *by contract*: both read a plain env var, and
+# both `secretRef`s in the Pod spec are shared with prod, so a Secret edit
+# during the window would switch them on in every release at once. Pinning
+# them makes the gray release's answer independent of that.
+BACKGROUND_TASK_SUPPRESSORS = {
+    "LITELLM_EXPIRED_UI_SESSION_KEY_CLEANUP_ENABLED": "false",
+    "LITELLM_KEY_ROTATION_ENABLED": "false",
+    "PROXY_BATCH_POLLING_ENABLED": "false",
+}
+# The fourth global-mutating job, `reset_budget_job`, has no env var at all --
+# its only guard is `general_settings.get("disable_reset_budget", False)`, read
+# out of config.yaml. So it is suppressed by a one-key overlay on the frozen
+# config instead of by an env entry; see disable_reset_budget_in_config().
+RESET_BUDGET_KEY = "disable_reset_budget"
+GENERAL_SETTINGS_ANCHOR_RE = re.compile(r"^general_settings:[ \t]*$", re.M)
 MAX_SCHEDULER_EVIDENCE_AGE = timedelta(minutes=15)
 CHART_DEFAULTS = Path(__file__).resolve().parents[1] / "chart" / "values.yaml"
 
@@ -590,6 +618,148 @@ def shadow_chart_default_keys(values: dict) -> list[str]:
     return shadowed
 
 
+def suppress_background_tasks(values: dict, *, profile: str) -> list[str]:
+    """Make `backgroundTasks.enabled: false` a fact about the Pod spec.
+
+    It was a label. Measured 2026-09-14: rendering the gray profile produced a
+    container whose entire env was `DISABLE_SCHEMA_UPDATE=True` plus prod's
+    frozen env, and whose only trace of the setting was the Pod label
+    `litellm.carher.io/background-tasks-enabled: "false"`. Nothing in that Pod
+    spec stops APScheduler; the sole guard on the whole job set is
+    `prisma_client is not None`, and gray shares prod's DATABASE_URL. So the
+    gray replicas would have run `reset_budget`, `check_batch_cost` and
+    `check_responses_cost` against the production database -- at a different
+    LiteLLM version than the release that owns them -- while the chart, the
+    label and the runbook all said background tasks were off.
+
+    That is the gate-property-in-prose shape: the sentence "gray does not run
+    background tasks" existed only in the sentence.
+
+    Returns the names this call pinned, for the run report. prod is asserted,
+    never rewritten: if the live prod Pod already pins a suppressor to "false"
+    then prod is not the release running that job, and the premise that prod
+    owns the scheduler is wrong -- that is a red, not something to paper over.
+    """
+    extra_env = values.get("extraEnv")
+    if not isinstance(extra_env, list):
+        fail("extraEnv must be frozen before background tasks can be pinned")
+    existing = {
+        entry.get("name"): entry
+        for entry in extra_env
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+    }
+    if profile == "prod":
+        for name, off in sorted(BACKGROUND_TASK_SUPPRESSORS.items()):
+            entry = existing.get(name)
+            if entry is not None and str(entry.get("value", "")).lower() == off:
+                fail(
+                    f"prod pins {name}={off}; prod cannot both own the scheduler "
+                    "and have that job disabled"
+                )
+        return []
+    pinned: list[str] = []
+    for name, off in sorted(BACKGROUND_TASK_SUPPRESSORS.items()):
+        entry = existing.get(name)
+        if entry is not None and str(entry.get("value", "")).lower() == off:
+            continue
+        if entry is not None:
+            # Prod set it to something else, or sourced it from a Secret. Drop
+            # that entry and pin the literal; leaving both would render two env
+            # entries with the same name, where the kubelet keeps the last one
+            # silently.
+            extra_env.remove(entry)
+        extra_env.append({"name": name, "value": off})
+        pinned.append(name)
+    # Appended, never re-sorted. The rest of extraEnv is prod's live order, and
+    # gate 2c diffs this Pod spec against prod's -- a wholesale reorder would
+    # turn one honest three-entry diff into a whole-block diff that no approval
+    # list can usefully name.
+    return pinned
+
+
+def disable_reset_budget_in_config(config_text: str, *, profile: str) -> tuple[str, bool]:
+    """Overlay `general_settings.disable_reset_budget: true` for non-prod releases.
+
+    `reset_budget_job` is the one global-mutating scheduled job with no env
+    var: `initialize_scheduled_background_jobs` guards it with
+    `general_settings.get("disable_reset_budget", False) is False` and nothing
+    else. Measured on prod's live `litellm-config` ConfigMap 2026-09-14: the
+    key is absent, so the job is scheduled -- today on all four prod replicas,
+    and, without this overlay, on the gray replicas too.
+
+    The edit is a single inserted line rather than a YAML round-trip. Re-dumping
+    a 500-model config would rewrite every line of the frozen snapshot, and the
+    whole point of freezing it is that the diff against prod is readable. The
+    anchor must occur exactly once at column 0; a non-unique anchor is a red,
+    not a "take the first one".
+
+    Returns (text, changed). prod is checked, not edited: prod carrying the key
+    would mean nobody resets budgets once gray is also muted.
+    """
+    parsed = yaml.safe_load(config_text)
+    if not isinstance(parsed, dict):
+        fail("config.yaml must be a mapping")
+    general = parsed.get("general_settings")
+    if general is not None and not isinstance(general, dict):
+        fail("config.yaml general_settings must be a mapping")
+    already = general.get(RESET_BUDGET_KEY) if general else None
+    if profile == "prod":
+        if already is True:
+            fail(
+                f"prod config sets general_settings.{RESET_BUDGET_KEY}; prod owns "
+                "reset_budget_job and cannot have it disabled"
+            )
+        return config_text, False
+    if already is True:
+        return config_text, False
+    if already is not None:
+        fail(
+            f"config.yaml sets general_settings.{RESET_BUDGET_KEY}={already!r}; "
+            "refusing to overwrite an explicit value"
+        )
+    anchors = GENERAL_SETTINGS_ANCHOR_RE.findall(config_text)
+    if general is None and not anchors:
+        # No block to overlay: append one. Only reachable on a config that has
+        # no general_settings at all, which prod's does not.
+        suffix = "" if config_text.endswith("\n") or not config_text else "\n"
+        overlaid = f"{config_text}{suffix}general_settings:\n  {RESET_BUDGET_KEY}: true\n"
+
+    else:
+        if len(anchors) != 1:
+            fail(
+                "config.yaml must contain exactly one top-level `general_settings:` "
+                f"line to overlay, found {len(anchors)}"
+            )
+        match = GENERAL_SETTINGS_ANCHOR_RE.search(config_text)
+        assert match is not None
+        insert_at = match.end() + 1
+        indent = "  "
+        for line in config_text[insert_at:].splitlines():
+            if not line.strip():
+                continue
+            leading = line[: len(line) - len(line.lstrip(" "))]
+            if leading:
+                indent = leading
+            break
+        overlaid = (
+            config_text[:insert_at]
+            + f"{indent}{RESET_BUDGET_KEY}: true\n"
+            + config_text[insert_at:]
+        )
+    # The insertion is textual, so prove semantically that it changed exactly
+    # one key and nothing else. A wrong indent would silently land the key in a
+    # nested mapping, or end the block -- both parse fine and both read green.
+    after = yaml.safe_load(overlaid)
+    expected = json.loads(json.dumps(parsed, default=str))
+    expected.setdefault("general_settings", {})
+    if expected["general_settings"] is None:
+        expected["general_settings"] = {}
+    expected["general_settings"][RESET_BUDGET_KEY] = True
+    if json.loads(json.dumps(after, default=str)) != expected:
+        fail("reset_budget overlay changed more than one key; refusing to freeze")
+    return overlaid, True
+
+
 def scheduler_safety(
     path: Path | None,
     *,
@@ -811,6 +981,11 @@ def main() -> int:
         "digest": args.digest,
         "pullPolicy": values.get("image", {}).get("pullPolicy", "IfNotPresent"),
     }
+    # Before values["config"] and config_sha, or the frozen snapshot and the
+    # digest the chart re-derives would describe two different files.
+    config_text, reset_budget_overlaid = disable_reset_budget_in_config(
+        config_text, profile=profile_name
+    )
     values["config"] = {"data": {"config.yaml": config_text}}
     # Copy, don't alias: shadow_chart_default_keys() adds null keys to
     # values["callbacks"]["data"], and sharing the object with `callbacks`
@@ -818,6 +993,9 @@ def main() -> int:
     values["callbacks"] = {"data": dict(callbacks)}
     deployment = load_deployment(args.deployment)
     secret_refs = freeze_runtime_shape(values, deployment)
+    # After freeze_runtime_shape (which sets extraEnv wholesale from the live
+    # Pod) and before runtime_sha, which the chart re-derives from extraEnv.
+    pinned_env = suppress_background_tasks(values, profile=profile_name)
     mount_report = freeze_mount_shape(
         values, deployment, snapshot_dirs, args.callbacks_volume
     )
@@ -888,6 +1066,15 @@ def main() -> int:
         # normal, not a warning: chart/values.yaml ships placeholder content and
         # a frozen run must not inherit any of it.
         "shadowed_chart_keys": shadowed,
+        # What `backgroundTasks.enabled: false` actually did to this Pod spec.
+        # Empty lists on a non-prod profile mean the frozen input already
+        # carried the suppression; they must never be read as "nothing to
+        # suppress" -- that was the old, silent behaviour.
+        "background_tasks": {
+            "enabled": profile_name == "prod",
+            "pinned_env": pinned_env,
+            "reset_budget_overlaid": reset_budget_overlaid,
+        },
     }
     print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return 0

@@ -244,6 +244,7 @@ def scheduler_evidence(
         if path.is_file()
     }
     callback_text = PREPARE_VALUES.raw_json(callback_data)
+    profile = "prod" if mode == "primary" else "gray"
     if runtime_sha256 is None:
         if deployment is None:
             runtime_sha256 = "sha256:" + ("d" * 64)
@@ -271,7 +272,24 @@ def scheduler_evidence(
                     extra_env.append({"name": name, "valueFrom": {ref_kind: frozen}})
 
             secret_refs = [item["secretRef"]["name"] for item in container.get("envFrom", [])]
-            
+
+            # A non-prod profile does not ship prod's env verbatim: prepare-values
+            # pins the three background-task suppressors into it, because
+            # `backgroundTasks.enabled: false` is otherwise only a Pod label and
+            # stops nothing. The digest has to describe the Pod spec that will
+            # actually be rendered, so mirror that here -- appended in sorted
+            # order, replacing any same-named entry, exactly as
+            # suppress_background_tasks() does.
+            if profile != "prod":
+                by_name = {entry["name"]: entry for entry in extra_env}
+                for name, off in sorted(PREPARE_VALUES.BACKGROUND_TASK_SUPPRESSORS.items()):
+                    existing = by_name.get(name)
+                    if existing is not None:
+                        if str(existing.get("value", "")).lower() == off:
+                            continue
+                        extra_env.remove(existing)
+                    extra_env.append({"name": name, "value": off})
+
             runtime_payload = {
                 "args": container.get("args") or defaults["args"],
                 "command": container.get("command") or defaults["command"],
@@ -286,12 +304,19 @@ def scheduler_evidence(
             # only placeholder-checks. The parameter is kept so callers can
             # still assert prepare-values consumed the file.
             runtime_sha256 = value_digest(runtime_payload)
+    # Same reason as the extraEnv mirror above: the frozen config a non-prod
+    # profile ships carries the `general_settings.disable_reset_budget: true`
+    # overlay, so the evidence must bind to the overlaid text, not to the file
+    # on disk.
+    config_text, _ = PREPARE_VALUES.disable_reset_budget_in_config(
+        config.read_text(encoding="utf-8"), profile=profile
+    )
     payload = {
         "schema_version": 1,
-        "profile": "prod" if mode == "primary" else "gray",
+        "profile": profile,
         "mode": mode,
         "image_digest": image_digest,
-        "config_sha256": "sha256:" + hashlib.sha256(config.read_bytes()).hexdigest(),
+        "config_sha256": "sha256:" + hashlib.sha256(config_text.encode("utf-8")).hexdigest(),
         "callbacks_sha256": "sha256:" + hashlib.sha256(callback_text.encode("utf-8")).hexdigest(),
         "runtime_sha256": runtime_sha256,
         "captured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -1328,17 +1353,24 @@ spec:
     )
     assert result.returncode == 0, result.stderr
     values = load_yaml(output)
-    assert values["extraEnv"] == [
-        {
-            "name": "FEATURE_FLAGS",
-            "valueFrom": {
-                "configMapKeyRef": {
-                    "name": "litellm-runtime-flags",
-                    "key": "flags.json",
-                    "optional": True,
-                }
-            },
-        }
+    # The configMapKeyRef entry survives verbatim *and stays first*: the gray
+    # profile's extraEnv is prod's live order with the background-task
+    # suppressors appended, never a re-sort. Gate 2c diffs this against prod's
+    # Pod spec, and a wholesale reorder would turn three nameable additions into
+    # an unreviewable whole-block diff.
+    assert values["extraEnv"][0] == {
+        "name": "FEATURE_FLAGS",
+        "valueFrom": {
+            "configMapKeyRef": {
+                "name": "litellm-runtime-flags",
+                "key": "flags.json",
+                "optional": True,
+            }
+        },
+    }
+    assert values["extraEnv"][1:] == [
+        {"name": name, "value": value}
+        for name, value in sorted(PREPARE_VALUES.BACKGROUND_TASK_SUPPRESSORS.items())
     ]
 
 
@@ -2543,3 +2575,173 @@ def test_only_fixed_config_check_init_container_can_be_enabled():
     assert config_check["image"] == deployment["spec"]["template"]["spec"]["containers"][0]["image"]
     assert "prisma" not in " ".join(config_check["command"] + config_check["args"]).lower()
     assert "migrate" not in " ".join(config_check["command"] + config_check["args"]).lower()
+
+
+# --------------------------------------------------------------------------
+# `backgroundTasks.enabled: false` is a fact about the Pod spec, not a label
+#
+# Measured 2026-09-14: the rendered gray Deployment's entire container env was
+# `DISABLE_SCHEMA_UPDATE=True` plus prod's frozen env, and the only trace of the
+# setting anywhere in the Pod spec was the label
+# `litellm.carher.io/background-tasks-enabled: "false"`. Nothing in that spec
+# stops APScheduler -- `ProxyStartupEvent.initialize_scheduled_background_jobs`
+# is guarded only by `if prisma_client is not None:`, and gray shares prod's
+# DATABASE_URL -- so the gray replicas would have run `reset_budget_job`,
+# `check_batch_cost_job` and `check_responses_cost_job` against the production
+# database at a different LiteLLM version than the release that owns them.
+#
+# These tests exist so that defect cannot come back silently. The old behaviour
+# read green: an absent suppression looks exactly like a suppression that was
+# already there.
+# --------------------------------------------------------------------------
+
+
+def _suppress(extra_env: list[dict], profile: str = "gray") -> tuple[list[dict], list[str]]:
+    values = {"extraEnv": list(extra_env)}
+    pinned = PREPARE_VALUES.suppress_background_tasks(values, profile=profile)
+    return values["extraEnv"], pinned
+
+
+def test_gray_extra_env_pins_every_background_task_suppressor():
+    frozen, pinned = _suppress([{"name": "ROUTER_MODE", "value": "safe"}])
+    assert pinned == sorted(PREPARE_VALUES.BACKGROUND_TASK_SUPPRESSORS)
+    # Prod's own entry keeps its position; suppressors are appended, never
+    # re-sorted into it -- gate 2c diffs this list against prod's Pod spec and a
+    # wholesale reorder is not reviewable.
+    assert frozen[0] == {"name": "ROUTER_MODE", "value": "safe"}
+    assert frozen[1:] == [
+        {"name": name, "value": value}
+        for name, value in sorted(PREPARE_VALUES.BACKGROUND_TASK_SUPPRESSORS.items())
+    ]
+    # Positive control: the suppressors must actually name the jobs that mutate
+    # global state. PROXY_BATCH_POLLING_ENABLED defaults to "true" upstream, so
+    # leaving it unset is not the same as pinning it off.
+    assert "PROXY_BATCH_POLLING_ENABLED" in PREPARE_VALUES.BACKGROUND_TASK_SUPPRESSORS
+
+
+def test_suppressing_a_prod_sourced_env_entry_leaves_no_duplicate_name():
+    """A same-named entry is replaced, not shadowed.
+
+    Two env entries with the same name render fine and the kubelet silently
+    keeps the last one -- a green render that nobody can read the answer off.
+    """
+    frozen, pinned = _suppress(
+        [
+            {
+                "name": "PROXY_BATCH_POLLING_ENABLED",
+                "valueFrom": {"secretKeyRef": {"name": "litellm-secrets", "key": "batch"}},
+            }
+        ]
+    )
+    assert pinned == sorted(PREPARE_VALUES.BACKGROUND_TASK_SUPPRESSORS)
+    names = [entry["name"] for entry in frozen]
+    assert len(names) == len(set(names))
+    polling = next(e for e in frozen if e["name"] == "PROXY_BATCH_POLLING_ENABLED")
+    assert polling == {"name": "PROXY_BATCH_POLLING_ENABLED", "value": "false"}
+
+
+def test_already_suppressed_env_is_reported_as_not_pinned_but_still_present():
+    already = [
+        {"name": name, "value": value}
+        for name, value in sorted(PREPARE_VALUES.BACKGROUND_TASK_SUPPRESSORS.items())
+    ]
+    frozen, pinned = _suppress(list(already))
+    assert frozen == already
+    # Empty `pinned_env` in the run report means "the frozen input already
+    # carried it", never "there was nothing to suppress".
+    assert pinned == []
+
+
+def test_prod_pinning_a_suppressor_is_a_red_not_a_no_op():
+    with pytest.raises(SystemExit) as caught:
+        _suppress(
+            [{"name": "PROXY_BATCH_POLLING_ENABLED", "value": "false"}], profile="prod"
+        )
+    assert "cannot both own the scheduler" in str(caught.value)
+
+
+def test_prod_extra_env_is_never_rewritten():
+    frozen, pinned = _suppress([{"name": "ROUTER_MODE", "value": "safe"}], profile="prod")
+    assert pinned == []
+    assert frozen == [{"name": "ROUTER_MODE", "value": "safe"}]
+
+
+def test_background_tasks_cannot_be_pinned_before_extra_env_is_frozen():
+    with pytest.raises(SystemExit) as caught:
+        PREPARE_VALUES.suppress_background_tasks({}, profile="gray")
+    assert "frozen" in str(caught.value)
+
+
+def test_reset_budget_overlay_adds_exactly_one_key_to_general_settings():
+    original = "model_list: []\ngeneral_settings:\n  store_model_in_db: true\n"
+    overlaid, changed = PREPARE_VALUES.disable_reset_budget_in_config(
+        original, profile="gray"
+    )
+    assert changed is True
+    # Textual insertion, so assert both halves: one added line, and one added
+    # parsed key. A wrong indent would land the key in a nested mapping or end
+    # the block -- both parse fine and both read green.
+    assert len(overlaid.splitlines()) == len(original.splitlines()) + 1
+    assert "  disable_reset_budget: true" in overlaid.splitlines()
+    before = yaml.safe_load(original)
+    after = yaml.safe_load(overlaid)
+    before["general_settings"]["disable_reset_budget"] = True
+    assert after == before
+
+
+def test_reset_budget_overlay_appends_a_block_when_the_config_has_none():
+    overlaid, changed = PREPARE_VALUES.disable_reset_budget_in_config(
+        "model_list: []\n", profile="gray"
+    )
+    assert changed is True
+    assert yaml.safe_load(overlaid) == {
+        "model_list": [],
+        "general_settings": {"disable_reset_budget": True},
+    }
+
+
+def test_reset_budget_overlay_is_a_no_op_when_already_true():
+    original = "general_settings:\n  disable_reset_budget: true\n"
+    overlaid, changed = PREPARE_VALUES.disable_reset_budget_in_config(
+        original, profile="gray"
+    )
+    assert changed is False
+    assert overlaid == original
+
+
+def test_reset_budget_overlay_refuses_to_overwrite_an_explicit_false():
+    with pytest.raises(SystemExit) as caught:
+        PREPARE_VALUES.disable_reset_budget_in_config(
+            "general_settings:\n  disable_reset_budget: false\n", profile="gray"
+        )
+    assert "refusing to overwrite" in str(caught.value)
+
+
+def test_reset_budget_overlay_reds_on_a_non_unique_anchor():
+    """A duplicate top-level key is legal YAML and the second wins.
+
+    Picking "the first one" would insert the key into the block that loses.
+    """
+    with pytest.raises(SystemExit) as caught:
+        PREPARE_VALUES.disable_reset_budget_in_config(
+            "general_settings:\n  a: 1\nmodel_list: []\ngeneral_settings:\n  b: 2\n",
+            profile="gray",
+        )
+    assert "exactly one" in str(caught.value)
+
+
+def test_prod_config_carrying_disable_reset_budget_is_a_red():
+    with pytest.raises(SystemExit) as caught:
+        PREPARE_VALUES.disable_reset_budget_in_config(
+            "general_settings:\n  disable_reset_budget: true\n", profile="prod"
+        )
+    assert "owns reset_budget_job" in str(caught.value)
+
+
+def test_prod_config_is_returned_byte_for_byte():
+    original = "model_list: []\ngeneral_settings:\n  store_model_in_db: true\n"
+    overlaid, changed = PREPARE_VALUES.disable_reset_budget_in_config(
+        original, profile="prod"
+    )
+    assert changed is False
+    assert overlaid == original

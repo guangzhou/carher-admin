@@ -17,17 +17,26 @@ Run identity
 
 | Field | Frozen value |
 |---|---|
-| Run ID | `FILL-RUN-ID` |
+| Run ID | `litellm-198-v195-20260914` |
 | Change ticket | `FILL-TICKET` |
 | Environment | `198 / litellm-product` |
 | Window start/end (UTC) | `FILL-START / FILL-END` |
 | Target release | `v1.95.0` |
-| Stable immutable digest | `FILL-IDC-REGISTRY-DIGEST` |
-| Target immutable digest | `FILL-IDC-REGISTRY-DIGEST` |
-| Guarded-old immutable digest | `FILL-IDC-REGISTRY-DIGEST` |
-| Evidence root | `FILL-ROOT-ONLY-PATH` |
+| Stable immutable digest | `127.0.0.1:5000/litellm-carher@sha256:7286aa2de7ca8c047c7141a60cba04a58a4a621bead0d7a75ebf3ebfbefacef7` |
+| Target immutable digest | `127.0.0.1:5000/litellm-carher@sha256:50e647bd5ee32010317378335d5830dbbcd793b4dd1a9a4460bd34a9272cda95` |
+| Guarded-old immutable digest | same as stable — `sha256:7286aa2de7ca…`; must be re-read from `imageID`, not inherited |
+| Evidence root | `/root/litellm-gray-run/litellm-198-v195-20260914` (root-only, on 198 `/Data`) |
 | Runbook SHA-256 | `FILL-CHECKSUM` |
 | Approval status/time | `FILL-APPROVAL` |
+
+> **The serving Deployment is pinned by tag, not by digest.** Measured
+> 2026-09-14: `deploy/litellm-proxy` carries
+> `127.0.0.1:5000/litellm-carher:vanilla-v1.90.2.capacity.sse-fix-bare-20260711-122004`,
+> and all four Pods resolve it to `sha256:7286aa2de7ca…`. The stable and
+> guarded-old digests above come from the Pods' `imageID`, which is the only
+> place the *running* bytes are named. Do not re-derive them from the tag during
+> the window: a tag can be repushed and the resolution would silently change.
+
 
 Stop before `preflight` if any `FILL-` marker remains, an image is not an
 immutable digest from `127.0.0.1:5000`, or evidence storage is group/world
@@ -153,6 +162,16 @@ migration role identity, Job digest, `lock_timeout`, `statement_timeout`,
 `backoffLimit: 0`, per-DDL completion state, final schema checksum, and stable
 post-migration smoke. A dump is disaster evidence, not an online rollback plan.
 
+> **Path A precondition, measured 2026-09-14 and currently NOT met.** The fuse is
+> `DISABLE_SCHEMA_UPDATE=True` on every serving old Pod *before* the migration
+> Job runs. Read inside all four live replicas
+> (`litellm-proxy-677b5474-{68jjb,bjm2g,m9f66,zbcjb}`, `-n litellm-product`), the
+> variable is **unset on all four** — not `False`, absent. Do not read the
+> chart's `DISABLE_SCHEMA_UPDATE: "True"` as proof: that is what the *gray*
+> render emits, and the serving prod Deployment is a different object. Set and
+> re-read it per Pod before the Job, and record the four readings here.
+
+
 Runtime gate
 
 | Check | Evidence/checksum | Owner | Result/freeze decision |
@@ -166,7 +185,7 @@ Runtime gate
 | Measured p100 `upstream_response_time` per `uri_class` (window + access-log path) | window = `zkreq.log` + `.1` (2 days, N=1,243,452 `/pro`); path `/var/log/nginx/zkreq.log` (format `zkreq`, **not** `access.log`) | `docs/drain-budget-evidence-2026-09-13.md` | p100 = **81,665 s** (`responses`); p99 = 1,442 s. **Re-measure on the day** |
 | Drain budget holds: `terminationGracePeriodSeconds >= drain.preStopSeconds + drain.streamDrainSeconds` and nginx `proxy_read_timeout == drain.streamDrainSeconds` | `600 >= 30 + 570` ✅ / live nginx is **600 s**, must be lowered to **570 s** (a real behavior change, not a template copy) | `docs/drain-budget-evidence-2026-09-13.md` §4 | `PASS` on arithmetic; nginx change **pending** |
 | ⚠️ `proxy_read_timeout` is an **inter-read** timeout, not a total-duration cap — it does not bound stream length and cannot prevent truncation of an actively streaming SSE. Its real job is to make nginx give up **before** the Pod is SIGKILLed (570 < 600) so a dying upstream yields a clean 504 instead of a silent cut | measured: 600 s timeout coexists with an 81,665 s request | `docs/drain-budget-evidence-2026-09-13.md` §4 | `NOTED` |
-| If measured p100 exceeds `drain.streamDrainSeconds`: grace and nginx timeout raised together, or truncation explicitly accepted with the affected request share and consumers named | **Truncation explicitly accepted.** Share = **0.0940%** (1,169 / 1,243,452). Consumers = **Codex Desktop / codex-tui on `/pro/v1/responses`** (no other lane in the tail). Grace NOT raised: covering p100 would need ~22.7 h | `docs/drain-budget-evidence-2026-09-13.md` §3.1–3.2 | `ACCEPTED` — needs sign-off |
+| If measured p100 exceeds `drain.streamDrainSeconds`: grace and nginx timeout raised together, or truncation explicitly accepted with the affected request share and consumers named | **Truncation explicitly accepted.** Share = **0.0940%** (1,169 / 1,243,452). Consumers = **Codex Desktop / codex-tui on `/pro/v1/responses` + Cursor 3.18.25** — the day-of re-measure put 27 Cursor requests over 570 s, so the 09-13 "single consumer" reading is stale and the truncation notice must include the Cursor lane. Grace NOT raised: covering p100 would need ~22.7 h | `docs/drain-budget-evidence-2026-09-13.md` §3.1–3.2, §7.2 | `ACCEPTED` — needs sign-off |
 | Declared NodePort source CIDRs (`prepare-values.py --ingress-cidr`, **one per forwarding path, not one per node**, `/24` or narrower) | `10.42.0.0/32` (198 `flannel.1`, cross-node) + `10.42.0.1/32` (198 `cni0`, same-node) | `docs/nodeport-source-cidr-evidence.md` | 2026-09-13 measured; **re-measure on the day** |
 | NodePort reachability positive leg: `curl 127.0.0.1:<nodePort>/health/liveliness` from the host-nginx node returns 200 after the policy is applied | `FILL` | `FILL` | `PASS/FAIL` |
 | NodePort reachability falsification leg: same request from an undeclared source times out / is refused. ⚠️ 188 is **not** an undeclared source — it SNATs to `10.42.0.0` like everything else; use a pod-network client hitting `10.42.x.y:4000` directly | `FILL` | `FILL` | `PASS/FAIL` |
@@ -300,6 +319,30 @@ validation. Never improvise a phase action.
 | `prod_offline_upgrading` | hold healthy gray; abort if gray fails | verified full-capacity guarded-old |
 | `prod_verified` | hold healthy gray; abort if gray fails | verified full-capacity guarded-old |
 | `committed` | bridge-first offline prod rollback sequence | verified guarded-old revision |
+
+Budget reset during `prod_offline_upgrading`
+
+Gray pins the background-task suppressors and overlays
+`general_settings.disable_reset_budget: true`, so while prod is offline **no
+release is resetting budgets**. This is a measured, bounded gap, not an unknown
+— see `docs/scheduler-suppression-evidence-2026-09-14.md` §5.
+
+Measured 2026-09-14 02:40 Beijing on `litellm-db-0` (`-n litellm-product`): 1526
+keys and 1 user carry `budget_duration`, and all but one stale key share a single
+next `budget_reset_at` of `2026-09-14 16:00:00 UTC` (2026-09-15 00:00 Beijing).
+`reset_budget_job` reschedules every ~597-605s.
+
+- Finish the window before 00:00 Beijing and the gap touches **0 rows**.
+- If the window does cross that boundary, accept a reset delay bounded by
+  (window remainder + ~10 min). No manual action is needed: prod picks the job
+  back up on its next cycle.
+- Either way, 15 minutes after prod is verified, re-run the overdue count and
+  record it. Convergence criterion: `budget_reset_at < now()` is back to <= 1.
+
+```sql
+SELECT count(*) FROM "LiteLLM_VerificationToken"
+ WHERE budget_duration IS NOT NULL AND budget_reset_at < now();
+```
 
 For an abort, record `aborting_to_bridge`, bridge direct smoke, atomic route
 activation, stable traffic proof, `aborted`, and compensation/recovery backlog.

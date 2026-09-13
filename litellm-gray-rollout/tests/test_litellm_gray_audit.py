@@ -1303,7 +1303,16 @@ spec:
 """,
         encoding="utf-8",
     )
-    config_sha = "sha256:" + hashlib.sha256(config.read_bytes()).hexdigest()
+    config_sha = "sha256:" + hashlib.sha256(
+        # This helper only ever builds the gray profile, and a non-prod profile
+        # ships the config with `general_settings.disable_reset_budget: true`
+        # overlaid -- `reset_budget_job` is the one global-mutating scheduled job
+        # with no env var to pin. The evidence binds to the frozen text, not to
+        # the file on disk.
+        _PREPARE_VALUES.disable_reset_budget_in_config(
+            config.read_text(encoding="utf-8"), profile="gray"
+        )[0].encode("utf-8")
+    ).hexdigest()
     scheduler = tmp_path / "scheduler.json"
     callback_data = {"smoke.py": (callbacks / "smoke.py").read_text(encoding="utf-8")}
     callback_text = _PREPARE_VALUES.raw_json(callback_data)
@@ -1316,6 +1325,12 @@ spec:
                 else {"value": "safe"}
             ),
         }
+    ]
+    # Same reason: the gray Pod spec carries the three background-task
+    # suppressors appended to prod's live env order.
+    extra_env += [
+        {"name": name, "value": value}
+        for name, value in sorted(_PREPARE_VALUES.BACKGROUND_TASK_SUPPRESSORS.items())
     ]
     # Exactly the four keys the chart's `litellm-proxy.runtimeChecksum` digests.
     # The Secret snapshot used to be folded in here too, which made every real

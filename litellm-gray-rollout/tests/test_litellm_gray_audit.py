@@ -2493,3 +2493,44 @@ def test_verify_readiness_excludes_every_non_manifest_under_k8s():
     # No dead pattern: a rule matching nothing is a rule nobody is maintaining.
     for pattern in patterns:
         assert any(pattern.search(path.name) for path in scanned), pattern.pattern
+
+
+def test_scripts_never_use_brace_intervals_in_awk():
+    """mawk silently matches nothing on `{n}` -- the failure reads as a clean empty file.
+
+    Measured 2026-09-14 on the production change host 10.68.13.198 (mawk 1.3.4
+    20200120, Ubuntu's default `awk`): the ERE interval quantifier is **not
+    supported and not reported**.  `_lib.sh:write_key_map` filtered its sid lines
+    with `[0-9a-f]{12}`, so on 198 every line was dropped and `key-sid.map` was
+    written empty -- while the same script was green on macOS, whose BWK awk does
+    support intervals.  Downstream, nginx's `map $canonical_key $key_sid` would
+    have fallen through to the default `-` for every key, with no error anywhere.
+
+    That is the worst failure direction this repo guards against: a tool that is
+    wrong only on the machine the change actually runs on, and wrong by going
+    quiet.  So the rule is mechanical -- no brace intervals inside awk programs,
+    spell the repetition out.
+
+    Only awk programs are in scope: bash `=~` and Python `re` both handle `{n}`
+    fine and are used deliberately elsewhere in these scripts.
+    """
+    import re
+
+    # An awk program is the first single-quoted argument after `awk` (optionally
+    # preceded by -v assignments).  Matching the quoted chunk keeps `${var}` shell
+    # expansions and bash `=~` patterns out of scope.
+    awk_program = re.compile(r"\bawk\b(?:\s+-v\s+\S+)*\s+'([^']*)'")
+    interval = re.compile(r"\{\d+(?:,\d*)?\}")
+
+    offenders = []
+    for path in sorted(TOOLS.glob("*.sh")):
+        text = path.read_text(encoding="utf-8")
+        for match in awk_program.finditer(text):
+            if interval.search(match.group(1)):
+                line = text.count("\n", 0, match.start()) + 1
+                offenders.append(f"{path.name}:{line}: {match.group(1)[:80]}")
+
+    assert not offenders, (
+        "awk program uses a brace interval, which mawk ignores silently:\n"
+        + "\n".join(offenders)
+    )

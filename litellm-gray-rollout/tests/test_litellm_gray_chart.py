@@ -705,6 +705,26 @@ def test_chart_expresses_single_file_overlays_and_the_patch_loader():
     assert preStop == ["sh", "-c", f"sleep {load_yaml(CHART / 'values.yaml')['drain']['preStopSeconds']}"]
 
 
+def _schema_path_forms(expected: str) -> tuple[str, ...]:
+    """Both renderings of a values-schema field path, so the assert survives helm 3 vs 4.
+
+    Measured 2026-09-14: the chart rejects the same bad values on both, with the same
+    reason -- only the *path formatting* differs.  helm v4.2.3 prints a JSON pointer
+    (`/callbacks/mountPaths/README.txt`); the helm v3.17.3 that actually runs on 198
+    prints a dotted path (`callbacks.mountPaths.README.txt`).  Pinning one spelling
+    made three parametrisations red on the production change host while
+    `returncode != 0` -- i.e. **the guard worked and the ruler said it did not**.
+
+    Pointer is canonical here because the translation only goes one way: a key can
+    contain a dot (`README.txt`), so `/` -> `.` is lossless while `.` -> `/` is not.
+    Anything that is not a path (a schema `description`, a template `fail` message) is
+    returned unchanged and keeps matching exactly.
+    """
+    if not expected.startswith("/"):
+        return (expected,)
+    return (expected, expected.lstrip("/").replace("/", "."))
+
+
 @pytest.mark.skipif(HELM is None, reason="helm is not installed")
 @pytest.mark.parametrize(
     "overrides, expected",
@@ -792,7 +812,7 @@ def test_chart_rejects_mount_shapes_that_would_silently_overlay_nothing(
 ):
     rejected = _render_gray_with_overrides(overrides)
     assert rejected.returncode != 0, overrides
-    assert expected in rejected.stderr, rejected.stderr
+    assert any(form in rejected.stderr for form in _schema_path_forms(expected)), rejected.stderr
 
 
 def test_chart_and_rollout_artifact_set_is_complete():

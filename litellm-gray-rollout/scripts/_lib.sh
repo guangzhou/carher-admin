@@ -700,10 +700,18 @@ write_key_map() {
   chmod 600 "$file.tmp"
   mv -f "$file.tmp" "$file"
   if [[ -n "$sid_file" ]]; then
-    local sid
+    local sid hex12
     sid="$(sid_for_key "$key")"
+    # ⚠️ 不要把下面这段写回 `[0-9a-f]{12}`。Ubuntu 的默认 awk 是 **mawk**
+    # （198 上实测 mawk 1.3.4 20200120），它**不支持 ERE 区间量词**，而且
+    # **不报错**——只是一行都不匹配。后果是 key-sid.map 被写成空文件，
+    # nginx 的 `map $canonical_key $key_sid` 全部落到 default `-`，静默失效。
+    # 2026-09-14 实测：同一份脚本在 mac（BWK awk，支持区间）绿，在 198 上
+    # test_convergence_commit_preserves_protected_key_sid 红，差异只在 awk 实现。
+    # `test_scripts_never_use_brace_intervals_in_awk` 会在有人写回去时报红。
+    hex12='[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
     { cat "$sid_file" 2>/dev/null || true; printf '"%s" %s;\n' "$key" "$sid"; } |
-      awk '/^[[:space:]]*"[^"]+"[[:space:]]+[0-9a-f]{12};[[:space:]]*$/ {print}' |
+      awk -v hex12="$hex12" '$0 ~ "^[[:space:]]*\"[^\"]+\"[[:space:]]+" hex12 ";[[:space:]]*$" { print }' |
       sort -u >"$sid_file.tmp"
     chmod 600 "$sid_file.tmp"
     mv -f "$sid_file.tmp" "$sid_file"

@@ -147,9 +147,10 @@
     "podSecurityContext": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["runAsNonRoot", "seccompProfile"],
+      "required": ["runAsUser", "runAsGroup", "seccompProfile"],
       "properties": {
-        "runAsNonRoot": {"const": true},
+        "runAsUser": {"const": 0},
+        "runAsGroup": {"const": 0},
         "seccompProfile": {
           "type": "object",
           "additionalProperties": false,

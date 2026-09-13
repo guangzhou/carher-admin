@@ -1,9 +1,28 @@
+# PodSecurity is `baseline`, not `restricted`, and that is deliberate.
+#
+# The clone exists to qualify the production LiteLLM image. That image ships its
+# Prisma query engine only under /root/.cache with /root at mode 0700, and
+# production's litellm-proxy runs as uid 0 with an empty securityContext. Under
+# `restricted` the qualification Jobs had to run as uid 1000, could not resolve
+# a query engine, and died before reaching the clone — i.e. `restricted` did not
+# make the clone safer, it made the gate untestable and it qualified an identity
+# that is never deployed.
+#
+# What still carries the isolation: the default-deny NetworkPolicy set in
+# k8s/clone-networkpolicies.yaml (no egress except explicitly labelled roles),
+# automountServiceAccountToken: false on every workload, and a dedicated node.
+# `audit`/`warn` stay at `restricted` so anything that does not need root is
+# still flagged.
+#
+# Revert path: set enforce back to `restricted` once the image exposes a
+# world-readable query engine (or once the runners stop using Prisma). Nothing
+# else in this directory depends on `baseline`.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: litellm-clone
   labels:
     litellm.carher.io/isolation: clone
-    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted

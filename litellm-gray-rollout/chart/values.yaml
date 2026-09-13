@@ -76,7 +76,15 @@ secretRefs:
   - carher-env-keys
 
 podSecurityContext:
-  runAsNonRoot: true
+  # runAsUser MUST be set explicitly. The LiteLLM image declares `USER root`
+  # (a name, not a uid), so `runAsNonRoot: true` alone makes the kubelet fail
+  # the container with CreateContainerConfigError: "container has runAsNonRoot
+  # and image has non-numeric user (root)" — the gray Deployment would never
+  # have started. Production's litellm-proxy runs as uid 0, and the image only
+  # exposes its Prisma query engine under root-only /root/.cache, so the gray
+  # instance runs under the same identity as the thing it replaces.
+  runAsUser: 0
+  runAsGroup: 0
   seccompProfile:
     type: RuntimeDefault
 

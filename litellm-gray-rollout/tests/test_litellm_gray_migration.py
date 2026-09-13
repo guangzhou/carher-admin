@@ -116,8 +116,17 @@ def test_compatibility_runner_starts_real_proxy_and_uses_http_paths():
     assert "pg_advisory_lock_shared" in source
     assert "pg_advisory_xact_lock" not in source
     assert "FOR UPDATE" not in source
-    assert "PRISMA_QUERY_ENGINE_BINARY" in source
-    assert "BINARY_PATHS.query_engine" in source
+    # The runner must NOT carry a Prisma engine override: the Job runs as uid 0
+    # like production, so the image's own root-only engine cache resolves.
+    # Comments are stripped first — the runner deliberately names the dead
+    # override in a comment so nobody reintroduces it.
+    code = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
+    assert "PRISMA_QUERY_ENGINE_BINARY" not in code
+    assert "BINARY_PATHS.query_engine" not in code
+    # A failed leg has to say why, not just which call broke.
+    assert "proxy_log_tail" in source
+    # SpendLogs.request_id is the response body id, not the call-id header.
+    assert 'response.get("id")' in source
 
 
 def test_prepare_migration_run_embeds_fixed_contract_and_real_proxy_config(tmp_path: Path):
@@ -137,9 +146,8 @@ def test_prepare_migration_run_embeds_fixed_contract_and_real_proxy_config(tmp_p
             if volume["name"] == "gray-runners"
         )
         assert runner_volume["configMap"]["defaultMode"] == 0o444
-        init = job["spec"]["template"]["spec"]["initContainers"]
-        assert init[0]["name"] == "prisma-engine-export"
-        assert init[0]["securityContext"]["runAsUser"] == 1000
+        assert not job["spec"]["template"]["spec"].get("initContainers")
+        assert job["spec"]["template"]["spec"]["securityContext"]["runAsUser"] == 0
         container = job["spec"]["template"]["spec"]["containers"][0]
         assert container["command"] == ["python3"]
         assert "--config" in container["args"]
@@ -148,7 +156,10 @@ def test_prepare_migration_run_embeds_fixed_contract_and_real_proxy_config(tmp_p
         assert env["GRAY_GENERATION"]["value"] == GENERATION
         assert "fieldRef" in env["POD_UID"]["valueFrom"]
         assert "secretKeyRef" in env["LITELLM_MASTER_KEY"]["valueFrom"]
-        assert env["PRISMA_QUERY_ENGINE_BINARY"]["value"] == "/prisma-engine/query-engine"
+        assert "PRISMA_QUERY_ENGINE_BINARY" not in env
+        mounts = {mount["name"]: mount for mount in container["volumeMounts"]}
+        assert mounts["gray-runners"]["mountPath"] == "/opt/litellm-gray"
+        assert mounts["gray-evidence"]["mountPath"] == "/evidence"
     assert json.loads(result.stdout)["ledger_sha256"] == digest(ledger)
 
 

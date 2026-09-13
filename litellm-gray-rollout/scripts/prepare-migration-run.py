@@ -226,46 +226,11 @@ def add_runner_mount(job: dict[str, Any], config_name: str) -> None:
     volumes = pod_spec.setdefault("volumes", [])
     volumes.extend(
         [
-            # ConfigMap files stay root-owned. The non-root runner only needs to
-            # read them because Python is the executable entrypoint.
+            # ConfigMap files stay root-owned and read-only; Python is the
+            # entrypoint, so the runner only ever needs to read them.
             {"name": "gray-runners", "configMap": {"name": config_name, "defaultMode": 0o444}},
             {"name": "gray-evidence", "emptyDir": {}},
         ]
-    )
-
-
-def add_shared_prisma_engine(job: dict[str, Any], engine_image: str) -> None:
-    """Use the target image's readable Prisma engine for both version clients."""
-    pod_spec = job["spec"]["template"]["spec"]
-    container = pod_spec["containers"][0]
-    pod_spec.setdefault("volumes", []).append({"name": "prisma-engine", "emptyDir": {}})
-    pod_spec.setdefault("initContainers", []).append(
-        {
-            "name": "prisma-engine-export",
-            "image": engine_image,
-            "imagePullPolicy": "IfNotPresent",
-            "command": ["sh", "-ceu"],
-            "args": [
-                "engine=$(find /opt/prisma/binaries -type f "
-                "-name 'query-engine-debian-openssl-3.0.x' -perm -111 -print -quit); "
-                "test -n \"$engine\"; cp \"$engine\" /prisma-engine/query-engine; "
-                "chmod 0555 /prisma-engine/query-engine",
-            ],
-            "securityContext": {
-                "runAsUser": 1000,
-                "runAsGroup": 1000,
-                "runAsNonRoot": True,
-                "allowPrivilegeEscalation": False,
-                "capabilities": {"drop": ["ALL"]},
-            },
-            "volumeMounts": [{"name": "prisma-engine", "mountPath": "/prisma-engine"}],
-        }
-    )
-    container.setdefault("env", []).append(
-        {"name": "PRISMA_QUERY_ENGINE_BINARY", "value": "/prisma-engine/query-engine"}
-    )
-    container.setdefault("volumeMounts", []).append(
-        {"name": "prisma-engine", "mountPath": "/prisma-engine", "readOnly": True}
     )
     container.setdefault("volumeMounts", []).extend(
         [
@@ -273,6 +238,25 @@ def add_shared_prisma_engine(job: dict[str, Any], engine_image: str) -> None:
             {"name": "gray-evidence", "mountPath": "/evidence"},
         ]
     )
+
+
+def enforce_production_identity(job: dict[str, Any]) -> None:
+    """Refuse to render a Job that cannot reach the image's Prisma engine.
+
+    The image keeps its query engines under /root/.cache with /root at 0700, so
+    a non-root uid resolves no engine and the runner dies at connect(). The
+    previous workaround exported one engine from an init container, but it
+    searched /opt/prisma/binaries — a path that only existed in a different
+    image — so it silently produced Jobs that could never pass. Production's
+    litellm-proxy runs as uid 0; qualifying it under any other identity tests
+    something that will not be deployed.
+    """
+    pod_spec = job["spec"]["template"]["spec"]
+    security = pod_spec.get("securityContext") or {}
+    if security.get("runAsUser") != 0 or security.get("runAsNonRoot"):
+        fail(f"Job {job['metadata']['name']} must run as uid 0 to reach the image's Prisma engine")
+    if pod_spec.get("initContainers"):
+        fail(f"Job {job['metadata']['name']} must not carry a Prisma engine export init container")
 
 
 def prepare_migration_job(
@@ -324,6 +308,7 @@ def prepare_migration_job(
     if (metadata.get("namespace"), secret_name) != expected:
         fail("migration target template is unsafe")
     add_runner_mount(job, config_name)
+    enforce_production_identity(job)
 
 
 def prepare_version_jobs(
@@ -380,7 +365,7 @@ def prepare_version_jobs(
             ]
         )
         add_runner_mount(job, config_name)
-        add_shared_prisma_engine(job, target_image)
+        enforce_production_identity(job)
     if seen != set(JOB_MODES):
         fail("compatibility Job set is incomplete")
 

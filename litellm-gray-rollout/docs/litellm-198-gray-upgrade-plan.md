@@ -231,7 +231,47 @@ flowchart TB
 
 对照 `litellm-safe-upgrade-canary-plan.md` 的 destructive checklist（DROP/ALTER TYPE/新增无默认 NOT NULL/改唯一索引/改 FK/enum 删改/表列改名）任一命中即 STOP。
 
-**在线 DDL gate（additive-only 之外的独立关卡）**：additive DDL 不等于可在线执行——`CREATE INDEX`、加约束、部分 `ALTER TABLE` 虽 schema 兼容，仍可能长时间锁表或重写大表、阻塞预算更新。v1.95.0 的 live diff 已包含 `CREATE INDEX "LiteLLM_SpendLogToolIndex_start_time_idx" ON "LiteLLM_SpendLogToolIndex"("start_time")`；生产该表约 13 GB / 1122 万行，因此精简 clone 只能验证索引定义，**不能批准直接执行普通 CREATE INDEX**。该索引必须拆成独立 `CREATE INDEX CONCURRENTLY` runner，先做重复/无效索引检查，设置取消与失败清理策略，并在生产规模副本或独立大表环境取得耗时、I/O、锁等待证据；否则转维护窗口。放行条件（全部满足，否则该 DDL 改走维护窗口）：
+**在线 DDL gate（additive-only 之外的独立关卡）**：additive DDL 不等于可在线执行——`CREATE INDEX`、加约束、部分 `ALTER TABLE` 虽 schema 兼容，仍可能长时间锁表或重写大表、阻塞预算更新。v1.95.0 的 live diff 已包含 `CREATE INDEX "LiteLLM_SpendLogToolIndex_start_time_idx" ON "LiteLLM_SpendLogToolIndex"("start_time")`，v1.100.1 的待执行集合里它仍在（`20260724000000_add_spend_log_tool_index_start_time_idx`），且**仍是普通 `CREATE INDEX`**。因此精简 clone 只能验证索引定义，**不能批准直接执行普通 CREATE INDEX**。该索引必须拆成独立 `CREATE INDEX CONCURRENTLY` runner，先做重复/无效索引检查，设置取消与失败清理策略，并在生产规模副本或独立大表环境取得耗时、I/O、锁等待证据；否则转维护窗口。放行条件（全部满足，否则该 DDL 改走维护窗口）：
+
+> **2026-09-13 实测更新（详见 [migration-cost-evidence-2026-09-13.md](migration-cost-evidence-2026-09-13.md)）**
+>
+> - 上面「约 13 GB / 1122 万行」是 v1.95.0 时代的读数，**已过时**：现在是
+>   **24,992,272 行 / 26 GB**（heap 1,216,700 页 ≈ 9.7 GB），翻了一倍以上。
+> - v1.90.2 → v1.100.1 共 **31 条**待执行迁移，逐条 grep 尺寸相关操作后，
+>   **碰得到大表的只有两条**：本索引，以及 `LiteLLM_SpendLogs` 上的
+>   `ADD COLUMN created_at/updated_at NOT NULL DEFAULT CURRENT_TIMESTAMP`。
+>   其余 12 处 index/constraint/UPDATE 的目标表都是同批迁移刚建出来的空表。
+> - 那条 `ADD COLUMN` **不重写表**：clone-c 上按生产形状造 3,000,000 行 / 1181 MB
+>   实测 **2.063 ms**，`filenode` 前后一致；VOLATILE 默认值的阳性对照为
+>   **21,128 ms** 且 `filenode` 改变。⇒ 按 141 GB 数据量外推的长维护窗口是**假设**，
+>   已被证伪，不要再写进方案。残余风险是 `ACCESS EXCLUSIVE` **锁获取**排队，
+>   即下方第 2 条的短 `lock_timeout`，不是语句时长。
+> - 本索引已按本节要求**在迁移窗口之外用 `CREATE INDEX CONCURRENTLY` 预建完成**
+>   （2026-09-13 19:05:12 → 19:14:47，耗时 **9 分 34.7 秒**，索引 213 MB，
+>   `indisvalid=true`，全库 invalid 索引数 = 0）。证据文件 §6：全程 `waitLock=0`、
+>   该表插入计数持续增长 ⇒ **未阻塞 DML**，4 个 proxy 副本无新增重启。
+>   建成后 migration 里的 `CREATE INDEX IF NOT EXISTS` 按索引名判重变成 no-op
+>   （实际索引定义与 migration 原句逐字一致，已核对），
+>   **尺寸相关语句从迁移窗口里彻底消失**。
+>   回滚方式：`DROP INDEX CONCURRENTLY "LiteLLM_SpendLogToolIndex_start_time_idx"`。
+> - 硬约束：生产 postgres `shared_buffers` 仅 128 MB，容器 cgroup 上限 3 Gi 且
+>   `memory.current` 长期贴在 99.8%（绝大部分是可回收 page cache，`anon` 仅 ~226 MB，
+>   `oom_kill=0`）。迁移 Job / 索引 runner **禁止**把 `maintenance_work_mem`
+>   调到几百 MB 以上，否则挤掉 page cache 拖慢全库，调过头会把容器打到 OOMKilled
+>   ——那才是真正的生产中断。本次预建只用 session 级 `256MB`。
+> - **迁移之后的兼容性也已实测**（证据文件 §7，三个 clone 各跑一次迁移演练，
+>   均恰好应用 31 条、终态 1085 列 / 86 表 / 162 条迁移）：
+>   - **回滚方向**：v1.90.2 对着已迁移的库正常启动并**写入成功**，新增的
+>     `created_at/updated_at` 由 DB 默认值自动填上，`LiteLLM_ErrorLogs = 0`。
+>   - **灰度方向**：v1.90.2 与 v1.100.1 **同时**连 clone-c 各打 3 条，6 行按
+>     `request_id` 全部认领成功且在 7.2 s 窗口内真实交错；共存前后 schema 指纹
+>     逐字一致（`1085|86|162|ba58039648be3e85d7267ce48524ad26`）
+>     ⇒ 老版本启动时的 schema 更新逻辑对已迁移库是 **no-op，不会把 schema 往回拽**，
+>     历史担心的 "schema thrashing" 在这条路径上不成立。
+>   - **补丁存活**：v1.100.1 补丁版运行时镜像内两个锚点仍命中
+>     （`selected model is at capacity`、`_BARE_STATUS_MAP`），3/3 round-trip 通过。
+>   ⇒ 因此下方「迁移后老版本可能改写 schema」这一类防御措施是**加固而非前提**，
+>   `DISABLE_SCHEMA_UPDATE` 可以设但不设也不会破。
 
 1. 拿到 migration 的**精确 DDL 清单**（clone 迁移时保存），逐条核对锁级别。本轮仓库内的 transactional ledger runner **只接受已经审定的 `ALTER TABLE ... ADD COLUMN` 子集**；`CREATE INDEX`、约束和其他 `ALTER` 一律 fail-closed，不得塞进该 Job。未来若出现索引，必须拆到独立的**非事务** runner，并只允许 `CREATE INDEX CONCURRENTLY`；在该 runner、对应测试与维护/取消策略落盘前，索引变更只能走维护窗口。
    对本轮 `ADD COLUMN`，ledger 记录 PostgreSQL 实际锁 `ACCESS EXCLUSIVE`；validator 只接受当前已审定的锁模式，未知/与批准清单不符的模式 fail-closed。`ACCESS EXCLUSIVE` 本身不是放行理由，仍必须同时满足短 `lock_timeout`、实测 lock wait/总时长/p95 阈值和 `table_rewrite=false`。

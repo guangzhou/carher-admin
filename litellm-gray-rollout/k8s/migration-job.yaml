@@ -1,5 +1,10 @@
 # Templates only. The renderer emits exactly one selected suspended Job:
 # clone by default, or production only after an explicit Path A target.
+#
+# These run as uid 0 for the same reason as the version-test Jobs: the ledger
+# runner talks to the database through Prisma, and the image only exposes its
+# query engine under root-only /root/.cache. Production's litellm-proxy already
+# runs as uid 0, so this is the production identity, not an escalation.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -22,9 +27,9 @@ spec:
       automountServiceAccountToken: false
       restartPolicy: Never
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
+        # uid 0 on purpose — see the header note.
+        runAsUser: 0
+        runAsGroup: 0
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -82,9 +87,9 @@ spec:
       automountServiceAccountToken: false
       restartPolicy: Never
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
+        # uid 0 on purpose — see the header note.
+        runAsUser: 0
+        runAsGroup: 0
         seccompProfile:
           type: RuntimeDefault
       containers:

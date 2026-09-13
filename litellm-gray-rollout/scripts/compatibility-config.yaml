@@ -3,6 +3,13 @@ model_list:
     litellm_params:
       model: openai/gpt-4o-mini
       api_key: os.environ/OPENAI_API_KEY
+      # Deployment-level mock: the clone namespace has no egress, and the gate
+      # is about DB/proxy compatibility, not about reaching OpenAI. It must be
+      # here rather than in the request body — the proxy strips client-supplied
+      # mock_response unless the key/team carries allow_client_mock_response
+      # metadata (litellm_pre_call_utils._CLIENT_MOCK_CONTROL_FIELDS), so the
+      # body form silently became a real upstream call.
+      mock_response: "gray compatibility ok"
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   store_model_in_db: true

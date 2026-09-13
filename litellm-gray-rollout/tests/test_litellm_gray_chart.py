@@ -1328,7 +1328,7 @@ def test_migration_job_is_suspended_fail_closed_and_never_retries():
     assert pod_spec["restartPolicy"] == "Never"
     assert pod_spec["automountServiceAccountToken"] is False
     assert job["metadata"]["namespace"] == "litellm-clone"
-    assert pod_spec["securityContext"]["runAsNonRoot"] is True
+    assert pod_spec["securityContext"]["runAsUser"] == 0
     assert pod_spec["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
     assert container["image"].startswith(IDC_REGISTRY_PREFIX)
     assert re.search(r"@sha256:[a-f0-9]{64}$", container["image"])
@@ -1342,7 +1342,7 @@ def test_migration_job_is_suspended_fail_closed_and_never_retries():
     assert "lock_timeout=5s" in env["PGOPTIONS"]
     assert "statement_timeout=15min" in env["PGOPTIONS"]
     assert "approved migration ledger" in "\n".join(container["args"]).lower()
-    assert_restricted_pod_spec(pod_spec)
+    assert_production_identity_pod_spec(pod_spec)
 
     production = find_doc(
         documents, "Job", "litellm-production-schema-migration-template"
@@ -1356,7 +1356,7 @@ def test_migration_job_is_suspended_fail_closed_and_never_retries():
         "key": "DATABASE_URL",
     }
     assert "CLONE_DB_HOST" not in production_env
-    assert_restricted_pod_spec(production["spec"]["template"]["spec"])
+    assert_production_identity_pod_spec(production["spec"]["template"]["spec"])
 
 
 def test_secret_templates_are_placeholder_only_and_immutable():
@@ -1590,6 +1590,26 @@ def assert_restricted_pod_spec(pod_spec: dict) -> None:
         assert security["capabilities"] == {"drop": ["ALL"]}
 
 
+def assert_production_identity_pod_spec(pod_spec: dict) -> None:
+    """For pods that run the LiteLLM image itself.
+
+    They must run as uid 0 — production's litellm-proxy does, and the image only
+    exposes its Prisma query engine under /root/.cache with /root at 0700, so a
+    non-root uid cannot open a database connection at all. Everything else that
+    `restricted` bought us is still asserted here.
+    """
+    assert pod_spec["automountServiceAccountToken"] is False
+    assert pod_spec["securityContext"]["runAsUser"] == 0
+    assert pod_spec["securityContext"]["runAsGroup"] == 0
+    assert "runAsNonRoot" not in pod_spec["securityContext"]
+    assert pod_spec["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
+    assert not pod_spec.get("initContainers")
+    for container in pod_spec["containers"]:
+        security = container["securityContext"]
+        assert security["allowPrivilegeEscalation"] is False
+        assert security["capabilities"] == {"drop": ["ALL"]}
+
+
 def test_clone_databases_define_independent_a_b_c_targets_without_credentials():
     documents = load_yaml_documents(ROLLOUT / "clone-databases.yaml")
     names = {"litellm-clone-a", "litellm-clone-b", "litellm-clone-c"}
@@ -1734,7 +1754,7 @@ def test_clone_version_jobs_cover_new_old_and_concurrent_compatibility():
         assert job["spec"]["suspend"] is True
         assert job["spec"]["backoffLimit"] == 0
         assert job["spec"]["template"]["spec"]["restartPolicy"] == "Never"
-        assert_restricted_pod_spec(job["spec"]["template"]["spec"])
+        assert_production_identity_pod_spec(job["spec"]["template"]["spec"])
         labels = job["spec"]["template"]["metadata"]["labels"]
         assert labels["litellm.carher.io/role"] == "version-test"
         env_items = {

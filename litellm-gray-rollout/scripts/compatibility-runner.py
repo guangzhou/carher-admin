@@ -12,6 +12,7 @@ import re
 import secrets
 import signal
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -26,6 +27,11 @@ CHECKSUM_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 BARRIER_NAMESPACE = 1981930
 BARRIER_KEY = 2
+# Second rendezvous: both legs must have OBSERVED the overlap before either one
+# deletes its ProxyModel row, otherwise the faster leg's cleanup can make the
+# slower leg's overlap check fail for a reason that has nothing to do with the
+# version under test.
+BARRIER_DONE_KEY = 3
 ISOLATED_CHECKS = {"proxy_startup", "key_api", "proxy_model_api", "auth", "spend_logs"}
 CONCURRENT_CHECKS = {"concurrent_budget", "concurrent_spend_logs", "concurrent_proxy_model"}
 
@@ -109,38 +115,75 @@ def request(
             raw = response.read()
             payload = json.loads(raw) if raw else {}
             return payload, {key.lower(): value for key, value in response.headers.items()}
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+    except urllib.error.HTTPError as exc:
+        # The proxy puts the actionable reason in the error body. Dropping it (the
+        # old behaviour) turns every 4xx/5xx into an unactionable status line and
+        # forces a second run just to learn what went wrong.
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:2000]
+        except Exception:  # pragma: no cover - body already consumed/closed
+            detail = "<error body unavailable>"
+        fail(f"{method} {path} failed: {exc} body={detail}")
+    except (urllib.error.URLError, json.JSONDecodeError) as exc:
         fail(f"{method} {path} failed: {exc}")
 
 
-def start_proxy(config: Path) -> subprocess.Popen[str]:
+def proxy_log_tail(log_path: Path, limit: int = 12000) -> str:
+    """Last `limit` bytes of the proxy log, decoded leniently.
+
+    The proxy prints its startup diagnosis (engine resolution, DB handshake,
+    config errors) in the FIRST lines and its request errors in the last ones.
+    Piping it into the runner and quoting only a slice on failure destroyed the
+    half that mattered, so the full log now lives in a file on the evidence
+    mount and this only produces the human-readable tail.
+    """
+    try:
+        with open(log_path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - limit))
+            text = handle.read().decode("utf-8", "replace")
+        return f"[{size} bytes total, tail of {min(size, limit)}]\n{text}"
+    except OSError as exc:
+        return f"<proxy log unavailable: {exc}>"
+
+
+def start_proxy(config: Path, log_path: Path) -> subprocess.Popen[bytes]:
     entrypoint = Path("/app/docker/prod_entrypoint.sh")
     if not entrypoint.is_file():
         fail("real LiteLLM proxy entrypoint is missing from the image")
-    process = subprocess.Popen(
-        [str(entrypoint), "--config", str(config), "--port", "4000", "--num_workers", "1"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # A pipe with no reader deadlocks the proxy once it fills the 64 KiB buffer,
+    # which looked exactly like "readiness timed out". Redirect to a real file.
+    handle = open(log_path, "wb")
+    try:
+        process = subprocess.Popen(
+            [str(entrypoint), "--config", str(config), "--port", "4000", "--num_workers", "1"],
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        handle.close()
     deadline = time.monotonic() + 180
     master_key = os.environ.get("LITELLM_MASTER_KEY", "")
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            output = process.stdout.read()[-4000:] if process.stdout else ""
-            fail(f"LiteLLM proxy exited during startup: {output}")
+            fail(
+                f"LiteLLM proxy exited during startup with code {process.returncode}; "
+                f"full log at {log_path}\n{proxy_log_tail(log_path)}"
+            )
         try:
             request("GET", "/health/readiness", token=master_key)
             return process
         except SystemExit:
             time.sleep(1)
-    fail("LiteLLM proxy readiness timed out")
+    fail(f"LiteLLM proxy readiness timed out; full log at {log_path}\n{proxy_log_tail(log_path)}")
 
 
-async def wait_for_peer(connection: Prisma) -> None:
+async def wait_for_peer(connection: Prisma, key: int = BARRIER_KEY, label: str = "start") -> None:
     await connection.query_raw(
-        "SELECT pg_advisory_lock_shared($1::integer, $2::integer)", BARRIER_NAMESPACE, BARRIER_KEY
+        "SELECT pg_advisory_lock_shared($1::integer, $2::integer)", BARRIER_NAMESPACE, key
     )
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
@@ -149,12 +192,12 @@ async def wait_for_peer(connection: Prisma) -> None:
             "WHERE locktype='advisory' AND classid=$1::oid AND objid=$2::oid "
             "AND mode='ShareLock' AND granted",
             BARRIER_NAMESPACE,
-            BARRIER_KEY,
+            key,
         )
         if rows and int(rows[0]["peers"] or 0) >= 2:
             return
         await asyncio.sleep(0.2)
-    fail("concurrent compatibility peer did not reach the start barrier")
+    fail(f"concurrent compatibility peer did not reach the {label} barrier")
 
 
 def admin_token() -> str:
@@ -176,65 +219,87 @@ async def application_probe(mode: str, connection: Prisma) -> list[str]:
     key = generated.get("key") or generated.get("token")
     if not isinstance(key, str) or not key.startswith("sk-"):
         fail("/key/generate did not return a LiteLLM key")
-    request("POST", "/key/update", token=admin, body={"key": key, "max_budget": 11})
-    request(
-        "POST", "/model/new", token=admin,
-        body={
-            "model_name": model_name,
-            "litellm_params": {"model": "openai/gpt-4o-mini", "api_key": "os.environ/OPENAI_API_KEY"},
-            "model_info": {"id": model_id},
-        },
-    )
-    info, _ = request("GET", "/model/info", token=admin)
-    if model_id not in json.dumps(info, sort_keys=True):
-        fail("new ProxyModel is not visible through /model/info")
-    response, headers = request(
-        "POST", "/v1/chat/completions", token=key,
-        body={
-            "model": "gray-gate-mock",
-            "messages": [{"role": "user", "content": "gray compatibility probe"}],
-            "mock_response": "gray compatibility ok",
-        },
-    )
-    if "gray compatibility ok" not in json.dumps(response):
-        fail("authenticated mock inference did not return the expected response")
-    request_id = headers.get("x-litellm-call-id") or headers.get("x-request-id")
-    if not request_id:
-        fail("inference response lacks a request identifier")
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        rows = await connection.query_raw(
-            'SELECT request_id FROM "LiteLLM_SpendLogs" WHERE request_id = $1', request_id
+    try:
+        request("POST", "/key/update", token=admin, body={"key": key, "max_budget": 11})
+        request(
+            "POST", "/model/new", token=admin,
+            body={
+                "model_name": model_name,
+                "litellm_params": {"model": "openai/gpt-4o-mini", "api_key": "os.environ/OPENAI_API_KEY"},
+                "model_info": {"id": model_id},
+            },
         )
-        if rows:
-            break
-        await asyncio.sleep(0.5)
-    else:
-        fail("inference did not create a SpendLogs terminal row")
-    if mode.startswith("concurrent-"):
-        peer_prefix = f"gray-{os.environ['GRAY_RUN_ID']}-concurrent-"
+        info, _ = request("GET", "/model/info", token=admin)
+        if model_id not in json.dumps(info, sort_keys=True):
+            fail("new ProxyModel is not visible through /model/info")
+        # Take the lower bound from the database's own clock so the concurrency
+        # window below cannot be widened or narrowed by pod/DB clock skew.
+        clock = await connection.query_raw(
+            "SELECT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS.MS') AS t"
+        )
+        if not clock:
+            fail("cannot read the database clock")
+        probe_started = str(clock[0]["t"])
+        response, headers = request(
+            "POST", "/v1/chat/completions", token=key,
+            body={
+                # No mock_response here on purpose: the proxy strips client-supplied
+                # mock fields unless the key allows them, so it would quietly become
+                # a real upstream call. The mock lives in the deployment config.
+                "model": "gray-gate-mock",
+                "messages": [{"role": "user", "content": "gray compatibility probe"}],
+            },
+        )
+        if "gray compatibility ok" not in json.dumps(response):
+            fail("authenticated mock inference did not return the expected response")
+        # SpendLogs.request_id is the RESPONSE BODY id (get_spend_logs_id falls back
+        # to litellm_call_id only when the response carries none). The x-litellm-call-id
+        # header is a different value, so polling on it never matched a row.
+        request_id = response.get("id") or headers.get("x-litellm-call-id") or headers.get("x-request-id")
+        if not request_id:
+            fail("inference response lacks a request identifier")
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
-            models = await connection.query_raw(
-                'SELECT count(*)::bigint AS count FROM "LiteLLM_ProxyModelTable" WHERE model_id LIKE $1',
-                peer_prefix + "%",
+            rows = await connection.query_raw(
+                'SELECT request_id FROM "LiteLLM_SpendLogs" WHERE request_id = $1', request_id
             )
-            logs = await connection.query_raw(
-                'SELECT count(DISTINCT request_id)::bigint AS count FROM "LiteLLM_SpendLogs" '
-                "WHERE request_id = $1 OR request_id IN (SELECT request_id FROM \"LiteLLM_SpendLogs\" WHERE model = 'gray-gate-mock')",
-                request_id,
-            )
-            if models and int(models[0]["count"] or 0) >= 2 and logs and int(logs[0]["count"] or 0) >= 2:
+            if rows:
                 break
             await asyncio.sleep(0.5)
         else:
-            fail("concurrent ProxyModel/SpendLogs writes did not overlap visibly")
-        checks = sorted(CONCURRENT_CHECKS)
-    else:
-        checks = sorted(ISOLATED_CHECKS)
-    request("POST", "/model/delete", token=admin, body={"id": model_id})
-    request("POST", "/key/delete", token=admin, body={"keys": [key]})
-    return checks
+            fail("inference did not create a SpendLogs terminal row")
+        if mode.startswith("concurrent-"):
+            peer_prefix = f"gray-{os.environ['GRAY_RUN_ID']}-concurrent-"
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                models = await connection.query_raw(
+                    'SELECT count(*)::bigint AS count FROM "LiteLLM_ProxyModelTable" WHERE model_id LIKE $1',
+                    peer_prefix + "%",
+                )
+                # model holds the LANDING model (openai/gpt-4o-mini); the requested
+                # name lives in model_group. Filtering on `model` matched nothing.
+                logs = await connection.query_raw(
+                    'SELECT count(DISTINCT request_id)::bigint AS count FROM "LiteLLM_SpendLogs" '
+                    "WHERE model_group = 'gray-gate-mock' AND \"startTime\" >= $1::timestamp",
+                    probe_started,
+                )
+                if models and int(models[0]["count"] or 0) >= 2 and logs and int(logs[0]["count"] or 0) >= 2:
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                fail("concurrent ProxyModel/SpendLogs writes did not overlap visibly")
+            await wait_for_peer(connection, BARRIER_DONE_KEY, "overlap-observed")
+            return sorted(CONCURRENT_CHECKS)
+        return sorted(ISOLATED_CHECKS)
+    finally:
+        # A failed leg used to leave its ProxyModel row and key behind, so the
+        # next leg started against a dirtier clone than the one it was meant to
+        # qualify. Clean up on both paths, never masking the original error.
+        for endpoint, payload in (("/model/delete", {"id": model_id}), ("/key/delete", {"keys": [key]})):
+            try:
+                request("POST", endpoint, token=admin, body=payload)
+            except BaseException:
+                pass
 
 
 async def run(mode: str, config: Path, result_path: Path) -> None:
@@ -248,20 +313,18 @@ async def run(mode: str, config: Path, result_path: Path) -> None:
         "rolled_back": False,
     }
     atomic_write(result_path, result)
-    # Stable images may keep Prisma binaries under root-only cache paths. The
-    # frozen Job exports one verified engine into a shared read-only mount.
-    engine_path = os.environ.get("PRISMA_QUERY_ENGINE_BINARY", "")
-    if engine_path:
-        from prisma import client as prisma_client
-
-        prisma_client.BINARY_PATHS.query_engine = {
-            platform: engine_path for platform in prisma_client.BINARY_PATHS.query_engine
-        }
+    # No PRISMA_QUERY_ENGINE_BINARY override here. The image keeps its query
+    # engines under root-only /root/.cache, and the Job runs as uid 0 exactly as
+    # production does, so Prisma resolves them on its own. The former override
+    # pointed at an engine exported by an init container that searched a path
+    # which does not exist in this image.
     connection = Prisma()
     await connection.connect()
     binding["db_target_sha256"] = await db_digest(connection)
     atomic_write(result_path, result)
-    proxy = start_proxy(config)
+    log_path = result_path.parent / f"proxy-{mode}.log"
+    result["proxy_log"] = str(log_path)
+    proxy = start_proxy(config, log_path)
     barrier = mode.startswith("concurrent-")
     try:
         if barrier:
@@ -271,19 +334,27 @@ async def run(mode: str, config: Path, result_path: Path) -> None:
         result["result_sha256"] = digest(result)
         atomic_write(result_path, result)
         print(json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
-    except BaseException:
-        result.update(status="FAIL", completed_at=now())
+    except BaseException as exc:
+        # Without the proxy's own log a failed leg only says which HTTP call
+        # broke, never why. Carry the tail into the result so one run is enough.
+        result.update(status="FAIL", completed_at=now(), failure=f"{type(exc).__name__}: {exc}")
+        tail = proxy_log_tail(log_path)
+        result["proxy_log_tail"] = tail
         atomic_write(result_path, result)
+        # The Job's Pod is gone by the time anyone reads the evidence mount, so
+        # the tail has to reach `kubectl logs` too, not only the result file.
+        print(f"--- proxy log ({log_path}) ---\n{tail}", file=sys.stderr, flush=True)
         raise
     finally:
         if barrier:
-            try:
-                await connection.query_raw(
-                    "SELECT pg_advisory_unlock_shared($1::integer, $2::integer)",
-                    BARRIER_NAMESPACE, BARRIER_KEY,
-                )
-            except Exception:
-                pass
+            for key in (BARRIER_KEY, BARRIER_DONE_KEY):
+                try:
+                    await connection.query_raw(
+                        "SELECT pg_advisory_unlock_shared($1::integer, $2::integer)",
+                        BARRIER_NAMESPACE, key,
+                    )
+                except Exception:
+                    pass
         await connection.disconnect()
         if proxy.poll() is None:
             os.killpg(proxy.pid, signal.SIGTERM)

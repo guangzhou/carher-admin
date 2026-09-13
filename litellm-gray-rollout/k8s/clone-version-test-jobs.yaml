@@ -1,3 +1,18 @@
+# Templates only — scripts/prepare-migration-run.py fills in the image digests,
+# the runner ConfigMap name and the real command.
+#
+# Why these Jobs run as uid 0:
+# the LiteLLM image ships its Prisma query engine only under /root/.cache with
+# /root at mode 0700, so a non-root uid cannot resolve an engine at all and the
+# runner dies at connect() before it ever touches the clone. Production's
+# litellm-proxy runs as uid 0 with an empty securityContext; these Jobs exist to
+# qualify that image, so they must run under the same identity or they are
+# qualifying something else. An earlier attempt to dodge this by exporting one
+# engine from an init container was built against a different image and searched
+# a path (/opt/prisma/binaries) that does not exist here.
+# The namespace is therefore PodSecurity `baseline`, not `restricted`
+# (k8s/clone-namespace.yaml); isolation is carried by the default-deny
+# NetworkPolicy in k8s/clone-networkpolicies.yaml, which is unchanged.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -23,9 +38,9 @@ spec:
           effect: NoSchedule
       restartPolicy: Never
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
+        # uid 0 on purpose — see the header note.
+        runAsUser: 0
+        runAsGroup: 0
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -81,9 +96,9 @@ spec:
           effect: NoSchedule
       restartPolicy: Never
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
+        # uid 0 on purpose — see the header note.
+        runAsUser: 0
+        runAsGroup: 0
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -139,9 +154,9 @@ spec:
           effect: NoSchedule
       restartPolicy: Never
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
+        # uid 0 on purpose — see the header note.
+        runAsUser: 0
+        runAsGroup: 0
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -197,9 +212,9 @@ spec:
           effect: NoSchedule
       restartPolicy: Never
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
+        # uid 0 on purpose — see the header note.
+        runAsUser: 0
+        runAsGroup: 0
         seccompProfile:
           type: RuntimeDefault
       containers:

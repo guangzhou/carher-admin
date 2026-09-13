@@ -165,15 +165,88 @@ PROXY_BUDGET_RESCHEDULER_MAX_TIME = 605     # ⇒ 约每 10 分钟一轮
 - 若窗口确实跨过 16:00 UTC：prod 恢复后**不必手工干预**，下一轮 `reset_budget_job` 自动补；
   但要在恢复后 15 分钟复查上表 `overdue` 计数回到 ≤1，作为收敛判据。
 
-## 6. 还没量的东西（**禁止填 0**）
+## 6. 三个 `observations` 的量具（**仍未量到，禁止填 0**）
 
-scheduler evidence 的三个 `observations`（`duplicate_scheduler_runs`、
-`duplicate_background_jobs`、`unexpected_control_writes`）**至今没有能看见它们的量具**：
-基于日志的尺子是瞎的 —— 24 小时 29,829 行日志里 apscheduler 相关 **0 行**。
+scheduler evidence 的三个计数 —— `duplicate_scheduler_runs`、`duplicate_background_jobs`、
+`unexpected_control_writes` —— `prepare-values.py` 要求它们**全都是 0** 才放行。
+也就是说：**不解决量具，gray 的 values 文件根本产不出来**。
 
 > **没量过的 0 比没有证据更糟，它读起来是干净的绿。**
 
-在拿到真能看见这三件事的量具之前，不许把 0 写进 evidence 文件。
+### 6.1 基于日志的尺子是瞎的（已证伪）
+
+24 小时 29,829 行 proxy 日志里 apscheduler 相关 **0 行**。
+`0 行` 在这里不是"没重复执行"，是"这把尺子看不见这件事"。
+
+### 6.2 进程内自省：够不着
+
+`initialize_scheduled_background_jobs` 里有 `global store_model_in_db, scheduler`，
+所以 `litellm.proxy.proxy_server.scheduler` 在启动后**确实**是那个活的 `AsyncIOScheduler`，
+而且每个 `add_job` 都显式带 `id=`（`reset_budget_job`、`add_deployment_job`、
+`get_credentials_job`、`spend_log_cleanup_job` …）⇒ `scheduler.get_jobs()` 会给出
+**这个进程里真正被调度的 job id 集合**，是一把理想的尺子。
+
+但够不着：`kubectl exec … python3 -c` 起的是**新进程**，它的
+`proxy_server.scheduler` 是模块初值 `None`（`proxy_server.py:1955`），启动流程从没跑过。
+要读活对象只能靠注入（pyrasite/gdb）或加一个 in-process callback —— 前者在生产 Pod 上太侵入，
+后者会让 gray 的 config 相对 prod 多出一条只为观测而存在的差异，违背冻结口径。
+**⇒ 这条路记下来，不走。**
+
+### 6.3 可行的尺子：clone C 上开 `log_statement='mod'` + `%h` 归因
+
+真正能看见"谁写了什么"的是 PostgreSQL 自己。关键是这两个参数都是 **SIGHUP 级**，
+`ALTER SYSTEM` + `pg_reload_conf()` 即可生效，**不需要重启**：
+
+```sql
+ALTER SYSTEM SET log_statement='mod';                              -- 只记 DML/DDL
+ALTER SYSTEM SET log_line_prefix='%m [%p] app=%a host=%h db=%d ';  -- %h = 客户端 IP ⇒ 归因
+SELECT pg_reload_conf();
+-- 回滚：
+-- ALTER SYSTEM RESET log_statement; ALTER SYSTEM RESET log_line_prefix; SELECT pg_reload_conf();
+```
+
+`%h` 给出客户端 Pod IP ⇒ **能把每一条写分给具体 release 的具体副本**，
+这正是 `unexpected_control_writes` 和 `duplicate_background_jobs` 需要的归因维度。
+`reset_budget_job` 约每 10 分钟一轮（§5），所以窗口至少要跨 **2 个完整周期（≥ 25 分钟）**
+才能把"跑了一次"和"跑了两次"分开。
+
+**⛔ 这把尺子不能开在 prod 上**：SpendLogs 的写入量在 20~30GB/天量级，
+`log_statement='mod'` 会把它们逐条打进容器日志，而 198 `/Data` 有两次盘满 502 的前科
+（见 skill `litellm-198-diskpressure-502`）。**只在 clone 上开。**
+
+#### 已经验证到哪一步（2026-09-14）
+
+| 项 | 结果 |
+|---|---|
+| clone A/B/C 是否在线 | ✅ `litellm-clone` ns，三个 sts 各 1/1，已跑 39 天 |
+| clone C 的 `log_destination` / `logging_collector` | `stderr` / `off` ⇒ 日志直接进容器 stdout，`kubectl logs` 可取 |
+| `ALTER SYSTEM` 两个参数能否热生效 | ✅ 实测生效（`log_statement=mod`、prefix 带 `%a %h %d`），**已按原值回滚**，现场无残留 |
+| `ALTER SYSTEM` 不能进事务块 | ⚠️ `psql -c "A; B;"` 会被当成一个事务块 ⇒ 报 `ALTER SYSTEM cannot run inside a transaction block`。必须**一条 `-c` 一条语句** |
+| 阳性对照（远端写 → 日志出现带 `%h` 的行） | ❌ **还没做成** |
+
+阳性对照没做成的原因已经查清，**不是** postgres 只听 socket ——
+`listen_addresses` 实测是 `*`。是 `litellm-clone` 这个 ns 有 `default-deny-all` NetworkPolicy，
+只有带 `litellm.carher.io/role in (migration,network-probe,restore,version-test)` 标签的
+Pod 才被 `allow-qualified-clients-egress-to-clone-db` 放行。我用 `litellm-clone-a-0`
+（没有这个标签）去连 clone C，得到 `Connection refused`。
+
+⇒ 阳性对照必须由一个**打了 `role=version-test` 标签的客户端** Pod 来打，
+而那正是 runbook「Clone C concurrent stable/target writes」那一行要搭的双版本台子。
+
+#### 因此，执行顺序是（写进 runbook Clone C 那一行）
+
+1. 按 `role=version-test` 起 stable(v1.90.2) 与 target(v1.95.0) 两个 release，都指向 clone C。
+2. **先打阳性对照**：从其中一个 release 发一条已知的写，确认 clone C 日志里出现带该 Pod IP
+   的 `%h` 行。**看不见就说明尺子坏了，此时的任何 0 都不可信。**
+3. 开着尺子跑 ≥ 25 分钟（≥2 个 `reset_budget` 周期）。
+4. 按 `%h` 分组数：同一个 job id 的特征语句在**两个 release 的 IP 上都出现** ⇒
+   `duplicate_background_jobs` 非 0。
+5. 再把 gray 侧的抑制（§4）打开重跑一遍，确认计数归零 —— 这一步同时是抑制生效的**行为级**证据，
+   比读 Pod spec 的 env 更硬。
+6. 收尾 `ALTER SYSTEM RESET` 两个参数 + `pg_reload_conf()`。
+
+**在第 2 步的阳性对照做出来之前，这三个计数一律保持未填。**
+
 
 ## 7. 相关
 

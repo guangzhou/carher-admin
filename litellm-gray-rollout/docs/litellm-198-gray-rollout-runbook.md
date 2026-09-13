@@ -133,6 +133,7 @@ Migration gate
 | Clone A target-version read/write | `FILL` | `FILL` | `FILL` |
 | Clone B stable-version read/write | `FILL` | `FILL` | `FILL` |
 | Clone C concurrent stable/target writes | `FILL` | `FILL` | `FILL` |
+| Clone C scheduler-observation ruler: positive control first (a known write from a `role=version-test` client must appear in clone C's log with its `%h`), then >=25 min (>=2 `reset_budget` cycles) of `log_statement='mod'` + `%h` attribution, then `ALTER SYSTEM RESET` both knobs | `docs/scheduler-suppression-evidence-2026-09-14.md` §6.3 | `FILL` | `FILL` |
 | `check-migration.py` structured result | `FILL` | `FILL` | `PASS/FAIL` |
 | Index runner `inspect` preflight snapshot (oldest transaction, prepared xacts, vacuum in progress, dead-tuple %, SpendLogs vacuum age, index bytes) | `FILL` | `FILL` | `FILL` |
 | Approved index headroom thresholds (`GRAY_INDEX_MAX_XACT_AGE_SECONDS`, `GRAY_INDEX_MAX_DEAD_TUP_PERCENT`, `GRAY_INDEX_MAX_VACUUM_AGE_SECONDS`) — no placeholder may remain | `FILL` | `FILL` | `FILL` |

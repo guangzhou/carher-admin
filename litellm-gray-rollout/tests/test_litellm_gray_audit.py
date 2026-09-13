@@ -2434,3 +2434,62 @@ def test_monitor_continuity_refuses_a_group_readable_or_forged_ledger(tmp_path: 
     )
     assert forged.returncode != 0
     assert "unexpected shape" in forged.stderr
+
+
+def test_verify_readiness_excludes_every_non_manifest_under_k8s():
+    """A readiness gate that is red for tool noise trains people to ignore it.
+
+    Measured 2026-09-14: `verify-readiness.py` fed all of `k8s/` to kubeconform
+    while only excluding `values-*.yaml`.  When `prod-pod-spec-approval.json`
+    landed in that directory, kubeconform reported `missing 'kind' key` for it
+    and the whole check went FAIL -- with `Invalid: 0` in the same summary.  The
+    manifests were fine; the gate was wrong about what it was looking at.
+
+    The exclusion list is a blacklist, so it rots silently the next time a
+    non-manifest file is added.  This test is the thing that notices: it derives
+    the truth from the files themselves (a K8s manifest has a `kind`) instead of
+    trusting the list.
+    """
+    import importlib.util
+    import re
+
+    import yaml
+
+    spec = importlib.util.spec_from_file_location(
+        "verify_readiness_for_tests", TOOLS / "verify-readiness.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    patterns = [re.compile(p) for p in module.NON_MANIFEST_PATTERNS]
+
+    # kubeconform only reads these extensions; README.md is never scanned.
+    scanned = sorted(
+        path
+        for suffix in ("*.yaml", "*.yml", "*.json")
+        for path in (ROOT / "litellm-gray-rollout" / "k8s").glob(suffix)
+    )
+    assert scanned, "k8s/ is empty -- the ruler lost its subject"
+
+    excluded, kept = [], []
+    for path in scanned:
+        (excluded if any(p.search(path.name) for p in patterns) else kept).append(path)
+
+    # Every excluded file must genuinely lack a kind, or the blacklist is hiding
+    # a real manifest from validation -- the failure direction that reads green.
+    for path in excluded:
+        docs = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
+        assert not any(isinstance(doc, dict) and "kind" in doc for doc in docs), (
+            f"{path.name} is excluded from kubeconform but IS a manifest"
+        )
+
+    # And every kept file must have a kind, or the gate goes red for tool noise.
+    for path in kept:
+        docs = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
+        assert docs and all(isinstance(doc, dict) and "kind" in doc for doc in docs if doc), (
+            f"{path.name} has no kind but is fed to kubeconform -- add it to "
+            "NON_MANIFEST_PATTERNS"
+        )
+
+    # No dead pattern: a rule matching nothing is a rule nobody is maintaining.
+    for pattern in patterns:
+        assert any(pattern.search(path.name) for path in scanned), pattern.pattern

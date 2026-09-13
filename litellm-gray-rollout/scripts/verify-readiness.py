@@ -16,6 +16,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parent
 
+# 文件名正则，匹配 k8s/ 下**不是** K8s 资源清单的文件。见 kubeconform 那一段的注释。
+NON_MANIFEST_PATTERNS = (
+    r"values-.*\.yaml$",
+    r"prod-pod-spec-approval\.json$",
+)
+
 
 def run(name: str, command: list[str]) -> dict[str, object]:
     result = subprocess.run(command, cwd=REPO, text=True, capture_output=True, check=False)
@@ -63,9 +69,13 @@ def main() -> int:
     else:
         checks.append({"name": "helm-lint", "status": "NOT_RUN"})
     if "kubeconform" not in missing:
-        # k8s/values-*.yaml 是 Helm values，不是 K8s 资源，没有 kind —— 必须排除，
-        # 否则 kubeconform 会为这三份文件报 "missing 'kind' key" 导致整个门禁红掉，
-        # 而真正的清单其实全过。把工具噪声当失败会训练人忽略这道门。
+        # k8s/ 下不是每个文件都是 K8s 资源：`values-*.yaml` 是 Helm values，
+        # `prod-pod-spec-approval.json` 是 gate 2c 的审批清单。两类都没有 kind，
+        # kubeconform 会报 "missing 'kind' key"，把整个门禁染红，而真正的清单其实全过。
+        # 把工具噪声当失败会训练人忽略这道门 —— 2026-09-14 实测：审批文件加进来之后
+        # readiness 就一直是 FAIL，而 `Invalid: 0`。
+        # ⚠️ 这是一份**黑名单**，新增非清单文件必须同步加进来；
+        # `test_verify_readiness_excludes_every_non_manifest_under_k8s` 会在漏加时报红。
         checks.append(
             run(
                 "kubeconform",
@@ -75,8 +85,7 @@ def main() -> int:
                     "-kubernetes-version",
                     "1.30.0",
                     "-summary",
-                    "-ignore-filename-pattern",
-                    r"values-.*\.yaml$",
+                    *[arg for pattern in NON_MANIFEST_PATTERNS for arg in ("-ignore-filename-pattern", pattern)],
                     str(ROOT / "k8s"),
                 ],
             )

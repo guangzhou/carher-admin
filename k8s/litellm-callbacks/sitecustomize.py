@@ -56,6 +56,14 @@
 
 import sys
 
+# Callback modules are mounted under /app while sitecustomize itself is loaded
+# from the virtualenv site-packages directory. Put the mount on sys.path before
+# importing sibling callbacks so startup behavior is deterministic in every
+# worker process.
+_APP_DIR = "/app"
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+
 # Preserve the prior sitecustomize behavior. Guarded: if responses_aclose is
 # not on the path in this deployment it simply logs and continues.
 try:

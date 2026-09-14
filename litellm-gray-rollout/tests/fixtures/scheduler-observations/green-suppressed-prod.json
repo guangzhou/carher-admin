@@ -1,0 +1,24 @@
+{
+  "binding": {
+    "image_digest": "sha256:7286aa2de7ca8c047c7141a60cba04a58a4a621bead0d7a75ebf3ebfbefacef7"
+  },
+  "hold": {
+    "client_addr": "10.42.1.88/32",
+    "ended_at": "2026-09-14 03:07:10.397",
+    "seconds": 1500,
+    "started_at": "2026-09-14 02:42:10.358"
+  },
+  "mode": "concurrent-old",
+  "scheduler_knobs": {
+    "config_sha256": "sha256:332195382ea5181c6f7279b08f6d14632febc84af54ee0fa06123ce4e807a392",
+    "disable_reset_budget": false,
+    "env": {
+      "LITELLM_EXPIRED_UI_SESSION_KEY_CLEANUP_ENABLED": null,
+      "LITELLM_KEY_ROTATION_ENABLED": null,
+      "PROXY_BATCH_POLLING_ENABLED": null
+    }
+  },
+  "schema_version": 2,
+  "status": "PASS",
+  "tool": "compatibility-runner"
+}

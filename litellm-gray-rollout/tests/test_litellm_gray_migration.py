@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -136,7 +138,8 @@ def test_prepare_migration_run_embeds_fixed_contract_and_real_proxy_config(tmp_p
     config_maps = load_documents(output / "runner-configmaps.yaml")
     data = config_maps[0]["data"]
     assert set(data) == {
-        "compatibility-config.yaml", "compatibility-runner.py", "migration-contract.py",
+        "compatibility-config.yaml", "compatibility-config-suppressed.yaml",
+        "compatibility-runner.py", "migration-contract.py",
         "migration-ledger-runner.py", "migration-ledger.json",
     }
     jobs = load_documents(output / "clone-version-test-jobs.yaml")
@@ -599,3 +602,341 @@ def test_job_attestation_collector_rejects_wrong_pod_or_image(tmp_path: Path):
     rejected = subprocess.run(command, capture_output=True, text=True, check=False)
     assert rejected.returncode != 0
     assert "imageid" in rejected.stderr.lower()
+
+
+# --- scheduler observation probe -------------------------------------------
+#
+# Measured defect these cover: the three `observations` counts that
+# prepare-values.py refuses to pass without had no producer at all. The design
+# note (docs/scheduler-suppression-evidence-2026-09-14.md §6) rules out the
+# log-based and in-process rulers and lands on a database-side one, which needs
+# two releases holding connections to the same clone long enough to tell "the
+# job ran once" from "it ran twice". These assert the harness that produces that
+# window, not the counts themselves -- the counts come off the cluster.
+
+
+def _pv_module():
+    spec = importlib.util.spec_from_file_location(
+        "litellm_gray_prepare_values_for_tests", TOOLS / "prepare-values.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _render_scheduler_probe(tmp_path: Path, probe: str, hold: int) -> list[dict]:
+    output = tmp_path / f"probe-{probe}-{hold}"
+    result = subprocess.run(
+        [
+            sys.executable, str(TOOLS / "prepare-migration-run.py"),
+            "--version-template", str(ROLLOUT / "clone-version-test-jobs.yaml"),
+            "--target-image", IDC_IMAGE + "a" * 64,
+            "--stable-image", IDC_IMAGE + "b" * 64,
+            "--output-dir", str(output),
+            "--run-id", RUN_ID, "--generation", GENERATION, "--version-only",
+            "--scheduler-probe", probe, "--scheduler-hold-seconds", str(hold),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return load_documents(output / "clone-version-test-jobs.yaml")
+
+
+def test_suppressed_compatibility_config_is_exactly_the_prepare_values_overlay():
+    """The suppressed config is not a hand-maintained twin of the plain one.
+
+    If it drifts, the leg standing in for gray stops standing in for gray, and
+    the measurement answers a question nobody asked.
+    """
+    module = _pv_module()
+    base = (TOOLS / "compatibility-config.yaml").read_text(encoding="utf-8")
+    suppressed = (TOOLS / "compatibility-config-suppressed.yaml").read_text(encoding="utf-8")
+    expected, changed = module.disable_reset_budget_in_config(base, profile="gray")
+    assert changed is True
+    assert suppressed == expected
+    # And the plain one is genuinely the unsuppressed control, not already overlaid.
+    assert yaml.safe_load(base)["general_settings"].get("disable_reset_budget") is None
+    assert yaml.safe_load(suppressed)["general_settings"]["disable_reset_budget"] is True
+
+
+def test_scheduler_probe_suppresses_only_the_target_leg_on_clone_c(tmp_path: Path):
+    module = _pv_module()
+    jobs = {
+        job["metadata"]["name"]: job
+        for job in _render_scheduler_probe(tmp_path, "suppressed", 1800)
+    }
+    gray_leg = jobs["litellm-concurrent-new-test"]["spec"]["template"]["spec"]["containers"][0]
+    prod_leg = jobs["litellm-concurrent-old-test"]["spec"]["template"]["spec"]["containers"][0]
+    assert "/opt/litellm-gray/compatibility-config-suppressed.yaml" in gray_leg["args"]
+    assert "/opt/litellm-gray/compatibility-config.yaml" in prod_leg["args"]
+    gray_env = {item["name"]: item.get("value") for item in gray_leg["env"]}
+    prod_env = {item["name"]: item.get("value") for item in prod_leg["env"]}
+    for name, off in module.BACKGROUND_TASK_SUPPRESSORS.items():
+        assert gray_env[name] == off
+        # The stable leg stands in for prod, which OWNS the scheduler. Suppress
+        # it too and the window has no scheduler running in it at all, which
+        # would read as a clean green for the wrong reason.
+        assert name not in prod_env
+    for leg in (gray_leg, prod_leg):
+        assert leg["args"][-2:] == ["--hold-seconds", "1800"]
+    for name in ("litellm-concurrent-new-test", "litellm-concurrent-old-test"):
+        assert jobs[name]["spec"]["activeDeadlineSeconds"] == 1800 + 900
+    # The isolated legs talk to clone A and clone B, one release each. Holding
+    # them open would measure a release against nobody.
+    for name in ("litellm-new-version-test", "litellm-old-version-test"):
+        container = jobs[name]["spec"]["template"]["spec"]["containers"][0]
+        assert "--hold-seconds" not in container["args"]
+        assert jobs[name]["spec"]["activeDeadlineSeconds"] == 1800
+
+
+def test_scheduler_probe_unsuppressed_is_the_positive_control(tmp_path: Path):
+    """Step 0: both legs unsuppressed, so the ruler MUST see duplicates.
+
+    A ruler that reads zero here is blind, and every zero it later reports on
+    the suppressed run is a synthetic green.
+    """
+    module = _pv_module()
+    jobs = {
+        job["metadata"]["name"]: job
+        for job in _render_scheduler_probe(tmp_path, "unsuppressed", 1560)
+    }
+    for name in ("litellm-concurrent-new-test", "litellm-concurrent-old-test"):
+        container = jobs[name]["spec"]["template"]["spec"]["containers"][0]
+        assert "/opt/litellm-gray/compatibility-config.yaml" in container["args"]
+        assert container["args"][-2:] == ["--hold-seconds", "1560"]
+        env = {item["name"] for item in container["env"]}
+        assert not (env & set(module.BACKGROUND_TASK_SUPPRESSORS))
+
+
+@pytest.mark.parametrize(
+    "extra,expected",
+    [
+        (["--scheduler-probe", "suppressed", "--scheduler-hold-seconds", "600"], "1500"),
+        (["--scheduler-probe", "suppressed", "--scheduler-hold-seconds", "7200"], "3600"),
+        (["--scheduler-hold-seconds", "1800"], "requires"),
+    ],
+)
+def test_scheduler_probe_hold_bounds_are_enforced_at_render_time(
+    tmp_path: Path, extra: list[str], expected: str
+):
+    result = subprocess.run(
+        [
+            sys.executable, str(TOOLS / "prepare-migration-run.py"),
+            "--version-template", str(ROLLOUT / "clone-version-test-jobs.yaml"),
+            "--target-image", IDC_IMAGE + "a" * 64,
+            "--stable-image", IDC_IMAGE + "b" * 64,
+            "--output-dir", str(tmp_path / "rejected"),
+            "--run-id", RUN_ID, "--generation", GENERATION, "--version-only", *extra,
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode != 0
+    assert expected in result.stderr
+
+
+def test_scheduler_probe_is_off_by_default(tmp_path: Path):
+    jobs = load_documents(
+        _default_probe_output(tmp_path) / "clone-version-test-jobs.yaml"
+    )
+    for job in jobs:
+        container = job["spec"]["template"]["spec"]["containers"][0]
+        assert "--hold-seconds" not in container["args"]
+        assert "compatibility-config-suppressed.yaml" not in " ".join(container["args"])
+
+
+def _default_probe_output(tmp_path: Path) -> Path:
+    output = tmp_path / "default"
+    result = subprocess.run(
+        [
+            sys.executable, str(TOOLS / "prepare-migration-run.py"),
+            "--version-template", str(ROLLOUT / "clone-version-test-jobs.yaml"),
+            "--target-image", IDC_IMAGE + "a" * 64,
+            "--stable-image", IDC_IMAGE + "b" * 64,
+            "--output-dir", str(output),
+            "--run-id", RUN_ID, "--generation", GENERATION, "--version-only",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return output
+
+
+def test_runner_hold_window_is_bounded_by_the_database_clock_and_client_addr():
+    """The window bounds and the attribution key both come from the server.
+
+    The log lines being matched carry postgres's clock and postgres's view of
+    `%h`. Taking either from the pod introduces a skew or a NAT translation the
+    analysis would absorb without complaining.
+    """
+    source = (TOOLS / "compatibility-runner.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    hold = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "hold_open"
+    )
+    body = ast.get_source_segment(source, hold) or ""
+    assert "inet_client_addr" in body
+    assert "now() AT TIME ZONE 'utc'" in body
+    # `now()` is this module's own wall-clock helper; the hold must not use it.
+    assert not re.search(r"[^.\w]now\(\)(?!\s*AT)", body.replace("now() AT TIME ZONE", "DBNOW"))
+    # A dead proxy mid-hold must be a red, not a shorter window that still parses.
+    assert "exited mid-hold" in body
+
+
+def test_runner_refuses_a_hold_shorter_than_two_budget_cycles():
+    source = (TOOLS / "compatibility-runner.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    constants = {
+        node.targets[0].id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Constant)
+    }
+    # reset_budget_job reschedules every 597-605s; one cycle cannot separate
+    # "ran once" from "ran twice".
+    assert constants["MIN_HOLD_SECONDS"] >= 2 * 605
+    assert constants["MAX_HOLD_SECONDS"] <= 3600
+
+
+def test_runner_attests_its_own_scheduler_knobs():
+    source = (TOOLS / "compatibility-runner.py").read_text(encoding="utf-8")
+    assert "scheduler_knobs" in source
+    tree = ast.parse(source)
+    knobs = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "scheduler_knobs"
+    )
+    body = ast.get_source_segment(source, knobs) or ""
+    assert "disable_reset_budget" in body
+    assert "os.environ.get(name)" in body
+    # The hold runs AFTER the checks: a leg that never proved it can serve a
+    # request is not a leg whose scheduler behaviour means anything.
+    run_source = source.split("async def run(")[1]
+    assert run_source.index("application_probe") < run_source.index("hold_open")
+
+
+def test_barrier_acquire_never_returns_a_void_column():
+    """Measured defect, clone C 2026-09-14: both concurrent legs died on this line.
+
+    `pg_advisory_lock_shared()` is declared to return `void`, and Prisma's raw-query
+    layer raises `RawQueryError: Failed to deserialize column of type 'void'` before
+    the lock's return value is ever inspected. The lock IS taken server-side, so the
+    failure is purely in the deserializer -- which is why the bug survived: the SQL
+    is correct, only the shape of the result set is not. Both `concurrent-*` legs
+    exited non-zero at the very first barrier, meaning this barrier had never once
+    executed in the harness's life.
+
+    The fix keeps the blocking acquire and hides the void column inside a subquery.
+    This test pins the shape, not the wording: any `SELECT pg_advisory_lock_shared`
+    that is the outermost select list is the bug coming back.
+    """
+    source = (TOOLS / "compatibility-runner.py").read_text(encoding="utf-8")
+    code = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
+    # The void-returning acquire must never be the outermost projection: legal only
+    # when it opens a subquery, i.e. immediately preceded by "(".
+    assert not re.search(r"(?<!\()SELECT\s+pg_advisory_lock_shared", code)
+    assert "(SELECT pg_advisory_lock_shared($1::integer, $2::integer)) AS acquired" in code
+    assert "SELECT 1::bigint AS locked, " in code
+    # pg_advisory_unlock_shared returns boolean, so it is legal bare and must stay
+    # bare -- wrapping it would discard the "did I actually hold it" answer.
+    assert "SELECT pg_advisory_unlock_shared($1::integer, $2::integer)" in code
+
+
+def test_overlap_window_lower_bound_comes_from_the_barrier_not_the_local_leg():
+    """Measured defect, clone C 2026-09-14: `new` saw the overlap, `old` did not.
+
+    Both legs ran the same code and both served a successful inference, yet the
+    `old` leg failed "concurrent ProxyModel/SpendLogs writes did not overlap
+    visibly" while the `new` leg passed and went on to wait at the done barrier.
+    The asymmetry was not a version difference: each leg read the database clock
+    just before its OWN inference and used that as the lower bound on
+    `LiteLLM_SpendLogs."startTime"`, so a peer row written a few hundred
+    milliseconds earlier fell outside the window and was never counted.
+
+    The sound bound is the instant this leg ACQUIRED the start barrier: the peer
+    cannot leave that barrier until it has seen this leg holding the lock, so the
+    acquire instant precedes every post-barrier write by both legs.
+    """
+    source = (TOOLS / "compatibility-runner.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    barrier = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "wait_for_peer"
+    )
+    # The barrier hands the instant back instead of returning None.
+    assert isinstance(barrier.returns, ast.Name) and barrier.returns.id == "str"
+    barrier_body = ast.get_source_segment(source, barrier) or ""
+    assert "to_char(now() AT TIME ZONE 'utc'" in barrier_body
+    assert 'return str(acquired[0]["t"])' in barrier_body
+
+    probe = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "application_probe"
+    )
+    assert [arg.arg for arg in probe.args.args] == ["mode", "connection", "window_start"]
+    probe_body = ast.get_source_segment(source, probe) or ""
+    assert "probe_started = window_start" in probe_body
+
+    # run() must feed the barrier's instant into the probe, not discard it.
+    run_source = source.split("async def run(")[1]
+    assert "window_start = await wait_for_peer(connection) if barrier else None" in run_source
+    assert "application_probe(mode, connection, window_start)" in run_source
+
+
+def test_overlap_observed_rendezvous_latches_instead_of_sampling_an_interval():
+    """Measured defect, clone C 2026-09-14: a 39 ms window nobody could sample.
+
+    Postgres statement log, both legs on clone C:
+
+        01:29:34.804  host=10.42.1.79  acquire done-key
+        01:29:34.878  host=10.42.1.78  acquire done-key
+        01:29:34.917  host=10.42.1.78  pg_advisory_unlock_shared   <- 39 ms later
+        01:31:34.881  host=10.42.1.79  timed out after the full 120 s
+
+    With ONE shared key, "both legs are present" is an interval. The faster leg
+    saw it on its first poll and left; the slower leg polls every 200 ms and never
+    sampled those 39 ms. Nothing was wrong with either LiteLLM version.
+
+    Per-leg keys turn the same question into a latching fact: each leg takes its
+    own key when it observes the overlap and holds it until the process exits, so
+    the peer's evidence cannot expire between two polls.
+    """
+    source = (TOOLS / "compatibility-runner.py").read_text(encoding="utf-8")
+    code = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
+    # The single shared done-key is the bug; it must not come back.
+    assert "BARRIER_DONE_KEY " not in code
+    assert "BARRIER_DONE_KEYS" in code
+
+    tree = ast.parse(source)
+    keys = next(
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "BARRIER_DONE_KEYS"
+    )
+    mapping = ast.literal_eval(keys)
+    assert set(mapping) == {"concurrent-new", "concurrent-old"}
+    # Distinct keys, and neither may collide with the start barrier.
+    assert len(set(mapping.values())) == 2
+    start = next(
+        node.value.value for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "BARRIER_KEY"
+    )
+    assert start not in mapping.values()
+
+    rendezvous = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "wait_for_peer_observation"
+    )
+    body = ast.get_source_segment(source, rendezvous) or ""
+    # It waits on the PEER's key, and one holder is enough -- asking for 2 on a
+    # per-leg key can never be satisfied.
+    assert "peers\"] or 0) >= 1" in body
+    assert "BARRIER_NAMESPACE,\n            peer,\n        )" in body
+    # No unlock inside the rendezvous: releasing early recreates the window.
+    assert "unlock" not in body

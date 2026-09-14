@@ -45,10 +45,22 @@ MIGRATION_JOBS = {
 }
 RUNNER_FILES = (
     "compatibility-config.yaml",
+    "compatibility-config-suppressed.yaml",
     "migration-contract.py",
     "migration-ledger-runner.py",
     "compatibility-runner.py",
 )
+# Where the three suppressor names come from. Importing the constant rather than
+# retyping it means a fourth suppressor added to prepare-values.py cannot be
+# silently missing from the leg that is supposed to be qualifying it.
+_PV_SPEC = spec_from_file_location(
+    "litellm_gray_prepare_values", Path(__file__).with_name("prepare-values.py")
+)
+if _PV_SPEC is None or _PV_SPEC.loader is None:
+    raise SystemExit("prepare-migration-run: cannot load prepare-values")
+_PV = module_from_spec(_PV_SPEC)
+_PV_SPEC.loader.exec_module(_PV)
+BACKGROUND_TASK_SUPPRESSORS = _PV.BACKGROUND_TASK_SUPPRESSORS
 QUALIFICATION_KEYS = {
     "schema_version", "status", "run_id", "generation", "config_checksum",
     "source_payload_sha256", "captured_at", "path", "ledger_sha256", "target_image",
@@ -320,6 +332,8 @@ def prepare_version_jobs(
     config_checksum: str,
     run_id: str,
     generation: str,
+    scheduler_probe: str = "none",
+    hold_seconds: int = 0,
 ) -> None:
     seen: set[str] = set()
     for job in jobs:
@@ -342,16 +356,32 @@ def prepare_version_jobs(
                 db_identity=db_identity,
             )
         )
+        concurrent = mode.startswith("concurrent-")
+        # The scheduler probe models the window itself: the stable leg stands in
+        # for prod, which owns the scheduler, and the target leg stands in for
+        # gray, which must not run it a second time. Only the target leg is ever
+        # suppressed, and only the two legs sharing clone C are held open --
+        # holding the isolated legs would measure one release against nobody.
+        suppressed = scheduler_probe == "suppressed" and mode == "concurrent-new"
+        config_file = (
+            "compatibility-config-suppressed.yaml" if suppressed else "compatibility-config.yaml"
+        )
         container["command"] = ["python3"]
         container["args"] = [
             "/opt/litellm-gray/compatibility-runner.py",
             "--mode",
             mode,
             "--config",
-            "/opt/litellm-gray/compatibility-config.yaml",
+            f"/opt/litellm-gray/{config_file}",
             "--result",
             f"/evidence/{mode}.json",
         ]
+        if scheduler_probe != "none" and concurrent:
+            container["args"] += ["--hold-seconds", str(hold_seconds)]
+            # activeDeadlineSeconds counts the whole Pod, image pull and proxy
+            # startup included. Leaving the template's 1800 would kill the Job
+            # mid-hold and hand back a truncated window that still parses.
+            job["spec"]["activeDeadlineSeconds"] = hold_seconds + 900
         container.setdefault("env", []).extend(
             [
                 {
@@ -364,6 +394,11 @@ def prepare_version_jobs(
                 {"name": "STORE_MODEL_IN_DB", "value": "True"},
             ]
         )
+        if suppressed:
+            container["env"] += [
+                {"name": key, "value": value}
+                for key, value in sorted(BACKGROUND_TASK_SUPPRESSORS.items())
+            ]
         add_runner_mount(job, config_name)
         enforce_production_identity(job)
     if seen != set(JOB_MODES):
@@ -437,6 +472,18 @@ def main() -> int:
         help="render clone compatibility Jobs without qualifying a migration",
     )
     parser.add_argument("--clone-qualification", type=Path)
+    parser.add_argument(
+        "--scheduler-probe",
+        choices=("none", "suppressed", "unsuppressed"),
+        default="none",
+        help=(
+            "hold the two clone-C legs open so a database-side ruler can watch "
+            "their schedulers. 'suppressed' gives the target leg the gray "
+            "background-task suppression; 'unsuppressed' is the positive "
+            "control, where the ruler must see duplicates or it is blind"
+        ),
+    )
+    parser.add_argument("--scheduler-hold-seconds", type=int, default=0)
     parser.add_argument("--live-schema", type=Path)
     parser.add_argument("--migration-command", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--test-command-dir", type=Path, help=argparse.SUPPRESS)
@@ -449,6 +496,16 @@ def main() -> int:
             fail("images must be real 198 K3s local-registry immutable digests")
     if not ID_RE.fullmatch(args.run_id) or not ID_RE.fullmatch(args.generation):
         fail("run-id or generation is invalid")
+    if args.scheduler_probe != "none":
+        if args.migration_target != "clone":
+            fail("the scheduler probe only runs against the clone")
+        if not 1500 <= args.scheduler_hold_seconds <= 3600:
+            # Same bound the runner enforces. Checking it here too means the
+            # operator learns at render time, not 25 minutes into a Job that
+            # was always going to exit 2 on its argument parser.
+            fail("--scheduler-hold-seconds must be between 1500 and 3600")
+    elif args.scheduler_hold_seconds:
+        fail("--scheduler-hold-seconds requires --scheduler-probe")
 
     if args.version_only:
         if args.migration_target != "clone":
@@ -527,6 +584,8 @@ def main() -> int:
             config_checksum=config_checksum,
             run_id=args.run_id,
             generation=args.generation,
+            scheduler_probe=args.scheduler_probe,
+            hold_seconds=args.scheduler_hold_seconds,
         )
         outputs["clone-version-test-jobs.yaml"] = version_jobs
 

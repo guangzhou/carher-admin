@@ -1141,7 +1141,11 @@ spec:
 
 
 def _prepare_values_with_probes(
-    tmp_path: Path, readiness: str, liveness: str
+    tmp_path: Path,
+    readiness: str,
+    liveness: str,
+    grace: int = 600,
+    extra_args: list[str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run prepare-values.py against a Deployment carrying the given probe blocks."""
     config = tmp_path / "config.yaml"
@@ -1157,7 +1161,7 @@ metadata: {{name: litellm-proxy}}
 spec:
   template:
     spec:
-      terminationGracePeriodSeconds: 600
+      terminationGracePeriodSeconds: {grace}
       containers:
         - name: litellm
           envFrom: [{{secretRef: {{name: litellm-secrets}}}}]
@@ -1204,7 +1208,8 @@ spec:
             str(secret_metadata_file),
             "--output",
             str(output),
-        ],
+        ]
+        + (extra_args or []),
         capture_output=True,
         text=True,
         check=False,
@@ -1215,6 +1220,56 @@ spec:
 # Production's real timings, measured 2026-09-13 on litellm-product/litellm-proxy.
 PROD_READINESS = "{httpGet: {path: /health/readiness, port: 4000}, initialDelaySeconds: 60, periodSeconds: 10, failureThreshold: 12, timeoutSeconds: 5}"
 PROD_LIVENESS = "{httpGet: {path: /health/liveliness, port: 4000}, initialDelaySeconds: 180, periodSeconds: 30, failureThreshold: 10, timeoutSeconds: 8}"
+
+
+def test_prepare_values_refuses_a_live_grace_the_chart_would_reject(tmp_path: Path) -> None:
+    """Prod runs grace=30; the chart needs 600. Fail here, not at the console.
+
+    Copying the live 30 through produced a values file that every `helm template`
+    rejects. That is fail-closed, but at the wrong moment: the only way past it
+    during the window was a `--set` the frozen artefact never records.
+    """
+    result, _ = _prepare_values_with_probes(
+        tmp_path, PROD_READINESS, PROD_LIVENESS, grace=30
+    )
+    assert result.returncode != 0
+    assert "drain budget" in result.stderr
+    assert "--termination-grace-seconds" in result.stderr
+
+
+def test_prepare_values_records_an_explicit_grace_adoption(tmp_path: Path) -> None:
+    """The adopted number goes in the artefact AND in the report, or not at all."""
+    result, output = _prepare_values_with_probes(
+        tmp_path,
+        PROD_READINESS,
+        PROD_LIVENESS,
+        grace=30,
+        extra_args=["--termination-grace-seconds", "600"],
+    )
+    assert result.returncode == 0, result.stderr
+    values = load_yaml(output)
+    assert values["terminationGracePeriodSeconds"] == 600
+    report = json.loads(result.stdout)
+    assert report["termination_grace"] == {
+        "live": 30,
+        "applied": 600,
+        "drain_budget": 600,
+    }
+
+
+def test_prepare_values_rejects_a_grace_override_below_the_drain_budget(
+    tmp_path: Path,
+) -> None:
+    """The override states a decision; it does not get to disable the invariant."""
+    result, _ = _prepare_values_with_probes(
+        tmp_path,
+        PROD_READINESS,
+        PROD_LIVENESS,
+        grace=30,
+        extra_args=["--termination-grace-seconds", "300"],
+    )
+    assert result.returncode != 0
+    assert "below the chart's drain budget" in result.stderr
 
 
 def test_prepare_values_freezes_readiness_and_liveness_separately(tmp_path: Path) -> None:

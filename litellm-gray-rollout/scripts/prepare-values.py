@@ -318,7 +318,9 @@ def load_secret_metadata(path: Path, expected_names: list[str]) -> list[dict[str
     return sorted(result, key=lambda item: item["name"])
 
 
-def freeze_runtime_shape(values: dict, deployment: dict) -> list[str]:
+def freeze_runtime_shape(
+    values: dict, deployment: dict, grace_override: int | None = None
+) -> tuple[list[str], dict]:
     pod_spec, container = main_container(deployment)
     extra_env = []
     for item in container.get("env", []):
@@ -387,9 +389,41 @@ def freeze_runtime_shape(values: dict, deployment: dict) -> list[str]:
         value = pod_spec.get(field)
         if value is not None:
             values[field] = value
-    values["terminationGracePeriodSeconds"] = pod_spec.get(
-        "terminationGracePeriodSeconds", values.get("terminationGracePeriodSeconds")
-    )
+    # Grace is the one live field the chart can outright refuse. The chart
+    # requires grace >= drain.preStopSeconds + drain.streamDrainSeconds (600 on
+    # 198), and prod runs 30 with no preStop at all. Copying 30 through produced
+    # a values file that every `helm template` rejects -- fail-closed, but at the
+    # wrong moment: at the console during the window, where the only way past it
+    # was a `--set` that the frozen artefact does not record.
+    #
+    # The decision itself was already taken and is not re-litigated here
+    # (docs/prepare-values-prod-rehearsal-2026-09-13.md §4: adopting the chart
+    # moves the rolling-update truncation floor from >=0.6537% of streams to
+    # 0.0940%). What was missing was a way to state it in the artefact. So the
+    # operator must name the number, the tool checks it against the chart's own
+    # drain budget, and the override lands in the report -- never silently.
+    live_grace = pod_spec.get("terminationGracePeriodSeconds")
+    drain = values.get("drain") or {}
+    drain_budget = int(drain.get("preStopSeconds", 0)) + int(drain.get("streamDrainSeconds", 0))
+    if grace_override is None:
+        values["terminationGracePeriodSeconds"] = (
+            live_grace if live_grace is not None else values.get("terminationGracePeriodSeconds")
+        )
+    else:
+        if grace_override < drain_budget:
+            fail(
+                f"--termination-grace-seconds {grace_override} is below the chart's "
+                f"drain budget {drain_budget}; the chart would reject it at render time"
+            )
+        values["terminationGracePeriodSeconds"] = grace_override
+    applied_grace = values.get("terminationGracePeriodSeconds")
+    if applied_grace is not None and int(applied_grace) < drain_budget:
+        fail(
+            f"live terminationGracePeriodSeconds={applied_grace} is below the chart's "
+            f"drain budget {drain_budget}; pass --termination-grace-seconds to state "
+            "the adopted value explicitly instead of overriding it at the console"
+        )
+    grace_report = {"live": live_grace, "applied": applied_grace, "drain_budget": drain_budget}
     probe = container.get("readinessProbe", {})
     liveness = container.get("livenessProbe", {})
     fields = ("initialDelaySeconds", "periodSeconds", "failureThreshold", "timeoutSeconds")
@@ -405,7 +439,7 @@ def freeze_runtime_shape(values: dict, deployment: dict) -> list[str]:
         "readiness": {key: probe[key] for key in fields},
         "liveness": {key: liveness[key] for key in fields},
     }
-    return secret_refs
+    return secret_refs, grace_report
 
 
 CONFIG_MOUNT_PATH = "/app/config.yaml"
@@ -923,6 +957,18 @@ def main() -> int:
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument(
+        "--termination-grace-seconds",
+        type=int,
+        help=(
+            "adopt this terminationGracePeriodSeconds instead of the live "
+            "Deployment's. Needed because prod runs 30 with no preStop while the "
+            "chart requires grace >= drain.preStopSeconds + drain.streamDrainSeconds "
+            "(600 on 198); without it the frozen values file cannot render at all. "
+            "The number is stated here, not at the console with --set, so it lands "
+            "in the artefact and in this tool's report"
+        ),
+    )
+    parser.add_argument(
         "--emit-bindings",
         action="store_true",
         help=(
@@ -992,7 +1038,9 @@ def main() -> int:
     # would poison both the run report's count and the digest.
     values["callbacks"] = {"data": dict(callbacks)}
     deployment = load_deployment(args.deployment)
-    secret_refs = freeze_runtime_shape(values, deployment)
+    secret_refs, grace_report = freeze_runtime_shape(
+        values, deployment, args.termination_grace_seconds
+    )
     # After freeze_runtime_shape (which sets extraEnv wholesale from the live
     # Pod) and before runtime_sha, which the chart re-derives from extraEnv.
     pinned_env = suppress_background_tasks(values, profile=profile_name)
@@ -1066,6 +1114,9 @@ def main() -> int:
         # normal, not a warning: chart/values.yaml ships placeholder content and
         # a frozen run must not inherit any of it.
         "shadowed_chart_keys": shadowed,
+        # Live vs adopted grace, always reported so a 30 -> 600 adoption can
+        # never happen without a line in the run record saying so.
+        "termination_grace": grace_report,
         # What `backgroundTasks.enabled: false` actually did to this Pod spec.
         # Empty lists on a non-prod profile mean the frozen input already
         # carried the suppression; they must never be read as "nothing to

@@ -15,6 +15,18 @@ from pathlib import Path
 
 HTTP_MARKER = "# @@LITELLM_GRAY_HTTP_DIRECTIVES@@"
 PROXY_MARKER = "# @@LITELLM_GRAY_PRODUCT_PROXY_DIRECTIVES@@"
+# A managed /pro location whose live proxy_pass already selects between the
+# product upstream and a non-product one through a variable. Measured on 198
+# 2026-09-13: `location = /pro/v1/responses` reads
+# `proxy_pass http://$pro_responses_backend;`, where that map sends
+# `Upgrade: websocket` to `ws_ingress` (the codex incremental terminator, #24)
+# and everything else to `litellm_product`. Substituting the plain product
+# marker there would hand the WebSocket half to the gray state machine and take
+# the incremental terminator out of the path entirely -- a silent feature
+# regression, not a routing change. This marker keeps the pre-existing split
+# and applies the gray decision only to the half that was already product.
+WS_SPLIT_MARKER = "# @@LITELLM_GRAY_PRODUCT_PROXY_WS_SPLIT_DIRECTIVES@@"
+ALL_PROXY_MARKERS = (PROXY_MARKER, WS_SPLIT_MARKER)
 GENERATION_FILES = (
     "protected-prod.map",
     "force-prod.map",
@@ -25,6 +37,11 @@ GENERATION_FILES = (
     "split.conf",
 )
 SAFE_TOKEN = re.compile(r"^[A-Za-z0-9._~-]{8,128}$")
+# An nginx upstream/variable name we are willing to paste into the rendered
+# config. Deliberately narrow: this value ends up inside a `map` body.
+SAFE_UPSTREAM = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+# `<path> <format-name>` for an inherited site-level access_log we re-emit.
+SAFE_ACCESS_LOG = re.compile(r"^(?P<path>/[A-Za-z0-9._/-]{1,200}) (?P<format>[A-Za-z0-9_]{1,64})$")
 SPLIT_RULE = re.compile(
     r"(?:\*|(?:100|[1-9]?\d)(?:\.\d{1,2})?%)\s+litellm_(?:gray|product);"
 )
@@ -129,18 +146,24 @@ def is_redirect_only(body: str) -> bool:
     return re.search(r"\breturn\s+30[12]\b", masked) is not None
 
 
+def count_proxy_markers(text: str) -> int:
+    return sum(text.count(marker) for marker in ALL_PROXY_MARKERS)
+
+
 def validate_product_locations(base: str) -> None:
     blocks = location_blocks(base)
-    marker_count = base.count(PROXY_MARKER)
+    marker_count = count_proxy_markers(base)
     if marker_count < 1:
         fail("base template must contain at least one product proxy marker")
+    if base.count(WS_SPLIT_MARKER) > 1:
+        fail("the ws-split product proxy marker may appear at most once")
 
     generic_locations = 0
     managed_markers = 0
     for header, body in blocks:
         modifier, value = parse_location_header(header)
         value = value.replace(r"\/", "/")
-        markers = body.count(PROXY_MARKER)
+        markers = count_proxy_markers(body)
         if markers > 1:
             fail("a /pro location contains the product proxy marker more than once")
         managed_markers += markers
@@ -168,6 +191,11 @@ def validate_product_locations(base: str) -> None:
             fail(f"shared or ambiguous regex /pro location must be split before rollout: {header}")
         if modifier in {"", "^~"} and value == "/pro/":
             generic_locations += 1
+            if WS_SPLIT_MARKER in body:
+                # The catch-all covers every inference path. Applying the
+                # WebSocket split there would divert Upgrade requests on paths
+                # that never had that behaviour.
+                fail("the ws-split marker must not be used in the /pro/ catch-all")
 
     if generic_locations != 1:
         fail("base template must contain exactly one managed literal /pro/ location")
@@ -218,6 +246,63 @@ def safe_include_path(path: Path) -> str:
     return text
 
 
+def _map_file_keys(values: dict[str, str]) -> list[str]:
+    """Literal keys coming in through the generation's `include`d map files."""
+    keys: list[str] = []
+    for name, text in values.items():
+        if not name.endswith(".map"):
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            token = line.split(None, 1)[0]
+            if token != "default":
+                keys.append(token)
+    return keys
+
+
+# The longest literal key this module writes into a map itself, other than the
+# debug-token one: `"0:0:0:litellm_gray"` in $normal_inference_upstream.
+LONGEST_EMITTED_KEY = len('"0:0:0:litellm_gray"')
+
+
+def map_hash_sizing(values: dict[str, str], debug_token: str) -> tuple[int, int]:
+    """Size nginx's map hash from the data, not from today's token length.
+
+    nginx hashes every *literal* map key into a fixed-size bucket, and a key
+    longer than `map_hash_bucket_size` does not degrade -- it makes `nginx -t`
+    fail outright with `could not build map_hash, you should increase
+    map_hash_bucket_size`. Measured on 198 2026-09-14 during a scratch-root
+    rehearsal: the `$pool_hdr` key is `"1:" + debug_token`, so a 64-hex token
+    gives a 68-byte key and overflows the 64-byte default. `nginx -t` failed and
+    the run aborted -- which is the designed behaviour, but it would have failed
+    in the change window instead.
+
+    Hard-coding a larger number would only move the cliff: the debug token is
+    operator-chosen up to 128 chars, and `key-sid.map` keys are whole virtual
+    keys, which the auth regexes above allow up to 512. So both sizes are
+    computed from the generation actually being rendered, and a key long enough
+    to look like a bug fails closed rather than quietly reserving 64KB buckets.
+    """
+    keys = _map_file_keys(values)
+    longest = max(
+        [LONGEST_EMITTED_KEY, len(debug_token) + len('"1:"')] + [len(key) for key in keys]
+    )
+    # +8 covers nginx's per-entry bookkeeping inside the bucket; rounding up to a
+    # power of two keeps the value cache-line aligned, which nginx wants anyway.
+    bucket = 64
+    while bucket < longest + 8:
+        bucket *= 2
+    if bucket > 4096:
+        fail(f"a map key is {longest} bytes; refusing to render a config that hashes it")
+    entries = len(keys) + 64  # 64 covers every literal entry emitted below
+    max_size = 2048
+    while max_size < entries * 4:
+        max_size *= 2
+    return bucket, max_size
+
+
 def http_directives(
     generation: Path,
     split_rules: str,
@@ -225,10 +310,32 @@ def http_directives(
     *,
     gray_port: int = 30405,
     bridge_port: int = 30406,
+    ws_split_upstream: str | None = None,
+    map_hash_bucket_size: int = 64,
+    map_hash_max_size: int = 2048,
 ) -> str:
     root = safe_include_path(generation)
     split = "\n".join(f"        {line}" for line in split_rules.splitlines())
-    return f'''upstream litellm_gray {{ server 127.0.0.1:{gray_port}; keepalive 32; }}
+    ws_split = ""
+    if ws_split_upstream is not None:
+        # Two levels on purpose. The live map this replaces is
+        # `map $http_upgrade $pro_responses_backend { ~*websocket ws_ingress; }`
+        # -- an UNANCHORED case-insensitive match on the raw header. Folding the
+        # header and the gray decision into one key would force an anchored
+        # match and quietly narrow which requests still reach the terminator.
+        ws_split = f'''
+map $http_upgrade $gray_ws_upgrade {{ default 0; ~*websocket 1; }}
+map "$gray_ws_upgrade:$product_upstream" $gray_ws_split_upstream {{
+    ~^1: {ws_split_upstream};
+    default $product_upstream;
+}}'''
+    return f'''# Sized from this generation's own map data; see map_hash_sizing(). These are
+# http-scope and therefore also apply to the site's pre-existing maps, which is
+# harmless: a key that fit in a smaller bucket fits in a larger one.
+map_hash_bucket_size {map_hash_bucket_size};
+map_hash_max_size {map_hash_max_size};
+
+upstream litellm_gray {{ server 127.0.0.1:{gray_port}; keepalive 32; }}
 upstream litellm_guarded_old {{ server 127.0.0.1:{bridge_port}; keepalive 32; }}
 
 map $http_authorization $auth_token {{
@@ -299,21 +406,33 @@ geo $gray_debug_source {{ default 0; 127.0.0.1/32 1; }}
 map "$gray_debug_source:$http_x_llm_debug" $pool_hdr {{
     default "";
     "1:{debug_token}" $pool_label;
-}}
+}}{ws_split}
 log_format litellm_gray 'ts=$time_iso8601 $remote_addr $status $request_time '
                         'pool=$pool_label upstream=$upstream_addr rt=$upstream_response_time '
                         'uri_class=$uri_class sid=$key_sid';'''
 
 
-def proxy_directives(access_log: str = "/var/log/nginx/cc-auto-link.gray.log") -> str:
-    return f"""access_log {access_log} litellm_gray;
+def proxy_directives(
+    access_log: str = "/var/log/nginx/cc-auto-link.gray.log",
+    *,
+    upstream_variable: str = "product_upstream",
+    inherited_access_logs: tuple[str, ...] = (),
+) -> str:
+    # An `access_log` at location scope REPLACES the inherited server-level one.
+    # Measured on 198 2026-09-13: the product server block logs to
+    # `/var/log/nginx/zkreq.log zkreq`, so emitting only the gray log would drop
+    # every /pro request out of the log the latency-triage SOP reads -- blinding
+    # the very path that gets used when a rollout looks wrong. nginx accepts
+    # several access_log directives in one block, so re-emit the inherited one.
+    inherited = "".join(f"access_log {spec};\n" for spec in inherited_access_logs)
+    return f"""{inherited}access_log {access_log} litellm_gray;
 proxy_http_version 1.1;
 proxy_buffering off;
 # Must equal chart values drain.streamDrainSeconds: nginx may not promise to
 # wait longer than a Terminating Pod is allowed to live, or a rolling update
 # truncates the SSE stream instead of returning a clean 504.
 proxy_read_timeout 570s;
-proxy_pass http://$product_upstream;
+proxy_pass http://${upstream_variable};
 add_header X-LLM-Pool $pool_hdr always;"""
 
 
@@ -382,7 +501,31 @@ def main() -> int:
     parser.add_argument("--gray-port", type=int, default=30405, help=argparse.SUPPRESS)
     parser.add_argument("--bridge-port", type=int, default=30406, help=argparse.SUPPRESS)
     parser.add_argument("--access-log", default="/var/log/nginx/cc-auto-link.gray.log", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--inherited-access-log",
+        action="append",
+        default=[],
+        metavar="'PATH FORMAT'",
+        help=(
+            "site-level access_log the managed locations would otherwise lose, "
+            "re-emitted alongside the gray one; repeatable"
+        ),
+    )
+    parser.add_argument(
+        "--ws-split-upstream",
+        metavar="UPSTREAM",
+        help=(
+            "upstream that keeps receiving Upgrade: websocket requests in the "
+            "location carrying the ws-split marker (198: ws_ingress)"
+        ),
+    )
     args = parser.parse_args()
+
+    for spec in args.inherited_access_log:
+        if not SAFE_ACCESS_LOG.fullmatch(spec):
+            fail(f"--inherited-access-log must be '<path> <format>': {spec!r}")
+    if args.ws_split_upstream is not None and not SAFE_UPSTREAM.fullmatch(args.ws_split_upstream):
+        fail("--ws-split-upstream is not a valid nginx upstream name")
 
     base = require_regular(args.base_template, 0o600)
     debug_token = require_regular(args.debug_token_file, 0o600).strip()
@@ -394,13 +537,32 @@ def main() -> int:
     if not re.search(r"\bupstream\s+litellm_product\s*\{", base):
         fail("base template must preserve the litellm_product upstream")
     validate_product_locations(base)
+    uses_ws_split = WS_SPLIT_MARKER in base
+    if uses_ws_split and args.ws_split_upstream is None:
+        fail("base template uses the ws-split marker but --ws-split-upstream was not given")
+    if args.ws_split_upstream is not None and not uses_ws_split:
+        fail("--ws-split-upstream was given but the base template has no ws-split marker")
+    inherited = tuple(args.inherited_access_log)
+    bucket, max_size = map_hash_sizing(values, debug_token)
     rendered = base.replace(
         HTTP_MARKER,
         http_directives(
             args.generation, values["split.conf"], debug_token,
             gray_port=args.gray_port, bridge_port=args.bridge_port,
+            ws_split_upstream=args.ws_split_upstream if uses_ws_split else None,
+            map_hash_bucket_size=bucket, map_hash_max_size=max_size,
         ),
-    ).replace(PROXY_MARKER, proxy_directives(args.access_log))
+    ).replace(
+        WS_SPLIT_MARKER,
+        proxy_directives(
+            args.access_log,
+            upstream_variable="gray_ws_split_upstream",
+            inherited_access_logs=inherited,
+        ),
+    ).replace(
+        PROXY_MARKER,
+        proxy_directives(args.access_log, inherited_access_logs=inherited),
+    )
     if "@@LITELLM_GRAY" in rendered:
         fail("unresolved gray marker remains")
     atomic_replace(args.output, rendered)

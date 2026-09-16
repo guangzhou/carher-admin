@@ -32,6 +32,7 @@ import hashlib
 import json
 import os
 import time
+import urllib.request
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
@@ -67,6 +68,25 @@ _REGISTRY: "OrderedDict[str, WsSession]" = OrderedDict()
 
 # 顶层易变键：canonical 比对时剥掉（对齐 codex response_items_equal_ignoring_internal_metadata）。
 _VOLATILE_TOP_KEYS = ("id", "status")
+
+
+def _ws_proxy_from_env(ws_url: str) -> Optional[str]:
+    """取出口代理给 ws_connect 显式用。ws_connect 不认 trust_env（实测），必须手传。
+
+    wss:// 查 https 那条 env（aiohttp 只支持 http 型代理；HTTPS_PROXY 的值本身是 http://…）。
+    命中 NO_PROXY 时返回 None（走直连），与 urllib 的 bypass 口径一致。
+    """
+    try:
+        host = ws_url.split("://", 1)[-1].split("/", 1)[0].split(":")[0]
+        if urllib.request.proxy_bypass(host):
+            return None
+        proxies = urllib.request.getproxies()
+        px = proxies.get("https") or proxies.get("http") or proxies.get("all")
+        if px and "://" not in px:
+            px = "http://" + px
+        return px or None
+    except Exception:
+        return None
 
 
 def _feature_enabled() -> bool:
@@ -248,7 +268,16 @@ class WsSession:
         import aiohttp  # pod 内已验证可用
 
         try:
-            self._aio_session = aiohttp.ClientSession()
+            # 出口代理：ws_connect **不认** trust_env（2026-09-16 实测：同一 session
+            # trust_env=True 下 session.get() 走代理，但 ws_connect 直连 chatgpt.com:443；
+            # 只有显式 proxy= 才经 10.68.13.243:8118）。所以这里必须手动取环境代理传进去，
+            # 否则本路径静默走直连——且直连是通的、握手 200、日志安静，漏了没有任何信号。
+            # 代理不可用时走下面 connect_exc 分支 → 落 HTTP POST 兜底（结构不变）。
+            self._aio_session = aiohttp.ClientSession(trust_env=True)
+            _ws_kw = {}
+            _px = _ws_proxy_from_env(self.ws_url)
+            if _px:
+                _ws_kw["proxy"] = _px
             self.ws = await asyncio.wait_for(
                 self._aio_session.ws_connect(
                     self.ws_url,
@@ -256,6 +285,7 @@ class WsSession:
                     timeout=aiohttp.ClientWSTimeout(ws_close=30),
                     autoping=True,
                     heartbeat=30,
+                    **_ws_kw,
                 ),
                 timeout=_CONNECT_BUDGET_S,
             )

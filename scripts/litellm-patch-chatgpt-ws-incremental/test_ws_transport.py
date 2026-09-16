@@ -100,8 +100,12 @@ class FakeWS:
 
 class FakeClientSession:
     _script = None  # class-level: 下一个 ws_connect 用的 turns
-    def __init__(self): self.closed = False
+    last_kwargs = None  # class-level: 最近一次 ws_connect 收到的 kwargs（验 proxy 透传）
+    def __init__(self, *a, **k):  # 真实签名含 trust_env= 等，一律吞掉
+        self.closed = False
+        self.init_kwargs = k
     async def ws_connect(self, url, **k):
+        FakeClientSession.last_kwargs = k
         return FakeWS(FakeClientSession._script or [])
     async def close(self): self.closed = True
 aiohttp.ClientSession = FakeClientSession
@@ -432,6 +436,51 @@ async def main():
           it is not None and sessI.ws.sent[-1].get("previous_response_id") == "resp_i1")
     await _drain(it)
     W._REGISTRY.clear()
+
+    # === 出口代理必须显式透传给 ws_connect ===
+    # 背景（2026-09-16 实测）：ws_connect **不认** trust_env——同一 session 下 session.get()
+    # 走代理，ws_connect 却直连 chatgpt.com:443。漏出时直连是通的、握手 200、日志安静，
+    # 没有任何信号，所以这两个用例是防回归的唯一闸门。
+    _saved = {k: os.environ.get(k) for k in ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "no_proxy")}
+    def _restore():
+        for k, v in _saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    for k in ("NO_PROXY", "no_proxy"):
+        os.environ.pop(k, None)
+    os.environ["HTTPS_PROXY"] = "http://u:p@10.68.13.243:8118"
+    os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"]
+    W._REGISTRY.clear()
+    FakeClientSession.last_kwargs = None
+    FakeClientSession._script = [[_created("resp_x1"), _item_done(_a("hi", "mx1")), _completed("resp_x1")]]
+    it = await _call(_base_data([_u("q1")]), "pckPX1"); await _drain(it)
+    check("env proxy → ws_connect 收到 proxy=",
+          (FakeClientSession.last_kwargs or {}).get("proxy") == "http://u:p@10.68.13.243:8118")
+    W._REGISTRY.clear()
+
+    # NO_PROXY 命中该 host → 不许传 proxy（走直连，与 urllib bypass 口径一致）
+    os.environ["NO_PROXY"] = "chatgpt.com"
+    os.environ["no_proxy"] = "chatgpt.com"
+    FakeClientSession.last_kwargs = None
+    FakeClientSession._script = [[_created("resp_x2"), _item_done(_a("hi", "mx2")), _completed("resp_x2")]]
+    it = await _call(_base_data([_u("q1")]), "pckPX2"); await _drain(it)
+    check("NO_PROXY 命中 → ws_connect 不带 proxy",
+          "proxy" not in (FakeClientSession.last_kwargs or {}))
+    W._REGISTRY.clear()
+
+    # 无代理 env → 不许传 proxy（保持 stock 行为）
+    for k in ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "no_proxy"):
+        os.environ.pop(k, None)
+    FakeClientSession.last_kwargs = None
+    FakeClientSession._script = [[_created("resp_x3"), _item_done(_a("hi", "mx3")), _completed("resp_x3")]]
+    it = await _call(_base_data([_u("q1")]), "pckPX3"); await _drain(it)
+    check("无代理 env → ws_connect 不带 proxy",
+          "proxy" not in (FakeClientSession.last_kwargs or {}))
+    W._REGISTRY.clear()
+    _restore()
 
     print("\n%d/%d passed" % (sum(1 for _, c in results if c), len(results)))
     if not all(c for _, c in results):

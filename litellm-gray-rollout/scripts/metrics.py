@@ -30,6 +30,22 @@ METRIC_KEYS = {
     "latency_records", "latency_window_minutes",
 }
 MIN_SAMPLE = 100
+# Sample floor for the 5xx stop-loss leg, separate from MIN_SAMPLE.  MIN_SAMPLE
+# used to gate the whole class with a `continue`, which took the stop-loss leg
+# down with the latency legs -- and the latency legs already have their own
+# floors, so for them MIN_SAMPLE was redundant while for 5xx it was actively
+# wrong.  Measured on the negative control (stable split in half against itself
+# over 2026-09-16..18, 2123 class-windows, five-minute buckets): at a floor of
+# 100 the 5xx leg fires on 3.35% of windows where the true delta is zero; at 200
+# it fires on 0.00% while detection of an injected +2pp stays at 100.0%.  A
+# higher floor is strictly better here -- it is not a sensitivity trade.
+#
+# The 5xx leg stays on the five-minute window.  Widening it makes this worse,
+# not better: at 30 minutes the same floor of 200 fires on 7.98% because a long
+# window spans real shifts in traffic mix and stops being a homogeneous sample.
+# Below the floor the leg reports FIVE_XX_SAMPLE_BELOW_FLOOR and goes dark
+# honestly rather than pretending to be armed.
+MIN_FIVE_XX_SAMPLE = 200
 # A 101 response is a websocket upgrade: its `rt` is how long the connection
 # stayed open (observed median 74s, max 64281s = 17.8h), not how long a request
 # took to serve.  Mixing that into a latency percentile measures "how long did
@@ -318,14 +334,20 @@ def compare(gray: dict[str, dict[str, Any]], reference: dict[str, dict[str, Any]
             continue
         gray_count = int(gray_group.get("count", 0))
         ref_count = int(ref.get("count", 0))
+        # Each leg gates on its own floor.  This used to `continue` on MIN_SAMPLE
+        # and take the whole class down -- including the 5xx stop-loss leg, which
+        # is the one thing that must stay armed.  A class below every floor is
+        # still reported, with the alerts saying which legs were dark, so a PASS
+        # is never mistaken for "this class was checked".
+        five_xx_qualified = (
+            gray_count >= MIN_FIVE_XX_SAMPLE and ref_count >= MIN_FIVE_XX_SAMPLE
+        )
         if gray_count < MIN_SAMPLE:
             alerts.add("INSUFFICIENT_GRAY_SAMPLE")
-            comparisons.append({"uri_class": uri_class, "reference": reference_name, "qualified": False, "reason": "insufficient_gray_sample"})
-            continue
         if ref_count < MIN_SAMPLE:
             alerts.add("INSUFFICIENT_REFERENCE_SAMPLE")
-            comparisons.append({"uri_class": uri_class, "reference": reference_name, "qualified": False, "reason": "insufficient_reference_sample"})
-            continue
+        if not five_xx_qualified:
+            alerts.add("FIVE_XX_SAMPLE_BELOW_FLOOR")
         five_delta = float(gray_group["five_xx_rate"]) - float(ref.get("five_xx_rate", 0))
         p95_ratio = ratio(gray_group.get("p95"), ref.get("p95"))
         p99_ratio = ratio(gray_group.get("p99"), ref.get("p99"))
@@ -340,11 +362,14 @@ def compare(gray: dict[str, dict[str, Any]], reference: dict[str, dict[str, Any]
         item = {
             "uri_class": uri_class,
             "reference": reference_name,
-            "qualified": True,
+            # `qualified` means "at least one leg could judge this class".  It is
+            # not a claim that every leg was live; `*_qualified` say which were.
+            "qualified": five_xx_qualified or p95_qualified or p99_qualified,
             "gray_count": gray_count,
             "reference_count": ref_count,
             "gray_latency_count": gray_latency,
             "reference_latency_count": ref_latency,
+            "five_xx_qualified": five_xx_qualified,
             "p95_qualified": p95_qualified,
             "p99_qualified": p99_qualified,
             "five_xx_delta": rounded(five_delta),
@@ -353,7 +378,7 @@ def compare(gray: dict[str, dict[str, Any]], reference: dict[str, dict[str, Any]
         }
         comparisons.append(item)
         breaches: set[str] = set()
-        if five_delta > THRESHOLDS["five_xx_delta"]:
+        if five_xx_qualified and five_delta > THRESHOLDS["five_xx_delta"]:
             breaches.add("FIVE_XX_DELTA")
         if p95_qualified and p95_ratio is not None and p95_ratio > THRESHOLDS["p95_ratio"]:
             breaches.add("P95_RATIO")

@@ -1426,6 +1426,54 @@ def test_metrics_darkens_latency_legs_below_the_sample_floor() -> None:
     assert "LATENCY_SAMPLE_BELOW_FLOOR" in thin["dispatcher_recommendation"]["reason_codes"]
 
 
+def test_metrics_keeps_the_stop_loss_leg_armed_when_latency_legs_are_dark() -> None:
+    """The 5xx leg must not be switched off by the latency legs' sample floors.
+
+    MIN_SAMPLE used to gate the whole class with a `continue`, so a class thin
+    enough to darken the percentiles darkened the 5xx stop-loss with it -- the
+    one leg that has to stay armed.  Measured on 2026-09-18 production traffic
+    that was not hypothetical: every class was under MIN_SAMPLE in the
+    five-minute window, so the stop-loss was dark across the board while the
+    gate reported itself as armed.
+
+    Here the wide latency window is below MIN_P95_SAMPLE/MIN_P99_SAMPLE, but the
+    live window clears MIN_FIVE_XX_SAMPLE, so the 5xx leg still judges.
+    """
+    payload = _metrics_payload(
+        gray_latency=1.0,
+        stable_latency=1.0,
+        live_samples=300,
+        wide_samples=150,
+        gray_five_xx=30,  # 10% against stable's 0% -- far over the 1% threshold
+        sustain_state={"FIVE_XX_DELTA": 1},
+    )
+    result = _evaluate(payload)
+    comparison = result["comparisons"][0]
+    assert comparison["five_xx_qualified"] is True
+    assert comparison["p95_qualified"] is False
+    assert comparison["p99_qualified"] is False
+    assert comparison["breaches"] == ["FIVE_XX_DELTA"]
+    assert result["dispatcher_recommendation"]["action"] == "rollback"
+
+    # Below the 5xx floor the leg goes dark and says so, instead of quietly
+    # reporting a rate computed over too few requests.
+    thin = _evaluate(
+        _metrics_payload(
+            gray_latency=1.0,
+            stable_latency=1.0,
+            live_samples=150,
+            wide_samples=150,
+            gray_five_xx=15,
+            sustain_state={"FIVE_XX_DELTA": 1},
+        )
+    )
+    thin_comparison = thin["comparisons"][0]
+    assert thin_comparison["five_xx_qualified"] is False
+    assert thin_comparison["breaches"] == []
+    assert thin["dispatcher_recommendation"]["action"] != "rollback"
+    assert "FIVE_XX_SAMPLE_BELOW_FLOOR" in thin["dispatcher_recommendation"]["reason_codes"]
+
+
 def test_metrics_refuses_a_latency_window_that_does_not_match_its_records() -> None:
     """Both halves of the wide window, or neither, and never below the floor.
 

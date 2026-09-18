@@ -601,8 +601,16 @@ def test_check_migration_rejects_any_partial_ddl_state():
 
 
 def test_metrics_recommends_rollback_for_qualified_normal_gray_breach():
-    records = metric_records("stable", "chat", 100, 200, 0.1)
-    records += metric_records("canary", "chat", 100, 500, 0.2)
+    # 250 samples per pool, not 100: the 5xx leg's floor is MIN_FIVE_XX_SAMPLE
+    # (200), measured against a negative control rather than inherited from
+    # MIN_SAMPLE.  At 100 this fixture no longer qualifies the leg it is meant to
+    # exercise, so it would assert nothing about a *qualified* breach.
+    #
+    # Both pools share one latency so the only breach is the 5xx one.  At 250 the
+    # p95 leg is live too, and the old 0.1-vs-0.2 split would add a P95_RATIO
+    # breach that this test never meant to assert.
+    records = metric_records("stable", "chat", 250, 200, 0.1)
+    records += metric_records("canary", "chat", 250, 500, 0.1)
     payload = {
         "phase": "normal_gray",
         "rollout_percent": 10,
@@ -660,11 +668,23 @@ def test_metrics_sample_guard_alerts_without_triggering_rollback():
 
     assert result.returncode == 0
     assert output["status"] == "PASS"
+    # 99 canary samples is below MIN_SAMPLE (100) and below MIN_FIVE_XX_SAMPLE
+    # (200), so both the class-level guard and the 5xx leg report dark.  The
+    # canary 5xx rate here is 2.0% against stable's 0.1% -- a delta well over
+    # the 1% threshold -- and it must still not trigger, because a rate over 99
+    # requests fires on 3.35% of windows whose true delta is zero.
     assert output["dispatcher_recommendation"] == {
         "action": "alert_only",
         "hard_trigger": False,
-        "reason_codes": ["INSUFFICIENT_GRAY_SAMPLE"],
+        "reason_codes": [
+            "FIVE_XX_SAMPLE_BELOW_FLOOR",
+            "INSUFFICIENT_GRAY_SAMPLE",
+            "LATENCY_SAMPLE_BELOW_FLOOR",
+        ],
     }
+    comparison = output["comparisons"][0]
+    assert comparison["five_xx_qualified"] is False
+    assert comparison["breaches"] == []
 
 
 def test_metrics_uses_frozen_baseline_at_100_percent_not_prod():
@@ -701,8 +721,11 @@ def test_metrics_uses_frozen_baseline_at_100_percent_not_prod():
 
 
 def test_metrics_never_recommends_rollback_to_an_unhealthy_prod():
-    records = metric_records("stable", "chat", 100, 200, 0.1)
-    records += metric_records("canary", "chat", 100, 500, 0.2)
+    # 250 samples and one shared latency, for the same reason as the qualified
+    # breach fixture above: the breach being withheld here has to be a real
+    # qualified 5xx breach, which needs MIN_FIVE_XX_SAMPLE (200) on both pools.
+    records = metric_records("stable", "chat", 250, 200, 0.1)
+    records += metric_records("canary", "chat", 250, 500, 0.1)
     payload = {
         "phase": "normal_gray",
         "rollout_percent": 10,
@@ -763,13 +786,19 @@ def test_metrics_holds_gray_when_prod_is_offline_and_gray_is_healthy():
 
     assert result.returncode == 0
     assert output["status"] == "PASS"
-    # `hold_gray` must survive an informational alert rather than being downgraded
-    # by it: 100 samples is below the latency floor, which is worth saying out
-    # loud, but it is not a reason to stop holding a healthy gray.
+    # `hold_gray` must survive informational alerts rather than being downgraded
+    # by them: 100 samples is below both the latency floors and the 5xx floor,
+    # which is worth saying out loud, but it is not a reason to stop holding a
+    # healthy gray.  Prod is offline here, so there is nowhere to roll back to --
+    # a dark ruler must not become a reason to move traffic.
     assert output["dispatcher_recommendation"] == {
         "action": "hold_gray",
         "hard_trigger": False,
-        "reason_codes": ["LATENCY_SAMPLE_BELOW_FLOOR", "PROD_OFFLINE_GRAY_HEALTHY"],
+        "reason_codes": [
+            "FIVE_XX_SAMPLE_BELOW_FLOOR",
+            "LATENCY_SAMPLE_BELOW_FLOOR",
+            "PROD_OFFLINE_GRAY_HEALTHY",
+        ],
     }
 
 

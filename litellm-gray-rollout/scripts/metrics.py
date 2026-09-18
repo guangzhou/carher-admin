@@ -90,9 +90,21 @@ ABS_FIVE_XX_RATE = 0.10
 # Three events, so a 30-request window cannot trip on a single failure.
 MIN_ABS_FIVE_XX_EVENTS = 3
 # Concurrent non-gray inference traffic must clear this before it can veto a
-# breach.  Available in 89.5% of armed windows across history and 67.8% after
-# cutover, measured -- so the veto is real but not always readable, and the code
-# says which happened rather than letting a blind guard look like a clean one.
+# breach.
+#
+# After cutover this cohort is mostly BLIND, and that is measured, not feared:
+# stable inference clears 30 in only 27.8% of gray-armed windows over the last six
+# hours and 0% over the last two (stable inference p50 = 0 per window), because at
+# split=100 the stable pool keeps health checks -- which are excluded -- plus a few
+# force-prod keys.  Widening the guard window does not rescue it: 5/15/30/60
+# minutes give 27.8% / 30.6% / 34.7% / 43.1%.
+#
+# That is acceptable because depth, not the veto, is what actually suppresses
+# provider weather.  Real bursts are short: over 1318 windows / 4.58 days the
+# consecutive-breach runs are p50 1 window, p90 3, max 4, and exactly one run in
+# the whole span reached ABS_SUSTAIN_WINDOWS.  So with the guard assumed blind
+# throughout, false promotions are 0.22/day.  The veto is a bonus; the depth is
+# the mechanism.  Do NOT lower the depth on the grounds that the veto exists.
 SHARED_FATE_MIN_SAMPLE = 30
 # Classes that reach an upstream model provider.  `other` is health and probe
 # traffic: it never leaves the proxy, it is ~90% of stable's requests, and

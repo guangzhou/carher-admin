@@ -671,8 +671,10 @@ def test_metrics_sample_guard_alerts_without_triggering_rollback():
     # 99 canary samples is below MIN_SAMPLE (100) and below MIN_FIVE_XX_SAMPLE
     # (200), so both the class-level guard and the 5xx leg report dark.  The
     # canary 5xx rate here is 2.0% against stable's 0.1% -- a delta well over
-    # the 1% threshold -- and it must still not trigger, because a rate over 99
-    # requests fires on 3.35% of windows whose true delta is zero.
+    # the 1% threshold -- and it must still not trigger: a rate computed over 99
+    # requests is dominated by counting noise, and on the negative control a
+    # single window over threshold fires on ~11% of windows whose true delta is
+    # zero (the sustain gate, not this floor, is what brings that to 0.00%).
     assert output["dispatcher_recommendation"] == {
         "action": "alert_only",
         "hard_trigger": False,

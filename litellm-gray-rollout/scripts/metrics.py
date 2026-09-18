@@ -34,17 +34,29 @@ MIN_SAMPLE = 100
 # used to gate the whole class with a `continue`, which took the stop-loss leg
 # down with the latency legs -- and the latency legs already have their own
 # floors, so for them MIN_SAMPLE was redundant while for 5xx it was actively
-# wrong.  Measured on the negative control (stable split in half against itself
-# over 2026-09-16..18, 2123 class-windows, five-minute buckets): at a floor of
-# 100 the 5xx leg fires on 3.35% of windows where the true delta is zero; at 200
-# it fires on 0.00% while detection of an injected +2pp stays at 100.0%.  A
-# higher floor is strictly better here -- it is not a sensitivity trade.
+# wrong.
 #
-# The 5xx leg stays on the five-minute window.  Widening it makes this worse,
-# not better: at 30 minutes the same floor of 200 fires on 7.98% because a long
-# window spans real shifts in traffic mix and stops being a homogeneous sample.
+# The floor is 200 because that is where a single window's rate stops being
+# dominated by counting noise, NOT because it controls false positives -- it
+# barely does.  Measured on the negative control (stable split in half against
+# itself, 1223 five-minute buckets over 2026-09-14..18, threshold 0.01, real
+# inference classes only): a single window fires on 10.94% of windows at floor
+# 200 and 10.42% at floor 100 where the true delta is zero by construction.
+# What actually suppresses that is SUSTAIN_WINDOWS: requiring the same breach in
+# two consecutive windows takes it to 0.00% while still catching 54.7% of an
+# injected +2pp.  Do not raise this floor hoping to buy precision; at 300 only 6
+# windows in four days qualify at all and at 500 none do.
+#
+# Note for anyone re-running this: `other` (health/probe traffic) is ~90% of
+# armed windows and almost never fires, so including it dilutes the false
+# positive rate by more than 10x.  Calibrate on real inference classes only.
+#
+# The 5xx leg stays on the five-minute window, per its stop-loss role: a wider
+# window averages a fault down against healthy minutes before anyone sees it.
 # Below the floor the leg reports FIVE_XX_SAMPLE_BELOW_FLOOR and goes dark
-# honestly rather than pretending to be armed.
+# honestly rather than pretending to be armed.  At the current 15% split that is
+# most of the time -- see docs section 6.1.1 for the coverage table and what it
+# means for arming the dispatcher.
 MIN_FIVE_XX_SAMPLE = 200
 # A 101 response is a websocket upgrade: its `rt` is how long the connection
 # stayed open (observed median 74s, max 64281s = 17.8h), not how long a request

@@ -146,8 +146,23 @@ def digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(rendered.encode()).hexdigest()
 
 
+# Keys the evidence checksum deliberately does not cover.  "evidence" is the
+# envelope carrying the checksum itself.  "sustain_state" is control input the
+# wrapper splices in: collect-metrics.py signs the payload before those counts
+# exist (only gray-monitor-cycle.sh reads the state file beside the ledger), so
+# covering it made every real cycle fail EVIDENCE_CHECKSUM_MISMATCH while the
+# tests, which build the payload with the counts already present, stayed green.
+# Leaving it out is safe in the direction that matters: sustain counts can only
+# promote a breach to a trigger sooner, never suppress one, so a tampered value
+# cannot hide a regression -- and metrics.py clamps and filters the contents
+# anyway (see sustain_state()).
+UNSIGNED_PAYLOAD_KEYS = {"evidence", "sustain_state"}
+
+
 def payload_digest(payload: dict[str, Any]) -> str:
-    return digest({key: value for key, value in payload.items() if key != "evidence"})
+    return digest(
+        {key: value for key, value in payload.items() if key not in UNSIGNED_PAYLOAD_KEYS}
+    )
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -462,38 +477,72 @@ def opaque_ids(value: Any) -> set[str] | None:
 
 
 def spend_reconciliation(payload: dict[str, Any]) -> tuple[dict[str, Any], set[str], list[str]]:
+    """Judge spend-write integrity: did every request we issued get accounted for?
+
+    `pending_request_ids` exists because of a measurement, not a preference.  Over
+    6 hours / 25851 production rows on 198 (2026-09-18), LiteLLM's spend write is
+    bimodal: 98.4% of rows land within 30s of endTime, and the rest land in a
+    backlog sweep 5-100 minutes later (max 6069s), arriving in batches that share
+    an identical `created_at` and spanning unrelated model groups -- gpt-5.6-terra,
+    kiro-claude-opus-5, sa-grok-4.6.  So "row not there yet" is flush cadence, not
+    a fault, and a collector that scored it as `missing` would put a ~5%-per-cycle
+    false rollback on a leg that deliberately bypasses the sustain gate.  The
+    collector carries those ids forward instead and only reports one as missing
+    once it is past the full observed flush tail; `missing` therefore still means
+    "this spend write is lost", which is the fault worth a one-way door.
+
+    For the same reason `observed_lag_seconds` is an ALERT, not a trigger.  It
+    measures how long LiteLLM's batcher took, which is a property of the batcher
+    and not of the gray version -- no threshold on it can separate the two, and a
+    threshold sitting inside a 6069s tail is a ruler that reads the noise floor.
+    """
     source = payload.get("spend_reconciliation")
     if source is None:
-        return {"status": "NOT_PROVIDED"}, set(), []
+        return {"status": "NOT_PROVIDED"}, set(), [], set()
     if not isinstance(source, dict) or set(source) - {
-        "expected_request_ids", "terminal_request_ids", "failed_request_ids", "observed_lag_seconds"
+        "expected_request_ids", "terminal_request_ids", "failed_request_ids",
+        "pending_request_ids", "observed_lag_seconds",
     }:
-        return {"status": "INVALID"}, set(), ["SPEND_RECONCILIATION_INVALID"]
+        return {"status": "INVALID"}, set(), ["SPEND_RECONCILIATION_INVALID"], set()
     expected = opaque_ids(source.get("expected_request_ids"))
     terminal = opaque_ids(source.get("terminal_request_ids"))
     failed = opaque_ids(source.get("failed_request_ids"))
+    # Absent is allowed: a collector that cannot distinguish pending from lost
+    # must say so by omitting the key rather than by claiming an empty set.
+    pending_raw = source.get("pending_request_ids")
+    pending = set() if pending_raw is None else opaque_ids(pending_raw)
     lag = number(source.get("observed_lag_seconds"))
-    if expected is None or terminal is None or failed is None or not expected or lag is None or lag < 0:
-        return {"status": "INVALID"}, set(), ["SPEND_RECONCILIATION_INVALID"]
-    if terminal & failed or not (terminal | failed).issubset(expected):
-        return {"status": "INVALID"}, set(), ["SPEND_RECONCILIATION_INVALID"]
-    missing = expected - terminal - failed
+    if (
+        expected is None or terminal is None or failed is None or pending is None
+        or not expected or lag is None or lag < 0
+    ):
+        return {"status": "INVALID"}, set(), ["SPEND_RECONCILIATION_INVALID"], set()
+    if terminal & failed or not (terminal | failed | pending).issubset(expected):
+        return {"status": "INVALID"}, set(), ["SPEND_RECONCILIATION_INVALID"], set()
+    # A pending id that is also already terminal or failed is a contradiction:
+    # the collector observed the row and still called it unobserved.
+    if pending & (terminal | failed):
+        return {"status": "INVALID"}, set(), ["SPEND_RECONCILIATION_INVALID"], set()
+    missing = expected - terminal - failed - pending
     triggers: set[str] = set()
+    alerts: set[str] = set()
     if failed or missing:
         triggers.add("SPEND_RECONCILIATION_FAILED")
     if lag > MAX_SPEND_LAG_SECONDS:
-        triggers.add("SPEND_RECONCILIATION_LAG")
+        alerts.add("SPEND_RECONCILIATION_LAG")
     summary = {
         "status": "PASS" if not triggers else "FAIL",
         "expected_count": len(expected),
         "terminal_count": len(terminal),
         "failed_count": len(failed),
+        "pending_count": len(pending),
         "missing_request_ids": sorted(missing),
         "failed_request_ids": sorted(failed),
+        "pending_request_ids": sorted(pending),
         "observed_lag_seconds": rounded(lag),
         "request_ids_digest": digest(sorted(expected)),
     }
-    return summary, triggers, []
+    return summary, triggers, [], alerts
 
 
 def sustain_state(payload: dict[str, Any]) -> dict[str, int]:
@@ -614,11 +663,12 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         alerts.add("CANARY_SAMPLE_MISSING")
 
     hard = hard_error_probe
-    spend_summary, spend_triggers, spend_errors = spend_reconciliation(payload)
+    spend_summary, spend_triggers, spend_errors, spend_alerts = spend_reconciliation(payload)
     if rollout > 0 and spend_summary.get("status") == "NOT_PROVIDED":
         spend_errors.append("SPEND_RECONCILIATION_MISSING")
     if spend_errors:
         return error_result(spend_errors, groups)
+    alerts |= spend_alerts
     # Sustain gate.  Only the statistical legs are held back: a threshold breach
     # in a single window is mostly noise (adjacent stable windows move p95 2.42x
     # at the median with nothing changed), so it must repeat before it can move

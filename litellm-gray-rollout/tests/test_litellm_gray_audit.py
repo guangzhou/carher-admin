@@ -73,8 +73,17 @@ def _load_prepare_values():
 _PREPARE_VALUES = _load_prepare_values()
 
 
+# Must match metrics.py's UNSIGNED_PAYLOAD_KEYS.  "evidence" carries the
+# checksum itself; "sustain_state" is control input that gray-monitor-cycle.sh
+# splices in after collect-metrics.py has already signed the payload, so a
+# fixture that signs it does not reproduce any real cycle.
+_UNSIGNED_PAYLOAD_KEYS = {"evidence", "sustain_state"}
+
+
 def _payload_digest(payload: dict) -> str:
-    canonical = {key: value for key, value in payload.items() if key != "evidence"}
+    canonical = {
+        key: value for key, value in payload.items() if key not in _UNSIGNED_PAYLOAD_KEYS
+    }
     return _PREPARE_VALUES.raw_json_sha256(canonical)
 
 
@@ -1171,6 +1180,112 @@ def test_metrics_reconciles_request_ids_and_triggers_on_missing_terminal_rows():
     assert result.returncode == 1
     assert "SPEND_RECONCILIATION_FAILED" in output["dispatcher_recommendation"]["reason_codes"]
     assert output["spend_reconciliation"]["missing_request_ids"] == ["r-2"]
+
+
+def test_metrics_treats_pending_spend_rows_as_not_yet_a_fault():
+    """A row still inside LiteLLM's flush backlog must not dispatch a rollback.
+
+    Measured 2026-09-18 over 6h/25851 production rows on 198: 98.4% of spend rows
+    land within 30s of endTime and the rest arrive in a batch sweep up to 6069s
+    later.  Scoring that as `missing` put a ~5%-per-cycle false rollback on a leg
+    that bypasses the sustain gate, so a pending id is carried, not triggered.
+    """
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": metric_records("stable", "chat", 100, 200, 0.1)
+        + metric_records("canary", "chat", 100, 200, 0.1),
+        "hard_errors": {},
+        "spend_reconciliation": {
+            "expected_request_ids": ["r-1", "r-2"],
+            "terminal_request_ids": ["r-1"],
+            "failed_request_ids": [],
+            "pending_request_ids": ["r-2"],
+            "observed_lag_seconds": 2,
+        },
+    }
+    result, output = run_strict_tool("metrics.py", payload)
+    assert result.returncode == 0
+    assert output["spend_reconciliation"]["status"] == "PASS"
+    assert output["spend_reconciliation"]["missing_request_ids"] == []
+    assert output["spend_reconciliation"]["pending_request_ids"] == ["r-2"]
+    assert "SPEND_RECONCILIATION_FAILED" not in output["dispatcher_recommendation"]["reason_codes"]
+
+
+def test_metrics_reports_spend_lag_as_alert_not_rollback_trigger():
+    """Write lag measures LiteLLM's batcher, not the gray version.
+
+    The observed tail reaches 6069s, so no threshold on it separates a gray fault
+    from flush cadence: it is reported as an alert and must not move traffic.
+    """
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": metric_records("stable", "chat", 100, 200, 0.1)
+        + metric_records("canary", "chat", 100, 200, 0.1),
+        "hard_errors": {},
+        "spend_reconciliation": {
+            "expected_request_ids": ["r-1"],
+            "terminal_request_ids": ["r-1"],
+            "failed_request_ids": [],
+            "observed_lag_seconds": 900,
+        },
+    }
+    result, output = run_strict_tool("metrics.py", payload)
+    assert result.returncode == 0
+    assert output["status"] == "PASS"
+    # Alerts surface through the recommendation as alert_only -- visible, but it
+    # cannot move traffic. The distinction that matters is action, not the code.
+    assert output["dispatcher_recommendation"]["action"] == "alert_only"
+    assert "SPEND_RECONCILIATION_LAG" in output["dispatcher_recommendation"]["reason_codes"]
+    assert output["spend_reconciliation"]["status"] == "PASS"
+
+
+def test_metrics_still_triggers_when_a_spend_row_is_declared_lost():
+    """The fault the leg exists for must survive the pending fix.
+
+    An id reported in neither terminal, failed nor pending has outlived the whole
+    observed flush tail -- that is a lost spend write, and it still triggers.
+    """
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": metric_records("stable", "chat", 100, 200, 0.1)
+        + metric_records("canary", "chat", 100, 200, 0.1),
+        "hard_errors": {},
+        "spend_reconciliation": {
+            "expected_request_ids": ["r-1", "r-2", "r-3"],
+            "terminal_request_ids": ["r-1"],
+            "failed_request_ids": [],
+            "pending_request_ids": ["r-2"],
+            "observed_lag_seconds": 2,
+        },
+    }
+    result, output = run_strict_tool("metrics.py", payload)
+    assert result.returncode == 1
+    assert output["spend_reconciliation"]["missing_request_ids"] == ["r-3"]
+    assert "SPEND_RECONCILIATION_FAILED" in output["dispatcher_recommendation"]["reason_codes"]
+
+
+def test_metrics_rejects_pending_id_that_is_also_terminal():
+    """A collector cannot both observe a row and call it unobserved."""
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": 10,
+        "records": metric_records("stable", "chat", 100, 200, 0.1)
+        + metric_records("canary", "chat", 100, 200, 0.1),
+        "hard_errors": {},
+        "spend_reconciliation": {
+            "expected_request_ids": ["r-1"],
+            "terminal_request_ids": ["r-1"],
+            "failed_request_ids": [],
+            "pending_request_ids": ["r-1"],
+            "observed_lag_seconds": 1,
+        },
+    }
+    result, output = run_strict_tool("metrics.py", payload)
+    assert result.returncode == 2
+    assert "SPEND_RECONCILIATION_INVALID" in output["errors"]
 
 
 def test_metrics_requires_spend_reconciliation_when_gray_has_traffic():

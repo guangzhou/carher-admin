@@ -354,6 +354,53 @@ def test_monitor_cycle_carries_sustain_state_across_cycles(tmp_path: Path) -> No
     assert list(evidence_dir.glob(".metrics-input.*")) == []
 
 
+def test_monitor_cycle_sustain_splice_survives_the_real_evidence_checksum() -> None:
+    """The spliced sustain_state must not break the evidence checksum.
+
+    Every other sustain test hands gray-monitor-cycle.sh a stand-in for
+    metrics.py, so none of them exercises the checksum at all -- and the
+    fixtures that do reach the real tool used to sign the payload with
+    sustain_state already inside it, which no real cycle ever produces.
+    Between those two gaps, the pipeline shipped with the splice invalidating
+    the signature: collect-metrics.py signs the payload before the counts
+    exist, so metrics.py rejected every staged cycle with
+    EVIDENCE_CHECKSUM_MISMATCH and the heartbeat ledger stayed empty. A dead
+    monitor loop looks exactly like a quiet one, which is the shape the ramp
+    gate exists to refuse.
+
+    So this runs the real metrics.py against a payload signed the way the
+    collector signs it, then asserts both directions: the splice passes, and
+    tampering with a field the checksum does cover still fails.
+    """
+
+    def signed(**kwargs: Any) -> dict[str, Any]:
+        return _metrics_payload(gray_latency=0.5, stable_latency=0.5, **kwargs)
+
+    # Un-spliced: what collect-metrics.py writes.
+    assert _evaluate(signed())["status"] == "PASS"
+
+    # Spliced the way gray-monitor-cycle.sh splices it, with and without a
+    # carried streak. Both are real first/second cycles.
+    for counts in ({}, {"P95_RATIO": 1}):
+        result = _evaluate(signed(sustain_state=counts))
+        assert result["status"] == "PASS", result.get("errors")
+        assert "EVIDENCE_CHECKSUM_MISMATCH" not in result.get("errors", [])
+
+    # Negative control: the checksum must still protect everything else. If
+    # these passed, the fix above would have disarmed the whole envelope
+    # rather than narrowed it.
+    for mutate in (
+        lambda p: p.update(rollout_percent=10),
+        lambda p: p["records"][0].update(status=503),
+        lambda p: p["backend_health"].update(prod=False),
+    ):
+        payload = signed(sustain_state={})
+        mutate(payload)
+        tampered = _evaluate(payload)
+        assert tampered["status"] == "ERROR"
+        assert tampered["errors"] == ["EVIDENCE_CHECKSUM_MISMATCH"]
+
+
 def test_monitor_cycle_never_dispatches_invalid_or_failed_metrics(tmp_path: Path) -> None:
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir(mode=0o700)
@@ -1336,9 +1383,14 @@ def _metrics_payload(
         )
     if latency_window_minutes is not None:
         payload["latency_window_minutes"] = latency_window_minutes
-    if sustain_state is not None:
-        payload["sustain_state"] = sustain_state
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    # The checksum is computed BEFORE sustain_state is spliced in, exactly as
+    # collect-metrics.py does it: the collector signs what it observed, and only
+    # gray-monitor-cycle.sh later reads the carried counts from the state file
+    # beside the ledger.  Signing the counts here instead is what let
+    # EVIDENCE_CHECKSUM_MISMATCH reach production green -- every real cycle
+    # failed while these fixtures passed.  See UNSIGNED_PAYLOAD_KEYS in
+    # metrics.py.
     payload["evidence"] = {
         "schema_version": 1,
         "captured_at": now,
@@ -1351,6 +1403,8 @@ def _metrics_payload(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
     }
+    if sustain_state is not None:
+        payload["sustain_state"] = sustain_state
     return payload
 
 

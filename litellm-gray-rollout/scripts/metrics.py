@@ -58,6 +58,47 @@ MIN_SAMPLE = 100
 # most of the time -- see docs section 6.1.1 for the coverage table and what it
 # means for arming the dispatcher.
 MIN_FIVE_XX_SAMPLE = 200
+# The absolute 5xx stop-loss leg.  This exists because the delta leg above cannot
+# arm at production volume: measured on 65 five-minute windows of canary
+# inference traffic at split=100 (2026-09-19, 12h), the per-class counts are
+# chat median 65 / max 149, responses 44 / 100, messages 12 / 36, and even all
+# inference classes pooled peak at 185.  Zero windows in twelve hours reached
+# MIN_FIVE_XX_SAMPLE on the gray side, so `five_xx_qualified` was false in every
+# window at every split.  The reference side was never the problem -- the frozen
+# baseline carries 5156 / 2208 / 200.
+#
+# Lowering MIN_FIVE_XX_SAMPLE does not fix it.  A 100-request window holds ~2
+# requests' worth of a 2pp shift, so nothing can resolve that effect there:
+# measured against a leave-one-out negative control on the same version, floor 50
+# arms 51.6% of windows but fires falsely on 3.8% of them (a false rollback every
+# ~1.5h) while still catching only 11% of an injected +2pp.  A one-sided Fisher
+# exact on the raw counts was also tried: false positives 0.00%, detection 0.4%.
+# The information is not in the window.
+#
+# What IS resolvable at n=100 is a broken build, which does not produce 2% errors.
+# So this leg drops the reference comparison and trips on an absolute rate that
+# same-version history does not sustain.  Floor 30 because it arms 92.6% of
+# windows (stable) / 79.8% (canary) versus 3.16% for the delta leg, and a rate
+# needs a handful of requests to exist at all.
+MIN_ABS_FIVE_XX_SAMPLE = 30
+# 0.10 sits above the p90 of same-version five-minute windows (0.043 stable,
+# 0.035 canary) and below the p99 (0.206 / 0.288).  It is deliberately NOT above
+# the historical max: same-version windows reach 0.62 during upstream outages, so
+# any rate a broken build crosses, a burst crosses too.  Duration and shared fate
+# separate them, not the rate.
+ABS_FIVE_XX_RATE = 0.10
+# Three events, so a 30-request window cannot trip on a single failure.
+MIN_ABS_FIVE_XX_EVENTS = 3
+# Concurrent non-gray inference traffic must clear this before it can veto a
+# breach.  Available in 89.5% of armed windows across history and 67.8% after
+# cutover, measured -- so the veto is real but not always readable, and the code
+# says which happened rather than letting a blind guard look like a clean one.
+SHARED_FATE_MIN_SAMPLE = 30
+# Classes that reach an upstream model provider.  `other` is health and probe
+# traffic: it never leaves the proxy, it is ~90% of stable's requests, and
+# pooling it into the shared-fate cohort dilutes a real burst from 89.5%
+# suppression down to 64.4%.  Measured; that is why this set is explicit.
+INFERENCE_CLASSES = frozenset({"chat", "messages", "responses", "embedding"})
 # A 101 response is a websocket upgrade: its `rt` is how long the connection
 # stayed open (observed median 74s, max 64281s = 17.8h), not how long a request
 # took to serve.  Mixing that into a latency percentile measures "how long did
@@ -79,6 +120,15 @@ MIN_P99_SAMPLE = 500
 # the line carries almost no information.  Requiring two in a row costs one
 # window of detection latency and removes the remaining false positives.
 SUSTAIN_WINDOWS = 2
+# The absolute 5xx leg needs a deeper gate than the comparison legs, because it
+# has no reference to cancel provider weather out and its remaining false
+# positives are all upstream bursts.  Depth is the lever that works: measured on
+# same-version canary history (1310 windows / 4.55 days), at rate 0.10 the false
+# fires per day go 2.07 (depth 2) -> 0.89 (3) -> 0.30 (4), while detection of a
+# +20pp regression only falls 94.2% -> 90.9% -> 88.6%.  Four windows is 20
+# minutes of a sustained break before traffic moves; a burst that clears inside
+# that is exactly what we do not want to act on.
+ABS_SUSTAIN_WINDOWS = 4
 # Shortest latency window that can carry the floors above.  At five minutes the
 # `responses` class has a median of 57 latency samples, so MIN_P99_SAMPLE can
 # never be met and the p99 leg would be permanently dark -- a gate that cannot
@@ -92,7 +142,9 @@ THRESHOLDS = {
     "p99_ratio": 1.5,
 }
 # The statistical legs, and only those, are subject to the sustain gate.
-THRESHOLD_TRIGGER_CODES = frozenset({"FIVE_XX_DELTA", "P95_RATIO", "P99_RATIO"})
+THRESHOLD_TRIGGER_CODES = frozenset({"FIVE_XX_DELTA", "P95_RATIO", "P99_RATIO", "FIVE_XX_ABSOLUTE"})
+# Per-code sustain depth.  Anything absent uses SUSTAIN_WINDOWS.
+SUSTAIN_DEPTH = {"FIVE_XX_ABSOLUTE": ABS_SUSTAIN_WINDOWS}
 HARD_ERROR_CODES = {
     "prisma_error": "PRISMA_ERROR",
     "callback_import_error": "CALLBACK_IMPORT_ERROR",
@@ -418,6 +470,91 @@ def compare(gray: dict[str, dict[str, Any]], reference: dict[str, dict[str, Any]
     return comparisons, triggers, alerts
 
 
+def pool_inference_totals(groups: list[dict[str, Any]], pool: str) -> tuple[int, int]:
+    """Requests and 5xx across one pool's inference classes, pooled.
+
+    Pooled rather than per-class because that is the only grouping with a usable
+    denominator: per-class, the busiest five-minute window in twelve hours held
+    149 requests, while pooled it holds ~100 at the median.  `other` is excluded
+    because it never reaches a model provider, so its errors say nothing about the
+    build under test and its volume (~90% of stable) would bury a real one.
+    """
+    count = five_xx = 0
+    for item in groups:
+        if item["pool_label"] != pool or item["uri_class"] not in INFERENCE_CLASSES:
+            continue
+        count += int(item.get("count", 0))
+        five_xx += int(item.get("five_xx_count", 0))
+    return count, five_xx
+
+
+def absolute_five_xx(
+    groups: list[dict[str, Any]], gray_pool: str, guard_pool: str
+) -> tuple[dict[str, Any], set[str], set[str]]:
+    """Stop-loss on the gray cohort's own 5xx rate, vetoed by shared fate.
+
+    This is the leg that is actually armed at production volume; the delta leg
+    beside it cannot be, and says so with FIVE_XX_SAMPLE_BELOW_FLOOR.  It answers
+    a narrower question on purpose -- "is the gray cohort failing outright" rather
+    than "is it slightly worse than the reference" -- because that is the question
+    a five-minute window of ~100 requests can answer.
+
+    The shared-fate veto is what keeps it from firing on provider outages, which
+    are the entire residual false-positive population once the rate is above the
+    p90 of same-version windows.  When the guard cohort is too thin to read, the
+    breach still stands: a stop-loss that goes dark whenever it cannot attribute
+    the fault is the failure mode this whole change exists to remove.  The
+    veto/blind distinction is reported either way so nobody reads a quiet leg as a
+    confirmed-clean one.
+    """
+    gray_count, gray_five_xx = pool_inference_totals(groups, gray_pool)
+    guard_count, guard_five_xx = pool_inference_totals(groups, guard_pool)
+    gray_rate = (gray_five_xx / gray_count) if gray_count else None
+    guard_rate = (guard_five_xx / guard_count) if guard_count else None
+    guard_readable = guard_count >= SHARED_FATE_MIN_SAMPLE
+    summary: dict[str, Any] = {
+        "gray_pool": gray_pool,
+        "gray_count": gray_count,
+        "gray_five_xx_count": gray_five_xx,
+        "gray_five_xx_rate": rounded(gray_rate),
+        "threshold": ABS_FIVE_XX_RATE,
+        "minimum_sample": MIN_ABS_FIVE_XX_SAMPLE,
+        "minimum_events": MIN_ABS_FIVE_XX_EVENTS,
+        "shared_fate_pool": guard_pool,
+        "shared_fate_count": guard_count,
+        "shared_fate_five_xx_rate": rounded(guard_rate),
+        "shared_fate_readable": guard_readable,
+        "shared_fate_vetoed": False,
+    }
+    breaches: set[str] = set()
+    alerts: set[str] = set()
+    if gray_count < MIN_ABS_FIVE_XX_SAMPLE:
+        summary["qualified"] = False
+        # No gray inference traffic at all is a different fact from a thin window,
+        # and CANARY_SAMPLE_MISSING already reports it.  Adding a floor alert here
+        # would put two codes on one cause.
+        if gray_count:
+            alerts.add("ABS_FIVE_XX_SAMPLE_BELOW_FLOOR")
+        return summary, breaches, alerts
+    summary["qualified"] = True
+    # Only worth saying when the veto could have mattered.  A readable guard is
+    # irrelevant in a window with nothing to veto, and reporting it there would
+    # train readers to skip the code.
+    guard_relevant = gray_five_xx >= MIN_ABS_FIVE_XX_EVENTS and gray_rate > ABS_FIVE_XX_RATE
+    if guard_relevant and not guard_readable:
+        alerts.add("SHARED_FATE_COHORT_BLIND")
+    if gray_five_xx >= MIN_ABS_FIVE_XX_EVENTS and gray_rate > ABS_FIVE_XX_RATE:
+        if guard_readable and guard_rate > ABS_FIVE_XX_RATE:
+            # Both cohorts are equally bad and only one runs the gray build, so
+            # this is provider weather, not a regression.  Still an alert: the
+            # users are getting errors either way and someone has to know.
+            summary["shared_fate_vetoed"] = True
+            alerts.add("UPSTREAM_FIVE_XX_SHARED")
+        else:
+            breaches.add("FIVE_XX_ABSOLUTE")
+    return summary, breaches, alerts
+
+
 def with_wide_latency(
     live: dict[str, dict[str, Any]], wide: dict[str, dict[str, Any]]
 ) -> dict[str, dict[str, Any]]:
@@ -564,8 +701,13 @@ def sustain_state(payload: dict[str, Any]) -> dict[str, int]:
         except (TypeError, ValueError):
             continue
         if count > 0:
-            state[key] = min(count, SUSTAIN_WINDOWS)
+            state[key] = min(count, depth_for(key))
     return state
+
+
+def depth_for(code: str) -> int:
+    """Consecutive windows this code must hold before it can move traffic."""
+    return SUSTAIN_DEPTH.get(code, SUSTAIN_WINDOWS)
 
 
 def apply_sustain(
@@ -580,11 +722,13 @@ def apply_sustain(
     counts: dict[str, int] = {}
     promoted: set[str] = set()
     for code in sorted(breaches):
-        counts[code] = min(previous.get(code, 0) + 1, SUSTAIN_WINDOWS)
-        if counts[code] >= SUSTAIN_WINDOWS:
+        depth = depth_for(code)
+        counts[code] = min(previous.get(code, 0) + 1, depth)
+        if counts[code] >= depth:
             promoted.add(code)
     summary = {
         "required_windows": SUSTAIN_WINDOWS,
+        "required_windows_by_code": {code: depth_for(code) for code in sorted(THRESHOLD_TRIGGER_CODES)},
         "counts": counts,
         "pending": sorted(code for code in counts if code not in promoted),
         "promoted": sorted(promoted),
@@ -661,6 +805,19 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         comparisons, threshold_triggers, alerts = compare(gray, reference, "stable")
     if rollout > 0 and not gray:
         alerts.add("CANARY_SAMPLE_MISSING")
+    # Absolute 5xx stop-loss.  Runs in both comparison modes and at every split
+    # above zero, because it does not depend on a reference cohort -- which is the
+    # point: the delta leg is dark at production volume, and after cutover the
+    # stable pool retains only health checks plus a handful of force-prod keys.
+    # The guard cohort is stable's inference traffic, thin but real, and the leg
+    # reports when it could not be read rather than standing down.
+    abs_summary, abs_breaches, abs_alerts = absolute_five_xx(groups, "canary", "stable")
+    if rollout > 0:
+        threshold_triggers |= abs_breaches
+        alerts |= abs_alerts
+    else:
+        abs_summary["qualified"] = False
+        abs_summary["skipped_reason"] = "split_zero"
 
     hard = hard_error_probe
     spend_summary, spend_triggers, spend_errors, spend_alerts = spend_reconciliation(payload)
@@ -746,6 +903,9 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
             "minimum_p95_sample": MIN_P95_SAMPLE,
             "minimum_p99_sample": MIN_P99_SAMPLE,
             "sustain_windows": SUSTAIN_WINDOWS,
+            "absolute_five_xx_rate": ABS_FIVE_XX_RATE,
+            "minimum_absolute_five_xx_sample": MIN_ABS_FIVE_XX_SAMPLE,
+            "absolute_sustain_windows": ABS_SUSTAIN_WINDOWS,
             "latency_excluded_statuses": sorted(LATENCY_EXCLUDED_STATUSES),
             "minimum_latency_window_minutes": MIN_LATENCY_WINDOW_MINUTES,
             # None means the percentiles came from the five-minute live window and
@@ -762,6 +922,7 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         },
         "groups": groups,
         "comparisons": comparisons,
+        "absolute_five_xx": abs_summary,
         "spend_reconciliation": spend_summary,
         "backend_health": payload.get("backend_health", {}),
         "errors": sorted(set(errors)),

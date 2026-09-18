@@ -629,7 +629,7 @@ def test_metrics_recommends_rollback_for_qualified_normal_gray_breach():
         # A statistical breach must repeat before it can move traffic, so the
         # rollback path is reached on the window that completes the streak, not
         # the first one. See SUSTAIN_WINDOWS in metrics.py.
-        "sustain_state": {"FIVE_XX_DELTA": 1},
+        "sustain_state": {"FIVE_XX_DELTA": 1, "FIVE_XX_ABSOLUTE": 3},
         "spend_reconciliation": {
             "expected_request_ids": ["r-001"],
             "terminal_request_ids": ["r-001"],
@@ -658,8 +658,14 @@ def test_metrics_recommends_rollback_for_qualified_normal_gray_breach():
     first_result, first_output = run_tool("metrics.py", first_window)
     assert first_result.returncode == 0
     assert first_output["dispatcher_recommendation"]["action"] != "rollback"
-    assert first_output["sustain"]["counts"] == {"FIVE_XX_DELTA": 1}
+    # This fixture is canary 100% 5xx against stable 0%, so the absolute leg
+    # breaches alongside the delta leg.  It carries a deeper gate
+    # (ABS_SUSTAIN_WINDOWS = 4) because it has no reference to cancel provider
+    # weather out, so it is still pending here while FIVE_XX_DELTA promotes.
+    assert first_output["sustain"]["counts"] == {"FIVE_XX_ABSOLUTE": 1, "FIVE_XX_DELTA": 1}
     assert first_output["sustain"]["promoted"] == []
+    assert first_output["sustain"]["required_windows_by_code"]["FIVE_XX_ABSOLUTE"] == 4
+    assert first_output["sustain"]["required_windows_by_code"]["FIVE_XX_DELTA"] == 2
 
 
 def test_metrics_sample_guard_alerts_without_triggering_rollback():
@@ -2719,3 +2725,193 @@ def test_scripts_never_use_brace_intervals_in_awk():
         "awk program uses a brace interval, which mawk ignores silently:\n"
         + "\n".join(offenders)
     )
+
+
+def abs_leg_payload(
+    gray_total: int,
+    gray_five_xx: int,
+    stable_total: int,
+    stable_five_xx: int,
+    *,
+    rollout: int = 100,
+    sustain: int = 3,
+    other_total: int = 0,
+) -> dict:
+    """Payload exercising the absolute 5xx leg at production-shaped volume.
+
+    Gray traffic is split across the three inference classes the way real canary
+    traffic is, so every per-class count lands under MIN_FIVE_XX_SAMPLE (200) and
+    the delta leg is dark -- which is the situation this leg exists for.  Measured
+    on 65 five-minute windows at split=100: chat median 65, responses 44,
+    messages 12, pooled peak 185.
+    """
+    records: list[dict] = []
+    # Weighted the way the real windows are: chat ~48%, responses ~44%, messages ~8%.
+    # The last class absorbs the rounding so the cohort totals are exact -- a
+    # fixture that silently carries 109 requests would make the assertions below
+    # about counts meaningless.
+    shares = (("chat", 0.48), ("responses", 0.44), ("messages", None))
+    placed = placed_bad = 0
+    for uri_class, share in shares:
+        if share is None:
+            count, bad = gray_total - placed, gray_five_xx - placed_bad
+        else:
+            count, bad = round(gray_total * share), round(gray_five_xx * share)
+        placed += count
+        placed_bad += bad
+        records += metric_records("canary", uri_class, bad, 502, 0.1)
+        records += metric_records("canary", uri_class, count - bad, 200, 0.1)
+    records += metric_records("stable", "chat", stable_five_xx, 502, 0.1)
+    records += metric_records("stable", "chat", stable_total - stable_five_xx, 200, 0.1)
+    # Health-check traffic, always stable, never reaches a provider.
+    records += metric_records("stable", "other", other_total, 200, 0.1)
+    payload = {
+        "phase": "normal_gray",
+        "rollout_percent": rollout,
+        "records": records,
+        "hard_errors": {},
+        "backend_health": {"gray": True, "prod": True},
+        "sustain_state": {"FIVE_XX_ABSOLUTE": sustain},
+        "spend_reconciliation": {
+            "expected_request_ids": ["r-001"],
+            "terminal_request_ids": ["r-001"],
+            "failed_request_ids": [],
+            "observed_lag_seconds": 1,
+        },
+    }
+    if rollout >= 100:
+        payload["baseline"] = [
+            {"uri_class": "chat", "count": 5156, "five_xx_rate": 0.001, "p95": 0.1, "p99": 0.2, "latency_count": 5156},
+            {"uri_class": "responses", "count": 2208, "five_xx_rate": 0.001, "p95": 0.1, "p99": 0.2, "latency_count": 2043},
+            {"uri_class": "messages", "count": 200, "five_xx_rate": 0.001, "p95": 0.1, "p99": 0.2, "latency_count": 200},
+        ]
+    return payload
+
+
+def test_abs_five_xx_leg_arms_at_real_post_cutover_volume():
+    """Positive control: a broken gray build at real volume must move traffic.
+
+    This is the defect the leg was added for.  Before it existed, every verdict at
+    every split carried FIVE_XX_SAMPLE_BELOW_FLOOR: on 65 five-minute windows of
+    canary inference traffic at split=100, zero reached MIN_FIVE_XX_SAMPLE on the
+    gray side, so `five_xx_qualified` was false every window and the automatic
+    rollback could not fire at all.  A gate that cannot fire looks armed.
+    """
+    # 108 gray requests, 25% failing -- a broken build, not a 2pp drift.  Stable
+    # inference is clean, so shared fate does not veto.
+    payload = abs_leg_payload(108, 27, 60, 0, other_total=4000)
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 1
+    assert output["dispatcher_recommendation"]["action"] == "rollback"
+    assert "FIVE_XX_ABSOLUTE" in output["dispatcher_recommendation"]["reason_codes"]
+    # The delta leg is dark at this volume, which is the whole point: the stop-loss
+    # must not depend on it.
+    assert all(not item["five_xx_qualified"] for item in output["comparisons"])
+    leg = output["absolute_five_xx"]
+    assert leg["qualified"] is True
+    assert leg["gray_count"] == 108
+    assert leg["shared_fate_vetoed"] is False
+
+
+def test_abs_five_xx_leg_holds_clean_traffic_green():
+    """Negative control: a synthetic green is as untrustworthy as a synthetic red.
+
+    Same shape and the same volume as the positive control, with the 5xx rate
+    under the threshold.  If this fired, the leg would just be a volume detector.
+    """
+    # 2 failures in 108 requests = 1.9%, under ABS_FIVE_XX_RATE and under
+    # MIN_ABS_FIVE_XX_EVENTS.
+    payload = abs_leg_payload(108, 2, 60, 0, sustain=3, other_total=4000)
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 0
+    assert output["dispatcher_recommendation"]["action"] != "rollback"
+    assert "FIVE_XX_ABSOLUTE" not in output["sustain"]["counts"]
+    leg = output["absolute_five_xx"]
+    assert leg["qualified"] is True
+    assert leg["gray_five_xx_rate"] < leg["threshold"]
+
+
+def test_abs_five_xx_leg_defers_to_shared_fate_on_upstream_outage():
+    """An upstream outage hits both cohorts; only one runs the gray build.
+
+    Measured on 4.55 days of same-version history: without this veto a shared
+    burst produces 164 false fires per day, with it 0.44.  Same-version windows
+    really do reach a 62% 5xx rate during provider outages, so no rate threshold
+    can separate a burst from a broken build -- shared fate and duration can.
+    """
+    payload = abs_leg_payload(108, 40, 60, 24, other_total=4000)
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 0
+    assert output["dispatcher_recommendation"]["action"] == "alert_only"
+    assert "UPSTREAM_FIVE_XX_SHARED" in output["dispatcher_recommendation"]["reason_codes"]
+    assert "FIVE_XX_ABSOLUTE" not in output["sustain"]["counts"]
+    leg = output["absolute_five_xx"]
+    assert leg["shared_fate_vetoed"] is True
+    assert leg["shared_fate_readable"] is True
+
+
+def test_abs_five_xx_leg_still_fires_when_shared_fate_cohort_is_unreadable():
+    """A stop-loss must not go dark just because it cannot attribute the fault.
+
+    After cutover the stable pool keeps only health checks and a few force-prod
+    keys, so its inference cohort clears SHARED_FATE_MIN_SAMPLE in 67.8% of armed
+    windows.  In the other third the breach still stands, with
+    SHARED_FATE_COHORT_BLIND on the record saying the veto could not be read.
+    """
+    payload = abs_leg_payload(108, 27, 5, 0, other_total=4000)
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 1
+    assert output["dispatcher_recommendation"]["action"] == "rollback"
+    codes = output["dispatcher_recommendation"]["reason_codes"]
+    assert "FIVE_XX_ABSOLUTE" in codes
+    assert output["absolute_five_xx"]["shared_fate_readable"] is False
+
+
+def test_abs_five_xx_leg_needs_four_windows_before_moving_traffic():
+    """Depth is the lever that removes the residual false positives.
+
+    Measured on 1310 same-version windows / 4.55 days at rate 0.10: false fires
+    per day are 2.07 at depth 2, 0.89 at 3, 0.30 at 4, while detection of a +20pp
+    regression only falls 94.2% -> 90.9% -> 88.6%.  So this leg carries a deeper
+    gate than the comparison legs, which stay at SUSTAIN_WINDOWS = 2.
+    """
+    for carried in (0, 1, 2):
+        payload = abs_leg_payload(108, 27, 60, 0, sustain=carried, other_total=4000)
+        if carried == 0:
+            del payload["sustain_state"]
+        result, output = run_tool("metrics.py", payload)
+        assert result.returncode == 0, f"carried={carried} moved traffic too early"
+        assert output["dispatcher_recommendation"]["action"] != "rollback"
+        assert output["sustain"]["counts"]["FIVE_XX_ABSOLUTE"] == carried + 1
+        assert "FIVE_XX_ABSOLUTE" not in output["sustain"]["promoted"]
+
+
+def test_abs_five_xx_leg_ignores_health_check_traffic():
+    """`other` is ~90% of stable's requests and never reaches a provider.
+
+    Pooling it into the cohorts dilutes a real burst from 89.5% suppression to
+    64.4%, and a flood of clean health checks would hide a broken build entirely.
+    Here 4000 clean `other` requests sit alongside a failing gray cohort: the leg
+    must still read 108, not 4108.
+    """
+    payload = abs_leg_payload(108, 27, 60, 0, other_total=4000)
+    _, output = run_tool("metrics.py", payload)
+    leg = output["absolute_five_xx"]
+    assert leg["gray_count"] == 108
+    # Stable's guard cohort counts its inference traffic only.
+    assert leg["shared_fate_count"] == 60
+
+
+def test_abs_five_xx_leg_is_dark_below_its_own_floor():
+    """Thin windows report dark rather than computing a rate on nothing."""
+    payload = abs_leg_payload(20, 10, 60, 0, other_total=4000)
+    result, output = run_tool("metrics.py", payload)
+
+    assert result.returncode == 0
+    assert "ABS_FIVE_XX_SAMPLE_BELOW_FLOOR" in output["dispatcher_recommendation"]["reason_codes"]
+    assert output["absolute_five_xx"]["qualified"] is False
+    assert "FIVE_XX_ABSOLUTE" not in output["sustain"]["counts"]

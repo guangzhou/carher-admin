@@ -373,6 +373,54 @@ def budget_public_message(exc: Any, user_api_key_dict: Any, rid: str) -> Optiona
         return None
 
 
+def context_window_public_message(exc: Any, rid: str) -> Optional[str]:
+    """ContextWindowExceededError 的对外文案豁免分支（2026-09-19）。
+
+    起因：wanglihua 09-18 11:25 在 OWUI 里把上下文堆到 547720 token，撞上
+    grok-4.6 的 500000 输入上限。这个异常是 litellm router 自己在
+    ``_pre_call_checks`` 里抛的（router.py:10762），**在选中任何 deployment
+    之前** —— 所以它的 message 里只有 "Model=<对外模型名>, Max Input
+    Tokens=<数字>, Got=<数字>"，没有 api_base、没有落点、没有 key 物料。
+    但整体置换把它打成「API 异常」之后，用户只知道"坏了"，不知道是自己聊得
+    太长了、更不知道开个新会话就能好，只会来问我们。
+
+    和 budget_public_message 同一套规矩：文案由本函数从零拼出，**不透传原文
+    的任何片段**，只用正则把两个纯数字抓出来（数字本身不是内部拓扑）。
+    抓不到就退化成不带数字的版本，绝不把原 message 拼进去。
+
+    仅豁免文案，置换机制不变：返回的 msg 仍走 sanitize_exception 的四属性
+    就地改写，400 状态码与异常类型原样保留。
+
+    文案用词避开 _LEAK_RE（账户/账号/池子/deployment 都会被 contains_leak
+    命中，那样这句话自己就会被 scrub 成通用文案）。
+
+    kill switch：CONTEXT_WINDOW_FRIENDLY_MSG_DISABLED=1
+    """
+    try:
+        if os.environ.get("CONTEXT_WINDOW_FRIENDLY_MSG_DISABLED") == "1":
+            return None
+        if type(exc).__name__ != "ContextWindowExceededError":
+            return None
+        raw = ""
+        try:
+            raw = str(getattr(exc, "message", "") or "")
+        except Exception:
+            raw = ""
+        got = re.search(r"Got\s*[=:]\s*(\d+)", raw, re.IGNORECASE)
+        cap = re.search(r"Max\s*Input\s*Tokens\s*[=:]\s*(\d+)", raw, re.IGNORECASE)
+        if got and cap:
+            nums = f"（本次约 {int(got.group(1)):,} token，上限 {int(cap.group(1)):,}）"
+        else:
+            nums = ""
+        return (
+            f"当前对话的上下文超出该模型的输入上限{nums}。"
+            f"请新建一个会话，或删掉前面的部分历史后重试。"
+            f"(req: {rid})"
+        )
+    except Exception:
+        return None
+
+
 def contains_leak(value: Any) -> bool:
     try:
         return bool(_LEAK_RE.search(str(value)))
@@ -587,6 +635,7 @@ class ErrorSanitize(CustomLogger):
             rid = request_id(request_data)
             msg = (
                 budget_public_message(original_exception, user_api_key_dict, rid)
+                or context_window_public_message(original_exception, rid)
                 or public_message(rid)
             )
             original = original_text(original_exception)

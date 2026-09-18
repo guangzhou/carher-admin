@@ -10,6 +10,7 @@ import subprocess
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -261,6 +262,96 @@ def test_monitor_cycle_persists_metrics_before_dispatching(tmp_path: Path) -> No
     assert lines[0]["metrics_status"] == "PASS"
     assert lines[0]["evidence"] == evidence.name
     assert lines[0]["cycle_completed_at"].endswith("Z")
+
+
+def test_monitor_cycle_carries_sustain_state_across_cycles(tmp_path: Path) -> None:
+    """The streak must survive between cycles, or it can never complete.
+
+    metrics.py only promotes a statistical breach to a trigger once it has held
+    for SUSTAIN_WINDOWS cycles, and each cycle is a separate process. If the
+    counts are not written back and spliced into the next input, the counter
+    never reaches the threshold and the latency/5xx legs are silently dead --
+    a stop-loss that looks armed and cannot fire.
+    """
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(mode=0o700)
+    input_file = tmp_path / "metrics-input.json"
+    input_file.write_text(json.dumps({"evidence": {"run_id": "r1", "generation": "g1"}}))
+    input_file.chmod(0o600)
+
+    # Stand-in for metrics.py: echoes the sustain_state it was handed back as an
+    # incremented count, which is what the real tool does on a repeated breach.
+    metrics = tmp_path / "metrics.py"
+    metrics.write_text(
+        "#!/usr/bin/env python3\n"
+        "import argparse, json\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('--input')\n"
+        "a = p.parse_args()\n"
+        "payload = json.load(open(a.input))\n"
+        "seen = payload.get('sustain_state', {})\n"
+        "count = int(seen.get('P95_RATIO', 0)) + 1\n"
+        "print(json.dumps({'tool': 'metrics', 'status': 'PASS',\n"
+        "                  'run_id': payload['evidence']['run_id'],\n"
+        "                  'generation': payload['evidence']['generation'],\n"
+        "                  'observed_sustain_state': seen,\n"
+        "                  'sustain': {'counts': {'P95_RATIO': count}}}))\n"
+    )
+    metrics.chmod(0o700)
+    dispatcher = tmp_path / "dispatch.sh"
+    dispatcher.write_text("#!/bin/sh\nexit 0\n")
+    dispatcher.chmod(0o700)
+
+    def cycle() -> None:
+        result = subprocess.run(
+            [
+                str(SCRIPT_DIR / "gray-monitor-cycle.sh"),
+                "--input", str(input_file),
+                "--evidence-dir", str(evidence_dir),
+            ],
+            text=True,
+            capture_output=True,
+            env={
+                "PATH": os.environ["PATH"],
+                "GRAY_ALLOW_NONROOT": "1",
+                "GRAY_TEST_MODE": "1",
+                "GRAY_METRICS_TOOL": str(metrics),
+                "GRAY_DISPATCH_TOOL": str(dispatcher),
+            },
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def evidence_payloads() -> list[dict[str, Any]]:
+        return [
+            json.loads(path.read_text())
+            for path in sorted(evidence_dir.glob("metrics-*.json"))
+        ]
+
+    state = evidence_dir / "monitor-sustain.json"
+
+    cycle()
+    assert stat.S_IMODE(state.stat().st_mode) == 0o600
+    assert json.loads(state.read_text())["counts"] == {"P95_RATIO": 1}
+    # First cycle starts from nothing: a lost ledger must cost a delay, not a
+    # spurious rollback.
+    assert evidence_payloads()[-1]["observed_sustain_state"] == {}
+
+    cycle()
+    assert json.loads(state.read_text())["counts"] == {"P95_RATIO": 2}
+    assert evidence_payloads()[-1]["observed_sustain_state"] == {"P95_RATIO": 1}
+
+    # A new generation is new bytes on the wire: counts earned against the old
+    # config say nothing about the new one and must not half-complete a streak.
+    input_file.write_text(json.dumps({"evidence": {"run_id": "r1", "generation": "g2"}}))
+    input_file.chmod(0o600)
+    cycle()
+    assert evidence_payloads()[-1]["observed_sustain_state"] == {}
+
+    # The frozen evidence is never rewritten to carry state; the splice happens
+    # in a private copy, and no scratch input is left behind.
+    assert "sustain_state" not in json.loads(input_file.read_text())
+    assert list(evidence_dir.glob(".metrics-input.*")) == []
 
 
 def test_monitor_cycle_never_dispatches_invalid_or_failed_metrics(tmp_path: Path) -> None:
@@ -1200,3 +1291,177 @@ def test_collect_metrics_rejects_a_forged_stale_or_foreign_baseline(tmp_path: Pa
     tampered_path = tmp_path / "tampered.json"
     tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
     assert consume(tampered_path).returncode != 0
+
+
+def _metrics_payload(
+    *,
+    gray_latency: float,
+    stable_latency: float,
+    live_samples: int = 300,
+    wide_samples: int | None = 900,
+    gray_five_xx: int = 0,
+    sustain_state: dict[str, int] | None = None,
+    latency_window_minutes: int | None = 30,
+) -> dict[str, Any]:
+    """A minimal well-formed metrics input for the `responses` class."""
+
+    def records(pool: str, count: int, latency: float, five_xx: int = 0) -> list[dict[str, Any]]:
+        return [
+            {
+                "pool_label": pool,
+                "uri_class": "responses",
+                "status": 500 if index < five_xx else 200,
+                "response_time": latency,
+            }
+            for index in range(count)
+        ]
+
+    payload: dict[str, Any] = {
+        "phase": "normal_gray",
+        "rollout_percent": 50,
+        "records": records("canary", live_samples, gray_latency, gray_five_xx)
+        + records("stable", live_samples, stable_latency),
+        "hard_errors": {"prisma_error": 0, "gray_pod_restart": 0},
+        "backend_health": {"gray": True, "prod": True, "bridge": True},
+        "spend_reconciliation": {
+            "expected_request_ids": ["req-1"],
+            "terminal_request_ids": ["req-1"],
+            "failed_request_ids": [],
+            "observed_lag_seconds": 1,
+        },
+    }
+    if wide_samples is not None:
+        payload["latency_records"] = records("canary", wide_samples, gray_latency) + records(
+            "stable", wide_samples, stable_latency
+        )
+    if latency_window_minutes is not None:
+        payload["latency_window_minutes"] = latency_window_minutes
+    if sustain_state is not None:
+        payload["sustain_state"] = sustain_state
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    payload["evidence"] = {
+        "schema_version": 1,
+        "captured_at": now,
+        "source": "collect-metrics.py",
+        "run_id": "run-test",
+        "generation": "g000001",
+        "config_checksum": "test-mode",
+        "payload_sha256": "sha256:"
+        + hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    return payload
+
+
+def _evaluate(payload: dict[str, Any]) -> dict[str, Any]:
+    result = subprocess.run(
+        ["python3", str(SCRIPT_DIR / "metrics.py"), "--input", "-"],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return json.loads(result.stdout)
+
+
+def test_metrics_promotes_a_statistical_breach_only_after_it_repeats() -> None:
+    """A single window over a latency threshold must not move traffic.
+
+    Stable split against itself moves p95 by 2.42x between adjacent windows with
+    nothing changed at all, so one window over the 1.3 line carries almost no
+    information -- measured at a 14.8% false-positive rate against a negative
+    control.  The breach has to survive SUSTAIN_WINDOWS before it becomes a
+    trigger, and a 3x regression must still be caught on the window after.
+    """
+    equal = _evaluate(_metrics_payload(gray_latency=1.0, stable_latency=1.0))
+    assert equal["dispatcher_recommendation"]["action"] == "none"
+    assert equal["sustain"]["counts"] == {}
+
+    first = _evaluate(_metrics_payload(gray_latency=3.0, stable_latency=1.0))
+    assert first["dispatcher_recommendation"]["action"] == "none"
+    assert first["sustain"]["counts"] == {"P95_RATIO": 1, "P99_RATIO": 1}
+    assert first["sustain"]["promoted"] == []
+
+    second = _evaluate(
+        _metrics_payload(
+            gray_latency=3.0,
+            stable_latency=1.0,
+            sustain_state=first["sustain"]["counts"],
+        )
+    )
+    assert second["dispatcher_recommendation"]["action"] == "rollback"
+    assert second["dispatcher_recommendation"]["reason_codes"] == ["P95_RATIO", "P99_RATIO"]
+
+    # A window that does not breach resets the streak rather than decaying it:
+    # bad, fine, bad, fine is noise, and letting it accumulate would rebuild the
+    # very false positive the sustain gate removes.
+    recovered = _evaluate(
+        _metrics_payload(
+            gray_latency=1.0,
+            stable_latency=1.0,
+            sustain_state={"P95_RATIO": 1, "P99_RATIO": 1},
+        )
+    )
+    assert recovered["sustain"]["counts"] == {}
+    assert recovered["dispatcher_recommendation"]["action"] == "none"
+
+
+def test_metrics_darkens_latency_legs_below_the_sample_floor() -> None:
+    """A ratio computed over too few samples must not be able to breach.
+
+    The `responses` class medians 57 latency samples per five minutes; a p99 over
+    57 samples is the single slowest request wearing a percentile's name.  Below
+    the floor the ratio is still reported -- that is the honest reading -- but it
+    cannot trigger, and the run says so out loud rather than passing silently.
+    """
+    thin = _evaluate(
+        _metrics_payload(gray_latency=3.0, stable_latency=1.0, wide_samples=150)
+    )
+    comparison = thin["comparisons"][0]
+    assert comparison["p95_qualified"] is False
+    assert comparison["p99_qualified"] is False
+    assert comparison["p95_ratio"] == 3.0
+    assert comparison["breaches"] == []
+    assert "LATENCY_SAMPLE_BELOW_FLOOR" in thin["dispatcher_recommendation"]["reason_codes"]
+
+
+def test_metrics_refuses_a_latency_window_that_does_not_match_its_records() -> None:
+    """Both halves of the wide window, or neither, and never below the floor.
+
+    A caller that ships thirty minutes of records while declaring five -- or
+    declares thirty and ships nothing -- would put a number on the evidence that
+    the samples do not support.  Refuse rather than compare across windows of
+    unknown length.
+    """
+    short = _metrics_payload(gray_latency=3.0, stable_latency=1.0, latency_window_minutes=5)
+    assert _evaluate(short)["errors"] == ["LATENCY_WINDOW_TOO_SHORT"]
+
+    half = _metrics_payload(
+        gray_latency=3.0, stable_latency=1.0, latency_window_minutes=None
+    )
+    assert _evaluate(half)["errors"] == ["INVALID_LATENCY_WINDOW"]
+
+    declared_only = _metrics_payload(
+        gray_latency=3.0, stable_latency=1.0, wide_samples=None
+    )
+    assert _evaluate(declared_only)["errors"] == ["INVALID_LATENCY_WINDOW"]
+
+
+def test_metrics_takes_error_rate_from_the_live_window_not_the_wide_one() -> None:
+    """5xx must stay on the five-minute ruler even when percentiles widen.
+
+    If the wide window fed `five_xx_rate` as well, a fault would be averaged
+    across twenty-five extra minutes of health before anyone saw it -- which is
+    exactly what a stop-loss must not do.  The wide window carries no 5xx here,
+    so a live-window error rate that survives proves the merge kept them apart.
+    """
+    payload = _metrics_payload(
+        gray_latency=1.0, stable_latency=1.0, live_samples=300, gray_five_xx=30
+    )
+    result = _evaluate(payload)
+    comparison = result["comparisons"][0]
+    assert comparison["five_xx_delta"] == 0.1
+    assert comparison["gray_count"] == 300
+    assert comparison["gray_latency_count"] == 900
+    assert result["sustain"]["counts"] == {"FIVE_XX_DELTA": 1}

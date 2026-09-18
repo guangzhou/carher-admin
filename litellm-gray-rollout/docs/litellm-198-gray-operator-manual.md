@@ -437,6 +437,47 @@ cron/systemd 只能调用这条编排链，不能直接调用 `gray-global-rollb
 `gray-convergence-abort.sh` 或 dispatcher。prod backend health 未明确为 true 时，
 硬错误只会产生 `alert_only`，不会把流量切到未验证的 prod。
 
+#### 6.1.1 两个窗口，两把尺子
+
+`--latency-window-minutes`（默认 30）只管 p95/p99；5xx 止损仍然只读 5 分钟的
+`records`。这不是可调偏好，是量过的：
+
+- **1.3/1.5 这两个阈值原本落在被测指标自身的噪声底以下。** 把 stable 随机劈成
+  两半和自己比（同一批人、同一版本、同一瞬间，真值必须是 0），324 个窗口里有
+  **48 个判红 = 14.8%**。相邻窗口 stable 对自己的 p95 中位数抖 **2.42x**、p99 抖
+  **3.01x**，所以 81% 的相邻窗口本来就越过 1.3 线。
+- **样本地板才是主导杠杆，不是阈值数值**：加上 `p95≥200 / p99≥500` 后假阳从
+  15.1% 降到 2.1%，再加"连续 2 窗口"降到 **0.0%**；同时阳性对照仍能抓到
+  lat1.5x 62% / lat2x 70% / 5xx+2% 86%。
+- 5 分钟窗口里 `responses` 类延迟样本中位数只有 **57** 条，`MIN_P99_SAMPLE` 永远
+  达不到，p99 那条腿会**永久熄灯却看起来是武装状态**。30 分钟窗口把延迟覆盖率
+  拉到 80%。
+
+`101` 是 websocket upgrade，它的 `rt` 是连接存活时长（实测中位 74s、最大 17.8h），
+不是服务时长；它计入 `count` 和 `five_xx_rate`，但不进 p95/p99。
+**注意：摘掉 101 单独并不能修好门禁**（回放仍有 61% 判红），它是放大器不是根因。
+
+`latency_records` 和 `latency_window_minutes` 必须同时出现，且声明的分钟数必须
+≥ `MIN_LATENCY_WINDOW_MINUTES`：只给一半、或声明 5 分钟，`metrics.py` 直接
+`INVALID_LATENCY_WINDOW` / `LATENCY_WINDOW_TOO_SHORT` 拒绝，不会拿对不上的两个
+窗口互比。
+
+#### 6.1.2 连续窗口状态文件
+
+`FIVE_XX_DELTA` / `P95_RATIO` / `P99_RATIO` 这三条统计腿要连续 `SUSTAIN_WINDOWS`
+（=2）个窗口都破线才会升级成 trigger，计数存在
+`$GRAY_GATE_EVIDENCE_DIR/monitor-sustain.json`（0600），由 monitor cycle 在
+**dispatch 之前**写盘——回滚路径不会返回，差一个窗口就成streak的那次必须先落账。
+
+- 文件缺失/损坏 = 按空处理，重新攒满 streak。**丢这个文件只会延迟回滚，不会造成
+  回滚。**
+- `run_id`/`generation` 不匹配时计数作废：换了 generation 就是换了线上配置，旧配
+  置上攒的破线说明不了新配置的事。
+- **硬错误和 SpendLogs 不受这道闸约束**——那是观察到的故障，不是抽样比值。
+- ⚠️ 代价：`FIVE_XX_DELTA` 也在闸内，所以错误率突增的回滚从 1 个周期变成 2 个
+  周期（按 300s 间隔 ≈ 10 分钟）。校准里 `5xx+2%` 这档阳性对照在连续 2 窗口下仍
+  有 86% 命中，这是量过后接受的代价，不是漏网。
+
 ### 6.2 放量前的 deadman gate
 
 每个成功周期会往 `$GRAY_GATE_EVIDENCE_DIR/monitor-heartbeat.jsonl` 追加一条心跳。

@@ -609,6 +609,10 @@ def test_metrics_recommends_rollback_for_qualified_normal_gray_breach():
         "records": records,
         "hard_errors": {},
         "backend_health": {"gray": True, "prod": True},
+        # A statistical breach must repeat before it can move traffic, so the
+        # rollback path is reached on the window that completes the streak, not
+        # the first one. See SUSTAIN_WINDOWS in metrics.py.
+        "sustain_state": {"FIVE_XX_DELTA": 1},
         "spend_reconciliation": {
             "expected_request_ids": ["r-001"],
             "terminal_request_ids": ["r-001"],
@@ -628,6 +632,17 @@ def test_metrics_recommends_rollback_for_qualified_normal_gray_breach():
     assert output["groups"] == sorted(
         output["groups"], key=lambda group: (group["pool_label"], group["uri_class"])
     )
+
+    # The same evidence without a carried streak must not move traffic: one
+    # window over a statistical threshold fired on 14.8% of windows where the
+    # true answer was measured to be zero.
+    first_window = dict(payload)
+    del first_window["sustain_state"]
+    first_result, first_output = run_tool("metrics.py", first_window)
+    assert first_result.returncode == 0
+    assert first_output["dispatcher_recommendation"]["action"] != "rollback"
+    assert first_output["sustain"]["counts"] == {"FIVE_XX_DELTA": 1}
+    assert first_output["sustain"]["promoted"] == []
 
 
 def test_metrics_sample_guard_alerts_without_triggering_rollback():
@@ -653,8 +668,10 @@ def test_metrics_sample_guard_alerts_without_triggering_rollback():
 
 
 def test_metrics_uses_frozen_baseline_at_100_percent_not_prod():
-    records = metric_records("canary", "images", 100, 200, 0.4)
-    records += metric_records("stable", "images", 100, 200, 99.0)
+    # Above MIN_P99_SAMPLE so both latency legs are live: at 100 samples the
+    # percentiles are below their floors and this would assert nothing.
+    records = metric_records("canary", "images", 500, 200, 0.4)
+    records += metric_records("stable", "images", 500, 200, 99.0)
     payload = {
         "phase": "normal_gray",
         "rollout_percent": 100,
@@ -670,6 +687,8 @@ def test_metrics_uses_frozen_baseline_at_100_percent_not_prod():
         ],
         "hard_errors": {},
         "backend_health": {"gray": True, "prod": True},
+        # Second window of the same breach; a single one is held back as noise.
+        "sustain_state": {"P95_RATIO": 1, "P99_RATIO": 1},
     }
 
     result, output = run_tool("metrics.py", payload)
@@ -690,6 +709,8 @@ def test_metrics_never_recommends_rollback_to_an_unhealthy_prod():
         "records": records,
         "hard_errors": {},
         "backend_health": {"gray": False, "prod": False},
+        # Second window of the same breach; a single one is held back as noise.
+        "sustain_state": {"FIVE_XX_DELTA": 1},
         "spend_reconciliation": {
             "expected_request_ids": ["r-001"],
             "terminal_request_ids": ["r-001"],
@@ -742,10 +763,13 @@ def test_metrics_holds_gray_when_prod_is_offline_and_gray_is_healthy():
 
     assert result.returncode == 0
     assert output["status"] == "PASS"
+    # `hold_gray` must survive an informational alert rather than being downgraded
+    # by it: 100 samples is below the latency floor, which is worth saying out
+    # loud, but it is not a reason to stop holding a healthy gray.
     assert output["dispatcher_recommendation"] == {
         "action": "hold_gray",
         "hard_trigger": False,
-        "reason_codes": ["PROD_OFFLINE_GRAY_HEALTHY"],
+        "reason_codes": ["LATENCY_SAMPLE_BELOW_FLOOR", "PROD_OFFLINE_GRAY_HEALTHY"],
     }
 
 

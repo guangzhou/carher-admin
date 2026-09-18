@@ -54,6 +54,22 @@ for path in sys.argv[1:3]:
         raise SystemExit(f"gray-rollout: executable bit is missing: {path}")
 PY
 
+# Single cleanup path for every temporary this script owns. Each `trap ... EXIT`
+# REPLACES the previous one, so the lock directory and the scratch input cannot
+# register separate handlers: a second trap would silently leak the lock dir and
+# wedge every later cycle behind "another metrics cycle is running".
+CLEANUP_LOCK_DIR=""
+CLEANUP_FILES=()
+cleanup() {
+  local path
+  for path in ${CLEANUP_FILES+"${CLEANUP_FILES[@]}"}; do
+    [[ -n "$path" ]] && rm -f "$path"
+  done
+  [[ -n "$CLEANUP_LOCK_DIR" ]] && rmdir "$CLEANUP_LOCK_DIR" 2>/dev/null
+  return 0
+}
+trap cleanup EXIT INT TERM
+
 lock_path="$evidence_parent/.monitor-cycle.lock"
 if command -v flock >/dev/null 2>&1; then
   exec 8>"$lock_path"
@@ -61,12 +77,61 @@ if command -v flock >/dev/null 2>&1; then
 else
   lock_dir="$lock_path.dir"
   mkdir "$lock_dir" 2>/dev/null || die "another metrics cycle is running"
-  trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT INT TERM
+  CLEANUP_LOCK_DIR="$lock_dir"
 fi
+
+# Sustain state. A single window over a statistical threshold is mostly noise,
+# so metrics.py only promotes a breach to a trigger once it has repeated. That
+# requires carrying counts across cycles, and the input file is frozen evidence
+# we must not rewrite -- so the state lives beside the ledger and is spliced into
+# a private copy of the input. Absent state reads as empty, which makes a fresh
+# cycle need the full streak again: losing this file can only ever delay a
+# rollback, never cause one.
+sustain_state="$evidence_parent/monitor-sustain.json"
+if [[ -L "$sustain_state" ]]; then
+  die "monitor sustain state must not be a symlink: $sustain_state"
+fi
+metrics_input="$(mktemp "$evidence_parent/.metrics-input.XXXXXX")"
+chmod 600 "$metrics_input"
+CLEANUP_FILES+=("$metrics_input")
+python3 - "$INPUT" "$sustain_state" "$metrics_input" <<'PY'
+import json
+import sys
+
+source, state_path, target = sys.argv[1:]
+with open(source, encoding="utf-8") as handle:
+    payload = json.load(handle)
+if not isinstance(payload, dict):
+    raise SystemExit("gray-rollout: metrics input is not an object")
+try:
+    with open(state_path, encoding="utf-8") as handle:
+        carried = json.load(handle)
+except (OSError, ValueError):
+    carried = {}
+# A state file that is not a flat object is treated as absent rather than
+# trusted: metrics.py filters the contents anyway, and the fail-safe direction
+# is "require the streak again".
+if not isinstance(carried, dict):
+    carried = {}
+# Streaks are only meaningful within one generation. A new generation is a new
+# config on the wire, so counts earned against the old one say nothing about the
+# new one; drop them instead of letting a pre-cutover breach half-complete a
+# streak that then finishes against different bytes.
+evidence = payload.get("evidence")
+evidence = evidence if isinstance(evidence, dict) else {}
+same_run = (
+    carried.get("run_id") == evidence.get("run_id")
+    and carried.get("generation") == evidence.get("generation")
+)
+counts = carried.get("counts") if same_run else {}
+payload["sustain_state"] = counts if isinstance(counts, dict) else {}
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True)
+PY
 
 temporary="$(mktemp "$evidence_parent/.metrics-cycle.XXXXXX")"
 chmod 600 "$temporary"
-if "$METRICS_TOOL" --input "$INPUT" >"$temporary"; then
+if "$METRICS_TOOL" --input "$metrics_input" >"$temporary"; then
   metrics_rc=0
 else
   metrics_rc=$?
@@ -99,6 +164,39 @@ evidence="$evidence_parent/metrics-$stamp-$$.json"
 }
 mv "$temporary" "$evidence"
 chmod 600 "$evidence"
+
+# Persist the streak counts BEFORE dispatching. If the dispatcher rolls back it
+# never returns here, and a breach that was one window short of promotion would
+# be forgotten -- so the window that would have completed the streak has to be
+# recorded while we still can. Written under the same lock as everything else.
+python3 - "$evidence" "$sustain_state" <<'PY'
+import json
+import os
+import stat
+import sys
+
+evidence, state_path = sys.argv[1:]
+with open(evidence, encoding="utf-8") as handle:
+    result = json.load(handle)
+summary = result.get("sustain")
+counts = summary.get("counts", {}) if isinstance(summary, dict) else {}
+record = {
+    "schema_version": 1,
+    "run_id": result.get("run_id"),
+    "generation": result.get("generation"),
+    "counts": counts if isinstance(counts, dict) else {},
+}
+flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(state_path, flags, 0o600)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+        raise SystemExit("gray-rollout: monitor sustain state has unsafe mode")
+    os.write(fd, (json.dumps(record, sort_keys=True) + "\n").encode())
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
 
 if ! "$DISPATCH_TOOL" --input "$evidence"; then
   die "dispatcher rejected frozen metrics evidence: $evidence"

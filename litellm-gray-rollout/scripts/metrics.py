@@ -26,14 +26,45 @@ CONFIG_CHECKSUM_RE = re.compile(r"^(?:test-mode|[0-9a-f]{64})$")
 EVIDENCE_KEYS = {"schema_version", "captured_at", "payload_sha256", "source", "run_id", "generation", "config_checksum"}
 METRIC_KEYS = {
     "evidence", "phase", "rollout_percent", "records", "hard_errors", "baseline",
-    "backend_health", "spend_reconciliation",
+    "backend_health", "spend_reconciliation", "sustain_state",
+    "latency_records", "latency_window_minutes",
 }
 MIN_SAMPLE = 100
+# A 101 response is a websocket upgrade: its `rt` is how long the connection
+# stayed open (observed median 74s, max 64281s = 17.8h), not how long a request
+# took to serve.  Mixing that into a latency percentile measures "how long did
+# someone keep a socket open", so p95 landed inside the 101 band whenever they
+# were 5% or more of a class.  They are still counted -- count, five_xx_rate and
+# the sample floors all include them -- but they never enter p95/p99.
+LATENCY_EXCLUDED_STATUSES = frozenset({101})
+# Sample floors for the latency legs, separate from MIN_SAMPLE.  A p99 over 57
+# samples is the single slowest request wearing a percentile's name; the
+# `responses` class has a median of 57 per five minutes.  Measured against a
+# negative control (stable split in half against itself, same version, same
+# people, same instant -- every trigger is by construction false), the floors
+# below are what took that false-positive rate from 15.1% to ~0%.
+MIN_P95_SAMPLE = 200
+MIN_P99_SAMPLE = 500
+# Consecutive qualifying windows a class must stay bad before a threshold
+# breach becomes a trigger.  Adjacent stable windows move p95 by 2.42x and p99
+# by 3.01x at the median with nothing changed at all, so a single window over
+# the line carries almost no information.  Requiring two in a row costs one
+# window of detection latency and removes the remaining false positives.
+SUSTAIN_WINDOWS = 2
+# Shortest latency window that can carry the floors above.  At five minutes the
+# `responses` class has a median of 57 latency samples, so MIN_P99_SAMPLE can
+# never be met and the p99 leg would be permanently dark -- a gate that cannot
+# fire is worse than a noisy one, because it looks armed.  The collector supplies
+# `latency_records` over a wider window for the percentiles only; `records` stays
+# at the five-minute live window so the 5xx stop-loss ruler is untouched.
+MIN_LATENCY_WINDOW_MINUTES = 30
 THRESHOLDS = {
     "five_xx_delta": 0.01,
     "p95_ratio": 1.3,
     "p99_ratio": 1.5,
 }
+# The statistical legs, and only those, are subject to the sustain gate.
+THRESHOLD_TRIGGER_CODES = frozenset({"FIVE_XX_DELTA", "P95_RATIO", "P99_RATIO"})
 HARD_ERROR_CODES = {
     "prisma_error": "PRISMA_ERROR",
     "callback_import_error": "CALLBACK_IMPORT_ERROR",
@@ -189,6 +220,14 @@ def normalize_record(record: dict[str, Any]) -> tuple[str, str, int, float] | No
 
 
 def summarize(records: list[Any]) -> tuple[list[dict[str, Any]], int]:
+    """Aggregate records per (pool, uri_class).
+
+    `latencies` deliberately holds fewer entries than `statuses`: websocket
+    upgrades are counted but excluded from the percentiles (see
+    LATENCY_EXCLUDED_STATUSES).  `latency_count` is emitted so a reader can see
+    how many samples each percentile actually rests on, and so the latency
+    sample floors gate on that number rather than on the class total.
+    """
     buckets: dict[tuple[str, str], dict[str, Any]] = defaultdict(lambda: {"statuses": [], "latencies": []})
     invalid = 0
     for record in records:
@@ -201,7 +240,8 @@ def summarize(records: list[Any]) -> tuple[list[dict[str, Any]], int]:
             continue
         pool, uri_class, status, latency = normalized
         buckets[(pool, uri_class)]["statuses"].append(status)
-        buckets[(pool, uri_class)]["latencies"].append(latency)
+        if status not in LATENCY_EXCLUDED_STATUSES:
+            buckets[(pool, uri_class)]["latencies"].append(latency)
 
     result: list[dict[str, Any]] = []
     for (pool, uri_class), values in sorted(buckets.items()):
@@ -213,6 +253,7 @@ def summarize(records: list[Any]) -> tuple[list[dict[str, Any]], int]:
                 "pool_label": pool,
                 "uri_class": uri_class,
                 "count": len(statuses),
+                "latency_count": len(latencies),
                 "five_xx_count": five_xx,
                 "five_xx_rate": rounded(five_xx / len(statuses)),
                 "p95": rounded(percentile(latencies, 0.95)),
@@ -251,6 +292,20 @@ def baseline_map(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+def latency_count(group: dict[str, Any]) -> int:
+    """Samples backing this group's percentiles.
+
+    Falls back to `count` for a group that predates `latency_count` -- a frozen
+    baseline captured by an older collect-metrics.py has no such key, and
+    treating it as zero would silently disable the latency legs against it.
+    """
+    raw = group.get("latency_count", group.get("count", 0))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
 def compare(gray: dict[str, dict[str, Any]], reference: dict[str, dict[str, Any]], reference_name: str) -> tuple[list[dict[str, Any]], set[str], set[str]]:
     comparisons: list[dict[str, Any]] = []
     triggers: set[str] = set()
@@ -274,24 +329,72 @@ def compare(gray: dict[str, dict[str, Any]], reference: dict[str, dict[str, Any]
         five_delta = float(gray_group["five_xx_rate"]) - float(ref.get("five_xx_rate", 0))
         p95_ratio = ratio(gray_group.get("p95"), ref.get("p95"))
         p99_ratio = ratio(gray_group.get("p99"), ref.get("p99"))
+        gray_latency = latency_count(gray_group)
+        ref_latency = latency_count(ref)
+        # Each latency leg gates on its own floor.  A ratio computed below the
+        # floor is still reported -- it is the honest reading of a thin sample --
+        # but it cannot breach, and `*_qualified` says which legs were live so a
+        # PASS is never mistaken for "latency was checked".
+        p95_qualified = gray_latency >= MIN_P95_SAMPLE and ref_latency >= MIN_P95_SAMPLE
+        p99_qualified = gray_latency >= MIN_P99_SAMPLE and ref_latency >= MIN_P99_SAMPLE
         item = {
             "uri_class": uri_class,
             "reference": reference_name,
             "qualified": True,
             "gray_count": gray_count,
             "reference_count": ref_count,
+            "gray_latency_count": gray_latency,
+            "reference_latency_count": ref_latency,
+            "p95_qualified": p95_qualified,
+            "p99_qualified": p99_qualified,
             "five_xx_delta": rounded(five_delta),
             "p95_ratio": rounded(p95_ratio),
             "p99_ratio": rounded(p99_ratio),
         }
         comparisons.append(item)
+        breaches: set[str] = set()
         if five_delta > THRESHOLDS["five_xx_delta"]:
-            triggers.add("FIVE_XX_DELTA")
-        if p95_ratio is not None and p95_ratio > THRESHOLDS["p95_ratio"]:
-            triggers.add("P95_RATIO")
-        if p99_ratio is not None and p99_ratio > THRESHOLDS["p99_ratio"]:
-            triggers.add("P99_RATIO")
+            breaches.add("FIVE_XX_DELTA")
+        if p95_qualified and p95_ratio is not None and p95_ratio > THRESHOLDS["p95_ratio"]:
+            breaches.add("P95_RATIO")
+        if p99_qualified and p99_ratio is not None and p99_ratio > THRESHOLDS["p99_ratio"]:
+            breaches.add("P99_RATIO")
+        if not p95_qualified and not p99_qualified:
+            alerts.add("LATENCY_SAMPLE_BELOW_FLOOR")
+        item["breaches"] = sorted(breaches)
+        triggers |= breaches
     return comparisons, triggers, alerts
+
+
+def with_wide_latency(
+    live: dict[str, dict[str, Any]], wide: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Take counts and 5xx from the live window, percentiles from the wide one.
+
+    The two legs answer different questions and need different window lengths.
+    `five_xx_rate` is a stop-loss ruler: it has to stay on the five-minute window
+    or a fault is averaged down by twenty-five minutes of health before anyone
+    sees it.  p95/p99 are sampled statistics that need enough samples to mean
+    anything, and five minutes of `responses` traffic does not have them.
+
+    A class present live but absent from the wide window keeps its live
+    percentiles rather than losing them: the wide window is a superset in
+    practice, so this only fires on a malformed input, and the fail-safe
+    direction is to keep measuring.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for uri_class, group in live.items():
+        source = wide.get(uri_class)
+        if source is None:
+            merged[uri_class] = group
+            continue
+        merged[uri_class] = {
+            **group,
+            "p95": source.get("p95"),
+            "p99": source.get("p99"),
+            "latency_count": source.get("latency_count", 0),
+        }
+    return merged
 
 
 def hard_errors(payload: dict[str, Any]) -> set[str] | None:
@@ -356,6 +459,53 @@ def spend_reconciliation(payload: dict[str, Any]) -> tuple[dict[str, Any], set[s
     return summary, triggers, []
 
 
+def sustain_state(payload: dict[str, Any]) -> dict[str, int]:
+    """Consecutive-breach counts carried in from the previous cycle.
+
+    Absent or malformed state reads as empty, which makes the first cycle after
+    a restart require SUSTAIN_WINDOWS fresh breaches.  That direction is
+    deliberate: losing the ledger must not let one noisy window move traffic.
+    """
+    raw = payload.get("sustain_state")
+    if not isinstance(raw, dict):
+        return {}
+    state: dict[str, int] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or key not in THRESHOLD_TRIGGER_CODES:
+            continue
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            state[key] = min(count, SUSTAIN_WINDOWS)
+    return state
+
+
+def apply_sustain(
+    breaches: set[str], previous: dict[str, int]
+) -> tuple[set[str], dict[str, Any]]:
+    """Promote a breach to a trigger only once it has held SUSTAIN_WINDOWS times.
+
+    A code that does not breach this window resets to zero rather than decaying:
+    a class that is bad, fine, bad, fine is noise, and letting those alternating
+    windows accumulate would rebuild the very false positive this removes.
+    """
+    counts: dict[str, int] = {}
+    promoted: set[str] = set()
+    for code in sorted(breaches):
+        counts[code] = min(previous.get(code, 0) + 1, SUSTAIN_WINDOWS)
+        if counts[code] >= SUSTAIN_WINDOWS:
+            promoted.add(code)
+    summary = {
+        "required_windows": SUSTAIN_WINDOWS,
+        "counts": counts,
+        "pending": sorted(code for code in counts if code not in promoted),
+        "promoted": sorted(promoted),
+    }
+    return promoted, summary
+
+
 def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     envelope_errors = evidence_errors(payload)
     if envelope_errors:
@@ -389,8 +539,30 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     groups, invalid_count = summarize(records)
     if invalid_count:
         return error_result(["INVALID_RECORD"], groups)
+
+    # Wide latency window.  Optional, but if either half is supplied both must
+    # be, and the declared length must actually reach MIN_LATENCY_WINDOW_MINUTES:
+    # a caller that passes thirty minutes of records while claiming five, or five
+    # while claiming thirty, would put a number on the evidence that the samples
+    # do not support.  Refuse rather than compare across mismatched windows.
+    latency_records = payload.get("latency_records")
+    latency_minutes = payload.get("latency_window_minutes")
+    latency_groups: list[dict[str, Any]] = []
+    latency_window_minutes: int | None = None
+    if latency_records is not None or latency_minutes is not None:
+        if not isinstance(latency_records, list) or not isinstance(latency_minutes, int) or isinstance(latency_minutes, bool):
+            return error_result(["INVALID_LATENCY_WINDOW"], groups)
+        if latency_minutes < MIN_LATENCY_WINDOW_MINUTES:
+            return error_result(["LATENCY_WINDOW_TOO_SHORT"], groups)
+        latency_groups, latency_invalid = summarize(latency_records)
+        if latency_invalid:
+            return error_result(["INVALID_LATENCY_RECORD"], groups)
+        latency_window_minutes = latency_minutes
+
     errors: list[str] = []
     gray = by_class(groups, "canary")
+    if latency_window_minutes is not None:
+        gray = with_wide_latency(gray, by_class(latency_groups, "canary"))
     if rollout >= 100:
         mode = "baseline"
         reference = baseline_map(payload)
@@ -398,6 +570,8 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     else:
         mode = "stable"
         reference = by_class(groups, "stable")
+        if latency_window_minutes is not None:
+            reference = with_wide_latency(reference, by_class(latency_groups, "stable"))
         comparisons, threshold_triggers, alerts = compare(gray, reference, "stable")
     if rollout > 0 and not gray:
         alerts.add("CANARY_SAMPLE_MISSING")
@@ -408,7 +582,14 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         spend_errors.append("SPEND_RECONCILIATION_MISSING")
     if spend_errors:
         return error_result(spend_errors, groups)
-    triggers = hard | threshold_triggers | spend_triggers
+    # Sustain gate.  Only the statistical legs are held back: a threshold breach
+    # in a single window is mostly noise (adjacent stable windows move p95 2.42x
+    # at the median with nothing changed), so it must repeat before it can move
+    # traffic.  Hard errors and spend mismatches are NOT held back -- those are
+    # observed faults, not sampled ratios, and one is already one too many.
+    sustain = sustain_state(payload)
+    sustained, sustain_summary = apply_sustain(threshold_triggers, sustain)
+    triggers = hard | sustained | spend_triggers
     reason_codes = sorted(triggers)
     if triggers:
         if phase in ROLLBACK_PHASES:
@@ -437,24 +618,27 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         hard_trigger = True
         status = "FAIL"
         code = 1
-    elif alerts:
-        action = "alert_only"
-        reason_codes = sorted(alerts)
-        hard_trigger = False
-        status = "PASS"
-        code = 0
-    elif phase in OFFLINE_PHASES:
+    else:
+        # An alert carries information; it must never suppress a safer action.
+        # `hold_gray` is checked first for that reason: when prod is offline and
+        # gray is healthy, holding gray is the correct recommendation whether or
+        # not some class also happens to be below a sample floor.  Ordering these
+        # the other way round let an informational alert silently downgrade the
+        # recommendation to `alert_only`.
         health = payload.get("backend_health", {})
-        if isinstance(health, dict) and health.get("gray") is True and health.get("prod") is False:
+        if (
+            phase in OFFLINE_PHASES
+            and isinstance(health, dict)
+            and health.get("gray") is True
+            and health.get("prod") is False
+        ):
             action = "hold_gray"
-            reason_codes = ["PROD_OFFLINE_GRAY_HEALTHY"]
+            reason_codes = sorted({"PROD_OFFLINE_GRAY_HEALTHY"} | alerts)
+        elif alerts:
+            action = "alert_only"
+            reason_codes = sorted(alerts)
         else:
             action = "none"
-        hard_trigger = False
-        status = "PASS"
-        code = 0
-    else:
-        action = "none"
         hard_trigger = False
         status = "PASS"
         code = 0
@@ -469,7 +653,21 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         "phase": phase,
         "rollout_percent": rollout,
         "comparison_mode": mode,
-        "thresholds": {**THRESHOLDS, "minimum_sample": MIN_SAMPLE},
+        "thresholds": {
+            **THRESHOLDS,
+            "minimum_sample": MIN_SAMPLE,
+            "minimum_p95_sample": MIN_P95_SAMPLE,
+            "minimum_p99_sample": MIN_P99_SAMPLE,
+            "sustain_windows": SUSTAIN_WINDOWS,
+            "latency_excluded_statuses": sorted(LATENCY_EXCLUDED_STATUSES),
+            "minimum_latency_window_minutes": MIN_LATENCY_WINDOW_MINUTES,
+            # None means the percentiles came from the five-minute live window and
+            # will mostly sit below the floors; a reader must not have to infer
+            # that from the absence of a key.
+            "latency_window_minutes": latency_window_minutes,
+        },
+        # Carried into the next cycle's input so a breach can be seen to repeat.
+        "sustain": sustain_summary,
         "dispatcher_recommendation": {
             "action": action,
             "reason_codes": reason_codes,

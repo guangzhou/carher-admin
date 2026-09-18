@@ -31,6 +31,24 @@ SECRET_RE = re.compile(
 )
 MAX_LOG_AGE = timedelta(minutes=5)
 MAX_CLOCK_SKEW = timedelta(minutes=1)
+# The baseline window may be widened past MAX_LOG_AGE (see
+# --baseline-window-minutes) but not without bound: it must stay inside
+# MAX_BASELINE_AGE so a baseline still describes this change window, and a
+# window long enough to average across a whole day would hide the very
+# regressions the comparison exists to catch.
+MAX_BASELINE_WINDOW = timedelta(hours=6)
+# Latency percentiles need more samples than five minutes of traffic provides
+# (the `responses` class medians 57), so they are computed over their own wider
+# window.  MAX_LOG_AGE still governs `records`, which is what the 5xx stop-loss
+# reads: averaging a fault across thirty minutes of health is exactly what a
+# stop-loss must not do.  Keep the floor in lockstep with metrics.py's
+# MIN_LATENCY_WINDOW_MINUTES, and the ceiling inside MAX_BASELINE_WINDOW so a
+# live percentile window can never be longer than the baseline it is compared to.
+LATENCY_WINDOW = timedelta(minutes=30)
+MAX_LATENCY_WINDOW = MAX_BASELINE_WINDOW
+# Keep in lockstep with metrics.py's LATENCY_EXCLUDED_STATUSES: a 101 is a
+# websocket upgrade whose `rt` is connection lifetime, not service time.
+LATENCY_EXCLUDED_STATUSES = frozenset({101})
 SOURCE_KEYS = {"schema_version", "source", "captured_at", "payload_sha256", "data"}
 # A baseline is deliberately older than the live window, but "older" is not
 # "unbounded": it must come from this run, from this tool, and from inside the
@@ -42,6 +60,11 @@ BASELINE_ITEM_KEYS = {
     "uri_class",
     "pool_label",
     "count",
+    # Samples behind p95/p99 after websocket upgrades are excluded.  Named
+    # explicitly because this set is compared for equality: a baseline written
+    # by an older build lacks the key and is rejected rather than silently
+    # compared against percentiles built from a different population.
+    "latency_count",
     "five_xx_count",
     "five_xx_rate",
     "p95",
@@ -129,7 +152,26 @@ def parse_timestamp(value: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def parse_access_log(path: Path) -> tuple[list[dict[str, Any]], datetime]:
+def parse_access_log(
+    path: Path,
+    *,
+    window: timedelta = MAX_LOG_AGE,
+    latency_window: timedelta | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None, datetime]:
+    """Read the access log, keeping records inside `window` of now.
+
+    `window` defaults to MAX_LOG_AGE so the live stop-loss path is unchanged.
+    Only --emit-baseline widens it: a baseline needs enough samples per
+    uri_class to be a reference at all, and the sparse classes (messages,
+    image) never reach that floor in five minutes of real traffic.  Widening
+    the live window instead would blunt the stop-loss ruler itself.
+
+    `latency_window`, when given, returns a second and wider slice of the SAME
+    read for the percentile legs.  It is one read on purpose: reading the file
+    twice would let the log grow between them, and the wide slice would then no
+    longer be a superset of the live one -- so a class could show more 5xx than
+    requests, and the merged group in metrics.py would be incoherent.
+    """
     raw = read_regular(path, "access log")
     if SECRET_RE.search(raw):
         fail("access log contains secret-bearing data")
@@ -162,10 +204,19 @@ def parse_access_log(path: Path) -> tuple[list[dict[str, Any]], datetime]:
     newest = max(timestamp for timestamp, _ in parsed)
     if newest - now > MAX_CLOCK_SKEW:
         fail("access log window is in the future")
-    records = [record for timestamp, record in parsed if timedelta(0) <= now - timestamp <= MAX_LOG_AGE]
+    records = [record for timestamp, record in parsed if timedelta(0) <= now - timestamp <= window]
     if not records:
         fail("access log window is stale")
-    return records, newest
+    latency_records = None
+    if latency_window is not None:
+        if latency_window < window:
+            fail("latency window cannot be narrower than the live window")
+        latency_records = [
+            record
+            for timestamp, record in parsed
+            if timedelta(0) <= now - timestamp <= latency_window
+        ]
+    return records, latency_records, newest
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -177,9 +228,21 @@ def percentile(values: list[float], fraction: float) -> float:
 
 
 def summarize_pool(
-    records: list[dict[str, Any]], pool: str, *, min_samples: int
+    records: list[dict[str, Any]],
+    pool: str,
+    *,
+    min_samples: int,
+    exempt_classes: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """Aggregate one pool per uri_class into metrics.py's comparison shape."""
+    """Aggregate one pool per uri_class into metrics.py's comparison shape.
+
+    A class listed in `exempt_classes` may enter the baseline below
+    `min_samples`.  This exists for classes that cannot reach the floor at any
+    window length -- `image` sees about one request a day -- where the honest
+    options are an explicit, recorded exemption or no baseline at all.  It is
+    not a way to admit a class that is merely inconvenient: the exemption is
+    named on the command line and the resulting `count` shows how thin it is.
+    """
     buckets: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         if record["pool_label"] == pool:
@@ -187,24 +250,50 @@ def summarize_pool(
     if not buckets:
         fail(f"access log window contains no {pool} records to baseline")
 
-    thin = sorted(name for name, items in buckets.items() if len(items) < min_samples)
+    thin = sorted(
+        name
+        for name, items in buckets.items()
+        if len(items) < min_samples and name not in exempt_classes
+    )
     if thin:
+        counts = ", ".join(f"{name}={len(buckets[name])}" for name in thin)
         fail(
             "baseline window is too thin for "
             + ",".join(thin)
-            + f" (need >={min_samples} samples each); capture a longer window"
+            + f" (need >={min_samples} samples each; have {counts}); capture a "
+            "longer window with --baseline-window-minutes, or exempt a class "
+            "that cannot reach the floor with --baseline-exempt-class"
         )
 
     groups: list[dict[str, Any]] = []
     for uri_class in sorted(buckets):
         items = buckets[uri_class]
-        latencies = [float(item["response_time"]) for item in items]
+        # Websocket upgrades are counted but kept out of the percentiles: their
+        # `rt` is connection lifetime, not service time.  Must match metrics.py's
+        # LATENCY_EXCLUDED_STATUSES, or a baseline and the live window would be
+        # measuring two different quantities and every ratio against it is void.
+        latencies = [
+            float(item["response_time"])
+            for item in items
+            if int(item["status"]) not in LATENCY_EXCLUDED_STATUSES
+        ]
         five_xx = sum(1 for item in items if int(item["status"]) >= 500)
+        if not latencies:
+            # percentile() would return 0.0 here, which a comparison would read
+            # as "instant", not "unmeasured", and a ratio against 0 is not a
+            # reading at all.  Refuse instead of freezing a fake floor.
+            fail(
+                f"uri_class {uri_class} has {len(items)} records but none carry a "
+                "latency sample (all websocket upgrades); it cannot be a latency "
+                "baseline -- exempt it with --baseline-exempt-class or widen the "
+                "window until it sees real requests"
+            )
         groups.append(
             {
                 "pool_label": pool,
                 "uri_class": uri_class,
                 "count": len(items),
+                "latency_count": len(latencies),
                 "five_xx_count": five_xx,
                 "five_xx_rate": round(five_xx / len(items), 6),
                 "p95": round(percentile(latencies, 0.95), 6),
@@ -309,6 +398,44 @@ def main() -> int:
         default=DEFAULT_BASELINE_MIN_SAMPLES,
         help="minimum samples per uri_class the baseline window must contain",
     )
+    parser.add_argument(
+        "--baseline-window-minutes",
+        type=int,
+        default=None,
+        help=(
+            "widen ONLY the --emit-baseline window to this many minutes "
+            f"(default {int(MAX_LOG_AGE.total_seconds() // 60)}, max "
+            f"{int(MAX_BASELINE_WINDOW.total_seconds() // 60)}). The live "
+            "metrics window is never affected; it stays at MAX_LOG_AGE so the "
+            "stop-loss ruler keeps its reaction time."
+        ),
+    )
+    parser.add_argument(
+        "--latency-window-minutes",
+        type=int,
+        default=int(LATENCY_WINDOW.total_seconds() // 60),
+        help=(
+            "window for the p95/p99 legs only "
+            f"(default {int(LATENCY_WINDOW.total_seconds() // 60)}, max "
+            f"{int(MAX_LATENCY_WINDOW.total_seconds() // 60)}). The 5xx "
+            "stop-loss keeps reading the "
+            f"{int(MAX_LOG_AGE.total_seconds() // 60)}-minute live window. "
+            "Below metrics.py's floor the percentile legs go dark, so this "
+            "cannot be narrowed to disable them quietly."
+        ),
+    )
+    parser.add_argument(
+        "--baseline-exempt-class",
+        action="append",
+        default=[],
+        metavar="URI_CLASS",
+        help=(
+            "allow this uri_class into the baseline below --baseline-min-samples. "
+            "Each exemption is recorded in the baseline envelope, because a class "
+            "admitted below the floor has a weaker reference than the others and "
+            "the reader must be able to see which ones."
+        ),
+    )
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--generation", required=True)
     parser.add_argument("--config-checksum", required=True)
@@ -324,7 +451,45 @@ def main() -> int:
     if not 0 <= args.rollout_percent <= 100:
         fail("rollout-percent must be between 0 and 100")
 
-    records, access_captured_at = parse_access_log(args.access_log)
+    baseline_window = MAX_LOG_AGE
+    if args.baseline_window_minutes is not None:
+        if not args.emit_baseline:
+            fail("--baseline-window-minutes only applies to --emit-baseline")
+        if args.baseline_window_minutes < 1:
+            fail("baseline-window-minutes must be positive")
+        baseline_window = timedelta(minutes=args.baseline_window_minutes)
+        if baseline_window > MAX_BASELINE_WINDOW:
+            fail(
+                "baseline-window-minutes exceeds "
+                f"{int(MAX_BASELINE_WINDOW.total_seconds() // 60)}"
+            )
+        if baseline_window < MAX_LOG_AGE:
+            fail(
+                "baseline-window-minutes cannot be narrower than the live window "
+                f"({int(MAX_LOG_AGE.total_seconds() // 60)} minutes)"
+            )
+    if args.baseline_exempt_class and not args.emit_baseline:
+        fail("--baseline-exempt-class only applies to --emit-baseline")
+
+    latency_window = timedelta(minutes=args.latency_window_minutes)
+    if latency_window < MAX_LOG_AGE:
+        fail(
+            "latency-window-minutes cannot be narrower than the live window "
+            f"({int(MAX_LOG_AGE.total_seconds() // 60)} minutes)"
+        )
+    if latency_window > MAX_LATENCY_WINDOW:
+        fail(
+            "latency-window-minutes exceeds "
+            f"{int(MAX_LATENCY_WINDOW.total_seconds() // 60)}"
+        )
+
+    records, latency_records, access_captured_at = parse_access_log(
+        args.access_log,
+        window=baseline_window if args.emit_baseline else MAX_LOG_AGE,
+        # --emit-baseline already reads one wide window and computes percentiles
+        # over all of it; a second wider slice there would mean nothing.
+        latency_window=None if args.emit_baseline else latency_window,
+    )
 
     if args.emit_baseline:
         if args.baseline is not None:
@@ -334,7 +499,7 @@ def main() -> int:
         if args.baseline_min_samples < 1:
             fail("baseline-min-samples must be positive")
         window_end = access_captured_at
-        window_start = window_end - MAX_LOG_AGE
+        window_start = window_end - baseline_window
         groups = [
             {
                 **group,
@@ -344,7 +509,10 @@ def main() -> int:
                 "window_ended_at": window_end.isoformat().replace("+00:00", "Z"),
             }
             for group in summarize_pool(
-                records, "stable", min_samples=args.baseline_min_samples
+                records,
+                "stable",
+                min_samples=args.baseline_min_samples,
+                exempt_classes=frozenset(args.baseline_exempt_class),
             )
         ]
         envelope = {
@@ -364,6 +532,16 @@ def main() -> int:
                     "output": str(args.output),
                     "uri_classes": [group["uri_class"] for group in groups],
                     "payload_sha256": envelope["payload_sha256"],
+                    "window_minutes": int(baseline_window.total_seconds() // 60),
+                    "min_samples": args.baseline_min_samples,
+                    # Named so the reader can see which classes hold a weaker
+                    # reference than the floor would otherwise guarantee.
+                    "exempted_classes": sorted(set(args.baseline_exempt_class)),
+                    "thin_classes": sorted(
+                        group["uri_class"]
+                        for group in groups
+                        if group["count"] < args.baseline_min_samples
+                    ),
                 },
                 sort_keys=True,
             )
@@ -392,6 +570,11 @@ def main() -> int:
         "records": records,
         "hard_errors": hard_errors,
     }
+    if latency_records is not None:
+        # Both keys or neither: metrics.py rejects a half-supplied pair rather
+        # than guessing how many minutes the extra records cover.
+        payload["latency_records"] = latency_records
+        payload["latency_window_minutes"] = int(latency_window.total_seconds() // 60)
     if args.backend_health is not None:
         payload["backend_health"] = backend_health
     if args.spend_reconciliation is not None:

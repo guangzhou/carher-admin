@@ -31,9 +31,17 @@
    tool_call_id 必须成对，删一条会让请求直接变成非法。
 
    旋钮（都是 deployment 的环境变量，改完需要重启才生效）：
-     OWUI_TOOL_OUTPUT_MAX_CHARS=30000        单条工具输出上限
+     OWUI_TOOL_OUTPUT_MAX_CHARS=60000        单条工具输出上限
      OWUI_TOOL_OUTPUT_TOTAL_MAX_CHARS=240000 一次请求内工具输出总预算
      OWUI_TOOL_OUTPUT_FLOOR_CHARS=2000       超总预算时，从最旧的开始压到这个地板
+
+   预算数字的来源（2026-09-19 实测 webui.db 未截断原文，4000 个 chat）：
+     function_call_output 2496 条，p50=1458 p95=13941 p99=52058 max=397099
+     超 30000 的 52 条（2.08%），超 100000 的 15 条（0.60%）
+   per 取 60000 是为了盖住 p99=52058（原来的 30000 会把 p99 那档砍掉一半多），
+   同时仍然拦住 397k 那种。⛔ 别用 SpendLogs 量这个分布：litellm 的
+   MAX_STRING_LENGTH_PROMPT_IN_DB 默认 2048，写库前逐字符串截断，量出来的
+   "最大 4826 字符"全是量具产物。
      OWUI_TOOL_OUTPUT_CAP_DISABLED=1         整个第 2 项的 kill switch
 
 不想要这个文件了：删掉 deployment 的 PYTHONPATH 环境变量即可。
@@ -61,6 +69,9 @@ def _int_env(name, default):
     return value if value > 0 else default
 
 
+_EXHAUSTED_MARKER = "...[本地补丁截断：本条消息额度已用尽]..."
+
+
 def _middle_truncate(text, limit):
     """保留头部和尾部，砍中间。grep/表格类输出尾部往往和头部一样有信息量。"""
     if len(text) <= limit:
@@ -73,7 +84,14 @@ def _middle_truncate(text, limit):
 
 
 def _cap_text_in_content(content, limit):
-    """content 可能是 str，也可能是多模态的 part 列表。返回 (新content, 新长度)。"""
+    """content 可能是 str，也可能是多模态的 part 列表。返回 (新content, 新长度)。
+
+    limit 是**整条消息**的上限，不是每个 part 各一份。原来的写法给列表里每个
+    input_text 都发一份完整 limit，3 个 part 的消息就能合法占到 3×limit，而
+    _cap_tool_messages 拿这个返回值当"这条消息的长度"去凑总预算 —— 预算算术
+    直接失真。misc.py 确实会产出列表形状的 tool 消息
+    （'content': [{'type': 'input_text', 'text': ...}]），所以这条路真会走到。
+    """
     if isinstance(content, str):
         capped = _middle_truncate(content, limit)
         return capped, len(capped)
@@ -84,9 +102,15 @@ def _cap_text_in_content(content, limit):
             if isinstance(part, dict) and part.get("type") == "input_text":
                 text = part.get("text", "")
                 if isinstance(text, str):
-                    # 列表里每个 input_text 分到同一个上限，够用且不会把
-                    # 多个 part 互相挤掉。
-                    capped = _middle_truncate(text, limit)
+                    # 按顺序分配剩余额度：前面的 part 用掉多少，后面就少多少。
+                    remaining = limit - total
+                    if remaining <= 0:
+                        # 额度已耗尽。保留 part 结构（不删 part，避免破坏
+                        # 多模态消息的形状），但正文清空并留下痕迹。
+                        out.append({**part, "text": _EXHAUSTED_MARKER})
+                        total += len(_EXHAUSTED_MARKER)
+                        continue
+                    capped = _middle_truncate(text, remaining)
                     total += len(capped)
                     out.append({**part, "text": capped})
                     continue
@@ -113,7 +137,7 @@ def _cap_tool_messages(messages):
     if not isinstance(messages, list):
         return messages
 
-    per = _int_env("OWUI_TOOL_OUTPUT_MAX_CHARS", 30000)
+    per = _int_env("OWUI_TOOL_OUTPUT_MAX_CHARS", 60000)
     total_cap = _int_env("OWUI_TOOL_OUTPUT_TOTAL_MAX_CHARS", 240000)
     floor = _int_env("OWUI_TOOL_OUTPUT_FLOOR_CHARS", 2000)
 
@@ -134,17 +158,38 @@ def _cap_tool_messages(messages):
         messages[i] = {**messages[i], "content": content}
         running += length
 
-    # 第二轮：还超总预算，就从最旧的开始压到地板（最新的工具输出对模型最有用）
+    # 第二轮：还超总预算，就从最旧的开始压到地板（最新的工具输出对模型最有用）。
+    #
+    # 最新那条也要参与，只是给它更高的地板。原来写 idxs[:-1] 把它完全豁免，
+    # 于是可压上限只有 (N-1)*floor + per —— N 小的时候根本降不到 total_cap，
+    # 静默不收敛。现在最坏情况也能收到 (N-1)*floor + max(floor, per)。
     if running > total_cap:
-        for i in idxs[:-1]:
+        newest = idxs[-1]
+        for i in idxs:
             if running <= total_cap:
                 break
+            # 最新一条保留到 per（单条上限），其余压到地板。
+            target = max(floor, per) if i is newest else floor
             was = _content_len(messages[i].get("content"))
-            if was <= floor:
+            if was <= target:
                 continue
-            content, length = _cap_text_in_content(messages[i].get("content"), floor)
+            content, length = _cap_text_in_content(messages[i].get("content"), target)
             messages[i] = {**messages[i], "content": content}
             running -= was - length
+
+    if running > total_cap:
+        # 收敛失败。用 WARNING 而不是 INFO —— 补丁跑在 OWUI 装 logging handler
+        # 之前，此时 root.handlers 为空，stdlib 的 lastResort 只收 WARNING 以上，
+        # INFO 会被静默丢掉（09-19 实测过）。
+        log.warning(
+            "pypatch tool-output cap 未收敛: %d 条工具消息压到 %d 字符，"
+            "仍超总预算 %d（per=%d floor=%d）",
+            len(idxs),
+            running,
+            total_cap,
+            per,
+            floor,
+        )
 
     if running < before:
         log.info(

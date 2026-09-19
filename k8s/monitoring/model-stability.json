@@ -1,0 +1,1515 @@
+{
+  "title": "LiteLLM 模型稳定性 (198)",
+  "uid": "litellm-stability-198",
+  "timezone": "Asia/Shanghai",
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "一、用户视角：真实失败率（重试+兜底全挂了才算失败）（已剔除探针流量）",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "type": "stat",
+      "title": "全局用户真实失败率（当前时间范围）",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "100 * sum((\n  sum by (requested_model)(increase(litellm_proxy_failed_requests_metric_total[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n)) / clamp_min(sum((\n  sum by (requested_model)(increase(litellm_proxy_total_requests_metric_total[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n)), 1)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "总请求数",
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 6,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "sum((\n  sum by (requested_model)(increase(litellm_proxy_total_requests_metric_total[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "用户真实失败数",
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 11,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        }
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "sum((\n  sum by (requested_model)(increase(litellm_proxy_failed_requests_metric_total[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "重试/兜底救回来的次数（上游失败但用户没感觉）",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "description": "上游腿失败总数 − 用户真实失败数。这个数字越大，说明重试和 fallback 帮你挡掉了越多故障。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "clamp_min(sum((\n  sum by (requested_model)(increase(litellm_deployment_failure_responses_total[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n)) - sum((\n  sum by (requested_model)(increase(litellm_proxy_failed_requests_metric_total[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n)), 0)"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "各模型 用户真实失败率排行（点表头可排序）",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "description": "失败率 = 用户真实失败数 / 总请求数。requested_model 为空的那行是客户端没带模型名就被拒的请求。",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "失败率%"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "orange",
+                      "value": 5
+                    },
+                    {
+                      "color": "red",
+                      "value": 20
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "失败率%",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "format": "table",
+          "expr": "(\n  sum by (requested_model)(increase(litellm_proxy_total_requests_metric_total[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n)"
+        },
+        {
+          "refId": "B",
+          "instant": true,
+          "format": "table",
+          "expr": "(\n  sum by (requested_model)(increase(litellm_proxy_failed_requests_metric_total[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n) or ((\n  sum by (requested_model)(increase(litellm_proxy_total_requests_metric_total[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n) * 0)"
+        },
+        {
+          "refId": "C",
+          "instant": true,
+          "format": "table",
+          "expr": "100 * ((\n  sum by (requested_model)(increase(litellm_proxy_failed_requests_metric_total[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n) or ((\n  sum by (requested_model)(increase(litellm_proxy_total_requests_metric_total[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n) * 0)) / clamp_min((\n  sum by (requested_model)(increase(litellm_proxy_total_requests_metric_total[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n), 1)"
+        },
+        {
+          "refId": "D",
+          "instant": true,
+          "format": "table",
+          "expr": "histogram_quantile(0.95, (\n  sum by (le, requested_model)(rate(litellm_request_total_latency_metric_bucket[$__range]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n))"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "requested_model",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true
+            },
+            "renameByName": {
+              "requested_model": "模型",
+              "Value #A": "请求数",
+              "Value #B": "用户失败数",
+              "Value #C": "失败率%",
+              "Value #D": "端到端 p95(秒)"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "各模型 用户真实失败率趋势（%，10 分钟滑窗）",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "description": "只画有流量的模型。某条线抬头 = 那个模型真的在坑用户。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "max",
+            "mean"
+          ],
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{requested_model}}",
+          "expr": "100 * ((\n  sum by (requested_model)(rate(litellm_proxy_failed_requests_metric_total[10m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n)) / clamp_min((\n  sum by (requested_model)(rate(litellm_proxy_total_requests_metric_total[10m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n), 0.0001) > 0"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "各模型 请求速率（req/分钟）",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "stacking": {
+              "mode": "normal"
+            },
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean"
+          ],
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{requested_model}}",
+          "expr": "topk(15, (\n  sum by (requested_model)(rate(litellm_proxy_total_requests_metric_total[10m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n) * 60)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "用户失败按错误码拆（403=没权限 / 429=限流 / 5xx=上游挂）",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 30,
+            "stacking": {
+              "mode": "normal"
+            },
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "sum"
+          ],
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{exception_status}} {{exception_class}}",
+          "expr": "sum by (exception_status, exception_class)((\n  sum by (exception_status, exception_class, requested_model)(rate(litellm_proxy_failed_requests_metric_total[10m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n)) * 60"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "二、速度：用户等了多久（已剔除探针流量）",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "端到端耗时 p95（秒，整个请求从进到出）",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{requested_model}}",
+          "expr": "histogram_quantile(0.95, (\n  sum by (le, requested_model)(rate(litellm_request_total_latency_metric_bucket[10m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "端到端耗时 p50（秒，一半用户比这快）",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{requested_model}}",
+          "expr": "histogram_quantile(0.5, (\n  sum by (le, requested_model)(rate(litellm_request_total_latency_metric_bucket[10m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "首字出来的时间 p95（秒，流式体感就是这条）",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{requested_model}}",
+          "expr": "histogram_quantile(0.95, (\n  sum by (le, requested_model)(rate(litellm_llm_api_time_to_first_token_metric_bucket[10m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "上游 API 自身耗时 p95（秒，减掉我们这侧开销）",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{requested_model}}",
+          "expr": "histogram_quantile(0.95, (\n  sum by (le, requested_model)(rate(litellm_llm_api_latency_metric_bucket[10m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n))"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "三、上游视角：哪条腿在坏（用户可能没感觉，但它在消耗重试预算）",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 58
+      }
+    },
+    {
+      "type": "table",
+      "title": "⚠️ 当前不健康的上游部署（0=正常 1=部分故障 2=完全故障）",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 59
+      },
+      "description": "空表 = 所有上游腿都健康。这里出现的行，就是路由器认为有问题、正在少发或不发流量的那条腿。",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "状态"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 2
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "状态",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "format": "table",
+          "expr": "max by (litellm_model_name, model_id, api_provider, api_base) (litellm_deployment_state) > 0"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true
+            },
+            "renameByName": {
+              "litellm_model_name": "模型组",
+              "model_id": "部署ID",
+              "api_provider": "供应商",
+              "api_base": "上游地址",
+              "Value": "状态"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "上游腿失败速率（次/分钟，含被重试救回来的）",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 68
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "stacking": {
+              "mode": "normal"
+            },
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{litellm_model_name}} · {{api_provider}} · {{exception_status}}",
+          "expr": "topk(15, sum by (litellm_model_name, api_provider, exception_status) (rate(litellm_deployment_failure_responses_total[10m])) * 60)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "上游腿失败占比（%，按部署 ID）",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 68
+      },
+      "description": "同一个模型组下不同腿的健康度对比。某个 model_id 常年高位 = 那个账号/供应商该摘了。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "max",
+            "mean"
+          ],
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{litellm_model_name}} · {{model_id}}",
+          "expr": "topk(15, 100 * sum by (litellm_model_name, model_id) (rate(litellm_deployment_failure_responses_total[10m])) / clamp_min(sum by (litellm_model_name, model_id) (rate(litellm_deployment_total_requests_total[10m])), 0.0001))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "兜底（fallback）动作：救回 vs 也失败",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 78
+      },
+      "description": "绿线 = 主模型挂了但兜底接住了；红线 = 兜底也没接住，这就直接变成用户失败。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "stacking": {
+              "mode": "normal"
+            },
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "sum"
+          ],
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "✅救回 {{requested_model}} → {{fallback_model}}",
+          "expr": "sum by (requested_model, fallback_model) (rate(litellm_deployment_successful_fallbacks_total[10m])) * 60"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "❌兜底也挂 {{requested_model}} → {{fallback_model}}",
+          "expr": "sum by (requested_model, fallback_model) (rate(litellm_deployment_failed_fallbacks_total[10m])) * 60"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "被临时拉黑（cooldown）的次数",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 78
+      },
+      "description": "一条腿连续失败到阈值就会被拉黑一段时间。拉黑频繁 = 那个上游在抖。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "stacking": {
+              "mode": "normal"
+            },
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "sum"
+          ],
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{litellm_model_name}} · {{model_id}}",
+          "expr": "sum by (litellm_model_name, model_id) (rate(litellm_deployment_cooled_down_total[10m])) * 60"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "采集健康度：正在被抓的 litellm-proxy 副本数（应为 4）",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 87
+      },
+      "description": "掉到 4 以下说明有副本没被采到，上面所有数字都会偏低。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 3
+              },
+              {
+                "color": "green",
+                "value": 4
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(up{job=\"litellm-proxy\"})"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "四、主动探针：没人用的腿也在被监视（每 15 分钟主动打一发最小推理）",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 91
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "正常的上游端点",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 92
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 20
+              },
+              {
+                "color": "green",
+                "value": 40
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "count(litellm_probe_state == 0)"
+        }
+      ],
+      "description": "探针判定 0=正常。这是按『上游端点』数的，不是按模型名数的——一个 ChatGPT 账号挂 26 个模型名，只算 1 个端点。"
+    },
+    {
+      "type": "stat",
+      "title": "通但慢（>20s）",
+      "gridPos": {
+        "h": 5,
+        "w": 3,
+        "x": 4,
+        "y": 92
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "count(litellm_probe_state == 1) or vector(0)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "被限流(429)",
+      "gridPos": {
+        "h": 5,
+        "w": 3,
+        "x": 7,
+        "y": 92
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "count(litellm_probe_state == 2) or vector(0)"
+        }
+      ],
+      "description": "429 单独成一态：被限流不等于挂了，处置完全不同（等额度 vs 修上游）。"
+    },
+    {
+      "type": "stat",
+      "title": "挂了(5xx/超时)",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 10,
+        "y": 92
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "count(litellm_probe_state == 3) or vector(0)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "配置/选型问题",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 14,
+        "y": 92
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "count(litellm_probe_state == 4) or vector(0)"
+        }
+      ],
+      "description": "所有候选落点都被上游 400 拒掉。这不是 outage，是这个端点上挂的模型名它自己不接受——要改配置，不是修上游。"
+    },
+    {
+      "type": "stat",
+      "title": "凭据失效(401/403)",
+      "gridPos": {
+        "h": 5,
+        "w": 3,
+        "x": 18,
+        "y": 92
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "count(litellm_probe_state == 5) or vector(0)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "探不到的端点",
+      "gridPos": {
+        "h": 5,
+        "w": 3,
+        "x": 21,
+        "y": 92
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "expr": "litellm_probe_unprobeable_endpoints"
+        }
+      ],
+      "description": "这些端点只剩图像/embedding 落点，拿 chat 探针打必然 400（那是假红不是故障），所以没探。明示在这里，而不是让它们静默消失。"
+    },
+    {
+      "type": "timeseries",
+      "title": "各类上游的可用率（%，探针视角）",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 97
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "never"
+          },
+          "unit": "percent"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum by (kind)(litellm_probe_up) / count by (kind)(litellm_probe_up)",
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "description": "分母是该类端点总数，分子是本轮探通的个数。跟第一段的『用户真实失败率』是两把不同的尺子：这条不管有没有人用。"
+    },
+    {
+      "type": "timeseries",
+      "title": "探针耗时 p95（秒，按上游类别）",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 97
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "never"
+          },
+          "unit": "s"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, kind)(rate(litellm_probe_duration_seconds_bucket[1h])))",
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "description": "同一句 ping、同样的 max_tokens=16，所以跨类别可比。cursor 网关常年 67~72s 是它本来的样子，不是故障。"
+    },
+    {
+      "type": "table",
+      "title": "⚠️ 当前非正常的上游端点（0正常 1慢 2限流 3挂 4配置 5凭据）",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 107
+      },
+      "description": "空表 = 68 个上游端点全通。『4 配置』那几行别当故障报——是路由表上挂的模型名该端点不接受。",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "判定"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "慢",
+                        "color": "orange",
+                        "index": 0
+                      },
+                      "2": {
+                        "text": "被限流",
+                        "color": "yellow",
+                        "index": 1
+                      },
+                      "3": {
+                        "text": "挂了",
+                        "color": "red",
+                        "index": 2
+                      },
+                      "4": {
+                        "text": "配置/选型",
+                        "color": "purple",
+                        "index": 3
+                      },
+                      "5": {
+                        "text": "凭据失效",
+                        "color": "dark-red",
+                        "index": 4
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "最近耗时"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "多久没成功过"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "判定",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "format": "table",
+          "expr": "(max by (endpoint, kind)(litellm_probe_state) > 0) * on(endpoint) group_left(model_group, model_id) litellm_probe_target_info"
+        },
+        {
+          "refId": "B",
+          "instant": true,
+          "format": "table",
+          "expr": "max by (endpoint, kind)(litellm_probe_latency_seconds) * on(endpoint) group_left(model_group, model_id) litellm_probe_target_info"
+        },
+        {
+          "refId": "C",
+          "instant": true,
+          "format": "table",
+          "expr": "(time() - max by (endpoint, kind)(litellm_probe_last_success_timestamp_seconds)) * on(endpoint) group_left(model_group, model_id) litellm_probe_target_info"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "endpoint",
+            "mode": "inner"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "kind 2": true,
+              "kind 3": true,
+              "model_group 2": true,
+              "model_group 3": true,
+              "model_id 2": true,
+              "model_id 3": true
+            },
+            "renameByName": {
+              "endpoint": "上游端点",
+              "kind": "类别",
+              "kind 1": "类别",
+              "model_group": "探的模型组",
+              "model_group 1": "探的模型组",
+              "model_id": "探的落点ID",
+              "model_id 1": "探的落点ID",
+              "Value #A": "判定",
+              "Value #B": "最近耗时",
+              "Value #C": "多久没成功过"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "每一发探针的结果分布（次/小时）",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 119
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result)(rate(litellm_probe_attempts_total[1h])) * 3600",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "description": "rejected 是『候选被拒、当轮换了下一个』，不是失败；all-rejected 才是所有候选都不行。"
+    },
+    {
+      "type": "timeseries",
+      "title": "探针自身健康度",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 119
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "never"
+          },
+          "unit": "s"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - litellm_probe_last_round_timestamp_seconds",
+          "legendFormat": "距上轮结束(秒)"
+        },
+        {
+          "refId": "B",
+          "expr": "litellm_probe_round_duration_seconds",
+          "legendFormat": "单轮耗时(秒)"
+        },
+        {
+          "refId": "C",
+          "expr": "increase(litellm_probe_topology_failures_total[1h])",
+          "legendFormat": "拉拓扑失败/小时"
+        }
+      ],
+      "description": "『距上轮结束』长期 >1800s = 探针自己死了，此时上面所有绿色都是陈旧值，不可信。"
+    },
+    {
+      "type": "timeseries",
+      "title": "路由表规模（探针每小时重算一次拓扑）",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 128
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "litellm_probe_known_deployments",
+          "legendFormat": "落点总数"
+        },
+        {
+          "refId": "B",
+          "expr": "litellm_probe_known_endpoints",
+          "legendFormat": "上游端点总数"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(litellm_probe_targets)",
+          "legendFormat": "实际在探的端点数"
+        },
+        {
+          "refId": "D",
+          "expr": "litellm_probe_unprobeable_endpoints",
+          "legendFormat": "只剩图像/embedding"
+        }
+      ],
+      "description": "1229 个落点背后只有 102 个上游端点。逐落点全探会把订阅账号额度烧穿，所以按端点收敛。"
+    }
+  ]
+}

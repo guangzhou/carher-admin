@@ -1,0 +1,7 @@
+apiVersion: 1
+# 2026-09-13 阳性对照探针（uid zz-positive-control）用完即删。
+# 保留这个文件是因为 Grafana 文件式 provisioning 不会因为规则从文件里消失就删掉它，
+# 必须显式声明 deleteRules。删掉本文件 = 探针会复活。
+deleteRules:
+  - orgId: 1
+    uid: zz-positive-control

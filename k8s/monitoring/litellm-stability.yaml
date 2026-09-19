@@ -1,0 +1,581 @@
+apiVersion: 1
+groups:
+- orgId: 1
+  name: litellm-model-stability
+  folder: LiteLLM
+  interval: 1m
+  rules:
+  - uid: llm-stab-model-failrate
+    title: 模型用户真实失败率 > 5%（重试和兜底都没救回来）
+    condition: C
+    for: 10m
+    labels:
+      severity: critical
+      service: litellm
+    annotations:
+      summary: 模型 {{ $labels.requested_model }} 正在坑用户，失败率 {{ humanize $values.A.Value }}%
+      description: 近 15 分钟内该模型的请求在重试 + fallback 全部失败后仍然返回错误给客户端。看板：/d/litellm-stability-198（探针流量已剔除）
+    noDataState: OK
+    execErrState: Error
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: "100 * (\n  sum by (requested_model)(increase(litellm_proxy_failed_requests_metric_total[15m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n)\n  / clamp_min((\n  sum by (requested_model)(increase(litellm_proxy_total_requests_metric_total[15m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n), 1)\n  and (\n  sum by (requested_model)(increase(litellm_proxy_total_requests_metric_total[15m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n) >= 20\n"
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 5
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query
+  - uid: llm-stab-deployment-down
+    title: 上游部署完全故障（路由器已经停止向它发流量）
+    condition: C
+    for: 5m
+    labels:
+      severity: warning
+      service: litellm
+    annotations:
+      summary: '{{ $labels.litellm_model_name }} 的一条腿挂了：{{ $labels.model_id }}（{{ $labels.api_provider }}）'
+      description: 该 deployment 被路由器判定为完全故障。如果这个模型组还有别的健康腿，用户暂时没感觉，但容错余量在变薄。
+    noDataState: OK
+    execErrState: Error
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: max by (litellm_model_name, model_id, api_provider) (litellm_deployment_state)
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 1
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query
+  - uid: llm-stab-leg-failrate
+    title: 单条上游腿失败率 > 20%（用户可能还没感觉，但它在烧重试预算）
+    condition: C
+    for: 15m
+    labels:
+      severity: warning
+      service: litellm
+    annotations:
+      summary: '{{ $labels.litellm_model_name }} 的腿 {{ $labels.model_id }} 失败率 {{ humanize $values.A.Value }}%'
+      description: 这条腿在持续失败、靠重试和兜底兜着。常年高位就该把这个账号/供应商摘掉。
+    noDataState: OK
+    execErrState: Error
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 1200
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: "100 * sum by (litellm_model_name, model_id) (increase(litellm_deployment_failure_responses_total[15m]))\n  / clamp_min(sum by (litellm_model_name, model_id) (increase(litellm_deployment_total_requests_total[15m])), 1)\n  and sum by (litellm_model_name, model_id) (increase(litellm_deployment_total_requests_total[15m])) >= 20\n"
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 20
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query
+  - uid: llm-stab-fallback-failed
+    title: 兜底（fallback）也失败了 —— 最后一道防线破了
+    condition: C
+    for: 5m
+    labels:
+      severity: critical
+      service: litellm
+    annotations:
+      summary: '{{ $labels.requested_model }} → {{ $labels.fallback_model }} 的兜底没接住'
+      description: 主模型挂了，降级目标也挂了。这些请求 100% 变成用户可见的失败。
+    noDataState: OK
+    execErrState: Error
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: sum by (requested_model, fallback_model) (increase(litellm_deployment_failed_fallbacks_total[15m]))
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query
+  - uid: llm-stab-latency
+    title: 模型端到端 p95 > 150 秒（明显变慢）
+    condition: C
+    for: 15m
+    labels:
+      severity: warning
+      service: litellm
+    annotations:
+      summary: '{{ $labels.requested_model }} 端到端 p95 = {{ humanize $values.A.Value }}s'
+      description: 参照基线：2026-09-13 现网 p95 区间 27~80s。超过 150s 说明上游或路由在劣化。（探针流量已剔除）
+    noDataState: OK
+    execErrState: OK
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 1200
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: "histogram_quantile(0.95, (\n  sum by (le, requested_model)(rate(litellm_request_total_latency_metric_bucket[15m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n))\n  and (\n  sum by (requested_model)(increase(litellm_request_total_latency_metric_count[15m]))\n  unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")\n) >= 20\n"
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 150
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query
+  - uid: llm-stab-scrape-down
+    title: 指标采集不全：litellm-proxy 副本没被抓满（上面所有告警会失灵）
+    condition: C
+    for: 10m
+    labels:
+      severity: warning
+      service: litellm
+    annotations:
+      summary: 只抓到 {{ humanize $values.A.Value }} / 4 个 litellm-proxy 副本
+      description: 少抓一个副本，所有失败率和请求量都会偏低，告警可能不触发。先修采集再信数据。2026-09-19：阈值 4→5。切流后承接生产的是 litellm-proxy-gray×4，旧 app=litellm-proxy 只剩 1 个闲置 lane；scrape job 的 regex 曾只精确匹配 litellm-proxy，于是 gray 那 4 个一个都没被抓，所有 litellm_proxy_* 告警的分母是空的（闲置 lane 的 /metrics 只有 3 行）。副本数变更时本阈值需同步；更稳的做法是改成与 kube_deployment_status_replicas 动态比对。
+    noDataState: Alerting
+    execErrState: Error
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: sum(up{job="litellm-proxy"})
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: lt
+            params:
+            - 5
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query
+  - uid: llm-probe-endpoint-down
+    title: 上游端点连续两轮探不通（没人用的腿也算）
+    condition: C
+    for: 0m
+    labels:
+      severity: critical
+      service: litellm
+      source: probe
+    annotations:
+      summary: '{{ $labels.kind }} / {{ $labels.endpoint }} 连续两轮探针都失败（5xx 或超时）'
+      description: 探针每 15 分钟按 model_id 直打这条腿，绕过路由池和 cooldown，所以这不是『池子里还有活腿』能掩盖的。判据只看状态码——生产挂着 error_sanitize，错误文本已被抹掉，要原因去 pod 日志 grep req id。看板：/d/litellm-stability-198（第四段 主动探针）。
+    noDataState: OK
+    execErrState: Error
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 1800
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: min_over_time(litellm_probe_state[35m]) == 3
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: within_range
+            params:
+            - 2.5
+            - 3.5
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query
+  - uid: llm-probe-endpoint-auth
+    title: 上游端点凭据失效（401/403）—— 要换 token，不是修上游
+    condition: C
+    for: 0m
+    labels:
+      severity: critical
+      service: litellm
+      source: probe
+    annotations:
+      summary: '{{ $labels.kind }} / {{ $labels.endpoint }} 返回 401/403，凭据过期或被封'
+      description: 跟『上游挂了』是两种处置：这条要去重烧 OAuth / 补 API Key。看板：/d/litellm-stability-198（第四段 主动探针）。
+    noDataState: OK
+    execErrState: Error
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 1800
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: min_over_time(litellm_probe_state[35m]) == 5
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: within_range
+            params:
+            - 4.5
+            - 5.5
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query
+  - uid: llm-probe-endpoint-misconfig
+    title: 上游端点所有候选落点都被 400 拒（配置/选型问题，不是故障）
+    condition: C
+    for: 30m
+    labels:
+      severity: warning
+      service: litellm
+      source: probe
+    annotations:
+      summary: '{{ $labels.kind }} / {{ $labels.endpoint }} 路由表上挂的模型名它自己不接受'
+      description: 探针已经在 4 个候选落点之间轮换过，全部被 400。典型形状：Codex 账号上挂了 gpt-5.4。这是路由表漂移，改配置即可，别当 outage 处理。看板：/d/litellm-stability-198（第四段 主动探针）。
+    noDataState: OK
+    execErrState: Error
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 1800
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: min_over_time(litellm_probe_state[35m]) == 4
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: within_range
+            params:
+            - 3.5
+            - 4.5
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query
+  - uid: llm-probe-kind-all-down
+    title: 一整类上游全挂（该类别可用率 = 0）
+    condition: C
+    for: 0m
+    labels:
+      severity: critical
+      service: litellm
+      source: probe
+    annotations:
+      summary: '{{ $labels.kind }} 这一类上游端点无一可用'
+      description: 阈值取 0 而不是某个百分比：整类不可用是个客观事实，不用拍阈值。单端点挂用上面那条告警，这条专抓成片塌。看板：/d/litellm-stability-198（第四段 主动探针）。
+    noDataState: OK
+    execErrState: Error
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 1800
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: sum by (kind)(litellm_probe_up) == 0 and count by (kind)(litellm_probe_up) > 1
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: within_range
+            params:
+            - -0.5
+            - 0.5
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query
+  - uid: llm-probe-stale
+    title: 探针自己停了 —— 上面所有探针告警此刻都失灵
+    condition: C
+    for: 0m
+    labels:
+      severity: critical
+      service: litellm
+      source: probe
+    annotations:
+      summary: 距上一轮探针结束已 {{ humanizeDuration $values.A.Value }}，探针没在跑
+      description: 阈值 2400s 来自实测：间隔 900s + 单轮约 92s，正常最大间隔 ~1000s；2400s 意味着连续漏了两轮以上。探针一停，看板上的绿色全是陈旧值——绿色必须先证明量具活着。看板：/d/litellm-stability-198（第四段 主动探针）。
+    noDataState: Alerting
+    execErrState: Error
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: time() - litellm_probe_last_round_timestamp_seconds
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 2400
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query
+  - uid: llm-probe-topology-fail
+    title: 探针拉不到路由表（拓扑刷新连续失败）
+    condition: C
+    for: 0m
+    labels:
+      severity: warning
+      service: litellm
+      source: probe
+    annotations:
+      summary: 探针近 1 小时拉 /model/info 失败 {{ humanize $values.A.Value }} 次
+      description: 拉不到拓扑时探针会沿用上一轮目标继续探，所以不会瞎；但新增/下线的端点不会被发现。看板：/d/litellm-stability-198（第四段 主动探针）。
+    noDataState: OK
+    execErrState: Error
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 3600
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: increase(litellm_probe_topology_failures_total[1h])
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 3
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query

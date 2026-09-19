@@ -1,0 +1,150 @@
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  external_labels:
+    cluster: aiyjy-198
+
+scrape_configs:
+  # 容器级 CPU/内存 —— 这条是主目标，litellm-proxy 的内存曲线就来自这里
+  - job_name: kubelet-cadvisor
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    kubernetes_sd_configs:
+      - role: node
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+    metric_relabel_configs:
+      # 只留真正要用的指标，控制体积
+      - source_labels: [__name__]
+        regex: 'container_(memory_working_set_bytes|memory_rss|memory_usage_bytes|cpu_usage_seconds_total|network_receive_bytes_total|network_transmit_bytes_total|fs_usage_bytes|last_seen)'
+        action: keep
+      # 丢掉 POD 沙箱容器和空容器名，减一半 series
+      - source_labels: [container]
+        regex: '(POD|)'
+        action: drop
+
+  # kubelet 自身指标（pod 数、驱逐、探针失败次数）
+  - job_name: kubelet
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    kubernetes_sd_configs:
+      - role: node
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/$1/proxy/metrics
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'kubelet_(running_pods|running_containers|volume_stats_.*|pod_start_duration_seconds.*)|prober_probe_total|storage_operation_duration_seconds.*'
+        action: keep
+
+  # 宿主机 CPU/内存/磁盘/网络
+  - job_name: node-exporter
+    kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names: [monitoring]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name]
+        regex: node-exporter
+        action: keep
+      - source_labels: [__meta_kubernetes_endpoint_node_name]
+        target_label: node
+
+  # K8s 对象状态：pod 重启次数、OOMKilled、deployment 副本数
+  - job_name: kube-state-metrics
+    kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names: [monitoring]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name]
+        regex: kube-state-metrics
+        action: keep
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ---- LiteLLM 应用指标（2026-09-13 加）：模型稳定性看板的数据源 ----
+  # 只抓稳定性相关指标，标签已在 litellm 侧用 prometheus_metrics_config 裁到
+  # model 维度（无 hashed_api_key / client_ip / user_agent），避免高基数。
+  - job_name: litellm-proxy
+    # 该 job 的 /metrics 序列极多，实测 3/4 副本渲染要 28~60s，
+    # 全局 10s 超时会把它们抓成 down —— 看板只剩 1/4 流量视角。
+    scrape_interval: 60s
+    scrape_timeout: 45s
+    scheme: http
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/litellm-scraper-token
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [litellm-product]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        regex: litellm-proxy|litellm-proxy-gray
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_number]
+        regex: "4000"
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'litellm_(proxy_(total|failed)_requests_metric.*|deployment_(state|cooled_down|total_requests|success_responses|failure_responses|successful_fallbacks|failed_fallbacks).*|llm_api_latency_metric.*|llm_api_time_to_first_token_metric.*|request_total_latency_metric.*)'
+        action: keep
+
+  # ---- 主动探针（2026-09-13 加）：litellm-probe 逐上游端点打最小推理 ----
+  # 被动指标只看得到有人用过的腿；这个 job 把没人打的腿也变成可观测的。
+  - job_name: litellm-probe
+    scheme: http
+    metrics_path: /metrics
+    scrape_interval: 60s
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [litellm-product]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        regex: litellm-probe
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_number]
+        regex: "9109"
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+
+  - job_name: alert2feishu
+    scheme: http
+    metrics_path: /metrics
+    scrape_interval: 60s
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces: {names: [monitoring]}
+    relabel_configs:
+      - {source_labels: [__meta_kubernetes_pod_label_app], regex: alert-to-feishu, action: keep}
+      - {source_labels: [__meta_kubernetes_pod_container_port_number], regex: "9110", action: keep}
+      - {source_labels: [__meta_kubernetes_pod_name], target_label: pod}

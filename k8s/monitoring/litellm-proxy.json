@@ -1,0 +1,87 @@
+{
+  "title": "LiteLLM Proxy (198)",
+  "uid": "litellm-198",
+  "timezone": "Asia/Shanghai",
+  "refresh": "30s",
+  "time": {"from": "now-24h", "to": "now"},
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "内存 working set (12Gi = OOM 线)",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {"fillOpacity": 8},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "orange", "value": 9663676416},
+            {"color": "red", "value": 12884901888}
+          ]}
+        }
+      },
+      "options": {"legend": {"displayMode": "table", "calcs": ["last", "max"], "placement": "bottom"}},
+      "targets": [{
+        "expr": "container_memory_working_set_bytes{namespace=\"litellm-product\",pod=~\"litellm-proxy-.*\",container=\"litellm\"} or container_memory_working_set_bytes{namespace=\"litellm-product\",pod=~\"litellm-proxy-.*\",container!=\"\"}",
+        "legendFormat": "{{pod}}"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "内存增长速率 (MiB/小时) —— 判泄露就看这条平不平",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 10},
+      "fieldConfig": {"defaults": {"unit": "none", "custom": {"fillOpacity": 0}}},
+      "targets": [{
+        "expr": "deriv(container_memory_working_set_bytes{namespace=\"litellm-product\",pod=~\"litellm-proxy-.*\",container!=\"\"}[30m]) * 3600 / 1024 / 1024",
+        "legendFormat": "{{pod}}"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU 用量 (核, limit=4)",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 10},
+      "fieldConfig": {"defaults": {"unit": "none"}},
+      "targets": [{
+        "expr": "rate(container_cpu_usage_seconds_total{namespace=\"litellm-product\",pod=~\"litellm-proxy-.*\",container!=\"\"}[5m])",
+        "legendFormat": "{{pod}}"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "重启次数（OOM 会让它跳）",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 19},
+      "targets": [{
+        "expr": "kube_pod_container_status_restarts_total{namespace=\"litellm-product\",pod=~\"litellm-proxy-.*\"}",
+        "legendFormat": "{{pod}}"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "OOMKilled 终止事件",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 19},
+      "targets": [{
+        "expr": "kube_pod_container_status_last_terminated_reason{namespace=\"litellm-product\",reason=\"OOMKilled\"}",
+        "legendFormat": "{{pod}}"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "探针失败次数 (readiness/liveness 超时)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 27},
+      "targets": [{
+        "expr": "sum by (probe_type, result) (rate(prober_probe_total{result!=\"successful\"}[5m]))",
+        "legendFormat": "{{probe_type}} {{result}}"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "节点内存可用 / 根盘可用",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 27},
+      "fieldConfig": {"defaults": {"unit": "bytes"}},
+      "targets": [
+        {"expr": "node_memory_MemAvailable_bytes", "legendFormat": "mem avail {{instance}}"},
+        {"expr": "node_filesystem_avail_bytes{mountpoint=\"/\"}", "legendFormat": "disk avail {{instance}}"}
+      ]
+    }
+  ]
+}

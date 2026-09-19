@@ -1,0 +1,15 @@
+# Grafana 告警投递：联系点（contact point）
+# 现在只"加"不"切"：联系点建好、但通知策略还没指过来，所以这份文件单独存在
+# 不会改变任何现有投递行为。等 alert-to-feishu 真的能发出去了，再切策略。
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: feishu-群机器人
+    receivers:
+      - uid: feishu-webhook
+        type: webhook
+        settings:
+          # 指向集群内的转换层，不是飞书地址 —— Grafana 的 body 飞书不认，见 alert2feishu.py
+          url: http://alert-to-feishu.monitoring.svc.cluster.local:8080/grafana
+          httpMethod: POST
+        disableResolveMessage: false

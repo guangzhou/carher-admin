@@ -457,3 +457,472 @@ try:
     _install_ui_spendlog_render_fix()
 except Exception as _exc:  # pragma: no cover
     print("[sitecustomize] ui spendlog render fix install failed: " + repr(_exc), file=sys.stderr)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SPEND-LOG BATCH RESCUE  (root-caused 2026-09-19, LiteLLM 1.100.1 prod on 198)
+# ─────────────────────────────────────────────────────────────────────────────
+# SYMPTOM  Two ERROR lines appear together, ~4x/min per gray pod:
+#   utils.py:6238            "spend log queue is at its 64000000 byte budget;
+#                             dropped the N oldest spend logs"
+#   spend_log_error_logger.py:81
+#                            "Error in spend logs queue monitor: Unable to match
+#                             input value to any allowed input type for the
+#                             field. ... `data` should be of any of the
+#                             following types: `LiteLLM_SpendLogsCreateManyInput`"
+#
+# ROOT CAUSE  ``update_spend_logs_job`` (utils.py:6522) POPS the batch off the
+# queue (``dequeue_spend_logs``, 6542) BEFORE writing it. Inside
+# ``ProxyUpdateSpend.update_spend_logs`` (6320) only two paths put rows back:
+#   * asyncio.CancelledError            -> enqueue_spend_logs(at_head=True)
+#   * DB *transport* error, retries out -> enqueue_spend_logs(at_head=True)
+# and 6384-6386 reads:
+#     if not PrismaDBExceptionHandler.is_database_transport_error(e): raise
+#
+# CORRECTION (measured later the same day; two earlier readings of this were
+# wrong and are retracted here). The prisma engine's input-validation error DOES
+# get classified as a transport error, because
+# ``is_database_transport_error`` matches KEYWORDS against ``str(e)`` and a
+# DataError's message EMBEDS THE REJECTED ROW, whose payload routinely contains
+# "timeout" / "connection error". Measured: 16 of 16 DataError lines matched.
+# So the real shape is NOT "the batch is silently lost" but:
+#     bad batch -> judged transport -> retried 4x ("retry 4/3" seen 26 times)
+#     -> enqueue_spend_logs(at_head=True) -> SAME batch popped next flush
+#     -> forever, sitting in FRONT of the rows behind it.
+# That misclassification is fixed by the second installer at the bottom of this
+# file; this first installer is what then bounds the damage to the few rows that
+# genuinely cannot be written.
+#
+# ``_create_spend_logs_with_poison_isolation`` (6731) cannot help: it bisects to
+# find the row that makes the *DB* reject a statement, but here the statement is
+# refused by the engine's argument parser before it is ever sent, so every
+# bisection half fails identically and the isolation budget just burns.
+#
+# EVIDENCE (2026-09-19, gray pods, v1.100.1)
+#   * 13 distinct ``litellm_call_id`` values scraped off the rejected-batch log
+#     lines were queried against LiteLLM_SpendLogs.request_id: ALL 13 absent.
+#     Negative control on the same SQL with 3 known-present request_ids
+#     (including a 36-char UUID-shaped one) returned 1 each => the 0s are real
+#     data loss, not a bad query.
+#   * Landing curve has NO gap (19 consecutive 5-min buckets, 58..222 rows,
+#     newest-row lag 18s) and gpt-5.6-sol still lands 204 rows/30min => the loss
+#     is a small per-batch fraction, not an outage.
+#   * v1.90.2 (guarded-old) never emits this line: 1.100.1-only.
+#
+# FIX  Wrap ``ProxyUpdateSpend.update_spend_logs``. On ANY exception that is not
+# already handled by upstream's requeue paths, put the batch BACK AT THE HEAD of
+# the queue, but stamp each row with a rescue counter first. A row that has been
+# rescued more than ``_MAX_RESCUES`` times is dropped ALONE and loudly, so one
+# permanently-unwritable row can never hold the queue hostage (which would
+# convert a small loss into a total stall — strictly worse).
+#
+# Invariants this must preserve:
+#   1. NEVER swallow the exception. Upstream's caller
+#      (``_raise_failed_update_spend_exception``) and the alerting that hangs off
+#      it must still see the failure. We re-raise unconditionally.
+#   2. NEVER requeue on CancelledError or on transport errors — upstream already
+#      did it there; doing it twice would duplicate rows.
+#   3. The rescue counter lives OUTSIDE the row dict sent to the DB (a private
+#      side table keyed by id()) — adding a key to the row would itself be an
+#      "unknown field" and cause the very error we are fixing.
+#   4. Fail-open: any error inside this wrapper is swallowed after the re-raise
+#      of the original, so the hook can never make the flush worse.
+#
+# Log level is WARNING/ERROR on purpose: ``log.info`` from a sitecustomize
+# patch is invisible (it runs before the app installs handlers, so logging's
+# lastResort handler at level WARNING is what prints).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _install_spendlog_batch_rescue():
+    import asyncio
+    from importlib.abc import MetaPathFinder
+    from importlib.util import find_spec
+
+    _TARGET = "litellm.proxy.utils"
+    _MAX_RESCUES = 3
+
+    # request_id -> times this row came back from a failed write.
+    # Keyed by request_id (a str already on every row) so it survives the
+    # dict being rebuilt by jsonify_object. Bounded to avoid unbounded growth.
+    _rescues = {}
+    _RESCUES_MAX_KEYS = 50000
+
+    def _row_key(row):
+        try:
+            rid = row.get("request_id")
+            return rid if isinstance(rid, str) else None
+        except Exception:
+            return None
+
+    def _split_batch(logs):
+        """Return (retry_rows, doomed_rows) by rescue count."""
+        retry, doomed = [], []
+        for row in logs:
+            k = _row_key(row)
+            if k is None:
+                # No id to track: retry once-ish but never forever. Treat as
+                # doomed so it cannot become an untracked permanent blocker.
+                doomed.append(row)
+                continue
+            n = _rescues.get(k, 0) + 1
+            if len(_rescues) < _RESCUES_MAX_KEYS:
+                _rescues[k] = n
+            if n > _MAX_RESCUES:
+                _rescues.pop(k, None)
+                doomed.append(row)
+            else:
+                retry.append(row)
+        return retry, doomed
+
+    def _clear_rescues(logs):
+        for row in logs:
+            k = _row_key(row)
+            if k is not None:
+                _rescues.pop(k, None)
+
+    def _patch(mod):
+        try:
+            P = getattr(mod, "ProxyUpdateSpend", None)
+            enqueue = getattr(mod, "enqueue_spend_logs", None)
+            handler = getattr(mod, "PrismaDBExceptionHandler", None)
+            if P is None or enqueue is None:
+                print(
+                    "[sitecustomize] spendlog batch rescue: hook point missing "
+                    "(ProxyUpdateSpend=%r enqueue_spend_logs=%r) - NOT installed"
+                    % (P is not None, enqueue is not None),
+                    file=sys.stderr,
+                )
+                return
+            orig = P.update_spend_logs
+            if getattr(orig, "_spendlog_batch_rescue_patched", False):
+                return
+
+            import functools
+
+            @functools.wraps(orig)
+            async def patched(*args, **kwargs):
+                logs = kwargs.get("logs_to_process")
+                if logs is None:
+                    # Caller did not pass the batch; upstream pops it itself and
+                    # we have no handle on it. Nothing to rescue - pass through.
+                    return await orig(*args, **kwargs)
+                try:
+                    result = await orig(*args, **kwargs)
+                except asyncio.CancelledError:
+                    raise                      # invariant 2: upstream requeued
+                except Exception as exc:
+                    try:
+                        transport = False
+                        if handler is not None:
+                            try:
+                                transport = bool(
+                                    handler.is_database_transport_error(exc)
+                                )
+                            except Exception:
+                                transport = False
+                        if not transport and logs:
+                            # Callers invoke update_spend_logs with keyword
+                            # args only; never guess from *args -- passing the
+                            # wrong object to enqueue would corrupt the queue.
+                            prisma_client = kwargs.get("prisma_client")
+                            retry, doomed = _split_batch(logs)
+                            if doomed:
+                                print(
+                                    "[spendlog-rescue] ERROR dropping %d spend "
+                                    "log row(s) the DB engine refused %d times "
+                                    "(request_ids: %s); error=%s"
+                                    % (
+                                        len(doomed),
+                                        _MAX_RESCUES,
+                                        ",".join(
+                                            str(_row_key(r)) for r in doomed[:10]
+                                        ),
+                                        str(exc)[:300].replace("\n", " "),
+                                    ),
+                                    file=sys.stderr,
+                                )
+                            if retry and prisma_client is not None:
+                                await enqueue(
+                                    prisma_client, retry, at_head=True
+                                )
+                                print(
+                                    "[spendlog-rescue] WARNING requeued %d of "
+                                    "%d spend log rows after a non-transport "
+                                    "write failure (upstream would have lost "
+                                    "the whole batch)"
+                                    % (len(retry), len(logs)),
+                                    file=sys.stderr,
+                                )
+                    except Exception as inner:   # invariant 4: fail-open
+                        print(
+                            "[spendlog-rescue] ERROR rescue path itself failed: "
+                            + repr(inner),
+                            file=sys.stderr,
+                        )
+                    raise                        # invariant 1: never swallow
+                else:
+                    _clear_rescues(logs)
+                    return result
+
+            patched._spendlog_batch_rescue_patched = True
+            P.update_spend_logs = staticmethod(patched)
+            print(
+                "[sitecustomize] spendlog batch rescue patched "
+                "ProxyUpdateSpend.update_spend_logs (requeues a batch the "
+                "prisma engine refuses instead of losing it; drops a row alone "
+                "after %d rescues)" % _MAX_RESCUES,
+                file=sys.stderr,
+            )
+        except Exception as exc:  # pragma: no cover
+            print(
+                "[sitecustomize] spendlog batch rescue patch failed: " + repr(exc),
+                file=sys.stderr,
+            )
+
+    if _TARGET in sys.modules:
+        _patch(sys.modules[_TARGET])
+        return
+
+    class _RescueFinder(MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name != _TARGET:
+                return None
+            try:
+                sys.meta_path.remove(self)
+            except ValueError:
+                pass
+            try:
+                spec = find_spec(name)
+            finally:
+                if self not in sys.meta_path:
+                    sys.meta_path.insert(0, self)
+            if spec is None or spec.loader is None:
+                return None
+            loader = spec.loader
+            orig_exec = loader.exec_module
+
+            def exec_module(module):
+                orig_exec(module)
+                _patch(module)
+
+            try:
+                loader.exec_module = exec_module
+            except Exception:
+                pass
+            return spec
+
+    sys.meta_path.insert(0, _RescueFinder())
+
+
+try:
+    _install_spendlog_batch_rescue()
+except Exception as _exc:  # pragma: no cover
+    print(
+        "[sitecustomize] spendlog batch rescue install failed: " + repr(_exc),
+        file=sys.stderr,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Patch #2 for spend-log writes: stop a data error from being mistaken for a
+# transport error.
+#
+# SYMPTOM (measured on litellm-proxy-gray, 2026-09-19 13:12-13:13 UTC):
+#   prisma.errors.DataError "Unable to match input value to any allowed input
+#   type for the field ... `LiteLLM_SpendLogsCreateManyInput` ... is not a
+#   valid `JSON String`. Underlying error: invalid escape"
+#   accompanied, in the SAME second, by
+#   "Spend tracking - DB connection error writing spend logs, retry 1/3 .. 4/3".
+#
+# ROOT CAUSE (litellm/proxy/db/exception_handler.py:127
+# PrismaDBExceptionHandler.is_database_transport_error):
+#   For any prisma.errors.PrismaError it lowercases str(e) and returns True if
+#   the message contains any of "timeout", "timed out", "connection error", ...
+#   A DataError's message EMBEDS THE REJECTED ROW, and spend-log rows routinely
+#   contain those words in their request/response payloads. Measured: 16 of 16
+#   DataError lines contained "timeout"/"timed out"/"connection error".
+#   So a pure input-validation error is classified as a connectivity failure.
+#
+# CONSEQUENCE (litellm/proxy/utils.py:6384-6400, update_spend_logs):
+#   transport => retry loop runs, and at i >= n_retry_times it calls
+#   enqueue_spend_logs(..., at_head=True). The batch goes back to the HEAD of
+#   the queue and the next flush pops the same poisoned batch again. Observed
+#   "retry 4/3" 26 times. The bad batch never drains and, being at the head,
+#   it sits in front of the rows behind it. Reconciliation: 13 request_ids
+#   scraped from rejected batches were all absent from LiteLLM_SpendLogs, while
+#   3 known-good request_ids each returned 1 (negative control valid).
+#
+# WHY THIS AND NOT A CONTENT SCRUBBER:
+#   The offending character is not recoverable from either side: litellm's own
+#   DB-storage truncation ("litellm_truncated skipped N chars") removes the
+#   region from the logged message, and the row never lands so it cannot be
+#   read back. Negative control ruled truncation out as the cause: 1583 of 1678
+#   rows that DID land in the last hour carry the same truncation marker. The
+#   classification bug, by contrast, is proven by data and is what turns one
+#   bad row into an unbounded head-of-queue retry.
+#
+# WHAT THIS DOES:
+#   Wrap is_database_transport_error so that a prisma DataError / a message
+#   whose connectivity verdict comes only from text found inside the embedded
+#   row is reported as NOT transport. update_spend_logs then takes the bare
+#   `raise` at 6385, the batch is not re-enqueued at the head, and patch #1
+#   (the batch rescue installed above) takes over: it requeues the batch up to
+#   _MAX_RESCUES times and then drops only the rows that can never be written,
+#   logging their request_ids.
+#
+# Invariants:
+#   1. Only ever flips True -> False, never False -> True. A real connectivity
+#      failure must keep its retry/reconnect behaviour.
+#   2. Only for prisma data errors. Any other exception type is passed straight
+#      through to the original classifier.
+#   3. Fail-open: if anything in here raises, defer to the original verdict.
+#   4. No content is logged. The rejected row embeds real users' key metadata
+#      (emails, open_ids, team spend), so only the exception class name and a
+#      row count are printed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _install_spendlog_transport_misclassification_fix():
+    from importlib.abc import MetaPathFinder
+    from importlib.util import find_spec
+
+    _TARGET = "litellm.proxy.db.exception_handler"
+
+    def _is_data_error(exc):
+        """True iff exc is a prisma error that means 'the DB refused this input'.
+
+        Such an error proves the DB was REACHED, so reconnect/retry logic must
+        not claim it. Matched by class name rather than by isinstance so a
+        prisma version that moves the class does not silently disable the fix.
+        """
+        try:
+            import prisma.errors as pe
+        except Exception:
+            return False
+        data_error_types = tuple(
+            t
+            for t in (
+                getattr(pe, "DataError", None),
+                getattr(pe, "MissingRequiredValueError", None),
+                getattr(pe, "UniqueViolationError", None),
+                getattr(pe, "ForeignKeyViolationError", None),
+                getattr(pe, "RecordNotFoundError", None),
+            )
+            if isinstance(t, type)
+        )
+        if data_error_types and isinstance(exc, data_error_types):
+            return True
+        return type(exc).__name__ in (
+            "DataError",
+            "MissingRequiredValueError",
+            "UniqueViolationError",
+            "ForeignKeyViolationError",
+        )
+
+    def _patch(mod):
+        try:
+            handler = getattr(mod, "PrismaDBExceptionHandler", None)
+            if handler is None:
+                print(
+                    "[sitecustomize] transport-misclassification fix: "
+                    "PrismaDBExceptionHandler missing - NOT installed",
+                    file=sys.stderr,
+                )
+                return
+            orig = handler.is_database_transport_error
+            if getattr(orig, "_transport_misclassification_fixed", False):
+                return
+
+            import functools
+
+            _reported = [0]
+
+            @functools.wraps(orig)
+            def patched(e):
+                try:
+                    verdict = orig(e)
+                except Exception:
+                    raise
+                try:
+                    # invariant 1: only ever narrow a True verdict.
+                    if verdict and _is_data_error(e):
+                        if _reported[0] < 20:
+                            _reported[0] += 1
+                            print(
+                                "[spendlog-transport-fix] WARNING reclassified "
+                                "%s as NON-transport (the DB was reached and "
+                                "refused the input; its message merely embeds "
+                                "the row, which contains connectivity words). "
+                                "Upstream will no longer requeue it at the "
+                                "queue head."
+                                % type(e).__name__,
+                                file=sys.stderr,
+                            )
+                        return False
+                except Exception as inner:  # invariant 3: fail-open
+                    print(
+                        "[spendlog-transport-fix] ERROR fix path failed, "
+                        "deferring to original verdict: " + repr(inner),
+                        file=sys.stderr,
+                    )
+                return verdict
+
+            patched._transport_misclassification_fixed = True
+            handler.is_database_transport_error = staticmethod(patched)
+            print(
+                "[sitecustomize] transport-misclassification fix patched "
+                "PrismaDBExceptionHandler.is_database_transport_error "
+                "(prisma data errors no longer counted as connectivity "
+                "failures)",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # pragma: no cover
+            print(
+                "[sitecustomize] transport-misclassification fix failed: "
+                + repr(exc),
+                file=sys.stderr,
+            )
+
+    if _TARGET in sys.modules:
+        _patch(sys.modules[_TARGET])
+        return
+
+    class _TransportFixFinder(MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name != _TARGET:
+                return None
+            try:
+                sys.meta_path.remove(self)
+            except ValueError:
+                pass
+            try:
+                spec = find_spec(name)
+            finally:
+                if self not in sys.meta_path:
+                    sys.meta_path.insert(0, self)
+            if spec is None or spec.loader is None:
+                return None
+            loader = spec.loader
+            orig_exec = loader.exec_module
+
+            def exec_module(module):
+                orig_exec(module)
+                _patch(module)
+
+            try:
+                loader.exec_module = exec_module
+            except Exception:
+                pass
+            return spec
+
+    sys.meta_path.insert(0, _TransportFixFinder())
+
+
+try:
+    _install_spendlog_transport_misclassification_fix()
+except Exception as _exc:  # pragma: no cover
+    print(
+        "[sitecustomize] transport-misclassification install failed: "
+        + repr(_exc),
+        file=sys.stderr,
+    )

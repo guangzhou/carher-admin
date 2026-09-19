@@ -101,6 +101,27 @@ out = cap(list(none_tool))
 check("无 tool 消息不改动", out == none_tool)
 
 print()
+print("=== 截断痕迹本身也要算在预算里（09-19 fuzz 抓到的）===")
+# 原来 _middle_truncate 是 head+tail 吃满 limit 再额外拼 marker，每截一次就
+# 超一个 marker；多 part 消息里每个耗尽的壳同样是纯超支，实测到 limit+72。
+mt = mod._middle_truncate
+over = [
+    (lim, n, len(mt("x" * n, lim)))
+    for lim in (1, 10, 39, 40, 100, 2000, PER)
+    for n in (0, 1, lim, lim + 1, lim * 3, 500000)
+    if len(mt("x" * n, lim)) > lim
+]
+check("_middle_truncate 任何 limit 下都不超", not over, f"{over[:3]}")
+
+parts5 = cap([tool_parts(*["y" * 100000] * 5)])
+check("5 part 消息总长不超 per", clen(parts5[0]["content"]) <= PER,
+      f"{clen(parts5[0]['content'])}")
+
+many = cap([tool("z" * 400000) for _ in range(12)] )
+tot = sum(clen(m["content"]) for m in many if m["role"] == "tool")
+check("12 条 400k 总长不超 total", tot <= TOTAL, f"{tot}")
+
+print()
 if fails:
     print(f"FAILED: {len(fails)} 项 — {fails}")
     sys.exit(1)

@@ -1,6 +1,6 @@
 """OWUI 本地补丁（PVC 上，靠 deployment 的 PYTHONPATH=/app/backend/data/pypatch 加载）。
 
-两件事，互相独立：
+三件事，互相独立：
 
 1. 给 feishu provider 补一个显示名。
    上游 config.py 的 OAUTH_PROVIDERS['feishu'] 没有 'name' 键（只有 oidc 有），
@@ -44,6 +44,29 @@
    "最大 4826 字符"全是量具产物。
      OWUI_TOOL_OUTPUT_CAP_DISABLED=1         整个第 2 项的 kill switch
 
+3. 给 RAG 引文（<source> 正文）加长度上限。
+   第 2 项拦不到这条路：知识库/文件检索的内容不经过
+   convert_output_to_messages，而是 get_source_context() 拼成 <source> 标签，
+   再由 apply_source_context_to_messages 经 rag_template 塞进 system 或
+   user 消息（middleware.py:942-1002）。两个调用点
+   （middleware.py:3077 用户入口、middleware.py:5878 工具循环内）都只经过
+   get_source_context 这一个收口，而它是 middleware 自己的模块全局，
+   所以换掉模块属性就同时覆盖住内部调用。
+
+   实测（2026-09-19 webui.db 未截断原文）：sources[].document 183 条，
+   max=100000，超 30000 的 14 条。100000 这个数不是巧合 ——
+   env.py:1158 VIEW_FILE_MAX_CHARS=100_000 是生产侧的真实上限。
+
+   旋钮：
+     OWUI_RAG_SOURCE_MAX_CHARS=40000         单个 <source> 正文上限
+     OWUI_RAG_SOURCE_TOTAL_MAX_CHARS=160000  一次请求内引文正文总预算
+     OWUI_RAG_SOURCE_CAP_DISABLED=1          第 3 项的 kill switch
+
+   只截断正文（doc），不动 metadata、不动 source_ids 编号、不删 source ——
+   引文编号得和前端显示的角标对得上，少一个 <source id=N> 会让模型引到空号。
+   截断在输入侧做 copy，不原地改 sources —— 那个 list 同时被
+   metadata['sources'] 拿去发前端做引文展示，改了会连前端看到的原文一起缩。
+
 不想要这个文件了：删掉 deployment 的 PYTHONPATH 环境变量即可。
 """
 
@@ -56,7 +79,7 @@ log = logging.getLogger("owui.pypatch")
 
 _real_import = builtins.__import__
 
-_done = {"feishu": False, "toolcap": False}
+_done = {"feishu": False, "toolcap": False, "ragcap": False}
 
 
 # ---------------------------------------------------------------- 工具输出截断
@@ -73,14 +96,27 @@ _EXHAUSTED_MARKER = "...[本地补丁截断：本条消息额度已用尽]..."
 
 
 def _middle_truncate(text, limit):
-    """保留头部和尾部，砍中间。grep/表格类输出尾部往往和头部一样有信息量。"""
+    """保留头部和尾部，砍中间。grep/表格类输出尾部往往和头部一样有信息量。
+
+    marker 本身也算在 limit 里 —— 保证 len(返回值) <= limit。原来是
+    head+tail 就吃满 limit 再额外拼上 marker，每截一次超一个 marker 的长度，
+    而两个 cap 都拿返回长度当"这条花了多少预算"，于是总预算按条数被放大
+    （8 条就超 ~300 字符，上百条就不止了）。
+    """
     if len(text) <= limit:
         return text
-    head = int(limit * 0.6)
-    tail = limit - head
-    dropped = len(text) - limit
-    marker = f"\n...[本地补丁截断：省略 {dropped} 字符，原长 {len(text)}]...\n"
-    return text[:head] + marker + (text[-tail:] if tail > 0 else "")
+    # marker 的长度取决于省略量，省略量又取决于 marker 长度 —— 迭代两次就稳。
+    keep = limit
+    for _ in range(2):
+        marker = f"\n...[本地补丁截断：省略 {len(text) - keep} 字符，原长 {len(text)}]...\n"
+        keep = limit - len(marker)
+    if keep <= 0:
+        # limit 比 marker 还短，放不下痕迹，只能硬切。
+        return text[:limit]
+    head = int(keep * 0.6)
+    tail = keep - head
+    out = text[:head] + marker + (text[-tail:] if tail > 0 else "")
+    return out[:limit] if len(out) > limit else out
 
 
 def _cap_text_in_content(content, limit):
@@ -98,13 +134,27 @@ def _cap_text_in_content(content, limit):
     if isinstance(content, list):
         out = []
         total = 0
+        # 每个 input_text part 至少会留下一个 _EXHAUSTED_MARKER 的壳，这部分
+        # 额度必须先预留：否则第一个 part 吃满 limit 后，后面每个壳都是纯超支
+        # （4 个 part 的消息实测能到 limit+72）。
+        mlen = len(_EXHAUSTED_MARKER)
+        n_text = sum(
+            1
+            for p in content
+            if isinstance(p, dict)
+            and p.get("type") == "input_text"
+            and isinstance(p.get("text"), str)
+        )
+        seen = 0
         for part in content:
             if isinstance(part, dict) and part.get("type") == "input_text":
                 text = part.get("text", "")
                 if isinstance(text, str):
-                    # 按顺序分配剩余额度：前面的 part 用掉多少，后面就少多少。
-                    remaining = limit - total
-                    if remaining <= 0:
+                    seen += 1
+                    # 按顺序分配剩余额度：前面的 part 用掉多少，后面就少多少，
+                    # 同时给后面还没处理的每个 part 预留一个壳。
+                    remaining = limit - total - mlen * (n_text - seen)
+                    if remaining <= mlen:
                         # 额度已耗尽。保留 part 结构（不删 part，避免破坏
                         # 多模态消息的形状），但正文清空并留下痕迹。
                         out.append({**part, "text": _EXHAUSTED_MARKER})
@@ -205,6 +255,119 @@ def _cap_tool_messages(messages):
     return messages
 
 
+def _cap_rag_sources(sources):
+    """给 sources[].document 里每段正文加上限，返回一份新的 sources。
+
+    绝不原地改：传进来的 list 同时被 metadata['sources'] 拿去发前端做引文展示。
+    形状约定（middleware.py:942 的 zip(source['document'], source['metadata'])）：
+    document 和 metadata 是等长的两个平行 list，所以只能替换 document 里的
+    字符串，不能删元素 —— 删一个就把后面所有 doc 和 metadata 错位了。
+    """
+    if os.getenv("OWUI_RAG_SOURCE_CAP_DISABLED") == "1":
+        return sources
+    if not isinstance(sources, list) or not sources:
+        return sources
+
+    per = _int_env("OWUI_RAG_SOURCE_MAX_CHARS", 40000)
+    total_cap = _int_env("OWUI_RAG_SOURCE_TOTAL_MAX_CHARS", 160000)
+
+    before = 0
+    for src in sources:
+        if isinstance(src, dict):
+            for doc in src.get("document", []) or []:
+                if isinstance(doc, str):
+                    before += len(doc)
+
+    if before <= total_cap and before <= per:
+        # 连单条上限都没碰到，原样返回，省掉整份 copy。
+        return sources
+
+    # 每条正文至少要留下 _EXHAUSTED_MARKER 那个壳（空的 <source id=N> 比
+    # "被截断了"更糟），所以这部分额度必须先从总预算里扣掉预留，否则前几条
+    # 把 total_cap 吃满之后，后面每个壳都是纯超支。
+    mlen = len(_EXHAUSTED_MARKER)
+    n_str_docs = sum(
+        1
+        for s in sources
+        if isinstance(s, dict)
+        for d in (s.get("document") or [])
+        if isinstance(d, str)
+    )
+
+    out = []
+    running = 0
+    seen = 0
+    for src in sources:
+        if not isinstance(src, dict):
+            out.append(src)
+            continue
+        docs = src.get("document")
+        if not isinstance(docs, list):
+            out.append(src)
+            continue
+        new_docs = []
+        for doc in docs:
+            if not isinstance(doc, str):
+                new_docs.append(doc)
+                continue
+            seen += 1
+            # 给后面还没处理的每条正文预留一个壳的额度。
+            reserve = mlen * (n_str_docs - seen)
+            limit = min(per, max(total_cap - running - reserve, 0))
+            if limit <= mlen:
+                new_docs.append(_EXHAUSTED_MARKER)
+                running += mlen
+                continue
+            capped = _middle_truncate(doc, limit)
+            running += len(capped)
+            new_docs.append(capped)
+        out.append({**src, "document": new_docs})
+
+    if running < before:
+        log.info(
+            "pypatch rag-source cap: %d sources, %d -> %d chars (per=%d total=%d)",
+            len(sources),
+            before,
+            running,
+            per,
+            total_cap,
+        )
+    return out
+
+
+def _install_rag_cap():
+    """包住 middleware.get_source_context。
+
+    它是 RAG 正文进 payload 的唯一收口（middleware.py:3077 用户入口、
+    middleware.py:5878 工具循环内），且是 middleware 自己的模块全局，
+    所以换模块属性就连 apply_source_context_to_messages 的内部调用一起盖住。
+    """
+    mw = sys.modules.get("open_webui.utils.middleware")
+    if mw is None:
+        return False
+    original = getattr(mw, "get_source_context", None)
+    if original is None:
+        return False
+    if getattr(original, "_owui_rag_cap", False):
+        return True
+
+    def wrapped(sources, *args, **kwargs):
+        try:
+            sources = _cap_rag_sources(sources)
+        except Exception:
+            # 截断失败绝不能连带把请求搞挂：用原始 sources 继续。
+            log.exception("pypatch rag-source cap failed, passing through")
+        return original(sources, *args, **kwargs)
+
+    wrapped._owui_rag_cap = True
+    wrapped.__name__ = getattr(original, "__name__", "get_source_context")
+    wrapped.__doc__ = getattr(original, "__doc__", None)
+
+    mw.get_source_context = wrapped
+    log.info("pypatch rag-source cap installed on: open_webui.utils.middleware")
+    return True
+
+
 def _install_tool_cap():
     """包住 convert_output_to_messages。
 
@@ -273,8 +436,16 @@ def _hook(name, *args, **kwargs):
             log.exception("pypatch tool-output cap install failed; giving up on it")
             _done["toolcap"] = True
 
-    # 两件事都办完才撤钩子（原来的 feishu 补丁是补完就撤，现在要等齐）。
-    if _done["feishu"] and _done["toolcap"]:
+    if not _done["ragcap"]:
+        try:
+            if _install_rag_cap():
+                _done["ragcap"] = True
+        except Exception:
+            log.exception("pypatch rag-source cap install failed; giving up on it")
+            _done["ragcap"] = True
+
+    # 三件事都办完才撤钩子（原来的 feishu 补丁是补完就撤，现在要等齐）。
+    if _done["feishu"] and _done["toolcap"] and _done["ragcap"]:
         builtins.__import__ = _real_import
 
     return module

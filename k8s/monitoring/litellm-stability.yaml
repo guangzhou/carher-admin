@@ -202,9 +202,9 @@ groups:
       service: litellm
     annotations:
       summary: '{{ $labels.requested_model }} 端到端 p95 = {{ humanize $values.A.Value }}s'
-      description: 参照基线：2026-09-13 现网 p95 区间 27~80s。超过 150s 说明上游或路由在劣化。（探针流量已剔除）
+      description: 参照基线：2026-09-13 现网 p95 区间 27~80s。超过 150s 说明上游或路由在劣化。（探针流量已剔除）2026-09-20：execErrState 由 OK 改 Error —— 本规则是全文件唯一一条把「查询执行报错」当成通过的，histogram_quantile + label_replace + unless 这串表达式报错的机会不少，而报错和「延迟正常」在看板上长得一样。noDataState 保持 OK 是对的：没请求就没有延迟，活性由 llm-stab-scrape-down 兜。
     noDataState: OK
-    execErrState: OK
+    execErrState: Error
     isPaused: false
     data:
     - refId: A

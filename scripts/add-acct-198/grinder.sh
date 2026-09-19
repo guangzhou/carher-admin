@@ -30,8 +30,12 @@
 # ────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
-: "${LITELLM_MK_198:=sk-pro-litellm-ce077e2b0721bb419a633e4d}"
+: "${LITELLM_MK_198:?需要 export LITELLM_MK_198=<198 prod master key>；脚本不再内置默认值}"
 CREDS_CSV="${GRIND_CREDS:-/tmp/grind-creds.csv}"
+# GRIND_FORCE_OTP=1: 卖号商只给邮箱密码(gpt 密码列填占位)的验证码登录号, 让 oauth 跳过
+# 密码页直接走一次性邮箱验证码登录(FORCE_OTP_LOGIN, re-oauth.sh 已透传)。默认关, 不影响老路径。
+FORCE_OTP_ENV=""
+[ "${GRIND_FORCE_OTP:-0}" = "1" ] && FORCE_OTP_ENV="FORCE_OTP_LOGIN=1 "
 NS=litellm-product
 IMAGE=mcr.microsoft.com/playwright/python:v1.60.0-noble
 REPO="${GRIND_REPO:-$HOME/codes/carher-admin}"
@@ -98,7 +102,7 @@ for N in $ACCTS; do
     j8 'docker ps --filter ancestor='"$IMAGE"' -q | xargs -r docker kill >/dev/null 2>&1'
     # 每次 attempt 结束把日志/截图归档成 .att<N> 再清空; 否则下一 attempt 一 rm 就把
     # 上一次的失败证据全毁了(诊断时只能干瞪眼, acct-112 实证)。
-    j8 "[ -s /tmp/oauth-acct-$N.log ] && cp -f /tmp/oauth-acct-$N.log /tmp/oauth-acct-$N.log.prev 2>/dev/null; [ -d /tmp/screenshots-acct-$N ] && { rm -rf /tmp/screenshots-acct-$N.prev; cp -a /tmp/screenshots-acct-$N /tmp/screenshots-acct-$N.prev 2>/dev/null; }; docker run --rm -v /tmp:/t busybox rm -rf /t/auth-acct-$N.json /t/oauth-acct-$N.log /t/screenshots-acct-$N >/dev/null 2>&1; rm -f /tmp/oauth-acct-$N.log /tmp/auth-acct-$N.json; rm -rf /tmp/screenshots-acct-$N; setsid bash -c 'OAUTH_PROXY=$PX MAIL_OTP_PROVIDER=mailcom GEN_ONLY=1 bash /Data/chatgpt-auth/re-oauth.sh acct-$N 2>&1 | stdbuf -oL tee /tmp/oauth-acct-$N.log' </dev/null >/dev/null 2>&1 & disown; sleep 2; echo launched"
+    j8 "[ -s /tmp/oauth-acct-$N.log ] && cp -f /tmp/oauth-acct-$N.log /tmp/oauth-acct-$N.log.prev 2>/dev/null; [ -d /tmp/screenshots-acct-$N ] && { rm -rf /tmp/screenshots-acct-$N.prev; cp -a /tmp/screenshots-acct-$N /tmp/screenshots-acct-$N.prev 2>/dev/null; }; docker run --rm -v /tmp:/t busybox rm -rf /t/auth-acct-$N.json /t/oauth-acct-$N.log /t/screenshots-acct-$N >/dev/null 2>&1; rm -f /tmp/oauth-acct-$N.log /tmp/auth-acct-$N.json; rm -rf /tmp/screenshots-acct-$N; setsid bash -c 'OAUTH_PROXY=$PX MAIL_OTP_PROVIDER=mailcom ${FORCE_OTP_ENV}GEN_ONLY=1 bash /Data/chatgpt-auth/re-oauth.sh acct-$N 2>&1 | stdbuf -oL tee /tmp/oauth-acct-$N.log' </dev/null >/dev/null 2>&1 & disown; sleep 2; echo launched"
     for w in $(seq 1 54); do
       sleep 10
       V=$(j8 "python3 -c 'import json;print(1 if len(json.load(open(\"/tmp/auth-acct-$N.json\")).get(\"access_token\",\"\"))>1000 else 0)' 2>/dev/null" | tr -dc 0-9)

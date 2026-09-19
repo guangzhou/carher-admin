@@ -24,7 +24,7 @@ SLUG="${SLUG:-codex-auto-review}"                 # chatgpt 后端 slug（透传
 MODEL_NAME="chatgpt-${SLUG}"                       # acct pod / router 里的 model_name
 NS="${NS:-litellm-product}"
 EP="${EP:-https://cc.auto-link.com.cn/pro}"
-MK="${MK:-sk-pro-litellm-ce077e2b0721bb419a633e4d}"        # prod master key
+MK="${MK:?需要 export MK=<198 prod master key>；脚本不再内置默认值}"   # prod master key
 AK="${AK:-sk-chatgpt-198-d8a3f4e62b9c1057ef324918a7b6d3e0}" # acct pod pool key
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-150s}"
 

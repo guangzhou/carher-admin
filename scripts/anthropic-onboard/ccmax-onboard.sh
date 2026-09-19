@@ -190,7 +190,7 @@ if [[ "$CMD" == "finish" ]]; then
   ssh -o BatchMode=yes "$S188" "docker rm -f ccv-$ACCT ccv-mail-$ACCT >/dev/null 2>&1; tmux kill-session -t cc-oauth-$ACCT 2>/dev/null; shred -u $WORK/mail_pw.txt 2>/dev/null || rm -f $WORK/mail_pw.txt; echo cleaned"
 
   echo "== deploy (proxy+tunnel+entries+quota) =="
-  CLTX_PW="$CLTX_PW_224" MASTER_KEY="${MASTER_KEY:-sk-pro-litellm-ce077e2b0721bb419a633e4d}" \
+  CLTX_PW="$CLTX_PW_224" MASTER_KEY="${MASTER_KEY:?需要 export MASTER_KEY=<198 prod master key>}" \
     "$ROOT/scripts/anthropic-onboard/ccmax-deploy-224.sh" \
     --acct "$ACCT" --oat "$OAT" --proxy-port "$PROXY_PORT" --tunnel-port "$TUNNEL_PORT" --egress-port "$EGRESS_PORT"
   exit 0

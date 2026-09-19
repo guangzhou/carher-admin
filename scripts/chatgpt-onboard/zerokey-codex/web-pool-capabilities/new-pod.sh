@@ -18,7 +18,7 @@
 set -u
 H188="cltx@10.68.13.188"; H198="cltx@10.68.13.198"
 K="sudo k3s kubectl -n litellm-product"
-MK="${LITELLM_MK:-sk-pro-litellm-ce077e2b0721bb419a633e4d}"
+MK="${LITELLM_MK:?需要 export LITELLM_MK=<198 prod master key>；脚本不再内置默认值}"
 REGISTER="${REGISTER:-1}"
 SC="ssh -o ConnectTimeout=20"
 

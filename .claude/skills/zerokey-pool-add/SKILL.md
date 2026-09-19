@@ -66,7 +66,7 @@ python3 scripts/chatgpt-onboard/zerokey-codex/ops-prod/zerokey-pool-register.py
 
 # 确认注册结果
 curl -s http://10.68.13.198:30402/pro/model/info \
-  -H "Authorization: Bearer sk-pro-litellm-ce077e2b0721bb419a633e4d" | \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" | \
   python3 -c "
 import json, sys
 from collections import Counter
@@ -90,7 +90,7 @@ for model_suffix in gpt-5.5 gpt-5.4 gpt-5.3-codex gpt-5.6-sol gpt-5.6-terra gpt-
     gpt-5.6-luna)  slug="openai/gpt-5.6-luna"; ic=1e-6; oc=6e-6 ;;
   esac
   curl -s -X POST http://10.68.13.198:30402/pro/model/new \
-    -H "Authorization: Bearer sk-pro-litellm-ce077e2b0721bb419a633e4d" \
+    -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
     -H "Content-Type: application/json" \
     -d "{
       \"model_name\": \"zerokey-pool-${model_suffix}\",
@@ -110,7 +110,7 @@ done
 ```bash
 for suffix in gpt-5.5 gpt-5.4 gpt-5.3-codex gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna; do
   curl -s -X POST http://10.68.13.198:30402/pro/model/delete \
-    -H "Authorization: Bearer sk-pro-litellm-ce077e2b0721bb419a633e4d" \
+    -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
     -H "Content-Type: application/json" \
     -d "{\"id\": \"zk-N-${suffix}\"}"
 done
@@ -211,7 +211,8 @@ python3 scripts/zerokey-pioneer-key-sync.py align --ref-alias cursor-linsen-03gc
 4. **保留**各 key 已有的 `glm/kimi/deepseek` 经济路由 aliases 与原 models（**不覆盖**）
 5. POST `/pro/key/update`，缓存自动刷新，**不需要 rollout**
 
-master key / base：`sk-pro-litellm-ce077e2b0721bb419a633e4d` @ `http://10.68.13.198:30402/pro`（脚本内可用 env `LITELLM_MASTER_KEY`/`LITELLM_BASE` 覆盖）。
+master key / base：先 `export LITELLM_MASTER_KEY=<198 prod master key>`（**不写进文件、不进命令行历史**），base `http://10.68.13.198:30402/pro`（env `LITELLM_BASE` 可覆盖）。
+脚本一律从 env 读，缺了直接退出 —— 不内置默认值，避免真 key 落进仓库。
 
 ### ⚠️ 不切 gpt-5.3-codex
 

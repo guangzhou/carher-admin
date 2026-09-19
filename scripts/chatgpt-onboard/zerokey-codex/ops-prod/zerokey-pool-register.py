@@ -17,7 +17,20 @@ import time
 import os
 
 LITELLM_BASE = os.environ.get("LITELLM_BASE", "http://10.68.13.198:30402/pro")
-LITELLM_MK = os.environ.get("LITELLM_MK", "sk-pro-litellm-ce077e2b0721bb419a633e4d")
+def _require_env(name: str) -> str:
+    """凭据只从环境变量读，缺了直接退出。
+
+    不设内置默认值：脚本里写死一个真 master key 等于把凭据提交进仓库，
+    而且改 key 之后老默认值还会静默生效。缺了就报错，比悄悄用错的 key 好。
+    """
+    v = os.environ.get(name, "")
+    if not v:
+        raise SystemExit(
+            "缺少环境变量 %s —— 先 export %s=<198 prod master key>（别写进文件/命令行历史）" % (name, name)
+        )
+    return v
+
+LITELLM_MK = _require_env("LITELLM_MK")
 
 MODELS = [
     {"model_name": "zerokey-pool-gpt-5.5",       "model": "openai/gpt-5-5",       "id_suffix": "gpt-5.5",       "input_cost": 5e-6,   "output_cost": 3e-5},

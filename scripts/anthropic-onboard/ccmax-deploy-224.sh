@@ -31,7 +31,7 @@ set -euo pipefail
 ACCT="" OAT="" PROXY_PORT="" TUNNEL_PORT="" EGRESS_PORT=""
 PROXY_HOST="38.175.220.46"
 PROXY_API_KEY="${PROXY_API_KEY:-d89f74ccaaa55b604a010c31be8e4c05d515e102b537c819}"
-MASTER_KEY="${MASTER_KEY:-sk-pro-litellm-ce077e2b0721bb419a633e4d}"
+MASTER_KEY="${MASTER_KEY:?需要 export MASTER_KEY=<198 prod master key>；脚本不再内置默认值}"
 CLTX_PW="${CLTX_PW:?set CLTX_PW to 224 cltx password}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 JMS="$ROOT/scripts/jms"

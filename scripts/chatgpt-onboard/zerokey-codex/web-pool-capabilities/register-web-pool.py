@@ -17,7 +17,20 @@ Run from anywhere that can reach 198:30402 (188 or local).
 import json, os, sys, urllib.request
 
 BASE = os.environ.get("LITELLM_BASE", "http://10.68.13.198:30402")
-MK = os.environ.get("LITELLM_MK", "sk-pro-litellm-ce077e2b0721bb419a633e4d")
+def _require_env(name: str) -> str:
+    """凭据只从环境变量读，缺了直接退出。
+
+    不设内置默认值：脚本里写死一个真 master key 等于把凭据提交进仓库，
+    而且改 key 之后老默认值还会静默生效。缺了就报错，比悄悄用错的 key 好。
+    """
+    v = os.environ.get(name, "")
+    if not v:
+        raise SystemExit(
+            "缺少环境变量 %s —— 先 export %s=<198 prod master key>（别写进文件/命令行历史）" % (name, name)
+        )
+    return v
+
+MK = _require_env("LITELLM_MK")
 
 # variant -> (litellm model_name group, plain web slug sent as openai/<slug>)
 #

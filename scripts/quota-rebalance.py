@@ -70,12 +70,15 @@ FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
 JITTER_MAX = int(os.environ.get("REBALANCE_JITTER", "180"))
 DRY_RUN = os.environ.get("DRY_RUN", "") == "1"
 
-# 198 prod 的 4 个 chatgpt model groups
+# 198 prod ChatGPT model groups. Astra is kept in the same per-account
+# lifecycle as the existing groups so pause/resume and weight-align cannot
+# silently drop it from an account.
 CHATGPT_MODELS = [
     {"model_name": "chatgpt-gpt-5.5", "litellm_model": "openai/chatgpt-gpt-5.5"},
     {"model_name": "chatgpt-gpt-5.4", "litellm_model": "openai/chatgpt-gpt-5.4"},
     # 5.3-codex upstream replaced with spark (Codex/ChatGPT plan restriction, 2026-06-13 pool-wide verified)
     {"model_name": "chatgpt-gpt-5.3-codex", "litellm_model": "openai/chatgpt-gpt-5.3-codex-spark"},
+    {"model_name": "chatgpt-gpt-6-astra", "litellm_model": "openai/chatgpt-gpt-6-astra"},
     # chatgpt-gpt-5.4-pro removed: 0/13 acct support upstream (Codex/ChatGPT plan limit)
 ]
 
@@ -105,12 +108,39 @@ CHATGPT_MODELS_REVIEW = [
 def models_for(acct):
     return CHATGPT_MODELS + CHATGPT_MODELS_56 + CHATGPT_MODELS_REVIEW
 
+
+def _base_model_for(model_name):
+    """计费必填: entry 名(chatgpt-gpt-5.5)/池 id 都不在 litellm 内置价表,
+    上游 chatgpt/ 前缀键价格全 None → 不带 base_model 注册的 entry spend 恒 0
+    (2026-08-07~08-22 五轮复发实证, 清扫工具见 scripts/litellm-acct-base-model-fix.py)。
+    base_model 指到内置价表真实键。codex-auto-review 实测 map_key=gpt-5.6-luna
+    (08-07/08-09 两代池全命中)。"""
+    short = model_name.replace("chatgpt-", "", 1)
+    if short == "codex-auto-review":
+        return "gpt-5.6-luna"
+    if short == "gpt-6-astra":
+        return "gpt-6-astra"
+    return short
+
+
+def _pricing_for(model_name):
+    """Return explicit input/output/cache pricing for pool registrations."""
+    if model_name == "chatgpt-gpt-6-astra":
+        return {
+            "input_cost_per_token": 1e-5,
+            "output_cost_per_token": 5e-5,
+            "cache_read_input_token_cost": 1e-6,
+            "cache_creation_input_token_cost": 1.25e-5,
+            "cache_read_input_token_cost_above_272k_tokens": 2e-6,
+            "cache_read_input_token_cost_above_272k_tokens_priority": 4e-6,
+        }
+    return {}
+
+
 # 198 prod pool 中的账号
 # location=188 → auth.json 在本机 /Data/chatgpt-auth/acct-N/
 # location=187 → auth.json 在 187，通过 SSH 远程读取探测
 POOL_ACCOUNTS = {
-    "acct-28": {"port": 4028, "location": "198"},
-    "acct-31": {"port": 4031, "location": "198"},
     "acct-33": {"port": 4033, "location": "198"},
     "acct-35": {"port": 4035, "location": "198"},
     "acct-48": {"port": 4048, "location": "198"},
@@ -123,12 +153,7 @@ POOL_ACCOUNTS = {
     "acct-61": {"port": 4061, "location": "198"},
     "acct-62": {"port": 4062, "location": "198"},
     "acct-63": {"port": 4063, "location": "198"},
-    "acct-64": {"port": 4064, "location": "198"},
-    "acct-65": {"port": 4065, "location": "198"},
     "acct-66": {"port": 4066, "location": "198"},
-    "acct-73": {"port": 4073, "location": "198"},
-    "acct-74": {"port": 4074, "location": "198"},
-    "acct-76": {"port": 4076, "location": "198"},
     "acct-78": {"port": 4078, "location": "198"},
     "acct-79": {"port": 4079, "location": "198"},
 }
@@ -1055,9 +1080,20 @@ def acct_api_key(meta, acct=None):
 PROBE_ENDPOINT  = os.environ.get(
     "PROBE_ENDPOINT", "https://cc.auto-link.com.cn/pro/v1/chat/completions"
 )
-PROBE_MK        = os.environ.get(
-    "PROBE_MK", "sk-pro-litellm-ce077e2b0721bb419a633e4d"
-)
+def _require_env(name: str) -> str:
+    """凭据只从环境变量读，缺了直接退出。
+
+    不设内置默认值：脚本里写死一个真 master key 等于把凭据提交进仓库，
+    而且改 key 之后老默认值还会静默生效。缺了就报错，比悄悄用错的 key 好。
+    """
+    v = os.environ.get(name, "")
+    if not v:
+        raise SystemExit(
+            "缺少环境变量 %s —— 先 export %s=<198 prod master key>（别写进文件/命令行历史）" % (name, name)
+        )
+    return v
+
+PROBE_MK        = _require_env("PROBE_MK")
 PROBE_TIMEOUT   = 20
 PROBE_MAX_TRIES = 2  # 一轮内最多 2 次；都失败才视为 fail
 
@@ -1251,6 +1287,9 @@ def resume_acct(acct, meta):
                 "api_base": ab,
                 "api_key": ak,
         }
+        _lp.update(_pricing_for(m["model_name"]))
+        _info = {"id": mid, "mode": "responses", "base_model": _base_model_for(m["model_name"])}
+        _info.update(_pricing_for(m["model_name"]))
         if is_shared_proxy(acct):
             _lp["extra_headers"] = {"X-Codex-Account": acct}
         _dw = meta.get("desired_weight")
@@ -1259,7 +1298,7 @@ def resume_acct(acct, meta):
         entry = {
             "model_name": m["model_name"],
             "litellm_params": _lp,
-            "model_info": {"id": mid, "mode": "responses"},
+            "model_info": _info,
         }
         # 已存在且 api_base 一致 → 真正幂等 skip（视为 created，状态就是想要的）
         if existing.get(mid) == ab:

@@ -553,7 +553,7 @@ print([type(cb).__name__ for cb in litellm.callbacks])
 | Storage | NAS（cnfs）| `local-path`（rancher）|
 | `model_id` 命名 | `chatgpt-acct-N/<model>`（用 `/` 拆）| `chatgpt-acct-N-<model>`（用 `-` 拆）|
 | 5 acct ChatGPT 池 | acct-7~11（K8s Pod）| acct-2~6（188 docker + admin API DB-registered）|
-| LiteLLM master key | `sk-carher-litellm-...`（不公开）| `sk-pro-litellm-ce077e2b0721bb419a633e4d`（多个 skill 提及）|
+| LiteLLM master key | `sk-carher-litellm-...`（不公开）| `sk-pro-litellm-...`（不公开，env `LITELLM_MASTER_KEY`）|
 | 用户 vkey 体系 | `carher-N` 自动生成 | `claude-code-*` / `cursor-*` 团队 IDE |
 
 ### 11.2 198 落地步骤（已完成）

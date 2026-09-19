@@ -37,8 +37,20 @@ project_zerokey_198_acct_bridge_via_188_docker_2026_07_21）：
     # 4) 冒烟：对某 key 发流式请求，验响应头落 zk-*
     python3 scripts/zerokey-pioneer-key-sync.py smoke --only cursor-foo
 
+    # 5) 全量基线对齐：把所有 cursor-* key 拉成与某个参照完全一致（不依赖飞书名单！）
+    #    典型：整体撤回 acct-pool 基线，排除自己在用的 bridge key
+    python3 scripts/zerokey-pioneer-key-sync.py align --ref-alias cursor-linsen-03gc \
+        --exclude cursor-liuguoxian-l08v --dry-run
+    python3 scripts/zerokey-pioneer-key-sync.py align --ref-alias cursor-linsen-03gc \
+        --exclude cursor-liuguoxian-l08v
+
+⚠️ 名单来源有两条，别混：
+    switch/status/rollback/smoke 走**飞书先锋列**（子集操作，靠 `--only` 点名）。
+    align 走 **LiteLLM /key/list 全量 cursor-\\* key**（2026-07-27 加）——因为"所有 cursor
+    key"这类需求跟飞书先锋列无关，飞书只有 120 条先锋，而 LiteLLM 里有 530 把 cursor key。
+
 环境变量：
-    LITELLM_MASTER_KEY   默认 sk-pro-litellm-ce077e2b0721bb419a633e4d
+    LITELLM_MASTER_KEY   必填（无内置默认值，缺了直接退出）
     LITELLM_BASE         默认 http://10.68.13.198:30402/pro
 """
 from __future__ import annotations
@@ -53,7 +65,20 @@ import urllib.parse
 import urllib.request
 
 BASE = os.environ.get("LITELLM_BASE", "http://10.68.13.198:30402/pro")
-MASTER = os.environ.get("LITELLM_MASTER_KEY", "sk-pro-litellm-ce077e2b0721bb419a633e4d")
+def _require_env(name: str) -> str:
+    """凭据只从环境变量读，缺了直接退出。
+
+    不设内置默认值：脚本里写死一个真 master key 等于把凭据提交进仓库，
+    而且改 key 之后老默认值还会静默生效。缺了就报错，比悄悄用错的 key 好。
+    """
+    v = os.environ.get(name, "")
+    if not v:
+        raise SystemExit(
+            "缺少环境变量 %s —— 先 export %s=<198 prod master key>（别写进文件/命令行历史）" % (name, name)
+        )
+    return v
+
+MASTER = _require_env("LITELLM_MASTER_KEY")
 
 # 飞书 bitable 坐标（reference_feishu_cursor_cc_bitable）
 FS_BASE = "DlT9bsrwMad12VsogEpcK9Ptncc"
@@ -128,6 +153,28 @@ def fetch_pioneers() -> dict[str, str]:
         if ka and tok:
             m[ka] = tok
     return m
+
+
+def list_all_keys() -> list[dict]:
+    """/key/list 全量拉取（分页 size=100，14 页 ≈ 1344 把）。
+
+    ⚠️ 两个坑（2026-07-27 实证）：
+      - 分页参数是 `size` 而非 `page_size`；传 page_size 会 422。
+      - 不传 `return_full_object=true` 时 keys 是 str 列表（只有 token），拿不到
+        aliases/models，必须传。
+    返回的每项 `token` 是 **hash**（不是 sk- 明文），但 `/key/update` 的 `key` 字段
+    接受 hash——所以批量对齐无需回飞书查明文 token。
+    """
+    out: list[dict] = []
+    for page in range(1, 100):
+        d = api("GET", f"/key/list?page={page}&size=100&return_full_object=true")
+        ks = d.get("keys") or []
+        if not ks:
+            break
+        out.extend(k for k in ks if isinstance(k, dict))
+        if d.get("total_pages") and page >= d["total_pages"]:
+            break
+    return out
 
 
 def fetch_key_token(key_alias: str) -> str | None:
@@ -243,6 +290,80 @@ def cmd_rollback(args):
         print(f"{'OK' if eq else 'MISMATCH'} {name} <= {args.ref}")
 
 
+def cmd_align(args):
+    """把所有 cursor-* key 的 aliases+models 全量拉成与 --ref-alias 完全一致。
+
+    与 rollback 的区别：rollback 按飞书名单 + `--only` 点名做子集；align 直接以
+    LiteLLM 全量 cursor-* key 为范围，用于"所有 cursor key 都改成 X 那样"这类需求。
+    """
+    if not args.ref_alias:
+        sys.exit("align 需要 --ref-alias <参照 LiteLLM key_alias>，如 cursor-linsen-03gc")
+    exclude = {x.strip() for x in (args.exclude or "").split(",") if x.strip()}
+    allk = list_all_keys()
+    ref = next((k for k in allk if k.get("key_alias") == args.ref_alias), None)
+    if ref is None:
+        sys.exit(f"/key/list 里找不到参照 key_alias={args.ref_alias}")
+    ref_al = ref.get("aliases") or {}
+    ref_md = sorted(ref.get("models") or [])
+    print(f"参照 {args.ref_alias}: {len(ref_al)} aliases, {len(ref_md)} models")
+    print(f"排除: {sorted(exclude) or '(无)'}")
+
+    cursor = [k for k in allk if str(k.get("key_alias") or "").startswith(args.prefix)]
+    todo = [k for k in cursor
+            if k["key_alias"] not in exclude
+            and not ((k.get("aliases") or {}) == ref_al
+                     and sorted(k.get("models") or []) == ref_md)]
+    print(f"{args.prefix}* 共 {len(cursor)} 把，已一致 {len(cursor) - len(todo) - len(exclude & {k['key_alias'] for k in cursor})}，待改 {len(todo)}")
+
+    # 落盘备份：改前的 aliases+models，逐 key 可回滚
+    bak = {"ref": {"key_alias": args.ref_alias, "aliases": ref_al, "models": ref_md},
+           "exclude": sorted(exclude),
+           "targets": [{"key_alias": k["key_alias"], "token": k["token"],
+                        "aliases": k.get("aliases") or {},
+                        "models": sorted(k.get("models") or [])} for k in todo]}
+    if args.backup:
+        with open(args.backup, "w") as fh:
+            json.dump(bak, fh, ensure_ascii=False, indent=1)
+        print(f"备份已写: {args.backup}")
+
+    if args.dry_run:
+        for k in todo:
+            al = k.get("aliases") or {}
+            print(f"  [dry] {k['key_alias']:30s} aliases {len(al)}->{len(ref_al)} "
+                  f"models {len(k.get('models') or [])}->{len(ref_md)}")
+        return
+    if not args.backup:
+        sys.exit("align 非 dry-run 必须给 --backup <path>（改前状态要落盘，否则无法回滚）")
+
+    ok = fail = 0
+    for i, k in enumerate(todo, 1):
+        try:
+            api("POST", "/key/update",
+                {"key": k["token"], "aliases": ref_al, "models": ref_md})
+            ok += 1
+        except Exception as e:  # noqa: BLE001
+            fail += 1
+            print(f"  FAIL {k['key_alias']}: {e}")
+            if fail >= 2:
+                print("!! 连续 2 次失败，停止并人工核查（fail>=2 stop 规程）!!")
+                break
+        if i % 20 == 0:
+            print(f"  ...{i}/{len(todo)}")
+    print(f"\n=== align done: ok={ok} fail={fail} ===")
+
+    # 全量复查：重拉一遍确认落盘，并报残余 zerokey 引用
+    fresh = [k for k in list_all_keys()
+             if str(k.get("key_alias") or "").startswith(args.prefix)]
+    bad = [k["key_alias"] for k in fresh
+           if k["key_alias"] not in exclude
+           and not ((k.get("aliases") or {}) == ref_al
+                    and sorted(k.get("models") or []) == ref_md)]
+    zkleft = [k["key_alias"] for k in fresh
+              if any("zerokey" in str(v) for v in (k.get("aliases") or {}).values())]
+    print(f"复查: {len(fresh)} 把，仍不一致(排除项外)={bad or '无'}")
+    print(f"仍带 zerokey alias 的 key: {zkleft or '无'}")
+
+
 def cmd_smoke(args):
     m = filter_only(fetch_pioneers(), args.only)
     if not m:
@@ -266,15 +387,21 @@ def cmd_smoke(args):
 def main():
     p = argparse.ArgumentParser(description="zerokey 先锋 cursor key 批量切换/回滚")
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("status", "switch", "rollback", "smoke"):
+    for name in ("status", "switch", "rollback", "smoke", "align"):
         sp = sub.add_parser(name)
         sp.add_argument("--only", help="逗号分隔的 key_alias（如 cursor-guran,cursor-linsen）")
         sp.add_argument("--dry-run", action="store_true")
         if name == "rollback":
             sp.add_argument("--ref", help="参照 key_alias（拷贝其 aliases+models）")
+        if name == "align":
+            sp.add_argument("--ref-alias", help="参照 LiteLLM key_alias，如 cursor-linsen-03gc")
+            sp.add_argument("--exclude", default="",
+                            help="逗号分隔的 LiteLLM key_alias，不改（如自己在用的 bridge key）")
+            sp.add_argument("--prefix", default="cursor-", help="key_alias 前缀，默认 cursor-")
+            sp.add_argument("--backup", help="改前状态落盘路径（非 dry-run 必填）")
     args = p.parse_args()
-    {"status": cmd_status, "switch": cmd_switch,
-     "rollback": cmd_rollback, "smoke": cmd_smoke}[args.cmd](args)
+    {"status": cmd_status, "switch": cmd_switch, "rollback": cmd_rollback,
+     "smoke": cmd_smoke, "align": cmd_align}[args.cmd](args)
 
 
 if __name__ == "__main__":

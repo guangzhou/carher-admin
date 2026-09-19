@@ -242,7 +242,11 @@ def _cap_tool_messages(messages):
         )
 
     if running < before:
-        log.info(
+        # WARNING 而非 INFO：这是「真的截到了」的唯一痕迹（存库走 full_output()
+        # 不带标记，SpendLogs 又被 MAX_STRING_LENGTH_PROMPT_IN_DB=2048 切掉，
+        # 两条旁路都量不出来）。量不大：实测 p99=52058 < per 默认 60000，
+        # 只有尾部请求会触发。
+        log.warning(
             "pypatch tool-output cap: %d tool msgs, %d -> %d chars "
             "(per=%d total=%d floor=%d)",
             len(idxs),
@@ -324,7 +328,8 @@ def _cap_rag_sources(sources):
         out.append({**src, "document": new_docs})
 
     if running < before:
-        log.info(
+        # WARNING 而非 INFO，理由同 _cap_tool_messages 里那条。
+        log.warning(
             "pypatch rag-source cap: %d sources, %d -> %d chars (per=%d total=%d)",
             len(sources),
             before,
@@ -364,7 +369,11 @@ def _install_rag_cap():
     wrapped.__doc__ = getattr(original, "__doc__", None)
 
     mw.get_source_context = wrapped
-    log.info("pypatch rag-source cap installed on: open_webui.utils.middleware")
+    # WARNING 而非 INFO：这行是「补丁到底装上没」的唯一判据，而补丁跑在 OWUI
+    # 装 logging handler 之前，root.handlers 为空，stdlib 的 lastResort 只收
+    # WARNING 以上 —— 写成 INFO 就等于没有判据（09-19 实测：三腿全静默，
+    # 只能靠副作用反推，而副作用全被 env 变量污染成坏尺子）。
+    log.warning("pypatch rag-source cap installed on: open_webui.utils.middleware")
     return True
 
 
@@ -409,7 +418,8 @@ def _install_tool_cap():
         mw.convert_output_to_messages = wrapped
         patched.append("open_webui.utils.middleware")
 
-    log.info("pypatch tool-output cap installed on: %s", ", ".join(patched))
+    # WARNING 而非 INFO，理由同 _install_rag_cap。
+    log.warning("pypatch tool-output cap installed on: %s", ", ".join(patched))
     # middleware 还没导入就先别收工，等它进来再补上它的那份引用。
     return mw is not None
 
@@ -427,6 +437,10 @@ def _hook(name, *args, **kwargs):
             if isinstance(feishu, dict):
                 feishu.setdefault("name", os.getenv("OAUTH_PROVIDER_NAME") or "飞书")
                 _done["feishu"] = True
+                # 必须有独立判据：/api/config 里那个 "feishu":"飞书" 不能当证据 ——
+                # env 里本来就有 OAUTH_PROVIDER_NAME=飞书，OWUI 自己读同一个变量
+                # 也会写出一样的值，阳性与阴性长得完全一样（09-19 踩过）。
+                log.warning("pypatch feishu provider name installed")
 
     if not _done["toolcap"]:
         try:
@@ -447,6 +461,24 @@ def _hook(name, *args, **kwargs):
     # 三件事都办完才撤钩子（原来的 feishu 补丁是补完就撤，现在要等齐）。
     if _done["feishu"] and _done["toolcap"] and _done["ragcap"]:
         builtins.__import__ = _real_import
+        # 撤钩子时报一次终态。这是 leg2 的收口判据：安装那行只证明「misc 被包了」，
+        # 而 middleware.py:107 是 `from ... import convert_output_to_messages`
+        # 拿的是函数对象本身 —— misc 换了属性不等于 middleware 那个名字也换了。
+        # 两个模块的名字各自查一遍，任一为 False 就是漏网（09-19：只靠安装行
+        # 读不出这个差别，日志里 patched 只有 misc 却无法判断是「middleware
+        # 还没导入，稍后 import 到包过的版本」还是「真漏了」）。
+        try:
+            _m = sys.modules.get("open_webui.utils.misc")
+            _w = sys.modules.get("open_webui.utils.middleware")
+            log.warning(
+                "pypatch final: misc.convert=%s middleware.convert=%s "
+                "middleware.get_source_context=%s",
+                getattr(getattr(_m, "convert_output_to_messages", None), "_owui_tool_cap", False),
+                getattr(getattr(_w, "convert_output_to_messages", None), "_owui_tool_cap", False),
+                getattr(getattr(_w, "get_source_context", None), "_owui_rag_cap", False),
+            )
+        except Exception:
+            log.exception("pypatch final-state report failed (harmless)")
 
     return module
 

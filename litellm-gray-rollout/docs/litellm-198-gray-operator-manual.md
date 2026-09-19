@@ -244,6 +244,12 @@ root-only run 目录，再执行 Helm。`prepare-values.py` 还要求 `--ingress
 宿主 nginx 走 NodePort，kube-proxy 把源地址呈现为**节点地址**，只有 selector
 的 NetworkPolicy 会把真实流量黑洞掉。`/24` 或更窄，禁 `0.0.0.0/0`。
 
+🔴 **要枚举的是"全部消费者"，不止公网入口那条腿。** 2026-09-19 只声明了
+NodePort 源地址，结果切流之后集群内 Pod→Pod 全被拒 3.5 小时（ws-ingress 的
+codex 增量传输停摆、OWUI 用户被判成「没申请过 key」401），而**公网入口全程绿**
+所以完全没告警。所以上面 6 条里后 4 条是集群内那条腿：三个节点的 podCIDR
+加节点 LAN。细节与三段式见 `docs/nodeport-source-cidr-evidence.md` §1.1。
+
 ⚠️ **写一条 per 转发路径，不是 per 节点**，而且**不是节点的业务 IP**。2026-09-13
 实测（`docs/nodeport-source-cidr-evidence.md`）：pod 侧看到的源地址跨节点是 198 的
 `flannel.1`、同节点是 198 的 `cni0`，`10.68.13.198` **一次都没出现过**；
@@ -265,6 +271,8 @@ litellm-gray-rollout/scripts/collect-scheduler-evidence.py \
   --evidence-output /root/litellm-gray-run/gray-scheduler-evidence.json \
   --profile litellm-gray-rollout/k8s/values-gray.yaml \
   --ingress-cidr '10.42.0.0/32' --ingress-cidr '10.42.0.1/32' \
+  --ingress-cidr '10.42.0.0/24' --ingress-cidr '10.42.1.0/24' \
+  --ingress-cidr '10.42.2.0/24' --ingress-cidr '10.68.13.0/24' \
   ...
 
 # ② 再冻结 values。--scheduler-evidence 不能省略。
@@ -272,6 +280,10 @@ litellm-gray-rollout/scripts/prepare-values.py \
   --profile litellm-gray-rollout/k8s/values-gray.yaml \
   --ingress-cidr '10.42.0.0/32' \
   --ingress-cidr '10.42.0.1/32' \
+  --ingress-cidr '10.42.0.0/24' \
+  --ingress-cidr '10.42.1.0/24' \
+  --ingress-cidr '10.42.2.0/24' \
+  --ingress-cidr '10.68.13.0/24' \
   --scheduler-evidence /root/litellm-gray-run/gray-scheduler-evidence.json \
   ... \
   --output /root/litellm-gray-run/gray-values.yaml

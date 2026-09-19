@@ -166,6 +166,34 @@ async def main():
               len(SEEN_BODIES) == n7 and evs and evs[-1][0] == "WS")
         G.LEDGER_MAX_ITEMS = 20000
         await ws2.close()
+        # 7b. 字节上限（2026-09-19 补：OOMKill 46 次而条数上限一次没触发过）。
+        #     条数留在默认 20000 不动 —— 必须证明是**字节**这根轴单独把闸门拉响的。
+        G.LEDGER_MAX_BYTES = 4096
+        ws2b = await s.ws_connect(f"{base}/v1/responses",
+                                  headers={"Authorization": "Bearer sk-test"})
+        evs = await drive(ws2b, {"type": "response.create", "generate": True, "model": "m",
+                                 "input": [u("y" * 8192)]})   # 1 项，远低于 20000 条
+        ridb = evs[-1]["response"]["id"]
+        n7b = len(SEEN_BODIES)
+        evs = await drive(ws2b, {"type": "response.create", "generate": True, "model": "m",
+                                 "input": [u("z")], "previous_response_id": ridb})
+        check("byte-cap alone (items far under cap) -> CLOSED not amnesia-forwarded",
+              len(SEEN_BODIES) == n7b and evs and evs[-1][0] == "WS")
+        await ws2b.close()
+        # 7c. 阴性对照：同样的两轮，账本没超字节上限 ⇒ 必须照常走 incremental。
+        #     少了这条，把 LEDGER_MAX_BYTES 设成 0 也能让 7b 变绿（合成绿）。
+        G.LEDGER_MAX_BYTES = 48 * 1024 * 1024
+        ws2c = await s.ws_connect(f"{base}/v1/responses",
+                                  headers={"Authorization": "Bearer sk-test"})
+        evs = await drive(ws2c, {"type": "response.create", "generate": True, "model": "m",
+                                 "input": [u("y" * 8192)]})
+        ridc2 = evs[-1]["response"]["id"]
+        n7c = len(SEEN_BODIES)
+        await drive(ws2c, {"type": "response.create", "generate": True, "model": "m",
+                           "input": [u("z")], "previous_response_id": ridc2})
+        check("negative control: under byte cap -> still incremental (forwarded, 3 items)",
+              len(SEEN_BODIES) == n7c + 1 and len(SEEN_BODIES[-1]["input"]) == 3)
+        await ws2c.close()
         # 8. 双连接隔离: 各自账本互不串
         wa = await s.ws_connect(f"{base}/v1/responses", headers={"Authorization": "Bearer sk-a"})
         wb = await s.ws_connect(f"{base}/v1/responses", headers={"Authorization": "Bearer sk-b"})

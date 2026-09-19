@@ -41,6 +41,15 @@ TURN_TIMEOUT_S = float(os.getenv("TURN_TIMEOUT_S", "600"))
 WS_MAX_MSG = int(os.getenv("WS_MAX_MSG", str(16 * 1024 * 1024)))
 CONN_IDLE_S = float(os.getenv("CONN_IDLE_S", "3600"))
 LEDGER_MAX_ITEMS = int(os.getenv("LEDGER_MAX_ITEMS", "20000"))
+# 账本还要按**字节**设上限。2026-09-19 实测：这个进程被 OOMKill 过 46 次
+# （最后一次 exit 137 @ 2026-09-18T10:31:05Z，limit 512Mi），而
+# LEDGER_MAX_ITEMS=20000 **一次都没触发过**（`grep -c '^ws_ingress ledger cap hit'`
+# = 0；两个 incarnation 共 18653 轮里最大 full=1359 项，离 20000 差一个半数量级）。
+# 缺口：条数封顶了，**真正占内存的那根轴（字节）根本没有上限** —— 单个 item 可以是
+# 几 MB 的 input_text（WS_MAX_MSG 单帧就允许 16MiB），1300 项的账本按字节可以任意大，
+# 而且是 per-connection 常驻。这里补上缺的那根轴，处置与条数上限**完全相同**
+# （连 last_rid 一起清 → 下轮 prev 不识 → 关连接 → 客户端全量重发，零失忆）。
+LEDGER_MAX_BYTES = int(os.getenv("LEDGER_MAX_BYTES", str(48 * 1024 * 1024)))
 
 
 def _now_rid() -> str:
@@ -49,6 +58,19 @@ def _now_rid() -> str:
 
 def _ev(obj: Dict[str, Any]) -> str:
     return json.dumps(obj, ensure_ascii=False)
+
+
+def _ledger_bytes(items: List[Any]) -> int:
+    """账本的序列化字节数 —— 这是转发体的真实大小，也是常驻内存的那根轴。
+
+    用 json 序列化而不是 sys.getsizeof：转发出去的就是这份 JSON，而 getsizeof
+    对嵌套 dict/list 只数外壳、量不到里面那几 MB 的字符串（坏尺子）。
+    不可序列化的 item 不该让这道闸门炸掉整轮，退化成"当作超限"由上层清账本。
+    """
+    try:
+        return len(json.dumps(items, ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        return LEDGER_MAX_BYTES + 1
 
 
 class ConnState:
@@ -122,10 +144,13 @@ async def _forward_turn(ws: web.WebSocketResponse, st: ConnState, frame: Dict[st
                         completed_rid = (ev.get("response") or {}).get("id")
     if completed_rid:
         st.ledger = full + outputs
-        if len(st.ledger) > LEDGER_MAX_ITEMS:
+        ledger_bytes = _ledger_bytes(st.ledger)
+        if len(st.ledger) > LEDGER_MAX_ITEMS or ledger_bytes > LEDGER_MAX_BYTES:
             # 上限清账本时必须**连 last_rid 一起清**——否则下轮 delta+prev 匹配成功
             # 却无账本可拼 → 掉进失忆分支。清了 rid, 下轮 prev 不识 → 关连接 → 客户端全量重发。
-            print(f"ws_ingress ledger cap hit ({len(st.ledger)}) -> reset(ledger+rid)", flush=True)
+            which = "items" if len(st.ledger) > LEDGER_MAX_ITEMS else "bytes"
+            print(f"ws_ingress ledger cap hit axis={which} items={len(st.ledger)} "
+                  f"bytes={ledger_bytes} -> reset(ledger+rid)", flush=True)
             st.ledger = []
             st.last_rid = None
         else:

@@ -24,17 +24,59 @@
 ## 1. 结论（先给答案）
 
 ```
+# ① NodePort 转发路径（宿主 nginx → 公网入口这条腿）
 --ingress-cidr 10.42.0.0/32     # 跨节点路径：198 的 flannel.1（VXLAN）
 --ingress-cidr 10.42.0.1/32     # 同节点路径：198 的 cni0
+# ② 集群内 Pod→Pod 消费者（见 §1.1，2026-09-19 补）
+--ingress-cidr 10.42.0.0/24     # 198     podCIDR
+--ingress-cidr 10.42.1.0/24     # standby podCIDR
+--ingress-cidr 10.42.2.0/24     # 242     podCIDR
+--ingress-cidr 10.68.13.0/24    # 节点 LAN（hostNetwork 来源）
 ```
 
 ⚠️ **不是 `10.68.13.198/32`。** 实测 pod 侧从来没有看到过这个地址，一次都没有。
 
-⚠️ **也不是"每个节点一条"**（runbook 原文 "one per node" 的措辞会把人带沟里）：
+⚠️ ①那两条**不是"每个节点一条"**（runbook 原文 "one per node" 的措辞会把人带沟里）：
 两条都是 **198 一台机器的两个接口**，对应两条**不同的转发路径**，而不是两台不同的机器。
-242 / standby 的地址一条都不需要 —— 因为流量从来不从它们进来。
+就 NodePort 这条腿而言，242 / standby 的地址一条都不需要 —— 流量从来不从它们进来。
 
-两条都是 `/32`，满足 `prepare-values.py` 的 `MIN_NODE_CIDR_PREFIX = 24`（32 ≥ 24）。
+全部 7 条都是 `/24` 或更窄，满足 `prepare-values.py` 的 `MIN_NODE_CIDR_PREFIX = 24`。
+
+### 1.1 只声明 NodePort 源地址 = 把集群内那条腿黑洞掉（2026-09-19 实测代价：3.5 小时）
+
+**本文件 2026-09-13 版只回答了"宿主 nginx 从哪来"，漏了"集群内 Pod 从哪来"。**
+2026-09-19 18:10（北京）把 `svc/litellm-proxy` 的 selector 切到 gray 之后，18:17 起
+集群内所有 Pod→Pod 消费者被自己的 NetworkPolicy 全部拒掉：
+
+- `ws-ingress` → `litellm-proxy:4000` 全 `ClientConnectorError`，4 小时内 232 次 turn aborted；
+  codex 的 WS 增量传输（`mode=incremental`）最后一次出现在 18:20，之后整条腿停摆。
+- OWUI 的 `key-swap-proxy` 门禁探测 `{LITELLM_URL}/user/info` 拿到
+  `All connection attempts failed`，而它的 `except httpx.HTTPError` 分支是
+  **fail-closed（`continue` → 401）** ⇒ 用户在 OWUI 里被判成
+  「你 … 还没在 LiteLLM 申请过 key，无法使用 Open WebUI」。
+- 同时 `spendlog-mirror-collector`、`open-webui` 的 RAG 腿一并被拒。
+
+**公网入口全程 100% 正常**（nginx → NodePort，源 IP 是节点，恰好被 ①那两条放行），
+所以监控、健康检查、公网探针全绿 —— 这道墙**只切集群内那条腿，症状对外完全不可见**。
+
+三段式（2026-09-19 闭合）：
+1. **假设**：gray Pod 不可达的唯一原因是本策略选中了它。
+2. **证伪条件**：若假设错误，同一源 Pod、同一端口 4000，打未被本策略选中的 Pod 也应失败。
+3. **数据**：同一源 Pod（`ws-ingress` / `key-swap-proxy`）打未被选中的
+   `litellm-proxy(10.42.2.54):4000` = OK，打被选中的 `10.42.2.57` / `10.42.1.62` = ConnectionRefused；
+   补上 ②那 4 条后同一探针全 OK（5/5 + 4/4），OWUI 门禁回 200，
+   ws-ingress 第二轮 `turn mode=incremental in=1 full=4 out=2 dt=3.0s`。
+
+⇒ **`--ingress-cidr` 要按"消费者"枚举，不是按"公网入口"枚举。** 当前集群内消费者：
+`ws-ingress` / `open-webui` 的 `key-swap-proxy` 与 RAG 腿 / `spendlog-mirror-collector` /
+`zk-delta` / `zk-session-reaper`。它们分散在三个节点上且会被重新调度，
+所以按 **podCIDR 逐节点**声明（`kubectl get nodes -o custom-columns=…:.spec.podCIDR`
+实测：198=`10.42.0.0/24`、standby=`10.42.1.0/24`、242=`10.42.2.0/24`），
+**不要**图省事写 `10.42.0.0/16` —— 那个会被 `MIN_NODE_CIDR_PREFIX` 挡掉，
+线上临时补的 `/16` 已于同日收窄成这三条并复验通过。
+
+⛔ 新增节点必须同步加一条 podCIDR，否则调度到新节点的消费者会单独失联 ——
+和 §1 里"同节点那条不能省"是同一类坑。
 
 ---
 

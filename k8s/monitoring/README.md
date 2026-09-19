@@ -66,3 +66,37 @@ Error 状态 —— 规则从写下来那天起一次都没评估过。判等要
   2026-09-13 到 09-19，探针停了 6 天，6 条探针告警全绿，就是这个机制。
 
 绿色必须先证明量具活着。
+
+## 待填：告警现在评估正确了，但送不到任何人手上
+
+`wire-feishu-alerts.sh` 是这件事的一键脚本，**缺的唯一东西是飞书群机器人的
+webhook URL** —— 那只有群管理员能拿到，所以脚本没法代跑。
+
+2026-09-19 实测三处全断，有依赖顺序：
+
+1. `deploy/alert-to-feishu` `spec.replicas=0`，`generation=1`。generation 是 1
+   说明它的 spec 从未被改过 —— 不是被谁关掉的，是当年建到这一步就停住了。
+2. 它依赖的 Secret `feishu-alert-webhook` **不存在**。`alert2feishu.py:45` 是
+   `os.environ["FEISHU_WEBHOOK"]`，缺了就 KeyError 起不来。这解释了上一条：
+   webhook 拿不到，副本就没法起，于是停在 0。
+3. Grafana 根路由 receiver 是 `grafana-default-email`，
+   联系点「feishu-群机器人」建好了但没人指过来 ——
+   `feishu-contactpoint.yaml` 的注释当年就写明了「只加不切，等真能发出去了再切策略」。
+   当初停在这一步是对的，不是遗漏。
+
+顺序不能颠倒：没有 webhook 就先切策略，等于把全部告警打进一个 CrashLoop 的
+服务，比现在（至少 Grafana UI 里还看得到）更糟。
+
+已做过的端到端自检（用假 webhook 指向 `.invalid`，绝不外发）：副本起得来、
+合成告警解析成功、投递如实失败，计数器 `received=1` / `sent=0` /
+`delivery_failures{reason="exception"}=1`。**除 webhook 值本身，整条链路已验证可用。**
+自检完立刻缩回 0 并删掉假 Secret —— 不留一个指向 `.invalid` 的 Secret，
+否则将来有人起副本会以为已经配好了。
+
+两个调用形状上的坑，脚本里已经绕开：
+
+- **grafana pod 里的 `wget` 是 BusyBox，没有 `--method`**，发不了 PUT。切策略要用
+  `curl`（pod 里有）。根路由不是文件式 provisioning 管的，所以 API 改得动，
+  也不需要 `rollout restart`。
+- **判投递成功不能看 HTTP 码**：飞书会 200 + body `code != 0` 地假装成功。
+  判据是 `alert2feishu_sent_total` 这个计数器。

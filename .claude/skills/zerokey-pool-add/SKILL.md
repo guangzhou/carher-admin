@@ -116,6 +116,40 @@ for suffix in gpt-5.5 gpt-5.4 gpt-5.3-codex gpt-5.6-sol gpt-5.6-terra gpt-5.6-lu
 done
 ```
 
+## 自动摘除器 zk-session-reaper（CronJob，2026-09-19 补文档）
+
+线上真身是 CronJob `zk-session-reaper` + ConfigMap `zk-session-reaper`（ns `litellm-product`，
+`13,43 * * * *`，一轮跑约 8 分半）。仓库里的可测副本：
+`scripts/chatgpt-onboard/zerokey-codex/ops-prod/zk_session_reaper.py`
+（改动前先跑 `python3 test_zk_session_reaper.py`，5/5 必须全绿）。
+
+改完部署（**CM 名字里没有内容 hash，直接覆盖同名 CM**）：
+
+```bash
+kubectl -n litellm-product create cm zk-session-reaper \
+  --from-file=zk_session_reaper.py=zk_session_reaper.py \
+  --dry-run=client -o yaml | kubectl -n litellm-product apply -f -
+# 判据 = CM 里的 sha 与本地一致，不是 "apply 成功"
+kubectl -n litellm-product get cm zk-session-reaper \
+  -o jsonpath='{.data.zk_session_reaper\.py}' | sha256sum
+# 回归：手工起一轮，看首行 "pool members: N pods" 出来了
+kubectl -n litellm-product create job reaper-verify-$(date +%Y%m%d) --from=cronjob/zk-session-reaper
+```
+
+🔴 **`api()` 只 catch `HTTPError`，传输层错误会让整轮 run 带 40 行 traceback 裸死。**
+2026-09-19：litellm-proxy 的 NetworkPolicy 把集群内 Pod→Pod 那条腿切了 3.5h，
+`urlopen` 抛 `URLError [Errno 111]`，三轮 run（12:43Z/13:13Z/13:43Z）连一行业务日志都没打就退出。
+已补 `_open()` 重试 + `TransportDown`：传输层错误重试 4 次（间隔 5/10/15s）后只打一行
+`FATAL litellm unreachable at ... no reap performed this run` 并 exit 1；
+**HTTP 状态码不重试**（404 要走下一个 prefix，5xx 是业务信号）。
+⛔ 判"这轮到底是网络还是业务"看**首行有没有 `pool members:`** —— 没有就是根本没连上 litellm。
+
+⚠️ `failedJobsHistoryLimit=3` ⇒ 只看 `kubectl get job` 会以为"刚坏 3 轮"，更早的失败已被裁掉。
+判起始时刻要看 `.status.startTime` 和最后一次 `lastSuccessfulTime`。
+
+⚠️ 当前 24 个池成员全报 SUSPECT（13× HTTP_502 + 11× URLError），**0 个 healthy**
+⇒ reaper 按设计什么都不摘（`FLOOR=15` 安全阀 + SUSPECT 不触发摘除）。这是待处理的池子积压，不是 reaper 故障。
+
 ## 切换 Cursor Key 到 zerokey-pool（当前范式，2026-07-23 定型）
 
 **首选脚本（本机即可跑，纯管理 API，不碰 DB / 不 rollout）：**

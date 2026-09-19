@@ -345,6 +345,31 @@ SELECT count(*) FROM "LiteLLM_VerificationToken"
  WHERE budget_duration IS NOT NULL AND budget_reset_at < now();
 ```
 
+🔴 After convergence, the **idle lane also needs the suppressor** (2026-09-19)
+
+`disable_reset_budget: true` was only ever pinned on the *gray* lane's config. Once
+the run committed and `litellm-proxy` became the idle lane, that lane kept running at
+`replicas=1`, kept `envFrom: litellm-secrets` — i.e. **the same production database** —
+and therefore kept scheduling `reset_budget_job` against real user budgets. Measured on
+`litellm-proxy-7c8b7d56-z2lgt`: `Scheduled job stagger applied (… reset_budget_job=+270s …)`,
+two workers, 11h uptime. A lane serving no traffic is still a *writer*.
+
+Fix is one appended line in the idle lane's config CM (`general_settings.disable_reset_budget: true`),
+a new content-hashed CM, and a `patch` of the `config` volume — **never `apply` on
+`litellm-proxy`**:
+
+```bash
+# guarded patch: assert the old CM name before replacing it
+kubectl -n litellm-product patch deploy litellm-proxy --type=json -p '[
+  {"op":"test","path":"/spec/template/spec/volumes/1/configMap/name","value":"<OLD-CM>"},
+  {"op":"replace","path":"/spec/template/spec/volumes/1/configMap/name","value":"<NEW-CM>"}]'
+```
+
+⛔ **Judging it by re-grepping the old pod is a bad ruler** — the pod is gone after the
+rollout, so `grep -c reset_budget_job` returns 0 for both the broken and the fixed build.
+The real criterion is the **contents of the new pod's stagger line**: the other 9 jobs
+are still listed and `reset_budget_job` is absent from that list.
+
 For an abort, record `aborting_to_bridge`, bridge direct smoke, atomic route
 activation, stable traffic proof, `aborted`, and compensation/recovery backlog.
 If bridge verification fails after route activation, keep the active

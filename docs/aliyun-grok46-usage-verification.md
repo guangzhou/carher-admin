@@ -3,10 +3,15 @@
 - 脚本：`scripts/aliyun-grok46-usage-probe.py`（只读，不写任何配置）
 - 验证时间：2026-09-19
 - 起因：同事报「sa-grok-4.6 每次请求返回没有 usage」
-- 结论：**阿里云这一跳没有复现。** 该说法最可能的解释是客户端流式请求没带
-  `stream_options.include_usage` —— 那种情况下没有 usage 是协议规定，不是故障。
-- 未测：**198 那一跳没测**（缺桥凭据，见文末）。所以本文只能否掉「阿里云丢 usage」，
-  不能否掉整条链路的所有可能。
+- **结论：同事说的是真事，而且已修。** 根因不是模型，是两个集群的一个配置差异：
+  **198 有 `general_settings.always_include_stream_usage: true`，阿里云没有**
+  ⇒ 同一个客户端同一份代码，裸流式打 198 有 usage、打阿里云没有。
+  2026-09-19 已给阿里云补上该键，两跳行为现已一致。
+
+> **订正**：本文初稿写的是「阿里云不复现，让客户端加 `include_usage` 即可」。
+> 那句话在 198 成立、在阿里云不成立 —— 当时只测了阿里云一跳就外推了。
+> **两个集群同名模型、同版本镜像（都是 v1.90.2），也能因为一个
+> `general_settings` 键的有无给出相反行为。** 跨集群的「有没有 X」两边都得实测。
 
 ## 先分清是哪个「没有 usage」
 
@@ -116,48 +121,87 @@ python3 scripts/aliyun-grok46-usage-probe.py --hop aliyun --long
 key 取自 HerInstance CRD 的 `{.spec.litellmKey}`（`her-1000`，即 carher-1000）。
 脚本只打印长度，不回显值。
 
-## 实测结果
+## 实测结果：改前，两跳同窗口各 3 轮
 
-`--hop aliyun`，单轮：
+关键差异在 C 那一行：
 
-| 用例 | 判定 | 读数 |
+| 用例 | 阿里云 | 198 |
 |---|---|---|
-| A 非流式 | OK | `prompt=641 completion=1 total=719 [cached=512 reasoning=77]` |
-| B 流式+include_usage | OK | `prompt=641 total=642 [cached=640 reasoning=245] sse_chunks=15` |
-| C 流式裸 | MISSING | `sse_chunks=13`（协议正确） |
-| D 流式+false | MISSING | `sse_chunks=14`（协议正确） |
+| A 非流式 | OK `prompt=641 [cached=640]` | OK `prompt=641 [cached=640]` |
+| B 流式+`include_usage:true` | OK `sse_chunks=14` | OK `sse_chunks=14` |
+| **C 流式裸** | **MISSING** `sse_chunks=13/14` | **OK** `sse_chunks=15` |
+| D 流式+`include_usage:false` | MISSING | MISSING |
 
-`--repeat 3`：A.1–A.3 全 OK（`cached=640`，reasoning 67/181/72）；
-B.1–B.3 全 OK（reasoning 150/162/187）；C/D 六次全 MISSING，一致。
+两边 3 轮各 12 次，分野稳定、没有间歇。`prompt_tokens` 随 prompt 长度
+从 641 变到 4647（`--long`），是真计数不是写死的常量。
 
-`--long`：A OK `prompt=4647 [cached=512 reasoning=210]`；
-B OK `prompt=4647 [cached=4608 reasoning=118] sse_chunks=39`；C/D MISSING。
+补充证据：阿里云 SpendLogs 里那几次裸流式 `prompt_tokens=641` **是对的** ——
+litellm 手里有数，只是没写进给客户端的响应体。所以这不是「拿不到」，是「没回传」。
 
-12/12 一致，且 `prompt_tokens` 随 prompt 长度变化（641 → 4647）——
-是真计数，不是写死的常量。
+## 根因：一个 `general_settings` 键
 
-## 结论与客户端改法
+```yaml
+# 198 有，阿里云原来整个 general_settings 键都不存在
+general_settings:
+  always_include_stream_usage: true
+```
 
-- **阿里云一跳没有 usage 丢失。** A/B（协议要求必须有 usage 的两个用例）
-  每次都返回真实计数，且 `cached_tokens` / `reasoning_tokens` 有值，
-  说明上游到 litellm 这段也在报。
-- 同事看到的「每次都没有」，形状与 C/D 完全一致。客户端改一行即可：
+消费它的代码在 `proxy/common_request_processing.py:1113`（两边都是 v1.90.2，
+已在阿里云 pod 内 grep 确认该版本确实读这个键）：
+
+- `stream_options` 缺失 → 补 `{"include_usage": True}`
+- `stream_options` 在但没有 `include_usage` 键 → 补上
+- **显式 `include_usage: false` → 不覆盖**
+
+第三条正好解释了 D：D 在两边都仍然没有 usage。**这是个天然的阴性对照** ——
+如果我读错了代码路径，D 不会这么听话。所以这不是「强制开启」，只是补默认。
+
+排除过的其它可能：两侧 config 里都没有任何 `include_usage` / `stream_options`
+字样（`grep` 命中 0）；198 的 33 个 callback 里也没有注入它的（唯一命中是
+`opus_47_fix.py` 的一句注释，内容恰好是说这件事必须走 config 而非 pre-call hook）。
+
+## 修复（2026-09-19，已上线）
+
+给阿里云 CM `litellm-config` 的 `config.yaml` 末尾**纯追加** 9 行（含注释）。
+
+- 改前 sha256 `eb77593b2e6bb931` → 改后 `b8da8ad91f722595`
+- 备份：`/tmp/usage-fix-20260919-100642/litellm-config.BEFORE.yaml`（sha `53d88ad0901d629c`）
+- 自检：`model_list` 168 个逐条不变、`litellm_settings` / `router_settings`
+  逐字节相同、`diff` 只有 9 个 `>` 零个 `<`
+- 没走 YAML round-trip —— 2388 行重新 dump 会洗掉注释和引号风格，
+  那是个比目标大得多的改动面
+
+**⛔ 该 CM 是 `subPath` 挂载，改完不会自动同步进容器，必须 rollout。**
+Deployment 是 RollingUpdate / 2 副本 / `maxUnavailable=1` ⇒ 零中断，
+全程有 pod 在服务。判据是**容器内** `sha256 /app/config.yaml`，两个 pod
+都是 `b8da8ad91f722595`（CM 里对了不算，得容器里对）。
+
+回滚：删掉 `config.yaml` 末尾那 9 行，再 rollout 一次。
+
+### 改后验证
+
+同窗口两跳各 3 轮，24/24 对齐：
+
+| 用例 | 阿里云 | 198 |
+|---|---|---|
+| A 非流式 | OK ×3 | OK ×3 |
+| B 流式+`include_usage:true` | OK ×3 | OK ×3 |
+| **C 流式裸** | **OK ×3**（翻了） | OK ×3 |
+| D 流式+`include_usage:false` | MISSING ×3 | MISSING ×3 |
+
+生产回归（改动影响每一个流式请求，所以判据是真实流量不是我的探针）：
+切换后 322 次调用，`prompt_tokens=0` 的行数 1 条、与改前 1020 次里的 1 条持平，
+平均 `prompt_tokens` 58814 → 63888 同量级。新 pod 日志里唯一的 ERROR 是
+既存的 key 白名单形状，与 stream/usage 无关。
+
+## 客户端侧
+
+现在两边都不需要改客户端了。但显式带上仍然是好习惯（不依赖服务端配置）：
 
 ```json
 {"model": "grok-4.6", "stream": true,
  "stream_options": {"include_usage": true}}
 ```
 
-## 还没查的部分
-
-**198 那一跳没测。** 它的凭据是桥 key（`PRO198_BRIDGE_API_KEY`），
-不是 carher key，取自阿里云 litellm 的 Secret。脚本在缺这个变量时明确跳过并说明，
-不假装测过。要补：
-
-```bash
-export PRO198_BRIDGE_API_KEY=...   # 取自阿里云 litellm Secret
-python3 scripts/aliyun-grok46-usage-probe.py --hop 198 --repeat 3
-```
-
-如果 198 那跳也全绿，则整条链路都不丢 usage，问题 100% 在客户端请求形状；
-如果 198 那跳有缺失，那就是阿里云侧补齐了什么、需要另查。
+注意反过来：**显式写 `include_usage: false` 的客户端拿不到 usage**，
+服务端这个旋钮不会覆盖它 —— 这是设计如此，不是漏修。

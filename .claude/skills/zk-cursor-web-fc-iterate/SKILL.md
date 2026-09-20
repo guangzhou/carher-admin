@@ -181,7 +181,9 @@ Cursor(/v1/responses, 19工具+9.4K instructions)
 1. **取证**：用户现象 + Cursor 本地结构化日志
    （`~/Library/Application Support/Cursor/logs/<ts>/window*/exthost/anysphere.cursor-always-local/*.log`，
    看 `nal.tool_call.*`/`nal.empty_response.*`）+ pod 日志决策行（见下）。
-2. **写 anchor-assert 补丁脚本**：`scripts/zk-cursor-web/patch_roundN.py` 模式——
+2. **写 anchor-assert 补丁脚本**：命名模式 `scripts/zk-cursor-web/patch_round<N>.py`（`N` 是轮次数字，
+   不是字面量 `N`；截至 2026-09-20 仓里有 `patch_round15.py`…`patch_round18.py`，新一轮就接着 19 写，
+   直接 copy 上一轮改锚点最省事）——
    `assert src.count(anchor)==K` 锚点唯一性硬校验，产出 `/tmp/responses.rN.js`，
    **必过 `node --check`**。
 3. **备份**：`kubectl get cm -o json` → `/Data/backups/zk-cursor-bpi-cm-<ts>-pre-rN.json`。

@@ -267,7 +267,7 @@ services:
   mock-upstream:
     image: python:3.11-slim
     volumes:
-      - ./mock-chatgpt.py:/mock.py   # 长期版在 carher-admin/scripts/litellm-mock/mock-chatgpt.py，首跑前 scp 到 198
+      - ./mock-chatgpt.py:/mock.py   # ⛔ 这个文件还没落地（见文末「待运维补完」#1），第一次用时当场写并提交
     command: python /mock.py swallow
     ports: ["9999:9999"]
 EOF
@@ -280,7 +280,8 @@ curl http://localhost:4000/v1/responses ...
 
 **断言**：3 次/3 次稳定观察到与 prod 同形态错误。
 
-Mock server 长期维护位置：`scripts/litellm-mock/mock-chatgpt.py`（5 mode：swallow/unauthorized/context_cap/fivehundred/forward_compat）。
+Mock server 规划位置：`scripts/litellm-mock/mock-chatgpt.py`（5 mode：swallow/unauthorized/context_cap/fivehundred/forward_compat）。
+**⛔ 截至 2026-09-20 这个目录和文件都不存在**（全 git 历史 0 次），本节是规格不是现货 —— 第一次跑 Phase 3 时按上面 5 个 mode 写出来并提交，别 `scp` 一个不存在的文件。
 
 ---
 
@@ -468,7 +469,7 @@ kubectl rollout status -n litellm-product deploy/litellm-proxy --timeout=300s
 |---|---|
 | 方案文档 | `docs/<feature>.md` |
 | 回归套件 | docs/ §回归 或 `scripts/litellm-<feature>/` |
-| Mock server | `scripts/litellm-mock/mock-chatgpt.py`（共享长期维护） |
+| Mock server | `scripts/litellm-mock/mock-chatgpt.py`（⛔ 规划位置，尚未落地，见「待运维补完」#1）|
 | Memory | `~/.claude/projects/.../memory/<topic>.md` |
 | SKILL | 本 SKILL（流程） + 专题 SKILL（如 `litellm-key-provider-swap`） |
 

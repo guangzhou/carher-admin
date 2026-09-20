@@ -20,24 +20,31 @@
 
 ### Lint / Formatter / Test config
 
-| 文件 | 为什么死保护 |
-|---|---|
-| `pyproject.toml` 的 `[tool.ruff]` 段 | agent 倾向加 ignore 让代码"通过 lint"，但代码本身没改对 |
-| `eslint.config.js` / `.eslintrc*` | 同理 |
-| `.markdownlint.json` | 你已经在用，加 rule 容易造成跨文档不一致 |
-| `pytest.ini` / `.coveragerc` | agent 想 skip 失败的测试，正确做法是修代码 |
-| `.prettierrc*` / `biome.json` / `.stylelintrc*` | 格式化规则不该被改放宽 |
-| `.shellcheckrc` | shell 安全规则不该被改放宽 |
+| 文件 | 本仓是否存在 | 为什么死保护 |
+|---|---|---|
+| `backend/tests/conftest.py` | ✅ | agent 想在这里 mock 掉失败的依赖让测试转绿，正确做法是修代码 |
+| `frontend/vite.config.js` / `tailwind.config.js` / `postcss.config.js` | ✅ | 构建/样式配置，改了会静默改变产物 |
+| `pyproject.toml` 的 `[tool.ruff]` 段 | ❌ 本仓没有 | agent 倾向加 ignore 让代码"通过 lint"，但代码本身没改对 |
+| `eslint.config.js` / `.eslintrc*` / `.markdownlint.json` | ❌ 本仓没有 | 同理 |
+| `pytest.ini` / `.coveragerc` / `setup.cfg` | ❌ 本仓没有（pytest 走命令行参数） | agent 想 skip 失败的测试，正确做法是修代码 |
+| `.prettierrc*` / `biome.json` / `.stylelintrc*` / `.shellcheckrc` | ❌ 本仓没有 | 格式化/安全规则不该被改放宽 |
+
+> **⛔ 「❌ 本仓没有」的行是预留模式，不是当前生效的保护。** hook matcher 指向不存在的路径不会报错，
+> 只会永远不触发——配了保护却一次都没拦住，形状和"根本没配"完全一样。这些行等对应文件真出现再算生效；
+> 判某一行是否真在保护，要么看 hook 命中日志，要么实测改一次那个文件看拦不拦，不能看这张表有没有这一行。
 
 > **注意**：`pyproject.toml` 整体不在死保护清单（因为它同时是依赖管理）；只有当 agent 试图修改它时，由 `carher-fact-force.js` 的 generic edit 分支强制取证。
 
 ### Carher prod resource
 
-| 文件 / 路径 | 为什么死保护 |
-|---|---|
-| `k8s/litellm-proxy.yaml` | 改探针 / 资源限制让 OOM 告警表面消失但埋雷的真实事故已发生过 |
-| `k8s/her-instance-template.yaml` | 200+ 实例的 template，一动全动 |
-| `cloudflare/tunnels/*.json` | 200+ 实例的 OAuth callback 路由全在这；改错全部 502 |
+| 文件 / 路径 | 本仓是否存在 | 为什么死保护 |
+|---|---|---|
+| `k8s/litellm-proxy.yaml` | ✅ | 改探针 / 资源限制让 OOM 告警表面消失但埋雷的真实事故已发生过 |
+| `operator-go/internal/controller/reconciler.go` 的 `ResourceRequirements`（约 L875/L919/L953）| ✅ | HerInstance Pod 模板的真身在 Go 代码里，不是 YAML；一动 500+ 实例全动 |
+| `k8s/crd.yaml` | ✅ | HerInstance CRD 定义，字段改错所有实例配置解析失败 |
+| `k8s/cloudflared.yaml` 的 ingress ConfigMap + `backend/cloudflare_ops.py` | ✅ | `*.carher.net` 的接入路由全在这；改错全部 502 |
+| ~~`k8s/her-instance-template.yaml`~~ | ❌ 从来没存在过 | 2026-09-20 核查：本仓无此文件，Pod 模板在 `reconciler.go`，CRD 在 `k8s/crd.yaml` |
+| ~~`cloudflare/tunnels/*.json`~~ | ❌ 从来没存在过 | 2026-09-20 核查：Cloudflare 配置在 `k8s/cloudflared.yaml` + `backend/cloudflare_ops.py` |
 
 ---
 

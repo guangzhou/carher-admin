@@ -77,12 +77,16 @@ X 是不是 100% 不该发生？
 | 类别 | 文件 / 模式 | 推荐模式 |
 |---|---|---|
 | K8s prod config | `k8s/litellm-proxy.yaml` 的探针/资源段 | Fact-Forcing |
-| K8s prod config | `k8s/her-instance-template.yaml` 的资源限制 | Fact-Forcing |
+| HerInstance Pod 模板 | `operator-go/internal/controller/reconciler.go` 的 `ResourceRequirements`（约 L875/L919/L953）+ `k8s/crd.yaml` | Fact-Forcing |
 | LiteLLM callback | `k8s/litellm-callbacks/*.py`（已有 hook 在跑流量） | Fact-Forcing |
-| Cloudflare 路由 | `cloudflare/tunnels/*.json` | Fact-Forcing |
-| Lint config | `pyproject.toml` 的 `[tool.ruff]` / `eslint.config.js` / `.markdownlint.json` | Config Protection |
-| Test config | `pytest.ini` / `backend/pytest.ini` / `setup.cfg` | Config Protection |
+| Cloudflare 路由 | `k8s/cloudflared.yaml` 的 ingress ConfigMap + `backend/cloudflare_ops.py` | Fact-Forcing |
+| 前端构建/样式配置 | `frontend/vite.config.js` / `tailwind.config.js` / `postcss.config.js` | Config Protection |
+| Test config | `backend/tests/conftest.py` | Config Protection |
 | 破坏性脚本入口 | `scripts/jms` 加包装层时 | Fact-Forcing 的 destructive 分支 |
+
+⛔ 这张表 2026-09-20 前有 4 行指向不存在的路径（`k8s/her-instance-template.yaml`、`cloudflare/tunnels/*.json`、
+`pyproject.toml`/`eslint.config.js`/`.markdownlint.json`、`pytest.ini`/`setup.cfg`）。**hook 的 matcher 写不存在的路径
+不会报错，只会永远不触发**——配了保护却一次都没拦住，形状和"没配"完全一样。加行前先 `ls` 一遍。
 
 ## 落地步骤（用 Fact-Forcing Gate 举例）
 

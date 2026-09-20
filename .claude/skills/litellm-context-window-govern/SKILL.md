@@ -145,8 +145,15 @@ python3 scripts/tmpl_drift.py            # 输出 "✅ 模板逐字段相等"
 （对宿主机零冲击）。所以顺序是：**先只读 `/model/info` 逐副本轮询等收敛，收敛不了再滚**。
 
 ```bash
-bash scripts/astra_modelinfo.sh    # 逐副本打印目标行的 max_input_tokens 分布
+# 审计：任何 zerokey 支撑的 deployment 若 max_input_tokens 为空 → 退出码 1
+# （空值会被 LiteLLM 从内置价格表按 slug 静默继承成 1,050,000）
+scripts/litellm-198-max-input-tokens-audit.sh              # 默认 zerokey-cursor%
+scripts/litellm-198-max-input-tokens-audit.sh 'zerokey-%'  # 自定义 id 前缀
 ```
+
+> ⛔ 这里以前写的是 `scripts/astra_modelinfo.sh` —— **那个文件从来不存在**
+> （git 全历史 0 次），照着抄会直接 `No such file`。2026-09-20 改指到真实脚本。
+> ⛔ 另外：`/model_group/info` 返回的 cap 是**组内最大值，不是闸门**，别拿它当判据。
 
 DB 侧改动同样要外科式：`copy (...) to stdout` 备份目标行 + 断言行数、
 `update ... where <字段>='<旧值>'` 带旧值条件（补新键时条件写 `is null`）、`UPDATE N` 与期望条数对上、回读，

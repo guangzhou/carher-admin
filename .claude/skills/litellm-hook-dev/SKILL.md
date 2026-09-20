@@ -231,8 +231,9 @@ kubectl get cm litellm-config -n carher -o jsonpath='{.data.config\.yaml}' > /tm
 sed -i.bak 's|callbacks: \[\(.*\)\]|callbacks: [\1, "<module>.<instance>"]|' /tmp/canary.yaml
 
 # 2. 构造完整 yaml：ConfigMap × 2 + Deployment + Service
-#    参考模板：git log --diff-filter=D -- k8s/litellm-canary.yaml  (若历史有)
-#    或 copy 主 deploy yaml 改 name/labels/CM 引用
+#    ✅ 现成模板就在仓里：k8s/litellm-proxy-canary.yaml（Deployment + Service）
+#                       k8s/litellm-proxy-canary-config.yaml（canary CM）
+#    ⛔ 别再找 k8s/litellm-canary.yaml —— 这个名字从来没存在过（2026-09-20 核查全历史 0 次）
 #    关键点：Deployment selector & labels 都是 app=litellm-proxy-canary
 #           主容器多挂一个 /app/<new_hook>.py volumeMount
 

@@ -27,6 +27,20 @@ description: 198 LiteLLM 网关按 key 名单灰度切流到新版本（force-gr
 **完全相同的 654 把**（sid 集合逐条相等）；`reconcile-keys.py` 生成的 196KB SQL
 内 `grep -c 'sk-'` = **0**。
 
+### 仓内配套脚本（不在本 skill 目录，但属于同一条流水线）
+
+| 脚本 | 什么时候跑 | 判什么 |
+|---|---|---|
+| `k8s/monitoring/observability-preflight.py` | **第 −1 天，切流之前** | 尺子自己活不活。四条腿 LIVE/RED-ABLE/DELIVER/FAIL-RED，不过 exit 1。见 [[litellm-198-monitoring-ops]] |
+| `litellm-gray-rollout/scripts/gray-monitor-cycle.sh` | 切流后每个观察周期 | 单周期采样 + 门禁判定（`gray-monitor-loop.sh` 是它的循环外壳） |
+| `litellm-gray-rollout/scripts/collect-metrics.py` | 同上，被 cycle 调 | 从 Prometheus 取门禁那几条腿的原始数 |
+| `litellm-gray-rollout/scripts/collect-spend-reconciliation.py` | 收尾对账 | SpendLogs 与门禁读数对齐。⚠️ 落库是**双峰刷盘**（98.4% 在 30s 内，尾巴 6069s），滞后只出 alert、缺行先 `pending` 跨 cycle 携带，**不许当回滚信号** |
+| `scripts/litellm-set-live-weight.py` | 调权重 | 改的是承接生产那条 lane，属生产变更，先确认再动 |
+
+**为什么 preflight 排在最前面**：09-13→09-20 那 38 个提交里 **11 个是在修门禁和监控
+自己**，不是在修被测对象；根因是 Prometheus 六天没抓过生产而门禁一直在读它出的数。
+先验尺子再谈阈值，顺序颠倒就会把返工重做一遍。
+
 ## 0. 两条路怎么选（先做这个判断）
 
 | | `gray-split-update.sh <pct>` | `gray-key-route.sh force-gray`（本 skill） |

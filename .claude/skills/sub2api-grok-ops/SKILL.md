@@ -17,10 +17,44 @@ description: >-
 
 ## ⚡「我的 grok 又被全部停下了」—— 先看巡检，而且它**不是** reauth
 
-🔴 **2026-09-20 起 `rescue` 单跑已经不成立了。** 一条上游 403 park 的是**整个池子**，不是吃到
-403 的那条腿：13:23 被 park 的 10 条腿里有 **7 条一条 403 都没吃过**，且 `span`
-（`until - updated_at`）是 29:38~29:59 —— 从一个共同到期点倒推，不是各自从被写的时刻算 30 分钟。
-13:17 手动放开 10 条，**两分钟后只剩 1 条**。所以第一步是确认巡检在跑，不是再手跑一遍 rescue：
+🔴 **2026-09-20 起 `rescue` 单跑已经不成立了：一个坏请求会沿 failover 走遍整个池子，
+10 条腿在 6 秒内逐个吃同一个 403、逐个被 park。** 所以「过几分钟又不可用」的第一步是**数
+failover 链**，不是查账号健康度、也不是再手跑一遍 rescue：
+
+```bash
+PG=sub2api-postgres-bbd7d9995-l76qh   # ⚠️ 不是 StatefulSet，没有 -0 后缀
+sudo kubectl -n litellm-dev exec $PG -- psql -U sub2api -d sub2api -c "
+select request_id, count(*) hops, count(distinct extra->>'account_id') legs,
+       string_agg(distinct extra->>'upstream_status',',') st,
+       min(created_at), max(created_at)
+from ops_system_logs
+where created_at > now() - interval '2 hours'
+  and message like '%upstream_failover_switching%'
+group by 1 having count(*) >= 4 order by 2 desc limit 15;"
+```
+
+**一条链 hops=10 且 legs=10 ⇒ 找到了。** 09-20 13:10~13:35 每 1~2 分钟就有一条这样的链
+（13 点那小时 39 条，`max_switches=10` 打满）。
+
+🔴 **403 是那个请求的属性，不是账号的属性。** 判据：leg 30 在 13:35:25 吃 403，
+13:35:27 / 13:35:45 就有成功记录；13:35:07 那条走遍全池的链之后 10 条腿全部在 20 秒内
+恢复成交（18~232 次）。**腿是好的，是那个 payload 让 x.ai 拒。** 所以：
+
+- ⛔ 别去查账号健康度、别 reauth、别充钱做厚池子 —— **池子越大，一条坏请求扫掉的腿越多**
+  （`max_switches=10` 是它的上限，不是池子的）。
+- 该查的是那个 caller 的 payload。09-20 的形状：`user_agent=AsyncOpenAI/Python 2.33.0`、
+  `api_key_prefix=sk-1e13d`、`user_id=1`、`model=grok-4.6`、`stream=t`，
+  `/v1/chat/completions` 和 `/v1/responses` 都有。
+
+🔴 **两个把我带偏过的坏尺子，别再踩：**
+
+1. **failover 的中间跳只写 `ops_system_logs`**（`extra->>'account_id'`），只有最后一跳才落
+   `ops_error_logs`。只查后者会得出"10 条被 park 的腿里 7 条一条 403 都没吃过"这种假结论，
+   进而编出"一条 403 停整池"的假机制。**判「这条腿吃过什么」两张表都要查。**
+2. **先读 `temp_unschedulable_reason`。** 它写的是 `grok stream idle timeout` /
+   `grok upstream temporary error` —— 字段里就有分类结果，我没读它就先讲成了 403 规则。
+
+然后确认巡检在跑（止血，不治本）：
 
 ```bash
 # 198 上
@@ -33,14 +67,14 @@ sudo cron 每分钟起一次、脚本内自己跑 4 轮 × 15s，只放探针实
 ⛔ **改 cron 间隔必须同时改脚本里的 `SWEEPS`**，否则两轮叠在一起被 `flock` 挡掉，
 表现是"巡检不跑了"。
 
-**它是止血不是治本，但止得住。** 13:32~13:36 每分钟 1 轮时池子还在 11 条 ↔ 1 条之间跳、
-503 每 30 秒几十条；换成 4 轮 × 15s 之后 13:38 起 **0 parked / 10 open，503 归零
-（5 分钟只剩 1 条 `account_auth`），成交 45~102/分**。⚠️ 但这个绿有一半是"上游 10 分钟没再返
-403"给的 —— 巡检做的是**15 秒内把腿捞回来**，不是阻止 park 发生，403 一密集还是会掉坑。
-**真解只有两条**：升级 sub2api 本体（§G），
-或给 xAI 充钱把池子做厚 —— 21 条腿现在只有 10 条可用，另外 11 条（7/8/9/18/20/27/28/29/33/34/35）
-是余额死，不充钱永远回不来。放大倍数感受一下：当天 12h 内上游只返 **18 条 403 / 21020 条成功
-（0.086%）**，换来 **8 腿·小时**停机和 **8791 条 routing 503**。
+**它只是止血：15 秒内把腿捞回来，不阻止 park 发生。** 每分钟 1 轮时池子在 11 条 ↔ 1 条之间跳、
+503 每 30 秒几十条；4 轮 × 15s 之后 13:38 起 0 parked / 10 open、503 归零、成交 72~91/分。
+⚠️ **但那个绿不是巡检赢了，是坏请求 13:36 自己停了** —— 同期 failover 链从每分钟一条掉到零。
+别把 503 归零当成"已修复"，判是否真好了要看链数。
+
+**真解顺序**：① 找到发坏 payload 的 caller（上面那组特征）；② 让一个请求别连着换 10 条腿
+（`max_switches`）；③ 升级 sub2api 本体（§G）。⛔ 充钱做厚池子不在这条链上 ——
+余额死的那 11 条（7/8/9/18/20/27/28/29/33/34/35）该充是另一笔账，但它治不了这个症状。
 
 手动单跑（巡检没装、或要看一眼分类结果时）：
 
@@ -66,13 +100,20 @@ sudo rm -f /run/.s2apw
 
 | 症状 | 该跑 | 不该跑 |
 |---|---|---|
-| 全池 503 / 腿都停了，探针 `200 usable` | 查巡检日志；没装就装巡检（`rescue` 单跑撑不过两分钟） | ⛔ reauth（no-op）、⛔ 反复手跑 rescue |
+| 好的腿过几分钟又变停 / 全池反复 503 | **数 failover 链**（上面那条 SQL），找发坏 payload 的 caller | ⛔ 查账号健康度、⛔ reauth、⛔ 反复手跑 rescue、⛔ 靠充钱做厚池子 |
+| 全池 503 / 腿都停了，探针 `200 usable` | 查巡检日志；没装就装巡检（`rescue` 单跑撑不过两分钟） | ⛔ reauth（no-op） |
 | 腿上 `rate_limited_at` 非空 | 当**余额死**处理，只能充钱 | ⛔ 查限流、⛔ 等窗口过期（这个标志永不自清） |
 | 探针 `403 ...bad-credentials`，且手里有新 SSO 行 | `reauth <creds>` | — |
 | 探针 `403 ...spending-limit` | **只能充钱** | ⛔ 两个都是 no-op |
 
 ⛔ **`rescue` 不放 `spending-limit` 的腿**，这是故意的：放出来只是多一条腿吃 failover 再 403，
 09-20 就是这么把一个本来就薄的池子推成全池 503 的。
+
+⚠️ **`rate_limited_at` 不是在 403 那一刻打的，是在"被放回池子后第一次真的出活"那一刻打的。**
+leg 7/8/9 三条的 `rate_limited_at` 同为 `09-17 11:00:03`，而 `audit_logs` 里 `10:59:54`
+有人 `bulk-update {"account_ids":[7,8,9,18],"schedulable":true}` —— 9 秒之差。
+⇒ 查这个标志的来源必须把 `audit_logs` 排进去，**只按 ±5 秒去配 403 会只匹配到 2/11 条，
+得出"对不上"的假结论**。
 
 ### 这一节踩过的坑（前三个都写进脚本了，别再手搓这套命令）
 
@@ -773,7 +814,7 @@ zerokey-pool-\* / claude-gpt-\* / claude-zerokey-\* / openrouter-\* / ua-split-\
 198 上常驻 `/Data/sub2api-ops/sub2api-upgrade.py`（源在 repo
 `scripts/grok-onboard/sub2api-upgrade.py`，两边 sha256 应逐字相等，改完必同步）。
 09-08（v0.1.179→v0.2.3）、09-10（v0.2.3→v0.2.4）、09-20（v0.2.4→v0.2.7）三次，
-每次踩到的坑都已固化进脚本。**当前线上 v0.2.7**，脚本 sha256 `97159a03…`。
+每次踩到的坑都已固化进脚本。**当前线上 v0.2.7**，脚本 sha256 `77a4e06e…`（repo 与 198 `/Data/sub2api-ops/` 同值，改完必核）。
 
 ```bash
 ssh cltx@10.68.13.198
@@ -916,11 +957,22 @@ group 10 `ag-gemini-probe-s48` + account **15/16/17（09-09 建）、21/22/23（
 并清空 `error_message`**，而 `expires_at` 一直是 09-16、`schedulable` 一直 `f`。
 `audit_logs` 45 分钟零行 ⇒ 是 sub2api 自己翻的。**只认 `expires_at` + 末次 usage。**
 
-⚠️ 09-10 留的那个「两边同刷同一个 token 理论上不冲突，没跑满一天别当已验证」——
-现在有数据了，但**还不能定因**：21/22/23 是 09-10 建的、活到 09-16 过期；
-而 24/25/26 是 **09-16 建的、`expires_at` 也在 09-16** ⇒ 这批一天都没撑到。
-"双刷互踢"和"这批号本身就带快过期的凭据"在这组数据里**还没分开**，别先下结论。
-下一步该看的是：15/16/17 为什么活着（它们在 Secret 那边也有拷贝吗）。
+✅ **09-10 留的「双刷互踢」猜想已被 09-20 的数据证伪，别再提它。** 判据：
+`cliproxy-secrets`（ns `litellm-dev`，唯一消费者是 deploy `cli-proxy-api`）里 8 个
+`antigravity-<email>.json` 的 `refresh_token` 与 DB 对应行 **md5 逐个相同** ——
+而这 8 个里 `samuelsmart341`(=acct 15)、`ikmedose`(=acct 16) **是活着的**。
+「两边各有一份同一个 token」在活腿和死腿身上同时成立 ⇒ **它不是区分量**。
+（acct 17 `1632004@gmail.com` 反过来只在 DB、Secret 里没有，也活着。）
+
+⚠️ Secret 那边是**静态种子、从不回写**：`timestamp=0`、`expired=2020-01-01T00:00:00`、
+`disabled=false`，八个文件全一样 ⇒ **别拿 Secret 里的字段判死活**，它只是建号时塞进去的原件。
+（读它做比对时只打 `md5(refresh_token)`，不要把 token 本体打到终端/日志里。）
+
+剩下的真问题仍是「21-26 为什么在 09-16 一起被拒」，**目前没有能定因的数据**：
+21/22/23 是 09-10 建的活到 09-16，24/25/26 是 **09-16 建的当天就冻住**。
+本机这边已经查完、**两个候选量都不是区分量，别再查第三遍**：
+`project_id` 八个全是 `aicode-consumers`、`user_agent` 全是 `antigravity/1.0.0 windows/amd64`，
+活腿死腿一样。要定因只剩 Google 侧（那批 Gmail 是否被判滥用/风控），本机拿不到证据。
 
 加号、判活、回滚、六个坑（`batch-refresh` 参数名、`privacy_set_failed`、
 `error_message` 是历史残留、逐腿只能看 `usage_logs.account_id`…）

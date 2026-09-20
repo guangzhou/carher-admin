@@ -6,15 +6,43 @@ description: >-
   sub2api 内部虚拟余额充值、SSO→OAuth 建号、`sa-grok-4.6` 作为 cursor gpt 系 fallback、两层回归。
   同一台 sub2api 上还挂着 Kimi Allegro（`sa-kimi-k3` / `sa-kimi-code*`，group 8/9），
   动它前先看影响面。**升级 sub2api 本体也在这里（§G，一条命令 `sub2api-upgrade.py go`）**。
-  **「grok 又被全部停下了 / 重新认证下」= §⚡ 最前面那一节，一条命令 `rescue`，
-  而且九成不该跑 reauth（腿通常是健康的，被 sub2api 自己 park 了）。**
+  **「grok 又被全部停下了 / 重新认证下」= §⚡ 最前面那一节：先确认巡检还在跑（`rescue`
+  单跑撑不过两分钟，一条 403 park 的是整池），而且九成不该跑 reauth（腿通常是健康的，
+  被 sub2api 自己 park 了）。**
   Use when 用户说"grok 不能用了"/"我的 grok 又被停了/全停了"/"grok 重新认证下"/
   "重新授权 grok"/"sub2api 403"/"grok 报余额不足"/
   "再加一个 grok 账号"/"sa-grok-*/grok-4.5 打不通"/"kimi 不能用了"/"sa-kimi-* 报错"/
   "sub2api 有新版本了升级下"。
 ---
 
-## ⚡「我的 grok 又被全部停下了」—— 一条命令，而且它**不是** reauth
+## ⚡「我的 grok 又被全部停下了」—— 先看巡检，而且它**不是** reauth
+
+🔴 **2026-09-20 起 `rescue` 单跑已经不成立了。** 一条上游 403 park 的是**整个池子**，不是吃到
+403 的那条腿：13:23 被 park 的 10 条腿里有 **7 条一条 403 都没吃过**，且 `span`
+（`until - updated_at`）是 29:38~29:59 —— 从一个共同到期点倒推，不是各自从被写的时刻算 30 分钟。
+13:17 手动放开 10 条，**两分钟后只剩 1 条**。所以第一步是确认巡检在跑，不是再手跑一遍 rescue：
+
+```bash
+# 198 上
+sudo tail -20 /var/log/grok-park-patrol.log     # 每分钟应有 freed=[...] ok=N still_held=0
+sudo crontab -l | grep -A2 'BEGIN grok-park-patrol'
+```
+
+巡检 = `/home/cltx/grok-onboard/grok-park-patrol.sh`（repo 里在 `scripts/grok-onboard/`），
+sudo cron 每分钟起一次、脚本内自己跑 4 轮 × 15s，只放探针实测 `200 usable` 的腿。
+⛔ **改 cron 间隔必须同时改脚本里的 `SWEEPS`**，否则两轮叠在一起被 `flock` 挡掉，
+表现是"巡检不跑了"。
+
+**它是止血不是治本，但止得住。** 13:32~13:36 每分钟 1 轮时池子还在 11 条 ↔ 1 条之间跳、
+503 每 30 秒几十条；换成 4 轮 × 15s 之后 13:38 起 **0 parked / 10 open，503 归零
+（5 分钟只剩 1 条 `account_auth`），成交 45~102/分**。⚠️ 但这个绿有一半是"上游 10 分钟没再返
+403"给的 —— 巡检做的是**15 秒内把腿捞回来**，不是阻止 park 发生，403 一密集还是会掉坑。
+**真解只有两条**：升级 sub2api 本体（§G），
+或给 xAI 充钱把池子做厚 —— 21 条腿现在只有 10 条可用，另外 11 条（7/8/9/18/20/27/28/29/33/34/35）
+是余额死，不充钱永远回不来。放大倍数感受一下：当天 12h 内上游只返 **18 条 403 / 21020 条成功
+（0.086%）**，换来 **8 腿·小时**停机和 **8791 条 routing 503**。
+
+手动单跑（巡检没装、或要看一眼分类结果时）：
 
 ```bash
 cd ~/grok-onboard      # 198 上；脚本已在，不用再传
@@ -38,14 +66,15 @@ sudo rm -f /run/.s2apw
 
 | 症状 | 该跑 | 不该跑 |
 |---|---|---|
-| 全池 503 / 腿都停了，探针 `200 usable` | `rescue` | ⛔ reauth（no-op） |
+| 全池 503 / 腿都停了，探针 `200 usable` | 查巡检日志；没装就装巡检（`rescue` 单跑撑不过两分钟） | ⛔ reauth（no-op）、⛔ 反复手跑 rescue |
+| 腿上 `rate_limited_at` 非空 | 当**余额死**处理，只能充钱 | ⛔ 查限流、⛔ 等窗口过期（这个标志永不自清） |
 | 探针 `403 ...bad-credentials`，且手里有新 SSO 行 | `reauth <creds>` | — |
 | 探针 `403 ...spending-limit` | **只能充钱** | ⛔ 两个都是 no-op |
 
 ⛔ **`rescue` 不放 `spending-limit` 的腿**，这是故意的：放出来只是多一条腿吃 failover 再 403，
 09-20 就是这么把一个本来就薄的池子推成全池 503 的。
 
-### 这一节踩过的三个坑（都写进脚本了，别再手搓这套命令）
+### 这一节踩过的坑（前三个都写进脚本了，别再手搓这套命令）
 
 1. **`reset-quota` 不碰 `temp_unschedulable_until`** ⇒ 跑完整套 reauth 腿仍然是 park 状态，
    503 一条不少。09-20 09:4x reauth 完 36/37，直到单独 `clear-error` 才停。
@@ -57,6 +86,13 @@ sudo rm -f /run/.s2apw
    我在新查询里加了 `::text`，`== "t"` 的解析当场把八条 `true` 全判成 `False` ⇒
    **八个 "STILL HELD" 假红，形状和"写没落"一模一样**，害我去查 group、查库名、查竞态。
    **已修**：统一走 `pgbool()`，且 SQL 侧不再 cast 布尔。判「写没落」之前先确认读数器没坏。
+4. 🔴 **但 13:23 那批 10 个 "STILL HELD" 是真的，不是第 3 条那个假红。** 判据：
+   `updated_at=13:13:41 → until=13:43:41`，而我的 `clear-error` 是 13:13:40 打的 ——
+   写落了又被立刻改写。**假红和真红的区别只在时间戳**，回读读成 held 时先看
+   `updated_at` 是不是比你的写更新。
+5. ⛔ **`rescue --no-probe` 永远放不出腿。** `_rescue_classify` 里 `verdict` 被置成
+   `"not probed"`，`.startswith("200")` 为假 ⇒ 每条腿都进 `deadtok`，`free` 恒空，
+   而且不报错。**未修**，别用这个 flag。
 
 ### 第二只手（09-20 实测，会让状态来回翻）
 
@@ -736,31 +772,42 @@ zerokey-pool-\* / claude-gpt-\* / claude-zerokey-\* / openrouter-\* / ua-split-\
 
 198 上常驻 `/Data/sub2api-ops/sub2api-upgrade.py`（源在 repo
 `scripts/grok-onboard/sub2api-upgrade.py`，两边 sha256 应逐字相等，改完必同步）。
-09-08（v0.1.179→v0.2.3）和 09-10（v0.2.3→v0.2.4）两次都是手搓，同样几个坑各踩一遍，
-现在全固化进脚本了。
+09-08（v0.1.179→v0.2.3）、09-10（v0.2.3→v0.2.4）、09-20（v0.2.4→v0.2.7）三次，
+每次踩到的坑都已固化进脚本。**当前线上 v0.2.7**，脚本 sha256 `97159a03…`。
 
 ```bash
 ssh cltx@10.68.13.198
 sudo python3 /Data/sub2api-ops/sub2api-upgrade.py check   # 当前版本 vs hub latest + release notes
-sudo python3 /Data/sub2api-ops/sub2api-upgrade.py go      # 全流程（默认只在 23:00-06:00 放行）
+sudo python3 /Data/sub2api-ops/sub2api-upgrade.py go      # 全流程
 # 或者分步：probe --tag pre / backup / pull / cutover / verify / probe --tag post
 sudo python3 /Data/sub2api-ops/sub2api-upgrade.py rollback-plan
 ```
+
+**`go` 白天跑是安全的（09-20 起）。** 它把 check/probe/backup/pull 四步**无条件**跑完
+（这四步不碰线上），然后在 `cutover` 前撞窗口门禁停住，打印「dump 和镜像已就位，
+只剩一条命令」。**这个顺序是刻意的**：要跟人确认断流时，该确认的只剩一刀，
+而不是带着一个什么都没准备的问题去问。想在窗口外继续 = `go --force` 或单跑 `cutover --yes`。
+
+⛔ **别想把断流「优化」掉成 RollingUpdate**：迁移在 pod 启动时跑，
+两个版本同时对一个库写 schema 比断一分钟 503 严重得多。`Recreate` 是对的。
 
 **⚠️ 全程用同一个身份跑**（推荐一路 `sudo`）。备份目录取 `$HOME`，`sudo` 下是
 `/root/sub2api-backup`、不 sudo 是 `/home/cltx/...`；混着跑会让 `rollback-plan`
 指向另一个时刻的 dump —— 09-10 我就制造过一次「指向升级**后**快照的回滚点」。
 dump 里含 `accounts` 表的 grok/kimi OAuth token，**是凭据文件**，脚本已 chmod 600。
 
-### 六条这脚本替你挡掉的坑
+### 九条这脚本替你挡掉的坑
 
 | 坑 | 形状 | 脚本怎么挡 |
 |---|---|---|
 | 镜像站 525 | `docker pull weishaw/sub2api:<版本号>` 被 `registry.dockermirror.com` 挡，`:latest` 能拉 | 拉 `:latest`，用 label `org.opencontainers.image.version` **反证**是不是目标版本，不符**拒绝 push** |
 | `schema_migrations` 没有 `version` 列 | 主键是 **`filename`**，照通用 runbook 写必报 column does not exist | 查询已按 `filename`/`applied_at` |
-| Recreate 空档 | replicas=1 + `Recreate`，有 30~90s 断流，**同时打掉 grok + kimi + cursor gpt 组的 fallback 链** | `go` 默认只在 23:00-06:00 放行，`cutover` 前打印影响面并要求手打 `yes` |
-| 静默改数 | 迁移可能悄悄动账号/余额，几天后被用户发现 | `backup` 存 pre-state（镜像/迁移数/账号数/active/balance），`verify` 逐项 diff |
+| **迁移序号不唯一** | 09-20 一轮来了**两条都叫 238**（`238_opencode_go_platform` + `238_purge_unlimited_user_platform_quotas`），拿序号当主键/排序键会少算一条 | `verify` 检测同前缀并喊出来：数行数、只认 `filename` |
+| Recreate 空档 | replicas=1 + `Recreate`，有 30~90s 断流，**同时打掉 grok + kimi + cursor gpt 组的 fallback 链** | 门禁挪到 `cutover` 正前方，前四步无条件跑完；`cutover` 打印影响面并要求 `yes` |
+| 静默改数 | 迁移可能悄悄动账号/余额，几天后被用户发现 | `backup` 存 pre-state（镜像/迁移数/账号数/active/balance/**逐账号 status**），`verify` 逐项 diff |
+| **`active` 变了但不知道是谁、也不知道是不是我干的** | 09-20 `active 39→33`，翻转时刻 == 重启时刻，**和「升级弄坏了凭据」完全同形**；我手搓了五轮 SQL 才定因 | `verify` 自己展开：逐个翻转账号打 `expires_at` + 末次成功 `usage_logs` + 影响面提示，并写明 `updated_at` 是**被发现的时刻**不是死亡时刻 |
 | `"error": null` 读成红 | `/v1/responses` 正常也带 `"error": null`，`if "error" in d` 把全绿读成全红（09-08 栽过） | 判据是**唯一 nonce 原样回显**，不看 error 键 |
+| **既存故障把 post 判成红** | 09-20 `sa-grok-4.20` 升级前后都是 503（半数腿被 x.ai 限流 park 到 09-22+）。判绝对全绿 ⇒ 只要有一条既存故障 `go` 就永久不可用，还得人眼 diff 两屏 | `probe` 落盘逐条判词，post 打 **delta**（fixed / pre-existing / **NEWLY BROKEN**），**只在 newly-broken 上返非零**；pre 红不再阻塞（它是基线）；两边跑的集合不一致会喊 `NOT RE-RUN` |
 | ERROR 计数假阳性 | `grep -i '\bERROR\b'` 会命中健康 WARN 行里 JSON 的 `"error":` 键（09-10 实测 11 条全假） | 大小写敏感 + 锚在制表符分隔的日志级别字段 |
 
 ### 回归的边界（脚本会自己喊出来，别替它下结论）
@@ -775,16 +822,31 @@ dump 里含 `accounts` 表的 grok/kimi OAuth token，**是凭据文件**，脚�
 - **kimi 探针是花钱的**：全公司共用一个会员，100 次/5h 且 100 次/周。
   所以 `probe --tag pre` 默认**不打 kimi**（阳性对照用 grok 那 4 发就够），
   `--tag post` 才打全 4 条协议面；要在 pre 也打就显式加 `--kimi`。
+  **反过来，重跑 post 要显式 `--no-kimi`**（09-20 加的）—— 修完东西重跑一次很正常，
+  每跑一次再吃 4 发**周额度**，跑几轮就悄悄啃掉全公司一块。
 - **升级是为了某个具体修复才升的**，回归要**专门打那一条**。脚本收尾会提醒，
   但它不知道你这次为什么升。
+- 🔴 **`verify` 喊出 `<-- CHANGED` 是提问不是结论。** 它现在会把逐账号证据打全
+  （`expires_at` / 末次 usage / 影响面），但**下结论仍然是人的事**：
+  判据是「这 token 一小时前还活着吗」。几天前就过期 ⇒ 是重启的刷新周期
+  把旧账揭出来了，不是这次升级。见 [[feedback_restart_token_refresher_reveals_pre_dead_tokens]]。
 
-### 09-10 v0.2.4 那次的实际数值（下次对照用）
+### 三次升级的实际数值（下次对照用）
 
-备份 6.6MB / 迁移**只增 1 条** `237_add_minimax_platform.sql`（283→284）/
-rollout 约 30s / 真 ERROR 0 / 账号 20 条 18 active / balance 未变 /
-回归 8/8 nonce 全回显。0.2.4 与我们相关的四条修复：429 未耗尽额度仍触发账号退避、
-Grok Chat Completions `external_web_access` 致失败、长流 HTTP/2 PING 保活、
-go-redis 连接池 nil-ctx panic。
+| | 09-08 v0.2.3 | 09-10 v0.2.4 | **09-20 v0.2.7** |
+|---|---|---|---|
+| 迁移 | 8 条 → `236_…` | +1 → 284 | **+2 → 286**（两条都叫 238） |
+| rollout | — | ~30s | **31s**，`restartCount=0` |
+| 真 ERROR | 0 | 0 | **0** |
+| 账号 | — | 20 / 18 active | 41 / **39→33**（6 个 antigravity，非升级所致） |
+| 回归 | — | 8/8 | **7/8，delta 判定 0 regression** |
+| 备份 | 2.9MB | 6.6MB | `sub2api-20260920-1324.dump`，sha256 `2f1daff4…` |
+
+**09-20 那次是白天高峰切的**（用户拍板接受 30~90s 断流），不是夜间窗口 ——
+我先把 probe pre / backup / pull 三步做完才去问，问的时候只剩一刀。
+0.2.7 与我们相关的修复：Kimi 国内 Coding Plan 配额耗尽 403 不再误判为永久禁用（改限时暂停）、
+Grok Responses `sequence_number` 未始终写出、Grok 媒体槽位泄漏、
+Codex 根级联合 schema 致 `/v1/responses`→`/v1/messages` 400。
 全记录 [[project_sub2api_198_upgrade_v023_2026_09_08]]。
 
 ## 同一个 sub2api 上还挂着 kimi（2026-09-08 起）
@@ -825,15 +887,40 @@ go-redis 连接池 nil-ctx panic。
 升级史与 SOP（`created_at` 修复出自 v0.2.3；当前线上 v0.2.4）：见 **§G** +
 [[project_sub2api_198_upgrade_v023_2026_09_08]]。
 
-## 同一个 sub2api 上还挂着 antigravity（2026-09-10 起补齐 6 条腿）
+## 同一个 sub2api 上还挂着 antigravity（09-10 补到 6 条，09-16 又被加到 9 条）
 
-group 10 `ag-gemini-probe-s48` + account 15/16/17/21/22/23（六个 Google AI Pro 号）。
+group 10 `ag-gemini-probe-s48` + account **15/16/17（09-09 建）、21/22/23（09-10 建）、
+24/25/26（09-16 建，不是我这条线加的）= 九个** Google AI Pro 号（09-20 实测，
+旧文档写"六个 15/16/17/21/22/23"已过期）。
 **目前只有一把 probe key `s48-ag-probe`，零生产流量** —— 生产的 Antigravity 走的是
 另一条路（`cli-proxy-api` → LiteLLM 的 12 条 `ag-*` entry），不是这台。
 所以重启/升级 sub2api **不会**影响同事的 gemini。
 
 ⚠️ **但凭据是两份拷贝**：同一批 refresh_token 既在 k8s Secret `cliproxy-secrets`、
 又在这台的 Postgres 里，两边各自刷。**加号/撤号要两边都动**，只动一边会留僵尸腿。
+
+🔴 **acct 21-26 这六条腿已经死了（09-20 实测）**：`invalid_grant`，
+`credentials.expires_at` 全冻在 **09-16 19:33~20:18**，末次成功 `usage_logs` 是 09-10。
+
+⚠️ **`expires_at` 是 unix epoch，而且它是 access token 的到期时刻 ⇒ 实际读法是
+「末次成功刷新的水位线」，不是「死亡日期」。** 活着的腿这个值永远在**未来**
+（15/16/17 实测是当天 14:03~14:08，每 5min 往前滚）；死掉的腿它**冻在最后一次刷新成功的那刻**。
+所以"冻在 09-16"= refresh_token 从 09-16 起就被 Google 拒了，**比"过期了"是更硬的证据**。
+⛔ 别忘了 `to_timestamp(...::bigint)`，裸读是个十位数字。
+是 09-20 升级时新 pod 的 token 刷新周期把它揭出来的，**不是升级弄坏的**
+（[[feedback_restart_token_refresher_reveals_pre_dead_tokens]]）。acct 15/16/17 活着。
+修它要重新走 OAuth 拿新 refresh_token，**两边都要写**。
+
+⚠️ **别拿 `status` / `error_message` 判它死活，这两列每 5min 被刷新周期覆写、会来回翻。**
+09-20 实测：13:26 写成 `status=error`，13:36:26 又失败一轮，**13:36:53 却全翻回 `active`
+并清空 `error_message`**，而 `expires_at` 一直是 09-16、`schedulable` 一直 `f`。
+`audit_logs` 45 分钟零行 ⇒ 是 sub2api 自己翻的。**只认 `expires_at` + 末次 usage。**
+
+⚠️ 09-10 留的那个「两边同刷同一个 token 理论上不冲突，没跑满一天别当已验证」——
+现在有数据了，但**还不能定因**：21/22/23 是 09-10 建的、活到 09-16 过期；
+而 24/25/26 是 **09-16 建的、`expires_at` 也在 09-16** ⇒ 这批一天都没撑到。
+"双刷互踢"和"这批号本身就带快过期的凭据"在这组数据里**还没分开**，别先下结论。
+下一步该看的是：15/16/17 为什么活着（它们在 Secret 那边也有拷贝吗）。
 
 加号、判活、回滚、六个坑（`batch-refresh` 参数名、`privacy_set_failed`、
 `error_message` 是历史残留、逐腿只能看 `usage_logs.account_id`…）

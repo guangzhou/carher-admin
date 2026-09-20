@@ -17,23 +17,23 @@
 
 | 项目 | 换腿前 | 换腿后 |
 |---|---|---|
-| cr-g 池腿 | 84, 135, 136, 137, 138, 139, 140（7 条） | 175, 176, 177, 178, 180, 181, 182, 185, 186, 187, 188（11 条） |
-| 池别名 | 14 个 `cr-g-*` × 7 条 = 98 行 | 14 个 `cr-g-*` × 11 条 = 154 行 |
-| 独占直连名 | 只有 82 / 135 有 | `cr-g-5.6-mini-<lane>` 覆盖全部 11 条池腿（**验单条腿死活的唯一入口**） |
+| cr-g 池腿 | 84, 135, 136, 137, 138, 139, 140（7 条） | 175, 176, 177, 178, 180, 181, 182, 185, 186, 187, 188, 190, 191, 193（**14 条**） |
+| 池别名 | 14 个 `cr-g-*` × 7 条 = 98 行 | 14 个 `cr-g-*` × 14 条 = 196 行 |
+| 独占直连名 | 只有 82 / 135 有 | `cr-g-5.6-mini-<lane>` 覆盖全部 14 条池腿（**验单条腿死活的唯一入口**） |
 | 保留未动 | — | 84（12 个 `cursor-g-*` 行）、135（14 个 `-135` 直连行）、101（6 个 `cursor-gpt-*` 行）、82（canary） |
 | 删除 | — | 136, 137, 138, 139, 140（各自 deploy + svc） |
 
 **只有 136–140 被删**，因为只有它们的 model 行数是 0 —— 84/135/101 都还有活引用，
 删了会当场打断别的产品线。这一条是查出来的，不是按"旧腿"一刀切的。
 
-**image 一致性**：11 条新腿全部 `clone_lane_from_live.py --ref 135 --expect-cm zk-cursor-bpi-patch-135`
+**image 一致性**：15 条新腿全部 `clone_lane_from_live.py --ref 135 --expect-cm zk-cursor-bpi-patch-135`
 从活腿克隆，image 与 svc 形状随源腿走，`pool_consistency.py` A 段（代码一致性）+ C 段（26 个 env 对众数）全 PASS。
 
 ---
 
 ## 二、逐项改动与回滚
 
-### 2.1 新建 11 条 lane（175–188 里过门的那些）
+### 2.1 新建 14 条池 lane（175–195 里过门的那些）+ 1 条建好但未留在池里（195）
 
 - 脚本：`clone_lane_from_live.py --ref 135 --expect-cm zk-cursor-bpi-patch-135 --new <N> --apply`
 - 落点：全部 `nodeName=aiyjy-litellm-standby`，每条 requests 50m/64Mi。
@@ -42,7 +42,7 @@
 - **回滚**：`kubectl -n litellm-product delete deploy zero-cursor-bpi-<N> svc zero-cursor-bpi-<N>`
   —— 纯新建对象，删掉即净。
 
-### 2.2 11 份 seed 灌进 225
+### 2.2 15 份 seed 灌进 225
 
 - 捕获：`lane_seed_capture_queue.sh`（**必须在 188 跑**，`cf_clearance` 绑 188 出口 IP），
   ledger 在 `188:/Data/zkcaps/queue.log`，每号工作目录 `188:/Data/zkcaps/zkcap-<N>/`（700）。
@@ -55,7 +55,9 @@
 ### 2.3 入池门禁
 
 - `lane_model_catalog.py --gate --ref 176 --lanes <N>`：≥19 slug 且含 `thinking`/`pro`/`instant`
-  且是参照腿的超集。11 条腿实测全是 **21 个 slug，与 176 差集 0**。
+  且是参照腿的超集。15 条腿实测全是 **21 个 slug，与 176 差集 0**。
+  ⚠️ 195 **过了门禁却是死腿**（账号侧 403，见 2.7）—— 目录门禁量的是"菜单齐不齐"，
+  量不到"这个账号还能不能答"，两者是不同的判据，别拿门禁 PASS 当腿活着。
 - 门禁**在注册之前**，不带病入池。
 
 ### 2.4 注册进池
@@ -97,17 +99,37 @@
   （30330 bytes，36 把 key 的 `models_before` 整份；自检：长度 25–49，含 `cr-g-` 的 0 把）。
 - **怎么回滚**：按备份逐把 `/key/update` 写回 `models_before`（同样是整表覆盖，一把一份）。
 
+### 2.7 lane 195：入池 2 分钟后摘掉（账号侧恒 403）
+
+- **动了啥**：195 过了目录门禁（21 slug、与 176 差集 0）、注册 15/15、proxy restart 后，
+  独占名 `cr-g-5.6-mini-195` 实打 **3/3 全 500**，SpendLogs 落点确实是 195 ⇒ 路由对、腿本身报错。
+  lane 日志栈底是 `403 Forbidden` / `[ChatGPT] Got 403`，即**上游账号直接拒**，不是网关 bug。
+  同一轮 193 是 200 ⇒ **不是尺子坏**（有已证绿的对照）。
+  于是 `crg_lane_retire.py --lanes 195 --apply` 摘掉 15 行（14 池名 + 1 直连名），
+  每个池名摘完仍剩 14 条腿，**没有任何别名被摘成 0 条**。
+- **备份在哪**：`198:/Data/backups/crg-retire-lane195-20260920-222440.txt`（693 bytes，15 行 `model_name|id`）。
+  ⚠️ 这份备份**不能直接重建**（没有 `litellm_params`，`api_key` 被脱敏）——
+  重建的拷贝源永远是一条活腿：`crg_pool_register.py --lanes 195 --with-direct --apply`。
+- **怎么回滚**：先修账号（403 是账号侧的），再按上一行重注册 + `rollout restart deploy/litellm-proxy`。
+- **WA 亲和 flush 没做，这是有判据的跳过**：全量 dry-run 实读 140 个 v2 pin，
+  **指向 `-195-` 的有 0 个**（它在池里只待了约 2 分钟，没接到真流量）。
+  没有对象可 flush，而 flush 会打断另外 140 个活会话的 pin ⇒ 不做比做安全。
+- lane 195 的 deploy/svc/seed **保留未删**（白养一条 50m/64Mi 的 pod），
+  账号修好后可直接重注册；要彻底下线则 `delete deploy/svc zero-cursor-bpi-195`。
+
 ---
 
 ## 三、验收判据（哪些是证过的，哪些没有）
 
 **证过的**：
 
-- 11 条腿**逐条**用独占直连名 `cr-g-5.6-mini-<lane>` 打过真推理，全 200，SpendLogs 落点是该 lane。
-- 全池回归 `crg_pool_probe.py --all --keys 10`：14 个池名 14/14 全 200，失败 0 发。
-- `pool_consistency.py` **VERDICT: PASS**（A 代码一致性 / B 池覆盖 / C env 一致性），
-  孤儿 lane 只剩 101（既定弃用，永不入池）。
-- 11 条 lane pod **0 restarts**；136–140 删后残留 0。
+- 14 条腿**逐条**用独占直连名 `cr-g-5.6-mini-<lane>` 打过真推理，全 200，SpendLogs 落点是该 lane。
+- 全池回归 `crg_pool_probe.py --all --keys 10`：14 个池名 14/14 全 200，失败 0 发；
+  该轮抽样漏掉的 175/178/180/188/191 随后用独占名逐条补打，5/5 全 200、落点正确。
+- 服务端实读：14 个池别名腿数分布 `[14]`（**完全齐平**），总池行 196 行，14 条池腿各有独占直连名。
+- `pool_consistency.py` **VERDICT: PASS**（A 代码一致性 / B 池覆盖 / C env 一致性）。
+  孤儿 lane 现为 `101,195`：101 既定弃用永不入池；195 是本轮**入池后又摘掉**的（见 2.7）。
+- 14 条 lane pod **0 restarts**；136–140 删后残留 0。
 
 **没证到的，明说**：
 
@@ -129,6 +151,11 @@
 根因是 **09-17 起 mail.com 的 OTP 正文 iframe 恒为 170 字节空壳**，浏览器侧抓不到验证码。
 ⛔ 不要再往 selector 上叠补丁（已试过无效）；下一步是截图看页面，或走 IMAP 绕开浏览器。
 
+另有 `192, 194` 失败，症状**不是同一类**：
+`navigating to "https://chatgpt.com/", waiting until "domcontentloaded"` 超时，
+且 194 只跑了 31 秒就失败（正常一轮 3–5 分钟）。它们中间的 193/195 都抓成功了
+⇒ **不是通道整体挂了**。OTP 那批是真废，导航超时这类可能只是瞬时，将来可单独重试。
+
 **这一条同时意味着**：`188:/Data/zkcaps/refresh-accts.txt` 的轮转**当前无法刷新需要 OTP 的号**，
 把新号加进去时必须把这个限制写清楚，不能假装轮转能兜住。
 
@@ -138,7 +165,11 @@
 
 - `cursor-g-*` 产品线 6 个双腿名字压在 82 和 84 上，而 84 的 seed 属于已废批次
   ⇒ 那条线**实际只有一条活腿**。要不要换腿需用户决定（84 本身还有 12 个活引用，不能顺手删）。
-- `cursor-web-fc-pool-terra*` 只挂 lane 82，各别名腿数不齐（形如 `[1, 2, 11]`）。
-- `pool_consistency_selftest.py` 还是旧拓扑，需按 11 条腿更新。
+- `cursor-web-fc-pool-terra*` 只挂 lane 82，各别名腿数不齐（形如 `[1, 2, 14]`）。
+  **注意这个 `[1, 2, 14]` 说的不是 `cr-g-*`** —— `cr-g-*` 14 个别名实读全是 14 条腿（齐平）；
+  不齐的是 `cursor-web-fc-pool-terra*` / `cursor-g-*` 那两条别的产品线。
+- ~~`pool_consistency_selftest.py` 还是旧拓扑~~ **已核实不需要改**：它没有硬编码腿号
+  （`ok_a, lanes = pc.check_code()` 读线上拓扑），实跑 **8/8 OK**，且能红
+  （合成悬挂 lane 135 被抓到、`stealth-fork-must-fail got=False want=False`）。
 - `lane_seed_install.sh` 的 in-pod `/app/temp/users.json` mtime 判据目前每轮手工做，该收进脚本。
   判据是：temp mtime > seed mtime（证明 running 进程真的 `cp` 过）+ key == `acct<N>` + cookie 长度吻合。

@@ -132,6 +132,15 @@ scripts/litellm-key-drift-verify.py --snapshot /root/<task>/full-<ts>.json \
 和 **drift**（别人的被我压了 ⇒ **停手先找那个写手**）。两者含义不同，不许合并成一个"坏"计数。
 `ok=0` 报 FAIL——空样本是失败不是通过。
 
+**198 上加两个参数**，否则它红得毫无道理：`--ns litellm-product`（默认是阿里云的 `carher`，
+不改会去读一个同名但内容不同的 ns），且它 shell 出去调的是**裸 `kubectl`**（不带 sudo、
+不读你的 env override），198 上要先放一个 PATH shim：
+
+```bash
+mkdir -p ~/bin-0a && printf '#!/bin/sh\nexec sudo /usr/local/bin/kubectl "$@"\n' > ~/bin-0a/kubectl
+chmod +x ~/bin-0a/kubectl && export PATH=~/bin-0a:$PATH
+```
+
 **③ 真流量矩阵**（唯一能证明"能用"的尺子）：
 
 ```bash
@@ -156,11 +165,67 @@ scripts/litellm-her-key-model-regress.sh --uids 425,1000 \
 判据是改动前那份快照里它 `n_models=31` 且不含该名字。没有改动前快照就没法分辨，
 所以 `--backup` 是强制的。
 
-## 已知终态（2026-09-17，用来判漂移）
+**198 上用 `scripts/litellm-198-her-name-probe.py`**（上面那个 `.sh` 是阿里云两 pod 的形状）：
 
-420 把 `carher-*`：`her-pro` → `grok-4.6`（落点 `pro198/grok-4.6`）、
-`her-flash` → `openrouter-deepseek-v4.1-flash`（落点 `openrouter/deepseek-v4.1-flash`）；
-中途叫过的 `auto` 已摘净。CM 168 条。详见 [[project_aliyun_her_key_auto_alias_grok46_2026_09_17]]。
+```bash
+python3 scripts/litellm-198-her-name-probe.py \
+  --key '<明文 key>' --nonce "$(date +%s)-$$" \
+  --pod-ip <ip1> --pod-ip <ip2> --pod-ip <ip3> --pod-ip <ip4> \
+  --model her-pro --model her-flash
+```
+
+`--pod-ip` / `--model` 都是 `append`，每个值各写一次 flag（不是空格列表）。
+`--model` 不给默认就是 `her-pro her-flash`；`--negative` 默认 `her-nonexistent-control`；
+`--timeout` 默认 120。
+
+它逐个 pod IP 直打（**不打 VIP**，VIP 会藏住哪个 pod 不同意），判据同样是解析后的
+`choices[0].message.content` 含 nonce（`finish_reason=length` 且 content 空算 miss），
+每个 pod 各带一发阴性对照必须 ≥400，任一结果坏就非零退出。198 的明文 key 不在 k8s CM 里，
+取法见下面「198 的真 key 在哪」。
+
+## 已知终态（用来判漂移）
+
+**阿里云（ns `carher`）2026-09-17**：420 把 `carher-*`：`her-pro` → `grok-4.6`
+（落点 `pro198/grok-4.6`）、`her-flash` → `openrouter-deepseek-v4.1-flash`
+（落点 `openrouter/deepseek-v4.1-flash`）；中途叫过的 `auto` 已摘净。CM 168 条。
+详见 [[project_aliyun_her_key_auto_alias_grok46_2026_09_17]]。
+
+**198（ns `litellm-product`）2026-09-20**：227 把 `carher-*` 同样两个对外名，但
+**alias 目标是 198 的组名，不是阿里云那两个**：
+
+| 对外名 | 阿里云 alias 目标 | **198 alias 目标** | 198 落点 |
+|---|---|---|---|
+| `her-pro` | `grok-4.6` | **`sa-grok-4.6`** | `openai/grok-4.6`，`model_info.id=sa/grok-4.6` |
+| `her-flash` | `openrouter-deepseek-v4.1-flash` | 同名 | `openrouter/deepseek/deepseek-v4.1-flash` |
+
+⛔ **`grok-4.6` 这个裸名在 198 不是组**（`ProxyModelTable` 零命中，也无全局 alias）——
+照抄阿里云的 alias 值会过了准入闸门然后 400。每次都查目标集群，别跨集群搬组名。
+详见 [[project_198_her_pro_flash_keys_2026_09_20]]。
+
+## 198 的三处与阿里云不同（做之前先对一遍）
+
+1. **目标组两个都已存在 ⇒ 纯 key 写入，不碰 CM、不 rollout**。阿里云那轮要 splice CM +
+   16 分钟 rollout 是因为它当时没有 OpenRouter deepseek 组；198 早有（09-16 建）。
+   判据：`select model_name from "LiteLLM_ProxyModelTable" where model_name in (...)` 两行都回。
+2. **要打的是 4 个 pod，不是 2 个**。198 生产流量走 gray lane：`svc/litellm-proxy` 与
+   NodePort 30402 的 selector 是 `carher.net/litellm-production-route=enabled`，命中
+   `litellm-proxy-gray` 的 4 副本；那个叫 `litellm-proxy` 的单 pod **不在 endpoints 里**。
+   拿 `kubectl get pods -l carher.net/litellm-production-route=enabled -o custom-columns=...:.status.podIP`
+   取 IP，逐 pod 直打（打 VIP 会负载均衡，掩盖是哪个 pod 不认）。
+3. **范围是 `carher-%` 那 227 把，`aliyun-carher-*` 那 2 把桥 key 不在内**。
+   `--prefix carher-` 的 `startswith` 天然排除它们（`scoped_keys=227` 就是判据），
+   但别手写 SQL 用 `%carher%` 去核，那会多捞 2 行。
+
+⚠️ 旧记忆说「198 的 `carher-*` key 无效不被使用」**已过时**：09-20 实测近 14 天有 8 把在
+真实出活（`carher-75` 26768 行 / `carher-14` 5285 / `carher-13` 2822 / `carher-1` 1618 /
+`carher-221` 733）。它们是 188 docker 实例和老杨那条线，不是 k8s her pod ⇒
+**198 上动 `carher-*` key 有真实受害面**，不是刷死账。
+
+**198 的真 key 在哪**（不在 k8s CM 里，别去 `carher-<uid>-user-config` 找，那是阿里云的形状）：
+188 容器的 env，`docker inspect hermestest-<uid> --format '{{range .Config.Env}}{{println .}}{{end}}'`
+里的 `CARHER_PROD_KEY`；`openclaw.runtime.json5` 里写的是 `${CARHER_PROD_KEY}` 占位符，
+且那文件是 JSON5 带 `//` 注释，`json.load` 直接喂会 `PARSE_FAIL`。
+端到端入口是桥 `https://cc.auto-link.com.cn/pro/v1`。
 
 ## 两件本 skill **不做**的事（收工时必须主动说）
 

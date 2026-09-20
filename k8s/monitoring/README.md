@@ -3,6 +3,9 @@
 这 8 个文件在 2026-09-19 之前**只存在于集群 ConfigMap 里**，repo 一份副本都没有。
 和 `zk_session_reaper.py` 是同一个病：唯一的家是 ConfigMap，谁误删就没了，改动也没有 diff 可审。
 
+现在 repo 是真身，但**集群仍会漂移**（别人也会 patch），所以下面「改完怎么同步」
+第一步是 diff，不是 patch。
+
 ## 文件 → ConfigMap 映射
 
 | 文件 | namespace | ConfigMap | key |
@@ -21,6 +24,18 @@
 往这些文件里写任何 `sk-` 开头的东西都是错的。
 
 ## 改完怎么同步回集群
+
+**第 0 步：diff 集群现值 vs 你手上这份。**
+
+```bash
+kubectl -n monitoring get cm grafana-alerting \
+  -o jsonpath='{.data.litellm-stability\.yaml}' > /tmp/cluster.yaml
+diff /tmp/cluster.yaml k8s/monitoring/litellm-stability.yaml
+```
+
+集群比 repo 新 ⇒ 直接 patch 会**静默覆盖掉别人的改动**，而且 patch 成功、sha 对得上，
+事后看不出来。2026-09-20 实测过一次反方向（集群少一处 `execErrState: OK→Error`），
+patch 把 repo 版本带上去了 —— 方向对，但必须在交付里写明"顺带带上去了什么"。
 
 **禁 `kubectl apply`**（会连带覆盖同一个 CM 里别的 key）。只 patch 单个 key：
 
@@ -45,6 +60,27 @@ kubectl -n monitoring patch cm grafana-alerting --type merge --patch-file /tmp/p
 
 两者都要先等 kubelet 把新内容投影进容器（约 20~60s），判据 = **容器内 `sha256sum`**，
 不是 CM 的内容。
+
+## 改 `probe.py` 的探针节奏 ⇒ 必须同时改 `litellm-stability.yaml`
+
+三道尺子按间隔标定：`llm-probe-stale` 的 `gt` 阈值（≈2 轮）、三条
+`min_over_time(litellm_probe_state[W])` 的 W（编码"连续两轮"，需 `≥2×间隔上界+单轮`）、
+以及那三条的 `relativeTimeRange.from`（要盖住 W）。只改间隔不改它们不会报错，
+只会开始说谎：stale 每轮假报，或"连续两轮"静默退化成"一轮"。
+
+间隔是**区间**（`PROBE_INTERVAL_MIN..MAX`，30~45 分钟随机抽，防上游风控指纹），
+**尺子按 MAX 标定** —— 按均值标会让抽到最长那一轮间歇性假报，比每轮假报更难查。
+单轮耗时按 `目标数 × PROBE_GAP_MAX` 算（串行且发间随机停顿），所以
+**改目标数或改停顿上界同样会让阈值失准**。
+
+当前：间隔 1800~2700s、单轮预算 1200s ⇒ `gt 7800` / `[115m]` / `from: 7200`。
+（沿革：900s 固定 ⇒ `2400`/`[35m]`/`1800`；1800s 固定并发 8 ⇒ `4200`/`[65m]`/`3900`。）
+
+这条耦合关系有机器校验，改完跑它（**不过不许同步上去**）：
+
+```bash
+./observability-preflight.py --rules litellm-stability.yaml --probe-script probe.py --static-only
+```
 
 ## 两个不能踩的坑
 

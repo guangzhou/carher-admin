@@ -48,7 +48,33 @@ ProxyModelNotFoundError —— 这个坑踩过一次。
 1229 个落点背后只有 102 个上游端点，其中 50 个是 ChatGPT 账号、24 个 zerokey 账号，
 全是烧订阅额度的。逐落点全探会把账号额度烧穿，探针自己就会把池子打挂。
 一个账号探一次就知道它活没活，没必要为它挂的 26 个模型名各探一次。
-收敛后 68 个目标 / 15 分钟 = 每账号每天 96 发。
+收敛后 82 个目标，周期 = 轮间隔(30~45 分钟随机) + 单轮耗时(串行，约 14 分钟)
+⇒ **每账号每天约 22~33 发**（2026-09-20 从固定 15 分钟先放宽到固定 30 分钟，
+当天又改成 30~45 分钟随机并串行化，理由见下面 PROBE_INTERVAL_MIN 那段注释）。
+⚠️ 算每天几发时别只拿间隔当分母：串行化之后单轮耗时不再可忽略（原来 92s，现在约
+14 分钟），漏掉它会把密度算高 1/3。
+
+怎么不让探针自己长得像个扫描器
+------------------------------
+上游（ChatGPT / Cursor / xAI 这些）看到的不是「我们的监控」，是一个账号上的请求流。
+**固定节奏 + 固定并发 + 固定文本 = 一眼可辨的机器指纹**，风控不需要理解意图就能命中。
+所以四件事同时做，缺一件都会把指纹留下来：
+
+  1. **轮间隔随机** `PROBE_INTERVAL_MIN..MAX`（30~45 分钟均匀抽）。固定 1800s 的话，
+     每个账号每天在同样的分钟数上被打 48 次，这是最刺眼的一条。
+  2. **串行，不并发**（`PROBE_CONCURRENCY` 已删，恒 1）。原来 8 并发 = 82 个目标在 92s
+     内打完，对上游是一个短促的脉冲；现在摊到约 20 分钟。
+  3. **轮内顺序每轮重洗** + 每发之间随机停 2~10s。顺序不洗的话，虽然并发是 1，
+     但同一个账号每轮仍然固定落在第 N 分钟。
+  4. **prompt 从 10 条里随机抽**（`PING_PROMPTS`），不是每次都 "ping"。
+
+⚠️ 这四件事**不降低覆盖**：每轮仍然把全部端点探一遍。少探一部分端点会让
+「连续两轮探不通」的语义坏掉（某端点这轮没被选中，指标停在陈旧值上，
+告警看到的是上一轮的绿），那是拿假绿换来的安静，不接受。
+
+⚠️ prompt 随机化只动 `messages` 里那句话。**body 的其余形状一个字段都不能动** ——
+尤其不许补 `reasoning_effort`：真实客户端不发它，它必须由模型行的 `litellm_params`
+提供，探针一补，「配置漏了档位」这类红就被构造性地屏蔽掉（2026-09-01 实测踩过）。
 
 代表落点挑错会全盘假红
 ----------------------
@@ -84,7 +110,7 @@ import os
 import re
 import json
 import time
-import threading
+import random
 import logging
 import urllib.request
 import urllib.error
@@ -99,13 +125,51 @@ PROXY_BASE = os.environ.get("PROXY_BASE", "http://litellm-proxy:4000").rstrip("/
 PROBE_KEY = os.environ["PROBE_KEY"]
 # 拓扑必须用 master key 拉，受限 key 拿到的是删减视图（见模块 docstring）
 ADMIN_KEY = os.environ.get("ADMIN_KEY") or PROBE_KEY
-INTERVAL = int(os.environ.get("PROBE_INTERVAL", "900"))       # 15 分钟
+# 轮间隔：30~45 分钟之间均匀随机抽，不是固定值。
+# 沿革：900（15min，每账号每天 96 发，太密）→ 1800 固定 → 30~45 随机。
+# 为什么必须随机：固定 1800s 会让每个账号每天在同样的分钟数上被打，加上原来的
+# 8 并发和固定 "ping" 文本，三件事叠起来就是一个不需要理解意图就能命中的机器指纹。
+#
+# ⚠️ 下游尺子按 **MAX** 标定，不是按均值 —— 按均值标会让「抽到 45 分钟那一轮」
+# 每次都假报。三处耦合（只改这里不改那里不会报错，只会开始说谎）：
+#   - llm-probe-stale 的 gt 阈值：算法 = MAX + 单轮耗时，再留两轮余量。
+#     单轮耗时随串行化涨到约 1200s（82 个目标 × 平均 6s 停顿 + 请求本身），
+#     2700 + 1200 ≈ 3900s 是正常最大间隔，阈值取 7800s（≈ 连续漏两轮以上）。
+#   - llm-probe-endpoint-down / -auth / -misconfig 的 min_over_time(...[W])：
+#     W 编码的是「连续两轮」，必须 ≥ 2×MAX + 单轮 = 6600s ⇒ 取 115m。
+#     退化成装不下两个采样点时，「连续两轮才报」会静默变成「一轮就报」。
+#   - 上面三条的 relativeTimeRange.from 要盖住 W。
+# 机器校验：observability-preflight.py 的 CADENCE 腿，改完必跑。
+INTERVAL_MIN = int(os.environ.get("PROBE_INTERVAL_MIN", "1800"))   # 30 分钟
+INTERVAL_MAX = int(os.environ.get("PROBE_INTERVAL_MAX", "2700"))   # 45 分钟
 TOPO_REFRESH = int(os.environ.get("TOPO_REFRESH", "3600"))    # 1 小时重算一次拓扑
 # 90 不是拍的：实测 cursor/grok-4.6 单发 67~72s，60s 会把它判成假红
 REQ_TIMEOUT = int(os.environ.get("PROBE_TIMEOUT", "90"))
 SLOW_SECONDS = float(os.environ.get("PROBE_SLOW_SECONDS", "20"))
-CONCURRENCY = int(os.environ.get("PROBE_CONCURRENCY", "8"))
+# 发与发之间的随机停顿（秒）。串行 + 这个停顿 = 一轮摊到约 20 分钟，
+# 而不是 92s 内一个脉冲。并发已取消（原 PROBE_CONCURRENCY=8），恒串行。
+GAP_MIN = float(os.environ.get("PROBE_GAP_MIN", "2"))
+GAP_MAX = float(os.environ.get("PROBE_GAP_MAX", "10"))
 METRICS_PORT = int(os.environ.get("METRICS_PORT", "9109"))
+
+# 10 条探针问句，每发随机抽一条。全部满足三个条件：
+#   · 极短（省额度，也省 token 计费）；
+#   · 语义上是个真问题，不是控制字符串 —— 上游侧看着像人；
+#   · 答案不参与判据。判据只有状态码（生产挂着 error_sanitize，body 里的
+#     错误文本已被抹成 "API 异常 (req: <id>)"，文本不可判）。所以换文本
+#     不会动摇任何一条告警的语义。
+PING_PROMPTS = (
+    "ping",
+    "hi",
+    "say ok",
+    "1+1=?",
+    "what day is it?",
+    "reply with one word",
+    "are you there?",
+    "name a color",
+    "count to three",
+    "short greeting please",
+)
 
 # 探针状态。429 单独成一态 —— 被限流不等于挂了，混在一起会把「额度用完」
 # 误报成「上游故障」，是两种完全不同的处置。
@@ -119,7 +183,7 @@ STATE_AUTH = 5          # 401/403：凭据过期/被封，跟"上游挂了"是�
 # ⚠️ 状态指标的标签里**不能**放 model_id/model_group。
 # 探针会换候选落点，一换就换了标签组合 = 新开一条时间序列，旧那条变陈旧值留在原地。
 # 后果有两个，都很难看：
-#   1. 幽灵告警 —— `min_over_time(litellm_probe_state[35m]) == 4` 会把"修好之前那一轮"
+#   1. 幽灵告警 —— `min_over_time(litellm_probe_state[115m]) == 4` 会把"修好之前那一轮"
 #      的残影当成还在故障，实测一次改动后凭空多出 25 条命中；
 #   2. cardinality 只增不减，每次轮换都留一条永不复用的序列。
 # 所以按 Prometheus 的惯例拆成两个指标：状态只按端点，"当前探的是谁"单独用 info 指标，
@@ -149,10 +213,34 @@ g_topo_fail = Counter("litellm_probe_topology_failures_total", "拉拓扑失败�
 
 # 挑代表落点的优先级：先按档位从低到高（别去烧强模型那个额度桶），
 # 再优先带 "/" 的 id。
-TIER_HINTS = ["5.4", "mini", "flash", "haiku", "lite", "small", "air", "5.3", "auto"]
+#
+# 2026-09-20：把 "5.3" 提到 "5.4" 前面。旧表 "5.4" 在索引 0，于是每次重算拓扑，
+# 凡是手上有 gpt-5.4 的端点都先挑它当代表（实测 82 个端点里有 53 个）。
+# zerokey 那批（zk-NNN-gpt-5.3，实测 3.5~4.6s 全 200）现在首发命中。
+TIER_HINTS = ["5.3", "mini", "flash", "haiku", "lite", "small", "air", "5.4", "auto"]
+
 # 负向词：mode 字段没标全，这些名字一看就不是 chat，选中了必然假红。
 NEG_HINTS = ("image", "lyria", "veo", "imagen", "sora", "video", "music",
              "tts", "whisper", "embed", "bge", "rerank", "moderation")
+
+# 「上游明确不支持」的落点：拿它当代表必然 400，靠 probe_one 轮换能兜住结果，
+# 但轮换结果只活在内存里，TOPO_REFRESH 一到就清空 —— 于是每次重算拓扑，
+# 每个账号都白烧一发注定失败的请求。写进这里让打分直接把它踢到最后。
+#
+# 判据是实测（2026-09-20，chat 与 responses 两个端点、max_tokens 16 与 256 各打过）：
+#   openai/chatgpt-gpt-5.4              -> 400 "The 'gpt-5.4' model is not supported
+#                                              when using Codex with a ChatGPT account."
+#   openai/chatgpt-gpt-5.3-codex-spark  -> 400 同上，只是模型名换成 gpt-5.3-codex-spark
+# 注意第二条：id 后缀写的是 `-gpt-5.3-codex`，上游真名却是 `...-codex-spark`，
+# 所以必须按 litellm_params.model 匹配，只看 id 名字会漏。
+#
+# ⚠️ 这是「这个上游不接受这个模型」，不是「这个模型不能探」：同名落点挂在别的
+# 端点上照样是好的（wangsu7-gpt-5.3-codex 实测 200）。所以匹配串带上了
+# chatgpt- 前缀，只作用于 ChatGPT 账号池。
+UNSUPPORTED_UPSTREAM_MODELS = (
+    "chatgpt-gpt-5.4",
+    "chatgpt-gpt-5.3-codex-spark",
+)
 CHAT_MODES = {"chat", "responses", None}
 CANDIDATES = int(os.environ.get("PROBE_CANDIDATES", "4"))
 
@@ -229,10 +317,15 @@ def build_targets():
     for ep, legs in by_ep.items():
         def score(x):
             name = (x[0] + " " + x[1] + " " + str(x[2].get("model", ""))).lower()
+            upstream = str(x[2].get("model", "")).lower()
             neg = 1 if any(h in name for h in NEG_HINTS) else 0
+            # 已知上游不支持的落点排最后：仍留在候选里（万一哪天上游支持了，
+            # 轮换还能用上），但绝不当首选，免得每轮白烧一发注定的 400。
+            unsupported = 1 if any(h in upstream
+                                   for h in UNSUPPORTED_UPSTREAM_MODELS) else 0
             tier = next((i for i, h in enumerate(TIER_HINTS) if h in name),
                         len(TIER_HINTS))
-            return (neg, tier, 0 if "/" in x[0] else 1, x[0])
+            return (neg, unsupported, tier, 0 if "/" in x[0] else 1, x[0])
 
         # 留多个候选：代表落点可能被上游拒（如 Codex 账号不支持 gpt-5.4），
         # 探到 400 时当轮换下一个，而不是把端点判成挂。
@@ -275,7 +368,10 @@ def classify(status, elapsed):
 def _send(model_id):
     payload = {
         "model": model_id,
-        "messages": [{"role": "user", "content": "ping"}],
+        # 每发随机抽一条，别让上游看到一串一模一样的 "ping"（见模块 docstring
+        # 「怎么不让探针自己长得像个扫描器」）。判据只有状态码，所以换文本
+        # 不影响任何告警的语义。
+        "messages": [{"role": "user", "content": random.choice(PING_PROMPTS)}],
         # 不能给 1：部分上游会报 "max_tokens ... was reached" 硬 400，那是假红
         "max_tokens": 16,
         "temperature": 0,
@@ -343,25 +439,19 @@ def run_round(targets):
     for k, v in kinds.items():
         g_targets.labels(k).set(v)
 
+    # 串行 + 每轮重洗顺序 + 发间随机停顿。三件事都是为了不给上游留机器指纹：
+    #   · 串行取代原来的 8 并发：82 发不再挤在 92s 里成一个脉冲；
+    #   · 重洗顺序：否则并发虽是 1，同一个账号每轮仍固定落在第 N 分钟；
+    #   · 随机停顿：把一轮摊到约 20 分钟。
+    # 注意仍然是**全量**一轮探完，不抽样 —— 抽样会让「连续两轮探不通」读到陈旧值。
     q = list(targets)
-    lock = threading.Lock()
+    random.shuffle(q)
     tally = defaultdict(int)
 
-    def worker():
-        while True:
-            with lock:
-                if not q:
-                    return
-                t = q.pop()
-            s = probe_one(t)
-            with lock:
-                tally[s] += 1
-
-    ths = [threading.Thread(target=worker, daemon=True) for _ in range(CONCURRENCY)]
-    for th in ths:
-        th.start()
-    for th in ths:
-        th.join()
+    for i, t in enumerate(q):
+        tally[probe_one(t)] += 1
+        if i != len(q) - 1:
+            time.sleep(random.uniform(GAP_MIN, GAP_MAX))
 
     dur = time.time() - t0
     g_round_dur.set(dur)
@@ -376,7 +466,8 @@ def main():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     start_http_server(METRICS_PORT)
-    log.info("探针启动 proxy=%s 间隔=%ds 并发=%d", PROXY_BASE, INTERVAL, CONCURRENCY)
+    log.info("探针启动 proxy=%s 轮间隔=%d~%ds(随机) 串行 发间停顿=%.0f~%.0fs",
+             PROXY_BASE, INTERVAL_MIN, INTERVAL_MAX, GAP_MIN, GAP_MAX)
 
     targets, topo_at = [], 0.0
     while True:
@@ -391,7 +482,9 @@ def main():
             # 拉拓扑失败时保留上一轮的 targets 继续探，不要因为控制面抖动就瞎了
             g_topo_fail.inc()
             log.exception("本轮失败")
-        time.sleep(INTERVAL)
+        nap = random.uniform(INTERVAL_MIN, INTERVAL_MAX)
+        log.info("下一轮 %.0fs 后（%d~%d 随机）", nap, INTERVAL_MIN, INTERVAL_MAX)
+        time.sleep(nap)
 
 
 if __name__ == "__main__":

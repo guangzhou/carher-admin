@@ -15,6 +15,7 @@
   2. RED-ABLE 每条告警规则能被合成红触发（不是读配置说「看起来对」）
   3. DELIVER  告警真能送到人手上（判据是投递计数器，不是 HTTP 200）
   4. FAIL-RED 数据断了必须变红：禁 noDataState:OK、禁 execErrState:OK、禁 eq 阈值
+  5. CADENCE  采样间隔与读它的窗口/阈值算术自洽（改间隔不改尺子 ⇒ 全员假报）
 
 为什么「绿」必须是昂贵的
 ------------------------
@@ -36,6 +37,9 @@ logger 走 lastResort level=30，info 恒不可见）、`replicas>0` 当「在�
 
   # 只看静态那两项（不联网），适合本地跑
   ./observability-preflight.py --rules litellm-stability.yaml --static-only
+
+  # 改过 PROBE_INTERVAL 之后必跑：校验窗口/阈值跟新间隔还自洽
+  ./observability-preflight.py --rules litellm-stability.yaml --probe-script probe.py
 
 这个脚本只读，不改任何线上对象。RED-ABLE 与 DELIVER 两项需要人工配合
 （合成红要真发一发、投递要看计数器），脚本会把**该怎么做**和**判据是什么**
@@ -218,6 +222,134 @@ def check_fail_red(rules_path: str) -> list[str]:
     return problems
 
 
+# 探针间隔现在是一个区间（`PROBE_INTERVAL_MIN`..`MAX`，30~45 分钟随机），不再是单值。
+# **下游尺子必须按 MAX 标定**：按均值标，抽到 45 分钟那一轮就会假报。
+# 两个正则都必须命中，缺一个就报「提取器跟脚本脱节」而不是「间隔没问题」——
+# 这是量具自己的失效形状，2026-09-20 的教训是提取器静默失配比阈值错更难发现。
+INTERVAL_MIN_RE = re.compile(
+    r'^INTERVAL_MIN\s*=\s*int\(os\.environ\.get\(\s*"PROBE_INTERVAL_MIN"\s*,\s*"(\d+)"')
+INTERVAL_MAX_RE = re.compile(
+    r'^INTERVAL_MAX\s*=\s*int\(os\.environ\.get\(\s*"PROBE_INTERVAL_MAX"\s*,\s*"(\d+)"')
+GAP_MAX_RE = re.compile(
+    r'^GAP_MAX\s*=\s*float\(os\.environ\.get\(\s*"PROBE_GAP_MAX"\s*,\s*"([\d.]+)"')
+DURATION_RE = re.compile(r"\[(\d+)([smhd])\]")
+_UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+# 单轮耗时上界。2026-09-20 起探针串行且发间随机停 2~10s，单轮 = 82 × (停顿均值 6s
+# + 请求本身) ≈ 1200s，不再是并发时代的 92~102s。这个数由 check_cadence 按
+# 「目标数 × GAP_MAX」重算，下面的常量只是目标数拿不到时的兜底。
+# 改它要有实测支撑，不要为了让 check 过而调它。
+ROUND_BUDGET_S = 1200
+# 探针目标数。用于按 GAP_MAX 推算单轮上界；实测 82（2026-09-20）。
+# 端点数涨了要改这里 —— 涨了不改 ⇒ 单轮上界算小了 ⇒ stale 阈值假报。
+PROBE_TARGETS = 82
+
+
+def check_cadence(rules_path: str, probe_script: str) -> list[str]:
+    """判据 5：采样间隔与读它的尺子算术自洽。
+
+    2026-09-20 踩的形状：`PROBE_INTERVAL` 从 900 放宽到 1800，而
+      · `llm-probe-stale` 的 gt 阈值按 900 算的（2400s），新间隔下每轮都假报；
+      · `min_over_time(litellm_probe_state[35m])` 里的 35m 编码的是「连续两轮」，
+        对 900s 成立，对 1800s 静默退化成「一轮」—— 一次抖动就报 critical。
+    两处都不会报错，只会开始说谎。所以这条耦合关系必须机器校验，不能只写注释。
+
+    同日第二次改动把间隔改成**区间**（30~45 分钟随机，反风控指纹）并把探针串行化。
+    于是这里的算术要跟着变，两处都容易错：
+      · **按 MAX 标定，不按均值**。按均值 ⇒ 抽到 45 分钟那一轮每次假报，
+        而且假报是间歇性的，比每轮都报更难查。
+      · **单轮耗时不再是 92s**。串行 + 发间停顿 ⇒ 上界 ≈ 目标数 × GAP_MAX。
+        沿用 180s 的旧预算会把 stale 阈值算松，探针半死不活时不报。
+
+    两个不变量（interval 一律取 MAX）：
+      · stale 阈值 > MAX + 单轮耗时（否则正常节奏就超阈值）
+      · 每个 min_over_time(litellm_probe_*) 窗口 ≥ 2×MAX + 单轮耗时
+        （「连续两轮」的字面含义：窗口里必须真的装得下两个采样点）
+    """
+    problems: list[str] = []
+    lo = hi = gap_max = None
+    with open(probe_script) as fh:
+        for line in fh:
+            for rx, setter in ((INTERVAL_MIN_RE, "lo"), (INTERVAL_MAX_RE, "hi"),
+                               (GAP_MAX_RE, "gap")):
+                m = rx.match(line)
+                if not m:
+                    continue
+                if setter == "lo":
+                    lo = int(m.group(1))
+                elif setter == "hi":
+                    hi = int(m.group(1))
+                else:
+                    gap_max = float(m.group(1))
+    missing = [n for n, v in (("PROBE_INTERVAL_MIN", lo), ("PROBE_INTERVAL_MAX", hi),
+                              ("PROBE_GAP_MAX", gap_max)) if v is None]
+    if missing:
+        return [
+            f"  ✗ 在 {probe_script} 里没提取到 {'、'.join(missing)} "
+            f"—— 提取器跟脚本写法脱节了，先修提取器，别当成「间隔没问题」。"
+        ]
+    if lo > hi:
+        return [f"  ✗ {probe_script}: PROBE_INTERVAL_MIN({lo}) > MAX({hi})，区间是反的。"]
+
+    # 串行单轮上界：目标数 × 发间停顿上界。请求本身的耗时已被 GAP_MAX 的余量吸收
+    # （实测单发 3~5s，抽到 10s 停顿的那些发把均值拉平）；取两者较大者兜底。
+    round_budget = max(ROUND_BUDGET_S, int(PROBE_TARGETS * gap_max))
+    doc = _load_yaml(rules_path)
+    rules = [d for d in _walk(doc) if "noDataState" in d and "data" in d]
+    # 一律按 MAX 标定 —— 按均值会让「抽到最长那一轮」间歇性假报
+    interval = hi
+    two_round_min = 2 * interval + round_budget
+    stale_min = interval + round_budget
+    checked = 0
+
+    for r in rules:
+        title = r.get("uid") or r.get("title") or "<无标题规则>"
+        for expr in _exprs(r):
+            # 「连续两轮」窗口
+            for win in re.findall(r"min_over_time\(\s*litellm_probe_[a-z_]*\s*\[(\d+[smhd])\]", expr):
+                checked += 1
+                num, unit = DURATION_RE.match(f"[{win}]").groups()
+                secs = int(num) * _UNIT_S[unit]
+                if secs < two_round_min:
+                    problems.append(
+                        f"  ✗ {title}: min_over_time 窗口 {win}({secs}s) < 2×间隔+单轮 "
+                        f"({two_round_min}s，间隔={interval}s) —— 「连续两轮才报」会退化成"
+                        f"「一轮就报」，一次抖动即 critical。"
+                    )
+            # stale 看门狗阈值
+            if "litellm_probe_last_round_timestamp" not in expr:
+                continue
+            for dd in r.get("data", []) or []:
+                for cond in ((dd.get("model") or {}).get("conditions") or []):
+                    ev = cond.get("evaluator") or {}
+                    if ev.get("type") != "gt" or not ev.get("params"):
+                        continue
+                    checked += 1
+                    thr = float(ev["params"][0])
+                    if thr <= stale_min:
+                        problems.append(
+                            f"  ✗ {title}: stale 阈值 {thr:g}s ≤ 间隔+单轮 ({stale_min}s) "
+                            f"—— 正常节奏就会超阈值，这条看门狗每轮假报。"
+                        )
+                    elif thr > 4 * interval:
+                        problems.append(
+                            f"  ✗ {title}: stale 阈值 {thr:g}s > 4×间隔 ({4 * interval}s) "
+                            f"—— 探针死了要漏过 4 轮才报，太松。取 ≈2 轮。"
+                        )
+
+    if not checked:
+        problems.append(
+            "  ✗ 一条跟探针间隔耦合的尺子都没找到（既无 min_over_time(litellm_probe_*)，"
+            "也无 stale 阈值）—— 要么规则文件不对，要么这两道尺子没了，两种都得人去看。"
+        )
+    if not problems:
+        problems.append(
+            f"  ✓ 间隔 {lo}~{hi}s 随机（按 MAX={interval}s 标定，单轮预算 {round_budget}s"
+            f"＝{PROBE_TARGETS} 目标 × {gap_max:g}s 停顿上界）：{checked} 处耦合尺子全部自洽"
+            f"（两轮窗口 ≥{two_round_min}s，stale 阈值 ∈ ({stale_min}s, {4 * interval}s]）"
+        )
+    return problems
+
+
 def declared_jobs(prom_config: str) -> list[str]:
     doc = _load_yaml(prom_config)
     return [sc.get("job_name") for sc in (doc.get("scrape_configs") or []) if sc.get("job_name")]
@@ -370,11 +502,17 @@ def main() -> int:
         "--delivery-deploy-json",
         help="投递侧 Deployment 的 `kubectl get deploy alert-to-feishu -o json` 落地文件",
     )
+    ap.add_argument(
+        "--probe-script",
+        help="probe.py 路径；给了就校验 PROBE_INTERVAL 与规则里的窗口/阈值是否自洽",
+    )
     ap.add_argument("--static-only", action="store_true", help="只跑不联网的检查")
     args = ap.parse_args()
 
     if not args.rules and not args.prom_config and not args.prom_url:
         ap.error("至少给一个 --rules / --prom-config / --prom-url")
+    if args.probe_script and not args.rules:
+        ap.error("--probe-script 需要同时给 --rules（要比对的尺子在规则文件里）")
 
     failed = False
     print("=" * 72)
@@ -384,6 +522,13 @@ def main() -> int:
     if args.rules:
         print("\n[FAIL-RED] 数据断了必须变红（判据=每个指标族都有 fail-closed 看门狗）")
         for p in check_fail_red(args.rules):
+            print(p)
+            if p.lstrip().startswith("✗"):
+                failed = True
+
+    if args.probe_script:
+        print("\n[CADENCE] 采样间隔与读它的窗口/阈值算术自洽")
+        for p in check_cadence(args.rules, args.probe_script):
             print(p)
             if p.lstrip().startswith("✗"):
                 failed = True

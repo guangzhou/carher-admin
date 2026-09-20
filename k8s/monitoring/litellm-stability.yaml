@@ -297,14 +297,14 @@ groups:
       source: probe
     annotations:
       summary: '{{ $labels.kind }} / {{ $labels.endpoint }} 连续两轮探针都失败（5xx 或超时）'
-      description: 探针每 15 分钟按 model_id 直打这条腿，绕过路由池和 cooldown，所以这不是『池子里还有活腿』能掩盖的。判据只看状态码——生产挂着 error_sanitize，错误文本已被抹掉，要原因去 pod 日志 grep req id。看板：/d/litellm-stability-198（第四段 主动探针）。
+      description: 探针每 30~45 分钟（随机间隔，防风控指纹）按 model_id 直打这条腿，绕过路由池和 cooldown，所以这不是『池子里还有活腿』能掩盖的。判据只看状态码——生产挂着 error_sanitize，错误文本已被抹掉，要原因去 pod 日志 grep req id。看板：/d/litellm-stability-198（第四段 主动探针）。
     noDataState: OK
     execErrState: Error
     isPaused: false
     data:
     - refId: A
       relativeTimeRange:
-        from: 1800
+        from: 7200
         to: 0
       datasourceUid: PBFA97CFB590B2093
       model:
@@ -314,7 +314,7 @@ groups:
         editorMode: code
         intervalMs: 60000
         maxDataPoints: 43200
-        expr: min_over_time(litellm_probe_state[35m]) == 3
+        expr: min_over_time(litellm_probe_state[115m]) == 3
     - refId: C
       datasourceUid: __expr__
       model:
@@ -353,7 +353,7 @@ groups:
     data:
     - refId: A
       relativeTimeRange:
-        from: 1800
+        from: 7200
         to: 0
       datasourceUid: PBFA97CFB590B2093
       model:
@@ -363,7 +363,7 @@ groups:
         editorMode: code
         intervalMs: 60000
         maxDataPoints: 43200
-        expr: min_over_time(litellm_probe_state[35m]) == 5
+        expr: min_over_time(litellm_probe_state[115m]) == 5
     - refId: C
       datasourceUid: __expr__
       model:
@@ -402,7 +402,7 @@ groups:
     data:
     - refId: A
       relativeTimeRange:
-        from: 1800
+        from: 7200
         to: 0
       datasourceUid: PBFA97CFB590B2093
       model:
@@ -412,7 +412,7 @@ groups:
         editorMode: code
         intervalMs: 60000
         maxDataPoints: 43200
-        expr: min_over_time(litellm_probe_state[35m]) == 4
+        expr: min_over_time(litellm_probe_state[115m]) == 4
     - refId: C
       datasourceUid: __expr__
       model:
@@ -493,7 +493,7 @@ groups:
       source: probe
     annotations:
       summary: 距上一轮探针结束已 {{ humanizeDuration $values.A.Value }}，探针没在跑
-      description: 阈值 2400s 来自实测：间隔 900s + 单轮约 92s，正常最大间隔 ~1000s；2400s 意味着连续漏了两轮以上。探针一停，看板上的绿色全是陈旧值——绿色必须先证明量具活着。看板：/d/litellm-stability-198（第四段 主动探针）。
+      description: 阈值 7800s 按**间隔上界**标定：间隔 30~45 分钟随机，取 MAX 2700s + 串行单轮约 1200s（82 目标 × 发间随机停顿），正常最大间隔 ~3900s；7800s 意味着连续漏了两轮以上。按均值标会让抽到 45 分钟那一轮间歇性假报，比每轮假报更难查。改间隔（或改目标数/停顿上界）必须改这里，机器校验在 observability-preflight.py 的 CADENCE 腿。探针一停，看板上的绿色全是陈旧值——绿色必须先证明量具活着。看板：/d/litellm-stability-198（第四段 主动探针）。
     noDataState: Alerting
     execErrState: Error
     isPaused: false
@@ -521,7 +521,7 @@ groups:
         - evaluator:
             type: gt
             params:
-            - 2400
+            - 7800
           operator:
             type: and
           query:

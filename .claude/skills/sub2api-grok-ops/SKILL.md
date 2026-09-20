@@ -6,10 +6,67 @@ description: >-
   sub2api 内部虚拟余额充值、SSO→OAuth 建号、`sa-grok-4.6` 作为 cursor gpt 系 fallback、两层回归。
   同一台 sub2api 上还挂着 Kimi Allegro（`sa-kimi-k3` / `sa-kimi-code*`，group 8/9），
   动它前先看影响面。**升级 sub2api 本体也在这里（§G，一条命令 `sub2api-upgrade.py go`）**。
-  Use when 用户说"grok 不能用了"/"sub2api 403"/"grok 报余额不足"/
+  **「grok 又被全部停下了 / 重新认证下」= §⚡ 最前面那一节，一条命令 `rescue`，
+  而且九成不该跑 reauth（腿通常是健康的，被 sub2api 自己 park 了）。**
+  Use when 用户说"grok 不能用了"/"我的 grok 又被停了/全停了"/"grok 重新认证下"/
+  "重新授权 grok"/"sub2api 403"/"grok 报余额不足"/
   "再加一个 grok 账号"/"sa-grok-*/grok-4.5 打不通"/"kimi 不能用了"/"sa-kimi-* 报错"/
   "sub2api 有新版本了升级下"。
 ---
+
+## ⚡「我的 grok 又被全部停下了」—— 一条命令，而且它**不是** reauth
+
+```bash
+cd ~/grok-onboard      # 198 上；脚本已在，不用再传
+sudo kubectl -n litellm-dev get secret sub2api-secrets \
+  -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d | sudo tee /run/.s2apw >/dev/null
+sudo chmod 600 /run/.s2apw
+
+sudo S2A_PW_FILE=/run/.s2apw python3 sub2api-grok-onboard.py rescue --dry-run  # 先看
+sudo S2A_PW_FILE=/run/.s2apw python3 sub2api-grok-onboard.py rescue            # 再放
+sudo S2A_PW_FILE=/run/.s2apw python3 sub2api-grok-onboard.py regress --minutes 15
+sudo rm -f /run/.s2apw
+```
+
+`rescue` 做的事：读全五把闸 → **拿每条腿的 token 真打 `api.x.ai/v1/models`** →
+只对 `200 usable` 且被扣住的腿 `clear-error` + `bulk-update` → 读 postgres 回核 →
+把窗口内的 admin 审计行打出来（**第二只手**）。
+
+🔴 **用户说"重新认证下"时，九成不该跑 `reauth`。** 2026-09-20 一上午停了三回，三回都是
+**健康的腿被 sub2api 自己扣住** —— 八条腿直打 x.ai 全 `200 usable`，reauth 是把一个 xAI
+已经认的 token 重写一遍，纯 no-op。`reauth` 只在**手里有新凭据行**且探针说存的 token 死了时才跑。
+
+| 症状 | 该跑 | 不该跑 |
+|---|---|---|
+| 全池 503 / 腿都停了，探针 `200 usable` | `rescue` | ⛔ reauth（no-op） |
+| 探针 `403 ...bad-credentials`，且手里有新 SSO 行 | `reauth <creds>` | — |
+| 探针 `403 ...spending-limit` | **只能充钱** | ⛔ 两个都是 no-op |
+
+⛔ **`rescue` 不放 `spending-limit` 的腿**，这是故意的：放出来只是多一条腿吃 failover 再 403，
+09-20 就是这么把一个本来就薄的池子推成全池 503 的。
+
+### 这一节踩过的三个坑（都写进脚本了，别再手搓这套命令）
+
+1. **`reset-quota` 不碰 `temp_unschedulable_until`** ⇒ 跑完整套 reauth 腿仍然是 park 状态，
+   503 一条不少。09-20 09:4x reauth 完 36/37，直到单独 `clear-error` 才停。
+   **已修**：`reauth` 第 5 步现在自己打 `clear-error`。
+2. **`bulk-update` 返 `success:8 failed:0` 之后立刻读库，读到的是旧值。** 09-20 12:18 八条腿
+   `updated_at` 已经是 12:18:22、`schedulable` 已经是 `t`，而单次 readback 全读成 `f`。
+   **已修**：readback 重试 4 次 × 3s 收敛，不是 sleep 一次赌延迟。
+3. 🔴 **`psql -t -A` 的布尔有两种拼法**：裸列印 `t`/`f`，`boolean::text` 印 `true`/`false`。
+   我在新查询里加了 `::text`，`== "t"` 的解析当场把八条 `true` 全判成 `False` ⇒
+   **八个 "STILL HELD" 假红，形状和"写没落"一模一样**，害我去查 group、查库名、查竞态。
+   **已修**：统一走 `pgbool()`，且 SQL 侧不再 cast 布尔。判「写没落」之前先确认读数器没坏。
+
+### 第二只手（09-20 实测，会让状态来回翻）
+
+`sub2api` 自己写 park **不留审计行**，所以 `audit_logs` 里每一行都是人或另一个会话。
+⛔ `actor_email` 区分不了：**大家共用 `admin@sub2api.local`，脚本自己也是它**，只能按时间分。
+
+09-20 当天：10:51 有人用 `sso-to-oauth` 建了 acct 38/39（不是我建的）；11:01 和 11:31
+两次把腿 `POST /accounts/:id/schedulable {"schedulable":false}` 关掉，**11:31 那次就在我
+11:28 放开之后 34 秒**；12:18 之前整池 19 条全被关成 `sched=f`，包括三条正在跑
+163/184/200 req/15min 的。所以「放开又被停」先看审计行，别默认是 sub2api 干的。
 
 ## 🚦 第 0 步（2026-09-17 起强制）：`health` 先拿基线，再动任何东西
 
@@ -114,7 +171,7 @@ FROM ops_error_logs WHERE created_at > now() - interval '30 minutes'
 老腿被 x.ai 侧限流打到集体退避，池子空转 17 分钟。10:57 建的两个新号一上线，
 那一分钟失败就从 33 塌到 4，下一分钟 0。同窗 kimi 也有 10~21 条/分的 503 routing（旁证同一台）。
 
-### 四个坏尺子（都栽过）
+### 四个坏尺子（都栽过）—— 外加下面那把 `temp_unschedulable_until`，四把全绿它也能 503
 
 0. ⛔ **上面三个尺子全绿/全红都区分不了"token 死"和"xAI 余额死"**，而这两个的处置
    完全相反（重新授权 vs 只能充钱）。分开它俩的唯一办法是**拿新 token 直打
@@ -132,6 +189,71 @@ FROM ops_error_logs WHERE created_at > now() - interval '30 minutes'
 3. ⛔ **`rate_limit_reset_at` 有未来时刻 ≠ 已证明调度器读这一列。** 09-17 那 6 条腿的
    reset 指向 09-18～10-01，与"零流量"强相关，但我**没有**证据证明选腿逻辑读的是它
    （相关不是机制）。要下这个结论得去读 sub2api 选腿代码或拿到调度日志。
+
+### 🔴 第五把尺子：`temp_unschedulable_until`（2026-09-20 新增，前四把全绿它也能让整池 503）
+
+**09-20 全池 503 的真因就是它，而上面四把尺子当时全绿。** 形状：
+
+```
+schedulable = t          ← 绿
+rate_limited_at = NULL   ← 绿
+新 token 直打 api.x.ai   ← 200 usable（连红线①都绿）
+temp_unschedulable_until = now()+30min   ← 真正的闸在这里
+temp_unschedulable_reason = 'grok access or entitlement denied'
+```
+
+09-20 09:35:45 **那一秒**，4 条正在服务的腿（30/31/35/37）被同时 park 到 30 分钟后，
+`routing`/`account_id=NULL` 立刻起到 300~440 条/分，用户面 ok 从 79/min 塌到 2~9/min、
+fail 36~50/min，持续 9 分钟。**触发它的只是 acct 30 的一条上游 403**
+（`upstream_status_code=403` "Upstream access forbidden"）—— sub2api 把单条 403
+放大成整腿停 30 分钟。腿本身是好的，所以**加号和 reauth 对它都是纯 no-op**。
+
+⛔ **别把 `reason` 里的 `entitlement denied` 当成"这号没订阅"**：那是 sub2api 自己贴的标签，
+不是 xAI 的判决。xAI 的判决在红线①那个 body 里，当时是 200。
+
+```sql
+-- 判"全池 503 但腿看着都好"必查这一条
+SELECT id,name,schedulable,rate_limited_at,temp_unschedulable_until,temp_unschedulable_reason
+FROM accounts WHERE platform='grok' AND deleted_at IS NULL
+  AND temp_unschedulable_until > now() ORDER BY id;
+```
+
+**清它只有一个端点：`POST /api/v1/admin/accounts/{id}/clear-error`。**
+09-20 拿 acct 36 试、acct 37 当阴性对照逐个分辨过：
+
+| 端点 | 对 `temp_unschedulable_until` | 备注 |
+|---|---|---|
+| `POST /accounts/{id}/clear-error` | ✅ 清成 NULL | 唯一有效 |
+| `POST /accounts/{id}/clear-rate-limit` | ⛔ 一位没动 | 返 200 |
+| `POST /accounts/{id}/recover-state` | ⛔ 一位没动 | 返 200 |
+| `POST /accounts/{id}/reset-quota` | ⛔ 一位没动 | 它清的是 `rate_limited_at` |
+
+⚠️ **reset-quota 是 `reauth` 的第 4 步**，所以**跑完整套 reauth，腿仍然是 park 状态** ——
+09-20 我 reauth 完 36/37 两条腿，503 一条没少，直到 `clear-error` 才停。
+
+放腿**别再手搓这个 for 循环**（漏掉 `bulk-update` 和回核，第一版就漏了）——
+`rescue` 把分类、放腿、回核、查第二只手四件事一起做了，见本文件最前面的 §⚡。
+
+```bash
+sudo S2A_PW_FILE=/run/.s2apw python3 sub2api-grok-onboard.py rescue --dry-run
+sudo S2A_PW_FILE=/run/.s2apw python3 sub2api-grok-onboard.py rescue
+```
+
+**验收看逐分钟塌不塌，别信端点返 200。** 09-20：`routing` 09:44=437 → 09:45=71 →
+09:46/47=**0**，`usage_logs` 回到 75/86/50 每分钟，`regress --minutes 30` EXIT=0。
+
+📐 **底层原因是池子没有冗余，而且 09-20 一天内三次复发。**
+
+⛔ **别再抄"11 条 token 死、可 reauth"这个数** —— 那是**坏尺子读出来的**。池子里存的是几天前的
+token，过期后直打 x.ai 报 `403 unauthenticated:bad-credentials`，**把底下真正的
+`spending-limit` 盖住了**。当天下午拿新 SSO 换过一轮再打，`bad-credentials` 一条不剩：
+19 条腿里 **11 条 `spending-limit`（真没钱，只能充）、8 条 `200 usable`、token 死 0 条**。
+
+🔑 **所以「token 死还是余额死」只有拿刚换的新 token 打才算数**；用池子里存的旧 token 打，
+读数会系统性偏向"token 死"，而 token 死是能 reauth 的那一类 ⇒ 会让人一轮轮白跑 reauth。
+
+8 条活腿撑全部流量，任何一条上游 403 都会 park 掉一条 30 分钟。**修完这次还是 8 条**，
+下一条 403 会重演 —— 要真止住，只有给那 11 条充钱，或者补新号。
 
 ### 什么时候该说"加号解决不了"
 
@@ -394,6 +516,11 @@ emitter 换个 key 顺序或空格就静默匹配 0 条，读出来是"没有 fa
 
 ### C5. 🔑 给**已存在**的腿换新 token —— `reauth`，不是 `add`、更不是 `sso-to-oauth`
 
+🔴 **先读这一句：用户说"重新认证下"时，九成要跑的是 `rescue`（本文件最前面 §⚡），不是这一节。**
+`reauth` 重写凭据，而停掉的腿通常凭据是好的（探针 `200 usable`），被 sub2api 自己 park 了 ——
+09-20 三次全池 503，三次都是这个形状，reauth 对它是纯 no-op。
+**跑 `reauth` 的唯一前提：手里有新的凭据行，并且探针说存的 token 真的死了。**
+
 2026-09-18 实测。号早就在池子里、只是 token 过期时，前面两条路都不能用：
 
 - `add` 会看到同名号直接跳过；
@@ -413,8 +540,10 @@ emitter 换个 key 顺序或空格就静默匹配 0 条，读出来是"没有 fa
    时间戳（不顶，reloader 侧可能不认为变了）；
 4. `POST /accounts/{id}/reset-quota` —— 清 `rate_limited_at` / `rate_limit_reset_at` 的
    就是这一个端点；
-5. `POST /accounts/bulk-update {"account_ids":[id],"schedulable":true}`；
-6. 逐字段回读。
+5. `POST /accounts/{id}/clear-error`（**2026-09-20 补的第 5 步**）—— 第 4 步**不碰**
+   `temp_unschedulable_until`，少这一步的话凭据换新了腿仍然是 park 状态、503 一条不少；
+6. `POST /accounts/bulk-update {"account_ids":[id],"schedulable":true}`；
+7. 逐字段回读，**park 那一列从 postgres 读**（admin GET 不暴露它）。
 
 #### 🔴 这一节的三条硬红线（都是当天被咬出来的）
 

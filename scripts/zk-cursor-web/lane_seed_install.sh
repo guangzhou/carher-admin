@@ -57,7 +57,7 @@ for N in "$@"; do
 
   SZ=$($SSH "$H188" "stat -c %s '$SRC' 2>/dev/null || echo 0")
   if [ "${SZ:-0}" -lt 1000 ]; then
-    echo "❌ 188 上没有可用的源文件（$SRC，size=$SZ）—— 先跑 lane_seed_capture.sh $N"
+    echo "❌ 188 上没有可用的源文件（${SRC}，size=${SZ}）—— 先跑 lane_seed_capture.sh $N"
     rc_all=1; continue
   fi
   echo "源: 188:$SRC  $SZ bytes"
@@ -68,8 +68,19 @@ for N in "$@"; do
       echo \"  备份旧 seed -> /Data/backups/zerokey-seed-$N-$TS-pre-install.json (\$(sudo -n stat -c %s '$DST') bytes)\"; \
     else echo '  无旧 seed（新号，不需要备份）'; fi"
 
-  # 灌：字节走管道，不落本地磁盘
-  $SSH "$H188" "cat '$SRC'" | $SSH_IN "$H225" "sudo -n tee '$DST' >/dev/null && sudo -n chmod 600 '$DST'"
+  # 灌：字节走管道，不落本地磁盘。
+  # 先落临时文件再比内容 —— **内容没变就不覆盖**，否则 mtime 每轮刷新，
+  # 判据 ④ 结构性恒红：本脚本自己写的 mtime 永远晚于「上一次 pod 启动」。
+  # （2026-09-20 踩过：新建腿 restart 完再跑一遍校验，三条腿全红，差值只有十几秒，
+  #   红的不是"pod 里是旧副本"而是"我刚又写了一次"。）
+  TMP="/tmp/seed-$N-$TS.json"
+  $SSH "$H188" "cat '$SRC'" | $SSH_IN "$H225" "cat > '$TMP' && chmod 600 '$TMP'"
+  CHANGED=$($SSH "$H225" "if sudo -n cmp -s '$TMP' '$DST' 2>/dev/null; then echo same; else sudo -n cp '$TMP' '$DST' && sudo -n chmod 600 '$DST' && echo written; fi; rm -f '$TMP'")
+  if [ "$CHANGED" = "same" ]; then
+    echo "  内容与现有 seed 一致，未覆盖（保留原 mtime，判据 ④ 才量得准）"
+  else
+    echo "  已写入（内容有变）"
+  fi
   SEED_MT=$($SSH "$H225" "sudo -n stat -c %Y '$DST' 2>/dev/null || echo 0")
 
   # 判据三连（在 225 上就地验，不把内容传回来）
@@ -129,14 +140,14 @@ PY
       echo "  ❌ 读不到 $POD 的 zerokey 容器 startedAt（不是 Running？）—— 判不了拷没拷到，先看 pod 状态"
       rc_all=1
     elif [ "$START_EPOCH" -lt "${SEED_MT:-0}" ]; then
-      echo "  ❌ 容器 startedAt=$STARTED 早于本次 seed（mtime=$SEED_MT）—— pod 里那份是旧副本，"
+      echo "  ❌ 容器 startedAt=$STARTED 早于本次 seed（mtime=${SEED_MT}）—— pod 里那份是旧副本，"
       echo "     必须 $KC rollout restart deploy/$DEP 才算灌进去了（不重启毫无症状，到期才全红）"
       rc_all=1
     elif [ "$IN_KEY" != "acct$N" ]; then
       echo "  ❌ in-pod users key = '${IN_KEY:-none}'，期望 acct$N"
       rc_all=1
     else
-      echo "  ✅ in-pod: 容器 startedAt=$STARTED 晚于 seed mtime=$SEED_MT，key=$IN_KEY"
+      echo "  ✅ in-pod: 容器 startedAt=$STARTED 晚于 seed mtime=${SEED_MT}，key=$IN_KEY"
     fi
   fi
 done

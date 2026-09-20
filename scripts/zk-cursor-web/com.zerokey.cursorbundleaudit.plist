@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zerokey.cursorbundleaudit</string>
+
+    <!-- 每天问一次官方 stable 版本号(~1KB)。版本没变就静默退出,不下 dmg。
+         变了才跑 bundle_patch_regress.sh --fetch 的全四腿,绿红都告警。
+         没有这条:同事升级 Cursor → 补丁全掉 → 要等他反馈"模型不见了"才知道。 -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>/Users/Liuguoxian/codes/carher-admin/scripts/zk-cursor-web/bundle_audit_daily.sh</string>
+    </array>
+
+    <!-- 10:40 而不是 10:00:整点是所有人的默认值,没必要跟着挤。 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>10</integer>
+        <key>Minute</key><integer>40</integer>
+    </dict>
+
+    <!-- 睡过头的那天开机后补跑一次(笔记本常年不在 10:40 醒着)。 -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 台架要 hdiutil 挂 dmg + 跑 Cursor 的 Electron,给足时间;单次巡检不常驻。 -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/cursor_bundle_audit.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/cursor_bundle_audit.err</string>
+</dict>
+</plist>

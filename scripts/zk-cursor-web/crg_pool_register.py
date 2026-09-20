@@ -43,6 +43,7 @@
 """
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -97,18 +98,38 @@ def main():
     if "--dump" in args:
         return 0
 
-    # 源 = 82 的直连名，且只要 `zerokey-` 开头的那条腿（裸载体腿是 xhigh 旗种子，见 docstring）
+    # 拷贝源。**09-21 改过一次**：原来只认 82 的 `-82` 直连名，
+    # 但 82 那条腿这天被判死（实打 `session_expired`）、它的 28 个独占直名已删，
+    # 于是这里读出 0 个名字 → `EXPECT_NAMES` 闸门把整轮拦死（我给 195 补登记时撞上的）。
+    # 教训不是"别删 82"，是**模板源不该钉在一条随时会死的腿上**：
+    # 现在退化到「任一条活着的池腿的池名行」，池名行的形状与 `-82` 直名完全同源
+    # （当初就是从它拷出去的），只有 `api_base` / `model_info.id` 两键不同，而这两键
+    # 下面本来就要逐腿重写。⛔ 仍然只取 `zerokey-` 开头的 id：裸载体腿
+    # （`gpt-5.6-luna-wm` / `gpt-5.6-thinking`）是 xhigh 旗种子，形状不一样，见 docstring。
     src = {}
     for r in rows:
         n = r["model_name"]
         i = (r.get("model_info") or {}).get("id") or ""
         if n.endswith("-82") and i.startswith("zerokey-"):
             src[n[:-3]] = r          # 去掉 "-82" 就是池名
-    print("\n== 拷贝源：82 上 %d 个名字 ==" % len(src))
     if len(src) != EXPECT_NAMES:
-        # 不是"少几个也能凑合"：82 的菜单如果变了，我对目标形状的理解就已经过期，
-        # 闷头铺出去 = 池子和 canary 长得不一样。停手让人来看。
-        print("❌ 期望 %d 个，实际 %d 个 —— 82 的菜单变过了，停手" % (EXPECT_NAMES, len(src)))
+        fb = {}
+        for r in rows:
+            n = r["model_name"]
+            i = (r.get("model_info") or {}).get("id") or ""
+            # 池名 = 不带 `-<lane>` 后缀；lane 号是 2~3 位数字
+            if re.search(r"-\d{2,3}$", n) or not i.startswith("zerokey-"):
+                continue
+            fb.setdefault(n, r)      # 同名多腿，取第一条即可（形状相同）
+        if len(fb) == EXPECT_NAMES:
+            print("\n⚠️  82 的直名源只有 %d 个（82 已判死、直名已摘），"
+                  "退回「活池腿的池名行」作模板：%d 个名字" % (len(src), len(fb)))
+            src = fb
+    print("\n== 拷贝源：%d 个名字 ==" % len(src))
+    if len(src) != EXPECT_NAMES:
+        # 不是"少几个也能凑合"：菜单如果变了，我对目标形状的理解就已经过期，
+        # 闷头铺出去 = 池子里各腿长得不一样。停手让人来看。
+        print("❌ 期望 %d 个，实际 %d 个 —— 菜单变过了，停手" % (EXPECT_NAMES, len(src)))
         return 2
 
     plan, skip = [], []
@@ -144,7 +165,7 @@ def main():
     if "--with-direct" in args:
         base = src.get("cr-g-5.6-mini")
         if not base:
-            print("❌ --with-direct 拿不到 cr-g-5.6-mini 的 82 源行，不瞎猜形状，停手")
+            print("❌ --with-direct 拿不到 cr-g-5.6-mini 的模板源行，不瞎猜形状，停手")
             return 2
         bp = dict(base.get("litellm_params") or {})
         for lane in LANES:

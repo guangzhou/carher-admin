@@ -361,3 +361,129 @@ A 类的落点是 `logout?ls=wd` ⇒ 页面**换过**（不是卡在登录页不
 203 的形状值得单记：`post-OTP login state=True` 但 `url` 仍是 `email-verification`，
 随后 `[1b] silent SSO via Log in` 也没救回来 ⇒ **不是取码失败**，是提交了正确验证码之后
 OpenAI 仍不发会话。和 183/184/189 同一档（都盘==表），成因仍未查。
+
+## 七、老腿体检与摘除（09-21 01:0x ~ 01:2x）
+
+### 7.1 这一轮先纠了三把坏尺子
+
+**① `/model/info` 的 `api_key` 对活腿死腿一样是 `''`** —— 想用它判"哪条腿的 key 形状不对"，
+读出来绿死腿绿活腿全空。**这一栏被脱敏了，不能当判据。**
+
+**② lane 容器日志里的 `TypeError: user is not a function` 不是本次请求的错误。**
+我照 `grep` 到的这行说"死因是 api_key 非 vscode/cursor 形状"，但读了 `server.js:17`
+（`req.ide = authHeader.slice(7).toLowerCase()`）后**实测**：给 135/82/84 直发
+`Authorization: Bearer vscode` 与空 bearer，两种形状**回的都是
+`session_expired`，不是 `user is not a function`**。那行 traceback 是别的流量留下的。
+⇒ **日志里 grep 到一段"看起来能产生该现象"的报错 ≠ 该路径被本次请求执行**。
+
+**③ `/key/list?page_size=1000` 静默截到 10 条**（`total_count=1668`、`total_pages=167`）。
+我据它得出"没有任何 key 显式点名这些名字"——**那是 10/1668 的样本造出来的假绿**。
+真判据走 DB：`select … from "LiteLLM_VerificationToken", unnest(models)`。
+⚠️ 凡"数东西"的查询，先断言自己数得到（对一下 total）。
+
+**④ SpendLogs 里 `total_tokens>0` 不等于"答出来过"。** 失败行照样有
+`prompt_tokens`（263）而 `completion_tokens=0`、`metadata->>'status' = 'failure'`。
+判"这个名字有没有真流量"要**同时**看 `status` 和 `completion_tokens`。
+
+### 7.2 真正能用的尺子：绕开 litellm 直打 lane
+
+```
+POST http://zero-cursor-bpi-<lane>.litellm-product.svc.cluster.local:8201/v1/chat/completions
+Authorization: Bearer vscode     # server.js 拿它当 req.ide
+body: {model, stream:true, tools:[…], messages:[{user:"reply with exactly: ZKPROBE-OK-771"}]}
+```
+
+`tools` 必带（cursor 线型必需，栈顶就是 `ToolCompiler.formatPrompt`），判据是**收割后的文本
+命中暗号**。这条路不经过 litellm 的模型行，所以能把"腿死了"和"模型行没配对"分开。
+
+**seed 里唯一能判死活的字段**：`/seed/users.json → chatgpt.acct<N>.parsedFetch.headers.authorization`
+的 JWT `exp`。⛔ 不是 `users.json` 顶层的 `headers`（那一层没有 headers，我第一版脚本读它，
+**活腿死腿一起读出 `hdrs=0 cookielen=0`**，典型的一屏红先疑提取器）。
+
+### 7.3 体检结果（26 条 lane 全打，同一轮里有活的做阳性对照）
+
+| lane | seed token `exp` | 直打 | 判定 |
+|---|---|---|---|
+| 175…193 / 195 / 200…208（22 条） | 09-30 前后 | **200 + 暗号命中** | 活 |
+| **135** | **2026-09-12（过期 9 天）** | 500 `session_expired` | **死** |
+| **84** | **2026-09-04（过期 17 天）** | 500 `session_expired` | **死** |
+| **82** | 2026-09-22（**还没过期**） | 500 `session_expired` | **死** |
+| **`zero-cursor-bpi`（无后缀 base）** | — | 500 `session_expired` | **死** |
+
+**82 是反例，必须单记**：token `exp` 还有一天，镜像 digest 与活腿完全相同
+（`6527e1056135a3ed197d`），env 只差 `ZK_USER` 和 `ZK_SKILL_HINT`，**却同样
+`session_expired`** ⇒ **失效不止"JWT 到期"一条路**（cookie 侧先废也够）。
+所以判腿死活**只能实打，不能靠算 `exp`**。
+
+**lane 195 平反**：它 21 个 slug 全齐却恒 403 的旧结论，这轮查出来是**注册侧**问题——
+lane 本身直打 200 + 暗号命中，而 `/model/info` 里 **195 一行模型都没有**。
+它不是"坏腿要摘"，是"好腿没登记"。
+
+### 7.4 摘除范围与依赖计数（动手前先数）
+
+摘掉 82/84/135/base 这 4 条后**会彻底没有腿**的对外名：**49 个**（其余名字 0 个受影响，
+即不存在"掉一部分腿还能服务"的中间态）。分三族：
+
+- `cr-g-*-82` / `cr-g-*-135` 各 14 个 = 28 个**独占直名**（只给探针用）
+- `cursor-g-*` 13 个（含 `cursor-g-5.5` 等 6 个池名，腿 2/2 全死）
+- `cursor-web-fc-*` 8 个（含 `cursor-web-fc-pool-terra*` 3 个；lane 101 那条线**已弃**）
+
+依赖计数（DB，不是 `/key/list`）：**1982 把 key，其中 319 把是 `*`/空**（全放开，不点名）。
+显式点名这 49 个名字的 key 共 6 把：
+
+| key_alias | 建于 | models 数 | 近 30 天发数 |
+|---|---|---|---|
+| `cursor-zhangkairui-h1iz` | 04-13 | 69 | 0 |
+| `cursor-liuguoxian03` | 08-11 | 98 | 0 |
+| `cursor-liuguoxian04-5rub` | 08-15 | 172 | **198** |
+| `tmp-fmdrill-050213` | 08-24 | 1 | 0 |
+| `r2text-101-1787808598` | 08-27 | 1 | 0 |
+| `tmp-crg-step1-20260902` | 09-02 | 2 | 0 |
+
+`cursor-liuguoxian04-5rub` 有 198 发真流量，但它 models 里有 172 个名字——**要先确认它那
+198 发落在哪些名字上**，再决定能不能摘它点名的那几个。
+
+**近 30 天这 49 个名字的全部流量**：`cursor-g-*` / `cr-g-*-82` / `cr-g-*-135` 共 22 行，
+**每一行 `status=failure`、`completion_tokens=0`，且最后一发是 09-20 13:4x~17:0x**——
+全是我自己昨天的探针。⇒ **零真实用户流量**。
+
+`cursor-liuguoxian04-5rub` 那 198 发也查了落点：只有 4 发碰到死名
+（`cursor-g-5.6-sol` / `-sol-high` / `cursor-g-82-sol` 各 1、`cursor-fc-5.6-sol` 1），
+**全是 failure**，同样是昨天的探针。其余落在 `cr-g-*` 池名、`kiro-*`、`sa-*` 上。
+
+### 7.5 这一轮实际动了什么（可回滚）
+
+| 动作 | 范围 | 备份 | 回滚 |
+|---|---|---|---|
+| **删模型行** | 28 个 `cr-g-*-82` / `cr-g-*-135` **独占直名** | `.backups/deadlegs-20260921.json`（57 行，含 `cursor-g-*`/`cursor-web-fc-*` 那 29 行未删的） | `/model/new` 逐行重建，或 `crg_pool_register.py --lanes 82,135 --with-direct --apply` |
+
+> 这份备份**能回放**：它取自 `/model/info`（已解密），`api_base` / `model` 都是明文。
+> ⚠️ 别把它跟「`ProxyModelTable` 的 `model`/`api_base` 是密文、DB 层备份只能取证」那条
+> 混为一谈 —— 那说的是直接 dump 数据库表的情形，路径不同，结论相反。
+> 备份里唯一被脱敏的是 `api_key`（`/model/info` 一律回 `''`），重建时由脚本补 IDE 名。
+| **Deployment 缩到 0** | `zero-cursor-bpi-135`、`zero-cursor-bpi`（无后缀 base） | `198:/tmp/bk-zero-cursor-bpi-135-20260921.yaml`、`198:/tmp/bk-zero-cursor-bpi-20260921.yaml` | `kubectl scale deploy <name> --replicas=1` |
+| **补登记 lane 195** | 新增 14 个池名腿 + 1 个独占直名 = 15 行 | — | `/model/delete` 那 15 个 `zerokey-cr-g-195-*` id |
+
+**⛔ 没删也没停的**：`zero-cursor-bpi-82` / `-84` 两条 Deployment 仍 1/1 在跑。它们虽然实打
+`session_expired`，但 `cursor-g-*`（13 个名）和 `cursor-web-fc-*`（8 个名）两族对外名还挂在
+上面，那是另一条产品线的待裁决事项；**这一轮只摘 cr-g 池自己的东西**。
+两个裸载体 id（`gpt-5.6-luna-wm`、`gpt-5.6-thinking`，寄在 `cr-g-5.6-luna-max-82` /
+`cr-g-5.6-thinking-max-82` 名下）**脚本里显式跳过**——删掉它们 = 池的 `-max` 静默退回
+standard 且不报错。
+
+**回归**：删完 + 补完 195 后 `rollout restart deploy/litellm-proxy`，再 `--all --keys 6`
+打 14 个池名 **14/14 命中、失败 0 发**，落点分布在 175/178/180/181/182/187/190/193/204/208，
+**没有一发落到 82/84/135/base**。lane 195 独占直名 `cr-g-5.6-mini-195` 连打 2 发全中，
+SpendLogs 落点都在 195。**池腿 21 → 22。**
+
+### 7.6 顺手修掉的一个结构性坑
+
+`crg_pool_register.py` 的模板源原来**钉死在 lane 82 的 `-82` 直名行**上。我删掉那 28 行之后，
+它读出 0 个名字，`EXPECT_NAMES` 闸门直接把「给 195 补登记」这件毫不相关的事拦死。
+教训不是"别删 82"，是**模板源不该挂在一条随时会死的腿上**：现在加了退路——82 直名不足
+14 个时，退回「任一条活着的池腿的池名行」（形状同源，只有 `api_base`/`model_info.id` 两键
+不同，而这两键下面本来就逐腿重写）。
+
+同时记一个**差点出事的坑**：这脚本的腿参数是 `--lanes 195`，**裸写 `195` 会被静默忽略**，
+dry-run 打出来的是默认腿表（84/135/136–140，全是死腿/已删腿）。加 `--apply` 就会往死腿上
+铺 98 行。⇒ **dry-run 的价值全在"读输出"，不在"跑过了"**。

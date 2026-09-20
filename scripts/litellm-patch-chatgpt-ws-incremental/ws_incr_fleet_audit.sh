@@ -19,7 +19,9 @@
 set -uo pipefail
 WIN="${1:-2h}"
 NS=litellm-product
-PGPASS=pro-pg-pass-20260430-46138a20
+# 凭据必须来自 env，不留硬编码兜底默认值：兜底值等于把真口令提交进仓库，
+# 且口令轮转后老默认值会静默继续生效，认证失败看不出是"忘了设 env"还是"口令换了"。
+PGPASS="${LITELLM_PG_PW:?需要 LITELLM_PG_PW（litellm-db-0 的 PG 口令，别写进文件/命令行历史）}"
 
 echo "=== [1] per-pod (${WIN}): pod inc full hit% evict_lru distinct_pck ==="
 TOT_I=0; TOT_F=0; TOT_E=0; TOT_B=0; WARN=""

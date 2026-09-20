@@ -34,7 +34,9 @@ set -uo pipefail
 SSH_HOST="${ZKD_SSH_HOST:-cltx@10.68.13.198}"
 SSH_PASS="${ZKD_SSH_PASS:-}"
 NS=litellm-product
-PGPASS="${ZKD_PGPASS:-pro-pg-pass-20260430-46138a20}"
+# 凭据必须来自 env，不留硬编码兜底默认值：兜底值等于把真口令提交进仓库，
+# 且口令轮转后老默认值会静默继续生效，认证失败看不出是"忘了设 env"还是"口令换了"。
+PGPASS="${ZKD_PGPASS:?需要 ZKD_PGPASS（litellm-db-0 的 PG 口令，别写进文件/命令行历史）}"
 OUTDIR="${ZKD_SNAP_DIR:-/tmp/zkd-codex7d}"
 
 [[ -n "$SSH_PASS" ]] || { echo "需要 ZKD_SSH_PASS（198 的 ssh 口令）"; exit 2; }

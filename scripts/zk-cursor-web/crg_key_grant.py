@@ -18,6 +18,7 @@ glm/kimi 映射是团队标配；我 key 上那 8 条 chatgpt-*→sa-gpt-* 是�
 09-03 实跑 shangwensheng / linsen ×2：40→54、42→56、40→54，DB 直读核对。
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -25,7 +26,22 @@ import time
 NS = "litellm-product"
 SSH = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=20", "cltx@10.68.13.198"]
 SUDO = "sudo -n kubectl -n %s " % NS
-PG_PW = "pro-pg-pass-20260430-46138a20"
+def _require_env(name):
+    """凭据只从环境变量读，缺了直接退出。
+
+    不设内置默认值：写死一个真 PG 口令等于把凭据提交进仓库，而且口令轮转后
+    老默认值还会静默生效，打出来的认证失败看不出是"忘了设 env"还是"口令真的换了"。
+    """
+    v = os.environ.get(name, "")
+    if not v:
+        raise SystemExit(
+            "缺少环境变量 %s —— 先 export %s=<litellm-db-0 的 PG 口令>（别写进文件/命令行历史）"
+            % (name, name)
+        )
+    return v
+
+
+PG_PW = _require_env("LITELLM_PG_PW")
 # 默认给我自己的 key;09-03 起支持 --alias <key_alias>(可多次)给别人。
 KEY_ALIAS = "cursor-liuguoxian04-5rub"
 GRANT = [

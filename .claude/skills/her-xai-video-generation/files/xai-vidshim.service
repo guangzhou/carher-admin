@@ -1,0 +1,25 @@
+[Unit]
+Description=xAI video URL shim for openclaw (injects storage_options, promotes file_output.public_url)
+Documentation=https://docs.x.ai/developers/model-capabilities/imagine/files/outputs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/xai-vidshim/vidshim.py
+Environment=VIDSHIM_PORT=18098
+Environment=VIDSHIM_UPSTREAM=http://10.43.97.195:8080
+Environment=VIDSHIM_EXPIRES_AFTER=604800
+Environment=PYTHONUNBUFFERED=1
+DynamicUser=yes
+Restart=always
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -202,11 +202,78 @@ lane 175 / 191 / 193 的 seed bearer 分别还有 **235h / 239h / 240h**（约 1
 ⛔ **`post-OTP login state=True` 是恒绿读数**：183/184/189 三个号这一行全是 True 而实际全没登进去。
 真正的判据是紧随其后的 `[1] logged_in=`。
 
-**A 类的时间分布有形状，但成因未定**：6 个 A 类集中在**队首三个（19:11–19:43）和队尾三个（22:25–22:58）**，
-中间 19:49–22:14 的 19 个号**一个 A 类都没有**。假设是 mail.com 按累计登录次数限速
-（同一出口 IP 一晚登了 20+ 个不同邮箱）。**证伪条件**：若是限速，同一个号隔一段时间重试应能过；
-若是号本身坏，重试仍是 logout。**数据：还没测**（要测得等队列空窗，不能并发 CF 登录）。
-在测出来之前不许把"限速"当结论用。
+**A 类的判据已经确定，成因仍未定** —— 分三段写清楚，别把中间步骤当结论：
+
+*判据（已证）*：`mailcom-fail.png` **存在** ⇔ A 类。5 个成功号（178/185/193/195）一张都没有，
+196/199 都有。日志侧同义句是 `mail.com login may have failed url=https://www.mail.com/logout?ls=wd`。
+196 那张实读是 `#004788` 顶栏 + `#008000` 绿的门户/登录页，且一分钟后的 `mailcom-inbox.png`
+仍是同一页 ⇒ **45 轮 `waiting inbox` 从头到尾没离开过 logout 页**。
+
+*被证伪的两条*：
+- ~~turnstile 次数相关~~：0 次和 23 次两侧都有 OK 和 FAIL，作废。
+- ~~按累计登录次数限速~~：那会是渐进的，实际是**阶跃** —— 从 22:09（195 那轮）起
+  chatgpt.com 登录页换了分支（`LOGIN_MODE=otp → clicking 'Log in with a one-time code'`，
+  之前 19 个号全是 `password step skipped`），随后 196/197/198/199 **连续 4 个** A 类，
+  而之前 19 个号**零** A 类。
+- ~~新登录分支导致 A 类~~：**195 是有效健康对照** —— 它走了同一条新分支、`OTP=448266` 读出来了、
+  没有 `mailcom-fail.png`、抓取成功。所以新分支不是 A 类的原因，两件事时间重合而已。
+
+- ~~A 类的 profile 里带着旧 mail.com session，加载后被踢到 logout~~：**两类 profile 形状完全一样**
+  （成功 178/185/193/195 与 A 类 196/197/198/199/168/169/172 全是 4276–4280KB、6 个文件、
+  **没有 Cookies 库**），作废。顺带证明容器用的是近乎空的 ephemeral profile。
+
+*代码路径（读的是镜像里那份，不是推测）*：`zerokey-capture:latest` 的
+`/capture/zerokey-web-capture.py:125 mailcom_login()` —— `goto www.mail.com` → 点 `Log in`
+→ 填 `input[placeholder='Email address']` / `[placeholder='Password']` → 在 `button:has-text('Log in')`
+里挑第一个 `y>50` 的点 → **30 秒轮询 url 里有没有 `navigator`**；没有就 `ss(p,"mailcom-fail")` + 那句日志。
+A 类的落点是 `logout?ls=wd` ⇒ 页面**换过**（不是卡在登录页不动），但换到的不是 `navigator`。
+199 的日志把这点钉死：`mailcom-fail` 出现后**第 1 轮**就开始 `waiting inbox [1/45]`，
+说明 45 轮全程都在 logout 页上转，不是"等超时才掉下来"。
+
+### A 类根因（已证实，2026-09-20 23:37）
+
+**`/Data/chatgpt-auth/acct-<N>/.creds` 里的 `mail_pw` 是轮换前的旧值；飞书表才是当前值。**
+
+怎么证的 —— 写了个**只跑 mail.com 那一段**的探针（不碰 chatgpt.com、不占 CF 通道），
+把落点页面的可见文字打出来，因为 **188 上没有 OCR**（无 `tesseract`/`pytesseract`），
+截图此前只能做像素统计，读不出"密码错 / 风控 / 限速"这三种处置完全相反的原因。
+
+| 轮次 | 密码来源 | 落点 URL | 页面原文 |
+|---|---|---|---|
+| A（对照） | `.creds`，15 字符 | `www.mail.com/logout?ls=wd` | **PLEASE TRY AGAIN! You've entered an invalid email address / password combination.** |
+| B（实验） | 飞书表，17 字符 | `navigator-lxa.mail.com/login?...auth_time=...` | 登录成功，`reached navigator at t=0s` |
+
+同一个号（acct-196）、同一段代码、**唯一变量是密码** ⇒ 不是风控、不是限速、不是 profile、
+不是新登录分支。就是密码错。
+
+**形状判据**：飞书表里邮箱密码是 `Mail-<N>-xxxxxxxx`（17 字符，09-12~09-14 更新）⇒ 该号已轮换过；
+是随机串（12–16 字符）⇒ 没轮换。对齐所有已知结果，零反例：
+
+| 组 | 号 | 表内形状 | `.creds` | 结果 |
+|---|---|---|---|---|
+| 轮换过 | 196/197/198/199 | `Mail-19N-` 17 | 15/13/13/14 旧值 | **A 类** |
+| 轮换过 | 168/169/172 | `Mail-*` 17 | **邮箱本身都不同** | **A 类** |
+| 轮换过但 creds 已更新 | 195 | `Mail-195-` 17 | 17（09-20 17:16 有人更新过）| **成功** |
+| 没轮换 | 178/185/193/200/201/202 | 随机串 | 同长 | **成功** |
+
+⚠️ 168/169/172 是更重的一档：表里的邮箱（`madeline767846@` / `baileymark5619@` /
+`christopher_haas@`）与 `.creds` 里的（`vincent.bridges84895429841@` / `lwilliams8364@` /
+`samantha009304@`）**根本不是同一个邮箱**，不只是密码漂移 —— 撞上"表里邮箱≠盘上真身"那条。
+
+**可证伪的预测**（队列还在跑，等它自己验）：剩余 12 个号里
+`ROTATED` 的 **165/166/167/205/206/207/208** 会全是 A 类，
+`random` 的 **200/201/202/203/204** 会正常。200/201/202 已过 ⇒ 后半条已中三次。
+
+**处置未定（要用户拍板）**：修 `.creds` 是正解（表是权威源，`.creds` 存的是过期值，
+别的消费者拿旧密码同样是错的），但 `/Data/chatgpt-auth/*/.creds` 在 188 上有
+**20 个别人的消费者**（`onboard-chatgpt-acct.sh`、`re-oauth.sh`、`quota-rebalance.py` 等），
+半径超出这轮任务。而"只预置 `zkcap-<N>/mail_pw`"这条小半径路**无效** ——
+`cap-queue.sh` 每轮都会 `val mail_pw > "$W/mail_pw"` 从 `.creds` 覆盖它。
+
+探针留在 `188:/Data/zkcaps/mailprobe/mailprobe.py`（密码走 `MAIL_LOGIN_PW_FILE`，
+不进 argv、不进日志，只印长度）。⚠️ 镜像里是 **`patchright`** 不是 `playwright`
+（CF 要真 Chrome TLS），且 `xvfb-run` 会吞掉 stdout ⇒ 日志必须自己写文件，
+调用形状是 `--entrypoint bash -lc 'Xvfb :77 ... & DISPLAY=:77 python -u ...'`。
 
 **这一条同时意味着**：`188:/Data/zkcaps/refresh-accts.txt` 的轮转**当前无法刷新需要 OTP 的号**。
 而且比这更糟 —— 见下面 2.8。

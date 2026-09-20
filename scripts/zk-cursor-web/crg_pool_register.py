@@ -12,9 +12,16 @@
    **只改三个键**：`api_base`(换腿) / `model_info.id`(全局唯一) / `model_name`(去 `-82`)。
    `model`(载体)和 `reasoning_effort`(档位)原样带过去，一个字都不许默写。
 
-2. **`api_key` 必须显式补占位符**。`/model/info` 对它脱敏(读出来是 `<absent>`)，
-   照抄就会漏掉 —— 而 openai/ provider 真流量没有 api_key 直接 401，
-   **用 master key 测还测不出来**(走另一条分支，200 假绿)。占位符 `sk-zerokey-web-noop`。
+2. **`api_key` 必须显式补，且它不是占位符 —— 它是 IDE 选择器**。`/model/info` 对它脱敏
+   (127 行读出来全是 `None`)，照抄就会漏掉 —— 而 openai/ provider 真流量没有 api_key 直接 401。
+   ⚠️ **2026-09-20 实测推翻了原来那个占位符 `sk-zerokey-web-noop`**：lane 侧
+   `server.js:17` 把 Bearer 原样当 IDE 名 —— `req.ide = authHeader.slice(7).trim().toLowerCase()`，
+   `engine/index.js:22` 再 `getIDEMapper(ideName)` 取 `user` 函数。只有 `vscode` / `cursor`
+   两个键供得出 `user`；喂任何别的值(包括那个占位符)**请求死在 IDE 映射那一步**：
+       Bearer sk-zerokey-web-noop  → 500  TypeError: user is not a function
+       Bearer cursor               → 200  暗号命中
+   所以值必须是 `cursor`。这条不能从 `/model/info` 读回来自证(脱敏)，也不能从 DB 读
+   (`ProxyModelTable` 的相关列是密文)，**唯一判据是入池后从 proxy 侧实打一次**。
 
 3. **两条 `-max` 的裸载体腿(id = `gpt-5.6-luna-wm` / `gpt-5.6-thinking`)不复制**。
    它们是 xhigh 旗的种子：旗立在 `litellm.model_cost` 的**裸载体名键**上，是全局单例，
@@ -26,6 +33,11 @@
     ... python3 - --dump                        # 只打印现状(建前的备份判据)
     ... python3 - --only cr-g-5.6 --lane 81     # dry-run 单行探针
     ... python3 - --only cr-g-5.6 --lane 81 --apply
+    ... python3 - --lanes 181,182 --with-direct --apply   # 池名 + 独占直连名一起建
+
+`--with-direct` 顺带建 `cr-g-5.6-mini-<lane>`：**验单条腿死活的唯一入口**。
+池名是 key 级亲和，拿池名打新腿是碰运气（09-20 实测有整轮没落到 175）。
+少了这个名字，"新腿到底在不在服务"就只能靠抽样蒙。
     ... python3 - --apply                       # 补齐其余
 回滚：/model/delete 掉打印出来的那些 `zerokey-cr-g-{81,83,84,85}-*` id。
 """
@@ -44,7 +56,9 @@ MK = os.environ["LITELLM_MASTER_KEY"]
 DEFAULT_LANES = ["84", "135", "136", "137", "138", "139", "140"]
 LANES = list(DEFAULT_LANES)               # 82 是 canary，不进池；101 是被抛弃的旧线，不碰
 SVC = "http://zero-cursor-bpi-%s.litellm-product.svc.cluster.local:8201/v1"
-API_KEY_PLACEHOLDER = "sk-zerokey-web-noop"
+# **不是占位符，是 lane 侧的 IDE 选择器**（见 docstring 第 2 条，09-20 实测）。
+# 改这个值前先读 server.js:17 + engine/index.js:22，只有 vscode / cursor 供得出 `user` 函数。
+API_KEY_IDE = "cursor"
 EXPECT_NAMES = 14
 
 
@@ -111,7 +125,7 @@ def main():
             new_id = "zerokey-cr-g-%s-%s" % (lane, variant)
             lp = dict(sp)                       # 整份拷贝
             lp["api_base"] = SVC % lane         # 只改这一个键
-            lp["api_key"] = API_KEY_PLACEHOLDER  # /model/info 脱敏掉了，必须补
+            lp["api_key"] = API_KEY_IDE         # /model/info 脱敏掉了，必须补；值 = IDE 名
             lp.pop("input_cost_per_token", None)
             lp.pop("output_cost_per_token", None)
             payload = {"model_name": name, "litellm_params": lp,
@@ -120,6 +134,34 @@ def main():
                 skip.append(new_id)
             else:
                 plan.append(payload)
+
+    # --with-direct：顺手建 `cr-g-5.6-mini-<lane>` 这个**独占直连名**。
+    # 为什么必须有：池名走 weighted_affinity，是 **key 级**亲和，一把 key 被钉在一条腿上。
+    # 想证明"新加的这条腿在服务"，用池名打是碰运气 —— 09-20 实测 4 把 key × 14 发抽 5 条腿，
+    # 有一整轮压根没落到 175。**独占名是唯一能单独判一条腿死活的入口**。
+    # 只建 5.6-mini 一个变体：验的是"这条腿通不通"，不是"这条腿每个档位都对"
+    # （后者由目录门禁 lane_model_catalog.py 负责，那是建腿前就该过的）。
+    if "--with-direct" in args:
+        base = src.get("cr-g-5.6-mini")
+        if not base:
+            print("❌ --with-direct 拿不到 cr-g-5.6-mini 的 82 源行，不瞎猜形状，停手")
+            return 2
+        bp = dict(base.get("litellm_params") or {})
+        for lane in LANES:
+            if lane_filter and lane != lane_filter:
+                continue
+            dname = "cr-g-5.6-mini-%s" % lane
+            did = "zerokey-cr-g-%s-direct-5.6-mini" % lane
+            if did in existing_ids:
+                skip.append(did)
+                continue
+            lp = dict(bp)
+            lp["api_base"] = SVC % lane
+            lp["api_key"] = API_KEY_IDE
+            lp.pop("input_cost_per_token", None)
+            lp.pop("output_cost_per_token", None)
+            plan.append({"model_name": dname, "litellm_params": lp,
+                         "model_info": {"id": did, "mode": "chat"}})
 
     print("\n== 计划新建 %d 行（已存在跳过 %d 行）==" % (len(plan), len(skip)))
     for p in plan[:60]:

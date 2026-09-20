@@ -61,7 +61,14 @@ ENDPOINT = "https://cc.auto-link.com.cn/pro/v1/chat/completions"
 # 大多数名字。已摘腿 + 删 deploy/svc。现在是 84 + 135~140 七条 pro 腿。
 # **这张表必须跟着真实拓扑走**：它是"每条腿都被选中过"那条判据的基准，
 # 拿旧腿表去判 = 假绿（漏掉的腿从没被证明过，删掉的腿永远等不到）。
-POOL_LANES = ["84", "135", "136", "137", "138", "139", "140"]   # 82 是 canary，不在池里
+# **2026-09-20 第二次换腿**：84 + 135~140 七条全部 seed 过期（八条腿同时 `Sentinel 401
+# token is expired`；135~139 压根不在 188 的 refresh-accts.txt 里，84/140 在但 mail.com
+# OTP 自 09-17 起全废，最后一次 OK 停在 09-03/09-04）。用户面已实测红：
+# `cr-g-5.6-luna-min` + `User-Agent: Cursor/3.20.17` 全是 MidStreamFallbackError。
+# 换成新捕获的 175~180 五条。⚠️ 目标是 39 条，这里只是已灌装验过的头五条，后续补齐要改这张表。
+# **09-20 21:2x 起滚动入池**：181/182/185/186（队列每 10~12 分钟出一个，边出边灌）。
+# 168/169/172/183/184 因 mail.com OTP 自 09-17 全废，按"有问题的先跳过"跳过。
+POOL_LANES = ["175", "176", "177", "178", "180", "181", "182", "185", "186", "187", "188"]   # 82 是 canary，不在池里
 POOL_NAMES = [
     "cr-g-5.6", "cr-g-5.6-instant", "cr-g-5.6-mini", "cr-g-5.6-t-mini",
     "cr-g-5.6-pro", "cr-g-research", "cr-g-5.6-thinking", "cr-g-5.6-thinking-min",

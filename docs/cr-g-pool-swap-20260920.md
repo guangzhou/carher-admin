@@ -119,6 +119,34 @@
 
 ---
 
+### 2.8 新腿的 seed 轮转：**没有覆盖，加名字也不会有**（实测，不是推断）
+
+原计划是"把新号加进 `188:/Data/zkcaps/refresh-accts.txt`"。**查完发现这一步会是个静默无效的假保护，所以没做。**
+
+判据（`/home/cltx/zk-refresh-225.sh`，cron `23 */3 * * *`，读的就是那个文件）：
+
+| 它要的形状 | 我们新腿的形状 |
+|---|---|
+| `kubectl get pod -l app=zero-<N>` | 标签是 `app=zero-cursor-bpi-<N>` ⇒ **实测 `-l app=zero-193` 返回 0 个 pod** |
+| `kubectl cp ... $POD:/app/temp/users.json` | `/app/temp` 是 **emptyDir**，seed 在 `/seed`（hostPath `/Data/zerokey-sessions/zero-<N>`） |
+| `rollout restart deploy/zero-<N>` | deploy 叫 `zero-cursor-bpi-<N>`，`zero-193` 不存在 |
+
+对照 `zero-140`（名单里真有的号）：`-l app=zero-140` 查得到 pod，`/app/temp` 直接就是 hostPath。
+⇒ **形状根本不匹配**。往名单里写 `193` 只会让脚本 `continue` 掉，日志里一行都不多，
+而我们会以为"轮转兜住了"。这正是「指向不存在路径的保护永不触发」那个形状。
+
+**没做什么**：没改 `refresh-accts.txt`（别人的 cron 在读它，加了也是无效行）；
+没动 `zk-refresh-225.sh`（别人的脚本，改它要用户点头）。
+
+**现在的真实状况（实读 JWT `exp`，不回显 token）**：
+lane 175 / 191 / 193 的 seed bearer 分别还有 **235h / 239h / 240h**（约 10 天）。
+`.creds` 和 4.2M 的持久化 profile **15 个号全都有** ⇒ 技术上能复用会话免 OTP 重抓，
+但**当前没有任何自动化在给 `zero-cursor-bpi-*` 做这件事**。
+10 天后需要人工重跑 `lane_seed_capture.sh` + `lane_seed_install.sh`，
+或者由用户决定是否给 bpi 腿写一条对得上形状的轮转（要改的是标签查法 + cp 目标路径 + deploy 名）。
+
+---
+
 ## 三、验收判据（哪些是证过的，哪些没有）
 
 **证过的**：
@@ -156,8 +184,8 @@
 且 194 只跑了 31 秒就失败（正常一轮 3–5 分钟）。它们中间的 193/195 都抓成功了
 ⇒ **不是通道整体挂了**。OTP 那批是真废，导航超时这类可能只是瞬时，将来可单独重试。
 
-**这一条同时意味着**：`188:/Data/zkcaps/refresh-accts.txt` 的轮转**当前无法刷新需要 OTP 的号**，
-把新号加进去时必须把这个限制写清楚，不能假装轮转能兜住。
+**这一条同时意味着**：`188:/Data/zkcaps/refresh-accts.txt` 的轮转**当前无法刷新需要 OTP 的号**。
+而且比这更糟 —— 见下面 2.8。
 
 ---
 
@@ -171,5 +199,7 @@
 - ~~`pool_consistency_selftest.py` 还是旧拓扑~~ **已核实不需要改**：它没有硬编码腿号
   （`ok_a, lanes = pc.check_code()` 读线上拓扑），实跑 **8/8 OK**，且能红
   （合成悬挂 lane 135 被抓到、`stealth-fork-must-fail got=False want=False`）。
+- **`zero-cursor-bpi-*` 腿没有 seed 轮转**（见 2.8，形状对不上，不是"忘了加名字"）。
+  seed bearer 约 10 天后到期，届时要人工重抓，或由用户决定给 bpi 腿写一条对得上形状的轮转。
 - `lane_seed_install.sh` 的 in-pod `/app/temp/users.json` mtime 判据目前每轮手工做，该收进脚本。
   判据是：temp mtime > seed mtime（证明 running 进程真的 `cp` 过）+ key == `acct<N>` + cookie 长度吻合。

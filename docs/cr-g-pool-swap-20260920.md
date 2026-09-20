@@ -46,8 +46,11 @@
 
 - 捕获：`lane_seed_capture_queue.sh`（**必须在 188 跑**，`cf_clearance` 绑 188 出口 IP），
   ledger 在 `188:/Data/zkcaps/queue.log`，每号工作目录 `188:/Data/zkcaps/zkcap-<N>/`（700）。
-- 灌装：`lane_seed_install.sh <N>` → `225:/Data/zerokey-sessions/zero-<N>/users.json`，三条判据：
-  ① 落地字节数 == 源字节数 ② `users` key == `acct<N>` ③ cookie 非空 + sentinel 存在。
+- 灌装：`lane_seed_install.sh <N>` → `225:/Data/zerokey-sessions/zero-<N>/users.json`，四条判据：
+  ① 落地字节数 == 源字节数 ② `users` key == `acct<N>` ③ cookie 非空 + sentinel 存在
+  ④ **in-pod：容器 `startedAt` 晚于本次 seed 的 mtime**（证明启动时 `cp` 拷的是这份），
+  已有 pod 的号不重启就还在吃旧 seed 且**毫无症状**（照样 200，到期才全红）。
+  ④ 是本轮补进脚本的，且原先手工用的 mtime/字节判据是坏尺子，见第五节的纠正表。
 - **回滚**：新号无旧 seed，脚本明确打印「无旧 seed（新号，不需要备份）」，
   所以这一项**没有需要回退的覆盖**。老号若有旧 seed，脚本会先备份到
   `225:/Data/backups/zerokey-seed-<N>-<ts>-pre-install.json`。
@@ -201,5 +204,20 @@ lane 175 / 191 / 193 的 seed bearer 分别还有 **235h / 239h / 240h**（约 1
   （合成悬挂 lane 135 被抓到、`stealth-fork-must-fail got=False want=False`）。
 - **`zero-cursor-bpi-*` 腿没有 seed 轮转**（见 2.8，形状对不上，不是"忘了加名字"）。
   seed bearer 约 10 天后到期，届时要人工重抓，或由用户决定给 bpi 腿写一条对得上形状的轮转。
-- `lane_seed_install.sh` 的 in-pod `/app/temp/users.json` mtime 判据目前每轮手工做，该收进脚本。
-  判据是：temp mtime > seed mtime（证明 running 进程真的 `cp` 过）+ key == `acct<N>` + cookie 长度吻合。
+- ~~`lane_seed_install.sh` 的 in-pod mtime 判据每轮手工做，该收进脚本~~ **已收进脚本（第 ④ 条判据），
+  但原先写在这里的判据本身是错的**，一并纠正：
+
+  | 原计划的量 | 实测 | 结论 |
+  |---|---|---|
+  | in-pod `/app/temp/users.json` mtime > seed mtime | lane 176/191/193 的 in-pod mtime 全落在同一个 **9 秒窗口**内（1789914656–1789914665，就是「刚刚」），与各自启动时刻（12:14 / 14:04 / 14:15）无关 | **恒绿**，量不到 `cp` |
+  | in-pod 字节数 == seed 字节数 | in-pod 54493 / 55357 / 56603，seed 只有 19847 / 20238 / 20044 | **恒红** |
+  | 容器 `state.running.startedAt` > seed mtime | 176: 12:14:49 > 12:09:29；191: 14:04:55 > 14:04:22；193: 14:15:27 > 14:14:58 | ✅ 能绿也能红 |
+
+  成因：`/app/temp` 是 **emptyDir**，容器 args 只在启动那一刻 `cp /seed/users.json /app/temp/users.json`，
+  之后 **zerokey 进程持续回写那个文件**（会话状态），所以它的 mtime 和大小反映的是「进程刚写过」，
+  不是「启动时拷了哪一份」。唯一量得到 `cp` 那一刻的是容器 `startedAt`。
+  判据能红已验：同一条 193 把 seed mtime 换成合成的未来值立刻转红，三条真腿同轮全绿。
+- 上面那轮验证里测试脚手架自己坏过两次，形状都是「一屏读数全同形」，记下来免得重犯：
+  zsh 不对未加引号的变量做词分割（`set -- $pair` 没拆开 ⇒ 四行读数含合成红**全部同形**）；
+  循环体里的 `ssh` 会吞掉 `while read` 的 stdin（只跑掉第一行就静默结束）⇒ 脚本里统一用 `ssh -n`，
+  只有收管道/heredoc 的那两处用不带 `-n` 的 `$SSH_IN`。

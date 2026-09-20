@@ -21,11 +21,30 @@
 #   ① 落地字节数 == 188 上的源文件字节数
 #   ② 225 上能 JSON 解析，users 的 key == acct<N>（灌错号是最容易犯又最难发现的错）
 #   ③ parsedFetch 里 cookie 非空、openai-sentinel-proof-token 在
+#   ④ 【in-pod】容器 startedAt 晚于本次 seed 的 mtime，且 pod 里的 users key == acct<N>
+#
+# 第 ④ 条为什么必须有：容器 args 是
+#   `cp /seed/users.json /app/temp/users.json && exec node ...`
+# /app/temp 是 **emptyDir**，只在**启动那一刻**拷一次。所以「225 上 seed 是新的」
+# 和「这条腿正在用新 seed」是两回事 —— 不重启就一直吃旧的，而且**毫无症状**：
+# 请求照样 200，只是用的是过期 token，到期才突然全红。
+#
+# ⚠️ 判「拷到了没」**不能用 in-pod 的字节数或 mtime** —— zerokey 进程会持续回写
+# /app/temp/users.json：实测 lane 176/191/193 的 in-pod 都是 54–57KB（seed 只有 ~20KB），
+# 且三条腿的 mtime 全落在同一个 9 秒窗口里（=「刚刚」，与启动时刻无关）。
+# 拿这两个量会得到**恒红（字节）+ 恒绿（mtime）**两种假读数。
+# 唯一量得到 `cp` 那一刻的是容器 `state.running.startedAt`：晚于 seed mtime ⇒ 拷的是新的。
+# 新 lane 还没有 pod 时这一条打「跳过」并说明原因，别让「没 pod」和「校验没过」同形。
 set -uo pipefail
 
 H188="cltx@10.68.13.188"
+H198="cltx@10.68.13.198"
 H225="cltx@10.68.13.225"
-SSH="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=25"
+# -n：脚本主体是 for 循环，循环体里的 ssh 不加 -n 会吞掉后续输入（实测过一次：
+# 把四个 lane 的校验只跑掉第一个就静默退出）。灌装那一步要用 stdin 收管道，单独不带 -n。
+SSH="ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=25"
+SSH_IN="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=25"
+KC="sudo k3s kubectl -n litellm-product"
 TS="$(date +%Y%m%d-%H%M%S)"
 
 [ $# -ge 1 ] || { echo "usage: $0 <acct-N> [N2 ...]"; exit 2; }
@@ -50,10 +69,11 @@ for N in "$@"; do
     else echo '  无旧 seed（新号，不需要备份）'; fi"
 
   # 灌：字节走管道，不落本地磁盘
-  $SSH "$H188" "cat '$SRC'" | $SSH "$H225" "sudo -n tee '$DST' >/dev/null && sudo -n chmod 600 '$DST'"
+  $SSH "$H188" "cat '$SRC'" | $SSH_IN "$H225" "sudo -n tee '$DST' >/dev/null && sudo -n chmod 600 '$DST'"
+  SEED_MT=$($SSH "$H225" "sudo -n stat -c %Y '$DST' 2>/dev/null || echo 0")
 
   # 判据三连（在 225 上就地验，不把内容传回来）
-  $SSH "$H225" "sudo -n python3 - '$DST' '$N' '$SZ'" <<'PY'
+  $SSH_IN "$H225" "sudo -n python3 - '$DST' '$N' '$SZ'" <<'PY'
 import json, sys
 p, n, want = sys.argv[1], sys.argv[2], int(sys.argv[3])
 raw = open(p, 'rb').read()
@@ -94,6 +114,31 @@ else:
 sys.exit(0 if ok else 1)
 PY
   [ $? -ne 0 ] && rc_all=1
+
+  # ④ in-pod：正在服务的那份是不是刚灌的这份
+  DEP="zero-cursor-bpi-$N"
+  POD=$($SSH "$H198" "$KC get pod -l app=$DEP -o jsonpath='{.items[0].metadata.name}' 2>/dev/null")
+  if [ -z "$POD" ]; then
+    echo "  ⏭  in-pod 判据跳过：还没有 $DEP 的 pod（新 lane 正常；灌完再 clone 建腿）"
+  else
+    # 容器启动时刻（cp 发生的唯一时刻）—— 不是文件 mtime，见文件头 ④ 的说明
+    STARTED=$($SSH "$H198" "$KC get pod '$POD' -o jsonpath='{.status.containerStatuses[?(@.name==\"zerokey\")].state.running.startedAt}' 2>/dev/null")
+    START_EPOCH=$(python3 -c "import sys,datetime;s=sys.argv[1];print(int(datetime.datetime.strptime(s,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp()) if s else 0)" "$STARTED")
+    IN_KEY=$($SSH "$H198" "$KC exec '$POD' -c zerokey -- node -e 'console.log(Object.keys((require(\"/app/temp/users.json\").chatgpt)||{}).join(\",\"))' 2>/dev/null")
+    if [ "${START_EPOCH:-0}" -eq 0 ]; then
+      echo "  ❌ 读不到 $POD 的 zerokey 容器 startedAt（不是 Running？）—— 判不了拷没拷到，先看 pod 状态"
+      rc_all=1
+    elif [ "$START_EPOCH" -lt "${SEED_MT:-0}" ]; then
+      echo "  ❌ 容器 startedAt=$STARTED 早于本次 seed（mtime=$SEED_MT）—— pod 里那份是旧副本，"
+      echo "     必须 $KC rollout restart deploy/$DEP 才算灌进去了（不重启毫无症状，到期才全红）"
+      rc_all=1
+    elif [ "$IN_KEY" != "acct$N" ]; then
+      echo "  ❌ in-pod users key = '${IN_KEY:-none}'，期望 acct$N"
+      rc_all=1
+    else
+      echo "  ✅ in-pod: 容器 startedAt=$STARTED 晚于 seed mtime=$SEED_MT，key=$IN_KEY"
+    fi
+  fi
 done
 
 echo

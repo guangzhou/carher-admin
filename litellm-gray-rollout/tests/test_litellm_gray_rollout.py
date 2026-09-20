@@ -37,6 +37,7 @@ SHELL_TOOLS = (
     "gray-phase.sh",
     "gray-key-route.sh",
     "gray-split-update.sh",
+    "gray-workload-pin.sh",
     "gray-bridge-route.sh",
     "gray-global-rollback.sh",
     "gray-convergence-prepare.sh",
@@ -51,6 +52,7 @@ PYTHON_TOOLS = (
     "check-migration.py",
     "check-monitor-continuity.py",
     "check-pod-spec-shape.py",
+    "check-split-capacity.py",
     "check-release-deletion-set.py",
     "collect-metrics.py",
     "collect-migration-evidence.py",
@@ -72,6 +74,10 @@ GENERATION_FILES = (
     "split.conf",
     "state.env",
     "SHA256SUMS",
+    # Optional on disk (absent hashes as the literal `unbound`), but part of the
+    # generation contract: it is the K8s half of the frozen artifact, and it is
+    # hashed into config_checksum so a mid-run patch cannot stay invisible.
+    "workload.env",
 )
 
 
@@ -104,6 +110,31 @@ def test_shell_and_python_entrypoints_are_parseable_and_executable() -> None:
         path = SCRIPT_DIR / name
         assert path.stat().st_mode & stat.S_IXUSR, f"not executable: {path}"
         py_compile.compile(str(path), doraise=True)
+
+
+def test_every_script_with_a_shebang_is_executable() -> None:
+    """Scan the directory instead of trusting the lists above.
+
+    The lists are curated, so a script that nobody remembered to add is invisible to
+    the test that checks the mode bit -- and a file with a `#!` line that is not `+x`
+    fails exactly where the docs put it: the runbook says
+    `scripts/collect-bypass-inventory.sh --output ...` and the manual says
+    `v195-concurrent-index-runner.sh inspect`, both of which are "permission denied"
+    as written.  On 2026-09-20 five files were in that state, including
+    check-split-capacity.py the day it was written.  A shebang is the author saying
+    "this is an entrypoint", so that is the thing to enumerate.
+    """
+    not_executable = sorted(
+        path.name
+        for path in SCRIPT_DIR.iterdir()
+        if path.is_file()
+        and path.read_bytes()[:2] == b"#!"
+        and not path.stat().st_mode & stat.S_IXUSR
+    )
+
+    assert not not_executable, (
+        "files declare a shebang but cannot be run: " f"{not_executable}"
+    )
 
 
 def test_generation_contract_is_shared_by_scripts_and_nginx_fixture() -> None:
@@ -1033,6 +1064,21 @@ def test_collect_metrics_builds_bound_input_without_key_material(tmp_path: Path)
             }
         )
     )
+    # Required above split 0, and this runs at 1.  Passed here rather than defaulted
+    # in the collector: the readiness leg's expected count comes from the run sheet,
+    # and a collector that invented one would be the `llm-stab-scrape-down` literal
+    # all over again.
+    readiness = tmp_path / "readiness.json"
+    readiness.write_text(
+        source_envelope(
+            {
+                "lane": "gray",
+                "ready_containers": 3,
+                "expected_containers": 3,
+                "observed_at": captured_at,
+            }
+        )
+    )
     output = tmp_path / "metrics-input.json"
 
     result = subprocess.run(
@@ -1043,6 +1089,7 @@ def test_collect_metrics_builds_bound_input_without_key_material(tmp_path: Path)
             "--hard-errors", str(hard_errors),
             "--backend-health", str(backend_health),
             "--spend-reconciliation", str(spend),
+            "--readiness", str(readiness),
             "--run-id", "run-test",
             "--generation", "g000001",
             "--config-checksum", "a" * 64,
@@ -1077,9 +1124,24 @@ def test_collect_metrics_builds_bound_input_without_key_material(tmp_path: Path)
         },
     ]
     rendered = output.read_text()
+    # `abcdef123456` is the sid on the one authenticated line above -- a sha256 head
+    # of a real virtual key.  The log format carries it, the collector matches it so
+    # the trailing field cannot break the line regex, and nothing keeps it: this
+    # payload is signed and shipped, and no leg reads sid (it cannot be the
+    # enrolment filter it was meant to be -- `-` means "unknown", not "not
+    # enrolled", and the canary pool carried 14614 of those).
     assert "abcdef123456" not in rendered
     assert "sk-" not in rendered
     assert "Authorization" not in rendered
+    # Every source the collector was given is declared, so the liveness leg measures
+    # what was actually read rather than a list someone maintained by hand.
+    assert [source["name"] for source in payload["data_sources"]] == [
+        "access_log",
+        "hard_errors",
+        "backend_health",
+        "spend_reconciliation",
+        "readiness",
+    ]
 
     evaluated = subprocess.run(
         ["python3", str(SCRIPT_DIR / "metrics.py"), "--input", str(output)],
@@ -1349,6 +1411,9 @@ def _metrics_payload(
     gray_five_xx: int = 0,
     sustain_state: dict[str, int] | None = None,
     latency_window_minutes: int | None = 30,
+    ready_containers: int = 3,
+    expected_containers: int = 3,
+    source_ages: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """A minimal well-formed metrics input for the `responses` class."""
 
@@ -1363,6 +1428,14 @@ def _metrics_payload(
             for index in range(count)
         ]
 
+    # Both of these sections are REQUIRED above split 0 and this fixture runs at
+    # 50, so they are defaults rather than opt-ins.  Omitting them would make every
+    # test here fail with READINESS_MISSING/DATA_SOURCES_MISSING -- which is the
+    # guard working, but it would also mean no fixture ever exercised the legs.
+    observed = datetime.now(timezone.utc).replace(microsecond=0)
+    ages = {"access_log": 0, "hard_errors": 0, "backend_health": 0, "readiness": 0}
+    ages.update(source_ages or {})
+
     payload: dict[str, Any] = {
         "phase": "normal_gray",
         "rollout_percent": 50,
@@ -1376,6 +1449,24 @@ def _metrics_payload(
             "failed_request_ids": [],
             "observed_lag_seconds": 1,
         },
+        "readiness": {
+            "lane": "gray",
+            "ready_containers": ready_containers,
+            "expected_containers": expected_containers,
+            "observed_at": observed.isoformat().replace("+00:00", "Z"),
+        },
+        # Ages are relative to the newest observation, which is what data_liveness()
+        # anchors on -- so a fixture with every age at 0 is a live cycle, and one
+        # non-zero age is a single lagging source rather than a stale payload.
+        "data_sources": [
+            {
+                "name": name,
+                "observed_at": (observed - timedelta(seconds=age))
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+            for name, age in sorted(ages.items())
+        ],
     }
     if wide_samples is not None:
         payload["latency_records"] = records("canary", wide_samples, gray_latency) + records(
@@ -1408,6 +1499,27 @@ def _metrics_payload(
     return payload
 
 
+def _resign(payload: dict[str, Any]) -> str:
+    """Re-checksum a fixture after removing a section, over the same key set.
+
+    A test that deletes a required section has to re-sign, or metrics.py rejects it
+    on EVIDENCE_CHECKSUM_MISMATCH before reaching the leg under test -- a green that
+    proves only that the envelope works.  Excludes exactly UNSIGNED_PAYLOAD_KEYS,
+    matching the collector.
+    """
+    body = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"evidence", "sustain_state"}
+    }
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+
+
 def _evaluate(payload: dict[str, Any]) -> dict[str, Any]:
     result = subprocess.run(
         ["python3", str(SCRIPT_DIR / "metrics.py"), "--input", "-"],
@@ -1420,32 +1532,56 @@ def _evaluate(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_metrics_promotes_a_statistical_breach_only_after_it_repeats() -> None:
-    """A single window over a latency threshold must not move traffic.
+    """A single window over a sampled threshold must not move traffic.
 
     Stable split against itself moves p95 by 2.42x between adjacent windows with
-    nothing changed at all, so one window over the 1.3 line carries almost no
-    information -- measured at a 14.8% false-positive rate against a negative
-    control.  The breach has to survive SUSTAIN_WINDOWS before it becomes a
-    trigger, and a 3x regression must still be caught on the window after.
+    nothing changed at all, and the 5xx rate is no steadier -- so one window over
+    a line carries almost no information.  Measured at a 14.8% false-positive rate
+    against a negative control at depth 1.  The breach has to survive
+    SUSTAIN_WINDOWS before it becomes a trigger, and a real regression must still
+    be caught on the window after.
+
+    The vehicle here is FIVE_XX_DELTA rather than P95_RATIO because the latency
+    legs no longer trigger anything: their denominators differ ~8x between the
+    frozen baseline and the live window, so the ratio measured sample variance.
+    The sustain mechanism under test is the same one either way.
     """
     equal = _evaluate(_metrics_payload(gray_latency=1.0, stable_latency=1.0))
     assert equal["dispatcher_recommendation"]["action"] == "none"
     assert equal["sustain"]["counts"] == {}
 
-    first = _evaluate(_metrics_payload(gray_latency=3.0, stable_latency=1.0))
+    first = _evaluate(
+        _metrics_payload(gray_latency=1.0, stable_latency=1.0, gray_five_xx=6)
+    )
     assert first["dispatcher_recommendation"]["action"] == "none"
-    assert first["sustain"]["counts"] == {"P95_RATIO": 1, "P99_RATIO": 1}
+    # 6 of 300 is 0.02, which is exactly MAX_USER_FAILURE_RATE, so the user-facing
+    # leg reads AT the line and does not breach -- that comparison is strictly
+    # greater-than.  Asserted here rather than nudged to 7 because a boundary that
+    # nothing pins is a boundary that quietly moves: `>=` here would make the leg
+    # fire on the rate we measured as the acceptable ceiling.
+    assert first["user_facing_failures"]["failure_rate"] == 0.02
+    assert first["sustain"]["counts"] == {"FIVE_XX_DELTA": 1}
     assert first["sustain"]["promoted"] == []
 
     second = _evaluate(
         _metrics_payload(
-            gray_latency=3.0,
+            gray_latency=1.0,
             stable_latency=1.0,
+            gray_five_xx=6,
             sustain_state=first["sustain"]["counts"],
         )
     )
     assert second["dispatcher_recommendation"]["action"] == "rollback"
-    assert second["dispatcher_recommendation"]["reason_codes"] == ["P95_RATIO", "P99_RATIO"]
+    assert second["dispatcher_recommendation"]["reason_codes"] == ["FIVE_XX_DELTA"]
+
+    # One more failure and the user-facing leg crosses too, at its own depth of 2
+    # rather than the 5xx delta leg's -- the two legs read the same rows and are
+    # gated separately on purpose.
+    over = _evaluate(
+        _metrics_payload(gray_latency=1.0, stable_latency=1.0, gray_five_xx=7)
+    )
+    assert over["sustain"]["counts"] == {"FIVE_XX_DELTA": 1, "USER_FAILURE_RATE": 1}
+    assert over["dispatcher_recommendation"]["action"] == "none"
 
     # A window that does not breach resets the streak rather than decaying it:
     # bad, fine, bad, fine is noise, and letting it accumulate would rebuild the
@@ -1454,30 +1590,56 @@ def test_metrics_promotes_a_statistical_breach_only_after_it_repeats() -> None:
         _metrics_payload(
             gray_latency=1.0,
             stable_latency=1.0,
-            sustain_state={"P95_RATIO": 1, "P99_RATIO": 1},
+            sustain_state={"FIVE_XX_DELTA": 1, "USER_FAILURE_RATE": 1},
         )
     )
     assert recovered["sustain"]["counts"] == {}
     assert recovered["dispatcher_recommendation"]["action"] == "none"
 
 
-def test_metrics_darkens_latency_legs_below_the_sample_floor() -> None:
-    """A ratio computed over too few samples must not be able to breach.
+def test_metrics_reports_latency_ratios_without_arming_them() -> None:
+    """The percentile ratios are readings now, and must not be able to breach.
 
-    The `responses` class medians 57 latency samples per five minutes; a p99 over
-    57 samples is the single slowest request wearing a percentile's name.  Below
-    the floor the ratio is still reported -- that is the honest reading -- but it
-    cannot trigger, and the run says so out loud rather than passing silently.
+    A 3x p95 regression used to be a rollback trigger.  It is reported and it
+    triggers nothing, because the ratio's two sides are not comparable: the frozen
+    baseline carries 2043-5156 samples per class against a live window of 189-317,
+    so the ratio moves with sample depth.  Measured over 148 real cycles of
+    litellm-198-v195-20260914 at split=100 with five_xx_count identically 0, the
+    median ratio was BELOW 1.0 on every class while 17 windows breached the 1.3
+    line -- and one 30-minute `responses` stretch crossed it four times with a
+    2.5x swing and no errors at all.
+
+    The `messages` class was worse than noisy: 0 of 80 windows ever qualified, so
+    that leg was dark for the entire run while reporting itself armed.
+
+    This test is the guard against re-arming them without first fixing the
+    denominator (equal-depth cohorts), and against the softer failure of leaving a
+    threshold behind for a leg that cannot fire -- which is how a dark leg keeps
+    looking armed.
     """
+    result = _evaluate(_metrics_payload(gray_latency=3.0, stable_latency=1.0))
+    comparison = result["comparisons"][0]
+    assert comparison["p95_ratio"] == 3.0
+    assert comparison["p95_above_floor"] is True
+    assert comparison["breaches"] == []
+    assert result["sustain"]["counts"] == {}
+    assert result["dispatcher_recommendation"]["action"] == "none"
+
+    thresholds = result["thresholds"]
+    assert thresholds["latency_observed_only"] is True
+    assert "p95_ratio" not in thresholds
+    assert "p99_ratio" not in thresholds
+
+    # Below the reading floor the ratio is still reported -- that is the honest
+    # number -- and it is still not a trigger.
     thin = _evaluate(
         _metrics_payload(gray_latency=3.0, stable_latency=1.0, wide_samples=150)
     )
-    comparison = thin["comparisons"][0]
-    assert comparison["p95_qualified"] is False
-    assert comparison["p99_qualified"] is False
-    assert comparison["p95_ratio"] == 3.0
-    assert comparison["breaches"] == []
-    assert "LATENCY_SAMPLE_BELOW_FLOOR" in thin["dispatcher_recommendation"]["reason_codes"]
+    thin_comparison = thin["comparisons"][0]
+    assert thin_comparison["p95_above_floor"] is False
+    assert thin_comparison["p95_ratio"] == 3.0
+    assert thin_comparison["breaches"] == []
+    assert thin["dispatcher_recommendation"]["action"] == "none"
 
 
 def test_metrics_keeps_the_stop_loss_leg_armed_when_latency_legs_are_dark() -> None:
@@ -1504,8 +1666,15 @@ def test_metrics_keeps_the_stop_loss_leg_armed_when_latency_legs_are_dark() -> N
     result = _evaluate(payload)
     comparison = result["comparisons"][0]
     assert comparison["five_xx_qualified"] is True
-    assert comparison["p95_qualified"] is False
-    assert comparison["p99_qualified"] is False
+    # `p95_qualified`/`p99_qualified` are gone from the payload, replaced by
+    # `p95_above_floor`/`p99_above_floor`.  The rename is the point: the old names
+    # said "this leg is armed and has the samples for it", and after
+    # LATENCY_OBSERVED_ONLY only the second half is true.  Asserting the old keys are
+    # absent stops anyone reading a `true` here as a live gate.
+    assert comparison["p95_above_floor"] is False
+    assert comparison["p99_above_floor"] is False
+    assert "p95_qualified" not in comparison
+    assert "p99_qualified" not in comparison
     assert comparison["breaches"] == ["FIVE_XX_DELTA"]
     assert result["dispatcher_recommendation"]["action"] == "rollback"
 
@@ -1566,4 +1735,332 @@ def test_metrics_takes_error_rate_from_the_live_window_not_the_wide_one() -> Non
     assert comparison["five_xx_delta"] == 0.1
     assert comparison["gray_count"] == 300
     assert comparison["gray_latency_count"] == 900
-    assert result["sustain"]["counts"] == {"FIVE_XX_DELTA": 1}
+    # USER_FAILURE_RATE rides along because 30 of 300 is 10%, five times its line --
+    # it reads the same live rows off the same window, which is what this test is
+    # about.  If it were ever absent here while FIVE_XX_DELTA was present, the two
+    # legs would have drifted onto different windows.
+    assert result["sustain"]["counts"] == {"FIVE_XX_DELTA": 1, "USER_FAILURE_RATE": 1}
+    assert result["user_facing_failures"]["failure_rate"] == 0.1
+
+
+def test_metrics_reads_ready_containers_and_never_replicas() -> None:
+    """Leg 2: a lane short of ready containers must go red immediately.
+
+    `replicas` is the ruler this leg refuses to use, and the refusal is measured,
+    not stylistic: a Deployment scaled to zero still reports `Available: True`, and
+    on the acct pool 165 deployments with replicas>0 had only 54 actually serving.
+    Both failures point the same way -- the spec-side number reads healthy for a
+    lane with nothing running.
+
+    This trigger bypasses the sustain gate.  A container that is not ready is an
+    observed fact off an exact counter, not a sampled ratio, so holding it for a
+    second window would mean watching a known outage for ten minutes before acting.
+    """
+    short = _evaluate(
+        _metrics_payload(
+            gray_latency=1.0, stable_latency=1.0, ready_containers=2, expected_containers=3
+        )
+    )
+    assert short["readiness"]["status"] == "FAIL"
+    assert short["readiness"]["ruler"] == "ready_containers"
+    assert short["dispatcher_recommendation"]["action"] == "rollback"
+    assert "READY_CONTAINERS_SHORT" in short["dispatcher_recommendation"]["reason_codes"]
+    # Fires on the first window: absent from the sustain ledger entirely, rather
+    # than present with a count of 1 waiting for a repeat.
+    assert "READY_CONTAINERS_SHORT" not in short["sustain"]["counts"]
+
+    # Zero ready is the case a `grep -c`-style count cannot tell from "the query
+    # failed", which is why the collector omits the document when kubectl cannot
+    # answer.  When it IS read, zero is a real reading and must act.
+    empty = _evaluate(
+        _metrics_payload(
+            gray_latency=1.0, stable_latency=1.0, ready_containers=0, expected_containers=3
+        )
+    )
+    assert empty["readiness"]["status"] == "FAIL"
+    assert empty["dispatcher_recommendation"]["action"] == "rollback"
+
+    healthy = _evaluate(_metrics_payload(gray_latency=1.0, stable_latency=1.0))
+    assert healthy["readiness"]["status"] == "PASS"
+    assert healthy["dispatcher_recommendation"]["action"] == "none"
+
+
+def test_metrics_refuses_to_judge_a_split_without_a_readiness_reading() -> None:
+    """An absent readiness section above split 0 stops the ramp, it does not pass.
+
+    NOT_PROVIDED and "zero ready containers" are opposite facts: one is a missing
+    reading, the other an outage.  The leg keeps them apart, and this is the half
+    that matters for traffic -- a payload assembled without the section would
+    otherwise move users onto a lane while the leg that detects "the lane is not
+    running" was silently switched off.
+
+    Below split 0 there is no lane to be short of, so the section is optional
+    there and the collector omits it.
+    """
+    payload = _metrics_payload(gray_latency=1.0, stable_latency=1.0)
+    del payload["readiness"]
+    payload["evidence"]["payload_sha256"] = _resign(payload)
+    result = _evaluate(payload)
+    assert result["status"] == "ERROR"
+    assert "READINESS_MISSING" in result["errors"]
+    assert result["dispatcher_recommendation"]["action"] != "none"
+
+    liveness_gone = _metrics_payload(gray_latency=1.0, stable_latency=1.0)
+    del liveness_gone["data_sources"]
+    liveness_gone["evidence"]["payload_sha256"] = _resign(liveness_gone)
+    liveness_result = _evaluate(liveness_gone)
+    assert liveness_result["status"] == "ERROR"
+    assert "DATA_SOURCES_MISSING" in liveness_result["errors"]
+
+
+def test_metrics_goes_red_when_one_data_source_stops_answering() -> None:
+    """Leg 3: a monitor whose input died must not read as a healthy system.
+
+    Every other leg here reports "clean" on an empty window, so a collector that
+    stopped producing a source yields a payload indistinguishable from one watching
+    a healthy lane.  That is the shape behind the 2026-09-14 run being green
+    throughout while three of its five ramp steps had an unarmed stop-loss.
+
+    Ages are relative to the NEWEST observation in the cycle, which makes this leg
+    answer "is one input lagging while the others are alive".  The first version
+    anchored on `evidence.captured_at` -- the MINIMUM of the source timestamps by
+    construction -- so the dead source read as age 0 and everything else read as
+    being in the future.  Whole-payload staleness is a different leg
+    (MAX_EVIDENCE_AGE) on purpose, so a re-run over an archived cycle can still
+    judge that cycle instead of calling every historical file dead.
+
+    Like the readiness leg, this bypasses the sustain gate, and for a stronger
+    reason: what it detects is the monitor having stopped, so the window that would
+    confirm the breach may never arrive.
+    """
+    stale = _evaluate(
+        _metrics_payload(
+            gray_latency=1.0, stable_latency=1.0, source_ages={"hard_errors": 420}
+        )
+    )
+    assert stale["data_liveness"]["status"] == "FAIL"
+    assert stale["data_liveness"]["silent_sources"] == ["hard_errors"]
+    assert stale["data_liveness"]["anchor"] == "newest_observation"
+    assert stale["dispatcher_recommendation"]["action"] == "rollback"
+    assert "DATA_SOURCE_SILENT" in stale["dispatcher_recommendation"]["reason_codes"]
+    assert "DATA_SOURCE_SILENT" not in stale["sustain"]["counts"]
+
+    # One interval of lag is tolerated; the floor is `>`, not `>=`, so a source
+    # exactly one cadence behind is the newest cycle's own read rather than a fault.
+    at_floor = _evaluate(
+        _metrics_payload(
+            gray_latency=1.0, stable_latency=1.0, source_ages={"hard_errors": 300}
+        )
+    )
+    assert at_floor["data_liveness"]["status"] == "PASS"
+    assert at_floor["dispatcher_recommendation"]["action"] == "none"
+
+    # The anchor moving is what must NOT rescue a lagging source: shifting every
+    # timestamp back together keeps the payload internally live, because this leg
+    # measures spread between inputs and not distance from wall clock.
+    spread = _evaluate(
+        _metrics_payload(
+            gray_latency=1.0,
+            stable_latency=1.0,
+            source_ages={"access_log": 60, "hard_errors": 480, "backend_health": 60},
+        )
+    )
+    assert spread["data_liveness"]["silent_sources"] == ["hard_errors"]
+
+
+def test_metrics_counts_user_facing_failures_including_proxy_four_xx() -> None:
+    """Leg 4: the users'-eye view, at a much lower bar than the stop-loss.
+
+    Counted from the access log's own status per request -- one row per thing a user
+    actually saw.  NOT from ERROR log lines: those count a retry layer's upstream
+    attempts, so one user-visible failure appears 1-N times depending on how many
+    tries it took, and the number moves when retry policy changes with nothing
+    wrong.
+
+    429 counts here and nowhere else, which is the reason this leg exists next to
+    the absolute 5xx one.  A 429 storm out of a bad build is completely invisible
+    to a 5xx ruler and completely visible to the person hitting it.  What does NOT
+    count is caller-side 4xx -- see the CLIENT_ERROR test below for why.
+    """
+    payload = _metrics_payload(gray_latency=1.0, stable_latency=1.0)
+    # 12 of 300 = 4%, over the 2% line, and entirely 429: no 5xx leg can see this.
+    for record in payload["records"][:12]:
+        record["status"] = 429
+    payload["evidence"]["payload_sha256"] = _resign(payload)
+    result = _evaluate(payload)
+
+    leg = result["user_facing_failures"]
+    assert leg["ruler"] == "access_log_status"
+    assert leg["proxy_four_xx_count"] == 12
+    assert leg["client_four_xx_count"] == 0
+    assert leg["five_xx_count"] == 0
+    assert leg["failure_rate"] == 0.04
+    assert leg["qualified"] is True
+    # Sampled ratio, so it goes through the sustain gate rather than firing on one
+    # window -- unlike the readiness and liveness legs above.  Depth is 3, not the
+    # global 2: on real traffic the proxy-emitted breach runs reach 2 windows, so
+    # depth 2 still fired 3.13 times/day on healthy traffic.
+    assert result["sustain"]["required_windows_by_code"]["USER_FAILURE_RATE"] == 3
+    assert result["sustain"]["counts"] == {"USER_FAILURE_RATE": 1}
+    assert result["dispatcher_recommendation"]["action"] == "none"
+    # And the 5xx legs stayed silent on the same rows, which is what makes this leg
+    # additional rather than a second copy of the stop-loss.
+    assert result["comparisons"][0]["breaches"] == []
+
+    # Second breaching window: still pending, because depth is 3.
+    pending = _metrics_payload(gray_latency=1.0, stable_latency=1.0)
+    for record in pending["records"][:12]:
+        record["status"] = 429
+    pending["evidence"]["payload_sha256"] = _resign(pending)
+    pending["sustain_state"] = {"USER_FAILURE_RATE": 1}
+    second = _evaluate(pending)
+    assert second["sustain"]["counts"] == {"USER_FAILURE_RATE": 2}
+    assert second["dispatcher_recommendation"]["action"] != "rollback"
+
+    confirmed = _metrics_payload(gray_latency=1.0, stable_latency=1.0)
+    for record in confirmed["records"][:12]:
+        record["status"] = 429
+    confirmed["evidence"]["payload_sha256"] = _resign(confirmed)
+    confirmed["sustain_state"] = {"USER_FAILURE_RATE": 2}
+    third = _evaluate(confirmed)
+    assert third["dispatcher_recommendation"]["action"] == "rollback"
+    assert third["dispatcher_recommendation"]["reason_codes"] == ["USER_FAILURE_RATE"]
+
+    # Two failures in 40 requests is 5%, over the line, and must not start a streak:
+    # below MIN_USER_FAILURE_EVENTS a rate is a coin flip regardless of how far over
+    # it lands.  The window still QUALIFIES -- 40 clears the sample floor -- so this
+    # is the event minimum doing the work on its own, and no floor alert is raised
+    # because nothing about the sample was too thin to read.
+    thin = _metrics_payload(gray_latency=1.0, stable_latency=1.0, live_samples=40)
+    thin["records"][0]["status"] = 429
+    thin["records"][1]["status"] = 429
+    thin["evidence"]["payload_sha256"] = _resign(thin)
+    thin_result = _evaluate(thin)
+    thin_leg = thin_result["user_facing_failures"]
+    assert thin_leg["failure_count"] == 2
+    assert thin_leg["qualified"] is True
+    assert thin_leg["failure_rate"] == 0.05
+    assert "USER_FAILURE_RATE" not in thin_result["sustain"]["counts"]
+    assert "USER_FAILURE_SAMPLE_BELOW_FLOOR" not in thin_result["alerts"]
+    assert thin_result["dispatcher_recommendation"]["action"] != "rollback"
+
+
+def test_metrics_client_side_four_xx_alerts_but_never_moves_traffic() -> None:
+    """Caller-side 4xx is reported and never triggers.  This is a REGRESSION test.
+
+    Until 2026-09-20 this leg counted every status >= 400, and the negative control
+    (replaying real stable traffic against itself, so every red is false by
+    construction) promoted it to `rollback` on 3 of 6 consecutive windows.  The
+    population was the defect, not the threshold: over 185 healthy five-minute
+    windows / 66393 stable inference rows,
+
+        client-side 4xx  499x508 400x326 405x296 403x107 401x70
+          p50 0.0043  p90 0.0330  max 0.1222   above 0.02 in 39/185 (21.1%)
+        proxy-emitted    503x371 500x124 429x92 413x4
+          p50 0.0000  p90 0.0065  max 0.2283   above 0.02 in  7/185 ( 3.8%)
+
+    499 is nginx's code for the client hanging up before a reply, 405 is a caller
+    using a method the route does not serve, 400 is a malformed body.  A proxy
+    cannot be rolled back for any of them, and a gate that tries is a gate nobody
+    can leave armed.
+    """
+    # 60 of 300 = 20%, ten times the trigger line and twice the alert line, all of
+    # it caller-side.  Under the old population this was an unconditional rollback
+    # after two windows.
+    payload = _metrics_payload(gray_latency=1.0, stable_latency=1.0)
+    for index, record in enumerate(payload["records"][:60]):
+        record["status"] = (499, 405, 400, 401, 403)[index % 5]
+    payload["evidence"]["payload_sha256"] = _resign(payload)
+    result = _evaluate(payload)
+
+    leg = result["user_facing_failures"]
+    assert leg["client_four_xx_count"] == 60
+    assert leg["client_four_xx_rate"] == 0.2
+    # The trigger's own numbers are untouched by all of it.
+    assert leg["proxy_four_xx_count"] == 0
+    assert leg["five_xx_count"] == 0
+    assert leg["failure_count"] == 0
+    assert leg["failure_rate"] == 0.0
+    # Visible, and only visible: an alert, no streak, no action on traffic.
+    assert "CLIENT_ERROR_RATE_HIGH" in result["alerts"]
+    assert "USER_FAILURE_RATE" not in result["sustain"]["counts"]
+    assert result["dispatcher_recommendation"]["hard_trigger"] is False
+    assert result["dispatcher_recommendation"]["action"] == "alert_only"
+    # Repeating it forever still never moves traffic -- the code cannot reach the
+    # sustain gate at all, so there is no depth at which it converts.
+    repeat = _metrics_payload(gray_latency=1.0, stable_latency=1.0)
+    for index, record in enumerate(repeat["records"][:60]):
+        record["status"] = (499, 405, 400, 401, 403)[index % 5]
+    repeat["evidence"]["payload_sha256"] = _resign(repeat)
+    repeat["sustain_state"] = {"USER_FAILURE_RATE": 2}
+    second = _evaluate(repeat)
+    assert second["dispatcher_recommendation"]["hard_trigger"] is False
+    assert second["sustain"]["counts"].get("USER_FAILURE_RATE") in (None, 0)
+
+    # Below the alert line it is not even an alert: 6 of 300 = 2% is real caller
+    # noise on this proxy (p50 0.0043, p90 0.0330) and must stay quiet.
+    quiet = _metrics_payload(gray_latency=1.0, stable_latency=1.0)
+    for record in quiet["records"][:6]:
+        record["status"] = 499
+    quiet["evidence"]["payload_sha256"] = _resign(quiet)
+    quiet_result = _evaluate(quiet)
+    assert quiet_result["user_facing_failures"]["client_four_xx_count"] == 6
+    assert "CLIENT_ERROR_RATE_HIGH" not in quiet_result["alerts"]
+    assert quiet_result["dispatcher_recommendation"]["hard_trigger"] is False
+
+
+def test_replay_harness_reads_the_same_log_fields_as_the_collector() -> None:
+    """The negative control's extractor must not drift from the collector's.
+
+    They are two separate regexes on purpose -- the collector is a CLI that reads a
+    live log and refuses a stale window, which are exactly the two behaviours a
+    replay must not have -- and that is precisely why this has to be pinned.  If
+    nginx's log_format changes and only one of them is updated, the replay stops
+    matching lines and reports 0 reds on 0 windows, which reads as the cleanest run
+    the gate has ever had.  A negative control that cannot see is worse than none.
+
+    Compared by PATTERN, not by group name: the names differ deliberately
+    (`captured_at` vs `ts`, `upstream_times` vs `rt`) because each module names
+    fields for its own use.  What must stay identical is the shape of the line each
+    one expects, so the comparison strips the group names out.
+    """
+    harness = (SCRIPT_DIR / "replay-gate-negative-control.py").read_text()
+    collector = (SCRIPT_DIR / "collect-metrics.py").read_text()
+
+    def pattern_of(source: str, name: str) -> str:
+        block = re.search(
+            rf"^{name} = re\.compile\(\n(.*?)^\)", source, re.S | re.M
+        )
+        assert block, f"{name} not found in the expected form"
+        # Keep only the r"..." fragments: comments between them are prose, and the
+        # two modules explain themselves differently.
+        fragments = re.findall(r'r"((?:[^"\\]|\\.)*)"', block.group(1))
+        assert fragments, f"{name} has no pattern fragments"
+        joined = "".join(fragments)
+        # Drop the group NAMES, keep the grouping.
+        return re.sub(r"\(\?P<[A-Za-z_][A-Za-z0-9_]*>", "(", joined)
+
+    harness_pattern = pattern_of(harness, "LOG_LINE_RE")
+    collector_pattern = pattern_of(collector, "LOG_LINE_RE")
+    # The collector additionally matches (and deliberately does not capture) the
+    # trailing `sid=` field.  That suffix is the only permitted difference: the
+    # replay reads whole windows rather than enrolment, so it has no use for sid.
+    assert collector_pattern.startswith(harness_pattern), (
+        "the replay harness and the collector no longer expect the same log line\n"
+        f"harness:   {harness_pattern!r}\n"
+        f"collector: {collector_pattern!r}"
+    )
+    suffix = collector_pattern[len(harness_pattern) :]
+    assert "sid" in suffix or suffix == "", f"unexpected extra fields: {suffix!r}"
+
+    # And both must actually match a real line in the production log_format, so a
+    # pair of regexes that drifted together into matching nothing still fails here.
+    line = (
+        "ts=2026-09-20T03:12:39+08:00 - 200 1.234 "
+        'pool=canary rt=0.900 uri_class=chat sid=abc123'
+    )
+    for name, pattern in (
+        ("harness", harness_pattern),
+        ("collector", collector_pattern),
+    ):
+        assert re.compile(pattern).search(line), f"{name} regex matches no real line"

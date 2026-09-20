@@ -17,6 +17,7 @@
 #   $RAW_DIR/access.log            0600, overwritten each cycle
 #   $RAW_DIR/hard-errors.json      0600, overwritten each cycle
 #   $RAW_DIR/backend-health.json   0600, overwritten each cycle
+#   $RAW_DIR/readiness.json        0600, overwritten each cycle
 #   $RUN_DIR/restart-baseline.json 0600, per-pod restartCount carried between cycles
 #   $RUN_DIR/inputs/metrics-input-<UTC>.json  0600, one per cycle, never reused
 #   $RUN_DIR/monitor-loop.log      0600, append-only
@@ -70,6 +71,14 @@ ACCESS_LOG="${GRAY_ACCESS_LOG:-/var/log/nginx/cc-auto-link.gray.log}"
 LATENCY_WINDOW_MINUTES="${GRAY_LATENCY_WINDOW_MINUTES:-30}"
 NAMESPACE="${GRAY_NAMESPACE:-litellm-product}"
 GRAY_SELECTOR="${GRAY_POD_SELECTOR:-app=litellm-proxy-gray}"
+# Ready containers the gray lane must have, for metrics.py's readiness leg.
+#
+# No default on purpose.  A default would be a hard-coded fleet size that stops
+# matching after any scale change and never goes red when it does -- the
+# `llm-stab-scrape-down` failure, where a literal 5 sat in a rule for weeks.  It
+# comes from the run sheet, and above split 0 metrics.py refuses a cycle without
+# it, so forgetting it stops the ramp rather than silently disarming the leg.
+EXPECTED_READY="${GRAY_EXPECTED_READY_CONTAINERS:-}"
 # Enough log tail to cover the widest window the collector reads.  Measured
 # 2026-09-18: ~20MB of this log is ~40 minutes, so 40MB covers the 30-minute
 # latency window with room to spare.  Bounded on purpose -- the file grows, and
@@ -77,7 +86,9 @@ GRAY_SELECTOR="${GRAY_POD_SELECTOR:-app=litellm-proxy-gray}"
 TAIL_BYTES="${GRAY_ACCESS_LOG_TAIL_BYTES:-40000000}"
 
 usage() {
-  printf 'Usage: %s --baseline FILE [--interval SECONDS] [--max-cycles N] [--spend FILE] [--once]\n' "$0"
+  printf 'Usage: %s --baseline FILE [--interval SECONDS] [--max-cycles N] [--spend FILE] [--expected-ready N] [--once]\n' "$0"
+  printf '  --expected-ready N  ready containers the gray lane must have (run-sheet value,\n'
+  printf '                      no default; required above split 0)\n'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -86,6 +97,7 @@ while [[ $# -gt 0 ]]; do
     --max-cycles) MAX_CYCLES="${2:?missing max cycles}"; shift 2 ;;
     --baseline) BASELINE="${2:?missing baseline}"; shift 2 ;;
     --spend) SPEND_SOURCE="${2:?missing spend source}"; shift 2 ;;
+    --expected-ready) EXPECTED_READY="${2:?missing expected ready count}"; shift 2 ;;
     --once) MAX_CYCLES=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -95,6 +107,12 @@ done
 [[ "$INTERVAL" =~ ^[0-9]+$ && "$INTERVAL" -ge 60 ]] || { printf 'interval must be an integer >= 60\n' >&2; exit 2; }
 [[ "$MAX_CYCLES" =~ ^[0-9]+$ ]] || { printf 'max-cycles must be a non-negative integer\n' >&2; exit 2; }
 [[ -n "$BASELINE" && -f "$BASELINE" ]] || { printf 'a frozen --baseline file is required\n' >&2; exit 2; }
+# Validated here rather than at use: `printf '%d'` on a non-number aborts the
+# cycle mid-envelope under set -e, which reads as "the monitor broke" instead of
+# "you passed a bad flag".  1 is the floor because a lane expected to have zero
+# ready containers is not a lane being ramped.
+[[ -z "$EXPECTED_READY" || "$EXPECTED_READY" =~ ^[0-9]+$ && "$EXPECTED_READY" -ge 1 ]] \
+  || { printf 'expected-ready must be an integer >= 1\n' >&2; exit 2; }
 
 umask 077
 mkdir -p "$RAW_DIR"
@@ -243,6 +261,47 @@ collect_hard_errors() {
   rm -f "$RAW_DIR/.hard-errors.data"
 }
 
+# Ready CONTAINERS, counted from `.status.containerStatuses[*].ready` -- never
+# from replicas, and never from a Deployment's `Available` condition.  Both of
+# those are spec-side numbers that read healthy for a lane with nothing running:
+# a Deployment scaled to 0 still reports `Available: True`, and on the acct pool
+# 165 deployments with replicas>0 had only 54 actually serving.
+#
+# An unreadable count omits the document entirely, so the cycle fails on a
+# missing source rather than reporting 0 ready and dispatching a rollback on our
+# own broken kubectl.
+collect_readiness() {
+  local split="$1" raw ready
+  rm -f "$RAW_DIR/readiness.json"
+  if [[ -z "$EXPECTED_READY" ]]; then
+    # Above split 0 metrics.py turns the absent document into READINESS_MISSING
+    # and the ramp stops, which is the intended shape: an unset expectation
+    # disarms the leg, and a disarmed leg must not be able to move traffic.
+    [[ "$split" -gt 0 ]] && log "FAIL readiness required at split=$split but --expected-ready is unset"
+    return 0
+  fi
+  # kubectl's output is captured BEFORE counting.  `kubectl ... | grep -c` cannot
+  # tell "no pods matched the selector" from "kubectl could not answer": grep
+  # prints 0 for both, so a broken kubectl would report zero ready containers and
+  # dispatch a rollback on our own tooling rather than on production.
+  raw="$(kubectl -n "$NAMESPACE" get pods -l "$GRAY_SELECTOR" \
+    -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.ready}{"\n"}{end}{end}' \
+    2>/dev/null || true)"
+  if [[ -z "$raw" ]]; then
+    log "SKIP readiness unreadable (kubectl returned nothing for -l $GRAY_SELECTOR)"
+    return 1
+  fi
+  # `grep -c` exits 1 on zero matches under `set -e`, and zero ready containers is
+  # a real reading we must keep -- so the count is taken with awk, which exits 0
+  # either way and cannot turn a genuine 0 into a skipped cycle.
+  ready="$(printf '%s\n' "$raw" | awk '$0 == "true" { n++ } END { print n + 0 }')"
+  printf '{"lane":"gray","ready_containers":%d,"expected_containers":%d,"observed_at":"%s"}' \
+    "$ready" "$EXPECTED_READY" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    | envelope "kubectl get pods -l $GRAY_SELECTOR .status.containerStatuses[*].ready" \
+               "$RAW_DIR/readiness.json"
+  return 0
+}
+
 # Regenerate the spend reconciliation document for THIS cycle.
 #
 # Why a probe rather than production traffic: measured 2026-09-18, production
@@ -307,6 +366,13 @@ cycle() {
 
   collect_backend_health
   collect_hard_errors
+  if ! collect_readiness "$split"; then
+    # Same fail-safe reasoning as spend: READY_CONTAINERS_SHORT bypasses the
+    # sustain gate, so a kubectl that cannot answer must not be able to shape
+    # itself into "the lane is empty".
+    log "SKIP readiness unavailable (split=$split)"
+    return 1
+  fi
   if ! collect_spend "$split"; then
     # Refusing the cycle is the fail-safe direction.  A spend mismatch is a
     # rollback trigger that bypasses the sustain gate, so a *collector* failure
@@ -346,6 +412,12 @@ cycle() {
   # split=0 it is legitimately absent, so this stays optional here rather than
   # silently synthesising a source that would have to be trusted for rollback.
   [[ -n "$SPEND_SOURCE" ]] && args+=(--spend-reconciliation "$SPEND_SOURCE")
+  # Same rule for readiness: present when it could be read, absent otherwise, and
+  # metrics.py decides whether absence is fatal for this split.  The collector also
+  # derives data_sources from whichever flags are passed, so an omitted readiness
+  # here means "not requested" rather than "requested and silent" -- the liveness
+  # leg must not report a source we never asked for as having gone quiet.
+  [[ -f "$RAW_DIR/readiness.json" ]] && args+=(--readiness "$RAW_DIR/readiness.json")
 
   if ! python3 "$SCRIPT_DIR/collect-metrics.py" "${args[@]}" >>"$LOG_FILE" 2>&1; then
     log "FAIL collect-metrics.py (split=$split phase=$phase)"
@@ -365,7 +437,7 @@ cycle() {
 }
 
 printf '%s' "$$" >"$PID_FILE"; chmod 600 "$PID_FILE"
-log "loop start interval=${INTERVAL}s max_cycles=$MAX_CYCLES baseline=$BASELINE spend=${SPEND_SOURCE:-none} spend_collector=${SPEND_COLLECTOR:-none} pid=$$"
+log "loop start interval=${INTERVAL}s max_cycles=$MAX_CYCLES baseline=$BASELINE spend=${SPEND_SOURCE:-none} spend_collector=${SPEND_COLLECTOR:-none} expected_ready=${EXPECTED_READY:-unset} pid=$$"
 
 n=0
 while :; do

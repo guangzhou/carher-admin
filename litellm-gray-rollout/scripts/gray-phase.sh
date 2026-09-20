@@ -34,7 +34,21 @@ case "${1:-}" in
     elif ! is_test_mode; then
       case "$STATE_PHASE:$target" in
         preflight:normal_gray) require_gate_evidence gray_entry "normal_gray" ;;
-        prod_offline_upgrading:prod_verified) require_gate_evidence prod_verified "prod_verified" ;;
+        prod_offline_upgrading:prod_verified)
+          # The prod release must be pinned BEFORE this transition, not after.
+          # Section 7 has just replaced it with `helm upgrade --reset-values`, and
+          # `prod_verified` is the gate that says "the new prod build is good" --
+          # a claim about a build. Taking it while that build's chart, values and
+          # image digest are unrecorded means the claim names nothing: the very
+          # next step, gray-convergence-commit.sh, hands every user to it.
+          #
+          # Ordering matters and is load-bearing: pinning rotates the generation,
+          # so pin first and then earn prod_verified against the generation that
+          # describes the bytes now running. Earning it first would produce
+          # evidence that the pin immediately invalidates.
+          require_pinned_release "$GRAY_PROD_RELEASE" "declaring prod_verified"
+          require_gate_evidence prod_verified "prod_verified"
+          ;;
       esac
     fi
     stage_from_active

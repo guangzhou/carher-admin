@@ -9,6 +9,10 @@ load_state
 [[ "$STATE_PHASE" == "normal_gray" && "$STATE_FROZEN" == "0" ]] || die "convergence prepare requires normal_gray"
 [[ "$STATE_SPLIT" == "100" ]] || die "convergence prepare requires split=100"
 [[ -z "$(map_keys "$(active_dir)/force-prod.map")" ]] || die "incident force-prod must be empty"
+# Convergence is the point of no easy return: after it, prod is taken offline and
+# upgraded. The stability evidence below is only about a build config_checksum can
+# name, so require the workload to be pinned before trusting any of it.
+require_workload_binding "convergence prepare"
 require_gate_evidence convergence_stable GRAY_GRAY_STABLE
 require_gate_evidence convergence_control_plane GRAY_CONTROL_PLANE_OK
 require_gate_evidence convergence_bridge GRAY_BRIDGE_READY

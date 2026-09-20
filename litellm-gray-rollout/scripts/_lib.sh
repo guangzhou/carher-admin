@@ -13,6 +13,12 @@ GRAY_ALLOW_NONROOT="${GRAY_ALLOW_NONROOT:-0}"
 GRAY_TEST_MODE="${GRAY_TEST_MODE:-0}"
 GRAY_GATE_EVIDENCE_DIR="${GRAY_GATE_EVIDENCE_DIR:-$GRAY_ROOT/evidence}"
 GRAY_GATE_MAX_AGE_SECONDS="${GRAY_GATE_MAX_AGE_SECONDS:-86400}"
+# The Helm release that serves production after convergence. Section 7 upgrades it
+# with `--reset-values`, which is the single highest-radius action in the whole run,
+# and until 2026-09-21 it was the one release nothing ever pinned: the pin was only
+# ever run for the gray and guarded-old releases, so the build that BECOMES the
+# stable serving build had exactly the hole the pin exists to close.
+GRAY_PROD_RELEASE="${GRAY_PROD_RELEASE:-litellm-product-proxy}"
 
 is_test_mode() {
   [[ "$GRAY_TEST_MODE" == "1" ]]
@@ -453,7 +459,49 @@ validate_scalar() {
     bridge) [[ "$value" =~ ^(off|guarded-old)$ ]] || die "invalid bridge" ;;
     run_id|generation) [[ "$value" =~ ^[A-Za-z0-9._:-]+$ ]] || die "invalid $key" ;;
     config_checksum|input_checksum) [[ "$value" == test-mode || "$value" =~ ^[0-9a-f]{64}$ ]] || die "invalid $key" ;;
+    workload_checksum) [[ "$value" == unbound || "$value" =~ ^[0-9a-f]{64}$ ]] || die "invalid $key" ;;
   esac
+}
+
+# Fail closed on a run whose K8s side was never pinned.
+#
+# This is what stops the hole from simply reappearing as "nobody ran the pin
+# tool". An unbound run can still be loaded, inspected and rolled back; it may
+# not ramp, prepare convergence, or commit. The distinction matters because the
+# rollback path must keep working for runs created before this existed -- making
+# them unloadable would trade a visibility hole for an unrecoverable run.
+require_workload_binding() {
+  local what="$1"
+  is_test_mode && return 0
+  [[ "${STATE_WORKLOAD_CHECKSUM:-unbound}" != "unbound" ]] || die \
+    "$what requires a pinned workload: run gray-workload-pin.sh first (K8s side of the frozen artifact is unrecorded, so no gate can tell an approved build from a patched one)"
+}
+
+# Fail closed unless a NAMED release is inside the pin.
+#
+# `require_workload_binding` only asks "is anything pinned?", and the answer was
+# always yes from preflight onwards because preflight pins the gray release. So it
+# could not see the actual convergence hole: section 7 replaces the prod release
+# with `helm upgrade --reset-values`, and the only thing between that and
+# `gray-convergence-commit.sh` was the human-signed `prod_verified` gate. The run
+# would commit users onto a build whose chart, values and image digest were never
+# recorded anywhere -- the exact state the pin was written to make impossible,
+# surviving in the one release that matters most.
+#
+# Read from workload.env rather than from state, because the release set is not in
+# state; verify_generation() has already proven workload.env hashes to
+# workload_checksum, so this is reading a verified file, not trusting one.
+require_pinned_release() {
+  local release="$1" what="$2" dir
+  is_test_mode && return 0
+  require_workload_binding "$what"
+  dir="$(active_dir)"
+  [[ -f "$dir/workload.env" ]] || die "$what requires a pinned workload: workload.env is missing"
+  # An exact key match. A substring match would let `litellm-product-proxy-old`
+  # satisfy a requirement for `litellm-product-proxy`.
+  awk -F= -v key="release_${release}_image_digest" '$1 == key { found = 1 } END { exit !found }' \
+    "$dir/workload.env" || die \
+    "$what requires release '$release' to be pinned: run gray-workload-pin.sh with --release $release (chart package, values and image digest of the build that is actually running), otherwise no gate can tell the approved prod build from a patched one"
 }
 
 validate_state_invariants() {
@@ -479,6 +527,11 @@ load_state() {
   STATE_BRIDGE="$(state_get_from "$dir" bridge)" || die "state bridge missing"
   STATE_FROZEN="$(state_get_from "$dir" routing_frozen)" || die "state routing_frozen missing"
   STATE_INPUT_CHECKSUM="$(state_get_from "$dir" input_checksum)" || die "state input_checksum missing"
+  # Older generations predate workload pinning and have no such line. Reading
+  # that as `unbound` is deliberate: it keeps a pre-2026-09-21 run loadable (so
+  # it can still be rolled back) while require_workload_binding() refuses to let
+  # it take a forward step.
+  STATE_WORKLOAD_CHECKSUM="$(state_get_from "$dir" workload_checksum)" || STATE_WORKLOAD_CHECKSUM="unbound"
   STATE_CONFIG_CHECKSUM="$(state_get_from "$dir" config_checksum)" || die "state config_checksum missing"
   validate_scalar run_id "$STATE_RUN_ID"
   validate_scalar generation "$STATE_GENERATION"
@@ -504,10 +557,45 @@ files_checksum() {
 }
 
 state_checksum() {
-  local run_id="$1" generation="$2" phase="$3" mode="$4" split="$5" bridge="$6" frozen="$7" files="$8" input_checksum="${9:-test-mode}"
+  local run_id="$1" generation="$2" phase="$3" mode="$4" split="$5" bridge="$6" frozen="$7" files="$8" input_checksum="${9:-test-mode}" workload_checksum="${10:-unbound}"
   local payload
-  payload="run_id=$run_id|generation=$generation|phase=$phase|mode=$mode|split=$split|bridge=$bridge|routing_frozen=$frozen|files_checksum=$files|input_checksum=$input_checksum"
+  payload="run_id=$run_id|generation=$generation|phase=$phase|mode=$mode|split=$split|bridge=$bridge|routing_frozen=$frozen|files_checksum=$files|input_checksum=$input_checksum|workload_checksum=$workload_checksum"
   sha256_text "$payload"
+}
+
+# The K8s half of the frozen artifact, hashed into config_checksum so that a
+# mid-run patch cannot hide.
+#
+# WHY THIS EXISTS.  Until 2026-09-21 config_checksum covered exactly the seven
+# nginx route files.  The chart package, the three values files and the image
+# digest were frozen only by prose in the run book -- nothing recomputed them.
+# So patching a live release (edit values -> helm upgrade -> new content-addressed
+# ConfigMap -> rolling restart) left every ruler green: the generation did not
+# rotate, verify_generation still passed, and because require_gate_evidence() binds
+# evidence to run_id+generation+config_checksum, every gate approved against the
+# PRE-patch workload stayed valid against the POST-patch one.  The running build
+# was no longer the approved build and no gate could say so.
+#
+# The fix is not a new discipline layer, it is one more term in the hash that
+# already exists.  Recording a patch rotates config_checksum, which invalidates
+# every gate evidence file in one step -- so the ramp must re-earn split_sample,
+# split_monitor_continuity and (at >=50%) split_capacity, and the sustain streak
+# starts from zero because gray-monitor-cycle.sh drops counts across generations.
+# "I patched" and "I changed the config on the wire" become the same event,
+# because to the users they are.
+#
+# Absent file == `unbound`, NOT a silent pass: a run whose workload was never
+# recorded reads as unbound everywhere and require_workload_binding() fails
+# closed on it outside test mode.  An unpinned run is the pre-2026-09-21 state
+# and must not look identical to a pinned one.
+workload_checksum() {
+  local dir="$1"
+  if [[ ! -f "$dir/workload.env" ]]; then
+    printf 'unbound'
+    return 0
+  fi
+  secure_file "$dir/workload.env" "$GRAY_GENERATIONS"
+  sha256_file "$dir/workload.env"
 }
 
 input_manifest_checksum() {
@@ -576,10 +664,11 @@ PY
 
 write_state() {
   local dir="$1" run_id="$2" generation="$3" phase="$4" mode="$5" split="$6" bridge="$7" frozen="$8"
-  local files checksum input_checksum
+  local files checksum input_checksum workload
   files="$(files_checksum "$dir")"
   input_checksum="$(input_manifest_checksum "$dir")"
-  checksum="$(state_checksum "$run_id" "$generation" "$phase" "$mode" "$split" "$bridge" "$frozen" "$files" "$input_checksum")"
+  workload="$(workload_checksum "$dir")"
+  checksum="$(state_checksum "$run_id" "$generation" "$phase" "$mode" "$split" "$bridge" "$frozen" "$files" "$input_checksum" "$workload")"
   local state_tmp sums_tmp
   state_tmp="$(mktemp "$dir/.state.env.XXXXXX")"
   sums_tmp="$(mktemp "$dir/.SHA256SUMS.XXXXXX")"
@@ -592,6 +681,7 @@ split=$split
 bridge=$bridge
 routing_frozen=$frozen
 input_checksum=$input_checksum
+workload_checksum=$workload
 config_checksum=$checksum
 EOF
   chmod 600 "$state_tmp"
@@ -629,7 +719,7 @@ render_fragments() {
 }
 
 verify_generation() {
-  local dir="$1" actual expected files actual_input state_input expected_sums
+  local dir="$1" actual expected files actual_input state_input expected_sums actual_workload state_workload
   secure_dir "$dir" "$GRAY_GENERATIONS"
   for f in protected-prod.map force-prod.map force-gray.map key-sid.map convergence-mode.map bridge-override.map split.conf state.env SHA256SUMS input-checksums.env; do
     secure_file "$dir/$f" "$GRAY_GENERATIONS"
@@ -639,6 +729,12 @@ verify_generation() {
   actual_input="$(input_manifest_checksum "$dir")"
   state_input="$(state_get_from "$dir" input_checksum)" || die "state input checksum missing"
   [[ "$actual_input" == "$state_input" ]] || die "frozen input manifest checksum mismatch"
+  # The workload half. Recomputed from workload.env on disk, so editing that file
+  # without going through gray-workload-pin.sh fails here rather than passing
+  # quietly -- the same treatment the route maps already get.
+  actual_workload="$(workload_checksum "$dir")"
+  state_workload="$(state_get_from "$dir" workload_checksum)" || state_workload="unbound"
+  [[ "$actual_workload" == "$state_workload" ]] || die "workload checksum mismatch: workload.env changed outside a generation transition"
   files="$(files_checksum "$dir")"
   actual="$(state_checksum \
     "$(state_get_from "$dir" run_id)" \
@@ -649,7 +745,8 @@ verify_generation() {
     "$(state_get_from "$dir" bridge)" \
     "$(state_get_from "$dir" routing_frozen)" \
     "$files" \
-    "$actual_input")"
+    "$actual_input" \
+    "$actual_workload")"
   expected="$(state_get_from "$dir" config_checksum)" || die "config checksum missing"
   [[ "$actual" == "$expected" ]] || die "generation checksum mismatch"
   expected_sums="$(for f in protected-prod.map force-prod.map force-gray.map key-sid.map convergence-mode.map bridge-override.map split.conf; do printf '%s  %s\n' "$(sha256_file "$dir/$f")" "$f"; done)"
@@ -868,6 +965,22 @@ except Exception as exc:
 PY
 }
 
+# Which tool is allowed to produce each gate's evidence, for the gates that have
+# one. Empty means "no producer exists": that gate is a human attestation and must
+# carry a signer instead. The mapping is deliberately a whitelist in code rather
+# than a sentence in the manual -- `feedback_gate_property_in_prose_is_not_in_the_code`
+# is exactly the failure where the documented property was never checked anywhere.
+#
+# Adding a producer for a human-signed gate means adding its line here and moving
+# its row in manual section 6.2.3. Both halves, or the classification lies again.
+gate_expected_producer() {
+  case "$1" in
+    split_monitor_continuity) printf 'check-monitor-continuity' ;;
+    split_capacity) printf 'check-split-capacity' ;;
+    *) printf '' ;;
+  esac
+}
+
 require_gate_evidence() {
   local gate="$1" legacy_var="${2:-}" file env_name
   env_name="GRAY_$(printf '%s' "$gate" | tr '[:lower:]-' '[:upper:]_')_OK"
@@ -882,14 +995,36 @@ require_gate_evidence() {
   verify_frozen_gate_max_age "$(active_dir)"
   file="${GRAY_GATE_EVIDENCE_FILE:-$GRAY_GATE_EVIDENCE_DIR/$gate.json}"
   secure_file "$file" "$GRAY_GATE_EVIDENCE_DIR" || die "$gate gate evidence is untrusted: $file"
-  python3 - "$file" "$gate" "$STATE_RUN_ID" "$STATE_GENERATION" "$STATE_CONFIG_CHECKSUM" "$GRAY_GATE_MAX_AGE_SECONDS" "$(expected_owner_uid)" <<'PY'
+  python3 - "$file" "$gate" "$STATE_RUN_ID" "$STATE_GENERATION" "$STATE_CONFIG_CHECKSUM" "$GRAY_GATE_MAX_AGE_SECONDS" "$(expected_owner_uid)" "$(gate_expected_producer "$gate")" <<'PY'
 import datetime as dt
+import hashlib
 import json
 import os
+import re
 import stat
 import sys
 
-path, gate, run_id, generation, checksum, max_age, expected_uid = sys.argv[1:]
+path, gate, run_id, generation, checksum, max_age, expected_uid, producer = sys.argv[1:]
+
+# A signer is a person who can be asked "why did you sign this?". These are the
+# strings that look like a signature and name nobody: a template left unfilled, a
+# role, or the machine's own idea of who was at the keyboard. Sudo makes $USER
+# `root` for everyone, so `root` names no one either.
+SIGNER_RE = re.compile(r"^[A-Za-z0-9一-鿿][A-Za-z0-9一-鿿 ._@-]{1,63}$")
+PLACEHOLDER_SIGNERS = {
+    "fill_me", "fill-me", "fillme", "tbd", "todo", "n/a", "na", "none", "null",
+    "unknown", "operator", "admin", "root", "me", "self", "someone", "anyone",
+    "xxx", "xx", "test", "sudo_user", "user",
+}
+
+
+def canonical(obj):
+    """Exactly what the producers hash: every key but captured_at and the hash itself."""
+    body = {key: value for key, value in obj.items() if key not in ("captured_at", "result_sha256")}
+    rendered = json.dumps(body, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(rendered.encode()).hexdigest()
+
+
 try:
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     info = os.fstat(fd)
@@ -910,6 +1045,46 @@ try:
     age = (dt.datetime.now(dt.timezone.utc) - stamp).total_seconds()
     if age < -60 or age > int(max_age):
         raise ValueError("evidence is stale")
+
+    # A PASS that also lists errors is not a verdict, it is two verdicts. Until
+    # 2026-09-21 nothing looked past `status`, so a tool run that FAILED and was
+    # then hand-edited to PASS carried its own reason codes through the gate.
+    errors = obj.get("errors")
+    if errors not in (None, []):
+        raise ValueError(f"status is PASS but errors is non-empty: {errors!r}")
+
+    tool = obj.get("tool")
+    if producer:
+        # A measured gate may not be hand-written. This is the `split_capacity`
+        # failure: the gate was enforced for weeks while its evidence was a human
+        # typing "status": "PASS", which proves a human typed it.
+        if tool != producer:
+            raise ValueError(
+                f"{gate} is a measured gate: evidence must come from {producer}.py, "
+                f"got tool={tool!r}"
+            )
+        if obj.get("schema_version") != 1:
+            raise ValueError(f"schema_version must be 1, got {obj.get('schema_version')!r}")
+        # Recomputed, so editing any field after the tool wrote it reds here
+        # rather than riding through on a shape that still looks right.
+        if obj.get("result_sha256") != canonical(obj):
+            raise ValueError("result_sha256 does not match the evidence body (edited after capture)")
+    else:
+        if tool is not None:
+            raise ValueError(
+                f"{gate} has no producer, so evidence must not claim tool={tool!r}; "
+                "human attestations carry a signer instead"
+            )
+        # The manual says human-signed gates pin an irreversible action to a named
+        # person and a moment. captured_at was always the moment; until now nothing
+        # recorded the person, so the claim was prose with no code behind it.
+        signer = obj.get("signer")
+        if not isinstance(signer, str) or not SIGNER_RE.fullmatch(signer):
+            raise ValueError(
+                f"{gate} is a human attestation and needs a real \"signer\": got {signer!r}"
+            )
+        if signer.strip().lower().replace(" ", "_") in PLACEHOLDER_SIGNERS:
+            raise ValueError(f"signer {signer!r} names nobody who can be asked why they signed")
 except Exception as exc:
     print(f"gray-rollout: invalid {gate} gate evidence: {exc}", file=sys.stderr)
     raise SystemExit(1)

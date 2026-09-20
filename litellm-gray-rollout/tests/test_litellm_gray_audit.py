@@ -5,11 +5,16 @@ from __future__ import annotations
 import json
 import copy
 import hashlib
+import re
 import subprocess
 import sys
 import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
+
+import capacity_fixtures
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -17,24 +22,60 @@ TOOLS = ROOT / "litellm-gray-rollout" / "scripts"
 RUNBOOK = ROOT / "litellm-gray-rollout" / "docs" / "litellm-198-gray-rollout-runbook.md"
 
 
-def run_tool(name: str, payload: object) -> tuple[subprocess.CompletedProcess[str], dict]:
-    # Existing contract fixtures are wrapped in the same strict evidence
-    # envelope used by the production CLI.
-    if (
-        name == "metrics.py"
-        and isinstance(payload, dict)
-        and payload.get("rollout_percent", 0) > 0
-        and "spend_reconciliation" not in payload
-    ):
-        payload = {
-            **payload,
-            "spend_reconciliation": {
+def _with_required_sections(payload: dict, *, spend: bool) -> dict:
+    """Fill in the sections metrics.py requires above split 0.
+
+    Only the ones a fixture has not supplied itself, so a test that wants a
+    particular readiness or liveness reading still gets exactly the one it wrote.
+
+    These are defaults rather than per-fixture boilerplate because metrics.py
+    treats their absence as a hard error above split 0 -- deliberately: accepting a
+    payload without them would move production traffic with the two legs that
+    detect "the lane is not running" and "the monitor stopped" switched off.  Every
+    pre-existing fixture here predates those legs, and a healthy default is the
+    honest stand-in for a cycle the fixture was never about.
+
+    `spend` is off for run_strict_tool because the strict path has never filled it
+    in, and at least one test asserts on exactly that absence
+    (SPEND_RECONCILIATION_MISSING as the sole error).  Filling it there would turn
+    that test green by removing what it measures.
+    """
+    if payload.get("rollout_percent", 0) <= 0:
+        return payload
+    filled = dict(payload)
+    if spend:
+        filled.setdefault(
+            "spend_reconciliation",
+            {
                 "expected_request_ids": ["r-001"],
                 "terminal_request_ids": ["r-001"],
                 "failed_request_ids": [],
                 "observed_lag_seconds": 1,
             },
-        }
+        )
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    filled.setdefault(
+        "readiness",
+        {
+            "lane": "gray",
+            "ready_containers": 3,
+            "expected_containers": 3,
+            "observed_at": now,
+        },
+    )
+    # One source, all of it fresh.  data_liveness() measures each source's age from
+    # the NEWEST observation in the cycle, so a single entry can never be late
+    # relative to itself -- the default is inert by construction rather than by
+    # choice of timestamp.
+    filled.setdefault("data_sources", [{"name": "access_log", "observed_at": now}])
+    return filled
+
+
+def run_tool(name: str, payload: object) -> tuple[subprocess.CompletedProcess[str], dict]:
+    # Existing contract fixtures are wrapped in the same strict evidence
+    # envelope used by the production CLI.
+    if name == "metrics.py" and isinstance(payload, dict):
+        payload = _with_required_sections(payload, spend=True)
     if name == "audit-runtime.py" and isinstance(payload, dict):
         _refresh_runtime_sources(payload)
     if isinstance(payload, dict) and "evidence" not in payload:
@@ -127,6 +168,8 @@ def _with_evidence(
 def run_strict_tool(name: str, payload: dict) -> tuple[subprocess.CompletedProcess[str], dict]:
     if name == "audit-runtime.py":
         _refresh_runtime_sources(payload)
+    if name == "metrics.py":
+        payload = _with_required_sections(payload, spend=False)
     wrapped = _with_evidence(payload)
     if name == "audit-runtime.py":
         captured_at = datetime.fromisoformat(
@@ -658,14 +701,25 @@ def test_metrics_recommends_rollback_for_qualified_normal_gray_breach():
     first_result, first_output = run_tool("metrics.py", first_window)
     assert first_result.returncode == 0
     assert first_output["dispatcher_recommendation"]["action"] != "rollback"
-    # This fixture is canary 100% 5xx against stable 0%, so the absolute leg
-    # breaches alongside the delta leg.  It carries a deeper gate
-    # (ABS_SUSTAIN_WINDOWS = 4) because it has no reference to cancel provider
-    # weather out, so it is still pending here while FIVE_XX_DELTA promotes.
-    assert first_output["sustain"]["counts"] == {"FIVE_XX_ABSOLUTE": 1, "FIVE_XX_DELTA": 1}
+    # This fixture is canary 100% 5xx against stable 0%, so every sampled leg
+    # breaches at once, and that agreement is correct rather than redundant: a
+    # cohort failing every request is worse than the reference (FIVE_XX_DELTA),
+    # failing outright (FIVE_XX_ABSOLUTE), and visibly broken to the people hitting
+    # it (USER_FAILURE_RATE).  Each carries its own depth and only the shallowest
+    # promotes on the second window: FIVE_XX_ABSOLUTE needs 4 because it has no
+    # reference to cancel provider weather out, USER_FAILURE_RATE needs 3 because
+    # real proxy-side breach runs reach 2 windows (so depth 2 fired 3.13 times/day
+    # on healthy traffic), and FIVE_XX_DELTA keeps 2 -- that is the calibration it
+    # was measured at, and raising SUSTAIN_WINDOWS globally would have blunted it.
+    assert first_output["sustain"]["counts"] == {
+        "FIVE_XX_ABSOLUTE": 1,
+        "FIVE_XX_DELTA": 1,
+        "USER_FAILURE_RATE": 1,
+    }
     assert first_output["sustain"]["promoted"] == []
     assert first_output["sustain"]["required_windows_by_code"]["FIVE_XX_ABSOLUTE"] == 4
     assert first_output["sustain"]["required_windows_by_code"]["FIVE_XX_DELTA"] == 2
+    assert first_output["sustain"]["required_windows_by_code"]["USER_FAILURE_RATE"] == 3
 
 
 def test_metrics_sample_guard_alerts_without_triggering_rollback():
@@ -683,32 +737,55 @@ def test_metrics_sample_guard_alerts_without_triggering_rollback():
 
     assert result.returncode == 0
     assert output["status"] == "PASS"
-    # 99 canary samples is below MIN_SAMPLE (100) and below MIN_FIVE_XX_SAMPLE
-    # (200), so both the class-level guard and the 5xx leg report dark.  The
-    # canary 5xx rate here is 2.0% against stable's 0.1% -- a delta well over
-    # the 1% threshold -- and it must still not trigger: a rate computed over 99
-    # requests is dominated by counting noise, and on the negative control a
-    # single window over threshold fires on ~11% of windows whose true delta is
-    # zero (the sustain gate, not this floor, is what brings that to 0.00%).
+    # What the fixture actually is: 99 canary requests, ALL of them 502, against 500
+    # clean stable ones.  (An older comment here read the trailing 2.0 and 0.1 as
+    # error rates; they are the latency arguments.  metric_records gives every
+    # record it makes the same status, so this cohort is 100% failing.)
+    #
+    # It still must not move traffic on this window, and each leg is held back for
+    # its own measured reason:
+    #   FIVE_XX_DELTA     dark -- 99 < MIN_FIVE_XX_SAMPLE (200), reported as
+    #                     FIVE_XX_SAMPLE_BELOW_FLOOR
+    #   FIVE_XX_ABSOLUTE  armed and breaching, pending at depth 4
+    #   USER_FAILURE_RATE armed and breaching, pending at depth 3
+    # The floor darkens the leg that cannot read this sample; the sustain gate holds
+    # the two that can.  Asserting the sustain counts is what keeps those apart --
+    # without them this test would pass identically if the new leg were disarmed.
+    #
+    # INSUFFICIENT_GRAY_SAMPLE and LATENCY_SAMPLE_BELOW_FLOOR are both gone from
+    # the list.  The first was MIN_SAMPLE's class-level `continue`, which took the
+    # 5xx stop-loss down with the percentiles; the second belonged to latency legs
+    # that no longer trigger, so a floor alert for them would be reporting that a
+    # disarmed leg is disarmed.
     assert output["dispatcher_recommendation"] == {
         "action": "alert_only",
         "hard_trigger": False,
-        "reason_codes": [
-            "FIVE_XX_SAMPLE_BELOW_FLOOR",
-            "INSUFFICIENT_GRAY_SAMPLE",
-            "LATENCY_SAMPLE_BELOW_FLOOR",
-        ],
+        "reason_codes": ["FIVE_XX_SAMPLE_BELOW_FLOOR"],
     }
+    assert output["sustain"]["counts"] == {
+        "FIVE_XX_ABSOLUTE": 1,
+        "USER_FAILURE_RATE": 1,
+    }
+    assert output["sustain"]["promoted"] == []
     comparison = output["comparisons"][0]
     assert comparison["five_xx_qualified"] is False
     assert comparison["breaches"] == []
 
 
 def test_metrics_uses_frozen_baseline_at_100_percent_not_prod():
-    # Above MIN_P99_SAMPLE so both latency legs are live: at 100 samples the
-    # percentiles are below their floors and this would assert nothing.
-    records = metric_records("canary", "images", 500, 200, 0.4)
-    records += metric_records("stable", "images", 500, 200, 99.0)
+    # Both cohorts are 100% 502 here, and that is what makes the test discriminate.
+    # Against the frozen baseline (five_xx_rate 0.0) the delta is 1.0 and breaches;
+    # against the live stable cohort it would be 0.0 and breach nothing.  So a
+    # rollback on FIVE_XX_DELTA can only mean the reference was the baseline --
+    # which is the whole point at split 100, where "stable" is a handful of
+    # leftover requests rather than a control group.
+    #
+    # This fixture used to ride on P95_RATIO with stable at 99s latency.  That
+    # worked for the same structural reason, but those legs no longer trigger
+    # (LATENCY_OBSERVED_ONLY), so the vehicle moved to the 5xx delta leg.  500
+    # samples clears MIN_FIVE_XX_SAMPLE (200).
+    records = metric_records("canary", "images", 500, 502, 0.4)
+    records += metric_records("stable", "images", 500, 502, 0.4)
     payload = {
         "phase": "normal_gray",
         "rollout_percent": 100,
@@ -725,7 +802,7 @@ def test_metrics_uses_frozen_baseline_at_100_percent_not_prod():
         "hard_errors": {},
         "backend_health": {"gray": True, "prod": True},
         # Second window of the same breach; a single one is held back as noise.
-        "sustain_state": {"P95_RATIO": 1, "P99_RATIO": 1},
+        "sustain_state": {"FIVE_XX_DELTA": 1, "USER_FAILURE_RATE": 1},
     }
 
     result, output = run_tool("metrics.py", payload)
@@ -733,8 +810,14 @@ def test_metrics_uses_frozen_baseline_at_100_percent_not_prod():
     assert result.returncode == 1
     assert output["comparison_mode"] == "baseline"
     assert output["dispatcher_recommendation"]["action"] == "rollback"
-    assert "P95_RATIO" in output["dispatcher_recommendation"]["reason_codes"]
+    assert "FIVE_XX_DELTA" in output["dispatcher_recommendation"]["reason_codes"]
     assert all(item["reference"] == "baseline" for item in output["comparisons"])
+    # `images` is deliberately outside INFERENCE_CLASSES, so the absolute 5xx leg
+    # and its shared-fate cohort both read zero traffic and stay silent on this
+    # window.  Asserted rather than left implicit: a non-inference class reaching
+    # the pooled inference legs would mean the class filter had been widened, which
+    # would change what every measured figure in those legs was measured on.
+    assert output["alerts"] == []
 
 
 def test_metrics_never_recommends_rollback_to_an_unhealthy_prod():
@@ -804,16 +887,20 @@ def test_metrics_holds_gray_when_prod_is_offline_and_gray_is_healthy():
     assert result.returncode == 0
     assert output["status"] == "PASS"
     # `hold_gray` must survive informational alerts rather than being downgraded
-    # by them: 100 samples is below both the latency floors and the 5xx floor,
-    # which is worth saying out loud, but it is not a reason to stop holding a
-    # healthy gray.  Prod is offline here, so there is nowhere to roll back to --
-    # a dark ruler must not become a reason to move traffic.
+    # by them: 100 samples is below the 5xx floor, which is worth saying out loud,
+    # but it is not a reason to stop holding a healthy gray.  Prod is offline here,
+    # so there is nowhere to roll back to -- a dark ruler must not become a reason
+    # to move traffic.
+    #
+    # LATENCY_SAMPLE_BELOW_FLOOR is gone from this list because the alert is gone:
+    # it reported that a latency leg could not reach its floor, and those legs no
+    # longer trigger at any sample size (LATENCY_OBSERVED_ONLY).  An alert about a
+    # disarmed leg being disarmed is noise on every window forever.
     assert output["dispatcher_recommendation"] == {
         "action": "hold_gray",
         "hard_trigger": False,
         "reason_codes": [
             "FIVE_XX_SAMPLE_BELOW_FLOOR",
-            "LATENCY_SAMPLE_BELOW_FLOOR",
             "PROD_OFFLINE_GRAY_HEALTHY",
         ],
     }
@@ -2072,6 +2159,39 @@ def test_pod_spec_shape_never_reads_an_environment_variable_value(tmp_path: Path
                if "/env/" in entry["item"])
 
 
+def test_pod_spec_shape_records_the_container_image(tmp_path: Path):
+    """A shape PASS is the pin's corroboration for --image-digest, so it must see it.
+
+    Until 2026-09-21 `shape_of()` recorded volumes, mounts, env NAMES, probes and
+    lifecycle hooks -- but not `image`, the one field a mid-run `kubectl set image`
+    changes. So an operator could pin digest X, hand `gray-workload-pin.sh` a shape
+    PASS taken against a Pod running digest Y, and every ruler downstream would
+    measure Y while the record said X. Nothing in the system could have said so.
+
+    The value is recorded verbatim. Resolving a tag to a digest would be inventing a
+    fact that is not observable from the YAML.
+    """
+    old = "litellm-repo@sha256:" + "a" * 64
+    new = "litellm-repo@sha256:" + "b" * 64
+    live = POD_SPEC_LIVE.replace(
+        "        - name: litellm\n", f"        - name: litellm\n          image: {old}\n", 1
+    )
+    target = POD_SPEC_TARGET.replace(
+        "        - name: litellm\n", f"        - name: litellm\n          image: {new}\n", 1
+    )
+    result, payload = _pod_spec_shape(tmp_path, live=live, target=target)
+    assert result.returncode == 1
+    changed = {entry["item"]: entry for entry in payload["changed"]}
+    assert "container/litellm/image" in changed, sorted(changed)
+    assert changed["container/litellm/image"]["live"] == old
+    assert changed["container/litellm/image"]["target"] == new
+
+    # And it must need an approval naming a consumer -- an image change that lands in
+    # `changed` but is excused as inert would be a reported difference nobody signs.
+    assert "UNAPPROVED_SHAPE_CHANGES" in payload["errors"]
+    assert "container/litellm/image" not in payload.get("inert", [])
+
+
 def test_pod_spec_shape_refuses_to_compare_a_render_against_itself(tmp_path: Path):
     """Both self-comparisons are false green, so both fail closed.
 
@@ -2544,13 +2664,21 @@ def test_monitor_continuity_passes_only_when_every_cycle_landed(tmp_path: Path):
 
 
 def test_monitor_continuity_fails_closed_on_a_silent_scheduler(tmp_path: Path):
-    # The scheduler died 25 minutes ago: no evidence file records the gap, which
+    # The scheduler died 40 minutes ago: no evidence file records the gap, which
     # is exactly why the gap has to be derived from the ledger.
-    result, payload = _continuity(_heartbeat_ledger(tmp_path, [1700, 1500]))
+    #
+    # The fixture carries 4 on-cadence cycles before falling silent, and that is
+    # deliberate: with fewer it would also trip INSUFFICIENT_CYCLES, and this test
+    # would pass while proving the wrong leg. A gap and a too-short window are two
+    # different faults -- keep each fixture guilty of exactly one.
+    result, payload = _continuity(
+        _heartbeat_ledger(tmp_path, [3300, 3000, 2700, 2400]), window_seconds=3600
+    )
 
     assert result.returncode == 1
     assert payload["status"] == "FAIL"
     assert payload["errors"] == ["MONITORING_GAP"]
+    assert payload["cycles_in_window"] == 4
     assert payload["gaps"][-1]["seconds"] >= 1500
 
     # An entirely empty window is not "no news is good news" either.
@@ -2625,6 +2753,230 @@ def test_monitor_continuity_refuses_a_group_readable_or_forged_ledger(tmp_path: 
     )
     assert forged.returncode != 0
     assert "unexpected shape" in forged.stderr
+
+
+def _capacity(
+    access_log: Path,
+    readiness: Path,
+    *extra: str,
+    target_split: int = 50,
+    ceiling: float = 2.0,
+):
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOLS / "check-split-capacity.py"),
+            "--access-log",
+            str(access_log),
+            "--readiness",
+            str(readiness),
+            "--run-id",
+            "run-1",
+            "--generation",
+            "gen-1",
+            "--config-checksum",
+            "test-mode",
+            "--target-split",
+            str(target_split),
+            "--per-container-concurrency",
+            str(ceiling),
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # An input refusal exits 1 with nothing on stdout, same as check-monitor-continuity.py:
+    # a verdict is a payload, a refusal is a message.  Both are fail-closed, because
+    # require_gate_evidence reads the evidence FILE and neither path writes one.
+    if not result.stdout.strip():
+        return result, None
+    return result, json.loads(result.stdout)
+
+
+def test_split_capacity_passes_when_projected_demand_fits(tmp_path: Path):
+    """The negative control: a lane with room says so, with no errors at all.
+
+    1 chat/s per pool at 0.5s upstream each => 2 req/s total, 0.5 s/req, so 50%
+    of it is 0.5 upstream-seconds per second across 3 containers = 0.167 each,
+    a twelfth of a 2.0 ceiling.
+    """
+    log = capacity_fixtures.access_log(tmp_path)
+    result, payload = _capacity(log, capacity_fixtures.readiness_envelope(tmp_path))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert payload["status"] == "PASS"
+    assert payload["errors"] == []
+    assert payload["gate"] == "split_capacity"
+    assert payload["ruler"] == "upstream_seconds_per_second"
+    assert payload["ready_containers"] == 3
+    assert payload["projected_concurrency_per_container"] == pytest.approx(0.167, abs=0.01)
+    assert payload["max_supportable_split"] == 100.0
+    # The assumptions it could not measure have to travel with the verdict.
+    assert payload["residual_risk"]
+
+
+def test_split_capacity_judges_upstream_seconds_not_request_count(tmp_path: Path):
+    """The test that justifies the ruler.
+
+    The gray pool carries a small share of the REQUESTS and the expensive class
+    lives on stable: 1 chat/s gray, 4 chat/s + one 4-second `responses` per second
+    on stable.  By request count the lane is quiet.  By upstream-seconds the
+    projection is 5x what the lane is currently demonstrating, and that gap is the
+    whole reason this gate does not count lines.
+    """
+    log = capacity_fixtures.access_log(
+        tmp_path,
+        gray_chat_per_second=1,
+        stable_chat_per_second=4,
+        stable_responses_every=1,
+        gray_responses_total=60,
+    )
+    result, payload = _capacity(log, capacity_fixtures.readiness_envelope(tmp_path), ceiling=1.0)
+
+    assert result.returncode == 1
+    assert payload["status"] == "FAIL"
+    assert payload["errors"] == ["INSUFFICIENT_CAPACITY"]
+
+    per_container = payload["projected_concurrency_per_container"]
+    demonstrated = payload["demonstrated_concurrency_per_container"]
+    assert per_container > demonstrated * 4, (per_container, demonstrated)
+    # And it says how far it could go instead of only saying no.
+    assert 0 < payload["max_supportable_split"] < 50
+
+
+def test_split_capacity_rejects_a_ceiling_the_lane_already_beats(tmp_path: Path):
+    """A ceiling below demonstrated throughput is a bad INPUT, not a finding.
+
+    Without this the operator reads INSUFFICIENT_CAPACITY and goes looking for a
+    capacity problem that does not exist, because the number they typed is wrong.
+    """
+    log = capacity_fixtures.access_log(tmp_path)
+    result, payload = _capacity(log, capacity_fixtures.readiness_envelope(tmp_path), ceiling=0.10)
+
+    assert result.returncode == 1
+    assert "CEILING_BELOW_DEMONSTRATED" in payload["errors"]
+    assert payload["demonstrated_concurrency_per_container"] > 0.10
+
+
+def test_split_capacity_fails_closed_on_a_degraded_or_stale_lane(tmp_path: Path):
+    log = capacity_fixtures.access_log(tmp_path)
+
+    _, zero = _capacity(log, capacity_fixtures.readiness_envelope(tmp_path, ready=0))
+    assert zero["status"] == "FAIL"
+    assert "ZERO_READY_CONTAINERS" in zero["errors"]
+    assert "READY_CONTAINERS_SHORT" in zero["errors"]
+
+    _, short = _capacity(log, capacity_fixtures.readiness_envelope(tmp_path, ready=2, expected=3))
+    assert short["status"] == "FAIL"
+    assert short["errors"] == ["READY_CONTAINERS_SHORT"]
+
+    # A readiness reading older than one monitor cycle is not a reading.
+    _, stale = _capacity(log, capacity_fixtures.readiness_envelope(tmp_path, age_seconds=900))
+    assert stale["status"] == "FAIL"
+    assert "READINESS_STALE" in stale["errors"]
+
+
+def test_split_capacity_refuses_a_window_too_short_to_be_a_rate(tmp_path: Path):
+    log = capacity_fixtures.access_log(tmp_path, span_seconds=120)
+    result, payload = _capacity(log, capacity_fixtures.readiness_envelope(tmp_path))
+
+    assert result.returncode == 1
+    assert "WINDOW_TOO_SHORT" in payload["errors"]
+    # The span, not the requested window, is what it measured and what it reports.
+    assert payload["window_seconds"] < 200
+    assert payload["requested_window_seconds"] == 1800
+
+
+def test_split_capacity_treats_an_unpriced_class_as_a_fault_not_as_free(tmp_path: Path):
+    """A class with real demand and too few gray samples to price is a FAIL.
+
+    Skipping it is how a capacity gate reports infinite headroom for traffic
+    nobody measured.
+    """
+    log = capacity_fixtures.access_log(
+        tmp_path, gray_responses_total=5, stable_responses_every=2, responses_seconds=4.0
+    )
+    result, payload = _capacity(log, capacity_fixtures.readiness_envelope(tmp_path))
+
+    assert result.returncode == 1
+    assert "UNPRICED_CLASS" in payload["errors"]
+    assert "responses" in payload["unpriced_classes"]
+    priced = {item["uri_class"]: item for item in payload["classes"]}
+    assert priced["responses"]["cost_source"] == "unpriced"
+    assert priced["responses"]["seconds_per_request"] is None
+
+    # The escape hatch prices it off stable, and can only ever raise the cost:
+    # letting an assumption about the new build make the projection cheaper would
+    # turn an exemption into a discount.
+    _, imputed = _capacity(
+        log,
+        capacity_fixtures.readiness_envelope(tmp_path),
+        "--impute-class-cost-from-stable",
+        "responses",
+    )
+    assert imputed["errors"] == []
+    assert imputed["status"] == "PASS"
+    borrowed = {item["uri_class"]: item for item in imputed["classes"]}["responses"]
+    assert borrowed["cost_source"] == "stable_imputed"
+    assert borrowed["seconds_per_request"] == pytest.approx(4.0, abs=0.01)
+    assert borrowed["seconds_per_request"] >= borrowed["gray_seconds_per_request"]
+
+
+def test_split_capacity_refuses_a_misspelled_imputation_target(tmp_path: Path):
+    """A typo must refuse, not silently leave the class unpriced.
+
+    Unpriced would FAIL naming the class, the operator would re-supply the same
+    typo, and the loop has no exit.
+    """
+    log = capacity_fixtures.access_log(tmp_path, gray_responses_total=5, stable_responses_every=2)
+    result, payload = _capacity(
+        log,
+        capacity_fixtures.readiness_envelope(tmp_path),
+        "--impute-class-cost-from-stable",
+        "respones",
+    )
+
+    assert result.returncode != 0
+    # No verdict payload at all -- a refused input must not produce an evidence
+    # document, or the operator gets a file to point the gate at.
+    assert payload is None
+    assert "respones" in result.stderr
+
+
+def test_split_capacity_evidence_satisfies_the_gate_it_was_written_for(tmp_path: Path):
+    """End to end: the producer's output passes require_gate_evidence.
+
+    This is the point of the whole tool -- until 2026-09-20 `split_capacity` was
+    enforced at every step >= 50% with no producer anywhere in the repo, so the
+    file was hand-written and the gate validated a typed assertion.
+    """
+    log = capacity_fixtures.access_log(tmp_path)
+    output = tmp_path / "split_capacity.json"
+    result, payload = _capacity(
+        log, capacity_fixtures.readiness_envelope(tmp_path), "--output", str(output)
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert output.stat().st_mode & 0o777 == 0o600
+    written = json.loads(output.read_text(encoding="utf-8"))
+    assert written["gate"] == "split_capacity"
+    assert written["status"] == "PASS"
+    assert written["run_id"] == "run-1"
+    assert written["generation"] == "gen-1"
+    assert written["config_checksum"] == "test-mode"
+    assert written["result_sha256"] == payload["result_sha256"]
+
+    # The digest is over the verdict, so it is recomputable and a hand-edited
+    # PASS does not survive it.
+    recomputed = capacity_fixtures.digest(
+        {key: value for key, value in written.items() if key not in ("captured_at", "result_sha256")}
+    )
+    assert recomputed == written["result_sha256"]
+
+    forged = {key: value for key, value in written.items() if key not in ("captured_at", "result_sha256")}
+    forged["errors"] = ["INSUFFICIENT_CAPACITY"]
+    assert capacity_fixtures.digest(forged) != written["result_sha256"]
 
 
 def test_verify_readiness_excludes_every_non_manifest_under_k8s():
@@ -2811,7 +3163,12 @@ def test_abs_five_xx_leg_arms_at_real_post_cutover_volume():
     leg = output["absolute_five_xx"]
     assert leg["qualified"] is True
     assert leg["gray_count"] == 108
-    assert leg["shared_fate_vetoed"] is False
+    # The cohort is reported, not consulted.  `shared_fate_vetoed` is gone from the
+    # payload on purpose: a reader of the old field would take `false` to mean "a
+    # veto exists and did not fire", when no veto exists at all.
+    assert "shared_fate_vetoed" not in leg
+    assert leg["shared_fate_observed_only"] is True
+    assert leg["shared_fate_concurrent_breach"] is False
 
 
 def test_abs_five_xx_leg_holds_clean_traffic_green():
@@ -2833,24 +3190,48 @@ def test_abs_five_xx_leg_holds_clean_traffic_green():
     assert leg["gray_five_xx_rate"] < leg["threshold"]
 
 
-def test_abs_five_xx_leg_defers_to_shared_fate_on_upstream_outage():
-    """An upstream outage hits both cohorts; only one runs the gray build.
+def test_abs_five_xx_leg_reports_shared_fate_but_no_longer_defers_to_it():
+    """A shared outage is attribution, not a reason to keep serving errors.
 
-    Measured on 4.55 days of same-version history: without this veto a shared
-    burst produces 164 false fires per day, with it 0.44.  Same-version windows
-    really do reach a 62% 5xx rate during provider outages, so no rate threshold
-    can separate a burst from a broken build -- shared fate and duration can.
+    The veto used to suppress the rollback here.  It was introduced on sound
+    reasoning -- an upstream outage hits both cohorts and only one runs the gray
+    build -- and then measured: at split=100 the stable pool retains only health
+    checks (excluded from the cohort by design) plus a handful of force-prod keys,
+    so stable inference clears SHARED_FATE_MIN_SAMPLE in 27.8% of gray-armed
+    windows over six hours and 0% over the last two, with a per-window median of 0
+    requests.  Widening the guard window gives 27.8 / 30.6 / 34.7 / 43.1% at 5 / 15
+    / 30 / 60 minutes.
+
+    A veto blind in >=72% of windows is worse than no veto, because it is not
+    inert: it changes the verdict only on the minority of windows where it happens
+    to be readable, which makes the leg's behaviour depend on whether a few
+    force-prod keys were busy.  Depth is what separates a burst from a regression
+    and it is measured -- over 1318 windows / 4.58 days the consecutive-breach runs
+    are p50 1, p90 3, max 4, exactly one run reached ABS_SUSTAIN_WINDOWS, so with
+    the veto assumed blind throughout false promotions are 0.22/day.
+
+    So the breach now stands and the cohort reading rides along as an alert.  This
+    test is the guard against re-introducing the suppression: the users are getting
+    errors either way, and "probably upstream" is a judgement for a human with more
+    context than one five-minute window has.
     """
     payload = abs_leg_payload(108, 40, 60, 24, other_total=4000)
     result, output = run_tool("metrics.py", payload)
 
-    assert result.returncode == 0
-    assert output["dispatcher_recommendation"]["action"] == "alert_only"
-    assert "UPSTREAM_FIVE_XX_SHARED" in output["dispatcher_recommendation"]["reason_codes"]
-    assert "FIVE_XX_ABSOLUTE" not in output["sustain"]["counts"]
+    assert result.returncode == 1
+    assert output["dispatcher_recommendation"]["action"] == "rollback"
+    codes = output["dispatcher_recommendation"]["reason_codes"]
+    assert "FIVE_XX_ABSOLUTE" in codes
+    # Still on the record, as information for whoever reads the alert.  It lives in
+    # the top-level `alerts` list rather than in reason_codes, because reason_codes
+    # carries alerts only when nothing triggered -- so before that field existed the
+    # hint was dropped from every rollback, which is precisely the verdict a human
+    # needs it on.
+    assert "UPSTREAM_FIVE_XX_SHARED" in output["alerts"]
     leg = output["absolute_five_xx"]
-    assert leg["shared_fate_vetoed"] is True
     assert leg["shared_fate_readable"] is True
+    assert leg["shared_fate_concurrent_breach"] is True
+    assert leg["shared_fate_observed_only"] is True
 
 
 def test_abs_five_xx_leg_still_fires_when_shared_fate_cohort_is_unreadable():
@@ -2915,3 +3296,111 @@ def test_abs_five_xx_leg_is_dark_below_its_own_floor():
     assert "ABS_FIVE_XX_SAMPLE_BELOW_FLOOR" in output["dispatcher_recommendation"]["reason_codes"]
     assert output["absolute_five_xx"]["qualified"] is False
     assert "FIVE_XX_ABSOLUTE" not in output["sustain"]["counts"]
+
+
+def test_every_enforced_gate_is_classified_in_the_manual():
+    """The manual's measured-vs-attested table must cover every enforced gate.
+
+    `split_capacity` was enforced at `>= 50%` for as long as the runbook existed while
+    nothing in the repo produced its evidence, so in production the file was typed by
+    hand: shape validated, truth never.  The general form of that trap is that
+    `require_gate_evidence <name>` reads as "this is already being checked" whether or
+    not a ruler exists behind it -- and most of these gates are human attestations by
+    design.  Manual section 6.2.3 is where a reader finds out which is which, so a new
+    gate that is absent from it goes back to being indistinguishable from a measured
+    one.
+    """
+    manual = (
+        ROOT / "litellm-gray-rollout" / "docs" / "litellm-198-gray-operator-manual.md"
+    ).read_text()
+    classified = manual.split("#### 6.2.3")[1].split("### 6.3")[0]
+
+    enforced = set()
+    for script in sorted((ROOT / "litellm-gray-rollout" / "scripts").glob("*.sh")):
+        # Not anchored to line start: two call sites sit after a `case` pattern
+        # (`preflight:normal_gray) require_gate_evidence gray_entry ...`), and a
+        # line-anchored pattern silently dropped exactly those two.
+        for match in re.finditer(
+            r"(?<![\w-])require_gate_evidence\s+([a-z_]+)", script.read_text()
+        ):
+            enforced.add(match.group(1))
+
+    # Guard the ruler itself: an empty set would make this test vacuously green.
+    # 22 as of 2026-09-21 (key_pilot_entry was the 22nd). Raise this with the floor,
+    # never lower it -- a parser that silently stops finding call sites is exactly how
+    # a gate would become unclassified without this test noticing.
+    assert len(enforced) >= 22, f"only found {len(enforced)} gates -- parser broke?"
+
+    # Families are listed once as `post_commit_*` rather than one row per member.
+    exact = set(re.findall(r"`([a-z_]+)`", classified))
+    prefixes = tuple(re.findall(r"`([a-z_]+)\*`", classified))
+    unclassified = sorted(
+        name
+        for name in enforced
+        if name not in exact and not name.startswith(prefixes)
+    )
+
+    assert not unclassified, (
+        "gates enforced in the scripts but not classified as measured or attested in "
+        f"manual 6.2.3: {unclassified}"
+    )
+
+    # The section opens by stating the count in prose ("一共 N 处 ... 只有 2 道有生产者。
+    # 剩下 M 道"). That sentence is what a reader trusts instead of counting, and it has
+    # already been wrong twice (20 when it was 21, 21 when it was 22). A number in prose
+    # is an unverified assertion until something recomputes it.
+    stated_total = re.search(r"一共 \*\*(\d+) 处\*\*", classified)
+    stated_attested = re.search(r"剩下 (\d+) 道", classified)
+    assert stated_total and stated_attested, "6.2.3 no longer states its counts in prose"
+    assert int(stated_total.group(1)) == len(enforced), (
+        f"manual 6.2.3 says {stated_total.group(1)} enforced gates, scripts have {len(enforced)}"
+    )
+    producers = set(
+        re.findall(r"\| `([a-z_]+)` \| `(?:check-[a-z-]+)\.py` \|", classified)
+    )
+    assert producers == {"split_monitor_continuity", "split_capacity"}, sorted(producers)
+    assert int(stated_attested.group(1)) == len(enforced) - len(producers), (
+        f"manual 6.2.3 says {stated_attested.group(1)} attested gates, "
+        f"scripts have {len(enforced) - len(producers)}"
+    )
+
+
+def test_readiness_fixture_matches_the_envelope_production_writes(tmp_path):
+    """Run gray-monitor-loop.sh's own envelope.py against the fixture's payload.
+
+    capacity_fixtures.readiness_envelope says it "reproduces" what the loop writes,
+    and until now nothing checked that claim.  A drifted fixture fails toward green:
+    the tool would keep accepting a document production never produces, so every
+    capacity control would be measuring a shape that does not exist.  The helper is a
+    heredoc inside the loop, so extract and execute it rather than restating it.
+
+    What this pins, verified by mutating the fixture: the digest canonicalisation
+    (`sort_keys`/`separators`), `schema_version`, and the envelope's key set.  What it
+    does NOT pin is the payload's own field names -- `data` is handed to the helper, so
+    renaming a key inside it changes both sides and stays green.  Those names are
+    pinned where they are read instead, by check-split-capacity.py's own tests.
+    """
+    loop = (TOOLS / "gray-monitor-loop.sh").read_text(encoding="utf-8")
+    helper = loop.split("cat > \"$HELPER_DIR/envelope.py\" <<'PY'\n")[1].split("\nPY\n")[0]
+    helper_path = tmp_path / "envelope.py"
+    helper_path.write_text(helper, encoding="utf-8")
+
+    fixture = json.loads(
+        capacity_fixtures.readiness_envelope(tmp_path, ready=4, expected=6).read_text()
+    )
+
+    produced_path = tmp_path / "produced.json"
+    subprocess.run(
+        [sys.executable, str(helper_path), fixture["source"], str(produced_path)],
+        input=json.dumps(fixture["data"]),
+        text=True,
+        check=True,
+    )
+    produced = json.loads(produced_path.read_text())
+
+    # captured_at is "now" in both, so compare everything else byte for byte.
+    assert produced["schema_version"] == fixture["schema_version"]
+    assert produced["source"] == fixture["source"]
+    assert produced["data"] == fixture["data"]
+    assert produced["payload_sha256"] == fixture["payload_sha256"]
+    assert set(produced) == set(fixture), "envelope key set drifted"

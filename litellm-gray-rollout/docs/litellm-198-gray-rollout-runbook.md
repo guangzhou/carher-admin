@@ -76,6 +76,32 @@ Record the output of `helm lint`, frozen-package `helm template`, nginx 1.18.0
 fixture tests, pytest, and shellcheck in the evidence index. Rebuilding a chart
 package after approval creates a new run; do not silently replace the checksum.
 
+**The rows above are prose until they are pinned.** Until 2026-09-21 nothing in the
+scripts hashed the chart package, the values or the image digest — `config_checksum`
+covered exactly the seven nginx route files — so patching a live release rotated no
+generation, `verify_generation` kept passing, and every gate approved against the
+pre-patch workload stayed valid against the post-patch one. Copy the three checksums
+per release from this table into `gray-workload-pin.sh` in `preflight`, and run it
+again after **every** mid-run patch:
+
+| Release | chart `.tgz` SHA-256 | values SHA-256 | image digest | `workload_checksum` after pin | Reviewer |
+|---|---|---|---|---|---|
+| `litellm-product-gray` | `FILL` | `FILL` | `sha256:FILL` | `FILL` | `FILL` |
+| `litellm-product-guarded-old` | `N/A/FILL` | `N/A/FILL` | `N/A/sha256:FILL` | — | `FILL` |
+| `litellm-product-proxy` (post-convergence) | `N/A/FILL` | `N/A/FILL` | `N/A/sha256:FILL` | — | `FILL` |
+
+Each pin is recorded with a `--reason`, a `check-pod-spec-shape.py` verdict (or an
+explicit `--no-require-shape-evidence` waiver, which is written into the hashed
+artifact as `shape_evidence=waived`), and rotates the generation — which is the
+point: it invalidates every gate evidence file in one step, so the ramp re-earns
+`split_sample`, `split_monitor_continuity` and, at ≥50%, `split_capacity`, and the
+sustain streak restarts from zero. Log each pin as its own phase-ledger-style row:
+
+| Sequence | Reason | `previous_workload_checksum` | `workload_checksum` | Generation after | Time UTC | Actor |
+|---:|---|---|---|---|---|---|
+| p0 | preflight freeze | `unbound` | `FILL` | `FILL` | `FILL` | `FILL` |
+| p1 | `N/A` mid-run patch | `FILL` | `FILL` | `FILL` | `FILL` | `FILL` |
+
 ⚠️ **The chart package checksum is not reproducible on 198 — the `.tgz` is the
 artifact, not the source tree.** Measured 2026-09-13:
 
@@ -213,8 +239,9 @@ Gray traffic gates
 | Gate | Required evidence | Result/time |
 |---|---|---|
 | Frozen baseline produced by `collect-metrics.py --emit-baseline` at `--rollout-percent 0` (hand-written files are rejected) | path + `payload_sha256` | `FILL` |
-| Frozen monitor cycle interval (seconds) and `--max-missed-cycles` used by `check-monitor-continuity.py` | `FILL` | `FILL` |
-| Heartbeat ledger path + `check-monitor-continuity.py` PASS for the window before each ramp step (gaps must be repaired and re-observed, never widened away) | `FILL` | `PASS/FAIL` |
+| Frozen monitor cycle interval (seconds), `--max-missed-cycles`, and `--min-cycles` used by `check-monitor-continuity.py` (`--min-cycles` must equal `metrics.py` `ABS_SUSTAIN_WINDOWS`, default 4, or the deepest 5xx stop-loss leg cannot fire in that step) | `FILL` | `FILL` |
+| Heartbeat ledger path + `check-monitor-continuity.py` PASS for the window before each ramp step (gaps must be repaired and re-observed, never widened away; a step that dwelled for fewer than `--min-cycles` cycles must dwell longer, never have the floor lowered) | `FILL` | `PASS/FAIL` |
+| Each ramp step's dwell ≥ `--min-cycles × interval` (default 4 × 300s = 20min), proved from the heartbeat ledger via `gray-progress.py --ledger` — the 2026-09-14 run ran 5%/10%/50% at 2 cycles each and the stop-loss was unarmed in all three | `FILL` | `PASS/FAIL` |
 | Baseline `run_id` equals this run and `captured_at` is inside the 24h change window | `FILL` | `PASS/FAIL` |
 | Baseline per-`uri_class` sample counts and the `--baseline-min-samples` used (default 100; never lowered to make a thin window pass) | `FILL` | `FILL` |
 | Gray direct smoke on 30405 | readiness, all enabled surfaces, DB writes, callbacks | `FILL` |
@@ -224,7 +251,8 @@ Gray traffic gates
 | 1% | metrics JSON, request-ID spend reconciliation, capacity | `FILL` |
 | 5% | metrics JSON, request-ID spend reconciliation, capacity | `FILL` |
 | 10% | metrics JSON, one-hour observation | `FILL` |
-| 50% | prod-equivalent gray capacity and guarded-old capacity | `FILL` |
+| Frozen per-container upstream-concurrency ceiling (upstream-seconds per second one ready container sustains) and headroom fraction for `check-split-capacity.py` — there is no default, and a hard-coded fleet constant is the `llm-stab-scrape-down` literal `5` all over again | `FILL` | `FILL` |
+| 50% | `check-split-capacity.py` PASS (measured, NOT hand-written; ruler is upstream-seconds per ready container, never request count — the two differed 21.4% vs 44.9% on 2026-09-18) plus guarded-old capacity | `FILL` |
 | 100% | frozen same-uri baseline; no heterogeneous prod comparison | `FILL` |
 
 Before run initialization, record the exact values or separately reviewed
@@ -395,3 +423,9 @@ Observation and cleanup
 Do not delete the guarded-old release, old digest, frozen config/callback
 snapshots, migration ledger, clone evidence, or rollback revision before the
 observation owner and independent reviewer approve this section.
+
+The workload pin rows are part of that evidence bundle: they are the only record of
+which build served users during each stretch of the run. If a pin row reads
+`unbound`, the run cannot say which build was serving during the windows its gates
+approved — record that in the closeout as residual risk rather than leaving the row
+blank.

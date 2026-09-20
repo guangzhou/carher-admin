@@ -24,6 +24,28 @@ LOG_LINE_RE = re.compile(
     r".*?\bpool=(?P<pool>stable|canary|guarded-old)\b.*?"
     r"\brt=(?P<upstream_times>.*?)\s+"
     r"\buri_class=(?P<uri_class>[A-Za-z0-9._:-]+)\b"
+    # nginx emits `sid=$key_sid` at the end of this log_format
+    # (render-production-nginx.py, the `litellm_gray` format).  Matched so the
+    # trailing field cannot break the line match, and deliberately NOT captured
+    # into the records:
+    #
+    #   * No leg reads it.  It was going to be the enrolment filter for the
+    #     user-facing failure leg, and it cannot be one: `-` is nginx's
+    #     empty-value default for a key missing from key-sid.map, and the canary
+    #     pool carried 14614 of them on the 2026-09-14 run.  A filter that drops
+    #     unknowns would have discarded most of the traffic it was meant to count.
+    #     `pool=canary` is the ruler instead -- reaching that pool requires a
+    #     resolved canonical key, since an unauthenticated request gets an empty
+    #     $bucket_key and is forced to stable.
+    #   * It is a per-request key fingerprint (sha256 head of the virtual key), and
+    #     this payload is signed, shipped and kept.  Carrying which keys ran which
+    #     requests through it, for a field nothing reads, widens the artifact for
+    #     no measurement.
+    #
+    # Non-capturing and optional: parse_access_log calls fail() on any non-match,
+    # so a required group would reject every line from a lane whose format predates
+    # the field -- turning one missing field into a refusal to monitor at all.
+    r"(?:\s+sid=[A-Za-z0-9._:-]+)?"
 )
 SECRET_RE = re.compile(
     r"(?:authorization|x-api-key)\s*[:=]|\bbearer\s+\S+|\bsk-[A-Za-z0-9._~-]{8,}",
@@ -383,6 +405,17 @@ def main() -> int:
     parser.add_argument("--hard-errors", type=Path)
     parser.add_argument("--backend-health", type=Path)
     parser.add_argument("--spend-reconciliation", type=Path)
+    parser.add_argument(
+        "--readiness",
+        type=Path,
+        help=(
+            "ready-container reading for the gray lane (metrics.py leg 2). The "
+            "document carries ready_containers AND expected_containers: the "
+            "expected number belongs to the run sheet, not to a constant in "
+            "metrics.py, because a hard-coded one stops matching after any scale "
+            "change and never goes red when it does."
+        ),
+    )
     parser.add_argument("--baseline", type=Path)
     parser.add_argument(
         "--emit-baseline",
@@ -557,13 +590,37 @@ def main() -> int:
     spend_reconciliation, spend_at = load_source(
         args.spend_reconciliation, "spend reconciliation", dict, None
     )
+    readiness, readiness_at = load_source(args.readiness, "readiness", dict, {})
     baseline = load_baseline(args.baseline, args.run_id)
     captured_times = [
         item
-        for item in (access_captured_at, hard_errors_at, backend_health_at, spend_at)
+        for item in (
+            access_captured_at, hard_errors_at, backend_health_at, spend_at,
+            readiness_at,
+        )
         if item is not None
     ]
     captured_at = min(captured_times)
+    # Data-liveness input (metrics.py leg 3).  Built here rather than read from
+    # another file because the collector already holds every source's own
+    # timestamp -- asking an operator to supply them again would let the two
+    # disagree, and the liveness leg would then be judging the second copy.
+    #
+    # A source that was not requested on the command line is ABSENT from this list,
+    # not listed with a stale timestamp: "we did not ask for backend health" and
+    # "backend health stopped answering" are different facts and only one is a
+    # fault.  Each entry's name matches the flag that supplied it.
+    data_sources = [
+        {"name": name, "observed_at": moment.isoformat().replace("+00:00", "Z")}
+        for name, moment in (
+            ("access_log", access_captured_at),
+            ("hard_errors", hard_errors_at if args.hard_errors else None),
+            ("backend_health", backend_health_at if args.backend_health else None),
+            ("spend_reconciliation", spend_at if args.spend_reconciliation else None),
+            ("readiness", readiness_at if args.readiness else None),
+        )
+        if moment is not None
+    ]
     payload: dict[str, Any] = {
         "phase": args.phase,
         "rollout_percent": args.rollout_percent,
@@ -579,6 +636,9 @@ def main() -> int:
         payload["backend_health"] = backend_health
     if args.spend_reconciliation is not None:
         payload["spend_reconciliation"] = spend_reconciliation
+    if args.readiness is not None:
+        payload["readiness"] = readiness
+    payload["data_sources"] = data_sources
     if baseline is not None:
         payload["baseline"] = baseline
 

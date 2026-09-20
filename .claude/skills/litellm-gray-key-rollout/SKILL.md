@@ -31,10 +31,15 @@ description: 198 LiteLLM 网关按 key 名单灰度切流到新版本（force-gr
 
 | 脚本 | 什么时候跑 | 判什么 |
 |---|---|---|
-| `k8s/monitoring/observability-preflight.py` | **第 −1 天，切流之前** | 尺子自己活不活。四条腿 LIVE/RED-ABLE/DELIVER/FAIL-RED，不过 exit 1。见 [[litellm-198-monitoring-ops]] |
+| `k8s/monitoring/observability-preflight.py` | **第 −1 天，切流之前** | 尺子自己活不活。五条腿 LIVE/RED-ABLE/DELIVER/FAIL-RED/CADENCE，不过 exit 1。见 [[litellm-198-monitoring-ops]] |
 | `litellm-gray-rollout/scripts/gray-monitor-cycle.sh` | 切流后每个观察周期 | 单周期采样 + 门禁判定（`gray-monitor-loop.sh` 是它的循环外壳） |
 | `litellm-gray-rollout/scripts/collect-metrics.py` | 同上，被 cycle 调 | 从 Prometheus 取门禁那几条腿的原始数 |
 | `litellm-gray-rollout/scripts/collect-spend-reconciliation.py` | 收尾对账 | SpendLogs 与门禁读数对齐。⚠️ 落库是**双峰刷盘**（98.4% 在 30s 内，尾巴 6069s），滞后只出 alert、缺行先 `pending` 跨 cycle 携带，**不许当回滚信号** |
+| `litellm-gray-rollout/scripts/check-monitor-continuity.py` | **每次 `gray-split-update.sh <N>`（N>0）之前** | 上一段观察窗口「连续」且「够长」。缺口 + **周期数 < `--min-cycles`（默认 4 = `metrics.py` 的 `ABS_SUSTAIN_WINDOWS`）** 都出 `FAIL` |
+| `litellm-gray-rollout/scripts/check-split-capacity.py` | **每次 `gray-split-update.sh <N>`（N≥50）之前** | 车道装不装得下目标比例。尺子 = **upstream-秒/秒/ready 容器**（= 并发，Little 定律），**不是请求数**：09-18 那窗 canary 承 21.4% 请求但 44.9% 工作量。`--per-container-concurrency` **没有默认值**（写死就是又一个 `llm-stab-scrape-down` 的字面量 5）；这道门禁 09-20 之前**根本没有生产者**，证据是手写的 |
+| `litellm-gray-rollout/scripts/gray-workload-pin.sh` | **preflight 一次；每次给活 release 打补丁再跑一次；第 7 节 `helm upgrade litellm-product-proxy` 之后必跑一次**（09-21 起 `prod_verified` 和 `gray-convergence-commit.sh` 都要求 prod release 已被钉，`require_pinned_release`）。⚠️ **一次 pin 记的是整张表不是追加**，那一刻 gray 还扛 100% 流量 ⇒ 同一条命令里必须把 gray 那三项一起重报，否则服务中 build 的身份从记录里消失而 `require_workload_binding` 仍然绿（它只问"有没有钉住东西"） | 跑着的 build 到底是哪一个。把 chart `.tgz` / values / image digest 的摘要写进 `workload.env` 并摘进 `config_checksum`。09-21 之前这三样**只靠执行单的文字冻结**，代码一处都没摘 ⇒ `helm upgrade` 打完补丁 generation 不轮转、`verify_generation` 照过、**打补丁前批准的每一份 evidence 对打补丁后的负载依然有效**，sustain 连续计数继续替新 build 累加。钉一次就轮转 generation ⇒ 一步作废所有 gate 证据（放量重新挣 `split_sample`/`continuity`，≥50% 再挣 `split_capacity`，sustain 归零）。摘要没变时是 no-op，不会白轮转。⛔ chart 摘要只能取当天在 198 上 `helm package` 出的那个 `.tgz`，**"再打一次包比一比"在 198 上必然假红**（helm 3 把打包时刻写进内层 tar） |
+| `litellm-gray-rollout/scripts/gray-progress.py` | **随时**（只读、恒 exit 0、不碰路由） | 现在第几/共几环、走过哪些、跳过哪些、每档观察了几个周期 vs 要求、已耗时、剩余（机器时间与等人签**分开报**） |
+| `litellm-gray-rollout/scripts/replay-gate-negative-control.py` | **改了任何一条门禁腿之后**（本地、不碰集群） | 这条腿在**健康**流量上会不会乱响。把同一批请求同时标 `canary` 和 `stable`（构造上没有版本差 ⇒ 任何红都是假阳），过真 `metrics.py` 和真 sustain 状态携带。⛔ 全绿只证明它安静，**不证明它能响** —— 必须配 `--inject` 跑阳性对照，两个都跑完才能信任一条腿 |
 | `scripts/litellm-set-live-weight.py` | 调权重 | 改的是承接生产那条 lane，属生产变更，先确认再动 |
 
 **为什么 preflight 排在最前面**：09-13→09-20 那 38 个提交里 **11 个是在修门禁和监控
@@ -47,10 +52,33 @@ description: 198 LiteLLM 网关按 key 名单灰度切流到新版本（force-gr
 |---|---|---|
 | 选人方式 | 按 key 哈希均匀抽 | 显式名单，一把把点 |
 | 可接受比例 | 只有 `0/1/5/10/50/100` | 任意 |
-| 门禁 | 要 `split_sample` + `monitor_continuity` 证据 | 无 |
+| 门禁 | 先要 `workload_checksum != unbound`（没钉住 workload 的 run 比例上不去），再要 `split_sample` + `monitor_continuity` 证据，≥50% 再要**量出来的** `split_capacity` | `workload_checksum != unbound` + `key_pilot_entry`（09-21 起） |
 | 自动止损 | 有（门禁背后的监控周期） | **没有** |
 | 要明文 key | 不要 | **要**（要算 sha256 指纹） |
 | 适合 | 常规按比例放量 | 指定人群 / 表里选特定行 / 门禁证据不存在 |
+
+🔴 **`split=0` 不等于"还没有真实流量"。** `route_model.py` 的 `evaluate()` 里
+`force_gray` 命中**排在** `bucket_for(key, split)` **前面**，所以这条路送过去的人
+就是新 build 上的第一批真实生产用户（上一轮这一环跑了 84.8h）。而
+`require_workload_binding` 过去只守 `split > 0`，于是**整条流水线里唯一没有任何东西
+检查"跑的是哪个 build"的一环，正是这一环**。09-21 起 `force-gray` 要
+`require_workload_binding` + `require_gate_evidence key_pilot_entry`；
+`remove` 在 `split≠0` 时也要（摘掉 `protected-prod` 之后这个 key 会落回
+`bucket_for()`，可能就上了 gray）。**`force-prod` / `protect-prod` 永不设门禁**——
+把用户拉回旧 build 这条路必须在任何状态下都能走。
+
+🔴 **「门禁在跑」≠「门禁有量具」**：脚本里 22 处 `require_gate_evidence`，
+**只有 2 道有生产者**（`split_monitor_continuity`、`split_capacity`）。剩下 20 道里
+有一批本来就是人签（bypass 处置、阶段跃迁、不可逆动作确认这些没有量具），但**谁是哪种
+过去没写在任何地方**，读到 `require_` 的人会默认它已经在管。判一道门禁有没有用只看
+「这份证据是**谁量**出来的」；分类表在手册 6.2.3，有测试盯着它跟脚本同步——
+包括手册里那句 "一共 N 处" 的数字本身（它已经错过两次）。
+
+两类证据现在形状不同：量出来的那两道必须带 `tool` + `schema_version=1`，而且
+`result_sha256` **会被重算**（工具跑完之后改过任何字段就红）；人签那 20 道不许带
+`tool`，必须带 **`signer`** 真名——`FILL_ME`/`TBD`/`operator`/`root` 全拒收
+（sudo 之下所有人的 `$USER` 都是 root，那不指向任何人）。两类都加了一条：
+`status=PASS` 但 `errors` 非空 → 红。
 
 **默认应该走 split。** 只有下面这些情况才走 force-gray：
 - 用户点名了具体的人（"把 linsen 的切过去"）
@@ -156,6 +184,25 @@ kubectl describe nodes | grep -A5 'Allocated resources'   # 看 requests 不是�
 ## 5. 下发
 
 **一把 key 一次调用，一次 nginx reload，没有批量模式**（`grep -rn "batch|while read|--file|xargs"` 在脚本里查无此物）。所以：
+
+**下发前先把 `key_pilot_entry` 证据备好**，否则第一把 key 就会被门禁挡下：
+
+```bash
+# 人签证据。signer 写真名，不是 root / operator / FILL_ME。
+# run_id / generation / config_checksum 从当前状态读，不要手抄。
+eval "$(bash $RUN/src-*/litellm-gray-rollout/scripts/gray-phase.sh current | sed 's/^/S_/')"
+CS=$(sudo awk -F= '$1=="config_checksum"{print $2}' /etc/nginx/gray-route/active/state.env)
+umask 077
+sudo tee /root/litellm-gray-run/evidence/key_pilot_entry.json >/dev/null <<EOF
+{"gate":"key_pilot_entry","status":"PASS","signer":"刘国现",
+ "run_id":"$S_run_id","generation":"$S_generation","config_checksum":"$CS",
+ "captured_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+EOF
+sudo chmod 600 /root/litellm-gray-run/evidence/key_pilot_entry.json
+```
+
+证据吃 `run_id`+`generation`+`config_checksum`+24h，所以**中途 pin 过 workload
+就要重开一份**（generation 轮转了）。这不是麻烦，这就是机制本身。
 
 ```bash
 # 明文落地：base64 → 0600 文件，永不进 argv
@@ -310,6 +357,39 @@ shred -u ./batch.json ./batch.b64     # 本地的明文
 - gray 从 1 副本扩到 2 副本用 `kubectl scale`（**禁 `apply`**），原 pod 不重启
 - 50% 时两个 gray pod 共 688m CPU / 7.4Gi，standby 节点 CPU 17% / 内存 39%，余量宽
 - 无法迁移（表里无明文）：`cursor-linsen-03gc`、`cursor-zhuyida-3pfs`、`ceshi-zhuyida-3sth`
+
+### 13.1 这一轮整体耗时的实测拆解（`gray-progress.py` 从 675 个 generation 反推）
+
+| 环节 | 停留 | 备注 |
+|---|---|---|
+| ① 预检 | 17h58min | |
+| ② guarded-old 保险丝 | 4h32min | |
+| ③ 进 normal_gray（0%） | 5h54min | |
+| ④ 指名 key 试点 | **3d06h53min** | 其中 **79 小时零提交零换代**，纯空转 |
+| ⑤.1~⑤.5 放量 1→100% | **83min** | 整条放量梯子 |
+| ⑥~⑨ 收敛到提交 | 19min | |
+| **合计** | **126.0h** | |
+
+**结论：放量本身不慢（83 分钟），慢在两处。** 一是那 79 小时空转，紧接着爆出六个
+连续的"门禁自己坏了"修复提交 —— 时间花在发现尺子是错的。二是 ③→④ 那 662 个
+generation 是在一天里逐个手工加 key。
+
+判"现在到哪了"不要凭印象，跑 `gray-progress.py`。它只读、恒 exit 0、可在放量中途跑。
+
+⚠️ **放量档位停留不足 sustain 深度 ⇒ 止损腿没武装而门禁全绿**：这一轮 5%/10%/50%
+各只跑了 2 个监控周期，而绝对 5xx 止损腿要连续 4 个窗口（`ABS_SUSTAIN_WINDOWS=4`）。
+五档里三档的止损腿是熄灯的。现在 `check-monitor-continuity.py` 会以
+`INSUFFICIENT_CYCLES` 拦住，台账也会写明"没有武装过"。下一轮**每档至少停 4 个周期
+（300s 间隔 ⇒ 20 分钟）**，机器时间下限总计 ≈ 1h40min，别再压到 9 分钟。
+
+### 13.2 新写一个门禁脚本的验收清单（09-20 这轮踩全了）
+
+写完一个像 `check-split-capacity.py` 这样的量具，四步一步都不能省：
+
+1. **两个对照都进测试套件，不是手跑一次就算。** 阴性（健康流量上它安静）+ 阳性（真有故障时它会红）。只有阴性 = 只证明它不吵，不证明它有用。
+2. **⛔ 阳性对照「过」了是信息，不是无事发生。** 09-20 那次改 fixture 里 `"lane"` 的名字，预期红结果绿——原因是 fixture 自己的 `data` 同时喂给了两边，改名两边一起变、互相抵消。不许把这种绿当通过：要么改错了地方，要么测试的覆盖比它 docstring 承诺的窄，**后者必须把 docstring 改窄**，否则下一个人读到的是一个不存在的保证。
+3. **`chmod +x`，并且**别指望"按名单校验模式位"的测试帮你发现忘了。带 `#!` 却没 `+x` 的文件，**恰好在文档写着那条命令的地方**报 permission denied。09-20 有 5 个文件是这个状态，包括当天刚写的 `check-split-capacity.py` 本身，而当时的测试吃的是手维护名单 ⇒ 名单外的看不见。这类检查一律**扫目录认 shebang**。
+4. **顺手核一遍文档里写的调用形状是真的**（flag 名、位置参数、输出文件名）。凭印象写进 SOP 的命令，换台机器照着走就是一条死路。
 
 ## 14. 全量（100%）不该走这条路
 

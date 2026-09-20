@@ -281,6 +281,21 @@ def shape_of(
             name = container["name"]
             prefix = f"{role}/{name}"
 
+            # The image is the coarsest possible difference between two builds, and
+            # until 2026-09-21 it was the one thing this tool did not look at. That
+            # made a shape PASS unable to corroborate the pin's own --image-digest,
+            # which is precisely the field a mid-run patch changes: an operator could
+            # pin digest X, hand the pin a PASS produced against a Pod running
+            # digest Y, and every ruler downstream would be measuring Y while the
+            # record said X. A PASS now means "including the image".
+            #
+            # Recorded verbatim, tag or digest as written. Normalising a tag to the
+            # digest it resolved to would be this tool inventing a fact it cannot
+            # observe from a YAML file, and a tag that moved under a fixed string is
+            # itself the drift worth seeing.
+            if isinstance(container.get("image"), str):
+                shape[f"{prefix}/image"] = container["image"]
+
             for field in ("command", "args"):
                 if field in container:
                     shape[f"{prefix}/{field}"] = json.dumps(

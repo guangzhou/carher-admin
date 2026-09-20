@@ -28,13 +28,15 @@ METRIC_KEYS = {
     "evidence", "phase", "rollout_percent", "records", "hard_errors", "baseline",
     "backend_health", "spend_reconciliation", "sustain_state",
     "latency_records", "latency_window_minutes",
+    "readiness", "data_sources",
 }
-MIN_SAMPLE = 100
-# Sample floor for the 5xx stop-loss leg, separate from MIN_SAMPLE.  MIN_SAMPLE
-# used to gate the whole class with a `continue`, which took the stop-loss leg
-# down with the latency legs -- and the latency legs already have their own
-# floors, so for them MIN_SAMPLE was redundant while for 5xx it was actively
-# wrong.
+# Sample floor for the 5xx delta leg.  There used to be a MIN_SAMPLE = 100 here
+# that gated the whole class, and it is gone: every leg below carries its own
+# floor, so a single shared number could only be redundant (for the latency legs,
+# which have 200/500) or actively harmful (for the 5xx stop-loss, which it dragged
+# dark with them).  It also produced two alerts -- INSUFFICIENT_GRAY_SAMPLE and
+# INSUFFICIENT_REFERENCE_SAMPLE -- that fired in essentially every real window and
+# told a reader nothing the per-leg `*_qualified` flags do not say precisely.
 #
 # The floor is 200 because that is where a single window's rate stops being
 # dominated by counting noise, NOT because it controls false positives -- it
@@ -84,27 +86,16 @@ MIN_ABS_FIVE_XX_SAMPLE = 30
 # 0.10 sits above the p90 of same-version five-minute windows (0.043 stable,
 # 0.035 canary) and below the p99 (0.206 / 0.288).  It is deliberately NOT above
 # the historical max: same-version windows reach 0.62 during upstream outages, so
-# any rate a broken build crosses, a burst crosses too.  Duration and shared fate
-# separate them, not the rate.
+# any rate a broken build crosses, a burst crosses too.  DURATION separates them,
+# not the rate -- see ABS_SUSTAIN_WINDOWS.
 ABS_FIVE_XX_RATE = 0.10
 # Three events, so a 30-request window cannot trip on a single failure.
 MIN_ABS_FIVE_XX_EVENTS = 3
-# Concurrent non-gray inference traffic must clear this before it can veto a
-# breach.
-#
-# After cutover this cohort is mostly BLIND, and that is measured, not feared:
-# stable inference clears 30 in only 27.8% of gray-armed windows over the last six
-# hours and 0% over the last two (stable inference p50 = 0 per window), because at
-# split=100 the stable pool keeps health checks -- which are excluded -- plus a few
-# force-prod keys.  Widening the guard window does not rescue it: 5/15/30/60
-# minutes give 27.8% / 30.6% / 34.7% / 43.1%.
-#
-# That is acceptable because depth, not the veto, is what actually suppresses
-# provider weather.  Real bursts are short: over 1318 windows / 4.58 days the
-# consecutive-breach runs are p50 1 window, p90 3, max 4, and exactly one run in
-# the whole span reached ABS_SUSTAIN_WINDOWS.  So with the guard assumed blind
-# throughout, false promotions are 0.22/day.  The veto is a bonus; the depth is
-# the mechanism.  Do NOT lower the depth on the grounds that the veto exists.
+# Concurrent non-gray inference traffic must clear this before its rate is worth
+# reporting.  It NO LONGER VETOES anything -- see absolute_five_xx() for the
+# measurement that demoted it (blind in >=72% of gray-armed windows, 0% readable
+# in the last two hours before cutover completed).  The floor is kept because a
+# rate computed over 4 requests is not a reading either.
 SHARED_FATE_MIN_SAMPLE = 30
 # Classes that reach an upstream model provider.  `other` is health and probe
 # traffic: it never leaves the proxy, it is ~90% of stable's requests, and
@@ -118,14 +109,39 @@ INFERENCE_CLASSES = frozenset({"chat", "messages", "responses", "embedding"})
 # were 5% or more of a class.  They are still counted -- count, five_xx_rate and
 # the sample floors all include them -- but they never enter p95/p99.
 LATENCY_EXCLUDED_STATUSES = frozenset({101})
-# Sample floors for the latency legs, separate from MIN_SAMPLE.  A p99 over 57
-# samples is the single slowest request wearing a percentile's name; the
-# `responses` class has a median of 57 per five minutes.  Measured against a
-# negative control (stable split in half against itself, same version, same
-# people, same instant -- every trigger is by construction false), the floors
-# below are what took that false-positive rate from 15.1% to ~0%.
+# Sample floors for the latency readings.  A p99 over 57 samples is the single
+# slowest request wearing a percentile's name; the `responses` class has a median
+# of 57 per five minutes.  Measured against a negative control (stable split in
+# half against itself, same version, same people, same instant -- every trigger is
+# by construction false), these floors are what took that false-positive rate from
+# 15.1% to ~0%.
+#
+# They now gate a *reading*, not a trigger: see LATENCY_OBSERVED_ONLY.
 MIN_P95_SAMPLE = 200
 MIN_P99_SAMPLE = 500
+# p95/p99 ratios are reported and never trip the dispatcher.
+#
+# Not a preference -- measured on 148 real monitor cycles of the 2026-09-14 run at
+# split=100 with five_xx_count identically 0 throughout.  The median ratio was
+# BELOW 1.0 on every class (chat 0.527, responses 0.564, messages 0.664: canary was
+# faster than the reference), and the legs still breached 6 and 11 times.  One
+# 30-minute stretch of `responses` read
+# 1.369 1.799 1.746 1.034 0.727 0.725 0.725 0.751 1.127 1.428 1.648 1.656
+# -- across the 1.3 line four times, swinging 2.5x, with zero 5xx.
+#
+# The cause is the denominator, and it cannot be fixed by tuning: the frozen
+# baseline holds 2043-5156 samples per class while a live canary window holds
+# 189-317, so the ratio divides two distributions of ~8x different depth.  A
+# percentile ratio across unequal depths measures sample variance, not
+# regression -- the same reason a raw canary-vs-stable p50 comparison is a broken
+# ruler.  `messages` was worse than noisy: p95_qualified was False in all 80 of
+# its windows, so that leg was dark while reporting itself armed.
+#
+# Making them usable would require equal-depth cohorts (same sid set, or a window
+# wide enough on both sides), which is a different piece of work.  Until then the
+# honest form is: keep the numbers -- they are a real measurement of something --
+# and refuse to move production traffic on them.
+LATENCY_OBSERVED_ONLY = True
 # Consecutive qualifying windows a class must stay bad before a threshold
 # breach becomes a trigger.  Adjacent stable windows move p95 by 2.42x and p99
 # by 3.01x at the median with nothing changed at all, so a single window over
@@ -148,15 +164,126 @@ ABS_SUSTAIN_WINDOWS = 4
 # `latency_records` over a wider window for the percentiles only; `records` stays
 # at the five-minute live window so the 5xx stop-loss ruler is untouched.
 MIN_LATENCY_WINDOW_MINUTES = 30
+# --- Leg 2: ready container count -------------------------------------------
+#
+# Counted in READY CONTAINERS, never in replicas.  `replicas` is a spec field:
+# a Deployment scaled to 0 still reports `Available: True`, and on the acct pool
+# 165 deployments with replicas>0 had only 54 actually serving.  It is the same
+# broken ruler in both places, and it fails in the direction that hides an
+# outage.
+#
+# The floor is not a constant here because it cannot be: the correct number is
+# whatever the run sheet froze for this lane, and hard-coding one would repeat
+# the `llm-stab-scrape-down` mistake of a literal 5 that silently stops matching
+# after a scale change.  The collector supplies both the observed count and the
+# expected one; this module only checks the arithmetic and refuses to guess when
+# either is absent.
+READINESS_KEYS = {"lane", "ready_containers", "expected_containers", "observed_at"}
+# --- Leg 3: data liveness ----------------------------------------------------
+#
+# Any source silent longer than this reads red.  300s == the frozen scheduler
+# interval, so one missed cycle is already over the line: this leg exists because
+# a monitor whose inputs stopped is indistinguishable, in every downstream
+# payload, from a monitor watching a healthy system.  Every leg above reports
+# "clean" on an empty window.
+#
+# Coupled to the scheduler interval by arithmetic, exactly like
+# check-monitor-continuity.py's --cycle-interval-seconds.  A run at a different
+# cadence must pass its own value; the default matches the frozen 300s and
+# test_data_liveness_floor_matches_the_frozen_cycle_interval pins it.
+MAX_SOURCE_SILENCE_SECONDS = 300
+DATA_SOURCE_KEYS = {"name", "observed_at"}
+# --- Leg 4: user-facing failure count ---------------------------------------
+#
+# Failures of REAL keys, counted per request.  Not ERROR log lines: those count a
+# retry layer's attempts, not a user's outcome, and the same user-visible failure
+# appears 1-N times depending on how many upstream tries it took.  The ruler is
+# the access log's own status against an enrolled sid, which is one row per thing
+# a user actually saw.
+#
+# One is one too many only above this floor for the same reason the absolute 5xx
+# leg needs 3 events: a single failure in a thin window is a coin flip, and this
+# leg bypasses nothing -- it goes straight to the dispatcher.
+MIN_USER_FAILURE_EVENTS = 3
+# Rate rather than a bare count, because a bare count scales with traffic: 5
+# failures in 60 requests and 5 in 6000 are different facts.
+#
+# 🔴 What this rate is taken OVER was wrong until 2026-09-20, and the negative
+# control caught it: replaying real stable traffic against itself (identical
+# cohorts, so every red is false by construction) promoted USER_FAILURE_RATE to
+# `rollback` on 3 of 6 consecutive windows.  The threshold was not the defect --
+# the population was.  Counting every status >= 400, 48 of 185 healthy windows
+# (25.9%) sit above 0.02, because most 4xx on this proxy is steady-state client
+# behaviour, present at this rate on traffic with no version fault at all:
+#
+#   66393 stable inference rows / 15.4h / 185 windows of >= 30 samples
+#   client-side 4xx  499x508 400x326 405x296 403x107 401x70 402x1
+#     -> p50 0.0043  p90 0.0330  max 0.1222   above 0.02 in 39/185 (21.1%)
+#   proxy-emitted    503x371 500x124 429x92 413x4
+#     -> p50 0.0000  p90 0.0065  max 0.2283   above 0.02 in  7/185 ( 3.8%)
+#
+# 499 is nginx's own code for the client hanging up before a reply; 405 (296, all
+# on `responses`) is a client calling a method the route does not serve; 400 is a
+# malformed body.  None of those is something the build under test did, and none
+# of them is what 「用户面失败」 means.  So the trigger counts only what the proxy
+# itself emitted, and the client codes stay in the payload as a reading with their
+# own alert line -- visible, never moving traffic.
+#
+# The line stays at 0.02 rather than moving up: on the correct population it is
+# already above p90 by 3x, and raising it would blunt the one leg that sees a
+# 429/401 storm.
+MAX_USER_FAILURE_RATE = 0.02
+# 4xx the proxy emits about its OWN state, folded in with 5xx: 429 is this proxy
+# refusing the request (rate limit or budget) and 413 is it rejecting the body.
+# A build that starts 429-ing everyone is invisible to a 5xx ruler and entirely
+# visible to the person hitting it -- that case is why this leg exists next to the
+# absolute 5xx stop-loss.  Every other 4xx describes the CALLER, not the build.
+PROXY_EMITTED_CLIENT_STATUSES = frozenset({413, 429})
+# Client-side 4xx gets an alert, never a trigger.  Measured above: 0.03 would page
+# 35.9 times a day on healthy traffic, 0.05 15.6 times.  0.10 fires on 1 of 185
+# windows (1.56/day) and is still well under the 0.1222 ceiling this population
+# actually reached, so it flags a genuine change in caller behaviour -- a client
+# fleet suddenly sending bad bodies is worth knowing about, just not worth
+# rolling back a proxy for.
+MAX_USER_CLIENT_ERROR_RATE = 0.10
+# Only the 5xx legs have thresholds now: p95_ratio/p99_ratio used to live here at
+# 1.3/1.5 and they are gone with the triggers they fed (LATENCY_OBSERVED_ONLY).
+# Leaving a threshold behind for a leg that cannot fire is how a dark leg keeps
+# looking armed -- the ratios are still in the payload as readings, with no line
+# for anyone to read them against.
 THRESHOLDS = {
     "five_xx_delta": 0.01,
-    "p95_ratio": 1.3,
-    "p99_ratio": 1.5,
 }
 # The statistical legs, and only those, are subject to the sustain gate.
-THRESHOLD_TRIGGER_CODES = frozenset({"FIVE_XX_DELTA", "P95_RATIO", "P99_RATIO", "FIVE_XX_ABSOLUTE"})
+#
+# USER_FAILURE_RATE is in here and READY_CONTAINERS_SHORT / DATA_SOURCE_SILENT are
+# not, and that split is the point.  A failure rate is a sampled ratio and one bad
+# window of it is mostly noise.  A container that is not ready and a data source
+# that has stopped are OBSERVED FACTS read from an exact counter -- holding them
+# for repeats would mean watching a known outage for 20 minutes before acting, and
+# for the liveness leg it is worse than that: the thing it detects is the monitor
+# having stopped, so the next window that would confirm it may never arrive.
+THRESHOLD_TRIGGER_CODES = frozenset(
+    {"FIVE_XX_DELTA", "FIVE_XX_ABSOLUTE", "USER_FAILURE_RATE"}
+)
 # Per-code sustain depth.  Anything absent uses SUSTAIN_WINDOWS.
-SUSTAIN_DEPTH = {"FIVE_XX_ABSOLUTE": ABS_SUSTAIN_WINDOWS}
+#
+# USER_FAILURE_RATE needs 3, not 2, and that is measured on the corrected
+# population rather than argued: over the same 185 healthy windows, the runs of
+# consecutive proxy-emitted breaches above 0.02 are [1, 1, 1, 2, 2] -- max 2.
+# Depth 2 therefore still fires twice in 15.4h (3.13 false rollbacks/day); depth 3
+# fires zero times.  The cost is 5 extra minutes before a real regression moves
+# traffic, and the absolute 5xx stop-loss sits underneath at depth 4 for anything
+# severe enough to be worth less delay than that.
+#
+# ⛔ This is a per-code depth for the same reason FIVE_XX_ABSOLUTE's is: raising
+# SUSTAIN_WINDOWS globally to 3 would blunt FIVE_XX_DELTA, whose own calibration
+# was done at 2.
+USER_FAILURE_SUSTAIN_WINDOWS = 3
+SUSTAIN_DEPTH = {
+    "FIVE_XX_ABSOLUTE": ABS_SUSTAIN_WINDOWS,
+    "USER_FAILURE_RATE": USER_FAILURE_SUSTAIN_WINDOWS,
+}
 HARD_ERROR_CODES = {
     "prisma_error": "PRISMA_ERROR",
     "callback_import_error": "CALLBACK_IMPORT_ERROR",
@@ -355,6 +482,20 @@ def summarize(records: list[Any]) -> tuple[list[dict[str, Any]], int]:
         statuses = values["statuses"]
         latencies = values["latencies"]
         five_xx = sum(1 for status in statuses if status >= 500)
+        # 4xx is for the user-facing leg only and is deliberately NOT folded into
+        # five_xx_count or five_xx_rate: the stop-loss legs and the frozen baseline
+        # are both calibrated on 5xx, and widening that number here would silently
+        # re-base every threshold measured against it.
+        four_xx = sum(1 for status in statuses if 400 <= status < 500)
+        # ...and split in two, because only one half describes the build.  The
+        # proxy emits 429/413 about its own state; every other 4xx describes the
+        # caller (499 hung up, 405 wrong method, 400 bad body).  Folding them into
+        # one number is what made the user-facing leg fire on 25.9% of healthy
+        # windows -- see MAX_USER_FAILURE_RATE.  `four_xx_count` stays as the total
+        # so an existing reader is not silently re-based.
+        proxy_four_xx = sum(
+            1 for status in statuses if status in PROXY_EMITTED_CLIENT_STATUSES
+        )
         result.append(
             {
                 "pool_label": pool,
@@ -362,6 +503,9 @@ def summarize(records: list[Any]) -> tuple[list[dict[str, Any]], int]:
                 "count": len(statuses),
                 "latency_count": len(latencies),
                 "five_xx_count": five_xx,
+                "four_xx_count": four_xx,
+                "proxy_four_xx_count": proxy_four_xx,
+                "client_four_xx_count": four_xx - proxy_four_xx,
                 "five_xx_rate": rounded(five_xx / len(statuses)),
                 "p95": rounded(percentile(latencies, 0.95)),
                 "p99": rounded(percentile(latencies, 0.99)),
@@ -425,18 +569,14 @@ def compare(gray: dict[str, dict[str, Any]], reference: dict[str, dict[str, Any]
             continue
         gray_count = int(gray_group.get("count", 0))
         ref_count = int(ref.get("count", 0))
-        # Each leg gates on its own floor.  This used to `continue` on MIN_SAMPLE
-        # and take the whole class down -- including the 5xx stop-loss leg, which
-        # is the one thing that must stay armed.  A class below every floor is
-        # still reported, with the alerts saying which legs were dark, so a PASS
-        # is never mistaken for "this class was checked".
+        # Each leg gates on its own floor.  This used to `continue` on a shared
+        # MIN_SAMPLE and take the whole class down -- including the 5xx stop-loss
+        # leg, which is the one thing that must stay armed.  A class below every
+        # floor is still reported, with the alerts saying which legs were dark, so
+        # a PASS is never mistaken for "this class was checked".
         five_xx_qualified = (
             gray_count >= MIN_FIVE_XX_SAMPLE and ref_count >= MIN_FIVE_XX_SAMPLE
         )
-        if gray_count < MIN_SAMPLE:
-            alerts.add("INSUFFICIENT_GRAY_SAMPLE")
-        if ref_count < MIN_SAMPLE:
-            alerts.add("INSUFFICIENT_REFERENCE_SAMPLE")
         if not five_xx_qualified:
             alerts.add("FIVE_XX_SAMPLE_BELOW_FLOOR")
         five_delta = float(gray_group["five_xx_rate"]) - float(ref.get("five_xx_rate", 0))
@@ -453,16 +593,25 @@ def compare(gray: dict[str, dict[str, Any]], reference: dict[str, dict[str, Any]
         item = {
             "uri_class": uri_class,
             "reference": reference_name,
-            # `qualified` means "at least one leg could judge this class".  It is
-            # not a claim that every leg was live; `*_qualified` say which were.
-            "qualified": five_xx_qualified or p95_qualified or p99_qualified,
+            # `qualified` means "the one leg that can judge this class could judge
+            # it".  The latency readings below do not enter it: they never trigger,
+            # so counting them here would let a class with 900 latency samples and
+            # 40 requests report itself as checked when nothing was checked.
+            "qualified": five_xx_qualified,
             "gray_count": gray_count,
             "reference_count": ref_count,
             "gray_latency_count": gray_latency,
             "reference_latency_count": ref_latency,
             "five_xx_qualified": five_xx_qualified,
-            "p95_qualified": p95_qualified,
-            "p99_qualified": p99_qualified,
+            # Kept as floor flags for the reading, not as gate state.  Below the
+            # floor the ratio is a percentile over too few samples and a reader
+            # should discount it; above the floor it is still only a reading.
+            "p95_above_floor": p95_qualified,
+            "p99_above_floor": p99_qualified,
+            # Says out loud what the flags above no longer imply.  Without this a
+            # reader who remembers the old payload would take `p95_above_floor:
+            # true` to mean the leg is armed.
+            "latency_observed_only": LATENCY_OBSERVED_ONLY,
             "five_xx_delta": rounded(five_delta),
             "p95_ratio": rounded(p95_ratio),
             "p99_ratio": rounded(p99_ratio),
@@ -471,12 +620,6 @@ def compare(gray: dict[str, dict[str, Any]], reference: dict[str, dict[str, Any]
         breaches: set[str] = set()
         if five_xx_qualified and five_delta > THRESHOLDS["five_xx_delta"]:
             breaches.add("FIVE_XX_DELTA")
-        if p95_qualified and p95_ratio is not None and p95_ratio > THRESHOLDS["p95_ratio"]:
-            breaches.add("P95_RATIO")
-        if p99_qualified and p99_ratio is not None and p99_ratio > THRESHOLDS["p99_ratio"]:
-            breaches.add("P99_RATIO")
-        if not p95_qualified and not p99_qualified:
-            alerts.add("LATENCY_SAMPLE_BELOW_FLOOR")
         item["breaches"] = sorted(breaches)
         triggers |= breaches
     return comparisons, triggers, alerts
@@ -503,7 +646,7 @@ def pool_inference_totals(groups: list[dict[str, Any]], pool: str) -> tuple[int,
 def absolute_five_xx(
     groups: list[dict[str, Any]], gray_pool: str, guard_pool: str
 ) -> tuple[dict[str, Any], set[str], set[str]]:
-    """Stop-loss on the gray cohort's own 5xx rate, vetoed by shared fate.
+    """Stop-loss on the gray cohort's own 5xx rate.
 
     This is the leg that is actually armed at production volume; the delta leg
     beside it cannot be, and says so with FIVE_XX_SAMPLE_BELOW_FLOOR.  It answers
@@ -511,13 +654,29 @@ def absolute_five_xx(
     than "is it slightly worse than the reference" -- because that is the question
     a five-minute window of ~100 requests can answer.
 
-    The shared-fate veto is what keeps it from firing on provider outages, which
-    are the entire residual false-positive population once the rate is above the
-    p90 of same-version windows.  When the guard cohort is too thin to read, the
-    breach still stands: a stop-loss that goes dark whenever it cannot attribute
-    the fault is the failure mode this whole change exists to remove.  The
-    veto/blind distinction is reported either way so nobody reads a quiet leg as a
-    confirmed-clean one.
+    The shared-fate cohort is REPORTED but no longer vetoes.  It was introduced to
+    tell a provider outage apart from a bad build, and on paper it does; measured,
+    it cannot see.  At split=100 the stable pool retains only health checks (which
+    are excluded from the cohort by design) plus a handful of force-prod keys, so
+    stable inference clears SHARED_FATE_MIN_SAMPLE in 27.8% of gray-armed windows
+    over six hours and 0% over the last two, with a per-window median of 0
+    requests.  Widening the guard window does not rescue it: 5/15/30/60 minutes
+    give 27.8% / 30.6% / 34.7% / 43.1%.
+
+    A veto blind in >=72% of windows is worse than no veto, because it is not
+    inert -- it is a branch that changes the verdict on the minority of windows
+    where it happens to be readable, which makes the leg's behaviour depend on
+    whether a few force-prod keys were busy.  Depth is what actually separates a
+    burst from a regression and it is measured: over 1318 windows / 4.58 days the
+    consecutive-breach runs are p50 1, p90 3, max 4, and exactly one run in the
+    whole span reached ABS_SUSTAIN_WINDOWS -- so with the veto assumed blind
+    throughout, false promotions are 0.22/day.  The veto was the bonus; the depth
+    was always the mechanism.
+
+    The cohort's numbers stay in the summary, and UPSTREAM_FIVE_XX_SHARED is still
+    raised as an ALERT when both cohorts are equally bad: that is real information
+    for whoever is reading, and the users are getting errors either way.  It just
+    no longer suppresses the stop-loss.
     """
     gray_count, gray_five_xx = pool_inference_totals(groups, gray_pool)
     guard_count, guard_five_xx = pool_inference_totals(groups, guard_pool)
@@ -536,7 +695,11 @@ def absolute_five_xx(
         "shared_fate_count": guard_count,
         "shared_fate_five_xx_rate": rounded(guard_rate),
         "shared_fate_readable": guard_readable,
-        "shared_fate_vetoed": False,
+        # Renamed from `shared_fate_vetoed`, which a reader of the old payload would
+        # take to mean "a veto exists and did not fire this window".  It no longer
+        # exists at all; this field says only whether both cohorts were bad.
+        "shared_fate_observed_only": True,
+        "shared_fate_concurrent_breach": False,
     }
     breaches: set[str] = set()
     alerts: set[str] = set()
@@ -549,22 +712,230 @@ def absolute_five_xx(
             alerts.add("ABS_FIVE_XX_SAMPLE_BELOW_FLOOR")
         return summary, breaches, alerts
     summary["qualified"] = True
-    # Only worth saying when the veto could have mattered.  A readable guard is
-    # irrelevant in a window with nothing to veto, and reporting it there would
-    # train readers to skip the code.
-    guard_relevant = gray_five_xx >= MIN_ABS_FIVE_XX_EVENTS and gray_rate > ABS_FIVE_XX_RATE
-    if guard_relevant and not guard_readable:
-        alerts.add("SHARED_FATE_COHORT_BLIND")
     if gray_five_xx >= MIN_ABS_FIVE_XX_EVENTS and gray_rate > ABS_FIVE_XX_RATE:
-        if guard_readable and guard_rate > ABS_FIVE_XX_RATE:
+        # The breach stands regardless of what the guard cohort looks like.  What
+        # the cohort adds is an attribution HINT for the human reading the alert,
+        # and it is reported as one.
+        breaches.add("FIVE_XX_ABSOLUTE")
+        if not guard_readable:
+            alerts.add("SHARED_FATE_COHORT_BLIND")
+        elif guard_rate > ABS_FIVE_XX_RATE:
             # Both cohorts are equally bad and only one runs the gray build, so
-            # this is provider weather, not a regression.  Still an alert: the
-            # users are getting errors either way and someone has to know.
-            summary["shared_fate_vetoed"] = True
+            # this most likely is provider weather rather than a regression.  It
+            # does not suppress the rollback: the users are getting errors either
+            # way, and "probably upstream" is a judgement for a human with more
+            # context than this window has.
+            summary["shared_fate_concurrent_breach"] = True
             alerts.add("UPSTREAM_FIVE_XX_SHARED")
-        else:
-            breaches.add("FIVE_XX_ABSOLUTE")
     return summary, breaches, alerts
+
+
+def readiness(payload: dict[str, Any]) -> tuple[dict[str, Any], set[str], list[str]]:
+    """Leg 2: are the containers that should be serving actually ready?
+
+    Ready containers, never `replicas`.  `replicas` is a spec number and it lies
+    in the dangerous direction: a Deployment scaled to zero still reports
+    `Available: True`, so a lane with nothing running reads healthy.
+
+    The expected count comes from the collector rather than from a constant here.
+    A literal in this file would be the `llm-stab-scrape-down` failure again --
+    hard-coded 5, silently wrong after any scale change, and wrong in a way that
+    never goes red.  Absence of the section is NOT_PROVIDED, not zero: a missing
+    reading and a lane with no ready containers are opposite facts, and only one
+    of them is an outage.
+    """
+    source = payload.get("readiness")
+    if source is None:
+        return {"status": "NOT_PROVIDED"}, set(), []
+    if not isinstance(source, dict) or set(source) - READINESS_KEYS:
+        return {"status": "INVALID"}, set(), ["READINESS_INVALID"]
+    ready = number(source.get("ready_containers"))
+    expected = number(source.get("expected_containers"))
+    lane = source.get("lane")
+    if (
+        ready is None or expected is None
+        or ready < 0 or expected < 1
+        or not float(ready).is_integer() or not float(expected).is_integer()
+        or not isinstance(lane, str) or not lane
+    ):
+        return {"status": "INVALID"}, set(), ["READINESS_INVALID"]
+    ready, expected = int(ready), int(expected)
+    summary: dict[str, Any] = {
+        "status": "PASS",
+        "lane": lane,
+        "ready_containers": ready,
+        "expected_containers": expected,
+        # Said out loud so nobody has to trust that this leg read the right field.
+        "ruler": "ready_containers",
+    }
+    triggers: set[str] = set()
+    if ready < expected:
+        triggers.add("READY_CONTAINERS_SHORT")
+        summary["status"] = "FAIL"
+    return summary, triggers, []
+
+
+def data_liveness(payload: dict[str, Any]) -> tuple[dict[str, Any], set[str], list[str]]:
+    """Leg 3: has any input to this cycle gone silent?
+
+    Every other leg in this module reports "clean" on an empty window, which means
+    a monitor whose inputs died produces a payload indistinguishable from a
+    monitor watching a healthy system.  That shape is why the 2026-09-14 run was
+    green throughout while three of its five ramp steps had an unarmed stop-loss.
+
+    Ages are measured from the NEWEST observation in the cycle, not from
+    `evidence.captured_at`.  captured_at is the MINIMUM of the source timestamps
+    by construction in the collector, so anchoring on it gives the oldest source
+    an age of 0 -- the one that has actually gone quiet reads as the freshest, and
+    every other source reads as being in the future.  The first smoke run of this
+    leg did exactly that.
+
+    Anchoring on the newest observation makes this leg RELATIVE on purpose: it
+    answers "is one input lagging while the others are alive", which is the
+    failure nothing else here can see.  Whole-payload staleness -- everything
+    stopped together -- is already `evidence_errors`'s job via MAX_EVIDENCE_AGE
+    against wall clock, and the collector's own MAX_LOG_AGE refuses a stale access
+    log before this module runs.  Splitting it this way is also what lets a
+    re-run over an archived cycle judge that cycle instead of calling every
+    historical file dead.
+
+    There is deliberately no clock-skew code here.  With a max anchor no age can
+    be negative, so such a branch could never fire, and a leg that cannot fire
+    while looking armed is the exact shape this whole trim exists to delete.
+    """
+    source = payload.get("data_sources")
+    if source is None:
+        return {"status": "NOT_PROVIDED"}, set(), []
+    if not isinstance(source, list) or not source:
+        return {"status": "INVALID"}, set(), ["DATA_SOURCES_INVALID"]
+    observations: list[tuple[str, datetime]] = []
+    seen: set[str] = set()
+    for item in source:
+        if not isinstance(item, dict) or set(item) - DATA_SOURCE_KEYS:
+            return {"status": "INVALID"}, set(), ["DATA_SOURCES_INVALID"]
+        name = item.get("name")
+        observed = parse_timestamp(item.get("observed_at"))
+        if not isinstance(name, str) or not name or observed is None or name in seen:
+            return {"status": "INVALID"}, set(), ["DATA_SOURCES_INVALID"]
+        seen.add(name)
+        observations.append((name, observed))
+    anchor = max(observed for _, observed in observations)
+    triggers: set[str] = set()
+    entries: list[dict[str, Any]] = []
+    for name, observed in observations:
+        age = (anchor - observed).total_seconds()
+        entry = {
+            "name": name,
+            "age_seconds": rounded(age),
+            "silent": age > MAX_SOURCE_SILENCE_SECONDS,
+        }
+        if entry["silent"]:
+            triggers.add("DATA_SOURCE_SILENT")
+        entries.append(entry)
+    summary = {
+        "status": "FAIL" if triggers else "PASS",
+        "floor_seconds": MAX_SOURCE_SILENCE_SECONDS,
+        # Named so a reader knows the ages are relative to this cycle's freshest
+        # input rather than to wall clock.
+        "anchor": "newest_observation",
+        "anchor_at": anchor.isoformat().replace("+00:00", "Z"),
+        "sources": sorted(entries, key=lambda item: item["name"]),
+        "silent_sources": sorted(
+            entry["name"] for entry in entries if entry["silent"]
+        ),
+    }
+    return summary, triggers, []
+
+
+def user_facing_failures(
+    groups: list[dict[str, Any]], pool: str
+) -> tuple[dict[str, Any], set[str], set[str]]:
+    """Leg 4: how many requests did real users see THIS PROXY fail?
+
+    Counted from the access log's own status codes on the gray pool's inference
+    classes -- one row per thing a user actually saw.  NOT from ERROR log lines:
+    those count a retry layer's upstream attempts, so one user-visible failure
+    appears 1-N times depending on how many tries it took, and the count moves
+    when retry policy changes with nothing wrong.
+
+    🔴 The trigger counts 5xx plus PROXY_EMITTED_CLIENT_STATUSES (429/413) and
+    NOT the rest of the 4xx.  That is not a softening of the leg, it is the fix
+    for a false positive the negative control caught: on identical cohorts this
+    leg promoted to `rollback` on 3 of 6 windows, because 499 (client hung up),
+    405 (wrong method) and 400 (bad body) are steady-state caller behaviour on
+    this proxy -- 21.1% of healthy windows are above 0.02 on those codes alone,
+    against 3.8% on the codes the proxy itself emits.  See MAX_USER_FAILURE_RATE
+    for the full distribution.
+
+    The client codes are still counted, reported, and given their own alert at
+    MAX_USER_CLIENT_ERROR_RATE.  A client fleet that starts sending bad bodies is
+    worth knowing about; it is not a reason to roll a proxy back, and treating it
+    as one meant the whole leg could not be trusted.
+
+    Distinct from the absolute 5xx leg despite reading the same rows.  That leg is
+    a stop-loss with a deliberately high bar (rate 0.10, four consecutive windows)
+    tuned so provider weather does not move traffic.  This one is the users'-eye
+    view at a lower bar (0.02, three windows), and it sees the one failure mode a
+    pure-5xx ruler cannot: a build that starts 429-ing or 413-ing everybody is a
+    total outage to the person hitting it and zero 5xx to the monitor.
+
+    `other` stays excluded, same as everywhere else: health and probe traffic is
+    ~90% of the rows and none of it is a user.
+    """
+    count = server_errors = proxy_four_xx = client_four_xx = 0
+    for item in groups:
+        if item["pool_label"] != pool or item["uri_class"] not in INFERENCE_CLASSES:
+            continue
+        count += int(item.get("count", 0))
+        server_errors += int(item.get("five_xx_count", 0))
+        proxy_four_xx += int(item.get("proxy_four_xx_count", 0))
+        client_four_xx += int(item.get("client_four_xx_count", 0))
+    failures = server_errors + proxy_four_xx
+    rate = (failures / count) if count else None
+    client_rate = (client_four_xx / count) if count else None
+    summary: dict[str, Any] = {
+        "pool": pool,
+        "request_count": count,
+        # `failure_count` / `failure_rate` are what the trigger reads, and their
+        # meaning CHANGED on 2026-09-20: they no longer include caller-side 4xx.
+        # A reader comparing them against an archived payload is comparing two
+        # different populations -- the old number is `failure_count` +
+        # `client_four_xx_count`.
+        "failure_count": failures,
+        "failure_rate": rounded(rate),
+        "five_xx_count": server_errors,
+        "proxy_four_xx_count": proxy_four_xx,
+        "client_four_xx_count": client_four_xx,
+        "client_four_xx_rate": rounded(client_rate),
+        "threshold": MAX_USER_FAILURE_RATE,
+        "client_error_threshold": MAX_USER_CLIENT_ERROR_RATE,
+        "minimum_events": MIN_USER_FAILURE_EVENTS,
+        "proxy_emitted_client_statuses": sorted(PROXY_EMITTED_CLIENT_STATUSES),
+        # Both counts come from summarize() over the same rows, so there is no
+        # "collector too old to report 4xx" case to guard against -- the groups this
+        # leg reads are built in this module.  A flag for it would be a check that
+        # can never go red, which is the shape this whole trim exists to remove.
+        "ruler": "access_log_status",
+    }
+    triggers: set[str] = set()
+    alerts: set[str] = set()
+    if count < MIN_ABS_FIVE_XX_SAMPLE:
+        summary["qualified"] = False
+        if count:
+            alerts.add("USER_FAILURE_SAMPLE_BELOW_FLOOR")
+        return summary, triggers, alerts
+    summary["qualified"] = True
+    if failures >= MIN_USER_FAILURE_EVENTS and rate > MAX_USER_FAILURE_RATE:
+        triggers.add("USER_FAILURE_RATE")
+    # Alert only, and gated on the same event floor so a thin window cannot raise
+    # it on one hung-up client.  It never enters `triggers`, so it never reaches
+    # the sustain gate or the dispatcher.
+    if (
+        client_four_xx >= MIN_USER_FAILURE_EVENTS
+        and client_rate > MAX_USER_CLIENT_ERROR_RATE
+    ):
+        alerts.add("CLIENT_ERROR_RATE_HIGH")
+    return summary, triggers, alerts
 
 
 def with_wide_latency(
@@ -831,6 +1202,37 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         abs_summary["qualified"] = False
         abs_summary["skipped_reason"] = "split_zero"
 
+    # Leg 4, the users'-eye view.  Same gating as the stop-loss above -- at split 0
+    # there is no gray traffic to judge and a zero-request window must not read as
+    # a clean one.
+    user_summary, user_triggers, user_alerts = user_facing_failures(groups, "canary")
+    if rollout > 0:
+        threshold_triggers |= user_triggers
+        alerts |= user_alerts
+    else:
+        user_summary["qualified"] = False
+        user_summary["skipped_reason"] = "split_zero"
+
+    # Legs 2 and 3 are observed facts, not sampled ratios, so they bypass the
+    # sustain gate entirely (see THRESHOLD_TRIGGER_CODES) and they run at every
+    # split including zero: a lane with no ready containers and a monitor whose
+    # inputs stopped are faults regardless of how much traffic is pointed at it.
+    ready_summary, ready_triggers, ready_errors = readiness(payload)
+    liveness_summary, liveness_triggers, liveness_errors = data_liveness(payload)
+    # Required once any traffic is split, same rule as spend reconciliation.  The
+    # collector always emits both, so absence means a hand-assembled payload -- and
+    # accepting it would move production traffic with the two legs that detect "the
+    # lane is not running" and "the monitor stopped" switched off, which is the
+    # precise condition they exist to make impossible.
+    if rollout > 0:
+        if ready_summary.get("status") == "NOT_PROVIDED":
+            ready_errors.append("READINESS_MISSING")
+        if liveness_summary.get("status") == "NOT_PROVIDED":
+            liveness_errors.append("DATA_SOURCES_MISSING")
+    if ready_errors or liveness_errors:
+        return error_result(ready_errors + liveness_errors, groups)
+    observed_faults = ready_triggers | liveness_triggers
+
     hard = hard_error_probe
     spend_summary, spend_triggers, spend_errors, spend_alerts = spend_reconciliation(payload)
     if rollout > 0 and spend_summary.get("status") == "NOT_PROVIDED":
@@ -845,7 +1247,7 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     # observed faults, not sampled ratios, and one is already one too many.
     sustain = sustain_state(payload)
     sustained, sustain_summary = apply_sustain(threshold_triggers, sustain)
-    triggers = hard | sustained | spend_triggers
+    triggers = hard | sustained | spend_triggers | observed_faults
     reason_codes = sorted(triggers)
     if triggers:
         if phase in ROLLBACK_PHASES:
@@ -911,13 +1313,33 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         "comparison_mode": mode,
         "thresholds": {
             **THRESHOLDS,
-            "minimum_sample": MIN_SAMPLE,
-            "minimum_p95_sample": MIN_P95_SAMPLE,
-            "minimum_p99_sample": MIN_P99_SAMPLE,
+            "minimum_five_xx_delta_sample": MIN_FIVE_XX_SAMPLE,
+            # Floors for the latency READINGS, named so nobody reads them as gate
+            # state.  `latency_observed_only` says the same thing in one field for
+            # anyone diffing this block against the pre-trim payload.
+            "p95_reading_floor": MIN_P95_SAMPLE,
+            "p99_reading_floor": MIN_P99_SAMPLE,
+            "latency_observed_only": LATENCY_OBSERVED_ONLY,
             "sustain_windows": SUSTAIN_WINDOWS,
             "absolute_five_xx_rate": ABS_FIVE_XX_RATE,
             "minimum_absolute_five_xx_sample": MIN_ABS_FIVE_XX_SAMPLE,
+            "minimum_absolute_five_xx_events": MIN_ABS_FIVE_XX_EVENTS,
             "absolute_sustain_windows": ABS_SUSTAIN_WINDOWS,
+            # Kept in the block so the depth and the demoted veto are read
+            # together: the depth is now the whole mechanism.
+            "shared_fate_minimum_sample": SHARED_FATE_MIN_SAMPLE,
+            "shared_fate_observed_only": True,
+            "user_failure_rate": MAX_USER_FAILURE_RATE,
+            "minimum_user_failure_events": MIN_USER_FAILURE_EVENTS,
+            # The rate above is taken over 5xx + these codes only.  Emitted so a
+            # reader can tell which population a `failure_rate` in the same payload
+            # was measured on -- before 2026-09-20 it was every 4xx, and the two
+            # numbers are not comparable.
+            "user_failure_statuses": ["5xx"] + sorted(PROXY_EMITTED_CLIENT_STATUSES),
+            "user_failure_sustain_windows": USER_FAILURE_SUSTAIN_WINDOWS,
+            # Alert-only line for caller-side 4xx (499/405/400/401/403).
+            "client_error_rate": MAX_USER_CLIENT_ERROR_RATE,
+            "maximum_source_silence_seconds": MAX_SOURCE_SILENCE_SECONDS,
             "latency_excluded_statuses": sorted(LATENCY_EXCLUDED_STATUSES),
             "minimum_latency_window_minutes": MIN_LATENCY_WINDOW_MINUTES,
             # None means the percentiles came from the five-minute live window and
@@ -927,6 +1349,15 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         },
         # Carried into the next cycle's input so a breach can be seen to repeat.
         "sustain": sustain_summary,
+        # Always present, whether or not anything triggered.  `reason_codes` below
+        # carries alerts ONLY when nothing triggered, so before this field existed
+        # every alert vanished from the payload at exactly the moment a human
+        # started reading it.  That was tolerable while the shared-fate cohort could
+        # veto -- suppression was visible in the action itself -- and stopped being
+        # tolerable when it was demoted to an attribution hint: the hint is now the
+        # only place the payload says "both cohorts are equally bad, this is
+        # probably upstream", and it was being dropped from every rollback.
+        "alerts": sorted(alerts),
         "dispatcher_recommendation": {
             "action": action,
             "reason_codes": reason_codes,
@@ -935,6 +1366,9 @@ def run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         "groups": groups,
         "comparisons": comparisons,
         "absolute_five_xx": abs_summary,
+        "user_facing_failures": user_summary,
+        "readiness": ready_summary,
+        "data_liveness": liveness_summary,
         "spend_reconciliation": spend_summary,
         "backend_health": payload.get("backend_health", {}),
         "errors": sorted(set(errors)),

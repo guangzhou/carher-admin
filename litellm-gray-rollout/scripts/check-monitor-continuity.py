@@ -9,11 +9,23 @@ window is indistinguishable from a healthy one at ramp time. That is the empty
 data column the diagnosis discipline forbids.
 
 So this tool reads the append-only ledger written by gray-monitor-cycle.sh and
-answers one question with data: between --window-start and now, was there ever
-a gap longer than the approved cycle interval allows? It emits gate evidence in
-the shape require_gate_evidence() consumes, and returns 1 on FAIL.
+answers two questions with data about the span between --window-start and now:
 
-It never talks to the cluster and never mutates routing state.
+  1. was there ever a gap longer than the approved cycle interval allows?
+  2. were there *enough* cycles for the deepest sustain leg to be able to fire?
+
+Question 2 exists because of what the 2026-09-14 run actually did. Measured from
+the heartbeat ledger, the 5% / 10% / 50% steps ran 2 monitor cycles each, while
+metrics.py requires ABS_SUSTAIN_WINDOWS = 4 consecutive breaching windows before
+the absolute 5xx stop-loss fires. In three of five ramp steps that leg was
+physically incapable of firing -- and this gate was green for all of them,
+because it only ever compared *intervals* and never the *count*. A gap check
+cannot see a window that is merely too short: two cycles 5 minutes apart have no
+gap at all. A stop-loss that cannot fire is the same shape as one that fired and
+found nothing, which is exactly the empty data column the discipline forbids.
+
+It emits gate evidence in the shape require_gate_evidence() consumes, and
+returns 1 on FAIL. It never talks to the cluster and never mutates routing state.
 """
 
 from __future__ import annotations
@@ -46,6 +58,14 @@ RECORD_KEYS = {
     "evidence",
 }
 MAX_CLOCK_SKEW = dt.timedelta(minutes=1)
+
+# How many completed cycles a ramp step must accumulate before it may claim the
+# window was observed. 4 == metrics.py's ABS_SUSTAIN_WINDOWS: the absolute 5xx
+# stop-loss leg needs 4 consecutive breaching windows, so a step that dwells for
+# fewer than 4 cycles has never armed it. Raising ABS_SUSTAIN_WINDOWS without
+# raising this default silently disarms that leg again -- the coupling is
+# arithmetic, and a comment is not a gate, so keep them equal.
+DEFAULT_MIN_CYCLES = 4
 
 
 def fail(message: str) -> NoReturn:
@@ -116,6 +136,8 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         fail("--cycle-interval-seconds must be positive")
     if args.max_missed_cycles < 0:
         fail("--max-missed-cycles must not be negative")
+    if args.min_cycles < 1:
+        fail("--min-cycles must be at least 1")
 
     allowed = dt.timedelta(
         seconds=args.cycle_interval_seconds * (1 + args.max_missed_cycles)
@@ -156,6 +178,11 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     failed_cycles = [
         item["evidence"] for item in in_window if item["metrics_status"] != "PASS"
     ]
+    # A window with cycles but too few of them: no gap, nothing failed, and the
+    # deepest sustain leg still never had the consecutive windows it needs. The
+    # empty case is already NO_CYCLES_IN_WINDOW, so this stays disjoint from it.
+    if in_window and len(in_window) < args.min_cycles:
+        errors.append("INSUFFICIENT_CYCLES")
     if gaps:
         errors.append("MONITORING_GAP")
     if foreign:
@@ -178,6 +205,8 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "max_missed_cycles": args.max_missed_cycles,
         "max_allowed_gap_seconds": int(allowed.total_seconds()),
         "cycles_in_window": len(in_window),
+        "min_cycles": args.min_cycles,
+        "min_observation_seconds": args.min_cycles * args.cycle_interval_seconds,
         "last_cycle_at": previous.isoformat().replace("+00:00", "Z"),
         "gaps": gaps,
         "failed_cycles": failed_cycles,
@@ -236,6 +265,15 @@ def main() -> int:
         type=int,
         default=1,
         help="how many consecutive cycles may be missed before the window is unobserved",
+    )
+    parser.add_argument(
+        "--min-cycles",
+        type=int,
+        default=DEFAULT_MIN_CYCLES,
+        help=(
+            "minimum completed cycles this window must contain; must stay equal to "
+            "metrics.py's ABS_SUSTAIN_WINDOWS, or the deepest stop-loss leg cannot fire"
+        ),
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

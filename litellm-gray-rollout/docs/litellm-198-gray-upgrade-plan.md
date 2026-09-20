@@ -69,7 +69,7 @@
 | `litellm-gray-rollout/scripts/gray-convergence-abort.sh` | prod 离线阶段把全部新流量切 guarded-old bridge，完成后写 `aborted` |
 | `litellm-gray-rollout/scripts/gray-auto-dispatch.sh` | 指标止损唯一入口；按 phase 和后端健康选择 rollback、保持 gray 或 abort，绝不由监控脚本直接改路由 |
 | `litellm-gray-rollout/scripts/gray-monitor-cycle.sh` | 单次 fail-closed 监控周期：消费冻结 metrics 输入，先原子保存结构化结果，再调用 dispatcher；成功后向 `monitor-heartbeat.jsonl` 追加一条心跳；cron/systemd 频率与采集命令由执行单冻结 |
-| `litellm-gray-rollout/scripts/check-monitor-continuity.py` | 放量前的 deadman gate：从心跳账本证明观察窗口内没有漏过周期，输出 `split_monitor_continuity` gate 证据，有缺口就 fail-closed |
+| `litellm-gray-rollout/scripts/check-monitor-continuity.py` | 放量前的 deadman gate：从心跳账本证明观察窗口内**既没漏过周期、周期数也够最深那条止损腿武装**（`--min-cycles` 默认 4 == `metrics.py` 的 `ABS_SUSTAIN_WINDOWS`），输出 `split_monitor_continuity` gate 证据，缺口或周期不够都 fail-closed |
 | `litellm-gray-rollout/scripts/render-production-nginx.py` | 从审核冻结的完整 live nginx 模板与指定 generation 渲染真实生产候选；安全嵌入 split 规则，原子替换候选文件 |
 | `litellm-gray-rollout/scripts/collect-runtime.py` | 把同批次 callback/API surface/30402/acct/Redis/scheduler/mutation 快照组装为带来源时间与 checksum 的 runtime evidence |
 | `litellm-gray-rollout/scripts/audit-runtime.py` | 生成 callback/patch、API surface、30402 旁路和 acct/Redis/SpendLogs 脱敏审计快照 |
@@ -643,10 +643,13 @@ python3 litellm-gray-rollout/scripts/check-monitor-continuity.py \
   --config-checksum "$GRAY_CONFIG_CHECKSUM" \
   --window-start '<上一次放量的 UTC 时间戳>' \
   --cycle-interval-seconds '<执行单冻结的调度间隔>' \
+  --min-cycles 4 \
   --output "$GRAY_GATE_EVIDENCE_DIR/split_monitor_continuity.json"
 ```
 
-FAIL 条件：任一相邻缺口 > `间隔 ×(1+max-missed-cycles)`（默认允许漏 1 次）、窗口内零周期、心跳 run_id 非本次 run、窗口内存在 `metrics_status=FAIL` 的周期。补救只有一条路——**修好监控、重新观察一个完整窗口**；调大 `--max-missed-cycles` 把缺口盖过去等于伪造观察记录，禁止。
+FAIL 条件：任一相邻缺口 > `间隔 ×(1+max-missed-cycles)`（默认允许漏 1 次）、窗口内零周期（`NO_CYCLES_IN_WINDOW`）、**窗口内周期数 < `--min-cycles`（`INSUFFICIENT_CYCLES`）**、心跳 run_id 非本次 run、窗口内存在 `metrics_status=FAIL` 的周期。补救只有一条路——**修好监控、重新观察一个完整窗口**；调大 `--max-missed-cycles` 把缺口盖过去等于伪造观察记录，禁止。
+
+**`--min-cycles` 这条腿为什么必须存在**：缺口检查看不见"窗口太短"这个形状——相隔 5 分钟的两个周期没有任何缺口。而 `metrics.py` 的 `SUSTAIN_DEPTH["FIVE_XX_ABSOLUTE"] = ABS_SUSTAIN_WINDOWS = 4`，绝对 5xx 止损腿要连续 4 个越界窗口才会响。2026-09-14 那轮实测：5% / 10% / 50% 三档各只停了 **2 个周期**，这条腿在三档里物理上不可能响，而这个 gate 当时三档全绿。"止损腿没武装"和"止损腿响过但没发现问题"在证据上完全同形，正是纪律禁止的空数据栏。所以 `--min-cycles` 默认值必须恒等于 `ABS_SUSTAIN_WINDOWS`——这是算术耦合，注释拦不住下一个人，`tests/test_litellm_gray_progress.py::test_min_cycles_equals_absolute_sustain_depth` 会在任一侧漂移时报红。
 
 - `normal_gray` 且 prod 完整健康：dispatcher 调用第 7 节 `litellm-gray-rollout/scripts/gray-global-rollback.sh`；若 hard error 已触发但 `backend_health.prod != true`，只输出 hard alert 并冻结自动变更，绝不把全量流量切到未验证 prod。
 - `convergence_ready` 且 prod 仍完整健康：dispatcher 也可普通回滚，但必须退出 convergence mode、清比例并迁移 force-gray 后写 `rolled_back`。
@@ -686,7 +689,21 @@ litellm-gray-rollout/scripts/collect-metrics.py \
 
 ### 3.7 容量（50%/100% 前必做）
 
-gray 灰度期 2 Pod 仅够 ~10%。升 50%/100% 前**按实际 QPS/CPU/内存/并发 SSE 计算**，扩到与 prod 等效（≥4 Pod）。否则版本风险与容量风险混淆，p95 变化无法归因。同时检查：node 反亲和（gray 两 Pod 不落同一故障域）、DB 连接池余量。
+gray 灰度期 2 Pod 仅够 ~10%。升 50%/100% 前必须扩到与 prod 等效（≥4 Pod）。否则版本风险与容量风险混淆，p95 变化无法归因。同时检查：node 反亲和（gray 两 Pod 不落同一故障域）、DB 连接池余量。
+
+「按实际 QPS 计算」这句话 2026-09-20 之前是**手算**，而 `gray-split-update.sh` 在
+`>= 50%` 上要的那份 `split_capacity` 证据**没有任何生产者**——文件是手写的，门禁只校验
+了形状。现在由 `scripts/check-split-capacity.py` 量（手册 6.2.2）：
+
+- **尺子是 upstream-秒/秒/ready 容器，不是 QPS。** 两者在本系统上对不上：2026-09-18
+  那个窗口 canary 承了 21.4% 的请求、44.9% 的工作量，因为两池 class 组成不同，一次
+  `responses` 抵好几次 `chat`。这个量同时就是并发（Little 定律），也就是 worker 池真正
+  封顶的东西。
+- **ready 容器数，不是 Pod 数 / replicas**：副本数 0 的 Deployment 照样 `Available: True`。
+- **单容器上限是运行单输入，工具里没有默认值**：容器扛不住的那个点不把它推到那儿量不
+  出来，而写死一个机队常数就是 `llm-stab-scrape-down` 那个字面量 `5`——改一次架构就不再
+  成立且永远不会红。上限低于车道**已经在演示**的吞吐时报 `CEILING_BELOW_DEMONSTRATED`，
+  当作错的输入而不是容量结论。
 
 PodDisruptionBudget 要按实际存在的对象查，本 chart **不渲染任何 PDB**，所以不存在“gray 自己的 PDB”：
 

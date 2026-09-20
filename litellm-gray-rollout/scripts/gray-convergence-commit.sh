@@ -8,6 +8,15 @@ lock_acquire
 load_state
 [[ "$STATE_PHASE" == "prod_verified" ]] || die "convergence commit requires prod_verified"
 [[ -z "$(map_keys "$(active_dir)/force-prod.map")" ]] || die "incident force-prod must be empty"
+# The last forward step. Committing an unbound run would make the whole run's
+# audit trail unable to say which build the users were served.
+#
+# Named release, not merely "something is pinned": this is the step that hands
+# every user to the prod release, so the gate belongs immediately in front of the
+# irreversible action rather than only at the phase transition before it. The
+# phase check would already have caught an unpinned prod release, but a gate on
+# the step that cannot be undone must not depend on an earlier step having run.
+require_pinned_release "$GRAY_PROD_RELEASE" "convergence commit"
 require_gate_evidence convergence_commit GRAY_PROD_HEALTHY
 stage_from_active
 archive="$GRAY_ROOT/force-gray-archive-${STATE_RUN_ID}-${STATE_GENERATION}-$(date -u +%Y%m%dT%H%M%SZ)-$$.sids"

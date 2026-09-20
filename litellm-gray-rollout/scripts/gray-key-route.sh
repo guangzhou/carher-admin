@@ -36,6 +36,34 @@ case "$ACTION" in
     lock_acquire
     load_state
     [[ "$STATE_PHASE" == "normal_gray" && "$STATE_FROZEN" == "0" ]] || die "key routing is frozen in phase=$STATE_PHASE"
+    # Which direction does this action move a key? Everything that can put a key
+    # ON the new build is an escalation and is gated like a ramp step; everything
+    # that moves a key OFF it is de-escalation and must never be gated, because
+    # that is the incident path and a blocked incident path is worse than the hole
+    # it would close.
+    #
+    # `force-gray` routes to the gray pool INDEPENDENTLY of split (see
+    # route_model.py evaluate(): force_gray is matched before bucket_for()), so a
+    # named-key pilot at split=0 is already real users on the new build. Until
+    # 2026-09-21 this script had neither a workload binding nor a gate, while
+    # require_workload_binding only guarded split > 0 -- so ring ④, which carried
+    # the FIRST production traffic and dwelled 84.8h last run, was the one ring
+    # where nothing checked which build was running.
+    #
+    # `remove` de-escalates out of force-gray, but it also drops protected-prod,
+    # and with a live split a formerly protected key then falls to bucket_for()
+    # and can land on gray. That is an escalation in everything but name, so it
+    # binds whenever split > 0 -- and stays free at split=0, where every bucket
+    # is prod and the action cannot expose anyone.
+    case "$ACTION" in
+      force-gray)
+        require_workload_binding "routing a key to the gray build"
+        require_gate_evidence key_pilot_entry
+        ;;
+      remove)
+        [[ "$STATE_SPLIT" == "0" ]] || require_workload_binding "removing a key override while split=$STATE_SPLIT is live"
+        ;;
+    esac
     IFS= read -r -s key || true
     printf '\n' >&2
     valid_key "$key" || die "invalid key format"

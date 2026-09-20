@@ -208,9 +208,16 @@ def main():
     args = sys.argv[1:]
     rep = int(args[args.index("--repeat") + 1]) if "--repeat" in args else 1
     nkeys = int(args[args.index("--keys") + 1]) if "--keys" in args else 1
-    names = POOL_NAMES if "--all" in args else [a for a in args if a.startswith("cr-g-")]
+    # 09-20：白名单从「只认 cr-g-」放宽到「cr-g-* 或 cursor-g-*」。
+    # 起因：想查 cursor-g-* 那条线的死活，被这里挡住 → 我手搓了一把探针，
+    # 结果 body 少了 `stream:True` + `tools`（cursor 线型必需，栈顶就是 ToolCompiler.formatPrompt），
+    # 一屏 500 里连**已证绿**的 cr-g 池名也是 500 —— 典型的坏尺子形状，白烧一轮诊断。
+    # 教训不是"记得加 tools"，是**别为了绕过一个参数检查去另写一把尺子**：
+    # 放开这一行比重写 body 安全得多。
+    names = POOL_NAMES if "--all" in args else [
+        a for a in args if a.startswith("cr-g-") or a.startswith("cursor-g-")]
     if not names:
-        print("要打哪个名字？给 cr-g-xxx 或 --all")
+        print("要打哪个名字？给 cr-g-xxx / cursor-g-xxx 或 --all")
         return 2
 
     since = int(time.time()) - 5

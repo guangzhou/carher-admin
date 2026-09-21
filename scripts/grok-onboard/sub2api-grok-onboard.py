@@ -107,6 +107,7 @@ a deploy.  D1's idle legs do NOT set it -- idleness is ambiguous by construction
 (see the three cases above) and an ambiguous signal must not fail a gate.
 """
 import argparse
+import atexit
 import datetime
 import json
 import os
@@ -114,6 +115,7 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -127,7 +129,37 @@ GROK_ENTRIES = ["sa-grok-4.5", "sa-grok-4.6", "sa-grok-4.20"]
 _helper = open(os.path.join(HERE, "sub2api_admin.py")).read().rsplit("if __name__", 1)[0]
 
 
+def _ensure_pw():
+    """Fetch the admin password ourselves, so the caller only passes a path.
+
+    Doing it by hand is three steps (kubectl get secret / S2A_PW_FILE= / rm)
+    that are identical every single time, and forgetting the env var fails
+    inside the helper's *import* as `assert _st == 200` -- it reads as a login
+    failure, not as a missing variable, which is the wrong thing to go debug.
+
+    An explicit S2A_PW_FILE that exists still wins, so the park-patrol cron
+    (which stages its own /run/.s2apw-patrol) keeps its current behaviour and
+    never pays for a kubectl call.
+    """
+    pwf = os.environ.get("S2A_PW_FILE")
+    if pwf and os.path.exists(pwf):
+        return
+    pw = sh("sudo kubectl -n %s get secret sub2api-secrets "
+            "-o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d" % DEV_NS).strip()
+    if not pw:
+        sys.exit("secret %s/sub2api-secrets key ADMIN_PASSWORD is empty -- "
+                 "cannot log in" % DEV_NS)
+    d = "/run" if os.access("/run", os.W_OK) else None
+    fd, tmp = tempfile.mkstemp(prefix=".s2apw-", dir=d)
+    os.fchmod(fd, 0o600)          # before the write, not after
+    os.write(fd, pw.encode())
+    os.close(fd)
+    os.environ["S2A_PW_FILE"] = tmp
+    atexit.register(lambda: os.path.exists(tmp) and os.unlink(tmp))
+
+
 def _load_helper():
+    _ensure_pw()
     ns = {}
     exec(compile(_helper, "sub2api_admin.py", "exec"), ns)
     return ns["call"], ns["TOK"]
@@ -384,16 +416,35 @@ def parse_creds(path):
     index) because the middle fields vary; anything that is not JWT-ish is
     refused loudly.  A silently dropped line reads as "that account failed"
     several steps later, which is the wrong direction.
+
+    Three things the real 卡密导出.txt export has that a chat paste does not
+    (2026-09-21, all three were hard failures before):
+      * a UTF-8 BOM        -> read with utf-8-sig, else field 1 is "\\ufeff<email>"
+      * a header line + a blank line -> skipped, but ONLY when the line has no
+        `@` in it; a line that looks like an account is never skipped quietly.
+      * **五个** dashes, not four.  Splitting on a literal "----" leaves the
+        separator's 5th dash glued to the front of every later field, so the
+        password becomes "-N5..." and the SSO "-eyJ...".  The SSO one is caught
+        by the eyJ check, but the password would have been stored wrong and
+        silently.  Split on a RUN of dashes: `-{4,}`.
     """
     out = []
-    for lineno, raw in enumerate(open(path), 1):
+    skipped = []
+    try:
+        lines = open(path, encoding="utf-8-sig").read().splitlines()
+    except UnicodeDecodeError:
+        lines = open(path, encoding="gbk").read().splitlines()
+    for lineno, raw in enumerate(lines, 1):
         raw = raw.strip()
         if not raw or raw.startswith("#"):
             continue
-        f = raw.split("----")
+        f = re.split(r"-{4,}", raw)
         if len(f) < 2:
-            sys.exit("line %d: expected `----`-separated fields, got %d"
-                     % (lineno, len(f)))
+            if "@" in raw:
+                sys.exit("line %d: has an email but no `----` separator -- "
+                         "refusing to guess" % lineno)
+            skipped.append((lineno, raw[:30]))   # header / title / footer
+            continue
         name = f[0].strip()
         if len(f) >= 8:
             userid, sso = f[6].strip(), f[7].strip()
@@ -409,8 +460,16 @@ def parse_creds(path):
         if not name:
             sys.exit("line %d: empty account name (field 1)" % lineno)
         out.append({"name": name, "userid": userid, "sso": sso})
+    for lineno, text in skipped:
+        # Loud, not silent: if a real account line ever lands here because its
+        # separator was mangled, this is the only place it shows up.
+        print("   line %d ignored (no separator, no email): %r" % (lineno, text))
     if not out:
         sys.exit("no credential lines found in %s" % path)
+    dupes = sorted({c["name"] for c in out
+                    if [x["name"] for x in out].count(c["name"]) > 1})
+    if dupes:
+        sys.exit("duplicate account names in %s: %s" % (path, ", ".join(dupes)))
     return out
 
 
@@ -1195,6 +1254,13 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    # `<script> /path/to/creds.txt` == `<script> onboard /path/to/creds.txt`.
+    # Only when the first argument is an existing file, so a typo'd subcommand
+    # still gets argparse's error instead of being silently read as a path.
+    argv = sys.argv[1:]
+    if argv and os.path.isfile(argv[0]):
+        argv.insert(0, "onboard")
+
     p = sub.add_parser("onboard",
                        help="ONE COMMAND: creds file -> health baseline, "
                             "verify, add, x.ai verdict on the new legs, "
@@ -1255,7 +1321,7 @@ def main():
     p.add_argument("--minutes", type=int, default=15)
     p.set_defaults(fn=cmd_regress)
 
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     sys.exit(a.fn(a) or 0)
 
 

@@ -66,6 +66,21 @@ def _ensure_stubs():
 
         exc_mod.ModifyResponseException = ModifyResponseException
 
+    # ③ 软拦截：patch 层判 type(e).__name__ == "BudgetExceededError"，pre_call
+    #   非可 mock 分支 raise litellm.BudgetExceededError(current_cost=, max_budget=)。
+    if not hasattr(litellm, "BudgetExceededError"):
+
+        class BudgetExceededError(Exception):
+            def __init__(self, current_cost=None, max_budget=None, message="", **kw):
+                self.current_cost = current_cost
+                self.max_budget = max_budget
+                self.message = message or "Budget has been exceeded"
+                super().__init__(self.message)
+
+        litellm.BudgetExceededError = BudgetExceededError
+        if not hasattr(exc_mod, "BudgetExceededError"):
+            exc_mod.BudgetExceededError = BudgetExceededError
+
     if "litellm.litellm_core_utils.litellm_logging" not in sys.modules:
         core_utils = types.ModuleType("litellm.litellm_core_utils")
         logging_mod = types.ModuleType("litellm.litellm_core_utils.litellm_logging")
@@ -128,6 +143,74 @@ def _ensure_stubs():
         litellm.proxy = proxy_mod
         sys.modules["litellm.proxy"] = proxy_mod
         sys.modules["litellm.proxy.common_request_processing"] = crp
+
+    # codex 停机分支的桩:_codex_usage_limit_exc 抛 ProxyException(带 headers)。
+    if "litellm.proxy._types" not in sys.modules:
+        proxy_mod = sys.modules.get("litellm.proxy")
+        if proxy_mod is None:
+            proxy_mod = types.ModuleType("litellm.proxy")
+            litellm.proxy = proxy_mod
+            sys.modules["litellm.proxy"] = proxy_mod
+        types_mod = types.ModuleType("litellm.proxy._types")
+
+        class ProxyException(Exception):
+            def __init__(self, message, type, param, code=None, headers=None,
+                         openai_code=None, provider_specific_fields=None):
+                self.message = str(message)
+                super().__init__(self.message)
+                self.type = type
+                self.param = param
+                self.code = str(code)
+                self.headers = headers or {}
+                self.openai_code = openai_code or code
+                self.provider_specific_fields = provider_specific_fields
+
+        types_mod.ProxyException = ProxyException
+        proxy_mod._types = types_mod
+        sys.modules["litellm.proxy._types"] = types_mod
+
+    # ③ 第二道预算检查的桩:_PROXY_MaxBudgetLimiter(budget_notice 模块加载时
+    #   会 patch 它的 async_pre_call_hook)。原始实现:超预算抛 BudgetExceededError。
+    if "litellm.proxy.hooks.max_budget_limiter" not in sys.modules:
+        proxy_mod = sys.modules["litellm.proxy"]
+        hooks_mod = types.ModuleType("litellm.proxy.hooks")
+        mbl = types.ModuleType("litellm.proxy.hooks.max_budget_limiter")
+
+        class _PROXY_MaxBudgetLimiter:
+            async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
+                spend = float(getattr(user_api_key_dict, "spend", 0) or 0)
+                mx = getattr(user_api_key_dict, "max_budget", None)
+                if mx and spend > mx:
+                    raise litellm.BudgetExceededError(current_cost=spend, max_budget=mx)
+                return None
+
+        mbl._PROXY_MaxBudgetLimiter = _PROXY_MaxBudgetLimiter
+        hooks_mod.max_budget_limiter = mbl
+        proxy_mod.hooks = hooks_mod
+        sys.modules["litellm.proxy.hooks"] = hooks_mod
+        sys.modules["litellm.proxy.hooks.max_budget_limiter"] = mbl
+
+    # ③ 第三道预算闸门的桩:capacity patch 的预算预留层。
+    if "litellm.proxy.spend_tracking.budget_reservation" not in sys.modules:
+        proxy_mod = sys.modules["litellm.proxy"]
+        st_mod = types.ModuleType("litellm.proxy.spend_tracking")
+        br = types.ModuleType("litellm.proxy.spend_tracking.budget_reservation")
+
+        async def reserve_budget_for_request(**kwargs):
+            vt = kwargs.get("valid_token")
+            spend = float(getattr(vt, "spend", 0) or 0)
+            mx = getattr(vt, "max_budget", None)
+            if mx and spend + 0.16 > mx:  # 模拟含预估成本
+                raise litellm.BudgetExceededError(
+                    current_cost=spend + 0.16, max_budget=mx,
+                    message=f"Budget has been exceeded! Key=x Current cost: {spend+0.16}, Max budget: {mx}")
+            return {"reserved_cost": 0.16, "entries": [], "finalized": False}
+
+        br.reserve_budget_for_request = reserve_budget_for_request
+        st_mod.budget_reservation = br
+        proxy_mod.spend_tracking = st_mod
+        sys.modules["litellm.proxy.spend_tracking"] = st_mod
+        sys.modules["litellm.proxy.spend_tracking.budget_reservation"] = br
 
 
 def _load():
@@ -489,6 +572,61 @@ class NonIterableGuardTest(unittest.TestCase):
         self.assertEqual(out, ["EV1:ResponsesAPIResponse", "EV2:done"])
 
 
+class ReasoningTokensBackfillTest(unittest.TestCase):
+    """mock usage 少 `reasoning_tokens` 会让 Codex 判 ResponseCompleted 解析失败,
+    整轮重试(WS 5 次 + 降 HTTP 再 5 次),同一张余额卡刷 12 遍。"""
+
+    @staticmethod
+    def _resp(details):
+        class _Usage:
+            pass
+
+        class ResponsesAPIResponse:
+            pass
+
+        u = _Usage()
+        u.output_tokens_details = details
+        r = ResponsesAPIResponse()
+        r.usage = u
+        return r
+
+    def test_empty_details_object_gets_zero(self):
+        class _Details:
+            reasoning_tokens = None
+
+        r = self._resp(_Details())
+        M._ensure_reasoning_tokens(r)
+        self.assertEqual(r.usage.output_tokens_details.reasoning_tokens, 0)
+
+    def test_existing_value_is_not_clobbered(self):
+        class _Details:
+            reasoning_tokens = 42
+
+        r = self._resp(_Details())
+        M._ensure_reasoning_tokens(r)
+        self.assertEqual(r.usage.output_tokens_details.reasoning_tokens, 42)
+
+    def test_dict_details_gets_zero(self):
+        r = self._resp({})
+        M._ensure_reasoning_tokens(r)
+        self.assertEqual(r.usage.output_tokens_details["reasoning_tokens"], 0)
+
+    def test_no_usage_is_a_noop(self):
+        class ResponsesAPIResponse:
+            pass
+
+        M._ensure_reasoning_tokens(ResponsesAPIResponse())  # 不抛即通过
+
+    def test_stream_guard_backfills_before_wrapping(self):
+        class _Details:
+            reasoning_tokens = None
+
+        r = self._resp(_Details())
+        out = _run_stream_raw(r, _Key(token="tok-g-2"))
+        self.assertEqual(out, ["EV1:ResponsesAPIResponse", "EV2:done"])
+        self.assertEqual(r.usage.output_tokens_details.reasoning_tokens, 0)
+
+
 def _run_stream_raw(response_obj, key):
     async def go():
         out = []
@@ -594,6 +732,535 @@ class UsageTextTest(unittest.TestCase):
         t = M._usage_text(key)
         self.assertIn("93%", t)
         self.assertIn("$5.00", t)
+
+
+# ------------------------------------------------ ③ 超预算软拦截成 200
+
+class OverBudgetSoftBlockTest(unittest.TestCase):
+    """patch 层吞 BudgetExceededError→打 mark→pre_call 出 200 友好文案。"""
+
+    def setUp(self):
+        _ensure_stubs()
+        M._OVER_BUDGET_MARKS.clear()
+
+    def tearDown(self):
+        M._OVER_BUDGET_MARKS.clear()
+
+    # ---- mark 生命周期 ----
+    def test_mark_set_take_persists(self):
+        M._mark_over_budget("tok-ob", 9.0, 5.0)
+        # 不 pop：同一 mark 覆盖预检+真实请求两跳，可重复取
+        self.assertEqual(M._take_over_budget_mark("tok-ob"), (9.0, 5.0))
+        self.assertEqual(M._take_over_budget_mark("tok-ob"), (9.0, 5.0))
+
+    def test_mark_clear(self):
+        M._mark_over_budget("tok-ob", 9.0, 5.0)
+        M._clear_over_budget_mark("tok-ob")
+        self.assertIsNone(M._take_over_budget_mark("tok-ob"))
+
+    def test_mark_ttl_expiry(self):
+        M._mark_over_budget("tok-ob", 9.0, 5.0)
+        # 手动把时间戳挪到 TTL 之外
+        ts, c, m = M._OVER_BUDGET_MARKS["tok-ob"]
+        M._OVER_BUDGET_MARKS["tok-ob"] = (ts - M._OVER_BUDGET_TTL - 1.0, c, m)
+        self.assertIsNone(M._take_over_budget_mark("tok-ob"))
+        self.assertNotIn("tok-ob", M._OVER_BUDGET_MARKS)
+
+    def test_take_missing_returns_none(self):
+        self.assertIsNone(M._take_over_budget_mark("nope"))
+
+    # ---- pre_call：mark 存在 → 200 友好文案 ----
+    def test_over_budget_chat_mock(self):
+        M._mark_over_budget("tok-default", 9.0, 5.0)
+        d = {"messages": [{"role": "user", "content": "帮我写个函数"}]}
+        out = _pre(d, "acompletion")
+        self.assertIn("额度已用完", out.get("mock_response", ""))
+        self.assertIn("$9.00", out["mock_response"])
+        self.assertIn("$5.00", out["mock_response"])
+
+    def test_over_budget_responses_mock(self):
+        M._mark_over_budget("tok-default", 9.0, 5.0)
+        out = _pre({"input": "继续"}, "aresponses")
+        self.assertIn("额度已用完", out.get("mock_response", ""))
+
+    def test_over_budget_anthropic_raises_modify(self):
+        from litellm.exceptions import ModifyResponseException
+
+        M._mark_over_budget("tok-default", 9.0, 5.0)
+        d = {"model": "gpt-x", "messages": [{"role": "user", "content": "hi"}]}
+        with self.assertRaises(ModifyResponseException) as ctx:
+            _pre(d, "aanthropic_messages")
+        self.assertIn("额度已用完", ctx.exception.message)
+
+    def test_over_budget_nonmockable_reraises(self):
+        import litellm
+
+        M._mark_over_budget("tok-default", 9.0, 5.0)
+        d = {"messages": [{"role": "user", "content": "hi"}]}
+        with self.assertRaises(litellm.BudgetExceededError):
+            _pre(d, "aembedding")
+
+    def test_over_budget_priority_over_quota_query(self):
+        """超预算优先级高于 /查余额：mark 在时即便发 /查余额也出「额度已用完」。"""
+        M._mark_over_budget("tok-default", 9.0, 5.0)
+        d = {"messages": [{"role": "user", "content": "/查余额"}]}
+        out = _pre(d, "acompletion")
+        self.assertIn("额度已用完", out.get("mock_response", ""))
+
+    def test_friendly_mock_disabled_ignores_mark(self):
+        M._mark_over_budget("tok-default", 9.0, 5.0)
+        d = {"messages": [{"role": "user", "content": "hi"}]}
+
+        def go():
+            return _pre(d, "acompletion")
+
+        out = _with_env({"BUDGET_FRIENDLY_MOCK_DISABLED": "1"}, go)
+        self.assertNotIn("mock_response", out)
+
+    def test_ungated_key_ignores_mark(self):
+        M._mark_over_budget("tok-other", 9.0, 5.0)
+        d = {"messages": [{"role": "user", "content": "hi"}]}
+        out = _pre(d, "acompletion", key=_Key(alias="other-user", token="tok-other"))
+        self.assertNotIn("mock_response", out)
+
+    # ---- patch wrapper：吞 429 / 打 mark / 清 mark ----
+    def _wrap_and_call(self, orig, key):
+        wrapped = M._make_budget_soft_wrapper(orig)
+        return _with_env(PREFIX_ENV, lambda: asyncio.run(wrapped(key)))
+
+    def test_wrapper_gated_over_budget_marks_and_swallows(self):
+        import litellm
+
+        async def orig(vt, *a, **k):
+            raise litellm.BudgetExceededError(current_cost=9.0, max_budget=5.0)
+
+        key = _Key(token="tok-w1")
+        res = self._wrap_and_call(orig, key)
+        self.assertIsNone(res)
+        self.assertEqual(M._take_over_budget_mark("tok-w1"), (9.0, 5.0))
+
+    def test_wrapper_success_clears_mark(self):
+        M._mark_over_budget("tok-w2", 9.0, 5.0)
+
+        async def orig(vt, *a, **k):
+            return "OK"
+
+        key = _Key(token="tok-w2")
+        res = self._wrap_and_call(orig, key)
+        self.assertEqual(res, "OK")
+        self.assertIsNone(M._take_over_budget_mark("tok-w2"))
+
+    def test_wrapper_ungated_reraises(self):
+        import litellm
+
+        async def orig(vt, *a, **k):
+            raise litellm.BudgetExceededError(current_cost=9.0, max_budget=5.0)
+
+        key = _Key(alias="other-user", token="tok-w3")
+        with self.assertRaises(litellm.BudgetExceededError):
+            self._wrap_and_call(orig, key)
+        self.assertIsNone(M._take_over_budget_mark("tok-w3"))
+
+    def test_wrapper_disabled_reraises(self):
+        import litellm
+
+        async def orig(vt, *a, **k):
+            raise litellm.BudgetExceededError(current_cost=9.0, max_budget=5.0)
+
+        key = _Key(token="tok-w4")
+        with self.assertRaises(litellm.BudgetExceededError):
+            _with_env({"BUDGET_FRIENDLY_MOCK_DISABLED": "1", **PREFIX_ENV},
+                      lambda: asyncio.run(M._make_budget_soft_wrapper(orig)(key)))
+        self.assertIsNone(M._take_over_budget_mark("tok-w4"))
+
+    def test_wrapper_non_budget_exception_propagates(self):
+        async def orig(vt, *a, **k):
+            raise ValueError("boom")
+
+        key = _Key(token="tok-w5")
+        with self.assertRaises(ValueError):
+            self._wrap_and_call(orig, key)
+
+    # ---- 第二道检查(_PROXY_MaxBudgetLimiter)的 patch ----
+    def test_limiter_patch_swallows_and_marks_gated(self):
+        from litellm.proxy.hooks.max_budget_limiter import _PROXY_MaxBudgetLimiter
+
+        self.assertTrue(getattr(
+            _PROXY_MaxBudgetLimiter.async_pre_call_hook, "_bn_budget_soft_patched", False))
+        inst = _PROXY_MaxBudgetLimiter()
+        key = _Key(spend=80.0, max_budget=70.0, token="tok-l1")
+        res = _with_env(PREFIX_ENV, lambda: asyncio.run(
+            inst.async_pre_call_hook(key, None, {}, _CallType("acompletion"))))
+        self.assertIsNone(res)
+        self.assertEqual(M._take_over_budget_mark("tok-l1"), (80.0, 70.0))
+
+    def test_limiter_patch_reraises_ungated(self):
+        import litellm
+
+        from litellm.proxy.hooks.max_budget_limiter import _PROXY_MaxBudgetLimiter
+
+        inst = _PROXY_MaxBudgetLimiter()
+        key = _Key(alias="other-user", spend=80.0, max_budget=70.0, token="tok-l2")
+        with self.assertRaises(litellm.BudgetExceededError):
+            _with_env(PREFIX_ENV, lambda: asyncio.run(
+                inst.async_pre_call_hook(key, None, {}, _CallType("acompletion"))))
+        self.assertIsNone(M._take_over_budget_mark("tok-l2"))
+
+    def test_limiter_patch_under_budget_passthrough(self):
+        from litellm.proxy.hooks.max_budget_limiter import _PROXY_MaxBudgetLimiter
+
+        inst = _PROXY_MaxBudgetLimiter()
+        key = _Key(spend=10.0, max_budget=70.0, token="tok-l3")
+        res = _with_env(PREFIX_ENV, lambda: asyncio.run(
+            inst.async_pre_call_hook(key, None, {}, _CallType("acompletion"))))
+        self.assertIsNone(res)
+        self.assertIsNone(M._take_over_budget_mark("tok-l3"))
+
+    # ---- 第三道闸门(capacity patch 预算预留)的 patch ----
+    def test_reservation_patch_swallows_and_marks_gated(self):
+        from litellm.proxy.spend_tracking.budget_reservation import (
+            reserve_budget_for_request,
+        )
+
+        self.assertTrue(getattr(
+            reserve_budget_for_request, "_bn_budget_soft_patched", False))
+        key = _Key(spend=75.0, max_budget=70.0, token="tok-r1")
+        res = _with_env(PREFIX_ENV, lambda: asyncio.run(
+            reserve_budget_for_request(valid_token=key, request_body={}, route="/v1/chat/completions")))
+        self.assertIsNone(res)
+        cost, mx = M._take_over_budget_mark("tok-r1")
+        self.assertAlmostEqual(cost, 75.16)
+        self.assertEqual(mx, 70.0)
+
+    def test_reservation_patch_reraises_ungated(self):
+        import litellm
+
+        from litellm.proxy.spend_tracking.budget_reservation import (
+            reserve_budget_for_request,
+        )
+
+        key = _Key(alias="other-user", spend=75.0, max_budget=70.0, token="tok-r2")
+        with self.assertRaises(litellm.BudgetExceededError):
+            _with_env(PREFIX_ENV, lambda: asyncio.run(
+                reserve_budget_for_request(valid_token=key, request_body={}, route="/x")))
+        self.assertIsNone(M._take_over_budget_mark("tok-r2"))
+
+    def test_reservation_patch_under_budget_passthrough(self):
+        from litellm.proxy.spend_tracking.budget_reservation import (
+            reserve_budget_for_request,
+        )
+
+        key = _Key(spend=10.0, max_budget=70.0, token="tok-r3")
+        res = _with_env(PREFIX_ENV, lambda: asyncio.run(
+            reserve_budget_for_request(valid_token=key, request_body={}, route="/x")))
+        self.assertIsNotNone(res)
+        self.assertIsNone(M._take_over_budget_mark("tok-r3"))
+
+
+# ------------------------------------------------ ④ 模型系列日额度
+
+FAM_ENV = {**PREFIX_ENV, "BUDGET_FAMILY_ENABLED": "1"}
+
+
+class FamilyBudgetTest(unittest.TestCase):
+    def setUp(self):
+        _ensure_stubs()
+        M._fam_local.clear()
+        M._OVER_BUDGET_MARKS.clear()
+
+    def tearDown(self):
+        M._fam_local.clear()
+
+    # ---- 匹配器 ----
+    def test_family_matcher(self):
+        for m in ("gpt-5.3-codex", "chatgpt-gpt-5.3-codex", "cursor-gpt-5.3-codex",
+                  "zerokey-pool-gpt-5.3", "zerokey-pool-gpt-5.3-mini",
+                  "wangsu7-gpt-5.3-codex", "openrouter-gpt-5.3-codex"):
+            self.assertEqual(M._family_of(m)[0], "gpt53", m)
+        for m in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4-mini",
+                  "chatgpt-gpt-5.6-luna", "claude-gpt-5.6-sol", "sa-gpt-image-1",
+                  # 08-22 起非 gpt 也进 other 桶(共用 $500)
+                  "claude-sonnet-5", "deepseek-v4-flash", "glm-5.3"):
+            self.assertEqual(M._family_of(m)[0], "other", m)
+        self.assertIsNone(M._family_of(""), "empty model")
+
+    # ---- 限额来源 ----
+    def test_limit_default_env_metadata(self):
+        k = _Key()
+        self.assertEqual(M._family_limit("gpt53", k), 200.0)
+        self.assertEqual(M._family_limit("other", k), 500.0)
+        out = _with_env({"BUDGET_FAMILY_GPT53_USD": "50"},
+                        lambda: M._family_limit("gpt53", k))
+        self.assertEqual(out, 50.0)
+        k.metadata = {"budget_family_overrides": {"gpt53": 0.5}}
+        self.assertEqual(M._family_limit("gpt53", k), 0.5)
+
+    # ---- 记账（local 降级路径）----
+    def test_accounting_accumulates(self):
+        async def go():
+            await M._family_add_spend("tok-f1", "gpt53", 1.5)
+            await M._family_add_spend("tok-f1", "gpt53", 2.5)
+            return await M._family_get_spend("tok-f1", "gpt53")
+        self.assertEqual(asyncio.run(go()), 4.0)
+
+    def test_log_event_gated_and_family_routed(self):
+        slp = {"response_cost": 3.0, "model_group": "gpt-5.6-sol",
+               "metadata": {"user_api_key_alias": "claude-code-u1",
+                            "user_api_key_hash": "tok-f2"}}
+        def go():
+            return asyncio.run(M.budget_notice.async_log_success_event(
+                {"standard_logging_object": slp}, None, None, None))
+        _with_env(FAM_ENV, go)
+        async def rd():
+            return await M._family_get_spend("tok-f2", "other")
+        self.assertEqual(asyncio.run(rd()), 3.0)
+
+    def test_log_event_ungated_or_disabled_noop(self):
+        slp = {"response_cost": 3.0, "model_group": "gpt-5.6-sol",
+               "metadata": {"user_api_key_alias": "other-user",
+                            "user_api_key_hash": "tok-f3"}}
+        _with_env(FAM_ENV, lambda: asyncio.run(
+            M.budget_notice.async_log_success_event(
+                {"standard_logging_object": slp}, None, None, None)))
+        # 未启用 env 时 gated key 也不记
+        slp2 = {**slp, "metadata": {"user_api_key_alias": "claude-code-u1",
+                                    "user_api_key_hash": "tok-f4"}}
+        _with_env(PREFIX_ENV, lambda: asyncio.run(
+            M.budget_notice.async_log_success_event(
+                {"standard_logging_object": slp2}, None, None, None)))
+        async def rd():
+            return (await M._family_get_spend("tok-f3", "other"),
+                    await M._family_get_spend("tok-f4", "other"))
+        self.assertEqual(asyncio.run(rd()), (0.0, 0.0))
+
+    # ---- 执法 ----
+    def _pre_fam(self, data, call_type, key=None):
+        async def go():
+            return await M.budget_notice.async_pre_call_hook(
+                key or _Key(), None, data, _CallType(call_type))
+        return _with_env(FAM_ENV, lambda: asyncio.run(go()))
+
+    def _seed(self, token, fkey, amount):
+        M._fam_local[M._family_spend_key(fkey, token)] = amount
+
+    def test_family_block_chat_mock(self):
+        self._seed("tok-default", "gpt53", 250.0)
+        d = {"model": "gpt-5.3-codex",
+             "messages": [{"role": "user", "content": "写个函数"}]}
+        out = self._pre_fam(d, "acompletion")
+        self.assertIn("GPT-5.3 系列 额度已用完", out.get("mock_response", ""))
+        self.assertIn("$250.00", out["mock_response"])
+        self.assertIn("$200.00", out["mock_response"])
+        self.assertIn("不受影响", out["mock_response"])
+
+    def test_family_other_gpt_not_blocked_by_gpt53(self):
+        """5.3 桶爆了不影响其他 GPT 系列。"""
+        self._seed("tok-default", "gpt53", 250.0)
+        d = {"model": "gpt-5.6-sol",
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = self._pre_fam(d, "acompletion")
+        self.assertNotIn("mock_response", out)
+
+    def test_family_block_anthropic_raises(self):
+        from litellm.exceptions import ModifyResponseException
+
+        self._seed("tok-default", "other", 600.0)
+        d = {"model": "claude-gpt-5.6-sol",
+             "messages": [{"role": "user", "content": "hi"}]}
+        with self.assertRaises(ModifyResponseException) as ctx:
+            self._pre_fam(d, "aanthropic_messages")
+        self.assertIn("其他模型 额度已用完", ctx.exception.message)
+
+    def test_family_under_limit_passes(self):
+        self._seed("tok-default", "gpt53", 100.0)
+        d = {"model": "gpt-5.3-codex",
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = self._pre_fam(d, "acompletion")
+        self.assertNotIn("mock_response", out)
+
+    def test_family_nongpt_blocked_by_other_bucket(self):
+        """08-22 起 claude/deepseek 等非 gpt 也共用 other 桶。"""
+        self._seed("tok-default", "other", 600.0)
+        d = {"model": "claude-sonnet-5",
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = self._pre_fam(d, "acompletion")
+        self.assertIn("其他模型 额度已用完", out.get("mock_response", ""))
+
+    def test_family_gpt53_not_blocked_by_other_bucket(self):
+        self._seed("tok-default", "other", 600.0)
+        d = {"model": "gpt-5.3-codex",
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = self._pre_fam(d, "acompletion")
+        self.assertNotIn("mock_response", out)
+
+    def test_family_quota_query_bypasses_block(self):
+        """系列爆了 /查余额 仍可用（零上游），且文案带系列用量。"""
+        self._seed("tok-default", "gpt53", 250.0)
+        d = {"model": "gpt-5.3-codex",
+             "messages": [{"role": "user", "content": "/查余额"}]}
+        out = self._pre_fam(d, "acompletion")
+        self.assertIn("今日用量", out.get("mock_response", ""))
+        self.assertIn("系列额度", out["mock_response"])
+        self.assertIn("GPT-5.3 系列 $250.00/$200.00", out["mock_response"])
+
+    def test_family_disabled_by_default(self):
+        self._seed("tok-default", "gpt53", 250.0)
+        d = {"model": "gpt-5.3-codex",
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = _with_env(PREFIX_ENV, lambda: asyncio.run(
+            M.budget_notice.async_pre_call_hook(
+                _Key(), None, d, _CallType("acompletion"))))
+        self.assertNotIn("mock_response", out)
+
+    def test_family_metadata_override(self):
+        k = _Key()
+        k.metadata = {"budget_family_overrides": {"gpt53": 0.5}}
+        self._seed("tok-default", "gpt53", 0.6)
+        d = {"model": "gpt-5.3-codex",
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = self._pre_fam(d, "acompletion", key=k)
+        self.assertIn("额度已用完", out.get("mock_response", ""))
+
+    def test_family_ungated_key_untouched(self):
+        self._seed("tok-other", "gpt53", 999.0)
+        d = {"model": "gpt-5.3-codex",
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = self._pre_fam(d, "acompletion",
+                            key=_Key(alias="other-user", token="tok-other"))
+        self.assertNotIn("mock_response", out)
+
+
+class CodexStopTest(unittest.TestCase):
+    """codex goal 模式停机分支:超额时对 codex 客户端回 429 + usage_limit_reached +
+    x-codex-promo-message(ASCII),而非 200 mock。非 codex 客户端(Cursor 等)仍 200。
+
+    注:头是否真到 wire、codex 是否真退出 goal 循环,由 198 全链 T0 验证(scripts/
+    litellm-198-t0-fullchain.sh + 真 codex 二进制);本处只锁 raise 形状与 promo 内容。"""
+
+    def setUp(self):
+        _ensure_stubs()
+        M._fam_local.clear()
+        M._OVER_BUDGET_MARKS.clear()
+
+    def tearDown(self):
+        M._fam_local.clear()
+        M._OVER_BUDGET_MARKS.clear()
+
+    def _seed(self, token, fkey, amount):
+        M._fam_local[M._family_spend_key(fkey, token)] = amount
+
+    def _codex_data(self, model, where="proxy_server_request", ua="codex_exec/0.5.0"):
+        d = {"model": model, "messages": [{"role": "user", "content": "写个函数"}]}
+        d[where] = {"headers": {"user-agent": ua}}
+        return d
+
+    def _pre_fam(self, data, call_type, key=None, extra_env=None):
+        env = {**FAM_ENV, **(extra_env or {})}
+
+        async def go():
+            return await M.budget_notice.async_pre_call_hook(
+                key or _Key(), None, data, _CallType(call_type))
+        return _with_env(env, lambda: asyncio.run(go()))
+
+    # ---- 客户端识别 ----
+    def test_client_is_codex_detects_ua_and_originator(self):
+        self.assertTrue(M._client_is_codex(
+            {"proxy_server_request": {"headers": {"user-agent": "codex_exec/0.5"}}}))
+        self.assertTrue(M._client_is_codex(
+            {"metadata": {"headers": {"originator": "codex_cli_rs"}}}))
+        self.assertTrue(M._client_is_codex(
+            {"litellm_metadata": {"headers": {"User-Agent": "codex/1.0"}}}))
+        self.assertFalse(M._client_is_codex(
+            {"proxy_server_request": {"headers": {"user-agent": "cursor/0.42"}}}))
+        self.assertFalse(M._client_is_codex({"messages": []}))
+
+    # ---- ④ 系列桶:codex → 429 usage_limit_reached + promo 头 ----
+    def test_family_codex_raises_usage_limit_with_promo(self):
+        from litellm.proxy._types import ProxyException
+
+        # other 桶爆($500.44/$500),gpt5.3 桶还剩($45/$200)
+        self._seed("tok-default", "other", 500.44)
+        self._seed("tok-default", "gpt53", 155.0)
+        d = self._codex_data("gpt-5.6-sol")
+        with self.assertRaises(ProxyException) as ctx:
+            self._pre_fam(d, "aresponses")
+        e = ctx.exception
+        self.assertEqual(e.type, "usage_limit_reached")
+        self.assertEqual(str(e.code), "429")
+        promo = e.headers.get("x-codex-promo-message", "")
+        # 用量数字(超额系列) + 另一系列剩余 + 切换提示
+        self.assertIn("500.44", promo)
+        self.assertIn("500.00", promo)
+        self.assertIn("45.00", promo)          # gpt5.3 剩余 200-155
+        self.assertIn("gpt-5.3 (codex)", promo)
+        self.assertIn("/model", promo)
+        # ASCII-only(HTTP 头 to_str() 只认可见 ASCII)
+        self.assertEqual(promo, promo.encode("ascii", "ignore").decode("ascii"))
+
+    def test_family_codex_both_exhausted_no_switch_hint(self):
+        from litellm.proxy._types import ProxyException
+
+        self._seed("tok-default", "other", 500.10)
+        self._seed("tok-default", "gpt53", 220.0)   # gpt5.3 也爆
+        d = self._codex_data("gpt-5.6-sol")
+        with self.assertRaises(ProxyException) as ctx:
+            self._pre_fam(d, "aresponses")
+        promo = ctx.exception.headers.get("x-codex-promo-message", "")
+        self.assertIn("500.10", promo)
+        self.assertNotIn("switch model", promo)
+        self.assertIn("resets", promo)
+
+    def test_family_codex_blocked_on_gpt53_hints_other(self):
+        from litellm.proxy._types import ProxyException
+
+        self._seed("tok-default", "gpt53", 250.0)    # gpt5.3 爆
+        self._seed("tok-default", "other", 10.0)     # other 还剩很多
+        d = self._codex_data("gpt-5.3-codex")
+        with self.assertRaises(ProxyException) as ctx:
+            self._pre_fam(d, "aresponses")
+        promo = ctx.exception.headers.get("x-codex-promo-message", "")
+        self.assertIn("gpt-5.3 (codex) series hit", promo)
+        self.assertIn("main-models", promo)
+        self.assertIn("490.00", promo)               # 500-10
+
+    # ---- 非 codex 客户端保持 200 mock(Cursor 吞 429 body) ----
+    def test_family_non_codex_still_200_mock(self):
+        self._seed("tok-default", "other", 600.0)
+        d = {"model": "gpt-5.6-sol",
+             "proxy_server_request": {"headers": {"user-agent": "cursor/0.42"}},
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = self._pre_fam(d, "aresponses")
+        self.assertIn("额度已用完", out.get("mock_response", ""))
+
+    # ---- 逃生门 ----
+    def test_family_codex_kill_switch_falls_back_to_mock(self):
+        self._seed("tok-default", "other", 600.0)
+        d = self._codex_data("gpt-5.6-sol")
+        out = self._pre_fam(d, "aresponses",
+                            extra_env={"BUDGET_CODEX_STOP_DISABLED": "1"})
+        self.assertIn("额度已用完", out.get("mock_response", ""))
+
+    # ---- ③ 总额度:codex → 429 total promo ----
+    def test_over_budget_codex_raises_usage_limit(self):
+        from litellm.proxy._types import ProxyException
+
+        M._mark_over_budget("tok-default", 9.0, 5.0)
+        d = self._codex_data("gpt-5.6-sol")
+        with self.assertRaises(ProxyException) as ctx:
+            self._pre_fam(d, "aresponses")
+        e = ctx.exception
+        self.assertEqual(e.type, "usage_limit_reached")
+        promo = e.headers.get("x-codex-promo-message", "")
+        self.assertIn("9.00", promo)
+        self.assertIn("5.00", promo)
+        self.assertIn("total budget", promo)
+
+    def test_over_budget_non_codex_still_200_mock(self):
+        M._mark_over_budget("tok-default", 9.0, 5.0)
+        d = {"proxy_server_request": {"headers": {"user-agent": "cursor/0.42"}},
+             "input": "继续"}
+        out = self._pre_fam(d, "aresponses")
+        self.assertIn("额度已用完", out.get("mock_response", ""))
 
 
 if __name__ == "__main__":

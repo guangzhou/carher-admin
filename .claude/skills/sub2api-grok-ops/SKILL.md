@@ -407,13 +407,26 @@ pod 自己的出口打 auth.x.ai，实测通）。有 sso 就走这条，C1 只�
 09-17 加 `health` 子命令 + first-pick 列 + `regress` 按 D2 定退出码；
 六个子命令都在 198 实跑验过）
 
-### ⚡ 09-21 起：加号只要一条命令 —— **只传路径**
+### ⚡ 09-21 起：加号只要一条命令 —— **在自己 Mac 上，只传路径**
 
 ```bash
-sudo python3 /home/cltx/grok-onboard/sub2api-grok-onboard.py /abs/path/卡密导出.txt
+cd <repo>/scripts/grok-onboard
+python3 sub2api-grok-onboard.py ~/Downloads/grok-mima/卡密导出.txt
 ```
 
-就这一行，**不用先捞密码、不用 `S2A_PW_FILE=`、不用 `cd`、不用写子命令**：
+就这一行，**不用 ssh 上去、不用本地 sudo、不用先捞密码、不用 `S2A_PW_FILE=`、不用写子命令**：
+
+- **不在 198 上时脚本自己 ssh 过去**：判据是 `/etc/rancher/k3s/k3s.yaml` 在不在
+  （⛔ **不能用 `which kubectl` 当尺子** —— Mac 上也装了，两边都答"是"，
+  于是脚本会留在本地跑、死在第一条 `kubectl -n litellm-dev`）。
+  它把**脚本 + `sub2api_admin.py` + 凭据文件**一起 scp 到 `/home/cltx/grok-onboard/`，
+  凭据那份 0600、**跑完无论成败都 shred**，远端退出码原样带回来。
+  ⚠️ 远端用 `sudo -n`（永不弹密码提示）：`ssh -n` 下的提示会永远挂住，
+  形状看起来像"脚本在一个会写库的步骤中间卡死了"。
+  `S2A_HOST` / `S2A_REMOTE_DIR` 可改目标；`S2A_LOCAL=1` 强制本地跑。
+- ⚠️ **本地那些 `print` 必须 `flush=True`**：stdout 非 tty 时是块缓冲，而 ssh
+  直接写继承来的 fd ⇒ 不 flush 的话"正在发往 198"这行会打在远端输出**后面**，
+  读起来像是先跑完才决定去哪跑。
 
 - 密码脚本自己从 `litellm-dev/sub2api-secrets` 的 `ADMIN_PASSWORD` 取，落 0600 临时文件，
   `atexit` 删。⚠️ **显式的 `S2A_PW_FILE` 仍然优先**，所以每分钟的 park 巡检

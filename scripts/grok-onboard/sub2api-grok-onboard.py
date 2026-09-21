@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 """Add grok subscription accounts to sub2api on 198, and prove they work.
 
-Run on 198.  Needs `sudo kubectl` (postgres readback) and the sub2api admin
-password in a root-only file.
+RUN IT FROM THE MAC, with nothing but a path:
+
+  python3 sub2api-grok-onboard.py ~/Downloads/grok-mima/卡密导出.txt
+
+No local sudo, no S2A_PW_FILE, no subcommand.  When /etc/rancher/k3s/k3s.yaml
+is absent (i.e. not on 198) the script ships itself + the helper + the creds
+file to $S2A_HOST (default cltx@10.68.13.198), runs it there under `sudo -n`,
+streams the output back, shreds the remote creds copy, and exits with the
+remote exit code.  S2A_LOCAL=1 forces
+local execution; on 198 nothing is shipped and it just runs.
+
+The admin password is fetched from the k8s secret by the script itself.
+Secrets never go in argv: the creds file path is an argument, its contents are
+not.
 
 WHY THIS EXISTS (2026-09-09).  Onboarding three accounts by hand meant writing
 four throwaway scripts under /root, and three of the four steps had a way to
@@ -24,13 +36,8 @@ lie to me:
 The free cross-check that catches (1) immediately: the `sso-token` endpoint
 returns `data.sub`, which must equal field 7 of the same line, verbatim.
 
-Secrets never go in argv: the creds file path is an argument, its contents are
-not, and the admin password is read from S2A_PW_FILE.
-
-  # 0. admin password into a root-only file (once per session)
-  sudo kubectl -n litellm-dev get secret sub2api-secrets \
-    -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d > /run/.s2apw
-  sudo chmod 600 /run/.s2apw
+  # 0. ONE COMMAND: baseline, verify, create, x.ai verdict, regression
+  python3 sub2api-grok-onboard.py /path/to/creds.txt
 
   # 0b. BASELINE FIRST -- how many legs actually serve right now?
   sudo python3 sub2api-grok-onboard.py health
@@ -113,6 +120,7 @@ import json
 import os
 import random
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -123,6 +131,75 @@ DEV_NS = "litellm-dev"
 PROD_NS = "litellm-product"
 GROK_GROUP = 7
 GROK_ENTRIES = ["sa-grok-4.5", "sa-grok-4.6", "sa-grok-4.20"]
+
+REMOTE = os.environ.get("S2A_HOST", "cltx@10.68.13.198")
+REMOTE_DIR = os.environ.get("S2A_REMOTE_DIR", "/home/cltx/grok-onboard")
+
+
+def on_198():
+    """Are we on the box that can actually reach sub2api?
+
+    The ruler is the k3s kubeconfig, not `which kubectl`: kubectl is installed
+    on the Mac too, so it would answer yes in both places and the script would
+    try to run locally and fail at the first `kubectl -n litellm-dev`.
+    The path is world-readable on 198 (checked as cltx, not just as root), so
+    this does not need sudo to answer.
+    """
+    return os.path.exists("/etc/rancher/k3s/k3s.yaml")
+
+
+def delegate(argv):
+    """Re-run ourselves on 198 over ssh, so the Mac can drive it with a path.
+
+    Ships the two code files (the helper too -- the script `exec`s it and
+    crashes without it), ships any argument that is an existing local file as
+    a 0600 copy, rewrites those arguments to the remote paths, and shreds the
+    copies afterwards whatever happens.
+
+    Output is NOT captured: ssh inherits stdout/stderr so a 5-minute run prints
+    as it goes instead of arriving in one lump at the end.  The remote exit
+    code is returned unchanged -- it is the whole verdict of the run.
+    """
+    q = shlex.quote
+    me = os.path.basename(os.path.abspath(__file__))
+    # flush=True on every local print in here: stdout is block-buffered when it
+    # is not a tty, while ssh writes to the inherited fd directly, so without
+    # this the banner and the "shipped X" lines land AFTER the remote output.
+    print("--- not on 198 (no /etc/rancher/k3s/k3s.yaml) -> running there as %s ---"
+          % REMOTE, flush=True)
+
+    def ssh(cmd, **kw):
+        return subprocess.run(["ssh", "-n", REMOTE, cmd], **kw)
+
+    if ssh("mkdir -p %s && chmod 700 %s" % (q(REMOTE_DIR), q(REMOTE_DIR))).returncode:
+        sys.exit("cannot reach %s over ssh" % REMOTE)
+    code = [os.path.join(HERE, me), os.path.join(HERE, "sub2api_admin.py")]
+    if subprocess.run(["scp", "-q"] + code + ["%s:%s/" % (REMOTE, REMOTE_DIR)]).returncode:
+        sys.exit("scp of the script failed")
+
+    shipped, out = [], []
+    for a in argv:
+        if os.path.isfile(a):
+            rp = "%s/.creds-%d-%d.txt" % (REMOTE_DIR, os.getpid(), len(shipped))
+            if subprocess.run(["scp", "-q", a, "%s:%s" % (REMOTE, rp)]).returncode:
+                sys.exit("scp of %s failed" % a)
+            ssh("chmod 600 %s" % q(rp))
+            shipped.append(rp)
+            out.append(rp)
+            print("    %s -> %s (0600, shredded after the run)" % (a, rp), flush=True)
+        else:
+            out.append(a)
+    try:
+        # sudo -n: never prompt.  A prompt over ssh -n would hang forever and
+        # look like the script froze partway through a run that writes.
+        cmd = "cd %s && sudo -n python3 %s/%s %s" % (
+            q(REMOTE_DIR), q(REMOTE_DIR), q(me), " ".join(q(x) for x in out))
+        sys.stdout.flush()
+        return subprocess.run(["ssh", REMOTE, cmd]).returncode
+    finally:
+        for rp in shipped:
+            ssh("shred -u %s 2>/dev/null || rm -f %s" % (q(rp), q(rp)))
+
 
 # The helper's docstring also contains the literal `if __name__`, so split()
 # would cut the file in half.  rsplit takes the real one at the bottom.
@@ -1260,6 +1337,12 @@ def main():
     argv = sys.argv[1:]
     if argv and os.path.isfile(argv[0]):
         argv.insert(0, "onboard")
+
+    # Run from the Mac: ship everything to 198 and run it there.  Done before
+    # parsing so the remote side does the parsing -- one parser, not two that
+    # can drift.  S2A_LOCAL=1 forces local execution.
+    if not on_198() and not os.environ.get("S2A_LOCAL"):
+        sys.exit(delegate(argv))
 
     p = sub.add_parser("onboard",
                        help="ONE COMMAND: creds file -> health baseline, "

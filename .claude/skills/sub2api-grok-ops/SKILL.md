@@ -407,16 +407,27 @@ pod 自己的出口打 auth.x.ai，实测通）。有 sso 就走这条，C1 只�
 09-17 加 `health` 子命令 + first-pick 列 + `regress` 按 D2 定退出码；
 六个子命令都在 198 实跑验过）
 
-### ⚡ 09-21 起：加号只要一条命令 `onboard`
+### ⚡ 09-21 起：加号只要一条命令 —— **只传路径**
 
 ```bash
-sudo S2A_PW_FILE=/run/.s2apw python3 sub2api-grok-onboard.py onboard .creds.txt --minutes 20
+sudo python3 /home/cltx/grok-onboard/sub2api-grok-onboard.py /abs/path/卡密导出.txt
 ```
+
+就这一行，**不用先捞密码、不用 `S2A_PW_FILE=`、不用 `cd`、不用写子命令**：
+
+- 密码脚本自己从 `litellm-dev/sub2api-secrets` 的 `ADMIN_PASSWORD` 取，落 0600 临时文件，
+  `atexit` 删。⚠️ **显式的 `S2A_PW_FILE` 仍然优先**，所以每分钟的 park 巡检
+  （自带 `/run/.s2apw-patrol`）行为不变、也不会多一次 kubectl。
+  🔴 以前漏掉这个环境变量，是在 helper 的 **import 期** `assert _st == 200` 炸，
+  报成**登录失败**，看不出是变量丢了 —— 会去查密码、查端点，方向全错。
+- 第一个参数是**存在的文件**时隐含 `onboard`；子命令写错仍走 argparse 报错，不会被当路径。
+
+也可以显式写：`... onboard .creds.txt --minutes 20`。
 
 **它按 skill 规定的顺序把五步一次跑完**：`health` 基线 → `verify`（不建号）→ `add`
 → **只对新腿**打 x.ai 判词 → `regress`。退出码 = 「任一新腿不是 `200 usable`」∨
 「D2 丢 nonce」；**既存腿余额死不算红**（那是基线不是回归，同
-`sub2api-upgrade.py` 的 delta 判法）。09-21 实跑 `EXIT=0`。
+`sub2api-upgrade.py` 的 delta 判法）。09-21 两次实跑 `EXIT=0`。
 
 🔑 **第 4 步是这条命令存在的理由**：没有它，一轮会以「已添加 2 个账号」收尾，
 而实际新增可用容量为 **0** —— 09-21 池子 25 条腿里 19 条正是
@@ -428,19 +439,35 @@ sudo S2A_PW_FILE=/run/.s2apw python3 sub2api-grok-onboard.py onboard .creds.txt 
 | 形状 | 样子 | 第 7 段 |
 |---|---|---|
 | LONG（表格导出，8+ 段） | `email----mailpw----pw----CURSOR_tok----phone----sms----grok_userid----sso` | 有,`sub==userid` 是**独立**交叉校验 |
-| SHORT（聊天里粘的，2~7 段） | `email----mailpw----sso` | 无 ⇒ 自动去 `sso-token` 端点取 `sub` 补上 |
+| SHORT（聊天里粘的 / 卡密导出，2~7 段） | `email----mailpw----sso` | 无 ⇒ 自动去 `sso-token` 端点取 `sub` 补上 |
 
 🔴 **SHORT 行的 `sub == userid` 是同义反复,不是交叉校验** —— 答案来自被校验的同一个端点。
 脚本会把它打成 `tautological (short line)` 而不是一个说谎的绿 `True`。
 要独立校验就得用 LONG 行。末段一律按 JWT（`eyJ` 开头）校验，不像就**大声退出**不静默跳过。
 
+### 🔴 真实「卡密导出.txt」与聊天里粘的那种**不是一个格式**，三处全是硬失败
+
+09-21 拿 `~/Downloads/grok-mima/卡密导出.txt` 对过，一个都不能少：
+
+| 坑 | 不处理会怎样 |
+|---|---|
+| **UTF-8 BOM** | 第一个字段变成 `'﻿<email>'`，账号名带不可见前缀进库 |
+| 抬头行 `卡密导出` + 空行 | 老版本直接 `sys.exit`，整个文件用不了 |
+| 🔴 **分隔符是「五个」短横不是四个** | 按字面 `"----"` 切，第 5 个短横粘在后面每个字段头上：密码变 `-N5...`、sso 变 `-eyJ...`。**sso 那个被 `eyJ` 检查抓到，密码那个会静默存错** |
+
+⇒ 脚本已改成 `utf-8-sig` 读 + 按 `-{4,}` 正则切一整段短横 + 跳过无分隔符的行。
+**但带 `@` 的行永不静默跳过**（分隔符坏掉的账号行必须报出来，不能当抬头吞掉）；
+同名邮箱重复直接拒。离线 6 例回归：真导出 / 旧 4 横粘贴 / CRLF+BOM+注释 /
+坏分隔符邮箱行拒 / 重复拒 / 非 JWT 拒。
+
 ⚠️ 脚本**不删凭据文件**（故意的，它可能还要重跑）；收尾自己 `shred -u`。
 
-⚠️ **198 上没有常驻副本**（09-17 确认 `/root` 和 `/Data/grok-onboard` 都没有），
-每次从 repo scp 过去，连 `sub2api_admin.py` 一起 —— 脚本用 `exec` 引它，缺了直接崩。
-09-21 起 `/home/cltx/grok-onboard/` 下有一份，sha256 应与 repo 逐字相等
-（当前 `66dcf480…`）；⚠️ 这份**正被每分钟的 park 巡检 cron 调用**（`rescue --minutes 5`），
-覆盖它就等于同时换掉巡检跑的代码，改完必须立刻核 `tail /var/log/grok-park-patrol.log`。
+⚠️ **198 上有常驻副本 `/home/cltx/grok-onboard/`**（09-17 那句「没有常驻副本」已过期；
+`/root` 和 `/Data/grok-onboard` 至今确实没有）。`sub2api_admin.py` 必须和它放在一起 ——
+脚本用 `exec` 引它，缺了直接崩。sha256 应与 repo 逐字相等（当前 `c0ac7479…`）；
+⚠️ 这份**正被每分钟的 park 巡检 cron 调用**（`rescue --minutes 5`），
+覆盖它就等于同时换掉巡检跑的代码，改完必须立刻核 `tail /var/log/grok-park-patrol.log`，
+或者直接按巡检的原样跑一次 `rescue --minutes 5 --dry-run` 看退出码。
 
 🔴 **中断一条已经开始跑的 `ssh ... add`，远端会照样把号建完。** 09-21 实例：
 被中断的 `add` 在 18:09:15/18:09:23 建出 acct 44/45，重跑只看到

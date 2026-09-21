@@ -750,3 +750,80 @@ lane 172 与参照腿 193 **都是 21 slug、双向差集 0**（含 thinking/pro
 完全有效的修复误判成半成品。
 
 池腿：21 →（摘 4 死腿）→ 22 → 26 → 27 → 28 → **29**。
+
+---
+
+## 十三、摘掉 82/84：26 行模型行 + 两个 Deployment（09-21，用户拍板）
+
+### 13.1 动了啥
+
+| 动作 | 对象 | 结果 |
+|---|---|---|
+| `/model/delete` | **26 个 `model_info.id`**（逐个显式指定，无通配） | 26/26 成功 |
+| `rollout restart` | `deploy/litellm-proxy` | rolled out |
+| `scale --replicas=0` | `zero-cursor-bpi-82`、`zero-cursor-bpi-84` | Running pod 数 = 0 |
+
+涉及 **20 个对外名**：`cursor-g-5.5/-5.6-instant/-5.6-luna/-5.6-pro/-5.6-sol/-5.6-sol-high`、
+`cursor-g-82-sol`、`cursor-g-84-{5.5,5.6-instant,5.6-luna,5.6-pro,5.6-sol,5.6-sol-high}`、
+`cursor-web-fc-82-terra-{high,max}`、`cursor-web-fc-pool-terra{,-high,-max}`、
+`cr-g-5.6-luna-max-82`、`cr-g-5.6-thinking-max-82`。
+
+### 13.2 备份在哪 / 怎么回滚
+
+- **模型行**：`198:/tmp/bk-crg-8284-rows-20260921.json`（26 行完整 `/model/info` 行，294975 bytes），
+  另在本机 `/tmp/` 同名一份。⚠️ 按 [[feedback_proxymodeltable_model_and_api_base_are_encrypted]]，
+  `ProxyModelTable` 里 `model`/`api_base` 是密文，这份备份**只能取证、不能直接回放**；
+  真要恢复走 `crg_pool_register.py` 重建。
+- **Deployment**：`198:/tmp/bk-zero-cursor-bpi-82-20260921-scaledown.yaml`（8372B）、
+  `198:/tmp/bk-zero-cursor-bpi-84-20260921-scaledown.yaml`（9545B）。
+- **回滚**：`scale --replicas=1` 起腿 → 重抓 seed（腿是 `session_expired`，起来也是死的）
+  → 目录门禁 → `crg_pool_register.py` 重建行。
+
+### 13.3 删之前做了什么确认
+
+1. **枚举而非猜**：`/model/info` 里按 `api_base` 正则 `zero-cursor-bpi-(82|84)\b` 精确取行
+   ⇒ 26 行 / 20 个名字，**每个名字都是"只挂死腿、无活腿"**，不存在"删一个名字会连坐活腿"。
+2. **裸载体 id 的连坐检查**：`cr-g-5.6-luna-max-82` / `cr-g-5.6-thinking-max-82` 的
+   `model_info.id` 是**裸载体名** `gpt-5.6-luna-wm` / `gpt-5.6-thinking`
+   —— 上一轮摘死腿时正是因为怕连坐而显式跳过它们。这轮先查 id 共用情况：
+   **各自只剩 1 行、且都长在 82 上** ⇒ 删它们不影响任何别的行。
+   事后复核：`cr-g-5.6-luna-max` / `cr-g-5.6-thinking-max` 两个对外名**各自仍是 29 腿**。
+3. **算术对账**：总行数 1928 → 1902，**差正好 26**，不多不少。
+
+### 13.4 🔴 我改口的一处：不是"30 天零真实流量"
+
+之前我说过这 21 个名字"30 天零真实用户流量"。查 SpendLogs 后**这句不准确**，须更正：
+
+```
+09-20 15:34|cursor-g-5.6-sol      |failure|248|0|cursor-liuguoxian04-5rub
+09-20 15:34|cursor-g-5.6-sol-high |failure|248|0|cursor-liuguoxian04-5rub
+09-20 15:36|cursor-g-82-sol       |failure|248|0|cursor-liuguoxian04-5rub
+```
+
+**有 3 发出自用户本人的 key `cursor-liuguoxian04-5rub`**，不是我的探针
+（我的是 `cgprobe-` / `cgsep-` / `crgprobe-` / `litellm_pr`）。
+
+放行的真实依据是更强的那一条：**这 20 个名字 90 天内总共只有 17 发，全部集中在
+2026-09-20 一天，`completion_tokens>0` 的成功行 = 0**。用户那 3 发也在同一天同一小时
+（15:34–15:36，排查当时顺手试打），不是日常在用。
+⇒ 判据从"零流量"改成 **"90 天零成功、且仅一天内的排查流量"**，结论不变但依据换了。
+
+**教训**：`failure` 行照样带 `prompt_tokens`
+（[[feedback_retry_layer_error_count_is_not_user_failure_rate]]），
+判"有没有人在用"必须**按 key alias 分组看时间跨度**，不能只看行数是否为 0。
+
+### 13.5 回归
+
+- `/model/info` 复查：指向 82/84 的行 **0 行 / 0 个名字**
+- 池子形状：**14 个池名 × 各 29 腿**，腿集合不变（172 也在）
+- 池级回归 `--all --keys 8`：**14/14 绿、失败 0 发**
+- 直打 `193,172,167,205` 四腿：**4 行全绿**，输出行数 == 传入腿数（尺子自检）
+
+### 13.6 没动、只报告的
+
+- **`cursor-web-fc-terra` / `-terra-high` / `-terra-max`** 这 3 个名字指向
+  `zero-cursor-bpi`（**无后缀 base 服务**，已 0 副本），`model_info.id` 是
+  `zerokey-cursor-web-fc-101-*` —— 属于**已废弃的 lane 101 线**
+  （[[feedback_101_cursor_web_fc_terra_is_abandoned_never_propose]]）。
+  90 天零流量，但指向 0 副本后端 ⇒ 必然报错。**授权范围只有 82/84，未动。**
+- **`zero-cursor-101` Deployment 仍在跑 1 副本。** 未动。

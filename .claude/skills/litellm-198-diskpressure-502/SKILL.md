@@ -312,3 +312,7 @@ echo "delta=$(( (S2-S1)/1024 )) MB/min"
 - `k8s/litellm-198-spendlog-retention-cronjob.yaml` —— 日常保留
 - `scripts/litellm-198-spendlog-emergency-truncate.sh` —— 本 runbook 的执行体
 - skill `k3s-198-node-expand` —— 如果结论是"盘就是不够"，扩节点/扩盘走那条
+- [[litellm-aliyun-logtable-truncate]] —— **阿里云(ns `carher`)是另一套,别把这份 runbook 套过去**:
+  那边是 CNFS NAS(`df` 恒显示 10P 量不出水位)、无 disk-pressure、db pod 常驻 Running,
+  所以只有 online 模式、也没有等 taint 撤销这一步。两边表结构还不一样:
+  阿里云的大头是 `LiteLLM_SpendLogToolIndex`(实测 19 行/请求,是 SpendLogs 的 19 倍)。

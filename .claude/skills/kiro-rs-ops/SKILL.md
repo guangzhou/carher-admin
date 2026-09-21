@@ -20,7 +20,7 @@ description: >-
 | ns / Service | `kiro-rs`，ClusterIP **`10.43.109.5:8990`**（仅集群内，无 NodePort/ingress） |
 | 节点 | **`aiyjy-litellm-242`**，nodeSelector 硬钉 + toleration `dedicated=new-node:NoSchedule` |
 | 镜像 | **`kiro-rs:master-kiroalias`** —— 自建，**只在 242 本地 containerd** |
-| 账号 | **4 个，都 KIRO PRO+ / 2000 credits / `us-east-1` / priority 0**：id 3 `rmiglio582`（09-17 19:2x 加，**在役 `currentId=3`**）、id 4 `alhassanrashida749`（21:19）、id 5 `kumistephen070`（21:35）、id 6 `adafiasenyo444`（22:10）—— 后三个都是**备用**。故意不切 currentId：老号还有余额时靠 `QuotaExceeded` 自动重选才是真兜底。历史三个号 09-17 19:52 全摘，台账见 §D4 |
+| 账号 | **6 个，都 KIRO PRO+ / 2000 credits / `us-east-1` / priority 0**：id 3 `rmiglio582`、id 4 `alhassanrashida749`、id 5 `kumistephen070`、id 6 `adafiasenyo444` —— 🔴 **这 4 个 09-19~09-21 已全部 `QuotaExceeded` 耗尽并被自动 disabled**（succ 分别 3091/2648/2693/2839）；id 7 `edemamoahalbert`（**在役 `currentId=7`**，09-21 13:08 live `108.03/2000`）；id 8 `princessrit15`（**09-21 13:06 加，2000/2000 全新，备用不切**）。下次重置 **2026-10-01 00:00 UTC**。台账见 §D4 |
 | 出口 | **全部经 `10.68.13.243:8120`**（Astrill Los Angeles → `104.129.16.172`，09-17 19:36 从 8119 Seattle 改指），见 §D2。⚠️**全局唯一，无 per-account 路由**；⚠️ 8118/8119/8120 **三条都与 `chatgpt-acct-*` 共用**（分别 8/7/6 个对象），**没有独占 IP 可选** |
 | 凭据 | PVC 内 `/app/config/credentials.json`（list = **真的多号池**，不是只用 `[0]`，见 §D3） |
 | 对外 | 198 LiteLLM ns `litellm-product` 的 **18 条 `kiro-*` 道** |
@@ -561,12 +561,22 @@ key 的来源是 `secret/kiro-rs-bootstrap` 的 `config.json`（ns 里**没有**
 | `bradburybruns64@gmail.com` | KIRO **FREE** `16.34/50`（还剩 33.66） | ❌ **AWS 封停**：catalog 403 `User ID c488d458-… temporarily is suspended`（09-12 起） | 09-14 换号时移出；余额还在但打不动，只能走 support_form 申诉 |
 | `beltmike66@gmail.com` | KIRO PRO **`1000.0/1000.0`** | ✅ 真打满 | 09-16 摘除，备份 `backup/credentials.json.20260916-141659` |
 | `barisibetter9@gmail.com` (id2) | KIRO PRO+ **`2000.0/2000.0`** | ✅ 真打满（09-17 06:35，`successCount` 2895） | **09-17 19:52 `DELETE /credentials/2`**，备份 `backup/credentials.json.pre-del-id2.20260917-195234`（0600，含完整凭据） |
-| `rmiglio582@gmail.com` (id3) | KIRO PRO+ `97.54/2000`（09-17 21:2x） | 🟢 在服役 | priority 0，`currentId=3` |
-| `alhassanrashida749@gmail.com` (id4) | KIRO PRO+ `0.0/2000` | 🟢 备用 | 09-17 21:19 加，priority 0，**故意不切 currentId**（id3 还剩 1902，见 §D3 第 4 步）。备份 `backup/credentials.json.20260917-211915` |
-| `kumistephen070@gmail.com` (id5) | KIRO PRO+ `0.0/2000` | 🟢 备用 | 09-17 21:35 加，priority 0，同样不切 currentId。导出是**扁平无 `machineId`** 那种形状（`provider: BuilderId`），`machineId` 按 `sha256("KotlinNativeAPI/<rt>")` 固化。备份 `backup/credentials.json.20260917-213531` |
-| `adafiasenyo444@gmail.com` (id6) | KIRO PRO+ `0.0/2000` | 🟢 备用 | 09-17 22:10 加，与 id5 同一形状同一套路（扁平·`BuilderId`·补 `machineId`），**全程照 §D3 第 0 步走无新坑**。备份 `backup/credentials.json.20260917-221052` |
+| `rmiglio582@gmail.com` (id3) | KIRO PRO+ **`2000/2000`** | ❌ 已打满（succ 3091，`reason=QuotaExceeded` 自动 disabled） | 留在池里等 10-01 重置 |
+| `alhassanrashida749@gmail.com` (id4) | KIRO PRO+ **`2000/2000`**（09-21 live 复核） | ❌ 已打满（succ 2648） | 09-17 21:19 加，priority 0，**故意不切 currentId**（id3 还剩 1902，见 §D3 第 4 步）。备份 `backup/credentials.json.20260917-211915` |
+| `kumistephen070@gmail.com` (id5) | KIRO PRO+ **`2000/2000`** | ❌ 已打满（succ 2693） | 09-17 21:35 加，priority 0，同样不切 currentId。导出是**扁平无 `machineId`** 那种形状（`provider: BuilderId`），`machineId` 按 `sha256("KotlinNativeAPI/<rt>")` 固化。备份 `backup/credentials.json.20260917-213531` |
+| `adafiasenyo444@gmail.com` (id6) | KIRO PRO+ **`2000/2000`** | ❌ 已打满（succ 2839） | 09-17 22:10 加，与 id5 同一形状同一套路（扁平·`BuilderId`·补 `machineId`），**全程照 §D3 第 0 步走无新坑**。备份 `backup/credentials.json.20260917-221052` |
+| `edemamoahalbert@gmail.com` (id7) | KIRO PRO+ `108.03/2000`（09-21 13:08 live） | 🟢 **在服役 `currentId=7`** | 09-21 10:30 加，priority 0。**其余 4 个全 disabled ⇒ 服务端自己选中它，没执行 `priority` 命令**。扁平·`BuilderId` 形状，`machineId` 按 `sha256("KotlinNativeAPI/<rt>")` 固化。备份 `backup/credentials.json.20260921-103044`。加完 18/18 回归全绿（TTFT p50 1.17 / p95 1.64，`input_tokens` 分层正常） |
+| `princessrit15@gmail.com` (id8) | KIRO PRO+ `0.0/2000`（09-21 13:05 live 验号：AI_EDITOR 19 个模型 + 满额） | 🟡 **备用，`disabled:false` 但非 current** | 09-21 13:06 加，priority 0。扁平·`BuilderId`·无 `machineId` 那种形状，照 §D3 第 0 步走**无新坑**。🔴 **故意不切 currentId** —— id7 当时还剩 1891.97，切过去等于把两个号摊薄成半个；等 id7 打满后 kiro.rs 自己 `QuotaExceeded` + `min_by_key` 选中它。备份 `backup/credentials.json.20260921-130626`。加完 18/18 回归全绿（TTFT p50 1.25 / p95 1.96，`input_tokens` 分层正常：opus-5 6765 / sonnet-5 6482 / opus-4-6 4171 / gpt 道 429-430，与上轮逐道吻合 ⇒ 无降级），pod `restarts=0` `startTime` 未变 ⇒ 零重启 |
 
-**这些号的 `nextDateReset` 全是 `2026-10-01 00:00 UTC`。** ⇒ 到点后两个打满的号都能复活，
+🔴 **account-manager 导出里的 `usage` / `subscription` 是导出那一刻的快照，不是当前值。**
+09-21 用户发来 `alhassanrashida749` 的导出，里面写着 `usage.current: 0 / limit: 2000`，
+看上去像个满额新号 —— 但 `exportedAt`/`lastUpdated` 解出来是 **09-17 08:13 UTC**，
+而该凭据（`refreshToken`/`clientId`/`clientSecret` 三个 sha256 与线上 id4 **逐字节相同**）
+live 读出来是 **`2000/2000` 已耗尽**。
+⇒ **判额度只认 `kiro-probe.py quota` 的实时读，导出里的数字一律当作历史快照。**
+⇒ **判「是不是重复号」只认三个字段的 sha256，不看邮箱也不看导出里的 `id`/`userId`。**
+
+**这些号的 `nextDateReset` 全是 `2026-10-01 00:00 UTC`。** ⇒ 到点后 4 个打满的号（id3~id6）都能复活，
 两条命令（`extract` 会打印下一步的探针命令）：
 
 ```sh

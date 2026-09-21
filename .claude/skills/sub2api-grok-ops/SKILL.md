@@ -9,10 +9,12 @@ description: >-
   **「grok 又被全部停下了 / 重新认证下」= §⚡ 最前面那一节：先确认巡检还在跑（`rescue`
   单跑撑不过两分钟，一条 403 park 的是整池），而且九成不该跑 reauth（腿通常是健康的，
   被 sub2api 自己 park 了）。**
+  **grok 的 24 个名字里有 22 个走 model_list，2 个 video 走 pass-through（§H）——
+  LiteLLM 的 `/v1/videos` 结构性不兼容 sub2api 且升级永远修不好。**
   Use when 用户说"grok 不能用了"/"我的 grok 又被停了/全停了"/"grok 重新认证下"/
   "重新授权 grok"/"sub2api 403"/"grok 报余额不足"/
   "再加一个 grok 账号"/"sa-grok-*/grok-4.5 打不通"/"kimi 不能用了"/"sa-kimi-* 报错"/
-  "sub2api 有新版本了升级下"。
+  "sub2api 有新版本了升级下"/"grok 出图能用出视频不能用"/"视频模型打不通"。
 ---
 
 ## ⚡「我的 grok 又被全部停下了」—— 先看巡检，而且它**不是** reauth
@@ -405,8 +407,50 @@ pod 自己的出口打 auth.x.ai，实测通）。有 sso 就走这条，C1 只�
 09-17 加 `health` 子命令 + first-pick 列 + `regress` 按 D2 定退出码；
 六个子命令都在 198 实跑验过）
 
+### ⚡ 09-21 起：加号只要一条命令 `onboard`
+
+```bash
+sudo S2A_PW_FILE=/run/.s2apw python3 sub2api-grok-onboard.py onboard .creds.txt --minutes 20
+```
+
+**它按 skill 规定的顺序把五步一次跑完**：`health` 基线 → `verify`（不建号）→ `add`
+→ **只对新腿**打 x.ai 判词 → `regress`。退出码 = 「任一新腿不是 `200 usable`」∨
+「D2 丢 nonce」；**既存腿余额死不算红**（那是基线不是回归，同
+`sub2api-upgrade.py` 的 delta 判法）。09-21 实跑 `EXIT=0`。
+
+🔑 **第 4 步是这条命令存在的理由**：没有它，一轮会以「已添加 2 个账号」收尾，
+而实际新增可用容量为 **0** —— 09-21 池子 25 条腿里 19 条正是
+`200 + tier=supergrok_heavy` 换出来、被 x.ai 回 `spending-limit`。
+它只打**新建的那几条**，不重报早就死了的腿、也不浪费每腿一发真请求。
+
+**凭据文件现在吃两种形状**（09-21 起）：
+
+| 形状 | 样子 | 第 7 段 |
+|---|---|---|
+| LONG（表格导出，8+ 段） | `email----mailpw----pw----CURSOR_tok----phone----sms----grok_userid----sso` | 有,`sub==userid` 是**独立**交叉校验 |
+| SHORT（聊天里粘的，2~7 段） | `email----mailpw----sso` | 无 ⇒ 自动去 `sso-token` 端点取 `sub` 补上 |
+
+🔴 **SHORT 行的 `sub == userid` 是同义反复,不是交叉校验** —— 答案来自被校验的同一个端点。
+脚本会把它打成 `tautological (short line)` 而不是一个说谎的绿 `True`。
+要独立校验就得用 LONG 行。末段一律按 JWT（`eyJ` 开头）校验，不像就**大声退出**不静默跳过。
+
+⚠️ 脚本**不删凭据文件**（故意的，它可能还要重跑）；收尾自己 `shred -u`。
+
 ⚠️ **198 上没有常驻副本**（09-17 确认 `/root` 和 `/Data/grok-onboard` 都没有），
 每次从 repo scp 过去，连 `sub2api_admin.py` 一起 —— 脚本用 `exec` 引它，缺了直接崩。
+09-21 起 `/home/cltx/grok-onboard/` 下有一份，sha256 应与 repo 逐字相等
+（当前 `66dcf480…`）；⚠️ 这份**正被每分钟的 park 巡检 cron 调用**（`rescue --minutes 5`），
+覆盖它就等于同时换掉巡检跑的代码，改完必须立刻核 `tail /var/log/grok-park-patrol.log`。
+
+🔴 **中断一条已经开始跑的 `ssh ... add`，远端会照样把号建完。** 09-21 实例：
+被中断的 `add` 在 18:09:15/18:09:23 建出 acct 44/45，重跑只看到
+`SKIP already an account`，而中断前的 `health` 基线里没有这两个邮箱 ——
+**形状与「池子有第二只手」一模一样**，我据此误判过一次「`sso-token` 会建号」。
+判建号是谁干的只认 `audit_logs.action`：`admin.grok.sso_to_oauth.create` 才是建号，
+`admin.grok.oauth.sso_token.create` 只是换 token。
+⛔ `audit_logs` **没有 `resource_type` 列**（列名先 `\d audit_logs`），
+且 `actor_email` 全是 `admin@sub2api.local`，区分不了人。
+
 
 ```bash
 # 0. 传脚本（两个都要）+ 凭据，700/600
@@ -597,6 +641,18 @@ emitter 换个 key 顺序或空格就静默匹配 0 条，读出来是"没有 fa
 `reauth` 重写凭据，而停掉的腿通常凭据是好的（探针 `200 usable`），被 sub2api 自己 park 了 ——
 09-20 三次全池 503，三次都是这个形状，reauth 对它是纯 no-op。
 **跑 `reauth` 的唯一前提：手里有新的凭据行，并且探针说存的 token 真的死了。**
+
+🔴 **2026-09-21 全量复现：拿飞书表 21 行**最新** SSO 对全池 reauth，救回 0 条。**
+21 行 `verify` 全 `200 + sub==userid:True`（SSO 确实新鲜），但每一条的**新 token 直打
+x.ai 仍是 `403 personal-team-blocked:spending-limit`** ⇒ 23 条腿里 17 条是余额死，
+收尾 `sched=t` 只剩 19/30/31/38/39/43。⚠️ `tier` 在这里**没有判别力**：报
+`supergrok_heavy` 的（8/9/18/20/27/28/29/40）和报 `tier=None` 的（33~37/41/42）
+吃的是同一个 403。表里 `Grok UserID` 列缺值时用 DB `credentials->>'sub'` 补第 7 段
+（acct 8 两边逐字相等，验过这个补法）。**下次遇到同样形状别再跑一遍 reauth，直接报"只能充钱"。**
+⚠️ 判"这条腿还活着"别只看 `health` 的 SERVING 列：40/41/42 在 17:30~17:34 之间
+逐个被打上 `rate_limited_at` 停产，而 30min 窗口里它们仍显示几百 req —— 要配
+`select account_id,max(created_at) from usage_logs` 一起读。
+详见 [[project_sub2api_grok_pool_credit_death_2026_09_21]]。
 
 2026-09-18 实测。号早就在池子里、只是 token 过期时，前面两条路都不能用：
 
@@ -890,6 +946,73 @@ Grok Responses `sequence_number` 未始终写出、Grok 媒体槽位泄漏、
 Codex 根级联合 schema 致 `/v1/responses`→`/v1/messages` 400。
 全记录 [[project_sub2api_198_upgrade_v023_2026_09_08]]。
 
+## H. 24 个名字里 2 个 video **不能**走 model_list（2026-09-20 定论）
+
+把 sub2api 的 grok 全家接到 198 时，**22 个走 `/model/new`，2 个 video 必须走
+pass-through**：`grok-imagine-video` / `grok-imagine-video-1.5`。
+
+```bash
+# 22 个 chat/image 名字
+python3 scripts/litellm-198-add-sub2api-grok-family.py --apply
+# 2 个 video
+python3 scripts/litellm-198-sub2api-video-passthrough.py apply --apply
+```
+
+🔴 **别再试着用 `mode: video_generation` 注册它们。** 那样写**返 200、
+`/model/info` 也读得到，但永远打不通** —— 形状是"已接入"，实质是一行死条目。
+builder 里已改成显式 raise 挡住。09-20 已把 DB 里那两行删掉，
+备份 `198:~/grok-onboard/backups/video-models-20260920-140413.json`，
+回滚 = 用该 JSON 重新 `POST /model/new`（但别这么做，它本来就不通）。
+
+**三处不兼容各自独立，只修一处没用**：LiteLLM `OpenAIVideoConfig`
+① `use_multipart_form_data()` 恒 `True`（sub2api 只吃 JSON ⇒ **415**）、
+② 路径硬编码 `{api_base}/videos`（真身 `/v1/videos/generations`）、
+③ 响应过 `VideoObject.model_validate` 强制 `id`+`object`+`status`
+（sub2api 返 `{"request_id": …}`）。
+
+⛔ **"等升级"是永久等待**：upstream **PR #38104（2026-08-24 合入，早于我们的
+v1.100.1）故意**把 `/v1/videos` 改成无条件 multipart，去对齐官方 OpenAI SDK。
+issue #36493 仍 open 追这一类缺口。
+
+⚠️ **代价：pass-through 不进 SpendLogs。** video 按秒计费而
+`cost_per_request` 只有定额一种形状 ⇒ 对账去 sub2api 自己的 `usage_logs`
+和响应里的 `usage.cost_in_usd_ticks`（`1e10 ticks = $1`，8s 片子实测 $0.40~$0.64）。
+
+诊断矩阵、`include_subpath`/`auth` 两个不变量、三段验收梯子、全部坑位
+⇒ skill **`litellm-passthrough-endpoint`**。
+
+⚠️ 清点 `sa-*` 条目时**别用 `startswith("sa-grok")`** —— `sa-composer-2.5`
+没有 grok 前缀，会被漏掉读成"少了一个"。**09-20 又多了一个**
+`sa-composer-2.5-fast`（见下），这条更容易踩了。
+
+### 组名改过一次：`sa-grok-composer-2.5-fast` → `sa-composer-2.5-fast`（09-20）
+
+用户点名去掉 `grok-` 前缀，和既有的 `sa-composer-2.5` 一族对齐。**上游名没变**
+（仍是 `openai/grok-composer-2.5-fast`），只有对外组名和 `model_info.id` 变了。
+
+脚本里编码成 SPEC 的 `public` 覆盖字段，`model_info.id` 跟着**对外名**走：
+
+```python
+dict(name="grok-composer-2.5-fast", public="sa-composer-2.5-fast",
+     mode="chat", price=CHAT_45, lands="grok-4.5"),
+```
+
+按 add→verify→remove 做的（改名是加法）：`/model/new` 新名 → 带 nonce 实打 200
+且落点与老行一致 → 才 `/model/delete` 老行 `sa/grok-composer-2.5-fast`。
+终态 DB `%grok-composer%` **0 行**、`LiteLLM_Config` 零引用、`sa-*` 共 **22** 行不变。
+⚠️ 备份 `198:~/grok-onboard/backups/sa-grok-composer-rename-20260920-150154.json`
+**不能回放**（`model`/`api_base` 库里是密文），回滚 = 去掉 `public` 那行重跑脚本。
+详细纪律见 skill `add-litellm-model` 的「改一个已存在的组名」。
+
+### 六个名已铺进全部 cursor key 白名单（09-20）
+
+`sa-composer-2.5-fast` / `sa-grok-4.20-0309-reasoning` / `sa-grok-4.6-latest` /
+`sa-grok-4.5-latest` / `sa-grok-imagine` / `sa-grok-imagine-image-2.0`
+⇒ cursor **677/677**（含 19 把 blocked）。剩下 16 个名字和
+claude-/carher-/其他 398 把**没动**，要铺按同一条路径走。
+验收脚本 `scripts/litellm-198-grok6-cursor-probe.py`，SOP = skill
+`litellm-198-key-allowlist`。⚠️ 那两个 image 名必须走 `/v1/images/generations`。
+
 ## 同一个 sub2api 上还挂着 kimi（2026-09-08 起）
 
 **动这台 sub2api 不只影响 grok。** 它同时承载 Kimi Allegro 会员，
@@ -925,7 +1048,7 @@ Codex 根级联合 schema 致 `/v1/responses`→`/v1/messages` 400。
    判活只能拿 pool key 打真实推理。
 
 全记录：[[project_kimi_allegro_sub2api_198_2026_09_08]]、
-升级史与 SOP（`created_at` 修复出自 v0.2.3；当前线上 v0.2.4）：见 **§G** +
+升级史与 SOP（`created_at` 修复出自 v0.2.3；**当前线上 v0.2.7**，09-20 切的）：见 **§G** +
 [[project_sub2api_198_upgrade_v023_2026_09_08]]。
 
 ## 同一个 sub2api 上还挂着 antigravity（09-10 补到 6 条，09-16 又被加到 9 条）
@@ -981,6 +1104,7 @@ group 10 `ag-gemini-probe-s48` + account **15/16/17（09-09 建）、21/22/23（
 
 ## 相关
 
+- video 走 pass-through 的全套（诊断矩阵 / 不变量 / 验收梯子）：skill **`litellm-passthrough-endpoint`**
 - 部署与接入原始记录：[[project_198_sub2api_grok_litellm_2026_08_21]]
 - 09-04 定因 + 加号全过程：[[project_sub2api_grok_balance_gate_and_acct7_2026_09_04]]
 - 188 空壳那套的历史：[[project_grok_routing_reality_and_sub2api_empty_2026_08_13]]

@@ -114,6 +114,7 @@ import random
 import re
 import subprocess
 import sys
+import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEV_NS = "litellm-dev"
@@ -359,14 +360,30 @@ def cmd_health(a):
 # ---------------------------------------------------------------- parse
 
 def parse_creds(path):
-    """Decode the `----`-delimited paste format.
+    """Decode the `----`-delimited paste, in either shape it arrives in.
 
-    email----mailpw----password----CURSOR_token----phone----sms_url----grok_userid----grok_sso
+    LONG (8+ fields, the spreadsheet export):
+      email----mailpw----password----CURSOR_token----phone----sms_url----grok_userid----grok_sso
 
-    Field 4 is a Cursor session token and is deliberately ignored.  Anything
-    that does not yield a uuid-ish field 7 plus a JWT-ish field 8 is refused
-    loudly rather than silently skipped -- a silently dropped line reads as
-    "that account failed" later.
+      Field 4 is a Cursor session token and is deliberately ignored.  Field 7
+      is the grok userid and is kept, because it lets `verify`/`reauth` prove
+      independently that the SSO token belongs to the account we think it does.
+
+    SHORT (2..7 fields, what gets pasted into chat):
+      email----mailpw----grok_sso
+
+      No field 7, so `userid` comes back None and is filled in later by
+      resolve_subs() from the sso-token endpoint.  ⚠️ That makes the later
+      `sub == userid` assertion TAUTOLOGICAL for these lines -- the answer came
+      from the same endpoint being checked.  Every caller that prints that
+      assertion must say so, or a short line reads as if it passed a
+      cross-check it never had.  Only the LONG shape carries an independent
+      second source.
+
+    The last field is taken as the SSO token in the short shape (not a fixed
+    index) because the middle fields vary; anything that is not JWT-ish is
+    refused loudly.  A silently dropped line reads as "that account failed"
+    several steps later, which is the wrong direction.
     """
     out = []
     for lineno, raw in enumerate(open(path), 1):
@@ -374,26 +391,73 @@ def parse_creds(path):
         if not raw or raw.startswith("#"):
             continue
         f = raw.split("----")
-        if len(f) < 8:
-            sys.exit("line %d: expected >=8 `----` fields, got %d" % (lineno, len(f)))
-        name, userid, sso = f[0].strip(), f[6].strip(), f[7].strip()
-        if userid.count("-") != 4:
-            sys.exit("line %d: field 7 %r does not look like a grok userid (uuid)"
-                     % (lineno, userid[:40]))
+        if len(f) < 2:
+            sys.exit("line %d: expected `----`-separated fields, got %d"
+                     % (lineno, len(f)))
+        name = f[0].strip()
+        if len(f) >= 8:
+            userid, sso = f[6].strip(), f[7].strip()
+            if userid.count("-") != 4:
+                sys.exit("line %d: field 7 %r does not look like a grok userid "
+                         "(uuid)" % (lineno, userid[:40]))
+        else:
+            userid, sso = None, f[-1].strip()
         if not sso.startswith("eyJ"):
-            sys.exit("line %d: field 8 does not look like a JWT -- did the line "
-                     "have extra fields?" % lineno)
+            sys.exit("line %d: the SSO field does not look like a JWT (got %r). "
+                     "Long lines put it in field 8, short lines last."
+                     % (lineno, sso[:40]))
+        if not name:
+            sys.exit("line %d: empty account name (field 1)" % lineno)
         out.append({"name": name, "userid": userid, "sso": sso})
     if not out:
         sys.exit("no credential lines found in %s" % path)
     return out
 
 
+def resolve_subs(creds, call, tok):
+    """Fill in `userid` for short lines by asking the sso-token endpoint.
+
+    Exchanging an SSO token creates nothing (audit action
+    `admin.grok.oauth.sso_token.create` is just the exchange; accounts are born
+    from `admin.grok.sso_to_oauth.create`, which is what `add` calls), so this
+    is safe to run before any decision to write.
+
+    Marks the line `resolved=True` so callers can label the cross-check as
+    tautological instead of printing a green True that means nothing.
+    """
+    todo = [c for c in creds if not c["userid"]]
+    if not todo:
+        return creds
+    print("--- resolving grok userid for %d short line(s) via sso-token ---"
+          % len(todo))
+    bad = 0
+    for c in todo:
+        st, j = call("POST", "/api/v1/admin/grok/oauth/sso-token",
+                     {"sso_token": c["sso"]}, token=tok)
+        d = (j or {}).get("data") or {}
+        sub = d.get("sub") or d.get("user_id")
+        if st != 200 or not sub:
+            bad += 1
+            print("  %-34s st=%s FAILED to resolve: %s"
+                  % (c["name"], st, str(j)[:200]))
+            continue
+        c["userid"], c["resolved"] = sub, True
+        print("  %-34s sub=%s tier=%s  (resolved -- NOT an independent check)"
+              % (c["name"], sub, d.get("subscription_tier")))
+    if bad:
+        sys.exit("%d line(s) could not be resolved; refusing to continue with a "
+                 "partial batch" % bad)
+    print()
+    return creds
+
+
 def cmd_parse(a):
     for c in parse_creds(a.creds):
         print("%-34s userid=%s  sso=%s...%s (%d chars)"
-              % (c["name"], c["userid"], c["sso"][:12], c["sso"][-6:], len(c["sso"])))
+              % (c["name"], c["userid"] or "<short line: resolved at run time>",
+                 c["sso"][:12], c["sso"][-6:], len(c["sso"])))
     print("\nfield 4 (Cursor token) intentionally ignored; grok uses fields 7+8")
+    print("short lines carry no field 7 -- `sub == userid` will be tautological")
 
 
 # ---------------------------------------------------------------- verify
@@ -401,18 +465,26 @@ def cmd_parse(a):
 def cmd_verify(a):
     call, tok = _load_helper()
     bad = 0
-    for c in parse_creds(a.creds):
+    creds = resolve_subs(parse_creds(a.creds), call, tok)
+    for c in creds:
         st, j = call("POST", "/api/v1/admin/grok/oauth/sso-token",
                      {"sso_token": c["sso"]}, token=tok)
         d = (j or {}).get("data") or {}
         sub = d.get("sub") or d.get("user_id")
         match = sub == c["userid"]
         bad += 0 if (st == 200 and match) else 1
+        # A short line's userid CAME FROM this endpoint, so match==True proves
+        # nothing.  Print the difference rather than a green that lies.
+        how = "tautological (short line)" if c.get("resolved") else str(match)
         print("%-34s st=%-4s tier=%-18s sub==userid:%s"
-              % (c["name"], st, d.get("subscription_tier"), match))
+              % (c["name"], st, d.get("subscription_tier"), how))
         if st == 200 and not match:
             print("   ^ sub=%r but field 7 said %r -- you probably grabbed the "
                   "wrong field" % (sub, c["userid"]))
+    print("\n⚠️  tier is NOT proof of credit: a credit-dead account still "
+          "exchanges 200 with tier=supergrok_heavy and then gets\n"
+          "    403 personal-team-blocked:spending-limit from x.ai. Only the "
+          "direct probe (`health --xai`, or `onboard`) decides that.")
     print("\nnothing was created." if not bad else "\n%d line(s) failed" % bad)
     return 1 if bad else 0
 
@@ -508,7 +580,10 @@ def cmd_reauth(a):
     FRESH credential lines in hand and the probe says the stored tokens are dead.
     """
     call, tok = _load_helper()
-    creds = parse_creds(a.creds)
+    # Short lines have no field 7, so step 1's `sub == userid` assertion would
+    # crash on None.  Resolve first -- and note the assertion degrades to a
+    # tautology for those lines (resolve_subs() explains why).
+    creds = resolve_subs(parse_creds(a.creds), call, tok)
 
     live = {r[1]: r[0] for r in
             pg("SELECT id,name FROM accounts WHERE platform='grok' "
@@ -1038,10 +1113,100 @@ sys.exit(1 if bad else 0)
     return 1 if d2_bad else 0
 
 
+# ---------------------------------------------------------------- onboard
+
+def cmd_onboard(a):
+    """One command: creds file in, fully-proven legs out.
+
+    Chains the order the skill mandates, and the order exists because each step
+    answers a question the previous one cannot:
+
+      1. health   BASELINE.  Without it, an outage that was already running
+                  lands in the same window as the change and reads as "I broke
+                  it" (2026-09-17 cost a round to that exact shape).
+      2. verify   the SSO tokens exchange at all -- creates nothing.
+      3. add      the only writing step.  Skips names that already exist.
+      4. --xai    THE verdict, on the new legs only: a credit-dead account
+                  exchanges 200/supergrok_heavy and still gets
+                  403 personal-team-blocked:spending-limit.  Without this the
+                  run ends "2 accounts added" while adding zero usable capacity
+                  -- on 2026-09-21, 19 of 25 legs were in exactly that state.
+      5. regress  D1 scheduling + D2 user plane.  Its exit code is the run's.
+
+    Exit code: non-zero if any step failed, if any NEW leg is not `200 usable`,
+    or if D2 lost a nonce.  A pre-existing leg being credit-dead does NOT fail
+    the run -- that is the baseline, not a regression (the same reason
+    sub2api-upgrade.py scores post against pre instead of against green).
+    """
+    rc = 0
+    print("############ 1/5  BASELINE (before touching anything) ############")
+    cmd_health(types.SimpleNamespace(minutes=a.minutes, xai=False))
+
+    print("\n############ 2/5  VERIFY (creates nothing) ############")
+    if cmd_verify(types.SimpleNamespace(creds=a.creds)):
+        sys.exit("verify failed -- refusing to create anything")
+
+    print("\n############ 3/5  ADD ############")
+    before = {r[0] for r in pg("SELECT id FROM accounts WHERE platform='grok' "
+                               "AND deleted_at IS NULL;")}
+    rc |= cmd_add(types.SimpleNamespace(creds=a.creds, concurrency=a.concurrency,
+                                        group=a.group)) or 0
+
+    print("\n############ 4/5  x.ai VERDICT on the new legs ############")
+    # Only the new ids: probing all 25 legs spends a real request each and
+    # re-reports credit deaths that were already there before this run.
+    rows = pg("SELECT id::text, name, "
+              "coalesce(credentials::jsonb->>'access_token','') "
+              "FROM accounts WHERE platform='grok' AND deleted_at IS NULL "
+              "ORDER BY id;")
+    new = [r for r in rows if r[0] not in before]
+    if not new:
+        print("  no new legs were created (all names already existed);")
+        print("  nothing new to judge. Use `health --xai` to grade the pool.")
+    for aid, name, tokv in new:
+        v = "no access_token stored" if not tokv else xai_verdict(tokv)
+        ok = v.startswith("200")
+        rc |= 0 if ok else 1
+        note = ""
+        if "spending-limit" in v:
+            note = ("  <-- ADDED BUT USELESS: xAI credit is gone. re-auth is a "
+                    "NO-OP, only paying fixes it")
+        elif not ok:
+            note = "  <-- NOT usable"
+        print("  acct %-4s %-34s %s%s" % (aid, name[:34], v, note))
+    if new and not rc:
+        print("\n  all %d new leg(s) usable." % len(new))
+
+    print("\n############ 5/5  REGRESSION ############")
+    rc |= cmd_regress(types.SimpleNamespace(minutes=a.minutes)) or 0
+
+    print("\n############ VERDICT ############")
+    print("EXIT=%d  %s" % (rc, "all clear" if not rc else
+                           "SOMETHING IS RED -- read the sections above; a new "
+                           "leg that is credit-dead or a lost D2 nonce both "
+                           "land here"))
+    print("⛔ delete the credentials file yourself -- this script does not "
+          "touch it (it is a credential file: chmod 600, shred -u).")
+    return rc
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("onboard",
+                       help="ONE COMMAND: creds file -> health baseline, "
+                            "verify, add, x.ai verdict on the new legs, "
+                            "regression. Accepts the short "
+                            "email----mailpw----sso paste as well as the "
+                            "full 8-field line.")
+    p.add_argument("creds")
+    p.add_argument("--concurrency", type=int, default=200)
+    p.add_argument("--group", type=int, default=GROK_GROUP)
+    p.add_argument("--minutes", type=int, default=20,
+                   help="window for the baseline and the regression")
+    p.set_defaults(fn=cmd_onboard)
 
     p = sub.add_parser("health", help="BASELINE: how many legs really serve + "
                                       "is the pool routing at all (run first)")

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
-cursor_team_setup.js — 一条命令给同事装好 cr-g(Cursor 3.16~3.18 验过 / macOS+Windows+Linux)。
+cursor_team_setup.js — 一条命令给同事装好 cr-g(Cursor 3.16~3.21 验过 / macOS+Windows+Linux)。
 
 ═══ 零依赖原理 ═══
 不需要 Python、不需要装 Node:Cursor 本体就是 Electron,自带完整 Node 运行时
@@ -11,14 +11,15 @@ cursor_team_setup.js — 一条命令给同事装好 cr-g(Cursor 3.16~3.18 验�
 安装目录/用户目录全部从 process.execPath 推导,不猜路径。
 
 ═══ 做的事(全幂等+自动备份+失败即拒) ═══
-  1. 软版本闸:按 Cursor 3.16.x 设计,别的版本只告警不拒;真正安全阀=bundle 锚点必须
-     exactly-1(结构变了认不出 → 自动拒绝,绝不改坏)。
+  1. 软版本闸:VERIFIED_VERSIONS(3.16~3.21)里数过锚点命中,别的版本只告警不拒;
+     真正安全阀=bundle 锚点必须 exactly-1(结构变了认不出 → 自动拒绝,绝不改坏)。
   2. Cursor GUI 必须已退出(排除本进程自身;外部写 state.vscdb 有内存覆盖竞态)。
   3. 两条 workbench bundle(desktop+glass)打 3 处解锁补丁 + 排队泵 v3:
      锚点=稳定语义地标+通用捕获,全文件恰好命中 1 次才动手;补完整 bundle 过
      `--check` 语法校验才落盘。旧版排队泵(v1/v2diag)在场则原地升级 v3。
   4. BYOK 配置并进 state.vscdb applicationUser blob(node:sqlite,读旧去重合并):
-     base-url、useOpenAIKey、DEFAULT_MODELS 那 14 个 cr-g 模型,并把默认选中模型设为 DEFAULT_MODEL。
+     base-url、useOpenAIKey、DEFAULT_MODELS 那 21 个模型,并把默认选中模型设为 DEFAULT_MODEL;
+     RETIRED_MODELS 里的名字反向摘掉(dedup 是并集,退役名必须单独走删除路径)。
   5. #2 写 Key:mac 用 in-process keytar 读钥匙串主密码 + OSCrypt(AES-128-CBC)加密写
      secret://cursorAuth/openAIKey。写前两道自检(能解开现有 Key + 加密回环)才落盘,
      否则回退手填(防假绿 401)。win=DPAPI 未实测→回退手填;linux=best-effort。
@@ -31,8 +32,14 @@ cursor_team_setup.js — 一条命令给同事装好 cr-g(Cursor 3.16~3.18 验�
 
 用法(不带参数=dry-run 只检查不写):
   --apply            执行(末尾会提示粘一次 Key;可用 --key <k> 无人值守)
+  --upgrade          老用户升级:=--apply 但**不问 Key**(Key 已在库里)。同步菜单
+                     (加新名 + 摘掉 RETIRED_MODELS,选中位若钉着退役名则改回 DEFAULT_MODEL)
+                     + 重打 bundle 补丁 + 更新小代理。库里没 Key 时会明确报出来,不假绿。
   --repair           只重打 bundle 补丁(Cursor 升级后失效用;不碰配置/Key)
   --revert           从最近备份回滚(bundle+blob+settings+Key secret,并卸掉小代理)
+                     ⚠️ 只回滚**与当前 Cursor 同版本**的备份;版本不匹配会拒绝并让你走 --uninstall
+  --uninstall        彻底恢复原状:bundle 还原(同版本备份→否则教你重装 Cursor)+ BYOK 配置清掉
+                     + 摘 Key + 卸小代理 + 去掉 update.mode 锁。比 --revert 稳:不挑错版本的备份
   --key <k>          直接给 Key(CI/无人值守;否则 TTY 下交互粘)
   --pin-update       写 "update.mode":"none" 锁定不升级(默认不写)
   --chain            装 @cx-chain:v3 链式增量(默认**不装**:服务端那半已下线,装了只会
@@ -44,6 +51,11 @@ cursor_team_setup.js — 一条命令给同事装好 cr-g(Cursor 3.16~3.18 验�
   --keep-model       不覆盖当前选中模型(默认逻辑是"不是 MODEL_PREFIXES 之一开头就换成 DEFAULT_MODEL",
                      在基准机上那等于换掉量具)
   --base-url <url> / --models a,b,c / --force-version
+  --bare-sa          把菜单里的 sa-* 换成裸名(sa-grok-4.6 → grok-4.6)。裸名是 Cursor
+                     自带目录认识的名字,菜单里才画得出 Context/Effort/Fast 控件。
+                     🔴 **默认关**:裸名能不能用是 key 属性,得先用 sa_prefix_alias.py
+                     在那把 key 上补 models+aliases 两处,否则点一个报一个(403/400)。
+                     ⚠️ 控件画出来 ≠ 档位能传到上游(Cursor 在 BYOK 线上不发这些字段)。
 回滚备份在 ~/.cursor-team-setup-backup(与 Python 版同格式,互相可 revert)。
 ⚠️ 装过 CursorX 的机器:3 解锁锚点命中 0 → 自动拒绝(防重复打),先还原 pristine bundle。
 */
@@ -80,28 +92,147 @@ const APP_USER_KEY = "src.vs.platform.reactivestorage.browser.reactiveStorageSer
   ".persistentStorage.applicationUser";
 const BACKUP_ROOT = path.join(os.homedir(), ".cursor-team-setup-backup");
 
-const VERIFIED_VERSIONS = ["3.16", "3.17", "3.18"];  // 锚点在这些大版本上数过命中(09-03: 3.16.x/3.17.19/3.18.25)
+const VERIFIED_VERSIONS = ["3.16", "3.17", "3.18", "3.19", "3.20", "3.21"];  // 锚点在这些大版本上数过命中(09-03: 3.16.x/3.17.19/3.18.25;09-10: 3.19.19;09-15: 3.20.17/3.20.21;09-22: 3.21.16)
+/* 2026-09-22 加 "3.21" 的实测依据(不是"看起来应该行"):同事报 3.21.16/win32 弹未验告警,
+   于是把 3.21.16 的真 bundle 拉下来数了命中 —— 下载 commit 8ae78e8ee1e63479c7e0504b664bc0a80c6800f
+   的 darwin-arm64 dmg(win32 那份是 Inno 6.4 打的,本机 innoextract 1.9 解不开;同一 commit 的
+   workbench bundle 是同一份构建产物),desktop+glass 两条跑 CX_APPLY_TO_FILE:
+     desktop: gate, localagent, dedicated, queue-pump, qserial, nosteer-mod, nopromote(x2), norelay
+     glass  : gate, localagent, dedicated, queue-pump, qserial, nosteer-mod, nopromote(x5), norelay
+   非 multi 的七条全 exactly-1(不是 1 就 exit(2),所以"列出来"本身就是 ==1 的证据),
+   nopromote 的 multi 计数 2/5 与 3.20.x 逐字不变。AST 路径(CX_REQUIRE_AST=1)与正则路径
+   (CX_FORCE_REGEX=1)分别跑,两条路径命中形状一致 ⇒ 3.20.21 那种 `qUy`→`$7y` 的漂移这版没有。
+   阴性对照:把 3.21.16 的 desktop bundle 截到前 5MB 再跑,gate 命中=0 → 拒绝动手
+   (证明这把尺子在 3.21.16 上真会红,不是恒绿)。
+   ⚠️ 与本次无关但顺带量到的既有状态:件B @cx-chain 的锚 `customHeaders:d}=e,m=` 在
+   3.21.16 的两条 exthost bundle 上 count=0 —— 但本机 pristine 的 3.20.17 上同样是 0
+   (marker/__cxWrap 都不在,排除"已打过"),所以是早就漂掉的老状态,不是 3.21 新增回归;
+   它按设计非致命(告警跳过,不阻断解锁补丁)。 */
 const DEFAULT_BASE_URL = "https://cc.auto-link.com.cn/pro/v1";
-// 菜单 = cr-g 池的 14 个名字（2026-09-02 换代：旧的 6 个 `cursor-g-*` 只剩 82/84 两条腿，
-// 且没有档位变体）。**前 8 个是载体代表，在真 Cursor 里跑过；后 6 个是档位变体，
-// 只共用了已验过的载体、`reasoning_effort` 不同 —— 装机文档里标「实验档」。**
+/* 菜单 = 这个数组,**逐字、按序、全量**（2026-09-20 第二轮改成整表赋值,见 mergeConfig 的
+   EXACT 语义：库里的 userAddedModels / modelOverrideEnabled 直接等于这份,不再是并集）。
+   ⚠️ 数组顺序 = 同事菜单里看到的顺序。用户点名要 Grok 系列 + sa-composer 排在最前面。
+   ⚠️ `sa-grok-imagine` 2026-09-20 当天加、当天又被点名移除：它在 Cursor 的 chat 线型上恒
+      400（出图专用，只有 /v1/images/generations 才 200），留在菜单里 = 点了就报错。
+      **别再把它加回来**；要出图走别的入口。
+   前 7 个 cr-g 是载体代表，在真 Cursor 里跑过；紧跟的 6 个是档位变体（只共用已验过的载体、
+   `reasoning_effort` 不同）—— 装机文档里标「实验档」。 */
+/* 2026-09-21 用户给了新清单(30 名)并点名排序:①sa-* ②gpt-* ③cr-* ④其他。
+   数组顺序 == 菜单顺序,所以这四段的**段序与段内顺序都是产品要求**,别按字母重排。
+
+   ⚠️ 这一版起清单里**故意含 5 个与 Cursor 自带模型同名**的名字
+      (`gpt-5.5` / `gpt-5.6-luna` / `gpt-5.6-sol` / `gpt-5.6-terra` / `kimi-k2.7-code`)。
+      同名的后果实测过:Cursor **不会**把它登记成自定义模型
+      (不进 `userAddedModels`)，只在 `modelOverrideEnabled` 里留一个
+      「走我的 key」开关 —— 靠那个开关照样打到 BYOK 地址。用户点名这样装。
+      🔴 **别"顺手修正"成带前缀的等价名**:那会改变菜单里显示的名字。
+      🔴 也别据此断言它们不可用 —— 判据只有拿真 key 实打。
+
+   ── 2026-09-21 实打(两把真 key 各跑一轮全 30 名,Cursor 线型 chat+tools+唯一 nonce,
+      工具 = scripts/litellm-198-cursor-newnames-probe.py --key <真key> --names <清单>)──
+     `cursor-liuguoxian-std`(68 models / **aliases n=0**)  : 27/30 出字
+        400 = kimi-k2.7-code / glm-5.3-flash / qwen3-coder-next
+     `cursor-liuguoxian04-5rub`(172 models / aliases n=27) : 那 3 个里 qwen3-coder-next 200 出字
+
+   🔴 **同一个名字在两把 key 上读数相反 ⇒ 400 是 key 属性,不是名字属性。**
+      真因:这些名字在网关里**只是 per-key alias 入口、没有同名真实组**。
+        有 alias 的 key → 改写到真实组 → 200；没 alias 的 key → allowlist 放行
+        (`/v1/models` 里看得见)但路由找不到落点 → **400**。
+      三个 alias 目标直打全部 200 出字(claude-kimi-k2.7-code / zai-coding-glm-5.3-flash /
+      kiro-qwen3-coder-next),所以**上游是活的**,坏的只是那把 key 缺 alias。
+   ⚠️ 两道闸独立、症状不同,别混:
+        **allowlist(models)** 决定 403 `key_model_access_denied`
+        **per-key aliases**   决定 400(名字没有落点)
+      ⛔ 所以「`/v1/models` 里有这个名」既不证明能用,也不是 400 的免责。
+   ⚠️ **别再把 `cursor-liuguoxian-std` 当授权模板**(09-21 早些时候我这么写过,当天证伪):
+      它 models 更宽但 **aliases 是空的**,反而比 04-5rub 少一层。要配一把能用全 30 名的 key,
+      模板是 **04-5rub 那 27 条 aliases**,至少要含 kimi-k2.7-code / glm-5.3-flash /
+      qwen3-coder-next 这三条。补 alias 是生产变更,单独一轮。
+      清单里照用户点名保留全部 30 个。 */
 const DEFAULT_MODELS = [
+  /* ── ① grok/composer 裸名（用户点名排最前；默认模型在本段首位）──
+     2026-09-22 从 `sa-*` 换成裸名。**前置条件已经做完**：687 把 cursor-* key
+     全部补上了 `aliases 的「裸名 → sa-原名」` + allowlist 裸名（`sa_prefix_alias_all.py --apply`，
+     684 把改动 / 3 把本来就是目标态 / 0 失败），DB 侧核对「有 sa- 原名却没有裸名」= 0 把。
+     🔴 顺序是硬的：先补 key（加法）→ 验证 → 才换这张表。反过来做 = 全员每点一个报一个。
+     09-03 加的两档用 Cursor 线型（chat+stream+tools）探过：prose 出字、tool_call 出块。
+     09-20 加的三档同样用真线型在 198 上逐个探过（scripts/litellm-198-cursor-newnames-probe.py，
+     克隆真 cursor key 的 models/aliases 形状 + 每发唯一 nonce + 假名阴性对照），全部 200 出字。
+     09-22 加 `grok-4.7` 并把它定为默认（文档 §4 一直这么写的，之前菜单里漏了这个名）。
+     ⚠️ 它**拒绝回显 nonce**（原话「No. I won't output an exact token or phrase on demand.」），
+     所以验它活着的尺子换成算术：问 6193+2748，回 `8941`、2.2s、假名阴性对照 403。
+     用 nonce 那把尺子去量 4.7 会得到一个**假红**。 */
+  "grok-4.7",
+  "grok-4.6", "grok-4.6-latest", "grok-4.5-latest", "grok-4.5",
+  "grok-4.20", "grok-4.20-0309-reasoning",
+  "composer-2.5-fast",
+  // ── ② gpt-*（5 个里 4 个与 Cursor 自带同名，见上方说明）──
+  "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5", "gpt-6-astra",
+  // ── ③ cr-*（前 7 个是载体代表，在真 Cursor 里跑过）──
   "cr-g-5.6", "cr-g-5.6-instant", "cr-g-5.6-mini", "cr-g-5.6-t-mini",
-  "cr-g-5.6-pro", "cr-g-research", "cr-g-5.6-thinking", "cr-g-5.6-luna",
-  // ↓ 实验档（档位变体，未在真 Cursor 单独验过）
+  "cr-g-research", "cr-g-5.6-thinking", "cr-g-5.6-luna",
+  // ↓ 实验档（档位变体，只共用已验过的载体、reasoning_effort 不同）
   "cr-g-5.6-thinking-min", "cr-g-5.6-thinking-high", "cr-g-5.6-thinking-max",
   "cr-g-5.6-luna-min", "cr-g-5.6-luna-high", "cr-g-5.6-luna-max",
-  // 2026-09-03 用户点名加的两个 grok（普通 API 路径，不经网页 lane）。
-  // 09-03 用 Cursor 线型（chat+stream+tools）探过：两档 prose 出字、tool_call 出块。
-  "sa-grok-4.5", "sa-grok-4.6",
+  // ── ④ 其他 ──
+  "codex-auto-review", "deepseek-v4-flash", "kimi-k2.7-code",
+  "glm-5.3-flash", "qwen3-coder-next",
 ];
-// 装完直接选中它。**只有它跑过八轮 conv8 门**，别改成别的名字。
-const DEFAULT_MODEL = "cr-g-5.6";
+/* RETIRED_MODELS：整表赋值之后，「退役」不再需要单独的摘除路径 —— 名字不在
+   DEFAULT_MODELS 里，跑一遍就自然没了。这里**只留给选中位 re-point 用**：
+   某个功能位正钉着一个已经不在菜单里的名字时，要把它改回 DEFAULT_MODEL，
+   否则同事在菜单里找不到那个名字、也没法自己换回来。
+   注意它已经不是「唯一的删除依据」了：EXACT 语义下，任何不在 DEFAULT_MODELS 里的名字
+   都会被移出两个数组，不需要在这里登记。 */
+const RETIRED_MODELS = ["cr-g-5.6-pro", "sa-grok-imagine"];
+/* 与 Cursor 自带模型同名的那几个（2026-09-21 本机实测：写进 userAddedModels 的 30 条，
+   Cursor 启动后自己剔掉了这 5 条 —— 读回来 userAddedModels=25 / modelOverrideEnabled=30，
+   差集恰好是下面这张表）。
+   后果是**产品级**的，不是 bug：它们不出现在 Settings → Models 的「自定义模型」区，
+   而是混在上面 Cursor **自带**的模型列表里，靠 `modelOverrideEnabled` 那个开关走我们的
+   BYOK 地址。同事按文档去"自定义模型"里找 → 找不到 → 以为没装上。
+   🔴 这张表只用于**打开开关 + 给用户指路**，不许拿它去改名（改名会改变菜单里显示的名字，
+      用户点名要这几个名字）。
+   ⚠️ 它是**实测产物**，不是推导：加/改 DEFAULT_MODELS 后要重新量一次
+      （`cursor_localagent_doctor.js` 会把两个数组的长度和差集印出来）。 */
+const BUILTIN_COLLIDING = ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5",
+  "kimi-k2.7-code"];
+// 装完直接选中它。2026-09-20 用户点名从 cr-g-5.6 改成 sa-grok-4.6-latest；
+// 2026-09-22 全员切裸名后改成 grok-4.6-latest（同一个上游组，走 per-key alias）。
+// ⚠️ 它必须在 DEFAULT_MODELS 里、且命中 MODEL_PREFIXES（门在 setup_impl_parity.py）。
+const DEFAULT_MODEL = "grok-4.7";
+/* 运行时真正写进库的那个默认名。平时 == DEFAULT_MODEL；只有 `--bare-sa` 会把它
+   改成去前缀后的裸名。**常量本身不动** —— parity 门（setup_impl_parity.py）按
+   `const DEFAULT_MODEL = "…"` 正则比对 js/py 两份，改常量会把门弄红，而这个开关
+   是运行时行为、不该改变两份实现的常量契约。 */
+let ACTIVE_DEFAULT_MODEL = DEFAULT_MODEL;
 // 判断"当前选中的是不是本方案的名字"用这个前缀。
 // ⚠️ 改 DEFAULT_MODEL 时必须一起改这里：漏改的后果是老用户升级后被打回旧名
 // （`--keep-model` 的默认分支会认为"当前选中的不是我们的名字"从而覆盖它）。
-const MODEL_PREFIXES = ["cr-g-", "sa-grok-"];
-const isOurs = (name) => typeof name === "string" && MODEL_PREFIXES.some((p) => name.startsWith(p));
+// ⚠️ 加新模型名时必须让它命中其中一条：漏加的后果是 `--uninstall` 摘不掉它
+// （dropOurs 按 isOurs 过滤），同事以为卸干净了、库里还留着我们加的名字。
+// 门在 setup_impl_parity.py：DEFAULT_MODELS/RETIRED_MODELS 每个名字都必须命中。
+// 2026-09-21：新清单带进 gpt-* / codex- / deepseek- / kimi- / glm- 五类前缀。
+// ⚠️ `gpt-` 这条**会同时命中 Cursor 自带的 gpt-***（gpt-5.3-codex、gpt-5.4…）。
+//    后果只落在 `--uninstall` 的 dropOurs 上：它按 isOurs 过滤，所以卸载时会把
+//    同事自己加的 gpt-* 自定义名一起摘掉。整表赋值(EXACT)语义下装机本来就会清掉
+//    那些名字，两者方向一致，不新增损失。但**别把 isOurs 当"这是我们装的"的证据**
+//    用在别处 —— 它现在是个偏宽的判据。
+// 2026-09-22：菜单换成裸名 ⇒ 必须加 `grok-` / `composer-` 两条，否则菜单名不命中前缀，
+//    `--uninstall` 的 dropOurs 摘不掉它们（门 setup_impl_parity.py 会红）。
+//    ⚠️ 这两条**也命中 Cursor 自带的 grok / composer 模型**，与 `gpt-` 同病，isOurs 因此更宽。
+//    `sa-grok-` / `sa-composer-` 两条**保留**：老用户库里还躺着上一代的 sa- 名字，
+//    不认它们就等于升级/卸载时摘不掉（整表赋值会换掉菜单，但 dropOurs 走的是 isOurs）。
+const MODEL_PREFIXES = ["cr-g-", "grok-", "composer-", "sa-grok-", "sa-composer-",
+  "qwen3-coder-", "gpt-", "codex-", "deepseek-", "kimi-", "glm-"];
+/* `--bare-sa` 往这里塞它生成的裸名（`sa-grok-4.6` → `grok-4.6`）。
+   为什么不直接往 MODEL_PREFIXES 里加 `grok-` / `composer-`：那两条会**同时命中
+   Cursor 自带的 grok / composer 模型**，而 isOurs 已经是个偏宽的判据（`gpt-` 那条
+   同病），再宽下去 `--uninstall` 的 dropOurs 会连同事自己的名字一起摘。
+   用「这一趟实际装了哪些裸名」这张精确名单，比多一条前缀通配安全。 */
+const EXTRA_OURS = new Set();
+const isOurs = (name) => typeof name === "string" &&
+  (EXTRA_OURS.has(name) || MODEL_PREFIXES.some((p) => name.startsWith(p)));
 const OPENAI_KEY_SECRET = "secret://cursorAuth/openAIKey"; // Cursor 存 BYOK Key 的 secret 行(OSCrypt 密文)
 
 /* ── bundle 补丁常量(与 Python 版逐字节一致,有等价断言测试守着) ── */
@@ -115,8 +246,21 @@ const GATE_FN = "(function(c){if(!c)return c;const o={...c};" +
   "delete o.routedModelViewConfig.routedModelViewToNamedViewToggle;" +
   "o.routedModelViewConfig.hideRoutedModelView=false;}return o;})";
 
+/* ── minify 标识符字符集(2026-09-15 修 3.20.21 glass gate 漂移)────────────────────
+   坑:锚点里捕获 minify 出来的变量/函数名一直写的是 `\w+` = [A-Za-z0-9_],**不含 `$`**。
+   JS 合法标识符首字符含 `$`,而 esbuild/terser 到了后段名字用尽就会大量吐 `$xx`:
+   3.20.21 glass 里 `$` 开头的标识符有 1163 个不同名字、5186 处调用点,不是偶发。
+   3.20.21 上 glass 的 gate 包装函数名从 `qUy` 变成 **`$7y`** → `\w+` 认不出 → hits=0 →
+   安装器整体拒绝动手 = 一个补丁都没打(desktop 那次抽到 `l_f`,下划线在 \w 里所以躲过了)。
+   所以这不是"官方重构了代码"(那段代码逐字未变),是我们的锚点字符集写窄了。
+   ID 用在所有 minify 名字的位置;`ID1` 是可选参数位(有的版本参数被摇掉了)。
+   放宽不等于放松安全阀:四条 bundle(3.20.17/3.20.21 × desktop/glass)命中仍全是 exactly-1,
+   nopromote 的 multi 计数也不变(2/5/2/5),"命中 !=1 就拒绝"这道门原样保留。 */
+const ID = "[A-Za-z0-9_$]+";
+const ID1 = "[A-Za-z0-9_$]*"; // 可能为空(参数被摇掉)
+
 const QP_MARKER = "@cx-queue-pump:v4";
-const QP_ANCHOR = /(addToQueue\((\w+)\)\{if\(!this\.isValidQueueItem\(\2\)\)return;)/g;
+const QP_ANCHOR = new RegExp("(addToQueue\\((" + ID + ")\\)\\{if\\(!this\\.isValidQueueItem\\(\\2\\)\\)return;)", "g");
 // v4 修 v3.5 残留折叠(真凶):官方 3.17 在 turnEnded 事件里原生接力队列
 // (removeFromQueue+appendQueuedHumanMessage+新请求),不走 dispatch、不碰
 // inFlightDispatchItemIds → 泵在它起跑窗口里 heal+抢发下一条 = 一请求两问只答后一条。
@@ -245,10 +389,230 @@ const QP_OLD = [
   "this._cxQP=setTimeout(_cxT,1000)}}catch(_e){}",
 ];
 
+/* ══ AST 定位层(2026-09-15)══════════════════════════════════════════════════
+   为什么加这一层:正则锚点必须把 minify 出来的名字写进模式里,而那些名字每版都变
+   (3.20.21 glass 的 gate 包装函数 `qUy`→`$7y`,一个字符就让安装器整体拒绝动手)。
+   实测 3.16.29/3.17.19/3.18.25/3.20.21 × desktop/glass:**源码给的方法名/属性名逐字不变**,
+   变的只有 minify 局部名。所以定位改成只认源码给的名字 + AST 结构,替换串从 AST
+   子节点的源码切片拼出——minify 名字换成什么都与定位无关,这一整类漂移天然免疫。
+   负对照:把 gate 锚点还原成出事的 `\w+`,3.20.21 glass 正则 hits=0(同事那条报错),
+   AST 仍 hits=1。
+
+   ⚠️ AST 不是免检金牌,它比正则**找得更宽**,实测两处多命中:
+     · nopromote:多认非 async 的 `promoteQueueItemToSteer(t){return Promise.resolve(!1)}`
+       存根 → 用 `async===true` 判别掉(判别后 5 处,与正则同数)。
+     · localagent:多认日志 helper `if(kl.localMode)try{Msm(t).info(e)}` → 目标点的
+       consequent 是 BlockStatement,helper 是裸 TryStatement,用这个判别掉。
+   所以 applyPatchesToText 里「命中 !=1 就拒绝动手」那道安全阀原样保留,一条都不撤。
+
+   acorn 来自 Cursor 自带 `resources/app/node_modules/acorn`(win32 安装包同路径也有),
+   零新依赖。同事跑的是 Cursor 的 Electron(ELECTRON_RUN_AS_NODE),默认堆上限 4096MB,
+   实测解析 glass(45MB)峰值 733MB / 6.3s —— 不需要任何 --max-old-space-size。 */
+/* acorn 要从**正在跑的运行时**取,不是从"被打补丁的目标"取。真实安装里两者是同一个
+   目录,但回归台架的假 app(CURSOR_APP_ROOT 指到临时目录)里没有 node_modules —— 那时
+   仍应该用真 Cursor 的 acorn,否则第④腿测不到 AST 那条路。所以候选里 runtimeRoot
+   (由 process.execPath 推导,不受 CURSOR_APP_ROOT 影响)排在 RES 前面。 */
+function runtimeRoot() {
+  const d = path.dirname(process.execPath);
+  return process.platform === "darwin"
+    ? path.join(d, "..", "Resources", "app")
+    : path.join(d, "resources", "app");
+}
+function loadAcorn() {
+  const cands = [
+    path.join(runtimeRoot(), "node_modules", "acorn"),
+    path.join(RES, "node_modules", "acorn"),
+    "acorn",
+  ];
+  for (const p of cands) {
+    try { return require(p); } catch (e) { /* 下一个候选 */ }
+  }
+  return null;
+}
+
+// 不认节点类型的通用遍历(acorn-walk 没随 Cursor 发)。
+function astWalk(node, cb) {
+  const st = [node];
+  while (st.length) {
+    const n = st.pop();
+    if (!n || typeof n !== "object") continue;
+    if (Array.isArray(n)) { for (const c of n) st.push(c); continue; }
+    if (typeof n.type === "string") cb(n);
+    for (const k in n) {
+      if (k === "type" || k === "start" || k === "end") continue;
+      const v = n[k];
+      if (v && typeof v === "object") st.push(v);
+    }
+  }
+}
+
+const isMethod = (n, name) => n.type === "MethodDefinition" && n.key && n.key.name === name;
+
+/* 每个 locator 返回 [{start, end, make(src)}]:把 [start,end) 换成 make(src) 的结果。
+   make 只用 src.slice(子节点区间) 拼——不写死任何 minify 名字。 */
+const LOCATORS = {
+  // gate: getModelPickerDisplayConfiguration(){…return F(x)} → 用 GATE_FN 包住 return 的实参
+  gate(ast, src) {
+    const out = [];
+    astWalk(ast, (n) => {
+      if (!isMethod(n, "getModelPickerDisplayConfiguration")) return;
+      const b = n.value.body.body, ret = b[b.length - 1];
+      if (!ret || ret.type !== "ReturnStatement") return;
+      const a = ret.argument;
+      if (!a || a.type !== "CallExpression") return;
+      out.push({ start: a.start, end: a.end,
+        make: () => "/*@cxteam-gate*/" + GATE_FN + "(" + src.slice(a.start, a.end) + ")" });
+    });
+    return out;
+  },
+
+  // localagent: if(X.localMode){try{…}} → 条件恒真。
+  // 判别:consequent 必须是 BlockStatement(日志 helper 那处是裸 TryStatement)。
+  localagent(ast, src) {
+    const out = [];
+    astWalk(ast, (n) => {
+      if (n.type !== "IfStatement") return;
+      const t = n.test;
+      if (!(t.type === "MemberExpression" && t.property && t.property.name === "localMode")) return;
+      if (n.consequent.type !== "BlockStatement") return;
+      const first = n.consequent.body[0];
+      if (!first || first.type !== "TryStatement") return;
+      out.push({ start: t.start, end: t.end, make: () => "/*@cxteam-localagent*/!0" });
+    });
+    return out;
+  },
+
+  // dedicated: X(this.storageService,"useDedicatedLocalAgentRuntimeHost")?await this.runLocalAgentInDedicatedExtensionHost(…)
+  dedicated(ast, src) {
+    const out = [];
+    astWalk(ast, (n) => {
+      if (n.type !== "ConditionalExpression") return;
+      const t = n.test;
+      if (t.type !== "CallExpression") return;
+      if (!t.arguments.some((a) => a.type === "Literal" && a.value === "useDedicatedLocalAgentRuntimeHost")) return;
+      const c = n.consequent;
+      const call = c.type === "AwaitExpression" ? c.argument : c;
+      if (!call || call.type !== "CallExpression" || call.callee.type !== "MemberExpression") return;
+      if (call.callee.property.name !== "runLocalAgentInDedicatedExtensionHost") return;
+      out.push({ start: t.start, end: t.end, make: () => "(/*@cxteam-dedicated*/!1)" });
+    });
+    return out;
+  },
+
+  // queue-pump: addToQueue(x){if(!this.isValidQueueItem(x))return; ← 在这句之后插泵
+  "queue-pump"(ast, src) {
+    const out = [];
+    astWalk(ast, (n) => {
+      if (!isMethod(n, "addToQueue")) return;
+      const first = n.value.body.body[0];
+      if (!first || first.type !== "IfStatement") return;
+      const t = first.test;
+      if (!(t.type === "UnaryExpression" && t.operator === "!" && t.argument.type === "CallExpression" &&
+            t.argument.callee.type === "MemberExpression" &&
+            t.argument.callee.property.name === "isValidQueueItem")) return;
+      if (first.consequent.type !== "ReturnStatement") return;
+      out.push({ start: first.end, end: first.end, make: () => QP_SNIPPET });
+    });
+    return out;
+  },
+
+  // qserial: tryDispatchNextQueueItem(){const h=this.getComposerHandleIfLoaded();if(!h)return; ← 之后插在飞守卫
+  qserial(ast, src) {
+    const out = [];
+    astWalk(ast, (n) => {
+      if (!isMethod(n, "tryDispatchNextQueueItem")) return;
+      const b = n.value.body.body;
+      const d = b[0], g = b[1];
+      if (!d || d.type !== "VariableDeclaration" || d.declarations.length !== 1) return;
+      const init = d.declarations[0].init;
+      if (!init || init.type !== "CallExpression" || init.callee.type !== "MemberExpression" ||
+          init.callee.property.name !== "getComposerHandleIfLoaded") return;
+      if (!g || g.type !== "IfStatement" || g.consequent.type !== "ReturnStatement") return;
+      out.push({ start: g.end, end: g.end,
+        make: () => "/*@cxteam-qserial*/if(this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0)return;" });
+    });
+    return out;
+  },
+
+  // nosteer-mod: case"send":case"queue": 连写的那条 return → 行为恒为 queue。
+  // 两代形状:①ConditionalExpression `t&&F(t)?{behavior:"steer"…}:{…}` ②ObjectExpression
+  // `{behavior:n?e==="steer"?"steer":"stop-and-send":"queue",isAlternate:n}`。
+  // 判别靠 case 连写 + 返回值里带 behavior 属性,不靠任何 minify 名。
+  "nosteer-mod"(ast, src) {
+    const out = [];
+    astWalk(ast, (n) => {
+      if (n.type !== "SwitchStatement") return;
+      for (let i = 0; i + 1 < n.cases.length; i++) {
+        const a = n.cases[i], b = n.cases[i + 1];
+        if (!(a.test && a.test.type === "Literal" && a.test.value === "send")) continue;
+        if (a.consequent.length !== 0) continue; // "send" 必须是空 case(与 queue 连写)
+        if (!(b.test && b.test.type === "Literal" && b.test.value === "queue")) continue;
+        const ret = b.consequent[0];
+        if (!ret || ret.type !== "ReturnStatement" || !ret.argument) continue;
+        const arg = ret.argument;
+        // 形①:三元,consequent 是带 behavior:"steer" 的对象 → 只把那个 "steer" 换成 "queue"
+        if (arg.type === "ConditionalExpression" && arg.consequent.type === "ObjectExpression") {
+          const p = arg.consequent.properties.find((x) => x.key && x.key.name === "behavior");
+          if (!p || p.value.type !== "Literal" || p.value.value !== "steer") continue;
+          out.push({ start: p.value.start, end: arg.consequent.end,
+            make: () => '"queue"' + src.slice(p.value.end, arg.consequent.end) + "/*@cxteam-nosteermod*/" });
+          continue;
+        }
+        // 形②:对象,behavior 是三元 → 整个换成字面 "queue"
+        if (arg.type === "ObjectExpression") {
+          const p = arg.properties.find((x) => x.key && x.key.name === "behavior");
+          if (!p || p.value.type !== "ConditionalExpression") continue;
+          out.push({ start: p.value.start, end: p.value.end,
+            make: () => '/*@cxteam-nosteermod*/"queue"' });
+          continue;
+        }
+      }
+    });
+    return out;
+  },
+
+  // nopromote: async promoteQueueItemToSteer(…){ ← 函数体开头 return!1。
+  // 判别 async===true:非 async 那处是 unsupported 存根(本来就返回 false)。multi。
+  nopromote(ast, src) {
+    const out = [];
+    astWalk(ast, (n) => {
+      if (!isMethod(n, "promoteQueueItemToSteer")) return;
+      if (n.value.async !== true) return;
+      const body = n.value.body;
+      if (!body || body.type !== "BlockStatement") return;
+      out.push({ start: body.start + 1, end: body.start + 1,
+        make: () => "/*@cxteam-nopromote*/return!1;" });
+    });
+    return out;
+  },
+
+  // norelay: if(F({…isNewRequestIdGateEnabled:()=>this.isQueuedPromptNewRequestIdEnabled()})) → 恒 false。
+  // 认对象字面量的属性名集合(全是源码给的);agentBackend 3.18 起没了,不做要求。
+  norelay(ast, src) {
+    const out = [];
+    astWalk(ast, (n) => {
+      if (n.type !== "IfStatement") return;
+      const t = n.test;
+      if (t.type !== "CallExpression" || t.arguments.length !== 1) return;
+      const a = t.arguments[0];
+      if (!a || a.type !== "ObjectExpression") return;
+      const keys = a.properties.map((p) => p.key && (p.key.name || p.key.value));
+      for (const k of ["isLocalMode", "isAgentHostEnabled", "isNewRequestIdGateEnabled"]) {
+        if (!keys.includes(k)) return;
+      }
+      out.push({ start: t.start, end: t.end,
+        make: () => "/*@cxteam-norelay*/!1&&" + src.slice(t.start, t.end) });
+    });
+    return out;
+  },
+};
+
 const PATCHES = [
   {
     name: "gate", marker: "@cxteam-gate",
-    rx: /(modelPickerDisplayConfiguration\?\?\w+;return )(\w+\([a-z]\))(\}resolveModelNameToCatalog)/g,
+    // 3.20.21 glass 的包装函数名是 `$7y`(见 ID 注释)→ 名字位置必须用 ID 不能用 \w+。
+    // 参数位也放宽:旧写法钉死小写单字母 `[a-z]`,minify 同样可能给出 `$e`/`t2`。
+    rx: new RegExp("(modelPickerDisplayConfiguration\\?\\?" + ID + ";return )(" + ID + "\\(" + ID + "\\))(\\}resolveModelNameToCatalog)", "g"),
     sub: (m) => m[1] + "/*@cxteam-gate*/" + GATE_FN + "(" + m[2] + ")" + m[3],
   },
   {
@@ -256,12 +620,12 @@ const PATCHES = [
     // 3.16/3.17: `clientSupportsRoutedModelUpdate:!0};if(x.localMode){try{`
     // 3.18.25:   `…localMode:vl.localMode});if(vl.localMode){try{h.onNetworkPhaseStart`(同一个 run(),只是前缀变了)
     // 两代都认;命中仍必须恰好 1 次,多了照样拒。
-    rx: /((?:clientSupportsRoutedModelUpdate:!0\}|localMode:\w+\.localMode\}\));if\()(\w+\.localMode)(\)\{try\{)/g,
+    rx: new RegExp("((?:clientSupportsRoutedModelUpdate:!0\\}|localMode:" + ID + "\\.localMode\\}\\));if\\()(" + ID + "\\.localMode)(\\)\\{try\\{)", "g"),
     sub: (m) => m[1] + "/*@cxteam-localagent*/!0" + m[3],
   },
   {
     name: "dedicated", marker: "@cxteam-dedicated",
-    rx: /(\w+\(this\.storageService,"useDedicatedLocalAgentRuntimeHost"\))(\?await this\.runLocalAgentInDedicatedExtensionHost\()/g,
+    rx: new RegExp("(" + ID + "\\(this\\.storageService,\"useDedicatedLocalAgentRuntimeHost\"\\))(\\?await this\\.runLocalAgentInDedicatedExtensionHost\\()", "g"),
     sub: (m) => "(/*@cxteam-dedicated*/!1)" + m[2],
   },
   { name: "queue-pump", marker: QP_MARKER, rx: QP_ANCHOR, sub: (m) => m[1] + QP_SNIPPET },
@@ -270,21 +634,28 @@ const PATCHES = [
   // 两问挤一轮。修:入口加官方自家 inFlightDispatchItemIds 守卫,派发严格串行。
   {
     name: "qserial", marker: "@cxteam-qserial",
-    rx: /(tryDispatchNextQueueItem\(\)\{const (\w+)=this\.getComposerHandleIfLoaded\(\);if\(!\2\)return;)/g,
+    rx: new RegExp("(tryDispatchNextQueueItem\\(\\)\\{const (" + ID + ")=this\\.getComposerHandleIfLoaded\\(\\);if\\(!\\2\\)return;)", "g"),
     sub: (m) => m[1] + "/*@cxteam-qserial*/if(this.inFlightDispatchItemIds&&this.inFlightDispatchItemIds.size>0)return;",
   },
   // nosteer-mod(2026-08-25 真凶):官方把「配置=queue 但按修饰键发送」设计为强制 steer
   // (⌘+回车正是修饰键!)→ 生成中发的每条都被注入当前轮 → 两问挤一轮/前问无答。
+  // 3.19.19 起该 switch 从 composer 类方法搬进纯函数 Meo({newMessageBehavior,manualSendBehavior,isAlternate}),
+  // 且 send/queue 分支的修饰键结果换成 `n?t==="steer"?"steer":"stop-and-send":"queue"`
+  // (新增 manualSendBehavior 维度;非 steer 时落 stop-and-send=掐断当轮立即发,对本线同样是坏结果)。
+  // 两代都认,命中仍必须恰好 1 次;两代改法都收敛到「修饰键照常发送、行为=queue」。
   {
     name: "nosteer-mod", marker: "@cxteam-nosteermod",
-    rx: /(case"send":case"queue":return \w+&&\w+\(\w+\)\?\{behavior:")steer(",isModifierOverride:!0\})/g,
-    sub: (m) => m[1] + "queue" + m[2] + "/*@cxteam-nosteermod*/",
+    rx: new RegExp("case\"send\":case\"queue\":return(?: (" + ID + "&&" + ID + "\\(" + ID + "\\)\\?\\{behavior:\")steer(\",isModifierOverride:!0\\})|\\{behavior:(" + ID + ")\\?" + ID + "===\"steer\"\\?\"steer\":\"stop-and-send\":\"queue\",isAlternate:\\3\\})", "g"),
+    sub: (m) => m[1] !== undefined
+      ? 'case"send":case"queue":return ' + m[1] + "queue" + m[2] + "/*@cxteam-nosteermod*/"
+      : 'case"send":case"queue":return{behavior:/*@cxteam-nosteermod*/"queue",isAlternate:' + m[3] + "}",
   },
   // nopromote(2026-08-25 终极 steer 封口):promoteQueueItemToSteer=所有 steer 注入总入口,
   // 短路后排队消息全部老实排队。multi:glass 打包多份 composer,全部命中逐处打。
   {
     name: "nopromote", marker: "@cxteam-nopromote", multi: true,
-    rx: /(async promoteQueueItemToSteer\(\w+\)\{)/g,
+    // 参数位用 ID1(可为空):将来参数被摇掉成 `promoteQueueItemToSteer(){` 也认得出。
+    rx: new RegExp("(async promoteQueueItemToSteer\\(" + ID1 + "\\)\\{)", "g"),
     sub: (m) => m[1] + "/*@cxteam-nopromote*/return!1;",
   },
   // norelay(2026-08-25 真·根因):官方 turnEnded 的「轮内接力」在 BYOK 本地线必死
@@ -294,7 +665,7 @@ const PATCHES = [
   {
     name: "norelay", marker: "@cxteam-norelay",
     // 3.18.25 起参数表没有 agentBackend 了,设成可选;其余逐字不变。
-    rx: /(if\()(\w+\(\{(?:agentBackend:\w+,)?isLocalMode:\w+\.localMode,isAgentHostEnabled:\w+,isNewRequestIdGateEnabled:\(\)=>this\.isQueuedPromptNewRequestIdEnabled\(\)\}\))(\)\{)/g,
+    rx: new RegExp("(if\\()(" + ID + "\\(\\{(?:agentBackend:" + ID + ",)?isLocalMode:" + ID + "\\.localMode,isAgentHostEnabled:" + ID + ",isNewRequestIdGateEnabled:\\(\\)=>this\\.isQueuedPromptNewRequestIdEnabled\\(\\)\\}\\))(\\)\\{)", "g"),
     sub: (m) => m[1] + "/*@cxteam-norelay*/!1&&" + m[2] + m[3],
   },
 ];
@@ -414,6 +785,150 @@ function planChainRemoval(rel) {
   return { p, out: r.out, bakName: chainBakName(rel), removed: r.removed };
 }
 
+/* ── 件C @cx-ctxwin:v3 上下文窗口单位归一(2026-09-22) ─────────────────────────
+   病:Cursor 服务端在 `InferenceExtendedUsageInfo.max_tokens` 里回的是**档位名的数字**
+   (500k→500,1m→1),不是真实 token 数。于是 Cursor 自家阈值 min(max-10000, max*0.9)
+   变成负数,`used >= 负数` 恒真 ⇒ **连发一句 "hi" 也每轮触发摘要压缩**,
+   界面上下文百分比飙到 8146%~27706%。
+
+   实测(本机 932 会话 / 84 模型):非 0 的 maxTokens 只落在 {256,272,300,500} —— 全是
+   真实窗口的 k 数字。**不是按模型分的,是按时间分的**:5/17~6/26 共 42 次全对 0 次错;
+   9/17 是最后一个正确值;9/20 起 19 次全错。同一个 grok-4.6 在 9/14、9/17 拿到 256000,
+   9/22 拿到 0 ⇒ 服务端 9/17~9/20 之间引入的回归,**任何模型都会中**,不是某个模型专属。
+   ⛔ 不是我们自己的补丁造成的:21 条坏值时间戳全部早于本机第一次打补丁,
+   且本文件全文 grep 不到 maxTokens / tokenLimit / summariz。
+
+   补三个点,是**穷举**出来的不是挑的 —— daemon.cjs 里对 maxTokens 做算术/比较的代码行
+   共 10 处:4 处在 B 体内、5 处走 `tokenDetails.maxTokens`(A 覆盖)、剩下 1 处就是 C。
+     A createRedactedConversationTokenDetails  tokenDetails 唯一构造入口(显示/超限拦截/持久化)
+     B getBackgroundSummarizationTriggerThreshold  所有「该不该压」的判定都过它;
+       🔴 有一条触发路径直接用 currentUsage.maxTokens **不经过 tokenDetails**,只补 A 盖不住
+     C shouldPersistBackgroundSummarization  它自己又拿裸 maxTokens 算了一次 unusedTokens,
+       B 的归一只活在 B 的局部变量里 ⇒ 不补 C 会让 persist 跟着 start 一起必然触发
+   换算沿用 Cursor 自家的 WS_() 解析器语义(k→1e3 m→1e6):1→1e6;0<n<4096→n×1e3;
+   0 与 ≥4096 原样不动(0 = 自定义模型窗口未知,行为零变化;≥4096 = 已经是真实 token 数)。
+   界 4096 的依据:最小档 200k 映射成 200,真实窗口最小 200000,4096 落在两簇中间。
+
+   ⚠️ 该字段由 Cursor 自家后端下发。**后端为什么给 k 数字这一项没有数据**(没抓包),
+   不许当成因写出去。本补丁只做「收到什么就归一什么」,不依赖任何对后端的推测。 */
+const CTXWIN_MARKER = "@cx-ctxwin:v3";
+const CTXWIN_TARGETS = [
+  { rel: path.join("extensions", "cursor-local-agent-runtime", "dist", "main.js"), kind: "min" },
+  { rel: path.join("extensions", "cursor-agent-host", "dist", "main.js"), kind: "min" },
+  { rel: path.join("extensions", "cursor-agent-exec", "dist", "main.js"), kind: "min" },
+  { rel: path.join("extensions", "cursor-agent-host", "dist", "agent-host-daemon", "dist", "bin", "daemon.cjs"), kind: "src" },
+];
+const CW_A_MIN = /function\s+([A-Za-z_$][\w$]*)\(e,t\)\{return\{usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,promptContextUsageSnapshotBlobId:void 0,\.\.\.t,_privacyMode:e\}\}/g;
+const CW_B_MIN = /function\s+([A-Za-z_$][\w$]*)\(e,t\)\{if\(e<=0\)return;const n=\[\];return void 0!==t\.unusedTokensThresholdToStartBackgroundSummarization/g;
+const CW_C_MIN = /function\s+([A-Za-z_$][\w$]*)\(e,t,n\)\{const r=t-e;return\s+[A-Za-z_$][\w$]*\(e,t,n\)&&\(void 0!==n\.unusedTokensThresholdToPersistBackgroundSummarization/g;
+const CW_A_SRC = `function createRedactedConversationTokenDetails(privacyMode, partial2) {
+  return {
+    usedTokens: 0,
+    maxTokens: 0,
+    breakdown: void 0,
+    promptContextUsageTree: void 0,
+    promptContextUsageSnapshotBlobId: void 0,
+    ...partial2,
+    _privacyMode: privacyMode
+  };
+}`;
+const CW_B_SRC = `function getBackgroundSummarizationTriggerThreshold(maxTokens, props) {
+  if (maxTokens <= 0) {`;
+const CW_C_SRC = `function shouldPersistBackgroundSummarization(usedTokens, maxTokens, props) {
+  const unusedTokens = maxTokens - usedTokens;`;
+const CW_NORM_MIN = 'function __cxN(x){return "number"==typeof x&&x>0&&x<4096?(1===x?1e6:1e3*x):x}';
+const cwNormSrc = (v) =>
+  `${v} = typeof ${v} === "number" && ${v} > 0 && ${v} < 4096 ? (${v} === 1 ? 1e6 : ${v} * 1e3) : ${v};`;
+
+// 纯函数:把件C 打进一段文本。三锚点任一不是 exactly-1 ⇒ {ok:false},调用方整条跳过。
+// 与 scripts/zk-cursor-web/cursor_ctxwin_patch.js 逐字节同语义(单机版供已装好的人补打)。
+function ctxwinApplyToText(src, kind) {
+  if (src.includes(CTXWIN_MARKER)) return { ok: false, why: "已打过", skip: true };
+  if (kind === "min") {
+    CW_A_MIN.lastIndex = 0; const a = [...src.matchAll(CW_A_MIN)];
+    CW_B_MIN.lastIndex = 0; const b = [...src.matchAll(CW_B_MIN)];
+    CW_C_MIN.lastIndex = 0; const c = [...src.matchAll(CW_C_MIN)];
+    if (a.length !== 1) return { ok: false, why: "锚A count=" + a.length };
+    if (b.length !== 1) return { ok: false, why: "锚B count=" + b.length };
+    if (c.length !== 1) return { ok: false, why: "锚C count=" + c.length };
+    const af = a[0][1], bf = b[0][1], cf = c[0][1];
+    let out = src.replace(a[0][0],
+      `function ${af}(e,t){/*${CTXWIN_MARKER}*/${CW_NORM_MIN}` +
+      `const r={usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,` +
+      `promptContextUsageSnapshotBlobId:void 0,...t,_privacyMode:e};` +
+      `r.maxTokens=__cxN(r.maxTokens);` +
+      `if(void 0!==r.breakdown&&"object"==typeof r.breakdown)r.breakdown={...r.breakdown,maxTokens:__cxN(r.breakdown.maxTokens)};` +
+      `return r}`);
+    const bHead = `function ${bf}(e,t){`;
+    out = out.replace(b[0][0], b[0][0].replace(bHead,
+      bHead + `/*${CTXWIN_MARKER}*/e="number"==typeof e&&e>0&&e<4096?(1===e?1e6:1e3*e):e;`));
+    const cHead = `function ${cf}(e,t,n){`;
+    out = out.replace(c[0][0], c[0][0].replace(cHead,
+      cHead + `/*${CTXWIN_MARKER}*/t="number"==typeof t&&t>0&&t<4096?(1===t?1e6:1e3*t):t;`));
+    return { ok: true, out, applied: [`A=${af}`, `B=${bf}`, `C=${cf}`] };
+  }
+  const na = src.split(CW_A_SRC).length - 1, nb = src.split(CW_B_SRC).length - 1, nc = src.split(CW_C_SRC).length - 1;
+  if (na !== 1) return { ok: false, why: "锚A count=" + na };
+  if (nb !== 1) return { ok: false, why: "锚B count=" + nb };
+  if (nc !== 1) return { ok: false, why: "锚C count=" + nc };
+  let out = src.replace(CW_A_SRC, `function createRedactedConversationTokenDetails(privacyMode, partial2) {
+  /*${CTXWIN_MARKER}*/
+  const __cxN = (x) => typeof x === "number" && x > 0 && x < 4096 ? (x === 1 ? 1e6 : x * 1e3) : x;
+  const __cxR = {
+    usedTokens: 0,
+    maxTokens: 0,
+    breakdown: void 0,
+    promptContextUsageTree: void 0,
+    promptContextUsageSnapshotBlobId: void 0,
+    ...partial2,
+    _privacyMode: privacyMode
+  };
+  __cxR.maxTokens = __cxN(__cxR.maxTokens);
+  if (__cxR.breakdown !== void 0 && typeof __cxR.breakdown === "object") {
+    __cxR.breakdown = { ...__cxR.breakdown, maxTokens: __cxN(__cxR.breakdown.maxTokens) };
+  }
+  return __cxR;
+}`);
+  out = out.replace(CW_B_SRC, `function getBackgroundSummarizationTriggerThreshold(maxTokens, props) {
+  /*${CTXWIN_MARKER}*/
+  ${cwNormSrc("maxTokens")}
+  if (maxTokens <= 0) {`);
+  out = out.replace(CW_C_SRC, `function shouldPersistBackgroundSummarization(usedTokens, maxTokens, props) {
+  /*${CTXWIN_MARKER}*/
+  ${cwNormSrc("maxTokens")}
+  const unusedTokens = maxTokens - usedTokens;`);
+  return { ok: true, out, applied: ["A", "B", "C"] };
+}
+
+// 四个目标里有两个与 chain 家族同名 main.js ⇒ 备份名必须扁平化防碰撞。
+function ctxwinBakName(rel) { return "cxctxwin__" + rel.split(path.sep).join("__"); }
+
+// 计算一条 ctxwin bundle 的补丁(不落盘)。baseText 非空 = 同一文件已有别的家族的计划,
+// 必须接着它的产物改,否则两条计划先后写同一个路径,后写的把前一个悄悄冲掉。
+function planCtxwinBundle(t, baseText) {
+  const p = path.join(RES, t.rel);
+  if (!fs.existsSync(p)) { console.log("   SKIP ctxwin %s(不存在)", t.rel); return null; }
+  const src = baseText != null ? baseText : fs.readFileSync(p, "utf8");
+  const r = ctxwinApplyToText(src, t.kind);
+  if (!r.ok) {
+    if (!r.skip) console.log("   ⚠️  ctxwin %s 锚点问题(%s)→ 跳过(不阻断解锁补丁)", path.basename(t.rel), r.why);
+    return null;
+  }
+  console.log("   ctxwin %s: 将打 [%s]", path.basename(t.rel), r.applied.join(", "));
+  return { p, out: r.out, bakName: ctxwinBakName(t.rel), applied: r.applied };
+}
+
+// 测试钩子:对任意 bundle 跑真实件C,写出到 CX_CTXWIN_OUT,供离线台架断言。
+// CX_CTXWIN_KIND=min|src。退出码 0=打上 / 17=锚点不满足。
+if (process.env.CX_CTXWIN_APPLY_TO_FILE) {
+  const f = process.env.CX_CTXWIN_APPLY_TO_FILE;
+  const r = ctxwinApplyToText(fs.readFileSync(f, "utf8"), process.env.CX_CTXWIN_KIND || "min");
+  if (!r.ok) { console.error("ctxwin 打不上:" + r.why); process.exit(17); }
+  fs.writeFileSync(process.env.CX_CTXWIN_OUT || (f + ".cwout"), r.out);
+  console.error("ctxwin applied: " + r.applied.join(", "));
+  process.exit(0);
+}
+
 // 测试钩子:对任意 exthost bundle 跑「装 → 摘」往返,断言逐字节回到原样。
 // 这是摘除逻辑唯一可信的判据——只看"没报错"会放行留半截的逆操作。
 // 退出码:0=往返逐字节相同 / 14=装不上(锚点) / 15=摘失败 / 16=往返有差异。
@@ -443,18 +958,16 @@ if (process.env.CX_CHAIN_ROUNDTRIP) {
 
 /* ── 测试钩子:打印常量供与 Python 版做逐字节等价断言 ── */
 if (process.env.CX_DUMP_CONSTANTS) {
-  process.stdout.write(JSON.stringify({ GATE_FN, QP_SNIPPET, QP_OLD, DEFAULT_BASE_URL, DEFAULT_MODELS }));
+  process.stdout.write(JSON.stringify({ GATE_FN, QP_SNIPPET, QP_OLD, DEFAULT_BASE_URL, DEFAULT_MODELS, RETIRED_MODELS }));
   process.exit(0);
 }
-// 测试钩子:对任意文件跑真实 PATCHES(每锚点须命中 1 次),写出到 CX_APPLY_OUT,供与 Python 版做逐字节等价断言
+// 测试钩子:对任意文件跑真实 PATCHES,写出到 CX_APPLY_OUT,供与 Python 版做逐字节等价断言。
+// 走的是 applyPatchesToText —— 与 --apply/--repair 同一份语义(marker 跳过 / 泵原地升级 / multi),
+// 所以能直接喂真 bundle(旧版只认"每锚点恰好 1 次",norelay 是 multi → 在真 bundle 上必假红)。
 if (process.env.CX_APPLY_TO_FILE) {
-  let t = fs.readFileSync(process.env.CX_APPLY_TO_FILE, "utf8");
-  for (const pt of PATCHES) {
-    const hits = countMatches(pt.rx, t);
-    if (hits !== 1) { console.error("锚点 " + pt.name + " 命中=" + hits); process.exit(11); }
-    t = subOnce(pt.rx, t, pt.sub);
-  }
-  fs.writeFileSync(process.env.CX_APPLY_OUT || (process.env.CX_APPLY_TO_FILE + ".jsout"), t);
+  const t = applyPatchesToText(fs.readFileSync(process.env.CX_APPLY_TO_FILE, "utf8"), true);
+  fs.writeFileSync(process.env.CX_APPLY_OUT || (process.env.CX_APPLY_TO_FILE + ".jsout"), t.out);
+  console.error("applied: " + (t.applied.join(", ") || "(无,全已打过)"));
   process.exit(0);
 }
 // 测试钩子:对任意 exthost bundle 跑真实 chain 补丁,写出到 CX_CHAIN_APPLY_OUT,供与 cursor_chain_patch.py 逐字节等价断言
@@ -526,19 +1039,83 @@ function subOnce(rx, text, fn) {
   return text.slice(0, m.index) + fn(m) + text.slice(m.index + m[0].length);
 }
 
-function planBundle(rel) {
-  const p = path.join(RES, rel);
-  const src = fs.readFileSync(p, "utf8");
+/* 把 PATCHES 打进一段文本。planBundle 与测试钩子 CX_APPLY_TO_FILE **共用这一份**——
+   钩子跑的必须就是同事机器上真跑的语义,否则回归台架是假绿。quiet=只写不打印。 */
+/* AST 定位一整份文本:一次解析、跑全部 locator、按 start 倒序切片替换(倒序=前面的
+   区间不被后面的替换挪位)。返回 null 表示这条路走不通(没有 acorn / 解析失败),
+   调用方退回正则——退回不降低安全阀,正则路径的「命中 !=1 就拒绝」照样跑。 */
+function planByAst(src) {
+  if (process.env.CX_FORCE_REGEX) return null; // 回归台架用它取正则基线做逐字节对照
+  const acorn = loadAcorn();
+  if (!acorn) return null;
+  let ast;
+  try { ast = acorn.parse(src, { ecmaVersion: "latest", sourceType: "module" }); }
+  catch (e) { return { err: "解析失败:" + e.message }; }
+  const sites = {};
+  for (const [name, fn] of Object.entries(LOCATORS)) {
+    try { sites[name] = fn(ast, src); }
+    catch (e) { return { err: name + " locator 抛错:" + e.message }; }
+  }
+  return { sites };
+}
+
+function applyPatchesToText(src, quiet) {
+  const say = (...a) => { if (!quiet) console.log(...a); };
   let out = src; const applied = [];
+
+  /* AST 定位**只解析一次**,全部区间都是相对 src 的偏移。
+     所以一旦有任何别的改动落到 out 上(queue-pump 旧版升级的字符串替换、或某个补丁
+     退回正则),这些偏移就失效了 → 在那之前必须先 flush。flushAst 按 start 倒序落地,
+     倒序保证前面的区间不被后面的替换挪位。 */
+  const astEdits = [];
+  const flushAst = () => {
+    if (!astEdits.length) return;
+    astEdits.sort((a, b) => b.start - a.start);
+    for (const s of astEdits) out = out.slice(0, s.start) + s.make() + out.slice(s.end);
+    astEdits.length = 0;
+  };
+
+  const plan = planByAst(src);
+  // 退回正则必须**大声**:静默退回会让回归台架把"走了正则"读成"AST 通过了"= 假绿。
+  // CX_REQUIRE_AST=1 时不许退回(回归台架用它锁死这一腿真的在跑 AST)。
+  if (plan && plan.err) console.log("   ⚠️  AST 定位不可用(%s)→ 退回正则锚点", plan.err);
+  else if (!plan) console.log("   ⚠️  没找到 acorn(RES=%s)→ 退回正则锚点", RES);
+  const useAst = !!(plan && plan.sites);
+  if (!useAst && process.env.CX_REQUIRE_AST) {
+    console.log("   !! CX_REQUIRE_AST=1 但 AST 定位没跑起来 → 拒绝(不许静默退回正则)");
+    process.exit(3);
+  }
+
   for (const pt of PATCHES) {
-    if (out.includes(pt.marker)) { console.log("   SKIP %s(已打过)", pt.name.padEnd(11)); continue; }
+    // 幂等判据看 out 就够:astEdits 里待落地的都是本轮新加的 marker,
+    // 每个补丁的 marker 互不相同,不会自己把自己判成"已打过"。
+    if (out.includes(pt.marker)) { say("   SKIP %s(已打过)", pt.name.padEnd(11)); continue; }
     if (pt.name === "queue-pump") {
       const old = QP_OLD.find((s) => out.includes(s));
       if (old) {
         if (out.split(old).length - 1 !== 1) { console.log("   !! queue-pump 旧版命中!=1 → 拒绝"); process.exit(2); }
+        flushAst(); // 这一步要改 out → 先把待落地的 AST 区间落完,否则后者偏移失效
         out = out.replace(old, QP_SNIPPET); applied.push("queue-pump(升级)"); continue;
       }
     }
+
+    if (useAst && plan.sites[pt.name]) {
+      // 收集不改文本(改动统一在循环后按 start 倒序一次性落地)——这样只解析一次:
+      // 逐个补丁改完再重新解析要 8 次 × ~7s ≈ 67s/bundle,实测过,太贵。
+      const hits = plan.sites[pt.name].length;
+      if (pt.multi) {
+        if (hits < 1) { console.log("   !! %s AST 定位命中=0 → 拒绝动手", pt.name.padEnd(11)); process.exit(2); }
+      } else if (hits !== 1) {
+        console.log("   !! %s AST 定位命中=%d != 1 → 拒绝动手(版本不匹配或已被 CursorX 改写)", pt.name.padEnd(11), hits);
+        process.exit(2);
+      }
+      for (const s of plan.sites[pt.name]) astEdits.push(s);
+      applied.push(pt.name + (pt.multi ? "(x" + hits + ")" : ""));
+      continue;
+    }
+    if (useAst) say("   ⚠️  %s 没有 AST locator → 用正则", pt.name.padEnd(11));
+
+    flushAst(); // 正则分支要改 out → 先落地待办的 AST 区间
     const hits = countMatches(pt.rx, out);
     if (pt.multi) {
       if (hits < 1) { console.log("   !! %s 锚点命中=0 → 拒绝动手", pt.name.padEnd(11)); process.exit(2); }
@@ -552,6 +1129,14 @@ function planBundle(rel) {
     out = subOnce(pt.rx, out, pt.sub);
     applied.push(pt.name);
   }
+  flushAst();
+  return { out, applied };
+}
+
+function planBundle(rel) {
+  const p = path.join(RES, rel);
+  const src = fs.readFileSync(p, "utf8");
+  const { out, applied } = applyPatchesToText(src, false);
   if (out === src) { console.log("   %s: 全部已打过,跳过", path.basename(rel)); return null; }
   console.log("   %s: 将打 [%s]", path.basename(rel), applied.join(", "));
   return { p, out };
@@ -592,15 +1177,55 @@ async function mergeConfig(args, dry) {
   // --zk-delta-only 连模型清单都不加：那台机器要么已经装好了，要么就是我的基准机，
   // 这一趟的唯一目的是把网络路径换成小代理。少动一样东西，少一个变量。
   const wantModels = args.zkDeltaOnly ? [] : args.models;
-  const dedup = (existing) => {
-    const seen = new Set(), outl = [];
-    for (const x of [...(existing || []), ...wantModels]) if (typeof x === "string" && !seen.has(x)) { seen.add(x); outl.push(x); }
-    return outl;
-  };
+  /* ── 2026-09-20 第二轮:整表赋值(EXACT)──────────────────────────────────────
+     原来 dedup 是**纯并集**:只加不减。后果是同事库里会越堆越多 —— 历史上装过的
+     旧代名字(`cursor-g-*`/`cr-g-*-135`)、他自己手工加的第三方名、Cursor 自带名
+     全留着(本机实测 userAddedModels 52 条、modelOverrideEnabled 50 条),菜单一拉
+     一屏找不到要用的那个,而且"文档写了什么"和"他菜单里有什么"永久性地对不上。
+     用户点名:**除文档里那份之外全部去掉,包括他自己配的**。
+     所以这里改成整表赋值:两个数组直接等于 DEFAULT_MODELS,顺序也跟着常量走
+     (菜单顺序 = 数组顺序,用户要 Grok 系列排最前)。
+     ⚠️ 这是**破坏性**的:他自己加的名字会被删掉。所以 main() 里的备份必须在
+        写库**之前**落盘(09-20 第二轮同时修的,见 mergeConfig 调用点),
+        `--revert` 能从 applicationUser.blob.json 整份还回去。
+     ⚠️ `--zk-delta-only` 例外:那一趟的唯一目的是换网络路径,wantModels 为空,
+        绝不能把人家的清单清空 —— 下面 EXACT 只在 wantModels 非空时生效。 */
+  const exact = !args.zkDeltaOnly && wantModels.length > 0;
+  // 选中位 re-point 用:不在新清单里的名字 = 菜单里已经没有它了。
+  // (RETIRED_MODELS 仍登记显式下架名,便于报告里点出来;但判据是"在不在新清单里"。)
+  const wantSet = new Set(wantModels);
+  const isRetired = (x) =>
+    typeof x === "string" && exact && !wantSet.has(x);
   const uamBefore = [...(ai.userAddedModels || [])];
-  ai.userAddedModels = dedup(ai.userAddedModels);
-  ai.modelOverrideEnabled = dedup(ai.modelOverrideEnabled);
+  const oveBefore = [...(ai.modelOverrideEnabled || [])];
+  const ovdBefore = [...(ai.modelOverrideDisabled || [])];
+  if (exact) {
+    // 整表赋值:逐字、按序、全量。dedup 只防常量里自己写重了。
+    const seen = new Set(), outl = [];
+    for (const x of wantModels) { if (!seen.has(x)) { seen.add(x); outl.push(x); } }
+    ai.userAddedModels = [...outl];
+    ai.modelOverrideEnabled = [...outl];
+    /* ── 2026-09-21 开关必须是"装上就开"，不让同事去点 ──────────────────────
+       `modelOverrideEnabled` 只是"开"的那一半。Cursor 另有一张**显式关闭**表
+       `modelOverrideDisabled`，两张表同时出现同一个名字时以"关"为准 ——
+       后果专打**升级路径**：同事之前手动关过某个名字，装机器把它写进 Enabled，
+       但 Disabled 里那条还在，开关看起来是灰的，他得自己找到再点一次。
+       本机初装 `modelOverrideDisabled` 是空数组，所以这个洞在新机器上**零症状**，
+       只在"关过再升级"的机器上出现 —— 这正是它一直没被发现的原因。
+       处置：把本方案的名字从 Disabled 里整个剔掉；**不碰**他自己关的其它名字
+       （那是他的选择，EXACT 语义清的是清单，不是他的开关偏好）。 */
+    ai.modelOverrideDisabled = ovdBefore.filter((x) => !seen.has(x));
+  } else {
+    // --zk-delta-only:一个字不动。
+    ai.userAddedModels = uamBefore;
+    ai.modelOverrideEnabled = oveBefore;
+    ai.modelOverrideDisabled = ovdBefore;
+  }
+  const unmuted = ovdBefore.filter((x) => wantSet.has(x));
   const added = wantModels.filter((m) => !uamBefore.includes(m));
+  const removed = exact
+    ? [...new Set([...uamBefore, ...oveBefore])].filter((m) => !wantSet.has(m))
+    : [];
   // #3 默认模型:装完直接选中 DEFAULT_MODEL,用户不用在菜单里挑。
   // 保守——仅当当前选中的不是本方案的名字(MODEL_PREFIXES)时才设,不覆盖用户自己已选的。
   // --keep-model / --zk-delta-only：一个字都不动选中模型。
@@ -608,6 +1233,23 @@ async function mergeConfig(args, dry) {
   //   而这个函数的默认分支会把它换成 DEFAULT_MODEL。
   //   拿安装器当 zk-delta 的开关用 = 顺手换掉量具，测出来的东西就不是同一个东西了。
   const mc = (ai.modelConfig = ai.modelConfig || {});
+  /* 退役名如果正被某个功能位选中,光从 userAddedModels 里摘掉是不够的:菜单里没了、
+     composer 却还钉着它 —— 同事一发消息就报错,而且他在菜单里找不到那个名字、
+     不知道该怎么换回来。所以**按值扫全部功能位**(不只 composer/cmd-k:实测本机
+     modelConfig 有 8 个键,同事可能在 deep-search / plan-execution 里也挑了它),
+     命中就改回 DEFAULT_MODEL。这一条**连 --keep-model 也要做** —— 那个开关是
+     "别动我钉的量具",而钉在一个已经不存在的名字上不是量具,是坏的。 */
+  const repointed = [];
+  for (const feat of Object.keys(mc)) {
+    const e = mc[feat];
+    if (!e || typeof e !== "object") continue;
+    const selRetired = Array.isArray(e.selectedModels) && e.selectedModels.some((s) => s && isRetired(s.modelId));
+    if (!isRetired(e.modelName) && !selRetired) continue;
+    const was = e.modelName;
+    e.modelName = ACTIVE_DEFAULT_MODEL;
+    e.selectedModels = [{ modelId: ACTIVE_DEFAULT_MODEL, parameters: [] }];
+    repointed.push(feat + ":" + (was || "?") + "→" + ACTIVE_DEFAULT_MODEL);
+  }
   const curName = mc.composer && mc.composer.modelName;
   const alreadyOurs = isOurs(curName);
   let defModelSet = "(skip, 已是 " + (curName || "?") + ")";
@@ -615,15 +1257,67 @@ async function mergeConfig(args, dry) {
     defModelSet = "(skip, --keep-model：保持 " + (curName || "?") + " 不动)";
   } else if (!alreadyOurs) {
     for (const feat of ["composer", "cmd-k"]) {
-      mc[feat] = { ...(mc[feat] || {}), modelName: DEFAULT_MODEL, selectedModels: [{ modelId: DEFAULT_MODEL, parameters: [] }] };
+      mc[feat] = { ...(mc[feat] || {}), modelName: ACTIVE_DEFAULT_MODEL, selectedModels: [{ modelId: ACTIVE_DEFAULT_MODEL, parameters: [] }] };
     }
-    defModelSet = DEFAULT_MODEL;
+    defModelSet = ACTIVE_DEFAULT_MODEL;
   }
-  console.log("   config diff: baseUrl %j -> %j ; useOpenAIKey %j -> true ; +models %s ; defaultModel -> %s",
-    before.baseUrl, args.baseUrl, before.useKey, added.length ? added.join(",") : "(none, all present)", defModelSet);
-  if (!dry) await db.set(APP_USER_KEY, JSON.stringify(d));
+  console.log("   config diff: baseUrl %j -> %j ; useOpenAIKey %j -> true ; defaultModel -> %s",
+    before.baseUrl, args.baseUrl, before.useKey, defModelSet);
+  if (exact) {
+    console.log("   模型清单 = 本方案那 %d 个(整表赋值,顺序即菜单顺序):%d 条 -> %d 条",
+      wantModels.length, uamBefore.length, ai.userAddedModels.length);
+    if (added.length) console.log("     + 新增 %d:%s", added.length, added.join(","));
+    /* 删掉了什么必须**逐个列出来**,不能只报个数字:这一步是破坏性的,
+       同事(和我自己)要能一眼看出"我原来那个 xxx 是不是被删了"。 */
+    if (removed.length) console.log("     - 移除 %d:%s", removed.length, removed.join(","));
+    if (!added.length && !removed.length) console.log("     (已经一致,无变化)");
+    if (unmuted.length) console.log("     ✔ 已自动打开(原先被显式关闭):%s", unmuted.join(","));
+    /* 指路,不是免责声明:这 5 个名字**不会**出现在"自定义模型"区(Cursor 对同名的处置),
+       开关已经替他打开了,但他仍然可能在错误的地方找。所以把位置直接印出来。 */
+    const collided = wantModels.filter((m) => BUILTIN_COLLIDING.includes(m));
+    if (collided.length) {
+      console.log("     ℹ 下面 %d 个与 Cursor 自带模型同名,开关已自动打开,但它们显示在", collided.length);
+      console.log("       Settings → Models **上面那段「自带模型」列表**里,不在「自定义模型」区:");
+      console.log("       %s", collided.join(", "));
+    }
+    if (repointed.length) console.log("     选中位改回:[%s]", repointed.join(", "));
+  } else {
+    console.log("   模型清单:一个字不动(--zk-delta-only)");
+  }
+  /* ── 备份必须在写库**之前** ────────────────────────────────────────────────
+     2026-09-20 第二轮发现的时序洞:旧代码把 `raw` 返回给 main(),由 main() 在
+     **写库之后**才落盘备份(doBackup 在 mergeConfig 调用点的下一行)。
+     并集语义下这个窗口无所谓(丢了也能重建);改成整表赋值之后不行了 ——
+     这一步会删掉同事自己加的名字,窗口里崩一次(或 bundle 写盘失败提前 exit)
+     旧清单就只存在过内存里,永久丢失,`--revert` 也无从还原。
+     所以:写库前先把旧 blob 落盘,拿到路径再写。main() 里那次 doBackup 照旧
+     (它还要备份 bundle/settings/Key),两者不冲突 —— 这里只保证**不可逆那一步
+     的正前方**有一份快照。 */
+  if (!dry) {
+    const pre = backupBlobBeforeWrite(raw);
+    if (pre) console.log("   ✔ 改配置前已备份旧清单 -> %s", pre);
+    await db.set(APP_USER_KEY, JSON.stringify(d));
+  }
   db.close();
   return raw; // 旧 blob 用于备份
+}
+
+/* 写库前的单点快照:**只**存 applicationUser blob(Key 这一步根本不碰,不需要).
+   独立成目录 `<ver>-<ts>-preconfig`,--revert 的 listBackupDirs 能看到它
+   (bakHasBundle 为 false,所以它只会在"该版本没有含 bundle 的备份"时被选中,
+    那种情况下还原 blob 正是我们要的)。
+   备份失败 = 直接 exit(4),绝不带着"没有退路"往下写。 */
+function backupBlobBeforeWrite(raw) {
+  const bdir = path.join(BACKUP_ROOT, `${cursorVersion()}-${ts()}-preconfig`);
+  try {
+    fs.mkdirSync(bdir, { recursive: true });
+    fs.writeFileSync(path.join(bdir, "applicationUser.blob.json"), raw);
+  } catch (e) {
+    console.log("   !! 改配置前备份失败(%s)——拒绝继续,你的模型清单一个字没动。", e && e.message);
+    console.log("      这一步会用本方案那份清单**整表替换**你库里的清单,没有备份不许动手。");
+    process.exit(4);
+  }
+  return bdir;
 }
 
 function setUpdateNone(dry) {
@@ -711,13 +1405,38 @@ async function doBackup(ver, plans, oldBlob) {
   console.log("   备份 ->", bdir);
 }
 
+/* 列出备份目录。**必须过滤掉非目录**:BACKUP_ROOT 里还躺着历史上手工存的
+   `applicationUser-*.json` / `empty-state-draft-*.json` 之类散文件,它们排序在数字版本号之后,
+   老代码 `baks[baks.length-1]` 那条兜底会挑到**一个 JSON 文件当备份目录**用(实测本机 7 个)。 */
+function listBackupDirs() {
+  if (!fs.existsSync(BACKUP_ROOT)) return [];
+  return fs.readdirSync(BACKUP_ROOT)
+    .filter((d) => { try { return fs.statSync(path.join(BACKUP_ROOT, d)).isDirectory(); } catch (e) { return false; } })
+    .sort();
+}
+const bakHasBundle = (d) =>
+  BUNDLES.some((rel) => fs.existsSync(path.join(BACKUP_ROOT, d, path.basename(rel)))) ||
+  CHAIN_TARGETS.some((rel) => fs.existsSync(path.join(BACKUP_ROOT, d, chainBakName(rel)))) ||
+  CTXWIN_TARGETS.some((t) => fs.existsSync(path.join(BACKUP_ROOT, d, ctxwinBakName(t.rel))));
+// 备份目录名形如 `3.18.25-20260903-105032`(可能带 `-cfgonly`)。取版本号那一段。
+const bakVersion = (d) => (d.match(/^(\d+\.\d+\.\d+)-/) || [])[1] || null;
+
 async function revert() {
-  const baks = fs.existsSync(BACKUP_ROOT) ? fs.readdirSync(BACKUP_ROOT).sort() : [];
+  const baks = listBackupDirs();
   if (!baks.length) { console.log("!! 无备份可回滚"); process.exit(1); }
-  // 优先选「含 bundle 的最新备份」(跳过 -cfgonly:那种只存了配置,回滚它会漏掉 bundle);都没有再退回最新
-  const hasBundle = (d) => BUNDLES.some((rel) => fs.existsSync(path.join(BACKUP_ROOT, d, path.basename(rel)))) ||
-    CHAIN_TARGETS.some((rel) => fs.existsSync(path.join(BACKUP_ROOT, d, chainBakName(rel))));
-  const pick = [...baks].reverse().find(hasBundle) || baks[baks.length - 1];
+  const ver = cursorVersion();
+  /* ⚠️ **版本必须匹配**。老代码只挑「最新的含 bundle 备份」,不看版本:本机实测 live=3.20.17
+     而最新含 bundle 备份是 3.18.25 → 会把**跨两个大版本的 bundle 盖到新 app 上**,那份产物
+     与 app 里其余几千个文件不配套,等于把 Cursor 弄坏,而且这一步没有备份可再退。 */
+  const sameVer = [...baks].reverse().filter((d) => bakVersion(d) === ver);
+  const pick = sameVer.find(bakHasBundle) || sameVer[0];
+  if (!pick) {
+    const newest = [...baks].reverse().find(bakHasBundle);
+    console.log("!! 没有与当前 Cursor %s 同版本的备份 —— 拒绝回滚(不拿旧版 bundle 覆盖新版 app)。", ver);
+    if (newest) console.log("   最近的含 bundle 备份是 %s(版本 %s),盖上去会把 Cursor 弄坏。", newest, bakVersion(newest) || "?");
+    console.log("   想恢复原状请跑 --uninstall:它会在没有同版本备份时教你用官方安装包重装(bundle 回原厂,配置/Key 照样清干净)。");
+    process.exit(1);
+  }
   const b = path.join(BACKUP_ROOT, pick);
   console.log("从备份回滚:", b);
   for (const rel of BUNDLES) {
@@ -728,6 +1447,11 @@ async function revert() {
   for (const rel of CHAIN_TARGETS) {
     const src = path.join(b, chainBakName(rel));
     if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(RES, rel)); console.log("  restored chain:", chainBakName(rel)); }
+  }
+  // 件C ctxwin bundle:同理扁平化名(四个目标里两个与 chain 同名 main.js)
+  for (const t of CTXWIN_TARGETS) {
+    const src = path.join(b, ctxwinBakName(t.rel));
+    if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(RES, t.rel)); console.log("  restored ctxwin:", ctxwinBakName(t.rel)); }
   }
   const blob = path.join(b, "applicationUser.blob.json");
   if (fs.existsSync(blob)) {
@@ -747,6 +1471,210 @@ async function revert() {
   // 回滚会把 BYOK 地址还原成备份里那个（公网直连），此时再留着小代理服务就是个孤儿：
   // 没人连它，但它还占着 8788、还在 KeepAlive。一起收掉。
   zkdUninstall(false);
+}
+
+/* ── --uninstall:彻底恢复原状 ────────────────────────────────────────────────
+   与 --revert 的分工:
+     --revert    = "回到我装之前那一刻"(需要同版本备份,能连 Key/选中模型一起还原)
+     --uninstall = "把 cursor-g 从这台机器上拿掉"(**不要求**有备份也能走完配置那半)
+
+   为什么不能用「按 marker 摘补丁」来还原 bundle(试过,行不通):
+     8 个补丁里有两个把原文**销毁**了 ——
+       dedicated : 整个条件 `<minify名>(this.storageService,"useDedicatedLocalAgentRuntimeHost")`
+                   被换成一个写死的 !1(外加 @cxteam-dedicated 注释),那个 minify 函数名在产物里不存在了;
+       localagent: `<minify名>.localMode` 被换成 `!0`,旧形状的前缀里也不含那个标识符。
+     补后文本里没有重建原文所需的信息 → 逐字节还原**只可能**来自 pristine 副本。
+     所以 bundle 这半是三层:同版本备份 → 官方安装包重装 → (都没有就明说,不硬来)。
+
+   配置那半永远做得到,且它才是同事真正在意的("模型菜单里那堆 cr-g-* 清掉、别再用我的 Key")。
+   即使 bundle 没法还原也照做,并**明确告诉他哪半做了哪半没做** —— 不许报一个含糊的"已恢复"。 */
+async function uninstall(dry) {
+  const ver = cursorVersion();
+  console.log("=== 恢复原状(--uninstall)%s ===", dry ? " [dry-run,什么都不写]" : "");
+
+  // ① bundle:优先同版本备份;没有就给出官方重装指引(绝不拿别的版本盖)
+  console.log("--- 1) bundle 还原 ---");
+  const baks = listBackupDirs();
+  const pick = [...baks].reverse().filter((d) => bakVersion(d) === ver).find(bakHasBundle);
+  let bundleDone = false;
+  if (pick) {
+    console.log("   用同版本备份 %s", pick);
+    for (const rel of BUNDLES) {
+      const src = path.join(BACKUP_ROOT, pick, path.basename(rel));
+      if (!fs.existsSync(src)) continue;
+      if (!dry) fs.copyFileSync(src, path.join(RES, rel));
+      console.log("   %s bundle: %s", dry ? "将还原" : "已还原", path.basename(rel));
+    }
+    for (const rel of CHAIN_TARGETS) {
+      const src = path.join(BACKUP_ROOT, pick, chainBakName(rel));
+      if (!fs.existsSync(src)) continue;
+      if (!dry) fs.copyFileSync(src, path.join(RES, rel));
+      console.log("   %s chain: %s", dry ? "将还原" : "已还原", chainBakName(rel));
+    }
+    for (const t of CTXWIN_TARGETS) {
+      const src = path.join(BACKUP_ROOT, pick, ctxwinBakName(t.rel));
+      if (!fs.existsSync(src)) continue;
+      if (!dry) fs.copyFileSync(src, path.join(RES, t.rel));
+      console.log("   %s ctxwin: %s", dry ? "将还原" : "已还原", ctxwinBakName(t.rel));
+    }
+    bundleDone = true;
+  } else {
+    // 数一下现在到底还有没有补丁在身上,免得让人白重装
+    let still = 0;
+    for (const rel of BUNDLES) {
+      const p = path.join(RES, rel);
+      if (!fs.existsSync(p)) continue;
+      const src = fs.readFileSync(p, "utf8");
+      for (const pt of PATCHES) if (pt.marker && src.includes(pt.marker)) { still++; break; }
+    }
+    if (!still) {
+      console.log("   当前 bundle 上没有本方案的 marker —— 本来就是原厂的,不用动。");
+      bundleDone = true;
+    } else {
+      console.log("   !! 没有与当前 Cursor %s 同版本的备份,而 bundle 上还有补丁。", ver);
+      console.log("   不拿别的版本的 bundle 覆盖(那会把 Cursor 弄坏)。bundle 这半请用官方安装包覆盖安装:");
+      console.log("     mac : https://cursor.com/downloads 下 dmg,拖进「应用程序」选替换");
+      console.log("     win : 下官方安装器 exe 直接跑一遍(装在原位即可)");
+      console.log("   覆盖安装会把 workbench 换回原厂,聊天记录/设置都在 ~ 目录里,不会丢。");
+      console.log("   下面的配置/Key/小代理**照样清干净**,不受这一条影响。");
+    }
+  }
+
+  // ② BYOK 配置:把 baseUrl / useOpenAIKey / 我们加进去的模型名 / 被我们设过的选中模型 撤掉
+  console.log("--- 2) BYOK 配置清理 ---");
+  let cfgNote = "";
+  try {
+    const db = openDb();
+    const raw = await db.get(APP_USER_KEY);
+    if (!raw) { console.log("   applicationUser blob 不存在,跳过"); db.close(); }
+    else {
+      const d = JSON.parse(raw);
+      const before = { baseUrl: d.openAIBaseUrl, useKey: d.useOpenAIKey };
+      // 地址/开关回到"没配过 BYOK"的样子
+      d.openAIBaseUrl = "";
+      d.useOpenAIKey = false;
+      const ai = (d.aiSettings = d.aiSettings || {});
+      /* 装前那份 blob(版本不必匹配 —— 这是配置不是 bundle)。
+         `--apply` 改成整表赋值之后,这份备份是**唯一**还知道他装前有哪些名字的东西:
+         库里已经只剩我们那 20 个了。下面模型清单和 modelConfig 都要用它,所以读一次。
+
+         ⚠️ **不能取"最新"那份**(旧代码就是 `.reverse().find(...)`,台架 ⑨ 当场抓到)。
+         装过一次之后,后面每次 --upgrade 都会再落一份 -preconfig,而那里面躺着的已经是
+         **我们的 20 个**了 —— 拿它当"装前"等于把"他自己加的名字"读成空集,卸载会
+         一个都还不回来,输出却照样写"还回你装前自己加的 0 个"(假绿:数字对,语义错)。
+         判据改成:**取最早那份里还带非我们名字的**。理由是时间上第一份才是真正的"装前";
+         再退一步,如果连它都没有非我们的名字,那他装前本来就没自己加过,空集是对的。 */
+      let preAi = null, preSrc = null;
+      for (const x of listBackupDirs()) {  // 正序 = 从最早那份开始
+        const f = path.join(BACKUP_ROOT, x, "applicationUser.blob.json");
+        if (!fs.existsSync(f)) continue;
+        let a = null;
+        try { a = JSON.parse(fs.readFileSync(f, "utf8")).aiSettings || null; } catch (e) { continue; }
+        if (!a) continue;
+        if (!preAi) { preAi = a; preSrc = x; }  // 兜底:最早一份可读的
+        const mine = (a.userAddedModels || []).some((m) => typeof m === "string" && !isOurs(m));
+        if (mine) { preAi = a; preSrc = x; break; }  // 找到真正的"装前"就停
+      }
+      const blobBak = preSrc;
+      /* 模型清单:删我们的名字 + **把他装前自己加的名字还回去**。
+         为什么要"还回去"而不是"没动过":09-20 第二轮 mergeConfig 改成整表赋值,
+         他自己加的第三方名在装的时候就被清掉了 —— 到这一步库里根本没有可"不动"的东西。
+         旧代码只做 dropOurs(库里留下的就是他的),那个前提已经不成立:
+         照旧只 dropOurs 的话,卸载完他的清单是**空的**,而他会以为"恢复原状"了。
+         判据不是"我们的名字没了",是"他装前那份清单回来了"。
+         取不到备份就只能 dropOurs —— 这种情况必须在输出里说出来,不许静默。 */
+      const dropOurs = (arr) => (arr || []).filter((x) => !(typeof x === "string" && isOurs(x)));
+      // 摘掉的 = 库里命中 MODEL_PREFIXES 的那些(先数,下面 merge 会改数组)
+      const dropped = (ai.userAddedModels || [])
+        .filter((x) => typeof x === "string" && isOurs(x)).length;
+      const merge = (live, pre) => {
+        const out = dropOurs(live), seen = new Set(out);
+        // 备份里他自己的名字(我们的名字不还 —— 那等于又装回去了)
+        for (const x of (pre || [])) {
+          if (typeof x === "string" && !isOurs(x) && !seen.has(x)) { seen.add(x); out.push(x); }
+        }
+        return out;
+      };
+      ai.userAddedModels = merge(ai.userAddedModels, preAi && preAi.userAddedModels);
+      ai.modelOverrideEnabled = merge(ai.modelOverrideEnabled, preAi && preAi.modelOverrideEnabled);
+      const restored = (preAi && preAi.userAddedModels || [])
+        .filter((x) => typeof x === "string" && !isOurs(x)).length;
+      /* 选中模型:只有当它是我们设的名字时才动(否则会把同事自己挑的模型弄掉)。
+         **优先从备份里取他装前挑的那个名字**,取不到才退回 "default" ——
+         `--apply` 会把 composer 从他自己的模型换成 DEFAULT_MODEL,到卸载时库里已经没有原值了;
+         只写 "default" 等于**静默弄丢他的选择**(台架实测:装前 composer=claude-opus-4.6,
+         卸完变 default,判据当场报红)。装前的值在同一份备份的 applicationUser.blob.json 里躺着。
+
+         另外两个细节也是看真库定的:
+          - **不能 `delete mc[feat]`**:那个对象里还有 `maxMode` 这类兄弟设置(实测
+            `cmd-k` = {modelName, maxMode, selectedModels}),整键删掉会连带把它抹了。
+            改成写回 Cursor 自己对"没选过"的表示法:modelName/selectedModels 都是 "default"
+            (实测 background-composer / spec / deep-search 等未选过的键就是这个形状)。
+          - **要扫全部功能位,不只 composer/cmd-k**:安装时只设这两个,但同事可能自己在
+            deep-search / plan-execution 里也挑了 cr-g(实测本机 modelConfig 有 8 个键)。
+            "恢复原状"的判据是"库里不该再有我们的名字被选中",所以按值判而不是按键名判。 */
+      const mc = (ai.modelConfig = ai.modelConfig || {});
+      // 装前的 modelConfig:上面那份 preAi 里就有(同一份备份,读一次即可)
+      const preMc = (preAi && preAi.modelConfig) || null;
+      const cleared = [];
+      for (const feat of Object.keys(mc)) {
+        const e = mc[feat];
+        if (!e || typeof e !== "object") continue;
+        const nm = e.modelName;
+        const selOurs = Array.isArray(e.selectedModels) && e.selectedModels.some((s) => s && isOurs(s.modelId));
+        if (!isOurs(nm) && !selOurs) continue;
+        // 装前那个名字只有在**不是我们的名字**时才算"他自己的选择"(否则等于又装回去了)
+        const pre = preMc && preMc[feat] && preMc[feat].modelName;
+        const back = pre && !isOurs(pre) ? pre : "default";
+        e.modelName = back;
+        e.selectedModels = (preMc && preMc[feat] && back === pre && Array.isArray(preMc[feat].selectedModels))
+          ? preMc[feat].selectedModels
+          : [{ modelId: back, parameters: [] }];
+        cleared.push(feat + ":" + (nm || "?") + "→" + back);
+      }
+      cfgNote = `baseUrl ${JSON.stringify(before.baseUrl)}→"" ; useOpenAIKey ${JSON.stringify(before.useKey)}→false ; ` +
+        `摘掉 ${dropped} 个模型名 ; 还回你装前自己加的 ${restored} 个 ; 选中还原 [${cleared.join(", ") || "无"}]` +
+        (blobBak ? ` (装前值取自备份 ${blobBak})`
+                 : " (⚠️ 没有备份 blob —— 装前你自己加的模型名还不回来,选中位只能回 default)");
+      console.log("   %s%s", dry ? "将改:" : "已改:", cfgNote);
+      if (!dry) await db.set(APP_USER_KEY, JSON.stringify(d));
+      db.close();
+    }
+  } catch (e) { console.log("   !! 配置清理失败(%s)—— 可在 Cursor 设置里手动关掉 BYOK", e.message); }
+
+  // ③ Key:把我们写进 keytar/OSCrypt 的那条摘掉。同事的 Key 是他自己的东西,不留在盘上。
+  console.log("--- 3) OpenAI Key ---");
+  try {
+    const db = openDb();
+    const k = await db.get(OPENAI_KEY_SECRET);
+    if (k == null) console.log("   库里没有 Key 记录,跳过");
+    else { if (!dry) await db.set(OPENAI_KEY_SECRET, ""); console.log("   %s Key(置空)", dry ? "将摘掉" : "已摘掉"); }
+    db.close();
+  } catch (e) { console.log("   !! Key 清理失败(%s)—— 可在 Cursor 设置里手动删", e.message); }
+
+  // ④ 小代理:卸服务 + 杀进程(源码留在 ~/.zk-delta,想重装不用再解包)
+  console.log("--- 4) zk-delta 小代理 ---");
+  zkdUninstall(dry);
+
+  // ⑤ update.mode:只有当它正是我们写的 "none" 时才删,同事自己设的别的值不动
+  console.log("--- 5) 升级锁 update.mode ---");
+  try {
+    if (!fs.existsSync(SETTINGS_JSON)) console.log("   没有 settings.json,跳过");
+    else {
+      const s = JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8") || "{}");
+      if (s["update.mode"] === "none") {
+        delete s["update.mode"];
+        if (!dry) fs.writeFileSync(SETTINGS_JSON, JSON.stringify(s, null, 2));
+        console.log("   %s update.mode:none(恢复自动升级)", dry ? "将删" : "已删");
+      } else console.log("   update.mode=%j,不是我们写的,不动", s["update.mode"] === undefined ? null : s["update.mode"]);
+    }
+  } catch (e) { console.log("   !! settings.json 不是纯 JSON(含注释?)→ 没动,可手动删掉 \"update.mode\":\"none\""); }
+
+  console.log("");
+  if (dry) { console.log("[dry-run] 以上都没写盘。加 --apply 真执行。"); return; }
+  if (bundleDone) console.log("✅ 恢复原状完成(bundle + 配置 + Key + 小代理),重启 Cursor 生效。");
+  else console.log("⚠️  配置 / Key / 小代理 / 升级锁 已清干净;**bundle 还没还原** —— 按上面第 1 步用官方安装包覆盖安装一次即可。");
+  console.log("   备份目录 %s **没有删**,想装回来跑 --apply。", BACKUP_ROOT);
 }
 
 /* ── zk-delta：本机小代理（只发增量到公网）────────────────────────────────────
@@ -874,7 +1802,7 @@ function zkdInstall(dry) {
 
 function zkdUninstall(dry) {
   if (!zkdSupported()) { console.log("   （非 macOS，本来就没装）"); return; }
-  console.log("   卸掉 %s，BYOK 地址改回公网直连", ZKD_PLIST);
+  console.log("   %s %s，BYOK 地址改回公网直连", dry ? "将卸掉" : "卸掉", ZKD_PLIST);
   if (dry) return;
   spawnSync("launchctl", ["unload", ZKD_PLIST], { stdio: "ignore" });
   try { fs.unlinkSync(ZKD_PLIST); } catch (e) {}
@@ -1028,7 +1956,12 @@ async function main() {
   const has = (f) => argv.includes(f);
   const opt = (f, dflt) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] ? argv[i + 1] : dflt; };
   const args = {
-    apply: has("--apply"), revert: has("--revert"), repair: has("--repair"),
+    // --upgrade = 老用户升级档:等价于 --apply,但**一个字都不问 Key**(他的 Key 已经在
+    // 库里,升级只同步"菜单该有哪些名字"和 bundle 补丁)。隐含 --apply —— 双击式升级不该
+    // 先给他一屏 dry-run 再要他找终端敲 --apply。
+    upgrade: has("--upgrade"),
+    apply: has("--apply") || has("--upgrade"), revert: has("--revert"), repair: has("--repair"),
+    uninstall: has("--uninstall"),
     forceVersion: has("--force-version"), pinUpdate: has("--pin-update"),
     // @cx-chain:v3 链式增量:默认**关**(服务端那半已下线)。不给这个开关时,
     // 安装器会把已装的 chain 补丁摘掉;服务端那半回来再用 --chain 装回去。
@@ -1047,13 +1980,52 @@ async function main() {
     keepModel: has("--keep-model") || has("--zk-delta-only"),
     baseUrl: opt("--base-url", ""),
     models: opt("--models", DEFAULT_MODELS.join(",")).split(",").map((s) => s.trim()).filter(Boolean),
+    bareSa: has("--bare-sa"),
   };
+
+  /* ── `--bare-sa`：把菜单里的 `sa-*` 换成去前缀的裸名（2026-09-22 加）────────
+     用户面的理由：裸名（`grok-4.6`、`grok-4.7`…）是 **Cursor 自带目录里认识的名字**，
+     菜单里写裸名才画得出 Context / Effort / Fast 那几个控件；`sa-` 开头的名字
+     Cursor 不认识，`parameterDefinitions` 是空的，连控件都不画。
+
+     🔴 **默认关，而且必须一直默认关。** 裸名能不能用是 **key 属性不是名字属性**：
+        网关侧要在那把 key 上同时补 `models`（allowlist，缺 → 403）和 `aliases`
+        （缺 → 400）两处，两道闸独立。给没补过的同事装上裸名菜单 = 他点一个就报错。
+        补 key 的那一步是 `sa_prefix_alias.py`，**先补 key，再用这个开关装菜单**。
+
+     ⚠️ 控件画出来了 ≠ 档位能用。2026-09-22 实测：35 分钟窗口内 209 条 Cursor
+        流量里 `fast` / `effort` / `reasoning_effort` 出现 **0 次**，而同窗口其它
+        客户端出现 450+ 次（尺子是好的）。Cursor 在 BYOK / OpenAI 兼容线上只拼标准
+        字段，界面上那些开关**没有出口**。这个开关解决的是「名字好写、菜单里有」，
+        不解决「档位能传到上游」。别把这两件事混成一件。 */
+  if (args.bareSa) {
+    const mapped = args.models.map((m) => (m.startsWith("sa-") ? m.slice(3) : m));
+    // 去前缀可能撞名（比如清单里同时有 `sa-x` 和 `x`）—— 撞了就保留一份，不做去重之外的事。
+    const seen = new Set();
+    args.models = mapped.filter((m) => (seen.has(m) ? false : (seen.add(m), true)));
+    // 让本趟的 isOurs 认得这些裸名。不认的后果有两个,都是静默的:
+    //   ① 选中位判断会认为"当前选中的不是我们的名字",把他选的 grok-4.7 打回默认;
+    //   ② --uninstall 的 dropOurs 摘不掉它们,同事以为卸干净了、库里还留着。
+    for (const m of args.models) if (!MODEL_PREFIXES.some((p) => m.startsWith(p))) EXTRA_OURS.add(m);
+    ACTIVE_DEFAULT_MODEL = DEFAULT_MODEL.startsWith("sa-") ? DEFAULT_MODEL.slice(3) : DEFAULT_MODEL;
+    console.log("--bare-sa: 菜单 %d 名已去掉 sa- 前缀,默认选中 %s(裸名需要该 key 已补 alias,见 sa_prefix_alias.py)",
+      args.models.length, ACTIVE_DEFAULT_MODEL);
+  }
 
   if (!fs.existsSync(RES)) { console.log("!! 找不到 Cursor 资源目录:", RES); process.exit(1); }
   const ver = cursorVersion();
   console.log("Cursor version:", ver, "| platform:", process.platform, "| runtime:", process.version);
 
   if (args.revert) return revert();
+  // --uninstall 也吃 Cursor 运行检查(下面那段)和 dry-run 默认:不带 --apply 只预览。
+  // 放在软版本闸**之前**:恢复原状不该被"这个版本没验过"的告警劝退。
+  if (args.uninstall) {
+    if (!process.env.CX_SKIP_RUNNING_CHECK && cursorRunning()) {
+      console.log("!! Cursor 正在运行 —— 请先完全退出(mac ⌘Q / Windows 右键托盘图标退出)再跑。");
+      process.exit(2);
+    }
+    return uninstall(!args.apply);
+  }
 
   // #4 软版本闸:非 3.16.x 只告警不拒绝——真正的安全阀是 planBundle 里"锚点必须 exactly-1"。
   // 这样 Cursor 升级后 --repair 也能尝试;bundle 变到锚点认不出 → planBundle 自动拒绝(不会改坏)。
@@ -1078,6 +2050,18 @@ async function main() {
     const r = args.chain ? planChainBundle(rel) : planChainRemoval(rel);
     if (r) plans.push(r);
   }
+  // 件C @cx-ctxwin:v3 上下文窗口单位归一,**默认装**(这是所有人都在挨的,不是可选项)。
+  // 🔴 与 chain 家族有两个同名 main.js 重叠:同一个路径若已有计划,必须**接着那份产物改**
+  // 并原地替换,不能再 push 一条 —— 两条计划先后 writeFileSync 同一路径,后写的会把
+  // 前一个静默冲掉,而且两份都"成功"了,不报错。
+  for (const t of CTXWIN_TARGETS) {
+    const abs = path.join(RES, t.rel);
+    const i = plans.findIndex((x) => x.p === abs);
+    const r = planCtxwinBundle(t, i >= 0 ? plans[i].out : null);
+    if (!r) continue;
+    if (i >= 0) plans[i] = { ...plans[i], out: r.out, applied: (plans[i].applied || []).concat(r.applied) };
+    else plans.push(r);
+  }
   console.log("--- 2) 语法校验补后 bundle ---");
   for (const { p, out } of plans) {
     if (!syntaxCheck(out, path.basename(p).split(".")[1])) { console.log("   !! 语法校验不过,终止,未落任何盘。"); process.exit(4); }
@@ -1091,7 +2075,7 @@ async function main() {
     console.log("--- 修复:重打 bundle ---");
     await doBackup(ver, plans, null);
     for (const { p, out } of plans) { fs.writeFileSync(p, out); console.log("   patched:", path.basename(p)); }
-    console.log("\n✅ 修复完成,重启 Cursor 即可继续用 " + DEFAULT_MODEL + "。");
+    console.log("\n✅ 修复完成,重启 Cursor 即可继续用 " + ACTIVE_DEFAULT_MODEL + "。");
     return;
   }
 
@@ -1137,7 +2121,19 @@ async function main() {
   // #2 写 Key:命令行给了 --key 用它,否则 TTY 下提示粘一次;空/非 TTY → 回退手填。
   console.log("--- 5) 写入 API Key ---");
   let rawKey = args.key;
-  if (args.zkDeltaOnly) {
+  // --upgrade:不提示、不覆盖。但要**读一下库里到底有没有那条 secret** ——
+  // "不问 Key" 和 "他其实从没配过 Key" 是两件事,后者升级完打开 Cursor 会 401,
+  // 而屏幕上只写了"完成"。所以查一次,没有就当场告诉他下一步是什么。
+  let upgradeHasKey = null;
+  if (args.upgrade && !args.zkDeltaOnly) {
+    try { const db = openDb(); const k = await db.get(OPENAI_KEY_SECRET); db.close(); upgradeHasKey = k != null; }
+    catch (e) { upgradeHasKey = null; }
+    console.log(upgradeHasKey === null
+      ? "   跳过(--upgrade:不覆盖你已有的 Key;这次没读到库,状态未知)"
+      : upgradeHasKey
+      ? "   跳过(--upgrade:库里已有 Key,原样保留)"
+      : "   !! --upgrade:库里**没有** Key —— 升级本身已完成,但你还没配过 Key。");
+  } else if (args.zkDeltaOnly) {
     console.log("   跳过（--zk-delta-only：Key 已经在库里，不动它）");
   } else {
   if (!rawKey && process.stdin.isTTY) {
@@ -1145,7 +2141,8 @@ async function main() {
   }
   }
   let keyDone = false;
-  if (args.zkDeltaOnly) { keyDone = true; }
+  if (args.upgrade && !args.zkDeltaOnly) { keyDone = upgradeHasKey !== false; }
+  else if (args.zkDeltaOnly) { keyDone = true; }
   else if (rawKey) {
     const r = await writeOpenAIKey(rawKey, RES, false);
     if (r.ok) { keyDone = true; console.log("   ✅ Key 已写入" + (r.confirmed ? "(方案已用现有 Key 校验一致)" : "")); }
@@ -1159,7 +2156,7 @@ async function main() {
   console.log("\n✅ 完成。" + (args.zkDeltaOnly
     ? "启动 Cursor 即可，选中的模型没被动过。"
     : keyDone
-    ? "启动 Cursor,模型菜单默认就是 " + DEFAULT_MODEL + ",直接用。"
+    ? "启动 Cursor,模型菜单默认就是 " + ACTIVE_DEFAULT_MODEL + ",直接用。"
     : "还差一步:启动 Cursor → Settings → Models → OpenAI API Key,粘贴你的 key 点 Verify。"));
   if (zkdOn) {
     console.log("   zk-delta 已开：Cursor → 127.0.0.1:8788 → 公网只发增量。");

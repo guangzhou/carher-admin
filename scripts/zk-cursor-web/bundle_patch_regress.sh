@@ -107,8 +107,35 @@ for d in "$BAK"/"$LIVE_VER"-*; do
   case "$d" in *-cfgonly) continue ;; esac
   [ -f "$d/workbench.desktop.main.js" ] && REF="$d"
 done
+# live 自己就是 pristine 的情况(补丁已 --revert / 这台机器从没装过 / 刚升过级还没 REPAIR):
+# 那两条 live bundle **本身就是**合法的 pristine 种子,②③④ 三腿都能靠它跑起来。
+# 之前只认备份目录,于是"live 干净"被当成"没种子"→ 三腿全 SKIP。SKIP 不是通过,
+# 而这种 SKIP 恰好出现在最常见的状态上(改完代码想验一下,但手上没装补丁),等于台架白摆着。
+# 判据不能用"备份在不在",要用**marker 计数**:0 = pristine,>0 = 已打过(不能当 pristine)。
+if [ -z "$REF" ] && [ -f "$LIVE_RES/out/vs/workbench/workbench.desktop.main.js" ]; then
+  LM=0
+  for b in workbench.desktop.main.js workbench.glass.main.js; do
+    # `grep -c` 零命中时 **既打印 0 又 rc=1** ⇒ 写 `$(grep -c … || echo 0)` 会拿到 "0\n0",
+    # 送进 $(( )) 直接 syntax error(实测)。所以不用 ||,末尾 tr 掉换行兜住多行。
+    n=$(grep -c '@cxteam-\|@cx-queue-pump:' "$LIVE_RES/out/vs/workbench/$b" 2>/dev/null | head -1 | tr -dc '0-9')
+    LM=$((LM+${n:-0}))
+  done
+  if [ "$LM" = "0" ]; then
+    REF="$TMP/live-pristine"; mkdir -p "$REF"
+    cp "$LIVE_RES/out/vs/workbench/workbench.desktop.main.js" \
+       "$LIVE_RES/out/vs/workbench/workbench.glass.main.js" "$REF/" 2>/dev/null
+    LIVE_IS_PRISTINE=1
+    echo "    live($LIVE_VER)本身是 pristine(marker=0)→ 拿它当种子跑 ③④(② 无从比较,见下)"
+  fi
+fi
+: "${LIVE_IS_PRISTINE:=0}"
 if [ -z "$REF" ]; then
   skip "②:$BAK 下没有与 live 版本($LIVE_VER)对应的含 bundle 备份 —— live 若已升级到新版,这腿要在升级前跑"
+elif [ "$LIVE_IS_PRISTINE" = "1" ]; then
+  # 这一腿问的是"pristine 重打出来的,和这台机器上**已经打过的**是不是逐字节一样"。
+  # live 本身 pristine ⇒ 没有"已经打过的"那一边,比较对象不存在 —— 只能跳,
+  # 但要说清是"没有对照物",不是"通过了"。
+  skip "②:live 本身是 pristine(补丁没装 / 已 revert)⇒ 没有「已打」那一边可比。装上补丁后再跑这腿"
 else
   echo "    live=$LIVE_VER  pristine=$REF"
   for b in workbench.desktop.main.js workbench.glass.main.js; do
@@ -181,6 +208,67 @@ if [ -z "$SEED" ]; then skip "④:没有可用的 pristine bundle 做种"; else
     [ "$n" -ge 6 ] && ok "④$b marker 落盘 x$n" || bad "④$b marker 只有 $n 个"
     node --check "$f" 2>/dev/null && ok "④$b 打完 node --check 过" || bad "④$b 打完语法坏了"
   done
+fi
+
+# ── ⑤ 件C @cx-ctxwin:v3 上下文窗口单位归一 ───────────────────────────────
+# 判据三条,缺一条这腿就不算数:
+#   a) 三锚点各 exactly-1 且真打上(marker 每文件 3 个)
+#   b) 打完过 node --check,且**阳性对照必须报红**(证明这把语法尺子真在量)
+#   c) 行为对:把打完的函数抠出来真跑,收到 500 必须与收到 500000 逐行同形
+#      (阈值 450000、90% 触发、89% 不触发),0 原样不动(自定义模型行为零变化)
+echo "--- 5) 件C ctxwin 单位归一 ---"
+CWBK="$(ls -d "$HOME"/.cursor-ctxwin-backup/* 2>/dev/null | tail -1)"
+if [ -z "$CWBK" ] || [ ! -d "$CWBK" ]; then
+  SKIP=$((SKIP+1)); echo "  SKIP  ⑤:没有 ~/.cursor-ctxwin-backup/<ts>/ 原始快照(先在本机跑一次 cursor_ctxwin_patch.js --apply)"
+else
+  CWTMP="$(mktemp -d)"
+  for spec in "extensions__cursor-local-agent-runtime__dist__main.js:min" \
+              "extensions__cursor-agent-host__dist__main.js:min" \
+              "extensions__cursor-agent-exec__dist__main.js:min" \
+              "extensions__cursor-agent-host__dist__agent-host-daemon__dist__bin__daemon.cjs:src"; do
+    fn="${spec%:*}"; kd="${spec##*:}"
+    [ -f "$CWBK/$fn" ] || { bad "⑤快照缺 $fn"; continue; }
+    out="$CWTMP/$fn"
+    if env ELECTRON_RUN_AS_NODE=1 CX_CTXWIN_APPLY_TO_FILE="$CWBK/$fn" CX_CTXWIN_KIND="$kd" \
+         CX_CTXWIN_OUT="$out" "$CXNODE" "$JS" >/dev/null 2>"$CWTMP/err"; then
+      n=$(grep -o '@cx-ctxwin:v3' "$out" | wc -l | tr -d ' ')
+      [ "$n" = "3" ] && ok "⑤${fn##*__} 三锚点全打上(marker x$n)" || bad "⑤${fn##*__} marker=$n(应为 3)"
+      node --check "$out" 2>/dev/null && ok "⑤${fn##*__} 打完 node --check 过" || bad "⑤${fn##*__} 打完语法坏了"
+    else
+      bad "⑤${fn##*__} 打不上:$(cat "$CWTMP/err")"
+    fi
+  done
+  # 阳性对照:在 marker 处插坏括号,语法尺子必须报红,否则上面那几个 PASS 不算数
+  POI="$CWTMP/poison.js"
+  cp "$CWTMP/extensions__cursor-agent-exec__dist__main.js" "$POI" 2>/dev/null &&
+  python3 -c "
+import sys
+p=sys.argv[1]; s=open(p,encoding='utf8').read(); i=s.index('/*@cx-ctxwin:v3*/')
+open(p,'w',encoding='utf8').write(s[:i]+'/*@cx-ctxwin:v3*/}}}if('+s[i+17:])" "$POI" &&
+  { node --check "$POI" 2>/dev/null && bad "⑤阳性对照居然 PASS ⇒ 语法尺子是坏的,上面的 PASS 全不算数" \
+      || ok "⑤阳性对照正确报红 ⇒ 语法尺子可信"; }
+  # 行为腿:抠出打完的真函数跑,500 必须与 500000 同形
+  node -e '
+const fs=require("fs");
+const f=process.argv[1];
+const s=fs.readFileSync(f,"utf8");
+const g=(i)=>{const o=s.indexOf("{",i);let d=0,j=o;for(;j<s.length;j++){const c=s[j];if(c==="{")d++;else if(c==="}"){d--;if(!d){j++;break}}}return s.slice(i,j)};
+const nm=(n)=>{const r=new RegExp("function "+n+"\\(","g");const m=[...s.matchAll(r)];if(m.length!==1)throw new Error(n+" 命中="+m.length);return g(m[0].index)};
+const M=eval("(function(){"+["isValidUsedTokensThreshold","getBackgroundSummarizationTriggerThreshold","shouldStartBackgroundSummarization"].map(nm).join("\n")+";return{s:shouldStartBackgroundSummarization,t:getBackgroundSummarizationTriggerThreshold}})()");
+const P={unusedTokensThresholdToStartBackgroundSummarization:1e4,unusedPercentTokensThresholdToStartBackgroundSummarization:.1};
+let bad=0;
+for(const [raw,real] of [[500,500000],[300,300000],[272,272000],[256,256000],[1,1000000]]){
+  if(M.t(raw,P)!==M.t(real,P)){console.log("🔴 "+raw+" 与 "+real+" 阈值不同形");bad++;continue}
+  if(!M.s(Math.round(real*0.90),raw,P)){console.log("🔴 "+raw+" 在 90% 没触发");bad++}
+  if(M.s(Math.round(real*0.89),raw,P)){console.log("🔴 "+raw+" 在 89% 误触发");bad++}
+  if(M.s(1000,raw,P)){console.log("🔴 "+raw+" 发 1000 token 就压(病没修好)");bad++}
+}
+if(M.t(0,P)!==undefined){console.log("🔴 maxTokens=0 被动了(自定义模型行为应零变化)");bad++}
+process.exit(bad?1:0);
+' "$CWTMP/extensions__cursor-agent-host__dist__agent-host-daemon__dist__bin__daemon.cjs" \
+    && ok "⑤行为:500/300/272/256/1 与真实窗口逐行同形,90%触发/89%不触发/0不动" \
+    || bad "⑤行为腿不符(见上面 🔴)"
+  rm -rf "$CWTMP"
 fi
 
 echo ""

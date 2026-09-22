@@ -1,4 +1,4 @@
-# Cursor 客户端 bundle 补丁 SOP(3.16.x~3.20.x;安装器跨平台,诊断/日志路径示例为 macOS)
+# Cursor 客户端 bundle 补丁 SOP(3.16.x~3.21.x;安装器跨平台,诊断/日志路径示例为 macOS)
 
 对象:同事/本机 **Cursor.app 本体**的 workbench bundle 补丁与 BYOK 配置,与网关线
 (zk-cursor-web-fc-iterate,改 198 CM)完全分层:**这边改的是用户 Mac 上的 Cursor,
@@ -10,9 +10,15 @@
 | `cursor_team_setup.py` | 同上的 Python 版,**纯正则、故意不上 AST**——不在 zip 交付物里,留作第③腿的跨实现参照 | 8 补丁全家(**无 chain**,legacy 不分发) |
 | `cursor_chain_patch.py` | 件B 链式增量独立源(exthost fetch seam),移植进 `.js` 安装器的字节基准 | `@cx-chain:v3` |
 | `cursor_queue_pump_patch.py` | 单独打/升级排队泵(旧版 v1→v3.5 全支持原地升级) | `@cx-queue-pump:v4` |
+| `cursor_ctxwin_patch.js` | 件C 上下文窗口单位归一**单机版**(`--apply`/`--revert`,不带参数=空跑);已逐字节移植进 `.js` 安装器的 `CTXWIN_*` 家族 | `@cx-ctxwin:v3` |
+| `cursor_ctxwin_check.js` | 件C 的尺子:读盘上 4 条 bundle 报 marker/锚点数 | — |
+| `cursor_ctx_param_gate.js` | `context` 档位参数门禁(⏸ 还没接进安装器/巡检) | — |
 | `cursor_queue_diag_patch.py` | 诊断用:把泵换成"每秒打 tick 日志"版,只观测不改行为 | `@cx-queue-diag:v3.2` |
 | `bundle_anchor_probe.js` | 只读数锚点命中(live Cursor 或**显式给 bundle 文件**,新版预检不用装) | — |
 | `bundle_patch_regress.sh` | **改 PATCHES 后的四腿离线回归台架**(见「新版本漂移修复流程」) | — |
+| `retire_model_offline_cases.sh` | **改模型清单后的九腿/28 断言离线台架**(整表赋值逐字按序 + 选中位 re-point + 写库前快照 + `--uninstall` 还原 + `--upgrade` 不问 Key;带 `RETIRE_JS=` 阳性对照) | — |
+| `cursor_key_read.js` | **只读解开本机 BYOK Key**(默认掩码,`--reveal` 才明文);诊断用,**不进交付 zip** | — |
+| `setup_package_freshness.py` | **发出去的 zip 是不是最新的**:逐成员 sha256 vs 工作副本 + 与上一版逐成员 diff + 菜单条数;`--selftest` 自带阳性对照 | — |
 | `bundle_audit_daily.sh` + `com.zerokey.cursorbundleaudit.plist` | **每日自动巡检**:官方出新版当天自动跑全四腿并告警(见「每日自动巡检」) | — |
 | `regress_queue_pump.js` | 泵离线回归台架(注入真发货 snippet,17 判据+负对照) | — |
 
@@ -148,6 +154,74 @@ v3 之后仍复发「两问挤一轮只答后一条」(甲乙丙丁戊己/壬癸
   memory 会假阳性)。客户端 trace `passthrough-full` bodyLen>1.05M 是双 wrap 记账假象,别据此判 400。
 - 记忆:[[project_cx_chain_client_shim_verified_2026_08_30]]、[[project_chain_srv_gateway_deployed_2026_08_30]]。
 
+## 件C 上下文窗口单位归一 @cx-ctxwin:v3(2026-09-22 上线,**默认开**)
+
+**病**:服务端 protobuf `InferenceExtendedUsageInfo.max_tokens` 回的是**档位名的数字部分**
+(500k→`500`、1m→`1`),小 1000 倍。Cursor 自己的阈值 `min(maxTokens-10000, maxTokens*0.9)`
+于是变负数,`used >= 负数` 恒真 ⇒ 连发 `hi` 也每轮触发 summarization,界面 8146%~27706%。
+
+- 🔴 **是按时间分的,不是按模型分的**:5/17~6/26 共 42 次全对 0 次错;9/17 是最后一个正确值,
+  **9/20 起 19 次全错**。同一个 grok-4.6:9/14、9/17 拿到 256000,9/22 拿到 0。
+  ⇒ 服务端 9/17~9/20 之间的回归,**任何模型都会中**,别按模型分诊。
+- 🔴 **ctx 档位与 maxTokens 并非一一对应**(gpt-5.6-sol 选 272k 拿到 `500`;grok-4.5-latest
+  无 ctx 参数却拿到 `272`)⇒ **不许按 ctx 档位反推窗口**,只能对收到的那个数字做单位归一。
+- `maxTokens=0`(`sa-*`/`cr-g-*` 这些只在 198 上存在的名)= 窗口未知 ⇒ **从不压缩**,
+  是**另一个病**,补丁**故意放行 0**,别一起治。
+- ⚠️ **后端为什么发 k 数字这一项没有数据**(无抓包),不许当成因说出口。
+
+**换算**沿用 Cursor 自己的解析器 `WS_()`(k→1e3 m→1e6):`1→1e6`;`0<n<4096→n×1e3`;
+`0` 与 `≥4096` 原样不动。界 4096 的依据:最小档 200k 映射成 `200`,真实窗口最小 200000,
+4096 落在两簇之间 ⇒ 自定义模型与真实窗口都零变化。
+
+**补三个点,缺一不可 —— 是穷举出来的,不是挑的**:daemon.cjs 里对 `maxTokens` 做算术/比较的
+代码行共 10 处 —— 4 处在 B 体内、5 处走 `tokenDetails.maxTokens`(A 覆盖)、剩下 1 处就是 C。
+
+| 点 | 函数 | 管什么 | 漏了会怎样 |
+|---|---|---|---|
+| A | `createRedactedConversationTokenDetails()` | tokenDetails **唯一构造入口**:界面百分比、`overageThreshold` 阻塞、持久化 | 显示还是 8146% |
+| B | `getBackgroundSummarizationTriggerThreshold(maxTokens, props)` | **所有「该不该压」的判定都过它**(shouldStart/shouldPersist 都调它) | 有一条路径直接用 `currentUsage.maxTokens` **不经过 tokenDetails**,照样每轮压(v2 的漏洞) |
+| C | `shouldPersistBackgroundSummarization(used, maxTokens, props)` | persist 档位 | 🔴 它**自己又拿裸值**算了一次 `unusedTokens = maxTokens - usedTokens`;start 一触发 persist 必同时触发,「后台摘要」档位没了 |
+
+- 🔴 **律令:在函数入口归一,那次归一只活在这个函数的局部变量里**。下游函数拿到的还是**裸值**,
+  会重新算一遍 —— 「补了唯一构造入口」不等于覆盖了所有消费者(C 就是这么漏掉的)。
+  判据只能是**穷举该字段的全部算术/比较点**,数出来,不是读着像就算完。
+- 打的是 **4 条 bundle**:`cursor-local-agent-runtime`、`cursor-agent-host`、`cursor-agent-exec`
+  三条 `dist/main.js`(minified)+ `cursor-agent-host/dist/agent-host-daemon/dist/bin/daemon.cjs`
+  (**未压缩,锚点用源码字面量**)。安装器 `CTXWIN_TARGETS`,家族前缀 `CTXWIN_*`,备份扁平名
+  `cxctxwin__extensions__…`(与 chain 同源纪律:两条 bundle 都叫 `main.js`,按 basename 存会互相覆盖)。
+- **三锚点任一不是 exactly-1 ⇒ 整体放弃,一字节不写**;文件里已有旧 marker(v1/v2)⇒ 拒绝并让先 `--revert`。
+- 🔴 **同路径多家族必须 plan 合并,不能各写各的**:件A/件C 都改 `cursor-agent-exec/dist/main.js`,
+  安装器主流程按 `plans.findIndex(x=>x.p===abs)` 找到同路径计划,**拿它的 `out` 当 baseText 继续变换**
+  再合并 `applied`;各自 push 一条计划 ⇒ 后写的静默冲掉前一个家族,且两边都报成功。
+
+**回归(`bundle_patch_regress.sh` 腿⑤)三条判据**:①三锚点 exactly-1 且每文件 marker×3;
+②`node --check` PASS **并且塞一个故意写坏的样本进去确认检查器真会报红**(不然"全绿"不算数);
+③**行为腿**:把补后的真实函数抠出来真跑 —— `1→1e6`、`256→256000`、`500→500000`,`0` 与 `≥4096` 不动,
+90% 压、89% 不压、1000 token 不压,**4 条 bundle 结果逐行相同**。
+另有 42 行压缩矩阵(1/50/89/90/95/120% × 各窗口)0 处不符。
+
+**自证「不是我改坏的」只能靠 pristine 快照真跑**(这轮他直接问了):
+原始快照 `~/.cursor-ctxwin-backup/20260922163516/`(marker=0 已验)上实测 `1/256/272/300/500`
+阈值 = `-9999/-9744/-9728/-9700/-9500`,1000 token 就触发 ⇒ **原始 Cursor 就有这个病**。
+同一轮健康对照:真实窗口 200000~1000000 全部 90% 压/89% 不压 ⇒ **尺子没坏**。
+再加两条:21 条坏值时间戳最晚 09-22 15:58 < 本机首次打补丁 16:03;
+`cursor_team_setup.js` 全文 grep 不到 `maxTokens`/`context`/`tokenLimit`/`summariz`。
+**只有"我没改那里"这句话是不够的,要有原始态上的实测红。**
+
+⚠️ **台架自己坏过**:第一版用松正则,B 抓到了不相干的函数、整列返 `false` —— 一整屏无意义输出。
+锚点必须与补丁脚本**逐字一致**。minified bundle 里 B 的依赖函数是压缩名且**重名 8 次**,
+按名字抠会抓错 ⇒ 只能按**函数体形状**匹配
+(`function X(e,t){return"number"==typeof e&&Number.isSafeInteger(e)&&...}`)。
+`shouldPersist` 那列一开始全"不压",是我的 props 漏了 *start* 档阈值(它委托给 shouldStart 用同一份
+props ⇒ 阈值 `void 0` ⇒ 恒 false)—— **这个假绿正好也是 C 这个真漏洞的入口**,当时没当成"本来如此"放过。
+
+⚠️ `cursor_team_setup.py`(Python 孪生)**没有** ctxwin 家族 ⇒ 两边补丁覆盖面已漂移;
+它不进 zip,第③腿跨实现参照对不上 ctxwin 这部分。
+
+- 脚本:`cursor_ctxwin_patch.js`(单机版,`--apply`/`--revert`,空跑只报告)、`cursor_ctxwin_check.js`(尺子)。
+  **安装器产物与单机版逐字节相同 4/4**(`setup_impl_parity.py` 之外的额外对账)。
+- 记忆:[[project_cursor_ctxwin_maxtokens_1000x_2026_09_22]]。
+
 ## 诊断方法论(内存态读不到时,可复用)
 
 composer 运行时状态只活在 renderer 内存,workspace state.vscdb 里没有——**磁盘取证无效**。
@@ -207,6 +281,219 @@ AST 子节点的 `start/end` 里 `src.slice()` 出来搬运,不写进任何模�
   2. `grep -c` 没命中时**打印 0 且退出码 1** → `$(grep -c … || echo 0)` 吐出两行 `0\n0`,告警里出现 `FAIL=0\n0`。用 `wc -l` 或加 `head -1`。
   3. UTF-8 locale 下 bash 会把紧跟变量的**中文标点吞进变量名** → `$SKIPN。` 触发 `set -u` 的
      `unbound variable` 把整条告警打掉。变量紧跟中文字符必须写 `${SKIPN}`。
+
+## 模型清单增减 + 老用户升级档(2026-09-20)
+
+改菜单里有哪些模型名 = 改 `DEFAULT_MODELS`,**但删一个名字不等于同事机器上就没了**。
+
+- **`mergeConfig` 的 dedup 原来是纯并集,没有删除路径**:从 `DEFAULT_MODELS` 里删掉一个名字
+  只影响**新装**的机器;已装过的同事库里那个名字会**永远留着**,他在菜单里点一下就报错。
+  ⇒ 下架名字必须进 **`RETIRED_MODELS`**(两份实现都要,`setup_impl_parity.py` 已把它列为
+  第 4 个逐字节门禁常量)。`--models` 显式点名某个退役名时**以他为准**(不替用户做决定)。
+- **光从 `userAddedModels` 摘掉不够**:退役名可能正被某个功能位**选中**。菜单里没了、
+  `composer` 却还钉着它 ⇒ 他一发消息就报错,而且在菜单里找不到那个名字、不知道怎么换回来。
+  ⇒ 按值扫 **`modelConfig` 的全部键**(不只 `composer`/`cmd-k`;本机实测 8 个键,
+  同事可能在 `deep-search` / `plan-execution` 里也挑了它),命中就改回 `DEFAULT_MODEL`。
+  这一条**连 `--keep-model` 也要做**:那个开关的语义是"别动我钉的量具",
+  而钉在一个已经不存在的名字上不是量具,是坏的。
+- **加新名字前必须用 Cursor 的真线型逐个探**(`scripts/litellm-198-cursor-newnames-probe.py`:
+  克隆真 cursor key 的 `models`/`aliases` 形状 + `POST /v1/chat/completions` 带 `stream`+`tools`
+  + 每发唯一 nonce + 假名阴性对照)。**"`/model/info` 读得到"不是能用**。
+  09-20 实测:`sa-grok-imagine` 在 chat 线型上 400 `invalid_request_error`,只有
+  `/v1/images/generations` 才 200 —— 出图专用名,Cursor 只会打 chat ⇒ 菜单里能选、一点就报错。
+  用户点名要它在列 ⇒ 留在菜单 + README/文档标「出图专用」+ 证据写进代码注释。
+- **`MODEL_PREFIXES` 必须覆盖每一个菜单名**,否则 `--uninstall` 的 `dropOurs` 摘不掉它
+  却告诉他清干净了(09-20 加 `sa-composer-2.5-fast` / `qwen3-coder-next` 时差一步踩到)。
+  这不是注释能保证的事 ⇒ `setup_impl_parity.py` 里已落成**能红的门禁腿**
+  (菜单名 orphan / 退役名 orphan / 同一个名字既在菜单又在下架名单)。
+
+### 现行菜单:30 名 / 四段(2026-09-21)
+
+用户点名的**段序**是产品要求(数组顺序 == 菜单顺序,别按字母重排):
+**① `sa-*` → ② `gpt-*` → ③ `cr-*` → ④ 其他**。`DEFAULT_MODEL` 仍是 `sa-grok-4.6-latest`
+(段 ① 首位)。`RETIRED_MODELS` 仍是 `cr-g-5.6-pro` / `sa-grok-imagine`。
+
+`MODEL_PREFIXES` 随之从 4 条扩到 **9 条**:
+`cr-g-` / `sa-grok-` / `sa-composer-` / `qwen3-coder-` / `gpt-` / `codex-` / `deepseek-` / `kimi-` / `glm-`。
+⚠️ **`gpt-` 这条会同时命中 Cursor 自带的 `gpt-*`**(`gpt-5.3-codex`、`gpt-5.4`…)。后果只落在
+`--uninstall` 的 `dropOurs`:卸载时会把同事自己加的 `gpt-*` 自定义名一起摘掉。EXACT 语义下装机
+本来就会清掉那些名字,方向一致、不新增损失 —— 但**别把 `isOurs` 当"这是我们装的"的证据**用在别处,
+它现在是个偏宽的判据。
+
+**这一版起清单里故意含 5 个与 Cursor 自带模型同名的名字**
+(`gpt-5.5` / `gpt-5.6-luna` / `gpt-5.6-sol` / `gpt-5.6-terra` / `kimi-k2.7-code`),用户点名照原名装。
+同名的实测后果见下节「撞名」。🔴 别"顺手修正"成带前缀的等价名 —— 那会改变菜单里显示的名字。
+
+**09-21 实打**(两把真 key 各跑一轮全 30 名,Cursor 线型 chat+tools+唯一 nonce;
+工具 = `scripts/litellm-198-cursor-newnames-probe.py --key <真key> --names <清单>`,
+09-21 给它加了 `--key`/`--names` 两个口子,默认行为一字不变、18 条门禁仍全过):
+
+| key | 形状 | 读数 |
+|---|---|---|
+| `cursor-liuguoxian-std` | 68 models / **aliases n=0** | **27/30 出字**；400 = `kimi-k2.7-code`·`glm-5.3-flash`·`qwen3-coder-next` |
+| `cursor-liuguoxian04-5rub` | 172 models / aliases n=27 | 那 3 个里 `qwen3-coder-next` **200 出字** |
+
+🔴 **同一个名字在两把 key 上读数相反 ⇒ 400 是 key 属性,不是名字属性。**
+真因:这些名字在网关里**只是 per-key alias 入口、没有同名真实组**。有 alias 的 key
+改写到真实组 → 200;没 alias 的 key 虽然 allowlist 放行(`/v1/models` 里看得见)
+但路由找不到落点 → **400**。三个 alias 目标直打全部 200 出字
+(`claude-kimi-k2.7-code` / `zai-coding-glm-5.3-flash` / `kiro-qwen3-coder-next`)
+⇒ **上游是活的**,坏的只是那把 key 缺 alias。
+
+⚠️ **两道闸独立、症状不同,别混**:
+**allowlist(`models`)** 决定 403 `key_model_access_denied`;
+**per-key `aliases`** 决定 400(名字没有落点)。
+⛔ 「`/v1/models` 里有这个名」既不证明能用,也不是 400 的免责
+(记忆 `feedback_allowlist_name_without_alias_is_400` 讲的就是这一条)。
+
+⚠️ **别再把 `cursor-liuguoxian-std` 当授权模板** —— 09-21 早些时候我这么写过,**当天证伪**:
+它 `models` 更宽(68)但 **`aliases` 是空的**,反而比 04-5rub 少一层。要配一把能用全 30 名的 key,
+模板是 **04-5rub 那 27 条 `aliases`**,至少含 `kimi-k2.7-code→claude-kimi-k2.7-code` /
+`glm-5.3-flash→openrouter-glm-5.3-flash` / `qwen3-coder-next→kiro-qwen3-coder-next` 三条。
+补 alias 是**生产变更,单独一轮、要签字**。
+
+### 撞名:自定义名 == Cursor 自带名(2026-09-21 根因)
+
+**一个与 Cursor 自带模型同名的自定义名,不会被登记成自定义模型** —— 它**不进
+`aiSettings.userAddedModels`**,只在 **`aiSettings.modelOverrideEnabled`** 里留一个
+「走我的 key」开关。请求于是以那个**自带名**沿 BYOK 管道发出去。
+
+- **`modelOverrideEnabled` 才是路径开关**:勾上 → 打 BYOK baseUrl(我们的网关);
+  取消 → 回 Cursor 自己的服务器 / 他的订阅额度。
+- **判"这条是自带的还是自定义的"唯一有效判据 = `availableDefaultModels2` 里的条目形状**:
+  自带 = 27~28 个字段,带 `tooltipData`/`contextTokenLimit`/`clientDisplayName`,常有
+  `variants`/`legacySlugs`,**没有 `isUserAdded`**;自定义 = 21 个字段、**有 `isUserAdded`**、
+  `variants` 为空。本机实测 59 条里 38 条自带。
+  🔴 **grep bundle 证明不了任何事** —— 自带清单是服务端推下来的,不在 bundle 里。
+- 09-21 本机 403 的完整链条:composer 钉着 `gpt-5.6-sol`(撞名)→ 没进 `userAddedModels`、
+  只有 override 开关 → 请求沿 `127.0.0.1:8788` → `cc.auto-link.com.cn/pro` 出去 →
+  那把 key 的 allowlist 里没这个名 → 403 `key_model_access_denied`/`param: model` →
+  `cursor-agent-exec` 归类 `LocalProviderError`→`NonRetriableError`,第一个 token 之前就中止
+  (`pre_network_ms` 127~211ms)。旁证:同一进程生命周期内 22:43 `code=200`(`sa-grok-4.6-latest`)
+  → 23:10/23:11 `code=403`(`gpt-5.6-sol`)。
+- ⚠️ **`key_model_access_denied` 是授权信号,不是"网关里没这个模型"**。litellm 全库 338 个模型里
+  `gpt-5.6-sol` 和 `chatgpt-gpt-5.6-sol` 都在 —— 09-21 我据 403 断言"我们没这个名字",被用户纠正。
+  判"有没有"查全库,判"能不能用"查那把 key 的 `models` + `aliases`。
+- ⚠️ **读 blob 里这两个数组必须走 `aiSettings.` 这一层**,顶层没有同名字段。09-21 我在顶层读到
+  `n=0`,差点报成"清单是空的"。
+
+**`--upgrade` = 老用户升级档**(`UPGRADE-Mac.command` / `UPGRADE-Windows.cmd`):
+等价 `--apply` 但**一个字都不问 Key**(隐含 `--apply` —— 双击式升级不该先给他一屏 dry-run
+再要他找终端敲参数)。它仍然**读一次库里有没有那条 secret**:"不问 Key"和"他其实从没配过 Key"
+是两件事,后者升级完打开 Cursor 会 401 而屏幕上只写了"完成" ⇒ 没有就当场报出来并给下一步。
+三个按钮的分工:`INSTALL`=第一次装(问 Key)/ `UPGRADE`=已装过要更新(不问 Key,同步菜单+摘下架名+
+重打补丁+更新小代理)/ `REPAIR`=升级后补丁失效,**只重打 bundle**(不改菜单、不更新小代理)。
+
+**台架**:`sh retire_model_offline_cases.sh`(约 60s,只碰临时目录)。九个 case、28 条断言:
+退役名从 `userAddedModels`/`modelOverrideEnabled` 摘净 · `composer` 与 `deep-search` 的选中位
+改回 `DEFAULT_MODEL` 且兄弟字段(`maxMode`)不丢 · **⑤ 同事自己加的第三方名必须被清掉**
+(09-20 第二轮起,期望与上一版相反,见下节)· 新名真进库 · `--upgrade` 不问 Key/不覆盖 Key/幂等 ·
+⑦ 两个数组逐字且按序 == `DEFAULT_MODELS` · ⑧ 写库前落了 `-preconfig` 快照 ·
+⑨ `--uninstall` 把他装前的名字还回去 · 没 Key 的机器明确报出来。
+- **阳性对照**:`RETIRE_JS=<改坏的副本> sh retire_model_offline_cases.sh` —— 把 dedup 的
+  `isRetired` 过滤和 re-point 整段摘掉,必须**恰好**那几条腿红、其余全绿。
+- ⚠️ **假 app 的 bundle 必须是真 bundle 的副本**。空壳文件 → 锚点命中=0 →
+  `applyPatchesToText` 直接 `process.exit(2)`,**根本走不到 `mergeConfig`** ⇒ 12 项全红,
+  红的理由还跟被测行为无关(第一版就是这个形状,日志里只有"AST 定位命中=0")。
+- ⚠️ **每一次调 Cursor 可执行文件都必须带 `ELECTRON_RUN_AS_NODE=1`**。漏一次不是跑 node,
+  而是**弹一个 Cursor 窗口然后永远挂住**(120s 超时、零输出,看起来像脚本死循环)。
+
+### 交付包新鲜度:`setup_package_freshness.py`(2026-09-21)
+
+同事问「脚本是最新的吗?怎么和我之前的大小不一样」时,**mtime 更新不是证据,zip 变大也不是证据**。
+唯一能下结论的尺子是 `python3 setup_package_freshness.py`,三条腿:
+
+| 腿 | 判据 | 红了说明 |
+|---|---|---|
+| ① zip vs 工作副本 | **逐成员 sha256** 相等 | zip 是旧的,重跑 `package_team_setup.sh` |
+| ② vs 上次发出去那份 | 逐成员 size/sha diff + 菜单增删名单(**不返红**,是账) | 用来回答"为什么大小变了" |
+| ③ zip 内菜单条数 | `--expect 30`、无重名 | 发错版本,或 `--expect` 该更新 |
+
+- ⚠️ **zip 成员全带 `cursor-g-setup/` 前缀。**忘了剥它 ⇒ 每个成员都读成"工作副本里没这个文件",
+  **一条腿都不红** = 假绿(09-21 第一次比就是这个形状)。
+- 13 个双击器 / `README.txt` / `zk-delta/*` 由打包脚本**现生成**,仓库目录里本来没有 ⇒
+  脚本里是**显式白名单** `GENERATED_ONLY`,不是"找不到就跳过";少一个双击器要能红。
+- `--selftest` 是阳性对照:合成一份改了一个字节的 zip,第①腿必须变红;同时验模型名抠法的界。
+  **跑结论前先跑它。**
+- 拉"上次发出去那份"只能用 `lark-cli docs +media-download --token <file_token> --output x.zip`;
+  ⛔ `lark-cli drive +download` 对文档附件**静默不落盘**。
+
+🔴 **抠 `DEFAULT_MODELS` 必须有界。**从 `js.index('DEFAULT_MODELS')` 松散切到第一个 `];`
+会读出 **36** 条,混着 `'use strict'` / `'path'` / `'crypto'` / `'darwin'` 和 `path.join(...)` 的碎片
+⇒ 据此得出的"缺失名单"全是垃圾(09-21 实际发生过,拿它比对飞书文档漏名)。
+正确写法 `re.search(r'const DEFAULT_MODELS\s*=\s*\[(.*?)\n\];', js, re.S)` + 去 `//` 注释 +
+`assert len(names)==30`,尺子坏了当场停。
+
+**09-21 那次的账**(留作口径示例):61876 → 63469 B,20 个成员里**只有 2 个变**
+—— `cursor_team_setup.js` 119510→123035(+3525)、`README.txt` 5555→5732(+177),其余 14 个逐字节相同;
+菜单 20→30(新增 10、删 0);`DEFAULT_MODEL`/`RETIRED_MODELS` 未变;把注释行剥掉后真代码只改 4 处。
+⇒ 结论是"是最新的,而且装的逻辑没变",而不是"看 mtime 应该是新的"。
+
+**同事拿到的包在哪**:新文档 `FapXdudPLoTTRLxWGJQcqITpn9g`(《Cursor 一键配置》,09-21 重写,附件 63469 B)。
+⚠️ 旧文档 `OQCPdLd4MovEVoxGzdMcD3CJnCf` 的附件**还是 20 名那版(61876 B)**,
+从那儿下载的人装出来的菜单缺 `sa-grok-4.20` 和整个 `gpt-*` 段(10 个名)——**处置未定,别当它已经退役**。
+
+## 清单语义:并集 → 整表赋值(EXACT,2026-09-20 第二轮)
+
+`mergeConfig` 原来是**纯并集**(只加不减)。后果:同事库里越堆越多 —— 历史代名(`cursor-g-*`/
+`cr-g-*-135`)、他自己手工加的第三方名、早年装机留下的全在(**本机实测 `userAddedModels` 52 条 /
+`modelOverrideEnabled` 50 条**,升级后先清到 58 再整表换成当时那 20 个;09-21 起清单是 30 个),
+菜单拉一屏找不到要用的那个,
+而且"文档写了什么"和"他菜单里有什么"永久性地对不上。用户点名:**除文档那份之外全部去掉,
+包括他自己配的**。⇒ 两个数组**直接等于** `DEFAULT_MODELS`:
+
+- **数组顺序 = 菜单顺序**,是产品行为不是巧合。改 `DEFAULT_MODELS` 的排列就是改同事看到的菜单。
+- **`RETIRED_MODELS` 降级为"报告用"**:EXACT 之下判据是"在不在新清单里",不在就摘、就 re-point。
+  它仍登记显式下架名(便于 README/文档/报告点出来),但**不再是唯一的删除依据**。
+- **`--zk-delta-only` 必须豁免**:那一趟 `wantModels` 是空的,EXACT 会把人家清单**清空**。
+  代码里是 `const exact = !args.zkDeltaOnly && wantModels.length > 0`,少一条腿就是清盘。
+
+**备份必须挪到写库之前**(`backupBlobBeforeWrite()` → `<ver>-<ts>-preconfig/applicationUser.blob.json`,
+写不进去就 `exit(4)` 不动手)。并集语义下备份晚一点无所谓(丢了也能重建);整表赋值之后
+那份快照是**唯一**还知道他装前有哪些名字的东西。**门禁贴在不可逆那一步正前方**,不是 `main()` 末尾。
+
+🔴 **改写入语义会推翻读这份数据的反向路径**:`--uninstall` 的隐含前提是"库里剩下的就是用户自己的名字"
+(并集时代成立:我们只加过)。EXACT 之后**装机那一刻他的名字就没了**,卸载于是"还回 0 个"、
+数字对、语义错、全绿。修法=从快照还原,且**取最早那份带非我们名字的快照**——
+装过一次之后每次 `--upgrade` 都再落一份 `-preconfig`,里面躺着的已经是**我们那份清单**,
+`sort().reverse()[0]` 拿到的就是那份(第一版就是这么写的,腿 ⑨ 报红才发现)。
+⚠️ "还回 N 个"里 **N=0 有两种成因同形**(真的没有 / 挑错了快照),所以 ⑨ 的判据是
+**点名他那两个名字回来了 + 我们的名字没了**,不是数个数。
+记忆:`feedback_changing_merge_to_exact_invalidates_the_uninstall_premise`。
+
+⚠️ **顺序腿的阳性对照不能靠改 `DEFAULT_MODELS` 的顺序**:期望值也是从同一个常量抠的
+(`CX_DUMP_CONSTANTS`),改常量两边一起动 = 对照恒绿、**构造上不可能红**。要破坏的是**被测物**
+(让安装器写库前 `.sort()` 一下),不是期望。同理 ⑦ 开跑前先断言抠到的数组非空 ——
+空数组会让"两个空的相等"恒绿。
+
+## 读同事/本机的 BYOK Key:`cursor_key_read.js`(只读,不进交付包)
+
+`secret://cursorAuth/openAIKey` 存的是 **OSCrypt 密文**(`v10` + AES-128-CBC,iv=16 个 `0x20`,
+key=`PBKDF2(钥匙串主密码,"saltysalt",mac 1003/linux 1,16,sha1)`),`sqlite3` 直接 select 出来
+只有 `{"type":"Buffer","data":[...]}`,看不出任何东西。
+
+```
+ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor cursor_key_read.js            # 掩码
+ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor cursor_key_read.js --reveal   # 明文
+```
+
+默认只打 `sk-L****…tEYg` + 长度 + sha256 前 16 位 —— 回答"两边是不是同一个 Key"用不着明文。
+`CX_DB=` / `CX_RES=` 可指别处(台架/别人的备份)。**不进 `package_team_setup.sh` 的 stage**:
+它是诊断工具,交付包里多一个能打印凭据的脚本没有收益。
+
+- 🔴 **`/usr/bin/security find-generic-password` 在 agent shell 里会永远挂住**,不是报错、不是拒绝:
+  `Cursor Safe Storage`/`Cursor` 那条 item 的 ACL 只认 Cursor 签名的二进制,别的进程来读就**弹授权框**,
+  无人值守时没人点 ⇒ 零输出直到被超时杀掉。**这个形状和"钥匙串里没这条 item"、"脚本死循环"一模一样**,
+  我这一轮就先按这条路撞了一次。判据:`security` 几秒内不吐东西就是在等框 —— 不要加 timeout 重试,换 keytar 那条路。
+- **四种失败处置完全不同,所以四个不同退出码**:`2`=找不到 app/库(路径问题) · `3`=拿不到主密码
+  (**Cursor 从没启动过**,或没用 Cursor 二进制跑 → keytar 的 `.node` ABI 对不上) · `5`=**库里没那一行**
+  (他从没配过 Key;升级完会 401,而屏幕上只写"完成") · `6`=有行但解不开(**换过机器/迁移过 Library**
+  → 密文方案与本机不符,**别覆盖写新 Key**)。把 `5` 和 `6` 混成一句"读不到"就会做出相反的处置。
+- **阳性对照**(每次改这个脚本都重跑一遍,造四个假库):无该行→`5` · 值不是 Buffer 形状→`6` ·
+  有 Buffer 无 `v10` 前缀→`6`(不同理由)· `v10`+随机字节→`6` BAD_DECRYPT · `CX_DB` 指不存在→`2` ·
+  `CX_RES` 指空目录→`3`。六条各红各自那条、真库绿,才算这把尺子有判别力。
+- ⚠️ **Key 是凭据**:明文别进 issue / 聊天记录 / 工单 / 记忆文件。要换就跑 `INSTALL` 重填,
+  安装器写前有"能解开现有 Key + 加密回环"两道自检。
 
 ## 硬规矩
 
@@ -283,9 +570,25 @@ AST 子节点的 `start/end` 里 `src.slice()` 出来搬运,不写进任何模�
    报告时必须**明说是替代判据**。⚠️ 别用 `git stash`/`git cat-file HEAD` 造基准:HEAD 可能落后于工作区
    已有的钩子重构(09-15 踩到——HEAD 版还是 09-10 前那个自写"每锚点恰好 1 次"的旧钩子,喂真 bundle
    在 multi 锚点 `nopromote` 上直接假红退出、连产物都不写,`cmp` 于是报"文件不存在"极易被误读成 DIFFER)。
+   **②腿 SKIP 的另一种情况(2026-09-20 修掉)**:live 本身 pristine(补丁没装/已 `--revert`/
+   刚升级还没 REPAIR)时,台架原来只认 `~/.cursor-team-setup-backup/` 里的种子,于是把
+   "live 干净"读成"没种子"⇒ ②③④ **三腿全 SKIP**,而这恰好是最常见的状态(改完代码想验一下、
+   手上没装补丁)= 台架白摆着。现在改成:按 **marker 计数**判 pristine(0=干净,>0=已打),
+   干净就拿 live 那两条当 ③④ 的种子;② 仍然 SKIP,但理由写明是「**没有"已打"那一边可比**」
+   不是通过。⚠️ `grep -c` 零命中时**既打印 0 又 rc=1**,写 `$(grep -c … || echo 0)` 会拿到
+   `"0\n0"` 送进 `$(( ))` 直接 syntax error(实测)。
 5. `VERIFIED_VERSIONS` 加新大版本(软闸只告警,真安全阀是 exactly-1)→ `python3 setup_impl_parity.py`
-   → `sh package_team_setup.sh` 重打 zip → 换飞书文档 `OQCPdLd4MovEVoxGzdMcD3CJnCf` 附件。
-6. 同事侧动作:**只需双击 `REPAIR-Mac.command`**(新包)。
+   → 改过模型清单的话再跑 `sh retire_model_offline_cases.sh`
+   → `sh package_team_setup.sh` 重打 zip
+   → **`python3 setup_package_freshness.py`**(逐成员 sha256 == 工作副本;换附件前的最后一道门)
+   → 换飞书文档附件(现行入口 `FapXdudPLoTTRLxWGJQcqITpn9g`;
+   旧文档 `OQCPdLd4MovEVoxGzdMcD3CJnCf` 的附件仍是 20 名那版,处置未定)。
+6. 同事侧动作:纯补丁漂移 → **双击 `REPAIR-Mac.command`**;
+   这一版还动了模型清单(加名/下架)→ 让他双击 **`UPGRADE-Mac.command`**(不问 Key,
+   见「模型清单增减 + 老用户升级档」)。
+7. **README.txt 里的模型清单/下架名单不许写死**,从 `DEFAULT_MODELS`/`RETIRED_MODELS` 抠
+   (`__MODEL_LIST__` / `__RETIRED_MODELS__` 占位符),抠不到就**中止打包** ——
+   "README 这一节是空的"同事不会来问,他只会按旧印象用。占位符残留检查已覆盖这两个新占位符。
 
 - **snippet 单一来源**:三处 QP_SNIPPET(`cursor_team_setup.py`、`cursor_team_setup.js`、
   `cursor_queue_pump_patch.py`)必须逐字节一致(改一处必同步另两处并跑等价断言 `CX_DUMP_CONSTANTS`);
@@ -342,8 +645,11 @@ A) bundle 与 pristine 逐字节相同        ✅ desktop + glass
 B) marker 全清 = 0                      ✅ (对照:patched 产物同尺子报 9,尺子有判别力)
 C) 库回到装前形状                        ✅ 9/9
    composer 还给 claude-opus-4.6(连 parameters)/ maxMode=True 没丢 /
-   cmd-k 归 default / deep-search 别人的第三方模型没被动 /
-   userAddedModels 与 modelOverrideEnabled 只剩别人的 / baseUrl=""+useKey=false
+   cmd-k 归 default / baseUrl=""+useKey=false
+   ⚠️ 09-20 第二轮起后两条**换了口径**:EXACT 语义下装机会把他的第三方名删掉,
+   所以不再是"没被动过"而是「**从最早那份 -preconfig 快照里还回去**」
+   (上一版写的"deep-search 别人的模型没被动 / 两个数组只剩别人的"已作废)。
+   判据=点名他那两个名字回来了 + 我们清单里的名字没了,**不是数个数**(N=0 两种成因同形)。
 D) 无同版本备份分支                      ✅ 给官方重装指引,旧版 bundle 没被盖上去
 E) --revert 版本不匹配                   ✅ rc=1 且不动 bundle(对照:同版本 rc=0 且真还原)
 F) 预演不落盘                            ✅ bundle/库 md5 都没变(对照:带 --apply 两者都变)
@@ -355,7 +661,9 @@ F) 预演不落盘                            ✅ bundle/库 md5 都没变(对�
 `v3`(僵尸 uuid 判活)→ `v3.3`(去 120-tick 寿命上限)→ `v3.4`(在飞防护)→
 `v3.5`(派发收敛:仅 heal 后/空闲派)→ **`v4`(现行:队列被外部消费让路 5 tick+
 自家在飞豁免,退居纯兜底)**;根治靠 `@cxteam-norelay`(泵不再是主派发器);
-链式增量线独立演进:**`@cx-chain:v3`**(exthost fetch seam,件B,见末节)。
+链式增量线独立演进:**`@cx-chain:v3`**(exthost fetch seam,件B,见末节);
+上下文窗口归一线独立演进:`@cx-ctxwin:v1`(补的是阈值函数而非构造器,漏 3 个消费者)→
+`v2`(补构造器 A,漏了 B 的旁路)→ **`v3`(现行:A+B+C 三点,穷举 10 处算术点得出)**。
 记忆:`feedback_cursor_queue_stuck_zombie_uuid_v3_liveness`、
 `feedback_cursor_turnended_relay_orphan_fold_norelay_root_fix`;安装器设计与等价性证明:
 `docs/cursor-g-naming-rollout-20260824.md` §七。

@@ -14,6 +14,10 @@
 #   ② 旧版 pristine bundle 打完 == 当前 live 已打 bundle(BYTE-EQUAL)——防"修新版把老用户改坏"
 #   ③ js 产物 == py 产物(BYTE-EQUAL)——双实现不许分叉
 #   ④ 假 app 端到端 --repair 打上 + node --check 过 + 再跑一次全 SKIP(幂等)
+#   ⑤ 件C ctxwin:三锚点 + 语法阳性对照 + 行为(500 与 500000 同形)
+#   ⑥ byok 路由(bOd)行为 + 阳性对照(原版在开关 off 下必须判不走 BYOK)
+#   ⑦ 件D noloop:Agent Host 轮次路由器改判 connect —— 结构(锚点/位置/语法)
+#      + 行为(daemon.cjs 真路由器,3 个坏出口全改判 + 每例原版对照)
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 JS="$HERE/cursor_team_setup.js"
@@ -121,6 +125,24 @@ else skip "①:没给 --new-bundles / --fetch(只有新 Cursor 版本发布时�
 #    `const r=[]`、C 的第三参数与局部变量互换 ⇒ 命中 0,安装器"警告后跳过"不阻断,
 #    所以包发出去了、门禁全绿、用户拿不到修复。跳过不是通过。
 echo "--- 1b) 新版 app 件C(ctxwin)锚点 ---"
+# 🔴 回落:没给 --new-app 时,拿 ~/.cursor-ctxwin-backup/<ts>/ 的扁平快照还原出目录结构。
+# 那份快照是**打补丁前**的原厂文件,对"锚点认不认得出这个版本"完全够用。
+# 之前只认 --new-app ⇒ 平时跑台架它永远 SKIP,而这腿存在的唯一理由就是
+# 「3.21.18 的 ctxwin 锚点命中 0 是因为它从来没进台架」—— 常年 SKIP 等于原病复发。
+# 这时量的是**当前版本**而不是新版,输出里写清,别当成"新版已验"。
+NEWAPP_IS_SNAPSHOT=0
+if [ -z "$NEWAPP" ]; then
+  CWSNAP="$(ls -d "$HOME"/.cursor-ctxwin-backup/* 2>/dev/null | tail -1)"
+  if [ -n "$CWSNAP" ] && [ -f "$CWSNAP/extensions__cursor-agent-exec__dist__main.js" ]; then
+    NEWAPP="$TMP/snapapp"; NEWAPP_IS_SNAPSHOT=1
+    for fn in "$CWSNAP"/extensions__*; do
+      rel="$(basename "$fn" | sed 's|__|/|g')"
+      mkdir -p "$NEWAPP/$(dirname "$rel")"
+      cp "$fn" "$NEWAPP/$rel"
+    done
+    echo "    (没给 --new-app → 用原厂快照 $CWSNAP 还原目录,量的是**当前版本**不是新版)"
+  fi
+fi
 if [ -n "$NEWAPP" ]; then
   NAPP_RES="$NEWAPP/Contents/Resources/app"
   [ -d "$NAPP_RES" ] || NAPP_RES="$NEWAPP"      # 也接受直接给 Resources/app
@@ -314,10 +336,14 @@ fi
 echo "--- 6) byok 路由(bOd)行为 + 阳性对照 ---"
 BYOK_SRC=""
 [ -n "$NEWDIR" ] && [ -f "$NEWDIR/workbench.desktop.main.js" ] && BYOK_SRC="$NEWDIR/workbench.desktop.main.js"
+# 🔴 回落到 $REF:这腿量的是**路由函数的行为**,只需要一份 pristine bundle,
+# 跟"是不是新版"无关。之前只认 --new-bundles ⇒ 平时跑台架它永远 SKIP,
+# 而 byok-force/byok-keepon 恰好是最近改动最多的两个补丁 —— 最该被量的那一腿常年没跑。
+[ -z "$BYOK_SRC" ] && [ -n "$REF" ] && [ -f "$REF/workbench.desktop.main.js" ] && BYOK_SRC="$REF/workbench.desktop.main.js"
 if [ -z "$CXNODE" ]; then
   skip "⑥:没找到 Cursor 的 electron(CXNODE 空),这腿没跑"
 elif [ -z "$BYOK_SRC" ]; then
-  skip "⑥:没给 --new-bundles / --fetch ⇒ 没有 pristine 输入,这腿没跑"
+  skip "⑥:没有 pristine workbench bundle(既没 --new-bundles,$BAK 下也没有当前版本的备份),这腿没跑"
 else
   BTMP="$(mktemp -d)"
   CX_APPLY_TO_FILE="$BYOK_SRC" CX_APPLY_OUT="$BTMP/patched.js" \
@@ -328,6 +354,80 @@ else
       || bad "⑥byok 路由行为腿不符(见上面 FAIL)"
   fi
   rm -rf "$BTMP"
+fi
+
+# ── 7) 件D @cx-noloop:v1 —— Agent Host 轮次 runtime 路由器改判 connect ──────────
+# 病:同事那台的服务端 feature gate `agent_host_local_loop` 是 on ⇒
+# `createLocalLoopTurnRouter` 把这一轮交给 `managed-local`(Cursor 自家的
+# InferenceService.RunInference)⇒ `[permission_denied] … is not enabled for this account`
+# / 界面上是 "An unexpected error occurred. Request ID: <uuid>"。
+# 而 Cursor 自己的源码里写着 local loop **不支持 BYOK**
+# ("Turns with custom model credentials (BYOK/private models) are not supported on the local loop"),
+# ⇒ 对我们这支纯 BYOK 的车队,两个非 connect 出口**都是错的**:带 key → fail,不带 key → 打它自家推理。
+#
+# 判据四条,缺一条这腿不算数:
+#   a) 两个目标各 exactly-1 锚点、marker 各 1 个
+#   b) marker 必须**紧贴生成器体开头**(= 插成第一条语句)。只断言"有 marker"不够:
+#      插在函数尾部同样能数到 1 个,但一行都不会被执行 —— 那是零症状的假绿。
+#   c) 打完过 node --check,且**阳性对照必须报红**(证明语法尺子真在量)
+#   d) 行为:拿 daemon.cjs 里那份**真路由器**真跑,三个坏出口(managed-local /
+#      fail / privateInference 那支)全改判 connect,且每例自带原版对照
+#      ⇒ cursor_noloop_offline_cases.js
+#   🔴 main.js 那份是混淆名,靠猜名造桩测的是我的猜名能力不是补丁 ⇒ 它只有 a/b/c
+#      三条结构判据,没有行为判据。这半的强度低于 daemon.cjs 那半,不许合并成一句"全绿"。
+echo "--- 7) 件D noloop:Agent Host 轮次路由改判 connect ---"
+NLBK="$(ls -d "$HOME"/.cursor-ctxwin-backup/* 2>/dev/null | tail -1)"
+if [ -z "$CXNODE" ]; then
+  skip "⑦:没找到 Cursor 的 electron(CXNODE 空),这腿没跑"
+elif [ -z "$NLBK" ] || [ ! -d "$NLBK" ]; then
+  skip "⑦:没有 ~/.cursor-ctxwin-backup/<ts>/ 原始快照(先在本机跑一次 cursor_ctxwin_patch.js --apply)"
+else
+  NLTMP="$(mktemp -d)"
+  NL_DAEMON_OUT=""
+  for spec in "extensions__cursor-agent-host__dist__main.js:min" \
+              "extensions__cursor-agent-host__dist__agent-host-daemon__dist__bin__daemon.cjs:src"; do
+    fn="${spec%:*}"; kd="${spec##*:}"
+    [ -f "$NLBK/$fn" ] || { bad "⑦快照缺 $fn"; continue; }
+    # 先断言输入真的是 pristine。快照里已经带 marker 的话,下面"marker=1"会变成
+    # 在量上一轮的残留,补丁本轮有没有生效完全测不出来 —— 报红不跳过。
+    if grep -q '@cx-noloop:v1' "$NLBK/$fn"; then bad "⑦${fn##*__} 快照里已有 marker ⇒ 不是 pristine,这一例无判别力"; continue; fi
+    out="$NLTMP/$fn"
+    if env ELECTRON_RUN_AS_NODE=1 CX_NOLOOP_APPLY_TO_FILE="$NLBK/$fn" CX_NOLOOP_KIND="$kd" \
+         CX_NOLOOP_OUT="$out" "$CXNODE" "$JS" >/dev/null 2>"$NLTMP/err"; then
+      n=$(grep -o '@cx-noloop:v1' "$out" | wc -l | tr -d ' ')
+      [ "$n" = "1" ] && ok "⑦${fn##*__} 锚点 exactly-1 且打上(marker x$n)" || bad "⑦${fn##*__} marker=$n(应为 1)"
+      # b) 位置:marker + return 必须紧接在 `function*(){` 之后
+      h=$(grep -o 'function\* *( *) *{ */\*@cx-noloop:v1\*/return{runtime:"connect"' "$out" | wc -l | tr -d ' ')
+      [ "$h" = "1" ] && ok "⑦${fn##*__} return 是生成器体第一条语句(会被执行)" \
+        || bad "⑦${fn##*__} marker 不在生成器体开头(命中=$h)⇒ 插进去也不会执行"
+      node --check "$out" 2>/dev/null && ok "⑦${fn##*__} 打完 node --check 过" || bad "⑦${fn##*__} 打完语法坏了"
+      [ "$kd" = "src" ] && NL_DAEMON_OUT="$out"
+    else
+      bad "⑦${fn##*__} 打不上:$(cat "$NLTMP/err")"
+    fi
+  done
+  # c) 阳性对照:在 marker 处插坏括号,语法尺子必须报红
+  NPOI="$NLTMP/poison.js"
+  if [ -n "$NL_DAEMON_OUT" ] && cp "$NL_DAEMON_OUT" "$NPOI" 2>/dev/null; then
+    python3 -c "
+import sys
+p=sys.argv[1]; s=open(p,encoding='utf8').read(); i=s.index('/*@cx-noloop:v1*/')
+open(p,'w',encoding='utf8').write(s[:i]+'/*@cx-noloop:v1*/}}}if('+s[i+17:])" "$NPOI" &&
+    { node --check "$NPOI" 2>/dev/null && bad "⑦阳性对照居然 PASS ⇒ 语法尺子是坏的,上面的 PASS 全不算数" \
+        || ok "⑦阳性对照正确报红 ⇒ 语法尺子可信"; }
+  fi
+  # d) 行为腿(只对 daemon.cjs 那份真名产物)
+  if [ -n "$NL_DAEMON_OUT" ]; then
+    if env CX_NL_PRE="$NLBK/extensions__cursor-agent-host__dist__agent-host-daemon__dist__bin__daemon.cjs" \
+           CX_NL_POST="$NL_DAEMON_OUT" node "$HERE/cursor_noloop_offline_cases.js"; then
+      ok "⑦行为(daemon.cjs 真路由器):3 个坏出口全改判 connect,原版对照全部成立"
+    else
+      bad "⑦行为腿不符(见上面 FAIL)"
+    fi
+  else
+    bad "⑦行为腿没输入(daemon.cjs 那一例没产出)⇒ 结构过了也不代表路由真改判"
+  fi
+  rm -rf "$NLTMP"
 fi
 
 echo ""

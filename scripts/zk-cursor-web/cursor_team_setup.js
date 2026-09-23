@@ -1084,6 +1084,115 @@ if (process.env.CX_CTXWIN_APPLY_TO_FILE) {
   process.exit(0);
 }
 
+/* ── 件D @cx-noloop:v1 关掉 Agent Host 本地循环(2026-09-23) ───────────────────
+   病:同事 Windows/3.21.18 发消息报
+     `[permission_denied] InferenceService.RunInference is not enabled for this account`
+     （之前那一发是 `An unexpected error occurred. Request ID: …`）。
+   他本地日志里两句关键的:选中模型 `grok-4.7` 被当成 Cursor 的 `catalogModelId`;
+   这一轮的 runtime 是 **`managed-local`**。
+
+   这跟 `bOd`(件byok,决定"这次请求走不走 BYOK")**不是一处**。agent-host 里另有一个
+   独立的决策点 `createLocalLoopTurnRouter`,决定这一轮跑在哪个 runtime 上:
+     `connect`       = 老路,交给 Cursor 后端循环(BYOK 一直是走这条活的)
+     `managed-local` = 新路,本地跑 agent 循环、直接打 Cursor 自家 InferenceService
+     `fail`          = 当场抛错
+   日志行 `Selected Agent Host turn runtime {runtime, reason}` 就是它打的。
+
+   🔴 Cursor 自己的源码写明了 local loop **不支持 BYOK**(daemon.cjs 未压缩那份):
+     private-model-not-supported:
+       "Turns with custom model credentials (BYOK/private models) are not supported
+        on the local loop"
+     且给出解法:"Disable agent_host_local_loop to run on the backend loop."
+   ⇒ 对我们这批**只用 BYOK**的机器,这条新路在任何情况下都是错的:
+     带 key  → `getSharedTurnIneligibilityReason` 返 private-model-not-supported → `fail` 抛错
+     不带 key → 判 eligible → `managed-local` → 打 Cursor 自家推理 → 没权限 → permission_denied
+   两个出口都是坏的,所以补丁不去改判定条件,而是让路由器**恒返 `connect`**。
+
+   三段式(证据链):
+   - 假设:同事那一发之所以打到 Cursor 自家推理,是因为 `agent_host_local_loop` 这个
+     服务端 feature gate 在他那边是 on,于是路由器把这一轮判给了 managed-local。
+   - 证伪条件:若假设错(差异不在这个 gate),那么**能正常用 BYOK 的机器**上这个 gate
+     也应该是 on。
+   - 数据:本机(BYOK 正常、同版本 3.21.18)`state.vscdb` 的
+     `workbench.experiments.statsigBootstrap` 里
+     `feature_gates[djb2("agent_host_local_loop")].value === false`
+     (rule_id `3MgjZ8CeD3wwbjykIVegtc`)。而源码里 `managed-local` 只在 gate 为 true
+     且不被判不合格时产生,gate 为 false 的唯一出口是 `{runtime:"connect",reason:"gate-off"}`。
+     ⇒ 他那台 gate 为 on,本机为 off,差异点就在这里。
+
+   ⚠️ **这条补丁不保证他就好了,只保证不再打到 Cursor 自家推理**。他那一轮
+   `hasModelCredentials` 必然是 false(否则会走 `fail` 而不是 managed-local),也就是说
+   modelDetails 上**没有挂 apiKey**。`credentials` 这个 oneof 只有一个来源:
+   `convertModelDetailsToRequestedModelCredentials` 里 `e.apiKey ? apiKeyCredentials : {case:void 0}`,
+   而 `getModelDetailsFromName` 里 `(!i||!n)&&(n=void 0)` —— 开关关着或库里没 Key 都会把它抹掉。
+   所以摘掉 local loop 之后他会退回到「连 Cursor 后端」那条老路:Key 真在库里就通,
+   Key 不在就会看到 Free 档那句话。**哪一种,得看他的 DOCTOR 输出**(第 4 节新增了这一格)。
+   在拿到之前不许说"修好了"。
+
+   为什么不用 Cursor 自带的 feature flag override(`_featureFlagOverrides`):
+   `_canUseOverrides()` 在正式构建里要求 `isDevUser` 这个 contextKey 或服务端下发的
+   dev 资格,普通账号拿不到;而那份资格缓存会被服务端刷新覆盖 ⇒ 覆盖掉之后 override
+   静默失效、症状原样回来。补丁在我们自己的 REPAIR/UPGRADE 里可重放,是可控的那一半。 */
+const NOLOOP_MARKER = "@cx-noloop:v1";
+const NOLOOP_TARGETS = [
+  { rel: path.join("extensions", "cursor-agent-host", "dist", "main.js"), kind: "min" },
+  { rel: path.join("extensions", "cursor-agent-host", "dist", "agent-host-daemon", "dist", "bin", "daemon.cjs"), kind: "src" },
+];
+// 🔴 名字位一律 ID 捕获 —— 压缩版里 `Ps/Js/Ms/e/t/Rs` 全是会摇的名字。锚点靠两个
+//    **字符串字面量**钉死语义:gate 名 `agent_host_local_loop` 与 logger 名
+//    `@anysphere/agent-host:local-loop-turn-router`,它们是源码里的常量,不参与混淆。
+const NL_MIN = new RegExp('"agent_host_local_loop",(' + ID + ')=[^;]{0,80}'
+  + '"@anysphere/agent-host:local-loop-turn-router"\\);'
+  + 'function (' + ID + ')\\((' + ID + ')\\)\\{return (' + ID + ')=>(' + ID + ')'
+  + '\\(this,void 0,void 0,function\\*\\(\\)\\{', "g");
+// 未压缩那份(daemon.cjs)esbuild 保住了真名,但 `options2`/`__awaiter73` 这种后缀会随
+// 打包结果变 ⇒ 同样只钉函数名,参数名/helper 名全用 ID 捕获。
+const NL_SRC = new RegExp('function\\s+createLocalLoopTurnRouter\\((' + ID + ')\\)\\s*\\{\\s*'
+  + 'return\\s*\\((' + ID + ')\\)\\s*=>\\s*(' + ID + ')\\(this,\\s*void 0,\\s*void 0,\\s*'
+  + 'function\\*\\s*\\(\\)\\s*\\{', "g");
+// reason 用我们自己的字面量而不是照抄 "gate-off":日志里要能一眼看出这是**我们**摘的,
+// 而不是服务端本来就没开。把自己的动作伪装成环境的原样是给下一轮诊断埋雷。
+const NL_RET = 'return{runtime:"connect",reason:"cxteam-local-loop-off"};';
+
+// 纯函数:把件D 打进一段文本。锚点不是 exactly-1 ⇒ {ok:false},调用方整条跳过(不硬来)。
+function noloopApplyToText(src, kind) {
+  if (src.includes(NOLOOP_MARKER)) return { ok: false, why: "已打过", skip: true };
+  const re = kind === "min" ? NL_MIN : NL_SRC;
+  re.lastIndex = 0;
+  const m = [...src.matchAll(re)];
+  if (m.length !== 1) return { ok: false, why: "锚点 count=" + m.length };
+  // 生成器体的第一句插 return:`Rs/__awaiter` 拿到 {done:true,value:我们的对象} 就直接
+  // resolve,后面那些 `var _a;if(...privateInference)` 全成死代码 —— 两条分支(私有推理
+  // 那支在 gate 检查**之前**就 return 了)于是一起被盖住。只补 gate 那支会漏掉私有推理那支。
+  const out = src.replace(m[0][0], m[0][0] + "/*" + NOLOOP_MARKER + "*/" + NL_RET);
+  return { ok: true, out, applied: ["noloop-" + kind] };
+}
+function noloopBakName(rel) { return "cxnoloop__" + rel.split(path.sep).join("__"); }
+
+function planNoloopBundle(t, baseText) {
+  const p = path.join(RES, t.rel);
+  if (!fs.existsSync(p)) { console.log("   SKIP noloop %s(不存在)", t.rel); return null; }
+  const src = baseText != null ? baseText : fs.readFileSync(p, "utf8");
+  const r = noloopApplyToText(src, t.kind);
+  if (!r.ok) {
+    if (!r.skip) console.log("   ⚠️  noloop %s 锚点问题(%s)→ 跳过(不阻断其它补丁)", path.basename(t.rel), r.why);
+    return null;
+  }
+  console.log("   noloop %s: 将打 [%s]", path.basename(t.rel), r.applied.join(", "));
+  return { p, out: r.out, bakName: noloopBakName(t.rel), applied: r.applied };
+}
+
+// 测试钩子:对任意文件跑真实件D,写出到 CX_NOLOOP_OUT,供离线台架断言。
+// CX_NOLOOP_KIND=min|src。退出码 0=打上 / 17=锚点不满足。
+if (process.env.CX_NOLOOP_APPLY_TO_FILE) {
+  const f = process.env.CX_NOLOOP_APPLY_TO_FILE;
+  const r = noloopApplyToText(fs.readFileSync(f, "utf8"), process.env.CX_NOLOOP_KIND || "min");
+  if (!r.ok) { console.error("noloop 打不上:" + r.why); process.exit(17); }
+  fs.writeFileSync(process.env.CX_NOLOOP_OUT || (f + ".nlout"), r.out);
+  console.error("noloop applied: " + r.applied.join(", "));
+  process.exit(0);
+}
+
 // 测试钩子:对任意 exthost bundle 跑「装 → 摘」往返,断言逐字节回到原样。
 // 这是摘除逻辑唯一可信的判据——只看"没报错"会放行留半截的逆操作。
 // 退出码:0=往返逐字节相同 / 14=装不上(锚点) / 15=摘失败 / 16=往返有差异。
@@ -1572,7 +1681,8 @@ function listBackupDirs() {
 const bakHasBundle = (d) =>
   BUNDLES.some((rel) => fs.existsSync(path.join(BACKUP_ROOT, d, path.basename(rel)))) ||
   CHAIN_TARGETS.some((rel) => fs.existsSync(path.join(BACKUP_ROOT, d, chainBakName(rel)))) ||
-  CTXWIN_TARGETS.some((t) => fs.existsSync(path.join(BACKUP_ROOT, d, ctxwinBakName(t.rel))));
+  CTXWIN_TARGETS.some((t) => fs.existsSync(path.join(BACKUP_ROOT, d, ctxwinBakName(t.rel)))) ||
+  NOLOOP_TARGETS.some((t) => fs.existsSync(path.join(BACKUP_ROOT, d, noloopBakName(t.rel))));
 // 备份目录名形如 `3.18.25-20260903-105032`(可能带 `-cfgonly`)。取版本号那一段。
 const bakVersion = (d) => (d.match(/^(\d+\.\d+\.\d+)-/) || [])[1] || null;
 
@@ -1607,6 +1717,12 @@ async function revert() {
   for (const t of CTXWIN_TARGETS) {
     const src = path.join(b, ctxwinBakName(t.rel));
     if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(RES, t.rel)); console.log("  restored ctxwin:", ctxwinBakName(t.rel)); }
+  }
+  // 件D noloop:只有在它是该路径**唯一**计划时才会有自己的备份名(与 ctxwin 同路径时
+  // 备份归 ctxwin 那一份,一次备份就够)。所以这里存在才还原,不存在不是错。
+  for (const t of NOLOOP_TARGETS) {
+    const src = path.join(b, noloopBakName(t.rel));
+    if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(RES, t.rel)); console.log("  restored noloop:", noloopBakName(t.rel)); }
   }
   const blob = path.join(b, "applicationUser.blob.json");
   if (fs.existsSync(blob)) {
@@ -1672,15 +1788,29 @@ async function uninstall(dry) {
       if (!dry) fs.copyFileSync(src, path.join(RES, t.rel));
       console.log("   %s ctxwin: %s", dry ? "将还原" : "已还原", ctxwinBakName(t.rel));
     }
+    for (const t of NOLOOP_TARGETS) {
+      const src = path.join(BACKUP_ROOT, pick, noloopBakName(t.rel));
+      if (!fs.existsSync(src)) continue;
+      if (!dry) fs.copyFileSync(src, path.join(RES, t.rel));
+      console.log("   %s noloop: %s", dry ? "将还原" : "已还原", noloopBakName(t.rel));
+    }
     bundleDone = true;
   } else {
-    // 数一下现在到底还有没有补丁在身上,免得让人白重装
+    // 数一下现在到底还有没有补丁在身上,免得让人白重装。
+    // 🔴 必须把 exthost 家族(ctxwin/noloop)一起数:它们不在 BUNDLES 里。只数 workbench
+    //    的话,agent-host 上还挂着 noloop 却报「本来就是原厂的,不用动」—— 假绿。
     let still = 0;
     for (const rel of BUNDLES) {
       const p = path.join(RES, rel);
       if (!fs.existsSync(p)) continue;
       const src = fs.readFileSync(p, "utf8");
       for (const pt of PATCHES) if (pt.marker && src.includes(pt.marker)) { still++; break; }
+    }
+    for (const [targets, marker] of [[CTXWIN_TARGETS, CTXWIN_MARKER], [NOLOOP_TARGETS, NOLOOP_MARKER]]) {
+      for (const t of targets) {
+        const p = path.join(RES, t.rel);
+        if (fs.existsSync(p) && fs.readFileSync(p, "utf8").includes(marker)) still++;
+      }
     }
     if (!still) {
       console.log("   当前 bundle 上没有本方案的 marker —— 本来就是原厂的,不用动。");
@@ -2155,6 +2285,15 @@ async function doDoctor() {
     const n = fs.readFileSync(p, "utf8").split(CTXWIN_MARKER).length - 1;
     P("    " + n + "  " + t.rel);
   }
+  // 件D:0 = local loop 没被摘 ⇒ 若下面第 4 节那个 gate 是 on,这台机器就会把这一轮
+  // 打到 Cursor 自家 InferenceService(BYOK 的 key 压根不参与)。
+  P("  noloop(" + NOLOOP_MARKER + "):");
+  for (const t of NOLOOP_TARGETS) {
+    const p = path.join(RES, t.rel);
+    if (!fs.existsSync(p)) { P("    !!", t.rel, "不存在"); continue; }
+    const n = fs.readFileSync(p, "utf8").split(NOLOOP_MARKER).length - 1;
+    P("    " + n + "  " + t.rel + (n === 0 ? "   🔴 没摘" : ""));
+  }
 
   P("\n--- 2) BYOK 配置 / Key ---");
   let d = null;
@@ -2216,6 +2355,40 @@ async function doDoctor() {
         "  params=" + JSON.stringify(r.params || []));
     }
   } catch (e) { P("  !! 读 composerData 失败:", e && e.message || e); }
+
+  /* 4) Cursor 服务端下发的 feature gate 实际值。
+     为什么这一格必需:`agent_host_local_loop` 决定这一轮跑在哪个 runtime 上 ——
+     on ⇒ agent-host 可能把这一轮判给 `managed-local`,直接打 Cursor 自家
+     InferenceService(**完全绕过 BYOK**),账号没这个权限就是
+     `[permission_denied] InferenceService.RunInference is not enabled for this account`。
+     ⚠️ gate 名在 statsig bootstrap 里是 **djb2 哈希**过的,不是明文,所以必须自己算哈希
+        再查表;直接 grep 名字必然 0 命中(那是假红,不是"没有这个 gate")。
+     判据:本机 BYOK 正常的那台读出来是 false。这一格是 true 且上面 noloop=0 ⇒ 就是它。 */
+  P("\n--- 4) Cursor 服务端 feature gate(与 BYOK 路由相关的那几个) ---");
+  try {
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(STATE_DB, { readOnly: true });
+    const row = db.prepare("SELECT value FROM ItemTable WHERE key=?").get("workbench.experiments.statsigBootstrap");
+    db.close();
+    if (!row) P("  (没有 statsigBootstrap ⇒ 这台机器还没拉过实验配置)");
+    else {
+      const j = JSON.parse(Buffer.isBuffer(row.value) ? row.value.toString("utf8") : String(row.value));
+      const gates = j.feature_gates || {};
+      // statsig djb2:32 位无符号。算法必须与 Cursor 用的一致,否则查不到 = 假"没有这个 gate"。
+      const djb2 = (s) => { let h = 0; for (let i = 0; i < s.length; i++) { h = (h << 5) - h + s.charCodeAt(i); h = h & h; } return String(h >>> 0); };
+      P("  hash_used =", JSON.stringify(j.hash_used), " gate 总数 =", Object.keys(gates).length);
+      // 阳性对照:先证明这张表**查得到东西**。一个都查不到时,下面的 "NOT FOUND" 要能
+      // 和"这个 gate 确实没下发"区分开 —— 会数东西的尺子必须先断言自己数得到。
+      let hit = 0;
+      for (const name of ["agent_host_local_loop", "agent_host_enabled", "dedicated_local_agent_runtime_host"]) {
+        const k = djb2(name);
+        const g = gates[k];
+        if (g) hit++;
+        P("  " + name + " = " + (g ? JSON.stringify(g.value) : "(未下发)") + "  [djb2=" + k + "]");
+      }
+      if (!hit) P("  ⚠️ 三个都查不到 ⇒ 要么哈希算法换了,要么这几个 gate 都没下发。别只凭这一格下结论。");
+    }
+  } catch (e) { P("  !! 读 feature gate 失败:", e && e.message || e); }
 
   const dst = path.join(os.tmpdir(), "cursor-g-doctor.txt");
   try { fs.writeFileSync(dst, out.join("\n") + "\n"); P("\n📋 这份报告也存在:", dst, "—— 把它整份发出来即可(里面没有明文 Key)"); }
@@ -2331,6 +2504,18 @@ async function main() {
     const abs = path.join(RES, t.rel);
     const i = plans.findIndex((x) => x.p === abs);
     const r = planCtxwinBundle(t, i >= 0 ? plans[i].out : null);
+    if (!r) continue;
+    if (i >= 0) plans[i] = { ...plans[i], out: r.out, applied: (plans[i].applied || []).concat(r.applied) };
+    else plans.push(r);
+  }
+  // 件D @cx-noloop:v1 关掉 agent-host 本地循环,**默认装**(local loop 与 BYOK 互斥,
+  // 是 Cursor 自己源码里写明的,不是可选项)。两个目标都与 ctxwin 家族同路径重叠
+  // ⇒ 必须接着已有计划的产物改并原地替换,不能再 push 一条(两条计划先后写同一路径,
+  // 后写的会把前一个静默冲掉,而且两份都"成功"、不报错)。
+  for (const t of NOLOOP_TARGETS) {
+    const abs = path.join(RES, t.rel);
+    const i = plans.findIndex((x) => x.p === abs);
+    const r = planNoloopBundle(t, i >= 0 ? plans[i].out : null);
     if (!r) continue;
     if (i >= 0) plans[i] = { ...plans[i], out: r.out, applied: (plans[i].applied || []).concat(r.applied) };
     else plans.push(r);

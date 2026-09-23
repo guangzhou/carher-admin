@@ -4,10 +4,13 @@
 #
 #   sh bundle_patch_regress.sh                      # 三腿(旧版零漂移 / js==py / 假 app 端到端)
 #   sh bundle_patch_regress.sh --new-bundles /tmp/cx319   # 再加第①腿:新版 bundle 锚点全 exactly-1
+#   sh bundle_patch_regress.sh --new-app "/Volumes/Cursor Installer/Cursor.app"   # ①b:新版件C 4/4
 #   sh bundle_patch_regress.sh --fetch              # 自己去官方拉最新 dmg 抽 bundle,再跑全四腿
 #
 # 四腿(照 skill cursor-client-bundle-patch「新版本漂移修复流程」第 4 步):
 #   ① 新版两条 bundle:每个非 multi 锚点 hits=1(multi ≥1)——证明新正则认得出新版
+#  ①b 新版 app 的件C(ctxwin)四个目标全 OK ——🔴 2026-09-23 补:①只量 workbench 解锁锚点,
+#      ctxwin 那四个 bundle 完全没进台架,3.21.18 的锚点 B/C 命中 0 就是这样发出去的
 #   ② 旧版 pristine bundle 打完 == 当前 live 已打 bundle(BYTE-EQUAL)——防"修新版把老用户改坏"
 #   ③ js 产物 == py 产物(BYTE-EQUAL)——双实现不许分叉
 #   ④ 假 app 端到端 --repair 打上 + node --check 过 + 再跑一次全 SKIP(幂等)
@@ -16,17 +19,19 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 JS="$HERE/cursor_team_setup.js"
 PY="$HERE/cursor_team_setup.py"
 PROBE="$HERE/bundle_anchor_probe.js"
+CTXWIN="$HERE/cursor_ctxwin_patch.js"
 APP="${CURSOR_APP:-/Applications/Cursor.app}"
 LIVE_RES="$APP/Contents/Resources/app"
 BAK="${CURSOR_BACKUP_DIR:-$HOME/.cursor-team-setup-backup}"
 TMP="$(mktemp -d)"
-NEWDIR=""; FETCH=0; FAIL=0; SKIP=0
+NEWDIR=""; NEWAPP=""; FETCH=0; FAIL=0; SKIP=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --new-bundles) NEWDIR="$2"; shift 2 ;;
+    --new-app) NEWAPP="$2"; shift 2 ;;
     --fetch) FETCH=1; shift ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "未知参数:$1" >&2; exit 64 ;;
   esac
 done
@@ -79,6 +84,17 @@ if [ "$FETCH" = "1" ]; then
       cp "$MNT"/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js \
          "$MNT"/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.glass.main.js "$NEWDIR"/ \
          && ok "抽出 $VER 的两条 bundle → $NEWDIR" || bad "拷 bundle 失败"
+      # ①b 要的是件C 那四个目标(在 extensions/ 下,不是 workbench)——挂载期内一起拷走,
+      # 否则 detach 之后①b 只能 SKIP,而 SKIP 不是通过。
+      NEWAPP="$TMP/newapp-$VER"
+      for rel in extensions/cursor-local-agent-runtime/dist/main.js \
+                 extensions/cursor-agent-host/dist/main.js \
+                 extensions/cursor-agent-exec/dist/main.js \
+                 extensions/cursor-agent-host/dist/agent-host-daemon/dist/bin/daemon.cjs; do
+        mkdir -p "$NEWAPP/Contents/Resources/app/$(dirname "$rel")"
+        cp "$MNT/Cursor.app/Contents/Resources/app/$rel" \
+           "$NEWAPP/Contents/Resources/app/$rel" 2>/dev/null || bad "拷件C 目标失败:$rel"
+      done
       hdiutil detach "$MNT" >/dev/null 2>&1
     else bad "挂载 dmg 失败"; fi
   fi
@@ -98,6 +114,28 @@ if [ -n "$NEWDIR" ]; then
     else bad "新版锚点有 hits!=1 的(见上)"; fi
   else skip "①:$NEWDIR 里没有 workbench.*.main.js"; fi
 else skip "①:没给 --new-bundles / --fetch(只有新 Cursor 版本发布时才需要这腿)"; fi
+
+# ── ①b 新版 app 的件C(ctxwin):四个目标全 OK,且不许出现"已打过" ──
+# 🔴 为什么单开一腿:① 只量 workbench 两条 bundle 的解锁锚点,件C 的四个目标在
+#    extensions/ 下,从来没进过台架。3.21.18 里锚点 B 的局部变量 `const n=[]` 摇成
+#    `const r=[]`、C 的第三参数与局部变量互换 ⇒ 命中 0,安装器"警告后跳过"不阻断,
+#    所以包发出去了、门禁全绿、用户拿不到修复。跳过不是通过。
+echo "--- 1b) 新版 app 件C(ctxwin)锚点 ---"
+if [ -n "$NEWAPP" ]; then
+  NAPP_RES="$NEWAPP/Contents/Resources/app"
+  [ -d "$NAPP_RES" ] || NAPP_RES="$NEWAPP"      # 也接受直接给 Resources/app
+  if [ -f "$NAPP_RES/extensions/cursor-agent-exec/dist/main.js" ]; then
+    CURSOR_APP_ROOT="$NAPP_RES" node "$CTXWIN" --dry >"$TMP/cw.txt" 2>&1
+    sed 's/^/    /' "$TMP/cw.txt"
+    NOK=$(grep -c '^OK ' "$TMP/cw.txt")
+    NXX=$(grep -c '^XX ' "$TMP/cw.txt")
+    # 判据:4 个 OK 且 0 个 XX。先断言自己数得到(NOK 非空且是数字),否则尺子坏了当红。
+    case "$NOK" in ''|*[!0-9]*) bad "①b 尺子坏了:数不出 OK 行数";; *)
+      if [ "$NOK" = "4" ] && [ "$NXX" = "0" ]; then ok "①b 件C 新版 4/4 锚点 exactly-1"
+      else bad "①b 件C 新版 OK=$NOK XX=$NXX(须 4/0)"; fi ;;
+    esac
+  else skip "①b:$NEWAPP 里找不到 extensions/cursor-agent-exec/dist/main.js"; fi
+else skip "①b:没给 --new-app / --fetch(新版本漂移时这腿必须跑)"; fi
 
 # ── ② 旧版 pristine 打完 == 当前 live 已打(零漂移真门) ──
 echo "--- 2) 旧版零漂移(pristine 重打 vs live 已打)---"

@@ -107,7 +107,15 @@ const VERIFIED_VERSIONS = ["3.16", "3.17", "3.18", "3.19", "3.20", "3.21"];  // 
    ⚠️ 与本次无关但顺带量到的既有状态:件B @cx-chain 的锚 `customHeaders:d}=e,m=` 在
    3.21.16 的两条 exthost bundle 上 count=0 —— 但本机 pristine 的 3.20.17 上同样是 0
    (marker/__cxWrap 都不在,排除"已打过"),所以是早就漂掉的老状态,不是 3.21 新增回归;
-   它按设计非致命(告警跳过,不阻断解锁补丁)。 */
+   它按设计非致命(告警跳过,不阻断解锁补丁)。
+   2026-09-23 3.21.18(Universal)实测补记:8 条解锁锚点在 desktop/glass 上仍是
+   非 multi 全 exactly-1、nopromote 2/5 逐字不变 ⇒ 解锁面零漂移。
+   🔴 但件C(ctxwin)在 3.21.18 上原本全灭:锚点 B 的局部变量 `const n=[]` 摇成
+   `const r=[]`、锚点 C 的第三参数与局部变量互换(`(e,t,n)/const r`→`(e,t,r)/const n`),
+   三条 min bundle 全部命中 0(daemon.cjs 不受影响,它不 minify)。原因是我把 minify 的
+   **参数名和局部变量名写死**了 —— 与 3.20.21 栽在函数名(`qUy`→`$7y`)同一个病,只是低一层。
+   现已全部改成 ID 捕获 + 反向引用绑定语义;3.21.18 与 3.20.17 两代都 4/4,产物与单机版
+   逐字节相同。台架同时补了①b 腿(新版 app 件C 4/4),之前①只量 workbench,件C 没人看。 */
 const DEFAULT_BASE_URL = "https://cc.auto-link.com.cn/pro/v1";
 /* 菜单 = 这个数组,**逐字、按序、全量**（2026-09-20 第二轮改成整表赋值,见 mergeConfig 的
    EXACT 语义：库里的 userAddedModels / modelOverrideEnabled 直接等于这份,不再是并集）。
@@ -818,9 +826,18 @@ const CTXWIN_TARGETS = [
   { rel: path.join("extensions", "cursor-agent-exec", "dist", "main.js"), kind: "min" },
   { rel: path.join("extensions", "cursor-agent-host", "dist", "agent-host-daemon", "dist", "bin", "daemon.cjs"), kind: "src" },
 ];
-const CW_A_MIN = /function\s+([A-Za-z_$][\w$]*)\(e,t\)\{return\{usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,promptContextUsageSnapshotBlobId:void 0,\.\.\.t,_privacyMode:e\}\}/g;
-const CW_B_MIN = /function\s+([A-Za-z_$][\w$]*)\(e,t\)\{if\(e<=0\)return;const n=\[\];return void 0!==t\.unusedTokensThresholdToStartBackgroundSummarization/g;
-const CW_C_MIN = /function\s+([A-Za-z_$][\w$]*)\(e,t,n\)\{const r=t-e;return\s+[A-Za-z_$][\w$]*\(e,t,n\)&&\(void 0!==n\.unusedTokensThresholdToPersistBackgroundSummarization/g;
+// 🔴 名字位一律用 ID 捕获 + 反向引用绑定语义 —— 函数名、**参数名、局部变量名**都算名字位。
+//    3.20.21 栽在函数名($7y);3.21.18 栽在局部变量名与参数名:B 的 `const n=[]` 摇成
+//    `const r=[]`,C 的第三参数与局部变量互换(`(e,t,n)/const r` → `(e,t,r)/const n`),
+//    写死名字的锚点当场命中 0。下面不许再出现字面量 e/t/n/r。
+const CW_A_MIN = new RegExp("function\\s+(" + ID + ")\\((" + ID + "),(" + ID + ")\\)\\{return\\{"
+  + "usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,"
+  + "promptContextUsageSnapshotBlobId:void 0,\\.\\.\\.\\3,_privacyMode:\\2\\}\\}", "g");
+const CW_B_MIN = new RegExp("function\\s+(" + ID + ")\\((" + ID + "),(" + ID + ")\\)\\{if\\(\\2<=0\\)return;"
+  + "const (" + ID + ")=\\[\\];return void 0!==\\3\\.unusedTokensThresholdToStartBackgroundSummarization", "g");
+const CW_C_MIN = new RegExp("function\\s+(" + ID + ")\\((" + ID + "),(" + ID + "),(" + ID + ")\\)\\{"
+  + "const (" + ID + ")=\\3-\\2;return\\s+" + ID + "\\(\\2,\\3,\\4\\)&&"
+  + "\\(void 0!==\\4\\.unusedTokensThresholdToPersistBackgroundSummarization", "g");
 const CW_A_SRC = `function createRedactedConversationTokenDetails(privacyMode, partial2) {
   return {
     usedTokens: 0,
@@ -852,19 +869,21 @@ function ctxwinApplyToText(src, kind) {
     if (b.length !== 1) return { ok: false, why: "锚B count=" + b.length };
     if (c.length !== 1) return { ok: false, why: "锚C count=" + c.length };
     const af = a[0][1], bf = b[0][1], cf = c[0][1];
+    const aPriv = a[0][2], aPart = a[0][3];       // A 的两个参数名(捕获来的)
+    const bMax = b[0][2];                          // B 的第 1 参 = maxTokens
+    const cMax = c[0][3];                          // C 的第 2 参 = maxTokens
     let out = src.replace(a[0][0],
-      `function ${af}(e,t){/*${CTXWIN_MARKER}*/${CW_NORM_MIN}` +
-      `const r={usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,` +
-      `promptContextUsageSnapshotBlobId:void 0,...t,_privacyMode:e};` +
-      `r.maxTokens=__cxN(r.maxTokens);` +
-      `if(void 0!==r.breakdown&&"object"==typeof r.breakdown)r.breakdown={...r.breakdown,maxTokens:__cxN(r.breakdown.maxTokens)};` +
-      `return r}`);
-    const bHead = `function ${bf}(e,t){`;
-    out = out.replace(b[0][0], b[0][0].replace(bHead,
-      bHead + `/*${CTXWIN_MARKER}*/e="number"==typeof e&&e>0&&e<4096?(1===e?1e6:1e3*e):e;`));
-    const cHead = `function ${cf}(e,t,n){`;
-    out = out.replace(c[0][0], c[0][0].replace(cHead,
-      cHead + `/*${CTXWIN_MARKER}*/t="number"==typeof t&&t>0&&t<4096?(1===t?1e6:1e3*t):t;`));
+      `function ${af}(${aPriv},${aPart}){/*${CTXWIN_MARKER}*/${CW_NORM_MIN}` +
+      `const __cxR={usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,` +
+      `promptContextUsageSnapshotBlobId:void 0,...${aPart},_privacyMode:${aPriv}};` +
+      `__cxR.maxTokens=__cxN(__cxR.maxTokens);` +
+      `if(void 0!==__cxR.breakdown&&"object"==typeof __cxR.breakdown)__cxR.breakdown={...__cxR.breakdown,maxTokens:__cxN(__cxR.breakdown.maxTokens)};` +
+      `return __cxR}`);
+    // 插入点 = 参数表后的第一个 `{`(参数表里不可能有 `{`)⇒ 不依赖空格也不依赖名字
+    const cwIns = (m, v) => m.replace("{", `{/*${CTXWIN_MARKER}*/` +
+      `${v}="number"==typeof ${v}&&${v}>0&&${v}<4096?(1===${v}?1e6:1e3*${v}):${v};`);
+    out = out.replace(b[0][0], cwIns(b[0][0], bMax));
+    out = out.replace(c[0][0], cwIns(c[0][0], cMax));
     return { ok: true, out, applied: [`A=${af}`, `B=${bf}`, `C=${cf}`] };
   }
   const na = src.split(CW_A_SRC).length - 1, nb = src.split(CW_B_SRC).length - 1, nc = src.split(CW_C_SRC).length - 1;

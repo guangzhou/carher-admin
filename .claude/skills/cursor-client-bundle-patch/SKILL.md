@@ -510,6 +510,16 @@ ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor cursor_key
   同理参数位别钉死 `[a-z]`(gate 旧写法)或必填 `\w+`(nopromote 旧写法,用 `ID1` 允许空参)。
   **诊断口径:先分清是哪条 bundle 报的**——`planBundle` 按 desktop→glass 顺序打印,
   拒绝行之前若已有一条成功的"将打 [...]",漂的就是 glass 那条,别去查 desktop。
+- **🔴 「名字位」不止函数名 —— 参数名和局部变量名同样会被 minify 摇**(2026-09-23,3.21.18):
+  件C 三条 min bundle 锚点全灭。锚点 B 里我写死了 `const n=[]`,3.21.18 摇成 `const r=[]`;
+  锚点 C 的第三参数与局部变量**互换**(`(e,t,n)/const r` → `(e,t,r)/const n`)⇒ 命中 0。
+  与 3.20.21 的 `qUy`→`$7y` 是**同一个病低一层**:我以为"参数名 e/t/n 是 minify 惯例所以稳定",
+  但 terser 分配名字取决于作用域里的变量集合,**上游改一行就能让整组名字换位**。
+  正解:`function\s+(ID)\((ID),(ID)\)\{if\(\2<=0\)` —— 名字全捕获,**语义靠反向引用绑定**
+  (第 1 参出现在 `<=0` 比较里才是 maxTokens),插入的归一语句用**捕获到的名字**生成。
+  插入点也别拼 `function X(e,t){` 这种字面头:改成 `m.replace("{", ...)` 取参数表后第一个 `{`
+  (参数表里不可能有 `{`),这样连空格差异也不依赖。
+  ⚠️ 判据是 **3.21.18 与 3.20.17 两代都 4/4**:只让新版过,等于把老用户换成新的受害者。
 - **升级策略**:默认允许 Cursor 自动升级,升级掀翻补丁后跑 `--repair` 一键重打
   (锚点=语义地标,3.16→3.19.19 全部存活);要锁死不升级才用 `--pin-update`。
 
@@ -546,6 +556,13 @@ ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor cursor_key
    `sh bundle_patch_regress.sh --new-bundles <新版 bundle 目录>`(或 `--fetch` 让它自己下 dmg 抽 bundle,
    第 1 步就省了)。四腿分别是:
    ①新版两条 bundle 每个非 multi 锚点 exactly-1(`nopromote` 是 multi,≥1);
+   **①b 新版 app 的件C(ctxwin)四个目标全 OK**(`--new-app "<新版 Cursor.app>"`,`--fetch` 会自动带上):
+   🔴 2026-09-23 补的腿。此前①只量 `workbench.*` 两条 bundle 的**解锁**锚点,件C 那四个目标在
+   `extensions/` 下,**从来没有任何一腿看过它们**。3.21.18 的件C 锚点 B/C 命中 0,而安装器对件C
+   的设计是「警告后跳过、不阻断解锁补丁」⇒ **包照样发出去、台架全绿、同事拿到的包里没有这个修复**。
+   这就是「门禁在跑 ≠ 有量具」的标准形状:不阻断的补丁必须自带一腿,否则它静默消失没人知道。
+   这腿的负对照要**打在锚点真正吃的那一处**上(同一个标识符全文可能出现 4 次,改错一处
+   偏移只会平移 3 字节、锚点照样命中 ⇒ 假绿;按 dry-run 报的 offset 定位再改);
    ②**旧版 pristine bundle**(`~/.cursor-team-setup-backup/<live 版本>-<ts>/`)打完的产物与**当前 live 已打 bundle**
    `cmp` **BYTE-EQUAL**(= 旧代零漂移,这条是防"修新版把老用户改坏"的真门;⚠️**必须在自己的 Cursor 升级前跑**,
    live 一旦升到新版就没有同版本参照物了,台架会 SKIP);
@@ -664,6 +681,8 @@ F) 预演不落盘                            ✅ bundle/库 md5 都没变(对�
 链式增量线独立演进:**`@cx-chain:v3`**(exthost fetch seam,件B,见末节);
 上下文窗口归一线独立演进:`@cx-ctxwin:v1`(补的是阈值函数而非构造器,漏 3 个消费者)→
 `v2`(补构造器 A,漏了 B 的旁路)→ **`v3`(现行:A+B+C 三点,穷举 10 处算术点得出)**。
+marker 停在 `v3` 不变、但**锚点写法 2026-09-23 改过一次**(3.21.18 命中 0 ⇒ 参数名/局部变量名
+全改成 ID 捕获 + 反向引用)——语义没变所以不升 marker,3.21.18 与 3.20.17 产物都验过。
 记忆:`feedback_cursor_queue_stuck_zombie_uuid_v3_liveness`、
 `feedback_cursor_turnended_relay_orphan_fold_norelay_root_fix`;安装器设计与等价性证明:
 `docs/cursor-g-naming-rollout-20260824.md` §七。

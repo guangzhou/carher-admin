@@ -68,8 +68,14 @@ const TARGETS=[
   {f:"extensions/cursor-agent-host/dist/agent-host-daemon/dist/bin/daemon.cjs", kind:"src"},
 ];
 
+// 🔴 名字位一律用 ID 捕获,不许写死 —— 函数名、**参数名、局部变量名**都算名字位。
+// 3.20.21 栽在函数名($7y),3.21.18 栽在局部变量名与参数名(见锚点 B/C 注释)。
+const ID="[A-Za-z0-9_$]+";
+
 // ── 锚点 A:tokenDetails 构造器 ──
-const A_MIN=/function\s+([A-Za-z_$][\w$]*)\(e,t\)\{return\{usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,promptContextUsageSnapshotBlobId:void 0,\.\.\.t,_privacyMode:e\}\}/g;
+const A_MIN=new RegExp("function\\s+("+ID+")\\(("+ID+"),("+ID+")\\)\\{return\\{"
+  +"usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,"
+  +"promptContextUsageSnapshotBlobId:void 0,\\.\\.\\.\\3,_privacyMode:\\2\\}\\}","g");
 const A_SRC=`function createRedactedConversationTokenDetails(privacyMode, partial2) {
   return {
     usedTokens: 0,
@@ -82,11 +88,17 @@ const A_SRC=`function createRedactedConversationTokenDetails(privacyMode, partia
   };
 }`;
 // ── 锚点 B:摘要触发阈值函数 ──
-const B_MIN=/function\s+([A-Za-z_$][\w$]*)\(e,t\)\{if\(e<=0\)return;const n=\[\];return void 0!==t\.unusedTokensThresholdToStartBackgroundSummarization/g;
+// 🔴 2026-09-23:3.21.18 把局部变量 `const n=[]` 摇成 `const r=[]` ⇒ 写死名字的锚点命中 0。
+// 参数名与局部变量名一律用 ID 捕获 + 反向引用绑定语义,不许出现字面量 e/t/n/r。
+const B_MIN=new RegExp("function\\s+("+ID+")\\(("+ID+"),("+ID+")\\)\\{if\\(\\2<=0\\)return;"
+  +"const ("+ID+")=\\[\\];return void 0!==\\3\\.unusedTokensThresholdToStartBackgroundSummarization","g");
 const B_SRC=`function getBackgroundSummarizationTriggerThreshold(maxTokens, props) {
   if (maxTokens <= 0) {`;
 // ── 锚点 C:persist 判定(它自己又拿裸 maxTokens 算了一次 unusedTokens) ──
-const C_MIN=/function\s+([A-Za-z_$][\w$]*)\(e,t,n\)\{const r=t-e;return\s+[A-Za-z_$][\w$]*\(e,t,n\)&&\(void 0!==n\.unusedTokensThresholdToPersistBackgroundSummarization/g;
+// 🔴 3.21.18 里第三参数与局部变量互换(`(e,t,n)/const r` → `(e,t,r)/const n`)⇒ 同样必须全捕获。
+const C_MIN=new RegExp("function\\s+("+ID+")\\(("+ID+"),("+ID+"),("+ID+")\\)\\{"
+  +"const ("+ID+")=\\3-\\2;return\\s+"+ID+"\\(\\2,\\3,\\4\\)&&"
+  +"\\(void 0!==\\4\\.unusedTokensThresholdToPersistBackgroundSummarization","g");
 const C_SRC=`function shouldPersistBackgroundSummarization(usedTokens, maxTokens, props) {
   const unusedTokens = maxTokens - usedTokens;`;
 
@@ -106,20 +118,27 @@ function planFile(p, kind){
     if(b.length!==1) return {err:`锚点B命中=${b.length}(须 1)`};
     if(c.length!==1) return {err:`锚点C命中=${c.length}(须 1)`};
     const af=a[0][1], bf=b[0][1], cf=c[0][1];
-    const aTo=`function ${af}(e,t){/*${MARK}*/${NORM_MIN}`
-      +`const r={usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,`
-      +`promptContextUsageSnapshotBlobId:void 0,...t,_privacyMode:e};`
-      +`r.maxTokens=__cxN(r.maxTokens);`
-      +`if(void 0!==r.breakdown&&"object"==typeof r.breakdown)r.breakdown={...r.breakdown,maxTokens:__cxN(r.breakdown.maxTokens)};`
-      +`return r}`;
-    const bHead=`function ${bf}(e,t){`;
-    const bTo=bHead+`/*${MARK}*/e="number"==typeof e&&e>0&&e<4096?(1===e?1e6:1e3*e):e;`;
-    const cHead=`function ${cf}(e,t,n){`;
-    const cTo=cHead+`/*${MARK}*/t="number"==typeof t&&t>0&&t<4096?(1===t?1e6:1e3*t):t;`;
+    // A:参数名也是捕获来的(2=privacyMode,3=partial)
+    const aPriv=a[0][2], aPart=a[0][3];
+    const aTo=`function ${af}(${aPriv},${aPart}){/*${MARK}*/${NORM_MIN}`
+      +`const __cxR={usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,`
+      +`promptContextUsageSnapshotBlobId:void 0,...${aPart},_privacyMode:${aPriv}};`
+      +`__cxR.maxTokens=__cxN(__cxR.maxTokens);`
+      +`if(void 0!==__cxR.breakdown&&"object"==typeof __cxR.breakdown)__cxR.breakdown={...__cxR.breakdown,maxTokens:__cxN(__cxR.breakdown.maxTokens)};`
+      +`return __cxR}`;
+    // B/C:归一语句用**捕获到的那个参数名**生成;插入点 = 参数表后的第一个 `{`
+    //     (参数表里不可能有 `{`,所以 replace 第一个 `{` 就是函数体开括号,与空格/换行无关)
+    const bMax=b[0][2];                     // B 的第 1 参 = maxTokens
+    const cMax=c[0][3];                     // C 的第 2 参 = maxTokens
+    const norm=v=>`${v}="number"==typeof ${v}&&${v}>0&&${v}<4096?(1===${v}?1e6:1e3*${v}):${v};`;
+    const bPatched=b[0][0].replace("{", `{/*${MARK}*/`+norm(bMax));
+    const cPatched=c[0][0].replace("{", `{/*${MARK}*/`+norm(cMax));
     s=s.replace(a[0][0], aTo);
-    s=s.replace(b[0][0], b[0][0].replace(bHead, bTo));
-    s=s.replace(c[0][0], c[0][0].replace(cHead, cTo));
-    notes.push(`A=${af}()@${a[0].index}`, `B=${bf}()@${b[0].index}`, `C=${cf}()@${c[0].index}`);
+    s=s.replace(b[0][0], bPatched);
+    s=s.replace(c[0][0], cPatched);
+    notes.push(`A=${af}(${aPriv},${aPart})@${a[0].index}`,
+               `B=${bf}(${bMax},..)@${b[0].index}`,
+               `C=${cf}(..,${cMax},..)@${c[0].index}`);
   } else {
     const ca=s.split(A_SRC).length-1, cb=s.split(B_SRC).length-1, cc=s.split(C_SRC).length-1;
     if(ca!==1) return {err:`锚点A命中=${ca}(须 1)`};

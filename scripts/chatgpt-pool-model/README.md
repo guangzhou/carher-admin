@@ -1,11 +1,49 @@
 # 给 198 池加一个 chatgpt-backend 模型（codex-auto-review 等）并接 Codex 客户端
 
+> ## 🔴 2026-09-23：本篇三处已被实测推翻，先读这段
+>
+> 新的权威流程是 skill **`chatgpt-pool-codex-slug-onboard`**（repo `.claude/skills/`）
+> + 两个脚本 `scripts/chatgpt-pool-codex-slug-survey.py` /
+> `scripts/chatgpt-pool-add-codex-model.py`。本篇保留是因为 `codex-auto-review`
+> 那条「专用 key + Codex CLI 客户端配置」的内容仍然有效（§3）。
+>
+> **① Step 2 说「198 prod 的 `router_settings` 在 CM `litellm-config` 里、DB 无
+> router_settings 行、`/config/update` 写 DB 不生效」——已作废。** 现在
+> `STORE_MODEL_IN_DB=True`，权威源是 Postgres `LiteLLM_Config` 里
+> `param_name='router_settings'` 那一行，改 CM 是 no-op；它每 ~30s 热加载，**不需要 rollout**。
+> ⛔ 而 `/config/update` 不是"不生效"，是**危险**：传部分 `router_settings` 会静默抹掉
+> `model_group_alias`（24 → `{}`），下次重启才引爆。只准
+> `jsonb_set(param_value,'{fallbacks}',...)`。
+> ⛔ 顺带：本篇 Step 2 让你 `apply` CM 后 `rollout restart deploy/litellm-proxy` ——
+> **`litellm-proxy` 禁 `apply`**（仓库 manifest 陈旧，会回退 image + 内嵌 CM），
+> 且生产车道现在不叫 `litellm-proxy`（判据 = Svc `litellm-proxy-nodeport` 的 selector，
+> 标签在 **Pod** 上，`get deploy -l` 返回空是假红）。
+>
+> **② Step 4 / `fanout-pool-model.sh` 会对每个 acct `rollout restart`。**
+> 重启在服务的号**可能永久打死它且回退救不回**（acct-237）。
+> 只要 slug 已经在 acct pod 的 `config.yaml` 里，**建组根本不需要重启任何 pod**——
+> 用 `chatgpt-pool-add-codex-model.py`（只写外层 router 行，一个 pod 都不碰）。
+> 那份脚本还会先 `/model/delete` 再 `/model/new`；新脚本幂等跳过已存在的 id，不删。
+>
+> **③ Step 5 那条裸 SQL `array_append` 只写白名单、不写 alias。**
+> 白名单只发**准入**不发路由：裸名不是真实组又没有全局 alias 时，只加白名单**必然 400**。
+> 用 `scripts/litellm-198-key-allowlist.py` 在**同一条命令**里写 `--add-model` + `--alias`
+> （还带金丝雀、backup、逐 key 回读）。
+>
+> **④ 另有一条相邻的旧结论也被推翻**（在 `~/.claude/skills/chatgpt-pool-model-variant` 里，
+> 那份**不在本仓 git 里**，我改不了它，只能在这里标注）：
+> 「`db_model:True` + `mode:responses` 会触发 `No connected db.`，必须用 CM 条目」。
+> 实测 `/model/info` 上 `chatgpt-gpt-6-sol`/`-luna`/`-5.6-sol`/`-astra` 共 **188 行全部
+> `db_model=True` + `mode=responses` 且都在服务**。真因是漏了 `litellm_params.api_key`。
+
 > 面向下次直接执行的操作手册。以 `codex-auto-review`（Codex Guardian 审查专用模型）为样板，
 > 同法可加任何 Codex 后端 slug（gpt-5.7、下一代 codex 变体等）。
 >
 > 配套脚本：`fanout-pool-model.sh`（同目录，全池铺开 = rollout + 注册）。
 > 深度背景/踩坑：memory `[[reference_codex_auto_review_model_oauth_served]]`。
-> 面向 carher bot 的产品级变体上线（config_gen 双写 + operator）走另一条：skill `chatgpt-pool-model-variant`。
+> 面向 carher bot 的产品级变体上线（config_gen 双写 + operator）走另一条：skill `chatgpt-pool-model-variant`
+> （⚠️ **只存在于 `~/.claude/skills/`，不在本仓 git 里** —— 能加载，但不受本仓版本控制、
+> review 不到、换机器就没有）。
 
 ---
 

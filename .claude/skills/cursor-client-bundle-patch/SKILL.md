@@ -25,6 +25,37 @@
 **补丁全家(3.20.21 现行 8 处 workbench)**:gate / localagent / dedicated(解锁三件套)+
 `@cx-queue-pump:v4`(兜底泵)+ qserial / nosteer-mod / nopromote(排队纵深防御,`nopromote` 是 multi)+
 **`@cxteam-norelay`(2026-08-25 连发折叠+僵尸真根因修)**。
+2026-09-23 加到 **10 处**:`@cxteam-nocloud` / `@cxteam-nocloudset`(见下「会话被改道去 Cloud Agents」)。
+
+## 会话被改道去 Cloud Agents(2026-09-23,@cxteam-nocloud / nocloudset)
+
+同事升 3.21.18 后每次发消息弹「Upgrade to run Cloud Agents / Cloud Agents are not available
+on your current plan」,BYOK 模型一个都用不上。
+
+🔴 **判定在服务端 ≠ 我们修不了。要拆成两问:「谁拒的」和「谁把请求送过去的」。**
+那句标题在客户端只出现在埋点翻译函数
+(`case"Upgrade to run Cloud Agents":return"cloud_agent_pro_trial_denied"`),正文全 app 0 命中
+⇒ 文案确实是服务端 `CUSTOM_MESSAGE`。**但改不改道在客户端**,全 bundle 唯一岔路口:
+
+```js
+shouldRunOnBeforeSubmitChat(){const e=this.composerDataService.getComposerData(this.getComposerHandle());
+  return e!==void 0&&Oke(e)||!!e?.pendingBackgroundAgent}   // true ⇒ 云端 RPC
+```
+
+- `pendingBackgroundAgent` **持久化在会话数据里**,升级/重启都不清 ⇒ 中招一次每轮都弹,自己好不了。
+- 置位来源两条:输入框右侧 Send-to-Cloud 手滑点中;服务端把 `push_local_agent_to_cloud` /
+  `send_to_cloud_on_followup` / `midturn_move_to_cloud_ads` 这些 **`{client:!0,default:!1}`** 闸门打开。
+- 修两处缺一不可:`nocloud-submit` 摘掉岔路口那条腿(老会话立刻回本地线)+
+  `nocloud-set` 置位入口恒 `!1`(堵死两条来路)。
+  **`Oke(e)` 那条腿保留** —— 那是「这本来就是个云端 agent 会话」(`createdFromBackgroundAgent`),
+  用户主动在云端开的不许动。
+- 名字位(**参数名 + 局部变量名**)desktop/glass 全不同(`e`/`t`、`Os`/`ji`、`Hs`/`vr`)
+  ⇒ 一律 `ID` 捕获 + 反向引用,别写死。
+- ⚠️ **有意加补丁 ⇒ 台架② 必红**(pristine 重打 N+2 vs live 已打 N)。正确做法是
+  **证明差异恰好只有新插入那两处**:`live 再打这 2 个` 与 `pristine 打全部 N+2` 逐字节相同。
+  ⛔ 别拿 `difflib.SequenceMatcher` diff 38MB bundle(300s 超时),用上面那个等价性做法。
+  ⛔ 更别把② 的红当"已知问题"挥掉。
+- 记忆:`feedback_cursor_cloud_agents_is_a_server_side_plan_gate`。commit `e45ffc4`。
 另有 exthost 侧 `@cx-chain:v3`(件B 链式增量):**服务端那半 09-01 已下线,安装器 `--chain` 默认关且
 `--apply` 会自动摘除**残留补丁,源码仍留着备将来重启用(见末节)。
 
@@ -417,6 +448,13 @@ AST 子节点的 `start/end` 里 `src.slice()` 出来搬运,不写进任何模�
   **跑结论前先跑它。**
 - 拉"上次发出去那份"只能用 `lark-cli docs +media-download --token <file_token> --output x.zip`;
   ⛔ `lark-cli drive +download` 对文档附件**静默不落盘**。
+- 🔴 **换飞书附件的命令形状**(09-23 踩过两次)。`docs +fetch` 用 `--doc`(不是 `--token`,
+  `--token` 属于 `+media-download`),且**默认 `--detail simple` 不带 block id** ⇒
+  想拿 block id 必须 `--detail with-ids`;`--format` 只有 json/pretty/table/ndjson/csv,**没有 html**。
+  块操作**没有** `docs +block-move-after` 这个子命令,全在
+  `docs +update --command block_move_after|block_delete|block_insert_after|block_replace`。
+  顺序照旧 **add → 回环下载 `cmp` 验字节 → move_after → 删旧**,别先删。
+  验收三条:字符数(用同一个 `--detail` 比,否则数不可比)、`<img` 数、**旧 token 残留 0**。
 
 🔴 **抠 `DEFAULT_MODELS` 必须有界。**从 `js.index('DEFAULT_MODELS')` 松散切到第一个 `];`
 会读出 **36** 条,混着 `'use strict'` / `'path'` / `'crypto'` / `'darwin'` 和 `path.join(...)` 的碎片

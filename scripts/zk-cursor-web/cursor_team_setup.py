@@ -307,8 +307,10 @@ PATCHES = [
                        + r')=this\.composerDataService\.getComposerData\(this\.getComposerHandle\(\)\);return \2!==void 0&&'
                        + _ID + r'\(\2\))\|\|!!\2\?\.pendingBackgroundAgent(\})'),
          sub=lambda m: m.group(1) + '/*@cxteam-nocloud*/' + m.group(3)),
-    dict(name="nocloud-set", marker="@cxteam-nocloudset",
-         rx=re.compile(r'(updateComposerData\(' + _ID + r',\{pendingBackgroundAgent:)(' + _ID + r')(\}\))'),
+    # ⚠️ 09-23:写入点不止一个(ComposerPlanService 那处前面多带 `unifiedMode:L`),
+    #    放开成「对象里任意位置」+ multi;每条 bundle 恰好 2 处。详注见 js 同名条目。
+    dict(name="nocloud-set", marker="@cxteam-nocloudset", multi=True,
+         rx=re.compile(r'(updateComposerData\(' + _ID + r',\{[^{}]{0,160}?pendingBackgroundAgent:)(' + _ID + r')(\}\))'),
          sub=lambda m: m.group(1) + '/*@cxteam-nocloudset*/!1' + m.group(3)),
 ]
 

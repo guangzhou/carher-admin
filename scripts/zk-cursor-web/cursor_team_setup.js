@@ -705,8 +705,16 @@ const PATCHES = [
     sub: (m) => m[1] + "/*@cxteam-nocloud*/" + m[3],
   },
   {
-    name: "nocloud-set", marker: "@cxteam-nocloudset",
-    rx: new RegExp("(updateComposerData\\(" + ID + ",\\{pendingBackgroundAgent:)(" + ID + ")(\\}\\))", "g"),
+    // ⚠️ 09-23 自查覆盖面时发现:写入点**不止一个**。除了输入框的 Send-to-Cloud
+    //   (`updateComposerData(Os,{pendingBackgroundAgent:ji})`),ComposerPlanService 里还有
+    //   `updateComposerData(e,{unifiedMode:L,pendingBackgroundAgent:x})` —— 前面多带一个字段,
+    //   原来那条"`{` 紧跟字段名"的锚点匹配不到它 ⇒ 漏堵。所以放开成「对象里任意位置」并改成 multi。
+    //   判据:每条 bundle 恰好 2 处(不是 2 就该回来看是不是又多了写入点)。
+    //   `:!1}` 那三处是**取消/失败时的复位**(本来就写 false),`ID` 不匹配 `!1` ⇒ 不会误伤;
+    //   `pendingBackgroundAgent:s.pendingBackgroundAgent===!0` 是序列化拷贝,不是 updateComposerData。
+    //   真正兜住路由的是 nocloud-submit(读侧,与谁写的无关);这条是源头补强,两条都要有。
+    name: "nocloud-set", marker: "@cxteam-nocloudset", multi: true,
+    rx: new RegExp("(updateComposerData\\(" + ID + ",\\{[^{}]{0,160}?pendingBackgroundAgent:)(" + ID + ")(\\}\\))", "g"),
     sub: (m) => m[1] + "/*@cxteam-nocloudset*/!1" + m[3],
   },
 ];

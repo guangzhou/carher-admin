@@ -676,6 +676,39 @@ const PATCHES = [
     rx: new RegExp("(if\\()(" + ID + "\\(\\{(?:agentBackend:" + ID + ",)?isLocalMode:" + ID + "\\.localMode,isAgentHostEnabled:" + ID + ",isNewRequestIdGateEnabled:\\(\\)=>this\\.isQueuedPromptNewRequestIdEnabled\\(\\)\\}\\))(\\)\\{)", "g"),
     sub: (m) => m[1] + "/*@cxteam-norelay*/!1&&" + m[2] + m[3],
   },
+  // ── nocloud(2026-09-23):把会话钉死在本地线,不许被"送去 Cloud Agents" ──
+  // 病:同事升到 3.21.18 后每次发消息弹
+  //   「Upgrade to run Cloud Agents / Cloud Agents are not available on your current plan」
+  // ⇒ 请求根本没走本地 BYOK,而是被送去 Cursor 云端跑,被套餐闸门拒 ⇒ 我们的模型一个都用不了。
+  //
+  // 三段式:
+  //   假设:该会话的 `pendingBackgroundAgent` 被置 true,提交岔路口因此改道云端。
+  //   证伪条件:若改道与该标志无关,岔路口条件里不应出现它。
+  //   数据:唯一岔路口 `shouldRunOnBeforeSubmitChat(){…return e!==void 0&&Oke(e)||!!e?.pendingBackgroundAgent}`
+  //         为真 ⇒ 走 `onBeforeSubmitChat` ⇒ `addAsyncFollowupBackgroundComposer`(云端 RPC)。
+  //         那句报错客户端只在埋点翻译函数里出现
+  //         (`case"Upgrade to run Cloud Agents":return"cloud_agent_pro_trial_denied"`),
+  //         正文全 app 0 命中 ⇒ 文案来自服务端 CUSTOM_MESSAGE,**但改道与否在客户端**。
+  //   置位来源有二:输入框右侧 Send-to-Cloud 手滑点中;或服务端把 `push_local_agent_to_cloud` /
+  //   `send_to_cloud_on_followup`(都是 `client:!0,default:!1` 的客户端闸门)给这个号打开。
+  //   ⚠️ 该标志**持久化在会话数据里**,升级/重启都不清 ⇒ 中招后每轮都弹,自己好不了。
+  //
+  // 修两处,缺一不可:
+  //   nocloud-submit:岔路口摘掉 pendingBackgroundAgent 这条腿 —— 已中招的老会话立刻回本地线。
+  //                   `Oke(e)` 那条腿**保留**:那是"这本来就是个云端 agent 会话"(createdFromBackgroundAgent),
+  //                   用户主动在云端开的会话仍按原样走云端,我们只拦"本地会话被改道"。
+  //   nocloud-set:   置位入口恒 false —— 从源头堵住,含误点与服务端闸门两条来路。
+  // 名字位(参数名/局部变量名)实测 desktop/glass 全不同(e/t、Os/ji、Hs/vr)⇒ 一律 ID 捕获 + 反向引用。
+  {
+    name: "nocloud-submit", marker: "@cxteam-nocloud",
+    rx: new RegExp("(shouldRunOnBeforeSubmitChat\\(\\)\\{const (" + ID + ")=this\\.composerDataService\\.getComposerData\\(this\\.getComposerHandle\\(\\)\\);return \\2!==void 0&&" + ID + "\\(\\2\\))\\|\\|!!\\2\\?\\.pendingBackgroundAgent(\\})", "g"),
+    sub: (m) => m[1] + "/*@cxteam-nocloud*/" + m[3],
+  },
+  {
+    name: "nocloud-set", marker: "@cxteam-nocloudset",
+    rx: new RegExp("(updateComposerData\\(" + ID + ",\\{pendingBackgroundAgent:)(" + ID + ")(\\}\\))", "g"),
+    sub: (m) => m[1] + "/*@cxteam-nocloudset*/!1" + m[3],
+  },
 ];
 
 /* ── 件B @cx-chain:v3 链式增量(exthost bundle fetch seam;与 cursor_chain_patch.py 逐字节一致) ──

@@ -176,6 +176,9 @@ const DEFAULT_MODELS = [
   "composer-2.5-fast",
   // ── ② gpt-*（5 个里 4 个与 Cursor 自带同名，见上方说明）──
   "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5", "gpt-6-astra",
+  // gpt-6-luna:09-23 198 全池上线,原来漏在清单外 ⇒ 同事只能手敲,敲成 `GPT-6-luna`
+  // 撞上 LiteLLM key 白名单大小写敏感 ⇒ 403。补进来就不必手敲。
+  "gpt-6-luna",
   // ── ③ cr-*（前 7 个是载体代表，在真 Cursor 里跑过）──
   "cr-g-5.6", "cr-g-5.6-instant", "cr-g-5.6-mini", "cr-g-5.6-t-mini",
   "cr-g-research", "cr-g-5.6-thinking", "cr-g-5.6-luna",
@@ -716,6 +719,98 @@ const PATCHES = [
     name: "nocloud-set", marker: "@cxteam-nocloudset", multi: true,
     rx: new RegExp("(updateComposerData\\(" + ID + ",\\{[^{}]{0,160}?pendingBackgroundAgent:)(" + ID + ")(\\}\\))", "g"),
     sub: (m) => m[1] + "/*@cxteam-nocloudset*/!1" + m[3],
+  },
+
+  /* ── keepmine(2026-09-23):不许 Cursor 把我们装的同名模型从清单里吞掉 ──────────────
+     病:同事选 `Grok 4.7`(芯片上还带 High/Fast 档位)发消息,服务端回
+       「This model does not support custom API keys」—— 请求压根没到我们的 LiteLLM。
+
+     三段式:
+       假设:安装器写进 userAddedModels 的名字,若与服务端目录里 Cursor 自家的同名条目撞上,
+             会被客户端**删掉**,于是选中的是 Cursor 自家那条 ⇒ 不走 BYOK。
+       证伪条件:若假设错,用户机器上 userAddedModels 应仍是安装器写的全部 31 个,
+             且撞名的那几个在目录里应带 isUserAdded。
+       数据(本机 3.20.17,读 state.vscdb 的 reactiveStorage.persistentStorage.applicationUser):
+             userAddedModels **只剩 24 个**,少的正是
+             grok-4.7 / grok-4.6 / grok-4.5 / gpt-5.6-{sol,luna,terra} / gpt-5.5 / kimi-k2.7-code
+             —— 一个不多一个不少,全是撞名的那批;活下来的 23 个在目录里都带 `isUserAdded:true`,
+             而 `grok-4.7` 那条**没有** isUserAdded、却有 parameterDefinitions
+             (context 256k/500k + reasoning_effort low/medium/high/xhigh)
+             = 同事截图里 `Grok 4.7 High Fast` 那两个芯片的来源。
+       对照组(没坏的那批):23 个带 isUserAdded 的裸名一直好用 ⇒ 不是"裸名"的错,是**撞名**的错。
+
+     机制(desktop 3.20.17 的名字,四条 bundle 形状一致):
+       Yb_(e,t){return e.name===t||e.clientDisplayName===t||e.serverModelName===t}
+       Xb_(e,t){return e.filter(n=>t.some(i=>Yb_(i,n)&&!i.isUserAdded))}   // 要删谁
+       → Zb_() 把它当 userAddedModelsToRemove 返回 → refreshDefaultModels 里
+         `k.length>0&&set…("aiSettings","userAddedModels",t.filter(V=>!k.includes(V)))`
+         **真写回持久化存储** ⇒ 删一次就永久没了,重装 Cursor 也不回来,用户自己好不了。
+       ⇒ 同族于 nocloud:判定在服务端(目录谁发的),但**落地动作在客户端**,所以我们能拦。
+
+     修两处,缺一不可:
+       keepmine-noevict:驱逐名单恒空 —— 名字不再被从 userAddedModels 里抹掉。
+       keepmine-claim:  目录落盘前,凡名字在 userAddedModels 里的条目一律改成
+                        `isUserAdded:!0` 并清掉 parameterDefinitions/variants,
+                        与那 23 个活着的条目**逐字段同形** ⇒ 走 BYOK 到我们的 base url。
+     ⚠️ 只动"名字在我们自己 userAddedModels 里"的条目:用户没装的 Cursor 自带模型零影响。
+     名字位(函数名/参数名)desktop/glass/两代全不同(Xb_/h5k/SC_/Vz0)⇒ 一律 ID 捕获 + 反向引用。
+     两代四条 bundle 实测两个锚点均 exactly-1。 */
+  {
+    name: "keepmine-noevict", marker: "@cxteam-keepmine",
+    rx: new RegExp("function (" + ID + ")\\((" + ID + "),(" + ID + ")\\)\\{return \\2\\.filter\\((" + ID + ")=>\\3\\.some\\((" + ID + ")=>" + ID + "\\(\\5,\\4\\)&&!\\5\\.isUserAdded\\)\\)\\}", "g"),
+    sub: (m) => "function " + m[1] + "(" + m[2] + "," + m[3] + "){/*@cxteam-keepmine*/return[]}",
+  },
+  {
+    // `const k=h(c);c=c.map(V=>ipn(V))` —— ipn 只是 protobuf message → 普通对象,
+    // 这是目录写进 availableDefaultModels2 之前**最后一个能动的点**(下面紧跟两处 set…)。
+    // `this` 在此是 refreshDefaultModels 的方法 this(紧随其后的 Jh(()=>{…this._reactiveStorageService…})
+    // 同一 this)⇒ 直接从 reactiveStorage 读 userAddedModels,不依赖上文局部变量名。
+    name: "keepmine-claim", marker: "@cxteam-keepmine2",
+    rx: new RegExp("(const " + ID + "=" + ID + "\\((" + ID + ")\\);\\2=\\2\\.map\\((" + ID + ")=>" + ID + "\\(\\3\\)\\))", "g"),
+    sub: (m) => m[1] + "/*@cxteam-keepmine2*/.map(" + m[3] + "=>{try{const __cxu=this._reactiveStorageService.applicationUserPersistentStorage.aiSettings.userAddedModels||[];return __cxu.includes(" + m[3] + ".name)&&" + m[3] + ".isUserAdded!==!0?{..." + m[3] + ",isUserAdded:!0,parameterDefinitions:[],variants:[]}:" + m[3] + "}catch(__cxe){return " + m[3] + "}})",
+  },
+
+  /* ── byok(2026-09-23):Free 档把 BYOK 开关关掉 ⇒ 我们的名字改道 Cursor 服务端 ─────────
+     同事 win32/3.21.18 发消息弹「Named modes unavailable / Free plans can only use Auto」。
+
+     **这与 keepmine 是两个病,别混。** keepmine 管"名字还在不在菜单里";这一条管"请求发给谁"。
+
+     假设:请求没走 BYOK,而是发到了 Cursor 服务端,被 Free 档的 named-model 闸门拒。
+     证伪条件:若假设错,那句文案应该能在客户端 bundle 里 grep 到(纯客户端拦截)。
+     数据:`Named mode` / `can only use Auto` / `upgrade plans to continue` 在 3.21.18
+       desktop+glass 两份 bundle 里均 **0 命中**;按钮由
+       `hIv(e,t,n,i){…const r=n?.details?.buttons??[]…case"switchModel"…}` 从**服务端**
+       error details 构造 ⇒ 请求确实到了 Cursor 服务端。
+
+     那么是什么决定走不走 BYOK?全 bundle 唯一判定:
+       `bOd(e,t){return B7f(e)?t.useClaudeKey?…:U7f(e)?t.useGoogleKey?…:t.useOpenAIKey?"openai":void 0}`
+       `Qoo=bOd!==void 0` → `m7t=vOd||Qoo` → 提交处 `isByok:m7t(i,…applicationUserPersistentStorage)`
+     🔴 **只看模型名前缀 + `useOpenAIKey` 这个开关,不看 `isUserAdded`。**
+     ⇒ 这也**证伪了**"keepmine 能顺手修好这个"——名字被吞掉只影响菜单,不影响路由。
+
+     安装器装机时写的是 `d.useOpenAIKey = true`(mergeConfig)。所以开关是后来被客户端翻掉的,
+     全 bundle 只有两处会翻成 false,两处两代四 bundle 均 exactly-1:
+       A `fOd({isLocalMode:…})&&g===dr.FREE&&m!==dr.FREE&&this.setUseOpenAIKey(!1)` ← 订阅降到 Free
+       B admin-policy `byokDisabled=true` 那支(还顺手 removeModel/removeUserAddedModel)
+     ⚠️ **他那台机器上 `useOpenAIKey` 的实际值我没有,这一格是空的。** 所以下面第一条不去猜
+     开关状态,而是**让开关管不着我们自己装的名字**:名字在 userAddedModels 里就恒走 openai。
+
+     byok-force:  `bOd` 开头加一句 —— 名字是我们装进去的 ⇒ 直接返回 "openai"。
+                  我们菜单里 32 个名字没有 claude-/gemini- 前缀,全部经 LiteLLM 走 OpenAI 兼容口,
+                  所以恒 "openai" 是对的。⚠️ 只认 userAddedModels 里的名字,Cursor 自带模型零影响。
+     byok-keepon: A 那条腿摘掉 —— 降到 Free 不再把开关关掉(否则设置页显示和实际路由不一致)。
+     B 留着不动:它挂在 admin-policy `byokDisabled` 上,个人号不走这条;而 force 那条已经覆盖路由。
+     ⚠️ 还空着的一格:`--repair` 按设计**不碰配置/Key**,所以开关被翻掉过的机器光跑 REPAIR
+       补不回来 —— 要跑一次 `--apply`/`--upgrade` 才会重写 `useOpenAIKey=true`。 */
+  {
+    name: "byok-force", marker: "@cxteam-byokforce",
+    rx: new RegExp("function (" + ID + ")\\((" + ID + "),(" + ID + ")\\)\\{return (" + ID + ")\\(\\2\\)\\?\\3\\.useClaudeKey\\?\"anthropic\":void 0:(" + ID + ")\\(\\2\\)\\?\\3\\.useGoogleKey\\?\"google\":void 0:\\3\\.useOpenAIKey\\?\"openai\":void 0\\}", "g"),
+    sub: (m) => "function " + m[1] + "(" + m[2] + "," + m[3] + "){/*@cxteam-byokforce*/try{if((" + m[3] + "?.aiSettings?.userAddedModels||[]).includes(" + m[2] + "))return\"openai\"}catch(__cxe){}return " + m[4] + "(" + m[2] + ")?" + m[3] + ".useClaudeKey?\"anthropic\":void 0:" + m[5] + "(" + m[2] + ")?" + m[3] + ".useGoogleKey?\"google\":void 0:" + m[3] + ".useOpenAIKey?\"openai\":void 0}",
+  },
+  {
+    name: "byok-keepon", marker: "@cxteam-byokkeepon",
+    rx: new RegExp("(" + ID + ")\\(\\{isLocalMode:(" + ID + ")\\.localMode\\}\\)&&(" + ID + ")===(" + ID + ")\\.FREE&&(" + ID + ")!==\\4\\.FREE&&this\\.setUseOpenAIKey\\(!1\\)", "g"),
+    sub: () => "/*@cxteam-byokkeepon*/void 0",
   },
 ];
 
@@ -2011,9 +2106,127 @@ async function larkSetup(args) {
   else console.log("   ⚠️  登录没完成（rc=" + lg.status + "）。以后随时补: lark-cli auth login");
 }
 
+/* ── `--doctor`(2026-09-23):把「判据那一栏」一次性打出来,**只读,不写任何东西** ──────
+   为什么要这把尺子:同事报「This model does not support custom API keys」,那句话在
+   3.21.18 **整个 app 里 0 命中**(desktop/glass/agent-host/local-agent-runtime 全搜过),
+   且带 Cursor 形状的 `Request ID: <uuid>` ⇒ 它来自 Cursor 后端,不是我们的腿
+   (我们的腿返的是 `API 异常 (req: 8位)`,中文短 id;repo 里也 0 命中)。
+   ⇒ 剩下唯一没数据的格子全在**他那台机器的状态里**,而我拿不到。这把尺子就是让他
+      一条命令把那几格交出来,不用截图、不用来回问。
+
+   🔴 打出来的每一项都要能单独判真假,别打成一段散文:
+     - 补丁装没装:按 marker 逐条数(装了几处),不是"看着装了"。
+     - Key 有没有:只打 **sha256 前16位**,明文一个字节都不落盘/不上屏。
+     - 开关/档位/baseUrl:原值照抄。
+     - 目录撞名:我们装的名字里 `isUserAdded!==true` 的**逐个列出来** —— 这一格非 0
+       说明 keepmine 没生效(补丁没装、或装了没重启 Cursor 刷目录)。
+     - 最近会话选的哪个模型:报错那一发到底选的是谁,这格空着就没法归因。 */
+async function doDoctor() {
+  const crypto = require("crypto");
+  const out = [];
+  const P = (...a) => { const s = a.join(" "); out.push(s); console.log(s); };
+  P("=== cursor-g doctor ===");
+  P("时间      :", new Date().toISOString());
+  P("平台      :", process.platform, process.arch);
+  P("Cursor    :", cursorVersion());
+  P("资源目录  :", RES);
+
+  P("\n--- 1) bundle 补丁(按 marker 数命中处数) ---");
+  // 🔴 数 marker 必须数**完整注释形状** `/*@cxteam-x*/`,不许裸数名字:
+  //    `@cxteam-keepmine` 是 `@cxteam-keepmine2` 的子串,`-nocloud` 是 `-nocloudset` 的子串,
+  //    裸数会互相灌水(我 09-23 在 `setUseOpenAIKey(!1)` 上已经栽过一次同形的假红)。
+  // 名单不写死:直接把 bundle 里出现的所有 cxteam marker 枚举出来,免得以后加了补丁忘改这里。
+  const MUST = ["byokforce", "byokkeepon", "keepmine", "keepmine2", "nocloud", "nocloudset"];
+  for (const rel of BUNDLES) {
+    const p = path.join(RES, rel);
+    if (!fs.existsSync(p)) { P("  !!", rel, "不存在"); continue; }
+    const s = fs.readFileSync(p, "utf8");
+    const seen = new Map();
+    for (const m of s.match(/\/\*@cxteam-[a-z0-9]+\*\//g) || []) seen.set(m, (seen.get(m) || 0) + 1);
+    const line = [...seen.entries()].map(([k, v]) => k.slice(10, -2) + "=" + v).sort().join(" ");
+    P("  " + path.basename(rel) + ": " + (line || "(一个都没有 ⇒ 补丁没装)"));
+    const missing = MUST.filter((n) => !seen.has("/*@cxteam-" + n + "*/"));
+    if (missing.length) P("    🔴 缺:" + missing.join(", ") + " ⇒ 这台机器没跑过新版安装器(或 Cursor 升级后冲掉了,双击 REPAIR)");
+  }
+  P("  ctxwin(" + CTXWIN_MARKER + "):");
+  for (const t of CTXWIN_TARGETS) {
+    const p = path.join(RES, t.rel);
+    if (!fs.existsSync(p)) { P("    !!", t.rel, "不存在"); continue; }
+    const n = fs.readFileSync(p, "utf8").split(CTXWIN_MARKER).length - 1;
+    P("    " + n + "  " + t.rel);
+  }
+
+  P("\n--- 2) BYOK 配置 / Key ---");
+  let d = null;
+  try {
+    const db = openDb();
+    const raw = await db.get(APP_USER_KEY);
+    const k = await db.get(OPENAI_KEY_SECRET);
+    db.close();
+    if (!raw) P("  !! applicationUser blob 不存在(Cursor 没初始化过?)");
+    else d = JSON.parse(raw);
+    // 明文不上屏:只打长度 + sha256 前16位,够对账、不泄露。
+    P("  openAIKey secret:", k == null ? "**不存在**(没配过 Key)"
+      : "存在 len=" + String(k).length + " sha256_16=" + crypto.createHash("sha256").update(String(k)).digest("hex").slice(0, 16));
+  } catch (e) { P("  !! 读库失败:", e && e.message || e); }
+  if (d) {
+    for (const f of ["membershipType", "isEnterprise", "useOpenAIKey", "useClaudeKey", "openAIBaseUrl", "hasTokenBasedPricing"]) {
+      P("  " + f + " =", JSON.stringify(d[f]));
+    }
+    const uam = (d.aiSettings && d.aiSettings.userAddedModels) || [];
+    P("  userAddedModels =", uam.length, "个");
+    const cat = d.availableDefaultModels2 || [];
+    const mine = cat.filter((e) => uam.includes(e.name));
+    const bad = mine.filter((e) => e.isUserAdded !== true);
+    P("  目录 =", cat.length, "条; 其中属于我们的 =", mine.length, "条");
+    P("  🔴 我们的名字里 isUserAdded!==true 的 =", bad.length, "个",
+      bad.length ? "(keepmine 没兜住 ⇒ 这几个点了就不走 BYOK)" : "(全部兜住)");
+    for (const e of bad) P("      -", e.name, "isUserAdded=" + JSON.stringify(e.isUserAdded),
+      "params=" + ((e.parameterDefinitions || []).length));
+    const miss = uam.filter((n) => !cat.some((e) => e.name === n));
+    if (miss.length) P("  ⚠️ 装了但目录里没有的名字:", miss.join(", "));
+  }
+
+  P("\n--- 3) 最近几个会话选的模型(报错那一发选的是谁) ---");
+  // ⚠️ `composerData:*` 躺在 **globalStorage/state.vscdb 的 cursorDiskKV** 表里,
+  //    不在 workspaceStorage —— 第一版写错了路径,拿到 0 行还把它当成"没有会话"打出去,
+  //    典型的「指向不存在路径的尺子恒绿/恒空」。所以下面**先数总行数并打出来**:
+  //    行数=0 和"读不到" 必须能区分,不然这一格永远在撒谎。
+  try {
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(STATE_DB, { readOnly: true });
+    const tot = db.prepare("SELECT count(*) AS n FROM cursorDiskKV WHERE key LIKE 'composerData:%'").get();
+    P("  composerData 行数 =", tot && tot.n);
+    const rs = db.prepare("SELECT key,value FROM cursorDiskKV WHERE key LIKE 'composerData:%' ORDER BY rowid DESC LIMIT 60").all();
+    db.close();
+    const list = [];
+    for (const r of rs) {
+      try {
+        const c = JSON.parse(String(r.value));
+        const mc = c.modelConfig || {};
+        list.push({ t: c.lastUpdatedAt || c.createdAt || 0, model: mc.modelName, maxMode: mc.maxMode,
+          params: ((mc.selectedModels || [])[0] || {}).parameters });
+      } catch (e) { /* 单条坏行不挡整份报告 */ }
+    }
+    list.sort((a, b) => b.t - a.t);
+    if (!list.length) P("  (行数非 0 但一条都解不出来 ⇒ 结构变了,把这句原样发出来)");
+    for (const r of list.slice(0, 5)) {
+      P("  " + (r.t ? new Date(r.t).toISOString() : "无时间") +
+        "  model=" + JSON.stringify(r.model) + "  maxMode=" + JSON.stringify(r.maxMode) +
+        "  params=" + JSON.stringify(r.params || []));
+    }
+  } catch (e) { P("  !! 读 composerData 失败:", e && e.message || e); }
+
+  const dst = path.join(os.tmpdir(), "cursor-g-doctor.txt");
+  try { fs.writeFileSync(dst, out.join("\n") + "\n"); P("\n📋 这份报告也存在:", dst, "—— 把它整份发出来即可(里面没有明文 Key)"); }
+  catch (e) { P("\n(写报告文件失败,直接复制上面这一屏即可)"); }
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const has = (f) => argv.includes(f);
+  // --doctor 必须在所有写路径**之前**返回:它的唯一契约是只读。
+  if (has("--doctor")) { await doDoctor(); return; }
   const opt = (f, dflt) => { const i = argv.indexOf(f); return i >= 0 && argv[i + 1] ? argv[i + 1] : dflt; };
   const args = {
     // --upgrade = 老用户升级档:等价于 --apply,但**一个字都不问 Key**(他的 Key 已经在

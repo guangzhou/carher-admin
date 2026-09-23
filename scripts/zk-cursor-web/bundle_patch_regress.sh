@@ -309,6 +309,27 @@ process.exit(bad?1:0);
   rm -rf "$CWTMP"
 fi
 
+# ── 6) byok 路由行为腿(Free 档关掉 BYOK 开关 ⇒ 改道 Cursor 服务端)────────────────
+#    需要一份新版 pristine bundle 做输入:没有就必须**报跳过**,不许静默当过。
+echo "--- 6) byok 路由(bOd)行为 + 阳性对照 ---"
+BYOK_SRC=""
+[ -n "$NEWDIR" ] && [ -f "$NEWDIR/workbench.desktop.main.js" ] && BYOK_SRC="$NEWDIR/workbench.desktop.main.js"
+if [ -z "$CXNODE" ]; then
+  skip "⑥:没找到 Cursor 的 electron(CXNODE 空),这腿没跑"
+elif [ -z "$BYOK_SRC" ]; then
+  skip "⑥:没给 --new-bundles / --fetch ⇒ 没有 pristine 输入,这腿没跑"
+else
+  BTMP="$(mktemp -d)"
+  CX_APPLY_TO_FILE="$BYOK_SRC" CX_APPLY_OUT="$BTMP/patched.js" \
+    env ELECTRON_RUN_AS_NODE=1 CX_REQUIRE_AST=1 "$CXNODE" "$JS" >/dev/null 2>&1
+  if [ ! -s "$BTMP/patched.js" ]; then bad "⑥打补丁没产出产物"; else
+    CX_BYOK_PRE="$BYOK_SRC" CX_BYOK_POST="$BTMP/patched.js" node "$HERE/cursor_byok_offline_cases.js" \
+      && ok "⑥byok 路由行为全绿(含阳性对照:原版在开关 off 下必须判不走 BYOK)" \
+      || bad "⑥byok 路由行为腿不符(见上面 FAIL)"
+  fi
+  rm -rf "$BTMP"
+fi
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

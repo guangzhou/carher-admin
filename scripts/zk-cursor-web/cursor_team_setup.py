@@ -107,6 +107,9 @@ DEFAULT_MODELS = [
     "composer-2.5-fast",
     # ── ② gpt-*(5 个里 4 个与 Cursor 自带同名,见上方说明)──
     "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5", "gpt-6-astra",
+    # gpt-6-luna:09-23 198 全池上线,原来漏在清单外 ⇒ 同事只能手敲成 `GPT-6-luna`,
+    # 撞上 LiteLLM key 白名单大小写敏感 ⇒ 403。补进来就不必手敲。
+    "gpt-6-luna",
     # ── ③ cr-*(前 7 个是载体代表,在真 Cursor 里跑过)──
     "cr-g-5.6", "cr-g-5.6-instant", "cr-g-5.6-mini", "cr-g-5.6-t-mini",
     "cr-g-research", "cr-g-5.6-thinking", "cr-g-5.6-luna",
@@ -312,6 +315,45 @@ PATCHES = [
     dict(name="nocloud-set", marker="@cxteam-nocloudset", multi=True,
          rx=re.compile(r'(updateComposerData\(' + _ID + r',\{[^{}]{0,160}?pendingBackgroundAgent:)(' + _ID + r')(\}\))'),
          sub=lambda m: m.group(1) + '/*@cxteam-nocloudset*/!1' + m.group(3)),
+    # keepmine(2026-09-23):不许 Cursor 把我们装的同名模型从清单里吞掉。详注见 js 同名条目。
+    # 数据:本机 3.20.17 的 userAddedModels 只剩 24 个,少的正是 grok-4.7/4.6/4.5 +
+    # gpt-5.6-{sol,luna,terra} + gpt-5.5 + kimi-k2.7-code —— 全是与服务端目录撞名的那批;
+    # 活着的 23 个在目录里都带 isUserAdded:true。Xb_() 算出驱逐名单 → refreshDefaultModels
+    # 把它**写回持久化存储**,删一次永久没了 ⇒ 判定在服务端、落地动作在客户端,我们能拦。
+    # noevict 让驱逐名单恒空;claim 把目录里属于我们的条目改成与那 23 个逐字段同形。
+    dict(name="keepmine-noevict", marker="@cxteam-keepmine",
+         rx=re.compile(r'function (' + _ID + r')\((' + _ID + r'),(' + _ID + r')\)\{return \2\.filter\(('
+                       + _ID + r')=>\3\.some\((' + _ID + r')=>' + _ID + r'\(\5,\4\)&&!\5\.isUserAdded\)\)\}'),
+         sub=lambda m: 'function ' + m.group(1) + '(' + m.group(2) + ',' + m.group(3)
+                       + '){/*@cxteam-keepmine*/return[]}'),
+    dict(name="keepmine-claim", marker="@cxteam-keepmine2",
+         rx=re.compile(r'(const ' + _ID + r'=' + _ID + r'\((' + _ID + r')\);\2=\2\.map\((' + _ID
+                       + r')=>' + _ID + r'\(\3\)\))'),
+         sub=lambda m: m.group(1) + '/*@cxteam-keepmine2*/.map(' + m.group(3)
+                       + '=>{try{const __cxu=this._reactiveStorageService.applicationUserPersistentStorage.aiSettings.userAddedModels||[];return __cxu.includes('
+                       + m.group(3) + '.name)&&' + m.group(3) + '.isUserAdded!==!0?{...' + m.group(3)
+                       + ',isUserAdded:!0,parameterDefinitions:[],variants:[]}:' + m.group(3)
+                       + '}catch(__cxe){return ' + m.group(3) + '}})'),
+    # byok(2026-09-23):Free 档把 BYOK 开关关掉 ⇒ 请求改道 Cursor 服务端,弹
+    # 「Named modes unavailable / Free plans can only use Auto」。详注见 js 同名条目。
+    # 与 keepmine 是两个病:keepmine 管"名字在不在菜单",这条管"请求发给谁"。
+    # 数据:那句文案在 3.21.18 两份 bundle 里 0 命中(服务端下发);路由唯一判定
+    # bOd() 只看模型名前缀 + useOpenAIKey,**不看 isUserAdded**。
+    dict(name="byok-force", marker="@cxteam-byokforce",
+         rx=re.compile(r'function (' + _ID + r')\((' + _ID + r'),(' + _ID + r')\)\{return (' + _ID
+                       + r')\(\2\)\?\3\.useClaudeKey\?"anthropic":void 0:(' + _ID
+                       + r')\(\2\)\?\3\.useGoogleKey\?"google":void 0:\3\.useOpenAIKey\?"openai":void 0\}'),
+         sub=lambda m: 'function ' + m.group(1) + '(' + m.group(2) + ',' + m.group(3)
+                       + '){/*@cxteam-byokforce*/try{if((' + m.group(3)
+                       + '?.aiSettings?.userAddedModels||[]).includes(' + m.group(2)
+                       + '))return"openai"}catch(__cxe){}return ' + m.group(4) + '(' + m.group(2) + ')?'
+                       + m.group(3) + '.useClaudeKey?"anthropic":void 0:' + m.group(5) + '('
+                       + m.group(2) + ')?' + m.group(3) + '.useGoogleKey?"google":void 0:'
+                       + m.group(3) + '.useOpenAIKey?"openai":void 0}'),
+    dict(name="byok-keepon", marker="@cxteam-byokkeepon",
+         rx=re.compile(r'(' + _ID + r')\(\{isLocalMode:(' + _ID + r')\.localMode\}\)&&(' + _ID
+                       + r')===(' + _ID + r')\.FREE&&(' + _ID + r')!==\4\.FREE&&this\.setUseOpenAIKey\(!1\)'),
+         sub=lambda m: '/*@cxteam-byokkeepon*/void 0'),
 ]
 
 

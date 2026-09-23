@@ -108,6 +108,33 @@ echo.
 pause
 WINUP
 
+# 双击自检器(2026-09-23):**只读**,不改任何东西。
+# 为什么要有它:同事报「This model does not support custom API keys」这类报错时,缺的从来
+# 不是猜想而是**他那台机器上的几个值**(补丁装没装 / 开关 / baseUrl / Key 在不在 /
+# 目录里撞名的还剩几个 / 报错那一发选的哪个模型)。以前只能靠截图来回问,而截图看不到
+# 持久化存储里的值。这把尺子一条命令把那几格全打出来,报告落在临时目录里,整份发出来即可。
+# 🔴 报告里**没有明文 Key** —— 只打长度和 sha256 前 16 位。
+cat > "$STAGE/DOCTOR-Mac.command" <<'MACD'
+#!/bin/sh
+DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "自检(只读,不会改任何东西)。把下面整屏发给管理员即可。"
+echo ""
+sh "$DIR/cursor_team_setup.sh" --doctor
+echo ""
+printf "按回车键关闭本窗口…"; read _
+MACD
+
+# 双击自检器(Windows)
+cat > "$STAGE/DOCTOR-Windows.cmd" <<'WIND'
+@echo off
+chcp 65001 >nul
+echo 自检（只读，不会改任何东西）。把下面整屏发给管理员即可。
+echo.
+call "%~dp0cursor_team_setup.cmd" --doctor
+echo.
+pause
+WIND
+
 # 双击关掉增量传输(Mac):万一小代理出问题,不用找管理员,双击退回公网直连。
 # 文件名用 ASCII —— 中文名在 zip 里跨平台会乱码(实测 unzip -l 显示成 ?��??)。
 cat > "$STAGE/TURN-OFF-DELTA-Mac.command" <<'MACZ'
@@ -226,7 +253,7 @@ echo.
 pause
 WINU
 
-chmod +x "$STAGE/INSTALL-Mac.command" "$STAGE/UPGRADE-Mac.command" "$STAGE/REPAIR-Mac.command" "$STAGE/TURN-OFF-DELTA-Mac.command" "$STAGE/REMOTE-SSH-Mac.command" "$STAGE/UNINSTALL-Mac.command" "$STAGE/cursor_team_setup.sh" "$STAGE/cursor_remote_ssh.sh"
+chmod +x "$STAGE/INSTALL-Mac.command" "$STAGE/UPGRADE-Mac.command" "$STAGE/REPAIR-Mac.command" "$STAGE/DOCTOR-Mac.command" "$STAGE/TURN-OFF-DELTA-Mac.command" "$STAGE/REMOTE-SSH-Mac.command" "$STAGE/UNINSTALL-Mac.command" "$STAGE/cursor_team_setup.sh" "$STAGE/cursor_remote_ssh.sh"
 
 cat > "$STAGE/README.txt" <<'RD'
 __MODEL_PREFIX__ 一键安装(零依赖,不用装 Python / Node)
@@ -257,6 +284,12 @@ __MODEL_PREFIX__ 一键安装(零依赖,不用装 Python / Node)
   三个按钮的区别,一句话:
     INSTALL = 第一次装(会问 Key)   UPGRADE = 已装过要更新(不问 Key)
     REPAIR  = Cursor 升级后模型没了,只重打补丁(不改菜单、不更新小代理)
+
+  ★ 报错了先双击 DOCTOR(Mac: DOCTOR-Mac.command / Windows: DOCTOR-Windows.cmd)
+    它**只读**,一个字节都不改。跑完把整屏(或它提示的那个 txt)发给管理员 ——
+    里面是判断问题所必需的那几个值(补丁装没装 / 开关 / 地址 / Key 在不在 /
+    报错那一发选的哪个模型)。**没有明文 Key**,只有长度和指纹前 16 位。
+    截图看不到这些值,所以有 DOCTOR 就别只发截图,能省掉好几轮来回。
 
 准备:
   1) 先拿到你的 API Key(找管理员,或用飞书「个人账户」表查)。

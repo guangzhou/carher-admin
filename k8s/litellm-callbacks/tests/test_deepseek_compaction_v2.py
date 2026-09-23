@@ -105,6 +105,40 @@ class InboundRewrite(unittest.TestCase):
         out = ADAPT._adapt(data, "test")
         self.assertGreaterEqual(out["max_output_tokens"], 4096)
 
+    def test_client_4096_is_raised(self):
+        """回归 2026-09-23：这个 4096 是我们自己造的。
+
+        Codex 的 ``ResponsesApiRequest`` 里没有 max_output_tokens 字段，压缩轮
+        一个上限都不发；旧判据把 ``None`` 也算进「低于 4096」，等于给无上限的
+        请求装上 4096 的上限。落点是推理模型时 4096 全被 reasoning 吃光（实测
+        reasoning=4096、摘要 0 字），Codex 报 ``reason: max_output_tokens``
+        判死整轮。同一份 payload 给 16384 就 completed（output=5400 /
+        reasoning=2024 / 摘要 8826 字）。
+        """
+        data = {"model": "deepseek-v4-flash", "input": CONV + [TRIGGER],
+                "max_output_tokens": 4096}
+        out = ADAPT._adapt(data, "test")
+        self.assertGreaterEqual(out["max_output_tokens"], 16384)
+
+    def test_absent_budget_is_not_capped_at_4096(self):
+        """客户端一个字段都不发时（Codex 的真实形状），别给它装小上限。"""
+        data = {"model": "deepseek-v4-flash", "input": CONV + [TRIGGER]}
+        out = ADAPT._adapt(data, "test")
+        self.assertGreaterEqual(out["max_output_tokens"], 16384)
+
+    def test_client_budget_larger_than_floor_is_kept(self):
+        """客户端给得比下限大就别往下压。"""
+        data = {"model": "deepseek-v4-flash", "input": CONV + [TRIGGER],
+                "max_output_tokens": 100000}
+        out = ADAPT._adapt(data, "test")
+        self.assertEqual(out["max_output_tokens"], 100000)
+
+    def test_budget_is_capped(self):
+        """按输入规模上浮也要有顶，别把上游的硬上限顶穿。"""
+        self.assertEqual(
+            ADAPT._compaction_output_budget([{"t": "x" * 40_000_000}]),
+            ADAPT._COMPACTION_MAX_OUTPUT_TOKENS)
+
     def test_no_trigger_is_noop(self):
         data = {"model": "deepseek-v4-flash", "input": list(CONV)}
         self.assertIs(ADAPT._adapt(data, "test"), data)

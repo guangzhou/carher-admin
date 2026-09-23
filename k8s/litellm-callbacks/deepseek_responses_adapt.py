@@ -183,7 +183,6 @@ _RESPONSES_GROUP_REWRITE = {
 }
 
 
-
 def _is_responses_call(call_type: Any) -> bool:
     """必须取 ``.value``，不能用 ``str(call_type)``。
 
@@ -373,7 +372,6 @@ def _trim_oversize_input(data: dict[str, Any], counts: dict[str, int]) -> dict[s
     return out
 
 
-
 def _opens_new_turn(out: list[Any]) -> bool:
     """当前位置要不要补 reasoning：往回跳过轮内填充项再看。
 
@@ -490,6 +488,31 @@ def _adapt_tool_choice(choice: Any, tools: Any, counts: dict[str, int]) -> Any:
 # key 用 counts 的 id —— 同一次 _adapt 内 counts 是同一个对象，天然隔离；
 # _adapt 末尾会把它转存进 litellm_metadata 再清掉，不留全局状态。
 _DOWNGRADED_NAMES: "dict[int, set]" = {}
+
+
+def _drop_null_tool_strict(tools: Any, counts: dict[str, int]) -> Any:
+    """Remove only ``strict: null`` from DeepSeek Responses tool definitions.
+
+    SGLang validates ``strict`` as a boolean when present. GPT Responses metadata
+    can serialize an unspecified value as JSON null, which makes a cross-model
+    fallback fail before DeepSeek sees the tool schema. Explicit boolean choices
+    are meaningful and must remain untouched.
+    """
+    if not isinstance(tools, list):
+        return tools
+
+    out: list[Any] = []
+    changed = False
+    for tool in tools:
+        if isinstance(tool, dict) and tool.get("strict", _SENTINEL) is None:
+            fixed = dict(tool)
+            fixed.pop("strict", None)
+            out.append(fixed)
+            counts["tool_strict_null_dropped"] = counts.get("tool_strict_null_dropped", 0) + 1
+            changed = True
+        else:
+            out.append(tool)
+    return out if changed else tools
 
 
 def _adapt_tools(tools: Any, counts: dict[str, int]) -> Any:
@@ -754,6 +777,44 @@ def _has_compaction_trigger(items: Any) -> bool:
                for i in items)
 
 
+# 摘要输出预算。
+#
+# 🔴 **这个上限是我们自己造的，不是客户端发的。** Codex 的
+# ``ResponsesApiRequest``（codex-rs/codex-api/src/common.rs:282）里**没有
+# max_output_tokens 这个字段**，压缩轮一个上限都不发。旧代码的判据
+# ``not isinstance(cur, int) or cur < 4096`` 把 ``cur is None``（= 没发）
+# 也算进「低于下限」，于是给一个本来无上限的请求装上了 4096 的上限。
+#
+# 2026-09-23 实测（``gpt-5.5`` -> per-key alias -> ``sa-grok-4.7`` -> 兜底
+# ``openrouter-deepseek-v4.1-flash``，98,238 input token 的真实 Codex 会话）：
+#
+#   一个字段都不发（Codex 真实形状）-> status=incomplete reason=max_output_tokens
+#                                      output=4096 **reasoning=4096** 摘要 0 字
+#   max_output_tokens=16384          -> status=completed
+#                                      output=5400 reasoning=2024 摘要 8826 字
+#                                      + 1 个 compaction item
+#
+# 对照组：同组同路但**不带** compaction_trigger 的普通请求 output 到过 8,381
+# ⇒ 4096 既不是上游默认也不是部署上限，只在压缩轮出现，就是这一行给的。
+#
+# 落点是推理模型时 4096 全被 reasoning 吃光，一个字摘要都出不来，Codex 侧报
+# ``Error running remote compact task: ... reason: max_output_tokens`` 并把整轮
+# 判死。所以下限按**实测需要的 5400 再留一倍余量**取 16384；再按输入规模上浮
+# （1 token ≈ 2.5 字符，摘要给输入的 ~1/16），上限 65536 与 codex_compaction_v2
+# 对齐。仍然保留「客户端给得更大就不往下压」的语义。
+_COMPACTION_MIN_OUTPUT_TOKENS = 16384
+_COMPACTION_MAX_OUTPUT_TOKENS = 65536
+
+
+def _compaction_output_budget(items: Any) -> int:
+    try:
+        chars = len(json.dumps(items, ensure_ascii=False)) if items else 0
+    except (TypeError, ValueError):
+        chars = 0
+    return max(_COMPACTION_MIN_OUTPUT_TOKENS,
+               min(_COMPACTION_MAX_OUTPUT_TOKENS, chars // 40))
+
+
 def _rewrite_compaction_request(data: dict[str, Any], counts: dict[str, int]) -> dict[str, Any]:
     """把 compaction_trigger 换成显式摘要指令。
 
@@ -776,8 +837,10 @@ def _rewrite_compaction_request(data: dict[str, Any], counts: dict[str, int]) ->
     # 摘要要完整,别被默认 max_output_tokens 截断（实测 300 会 incomplete）
     try:
         cur = out.get("max_output_tokens")
-        if not isinstance(cur, int) or cur < 4096:
-            out["max_output_tokens"] = 4096
+        want = _compaction_output_budget(kept)
+        if not isinstance(cur, int) or cur < want:
+            out["max_output_tokens"] = want
+            counts["compaction_output_budget"] = want
     except Exception:
         pass
     # 标记给出站侧：这一轮的输出要包装成 compaction item
@@ -805,7 +868,8 @@ def _adapt(data: dict[str, Any], source: str) -> dict[str, Any]:
         data = dict(data)
         data["input"] = repaired
     out = dict(data)
-    tools = _adapt_tools(out.get("tools"), counts)
+    tools = _drop_null_tool_strict(out.get("tools"), counts)
+    tools = _adapt_tools(tools, counts)
     if tools is not out.get("tools"):
         out["tools"] = tools
     items = _adapt_input(out.get("input"), counts)

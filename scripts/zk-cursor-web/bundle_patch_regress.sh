@@ -1,5 +1,5 @@
 #!/bin/sh
-# bundle_patch_regress.sh —— 改了 cursor_team_setup.{js,py} 之后的离线回归台架(①~⑩)。
+# bundle_patch_regress.sh —— 改了 cursor_team_setup.{js,py} 之后的离线回归台架(①~⑪)。
 # 全程只读 live Cursor(不用退出、不改任何东西),产物都在临时目录。
 #
 #   sh bundle_patch_regress.sh                      # 三腿(旧版零漂移 / js==py / 假 app 端到端)
@@ -21,8 +21,9 @@
 #   ⑧ 家族隔离:workbench 的某一个锚点漂了,件C/件D 必须照样打上(exit 5,不是 exit 2 全盘退出)
 #   ⑨ 还原源逐路径解析(两代备份)+ 还原后复查残留 marker(exit 6)
 #   ⑩ 空串 Key 不算 Key:--uninstall 置空后再 --upgrade 必须说「还差一步」而不是「直接用」
+#   ⑪ 小代理装不上但**活着**时,BYOK 地址不许被降级成公网直连(死了才降)
 #
-# 🔴 ⑧⑨⑩ 的**阳性对照一律在本腿里就地重实现旧行为**,不许写成 `git show HEAD:...` ——
+# 🔴 ⑧~⑪ 的**阳性对照一律在本腿里就地重实现旧行为**,不许写成 `git show HEAD:...` ——
 #    修好的版本一进 HEAD,那种对照就退化成"新 vs 新",永远绿,等于台架上少了一腿却没人知道。
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -681,6 +682,49 @@ else
     fi
   fi
 fi
+# ── ⑪ 装不上小代理 ≠ 把已经配好的地址降级(2026-09-24 补)────────────────────
+# 量的是什么:`zkdInstall` 返回 ok:false 时,老逻辑一律把 BYOK 地址改写成公网直连。
+# 最常见的触发不是"小代理坏了",而是**引擎不是从包里跑的**(管理员在 repo 里直接跑,
+# `zk-delta/` 不在 __dirname 旁边 ⇒ missing_*),而那台机器上的小代理跑得好好的。
+# 一次无关的 --upgrade 就把一台配好的机器静默降成"不省流量"。
+# 判据改成打 /healthz 看**真相**;台架用 CX_ZKD_ALIVE 钩子把这一格两个值都走一遍。
+# 🔴 两侧都要量:只量"活着别降级"分不出"这行字是不是永远打印"。
+echo "--- 11) 小代理活着就别降级 ---"
+if ! command -v mk10 >/dev/null 2>&1; then
+  skip "⑪:⑩ 的 fixture 没造起来(见上),这腿共用它"
+elif [ "$(uname -s)" != "Darwin" ]; then
+  skip "⑪:非 macOS,zk-delta 这一步本来就整段跳过"
+else
+  BURL() { python3 -c 'import sqlite3,json,sys
+c=sqlite3.connect(sys.argv[1]); r=c.execute("SELECT value FROM ItemTable WHERE key=?",
+ ("src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser",)).fetchone()
+print(json.loads(r[0]).get("openAIBaseUrl","?") if r else "?")' "$FU10/globalStorage/state.vscdb"; }
+  # a) 小代理活着 ⇒ 地址必须保持 127.0.0.1(台架本身就在 repo 里跑,zk-delta/ 天然不在旁边)
+  mk10 '"ZmFrZS1rZXk="'
+  L11A="$TMP/leg11-alive.log"
+  env ELECTRON_RUN_AS_NODE=1 HOME="$FH10" CURSOR_APP_ROOT="$FA10" CURSOR_USER_DIR="$FU10"     CX_SKIP_RUNNING_CHECK=1 CX_ZKD_ALIVE=1 "$CXNODE" "$JS" --upgrade --apply >"$L11A" 2>&1
+  U11A="$(BURL)"
+  if grep -q '拒绝安装 zk-delta' "$L11A"; then
+    ok "⑪前提成立:这一跑确实装不上小代理(包里没有源码)"
+  else
+    bad "⑪前提不成立(装上了?见 $L11A)⇒ 下面量的不是这个病"
+  fi
+  case "$U11A" in
+    http://127.0.0.1:8788/*) ok "⑪小代理活着 ⇒ 地址保持 $U11A(没被降级)" ;;
+    *) bad "⑪小代理活着却被降级成 $U11A ⇒ 一次无关的 --upgrade 就把配好的机器改坏" ;;
+  esac
+  # b) 阴性对照:小代理真的死了,地址就必须改回公网 —— 指着一个死端口比不省流量坏得多
+  mk10 '"ZmFrZS1rZXk="'
+  L11B="$TMP/leg11-dead.log"
+  env ELECTRON_RUN_AS_NODE=1 HOME="$FH10" CURSOR_APP_ROOT="$FA10" CURSOR_USER_DIR="$FU10"     CX_SKIP_RUNNING_CHECK=1 CX_ZKD_ALIVE=0 "$CXNODE" "$JS" --upgrade --apply >"$L11B" 2>&1
+  U11B="$(BURL)"
+  case "$U11B" in
+    http://127.0.0.1:*) bad "⑪阴性对照红了:小代理死了还把地址指过去($U11B)⇒ Cursor 彻底连不上" ;;
+    "?"|"") bad "⑪阴性对照读不到 blob(见 $L11B)" ;;
+    *) ok "⑪小代理死了 ⇒ 地址改回 $U11B(不指死端口)" ;;
+  esac
+fi
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

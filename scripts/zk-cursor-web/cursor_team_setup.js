@@ -2116,6 +2116,16 @@ const ZKD_FILES = [
 
 function zkdSupported() { return process.platform === "darwin"; }
 
+/* 8788 上**现在**有没有一个活着的小代理。判据只认 /healthz 真响应,不认
+   "~/.zk-delta 目录在不在" —— 目录在而进程死了的机器,地址指过去就是连不上。 */
+function zkdAlive() {
+  if (process.env.CX_ZKD_ALIVE) return process.env.CX_ZKD_ALIVE === "1"; // 测试钩子(台架⑪)
+  try {
+    const c = spawnSync("curl", ["-fsS", "-m", "2", "http://127.0.0.1:8788/healthz"], { encoding: "utf8" });
+    return c.status === 0 && /"ok":true/.test(c.stdout || "");
+  } catch (e) { return false; }
+}
+
 function zkdInstall(dry) {
   if (!zkdSupported()) {
     console.log("   跳过：zk-delta 的服务定义只在 macOS 实测过（launchd）。当前 %s —— 不写没验证过的东西。", process.platform);
@@ -2672,7 +2682,17 @@ async function main() {
   } else {
     const r = zkdInstall(!args.apply);
     zkdOn = !!r.ok;
-    if (!zkdOn && args.apply) console.log("   → 地址保持公网直连（%s），功能不受影响。", DEFAULT_BASE_URL);
+    /* 🔴 装不上 ≠ 这台机器上没有小代理。最常见的一种:引擎**不是从包里跑的**
+       (管理员在 repo 里直接跑 `node cursor_team_setup.js`),`zk-delta/` 不在
+       __dirname 旁边 ⇒ 返回 missing_*,而他机器上那个小代理**跑得好好的**。
+       老逻辑到这里一律把 baseUrl 改写成公网直连,于是一次无关的 --upgrade 就把
+       一台配好的机器静默降级成"不省流量",屏幕上只有一行"拒绝安装"。
+       判据用**真相**不用原因码:直接打 /healthz —— 活着就保住本机地址。
+       (healthz 不通时仍然改回公网:那种情况下指着 127.0.0.1 是彻底连不上,更坏。) */
+    if (!zkdOn && zkdSupported() && zkdAlive()) {
+      zkdOn = true;
+      console.log("   ↳ 这一步装不上,但 8788 上已有一个活着的小代理 ⇒ 地址保持 %s(不降级)。", ZKD_LOCAL_URL);
+    } else if (!zkdOn && args.apply) console.log("   → 地址保持公网直连（%s），功能不受影响。", DEFAULT_BASE_URL);
   }
   // dry-run 下 zkdInstall 返回 {ok:true,dry:true} = "这些前置条件都满足，真跑能装上"；
   // 返回 ok:false（缺文件 / 非 mac / 起不来）就必须**一路影响到地址**，

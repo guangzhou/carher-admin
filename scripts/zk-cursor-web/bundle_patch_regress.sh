@@ -1,5 +1,5 @@
 #!/bin/sh
-# bundle_patch_regress.sh —— 改了 cursor_team_setup.{js,py} 的 PATCHES 之后的四腿离线回归台架。
+# bundle_patch_regress.sh —— 改了 cursor_team_setup.{js,py} 之后的离线回归台架(①~⑩)。
 # 全程只读 live Cursor(不用退出、不改任何东西),产物都在临时目录。
 #
 #   sh bundle_patch_regress.sh                      # 三腿(旧版零漂移 / js==py / 假 app 端到端)
@@ -7,7 +7,7 @@
 #   sh bundle_patch_regress.sh --new-app "/Volumes/Cursor Installer/Cursor.app"   # ①b:新版件C 4/4
 #   sh bundle_patch_regress.sh --fetch              # 自己去官方拉最新 dmg 抽 bundle,再跑全四腿
 #
-# 四腿(照 skill cursor-client-bundle-patch「新版本漂移修复流程」第 4 步):
+# 各腿(照 skill cursor-client-bundle-patch「新版本漂移修复流程」第 4 步):
 #   ① 新版两条 bundle:每个非 multi 锚点 hits=1(multi ≥1)——证明新正则认得出新版
 #  ①b 新版 app 的件C(ctxwin)四个目标全 OK ——🔴 2026-09-23 补:①只量 workbench 解锁锚点,
 #      ctxwin 那四个 bundle 完全没进台架,3.21.18 的锚点 B/C 命中 0 就是这样发出去的
@@ -18,6 +18,12 @@
 #   ⑥ byok 路由(bOd)行为 + 阳性对照(原版在开关 off 下必须判不走 BYOK)
 #   ⑦ 件D noloop:Agent Host 轮次路由器改判 connect —— 结构(锚点/位置/语法)
 #      + 行为(daemon.cjs 真路由器,3 个坏出口全改判 + 每例原版对照)
+#   ⑧ 家族隔离:workbench 的某一个锚点漂了,件C/件D 必须照样打上(exit 5,不是 exit 2 全盘退出)
+#   ⑨ 还原源逐路径解析(两代备份)+ 还原后复查残留 marker(exit 6)
+#   ⑩ 空串 Key 不算 Key:--uninstall 置空后再 --upgrade 必须说「还差一步」而不是「直接用」
+#
+# 🔴 ⑧⑨⑩ 的**阳性对照一律在本腿里就地重实现旧行为**,不许写成 `git show HEAD:...` ——
+#    修好的版本一进 HEAD,那种对照就退化成"新 vs 新",永远绿,等于台架上少了一腿却没人知道。
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 JS="$HERE/cursor_team_setup.js"
@@ -35,7 +41,7 @@ while [ $# -gt 0 ]; do
     --new-bundles) NEWDIR="$2"; shift 2 ;;
     --new-app) NEWAPP="$2"; shift 2 ;;
     --fetch) FETCH=1; shift ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
     *) echo "未知参数:$1" >&2; exit 64 ;;
   esac
 done
@@ -430,6 +436,251 @@ open(p,'w',encoding='utf8').write(s[:i]+'/*@cx-noloop:v1*/}}}if('+s[i+17:])" "$N
   rm -rf "$NLTMP"
 fi
 
+
+# ── ⑧ 家族隔离:一个锚点漂了,其余家族照打(2026-09-24 补,F4)───────────────
+# 量的是什么:workbench 的某一个锚点在新版 Cursor 上认不出时,**ctxwin(件C)和
+# noloop(件D)那几个完全不同的文件必须照样打上**。
+# 为什么值得一条腿:09-23 那版里任何一个锚点认不出都会 `process.exit(2)` 直接终止整个
+# 进程 ⇒ 用户报的"8146%"和"An unexpected error"两个毛病一个都没修上,而屏幕上只有
+# 一行看不懂的 `!! xxx 锚点命中=0`。这是"用户不断随机反馈问题"里占比最大的那一类。
+# 判据 = **前后对照**:同一份 fixture,不漂移时三家族全打上(证明 fixture 有判别力);
+# 只把 byok-keepon 那一个锚点摇一下,则 desktop 一个字节没动、glass + ctxwin×4 +
+# noloop×2 全部照打、退出码 5、屏幕上有红字清单。
+echo "--- 8) 家族隔离:一个锚点漂了其余照打 ---"
+CW8="${CWBK:-}"
+if [ -z "$SEED" ] || [ -z "$CW8" ] || [ ! -d "$CW8" ]; then
+  skip "⑧:缺 pristine 种子(workbench 来自 \$SEED / exthost 来自 ~/.cursor-ctxwin-backup)—— 这腿是端到端的,不能拿合成文件糊弄"
+else
+  F8="$TMP/f8"; FA8="$F8/app"; FU8="$F8/user"; FH8="$F8/home"
+  mk8() {
+    rm -rf "$F8"; mkdir -p "$FA8/out/vs/workbench" "$FU8" "$FH8"
+    cp "$SEED/workbench.desktop.main.js" "$SEED/workbench.glass.main.js" "$FA8/out/vs/workbench/" 2>/dev/null
+    echo '{"version":"0.0.0-fake8"}' > "$FA8/package.json"
+    for fn in "$CW8"/extensions__*; do
+      [ -f "$fn" ] || continue
+      rel="$(basename "$fn" | sed 's|__|/|g')"
+      mkdir -p "$FA8/$(dirname "$rel")"; cp "$fn" "$FA8/$rel"
+    done
+  }
+  # 数某个 marker 在某个文件里出现几次。grep -c 零命中时 rc=1 且打印 0,所以不接 ||。
+  n8() { [ -f "$1" ] || { echo 0; return; }; grep -o "$2" "$1" 2>/dev/null | wc -l | tr -d ' '; }
+  D8="$FA8/out/vs/workbench/workbench.desktop.main.js"
+  G8="$FA8/out/vs/workbench/workbench.glass.main.js"
+  X8="$FA8/extensions/cursor-agent-exec/dist/main.js"
+  N8="$FA8/extensions/cursor-agent-host/dist/agent-host-daemon/dist/bin/daemon.cjs"
+  mk8
+  # 种子自检:**这腿会数 marker,所以先断言自己数得到 0** —— 种子若本身带 marker,
+  # 下面"打上了"的结论就是从旧 marker 抄来的,整腿零判别力。
+  SEED_MK=$(( $(n8 "$D8" '@cxteam-') + $(n8 "$X8" '@cx-ctxwin:v3') + $(n8 "$N8" '@cx-noloop:v1') ))
+  if [ ! -f "$X8" ] || [ ! -f "$N8" ]; then
+    skip "⑧:~/.cursor-ctxwin-backup 快照里缺 agent-exec / daemon.cjs,凑不出三家族的 fixture"
+  elif [ "$SEED_MK" != "0" ]; then
+    skip "⑧:种子不是 pristine(marker=$SEED_MK)—— 拿它做对照会把旧 marker 读成新战果"
+  else
+    L8A="$TMP/leg8-control.log"
+    env ELECTRON_RUN_AS_NODE=1 HOME="$FH8" CURSOR_APP_ROOT="$FA8" CURSOR_USER_DIR="$FU8" \
+      CX_SKIP_RUNNING_CHECK=1 CX_REQUIRE_AST=1 "$CXNODE" "$JS" --repair >"$L8A" 2>&1
+    RC8A=$?
+    C_D=$(n8 "$D8" '@cxteam-'); C_G=$(n8 "$G8" '@cxteam-')
+    C_X=$(n8 "$X8" '@cx-ctxwin:v3'); C_N=$(n8 "$N8" '@cx-noloop:v1')
+    if [ "$RC8A" = "0" ] && [ "$C_D" -gt 0 ] && [ "$C_G" -gt 0 ] && [ "$C_X" = "3" ] && [ "$C_N" = "1" ]; then
+      ok "⑧对照跑(不漂移):三家族全打上 desktop=$C_D glass=$C_G ctxwin=$C_X noloop=$C_N,exit=0"
+    else
+      bad "⑧对照跑就没打全(exit=$RC8A desktop=$C_D glass=$C_G ctxwin=$C_X noloop=$C_N)⇒ 下面的漂移对照不成立,见 $L8A"
+      cp "$L8A" /tmp/ 2>/dev/null
+    fi
+
+    # 摇一个锚点。挑 byok-keepon(`this.setUseOpenAIKey(!1)`)是因为它是**正则腿**且只在
+    # desktop/glass 里 —— 改它不会连带影响 exthost 那几个文件,漂移面是干净的。
+    # ⚠️ 只摇 desktop 不摇 glass:同一家族里的另一份必须照常打上,否则"跳过"的粒度
+    #     就成了整个家族,而不是"出问题的那一个文件"。
+    mk8
+    python3 - "$D8" <<'PY8'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf8", errors="surrogateescape").read()
+old = "this.setUseOpenAIKey(!1)"
+i = s.find(old)
+if i < 0:
+    sys.exit(3)
+s = s.replace(old, "this.setUseOpenAIKey(!1,void 0)")
+open(p, "w", encoding="utf8", errors="surrogateescape").write(s)
+PY8
+    if [ $? != 0 ]; then
+      skip "⑧:种子里找不到 byok-keepon 那个锚点(Cursor 版本变了)⇒ 造不出这次漂移"
+    else
+      L8B="$TMP/leg8-drift.log"
+      env ELECTRON_RUN_AS_NODE=1 HOME="$FH8" CURSOR_APP_ROOT="$FA8" CURSOR_USER_DIR="$FU8" \
+        CX_SKIP_RUNNING_CHECK=1 CX_REQUIRE_AST=1 "$CXNODE" "$JS" --repair >"$L8B" 2>&1
+      RC8B=$?
+      C_D=$(n8 "$D8" '@cxteam-'); C_G=$(n8 "$G8" '@cxteam-')
+      C_X=$(n8 "$X8" '@cx-ctxwin:v3'); C_N=$(n8 "$N8" '@cx-noloop:v1')
+      [ "$C_D" = "0" ] && ok "⑧漂移后 desktop 一个字节没动(marker=0)—— 不半打" \
+        || bad "⑧漂移后 desktop 上有 $C_D 个 marker ⇒ 打了一半就退出了"
+      [ "$C_G" -gt 0 ] && ok "⑧同家族另一份 glass 照常打上(marker=$C_G)" \
+        || bad "⑧glass 被连坐了(marker=$C_G)⇒ 跳过的粒度错成了整个家族"
+      [ "$C_X" = "3" ] && ok "⑧件C ctxwin 照常打上(agent-exec marker=3)" \
+        || bad "⑧件C 被 workbench 的锚点漂移连坐了(marker=$C_X)⇒ 8146% 那个毛病修不上"
+      [ "$C_N" = "1" ] && ok "⑧件D noloop 照常打上(daemon.cjs marker=1)" \
+        || bad "⑧件D 被连坐了(marker=$C_N)⇒ An unexpected error 那个毛病修不上"
+      grep -q '整份跳过' "$L8B" && ok "⑧屏幕上说清了「哪一份被跳过」" \
+        || bad "⑧没打印「整份跳过」⇒ 同事只会看到一行看不懂的锚点报错"
+      grep -qF '这部分补丁没打上' "$L8B" && ok "⑧收尾有红字清单(告诉他要找管理员出新锚点)" \
+        || bad "⑧收尾没有红字清单 ⇒ 部分失败被埋在滚动输出里"
+      [ "$RC8B" = "5" ] && ok "⑧退出码 5(部分完成)—— 既不是 0 假绿也不是 2 全盘放弃" \
+        || bad "⑧退出码=$RC8B(应为 5)"
+    fi
+  fi
+fi
+
+# ── ⑨ 还原源逐路径解析 + 还原后复查(2026-09-24 补,F1)────────────────────
+# 量的是什么:一台机器上跑过两代安装器 ⇒ 原厂 workbench 躺在**较早**那个备份目录里,
+# 而较晚那个目录里只有 09-23 才新增的 cxnoloop__ 两份。老规则"挑最新的含 bundle 备份、
+# 只从它里面拿"会把 workbench 留在打过补丁的状态,却照样打印"恢复原状完成"。
+# 🔴 阳性对照**在本腿里就地重实现老规则**,不用 `git show HEAD:` —— 一旦修好的版本
+#    进了 HEAD,那种对照就退化成"新 vs 新",永远绿,等于没有对照。
+echo "--- 9) 还原源逐路径解析 + 还原后复查 ---"
+F9="$TMP/f9"; FA9="$F9/app"; FH9="$F9/home"; BR9="$FH9/.cursor-team-setup-backup"
+A9="$BR9/9.9.9-20260922-100000"; B9="$BR9/9.9.9-20260923-100000"
+DESK9="$FA9/out/vs/workbench/workbench.desktop.main.js"
+DAEM9="$FA9/extensions/cursor-agent-host/dist/agent-host-daemon/dist/bin/daemon.cjs"
+# $1 = B 目录里那份 daemon 备份的内容("脏"=还带着 ctxwin marker / "净"=原厂)
+mk9() {
+  rm -rf "$F9"
+  mkdir -p "$FA9/out/vs/workbench" "$FA9/extensions/cursor-agent-exec/dist" \
+           "$FA9/extensions/cursor-local-agent-runtime/dist" \
+           "$FA9/extensions/cursor-agent-host/dist/agent-host-daemon/dist/bin" "$A9" "$B9"
+  echo '{"version":"9.9.9"}' > "$FA9/package.json"
+  # app 侧:六个文件都带着我们的 marker(= 装过补丁的样子)
+  printf 'patched-desktop/*@cxteam-keepmine*/tail\n' > "$DESK9"
+  printf 'patched-glass/*@cxteam-keepmine*/tail\n'   > "$FA9/out/vs/workbench/workbench.glass.main.js"
+  printf 'patched/*@cx-ctxwin:v3*/tail\n' > "$FA9/extensions/cursor-agent-exec/dist/main.js"
+  printf 'patched/*@cx-ctxwin:v3*/tail\n' > "$FA9/extensions/cursor-local-agent-runtime/dist/main.js"
+  printf 'patched/*@cx-ctxwin:v3*//*@cx-noloop:v1*/tail\n' > "$FA9/extensions/cursor-agent-host/dist/main.js"
+  printf 'patched/*@cx-ctxwin:v3*//*@cx-noloop:v1*/tail\n' > "$DAEM9"
+  # A 代(09-22):原厂 workbench ×2 + 那时候打的 ctxwin 三份的原厂副本
+  printf 'PRISTINE-DESKTOP\n' > "$A9/workbench.desktop.main.js"
+  printf 'PRISTINE-GLASS\n'   > "$A9/workbench.glass.main.js"
+  printf 'PRISTINE-EXEC\n'    > "$A9/cxctxwin__extensions__cursor-agent-exec__dist__main.js"
+  printf 'PRISTINE-LAR\n'     > "$A9/cxctxwin__extensions__cursor-local-agent-runtime__dist__main.js"
+  printf 'PRISTINE-HOST\n'    > "$A9/cxctxwin__extensions__cursor-agent-host__dist__main.js"
+  # B 代(09-23):只新增了 noloop 两份。daemon 那份是**在 ctxwin 之后**备份的 ⇒ 默认"脏"。
+  printf 'PRISTINE-HOST\n' > "$B9/cxnoloop__extensions__cursor-agent-host__dist__main.js"
+  if [ "$1" = "净" ]; then printf 'PRISTINE-DAEMON\n' > "$B9/cxnoloop__extensions__cursor-agent-host__dist__agent-host-daemon__dist__bin__daemon.cjs"
+  else printf 'half/*@cx-ctxwin:v3*/tail\n' > "$B9/cxnoloop__extensions__cursor-agent-host__dist__agent-host-daemon__dist__bin__daemon.cjs"; fi
+}
+mk9 脏
+# a) 阳性对照:就地重跑老规则(排序后最后一个"含 bundle 文件"的目录,只从它里面拿)
+OLDPICK=""
+for d in $(ls "$BR9" | sort); do
+  for f in "$BR9/$d"/workbench.desktop.main.js "$BR9/$d"/workbench.glass.main.js \
+           "$BR9/$d"/cxctxwin__* "$BR9/$d"/cxnoloop__*; do
+    [ -f "$f" ] && { OLDPICK="$d"; break; }
+  done
+done
+if [ "$OLDPICK" = "$(basename "$B9")" ] && [ ! -f "$BR9/$OLDPICK/workbench.desktop.main.js" ]; then
+  ok "⑨阳性对照成立:老规则挑中 $OLDPICK,而原厂 workbench 只在更早那代里 ⇒ 老代码还不回去"
+else
+  bad "⑨阳性对照不成立(老规则挑中 '$OLDPICK')⇒ 这腿量不到 F1,下面全绿也不算数"
+fi
+# b) 新代码:逐路径解析,workbench 必须从**更早**那代还回来
+L9A="$TMP/leg9-dirty.log"
+env ELECTRON_RUN_AS_NODE=1 HOME="$FH9" CURSOR_APP_ROOT="$FA9" CX_SKIP_RUNNING_CHECK=1 \
+  "$CXNODE" "$JS" --revert >"$L9A" 2>&1
+RC9A=$?
+if grep -q '^PRISTINE-DESKTOP$' "$DESK9"; then ok "⑨workbench 从更早那代($(basename "$A9"))还回来了"
+else bad "⑨workbench 没还回来(内容=$(head -c 40 "$DESK9"))⇒ F1 复发"; fi
+grep -q "← $(basename "$A9")" "$L9A" && ok "⑨屏幕上标了每个文件是从**哪个**备份目录取的" \
+  || bad "⑨没打印来源目录 ⇒ 还原了什么无从核对"
+# c) "拷了几个文件"不是"还原干净了":B 里那份 daemon 本身带 ctxwin marker,必须被复查抓出来
+if grep -qF '回滚**不完整**' "$L9A" && [ "$RC9A" = "6" ]; then
+  ok "⑨还原后复查抓到残留 marker,退出码 6,不打印成功"
+else
+  bad "⑨还原后没复查出残留(exit=$RC9A)⇒ 半还原会被报成「完成」,见 $L9A"
+fi
+# d) 阴性对照:备份完整时必须干干净净地绿,否则这把尺子只会报红,等于没有
+mk9 净
+L9B="$TMP/leg9-clean.log"
+env ELECTRON_RUN_AS_NODE=1 HOME="$FH9" CURSOR_APP_ROOT="$FA9" CX_SKIP_RUNNING_CHECK=1 \
+  "$CXNODE" "$JS" --revert >"$L9B" 2>&1
+RC9B=$?
+if grep -q '回滚完成' "$L9B" && [ "$RC9B" = "0" ] && ! grep -q '@cx' "$DAEM9"; then
+  ok "⑨阴性对照:备份完整时 exit=0 且复查无 marker(尺子不是只会报红)"
+else
+  bad "⑨阴性对照红了(exit=$RC9B)⇒ 复查有假阳,见 $L9B"
+fi
+
+# ── ⑩ 空串 Key 不算 Key(2026-09-24 补,F2)────────────────────────────────
+# 量的是什么:`--uninstall` 清 Key 时写的是**空串**而不是删行。于是下次 `--upgrade`
+# 读到 `""`(非 null)就判定"库里已有 Key,原样保留",最后打印"直接用" —— 而他一打开
+# Cursor 就是 401。这是"装完看着成功、用起来报错"这一类反馈的其中一条。
+# 判据 = 一对:空串必须报「没有 Key / 还差一步」,真值必须报「已有 Key / 直接用」。
+# 只测空串那一半是不够的 —— 分不出"尺子在量"还是"这行字永远打印"。
+echo "--- 10) 空串 Key 不算 Key ---"
+F10="$TMP/f10"; FA10="$F10/app"; FU10="$F10/user"; FH10="$F10/home"
+# 已全部打过补丁的假 bundle:让 plans 为空,这腿只关心 Key 那一步,不牵扯锚点。
+# marker 清单**从安装器现抠**,写死的话加了新补丁就会静默退化成"锚点认不出"。
+MK10="$(grep -o '@cxteam-[A-Za-z0-9]*' "$JS" | sort -u | sed 's|^|/*|; s|$|*/|' | tr -d '\n')"
+QP10="$(grep -o '@cx-queue-pump:v[0-9]*' "$JS" | head -1)"
+mk10() {
+  rm -rf "$F10"; mkdir -p "$FA10/out/vs/workbench" "$FU10/globalStorage" "$FH10"
+  echo '{"version":"0.0.0-fake10"}' > "$FA10/package.json"
+  for b in workbench.desktop.main.js workbench.glass.main.js; do
+    printf 'x%s/*%s*/y\n' "$MK10" "$QP10" > "$FA10/out/vs/workbench/$b"
+  done
+  python3 - "$FU10/globalStorage/state.vscdb" "$1" <<'PY10'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE IF NOT EXISTS ItemTable(key TEXT PRIMARY KEY, value BLOB)")
+rows = [("secret://cursorAuth/openAIKey", sys.argv[2])]
+# mergeConfig 读不到 applicationUser blob 会 exit(3) —— 那一步在 Key 那一步**之前**,
+# 缺了它整腿测不到东西。给一份最小但形状完整的 blob。
+rows.append(("src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl"
+             ".persistentStorage.applicationUser",
+             '{"openAIBaseUrl":"https://example.invalid/v1","useOpenAIKey":true,'
+             '"aiSettings":{"userAddedModels":[],"modelOverrideEnabled":[]}}'))
+c.executemany("INSERT OR REPLACE INTO ItemTable(key,value) VALUES(?,?)", rows)
+c.commit(); c.close()
+PY10
+}
+if [ -z "$MK10" ] || [ -z "$QP10" ] || ! python3 -c 'import sqlite3' 2>/dev/null; then
+  skip "⑩:抠不到 marker 清单或没有 python3 sqlite3 ⇒ 造不出 fixture"
+else
+  mk10 ""
+  # fixture 自检:先确认这份假 bundle 真的被判成"全部已打过"。判不成的话下面读到的
+  # Key 那几行可能是在别的分支里打印的,整腿零判别力。⇒「会数东西的测试先断言自己数得到」
+  L10S="$TMP/leg10-selfcheck.log"
+  env ELECTRON_RUN_AS_NODE=1 HOME="$FH10" CURSOR_APP_ROOT="$FA10" CURSOR_USER_DIR="$FU10" \
+    CX_SKIP_RUNNING_CHECK=1 "$CXNODE" "$JS" --repair >"$L10S" 2>&1
+  if ! grep -q '无需修复' "$L10S"; then
+    skip "⑩:假 bundle 没被判成「全部已打过」(见 $L10S)⇒ fixture 不成立,不硬跑"
+  else
+    ok "⑩fixture 自检:假 bundle 被判成全部已打过(Key 那一步才是唯一变量)"
+    # 空串那一发
+    L10A="$TMP/leg10-empty.log"
+    env ELECTRON_RUN_AS_NODE=1 HOME="$FH10" CURSOR_APP_ROOT="$FA10" CURSOR_USER_DIR="$FU10" \
+      CX_SKIP_RUNNING_CHECK=1 "$CXNODE" "$JS" --upgrade --apply --no-zk-delta >"$L10A" 2>&1
+    if ! grep -q '5) 写入 API Key' "$L10A"; then
+      # 跑没跑到 Key 那一步是**先决条件**,不是结论。没跑到就明说跳过,
+      # 不许把"前面某一步 exit 了"读成"空串被当成有 Key"。
+      skip "⑩:--upgrade 没跑到 Key 那一步(见 $L10A)⇒ 这腿这次什么都没量到"
+    elif grep -qF '库里**没有** Key' "$L10A" && grep -q '还差一步' "$L10A"; then
+      ok "⑩空串 Key ⇒ 明说「库里没有 Key」+「还差一步」"
+    else
+      bad "⑩空串 Key 被当成有 Key(见 $L10A)⇒ 升级完报成功,他一打开就 401"; cp "$L10A" /tmp/ 2>/dev/null
+    fi
+    # 阴性对照:真有 Key 时不许乱喊"没有"
+    mk10 '"ZmFrZS1rZXk="'
+    L10B="$TMP/leg10-present.log"
+    env ELECTRON_RUN_AS_NODE=1 HOME="$FH10" CURSOR_APP_ROOT="$FA10" CURSOR_USER_DIR="$FU10" \
+      CX_SKIP_RUNNING_CHECK=1 "$CXNODE" "$JS" --upgrade --apply --no-zk-delta >"$L10B" 2>&1
+    if grep -q '库里已有 Key' "$L10B" && grep -q '直接用' "$L10B"; then
+      ok "⑩阴性对照:真有 Key 时照常「原样保留」+「直接用」"
+    else
+      bad "⑩阴性对照红了(见 $L10B)⇒ keyPresent 把真 Key 也判成空了"; cp "$L10B" /tmp/ 2>/dev/null
+    fi
+  fi
+fi
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

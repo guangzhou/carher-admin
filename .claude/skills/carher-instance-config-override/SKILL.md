@@ -55,6 +55,23 @@ carher-<N>-user-config (ConfigMap, per-instance, 由 operator 生成)
 - **User-config 里**：bot **不做** env 替换，`${LITELLM_API_KEY}` 会**原样保留** → 调用上游时报 401
 - **结论**：user-config override 必须写**字面 key**（从 `spec.litellmKey` 取），不能用 env 占位
 
+🔴 **上面三条只对「K8s 的 carher-<N>-user-config」这个形状成立，别外推。**
+188 上的 docker 实例（`hermestest-*`，openclaw 2026.6.10，overlay 是
+`/Data/carher-runtime/deploy/carher-<N>/openclaw.runtime.json5`）**语义相反**：
+`resolveConfigEnvVars` 对整个已解析 config 递归插值，`${VAR}` 放任意路径都生效，
+未设值抛 `MissingEnvVarError` 而不是静默空串。见
+[hermestest-web-search-provider](../hermestest-web-search-provider/SKILL.md) §2。
+
+**判别器（别猜，2 秒跑完）**——写一个 `${某个已设 env}` 进去，然后实打一次：
+
+```bash
+docker exec -e HOME=/data <容器> openclaw infer web search --query "test"
+# 200 + 正文非空 ⇒ 插值了；401 ⇒ 原样透传了字面 ${...}
+```
+
+⚠️ 不能用 `openclaw config get <路径>` 代替：它把 secret 打成
+`__OPENCLAW_REDACTED__`，插没插值看不出来。
+
 ```bash
 # 取某实例的 litellmKey
 KEY=$(kubectl get her her-${ID} -n carher -o jsonpath='{.spec.litellmKey}')
@@ -357,3 +374,4 @@ CM 写对了不代表 gateway 加载了。第二个量具是 pod 日志里的 re
 - memorySearch 特定路径 → [carher-memorysearch-config](../carher-memorysearch-config/SKILL.md)
 - LiteLLM 侧改 group / entry / key alias → [litellm-ops](../litellm-ops/SKILL.md)、[litellm-per-key-model-alias](../litellm-per-key-model-alias/SKILL.md)
 - 切完 her 不回消息的排查 → [carher-her-reply-failure-triage](../carher-her-reply-failure-triage/SKILL.md)
+- **188 上的 docker 实例形状**（`hermestest-*`，`${ENV}` 语义与这里相反）→ [hermestest-web-search-provider](../hermestest-web-search-provider/SKILL.md)

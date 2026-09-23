@@ -1323,6 +1323,34 @@ function planByAst(src) {
   return { sites };
 }
 
+/* 🔴 锚点认不出时「拒绝动手」的**范围**:只该拒绝这一个文件,不该拒绝整次安装。
+   数据(09-24 台架 ⑩,可复现):拿 3.21.18 的 pristine 造假 app,只把 workbench.desktop
+   里 byok-keepon 那**一个**锚点改漂移(命中 1→0),跑 --repair ——
+     对照(不漂移):workbench ×2 + ctxwin ×4 + noloop ×2 全打上;
+     漂移后      :第一行就 `!! byok-keepon 锚点命中=0 → 拒绝动手` 然后 process.exit(2),
+                   agent-host 上 @cx-ctxwin:v3 / @cx-noloop:v1 计数**都是 0**。
+   件C(8146%/每轮压缩)和件D(InferenceService 报错)打的是 agent-host 那几个**完全不同
+   的文件**,锚点好好的,却因为 workbench 里另一条腿漂了而一个都没打上。Cursor 每次自动
+   升级都可能漂一个锚点 ⇒ 这就是"补丁一个字没改,同事那边却突然整片失效"的形状。
+   现在:planBundle 捕获 → 这个文件整份跳过(一个字节不动)→ 别的家族照常打 → 结尾大声报红 + 非 0 退出。
+   ⚠️ 测试钩子(CX_APPLY_TO_FILE)是直调 applyPatchesToText,不开软失败 ⇒ 台架原来靠
+      exit 2 断言锚点的那几腿语义**一个字没变**。 */
+let SOFT_MISS = false;
+const MISSED = [];
+function patchRefuse(msg) {
+  if (SOFT_MISS) { const e = new Error(msg); e.cxRefuse = true; throw e; }
+  console.log(msg);
+  process.exit(2);
+}
+function reportMissed() {
+  if (!MISSED.length) return false;
+  console.log("\n❌ 有 %d 个文件的锚点认不出,**这部分补丁没打上**(那几个文件一个字节没动):", MISSED.length);
+  for (const m of MISSED) console.log("   · %s —— %s", path.basename(m.rel), m.why.replace(/^\s*!!\s*/, "").trim());
+  console.log("   通常是 Cursor 升级后这段代码改了,需要出新版锚点。请把上面整屏发给管理员。");
+  console.log("   其余文件的补丁**已经打上了**,Cursor 照常能用,只是上面这几条没生效。");
+  return true;
+}
+
 function applyPatchesToText(src, quiet) {
   const say = (...a) => { if (!quiet) console.log(...a); };
   let out = src; const applied = [];
@@ -1357,7 +1385,7 @@ function applyPatchesToText(src, quiet) {
     if (pt.name === "queue-pump") {
       const old = QP_OLD.find((s) => out.includes(s));
       if (old) {
-        if (out.split(old).length - 1 !== 1) { console.log("   !! queue-pump 旧版命中!=1 → 拒绝"); process.exit(2); }
+        if (out.split(old).length - 1 !== 1) patchRefuse("   !! queue-pump 旧版命中!=1 → 拒绝");
         flushAst(); // 这一步要改 out → 先把待落地的 AST 区间落完,否则后者偏移失效
         out = out.replace(old, QP_SNIPPET); applied.push("queue-pump(升级)"); continue;
       }
@@ -1368,10 +1396,9 @@ function applyPatchesToText(src, quiet) {
       // 逐个补丁改完再重新解析要 8 次 × ~7s ≈ 67s/bundle,实测过,太贵。
       const hits = plan.sites[pt.name].length;
       if (pt.multi) {
-        if (hits < 1) { console.log("   !! %s AST 定位命中=0 → 拒绝动手", pt.name.padEnd(11)); process.exit(2); }
+        if (hits < 1) patchRefuse("   !! " + pt.name.padEnd(11) + " AST 定位命中=0 → 拒绝动手");
       } else if (hits !== 1) {
-        console.log("   !! %s AST 定位命中=%d != 1 → 拒绝动手(版本不匹配或已被 CursorX 改写)", pt.name.padEnd(11), hits);
-        process.exit(2);
+        patchRefuse("   !! " + pt.name.padEnd(11) + " AST 定位命中=" + hits + " != 1 → 拒绝动手(版本不匹配或已被 CursorX 改写)");
       }
       for (const s of plan.sites[pt.name]) astEdits.push(s);
       applied.push(pt.name + (pt.multi ? "(x" + hits + ")" : ""));
@@ -1382,13 +1409,12 @@ function applyPatchesToText(src, quiet) {
     flushAst(); // 正则分支要改 out → 先落地待办的 AST 区间
     const hits = countMatches(pt.rx, out);
     if (pt.multi) {
-      if (hits < 1) { console.log("   !! %s 锚点命中=0 → 拒绝动手", pt.name.padEnd(11)); process.exit(2); }
+      if (hits < 1) patchRefuse("   !! " + pt.name.padEnd(11) + " 锚点命中=0 → 拒绝动手");
       out = out.replace(pt.rx, (...a) => pt.sub(a)); // sub 吃 exec 风格数组(a[1]=组1)
       applied.push(pt.name + "(x" + hits + ")"); continue;
     }
     if (hits !== 1) {
-      console.log("   !! %s 锚点命中=%d != 1 → 拒绝动手(版本不匹配或已被 CursorX 改写)", pt.name.padEnd(11), hits);
-      process.exit(2);
+      patchRefuse("   !! " + pt.name.padEnd(11) + " 锚点命中=" + hits + " != 1 → 拒绝动手(版本不匹配或已被 CursorX 改写)");
     }
     out = subOnce(pt.rx, out, pt.sub);
     applied.push(pt.name);
@@ -1400,7 +1426,18 @@ function applyPatchesToText(src, quiet) {
 function planBundle(rel) {
   const p = path.join(RES, rel);
   const src = fs.readFileSync(p, "utf8");
-  const { out, applied } = applyPatchesToText(src, false);
+  let r;
+  SOFT_MISS = true;
+  try { r = applyPatchesToText(src, false); }
+  catch (e) {
+    if (!e.cxRefuse) throw e;
+    console.log(e.message);
+    console.log("   ↳ %s 整份跳过(一个字节没动),其余补丁家族继续打。", path.basename(rel));
+    MISSED.push({ rel, why: e.message });
+    return null;
+  }
+  finally { SOFT_MISS = false; }
+  const { out, applied } = r;
   if (out === src) { console.log("   %s: 全部已打过,跳过", path.basename(rel)); return null; }
   console.log("   %s: 将打 [%s]", path.basename(rel), applied.join(", "));
   return { p, out };
@@ -1665,7 +1702,7 @@ async function doBackup(ver, plans, oldBlob) {
   if (fs.existsSync(SETTINGS_JSON)) fs.copyFileSync(SETTINGS_JSON, path.join(bdir, "settings.json"));
   // #2 备份现有 Key secret(若有),便于 --revert 还原
   try { const db = openDb(); const k = await db.get(OPENAI_KEY_SECRET); db.close();
-    if (k != null) fs.writeFileSync(path.join(bdir, "openAIKey.secret.json"), k); } catch (e) { /* ignore */ }
+    if (keyPresent(k)) fs.writeFileSync(path.join(bdir, "openAIKey.secret.json"), k); } catch (e) { /* ignore */ }
   console.log("   备份 ->", bdir);
 }
 
@@ -1686,59 +1723,148 @@ const bakHasBundle = (d) =>
 // 备份目录名形如 `3.18.25-20260903-105032`(可能带 `-cfgonly`)。取版本号那一段。
 const bakVersion = (d) => (d.match(/^(\d+\.\d+\.\d+)-/) || [])[1] || null;
 
+/* 🔴 还原源必须**按真实路径逐个**解析,不能"挑一个备份目录、然后只从它里面拿"。
+   数据(09-24,/tmp/cxaudit 可复现):造两代备份 ——
+     A `3.21.18-20260922-100000`:workbench ×2 + cxctxwin__…agent-host…main.js
+     B `3.21.18-20260923-100000`:只有 cxnoloop__ ×2(09-23 那次只改了 agent-host)
+   老代码 `[...baks].reverse().find(bakHasBundle)` 挑到 B(它确实"含 bundle"),然后
+   **只从 B 还原** ⇒ 带着 @cxteam-keepmine marker 的 workbench ×2 一个字节没还原,
+   屏幕上照样打「✅ 恢复原状完成(bundle + 配置 + Key + 小代理)」。半还原报成全还原。
+   这正是先跑 09-22 包、又跑 09-23 包的人留下的备份形状 —— 不是边角情况。
+   规则:同版本备份目录**从旧到新**扫(listBackupDirs 已按名排序 = 时间序),
+   每条真实路径取**第一个**含它任一备份名的目录。从旧到新 = 那一版第一次落的备份才是
+   原厂的;更新的那些是"已经打过某些补丁的样子",拿来还原会留下别家族的 marker。 */
+function restorePlan(ver) {
+  const dirs = listBackupDirs().filter((d) => bakVersion(d) === ver);
+  // 同一条真实路径在不同代里可能以**不同扁平名**备份过(agent-host/main.js 既是 ctxwin
+  // 目标又是 noloop 目标,谁先建计划就归谁的名)⇒ 必须按真实路径合并候选名,否则会漏。
+  const byRel = new Map();
+  const want = (rel, kind, name) => {
+    const e = byRel.get(rel) || { rel, names: [] };
+    if (!e.names.some((n) => n.name === name)) e.names.push({ name, kind });
+    byRel.set(rel, e);
+  };
+  for (const rel of BUNDLES) want(rel, "bundle", path.basename(rel));
+  for (const rel of CHAIN_TARGETS) want(rel, "chain", chainBakName(rel));
+  for (const t of CTXWIN_TARGETS) want(t.rel, "ctxwin", ctxwinBakName(t.rel));
+  for (const t of NOLOOP_TARGETS) want(t.rel, "noloop", noloopBakName(t.rel));
+  const items = [], noSource = [];
+  for (const e of byRel.values()) {
+    let hit = null;
+    for (const d of dirs) {
+      // 家族标签取**真正命中的那个备份名**的,不是第一个注册的 —— 否则 agent-exec 那份
+      // 明明是 ctxwin 的备份却被打成 "chain",给下一轮诊断递假情报。
+      const n = e.names.find((x) => fs.existsSync(path.join(BACKUP_ROOT, d, x.name)));
+      if (n) { hit = { rel: e.rel, kind: n.kind, from: path.join(BACKUP_ROOT, d, n.name), dir: d }; break; }
+    }
+    if (hit) items.push(hit);
+    else if (fileHasOurMarker(e.rel)) noSource.push(e.rel); // 没备份源、但**现在身上有 marker** 才算缺口
+  }
+  return { dirs, items, noSource };
+}
+
+const ALL_MARKERS = () => [CHAIN_MARKER, CTXWIN_MARKER, NOLOOP_MARKER]
+  .concat(PATCHES.map((p) => p.marker).filter(Boolean));
+
+function fileHasOurMarker(rel) {
+  const p = path.join(RES, rel);
+  if (!fs.existsSync(p)) return false;
+  const src = fs.readFileSync(p, "utf8");
+  return ALL_MARKERS().some((m) => src.includes(m));
+}
+
+/* 还原完必须**重新数一遍 marker**。「拷贝了 N 个文件」不是「还原干净了」——
+   只有这一格能把"半还原"和"全还原"分开。⇒ 会数东西的判据先得自己数得到。 */
+function leftoverMarkers() {
+  const left = [];
+  const seen = new Set();
+  const check = (rel) => {
+    if (seen.has(rel)) return; seen.add(rel);
+    const p = path.join(RES, rel);
+    if (!fs.existsSync(p)) return;
+    const src = fs.readFileSync(p, "utf8");
+    const hit = ALL_MARKERS().filter((m) => src.includes(m));
+    if (hit.length) left.push({ rel, marks: hit });
+  };
+  for (const rel of BUNDLES) check(rel);
+  for (const rel of CHAIN_TARGETS) check(rel);
+  for (const t of CTXWIN_TARGETS) check(t.rel);
+  for (const t of NOLOOP_TARGETS) check(t.rel);
+  return left;
+}
+
+/* 🔴 「Key 在不在」不能只判 null:--uninstall 摘 Key 写的是**空串**(`db.set(…,"")`)而不是删行。
+   于是卸载完再跑 --upgrade,`k != null` 成立 ⇒ 打印「库里已有 Key,原样保留」、keyDone=true、
+   最后一行还写「直接用」—— 一路假绿,而他其实一个 Key 都没有,打开 Cursor 必 401。
+   doctor 那格同病(打成「存在 len=0」)。统一用这把尺子。 */
+function keyPresent(k) {
+  if (k == null) return false;
+  let s = String(k).trim();
+  if (s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"') s = s.slice(1, -1).trim();
+  return s.length > 0;
+}
+
 async function revert() {
   const baks = listBackupDirs();
   if (!baks.length) { console.log("!! 无备份可回滚"); process.exit(1); }
   const ver = cursorVersion();
+  /* --revert 会**直接覆写 bundle**,和 --uninstall 的破坏性一样 ⇒ 同样要先确认 Cursor 已退出。
+     Cursor 跑着的时候覆写 workbench,它自己的 mmap/懒加载会拿到半新半旧的字节。
+     (09-24 补:原来只有 --uninstall 有这道闸,--revert 从入口就绕过去了。) */
+  if (!process.env.CX_SKIP_RUNNING_CHECK && cursorRunning()) {
+    console.log("!! Cursor 正在运行 —— 请先完全退出(mac ⌘Q / Windows 右键托盘图标退出)再跑 --revert。");
+    process.exit(2);
+  }
   /* ⚠️ **版本必须匹配**。老代码只挑「最新的含 bundle 备份」,不看版本:本机实测 live=3.20.17
      而最新含 bundle 备份是 3.18.25 → 会把**跨两个大版本的 bundle 盖到新 app 上**,那份产物
      与 app 里其余几千个文件不配套,等于把 Cursor 弄坏,而且这一步没有备份可再退。 */
-  const sameVer = [...baks].reverse().filter((d) => bakVersion(d) === ver);
-  const pick = sameVer.find(bakHasBundle) || sameVer[0];
-  if (!pick) {
+  const rp = restorePlan(ver);
+  if (!rp.items.length) {
     const newest = [...baks].reverse().find(bakHasBundle);
     console.log("!! 没有与当前 Cursor %s 同版本的备份 —— 拒绝回滚(不拿旧版 bundle 覆盖新版 app)。", ver);
     if (newest) console.log("   最近的含 bundle 备份是 %s(版本 %s),盖上去会把 Cursor 弄坏。", newest, bakVersion(newest) || "?");
     console.log("   想恢复原状请跑 --uninstall:它会在没有同版本备份时教你用官方安装包重装(bundle 回原厂,配置/Key 照样清干净)。");
     process.exit(1);
   }
-  const b = path.join(BACKUP_ROOT, pick);
-  console.log("从备份回滚:", b);
-  for (const rel of BUNDLES) {
-    const src = path.join(b, path.basename(rel));
-    if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(RES, rel)); console.log("  restored bundle:", path.basename(rel)); }
+  console.log("从备份回滚(逐路径取同版本里**最早**那份 = 原厂的那份):");
+  for (const it of rp.items) {
+    fs.copyFileSync(it.from, path.join(RES, it.rel));
+    console.log("  restored %s: %s  ← %s", it.kind, path.basename(it.from), it.dir);
   }
-  // 件B chain bundle:扁平化名回滚(两条同名 main.js 靠 chainBakName 区分)
-  for (const rel of CHAIN_TARGETS) {
-    const src = path.join(b, chainBakName(rel));
-    if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(RES, rel)); console.log("  restored chain:", chainBakName(rel)); }
+  if (rp.noSource.length) {
+    console.log("  !! 这几条**没有可用备份**,身上还带着我们的 marker,没还原:");
+    for (const rel of rp.noSource) console.log("     · " + rel);
   }
-  // 件C ctxwin bundle:同理扁平化名(四个目标里两个与 chain 同名 main.js)
-  for (const t of CTXWIN_TARGETS) {
-    const src = path.join(b, ctxwinBakName(t.rel));
-    if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(RES, t.rel)); console.log("  restored ctxwin:", ctxwinBakName(t.rel)); }
-  }
-  // 件D noloop:只有在它是该路径**唯一**计划时才会有自己的备份名(与 ctxwin 同路径时
-  // 备份归 ctxwin 那一份,一次备份就够)。所以这里存在才还原,不存在不是错。
-  for (const t of NOLOOP_TARGETS) {
-    const src = path.join(b, noloopBakName(t.rel));
-    if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(RES, t.rel)); console.log("  restored noloop:", noloopBakName(t.rel)); }
-  }
-  const blob = path.join(b, "applicationUser.blob.json");
-  if (fs.existsSync(blob)) {
+  /* 配置那三样(blob / settings / key)同样逐个解析,取同版本里**最早**含它的目录 ——
+     和 bundle 一个道理:后面每次 --upgrade 都会再落一份,里面躺着的已经是"我们的样子"了。 */
+  const cfgSrc = (name) => {
+    for (const d of rp.dirs) { const p = path.join(BACKUP_ROOT, d, name); if (fs.existsSync(p)) return p; }
+    return null;
+  };
+  const blob = cfgSrc("applicationUser.blob.json");
+  if (blob) {
     const db = openDb();
     await db.set(APP_USER_KEY, fs.readFileSync(blob, "utf8"));
-    db.close(); console.log("  restored applicationUser blob");
+    db.close(); console.log("  restored applicationUser blob ←", path.basename(path.dirname(blob)));
   }
-  const sj = path.join(b, "settings.json");
-  if (fs.existsSync(sj)) { fs.copyFileSync(sj, SETTINGS_JSON); console.log("  restored settings.json"); }
-  const ks = path.join(b, "openAIKey.secret.json");
-  if (fs.existsSync(ks)) {
+  const sj = cfgSrc("settings.json");
+  if (sj) { fs.copyFileSync(sj, SETTINGS_JSON); console.log("  restored settings.json"); }
+  const ks = cfgSrc("openAIKey.secret.json");
+  if (ks) {
     const db = openDb();
     await db.set(OPENAI_KEY_SECRET, fs.readFileSync(ks, "utf8"));
     db.close(); console.log("  restored openAIKey secret");
   }
-  console.log("回滚完成,重启 Cursor 生效。");
+  // 拷完必须复查:「拷了几个文件」不是「还原干净了」。
+  const left = leftoverMarkers();
+  if (left.length) {
+    console.log("\n❌ 回滚**不完整** —— 这些文件上还留着我们的 marker:");
+    for (const l of left) console.log("   · %s  [%s]", l.rel, l.marks.join(","));
+    console.log("   bundle 这半请用官方安装包覆盖安装一次(聊天记录/设置在 ~ 目录里,不会丢)。");
+    process.exitCode = 6;
+  } else {
+    console.log("回滚完成(已复查:app 上不再有本方案 marker),重启 Cursor 生效。");
+  }
   // 回滚会把 BYOK 地址还原成备份里那个（公网直连），此时再留着小代理服务就是个孤儿：
   // 没人连它，但它还占着 8788、还在 KeepAlive。一起收掉。
   zkdUninstall(false);
@@ -1765,54 +1891,39 @@ async function uninstall(dry) {
 
   // ① bundle:优先同版本备份;没有就给出官方重装指引(绝不拿别的版本盖)
   console.log("--- 1) bundle 还原 ---");
-  const baks = listBackupDirs();
-  const pick = [...baks].reverse().filter((d) => bakVersion(d) === ver).find(bakHasBundle);
+  const rp = restorePlan(ver);
   let bundleDone = false;
-  if (pick) {
-    console.log("   用同版本备份 %s", pick);
-    for (const rel of BUNDLES) {
-      const src = path.join(BACKUP_ROOT, pick, path.basename(rel));
-      if (!fs.existsSync(src)) continue;
-      if (!dry) fs.copyFileSync(src, path.join(RES, rel));
-      console.log("   %s bundle: %s", dry ? "将还原" : "已还原", path.basename(rel));
-    }
-    for (const rel of CHAIN_TARGETS) {
-      const src = path.join(BACKUP_ROOT, pick, chainBakName(rel));
-      if (!fs.existsSync(src)) continue;
-      if (!dry) fs.copyFileSync(src, path.join(RES, rel));
-      console.log("   %s chain: %s", dry ? "将还原" : "已还原", chainBakName(rel));
-    }
-    for (const t of CTXWIN_TARGETS) {
-      const src = path.join(BACKUP_ROOT, pick, ctxwinBakName(t.rel));
-      if (!fs.existsSync(src)) continue;
-      if (!dry) fs.copyFileSync(src, path.join(RES, t.rel));
-      console.log("   %s ctxwin: %s", dry ? "将还原" : "已还原", ctxwinBakName(t.rel));
-    }
-    for (const t of NOLOOP_TARGETS) {
-      const src = path.join(BACKUP_ROOT, pick, noloopBakName(t.rel));
-      if (!fs.existsSync(src)) continue;
-      if (!dry) fs.copyFileSync(src, path.join(RES, t.rel));
-      console.log("   %s noloop: %s", dry ? "将还原" : "已还原", noloopBakName(t.rel));
+  if (rp.items.length) {
+    const used = [...new Set(rp.items.map((i) => i.dir))];
+    console.log("   用同版本备份(逐路径取最早那份):%s", used.join(" + "));
+    for (const it of rp.items) {
+      if (!dry) fs.copyFileSync(it.from, path.join(RES, it.rel));
+      console.log("   %s %s: %s  ← %s", dry ? "将还原" : "已还原", it.kind, path.basename(it.from), it.dir);
     }
     bundleDone = true;
-  } else {
-    // 数一下现在到底还有没有补丁在身上,免得让人白重装。
-    // 🔴 必须把 exthost 家族(ctxwin/noloop)一起数:它们不在 BUNDLES 里。只数 workbench
-    //    的话,agent-host 上还挂着 noloop 却报「本来就是原厂的,不用动」—— 假绿。
-    let still = 0;
-    for (const rel of BUNDLES) {
-      const p = path.join(RES, rel);
-      if (!fs.existsSync(p)) continue;
-      const src = fs.readFileSync(p, "utf8");
-      for (const pt of PATCHES) if (pt.marker && src.includes(pt.marker)) { still++; break; }
+    if (rp.noSource.length) {
+      bundleDone = false;
+      console.log("   !! 这几条**没有可用备份**、身上却还带着我们的 marker,%s:", dry ? "不会被还原" : "没还原");
+      for (const rel of rp.noSource) console.log("      · " + rel);
     }
-    for (const [targets, marker] of [[CTXWIN_TARGETS, CTXWIN_MARKER], [NOLOOP_TARGETS, NOLOOP_MARKER]]) {
-      for (const t of targets) {
-        const p = path.join(RES, t.rel);
-        if (fs.existsSync(p) && fs.readFileSync(p, "utf8").includes(marker)) still++;
+    /* 🔴 真跑完必须重数一遍 marker。老代码在这里无条件 `bundleDone = true`,
+       于是"只还原了 agent-host、workbench 一个字节没动"照样打印「✅ 恢复原状完成」。 */
+    if (!dry) {
+      const left = leftoverMarkers();
+      if (left.length) {
+        bundleDone = false;
+        console.log("   ❌ 复查:还原后这些文件上仍有本方案 marker:");
+        for (const l of left) console.log("      · %s  [%s]", l.rel, l.marks.join(","));
+      } else {
+        console.log("   ✓ 复查:app 上已无本方案 marker。");
       }
     }
-    if (!still) {
+  } else {
+    // 数一下现在到底还有没有补丁在身上,免得让人白重装。
+    // 🔴 必须把 exthost 家族(chain/ctxwin/noloop)一起数:它们不在 BUNDLES 里。只数 workbench
+    //    的话,agent-host 上还挂着 noloop 却报「本来就是原厂的,不用动」—— 假绿。
+    const still = leftoverMarkers();
+    if (!still.length) {
       console.log("   当前 bundle 上没有本方案的 marker —— 本来就是原厂的,不用动。");
       bundleDone = true;
     } else {
@@ -1932,7 +2043,7 @@ async function uninstall(dry) {
   try {
     const db = openDb();
     const k = await db.get(OPENAI_KEY_SECRET);
-    if (k == null) console.log("   库里没有 Key 记录,跳过");
+    if (!keyPresent(k)) console.log("   库里没有 Key 记录(或已是空串),跳过");
     else { if (!dry) await db.set(OPENAI_KEY_SECRET, ""); console.log("   %s Key(置空)", dry ? "将摘掉" : "已摘掉"); }
     db.close();
   } catch (e) { console.log("   !! Key 清理失败(%s)—— 可在 Cursor 设置里手动删", e.message); }
@@ -1957,8 +2068,13 @@ async function uninstall(dry) {
 
   console.log("");
   if (dry) { console.log("[dry-run] 以上都没写盘。加 --apply 真执行。"); return; }
-  if (bundleDone) console.log("✅ 恢复原状完成(bundle + 配置 + Key + 小代理),重启 Cursor 生效。");
-  else console.log("⚠️  配置 / Key / 小代理 / 升级锁 已清干净;**bundle 还没还原** —— 按上面第 1 步用官方安装包覆盖安装一次即可。");
+  if (bundleDone) console.log("✅ 恢复原状完成(bundle + 配置 + Key + 小代理,已复查无 marker),重启 Cursor 生效。");
+  else {
+    // 「哪些还原了、哪些没有」上面第 1 步逐条打过了 ⇒ 这里只说结论,不含糊成"bundle 没还原"。
+    console.log("⚠️  配置 / Key / 小代理 / 升级锁 已清干净;**bundle 只还原了一部分**(上面第 1 步标 ❌ / !! 的那几个文件还带着补丁)。");
+    console.log("   那几个文件请用官方安装包覆盖安装一次即可回原厂(聊天记录/设置在 ~ 目录里,不会丢)。");
+    process.exitCode = 6;
+  }
   console.log("   备份目录 %s **没有删**,想装回来跑 --apply。", BACKUP_ROOT);
 }
 
@@ -2305,7 +2421,7 @@ async function doDoctor() {
     if (!raw) P("  !! applicationUser blob 不存在(Cursor 没初始化过?)");
     else d = JSON.parse(raw);
     // 明文不上屏:只打长度 + sha256 前16位,够对账、不泄露。
-    P("  openAIKey secret:", k == null ? "**不存在**(没配过 Key)"
+    P("  openAIKey secret:", !keyPresent(k) ? "**不存在**(没配过 Key,或被 --uninstall 置空)"
       : "存在 len=" + String(k).length + " sha256_16=" + crypto.createHash("sha256").update(String(k)).digest("hex").slice(0, 16));
   } catch (e) { P("  !! 读库失败:", e && e.message || e); }
   if (d) {
@@ -2529,11 +2645,20 @@ async function main() {
 
   // #4 修复模式:只重打 bundle(配置/Key 在库里,升级不动它们),不碰 config/update.mode/Key。
   if (args.repair) {
-    if (!plans.length) { console.log("\n✅ bundle 补丁都在,无需修复。"); return; }
+    // 🔴 `plans.length===0` 有两种含义,不许合并成一句「都在」:①真的都打过了 ②锚点认不出被跳过了。
+    if (!plans.length) {
+      if (reportMissed()) { process.exitCode = 5; return; }
+      console.log("\n✅ bundle 补丁都在,无需修复。"); return;
+    }
     console.log("--- 修复:重打 bundle ---");
     await doBackup(ver, plans, null);
     for (const { p, out } of plans) { fs.writeFileSync(p, out); console.log("   patched:", path.basename(p)); }
-    console.log("\n✅ 修复完成,重启 Cursor 即可继续用 " + ACTIVE_DEFAULT_MODEL + "。");
+    if (reportMissed()) {
+      process.exitCode = 5;
+      console.log("\n⚠️  部分完成:上面列红的文件没打上,其余已重打。重启 Cursor 后那几条对应的毛病仍在。");
+    } else {
+      console.log("\n✅ 修复完成,重启 Cursor 即可继续用 " + ACTIVE_DEFAULT_MODEL + "。");
+    }
     return;
   }
 
@@ -2561,7 +2686,10 @@ async function main() {
   if (args.pinUpdate) setUpdateNone(!args.apply);
   else console.log("   跳过(允许 Cursor 自动升级;升级后模型没了就双击 REPAIR / 跑 --repair)。加 --pin-update 可锁定不升级。");
 
-  if (!args.apply) { console.log("\n[dry-run] 以上全部通过。加 --apply 执行(会先备份到 %s)。", BACKUP_ROOT); return; }
+  if (!args.apply) {
+    if (reportMissed()) { process.exitCode = 5; console.log("\n[dry-run] 其余项通过,但上面列红的文件锚点认不出。"); return; }
+    console.log("\n[dry-run] 以上全部通过。加 --apply 执行(会先备份到 %s)。", BACKUP_ROOT); return;
+  }
 
   console.log("--- 落盘 ---");
   if (plans.length) {
@@ -2572,7 +2700,7 @@ async function main() {
     fs.mkdirSync(bdir, { recursive: true });
     fs.writeFileSync(path.join(bdir, "applicationUser.blob.json"), oldBlob);
     try { const db = openDb(); const k = await db.get(OPENAI_KEY_SECRET); db.close();
-      if (k != null) fs.writeFileSync(path.join(bdir, "openAIKey.secret.json"), k); } catch (e) { /* ignore */ }
+      if (keyPresent(k)) fs.writeFileSync(path.join(bdir, "openAIKey.secret.json"), k); } catch (e) { /* ignore */ }
     console.log("   备份(仅配置)->", bdir);
   }
 
@@ -2584,7 +2712,7 @@ async function main() {
   // 而屏幕上只写了"完成"。所以查一次,没有就当场告诉他下一步是什么。
   let upgradeHasKey = null;
   if (args.upgrade && !args.zkDeltaOnly) {
-    try { const db = openDb(); const k = await db.get(OPENAI_KEY_SECRET); db.close(); upgradeHasKey = k != null; }
+    try { const db = openDb(); const k = await db.get(OPENAI_KEY_SECRET); db.close(); upgradeHasKey = keyPresent(k); }
     catch (e) { upgradeHasKey = null; }
     console.log(upgradeHasKey === null
       ? "   跳过(--upgrade:不覆盖你已有的 Key;这次没读到库,状态未知)"
@@ -2616,6 +2744,7 @@ async function main() {
     : keyDone
     ? "启动 Cursor,模型菜单默认就是 " + ACTIVE_DEFAULT_MODEL + ",直接用。"
     : "还差一步:启动 Cursor → Settings → Models → OpenAI API Key,粘贴你的 key 点 Verify。"));
+  if (reportMissed()) process.exitCode = 5;
   if (zkdOn) {
     console.log("   zk-delta 已开：Cursor → 127.0.0.1:8788 → 公网只发增量。");
     console.log("     看省了多少: curl -s http://127.0.0.1:8788/metrics.json");

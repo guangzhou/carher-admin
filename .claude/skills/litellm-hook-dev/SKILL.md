@@ -214,6 +214,35 @@ deepseek_responses_adapt: source=pre_deployment:CallTypes.aresponses \
 
 与 ConfigMap 内嵌版保持一致；注释里写清 "keep two in sync"。
 
+### Step 2.5: 只是**改一个已在线的 hook 文件**？6 步全跳过
+
+Step 3~6 讲的是**装新 hook**。如果这个文件已经装好、挂好、在 callbacks 列表里了，
+你只想换掉它的内容，那么多做的每一步（加 volumeMount / 动 config.yaml）都是新增
+故障面。198（ns `litellm-product`）上用：
+
+```bash
+scripts/litellm-198-callback-update.py plan   deepseek_responses_adapt.py
+scripts/litellm-198-callback-update.py apply  deepseek_responses_adapt.py
+scripts/litellm-198-callback-update.py verify deepseek_responses_adapt.py
+```
+
+它挡住三个坑（2026-09-23 手搓 /tmp 脚本时全踩了一遍）：
+
+1. 🔴 **门禁：`git diff HEAD -- <file>` 必须为空。** 把工作区整份文件推上生产，
+   会把**本轮没打算发的未提交改动**一起发出去 —— 当天就带飞了一处 25 行的
+   `_drop_null_tool_strict`，还被写进了那条 commit 的 message。
+   「我只改了 X」的判据不是记忆，是 `git diff HEAD`。
+2. gray 车道挂的是**内容哈希命名的不可变 CM**：复制现有 CM → 替换一个 key →
+   新名 `create`。⛔ `kubectl apply` 会因 `last-applied-configuration` 撞
+   262144 字节上限直接失败；⛔ 照 repo 目录重建 CM 会丢掉只存在于集群的那 8 个文件。
+3. 共享 CM `litellm-callbacks` 同时挂在 13 个 `chatgpt-acct-*` 上：
+   🔴 **只 merge-patch data，永远不 rollout restart**（重启在服务的 acct 号
+   可能永久打死它且救不回）。它们下次自然重启才生效，这是有意为之。
+
+上线后别忘了：滚动窗口内在途流式请求会断成「event-stream 开了、0 个 event」，
+形状跟「新代码把流搞坏了」一模一样。定罪前先过
+[[codex-remote-compaction-triage]] §6 的两层判据（代码路径可达性 + rollout 窗口）。
+
 ### Step 3: 建 canary（独立 Deployment + Service，不影响主流量）
 
 4 个临时资源（名字都加 `-canary` 后缀）：
@@ -812,6 +841,7 @@ _ACTIVE: "contextvars.ContextVar[tuple | None]" = contextvars.ContextVar(
 ## 相关 skill
 
 - [codex-deepseek-tool-triage](../codex-deepseek-tool-triage/SKILL.md) — Codex×DeepSeek 工具调用静默故障排障（本页两层坑的实战来源）
+- [codex-remote-compaction-triage](../codex-remote-compaction-triage/SKILL.md) — Codex 远程压缩报 `max_output_tokens`：预算扫描尺子 + 两层抬预算补丁的门控作用域 + 改已在线 hook 的推送流程
 
 - LiteLLM Proxy 整体运维 → [litellm-ops](../litellm-ops/SKILL.md)
 - 零中断 rollout 主 Deployment 细节 → [carher-k8s-zero-downtime-rollout](../carher-k8s-zero-downtime-rollout/SKILL.md)

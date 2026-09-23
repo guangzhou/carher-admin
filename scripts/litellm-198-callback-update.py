@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""把**已经在线**的一个 callback 文件更新到 198 各 lane（ns `litellm-product`）。
+
+跟 [[litellm-198-router-patch]] 的 `install` 不是一回事
+----------------------------------------------------
+那个脚本装的是**新**补丁：加 CM data + 加独立 subPath volumeMount + 改
+config.yaml callbacks 列表，三步。本脚本只干「这个文件已经装好了、挂好了、
+在 callbacks 列表里了，我只想换掉它的内容」——**一步都不能多**，多加
+volumeMount 或改 config 反而会引入新故障面。
+
+两条 lane 的换法**不一样**，混用会出事
+-------------------------------------
+* `gray`（`litellm-proxy-gray`，Svc `litellm-proxy-nodeport` 真正指向的生产车道）
+  挂的是**内容哈希命名的不可变 CM** `litellm-product-gray-callbacks-<hash>`。
+  换代 = 复制当前 CM → 替换那一个 key → 按新内容重新哈希命名 → `create` →
+  strategic-patch Deployment 的 volume 指向新名 → 滚动更新。
+* `idle-prod` / acct 池挂的是**可变的共享 CM** `litellm-callbacks`。
+  它同时被 13 个 `chatgpt-acct-*` Deployment 挂着，其中有在服务的号。
+  🔴 **只 merge-patch data，永远不要 rollout restart 它们** ——
+  重启在服务的 acct 号可能永久打死它且回退救不回
+  （memory: feedback_restarting_a_serving_acct_can_kill_it_permanently）。
+  data 改了但不重启 = 这些 pod 下次自然重启时才生效，这是**有意为之**。
+
+三条出厂即开的门禁（都可以 `--force` 越过，但会把越过这件事打在屏幕上）
+--------------------------------------------------------------------
+1. **`git diff HEAD -- <file>` 必须是空的。**
+   2026-09-23 实测：我把工作区整份文件 scp 上生产，里面**带着一处本轮没打算
+   发的未提交改动**（25 行），它跟着上了生产、还被写进了我那条 commit。
+   「我只改了 X」这句话的判据不是我的记忆，是 `git diff HEAD`。
+2. **线上旧版必须能在 git 里找到对应版本**（默认比 `HEAD~1`/`HEAD`）。
+   对不上说明线上那份是别人没提交的改动，推上去 = 静默回退它
+   （memory: 禁 blanket cp）。先跑 `litellm-198-callbacks-drift.py --diff`。
+3. **`kubectl apply` 全程禁用**（manifest 陈旧，apply 会回退 image + 内嵌 CM）。
+   本脚本只用 `create` / `patch` / `rollout status`。
+
+验收（`verify` 干的事，逐副本不抽样）
+------------------------------------
+* 每个在服务的 pod 内 `sha256sum /app/<file>` == 本地文件 sha
+* pod 日志里 `ImportError|SyntaxError|ModuleNotFoundError` == 0
+* ⚠️ 滚动更新期间旧 pod 会 `connection reset by peer`，在途流式请求会断成
+  「event-stream 开了、0 个 event」。**那是重启窗口，不是新代码的 bug。**
+  判「是不是这次改动带入的」要分两层：① 改动的代码路径在门控上可不可达
+  ② 报错时刻落不落在 rollout 窗口里。见 skill codex-remote-compaction-triage。
+
+用法
+----
+    ./litellm-198-callback-update.py plan   deepseek_responses_adapt.py
+    ./litellm-198-callback-update.py apply  deepseek_responses_adapt.py
+    ./litellm-198-callback-update.py verify deepseek_responses_adapt.py
+
+`plan` 只读：打印 git 对账 + 各 lane 当前 sha + 将要做的动作，不碰集群。
+`apply` 先把每个要改的 CM 备份到 198 `/tmp/bak_<cm>_<时间戳>.yaml` 并打印路径。
+
+回滚
+----
+    ssh cltx@10.68.13.198 'sudo kubectl -n litellm-product patch deploy \
+        litellm-proxy-gray --type=json -p "[{\"op\":\"replace\",
+        \"path\":\"/spec/template/spec/volumes/<i>/configMap/name\",
+        \"value\":\"<旧CM名>\"}]"'
+旧 CM 是不可变的、没被删，改回名字即回滚（`plan` 会把当前名字打出来存档）。
+共享 CM 用 `kubectl replace -f <备份yaml>` 还原 data。
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+
+SSH = ["ssh", "-n", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=20",
+       "cltx@10.68.13.198"]
+KUBECTL = "sudo -n kubectl"
+NS = "litellm-product"
+REPO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "k8s", "litellm-callbacks")
+VOLUME = "callbacks"
+
+GRAY_DEPLOY = "litellm-proxy-gray"
+GRAY_CM_PREFIX = "litellm-product-gray-callbacks-"
+SHARED_CM = "litellm-callbacks"
+# 生产车道判据：Svc 的 selector，不是 `-l app=litellm-proxy`
+# （memory: feedback_prod_lane_label_is_on_pods_not_deployments）
+PROD_POD_SELECTOR = "carher.net/litellm-production-route=enabled"
+
+
+def sh(cmd, check=True):
+    r = subprocess.run(SSH + [cmd], capture_output=True, text=True)
+    if check and r.returncode:
+        raise SystemExit("远端失败(%d): %s\n%s" % (r.returncode, cmd, r.stderr[:800]))
+    return r.stdout
+
+
+def local(cmd):
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                          cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+
+def sha(s: str) -> str:
+    return hashlib.sha256(s.encode()).hexdigest()
+
+
+def h12(s: str) -> str:
+    return sha(s)[:12]
+
+
+def gray_cm_name() -> str:
+    out = sh("%s -n %s get deploy %s -o json" % (KUBECTL, NS, GRAY_DEPLOY))
+    for v in json.loads(out)["spec"]["template"]["spec"].get("volumes", []):
+        if v["name"] == VOLUME:
+            return (v.get("configMap") or {}).get("name")
+    raise SystemExit("反查不到 %s 的 %s volume —— 没对上账，不当绿" % (GRAY_DEPLOY, VOLUME))
+
+
+def gray_volume_index() -> int:
+    """永远反查下标，别写死 —— 别人加了 volume 就错位了。"""
+    out = sh("%s -n %s get deploy %s -o json" % (KUBECTL, NS, GRAY_DEPLOY))
+    vols = json.loads(out)["spec"]["template"]["spec"].get("volumes", [])
+    for i, v in enumerate(vols):
+        if v["name"] == VOLUME:
+            return i
+    raise SystemExit("反查不到 volume 下标")
+
+
+def cm_data(name: str) -> dict:
+    out = sh("%s -n %s get cm %s -o json | base64 -w0" % (KUBECTL, NS, name))
+    return json.loads(base64.b64decode(out.strip()).decode("utf-8", "replace"))["data"]
+
+
+def git_preflight(fname: str, force: bool) -> None:
+    """门禁 1：工作区那份文件相对 HEAD 必须干净。"""
+    rel = "k8s/litellm-callbacks/" + fname
+    r = local("git diff HEAD --stat -- %s" % rel)
+    dirty = r.stdout.strip()
+    if not dirty:
+        print("✓ 门禁1 `git diff HEAD -- %s` 为空 —— 要推的就是 HEAD 那份" % rel)
+        return
+    print("⛔ 门禁1 不过：工作区这份文件相对 HEAD 有未提交改动\n" + dirty)
+    print(local("git diff HEAD -- %s" % rel).stdout[:4000])
+    print("\n推上去 = 把上面这些也一起发到生产。先 commit（或 checkout 掉）再来。")
+    if not force:
+        raise SystemExit(1)
+    print("⚠️ --force：**明知带着未提交改动**仍然继续。这件事会出现在本轮记录里。")
+
+
+def live_vs_git(fname: str, live: str) -> None:
+    """门禁 2：线上旧版能不能在 git 历史里对上。对不上=线上有人没提交的改动。"""
+    rel = "k8s/litellm-callbacks/" + fname
+    for ref in ("HEAD", "HEAD~1", "HEAD~2"):
+        r = local("git show %s:%s" % (ref, rel))
+        if r.returncode == 0 and r.stdout == live:
+            print("✓ 门禁2 线上旧版 == git %s（推上去不会静默回退别人的改动）" % ref)
+            return
+    print("⚠️ 门禁2 线上旧版在 HEAD/HEAD~1/HEAD~2 里都对不上 —— "
+          "线上那份可能是别人没提交的改动。\n"
+          "   先跑 `scripts/litellm-198-callbacks-drift.py --diff --file %s` 看 diff 定方向，"
+          "禁 blanket cp。" % fname)
+
+
+def pods():
+    out = sh("%s -n %s get po -l %s -o json" % (KUBECTL, NS, PROD_POD_SELECTOR))
+    return [p["metadata"]["name"] for p in json.loads(out).get("items", [])
+            if p.get("status", {}).get("phase") == "Running"]
+
+
+def cmd_plan(fname: str, force: bool) -> int:
+    path = os.path.join(REPO_DIR, fname)
+    want = open(path, encoding="utf-8").read()
+    git_preflight(fname, force)
+
+    cur_cm = gray_cm_name()
+    data = cm_data(cur_cm)
+    if fname not in data:
+        raise SystemExit("⛔ %s 不在 CM %s 里 —— 这是**新装**，走 litellm-198-router-patch，"
+                         "别用本脚本（还缺 volumeMount + config.yaml 两步）" % (fname, cur_cm))
+    live = data[fname]
+    live_vs_git(fname, live)
+
+    new_cm = GRAY_CM_PREFIX + h12("".join(
+        "%s\0%s\0" % (k, want if k == fname else v) for k, v in sorted(data.items())))
+    print("\n== 计划 ==")
+    print("  文件        %s" % fname)
+    print("  本地 sha    %s" % h12(want))
+    print("  gray 线上   %s  (CM %s, %d 个 key)" % (h12(live), cur_cm, len(data)))
+    try:
+        shared = cm_data(SHARED_CM).get(fname)
+        print("  共享 CM     %s  (%s)" % (h12(shared) if shared else "缺这个 key", SHARED_CM))
+    except SystemExit:
+        print("  共享 CM     读不到")
+    if live == want:
+        print("\n✓ gray 已经是这份内容，无事可做。")
+        return 0
+    print("\n  将要：① 建新 CM %s（只换 %s 这一个 key）" % (new_cm, fname))
+    print("        ② patch %s 的 volumes[%d] 指向新 CM → 滚动更新 4 副本"
+          % (GRAY_DEPLOY, gray_volume_index()))
+    print("        ③ merge-patch 共享 CM %s 的 data（**不重启任何 acct pod**）" % SHARED_CM)
+    print("\n  回滚：把 volumes[%d].configMap.name 改回 %s（旧 CM 不可变、不删）"
+          % (gray_volume_index(), cur_cm))
+    return 0
+
+
+def cmd_apply(fname: str, force: bool) -> int:
+    path = os.path.join(REPO_DIR, fname)
+    want = open(path, encoding="utf-8").read()
+    git_preflight(fname, force)
+
+    cur_cm = gray_cm_name()
+    data = cm_data(cur_cm)
+    if fname not in data:
+        raise SystemExit("⛔ %s 不在 CM %s 里 —— 这是新装，走 litellm-198-router-patch" % (fname, cur_cm))
+    live_vs_git(fname, data[fname])
+    if data[fname] == want:
+        print("✓ gray 已是这份内容，跳过 ①②")
+    ts = time.strftime("%Y%m%d%H%M%S")
+
+    # --- 备份（先做，路径打出来存档）---
+    for cm in (cur_cm, SHARED_CM):
+        bak = "/tmp/bak_%s_%s.yaml" % (cm, ts)
+        sh("%s -n %s get cm %s -o yaml > %s" % (KUBECTL, NS, cm, bak))
+        print("备份 %s → 198:%s" % (cm, bak))
+
+    if data[fname] != want:
+        # --- ① 新 CM ---
+        newdata = dict(data)
+        newdata[fname] = want
+        new_cm = GRAY_CM_PREFIX + h12("".join(
+            "%s\0%s\0" % (k, v) for k, v in sorted(newdata.items())))
+        payload = json.dumps({"apiVersion": "v1", "kind": "ConfigMap",
+                              "metadata": {"name": new_cm, "namespace": NS},
+                              "data": newdata}, ensure_ascii=False)
+        b64 = base64.b64encode(payload.encode()).decode()
+        # `create` 不是 `apply`：apply 要把整份塞进 last-applied 注解，
+        # 33 个 key 会撞 262144 字节上限直接失败。
+        sh("echo %s | base64 -d | %s -n %s create -f - " % (b64, KUBECTL, NS))
+        print("① 建好 CM %s（%d 个 key，只有 %s 变了）" % (new_cm, len(newdata), fname))
+
+        # --- ② 切 volume ---
+        i = gray_volume_index()
+        patch = json.dumps([{"op": "replace",
+                             "path": "/spec/template/spec/volumes/%d/configMap/name" % i,
+                             "value": new_cm}])
+        sh("%s -n %s patch deploy %s --type=json -p '%s'" % (KUBECTL, NS, GRAY_DEPLOY, patch))
+        print("② %s volumes[%d] → %s，等滚动更新…" % (GRAY_DEPLOY, i, new_cm))
+        print(sh("%s -n %s rollout status deploy %s --timeout=300s" % (KUBECTL, NS, GRAY_DEPLOY)))
+
+    # --- ③ 共享 CM：只改 data，不重启 ---
+    pj = json.dumps({"data": {fname: want}}, ensure_ascii=False)
+    b64 = base64.b64encode(pj.encode()).decode()
+    sh("echo %s | base64 -d > /tmp/_cbpatch.json && %s -n %s patch cm %s "
+       "--type=merge --patch-file /tmp/_cbpatch.json" % (b64, KUBECTL, NS, SHARED_CM))
+    print("③ 共享 CM %s data 已更新 —— **没有重启任何 pod**（acct 池在服务的号不能重启）"
+          % SHARED_CM)
+    print("   这些 pod 会在下次自然重启时才用上新版本，这是有意为之。")
+    return cmd_verify(fname)
+
+
+def cmd_verify(fname: str) -> int:
+    want_sha = sha(open(os.path.join(REPO_DIR, fname), encoding="utf-8").read())
+    rc = 0
+    ps = pods()
+    if not ps:
+        print("⛔ 生产车道一个 Running pod 都没查到 —— 没对上账，不当绿")
+        return 1
+    print("\n== 逐副本验收（%d 个）==" % len(ps))
+    for p in ps:
+        got = sh("%s -n %s exec %s -- sha256sum /app/%s" % (KUBECTL, NS, p, fname),
+                 check=False).split()
+        ok = bool(got) and got[0] == want_sha
+        bad = sh("%s -n %s logs %s --since=10m 2>/dev/null | "
+                 "grep -cE 'ImportError|SyntaxError|ModuleNotFoundError'"
+                 % (KUBECTL, NS, p), check=False).strip() or "0"
+        print("  %s sha=%s  import错误=%s  %s"
+              % ("✓" if ok and bad == "0" else "✗", (got[0][:12] if got else "读不到"),
+                 bad, p))
+        if not ok or bad != "0":
+            rc = 1
+    print("\n共享 CM %s 里这个文件 sha=%s（%s）"
+          % (SHARED_CM, h12(cm_data(SHARED_CM).get(fname, "")),
+             "已同步" if sha(cm_data(SHARED_CM).get(fname, "")) == want_sha else "⚠️ 未同步"))
+    if rc:
+        print("\n⛔ 有副本没对上 —— 回滚见文件头。")
+    else:
+        print("\n✓ 逐副本对齐。⚠️ 滚动窗口内的在途流式请求会断（0 event），"
+              "那是重启窗口不是新代码；别拿那几分钟的报错给本次改动定罪。")
+    return rc
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="更新 198 上一个**已在线**的 callback 文件（gray 哈希 CM 换代 + 共享 CM data 同步）")
+    ap.add_argument("action", choices=["plan", "apply", "verify"])
+    ap.add_argument("file", help="文件名，如 deepseek_responses_adapt.py")
+    ap.add_argument("--force", action="store_true",
+                    help="越过 git 门禁（会明确打印越过了什么）")
+    a = ap.parse_args()
+    if a.action == "plan":
+        return cmd_plan(a.file, a.force)
+    if a.action == "apply":
+        return cmd_apply(a.file, a.force)
+    return cmd_verify(a.file)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

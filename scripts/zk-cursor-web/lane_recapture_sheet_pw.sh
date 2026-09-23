@@ -49,7 +49,7 @@ for N in "$@"; do
   DH=$("${SSH[@]}" "awk -F= '/^mail_pw=/{v=substr(\$0,9);gsub(/^'\''|'\''\$/,\"\",v);printf \"%s\",v}' /Data/chatgpt-auth/acct-$N/.creds | sha256sum | cut -c1-12")
   SH=$(printf '%s' "$PW" | shasum -a 256 | cut -c1-12)
   if [ "$DH" = "$SH" ]; then
-    echo "  ⚠️  盘上值与表里一致（$SH）—— 这号的失败不是 A 类，密码换不换都一样"
+    echo "  ⚠️  盘上值与表里一致（${SH}）—— 这号的失败不是 A 类，密码换不换都一样"
   else
     echo "  盘 $DH ≠ 表 $SH ⇒ 正是 A 类，这一轮用表里的值"
   fi
@@ -74,6 +74,13 @@ for N in "$@"; do
 
   # 重跑前把旧 out 挪走：cap-queue 判"已有 seed 就跳过"，留着会让下面的判据读到旧文件。
   "${SSH[@]}" "if [ -s /Data/zkcaps/zkcap-$N/out/zerokey-users.json ]; then mv /Data/zkcaps/zkcap-$N/out/zerokey-users.json /Data/zkcaps/zkcap-$N/out/zerokey-users.json.prev-\$(date +%s); fi"
+
+  # 🔴 截图也必须挪走：下面的失败分类**只看 screenshots/ 里有没有 mailcom-fail.png**，
+  # 而这个目录以前从不清。2026-09-23 实踩两次：acct-167 与 acct-175 都被判成
+  # 「A（mail.com 拒登）」，翻 last-run.log 才知道真因分别是「ChatGPT 登录页 email 输入框
+  # 30s 没出来」和「OTP 邮件一直没到」—— mailcom-fail.png 是上一轮留下的。
+  # 分类读的是**目录状态**不是本轮事实，不清就等于拿旧证据给新失败定性。
+  "${SSH[@]}" "S=/Data/zkcaps/zkcap-$N/screenshots; if [ -n \"\$(ls -A \$S 2>/dev/null)\" ]; then D=\$S.prev-\$(date +%s); mkdir -p \$D && mv \$S/* \$D/; fi"
 
   "${SSH[@]}" "echo \"\$(date +%H:%M:%S) ══ recap acct-$N 开始（表里密码）\" | tee -a $LEDGER"
 
@@ -111,12 +118,49 @@ PY
     SHOTS=$("${SSH[@]}" "ls /Data/zkcaps/zkcap-$N/screenshots/ 2>/dev/null | tr '\n' ' '")
     OTP=$("${SSH[@]}" "grep -oE 'OTP=[0-9]+' /Data/zkcaps/zkcap-$N/last-run.log | tail -1 || true")
     WARN=$("${SSH[@]}" "grep -c 'inbox keyword never appeared' /Data/zkcaps/zkcap-$N/last-run.log || true")
-    case "$SHOTS" in
-      *mailcom-fail*) CLS="A（mail.com 拒登）—— 表里的密码也不对，要人工核表" ;;
-      *) if [ "${WARN:-0}" != "0" ]; then CLS="B'（新邮件没到：inbox keyword never appeared，取到的码是旧邮件）"
-         elif [ -n "$OTP" ]; then CLS="B（有码 $OTP 但 OpenAI 侧不放行）"
-         else CLS="C（取不到码/导航超时）"; fi ;;
-    esac
+    # 🔴 分类顺序：**日志里的终局信号优先，截图只能兜底**。
+    # 2026-09-23 acct-175/204 实踩：`mailcom-fail.png` 是登录 mail.com 过程中某次重试留下的
+    # 中间态截图，**后面的 `mailcom-inbox.png` 时间更晚** —— 收件箱明明进去了，真因是
+    # 「OTP 邮件一直没到」。可老分类把 `*mailcom-fail*` 摆在第一位，于是输出
+    # 「表里的密码也不对，要人工核表」，把人送去核一个根本没问题的密码。
+    # 「目录里有这张图」是**过程痕迹**，不是判据；判据要取只在终局出现一次的那句话。
+    # 🔴 A 类的终局信号是**那行 URL**，不是页面上那句话。"invalid email address /
+    # password combination" 只印在 mailcom-fail.png 的页面上，**从来不进 last-run.log**
+    # （2026-09-23 把 175/204 的截图拉回来肉眼核实：页面明写这句，日志里 grep 不到）。
+    # 日志里能拿到的唯一终局证据是 `mail.com login may have failed url=…/logout?ls=wd`
+    # —— 登录被打回登出页。拿页面文案当 grep 锚点 = 这条分支永远不触发。
+    MAILBAD=$("${SSH[@]}" "grep -cE 'mail.com login may have failed url=.*mail\.com/logout' /Data/zkcaps/zkcap-$N/last-run.log || true")
+    OTPFAIL=$("${SSH[@]}" "grep -c 'OTP fetch failed' /Data/zkcaps/zkcap-$N/last-run.log || true")
+    NAVFAIL=$("${SSH[@]}" "grep -cE 'Page.goto: Timeout|wait_for_selector: Timeout' /Data/zkcaps/zkcap-$N/last-run.log || true")
+    if [ "${MAILBAD:-0}" != "0" ]; then
+      CLS="A（mail.com 拒登：日志里有 invalid password）—— 表里的密码也不对，要人工核表"
+    elif [ "${OTPFAIL:-0}" != "0" ]; then
+      if [ "${WARN:-0}" != "0" ]; then
+        CLS="B'（OTP 邮件没到：inbox keyword never appeared）—— 密码没问题，重跑或等 OpenAI 发信"
+      else
+        CLS="B'（OTP 邮件没到：OTP fetch failed，6 次轮询都没取到）—— 密码没问题，重跑"
+      fi
+    elif [ -n "$OTP" ]; then
+      CLS="B（有码 $OTP 但 OpenAI 侧不放行）"
+    elif [ "${NAVFAIL:-0}" != "0" ]; then
+      # C 还要再分一刀：**卡在 ChatGPT 登录页的 email 输入框**和「别处导航抖了」处置不同。
+      # 2026-09-23 acct-167 连跑三轮同一形状：`clear_cf` 点满 23 次 turnstile，然后
+      # `wait_for_selector("input[type='email']")` 30s 超时、**screenshots/ 全空**
+      # （抓图那步在登录流程更后面，压根没走到）。这不是"抖了重跑就好"——同一出口 IP 上
+      # CF 一直没放行，重跑只是复现。要换出口或等 CF 冷却，不是加重试次数。
+      CFSTUCK=$("${SSH[@]}" "grep -c \"autocomplete='username'\" /Data/zkcaps/zkcap-$N/last-run.log || true")
+      CFCLICK=$("${SSH[@]}" "grep -c 'clear_cf: clicked turnstile' /Data/zkcaps/zkcap-$N/last-run.log || true")
+      if [ "${CFSTUCK:-0}" != "0" ]; then
+        CLS="C1（CF 没放行：turnstile 点了 ${CFCLICK} 次，ChatGPT 登录页 email 框始终没出现）—— 换出口/等冷却，重跑无用"
+      else
+        CLS="C（导航/选择器超时，走 CF 那条链路抖了）—— 重跑"
+      fi
+    else
+      case "$SHOTS" in
+        *mailcom-fail*) CLS="（兜底猜测）mail.com 那步有失败截图，但日志没给终局信号 —— 自己去看 last-run.log" ;;
+        *) CLS="C（原因不明）—— 自己去看 last-run.log" ;;
+      esac
+    fi
     echo "  ❌ 仍失败 — $CLS"
     echo "     截图: $SHOTS"
     "${SSH[@]}" "echo \"\$(date +%H:%M:%S) ❌ recap acct-$N FAIL $CLS\" | tee -a $LEDGER"

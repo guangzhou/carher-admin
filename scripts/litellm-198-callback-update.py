@@ -99,8 +99,25 @@ PROD_POD_SELECTOR = "carher.net/litellm-production-route=enabled"
 _PROD_DEPLOY_CACHE = None
 
 
-def sh(cmd, check=True):
-    r = subprocess.run(SSH + [cmd], capture_output=True, text=True)
+def sh(cmd, check=True, stdin_data=None):
+    """在 198 上跑一条命令。大载荷必须走 `stdin_data`，不许拼进 argv。
+
+    🔴 2026-09-25：`apply budget_notice.py` 整个炸在这里。旧写法是把整份 CM
+    （875 KB base64）当成 `echo <b64>` 的**命令行参数**塞给 ssh，直接撞
+    ARG_MAX，症状不是干净的报错而是
+    `Read from remote host: Connection reset by peer` + `Broken pipe`，
+    ssh 退 255。CM 越长越容易踩到，而 callbacks CM 只会越来越大。
+
+    幸运的是这一步在三步动作的**第一步**，失败时 deploy 还没被 patch、
+    共享 CM 还没被改，集群零改动（当天实测：新 CM NotFound、deploy 仍指旧
+    CM、4 个 pod restartCount=0）。但这是运气，不是设计 —— 所以改成 stdin。
+    """
+    # ⚠️ SSH 里带着 `-n`（stdin 接 /dev/null，防循环里 ssh 吞掉外层输入）。
+    # 要喂 stdin 就必须把 `-n` 摘掉，否则载荷被静默丢弃 —— `kubectl create -f -`
+    # 会收到空输入，报的错跟"内容不对"长得一样，查起来很贵。
+    argv = [a for a in SSH if a != "-n"] if stdin_data is not None else list(SSH)
+    r = subprocess.run(argv + [cmd], input=stdin_data,
+                       capture_output=True, text=True)
     if check and r.returncode:
         raise SystemExit("远端失败(%d): %s\n%s" % (r.returncode, cmd, r.stderr[:800]))
     return r.stdout
@@ -282,7 +299,8 @@ def cmd_apply(fname: str, force: bool) -> int:
         b64 = base64.b64encode(payload.encode()).decode()
         # `create` 不是 `apply`：apply 要把整份塞进 last-applied 注解，
         # 33 个 key 会撞 262144 字节上限直接失败。
-        sh("echo %s | base64 -d | %s -n %s create -f - " % (b64, KUBECTL, NS))
+        # base64 走 stdin，不进 argv —— 875 KB 的载荷会撞 ARG_MAX（见 sh()）。
+        sh("base64 -d | %s -n %s create -f -" % (KUBECTL, NS), stdin_data=b64)
         print("① 建好 CM %s（%d 个 key，只有 %s 变了）" % (new_cm, len(newdata), fname))
 
         # --- ② 切 volume ---
@@ -297,8 +315,10 @@ def cmd_apply(fname: str, force: bool) -> int:
     # --- ③ 共享 CM：只改 data，不重启 ---
     pj = json.dumps({"data": {fname: want}}, ensure_ascii=False)
     b64 = base64.b64encode(pj.encode()).decode()
-    sh("echo %s | base64 -d > /tmp/_cbpatch.json && %s -n %s patch cm %s "
-       "--type=merge --patch-file /tmp/_cbpatch.json" % (b64, KUBECTL, NS, SHARED_CM))
+    # 同样走 stdin：这份只含单个文件，比 ① 小一个量级，但没理由留第二个 ARG_MAX 雷。
+    sh("base64 -d > /tmp/_cbpatch.json && %s -n %s patch cm %s "
+       "--type=merge --patch-file /tmp/_cbpatch.json" % (KUBECTL, NS, SHARED_CM),
+       stdin_data=b64)
     print("③ 共享 CM %s data 已更新 —— **没有重启任何 pod**（acct 池在服务的号不能重启）"
           % SHARED_CM)
     print("   这些 pod 会在下次自然重启时才用上新版本，这是有意为之。")

@@ -104,6 +104,11 @@ python3 $S --prefix carher- --add-model her-flash --alias her-flash=...         
   `count(distinct cardinality(models))`（并发 read-merge-write 会静默压回别人的成果，
   两边都返 200，见 [[feedback_concurrent_bulk_key_writes_silently_overwrite]]）。
   跑完要**反向核**对方动过的名字还在不在。
+  ⛔ 但 `updated_at` **不能反过来用来给某次配置改动定日期**：LiteLLM 每次 spend 写回都会刷它，
+  按分钟做直方图量到的是流量不是配置变更。防撞靠的是那个 `distinct cardinality`，不是时间本身。
+- **判"我上轮的改动还在不在"只认 `token`**：key 会被同名重发（删了重建，`key_alias` 不变
+  但 `token` 变），模型数看着"变回默认"时，"被覆盖"和"被重发"处置完全相反。对 `--backup`
+  快照里的 `token` 比 live 行。见 [[feedback_same_key_alias_can_be_a_new_row]]。
 - **改名走加法**：先 `--add-model 新名 --alias 新名=组` 验通，**再单独一轮**
   `--rm-model 旧名 --rm-alias 旧名`。合成一次写也行，但分两轮更好回滚；
   ⛔ 绝不能先删后加（中间那段用户无名字可用）。见 [[feedback_rename_is_add_verify_cutover_then_remove]]。
@@ -207,9 +212,9 @@ python3 scripts/litellm-198-her-name-probe.py \
 1. **目标组两个都已存在 ⇒ 纯 key 写入，不碰 CM、不 rollout**。阿里云那轮要 splice CM +
    16 分钟 rollout 是因为它当时没有 OpenRouter deepseek 组；198 早有（09-16 建）。
    判据：`select model_name from "LiteLLM_ProxyModelTable" where model_name in (...)` 两行都回。
-2. **要打的是 4 个 pod，不是 2 个**。198 生产流量走 gray lane：`svc/litellm-proxy` 与
-   NodePort 30402 的 selector 是 `carher.net/litellm-production-route=enabled`，命中
-   `litellm-proxy-gray` 的 4 副本；那个叫 `litellm-proxy` 的单 pod **不在 endpoints 里**。
+2. **要打的是每个在服务的 pod，不是 2 个**。198 生产流量走带路由标签的车道：`svc/litellm-proxy` 与
+   NodePort 30402 的 selector 是 `carher.net/litellm-production-route=enabled`，09-24 起命中的是
+   `litellm-proxy` 自己的 4 副本（09-24 前带标签的是 `litellm-proxy-gray`，车道搬过家）。**按标签取 pod，别按名字**：
    拿 `kubectl get pods -l carher.net/litellm-production-route=enabled -o custom-columns=...:.status.podIP`
    取 IP，逐 pod 直打（打 VIP 会负载均衡，掩盖是哪个 pod 不认）。
 3. **范围是 `carher-%` 那 227 把，`aliyun-carher-*` 那 2 把桥 key 不在内**。

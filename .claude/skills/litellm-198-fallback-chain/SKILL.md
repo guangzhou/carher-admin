@@ -18,8 +18,17 @@ description: >-
 > [[litellm-key-provider-swap]]；装 **Router 猴补丁**改重试决策看
 > [[litellm-198-router-patch]]。
 
-脚本：`scripts/litellm-198-fallback-prepend.py`
-（`--verify` / `--regress` 只读，`--apply` 需 `--backup`，`--restore` 回滚）
+脚本（三把，语义不同，别拿错）：
+
+| 脚本 | 语义 | 何时用 |
+|---|---|---|
+| `scripts/litellm-198-fallback-prepend.py` | 把 target 插到**某一个** group 的链首 | 换某条链的首选腿 |
+| `scripts/litellm-198-fallback-insert-before.py` | 在**点名的一组** group 里，把 target 插到 **anchor 之前** | 升级某条既有腿（新腿在前、老腿保留为下一跳） |
+| `scripts/litellm-198-gpt-fallback-append.py` | 全表扫「以 anchor **结尾**」的链，往后追加 | 给一大批链加统一的末端兜底 |
+
+三把都是 `--apply` 需 `--backup`、`--restore` 回滚、默认 dry-run。
+⚠️ **`gpt-fallback-append.py` 的 pod selector 写死成 `app=litellm-proxy`**，见 §0.5 ——
+它现在会验到不在服务的车道，用它之前先改 selector。
 
 ## 0. 先决定粒度：全局一行 vs per-key
 
@@ -43,10 +52,53 @@ description: >-
 
 拿不准就读运行 pod 里的源码，别靠记忆挑一个（这两条我自己就记反过一次）。
 
+**cursor 装机包 gpt 段要改哪几行 —— 不是 5 行，是 6 行。**
+菜单 gpt 段就 5 个名（`cursor_team_setup.py::DEFAULT_MODELS` 第 ② 段），
+但它们**不是同一种触达方式**，按 per-key `aliases` 分成两类：
+
+| 菜单名 | 有 per-key alias 吗 | fallback 查表用的名 |
+|---|---|---|
+| `gpt-5.5` / `gpt-5.6-sol` / `gpt-5.6-luna` / `gpt-5.6-terra` | ❌ 665 把里只有 1 把有 | **同名行**（`gpt-5.5` …） |
+| `gpt-6-astra` | ✅ **644 把**改写成 `chatgpt-gpt-6-astra` | **`chatgpt-gpt-6-astra`** |
+
+所以给 gpt 段改兜底，`gpt-6-astra` 和 `chatgpt-gpt-6-astra` **两行都得改** ——
+只改前者，那 644 把 key 一条都吃不到（而且是零症状：链在、日志正常、就是没生效）。
+查这张表的命令（别靠猜）：
+
+```sql
+select count(*), a.key, a.value
+  from "LiteLLM_VerificationToken" t, lateral jsonb_each_text(t.aliases) a
+ where t.key_alias like 'cursor-%' group by a.key, a.value order by a.key;
+```
+
 **全局一行的代价必须先量再报**：组名不等于「某个产品专属」。
 `sa-grok-4.6` 14d 落点里 cursor 占 74%，但 `aliyun-carher-pro198` 有 51.0k、
 `carher-75` 1.3k —— 它们**也会拿到这条新腿**。改之前用落点分布把这件事摆出来给用户拍板，
 不要事后才说。
+
+## 0.5 改哪条车道 —— 标签在 **Pod** 上，不在 Deployment 上
+
+生产是**带路由标签的那个 Deployment**，不是名字叫 `litellm-proxy` 的那个。
+权威判据是 **Service `litellm-proxy-nodeport`（nodePort 30402）的 selector**：
+
+```bash
+kubectl -n litellm-product get svc litellm-proxy-nodeport -o jsonpath='{.spec.selector}'
+# -> {"carher.net/litellm-production-route":"enabled"}
+kubectl -n litellm-product get pods -l carher.net/litellm-production-route=enabled
+```
+
+🔴 **那个标签在 Pod 上（podTemplate），不在 Deployment 对象上。**
+`kubectl get deploy -l carher.net/litellm-production-route=enabled` 返回
+**"No resources found"** —— 这是**假红**，不代表标签不存在、更不代表没有生产车道。
+我 2026-09-21 就是这么读了一次，差点据此断言"路由标签已经没人带了"。
+选 pod 一律 `get pods -l`，别 `get deploy -l`。
+
+2026-09-24 现状：生产车道是 `litellm-proxy`（4 副本吃 30402）；`litellm-proxy-gray`
+已排空到 0 副本、留作回滚；`litellm-proxy-guarded-old` 0 副本，老版本已退役。
+（09-24 前带路由标签的是 `litellm-proxy-gray`，车道搬过家了。）**永远别写死 Deployment 名**——
+车道搬过家，还会再搬。`litellm-198-fallback-insert-before.py` 按标签选，
+并有一条测试钉住这件事（`test_production_lane_is_selected_by_route_label_...`，
+实测把 selector 改回 `app=litellm-proxy` 它会真的红）。
 
 ## 1. 写法：只准 `jsonb_set` 一个键
 
@@ -67,10 +119,8 @@ update "LiteLLM_Config"
   （[[feedback_manifest_prod_drift_apply_overwrites]]）。
 - ⛔ **整块重写 `param_value`**：13 个顶层键，少一个就是事故。只动 `{fallbacks}`。
 
-**改哪条车道**：生产是**带路由标签的那个 Deployment**，不是名字叫 `litellm-proxy` 的那个。
-判据 `-l carher.net/litellm-production-route=enabled`（2026-09-20 是
-`litellm-proxy-gray` 4 副本吃 30402；`litellm-proxy` 1 副本闲置）。
-脚本靠标签选，不写死名字——**永远别写死 Deployment 名**。
+**改哪条车道**：见 §0.5（判据 = Service `litellm-proxy-nodeport` 的 selector，
+且必须 `get pods -l`，不是 `get deploy -l`）。脚本靠标签选，不写死名字。
 
 ## 2. `router_settings` 每 30s 热加载 —— 旧「必须 rollout」已作废
 
@@ -118,7 +168,48 @@ python3 scripts/litellm-198-fallback-prepend.py --regress --since '2026-09-20 01
 混在一起看会分不清失败属于哪个人群。2026-09-20 实测 6h：
 cursor **380 success / 1 failure（99.7%）**，3 条失败全在非 cursor 那把 key 上。
 
-## 4. 六个坏尺子（每一个我都实际踩过）
+### 3.1 「能不能兜住」的回归 = 两条腿，缺一条都不算
+
+| 腿 | 量什么 | 量不到什么 |
+|---|---|---|
+| **A 真流量窗口** | 链**真的走到**新腿 + 新腿**真出字**（按 status + ct>0 分组） | 主路没挂的那些组（走不到就没读数） |
+| **B cursor 线型探针** | 新腿**接得住 cursor 形状**（`stream:true` + `tools` + 唯一 nonce） | fallback 本身（探针打 gpt-* 走的是**主路**） |
+
+A 用 SQL（写入时刻起，`model like '%<新腿落点>%'`，按 `model_group/status/who` 分组；
+同时查**老腿在同窗口是否归零** —— 归零才证明插入位置生效）。
+B 用 `scripts/litellm-198-cursor-newnames-probe.py --clone-file <真key形状> --names <新腿>,<5个gpt名>`，
+脚本会把 `--names` 里不在 models 的自动加进临时 key（兜底目标不在 cursor 的 allowlist 里是预期的，
+这里加进去是为了量"它吃不吃这种 payload"，不是在量授权）。
+
+⛔ **B 绿 ≠ 兜住**：探针打 `gpt-5.6-sol` 200 出字只说明主路活着。
+⛔ **A 里没读数 ≠ 坏**：2026-09-21 窗口 23.5min 里 `gpt-5.6-sol/luna/terra` 三个名
+**一条都没落到新腿** —— 不是坏了，是它们链里新腿前面还有两跳互兜，中间跳接住了。
+这三个名当时只有 1、2 层绿，第 3 层是空的，**报告里必须写成空的**，不许拿 B 的绿顶上。
+
+2026-09-21 实测（`sa-grok-4.20` 插在 `sa-grok-4.6` 之前，6 行）：
+写入 → 4 pod 收敛 <60s；23.5min 窗口新腿 **25 success / 1 failure，success 全 ct>0**；
+老腿 `grok-4.6` 同窗口 **0 条**；探针 6/6 绿、阴性对照 403。
+触发兜底的是主路真实故障（`MidStreamFallbackError: transient capacity` 一分钟十几条），
+不是我造的载具。
+
+### 3.2 那 1 条失败怎么定性：先查它是不是**请求属性**
+
+`Invalid 'input[271].id': string too long. Expected max 64, got 84`（`/v1/responses` 端点）。
+判据不是"看起来像"，是**同形状错误在改动前有没有出现在别的腿上**：
+
+```sql
+select model, count(*), min("startTime"), max("startTime") from "LiteLLM_SpendLogs"
+ where "startTime" > now() - interval '7 days' and status='failure'
+   and metadata->>'error_information' like '%string too long%' group by 1;
+-- openai/deepseek-v4-pro | 11 | 09-20 14:58 | 09-21 05:45   ← 全在改动之前
+```
+
+⇒ 既存缺口：chatgpt 系的腿吃 84 长度的 id，**非 chatgpt 系的兜底腿**（deepseek-v4-pro、
+grok-4.20）不吃。不归本次改动，但新腿排前了会**更早**撞上它。
+⚠️ 400 是不可重试错误，链在这跳**停住**（该 request_id 只有一行，没继续兜到 4.6）——
+那一发用户是真失败。要不要治是另一件事，别混进"兜住没有"的结论里。
+
+## 4. 八个坏尺子（每一个我都实际踩过）
 
 1. 🔴 **`metadata->>'model_group'` 必超时。** `LiteLLM_SpendLogs` 有**真列
    `model_group`**，走 JSONB 提取用不上索引 —— 我两次查询都 120s 超时进后台且永不返回。
@@ -132,6 +223,8 @@ cursor **380 success / 1 failure（99.7%）**，3 条失败全在非 cursor 那�
    只能从实际落点集合里反推（脚本 `landing_of()` 这么做，且**歧义时拒绝猜**）。
 3. ⛔ **`mock_testing_fallbacks` 在本镜像返硬 400**，当不了"强制触发"的尺子。
    （旧记忆写的是"静默丢弃"，实测是 400，形状不同。）
+   **2026-09-21 复测仍是 400** —— 别每次改完都重新去试一遍，它没变。
+   推论：**「兜住没有」这件事只能等真实流量，不能合成。**
 4. ⛔ **想造"100% 失败的组"当载具基本走不通**：我挑的候选（`zk-116-gpt-5.4` 等
    24h 全挂）**压根没有 fallback 行**（读回 `None`）。
    正解是**别造载具，去查历史真实流量** —— 答案本来就在 SpendLogs 里。
@@ -140,6 +233,13 @@ cursor **380 success / 1 failure（99.7%）**，3 条失败全在非 cursor 那�
    `APIConnectionError / Timeout on reading data from socket`，挤在 **6 秒内**、同一把 key。
    判「瞬时抖动」的判据是**再等一段时间证明它不复现**（实测 12min 和 6h 后都没有），
    不是"看起来像抖动"。
+7. 🔴 **`get deploy -l <路由标签>` 返 "No resources found" 是假红** ——
+   标签在 Pod 上。见 §0.5。我据它差点断言"生产车道没人带路由标签了"。
+8. 🔴 **"某个组没有 fallback"这个否定结论，必须**在 91 行里按名字查过**再说。**
+   2026-09-21 用户报"cursor 的 gpt 系列没有 fallback"，实际 5 个名**全都有**，
+   而且近 3 天已真兜住 **1141 次**（全 ct>0）。真实诉求是"把 grok 那一跳升级"。
+   **先证伪用户给的前提，再动手** —— 否则会去"补"一条本来就在的链，
+   顺手把已经在兜的腿改坏。
 
 ## 5. 目标组上线前要核的两件事
 
@@ -149,7 +249,14 @@ cursor **380 success / 1 failure（99.7%）**，3 条失败全在非 cursor 那�
   `LiteLLM_ProxyModelTable` 里**查不到行**，但落点是 `openai/deepseek-v4-flash` ——
   说明它靠 alias/config 定义，不在 DB 模型表里。要收拾它得先知道这点。
 - **它的 `max_input_tokens` 吃得下主路的上下文**。cursor 常打 20 万 token；
-  新目标 `1,048,576` 撑得住。不核这条会换来一条"一上大上下文就 400"的腿。
+  2026-09-20 的新目标 `1,048,576` 撑得住；2026-09-21 的 `sa-grok-4.20` 是
+  **1,000,000**（老腿 `sa-grok-4.6` 只有 500,000）。不核这条会换来一条
+  "一上大上下文就 400"的腿。读法：`/model_group/info` 里该组的 `max_input_tokens`
+  （⚠️ 这个数是**组内最大值**，不是闸门本身，见
+  [[feedback_model_group_info_cap_is_group_max_not_gate]]）。
+- **拿 master key 带唯一 nonce 实打一次，确认它真出字。** 组在表里 ≠ 能用。
+  2026-09-21 `sa-grok-4.20` 只有 7 天 24 条历史流量 —— **"它是真组"和"它扛得住
+  承接量"是两个命题**，前者能证，后者上线前证不了，要在报告里说出来。
 
 **兜底目标不受 key 的 `models` allowlist 限制** —— 用 cursor key 直打目标组拿 403
 是**预期行为**，不是故障。别为此去加白名单（我为此误判过一次）。
@@ -159,6 +266,9 @@ cursor **380 success / 1 failure（99.7%）**，3 条失败全在非 cursor 那�
 ## 6. 回滚
 
 ```bash
+# 用哪把脚本改的，就用哪把回滚（三把的 --restore 语义一致：整表写回 fallbacks）
+python3 scripts/litellm-198-fallback-insert-before.py \
+    --restore /tmp/rs-pre-<change>.json --apply
 python3 scripts/litellm-198-fallback-prepend.py \
     --restore /root/rs-bak/<pre-change>.json --apply
 ```
@@ -170,6 +280,7 @@ python3 scripts/litellm-198-fallback-prepend.py \
 回滚等于把兜底退回 8.5% 成功率那条腿上 —— 技术上可回滚，实际上是把用户推回坑里。
 
 - [[project_198_sa_grok_fallback_to_openrouter_deepseek_2026_09_20]] — 首次使用全过程
+- [[project_198_cursor_gpt_fallback_grok420_2026_09_21]] — insert-before 首次使用 + 两腿回归
 - [[feedback_router_settings_hot_reloads_every_30s_no_restart]]
 - [[feedback_litellm_alias_fallback_pre_rewrite_lookup]] — 两条 alias 规则方向
 - [[feedback_config_update_silently_drops_unknown_router_settings]]

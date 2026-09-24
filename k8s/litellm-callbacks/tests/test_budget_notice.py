@@ -338,6 +338,191 @@ class PreCallTest(unittest.TestCase):
         self.assertIn("今日用量", out.get("mock_response", ""))
         self.assertIn("$70.00", out["mock_response"])
 
+
+class ModelCatalogTest(unittest.TestCase):
+    def setUp(self):
+        _ensure_stubs()
+        self.proxy_server = types.ModuleType("litellm.proxy.proxy_server")
+        self.old_proxy_server = sys.modules.get("litellm.proxy.proxy_server")
+        sys.modules["litellm.proxy.proxy_server"] = self.proxy_server
+
+    def tearDown(self):
+        if self.old_proxy_server is None:
+            sys.modules.pop("litellm.proxy.proxy_server", None)
+        else:
+            sys.modules["litellm.proxy.proxy_server"] = self.old_proxy_server
+
+    def test_quota_text_filters_allowlist_and_deduplicates_pool_legs(self):
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "gpt-5.6-sol",
+             "model_info": {"context_window": 1000000,
+                             "max_input_tokens": 922000},
+             "litellm_params": {"max_output_tokens": 128000}},
+            {"model_name": "gpt-5.6-sol",
+             "model_info": {"context_window": 1000000,
+                             "max_input_tokens": 922000,
+                             "max_output_tokens": 128000}},
+            {"model_name": "hidden-model",
+             "model_info": {"context_window": 123}},
+        ])
+        key = _Key(alias="cursor-u1")
+        key.models = ["gpt-5.6-sol"]
+
+        text = M._model_catalog_text(key)
+
+        self.assertIn("gpt-5.6-sol", text)
+        self.assertIn("1,000,000/922,000/128,000", text)
+        self.assertNotIn("hidden-model", text)
+        self.assertEqual(text.count("gpt-5.6-sol"), 1)
+
+    def test_quota_pre_call_includes_model_catalog(self):
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "gpt-5.6-sol",
+             "model_info": {"context_window": 1000000,
+                             "max_input_tokens": 922000,
+                             "max_output_tokens": 128000}},
+        ])
+        key = _Key(alias="cursor-u1")
+        key.models = ["gpt-5.6-sol"]
+
+        out = _pre(
+            {"messages": [{"role": "user", "content": "查余额"}]},
+            "acompletion",
+            key=key,
+        )
+
+        self.assertIn("📋 模型 1 个（上下文/输入/输出 上限，按限制合并）", out["mock_response"])
+        self.assertIn("1,000,000", out["mock_response"])
+
+    def test_empty_allowlist_lists_all_models_and_marks_missing_limits(self):
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "model-without-limits", "model_info": {}},
+        ])
+        key = _Key(alias="cursor-u1")
+        key.models = []
+
+        text = M._model_catalog_text(key)
+
+        self.assertIn("model-without-limits", text)
+        self.assertEqual(text.count("未配置"), 3)
+
+    def test_catalog_uses_effective_defaults_for_unannotated_aliases(self):
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "cr-g-5.6-instant",
+             "model_info": {},
+             "litellm_params": {"model": "openai/gpt-5.6-instant"}},
+            {"model_name": "claude-sonnet-5",
+             "model_info": {},
+             "litellm_params": {"model": "openai/claude-sonnet-5"}},
+            {"model_name": "deepseek-v4-flash",
+             "model_info": {},
+             "litellm_params": {"model": "custom_openai/deepseek-v4-flash"}},
+        ])
+        key = _Key(alias="cursor-u1")
+        key.models = ["cr-g-5.6-instant", "claude-sonnet-5", "deepseek-v4-flash"]
+
+        text = M._model_catalog_text(key)
+
+        self.assertIn("1,000,000/922,000/128,000 → cr-g-5.6-instant", text)
+        self.assertIn("1,000,000/1,000,000/128,000 → claude-sonnet-5", text)
+        self.assertIn("1,000,000/1,000,000/393,216 → deepseek-v4-flash", text)
+
+    def test_catalog_uses_key_allowlist_and_per_key_aliases(self):
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "kiro-qwen3-coder-next",
+             "model_info": {"context_window": 262144,
+                             "max_input_tokens": 250000,
+                             "max_output_tokens": 16384}},
+        ])
+        key = _Key(alias="cursor-u1")
+        key.models = ["qwen3-coder-next", "callback-only-model"]
+        key.aliases = {"qwen3-coder-next": "kiro-qwen3-coder-next"}
+
+        text = M._model_catalog_text(key)
+
+        self.assertIn("📋 模型 2 个（上下文/输入/输出 上限，按限制合并）", text)
+        self.assertIn("qwen3-coder-next", text)
+        self.assertIn("262,144", text)
+        self.assertIn("callback-only-model", text)
+        self.assertEqual(text.count("qwen3-coder-next"), 1)
+
+
+class TTFTTest(unittest.TestCase):
+    def setUp(self):
+        _ensure_stubs()
+        self.proxy_server = types.ModuleType("litellm.proxy.proxy_server")
+        self.old_proxy_server = sys.modules.get("litellm.proxy.proxy_server")
+        sys.modules["litellm.proxy.proxy_server"] = self.proxy_server
+        M._TTFT_CACHE.clear()
+
+    def tearDown(self):
+        M._TTFT_CACHE.clear()
+        if self.old_proxy_server is None:
+            sys.modules.pop("litellm.proxy.proxy_server", None)
+        else:
+            sys.modules["litellm.proxy.proxy_server"] = self.old_proxy_server
+
+    def test_per_model_ttft_is_rendered_and_cached(self):
+        calls = []
+
+        class DB:
+            async def query_raw(self, query, value):
+                calls.append((query, value))
+                return [
+                    {"g": "gpt-5.6-sol", "n": 662, "p50": 1.25, "p90": 2.53},
+                    {"g": "sa-grok-4.6", "n": 1, "p50": 17.51, "p90": 17.51},
+                ]
+
+        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        key = _Key(alias="cursor-u1", token="hashed-token")
+
+        first = asyncio.run(M._ttft_text(key))
+        second = asyncio.run(M._ttft_text(key))
+
+        self.assertIn("gpt-5.6-sol 1.25/2.53（662 次）", first)
+        self.assertIn("sa-grok-4.6 17.51/17.51（1 次）", first)
+        self.assertEqual(first, second)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1], "hashed-token")
+
+    def test_ttft_sql_keeps_the_two_measured_performance_constraints(self):
+        """把 2026-09-24 实测的两条硬约束钉住 —— 违反任一条都是 1000x 级退化。
+
+        约束来自 198 prod 库实测（见 `_TTFT_SQL` 上方注释）：
+          1. metadata->>'user_api_key_alias' 过滤 = 791,457 ms；api_key = 773 ms
+          2. "startTime" 上套算术会让 startTime 索引失效，退化成 Seq Scan
+        这两条不是风格问题：proxy 只有 1 条 DB 连接（connection_limit=1），
+        一条 13 分钟的查询会把整个 proxy 的 DB 访问饿死。
+        """
+        sql = M._TTFT_SQL
+        self.assertIn('"api_key" = $1', sql)
+        self.assertNotIn("metadata", sql)
+        # startTime 必须裸列参与比较，偏移挪到右边
+        self.assertIn('"startTime" >=', sql)
+        self.assertNotIn('"startTime" + INTERVAL', sql)
+        # 分组列必须是请求名 model_group，不是落点名 model
+        self.assertIn('"model_group"', sql)
+
+    def test_ttft_query_failure_is_visible(self):
+        class DB:
+            async def query_raw(self, query, value):
+                raise RuntimeError("db unavailable")
+
+        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        text = asyncio.run(
+            M._ttft_text(_Key(alias="cursor-u1", token="hashed-token")))
+        self.assertIn("查询暂不可用", text)
+
+    def test_ttft_no_rows_says_so_instead_of_vanishing(self):
+        class DB:
+            async def query_raw(self, query, value):
+                return []
+
+        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        text = asyncio.run(
+            M._ttft_text(_Key(alias="cursor-u1", token="hashed-token")))
+        self.assertIn("暂无有效样本", text)
+
     def test_responses_sets_mock_response(self):
         d = {"input": "/quota"}
         out = _pre(d, "aresponses")
@@ -973,34 +1158,60 @@ class FamilyBudgetTest(unittest.TestCase):
 
     # ---- 匹配器 ----
     def test_family_matcher(self):
-        for m in ("gpt-5.3-codex", "chatgpt-gpt-5.3-codex", "cursor-gpt-5.3-codex",
-                  "zerokey-pool-gpt-5.3", "zerokey-pool-gpt-5.3-mini",
-                  "wangsu7-gpt-5.3-codex", "openrouter-gpt-5.3-codex"):
-            self.assertEqual(M._family_of(m)[0], "gpt53", m)
-        for m in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4-mini",
-                  "chatgpt-gpt-5.6-luna", "claude-gpt-5.6-sol", "sa-gpt-image-1",
-                  # 08-22 起非 gpt 也进 other 桶(共用 $500)
-                  "claude-sonnet-5", "deepseek-v4-flash", "glm-5.3"):
-            self.assertEqual(M._family_of(m)[0], "other", m)
+        cursor_key = _Key(alias="cursor-u1")
+        legacy_key = _Key(alias="claude-code-u1")
+        for m in ("claude-fable-5", "fable5.1", "claude-sonnet-5",
+                  "kiro-claude-opus-5", "anthropic.claude-opus-4-8",
+                  "cursor-ultra-haiku-4-5"):
+            self.assertEqual(M._family_of(m, cursor_key)[0], "claude", m)
+            self.assertEqual(M._family_of(m, legacy_key)[0], "claude", m)
+        for m in ("gpt-5.3-codex", "chatgpt-gpt-5.3-codex",
+                  "cursor-gpt-5.3-codex", "zerokey-pool-gpt-5.3-mini",
+                  "openrouter-gpt-5.3-codex"):
+            self.assertEqual(M._family_of(m, cursor_key)[0], "other", m)
+            self.assertEqual(M._family_of(m, legacy_key)[0], "gpt53", m)
+        for m in ("gpt-5.6-sol", "gpt-5.6-terra",
+                  "gpt-5.5", "gpt-5.4-mini",
+                  "chatgpt-gpt-5.6-luna", "sa-gpt-image-1", "claude-gpt-5.6-sol",
+                  "claude-gpt-5.3",
+                  "claude-glm-5.3", "claude-deepseek-v4-pro", "claude-kimi-k2.7-code",
+                  "claude-grok-4.6", "deepseek-v4-flash", "glm-5.3"):
+            self.assertEqual(M._family_of(m, cursor_key)[0], "other", m)
+            self.assertEqual(M._family_of(m, legacy_key)[0], "other", m)
         self.assertIsNone(M._family_of(""), "empty model")
+
+    def test_non_cursor_retains_gpt53_bucket(self):
+        self.assertEqual(M._family_of("gpt-5.3-codex", _Key(alias="claude-code-u1"))[0],
+                         "gpt53")
 
     # ---- 限额来源 ----
     def test_limit_default_env_metadata(self):
         k = _Key()
         self.assertEqual(M._family_limit("gpt53", k), 200.0)
+        self.assertEqual(M._family_limit("claude", k), 100.0)
         self.assertEqual(M._family_limit("other", k), 500.0)
+        out = _with_env({"BUDGET_FAMILY_CLAUDE_USD": "75"},
+                        lambda: M._family_limit("claude", k))
+        self.assertEqual(out, 75.0)
+        out = _with_env({"BUDGET_FAMILY_OTHER_USD": "450"},
+                        lambda: M._family_limit("other", k))
+        self.assertEqual(out, 450.0)
         out = _with_env({"BUDGET_FAMILY_GPT53_USD": "50"},
                         lambda: M._family_limit("gpt53", k))
         self.assertEqual(out, 50.0)
+        k.metadata = {"budget_family_overrides": {"claude": 0.5}}
+        self.assertEqual(M._family_limit("claude", k), 0.5)
+        k.metadata = {"budget_family_overrides": {"other": 0.5}}
+        self.assertEqual(M._family_limit("other", k), 0.5)
         k.metadata = {"budget_family_overrides": {"gpt53": 0.5}}
         self.assertEqual(M._family_limit("gpt53", k), 0.5)
 
     # ---- 记账（local 降级路径）----
     def test_accounting_accumulates(self):
         async def go():
-            await M._family_add_spend("tok-f1", "gpt53", 1.5)
-            await M._family_add_spend("tok-f1", "gpt53", 2.5)
-            return await M._family_get_spend("tok-f1", "gpt53")
+            await M._family_add_spend("tok-f1", "other", 1.5)
+            await M._family_add_spend("tok-f1", "other", 2.5)
+            return await M._family_get_spend("tok-f1", "other")
         self.assertEqual(asyncio.run(go()), 4.0)
 
     def test_log_event_gated_and_family_routed(self):
@@ -1014,6 +1225,18 @@ class FamilyBudgetTest(unittest.TestCase):
         async def rd():
             return await M._family_get_spend("tok-f2", "other")
         self.assertEqual(asyncio.run(rd()), 3.0)
+
+    def test_log_event_claude_family_routed(self):
+        slp = {"response_cost": 4.0, "model_group": "kiro-claude-opus-5",
+               "metadata": {"user_api_key_alias": "cursor-u1",
+                            "user_api_key_hash": "tok-claude"}}
+        _with_env(FAM_ENV, lambda: asyncio.run(
+            M.budget_notice.async_log_success_event(
+                {"standard_logging_object": slp}, None, None, None)))
+
+        async def rd():
+            return await M._family_get_spend("tok-claude", "claude")
+        self.assertEqual(asyncio.run(rd()), 4.0)
 
     def test_log_event_ungated_or_disabled_noop(self):
         slp = {"response_cost": 3.0, "model_group": "gpt-5.6-sol",
@@ -1037,74 +1260,93 @@ class FamilyBudgetTest(unittest.TestCase):
     def _pre_fam(self, data, call_type, key=None):
         async def go():
             return await M.budget_notice.async_pre_call_hook(
-                key or _Key(), None, data, _CallType(call_type))
+                key or _Key(alias="cursor-u1"), None, data, _CallType(call_type))
         return _with_env(FAM_ENV, lambda: asyncio.run(go()))
 
     def _seed(self, token, fkey, amount):
         M._fam_local[M._family_spend_key(fkey, token)] = amount
 
     def test_family_block_chat_mock(self):
-        self._seed("tok-default", "gpt53", 250.0)
+        self._seed("tok-default", "other", 500.0)
         d = {"model": "gpt-5.3-codex",
              "messages": [{"role": "user", "content": "写个函数"}]}
         out = self._pre_fam(d, "acompletion")
-        self.assertIn("GPT-5.3 系列 额度已用完", out.get("mock_response", ""))
-        self.assertIn("$250.00", out["mock_response"])
-        self.assertIn("$200.00", out["mock_response"])
+        self.assertIn("其他模型 额度已用完", out.get("mock_response", ""))
+        self.assertIn("$500.00", out["mock_response"])
+        self.assertIn("$500.00", out["mock_response"])
         self.assertIn("不受影响", out["mock_response"])
 
-    def test_family_other_gpt_not_blocked_by_gpt53(self):
-        """5.3 桶爆了不影响其他 GPT 系列。"""
-        self._seed("tok-default", "gpt53", 250.0)
+    def test_family_gpt53_uses_other_bucket(self):
+        """GPT-5.3 不再有独立桶，直接使用 other。"""
+        self._seed("tok-default", "other", 500.0)
         d = {"model": "gpt-5.6-sol",
              "messages": [{"role": "user", "content": "hi"}]}
         out = self._pre_fam(d, "acompletion")
-        self.assertNotIn("mock_response", out)
+        self.assertIn("额度已用完", out.get("mock_response", ""))
 
     def test_family_block_anthropic_raises(self):
         from litellm.exceptions import ModifyResponseException
 
-        self._seed("tok-default", "other", 600.0)
-        d = {"model": "claude-gpt-5.6-sol",
+        self._seed("tok-default", "claude", 100.01)
+        d = {"model": "claude-opus-5",
              "messages": [{"role": "user", "content": "hi"}]}
         with self.assertRaises(ModifyResponseException) as ctx:
             self._pre_fam(d, "aanthropic_messages")
-        self.assertIn("其他模型 额度已用完", ctx.exception.message)
+        self.assertIn("Claude 家族 额度已用完", ctx.exception.message)
+
+    def test_family_claude_isolated_from_other_bucket(self):
+        """Claude 超限时，other 桶仍可正常使用。"""
+        self._seed("tok-default", "claude", 100.01)
+        d = {"model": "claude-sonnet-5",
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = self._pre_fam(d, "acompletion")
+        self.assertIn("Claude 家族 额度已用完", out.get("mock_response", ""))
+
+        d = {"model": "deepseek-v4-flash",
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = self._pre_fam(d, "acompletion")
+        self.assertNotIn("mock_response", out)
 
     def test_family_under_limit_passes(self):
-        self._seed("tok-default", "gpt53", 100.0)
+        self._seed("tok-default", "other", 100.0)
         d = {"model": "gpt-5.3-codex",
              "messages": [{"role": "user", "content": "hi"}]}
         out = self._pre_fam(d, "acompletion")
         self.assertNotIn("mock_response", out)
 
     def test_family_nongpt_blocked_by_other_bucket(self):
-        """08-22 起 claude/deepseek 等非 gpt 也共用 other 桶。"""
+        """非 GPT/Claude 模型仍进入 other 桶。"""
         self._seed("tok-default", "other", 600.0)
-        d = {"model": "claude-sonnet-5",
+        d = {"model": "deepseek-v4-flash",
              "messages": [{"role": "user", "content": "hi"}]}
         out = self._pre_fam(d, "acompletion")
         self.assertIn("其他模型 额度已用完", out.get("mock_response", ""))
 
-    def test_family_gpt53_not_blocked_by_other_bucket(self):
+    def test_family_gpt53_blocked_by_other_bucket(self):
         self._seed("tok-default", "other", 600.0)
         d = {"model": "gpt-5.3-codex",
              "messages": [{"role": "user", "content": "hi"}]}
         out = self._pre_fam(d, "acompletion")
-        self.assertNotIn("mock_response", out)
+        self.assertIn("其他模型 额度已用完", out.get("mock_response", ""))
 
     def test_family_quota_query_bypasses_block(self):
         """系列爆了 /查余额 仍可用（零上游），且文案带系列用量。"""
-        self._seed("tok-default", "gpt53", 250.0)
+        self._seed("tok-default", "other", 250.0)
         d = {"model": "gpt-5.3-codex",
              "messages": [{"role": "user", "content": "/查余额"}]}
         out = self._pre_fam(d, "acompletion")
         self.assertIn("今日用量", out.get("mock_response", ""))
         self.assertIn("系列额度", out["mock_response"])
-        self.assertIn("GPT-5.3 系列 $250.00/$200.00", out["mock_response"])
+        self.assertIn("其他模型 $250.00/$500.00", out["mock_response"])
+
+        self._seed("tok-default", "claude", 100.01)
+        d = {"model": "claude-opus-5",
+             "messages": [{"role": "user", "content": "/查余额"}]}
+        out = self._pre_fam(d, "acompletion")
+        self.assertIn("Claude 家族 $100.01/$100.00", out["mock_response"])
 
     def test_family_disabled_by_default(self):
-        self._seed("tok-default", "gpt53", 250.0)
+        self._seed("tok-default", "other", 250.0)
         d = {"model": "gpt-5.3-codex",
              "messages": [{"role": "user", "content": "hi"}]}
         out = _with_env(PREFIX_ENV, lambda: asyncio.run(
@@ -1113,21 +1355,29 @@ class FamilyBudgetTest(unittest.TestCase):
         self.assertNotIn("mock_response", out)
 
     def test_family_metadata_override(self):
-        k = _Key()
-        k.metadata = {"budget_family_overrides": {"gpt53": 0.5}}
-        self._seed("tok-default", "gpt53", 0.6)
+        k = _Key(alias="cursor-u1")
+        k.metadata = {"budget_family_overrides": {"other": 0.5}}
+        self._seed("tok-default", "other", 0.6)
         d = {"model": "gpt-5.3-codex",
              "messages": [{"role": "user", "content": "hi"}]}
         out = self._pre_fam(d, "acompletion", key=k)
         self.assertIn("额度已用完", out.get("mock_response", ""))
 
     def test_family_ungated_key_untouched(self):
-        self._seed("tok-other", "gpt53", 999.0)
+        self._seed("tok-other", "other", 999.0)
         d = {"model": "gpt-5.3-codex",
              "messages": [{"role": "user", "content": "hi"}]}
         out = self._pre_fam(d, "acompletion",
                             key=_Key(alias="other-user", token="tok-other"))
         self.assertNotIn("mock_response", out)
+
+    def test_family_legacy_gpt53_enforced_for_claude_code(self):
+        key = _Key(alias="claude-code-u1", token="tok-legacy")
+        self._seed("tok-legacy", "gpt53", 200.01)
+        d = {"model": "gpt-5.3-codex",
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = self._pre_fam(d, "acompletion", key=key)
+        self.assertIn("GPT-5.3 系列 额度已用完", out.get("mock_response", ""))
 
 
 class CodexStopTest(unittest.TestCase):
@@ -1159,7 +1409,7 @@ class CodexStopTest(unittest.TestCase):
 
         async def go():
             return await M.budget_notice.async_pre_call_hook(
-                key or _Key(), None, data, _CallType(call_type))
+                key or _Key(alias="cursor-u1"), None, data, _CallType(call_type))
         return _with_env(env, lambda: asyncio.run(go()))
 
     # ---- 客户端识别 ----
@@ -1178,9 +1428,9 @@ class CodexStopTest(unittest.TestCase):
     def test_family_codex_raises_usage_limit_with_promo(self):
         from litellm.proxy._types import ProxyException
 
-        # other 桶爆($500.44/$500),gpt5.3 桶还剩($45/$200)
+        # other 桶爆($500.44/$500),Claude 桶还剩($50/$100)
         self._seed("tok-default", "other", 500.44)
-        self._seed("tok-default", "gpt53", 155.0)
+        self._seed("tok-default", "claude", 50.0)
         d = self._codex_data("gpt-5.6-sol")
         with self.assertRaises(ProxyException) as ctx:
             self._pre_fam(d, "aresponses")
@@ -1191,8 +1441,8 @@ class CodexStopTest(unittest.TestCase):
         # 用量数字(超额系列) + 另一系列剩余 + 切换提示
         self.assertIn("500.44", promo)
         self.assertIn("500.00", promo)
-        self.assertIn("45.00", promo)          # gpt5.3 剩余 200-155
-        self.assertIn("gpt-5.3 (codex)", promo)
+        self.assertIn("50.00", promo)          # Claude 剩余 100-50
+        self.assertIn("Claude", promo)
         self.assertIn("/model", promo)
         # ASCII-only(HTTP 头 to_str() 只认可见 ASCII)
         self.assertEqual(promo, promo.encode("ascii", "ignore").decode("ascii"))
@@ -1201,7 +1451,7 @@ class CodexStopTest(unittest.TestCase):
         from litellm.proxy._types import ProxyException
 
         self._seed("tok-default", "other", 500.10)
-        self._seed("tok-default", "gpt53", 220.0)   # gpt5.3 也爆
+        self._seed("tok-default", "claude", 100.10)   # Claude 也爆
         d = self._codex_data("gpt-5.6-sol")
         with self.assertRaises(ProxyException) as ctx:
             self._pre_fam(d, "aresponses")
@@ -1210,18 +1460,23 @@ class CodexStopTest(unittest.TestCase):
         self.assertNotIn("switch model", promo)
         self.assertIn("resets", promo)
 
-    def test_family_codex_blocked_on_gpt53_hints_other(self):
+    def test_family_codex_blocked_on_claude_hints_other(self):
         from litellm.proxy._types import ProxyException
 
-        self._seed("tok-default", "gpt53", 250.0)    # gpt5.3 爆
+        self._seed("tok-default", "claude", 100.0)    # Claude 爆
         self._seed("tok-default", "other", 10.0)     # other 还剩很多
-        d = self._codex_data("gpt-5.3-codex")
+        d = self._codex_data("claude-opus-5")
         with self.assertRaises(ProxyException) as ctx:
             self._pre_fam(d, "aresponses")
         promo = ctx.exception.headers.get("x-codex-promo-message", "")
-        self.assertIn("gpt-5.3 (codex) series hit", promo)
-        self.assertIn("main-models", promo)
-        self.assertIn("490.00", promo)               # 500-10
+        # 钉的是「这句话必须说清哪几件事」,不钉具体措辞 —— 文案改过一次
+        self.assertIn("Claude", promo)               # 爆的是哪条 lane
+        self.assertIn("100.00", promo)               # 花了多少
+        self.assertIn("100.00", promo)               # 上限多少
+        self.assertIn("main-models", promo)          # 还能走哪条
+        self.assertIn("490.00", promo)               # 那条还剩多少(500-10)
+        self.assertIn("/model", promo)               # 怎么切
+        self.assertEqual(promo, promo.encode("ascii", "ignore").decode("ascii"))
 
     # ---- 非 codex 客户端保持 200 mock(Cursor 吞 429 body) ----
     def test_family_non_codex_still_200_mock(self):
@@ -1253,7 +1508,13 @@ class CodexStopTest(unittest.TestCase):
         promo = e.headers.get("x-codex-promo-message", "")
         self.assertIn("9.00", promo)
         self.assertIn("5.00", promo)
-        self.assertIn("total budget", promo)
+        # ③ 是 key 总额度,覆盖所有模型 ⇒ 这条分支**不许**暗示"切到 gpt-5.3 就能接着跑"
+        # (budget_notice pre_call 只看 over_budget_mark 不看 model,切了照样撞墙)。
+        # 所以这里钉两件事:说清它管所有模型 + 不给切模型的 CTA。
+        # 原来钉的字面 "total budget" 已被改写,钉字面钉不住这个语义。
+        self.assertIn("every model", promo)
+        self.assertNotIn("/model", promo)
+        self.assertEqual(promo, promo.encode("ascii", "ignore").decode("ascii"))
 
     def test_over_budget_non_codex_still_200_mock(self):
         M._mark_over_budget("tok-default", 9.0, 5.0)

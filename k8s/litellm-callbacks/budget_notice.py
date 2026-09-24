@@ -7,7 +7,8 @@ key 日额度（claude-code-* $70/天、cursor-* $100/天，北京 0 点重置�
 知道自己超额就是一脸懵逼的报错。三件套：
 
 ① ``/查余额`` | ``/quota`` —— pre-call 短路，不打上游、零计费，直接返回本 key
-   今日用量。chat / responses 路径用 ``data["mock_response"]``（mock_heartbeat
+   今日用量和当前 key 可访问的模型配置（context / 输入上限 / 输出上限）。chat /
+   responses 路径用 ``data["mock_response"]``（mock_heartbeat
    同款机制，198 已在产验证）；anthropic ``/v1/messages`` 路径抛
    ``ModifyResponseException``（路由对它有原生 200 + stream 处理；
    ``litellm_params.mock_response`` 在该路径返回非流式对象，与 Claude Code 的
@@ -31,8 +32,9 @@ key 日额度（claude-code-* $70/天、cursor-* $100/天，北京 0 点重置�
    error_sanitize.py 的 BudgetExceededError 友好 429 分支仍保留 —— 非 gated key
    （carher-* bot 等）和 ``BUDGET_FRIENDLY_MOCK_DISABLED=1`` 止血时走那条。
 ④ 模型系列日额度（2026-08-21，默认关）—— 每 key 每北京日按**系列**限额：
-   GPT-5.3 系列 $200、其他所有模型（gpt/claude/deepseek/glm…）共用 $500
-   （env 可调、key metadata 可按人覆盖；08-22 第二桶从"其他 GPT"扩为全模型）。
+   Cursor key 使用 Claude 家族（Fable/Opus/Sonnet/Haiku）$100、其他所有模型
+   （含 GPT-5.3、gpt/deepseek/glm…）共用 $500；其他 gated key 仍保留 GPT-5.3
+   独立桶 $200（env 可调、key metadata 可按人覆盖）。
    litellm 原生 model_max_budget 精确匹配无系列桶且滚动 24h 窗，故自建：
    success 事件按 (family, token, 北京日) redis 累加，pre_call 查桶超限出
    200 mock「该系列额度已用完，其他系列不受影响」。/查余额 附带各系列用量。
@@ -53,8 +55,9 @@ BUDGET_FRIENDLY_MOCK_DISABLED=1                关掉 ③ 的 200 软拦截（�
                                               ① ② 不受影响）
 BUDGET_FAMILY_ENABLED=1                        启用 ④ 系列额度（默认关——阿里云
                                               不设即零行为变化）
-BUDGET_FAMILY_GPT53_USD=200                    ④ GPT-5.3 系列每日限额
-BUDGET_FAMILY_OTHER_USD=500                    ④ 其他所有模型共用每日限额
+BUDGET_FAMILY_GPT53_USD=200                    非 Cursor gated key 的 GPT-5.3 限额
+BUDGET_FAMILY_CLAUDE_USD=100                   ④ Claude 家族每日限额
+BUDGET_FAMILY_OTHER_USD=500                    ④ 其他所有模型每日限额（Cursor 含 GPT-5.3）
 BUDGET_NOTICE_KEY_ALIASES=a,b                  精确灰度名单
 BUDGET_NOTICE_KEY_PREFIXES=claude-code-,cursor-  前缀放量
 两个 env 都未设置时默认 canary：claude-code-liuguoxian-50gj。
@@ -66,6 +69,7 @@ keep two in sync：本文件与 198 CM ``litellm-callbacks`` 的 ``budget_notice
 from __future__ import annotations
 
 import datetime
+import asyncio
 import json
 import logging
 import os
@@ -76,6 +80,11 @@ from typing import Any, List, Optional, Tuple
 from litellm.integrations.custom_logger import CustomLogger
 
 _log = logging.getLogger("budget_notice")
+
+_MODEL_CATALOG_CACHE_TTL = 300.0
+_TTFT_CACHE_TTL = 60.0
+_MODEL_CATALOG_CACHE: dict = {}
+_TTFT_CACHE: dict = {}
 
 # ---------------------------------------------------------------- env gates
 
@@ -205,13 +214,298 @@ def _usage_text(user_api_key_dict: Any) -> str:
         )
     pct = spend / max_budget * 100.0
     remain = max(0.0, max_budget - spend)
+    # 「今日用量」这四个字是 T0 活体冒烟（tests/t0_budget_notice.py A~D3、I、J）和
+    # scripts/litellm-198-budget-notice-smoke.sh 的断言锚点，改文案时不许动它。
     return (
         f"📊 {alias} 今日用量\n"
-        f"已用 ${spend:.2f} / 限额 ${max_budget:.2f}（{pct:.0f}%），"
-        f"剩余 ${remain:.2f}\n"
-        f"{_beijing_reset_str(user_api_key_dict)} 重置。"
-        f"用量数据约有 1 分钟延迟。"
+        f"${spend:.2f} / ${max_budget:.2f}（{pct:.0f}%），剩余 ${remain:.2f}"
+        f" · {_beijing_reset_str(user_api_key_dict)} 重置 · 数据约 1 分钟延迟"
     )
+
+
+def _runtime_model_list() -> list:
+    """Read the loaded Router catalog without making a network request."""
+    try:
+        from litellm.proxy.proxy_server import llm_router
+
+        rows = getattr(llm_router, "model_list", None)
+        return rows if isinstance(rows, list) else []
+    except Exception as exc:
+        _log.warning("budget_notice: model catalog unavailable %r", exc)
+        return []
+
+
+_MODEL_LIMIT_DEFAULTS = (
+    ("deepseek-v4-flash", {"context_window": 1_000_000,
+                            "max_input_tokens": 1_000_000,
+                            "max_output_tokens": 393_216}),
+    ("claude-sonnet-5", {"context_window": 1_000_000,
+                          "max_input_tokens": 1_000_000,
+                          "max_output_tokens": 128_000}),
+    ("claude-opus-5", {"context_window": 1_000_000,
+                        "max_input_tokens": 1_000_000,
+                        "max_output_tokens": 128_000}),
+    ("claude-haiku-4-5", {"context_window": 200_000,
+                           "max_input_tokens": 200_000,
+                           "max_output_tokens": 64_000}),
+    ("gpt-image-2", {"context_window": 32_000,
+                      "max_input_tokens": 32_000,
+                      "max_output_tokens": 4_096}),
+    ("gpt-5.6", {"context_window": 1_000_000,
+                 "max_input_tokens": 922_000,
+                 "max_output_tokens": 128_000}),
+)
+
+
+def _model_limit_defaults(model_name: Any, params: dict) -> dict:
+    """Return explicit product limits for aliases absent from LiteLLM's price table."""
+    haystack = " ".join(
+        str(value).lower()
+        for value in (model_name, params.get("model"))
+        if value
+    )
+    for marker, limits in _MODEL_LIMIT_DEFAULTS:
+        if marker in haystack:
+            return limits
+    return {}
+
+
+def _model_limit_value(info: dict, params: dict, model_name: Any, *names: str) -> Any:
+    """Prefer explicit values, then LiteLLM's effective metadata, then product defaults."""
+    for source in (info, params):
+        for name in names:
+            if isinstance(source, dict) and source.get(name) is not None:
+                return source[name]
+    defaults = _model_limit_defaults(model_name, params)
+    for name in names:
+        if name in defaults:
+            return defaults[name]
+    try:
+        import litellm
+
+        model = str(params.get("model") or model_name or "")
+        for candidate in (model, model.split("/", 1)[-1]):
+            if not candidate:
+                continue
+            effective = litellm.get_model_info(candidate)
+            for name in names:
+                if effective.get(name) is not None:
+                    return effective[name]
+    except Exception:
+        pass
+    return None
+
+
+def _format_model_limit(value: Any) -> str:
+    if value is None:
+        return "未配置"
+    try:
+        number = float(value)
+        if number.is_integer():
+            return f"{int(number):,}"
+        return f"{number:,g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _model_catalog_text(user_api_key_dict: Any) -> str:
+    """Render the key's configured models, enriched by loaded deployment data."""
+    allowed = getattr(user_api_key_dict, "models", None)
+    if isinstance(allowed, dict):
+        allowed = allowed.keys()
+    if allowed:
+        # Preserve the key API order; it is more useful than Router insertion
+        # order and includes callback-routed aliases absent from model_list.
+        names = list(dict.fromkeys(str(model) for model in allowed))
+    else:
+        # LiteLLM uses an empty model list to mean unrestricted access.
+        names = []
+
+    aliases = getattr(user_api_key_dict, "aliases", None)
+    if not isinstance(aliases, dict):
+        aliases = {}
+    rows_by_name = {}
+    for row in _runtime_model_list():
+        if not isinstance(row, dict) or not row.get("model_name"):
+            continue
+        rows_by_name.setdefault(str(row["model_name"]), []).append(row)
+    if not names:
+        names = list(rows_by_name)
+
+    grouped = {}
+    for name in names:
+        # A per-key alias often points at the real deployment carrying the
+        # official limits, while the public name itself is callback-routed.
+        lookup_names = [name]
+        target = aliases.get(name)
+        if target and str(target) not in lookup_names:
+            lookup_names.append(str(target))
+        rows = [row for lookup in lookup_names for row in rows_by_name.get(lookup, [])]
+        entry = grouped.setdefault(name, {
+            "context_window": set(),
+            "max_input_tokens": set(),
+            "max_output_tokens": set(),
+        })
+        for row in rows:
+            info = row.get("model_info") or {}
+            params = row.get("litellm_params") or {}
+            if not isinstance(info, dict):
+                info = {}
+            if not isinstance(params, dict):
+                params = {}
+            for field, value in (
+                ("context_window", _model_limit_value(
+                    info, params, name, "context_window")),
+                ("max_input_tokens", _model_limit_value(
+                    info, params, name, "max_input_tokens")),
+                ("max_output_tokens", _model_limit_value(
+                    info, params, name, "max_output_tokens", "max_tokens")),
+            ):
+                if value is not None:
+                    entry[field].add(str(value))
+        # Resolve aliases with no loaded row from LiteLLM's built-in price and
+        # context metadata, then from the explicit product defaults below.
+        for field, lookup_names in (
+            ("context_window", ("context_window",)),
+            ("max_input_tokens", ("max_input_tokens",)),
+            ("max_output_tokens", ("max_output_tokens", "max_tokens")),
+        ):
+            if not entry[field]:
+                value = _model_limit_value({}, {}, name, *lookup_names)
+                if value is not None:
+                    entry[field].add(str(value))
+
+    if not grouped:
+        return ""
+
+    catalog_fingerprint = tuple(
+        (name, tuple(sorted((field, tuple(sorted(values)))
+                            for field, values in limits.items())))
+        for name, limits in grouped.items()
+    )
+    cache_key = (getattr(user_api_key_dict, "key_alias", ""), catalog_fingerprint,
+                 tuple(sorted((str(k), str(v)) for k, v in aliases.items())))
+    cached = _MODEL_CATALOG_CACHE.get(cache_key)
+    now = time.monotonic()
+    if cached and now - cached[0] < _MODEL_CATALOG_CACHE_TTL:
+        return cached[1]
+
+    # 按「限制三元组」合并：41 个模型的 41 行实测塌成约 12 行，且一个公开模型名
+    # 都不丢。标签（上下文/输入/输出）在表头声明一次，不在每行重复。
+    by_limits = {}
+    for name, limits in grouped.items():
+        values = tuple(
+            tuple(sorted(_format_model_limit(value) for value in limits[field]))
+            for field in ("context_window", "max_input_tokens", "max_output_tokens")
+        )
+        by_limits.setdefault(values, []).append(name)
+
+    lines = [f"\n📋 模型 {len(grouped)} 个（上下文/输入/输出 上限，按限制合并）:"]
+    for values, names_in_group in by_limits.items():
+        limits_text = "/".join(
+            ("/".join(value) if value else "未配置") for value in values
+        )
+        lines.append(f"- {limits_text} → " + "、".join(names_in_group))
+    text = "\n".join(lines)
+    _MODEL_CATALOG_CACHE[cache_key] = (now, text)
+    return text
+
+
+# TTFT 一条查询取回「今天这把 key 用过的每个模型」的 P50/P90。上限只为防一把 key
+# 一天里打了几十个模型时把消息撑爆；今日有流量的模型数远小于 key 的白名单长度
+# （实测 cursor-liuguoxian-std：白名单 41 个，今日有流量 5 个）。
+_TTFT_MAX_ROWS = 15
+
+# 🔴 这条 SQL 的两个写法都是 2026-09-24 在 198 prod 库（litellm-db-0，
+# `LiteLLM_SpendLogs` 108 GB / 907,738 行）实测定下来的，改之前先看数据：
+#
+#   1. **过滤列只能是 `api_key`，绝不能是 `metadata->>'user_api_key_alias'`。**
+#      同一天窗口、同一张表实测：
+#          metadata->>'user_api_key_alias'  →  791,457 ms（13 分 11 秒）
+#          api_key = $1                     →        773 ms
+#      差三个数量级。`metadata` 是大 JSON 且被 TOAST 外存，`->>` 逼 PG 把 90 万行
+#      的 metadata 逐行解出来；`api_key` 是普通 varchar，比就完了。
+#
+#   2. **`startTime` 上不许套算术。** 写成
+#      `("startTime" + INTERVAL '8 hours') >= DATE_TRUNC(...)` 会让
+#      `LiteLLM_SpendLogs_startTime_idx` 整个失效，退化成 Parallel Seq Scan；
+#      把 8 小时偏移挪到比较式右边之后，EXPLAIN ANALYZE 实测走
+#      Parallel Index Scan，621 ms → 343 ms。语义完全等价：
+#      `DATE_TRUNC('day', NOW() + 8h) - 8h` 就是「北京今天 00:00」对应的 UTC 时刻，
+#      而 `startTime` 是裸 UTC。
+#
+# 为什么这两条是硬约束、不是"优化"：proxy 的 DATABASE_URL 带
+# `connection_limit=1&pool_timeout=60` —— 整个 proxy 进程只有 **1 条** DB 连接。
+# 一条 13 分钟的查询会独占它 13 分钟，把所有其它 DB 使用方一起饿死；而 60s 的
+# pool_timeout 又保证这条查询在有竞争时永远拿不到连接 → 抛异常 → 被 except 吞成
+# 空串。用户面症状就是「查余额很慢，而且 TTFT 那段根本不出现」。PG 侧
+# `statement_timeout = 0`，不会有人来把慢查询掐掉。
+_TTFT_SQL = '''SELECT "model_group" AS g,
+                      COUNT(*)::int AS n,
+                      ROUND((PERCENTILE_CONT(0.50) WITHIN GROUP (
+                        ORDER BY EXTRACT(EPOCH FROM ("completionStartTime" - "startTime"))
+                      ))::numeric, 2) AS p50,
+                      ROUND((PERCENTILE_CONT(0.90) WITHIN GROUP (
+                        ORDER BY EXTRACT(EPOCH FROM ("completionStartTime" - "startTime"))
+                      ))::numeric, 2) AS p90
+               FROM "LiteLLM_SpendLogs"
+               WHERE "api_key" = $1
+                 AND "startTime" >=
+                     DATE_TRUNC('day', NOW() + INTERVAL '8 hours') - INTERVAL '8 hours'
+                 AND "completionStartTime" IS NOT NULL
+                 AND "completionStartTime" > "startTime"
+               GROUP BY 1
+               ORDER BY n DESC
+               LIMIT ''' + str(_TTFT_MAX_ROWS)
+
+
+async def _ttft_text(user_api_key_dict: Any) -> str:
+    """今日 per-model TTFT P50/P90，按 `model_group`（= 用户在菜单里看到的请求名）分组。
+
+    `completionStartTime` 由流式桥在上游第一个内容事件时写入，所以
+    `completionStartTime - startTime` 就是 TTFT。没有正区间的行（非流式、
+    失败行）全部排除 —— 它们没有 TTFT 可言。
+
+    分组列用 `model_group` 而不是 `model`：`model` 是落点名
+    （`openai/chatgpt-gpt-5.6-sol`），`model_group` 才是请求名（`gpt-5.6-sol`），
+    后者才是用户认得出、也是他在模型菜单里选的那个名字。
+
+    过滤列和时间条件的写法有硬约束，见 `_TTFT_SQL` 上方注释。
+    """
+    token = getattr(user_api_key_dict, "token", None) or ""
+    if not token:
+        # 只认 api_key（= VerificationToken.token 的哈希）。alias 那条路走
+        # metadata JSON，实测 13 分钟，宁可不显示也不能再挂回去。
+        return "\n⚡ TTFT 今日：取不到本 key 标识，无法统计。"
+    cached = _TTFT_CACHE.get(token)
+    now = time.monotonic()
+    if cached and now - cached[0] < _TTFT_CACHE_TTL:
+        return cached[1]
+
+    def _keep(text: str) -> str:
+        _TTFT_CACHE[token] = (now, text)
+        return text
+
+    try:
+        from litellm.proxy.proxy_server import prisma_client
+        if prisma_client is None:
+            return _keep("\n⚡ TTFT 今日：查询暂不可用，请稍后重试。")
+
+        rows = await prisma_client.db.query_raw(_TTFT_SQL, token)
+        if not rows:
+            return _keep("\n⚡ TTFT 今日：暂无有效样本（今日尚无流式请求）。")
+
+        lines = ["\n⚡ TTFT 今日 P50/P90（秒，仅今日有流量的模型）:"]
+        for row in rows:
+            name = row.get("g") or "（未知模型）"
+            lines.append(
+                f"- {name} {float(row['p50']):.2f}/{float(row['p90']):.2f}"
+                f"（{row['n']} 次）"
+            )
+        return _keep("\n".join(lines))
+    except Exception as exc:
+        _log.warning("budget_notice: TTFT query unavailable %r", exc)
+        return _keep("\n⚡ TTFT 今日：查询暂不可用，请稍后重试。")
 
 
 def _warn_text(user_api_key_dict: Any) -> str:
@@ -285,7 +579,8 @@ def _take_over_budget_mark(token: str):
 
 
 # ------------------------------------------------ ④ 模型系列日额度（per key）
-# 需求（2026-08-21）：每人每天 GPT-5.3 系列 $200、其他 GPT 系列 $500，北京 0 点
+# 需求（2026-09-24）：Cursor key 每人每天 Claude 家族 $100、其他模型（含 GPT-5.3）$500；
+# 其他 gated key 保留 GPT-5.3 独立 $200 桶，北京 0 点
 # 重置。litellm 原生 model_max_budget 做不到：精确匹配无系列概念、每模型独立
 # 记账不共享桶、滚动 24h 窗非日历日、超限裸 429 Cursor 不可见 —— 全在这里自建。
 #
@@ -300,13 +595,33 @@ def _take_over_budget_mark(token: str):
 _FAMILY_RULES = (
     # (key, 展示名, 匹配函数)。顺序即优先级，首个命中生效。
     ("gpt53", "GPT-5.3 系列",
-     lambda m: "gpt" in m and "5.3" in m),
-    # 2026-08-22 调整:第二桶从「其他 GPT」扩为「其他所有模型」(claude/
-    # deepseek/glm/... 全部共用),兜底匹配一切非 5.3 的模型。
+     lambda m: _is_gpt53_model(m)),
+    # Claude 单独成桶。只认 Claude 家族的型号词，而不是泛匹配 "claude"：
+    # Fable/Opus/Sonnet/Haiku 的不同 provider、前缀和 dated alias 都覆盖；
+    # claude-glm/deepseek/kimi/grok 等内部别名仍留在 other 桶。
+    ("claude", "Claude 家族",
+     lambda m: bool(_CLAUDE_MODEL_RE.search(m))),
+    # 其他所有模型兜底进入 other 桶。
     ("other", "其他模型",
-     lambda m: True),
+    lambda m: True),
 )
-_FAMILY_DEFAULT_USD = {"gpt53": 200.0, "other": 500.0}
+_FAMILY_DEFAULT_USD = {"gpt53": 200.0, "claude": 100.0, "other": 500.0}
+
+# Cursor 专属规则：GPT-5.3 不再单独计账，直接进入 other。
+_CURSOR_FAMILY_RULES = tuple(rule for rule in _FAMILY_RULES if rule[0] != "gpt53")
+
+# Model groups are not consistently prefixed: examples include
+# ``claude-fable-5``, ``anthropic.claude-opus-4-8``, ``fable5.1`` and
+# ``cursor-ultra-sonnet-4-6``. Boundary-aware matching avoids treating
+# ``claude-glm``/``claude-kimi``/``claude-gpt`` as Claude-family models.
+_CLAUDE_MODEL_RE = _re.compile(
+    r"(?:^|[-_./])(?:fable|opus|sonnet|haiku)(?=$|[-_./0-9])"
+)
+
+
+def _is_gpt53_model(model: str) -> bool:
+    """Keep Claude-prefixed internal aliases out of the GPT-5.3 bucket."""
+    return "gpt" in model and "5.3" in model and "claude" not in model
 
 
 def _family_enabled() -> bool:
@@ -324,6 +639,7 @@ def _family_limit(fkey: str, user_api_key_dict: Any) -> float:
     except Exception:
         pass
     env_name = {"gpt53": "BUDGET_FAMILY_GPT53_USD",
+                "claude": "BUDGET_FAMILY_CLAUDE_USD",
                 "other": "BUDGET_FAMILY_OTHER_USD"}.get(fkey, "")
     try:
         return float(os.environ.get(env_name, _FAMILY_DEFAULT_USD[fkey]))
@@ -331,13 +647,24 @@ def _family_limit(fkey: str, user_api_key_dict: Any) -> float:
         return _FAMILY_DEFAULT_USD.get(fkey, 0.0)
 
 
-def _family_of(model: str):
+def _family_rules_for_key(user_api_key_dict: Any = None):
+    """Return the active family rules; only cursor-* retires gpt53."""
+    if isinstance(user_api_key_dict, str):
+        alias = user_api_key_dict
+    else:
+        alias = getattr(user_api_key_dict, "key_alias", "") if user_api_key_dict else ""
+    if str(alias).startswith("cursor-"):
+        return _CURSOR_FAMILY_RULES
+    return _FAMILY_RULES
+
+
+def _family_of(model: str, user_api_key_dict: Any = None):
     """返回 (fkey, label) 或 None。按 model_group 名匹配（执法用请求里的
     data["model"]，记账用 payload.model_group —— litellm 两处同名）。"""
     m = (model or "").lower()
     if not m:
         return None
-    for fkey, label, pred in _FAMILY_RULES:
+    for fkey, label, pred in _family_rules_for_key(user_api_key_dict):
         try:
             if pred(m):
                 return fkey, label
@@ -398,9 +725,12 @@ async def _family_usage_lines(token: str, user_api_key_dict: Any) -> str:
     if not _family_enabled() or not token:
         return ""
     try:
+        rules = _family_rules_for_key(user_api_key_dict)
+        spends = await asyncio.gather(
+            *(_family_get_spend(token, fkey) for fkey, _label, _pred in rules)
+        )
         parts = []
-        for fkey, label, _pred in _FAMILY_RULES:
-            spent = await _family_get_spend(token, fkey)
+        for (fkey, label, _pred), spent in zip(rules, spends):
             limit = _family_limit(fkey, user_api_key_dict)
             parts.append(f"{label} ${spent:.2f}/${limit:.2f}")
         return "\n系列额度：" + "，".join(parts) + "。"
@@ -428,7 +758,11 @@ async def _family_usage_lines(token: str, user_api_key_dict: Any) -> str:
 # mock(见 feedback_cursor_swallows_429_response_body)。
 
 # _FAMILY_RULES 的展示名是中文,进不了 ASCII 头;这里给一份 ASCII 别名。
-_FAMILY_ASCII = {"gpt53": "gpt-5.3 (codex)", "other": "main-models (gpt-5.6/5.5)"}
+_FAMILY_ASCII = {
+    "gpt53": "gpt-5.3 (codex)",
+    "claude": "Claude",
+    "other": "main-models (all non-Claude models)",
+}
 
 
 def _codex_stop_disabled() -> bool:
@@ -460,11 +794,16 @@ def _client_is_codex(data: Any) -> bool:
     return False
 
 
-def _family_other(fkey: str):
-    """两桶模型下返回另一桶 (fkey, label);找不到返回 None。"""
-    for k, label, _p in _FAMILY_RULES:
-        if k != fkey:
-            return k, label
+def _family_other(fkey: str, rules=None):
+    """返回一个可切换的替代桶，供 Codex ASCII promo 使用。"""
+    rules = rules or _FAMILY_RULES
+    # Cursor 是 Claude ↔ other；其他 gated key 仍可在 gpt53/claude/other 间切换。
+    for wanted in ("other", "gpt53", "claude"):
+        if wanted == fkey:
+            continue
+        for k, label, _p in rules:
+            if k == wanted:
+                return k, label
     return None
 
 
@@ -477,9 +816,9 @@ def _codex_promo_family(fkey: str, spent: float, limit: float,
     所以 {promo} 要写成能在句号之后、逗号之前顺读的整句(首字母大写、不与
     "usage limit" 重复、句尾能接 ", or try again later")。
 
-    这是**唯一**能诚实说 gpt-5.3(codex)当前可用的分支:main 桶满、gpt53 桶
-    还有余额、且 key 总额度(③)未满 —— 此时切模型确实能接着跑。按用户要求写成
-    信息式(告知有余额 + 怎么切),用不用让用户自己决定,不强推。
+    Claude 桶满、other 桶还有余额时，Cursor 可以切到非 Claude 模型继续；
+    Cursor 的 GPT-5.3 已归入 other，不再有独立可切换桶。按用户要求写成
+    信息式（告知有余额 + 怎么切），用不用让用户自己决定，不强推。
     """
     blocked = _FAMILY_ASCII.get(fkey, fkey)
     orem = (olimit - ospent) if (olimit and olimit > 0) else 0.0
@@ -495,17 +834,13 @@ def _codex_promo_family(fkey: str, spent: float, limit: float,
 def _codex_promo_total(cost: float, mx: float) -> str:
     """③ key 总额度超额时给 codex 的 ASCII promo。
 
-    数字口径同 ④(used/limit)。但**不能**在这里说 gpt-5.3 当前可用:key 的
-    max_budget 覆盖所有模型、gpt-5.3 的花费也计入 spend,且 ③ 分支 model-agnostic
+    数字口径同 ④(used/limit)。总额度覆盖所有模型，且 ③ 分支 model-agnostic
     (budget_notice pre_call 只看 over_budget_mark、不看 model),所以 ③ 一旦触发,
-    同一把 key 的 gpt-5.3 下一跳同样被挡(除非把总额度抬到高于 main 系列桶)。
-    这里把 gpt-5.3 定位成「最省的通道」的真实信息,而不是虚假的「现在还能切」——
-    后者会让用户白切一次仍撞墙、徒增支持成本。
+    切换模型也不能绕过它。
     """
     return (f"You've spent ${cost:.2f} of your ${mx:.2f} daily budget, which "
             f"covers every model (gpt-5.3 included); it resets 00:00 Beijing "
-            f"time. gpt-5.3 (codex) is the cheapest lane, so it stretches your "
-            f"budget furthest")
+            f"time. Choose a model family only after the daily total resets")
 
 
 def _codex_usage_limit_exc(promo: str):
@@ -812,7 +1147,7 @@ class BudgetNotice(CustomLogger):
             # ④ 模型系列日额度（先于 ① —— 系列超限时连 /查余额 之外的推理
             #   都不放行；/查余额 本身不打上游、不受系列额度限制，放它先走）
             if _family_enabled() and token:
-                fam = _family_of(str(data.get("model") or ""))
+                fam = _family_of(str(data.get("model") or ""), user_api_key_dict)
                 if fam is not None and not _is_quota_query(_last_user_text(data)):
                     fkey, flabel = fam
                     spent = await _family_get_spend(token, fkey)
@@ -825,7 +1160,8 @@ class BudgetNotice(CustomLogger):
                             "responses", "aresponses", "_aresponses_websocket",
                         ):
                             if _client_is_codex(data) and not _codex_stop_disabled():
-                                ofk = _family_other(fkey)
+                                ofk = _family_other(
+                                    fkey, _family_rules_for_key(user_api_key_dict))
                                 if ofk:
                                     ofkey = ofk[0]
                                     ospent = await _family_get_spend(token, ofkey)
@@ -877,8 +1213,14 @@ class BudgetNotice(CustomLogger):
             if not _is_quota_query(text):
                 return data
 
-            text = _usage_text(user_api_key_dict) + await _family_usage_lines(
-                token, user_api_key_dict)
+            family_text, ttft_text = await asyncio.gather(
+                _family_usage_lines(token, user_api_key_dict),
+                _ttft_text(user_api_key_dict),
+            )
+            # 顺序：额度 → 系列 → TTFT → 模型清单。TTFT 是用户主动要的那段，放在
+            # 12 行模型清单**前面**，不然它被挤到消息尾部要翻屏才看得到。
+            text = (_usage_text(user_api_key_dict) + family_text + ttft_text
+                    + _model_catalog_text(user_api_key_dict))
             if v in ("anthropic_messages", "aanthropic_messages"):
                 from litellm.exceptions import ModifyResponseException
 
@@ -999,7 +1341,9 @@ class BudgetNotice(CustomLogger):
                     or any(alias.startswith(p) for p in _gate_prefixes())):
                 return
             model = slp.get("model_group") or slp.get("model") or ""
-            fam = _family_of(str(model))
+            # Classification is key-scoped: Cursor has no separate gpt53 bucket,
+            # while other gated prefixes retain the legacy family split.
+            fam = _family_of(str(model), alias)
             if fam is None:
                 return
             await _family_add_spend(token, fam[0], cost)

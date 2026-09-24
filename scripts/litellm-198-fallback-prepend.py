@@ -364,8 +364,11 @@ def main() -> int:
     if lagging:
         print(f"\n{len(lagging)} pod(s) still behind after 150s. Only NOW is a restart"
               f" worth considering (zero-interruption rolling update, user's call):")
-        print(f"  kubectl -n {NS} rollout restart deploy/litellm-proxy-gray")
-        print(f"  kubectl -n {NS} rollout status  deploy/litellm-proxy-gray --timeout=15m")
+        print(f"  D=$(kubectl -n {NS} get po -l carher.net/litellm-production-route=enabled"
+              f" -o jsonpath='{{.items[0].metadata.ownerReferences[0].name}}' | sed 's/-[^-]*$//')"
+              f"   # 车道名按路由标签反查，别写死")
+        print(f"  kubectl -n {NS} rollout restart deploy/$D")
+        print(f"  kubectl -n {NS} rollout status  deploy/$D --timeout=15m")
         return 1
 
     print(f"\nlayers 1-2 done: {len(pods)}/{len(pods)} pods lead with {a.target}, no restart.")

@@ -50,11 +50,14 @@ NS = "litellm-product"
 REPO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "..", "k8s", "litellm-callbacks")
 # lane → Deployment。volume 名统一是 callbacks，CM 名从 Deployment 反查。
+# 🔴 2026-09-24：`prod` 这条**按路由标签反查**，不写死名字 —— 09-24 之前
+# 带标签的是 `litellm-proxy-gray`，09-24 起是 `litellm-proxy`。写死名字会让
+# 漂移体检去比一条 0 副本的车道，结果「没漂移」而实际一个在服务的 pod 都没看。
 LANES = {
-    "gray": "litellm-proxy-gray",            # 当前在 Service endpoints 里的那条
-    "idle-prod": "litellm-proxy",            # 空转的老 prod（零 endpoints 但同一个库）
     "guarded-old": "litellm-proxy-guarded-old",  # 回滚 lane
 }
+PROD_POD_SELECTOR = "carher.net/litellm-production-route=enabled"
+IDLE_CANDIDATES = ["litellm-proxy", "litellm-proxy-gray"]
 VOLUME = "callbacks"
 
 
@@ -131,15 +134,62 @@ def compare(lane, deploy, repo, only_file, show_diff):
     return 1 if (drift or missing) else 0
 
 
+def prod_deploy():
+    """反查带路由标签的那条车道，fail-closed。
+
+    ⛔ 不用 `get deploy -l <路由标签>`：标签在 Pod 上不在 Deployment 上，
+    那条查询返空集，而空集长得跟「没问题」一样。
+    """
+    out = sh("%s -n %s get po -l %s -o json" % (KUBECTL, NS, PROD_POD_SELECTOR), check=False)
+    names = set()
+    for p in (json.loads(out).get("items", []) if out.strip() else []):
+        if p.get("status", {}).get("phase") != "Running":
+            continue
+        for ref in p["metadata"].get("ownerReferences", []):
+            if ref["kind"] != "ReplicaSet":
+                continue
+            rs = sh("%s -n %s get rs %s -o json" % (KUBECTL, NS, ref["name"]), check=False)
+            if not rs.strip():
+                continue
+            for r2 in json.loads(rs)["metadata"].get("ownerReferences", []):
+                if r2["kind"] == "Deployment":
+                    names.add(r2["name"])
+    if not names:
+        raise SystemExit("反查不到生产车道：没有 Running pod 带 %s —— 判据失效，不当绿。"
+                         % PROD_POD_SELECTOR)
+    if len(names) > 1:
+        raise SystemExit("生产车道反查到多条：%s —— 切换窗口里比对会只看一半，等收敛。"
+                         % sorted(names))
+    return names.pop()
+
+
+def live_lanes():
+    """把「谁在服务 / 谁在空转」按实测填出来，名字是结果不是前提。"""
+    prod = prod_deploy()
+    lanes = {"prod": prod}
+    for d in IDLE_CANDIDATES:
+        if d != prod:
+            lanes["idle-" + d] = d
+    lanes.update(LANES)
+    return lanes
+
+
 def main():
     ap = argparse.ArgumentParser(description="repo k8s/litellm-callbacks/ ↔ 198 各 lane 活 CM 对账（只读）")
-    ap.add_argument("--lane", choices=sorted(LANES), help="只看一条 lane")
+    ap.add_argument("--lane", help="只看一条 lane（名字见不带参数时的输出）")
     ap.add_argument("--file", help="只看一个文件名，如 budget_notice.py")
     ap.add_argument("--diff", action="store_true", help="打印 unified diff")
     a = ap.parse_args()
 
     repo = repo_data()
-    lanes = {a.lane: LANES[a.lane]} if a.lane else LANES
+    all_lanes = live_lanes()
+    print("车道实测：" + "  ".join("%s=%s" % (k, v) for k, v in all_lanes.items()))
+    if a.lane:
+        if a.lane not in all_lanes:
+            raise SystemExit("没有这条 lane：%s（现有 %s）" % (a.lane, sorted(all_lanes)))
+        lanes = {a.lane: all_lanes[a.lane]}
+    else:
+        lanes = all_lanes
     rc = 0
     for lane, deploy in lanes.items():
         rc |= compare(lane, deploy, repo, a.file, a.diff)

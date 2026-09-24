@@ -10,8 +10,11 @@ volumeMount 或改 config 反而会引入新故障面。
 
 两条 lane 的换法**不一样**，混用会出事
 -------------------------------------
-* `gray`（`litellm-proxy-gray`，Svc `litellm-proxy-nodeport` 真正指向的生产车道）
-  挂的是**内容哈希命名的不可变 CM** `litellm-product-gray-callbacks-<hash>`。
+* **生产车道**（Svc `litellm-proxy-nodeport` 真正指向的那条，靠路由标签
+  `carher.net/litellm-production-route=enabled` 反查，**不写死名字**；
+  2026-09-24 前是 `litellm-proxy-gray`，09-24 起是 `litellm-proxy`）
+  挂的是**内容哈希命名的不可变 CM**（新一代 `litellm-stable-callbacks-<hash>`，
+  历史上是 `litellm-product-gray-callbacks-<hash>`，旧名留着当回滚点）。
   换代 = 复制当前 CM → 替换那一个 key → 按新内容重新哈希命名 → `create` →
   strategic-patch Deployment 的 volume 指向新名 → 滚动更新。
 * `idle-prod` / acct 池挂的是**可变的共享 CM** `litellm-callbacks`。
@@ -54,7 +57,7 @@ volumeMount 或改 config 反而会引入新故障面。
 回滚
 ----
     ssh cltx@10.68.13.198 'sudo kubectl -n litellm-product patch deploy \
-        litellm-proxy-gray --type=json -p "[{\"op\":\"replace\",
+        <plan 打印出来的那条生产车道> --type=json -p "[{\"op\":\"replace\",
         \"path\":\"/spec/template/spec/volumes/<i>/configMap/name\",
         \"value\":\"<旧CM名>\"}]"'
 旧 CM 是不可变的、没被删，改回名字即回滚（`plan` 会把当前名字打出来存档）。
@@ -79,12 +82,21 @@ REPO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "..", "k8s", "litellm-callbacks")
 VOLUME = "callbacks"
 
-GRAY_DEPLOY = "litellm-proxy-gray"
-GRAY_CM_PREFIX = "litellm-product-gray-callbacks-"
+# 2026-09-24：新一代 CM 一律用中性前缀。生产车道上仍可能挂着历史的
+# `litellm-product-gray-callbacks-<hash>`（旧名不动、不可变、留作回滚），
+# 本脚本只决定**新建的那一代**叫什么 —— 旧名是从 Deployment 反查来的。
+GRAY_CM_PREFIX = "litellm-stable-callbacks-"
 SHARED_CM = "litellm-callbacks"
 # 生产车道判据：Svc 的 selector，不是 `-l app=litellm-proxy`
 # （memory: feedback_prod_lane_label_is_on_pods_not_deployments）
 PROD_POD_SELECTOR = "carher.net/litellm-production-route=enabled"
+
+# 🔴 2026-09-24：生产车道的 Deployment 名字**不再写死**。
+# 历史上这里是 `litellm-proxy-gray`，09-24 把路由标签搬到 `litellm-proxy` 之后，
+# 写死的名字会让本脚本 patch 一个 0 副本的 Deployment —— patch 成功、退出码 0、
+# 但改的东西一个在服务的 pod 都没吃到（静默打空）。
+# 判据只认「谁的 pod 带路由标签」，名字是它的结果不是它的前提。
+_PROD_DEPLOY_CACHE = None
 
 
 def sh(cmd, check=True):
@@ -107,17 +119,53 @@ def h12(s: str) -> str:
     return sha(s)[:12]
 
 
+def prod_deploy() -> str:
+    """反查「真正在服务的那条车道」的 Deployment 名，fail-closed。
+
+    路径：带路由标签的 Running pod → ownerRef(ReplicaSet) → ownerRef(Deployment)。
+    ⛔ 不用 `get deploy -l <路由标签>`：标签在 **Pod** 上不在 Deployment 上，
+    那条查询会返空集，而空集在 shell 里长得跟「没问题」一模一样。
+    """
+    global _PROD_DEPLOY_CACHE
+    if _PROD_DEPLOY_CACHE:
+        return _PROD_DEPLOY_CACHE
+    out = sh("%s -n %s get po -l %s -o json" % (KUBECTL, NS, PROD_POD_SELECTOR))
+    names = set()
+    for p in json.loads(out).get("items", []):
+        if p.get("status", {}).get("phase") != "Running":
+            continue
+        for ref in p["metadata"].get("ownerReferences", []):
+            if ref["kind"] != "ReplicaSet":
+                continue
+            rs = json.loads(sh("%s -n %s get rs %s -o json" % (KUBECTL, NS, ref["name"])))
+            for r2 in rs["metadata"].get("ownerReferences", []):
+                if r2["kind"] == "Deployment":
+                    names.add(r2["name"])
+    if not names:
+        raise SystemExit(
+            "反查不到生产车道：没有 Running pod 带 %s。\n"
+            "这不是「没问题」，是判据失效 —— 先确认路由标签在谁身上再跑本脚本。"
+            % PROD_POD_SELECTOR)
+    if len(names) > 1:
+        raise SystemExit(
+            "生产车道反查到 %d 个 Deployment：%s\n"
+            "切换窗口里两条车道同时带标签是预期的，但这时换 callback 会只改一半 —— "
+            "等切换收敛到单条再跑。" % (len(names), sorted(names)))
+    _PROD_DEPLOY_CACHE = names.pop()
+    return _PROD_DEPLOY_CACHE
+
+
 def gray_cm_name() -> str:
-    out = sh("%s -n %s get deploy %s -o json" % (KUBECTL, NS, GRAY_DEPLOY))
+    out = sh("%s -n %s get deploy %s -o json" % (KUBECTL, NS, prod_deploy()))
     for v in json.loads(out)["spec"]["template"]["spec"].get("volumes", []):
         if v["name"] == VOLUME:
             return (v.get("configMap") or {}).get("name")
-    raise SystemExit("反查不到 %s 的 %s volume —— 没对上账，不当绿" % (GRAY_DEPLOY, VOLUME))
+    raise SystemExit("反查不到 %s 的 %s volume —— 没对上账，不当绿" % (prod_deploy(), VOLUME))
 
 
 def gray_volume_index() -> int:
     """永远反查下标，别写死 —— 别人加了 volume 就错位了。"""
-    out = sh("%s -n %s get deploy %s -o json" % (KUBECTL, NS, GRAY_DEPLOY))
+    out = sh("%s -n %s get deploy %s -o json" % (KUBECTL, NS, prod_deploy()))
     vols = json.loads(out)["spec"]["template"]["spec"].get("volumes", [])
     for i, v in enumerate(vols):
         if v["name"] == VOLUME:
@@ -195,7 +243,7 @@ def cmd_plan(fname: str, force: bool) -> int:
         return 0
     print("\n  将要：① 建新 CM %s（只换 %s 这一个 key）" % (new_cm, fname))
     print("        ② patch %s 的 volumes[%d] 指向新 CM → 滚动更新 4 副本"
-          % (GRAY_DEPLOY, gray_volume_index()))
+          % (prod_deploy(), gray_volume_index()))
     print("        ③ merge-patch 共享 CM %s 的 data（**不重启任何 acct pod**）" % SHARED_CM)
     print("\n  回滚：把 volumes[%d].configMap.name 改回 %s（旧 CM 不可变、不删）"
           % (gray_volume_index(), cur_cm))
@@ -242,9 +290,9 @@ def cmd_apply(fname: str, force: bool) -> int:
         patch = json.dumps([{"op": "replace",
                              "path": "/spec/template/spec/volumes/%d/configMap/name" % i,
                              "value": new_cm}])
-        sh("%s -n %s patch deploy %s --type=json -p '%s'" % (KUBECTL, NS, GRAY_DEPLOY, patch))
-        print("② %s volumes[%d] → %s，等滚动更新…" % (GRAY_DEPLOY, i, new_cm))
-        print(sh("%s -n %s rollout status deploy %s --timeout=300s" % (KUBECTL, NS, GRAY_DEPLOY)))
+        sh("%s -n %s patch deploy %s --type=json -p '%s'" % (KUBECTL, NS, prod_deploy(), patch))
+        print("② %s volumes[%d] → %s，等滚动更新…" % (prod_deploy(), i, new_cm))
+        print(sh("%s -n %s rollout status deploy %s --timeout=300s" % (KUBECTL, NS, prod_deploy())))
 
     # --- ③ 共享 CM：只改 data，不重启 ---
     pj = json.dumps({"data": {fname: want}}, ensure_ascii=False)

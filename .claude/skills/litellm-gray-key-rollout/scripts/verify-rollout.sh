@@ -76,12 +76,13 @@ echo
 echo "########## 容量体检 ##########"
 kubectl -n litellm-product get deploy litellm-proxy litellm-proxy-gray \
   -o custom-columns=NAME:.metadata.name,REP:.spec.replicas,READY:.status.readyReplicas,CPULIM:'.spec.template.spec.containers[0].resources.limits.cpu',MEMLIM:'.spec.template.spec.containers[0].resources.limits.memory' 2>&1
-echo "--- gray pod ---"
-kubectl -n litellm-product top pod -l app=litellm-proxy-gray --no-headers 2>&1
-kubectl -n litellm-product get pods -l app=litellm-proxy-gray \
+echo "--- 在服务的车道 pod（按路由标签，不按名字）---"
+kubectl -n litellm-product top pod -l carher.net/litellm-production-route=enabled --no-headers 2>&1
+kubectl -n litellm-product get pods -l carher.net/litellm-production-route=enabled \
   -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName,RST:.status.containerStatuses[0].restartCount --no-headers 2>&1
-echo "--- stable pod ---"
-kubectl -n litellm-product top pod -l app=litellm-proxy --no-headers 2>&1
+echo "--- 全部 proxy 类 pod（含已排空的车道，用来看谁还剩着）---"
+kubectl -n litellm-product get pods -l 'app in (litellm-proxy,litellm-proxy-gray,litellm-proxy-guarded-old)' \
+  -o custom-columns=POD:.metadata.name,READY:.status.containerStatuses[0].ready,NODE:.spec.nodeName --no-headers 2>&1
 echo "--- 节点 ---"
 kubectl top nodes 2>&1
 echo "--- 节点压力（True 才是真有压力，看百分比会误判）---"

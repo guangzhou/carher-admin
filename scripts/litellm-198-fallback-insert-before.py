@@ -13,9 +13,9 @@ grok leg was `sa-grok-4.6`. 用户要把那条 grok 腿升到 `sa-grok-4.20`
 
 1. 语义：那个是 append-after-anchor 且全表扫「以 anchor 结尾」的链；
    这里要 insert-before-anchor，且只动**点名的 group**，别的行一律原样抄。
-2. 🔴 那个脚本把 `PROXY_SELECTOR` 写死成 `app=litellm-proxy` —— 2026-09-21
-   生产车道是 `litellm-proxy-gray`（4 副本），`litellm-proxy` 是 1 副本闲置。
-   拿它验会验到不在服务的 pod（假绿），`rollout restart` 会滚错 Deployment。
+2. 🔴 那个脚本把 `PROXY_SELECTOR` 写死成 `app=litellm-proxy` —— 车道会搬家：
+   2026-09-21 生产车道是 `litellm-proxy-gray`，2026-09-24 又搬回 `litellm-proxy`。
+   拿写死的名字验会验到不在服务的 pod（假绿），`rollout restart` 会滚错 Deployment。
    本脚本按 **Service `litellm-proxy-nodeport` 的 selector**
    （`carher.net/litellm-production-route=enabled`）选 pod，永不写死 Deployment 名。
    ⚠️ 该标签在 **Pod** 上，不在 Deployment 对象上 —— `get deploy -l <它>`

@@ -147,7 +147,7 @@ if not isinstance(cur, int) or cur < 4096:   # ⛔ None 也进这一支
 ```bash
 kubectl -n litellm-product get po -l carher.net/litellm-production-route=enabled \
     -o custom-columns=N:.metadata.name,START:.status.startTime
-kubectl -n litellm-product get events --sort-by=.lastTimestamp | grep litellm-proxy-gray
+kubectl -n litellm-product get events --sort-by=.lastTimestamp | grep litellm-proxy
 ```
 看旧 ReplicaSet 的 `Killing` / `connection reset by peer` 覆盖到几点。
 
@@ -168,7 +168,8 @@ claude 族失败行改动前后都散布着，出事那一分钟一条都没有�
 - ⛔ **`-l app=litellm-proxy` 抓到的是另一个不在服务的 pod**，在它日志里
   grep 不到 compaction 记录 = 假红。判生产车道只认 Svc
   `litellm-proxy-nodeport` 的 selector `carher.net/litellm-production-route=enabled`
-  → `litellm-proxy-gray-*`（[[feedback_prod_lane_label_is_on_pods_not_deployments]]）。
+  → 带该标签的那条车道（09-24 起是 `litellm-proxy-*`，09-24 前是 `litellm-proxy-gray-*`；
+  别写死名字，[[feedback_prod_lane_label_is_on_pods_not_deployments]]）。
 - ⛔ 上线后 grep 到一屏 `Traceback` 别急着认账：那边常驻的是 SpendLogs
   毒行的 `prisma DataError` / `ValueError` / `MidStreamFallbackError`。
   判**自己**的文件有没有炸，锚点只能是

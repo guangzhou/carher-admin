@@ -386,6 +386,28 @@ Fix is one appended line in the idle lane's config CM (`general_settings.disable
 a new content-hashed CM, and a `patch` of the `config` volume — **never `apply` on
 `litellm-proxy`**:
 
+🔴 The serving lane must own exactly one reset job (2026-09-23)
+
+The 2026-09-19 suppressor was copied onto every lane, including the lane that
+later took production traffic. Measured 2026-09-23 11:45 Beijing:
+
+- `Service/litellm-proxy-nodeport:30402` selects `carher.net/litellm-production-route=enabled`.
+- Only `Deployment/litellm-proxy-gray` (4/4) carries that label. Its config was
+  `litellm-cwfb-gray-acd247195547`, which had `disable_reset_budget: true`.
+  (Superseded 2026-09-24: the route label was moved back to `litellm-proxy` and
+  `litellm-proxy-gray` was drained to 0 — see the operator manual §1.3. The
+  measurement above is the 2026-09-23 snapshot, kept as-is for the record.)
+- Idle `litellm-proxy` and `litellm-proxy-guarded-old` also had the suppressor,
+  so nobody was running `reset_budget_job`.
+- 1557 keys stayed pinned at `budget_reset_at=2026-09-19 16:00:00 UTC`.
+
+Repair: remove the key only from the serving gray config, create a new
+content-hashed ConfigMap, and guarded-patch only `litellm-proxy-gray`. Keep the
+suppressor on idle lanes that still point at the production database. Verify the
+new gray pod startup line contains `reset_budget_job`, then wait one scheduler
+cycle and confirm overdue `budget_reset_at < now()` returns to the historical
+baseline of `<= 1`.
+
 ```bash
 # guarded patch: assert the old CM name before replacing it
 kubectl -n litellm-product patch deploy litellm-proxy --type=json -p '[

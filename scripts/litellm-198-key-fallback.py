@@ -5,8 +5,10 @@ model group a key can reach.
 This writes ``LiteLLM_VerificationToken.router_settings`` (native key-level
 router settings, LiteLLM >= 1.90). It is a pure DB/API write: no callback
 module, no ConfigMap edit, no proxy restart, no multi-lane rollout. That
-matters because ``litellm-callbacks`` is shared by ``litellm-proxy``,
-``litellm-proxy-gray-v192`` and 13 ``chatgpt-acct-*`` deployments.
+matters because ``litellm-callbacks`` is shared by the production proxy lane
+(select by route label ``carher.net/litellm-production-route=enabled``, never a
+hardcoded name — it moved from ``litellm-proxy-gray`` back to ``litellm-proxy``
+on 2026-09-24) and 13 ``chatgpt-acct-*`` deployments.
 
 Five invariants this encodes, each measured on 198 (2026-09-17):
 

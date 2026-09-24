@@ -69,6 +69,21 @@ gray。
 | gray | `litellm-proxy-gray` / `30405` | 目标版本灰度 | 独立 Helm release，关闭 Pod schema update |
 | guarded-old | `litellm-proxy-guarded-old` / `30406` | 收敛和回滚的旧版本承载面 | 必须提前扩到全量容量并完成直连 smoke |
 
+> 🔴 **2026-09-24 收敛现状（避免"gray 是生产"的误解）**：此前一段时间里路由标签
+> `carher.net/litellm-production-route=enabled` 漂在 `litellm-proxy-gray` 上，
+> 也就是"名叫 gray 的车道实际在扛 30402 生产流量"——这是历史漂移，不是设计意图。
+> 09-24 已把标签搬回 `litellm-proxy`，使实际状态与上表设计重新对齐：
+>
+> | Deployment | 副本 | 版本 | 是否在服务 |
+> |---|---:|---|---|
+> | `litellm-proxy` | 4 | 1.100.1 | **是（唯一生产车道）** |
+> | `litellm-proxy-gray` | 0 | 1.100.1 | 否（已排空，留作回滚） |
+> | `litellm-proxy-guarded-old` | 0 | 1.90.2（老版本）| 否（已退役） |
+>
+> 判"谁在服务"永远只认路由标签、按 Pod（`get pods -l`）反查，**不要按名字**——
+> `get deploy -l <路由标签>` 返回 "No resources found" 是假红（标签在 Pod 上不在 Deployment 上）。
+> 下一次灰度升级时 gray 会重新扩起来承接新版本，这套三车道结构本身不变。
+
 节点分工：198 是生产数据库所在节点；当前 4 个 prod LiteLLM Pod 分布为 198×2、225×2。225 的 Kubernetes hostname 是 `aiyjy-litellm-standby`，用于 clone、migration qualification、目标镜像启动和“不切流量”gray smoke，但不是空闲机器：它还有开发 Pod 和多批 `zero-*` Pod，并带 `dedicated=standby:NoSchedule`；固定到 225 的 workload 必须带匹配 toleration。仓库中的 gray 模板默认 pin 到 225，但这只是调度位置，不是资源隔离承诺。真正开始放量前必须重新检查两节点资源、磁盘和故障域，并生成单独的容量 values；不能把“225 能启动 Pod”当成“225 能单独扛全量”。
 
 磁盘必须区分系统盘和数据盘。225 的 root filesystem 可能只有约 20 GiB，
@@ -186,6 +201,29 @@ python3 litellm-gray-rollout/scripts/verify-readiness.py \
 
 生产模式缺少 Helm、stock nginx 1.18、ShellCheck 或 kubeconform 时会失败，不能用
 `--developer-mode` 冒充生产通过。
+
+### 3.1.1 选目标版本：`/releases` 是坏尺子
+
+判「官方最新稳定版是哪个」**必须同时查三处**，缺一处就会看漏：
+
+```bash
+# ① git tag（唯一完整的）——去掉 rc/dev 后取最大
+curl -s 'https://api.github.com/repos/BerriAI/litellm/tags?per_page=30' \
+  | python3 -c "import sys,json;print([t['name'] for t in json.load(sys.stdin) if not any(x in t['name'] for x in ('rc','dev'))][:5])"
+# ② PyPI 的 info.version
+curl -s https://pypi.org/pypi/litellm/json | python3 -c "import sys,json;print(json.load(sys.stdin)['info']['version'])"
+# ③ ghcr 上镜像真的存在（拿 amd64 manifest digest，部署按它钉）
+```
+
+🔴 **`GET /repos/BerriAI/litellm/releases` 会漏版本**：`v1.102.0`（2026-09-20）有 git tag、
+有 PyPI release、有 ghcr 镜像，但**没有 GitHub Release 条目**，在 releases 列表里
+一条都查不到 —— 2026-09-21 我就是只看 releases，把 1.101.0 当成了最新稳定版。
+形状上「releases 里最新的那个 stable」和「真的最新 stable」长得一模一样，不会报错。
+
+选定后按 `patches/<tag>/` 建目录并做锚点重定（见 `patches/v1.102.0/README.md` 的做法）：
+拿该 tag 的真源文件干跑两个补丁脚本，要求**锚点各命中 1 次、`py_compile` 通过、
+重跑得 SKIP、补丁块引用的名字在新作用域里全部可解析**。锚点命中数对了还不够 ——
+必须确认注入点仍落在原来那个函数/类里，不然会静默插进一个不会被执行的分支。
 
 ### 3.2 生产前置条件
 

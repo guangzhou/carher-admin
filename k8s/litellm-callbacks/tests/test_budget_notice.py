@@ -371,7 +371,7 @@ class ModelCatalogTest(unittest.TestCase):
         text = M._model_catalog_text(key)
 
         self.assertIn("gpt-5.6-sol", text)
-        self.assertIn("922,000/128,000 → gpt-5.6-sol", text)
+        self.assertIn("922k  128k  gpt-5.6-sol", text)
         self.assertNotIn("hidden-model", text)
         self.assertEqual(text.count("gpt-5.6-sol"), 1)
 
@@ -391,10 +391,11 @@ class ModelCatalogTest(unittest.TestCase):
             key=key,
         )
 
-        self.assertIn("📋 模型 1 个（输入/输出 上限，按限制合并）", out["mock_response"])
-        self.assertIn("922,000/128,000 → gpt-5.6-sol", out["mock_response"])
+        self.assertIn("📋 模型 1 个，1 组上限", out["mock_response"])
+        self.assertIn("922k  128k  gpt-5.6-sol", out["mock_response"])
         # `context_window` 即使部署行上有，也不该出现 —— 它不是闸门读的字段
         self.assertNotIn("1,000,000", out["mock_response"])
+        self.assertNotIn("1M", out["mock_response"])
 
     def test_empty_allowlist_lists_all_models_and_marks_missing_limits(self):
         self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
@@ -406,8 +407,12 @@ class ModelCatalogTest(unittest.TestCase):
         text = M._model_catalog_text(key)
 
         self.assertIn("model-without-limits", text)
-        # 两栏（输入/输出），不是三栏 —— `context_window` 那栏已删，见下面的回归护栏
-        self.assertEqual(text.count("未设上限"), 2)
+        # 两栏（输入/输出）各一个占位符，不是三栏 —— `context_window` 那栏已删，
+        # 见下面的回归护栏。⛔ 不能数占位符出现了几次：它是 ASCII `-`，
+        # 分隔线和模型名里都有，数出来是 43 不是 3。判据只能是**那一行本身**。
+        row = [ln for ln in text.splitlines() if "model-without-limits" in ln][0]
+        self.assertEqual(row.split(), ["-", "-", "model-without-limits"])
+        self.assertIn(f"{M._NO_LIMIT} = 未设上限", text)
 
     def test_no_hardcoded_product_limits_are_invented(self):
         """🔴 回归护栏：限制值只许来自部署行 / LiteLLM 自己的表，不许来自硬编。
@@ -435,7 +440,34 @@ class ModelCatalogTest(unittest.TestCase):
 
         self.assertIn("cr-g-5.6-instant", text)
         self.assertNotIn("922,000", text)
-        self.assertIn("未设上限", text)
+        self.assertNotIn("922k", text)
+        row = [ln for ln in text.splitlines() if "cr-g-5.6-instant" in ln][0]
+        self.assertEqual(row.split()[:2], [M._NO_LIMIT, M._NO_LIMIT])
+
+    def test_table_uses_no_ambiguous_width_characters(self):
+        """🔴 对齐的前提是每个字符宽度确定，而 `—`/`─` 的宽度**不确定**。
+
+        East Asian Width = Ambiguous 的字符在非 CJK 环境占 1 格、CJK 环境占 2 格。
+        表格里出现它 ⇒ 同一个字符串在两种客户端里宽度不同，任何一套 padding
+        都只能对一半（实测：`—` 占位那一行整列歪 1 格）。
+        表格的全部价值就是对齐，所以宁可用不好看的 ASCII。
+        中文表头是 W（确定 2 格），不在此列。
+        """
+        import unicodedata
+
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "m1", "model_info": {"max_input_tokens": 922000}},
+            {"model_name": "m2", "model_info": {}},
+        ])
+        key = _Key(alias="cursor-u1")
+        key.models = ["m1", "m2"]
+
+        text = M._model_catalog_text(key)
+        offenders = sorted({
+            ch for ch in text
+            if unicodedata.east_asian_width(ch) == "A" and not ch.isspace()
+        })
+        self.assertEqual(offenders, [], f"表格里有宽度不确定的字符：{offenders}")
 
     def test_catalog_drops_the_fabricated_context_window_column(self):
         """`context_window` 即使部署行上写了，也不再显示 —— 它不是闸门读的字段。"""
@@ -450,9 +482,11 @@ class ModelCatalogTest(unittest.TestCase):
 
         text = M._model_catalog_text(key)
 
-        self.assertIn("250,000/16,384 → m1", text)
+        self.assertIn("250k  ~16k  m1", text)
         self.assertNotIn("999,999", text)
-        self.assertIn("（输入/输出 上限", text)
+        self.assertNotIn("~1M", text)
+        self.assertIn("输入", text)
+        self.assertIn("输出", text)
 
     def test_catalog_uses_key_allowlist_and_per_key_aliases(self):
         self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
@@ -467,11 +501,59 @@ class ModelCatalogTest(unittest.TestCase):
 
         text = M._model_catalog_text(key)
 
-        self.assertIn("📋 模型 2 个（输入/输出 上限，按限制合并）", text)
+        self.assertIn("📋 模型 2 个，2 组上限", text)
         self.assertIn("qwen3-coder-next", text)
-        self.assertIn("250,000", text)
+        self.assertIn("250k", text)
         self.assertIn("callback-only-model", text)
         self.assertEqual(text.count("qwen3-coder-next"), 1)
+
+    def test_rounded_labels_never_merge_two_distinct_gate_values(self):
+        """🔴 四舍五入是显示层的取舍，不许变成分组层的丢数据。
+
+        用户明确选了「1,048,576 显示成 ~1.05M」这种近似写法，代价是
+        1,048,576 和 1,050,000 渲染出同一个字符串。如果分组 key 用的是
+        **渲染后的字符串**，这两个不同的闸门就会被并成一行 —— 41 个模型里
+        少掉一个真实配置值，而且一个报错都没有、看起来完全正常。
+        所以分组 key 必须是**原始数值**：最坏情况是两行标签长得一样
+        （可见的歧义，读者会去问），而不是少一行（静默丢数据）。
+        """
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "a-1048576",
+             "model_info": {"max_input_tokens": 1048576, "max_output_tokens": 131072}},
+            {"model_name": "b-1050000",
+             "model_info": {"max_input_tokens": 1050000, "max_output_tokens": 131072}},
+        ])
+        key = _Key(alias="cursor-u1")
+        key.models = ["a-1048576", "b-1050000"]
+
+        text = M._model_catalog_text(key)
+
+        self.assertEqual(text.count("~1.05M"), 2, "两个不同的闸门被并成一行了")
+        self.assertIn("📋 模型 2 个，2 组上限", text)
+        # 归一：`"1050000"`（字符串）和 `1050000.0` 必须和 `1050000` 同组，
+        # 否则同一个闸门会因为写法不同被拆成三行。
+        self.proxy_server.llm_router.model_list.append(
+            {"model_name": "c-str",
+             "model_info": {"max_input_tokens": "1050000", "max_output_tokens": 131072.0}})
+        key.models = ["a-1048576", "b-1050000", "c-str"]
+        self.assertIn("📋 模型 3 个，2 组上限", M._model_catalog_text(key))
+
+    def test_limit_rows_are_sorted_by_numeric_value_not_by_label(self):
+        """🔴 排序只认原始数值：字典序会把 `10M` 排到 `922k` 前面。"""
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "big", "model_info": {"max_input_tokens": 10000000}},
+            {"model_name": "mid", "model_info": {"max_input_tokens": 922000}},
+            {"model_name": "small", "model_info": {"max_input_tokens": 200000}},
+            {"model_name": "none-at-all", "model_info": {}},
+        ])
+        key = _Key(alias="cursor-u1")
+        key.models = ["big", "mid", "small", "none-at-all"]
+
+        text = M._model_catalog_text(key)
+        order = [name for name in ("none-at-all", "small", "mid", "big")]
+        positions = [text.index(name) for name in order]
+        self.assertEqual(positions, sorted(positions),
+                         "行序不是按输入上限升序（未设上限最前）")
 
 
 class TTFTTest(unittest.TestCase):
@@ -506,8 +588,8 @@ class TTFTTest(unittest.TestCase):
         first = asyncio.run(M._ttft_text(key))
         second = asyncio.run(M._ttft_text(key))
 
-        self.assertIn("gpt-5.6-sol 1.25/2.53（662 次）", first)
-        self.assertIn("sa-grok-4.6 17.51/17.51（1 次）", first)
+        self.assertIn("gpt-5.6-sol   1.25   2.53   662", first)
+        self.assertIn("sa-grok-4.6  17.51  17.51     1", first)
         self.assertEqual(first, second)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1], "hashed-token")

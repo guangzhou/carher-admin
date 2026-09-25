@@ -78,6 +78,7 @@ import logging
 import os
 import re as _re
 import time
+import unicodedata
 from typing import Any, List, Optional, Tuple
 
 from litellm.integrations.custom_logger import CustomLogger
@@ -288,19 +289,88 @@ def _model_limit_value(info: dict, params: dict, model_name: Any, *names: str) -
     return None
 
 
+# 「未设上限」是对**配置**的陈述（这个字段确实是 None），不是对能力的陈述。
+# 旧文案"未配置"读起来像"漏配了"，但其中一大半是那一栏本来就不存在。
+# 表里用占位符，含义在表头的图例里声明一次。
+#
+# 🔴 占位符必须是 **ASCII**。第一版用 `—`（U+2014），它的 East Asian Width 是
+# **Ambiguous**：在非 CJK 环境占 1 格、在 CJK 环境占 2 格。同一个字符串在两种
+# 客户端里宽度不同 ⇒ 任何一套 padding 规则都只能对一半，实测这一行整列歪 1 格。
+# 表格的全部价值就是对齐，所以这里不要漂亮的破折号，要宽度确定的字符。
+_NO_LIMIT = "-"
+
+
 def _format_model_limit(value: Any) -> str:
+    """把闸门值压成 k/M。**近似值一律带 `~` 前缀。**
+
+    用户要的是"少一堆 0"，所以 131,072 显示成 131k。代价是精度：
+    1,048,576 和 1,050,000 都约等于 1.05M，光看字符串分不出来。
+    两处兜住这个代价：
+      ① 带 `~` ⇒ 读者一眼知道这个数被四舍五入过，不会拿它当精确值去算 token 预算；
+      ② 分组用**原始数值**做 key（见 `_model_catalog_text`）⇒ 两个不同的闸门值
+         永远是两行，不会因为渲染成同一个字符串而被静默并成一行。
+      ⇒ 最坏情况是"两行标签看起来一样"（可见的歧义），而不是"少了一个值"（静默丢数据）。
+    """
     if value is None:
-        # 「未设上限」是对**配置**的陈述（这个字段确实是 None），
-        # 不是对能力的陈述。旧文案"未配置"读起来像"漏配了"，
-        # 但其中一大半是那一栏本来就不存在。
-        return "未设上限"
+        return _NO_LIMIT
     try:
         number = float(value)
-        if number.is_integer():
-            return f"{int(number):,}"
-        return f"{number:,g}"
     except (TypeError, ValueError):
         return str(value)
+    if not number.is_integer() or number <= 0:
+        return f"{number:,g}"
+    exact = int(number)
+    for unit, scale, digits in (("M", 1_000_000, 2), ("k", 1_000, 0)):
+        if exact >= scale:
+            whole, remainder = divmod(exact, scale)
+            if remainder == 0:
+                return f"{whole}{unit}"          # 10M / 922k —— 精确，不带 ~
+            text = f"{exact / scale:.{digits}f}"
+            if "." in text:
+                text = text.rstrip("0").rstrip(".")
+            return f"~{text}{unit}"              # ~1.05M / ~131k
+    return str(exact)
+
+
+def _normalize_limit(value: Any):
+    """把限制值收敛成一个**可比较、可哈希**的规范形（数值优先）。
+
+    部署行里同一个上限可能是 `128000` / `128000.0` / `"128000"` 三种写法。
+    旧实现一律 `str(value)` 入集合，于是这三个是三个不同的值；
+    改成按数值分组后必须先归一，否则同一个闸门会被拆成三行。
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return int(number) if number.is_integer() else number
+
+
+def _limit_sort_key(value: Any):
+    """数值升序在前，非数值按字符串垫后。
+
+    🔴 不能拿**格式化后的字符串**排序：那是字典序，`10M` 会排到 `922k` 前面，
+    加了 k/M 后缀之后更乱。排序只认原始数值。
+    """
+    if value is None:
+        return (2, 0.0, "")
+    try:
+        return (0, float(value), "")
+    except (TypeError, ValueError):
+        return (1, 0.0, str(value))
+
+
+def _display_width(text: str) -> int:
+    """终端显示宽度。CJK（含 `—`，East Asian Width = Ambiguous）算 2 格。
+
+    表头是中文、占位符是全角破折号，拿 `len()` 对齐必歪。
+    """
+    return sum(2 if unicodedata.east_asian_width(ch) in "FWA" else 1 for ch in text)
+
+
+def _pad(text: str, width: int, right: bool = False) -> str:
+    fill = " " * max(0, width - _display_width(text))
+    return fill + text if right else text + fill
 
 
 def _model_catalog_text(user_api_key_dict: Any) -> str:
@@ -354,7 +424,7 @@ def _model_catalog_text(user_api_key_dict: Any) -> str:
                     info, params, name, "max_output_tokens", "max_tokens")),
             ):
                 if value is not None:
-                    entry[field].add(str(value))
+                    entry[field].add(_normalize_limit(value))
         # 一个公开名可能只作为 per-key alias 存在、没有自己的部署行，
         # 这时回落到 LiteLLM 内置价格表 —— 那也正是闸门会读的东西。
         for field, lookup_names in (
@@ -364,14 +434,14 @@ def _model_catalog_text(user_api_key_dict: Any) -> str:
             if not entry[field]:
                 value = _model_limit_value({}, {}, name, *lookup_names)
                 if value is not None:
-                    entry[field].add(str(value))
+                    entry[field].add(_normalize_limit(value))
 
     if not grouped:
         return ""
 
     catalog_fingerprint = tuple(
-        (name, tuple(sorted((field, tuple(sorted(values)))
-                            for field, values in limits.items())))
+        (name, tuple(sorted((field, tuple(sorted(values, key=_limit_sort_key)))
+                            for field, values in sorted(limits.items()))))
         for name, limits in grouped.items()
     )
     cache_key = (getattr(user_api_key_dict, "key_alias", ""), catalog_fingerprint,
@@ -381,25 +451,74 @@ def _model_catalog_text(user_api_key_dict: Any) -> str:
     if cached and now - cached[0] < _MODEL_CATALOG_CACHE_TTL:
         return cached[1]
 
-    # 按「限制三元组」合并：41 个模型的 41 行实测塌成约 12 行，且一个公开模型名
-    # 都不丢。标签（上下文/输入/输出）在表头声明一次，不在每行重复。
+    # 按「限制对」合并：41 个模型的 41 行塌成约 11 行，且一个公开模型名都不丢。
+    # 🔴 key 是**原始数值**元组，不是渲染出来的字符串。渲染成 k/M 之后
+    # 1,048,576 和 1,050,000 都是 `~1.05M`，拿字符串做 key 会把两个不同的闸门
+    # 静默并成一行 —— 那是丢数据，而不是省地方。
     by_limits = {}
     for name, limits in grouped.items():
         values = tuple(
-            tuple(sorted(_format_model_limit(value) for value in limits[field]))
+            tuple(sorted(limits[field], key=_limit_sort_key))
             for field in ("max_input_tokens", "max_output_tokens")
         )
         by_limits.setdefault(values, []).append(name)
 
-    lines = [f"\n📋 模型 {len(grouped)} 个（输入/输出 上限，按限制合并）:"]
-    for values, names_in_group in by_limits.items():
-        limits_text = "/".join(
-            ("/".join(value) if value else "未设上限") for value in values
-        )
-        lines.append(f"- {limits_text} → " + "、".join(names_in_group))
+    def _cell(raw_values) -> str:
+        if not raw_values:
+            return _NO_LIMIT
+        return "/".join(_format_model_limit(value) for value in raw_values)
+
+    # 一行一个限制组，按输入上限升序；未设上限（= 我们这侧没闸门）排最前，
+    # 它是"待处理"那一档，放在最上面比埋在中间有用。
+    def _row_order(raw_values):
+        # 空 ⇒ `(-1, …)`：`_limit_sort_key(None)` 把 None 垫到最后（给同一栏里
+        # 多个值排序时是对的），但**行序**要的是相反方向，所以这里不能复用它。
+        return (-1, 0.0, "") if not raw_values else _limit_sort_key(raw_values[0])
+
+    rows = []
+    for values, names_in_group in sorted(
+        by_limits.items(),
+        key=lambda item: (_row_order(item[0][0]), _row_order(item[0][1])),
+    ):
+        rows.append((_cell(values[0]), _cell(values[1]),
+                     "、".join(sorted(names_in_group))))
+
+    w_in = max([_display_width("输入")] + [_display_width(r[0]) for r in rows])
+    w_out = max([_display_width("输出")] + [_display_width(r[1]) for r in rows])
+    # 模型名那栏软换行：一行装不下就折到续行，续行缩进到模型列，读起来还是一张表。
+    w_models = 44
+
+    lines = [
+        f"\n📋 模型 {len(grouped)} 个，{len(rows)} 组上限"
+        f"（{_NO_LIMIT} = 未设上限，~ = 近似值）\n",
+        f"  {_pad('输入', w_in)}  {_pad('输出', w_out)}  模型",
+        f"  {'-' * w_in}  {'-' * w_out}  {'-' * 30}",
+    ]
+    indent = " " * (2 + w_in + 2 + w_out + 2)
+    for cell_in, cell_out, models in rows:
+        for index, chunk in enumerate(_wrap_models(models, w_models)):
+            if index == 0:
+                lines.append(f"  {_pad(cell_in, w_in)}  {_pad(cell_out, w_out)}  {chunk}")
+            else:
+                lines.append(indent + chunk)
     text = "\n".join(lines)
     _MODEL_CATALOG_CACHE[cache_key] = (now, text)
     return text
+
+
+def _wrap_models(models: str, width: int) -> List[str]:
+    """在 `、` 边界折行，永不切断模型名 —— 半个模型名比一行太长糟糕得多。"""
+    chunks, current = [], ""
+    for part in models.split("、"):
+        candidate = f"{current}、{part}" if current else part
+        if current and _display_width(candidate) > width:
+            chunks.append(current + "、")
+            current = part
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks or [""]
 
 
 # TTFT 一条查询取回「今天这把 key 用过的每个模型」的 P50/P90。上限只为防一把 key
@@ -486,12 +605,29 @@ async def _ttft_text(user_api_key_dict: Any) -> str:
         if not rows:
             return _keep("\n⚡ TTFT 今日：暂无有效样本（今日尚无流式请求）。")
 
-        lines = ["\n⚡ TTFT 今日 P50/P90（秒，仅今日有流量的模型）:"]
+        entries = []
         for row in rows:
-            name = row.get("g") or "（未知模型）"
+            entries.append((
+                row.get("g") or "（未知模型）",
+                f"{float(row['p50']):.2f}",
+                f"{float(row['p90']):.2f}",
+                str(row["n"]),
+            ))
+
+        w_name = max([_display_width("模型")] + [_display_width(e[0]) for e in entries])
+        w_p50 = max([4] + [len(e[1]) for e in entries])
+        w_p90 = max([4] + [len(e[2]) for e in entries])
+        w_n = max([_display_width("次数")] + [len(e[3]) for e in entries])
+        lines = [
+            "\n⚡ TTFT 今日（秒，仅今日有流量）\n",
+            f"  {_pad('模型', w_name)}  {_pad('P50', w_p50, True)}"
+            f"  {_pad('P90', w_p90, True)}  {_pad('次数', w_n, True)}",
+            f"  {'-' * w_name}  {'-' * w_p50}  {'-' * w_p90}  {'-' * w_n}",
+        ]
+        for name, p50, p90, count in entries:
             lines.append(
-                f"- {name} {float(row['p50']):.2f}/{float(row['p90']):.2f}"
-                f"（{row['n']} 次）"
+                f"  {_pad(name, w_name)}  {_pad(p50, w_p50, True)}"
+                f"  {_pad(p90, w_p90, True)}  {_pad(count, w_n, True)}"
             )
         return _keep("\n".join(lines))
     except Exception as exc:

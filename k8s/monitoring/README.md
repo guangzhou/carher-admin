@@ -2,6 +2,7 @@
 
 这 8 个文件在 2026-09-19 之前**只存在于集群 ConfigMap 里**，repo 一份副本都没有。
 和 `zk_session_reaper.py` 是同一个病：唯一的家是 ConfigMap，谁误删就没了，改动也没有 diff 可审。
+（`model-perf.json` 是 2026-09-25 新加的，从第一天起 repo 就是真身。）
 
 现在 repo 是真身，但**集群仍会漂移**（别人也会 patch），所以下面「改完怎么同步」
 第一步是 diff，不是 patch。
@@ -16,8 +17,30 @@
 | `prometheus.yml` | monitoring | `prometheus-config` | `prometheus.yml` |
 | `model-stability.json` | monitoring | `grafana-dashboard-litellm` | `model-stability.json` |
 | `litellm-proxy.json` | monitoring | `grafana-dashboard-litellm` | `litellm-proxy.json` |
+| `model-perf.json` | monitoring | `grafana-dashboard-litellm` | `model-perf.json` |
 | `alert2feishu.py` | monitoring | `alert2feishu-script` | `alert2feishu.py` |
 | `probe.py` | litellm-product | `litellm-probe-script` | `probe.py` |
+
+只在 repo 里、集群不需要的工具（不要去集群找它们）：
+
+| 文件 | 干什么 |
+|------|--------|
+| `gen-model-perf.py` | `model-perf.json` 的**真身**。改看板改这个脚本再生成，别手改 JSON |
+| `verify-dashboard-queries.py` | 拿真 Prometheus 跑一遍看板里每条 query，出不了数就退 1 |
+
+`verify-dashboard-queries.py` 是给看板配的量具 —— 没有它，一块查了不存在指标的面板
+会永远空着且零报错（`model-stability.json` 的「被临时拉黑(cooldown)的次数」就是这样
+空了十几天）。用法：
+
+```bash
+python3 k8s/monitoring/verify-dashboard-queries.py \
+  k8s/monitoring/model-perf.json --prom http://10.68.13.198:30900
+```
+
+⚠️ 它只判「这条 query 出不出数」，判不了「出的数对不对」。而且**必须配阳性对照**
+（拿一份已知在服务的看板跑一遍）：它自己坏过两次都是假红 —— 把 `by (...)` 里的
+**标签名**当成指标名，以及没替换 Grafana 的 `$__range` 宏导致 HTTP 400。
+一屏红先疑它，别先疑看板。
 
 凭据一个都不在这些文件里，全走 env（`PROBE_KEY` / `ADMIN_KEY` / `FEISHU_WEBHOOK` /
 `FEISHU_SIGN_SECRET` / Prometheus 的 `credentials_file`）。**保持这个性质**，

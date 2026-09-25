@@ -775,7 +775,7 @@
         "x": 12,
         "y": 78
       },
-      "description": "一条腿连续失败到阈值（allowed_fails 3 / cooldown_time 60）就会被拉黑一段时间。这里读的是 litellm_deployment_state==2（当前处于完全故障/冷却），口径是**当前有几个落点在里面**，不是**被拉黑了几次**。\n\n⚠️ 为什么不用原生的次数指标：本面板原先查 litellm_deployment_cooled_down_total，17 天恒空且零报错。根因不是没发生过冷却（同期 42 个落点进过 state=2，而设这个 state 的就在 inc 计数器的前一行），而是我们 config 的 prometheus_metrics_config 里 deployment_state 组把 exception_status 裁掉了，上游 increment_deployment_cooled_down() 却按 5 个位置参数调 .labels()，每次冷却都抛 ValueError: Incorrect label count —— 计数器永远拿不到子序列。在 pod 内用同一份 config 起独立进程实测复现过。\n修法：把 litellm_deployment_cooled_down 从 deployment_state 组里拆出来单独一组，include_labels 加上 exception_status（state 那个 gauge 只吃 4 个标签，直接往共用组里加会把它一起打坏）。改 config 要重启生产代理，所以没顺手改。",
+      "description": "一条腿连续失败到阈值（allowed_fails 3 / cooldown_time 60）就会被拉黑一段时间。这里读的是 litellm_deployment_state==2（当前处于完全故障/冷却），口径是**当前有几个落点在里面**，不是**被拉黑了几次**。\n\n⚠️ 为什么不用原生的次数指标：本面板原先查 litellm_deployment_cooled_down_total，17 天恒空且零报错。根因不是没发生过冷却（同期 42 个落点进过 state=2，而设这个 state 的就在 inc 计数器的前一行），而是我们 config 的 prometheus_metrics_config 里 deployment_state 组把 exception_status 裁掉了，上游 increment_deployment_cooled_down() 却按 5 个位置参数调 .labels()，每次冷却都抛 ValueError: Incorrect label count —— 计数器永远拿不到子序列。在 pod 内用同一份 config 起独立进程实测复现过。\n修法：把 litellm_deployment_cooled_down 从 deployment_state 组里拆出来单独一组，include_labels 加上 exception_status（state 那个 gauge 只吃 4 个标签，直接往共用组里加会把它一起打坏）。2026-09-25 已切生产（CM litellm-cwfb-stable-a26e1e6160bb，滚动更新 maxUnavailable=0，全程就绪端点恒 4），计数器当天就收到第一条真实序列。本面板口径不变，要看「发生了几次」请看下面那块「冷却发生次数」。",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -1510,6 +1510,48 @@
         }
       ],
       "description": "1229 个落点背后只有 102 个上游端点。逐落点全探会把订阅账号额度烧穿，所以按端点收敛。"
+    },
+    {
+      "type": "timeseries",
+      "title": "冷却发生次数 (按 HTTP 状态)",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 136
+      },
+      "description": "litellm_deployment_cooled_down_total 的增量 —— 口径是**当前时间范围里发生了几次冷却**，和上面那块「当前有几个落点在里面」是两个不同的量，别混读。\n\n这个指标 2026-09-08~09-25 恒空过 17 天，不是没发生冷却，是我们自己 config 的 include_labels 把 exception_status 裁掉了、上游却按 5 个位置参数调 .labels()，每次冷却抛 ValueError。09-25 把它拆成独立的 deployment_cooldown 组修掉了。\n\n⚠️ 空 ≠ 坏：此刻没有落点在冷却时它本来就该是空的。判它死活要先看上面那块是不是也为 0。\n⚠️ 生产代理重启会让计数器归零，所以看趋势只用 increase/rate，别读绝对值。",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "stacking": {
+              "mode": "normal"
+            },
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "calcs": [
+            "sum"
+          ],
+          "placement": "right"
+        }
+      },
+      "targets": [
+        {
+          "datasource": null,
+          "editorMode": "code",
+          "expr": "sum by (exception_status) (increase(litellm_deployment_cooled_down_total[$__range]))",
+          "legendFormat": "{{exception_status}}",
+          "range": true,
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

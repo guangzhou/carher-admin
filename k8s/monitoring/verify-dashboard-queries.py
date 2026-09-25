@@ -31,6 +31,28 @@ SUBST = {
     "$__range": "30m", "$__range_s": "1800", "$__range_ms": "1800000",
 }
 
+# `$1`..`$9` 是 label_replace 的捕获组，不是看板变量，别当变量查。
+_VAR = re.compile(r"\$(__)?([A-Za-z_]\w*)")
+
+
+def undefined_vars(expr, defined):
+    """用了但看板没定义的变量。
+
+    这是 2026-09-25 补的：**代入本身会把这个病藏起来**。尺子无条件把 `$win`
+    换成 `30m` 再去打 Prometheus，于是一块引用了看板根本没定义的变量的面板
+    在尺子这里是满分绿，在 Grafana 里却把字面量 `$win` 发出去直接报错。
+    当天我自己就差点这样上一块死面板（`model-stability.json` 的
+    `templating` 是 null，而我照另一份看板的习惯写了 `[$win]`）。
+    """
+    out = set()
+    for m in _VAR.finditer(expr):
+        if m.group(1):          # $__ 开头 = Grafana 内置宏，看板不必定义
+            continue
+        name = m.group(2)
+        if name not in defined:
+            out.add("$" + name)
+    return out
+
 
 # `litellm_*` 这种 token 既可能是指标名，也可能是 **label 名**
 # （`by (litellm_model_name)` / `{litellm_model_name="x"}` / label_replace 的字符串参数）。
@@ -78,6 +100,8 @@ def main():
 
     dash = json.load(open(args.dashboard))
     names = set(fetch(args.prom, "/api/v1/label/__name__/values", {})["data"])
+    tpl = dash.get("templating") or {}
+    defined = {v["name"] for v in (tpl.get("list") or [])}
 
     rows, bad = [], 0
     for p in walk(dash["panels"]):
@@ -85,6 +109,13 @@ def main():
             ref = t.get("refId", "?")   # 有些 target 没有 refId，早期手写的看板里有
             raw = t.get("expr")
             if not raw:
+                continue
+            # 先判变量定义，再判查询出不出数 —— 代入会把未定义变量藏起来
+            undef = undefined_vars(raw, defined)
+            if undef:
+                rows.append(("UNDEF", p.get("title"), ref, "-",
+                             "看板未定义变量: " + ",".join(sorted(undef))))
+                bad += 1
                 continue
             expr = expand(raw)
             try:
@@ -119,7 +150,7 @@ def main():
     c = Counter(r[0] for r in rows)
     print("\n" + "  ".join(f"{k}={v}" for k, v in sorted(c.items())))
     if bad:
-        print(f"\nFAIL: {bad} 条查询指向不存在的指标或执行失败")
+        print(f"\nFAIL: {bad} 条查询指向不存在的指标、用了看板未定义的变量，或执行失败")
         return 1
     if c.get("EMPTY"):
         print(f"\n注意: {c['EMPTY']} 条查询指标存在但当前无数据，需人工判是否合理")

@@ -26,7 +26,7 @@
 | 文件 | 干什么 |
 |------|--------|
 | `gen-model-perf.py` | `model-perf.json` 的**真身**。改看板改这个脚本再生成，别手改 JSON |
-| `verify-dashboard-queries.py` | 拿真 Prometheus 跑一遍看板里每条 query，出不了数就退 1 |
+| `verify-dashboard-queries.py` | 拿真 Prometheus 跑一遍看板里每条 query，出不了数、或用了看板未定义的变量就退 1 |
 
 `verify-dashboard-queries.py` 是给看板配的量具 —— 没有它，一块查了不存在指标的面板
 会永远空着且零报错（`model-stability.json` 的「被临时拉黑(cooldown)的次数」就是这样
@@ -41,6 +41,14 @@ python3 k8s/monitoring/verify-dashboard-queries.py \
 （拿一份已知在服务的看板跑一遍）：它自己坏过两次都是假红 —— 把 `by (...)` 里的
 **标签名**当成指标名，以及没替换 Grafana 的 `$__range` 宏导致 HTTP 400。
 一屏红先疑它，别先疑看板。
+
+⚠️ **它还有第三个坏法，2026-09-25 已补：代入本身会把病藏起来。** 尺子无条件把 `$win`
+换成 `30m` 再去打 Prometheus，于是一块引用了**看板根本没定义的变量**的面板在尺子这里满分绿，
+在 Grafana 里却把字面量 `$win` 发出去直接报错。当天我差点这样上一块死面板
+（`model-stability.json` 的 `templating` 是 `null`，而我照 `model-perf.json` 的习惯写了 `[$win]`）。
+现在非 `$__` 开头的变量必须在 `templating.list` 里有定义，否则报 `UNDEF` 退 1；
+`$1`..`$9` 是 `label_replace` 的捕获组，不算变量。这个检查配了双向对照：
+合成一份把 `$win` 塞回去的副本必须 `UNDEF`，真定义了 `$win` 的 `model-perf.json` 必须放过。
 
 凭据一个都不在这些文件里，全走 env（`PROBE_KEY` / `ADMIN_KEY` / `FEISHU_WEBHOOK` /
 `FEISHU_SIGN_SECRET` / Prometheus 的 `credentials_file`）。**保持这个性质**，
@@ -136,7 +144,7 @@ Error 状态 —— 规则从写下来那天起一次都没评估过。判等要
 
 绿色必须先证明量具活着。
 
-## 已备未切：冷却次数指标被我们自己的 `include_labels` 打死了
+## 已修：冷却次数指标曾被我们自己的 `include_labels` 打死 17 天
 
 `litellm_deployment_cooled_down_total` 从建看板起 17 天恒空、零报错。**不是没发生过冷却。**
 
@@ -156,9 +164,14 @@ Error 状态 —— 规则从写下来那天起一次都没评估过。判等要
 所以「指标不在 Prometheus 里」和「从没 inc 过」在这条路上同形 —— 不能拿「查不到」直接判指标不存在。
 分辨方法是在容器内起独立进程复现注册，或看紧邻代码路径有没有留下痕迹（这里是 state=2）。
 
-**修法（已实测通过，未上生产）**：把它从共用组里拆出来单独一组。
-不能直接往 `deployment_state` 组加 `exception_status` —— `litellm_deployment_state` 那个 gauge
-只吃 4 个标签，加了会把**当前正常工作的**指标一起打坏。
+**同族审计（做过，别再重做一遍）**：这份 config 配了 12 个指标，逐个数 Prometheus 里的序列数，
+**11 个都有活序列，唯一零序列的就是 `cooled_down`** ⇒ 病是孤立的，一次滚动就够，不用捆别的。
+（⛔ 别用"静态扫 `.labels(` 调用点数位置参数"来做这个审计 —— 实测它把**当前正常工作的**
+`litellm_deployment_state` 判成"注册 4 传 1"。一屏红先疑提取器。）
+
+**修法**：把它从共用组里拆出来单独一组。不能直接往 `deployment_state` 组加
+`exception_status` —— `litellm_deployment_state` 那个 gauge 只吃 4 个标签，加了会把**当前正常工作的**
+指标一起打坏。
 
 ```yaml
   - group: deployment_state
@@ -171,11 +184,61 @@ Error 状态 —— 规则从写下来那天起一次都没评估过。判等要
     include_labels: [litellm_model_name, model_id, api_base, api_provider, exception_status]
 ```
 
-**为什么没顺手改**：生产 config 挂的是派生 CM `litellm-cwfb-stable-<hash>`，`subPath` 永不热更 ⇒
-要新建 hash CM + 换卷名 + 滚动生产代理。这是生产切换，不是监控侧改动，得单独拍板。
+### 2026-09-25 已切生产，怎么切的 / 怎么滚回去
 
-在那之前，看板 `当前被判完全故障 / 冷却的落点数` 读的是 `litellm_deployment_state == 2`
-（口径是**当前有几个落点在里面**，不是**被拉黑了几次**），面板描述里写明了这个差别。
+生产 config 挂的是派生 CM `litellm-cwfb-stable-<hash>`、`subPath` 永不热更，所以这是**生产切换**，
+不是监控侧改动。hash 约定 = `config.yaml` 内容的 `sha256[:12]`，**CM 名字自证内容**。
+
+| | |
+|---|---|
+| 旧 CM（回滚点，**原地未动**） | `litellm-cwfb-stable-aa08e8cdcd1e` |
+| 新 CM | `litellm-cwfb-stable-a26e1e6160bb` |
+| 动的对象 | `deploy/litellm-proxy` 的 `config` 卷名（strategic merge 按 `name: config` 精确合并，不碰其余 7 个卷）|
+
+回滚 = 把卷名 patch 回旧 CM，旧 CM 一直在。
+
+切换纪律，按顺序：
+
+1. **文本级手术改**，不重序列化整个 61KB YAML（否则 diff 糊成一片、审不了）。
+2. **语义 diff 断言**：摘掉 `prometheus_metrics_config` 后两边必须完全相等，且指标集合不变（12 个）
+   —— 这是防「推文件上生产 = 把这文件里所有未提交改动一起发」。
+3. **在 pod 内起独立进程跑双向对照**：旧 config 下 `increment` 必抛 `ValueError` 且零样本，
+   新 config 下两个调用都 OK 且计数器真出样本，同时 `deployment_state` **仍是 4 个标签**（没被连坐）。
+4. **门禁贴在换卷名正前方**：新 CM 存在 + 内容 sha 自证 + 旧 CM 在 + 切换前就绪端点 == 4，
+   任一不过就 `PREPARED, NOT CUT OVER`。
+5. 滚动期间每 15s 记一次就绪端点数。`maxSurge=1 / maxUnavailable=0` ⇒ **全程恒 4，没有降载**，
+   4 个新 pod 重启次数 0。
+
+验收三层，不许只做前两层：
+
+- **配置** — CM 内容 sha == `a26e1e6160bb`。
+- **装载** — 4/4 pod 容器内 `sha256sum /app/config.yaml` 都等于新值。
+- **兜住** — 真实流量下计数器出了第一条序列：`exception_status="401"`，落点
+  `chatgpt-acct-85-gpt-6-luna`。**不是靠探针，是真事件。**
+  同时核了 `litellm_deployment_state` 的标签集仍无 `exception_status`。
+
+⚠️ **切换后 `state==2` 一度是 0 个落点。那时计数器为空是预期，不是失败** ——
+判它死活必须先看 state 那块是不是也为 0，否则就会把「没发生」读成「又坏了」。
+⚠️ 生产代理重启会让所有计数器归零，所以**切换后短期内序列数比切换前少是正常的**，
+看趋势只用 `increase`/`rate`，别读绝对值、别把它读成回归。
+
+**顺带发现（只记录，没动手）**：第一条冷却是 `chatgpt-acct-85-gpt-6-luna` 返 401。
+acct-85 是 free 档，当初上 `gpt-6-sol` 时是被**明确排除**的，但它在 luna 组里且在返 401。
+这碰的是生产路由，不在本次范围内。
+
+看板侧现在两块面板、**两个不同口径，别混读**：
+`当前被判完全故障 / 冷却的落点数` 读 `state == 2`（当前有几个在里面），
+`冷却发生次数 (按 HTTP 状态)` 读 `increase(cooled_down_total[$__range])`（发生了几次）。
+
+### ⚠️ 遗留：这份生产 `config.yaml` 在 repo 里没有家
+
+本文件开篇那个病（「唯一的家是 ConfigMap，谁误删就没了，改动也没有 diff 可审」），
+`litellm-cwfb-stable-<hash>` 那份 61KB 生产 config **正是如此** —— `git ls-files` 里没有它。
+查过了，**阻碍不是凭据**：92 个 `api_key` 行里 88 个是 `os.environ/` 引用、4 个是 `dummy-*` 占位，
+零真实密钥，所以技术上是可以入库的。阻碍是同步纪律：它每次改都换 hash CM，
+入库就等于多一条必须维护的 repo↔集群同步义务，而这类义务一旦漂移就是静默的。
+**这件事得单独拍板，本轮只记录，没有擅自入库。**
+
 
 ## 待填：告警现在评估正确了，但送不到任何人手上
 

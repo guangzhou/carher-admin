@@ -337,9 +337,18 @@ def cmd_verify(fname: str) -> int:
         got = sh("%s -n %s exec %s -- sha256sum /app/%s" % (KUBECTL, NS, p, fname),
                  check=False).split()
         ok = bool(got) and got[0] == want_sha
+        # 🔴 这个 grep 必须按**被发布的那个文件**收窄。
+        #    原先它 grep 整份日志里任何 import 错误，于是恒抓到既存的
+        #    `[sitecustomize] responses_aclose import failed`（改动**前**的旧 pod
+        #    同样 4 条）⇒ 每次发布都报 `import错误=4` 的假红，把整条验收拦住。
+        #    一屏红里对照对象也红 ⇒ 先疑量具。2026-09-25 修。
+        #    ⚠️ 别改成「减掉一个基线数」—— 那会在真出错时把错误数也一起减掉。
+        #    正解是只认提到本文件名（或其模块名）的那些行。
+        modname = fname[:-3] if fname.endswith(".py") else fname
         bad = sh("%s -n %s logs %s --since=10m 2>/dev/null | "
-                 "grep -cE 'ImportError|SyntaxError|ModuleNotFoundError'"
-                 % (KUBECTL, NS, p), check=False).strip() or "0"
+                 "grep -E 'ImportError|SyntaxError|ModuleNotFoundError' | "
+                 "grep -cE '%s' || true"
+                 % (KUBECTL, NS, p, modname), check=False).strip() or "0"
         print("  %s sha=%s  import错误=%s  %s"
               % ("✓" if ok and bad == "0" else "✗", (got[0][:12] if got else "读不到"),
                  bad, p))

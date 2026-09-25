@@ -230,6 +230,37 @@ acct-85 是 free 档，当初上 `gpt-6-sol` 时是被**明确排除**的，但�
 `当前被判完全故障 / 冷却的落点数` 读 `state == 2`（当前有几个在里面），
 `冷却发生次数 (按 HTTP 状态)` 读 `increase(cooled_down_total[$__range])`（发生了几次）。
 
+### 🔴 未解：`failure_responses_total` 记不到 401，3 块面板 + 1 条告警对 401 全盲
+
+2026-09-26 发现，**这不是 `include_labels` 那个病**（已证伪：它 340 条序列、`exception_status`
+标签健在、8 个状态码都有），是这把计数器**确实一条 401 都没记过**。
+
+数据三方对照：
+
+| 尺子 | 401 |
+|---|---|
+| `litellm_deployment_cooled_down_total` | 有，9 条序列 |
+| SpendLogs `error_information` 近 6h | 有，45 行 `AuthenticationError/401` |
+| `litellm_deployment_failure_responses_total`（全集群 340 条序列）| **零** |
+
+穷举确认：整个 Prometheus 里带 `exception_status="401"` 的指标**只有 `cooled_down_total` 一个**。
+而 `failure_responses_total` 的 303/340 条序列带 `model_id` ⇒ 它**也是按腿计的**，
+所以「一个按腿计一个按请求计」解释不了这个差。**机制未解，不编。**
+下一步是读 401 路径上这个 counter 到底 inc 没 inc，**不是再换一把尺子**。
+
+受影响的东西（建在它上面 ⇒ 看不见任何 401）：
+
+- `model-stability.json` 三块：`重试/兜底救回来的次数`、`上游腿失败速率`、`上游腿失败占比`
+- 告警 `llm-stab-leg-failrate`「单条上游腿失败率 > 20%」（repo 与集群各 1 处，**无漂移**）
+
+⚠️ **这条告警正好漏掉它被设计来抓的那个案例**：`chatgpt-acct-175-gpt-5.6-sol` 在
+以约 **10 次/小时**的速率反复 401 冷却、烧重试预算，而这条规则永远不会为它响
+—— 它的分子恒 0。判这类腿只能用 `cooled_down_total`。
+
+⚠️ 顺带纠正一个我自己说过的错：**「冷却是一次突发、已停止增长」是错的**。
+那是一次时点读数（`increase[15m]` 恰好为 0）就下的结论，复核时 175-sol 仍在
+约 10 次/小时地涨。**判「还在不在烧」必须比两个时点或看速率，单次 `increase` 为 0 不是结论。**
+
 ### ⚠️ 遗留：这份生产 `config.yaml` 在 repo 里没有家
 
 本文件开篇那个病（「唯一的家是 ConfigMap，谁误删就没了，改动也没有 diff 可审」），

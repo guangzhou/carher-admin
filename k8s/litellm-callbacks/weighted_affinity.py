@@ -109,6 +109,7 @@ class WeightedAffinityRouter(CustomLogger):
 
     CACHE_KEY_PREFIX = "weighted_affinity:v2"
     FAIL_MARK_KEY_PREFIX = "weighted_affinity:fail:v1"
+    DETOUR_KEY_PREFIX = "weighted_affinity:detour:v1"
 
     # ---- [2026-08-13] 故障标记分类（修「悬挂黑洞」）----
     # 背景：CrashLoop/悬挂型 zerokey 成员失败节奏 ~1次/90s，永远凑不够
@@ -199,12 +200,25 @@ class WeightedAffinityRouter(CustomLogger):
         self.quota_mark_ttl_default = int(
             os.getenv("WEIGHTED_AFFINITY_QUOTA_MARK_TTL", "21600")
         )
+        # ---- [2026-09-25] 绕行 / 改钉分离（修「一次抖动永久搬家」）----
+        # pin 指向的号只要有一瞬间不可用（router cooldown 60s、或本次请求内被
+        # weighted-failover 排除），旧实现走 MISS 分支**改写 pin**，号恢复后没有
+        # 任何回归逻辑 → 一天下来同一个会话被搬 31 次，每次砸掉整份前缀缓存
+        # （实测 cursor-buyitian-pwcf：单 session 2451 req / 31 个 acct / 24h，
+        #  prompt_tokens 跨切换点连续增长，即会话中途换号）。
+        # 现在：临时不可用 → 绕行（原 pin 保留，绕行目标自身也复用，避免绕行期
+        # 间每请求重摇把缓存碎得更细）；持续不可用超过 detour_repin_after 才
+        # 真正改钉，避开「钉的号永久死了却死守」的反效果。
+        self.detour_repin_after = int(
+            os.getenv("WEIGHTED_AFFINITY_DETOUR_REPIN_AFTER", "300")
+        )
         verbose_router_logger.info(
             "WeightedAffinityRouter: initialized (ttl=%ss, injected_cache=%s, "
-            "quota_mark_ttl_default=%ss)",
+            "quota_mark_ttl_default=%ss, detour_repin_after=%ss)",
             self.ttl_seconds,
             "yes" if cache is not None else "no",
             self.quota_mark_ttl_default,
+            self.detour_repin_after,
         )
 
     # ------------------------------------------------------------------
@@ -459,6 +473,19 @@ class WeightedAffinityRouter(CustomLogger):
     def get_fail_mark_key(cls, model_id: str) -> str:
         return f"{cls.FAIL_MARK_KEY_PREFIX}:{model_id}"
 
+    @classmethod
+    def get_detour_key(cls, affinity_cache_key: str) -> str:
+        """
+        绕行记录键 —— 与 pin 一一对应，只换前缀，便于按会话对账／单独 flush。
+        刻意**不**复用 pin 的键空间：`litellm-wa-flush-affinity.py` 按
+        `weighted_affinity:v2:*` 清 pin，绕行记录不该被那个手法连带清掉
+        （清了只是丢一次绕行上下文，不影响正确性，但会让统计失真）。
+        """
+        suffix = affinity_cache_key
+        if suffix.startswith(cls.CACHE_KEY_PREFIX + ":"):
+            suffix = suffix[len(cls.CACHE_KEY_PREFIX) + 1:]
+        return f"{cls.DETOUR_KEY_PREFIX}:{suffix}"
+
     @staticmethod
     def _get_deployment_id_from_failure_kwargs(kwargs: dict) -> Optional[str]:
         litellm_params = kwargs.get("litellm_params")
@@ -707,22 +734,30 @@ class WeightedAffinityRouter(CustomLogger):
         elif isinstance(cache_result, str):
             pinned_model_id = cache_result  # 兼容裸字符串
 
+        # pin 存在但这一刻用不了的原因；None = 本来就没 pin（真 MISS）。
+        # 有值 → 下方走「绕行」而不是「改钉」，见 __init__ 里 detour_repin_after 注释。
+        pin_unusable_reason: Optional[str] = None
+
         if pinned_model_id:
             deployment = self._find_deployment_by_model_id(deployments, pinned_model_id)
             if deployment is None:
-                # 钉的台已不在健康集合 → 视为失效，走 MISS 重选
+                # 钉的台不在健康集合（router cooldown，或本次请求内被
+                # _excluded_deployment_ids 排除）→ 临时绕行，**不改钉**。
+                pin_unusable_reason = "unhealthy"
                 verbose_router_logger.info(
                     "WeightedAffinityRouter: pinned deployment=%s not in healthy set "
-                    "(group=%s), re-picking",
+                    "(group=%s), detouring (pin kept)",
                     pinned_model_id,
                     model_group,
                 )
             elif await self._is_fail_marked(pinned_model_id):
-                # pin 指向刚报过传输类故障的成员 → 立即迁移（悬挂黑洞修复）。
-                # 从候选剔除后落入下方 MISS 重选并改写 pin；若它是唯一候选则保留。
+                # pin 指向刚报过传输类故障的成员 → 本次迁走（悬挂黑洞修复），
+                # 但同样只绕行不改钉：fail-mark 是 180s 的短标记，标记过期后
+                # 会话应该回到原号，而不是被永久搬走。
+                pin_unusable_reason = "fail-marked"
                 verbose_router_logger.info(
                     "WeightedAffinityRouter: pinned deployment=%s fail-marked "
-                    "(group=%s), re-picking",
+                    "(group=%s), detouring (pin kept)",
                     pinned_model_id,
                     model_group,
                 )
@@ -747,6 +782,10 @@ class WeightedAffinityRouter(CustomLogger):
                         cache_key,
                         e,
                     )
+                # pin 又能用了 → 清掉绕行记录，让 detour_repin_after 的计时从
+                # 下一次真的生病时重新起算（否则陈旧 since 会让日后一次抖动
+                # 被误判成「持续不健康」而直接改钉）。
+                await self._clear_detour(cache_key)
                 verbose_router_logger.info(
                     "WeightedAffinityRouter: HIT group=%s user=%s session=%s -> "
                     "pinned deployment=%s",
@@ -757,9 +796,68 @@ class WeightedAffinityRouter(CustomLogger):
                 )
                 return [deployment]
 
-        # ---- 2) MISS → weighted 选台（避开 fail-marked 成员）+ 写缓存 ----
+        # ---- 2) 选台（避开 fail-marked 成员）----
+        chosen = await self._pick_avoiding_fail_marks(deployments)
+        if chosen is None:
+            # 理论上不会发生（_weighted_pick 有兜底），保险起见原样返回
+            return deployments
+
+        chosen_id = self._get_model_id(chosen)
+        if chosen_id is None:
+            verbose_router_logger.debug(
+                "WeightedAffinityRouter: chosen deployment has no model_info.id, "
+                "returning all deployments unchanged"
+            )
+            return deployments
+
+        # ---- 2a) pin 本来就不存在 → 真 MISS：选台 + 写 pin（原语义）----
+        if pin_unusable_reason is None:
+            try:
+                await self.cache.async_set_cache(
+                    cache_key,
+                    {"model_id": chosen_id},
+                    ttl=self.ttl_seconds,
+                )
+            except Exception as e:
+                # 写缓存失败不阻断请求，只是这次没黏上而已
+                verbose_router_logger.debug(
+                    "WeightedAffinityRouter: cache set failed key=%s err=%s", cache_key, e
+                )
+
+            verbose_router_logger.info(
+                "WeightedAffinityRouter: MISS group=%s user=%s session=%s -> weighted-pick "
+                "deployment=%s weight=%s (total_candidates=%d, ttl=%ss)",
+                model_group,
+                self._shorten_for_logs(user_key),
+                "yes" if session_fp else "no",
+                chosen_id,
+                self._get_weight(chosen),
+                len(deployments),
+                self.ttl_seconds,
+            )
+            return [chosen]
+
+        # ---- 2b) pin 存在但这一刻用不了 → 绕行；只有持续生病才改钉 ----
+        return await self._detour(
+            cache_key=cache_key,
+            model_group=model_group,
+            user_key=user_key,
+            session_fp=session_fp,
+            pinned_model_id=cast(str, pinned_model_id),
+            reason=pin_unusable_reason,
+            deployments=deployments,
+            fresh_pick=chosen,
+            fresh_pick_id=chosen_id,
+        )
+
+    # ------------------------------------------------------------------
+    # 绕行 / 改钉（2026-09-25，见 __init__ 里 detour_repin_after 注释）
+    # ------------------------------------------------------------------
+    async def _pick_avoiding_fail_marks(
+        self, deployments: List[dict]
+    ) -> Optional[dict]:
+        """weighted 选台，最多重摇 3 次避开 fail-marked 成员；绝不返回空。"""
         pick_pool = list(deployments)
-        chosen: Optional[dict] = None
         for _ in range(3):
             candidate = self._weighted_pick(pick_pool)
             if candidate is None:
@@ -775,47 +873,155 @@ class WeightedAffinityRouter(CustomLogger):
                     if str(self._get_model_id(d)) != str(candidate_id)
                 ]
                 continue
-            chosen = candidate
-            break
-        if chosen is None:
-            # 兜底：全被标记/重摇耗尽 → 从原始候选里直接选，绝不返回空
-            chosen = self._weighted_pick(deployments)
-        if chosen is None:
-            # 理论上不会发生（_weighted_pick 有兜底），保险起见原样返回
-            return deployments
+            return candidate
+        # 兜底：全被标记/重摇耗尽 → 从原始候选里直接选
+        return self._weighted_pick(deployments)
 
-        chosen_id = self._get_model_id(chosen)
-        if chosen_id is None:
+    async def _clear_detour(self, cache_key: str) -> None:
+        """pin 恢复可用时清掉绕行记录。失败静默 —— 绝不阻断主流程。"""
+        try:
+            cache = self.cache
+            detour_key = self.get_detour_key(cache_key)
+            deleter = getattr(cache, "async_delete_cache", None)
+            if deleter is not None:
+                await deleter(detour_key)
+            else:
+                # 退化后端（内存 dict / 老 DualCache）没有 delete → 写空值+极短 TTL
+                await cache.async_set_cache(detour_key, None, ttl=1)
+        except Exception:
+            pass
+
+    async def _detour(
+        self,
+        cache_key: str,
+        model_group: str,
+        user_key: str,
+        session_fp: Optional[str],
+        pinned_model_id: str,
+        reason: str,
+        deployments: List[dict],
+        fresh_pick: dict,
+        fresh_pick_id: str,
+    ) -> List[dict]:
+        """
+        pin 存在但这一刻不可用时的处置。三种结局：
+
+        - **绕行复用**：已有绕行记录且那台还能用 → 继续用它（绕行期间也保持
+          黏性，不然每个请求重摇会把缓存碎得比改钉更细），`since` 不变。
+        - **绕行新建**：没有记录 / 记录里那台也不能用了 → 新选一台记下来；
+          `since` 沿用已有值（生病是从第一次绕行起算的，不能被刷新，否则
+          永久死号会因为一直刷新而永远走不到改钉）。
+        - **改钉**：`now - since >= detour_repin_after` → pin 指向的号不是抖动
+          而是真的长期不可用，这时才把 pin 改写成替补并清掉绕行记录。
+        """
+        detour_key = self.get_detour_key(cache_key)
+        record: Optional[dict] = None
+        try:
+            raw = await self.cache.async_get_cache(key=detour_key)
+            if isinstance(raw, dict):
+                record = raw
+        except Exception as e:
             verbose_router_logger.debug(
-                "WeightedAffinityRouter: chosen deployment has no model_info.id, "
-                "returning all deployments unchanged"
+                "WeightedAffinityRouter: detour get failed key=%s err=%s", detour_key, e
             )
-            return deployments
 
+        now = time.time()
+        since = now
+        if record is not None:
+            try:
+                since = float(record.get("since", now))
+            except (TypeError, ValueError):
+                since = now
+
+        sick_for = max(0.0, now - since)
+
+        # ---- 改钉：病得够久，不是抖动 ----
+        if record is not None and sick_for >= self.detour_repin_after:
+            try:
+                await self.cache.async_set_cache(
+                    cache_key,
+                    {"model_id": fresh_pick_id},
+                    ttl=self.ttl_seconds,
+                )
+            except Exception as e:
+                verbose_router_logger.debug(
+                    "WeightedAffinityRouter: repin set failed key=%s err=%s",
+                    cache_key,
+                    e,
+                )
+            await self._clear_detour(cache_key)
+            verbose_router_logger.info(
+                "WeightedAffinityRouter: REPIN group=%s user=%s session=%s -> old=%s "
+                "unusable for %.0fs (%s, >=%ss), pin moved to %s",
+                model_group,
+                self._shorten_for_logs(user_key),
+                "yes" if session_fp else "no",
+                pinned_model_id,
+                sick_for,
+                reason,
+                self.detour_repin_after,
+                fresh_pick_id,
+            )
+            return [fresh_pick]
+
+        # ---- 绕行复用：上次的替补还能用就继续用它 ----
+        if record is not None:
+            prev_id = record.get("model_id")
+            if prev_id:
+                prev = self._find_deployment_by_model_id(deployments, str(prev_id))
+                if prev is not None and not await self._is_fail_marked(str(prev_id)):
+                    try:
+                        await self.cache.async_set_cache(
+                            detour_key,
+                            {"model_id": str(prev_id), "since": since},
+                            ttl=max(self.detour_repin_after * 2, 60),
+                        )
+                    except Exception as e:
+                        verbose_router_logger.debug(
+                            "WeightedAffinityRouter: detour refresh failed key=%s "
+                            "err=%s",
+                            detour_key,
+                            e,
+                        )
+                    verbose_router_logger.info(
+                        "WeightedAffinityRouter: DETOUR group=%s user=%s session=%s -> "
+                        "pin=%s unusable %.0fs (%s), reusing detour=%s (pin kept)",
+                        model_group,
+                        self._shorten_for_logs(user_key),
+                        "yes" if session_fp else "no",
+                        pinned_model_id,
+                        sick_for,
+                        reason,
+                        prev_id,
+                    )
+                    return [prev]
+
+        # ---- 绕行新建：since 沿用已有值，不刷新 ----
         try:
             await self.cache.async_set_cache(
-                cache_key,
-                {"model_id": chosen_id},
-                ttl=self.ttl_seconds,
+                detour_key,
+                {"model_id": fresh_pick_id, "since": since},
+                ttl=max(self.detour_repin_after * 2, 60),
             )
         except Exception as e:
-            # 写缓存失败不阻断请求，只是这次没黏上而已
             verbose_router_logger.debug(
-                "WeightedAffinityRouter: cache set failed key=%s err=%s", cache_key, e
+                "WeightedAffinityRouter: detour set failed key=%s err=%s",
+                detour_key,
+                e,
             )
-
         verbose_router_logger.info(
-            "WeightedAffinityRouter: MISS group=%s user=%s session=%s -> weighted-pick "
-            "deployment=%s weight=%s (total_candidates=%d, ttl=%ss)",
+            "WeightedAffinityRouter: DETOUR group=%s user=%s session=%s -> pin=%s "
+            "unusable %.0fs (%s), new detour=%s (pin kept, repin_after=%ss)",
             model_group,
             self._shorten_for_logs(user_key),
             "yes" if session_fp else "no",
-            chosen_id,
-            self._get_weight(chosen),
-            len(deployments),
-            self.ttl_seconds,
+            pinned_model_id,
+            sick_for,
+            reason,
+            fresh_pick_id,
+            self.detour_repin_after,
         )
-        return [chosen]
+        return [fresh_pick]
 
 
 # ---------------------------------------------------------------------------

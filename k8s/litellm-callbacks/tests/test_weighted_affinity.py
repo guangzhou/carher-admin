@@ -196,7 +196,16 @@ async def run():
     ok9 = same9 and expired
     print(f"[T9 滑动续期] 跨TTL连打同台={same9} ids={ids9}, 静默后过期={expired}  T9 {'PASS' if ok9 else 'FAIL'}")
 
-    # ---- 测试10: failover 排除名单改写 session pin（排除钉的台 → 换台并保持新台）----
+    # ---- 测试10: failover 排除名单只绕行、不改钉（2026-09-25 语义翻转）----
+    #
+    # 这条断言原先钉的是**反的**：老实现在排除名单命中时走 MISS 分支改写 pin，
+    # 测试也就跟着断言「后续 == 重挑的台」。2026-09-25 查 cursor-buyitian-pwcf
+    # 才发现那正是病根 —— 单会话 24h 被搬 31 个 acct，每搬一次砸掉整份前缀缓存
+    # （session_id 逐字相同、status=success、prompt_tokens 跨切换点连续增长，
+    #  即会话中途换号而不是新会话重摇）。排除名单是**请求级**的临时状态，
+    # cooldown 也只有 60s，都不该留下永久后果。
+    #
+    # 现在的契约：这一刻绕行到替补，pin 原封不动；号一恢复就回家。
     key10 = "%064x" % 101010
     kw = kwargs_for(key10)
     kw["prompt_cache_key"] = "sess-failover"
@@ -213,6 +222,9 @@ async def run():
         messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
     )
     repicked10 = pick_id(res)
+    # 绕行期间 pin 必须还指向原台（不是「反正下次会回来」，而是缓存里没被动过）
+    ck10 = handler.get_affinity_cache_key("wtest", key10, "sess-failover")
+    pin_after_detour10 = (await handler.cache.async_get_cache(key=ck10) or {}).get("model_id")
     kw = kwargs_for(key10)
     kw["prompt_cache_key"] = "sess-failover"
     res = await handler.async_filter_deployments(
@@ -220,10 +232,22 @@ async def run():
         messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
     )
     after10 = pick_id(res)
-    ok10 = repicked10 is not None and repicked10 != pinned10 and after10 == repicked10
-    print(f"[T10 failover 改写 pin] 原={pinned10} 重挑={repicked10} 后续={after10}  T10 {'PASS' if ok10 else 'FAIL'}")
+    ok10 = (
+        repicked10 is not None
+        and repicked10 != pinned10        # 这一刻确实绕开了
+        and pin_after_detour10 == pinned10  # 但 pin 没被改写
+        and after10 == pinned10           # 恢复后回到原台
+    )
+    print(f"[T10 抖动只绕行不改钉] 原={pinned10} 绕行={repicked10} "
+          f"pin={pin_after_detour10} 恢复后={after10}  T10 {'PASS' if ok10 else 'FAIL'}")
 
-    # ---- 测试11: 传输类故障标记 → pin 立即迁移 + 改写（悬挂黑洞修复）----
+    # ---- 测试11: 传输类故障标记 → 本次迁走 + 绕行复用（悬挂黑洞修复）----
+    #
+    # 注意「为什么通过」变了：老实现靠改写 pin 让 stay11 == moved11；
+    # 现在 fail-mark 期内靠**绕行复用**返回同一个替补（pin 仍是原台）。
+    # 两者外部表现一样，所以这里额外断言 pin 没被改写 —— 不然这条测试会在
+    # 语义回退时继续绿。fail-mark 是 180s 短标记，过期就该回家，
+    # 永久搬家得由 detour_repin_after 决定（见 T15）。
     class Timeout(Exception):
         pass
 
@@ -253,8 +277,16 @@ async def run():
         messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
     )
     stay11 = pick_id(res)
-    ok11 = moved11 is not None and moved11 != pinned11 and stay11 == moved11
-    print(f"[T11 故障标记迁移] 原={pinned11} 迁移={moved11} 后续={stay11}  T11 {'PASS' if ok11 else 'FAIL'}")
+    ck11 = handler.get_affinity_cache_key("wtest", key11, "sess-failmark")
+    pin11 = (await handler.cache.async_get_cache(key=ck11) or {}).get("model_id")
+    ok11 = (
+        moved11 is not None
+        and moved11 != pinned11     # 标记期内确实迁走
+        and stay11 == moved11       # 绕行期保持黏性（不是每请求重摇）
+        and pin11 == pinned11       # 且 pin 没被改写
+    )
+    print(f"[T11 故障标记绕行] 原={pinned11} 迁移={moved11} 后续={stay11} "
+          f"pin={pin11}  T11 {'PASS' if ok11 else 'FAIL'}")
 
     # ---- 测试12: 4xx 客户端错误不标记 → pin 不动 ----
     class BadRequestError(Exception):
@@ -296,7 +328,84 @@ async def run():
     ok13 = isinstance(res, list) and len(res) == 1
     print(f"[T13 全标记兜底] 返回台数={len(res)} (期望1)  T13 {'PASS' if ok13 else 'FAIL'}")
 
-    oks = [ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13]
+    # ---- 测试14: 持续绕行期间保持黏性，且始终不改钉 ----
+    #
+    # 绕行本身必须也是黏的。如果绕行期每个请求都重摇，缓存会碎得比「改钉一次」
+    # 更厉害 —— 那就把 buyitian 那个病从「24h 搬 31 次」改成「每请求搬一次」。
+    async def detour_once(h, key, sess, exclude):
+        kw = kwargs_for(key)
+        kw["prompt_cache_key"] = sess
+        if exclude:
+            kw["_excluded_deployment_ids"] = set(exclude)
+        r = await h.async_filter_deployments(
+            model="wtest", healthy_deployments=make_deployments(),
+            messages=[{"role": "user", "content": "hi"}], request_kwargs=kw,
+        )
+        return pick_id(r)
+
+    h14 = mod.WeightedAffinityRouter(ttl_seconds=3600)
+    h14.detour_repin_after = 3600  # 本测试只看「不改钉」，把改钉门槛推远
+    key14 = "%064x" % 141414
+    pinned14 = await detour_once(h14, key14, "sess-detour", None)
+    subs14 = [await detour_once(h14, key14, "sess-detour", {pinned14}) for _ in range(5)]
+    ck14 = h14.get_affinity_cache_key("wtest", key14, "sess-detour")
+    pin14 = (await h14.cache.async_get_cache(key=ck14) or {}).get("model_id")
+    ok14 = (
+        len(set(subs14)) == 1               # 5 次绕行全落同一个替补
+        and subs14[0] != pinned14
+        and pin14 == pinned14               # pin 一次都没被改写
+    )
+    print(f"[T14 绕行期黏性] 原={pinned14} 替补={set(subs14)} pin={pin14}  "
+          f"T14 {'PASS' if ok14 else 'FAIL'}")
+
+    # ---- 测试15: 持续不可用超过 detour_repin_after → 真改钉 ----
+    #
+    # 反效果防线：修完「抖动不搬家」不能变成「钉的号永久死了也死守」。
+    h15 = mod.WeightedAffinityRouter(ttl_seconds=3600)
+    h15.detour_repin_after = 1
+    key15 = "%064x" % 151515
+    pinned15 = await detour_once(h15, key15, "sess-repin", None)
+    await detour_once(h15, key15, "sess-repin", {pinned15})  # 第一次绕行，记下 since
+    await asyncio.sleep(1.1)                                  # 病过门槛
+    repinned15 = await detour_once(h15, key15, "sess-repin", {pinned15})
+    ck15 = h15.get_affinity_cache_key("wtest", key15, "sess-repin")
+    pin15 = (await h15.cache.async_get_cache(key=ck15) or {}).get("model_id")
+    ok15 = (
+        repinned15 is not None
+        and repinned15 != pinned15
+        and pin15 == repinned15    # pin 真的搬到了替补
+    )
+    print(f"[T15 持续生病才改钉] 原={pinned15} 改钉到={pin15} 返回={repinned15}  "
+          f"T15 {'PASS' if ok15 else 'FAIL'}")
+
+    # ---- 测试16: pin 恢复会清掉绕行记录（陈旧 since 不得攒出误改钉）----
+    #
+    # 这条钉的是 _clear_detour。若 HIT 不清记录，since 会一直停在第一次抖动的
+    # 时刻；几小时后随便再抖一下，sick_for 立刻超过门槛 → 一次抖动直接改钉，
+    # 等于绕行机制白做。
+    h16 = mod.WeightedAffinityRouter(ttl_seconds=3600)
+    h16.detour_repin_after = 1
+    key16 = "%064x" % 161616
+    pinned16 = await detour_once(h16, key16, "sess-clear", None)
+    await detour_once(h16, key16, "sess-clear", {pinned16})   # 抖一下，写 since
+    back16 = await detour_once(h16, key16, "sess-clear", None)  # 恢复 → 应清记录
+    ck16 = h16.get_affinity_cache_key("wtest", key16, "sess-clear")
+    dk16 = h16.get_detour_key(ck16)
+    rec16 = await h16.cache.async_get_cache(key=dk16)
+    await asyncio.sleep(1.1)  # 超过门槛，但记录已清 → 不该攒进 sick_for
+    again16 = await detour_once(h16, key16, "sess-clear", {pinned16})
+    pin16 = (await h16.cache.async_get_cache(key=ck16) or {}).get("model_id")
+    ok16 = (
+        back16 == pinned16        # 恢复后回原台
+        and not isinstance(rec16, dict)  # 绕行记录已清
+        and again16 != pinned16   # 再抖仍会绕行
+        and pin16 == pinned16     # 但仍然只绕行、不改钉
+    )
+    print(f"[T16 恢复清绕行记录] 恢复={back16} 记录={rec16} 再抖={again16} "
+          f"pin={pin16}  T16 {'PASS' if ok16 else 'FAIL'}")
+
+    oks = [ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13,
+           ok14, ok15, ok16]
     print(f"\n=== 汇总: " + " ".join(f"T{i+1}={'P' if v else 'F'}" for i, v in enumerate(oks)) + " ===")
     if not all(oks):
         sys.exit(1)

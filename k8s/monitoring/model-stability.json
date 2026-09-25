@@ -768,14 +768,14 @@
     },
     {
       "type": "timeseries",
-      "title": "被临时拉黑（cooldown）的次数",
+      "title": "当前被判完全故障 / 冷却的落点数",
       "gridPos": {
         "h": 9,
         "w": 12,
         "x": 12,
         "y": 78
       },
-      "description": "一条腿连续失败到阈值就会被拉黑一段时间。拉黑频繁 = 那个上游在抖。",
+      "description": "一条腿连续失败到阈值（allowed_fails 3 / cooldown_time 60）就会被拉黑一段时间。这里读的是 litellm_deployment_state==2（当前处于完全故障/冷却），口径是**当前有几个落点在里面**，不是**被拉黑了几次**。\n\n⚠️ 为什么不用原生的次数指标：本面板原先查 litellm_deployment_cooled_down_total，17 天恒空且零报错。根因不是没发生过冷却（同期 42 个落点进过 state=2，而设这个 state 的就在 inc 计数器的前一行），而是我们 config 的 prometheus_metrics_config 里 deployment_state 组把 exception_status 裁掉了，上游 increment_deployment_cooled_down() 却按 5 个位置参数调 .labels()，每次冷却都抛 ValueError: Incorrect label count —— 计数器永远拿不到子序列。在 pod 内用同一份 config 起独立进程实测复现过。\n修法：把 litellm_deployment_cooled_down 从 deployment_state 组里拆出来单独一组，include_labels 加上 exception_status（state 那个 gauge 只吃 4 个标签，直接往共用组里加会把它一起打坏）。改 config 要重启生产代理，所以没顺手改。",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -800,8 +800,8 @@
       "targets": [
         {
           "refId": "A",
-          "legendFormat": "{{litellm_model_name}} · {{model_id}}",
-          "expr": "sum by (litellm_model_name, model_id) (rate(litellm_deployment_cooled_down_total[10m])) * 60"
+          "expr": "count by (litellm_model_name) (max by (litellm_model_name, model_id)(litellm_deployment_state) == 2)",
+          "legendFormat": "{{litellm_model_name}}"
         }
       ]
     },
@@ -1220,7 +1220,7 @@
         "x": 0,
         "y": 107
       },
-      "description": "空表 = 68 个上游端点全通。『4 配置』那几行别当故障报——是路由表上挂的模型名该端点不接受。",
+      "description": "空表 = 68 个上游端点全通。『4 配置』那几行别当故障报——是路由表上挂的模型名该端点不接受。\n\n⚠️ 这张表在 2026-09-25 之前三条查询全返 HTTP 422（many-to-many），一行都没显示过。原写法 `state * on(endpoint) group_left(model_group,model_id) target_info` 把 target_info 放在右边当『一』，但实测 4 个端点（sub2api / router9 / zero-cursor-bpi-82 / -84）各挂 2 条 target_info 序列 —— 一个端点探多条腿是正常拓扑，不是脏数据。改成把 target_info 放左边当『多』、状态放右边当『一』，两条腿都显示，不用在它们之间瞎挑一条。",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
@@ -1320,19 +1320,19 @@
           "refId": "A",
           "instant": true,
           "format": "table",
-          "expr": "(max by (endpoint, kind)(litellm_probe_state) > 0) * on(endpoint) group_left(model_group, model_id) litellm_probe_target_info"
+          "expr": "max by (endpoint, kind, model_group, model_id)(litellm_probe_target_info) * on(endpoint, kind) group_left() (max by (endpoint, kind)(litellm_probe_state) > 0)"
         },
         {
           "refId": "B",
           "instant": true,
           "format": "table",
-          "expr": "max by (endpoint, kind)(litellm_probe_latency_seconds) * on(endpoint) group_left(model_group, model_id) litellm_probe_target_info"
+          "expr": "max by (endpoint, kind, model_group, model_id)(litellm_probe_target_info) * on(endpoint, kind) group_left() (max by (endpoint, kind)(litellm_probe_latency_seconds))"
         },
         {
           "refId": "C",
           "instant": true,
           "format": "table",
-          "expr": "(time() - max by (endpoint, kind)(litellm_probe_last_success_timestamp_seconds)) * on(endpoint) group_left(model_group, model_id) litellm_probe_target_info"
+          "expr": "max by (endpoint, kind, model_group, model_id)(litellm_probe_target_info) * on(endpoint, kind) group_left() (time() - max by (endpoint, kind)(litellm_probe_last_success_timestamp_seconds))"
         }
       ],
       "transformations": [

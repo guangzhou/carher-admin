@@ -99,6 +99,16 @@ kubectl -n monitoring patch cm grafana-alerting --type merge --patch-file /tmp/p
 当前：间隔 1800~2700s、单轮预算 1200s ⇒ `gt 7800` / `[115m]` / `from: 7200`。
 （沿革：900s 固定 ⇒ `2400`/`[35m]`/`1800`；1800s 固定并发 8 ⇒ `4200`/`[65m]`/`3900`。）
 
+⚠️ **2026-09-25 实测：上面这套「当前」在 repo 里，没在集群里。** 线上跑的还是
+`PROBE_INTERVAL=1800` 固定 + 并发 8（`PROBE_CONCURRENCY` 无覆盖 ⇒ 默认 8），
+集群告警仍是 `4200`/`[65m]`/`3900`，集群看板文案仍写「每 30 分钟」。
+`b790f26` 把三件事一起改了但**从未部署**。
+
+好消息是两侧各自自洽（集群三件套按 1800 标定、repo 三件套按 2700 标定），没有交叉错配，
+所以现在的告警没在说谎。坏消息是 repo↔集群任何方向的单点同步都会**打破这个自洽**：
+只推看板文案 = 描述一个线上不存在的行为；只推告警 = 阈值按 2700 标而探针 1800 ⇒ 看门狗钝化一倍。
+这三样要么一起上，要么一起不动。
+
 这条耦合关系有机器校验，改完跑它（**不过不许同步上去**）：
 
 ```bash
@@ -125,6 +135,47 @@ Error 状态 —— 规则从写下来那天起一次都没评估过。判等要
   2026-09-13 到 09-19，探针停了 6 天，6 条探针告警全绿，就是这个机制。
 
 绿色必须先证明量具活着。
+
+## 已备未切：冷却次数指标被我们自己的 `include_labels` 打死了
+
+`litellm_deployment_cooled_down_total` 从建看板起 17 天恒空、零报错。**不是没发生过冷却。**
+
+- 同期 42 个落点进过 `litellm_deployment_state == 2`，而设这个 state 的
+  `set_deployment_complete_outage()` 就在 `increment_deployment_cooled_down()` 的**前一行**
+  （`litellm/router_utils/cooldown_callbacks.py`，同一个 `if` 块）。前一行成功、后一行没留下任何序列。
+- 生产 config 的 `prometheus_metrics_config` 把 `litellm_deployment_cooled_down` 和
+  `litellm_deployment_state` 放在同一组 `deployment_state`，`include_labels` 只有 4 个
+  （`litellm_model_name, model_id, api_base, api_provider`）。
+- 上游 `increment_deployment_cooled_down()` 按 **5 个位置参数**调 `.labels()`（多一个
+  `exception_status`）⇒ 每次冷却抛 `ValueError: Incorrect label count`，计数器永远拿不到子序列。
+
+在 pod 内用**同一份 config** 起独立进程实测复现过：注册 labelnames 4 个、调用传 5 个、
+`increment` 抛 `ValueError`，而前一行 4 标签的 `set_deployment_complete_outage` 不抛。
+
+⚠️ 这里有个反向的坑：`/metrics` 只暴露**有子序列**的指标（实测 12 个 HELP、零样本指标一个都没有），
+所以「指标不在 Prometheus 里」和「从没 inc 过」在这条路上同形 —— 不能拿「查不到」直接判指标不存在。
+分辨方法是在容器内起独立进程复现注册，或看紧邻代码路径有没有留下痕迹（这里是 state=2）。
+
+**修法（已实测通过，未上生产）**：把它从共用组里拆出来单独一组。
+不能直接往 `deployment_state` 组加 `exception_status` —— `litellm_deployment_state` 那个 gauge
+只吃 4 个标签，加了会把**当前正常工作的**指标一起打坏。
+
+```yaml
+  - group: deployment_state
+    metrics:
+    - litellm_deployment_state
+    include_labels: [litellm_model_name, model_id, api_base, api_provider]
+  - group: deployment_cooldown          # 新增
+    metrics:
+    - litellm_deployment_cooled_down
+    include_labels: [litellm_model_name, model_id, api_base, api_provider, exception_status]
+```
+
+**为什么没顺手改**：生产 config 挂的是派生 CM `litellm-cwfb-stable-<hash>`，`subPath` 永不热更 ⇒
+要新建 hash CM + 换卷名 + 滚动生产代理。这是生产切换，不是监控侧改动，得单独拍板。
+
+在那之前，看板 `当前被判完全故障 / 冷却的落点数` 读的是 `litellm_deployment_state == 2`
+（口径是**当前有几个落点在里面**，不是**被拉黑了几次**），面板描述里写明了这个差别。
 
 ## 待填：告警现在评估正确了，但送不到任何人手上
 

@@ -1,0 +1,421 @@
+[
+ {
+  "model": "cr-g-5.6",
+  "trace": [],
+  "verdict": "SKIP",
+  "sample_error": "{\"error\": {\"message\": \"API 异常 (req: 0196f1ff)\", \"type\": null, \"param\": null, \"code\": \"500\"}}",
+  "reason": "阳性对照/标定没过（HTTP 500 / UNKNOWN）—— 这条腿对本探针本来就不通，它对大请求报错不构成天花板证据（真实原因被打码，拿 req id 去生产车道 pod 日志 grep `masked req=`）"
+ },
+ {
+  "model": "cr-g-5.6-instant",
+  "trace": [],
+  "verdict": "SKIP",
+  "sample_error": "{\"error\": {\"message\": \"API 异常 (req: 75fa5318)\", \"type\": null, \"param\": null, \"code\": \"500\"}}",
+  "reason": "阳性对照/标定没过（HTTP 500 / UNKNOWN）—— 这条腿对本探针本来就不通，它对大请求报错不构成天花板证据（真实原因被打码，拿 req id 去生产车道 pod 日志 grep `masked req=`）"
+ },
+ {
+  "model": "cr-g-5.6-mini",
+  "trace": [],
+  "verdict": "SKIP",
+  "sample_error": "{\"error\": {\"message\": \"API 异常 (req: 38983e49)\", \"type\": null, \"param\": null, \"code\": \"500\"}}",
+  "reason": "阳性对照/标定没过（HTTP 500 / UNKNOWN）—— 这条腿对本探针本来就不通，它对大请求报错不构成天花板证据（真实原因被打码，拿 req id 去生产车道 pod 日志 grep `masked req=`）"
+ },
+ {
+  "model": "cr-g-5.6-t-mini",
+  "trace": [],
+  "verdict": "SKIP",
+  "sample_error": "{\"error\": {\"message\": \"API 异常 (req: 025ef019)\", \"type\": null, \"param\": null, \"code\": \"500\"}}",
+  "reason": "阳性对照/标定没过（HTTP 500 / UNKNOWN）—— 这条腿对本探针本来就不通，它对大请求报错不构成天花板证据（真实原因被打码，拿 req id 去生产车道 pod 日志 grep `masked req=`）"
+ },
+ {
+  "model": "cr-g-research",
+  "trace": [],
+  "verdict": "SKIP",
+  "sample_error": "{\"error\": {\"message\": \"API 异常 (req: 934292a7)\", \"type\": null, \"param\": null, \"code\": \"500\"}}",
+  "reason": "阳性对照/标定没过（HTTP 500 / UNKNOWN）—— 这条腿对本探针本来就不通，它对大请求报错不构成天花板证据（真实原因被打码，拿 req id 去生产车道 pod 日志 grep `masked req=`）"
+ },
+ {
+  "model": "cr-g-5.6-thinking",
+  "trace": [],
+  "verdict": "SKIP",
+  "sample_error": "{\"error\": {\"message\": \"API 异常 (req: 4feb2479)\", \"type\": null, \"param\": null, \"code\": \"500\"}}",
+  "reason": "阳性对照/标定没过（HTTP 500 / UNKNOWN）—— 这条腿对本探针本来就不通，它对大请求报错不构成天花板证据（真实原因被打码，拿 req id 去生产车道 pod 日志 grep `masked req=`）"
+ },
+ {
+  "model": "cr-g-5.6-luna",
+  "trace": [],
+  "verdict": "SKIP",
+  "sample_error": "{\"error\": {\"message\": \"API 异常 (req: c66ff198)\", \"type\": null, \"param\": null, \"code\": \"500\"}}",
+  "reason": "阳性对照/标定没过（HTTP 500 / UNKNOWN）—— 这条腿对本探针本来就不通，它对大请求报错不构成天花板证据（真实原因被打码，拿 req id 去生产车道 pod 日志 grep `masked req=`）"
+ },
+ {
+  "model": "sa-grok-4.5",
+  "trace": [
+   {
+    "target": 2000000,
+    "kind": "UNKNOWN",
+    "status": 400,
+    "used": null
+   }
+  ],
+  "tokens_per_rep": 1.0,
+  "fixed_overhead_tokens": 495,
+  "verdict": "UNKNOWN",
+  "reason": "上界请求返回了无法归类的失败（HTTP 400），不二分",
+  "sample_error": "{\"error\": {\"message\": \"API 异常 (req: a9b3485f)\", \"type\": \"invalid_request_error\", \"param\": null, \"code\": \"400\"}}"
+ },
+ {
+  "model": "sa-grok-4.6",
+  "trace": [
+   {
+    "target": 2000000,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null
+   },
+   {
+    "target": 1000500,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null,
+    "sec": 1.4
+   },
+   {
+    "target": 500750,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null,
+    "sec": 0.6
+   },
+   {
+    "target": 250875,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 250875,
+    "sec": 36.0
+   },
+   {
+    "target": 375812,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 375812,
+    "sec": 59.8
+   },
+   {
+    "target": 438281,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 438281,
+    "sec": 80.2
+   },
+   {
+    "target": 469515,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 469515,
+    "sec": 85.4
+   },
+   {
+    "target": 485132,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 485132,
+    "sec": 100.5
+   },
+   {
+    "target": 492941,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 492941,
+    "sec": 91.8
+   }
+  ],
+  "tokens_per_rep": 1.0,
+  "fixed_overhead_tokens": 637,
+  "gate_says": 500000,
+  "verdict": "MEASURED",
+  "accepted_max": 492941,
+  "rejected_min": 500750,
+  "observed_prompt_tokens_max": 492941
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "trace": [
+   {
+    "target": 2000000,
+    "kind": "UNKNOWN",
+    "status": 0,
+    "used": null
+   }
+  ],
+  "tokens_per_rep": 1.0,
+  "fixed_overhead_tokens": 5,
+  "verdict": "UNKNOWN",
+  "reason": "上界请求返回了无法归类的失败（HTTP 0），不二分",
+  "sample_error": "TimeoutError: timed out"
+ },
+ {
+  "model": "claude-kimi-k2.7-code",
+  "trace": [
+   {
+    "target": 2000000,
+    "kind": "UNKNOWN",
+    "status": 0,
+    "used": null
+   }
+  ],
+  "tokens_per_rep": 1.0,
+  "fixed_overhead_tokens": 7,
+  "verdict": "UNKNOWN",
+  "reason": "上界请求返回了无法归类的失败（HTTP 0），不二分",
+  "sample_error": "TimeoutError: timed out"
+ },
+ {
+  "model": "claude-haiku-4-5",
+  "trace": [
+   {
+    "target": 2000000,
+    "kind": "UNKNOWN",
+    "status": 0,
+    "used": null
+   }
+  ],
+  "tokens_per_rep": 1.0,
+  "fixed_overhead_tokens": 8,
+  "verdict": "UNKNOWN",
+  "reason": "上界请求返回了无法归类的失败（HTTP 0），不二分",
+  "sample_error": "RemoteDisconnected: Remote end closed connection without response"
+ },
+ {
+  "model": "kiro-qwen3-coder-next",
+  "trace": [
+   {
+    "target": 2000000,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null
+   },
+   {
+    "target": 1000500,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null,
+    "sec": 1.3
+   },
+   {
+    "target": 500750,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null,
+    "sec": 0.5
+   },
+   {
+    "target": 250875,
+    "kind": "UNKNOWN",
+    "status": 400,
+    "used": null,
+    "sec": 2.2
+   },
+   {
+    "target": 250875,
+    "kind": "UNKNOWN",
+    "status": 400,
+    "used": null,
+    "sec": 2.1
+   },
+   {
+    "target": 250875,
+    "kind": "UNKNOWN",
+    "status": 400,
+    "used": null,
+    "sec": 2.0
+   },
+   {
+    "target": 250875,
+    "kind": "UNKNOWN",
+    "status": 400,
+    "used": null,
+    "sec": 2.1
+   }
+  ],
+  "tokens_per_rep": 0.998,
+  "fixed_overhead_tokens": 3792,
+  "gate_says": 256000,
+  "unknown_samples": [
+   {
+    "target": 250875,
+    "status": 400,
+    "body": "{\"error\": {\"message\": \"API 异常 (req: f6f5a044)\", \"type\": null, \"param\": null, \"code\": \"400\"}}"
+   },
+   {
+    "target": 250875,
+    "status": 400,
+    "body": "{\"error\": {\"message\": \"API 异常 (req: 18c00c2d)\", \"type\": null, \"param\": null, \"code\": \"400\"}}"
+   },
+   {
+    "target": 250875,
+    "status": 400,
+    "body": "{\"error\": {\"message\": \"API 异常 (req: fe23ee06)\", \"type\": null, \"param\": null, \"code\": \"400\"}}"
+   },
+   {
+    "target": 250875,
+    "status": 400,
+    "body": "{\"error\": {\"message\": \"API 异常 (req: 065e497d)\", \"type\": null, \"param\": null, \"code\": \"400\"}}"
+   }
+  ],
+  "verdict": "PARTIAL",
+  "accepted_max": 1000,
+  "rejected_min": 500750,
+  "observed_prompt_tokens_max": 0
+ },
+ {
+  "model": "chatgpt-gpt-6-sol",
+  "trace": [
+   {
+    "target": 2000000,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null
+   },
+   {
+    "target": 1000500,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null,
+    "sec": 0.9
+   },
+   {
+    "target": 500750,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 500750,
+    "sec": 9.8
+   },
+   {
+    "target": 750625,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 750625,
+    "sec": 10.8
+   },
+   {
+    "target": 875562,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null,
+    "sec": 2.1
+   },
+   {
+    "target": 813093,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 813093,
+    "sec": 12.6
+   },
+   {
+    "target": 844327,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 844327,
+    "sec": 10.4
+   },
+   {
+    "target": 859944,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 859944,
+    "sec": 8.3
+   }
+  ],
+  "tokens_per_rep": 1.0,
+  "fixed_overhead_tokens": 1631,
+  "gate_says": 872000,
+  "verdict": "MEASURED",
+  "accepted_max": 859944,
+  "rejected_min": 875562,
+  "observed_prompt_tokens_max": 859944
+ },
+ {
+  "model": "gpt-5.6-sol",
+  "trace": [
+   {
+    "target": 2000000,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null
+   },
+   {
+    "target": 1000500,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null,
+    "sec": 1.0
+   },
+   {
+    "target": 500750,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 500750,
+    "sec": 5.8
+   },
+   {
+    "target": 750625,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 750625,
+    "sec": 12.1
+   },
+   {
+    "target": 875562,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 875562,
+    "sec": 6.9
+   },
+   {
+    "target": 938031,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null,
+    "sec": 0.9
+   },
+   {
+    "target": 906796,
+    "kind": "ACCEPT",
+    "status": 200,
+    "used": 906796,
+    "sec": 11.3
+   },
+   {
+    "target": 922413,
+    "kind": "TOO_LONG",
+    "status": 400,
+    "used": null,
+    "sec": 1.9
+   }
+  ],
+  "tokens_per_rep": 1.0,
+  "fixed_overhead_tokens": 1631,
+  "gate_says": 922000,
+  "verdict": "MEASURED",
+  "accepted_max": 906796,
+  "rejected_min": 922413,
+  "observed_prompt_tokens_max": 906796
+ },
+ {
+  "model": "gpt-5.4",
+  "trace": [
+   {
+    "target": 2000000,
+    "kind": "UNKNOWN",
+    "status": 400,
+    "used": null
+   }
+  ],
+  "tokens_per_rep": 1.0,
+  "fixed_overhead_tokens": 1631,
+  "verdict": "UNKNOWN",
+  "reason": "上界请求返回了无法归类的失败（HTTP 400），不二分",
+  "sample_error": "{\"error\": {\"message\": \"API 异常 (req: af7a9fd0)\", \"type\": null, \"param\": null, \"code\": \"400\"}}"
+ }
+]

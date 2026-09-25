@@ -371,7 +371,7 @@ class ModelCatalogTest(unittest.TestCase):
         text = M._model_catalog_text(key)
 
         self.assertIn("gpt-5.6-sol", text)
-        self.assertIn("1,000,000/922,000/128,000", text)
+        self.assertIn("922,000/128,000 → gpt-5.6-sol", text)
         self.assertNotIn("hidden-model", text)
         self.assertEqual(text.count("gpt-5.6-sol"), 1)
 
@@ -391,8 +391,10 @@ class ModelCatalogTest(unittest.TestCase):
             key=key,
         )
 
-        self.assertIn("📋 模型 1 个（上下文/输入/输出 上限，按限制合并）", out["mock_response"])
-        self.assertIn("1,000,000", out["mock_response"])
+        self.assertIn("📋 模型 1 个（输入/输出 上限，按限制合并）", out["mock_response"])
+        self.assertIn("922,000/128,000 → gpt-5.6-sol", out["mock_response"])
+        # `context_window` 即使部署行上有，也不该出现 —— 它不是闸门读的字段
+        self.assertNotIn("1,000,000", out["mock_response"])
 
     def test_empty_allowlist_lists_all_models_and_marks_missing_limits(self):
         self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
@@ -404,28 +406,53 @@ class ModelCatalogTest(unittest.TestCase):
         text = M._model_catalog_text(key)
 
         self.assertIn("model-without-limits", text)
-        self.assertEqual(text.count("未配置"), 3)
+        # 两栏（输入/输出），不是三栏 —— `context_window` 那栏已删，见下面的回归护栏
+        self.assertEqual(text.count("未设上限"), 2)
 
-    def test_catalog_uses_effective_defaults_for_unannotated_aliases(self):
+    def test_no_hardcoded_product_limits_are_invented(self):
+        """🔴 回归护栏：限制值只许来自部署行 / LiteLLM 自己的表，不许来自硬编。
+
+        2026-09-25 前这里有一张 `_MODEL_LIMIT_DEFAULTS`，给 `cr-g-5.6-instant`
+        之类没有配置的模型编出 `1,000,000/922,000/128,000`。两个问题：
+        `context_window` 不是 LiteLLM 的字段（线上 41/41 为 None），
+        而 922,000 是我们自己算的、从来不是真实天花板。
+        兜底值改不动闸门，只改显示 ⇒「显示 1,000,000、实际拦在 922,000」
+        能长期零症状共存。所以宁可显示"未设上限"，也不许把假设印成事实。
+        """
+        self.assertFalse(hasattr(M, "_MODEL_LIMIT_DEFAULTS"),
+                         "硬编默认限制表又回来了")
+        self.assertFalse(hasattr(M, "_model_limit_defaults"))
+
         self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
             {"model_name": "cr-g-5.6-instant",
              "model_info": {},
              "litellm_params": {"model": "openai/gpt-5.6-instant"}},
-            {"model_name": "claude-sonnet-5",
-             "model_info": {},
-             "litellm_params": {"model": "openai/claude-sonnet-5"}},
-            {"model_name": "deepseek-v4-flash",
-             "model_info": {},
-             "litellm_params": {"model": "custom_openai/deepseek-v4-flash"}},
         ])
         key = _Key(alias="cursor-u1")
-        key.models = ["cr-g-5.6-instant", "claude-sonnet-5", "deepseek-v4-flash"]
+        key.models = ["cr-g-5.6-instant"]
 
         text = M._model_catalog_text(key)
 
-        self.assertIn("1,000,000/922,000/128,000 → cr-g-5.6-instant", text)
-        self.assertIn("1,000,000/1,000,000/128,000 → claude-sonnet-5", text)
-        self.assertIn("1,000,000/1,000,000/393,216 → deepseek-v4-flash", text)
+        self.assertIn("cr-g-5.6-instant", text)
+        self.assertNotIn("922,000", text)
+        self.assertIn("未设上限", text)
+
+    def test_catalog_drops_the_fabricated_context_window_column(self):
+        """`context_window` 即使部署行上写了，也不再显示 —— 它不是闸门读的字段。"""
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "m1",
+             "model_info": {"context_window": 999999,
+                             "max_input_tokens": 250000,
+                             "max_output_tokens": 16384}},
+        ])
+        key = _Key(alias="cursor-u1")
+        key.models = ["m1"]
+
+        text = M._model_catalog_text(key)
+
+        self.assertIn("250,000/16,384 → m1", text)
+        self.assertNotIn("999,999", text)
+        self.assertIn("（输入/输出 上限", text)
 
     def test_catalog_uses_key_allowlist_and_per_key_aliases(self):
         self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
@@ -440,9 +467,9 @@ class ModelCatalogTest(unittest.TestCase):
 
         text = M._model_catalog_text(key)
 
-        self.assertIn("📋 模型 2 个（上下文/输入/输出 上限，按限制合并）", text)
+        self.assertIn("📋 模型 2 个（输入/输出 上限，按限制合并）", text)
         self.assertIn("qwen3-coder-next", text)
-        self.assertIn("262,144", text)
+        self.assertIn("250,000", text)
         self.assertIn("callback-only-model", text)
         self.assertEqual(text.count("qwen3-coder-next"), 1)
 

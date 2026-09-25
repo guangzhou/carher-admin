@@ -7,7 +7,10 @@ key 日额度（claude-code-* $70/天、cursor-* $100/天，北京 0 点重置�
 知道自己超额就是一脸懵逼的报错。三件套：
 
 ① ``/查余额`` | ``/quota`` —— pre-call 短路，不打上游、零计费，直接返回本 key
-   今日用量和当前 key 可访问的模型配置（context / 输入上限 / 输出上限）。chat /
+   今日用量、今日各模型 TTFT P50/P90，以及当前 key 可访问的模型配置
+   （**输入上限 / 输出上限**，即闸门自己的两个数；2026-09-25 去掉了原先那栏
+   `context` —— 它不是 LiteLLM 的字段，线上 41/41 全为 None，显示出来的值
+   全部来自本文件里一张硬编表，见 `_model_limit_value` 上方的说明）。chat /
    responses 路径用 ``data["mock_response"]``（mock_heartbeat
    同款机制，198 已在产验证）；anthropic ``/v1/messages`` 路径抛
    ``ModifyResponseException``（路由对它有原生 200 + stream 处理；
@@ -235,51 +238,40 @@ def _runtime_model_list() -> list:
         return []
 
 
-_MODEL_LIMIT_DEFAULTS = (
-    ("deepseek-v4-flash", {"context_window": 1_000_000,
-                            "max_input_tokens": 1_000_000,
-                            "max_output_tokens": 393_216}),
-    ("claude-sonnet-5", {"context_window": 1_000_000,
-                          "max_input_tokens": 1_000_000,
-                          "max_output_tokens": 128_000}),
-    ("claude-opus-5", {"context_window": 1_000_000,
-                        "max_input_tokens": 1_000_000,
-                        "max_output_tokens": 128_000}),
-    ("claude-haiku-4-5", {"context_window": 200_000,
-                           "max_input_tokens": 200_000,
-                           "max_output_tokens": 64_000}),
-    ("gpt-image-2", {"context_window": 32_000,
-                      "max_input_tokens": 32_000,
-                      "max_output_tokens": 4_096}),
-    ("gpt-5.6", {"context_window": 1_000_000,
-                 "max_input_tokens": 922_000,
-                 "max_output_tokens": 128_000}),
-)
-
-
-def _model_limit_defaults(model_name: Any, params: dict) -> dict:
-    """Return explicit product limits for aliases absent from LiteLLM's price table."""
-    haystack = " ".join(
-        str(value).lower()
-        for value in (model_name, params.get("model"))
-        if value
-    )
-    for marker, limits in _MODEL_LIMIT_DEFAULTS:
-        if marker in haystack:
-            return limits
-    return {}
+# 🔴 2026-09-25 删掉了这里原有的 `_MODEL_LIMIT_DEFAULTS` 硬编表，原因是它**在撒谎**。
+#
+# 那张表给每个模型写了 `context_window` / `max_input_tokens` / `max_output_tokens`
+# 三个数当兜底。问题：
+#
+# ① `context_window` **根本不是 LiteLLM 的字段**。LiteLLM 只有 `max_input_tokens`
+#    和 `max_output_tokens`。当天实测这把 key 的 41 个模型，线上
+#    `model_info.context_window` **41/41 全是 None** —— 屏幕上那一整栏
+#    （1,000,000 / 200,000 / 32,000 …）100% 来自这张硬编表，不反映任何线上配置。
+#    用户照着它规划上下文，撞的是另一个数。
+#
+# ② 表里 `gpt-5.6` 那行写 `max_input_tokens: 922_000`，而 922,000 按 09-21 的裁决
+#    就是我们自己算出来的、从来不是真实天花板
+#    （memory: `feedback_922000_was_never_the_real_ceiling`）。
+#    把它写进兜底 = 给一个已知错误的数字续命，且**在真实配置缺失时才生效**，
+#    也就是专挑"没人知道真值"的场合冒充真值。
+#
+# ③ 兜底值和真闸门是两套数。闸门在 `model_info.max_input_tokens`；这张表改不动
+#    闸门，只改显示。于是"显示 1,000,000、实际拦在 922,000"能长期零症状共存。
+#
+# 结论：展示层只许显示**闸门自己的值**。查不到就如实说"未设上限"，
+# 不拿一个看起来合理的数去填空白 —— 那是把假设印成事实。
 
 
 def _model_limit_value(info: dict, params: dict, model_name: Any, *names: str) -> Any:
-    """Prefer explicit values, then LiteLLM's effective metadata, then product defaults."""
+    """Prefer explicit deployment values, then LiteLLM's own effective metadata.
+
+    只有这两个来源：部署行上显式写的值，和 LiteLLM 内置价格表算出来的有效值。
+    这两者**就是闸门读的东西**，所以显示和拦截天然一致。不再有第三个"产品默认值"。
+    """
     for source in (info, params):
         for name in names:
             if isinstance(source, dict) and source.get(name) is not None:
                 return source[name]
-    defaults = _model_limit_defaults(model_name, params)
-    for name in names:
-        if name in defaults:
-            return defaults[name]
     try:
         import litellm
 
@@ -298,7 +290,10 @@ def _model_limit_value(info: dict, params: dict, model_name: Any, *names: str) -
 
 def _format_model_limit(value: Any) -> str:
     if value is None:
-        return "未配置"
+        # 「未设上限」是对**配置**的陈述（这个字段确实是 None），
+        # 不是对能力的陈述。旧文案"未配置"读起来像"漏配了"，
+        # 但其中一大半是那一栏本来就不存在。
+        return "未设上限"
     try:
         number = float(value)
         if number.is_integer():
@@ -342,7 +337,6 @@ def _model_catalog_text(user_api_key_dict: Any) -> str:
             lookup_names.append(str(target))
         rows = [row for lookup in lookup_names for row in rows_by_name.get(lookup, [])]
         entry = grouped.setdefault(name, {
-            "context_window": set(),
             "max_input_tokens": set(),
             "max_output_tokens": set(),
         })
@@ -354,8 +348,6 @@ def _model_catalog_text(user_api_key_dict: Any) -> str:
             if not isinstance(params, dict):
                 params = {}
             for field, value in (
-                ("context_window", _model_limit_value(
-                    info, params, name, "context_window")),
                 ("max_input_tokens", _model_limit_value(
                     info, params, name, "max_input_tokens")),
                 ("max_output_tokens", _model_limit_value(
@@ -363,10 +355,9 @@ def _model_catalog_text(user_api_key_dict: Any) -> str:
             ):
                 if value is not None:
                     entry[field].add(str(value))
-        # Resolve aliases with no loaded row from LiteLLM's built-in price and
-        # context metadata, then from the explicit product defaults below.
+        # 一个公开名可能只作为 per-key alias 存在、没有自己的部署行，
+        # 这时回落到 LiteLLM 内置价格表 —— 那也正是闸门会读的东西。
         for field, lookup_names in (
-            ("context_window", ("context_window",)),
             ("max_input_tokens", ("max_input_tokens",)),
             ("max_output_tokens", ("max_output_tokens", "max_tokens")),
         ):
@@ -396,14 +387,14 @@ def _model_catalog_text(user_api_key_dict: Any) -> str:
     for name, limits in grouped.items():
         values = tuple(
             tuple(sorted(_format_model_limit(value) for value in limits[field]))
-            for field in ("context_window", "max_input_tokens", "max_output_tokens")
+            for field in ("max_input_tokens", "max_output_tokens")
         )
         by_limits.setdefault(values, []).append(name)
 
-    lines = [f"\n📋 模型 {len(grouped)} 个（上下文/输入/输出 上限，按限制合并）:"]
+    lines = [f"\n📋 模型 {len(grouped)} 个（输入/输出 上限，按限制合并）:"]
     for values, names_in_group in by_limits.items():
         limits_text = "/".join(
-            ("/".join(value) if value else "未配置") for value in values
+            ("/".join(value) if value else "未设上限") for value in values
         )
         lines.append(f"- {limits_text} → " + "、".join(names_in_group))
     text = "\n".join(lines)

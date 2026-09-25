@@ -104,3 +104,80 @@ def test_multi_key_entry_rejected():
 
     with pytest.raises(ValueError):
         _plan([{"a": [ANCHOR], "b": [ANCHOR]}])
+
+
+# --------------------------------------------------------------------------- #
+# named-groups 模式（2026-09-25 新增）—— 「全部 gpt 系列末端统一成 X」用的。
+# anchor 模式在这个诉求下不合用：53 条在范围内的链末端有 **7 种**不同的腿，
+# 按 anchor 扫会连带改到共享同一末端的非 gpt 链（光 deepseek-v4-pro-responses
+# 结尾的就有 36 条）。
+# --------------------------------------------------------------------------- #
+TARGET = "openrouter-deepseek-v4.1-flash"
+
+
+def _plan_named(fallbacks, groups):
+    return mod.plan_fallbacks(fallbacks, ANCHOR, TARGET, set(groups))
+
+
+def test_named_groups_ignores_anchor_entirely():
+    # 链末端不是 anchor，anchor 模式会跳过；点名模式必须照改。
+    fb = [{"gpt-6-astra": ["chatgpt-gpt-5.6-sol", "sa-grok-4.6"]}]
+    new, changes = _plan_named(fb, ["gpt-6-astra"])
+    assert new == [{"gpt-6-astra": ["chatgpt-gpt-5.6-sol", "sa-grok-4.6", TARGET]}]
+    assert len(changes) == 1
+
+
+def test_named_groups_does_not_touch_unnamed_even_if_anchor_tail():
+    # 这条是本模式存在的理由：同样以 anchor 结尾的非 gpt 链必须纹丝不动。
+    fb = [
+        {"gpt-5.4": ["chatgpt-gpt-5.6-luna", ANCHOR]},
+        {"some-non-gpt-group": ["whatever", ANCHOR]},
+    ]
+    new, changes = _plan_named(fb, ["gpt-5.4"])
+    assert new[1] == {"some-non-gpt-group": ["whatever", ANCHOR]}
+    assert [g for g, _, _ in changes] == ["gpt-5.4"]
+
+
+def test_named_groups_moves_midchain_target_to_tail_instead_of_duplicating():
+    # gpt-5.6-sol 的真实形状：target 已经在链中段。诉求是「最后一个用它」，
+    # 所以要**搬到末尾**，不是再追加一份（追加会让同一条腿在链里出现两次）。
+    fb = [{"gpt-5.6-sol": ["sa-grok-4.6", TARGET, ANCHOR, APPEND]}]
+    new, changes = _plan_named(fb, ["gpt-5.6-sol"])
+    assert new == [{"gpt-5.6-sol": ["sa-grok-4.6", ANCHOR, APPEND, TARGET]}]
+    assert new[0]["gpt-5.6-sol"].count(TARGET) == 1
+    assert len(changes) == 1
+
+
+def test_named_groups_idempotent_when_target_already_last():
+    fb = [{"gpt-5.4": ["chatgpt-gpt-5.6-luna", TARGET]}]
+    new, changes = _plan_named(fb, ["gpt-5.4"])
+    assert new == fb
+    assert changes == []
+
+
+def test_named_groups_empty_chain_is_not_given_a_chain():
+    # 空链 = 这个组实际上没有兜底。给它凭空造一条是**新的路由决定**，不是编辑。
+    fb = [{"gpt-weird": []}]
+    new, changes = _plan_named(fb, ["gpt-weird"])
+    assert new == fb
+    assert changes == []
+
+
+def test_plan_misses_reports_groups_with_no_fallback_row():
+    fb = [{"gpt-5.4": ["x"]}]
+    assert mod.plan_misses(fb, {"gpt-5.4", "gpt-nonexistent", "gpt-also-missing"}) == [
+        "gpt-also-missing",
+        "gpt-nonexistent",
+    ]
+
+
+def test_named_groups_does_not_mutate_input():
+    fb = [{"gpt-5.4": ["chatgpt-gpt-5.6-luna", ANCHOR]}]
+    snapshot = [dict((k, list(v)) for k, v in e.items()) for e in fb]
+    _plan_named(fb, ["gpt-5.4"])
+    assert fb == snapshot
+
+
+def test_production_lane_is_selected_by_route_label_not_deployment_name():
+    # 🔴 标签在 Pod 上；这条钉住 selector 不许退回 app=litellm-proxy。
+    assert mod.PROXY_SELECTOR == "carher.net/litellm-production-route=enabled"

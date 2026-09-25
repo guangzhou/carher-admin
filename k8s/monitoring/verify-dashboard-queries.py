@@ -82,6 +82,7 @@ def main():
     rows, bad = [], 0
     for p in walk(dash["panels"]):
         for t in p.get("targets", []) or []:
+            ref = t.get("refId", "?")   # 有些 target 没有 refId，早期手写的看板里有
             raw = t.get("expr")
             if not raw:
                 continue
@@ -89,11 +90,11 @@ def main():
             try:
                 r = fetch(args.prom, "/api/v1/query", {"query": expr})
             except Exception as e:                      # noqa: BLE001
-                rows.append(("ERROR", p.get("title"), t["refId"], repr(e)[:70], ""))
+                rows.append(("ERROR", p.get("title"), ref, repr(e)[:70], ""))
                 bad += 1
                 continue
             if r.get("status") != "success":
-                rows.append(("ERROR", p.get("title"), t["refId"],
+                rows.append(("ERROR", p.get("title"), ref,
                              str(r.get("error"))[:70], ""))
                 bad += 1
                 continue
@@ -101,14 +102,14 @@ def main():
             refs = metric_refs(expr)
             missing = sorted(m for m in refs if m not in names)
             if missing:
-                rows.append(("DEAD", p.get("title"), t["refId"],
+                rows.append(("DEAD", p.get("title"), ref,
                              f"{n} series", "指标不存在: " + ",".join(missing)))
                 bad += 1
             elif n == 0:
-                rows.append(("EMPTY", p.get("title"), t["refId"], "0 series",
+                rows.append(("EMPTY", p.get("title"), ref, "0 series",
                              "指标存在但此刻无数据 —— 可能是真的没故障，人工确认"))
             else:
-                rows.append(("OK", p.get("title"), t["refId"], f"{n} series", ""))
+                rows.append(("OK", p.get("title"), ref, f"{n} series", ""))
 
     w = max((len(r[1] or "") for r in rows), default=20)
     for st, title, ref, detail, note in rows:
@@ -127,4 +128,16 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # 退出码分三档，别让「量具自己崩了」和「查询是死的」同形 ——
+    # 2026-09-25 它就因为一个没有 refId 的 target 抛 KeyError 退了 1，
+    # 看上去和「这份看板有坏查询」一模一样。
+    #   0 = 全部出数    1 = 有查询指向不存在的指标/执行失败    2 = 量具自己坏了
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception:                                   # noqa: BLE001
+        import traceback
+        traceback.print_exc()
+        print("\nBROKEN RULER: 量具自己崩了，这不是看板的结论", file=sys.stderr)
+        sys.exit(2)

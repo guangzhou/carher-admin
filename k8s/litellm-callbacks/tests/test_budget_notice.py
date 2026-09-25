@@ -371,7 +371,7 @@ class ModelCatalogTest(unittest.TestCase):
         text = M._model_catalog_text(key)
 
         self.assertIn("gpt-5.6-sol", text)
-        self.assertIn("922k  128k  gpt-5.6-sol", text)
+        self.assertIn("| 922k | 128k | gpt-5.6-sol |", text)
         self.assertNotIn("hidden-model", text)
         self.assertEqual(text.count("gpt-5.6-sol"), 1)
 
@@ -392,7 +392,7 @@ class ModelCatalogTest(unittest.TestCase):
         )
 
         self.assertIn("📋 模型 1 个，1 组上限", out["mock_response"])
-        self.assertIn("922k  128k  gpt-5.6-sol", out["mock_response"])
+        self.assertIn("| 922k | 128k | gpt-5.6-sol |", out["mock_response"])
         # `context_window` 即使部署行上有，也不该出现 —— 它不是闸门读的字段
         self.assertNotIn("1,000,000", out["mock_response"])
         self.assertNotIn("1M", out["mock_response"])
@@ -411,7 +411,8 @@ class ModelCatalogTest(unittest.TestCase):
         # 见下面的回归护栏。⛔ 不能数占位符出现了几次：它是 ASCII `-`，
         # 分隔线和模型名里都有，数出来是 43 不是 3。判据只能是**那一行本身**。
         row = [ln for ln in text.splitlines() if "model-without-limits" in ln][0]
-        self.assertEqual(row.split(), ["-", "-", "model-without-limits"])
+        self.assertEqual([c.strip() for c in row.strip("|").split("|")],
+                         ["-", "-", "model-without-limits"])
         self.assertIn(f"{M._NO_LIMIT} = 未设上限", text)
 
     def test_no_hardcoded_product_limits_are_invented(self):
@@ -442,7 +443,8 @@ class ModelCatalogTest(unittest.TestCase):
         self.assertNotIn("922,000", text)
         self.assertNotIn("922k", text)
         row = [ln for ln in text.splitlines() if "cr-g-5.6-instant" in ln][0]
-        self.assertEqual(row.split()[:2], [M._NO_LIMIT, M._NO_LIMIT])
+        self.assertEqual([c.strip() for c in row.strip("|").split("|")][:2],
+                         [M._NO_LIMIT, M._NO_LIMIT])
 
     def test_table_uses_no_ambiguous_width_characters(self):
         """🔴 对齐的前提是每个字符宽度确定，而 `—`/`─` 的宽度**不确定**。
@@ -482,7 +484,7 @@ class ModelCatalogTest(unittest.TestCase):
 
         text = M._model_catalog_text(key)
 
-        self.assertIn("250k  ~16k  m1", text)
+        self.assertIn("| 250k | ~16k | m1 |", text)
         self.assertNotIn("999,999", text)
         self.assertNotIn("~1M", text)
         self.assertIn("输入", text)
@@ -588,8 +590,8 @@ class TTFTTest(unittest.TestCase):
         first = asyncio.run(M._ttft_text(key))
         second = asyncio.run(M._ttft_text(key))
 
-        self.assertIn("gpt-5.6-sol   1.25   2.53   662", first)
-        self.assertIn("sa-grok-4.6  17.51  17.51     1", first)
+        self.assertIn("| gpt-5.6-sol |  1.25 |  2.53 |  662 |", first)
+        self.assertIn("| sa-grok-4.6 | 17.51 | 17.51 |    1 |", first)
         self.assertEqual(first, second)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1], "hashed-token")

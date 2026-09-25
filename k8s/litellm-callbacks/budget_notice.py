@@ -485,29 +485,41 @@ def _model_catalog_text(user_api_key_dict: Any) -> str:
 
     w_in = max([_display_width("输入")] + [_display_width(r[0]) for r in rows])
     w_out = max([_display_width("输出")] + [_display_width(r[1]) for r in rows])
-    # 模型名那栏软换行：一行装不下就折到续行，续行缩进到模型列，读起来还是一张表。
-    w_models = 44
 
+    # markdown 管道表。2026-09-25 实测（Codex app 截图）：客户端**会**渲染 markdown，
+    # 上一版靠空格对齐的纯文本表在那里被拆成三种形状 ——
+    # 表头下那行 `----` 成了横线、`-` 开头的行成了圆点列表、续行缩进 ≥4 格
+    # 又被当成缩进代码块塞进一张卡片，而多空格一律被折成一个、列全丢。
+    # ⇒ 对齐这件事必须交给渲染器，不能靠我们自己数格子。
+    #
+    # 这里仍然给两个窄列做 padding：那**不影响**渲染结果，只是让复制出来的
+    # 源文本自己也还能看。模型名那列不 padding —— 最长的一组有 20 个名字，
+    # 按它补齐会把每一行都撑到几百字符。
     lines = [
-        f"\n📋 模型 {len(grouped)} 个，{len(rows)} 组上限"
+        f"\n\n📋 模型 {len(grouped)} 个，{len(rows)} 组上限"
         f"（{_NO_LIMIT} = 未设上限，~ = 近似值）\n",
-        f"  {_pad('输入', w_in)}  {_pad('输出', w_out)}  模型",
-        f"  {'-' * w_in}  {'-' * w_out}  {'-' * 30}",
+        f"| {_pad('输入', w_in)} | {_pad('输出', w_out)} | 模型 |",
+        f"|{'-' * (w_in + 2)}|{'-' * (w_out + 2)}|---|",
     ]
-    indent = " " * (2 + w_in + 2 + w_out + 2)
     for cell_in, cell_out, models in rows:
-        for index, chunk in enumerate(_wrap_models(models, w_models)):
-            if index == 0:
-                lines.append(f"  {_pad(cell_in, w_in)}  {_pad(cell_out, w_out)}  {chunk}")
-            else:
-                lines.append(indent + chunk)
+        lines.append(f"| {_pad(cell_in, w_in)} | {_pad(cell_out, w_out)} "
+                     f"| {_escape_pipes(models)} |")
     text = "\n".join(lines)
     _MODEL_CATALOG_CACHE[cache_key] = (now, text)
     return text
 
 
+def _escape_pipes(text: str) -> str:
+    """单元格里的 `|` 会把一列劈成两列。模型名目前没有，但这是白菜价的保险。"""
+    return text.replace("|", "\\|")
+
+
 def _wrap_models(models: str, width: int) -> List[str]:
-    """在 `、` 边界折行，永不切断模型名 —— 半个模型名比一行太长糟糕得多。"""
+    """在 `、` 边界折行，永不切断模型名。
+
+    ⚠️ 管道表改造后不再用于渲染（单元格里放不进换行，折行交给渲染器）。
+    留着是因为它是纯函数、有测试，且下次要出纯文本形态时还得用。
+    """
     chunks, current = [], ""
     for part in models.split("、"):
         candidate = f"{current}、{part}" if current else part
@@ -615,19 +627,22 @@ async def _ttft_text(user_api_key_dict: Any) -> str:
             ))
 
         w_name = max([_display_width("模型")] + [_display_width(e[0]) for e in entries])
-        w_p50 = max([4] + [len(e[1]) for e in entries])
-        w_p90 = max([4] + [len(e[2]) for e in entries])
+        w_p50 = max([len("P50")] + [len(e[1]) for e in entries])
+        w_p90 = max([len("P90")] + [len(e[2]) for e in entries])
         w_n = max([_display_width("次数")] + [len(e[3]) for e in entries])
+        # 管道表：`---:` 让渲染器把三个数字列右对齐（小数点自然对齐）。
+        # padding 只为复制出来的源文本好看，不影响渲染结果。
         lines = [
-            "\n⚡ TTFT 今日（秒，仅今日有流量）\n",
-            f"  {_pad('模型', w_name)}  {_pad('P50', w_p50, True)}"
-            f"  {_pad('P90', w_p90, True)}  {_pad('次数', w_n, True)}",
-            f"  {'-' * w_name}  {'-' * w_p50}  {'-' * w_p90}  {'-' * w_n}",
+            "\n\n⚡ TTFT 今日（秒，仅今日有流量）\n",
+            f"| {_pad('模型', w_name)} | {_pad('P50', w_p50, True)}"
+            f" | {_pad('P90', w_p90, True)} | {_pad('次数', w_n, True)} |",
+            f"|{'-' * (w_name + 2)}|{'-' * (w_p50 + 1)}:"
+            f"|{'-' * (w_p90 + 1)}:|{'-' * (w_n + 1)}:|",
         ]
         for name, p50, p90, count in entries:
             lines.append(
-                f"  {_pad(name, w_name)}  {_pad(p50, w_p50, True)}"
-                f"  {_pad(p90, w_p90, True)}  {_pad(count, w_n, True)}"
+                f"| {_pad(_escape_pipes(name), w_name)} | {_pad(p50, w_p50, True)}"
+                f" | {_pad(p90, w_p90, True)} | {_pad(count, w_n, True)} |"
             )
         return _keep("\n".join(lines))
     except Exception as exc:

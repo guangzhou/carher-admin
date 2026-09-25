@@ -286,3 +286,54 @@ python3 scripts/litellm-198-fallback-prepend.py \
 - [[feedback_config_update_silently_drops_unknown_router_settings]]
 - [[feedback_litellm_group_name_lies_judge_by_api_base]]
 - [[litellm-key-provider-swap]] / [[litellm-198-router-patch]] / [[topic_litellm_ops_index]]
+
+## 7. 点名模式（2026-09-25 加）—— 「全部 X 系列末端统一成 Y」用这个，不是 anchor
+
+`litellm-198-gpt-fallback-append.py --groups-file <清单>`：把 target 做成点名
+那些组的**最后一跳**，`--anchor` 整个忽略。
+
+**为什么 anchor 模式接不住这个诉求**：53 条在范围内的 gpt 链末端有 **7 种**
+不同的腿，按 anchor 扫会连带改到共享同一末端的**非 gpt** 链（光
+`deepseek-v4-pro-responses` 结尾的就有 36 条，不全是 gpt）。
+
+两条语义是刻意的：
+
+- target 已在链**中段** ⇒ **搬到末尾**，不是再追加一份（`gpt-5.6-sol` 正是
+  这形状，追加会让同一条腿在链里出现两次）。
+- 点名的组在表里**没有** fallback 行 ⇒ 报出来并**跳过，不新建**。凭空造一条
+  链是一个新的**路由决定**，不是一次编辑。
+
+**范围别只按名字子串**：`codex-auto-review` 是 gpt 系，名字里没有 `gpt`。
+（`chatgpt-codex-auto-review` 反而被 `gpt` 子串捞到了。）先把全表 95 条
+dump 出来人眼扫一遍非 gpt 的那 42 条，再定清单。
+
+### 7.1 第 9 个坏尺子：拿组名当 `model` 查出来的「全挂」
+
+判 `openrouter-deepseek-v4.1-flash` 健康度，第一版 SQL 同时 `OR` 了组名和落点，
+得到 **0 成功 / 92 失败**，差点据此断言这条腿不能用。
+
+**识破它的信号**：一屏里十几条**不同的**腿全都恰好 90~92 bad / 0 ok，
+且 `last_seen` **同为 `09-23 01:39` 这一分钟** ⇒ 机器指纹，是某个扫描器把全表
+打了一遍留下的行，不是真实流量（[[feedback_fixed_cadence_is_a_machine_fingerprint]]）。
+只按**落点** `openrouter/deepseek/deepseek-v4.1-flash` 查，真相是
+**9292 success（ct>0）/ 18 failure**。
+
+⇒ §4.2 那条「拿组名查 `model` 恒 0 行」还有个更坏的变体：**不是 0 行，是一堆
+探针留下的失败行**，看起来像证据。
+
+### 7.2 append 还是 replace：先分清 ct=0 落在 success 还是 failure 上
+
+§3 记的「983 条 ct=0」曾让我以为现有末端 `openai/deepseek-v4-*` 会返
+**success 空壳**、追加在它后面永远走不到。重查按 status 分组：
+
+| 落点 | success | 其中 ct=0 | failure |
+|---|---|---|---|
+| `openai/deepseek-v4-flash` | 2118 | **0** | 655（全 ct=0） |
+| `openai/deepseek-v4-pro` | 85 | **0** | 14 |
+
+ct=0 全在 **failure 行**上（那是正常的），success 行**全部 ct>0**。
+⇒ 失败就是真失败、会继续往下跳 ⇒ **append 可达**，不需要 replace
+（replace 要摘掉一条 7 天出字 2118 次的腿）。
+
+**判据**：不是「有多少 ct=0」，是「ct=0 落在哪个 status 上」。
+混在一起算会把一条健康的腿误判成空壳。

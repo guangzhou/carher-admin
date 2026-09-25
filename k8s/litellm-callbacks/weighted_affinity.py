@@ -782,10 +782,22 @@ class WeightedAffinityRouter(CustomLogger):
                         cache_key,
                         e,
                     )
-                # pin 又能用了 → 清掉绕行记录，让 detour_repin_after 的计时从
-                # 下一次真的生病时重新起算（否则陈旧 since 会让日后一次抖动
-                # 被误判成「持续不健康」而直接改钉）。
-                await self._clear_detour(cache_key)
+                # ⛔ 这里**刻意不清**绕行记录（2026-09-25 第二轮修正）。
+                #
+                # 原先挂了 `_clear_detour`，理由是「陈旧 since 会让日后一次抖动
+                # 被误判成持续不健康」。生产实测那是防过头了：HIT 只证明 pin
+                # 这一刻**在候选集里**，不证明它**能用**。key
+                # cursor-tankaiwen-lxgf 的 pin=chatgpt-acct-184-gpt-5.6-sol 每个
+                # 请求第一次尝试都进这一支打 HIT、然后失败，重试被
+                # `_excluded_deployment_ids` 前置过滤剥掉 pin ⇒ 判 unhealthy ⇒
+                # 绕行。于是 since 在每个请求开头被清零，`sick_for` 永远卡在
+                # ~10s，**REPIN 永不触发**（实测 11:25:13→11:26:13 一分钟内
+                # HIT/DETOUR 交替 5 轮，每轮都从 0s 重起）。
+                #
+                # 改成靠绕行记录自身的 TTL 过期来代替「恢复即清」：TTL =
+                # detour_repin_after，只有 DETOUR 会刷新它。pin 真恢复 ⇒ 该窗口
+                # 内不再有 DETOUR ⇒ 记录自然消失，计时从下次真生病重起算
+                # （T16 要防的事照样防住，且不需要一个会撒谎的「恢复」信号）。
                 verbose_router_logger.info(
                     "WeightedAffinityRouter: HIT group=%s user=%s session=%s -> "
                     "pinned deployment=%s",
@@ -876,6 +888,27 @@ class WeightedAffinityRouter(CustomLogger):
             return candidate
         # 兜底：全被标记/重摇耗尽 → 从原始候选里直接选
         return self._weighted_pick(deployments)
+
+    def _detour_record_ttl(self) -> int:
+        """
+        绕行记录的 TTL —— 这是**承重件**，不是随手给的过期时间。
+
+        [2026-09-25 第二轮] 「pin 恢复了」这个信号原先取自 HIT（pin 出现在候选
+        集里就清记录），实测会撒谎：pin 每个请求第一次尝试都 HIT 然后失败，
+        计时被清零到永远走不到 REPIN。改成没有显式「恢复」信号，只让记录自己
+        过期：
+
+        - 只有 DETOUR 会刷新这个 TTL（`since` 本身**不**刷新）。
+        - pin 真恢复 ⇒ 一整个 detour_repin_after 窗口内不再 DETOUR ⇒ 记录消失
+          ⇒ 下次真生病时 since 从头起算。
+        - pin 只是「在候选集里但每次都失败」⇒ DETOUR 持续刷新 TTL ⇒ since 保住
+          ⇒ 够 detour_repin_after 就改钉。
+
+        取值刻意等于 detour_repin_after 而不是它的 2 倍：窗口越长，pin 真恢复后
+        再抖一次时被算进 sick_for 的健康期越多（会提前改钉）。等长是把这个误差
+        压到「最多把一个刚恢复就又抖的号提前换掉」，方向可接受。
+        """
+        return max(self.detour_repin_after, 60)
 
     async def _clear_detour(self, cache_key: str) -> None:
         """pin 恢复可用时清掉绕行记录。失败静默 —— 绝不阻断主流程。"""
@@ -974,7 +1007,7 @@ class WeightedAffinityRouter(CustomLogger):
                         await self.cache.async_set_cache(
                             detour_key,
                             {"model_id": str(prev_id), "since": since},
-                            ttl=max(self.detour_repin_after * 2, 60),
+                            ttl=self._detour_record_ttl(),
                         )
                     except Exception as e:
                         verbose_router_logger.debug(
@@ -1001,7 +1034,7 @@ class WeightedAffinityRouter(CustomLogger):
             await self.cache.async_set_cache(
                 detour_key,
                 {"model_id": fresh_pick_id, "since": since},
-                ttl=max(self.detour_repin_after * 2, 60),
+                ttl=self._detour_record_ttl(),
             )
         except Exception as e:
             verbose_router_logger.debug(

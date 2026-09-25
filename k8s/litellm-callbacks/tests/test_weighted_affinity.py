@@ -378,34 +378,66 @@ async def run():
     print(f"[T15 持续生病才改钉] 原={pinned15} 改钉到={pin15} 返回={repinned15}  "
           f"T15 {'PASS' if ok15 else 'FAIL'}")
 
-    # ---- 测试16: pin 恢复会清掉绕行记录（陈旧 since 不得攒出误改钉）----
+    # ---- 测试16: 绕行记录靠 TTL 自然过期，而不是「HIT 即清」----
     #
-    # 这条钉的是 _clear_detour。若 HIT 不清记录，since 会一直停在第一次抖动的
-    # 时刻；几小时后随便再抖一下，sick_for 立刻超过门槛 → 一次抖动直接改钉，
-    # 等于绕行机制白做。
+    # 2026-09-25 第二轮：这条原先断言 HIT 之后记录被清掉（`_clear_detour`）。
+    # 生产实测那个「恢复」信号会撒谎 —— 见 T17。现在的契约：
+    #   HIT 不动记录 → 记录只在一整个 detour_repin_after 窗口内没有新 DETOUR
+    #   时自然过期 → 那才算真恢复，since 从下次生病重起算。
+    # 要防的事没变（陈旧 since 不得攒出误改钉），只是换了个不会撒谎的判据。
     h16 = mod.WeightedAffinityRouter(ttl_seconds=3600)
     h16.detour_repin_after = 1
+    h16._detour_record_ttl = lambda: 1  # 绕过 60s 下限，否则这条测试要等一分钟
     key16 = "%064x" % 161616
     pinned16 = await detour_once(h16, key16, "sess-clear", None)
     await detour_once(h16, key16, "sess-clear", {pinned16})   # 抖一下，写 since
-    back16 = await detour_once(h16, key16, "sess-clear", None)  # 恢复 → 应清记录
+    back16 = await detour_once(h16, key16, "sess-clear", None)  # 恢复 → HIT
     ck16 = h16.get_affinity_cache_key("wtest", key16, "sess-clear")
     dk16 = h16.get_detour_key(ck16)
-    rec16 = await h16.cache.async_get_cache(key=dk16)
-    await asyncio.sleep(1.1)  # 超过门槛，但记录已清 → 不该攒进 sick_for
+    rec_after_hit16 = await h16.cache.async_get_cache(key=dk16)
+    await asyncio.sleep(1.2)  # 窗口内无新 DETOUR → 记录自己过期
+    rec_expired16 = await h16.cache.async_get_cache(key=dk16)
     again16 = await detour_once(h16, key16, "sess-clear", {pinned16})
     pin16 = (await h16.cache.async_get_cache(key=ck16) or {}).get("model_id")
     ok16 = (
-        back16 == pinned16        # 恢复后回原台
-        and not isinstance(rec16, dict)  # 绕行记录已清
-        and again16 != pinned16   # 再抖仍会绕行
-        and pin16 == pinned16     # 但仍然只绕行、不改钉
+        back16 == pinned16                     # 恢复后回原台
+        and isinstance(rec_after_hit16, dict)  # HIT **不**清记录（契约已翻转）
+        and not isinstance(rec_expired16, dict)  # 但窗口内无 DETOUR → 自然过期
+        and again16 != pinned16                # 再抖仍会绕行
+        and pin16 == pinned16                  # 且 since 重起算 ⇒ 只绕行、不改钉
     )
-    print(f"[T16 恢复清绕行记录] 恢复={back16} 记录={rec16} 再抖={again16} "
-          f"pin={pin16}  T16 {'PASS' if ok16 else 'FAIL'}")
+    print(f"[T16 记录靠TTL过期] 恢复={back16} HIT后记录={'有' if isinstance(rec_after_hit16, dict) else '无'} "
+          f"过期后={rec_expired16} 再抖={again16} pin={pin16}  T16 {'PASS' if ok16 else 'FAIL'}")
+
+    # ---- 测试17: pin「每请求第一次 HIT 然后必失败」也必须走到改钉 ----
+    #
+    # 这条钉的是 2026-09-25 生产现场那个 bug（key cursor-tankaiwen-lxgf，
+    # pin=chatgpt-acct-184-gpt-5.6-sol）。日志形状：
+    #     11:25:13 HIT a184
+    #     11:25:15 DETOUR pin=a184 unusable 0s → a186
+    #     11:25:17 DETOUR pin=a184 unusable 1s → a183
+    #     ...
+    #     11:25:29 HIT a184                      ← 下个请求
+    #     11:25:30 DETOUR pin=a184 unusable 0s   ← 计时又从 0 起
+    # 一分钟内 5 轮，每轮都归零 ⇒ sick_for 永远卡在 ~10s ⇒ REPIN 永不触发。
+    # 老实现（`_clear_detour` 挂在 HIT 上）在这条测试下必红。
+    h17 = mod.WeightedAffinityRouter(ttl_seconds=3600)
+    h17.detour_repin_after = 1
+    key17 = "%064x" % 171717
+    pinned17 = await detour_once(h17, key17, "sess-flap", None)
+    seen17 = []
+    for _ in range(4):
+        await detour_once(h17, key17, "sess-flap", None)        # 请求第一次尝试 → HIT
+        seen17.append(await detour_once(h17, key17, "sess-flap", {pinned17}))  # 重试 → 绕行
+        await asyncio.sleep(0.4)
+    ck17 = h17.get_affinity_cache_key("wtest", key17, "sess-flap")
+    pin17 = (await h17.cache.async_get_cache(key=ck17) or {}).get("model_id")
+    ok17 = pin17 is not None and pin17 != pinned17   # 攒够 1s ⇒ 必须已改钉
+    print(f"[T17 HIT不得清零生病计时] 原={pinned17} 绕行过={set(seen17)} "
+          f"pin={pin17} (期望≠原)  T17 {'PASS' if ok17 else 'FAIL'}")
 
     oks = [ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8, ok9, ok10, ok11, ok12, ok13,
-           ok14, ok15, ok16]
+           ok14, ok15, ok16, ok17]
     print(f"\n=== 汇总: " + " ".join(f"T{i+1}={'P' if v else 'F'}" for i, v in enumerate(oks)) + " ===")
     if not all(oks):
         sys.exit(1)

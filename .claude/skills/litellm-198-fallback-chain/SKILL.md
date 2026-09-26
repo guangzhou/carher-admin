@@ -5,7 +5,8 @@ description: >-
   插链首 / 换目标 / 回滚，并按「配置→装载→兜住」三层分别验收。含为什么全局一行能覆盖
   665 把 cursor key（per-key alias 用改写后的名字）、为什么 per-key fallbacks 反而覆盖不了
   （整表替换不是合并）、`router_settings` 每 30s 热加载（旧「必须 rollout」已作废）、
-  以及六个会让你把「兜底存在」误读成「兜住了」的坏尺子。
+  以及十一个会让你把「兜底存在」误读成「兜住了」、或者把「尺子坏了」误读成
+  「没装载」的坏尺子（含容器里没 curl、后台 exit 0 不等于跑完）。
   Use when the user mentions 兜底/fallback 链、"X 挂了兜到 Y"、改 fallbacks、
   兜底没生效、兜底能不能兜住、fallback 回归验证、sa-grok-4.6、
   或要给某个模型组换/加备用腿。
@@ -240,6 +241,39 @@ grok-4.20）不吃。不归本次改动，但新腿排前了会**更早**撞上�
    而且近 3 天已真兜住 **1141 次**（全 ct>0）。真实诉求是"把 grok 那一跳升级"。
    **先证伪用户给的前提，再动手** —— 否则会去"补"一条本来就在的链，
    顺手把已经在兜的腿改坏。
+
+### 4.1 第 10、11 个坏尺子（2026-09-26，手搓 layer2 时踩的）
+
+10. 🔴 **手搓 layer2 探针用 `curl` ⇒ 4 个 pod 全 `READ-FAIL`，和「这行没装载」完全同形。**
+    `litellm` 容器里**没有 curl**（`command -v curl` 返空，镜像自带 python3），
+    见 [[feedback_litellm_image_no_curl_smoke_use_python]]。优先用脚本的 `--verify`；
+    非要手搓就用 `python3 -c` + `urllib`，**且必须带一个已知存在的组做阳性对照**：
+
+    ```bash
+    # 容器里没 curl，走 urllib；ctl 是阳性对照，它有值才说明尺子有分辨力
+    for p in $(sudo kubectl -n litellm-product get pods \
+                 -l carher.net/litellm-production-route=enabled -o name | sed 's|pod/||'); do
+      sudo kubectl -n litellm-product exec "$p" -c litellm -- \
+        env MK="$LITELLM_MASTER_KEY" python3 -c '
+    import json,os,urllib.request
+    q=urllib.request.Request("http://127.0.0.1:4000/get/config/callbacks",
+                             headers={"Authorization":"Bearer "+os.environ["MK"]})
+    fb=json.load(urllib.request.urlopen(q,timeout=20))["router_settings"]["fallbacks"]
+    hit=[v for r in fb for k,v in r.items() if k=="<被测组>"]
+    ctl=[v for r in fb for k,v in r.items() if k=="<已知存在的组>"]
+    print("rows=%d hit=%s [ctl=%s]"%(len(fb), hit or "MISSING", ctl or "MISSING"))'
+    done
+    ```
+
+    ⚠️ `/get/config/callbacks` 的 `router_settings` 是 **dict 不是 list** ——
+    按 list 解析会 `AttributeError: 'str' object has no attribute 'get'`，
+    而这个报错同样会被读成「读不到 ⇒ 没装载」。**先把尺子跑通，再读结论。**
+
+11. 🔴 **后台批量 ssh 跑 N 条：`exit 0` + 最后一条只打了标题 ≠ 它跑过了。**
+    09-26 那轮 7 条 `kiro-claude-*`，第 7 条（haiku）日志在 `=== [7/7]` 处截断，
+    shell 仍 `exit 0`。唯一合法判据是**回读真实状态**：`fallbacks` 行数 96 → 103、
+    且逐 pod 回读到那一行。这是
+    [[feedback_kubectl_exec_heredoc_stdout_lost]] 的同一个形状，别靠 exit code。
 
 ## 5. 目标组上线前要核的两件事
 

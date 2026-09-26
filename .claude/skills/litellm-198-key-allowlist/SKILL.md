@@ -7,9 +7,17 @@ description: >-
   `models=[]` 是全放行不能收窄、删+加+映射合成一次写、金丝雀+双对照验收、
   跑到收敛、换尺子回读、快照回滚、并发写的开跑前防撞与事后取证、
   **撤权限必须 `--include-blocked`**（blocked 只挡认证不清白名单，解封会静默复活）、
-  白名单里有名字 ≠ 能用（缺 alias 的裸名过了闸门照样 400）。
+  白名单里有名字 ≠ 能用（缺 alias 的裸名过了闸门照样 400）、
+  `--converge-to <参考key>` 收敛（别手算差集）、收敛的两个用户面
+  （`UPSTREAM CHANGE` 静默换供应商 / `NAMES DROPPED` 名字没了直接 403，后者只报不拦）、
+  `readback_ok=N/N` 回答不了"全部改完了吗"（scope 先被收窄，末尾的
+  `converged_identical/spared/blocked/unrestricted/mismatch` 才是）、
+  判改动是否还在只认 `token` 不认模型数
+  （key 会被同名重发）、`updated_at` 与 `AuditLog` 这两把尺子在这件事上是坏的。
   Use when 用户说"把这个模型给所有 cursor/claude key 都加上"/"让同事们都能用 X"/
-  "把 X 从白名单里摘了"/"把 X 的权限都删除了"/"只保留一个名字 Y 映射到 Z"/"谁能调这个模型"。
+  "把 X 从白名单里摘了"/"把 X 的权限都删除了"/"只保留一个名字 Y 映射到 Z"/"谁能调这个模型"/
+  "把这几把 key 改成和 XXX 一样的配置和映射"/"全部 key 改成和 XXX 一致，多出来的删掉"/
+  "我改的怎么又变回去了"。
   ⚠️ 白名单 ≠ 引流：要让流量自动打过去是 fallback，不是这个 skill。
 ---
 
@@ -80,6 +88,223 @@ python3 $S --prefix cursor- \
 
 分两次写会留一个窗口：旧名已删、新名还没到，那段时间用户无模型可用。
 
+## 「把这几把 key 改成和 <某把> 一样」用 `--converge-to`，别手算差集
+
+2026-09-21 把 5 把新 key + 1 把模板 key 收敛到 `cursor-liuguoxian-std` 的 32 模型 3 alias，
+我是手算了 **36 个 `--rm-model` + 19 个 `--rm-alias`** 干的。手算的清单每次写之前都得自证完整
+（`comm -23 rm36 source` 必须为空、剩下的 `diff` 参考 key 必须 `IDENTICAL`），
+而且那串数组一旦在本地拼好再插进 ssh 命令串就会被远端重新分词 —— argparse 只认第一个
+`--rm-model`，其余变成裸位置参数。**已封成开关，别再手算：**
+
+```bash
+python3 $S --only cursor-peilu-18ta --only cursor-fenglili-klmo \
+  --converge-to cursor-liuguoxian-std          # ① dry-run
+python3 $S --only ... --converge-to cursor-liuguoxian-std \
+  --apply --backup ~/recurate-$(date -u +%Y%m%dT%H%M%S).json
+```
+
+它做四件手算做不到的事：
+
+1. **期望态从参考 key 读**，不存在"清单漏一个名字"这种失败模式；顺序也照抄，
+   所以收敛后各行**逐字节相同**，验收判据可以是 `count(distinct sig)=1`。
+2. 参考 key **落在写入范围里就拒跑** —— 否则它自己 no-op 会被算进 `applied_ok` 充数。
+3. 参考 key 是 `models=[]`（全放行）**拒跑** —— 收敛到它等于给所有人开全部权限。
+4. **`--converge-to` 与 `--add-model/--rm-model/--alias/--rm-alias` 互斥**，
+   避免"收敛完又被差集补丁改一刀"。
+
+readback 在 `--converge-to` 下改判**相等**而不是包含 —— add/rm 集合是空的，
+原来那套 `set(add) <= models` 断言会**恒真通过**（假绿）。
+
+### 🔴 模板 key ≠ 新 key：收敛会静默把人搬到另一个供应商
+
+新发的 key 是 `68 models / 0 aliases`，收敛过去只是减白名单。
+但**已经带 22 条标准 alias 的模板 key**收敛到 3 条参考 alias = **删掉 19 条**。
+其中危险的子集是：**被删/改的 alias，其源名仍留在白名单里** ——
+那就不是 403，而是**毫无症状地换了上游**。
+
+脚本把这个子集单独算出来打成 `UPSTREAM CHANGE`，默认 **rc=2 拒跑**，
+必须显式 `--allow-upstream-change` 才动。09-21 `cursor-wangzhongwei-w1qn` 上正是 3 条：
+
+| 源名 | 原目标 | 收敛后落点 |
+|---|---|---|
+| `gpt-6-astra` | `chatgpt-gpt-6-astra` | 同名真实组（**没验过它能用**）|
+| `deepseek-v4-flash` | `openrouter-deepseek-v4.1-flash` | 同名真实组 |
+| `glm-5.3-flash` | `openrouter-glm-5.3-flash` | `zai-coding-glm-5.3-flash`（实测约 58% 成功，199 ok / 146 fail；**openrouter 那条没测过，他原来那条可能更稳**）|
+
+⇒ 这三条要**拿给用户裁决**，不是配上 flag 就过。"和 std 一样"这句话在模板 key 上
+不等于"更干净"，等于"换供应商"。⚠️ `models=[]` 的全放行 key 每个名字都仍可调，
+所以它的**任何** alias 变动都算 exposed。
+
+### 🔴 `UPSTREAM CHANGE` 只是一半：另一半是**名字直接没了**（2026-09-26 加）
+
+`upstream_changes` 只管"名字还在、上游变了"这个**静默**面。另一个面它一个字都不报：
+**源名连白名单一起被删 ⇒ 用户下一次调用直接 403。**
+
+09-26 收敛 688 把 `claude-code-*` 到 std 时，门禁对着 GPT-5.6 那批 retarget 大喊大叫，
+而真正不可替代的损失**全程无人提起**：`anthropic.claude-fable-5`
+（14 天 1030 次 / 9 把 key）离开白名单，**参考 key 上根本没有等价物**——
+kiro 整个没有 fable 族。我是另写了一段 SQL 反推才发现的。
+
+现在脚本自己算 `NAMES DROPPED`，**只报不拦**（09-21 那把模板 key 一跑就是 49 个名字）：
+
+```
+NAMES DROPPED from the allowlist: 49 distinct -- every key below starts 403ing on them
+  anthropic.claude-fable-5  (9 key(s))
+  ...
+  ^ measure 14d traffic on these BEFORE --apply
+```
+
+**为什么不拦**：一个名字消失了是否要紧，取决于"参考 key 上还有没有等价能力"，
+这是只有人能下的判断，脚本猜一个反而会训练人去无脑加 flag。
+**吵不等于无害** —— 403 对用户可见，对跑 sweep 的人完全不可见。
+
+🔴 **它打印在 `UPSTREAM CHANGE` 门禁之前，这是刻意的。** 我第一版写在后面，
+那道门禁 `return 2`，结果真跑的时候这份清单一次都没打出来 ——
+而操作者最需要它的时刻，恰恰是被门禁拦住、正在决定要不要加
+`--allow-upstream-change` 的那一刻。阳性对照抓到的就是这个。
+
+⚠️ **去量这些名字的流量时，尺子本身有个洞**：`LiteLLM_SpendLogs` 记的是
+**改写后**的组名，所以一把 key 有多个 alias 指向同一目标时，
+**分辨不出用户实际敲的是哪个名**。反推出来的每名 req 数是**上界不是计数**
+（09-26：`glm-5.3-flash` / `-low` / `-high` / `-medium` 各 752，
+其实是同一批 752 次；`claude-opus-5` 4709 与 `anthropic.claude-opus-5` 4705 同理）。
+
+### 🔴 `readback_ok=668/668 mismatches=0` 回答不了"全部改完了吗"（2026-09-26 加）
+
+`applied_ok` / `readback_ok` 只谈**它自己 planned 的那批**。而 scope 是**先被收窄**的 ——
+**一把静默不在 scope 里的 key，读起来和一把不需要改的 key 一模一样。**
+
+09-26 那一跑：`scoped_keys=669 planned=668 applied_ok=668 readback_ok=668/668 mismatches=0`，
+完美，而且作为"全部"的答案是错的。漏了 **23 把**：19 把 `blocked=t`
+（`--include-blocked` 默认关，压根没进 scope）+ 4 把 `models=[]`（结构上收敛不了）。
+是我另写了一次全表独立回读才发现的。
+
+那次回读现在折进脚本了，`--converge-to --apply` 末尾必打：
+
+```
+converged_identical=685 spared=3 blocked=0 unrestricted=4 mismatch=0
+```
+
+四个桶按优先级互斥，**且只装「还不一致」的**：
+
+| 桶 | 含义 | 要不要动 |
+|---|---|---|
+| `spared` | 被 `--exclude`/`--exclude-prefix` 显式豁免 | 不动，这是你要的 |
+| `blocked` | 因为没带 `--include-blocked` 被跳过 | 🔴 **它们留着旧白名单**，哪天解封就静默还原回 sweep 前的形状 |
+| `unrestricted` | `models=[]`，设计上永不收窄 | 不动，它**永远**等不了参考 key，这不是失败 |
+| `mismatch` | 在 scope 里、可写、仍然不一样 | **只有这个桶红，返回 4** |
+
+⚠️ 第一版按 flag 分桶、**没先测相等**，于是刚用 `--include-blocked` 收敛完的
+那 19 把既算进 `converged_identical` 又列在 `blocked` 里 ——
+同一把 key 报两次、结论相反。**相等判断必须排在分桶之前**，
+让四个桶和 `converged_identical` 正好把 scope 切完（有单测钉住这条）。
+
+### 全舰队收敛的完整命令形状（09-26 实跑 688 把）
+
+```bash
+for pass in 1 2 3; do        # /key/list 分页会少数，必须跑到 planned=0
+  python3 $S --prefix claude-code- \
+    --exclude-prefix claude-code-liuguoxian02 \
+    --exclude-prefix claude-code-liuguoxian03 \
+    --exclude-prefix claude-code-liuguoxian04 \
+    --exclude claude-code-liuguoxian-std \
+    --converge-to claude-code-liuguoxian-std \
+    --allow-upstream-change \
+    --apply --backup ~/fleet-bak/fleet-p$pass-$TS.json
+done
+# blocked 那批要单独补一遍，加 --include-blocked（它们不在上面的 scope 里）
+```
+
+⛔ **`export LITELLM_MASTER_KEY=...` 必须和脚本在同一条 ssh 命令里** ——
+少了它报的是 `HTTP 401: Authentication Error, API 异常 (req: ...)`，
+形状和"key 真的没权限"一模一样，别拿它去查权限。
+
+**"fallback 链也要一致"不需要 per-key 做任何事**，但要证明：per-key fallbacks
+是**整表替换**全局表，带了就不可能一致。判据是一条 SQL：
+
+```sql
+select count(*) filter (where metadata ? 'fallbacks'), count(*)
+  from "LiteLLM_VerificationToken" where key_alias like 'claude-code-%';
+-- 0|692  ⇒ 全部吃全局表；alias 改写在 router 之前，11 个 alias 目标相同 ⇒ 链必然相同
+```
+
+## 判「我的改动还在不在」：对 `token`，不对模型数
+
+09-21 我 Phase 1 写好的 `cursor-liuguoxian-std`（32/3）几小时后变回 `68/0`。
+第一反应是"被并发会话压回去了"，**错**：这把 key 是**被删掉重建**的 ——
+同一个 `key_alias`，**新的 `token`、新的 `created_at`**。
+
+⇒ 判据是 **`--backup` 快照里的 `token` 对当前行的 `token`**。
+同一个 alias 不代表同一行。只比 `cardinality(models)` 会把"被重建"读成"被覆盖"，
+处置完全不同：被覆盖 → 重跑到收敛；被重建 → 重跑也只能保到下一次重建，
+得去找发 key 的流水线。
+
+### 两把在这件事上坏掉的尺子
+
+- 🔴 **`updated_at` 量不出"配置什么时候被改的"** —— LiteLLM 写 spend 时会刷它，
+  所以按分钟做 `updated_at` 直方图量的是**流量**不是改动。
+  （上面防撞那节靠 `distinct_len` 形状列救回来了，但**用它给一次改动定时间是无效的**。）
+- 🔴 **`LiteLLM_AuditLog` 对这两个 token 返 0 行**（`store_audit_logs` 疑似没开）。
+  "没有审计行"**不是**"没人改过"的证据，是尺子坏了。
+- grep 仓库里的 `/key/delete` `/key/generate` 命中 30+ 文件 —— **代码存在 ≠ 该路径被执行**，
+  别拿它指认凶手。
+
+### 管用的那把尺子：按 `(nmodels, naliases)` 分桶
+
+两把尺子都坏之后，是**指纹分桶**给出的答案：
+
+```sql
+select cardinality(models) nm, count(*) FILTER (WHERE true) n,
+       (select count(*) from jsonb_object_keys(coalesce(aliases,'{}'::jsonb))) -- 见下
+from "LiteLLM_VerificationToken" where key_alias like 'cursor-%' ...;
+-- 实用写法：先在子查询里算好 (nm, na)，外层 group by 1,2 order by 3 desc
+```
+
+683 把 `cursor-*` 里 **497 把是 `68/22` 标准模板**，而 `68/0` 桶里**恰好 5 把**，
+就是最近 12 小时内新建的那 5 把（02:01 / 03:08 / 03:23 / 03:32 / 03:52 单个错开，
+`created_by=default_user_id`）。
+
+⇒ **发 key 的流水线用 68 名默认白名单发，且 22 条 alias 一条都不带。**
+那 5 个人打 `glm-5.3-flash` 这类模板名**必然 400**（白名单有名字 ≠ 能用，见下文）。
+这个缺陷**早于且独立于**我的改动，且**至今没定位**（grep 找不到、审计为空）；
+任何一次重发都会把收敛过的 key 打回原形。
+
+⚠️ 顺带修正一条旧结论：memory 里"别拿 `cursor-liuguoxian-std` 当授权模板（aliases n=0）"
+的**成因**就是这个 —— 它 02:01 被重发过，不是它本来就没 alias。
+
+### 验收：`count(distinct sig) = 1`，且从库里查
+
+脚本自带的 `readback_ok` 走的是**写它的同一个 API**，不能自证。收敛的验收判据：
+
+```sql
+select count(distinct md5(array_to_string(models,',')) || md5(coalesce(aliases,'{}')::text))
+from "LiteLLM_VerificationToken"
+where key_alias in ('<ref>','<t1>','<t2>', ...);
+-- 必须回 1。回 2 就是有 key 没收敛到位（或参考 key 自己又被重发了）
+```
+
+09-21 终态 `DISTINCT_SIGS: 1 of 6`（`nm=32 na=3`，`msig=df586b0f…` `asig=dd4007d5…`）。
+⚠️ 指纹相等只证明**配置一致**，不证明那几个人**真能调通** —— 那需要探针
+（`cr-g-*` 线要 vscode 形状的 api_key，master key 直打会假红）。
+
+## 远端调用形状（这轮踩的两个坑）
+
+```bash
+ssh cltx@10.68.13.198 'bash -s' <<'REMOTE'
+export LITELLM_MASTER_KEY=$(sudo kubectl -n litellm-product get secret litellm-secrets \
+  -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+[ -z "$LITELLM_MASTER_KEY" ] && { echo "ALERT: empty master key"; exit 2; }
+echo "mk_len=${#LITELLM_MASTER_KEY}"   # 应为 39，光看命令成功不算
+python3 ~/litellm-198-key-allowlist-<sid>.py --only ... --converge-to ... --apply --backup ~/...json
+REMOTE
+```
+
+- 🔴 **多值参数数组必须在远端 heredoc 里拼**。在本地拼好插进命令串，远端会重新分词，
+  argparse 只认第一个 flag、其余报 `unrecognized arguments`（没报错的话就是静默只改一个名字）。
+  非要手拼就断言 `echo "${#ARGS[@]}"` 等于 2×N。
+- 🔴 **`LITELLM_MASTER_KEY` 不在远端 env 里 ⇒ `/key/list` 直接 401**。
+  空值守卫 + 打长度，别只看 `export` 那行有没有报错。
+
 ## 五条不许违反的纪律
 
 1. **`/key/update` 是整字段替换，不是 merge**——`models` 和 `aliases` 都是。必须读回当前值
@@ -96,6 +321,25 @@ python3 $S --prefix cursor- \
 4. **必须留快照。** `--apply` 强制 `--backup`；连续 2 次写失败自动中止。
 5. **跑到收敛，别信单轮的 `applied_ok`。** 同一条命令重复跑，直到 `planned=0` 且 psql 复核为准。
    见下一节。
+
+### ⚠️ drift-verify 的 `--snapshot` 吃的是本脚本 `--backup` 的形状（2026-09-20 修）
+
+`scripts/litellm-key-drift-verify.py` 旧版的 `load_snapshot` 只读 `row["token"]`，
+而本脚本 `--backup` 写出来的是 `{token: {key_alias, models, aliases}}`——
+**token 在映射键上，行里没有**。于是整份快照被读空，报
+`snapshot=0 keys` / `FAIL: zero keys verified`。
+
+**这个假红的形状和 `--prefix` 写错一模一样**，会让你以为范围选错了去改 prefix，
+而真相是验收器自己坏了。已修（两种快照形状都吃，行内 `token` 优先），
+附单测 `backend/tests/test_litellm_key_drift_verify.py`。
+
+198 上还要两个参数否则照样红得没道理：`--ns litellm-product`（默认是阿里云的 `carher`），
+且它 shell 出去调的是**裸 `kubectl`**（不带 sudo、不读 env override），需要 PATH shim：
+
+```bash
+mkdir -p ~/bin-0a && printf '#!/bin/sh\nexec sudo /usr/local/bin/kubectl "$@"\n' > ~/bin-0a/kubectl
+chmod +x ~/bin-0a/kubectl && export PATH=~/bin-0a:$PATH
+```
 
 ## 并发写会静默吃掉你的改动（2026-09-08 实测）
 
@@ -197,6 +441,34 @@ select count(*) from "LiteLLM_VerificationToken"
 
 还要看**白名单长度分布**：正常应该是整体平移（+1/-1）。出现别的长度 = 有 key 被写坏了。
 
+### ③ 探针已封成脚本，别再每次手搓
+
+`scripts/litellm-198-grok6-cursor-probe.py` 把上面这套判据（复刻形状建临时 key →
+逐名真打 → 阴性对照必须红得不一样 → `finally` 删临时 key）封进去了，
+`--clone-from` 直接吃 allowlist 脚本 `--backup` 产出的快照。改模型名列表即可复用：
+
+```bash
+scp scripts/litellm-198-grok6-cursor-probe.py cltx@10.68.13.198:~/grok-onboard/
+ssh cltx@10.68.13.198 'cd ~/grok-onboard && LITELLM_MASTER_KEY=$(sudo kubectl -n litellm-product \
+  get secret litellm-secrets -o jsonpath="{.data.LITELLM_MASTER_KEY}" | base64 -d) \
+  python3 litellm-198-grok6-cursor-probe.py --clone-from $(ls -t backups/cursor-grok6-full-*.json | head -1)'
+```
+
+⚠️ 它从 backup 快照复刻形状，而**快照是写之前的 `models`** ⇒ 脚本会把这批新名字
+补进复刻列表，复刻出来的是"写完之后应该长的样子"。换用途时这段（`clone_shape`）要一起改。
+
+⛔ `GET /key/info?key_alias=<alias>` **返 404**——这个 filter 不存在，别拿它去取形状
+（我 09-20 在这上面浪费了一轮）。形状的来源只有两个：allowlist 脚本的 backup 快照，
+或 `/key/list` 翻页找到 token 后 `GET /key/info?key=<token_hash>`。
+
+### 🔴 `mode` 不是 chat 的名字，探针必须换端点
+
+`image_generation` 的名字（如 `sa-grok-imagine` / `sa-grok-imagine-image-2.0`）
+用 `/v1/chat/completions` 打**必然红**，而那个红和"白名单没生效"长得一模一样。
+写白名单前先 `/model/info` 看每个名字的 `mode`，chat 的走 chat、image 的走
+`/v1/images/generations`（判据 `data` 数组非空）。09-20 六个名字里两个是 image，
+提前分好端点，一轮就全绿。
+
 ## blocked key：加模型时跳过，**撤模型时必须带上**
 
 脚本默认跳过 `blocked=true` 的 key（198 上 38 把：19 把 `cursor-*` + 19 把 `claude-code-*`，
@@ -213,6 +485,10 @@ python3 $S --prefix cursor- --prefix claude- --include-blocked \
 
 输出会打 `include_blocked=` 和 `blocked_in_scope=` 两个数，用来确认范围真的扩到了。
 不带这个 flag 时行为与旧版完全一致。
+
+🔴 **`--converge-to` 也吃这条，而且更阴**：收敛本质上就是一次大规模撤权限。
+09-26 那次 19 把 blocked key 静默留在 sweep 外，脚本一路全绿 —— 详见上面
+「`readback_ok` 回答不了"全部改完了吗"」。现在末尾的 `blocked=N` 桶会点名它们。
 
 判「撤干净了」的 psql 判据**不能过滤 blocked**，否则 38 把残留正好落在你的尺子外面：
 
@@ -244,6 +520,61 @@ where m = '<撤掉的名字>' group by 1;
 09-09 撤 4 个 deepseek pro 名字后 cursor 51.94→50.89（-1.05）、claude 23.61→22.65（-0.96），
 正好等于人均摘掉的模型数，这才叫干净。
 
+**2026-09-20 增量**：给 cursor 铺 6 个 `sa-*` grok 名（4 chat + 2 image）。
+`--prefix cursor- --include-blocked` ⇒ `scoped_keys=677`（比 09-09 的 633+19=652 多 25，
+期间新建的）· `unrestricted_in_scope=0` · `blocked_in_scope=19` ·
+`applied_ok=676`（+1 把 canary 已写故 `no_change=1`）· `readback 676/676 mismatches=0`。
+终态 psql `has_all_six=677/677`，耗时约 100 秒。
+**proxy 当前只 1 个副本** ⇒ 这轮没有跨 pod 传播延迟；副本数变回多个时逐 pod 那条纪律要捡回来。
+
+**2026-09-25 增量（撤权限的完整形状，可当模板）**：把 `cr-g` 全族从 cursor 家族摘掉，
+只留 `cursor-liuguoxian02-7w7g` / `-liuguoxian03` / `-liuguoxian04-5rub` 三把。
+
+```bash
+# 14 个名字必须在**远端** heredoc 里拼数组；--exclude-prefix 防的是发 key 流水线换随机后缀
+ARGS=(); for n in $NAMES; do ARGS+=(--rm-model "$n"); done   # 断言 ${#ARGS[@]} == 2N
+python3 $S --prefix cursor- --include-blocked \
+  --exclude-prefix cursor-liuguoxian02 --exclude-prefix cursor-liuguoxian03 \
+  --exclude-prefix cursor-liuguoxian04 "${ARGS[@]}" --apply --backup ~/…/full-<ts>.json
+```
+
+`excluded=3` · `scoped_keys=693` · `planned=692`（金丝雀那把 `no_change=1`）·
+`blocked_in_scope=19` · `unrestricted_in_scope=0` · `applied_ok=692/692` · **43 秒**。
+终态 `cursor-* 673 把 nm=28`（原 41，-13）· blocked 18 把 `nm=55`（原 68）。
+
+三条这轮才立起来的判据：
+
+1. **名字全集从库里取，不许手列。** cr-g 在 key 白名单里有 **42** 个名字，但按腿的
+   `-82` / `-135` 后缀那 28 个**只长在豁免的 04 和一把 09-02 的临时 key 上**；
+   `select distinct m … where key_alias like 'cursor-%' and key_alias not in (豁免)`
+   回的是 **14** 个。少列一个是零症状残留，多列一个会让 `--exclude` 白名单外的 key 也被扫。
+2. **验收判据是「快照 vs 当前库逐 key 比对」，且这把尺子要带阳性对照。**
+   readback 走写它的同一个 API 不能自证；`avg(models)` 只能看出整体位移。
+   判据：对 692 把逐个断言 `db.models == snapshot.models − cr-g` 且
+   `db.aliases == snapshot.aliases` **逐字相等**（这条正是防 `/key/update` 逐字段覆盖
+   顺手冲掉 alias —— 198 上有一批 key 靠 per-key alias 活着，冲掉零症状）。
+   阳性对照：拿「快照 vs 快照减 cr-g」比一次，**必须报出 692 个差异**；
+   对照不亮说明比对器自己坏了，本轮所有 `0 差异` 结论作废。
+3. **阴性腿要看 `type` 不只看状态码。** 三个摘掉的名字全回
+   `403 key_model_access_denied` / 0.0s；阳性腿 `gpt-5.6-luna` 200 出 `pong`。
+   ⚠️ 同一轮里 `grok-4.6` 返 **400**，那是**既存**状态不是本轮带入 ——
+   pod 日志原文 `ProxyModelNotFoundError: Invalid model name passed in model=grok-4.6`，
+   而复刻源 key 本来就 `aliases=0`（快照已证明 alias 一字未动）。
+   ⇒ 回归里的 4xx 先去日志分类，再去快照对照，两步都过了才算「我改坏的」。
+
+### 🔴 回归里的 403 先分「本来就没有」和「我冲掉了」
+
+09-20 探针里 `sa-grok-4.6` 在某把 key 上返 403，第一反应是"`/key/update` 整字段替换
+把它冲掉了"。**去 backup 快照里查这把 key 写之前的 `models`，本来就没有这个名**——
+它 37 个模型里只有裸名 `grok-4.6`，靠 per-key alias 落到 `sa-grok-4.6`。
+全库这种「有 alias 无同名白名单」的 cursor key 有 **8 把**。
+
+⇒ 判「我有没有冲掉」的尺子是 **backup 快照，不是当前库**。快照就是你写之前那一刻的
+真值，对着它比对才有意义；拿当前库和记忆里的印象比 = 没有对照。
+
+同理，回归必须验**裸名**而不只是 `sa-` 真名：633 把 cursor key 的
+`grok-4.6 → sa-grok-4.6` alias 才是主流量路径，裸名 200 才算没回退。
+
 
 ## 命名惯例
 
@@ -257,7 +588,80 @@ where m = '<撤掉的名字>' group by 1;
   `sa-kimi-k3*` 走 sub2api，名字像但是三条独立的路。摘名字前先查它的 `litellm_params.model`
   和 `api_base`，别把「统一命名」做成「把用户从一条能用的路挪到另一条」。
 
-### 白名单里有这个名字 ≠ 它能用
+### 🔴 客户端发的名字**只有他的 SpendLogs 知道**，探针名字是我自己给的（2026-09-22）
+
+给 `cursor-liuguoxian-std` 配完 kiro 的三个 claude 名之后，用户报「haiku 有问题」。
+我把 `claude-haiku-4.5` **四个面全打绿了**：Cursor 线型（`stream`+`tools`）200 出字、
+chat 非流式 200 回显 nonce、`/v1/messages` 200、`max_tokens` 64000/128000 都 200、
+阴性编造名 403 —— 尺子有分辨力，读数不作废，**但和他的故障无关**。
+
+因为他 Cursor 里发的是 **`claude-haiku-4-5`（连字符）**，白名单里是
+**`claude-haiku-4.5`（点号）**。两个都是合法写法，差一个字符，403 死在准入闸门，
+**根本没走到 kiro**。opus-5 / sonnet-5 两边写法恰好一致，所以只有 haiku "有问题"。
+
+| 假设 | 证伪条件 | 数据 |
+|---|---|---|
+| kiro 没有 haiku 模型 | `ListAvailableModels` 里应查不到 | **有**，`claude-haiku-4.5` 0.4x / 200K，19 个模型里第 14 个 |
+| alias 没配对 / 配错了 | 库里 `aliases` 应为空或指别处 | 指的就是 `kiro-claude-haiku-4-5` |
+| 名字对但链路坏 | 四个面里应至少一个红 | 全绿，且 SpendLogs 落 `kiro-rs/claude-haiku-4-5-20251001` |
+| **他发的不是这个名字** | 他 key 的 SpendLogs 里应只有点号名 | **`model=claude-haiku-4-5` `status=failure` `error_code=403`** |
+
+⇒ **配完模型的验收，最后一道必须是他真 key 的 SpendLogs**，不是我挑名字打的探针。
+探针量的是「我以为他发的名字通不通」；他发什么名字，只有他的行里有。
+
+```sql
+-- 失败行**带** user_api_key_alias（实测过，这把尺子是好的），直接按 alias 捞
+select "startTime", model, model_group, status,
+       metadata->'error_information'->>'error_code',
+       left(metadata->'error_information'->>'error_message', 80)
+from "LiteLLM_SpendLogs"
+where metadata->>'user_api_key_alias' = '<key_alias>'
+  and "startTime" > now() - interval '12 hours' and status = 'failure'
+order by "startTime" desc limit 20;
+```
+
+🔴 **`model` 这一列在成功行和失败行里语义不同**：成功行是**落点**
+（`anthropic/claude-haiku-4-5-20251001`），403 失败行是客户端**发来的原始名**
+（`claude-haiku-4-5`，未经 alias 改写、`model_group` 和 `model_id` 都是空）。
+两种名混在一列里，不带 `status`/`model_group` 一起 group by 就读不出来。
+⇒ 判「死在准入/解析这道」的判据是 **`status='failure'` 且 `model_group` 为空**。
+
+这两段已经落进 `scripts/litellm-key-activity.sh`（model summary 加 `model_group`+`status`
+两维、Failure breakdown 加 `model` 列、新增一段 "requested names that never landed"）。
+**别再手搓这个查询**，跑 `./scripts/litellm-key-activity.sh <key_alias> pro 12`。
+
+### 改名：add → verify → cutover → remove，与「合成一次写」的边界
+
+上面那节「改名/收敛要在一条命令里同时删旧、加新」防的是**旧名还在服务**时的窗口。
+但当**旧名此刻零流量**（比如它从来就没被客户端发过，用户打的一直是新名），
+就该按加法律令拆三步，因为 verify 必须发生在 remove 之前：
+
+```bash
+# ① add：新名 + alias 一次写（旧名不动，此刻两个名都在）
+python3 $S --only <key> --add-model claude-haiku-4-5 \
+  --alias claude-haiku-4-5=kiro-claude-haiku-4-5 --apply --backup ~/…-add-<ts>.json
+# ② verify：Cursor 线型真打新名 + **换尺子看 SpendLogs 落点**（见下条，光 200 不够）
+# ③ cutover/remove：确认落点对了，再摘旧名 + 旧 alias，一次写
+python3 $S --only <key> --rm-model claude-haiku-4.5 --rm-alias claude-haiku-4.5 \
+  --apply --backup ~/…-cutover-<ts>.json
+# ④ 阴性复核：旧名现在必须 403（证明摘干净了，不是"还留着只是没走到"）
+```
+
+🔴 **新名撞上同名真实组时，②那步的落点复核不能省。** `claude-haiku-4-5` 在 198 上
+**本身就是一个真实组**（网宿 `aigateway.edgecloudapp.com`），`claude-haiku-4.5` 也是
+（copilot2api-4/-5 两腿）。只加白名单不写 alias ⇒ 照样 200，但**静默落到别的供应商**，
+和 `UPSTREAM CHANGE` 是同一种零症状故障。判据只认 SpendLogs 的 `model_id`
+（09-22 复核：两行全是 `kiro-rs/…`，零行落网宿），⛔ 不认 `x-litellm-model-id`（是 hash）。
+
+### ⛔ `/key/delete` 不认 `key_aliases`，只认 token hash
+
+清理探针临时 key 时 `{"key_aliases":["zz-probe-…"]}` 返 **404 `{'error': 'No keys found'}`**，
+看起来像"这把 key 不存在"，其实是这个 filter 不生效。正解是先从库里取 `token`
+（库里存的就是 sha256），再 `{"keys":["<token hash>"]}` —— 返 `deleted_keys` 才算删掉。
+⚠️ 探针脚本被 `TaskStop` / ssh 断开打断时 `finally` 不一定跑得到，远端 python
+还会**继续跑**（ssh 断了进程不死），要 `pgrep -af <脚本名>` 杀掉再按上面这条清 key。
+
+
 
 白名单只管**准入**，解析是另一道。一个名字要真能调通，得满足其一：
 它是 `LiteLLM_ProxyModelTable` 里的真实组、或有全局 `model_group_alias`、或有 per-key `aliases`。

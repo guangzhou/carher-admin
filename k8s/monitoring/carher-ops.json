@@ -1,0 +1,1929 @@
+{
+  "uid": "carher-litellm-ops-198",
+  "title": "CarHer · LiteLLM 运维总览 (198)",
+  "description": "按排查顺序组织：用户面 → TTFT → 吞吐/错误 → Token → 兜底/冷却 → 基础设施。统计窗口用 $win 切换，与 Grafana 时间范围解耦。",
+  "tags": [
+    "litellm",
+    "198",
+    "carher",
+    "ops"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "30s",
+      "1m",
+      "5m",
+      "15m"
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "model",
+        "label": "模型",
+        "type": "query",
+        "datasource": null,
+        "query": {
+          "qryType": 1,
+          "query": "query_result(topk(300, sum by (requested_model)(increase(litellm_proxy_total_requests_metric_total[6h])) > 0))",
+          "refId": "var-model"
+        },
+        "regex": "/requested_model=\"([^\"]+)\"/",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0
+      },
+      {
+        "name": "provider",
+        "label": "Provider",
+        "type": "query",
+        "datasource": null,
+        "query": {
+          "qryType": 1,
+          "query": "label_values(litellm_proxy_total_requests_metric_total, api_provider)",
+          "refId": "var-provider"
+        },
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0
+      },
+      {
+        "name": "win",
+        "label": "统计窗口",
+        "type": "custom",
+        "query": "5m,10m,30m,1h,6h",
+        "options": [
+          {
+            "selected": false,
+            "text": "5m",
+            "value": "5m"
+          },
+          {
+            "selected": false,
+            "text": "10m",
+            "value": "10m"
+          },
+          {
+            "selected": true,
+            "text": "30m",
+            "value": "30m"
+          },
+          {
+            "selected": false,
+            "text": "1h",
+            "value": "1h"
+          },
+          {
+            "selected": false,
+            "text": "6h",
+            "value": "6h"
+          }
+        ],
+        "current": {
+          "selected": true,
+          "text": "30m",
+          "value": "30m"
+        },
+        "multi": false,
+        "includeAll": false,
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "一、用户面（窗口 = $win，已剔除探针流量）",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "QPS（请求/秒）",
+      "description": "窗口内平均请求速率。探针流量已剔除。",
+      "datasource": null,
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sum by (requested_model)(rate(litellm_proxy_total_requests_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\"))",
+          "editorMode": "code",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "用户真实失败率",
+      "description": "重试和兜底全挂了才算一次失败 —— 这是用户真正看到的失败率，不是上游失败率。上游在坏但兜底救回来了，这里是 0。",
+      "datasource": null,
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * (sum(sum by (requested_model)(rate(litellm_proxy_failed_requests_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\"))) / clamp_min(sum(sum by (requested_model)(rate(litellm_proxy_total_requests_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")), 0.0001)",
+          "editorMode": "code",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "TTFT p50",
+      "description": "首字时间。⚠️ 只统计**流式**请求，且起点是「上游调用开始」，不含 LiteLLM 侧鉴权/排队 —— 与用户浏览器感受到的首字节不是一回事。",
+      "datasource": null,
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le)(sum by (le,requested_model)(rate(litellm_llm_api_time_to_first_token_metric_bucket{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")))",
+          "editorMode": "code",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 15
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "TTFT p95",
+      "description": "首字时间。⚠️ 只统计**流式**请求，且起点是「上游调用开始」，不含 LiteLLM 侧鉴权/排队 —— 与用户浏览器感受到的首字节不是一回事。",
+      "datasource": null,
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le)(sum by (le,requested_model)(rate(litellm_llm_api_time_to_first_token_metric_bucket{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")))",
+          "editorMode": "code",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "TTFT p99",
+      "description": "首字时间。⚠️ 只统计**流式**请求，且起点是「上游调用开始」，不含 LiteLLM 侧鉴权/排队 —— 与用户浏览器感受到的首字节不是一回事。",
+      "datasource": null,
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le)(sum by (le,requested_model)(rate(litellm_llm_api_time_to_first_token_metric_bucket{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")))",
+          "editorMode": "code",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 20
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "在抓的 proxy 副本",
+      "description": "应为 4。低于 4 时本页**所有**面板的分母都偏小，先修这个再读别的。",
+      "datasource": null,
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(up{job=\"litellm-proxy\"} == 1)",
+          "editorMode": "code",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 4
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "二、TTFT 首字时间（仅流式请求）",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "panels": []
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "TTFT 分位（当前筛选聚合）",
+      "description": "p50 平、p99 翘 = 长尾；三条一起翘 = 上游整体变慢。",
+      "datasource": null,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le)(sum by (le,requested_model)(rate(litellm_llm_api_time_to_first_token_metric_bucket{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le)(sum by (le,requested_model)(rate(litellm_llm_api_time_to_first_token_metric_bucket{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le)(sum by (le,requested_model)(rate(litellm_llm_api_time_to_first_token_metric_bucket{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "p99"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "按模型 TTFT p95（top 15）",
+      "description": "只画 top 15，避免几百条线糊成一片。",
+      "datasource": null,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(15, histogram_quantile(0.95, (sum by (le, requested_model)(rate(litellm_llm_api_time_to_first_token_metric_bucket{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\"))))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{requested_model}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "按 Provider TTFT p95",
+      "description": "哪家上游首字慢。⚠️ 这条**没有**剔除探针流量：unless 要在 requested_model 维上做，而这里已经聚到 provider 维了。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, api_provider)(rate(litellm_llm_api_time_to_first_token_metric_bucket{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{api_provider}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "端到端 vs 上游 vs LiteLLM 侧排队 p95",
+      "description": "🔴 这三条一起看才回答得了「TTFT 很好但用户说卡」：TTFT 的起点是**上游调用开始**，排队那一段完全在它之外。「排队 p95」翘起来 = 卡在我们这侧，与上游快慢无关。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le)(sum by (le,requested_model)(rate(litellm_request_total_latency_metric_bucket{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "端到端 p95"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le)(sum by (le,requested_model)(rate(litellm_llm_api_latency_metric_bucket{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "上游 API p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.95, sum by (le)(sum by (le,requested_model)(rate(litellm_request_queue_time_seconds_bucket{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "LiteLLM 侧排队 p95"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "row",
+      "title": "三、吞吐与错误",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "panels": []
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "按模型 QPS（top 15）",
+      "description": "",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(15, (sum by (requested_model)(rate(litellm_proxy_total_requests_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{requested_model}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "按模型 用户真实失败率（%，只画出过错的）",
+      "description": "`> 0` 过滤掉一直健康的模型。分母 clamp_min 防 0 除。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(15, 100 * (sum by (requested_model)(rate(litellm_proxy_failed_requests_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")) / clamp_min((sum by (requested_model)(rate(litellm_proxy_total_requests_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")), 0.0001) > 0)",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{requested_model}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "失败按错误码拆",
+      "description": "403=没权限 / 429=限流 / 5xx=上游挂 / 499=客户端断开。⚠️ 没剔除探针流量（这一维上没有 requested_model 可以 unless），只看形状变化，别当 SLA 分子。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 29
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (exception_status)(rate(litellm_proxy_failed_requests_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) > 0",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{exception_status}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "失败按异常类型拆",
+      "description": "",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 29
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (exception_class)(rate(litellm_proxy_failed_requests_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) > 0",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{exception_class}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "按 Provider QPS",
+      "description": "流量落在哪几家上游。⚠️ 未剔除探针流量（已聚到 provider 维）。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 29
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (api_provider)(rate(litellm_proxy_total_requests_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win]))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{api_provider}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "四、Token 吞吐",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Token/秒：输入 vs 输出",
+      "description": "输入远大于输出是长上下文场景的正常形态。「推理 token」是输出的子集，不要重复计入。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 37
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(sum by (requested_model)(rate(litellm_input_tokens_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\"))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "输入 token/s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(sum by (requested_model)(rate(litellm_output_tokens_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\"))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "输出 token/s"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(sum by (requested_model)(rate(litellm_output_reasoning_tokens_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\"))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "其中推理 token/s"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "按模型 总 token/秒（top 15）",
+      "description": "",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 37
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(15, (sum by (requested_model)(rate(litellm_total_tokens_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) unless on(requested_model) label_replace(max by (model_id)(litellm_probe_target_info), \"requested_model\", \"$1\", \"model_id\", \"(.*)\")))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{requested_model}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "缓存命中的输入 token/秒（省下来的钱）",
+      "description": "prompt caching 实际命中的量。为空 = 当前筛选下没有缓存命中。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (requested_model)(rate(litellm_input_cached_tokens_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) > 0",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{requested_model}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "按 Provider 花费（$/小时）",
+      "description": "⚠️ 只统计 LiteLLM 算得出价格的模型；自建/未配价的上游这里是 0，不代表免费。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (api_provider)(rate(litellm_spend_metric_total{requested_model=~\"$model\",api_provider=~\"$provider\"}[$win])) * 3600",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{api_provider}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 3,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 24,
+      "type": "row",
+      "title": "五、兜底（fallback）与冷却（cooldown）",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 51
+      },
+      "panels": []
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "兜底：救回来了 vs 兜底也失败",
+      "description": "「救回来了」高 = 上游在坏但用户没感觉，在烧重试预算 —— 这是**最容易被忽略的故障形态**，用户面失败率仍然是绿的。🔴 这两个指标结构上没有 api_provider，**Provider 筛选对本面板无效**。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 52
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(litellm_deployment_successful_fallbacks_total{requested_model=~\"$model\"}[$win]))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "救回来了"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(litellm_deployment_failed_fallbacks_total{requested_model=~\"$model\"}[$win]))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "兜底也失败"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 3,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "兜底落到哪个模型上",
+      "description": "承接兜底流量的模型。某个名字突然变高 = 它正在给别人当垫背，自己的配额会被烧掉。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 52
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (fallback_model)(rate(litellm_deployment_successful_fallbacks_total{requested_model=~\"$model\"}[$win])) > 0",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{fallback_model}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 3,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "冷却：被摘出轮转的上游腿",
+      "description": "LiteLLM 把某条腿判死并摘出轮转的速率。🔴 这个指标**不带 requested_model**，所以模型筛选对本面板无效。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 52
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (litellm_model_name, api_provider, exception_status)(rate(litellm_deployment_cooled_down_total[$win])) > 0",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{litellm_model_name}} / {{api_provider}} / {{exception_status}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 3,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 28,
+      "type": "row",
+      "title": "六、基础设施（是不是我们自己的机器拖的）",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 59
+      },
+      "panels": []
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "proxy 每副本 CPU（核）",
+      "description": "与下面的 limit 对照。贴着 limit 跑 = 在被限流，会直接表现为上面那个「我们这侧开销」变大。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 60
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pod)(rate(container_cpu_usage_seconds_total{namespace=\"litellm-product\",container=\"litellm\",pod=~\"litellm-proxy-.*\"}[$win]))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "proxy 每副本内存（工作集）",
+      "description": "工作集持续爬升不回落 = 泄漏；接近 limit 会 OOMKilled，表现为下面「重启次数」跳变。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 60
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pod)(container_memory_working_set_bytes{namespace=\"litellm-product\",container=\"litellm\",pod=~\"litellm-proxy-.*\"})",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "decimals": 1,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "重启次数（累计）",
+      "description": "🔴 这是**累计量**不是速率 —— 滚动更新会让新 pod 从 0 开始，曲线下跌是换了 pod，不是修好了。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 60
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pod)(kube_pod_container_status_restarts_total{namespace=\"litellm-product\",container=\"litellm\"})",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Redis 延迟 p95 / p99",
+      "description": "Redis 慢会直接顶到用户面延迟上。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 0,
+        "y": 67
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le)(rate(litellm_redis_latency_bucket[$win])))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le)(rate(litellm_redis_latency_bucket[$win])))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "p99"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Postgres 延迟 p95 / p99",
+      "description": "花费落库走这里。慢 ≠ 用户受影响（写是异步的），但持续慢会让 SpendLogs 落后。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 6,
+        "y": 67
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le)(rate(litellm_postgres_latency_bucket[$win])))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le)(rate(litellm_postgres_latency_bucket[$win])))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "p99"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "LiteLLM 自身开销：鉴权 / 路由 / 调用前",
+      "description": "「端到端 减 上游」那段差值具体花在哪。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 12,
+        "y": 67
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le)(rate(litellm_auth_latency_bucket[$win])))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "鉴权 p95"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le)(rate(litellm_router_latency_bucket[$win])))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "路由 p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.95, sum by (le)(rate(litellm_proxy_pre_call_latency_bucket[$win])))",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "调用前 p95"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "在途请求数（每副本）",
+      "description": "副本之间差很多 = 负载不均。这个指标曾被 Prometheus 侧的第二层白名单静默丢了 17 天，2026-09-26 才接回来。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 18,
+        "y": 67
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pod)(litellm_in_flight_requests)",
+          "editorMode": "code",
+          "range": true,
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 36,
+      "type": "table",
+      "title": "⚠️ 当前不健康的上游部署（1=部分故障 2=完全故障）",
+      "description": "litellm_deployment_state 带 pid 标签（每 worker 一份），用 max 收敛到部署级。空表 = 当前没有故障腿。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 74
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (litellm_model_name, model_id, api_provider, api_base)(litellm_deployment_state) > 0",
+          "editorMode": "code",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 37,
+      "type": "table",
+      "title": "Pod 状态（litellm-product 命名空间）",
+      "description": "Ready=1 才在接流量。副本数与上面「在抓的 proxy 副本」对不上，说明采集侧有问题而不是服务侧。",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 74
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "kube_pod_status_ready{namespace=\"litellm-product\",condition=\"true\"}",
+          "editorMode": "code",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "job": true,
+              "instance": true,
+              "condition": true,
+              "__name__": true
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 38,
+      "type": "row",
+      "title": "七、这一页测不到什么（先读这个，再读上面的数）",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 81
+      },
+      "panels": []
+    },
+    {
+      "id": 39,
+      "type": "text",
+      "title": "盲区清单",
+      "datasource": null,
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 82
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "\n**写在页面上而不是交接文档里，是因为读看板的人不会去翻交接文档。**\n\n1. **TTFT 只覆盖流式请求。** 非流式请求根本不产生\n   `litellm_llm_api_time_to_first_token_metric`，所以 TTFT 面板的样本数**永远**\n   小于 QPS 面板。两者对不上是预期，不是采集丢数。\n\n2. **TTFT 的起点是「上游调用开始」，不是「用户按回车」。** LiteLLM 侧的鉴权、路由、\n   排队不在里面。第二段最右那块把**端到端 / 上游 / LiteLLM 侧排队**三条放在一起，\n   就是为了回答「TTFT 很好但用户说卡」：那种情况下「排队 p95」是翘的、TTFT 是平的。\n   （`litellm_request_queue_time_seconds` 2026-09-26 实测 p95 ≈ 1.4s，有数。）\n   → 所以官方 TTFT 指标、日志里的 TTFT、用户浏览器真正感受到的首字节，**是三件事**。\n\n3. **`$provider` 筛选对两类面板无效**，代码里是显式降级不是静默的：\n   - **fallback 那两个指标结构上没有 `api_provider`**（只有 requested_model /\n     fallback_model / exception_status）—— 永远无法按 provider 拆。\n   - `litellm_deployment_cooled_down_total` **没有 `requested_model`**，\n     所以反过来 **`$model` 筛选对「冷却」面板无效**。\n   - 本次生成时实测 `litellm_proxy_failed_requests_metric_total` 带 api_provider =\n     **True**，失败类面板据此选的是\n     `model+provider`。\n   - ⚠️ `api_provider` 有一个字面取值 **`\"None\"`**（LiteLLM 判不出上游时填的，\n     不是缺失）。按具体 provider 筛会把这批漏掉 —— 2026-09-26 实测它在请求侧\n     占比 0.0%，但在**失败**序列里出现过，查失败时记得把 `None` 也选上。\n\n4. **聚合到 provider 维的面板没有剔除探针流量。** 剔除子句要在 `requested_model`\n   维上 `unless`，聚到 provider 之后那一维已经没了。这些面板绝对值偏高，\n   只适合看形状变化。\n\n5. **花费面板只覆盖 LiteLLM 算得出价格的模型。** 自建/未配价的上游显示 0，\n   **不代表免费**。\n\n6. **「重启次数」是累计量。** 滚动更新时新 pod 从 0 开始，曲线下跌 = 换了 pod，\n   不是问题修好了。判趋势要看跳变时刻，不看绝对高度。\n\n7. **副本数 < 4 时本页所有面板的分母都偏小。** 第一段最右边那个卡片是前置条件，\n   它不绿的时候，别读别的数。\n\n8. **指标白名单只有一份**（LiteLLM 侧 `prometheus_metrics_config`）。\n   Prometheus 侧已于 2026-09-26 改成 `litellm_.*` 全收 —— 之前两份白名单要手动同步，\n   不同步的症状是**静默少指标**、没有任何报错，`litellm_in_flight_requests`\n   就这样被丢了 17 天。**加指标只改 LiteLLM 侧配置。**\n"
+      }
+    }
+  ]
+}

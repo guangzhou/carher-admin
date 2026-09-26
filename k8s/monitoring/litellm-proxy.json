@@ -66,11 +66,13 @@
     },
     {
       "type": "timeseries",
-      "title": "探针失败次数 (readiness/liveness 超时)",
+      "title": "副本未就绪数（readiness 不过就是这条翘）",
+      "description": "= spec 副本 - available 副本。0 = 全部通过 readiness。\n🔴 2026-09-26 换掉的旧查询是 `rate(prober_probe_total{result!=\"successful\"}[5m])`，它从上线起就是空的：本集群的 kubelet（k3s）**根本不暴露 `prober_probe_total`** —— Prometheus 侧 keep 正则里早就写了这个名字，所以不是白名单漏了，是上游没这个指标。空面板和「探针从没失败过」长得一模一样，于是它空跑了没人发现。\n换成 deployment 级的「未就绪副本数」：探针失败的**可观测后果**就是副本掉出 available，这个量本集群确实有。",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 27},
+      "fieldConfig": {"defaults": {"unit": "none", "decimals": 0}},
       "targets": [{
-        "expr": "sum by (probe_type, result) (rate(prober_probe_total{result!=\"successful\"}[5m]))",
-        "legendFormat": "{{probe_type}} {{result}}"
+        "expr": "kube_deployment_spec_replicas{namespace=\"litellm-product\"} - on(namespace, deployment) kube_deployment_status_replicas_available{namespace=\"litellm-product\"}",
+        "legendFormat": "{{deployment}}"
       }]
     },
     {

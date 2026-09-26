@@ -85,11 +85,21 @@ scrape_configs:
       - targets: ["localhost:9090"]
 
   # ---- LiteLLM 应用指标（2026-09-13 加）：模型稳定性看板的数据源 ----
-  # 只抓稳定性相关指标，标签已在 litellm 侧用 prometheus_metrics_config 裁到
-  # model 维度（无 hashed_api_key / client_ip / user_agent），避免高基数。
+  # 标签已在 litellm 侧用 prometheus_metrics_config 裁到 model 维度
+  # （无 hashed_api_key / client_ip / user_agent），避免高基数。
+  #
+  # 🔴 2026-09-26：这里**不再做第二层指标白名单**。原来 litellm 侧 config 是一份
+  # 显式白名单、这里的 keep 正则又是一份，两份必须手动保持同步 —— 而不同步的症状是
+  # **静默少指标**，没有任何报错。已经坑过一次：`litellm_in_flight_requests`
+  # litellm 一直在吐，被这条正则丢了 17 天，查的时候「查不到名」和「从没发生」同形。
+  # ⇒ 白名单只留 litellm 侧那一份（它还能同时裁标签），这里只负责挡掉
+  #    python_/process_ 那些 exporter 自带指标。加指标只改 config，不用动这里。
   - job_name: litellm-proxy
-    # 该 job 的 /metrics 序列极多，实测 3/4 副本渲染要 28~60s，
+    # 该 job 的 /metrics 序列极多，历史实测 3/4 副本渲染要 28~60s，
     # 全局 10s 超时会把它们抓成 down —— 看板只剩 1/4 流量视角。
+    # ⚠️ 2026-09-26 实测 4 副本各 0.04~0.05s / 1300~1760 序列，但当时 pod 龄仅 ~5min。
+    # PROMETHEUS_MULTIPROC_DIR 的文件数随运行时长累积，渲染耗时也随之涨，
+    # 所以这个读数**不能**用来下调 timeout —— 45s 保留。
     scrape_interval: 60s
     scrape_timeout: 45s
     scheme: http
@@ -113,8 +123,12 @@ scrape_configs:
       - source_labels: [__meta_kubernetes_pod_node_name]
         target_label: node
     metric_relabel_configs:
+      # 基数预算（2026-09-26 实测 4 副本合计）：放开前 3702 序列 → 放开后 7668，
+      # 净增 ~3966，对当时 headSeries 88,793 约 +4.5%。大头是三个 histogram
+      # （deployment_latency_per_output_token / request_queue_time / overhead_latency，
+      # 每族 ~18 bucket），不是标签爆炸。
       - source_labels: [__name__]
-        regex: 'litellm_(proxy_(total|failed)_requests_metric.*|deployment_(state|cooled_down|total_requests|success_responses|failure_responses|successful_fallbacks|failed_fallbacks).*|llm_api_latency_metric.*|llm_api_time_to_first_token_metric.*|request_total_latency_metric.*)'
+        regex: 'litellm_.*'
         action: keep
 
   # ---- 主动探针（2026-09-13 加）：litellm-probe 逐上游端点打最小推理 ----

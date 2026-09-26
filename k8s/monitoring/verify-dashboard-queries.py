@@ -22,14 +22,40 @@
 """
 import argparse, json, re, sys, urllib.parse, urllib.request
 
-# 看板变量的代入值。$model 代入 .* = 全选，与 allValue 一致。
-SUBST = {
-    "$model": ".*", "$win": "30m",
-    # Grafana 内置宏。不代入会让查询以 HTTP 400 失败，看起来像「看板坏了」，
-    # 实际是尺子少了一步。2026-09-25 实测假红 8 条。
+# Grafana 内置宏。不代入会让查询以 HTTP 400 失败，看起来像「看板坏了」，
+# 实际是尺子少了一步。2026-09-25 实测假红 8 条。
+MACROS = {
     "$__rate_interval": "1m", "$__interval": "1m",
     "$__range": "30m", "$__range_s": "1800", "$__range_ms": "1800000",
 }
+
+# 看板自定义变量的兜底代入值（按变量名）。没列到的走 allValue / `.*`。
+# 🔴 2026-09-26：这里原来是一张**硬编码表** `{"$model": ".*", "$win": "30m"}`，
+# 于是任何新加的看板变量都不会被代入，`api_provider=~"$provider"` 原样发给
+# Prometheus、匹配不到任何序列 → 判成 EMPTY「指标存在但此刻无数据，可能是真的没故障」。
+# 当天实测：`carher-ops.json` 39 个 panel 里 24 条这样被判成假 EMPTY，
+# 而其中包括 QPS 这种**绝不可能没数据**的面板。
+# ⇒ 代入不许跟变量名绑定；改成从看板 `templating` 里读出**所有**已定义变量，
+#   统一按 allValue（没有就 `.*`）代入。新加变量不用再改尺子。
+FALLBACK = {"win": "30m"}
+
+
+def substitutions(tpl_list):
+    """看板里每个已定义变量的代入值。"""
+    s = dict(MACROS)
+    for v in tpl_list or []:
+        name = v.get("name")
+        if not name:
+            continue
+        if name in FALLBACK:
+            s["$" + name] = FALLBACK[name]
+        elif v.get("allValue"):
+            s["$" + name] = v["allValue"]
+        elif v.get("type") == "custom" and v.get("query"):
+            s["$" + name] = str(v["query"]).split(",")[0].strip()
+        else:
+            s["$" + name] = ".*"
+    return s
 
 # `$1`..`$9` 是 label_replace 的捕获组，不是看板变量，别当变量查。
 _VAR = re.compile(r"\$(__)?([A-Za-z_]\w*)")
@@ -61,15 +87,86 @@ def undefined_vars(expr, defined):
 _LABEL_POS = re.compile(
     r"""(?:\b(?:by|on|without|ignoring|group_left|group_right)\s*\([^()]*\))"""
     r"""|(?:\{[^{}]*\})"""          # label selector
+    r"""|(?:\[[^\]]*\])"""          # range / offset：`[5m]` 里的 `m` 会被当标识符
     r"""|(?:"[^"]*")""",              # 字符串字面量（label_replace 的参数在这里）
     re.X,
 )
 
+# PromQL 的函数 / 聚合算子 / 关键字。剥掉标签位之后剩下的标识符，
+# 不在这张表里的才算指标名。
+_PROMQL_WORDS = {
+    # 聚合算子
+    "sum", "min", "max", "avg", "group", "stddev", "stdvar", "count",
+    "count_values", "bottomk", "topk", "quantile", "limitk", "limit_ratio",
+    # 修饰符 / 关键字（PromQL 里大小写不敏感）
+    "by", "without", "on", "ignoring", "group_left", "group_right",
+    "offset", "bool", "and", "or", "unless", "start", "end", "inf", "nan",
+    # 函数
+    "abs", "absent", "absent_over_time", "ceil", "changes", "clamp",
+    "clamp_max", "clamp_min", "day_of_month", "day_of_week", "day_of_year",
+    "days_in_month", "delta", "deriv", "exp", "floor", "histogram_quantile",
+    "histogram_count", "histogram_sum", "histogram_fraction", "histogram_avg",
+    "histogram_stddev", "histogram_stdvar", "holt_winters", "info",
+    "double_exponential_smoothing", "hour", "idelta", "increase", "irate",
+    "label_join", "label_replace", "ln", "log2", "log10", "minute", "month",
+    "predict_linear", "rate", "resets", "round", "scalar", "sgn", "sort",
+    "sort_desc", "sort_by_label", "sort_by_label_desc", "sqrt", "time",
+    "timestamp", "vector", "year", "atan2", "avg_over_time", "min_over_time",
+    "max_over_time", "sum_over_time", "count_over_time", "quantile_over_time",
+    "stddev_over_time", "stdvar_over_time", "last_over_time",
+    "present_over_time", "mad_over_time", "ts_of_max_over_time",
+    "ts_of_min_over_time", "ts_of_last_over_time",
+}
+
+_IDENT = re.compile(r"\b([A-Za-z_:][A-Za-z0-9_:]*)\b")
+
 
 def metric_refs(expr):
-    """表达式里真正作为**指标名**出现的 litellm_* / up。"""
+    """表达式里真正作为**指标名**出现的 token。
+
+    🔴 2026-09-26 修：这里原来写死 `litellm_[a-z0-9_]+|up`，**只认我们自己的前缀**。
+    后果:官方 `dashboard_genai_otel` 全部 10 个 panel 查的是 `gen_ai_*`
+    (OTel 语义约定),我们一个都没有 —— 但它们从来没被提取成指标名,
+    `missing` 恒空,于是 10/10 死查询全部落进 EMPTY 那句
+    「指标存在但此刻无数据,可能是真的没故障」,整份看板**退 0 = PASS**。
+    一份 100% 死掉的看板和一份「此刻恰好安静」的看板在尺子这里同形。
+    ⇒ 指标名提取不许跟前缀绑定;判据只能是「这个标识符在
+      `/api/v1/label/__name__/values` 里存不存在」。
+    """
     stripped = _LABEL_POS.sub(" ", expr)
-    return set(re.findall(r"\b(litellm_[a-z0-9_]+|up)\b", stripped))
+    return {
+        m.group(1) for m in _IDENT.finditer(stripped)
+        if m.group(1).lower() not in _PROMQL_WORDS
+    }
+
+
+# `by (...)` / `sum by (...)` 里的分组标签。
+_BY = re.compile(r"\b(?:by|without)\s*\(([^()]*)\)")
+
+
+def grouping_labels(expr):
+    out = set()
+    for m in _BY.finditer(expr):
+        for x in m.group(1).split(","):
+            x = x.strip()
+            # `le` 会被 histogram_quantile 吃掉，不会出现在结果里，不能据此判红。
+            if x and x != "le":
+                out.add(x)
+    return out
+
+
+_LBL_CACHE = {}
+
+
+def family_labels(prom, metric, cache):
+    """某个指标族实际带的标签名集合（问 Prometheus，不猜）。"""
+    if metric not in cache:
+        try:
+            d = fetch(prom, "/api/v1/labels", {"match[]": metric})
+            cache[metric] = set(d.get("data") or [])
+        except Exception:                               # noqa: BLE001
+            cache[metric] = set()
+    return cache[metric]
 
 
 def fetch(prom, path, params):
@@ -78,8 +175,9 @@ def fetch(prom, path, params):
         return json.load(r)
 
 
-def expand(expr):
-    for k, v in SUBST.items():
+def expand(expr, subst=None):
+    # 长变量名优先，否则 `$model` 会先把 `$model_id` 的前缀吃掉
+    for k, v in sorted((subst or MACROS).items(), key=lambda kv: -len(kv[0])):
         expr = expr.replace(k, v)
     return expr
 
@@ -102,6 +200,7 @@ def main():
     names = set(fetch(args.prom, "/api/v1/label/__name__/values", {})["data"])
     tpl = dash.get("templating") or {}
     defined = {v["name"] for v in (tpl.get("list") or [])}
+    subst = substitutions(tpl.get("list"))
 
     rows, bad = [], 0
     for p in walk(dash["panels"]):
@@ -117,7 +216,7 @@ def main():
                              "看板未定义变量: " + ",".join(sorted(undef))))
                 bad += 1
                 continue
-            expr = expand(raw)
+            expr = expand(raw, subst)
             try:
                 r = fetch(args.prom, "/api/v1/query", {"query": expr})
             except Exception as e:                      # noqa: BLE001
@@ -140,7 +239,33 @@ def main():
                 rows.append(("EMPTY", p.get("title"), ref, "0 series",
                              "指标存在但此刻无数据 —— 可能是真的没故障，人工确认"))
             else:
-                rows.append(("OK", p.get("title"), ref, f"{n} series", ""))
+                # 🔴 2026-09-26 加:出数 ≠ 出的是这个 panel 要的东西。
+                # `sum(rate(litellm_proxy_total_requests_metric_total[5m])) by (api_key_alias)`
+                # 回 1 series 且 metric 是 `{}` —— 因为 `api_key_alias` 被 litellm 侧
+                # include_labels 裁掉了。旧尺子读成「OK 1 series」,而 panel 上是一根
+                # 没有图例的线,「按 key 拆分」这个诉求一条也没实现。
+                #
+                # ⚠️ 判据不能是「结果序列里有没有这个标签」—— 那样会被**嵌套聚合**打成假红:
+                # `sum(topk(15, sum by (requested_model)(...)))` 外层故意把标签聚掉,
+                # 结果无标签是对的。2026-09-26 第一版这么写,把我们两份已上线的好看板
+                # 打红 27 条。
+                # ⇒ 改成问 Prometheus「这个指标族到底带不带这个标签」,
+                #   与表达式结构无关。
+                gl = grouping_labels(expr)
+                if gl:
+                    avail = set()
+                    for m in refs:
+                        avail |= family_labels(args.prom, m, _LBL_CACHE)
+                    lost = sorted(gl - avail) if avail else []
+                else:
+                    lost = []
+                if lost:
+                    rows.append(("DEGEN", p.get("title"), ref, f"{n} series",
+                                 "该指标族不带这些分组标签,by() 是空转: "
+                                 + ",".join(lost)))
+                    bad += 1
+                else:
+                    rows.append(("OK", p.get("title"), ref, f"{n} series", ""))
 
     w = max((len(r[1] or "") for r in rows), default=20)
     for st, title, ref, detail, note in rows:
@@ -150,7 +275,8 @@ def main():
     c = Counter(r[0] for r in rows)
     print("\n" + "  ".join(f"{k}={v}" for k, v in sorted(c.items())))
     if bad:
-        print(f"\nFAIL: {bad} 条查询指向不存在的指标、用了看板未定义的变量，或执行失败")
+        print(f"\nFAIL: {bad} 条查询指向不存在的指标、分组标签已被裁掉、"
+              f"用了看板未定义的变量，或执行失败")
         return 1
     if c.get("EMPTY"):
         print(f"\n注意: {c['EMPTY']} 条查询指标存在但当前无数据，需人工判是否合理")

@@ -192,22 +192,31 @@ P.append(text("这块看板测不到什么", """
    总是小于请求数面板。两者对不上是**预期**，不是采集丢数。
 
 2. **TTFT 的起点是「上游调用开始」，不是「用户按回车」。** LiteLLM 自己的鉴权、
-   排队、worker 抢占都不在里面。当前 `/metrics` **没有** emit
-   `litellm_request_queue_time_seconds`，所以这段差值现在量不到。
-   → 「TTFT 很好但用户说卡」这种情况，本看板查不出来。
+   排队、worker 抢占都不在里面。
+   ✅ 2026-09-26 更新：`litellm_request_queue_time_seconds` 已放开且**有数**
+   （p95 ≈ 1.4s），排队那一段现在量得到了 —— 但**不在本看板上**，
+   去「CarHer · LiteLLM 运维总览」第二段看「端到端 / 上游 / 排队」三条对比。
+   → 「TTFT 很好但用户说卡」这种情况，**本看板**仍然查不出来。
 
-3. **没有 Token 吞吐（TPS）。** 当前 `/metrics` 没有 emit
-   `litellm_input_tokens_metric` / `litellm_output_tokens_metric` / `litellm_spend_metric`。
-   要 TPS 和费用得先在 LiteLLM 侧放开这几个指标。
+3. **本看板没有 Token 吞吐和费用。**
+   ⚠️ 2026-09-26 更新：`litellm_input_tokens_metric` / `litellm_output_tokens_metric` /
+   `litellm_spend_metric` **已经有数了**（实测 6h 输入 1.33 亿 token / 花费 \\$195），
+   之前那句「proxy 没有 emit」已经不成立。只是这些面板做在了
+   「CarHer · LiteLLM 运维总览」第四段，没有回填到本看板。
 
-4. **没有 cooldown 面板。** `litellm_deployment_cooled_down_total` 这个指标
-   proxy 从来没 emit 过。（「LiteLLM 模型稳定性」那份看板里有一个 cooldown 面板，
-   查的就是它，**因此那个面板一直是空的** —— 空不代表没发生 cooldown。）
+4. **本看板没有 cooldown 面板。**
+   🔴 2026-09-26 更新：之前这里写「`litellm_deployment_cooled_down_total`
+   proxy 从来没 emit 过」—— **这句现在不成立**，实测近 6h 有 25 次。
+   ⚠️ 但「它以前为什么查不到」我**没有数据**：Prometheus 侧那条旧 keep 正则
+   里本来就写了 `deployment_cooled_down`，所以不是那一层丢的。
+   是 LiteLLM 侧白名单、还是这段时间才真的发生了冷却，没查，别当结论用。
+   冷却面板现在在「CarHer · LiteLLM 运维总览」第五段。
 
-5. **`api_provider` / `model_id` 这两维在请求侧量不到。** 请求类指标的 label 被裁到只剩
-   `requested_model`（为控基数，我们有几百个模型名）。所以**同一个模型名下多条上游腿
-   谁快谁慢，本看板分不开** —— 一条慢腿会被平均值盖住。要分腿只能看「上游部署」那张表
-   或走探针面板。
+5. **`api_provider` 这一维在请求侧**
+   ✅ **2026-09-26 已经可用**（rev2/rev3 给 latency/TTFT/请求/失败四类指标补上了
+   `include_labels: api_provider`）。但本看板的查询没有回填这一维，
+   所以**本看板**仍然分不开同一个模型名下的多条上游腿 —— 要按 provider 拆，
+   去「CarHer · LiteLLM 运维总览」。`model_id` 仍然在请求侧量不到。
 
 6. **「失败按错误码拆」那个面板没有剔除探针流量**（那一维上没有 `requested_model`
    可以 `unless`），所以它的绝对值偏高，只适合看**形状变化**，不适合当 SLA 分子。

@@ -18,9 +18,23 @@ P198='..' P188='..' scripts/chatgpt-pool-198-pause.sh --apply   115 116 ...
 sleep 400
 P188='..'           scripts/chatgpt-pool-198-pause.sh --verify  115 116 ...  # ← 不许省
 
+# 只摘轮转、不停 pod(①②③⑤,跳过 ④ scale=0)
+P198='..' P188='..' scripts/chatgpt-pool-198-pause.sh --apply --keep-pods 175
+
 # 回池(单号,串行,一号一跑)
 P198='..' P188='..' scripts/chatgpt-pool-198-rejoin.sh <N> [/tmp/auth-acct-<N>.json]
 ```
+
+## `--keep-pods`:「从循环池摘除」只需要 ②,不需要 ④
+
+下面那张表写明**只有 ②(router 成员)才叫"在轮转里"**。所以"把某号摘出循环池"这个诉求,
+①(pod 活着)根本不必动 —— arms 一摘它就吃不到流量了。
+
+而 scale=0 之后再 scale=1 是一次**重启**,`feedback_restarting_a_serving_acct_can_kill_it_permanently`
+那条(acct-237 被重启后永久死亡、回退救不回)就挂在这条路上。
+⇒ 号还 `ready` 且**失败原因尚未定位到账号本身**时,默认 `--keep-pods`:
+省一个 idle pod 的收益,远小于"把一个也许还能救的号变成必须重登"的代价。
+彻底停机 / 换 auth 是另一个决定,那时再单独 scale=0。
 
 两个方向都**只动「副本数 + router 成员关系 + governor 状态」**,PVC / auth.json / deployment
 本体一概不碰 ⇒ 完全可逆。彻底删号是另一件事,走 skill `chatgpt-acct-audit-and-retire` §5 的五层。
@@ -88,6 +102,43 @@ handler 上线之前建的老 deploy(长期 0 副本所以从没暴露)全缺这
   当阳性对照(实测 175/176/194 → 3 号 24 条),否则你验的是自己的 bug。
 - 🔴 **`replicas>0` ≠ 在服务**。2026-09-19 实测 165 个 `chatgpt-acct-*` 里**只 54 个在服务**。
   死号会让"我搞坏了"和"本来就坏"长得一模一样 ⇒ 判据看 `state.terminated.finishedAt`。
+
+## 🔴 已修:③ 收敛复核曾恒空转 —— 它是**这个脚本自己**踩了下面那个 `kx()` 坑
+
+2026-09-26 摘 acct-175 时,③ 打出 10 轮「复核 **0** 个 proxy 副本,仍含目标的 0 个」。
+**这道门禁从写下来那天起一次都没真验过,且零报错。**
+
+机制(已复现,不是推理):`kx()` 自带一层 `sudo -S sh -c '...'`,而 ③ 那一句里有
+`-H 'Authorization: Bearer $POOLKEY'`。内层单引号塌陷后 bearer 被词分割成两个裸参数,
+curl 报错 → 被 `kx()` 的 `2>/dev/null` 吞掉 → 整句返 **0 字节**。
+逐段证伪:同一条命令摘掉 `-H '...'` 后正常回 4 个 pod IP;`sudo` 本身通、`kubectl` 在 PATH 里。
+⚠️ ⓪ 和 ④ 用 kx 没事 —— 它们的命令里**没有单引号**。只有 ③ 中招。
+
+修法两层:
+1. ③ 改走 `s198`(不套 `sh -c` 那层,单引号不塌陷)+ 远端 env 传 bearer;非 JSON 的行不计入 `seen`。
+2. **加 `CONVERGED` 断言**:`seen==0` 与"全部收敛"长得一样,所以数不到副本必须**红退**,
+   不许 fall through 到 ④。失败信息里把两种情况分开写清(尺子坏了 vs 真没收敛),
+   并声明「state 已标、arms 已发删除、**没有** scale 任何 pod」。
+
+三条对照(修完实测):好 bearer + 已摘的 175 → `seen=4 bad=0`;好 bearer + 仍在池的 194 →
+`seen=4 bad=4`(证明它真分辨得出"在池");**坏 bearer → `seen=0`**(证明新门禁会红退而非假绿)。
+
+## ⚠️ 基线漂了:arms/号 从 8 变成 10
+
+2026-09-26 实测 router 里 39 个号,分布 **35 个号 ×10 条 / 3 个 ×8 / 1 个 ×1**。
+下面「战果基线」里的「每号 8 条」是 2026-09-12 的数,已过期 ——
+09-23 上了 `gpt-6-luna` / `gpt-6-sol` 两个新 slug。
+**⇒ 别把"每号 N 条"写进判据,现算。**
+
+那 3 个只有 8 条的(175/203/204)缺的都是同两个新 slug ⇒ 是**上新 slug 时漏了这 3 个号**,
+不是 dead-arm 摘的(`DEAD_ARM_AUTO_DELETE_DISABLED` 在 proxy env 里)。
+只有 1 条的是 acct-85(free 档),仅剩 `gpt-6-luna` —— 与"当初上 sol 时被明确排除"吻合。
+
+## 顺带:`state.json` 里有订阅到期日,判号死活别漏了它
+
+`subscription_active_until` 是现成的一栏。acct-175 那条是 **`2026-09-13`** ——
+**订阅 13 天前就过期了**,这比任何"凭据失效/配置不对"的猜测都更直接地解释它为什么一直 401。
+⇒ 判一个号"要不要救、救得回吗"先读这一栏:过期的号**重登也没用,得先续订**。
 
 ## 🔴 改在服务的号:默认不做
 

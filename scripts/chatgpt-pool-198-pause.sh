@@ -5,8 +5,20 @@
 #   P198='..' P188='..' ./chatgpt-pool-198-pause.sh --apply    115 116 ...   # 真干
 #   P188='..'           ./chatgpt-pool-198-pause.sh --verify   115 116 ...   # 隔一轮 cron 复查
 #
+#   ... --apply --keep-pods 175     # 只摘轮转(①②③⑤),**跳过 ④ scale=0**,pod 留着跑
+#
 # 只动「副本数 + router 成员关系 + governor 状态」,**不碰** PVC / auth.json / deployment 本体,
 # 所以完全可逆 —— 恢复走 chatgpt-pool-198-rejoin.sh(或单纯 scale=1 + resume_acct)。
+#
+# ## 什么时候该加 --keep-pods
+#
+# SKILL 里那张表写明:「在池」三层中**只有 ②(router 成员)才叫"在轮转里"**。
+# 所以「把某号从循环池摘除」这个诉求,①(pod 活着)根本不必动 —— 摘完 arms 它就吃不到流量了。
+# 而 scale=0 之后再 scale=1 是一次**重启**:2026-09-19 实测重启一个正在服务的号可能
+# **永久打死它**(acct-237,回退救不回,只能重新登录)。
+# ⇒ 号还 `ready` 且失败原因**尚未定位到账号本身**时,默认 `--keep-pods`:
+#    收益(省一个 idle pod)远小于代价(把一个也许还能救的号变成必须重登)。
+#    真要彻底停机/换 auth 再单独 scale=0,那是另一个决定。
 #
 # ## 顺序不许换:state 先写,arms 后删
 #
@@ -35,10 +47,15 @@ POOLKEY=${POOLKEY:?需要 export POOLKEY=<198 prod master key>；不再内置默
 STATE=/home/cltx/.chatgpt-quota/state/state.json
 
 MODE=survey
-case "${1:-}" in
-  --apply)  MODE=apply;  shift ;;
-  --verify) MODE=verify; shift ;;
-esac
+KEEP_PODS=0
+while :; do
+  case "${1:-}" in
+    --apply)     MODE=apply;   shift ;;
+    --verify)    MODE=verify;  shift ;;
+    --keep-pods) KEEP_PODS=1;  shift ;;
+    *) break ;;
+  esac
+done
 [ $# -gt 0 ] || { sed -n '2,8p' "$0"; exit 2; }
 ACCTS=$(printf '%s\n' "$@" | sort -n -u | tr '\n' ' ')
 PYLIST=$(printf '%s,' $ACCTS)
@@ -138,28 +155,69 @@ s198 "n=0; while read -r id; do [ -n \"\$id\" ] || continue;
     -d \"{\\\"id\\\":\\\"\$id\\\"}\"; n=\$((n+1)); done < /tmp/arms-to-delete.txt; echo \"  ✓ SENT=\$n\""
 
 # ---------------------------------------------------------------- ③ 逐 pod 收敛复核
+#
+# ⚠️ 这里**不能用 kx()**。kx 自己套了一层 `sudo -S sh -c '...'`,把
+# `-H 'Authorization: Bearer ...'` 的单引号吃掉 ⇒ curl 收到残废参数报错 ⇒ 又被 kx 的
+# `2>/dev/null` 吞掉 ⇒ 这一句恒返 0 字节。2026-09-26 实测:摘 acct-175 那次 10 轮全部
+# 「复核 0 个 proxy 副本」,这道门禁**一次都没真的验过**,却没有报错。
+# ⇒ 改走 s198(不加 sh -c 那层,单引号不塌陷)+ 远端 env 传 bearer。
+#
+# 而且「复核 0 个副本 / 残留 0 个」和「全部收敛」长得一模一样。所以下面**必须**先断言
+# 自己数得到副本(seen>0),数不到就是尺子坏了,直接红退,绝不许 fall through 到 ④。
+CONVERGED=0
 for r in $(seq 1 10); do
   sleep 12
-  OUT=$(kx "for ip in \$(kubectl -n $NS get pod -l app=litellm-proxy -o jsonpath='{.items[*].status.podIP}'); do
-    curl -s -m 20 -H 'Authorization: Bearer $POOLKEY' http://\$ip:4000/v1/model/info; echo; done" \
+  OUT=$(s198 "export KUBECONFIG=/home/cltx/.kube/config; K='$POOLKEY'
+    for ip in \$(kubectl -n $NS get pod -l app=litellm-proxy -o jsonpath='{.items[*].status.podIP}'); do
+      curl -s -m 20 -H \"Authorization: Bearer \$K\" http://\$ip:4000/v1/model/info; echo
+    done" 2>/dev/null \
     | python3 -c "
 import json,sys,re
 T=set([$PYLIST]); bad=0; seen=0
 for L in sys.stdin:
     L=L.strip()
     if not L: continue
+    try: d=json.loads(L)
+    except Exception: continue          # 不是 JSON 的行不计入 seen,否则又是一种假绿
+    if not isinstance(d.get('data'), list): continue
     seen+=1; ids=set()
-    for e in json.loads(L).get('data',[]):
+    for e in d['data']:
         m=re.match(r'chatgpt-acct-(\d+)-',(e.get('model_info') or {}).get('id',''))
         if m: ids.add(int(m.group(1)))
     if ids&T: bad+=1
 print(seen,bad)")
   set -- $OUT
   echo "  收敛轮$r: 复核 ${1:-0} 个 proxy 副本,仍含目标的 ${2:-?} 个"
-  [ "${1:-0}" -gt 0 ] && [ "${2:-1}" = 0 ] && { echo '  ✓ 全副本收敛,目标零残留'; break; }
+  [ "${1:-0}" -gt 0 ] && [ "${2:-1}" = 0 ] && { echo '  ✓ 全副本收敛,目标零残留'; CONVERGED=1; break; }
 done
+if [ "$CONVERGED" != 1 ]; then
+  echo "!!!! ③ 收敛复核没通过。注意区分两种情况:"
+  echo "     「复核 0 个副本」= 尺子坏了(取不到 pod IP 或 bearer 不对),什么都没验;"
+  echo "     「复核 N 个、仍含目标 M 个」= 真没收敛。"
+  echo "     state 已标 paused、arms 已发删除请求;**没有** scale 任何 pod。"
+  echo "     PREPARED, NOT CONVERGED —— 先手工 readback 逐 pod 的 /v1/model/info 再决定下一步。"
+  exit 1
+fi
 
 # ---------------------------------------------------------------- ④ scale=0
+if [ "$KEEP_PODS" = 1 ]; then
+  echo "  ⏭  --keep-pods:跳过 ④ scale=0,pod 留在 replicas=1。"
+  echo "     目标已不在 router 轮转里(②已收敛),吃不到流量;没有重启风险。"
+  kx "kubectl -n $NS get deploy -o custom-columns=N:.metadata.name,R:.spec.replicas --no-headers" \
+    | awk '{print $1,$2}' > /tmp/pause-deploys2.txt
+  python3 - "$PYLIST" <<'PY'
+import sys
+T=set(int(x) for x in sys.argv[1].rstrip(',').split(','))
+keep=[]
+for L in open('/tmp/pause-deploys2.txt'):
+    p=L.split()
+    if len(p)>=2 and p[0].startswith('chatgpt-acct-'):
+        try: n=int(p[0].rsplit('-',1)[1])
+        except ValueError: continue
+        if n in T: keep.append((n,int(p[1])))
+print('  目标副本数(应保持原样):', sorted(keep) or '无')
+PY
+else
 for n in $ACCTS; do
   kx "kubectl -n $NS scale deploy chatgpt-acct-$n --replicas=0" >/dev/null 2>&1
 done
@@ -187,6 +245,7 @@ T=set(int(x) for x in sys.argv[1].rstrip(',').split(','))
 run={int(l) for l in open('/tmp/pause-running.txt') if l.strip()}
 print('  目标里仍 Running 的 pod:', sorted(run&T) or '无')
 PY
+fi
 
 echo
 echo "== ⚠️ 还没完:等 ≥6min(一整轮 governor cron)后必须跑一次"

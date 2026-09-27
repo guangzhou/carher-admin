@@ -185,7 +185,8 @@ CLI 用户才看得到我们的英文 promo。要给 IDE 用户可读文案没�
 |---|---|---|
 | 活的判据 | **真打 + 回了非空内容** | 目录门禁 PASS ≠ 腿活；`/model/new` 返 200 + 读得到 ≠ 能用 |
 | 200 不算活 | 200 + `content=None` 报「200 但内容为空」，不判活也不当报错 | 推理模型给小 `max_tokens` 会把预算吃在推理 token 上，那是假红 |
-| 聊天/画图分流 | 只认 litellm 的 `mode`（部署行 `model_info.mode` → 回落 `get_model_info(落点名)`） | ⛔ 不许按名字里有没有 `image` 猜 —— 尺子里跟名字绑的硬编码表 ⇒ 新增那项 = 永久盲区 |
+| 聊天/画图分流 | 只认 litellm 的 `mode`，三级：部署行 `model_info.mode` → `get_model_info(落点名)` → **provider 能力表** | ⛔ 不许按名字里有没有 `image` 猜 —— 尺子里跟名字绑的硬编码表 ⇒ 新增那项 = 永久盲区 |
+| 第三级怎么算 | `ProviderConfigManager.get_provider_image_generation_config()` 返 None = 这 provider **没实现画图** ⇒ 只能是 chat | 这是 litellm 自己的能力表，不是名字猜。⛔ **反方向不成立**：provider 有画图实现 ≠ 该模型是画图（`openai/grok-4.6` 也返 image_capable=True），所以只做「不可能是画图 ⇒ chat」这一个方向 |
 | 判不出 mode | **跳过 + 列进「⚠️ 未测」并说明**，不默认当聊天打 | 拿错协议打出来的红是假红，会让人以为模型死了 |
 | 挂死腿 | 自带 25s `wait_for`（`_PROBE_TIMEOUT_S`），报「超时，不返回，非报错」 | cr-g 挂死是**不返回**（90s 零字节）。没这层，整条命令会被拖到客户端先超时，用户看到「没反应」= 与「命令不存在」同形 |
 | 打什么名 | 打**公开名**，不打落点名 | 直接打落点就绕过了 per-key alias 那一层，测出来的绿说明不了「用户发那个名字能用」 |
@@ -200,7 +201,34 @@ CLI 用户才看得到我们的英文 promo。要给 IDE 用户可读文案没�
 （顺带：所以「把用户 key 转给外部体检页」这条路在 callback 里走不通。）
 
 ⚠️ `Router.aresponses` / `Router.aget_available_deployment` **不存在**（实测），
-只有 `acompletion` / `aimage_generation` 可用。
+只有 `acompletion` / `aimage_generation` 可用。`mode='responses'` 的行（198 上
+1093 行，全库最多的一类）走 `acompletion` 分支，实测能打通，不用单开一路。
+
+### ⑤ 的 mode 盲区：数字在这儿，别凭感觉估
+
+2026-09-27 在 198 实测 `/v1/model/info` 全库 1830 行：
+
+| mode | 行数 |
+|---|---:|
+| `responses` | 1093 |
+| `chat` | 582 |
+| `image_generation` | 74 |
+| `embedding` | 2 |
+| **无** | **79** |
+
+那 79 行是真没有：DB 的 `model_info` 列没 `mode`、litellm 内置表查不到、
+`supported_endpoints` 也是 None。里头是 `kiro-*` / `cursor-fc-*` / `wangsu-*` /
+`openrouter-gpt-*` —— **用户白名单里的常客**，在 ⑤ 里会永久「⚠️ 未测」。
+第三级（provider 能力表）吃掉其中 **51**（anthropic 32 + custom_openai 18 +
+perplexity 1），剩 **28** 个落点在 openai 的**继续如实「未测」**。
+🔴 **不许为了把 28 也凑掉而给默认值** —— 那就回到「猜」了。
+
+阳性对照（加这类判据必须先跑）：全库 74 个 `mode=image_generation` 的行，
+这个判据误判成 chat-only 的有 **0** 个；2 个 embedding 行同样 0。
+
+🔴 **量这些数只能打线上那个 proxy 的 HTTP 口**。`kubectl exec … python -c` 起的是
+新进程，在里面 `get_model_info` 抛 "isn't mapped yet" 是**假红** —— 我靠它造出过
+一条完全不存在的根因（说 `sa-grok-4.6` 永久未测，实测它活 1 死 0）。
 
 ### 🔴 TTFT 显示的模型名：用户发的原始名 **SpendLogs 一列都没存**
 

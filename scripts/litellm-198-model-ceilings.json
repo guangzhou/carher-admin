@@ -1,0 +1,52 @@
+{
+  "_README": [
+    "官方上下文天花板的唯一真源。任何脚本/文档要引用某个模型的 max_input_tokens，读这里，",
+    "不许再在代码里硬编数字（2026-09-25 的坑：审计脚本自己硬编了 10000000 当「修复建议」，",
+    "于是每次按它办就把闸门关掉一次，用户面反复出现 `10M | 128k`）。",
+    "",
+    "口径（2026-09-25 用户拍板）：逐字照抄官方 max_context_window，不用实测值。",
+    "官方那个数是**总窗**，填进 max_input_tokens 会让闸门偏松一点（宽 = 不误杀）；",
+    "实测输入上限（= 总窗 − 输出预留）更紧但不是官方口径。两者自洽，别混成一个说法。",
+    "⛔ `context_window` 不是 LiteLLM 的字段，LiteLLM 只有 max_input_tokens / max_output_tokens。"
+  ],
+  "_absurd_threshold": 10000000,
+  "_absurd_note": "≥ 1e7 一律判 FAIL：那不是能力声明，是把 _pre_call_checks 这道闸门写到够不着 = 关掉。同一条 refusal 见 scripts/chatgpt-pool-add-codex-model.py。",
+  "sources": {
+    "codex_catalog": {
+      "url": "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0",
+      "field": "max_context_window",
+      "fetched_at": "2026-09-25",
+      "fetched_from": "acct-165",
+      "caveat": "client_version < 1.0.0 会返 200 {\"models\":[]}（空列表假红），必须填 1.0.0"
+    }
+  },
+  "ceilings": {
+    "gpt-5.6-sol": { "max_input_tokens": 872000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 },
+    "gpt-5.6-terra": { "max_input_tokens": 872000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 },
+    "gpt-5.6-luna": { "max_input_tokens": 872000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 },
+    "gpt-6-astra": { "max_input_tokens": 872000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 },
+    "gpt-6-sol": { "max_input_tokens": 872000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 },
+    "gpt-6-luna": { "max_input_tokens": 872000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 },
+    "gpt-5.5": { "max_input_tokens": 272000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 },
+    "gpt-5.3-codex": { "max_input_tokens": 272000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 }
+  },
+  "retired": {
+    "_note": "已退役：实打返 `The '<name>' model is not supported when using Codex with a ChatGPT account.` 给死模型填上限是空操作，审计里单独分类，不要当成「缺配置」去补。",
+    "_note_separators": "同一个模型在不同上游写法不同：codex 目录写 `gpt-5.4`，cursor 车道的 slug 写 `gpt-5-4-thinking`（连字符）。两种都要列，否则连字符那批会掉进 ABSURD 被当成「闸门没关」。",
+    "gpt-5.4": "2026-09-21 实测退役",
+    "gpt-5-4": "2026-09-25 同一个退役模型的连字符写法（cursor-fc-5.4 的 slug 是 openai/gpt-5-4-thinking）"
+  },
+  "wrong_values_seen_in_the_wild": {
+    "10000000": "闸门被关掉。2026-08-30 由 zk-delta-20260831-S1 / zk-delta-S2-restore 写进 15 行 cursor-* 的 DB 行；另有一批行在 DB 里是 <none> 却在运行时读到 10,000,000，注入源尚未定位（不在 DB 行 / ns 内 ConfigMap / pod env / /app 补丁层 / litellm 内置与远端价格表 / LiteLLM_Config）。2026-09-25 已把其中 DB 可写的部分改成官方值。",
+    "922000": "LiteLLM 自带 model_cost 里 gpt-5.6-* 的值（bundled 与 remote 两份都是它）。不是官方发布数，也不是我们算的 —— 这句以前记反过。",
+    "1050000": "同样来自 LiteLLM 自带 model_cost（gpt-5.4 / gpt-5.5 那几个 slug）。DB 里 0 行写过它，全是「没配 ⇒ 按 slug 静默继承」的结果。"
+  },
+  "_gate_counts_high_by_0_8_percent": [
+    "🔴 闸门数出来的 token 数 ≠ 上游 usage 里的真实分词数，2026-09-25 实测闸门高约 0.78%：",
+    "  `\"hello \"*869000` 被闸门数成 875,801 而拦下；`\"hello \"*700000` 上游 usage 回 701,636。",
+    "闸门用的是估算器（token_counter），上游用的是真分词器，两者本来就不等。",
+    "⇒ 写探针时**不许信任任何固定的「条数→token 数」比例**：被拦了就按它自己报的数回算再打",
+    "  （regress_window.py 的 gate_probe 已经这么做）。",
+    "⇒ 也意味着 872,000 这个闸门对应的**真实可用输入**约 865k，不是 872k。这是偏紧，不是故障。"
+  ]
+}

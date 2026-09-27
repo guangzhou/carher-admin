@@ -36,6 +36,21 @@ metadata:
 | **DB/CM 里是 `<none>` ≠ 继承到了合理值** | 198 实测：`chatgpt-gpt-5.6-*` 132 行 DB 全 `<none>`，运行时却读到 **10,000,000**；而同样 `<none>` 的 astra 6 行读到 922,000。**只能以 `/model/info` 为判据** |
 | `max_input_tokens: 10000000` 不是能力声明，是**故意写到够不着 = 把闸门关掉** | 同 pod 同载荷 A/B：922000 那条 400/1.6s 本地拒；10000000 那条不拒、出网超时 |
 | 官方文档的 `context window` 是**总窗口**（输入+输出），不能直接填进 `max_input_tokens` | 一般 `max_input_tokens ≈ context_window − max_output_tokens` |
+| 🔴 **闸门数出来的 token 数比上游真实分词高约 0.8%** | 2026-09-25：`"hello "*869000` 被闸门数成 875,801 拦下，而 `"hello "*700000` 上游 usage 回 701,636。闸门用估算器、上游用真分词器。⇒ 探针**不许信固定的「条数→token」比例**，被拦了要按它自己报的数回算再打 |
+
+### 取值：只认 `scripts/litellm-198-model-ceilings.json`
+
+不许再在任何脚本/文档里硬编这些数字。当前口径（2026-09-25 从 acct-165 实拉
+`GET https://chatgpt.com/backend-api/codex/models?client_version=1.0.0`，字段 `max_context_window`）：
+
+| 模型 | `max_input_tokens` |
+|---|---|
+| `gpt-5.6-sol` / `-terra` / `-luna`、`gpt-6-astra` / `-sol` / `-luna` | **872,000** |
+| `gpt-5.5`、`gpt-5.3-codex` | **272,000** |
+
+⛔ `client_version < 1.0.0` 会返 `200 {"models":[]}`（空列表假红），必须填 `1.0.0`。
+⛔ 野外见过的三个错值 `10000000` / `922000` / `1050000` 的来路见该 JSON 的
+`wrong_values_seen_in_the_wild`——**都不是官方数**。
 
 **⚠️ 读配置的假判据**：`python3 -c "import litellm.proxy.proxy_server as ps; ps.llm_router"` 在**新起的进程里恒为 None**
 （不是在跑的那个 app）。想知道闸门开没开，只有两条合法路：读 pod 内 `/app/config.yaml`，或行为实测。
@@ -145,11 +160,20 @@ python3 scripts/tmpl_drift.py            # 输出 "✅ 模板逐字段相等"
 （对宿主机零冲击）。所以顺序是：**先只读 `/model/info` 逐副本轮询等收敛，收敛不了再滚**。
 
 ```bash
-# 审计：任何 zerokey 支撑的 deployment 若 max_input_tokens 为空 → 退出码 1
-# （空值会被 LiteLLM 从内置价格表按 slug 静默继承成 1,050,000）
-scripts/litellm-198-max-input-tokens-audit.sh              # 默认 zerokey-cursor%
-scripts/litellm-198-max-input-tokens-audit.sh 'zerokey-%'  # 自定义 id 前缀
+# 审计：DB 层 + 运行时 /model/info 双层扫描，四类判红（ABSURD / OVER / MISSING），
+# 取值真源是 scripts/litellm-198-model-ceilings.json，脚本里不硬编任何数字。
+KUBECTL='sudo kubectl' scripts/litellm-198-max-input-tokens-audit.sh              # 全表
+KUBECTL='sudo kubectl' scripts/litellm-198-max-input-tokens-audit.sh 'zerokey-%'  # 限定 id 前缀
+RUNTIME=0 scripts/litellm-198-max-input-tokens-audit.sh                           # 只查 DB（快，会漏继承）
 ```
+
+> 🔴 **这把尺子自己就是"这个问题反复出现多次"的机械原因**（2026-09-25 复现）：
+> 老版本只把**空值**算 missing，`10000000` 被它算成"已配置" ⇒ 在 15 行全是关闸门的 pattern 上
+> 输出 `missing=0 / AUDIT OK / EXIT=0`；而且它打印的"修复方式"里**硬编了
+> `{"max_input_tokens": 10000000}`** —— 照它办一次就把闸门关掉一次。
+> 门禁把错值判为正确，并把错值当解法发出去。现由
+> `backend/tests/test_litellm_198_max_input_tokens_audit.py` 钉住，防止再退化回去。
+> ⛔ 它只读 DB 也是坏的：**DB 里 `<none>` 不等于运行时没值**，必须带运行时那一层。
 
 > ⛔ 这里以前写的是 `scripts/astra_modelinfo.sh` —— **那个文件从来不存在**
 > （git 全历史 0 次），照着抄会直接 `No such file`。2026-09-20 改指到真实脚本。
@@ -157,17 +181,32 @@ scripts/litellm-198-max-input-tokens-audit.sh 'zerokey-%'  # 自定义 id 前缀
 
 DB 侧改动同样要外科式：`copy (...) to stdout` 备份目标行 + 断言行数、
 `update ... where <字段>='<旧值>'` 带旧值条件（补新键时条件写 `is null`）、`UPDATE N` 与期望条数对上、回读，
-并**显式回读证明不该动的行没动**（198 上 `cursor-*` 那 26 行的 `10000000` 是有意的，
-碰它就是劈错路由，见 [[feedback_proxymodeltable_write_reroutes_deployment_needs_restart_regress]]）。
+并**显式回读证明不该动的行没动**。
+
+> 🔴 **2026-09-25 修正：这里以前写着「198 上 `cursor-*` 那 26 行的 `10000000` 是有意的，
+> 碰它就是劈错路由」—— 这句是外推，已被数据推翻。**
+> [[feedback_proxymodeltable_write_reroutes_deployment_needs_restart_regress]] 讲的是写
+> `litellm_params.model` / `api_base` 会劈路由；而本字段在 `model_info` 里，
+> **写它碰不到任何路由字段**。实测：那 15 行改成官方值后，`api_base`（`zero-cursor-101` /
+> `zero-cursor-bpi`）逐字未变，路由没动。
+> 真正该留下的纪律不是"别碰 cursor"，而是**「基线组必须可传入，不能焊死」** ——
+> 当基线组自己变成要改的对象时，焊死的 `BASELINE_LIKE='cursor%'` 会让你拿一个正在变的东西
+> 当"不该动的对照"。`db_patch_window_generic.sh` 的 `BASELINE_LIKE` / `BASELINE_NAME` 已参数化。
 
 ```bash
-# 参数化版（带上面五道门，条件是 is null ⇒ 重跑幂等、UPDATE 0）
-TARGETS="'chatgpt-gpt-5.6-sol','chatgpt-gpt-5.6-terra','chatgpt-gpt-5.6-luna'" EXPECT=132 NEW=922000 \
-  bash scripts/db_patch_window_generic.sh          # dry-run
+# 参数化版（带五道门；OLD 不给 ⇒ 条件 is null 只补空键，OLD 给了 ⇒ 替换该旧值。两种都幂等）
+TARGETS="'chatgpt-gpt-5.6-sol','chatgpt-gpt-5.6-terra','chatgpt-gpt-5.6-luna'" EXPECT=114 \
+  OLD=922000 NEW=872000 BASELINE_NAME=chatgpt-gpt-5.5 \
+  KUBECTL='sudo kubectl' bash scripts/db_patch_window_generic.sh          # 去掉 --apply 即 dry-run
 ```
 
-2026-09-06 用它给 198 的 5.6 三档 132 行补上 922,000：`UPDATE 132`，**100 秒内 4 副本自行收敛，零 rollout**；
-双向回归 930k→400（日志原文 `Max Input Tokens=922000, Got=930008`）、920k→200（`prompt_tokens=921,631`）。
+2026-09-06 用它给 198 的 5.6 三档 132 行补上 922,000：`UPDATE 132`，**100 秒内 4 副本自行收敛，零 rollout**。
+2026-09-25 再次验证同一条性质：287 行分 6 波写完，**110 秒内 4/4 副本收敛，零 rollout**。
+
+> 🔴 **922,000 不是官方数**：它是 LiteLLM 自带 `model_cost` 里 `gpt-5.6-*` 的值
+> （bundled 与 remote 两份都是它）。官方 codex 目录 `max_context_window` 是 **872,000**。
+> 以前这里把 922,000 记成"我们算的/官方的"，两种说法都错。取值只认
+> `scripts/litellm-198-model-ceilings.json`。
 
 ## 6. 回归：逐副本、真 key、带证伪腿
 
@@ -175,28 +214,44 @@ TARGETS="'chatgpt-gpt-5.6-sol','chatgpt-gpt-5.6-terra','chatgpt-gpt-5.6-luna'" E
 只查一个 = 另一个可能在跑旧配置）：
 
 ```bash
-for P in $(kubectl -n carher get po -l app=litellm-proxy --no-headers -o name | cut -d/ -f2); do
-  kubectl -n carher cp scripts/regress_window.py $P:/tmp/regress_window.py
-  kubectl -n carher exec $P -- python3 /tmp/regress_window.py $P
-done
+# 逐副本读分布（DB 改完等收敛、以及回归判据 1）
+NAMES='chatgpt-gpt-5.6-luna,chatgpt-gpt-6-astra' KUBECTL='sudo kubectl' \
+  bash scripts/modelinfo_per_replica.sh
+
+# 双向闸门 + 邻居冒烟（放行腿要花钱，只在**一个** pod 上跑；分布那项靠上面那条覆盖全副本）
+P=<一个 prod 车道 pod>
+sudo kubectl cp scripts/regress_window.py litellm-product/$P:/tmp/regress_window.py
+sudo kubectl exec -n litellm-product $P -- \
+  env MODELS=chatgpt-gpt-5.6-luna GATE_MODEL=chatgpt-gpt-5.6-luna BUDGET=200 \
+  python3 /tmp/regress_window.py POST
 ```
 
 必须全绿的五项：
 
-1. `/model/info` 里目标行的 `max_input_tokens` 分布 = 期望值 × 期望条数（两副本一致）
+1. `/model/info` 里目标行的 `max_input_tokens` 分布 = 期望值 × 期望条数（**每个副本**都一致）
 2. **临时 scoped key**（不是 master key）打每个目标模型 → 200；`finally` 里删 key
-3. **闸门放行腿**：略低于阈值（如 920,637）→ 200
-4. **闸门拦截腿**：略高于阈值（如 923,000）→ **400 `ContextWindowExceededError`，< 1s，不出网**
+3. **闸门放行腿**：略低于阈值 → 200
+4. **闸门拦截腿**：略高于阈值 → **400 `ContextWindowExceededError`，< 1s，不出网**
    （只有 3 没有 4 = 没证明闸门在工作）
-   - ⚠ **临时 key 的 `max_budget` 要够**：92 万那发放行腿在 198 上就吃掉 ~$12，
+   - 🔴 **探针档位必须从闸门实际值算出来，不许写死**。2026-09-25 的坑：脚本里焊着
+     `919000/923000`（922,000 时代的两侧），闸门改到 872,000 之后这两发全在阈值上方 ⇒
+     两条腿都 400，"放行腿"永远亮不了，尺子横跨了一个**已经不存在的阈值**。现已改成
+     读 `/model/info` 拿到闸门值再算。
+   - 🔴 **填充物条数 ≠ 闸门数出来的 token 数**（闸门高约 0.8%，见 §0）。放行腿被拦了要
+     按它自己报的 `本次约 N token` 回算重打，别调固定比例。
+   - ⚠ **临时 key 的 `max_budget` 要够**：87 万那发放行腿在 198 上就吃掉 ~$12，
      $5 的 key 会让紧随其后的拦截腿返 **429**（"今日 key 额度已用完"）——那是判据被顶掉，
-     不是闸门。要么把拦截腿排在放行腿**前面**，要么预算给到 200。
+     不是闸门。脚本已把拦截腿排在放行腿**前面**，预算默认 200。
    - ⚠ **198 有报错脱敏**：前台只看得到 `API 异常 (req: xxxxxxxx)`，光凭 400 不能说是窗口闸门。
      必须去 pod 日志捞脱敏前原文：
-     `kubectl -n litellm-product logs <pod> --since=10m | grep -E '<reqid>|Max Input Tokens'`
-     认这句才算数：`Max Input Tokens=922000, Got=923013`。
-5. 邻居模型冒烟（如 `chatgpt-gpt-5.5` / `claude-opus-4-7` / `wangsu-deepseek-v4-flash`）→ 200，
+     `sudo kubectl -n litellm-product logs <pod> --tail=4000 | grep -E '<reqid>|Max Input Tokens'`
+     认这句才算数（2026-09-25 实测原文）：`Max Input Tokens=872000, Got=875801`。
+5. 邻居模型冒烟（如 `chatgpt-gpt-5.5` / `claude-fable-5.1` / `wangsu-deepseek-v4-flash`）→ 200，
    证明没误伤别的行；**改前也测一遍存基线**，否则分不清"本来就坏"和"我搞坏的"
+   - ⛔ **邻居名必须是 198 上真实存在的组**。这里以前默认写 `claude-opus-4-7`，
+     198 上**根本没有这个名**，它稳定返 `400 ProxyModelNotFoundError` ⇒ 每轮回归都挂着
+     一条长期红腿，把"我改坏了"和"这个名字是编的"混成同一个形状。判别只要看日志里
+     是 `ProxyModelNotFoundError` 还是别的类。
 
 ## 7. 开闸前的爆炸半径审计（第一次开 pre_call_checks 时必做）
 

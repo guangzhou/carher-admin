@@ -64,6 +64,14 @@ BUDGET_FAMILY_OTHER_USD=500                    ④ 其他所有模型每日限�
 BUDGET_NOTICE_KEY_ALIASES=a,b                  精确灰度名单
 BUDGET_NOTICE_KEY_PREFIXES=claude-code-,cursor-  前缀放量
 两个 env 都未设置时默认 canary：claude-code-liuguoxian-50gj。
+BUDGET_NOTICE_QUOTA_KEY_PREFIXES=carher-       ①（且只有①）的独立窄门。
+                                              ⚠️ 上面那两个 env 是 ①②③④ 共用的
+                                              一道门，往里加人 = 顺手打开 ②（把
+                                              提醒注入进 bot 给用户的回复）③（超
+                                              预算改回 200 假消息）④（套上每日
+                                              系列额度桶，线上 FAMILY_ENABLED=1
+                                              会真掐住 bot）。只想开 /查余额 就
+                                              用这个 env。不设 = 零行为变化。
 BUDGET_NOTICE_WARN_RATIO=0.9                   ② 的阈值
 
 keep two in sync：本文件与 198 CM ``litellm-callbacks`` 的 ``budget_notice.py``。
@@ -135,6 +143,33 @@ def _gated(user_api_key_dict: Any) -> bool:
     if alias in _gate_aliases():
         return True
     return any(alias.startswith(p) for p in _gate_prefixes())
+
+
+def _quota_only_prefixes() -> Tuple[str, ...]:
+    """① /查余额 的**独立**放量名单（前缀匹配；写全名即精确匹配）。
+
+    为什么不直接往 ``BUDGET_NOTICE_KEY_PREFIXES`` 里加人：那个 env 是 ①②③④
+    **共用**的一道门。carher-* 的 bot 只是想要 ①，而加进去会顺手打开
+    ② 把 90% 提醒注入进 bot 回复用户的话里、③ 超预算改回 200 假消息、
+    ④ 给整支 bot 队伍套上每日系列额度桶 —— 线上 ``BUDGET_FAMILY_ENABLED=1``
+    是开着的，④ 会真的掐住生产 bot。所以 ① 单独开一道窄门。
+
+    不设 = 零行为变化。
+    """
+    raw = os.environ.get("BUDGET_NOTICE_QUOTA_KEY_PREFIXES")
+    if raw is None:
+        return ()
+    return tuple(x.strip() for x in raw.split(",") if x.strip())
+
+
+def _quota_gated(user_api_key_dict: Any) -> bool:
+    """能不能用 ① /查余额。``_gated`` 的 key 天然包含在内。"""
+    if _gated(user_api_key_dict):
+        return True
+    alias = getattr(user_api_key_dict, "key_alias", None) or ""
+    if not alias:
+        return False
+    return any(alias.startswith(p) for p in _quota_only_prefixes())
 
 
 # ------------------------------------------------------- request text 提取
@@ -1237,7 +1272,12 @@ class BudgetNotice(CustomLogger):
         try:
             if _disabled() or not isinstance(data, dict):
                 return data
-            if not _gated(user_api_key_dict):
+            # 两道门，宽窄不同：``gated`` 管 ②③④（会改 bot 给用户的回复、会
+            # 掐额度），``_quota_gated`` 只多放 ① /查余额 进来。往下每一处
+            # ③④ 分支都必须显式检查 ``gated`` —— 只过了窄门的 key 绝不能被
+            # ③ 的软拦截或 ④ 的额度桶碰到。
+            gated = _gated(user_api_key_dict)
+            if not (gated or _quota_gated(user_api_key_dict)):
                 return data
             v = str(getattr(call_type, "value", call_type))  # 枚举必须取 .value
 
@@ -1245,7 +1285,8 @@ class BudgetNotice(CustomLogger):
             #   的路由白名单/文案判断 —— mark 一旦存在就要出 200 友好消息，
             #   否则请求会带着「auth 放行」继续打到上游（真实计费）。
             token = getattr(user_api_key_dict, "token", "") or ""
-            ob = _take_over_budget_mark(token) if token else None
+            # 只过窄门的 key 不看 mark —— ③ 对它不适用，读了也只能扔。
+            ob = _take_over_budget_mark(token) if (token and gated) else None
             if ob is not None and not _friendly_mock_disabled():
                 cost, mx = ob
                 ob_text = _over_budget_text(user_api_key_dict, cost, mx)
@@ -1288,7 +1329,7 @@ class BudgetNotice(CustomLogger):
 
             # ④ 模型系列日额度（先于 ① —— 系列超限时连 /查余额 之外的推理
             #   都不放行；/查余额 本身不打上游、不受系列额度限制，放它先走）
-            if _family_enabled() and token:
+            if gated and _family_enabled() and token:
                 fam = _family_of(str(data.get("model") or ""), user_api_key_dict)
                 if fam is not None and not _is_quota_query(_last_user_text(data)):
                     fkey, flabel = fam
@@ -1356,7 +1397,9 @@ class BudgetNotice(CustomLogger):
                 return data
 
             family_text, ttft_text = await asyncio.gather(
-                _family_usage_lines(token, user_api_key_dict),
+                # 只过窄门的 key 不受 ④ 约束，就不该在回复里看到系列额度 ——
+                # 报一个不执法的数字只会让人以为自己被限了。
+                _family_usage_lines(token if gated else "", user_api_key_dict),
                 _ttft_text(user_api_key_dict),
             )
             # 顺序：额度 → 系列 → TTFT → 模型清单。TTFT 是用户主动要的那段，放在

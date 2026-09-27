@@ -1635,5 +1635,114 @@ class CodexStopTest(unittest.TestCase):
         self.assertIn("额度已用完", out.get("mock_response", ""))
 
 
+# 窄门 = BUDGET_NOTICE_QUOTA_KEY_PREFIXES：只开 ① /查余额，不开 ②③④。
+# 现场来历（2026-09-27）：飞书 bot 打 198 用的 key 别名是 carher-14，共用门的
+# 前缀只有 claude-code-/cursor- ⇒ async_pre_call_hook 第三行就 return 了，
+# /查余额 的匹配器从没被执行过，用户看到的是模型自己编的一句话。
+QUOTA_ENV = {**PREFIX_ENV, "BUDGET_NOTICE_QUOTA_KEY_PREFIXES": "carher-"}
+
+
+class QuotaOnlyGateTest(unittest.TestCase):
+    def setUp(self):
+        _ensure_stubs()
+        M._OVER_BUDGET_MARKS.clear()
+        M._fam_local.clear()
+
+    def tearDown(self):
+        M._OVER_BUDGET_MARKS.clear()
+        M._fam_local.clear()
+
+    def _pre(self, data, call_type, env, alias="carher-14"):
+        async def go():
+            return await M.budget_notice.async_pre_call_hook(
+                _Key(alias=alias, token="tok-carher"), None, data, _CallType(call_type))
+        return _with_env(env, lambda: asyncio.run(go()))
+
+    # ---- 阳性对照：窄门不设时，就是今天线上的病 ----
+    def test_bot_key_not_gated_without_narrow_env(self):
+        d = {"messages": [{"role": "user", "content": "查余额"}]}
+        out = self._pre(d, "acompletion", PREFIX_ENV)
+        self.assertNotIn("mock_response", out)
+
+    # ---- 窄门放行 ① ----
+    def test_narrow_env_enables_quota_query(self):
+        d = {"messages": [{"role": "user", "content": "查余额"}]}
+        out = self._pre(d, "acompletion", QUOTA_ENV)
+        self.assertIn("今日用量", out.get("mock_response", ""))
+
+    def test_narrow_env_quota_query_anthropic(self):
+        from litellm.exceptions import ModifyResponseException
+
+        d = {"messages": [{"role": "user", "content": "/查余额"}]}
+        with self.assertRaises(ModifyResponseException) as ctx:
+            self._pre(d, "aanthropic_messages", QUOTA_ENV)
+        self.assertIn("今日用量", ctx.exception.message)
+
+    def test_narrow_env_does_not_short_circuit_normal_prose(self):
+        d = {"messages": [{"role": "user", "content": "帮我写个函数"}]}
+        out = self._pre(d, "acompletion", QUOTA_ENV)
+        self.assertNotIn("mock_response", out)
+
+    # ---- 窄门**不**打开 ②③④（这才是不直接往共用门里加人的全部理由）----
+    def test_narrow_gate_does_not_enable_soft_block(self):
+        """③ 超预算软拦截：只过窄门的 key 照常放行到上游，不出 200 假消息。"""
+        M._mark_over_budget("tok-carher", 9.0, 5.0)
+        d = {"messages": [{"role": "user", "content": "帮我写个函数"}]}
+        out = self._pre(d, "acompletion", QUOTA_ENV)
+        self.assertNotIn("mock_response", out)
+
+    def test_narrow_gate_quota_query_ignores_over_budget_mark(self):
+        """mark 在，但 ① 仍是 ①：出的是用量文案，不是「额度已用完」。"""
+        M._mark_over_budget("tok-carher", 9.0, 5.0)
+        d = {"messages": [{"role": "user", "content": "查余额"}]}
+        out = self._pre(d, "acompletion", QUOTA_ENV)
+        self.assertIn("今日用量", out.get("mock_response", ""))
+        self.assertNotIn("额度已用完", out["mock_response"])
+
+    def test_narrow_gate_does_not_enable_family_block(self):
+        """④ 系列额度：桶早就爆了，只过窄门的 key 也不该被掐。"""
+        M._fam_local[M._family_spend_key("other", "tok-carher")] = 9999.0
+        d = {"model": "gpt-5.6-terra",
+             "messages": [{"role": "user", "content": "帮我写个函数"}]}
+        out = self._pre(d, "acompletion",
+                        {**QUOTA_ENV, "BUDGET_FAMILY_ENABLED": "1"})
+        self.assertNotIn("mock_response", out)
+
+    def test_narrow_gate_quota_reply_has_no_family_lines(self):
+        """报一个不执法的额度数字只会让人以为自己被限了。"""
+        M._fam_local[M._family_spend_key("other", "tok-carher")] = 3.0
+        d = {"messages": [{"role": "user", "content": "查余额"}]}
+        out = self._pre(d, "acompletion",
+                        {**QUOTA_ENV, "BUDGET_FAMILY_ENABLED": "1"})
+        self.assertIn("今日用量", out.get("mock_response", ""))
+        self.assertNotIn("系列额度", out["mock_response"])
+
+    # ---- 共用门的 key 一切不变 ----
+    def test_shared_gate_keys_unaffected(self):
+        out = _with_env(QUOTA_ENV, lambda: (
+            M._quota_gated(_Key(alias="claude-code-u1")),
+            M._quota_gated(_Key(alias="cursor-u1")),
+            M._quota_gated(_Key(alias="carher-14")),
+            M._quota_gated(_Key(alias="other-user")),
+            M._quota_gated(_Key(alias="")),
+        ))
+        self.assertEqual(out, (True, True, True, False, False))
+
+    def test_shared_gate_family_still_enforced(self):
+        """同一轮改动不许把 ④ 对共用门 key 的执法弄丢。"""
+        M._fam_local[M._family_spend_key("other", "tok-carher")] = 9999.0
+        d = {"model": "gpt-5.6-terra",
+             "messages": [{"role": "user", "content": "写个函数"}]}
+        out = self._pre(d, "acompletion",
+                        {**QUOTA_ENV, "BUDGET_FAMILY_ENABLED": "1"},
+                        alias="cursor-u1")
+        self.assertIn("额度已用完", out.get("mock_response", ""))
+
+    def test_narrow_env_unset_is_zero_change(self):
+        self.assertEqual(M._quota_only_prefixes(), ())
+        self.assertFalse(_with_env(PREFIX_ENV,
+                                   lambda: M._quota_gated(_Key(alias="carher-14"))))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

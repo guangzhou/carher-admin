@@ -785,13 +785,52 @@ def _probe_enabled() -> bool:
     return os.environ.get("BUDGET_NOTICE_PROBE_ENABLED") == "1"
 
 
+def _image_generation_impossible(target: str) -> bool:
+    """这个落点**在 litellm 里根本没有画图实现**吗？是 ⇒ 只可能用聊天去打。
+
+    这不是按名字猜，读的是 litellm 自己的 provider 能力表：
+    `ProviderConfigManager.get_provider_image_generation_config()` 返回 None
+    表示这个 provider 压根没实现 image generation。anthropic 就是这样。
+
+    🔴 为什么需要这一级（09-27 实测，两组数）：
+      · 1830 行里 79 行**真的**没有 `mode`（DB 列空、内置表也查不到），
+        这 79 个在 `/测模型` 里永久是「⚠️ 未测（判不出该用什么协议）」，
+        而里头是 `kiro-*` / `cursor-fc-*` / `wangsu-*` —— 用户白名单里的常客。
+        拿一把白名单=[kiro-auto, wangsu-glm-5.1, wangsu-gpt-5.4, wangsu-gpt-5.5]
+        的 key 实测：活 2 / 死 0 + **另有 2 个未测**，就是这两个。
+      · 这一级只把 79 里的 **51** 个判成 chat（anthropic 32 + custom_openai 18
+        + perplexity 1），剩 28 个落点是 openai（openai 确实有画图实现）
+        ⇒ 仍然如实「未测」。**不许**为了凑满而给它们默认 chat。
+
+    🔴 阳性对照（不许省）：全库 74 个 `mode=image_generation` 的行，
+       这个判据把其中 **0** 个误判成 chat-only；2 个 embedding 行同样 0。
+       查不出 provider 就返回 False —— 拿不准时宁可「未测」，不许乱打。
+
+    ⛔ 反过来不成立：provider **有**画图实现不代表这个模型是画图模型
+       （`openai/grok-4.6` 也会说 image_capable=True）。所以这里只做
+       「不可能是画图 ⇒ 是聊天」这一个方向，另一个方向永远留给上面两级。
+    """
+    if not target:
+        return False
+    try:
+        from litellm.types.utils import LlmProviders
+        from litellm.utils import ProviderConfigManager, get_llm_provider
+        _, provider, _, _ = get_llm_provider(model=target)
+        cfg = ProviderConfigManager.get_provider_image_generation_config(
+            model=target.split("/", 1)[-1], provider=LlmProviders(provider))
+        return cfg is None
+    except Exception:
+        return False
+
+
 def _probe_model_mode(name: str, row_lookup: dict) -> str:
     """这个模型该用聊天还是画图去测。返回 'chat' / 'image_generation' / ''。
 
     🔴 不许按名字里有没有 'image' 来猜 —— 09-26 裁决「尺子里跟名字绑的硬编码表
     ⇒ 新增那项 = 永久盲区」。依据只能是 litellm 自己的 `mode`：先读部署行的
-    `model_info.mode`，再回落到 `get_model_info(落点名)`。两者都取不到就返回
-    空串，调用方**跳过**并如实标成「判不出类型」，而不是默认当聊天打。
+    `model_info.mode`，再回落到 `get_model_info(落点名)`。都取不到再走第三级
+    （见 `_image_generation_impossible`）。全落空就返回空串，调用方**跳过**并
+    如实标成「判不出类型」，而不是默认当聊天打。
     """
     for row in row_lookup.get(name, []):
         info = row.get("model_info") if isinstance(row, dict) else None
@@ -809,6 +848,11 @@ def _probe_model_mode(name: str, row_lookup: dict) -> str:
                 return str(mi["mode"])
         except Exception:
             continue
+    for row in row_lookup.get(name, []):
+        params = row.get("litellm_params") if isinstance(row, dict) else None
+        target = (params or {}).get("model") if isinstance(params, dict) else None
+        if target and _image_generation_impossible(str(target)):
+            return "chat"
     return ""
 
 

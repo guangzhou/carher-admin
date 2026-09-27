@@ -2033,6 +2033,7 @@ class ProbeModeTest(unittest.TestCase):
         self.assertEqual(M._probe_model_mode("my-image-model", lookup), "")
         self.assertEqual(M._probe_model_mode("not-in-catalog-at-all", lookup), "")
 
+
     def test_targets_use_public_names_and_resolve_mode_through_alias(self):
         """打给 router 的必须是**公开名** —— 直接打落点就绕过了 alias 那层，
         测出来的绿说明不了「用户发那个名字能用」。"""
@@ -2063,6 +2064,103 @@ class ProbeModeTest(unittest.TestCase):
         key = _Key(alias="carher-14")
         key.models = []
         self.assertEqual(M._probe_targets(key), [])
+
+
+
+class ImageImpossibleTest(unittest.TestCase):
+    """第三级：落点的 provider **在 litellm 里没有画图实现** ⇒ 只能是聊天。
+
+    🔴 为什么要有这一级（09-27 实测）：全库 1830 行里 79 行真的没有 `mode`，
+       在 `/测模型` 里永久是「⚠️ 未测」，而里头全是 `kiro-*` / `cursor-fc-*` /
+       `wangsu-*` —— 用户白名单里的常客。拿一把白名单 = [kiro-auto,
+       wangsu-glm-5.1, wangsu-gpt-5.4, wangsu-gpt-5.5] 的 key 实测，屏幕上就是
+       「活 2 / 死 0，另有 2 个未测」。这一级只吃掉其中 51 个（anthropic 32 +
+       custom_openai 18 + perplexity 1），剩 28 个落点在 openai 的仍然「未测」。
+    """
+
+    def setUp(self):
+        _ensure_stubs()
+        self.saved = {k: sys.modules.get(k)
+                      for k in ("litellm.utils", "litellm.types.utils")}
+        self.utils = types.ModuleType("litellm.utils")
+        self.tutils = types.ModuleType("litellm.types.utils")
+        self.tutils.LlmProviders = lambda p: p          # 桩：provider 原样透传
+        sys.modules["litellm.utils"] = self.utils
+        sys.modules["litellm.types.utils"] = self.tutils
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    def _wire(self, provider, image_cfg, provider_raises=False):
+        def get_llm_provider(model=None):
+            if provider_raises:
+                raise RuntimeError("cannot infer provider")
+            return (model, provider, None, None)
+
+        class PCM:
+            @staticmethod
+            def get_provider_image_generation_config(model=None, provider=None):
+                return image_cfg
+
+        self.utils.get_llm_provider = get_llm_provider
+        self.utils.ProviderConfigManager = PCM
+
+    def test_provider_without_image_impl_means_chat_only(self):
+        """anthropic 没有画图实现 ⇒ 判 chat。实测 79 个无 mode 的行里 32 个是它。"""
+        self._wire("anthropic", None)
+        self.assertTrue(M._image_generation_impossible("anthropic/auto"))
+
+    def test_provider_with_image_impl_stays_ambiguous(self):
+        """⛔ 反方向不成立：openai 有画图实现，但 `openai/grok-4.6` 是聊天模型。
+        所以这一级只答「不可能是画图」，不许反过来断言「那就是画图」。"""
+        self._wire("openai", object())
+        self.assertFalse(M._image_generation_impossible("openai/grok-4.6"))
+
+    def test_unresolvable_provider_is_not_a_guess(self):
+        """查不出 provider ⇒ False ⇒ 上层保持「未测」。拿不准时不许乱打。"""
+        self._wire("whatever", None, provider_raises=True)
+        self.assertFalse(M._image_generation_impossible("nonsense"))
+        self.assertFalse(M._image_generation_impossible(""))
+
+    def test_mode_falls_back_to_provider_capability(self):
+        """接到 `_probe_model_mode` 上：前两级空 + provider 没画图 ⇒ 'chat'。"""
+        self._wire("anthropic", None)
+        litellm = sys.modules["litellm"]
+        had, old = hasattr(litellm, "get_model_info"), getattr(litellm, "get_model_info", None)
+
+        def boom(name):
+            raise RuntimeError("This model isn't mapped yet.")
+
+        litellm.get_model_info = boom
+        try:
+            lookup = {"kiro-auto": [{"model_info": {},
+                                     "litellm_params": {"model": "anthropic/auto"}}]}
+            self.assertEqual(M._probe_model_mode("kiro-auto", lookup), "chat")
+        finally:
+            if had:
+                litellm.get_model_info = old
+            else:
+                litellm.__dict__.pop("get_model_info", None)
+
+    def test_openai_target_still_reported_unknown(self):
+        """实测剩下的 28 个（落点在 openai）必须继续「未测」，不许凑数。"""
+        self._wire("openai", object())
+        litellm = sys.modules["litellm"]
+        had, old = hasattr(litellm, "get_model_info"), getattr(litellm, "get_model_info", None)
+        litellm.get_model_info = lambda name: (_ for _ in ()).throw(RuntimeError("nope"))
+        try:
+            lookup = {"openrouter-gpt-5.5": [{"model_info": {},
+                                              "litellm_params": {"model": "openai/gpt-5.5"}}]}
+            self.assertEqual(M._probe_model_mode("openrouter-gpt-5.5", lookup), "")
+        finally:
+            if had:
+                litellm.get_model_info = old
+            else:
+                litellm.__dict__.pop("get_model_info", None)
 
 
 class ProbeTextTest(unittest.TestCase):

@@ -6,7 +6,7 @@ description: >-
   / "每日额度" / "max_budget" / "budget_duration", or wants to set, modify,
   remove, or query spending limits on LiteLLM keys. Also covers the per-series
   daily bucket ("系列日额度" / "main 系列" / budget_family_overrides /
-  gpt53 vs other family), the cursor-* invariant (other == max_budget) with its
+  claude/other family; GPT-5.3 is included in other), the cursor-* invariant (other == max_budget) with its
   audit script, codex-client 429 stop behavior (usage_limit_reached /
   x-codex-promo-message / BUDGET_CODEX_STOP_DISABLED), and WHEN budgets reset
   ("重置时间" / "重置时区" / "北京时间零点" / budget_reset_at /
@@ -110,6 +110,27 @@ PG psql 命令行 default autocommit，单条 UPDATE 就是单条事务。对 �
 | 198 `claude-code-*` / `cursor-*`（gated）| **HTTP 200** 助手消息「🚫 你的 key 今日额度已用完：已消费 $X / 限额 $Y。北京时间明日 00:00 自动重置…」| budget_notice.py ③ 软拦截（auth 层 monkey-patch 吞 BudgetExceededError → pre-call 出 mock，零上游零计费）|
 | 198 其余 key | HTTP 429 + 友好中文 body + `type=budget_exceeded` | error_sanitize.py 的 BudgetExceededError 分支 |
 | **阿里云 `carher-*`（her bot）**| HTTP 429 原生（**③ 用 `BUDGET_FRIENDLY_MOCK_DISABLED=1` 关着**，bot 侧行为不变；①查余额②90%预警已开，gate `BUDGET_NOTICE_KEY_PREFIXES=carher-`。要开③删该 env 即可）| 同一份 budget_notice.py（三拷贝 md5 全等），repo 清单 `k8s/litellm-proxy.yaml` |
+| **198 `carher-*`（her bot，2026-09-27 起）**| 超额行为不变（走上面"198 其余 key"那行的原生 429）；**只多了 ① `/查余额`**，gate 是独立窄门 `BUDGET_NOTICE_QUOTA_KEY_PREFIXES=carher-` | budget_notice.py `_quota_gated` |
+
+### ⚠️ 想给某批 key 开 `/查余额`：用窄门 env，别往共用门里加人
+
+`BUDGET_NOTICE_KEY_PREFIXES` / `_KEY_ALIASES` 是 **①②③④ 共用**的一道门。
+往里加一个前缀 = 同时给这批 key 打开：
+
+- ② 90% 提醒**注入进它回复用户的话里**（bot 场景 = 同事看到运维文案）
+- ③ 超预算从原生 429 改成 200 假助手消息
+- ④ 每日系列额度桶。🔴 **198 三条 lane 实测 `BUDGET_FAMILY_ENABLED=1`**
+  （`GPT53=200 / OTHER=500 / CLAUDE=100`），加进去会**真的掐住生产 bot**。
+
+只想开 ① 就用 **`BUDGET_NOTICE_QUOTA_KEY_PREFIXES`**（前缀匹配；写全名即精确匹配；
+不设 = 零行为变化）。③④ 各分支都显式检查旧的 `gated`，窄门 key 碰不到。
+
+**2026-09-27 现场**：飞书里 her bot 打「查余额」返回的是模型自己编的一句
+「请在 IDE 或终端直接输入…」。根因是 `async_pre_call_hook` 第三行
+`if not _gated(...)` 就 return 了 —— bot 的别名 `carher-14` 不在
+`claude-code-,cursor-` 里，**匹配器从没被执行过**。那句话在容器里
+grep 不到，只出现在 session trajectory 里 ⇒ 是模型即兴编的，不是配置。
+⛔ 别把它当 grep 锚点去找配置（见 [[feedback_page_text_is_not_a_log_anchor]]）。
 
 **为什么 gated 是 200 不是 429**：Cursor 收到 429 完全不渲染 body，只显示自家
 "exceeded retry limit" 串——200 助手消息是唯一用户可见通道（2026-08-21 活体
@@ -162,28 +183,32 @@ prod 冒烟：`scripts/litellm-198-budget-notice-smoke.sh`（198 上 sudo 跑，
 
 ## 模型系列日额度（④，198 prod 2026-08-22 起）
 
+完整的 Cursor 家族桶审计与 rollout SOP 见 `.claude/skills/litellm-cursor-family-budget/SKILL.md`。
+
 每 key 每北京日按**系列**限额（budget_notice.py 自建；litellm 原生
 `model_max_budget` 做不到：精确匹配无系列桶、每模型独立记账、滚动 24h 窗、
 超限裸 429）：
 
 | 系列 | 匹配规则（model_group 名） | 默认限额 |
 |---|---|---|
-| GPT-5.3 系列 | 含 `gpt` 且含 `5.3`（8 个入口名全中） | **$200/天** |
-| 其他所有模型 | 兜底匹配一切非 5.3（gpt/claude/deepseek/glm…共用一桶，fkey=`other`） | **$500/天** |
+| Claude 家族 | 型号词包含 `fable` / `opus` / `sonnet` / `haiku`（不按 `claude` 前缀泛匹配） | **$100/天** |
+| 其他所有模型 | 兜底匹配一切非 Claude 家族（含 GPT-5.3、deepseek/glm/kimi/grok/普通 gpt…共用一桶，fkey=`other`） | **$500/天** |
 
 - 超限行为：200 助手消息「🚫 该系列今日额度已用完…其他系列不受影响」，零上游零计费；`/查余额` 显示各系列已用/限额
 - 记账：redis `budget_notice:fam:{family}:{token}:{北京日}`（INCRBYFLOAT，键含日期天然北京 0 点换桶）；**只累计 response_cost>0 的请求**——免费入口（如 gpt-5.4-mini 计费 0）不占系列额度
-- 调整：env `BUDGET_FAMILY_GPT53_USD` / `BUDGET_FAMILY_OTHER_USD`（全局）；按人覆盖走 key `metadata.budget_family_overrides: {"gpt53": 300}`（/key/update 热改，auth 缓存 ~60s 生效）
+- 调整：env `BUDGET_FAMILY_CLAUDE_USD` / `BUDGET_FAMILY_OTHER_USD`（全局）；按人覆盖走 key `metadata.budget_family_overrides: {"claude": 75}`（/key/update 热改，auth 缓存 ~60s 生效）
 - 开关：`BUDGET_FAMILY_ENABLED=1`（仅 198 设了；阿里云未设=完全不生效）
 - 与 key 总额度叠加判定：先系列后总额，两者独立；总额 $70 的普通 key 通常先触总额，系列限额主要约束白名单高额 key
 - ⚠️ 动预算拦截逻辑必看 [[feedback_litellm_budget_rejection_has_three_gates]]——预算 429 有**三道独立闸门**（auth check / MaxBudgetLimiter hook / capacity 预留层），只 patch 一处 = 假修，零价格 mock 的 T0 测不出来
 
 ### cursor-\* 不变量：main 系列日限额 == 每天总限额（2026-08-23 约定）
 
+该不变量只约束 `other` 桶；新增的 `claude` 桶不参与此对齐，也不会改变 key 的个人总额度。
+
 每个 `cursor-*` key 的 `metadata.budget_family_overrides.other` **必须 == 该 key 自己的
 `max_budget`**（"其他/main 系列"日桶 = 每天总额度）。**onboarding 新造的 cursor key 常
-漏设 `other`** → 退回 env 默认 $500，与总额度脱节，需定期回归审计。gpt53 系列（$200）
-不在此不变量内。
+漏设 `other`** → 退回 env 默认 $500，与总额度脱节，需定期回归审计。GPT-5.3
+已归入 `other`，同样受该不变量约束。
 
 ```bash
 # 审计(dry-run)/对齐一把梭:

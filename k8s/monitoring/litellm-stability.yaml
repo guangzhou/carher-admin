@@ -108,7 +108,7 @@ groups:
       service: litellm
     annotations:
       summary: '{{ $labels.litellm_model_name }} 的腿 {{ $labels.model_id }} 失败率 {{ humanize $values.A.Value }}%'
-      description: 这条腿在持续失败、靠重试和兜底兜着。常年高位就该把这个账号/供应商摘掉。
+      description: 这条腿在持续失败、靠重试和兜底兜着。常年高位就该把这个账号/供应商摘掉。⚠️ 这条有结构性盲区，必须和 llm-stab-leg-cooldown-burn 配对看：它的『至少 20 次请求』这道门，对「一失败就被 router 摘掉、于是在请求量指标里根本没有序列」的腿永远不成立，那种腿只有冷却计数看得见。
     noDataState: OK
     execErrState: Error
     isPaused: false
@@ -137,6 +137,64 @@ groups:
             type: gt
             params:
             - 20
+          operator:
+            type: and
+          query:
+            params:
+            - A
+          reducer:
+            type: last
+            params: []
+          type: query
+  - uid: llm-stab-leg-cooldown-burn
+    title: 上游腿反复被摘且完全不出活（上面那条失败率告警结构性看不见它）
+    condition: C
+    for: 30m
+    labels:
+      severity: warning
+      service: litellm
+    annotations:
+      summary: '{{ $labels.litellm_model_name }} 的腿 {{ $labels.model_id }} 近 1 小时被摘 {{ humanize $values.A.Value }} 次且零成功'
+      description: >-
+        必须和 llm-stab-leg-failrate 配对看，少一条就有盲区。那条按「失败率 + 至少 20 次请求」判，
+        而**一失败就被 router 摘掉的腿在 litellm_deployment_total_requests_total 里是零序列**
+        （不是数值低，是序列不存在）——分子分母同时不成立，所以它对这类腿永远不会响。
+        冷却计数是唯一还看得见它们的量具。反过来这条也替代不了那条：有流量、失败率高但仍在出活的腿
+        不会被这条抓到。两条一起看才是完整的。
+        『零成功』这个条件是用来分开「抖动」和「死了」的——2026-09-27 实测 acct-178-gpt-6-sol
+        冷却 24.8 次/小时却出了 12 次活（抖动，不报），而 acct-165/166/167/168/169/172/177 的
+        gpt-6-sol 冷却 25~29 次/小时且零成功（死，要报）。整块连号在同一个模型上死掉，
+        典型根因是这些账号没有该模型的订阅权限，不是上游故障：处置是摘腿或补订阅，等不来自愈。
+        ⚠️ 冷却本身是常态（近 1 小时 36 条腿有冷却），所以阈值不能设成「冷却 > 0」，那是刷屏。
+        看板：/d/litellm-stability-198。
+    noDataState: OK
+    execErrState: Error
+    isPaused: false
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 3600
+        to: 0
+      datasourceUid: PBFA97CFB590B2093
+      model:
+        refId: A
+        instant: true
+        range: false
+        editorMode: code
+        intervalMs: 60000
+        maxDataPoints: 43200
+        expr: "sum by (litellm_model_name, model_id) (increase(litellm_deployment_cooled_down_total[1h]))\n  unless sum by (litellm_model_name, model_id) (increase(litellm_deployment_success_responses_total[1h])) > 0\n"
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: A
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 6
           operator:
             type: and
           query:

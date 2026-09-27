@@ -267,6 +267,48 @@ acct-85 是 free 档，当初上 `gpt-6-sol` 时是被**明确排除**的，但�
 错在拿它去量一条已经被摘掉的腿。
 ⇒ **这类腿只能用 `cooled_down_total` 的绝对速率来告警**，不是改分子。
 
+#### ✅ 2026-09-27 已补上：`llm-stab-leg-cooldown-burn`（**和上面那条配对，不是替代**）
+
+用户口径是「两个都要综合看」。**没有改 `llm-stab-leg-failrate` 的表达式** —— 它此刻正撑着
+30 条腿的真实告警，改错了那 30 条一起变黑，而"加一条"没有这个风险。只给它的 description
+加了交叉引用。新规则：
+
+```promql
+sum by (litellm_model_name, model_id) (increase(litellm_deployment_cooled_down_total[1h]))
+  unless sum by (litellm_model_name, model_id) (increase(litellm_deployment_success_responses_total[1h])) > 0
+```
+`gt 6`、`for: 30m`、`severity: warning`。
+
+**为什么必须带 `unless` 那半句（零成功）**：光看冷却次数分不开「抖动」和「死了」。
+2026-09-27 实测 6h 窗：`acct-178-gpt-6-sol` 冷却 **24.8 次/小时却出了 12 次活**（抖动，不该报），
+而 `acct-165/166/167/168/169/172/177` 的 `gpt-6-sol` 冷却 **25~29 次/小时且零成功**（死，该报）。
+整块连号在同一个模型上死掉，形状指向订阅权限而非上游故障。
+
+**为什么阈值不是「冷却 > 0」**：冷却是常态 —— 近 1 小时有 36 条腿在冷却，近 6 小时 56 条。
+设成 >0 就是刷屏。但这 33~45 条零成功腿集中在 5 个 chatgpt 大池里，每池仍有 15~25 条腿在出活，
+所以它们是"该清理"不是"池子塌了"。
+
+⚠️ **池级那个看起来更狠的判据我查了但没做**：「池内零腿出活」此刻命中
+`claude-haiku-4.5-anthropic` 和 `image-2` 两个池 —— 但这两个池同期**也没有人在用**
+（haiku 那个 7 天 80 次调用全失败、最后一次 09-22）。给一个没人用的组发 critical 是错的，
+判据得是「有请求但零成功」，本轮数据不足以定它，所以**没写**，留作独立议题。
+
+⛔ **`litellm_deployment_state` 不能用来数"这个池有几条腿"**：它带 pod 标签，
+`count by (litellm_model_name)` 会把 4 个副本重复计。要去重得先 `sum by (litellm_model_name, model_id)`。
+
+**上线验收**（都做了，不是"配置看起来对"）：仓库 preflight 静态门过（规则数 12→13，
+fail-closed 看门狗完好）；表达式从 YAML 里原样取出在生产 Prometheus 真打，返 70 条序列、
+**5 条越过阈值**（RED-ABLE 阳性对照：此刻就有真实数据在阈值之上）；阴性对照 = 去掉 `unless`
+是 93 条、带上是 70 条，被剔掉的 23 条确实都在出活；判据取自**运行中的 Grafana 进程**
+（`/api/v1/provisioning/alert-rules` 读回 13 条、`for=30m`、`gt 6`），不是只看 CM。
+
+**同步姿势（这次的关键约束）**：没有用 `sync.py push` —— 那会把整个 repo 文件推上去，
+顺带带上**未部署的 `b790f26` 探针节奏改动**，阈值按 2700 标而探针跑 1800 ⇒ 看门狗钝化一倍。
+改成：拿集群现值 + 只做这两处改动，推之前过两道门（vs 集群只差我这两条 / vs repo 只差那 4 条
+已知探针规则）。回滚点 `~/grafana-alerting-20260927T181120.yaml`（集群侧
+`/tmp/lgx-rollback-20260927T181120.yaml`），回滚 = 用它重建 patch 再 `rollout restart deploy/grafana`。
+
+
 （顺带：这条规则此刻 33 条序列进入评估、其中 30 条失败率 > 20%，分子几乎全是 400 ——
 规则本身能出数，阳性对照成立，只是对 401 这一类结构性失明。那 30 条是另一件事。）
 

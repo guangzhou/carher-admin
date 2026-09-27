@@ -110,7 +110,7 @@ PG psql 命令行 default autocommit，单条 UPDATE 就是单条事务。对 �
 | 198 `claude-code-*` / `cursor-*`（gated）| **HTTP 200** 助手消息「🚫 你的 key 今日额度已用完：已消费 $X / 限额 $Y。北京时间明日 00:00 自动重置…」| budget_notice.py ③ 软拦截（auth 层 monkey-patch 吞 BudgetExceededError → pre-call 出 mock，零上游零计费）|
 | 198 其余 key | HTTP 429 + 友好中文 body + `type=budget_exceeded` | error_sanitize.py 的 BudgetExceededError 分支 |
 | **阿里云 `carher-*`（her bot）**| HTTP 429 原生（**③ 用 `BUDGET_FRIENDLY_MOCK_DISABLED=1` 关着**，bot 侧行为不变；①查余额②90%预警已开，gate `BUDGET_NOTICE_KEY_PREFIXES=carher-`。要开③删该 env 即可）| 同一份 budget_notice.py（三拷贝 md5 全等），repo 清单 `k8s/litellm-proxy.yaml` |
-| **198 `carher-*`（her bot，2026-09-27 起）**| 超额行为不变（走上面"198 其余 key"那行的原生 429）；**只多了 ① `/查余额`**，gate 是独立窄门 `BUDGET_NOTICE_QUOTA_KEY_PREFIXES=carher-` | budget_notice.py `_quota_gated` |
+| **198 `carher-*`（her bot，2026-09-27 起）**| 超额行为不变（走上面"198 其余 key"那行的原生 429）；**多了 ① `/查余额` 和 ⑤ `/测模型`**，gate 是独立窄门 `BUDGET_NOTICE_QUOTA_KEY_PREFIXES=carher-`（⑤ 还要 `BUDGET_NOTICE_PROBE_ENABLED=1`，已开）| budget_notice.py `_quota_gated` |
 
 ### ⚠️ 想给某批 key 开 `/查余额`：用窄门 env，别往共用门里加人
 
@@ -124,6 +124,11 @@ PG psql 命令行 default autocommit，单条 UPDATE 就是单条事务。对 �
 
 只想开 ① 就用 **`BUDGET_NOTICE_QUOTA_KEY_PREFIXES`**（前缀匹配；写全名即精确匹配；
 不设 = 零行为变化）。③④ 各分支都显式检查旧的 `gated`，窄门 key 碰不到。
+
+⚠️ **窄门同时也是 ⑤ `/测模型` 的门**（⑤ 跟 ① 一样是"用户敲一句话"类命令）。
+但 ⑤ **会真花钱**，所以它另有一个总闸 `BUDGET_NOTICE_PROBE_ENABLED`（默认关）：
+进了窄门也得这个 env 为 1 才真打。不想给某批 key 开 ⑤ 又要开 ①，
+目前只能整体关 ⑤ —— 没做按 key 分流。
 
 **2026-09-27 现场**：飞书里 her bot 打「查余额」返回的是模型自己编的一句
 「请在 IDE 或终端直接输入…」。根因是 `async_pre_call_hook` 第三行
@@ -232,7 +237,9 @@ pod 日志里也没有（router 只打落点名）。根因：**per-key alias �
 
 止血 env（改 deploy litellm-proxy env 即生效）：`BUDGET_NOTICE_DISABLED=1`
 全关；`BUDGET_FRIENDLY_MOCK_DISABLED=1` 只关 200 软拦截退回友好 429；
-`BUDGET_FRIENDLY_429_DISABLED=1` 连友好 429 文案也关。
+`BUDGET_FRIENDLY_429_DISABLED=1` 连友好 429 文案也关；
+**`BUDGET_NOTICE_PROBE_ENABLED=0`（或删掉）只关 ⑤ `/测模型`** —— 它是唯一会
+主动花钱的功能，出事先关这个，别动整个 hook。
 排障日志判据：`kubectl -n litellm-product logs -l app=litellm-proxy --tail=-1 | grep "budget_notice: soft-block"`。
 prod 冒烟：`scripts/litellm-198-budget-notice-smoke.sh`（198 上 sudo 跑，8 检查项）。
 实现/上线全记录见 [[project_198_budget_notice_suite_2026_08_19]] 与

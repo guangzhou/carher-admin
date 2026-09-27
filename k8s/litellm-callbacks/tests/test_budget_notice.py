@@ -2217,6 +2217,22 @@ class ProbeTextTest(unittest.TestCase):
         self.assertIn("❌ 不能用", out)
         self.assertIn("m1", out)
 
+    def test_empty_catalog_says_the_ruler_isnt_ready_not_unknown_mode(self):
+        """🔴 目录空 = **尺子还没就绪**，不能跟「这个模型判不出类型」同形。
+
+        09-27 上线当天：滚动更新刚结束那两分钟里，几次 /测模型 把模型报成
+        「未测（判不出协议）」，而同一时刻 `/model/info` 里 mode 好得很；之后
+        180 次采样零复现、日志窗口已滚掉，**根因没查到**。根因归根因，这两件事
+        在屏幕上必须分得开：一个该重发，一个是模型自己的问题。
+        """
+        r = self._router(model_list=[])          # 目录空，但 router 对象在
+        out = self._run(self._key(["m1", "m2"]))
+
+        self.assertIn("模型目录暂时读不到", out)
+        self.assertIn("重发", out)
+        self.assertNotIn("判不出", out)          # ⛔ 不许退化成「未测」那句
+        self.assertEqual(r.calls, [])            # 一个都没打（省钱也省假红）
+
     def test_truncation_is_announced(self):
         r = self._router(model_list=[
             {"model_name": f"m-{i}", "model_info": {"mode": "chat"}}

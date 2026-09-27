@@ -958,6 +958,16 @@ async def _probe_text(user_api_key_dict: Any) -> str:
         return ("🧪 /测模型：这把 key 没有模型白名单（= 不限制），"
                 "没有确定的清单可测。")
 
+    # 🔴 目录空 = **我们的尺子还没就绪**，不是「这些模型判不出类型」。
+    #    2026-09-27 上线当天实测：滚动更新刚结束那两分钟里，有几次 /测模型
+    #    把模型报成「未测（判不出协议）」，而同一时刻 `/model/info` 里 mode 好得很；
+    #    之后 180 次采样（4 pod × 45 轮 × 2s）零复现，pod 日志只留 2~4 分钟、
+    #    那个窗口已经滚掉，**根因没查到**。但不管根因是什么，这两件事在屏幕上
+    #    必须长得不一样：一个该让用户重发一次，一个是模型自己的问题。
+    if not _runtime_model_list():
+        return ("🧪 /测模型：模型目录暂时读不到（proxy 刚重启或 router 还没装载完），"
+                "这时候测出来的红是假红。**过十几秒重发一次**。")
+
     alias = getattr(user_api_key_dict, "key_alias", None) or "（无别名）"
     sem = asyncio.Semaphore(_PROBE_CONCURRENCY)
 

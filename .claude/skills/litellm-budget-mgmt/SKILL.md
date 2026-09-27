@@ -162,6 +162,74 @@ CLI 用户才看得到我们的英文 promo。要给 IDE 用户可读文案没�
 - 用户发 `/查余额`（Cursor 用户须发裸词 `查余额`，`/` 开头会被 Cursor 命令面板拦截）→ 200 返回今日用量，零计费
 - 已用 ≥90% → 响应流末尾注入一次性预警（每 key 每北京日一次）
 
+### ⑤ `/测模型` —— 逐个真打白名单，报谁活谁死（2026-09-27 起）
+
+用户发 `/测模型`（或 `测模型` / `/testmodels`，按行全等）→ 拿**他自己的 key**
+逐个真打一遍白名单里的模型，回一张「✅ 能用 / ❌ 不能用 / ⚠️ 未测」表。
+
+**独立开关 `BUDGET_NOTICE_PROBE_ENABLED=1`，默认关。** 进门走 ① 那道
+（共用门或窄门任一），但**功能开不开只看这一个 env** —— 它跟 ①②③④ 的风险
+量级不同：**会真花钱**（每个模型一次、`max_tokens=16`，记在用户自己 key 上）。
+
+🔴 **故意不豁免 ④ 系列日额度**。额度烧完了还放它逐个真打，等于给闸门开后门。
+① 不打上游所以照放，⑤ 打上游所以照拦。
+
+判据纪律（每条都对应一条已裁决的坑，改之前先读）：
+
+| 项 | 规则 | 为什么 |
+|---|---|---|
+| 活的判据 | **真打 + 回了非空内容** | 目录门禁 PASS ≠ 腿活；`/model/new` 返 200 + 读得到 ≠ 能用 |
+| 200 不算活 | 200 + `content=None` 报「200 但内容为空」，不判活也不当报错 | 推理模型给小 `max_tokens` 会把预算吃在推理 token 上，那是假红 |
+| 聊天/画图分流 | 只认 litellm 的 `mode`（部署行 `model_info.mode` → 回落 `get_model_info(落点名)`） | ⛔ 不许按名字里有没有 `image` 猜 —— 尺子里跟名字绑的硬编码表 ⇒ 新增那项 = 永久盲区 |
+| 判不出 mode | **跳过 + 列进「⚠️ 未测」并说明**，不默认当聊天打 | 拿错协议打出来的红是假红，会让人以为模型死了 |
+| 挂死腿 | 自带 25s `wait_for`（`_PROBE_TIMEOUT_S`），报「超时，不返回，非报错」 | cr-g 挂死是**不返回**（90s 零字节）。没这层，整条命令会被拖到客户端先超时，用户看到「没反应」= 与「命令不存在」同形 |
+| 打什么名 | 打**公开名**，不打落点名 | 直接打落点就绕过了 per-key alias 那一层，测出来的绿说明不了「用户发那个名字能用」 |
+| 密钥 | 错误文案里 `sk-\w+` 打码 | 上游报错常把整个请求头回显出来 |
+| 规模 | 最多 40 个（`_PROBE_MAX_MODELS`）、并发 8，超了在回复里说明 | 白名单几百个名字会把一次命令拖成几分钟 |
+
+🔴 **不倒手用户的原始 key**：`authorization` 落在 litellm 的
+`_SPECIAL_HEADERS_CACHE` 剥离名单里（2026-09-27 在 198 pod 内实测
+`"authorization" in _SPECIAL_HEADERS_CACHE` → `True`），pre_call **根本拿不到**
+原始 `sk-`。所以 ⑤ 走进程内 `llm_router`，把 `user_api_key_dict` 的身份塞进
+`metadata` 让它按用户自己 key 记账 —— 反倒不用经手密钥。
+（顺带：所以「把用户 key 转给外部体检页」这条路在 callback 里走不通。）
+
+⚠️ `Router.aresponses` / `Router.aget_available_deployment` **不存在**（实测），
+只有 `acompletion` / `aimage_generation` 可用。
+
+### 🔴 TTFT 显示的模型名：用户发的原始名 **SpendLogs 一列都没存**
+
+`/查余额` 的 TTFT 表要显示「用户自己发的那个名字」，这**不是「SQL 选对列」**
+能解决的。2026-09-27 在 198 prod 库把所有能装名字的地方全查了一遍，
+发的是 `anthropic.claude-opus-5`，落库长这样：
+
+```
+model_group                          kiro-claude-opus-5
+model                                anthropic/claude-opus-5
+proxy_server_request->>'model'       kiro-claude-opus-5   ← 连这列也是改写后的
+metadata->>'original_model_group'    kiro-claude-opus-5（或 null）
+model_map_information.model_map_key  anthropic/claude-opus-5
+metadata->>'routing_decision'        null
+```
+
+pod 日志里也没有（router 只打落点名）。根因：**per-key alias 在进 router 之前
+就把 `data["model"]` 改掉了**，改写发生在任何记账/日志之前，原始名当场丢弃。
+
+⇒ 唯一还原依据是 key 自己那张 alias 表（`user_api_key_dict.aliases`，运行时
+拿得到）反向查：落点 → 公开名。实现 `_display_name_for_group`。
+
+⚠️ **反查会撞多对一**：全库 1623 把带 alias 的 key 里 **930 把**存在「多个公开名
+指向同一落点」（1651 个撞车落点）。这种行**信息在成功行里根本不存在**，不是查得
+不够细 ⇒ 把候选全列出来（`名A / 名B`），**绝不挑一个冒充确定值**。
+
+⚠️ 拿这个反查去回答「他实际发的是哪个名」时先看这把 key 是不是一对一。
+（用户自己那把 `-50gj` 是 11 进 11 出一对一，他看到的永远精确。）
+
+🔴 **`_TTFT_SQL` 一字不许动**，两条 2026-09-24 实测的 1000x 级硬约束：
+过滤列必须是 `api_key`（773 ms），**不能**是 `metadata->>'user_api_key_alias'`
+（791,457 ms）；`"startTime"` 上**不许套算术**（索引会死）。proxy
+`connection_limit=1`，一条慢查询饿死全部 DB 访问。
+
 止血 env（改 deploy litellm-proxy env 即生效）：`BUDGET_NOTICE_DISABLED=1`
 全关；`BUDGET_FRIENDLY_MOCK_DISABLED=1` 只关 200 软拦截退回友好 429；
 `BUDGET_FRIENDLY_429_DISABLED=1` 连友好 429 文案也关。

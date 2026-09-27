@@ -133,6 +133,43 @@ LiteLLM v1.82.6 有个已知 bug：`model_info.id` 与 bundled model_prices 冲�
   `scripts/litellm-astra-cache-price-patch.py --verify`（Astra 形状，可照抄改
   `MODEL_NAME`/`PRICES` 复用到别的模型组）。
 
+#### 唯一的例外：**OpenRouter 走动态计价，一个价格字段都不要写**（2026-09-28 实测）
+
+上面"双写"的前提是**我们的价表说话**。OpenRouter 不是这样：价格由 provider 随响应回报，
+LiteLLM 有一条**早返回**的路径，硬编码单价根本到不了计费。读代码定的位：
+
+- `llms/openrouter/chat/transformation.py:171` —— 请求里**恒定**注入 `usage: {include: true}`。
+- 同文件 `:224` —— 把响应的 `usage.cost` 塞进
+  `_hidden_params["additional_headers"]["llm_provider-x-litellm-response-cost"]`。
+- `cost_calculator.py:1848-1850` —— `response_cost_calculator` **在 `completion_cost()`
+  之前**就把这个值 return 掉了。
+
+⇒ 后果两条：① 写死的单价是**死代码**，只会让 `/model/info` 说谎；
+② 全局 `GLOBAL_COST_MULTIPLIER=1.3` 那层叠加**也够不到**（它挂在 `completion_cost()` 那侧）。
+所以 `openrouter/*` 的 `/model/new` payload 就三个 key：`model_name` / `litellm_params` / `model_info`，
+里面**没有任何 `*cost*` 字段**。实测 `usage.cost` 每次都回 0。
+
+🔴 **验收这件事的尺子极易写反**：判"有没有多余的价格字段"如果写成
+「`/model/info` 回来的 dict 里有没有 key 含 `cost`」，会**恒报 BAD** ——
+`/model/info` 对**每个**模型都回一整套 ~75 个 cost 字段的完整 **schema**，绝大多数值是 `None`。
+那样量到的是**接口的响应形状**，不是我们写进去的东西。正确形状（纯函数，可单测）：
+
+```python
+def hardcoded_cost(lp: dict, mi: dict) -> dict:
+    """`/model/info` 里真的被写死的价格字段。
+    `0` 也要放过：LiteLLM 自己会把 input/output_cost_per_token 填成 0，
+    而 0 恰好是我们想要的形状（动态计价）。"""
+    return {k: v for k, v in list(lp.items()) + list(mi.items())
+            if "cost" in k and v not in (None, 0)}
+```
+
+并且**必须配阳性对照单测**（塞一个真价格进去必须被抓到），否则一个「恒返回 `{}`」的
+空尺子也能让 verify 全绿。参考实现 `scripts/litellm-198-add-openrouter-jev.py`
++ `backend/tests/test_litellm_198_add_openrouter_jev.py`（15 测）。
+
+⚠️ 另外 `model_info.mode` 对 OpenRouter 这类新注册项**必须显式写 `"chat"`**：不写的话
+`/测模型` 判不出类型报「未测」，和探针坏掉同形（[[project_198_probe_command_shipped_2026_09_27]]）。
+
 ### `model_info.id` 必须显式设置（适用于 ConfigMap 和 admin API `/model/new`）
 
 **绝对不要省略 `model_info.id`！** LiteLLM 默认自动生成 UUID（如 `29904ae5-eb92-4941-bf1e-57574bf1be18`），导致：
@@ -156,6 +193,53 @@ LiteLLM v1.82.6 有个已知 bug：`model_info.id` 与 bundled model_prices 冲�
     input_cost_per_token: <USD_PER_TOKEN>
     output_cost_per_token: <USD_PER_TOKEN>
 ```
+
+### 改一个已存在的组名 —— `id` 必须跟**对外名**走（2026-09-20 实测）
+
+改名是加法（[[feedback_rename_is_add_verify_cutover_then_remove]]），所以
+**新旧两行必然短暂共存**。如果 `id` 按上游名生成（`sa/<upstream>`），两行会撞
+同一个 `model_info.id` ⇒ `/model/new` 直接 `UniqueViolationError`，或更坏：
+写进去了但路由按 id 去重，你以为加成了其实覆盖了老行。
+
+⇒ **`id` 的生成规则必须是「对外名的变形」而不是「上游名的变形」**：
+
+```python
+def model_info_id(public_name: str) -> str:
+    # `sa-x` -> `sa/x`；对既有行是恒等变换（逐行核过再上线）
+    return public_name.replace("sa-", "sa/", 1) if public_name.startswith("sa-") else public_name
+```
+
+同时 **`model_info.base_model` 必须保持上游名不变**——那是内置价表的查表键，
+跟着对外名改会让计价静默走空。09-20 `sa-grok-composer-2.5-fast` →
+`sa-composer-2.5-fast` 就是这个形状：`id` 从 `sa/grok-composer-2.5-fast` 变成
+`sa/composer-2.5-fast`，而 `base_model` 两行都还是 `grok-composer-2.5-fast`。
+
+### 🔴 `ProxyModelTable` 的 `model` / `api_base` 是**加密存的** ⇒ DB 备份不能回放
+
+动 DB 注册的模型行之前习惯性 `row_to_json` 备份是对的，但**它不是回滚手段**：
+`litellm_params.model` 和 `api_base` 在库里是密文块，备份文件里存的就是密文，
+既读不出名字、也不能拿去重建。
+
+⇒ 回滚路径只有一条：**用脚本带明文重新 `/model/new`**。所以
+「备份在哪」这一栏要写清「备份仅供取证 / 回滚靠脚本第 N 行」，
+别让下一个人以为手里有可回放的快照。
+
+### 收尾判据：老名字返 400 **不等于**"删干净了"
+
+09-20 删掉老行后打老名字，拿到中文 `400 "API 异常 (req: ...)"`——看着像有东西
+接住了它。**拿两个瞎编的名字做阴性对照，读数一模一样** ⇒ 那就是这台机器上
+"名字不存在"的通用形状，不是残留。
+
+判「删干净」的真尺子是库 + 配置两处，不是探针的错误码：
+
+```sql
+select count(*) from "LiteLLM_ProxyModelTable" where model_name like '%<老名片段>%';   -- 必须 0
+select param_name from "LiteLLM_Config" where param_value::text like '%<老名片段>%';    -- 必须空
+```
+
+第二条容易漏：老名字可能还挂在 `router_settings.model_group_alias` 或
+`fallbacks` 里，删了组但留着引用 = 谁触发兜底谁 400
+（[[feedback_litellm_alias_fallback_pre_rewrite_lookup]]）。
 
 ---
 
@@ -238,6 +322,21 @@ MK198=$(...) ./scripts/aliyun-pro198-add-model.py --mode apply --public-name ...
 ./scripts/aliyun-pro198-add-model.py --mode verify --public-name ... --upstream-name ...
 ```
 
+🔴 **一次接多个模型：除最后一个外全部加 `--no-rollout`。** 一次 `--mode apply` =
+一次 `rollout restart`，而 `litellm-proxy` 是 `maxSurge:0 / maxUnavailable:1` +
+`terminationGracePeriodSeconds:600` ⇒ **每次 rollout 有 ~25 分钟容量下陷**，对 500 个
+her 实例做三次不可接受。`--no-rollout` 做完「扩桥 key + patch CM」就停，打印
+`PREPARED, NOT CUT OVER` —— CM patch 是可逆的、且在 Pod 重启前是惰性的，**不可逆的那步是
+rollout，门禁就贴在它正前方**。最后一个模型正常跑，再对前面每个 `--mode verify`。
+2026-09-21 实测：3 个模型收敛成 1 次 rollout，全程 `ready>=1` 未断。
+
+⚠️ **阿里云的 fallback 在 CM 里，不在 DB 里** —— 与 198 相反。198 的 `router_settings`
+在 `LiteLLM_Config` 表、30s 热加载无需重启；阿里云 `LiteLLM_Config` **没有
+`router_settings` 行**，`fallbacks` 是 CM `litellm-config` 的 `router_settings:` 段
+⇒ 改兜底 = patch CM + rollout。所以**兜底要和新模型条目塞进同一次 CM patch、共用那一次
+rollout**，否则白白多一个 25 分钟窗口。判装载：两个 pod 都打
+`GET /get/config/callbacks`，数 fallback 行数。
+
 ⛔ **绝不许往阿里云 CM 里引入含 `*` 的 `model_name`**：live 现在 0 条通配。一旦有一条，
 `pro198` 就变成 wildcard-route access group，`_check_model_access_group` 在非 premium 下
 会让**所有 key 写入直接 403 enterprise**（实测 `premium_user=False`、无 `LITELLM_LICENSE`）。
@@ -258,6 +357,11 @@ LITELLM_BASE=http://127.0.0.1:14000 LITELLM_MASTER_KEY=$MK \
 
 ⚠️ **默认 `--prefix` 是 `cursor-,claude-`，不加 `--prefix carher-` 会规划出 0 把**
 （第一次跑必踩，且它安静地报"0 keys planned"，读起来像"已经都有了"）。
+
+⚠️ 若诉求是**"把这几把改成和某把一样"**（不是"加一个名"），用 `--converge-to <参考key_alias>`，
+别把差集手算成一串 `--rm-model`：09-21 手算过一次是 36 个删除 + 19 个 alias 删除，
+每次写前都得 `comm -23` 证明清单完整。收敛还会**静默换供应商**（源名仍在白名单 ⇒ 不是 403
+是零症状），脚本默认拒跑。详见 skill `litellm-198-key-allowlist`。
 
 四条铁律：
 - **`models == []` 表示"不限制"**，往里写白名单是**吊销**，必须跳过。⛔ 禁 `/key/bulk_update`（会把所有 key 同质化，丢掉各自的非默认条目）。
@@ -283,9 +387,22 @@ LITELLM_BASE=http://127.0.0.1:14000 LITELLM_MASTER_KEY=$MK \
 #### 验收姿势（两条路都适用）
 
 - 每一发探针**带唯一 nonce 要求回显**：LiteLLM **响应缓存是开的**，body 逐字节相同的枪不会到达上游，"32/32 全绿而上游计数 0" 就是这么来的。
+- 🔴 **`kiro-*` 那条腿上游带了 Kiro 人格 system prompt，会拒绝「原样回显这个 token」** ⇒
+  nonce 判据在它身上约一半概率假红（实测 4 发中 2 发回 `I can't do that. I'm Kiro, an AI
+  development environment…`，http=200 且 ct>0）。判这条腿死活改看 **`http=200 ∧ ct>0` +
+  打印 body 肉眼确认是真生成**。⚠️ 同时这也是**用户面实情**：走 kiro 的 haiku 会自称 Kiro，
+  不是纯净 claude haiku，接给终端用户前必须说明。
 - `max_tokens` 别给 4：小上限会把 reasoning 模型截成空 content，读起来像坏了。给 ≥512。
 - **阴性对照必做**：另取一把**没有**该权限的 key 打同一个名字，必须 403。没有这条，上面的绿不可信。
 - psql 查 SpendLogs **双列**（`model_group` 是请求名、`model` 是落点），且 `completion_tokens ≠ 0`（同时证明 callback 层没被吞）。⚠️ 别用 `/spend/logs` 端点，实测它返 0 条而 psql 里有行。
+- 🔴 **阿里云的 `model_group` 记的是 per-key alias 改写「之后」的名，原始请求名全库无处可寻。**
+  2026-09-21 实测判据：carher-1 白名单里没有 `openrouter-deepseek-v4.1-flash`、没有别的 alias
+  指向它、它不带 `pro198` 标签、全库 `model_group_alias` 行数为 0 —— 唯一到达路径只能是请求
+  `her-flash` 被改写，而 SpendLogs 里确有记成 `openrouter-deepseek-v4.1-flash` 的行。
+  ⇒ **两个请求名 alias 到同一目标时，无法按请求名拆分流量**：`metadata.proxy_server_request`
+  是 `null`，`model_map_information.model_map_key` 是部署名，**没有任何列保留原始请求名**。
+  这类问题上只许说「无法归因」，⛔ 不许推出「那个名零流量」——本轮正是靠这条纪律
+  才没把一个活人（her-2）在用的名字当成死名处置。
 - ⚠️ **对账公式**：`spend = 未命中缓存的输入×in + cached_tokens×cache_read + 计费输出×out`，
   其中 **`reasoning_tokens` 计费但通常不在 `completion_tokens` 列里**。所以两行
   (prompt, completion) 完全相同而 spend 不同是**正常的**，别当成定价配错了。
@@ -559,5 +676,6 @@ git push origin main
 | `timeout 30 kubectl ... \| grep X` 打出"零命中" | **mac 上没有 `timeout`**（GNU coreutils 才有）⇒ 管道左端啥也没产出，grep 读空 stdin，退出码还是 0 | `kubectl --request-timeout=30s`；随机抽样用 python `random.shuffle` 不用 `shuf`（同样不存在） |
 | `kubectl get cm X -o jsonpath='{.data.openclaw\.json}'` 返空串（同命令对别的 cm 好用）| jsonpath 对某些对象静默返空 | 换 `-o go-template='{{index .data "openclaw.json"}}'` |
 | `/key/list?size=2000` → 422 | `size` 上限是 100 | 分页，或用 `/spend/keys` |
+| `/model/new` 返 200、`/model/info` 也读得到，但一发也打不通（尤其 `mode: video_generation` / 上游返 **415**）| 不是接入错了 —— **LiteLLM 那条标准 route 把请求改坏了**（如 `/v1/videos` 无条件发 multipart，是 upstream PR #38104 故意为之 ⇒ **升级永远修不好**）| 别写死条目。先跑「同 key 同 body 只变编码」的探针矩阵分清通路 vs 上游，然后走 `/config/pass_through_endpoint` ⇒ skill **`litellm-passthrough-endpoint`**（代价：不进 SpendLogs）|
 | 改 198 key 的 `key_alias` → 400 | 198 的 `key_alias` **全局唯一**，想用的名字已被一把无关的 key 占了 | 先 `/key/info` 确认；换个名字，⛔ 别去动那把无关的 key |
 | 撤了模型权限，验收 SQL 说"0 残留"，过一阵又能用了 | 验收把 `blocked` 的 key 过滤掉了；blocked 只挡认证、不清白名单，解封即复活 | 写入带 `--include-blocked`；验收按 blocked **分列**不过滤（`litellm-198-key-allowlist-verify.sh` 已内置） |

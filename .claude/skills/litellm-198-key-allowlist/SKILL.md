@@ -575,6 +575,72 @@ python3 $S --prefix cursor- --include-blocked \
 同理，回归必须验**裸名**而不只是 `sa-` 真名：633 把 cursor key 的
 `grok-4.6 → sa-grok-4.6` alias 才是主流量路径，裸名 200 才算没回退。
 
+### 🔴 回归里的 **400 ≠ 403**：403 是我可能冲掉的，400 从来不是（2026-09-28 加）
+
+上一条讲 403。**400 是另一个病，别混着查。** 09-28 给全舰队加完 `jev` 后跑回归，
+29 名白名单里 `grok-4.7` 和 `glm-5.3-flash` 返 **400**，其余 200。
+
+- **403 = 白名单闸门挡的**（`type=key_model_access_denied`）⇒ 名字不在这把 key 的 `models` 里
+  ⇒ 这才是"我可能冲掉了"的形状，按上一条去 backup 快照比。
+- **400 = 路由里没这个组**（消息被我们的补丁打码成中文 `API 异常 (req: ...)`，`type=None`）
+  ⇒ 白名单里**有**这个名，只是 198 上没有同名组。**白名单有名 ≠ 路由有组**
+  （[[feedback_allowlist_name_without_alias_is_400]]），跟 key 改动无关。
+
+分开的判据，三样都要（只看状态码会把既存故障读成"我打坏了"）：
+
+```
+# ① 这个名在组注册表里吗（唯一权威是 /model_group/info，PMT 不全）
+curl -s -H "Authorization: Bearer $MK" $PROXY/model_group/info \
+  | python3 -c 'import sys,json;print({g["model_group"] for g in json.load(sys.stdin)["data"]} & {"grok-4.7","glm-5.3-flash"})'
+# ② master key 直打 —— 还是 400 就与 key 白名单无关
+# ③ 改动前它成功过吗：SpendLogs 里 spend>0 的行数，不是总行数
+select model, count(*) total,
+       count(*) filter (where "startTime" < '<改动时刻>') before_change,
+       count(*) filter (where "startTime" < '<改动时刻>' and spend > 0) before_and_billed
+from "LiteLLM_SpendLogs" where model in (...) group by model;
+```
+
+09-28 实测：两个名都**不在** 325 个组里、master key 直打同样 400、改动前 155/35 条记录
+而 `spend>0` 的**一条都没有**（从 09-22 / 09-21 起就没成功过）⇒ 既存故障，改动前后同形。
+
+⚠️ **③ 的 `count(*)` 单独用会撒谎**：我第一次查的是 `max(startTime)`，拿到的是**我刚才那两次
+探测本身**（探测时刻晚于改动时刻），看着像"改动后还在用"。有失败行不代表通过，
+判"曾经能用"只认 `spend > 0`。
+
+### 两层回归：值层比快照，行为层真打（09-28 定型）
+
+`applied_ok` / `readback_ok` 是脚本给自己打的分（见上面 §`readback_ok` 那条）。回归要另外两层：
+
+**值层** —— 逐把 key 做集合比较，判据是 `now == old ∪ {新增名}`，一个名都不许少：
+
+```python
+lost   = set(backup[tok]["models"]) - set(now[tok]["models"])          # 必须空
+gained = set(now[tok]["models"]) - set(backup[tok]["models"]) - {NEW}  # 必须空
+aliases_changed = (backup[tok]["aliases"] or {}) != (now[tok]["aliases"] or {})  # 必须 False
+```
+
+四个读数要分开报：`EXACT(=old∪{new})` / `NAMES DROPPED` / `UNEXPECTED EXTRA` / `rows_vanished`。
+别合成一个百分比（[[feedback_two_failure_faces_must_be_counted_separately]]）。
+
+**行为层** —— 值层只证"名字在表里"，证不了"还能打"。明文 key 取不回来（库里只有 hash），
+所以**克隆一把被改过的真 key 的 `models` 数组**起一把短时 `duration=20m` 临时 key，
+打三类名：改动前就有的老名字（回归对象）+ 新增名（正对照）+ 白名单外的名（阴性对照，必须 403，
+证明门禁真在挡、那些 200 不是因为门没关）。跑完 `/key/delete` 并回库 `count(*)` 复核为 0。
+
+🔴 **导出 DB 做比对别用 `-F$"\t"`**：经 `ssh '...'` 传过去时 `$"\t"` 不展开，psql 收到的是
+**字面两字符 `\t`**，文件里一个真 tab 都没有 ⇒ `split("\t")` 把所有行静默丢进
+`len(p) < 4` 分支 ⇒ 解析出 0 行，却报成 `rows_vanished=1700`。**尺子坏和真丢行同形。**
+改用不依赖分隔符的单列 JSON，并在比对前断言自己数得到：
+
+```bash
+psql -t -A -c "select json_build_object('t',token,'m',models,'a',aliases)::text from \"LiteLLM_VerificationToken\";" > now.jsonl
+```
+```python
+assert len(now) == EXPECTED_DB_ROWS, f"ruler broken: {len(now)}"   # 先自证数得到
+# 阳性对照：人为往快照里塞一个假名，尺子必须抓到它丢了
+assert (set(probe) - set(now[tk]["models"])) == {"__synthetic_name__"}
+```
+
 
 ## 命名惯例
 

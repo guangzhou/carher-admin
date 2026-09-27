@@ -41,11 +41,17 @@ key 日额度（claude-code-* $70/天、cursor-* $100/天，北京 0 点重置�
    litellm 原生 model_max_budget 精确匹配无系列桶且滚动 24h 窗，故自建：
    success 事件按 (family, token, 北京日) redis 累加，pre_call 查桶超限出
    200 mock「该系列额度已用完，其他系列不受影响」。/查余额 附带各系列用量。
+⑤ ``/测模型`` | ``/testmodels`` —— 逐个**真打**这把 key 白名单里的每个模型，
+   报谁活谁死。判据 = 回了非空内容（与 keyprobe 同一把尺子）；聊天/画图按
+   litellm 自己的 ``mode`` 分流，判不出 mode 的**跳过并说明**，不猜。
+   🔴 与 ①②③④ 不同，它会**真花钱**（记在用户自己的 key 上），所以另有独立
+   env 开关 ``BUDGET_NOTICE_PROBE_ENABLED``，默认关。
 
-匹配规则（①）
---------------
+匹配规则（①⑤）
+----------------
 取最后一条 user 消息的文本，**按行 strip 后全等**命中 {"/查余额","查余额",
-"/quota"}（quota 不分大小写）才触发。按行而非按整条消息，是因为 Cursor /
+"/quota"}（quota 不分大小写）才触发；⑤ 同理，命中
+{"/测模型","测模型","/testmodels"}。按行而非按整条消息，是因为 Cursor /
 Claude Code 都会把用户输入包进模板（文件上下文、system-reminder 等），整条
 全等永远不命中；按行全等又比子串包含安全 —— 正文里聊到「查余额」三个字不会
 误触发（那得独占一行才行，且误触发的代价只是收到一条用量而非模型回答）。
@@ -73,6 +79,13 @@ BUDGET_NOTICE_QUOTA_KEY_PREFIXES=carher-       ①（且只有①）的独立窄
                                               会真掐住 bot）。只想开 /查余额 就
                                               用这个 env。不设 = 零行为变化。
 BUDGET_NOTICE_WARN_RATIO=0.9                   ② 的阈值
+BUDGET_NOTICE_PROBE_ENABLED=1                  启用 ⑤ /测模型（默认关）。
+                                              🔴 它逐个模型**真打一次、真花钱**，
+                                              所以必须能单独关掉，不复用上面任何
+                                              一道门。进门仍走 ①/窄门那道，但功能
+                                              开不开只看这一个 env。
+                                              ⑤ **不豁免** ④ 的系列额度闸门 ——
+                                              额度烧完了还放它跑等于开后门。
 
 keep two in sync：本文件与 198 CM ``litellm-callbacks`` 的 ``budget_notice.py``。
 """
@@ -176,6 +189,10 @@ def _quota_gated(user_api_key_dict: Any) -> bool:
 
 _TRIGGERS_EXACT = ("/查余额", "查余额")
 _TRIGGERS_CI = ("/quota",)
+
+# ⑤ /测模型：逐个真打这把 key 白名单里的模型，报谁活谁死。
+_PROBE_TRIGGERS_EXACT = ("/测模型", "测模型")
+_PROBE_TRIGGERS_CI = ("/testmodels",)
 # Cursor 等客户端会把用户输入包成单行 <user_query>查余额</user_query>；剥掉
 # XML 风格标签后整行仍须全等，精确度不降。
 _TAG_RE = _re.compile(r"<[^<>]{1,64}>")
@@ -218,17 +235,26 @@ def _last_user_text(data: dict) -> str:
     return ""
 
 
-def _is_quota_query(text: str) -> bool:
+def _matches_command(text: str, exact: tuple, ci: tuple) -> bool:
+    """按行 strip 后**全等**命中。子串包含会把「帮我看下查余额的实现」误判成命令。"""
     if not text or len(text) > 20000:
         return False
     for line in text.splitlines():
         s = line.strip()
         for cand in (s, _TAG_RE.sub("", s).strip()):
-            if cand in _TRIGGERS_EXACT:
+            if cand in exact:
                 return True
-            if cand.lower() in _TRIGGERS_CI:
+            if cand.lower() in ci:
                 return True
     return False
+
+
+def _is_quota_query(text: str) -> bool:
+    return _matches_command(text, _TRIGGERS_EXACT, _TRIGGERS_CI)
+
+
+def _is_probe_query(text: str) -> bool:
+    return _matches_command(text, _PROBE_TRIGGERS_EXACT, _PROBE_TRIGGERS_CI)
 
 
 # ------------------------------------------------------------- 用量文案
@@ -616,16 +642,55 @@ _TTFT_SQL = '''SELECT "model_group" AS g,
                LIMIT ''' + str(_TTFT_MAX_ROWS)
 
 
+def _display_name_for_group(group: str, aliases: dict) -> str:
+    """把账里的 `model_group` 翻回**用户自己发的那个名字**。
+
+    🔴 为什么必须在这里翻、而不是「SQL 选对列就行」：**用户发的原始名，
+    SpendLogs 一列都没存。** 2026-09-27 在 198 prod 库把所有能装名字的地方
+    全查了一遍，发的是 `anthropic.claude-opus-5`，落库长这样：
+
+        model_group                      kiro-claude-opus-5
+        model                            anthropic/claude-opus-5
+        proxy_server_request->>'model'   kiro-claude-opus-5   ← 连这列也是改写后的
+        metadata->>'original_model_group' kiro-claude-opus-5（或 null）
+        model_map_information.model_map_key  anthropic/claude-opus-5
+        metadata->>'routing_decision'    null
+
+    pod 日志里也没有（router 只打落点名 `anthropic/claude-opus-5`）。原因是
+    per-key alias 在**进 router 之前**就把 `data["model"]` 改掉了，改写发生在
+    任何记账/日志之前，原始名当场被丢弃。
+
+    所以唯一的还原依据是 key 自己那张 alias 表（公开名 → 落点），反向查。
+    这张表在运行时拿得到 —— 同一个 `user_api_key_dict.aliases`，
+    `_model_catalog_text` 已经在用它给纯 alias 名补上限了。
+
+    ⚠️ 反查会撞多对一：198 全库 1623 把带 alias 的 key 里，**930 把**存在
+    「多个公开名指向同一个落点」（实测 SQL 见 skill litellm-budget-mgmt）。
+    这种行账里只剩落点名，**信息在成功行里根本不存在**，不是查得不够细。
+    这时把候选全列出来（`名A / 名B`），绝不挑一个冒充确定值。
+    """
+    if not isinstance(aliases, dict) or not group:
+        return group
+    hits = [str(pub) for pub, tgt in aliases.items() if str(tgt) == group]
+    if not hits:
+        # 没有人映到它 ⇒ 它本身就是用户发的名字（例如 `claude-grok-4.6`）。
+        return group
+    if len(hits) == 1:
+        return hits[0]
+    return " / ".join(sorted(hits))
+
+
 async def _ttft_text(user_api_key_dict: Any) -> str:
-    """今日 per-model TTFT P50/P90，按 `model_group`（= 用户在菜单里看到的请求名）分组。
+    """今日 per-model TTFT P50/P90，显示**用户自己发的模型名**。
 
     `completionStartTime` 由流式桥在上游第一个内容事件时写入，所以
     `completionStartTime - startTime` 就是 TTFT。没有正区间的行（非流式、
     失败行）全部排除 —— 它们没有 TTFT 可言。
 
-    分组列用 `model_group` 而不是 `model`：`model` 是落点名
-    （`openai/chatgpt-gpt-5.6-sol`），`model_group` 才是请求名（`gpt-5.6-sol`），
-    后者才是用户认得出、也是他在模型菜单里选的那个名字。
+    分组列用 `model_group`（请求名）而不是 `model`（落点名），但 per-key alias
+    的 key 上 `model_group` **已经是改写后的名字**了（用户发
+    `anthropic.claude-opus-5`，落库 `kiro-claude-opus-5`），所以还要再过一道
+    `_display_name_for_group` 翻回去 —— 详见那个函数的注释。
 
     过滤列和时间条件的写法有硬约束，见 `_TTFT_SQL` 上方注释。
     """
@@ -652,10 +717,14 @@ async def _ttft_text(user_api_key_dict: Any) -> str:
         if not rows:
             return _keep("\n⚡ TTFT 今日：暂无有效样本（今日尚无流式请求）。")
 
+        aliases = getattr(user_api_key_dict, "aliases", None)
+        if not isinstance(aliases, dict):
+            aliases = {}
         entries = []
         for row in rows:
+            group = row.get("g") or ""
             entries.append((
-                row.get("g") or "（未知模型）",
+                _display_name_for_group(group, aliases) or "（未知模型）",
                 f"{float(row['p50']):.2f}",
                 f"{float(row['p90']):.2f}",
                 str(row["n"]),
@@ -683,6 +752,285 @@ async def _ttft_text(user_api_key_dict: Any) -> str:
     except Exception as exc:
         _log.warning("budget_notice: TTFT query unavailable %r", exc)
         return _keep("\n⚡ TTFT 今日：查询暂不可用，请稍后重试。")
+
+
+# ------------------------------------------------------- ⑤ /测模型 逐个真打
+#
+# 为什么必须**真打**、不能读配置/读目录来判：
+#   09-21 裁决「目录门禁 PASS ≠ 腿活，实打 403 也 ≠ 腿死」；
+#   09-20 裁决「`/model/new` 返 200 + 读得到 ≠ 能用」。
+#   白名单里有名字、`/model_group/info` 里有这个组，都不构成「用户能用」。
+#   唯一算数的判据是：拿这把 key 的身份真发一次请求，看回没回非空内容。
+#
+# 计费落在**用户自己**头上 —— 我们走 `llm_router` 并把 `user_api_key_dict` 的
+# metadata 带上，记账走正常链路。这是用户明确要的（"charge the user's own key"）。
+# 🔴 为什么不能把用户的原始 key 转手给外部体检页：`authorization` 落在 litellm 的
+# `_SPECIAL_HEADERS_CACHE` 剥离名单里（2026-09-27 在 198 pod 内实测
+# `"authorization" in _SPECIAL_HEADERS_CACHE` → True），pre_call 拿不到原始 key。
+# 所以只能在 proxy 内部用 auth 对象的身份打，反倒不用倒手密钥。
+
+_PROBE_MAX_MODELS = 40          # 防一把 key 白名单几百个名字把一次命令拖成几分钟
+_PROBE_CONCURRENCY = 8          # 并发上限；cr-g 那种挂死腿会占满 timeout，别放太宽
+_PROBE_TIMEOUT_S = 25.0         # 🔴 cr-g 实测「挂死是不返回」(90s 零字节)，必须自带超时
+_PROBE_MAX_TOKENS = 16          # 只要证明它回话，不要它写作文
+_PROBE_PROMPT = "ping"
+
+
+def _probe_enabled() -> bool:
+    """⑤ 的独立开关。不设 = 该功能不存在（零行为变化）。
+
+    单独一个 env、不复用 ①②③④ 任何一道门：⑤ 会**真花钱**（逐个模型各打一次），
+    跟「查一下余额」不是同一个风险量级，必须能单独关掉。
+    """
+    return os.environ.get("BUDGET_NOTICE_PROBE_ENABLED") == "1"
+
+
+def _probe_model_mode(name: str, row_lookup: dict) -> str:
+    """这个模型该用聊天还是画图去测。返回 'chat' / 'image_generation' / ''。
+
+    🔴 不许按名字里有没有 'image' 来猜 —— 09-26 裁决「尺子里跟名字绑的硬编码表
+    ⇒ 新增那项 = 永久盲区」。依据只能是 litellm 自己的 `mode`：先读部署行的
+    `model_info.mode`，再回落到 `get_model_info(落点名)`。两者都取不到就返回
+    空串，调用方**跳过**并如实标成「判不出类型」，而不是默认当聊天打。
+    """
+    for row in row_lookup.get(name, []):
+        info = row.get("model_info") if isinstance(row, dict) else None
+        if isinstance(info, dict) and info.get("mode"):
+            return str(info["mode"])
+    for row in row_lookup.get(name, []):
+        params = row.get("litellm_params") if isinstance(row, dict) else None
+        target = (params or {}).get("model") if isinstance(params, dict) else None
+        if not target:
+            continue
+        try:
+            from litellm import get_model_info
+            mi = get_model_info(str(target))
+            if isinstance(mi, dict) and mi.get("mode"):
+                return str(mi["mode"])
+        except Exception:
+            continue
+    return ""
+
+
+def _probe_verdict_from_chat(resp: Any) -> Tuple[bool, str]:
+    """判据 = **回了非空内容**（与 keyprobe 自助体检页同一把尺子，09-25 定）。
+
+    🔴 200 不算活：09-23 实测推理模型给小 `max_tokens` 会返 200 +
+    `content=None`（推理 token 把预算吃光），那是假红。所以这里既要 200，
+    也要真拿到字符。反过来，返回了内容就是活的，不看别的。
+    """
+    try:
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            return False, "无 choices"
+        msg = getattr(choices[0], "message", None)
+        content = getattr(msg, "content", None) if msg is not None else None
+        if content is None and isinstance(msg, dict):
+            content = msg.get("content")
+        if isinstance(content, list):          # anthropic 风格 block 数组
+            content = "".join(
+                str(b.get("text") or "") for b in content if isinstance(b, dict))
+        if isinstance(content, str) and content.strip():
+            return True, ""
+        # 内容空但可能是推理把额度吃完了 —— 如实说，不判死
+        fr = getattr(choices[0], "finish_reason", None)
+        return False, f"200 但内容为空（finish_reason={fr}）"
+    except Exception as exc:
+        return False, f"解析回包失败 {type(exc).__name__}"
+
+
+def _probe_verdict_from_image(resp: Any) -> Tuple[bool, str]:
+    """图片模型：判据 = 回了至少一条 data 项（url 或 b64）。"""
+    try:
+        data = getattr(resp, "data", None)
+        if data is None and isinstance(resp, dict):
+            data = resp.get("data")
+        if not data:
+            return False, "200 但无 data"
+        first = data[0]
+        got = getattr(first, "url", None) or getattr(first, "b64_json", None)
+        if got is None and isinstance(first, dict):
+            got = first.get("url") or first.get("b64_json")
+        return (True, "") if got else (False, "data 项里既无 url 也无 b64_json")
+    except Exception as exc:
+        return False, f"解析回包失败 {type(exc).__name__}"
+
+
+def _probe_error_brief(exc: BaseException) -> str:
+    """把异常压成一行、且**不回显密钥**。
+
+    只取类型名 + 状态码 + 消息前 120 字，且掐掉 `sk-` 开头的串。上游报错里
+    常常把请求头整个回显出来。
+    """
+    name = type(exc).__name__
+    status = getattr(exc, "status_code", None)
+    msg = str(getattr(exc, "message", None) or exc)
+    msg = _re.sub(r"sk-[A-Za-z0-9_\-]{6,}", "sk-***", msg)
+    msg = " ".join(msg.split())[:120]
+    head = f"{name}" + (f" {status}" if status else "")
+    return f"{head}：{msg}" if msg else head
+
+
+async def _probe_one(name: str, mode: str, user_api_key_dict: Any) -> tuple:
+    """打一个模型。返回 (显示名, 活?, 说明, 耗时秒)。绝不抛。"""
+    t0 = time.monotonic()
+    try:
+        from litellm.proxy.proxy_server import llm_router
+        if llm_router is None:
+            return (name, False, "router 未就绪", 0.0)
+
+        # 带上 key 身份，让这次调用按用户自己的 key 记账、并受其白名单约束。
+        meta = {
+            "user_api_key": getattr(user_api_key_dict, "token", None),
+            "user_api_key_alias": getattr(user_api_key_dict, "key_alias", None),
+            "user_api_key_user_id": getattr(user_api_key_dict, "user_id", None),
+            "user_api_key_team_id": getattr(user_api_key_dict, "team_id", None),
+        }
+        if mode == "image_generation":
+            coro = llm_router.aimage_generation(
+                model=name, prompt=_PROBE_PROMPT, n=1, metadata=meta)
+            verdict = _probe_verdict_from_image
+        else:
+            coro = llm_router.acompletion(
+                model=name,
+                messages=[{"role": "user", "content": _PROBE_PROMPT}],
+                max_tokens=_PROBE_MAX_TOKENS, stream=False, metadata=meta)
+            verdict = _probe_verdict_from_chat
+
+        # 🔴 自带超时：09-25 实测 cr-g 车道「挂死是不返回」，90s 零字节。没有这层
+        #    wait_for，一条挂死的腿会把整个 /测模型 拖到客户端先超时，用户看到的是
+        #    「这个命令没反应」—— 与「命令不存在」同形。
+        resp = await asyncio.wait_for(coro, timeout=_PROBE_TIMEOUT_S)
+        ok, why = verdict(resp)
+        return (name, ok, why, time.monotonic() - t0)
+    except asyncio.TimeoutError:
+        return (name, False, f"超时 >{_PROBE_TIMEOUT_S:.0f}s（不返回，非报错）",
+                time.monotonic() - t0)
+    except Exception as exc:
+        return (name, False, _probe_error_brief(exc), time.monotonic() - t0)
+
+
+def _probe_targets(user_api_key_dict: Any) -> list:
+    """这把 key 该测哪些模型。返回 [(用户看到的名, 打给 router 的名, mode)]。
+
+    名字取**用户白名单里的公开名**（他在菜单里选的那个），打给 router 的也是
+    公开名 —— per-key alias 会在 router 之前把它改写成落点，跟用户真实发一次
+    完全同路。这点很重要：如果我们直接打落点名，就绕过了 alias 那一层，
+    测出来的绿说明不了「用户发那个名字能用」。
+    """
+    allowed = getattr(user_api_key_dict, "models", None)
+    if isinstance(allowed, dict):
+        allowed = list(allowed.keys())
+    names = [str(m) for m in (allowed or [])]
+    # 空白名单在 litellm 里是「不限制」，那就没有一个确定的清单可测。
+    names = list(dict.fromkeys(n for n in names if n and not n.startswith("openai/*")))
+
+    row_lookup: dict = {}
+    for row in _runtime_model_list():
+        if isinstance(row, dict) and row.get("model_name"):
+            row_lookup.setdefault(str(row["model_name"]), []).append(row)
+    aliases = getattr(user_api_key_dict, "aliases", None)
+    if not isinstance(aliases, dict):
+        aliases = {}
+
+    out = []
+    for name in names[:_PROBE_MAX_MODELS]:
+        # mode 先按公开名查，查不到再按 alias 落点查 —— 纯 alias 名没有自己的部署行。
+        mode = _probe_model_mode(name, row_lookup)
+        if not mode:
+            target = aliases.get(name)
+            if target:
+                mode = _probe_model_mode(str(target), row_lookup)
+        out.append((name, name, mode))
+    return out
+
+
+async def _probe_text(user_api_key_dict: Any) -> str:
+    """⑤ /测模型 的完整回复。"""
+    if not _probe_enabled():
+        return ("🧪 /测模型 未启用。\n\n"
+                "它会拿你自己的 key 逐个真打一遍白名单里的模型（**会计费**），"
+                "所以默认关闭。需要开请找管理员设 "
+                "`BUDGET_NOTICE_PROBE_ENABLED=1`。")
+
+    targets = _probe_targets(user_api_key_dict)
+    if not targets:
+        return ("🧪 /测模型：这把 key 没有模型白名单（= 不限制），"
+                "没有确定的清单可测。")
+
+    alias = getattr(user_api_key_dict, "key_alias", None) or "（无别名）"
+    sem = asyncio.Semaphore(_PROBE_CONCURRENCY)
+
+    async def one(show: str, send: str, mode: str):
+        if not mode:
+            # 🔴 判不出类型就**跳过并说清楚**，不默认当聊天打 —— 拿错协议打出来的
+            #    红是假红，会让人以为模型死了。
+            return (show, None, "判不出模型类型（无 mode），未测", 0.0)
+        async with sem:
+            name, ok, why, secs = await _probe_one(send, mode, user_api_key_dict)
+            return (show, ok, why, secs)
+
+    t0 = time.monotonic()
+    results = await asyncio.gather(*[one(s, d, m) for s, d, m in targets],
+                                   return_exceptions=True)
+    elapsed = time.monotonic() - t0
+
+    rows, skipped = [], []
+    for r in results:
+        if isinstance(r, BaseException):
+            # gather 里 one() 自己已兜住一切；真漏到这儿就如实记一行，不丢。
+            rows.append(("（未知）", False, _probe_error_brief(r), 0.0))
+            continue
+        (rows if r[1] is not None else skipped).append(r)
+
+    live = [r for r in rows if r[1]]
+    dead = [r for r in rows if not r[1]]
+
+    lines = [
+        f"🧪 /测模型 {alias}",
+        f"逐个真打了 {len(rows)} 个模型，用了 {elapsed:.1f}s。"
+        f"**活 {len(live)} / 死 {len(dead)}**"
+        + (f"，另有 {len(skipped)} 个未测" if skipped else "") + "。",
+        "",
+    ]
+
+    if live:
+        w = max([_display_width("模型")] + [_display_width(r[0]) for r in live])
+        lines += [
+            "✅ 能用",
+            "",
+            f"| {_pad('模型', w)} | 首字耗时 |",
+            f"|{'-' * (w + 2)}|---------:|",
+        ]
+        for name, _ok, _why, secs in sorted(live, key=lambda r: r[3]):
+            lines.append(f"| {_pad(_escape_pipes(name), w)} | {secs:6.2f}s |")
+        lines.append("")
+
+    if dead:
+        w = max([_display_width("模型")] + [_display_width(r[0]) for r in dead])
+        lines += [
+            "❌ 不能用",
+            "",
+            f"| {_pad('模型', w)} | 原因 |",
+            f"|{'-' * (w + 2)}|------|",
+        ]
+        for name, _ok, why, _s in sorted(dead, key=lambda r: r[0]):
+            lines.append(
+                f"| {_pad(_escape_pipes(name), w)} | {_escape_pipes(why)} |")
+        lines.append("")
+
+    if skipped:
+        lines.append("⚠️ 未测：" + "、".join(
+            _escape_pipes(r[0]) for r in skipped) + "（判不出该用什么协议去打，"
+            "拿错协议打出来的红是假红，所以不测）")
+        lines.append("")
+
+    if len(targets) >= _PROBE_MAX_MODELS:
+        lines.append(f"⚠️ 白名单超过 {_PROBE_MAX_MODELS} 个，只测了前 "
+                     f"{_PROBE_MAX_MODELS} 个。")
+    lines.append("这一轮的花费会记在你自己的 key 上（每个模型一次、"
+                 f"最多 {_PROBE_MAX_TOKENS} 输出 token）。")
+    return "\n".join(lines)
 
 
 def _warn_text(user_api_key_dict: Any) -> str:
@@ -1329,6 +1677,9 @@ class BudgetNotice(CustomLogger):
 
             # ④ 模型系列日额度（先于 ① —— 系列超限时连 /查余额 之外的推理
             #   都不放行；/查余额 本身不打上游、不受系列额度限制，放它先走）
+            #
+            # 🔴 ⑤ /测模型 **故意不豁免**：它逐个模型真打，是会花钱的。系列额度
+            #    已经烧完还放它跑，等于给闸门开了个后门。所以这里只放 ① 过。
             if gated and _family_enabled() and token:
                 fam = _family_of(str(data.get("model") or ""), user_api_key_dict)
                 if fam is not None and not _is_quota_query(_last_user_text(data)):
@@ -1393,19 +1744,26 @@ class BudgetNotice(CustomLogger):
                 _log.warning(
                     "budget_notice: debug last_user_text alias=%s ct=%s head=%r",
                     alias, v, text[:300])
-            if not _is_quota_query(text):
+            is_probe = _is_probe_query(text)
+            if not (_is_quota_query(text) or is_probe):
                 return data
 
-            family_text, ttft_text = await asyncio.gather(
-                # 只过窄门的 key 不受 ④ 约束，就不该在回复里看到系列额度 ——
-                # 报一个不执法的数字只会让人以为自己被限了。
-                _family_usage_lines(token if gated else "", user_api_key_dict),
-                _ttft_text(user_api_key_dict),
-            )
-            # 顺序：额度 → 系列 → TTFT → 模型清单。TTFT 是用户主动要的那段，放在
-            # 12 行模型清单**前面**，不然它被挤到消息尾部要翻屏才看得到。
-            text = (_usage_text(user_api_key_dict) + family_text + ttft_text
-                    + _model_catalog_text(user_api_key_dict))
+            if is_probe:
+                # ⑤ /测模型。走窄门同一道（想查余额的人就该能自测模型），但**功能
+                # 本身**另有一个 env 开关，因为它会真花钱 —— 见 `_probe_enabled`。
+                _log.warning("budget_notice: probe query alias=%s route=%s", alias, v)
+                text = await _probe_text(user_api_key_dict)
+            else:
+                family_text, ttft_text = await asyncio.gather(
+                    # 只过窄门的 key 不受 ④ 约束，就不该在回复里看到系列额度 ——
+                    # 报一个不执法的数字只会让人以为自己被限了。
+                    _family_usage_lines(token if gated else "", user_api_key_dict),
+                    _ttft_text(user_api_key_dict),
+                )
+                # 顺序：额度 → 系列 → TTFT → 模型清单。TTFT 是用户主动要的那段，放在
+                # 12 行模型清单**前面**，不然它被挤到消息尾部要翻屏才看得到。
+                text = (_usage_text(user_api_key_dict) + family_text + ttft_text
+                        + _model_catalog_text(user_api_key_dict))
             if v in ("anthropic_messages", "aanthropic_messages"):
                 from litellm.exceptions import ModifyResponseException
 

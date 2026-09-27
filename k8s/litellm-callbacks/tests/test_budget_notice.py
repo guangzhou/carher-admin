@@ -230,7 +230,7 @@ PREFIX_ENV = {"BUDGET_NOTICE_KEY_PREFIXES": "claude-code-,cursor-"}
 class _Key:
     def __init__(self, alias="claude-code-u1", spend=1.0, max_budget=70.0,
                  token="tok-default", reset_at=datetime.datetime(2026, 8, 19, 16, 0),
-                 route="/v1/chat/completions"):
+                 route="/v1/chat/completions", aliases=None):
         self.key_alias = alias
         self.spend = spend
         self.max_budget = max_budget
@@ -238,6 +238,9 @@ class _Key:
         self.budget_reset_at = reset_at
         self.budget_duration = "1d"
         self.request_route = route
+        # per-key alias 表（公开名 → 落点组）。auth 对象上真实存在这个字段，
+        # `_model_catalog_text` 和 TTFT 的反查都读它。
+        self.aliases = {} if aliases is None else aliases
 
 
 class _CallType:
@@ -633,6 +636,89 @@ class TTFTTest(unittest.TestCase):
         text = asyncio.run(
             M._ttft_text(_Key(alias="cursor-u1", token="hashed-token")))
         self.assertIn("暂无有效样本", text)
+
+    def test_ttft_shows_the_name_the_user_sent_not_the_billed_one(self):
+        """🔴 用户发 `anthropic.claude-opus-5`，账里记的是 `kiro-claude-opus-5`。
+
+        2026-09-27 在 198 prod 库实测：用户发的原始名 **SpendLogs 一列都没存**
+        （`model_group` / `model` / `proxy_server_request->>'model'` /
+        `metadata->>'original_model_group'` 全是改写后的），所以只能靠 key 自己
+        的 alias 表反查。这条测试就是钉住「反查真的发生了」。
+        """
+        class DB:
+            async def query_raw(self, query, value):
+                return [
+                    {"g": "kiro-claude-opus-5", "n": 8, "p50": 7.79, "p90": 12.85},
+                    {"g": "ag-gemini-3.8-flash", "n": 3, "p50": 3.05, "p90": 3.24},
+                ]
+
+        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        key = _Key(alias="claude-code-liuguoxian-50gj", token="tok-50gj", aliases={
+            "anthropic.claude-opus-5": "kiro-claude-opus-5",
+            "claude-gemini-3.8-flash": "ag-gemini-3.8-flash",
+        })
+        text = asyncio.run(M._ttft_text(key))
+
+        self.assertIn("anthropic.claude-opus-5", text)
+        self.assertIn("claude-gemini-3.8-flash", text)
+        # 落点名一个都不许露出来
+        self.assertNotIn("kiro-claude-opus-5", text)
+        self.assertNotIn("ag-gemini-3.8-flash", text)
+
+    def test_ttft_unmapped_group_is_shown_as_is(self):
+        """没有人映到它 ⇒ 它本身就是用户发的名字（`claude-grok-4.6` 实测如此）。"""
+        class DB:
+            async def query_raw(self, query, value):
+                return [{"g": "claude-grok-4.6", "n": 2, "p50": 4.57, "p90": 5.15}]
+
+        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        key = _Key(alias="claude-code-liuguoxian-50gj", token="tok-a", aliases={
+            "anthropic.claude-opus-5": "kiro-claude-opus-5",
+        })
+        self.assertIn("claude-grok-4.6", asyncio.run(M._ttft_text(key)))
+
+    def test_ttft_many_to_one_lists_all_candidates(self):
+        """⚠️ 198 全库 1623 把带 alias 的 key 里 930 把有多对一。
+
+        账里只剩落点名，**倒不回去是哪个公开名** —— 那个信息在成功行里根本不存在。
+        这时列出全部候选，绝不挑一个冒充确定值。
+        """
+        class DB:
+            async def query_raw(self, query, value):
+                return [{"g": "claude-gpt-5.6-terra", "n": 9, "p50": 2.0, "p90": 3.0}]
+
+        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        key = _Key(alias="claude-code-liuguoxian03", token="tok-03", aliases={
+            "anthropic.claude-opus-5": "claude-gpt-5.6-terra",
+            "anthropic.claude-opus-4-6": "claude-gpt-5.6-terra",
+            "anthropic.claude-sonnet-5": "claude-gpt-5.6-terra",
+        })
+        text = asyncio.run(M._ttft_text(key))
+        for n in ("anthropic.claude-opus-5", "anthropic.claude-opus-4-6",
+                  "anthropic.claude-sonnet-5"):
+            self.assertIn(n, text)
+        self.assertNotIn("claude-gpt-5.6-terra", text)
+
+    def test_ttft_key_without_alias_table_is_unchanged(self):
+        """没有 alias 表的 key（多数 key）行为零变化。"""
+        class DB:
+            async def query_raw(self, query, value):
+                return [{"g": "gpt-5.6-sol", "n": 5, "p50": 1.25, "p90": 2.53}]
+
+        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        self.assertIn(
+            "| gpt-5.6-sol |",
+            asyncio.run(M._ttft_text(_Key(alias="cursor-u1", token="tok-b"))))
+
+    def test_display_name_helper_is_pure(self):
+        f = M._display_name_for_group
+        self.assertEqual(f("kiro-claude-opus-5",
+                           {"anthropic.claude-opus-5": "kiro-claude-opus-5"}),
+                         "anthropic.claude-opus-5")
+        self.assertEqual(f("claude-grok-4.6", {}), "claude-grok-4.6")
+        self.assertEqual(f("", {"a": "b"}), "")
+        self.assertEqual(f("x", None), "x")
+        self.assertEqual(f("t", {"b": "t", "a": "t"}), "a / b")  # 排序稳定
 
     def test_responses_sets_mock_response(self):
         d = {"input": "/quota"}
@@ -1742,6 +1828,504 @@ class QuotaOnlyGateTest(unittest.TestCase):
         self.assertEqual(M._quota_only_prefixes(), ())
         self.assertFalse(_with_env(PREFIX_ENV,
                                    lambda: M._quota_gated(_Key(alias="carher-14"))))
+
+
+# ============================================================ ⑤ /测模型
+#
+# 这一组钉的是「⑤ 不许用假绿/假红糊弄人」：
+#   · 判据必须是**真打 + 回了非空内容**，200 不算活（09-23 推理 token 假红）；
+#   · 聊天/画图分流只认 litellm 自己的 `mode`，不许按名字猜（09-26 裁决：
+#     尺子里跟名字绑的硬编码表 ⇒ 新增那项 = 永久盲区）；
+#   · 判不出 mode 的**跳过并说明**，不默认当聊天打；
+#   · 挂死腿必须被自带超时接住（09-25 实测 cr-g「挂死是不返回」）；
+#   · 开关默认关、④ 系列额度对它照样执法、错误文案不回显密钥。
+
+PROBE_ENV = {**PREFIX_ENV, "BUDGET_NOTICE_PROBE_ENABLED": "1"}
+
+
+def _chat_resp(content, finish_reason="stop"):
+    """router.acompletion 的回包形状（对象属性，不是 dict）。"""
+    msg = types.SimpleNamespace(content=content)
+    return types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=msg, finish_reason=finish_reason)])
+
+
+def _img_resp(url=None, b64=None):
+    return types.SimpleNamespace(
+        data=[types.SimpleNamespace(url=url, b64_json=b64)])
+
+
+class _FakeRouter:
+    """记录每一次调用，并按 model 名回放预置结果/异常。"""
+
+    def __init__(self, chat=None, image=None, model_list=None):
+        self.calls = []
+        self.model_list = model_list or []
+        self._chat = chat if chat is not None else (lambda **kw: _chat_resp("pong"))
+        self._image = image if image is not None else (lambda **kw: _img_resp("http://x"))
+
+    async def acompletion(self, **kw):
+        self.calls.append(("chat", kw))
+        return await self._deliver(self._chat, kw)
+
+    async def aimage_generation(self, **kw):
+        self.calls.append(("image", kw))
+        return await self._deliver(self._image, kw)
+
+    @staticmethod
+    async def _deliver(fn, kw):
+        out = fn(**kw)
+        if asyncio.iscoroutine(out):
+            out = await out
+        if isinstance(out, BaseException):
+            raise out
+        return out
+
+
+class ProbeTriggerTest(unittest.TestCase):
+    def test_exact_lines_trigger(self):
+        for t in ("/测模型", "测模型", "/testmodels", "/TestModels", "  /测模型  ",
+                  "<user_query>测模型</user_query>",
+                  "ctx\n<user_query>/testmodels</user_query>\nmore"):
+            self.assertTrue(M._is_probe_query(t), t)
+
+    def test_prose_does_not_trigger(self):
+        """⑤ 会真花钱，误触发的代价比 ① 大得多，子串必须不算。"""
+        for t in ("帮我看下 /测模型 的实现", "测模型功能坏了", "testmodels",
+                  "/testmodel", "顺便测模型吧", "", "x" * 30000):
+            self.assertFalse(M._is_probe_query(t), t[:40])
+
+    def test_quota_and_probe_do_not_bleed_into_each_other(self):
+        """两条命令各走各的分支，不许互相误判。"""
+        self.assertFalse(M._is_quota_query("/测模型"))
+        self.assertFalse(M._is_probe_query("/查余额"))
+        self.assertFalse(M._is_probe_query("/quota"))
+        self.assertFalse(M._is_quota_query("/testmodels"))
+
+
+class ProbeVerdictTest(unittest.TestCase):
+    """判据本身。这是 ⑤ 唯一说得上话的地方，假绿假红都从这里出。"""
+
+    def test_nonempty_content_is_alive(self):
+        self.assertEqual(M._probe_verdict_from_chat(_chat_resp("pong")), (True, ""))
+
+    def test_anthropic_block_array_content_is_alive(self):
+        resp = _chat_resp([{"type": "text", "text": "pong"}])
+        self.assertEqual(M._probe_verdict_from_chat(resp), (True, ""))
+
+    def test_200_with_empty_content_is_not_alive(self):
+        """🔴 09-23 实测：推理模型给小 max_tokens 会返 200 + content=None，
+        推理 token 把预算吃光了。把它当活的就是假绿；当死的又是假红 ——
+        所以判不活、但原因里必须说清是「200 但内容为空」，不是「报错」。"""
+        for content in (None, "", "   "):
+            ok, why = M._probe_verdict_from_chat(
+                _chat_resp(content, finish_reason="length"))
+            self.assertFalse(ok, repr(content))
+            self.assertIn("200 但内容为空", why)
+            self.assertIn("length", why)
+
+    def test_no_choices_is_not_alive(self):
+        ok, why = M._probe_verdict_from_chat(types.SimpleNamespace(choices=[]))
+        self.assertFalse(ok)
+        self.assertIn("无 choices", why)
+
+    def test_dict_message_content_is_read(self):
+        resp = types.SimpleNamespace(
+            choices=[types.SimpleNamespace(message={"content": "pong"},
+                                          finish_reason="stop")])
+        self.assertEqual(M._probe_verdict_from_chat(resp), (True, ""))
+
+    def test_image_verdict(self):
+        self.assertEqual(M._probe_verdict_from_image(_img_resp(url="http://x")),
+                         (True, ""))
+        self.assertEqual(M._probe_verdict_from_image(_img_resp(b64="AAA")),
+                         (True, ""))
+        ok, why = M._probe_verdict_from_image(types.SimpleNamespace(data=[]))
+        self.assertFalse(ok)
+        self.assertIn("无 data", why)
+        ok, why = M._probe_verdict_from_image(_img_resp())
+        self.assertFalse(ok)
+        self.assertIn("既无 url 也无 b64_json", why)
+
+    def test_garbage_shapes_never_raise(self):
+        for junk in (None, 0, "text", {"choices": "x"}, object()):
+            ok, _why = M._probe_verdict_from_chat(junk)
+            self.assertFalse(ok, repr(junk))
+            ok, _why = M._probe_verdict_from_image(junk)
+            self.assertFalse(ok, repr(junk))
+
+
+class ProbeErrorBriefTest(unittest.TestCase):
+    def test_key_is_redacted(self):
+        """上游报错常把整个请求头回显出来。密钥绝不能进 bot 回复。"""
+        exc = RuntimeError("401 from upstream: Authorization: Bearer "
+                           "sk-abcDEF1234567890xyz invalid")
+        out = M._probe_error_brief(exc)
+        self.assertIn("sk-***", out)
+        self.assertNotIn("abcDEF1234567890xyz", out)
+
+    def test_status_code_and_type_are_kept(self):
+        exc = RuntimeError("model not found")
+        exc.status_code = 404
+        out = M._probe_error_brief(exc)
+        self.assertIn("RuntimeError", out)
+        self.assertIn("404", out)
+        self.assertIn("model not found", out)
+
+    def test_long_message_is_truncated_to_one_line(self):
+        out = M._probe_error_brief(RuntimeError("a\nb\n" + "x" * 500))
+        self.assertNotIn("\n", out)
+        self.assertLessEqual(len(out), 160)
+
+
+class ProbeModeTest(unittest.TestCase):
+    """聊天/画图分流只认 litellm 自己的 `mode`。"""
+
+    def setUp(self):
+        _ensure_stubs()
+        self.proxy_server = types.ModuleType("litellm.proxy.proxy_server")
+        self.old_proxy_server = sys.modules.get("litellm.proxy.proxy_server")
+        sys.modules["litellm.proxy.proxy_server"] = self.proxy_server
+        self.litellm = sys.modules["litellm"]
+        self.had_gmi = hasattr(self.litellm, "get_model_info")
+        self.old_gmi = getattr(self.litellm, "get_model_info", None)
+
+    def tearDown(self):
+        if self.old_proxy_server is None:
+            sys.modules.pop("litellm.proxy.proxy_server", None)
+        else:
+            sys.modules["litellm.proxy.proxy_server"] = self.old_proxy_server
+        if self.had_gmi:
+            self.litellm.get_model_info = self.old_gmi
+        else:
+            self.litellm.__dict__.pop("get_model_info", None)
+
+    def test_mode_comes_from_deployment_row(self):
+        lookup = {"gpt-image-2": [{"model_info": {"mode": "image_generation"}}],
+                  "claude-opus-5": [{"model_info": {"mode": "chat"}}]}
+        self.assertEqual(M._probe_model_mode("gpt-image-2", lookup),
+                         "image_generation")
+        self.assertEqual(M._probe_model_mode("claude-opus-5", lookup), "chat")
+
+    def test_mode_falls_back_to_get_model_info_on_landing_name(self):
+        """部署行没写 mode 时，回落到 litellm 自己对**落点名**的认知。"""
+        seen = []
+
+        def gmi(name):
+            seen.append(name)
+            return {"mode": "image_generation"}
+
+        self.litellm.get_model_info = gmi
+        lookup = {"image-2": [{"model_info": {},
+                               "litellm_params": {"model": "openai/gpt-image-2"}}]}
+        self.assertEqual(M._probe_model_mode("image-2", lookup), "image_generation")
+        self.assertEqual(seen, ["openai/gpt-image-2"])
+
+    def test_unknown_mode_is_empty_string_not_a_guess(self):
+        """🔴 名字里带 image 也不许猜成画图 —— 09-26 裁决：尺子里跟名字绑的
+        硬编码表 ⇒ 新增那项 = 永久盲区。查不到就返回空串，由调用方跳过。"""
+        def boom(name):
+            raise RuntimeError("unknown model")
+
+        self.litellm.get_model_info = boom
+        lookup = {"my-image-model": [{"model_info": {},
+                                      "litellm_params": {"model": "vendor/whatever"}}]}
+        self.assertEqual(M._probe_model_mode("my-image-model", lookup), "")
+        self.assertEqual(M._probe_model_mode("not-in-catalog-at-all", lookup), "")
+
+    def test_targets_use_public_names_and_resolve_mode_through_alias(self):
+        """打给 router 的必须是**公开名** —— 直接打落点就绕过了 alias 那层，
+        测出来的绿说明不了「用户发那个名字能用」。"""
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "kiro-claude-opus-5", "model_info": {"mode": "chat"}},
+            {"model_name": "gpt-image-2",
+             "model_info": {"mode": "image_generation"}},
+        ])
+        key = _Key(alias="carher-14",
+                   aliases={"anthropic.claude-opus-5": "kiro-claude-opus-5"})
+        key.models = ["anthropic.claude-opus-5", "gpt-image-2", "anthropic.claude-opus-5"]
+
+        targets = M._probe_targets(key)
+
+        self.assertEqual(targets, [
+            ("anthropic.claude-opus-5", "anthropic.claude-opus-5", "chat"),
+            ("gpt-image-2", "gpt-image-2", "image_generation"),
+        ])
+
+    def test_targets_are_capped(self):
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[])
+        key = _Key(alias="carher-14")
+        key.models = [f"m-{i}" for i in range(M._PROBE_MAX_MODELS + 15)]
+        self.assertEqual(len(M._probe_targets(key)), M._PROBE_MAX_MODELS)
+
+    def test_empty_allowlist_yields_no_targets(self):
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[])
+        key = _Key(alias="carher-14")
+        key.models = []
+        self.assertEqual(M._probe_targets(key), [])
+
+
+class ProbeTextTest(unittest.TestCase):
+    """整段回复。含开关、跳过、超时、真打路径。"""
+
+    def setUp(self):
+        _ensure_stubs()
+        self.proxy_server = types.ModuleType("litellm.proxy.proxy_server")
+        self.old_proxy_server = sys.modules.get("litellm.proxy.proxy_server")
+        sys.modules["litellm.proxy.proxy_server"] = self.proxy_server
+
+    def tearDown(self):
+        if self.old_proxy_server is None:
+            sys.modules.pop("litellm.proxy.proxy_server", None)
+        else:
+            sys.modules["litellm.proxy.proxy_server"] = self.old_proxy_server
+
+    def _router(self, **kw):
+        r = _FakeRouter(**kw)
+        self.proxy_server.llm_router = r
+        return r
+
+    def _key(self, models, aliases=None):
+        key = _Key(alias="carher-14", token="tok-carher", aliases=aliases)
+        key.models = models
+        return key
+
+    def _run(self, key, env=None):
+        return _with_env(env or PROBE_ENV,
+                         lambda: asyncio.run(M._probe_text(key)))
+
+    # ---- 开关 ----
+    def test_disabled_by_default_and_calls_nothing(self):
+        """🔴 默认关就必须是**零上游调用**。它花的是用户自己的钱。"""
+        r = self._router(model_list=[{"model_name": "m1",
+                                      "model_info": {"mode": "chat"}}])
+        out = _with_env(PREFIX_ENV,
+                        lambda: asyncio.run(M._probe_text(self._key(["m1"]))))
+        self.assertIn("未启用", out)
+        self.assertIn("BUDGET_NOTICE_PROBE_ENABLED", out)
+        self.assertEqual(r.calls, [])
+
+    def test_empty_allowlist_says_so_and_calls_nothing(self):
+        r = self._router(model_list=[])
+        out = self._run(self._key([]))
+        self.assertIn("没有模型白名单", out)
+        self.assertEqual(r.calls, [])
+
+    # ---- 真打 ----
+    def test_live_and_dead_are_split_into_two_tables(self):
+        def chat(**kw):
+            if kw["model"] == "dead-1":
+                return RuntimeError("upstream 500")
+            if kw["model"] == "empty-1":
+                return _chat_resp(None, finish_reason="length")
+            return _chat_resp("pong")
+
+        r = self._router(chat=chat, model_list=[
+            {"model_name": n, "model_info": {"mode": "chat"}}
+            for n in ("live-1", "dead-1", "empty-1")])
+
+        out = self._run(self._key(["live-1", "dead-1", "empty-1"]))
+
+        self.assertIn("**活 1 / 死 2**", out)
+        self.assertIn("✅ 能用", out)
+        self.assertIn("❌ 不能用", out)
+        self.assertIn("live-1", out)
+        self.assertIn("upstream 500", out)
+        self.assertIn("200 但内容为空", out)
+        self.assertEqual(sorted(kw["model"] for _m, kw in r.calls),
+                         ["dead-1", "empty-1", "live-1"])
+
+    def test_image_model_goes_through_aimage_generation(self):
+        """🔴 画图模型用聊天协议去打，出来的红是假红。分流必须按 mode 走。"""
+        r = self._router(model_list=[
+            {"model_name": "gpt-image-2",
+             "model_info": {"mode": "image_generation"}},
+            {"model_name": "chat-1", "model_info": {"mode": "chat"}}])
+
+        out = self._run(self._key(["gpt-image-2", "chat-1"]))
+
+        self.assertEqual(sorted((m, kw["model"]) for m, kw in r.calls),
+                         [("chat", "chat-1"), ("image", "gpt-image-2")])
+        self.assertIn("**活 2 / 死 0**", out)
+
+    def test_probe_charges_the_users_own_key(self):
+        """用户明确要的：花费记在他自己的 key 上。靠 metadata 里的身份实现。"""
+        r = self._router(model_list=[{"model_name": "m1",
+                                      "model_info": {"mode": "chat"}}])
+        self._run(self._key(["m1"]))
+        meta = r.calls[0][1]["metadata"]
+        self.assertEqual(meta["user_api_key"], "tok-carher")
+        self.assertEqual(meta["user_api_key_alias"], "carher-14")
+
+    def test_probe_sends_the_public_name_not_the_landing_name(self):
+        r = self._router(model_list=[{"model_name": "kiro-claude-opus-5",
+                                      "model_info": {"mode": "chat"}}])
+        key = self._key(["anthropic.claude-opus-5"],
+                        aliases={"anthropic.claude-opus-5": "kiro-claude-opus-5"})
+        out = self._run(key)
+        self.assertEqual(r.calls[0][1]["model"], "anthropic.claude-opus-5")
+        self.assertIn("anthropic.claude-opus-5", out)
+        self.assertNotIn("kiro-claude-opus-5", out)
+
+    def test_probe_asks_for_a_tiny_completion(self):
+        r = self._router(model_list=[{"model_name": "m1",
+                                      "model_info": {"mode": "chat"}}])
+        self._run(self._key(["m1"]))
+        kw = r.calls[0][1]
+        self.assertEqual(kw["max_tokens"], M._PROBE_MAX_TOKENS)
+        self.assertFalse(kw["stream"])
+
+    # ---- 跳过 / 超时 / 兜底 ----
+    def test_unknown_mode_is_skipped_never_probed_as_chat(self):
+        """🔴 判不出协议就跳过并说清楚。拿错协议打出来的红会让人以为模型死了。"""
+        r = self._router(model_list=[{"model_name": "known",
+                                      "model_info": {"mode": "chat"}}])
+        out = self._run(self._key(["known", "mystery"]))
+
+        self.assertEqual([kw["model"] for _m, kw in r.calls], ["known"])
+        self.assertIn("⚠️ 未测", out)
+        self.assertIn("mystery", out)
+        self.assertIn("另有 1 个未测", out)
+        self.assertIn("**活 1 / 死 0**", out)
+
+    def test_hung_lane_is_caught_by_our_own_timeout(self):
+        """🔴 09-25 实测 cr-g 挂死是「不返回」(90s 零字节)。没有自带超时，
+        一条挂死腿会把整条命令拖到客户端先超时 —— 用户看到的是「没反应」，
+        与「命令不存在」同形。"""
+        async def hang(**kw):
+            await asyncio.sleep(3600)
+
+        r = self._router(chat=hang, model_list=[{"model_name": "hung",
+                                                 "model_info": {"mode": "chat"}}])
+        old = M._PROBE_TIMEOUT_S
+        M._PROBE_TIMEOUT_S = 0.05
+        try:
+            out = self._run(self._key(["hung"]))
+        finally:
+            M._PROBE_TIMEOUT_S = old
+
+        self.assertIn("超时", out)
+        self.assertIn("不返回，非报错", out)
+        self.assertIn("**活 0 / 死 1**", out)
+        self.assertEqual(len(r.calls), 1)
+
+    def test_router_not_ready_is_reported_not_crashed(self):
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "m1", "model_info": {"mode": "chat"}}])
+        # 上面那个对象没有 acompletion —— 取 mode 拿得到，真打时才炸。
+        out = self._run(self._key(["m1"]))
+        self.assertIn("❌ 不能用", out)
+        self.assertIn("m1", out)
+
+    def test_truncation_is_announced(self):
+        r = self._router(model_list=[
+            {"model_name": f"m-{i}", "model_info": {"mode": "chat"}}
+            for i in range(M._PROBE_MAX_MODELS + 5)])
+        out = self._run(self._key([f"m-{i}"
+                                  for i in range(M._PROBE_MAX_MODELS + 5)]))
+        self.assertIn(f"只测了前 {M._PROBE_MAX_MODELS} 个", out)
+        self.assertEqual(len(r.calls), M._PROBE_MAX_MODELS)
+
+    def test_cost_is_disclosed(self):
+        self._router(model_list=[{"model_name": "m1",
+                                  "model_info": {"mode": "chat"}}])
+        out = self._run(self._key(["m1"]))
+        self.assertIn("记在你自己的 key 上", out)
+
+
+class ProbeHookWiringTest(unittest.TestCase):
+    """⑤ 挂进 pre-call 那一刀：进哪道门、走哪条短路、④ 对它照样执法。"""
+
+    def setUp(self):
+        _ensure_stubs()
+        self.proxy_server = types.ModuleType("litellm.proxy.proxy_server")
+        self.old_proxy_server = sys.modules.get("litellm.proxy.proxy_server")
+        sys.modules["litellm.proxy.proxy_server"] = self.proxy_server
+        self.router = _FakeRouter(model_list=[
+            {"model_name": "m1", "model_info": {"mode": "chat"}}])
+        self.proxy_server.llm_router = self.router
+        M._fam_local.clear()
+        M._OVER_BUDGET_MARKS.clear()
+
+    def tearDown(self):
+        M._fam_local.clear()
+        M._OVER_BUDGET_MARKS.clear()
+        if self.old_proxy_server is None:
+            sys.modules.pop("litellm.proxy.proxy_server", None)
+        else:
+            sys.modules["litellm.proxy.proxy_server"] = self.old_proxy_server
+
+    def _key(self, alias="carher-14"):
+        key = _Key(alias=alias, token="tok-carher")
+        key.models = ["m1"]
+        return key
+
+    def _pre(self, call_type, env, key=None, text="/测模型"):
+        async def go():
+            return await M.budget_notice.async_pre_call_hook(
+                key or self._key(), None,
+                {"model": "m1", "messages": [{"role": "user", "content": text}]},
+                _CallType(call_type))
+        return _with_env(env, lambda: asyncio.run(go()))
+
+    def test_chat_route_short_circuits_with_mock_response(self):
+        out = self._pre("acompletion", {**PROBE_ENV,
+                                        "BUDGET_NOTICE_QUOTA_KEY_PREFIXES": "carher-"})
+        self.assertIn("🧪 /测模型", out.get("mock_response", ""))
+        self.assertIn("**活 1 / 死 0**", out["mock_response"])
+
+    def test_anthropic_route_raises_modify_response(self):
+        with self.assertRaises(Exception) as cm:
+            self._pre("anthropic_messages",
+                      {**PROBE_ENV, "BUDGET_NOTICE_QUOTA_KEY_PREFIXES": "carher-"})
+        self.assertEqual(type(cm.exception).__name__, "ModifyResponseException")
+        self.assertIn("🧪 /测模型", cm.exception.message)
+
+    def test_probe_enters_through_the_narrow_door(self):
+        """窄门 key（只放 ① 进来的那批）也该能自测模型。"""
+        out = self._pre("acompletion",
+                        {**PROBE_ENV, "BUDGET_NOTICE_QUOTA_KEY_PREFIXES": "carher-"})
+        self.assertIn("🧪 /测模型", out.get("mock_response", ""))
+
+    def test_key_outside_both_gates_is_untouched(self):
+        key = self._key(alias="nobody-knows-me")
+        out = self._pre("acompletion", PROBE_ENV, key=key)
+        self.assertNotIn("mock_response", out)
+        self.assertEqual(self.router.calls, [])
+
+    def test_probe_is_not_exempt_from_the_family_budget_gate(self):
+        """🔴 ⑤ 故意**不豁免** ④：额度烧完还放它逐个真打，等于给闸门开后门。
+        ① /查余额 不打上游，所以放行；⑤ 打上游，所以照拦。"""
+        # `m1` 不在任何 Claude/GPT-5.3 命名里 ⇒ 落 `other` 桶。桶名必须跟
+        # `_family_of` 实际算出来的一致，不然这条测试是在考一个没人读的桶（假绿）。
+        fam = M._family_of("m1", self._key(alias="cursor-u1"))
+        self.assertEqual(fam[0], "other")
+        M._fam_local[M._family_spend_key(fam[0], "tok-carher")] = 9999.0
+        key = self._key(alias="cursor-u1")           # 共用门，④ 对它执法
+        env = {**PROBE_ENV, "BUDGET_FAMILY_ENABLED": "1"}
+
+        blocked = self._pre("acompletion", env, key=key, text="/测模型")
+        self.assertIn("额度已用完", blocked.get("mock_response", ""))
+        self.assertNotIn("🧪 /测模型", blocked["mock_response"])
+        self.assertEqual(self.router.calls, [])      # 一个模型都没打
+
+        # 同一把 key、同一道闸门下，① 仍然放行 —— 它零上游、零花费。
+        allowed = self._pre("acompletion", env, key=key, text="/查余额")
+        self.assertIn("今日用量", allowed.get("mock_response", ""))
+
+    def test_normal_request_is_never_turned_into_a_probe(self):
+        out = self._pre("acompletion",
+                        {**PROBE_ENV, "BUDGET_NOTICE_QUOTA_KEY_PREFIXES": "carher-"},
+                        text="帮我写个函数")
+        self.assertNotIn("mock_response", out)
+        self.assertEqual(self.router.calls, [])
+
+    def test_probe_disabled_still_short_circuits_with_an_explanation(self):
+        """开关关着时也要回一句人话，不能把 /测模型 当普通提问发给模型。"""
+        out = self._pre("acompletion",
+                        {**PREFIX_ENV, "BUDGET_NOTICE_QUOTA_KEY_PREFIXES": "carher-"})
+        self.assertIn("未启用", out.get("mock_response", ""))
+        self.assertEqual(self.router.calls, [])
 
 
 if __name__ == "__main__":

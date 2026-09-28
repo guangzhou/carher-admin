@@ -76,6 +76,12 @@ _MAX_MIDSTREAM_FAILOVERS = 10
 # 从「同组占掉总预算的 60%」变成「前 3 次同组，之后 7 次全部放行到链」——
 # 用户要的形状（同组换 3 次 + 每个备胎各试一次）由这两个常量的差值表达，
 # 不需要改本行。
+#
+# [2026-09-29] 上面那句「由两个常量的差值表达」当时**只是设计意图，没有生效**。
+# 09-28 抬到 10 之后实测：10 发全砸在链子第 1 跳，后 4 跳一次都没碰到 ——
+# 光关闸门（擦 failed_deployment_id）不够，每次重发还会把 model 读回原组、
+# 去表里重新命中第 1 个目标。真正让链子下降的是下方 attempted_targets 注入，
+# 两处必须同时在才成立。本常量现在还额外决定注入时机（见那段注释的不等号）。
 _MAX_SAME_GROUP_RETRIES = 3
 
 
@@ -87,6 +93,13 @@ def _install_midstream_fallback_loop() -> None:
         from litellm.responses.streaming_iterator import (
             BaseResponsesAPIStreamingIterator,
             _get_openai_response_types,
+        )
+
+        # 链子逐层下降依赖这个去重表（见下方 attempted_targets 注释）。
+        # 它在 v1.90.2 的 fallback_event_handlers 里；upstream 挪了位置或改了名
+        # 就会 ImportError，走下面的 skip —— 保持原单发行为，不要半装。
+        from litellm.router_utils.fallback_event_handlers import (
+            AttemptedFallbackTargets as _AttemptedFallbackTargets,
         )
     except ImportError as exc:
         verbose_router_logger.warning(
@@ -114,6 +127,29 @@ def _install_midstream_fallback_loop() -> None:
         verbose_router_logger.error(
             "midstream_fallback_loop: original method fingerprint mismatch "
             "(image upgraded?), NOT patching — re-diff router.py before enabling"
+        )
+        return
+
+    # 第二道守卫：我们往 kwargs 塞 attempted_targets，靠的是 run_async_fallback
+    # 会把它**接过去**（`carried_targets = kwargs.get("attempted_targets")`）。
+    # 上游哪天不再读这个 key，注入就变成一句无害的死代码 —— 表现是链子静默
+    # 退回「10 发全砸第一层」，没有任何报错。所以升级镜像时必须在这里炸出来。
+    try:
+        from litellm.router_utils.fallback_event_handlers import run_async_fallback
+
+        _fb_src = inspect.getsource(run_async_fallback)
+    except Exception as exc:
+        verbose_router_logger.error(
+            "midstream_fallback_loop: cannot read run_async_fallback source, "
+            "skip: %r",
+            exc,
+        )
+        return
+    if 'kwargs.get("attempted_targets")' not in _fb_src:
+        verbose_router_logger.error(
+            "midstream_fallback_loop: run_async_fallback no longer reads "
+            "attempted_targets from kwargs — chain descent would silently "
+            "degrade to same-group-only, NOT patching"
         )
         return
 
@@ -241,6 +277,40 @@ def _install_midstream_fallback_loop() -> None:
                         # 同组配额用完 → 关掉 weighted-failover 的入口闸，强制走链。
                         # 见文件头 _MAX_SAME_GROUP_RETRIES 注释。
                         _cross_group = attempts > _MAX_SAME_GROUP_RETRIES
+                        # [2026-09-29] 让链子真的能往下走。
+                        #
+                        # 病灶：`run_async_fallback` 的签名是
+                        #   async def run_async_fallback(*args, litellm_router,
+                        #       fallback_model_group, original_model_group, **kwargs)
+                        # 那个 `**kwargs` 收集成一个**新 dict**，`common_utils` 里的
+                        # `input_kwargs` 同样是新 dict。所以它内部两处写入
+                        #   kwargs["model"] = mg
+                        #   kwargs["attempted_targets"] = attempted
+                        # 全落在副本上，本循环的 initial_kwargs 一个字节都收不到。
+                        # 后果：每次重发都重新读到**原组**，去表里查永远命中第 1 个
+                        # 目标 —— 09-28 实测 10 行日志全是
+                        # `model_group=chatgpt-gpt-6-astra`、10 发全砸在第一层备胎，
+                        # 后面四层一次都没碰到。
+                        #
+                        # 修法：我们自己在 kwargs 上放一个持久的 attempted_targets。
+                        # `run_async_fallback` 认这个 key（`if attempt_key in
+                        # attempted: continue`），于是试过的目标会被记住并跳过，
+                        # 链子逐层往下。只建一次，之后由 LiteLLM 往里累加。
+                        #
+                        # 时机为什么是 `>= _MAX_SAME_GROUP_RETRIES` 而不是
+                        # `> `：晚一发注入，则第 4 发时闸门已关但去重表刚建成空的，
+                        # `run_async_fallback` 会重挑第 1 个目标 —— 同层白打 4 发。
+                        # 早一发注入，第 3 发在同层内消化时顺手把第 1 层记进表，
+                        # 第 4 发才正好跳到第 2 层。mock 实测落点序列：
+                        #   6-sol ×3 → 6-luna → 5.6-sol → grok-4.20 → deepseek
+                        # 即同层恰好 3 发、之后每层各 1 发。改这个不等号会破掉它。
+                        if attempts >= _MAX_SAME_GROUP_RETRIES and not isinstance(
+                            initial_kwargs.get("attempted_targets"),
+                            _AttemptedFallbackTargets,
+                        ):
+                            initial_kwargs["attempted_targets"] = (
+                                _AttemptedFallbackTargets()
+                            )
                         if _cross_group and getattr(e, "failed_deployment_id", None):
                             try:
                                 e.failed_deployment_id = None

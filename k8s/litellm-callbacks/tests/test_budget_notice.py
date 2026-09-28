@@ -331,6 +331,97 @@ class LastUserTextTest(unittest.TestCase):
         self.assertEqual(M._last_user_text(d), "/quota")
 
 
+class TailUserTextsTest(unittest.TestCase):
+    """本轮输入 = 尾部连续 user 段。2026-09-28 carher-75 生产现场的形状。
+
+    openclaw 在用户正文之后还会追加一条纯运行时上下文的 user 消息，命令行不在
+    里面。只看最后一条 ⇒ ``/查余额`` 永久匹配不中，当普通消息放过去烧掉一整轮
+    agent 推理（实测 her-pro 114k in / 39.7s）。
+    """
+
+    # 生产实测的三条尾部 user，按原顺序（正文里的命令独占一行）
+    _ABORTED = "[Mon 2026-09-28 13:42 GMT+8] <turn_aborted>\nThe previous turn was interrupted."
+    _BODY = (
+        "[Mon 2026-09-28 14:28 GMT+8] Conversation info: ...\n"
+        "[CONTEXT ANCHOR v5]\nSELF: app_id=cli_a94a0b73a878dbcb\n"
+        "[END CONTEXT ANCHOR v5]\n\n"
+        "[群聊模式: group-at — 当前模式由运行时权威状态确认。]\n\n"
+        "/查余额"
+    )
+    _RUNTIME_CTX = (
+        "OpenClaw runtime context for the active user request in this turn.\n"
+        "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\n"
+        'Conversation info: {"was_mentioned":true}\n'
+        "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>"
+    )
+
+    def _openclaw_turn(self, body):
+        return {"messages": [
+            {"role": "user", "content": "老问题"},
+            {"role": "assistant", "content": "老答案"},
+            {"role": "user", "content": self._ABORTED},
+            {"role": "user", "content": body},
+            {"role": "user", "content": self._RUNTIME_CTX},
+        ]}
+
+    def test_command_behind_runtime_context_block_still_matches(self):
+        d = self._openclaw_turn(self._BODY)
+        # 回归锚点：最后一条 user 里根本没有命令
+        self.assertNotIn("查余额", M._last_user_text(d))
+        self.assertTrue(M._is_quota_request(d))
+
+    def test_probe_command_behind_runtime_context_block_still_matches(self):
+        d = self._openclaw_turn(self._BODY.replace("/查余额", "/测模型"))
+        self.assertTrue(M._is_probe_request(d))
+        self.assertFalse(M._is_quota_request(d))
+
+    def test_stops_at_assistant_so_history_does_not_retrigger(self):
+        """上一轮的 /查余额 不能让之后每一轮都重复短路。"""
+        d = {"messages": [
+            {"role": "user", "content": "/查余额"},
+            {"role": "assistant", "content": "（余额卡片）"},
+            {"role": "user", "content": "谢了"},
+        ]}
+        self.assertFalse(M._is_quota_request(d))
+
+    def test_stops_at_tool_role(self):
+        d = {"messages": [
+            {"role": "user", "content": "/测模型"},
+            {"role": "assistant", "content": None},
+            {"role": "tool", "content": "结果"},
+            {"role": "user", "content": "继续"},
+        ]}
+        self.assertFalse(M._is_probe_request(d))
+
+    def test_tail_is_capped(self):
+        n = M._TAIL_USER_LIMIT
+        msgs = [{"role": "user", "content": "/查余额"}]
+        msgs += [{"role": "user", "content": "x"} for _ in range(n)]
+        self.assertFalse(M._is_quota_request({"messages": msgs}))
+
+    def test_length_guard_is_per_message_not_joined(self):
+        """长度闸门按每条生效。拼成一段会让一条超长上下文把真命令一起判掉。"""
+        d = {"messages": [
+            {"role": "user", "content": "/查余额"},
+            {"role": "user", "content": "x" * 30000},
+        ]}
+        self.assertTrue(M._is_quota_request(d))
+
+    def test_order_is_nearest_first(self):
+        d = self._openclaw_turn(self._BODY)
+        ts = M._tail_user_texts(d)
+        self.assertEqual(len(ts), 3)
+        self.assertTrue(ts[0].startswith("OpenClaw runtime context"))
+        self.assertTrue(ts[-1].startswith("[Mon 2026-09-28 13:42"))
+
+    def test_responses_input_tail_also_scanned(self):
+        d = {"input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "/quota"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "ctx"}]},
+        ]}
+        self.assertTrue(M._is_quota_request(d))
+
+
 class PreCallTest(unittest.TestCase):
     def setUp(self):
         _ensure_stubs()  # 其它测试文件可能在 discover 中途替换过 litellm 桩
@@ -2381,6 +2472,20 @@ class ProbeTextTest(unittest.TestCase):
         self.assertIn("200 但内容为空", out)
         self.assertEqual(sorted(kw["model"] for _m, kw in r.calls),
                          ["dead-1", "empty-1", "live-1"])
+
+    def test_live_rows_are_sorted_by_name_not_latency(self):
+        """三张表都按模型名排。活表原来按首字耗时排，名字散开不好对。
+
+        白名单故意按耗时无关的乱序给，回复里必须是名字升序。
+        """
+        self._router(model_list=[
+            {"model_name": n, "model_info": {"mode": "chat"}}
+            for n in ("zebra", "alpha", "mid")])
+        out = self._run(self._key(["zebra", "alpha", "mid"]))
+        body = out.split("✅ 能用", 1)[1].split("❌", 1)[0]
+        names = [ln.split("|")[1].strip() for ln in body.splitlines()
+                 if ln.startswith("| ") and "模型" not in ln and "---" not in ln]
+        self.assertEqual(names, ["alpha", "mid", "zebra"])
 
     def test_image_model_goes_through_aimage_generation(self):
         """🔴 画图模型用聊天协议去打，出来的红是假红。分流必须按 mode 走。"""

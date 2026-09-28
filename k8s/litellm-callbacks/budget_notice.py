@@ -222,17 +222,49 @@ def _block_texts(content: Any) -> List[str]:
 
 def _last_user_text(data: dict) -> str:
     """从尾向前找第一条 role==user 的消息，返回其全部文本段（\\n 连接）。
-    同时兼容 chat/anthropic 的 ``messages`` 与 responses 的 ``input``。"""
+    同时兼容 chat/anthropic 的 ``messages`` 与 responses 的 ``input``。
+
+    🔴 判命令**不要**用它，用 :func:`_tail_user_texts` —— 见那边的注释。"""
+    texts = _tail_user_texts(data, limit=1)
+    return texts[0] if texts else ""
+
+
+# 本轮输入最多往前收几条 user。openclaw 实测是 3 条（turn_aborted + 正文 +
+# 运行时上下文块）；给到 6 条留余量，再多就不是"本轮"了。
+_TAIL_USER_LIMIT = 6
+
+
+def _tail_user_texts(data: dict, limit: int = _TAIL_USER_LIMIT) -> List[str]:
+    """本轮输入 = ``messages``/``input`` 尾部**连续**的 user 段，最近的在前。
+
+    只取最后一条会漏：openclaw 在用户那条之后还会追加一条纯运行时上下文的
+    user 消息（``<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>``），命令行不在里面，
+    于是 ``/查余额`` 永远匹配不中、当普通消息放过去，烧掉一整轮 agent 推理。
+    2026-09-28 carher-75 在飞书群里实测到：尾部三条 user 依次是
+    ``<turn_aborted>`` / 正文（末行独占 ``/查余额``）/ 运行时上下文块。
+
+    往前无限找也不行：历史里上一轮的 ``/查余额`` 会让之后每轮都重复短路。
+    所以遇到 assistant / tool / 无 role 的项就停 —— 那是上一轮的边界。
+
+    返回 list 而非拼成一段，是为了让 :func:`_matches_command` 的长度闸门按
+    **每条**生效；拼起来一超 20000 就把真命令一起判掉了。
+    """
     for field in ("messages", "input"):
         seq = data.get(field)
         if isinstance(seq, str) and field == "input":
-            return seq
+            return [seq]
         if not isinstance(seq, list):
             continue
+        out: List[str] = []
         for item in reversed(seq):
-            if isinstance(item, dict) and item.get("role") == "user":
-                return "\n".join(_block_texts(item.get("content")))
-    return ""
+            if not (isinstance(item, dict) and item.get("role") == "user"):
+                break
+            out.append("\n".join(_block_texts(item.get("content"))))
+            if len(out) >= limit:
+                break
+        if out:
+            return out
+    return []
 
 
 def _matches_command(text: str, exact: tuple, ci: tuple) -> bool:
@@ -255,6 +287,20 @@ def _is_quota_query(text: str) -> bool:
 
 def _is_probe_query(text: str) -> bool:
     return _matches_command(text, _PROBE_TRIGGERS_EXACT, _PROBE_TRIGGERS_CI)
+
+
+def _texts_match(texts: List[str], exact: tuple, ci: tuple) -> bool:
+    return any(_matches_command(t, exact, ci) for t in texts)
+
+
+def _is_quota_request(data: dict) -> bool:
+    """本轮输入里有没有 /查余额。判命令走这里，别自己 _last_user_text。"""
+    return _texts_match(_tail_user_texts(data), _TRIGGERS_EXACT, _TRIGGERS_CI)
+
+
+def _is_probe_request(data: dict) -> bool:
+    return _texts_match(
+        _tail_user_texts(data), _PROBE_TRIGGERS_EXACT, _PROBE_TRIGGERS_CI)
 
 
 # ------------------------------------------------------------- 用量文案
@@ -1238,7 +1284,7 @@ async def _probe_text(user_api_key_dict: Any) -> str:
             f"| {_pad('模型', w)} | 首字耗时 |",
             f"|{'-' * (w + 2)}|---------:|",
         ]
-        for name, _ok, _why, secs in sorted(live, key=lambda r: r[3]):
+        for name, _ok, _why, secs in sorted(live, key=lambda r: r[0]):
             lines.append(f"| {_pad(_escape_pipes(name), w)} | {secs:6.2f}s |")
         lines.append("")
 
@@ -1928,7 +1974,7 @@ class BudgetNotice(CustomLogger):
             #    已经烧完还放它跑，等于给闸门开了个后门。所以这里只放 ① 过。
             if gated and _family_enabled() and token:
                 fam = _family_of(str(data.get("model") or ""), user_api_key_dict)
-                if fam is not None and not _is_quota_query(_last_user_text(data)):
+                if fam is not None and not _is_quota_request(data):
                     fkey, flabel = fam
                     spent = await _family_get_spend(token, fkey)
                     limit = _family_limit(fkey, user_api_key_dict)
@@ -1985,13 +2031,14 @@ class BudgetNotice(CustomLogger):
             ):
                 return data
             alias = getattr(user_api_key_dict, "key_alias", "") or ""
-            text = _last_user_text(data)
+            texts = _tail_user_texts(data)
             if alias in _debug_aliases():
                 _log.warning(
-                    "budget_notice: debug last_user_text alias=%s ct=%s head=%r",
-                    alias, v, text[:300])
-            is_probe = _is_probe_query(text)
-            if not (_is_quota_query(text) or is_probe):
+                    "budget_notice: debug tail_user_texts alias=%s ct=%s n=%d heads=%r",
+                    alias, v, len(texts), [t[:200] for t in texts])
+            is_probe = _texts_match(
+                texts, _PROBE_TRIGGERS_EXACT, _PROBE_TRIGGERS_CI)
+            if not (_texts_match(texts, _TRIGGERS_EXACT, _TRIGGERS_CI) or is_probe):
                 return data
 
             if is_probe:

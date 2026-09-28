@@ -21,7 +21,7 @@ Fix
 把单发改成 while 循环：每次 MidStreamFallbackError 都重新进入
 `async_function_with_fallbacks_common_utils`（同组重挑 → 跨组链），
 `meta["_failover_excluded_ids"]` 天然跨轮累积（嵌套 dict 引用共享），
-已失败账号不会被重复挑中。上限 _MAX_MIDSTREAM_FAILOVERS=3 次，防满池
+已失败账号不会被重复挑中。上限 _MAX_MIDSTREAM_FAILOVERS 次（见该常量），防满池
 过载时无限循环。
 
 部署方式：litellm-callbacks ConfigMap 模块 import 副作用整体替换
@@ -42,7 +42,17 @@ except Exception:  # pragma: no cover
 
     verbose_router_logger = logging.getLogger("litellm.router")
 
-_MAX_MIDSTREAM_FAILOVERS = 5
+# [2026-09-28] 5 → 10。5 次预算里前 3 次按 _MAX_SAME_GROUP_RETRIES 规定花在同组
+# 换号上，留给 fallback 链的只有 2 次，而 chatgpt-gpt-6-astra 的链有 5 跳
+# （sol → luna → 5.6-sol → sa-grok-4.20 → openrouter-deepseek-v4.1-flash）：
+# 后 3 跳在预算上永远走不到。实测 cursor-buyitian-pwcf 30h 内 2406 次落主组、
+# 22 次落第 1 跳 sol，后 4 跳 SpendLogs 行数全 0。
+#
+# 抬到 10 = 3 次同组 + 7 次给链（链最长 5 跳，留 2 次余量给 run_async_fallback
+# 因 `already attempted` 跳过的重复项）。平时用不到：25min 窗口 36 次 failover 里
+# attempt 1/5 占 32 次、2/5 占 4 次，3/5 及以上为 0 —— 绝大多数请求第一次换号即成，
+# 抬上限只在过载风暴期才被消耗到，不改变常态行为。
+_MAX_MIDSTREAM_FAILOVERS = 10
 
 # [2026-09-17] 同组重挑配额。
 #
@@ -61,6 +71,11 @@ _MAX_MIDSTREAM_FAILOVERS = 5
 #
 # 黏性无影响：首发选腿由 weighted_affinity.py 的 async_filter_deployments 决定，
 # 那个 hook 通篇不读 enable_weighted_failover，本改动也不碰它。
+#
+# [2026-09-28] 维持 3 不动。_MAX_MIDSTREAM_FAILOVERS 抬到 10 之后，本常量的语义
+# 从「同组占掉总预算的 60%」变成「前 3 次同组，之后 7 次全部放行到链」——
+# 用户要的形状（同组换 3 次 + 每个备胎各试一次）由这两个常量的差值表达，
+# 不需要改本行。
 _MAX_SAME_GROUP_RETRIES = 3
 
 
@@ -189,8 +204,10 @@ def _install_midstream_fallback_loop() -> None:
                         if attempts > _MAX_MIDSTREAM_FAILOVERS:
                             verbose_router_logger.error(
                                 "midstream_fallback_loop: %d mid-stream failovers "
-                                "exhausted, surfacing error",
+                                "exhausted, surfacing error (model_group=%s trace=%s)",
                                 attempts - 1,
+                                initial_kwargs.get("model"),
+                                initial_kwargs.get("litellm_trace_id") or "-",
                             )
                             raise
                         _pu = Router._extract_partial_responses_usage(current_iterator)
@@ -233,13 +250,22 @@ def _install_midstream_fallback_loop() -> None:
                                     "failed_deployment_id: %r",
                                     _exc,
                                 )
+                        # [2026-09-28] 带上 trace id。原来这行只有 attempt/组名，
+                        # 并发请求的日志交错在一起**无法归属到同一条流** ——
+                        # 09-28 诊断 cursor-buyitian-pwcf 时我据此把别人的
+                        # `attempt 1/5 for model_group=chatgpt-gpt-6-sol`
+                        # （6h 内 43 把 key 直接点名发 sol，3334 次）读成了
+                        # 「跳到备胎后计数器归零」，得出错误结论。
+                        # trace id 是判「这几行是不是同一条流」的唯一依据。
+                        _trace = initial_kwargs.get("litellm_trace_id") or "-"
                         verbose_router_logger.info(
                             "midstream_fallback_loop: mid-stream failover attempt "
-                            "%d/%d for model_group=%s (mode=%s)",
+                            "%d/%d for model_group=%s (mode=%s) trace=%s",
                             attempts,
                             _MAX_MIDSTREAM_FAILOVERS,
                             model_group,
                             "cross-group" if _cross_group else "same-group",
+                            _trace,
                         )
                         new_response = (
                             await self.async_function_with_fallbacks_common_utils(

@@ -2053,6 +2053,69 @@ class ProbeModeTest(unittest.TestCase):
             ("gpt-image-2", "gpt-image-2", "image_generation"),
         ])
 
+    def test_router_group_alias_resolves_mode_when_key_has_no_alias(self):
+        """🔴 09-28 根因的阳性对照。一个公开名有**两层** alias：key 级 `aliases`
+        和 router 级 `model_group_alias`。两层都不进 `model_list`（那里只有部署
+        行，`model_name` 是落点名），所以纯 alias 名的 mode 只能靠落点救。原来
+        只救 key 级那一路，于是 carher-14 的 `gpt-5.6-terra/luna/sol`（只有组
+        别名、没有 per-key alias）永久报「未测」—— 而实测它们全活
+        （13.38s / 14.99s / 15.47s，fin=stop）。
+
+        这里三个名字形状刻意做成实测那样：`gpt-5.5` 两层都有，`gpt-5.6-terra`
+        只有 router 级。修复前后的差别就是第二行从 '' 变成 'responses'。
+        """
+        self.proxy_server.llm_router = types.SimpleNamespace(
+            model_list=[
+                {"model_name": "chatgpt-gpt-5.5",
+                 "model_info": {"mode": "responses"}},
+                {"model_name": "chatgpt-gpt-5.6-terra",
+                 "model_info": {"mode": "responses"}},
+            ],
+            model_group_alias={
+                "gpt-5.5": "chatgpt-gpt-5.5",
+                "gpt-5.6-terra": "chatgpt-gpt-5.6-terra",
+            },
+        )
+        key = _Key(alias="carher-14", aliases={"gpt-5.5": "chatgpt-gpt-5.5"})
+        key.models = ["gpt-5.5", "gpt-5.6-terra"]
+
+        self.assertEqual(M._probe_targets(key), [
+            ("gpt-5.5", "gpt-5.5", "responses"),
+            ("gpt-5.6-terra", "gpt-5.6-terra", "responses"),
+        ])
+
+    def test_router_group_alias_item_may_be_a_dict(self):
+        """`model_group_alias` 的值可以是 `{"model": ..., "hidden": ...}`，
+        不只是裸字符串。拿错形状会让这一级静默失效 —— 与「没这一级」同形。"""
+        self.proxy_server.llm_router = types.SimpleNamespace(
+            model_list=[{"model_name": "landing-x",
+                         "model_info": {"mode": "chat"}}],
+            model_group_alias={"public-x": {"model": "landing-x", "hidden": False}},
+        )
+        self.assertEqual(M._router_group_alias_target("public-x"), "landing-x")
+        key = _Key(alias="carher-14")
+        key.models = ["public-x"]
+        self.assertEqual(M._probe_targets(key),
+                         [("public-x", "public-x", "chat")])
+
+    def test_router_group_alias_absent_still_yields_untested_not_a_guess(self):
+        """阴性对照：两层 alias 都没有、目录里也没这个名字 ⇒ 仍然如实空串。
+        ⛔ 不许因为加了这一级就给兜不住的名字默认 chat。"""
+        self.proxy_server.llm_router = types.SimpleNamespace(
+            model_list=[{"model_name": "landing-y",
+                         "model_info": {"mode": "chat"}}],
+            model_group_alias={},
+        )
+        self.assertEqual(M._router_group_alias_target("nobody"), "")
+        key = _Key(alias="carher-14")
+        key.models = ["nobody"]
+        self.assertEqual(M._probe_targets(key), [("nobody", "nobody", "")])
+
+    def test_router_group_alias_survives_missing_attribute(self):
+        """老版本 router 可能压根没这个属性 ⇒ 返回 '' 而不是炸掉整个 /测模型。"""
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[])
+        self.assertEqual(M._router_group_alias_target("whatever"), "")
+
     def test_targets_are_capped(self):
         self.proxy_server.llm_router = types.SimpleNamespace(model_list=[])
         key = _Key(alias="carher-14")

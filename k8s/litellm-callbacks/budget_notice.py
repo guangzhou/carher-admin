@@ -835,6 +835,51 @@ def _image_generation_impossible(target: str) -> bool:
         return False
 
 
+def _router_group_alias_target(name: str) -> str:
+    """`router_settings.model_group_alias` 里这个公开名指向哪个组。查不到返回 ''。
+
+    🔴 09-28 根因：**一个公开名有两层 alias，探针原来只看了一层。**
+      · key 级 `aliases`（DB 里 `LiteLLM_VerificationToken.aliases`）
+      · router 级 `model_group_alias`（config.yaml 的 `router_settings`）
+    两层都不进 `llm_router.model_list` —— `model_list` 里只有**部署行**，
+    它的 `model_name` 是落点名（`chatgpt-gpt-5.6-terra`），不是公开名
+    （`gpt-5.6-terra`）。所以 `_probe_model_mode` 第①②③级对纯 alias 名**必然
+    全落空**，只能靠外面传进来的落点救。原来只用 key 级 alias 救，于是：
+
+      | 公开名          | router 级组别名 | key 级 alias | 结果 |
+      |-----------------|-----------------|--------------|------|
+      | `gpt-5.5`       | ✅              | ✅           | 测了 |
+      | `gpt-6-astra`   | ✅              | ✅           | 测了 |
+      | `gpt-5.6-terra` | ✅              | ❌ 无        | **永久未测** |
+      | `gpt-5.6-luna`  | ✅              | ❌ 无        | **永久未测** |
+      | `gpt-5.6-sol`   | ✅              | ❌ 无        | **永久未测** |
+
+    实测这三个用 master key 直打全活（13.38s / 14.99s / 15.47s，fin=stop），
+    而 `gpt-5.6-luna` 7 天内有 5399 次真实请求 —— 「未测」100% 是探针盲区。
+    carher-14 自己就跑在 `gpt-5.6-terra` 上，它当然是活的。
+
+    ⛔ 别拿 `/model/info` 当依据来判这一层：它返回的 `gpt-5.6-terra` 有 33 行
+       `mode=responses`，形状跟 `gpt-5.5` 一模一样，看不出谁是组别名 —— 那 33 行
+       是接口自己展开 alias 后补出来的（09-28「量到的是响应 schema 不是我们写进去
+       的」同一个坑）。判组别名只认 `llm_router.model_group_alias`。
+    """
+    try:
+        from litellm.proxy.proxy_server import llm_router
+        mga = getattr(llm_router, "model_group_alias", None)
+        if not isinstance(mga, dict):
+            return ""
+        item = mga.get(name)
+        if isinstance(item, str):
+            return item
+        # RouterModelGroupAliasItem：{"model": "...", "hidden": bool}
+        if isinstance(item, dict) and item.get("model"):
+            return str(item["model"])
+        target = getattr(item, "model", None)
+        return str(target) if target else ""
+    except Exception:
+        return ""
+
+
 def _probe_model_mode(name: str, row_lookup: dict) -> str:
     """这个模型该用聊天还是画图去测。返回 'chat' / 'image_generation' / ''。
 
@@ -843,6 +888,9 @@ def _probe_model_mode(name: str, row_lookup: dict) -> str:
     `model_info.mode`，再回落到 `get_model_info(落点名)`。都取不到再走第三级
     （见 `_image_generation_impossible`）。全落空就返回空串，调用方**跳过**并
     如实标成「判不出类型」，而不是默认当聊天打。
+
+    🔴 这三级**只认落点名**。公开名是 alias 的话这里必然全落空，解在调用方：
+    见 `_router_group_alias_target`。
     """
     for row in row_lookup.get(name, []):
         info = row.get("model_info") if isinstance(row, dict) else None
@@ -991,10 +1039,14 @@ def _probe_targets(user_api_key_dict: Any) -> list:
 
     out = []
     for name in names[:_PROBE_MAX_MODELS]:
-        # mode 先按公开名查，查不到再按 alias 落点查 —— 纯 alias 名没有自己的部署行。
+        # mode 先按公开名查，查不到再按落点查 —— 纯 alias 名没有自己的部署行。
+        # 🔴 落点有**两个来源**，必须都试（09-28 根因，见 `_router_group_alias_target`）：
+        #    少了 router 级那一路，`gpt-5.6-terra/luna/sol` 这类「只有组别名、没有
+        #    per-key alias」的名字会永久报「未测」，而它们其实全是活的。
         mode = _probe_model_mode(name, row_lookup)
-        if not mode:
-            target = aliases.get(name)
+        for target in (aliases.get(name), _router_group_alias_target(name)):
+            if mode:
+                break
             if target:
                 mode = _probe_model_mode(str(target), row_lookup)
         out.append((name, name, mode))

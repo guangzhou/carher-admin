@@ -1106,8 +1106,20 @@ def _probe_targets(user_api_key_dict: Any) -> list:
 
     ⛔ 判据不许按名字猜（有没有 `-`、前缀像不像落点）：只认 `row_lookup`，
        它是 `llm_router.model_list` 的 `model_name` 索引 = router 真正认识的名字。
-       公开名自己就在里面时**优先发公开名**（那才跟用户同路）；只有它不在、
-       而落点在，才改发落点。两个都不在就原样发公开名并如实报错，不装作测过。
+
+    🔴 **优先级：key 级 alias 的落点 > 公开名 > router 级组别名的落点。**
+       09-28 第二轮实测的坑：公开名**同时**是 key 级 alias 的键、又碰巧是一个
+       真组名。上一版规则「公开名 router 认识就发公开名」于是打了那个同名组，
+       而用户真实流量经 key 级 alias 落到别处 —— 两个不同的组。
+       carher-14 的 16 条 alias 里 **9 条**是这个形状（`claude-haiku-4-5`
+       `claude-opus-4-8/5` `claude-sonnet-5` `gpt-5.5` `gpt-5.6-luna/sol/terra`
+       `gpt-6-astra`），实测 `claude-haiku-4-5` 那个同名组挂死 45s+ 而落点
+       `kiro-claude-haiku-4-5` 1.28s 活 —— 探针报「超时 >120s」是打错了组。
+       另外 8 条两边都活，**绿是巧合**，量的不是用户真正到的地方。
+       理由：per-key alias 在**进 router 之前**就完成改写，所以它的落点才是
+       用户真正抵达的组；router 级组别名相反，是 router 拿改写**前**的名字查，
+       所以公开名自己在 `row_lookup` 里时它排在公开名后面。
+       两个都不在就原样发公开名并如实报错，不装作测过。
 
     ⚠️ 代价说清楚：改发落点等于**跳过了 per-key alias 那一层**，所以这一格的绿
        只证明「落点活着」，不证明「alias 映射本身没写错」。映射对不对由收敛工具的
@@ -1134,17 +1146,25 @@ def _probe_targets(user_api_key_dict: Any) -> list:
         # 🔴 落点有**两个来源**，必须都试（09-28 根因，见 `_router_group_alias_target`）：
         #    少了 router 级那一路，`gpt-5.6-terra/luna/sol` 这类「只有组别名、没有
         #    per-key alias」的名字会永久报「未测」，而它们其实全是活的。
-        mode = _probe_model_mode(name, row_lookup)
-        send = name if name in row_lookup else ""
-        for target in (aliases.get(name), _router_group_alias_target(name)):
-            if not target:
+        key_target = aliases.get(name)
+        router_target = _router_group_alias_target(name)
+        # 🔴 发出去的名字按优先级取第一个 router 认识的：
+        #    key 级 alias 落点 → 公开名 → router 级组别名落点。顺序的理由见
+        #    上面长注释（per-key 改写在进 router **之前**，公开名同时是真组名时
+        #    发公开名等于打了另一个组）。
+        send = ""
+        for cand in (key_target, name, router_target):
+            if cand and str(cand) in row_lookup:
+                send = str(cand)
+                break
+        # mode 按同一优先级找第一个查得到的 —— 纯 alias 名没有自己的部署行。
+        mode = ""
+        for cand in (key_target, name, router_target):
+            if not cand:
                 continue
-            target = str(target)
-            if not mode:
-                mode = _probe_model_mode(target, row_lookup)
-            # 🔴 发出去的名字必须是 router 认识的那个（见下方长注释）。
-            if not send and target in row_lookup:
-                send = target
+            mode = _probe_model_mode(str(cand), row_lookup)
+            if mode:
+                break
         out.append((name, send or name, mode))
     return out
 

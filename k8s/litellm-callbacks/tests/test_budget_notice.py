@@ -2081,19 +2081,52 @@ class ProbeModeTest(unittest.TestCase):
             ("gpt-image-2", "gpt-image-2", "image_generation"),
         ])
 
-    def test_public_name_wins_when_router_knows_it_too(self):
-        """公开名自己就在 `model_list` 里时**优先发公开名**，哪怕它也有 alias。
+    def test_key_alias_landing_beats_a_same_named_real_group(self):
+        """公开名**同时**是 key 级 alias 的键、又碰巧是真组名 ⇒ 必须发落点。
 
-        阴性对照方向：别一有 alias 就无脑改发落点 —— 那会白白绕过 alias 那层。
+        09-28 实测：`claude-haiku-4-5` 两边都在 `model_list` 里，同名那个组挂死
+        45s+ 而落点 `kiro-claude-haiku-4-5` 1.02s 活。发公开名 = 打了另一个组，
+        报出来的「超时」是假红。carher-14 的 16 条 alias 里 9 条是这个形状。
         """
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "claude-haiku-4-5", "model_info": {"mode": "chat"}},
+            {"model_name": "kiro-claude-haiku-4-5", "model_info": {"mode": "chat"}},
+        ])
+        key = _Key(alias="k",
+                   aliases={"claude-haiku-4-5": "kiro-claude-haiku-4-5"})
+        key.models = ["claude-haiku-4-5"]
+        self.assertEqual(
+            M._probe_targets(key),
+            [("claude-haiku-4-5", "kiro-claude-haiku-4-5", "chat")])
+
+    def test_public_name_used_when_there_is_no_key_alias_for_it(self):
+        """没有 key 级 alias 时才发公开名 —— 阴性对照，别无脑改发任何落点。"""
         self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
             {"model_name": "deepseek-v4-flash", "model_info": {"mode": "chat"}},
             {"model_name": "some-landing", "model_info": {"mode": "chat"}},
         ])
-        key = _Key(alias="k", aliases={"deepseek-v4-flash": "some-landing"})
+        key = _Key(alias="k", aliases={"other-name": "some-landing"})
         key.models = ["deepseek-v4-flash"]
         self.assertEqual(M._probe_targets(key),
                          [("deepseek-v4-flash", "deepseek-v4-flash", "chat")])
+
+    def test_router_group_alias_ranks_below_the_public_name(self):
+        """公开名在 `model_list` 里就用它，router 级组别名排它后面。
+
+        理由：router 级组别名是 router 拿改写**前**的名字查的，公开名本身能被
+        router 认出来时，用户的请求就停在那个组，不会再走组别名。
+        """
+        self.proxy_server.llm_router = types.SimpleNamespace(
+            model_list=[
+                {"model_name": "gpt-5.6-terra", "model_info": {"mode": "chat"}},
+                {"model_name": "chatgpt-gpt-5.6-terra",
+                 "model_info": {"mode": "chat"}},
+            ],
+            model_group_alias={"gpt-5.6-terra": "chatgpt-gpt-5.6-terra"})
+        key = _Key(alias="k", aliases={})
+        key.models = ["gpt-5.6-terra"]
+        self.assertEqual(M._probe_targets(key),
+                         [("gpt-5.6-terra", "gpt-5.6-terra", "chat")])
 
     def test_unknown_on_both_sides_sends_public_name_and_does_not_pretend(self):
         """两边都不认识就原样发公开名 —— 不许为了「看起来能测」瞎编一个落点。"""

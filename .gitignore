@@ -69,4 +69,12 @@ zk-delta/tests/fixtures/
 .tmp-larkdl/
 **/.tmp-larkdl/
 *.dat
+
+# sync-lark-key-models.py 的工作目录：rows.ndjson 是飞书 key 表整表导出，
+# 「API Key」列是**明文 sk-**（1372 行），backup-*.json 是写前原值快照。
+# 2026-09-28 发现上面的 `.tmp-larkdl/` 差一个字母不匹配 `.tmp-lark/` ——
+# 脚本默认就往这里写备份，一次 `git add .` 就会把 1372 把明文 key 推上去。
+.tmp-lark/
+**/.tmp-lark/
+.tmp-poison/
 .pytest_cache/

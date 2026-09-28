@@ -1843,11 +1843,20 @@ class QuotaOnlyGateTest(unittest.TestCase):
 PROBE_ENV = {**PREFIX_ENV, "BUDGET_NOTICE_PROBE_ENABLED": "1"}
 
 
-def _chat_resp(content, finish_reason="stop"):
+def _chat_resp(content, finish_reason="stop", reasoning_tokens=None):
     """router.acompletion 的回包形状（对象属性，不是 dict）。"""
     msg = types.SimpleNamespace(content=content)
-    return types.SimpleNamespace(
+    out = types.SimpleNamespace(
         choices=[types.SimpleNamespace(message=msg, finish_reason=finish_reason)])
+    if reasoning_tokens is not None:
+        out.usage = types.SimpleNamespace(
+            completion_tokens_details=types.SimpleNamespace(
+                reasoning_tokens=reasoning_tokens))
+    return out
+
+
+def _embed_resp(vec):
+    return types.SimpleNamespace(data=[types.SimpleNamespace(embedding=vec)])
 
 
 def _img_resp(url=None, b64=None):
@@ -1858,11 +1867,16 @@ def _img_resp(url=None, b64=None):
 class _FakeRouter:
     """记录每一次调用，并按 model 名回放预置结果/异常。"""
 
-    def __init__(self, chat=None, image=None, model_list=None):
+    def __init__(self, chat=None, image=None, model_list=None, embed=None,
+                 model_group_alias=None):
         self.calls = []
         self.model_list = model_list or []
+        if model_group_alias is not None:
+            self.model_group_alias = model_group_alias
         self._chat = chat if chat is not None else (lambda **kw: _chat_resp("pong"))
         self._image = image if image is not None else (lambda **kw: _img_resp("http://x"))
+        self._embed = embed if embed is not None else (
+            lambda **kw: _embed_resp([0.1, 0.2, 0.3]))
 
     async def acompletion(self, **kw):
         self.calls.append(("chat", kw))
@@ -1871,6 +1885,10 @@ class _FakeRouter:
     async def aimage_generation(self, **kw):
         self.calls.append(("image", kw))
         return await self._deliver(self._image, kw)
+
+    async def aembedding(self, **kw):
+        self.calls.append(("embed", kw))
+        return await self._deliver(self._embed, kw)
 
     @staticmethod
     async def _deliver(fn, kw):
@@ -2034,9 +2052,17 @@ class ProbeModeTest(unittest.TestCase):
         self.assertEqual(M._probe_model_mode("not-in-catalog-at-all", lookup), "")
 
 
-    def test_targets_use_public_names_and_resolve_mode_through_alias(self):
-        """打给 router 的必须是**公开名** —— 直接打落点就绕过了 alias 那层，
-        测出来的绿说明不了「用户发那个名字能用」。"""
+    def test_targets_send_the_name_router_actually_knows(self):
+        """🔴 09-28 根因。发出去的名字必须是 **router 认识的那个**。
+
+        本测试原来断言的是反面（「打给 router 的必须是公开名」），那正是 bug 本体：
+        我们跑在 alias 改写的**下游**，发改写前的公开名 ⇒ router 组注册表里查无此名
+        ⇒ 它去试、重试、等，25s 后被自己的 `wait_for` 掐掉，报「超时（不返回）」，
+        **与真的挂死同形**。实测同一批东西填落点名 12.3s 里 7 活 1 死、填公开名
+        25s 全超时。
+
+        显示名仍然是用户自己那个公开名 —— 用户不该看见落点。
+        """
         self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
             {"model_name": "kiro-claude-opus-5", "model_info": {"mode": "chat"}},
             {"model_name": "gpt-image-2",
@@ -2049,9 +2075,35 @@ class ProbeModeTest(unittest.TestCase):
         targets = M._probe_targets(key)
 
         self.assertEqual(targets, [
-            ("anthropic.claude-opus-5", "anthropic.claude-opus-5", "chat"),
+            # 公开名 router 不认识 ⇒ 改发落点，但显示名不变
+            ("anthropic.claude-opus-5", "kiro-claude-opus-5", "chat"),
+            # 公开名自己就在 model_list 里 ⇒ 照发公开名（那才跟用户同路）
             ("gpt-image-2", "gpt-image-2", "image_generation"),
         ])
+
+    def test_public_name_wins_when_router_knows_it_too(self):
+        """公开名自己就在 `model_list` 里时**优先发公开名**，哪怕它也有 alias。
+
+        阴性对照方向：别一有 alias 就无脑改发落点 —— 那会白白绕过 alias 那层。
+        """
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "deepseek-v4-flash", "model_info": {"mode": "chat"}},
+            {"model_name": "some-landing", "model_info": {"mode": "chat"}},
+        ])
+        key = _Key(alias="k", aliases={"deepseek-v4-flash": "some-landing"})
+        key.models = ["deepseek-v4-flash"]
+        self.assertEqual(M._probe_targets(key),
+                         [("deepseek-v4-flash", "deepseek-v4-flash", "chat")])
+
+    def test_unknown_on_both_sides_sends_public_name_and_does_not_pretend(self):
+        """两边都不认识就原样发公开名 —— 不许为了「看起来能测」瞎编一个落点。"""
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "known-thing", "model_info": {"mode": "chat"}},
+        ])
+        key = _Key(alias="k", aliases={})
+        key.models = ["totally-unknown"]
+        self.assertEqual(M._probe_targets(key),
+                         [("totally-unknown", "totally-unknown", "")])
 
     def test_router_group_alias_resolves_mode_when_key_has_no_alias(self):
         """🔴 09-28 根因的阳性对照。一个公开名有**两层** alias：key 级 `aliases`
@@ -2080,8 +2132,9 @@ class ProbeModeTest(unittest.TestCase):
         key.models = ["gpt-5.5", "gpt-5.6-terra"]
 
         self.assertEqual(M._probe_targets(key), [
-            ("gpt-5.5", "gpt-5.5", "responses"),
-            ("gpt-5.6-terra", "gpt-5.6-terra", "responses"),
+            # 两个公开名 router 都不认识（`model_list` 里只有落点行）⇒ 都改发落点
+            ("gpt-5.5", "chatgpt-gpt-5.5", "responses"),
+            ("gpt-5.6-terra", "chatgpt-gpt-5.6-terra", "responses"),
         ])
 
     def test_router_group_alias_item_may_be_a_dict(self):
@@ -2096,7 +2149,7 @@ class ProbeModeTest(unittest.TestCase):
         key = _Key(alias="carher-14")
         key.models = ["public-x"]
         self.assertEqual(M._probe_targets(key),
-                         [("public-x", "public-x", "chat")])
+                         [("public-x", "landing-x", "chat")])
 
     def test_router_group_alias_absent_still_yields_untested_not_a_guess(self):
         """阴性对照：两层 alias 都没有、目录里也没这个名字 ⇒ 仍然如实空串。
@@ -2318,15 +2371,77 @@ class ProbeTextTest(unittest.TestCase):
         self.assertEqual(meta["user_api_key"], "tok-carher")
         self.assertEqual(meta["user_api_key_alias"], "carher-14")
 
-    def test_probe_sends_the_public_name_not_the_landing_name(self):
+    def test_probe_sends_landing_but_shows_the_public_name(self):
+        """🔴 09-28：**发的名字**和**显示的名字**是两回事，端到端都得对。
+
+        本测试原来断言「发公开名」，那是 bug 本体（见
+        `test_targets_send_the_name_router_actually_knows`）。改成：
+          · 发给 router 的是它认识的落点 —— 否则 25s 假超时；
+          · 屏幕上还是用户自己那个公开名 —— 用户不该看见落点。
+        """
         r = self._router(model_list=[{"model_name": "kiro-claude-opus-5",
                                       "model_info": {"mode": "chat"}}])
         key = self._key(["anthropic.claude-opus-5"],
                         aliases={"anthropic.claude-opus-5": "kiro-claude-opus-5"})
         out = self._run(key)
-        self.assertEqual(r.calls[0][1]["model"], "anthropic.claude-opus-5")
+        self.assertEqual(r.calls[0][1]["model"], "kiro-claude-opus-5")
         self.assertIn("anthropic.claude-opus-5", out)
         self.assertNotIn("kiro-claude-opus-5", out)
+
+    def test_empty_content_with_reasoning_tokens_is_untested_not_dead(self):
+        """🔴 推理模型把额度花光 = **我们给的额度不够**，不是腿死。
+
+        09-28 实测 `claude-opus-5` / `openrouter-deepseek-v4.1-flash` 都是这个形状
+        （200 + content 空 + finish_reason=length），老代码判「不能用」⇒ 健康的
+        推理模型恒报红。判据必须先读 usage 再判死（与 keyprobe `probe_chat` 同尺子）。
+        """
+        r = self._router(
+            model_list=[{"model_name": "m1", "model_info": {"mode": "chat"}}],
+            chat=lambda **kw: _chat_resp(None, finish_reason="length",
+                                         reasoning_tokens=97))
+        out = self._run(self._key(["m1"]))
+        self.assertIn("未测", out)
+        self.assertIn("97", out)
+        self.assertIn("活 0 / 死 0", out)      # 既不算活也不算死
+        self.assertNotIn("❌ 不能用", out)
+
+    def test_empty_content_without_reasoning_tokens_is_still_dead(self):
+        """阴性对照：没有推理 token 的空正文照样判死，别把这条改成万能豁免。"""
+        r = self._router(
+            model_list=[{"model_name": "m1", "model_info": {"mode": "chat"}}],
+            chat=lambda **kw: _chat_resp(None, finish_reason="stop"))
+        out = self._run(self._key(["m1"]))
+        self.assertIn("❌ 不能用", out)
+        self.assertIn("活 0 / 死 1", out)
+
+    def test_embedding_model_goes_to_the_embeddings_route(self):
+        """🔴 embedding 模型拿 chat 协议打必 400，且那个 400 与「上游死了」同形。
+
+        09-28 实测 `bge-m3`：「is an embedding model and cannot be used for chat
+        completion」。敲错门是我们的 bug，keyprobe 早就分了三路，这里补齐。
+        """
+        r = self._router(
+            model_list=[{"model_name": "bge-m3",
+                         "model_info": {"mode": "embedding"}}])
+        out = self._run(self._key(["bge-m3"]))
+        self.assertEqual([c[0] for c in r.calls], ["embed"])
+        self.assertEqual(r.calls[0][1]["model"], "bge-m3")
+        self.assertIn("活 1 / 死 0", out)
+
+    def test_untested_rows_report_their_own_reason_not_one_merged_sentence(self):
+        """🔴「判不出协议」和「推理吃光额度」是两个病，未测表必须逐行报自己那个。
+
+        合成一句话会把后者说成前者，下一个人照着去查 mode 必然查空。
+        """
+        r = self._router(
+            model_list=[{"model_name": "m1", "model_info": {"mode": "chat"}},
+                        {"model_name": "m2", "model_info": {}}],
+            chat=lambda **kw: _chat_resp(None, finish_reason="length",
+                                         reasoning_tokens=88))
+        out = self._run(self._key(["m1", "m2"]))
+        self.assertIn("88", out)                    # m1：推理吃光额度
+        self.assertIn("无 mode", out)                # m2：判不出协议
+        self.assertIn("另有 2 个未测", out)
 
     def test_probe_asks_for_a_tiny_completion(self):
         r = self._router(model_list=[{"model_name": "m1",

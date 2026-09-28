@@ -916,7 +916,27 @@ def _probe_model_mode(name: str, row_lookup: dict) -> str:
     return ""
 
 
-def _probe_verdict_from_chat(resp: Any) -> Tuple[bool, str]:
+def _probe_reasoning_tokens(resp: Any) -> int:
+    """这次回包里有多少 token 花在推理上。读不到返回 0。
+
+    只用来把「推理吃光额度」从「腿死」里分出来 —— 见 `_probe_verdict_from_chat`。
+    """
+    try:
+        usage = getattr(resp, "usage", None)
+        if usage is None and isinstance(resp, dict):
+            usage = resp.get("usage")
+        det = getattr(usage, "completion_tokens_details", None)
+        if det is None and isinstance(usage, dict):
+            det = usage.get("completion_tokens_details")
+        rt = getattr(det, "reasoning_tokens", None)
+        if rt is None and isinstance(det, dict):
+            rt = det.get("reasoning_tokens")
+        return int(rt or 0)
+    except Exception:
+        return 0
+
+
+def _probe_verdict_from_chat(resp: Any) -> Tuple[Any, str]:
     """判据 = **回了非空内容**（与 keyprobe 自助体检页同一把尺子，09-25 定）。
 
     🔴 200 不算活：09-23 实测推理模型给小 `max_tokens` 会返 200 +
@@ -938,7 +958,34 @@ def _probe_verdict_from_chat(resp: Any) -> Tuple[bool, str]:
             return True, ""
         # 内容空但可能是推理把额度吃完了 —— 如实说，不判死
         fr = getattr(choices[0], "finish_reason", None)
+        # 🔴 先读 usage 再判死（与 keyprobe `probe_chat` 同一把尺子）：推理 token
+        #    把预算吃光是**我们给的额度不够**，不是腿死。判成「未测」而不是「不能用」，
+        #    否则健康的推理模型恒报红。09-28 实测 claude-opus-5 /
+        #    openrouter-deepseek-v4.1-flash 都是这个形状（finish_reason=length）。
+        rt = _probe_reasoning_tokens(resp)
+        if rt:
+            return None, (f"内容为空，但 {rt} 个 token 花在推理上了"
+                          f"（finish={fr}）—— 额度不够，未测")
         return False, f"200 但内容为空（finish_reason={fr}）"
+    except Exception as exc:
+        return False, f"解析回包失败 {type(exc).__name__}"
+
+
+def _probe_verdict_from_embed(resp: Any) -> Tuple[bool, str]:
+    """embedding 的判据 = 真拿到一条非空向量（与 keyprobe `probe_embed` 同尺子）。"""
+    try:
+        data = getattr(resp, "data", None)
+        if data is None and isinstance(resp, dict):
+            data = resp.get("data")
+        if not data:
+            return False, "200 但没有 data"
+        first = data[0]
+        vec = getattr(first, "embedding", None)
+        if vec is None and isinstance(first, dict):
+            vec = first.get("embedding")
+        if vec:
+            return True, f"向量维度 {len(vec)}"
+        return False, "data 项里没有 embedding"
     except Exception as exc:
         return False, f"解析回包失败 {type(exc).__name__}"
 
@@ -994,6 +1041,15 @@ async def _probe_one(name: str, mode: str, user_api_key_dict: Any) -> tuple:
             coro = llm_router.aimage_generation(
                 model=name, prompt=_PROBE_PROMPT, n=1, metadata=meta)
             verdict = _probe_verdict_from_image
+        elif mode == "embedding":
+            # 🔴 embedding 模型拿 chat 协议打必 400，且那个 400 与「上游死了」同形。
+            #    09-28 实测 `bge-m3`：「BAAI/bge-m3 is an embedding model and
+            #    cannot be used for chat completion」—— 敲错门是**我们的 bug**，
+            #    不是模型的。keyprobe 早就分了三路（`probe_chat/image/embed`），
+            #    这里照抄。
+            coro = llm_router.aembedding(
+                model=name, input=[_PROBE_PROMPT], metadata=meta)
+            verdict = _probe_verdict_from_embed
         else:
             coro = llm_router.acompletion(
                 model=name,
@@ -1017,10 +1073,45 @@ async def _probe_one(name: str, mode: str, user_api_key_dict: Any) -> tuple:
 def _probe_targets(user_api_key_dict: Any) -> list:
     """这把 key 该测哪些模型。返回 [(用户看到的名, 打给 router 的名, mode)]。
 
-    名字取**用户白名单里的公开名**（他在菜单里选的那个），打给 router 的也是
-    公开名 —— per-key alias 会在 router 之前把它改写成落点，跟用户真实发一次
-    完全同路。这点很重要：如果我们直接打落点名，就绕过了 alias 那一层，
-    测出来的绿说明不了「用户发那个名字能用」。
+    显示名取**用户白名单里的公开名**（他在菜单里选的那个）。发出去的名字则必须是
+    **router 认识的那个**，两者可以不同。
+
+    🔴 09-28 根因：**我们站在 alias 改写的下游，却发了改写前的名字。**
+
+    用户（和 keyprobe 自助体检页 `198:30920`）走的是正门：HTTP 入口 → 剥 key →
+    per-key alias 把 `her-flash` 改写成 `openrouter-deepseek-v4.1-flash` → router。
+    **改写在 router 之前。** 而本函数跑在 callback 里，位置已经在改写之后，
+    直调 `llm_router.acompletion(model="her-flash")` 时 router 的组注册表里
+    **没有 `her-flash` 这个组**（325 个组里查无此名），于是它拿着一个不存在的
+    名字去试、重试、等 —— 25s 后被 `_probe_one` 自己的 `wait_for` 掐掉，
+    报出来是「超时 >25s（不返回）」，**与真的挂死同形**。
+
+    这就是为什么它只坑一半的名字。09-28 carher-14 实测（21 个名字）：
+
+    | 名字类型 | 例子 | router 认不认 | 老代码结果 |
+    |---|---|---|---|
+    | 本身就是组名 | `jev` `perplexity-sonar` `claude-opus-4-8` | ✅ | 测对了 |
+    | 有 router 级组别名 | `gpt-5.5` `gpt-5.6-terra/luna/sol` | ✅ | 测对了 |
+    | **只有 per-key alias** | `her-flash` `grok-4.6/4.7` `gemini-3.8-flash` `gpt-6-luna/sol` `grok-imagine-image-2.0` | ❌ | **8 个全假超时** |
+
+    相关性是干净的：报活的 10 个 **10/10** 在组注册表里，报超时的 8 个只有 **1/8** 在。
+    决定性实验：**同一把 key、同样这 8 个东西，填落点名去测 12.3s 里 7 活 1 死；
+    填公开名去测 25s 全超时。**（单打对照：haiku 0.79s / gemini 3.91s /
+    grok-4.6 1.18s / her-flash 3.51s，全活。）
+
+    ⛔ 老注释里那句「per-key alias 会在 router 之前把它改写成落点，跟用户真实发一次
+       完全同路」**在 callback 里不成立** —— 那是入口层的事，我们已经过了那个点。
+       同坑记忆：「两条 alias 规则方向相反：router 级查改写**前**、per-key 查改写
+       **后**」，这次是反着踩的。
+
+    ⛔ 判据不许按名字猜（有没有 `-`、前缀像不像落点）：只认 `row_lookup`，
+       它是 `llm_router.model_list` 的 `model_name` 索引 = router 真正认识的名字。
+       公开名自己就在里面时**优先发公开名**（那才跟用户同路）；只有它不在、
+       而落点在，才改发落点。两个都不在就原样发公开名并如实报错，不装作测过。
+
+    ⚠️ 代价说清楚：改发落点等于**跳过了 per-key alias 那一层**，所以这一格的绿
+       只证明「落点活着」，不证明「alias 映射本身没写错」。映射对不对由收敛工具的
+       值层回归管（比 backup 快照），不由探针管 —— 探针的职责是量腿死活。
     """
     allowed = getattr(user_api_key_dict, "models", None)
     if isinstance(allowed, dict):
@@ -1044,12 +1135,17 @@ def _probe_targets(user_api_key_dict: Any) -> list:
         #    少了 router 级那一路，`gpt-5.6-terra/luna/sol` 这类「只有组别名、没有
         #    per-key alias」的名字会永久报「未测」，而它们其实全是活的。
         mode = _probe_model_mode(name, row_lookup)
+        send = name if name in row_lookup else ""
         for target in (aliases.get(name), _router_group_alias_target(name)):
-            if mode:
-                break
-            if target:
-                mode = _probe_model_mode(str(target), row_lookup)
-        out.append((name, name, mode))
+            if not target:
+                continue
+            target = str(target)
+            if not mode:
+                mode = _probe_model_mode(target, row_lookup)
+            # 🔴 发出去的名字必须是 router 认识的那个（见下方长注释）。
+            if not send and target in row_lookup:
+                send = target
+        out.append((name, send or name, mode))
     return out
 
 
@@ -1083,7 +1179,9 @@ async def _probe_text(user_api_key_dict: Any) -> str:
         if not mode:
             # 🔴 判不出类型就**跳过并说清楚**，不默认当聊天打 —— 拿错协议打出来的
             #    红是假红，会让人以为模型死了。
-            return (show, None, "判不出模型类型（无 mode），未测", 0.0)
+            return (show, None,
+                    "判不出该用什么协议去打（无 mode）—— 拿错协议打出来的红是假红",
+                    0.0)
         async with sem:
             name, ok, why, secs = await _probe_one(send, mode, user_api_key_dict)
             return (show, ok, why, secs)
@@ -1138,9 +1236,19 @@ async def _probe_text(user_api_key_dict: Any) -> str:
         lines.append("")
 
     if skipped:
-        lines.append("⚠️ 未测：" + "、".join(
-            _escape_pipes(r[0]) for r in skipped) + "（判不出该用什么协议去打，"
-            "拿错协议打出来的红是假红，所以不测）")
+        # 🔴 未测**不是一个原因**，必须逐行报它自己的那个：
+        #    「判不出协议」（没 mode）和「推理吃光额度」（200 但正文空）是两个病，
+        #    合成一句话会把后者说成前者，下一个人照着去查 mode 必然查空。
+        w = max([_display_width("模型")] + [_display_width(r[0]) for r in skipped])
+        lines += [
+            "⚠️ 未测（未测 ≠ 不能用）",
+            "",
+            f"| {_pad('模型', w)} | 为什么没测 |",
+            f"|{'-' * (w + 2)}|------------|",
+        ]
+        for name, _ok, why, _s in sorted(skipped, key=lambda r: r[0]):
+            lines.append(
+                f"| {_pad(_escape_pipes(name), w)} | {_escape_pipes(why)} |")
         lines.append("")
 
     if len(targets) >= _PROBE_MAX_MODELS:

@@ -770,9 +770,21 @@ async def _ttft_text(user_api_key_dict: Any) -> str:
 # 所以只能在 proxy 内部用 auth 对象的身份打，反倒不用倒手密钥。
 
 _PROBE_MAX_MODELS = 40          # 防一把 key 白名单几百个名字把一次命令拖成几分钟
-_PROBE_CONCURRENCY = 8          # 并发上限；cr-g 那种挂死腿会占满 timeout，别放太宽
-_PROBE_TIMEOUT_S = 25.0         # 🔴 cr-g 实测「挂死是不返回」(90s 零字节)，必须自带超时
-_PROBE_MAX_TOKENS = 16          # 只要证明它回话，不要它写作文
+# 🔴 并发与超时是**算术耦合**的，改一个必须算另一个：
+#    最坏总耗时 ≈ ceil(_PROBE_MAX_MODELS / _PROBE_CONCURRENCY) × _PROBE_TIMEOUT_S。
+#    40 / 8 × 120s = 10 分钟 —— 客户端早断了，用户看到的是「命令没反应」，
+#    与「命令不存在」同形。现在 40 / 40 × 120s = 120s，一轮打完，不排队。
+#
+# 🔴 09-27 carher-14 实测：8 并发下 21 个名字里 9 个撞 25s 超时报「不返回」，
+#    而同一批落点**单打全在 1.4–3.6s**（chatgpt-gpt-6-luna 1.49s 单打 →
+#    12.33s 8 并发）。那 9 个红全是排队挤出来的假红，不是模型死了。
+#    所以并发上限不能小于一次要测的模型数，否则后面几批的耗时里混着排队时间。
+_PROBE_CONCURRENCY = 40         # = _PROBE_MAX_MODELS，一轮打完不排队（见上）
+_PROBE_TIMEOUT_S = 120.0        # 🔴 cr-g 实测「挂死是不返回」(90s 零字节)，必须自带超时
+# 🔴 16 太小：推理模型会把这 16 个 token 全花在推理上，一个字都不吐，
+#    返回 200 + content 空 + finish_reason=length —— 判据是「回了非空内容」，
+#    于是健康的推理模型恒报红。09-27 实测 claude-opus-5 / her-flash 都是这个假红。
+_PROBE_MAX_TOKENS = 100         # 给推理 token 留余量，否则推理模型恒假红
 _PROBE_PROMPT = "ping"
 
 

@@ -130,7 +130,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEV_NS = "litellm-dev"
 PROD_NS = "litellm-product"
 GROK_GROUP = 7
-GROK_ENTRIES = ["sa-grok-4.5", "sa-grok-4.6", "sa-grok-4.20"]
+GROK_ENTRIES = ["sa-grok-4.5", "sa-grok-4.6", "sa-grok-4.20", "sa-grok-4.7"]
 
 REMOTE = os.environ.get("S2A_HOST", "cltx@10.68.13.198")
 REMOTE_DIR = os.environ.get("S2A_REMOTE_DIR", "/home/cltx/grok-onboard")
@@ -598,13 +598,48 @@ def cmd_parse(a):
 
 # ---------------------------------------------------------------- verify
 
+def _sso_403_note(count, total):
+    """The 09-25..09-28 shape: every line 403s on sub2api's own SSO endpoints.
+
+    Say what it IS, because the bare failure reads as "the user's tokens are
+    dead" and that costs a full round of re-authenticating good credentials.
+    Root cause (positive control, 2026-09-28): accounts.x.ai refuses datacenter
+    egress.  Same sso, same minute -- from the sub2api pod (172.235.204.67)
+    accounts.x.ai/api/auth/session is 403+Cloudflare HTML; from the 225 WARP
+    egress (104.28.238.115) the SAME url is 200 authenticated; meanwhile
+    auth.x.ai/oauth2/device/code is 200 from both.  One variable moved, so
+    sub2api's own version is NOT the cause -- do not put v0.2.8 in the report.
+    """
+    if not count:
+        return
+    print("\n🔴 %d/%d line(s) got 403 from sub2api's SSO endpoint." % (count, total))
+    print("   This is very likely NOT your tokens. accounts.x.ai blocks datacenter")
+    print("   egress; the pod cannot reach it at all, while the 225 WARP egress")
+    print("   gets 200 on the same URL in the same minute (positive control).")
+    print("   ⛔ Do not blame sub2api's version, and do not re-ask the user for")
+    print("      fresh credentials before checking the detour below.")
+    print("   ✅ Detour that works (4/4 on 09-28): capture on 225 through WARP,")
+    print("      then write the legs straight into the DB --")
+    print("        # on 225 (WARP socks5 127.0.0.1:40000)")
+    print("        python3 xai_sso_device_oauth.py --creds <0600 file> \\")
+    print("            --out-dir /tmp/xai-bundles")
+    print("        # then on 198, beside sub2api_admin.py")
+    print("        sudo -n env MODEL_MAP_FROM=61 S2A_PW_FILE=$PWD/.pw \\")
+    print("            python3 create-grok-oauth-account.py bundle-*.json")
+    print("   Prove the credential is fine first: grok.com/rest/auth/get-user")
+    print("   answers 200 from any egress, and the capture script asserts it.")
+
+
 def cmd_verify(a):
     call, tok = _load_helper()
     bad = 0
+    sso_403 = 0
     creds = resolve_subs(parse_creds(a.creds), call, tok)
     for c in creds:
         st, j = call("POST", "/api/v1/admin/grok/oauth/sso-token",
                      {"sso_token": c["sso"]}, token=tok)
+        if st == 403:
+            sso_403 += 1
         d = (j or {}).get("data") or {}
         sub = d.get("sub") or d.get("user_id")
         match = sub == c["userid"]
@@ -621,6 +656,7 @@ def cmd_verify(a):
           "exchanges 200 with tier=supergrok_heavy and then gets\n"
           "    403 personal-team-blocked:spending-limit from x.ai. Only the "
           "direct probe (`health --xai`, or `onboard`) decides that.")
+    _sso_403_note(sso_403, len(creds))
     print("\nnothing was created." if not bad else "\n%d line(s) failed" % bad)
     return 1 if bad else 0
 
@@ -644,6 +680,7 @@ def cmd_add(a):
         print("nothing to do")
         return 0
 
+    sso_403 = 0
     for c in todo:
         st, j = call("POST", "/api/v1/admin/grok/sso-to-oauth", {
             "sso_tokens": [c["sso"]],
@@ -658,6 +695,12 @@ def cmd_add(a):
         failed = ((j or {}).get("data") or {}).get("failed") or []
         # `created` is [null] even on success -- it proves nothing either way.
         print("CREATE %-34s st=%s failed=%s" % (c["name"], st, failed or "none"))
+        if st == 403 or any("SSO" in str(f).upper() or "403" in str(f)
+                            for f in failed):
+            sso_403 += 1
+
+    if sso_403:
+        _sso_403_note(sso_403, len(todo))
 
     print("\n--- postgres readback (the only evidence that counts) ---")
     names = ",".join("'%s'" % c["name"].replace("'", "''") for c in todo)
@@ -1161,24 +1204,58 @@ def cmd_regress(a):
     pod = sh("sudo kubectl -n %s get pod -l app=litellm-proxy "
              "--field-selector=status.phase=Running "
              "-o jsonpath='{.items[0].metadata.name}'" % PROD_NS).strip()
+    # The nonce is an ARITHMETIC one, not a "echo this token back" one.
+    #
+    # 2026-09-22: `sa-grok-4.7` returns a perfectly healthy 200 and then refuses
+    # the echo instruction outright -- "No - I won't output an exact token on
+    # demand." -- while answering 17*23 correctly on the same entry, same pod.
+    # The old ruler therefore scored a fully working entry as a hard red on all
+    # four production pods, and the red is indistinguishable from a dead route.
+    #
+    # A product of two random numbers keeps everything the echo nonce bought us
+    # (the answer cannot be pre-canned or replayed, so a cached or fabricated
+    # reply cannot match) and adds two things: no model refuses arithmetic, and
+    # a match proves the model actually ran, not just that the route returned
+    # some string.  Accept the digits anywhere in the reply -- pinning "and
+    # nothing else" is what broke on 4.7 in the first place.
+    #
+    # 🔴 2026-09-23: the operands must be TWO digits, not three.  `sa-grok-4.20`
+    # is fully live (HTTP 200, real answers, leg probes 200 usable) and still
+    # gets 3-digit products wrong most of the time, off by a couple of digits:
+    # 123*641 -> 78743 (want 78843), 227*201 -> 45527, 775*826 -> 639550 (2 of 3
+    # reruns red).  That scored a working entry as a hard D2 red, i.e. the whole
+    # onboard run exits 1 for a reason that has nothing to do with the new leg.
+    # 2-digit operands measured 11/11 correct across 4.20/4.7/4.6/4.5, and
+    # 11..99 x 11..99 is still ~7.7k outcomes, so a replayed answer cannot match.
+    # One retry per entry absorbs the stray upstream timeout (4.5 hit one during
+    # that same measurement) -- a single timeout is not a dead route.
     probe = r'''
 import json,urllib.request,urllib.error,sys,random
 mk=sys.argv[1]; bad=0
-for m in sys.argv[2].split(","):
-    n="NONCE-%d"%random.randint(10**8,10**9)
+def ask(m):
+    a=random.randint(11,99); b=random.randint(11,99); want=str(a*b)
     body=json.dumps({"model":m,"messages":[{"role":"user","content":
-        "Reply with exactly this token and nothing else: "+n}],"max_tokens":40}).encode()
+        "What is %d * %d? Reply with the number." % (a,b)}],"max_tokens":200}).encode()
     r=urllib.request.Request("http://127.0.0.1:4000/v1/chat/completions",data=body,
         headers={"Authorization":"Bearer "+mk,"Content-Type":"application/json"})
     try:
         d=json.load(urllib.request.urlopen(r,timeout=120))
-        t=d["choices"][0]["message"]["content"]
-        ok = n in t; bad += 0 if ok else 1
-        print("  %-14s 200  nonce_match=%s" % (m, ok))
+        t=d["choices"][0]["message"]["content"] or ""
+        ok = want in t.replace(",","")
+        return ok, ("  %-14s 200  nonce_match=%s  (%d*%d=%s)%s"
+                    % (m, ok, a, b, want, "" if ok else "  got=%r" % t[:80]))
     except urllib.error.HTTPError as e:
-        bad+=1; print("  %-14s %s  %s" % (m, e.code, e.read().decode()[:160]))
+        return False, "  %-14s %s  %s" % (m, e.code, e.read().decode()[:160])
     except Exception as e:
-        bad+=1; print("  %-14s ERR %s" % (m, str(e)[:120]))
+        return False, "  %-14s ERR %s" % (m, str(e)[:120])
+for m in sys.argv[2].split(","):
+    ok, line = ask(m)
+    print(line)
+    if not ok:
+        print("     retrying once -- one miss is not a verdict")
+        ok, line = ask(m)
+        print(line)
+    bad += 0 if ok else 1
 sys.exit(1 if bad else 0)
 '''
     tmp = "/tmp/.s2a-probe-%d.py" % random.randint(10**6, 10**7)

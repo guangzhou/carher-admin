@@ -64,14 +64,30 @@ scripts/litellm-198-router-patch-install.sh rollback dead_deployment_retry.py \
 - 容器内 `sha256sum /app/<mod>.py` == 本地文件 sha
 - 日志里 `<mod>: installed` ≥ 1 行
 - 日志里 `<mod>.*mismatch` == 0 行
+- 日志里**该补丁自己的拒装字样** == 0 行（每道守卫的 `return` 分支各一条）
 
-三条缺一就回滚。
+四条缺一就回滚。
+
+🔴 **第 1 条单独成立 = 假绿。** 文件 sha 只证明**文件装载了**，
+不证明**补丁装上了** —— 守卫拒装时 sha 照样对得上，而 Router 方法根本没被替换，
+两者在 sha 这把尺子下**完全同形**。2026-09-29 我只核了 sha 就报"已上线"，
+那一刻 4/4 副本的补丁全被自己的守卫拒了
+（[[feedback_guard_must_warn_not_refuse_when_its_ruler_breaks]]）。
+所以**第 2、4 条是不可省的**：一条证明装上了，一条证明没被自己的守卫挡掉。
 
 ### 补丁文件本身的三条硬要求
 
 1. **保存原函数引用，不命中判别条件就原样调原函数** → 对其他所有情况逐字节不变
-2. **源码指纹守卫**：`inspect.getsource` 原方法，比对一个只在该版本存在的特征串；
-   对不上就拒绝安装 + 打 error log + 保持原状（升级 litellm 时这是唯一的安全网）
+2. **源码指纹守卫**：`inspect.getsource` 原方法，比对一个只在该版本存在的特征串
+   （升级 litellm 时这是唯一的安全网）。⚠️ **但要按后果分两级，别一律拒装**：
+   - 缺了补丁就跑不起来的（import 不到某个类、方法体不是拷的那份）→ 拒装 + error log
+   - 只是"读出来的文本不符预期"→ **`warning` + 继续装**，下次换镜像人工 re-diff
+
+   理由：`inspect.getsource` 读不到是**量具坏了**，不等于**上游改了行为**。
+   上游真改了，拒装是安全降级；量具坏了却拒装，是把能用的补丁关掉。
+   2026-09-29 我把两者混为一谈，坏尺子让 **4/4 生产副本全部拒装**、线上退回无补丁约 8 分钟
+   ⇒ [[feedback_guard_must_warn_not_refuse_when_its_ruler_breaks]]。
+   **每道守卫上生产后必须逐副本 grep 确认它没误触发**（见下方验收判据第 3 条）。
 3. 整个 `_install()` 包在 try/except 里 —— **补丁装不上，绝不能拖垮 proxy 启动**
 
 范例：`k8s/litellm-callbacks/dead_deployment_retry.py`。
@@ -200,6 +216,8 @@ pool key       → 3/3 健康叶子 /v1/models = 200，12 个 model       ← �
 - 计划与全部事实/推测表：`docs/dead-deployment-retry-plan.md`
 - [[project_dead_deployment_retry_patch_2026_09_07]]
 - [[litellm-hook-dev]] — 阿里云 ns `carher` 的 CustomLogger hook 开发（**不是这套 SOP**）
+- [[litellm-midstream-chain-descent]] — 中流失败后**链子不往下走**（重发全砸第 1 跳）；
+  含守卫必须按后果分两级：读不到源码只告警，混为一谈会让坏尺子关停 4/4 副本
 - [[topic_litellm_ops_index]]
 - [[feedback_synthetic_red_is_as_untrusted_as_synthetic_green]] — 第 0 步阳性对照
 - [[feedback_manifest_prod_drift_apply_overwrites]] — 禁 apply

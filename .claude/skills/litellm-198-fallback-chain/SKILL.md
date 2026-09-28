@@ -106,6 +106,18 @@ kubectl -n litellm-product get pods -l carher.net/litellm-production-route=enabl
 `STORE_MODEL_IN_DB=True` ⇒ 权威源是 Postgres `LiteLLM_Config` 里
 `param_name='router_settings'` 那一行。**改 ConfigMap 是 no-op。**
 
+🔴 **两份可以完全矛盾，而只有 DB 那份生效。** 2026-09-29 实测：DB 里 astra 是
+五个目标，`config.yaml` 里同一个组只有一个目标（旧残留）。源码
+`ProxyConfig._add_router_settings_from_db_config` 是**整键覆盖**，
+只有 DB 值为**空列表**时才让位给 yaml ⇒ 「DB 里有非空 fallbacks」
+= 「yaml 那份完全不参与运算」。
+两个方向都危险：只读 yaml 会把五层链判成一层，然后去改根本不生效的那份
+（多换一个 CM、多一份风险）⇒ [[feedback_db_router_settings_overlays_config_yaml]]。
+
+**链子要几层就在同一行写几个目标**（一行五目标），
+⛔ 别拆成"每组指向下一组"的链式单跳 —— 那在 `attempted_targets` 去重表下
+会退化成只重试 1 次 ⇒ [[litellm-midstream-chain-descent]] §2。
+
 ```sql
 update "LiteLLM_Config"
    set param_value = jsonb_set(param_value, '{fallbacks}', $$[...]$$::jsonb)

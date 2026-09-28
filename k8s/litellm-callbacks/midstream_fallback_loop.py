@@ -96,8 +96,9 @@ def _install_midstream_fallback_loop() -> None:
         )
 
         # 链子逐层下降依赖这个去重表（见下方 attempted_targets 注释）。
-        # 它在 v1.90.2 的 fallback_event_handlers 里；upstream 挪了位置或改了名
-        # 就会 ImportError，走下面的 skip —— 保持原单发行为，不要半装。
+        # 它在 v1.90.2 的 fallback_event_handlers 里。这一条是**硬拒装**：
+        # 类不存在则下面的注入代码根本跑不起来（NameError），必须拦在安装期。
+        # 与它相邻的「源码文本守卫」不同 —— 那条只告警，理由见该处注释。
         from litellm.router_utils.fallback_event_handlers import (
             AttemptedFallbackTargets as _AttemptedFallbackTargets,
         )
@@ -133,25 +134,41 @@ def _install_midstream_fallback_loop() -> None:
     # 第二道守卫：我们往 kwargs 塞 attempted_targets，靠的是 run_async_fallback
     # 会把它**接过去**（`carried_targets = kwargs.get("attempted_targets")`）。
     # 上游哪天不再读这个 key，注入就变成一句无害的死代码 —— 表现是链子静默
-    # 退回「10 发全砸第一层」，没有任何报错。所以升级镜像时必须在这里炸出来。
+    # 退回「10 发全砸第一层」，没有任何报错。所以要在安装期留下痕迹。
+    #
+    # [2026-09-29] 本守卫**只告警、不拒装**。第一版写成了 `return`（拒装），
+    # 上生产后 4/4 副本全部拒装 —— 线上退回完全不打补丁的原单发行为，
+    # 比打补丁前更差（连同组重挑 3 次都没了）。而同一套判据在 exec 起的
+    # 干净进程里怎么测都是通过（冷/热 import、带不带 sitecustomize，全 True），
+    # 差异复现不出来。
+    #
+    # 「为什么 worker 里读不到」这一项**我没查出来，不下结论**。已排除的：
+    # 源码只有一份（find 全盘一个 .py + 一个 .pyc）、needle 在第 384 行确实是
+    # 双引号、函数无 __wrapped__、模块路径与 __module__ 一致。没排除的：
+    # uvicorn 多 worker 下 inspect/linecache 的行为。
+    #
+    # 但无论那个原因是什么，**拒装都是错的响应**：守卫的作用是「上游变了要让我
+    # 知道」，不该是「读不到就把能用的补丁关掉」。inspect.getsource 读不到源码
+    # 是**量具坏了**，不是**上游改了行为**，这两件事我第一版混为一谈了。
+    # 真出问题的降级是安全的（链子退回单层，和补丁前一样），而拒装的降级不安全。
     try:
         from litellm.router_utils.fallback_event_handlers import run_async_fallback
 
         _fb_src = inspect.getsource(run_async_fallback)
     except Exception as exc:
-        verbose_router_logger.error(
-            "midstream_fallback_loop: cannot read run_async_fallback source, "
-            "skip: %r",
+        verbose_router_logger.warning(
+            "midstream_fallback_loop: cannot read run_async_fallback source "
+            "(%r) — proceeding with attempted_targets injection unverified",
             exc,
         )
-        return
-    if 'kwargs.get("attempted_targets")' not in _fb_src:
-        verbose_router_logger.error(
-            "midstream_fallback_loop: run_async_fallback no longer reads "
-            "attempted_targets from kwargs — chain descent would silently "
-            "degrade to same-group-only, NOT patching"
-        )
-        return
+    else:
+        if 'kwargs.get("attempted_targets")' not in _fb_src:
+            verbose_router_logger.warning(
+                "midstream_fallback_loop: run_async_fallback source does not "
+                "show kwargs.get(\"attempted_targets\") — if upstream really "
+                "dropped it, chain descent degrades to same-group-only; "
+                "re-diff fallback_event_handlers.py on the next image bump"
+            )
 
     async def _patched_aresponses_streaming_iterator(
         self,

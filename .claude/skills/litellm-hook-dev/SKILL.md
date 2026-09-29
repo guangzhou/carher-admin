@@ -243,6 +243,29 @@ scripts/litellm-198-callback-update.py verify deepseek_responses_adapt.py
 形状跟「新代码把流搞坏了」一模一样。定罪前先过
 [[codex-remote-compaction-triage]] §6 的两层判据（代码路径可达性 + rollout 窗口）。
 
+#### 🔴 验收「4 个 pod 都吃到新代码」：pod 名每次 rollout 都变（2026-09-28）
+
+两个坑连在一起，合起来能造出一整轮假根因：
+
+1. **把上一轮记下来的 pod 名接着用** ⇒ `exec` 打在不存在的 pod 上。
+   `kubectl exec <gone-pod> -- printenv X` 在有些路径下**只回空、不报错** ⇒
+   读成「这个 env 没配」，跟「配置真缺」同形。本轮由此差点得出
+   「窄门 env 没下发到 3 个 pod」的错误结论。
+   ⛔ 别用 `-l app.kubernetes.io/name=litellm`（198 上返回空，也是假红）。
+   ✅ 每次现枚举：
+   ```bash
+   PODS=$(kubectl -n litellm-product get pods --no-headers \
+          | awk '/^litellm-proxy-/ && $3=="Running" {print $1}')
+   ```
+2. **env 的权威源是 Deployment spec，不是 pod 里 printenv 的手感。**
+   先读 `deploy/litellm-proxy` 的 `spec.template.spec.containers[].env`，
+   再逐 pod 核对；**每次 exec 都带一个阳性对照**（`print(bool(os.environ["HOSTNAME"]))`），
+   对照也空 = 尺子坏，不是配置缺。
+
+容器里没 `sha256sum`、没 `curl` ⇒ 量文件身份用 in-pod `python3 -c "import hashlib…"`。
+挂载路径是**单文件 subPath**（`/app/budget_notice.py`），
+**没有 `/app/callbacks/` 这个目录** —— 探它一律空输出，又一个同形假红。
+
 ### Step 3: 建 canary（独立 Deployment + Service，不影响主流量）
 
 4 个临时资源（名字都加 `-canary` 后缀）：

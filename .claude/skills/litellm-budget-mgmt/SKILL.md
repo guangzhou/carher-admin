@@ -337,6 +337,58 @@ scripts/litellm-198-cursor-family-budget-audit.sh --exclude canary   # 排除灰
 `budget_notice:` 行**（或全链 T0 `scripts/litellm-198-t0-fullchain.sh`，那里 key 已预热），
 不要拿冒烟新 key 下"功能没生效"的结论。
 
+### 🔴 验 ①⑤ 必须用**真 bot 的多条尾部 user 形状**，单条消息测不出来（2026-09-28）
+
+`scripts/litellm-198-budget-notice-smoke.sh` 的 S7 一直在测 `/查余额`，一直绿，
+但它发的是 `messages=[{"role":"user","content":"/查余额"}]` —— **单条**。
+生产 openclaw 一轮发的是**尾部连续三条 `role=user`**：
+
+```
+idx-3  role=user   [<turn_aborted>] 上一轮被打断
+idx-2  role=user   正文；命令 `/查余额` 独占最后一行
+idx-1  role=user   OpenClaw runtime context…<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>…（无命令）
+```
+
+旧代码 `_last_user_text()` 只取**最后一条** ⇒ 命令永远看不见 ⇒ 当普通聊天放过去，
+烧一整轮 agent 推理（实测 carher-75：`her-pro · 114k in / 1.3k out · 39.7s`，
+用户看到的是模型自己转述的余额，不是短路卡片）。已修为 `_tail_user_texts()`：
+尾部**连续** user、遇 assistant/tool/无 role 即停（否则上一轮的 `/查余额` 会让之后
+每轮重复短路）、最多 6 条、长度闸门**按每条**生效（拼成一段则一超 20000 把真命令一起判死）。
+
+**所以冒烟脚本的单条形状是结构性盲区。** 验 ①⑤ 用这个判据组：
+
+| 检查 | 判据 |
+|---|---|
+| ① 命令在倒数第二条 | 200 + 含「今日用量」+ **`in_tok` 是个位数** + <5s |
+| ② 阴性对照（同形状普通问题） | 200 + **不**含「今日用量」+ `in_tok` 上百 |
+| ⑤ `/测模型` | 200 + 含「能用」或「未测」 |
+
+🔴 **`in_tok` 才是短路的判据，不是文案。** 短路走 `mock_response`，`in_tok` 恒个位数
+（实测 10）；真打上游是几百到十几万。只看「有没有那段文案」分不出
+「短路了」和「模型正好把余额转述对了」。
+
+### 🔴 验「其他 carher 是否同时生效」：窄门是前缀匹配，但别只推不打（2026-09-28）
+
+`BUDGET_NOTICE_QUOTA_KEY_PREFIXES=carher-` 是**前缀**匹配 ⇒ 结构上全部 `carher-*` 都在门内。
+但「同一段代码 + 同一道门」只是**推断**，要现场证据就得拿**另一个** carher 的真 key 实打一发
+（证明不是那一把 key 碰巧好了）。三个坑：
+
+1. 🔴 **别新建 key 测** —— 见上一节，新 key 在 hook 里拿不到 alias。而且新 key 白名单里
+   写了公开名却没配 alias 会被 LiteLLM 在**进 hook 之前**挡掉：
+   `400 ProxyModelNotFoundError: Invalid model name passed in model=her-pro`。
+   见 [[feedback_allowlist_name_without_alias_is_400]]。
+2. 🔴 **真 key 在 bot 容器的 env 里，不在 198**（DB 只存 sha256）。188 上
+   `docker exec hermestest-<id> printenv` 的 `LITELLM_API_KEY` / `CARHER_PROD_KEY` /
+   `OPENAI_API_KEY` 是同一把。对账认 `sha256(key) == LiteLLM_VerificationToken.token`，
+   **不认 alias**。⚠️ 188 上 `docker` 不要加 `sudo`（加了 rc=1），且**没有 kubectl**。
+3. 🔴 **每把 carher 的白名单不一样，拿错模型名 403 与「功能没生效」同形**。
+   carher-14 在 09-28 的 27→21 合并里已删掉 `her-pro`，用它打会
+   `403 key_model_access_denied`，且**阴性对照一起红** ⇒ 这时判尺子坏，不是短路坏。
+   先 `select unnest(models) … where key_alias=…` 拿它真有的名（carher-14 用 `her-flash`）。
+
+2026-09-28 实测：carher-14 用自己容器里的真生产 key 打上面三条，①② 全 PASS
+（`/查余额` 0.40s / `in_tok=10`；阴性对照 4.06s / `in_tok=189`）。
+
 ## 重置时刻在哪个时区 —— 只看 `litellm_settings.timezone`
 
 **重置发生在几点，跟主机 TZ / 容器 TZ / DB TZ 全无关**（2026-08-06 在 198 实测，litellm 1.90.2）：

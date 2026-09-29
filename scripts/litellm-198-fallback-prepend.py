@@ -124,13 +124,21 @@ def master_key() -> str:
     return base64.b64decode(b64).decode()
 
 
-def pod_live(ip: str, mk: str) -> tuple[int, int, list | None]:
-    """(fallback row count, alias count, sa-grok row) as the pod holds it in memory."""
+def pod_live(ip: str, mk: str, group: str) -> tuple[int, int, list | None]:
+    """(fallback row count, alias count, THAT group's row) as the pod holds it in memory.
+
+    ``group`` must be passed in. This read used to be pinned to ``DEFAULT_GROUP``
+    (``sa-grok-4.6``) while the caller varied ``--group``: for any other group the
+    poll loop and ``--verify`` both interrogated the wrong row, so every pod read
+    as permanently lagging and the script steered toward a production restart that
+    the hot reload had already made unnecessary. A ruler with a name hardcoded in
+    it goes permanently blind on every group added after it was written.
+    """
     raw = sh(["curl", "-s", "-m", "25", f"http://{ip}:4000/get/config/callbacks",
               "-H", f"Authorization: Bearer {mk}"])
     rs = json.loads(raw)["router_settings"]
     fb = rs.get("fallbacks") or []
-    return len(fb), len(rs.get("model_group_alias") or {}), rows_of(fb).get(DEFAULT_GROUP)
+    return len(fb), len(rs.get("model_group_alias") or {}), rows_of(fb).get(group)
 
 
 def live_group_exists(ip: str, mk: str, name: str) -> bool:
@@ -291,7 +299,7 @@ def main() -> int:
               f"rows={len(rs['fallbacks'])} alias={len(rs['model_group_alias'])}")
         ok = True
         for name, ip in pods:
-            fbn, aln, row = pod_live(ip, mk)
+            fbn, aln, row = pod_live(ip, mk, a.group)
             good = bool(row) and row[0] == a.target
             ok &= good
             print(f"  {'OK ' if good else 'NO '} {name} {ip}  fb={fbn} alias={aln}  {a.group}={row}")
@@ -355,7 +363,7 @@ def main() -> int:
         time.sleep(10)
         lagging = []
         for name, ip in pods:
-            _, _, row = pod_live(ip, mk)
+            _, _, row = pod_live(ip, mk, a.group)
             if not (row and row[0] == a.target):
                 lagging.append(name)
         print(f"  ok={len(pods) - len(lagging)}/{len(pods)}"

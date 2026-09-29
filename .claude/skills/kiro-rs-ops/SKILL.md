@@ -50,7 +50,7 @@ description: >-
 ⚠️ **镜像只在 242 本地**。Deployment 靠 nodeSelector 钉在 242 才成立，
 换节点/重装节点必须重新 import，否则起不来。构建产物留在 `188:/Data/kiro-build/`。
 
-## §0.1 三个脚本：读用 `kiro-probe.py`，写用 `kiro-pool.py`，回归用 `kiro-lane-regress.sh`
+## §0.1 五个脚本：读用 `kiro-probe.py`，写用 `kiro-pool.py`，回归用 `kiro-lane-regress.sh`
 
 本仓 `scripts/` 下，都在**本机**跑（内部自己 ssh 198），不需要先登录：
 
@@ -59,6 +59,15 @@ description: >-
 | `kiro-pool.py` | **写**（admin API，零重启） | `show [--with-quota]` / `add <导出json>` / `remove <id>` / `priority <id> <n>` / `extract <备份> <who>` |
 | `kiro-probe.py` | **纯只读**（直打 AWS） | `catalog`（`ListAvailableModels` 逐号）/ `quota` / `both` / `has <模型…>`（退出码即判据）。凭据与出口都从 live pod 现取，401/403 自己走 refresh（**按 `authMethod` 分流 idc / social**）。social 号必带 `--out-rotated FILE`，见 §D3 第 0 步 |
 | `kiro-lane-regress.sh` | 只读压测 | 19 条道回归一条龙：车道名现取 + **条数断言** + bench + in_tok 容差带比对。见 §E |
+| `kiro-lane-add.py` | 生成 CM（**不写集群**） | 加一条 `kiro-*` 道：`<src> <dst> --name … --template <照抄哪条道> --litellm-model … --upstream-id … --rate-multiplier …`。字段级替换 ⇒ 缓存价/窗口/`mode` 从模板**继承**而不是重打（漏 `mode` 会让 `/测模型` 报「⚠️ 未测」，与模型真坏同形）。自己拒的四种情形见 §D1 |
+| `litellm-198-key-behavior-regress.py` | 只读 + 一把短命 key | 改完 key 白名单/alias 的**行为层**回归：克隆真 key 形状起临时 key → 打新名/老名/**白名单外的名** → 删。见 §D1 |
+
+🔴 **`kiro-lane-add.py` 与 `litellm-198-key-behavior-regress.py` 是 09-29 从 198 盘上
+两个一次性脚本（`~cltx/add-kiro-opus55-lane.py`、`~cltx/o55-keytest.py`）泛化进仓的。**
+在那之前这两步在 SOP 里只有散落的命令片段，脚本本体**只在 198 的磁盘上**
+—— 换台机器、或那台机器重装，这轮的手艺就没了（`feedback_sop_referenced_scripts_were_never_in_git`）。
+泛化的验收方式：拿生产上**改前那份 CM 当夹具重放**，产物与生产改后那份**逐字节相同**
+（sha `6c0c13749315`，正好等于派生 CM 名字的后缀 —— 派生 CM 名 = `sha256(config.yaml)[:12]`）。
 
 **日常这一条就够**：`python3 scripts/kiro-pool.py show --with-quota`
 —— 池状态 + 盘上一致性 + pod 零重启 + **每个号的 live 档位/余额**，一屏出全。
@@ -339,6 +348,39 @@ CM `litellm-config` 的 `model_list` **纯加法**（当时 74→92，added=18 /
 Secret `litellm-secrets` 加 `KIRO_RS_API_KEY` 用 **merge patch**，别整体替换。
 ⛔ litellm-proxy 变更**禁 apply**，只用 `set image`/`patch`。
 
+### §D0 加一条 `kiro-*` 道（脚本 `scripts/kiro-lane-add.py`，09-29 泛化入仓）
+
+🔴 **改的不是 `cm/litellm-config`** —— pod 挂的是内容哈希派生的
+`litellm-cwfb-stable-<hash>`，走 `subPath`，**永不热更**（§E、
+`feedback_198_lane_pods_mount_derived_cwfb_cm_not_litellm_config`）。
+patch 母 CM 是零效果，而且这两份 09-29 实测已漂 161 行。
+
+```sh
+# 1. 读 deploy 真挂的那个派生 CM（不是母 CM）
+MOUNTED=$(sudo kubectl -n litellm-product get deploy litellm-proxy \
+  -o jsonpath='{.spec.template.spec.volumes[0].configMap.name}')
+sudo kubectl -n litellm-product get cm $MOUNTED \
+  -o jsonpath='{.data.config\.yaml}' > /tmp/cm-cur.yaml
+
+# 2. 生成新内容（纯本地，不碰集群）。--template 指照抄哪条道
+python3 scripts/kiro-lane-add.py /tmp/cm-cur.yaml /tmp/cm-new.yaml \
+  --name kiro-claude-opus-5-5 --template kiro-claude-opus-5 \
+  --litellm-model claude-opus-5-5 --upstream-id claude-opus-5.5 \
+  --rate-multiplier 2.0
+# 它打印 NEW=litellm-cwfb-stable-<sha256(内容)[:12]> —— 这个名字是**自校验**的：
+# 派生 CM 名就是内容 sha 的前 12 位，名字对上 = 内容对上。
+
+# 3. 建新 CM → 带 test op 的守卫式 patch → rollout（命令由脚本原样打出）
+```
+
+⚠️ **`--template` 是为了继承而不是省事**：缓存价、窗口、`mode` 都从模板那条道抄。
+手写漏掉 `mode` ⇒ `/测模型` 报「⚠️ 未测」，**与模型真的坏了同形**。
+
+脚本拒跑的四种情形（都会让 dst 一个字节都不写）：
+dst 已存在且不是本轮产物（09-29 真踩过 —— 拿上一轮的 `/tmp/lane-new.yaml` 去 diff，
+看着"改动已在"实际什么都没生成）／道名已在（幂等）／模板道找不到或不唯一／
+模板里没有 `model: anthropic/<id>` 行。
+
 **⚠️ 三条 gpt 道必须带别名前缀。** `gpt-5.6-sol/terra/luna` 恰好是 LiteLLM 内置
 OpenAI 名，`main.py:2656` 在判 provider **之前**先查
 `litellm.open_ai_chat_completion_models`，于是即便写了 `anthropic/` 前缀 +
@@ -407,10 +449,35 @@ python3 litellm-198-key-allowlist.py --prefix cursor- \
 | `claude-` | 674 | 674（含 4 把 unrestricted 在域内）| 674/674 |
 | `carher-` | 237 | 237 | 237/237 |
 
-✅ 行为层三向对照（临时 key，用完即删）：
+✅ 行为层三向对照（临时 key，用完即删）——**09-29 起固化成脚本**：
+
+```sh
+# 值层（比快照）：scripts/litellm-key-drift-verify.py，判 now == old ∪ {新增名}
+# 行为层（证真能打）：
+LITELLM_MASTER_KEY=$MK python3 scripts/litellm-198-key-behavior-regress.py \
+  --clone-from cursor-liuguoxian-std \
+  --new claude-opus-5-5 --old claude-opus-5 --outside claude-opus-4-8
+```
+
 `claude-opus-5-5` → 200 走 alias；`claude-opus-5` → 200 仍落同名真实组（**没被新名劫走**）；
 `claude-opus-4-8`（故意不进白名单）→ **403 `key_model_access_denied`**（证明闸门真在拦）。
-⛔ 少了第三发就答不了"白名单到底有没有在生效"，只有前两发的绿是**恒绿**。
+⛔ 少了第三发就答不了"白名单到底有没有在生效"，只有前两发的绿是**恒绿**
+—— 所以**脚本把"阴性对照没返 403"判成整轮无效**，不是一条普通失败：
+闸门没在挡的时候，"通过"与"不通过"这两种世界的读数逐字相同。
+
+🔴 三条只能用脚本、手搓 curl 必踩的：
+1. **不许用 master key 打** —— 它不过 per-key 白名单闸门，打什么都 200 ⇒ 必然假绿。
+   真 key 明文取不回来（库里只有 hash），所以唯一的路是克隆形状起临时 key。
+2. **每发带唯一 nonce** —— 响应缓存开着，逐字节相同的请求到不了上游，那种 200 量的是缓存。
+3. **判据是"回了非空内容"不是 200**（空内容 200 在 198 上是真实故障面）；
+   而**响应体的 `model` 字段是请求名的逐字回显**，一个字都判不了落点
+   —— 判落点看 SpendLogs 的 `model` 列，或上游侧 `RUST_LOG=debug`（§G）。
+   脚本结尾固定把这句打出来，免得把行为层的绿读成"落点也对"。
+
+脚本自己拒跑的四种情形（都是量不出东西的局，报红比出数有用）：
+没 `LITELLM_MASTER_KEY`（⛔ 不许兜底默认值）／没给 `--outside`（这轮无分辨力）／
+`--outside` 的名就在白名单里（对照是坏的）／参考 key 是 `models=[]` 全放行（克隆它 = 闸门全开）。
+另外**建不出临时 key 时退 2 而不是 1** —— "什么都没量到"与"回归不过"是两件事。
 
 ### §D1.1 kiro 组的兜底链（2026-09-26 补齐 7 条）
 

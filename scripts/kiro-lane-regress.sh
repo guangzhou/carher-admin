@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# kiro 18 条道回归压测 —— 加号/摘号/换镜像之后的那一步，一条命令跑完。
+# kiro 19 条道回归压测 —— 加号/摘号/换镜像之后的那一步，一条命令跑完。
 #
 # 为什么要有这个脚本（每条都是 §E 踩过的坑，手搓时每次都要重新想起来）
 # ------------------------------------------------------------------
 # 1. 🔴 **车道名必须从线上 CM 现取，且 grep 不能加 `^\s*- ` 前缀锚。**
 #    CM 里的 YAML 已被 LiteLLM 规范化（键排序、`model_name` 不再是列表首键），
 #    带锚的写法抓到 **0 行**，bench 于是打印「全局 0/0 成功」——
-#    那是**空集假绿/假红**，极容易读成"18 条道全挂了"。
+#    那是**空集假绿/假红**，极容易读成"19 条道全挂了"。
 #    ⇒ 本脚本先断言车道数，数不对**直接退出，不跑**。
 # 2. key 的环境变量名是 **`MK`**（bench 的 `--key-env` 默认值）。
 #    写成 `LITELLM_MASTER_KEY` 会得到"环境变量 MK 没设"。
@@ -24,6 +24,8 @@
 # 用法
 #   scripts/kiro-lane-regress.sh                 # 跑 10 轮，与上一轮基线对比
 #   scripts/kiro-lane-regress.sh --rounds 3      # 快跑
+#   scripts/kiro-lane-regress.sh --only kiro-gpt5.6-sol --rounds 3
+#                                    # 断言 19 条通过之后只复打这几条；不能和 --save-baseline 同用
 #   scripts/kiro-lane-regress.sh --save-baseline # 把本轮 in_tok 存成新基线
 #
 # 基线文件：本仓 `scripts/kiro-lane-baseline.tsv`（`模型<TAB>in_tok`），随代码走。
@@ -31,16 +33,21 @@ set -euo pipefail
 
 HOST=cltx@10.68.13.198
 NS=litellm-product
-EXPECT_LANES=${EXPECT_LANES:-18}
+EXPECT_LANES=${EXPECT_LANES:-19}
 ROUNDS=10
 SAVE=0
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASELINE="$REPO/scripts/kiro-lane-baseline.tsv"
 
+ONLY=""
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --rounds) ROUNDS="$2"; shift 2 ;;
     --save-baseline) SAVE=1; shift ;;
+    # 复打单条道（某条报红后复核用）。仍从线上 CM 现取全量并断言 19 条，
+    # 只在**断言通过之后**把集合收窄成这几条 —— 空集假绿那道闸不绕过。
+    --only) ONLY="$2"; shift 2 ;;
     -h|--help) sed -n '1,30p' "$0"; exit 0 ;;
     *) echo "未知参数 $1"; exit 2 ;;
   esac
@@ -50,7 +57,13 @@ echo "# 1/4 推 bench 脚本到 198"
 scp -q "$REPO/scripts/litellm-lane-bench.py" "$HOST:/tmp/"
 
 echo "# 2/4 从线上 CM 现取车道名（不加前缀锚）并断言条数"
-MODELS=$(ssh "$HOST" "sudo kubectl -n $NS get cm litellm-config -o jsonpath='{.data.config\.yaml}' \
+# 🔴 必须读 **deploy 真挂的那个派生 CM**（`litellm-cwfb-stable-<hash>`），不是 `cm/litellm-config`。
+#    2026-09-29 实测两者已漂 161 行（09-25/09-26 那批 prometheus 指标配置只进了派生 CM）。
+#    读源 CM = 量了一个生产**根本没挂**的产物：它少一条道时你会把「加道成功」读成「加道失败」。
+MOUNTED_CM=$(ssh "$HOST" "sudo kubectl -n $NS get deploy litellm-proxy \
+  -o jsonpath='{.spec.template.spec.volumes[0].configMap.name}'")
+echo "#   deploy 真挂的 CM：$MOUNTED_CM"
+MODELS=$(ssh "$HOST" "sudo kubectl -n $NS get cm $MOUNTED_CM -o jsonpath='{.data.config\.yaml}' \
   | grep -oE 'model_name: kiro-[a-zA-Z0-9._-]+' | sed 's/model_name: //' | sort -u | paste -sd,")
 N=$(printf '%s' "$MODELS" | tr ',' '\n' | grep -c .)
 echo "#   车道 $N 条：$MODELS"
@@ -61,20 +74,54 @@ if [ "$N" -ne "$EXPECT_LANES" ]; then
   exit 1
 fi
 
+if [ -n "$ONLY" ]; then
+  # 断言已过，这里只是收窄。每条都必须真在现取的那 19 条里 —— 打错名字会被
+  # bench 当成「不存在的模型」报 400，看起来像这条道坏了。
+  KEEP=""
+  for m in $(printf '%s' "$ONLY" | tr ',' ' '); do
+    printf '%s' "$MODELS" | tr ',' '\n' | grep -qx "$m" \
+      || { echo "🔴 --only 里的 '$m' 不在线上那 19 条道里 ⇒ 不跑（避免把拼写错读成故障）。"; exit 2; }
+    KEEP="${KEEP:+$KEEP,}$m"
+  done
+  MODELS="$KEEP"
+  EXPECT_LANES=$(printf '%s' "$MODELS" | tr ',' '\n' | grep -c .)
+  echo "#   --only ⇒ 只打 $EXPECT_LANES 条：$MODELS"
+  echo "#   ⚠️ 这是**复核单条道**，不是回归；别拿它的绿说「19 条都好」。"
+fi
+
 echo "# 3/4 跑 $ROUNDS 轮（轮转不连发，自带阴性对照，成功判据=文本非空）"
 OUT=/tmp/kiro-regress.$(date +%Y%m%d-%H%M%S)
+# 🔴 **bench 有任何一条道失败就 `exit 1`**（`litellm-lane-bench.py:200`），
+#    而这里是 `set -e -o pipefail` ⇒ 原来这一行会让**整个脚本在第 3 步静默中止**，
+#    第 4 步的 in_tok 比对压根不跑、`.tsv` 不生成，终端上只看到 bench 的汇总表就没了
+#    —— 看起来像"跑完了"，其实降级那把尺子一次都没量。09-28 实证（sol 挂，第 4 步无输出）。
+#    ⇒ 退出码在管道末尾吞掉，红从日志里的 `0/n` 读，不靠那个变量。
+#    ⚠️ `{ cmd || rc=$?; } | tee` 在 `set -e -o pipefail` 下**照样中止**：
+#    `||` 只救了 ssh 自己，管道的退出状态仍是 tee 之前那个非零。必须 `|| true` 盖住整条管道。
 ssh "$HOST" "set -e
   MK=\$(sudo kubectl -n $NS get secret litellm-probe-key -o jsonpath='{.data.PROBE_KEY}' | base64 -d) \
   python3 /tmp/litellm-lane-bench.py --models '$MODELS' --rounds $ROUNDS --out $OUT.jsonl" \
-  | tee "$OUT.log"
+  | tee "$OUT.log" || true
+DEAD=$(grep -E '^kiro-' "$OUT.log" | awk '$2 ~ /^0\// {print $1}' | sort -u)
 
 echo "# 4/4 input_tokens 分层比对（判静默降级的唯一尺子）"
 CUR="$OUT.tsv"
 # 汇总表最后一列是 in_tok；只取以 kiro- 开头的行
 grep -E '^kiro-' "$OUT.log" | awk '{print $1"\t"$NF}' | sort -u > "$CUR"
+# 🔴 **打挂的道与"解析器坏了"必须分开数**，否则一条道真挂就被报成「尺子自己坏了」，
+#    把人从"这条道为什么挂"带去查 awk。挂的道 in_tok 是 `-`，先摘出去。
+if [ -n "$DEAD" ]; then
+  echo "🔴 有道一发都没成功（不是降级，是打不通）：$(echo "$DEAD" | paste -sd' ')"
+  echo "   ⇒ 单独复打确认：$0 --only $(echo "$DEAD" | paste -sd,) --rounds 3"
+  echo "   ⇒ 仍全挂则看 kiro.rs 日志分上下游：ssh $HOST 'sudo kubectl -n kiro-rs logs deploy/kiro-rs -c kiro-rs --tail=200'"
+  RED=1
+  grep -vE "$(echo "$DEAD" | paste -sd'|')" "$CUR" > "$CUR.alive" || true
+  mv "$CUR.alive" "$CUR"
+fi
 lanes_with_tok=$(grep -c . "$CUR" || true)
-if [ "$lanes_with_tok" -ne "$EXPECT_LANES" ]; then
-  echo "🔴 只解析出 $lanes_with_tok 条道的 in_tok（预期 $EXPECT_LANES）⇒ 这把尺子自己坏了，"
+expect_alive=$(( EXPECT_LANES - $(echo "$DEAD" | grep -c . || true) ))
+if [ "$lanes_with_tok" -ne "$expect_alive" ]; then
+  echo "🔴 打通的道有 $expect_alive 条，却只解析出 $lanes_with_tok 条的 in_tok ⇒ 这把尺子自己坏了，"
   echo "   先看 $OUT.log 的汇总表格式，别据此下「无降级」的结论。"
   exit 1
 fi
@@ -126,6 +173,12 @@ fi
 # ⛔ 不写 `[ "$SAVE" = 1 ] && cp …`：SAVE=0 时整行返回非零，`set -e` 会让脚本在这里
 #    静默退出 1 —— 看上去像"回归失败"，其实只是没存基线。
 if [ "$SAVE" = 1 ]; then
+  # 🔴 `--only` 的结果**不能当基线**：它只有几条道，覆盖上去等于把其余道从基线里删掉，
+  #    下次全量跑时那些道全变成「🆕 不在基线里」⇒ 门禁静默失效。
+  if [ -n "$ONLY" ]; then
+    echo "🔴 --only 与 --save-baseline 不能一起用（只有 $EXPECT_LANES 条，存了会把其余道从基线抹掉）⇒ 没存。"
+    exit 2
+  fi
   cp "$CMP" "$BASELINE"
   echo "# 基线已更新 -> $BASELINE"
 fi

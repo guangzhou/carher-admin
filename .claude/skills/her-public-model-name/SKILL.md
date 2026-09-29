@@ -1,9 +1,11 @@
 ---
 name: her-public-model-name
 description: >-
-  给**全部** her（阿里云 `carher-*` virtual key，420 把）增加 / 改名 / 摘掉一个
-  **对外模型名**，用 per-key `aliases` 把它映射到真实组（如 `her-pro`→`grok-4.6`、
-  `her-flash`→`openrouter-deepseek-v4.1-flash`）。含目标组不存在时先建组
+  给**全部** her（阿里云 `carher-*` 420 把 / 198 `litellm-product` 的 `carher-*` 227 把）
+  增加 / 改名 / **改映射** / 摘掉一个**对外模型名**，用 per-key `aliases` 把它映射到真实组
+  （如 198 `her-pro`→`sa-grok-4.7` 兜底 deepseek-v4.1-flash、`her-flash`→`openrouter-deepseek-v4.1-flash`）。
+  含 198 前缀扫描会误伤 hangzhou/测试 key ⇒ `--only-file` 精确名单、兜底挂在组上不在对外名上、
+  `--clone-key` 探针（算术判据，grok-4.7 拒复述 nonce）+ SpendLogs 判落点。含目标组不存在时先建组
   （CM 外科式 splice + rollout + 逐 pod sha 门禁）、改名走加法（add→verify→cutover→remove）、
   两个 proxy pod 的 key 元数据缓存差约 2 分钟、回归矩阵（pod×key×模型 + 阴性对照）、
   快照 drift 复核。Use when 用户说"给所有 her 的 key 加一个模型名 X 映射到 Y"/
@@ -113,6 +115,22 @@ python3 $S --prefix carher- --add-model her-flash --alias her-flash=...         
   `--rm-model 旧名 --rm-alias 旧名`。合成一次写也行，但分两轮更好回滚；
   ⛔ 绝不能先删后加（中间那段用户无名字可用）。见 [[feedback_rename_is_add_verify_cutover_then_remove]]。
 - `models == []` 是**全放行**，脚本恒不写它——那种 key 上不该期待看到新名字。
+- **改映射（retarget，名字不变只换背后组）是静默换上游**：用户那边零报错、只是换了模型。
+  ① 先确认新组在**本集群** `/model_group/info` 里；② 先回答「新组的兜底是不是用户要的」
+  （见「已知终态」下面那段）；③ 金丝雀后必须看 SpendLogs 落点，不能只看 200。
+  add 与 retarget 能合成一条命令：`--add-model X --alias X=新组` 对已有 X 的 key 只改 alias、
+  对没有的 key 两样都加（`plan_key` 幂等）。
+
+**198 的形状**（09-29 实跑）：
+
+```bash
+S=~/litellm-198-key-allowlist-<sid>.py; D=~/<task>-<sid>; mkdir -p $D   # 198 上
+# 名单先导出到 $D/targets.txt（见「198 的三处与阿里云不同」第 3 条）
+python3 $S --prefix carher- --only-file $D/targets.txt --add-model her-pro --alias her-pro=sa-grok-4.7
+python3 $S ... --limit 1 --apply --backup $D/canary-$(date +%Y%m%dT%H%M%S).json
+python3 $S ... --apply --backup $D/full-$(date +%Y%m%dT%H%M%S).json
+python3 $S ...                                                     # 跑到 planned=0
+```
 
 ## 步骤 2：验收（三把不同的尺子，缺一把都是合成绿）
 
@@ -173,20 +191,32 @@ scripts/litellm-her-key-model-regress.sh --uids 425,1000 \
 **198 上用 `scripts/litellm-198-her-name-probe.py`**（上面那个 `.sh` 是阿里云两 pod 的形状）：
 
 ```bash
-python3 scripts/litellm-198-her-name-probe.py \
-  --key '<明文 key>' --nonce "$(date +%s)-$$" \
-  --pod-ip <ip1> --pod-ip <ip2> --pod-ip <ip3> --pod-ip <ip4> \
-  --model her-pro --model her-flash
+# 198 上；首选 --clone-key：克隆目标 key 的 models+aliases 起 20m 临时 key，finally 里删并回查
+export LITELLM_MASTER_KEY=$(sudo kubectl -n litellm-product get secret litellm-secrets \
+  -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+ARGS=$(sudo kubectl -n litellm-product get pods -l carher.net/litellm-production-route=enabled \
+  -o jsonpath='{range .items[*]}--pod-ip {.status.podIP} {end}')
+python3 litellm-198-her-name-probe.py --clone-key carher-75 $ARGS --model her-pro --model her-flash
+# 手里有明文 key 时：--key '<明文>' 代替 --clone-key
 ```
 
-`--pod-ip` / `--model` 都是 `append`，每个值各写一次 flag（不是空格列表）。
-`--model` 不给默认就是 `her-pro her-flash`；`--negative` 默认 `her-nonexistent-control`；
-`--timeout` 默认 120。
+`--pod-ip` / `--model` 都是 `append`；`--model` 默认 `her-pro her-flash`；`--negative` 默认
+`her-nonexistent-control`。逐 pod IP 直打（**不打 VIP**），判据是解析后的
+`choices[0].message.content`，每 pod 一发阴性对照必须 ≥400，末尾打印 `temp_key ... deleted=True`。
 
-它逐个 pod IP 直打（**不打 VIP**，VIP 会藏住哪个 pod 不同意），判据同样是解析后的
-`choices[0].message.content` 含 nonce（`finish_reason=length` 且 content 空算 miss），
-每个 pod 各带一发阴性对照必须 ≥400，任一结果坏就非零退出。198 的明文 key 不在 k8s CM 里，
-取法见下面「198 的真 key 在哪」。
+🔴 **默认判据是随机算术题（`--check arith`），不是「原样复述 nonce」。** 2026-09-29 grok-4.7
+对 4 个 pod 的「Reply with exactly this token」**全部拒答**（"I can't comply with requests to
+output an exact token"）——HTTP 200、落点对、nonce 判据读成 8/8 FAIL。旧形状保留在 `--check nonce`，
+换了上游模型想用它，先拿一发看模型肯不肯复述。
+
+🔴 **本探针不证落点**：198 的 `x-litellm-model-id` 是哈希（`4e698ca6f80f`），不是 `sa/grok-4.7`。
+落点去 SpendLogs 按脚本打印的临时 key alias 查（`metadata->>'user_api_key_alias'`，看
+`model_group` / `model` 两列；写入有延迟，隔 ~20s 再查）。**改映射（retarget）这一步必查**——
+改前改后都是 200，只有落点能区分。
+
+**首选克隆而非明文**：198 只存 `sha256(key)`，真 key 在 188 容器 env 里（见下），
+而克隆出的临时 key 路由字段与目标 key 逐字相同，还顺带证明「这把 key 原有的其他名字还能打」
+（再多给一个 `--model <它原有的一个名字>` 当回归对象）。
 
 ## 已知终态（用来判漂移）
 
@@ -195,13 +225,23 @@ python3 scripts/litellm-198-her-name-probe.py \
 （落点 `openrouter/deepseek-v4.1-flash`）；中途叫过的 `auto` 已摘净。CM 168 条。
 详见 [[project_aliyun_her_key_auto_alias_grok46_2026_09_17]]。
 
-**198（ns `litellm-product`）2026-09-20**：227 把 `carher-*` 同样两个对外名，但
-**alias 目标是 198 的组名，不是阿里云那两个**：
+**198（ns `litellm-product`）**：09-20 给 227 把 `carher-*` 加了同样两个对外名；
+**09-29 `her-pro` 改指 `sa-grok-4.7`**（224 把 retarget + 补 `carher-13/14/75`，共 227 把，
+与 09-20 那 227 把不是同一集合）。**alias 目标是 198 的组名，不是阿里云那两个**：
 
-| 对外名 | 阿里云 alias 目标 | **198 alias 目标** | 198 落点 |
-|---|---|---|---|
-| `her-pro` | `grok-4.6` | **`sa-grok-4.6`** | `openai/grok-4.6`，`model_info.id=sa/grok-4.6` |
-| `her-flash` | `openrouter-deepseek-v4.1-flash` | 同名 | `openrouter/deepseek/deepseek-v4.1-flash` |
+| 对外名 | 阿里云 alias 目标 | **198 alias 目标** | 198 落点 | 198 兜底（DB router_settings） |
+|---|---|---|---|---|
+| `her-pro` | `grok-4.6` | **`sa-grok-4.7`**（09-29 前 `sa-grok-4.6`） | `openai/grok-4.7`，`model_info.id=sa/grok-4.7` | `openrouter-deepseek-v4.1-flash` → `deepseek-v4-flash-responses` |
+| `her-flash` | `openrouter-deepseek-v4.1-flash` | 同名 | `openrouter/deepseek/deepseek-v4.1-flash` | — |
+
+**兜底挂在组上，不在对外名上**：`her-pro` 走 per-key alias 改写成 `sa-grok-4.7` 后，
+路由器按 `sa-grok-4.7` 查 fallbacks。所以「对外名 X 映射 A、兜底 B」= 先看 A 组的 DB fallback
+是不是已经是 B（判生效只认 DB，见 [[feedback_db_router_settings_overlays_config_yaml]]）；
+是就只写 key，不是才动兜底（skill `litellm-198-fallback-chain`）。09-29 那轮 `sa-grok-4.7`
+的链首本来就是 deepseek-v4.1-flash ⇒ 零兜底改动、零重启。
+
+09-29 备份 198 `~/herpro47-5e/{canary-20260929T153336,full-20260929T153611}.json`，
+回滚：先 `--restore full-… --apply` 再 `--restore canary-… --apply`（金丝雀那 1 把只在 canary 里）。
 
 ⛔ **`grok-4.6` 这个裸名在 198 不是组**（`ProxyModelTable` 零命中，也无全局 alias）——
 照抄阿里云的 alias 值会过了准入闸门然后 400。每次都查目标集群，别跨集群搬组名。
@@ -217,9 +257,21 @@ python3 scripts/litellm-198-her-name-probe.py \
    `litellm-proxy` 自己的 4 副本（09-24 前带标签的是 `litellm-proxy-gray`，车道搬过家）。**按标签取 pod，别按名字**：
    拿 `kubectl get pods -l carher.net/litellm-production-route=enabled -o custom-columns=...:.status.podIP`
    取 IP，逐 pod 直打（打 VIP 会负载均衡，掩盖是哪个 pod 不认）。
-3. **范围是 `carher-%` 那 227 把，`aliyun-carher-*` 那 2 把桥 key 不在内**。
-   `--prefix carher-` 的 `startswith` 天然排除它们（`scoped_keys=227` 就是判据），
-   但别手写 SQL 用 `%carher%` 去核，那会多捞 2 行。
+3. **范围不能再用 `--prefix carher-` 裸扫。** `aliyun-carher-*` 那 2 把桥 key 被 `startswith`
+   天然排除（别手写 `%carher%` SQL 去核，会多捞 2 行），但 09-29 `carher-` 前缀已是 **237 把**，
+   多出的 10 把不该写：`carher-hangzhou`（杭州 gw 上游凭据，[[reference_carher_hangzhou_key_is_the_hangzhou_gw_upstream_credential]]）
+   + 09-28 的测试 key（`carher-14-probe-*` / `carher-iso-*` / `carher-slow8-*` / `carher-landing8-*`）。
+   ⇒ **先 psql 导出精确名单再 `--only-file`**：
+
+   ```sql
+   -- 例：已有该名的 + 用户点名要补的
+   select key_alias from "LiteLLM_VerificationToken" where key_alias like 'carher-%'
+     and ('her-pro'=ANY(models) or key_alias in ('carher-13','carher-14','carher-75')) order by 1;
+   ```
+   写进 `targets.txt` 后 `--prefix carher- --only-file targets.txt`。脚本打 `only_requested=N only_matched=N`，
+   **任一名字没匹配上（拼错 / blocked / 前缀外）直接拒跑**，不再静默少写一把。
+   ⛔ 别拼几百个 `--only` 进 `ssh '…'`：远端 shell 重切分后 argparse 静默丢参。
+   先 `grep -cE 'probe|iso|slow|landing|hangzhou' targets.txt` 必须为 0。
 
 ⚠️ 旧记忆说「198 的 `carher-*` key 无效不被使用」**已过时**：09-20 实测近 14 天有 8 把在
 真实出活（`carher-75` 26768 行 / `carher-14` 5285 / `carher-13` 2822 / `carher-1` 1618 /

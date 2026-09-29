@@ -71,6 +71,17 @@ python3 $S --restore ~/<M>-full-<ts>.json --apply               # ④ 回滚(mod
 `--include-blocked`（**撤权限时必须带**，见下面「blocked key」一节）。
 `--model` 是 `--add-model` 的旧拼法，配 `--remove` 等于 `--rm-model`。
 
+`--only-file PATH`（2026-09-29 加）：一行一个 alias，空行和 `#` 行跳过，与 `--only` 合并。
+**名单超过十来个就用它**，别把几百个 `--only` 拼进 `ssh '…'`（远端 shell 重切分会静默丢参）。
+🔴 **`--only` / `--only-file` 里有任何一个名字没匹配上就整轮拒跑（return 2）**，打
+`only_requested=N only_matched=M` + 逐个 unmatched。没匹配上的三种来源：拼错、blocked 却没带
+`--include-blocked`、不在 `--prefix` 范围里。09-29 前这种情况是**静默少写**，老调用方现在会被拒，
+这是故意的——少写的那几把用户那边零报错。
+
+🔴 **前缀 ≠ 意图集合**：198 `--prefix carher-` 扫出 237 把，其中 `carher-hangzhou`（杭州 gw 上游凭据）
+和 09-28 的测试 key（`*probe*`/`*iso*`/`*slow8*`/`*landing8*`）不该动。给「全部 her」写就先导出精确名单再 `--only-file`
+（导法见 skill `her-public-model-name`「198 的三处与阿里云不同」）。
+
 验收另有一支尺子，**不要手搓 SQL**（手搓极易漏掉 blocked，见下）：
 
 ```bash

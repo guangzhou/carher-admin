@@ -160,6 +160,31 @@ def select_keys(
     ]
 
 
+def read_only_file(path: str) -> list[str]:
+    """Exact aliases, one per line; blank lines and ``#`` comments ignored."""
+    with open(path, encoding="utf-8") as handle:
+        return [line.strip() for line in handle
+                if line.strip() and not line.lstrip().startswith("#")]
+
+
+def filter_only(keys: list[dict], only: list[str]) -> tuple[list[dict], list[str]]:
+    """Narrow ``keys`` to the exact aliases in ``only``; also return the names
+    that matched nothing.
+
+    Why the unmatched list matters: a prefix sweep is often the wrong scope.
+    2026-09-29 ``--prefix carher-`` covered 237 keys, but the intended set was
+    227 -- the other 10 were ``carher-hangzhou`` (the Hangzhou gateway's upstream
+    credential) and 09-28 probe/iso/slow8 test keys. The fix was an exact list,
+    and an exact list has its own silent failure: a typo'd or blocked name just
+    drops out and the run reports ``planned`` one short with no error. So any
+    unmatched name is a refusal, not a warning.
+    """
+    wanted = set(only)
+    kept = [key for key in keys if key.get("key_alias") in wanted]
+    found = {key.get("key_alias") for key in kept}
+    return kept, sorted(wanted - found)
+
+
 def plan_key(
     key: dict,
     add_models: list[str] | tuple[str, ...] = (),
@@ -414,6 +439,10 @@ def main() -> int:
     parser.add_argument("--include-blocked", action="store_true",
                         help="also write blocked keys (they keep their allowlist, so a "
                              "revoked model comes back if the key is ever unblocked)")
+    parser.add_argument("--only-file", metavar="PATH",
+                        help="one exact key_alias per line (blank/#-lines ignored); "
+                             "same as --only per line. Use it when the write set is a "
+                             "hand-picked subset of a prefix too long for a command line")
     parser.add_argument("--only", action="append", default=[],
                         help="restrict to exact key_alias values")
     parser.add_argument("--exclude", action="append", default=[],
@@ -475,9 +504,16 @@ def main() -> int:
             print("refusing: --exclude/--exclude-prefix matched 0 keys in scope -- "
                   "a typo here writes to the keys you meant to spare", file=sys.stderr)
             return 2
-    if args.only:
-        wanted = set(args.only)
-        keys = [key for key in keys if key.get("key_alias") in wanted]
+    only = list(args.only)
+    if args.only_file:
+        only += read_only_file(args.only_file)
+    if only:
+        keys, unmatched = filter_only(keys, only)
+        print(f"only_requested={len(set(only))} only_matched={len(keys)}")
+        if unmatched:
+            print(f"refusing: {len(unmatched)} --only name(s) not in scope "
+                  f"(typo, blocked, or outside --prefix): {unmatched[:20]}", file=sys.stderr)
+            return 2
 
     ref_models: list[str] = []
     ref_aliases: dict[str, str] = {}

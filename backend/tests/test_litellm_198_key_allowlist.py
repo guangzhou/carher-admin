@@ -409,3 +409,35 @@ def test_residual_buckets_partition_the_scope_with_the_identical_ones():
     )
     assert identical == 2
     assert identical + sum(len(v) for v in out.values()) == len(keys)
+
+
+# --only / --only-file: 2026-09-29 `--prefix carher-` hit 237 keys but the intended
+# set was 227 (carher-hangzhou + 09-28 test keys had to be spared). An exact list
+# was the fix; an exact list whose typo'd name silently drops out is the new trap.
+def test_filter_only_keeps_exact_matches_and_reports_unmatched():
+    keys = [key(key_alias="carher-1"), key(key_alias="carher-2"),
+            key(key_alias="carher-hangzhou")]
+    kept, unmatched = allowlist.filter_only(keys, ["carher-1", "carher-2", "carher-3"])
+    assert [k["key_alias"] for k in kept] == ["carher-1", "carher-2"]
+    assert unmatched == ["carher-3"]
+
+
+def test_filter_only_is_exact_not_prefix():
+    keys = [key(key_alias="carher-14"), key(key_alias="carher-14-probe-r3-1790566659")]
+    kept, unmatched = allowlist.filter_only(keys, ["carher-14"])
+    assert [k["key_alias"] for k in kept] == ["carher-14"]
+    assert unmatched == []
+
+
+def test_filter_only_reports_a_blocked_key_as_unmatched():
+    # select_keys already dropped the blocked key; the name must not vanish quietly.
+    scoped = allowlist.select_keys(
+        [key(key_alias="carher-1"), key(key_alias="carher-2", blocked=True)], ("carher-",))
+    _, unmatched = allowlist.filter_only(scoped, ["carher-1", "carher-2"])
+    assert unmatched == ["carher-2"]
+
+
+def test_read_only_file_skips_blank_and_comment_lines(tmp_path):
+    path = tmp_path / "targets.txt"
+    path.write_text("carher-1\n\n# spared: carher-hangzhou\n  carher-2  \n", encoding="utf-8")
+    assert allowlist.read_only_file(str(path)) == ["carher-1", "carher-2"]

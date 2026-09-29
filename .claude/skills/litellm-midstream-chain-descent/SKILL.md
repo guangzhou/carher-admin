@@ -120,9 +120,10 @@ kubectl -n litellm-product exec $POD -- python3 /tmp/chain_mock.py guard \
 | 只第 5 层活 | 10 发全落 `6-sol`，抛错 | 7 发，**成功** |
 | 只第 2 层活 | 10 发全落 `6-sol`，抛错 | 4 发，**成功** |
 
-⚠️ **这只是夹具里的 Router 行为。** 生产 worker 侧没验 —— 要验得让上游真中流失败。
+⚠️ **这只是夹具里的 Router 行为**，不是生产 worker 的行为。
 别指望 LiteLLM 自带的强制开关：`mock_testing_fallbacks` 在 198 上是硬 400
-（[[feedback_198_mock_fallback_forcers_ignored]]），**"兜住没有"只能等真实流量**。
+（[[feedback_198_mock_fallback_forcers_ignored]]），**生产侧"兜住没有"只能等真实流量**，
+用下面 §3.5 那把只读尺子去读。
 
 ### 夹具的两个实现约束（照抄，别自己简化）
 
@@ -133,6 +134,50 @@ kubectl -n litellm-product exec $POD -- python3 /tmp/chain_mock.py guard \
 2. **钩点必须是 `r._ageneric_api_call_with_fallbacks_helper`**。
    钩在它上游（我第一版钩早了）会让"落点"那一列全是 `?` ——
    那时 LiteLLM 还没挑 deployment，**尺子答不出"同层重试 vs 换层"这个问题，等于没有尺子**。
+
+## 3.5 生产侧：`scripts/litellm-midstream-chain-descent-prod-audit.py`
+
+夹具答的是"如果坏了我看得出来吗"，这把答的是"窗口内真实流量上发生了什么"。
+**两把都要跑，缺一把就报不了"生产上已验证"。** 全程只读，不写任何配置。
+
+```bash
+python3 scripts/litellm-midstream-chain-descent-prod-audit.py --group gpt-6-astra --hours 3
+```
+
+它出五段：A0 逐副本装载态 / A 面日志数每条流重发几发 / A2 按 trace 看有没有抛给用户 /
+B 面 SpendLogs 看跨组真落在哪层 / 两面互校。
+
+### 2026-09-29 首次生产实测（~10.5h 窗口，4 副本）
+
+| 读数 | 值 |
+|---|---|
+| 有中流失败并重发的流 | 107 条（235 发） |
+| 同组重发（第 1~3 发） | 204 发 |
+| **跨组重发（第 4 发起）** | **31 发** ← 病灶未修时这些全砸第一层 |
+| 打满 10 发耗尽抛错 | **0** |
+| 能归属到 astra 流的用户可见报错 | **0** |
+
+SpendLogs 侧 2h 内 111 条跨组落点**全 success**，含 `gpt-6-astra → chatgpt-gpt-6-sol`。
+最深那条流跑了 3 发同组 + 4 发跨组 —— 修复前这 4 发会全落第一层。
+**用户的目标（前端不吃报错）在生产上成立。**
+
+### 这把尺子的三个坑（都是首跑真踩的）
+
+1. 🔴 **归属只能按 trace id，不许按组名 grep 整行。** 我 `grep astra` 数出"32 条
+   astra 报错"，实际是别组的长报错串里嵌了 `astra` 子串（`fallbacks` 字典会被整个
+   打进 message，里面列着所有组名）。按 trace 重查是 **0**。组名 grep 在这里恒定虚高，
+   且高得很像真的。
+2. 🔴 **A 面（日志滑窗 2~4 分钟）和 B 面（SpendLogs 数小时）差着数量级。**
+   首跑 A 面跨组 = 0、B 面 = 7，看着自相矛盾，其实是窗口不对齐 ——
+   只拿 A 面会把**已经修好的系统判成没修**。脚本里的 `cross_check()` 就是为此而加，
+   此时唯一合法结论是"这几分钟没赶上"，不是"链子不下降"。
+3. 🔴 **刚起的 pod 和 Terminating 的 pod 必须排除。** 首跑正撞上生产滚更（不是我干的，
+   我全程只读），一个 95 秒的新副本还没打出装载行，被判"判不了"；同时刻 `sha256sum`
+   证明它装得好好的。脚本现在按 `startTime` 卡 180s 并跳过 `deletionTimestamp` 非空的。
+   **滚更窗口里的 0 是 rollout 窗口，不是回归**（[[feedback_rolling_restart_window_is_not_a_code_regression]]）。
+
+另外：`metadata::text LIKE '%<trace>%'` 在 25 万行 SpendLogs 上全表扫、120s 超时，
+**必须先用 `startTime` 收窗口**再 LIKE。
 
 ## 4. 指纹守卫必须按后果分两级
 
@@ -172,12 +217,24 @@ v2 上线后，4 个副本**各 2 条** `source does not show ...` 告警，稳�
 ```bash
 # 每个副本分别跑，不许抽样（共用 CM 只重启一个 = 另一个静默跑旧代码）
 sudo kubectl -n litellm-product exec <pod> -- sha256sum /app/midstream_fallback_loop.py
-sudo kubectl -n litellm-product logs <pod> | grep -c 'midstream_fallback_loop.*installed'   # ≥1
-sudo kubectl -n litellm-product logs <pod> | grep -c 'NOT patching'                          # ==0
+sudo kubectl -n litellm-product logs <pod> | grep -c 'patched Router._aresponses_streaming_iterator'  # ≥1
+sudo kubectl -n litellm-product logs <pod> | grep -cE 'NOT patching|install failed, skipped|import failed, skip'  # ==0
 ```
 
 第 3 条是这次新加的 —— 少了它，拒装与装好**完全同形**。
 判收敛时排除 `Terminating` 副本，否则是假红。
+
+🔴 **锚点必须从源码抄，别凭印象写。** 本 skill 第一版第 2 条写的是
+`grep 'midstream_fallback_loop.*installed'` —— 源码里**没有 `installed` 这个词**，
+真实字样是 `patched Router._aresponses_streaming_iterator`。照抄那条会恒 0，
+**把装好的补丁读成没装**，而"没装"正是我上一轮真踩过的故障，
+于是这把坏尺子会精准地伪造出一个我最容易相信的结论。
+写 grep 锚点前先 `grep -n 'verbose_router_logger' k8s/litellm-callbacks/*.py` 核一遍。
+
+⚠️ **pod 跑过几小时后这两条会双双变 0** —— 装载行是启动期打的，日志窗口只留
+2~4 分钟（滑窗），启动段早滑掉了。**那不等于没装**。窗口滑掉之后改用
+"补丁自己运行期才会打的行"当装载证据，本补丁是
+`grep -c 'mid-stream failover attempt'`（>0 即补丁在跑，这行只存在于我们的补丁里）。
 
 **别碰 `cm/litellm-callbacks`**（那个可变的共用 CM）：13 个 `chatgpt-acct-*` Deployment
 挂着它，其中有在服务的，**重启在服务的 acct 号可能永久打死且回滚救不回来**。
@@ -199,6 +256,8 @@ sudo kubectl -n litellm-product rollout status deploy/litellm-proxy --timeout=15
 ## 相关
 
 - [[project_198_astra_chain_descent_fixed_2026_09_29]] — 本轮全记录
+- [[topic_ruler_failure_shapes]] — 窗口差数量级 / 锚点过期，两条都在里面
+- [[feedback_rolling_restart_window_is_not_a_code_regression]]
 - [[litellm-198-router-patch]] — 装 / 验 / 回滚 Router 猴补丁的三步 SOP
 - [[litellm-198-fallback-chain]] — 改 `router_settings.fallbacks` 那一行
 - [[litellm-midstream-failover-defense]] — 升格：怎么把 HTTP 200 里的失败认出来

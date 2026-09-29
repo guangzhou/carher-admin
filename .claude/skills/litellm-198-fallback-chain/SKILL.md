@@ -222,7 +222,9 @@ grok-4.20）不吃。不归本次改动，但新腿排前了会**更早**撞上�
 ⚠️ 400 是不可重试错误，链在这跳**停住**（该 request_id 只有一行，没继续兜到 4.6）——
 那一发用户是真失败。要不要治是另一件事，别混进"兜住没有"的结论里。
 
-## 4. 八个坏尺子（每一个我都实际踩过）
+## 4. 十二个坏尺子（每一个我都实际踩过）
+
+> 前 8 个在本节，第 10/11 个在 §4.1，第 12 个（脚本自己的装载尺子写死组名）在 §4.2。
 
 1. 🔴 **`metadata->>'model_group'` 必超时。** `LiteLLM_SpendLogs` 有**真列
    `model_group`**，走 JSONB 提取用不上索引 —— 我两次查询都 120s 超时进后台且永不返回。
@@ -287,6 +289,30 @@ grok-4.20）不吃。不归本次改动，但新腿排前了会**更早**撞上�
     且逐 pod 回读到那一行。这是
     [[feedback_kubectl_exec_heredoc_stdout_lost]] 的同一个形状，别靠 exit code。
 
+### 4.2 第 12 个坏尺子：**`prepend.py` 的「装载」尺子曾写死默认组**（2026-09-29，已修）
+
+12. 🔴 **`pod_live()` 读 `rows_of(fb).get(DEFAULT_GROUP)`，而调用方传的是 `--group`。**
+    给 `kiro-claude-opus-5-5` 加腿那轮实测：四个副本全打 `NO`，并且把
+    **`sa-grok-4.6` 的链子挂在 `kiro-claude-opus-5-5` 这个标签下**打出来 ——
+    不是「判错」，是**错的值配着对的标签**，比返空更难发现。
+    `--verify` 与 `--apply` 的轮询共用这个函数，所以它会在热重载**早已生效**的
+    情况下报 4/4 落后，一路劝到生产滚动重启（§2 说过重启本来不需要）。
+
+    这是 [[topic_ruler_failure_shapes]] 里「尺子里跟名字绑的硬编码表 ⇒
+    写它之后新增的每一组都是永久盲区」那一条。已在 `79d79bf` 修掉
+    （`pod_live(ip, mk, group)`，两个调用点都传 `a.group`）。
+
+    **判「是脚本坏了」而不是「这行没装载」的办法 = 同一份未改状态上跑两把尺子**：
+
+    ```bash
+    # 写入之前跑，此时正确答案必须是 NO（行还没加）但值要是这个组自己的链
+    python3 fb-prepend-旧.py  --group <新组> --target <腿> --verify   # 打出别的组的值 ⇒ 尺子坏
+    python3 fb-prepend-新.py  --group <新组> --target <腿> --verify   # 打出本组的值、NO
+    python3 fb-prepend-新.py  --verify                                # 阳性对照：默认组必 4/4 OK
+    ```
+
+    没有第三行那个阳性对照，「4/4 NO」既可能是尺子瞎了也可能是真没装载，两者同形。
+
 ## 5. 目标组上线前要核的两件事
 
 - **它是运行 router 上的真组**（`/model_group/info` 有这个 `model_group`），
@@ -303,6 +329,16 @@ grok-4.20）不吃。不归本次改动，但新腿排前了会**更早**撞上�
 - **拿 master key 带唯一 nonce 实打一次，确认它真出字。** 组在表里 ≠ 能用。
   2026-09-21 `sa-grok-4.20` 只有 7 天 24 条历史流量 —— **"它是真组"和"它扛得住
   承接量"是两个命题**，前者能证，后者上线前证不了，要在报告里说出来。
+
+- **跨协议腿（2026-09-29 加）：主组和腿不在同一个 provider 家族时，要拿
+  「客户端真实用的那个端点」实打，不是 `/chat/completions`。**
+  给 `kiro-claude-opus-5-5`（anthropic 家）挂 `sa-grok-4.20`（`openai` 家）时，
+  8 条 `kiro-claude-*` 链**零先例**全都只兜 anthropic 家 —— 但这是**可测的，
+  不是只能推测的**：车队客户端（Claude Code / cursor）发的是 Anthropic 格式
+  `/v1/messages`，所以就打这个端点。实测 `sa-grok-4.20` 经 `/v1/messages`
+  返 **200、0.72s、nonce 原样返回**，`/chat/completions` 做阳性对照也 200 ⇒
+  `openai` 模式的组**可以**当 claude 组的兜底腿。
+  ⚠️ 只打 `/chat/completions` 就通过，等于没测协议转换那一层。
 
 **兜底目标不受 key 的 `models` allowlist 限制** —— 用 cursor key 直打目标组拿 403
 是**预期行为**，不是故障。别为此去加白名单（我为此误判过一次）。
@@ -327,6 +363,8 @@ python3 scripts/litellm-198-fallback-prepend.py \
 
 - [[project_198_sa_grok_fallback_to_openrouter_deepseek_2026_09_20]] — 首次使用全过程
 - [[project_198_cursor_gpt_fallback_grok420_2026_09_21]] — insert-before 首次使用 + 两腿回归
+- [[project_198_kiro_opus55_lane_and_fleet_2026_09_29]] — prepend 用在 `kiro-claude-*` 上：
+  **第一条跨协议腿**（claude 组兜到 `openai` 家的 grok）+ 修掉 §4.2 那把坏尺子
 - [[feedback_router_settings_hot_reloads_every_30s_no_restart]]
 - [[feedback_litellm_alias_fallback_pre_rewrite_lookup]] — 两条 alias 规则方向
 - [[feedback_config_update_silently_drops_unknown_router_settings]]

@@ -353,6 +353,29 @@ __MODEL_LIST__
    · 如果你的模型地址不是 127.0.0.1(比如 Windows 上就是直连公网),
      脚本会当场告诉你"不需要做这件事",然后一个字都不改。
 
+发消息报 "Cannot convert argument to a ByteString ... value of 8203" 怎么办?
+  完整报错长这样(数字可能不一样):
+    Local agent request failed
+    Cannot convert argument to a ByteString because the character at index 32
+    has a value of 8203 which is greater than 255.
+  原因:你粘进去的那把 Key 里混进了**一个看不见的字符**(零宽空格之类),多半是从
+       飞书表格 / 聊天窗口 / 网页里复制时顺带带进来的。Key 看起来一模一样、长度
+       肉眼也数不出差别,但 Cursor 拼请求头时装不下它,当场就报错。
+  两个判断要点,省得你白折腾:
+   · 这个错是**你这台电脑本地**报的 —— 请求一个字节都没发出去。所以跟网络、
+     跟我们机房、跟模型、跟你选哪个模型统统无关,换模型换网络都不会好。
+   · 报错里那个 index 减 7 就是它在 Key 里的位置("Bearer " 占 7 个字符)。
+     上面那个 32 ⇒ 它躲在 Key 的第 26 个字符,也就是**紧贴在 Key 末尾**。
+  怎么修(两种都行,不用重启 Cursor):
+   · 双击 INSTALL,在"粘贴 API Key"那一步重新粘一次 —— 安装器现在会自动把这类
+     字符剥掉,并在窗口里告诉你剥了几个、在第几位。
+     (**别用 UPGRADE**:UPGRADE 按设计不问 Key、不碰 Key,治不了这个病。)
+   · 或者在 Cursor 设置里把 Key 那一栏**全选删掉**(别只删末尾),重新粘一次。
+     ⚠️ 重新粘的时候**别再从飞书表格/聊天里复制** —— 从表格里双击单元格进编辑态
+        再复制,或者找管理员要一份纯文本。
+  想先确认是不是这个病:双击 DOCTOR。它会把 Key 里不可见字符的**位置和码位**打出来
+  (例如 "字符下标 25  U+200B  ZWSP 零宽空格"),**不会**打出你的 Key 内容。
+
 Cursor 升级后 __MODEL_PREFIX__ 的模型不见了怎么办?
   不用回滚升级。双击 REPAIR-Mac.command(Windows: REPAIR-Windows.cmd)一键修复,
   重启 Cursor 即可。你的 Key 和配置都还在,修复只重打补丁。

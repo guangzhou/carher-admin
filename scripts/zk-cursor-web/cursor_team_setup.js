@@ -1660,6 +1660,54 @@ function oscryptDecrypt(key, enc) {
   const d = crypto.createDecipheriv("aes-128-cbc", key, iv);
   return Buffer.concat([d.update(enc.slice(3)), d.final()]).toString("utf8");
 }
+/* ── Key 卫生:不可见字符 ────────────────────────────────────────────────────
+   病(2026-09-29 同事实报):Cursor 里
+     `Local agent request failed / Cannot convert argument to a ByteString
+      because the character at index 32 has a value of 8203 which is greater than 255`
+   8203 = U+200B 零宽空格。那是 WHATWG `Headers` 在拼 header 时抛的 ⇒ **请求一个字节都没出网**,
+   小代理 / 198 / 模型全都无关,日志里也不会有这一发。飞书 key 表 1374 行 key 全长 25,
+   `"Bearer "`(7) + 25 = 32 ⇒ index 32 正好是紧贴 key 末尾的那一格。
+
+   🔴 `trim()` 去不掉零宽字符:`"  ​sk-abc​  ".trim() === "​sk-abc​"`。
+      所以"看着没有空格、长度也差不多"完全不能排除,凭肉眼和 length 都判不出来。
+   🔴 尺子得看**码位**,不能看渲染:doctor 原来只打密文的 sha256 前 16 位,
+      带 ZWSP 的 key 在它眼里与干净 key 同形(都是"存在 len=… sha256_16=…"),一路假绿。 */
+const INVIS_CP = {
+  0x200b: "ZWSP 零宽空格", 0x200c: "ZWNJ 零宽不连字", 0x200d: "ZWJ 零宽连字",
+  0x2060: "WORD JOINER", 0xfeff: "BOM/ZWNBSP", 0x00a0: "NBSP 不换行空格",
+  0x3000: "IDEOGRAPHIC SPACE 全角空格", 0x200e: "LRM", 0x200f: "RLM",
+};
+/* 逐**码位**扫(用 for..of 而不是下标,免得把代理对劈开)。
+   报出来的 index 是**字符下标**,与 `Headers` 报错里那个 index 同一把尺子(减去 "Bearer " 的 7)。 */
+function scanInvisible(s) {
+  const hits = [];
+  let i = 0;
+  for (const ch of String(s)) {
+    const cp = ch.codePointAt(0);
+    // 已知的不可见字符,外加"任何 > 255 的码位"—— 后者才是 Headers 真正的判据:
+    // 只列白名单会漏掉下次换成别的字符的同形病(全角引号、CJK 等照样抛)。
+    if (INVIS_CP[cp] || cp > 255 || cp < 0x20 || cp === 0x7f) {
+      hits.push({ index: i, cp, name: INVIS_CP[cp] || (cp > 255 ? "码位 > 255(ByteString 装不下)" : "控制字符") });
+    }
+    i += ch.length;
+  }
+  return hits;
+}
+const cpHex = (cp) => "U+" + cp.toString(16).toUpperCase().padStart(4, "0");
+// 剥掉首尾空白 + 全部不可见/越界字符。返回 {clean, stripped:[…]},**剥了什么必须说出来**:
+// 静默剥掉等于把"他复制错了"这件事藏起来,下次还会犯。
+function sanitizeKey(raw) {
+  const before = String(raw).trim();
+  const stripped = scanInvisible(before);
+  let clean = "";
+  for (const ch of before) {
+    const cp = ch.codePointAt(0);
+    if (INVIS_CP[cp] || cp > 255 || cp < 0x20 || cp === 0x7f) continue;
+    clean += ch;
+  }
+  return { clean: clean.trim(), stripped };
+}
+
 // 返回 {ok, reason?, confirmed?}。两道自检:①能解开 Cursor 现有 Key(证明方案与 Cursor 完全一致)
 // ②加密回环相等。任一不过 → 不写,回退手填(绝不假绿)。
 async function writeOpenAIKey(rawKey, RES, dry) {
@@ -1667,6 +1715,20 @@ async function writeOpenAIKey(rawKey, RES, dry) {
     return { ok: false, reason: "Windows 暂不支持自动写(OSCrypt=DPAPI,未实测),请在 Cursor 里手动粘一次" };
   const key = await deriveOsCryptKey(RES);
   if (!key) return { ok: false, reason: "读不到钥匙串主密码(keytar 不可用?)" };
+  /* 落盘前剥不可见字符,并**把剥了什么打出来**。不打=把病藏进密文里,
+     下一次他自己在 Cursor 设置框里粘还会再中一次,而屏幕上只写了"✅ Key 已写入"。 */
+  const san = sanitizeKey(rawKey);
+  if (san.stripped.length) {
+    console.log("   ⚠️  这把 Key 里有 %d 个不可见/越界字符,已剥掉(否则 Cursor 拼 header 会抛 ByteString):",
+      san.stripped.length);
+    for (const h of san.stripped)
+      console.log("        字符下标 %d  %s  %s   ← header 里的下标 = %d(\"Bearer \" 占 7)",
+        h.index, cpHex(h.cp), h.name, h.index + 7);
+    console.log("        清理后 len=%d(原 len=%d) —— 多半是从飞书表格/聊天里复制带进来的",
+      san.clean.length, String(rawKey).trim().length);
+  }
+  if (!san.clean) return { ok: false, reason: "剥掉不可见字符后 Key 是空的 —— 复制到的全是空白,请重新复制" };
+  rawKey = san.clean;
   const db = openDb();
   let schemeOk = null; // true=解开现有Key(已确认) / false=解不开(方案不符) / null=无现存Key
   try {
@@ -2433,6 +2495,36 @@ async function doDoctor() {
     // 明文不上屏:只打长度 + sha256 前16位,够对账、不泄露。
     P("  openAIKey secret:", !keyPresent(k) ? "**不存在**(没配过 Key,或被 --uninstall 置空)"
       : "存在 len=" + String(k).length + " sha256_16=" + crypto.createHash("sha256").update(String(k)).digest("hex").slice(0, 16));
+    /* 🔴 上面那两个读数**量不到零宽字符**:密文长度和 sha256 对带 ZWSP 的 key 与干净 key 同形。
+       所以这里解一次明文,只报**码位**(不打任何明文字节),回答"是不是 ByteString 那个病"。
+       解不开 / 读不到主密码都如实报"量不到",不许把沉默当成"干净"。 */
+    if (keyPresent(k)) {
+      let pt = null, why = null;
+      try {
+        const ok = await deriveOsCryptKey(RES);
+        if (!ok) why = "读不到钥匙串主密码(是不是漏了 ELECTRON_RUN_AS_NODE=1 用 Cursor 自己的二进制跑?)";
+        else {
+          const encBuf = Buffer.from(JSON.parse(String(k)).data);
+          if (encBuf.slice(0, 3).toString() !== "v10") why = "密文没有 v10 前缀,方案不符";
+          else pt = oscryptDecrypt(ok, encBuf);
+        }
+      } catch (e) { why = (e && e.message) || String(e); }
+      if (pt == null) {
+        P("    不可见字符扫描:**量不到**(" + why + ") ⇒ 这一格是空的,别当成\"干净\"");
+      } else {
+        const hits = scanInvisible(pt);
+        P("    明文 len=" + pt.length + "(码位数=" + [...pt].length + ")");
+        if (!hits.length) P("    ✅ 不可见/越界字符 = 0 ⇒ 这把 Key 不会触发 ByteString 报错");
+        else {
+          P("    🔴 不可见/越界字符 = " + hits.length + " ⇒ **就是这个病**:Cursor 拼 header 时会抛" +
+            " `Cannot convert argument to a ByteString …`,请求一个字节都出不了网");
+          for (const h of hits)
+            P("        字符下标 " + h.index + "  " + cpHex(h.cp) + "  " + h.name +
+              "   ← 报错里的 index 应是 " + (h.index + 7) + "(\"Bearer \" 占 7)");
+          P("        解:在 Cursor 设置里把 Key 全选删掉重填(别从飞书表格/聊天里复制),或跑一次 INSTALL/--key");
+        }
+      }
+    }
   } catch (e) { P("  !! 读库失败:", e && e.message || e); }
   if (d) {
     for (const f of ["membershipType", "isEnterprise", "useOpenAIKey", "useClaudeKey", "openAIBaseUrl", "hasTokenBasedPricing"]) {

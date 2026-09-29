@@ -38,6 +38,10 @@ GENERATED_ONLY = {
     # ⚠️ `cursor_remote_ssh.js` / `.sh` **故意不在这里**:那两个是真源文件,
     #    漏改就该让这道门禁红,而不是被当成"生成物"放行。
     "REMOTE-SSH-Mac.command", "REMOTE-SSH-Windows.cmd", "cursor_remote_ssh.cmd",
+    # 09-29 补:这两个双击自检器 09-23 就随包发了,但当时漏进这张名单 ⇒ 此后每次跑
+    # 这道门禁都固定两条红。**常红的门禁等于没门禁** —— 下一次真出问题时那两行红
+    # 会被当成老毛病跳过。它俩同样是 package 里 heredoc 生成的,工作副本里没有真源。
+    "DOCTOR-Mac.command", "DOCTOR-Windows.cmd",
     "README.txt",
     "zk-delta/common/framing.js", "zk-delta/sidecar/sidecar.js",
     "zk-delta/SHA256SUMS.txt",
@@ -218,7 +222,10 @@ def main():
     ap.add_argument("--against", help="上次发出去的那份 zip(飞书文档附件用 "
                                       "`lark-cli docs +media-download` 拉,"
                                       "drive +download 会静默不落盘)")
-    ap.add_argument("--expect", type=int, default=30, help="期望菜单条数")
+    # 09-29 从 30 改 32:上一份发出去的 zip 和这一份都是 32 个(第②腿对账 32→32、
+    # 新增[]、删除[]),所以这是**默认值没跟上换代**,不是发错版本。改这个数之前先看
+    # 第②腿的"新增/删除"两栏 —— 那两栏为空才说明菜单本身没动,只是尺子旧了。
+    ap.add_argument("--expect", type=int, default=32, help="期望菜单条数")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:

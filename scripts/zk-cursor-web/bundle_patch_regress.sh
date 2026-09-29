@@ -725,6 +725,16 @@ print(json.loads(r[0]).get("openAIBaseUrl","?") if r else "?")' "$FU10/globalSto
   esac
 fi
 
+# ── 12) Key 里的不可见字符(2026-09-29 同事实报的 ByteString 病)─────────────────
+#    这腿不需要 Cursor、不需要 bundle、不需要 fixture:纯函数 + 真 `new Headers()`,
+#    所以**永远不许 SKIP**。它自带阳性对照(旧行为只 trim,必须仍然抛)。
+echo "--- 12) Key 不可见字符 sanitize + 真 Headers 对账 ---"
+if CX_SETUP_JS="$JS" node "$HERE/cursor_keysan_offline_cases.js" >"$TMP/leg12.log" 2>&1; then
+  ok "⑫Key sanitize 全绿($(grep -c '  PASS ' "$TMP/leg12.log") 项;含阳性对照:旧行为 trim 仍抛 ByteString)"
+else
+  bad "⑫Key sanitize 腿不符:"; sed -n '/FAIL/p' "$TMP/leg12.log"
+fi
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

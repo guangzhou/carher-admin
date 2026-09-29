@@ -18,6 +18,7 @@
 | `bundle_patch_regress.sh` | **改 PATCHES 后的四腿离线回归台架**(见「新版本漂移修复流程」) | — |
 | `retire_model_offline_cases.sh` | **改模型清单后的九腿/28 断言离线台架**(整表赋值逐字按序 + 选中位 re-point + 写库前快照 + `--uninstall` 还原 + `--upgrade` 不问 Key;带 `RETIRE_JS=` 阳性对照) | — |
 | `cursor_key_read.js` | **只读解开本机 BYOK Key**(默认掩码,`--reveal` 才明文);诊断用,**不进交付 zip** | — |
+| `cursor_keysan_offline_cases.js` | 台架第 ⑫ 腿:**Key 不可见字符**(真 `new Headers()` 对账 + 旧行为阳性对照,51 项);见「Key 里的不可见字符」 | — |
 | `setup_package_freshness.py` | **发出去的 zip 是不是最新的**:逐成员 sha256 vs 工作副本 + 与上一版逐成员 diff + 菜单条数;`--selftest` 自带阳性对照 | — |
 | `bundle_audit_daily.sh` + `com.zerokey.cursorbundleaudit.plist` | **每日自动巡检**:官方出新版当天自动跑全四腿并告警(见「每日自动巡检」) | — |
 | `regress_queue_pump.js` | 泵离线回归台架(注入真发货 snippet,17 判据+负对照) | — |
@@ -532,6 +533,71 @@ ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor cursor_key
   `CX_RES` 指空目录→`3`。六条各红各自那条、真库绿,才算这把尺子有判别力。
 - ⚠️ **Key 是凭据**:明文别进 issue / 聊天记录 / 工单 / 记忆文件。要换就跑 `INSTALL` 重填,
   安装器写前有"能解开现有 Key + 加密回环"两道自检。
+
+## Key 里的不可见字符 ⇒ `ByteString` 报错(2026-09-29)
+
+同事报:
+
+```
+Local agent request failed
+Cannot convert argument to a ByteString because the character at index 32
+has a value of 8203 which is greater than 255.
+Model: grok-4.6   Base URL: http://127.0.0.1:8788/v1
+```
+
+**8203 = U+200B 零宽空格,那是 WHATWG `Headers` 在拼 header 时抛的 ⇒ 请求一个字节都没出网。**
+所以小代理 / 198 / 模型 / 车道全都无关,`kubectl logs` 和小代理日志里**都不会有这一发** ——
+别拿"日志里查不到"当成腿死或尺子坏。判据是报错文案里有 `ByteString`。
+
+定位算术(可复现):飞书 key 表 1374 行 API Key **长度全是 25**,`"Bearer "`(7)+ 25 = 32
+⇒ `index 32` 正好是**紧贴 key 末尾**的那一格。想验哪一位就反过来减 7。
+
+🔴 **`trim()` 去不掉零宽字符**:`"  ​sk-abc​  ".trim() === "​sk-abc​"`。
+所以"看着没空格、长度也差不多"完全不能排除,肉眼和 `length` 都判不出来 —— 必须**看码位**。
+
+🔴 **`--doctor` 原来量不到这个病**:它只打密文的 `len` + `sha256` 前 16 位,带 ZWSP 的 key
+与干净 key **同形**,一路假绿。现在它解一次明文**只报码位、不打任何明文字节**:
+
+```
+ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor cursor_team_setup.js --doctor
+```
+
+```
+    明文 len=26(码位数=26)
+    🔴 不可见/越界字符 = 1 ⇒ **就是这个病**…
+        字符下标 25  U+200B  ZWSP 零宽空格   ← 报错里的 index 应是 32("Bearer " 占 7)
+```
+
+解不开 / 读不到主密码时它报 **「量不到」**,不报"干净" —— 沉默不是绿。
+
+安装器 `writeOpenAIKey` 落盘前调 `sanitizeKey()` 剥掉不可见/越界字符,并**逐个打出剥了什么**。
+静默剥等于把"他复制错了"藏起来,下次在 Cursor 设置框里粘还会再中。
+
+- **扫描器判据是 `Headers` 的超集,不是"同进同退"**:`Headers` 只在码位 > 255 时抛,
+  **NBSP(U+00A0)≤ 255 ⇒ 它不抛**,脏 key 照样出网、照样错,回来是 **401**。
+  这是**两个失败面,不许合并计数**:ByteString = 没出网;401 = 出网了但 key 错。
+  所以扫描器抓的是"这把 key 脏了",比 `Headers` 更严。台架 ⑫E 就地量了这条。
+- **台架第 ⑫ 腿**(`cursor_keysan_offline_cases.js`,51 项):纯函数 + **真 `new Headers()`**,
+  不需要 Cursor / bundle / fixture ⇒ **永远不许 SKIP**。它从**真源码里切出**那三个函数进 vm 跑,
+  不复制副本(副本会漂,漂了照样绿)。阳性对照 = **就地重实现旧行为(只 `trim()`)**,
+  四个样本必须**仍然抛**;旧行为一旦"也绿了"就说明样本被换成了 `trim` 能处理的普通空白。
+  D 段拿 `scanInvisible` 的字符下标 + 7 与 `Headers` 报的 index **逐位对账**。
+- **doctor 那一格的阳性对照怎么造**(改动它必重跑):`cp` 一份 `state.vscdb` 到临时目录,
+  用真 OSCrypt 方案写一把**故意带 ZWSP** 的假 key,`CURSOR_USER_DIR=<临时目录>` 跑 `--doctor`。
+  判据 = 它报 `字符下标 25` 且换算出 **index 32**(与同事的报错逐字相同)。**别对着真库下毒。**
+  两条操作细节:① 真库在本机有 **8.9GB**,别整库 `cp`(慢且占盘)—— 用 `sqlite3` 只把
+  `ItemTable` 里 `cursorAuth` / `applicationUser` 那十来行抄进新库,真库全程 `mode=ro` 打开。
+  ② 收工后 `ls -la` 比真库 mtime,确认仍是动手之前那个时间 —— "我没碰真库"要有据,不能靠记得。
+- **还要配一个阴性对照**:同一份 doctor 对**解毒后**的同一个副本再跑一次,必须报
+  `✅ 不可见字符 = 0`。只跑脏的那一发,分不清"它真在量"还是"它对谁都报红"。
+- 🔴 **台架里的样本 key 只许放合成值,注释不算证据**。09-29 我第一版随手粘了一把
+  "看起来像样本"的 25 位 key,注释写着"值是假的";提交前拿它去 `.tmp-lark/*.ndjson`
+  grep,**命中 2 行 —— 是飞书表里的真 key**。现在常量是 `sk-FAKE…` 前缀 + 脚本里
+  一行 `startsWith("sk-FAKE")` 断言。判据是**拿候选串去飞书快照对撞,命中必须 0**;
+  长度仍须 25,否则 D 段那些下标算术前提不成立。**提交前对所有要进这一笔的文件
+  (含 zip 内成员)扫一遍这个对撞**,别只扫肉眼可疑的那一行。
+- 同事那一侧的处置:Cursor 设置里把 Key **全选删掉重填**,别从飞书表格/聊天/文档里复制
+  (那三个地方最容易带零宽字符);或跑一次 `INSTALL` / `--key`,让安装器替他剥。不用重启 Cursor。
 
 ## 硬规矩
 

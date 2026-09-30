@@ -267,6 +267,39 @@ def _tail_user_texts(data: dict, limit: int = _TAIL_USER_LIMIT) -> List[str]:
     return []
 
 
+def _tail_user_blocks(data: dict, limit: int = _TAIL_USER_LIMIT) -> List[str]:
+    """同 :func:`_tail_user_texts` 取本轮尾部连续 user 消息，但**按 content block
+    展开、不拼接**。判命令一律走这里。
+
+    Claude Code 把 CLAUDE.md / MEMORY.md / gitStatus 作为**同一条** user 消息里
+    命令前面的几个 ``<system-reminder>`` block 发来（2026-09-30
+    claude-code-liuguoxian-std 实测：一条 user 4 个 text block，命令在最后一个，
+    独占 3 字符）。按消息拼接后合计 ~40KB，一超 :func:`_matches_command` 的
+    20000 闸门就整条判掉，命令那行根本没被扫到 —— 放给上游烧了 76k in。
+    09-28 修的是"多条消息别拼"，这里是同一个病矮一层："多个 block 别拼"。
+
+    ``limit`` 仍按**消息条数**计，语义与 :func:`_tail_user_texts` 一致。
+    """
+    for field in ("messages", "input"):
+        seq = data.get(field)
+        if isinstance(seq, str) and field == "input":
+            return [seq]
+        if not isinstance(seq, list):
+            continue
+        out: List[str] = []
+        n = 0
+        for item in reversed(seq):
+            if not (isinstance(item, dict) and item.get("role") == "user"):
+                break
+            out.extend(_block_texts(item.get("content")))
+            n += 1
+            if n >= limit:
+                break
+        if out:
+            return out
+    return []
+
+
 def _matches_command(text: str, exact: tuple, ci: tuple) -> bool:
     """按行 strip 后**全等**命中。子串包含会把「帮我看下查余额的实现」误判成命令。"""
     if not text or len(text) > 20000:
@@ -295,12 +328,12 @@ def _texts_match(texts: List[str], exact: tuple, ci: tuple) -> bool:
 
 def _is_quota_request(data: dict) -> bool:
     """本轮输入里有没有 /查余额。判命令走这里，别自己 _last_user_text。"""
-    return _texts_match(_tail_user_texts(data), _TRIGGERS_EXACT, _TRIGGERS_CI)
+    return _texts_match(_tail_user_blocks(data), _TRIGGERS_EXACT, _TRIGGERS_CI)
 
 
 def _is_probe_request(data: dict) -> bool:
     return _texts_match(
-        _tail_user_texts(data), _PROBE_TRIGGERS_EXACT, _PROBE_TRIGGERS_CI)
+        _tail_user_blocks(data), _PROBE_TRIGGERS_EXACT, _PROBE_TRIGGERS_CI)
 
 
 # ------------------------------------------------------------- 用量文案
@@ -2031,11 +2064,13 @@ class BudgetNotice(CustomLogger):
             ):
                 return data
             alias = getattr(user_api_key_dict, "key_alias", "") or ""
-            texts = _tail_user_texts(data)
+            texts = _tail_user_blocks(data)
             if alias in _debug_aliases():
                 _log.warning(
-                    "budget_notice: debug tail_user_texts alias=%s ct=%s n=%d heads=%r",
-                    alias, v, len(texts), [t[:200] for t in texts])
+                    "budget_notice: debug tail_user_blocks alias=%s ct=%s n=%d "
+                    "lens=%r heads=%r",
+                    alias, v, len(texts), [len(t) for t in texts],
+                    [t[:200] for t in texts])
             is_probe = _texts_match(
                 texts, _PROBE_TRIGGERS_EXACT, _PROBE_TRIGGERS_CI)
             if not (_texts_match(texts, _TRIGGERS_EXACT, _TRIGGERS_CI) or is_probe):

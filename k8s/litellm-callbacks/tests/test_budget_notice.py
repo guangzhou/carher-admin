@@ -407,6 +407,59 @@ class TailUserTextsTest(unittest.TestCase):
         ]}
         self.assertTrue(M._is_quota_request(d))
 
+    # 生产形状（claude-code-liuguoxian-std，SpendLogs 2026-09-30 11:36:30 的
+    # proxy_server_request）：Claude Code 首轮只有一条 user，4 个 text block ——
+    # CLAUDE.md+MEMORY.md reminder / gitStatus reminder / attribution reminder /
+    # 用户输入。前三块合计远超 20000，拼起来整条被长度闸门判掉，旧代码放给上游
+    # 烧了 76567 in_tok。长度照生产取整，不要改成小 fixture —— 小了测不出这个病。
+    @staticmethod
+    def _claude_code_turn(cmd, reminder_len=40000):
+        def rem(n):
+            return "<system-reminder>\n" + ("x" * 79 + "\n") * (n // 80) \
+                + "</system-reminder>"
+        return {"messages": [{"role": "user", "content": [
+            {"type": "text", "text": rem(reminder_len)},
+            {"type": "text", "text": rem(2300)},
+            {"type": "text", "text": rem(600)},
+            {"type": "text", "text": cmd},
+        ]}]}
+
+    def test_claude_code_command_block_after_huge_reminders_matches(self):
+        d = self._claude_code_turn("查余额")
+        # 回归锚点：按消息拼接的旧口径确实超闸门、判不中
+        joined = M._tail_user_texts(d)
+        self.assertEqual(len(joined), 1)
+        self.assertGreater(len(joined[0]), 20000)
+        self.assertFalse(M._texts_match(joined, M._TRIGGERS_EXACT, M._TRIGGERS_CI))
+        self.assertTrue(M._is_quota_request(d))
+
+    def test_claude_code_probe_command_block_matches(self):
+        d = self._claude_code_turn("/测模型")
+        self.assertTrue(M._is_probe_request(d))
+        self.assertFalse(M._is_quota_request(d))
+
+    def test_claude_code_turn_without_command_does_not_match(self):
+        """阴性对照：同形状、用户块是普通问题。"""
+        d = self._claude_code_turn("为什么查余额不能直接返回")
+        self.assertFalse(M._is_quota_request(d))
+
+    def test_huge_paste_with_command_line_inside_still_guarded(self):
+        """20000 闸门原意保留：一个 block 自己超长、里面某行恰好是 查余额 ⇒ 不触发。"""
+        big = ("正文\n" * 8000) + "查余额\n" + ("正文\n" * 100)
+        self.assertGreater(len(big), 20000)
+        d = {"messages": [{"role": "user", "content": [
+            {"type": "text", "text": big}]}]}
+        self.assertFalse(M._is_quota_request(d))
+
+    def test_block_split_stops_at_assistant(self):
+        """按 block 展开不改变「遇 assistant 即停」：上一轮的命令块不复活。"""
+        d = self._claude_code_turn("查余额")
+        d["messages"] += [
+            {"role": "assistant", "content": [{"type": "text", "text": "卡片"}]},
+            {"role": "user", "content": [{"type": "text", "text": "谢了"}]},
+        ]
+        self.assertFalse(M._is_quota_request(d))
+
     def test_order_is_nearest_first(self):
         d = self._openclaw_turn(self._BODY)
         ts = M._tail_user_texts(d)
@@ -820,6 +873,16 @@ class TTFTTest(unittest.TestCase):
         from litellm.exceptions import ModifyResponseException
 
         d = {"model": "gpt-x", "messages": [{"role": "user", "content": "/查余额"}]}
+        with self.assertRaises(ModifyResponseException) as ctx:
+            _pre(d, "aanthropic_messages")
+        self.assertIn("今日用量", ctx.exception.message)
+
+    def test_anthropic_claude_code_shape_short_circuits(self):
+        """整条 hook 路径走一遍 Claude Code 真形状（命令块前挂 ~40KB reminder）。"""
+        from litellm.exceptions import ModifyResponseException
+
+        d = TailUserTextsTest._claude_code_turn("查余额")
+        d["model"] = "anthropic.claude-opus-5"
         with self.assertRaises(ModifyResponseException) as ctx:
             _pre(d, "aanthropic_messages")
         self.assertIn("今日用量", ctx.exception.message)

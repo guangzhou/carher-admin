@@ -451,6 +451,36 @@ class TailUserTextsTest(unittest.TestCase):
             {"type": "text", "text": big}]}]}
         self.assertFalse(M._is_quota_request(d))
 
+    def test_claude_code_trailing_system_message_is_skipped(self):
+        """生产真形状 messages=[user, system]（13:40:06 那次 76421 in）。
+        旧代码把 system 当边界，一条 user 都没收到。"""
+        d = self._claude_code_turn("查余额")
+        d["messages"].append({"role": "system", "content": [
+            {"type": "text", "text": "# Environment\nYou have been invoked in …"}]})
+        self.assertTrue(M._is_quota_request(d))
+
+    def test_system_does_not_resurrect_previous_turn(self):
+        d = {"messages": [
+            {"role": "user", "content": "查余额"},
+            {"role": "assistant", "content": "卡片"},
+            {"role": "system", "content": "env"},
+        ]}
+        self.assertFalse(M._is_quota_request(d))
+
+    def test_pasted_content_line_does_not_trigger(self):
+        """用户粘了一段终端输出，里面有一行「查余额」—— 不是命令。"""
+        d = {"messages": [{"role": "user", "content": [
+            {"type": "text", "text":
+             '<pasted_content id="03e4">\n查余额\n\n⏺ Finding scripts\n'
+             '</pasted_content id="03e4">\n\n  感觉还是没有生效呢'}]}]}
+        self.assertFalse(M._is_quota_request(d))
+
+    def test_command_outside_pasted_content_still_triggers(self):
+        d = {"messages": [{"role": "user", "content": [
+            {"type": "text", "text":
+             '<pasted_content id="a1">\n一些日志\n</pasted_content id="a1">\n查余额'}]}]}
+        self.assertTrue(M._is_quota_request(d))
+
     def test_block_split_stops_at_assistant(self):
         """按 block 展开不改变「遇 assistant 即停」：上一轮的命令块不复活。"""
         d = self._claude_code_turn("查余额")
@@ -882,6 +912,7 @@ class TTFTTest(unittest.TestCase):
         from litellm.exceptions import ModifyResponseException
 
         d = TailUserTextsTest._claude_code_turn("查余额")
+        d["messages"].append({"role": "system", "content": "# Environment"})
         d["model"] = "anthropic.claude-opus-5"
         with self.assertRaises(ModifyResponseException) as ctx:
             _pre(d, "aanthropic_messages")

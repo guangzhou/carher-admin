@@ -267,6 +267,14 @@ def _tail_user_texts(data: dict, limit: int = _TAIL_USER_LIMIT) -> List[str]:
     return []
 
 
+# Claude Code 把用户粘贴的内容包成 <pasted_content id="…">…</pasted_content>。
+_PASTED_RE = _re.compile(r"<pasted_content\b[^>]*>.*?</pasted_content\b[^>]*>", _re.S)
+
+
+def _strip_pasted(text: str) -> str:
+    return _PASTED_RE.sub("", text) if "<pasted_content" in text else text
+
+
 def _tail_user_blocks(data: dict, limit: int = _TAIL_USER_LIMIT) -> List[str]:
     """同 :func:`_tail_user_texts` 取本轮尾部连续 user 消息，但**按 content block
     展开、不拼接**。判命令一律走这里。
@@ -279,19 +287,30 @@ def _tail_user_blocks(data: dict, limit: int = _TAIL_USER_LIMIT) -> List[str]:
     09-28 修的是"多条消息别拼"，这里是同一个病矮一层："多个 block 别拼"。
 
     ``limit`` 仍按**消息条数**计，语义与 :func:`_tail_user_texts` 一致。
+
+    ``role=system`` 的项**跳过、不当边界**：Claude Code 的请求体在用户那条之后
+    还跟着一条 ``role=system``（``# Environment …``，2026-09-30 生产实测
+    ``messages=[user, system]``）。当边界 ⇒ 从尾部一步就停、一条 user 都没收到，
+    上线 block 拆分后仍 76k in。system 不是上一轮的回复，跨过它不会让历史命令复活；
+    assistant / tool 仍是边界。
+
+    ``<pasted_content>`` 里的内容不参与判命令：那是用户从别处粘进来的（比如一段
+    终端输出），里面恰好有一行「查余额」不代表用户这轮在下命令。
     """
     for field in ("messages", "input"):
         seq = data.get(field)
         if isinstance(seq, str) and field == "input":
-            return [seq]
+            return [_strip_pasted(seq)]
         if not isinstance(seq, list):
             continue
         out: List[str] = []
         n = 0
         for item in reversed(seq):
+            if isinstance(item, dict) and item.get("role") == "system":
+                continue
             if not (isinstance(item, dict) and item.get("role") == "user"):
                 break
-            out.extend(_block_texts(item.get("content")))
+            out.extend(_strip_pasted(t) for t in _block_texts(item.get("content")))
             n += 1
             if n >= limit:
                 break

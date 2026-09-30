@@ -54,6 +54,33 @@ skill `chatgpt-pool-model-variant`（⚠️ **只存在于 `~/.claude/skills/`�
 所以顺序是：**slug 已在 CM 里** → 本篇。CM 里没有就先去做 CM + 受控分波 rollout，
 **别让建组脚本顺手帮你重启整池**。
 
+### CM + 分波 rollout 这两步已产品化（2026-09-30 泛化入仓）
+
+```bash
+# ① CM 加条目（结构化插入，禁 sed/>> 文本追加；回读校验；幂等）
+python3 scripts/chatgpt-pool-cm-add-slug.py --cm chatgpt-pool-config --slug gpt-6.1-sol \
+    --after chatgpt-gpt-6-luna --apply --backup ~/pool-cm-pre-<slug>-<ts>.yaml
+# ② 受控分波 rollout（先拿基线 → 波内并发 → 每波三判据 → 出问题立刻停）
+python3 scripts/chatgpt-pool-wave-rollout.py --targets ~/<slug>-targets.txt \
+    --slug gpt-6.1-sol --expect-model-name <新条数> --wave-size 4 --apply
+```
+
+**分波脚本的三判据，少一条都会把「坏了」读成「好了」**：
+
+| 判据 | 证明什么 | 少了会怎样 |
+|---|---|---|
+| `rollout status` rc=0 | 新 RS 起来了 | `paused=true` 的 deploy 静默吃变更不建 RS |
+| pod 内 `grep -c model_name` == 期望 | 新 CM **真进了容器** | subPath 不跟 inode，CM 改了容器里还是旧的 |
+| pod 内直打目标 slug **+ 阳性对照** | 号还活着**且**新名能用 | 被重启打死的号会表现成「配置都对就是不能用」，和「模型没放开」同形 |
+
+🔴 **必须先拿基线再重启**。`gpt-6.1-sol` 那轮基线里 acct-227 的阳性对照正好是 `HTTP429`
+（瞬态限流），有基线才不会在重启后把它算成 NEWLY BROKEN。
+没有基线 = 既存故障落进本轮窗口，形状和「我搞坏了」一模一样。
+
+`gpt-6.1-sol` 实测读数（11 个号 / 3 波 / wave-size 4）：
+`names` 全部 15→16、NEWLY BROKEN **0**、CM未进容器 **0**、号活但新名不通 **0**。
+acct-226/228 出现 `EMPTY200` 是瞬态节流（同刻阳性对照 OK），脚本判定里不算死。
+
 🔴 **acct 池不止一份 config**：`acct-168` 挂 `chatgpt-pool-config-168`（ns 里还有 `-135`）。
 patch 主 CM 是「覆盖大多数」不是「覆盖全池」，判据是 pod 内 `grep -c model_name /app/config.yaml`
 对不对得上，见 [[feedback_acct_pool_cm_is_not_the_only_config_source]]。
@@ -66,6 +93,38 @@ patch 主 CM 是「覆盖大多数」不是「覆盖全池」，判据是 pod �
 scp scripts/chatgpt-pool-codex-slug-survey.py cltx@10.68.13.198:~/slug-survey-<sid>.py
 ssh cltx@10.68.13.198 'python3 ~/slug-survey-<sid>.py --slug gpt-6-sol --out ~/sol-targets.txt'
 ```
+
+### 🔴 先确认 slug 真身：目录接口，不是新闻稿
+
+```bash
+# 在任意活 acct pod 内直拉，client_version 必须 >= 所有 slug 的 minimal_client_version
+GET https://chatgpt.com/backend-api/codex/models?client_version=1.0.0
+```
+
+2026-09-30 加 `gpt-6.1-sol` 时目录从 9 个 slug 变 **10 个**。官方发布口径（DevDay、
+$2/$10、缓存读 $0.10）和上游 slug 字符串是两件事，**名字只认这个接口**。
+`gpt-6.1-sol` 的 `minimal_client_version` 是 `0.153.0`，比 `gpt-6-sol` 的 `0.155.0` 还低。
+
+### 🔴 门禁的分母只能是「量得到的号」—— 这把尺子 2026-09-30 自己坏过
+
+第一次跑 `gpt-6.1-sol` 直接报「🔴 尺子失效：阴性对照有 15/36 个号没被拒（编造名居然通了）」，
+整轮读数被判作废。三段式：
+
+| | |
+|---|---|
+| 假设 | 探针没有分辨力，编造名真的通了 |
+| 证伪条件 | 若假设错，那 15 个号上三个名字（目标/阳性/阴性）应返回**同一个**失败码 |
+| 数据 | 三行分布里 `401` 恰好都是 **15**。编造名在那些号上返 401 = token 死，**请求压根没走到模型判定那一层** |
+
+真因：门禁写的是 `neg_rejected = 400+404`，把「量不到」算成「没被拒」。
+可测的 21 个号上阴性对照 **21/21 全被拒**，尺子本来是好的。
+
+⇒ 现在脚本有 `DEAD_BUCKETS`（`401`/`CPFAIL`/`NOPARSE`/`EXC`/`OTHER`/`MISSING`），
+门禁和三桶的分母都是 `measurable`，「量不到」单列成**第四桶**。
+**这一桶既不能算「阴性没被拒」（会把好尺子判废），也不能算「号本身的问题」**
+（那一桶是 free 档，处置完全不同）。
+
+改尺子时别把这个分母又改回 `len(results)`。
 
 🔴 **目录声明不是事实。** `/backend-api/codex/models` 里 `visibility: list` +
 `supported_in_api: true` 的 slug 直打照样 404。而且 `gpt-6-sol` **同一天内翻了三次面**：
@@ -170,6 +229,15 @@ ssh cltx@10.68.13.198 'python3 ~/fb-add-row-<sid>.py --group chatgpt-gpt-6-sol \
 
 ⚠️ **顺手核一下同族别的组有没有漏**：给 sol 配兜底时发现 `chatgpt-gpt-6-luna`
 **至今没有 fallback 行**。「这个组有没有兜底」这个否定结论，必须在那 90+ 行里按名字查过再说。
+（2026-09-30 已补：`chatgpt-gpt-6-luna → [sa-grok-4.20]`，104→105 行。
+那 7 天里 luna 有 **227 条 failure 无处可兜**，直接抛给了用户 ——
+「顺手查到的遗留」值得当场就补，拖着的代价是真流量。）
+
+🔴 **挂单腿兜底前必须实打那条腿。** 腿死的单腿兜底等于没兜底，且形状和「配了」一模一样。
+判据 = 直打组名 + 唯一 nonce 回显 + 阴性编造名被拒
+（`sa-grok-4.20` 2026-09-30 实测 200 / 0.8s / 回显，阴性 400）。
+⛔ 组名要查准：表里有 `sa-grok-4.20` 和 7 个变体
+（`-reasoning`/`-non-reasoning`/`-multi-agent`/`-0309-*`/`-latest`），照同族先例取裸名。
 
 ---
 
@@ -196,6 +264,30 @@ Claude Code key，而 `planned` 数看着很正常。
 范围纪律：加模型时 blocked key **跳过是对的**（它们连认证都过不了）；
 **撤模型时必须 `--include-blocked`**，否则解封后权限静默复活。
 ⚠️ 跳过的 blocked key 要在报告里单列出来说（sol 这轮是 19 把）。
+
+### 🔴 `carher-` 一律不许用裸 `--prefix`，必须配精确名单
+
+`--prefix carher-` 扫出 **237** 把，里面有 `carher-hangzhou`（**杭州 gw 的上游凭据**，
+不是 bot key）和 9 把测试 key（`*probe*`/`*iso*`/`*slow8*`/`*landing8*`）。
+真实意图集合是 **227**。前缀是命名惯例不是注册表。
+
+```bash
+# 导意图集合 → 污染项必须为 0 → --only-file（unmatched 整轮 return 2）
+psql: select key_alias from "LiteLLM_VerificationToken"
+      where key_alias like 'carher-%'
+        and key_alias !~* 'probe|iso|slow|landing|hangzhou|test|tmp|canary' order by 1;
+grep -cE 'probe|iso|slow|landing|hangzhou' ~/carher-intent.txt   # 必须 0
+python3 ~/kav-<sid>.py --prefix carher- --only-file ~/carher-intent.txt \
+    --add-model <裸名> --alias <裸名>=<组名> --apply --backup ~/...json
+```
+
+⚠️ **`--only-file` 必须和 `--prefix carher-` 同时给。** 只给 `--only-file` 会撞上
+默认范围（`cursor-`+`claude-`），脚本报 `refusing: 227 --only name(s) not in scope`
+—— 那是门禁在正常工作，不是名单错了。
+
+⚠️ **铺到 `carher-` key 上只解决 198 这一侧的准入和路由。** her/carher bot 走的是
+阿里云 ns `carher` 那套**另一个** LiteLLM，bot UI 里选不到这个名字，
+要接过去是 [[add-litellm-model]] 另一条流水线。
 
 ---
 

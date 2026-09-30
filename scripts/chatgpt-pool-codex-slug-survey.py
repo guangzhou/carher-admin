@@ -37,6 +37,12 @@ import time
 
 NS_DEFAULT = "litellm-product"
 
+# 这些桶表示「这个号压根没被测到」，不是「模型层面拒绝了我」。
+# 401 = token 死（请求没走到模型判定）；CPFAIL/NOPARSE/EXC = 尺子自己没跑起来。
+# 🔴 它们必须单列，既不能算「阴性对照没被拒」（会把好尺子判废），
+#    也不能算「号本身的问题」（那一桶是 free 档，处置不同）。
+DEAD_BUCKETS = ("401", "CPFAIL", "NOPARSE", "EXC", "OTHER", "MISSING")
+
 # 在 acct pod 内跑的探针：用该号自己的 auth.json 直打 codex 后端，绕开 litellm 聚合层、
 # 绕开 alias、绕开 fallback。唯一 nonce 回显才算活。
 PROBE_SRC = r'''
@@ -224,34 +230,62 @@ def main():
         print("%-28s %-12s %s" % (m, tag, json.dumps(dist(m), sort_keys=True)))
 
     # ---- 门禁：尺子自证有分辨力，放在建组之前 ----
-    neg = dist(negative)
+    #
+    # 🔴 2026-09-30：门禁本身坏过一次。原来写的是「阴性对照必须在**全部** n 个号上被拒」，
+    #    而 36 个号里有 15 个 token 死：那 15 个号上三个名字（目标/阳性/阴性）**都**返 401,
+    #    请求压根没走到模型判定那一层。旧门禁把这 15 个「量不到」算成「编造名居然通了」,
+    #    整轮读数被判作废 —— 而真实情况是可测的 21 个号上阴性 21/21 全被拒，尺子是好的。
+    #
+    #    ⇒ 门禁只能在**量得到的号**上成立。「量不到」必须单列，不许并进任何结论桶：
+    #    它既不是「这个 slug 没有」（模型缺口），也不是模型层面的拒绝。
     n = len(results)
-    neg_rejected = neg.get("400", 0) + neg.get("404", 0)
-    if neg_rejected < n:
-        print("\n🔴 尺子失效：阴性对照 %s 有 %d/%d 个号没被拒（编造名居然通了）⇒ 本轮读数作废"
-              % (negative, n - neg_rejected, n))
-        return 3
-    ctl = dist(args.control)
-    ctl_ok = ctl.get("OK", 0) + ctl.get("EMPTY200", 0)
-    if ctl_ok < args.min_control_ok * n:
-        print("\n🔴 尺子失效：阳性对照 %s 只有 %d/%d 可用 ⇒ 坏的是池子/尺子，不是 %s。"
-              "别据此判目标 slug 不可用。" % (args.control, ctl_ok, n, args.slug))
+    unmeasurable = sorted([a for a, r in results.items()
+                           if r.get(negative, ("MISSING",))[0] in DEAD_BUCKETS], key=int)
+    measurable = sorted([a for a in results if a not in set(unmeasurable)], key=int)
+    print("\n== 尺子覆盖面：量得到 %d / 量不到 %d（量不到的号三个名字都返同一个失败码，"
+          "不许并进结论桶）" % (len(measurable), len(unmeasurable)))
+    if unmeasurable:
+        print("   量不到：%s" % ",".join(
+            "%s(%s)" % (a, results[a].get(negative, ("?",))[0]) for a in unmeasurable))
+    if not measurable:
+        print("\n🔴 尺子失效：0 个号量得到（全是 token 死 / cp 失败）⇒ 本轮读数作废")
         return 3
 
-    ok = sorted([a for a, r in results.items() if r[args.slug][0] == "OK"], key=int)
+    neg_rejected = sum(1 for a in measurable
+                       if results[a].get(negative, ("MISSING",))[0] in ("400", "404"))
+    if neg_rejected < len(measurable):
+        print("\n🔴 尺子失效：阴性对照 %s 在量得到的 %d 个号里有 %d 个没被拒"
+              "（编造名居然通了）⇒ 本轮读数作废"
+              % (negative, len(measurable), len(measurable) - neg_rejected))
+        return 3
+    ctl_ok = sum(1 for a in measurable
+                 if results[a].get(args.control, ("MISSING",))[0] in ("OK", "EMPTY200"))
+    if ctl_ok < args.min_control_ok * len(measurable):
+        print("\n🔴 尺子失效：阳性对照 %s 在量得到的 %d 个号里只有 %d 可用 ⇒ 坏的是池子/尺子，"
+              "不是 %s。别据此判目标 slug 不可用。"
+              % (args.control, len(measurable), ctl_ok, args.slug))
+        return 3
+
+    # 三桶只在**量得到的号**里分。量不到的号单成第四桶（上面已打印），
+    # 把它们塞进「号本身的问题」会让那一桶同时装着 free 档和 token 死，处置完全不同。
+    ok = sorted([a for a in measurable if results[a][args.slug][0] == "OK"], key=int)
     # 目标失败但阳性对照成功 = 真的是这个模型在这个号上没有
-    model_gap = sorted([a for a, r in results.items()
-                        if r[args.slug][0] != "OK" and r[args.control][0] in ("OK", "EMPTY200")], key=int)
-    # 两个都失败 = 号的问题（free 档 / token 死），不是模型的问题
-    acct_bad = sorted([a for a, r in results.items()
-                       if r[args.slug][0] != "OK" and r[args.control][0] not in ("OK", "EMPTY200")], key=int)
+    model_gap = sorted([a for a in measurable
+                        if results[a][args.slug][0] != "OK"
+                        and results[a][args.control][0] in ("OK", "EMPTY200")], key=int)
+    # 两个都失败 = 号的问题（free 档），不是模型的问题
+    acct_bad = sorted([a for a in measurable
+                       if results[a][args.slug][0] != "OK"
+                       and results[a][args.control][0] not in ("OK", "EMPTY200")], key=int)
 
-    print("\n== 三桶（这一分类就是 acct-85 那一课）")
+    print("\n== 三桶（这一分类就是 acct-85 那一课）· 分母是量得到的 %d 个号" % len(measurable))
     print("可用            %3d  %s" % (len(ok), ",".join(ok)))
     print("模型缺口        %3d  %s  <- 目标不行、对照行 ⇒ 是这个 slug 在这些号上没有"
           % (len(model_gap), ",".join(model_gap)))
-    print("号本身的问题    %3d  %s  <- 两个都不行 ⇒ 是号（free 档/token 死），别记成模型问题"
+    print("号本身的问题    %3d  %s  <- 两个都不行 ⇒ 是号（free 档），别记成模型问题"
           % (len(acct_bad), ",".join(acct_bad)))
+    print("量不到          %3d  %s  <- token 死/cp 失败，这一桶对本 slug 零信息"
+          % (len(unmeasurable), ",".join(unmeasurable)))
     print("\n⏱  结论只对 %s 这一刻成立。可用性是时间函数不是账号属性，禁缓存到下一轮。"
           % time.strftime("%Y-%m-%d %H:%M:%S"))
 

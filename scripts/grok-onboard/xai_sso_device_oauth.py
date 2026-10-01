@@ -324,15 +324,8 @@ def poll_token(device_code_val, interval, budget_s=120):
                      "register" % last)
 
 
-def xai_models_verdict(access_token):
-    """The one ruler that separates "token dead" from "xAI credit dead".
-
-    A brand-new token that still gets 403 personal-team-blocked:spending-limit
-    means the subscription has no credit: creating the account would add a leg
-    that cannot serve, and no amount of re-authenticating changes it.  Run
-    before writing anything into sub2api, so a dead account is never onboarded
-    as if it were capacity.
-    """
+def _xai_models_once(access_token):
+    """One shot at api.x.ai/v1/models.  Returns (verdict_string, is_200)."""
     import subprocess
     r = subprocess.run(
         ["curl", "-s", "--max-time", "30", "-o", "/dev/stdout", "-w",
@@ -343,13 +336,48 @@ def xai_models_verdict(access_token):
     body, st = (parts[0], parts[-1]) if len(parts) == 2 else ("", "?")
     if st == "200":
         try:
-            return "200 usable (%d models)" % len(json.loads(body)["data"])
+            return "200 usable (%d models)" % len(json.loads(body)["data"]), True
         except Exception:
-            return "200 usable"
+            return "200 usable", True
     try:
-        return "%s %s" % (st, json.loads(body).get("code") or body[:80])
+        return "%s %s" % (st, json.loads(body).get("code") or body[:80]), False
     except Exception:
-        return "%s %s" % (st, body[:80])
+        return "%s %s" % (st, body[:80]), False
+
+
+def xai_models_verdict(access_token, attempts=3, pause=20, log=None):
+    """The one ruler that separates "token dead" from "xAI credit dead".
+
+    A brand-new token that still gets 403 personal-team-blocked:spending-limit
+    means the subscription has no credit: creating the account would add a leg
+    that cannot serve, and no amount of re-authenticating changes it.  Run
+    before writing anything into sub2api, so a dead account is never onboarded
+    as if it were capacity.
+
+    🔴 This is a GATE on onboarding, so a single sample must never decide it.
+    2026-10-01: `ekobqjdskw@outlook.com` got one `403 permission-denied` here
+    and was dropped as BAD -- three probes with the SAME token from the SAME
+    host minutes later were 200/200/200 with 13 models, and the account was
+    onboarded by hand as acct 71.  A transient 403 and a credit-dead 403 look
+    identical in one shot, so a non-200 is retried up to `attempts` times:
+    only a verdict that is non-200 EVERY time gets to reject an account.
+    The returned string carries the attempt trail, so a flap stays visible in
+    the bundle's `_probe` instead of being smoothed into a clean green.
+    """
+    trail = []
+    for i in range(max(1, attempts)):
+        verdict, ok = _xai_models_once(access_token)
+        trail.append(verdict)
+        if ok:
+            return verdict if i == 0 else "%s [flapped: %s]" % (
+                verdict, " -> ".join(trail[:-1]))
+        if i + 1 < attempts:
+            if log:
+                log("  x.ai verdict: %s -- retrying in %ds (one shot is not a "
+                    "ruler)" % (verdict, pause))
+            time.sleep(pause)
+    return "%s [%d/%d attempts: %s]" % (trail[-1], len(trail), attempts,
+                                        " -> ".join(trail))
 
 
 def parse_creds(path):
@@ -425,7 +453,7 @@ def one(email, sso, out_path, expect_userid=None):
     log("  token ok  access=%s…(%d)  refresh=%s…(%d)  expires_in=%s"
         % (at[:12], len(at), rt[:8], len(rt), tok.get("expires_in")))
 
-    verdict = xai_models_verdict(at)
+    verdict = xai_models_verdict(at, log=log)
     log("  x.ai verdict: %s" % verdict)
 
     tier = (sub or {}).get("productId") or ""

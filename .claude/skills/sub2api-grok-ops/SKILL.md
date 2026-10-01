@@ -3,7 +3,7 @@ name: sub2api-grok-ops
 description: >-
   198 LiteLLM 上 grok 的运维：**现存三条互相独立的 grok 路径**的分诊(修好一条不等于
   grok 好了；路 A grok-proxy 已于 2026-09-08 彻底删除，报错是预期别去修)、
-  sub2api 内部虚拟余额充值、SSO→OAuth 建号、`sa-grok-4.6` 作为 cursor gpt 系 fallback、两层回归。
+  sub2api 内部虚拟余额充值、**加号=§C 顶部 `grok-warp-onboard.py` 一条命令（225 WARP 抓+198 建号）**、`sa-grok-4.6` 作为 cursor gpt 系 fallback、两层回归。
   同一台 sub2api 上还挂着 Kimi Allegro（`sa-kimi-k3` / `sa-kimi-code*`，group 8/9），
   动它前先看影响面。**升级 sub2api 本体也在这里（§G，一条命令 `sub2api-upgrade.py go`）**。
   **「grok 又被全部停下了 / 重新认证下」= §⚡ 最前面那一节：先确认巡检还在跑（`rescue`
@@ -215,7 +215,7 @@ Cursor/客户端 → litellm-product :4000  (entry sa-grok-4.5 / sa-grok-4.6 / s
 | keys | `/api/v1/keys`（**不是** `/admin/api-keys`） |
 | accounts / groups | `/api/v1/admin/*` |
 | 生产 key | `grok-litellm` id=5，绑 group 7「grok账号分组」 |
-| grok 账号 | **12 条腿**（09-17 12:31 起），但**实际服务只有 6 条**：id=6/7/8/9/18/20 长期退避空转（`sched=f`），干活的是 19 + 09-17 两批新增：上午 **27 `LandenBeahanhes@hotmail.com`、28 `LarryHowedbf@outlook.com`**，中午 **29 `LarryWhitepgd@outlook.com`、30 `LarueLarkinjkt@outlook.com`、31 `LarueDickiheb@outlook.com`**（全部 `supergrok_heavy`、`concurrency=200`、group 7）。⚠️ **别拿"12 条腿"当容量**，跑 `health` 拿真数 |
+| grok 账号 | **51 条腿**（10-01 10:27 加完 70/71），同时刻只 **9 条** 在服务、其余多为 `spending-limit`；逐号历史见 memory `topic_grok_index`。⚠️ **别拿腿总数当容量**，跑 `health` 拿真数 |
 | DB | postgres pod 里 `psql -U sub2api` |
 | helper | `scripts/grok-onboard/sub2api_admin.py` |
 
@@ -392,10 +392,58 @@ python3 sub2api_admin.py GET /api/v1/admin/users/1
 
 ## C. 加一个新 grok 订阅号
 
-### C0. ✅ 首选：手里有 grok.com `sso` cookie 时，**用 sub2api 自带的 SSO→OAuth**
+### ⚡⚡ 2026-09-29 起的现行路径：**一条命令 `grok-warp-onboard.py`**（先看这里）
+
+用户粘来 `email----pw----sso`（或 8 段长行）⇒ 凭据写到 **repo 外**的 0600 文件，然后：
+
+```bash
+cd <repo>/scripts/grok-onboard
+python3 grok-warp-onboard.py ~/x/creds.txt --dry-run   # 可选：parse + 基线 + 两端 sha 核对，不抓不写
+python3 grok-warp-onboard.py ~/x/creds.txt             # 真跑，约 8 分钟（含 --wait 360）
+shred -u ~/x/creds.txt
+```
+
+它只编排、不重写任何一步：本地 parse → `health` 基线（打印「N of M legs served」+ 既存
+`routing`）→ 225 mktemp 目录跑 `xai_sso_device_oauth.py`（WARP）→ **只把抓取器判
+`OK` 的 bundle** `scp -3` 到 198 mktemp 目录 → `create-grok-oauth-account.py`（模板默认
+acct 61）→ 等 `--wait` 秒 → `regress` + `health`，打印服务腿数前后对比。
+两端临时目录 finally 里 shred+rm；远端副本先比 sha256 与 repo 逐字相等才跑。
+
+| 为什么不再用下面 §C0 / 09-21 那条 `sub2api-grok-onboard.py onboard` | |
+|---|---|
+| 它第 2 步 `verify` 走 sub2api 自带 SSO 端点 | 09-25 起从 pod 出口**恒 403**（`accounts.x.ai` 挡机房，§C1b），整条中止 |
+| 它从 Mac 跑会 `delegate()` 覆盖 `/home/cltx/grok-onboard/` | 那份是 **park 巡检 cron 每分钟跑的代码**；本脚本用 `S2A_REMOTE_DIR=<mktemp>` 绕开，常驻副本不动 |
+
+实跑：09-29 **68/69 一把过**（当时手搓 7 步，脚本是事后泛化的）。
+**10-01 这个编排器第一次完整真跑**（70/71）：`--dry-run` 绿 → 真跑建出 **acct 70**，
+腿 49→50、真服务腿 **7/49 → 8/50**，70 在 15 分钟窗口 41 req；四条 `sa-grok-*` nonce 全对；
+用户面 16 分钟 457 ok / 2 fail；错误面首个时间戳 10:11:58 **早于** 建号 10:20:33 ⇒ 既存。
+`EXIT=1` 来自抓取判 BAD 的那一个（见下一条），**建号与回归本身都绿**。
+
+🔴 **10-01 发现的尺子病：抓取器的 x.ai 判据原来只打一发，瞬时 403 会把好号判死。**
+`ekobqjdskw@outlook.com` 被判 `403 permission-denied` 丢掉，**同一把 token、同一台 225、
+3 分钟后连打 3 发全是 200（13 models）**，手工用同一个 `create-grok-oauth-account.py`
+建成 **acct 71**（group 7、mapping 1080B 与模板 acct 61 逐字节相等）。
+⇒ `xai_models_verdict()` 已改成**非 200 重试 3 次（间隔 20s），只有每次都非 200 才判死**，
+绿但曾翻面的会在 `_probe` 里留 `[flapped: …]` 痕迹。对照 8 case 在
+`scripts/grok-onboard/test_xai_verdict_retry.py`（**含阴性对照：3×403 仍必须被拒** ——
+只测翻面会放过一个"从不拒绝任何号"的坏尺子）。
+⛔ `403 permission-denied` **不是** skill 里记的 `403 personal-team-blocked:spending-limit`
+（那条才是余额死）；它这次的成因没查，只知道重试即消失，**别拿它当余额判据**。
+🔴 判断一个被抓取器判 BAD 的号要不要重来：**直接拿 bundle 里的 token 再打几发
+`api.x.ai/v1/models`**，别信那一发。bundle 即使 verdict 非 200 也会写盘（带探针），
+但编排器 finally 会 shred 临时目录 ⇒ 要留先 `cp` 到另一个 mktemp 目录。
+
+🔴 **建号成功 ≠ 加了长期容量**：09-22~09-28 加的 52~67 **全部**已 `spending-limit`
+（`rescue --dry-run` 09-29 实测 43/49 条 PAY）。首日流量下每号约 **25~30h** 烧完
+（56~67 实测 25.4~30.0h、每号 ~90~145M tok），52~55 较早一批撑了 159~168h。
+⇒ 汇报时说「新增 N 条、预计 1~2 天内耗尽」，别说「池子修好了」。
+收尾基线看 `health`「N of M legs served」，**不是**腿总数。
+
+### C0. ~~首选~~（⛔ 09-25 起 pod 出口恒 403，见 §C1b；仅作历史/端点参考）：sub2api 自带的 SSO→OAuth
 
 09-08 实测：sub2api 有原生端点，**根本不用起 Playwright、不用 225 WARP**（沿 sub2api
-pod 自己的出口打 auth.x.ai，实测通）。有 sso 就走这条，C1 只在**只有邮箱密码**时才用。
+pod 自己的出口打 auth.x.ai，实测通）。**09-25 起这条路不通**，现行路径见上面 ⚡⚡。
 
 | 端点 | 用途 |
 |---|---|
@@ -408,6 +456,8 @@ pod 自己的出口打 auth.x.ai，实测通）。有 sso 就走这条，C1 只�
 六个子命令都在 198 实跑验过）
 
 ### ⚡ 09-21 起：加号只要一条命令 —— **在自己 Mac 上，只传路径**
+
+⛔ **09-25 起 `onboard` 在第 2 步 `verify` 就中止**（SSO 端点恒 403）⇒ 加号改用上面 ⚡⚡ 的 `grok-warp-onboard.py`。本节的 `health`/`regress`/`rescue`/`reauth` 子命令照旧有效；⚠️ 从 Mac 跑任何子命令都会覆盖 198 常驻副本（巡检用的那份），09-29 起 `delegate()` 在 sha 变化时会打印 `⚠️ replacing …`。
 
 ```bash
 cd <repo>/scripts/grok-onboard
@@ -669,7 +719,7 @@ python3 create-grok-oauth-account.py .newacct-<tag>.json ...
 #### ⚡ 手里有 `sso` 时的首选：`xai_sso_device_oauth.py`（09-28 新增，4/4 一把过）
 
 **不用 Playwright、不用 DISPLAY** —— `sso` cookie 本身就是登录态，整条设备码流程纯 HTTP
-可走完。`scripts/grok-onboard/xai_sso_device_oauth.py`（**未进 git，记得 add**）：
+可走完。`scripts/grok-onboard/xai_sso_device_oauth.py`（已进 git；⚠️ 225 `/tmp/` 下那份是旧版，别直接用，`grok-warp-onboard.py` 每次现传 repo 版）：
 
 ```bash
 # 在 225 上（必须，见上面出口表）

@@ -354,6 +354,7 @@ idx-1  role=user   OpenClaw runtime context…<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT
 用户看到的是模型自己转述的余额，不是短路卡片）。已修为 `_tail_user_texts()`：
 尾部**连续** user、遇 assistant/tool/无 role 即停（否则上一轮的 `/查余额` 会让之后
 每轮重复短路）、最多 6 条、长度闸门**按每条**生效（拼成一段则一超 20000 把真命令一起判死）。
+（09-30 起判命令改走 `_tail_user_blocks()`，闸门再细到按 block，并跳过尾部 system，见下一节。）
 
 **所以冒烟脚本的单条形状是结构性盲区。** 验 ①⑤ 用这个判据组：
 
@@ -366,6 +367,40 @@ idx-1  role=user   OpenClaw runtime context…<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT
 🔴 **`in_tok` 才是短路的判据，不是文案。** 短路走 `mock_response`，`in_tok` 恒个位数
 （实测 10）；真打上游是几百到十几万。只看「有没有那段文案」分不出
 「短路了」和「模型正好把余额转述对了」。
+
+### 🔴 Claude Code 是第三种形状，openclaw 那套绿了也不代表它能用（2026-09-30）
+
+生产请求体（SpendLogs `proxy_server_request`，要抓**整个 messages 的角色序列**，只看 content 不够）：
+
+```
+messages[0]  role=user    4 个 text block：
+                          约 40KB <system-reminder>（CLAUDE.md+MEMORY.md）/ gitStatus / attribution /「查余额」
+messages[1]  role=system  "# Environment …"   ← 🔴 尾部跟着一条 system
+```
+
+前后漏了两层，每一层单独都足以让命令认不出来：
+
+| 层 | 病 | 修法 | commit |
+|---|---|---|---|
+| ① | 同一条消息的 4 个 block 被拼成一段，约 40KB，超过 20000 闸门，命令那行没被扫到 | `_tail_user_blocks()` 按 block 判，闸门对每个 block 单独生效 | `b7ce3cc` |
+| ② | 尾部 `role=system` 被当成轮次边界，往回一步就停，一条 user 都没收到 | 跳过 system，不当边界；assistant/tool 仍是边界 | `259a978` |
+| 附 | 用户粘贴的终端输出 `<pasted_content>` 里单独一行「查余额」被误判成命令 | 判之前先剥掉粘贴块 | `259a978` |
+
+🔴 **只修 ① 那版上线后仍然 76k in**。原因是我本地复现的 fixture 只有 user、没带尾部 system，单测全绿，最后是用户自己发现没生效。**fixture 必须照生产抄全部角色序列。**
+
+验收（会打生产，但只花一两条普通请求的钱）：
+
+```bash
+PROBE_KEY=$ANTHROPIC_AUTH_TOKEN python3 scripts/litellm-198-quota-cmd-openclaw-shape-probe.py \
+    --shape claude-code --base "$ANTHROPIC_BASE_URL" --model anthropic.claude-haiku-4-5
+```
+
+C1 查余额：`in_tok==0`，<5s。C2 普通问题、C3 粘贴块里的「查余额」：都不能短路。
+阳性对照：C1 在 `b7ce3cc` 上为红、在 `259a978` 上为绿（两版匹配器对比，不打生产）。
+⚠️ C3 分不出这两版（第一版连 ② 都没过），粘贴块那层的辨别力靠单测
+`test_pasted_content_line_does_not_trigger` 保证。
+
+⚠️ 前提：`ANTHROPIC_BASE_URL` 必须指向 198。指向网宿 `aigateway.edgecloudapp.com` 的话，补丁根本不在链路上（见 [[feedback_shared_gate_opens_four_features_at_once]]）。
 
 ### 🔴 验「其他 carher 是否同时生效」：窄门是前缀匹配，但别只推不打（2026-09-28）
 

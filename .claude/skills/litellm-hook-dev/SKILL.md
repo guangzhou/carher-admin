@@ -617,6 +617,7 @@ for split in range(len(prefix), len(prefix) + len(target_substring)):
 | **Cursor agent 收到 429 完全不渲染 body**，只显示自家 "exceeded retry limit" 串（2026-08-21 活体探针）| 精心写的友好 429 文案用户一个字看不到 | 拦截改成 **200 mock 助手消息**（budget_notice ③ 软拦截模式）|
 | **Claude Code 只把 anthropic 流最后一个 text block 当结果**（2026-08-19 canary）| 追加独立尾 block 会顶掉真正的答案 | 注入必须进**已存在的最后 text block 内部** |
 | **Cursor 把 `/` 开头输入当命令面板拦截**，根本不发给模型（2026-08-20 SpendLogs 实证）| `/查余额` 永远到不了 proxy | 触发词须支持裸词（`查余额`），匹配器剥 `<user_query>` 标签按行全等 |
+| **Claude Code 把用户输入放在一条 user 消息的最后一个 block**（前面约 40KB system-reminder），**尾部还跟一条 `role=system`**（2026-09-30 SpendLogs 实证）| 按消息拼接会超长度闸门；把 system 当轮次边界，一条 user 都收不到 | 「读本轮用户输入」类 hook 按 block 判、跳过 system、剥掉 `<pasted_content>`；fixture 照生产抄整个角色序列。详见 skill `litellm-budget-mgmt` |
 
 通用结论：**任何"给用户递话"的需求（额度提醒、超限提示、运维公告），最终
 载体只能是 200 的正常 assistant 消息**；错误通道（4xx/5xx body）、独立

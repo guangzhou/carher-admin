@@ -29,6 +29,29 @@ openclaw 一轮发的是**尾部连续三条 role=user**（`<turn_aborted>` / �
     select unnest(models) from "LiteLLM_VerificationToken" where key_alias='carher-14';
 
 退出码：0 全绿 / 1 有 FAIL / 2 尺子自己坏（连不上、全 4xx）。
+
+--shape claude-code（2026-09-30 加）
+-----------------------------------
+Claude Code 的形状和 openclaw 完全不同，openclaw 形状全绿**不代表** Claude Code 能用：
+
+    POST /v1/messages
+    system   = [...]                               ← 顶层 system，与匹配无关
+    messages = [
+      user: [text 约 40KB <system-reminder>CLAUDE.md+MEMORY.md,
+             text <system-reminder>gitStatus,
+             text <system-reminder>attribution,
+             text "查余额"]                         ← 命令在最后一个 block
+      system: "# Environment …"                    ← 🔴 尾部还跟一条 role=system
+    ]
+
+那天先后漏了两层：① 4 个 block 拼起来超过 20000 闸门；② 尾部的 `role=system`
+被当成轮次边界，一条 user 都没收到。只修 ① 那版上线后仍然 76k in，是因为我本地的
+fixture 没带 ②。所以本模式下这两层**必须同时带上**。另外加两条对照：普通问题、
+粘贴块（`<pasted_content>`）里单独一行的「查余额」，这两条都不能短路。
+
+    # key 用 Claude Code 自己的（env 里的 ANTHROPIC_AUTH_TOKEN），这把就是被测对象
+    PROBE_KEY=$ANTHROPIC_AUTH_TOKEN python3 scripts/litellm-198-quota-cmd-openclaw-shape-probe.py \
+        --shape claude-code --base "$ANTHROPIC_BASE_URL" --model anthropic.claude-haiku-4-5
 """
 import argparse
 import json
@@ -65,6 +88,58 @@ def _messages(cmd: str) -> list:
         {"role": "user", "content": _body(cmd)},      # 尾部 user #2 ← 命令在这
         {"role": "user", "content": _RUNTIME_CTX},    # 尾部 user #1（无命令）
     ]
+
+
+# Claude Code 形状（claude-code-liuguoxian-std，SpendLogs 2026-09-30 13:40:06 的
+# proxy_server_request）。第一块要超过 20000 才测得到闸门那层，block 结构和尾部
+# system 都是被测对象，不要精简。
+def _reminder(n: int) -> str:
+    return ("<system-reminder>\n" + ("x" * 79 + "\n") * (n // 80)
+            + "</system-reminder>")
+
+
+def _cc_messages(user_text: str) -> list:
+    return [
+        {"role": "user", "content": [
+            {"type": "text", "text": _reminder(40000)},
+            {"type": "text", "text": _reminder(2300)},
+            {"type": "text", "text": _reminder(600)},
+            {"type": "text", "text": user_text},
+        ]},
+        {"role": "system", "content": "# Environment\n"
+         "You have been invoked in the following environment: …"},
+    ]
+
+
+def shoot_cc(base, key, model, user_text, timeout=180):
+    payload = {"model": model, "max_tokens": 64,
+               "system": [{"type": "text", "text": "You are Claude Code."}],
+               "messages": _cc_messages(user_text)}
+    req = urllib.request.Request(
+        base.rstrip("/") + "/v1/messages",
+        data=json.dumps(payload).encode(),
+        headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                 "Content-Type": "application/json"})
+    t0 = time.time()
+    try:
+        raw = urllib.request.urlopen(req, timeout=timeout).read().decode()
+    except urllib.error.HTTPError as exc:
+        return {"code": exc.code, "text": "", "in_tok": None,
+                "el": time.time() - t0, "raw": exc.read()[:300].decode()}
+    except Exception as exc:                                  # noqa: BLE001
+        return {"code": 0, "text": "", "in_tok": None,
+                "el": time.time() - t0, "raw": repr(exc)}
+    el = time.time() - t0
+    try:
+        j = json.loads(raw)
+    except ValueError:
+        return {"code": 200, "text": "", "in_tok": None, "el": el,
+                "raw": raw[:300]}
+    text = "".join(b.get("text", "") for b in j.get("content") or []
+                   if isinstance(b, dict))
+    return {"code": 200, "text": text,
+            "in_tok": (j.get("usage") or {}).get("input_tokens"),
+            "el": el, "raw": raw[:300]}
 
 
 def shoot(base, key, model, cmd, timeout=180):
@@ -104,6 +179,9 @@ def main():
     ap.add_argument("--max-shortcircuit-in-tok", type=int, default=64,
                     help="短路的 in_tok 上界。实测 10；给到 64 留余量")
     ap.add_argument("--max-shortcircuit-sec", type=float, default=5.0)
+    ap.add_argument("--shape", choices=("openclaw", "claude-code"),
+                    default="openclaw",
+                    help="被测客户端形状，见文件头。两种形状互不覆盖")
     args = ap.parse_args()
 
     key = os.environ.get("PROBE_KEY") or ""
@@ -123,6 +201,9 @@ def main():
         print("  HTTP %s · %.2fs · in_tok=%s" % (r["code"], r["el"], r["in_tok"]))
         body = r["text"] or r["raw"]
         print("  " + body[:300].replace("\n", "\n  "))
+
+    if args.shape == "claude-code":
+        return _main_cc(args, key, check, show)
 
     print("=" * 66)
     print("① /查余额 —— 命令在倒数第二条 user，必须短路（零上游）")
@@ -158,6 +239,55 @@ def main():
     if all(r["code"] != 200 for r in (a, b, c)):
         print("🔴 三条全非 200（含阴性对照）= 尺子坏，不是短路坏。"
               "先查 --model 在不在这把 key 白名单里、key 是不是真 bot 的。",
+              file=sys.stderr)
+        return 2
+    return 0 if all(results) else 1
+
+
+def _main_cc(args, key, check, show):
+    """Claude Code 形状。/测模型 不打：它会真打上游、花钱，而且它和 ① 走的是
+    同一个 _tail_user_blocks，① 过了就说明取文本那层没问题。"""
+    results = []
+
+    def chk(name, cond, detail=""):
+        results.append(bool(cond))
+        check(name, cond, detail)
+
+    lim, sec = args.max_shortcircuit_in_tok, args.max_shortcircuit_sec
+    print("=" * 66)
+    print("① 查余额 —— 最后一个 block，前面约 40KB reminder，尾部跟 role=system")
+    a = shoot_cc(args.base, key, args.model, "查余额")
+    show("quota", a)
+    chk("C1 查余额 短路",
+        a["code"] == 200 and "今日用量" in a["text"]
+        and (a["in_tok"] if a["in_tok"] is not None else 10 ** 9) <= lim
+        and a["el"] < sec,
+        "want 200 + 今日用量 + in_tok<=%d + <%.0fs; got %s" % (lim, sec, a))
+
+    print("=" * 66)
+    print("② 阴性对照 —— 同形状普通问题，不能短路")
+    b = shoot_cc(args.base, key, args.model, "回复一个字：好")
+    show("normal", b)
+    chk("C2 普通问题不短路",
+        b["code"] == 200 and "今日用量" not in b["text"]
+        and (b["in_tok"] or 0) > lim,
+        "want 200 + 不含今日用量 + in_tok>%d; got %s" % (lim, b))
+
+    print("=" * 66)
+    print("③ 阴性对照 —— 粘贴块里单独一行「查余额」，不能短路")
+    c = shoot_cc(args.base, key, args.model,
+                 '<pasted_content id="p1">\n查余额\n</pasted_content id="p1">\n'
+                 "回复一个字：好")
+    show("pasted", c)
+    chk("C3 粘贴块不短路",
+        c["code"] == 200 and "今日用量" not in c["text"],
+        "want 200 + 不含今日用量; got %s" % c)
+
+    print()
+    print("%d/%d PASS" % (sum(results), len(results)))
+    if all(r["code"] != 200 for r in (a, b, c)):
+        print("🔴 三条全非 200（含阴性对照）= 尺子坏，不是短路坏。"
+              "先查 --model 在不在这把 key 白名单里、--base 是不是 198。",
               file=sys.stderr)
         return 2
     return 0 if all(results) else 1

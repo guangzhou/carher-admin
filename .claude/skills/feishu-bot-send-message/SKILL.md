@@ -12,6 +12,7 @@ description: >-
   区别于 `carher-feishu-bot-direct-install`（把发消息能力装进 her 实例、含建文档建表格）
   和 `backend/feishu_bridge.py`（Admin 后端里的入站事件 + 按 chat_id 回消息）——
   本 skill 是**独立 CLI 的出站发送**。
+  **群发给多维表里的人 / 群发页 / 198:30930 / feishu-broadcast** 也走本 skill 的「群发页」一节。
 ---
 
 # feishu-bot-send-message — 自建 App 给人/群发飞书消息
@@ -101,6 +102,34 @@ round-trip 反查（跨租户会在 round-trip 这一步暴露，而不是等发
    "权限不足"读成"网络挂了"。脚本在 `HTTPError` 分支里照样解析 body。
 4. **别把 app_secret 写进脚本兜底默认值**——那等于提交凭据。只从 env 读；
    secret 一旦在对话/日志里出现过，轮转是唯一真解，摘掉明文不消除暴露。
+
+## 群发页（多维表里的人）
+
+**线上 <http://10.68.13.198:30930/>**，ns `feishu-broadcast`，源码 `broadcast/`，
+清单 `k8s/feishu-broadcast.yaml`（文件头有部署、改 Secret 的命令），完整说明 `broadcast/README.md`。
+
+- **bot 读不到行时返回 `code 0` + 0 行，不报错，而且有两个原因现象一样**（2026-10-01 两个都踩到了）：
+  ① bot 不是协作者：连字段都读不到；
+  ② **bot 已经是「可阅读」协作者，但表开了高级权限**：表和字段都能读，行被角色的行规则滤光
+  （这张表「角色3」的规则是「提交人 包含 …」，bot 没提交过任何一行）。
+  区分方法：先查字段接口能不能读，再看 `GET /bitable/v1/apps/<token>` 的 `is_advanced`。
+  ⛔ **「已加协作者」不等于「能读到行」**。我第一版的红条把两种情况都说成「去加协作者」，
+  结果用户加完之后又白等了一轮。现在页面会按 `diagnose_empty` 分开提示。
+  ② 的解法要改共享表的权限，**由用户决定**：升「可管理」（能读写整张表，包括 `API Key` 列），
+  或者单建一个只读角色（所有行可读、只开需要的字段）。成员列表接口对两个角色都返回空，
+  所以 bot 被分在哪个角色**查不到**，不要编。
+- 判 bot 能不能读表，**现跑** `scripts/feishu-bot-base-access-check.py --wiki <token> --table <tbl> --view <vew>`
+  （只读，四层 token/元信息/字段/行，加上用户身份对照）：退出码 0 = bot 行数等于你本人的行数，
+  1 = 读不全且会说是哪一层，3 = 量具自己坏了（换不到 token / 对照读不出来），这时候结论不可信。
+  ⛔ **别拿记下来的行数当验收线**：同一视图 10-01 上午 1391 行，几小时后变成 1399 行。只认现跑出来的对照。
+- **寻址用人员字段，不用表里的文本 `open_id` 列。** 用 bot 自己的 token、`user_id_type=open_id` 读人员字段，
+  拿到的就是本 app 视角的 open_id；文本那列是别的 app 写进去的。192/661 人没有 email，按邮箱发会漏人。
+- **一人多行**（Cursor 一行、Claude Code 一行）⇒ 按 open_id 去重，筛选字段取各行并集。
+- **不重复发送靠 `uuid`**：`sha256(批次 root_id:open_id)[:40]`，重试和「重发未成功的」沿用同一个 root_id。
+  飞书只在 1 小时内按 uuid 去重。
+- **e2e 实测到的失败码**：塞一个格式对但不存在的 open_id ⇒ `99992351 not a valid {open_id}`
+  （不是 `99992361`），两者都归「open_id 无效或不属于本 app」。
+- 改源码后：scp 到 198 → 重建 ConfigMap → `rollout restart`，**用 pod 内 `sha256sum` 对一下本地的 sha** 再算上线完成。
 
 ## 别跑偏
 

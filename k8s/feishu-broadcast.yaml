@@ -1,0 +1,135 @@
+# feishu-broadcast — Namespace + Deployment + Service
+#
+# 内网群发页：从多维表「cursor&claude code 账户表格」筛人，用自建机器人发飞书消息。
+# 源码与说明：broadcast/server.py、broadcast/index.html、broadcast/README.md
+#
+# 它碰什么
+# --------
+# 只调飞书开放平台：读一张多维表 + im/v1/messages 发消息。不改表，
+# 对 litellm-product / carher / keyprobe 零引用、零权限。
+#
+# 镜像：照 keyprobe，不单独构建——纯标准库，ConfigMap 挂进节点已缓存的 open-webui 镜像跑。
+#
+# 凭据：Secret `feishu-broadcast-cred`，**不在本文件、不在 git**。建/改（在 198 上）：
+#
+#   umask 077; cat > /tmp/fb.env   # 写入下面 4 行后 Ctrl-D
+#     FEISHU_APP_ID=cli_xxx
+#     FEISHU_APP_SECRET=xxx
+#     BROADCAST_PASSWORD=<至少 10 位>
+#     BROADCAST_TEST_OPEN_ID=<你在本 app 视角的 open_id，「先发给我看看」发给它>
+#   sudo kubectl -n feishu-broadcast create secret generic feishu-broadcast-cred \
+#       --from-env-file=/tmp/fb.env --dry-run=client -o yaml | sudo kubectl apply -f -
+#   shred -u /tmp/fb.env
+#   sudo kubectl -n feishu-broadcast rollout restart deploy/feishu-broadcast
+#
+# 部署/更新源码：
+#
+#   sudo kubectl apply -f k8s/feishu-broadcast.yaml
+#   sudo kubectl -n feishu-broadcast create configmap feishu-broadcast-src \
+#       --from-file=server.py=broadcast/server.py --from-file=index.html=broadcast/index.html \
+#       --dry-run=client -o yaml | sudo kubectl apply -f -
+#   # ConfigMap 变了 pod 不会自己重启：
+#   sudo kubectl -n feishu-broadcast rollout restart deploy/feishu-broadcast
+#   sudo kubectl -n feishu-broadcast rollout status deploy/feishu-broadcast
+#
+# 发送记录：hostPath /var/lib/feishu-broadcast/jobs/*.json（钉在 master），滚 pod 不丢。
+#
+# 访问：http://10.68.13.198:30930/
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: feishu-broadcast
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feishu-broadcast
+  namespace: feishu-broadcast
+  labels:
+    app: feishu-broadcast
+spec:
+  replicas: 1
+  # 发送队列、登录会话都在进程内存里。多副本 = 两个 worker 抢同一批、会话随机失效。
+  # Recreate 保证滚动时不会有新旧两个 worker 同时在发。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: feishu-broadcast
+  template:
+    metadata:
+      labels:
+        app: feishu-broadcast
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 0          # hostPath 目录是 root 建的；容器内不跑别的东西
+      containers:
+      - name: feishu-broadcast
+        image: 127.0.0.1:5000/open-webui:v0.11.3
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "-u", "/app/broadcast/server.py"]
+        envFrom:
+        - secretRef:
+            name: feishu-broadcast-cred
+        env:
+        - name: PORT
+          value: "8080"
+        - name: BROADCAST_DATA_DIR
+          value: /data
+        - name: BROADCAST_RATE          # 条/秒；飞书单 app 上限 50 QPS
+          value: "5"
+        - name: BROADCAST_BASE_TOKEN
+          value: DlT9bsrwMad12VsogEpcK9Ptncc
+        - name: BROADCAST_TABLE_ID
+          value: tblJT2s6Y6xjYj5A
+        - name: BROADCAST_VIEW_ID       # 「全部」视图
+          value: vewISEKPg7
+        ports:
+        - name: http
+          containerPort: 8080
+        volumeMounts:
+        - name: src
+          mountPath: /app/broadcast
+          readOnly: true
+        - name: data
+          mountPath: /data
+        readinessProbe:
+          httpGet: {path: /healthz, port: http}
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: {path: /healthz, port: http}
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        resources:
+          requests: {cpu: 20m, memory: 64Mi}
+          limits:   {cpu: 500m, memory: 256Mi}
+      volumes:
+      - name: src
+        configMap:
+          name: feishu-broadcast-src
+      - name: data
+        hostPath:
+          path: /var/lib/feishu-broadcast
+          type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: feishu-broadcast
+  namespace: feishu-broadcast
+  labels:
+    app: feishu-broadcast
+spec:
+  type: NodePort
+  selector:
+    app: feishu-broadcast
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    nodePort: 30930

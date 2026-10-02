@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>飞书群发</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1f2329;--mute:#646a73;--line:#dee0e3;--pri:#3370ff;--pri-fg:#fff;
+--ok:#00a35c;--bad:#d83931;--warn:#d97706;--chip:#eef3ff;--chip-on:#3370ff;--chip-on-fg:#fff;--focus:#3370ff66}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#17181a;--card:#222326;--fg:#e8e9eb;
+--mute:#a0a4ab;--line:#3a3c40;--pri:#4c8bff;--chip:#2b3445;--chip-on:#4c8bff;--ok:#2fbf71;--bad:#f0665e;--warn:#f0a43a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:4px 0 16px}
+h2{font-size:15px;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:820px){.grid{grid-template-columns:1fr}}
+.mute{color:var(--mute)}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:6px;padding:6px 14px;cursor:pointer}
+button.pri{background:var(--pri);border-color:var(--pri);color:var(--pri-fg)}
+button.danger{background:var(--bad);border-color:var(--bad);color:#fff}
+button:disabled{opacity:.45;cursor:not-allowed}
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid var(--focus);outline-offset:1px}
+input,textarea,select{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
+textarea{min-height:180px;resize:vertical;font-family:ui-monospace,Menlo,monospace;font-size:13px}
+label{display:block;margin:8px 0 4px;color:var(--mute);font-size:13px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.field{margin-bottom:10px}
+.field-name{font-weight:600;font-size:13px;margin-bottom:4px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;max-height:120px;overflow:auto}
+.chip{border:1px solid transparent;background:var(--chip);color:var(--fg);border-radius:14px;padding:2px 10px;font-size:12px}
+.chip[aria-pressed=true]{background:var(--chip-on);color:var(--chip-on-fg)}
+.chip small{opacity:.75;margin-left:4px}
+.list{max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:6px;margin-top:8px}
+.list div{padding:3px 10px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px}
+.list div:last-child{border-bottom:0}
+.big{font-size:28px;font-weight:700}
+.banner{padding:10px 12px;border-radius:6px;background:#fdecea;color:#8a1c14;margin-bottom:12px}
+@media (prefers-color-scheme:dark){.banner{background:#3a1f1d;color:#ffb4ad}}
+table{border-collapse:collapse;width:100%;font-size:13px}
+td,th{border-bottom:1px solid var(--line);padding:6px;text-align:left;vertical-align:top}
+.tablewrap{overflow-x:auto}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{border:0;border-radius:0}
+.seg button[aria-pressed=true]{background:var(--pri);color:var(--pri-fg)}
+.hidden{display:none!important}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+</style>
+</head>
+<body>
+<main>
+<h1>飞书群发 <span class="mute" style="font-size:13px;font-weight:400">从多维表筛人 → 机器人发消息</span></h1>
+
+<section id="login" class="card hidden" aria-labelledby="lh">
+  <h2 id="lh">登录</h2>
+  <form id="loginForm" class="row">
+    <label for="pw" class="sr">口令</label>
+    <input id="pw" type="password" autocomplete="current-password" placeholder="口令" style="max-width:280px" required>
+    <button class="pri" type="submit">进入</button>
+    <span id="loginErr" class="bad" role="alert"></span>
+  </form>
+</section>
+
+<div id="app" class="hidden">
+  <div id="tableErr" class="banner hidden" role="alert"></div>
+
+  <div class="grid">
+    <section class="card" aria-labelledby="h1x">
+      <div class="row" style="justify-content:space-between"><h2 id="h1x">1. 选收件人</h2>
+        <div class="row"><span id="tableInfo" class="mute"></span>
+          <button id="refresh" type="button" title="重新从多维表拉取">刷新表</button>
+          <button id="logout" type="button">退出</button></div></div>
+      <p class="mute" style="margin:0 0 10px">同一字段多选 = 或；不同字段 = 且。一人多行按并集算。</p>
+      <div id="filters"></div>
+      <label for="addName">手动加人 / 排除（输入姓名）</label>
+      <div class="row">
+        <input id="addName" list="names" placeholder="姓名" style="flex:1">
+        <datalist id="names"></datalist>
+        <button id="addInc" type="button">加入</button>
+        <button id="addExc" type="button">排除</button>
+      </div>
+      <div id="manual" class="mute" style="margin-top:6px;font-size:13px"></div>
+    </section>
+
+    <section class="card" aria-labelledby="h2x">
+      <h2 id="h2x">2. 写消息</h2>
+      <div class="seg" role="group" aria-label="消息类型">
+        <button type="button" data-t="text" aria-pressed="true">纯文本</button>
+        <button type="button" data-t="markdown" aria-pressed="false">Markdown 卡片</button>
+      </div>
+      <div id="titleRow" class="hidden"><label for="title">卡片标题（可空）</label><input id="title" maxlength="100"></div>
+      <label for="body">内容 <span class="mute">· <code>{name}</code> 会替换成收件人姓名</span></label>
+      <textarea id="body" placeholder="例如：{name} 你好，本周五 cursor key 会轮换……"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button id="testBtn" type="button">先发给我看看</button>
+        <span id="testMsg" class="mute" role="status"></span>
+      </div>
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="h3x">
+    <h2 id="h3x">3. 确认并发送</h2>
+    <div class="row" style="align-items:baseline;gap:16px">
+      <div><span id="count" class="big">0</span> <span class="mute">人</span></div>
+      <button id="showList" type="button">看名单</button>
+    </div>
+    <div id="list" class="list hidden" tabindex="0" aria-label="收件人名单"></div>
+    <div class="row" style="margin-top:12px">
+      <label for="confirm" style="margin:0">输入收件人数确认：</label>
+      <input id="confirm" inputmode="numeric" style="max-width:110px">
+      <button id="sendBtn" class="danger" type="button" disabled>群发</button>
+      <span id="sendMsg" role="status"></span>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="h4x">
+    <div class="row" style="justify-content:space-between"><h2 id="h4x">发送记录</h2>
+      <button id="reloadJobs" type="button">刷新</button></div>
+    <div class="tablewrap"><table><thead><tr><th>时间</th><th>内容</th><th>人数</th><th>结果</th><th></th></tr></thead>
+      <tbody id="jobs"></tbody></table></div>
+    <div id="detail" class="hidden" style="margin-top:12px"></div>
+  </section>
+</div>
+</main>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const S = {people: [], fields: [], filters: {}, include: new Set(), exclude: new Set(), msgType: "text", count: 0, previewSeq: 0};
+const byId = new Map();
+const LS = "fb_draft_v1";
+
+async function call(method, url, body) {
+  const r = await fetch(url, {method, headers: {"Content-Type": "application/json"},
+    body: body ? JSON.stringify(body) : undefined, credentials: "same-origin"});
+  let data = {}; try { data = await r.json(); } catch (_) {}
+  if (r.status === 401 && !url.endsWith("/login")) { showLogin(); throw new Error("未登录"); }
+  if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+  return data;
+}
+function showLogin() { $("#app").classList.add("hidden"); $("#login").classList.remove("hidden"); $("#pw").focus(); }
+function showApp() { $("#login").classList.add("hidden"); $("#app").classList.remove("hidden"); }
+
+$("#loginForm").addEventListener("submit", async e => {
+  e.preventDefault(); $("#loginErr").textContent = "";
+  try { await call("POST", "/api/login", {password: $("#pw").value}); $("#pw").value = ""; await boot(); }
+  catch (err) { $("#loginErr").textContent = err.message; }
+});
+$("#logout").onclick = async () => { await call("POST", "/api/logout", {}).catch(() => {}); showLogin(); };
+
+async function loadPeople(force) {
+  const d = await call("GET", "/api/people" + (force ? "?refresh=1" : ""));
+  showApp();
+  S.people = d.people; S.fields = d.filter_fields; byId.clear();
+  d.people.forEach(p => byId.set(p.open_id, p));
+  const st = d.stats || {};
+  const err = $("#tableErr");
+  if (st.error) { err.textContent = st.error; err.classList.remove("hidden"); } else err.classList.add("hidden");
+  $("#tableInfo").textContent = st.people != null ? `${st.rows} 行 · ${st.people} 人` : "";
+  $("#testBtn").disabled = !d.test_ready;
+  if (!d.test_ready) $("#testMsg").textContent = "服务端没配测试收件人";
+  if (!Object.keys(S.filters).length) S.filters = JSON.parse(JSON.stringify(d.defaults || {}));
+  renderFilters(d.options);
+  $("#names").innerHTML = d.people.map(p => `<option value="${esc(p.name)}">${esc(p.email)}</option>`).join("");
+  await preview();
+}
+
+function renderFilters(options) {
+  $("#filters").innerHTML = S.fields.map(f => {
+    const vals = Object.entries(options[f] || {});
+    if (!vals.length) return "";
+    const on = new Set(S.filters[f] || []);
+    return `<div class="field"><div class="field-name">${esc(f)}${on.size ? ` <button type="button" class="chip" data-clear="${esc(f)}">清除</button>` : ""}</div>
+      <div class="chips" role="group" aria-label="${esc(f)}">${vals.map(([v, n]) =>
+        `<button type="button" class="chip" data-f="${esc(f)}" data-v="${esc(v)}" aria-pressed="${on.has(v)}">${esc(v)}<small>${n}</small></button>`).join("")}</div></div>`;
+  }).join("");
+  $("#filters").dataset.options = JSON.stringify(options);
+}
+$("#filters").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  const opts = JSON.parse($("#filters").dataset.options || "{}");
+  if (b.dataset.clear) { delete S.filters[b.dataset.clear]; }
+  else if (b.dataset.f) {
+    const set = new Set(S.filters[b.dataset.f] || []);
+    set.has(b.dataset.v) ? set.delete(b.dataset.v) : set.add(b.dataset.v);
+    S.filters[b.dataset.f] = [...set];
+  }
+  renderFilters(opts); preview();
+});
+
+function findByName(name) { return S.people.filter(p => p.name === name.trim()); }
+function manualAdd(kind) {
+  const hits = findByName($("#addName").value);
+  if (!hits.length) { $("#manual").textContent = "表里没有这个名字"; return; }
+  if (hits.length > 1) { $("#manual").textContent = `有 ${hits.length} 个同名的人，已全部${kind === "inc" ? "加入" : "排除"}`; }
+  hits.forEach(p => { (kind === "inc" ? S.include : S.exclude).add(p.open_id); (kind === "inc" ? S.exclude : S.include).delete(p.open_id); });
+  $("#addName").value = ""; renderManual(); preview();
+}
+$("#addInc").onclick = () => manualAdd("inc");
+$("#addExc").onclick = () => manualAdd("exc");
+function renderManual() {
+  const tag = (set, word) => [...set].map(id => `<button type="button" class="chip" data-rm="${esc(id)}" title="点击撤销">${word} ${esc(byId.get(id)?.name || id)} ×</button>`).join(" ");
+  $("#manual").innerHTML = tag(S.include, "+") + " " + tag(S.exclude, "−");
+}
+$("#manual").addEventListener("click", e => {
+  const id = e.target.closest("button")?.dataset.rm; if (!id) return;
+  S.include.delete(id); S.exclude.delete(id); renderManual(); preview();
+});
+
+function selection() { return {filters: S.filters, include: [...S.include], exclude: [...S.exclude]}; }
+async function preview() {
+  const seq = ++S.previewSeq;
+  const d = await call("POST", "/api/preview", selection());
+  if (seq !== S.previewSeq) return;  // 连点筛选时只认最后一次
+  S.count = d.count;
+  $("#count").textContent = d.count;
+  $("#list").innerHTML = d.recipients.map(r => `<div><span>${esc(r.name)}</span><span class="mute">${esc(byId.get(r.open_id)?.email || "")}</span></div>`).join("") || `<div class="mute">（空）</div>`;
+  checkConfirm();
+}
+$("#showList").onclick = () => $("#list").classList.toggle("hidden");
+
+document.querySelectorAll(".seg button").forEach(b => b.onclick = () => {
+  S.msgType = b.dataset.t;
+  document.querySelectorAll(".seg button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  $("#titleRow").classList.toggle("hidden", S.msgType !== "markdown");
+  saveDraft();
+});
+function message() { return {msg_type: S.msgType, title: $("#title").value, body: $("#body").value}; }
+function saveDraft() { try { localStorage.setItem(LS, JSON.stringify(message())); } catch (_) {} }
+function loadDraft() {
+  try { const d = JSON.parse(localStorage.getItem(LS) || "null"); if (!d) return;
+    $("#body").value = d.body || ""; $("#title").value = d.title || "";
+    document.querySelector(`.seg button[data-t="${d.msg_type === "markdown" ? "markdown" : "text"}"]`).click();
+  } catch (_) {}
+}
+["#body", "#title"].forEach(s => $(s).addEventListener("input", () => { saveDraft(); checkConfirm(); }));
+
+function checkConfirm() {
+  const ok = S.count > 0 && $("#body").value.trim() && Number($("#confirm").value) === S.count;
+  $("#sendBtn").disabled = !ok;
+}
+$("#confirm").addEventListener("input", checkConfirm);
+
+$("#testBtn").onclick = async () => {
+  $("#testMsg").textContent = "发送中…"; $("#testMsg").className = "mute";
+  try { const d = await call("POST", "/api/test", message());
+    $("#testMsg").textContent = "已排队，看飞书"; await watch(d.job.id, "#testMsg"); }
+  catch (e) { $("#testMsg").textContent = e.message; $("#testMsg").className = "bad"; }
+};
+$("#sendBtn").onclick = async () => {
+  if (!confirm(`确定给 ${S.count} 人群发？发出后无法撤回。`)) return;
+  $("#sendBtn").disabled = true; $("#sendMsg").textContent = "排队中…"; $("#sendMsg").className = "";
+  try { const d = await call("POST", "/api/send", {...message(), ...selection(), confirm_count: Number($("#confirm").value)});
+    $("#confirm").value = ""; checkConfirm(); await watch(d.job.id, "#sendMsg"); }
+  catch (e) { $("#sendMsg").textContent = e.message; $("#sendMsg").className = "bad"; checkConfirm(); }
+};
+
+function resultText(j) {
+  const c = j.counts, done = c.sent + c.failed + c.unknown;
+  let s = `${done}/${j.total}　成功 ${c.sent}`;
+  if (c.failed) s += `　失败 ${c.failed}（` + Object.values(j.buckets).map(([l, n]) => `${l} ${n}`).join("，") + "）";
+  if (c.unknown) s += `　未知 ${c.unknown}`;
+  return s;
+}
+async function watch(id, sel) {
+  for (;;) {
+    const d = await call("GET", "/api/jobs/" + id);
+    const j = d.job;
+    $(sel).textContent = (j.status === "done" ? "完成：" : "发送中：") + resultText(j);
+    $(sel).className = j.counts.failed || j.counts.unknown ? "warn" : (j.status === "done" ? "ok" : "");
+    if (j.status !== "queued" && j.status !== "running") break;
+    await new Promise(r => setTimeout(r, 1200));
+  }
+  loadJobs();
+}
+
+const STATUS = {queued: "排队", running: "发送中", done: "完成", interrupted: "中断"};
+async function loadJobs() {
+  const d = await call("GET", "/api/jobs");
+  $("#jobs").innerHTML = d.jobs.map(j => {
+    const t = new Date(j.created_at * 1000).toLocaleString("zh-CN", {hour12: false});
+    const canRetry = j.status !== "running" && j.status !== "queued" && (j.counts.failed || j.counts.unknown);
+    return `<tr><td>${esc(t)}${j.test ? ' <span class="mute">[测试]</span>' : ""}${j.note ? `<br><span class="mute">${esc(j.note)}</span>` : ""}</td>
+      <td>${esc((j.title ? j.title + " · " : "") + j.body.slice(0, 60))}${j.body.length > 60 ? "…" : ""}</td>
+      <td>${j.total}</td><td>${esc(STATUS[j.status] || j.status)}<br><span class="mute">${esc(resultText(j))}</span></td>
+      <td class="row"><button type="button" data-detail="${esc(j.id)}">明细</button>${canRetry ? `<button type="button" data-retry="${esc(j.id)}">重发未成功的</button>` : ""}</td></tr>`;
+  }).join("") || `<tr><td colspan="5" class="mute">还没有发送记录</td></tr>`;
+}
+$("#reloadJobs").onclick = loadJobs;
+$("#jobs").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.retry) {
+    if (!confirm("只重发失败和状态未知的人。1 小时内已送达的人飞书会按 uuid 去重，不会收到第二条。继续？")) return;
+    try { const d = await call("POST", `/api/jobs/${b.dataset.retry}/retry`, {}); await watch(d.job.id, "#sendMsg"); }
+    catch (err) { alert(err.message); }
+  }
+  if (b.dataset.detail) {
+    const d = await call("GET", "/api/jobs/" + b.dataset.detail);
+    const rows = d.recipients.slice().sort((a, b) => (a.status === "sent") - (b.status === "sent"));
+    $("#detail").innerHTML = `<h2>明细 · ${esc(d.job.id)}</h2><div class="tablewrap"><table><thead><tr><th>姓名</th><th>状态</th><th>飞书返回</th></tr></thead><tbody>` +
+      rows.map(r => `<tr><td>${esc(r.name)}</td><td class="${r.status === "sent" ? "ok" : (r.status === "failed" ? "bad" : "warn")}">${esc(r.status)}</td>
+        <td class="mute">${r.status === "sent" ? esc(r.message_id) : esc((r.code ?? "") + " " + (r.msg || ""))}</td></tr>`).join("") + "</tbody></table></div>";
+    $("#detail").classList.remove("hidden");
+    $("#detail").scrollIntoView({behavior: "smooth"});
+  }
+});
+
+$("#refresh").onclick = () => loadPeople(true).catch(e => alert(e.message));
+
+async function boot() {
+  try { await loadPeople(false); loadDraft(); await loadJobs(); }
+  catch (e) { if (e.message !== "未登录") alert(e.message); }
+}
+boot();
+</script>
+</body>
+</html>

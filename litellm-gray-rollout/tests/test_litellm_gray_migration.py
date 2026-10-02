@@ -396,6 +396,48 @@ def test_v195_index_create_names_manual_cleanup_when_the_drop_also_fails(tmp_pat
     assert (tmp_path / "index-state").read_text(encoding="utf-8").strip() == "invalid"
 
 
+def test_v195_index_runner_default_target_is_unchanged(tmp_path: Path):
+    # Callers that never set GRAY_INDEX_TARGET (the v1.95 Job) must keep building
+    # exactly the index they always did.
+    _, result = run_index_runner(tmp_path, "inspect")
+    assert result["target"] == "v195-spend-tool-start-time"
+    assert result["index"] == "LiteLLM_SpendLogToolIndex_start_time_idx"
+    assert result["table"] == "LiteLLM_SpendLogToolIndex"
+
+
+def test_v1103_spendlogs_index_target_matches_the_upstream_migration(tmp_path: Path):
+    # v1.103 migration 20260823000000 runs a plain CREATE INDEX on LiteLLM_SpendLogs,
+    # which holds SHARE and blocks every SpendLogs write for the whole build. The
+    # pre-build must use the exact upstream name so that statement becomes a no-op.
+    source = (TOOLS / "v195-concurrent-index-runner.sh").read_text(encoding="utf-8")
+    assert (
+        'CREATE INDEX CONCURRENTLY "LiteLLM_SpendLogs_api_key_startTime_idx" '
+        'ON public."LiteLLM_SpendLogs" USING btree ("api_key", "startTime")'
+    ) in source
+    assert 'CREATE INDEX "LiteLLM_SpendLogs_api_key_startTime_idx"' not in source
+
+    process, result = run_index_runner(
+        tmp_path, "create", env_overrides={"GRAY_INDEX_TARGET": "v1103-spendlogs-api-key-starttime"}
+    )
+    assert process.returncode == 0, process.stderr
+    assert result["target"] == "v1103-spendlogs-api-key-starttime"
+    assert result["index"] == "LiteLLM_SpendLogs_api_key_startTime_idx"
+    assert result["table"] == "LiteLLM_SpendLogs"
+    assert result["reason"] == "created_concurrently"
+
+
+def test_v195_index_runner_rejects_an_unknown_target(tmp_path: Path):
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    process = subprocess.run(
+        ["/bin/sh", str(TOOLS / "v195-concurrent-index-runner.sh"), "inspect"],
+        capture_output=True, text=True, check=False,
+        env={"PATH": "/usr/bin:/bin", "GRAY_INDEX_TARGET": "anything; DROP TABLE x"},
+    )
+    assert process.returncode != 0
+    assert "unknown GRAY_INDEX_TARGET" in process.stderr
+
+
 def test_v195_index_job_is_suspended_single_shot_and_uses_local_digest():
     documents = load_documents(ROLLOUT / "v195-concurrent-index-job.yaml")
     assert len(documents) == 1

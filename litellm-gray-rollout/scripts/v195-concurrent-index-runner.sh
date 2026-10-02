@@ -1,12 +1,39 @@
 #!/bin/sh
-# Fixed-purpose runner for the v1.95 SpendLogToolIndex start_time index.
+# Fixed-purpose runner for pre-building upstream migration indexes CONCURRENTLY.
+#
+# Each target is a closed allow-list entry whose name, table and key columns are
+# copied byte-for-byte from the upstream migration.sql, so the migration's own
+# `CREATE INDEX IF NOT EXISTS` becomes a no-op. There is no free-form SQL input.
+#   v195-spend-tool-start-time (default): v1.95 LiteLLM_SpendLogToolIndex(start_time)
+#   v1103-spendlogs-api-key-starttime:   v1.103 migration 20260823000000,
+#                                        LiteLLM_SpendLogs("api_key", "startTime")
 
 set -eu
 
 MODE=${1:-inspect}
-INDEX_NAME=LiteLLM_SpendLogToolIndex_start_time_idx
-TABLE_NAME=LiteLLM_SpendLogToolIndex
-COLUMN_NAME=start_time
+GRAY_INDEX_TARGET=${GRAY_INDEX_TARGET:-v195-spend-tool-start-time}
+case "$GRAY_INDEX_TARGET" in
+  v195-spend-tool-start-time)
+    INDEX_NAME=LiteLLM_SpendLogToolIndex_start_time_idx
+    TABLE_NAME=LiteLLM_SpendLogToolIndex
+    COLUMN_NAME=start_time
+    KEY_COLUMNS_SQL="ARRAY['start_time']::name[]"
+    CREATE_SQL='CREATE INDEX CONCURRENTLY "LiteLLM_SpendLogToolIndex_start_time_idx" ON public."LiteLLM_SpendLogToolIndex" USING btree ("start_time")'
+    DROP_SQL='DROP INDEX CONCURRENTLY IF EXISTS public."LiteLLM_SpendLogToolIndex_start_time_idx"'
+    ;;
+  v1103-spendlogs-api-key-starttime)
+    INDEX_NAME=LiteLLM_SpendLogs_api_key_startTime_idx
+    TABLE_NAME=LiteLLM_SpendLogs
+    COLUMN_NAME=api_key,startTime
+    KEY_COLUMNS_SQL="ARRAY['api_key','startTime']::name[]"
+    CREATE_SQL='CREATE INDEX CONCURRENTLY "LiteLLM_SpendLogs_api_key_startTime_idx" ON public."LiteLLM_SpendLogs" USING btree ("api_key", "startTime")'
+    DROP_SQL='DROP INDEX CONCURRENTLY IF EXISTS public."LiteLLM_SpendLogs_api_key_startTime_idx"'
+    ;;
+  *)
+    printf 'v195-concurrent-index-runner: unknown GRAY_INDEX_TARGET\n' >&2
+    exit 1
+    ;;
+esac
 RESULT_PATH=${RESULT_PATH:-/evidence/v195-index-result.json}
 PREFLIGHT_JSON=null
 CLEANUP_JSON=null
@@ -44,7 +71,7 @@ require_binding() {
 }
 
 index_state() {
-  psql "$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 <<'SQL'
+  psql "$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 <<SQL
 WITH candidate AS (
   SELECT
     i.indisvalid,
@@ -66,7 +93,7 @@ WITH candidate AS (
   JOIN unnest(i.indkey) WITH ORDINALITY AS keys(attnum, ordinality) ON true
   JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = keys.attnum
   WHERE n.nspname = 'public'
-    AND idx.relname = 'LiteLLM_SpendLogToolIndex_start_time_idx'
+    AND idx.relname = '$INDEX_NAME'
   GROUP BY i.indisvalid, i.indisready, i.indislive, i.indisunique,
            i.indpred, i.indexprs, am.amname, tn.nspname, t.relname
 )
@@ -77,8 +104,8 @@ SELECT CASE
     WHERE indisvalid AND indisready AND indislive AND NOT indisunique
       AND no_predicate AND no_expression AND amname = 'btree'
       AND table_schema = 'public'
-      AND table_name = 'LiteLLM_SpendLogToolIndex'
-      AND key_columns = ARRAY['start_time']::name[]
+      AND table_name = '$TABLE_NAME'
+      AND key_columns = $KEY_COLUMNS_SQL
   ) THEN 'valid'
   ELSE 'invalid'
 END;
@@ -98,7 +125,7 @@ SQL
 #   - not enough free space on the data volume for the new index.
 # Probe all of them in one snapshot so the create gate reads measured numbers.
 preflight_probe() {
-  psql "$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 <<'SQL'
+  psql "$DATABASE_URL" -X -qAt -v ON_ERROR_STOP=1 <<SQL
 SELECT
   coalesce((SELECT max(extract(epoch FROM (now() - xact_start)))::bigint
               FROM pg_stat_activity
@@ -117,7 +144,7 @@ SELECT
   coalesce((SELECT extract(epoch FROM (now() - greatest(last_vacuum, last_autovacuum)))::bigint
               FROM pg_stat_user_tables
              WHERE schemaname = 'public' AND relname = 'LiteLLM_SpendLogs'), -1),
-  coalesce(pg_total_relation_size(to_regclass('public."LiteLLM_SpendLogToolIndex"')), 0);
+  coalesce(pg_total_relation_size(to_regclass('public."$TABLE_NAME"')), 0);
 SQL
 }
 
@@ -161,7 +188,7 @@ write_result() {
   test ! -L "$RESULT_PATH" || return 1
   temporary="$RESULT_PATH.tmp.$$"
   cat >"$temporary" <<EOF
-{"tool":"v195-concurrent-index-runner","schema_version":2,"status":"$status","mode":"$MODE","state":"$state","reason":"$reason","run_id":"${GRAY_RUN_ID:-unknown}","generation":"${GRAY_GENERATION:-unknown}","approval_sha256":"${GRAY_INDEX_APPROVAL_SHA256:-unknown}","index":"$INDEX_NAME","table":"$TABLE_NAME","column":"$COLUMN_NAME","preflight":$PREFLIGHT_JSON,"cleanup":$CLEANUP_JSON,"captured_at":"$timestamp"}
+{"tool":"v195-concurrent-index-runner","schema_version":2,"status":"$status","mode":"$MODE","state":"$state","reason":"$reason","run_id":"${GRAY_RUN_ID:-unknown}","generation":"${GRAY_GENERATION:-unknown}","approval_sha256":"${GRAY_INDEX_APPROVAL_SHA256:-unknown}","target":"$GRAY_INDEX_TARGET","index":"$INDEX_NAME","table":"$TABLE_NAME","column":"$COLUMN_NAME","preflight":$PREFLIGHT_JSON,"cleanup":$CLEANUP_JSON,"captured_at":"$timestamp"}
 EOF
   mv -f "$temporary" "$RESULT_PATH"
   sha256sum "$RESULT_PATH" >"$RESULT_PATH.sha256"
@@ -183,7 +210,7 @@ drop_invalid_leftover() {
       ;;
   esac
   if psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 \
-    -c 'DROP INDEX CONCURRENTLY IF EXISTS public."LiteLLM_SpendLogToolIndex_start_time_idx"'
+    -c "$DROP_SQL"
   then
     final=$(index_state) || final=inspect_failed
     CLEANUP_JSON="{\"attempted\":true,\"dropped\":true,\"state_after_cleanup\":\"$final\"}"
@@ -223,7 +250,7 @@ case "$MODE" in
     test "$before" = absent || fail "create_requires_absent_found_$before"
     require_create_headroom
     if ! psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 \
-      -c 'CREATE INDEX CONCURRENTLY "LiteLLM_SpendLogToolIndex_start_time_idx" ON public."LiteLLM_SpendLogToolIndex" USING btree ("start_time")'
+      -c "$CREATE_SQL"
     then
       drop_invalid_leftover
       fail "create_failed_$CLEANUP_REASON"
@@ -235,7 +262,7 @@ case "$MODE" in
   drop-invalid)
     test "$before" = invalid || fail "drop_invalid_requires_invalid_found_$before"
     psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 \
-      -c 'DROP INDEX CONCURRENTLY IF EXISTS public."LiteLLM_SpendLogToolIndex_start_time_idx"' \
+      -c "$DROP_SQL" \
       || fail drop_invalid_failed
     after=$(index_state) || fail post_drop_inspect_failed
     test "$after" = absent || fail "post_drop_state_$after"

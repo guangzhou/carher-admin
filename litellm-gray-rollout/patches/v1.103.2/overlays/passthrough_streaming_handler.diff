@@ -1,0 +1,45 @@
+--- vanilla-v1.103.2/litellm/proxy/pass_through_endpoints/streaming_handler.py
++++ carher/litellm/proxy/pass_through_endpoints/streaming_handler.py
+@@ -56,8 +56,22 @@
+ 
+ class PassThroughStreamingHandler:
+     @staticmethod
+-    def _stamp_first_chunk_if_needed(litellm_logging_obj: LiteLLMLoggingObj) -> None:
+-        if litellm_logging_obj.completion_start_time is None:
++    def _stamp_first_chunk_if_needed(
++        chunk: bytes, litellm_logging_obj: LiteLLMLoggingObj
++    ) -> None:
++        # [2026-09-18] 空帧与 SSE 注释帧(`:` 心跳)不含任何 provider token，
++        # 不能用来钉 completion_start_time —— 否则 keepalive ping 会把首字时间
++        # 提前到上游真正开口之前，TTFT 全线偏小。上游 1.100.1 在
++        # `aiter_bytes()` 循环里对每个 transport chunk 无条件调用本函数
++        # (streaming_handler.py:96 / :107)，`split_complete_sse_frames` 在其**之后**
++        # 才做帧切分，所以过滤只能放在这里。`_update_completion_start_time`
++        # 只在字段为 None 时写入，写歪了不会被后续覆写。
++        # 本函数不改变 yield 行为，仅决定是否记时。
++        if (
++            chunk.strip()
++            and not chunk.lstrip().startswith(b":")
++            and litellm_logging_obj.completion_start_time is None
++        ):
+             litellm_logging_obj._update_completion_start_time(completion_start_time=datetime.now())
+ 
+     @staticmethod
+@@ -183,7 +197,7 @@
+                 # Hot path: just buffer for end-of-stream logging and forward.
+                 async for chunk in response.aiter_bytes():
+                     raw_bytes.append(chunk)
+-                    PassThroughStreamingHandler._stamp_first_chunk_if_needed(litellm_logging_obj)
++                    PassThroughStreamingHandler._stamp_first_chunk_if_needed(chunk, litellm_logging_obj)
+                     yield chunk
+             else:
+                 # ``cost_injection_active`` already requires ``model_name`` to
+@@ -194,7 +208,7 @@
+                 pending = b""
+                 async for chunk in response.aiter_bytes():
+                     raw_bytes.append(chunk)
+-                    PassThroughStreamingHandler._stamp_first_chunk_if_needed(litellm_logging_obj)
++                    PassThroughStreamingHandler._stamp_first_chunk_if_needed(chunk, litellm_logging_obj)
+                     complete_frames, pending = split_complete_sse_frames(
+                         pending + chunk
+                     )  # rebind-ok: SSE frame reassembly buffer across transport chunks

@@ -3,4 +3,6 @@ name: litellm-product-proxy
 description: Parameterized LiteLLM proxy chart for prod, gray, and guarded-old releases
 type: application
 version: 0.1.0
-appVersion: "1.95.0"
+# 本轮升级目标（2026-10-02 由 1.102.0 改为 1.103.2）。注意这里长期停在 "1.95.0"，与实际跑的 1.100.1 已经不符 ——
+# appVersion 只是标签，不参与渲染，改它不影响任何已部署对象；镜像永远按 digest 钉。
+appVersion: "1.103.2"

@@ -43,6 +43,10 @@ BARRIER_KEY = 2
 # held until the process exits, and waits for the PEER's key to appear. "Peer key
 # is held" is a latching fact, not an interval that has to be caught in flight.
 BARRIER_DONE_KEYS = {"concurrent-new": 3, "concurrent-old": 4}
+# Third rendezvous: "I have seen your observed-key". Without it the faster leg
+# exits, its observed-key goes with it, and the slower leg -- still on its way to
+# look -- waits out 120 s and fails. See linger_until_peer_leaves().
+BARRIER_ACK_KEYS = {"concurrent-new": 5, "concurrent-old": 6}
 ISOLATED_CHECKS = {"proxy_startup", "key_api", "proxy_model_api", "auth", "spend_logs"}
 CONCURRENT_CHECKS = {"concurrent_budget", "concurrent_spend_logs", "concurrent_proxy_model"}
 # The three background-task suppressors prepare-values.py pins into every
@@ -276,6 +280,45 @@ async def wait_for_peer_observation(connection: Prisma, mode: str) -> None:
     fail("concurrent compatibility peer never observed the overlap")
 
 
+async def linger_until_peer_leaves(connection: Prisma, mode: str) -> None:
+    """Keep this leg's observed-key held until the peer has finished observing it.
+
+    Each leg takes an ACK key once it has seen the peer's observed-key, then stays
+    until either the peer's ACK is held (the peer has seen us) or the peer's
+    observed-key is already gone (the peer saw us, acked and left before we
+    polled). Waiting only for "peer gone" would deadlock: both legs would wait
+    for the other to leave. The bound only stops a hang on a dead peer.
+    """
+    own_ack = BARRIER_ACK_KEYS.get(mode)
+    peer_ack = next((value for key, value in BARRIER_ACK_KEYS.items() if key != mode), None)
+    peer_seen = next((value for key, value in BARRIER_DONE_KEYS.items() if key != mode), None)
+    if own_ack is None or peer_ack is None or peer_seen is None:
+        fail(f"mode {mode} has no overlap-ack key")
+    await connection.query_raw(
+        "SELECT 1::bigint AS locked FROM "
+        "(SELECT pg_advisory_lock_shared($1::integer, $2::integer)) AS acquired",
+        BARRIER_NAMESPACE,
+        own_ack,
+    )
+
+    async def held(key: int) -> int:
+        rows = await connection.query_raw(
+            "SELECT count(DISTINCT pid)::bigint AS peers FROM pg_locks "
+            "WHERE locktype='advisory' AND classid=$1::oid AND objid=$2::oid "
+            "AND mode='ShareLock' AND granted",
+            BARRIER_NAMESPACE,
+            key,
+        )
+        return int(rows[0]["peers"] or 0) if rows else 0
+
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        if await held(peer_ack) >= 1 or await held(peer_seen) == 0:
+            return
+        await asyncio.sleep(0.2)
+    fail("concurrent compatibility peer never acknowledged the overlap")
+
+
 def scheduler_knobs(config: Path) -> dict[str, Any]:
     """What this leg's scheduler was actually configured with, read from disk and env.
 
@@ -439,6 +482,13 @@ async def application_probe(
             else:
                 fail("concurrent ProxyModel/SpendLogs writes did not overlap visibly")
             await wait_for_peer_observation(connection, mode)
+            # The peer's observed-key is released when its process exits, so a leg
+            # that returned as soon as it saw the peer's key could leave before the
+            # peer ever looked for ITS key -- the peer then waits 120 s and fails
+            # with nothing wrong with either version. Measured 2026-09-15 and three
+            # times 2026-10-02 (the faster leg always passes, the slower always fails).
+            # Linger until the peer has gone, bounded by the same 120 s budget.
+            await linger_until_peer_leaves(connection, mode)
             return sorted(CONCURRENT_CHECKS)
         return sorted(ISOLATED_CHECKS)
     finally:
@@ -503,7 +553,7 @@ async def run(mode: str, config: Path, result_path: Path, hold_seconds: int = 0)
         raise
     finally:
         if barrier:
-            for key in (BARRIER_KEY, *sorted(BARRIER_DONE_KEYS.values())):
+            for key in (BARRIER_KEY, *sorted(BARRIER_DONE_KEYS.values()), *sorted(BARRIER_ACK_KEYS.values())):
                 try:
                     await connection.query_raw(
                         "SELECT pg_advisory_unlock_shared($1::integer, $2::integer)",

@@ -63,7 +63,8 @@ if [ -n "$SRC" ]; then
   [ "$RSZ" = "$LSZ" ] || fail "中转文件大小不符 198=$RSZ 本地=$LSZ"
   kx "kubectl -n $NS scale deploy chatgpt-acct-$N --replicas=0" >/dev/null
   for i in $(seq 1 20); do
-    C=$(kx "kubectl -n $NS get pod -l app=chatgpt-acct-$N --no-headers" | grep -c chatgpt-acct)
+    # 只数活 pod:历史遗留的 Completed pod(acct-84 有个 25d 的)永远在列表里,数它=白等满 60s
+    C=$(kx "kubectl -n $NS get pod -l app=chatgpt-acct-$N --no-headers --field-selector=status.phase!=Succeeded,status.phase!=Failed" | grep -c chatgpt-acct)
     [ "${C:-0}" = 0 ] && break; sleep 3
   done
   # PV 是 local-path 且落在控制节点 198 本机,scale=0 后直接 cp,不用 busybox hostPath pod
@@ -106,7 +107,8 @@ done
 echo "  ✓ pod ready endpoint=$EP"
 
 # F pod 内 auth 复核(防被覆写成空壳)
-ALEN=$(kx "P=\$(kubectl -n $NS get pod -l app=chatgpt-acct-$N -o jsonpath={.items[0].metadata.name}); kubectl -n $NS exec \$P -- python3 -c \"import json;print(\\\"ALEN=\\\"+str(len(json.load(open(\\\"/chatgpt-auth/auth.json\\\")).get(\\\"access_token\\\",\\\"\\\"))))\"" \
+# 必须钉 Running:items[0] 会挑中历史 Completed pod ⇒ exec 失败 ⇒ ALEN 空 ⇒ 假红"auth 无效"(2026-10-02 acct-84)
+ALEN=$(kx "P=\$(kubectl -n $NS get pod -l app=chatgpt-acct-$N --field-selector=status.phase=Running -o jsonpath={.items[0].metadata.name}); kubectl -n $NS exec \$P -- python3 -c \"import json;print(\\\"ALEN=\\\"+str(len(json.load(open(\\\"/chatgpt-auth/auth.json\\\")).get(\\\"access_token\\\",\\\"\\\"))))\"" \
   | grep -oE 'ALEN=[0-9]+' | tail -1 | cut -d= -f2)
 [ "${ALEN:-0}" -gt 1000 ] || fail "pod 内 auth 无效 access_len=${ALEN:-0}"
 echo "  ✓ pod auth 有效 access_len=$ALEN"

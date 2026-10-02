@@ -31,6 +31,20 @@ CHATGPT_BASES = (
 SOL_OUTPUT_PER_TOKEN = 50.0 / 1_000_000  # $50/M 政策价
 GLOBAL_COST_MULTIPLIER = 1.3  # 未计费 token 抵消系数，2026-08-17 政策
 
+# 4. sub2api 出图组按张记账（2026-09-29 补，xAI 官网 docs.x.ai/developers/pricing）。
+#    🔴 deployment 上写的 input_cost_per_image **不会被读到**：`openai/` provider 的
+#    出图走 default_image_cost_calculator，它只按 `openai/<name>` / `<name>` 等后端键
+#    查 model_cost，不看 model_id；Router 把自定义价只登记在 model_id 下，后端键只有
+#    mode ⇒ 抛 "No pricing information found" 被吞 ⇒ spend 恒 $0（实测 79+ 次）。
+#    所以这里把价登记到后端键上。写官网原价，×1.3 由下面的乘子统一乘。
+#    grok-imagine 官网无此名，上游 sub2api 回报 cost_in_usd_ticks=5e8 ⇒ $0.05。
+IMAGE_PRICES = {
+    "grok-imagine": 0.05,
+    "grok-imagine-image": 0.02,
+    "grok-imagine-image-quality": 0.05,
+    "grok-imagine-image-2.0": 0.04,
+}
+
 
 def _apply():
     mc = litellm.model_cost
@@ -59,6 +73,23 @@ def _apply():
                 entry["output_cost_per_token"] = SOL_OUTPUT_PER_TOKEN
             patched.append(key)
     print(f"[pricing_overlay] patched {len(patched)} entries: {patched}", file=sys.stderr)
+
+
+def _image_entries():
+    return {
+        f"openai/{name}": {
+            "input_cost_per_image": price,
+            "litellm_provider": "openai",
+            "mode": "image_generation",
+        }
+        for name, price in IMAGE_PRICES.items()
+    }
+
+
+def _register_images():
+    # register_model 是合并写入；persist_across_reloads 默认 True，成本表热重载后仍在
+    litellm.register_model(_image_entries())
+    print(f"[pricing_overlay] image prices registered: {IMAGE_PRICES}", file=sys.stderr)
 
 
 def _install_multiplier():
@@ -93,6 +124,11 @@ try:
     _install_multiplier()
 except Exception as e:  # fail-open：计价覆盖失败不能挡启动
     print(f"[pricing_overlay] FAILED: {e}", file=sys.stderr)
+
+try:  # 独立 try：出图登记失败不连累上面两项
+    _register_images()
+except Exception as e:
+    print(f"[pricing_overlay] image FAILED: {e}", file=sys.stderr)
 
 
 class _PricingOverlayNoop(CustomLogger):

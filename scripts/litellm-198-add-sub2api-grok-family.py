@@ -123,11 +123,15 @@ SPEC: list[dict] = [
     dict(name="grok-4.20-multi-agent-latest", mode="responses", price=CHAT_1M,
          lands="grok-4.20-multi-agent"),
     # ---- image_generation (/v1/images/generations 实测 200) ----
-    # cost 取内置 xai/* 表；grok-imagine 内置表没有，按 grok-imagine-image 同价。
-    dict(name="grok-imagine", mode="image_generation", cost_per_image=0.02),
+    # cost = xAI 官网目录价（2026-09-29 核 docs.x.ai/developers/pricing）；grok-imagine
+    # 官网无此名，取上游 sub2api 回报的 cost_in_usd_ticks（5e8 = $0.05）。
+    # 🔴 这里写的 input_cost_per_image **只是记录，计费读不到**：`openai/` 出图按后端键
+    # `openai/<name>` 查价，不看 model_id ⇒ 光写这里 spend 恒 $0。真正生效的价登记在
+    # k8s/litellm-callbacks/pricing_overlay.py 的 IMAGE_PRICES，加新出图名两处同改。
+    dict(name="grok-imagine", mode="image_generation", cost_per_image=0.05),
     dict(name="grok-imagine-image", mode="image_generation", cost_per_image=0.02),
     dict(name="grok-imagine-image-quality", mode="image_generation", cost_per_image=0.05),
-    dict(name="grok-imagine-image-2.0", mode="image_generation", cost_per_image=0.06),
+    dict(name="grok-imagine-image-2.0", mode="image_generation", cost_per_image=0.04),
 ]
 
 # ---------------------------------------------------------------------------

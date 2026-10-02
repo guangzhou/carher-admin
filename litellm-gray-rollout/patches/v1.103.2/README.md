@@ -141,4 +141,4 @@ kiro 19 条 19/19 vs 19/19；her 逐 pod 全过；worker 被杀 0。`glm-5.3-fla
 两边同频出现（推理模型吃光小 max_tokens，探针已知坑），非版本差异。
 
 ⚠️ 转正 prod 时，prod 的 config 也必须带 `log_raw_request_response: false`，否则同样会炸。
-⚠️ 灰度门禁要加「worker 被杀次数」，pod 重启数看不到这个病。
+✅ 教训已写进灰度回归检验项：`docs/litellm-198-gray-operator-manual.md` §5.5（R1~R8）；`prepare-values.py` 冻结时自动拒 `log_raw_request_response: true` 和 DB 自管的路由键。

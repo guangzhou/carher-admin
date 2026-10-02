@@ -2800,3 +2800,44 @@ def test_prod_config_is_returned_byte_for_byte():
     )
     assert changed is False
     assert overlaid == original
+
+
+def test_known_bad_config_refuses_log_raw_request_response_true():
+    # Positive control: the exact 2026-10-02 shape is refused.
+    with pytest.raises(SystemExit) as caught:
+        PREPARE_VALUES.reject_known_bad_config(
+            "litellm_settings:\n  log_raw_request_response: true\n"
+        )
+    assert "log_raw_request_response" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    [
+        "litellm_settings:\n  log_raw_request_response: false\n",
+        "litellm_settings:\n  store_prompts_in_spend_logs: true\n",
+        "model_list: []\n",
+    ],
+)
+def test_known_bad_config_passes_the_fixed_and_unrelated_shapes(config_text):
+    # Negative control: a gate that refuses everything looks identical to one
+    # that refuses the bad shape, so the good shapes must pass. The UI's
+    # request/response view is store_prompts_in_spend_logs, a different switch.
+    PREPARE_VALUES.reject_known_bad_config(config_text)
+
+
+@pytest.mark.parametrize(
+    "key", ["fallbacks", "context_window_fallbacks", "model_group_alias"]
+)
+def test_known_bad_config_refuses_each_db_owned_router_key(key):
+    with pytest.raises(SystemExit) as caught:
+        PREPARE_VALUES.reject_known_bad_config(
+            f"router_settings:\n  routing_strategy: simple-shuffle\n  {key}: []\n"
+        )
+    assert key in str(caught.value)
+
+
+def test_known_bad_config_keeps_router_keys_the_db_does_not_own():
+    PREPARE_VALUES.reject_known_bad_config(
+        "router_settings:\n  routing_strategy: simple-shuffle\n  num_retries: 2\n"
+    )

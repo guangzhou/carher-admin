@@ -96,6 +96,17 @@ BACKGROUND_TASK_SUPPRESSORS = {
 # config instead of by an env entry; see disable_reset_budget_in_config().
 RESET_BUDGET_KEY = "disable_reset_budget"
 GENERAL_SETTINGS_ANCHOR_RE = re.compile(r"^general_settings:[ \t]*$", re.M)
+# 2026-10-02 v1.103.2 gray incident. 1.100.1 imported this flag by value at
+# module load, so `true` in config.yaml never took effect; 1.103 reads the live
+# value, so every upstream call (once per fallback hop) runs redact_string over
+# the whole request body on the event loop. 500KB x 6 concurrent x 8 hops
+# stalled the loop 5.32s > uvicorn's 5s worker heartbeat => worker killed =>
+# in-flight 502s, with pod restartCount still 0.
+FORBIDDEN_LITELLM_SETTINGS = {"log_raw_request_response": True}
+# 1.103 config_resolvers: a key present in config.yaml wins over the DB copy.
+# These three are owned by the DB on 198 (106 / 5 / 24 entries); a stale yaml
+# copy shadowed the DB and four groups went 400 on the gray release.
+DB_OWNED_ROUTER_KEYS = ("fallbacks", "context_window_fallbacks", "model_group_alias")
 MAX_SCHEDULER_EVIDENCE_AGE = timedelta(minutes=15)
 CHART_DEFAULTS = Path(__file__).resolve().parents[1] / "chart" / "values.yaml"
 
@@ -815,6 +826,38 @@ def disable_reset_budget_in_config(config_text: str, *, profile: str) -> tuple[s
     return overlaid, True
 
 
+def reject_known_bad_config(config_text: str) -> None:
+    """Refuse to freeze a config.yaml carrying a setting a past gray run proved harmful.
+
+    Not stripped silently: removing a router key is only safe once someone has
+    confirmed the DB holds it, and flipping a logging flag is a decision the
+    operator has to see.
+    """
+    parsed = yaml.safe_load(config_text)
+    if not isinstance(parsed, dict):
+        fail("config.yaml must be a mapping")
+    litellm_settings = parsed.get("litellm_settings") or {}
+    if not isinstance(litellm_settings, dict):
+        fail("config.yaml litellm_settings must be a mapping")
+    for key, bad in FORBIDDEN_LITELLM_SETTINGS.items():
+        if litellm_settings.get(key) is bad:
+            fail(
+                f"config.yaml sets litellm_settings.{key}: {bad!r}; it was a no-op on "
+                "1.100.1 and stalls the event loop past the worker heartbeat on 1.103 "
+                "(2026-10-02 incident). Set it to false"
+            )
+    router_settings = parsed.get("router_settings") or {}
+    if not isinstance(router_settings, dict):
+        fail("config.yaml router_settings must be a mapping")
+    shadowing = [key for key in DB_OWNED_ROUTER_KEYS if key in router_settings]
+    if shadowing:
+        fail(
+            "config.yaml router_settings carries DB-owned keys "
+            f"{', '.join(shadowing)}; on 1.103 the yaml copy wins over the DB. "
+            "Confirm the DB holds them, then drop them from the config"
+        )
+
+
 def scheduler_safety(
     path: Path | None,
     *,
@@ -1038,6 +1081,7 @@ def main() -> int:
 
     config_text = read_text(args.config, "config")
     reject_inline_credentials(config_text, "config")
+    reject_known_bad_config(config_text)
     profile_name = str(values.get("nameOverride", "")).removeprefix("litellm-proxy-")
     if values.get("nameOverride") == "litellm-proxy":
         profile_name = "prod"

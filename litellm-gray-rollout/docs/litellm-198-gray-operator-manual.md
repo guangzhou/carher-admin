@@ -491,6 +491,43 @@ reload 和 post-reload 检查。它只保证新请求切回 prod；已经建立�
 恢复该 key 到普通灰度前，先确认故障原因已经关闭，再使用 `force-gray`，不要直接
 手改 map 文件。
 
+### 5.5 灰度回归检验项（指名 key 之前、每次放量之前、转正之前都跑一遍）
+
+来源：2026-10-02 v1.103.2 灰度事故（`patches/v1.103.2/README.md`「灰度事故与修复」）。
+那轮 gray 每 pod 3h 里 worker 被杀约 38 次、buyitian 2h 吃了 72 次 502，而 pod 重启数
+恒 0、四条门禁腿全绿。下面每一项都对应那轮漏掉的一个洞，**任一项不过 = 不许往下走**。
+
+| # | 检验项 | 怎么量 | 过的判据 | 堵的洞 |
+|---|--------|--------|----------|--------|
+| R1 | 配置开关逐个审「旧版到底生没生效」 | 列出 gray `config.yaml` 里每个 `litellm_settings` 键，对旧版源码确认读法（模块加载时按值导入 = 从没生效） | 每个键都写出旧版实际行为；旧版没生效的，新版设成旧版实际值 | `log_raw_request_response: true` 在 1.100.1 是空操作、在 1.103 每跳拼整个请求体跑正则 |
+| R2 | 已知坏配置拒冻结 | `prepare-values.py` 内置 `reject_known_bad_config()`，自动跑 | 不报错 | 同上 + DB 自管的路由键被 yaml 盖掉 |
+| R3 | 生效路由设置与 prod 一致 | 两边各取 `/router/settings`（或 DB 行），比 `fallbacks` / `context_window_fallbacks` / `model_group_alias` 条数与内容 | 两边**逐项相同**（本轮 106 / 5 / 24） | 1.103 config 键盖 DB，4 个组直接 400 |
+| R4 | 事件循环卡顿实测 | `scripts/litellm-198-worker-kill-triage.py --lane gray --probe` | 6 并发 × 8 跳兜底，最长卡顿 **< 5s**（修后实测 0.00s），且打印的 `log_raw_request_response` 有效值 = False | uvicorn 心跳默认 5s，卡过就杀 worker |
+| R5 | worker 被杀次数 | `scripts/litellm-198-worker-kill-triage.py --lane all --since 30m` | gray 每 pod `worker_killed = 0` | pod restartCount 看不到这个病 |
+| R6 | 用户 502 与 worker 被杀对齐 | 对每把报 502 的 key：`--sid <sid前12位>` | 0 命中**且** pod 早于 502 才算无关；pod 比 502 新（已滚过）= 对不上，**不是**无关（exit 2） | 回滚后日志没了，把「对不上」读成「没关系」 |
+| R7 | 生产 / 灰度并排回归 | 同一批 key、同一时刻分别打 30402 和 30405 | 两边结果**一致**，不是 gray 单边全绿 | 单边绿分不出是版本问题还是上游天气 |
+| R8 | 试点 key 里必须有重度用户 | 选人时按近 24h SpendLogs 单请求最大输入 token 排序，前 10 名里至少挑 3 个 | 名单里有超长 codex / cursor 对话用户 | 重度用户第一批出事；只挑轻用户的试点量不到 |
+
+R7 并排回归集（本轮修后实测两边全对齐，以后少一项都不算过）：
+
+| 子项 | 工具 | 本轮结果（prod vs gray） |
+|------|------|--------------------------|
+| 流量前 24 组 × 3 协议（chat / responses / messages） | SpendLogs 取近 6h 前 24 组，逐组逐协议打 | 72/72 vs 72/72 |
+| 三类 key 行为（cursor-* / carher-* / claude-*：新名、老名、白名单外） | `scripts/litellm-198-key-behavior-regress.py`（`--clone-from` 克隆真 key，key 不进命令行） | 一致 |
+| 预算软拦截 | `scripts/litellm-198-budget-notice-smoke.sh` | 9/9 vs 9/9 |
+| kiro 19 条道 | `scripts/kiro-lane-regress.sh` | 19/19 vs 19/19 |
+| her 逐 pod | `scripts/litellm-her-key-model-regress.sh` | 全过 |
+| codex 压缩 | `scripts/codex-compaction-regression.py` | 一致 |
+
+⚠️ 已知两边同频的假红：`glm-5.3-flash` / `her-flash` 偶发「200 空内容」（推理模型吃光小
+`max_tokens`）。只有**单边**出现才算版本差异。
+
+🔴 **转正 prod 之前 R1~R3 要对 prod 的 config 再跑一遍。** prod 现在的 `litellm-config`
+仍带 `log_raw_request_response: true`，以及 DB 自管的 `fallbacks`（50 条）和
+`model_group_alias`（17 条）（2026-10-02 实测；在 1.100.1 上 DB 压 yaml，所以无害），
+直接换 1.103 镜像会原样复现这次事故。`reject_known_bad_config()` 对 prod profile 同样生效，
+所以没改的 prod config 冻结时会被拒，这是故意的。
+
 ## 6. 比例放量
 
 比例只能使用 `0、1、5、10、50、100`。每一档都要有当前 generation 的 sample

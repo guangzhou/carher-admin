@@ -115,3 +115,30 @@ LiteLLM 自带「重连并用同一查询重试」处理（日志原话 *This ma
 
 `litellm-secrets/DATABASE_URL` 带 Prisma 专用参数 `connection_limit`，`psql` 直接拒
 （`invalid URI query parameter`）。Job 里先剥掉 Prisma 参数再交给 runner。
+
+## 🔴 2026-10-02 灰度事故与修复：worker 被心跳杀 ⇒ 502
+
+**现象**：20% 指名灰度（254 把）期间，gray 每 pod 3h 内 worker 子进程被 uvicorn 杀约 38 次，
+`Child process [N] died`；pod 不重启（重启数恒 0，是坏尺子）。buyitian 的 cursor key 2h 72 次 502，
+每一波都与 worker 被杀同一分钟。生产 1.100.1 同期 0 次。已全量回退（17:58）。
+
+**根因（实测，不是推断）**：`litellm_settings.log_raw_request_response: true`。
+- 1.100.1 里这个开关**从未生效**：`litellm_logging.py` 在模块加载时 `from litellm import log_raw_request_response`
+  按值拷贝了默认 `False`，config 后来改 `litellm.log_raw_request_response` 不影响它。
+- 1.103.2 改成读活值 `litellm.log_raw_request_response`，于是每次上游调用都对整个请求体拼 curl 串再跑
+  `redact_string`（20+ 条正则），在事件循环主线程里同步执行。
+- py-spy 抓到被卡住的 worker 栈：`redact_string ← _redact_string ← pre_call ← async_response_api_handler`，
+  外面套 8 层 `run_async_fallback / _maybe_run_weighted_failover`（兜底链每跳各跑一次）。
+- 量具：500KB codex 形状请求，`pre_call` 单次 0.29s（旧版 0.000s）；6 并发 × 8 跳，事件循环最长卡 **5.32s**，
+  超过 uvicorn `timeout_worker_healthcheck` 默认 5s ⇒ 心跳没回 ⇒ 父进程 kill worker ⇒ 在途请求 502。
+- 没有任何消费者读 `raw_request`（SpendLogs 30 分钟 3070 行 0 行带它）。
+
+**修复**：gray config 里 `log_raw_request_response: false`（= 旧版实际行为）。gray rev9。
+修后同一量具：pre_call 0.000s，6×8 跳事件循环最长卡 **0.00s**。
+
+**回归（修复后，生产/灰度并排）**：24 组×3 协议 72/72 vs 72/72；三类 key 行为一致；预算软拦截 9/9 vs 9/9；
+kiro 19 条 19/19 vs 19/19；her 逐 pod 全过；worker 被杀 0。`glm-5.3-flash`/`her-flash` 偶发「200 空内容」
+两边同频出现（推理模型吃光小 max_tokens，探针已知坑），非版本差异。
+
+⚠️ 转正 prod 时，prod 的 config 也必须带 `log_raw_request_response: false`，否则同样会炸。
+⚠️ 灰度门禁要加「worker 被杀次数」，pod 重启数看不到这个病。

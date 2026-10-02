@@ -343,3 +343,32 @@ def test_scheduler_evidence_never_overwrites(tmp_path: Path):
     )
     assert result.returncode != 0
     assert existing.read_text(encoding="utf-8") == "{}"
+
+
+def load_prepare_values():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "prepare_values_under_test", Path(__file__).resolve().parents[1] / "scripts" / "prepare-values.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_typing_annotation_pair_is_not_an_inline_credential():
+    # Upstream streaming_handler.py (1.100.1 and 1.103.2) declares this TypedDict
+    # field; it blocked the site-packages overlay snapshot on 2026-10-02.
+    pv = load_prepare_values()
+    assert pv.find_inline_credential("    token: NotRequired[Mapping[str, str]]\n") is None
+    assert pv.find_inline_credential("secret: Optional[dict[str, str]]\n") is None
+
+
+def test_annotation_exemption_does_not_hide_real_credentials():
+    pv = load_prepare_values()
+    # Negative controls: the exemption must not swallow anything value-shaped.
+    assert pv.find_inline_credential("token: abcdefgh12345\n") is not None
+    assert pv.find_inline_credential("api_key: NotRequiredxyz123\n") is not None
+    assert pv.find_inline_credential("password: Mapping-not-a-type\n") is not None
+    assert pv.find_inline_credential('headers = {"Authorization": "Bearer abcdefgh12345678"}') is not None
+    assert pv.find_inline_credential("key = 'sk-abcdefgh12345678'") is not None

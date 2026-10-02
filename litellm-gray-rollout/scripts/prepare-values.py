@@ -173,8 +173,29 @@ def find_inline_credential(text: str) -> str | None:
         )
         if PLACEHOLDER_VALUE_RE.search(value):
             continue
+        if (
+            match.group("pair")
+            and TYPE_ANNOTATION_VALUE_RE.fullmatch(value)
+            and text[match.end("pair"):match.end("pair") + 1] == "["
+        ):
+            continue
         return match.group(0)
     return None
+
+
+# A `name: <typing construct>` pair is a Python annotation, not a value. Measured
+# 2026-10-02: upstream `litellm_core_utils/streaming_handler.py` (1.100.1 and
+# 1.103.2 alike) declares a TypedDict field `token: NotRequired[Mapping[str, str]]`,
+# which the `pair` branch read as an inline credential and blocked the
+# site-packages overlay snapshot outright. Only the `pair` branch is widened, and
+# only when the whole captured value is a typing head AND the source text
+# continues with `[` (the `pair` group stops before `[`), so `token: abcdefgh123`
+# and `api_key: NotRequiredxyz` still red.
+TYPE_ANNOTATION_VALUE_RE = re.compile(
+    r"(?:typing\.)?(?:NotRequired|Required|Optional|Union|Mapping|MutableMapping|"
+    r"Sequence|Iterable|Callable|Literal|Final|ClassVar|Annotated|dict|list|tuple|"
+    r"set|frozenset|type)"
+)
 
 
 def load_yaml(path: Path) -> dict:

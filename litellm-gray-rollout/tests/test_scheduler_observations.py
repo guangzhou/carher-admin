@@ -340,3 +340,57 @@ def test_fixtures_are_real_captured_log_text():
         assert prefixed, log
         for line in prefixed:
             assert " UTC [" in line and " app=" in line and " host=" in line, (log, line[:120])
+
+
+def _load_tool():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("measure_scheduler_observations_under_test", TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Captured verbatim on clone C 2026-10-02 (v1.103.2 leg), RETURNING clause trimmed.
+RESET_1103 = (
+    'UPDATE "public"."LiteLLM_VerificationToken" SET "spend" = '
+    '("public"."LiteLLM_VerificationToken"."spend" - $1), "budget_reset_at" = $2, '
+    '"updated_at" = $3 WHERE ("public"."LiteLLM_VerificationToken"."token" = $4 AND 1=1)'
+)
+SPEND_INCREMENT_1103 = (
+    'UPDATE "public"."LiteLLM_VerificationToken" SET "spend" = '
+    '("public"."LiteLLM_VerificationToken"."spend" + $1), "total_spend" = '
+    '("public"."LiteLLM_VerificationToken"."total_spend" + $2), "last_active" = $3, '
+    '"updated_at" = $4 WHERE "public"."LiteLLM_VerificationToken"."token" = $5'
+)
+
+
+def test_v1103_decrementing_key_reset_is_still_a_reset_budget_run():
+    # 1.103 resets with `spend - $n` instead of `spend = $n`. Before this pattern
+    # the 1.103 leg's reset was invisible and the positive control read 0.
+    tool = _load_tool()
+    assert tool.classify(RESET_1103) == ("reset_budget_job", None)
+
+
+def test_spend_increment_is_still_not_a_reset():
+    tool = _load_tool()
+    assert tool.classify(SPEND_INCREMENT_1103) == (None, None)
+
+
+def test_worker_heartbeat_writes_are_self_presence_not_control():
+    tool = _load_tool()
+    beat = (
+        'INSERT INTO "LiteLLM_ProxyWorkerHeartbeat" (worker_id, hostname, last_heartbeat_at)\n'
+        "VALUES ($1, $2, NOW())\nON CONFLICT (worker_id) DO UPDATE SET last_heartbeat_at = NOW()\n"
+    )
+    prune = (
+        'DELETE FROM "LiteLLM_ProxyWorkerHeartbeat"\n'
+        "WHERE last_heartbeat_at < NOW() - make_interval(secs => $1)\n"
+    )
+    for sql, name in ((beat, "worker_heartbeat_beat"), (prune, "worker_heartbeat_prune")):
+        flat = " ".join(sql.split())
+        assert any(p.match(flat) for n, p in tool.SELF_PRESENCE_PATTERNS if n == name)
+    # Anything wider on that table is NOT exempt: deleting other workers' rows
+    # without the staleness predicate would be a real control write.
+    wide = 'DELETE FROM "LiteLLM_ProxyWorkerHeartbeat" WHERE worker_id = $1'
+    assert not any(p.match(wide) for _, p in tool.SELF_PRESENCE_PATTERNS)

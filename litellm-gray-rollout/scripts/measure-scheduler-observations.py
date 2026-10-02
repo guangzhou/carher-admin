@@ -71,11 +71,20 @@ CONTROL_JOB_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     #   "budget_reset_at" = $2, "updated_at" = $3 WHERE (... = $4 AND 1=1) RETURNING ...
     # The assignment-shape is what separates it from the spend INCREMENT below,
     # which is an application write and reads `"spend" = ("public"....)`.
+    # 1.103 changed the key reset from an overwrite to a decrement (it keeps
+    # spend that raced the reset). Captured verbatim on clone C 2026-10-02 06:27:31:
+    #   UPDATE "public"."LiteLLM_VerificationToken" SET "spend" =
+    #   ("public"."LiteLLM_VerificationToken"."spend" - $1), "budget_reset_at" = $2, ...
+    # Matching only the overwrite made the 1.103 leg's reset invisible, so the
+    # positive control read duplicate_scheduler_runs=0. What still separates a
+    # reset from the application write is `"budget_reset_at"` in the same SET:
+    # the spend INCREMENT never touches it.
     (
         "reset_budget_job",
         re.compile(
             r'UPDATE "public"\."LiteLLM_(?:VerificationToken|UserTable|TeamTable)" '
-            r'SET "spend" = \$\d+, "budget_reset_at" = \$\d+'
+            r'SET "spend" = (?:\$\d+|\("public"\."LiteLLM_(?:VerificationToken|UserTable|TeamTable)"\."spend" - \$\d+\)), '
+            r'"budget_reset_at" = \$\d+'
         ),
     ),
     (
@@ -103,6 +112,33 @@ CONTROL_JOB_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 READONLY_JOB_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("add_deployment_job", re.compile(r'SELECT [^\n]*"public"\."LiteLLM_ProxyModelTable"')),
     ("get_credentials_job", re.compile(r'SELECT [^\n]*"public"\."LiteLLM_CredentialsTable"')),
+)
+
+# Per-process self-registration writes. Every release does these by design,
+# and they mutate nothing another release reads as business state: the row is
+# keyed by the writing worker's own uuid, and the prune only drops rows already
+# stale for an hour (idempotent, so two releases doing it is not duplication).
+# Table added in 1.100 (migration 20260814000000), i.e. after the 2026-09-14
+# measurement, which is why the fixtures contain none. Captured verbatim on
+# clone C 2026-10-02: each leg wrote 24 INSERT + 24 DELETE in a 24 min window.
+# Counted separately and reported, never folded into unexpected_control_writes --
+# otherwise no release on 1.100+ can ever qualify, and the gate turns into one
+# that is routed around.
+SELF_PRESENCE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "worker_heartbeat_beat",
+        re.compile(
+            r'^\s*INSERT INTO "LiteLLM_ProxyWorkerHeartbeat" \(worker_id, hostname, last_heartbeat_at\) '
+            r"VALUES \(\$\d+, \$\d+, NOW\(\)\) ON CONFLICT \(worker_id\) DO UPDATE SET last_heartbeat_at = NOW\(\)\s*$"
+        ),
+    ),
+    (
+        "worker_heartbeat_prune",
+        re.compile(
+            r'^\s*DELETE FROM "LiteLLM_ProxyWorkerHeartbeat" '
+            r"WHERE last_heartbeat_at < NOW\(\) - make_interval\(secs => \$\d+\)\s*$"
+        ),
+    ),
 )
 
 WRITE_RE = re.compile(r"^\s*(INSERT|UPDATE|DELETE|TRUNCATE|MERGE)\b", re.IGNORECASE)
@@ -225,6 +261,7 @@ def measure(log: Path, gray: dict[str, Any], prod: dict[str, Any], settle: int) 
     control: dict[str, dict[str, list[datetime]]] = {}
     readonly: dict[str, dict[str, list[datetime]]] = {}
     writes: dict[str, list[dict[str, str]]] = {"gray": [], "prod": []}
+    self_presence: dict[str, dict[str, int]] = {}
     seen_lines = {"gray": 0, "prod": 0}
 
     for stamp, host, level, payload in iter_entries(log):
@@ -241,7 +278,10 @@ def measure(log: Path, gray: dict[str, Any], prod: dict[str, Any], settle: int) 
             control.setdefault(control_job, {}).setdefault(role, []).append(stamp)
         if readonly_job:
             readonly.setdefault(readonly_job, {}).setdefault(role, []).append(stamp)
-        if WRITE_RE.match(sql):
+        presence = next((n for n, p in SELF_PRESENCE_PATTERNS if p.match(" ".join(sql.split()))), None)
+        if presence and not control_job:
+            self_presence.setdefault(presence, {"gray": 0, "prod": 0})[role] += 1
+        elif WRITE_RE.match(sql):
             writes[role].append(
                 {
                     "at": stamp.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
@@ -303,6 +343,7 @@ def measure(log: Path, gray: dict[str, Any], prod: dict[str, Any], settle: int) 
             "unexpected_control_writes": len(writes["gray"]),
         },
         "duplicate_background_job_names": sorted(duplicate_jobs),
+        "self_presence_writes_excluded": self_presence,
         "control_jobs": per_job,
         "readonly_pollers": readonly_summary,
         "gray_writes": writes["gray"][:50],

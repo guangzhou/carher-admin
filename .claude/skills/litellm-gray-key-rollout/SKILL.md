@@ -228,7 +228,7 @@ echo "done: total=$n ok=$ok fail=$fail"
 - `break` 是故意的：失败即停，好定位。**恢复时从 `FAIL at line N` 的 N+1 续跑，不要整个文件重跑**（重跑虽然无害——已存在的 key 返回 unchanged——但会掩盖它停在哪）
 - 事务模型是 `stage_from_active` → 改 stage 目录 → `render_fragments` → `nginx -t` → `commit_stage`。每次 reload 前都有 `nginx -t`，配置错了不会上线
 
-## 6. 验证：两把尺子，缺一不可
+## 6. 验证：三把尺子，缺一不可
 
 ### 尺子一：映射表对账
 
@@ -256,6 +256,17 @@ awk -v cut="$(date -d '10 minutes ago' +%Y-%m-%dT%H:%M:%S)" '
 ```
 
 **流量占比不等于 key 占比。** 本轮实测：切 20% 的 key 吃到 35% 流量（按编号取选中的是最早注册那批重度用户），切 50% 吃到 50.8%（样本大了偏差摊平）。所以按业务字段选人时，要提前告诉用户「流量占比会偏离 key 占比」。
+
+### 尺子三：worker 有没有被杀（2026-10-02 起必跑）
+
+```bash
+./scripts/litellm-198-worker-kill-triage.py --lane all --since 30m
+```
+
+🔴 **pod restartCount=0 / Ready=true 不代表没事。** 2026-10-02 v1.103.2 灰度：gray 每 pod 3h
+worker 子进程被 uvicorn 心跳杀约 38 次、buyitian 2h 72 次 502，而 pod 重启数恒 0、SpendLogs 只记了 11 条。
+任何一个 worker_killed ≥ 1 ⇒ 停止放量、按 skill `litellm-198-worker-kill-502` 排查。
+重度用户（超长 codex/cursor 对话）是这类病的第一批受害者，按编号前 N% 选人恰好选中他们。
 
 ## 7. 日志：两个文件，只有一个有 pool
 

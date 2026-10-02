@@ -309,7 +309,7 @@ def scheduler_evidence(
     # overlay, so the evidence must bind to the overlaid text, not to the file
     # on disk.
     config_text, _ = PREPARE_VALUES.disable_reset_budget_in_config(
-        config.read_text(encoding="utf-8"), profile=profile
+        config.read_text(encoding="utf-8"), role=mode
     )
     payload = {
         "schema_version": 1,
@@ -2651,9 +2651,9 @@ def test_only_fixed_config_check_init_container_can_be_enabled():
 # --------------------------------------------------------------------------
 
 
-def _suppress(extra_env: list[dict], profile: str = "gray") -> tuple[list[dict], list[str]]:
+def _suppress(extra_env: list[dict], role: str = "disabled") -> tuple[list[dict], list[str]]:
     values = {"extraEnv": list(extra_env)}
-    pinned = PREPARE_VALUES.suppress_background_tasks(values, profile=profile)
+    pinned = PREPARE_VALUES.suppress_background_tasks(values, role=role)
     return values["extraEnv"], pinned
 
 
@@ -2710,27 +2710,27 @@ def test_already_suppressed_env_is_reported_as_not_pinned_but_still_present():
 def test_prod_pinning_a_suppressor_is_a_red_not_a_no_op():
     with pytest.raises(SystemExit) as caught:
         _suppress(
-            [{"name": "PROXY_BATCH_POLLING_ENABLED", "value": "false"}], profile="prod"
+            [{"name": "PROXY_BATCH_POLLING_ENABLED", "value": "false"}], role="primary"
         )
-    assert "cannot both own the scheduler" in str(caught.value)
+    assert "cannot both own" in str(caught.value)
 
 
 def test_prod_extra_env_is_never_rewritten():
-    frozen, pinned = _suppress([{"name": "ROUTER_MODE", "value": "safe"}], profile="prod")
+    frozen, pinned = _suppress([{"name": "ROUTER_MODE", "value": "safe"}], role="primary")
     assert pinned == []
     assert frozen == [{"name": "ROUTER_MODE", "value": "safe"}]
 
 
 def test_background_tasks_cannot_be_pinned_before_extra_env_is_frozen():
     with pytest.raises(SystemExit) as caught:
-        PREPARE_VALUES.suppress_background_tasks({}, profile="gray")
+        PREPARE_VALUES.suppress_background_tasks({}, role="disabled")
     assert "frozen" in str(caught.value)
 
 
 def test_reset_budget_overlay_adds_exactly_one_key_to_general_settings():
     original = "model_list: []\ngeneral_settings:\n  store_model_in_db: true\n"
     overlaid, changed = PREPARE_VALUES.disable_reset_budget_in_config(
-        original, profile="gray"
+        original, role="disabled"
     )
     assert changed is True
     # Textual insertion, so assert both halves: one added line, and one added
@@ -2746,7 +2746,7 @@ def test_reset_budget_overlay_adds_exactly_one_key_to_general_settings():
 
 def test_reset_budget_overlay_appends_a_block_when_the_config_has_none():
     overlaid, changed = PREPARE_VALUES.disable_reset_budget_in_config(
-        "model_list: []\n", profile="gray"
+        "model_list: []\n", role="disabled"
     )
     assert changed is True
     assert yaml.safe_load(overlaid) == {
@@ -2758,7 +2758,7 @@ def test_reset_budget_overlay_appends_a_block_when_the_config_has_none():
 def test_reset_budget_overlay_is_a_no_op_when_already_true():
     original = "general_settings:\n  disable_reset_budget: true\n"
     overlaid, changed = PREPARE_VALUES.disable_reset_budget_in_config(
-        original, profile="gray"
+        original, role="disabled"
     )
     assert changed is False
     assert overlaid == original
@@ -2767,7 +2767,7 @@ def test_reset_budget_overlay_is_a_no_op_when_already_true():
 def test_reset_budget_overlay_refuses_to_overwrite_an_explicit_false():
     with pytest.raises(SystemExit) as caught:
         PREPARE_VALUES.disable_reset_budget_in_config(
-            "general_settings:\n  disable_reset_budget: false\n", profile="gray"
+            "general_settings:\n  disable_reset_budget: false\n", role="disabled"
         )
     assert "refusing to overwrite" in str(caught.value)
 
@@ -2780,7 +2780,7 @@ def test_reset_budget_overlay_reds_on_a_non_unique_anchor():
     with pytest.raises(SystemExit) as caught:
         PREPARE_VALUES.disable_reset_budget_in_config(
             "general_settings:\n  a: 1\nmodel_list: []\ngeneral_settings:\n  b: 2\n",
-            profile="gray",
+            role="disabled",
         )
     assert "exactly one" in str(caught.value)
 
@@ -2788,7 +2788,7 @@ def test_reset_budget_overlay_reds_on_a_non_unique_anchor():
 def test_prod_config_carrying_disable_reset_budget_is_a_red():
     with pytest.raises(SystemExit) as caught:
         PREPARE_VALUES.disable_reset_budget_in_config(
-            "general_settings:\n  disable_reset_budget: true\n", profile="prod"
+            "general_settings:\n  disable_reset_budget: true\n", role="primary"
         )
     assert "owns reset_budget_job" in str(caught.value)
 
@@ -2796,7 +2796,7 @@ def test_prod_config_carrying_disable_reset_budget_is_a_red():
 def test_prod_config_is_returned_byte_for_byte():
     original = "model_list: []\ngeneral_settings:\n  store_model_in_db: true\n"
     overlaid, changed = PREPARE_VALUES.disable_reset_budget_in_config(
-        original, profile="prod"
+        original, role="primary"
     )
     assert changed is False
     assert overlaid == original
@@ -2841,3 +2841,53 @@ def test_known_bad_config_keeps_router_keys_the_db_does_not_own():
     PREPARE_VALUES.reject_known_bad_config(
         "router_settings:\n  routing_strategy: simple-shuffle\n  num_retries: 2\n"
     )
+
+
+@pytest.mark.skipif(HELM is None, reason="helm is not installed")
+@pytest.mark.parametrize(
+    "mode,enabled,renders",
+    [
+        ("primary", True, True),  # gray after the background-task handover
+        ("disabled", False, True),  # gray while sharing traffic with prod
+        ("primary", False, False),  # evidence says it owns jobs, Pod spec mutes them
+        ("disabled", True, False),  # Pod spec runs jobs nobody measured
+    ],
+)
+def test_gray_scheduler_role_must_agree_with_background_tasks(mode, enabled, renders):
+    result = subprocess.run(
+        [
+            HELM, "template", "litellm-product-gray", str(CHART),
+            "--namespace", "litellm-product",
+            "--values", str(ROLLOUT / "values-gray.yaml"),
+            "--set", "artifactTemplate=false",
+            *frozen_scheduler_overrides("gray"),
+            "--set", f"schedulerSafety.mode={mode}",
+            "--set", f"backgroundTasks.enabled={str(enabled).lower()}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is renders, result.stderr
+    if not renders:
+        assert "gray backgroundtasks.enabled must be true exactly when" in result.stderr.lower()
+
+
+@pytest.mark.skipif(HELM is None, reason="helm is not installed")
+def test_guarded_old_still_refuses_the_primary_role():
+    result = subprocess.run(
+        [
+            HELM, "template", "litellm-product-guarded-old", str(CHART),
+            "--namespace", "litellm-product",
+            "--values", str(ROLLOUT / "values-guarded-old.yaml"),
+            "--set", "artifactTemplate=false",
+            *frozen_scheduler_overrides("guarded-old"),
+            "--set", "schedulerSafety.mode=primary",
+            "--set", "backgroundTasks.enabled=true",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "guarded-old schedulersafety.mode must be disabled" in result.stderr.lower()

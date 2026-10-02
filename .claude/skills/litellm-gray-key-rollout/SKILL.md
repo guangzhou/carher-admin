@@ -268,7 +268,7 @@ worker 子进程被 uvicorn 心跳杀约 38 次、buyitian 2h 72 次 502，而 p
 任何一个 worker_killed ≥ 1 ⇒ 停止放量、按 skill `litellm-198-worker-kill-502` 排查。
 重度用户（超长 codex/cursor 对话）是这类病的第一批受害者，按编号前 N% 选人恰好选中他们。
 
-完整的灰度回归检验项（R1~R8：配置开关旧版生效审计、路由设置与 prod 一致、卡顿实测、worker 被杀、并排回归集、试点含重度用户）见 `litellm-gray-rollout/docs/litellm-198-gray-operator-manual.md` §5.5。
+完整的灰度回归检验项（R1~R9：配置开关旧版生效审计、路由设置与 prod 一致、卡顿实测、worker 被杀、并排回归集、试点含重度用户）见 `litellm-gray-rollout/docs/litellm-198-gray-operator-manual.md` §5.5。
 
 ## 7. 日志：两个文件，只有一个有 pool
 

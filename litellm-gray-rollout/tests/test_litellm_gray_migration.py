@@ -694,7 +694,7 @@ def test_suppressed_compatibility_config_is_exactly_the_prepare_values_overlay()
     module = _pv_module()
     base = (TOOLS / "compatibility-config.yaml").read_text(encoding="utf-8")
     suppressed = (TOOLS / "compatibility-config-suppressed.yaml").read_text(encoding="utf-8")
-    expected, changed = module.disable_reset_budget_in_config(base, profile="gray")
+    expected, changed = module.disable_reset_budget_in_config(base, role="disabled")
     assert changed is True
     assert suppressed == expected
     # And the plain one is genuinely the unsuppressed control, not already overlaid.

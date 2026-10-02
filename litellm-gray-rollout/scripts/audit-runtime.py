@@ -506,7 +506,10 @@ def _run(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
             or scheduler["observations"][key] < 0
             for key in SCHEDULER_OBSERVATION_KEYS
         )
-        or (scheduler.get("profile") == "prod") != (scheduler.get("mode") == "primary")
+        # prod is always primary, guarded-old never; gray may be either (it
+        # takes primary only at the background-task handover).
+        or (scheduler.get("profile") == "prod" and scheduler.get("mode") != "primary")
+        or (scheduler.get("profile") == "guarded-old" and scheduler.get("mode") != "disabled")
     ):
         errors.append("SCHEDULER_EVIDENCE_INVALID")
     else:

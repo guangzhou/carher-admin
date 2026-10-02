@@ -102,8 +102,10 @@ def main() -> int:
         required=True,
         choices=["primary", "disabled"],
         help=(
-            "primary for the prod release (it owns the scheduler); disabled "
-            "for gray and guarded-old, which must not run it a second time"
+            "primary for the release that owns the scheduler (prod, or gray "
+            "at the background-task handover); disabled for every other lane, "
+            "which must not run it a second time. Forwarded to prepare-values "
+            "as --scheduler-role so the digests bind the same role"
         ),
     )
     for key in OBSERVATION_KEYS:
@@ -131,12 +133,14 @@ def main() -> int:
     if not SOURCE_RE.fullmatch(args.source):
         fail("--source must match clone:<id> or direct:<id>")
 
-    bindings = collect_bindings(passthrough)
+    if any(item == "--scheduler-role" or item.startswith("--scheduler-role=") for item in passthrough):
+        fail("pass the role once, as --mode; it is forwarded to prepare-values")
+    # prepare-values owns which profile may take which role; asking it with the
+    # same role is what keeps the two from disagreeing.
+    bindings = collect_bindings([*passthrough, "--scheduler-role", args.mode])
     profile = bindings.get("profile")
-    if args.mode == "primary" and profile != "prod":
-        fail(f"primary mode is only valid for the prod profile, got {profile!r}")
-    if args.mode == "disabled" and profile == "prod":
-        fail("the prod profile must declare primary mode")
+    if bindings.get("scheduler_role") != args.mode:
+        fail(f"prepare-values bound role {bindings.get('scheduler_role')!r}, not {args.mode!r}")
 
     payload = {
         "schema_version": 1,

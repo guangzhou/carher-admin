@@ -36,6 +36,18 @@ HELM = shutil.which("helm")
 IDC_REGISTRY_PREFIX = "127.0.0.1:5000/"
 DIGEST = "sha256:" + ("a" * 64)
 
+
+def _load_prepare_values():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("prepare_values", PREPARE_VALUES)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+PREPARE_VALUES_MODULE = _load_prepare_values()
+
 # Both properties are measured, not invented. `模型` and the emoji stand in for
 # the Chinese comments and status glyphs that are actually in prod's callbacks;
 # what matters is only that the bytes are outside ASCII.
@@ -75,7 +87,9 @@ spec:
 """
 
 
-def _freeze(tmp_path: Path, callbacks: dict[str, str]) -> tuple[Path, dict]:
+def _freeze(
+    tmp_path: Path, callbacks: dict[str, str], *, mode: str = "disabled"
+) -> tuple[Path, dict]:
     """Run collect-scheduler-evidence + prepare-values on the given callbacks.
 
     Returns the frozen values path and the parsed prepare-values report. Going
@@ -123,7 +137,7 @@ def _freeze(tmp_path: Path, callbacks: dict[str, str]) -> tuple[Path, dict]:
     collected = subprocess.run(
         [
             sys.executable, str(COLLECT_EVIDENCE),
-            "--mode", "disabled",
+            "--mode", mode,
             "--source", "clone:byte-fidelity-fixture",
             "--duplicate-scheduler-runs", "0",
             "--duplicate-background-jobs", "0",
@@ -142,6 +156,7 @@ def _freeze(tmp_path: Path, callbacks: dict[str, str]) -> tuple[Path, dict]:
         [
             sys.executable, str(PREPARE_VALUES),
             *passthrough,
+            "--scheduler-role", mode,
             "--scheduler-evidence", str(evidence),
             "--output", str(output),
         ],
@@ -372,3 +387,92 @@ def test_annotation_exemption_does_not_hide_real_credentials():
     assert pv.find_inline_credential("password: Mapping-not-a-type\n") is not None
     assert pv.find_inline_credential('headers = {"Authorization": "Bearer abcdefgh12345678"}') is not None
     assert pv.find_inline_credential("key = 'sk-abcdefgh12345678'") is not None
+
+
+# --- background-task handover (2026-10-02) ---------------------------------
+# gray used to be hard-wired to "scheduler disabled". That made "gray becomes
+# the next prod" impossible without hand-editing the live lane: 2055 keys carry
+# a daily budget_duration, and a promoted gray with the jobs off would never
+# reset them. The handover re-freezes gray as primary; these tests pin both the
+# new path and the guards that keep exactly one lane primary.
+
+
+def test_gray_frozen_as_primary_runs_every_background_task(tmp_path: Path):
+    values_path, report = _freeze(tmp_path, {"smoke.py": "x = 1\n"}, mode="primary")
+    values = yaml.safe_load(values_path.read_text(encoding="utf-8"))
+    assert report["background_tasks"] == {
+        "enabled": True,
+        "role": "primary",
+        "pinned_env": [],
+        "reset_budget_overlaid": False,
+    }
+    assert values["backgroundTasks"] == {"enabled": True}
+    assert values["schedulerSafety"]["mode"] == "primary"
+    config = yaml.safe_load(values["config"]["data"]["config.yaml"])
+    assert "disable_reset_budget" not in (config.get("general_settings") or {})
+    env = {entry["name"]: entry.get("value") for entry in values["extraEnv"]}
+    for name, off in PREPARE_VALUES_MODULE.BACKGROUND_TASK_SUPPRESSORS.items():
+        assert env.get(name) != off, name
+    if HELM is not None:
+        documents = _render(values_path)
+        deployment = next(d for d in documents if d.get("kind") == "Deployment")
+        labels = deployment["spec"]["template"]["metadata"]["labels"]
+        assert labels["litellm.carher.io/background-tasks-enabled"] == "true"
+        # Taking over the scheduler is not taking over the route; the route
+        # label stays prod-only and moves by the routing transaction.
+        assert "carher.net/litellm-production-route" not in labels
+
+
+def test_gray_default_role_is_still_disabled(tmp_path: Path):
+    # Negative control for the test above: without the explicit flag nothing
+    # changed, so a normal gray run still mutes every job.
+    values_path, report = _freeze(tmp_path, {"smoke.py": "x = 1\n"})
+    assert report["background_tasks"]["enabled"] is False
+    assert report["background_tasks"]["reset_budget_overlaid"] is True
+    assert sorted(report["background_tasks"]["pinned_env"]) == sorted(
+        PREPARE_VALUES_MODULE.BACKGROUND_TASK_SUPPRESSORS
+    )
+
+
+@pytest.mark.parametrize("profile", ["values-guarded-old.yaml"])
+def test_guarded_old_can_never_be_frozen_as_primary(tmp_path: Path, profile: str):
+    result = subprocess.run(
+        [
+            sys.executable, str(PREPARE_VALUES),
+            "--profile", str(ROLLOUT / profile),
+            "--scheduler-role", "primary",
+            "--repository", IDC_REGISTRY_PREFIX + "litellm-carher",
+            "--digest", DIGEST,
+            "--config", str(tmp_path / "missing.yaml"),
+            "--callbacks-dir", str(tmp_path),
+            "--deployment", str(tmp_path / "missing.yaml"),
+            "--secret-metadata", str(tmp_path / "missing.json"),
+            "--ingress-cidr", "10.42.0.0/32",
+            "--emit-bindings",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "cannot be frozen with scheduler role 'primary'" in result.stderr + result.stdout
+
+
+def test_collector_refuses_a_second_role_flag(tmp_path: Path):
+    result = subprocess.run(
+        [
+            sys.executable, str(COLLECT_EVIDENCE),
+            "--mode", "disabled",
+            "--source", "clone:x",
+            "--duplicate-scheduler-runs", "0",
+            "--duplicate-background-jobs", "0",
+            "--unexpected-control-writes", "0",
+            "--evidence-output", str(tmp_path / "e.json"),
+            "--scheduler-role", "primary",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "pass the role once" in result.stderr

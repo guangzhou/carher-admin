@@ -102,10 +102,18 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
 {{- if not .Values.backgroundTasks.enabled -}}
 {{- fail "prod backgroundTasks.enabled must be true" -}}
 {{- end -}}
+{{- else if eq $name "litellm-proxy-gray" -}}
+{{- /* gray is disabled while it shares traffic with prod and primary only after the background-task handover; the two fields must agree. */ -}}
+{{- if not (has .Values.schedulerSafety.mode (list "disabled" "primary")) -}}
+{{- fail "gray schedulerSafety.mode must be disabled or primary" -}}
+{{- end -}}
+{{- if ne .Values.backgroundTasks.enabled (eq .Values.schedulerSafety.mode "primary") -}}
+{{- fail "gray backgroundTasks.enabled must be true exactly when schedulerSafety.mode is primary" -}}
+{{- end -}}
 {{- else if ne .Values.schedulerSafety.mode "disabled" -}}
-{{- fail "gray and guarded-old schedulerSafety.mode must be disabled" -}}
+{{- fail "guarded-old schedulerSafety.mode must be disabled" -}}
 {{- else if .Values.backgroundTasks.enabled -}}
-{{- fail "gray and guarded-old backgroundTasks.enabled must be false" -}}
+{{- fail "guarded-old backgroundTasks.enabled must be false" -}}
 {{- end -}}
 {{- if ne (toJson .Values.workloadContract.containers) (toJson (list "litellm")) -}}
 {{- fail "workloadContract.containers must exactly match the rendered container set" -}}

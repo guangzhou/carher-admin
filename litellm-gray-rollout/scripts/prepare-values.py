@@ -95,6 +95,19 @@ BACKGROUND_TASK_SUPPRESSORS = {
 # out of config.yaml. So it is suppressed by a one-key overlay on the frozen
 # config instead of by an env entry; see disable_reset_budget_in_config().
 RESET_BUDGET_KEY = "disable_reset_budget"
+# Which release runs the global-mutating jobs above. Exactly one serving lane
+# must: zero lanes means nobody resets the daily budgets (2055 keys on 198 carry
+# a 1d/24h budget_duration, measured 2026-10-02), two lanes means every job runs
+# twice against the shared DB. prod is always primary and guarded-old never is.
+# gray is disabled while it shares traffic with prod, and is re-frozen as
+# primary only at the handover where it takes over prod (operator manual
+# "后台任务交接"); that is why the role is an explicit flag, not derived from
+# the name alone.
+SCHEDULER_ROLES = {
+    "prod": ("primary",),
+    "gray": ("disabled", "primary"),
+    "guarded-old": ("disabled",),
+}
 GENERAL_SETTINGS_ANCHOR_RE = re.compile(r"^general_settings:[ \t]*$", re.M)
 # 2026-10-02 v1.103.2 gray incident. 1.100.1 imported this flag by value at
 # module load, so `true` in config.yaml never took effect; 1.103 reads the live
@@ -684,7 +697,7 @@ def shadow_chart_default_keys(values: dict) -> list[str]:
     return shadowed
 
 
-def suppress_background_tasks(values: dict, *, profile: str) -> list[str]:
+def suppress_background_tasks(values: dict, *, role: str) -> list[str]:
     """Make `backgroundTasks.enabled: false` a fact about the Pod spec.
 
     It was a label. Measured 2026-09-14: rendering the gray profile produced a
@@ -701,10 +714,11 @@ def suppress_background_tasks(values: dict, *, profile: str) -> list[str]:
     That is the gate-property-in-prose shape: the sentence "gray does not run
     background tasks" existed only in the sentence.
 
-    Returns the names this call pinned, for the run report. prod is asserted,
-    never rewritten: if the live prod Pod already pins a suppressor to "false"
-    then prod is not the release running that job, and the premise that prod
-    owns the scheduler is wrong -- that is a red, not something to paper over.
+    Returns the names this call pinned, for the run report. The primary role
+    (prod, or a gray release frozen to take over prod -- see SCHEDULER_ROLES) is
+    asserted, never rewritten: if its frozen env already pins a suppressor to
+    "false" then it is not running that job, and the premise that it owns the
+    scheduler is wrong -- that is a red, not something to paper over.
     """
     extra_env = values.get("extraEnv")
     if not isinstance(extra_env, list):
@@ -714,13 +728,13 @@ def suppress_background_tasks(values: dict, *, profile: str) -> list[str]:
         for entry in extra_env
         if isinstance(entry, dict) and isinstance(entry.get("name"), str)
     }
-    if profile == "prod":
+    if role == "primary":
         for name, off in sorted(BACKGROUND_TASK_SUPPRESSORS.items()):
             entry = existing.get(name)
             if entry is not None and str(entry.get("value", "")).lower() == off:
                 fail(
-                    f"prod pins {name}={off}; prod cannot both own the scheduler "
-                    "and have that job disabled"
+                    f"the primary role pins {name}={off}; a release cannot both own "
+                    "the scheduler and have that job disabled"
                 )
         return []
     pinned: list[str] = []
@@ -743,7 +757,7 @@ def suppress_background_tasks(values: dict, *, profile: str) -> list[str]:
     return pinned
 
 
-def disable_reset_budget_in_config(config_text: str, *, profile: str) -> tuple[str, bool]:
+def disable_reset_budget_in_config(config_text: str, *, role: str) -> tuple[str, bool]:
     """Overlay `general_settings.disable_reset_budget: true` for non-prod releases.
 
     `reset_budget_job` is the one global-mutating scheduled job with no env
@@ -759,8 +773,9 @@ def disable_reset_budget_in_config(config_text: str, *, profile: str) -> tuple[s
     anchor must occur exactly once at column 0; a non-unique anchor is a red,
     not a "take the first one".
 
-    Returns (text, changed). prod is checked, not edited: prod carrying the key
-    would mean nobody resets budgets once gray is also muted.
+    Returns (text, changed). The primary role is checked, not edited: carrying
+    the key there would mean nobody resets budgets once every other lane is
+    also muted (measured 2026-09-23: 1557 keys stuck for four days).
     """
     parsed = yaml.safe_load(config_text)
     if not isinstance(parsed, dict):
@@ -769,11 +784,11 @@ def disable_reset_budget_in_config(config_text: str, *, profile: str) -> tuple[s
     if general is not None and not isinstance(general, dict):
         fail("config.yaml general_settings must be a mapping")
     already = general.get(RESET_BUDGET_KEY) if general else None
-    if profile == "prod":
+    if role == "primary":
         if already is True:
             fail(
-                f"prod config sets general_settings.{RESET_BUDGET_KEY}; prod owns "
-                "reset_budget_job and cannot have it disabled"
+                f"config sets general_settings.{RESET_BUDGET_KEY}; the primary role "
+                "owns reset_budget_job and cannot have it disabled"
             )
         return config_text, False
     if already is True:
@@ -862,6 +877,7 @@ def scheduler_safety(
     path: Path | None,
     *,
     profile: str,
+    role: str,
     config_text: str,
     callbacks: dict[str, str],
     image_digest: str,
@@ -869,13 +885,10 @@ def scheduler_safety(
     secret_metadata_sha: str,
 ) -> dict:
     if path is None:
-        if profile != "prod":
-            fail("gray and guarded-old profiles require scheduler evidence")
-        fail("prod profile requires scheduler evidence binding the primary role")
+        fail(f"{profile} profile requires scheduler evidence binding the {role} role")
     payload = load_yaml(path) if path.suffix.lower() in {".yaml", ".yml"} else json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or set(payload) != SCHEDULER_EVIDENCE_KEYS:
         fail("scheduler evidence must be an object")
-    expected_mode = "primary" if profile == "prod" else None
     mode = payload.get("mode")
     captured_at = payload.get("captured_at")
     source = payload.get("source")
@@ -909,10 +922,8 @@ def scheduler_safety(
     age = datetime.now(timezone.utc) - captured
     if age < -timedelta(minutes=5) or age > MAX_SCHEDULER_EVIDENCE_AGE:
         fail("scheduler evidence is stale")
-    if expected_mode and mode != expected_mode:
-        fail("prod scheduler evidence must declare primary mode")
-    if not expected_mode and mode != "disabled":
-        fail("non-prod scheduler evidence must declare disabled mode")
+    if mode != role:
+        fail(f"scheduler evidence declares {mode!r} but this release is frozen as {role!r}")
     config_sha = "sha256:" + hashlib.sha256(config_text.encode()).hexdigest()
     if payload.get("config_sha256") != config_sha:
         fail("scheduler evidence is not bound to the frozen config snapshot")
@@ -1006,6 +1017,16 @@ def main() -> int:
     )
     parser.add_argument("--deployment", type=Path, required=True)
     parser.add_argument("--scheduler-evidence", type=Path)
+    parser.add_argument(
+        "--scheduler-role",
+        choices=["primary", "disabled"],
+        help=(
+            "which scheduler role this release is frozen with. Defaults to the "
+            "profile's only allowed role; gray defaults to disabled and takes "
+            "primary only at the background-task handover, when it becomes the "
+            "lane serving production"
+        ),
+    )
     parser.add_argument("--secret-metadata", type=Path, required=True)
     parser.add_argument(
         "--ingress-cidr",
@@ -1068,6 +1089,20 @@ def main() -> int:
     if profile_values.get("artifactTemplate") is not True:
         fail("profile must be a checked-in artifact template")
     values = merge_values(load_yaml(CHART_DEFAULTS), profile_values)
+    # Role first: a profile/role mismatch is a red regardless of the inputs.
+    profile_name = str(values.get("nameOverride", "")).removeprefix("litellm-proxy-")
+    if values.get("nameOverride") == "litellm-proxy":
+        profile_name = "prod"
+    allowed_roles = SCHEDULER_ROLES.get(profile_name)
+    if allowed_roles is None:
+        fail(f"unknown profile {profile_name!r}")
+    scheduler_role = args.scheduler_role or allowed_roles[0]
+    if scheduler_role not in allowed_roles:
+        fail(
+            f"{profile_name} cannot be frozen with scheduler role {scheduler_role!r}; "
+            f"allowed: {', '.join(allowed_roles)}"
+        )
+    values["backgroundTasks"] = {"enabled": scheduler_role == "primary"}
     freeze_ingress_cidrs(values, args.ingress_cidr)
 
     callbacks = {}
@@ -1082,9 +1117,6 @@ def main() -> int:
     config_text = read_text(args.config, "config")
     reject_inline_credentials(config_text, "config")
     reject_known_bad_config(config_text)
-    profile_name = str(values.get("nameOverride", "")).removeprefix("litellm-proxy-")
-    if values.get("nameOverride") == "litellm-proxy":
-        profile_name = "prod"
     values["artifactTemplate"] = False
     values["allowTemplateRender"] = False
     values["image"] = {
@@ -1095,7 +1127,7 @@ def main() -> int:
     # Before values["config"] and config_sha, or the frozen snapshot and the
     # digest the chart re-derives would describe two different files.
     config_text, reset_budget_overlaid = disable_reset_budget_in_config(
-        config_text, profile=profile_name
+        config_text, role=scheduler_role
     )
     values["config"] = {"data": {"config.yaml": config_text}}
     # Copy, don't alias: shadow_chart_default_keys() adds null keys to
@@ -1108,7 +1140,7 @@ def main() -> int:
     )
     # After freeze_runtime_shape (which sets extraEnv wholesale from the live
     # Pod) and before runtime_sha, which the chart re-derives from extraEnv.
-    pinned_env = suppress_background_tasks(values, profile=profile_name)
+    pinned_env = suppress_background_tasks(values, role=scheduler_role)
     mount_report = freeze_mount_shape(
         values, deployment, snapshot_dirs, args.callbacks_volume
     )
@@ -1132,6 +1164,7 @@ def main() -> int:
                     "tool": "prepare-values",
                     "mode": "emit-bindings",
                     "profile": profile_name,
+                    "scheduler_role": scheduler_role,
                     "image_digest": args.digest,
                     "config_sha256": config_sha,
                     "callbacks_sha256": raw_json_sha256(callbacks),
@@ -1146,6 +1179,7 @@ def main() -> int:
     values["schedulerSafety"] = scheduler_safety(
         args.scheduler_evidence,
         profile=profile_name,
+        role=scheduler_role,
         config_text=config_text,
         callbacks=callbacks,
         image_digest=args.digest,
@@ -1187,7 +1221,8 @@ def main() -> int:
         # carried the suppression; they must never be read as "nothing to
         # suppress" -- that was the old, silent behaviour.
         "background_tasks": {
-            "enabled": profile_name == "prod",
+            "enabled": scheduler_role == "primary",
+            "role": scheduler_role,
             "pinned_env": pinned_env,
             "reset_budget_overlaid": reset_budget_overlaid,
         },

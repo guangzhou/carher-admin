@@ -507,6 +507,7 @@ reload 和 post-reload 检查。它只保证新请求切回 prod；已经建立�
 | R6 | 用户 502 与 worker 被杀对齐 | 对每把报 502 的 key：`--sid <sid前12位>` | 0 命中**且** pod 早于 502 才算无关；pod 比 502 新（已滚过）= 对不上，**不是**无关（exit 2） | 回滚后日志没了，把「对不上」读成「没关系」 |
 | R7 | 生产 / 灰度并排回归 | 同一批 key、同一时刻分别打 30402 和 30405 | 两边结果**一致**，不是 gray 单边全绿 | 单边绿分不出是版本问题还是上游天气 |
 | R8 | 试点 key 里必须有重度用户 | 选人时按近 24h SpendLogs 单请求最大输入 token 排序，前 10 名里至少挑 3 个 | 名单里有超长 codex / cursor 对话用户 | 重度用户第一批出事；只挑轻用户的试点量不到 |
+| R9 | 后台任务恰好一条车道在跑 | 每条车道读 config 的 `disable_reset_budget` + 三个 env + 启动日志的 job 列表；再跑 §7.0 那条逾期 SQL | 在服务的车道里**恰好一条** `primary`；逾期（排掉已过期 key）= 0。gray 要长期扛生产就先做 §7.0 交接 | gray 关着额度重置，转正后 2055 把日额度 key 不再恢复 |
 
 R7 并排回归集（本轮修后实测两边全对齐，以后少一项都不算过）：
 
@@ -1243,6 +1244,71 @@ litellm-gray-rollout/scripts/gray-convergence-commit.sh
 commit 成功后观察 gray 活跃连接排空，再按冻结 package 将 gray release 缩到 0。
 不要在 prod 滚动期间把 nginx 切回 prod，也不要只运行 `gray-phase.sh set ...` 绕过
 专用事务脚本。
+
+### 7.0 后台任务交接（gray 接手每日额度重置等后台任务）
+
+gray 平时关掉 4 个会改全局数据的后台任务：每日额度重置 `reset_budget_job`、
+批量/Responses 计费轮询、key 自动轮换、过期 UI 会话清理。原因是它和 prod 共用一个库，
+两边一起跑就会重复执行。代价是：**gray 一旦要长期扛生产，就必须把这些任务接过来**。
+198 上有 2055 把 key 带 `budget_duration=1d/24h`（2026-10-02 实测），没人跑重置的话，
+这些 key 当天额度用完以后，第二天也不会恢复。
+
+**规则：任何时刻只能有一条在服务的车道是 `primary`。** 0 条 = 没人重置额度
+（2026-09-23 实测过：1557 把 key 卡了 4 天）；2 条 = 所有任务跑两遍。
+
+角色现在是冻结 values 时显式给的，不再从名字推：
+
+| profile | 允许的 `--scheduler-role` | 默认 |
+|---------|---------------------------|------|
+| prod (`litellm-proxy`) | `primary` | `primary` |
+| gray (`litellm-proxy-gray`) | `disabled`、`primary` | `disabled` |
+| guarded-old | `disabled` | `disabled` |
+
+`prepare-values.py`、`collect-scheduler-evidence.py`、chart、`audit-runtime.py` 四处
+同一口径：gray 选 `primary` 时，config 里不加 `disable_reset_budget`、不钉那三个 env，
+`backgroundTasks.enabled=true`，chart 要求 `schedulerSafety.mode` 与它一致。
+
+**交接步骤**（gray 已经扛 100%、§5.5 R1~R9 全过之后）：
+
+```bash
+# 1. 避开北京时间 00:00（2026-10-02 实测 1716 把 key 的下一次重置都在 16:00 UTC）。
+#    交接窗口内没人重置是允许的，延迟上限 = 窗口剩余 + 约 10 分钟（任务约 600s 一轮）。
+
+# 2. 先关旧 prod 的任务：只做 guarded patch，不 apply（同 runbook「idle lane 也要抑制」那段）。
+#    顺序是承重的：先关旧的再开新的 = 最多短暂 0 个；反过来 = 一段时间里有 2 个。
+
+# 3. 用 primary 角色重新冻结 gray，副本数对齐 prod（现在 4）
+litellm-gray-rollout/scripts/collect-scheduler-evidence.py --mode primary \
+  --source direct:<本轮id> --duplicate-scheduler-runs 0 --duplicate-background-jobs 0 \
+  --unexpected-control-writes 0 --evidence-output <run>/scheduler-primary.json \
+  <与 prepare-values 相同的参数>
+litellm-gray-rollout/scripts/prepare-values.py <同上参数> \
+  --scheduler-role primary --scheduler-evidence <run>/scheduler-primary.json \
+  --output <run>/gray-primary-values.yaml
+#    报告里 background_tasks 必须是 {"enabled":true,"role":"primary","pinned_env":[],"reset_budget_overlaid":false}
+#    然后按 §5.1 的门禁（删除集 + Pod spec 形状）走 helm upgrade，不跳步。
+
+# 4. 验收（三层，缺一层不算交接完成）
+#    配置层：gray pod 里 general_settings 没有 disable_reset_budget，三个 env 不是 false
+#    装载层：gray pod 启动日志 `Scheduled job stagger applied` 那行里有 reset_budget_job
+#    兜住层：等一轮（≥10 分钟）后，下面这条回到 0
+```
+
+```sql
+-- 过期 key 不重置是正常的，必须排掉，否则会读成「几百把卡住」的假红
+-- （2026-10-02：339 把逾期全是已过期 key，排掉后 = 0）
+SELECT count(*) FROM "LiteLLM_VerificationToken"
+ WHERE budget_duration IS NOT NULL AND budget_reset_at < now()
+   AND (expires IS NULL OR expires > now());
+```
+
+回退：gray 用 `--scheduler-role disabled` 重新冻结并 upgrade，再把旧 prod 的抑制 patch
+撤掉（同样 guarded patch），顺序与交接相反。
+
+⚠️ 这一节只解决「后台任务跟着 gray 走」。gray 长期当生产还差路由这一块：chart 仍只允许
+`litellm-proxy` 带 `carher.net/litellm-production-route`，约 140 处脚本/skill 按
+`litellm-proxy` 这个名字认生产（`litellm-198-worker-kill-triage.py` 是按路由标签认的，不受影响），
+这部分没改。
 
 ### 7.1 排水预算
 

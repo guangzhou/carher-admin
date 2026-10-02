@@ -1573,7 +1573,7 @@ spec:
         # with no env var to pin. The evidence binds to the frozen text, not to
         # the file on disk.
         _PREPARE_VALUES.disable_reset_budget_in_config(
-            config.read_text(encoding="utf-8"), profile="gray"
+            config.read_text(encoding="utf-8"), role="disabled"
         )[0].encode("utf-8")
     ).hexdigest()
     scheduler = tmp_path / "scheduler.json"

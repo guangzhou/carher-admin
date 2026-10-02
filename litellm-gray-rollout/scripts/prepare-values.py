@@ -90,6 +90,9 @@ BACKGROUND_TASK_SUPPRESSORS = {
     "LITELLM_KEY_ROTATION_ENABLED": "false",
     "PROXY_BATCH_POLLING_ENABLED": "false",
 }
+# The subset the primary role must not have pinned off: the jobs that run by
+# default. The other two are opt-ins that stay at whatever prod already says.
+PRIMARY_MUST_RUN = frozenset({"PROXY_BATCH_POLLING_ENABLED"})
 # The fourth global-mutating job, `reset_budget_job`, has no env var at all --
 # its only guard is `general_settings.get("disable_reset_budget", False)`, read
 # out of config.yaml. So it is suppressed by a one-key overlay on the frozen
@@ -729,7 +732,13 @@ def suppress_background_tasks(values: dict, *, role: str) -> list[str]:
         if isinstance(entry, dict) and isinstance(entry.get("name"), str)
     }
     if role == "primary":
-        for name, off in sorted(BACKGROUND_TASK_SUPPRESSORS.items()):
+        # Only the default-ON job is a red when pinned off: that is a job the
+        # primary is supposed to run. Key rotation and UI-session cleanup are
+        # default-OFF opt-ins; live prod pins them false explicitly (measured
+        # 2026-10-03), and "fixing" that would switch key rotation ON for every
+        # user key -- a behaviour change, not a scheduler-ownership repair.
+        for name in sorted(PRIMARY_MUST_RUN):
+            off = BACKGROUND_TASK_SUPPRESSORS[name]
             entry = existing.get(name)
             if entry is not None and str(entry.get("value", "")).lower() == off:
                 fail(

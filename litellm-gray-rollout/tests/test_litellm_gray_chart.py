@@ -2891,3 +2891,20 @@ def test_guarded_old_still_refuses_the_primary_role():
     )
     assert result.returncode != 0
     assert "guarded-old schedulersafety.mode must be disabled" in result.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "name", ["LITELLM_KEY_ROTATION_ENABLED", "LITELLM_EXPIRED_UI_SESSION_KEY_CLEANUP_ENABLED"]
+)
+def test_primary_keeps_prods_explicit_off_for_default_off_opt_ins(name):
+    # Live prod pins these two false (2026-10-03). Turning key rotation on to
+    # "own the scheduler" would rotate every user key, so the primary role
+    # accepts them as-is and never rewrites them.
+    frozen, pinned = _suppress([{"name": name, "value": "false"}], role="primary")
+    assert pinned == []
+    assert frozen == [{"name": name, "value": "false"}]
+
+
+def test_primary_must_run_is_exactly_the_default_on_job():
+    assert PREPARE_VALUES.PRIMARY_MUST_RUN == {"PROXY_BATCH_POLLING_ENABLED"}
+    assert PREPARE_VALUES.PRIMARY_MUST_RUN <= set(PREPARE_VALUES.BACKGROUND_TASK_SUPPRESSORS)

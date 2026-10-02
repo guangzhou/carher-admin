@@ -611,3 +611,28 @@ def test_ramp_ladder_matches_the_approved_split_values() -> None:
     update = (TOOLS / "gray-split-update.sh").read_text(encoding="utf-8")
     for percent in ladder:
         assert percent in update or "0,1,5,10,50,100" in update
+
+
+def test_monitor_loop_drops_the_partial_first_line_only_when_it_byte_cuts(tmp_path):
+    """2026-10-02: a 63MB log under a 40MB tail made every cycle FAIL on line 1."""
+    import re as _re
+    import subprocess as _sp
+
+    loop = (TOOLS / "gray-monitor-loop.sh").read_text(encoding="utf-8")
+    block = _re.search(r'  if \[\[ "\$\(stat -c %s.*?\n  fi\n', loop, _re.S)
+    assert block, "snapshot block not found"
+    log = tmp_path / "access.log"
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    lines = [f"ts=2026-10-02T00:00:{i:02d}+08:00 line{i}" for i in range(10)]
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    script = (
+        f'ACCESS_LOG="{log}"; RAW_DIR="{raw}"; TAIL_BYTES="{{tb}}"\n' + block.group(0)
+    )
+    # Cut mid-line: first output line must be a whole record, never a fragment.
+    _sp.run(["bash", "-c", script.format(tb=100)], check=True)
+    out = (raw / "access.log").read_text(encoding="utf-8").splitlines()
+    assert out and all(l in lines for l in out)
+    # Negative control: a log smaller than the cut keeps every line.
+    _sp.run(["bash", "-c", script.format(tb=10**6)], check=True)
+    assert (raw / "access.log").read_text(encoding="utf-8").splitlines() == lines

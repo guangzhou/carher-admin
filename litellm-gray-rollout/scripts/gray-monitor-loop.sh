@@ -361,7 +361,16 @@ cycle() {
   # Snapshot rather than read in place: a rotation mid-parse would truncate the
   # sample, and a short window is exactly the condition under which the stop-loss
   # legs go dark.
-  tail -c "$TAIL_BYTES" "$ACCESS_LOG" > "$RAW_DIR/access.log"
+  # A byte cut lands mid-line whenever the log is larger than TAIL_BYTES, and
+  # collect-metrics.py rejects the whole snapshot on one malformed line. Drop the
+  # first (partial) line in that case only: a log smaller than the cut has no
+  # partial line, and dropping its first line would lose a real record.
+  # (2026-10-02: log 63MB > 40MB, every cycle FAILed on "invalid access log line 1".)
+  if [[ "$(stat -c %s "$ACCESS_LOG" 2>/dev/null || stat -f %z "$ACCESS_LOG")" -gt "$TAIL_BYTES" ]]; then
+    tail -c "$TAIL_BYTES" "$ACCESS_LOG" | tail -n +2 > "$RAW_DIR/access.log"
+  else
+    cat "$ACCESS_LOG" > "$RAW_DIR/access.log"
+  fi
   chmod 600 "$RAW_DIR/access.log"
 
   collect_backend_health

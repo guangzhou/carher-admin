@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import logging
 import re
 from typing import Any
@@ -9,11 +11,129 @@ from typing import Any
 from litellm.integrations.custom_logger import CustomLogger
 
 _log = logging.getLogger("chatgpt_responses_normalize")
-_TARGET_MODEL_PARTS = ("gpt-5.5", "chatgpt-gpt-5.5", "chatgpt-pool-gpt-5.5", "gpt-5.6", "chatgpt-gpt-5.6", "image-2")
+# Every model group served by the ChatGPT (codex) pool must be listed here: the
+# pool speaks one dialect and the normalizations below are what make a spec-legal
+# Responses request survive it. 2026-08-03: added gpt-5.4 / gpt-5.2 /
+# gpt-5.3-codex after proving the omission was a defect, not a deliberate carve-out
+# -- single-variable probe on the SAME acct (acct-82):
+#   chatgpt-gpt-5.4 + previous_response_id -> primary fails, falls back
+#   chatgpt-gpt-5.4 without it             -> 200 on acct-82-gpt-5.4
+#   chatgpt-gpt-5.5 + previous_response_id -> 200 (allowlisted, so it gets dropped)
+# i.e. the upstream rejects previous_response_id for ALL pool models; 5.5 only
+# survived because normalization ran for it. Same story for a bare-string
+# ``input`` (upstream 400 ``{"detail":"Input must be a list"}``).
+# The "too big a blast radius" note that previously justified the narrow list is
+# superseded: the two key-scoped transforms it worried about
+# (_DROP_ALL_REASONING_ALIASES / _MESSAGE_ONLY_ALIASES) are both EMPTY sets and
+# therefore never fire, and the rest are pool-protocol fixes 5.5/5.6 have run for
+# months.
+_TARGET_MODEL_PARTS = ("gpt-5.5", "chatgpt-gpt-5.5", "chatgpt-pool-gpt-5.5", "gpt-5.6", "chatgpt-gpt-5.6",
+                       "gpt-5.4", "gpt-5.2", "gpt-5.3-codex", "image-2")
 _TARGET_ROLES = {"system", "developer"}
 _RESPONSE_CALL_TYPES = {"responses", "aresponses"}
 _DROP_ALL_REASONING_ALIASES = set()
 _MESSAGE_ONLY_ALIASES = set()
+# ── encrypted_content 放行灰度（2026-08-22）──────────────────────────────
+# 实测（直打 acct pod 探针 probe_enc2/enc4）：chatgpt 上游对跨号密文已是静默
+# 容忍（单块/双外来块/A+B 混块/5.6-sol/high effort 全 200，解不开就忽略），
+# 不再是 2026-06 的 invalid_encrypted 400。放行密文块拿回推理连续性
+# （官方口径：工具调用 SWE-bench +3%、缓存利用率 40→80%）。
+# 灰度按 key_alias：名单内的 key 不剥 encrypted_content；其余流量行为不变。
+# 兜底：① 路由后阶段目标 deployment 非 chatgpt/ 渠道（wangsu fallback、
+# zerokey web 混池）→ 强制剥，外渠道永不收密文；② fallback guard 对
+# encrypted 类 400 放行 fallback（目标已被①剥净，wangsu 接得住）。
+_KEEP_ENCRYPTED_ALIASES = {"enc-canary-01"}
+
+# ---- gateway 压缩（治超巨会话，per-key 灰度）--------------------------------
+# 依据 2026-08-23 实测：2-8MB 请求占 6.5% 数量/43% 字节、每轮计费 ~50 万 tokens
+# （狂耗账号 7d 桶）；>16MiB 连 WS 增量都上不去。v1=inline 裁剪（参照 codex harness
+# auto-compact 思路）：保首条锚点 + 尾部预算内最近项，中间折叠为一条标记消息。
+# 上游本就把超上下文部分截断扔掉——裁剪只是把"扔"提前到网关，省双向带宽+计费 tokens。
+# 2026-08-24 用户拍板: 默认全量开(>2MB 闸内所有 key)。依据: 12h 灰度零事故 +
+# 线上 armed-check(名单精确) + 合成 A/B 计费 -80.6% + 今晨 900+ 真请求验证
+# "未超线不动"。豁免名单留作质量敏感 key 的退出通道; 秒级回滚 =
+# env CHATGPT_COMPACT_DEFAULT_ON=0 (proxy deploy set env) 或 CM 恢复备份。
+_COMPACT_DEFAULT_ON = os.getenv("CHATGPT_COMPACT_DEFAULT_ON", "1") == "1"
+_COMPACT_EXEMPT_ALIASES: set = set()          # 默认开模式下的退出名单
+_COMPACT_ALIASES = {"compact-canary-01"}      # 默认关模式下的准入名单(回滚态用)
+_COMPACT_MIN_BYTES = 2 * 1024 * 1024     # 触发：input 序列化 >2MB
+_COMPACT_ASSISTANT_MAX_BYTES = 40 * 1024 # assistant 单条上限（≈官方10K tokens）
+
+
+def _compact_input_items(items: list[Any]) -> tuple[list[Any], dict[str, int]]:
+    """网关压缩（结构参照 codex harness，2026-08-23 源码级调研）：
+    ① 绝不删项、绝不破坏工具调用配对——只把陈旧工具输出的 output **内容**替换为
+       截断占位（同官方 trim_function_call_history_to_fit_context_window 思路）；
+    ② 用户消息全保（官方 build_compacted_history：用户消息是任务定义，预算内倒序优先最新）；
+    ③ 超长 assistant 消息截到 ~10K tokens 等价（官方 MAX_RETAINED_AGENT_MESSAGE_TOKENS）；
+    ④ 从最老的工具输出开始改写，直到总量入预算；改写不足以达标时不再硬删（保结构安全）。
+    幂等：已被本函数改写过的输出带占位前缀，跳过。失败原样返回。"""
+    try:
+        total = len(json.dumps(items, ensure_ascii=False))
+    except Exception:
+        return items, {}
+    if total < _COMPACT_MIN_BYTES or len(items) < 8:
+        return items, {}
+    marker_prefix = "[gateway-truncated:"
+    out = list(items)
+    counts: dict[str, int] = {"compact_kb_before": total // 1024}
+    cur = total
+    # 确定性逐项规则（K5 修正）：触发后对**所有**超阈值项统一变换，绝不按预算提前停——
+    # 预算驱动会让掏空前沿逐轮前移，同一 item 两轮内容不同 → acct pod WS 增量前缀账本
+    # 必然 prefix_break → 压缩会话永远全量。恒同变换 ⇒ 前缀稳定 ⇒ 与增量兼容。
+    for i, it in enumerate(out):
+        if not isinstance(it, dict):
+            continue
+        t = str(it.get("type") or "")
+        if t in ("function_call_output", "custom_tool_call_output", "local_shell_call_output"):
+            o = it.get("output")
+            osz = len(json.dumps(o, ensure_ascii=False)) if o is not None else 0
+            if osz < 2048:
+                # 阈值 2KB（v2.2）：真实巨会话是 6000×~3KB 小项聚合（实测 avg 3KB/项），
+                # 8KB 阈值对它们完全无效（S3 探针抓到的假阳性上线）。2KB 才咬得到肥肉。
+                continue
+            ostr = o if isinstance(o, str) else json.dumps(o, ensure_ascii=False)
+            if ostr.startswith(marker_prefix):
+                continue  # 幂等
+            new_it = dict(it)
+            new_it["output"] = "%s %d chars omitted; head] %s" % (marker_prefix, osz, ostr[:512])
+            out[i] = new_it
+            cur -= osz - len(new_it["output"])
+            counts["compact_tool_outputs_truncated"] = counts.get("compact_tool_outputs_truncated", 0) + 1
+        elif t in ("message", "") and it.get("role") == "assistant":
+            try:
+                c = it.get("content")
+                csz = len(json.dumps(c, ensure_ascii=False)) if c is not None else 0
+            except Exception:
+                continue
+            if csz <= _COMPACT_ASSISTANT_MAX_BYTES:
+                continue
+            txt = None
+            if isinstance(c, list) and c and isinstance(c[0], dict):
+                txt = c[0].get("text")
+            elif isinstance(c, str):
+                txt = c
+            if not isinstance(txt, str) or txt.startswith(marker_prefix):
+                continue
+            new_it = dict(it)
+            head = txt[:_COMPACT_ASSISTANT_MAX_BYTES]
+            new_txt = "%s assistant msg %d chars omitted; head] %s" % (marker_prefix, len(txt), head)
+            if isinstance(c, str):
+                new_it["content"] = new_txt
+            else:
+                nc = [dict(c[0]) if isinstance(c[0], dict) else c[0]] + list(c[1:])
+                if isinstance(nc[0], dict):
+                    nc[0]["text"] = new_txt
+                new_it["content"] = nc
+            out[i] = new_it
+            cur -= csz - len(new_txt)
+            counts["compact_assistant_truncated"] = counts.get("compact_assistant_truncated", 0) + 1
+        # 用户消息/reasoning/调用项: 一律不动（任务定义与执行骨架）
+    if len(counts) <= 1:
+        return items, {}
+    counts["compact_kb_after"] = max(0, cur) // 1024
+    return out, counts
+
 
 # Cross-provider tool-call contamination cleanup.
 # A conversation history produced under an Anthropic model carries tool_use
@@ -124,7 +244,7 @@ def _reasoning_has_summary_text(item: dict[str, Any]) -> bool:
     return False
 
 
-def _normalize_item(item: Any, drop_all_reasoning: bool = False) -> tuple[Any | None, str | None]:
+def _normalize_item(item: Any, drop_all_reasoning: bool = False, keep_encrypted: bool = False) -> tuple[Any | None, str | None]:
     if not isinstance(item, dict):
         return item, None
 
@@ -154,8 +274,11 @@ def _normalize_item(item: Any, drop_all_reasoning: bool = False) -> tuple[Any | 
         changed.append("encrypted_item_id_strip")
 
     if has_encrypted_content:
-        out.pop("encrypted_content", None)
-        changed.append("encrypted_content_strip")
+        if keep_encrypted:
+            changed.append("encrypted_keep")
+        else:
+            out.pop("encrypted_content", None)
+            changed.append("encrypted_content_strip")
 
     # Anthropic->OpenAI tool-call contamination cleanup (see module docstring).
     if item.get("type") in _TOOL_CALL_TYPES or isinstance(out.get("name"), str):
@@ -179,7 +302,7 @@ def _normalize_item(item: Any, drop_all_reasoning: bool = False) -> tuple[Any | 
         out["call_id"] = new_call_id
         changed.append("toolu_call_id_remap")
 
-    if item.get("type") == "reasoning" and not _reasoning_has_summary_text(out):
+    if item.get("type") == "reasoning" and not _reasoning_has_summary_text(out) and "encrypted_content" not in out:
         kind = "+".join(changed + ["empty_reasoning_drop"]) if changed else "empty_reasoning_drop"
         return None, kind
 
@@ -239,6 +362,13 @@ def _normalize_data(data: dict[str, Any], source: str) -> dict[str, Any]:
     key_alias = md_in.get("user_api_key_alias") if isinstance(md_in, dict) else None
     drop_all_reasoning = key_alias in _DROP_ALL_REASONING_ALIASES
     message_only = key_alias in _MESSAGE_ONLY_ALIASES
+    keep_encrypted = key_alias in _KEEP_ENCRYPTED_ALIASES
+    # 密文只许进 chatgpt/ 渠道：pre_deployment 阶段 model 是 provider 形态
+    # （含"/"），目标不是 chatgpt/ 就强制剥——wangsu fallback、zerokey 混池
+    # deployment 永不收密文。pre_call 阶段 model 是 group 名（无"/"）不受影响。
+    if keep_encrypted and isinstance(model, str) and "/" in model and not model.startswith("chatgpt/"):
+        keep_encrypted = False
+        counts["foreign_channel_enc_gate"] = 1
     if out_data.pop("previous_response_id", None) is not None:
         counts["previous_response_id_drop"] = 1
 
@@ -254,12 +384,18 @@ def _normalize_data(data: dict[str, Any], source: str) -> dict[str, Any]:
         out_data["input"] = input_items
         counts["string_input_to_list"] = 1
     if isinstance(input_items, list):
+        _compact_on = (key_alias not in _COMPACT_EXEMPT_ALIASES) if _COMPACT_DEFAULT_ON \
+            else (key_alias in _COMPACT_ALIASES)
+        if _compact_on:
+            input_items, _ccounts = _compact_input_items(input_items)
+            for _ck, _cv in _ccounts.items():
+                counts[_ck] = counts.get(_ck, 0) + _cv
         new_items: list[Any] = []
         for item in input_items:
             if message_only and isinstance(item, dict) and item.get("type") not in (None, "message"):
                 counts["key_scoped_non_message_drop"] = counts.get("key_scoped_non_message_drop", 0) + 1
                 continue
-            new_item, kind = _normalize_item(item, drop_all_reasoning=drop_all_reasoning)
+            new_item, kind = _normalize_item(item, drop_all_reasoning=drop_all_reasoning, keep_encrypted=keep_encrypted)
             if kind:
                 counts[kind] = counts.get(kind, 0) + 1
             if new_item is not None:
@@ -301,7 +437,9 @@ def _normalize_data(data: dict[str, Any], source: str) -> dict[str, Any]:
     md = out_data.setdefault("litellm_metadata", {})
     if isinstance(md, dict):
         md["_chatgpt_responses_normalized"] = counts
-    _log.info("chatgpt_responses_normalize: source=%s model=%s counts=%s", source, model, counts)
+    # WARNING 级：root logger 默认 WARNING，INFO 会被吞（2026-08-22 排障教训，
+    # 本钩子曾因此"隐形"数周——同 CM 的 deepseek_responses_adapt 用 warning 才可见）。
+    _log.warning("chatgpt_responses_normalize: source=%s model=%s counts=%s", source, model, counts)
     return out_data
 
 
@@ -359,6 +497,15 @@ def _install_chatgpt_fallback_guard() -> None:
         status = getattr(exc, "status_code", None)
         text = str(exc)
 
+        # encrypted 类错误放行 fallback（2026-08-22）：灰度 key 放行密文后若上游
+        # 罕见地返 encrypted 400，fallback 目标在 pre_deployment 已被剥净密文，
+        # wangsu 能正常接住 → 用户拿降级回答而不是硬 400。存量流量密文在门口
+        # 已剥、不会产生此类错误，对存量零影响。
+        _enc_needles = ("encrypted_content", "encrypted content", "encryption boundary")
+        if any(needle in text for needle in _enc_needles):
+            _log.warning("chatgpt_responses_normalize: encrypted-4xx allowed to fallback: %s", text[:200])
+            return False
+
         # Availability / capacity errors are allowed to use the configured
         # Wangsu fallback. Payload/schema errors are not.
         retryable_needles = (
@@ -389,10 +536,6 @@ def _install_chatgpt_fallback_guard() -> None:
             "missing required",
             "Missing required",
             "System messages are not allowed",
-            "deployment that produced this encrypted_content",
-            "stale encrypted_content",
-            "same encryption boundary",
-            "Re-issue the request without the stale encrypted_content",
             "aresponses() missing",
             "schema",
             "unsupported",

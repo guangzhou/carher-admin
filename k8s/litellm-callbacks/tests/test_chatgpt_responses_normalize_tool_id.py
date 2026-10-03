@@ -158,11 +158,13 @@ check("二次归一化是幂等的", c["id"] == a["id"] and c["call_id"] == a["c
       "%s / %s" % (c.get("id"), c.get("call_id")))
 
 # --- 9. 非目标模型：只强制 id，其余一概不碰 --------------------------------
+# （原用 chatgpt-gpt-5.4 当"非目标"；2026-08-03 线上已把 5.4/5.2/5.3-codex 加进名单，
+#  这几条断言从那天起测的是一个已不存在的前提。改用确实不在名单里的 sa-grok-4.7。）
 # gpt-5.4 / gpt-5.2 / gpt-5.3-codex 不在 _TARGET_MODEL_PARTS 里，2026-08-02 修完
 # id 判据后它们仍在漏 fc_ 400，因为整个清洗对这些组根本不跑。补一个与模型无关的
 # 最小 pass：只改 id，不引入重型清洗（避免给从未经历过的流量换行为）。
 untouched = MOD._normalize_data({
-    "model": "chatgpt-gpt-5.4",
+    "model": "sa-grok-4.7",
     "input": [
         fc(POISON, POISON),
         {"type": "reasoning", "id": "encitem_keep", "encrypted_content": "litellm_enc:zzz",
@@ -181,12 +183,12 @@ check("非目标模型不改写 system message",
 check("非目标模型保留 previous_response_id",
       untouched.get("previous_response_id") == "resp_keepme", untouched.get("previous_response_id"))
 check("非目标模型无脏 id 时不复制 input（零改动零副作用）",
-      MOD._normalize_data({"model": "chatgpt-gpt-5.4", "input": [fc("fc_clean", "call_clean")]}, "t")["input"][0]["id"] == "fc_clean")
+      MOD._normalize_data({"model": "sa-grok-4.7", "input": [fc("fc_clean", "call_clean")]}, "t")["input"][0]["id"] == "fc_clean")
 check("非目标模型下 ctc_ 同样不被改坏",
-      MOD._normalize_data({"model": "chatgpt-gpt-5.4", "input": [
+      MOD._normalize_data({"model": "sa-grok-4.7", "input": [
           {"type": "custom_tool_call", "id": "ctc_keepme", "call_id": "call_k"}]}, "t")["input"][0]["id"] == "ctc_keepme")
 check("非目标模型 + 无 input 字段不报错",
-      MOD._normalize_data({"model": "chatgpt-gpt-5.4"}, "t") == {"model": "chatgpt-gpt-5.4"})
+      MOD._normalize_data({"model": "sa-grok-4.7"}, "t") == {"model": "sa-grok-4.7"})
 
 # --- 10. 既有能力不能被我改坏 ----------------------------------------------
 enc = norm([{"type": "reasoning", "id": "encitem_x1", "encrypted_content": "litellm_enc:zzz",
@@ -238,7 +240,7 @@ d2 = MOD._normalize_data({"model": TARGET, "input": ""}, "test")
 check("空字符串不凭空造消息", d2["input"] == "", d2.get("input"))
 d3 = MOD._normalize_data({"model": TARGET, "input": [fc(POISON, POISON)]}, "test")
 check("数组 input 行为不变", d3["input"][0]["id"] == "fc_70eac2a105794171b50ace1f", d3["input"][0].get("id"))
-d4 = MOD._normalize_data({"model": "chatgpt-gpt-5.4", "input": "hi"}, "test")
+d4 = MOD._normalize_data({"model": "sa-grok-4.7", "input": "hi"}, "test")
 check("非目标模型不做 input 归一（不扩大爆炸半径）", d4["input"] == "hi", d4.get("input"))
 
 

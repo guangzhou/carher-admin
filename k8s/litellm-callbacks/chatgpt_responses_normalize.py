@@ -1,6 +1,7 @@
 """Normalize OpenAI Responses items for the ChatGPT account pool."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -207,6 +208,66 @@ def _is_target_model(model: Any) -> bool:
     return isinstance(model, str) and any(part in model for part in _TARGET_MODEL_PARTS)
 
 
+# ── gateway-made compaction on models outside the allowlist (2026-10-03) ──
+# Our own non-native compaction paths write the summary into a compaction item's
+# ``encrypted_content`` as PLAIN TEXT (deepseek_id_prefix) or as our envelope
+# ``carher-cmp-v1:<b64>`` (codex_compaction_v2). Codex replays that item on every
+# later turn. On allowlisted models the full pass drops it (``compaction_drop``);
+# gpt-6* is not allowlisted, so it went to the ChatGPT pool verbatim and every turn
+# 400'd ``invalid_encrypted_content`` -> fallback (cursor-huangminqi, 239x after a
+# deepseek-made compaction; replayed identically on 1.100.1 and 1.103.2).
+#
+# Deliberately NOT done by adding gpt-6 to _TARGET_MODEL_PARTS: that would also
+# switch on reasoning-ciphertext stripping / previous_response_id drop / system
+# rewrite for all gpt-6 traffic, which works today. This pass touches only
+# compaction items we can prove we made, and turns them into a text message so
+# the summary survives. A native ChatGPT compaction (opaque base64 ciphertext)
+# is left alone -- dropping it would make native-compaction users forget.
+_COMPACTION_ONLY_MODEL_PARTS = ("gpt-6",)
+_OWN_ENVELOPE_PREFIX = "carher-cmp-v1:"
+_NATIVE_CIPHERTEXT_RE = re.compile(r"[A-Za-z0-9_\-+/=]+")
+_SUMMARY_HEADING = "[前序对话摘要 / conversation summary]"
+
+
+def _gateway_compaction_text(item: Any) -> str | None:
+    """Summary text if this is a compaction item WE produced, else None."""
+    if not (isinstance(item, dict) and item.get("type") == "compaction"):
+        return None
+    enc = item.get("encrypted_content")
+    if not isinstance(enc, str) or not enc.strip():
+        return None
+    if enc.startswith(_OWN_ENVELOPE_PREFIX):
+        try:
+            raw = base64.urlsafe_b64decode(enc[len(_OWN_ENVELOPE_PREFIX):] + "==")
+            summary = json.loads(raw.decode("utf-8")).get("summary")
+        except Exception:
+            return None
+        return summary if isinstance(summary, str) and summary.strip() else None
+    if _NATIVE_CIPHERTEXT_RE.fullmatch(enc):
+        return None  # looks like real ciphertext: not ours, do not touch
+    return enc
+
+
+def _restore_gateway_compaction(data: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    items = data.get("input")
+    if not isinstance(items, list):
+        return data, 0
+    restored = 0
+    out: list[Any] = []
+    for item in items:
+        text = _gateway_compaction_text(item)
+        if text is None:
+            out.append(item)
+            continue
+        out.append({"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": f"{_SUMMARY_HEADING}\n{text}"}]})
+        restored += 1
+    if restored:
+        data = dict(data)
+        data["input"] = out
+    return data, restored
+
+
 
 def _content_to_text(content: Any) -> str | None:
     if isinstance(content, str):
@@ -353,6 +414,11 @@ def _normalize_data(data: dict[str, Any], source: str) -> dict[str, Any]:
         if forced:
             _log.info("chatgpt_responses_normalize[%s] model=%s tool_id_fc_force=%d (untargeted model)",
                       source, model, forced)
+        if isinstance(model, str) and any(p in model for p in _COMPACTION_ONLY_MODEL_PARTS):
+            data, restored = _restore_gateway_compaction(data)
+            if restored:
+                _log.info("chatgpt_responses_normalize[%s] model=%s gateway_compaction_to_message=%d",
+                          source, model, restored)
         return data
 
 

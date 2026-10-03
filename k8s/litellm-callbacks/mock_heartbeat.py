@@ -80,6 +80,33 @@ def _is_userish_item(item: dict) -> bool:
     return isinstance(itype, str) and itype in _MESSAGE_TYPES
 
 
+def _item_text(content: Any) -> str:
+    """Flatten a message ``content`` (str or multi-part list) to text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, dict):
+                t = p.get("text") or p.get("input_text") or ""
+                if isinstance(t, str):
+                    parts.append(t)
+        return "\n".join(parts)
+    return ""
+
+
+# OpenClaw (newer builds, e.g. carher-75/267) appends a metadata user message
+# AFTER the heartbeat marker message:
+#   input[-2] = user "[... ] [OpenClaw heartbeat poll]"
+#   input[-1] = user "OpenClaw runtime context for the immediately preceding user message. ..."
+# The reverse walk used to stop at that runtime-context blob, miss the marker,
+# and bill the full-history poll upstream (measured 63K-157K prompt tokens per
+# poll on carher-75, 2026-08-16). Runtime-context blobs are metadata, not user
+# turns — skip a bounded number of them and evaluate the real last user message.
+_RUNTIME_CONTEXT_PREFIX = "OpenClaw runtime context"
+_MAX_CONTEXT_SKIPS = 3
+
+
 def _last_user_text(data: dict) -> str:
     """Pull the last user-role text out of either Responses-API ``input``
     or chat-style ``messages``. Returns empty string on any structural
@@ -89,47 +116,32 @@ def _last_user_text(data: dict) -> str:
     if isinstance(inp, str):
         return inp
     if isinstance(inp, list) and inp:
+        skips = 0
         # Walk back to find last user message
         for item in reversed(inp):
             if not isinstance(item, dict):
                 continue
             if not _is_userish_item(item):
                 continue
-            content = item.get("content")
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                # multi-part: concat text parts
-                parts = []
-                for p in content:
-                    if isinstance(p, dict):
-                        t = p.get("text") or p.get("input_text") or ""
-                        if isinstance(t, str):
-                            parts.append(t)
-                if parts:
-                    return "\n".join(parts)
-            break
+            text = _item_text(item.get("content"))
+            if text.startswith(_RUNTIME_CONTEXT_PREFIX) and skips < _MAX_CONTEXT_SKIPS:
+                skips += 1
+                continue
+            return text
     # Chat-style: data["messages"]
     msgs = data.get("messages")
     if isinstance(msgs, list) and msgs:
+        skips = 0
         for m in reversed(msgs):
             if not isinstance(m, dict):
                 continue
             if m.get("role") != "user":
                 continue
-            c = m.get("content")
-            if isinstance(c, str):
-                return c
-            if isinstance(c, list):
-                parts = []
-                for p in c:
-                    if isinstance(p, dict):
-                        t = p.get("text") or ""
-                        if isinstance(t, str):
-                            parts.append(t)
-                if parts:
-                    return "\n".join(parts)
-            break
+            text = _item_text(m.get("content"))
+            if text.startswith(_RUNTIME_CONTEXT_PREFIX) and skips < _MAX_CONTEXT_SKIPS:
+                skips += 1
+                continue
+            return text
     return ""
 
 
@@ -161,6 +173,10 @@ class MockHeartbeat(CustomLogger):
                 return data
 
             data["mock_response"] = "ok"
+            # LiteLLM Responses mock_response is non-streaming; collapse
+            # heartbeat mocks even when the client asked for stream=true.
+            if data.get("stream") is True:
+                data["stream"] = False
             md = data.setdefault("litellm_metadata", {})
             if isinstance(md, dict):
                 md["_mock_heartbeat"] = True

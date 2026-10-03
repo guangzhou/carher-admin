@@ -531,6 +531,10 @@
     "affinity": {
       "type": "object"
     },
+    "topologySpreadConstraints": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
     "resources": {
       "type": "object",
       "additionalProperties": false,

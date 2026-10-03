@@ -6,6 +6,20 @@
 {{- toYaml .Values.selectorLabels -}}
 {{- end -}}
 
+{{- /*
+Which pods a Service sends to. A production release selects on the route label,
+not on `app`: that is what the live 30402 Service has always done, and it is what
+lets the route move between lanes by relabelling pods (2026-09-24) without a
+Service edit. Non-production lanes keep their own `app` selector.
+*/ -}}
+{{- define "litellm-proxy.serviceSelector" -}}
+{{- if .Values.productionRouteEnabled -}}
+carher.net/litellm-production-route: enabled
+{{- else -}}
+{{ include "litellm-proxy.selectorLabels" . }}
+{{- end -}}
+{{- end -}}
+
 {{- define "litellm-proxy.labels" -}}
 {{ include "litellm-proxy.selectorLabels" . }}
 app.kubernetes.io/name: litellm-proxy

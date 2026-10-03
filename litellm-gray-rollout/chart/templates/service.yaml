@@ -8,10 +8,34 @@ metadata:
 spec:
   type: NodePort
   selector:
-    {{- include "litellm-proxy.selectorLabels" . | nindent 4 }}
+    {{- include "litellm-proxy.serviceSelector" . | nindent 4 }}
   ports:
     - name: http
       port: 4000
       targetPort: http
       nodePort: {{ .Values.service.nodePort }}
       protocol: TCP
+{{- if .Values.productionRouteEnabled }}
+---
+# In-cluster entry for production (litellm-probe, spendlog-mirror-collector,
+# ws-ingress, zk-delta, open-webui dial litellm-proxy:4000 by name; measured
+# 2026-10-03). It was hand-made outside this chart, so the first prod render
+# from the chart would have deleted it. Same selector as the NodePort: the
+# production route is a label, so both entries follow it together.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "litellm-proxy.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "litellm-proxy.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "litellm-proxy.serviceSelector" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+      protocol: TCP
+{{- end }}

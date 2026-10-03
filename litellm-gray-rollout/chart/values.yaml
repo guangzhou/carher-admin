@@ -158,6 +158,10 @@ podLabels: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+# Copied from the live Deployment by prepare-values.py. Prod spreads its four
+# replicas across nodes with this (measured 2026-10-03); a chart that cannot
+# carry it would silently let a rollout stack them on one host.
+topologySpreadConstraints: []
 
 resources:
   requests:

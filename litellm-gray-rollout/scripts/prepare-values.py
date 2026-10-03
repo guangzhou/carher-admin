@@ -433,7 +433,7 @@ def freeze_runtime_shape(
     values["extraEnv"] = extra_env
     values["secretRefs"] = secret_refs
     values["resources"] = container.get("resources") or values.get("resources")
-    for field in ("nodeSelector", "tolerations", "affinity"):
+    for field in ("nodeSelector", "tolerations", "affinity", "topologySpreadConstraints"):
         value = pod_spec.get(field)
         if value is not None:
             values[field] = value

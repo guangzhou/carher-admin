@@ -2331,7 +2331,24 @@ def test_rendered_profiles_have_isolated_selectors_snapshots_and_schema_fuse(pro
 
     assert all(pod_labels[key] == value for key, value in selector.items())
     assert selector == {"app": name}
-    assert service["spec"]["selector"] == selector
+    if production_route:
+        # The live 30402 Service selects on the route label, not `app`
+        # (2026-10-03); the ClusterIP that five in-cluster consumers dial must
+        # exist and follow the same label, or a prod render deletes it.
+        route = {"carher.net/litellm-production-route": "enabled"}
+        assert service["spec"]["selector"] == route
+        cluster = find_doc(documents, "Service", name)
+        assert cluster["spec"]["type"] == "ClusterIP"
+        assert cluster["spec"]["selector"] == route
+        assert cluster["spec"]["ports"] == [
+            {"name": "http", "port": 4000, "targetPort": 4000, "protocol": "TCP"}
+        ]
+        assert pod_labels["carher.net/litellm-production-route"] == "enabled"
+    else:
+        assert service["spec"]["selector"] == selector
+        assert not [
+            d for d in documents if d.get("kind") == "Service" and d["metadata"]["name"] == name
+        ]
     assert service["spec"]["ports"][0]["nodePort"] == node_port
     assert network_policy["spec"]["podSelector"] == {"matchLabels": {"app": name}}
     assert network_policy["spec"]["policyTypes"] == ["Ingress"]
@@ -2908,3 +2925,18 @@ def test_primary_keeps_prods_explicit_off_for_default_off_opt_ins(name):
 def test_primary_must_run_is_exactly_the_default_on_job():
     assert PREPARE_VALUES.PRIMARY_MUST_RUN == {"PROXY_BATCH_POLLING_ENABLED"}
     assert PREPARE_VALUES.PRIMARY_MUST_RUN <= set(PREPARE_VALUES.BACKGROUND_TASK_SUPPRESSORS)
+
+
+@pytest.mark.skipif(HELM is None, reason="helm is not installed")
+def test_topology_spread_from_live_prod_is_rendered():
+    spread = [{"labelSelector": {"matchLabels": {"app": "litellm-proxy-gray"}}, "maxSkew": 1,
+               "topologyKey": "kubernetes.io/hostname", "whenUnsatisfiable": "ScheduleAnyway"}]
+    result = _render_gray_with_overrides({"topologySpreadConstraints": spread})
+    assert result.returncode == 0, result.stderr
+    docs = [d for d in yaml.safe_load_all(result.stdout) if d]
+    dep = next(d for d in docs if d["kind"] == "Deployment")
+    assert dep["spec"]["template"]["spec"]["topologySpreadConstraints"] == spread
+    # Negative control: the default renders no field at all.
+    plain = _render_gray_with_overrides({})
+    dep = next(d for d in yaml.safe_load_all(plain.stdout) if d and d["kind"] == "Deployment")
+    assert "topologySpreadConstraints" not in dep["spec"]["template"]["spec"]

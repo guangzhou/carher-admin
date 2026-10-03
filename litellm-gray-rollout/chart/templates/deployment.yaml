@@ -28,7 +28,11 @@ spec:
         {{- include "litellm-proxy.selectorLabels" . | nindent 8 }}
         litellm.carher.io/background-tasks-enabled: {{ .Values.backgroundTasks.enabled | quote }}
         {{- if .Values.productionRouteEnabled }}
-        carher.net/litellm-production-route: "true"
+        {{- /* Must equal the value the live prod Services select on (measured
+             2026-10-03: `enabled`). "true" rendered fine, rolled out green, and
+             would have left 30402 + the litellm-proxy ClusterIP with zero
+             endpoints. */}}
+        carher.net/litellm-production-route: enabled
         {{- end }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
@@ -143,5 +147,9 @@ spec:
       {{- end }}
       {{- with .Values.tolerations }}
       tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}

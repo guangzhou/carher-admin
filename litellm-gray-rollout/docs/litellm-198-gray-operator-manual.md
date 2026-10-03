@@ -508,6 +508,7 @@ reload 和 post-reload 检查。它只保证新请求切回 prod；已经建立�
 | R7 | 生产 / 灰度并排回归 | 同一批 key、同一时刻分别打 30402 和 30405 | 两边结果**一致**，不是 gray 单边全绿 | 单边绿分不出是版本问题还是上游天气 |
 | R8 | 试点 key 里必须有重度用户 | 选人时按近 24h SpendLogs 单请求最大输入 token 排序，前 10 名里至少挑 3 个 | 名单里有超长 codex / cursor 对话用户 | 重度用户第一批出事；只挑轻用户的试点量不到 |
 | R9 | 后台任务恰好一条车道在跑 | 每条车道读 config 的 `disable_reset_budget` + 三个 env + 启动日志的 job 列表；再跑 §7.0 那条逾期 SQL | 在服务的车道里**恰好一条** `primary`；逾期（排掉已过期 key）= 0。gray 要长期扛生产就先做 §7.0 交接 | gray 关着额度重置，转正后 2055 把日额度 key 不再恢复 |
+| R10 | 转正字节 = 灰度字节 | 收敛 helm upgrade 后，逐 pod 对 3 个整文件覆盖件 + `register_pricing.py` 取 sha256，与 gray pod 比 | prod 每个 pod 与 gray **逐文件相同**（config 只许差 gray 专用的 scheduler 抑制） | 2026-10-03：prod 快照取自 live prod 挂载的 CM，把 1.100.1 版覆盖件装到了 1.103.2 上；rollout、/health、回归全绿 |
 
 R7 并排回归集（本轮修后实测两边全对齐，以后少一项都不算过）：
 
@@ -1268,7 +1269,7 @@ gray 平时关掉 4 个会改全局数据的后台任务：每日额度重置 `r
 同一口径：gray 选 `primary` 时，config 里不加 `disable_reset_budget`、不钉那三个 env，
 `backgroundTasks.enabled=true`，chart 要求 `schedulerSafety.mode` 与它一致。
 
-**交接步骤**（gray 已经扛 100%、§5.5 R1~R9 全过之后）：
+**交接步骤**（gray 已经扛 100%、§5.5 R1~R10 全过之后）：
 
 ```bash
 # 1. 避开北京时间 00:00（2026-10-02 实测 1716 把 key 的下一次重置都在 16:00 UTC）。

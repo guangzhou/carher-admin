@@ -142,3 +142,14 @@ kiro 19 条 19/19 vs 19/19；her 逐 pod 全过；worker 被杀 0。`glm-5.3-fla
 
 ⚠️ 转正 prod 时，prod 的 config 也必须带 `log_raw_request_response: false`，否则同样会炸。
 ✅ 教训已写进灰度回归检验项：`docs/litellm-198-gray-operator-manual.md` §5.5（R1~R9）；`prepare-values.py` 冻结时自动拒 `log_raw_request_response: true` 和 DB 自管的路由键。
+
+## ✅ 2026-10-03 收敛完成：198 生产 = 1.103.2
+
+第二次灰度 run `litellm-198-v1032-20261002b`：试点 10 把（近 24h 单次输入最大）→ 1/5/10/50/100% →
+buyitian 两把最后放 → §7 原地升级 `litellm-proxy`（helm rev11）→ committed（09:26 北京）。
+每档 worker_killed=0；100% 后新旧并排回归全部一致；commit 后 10 分钟 30402 1288 请求 0 5xx。
+
+收敛前 chart 补了四处才能安全渲染 prod（commit 8e14e5f）：ClusterIP `litellm-proxy`、路由标签值
+`enabled`、Service 按路由标签选、`topologySpreadConstraints`。
+⚠️ prod 冻结用的 6 个快照目录里，3 个整文件覆盖件必须取 `overlays/` 的 1.103.2 版（= gray），
+**不能取 live prod 挂载的 CM**（那是 1.100.1 版）。第一次升级（rev9）就是这么装错的，靠逐 pod sha 对比发现（检验项 R10）。

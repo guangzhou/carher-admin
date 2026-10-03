@@ -290,6 +290,7 @@ def _custom_names_from_iterator(it: Any) -> set:
     lo = getattr(it, "logging_obj", None)
     if lo is None:
         return set()
+    names: set = set()
     for holder in (getattr(lo, "model_call_details", None),
                    getattr(lo, "litellm_params", None),
                    getattr(lo, "optional_params", None)):
@@ -298,9 +299,35 @@ def _custom_names_from_iterator(it: Any) -> set:
         for key in ("litellm_metadata", "metadata"):
             meta = holder.get(key)
             if isinstance(meta, dict):
-                names = meta.get("deepseek_downgraded_custom_tools")
-                if names:
-                    return set(names)
+                found = meta.get("deepseek_downgraded_custom_tools")
+                if found:
+                    names = set(found)
+                    break
+        if names:
+            break
+    return names | _native_custom_apply_patch(lo)
+
+
+def _native_custom_apply_patch(lo: Any) -> set:
+    """``apply_patch`` 若被客户端声明为 custom，也要进还原名单（2026-10-03）。
+
+    deepseek_responses_adapt 认定 deepseek「原生支持 apply_patch」，原样以 custom
+    转发、不降级也不登记。但直打本地 deepseek /v1/responses 实测：custom
+    ``apply_patch`` 进，上游回的是 ``function_call``（流式非流式都是）。非流式被
+    codex_custom_tool_bridge 兜住；流式这里不认它 ⇒ Codex 收到一条没声明过的
+    function_call（近 24h 35 次，6 个用户）。
+
+    名字只从 ``model_call_details["tools"]`` 取：探针实测那里还是客户端声明的原形
+    （custom），而 litellm_metadata 不会带这个名字。只认 custom 声明，
+    客户端自己声明成 function 的 apply_patch 不碰。
+    """
+    mcd = getattr(lo, "model_call_details", None)
+    tools = mcd.get("tools") if isinstance(mcd, dict) else None
+    if not isinstance(tools, list):
+        return set()
+    for t in tools:
+        if isinstance(t, dict) and t.get("type") == "custom" and t.get("name") == "apply_patch":
+            return {"apply_patch"}
     return set()
 
 

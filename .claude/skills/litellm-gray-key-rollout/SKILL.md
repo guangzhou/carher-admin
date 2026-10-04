@@ -2,6 +2,8 @@
 name: litellm-gray-key-rollout
 description: 198 LiteLLM 网关按 key 名单灰度切流到新版本（force-gray 路线）。含选人、库对账、批量下发、双尺子验证、回滚边界、容量判据。适用于「把某些人/某个比例的 key 切到新版本」这类请求。
 ---
+> 整版本升级（看新版 → 灰度 → 收敛转正 → 转正后换 callback）的总流程见 skill [[litellm-198-version-upgrade]]。
+
 
 # LiteLLM 198 按名单灰度切流
 

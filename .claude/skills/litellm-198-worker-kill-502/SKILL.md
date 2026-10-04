@@ -10,6 +10,8 @@ description: >-
   Use when 用户说「某人一直 502」「灰度版本断流」「pod 没重启但报错」「Connection closed / ReadError 很多」
   「新版本某些用户报错旧版本没事」。
 ---
+> 整版本升级（看新版 → 灰度 → 收敛转正 → 转正后换 callback）的总流程见 skill [[litellm-198-version-upgrade]]。
+
 
 # 198 LiteLLM：worker 被心跳杀 ⇒ 502
 

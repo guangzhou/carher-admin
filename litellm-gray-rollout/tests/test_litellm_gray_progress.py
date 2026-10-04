@@ -636,3 +636,16 @@ def test_monitor_loop_drops_the_partial_first_line_only_when_it_byte_cuts(tmp_pa
     # Negative control: a log smaller than the cut keeps every line.
     _sp.run(["bash", "-c", script.format(tb=10**6)], check=True)
     assert (raw / "access.log").read_text(encoding="utf-8").splitlines() == lines
+
+
+def test_lane_callback_swap_keeps_the_lanes_current_replica_count():
+    """2026-10-04: a hand-rolled swap script wrote replicas=4 into every refreeze and
+    silently undid a requested scale-down of guarded-old (4 -> 2 -> 4)."""
+    import re as _re
+
+    src = (TOOLS / "lane-callback-swap.sh").read_text(encoding="utf-8")
+    # The count must come from the lane's current frozen values ...
+    assert _re.search(r'REPLICAS=\$\(python3 .*\[.replicas.\]', src), "replicas not read from current values"
+    assert 'int(rep)' in src
+    # ... and never be a literal.
+    assert not _re.search(r'\["replicas"\]\s*=\s*\d', src), "replica count hardcoded"

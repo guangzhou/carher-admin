@@ -80,7 +80,8 @@ PKCE + state → {KIRO_AUTH_API}/login?idp=Github → Playwright Chromium
   → POST oauth/token → refreshToken → getUsageLimits → append accounts.json
 ```
 
-核心库：`/tmp/kiro_batch_login.py`
+⚠️ **这条流程尚未进 git**（原 `/tmp/kiro_batch_login.py` 已随 /tmp 清空丢失）。
+2026-10-08 那批全是 BuilderId，没用到。需要时重写进 `scripts/`，别再放 `/tmp`。
 
 ### B — BuilderId/IdC（provider=`BuilderId`, authMethod=`IdC`）
 

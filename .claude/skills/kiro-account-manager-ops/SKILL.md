@@ -214,15 +214,69 @@ clientIdHash = `sha1(JSON.stringify({"startUrl":"https://view.awsapps.com/start"
 | 脚本 | 角色 |
 |------|------|
 | `scripts/kiro_common.py` | PKCE / OIDC / callback server / getUsageLimits / accounts.json 幂等写入 |
-| `scripts/kiro_oneshot.py` | 单账户 BuilderId 登录状态机（真 Chrome CDP + ddddocr + TOTP） |
-| `scripts/kiro_batch.sh` | 批量壳（inter-account `cleanup_chrome()` + 10s 间隔） |
+| `scripts/kiro_oneshot.py` | 单账户 BuilderId 登录状态机（真 Chrome CDP + ddddocr + TOTP）+ **`drive_login()` 共享函数** |
+| `scripts/kiro_batch.sh` | 批量加号壳（inter-account `cleanup_chrome()` + 10s 间隔） |
+| `scripts/aws_mfa_rotate.py` | AWS Builder ID MFA 设备轮换（加新 seed → 验证 → 可选删旧） |
+| `scripts/aws_mfa_rotate.sh` | 批量 MFA 轮换壳 |
 
-**待补**：`outlook_code.py`（无 TOTP seed 时登 Outlook 取邮箱验证码）
-本轮 10 个号都有 seed，没用上，所以没重建。真要用再按
-[[builderid-outlook-email-code-lessons]] 那 6 条写，别凭空发明。
+**`drive_login()`** 在 `kiro_oneshot.py` 里，是加号和 MFA 轮换共享的登录状态机
+（WAF 点击挑战、图片验证码、双密码、MFA、consent 全在里面）。改一处两边都生效。
 
-GitHub/social 那条流程（`kiro_batch_login.py` 等）也还没进 git——
-本轮全是 BuilderId。需要时同样重写进 `scripts/`，别再放 `/tmp`。
+**待补**：`outlook_code.py`（无 TOTP seed 时登 Outlook 取邮箱验证码）、
+GitHub/social 流程。需要时重写进 `scripts/`，别再放 `/tmp`。
+
+## AWS MFA 轮换（2026-10-08 实测）
+
+### 已验证全链路（rhania.putri 实证）
+
+```
+profile.aws.amazon.com → redirect → signin.aws 登录
+  → credentials.signin.aws/#/（「我的详细信息」页）
+  → 点左栏「安全」tab
+  → 点「注册设备」→ 跳到 signin.aws/.../mfa/register
+  → 选「身份验证器应用程序」radio → 点「下一步」
+  → 点「显示密钥」→ 取出 base32 seed（32 字符）
+  → pyotp 算码填入 → 点「分配 MFA」→ 绑定成功
+```
+
+### 用法
+
+```bash
+# 单号（旧设备不删，可回退）
+TARGET_EMAIL=x@binus.ac.id PW='<buildid pw>' TOTP_SEED='<现有 seed>' \
+  PYTHONPATH=scripts ~/.local/kiro-auto/venv/bin/python scripts/aws_mfa_rotate.py
+
+# 批量
+scripts/aws_mfa_rotate.sh /tmp/rotate-creds.ndjson           # 只加新设备
+DELETE_OLD=1 scripts/aws_mfa_rotate.sh /tmp/rotate-creds.ndjson  # 加完再删旧的
+
+# 新 seed 写到 /tmp/aws-mfa-rotate-<user>-<HHMMSS>.json（chmod 600，不覆盖）
+```
+
+### 🔴 关键限制：只对已有 authenticator app 的号可行
+
+实测 2026-10-08：
+
+| 号 | 已有 authenticator app | 点「注册设备」后 | 能选 authenticator app |
+|---|---|---|---|
+| rhania.putri | ✅ 有 1 个 | 弹出**设备类型选择**（三 radio） | ✅ 能选 |
+| jason.tanean | ❌ 从未设过 | 直接进 **passkey/FIDO 注册** | ❌ 不给选 |
+
+**AWS 对从未设过 authenticator app 的号，走「注册设备」时直接推 passkey，跳过设备类型选择。**
+这意味着：
+- 表里已有 `2fa` seed 的号（=已注册过 authenticator app）→ **能自动 rotate**
+- 从未注册过的号 → **需要先手动在 AWS 网页上注册一次 authenticator app**，之后才能自动
+
+### 🔴 实测踩过的 6 个坑
+
+| # | 坑 | 现象 | 修法 |
+|---|---|---|---|
+| 1 | `profile.aws.amazon.com/security` 返回 S3 404 | `NoSuchKey` XML | 走根路径进 SPA |
+| 2 | 登录后落到 `credentials.signin.aws`，不是 `profile.aws.amazon.com` | 域名检测全错 | 检测 `credentials.signin.aws` |
+| 3 | 落地页是「我的详细信息」不是 Security | 按钮找不到 | 先点左栏「安全」tab |
+| 4 | 「注册设备」后页面全白 | 按钮列表空 | SPA 导航需等页面加载 |
+| 5 | radio 选中了父 div 标题而非具体选项 | 选到「注册 MFA 设备」而非「身份验证器应用程序」 | 找最短 innerText 匹配 + index fallback |
+| 6 | `list_mfa_devices` 永远返回 0 | 误判设备没绑上 | SPA 用 div/card 非 table，量具坏了不影响操作 |
 
 ## 工具依赖
 

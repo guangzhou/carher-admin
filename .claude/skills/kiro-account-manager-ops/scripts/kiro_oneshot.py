@@ -120,6 +120,118 @@ def captcha_visible(page):
     return None
 
 
+def drive_login(
+    page,
+    email: str,
+    passwords: list[str],
+    totp_seed: str | None,
+    stop,
+    deadline: float,
+    log=K.log,
+) -> bool:
+    """驱动 AWS 登录页直到 `stop(page)` 为真或超时。返回是否达成。
+
+    抽出来是为了让「登录拿 token」和「登录改 MFA」**共用同一份** WAF/验证码/MFA/
+    consent 逻辑。这些分支是 2026-10-08 一个个踩出来的（见 SKILL.md 陷阱 11~15），
+    复制一份必然漂移：改了一边忘另一边，下次又从头踩。
+    `stop` 由调用方给：取 token 看 callback 到没到，改 MFA 看有没有进 profile 页。
+    """
+    pw_idx = 0
+    pw_fail_streak = 0
+    last_shape = ""
+
+    while time.time() < deadline:
+        if stop(page):
+            return True
+        time.sleep(1.2)
+
+        # 点击式挑战优先：它和图片验证码可能同时在页上，
+        # 但没点过 Verify 时图片那套提交了也不算过。
+        if "security challenge" in body_snippet(page) and click_to_verify(page):
+            log("  点击式 WAF 挑战 -> 已点 Verify")
+            time.sleep(5)
+            continue
+
+        frame = captcha_visible(page)
+        if frame is not None:
+            code = solve_captcha(page, frame)
+            if code:
+                log(f"  captcha -> {len(code)} chars")
+                box = frame.locator('input[type="text"]').first
+                human_type(box, code)
+                try:
+                    frame.locator('button[type="submit"]').first.click(timeout=5000)
+                except Exception:
+                    page.keyboard.press("Enter")
+                time.sleep(3)
+                continue
+
+        shape = page_shape(page)
+        if shape != last_shape:
+            log(f"  page -> {shape}")
+            last_shape = shape
+
+        if shape == "email":
+            fill_first(page, ['input[name="email"]', 'input[type="email"]', "#username"], email)
+            click_submit(page)
+        elif shape == "password":
+            fill_first(
+                page,
+                ['input[name="password"]', 'input[type="password"]', "#password"],
+                passwords[min(pw_idx, len(passwords) - 1)],
+            )
+            click_submit(page)
+            time.sleep(3)
+            if page_shape(page) == "password":
+                # 「还停在密码页」≠「密码错」：验证码答错也会停在这（陷阱 14）
+                if captcha_rejected(page):
+                    log("  密码页未过：验证码无效（不记密码失败）")
+                else:
+                    pw_fail_streak += 1
+                    if pw_fail_streak >= 2 and pw_idx + 1 < len(passwords):
+                        pw_idx += 1
+                        pw_fail_streak = 0
+                        log(f"  切备用密码 #{pw_idx + 1}")
+            else:
+                pw_fail_streak = 0
+        elif shape == "mfa":
+            if not totp_seed:
+                log("  !! 需要 MFA 但没有 TOTP seed，人工接管")
+                time.sleep(20)
+                continue
+            import pyotp
+
+            fill_first(
+                page,
+                ['input[name="mfaCode"]', 'input[autocomplete="one-time-code"]',
+                 'input[name="code"]', 'input[type="text"]'],
+                pyotp.TOTP(totp_seed).now(),
+            )
+            click_submit(page)
+            time.sleep(4)
+        elif shape == "consent":
+            # 陷阱 4：按钮文案是「允许访问」，必须 includes 匹配
+            clicked = False
+            for sel in ["button", 'input[type="submit"]', "a[role=button]"]:
+                for node in page.locator(sel).all():
+                    try:
+                        label = (node.inner_text() or "").strip()
+                    except Exception:
+                        continue
+                    if any(k in label for k in ("允许", "Allow", "Confirm", "同意")):
+                        try:
+                            node.click(timeout=5000)
+                            clicked = True
+                            break
+                        except Exception:
+                            continue
+                if clicked:
+                    break
+            time.sleep(3)
+
+    return stop(page)
+
+
 def run(email: str, passwords: list[str], totp_seed: str | None) -> int:
     if K.account_exists(email):
         K.log(f"SKIP {email} 已在 accounts.json")
@@ -141,9 +253,6 @@ def run(email: str, passwords: list[str], totp_seed: str | None) -> int:
     profile_dir = Path(f"/tmp/kiro-chrome-{os.getpid()}-{int(time.time())}")
     chrome = launch_chrome(profile_dir)
 
-    pw_idx = 0
-    pw_fail_streak = 0
-
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}")
@@ -154,100 +263,11 @@ def run(email: str, passwords: list[str], totp_seed: str | None) -> int:
             page.goto(authorize_url, wait_until="domcontentloaded", timeout=60000)
 
             deadline = time.time() + HEADFUL_WAIT
-            last_shape = ""
-            while time.time() < deadline:
-                if server.httpd.oauth_result:  # type: ignore[attr-defined]
-                    break
-                time.sleep(1.2)
-
-                # 点击式挑战优先：它和图片验证码可能同时在页上，
-                # 但没点过 Verify 时图片那套提交了也不算过。
-                if "security challenge" in body_snippet(page) and click_to_verify(page):
-                    K.log("  点击式 WAF 挑战 -> 已点 Verify")
-                    time.sleep(5)
-                    continue
-
-                frame = captcha_visible(page)
-                if frame is not None:
-                    code = solve_captcha(page, frame)
-                    if code:
-                        K.log(f"  captcha -> {len(code)} chars")
-                        box = frame.locator('input[type="text"]').first
-                        human_type(box, code)
-                        try:
-                            frame.locator('button[type="submit"]').first.click(timeout=5000)
-                        except Exception:
-                            page.keyboard.press("Enter")
-                        time.sleep(3)
-                        continue
-
-                shape = page_shape(page)
-                if shape != last_shape:
-                    K.log(f"  page -> {shape}")
-                    last_shape = shape
-
-                if shape == "email":
-                    fill_first(page, ['input[name="email"]', 'input[type="email"]', "#username"], email)
-                    click_submit(page)
-                elif shape == "password":
-                    fill_first(
-                        page,
-                        ['input[name="password"]', 'input[type="password"]', "#password"],
-                        passwords[min(pw_idx, len(passwords) - 1)],
-                    )
-                    click_submit(page)
-                    time.sleep(3)
-                    if page_shape(page) == "password":
-                        # 🔴 「还停在密码页」不等于「密码错」：验证码答错也会停在这。
-                        # 实测 2026-10-08 (rhania)：页面同时有「信息与记录不符」和
-                        # 「验证码无效」，无条件计数会把验证码的锅记到密码头上，
-                        # 两次就切到真的错密码，然后一路错下去。
-                        if captcha_rejected(page):
-                            K.log("  密码页未过：验证码无效（不记密码失败）")
-                        else:
-                            pw_fail_streak += 1
-                            # 坑 #3：同一密码连错 2 次才切备用（表里两列常互换）
-                            if pw_fail_streak >= 2 and pw_idx + 1 < len(passwords):
-                                pw_idx += 1
-                                pw_fail_streak = 0
-                                K.log(f"  切备用密码 #{pw_idx + 1}")
-                    else:
-                        pw_fail_streak = 0
-                elif shape == "mfa":
-                    if not totp_seed:
-                        K.log("  !! 需要 MFA 但没有 TOTP seed，人工接管")
-                        time.sleep(20)
-                        continue
-                    import pyotp
-
-                    otp = pyotp.TOTP(totp_seed).now()
-                    fill_first(
-                        page,
-                        ['input[name="mfaCode"]', 'input[autocomplete="one-time-code"]',
-                         'input[name="code"]', 'input[type="text"]'],
-                        otp,
-                    )
-                    click_submit(page)
-                    time.sleep(4)
-                elif shape == "consent":
-                    # 坑 #4：按钮文案是「允许访问」，必须 includes 匹配，精确相等点不到
-                    clicked = False
-                    for sel in ["button", 'input[type="submit"]', "a[role=button]"]:
-                        for node in page.locator(sel).all():
-                            try:
-                                label = (node.inner_text() or "").strip()
-                            except Exception:
-                                continue
-                            if any(k in label for k in ("允许", "Allow", "Confirm", "同意")):
-                                try:
-                                    node.click(timeout=5000)
-                                    clicked = True
-                                    break
-                                except Exception:
-                                    continue
-                        if clicked:
-                            break
-                    time.sleep(3)
+            drive_login(
+                page, email, passwords, totp_seed,
+                stop=lambda _p: bool(server.httpd.oauth_result),  # type: ignore[attr-defined]
+                deadline=deadline,
+            )
 
             K.log("STEP 4  等 callback")
             result = server.wait(timeout=max(30, int(deadline - time.time()) + 60), expect_state=state)

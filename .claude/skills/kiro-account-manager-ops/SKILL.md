@@ -95,6 +95,12 @@ POST oidc.amazonaws.com/client/register → PKCE + 本地 HTTP callback
 
 核心脚本：`scripts/kiro_oneshot.py`（状态机 + 双密码切换 + ddddocr OCR）
 
+#### 跑完一轮后的状态（2026-10-08）
+
+accounts.json **60 个**。本轮 10 个 binus 号 **10/10 全成**（全 BuilderId/IdC）。
+`rhania.putri` 第一次撞点击式 WAF 挑战失败，修完重跑 **87s 一次过且走首选密码**
+——证明它密码从头就对，是验证码的锅被记到了密码头上（见坑 14/15）。
+
 #### BuilderId MFA 两种路径
 
 | MFA 类型 | 条件 | 处理 |

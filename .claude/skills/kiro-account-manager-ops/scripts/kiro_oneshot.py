@@ -71,6 +71,42 @@ def solve_captcha(page, frame) -> str | None:
     return ocr.classification(png)
 
 
+def body_snippet(page, limit: int = 4000) -> str:
+    try:
+        return (page.locator("body").inner_text() or "")[:limit]
+    except Exception:
+        return ""
+
+
+def captcha_rejected(page) -> bool:
+    """页面是否在抱怨验证码错（而不是密码错）。"""
+    try:
+        body = (page.locator("body").inner_text() or "")[:4000]
+    except Exception:
+        return False
+    return any(k in body for k in ("验证码无效", "Invalid captcha", "incorrect characters"))
+
+
+def click_to_verify(page) -> bool:
+    """点击式 WAF 挑战（「Please click verify to start your security challenge」）。
+
+    2026-10-08 新出现：这类挑战没有图片可 OCR，必须真点一下 Verify 按钮，
+    点完 AWS 自己跑完挑战。不处理会一直停在密码页，表现成「密码一直错」。
+    """
+    for frame in page.frames:
+        try:
+            for node in frame.locator('button, [role="button"], input[type="button"]').all():
+                if not node.is_visible():
+                    continue
+                label = (node.inner_text() or node.get_attribute("value") or "").strip()
+                if label.lower() in ("verify", "验证"):
+                    node.click(timeout=5000)
+                    return True
+        except Exception:
+            continue
+    return False
+
+
 def captcha_visible(page):
     """坑 #2：过了验证码 iframe 仍留在 DOM，只是 img 变 hidden。
     判「还有验证码」必须看 img.is_visible()，不能看 iframe 存在性（那是恒真）。"""
@@ -124,6 +160,13 @@ def run(email: str, passwords: list[str], totp_seed: str | None) -> int:
                     break
                 time.sleep(1.2)
 
+                # 点击式挑战优先：它和图片验证码可能同时在页上，
+                # 但没点过 Verify 时图片那套提交了也不算过。
+                if "security challenge" in body_snippet(page) and click_to_verify(page):
+                    K.log("  点击式 WAF 挑战 -> 已点 Verify")
+                    time.sleep(5)
+                    continue
+
                 frame = captcha_visible(page)
                 if frame is not None:
                     code = solve_captcha(page, frame)
@@ -155,12 +198,19 @@ def run(email: str, passwords: list[str], totp_seed: str | None) -> int:
                     click_submit(page)
                     time.sleep(3)
                     if page_shape(page) == "password":
-                        pw_fail_streak += 1
-                        # 坑 #3：同一密码连错 2 次就切备用密码（表里两列常互换）
-                        if pw_fail_streak >= 2 and pw_idx + 1 < len(passwords):
-                            pw_idx += 1
-                            pw_fail_streak = 0
-                            K.log(f"  切备用密码 #{pw_idx + 1}")
+                        # 🔴 「还停在密码页」不等于「密码错」：验证码答错也会停在这。
+                        # 实测 2026-10-08 (rhania)：页面同时有「信息与记录不符」和
+                        # 「验证码无效」，无条件计数会把验证码的锅记到密码头上，
+                        # 两次就切到真的错密码，然后一路错下去。
+                        if captcha_rejected(page):
+                            K.log("  密码页未过：验证码无效（不记密码失败）")
+                        else:
+                            pw_fail_streak += 1
+                            # 坑 #3：同一密码连错 2 次才切备用（表里两列常互换）
+                            if pw_fail_streak >= 2 and pw_idx + 1 < len(passwords):
+                                pw_idx += 1
+                                pw_fail_streak = 0
+                                K.log(f"  切备用密码 #{pw_idx + 1}")
                     else:
                         pw_fail_streak = 0
                 elif shape == "mfa":

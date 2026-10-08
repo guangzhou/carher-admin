@@ -122,6 +122,18 @@ POST oidc.amazonaws.com/client/register → PKCE + 本地 HTTP callback
     文案是「需要额外验证 / MFA 代码 / 身份验证器」，**不含「验证码」**。
     只按属性或只匹配「验证码」会落 `unknown` 卡死。
 
+14. 🔴 **「还停在密码页」≠「密码错」**：验证码答错也停在密码页。
+    实测 (rhania)：页面**同时**有「您输入的某些信息与记录不完全相符」和
+    「**验证码无效**」。无条件累加 `pw_fail_streak` 会把验证码的锅记到密码头上，
+    两次就切到真正错的那个密码，然后一路错下去。
+    计数前先 `captcha_rejected(page)`，验证码错就不记密码失败。
+
+15. 🔴 **点击式 WAF 挑战**（2026-10-08 新出现）：
+    「Please click verify to start your security challenge」+ 一个 `Verify` 按钮，
+    **没有图片可 OCR**，必须真点一下。不点就一直停在密码页，
+    表现成「这个号密码怎么都不对」。ddddocr 那套对它完全无效。
+    处理顺序：**点击式挑战优先于图片验证码**（两者可能同时在页上）。
+
 #### 原有 10 条
 
 1. **human_type()** — `fill()` 被 AWS 判机器人，逐字 0.08~0.25s 随机

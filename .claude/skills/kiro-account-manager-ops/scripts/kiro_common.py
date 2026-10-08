@@ -157,7 +157,13 @@ class CallbackServer:
                     raise RuntimeError("回调里没有 code")
                 return result
             time.sleep(0.4)
-        raise TimeoutError(f"等 callback 超时 {timeout}s（MFA 码错/过期最常见）")
+        # 别只写「MFA 码错」：2026-10-08 rhania 实测真因是点击式 WAF 挑战没点，
+        # 一直停在密码页。超时只说明「没走到 consent」，不指向具体哪一步。
+        raise TimeoutError(
+            f"等 callback 超时 {timeout}s —— 没走到 consent。"
+            "常见真因：WAF 点击挑战未处理 / 验证码连错 / 密码错 / MFA 码过期。"
+            "查最后几条 `page ->` 停在哪一步"
+        )
 
     def close(self) -> None:
         try:

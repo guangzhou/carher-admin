@@ -108,9 +108,12 @@ accounts.json **60 个**。本轮 10 个 binus 号 **10/10 全成**（全 Builde
 | **TOTP** | 凭据有 `2fa` seed | `pyotp.TOTP(seed).now()` 自动填入，最快 |
 | **邮箱验证码** | 无 `2fa` | Outlook 取码（脚本待重建，见下） |
 
-#### BuilderId 关键陷阱（13 条）
+#### BuilderId 关键陷阱（15 条）
 
-**2026-10-08 新增 3 条**（都是「静默卡死」型，不报错只超时，最难查）：
+**2026-10-08 新增 11~15**，共同特征：**不报错，只超时**。页面状态不变
+（一直停在 password），状态机就不打印，日志能连续几分钟一行不出，
+看着像进程挂了其实在空转。**排查第一步：看最后几条 `page ->` 停在哪一步**，
+别信超时文案的猜测。
 
 11. 🔴 **本地 callback server 必须过滤 favicon**：浏览器渲染完回调页会再发
     `GET /favicon.ico`，若 handler 无条件记录就会把真 code/state 冲成 `None`，
@@ -145,6 +148,7 @@ accounts.json **60 个**。本轮 10 个 binus 号 **10/10 全成**（全 Builde
 1. **human_type()** — `fill()` 被 AWS 判机器人，逐字 0.08~0.25s 随机
 2. **iframe DOM 复用** — CAPTCHA 过后 iframe 仍在，判新 CAPTCHA 看 `img.is_visible()`
 3. **双密码切换** — `pw_fail_streak >= 2` 后切 ALT_PASSWORD
+   ⚠️ **已被第 14 条修正**：计数前必须排除「验证码错」，否则会冤枉对的密码
 4. **consent 按钮** — `includes('允许')` 不能精确匹配
 5. **MFA 后 page detachment** — post-submit screenshot 包 try/except
 6. **Chrome CDP** — BuilderId 必须真 Chrome + `--remote-debugging-port=9222`
@@ -204,92 +208,66 @@ accounts.json **60 个**。本轮 10 个 binus 号 **10/10 全成**（全 Builde
 
 clientIdHash = `sha1(JSON.stringify({"startUrl":"https://view.awsapps.com/start"}))`
 
-## /tmp 脚本清单
+## 脚本清单（git 内，非 /tmp）
 
-| 脚本 | 角色 | 状态 |
-|------|------|------|
-| `kiro_batch_login.py` | 共享库：PKCE、token、GitHub OAuth 自动化 | 核心 |
-| `kiro-oneshot.py` | BuilderId 完整流程（状态机 + 双密码 + ddddocr + TOTP/email MFA） | 核心 |
-| `outlook_code.py` | Outlook 邮箱验证码取码（Chrome CDP 9223 + incognito + 多选择器搜索） | 核心 |
-| `kiro-builderid-batch*.sh` | 批量 BuilderId 壳脚本（含 inter-account Chrome cleanup） | 模板 |
-| `kiro-batch-github-8.py` | 批量 GitHub 8 账户 | ✅ 已完成 |
-| `kiro-github-4.py` | 追加 GitHub 4 账户 | ✅ 已完成 |
-| `kiro-github-reset-4.py` | GitHub 密码重置流程 | 📦 备用 |
+| 脚本 | 角色 |
+|------|------|
+| `scripts/kiro_common.py` | PKCE / OIDC / callback server / getUsageLimits / accounts.json 幂等写入 |
+| `scripts/kiro_oneshot.py` | 单账户 BuilderId 登录状态机（真 Chrome CDP + ddddocr + TOTP） |
+| `scripts/kiro_batch.sh` | 批量壳（inter-account `cleanup_chrome()` + 10s 间隔） |
+
+**待补**：`outlook_code.py`（无 TOTP seed 时登 Outlook 取邮箱验证码）
+本轮 10 个号都有 seed，没用上，所以没重建。真要用再按
+[[builderid-outlook-email-code-lessons]] 那 6 条写，别凭空发明。
+
+GitHub/social 那条流程（`kiro_batch_login.py` 等）也还没进 git——
+本轮全是 BuilderId。需要时同样重写进 `scripts/`，别再放 `/tmp`。
 
 ## 工具依赖
 
 ```bash
-source /tmp/kiro-auto-venv/bin/activate
-# playwright pyotp httpx ddddocr Pillow
+~/.local/kiro-auto/venv/bin/python   # playwright pyotp httpx ddddocr Pillow
 ```
 
-BuilderId 额外需要本机 Chrome（`/Applications/Google Chrome.app`）。
+BuilderId 额外需要本机真 Chrome（`/Applications/Google Chrome.app`）。
 
 ## 飞书表格更新
 
 ```bash
-lark-cli base +record-batch-update \
-  --base_token IhSNbXxl5azo9xsKxyhcO0lEnnO --table_id tbludyQfSIZq6pLM \
-  --json '{"update_records":[{"record_id":"recXXX","fields":{"添加状态":"已添加","登录方式":"GitHub"}}]}'
-```
-
-select 字段值直接传字符串，不需要数组。单批最多 200 条。
-
-## 批量 BuilderId 壳脚本模板
-
-每次跑新一批 BuilderId 账户时，基于此模板生成 `/tmp/kiro-builderid-batch<N>.sh`：
-
-```bash
-#!/usr/bin/env bash
-set -uo pipefail
-VENV=/tmp/kiro-auto-venv/bin/python3
-SCRIPT=/tmp/kiro-oneshot.py
-ACCTS_FILE="$HOME/Library/Application Support/.kiro-account-manager/accounts.json"
-
-TARGETS=("email1@binus.ac.id" "email2@binus.ac.id")
-
-cleanup_chrome() {
-  pkill -9 -f 'remote-debugging-port=9222' 2>/dev/null || true
-  pkill -9 -f 'remote-debugging-port=9223' 2>/dev/null || true
-  sleep 2
-  for port in 9222 9223; do
-    for attempt in $(seq 1 5); do
-      lsof -i :$port -t >/dev/null 2>&1 || break
-      pkill -9 -f "remote-debugging-port=$port" 2>/dev/null || true
-      sleep 1
-    done
-  done
-  rm -rf /tmp/kiro-outlook-* 2>/dev/null || true
-}
-
-# ... for 循环：skip if exists → cleanup_chrome → run oneshot → check SAVED
-```
-
-关键：**每个账户前调用 `cleanup_chrome()`**，保证端口空闲 + profile 清空。
-
-## 飞书表格更新
-
-```bash
-# select 字段值用数组包裹
+# 改已有记录：update_records 是 **map**（recId -> 字段 map），select 值用**数组**
 lark-cli base +record-batch-update \
   --base-token IhSNbXxl5azo9xsKxyhcO0lEnnO --table-id tbludyQfSIZq6pLM \
   --json '{"update_records":{"recXXX":{"添加状态":["已添加"],"登录方式":["BuilderId"]}}}' --as user
 
 # 新建记录
 lark-cli base +record-batch-create \
+  --base-token IhSNbXxl5azo9xsKxyhcO0lEnnO --table-id tbludyQfSIZq6pLM \
   --json '{"create_records":[{"账户":"x@binus.ac.id","密码":"...","邮箱密码":"...","添加状态":["已添加"]}]}' --as user
+
+# 全量导出（NDJSON，含 record_id）；--limit 上限 200，ndjson 默认 2000
+lark-cli base +record-list --base-token IhSNbXxl5azo9xsKxyhcO0lEnnO \
+  --table-id tbludyQfSIZq6pLM --format ndjson --output ./creds.ndjson --overwrite --as user
 ```
+
+🔴 **`+record-batch-update` 曾经的 `[{record_id, fields}]` 数组写法已过时**，
+现在是 map 形状、select 用数组（`--help` 实测确认）。本文件里曾同时留着两段
+互相矛盾的说法，已删旧的。单批最多 200 条。
+
+🔴 **`+record-search` 必须带 `--keyword` 或 `--json`**，只想全量读用 `+record-list`。
 
 ## 操作经验
 
-- 批量间隔 10s 避免 rate limit
-- accounts.json 幂等写入：每次检查 email 去重
+- 单号登录 70~155s；批量间隔 10s 避免 rate limit
+- accounts.json 幂等：按 email 去重，已存在则**就地替换**不追加；写前自动备份
+  `accounts.json.bak-<ts>`
 - 密码失效路径：手动改密码 → 更新飞书表 → 重拉 ndjson → 重跑脚本
 - KIRO_APP_VERSION = `0.6.18`
-- Outlook 密码全角字符（`！` U+FF01）：`outlook_code.py` 自动尝试原始值 + normalize_pw() 两个变体
-- 卡在 "STEP 5: Waiting for callback" 时，说明 MFA 验证码错误或过期，手动 `kill -9` 后 batch 会继续下一个
+- creds ndjson 放 `/tmp` 且 `chmod 600`，跑完即删，**禁 git add**
+  （脚本本身不回显密码/token，日志可安全留存——本轮实测确认）
 
-## 当前状态 (2026-10-03)
+## 当前状态 (2026-10-08)
 
-accounts.json **50 个账户**（本轮新增 14 个 BuilderId，累计 25+11+14）。
-唯一未添加：**aldi.hafizh@binus.ac.id** — Outlook 密码错误（两个变体均被 M365 拒绝），需手动核实。
+accounts.json **60 个账户**。10-08 新增 10 个 binus BuilderId，**10/10 全成**。
+
+历史遗留未加：**aldi.hafizh@binus.ac.id** — Outlook 密码错误（两个变体均被 M365
+拒绝），需手动到 M365 后台核实/重置。

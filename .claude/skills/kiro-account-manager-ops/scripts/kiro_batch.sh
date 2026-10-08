@@ -12,12 +12,30 @@
 set -uo pipefail
 
 CREDS="${1:?需要 creds ndjson 路径}"
+# 下面会 cd /tmp，所以这两个必须先定成绝对路径
+[[ "$CREDS" = /* ]] || CREDS="$PWD/$CREDS"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${KIRO_PY:-$HOME/.local/kiro-auto/venv/bin/python}"
 ACCTS="$HOME/Library/Application Support/.kiro-account-manager/accounts.json"
 
-[[ -x "$PY" ]] || { echo "venv 不存在: $PY"; exit 1; }
+[[ -x "$PY" ]] || { echo "venv 不存在: $PY（见 SKILL.md 建 venv 一节）"; exit 1; }
 [[ -f "$CREDS" ]] || { echo "creds 不存在: $CREDS"; exit 1; }
+
+# 🔴 一律在仓库外执行 python：carher-admin 仓根有 `operator/__init__.py`，
+# 会 shadow 标准库 operator，`import enum` 直接 ImportError。
+# 本轮没炸只因为我手动 cd /tmp 过；换人从仓根跑必挂。
+# ⚠️ 这一步必须在**依赖自检之前**：否则自检自己就撞上 shadow，
+# 把「依赖齐全」误报成「依赖不全」（实测踩过）。
+cd /tmp || exit 1
+
+# 🔴 「python 在」不等于「依赖齐」：本轮踩过 venv 建坏（ensurepip 失败、
+# 连 pip 都没有）但 bin/python3 软链还在，跑到一半才 ModuleNotFoundError。
+# 开跑前一次性验全依赖，别让 10 个号跑一半才炸。
+if ! "$PY" -c "import playwright,pyotp,httpx,ddddocr,PIL" 2>/dev/null; then
+  echo "venv 依赖不全（需 playwright pyotp httpx ddddocr Pillow）："
+  "$PY" -c "import playwright,pyotp,httpx,ddddocr,PIL" 2>&1 | tail -3
+  exit 1
+fi
 
 cleanup_chrome() {
   for port in 9222 9223; do
@@ -42,17 +60,25 @@ declare -a OK=() SKIP=() FAIL=()
 
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
-  email=$("$PY" -c "import json,sys;print(json.loads(sys.argv[1]).get('email',''))" "$line")
+
+  # 一次解析出四个字段（NUL 分隔，避免密码里的换行/引号/shell 元字符出事）。
+  # 之前每个字段起一个 python 进程解同一行，4 倍开销且密码多过一遍命令行。
+  { IFS= read -r -d '' email; IFS= read -r -d '' pw
+    IFS= read -r -d '' alt_pw; IFS= read -r -d '' totp; } < <(
+    "$PY" -c '
+import json, sys
+r = json.loads(sys.argv[1])
+for k in ("email", "pw", "alt_pw", "totp"):
+    sys.stdout.write((r.get(k) or "") + "\0")
+' "$line"
+  )
   [[ -z "$email" ]] && continue
 
   echo
   echo "---------- $email ----------"
   cleanup_chrome
 
-  TARGET_EMAIL="$email" \
-  PW="$("$PY" -c "import json,sys;print(json.loads(sys.argv[1]).get('pw',''))" "$line")" \
-  ALT_PW="$("$PY" -c "import json,sys;print(json.loads(sys.argv[1]).get('alt_pw',''))" "$line")" \
-  TOTP_SEED="$("$PY" -c "import json,sys;print(json.loads(sys.argv[1]).get('totp',''))" "$line")" \
+  TARGET_EMAIL="$email" PW="$pw" ALT_PW="$alt_pw" TOTP_SEED="$totp" \
   PYTHONPATH="$SCRIPT_DIR" \
     "$PY" "$SCRIPT_DIR/kiro_oneshot.py"
   rc=$?

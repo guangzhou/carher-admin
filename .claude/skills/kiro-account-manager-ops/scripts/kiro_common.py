@@ -32,7 +32,7 @@ import httpx
 
 REGION = "us-east-1"
 OIDC_BASE = f"https://oidc.{REGION}.amazonaws.com"
-KIRO_AUTH_API = "https://prod.us-east-1.auth.desktop.kiro.dev"
+KIRO_AUTH_API = "https://prod.us-east-1.auth.desktop.kiro.dev"  # GitHub/social 流程用，当前未实现
 BUILDER_ID_START_URL = "https://view.awsapps.com/start"
 KIRO_APP_VERSION = "0.6.18"
 

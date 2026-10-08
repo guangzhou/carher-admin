@@ -12,6 +12,9 @@ description: >-
 
 # Casdoor 飞书 SSO 管理 (198 K3s)
 
+> **登 198**: 文中 `scripts/jms ssh AIYJY-litellm "..."` 是老写法, 现在一律 sshpass 直连
+> `cltx@10.68.13.198` + sudo; 脚本里用 [[owui-ops]] `scripts/_198.sh` 的 `r198 '...'` / `pypod`。
+
 > ## ⛔ 2026-09-14：OWUI 已不走 Casdoor 了，改成飞书直连
 > `chat.auto-link.com.cn` 现在用 OWUI **原生 `feishu` provider**，链路是 `飞书 → OWUI`，
 > Casdoor **不在登录路径上**（进程仍在跑，只作为回滚路径保留）。

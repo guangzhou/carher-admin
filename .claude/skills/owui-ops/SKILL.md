@@ -6,10 +6,12 @@ description: >-
   account 合并/重置、Redis session 排障、Service NodePort/Ingress 切流。
   Use when 用户提到 "open-webui" / "OWUI" / "chat.auto-link" / "https://chat.auto-link.com.cn" /
   "OWUI 升级 / 卡死 / 登不上 / 模型不对 / cookie / session" / "/oauth/oidc/callback 502" /
-  "改 OWUI env" / "OWUI Redis" 或要 audit OWUI 健康度。
+  "改 OWUI env" / "OWUI Redis" / "升级 openwebui" / "OWUI 只能用某个模型" 或要 audit OWUI 健康度。
 ---
 
 # Open WebUI 综合运维 (198 内网)
+
+**现状 (2026-10-07)**: 镜像 `v0.11.4`, 全员只放 `deepseek-v4.1-flash`(DeepSeek 官方)。
 
 OWUI 跑在 198 K3s `open-webui` namespace, 是内部 chat.auto-link.com.cn 的后端。
 **所有上游 LiteLLM 调用都经反代** `key-swap-proxy` (见 [[owui-key-swap-proxy]]),
@@ -18,21 +20,34 @@ OWUI 跑在 198 K3s `open-webui` namespace, 是内部 chat.auto-link.com.cn 的�
 
 ## 1. 快速入口
 
+**登 198 = sshpass 直连 `cltx@10.68.13.198` + sudo**, 不走 jms(jms 吞 sudo 密码、PTY 丢块)。
+下文老命令里的 `scripts/jms ssh AIYJY-litellm "..."` 一律等价替换成 `_198.sh` 的 `r198 '...'`。
+
+### 1.1 脚本 (`scripts/`, 都要 env `P198`)
+
+| 脚本 | 干什么 | 写? |
+|---|---|---|
+| `owui-model-gate-audit.sh` | 三层验收「用户只能用名单里的模型」, 名单读反代 CM | 只读 |
+| `owui-set-allowed-models.sh <a,b> [--apply]` | 换名单一条命令(见 [[owui-key-swap-proxy]] §6.0) | 默认 dry-run |
+| `owui-upgrade.sh vX.Y.Z [--set-env K=V] [--apply]` | 升级: 查 pypatch 挂点 / 残留 Pod → 备份 → 推镜像 → 一次重启 → 验收 | 默认 dry-run; 🔴 apply 会硬中断 ~2min |
+| `_198.sh` | 公共函数: `r198 '<bash>'` 远端 root 跑; `pypod <ns> <deploy> <file.py> [json]` pod 里跑本地 python | — |
+| `pod_*.py` | 上面几个脚本在 pod 里执行的部分, 不单独跑 | — |
+
+`pypod` 把 python 文件 base64 后下发, 参数以 `ARGS` 变量注入(已 import `json`)。在 OWUI pod 里
+`from open_webui.utils.auth import create_token` 可以按**真实用户 id** 签 token 测 `/api/*`,
+不用拿 admin 代测(admin 看到的和普通用户不一样)。
+
+### 1.2 手工
+
 ```bash
-# 198 节点
-scripts/jms ssh AIYJY-litellm
-
-# 健康检查
-curl -sS https://chat.auto-link.com.cn/health    # {"status":true}
-curl -sS http://10.68.13.198:30880/health        # 同上, 绕过 nginx 反代
-
-# OWUI Pod 实时日志
+curl -sS https://chat.auto-link.com.cn/api/version   # 公网, 带版本号
+curl -sS http://10.68.13.198:30880/health            # 绕 nginx
 kubectl logs -n open-webui -l app=open-webui -f --tail=50
 ```
 
 **关键文件**:
-- 198:`/root/open-webui-manifests/open-webui.yaml` (manifest)
-- 198:`/root/open-webui-manifests/README.md` (本地运维笔记)
+- 198:`/root/open-webui-manifests/` (manifest + README, ⚠️ 镜像 tag 已陈旧, 现状只认 `kubectl get`)
+- PVC `/app/backend/data/pypatch/sitecustomize.py` (本地补丁, 靠 env `PYTHONPATH` 加载)
 - `docs/openwebui-litellm-perkey-binding.md` (主文档)
 
 ## 2. 常见运维场景
@@ -63,20 +78,32 @@ scripts/jms ssh AIYJY-litellm "kubectl exec -n open-webui deployment/open-webui 
 
 完整 env 表见 [docs/openwebui-litellm-perkey-binding.md §7](../../docs/openwebui-litellm-perkey-binding.md)。
 
-### 2.2 OWUI 镜像升级
+### 2.2 OWUI 镜像升级 —— 用 `scripts/owui-upgrade.sh`
 
 ```bash
-scripts/jms ssh AIYJY-litellm '
-NEW=v0.10.0   # 查 https://github.com/open-webui/open-webui/releases 最新 stable
-docker pull ghcr.nju.edu.cn/open-webui/open-webui:$NEW
-docker tag  ghcr.nju.edu.cn/open-webui/open-webui:$NEW 127.0.0.1:5000/open-webui:$NEW
-docker push 127.0.0.1:5000/open-webui:$NEW
-kubectl set image -n open-webui deployment/open-webui open-webui=127.0.0.1:5000/open-webui:$NEW
-kubectl rollout status deployment/open-webui -n open-webui --timeout=180s
-'
+P198=... scripts/owui-upgrade.sh v0.11.5                       # dry-run 检查
+P198=... scripts/owui-upgrade.sh v0.11.5 --apply               # 先告知用户会中断
+P198=... scripts/owui-upgrade.sh v0.11.5 --set-env A=1 --apply # 顺带改 env, 只重启一次
 ```
 
-**禁止用 `:main` 漂移 tag**, 必须 pin。
+脚本把下面这些坑全做成了门禁:
+1. **pypatch 挂点**: 补丁换的是 `utils/misc.convert_output_to_messages`、
+   `utils/middleware.get_source_context`、`config.OAUTH_PROVIDERS['feishu']` 三个模块属性。
+   新版改名不会报错, 只会静默失效 ⇒ 升前 grep 新版源码, 升后要日志 `pypatch final:` 三个 True。
+2. **残留 Pod**: Recreate 会被非 Running 的老 Pod 永久卡成 0 副本 ⇒ 有就停。
+3. **只中断一次**: `rollout pause` → `set image` + `set env` → `resume`。
+4. **判版本用 `/api/version`**, 别看 `last-applied-configuration`(陈旧)。
+5. 镜像源 `ghcr.nju.edu.cn` → 推 `127.0.0.1:5000`, 禁止 `:main` 漂移 tag。
+6. 从 GitHub raw 拉源码偶尔 30s+ 超时, 脚本已 `--retry 3 --max-time 90`。
+
+v0.11.4 要注意的 changelog: slim 镜像砍了大量能力(**我们用标准镜像, 不受影响**);
+`langchain-community` 不再内置(自定义 tool/function import 它要自己声明; 10-07 库里 function 0 个);
+Integrations 个人设置页默认隐藏。
+
+| 日期 | 版本 | 停机 | 备注 |
+|---|---|---|---|
+| 09-19 | v0.9.5 → v0.11.3 | — | 并行会话升的; `config` 表变 key/value 三列 |
+| 10-07 | v0.11.3 → v0.11.4 | 19:49~19:51 ≈110s | 同批 `ENABLE_DIRECT_CONNECTIONS=false`; 备份 `webui.db.bak-pre-0114-ds41-20261007` |
 
 ### 2.3 查 OWUI sqlite user 表 / 合并账号 / 重置
 

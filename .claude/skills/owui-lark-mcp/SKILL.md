@@ -11,6 +11,9 @@ description: >-
 
 # OWUI × 飞书:lark-cli(现役)与 lark-mcp(搁置)
 
+> **登 198**: 文中 `scripts/jms ssh AIYJY-litellm "..."` 是老写法, 现在一律 sshpass 直连
+> `cltx@10.68.13.198` + sudo; 脚本里用 [[owui-ops]] `scripts/_198.sh` 的 `r198 '...'` / `pypod`。
+
 ## 0. 先看这里:现在走哪条路
 
 | | ① `lark-cli`(**现役**) | ② `lark-mcp`(**搁置**) |

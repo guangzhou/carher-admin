@@ -3,13 +3,17 @@ name: owui-key-swap-proxy
 description: >-
   OWUI → LiteLLM 中间反代 key-swap-proxy 的代码维护、镜像 build、K8s rollout、
   规则调整 (准入闸门 / 模型白名单 / 域名白名单 / 注入 user=email).
-  现役规则 = **只放 sa-grok-4.6**(白名单, 见 §6), 不再是"禁 Claude"黑名单。
+  现役规则 = **只放 deepseek-v4.1-flash**(2026-10-07 起, DeepSeek 官方; 白名单见 §6)。
   Use when 用户提到 "key-swap-proxy" / "OWUI 反代" / "只显示某个模型" / "禁用模型" /
   "OWUI 看不到模型" / "准入闸门" / "OWUI 模型 401" / "OWUI 反代 403" /
-  "ALLOWED_EMAIL_DOMAIN" / "ALLOWED_MODELS" / "改反代规则" / "反代升级" / "提示申请入口".
+  "ALLOWED_EMAIL_DOMAIN" / "ALLOWED_MODELS" / "改反代规则" / "反代升级" / "提示申请入口" /
+  "所有用户只能用某个模型" / "OWUI 只放 deepseek" / "OWUI 模型白名单验收".
 ---
 
 # key-swap-proxy 反代维护
+
+> **登 198**: 文中 `scripts/jms ssh AIYJY-litellm "..."` 是老写法, 现在一律 sshpass 直连
+> `cltx@10.68.13.198` + sudo; 脚本里用 [[owui-ops]] `scripts/_198.sh` 的 `r198 '...'` / `pypod`。
 
 OpenAI 协议反代 (FastAPI), 部署在 198 K3s `open-webui` namespace, 2 副本。
 所有 OWUI 用户的 LLM 调用都先经它, 再到真正的 LiteLLM。
@@ -135,22 +139,43 @@ kubectl patch configmap key-swap-proxy-config -n open-webui --type=merge \
 | `/v1/models` (有 key) | 转发到 LiteLLM, **只留** ALLOWED_MODELS 里的 | 200 |
 | `/v1/chat/completions` (合法 model) | 注入 body.user=email, master key 转发 | 200 (SSE 流式透传) |
 
-## 6. 模型白名单 (2026-09-15 起, 现役 = 只放 sa-grok-4.6)
+## 6. 模型白名单 —— 「OWUI 所有人只能用 X」
 
-原来是「禁 Claude」黑名单, 已改成白名单。**LiteLLM 一个字没动** —— 反代本来就在
-过滤模型列表, 所以"OWUI 只显示某个模型"这类需求**不需要碰 LiteLLM**。
+**现役 (2026-10-07)**: `ALLOWED_MODELS=deepseek-v4.1-flash` (DeepSeek 官方)。
 
-### 6.1 改名单 = 改 env, 不用重新发版
+### 6.0 一条命令 (首选)
 
 ```bash
-kubectl patch configmap key-swap-proxy-config -n open-webui --type=merge \
-  -p '{"data":{"ALLOWED_MODELS":"sa-grok-4.6,gpt-5.6-luna"}}'
-kubectl rollout restart deployment/key-swap-proxy -n open-webui
+S=.claude/skills/owui-ops/scripts
+P198=... $S/owui-set-allowed-models.sh deepseek-v4.1-flash            # dry-run: 前置检查 + 计划
+P198=... $S/owui-set-allowed-models.sh deepseek-v4.1-flash --apply    # 备份 → 反代 → OWUI → 验收
+P198=... $S/owui-model-gate-audit.sh                                   # 任何时候只读验收
 ```
 
-代码里的 default 是 `sa-grok-4.6`; 名单大小写与空格都容忍 (`strip().lower()`)。
+`--apply` 做的事, 按顺序, 前一步不过就停:
 
-### 6.2 ⛔ 必须改两处, 只改列表 = 半道门
+| 步 | 动作 | 中断? |
+|---|---|---|
+| 0 | 每个名字在 **LiteLLM 每个副本** 都注册 + 真发 200 | — |
+| 1 | 备份 CM / 两个 Deployment / `webui.db` 整库 → `198:/Data/owui-ops/backup-<TS>-allowed-models/` | — |
+| 2 | 反代 CM `ALLOWED_MODELS` + rollout restart | 无 (2 副本滚动) |
+| 3 | OWUI admin API: 关 direct connections、默认模型、停用 base 不在名单的 workspace 模型 | **无, 不重启 OWUI** |
+| 4 | `owui-model-gate-audit.sh` 三层验收 | — |
+
+**名字在 LiteLLM 里不存在 ⇒ 第 0 步红停**, 先建组。建组要点(10-07 实战):
+- 走 `POST /model/new`, 不直写 `LiteLLM_ProxyModelTable`(直写要滚 proxy, 见 memory
+  `feedback_proxymodeltable_write_reroutes_deployment_needs_restart_regress`)。
+  `/model/new` 后有副本同步窗口(10-07 1/4 副本落后约 1 分钟), 第 0 步就是逐副本查的。
+- `api_key` 传**真值**, 不能写 `os.environ/...`(DB 路径不解析)。复用同 provider 存量行的 key:
+  DB 里是密文, 在 litellm pod 里 `LITELLM_SALT_KEY=$LITELLM_MASTER_KEY` + `decrypt_value_helper` 解。
+- **对外名 ≠ 上游名**。先打 provider 自己的 `/v1/models` 拿真名。DeepSeek 官方只认
+  `deepseek-flash`(=V4.1-Flash) / `deepseek-v4-pro`; 发 `deepseek-v4.1-flash` 回 400,
+  旧名 `deepseek-v4-flash` 被官方静默落到 `deepseek-flash`。
+  ⇒ 现役组 `deepseek-v4.1-flash` = `custom_openai/deepseek-flash` @ `https://api.deepseek.com/v1`,
+  `model_info.id=deepseek-official/deepseek-flash`。
+- LiteLLM 会把响应体 `model` 改写成对外名, 看真落点用响应头 `x-litellm-model-name`。
+
+### 6.1 原理: 必须拦两处, 只改列表 = 半道门
 
 ```python
 # 列表 (可见性)
@@ -160,34 +185,32 @@ if not _model_allowed(body_json.get("model")):
     return _model_blocked_response(body_json.get("model"))
 ```
 
-**只改列表拦不住**: OWUI 的历史会话里存着老模型名, 用户点开上周的对话继续发,
-列表过滤器看不到那个请求, 照样发得出去。
+OWUI 历史会话里存着老模型名, 点开继续发, 列表过滤器看不到那个请求。名单是 env,
+改名单不用重新发版; 代码 default `sa-grok-4.6`, 大小写/空格容忍。
 
-### 6.3 代码改动脚本 (锚点式, 已用过一次)
+### 6.2 反代之外的三条旁路 (只改反代不够)
 
-`scripts/patch-grok-only.py` —— 5 个锚点, `sub_once()` 每个都要求**唯一命中**,
-命中数不对就红着退出不静默跳过; 改完还自查 `_is_claude_model` / `CLAUDE_MODEL_RE` /
-`claude_blocked` 三个死名字必须全没了, 有残留就不写盘。
+| 旁路 | 现象 | 堵法 |
+|---|---|---|
+| Direct Connections | 用户在个人设置里自填任意 API | `direct.enable=false` |
+| workspace 模型 base 指旧模型 | 列表里多一个死项, 点了 `Model not found` | `is_active=0` |
+| `BYPASS_MODEL_ACCESS_CONTROL=true` | 所有人看见所有 base 模型 | 不用动 —— base 列表已被反代过滤 |
 
-它是**一次性迁移脚本**(黑名单→白名单), 已经跑过。再想改名单走 §6.1 的 env。
-保留它是因为那套「锚点唯一命中 + 改完查残留」的形状值得照抄, 见
-[[reference_litellm_version_pinning_and_patch_layering]]。
+⚠️ **改 OWUI 配置不用重启**: v0.11.x `Config.get` 每次直读 `config` 表、无缓存, 走 admin API
+(`POST /api/v1/configs/connections` / `/configs/models`) 立刻生效。改 env 才要重启(硬中断)。
+env `ENABLE_DIRECT_CONNECTIONS` 只是首次启动的默认值, config 表里有行就以表为准。
 
-### 6.4 改白名单前要做的两项附带影响检查 (2026-09-15 都查过了)
+### 6.3 不受白名单影响的两件事 (09-15 实测)
 
-| 担心的事 | 实测 | 结论 |
-|---------|------|------|
-| 向量化 (embedding) 会不会被拦 | `RAG_OPENAI_API_BASE_URL` **直指 LiteLLM**, 绕过反代 | 不受影响 |
-| 标题/标签自动生成会不会挂 | `task.model.external = ""` ⇒ 复用聊天模型 | 不受影响 |
+- 向量化: `RAG_OPENAI_API_BASE_URL` 直指 LiteLLM, 绕过反代
+- 标题/标签生成: `task.model.external=""` ⇒ 复用聊天模型
 
-### 6.5 验证 (三个用户 + 一红一绿)
+### 6.4 历史
 
-```
-三个用户各自 /v1/models → 都只有 ['sa-grok-4.6']
-sa-grok-4.6  → 200 (nonce 回显)
-gpt-5.4      → 403
-claude-opus-5 → 403
-```
+| 日期 | 名单 | 备份 |
+|---|---|---|
+| 09-15 | 黑名单(禁 Claude) → 白名单 `sa-grok-4.6`, 用 `scripts/patch-grok-only.py` 改代码(一次性, 已跑过; 「锚点唯一命中 + 改完查残留」的形状值得照抄) | `198:/Data/key-swap-proxy-ops/backup-20260915T130000/` |
+| 10-07 | `deepseek-v4.1-flash`, 新建 LiteLLM 组 + 关 direct + 停用 `gpt-5.6-sol-lark` | `198:/Data/owui-ops/backup-20261007T194225-ds41/` + PVC `webui.db.bak-pre-0114-ds41-20261007` |
 
 ## 7. 故障排查
 

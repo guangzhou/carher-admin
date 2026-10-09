@@ -218,12 +218,35 @@ clientIdHash = `sha1(JSON.stringify({"startUrl":"https://view.awsapps.com/start"
 | `scripts/kiro_batch.sh` | 批量加号壳（inter-account `cleanup_chrome()` + 10s 间隔） |
 | `scripts/aws_mfa_rotate.py` | AWS Builder ID MFA 设备轮换（加新 seed → 验证 → 可选删旧） |
 | `scripts/aws_mfa_rotate.sh` | 批量 MFA 轮换壳 |
+| `scripts/kiro_github_login.py` | **GitHub/social 账户登录**（已走通，9/9） |
 
-**`drive_login()`** 在 `kiro_oneshot.py` 里，是加号和 MFA 轮换共享的登录状态机
+**`drive_login()`** 在 `kiro_oneshot.py` 里，是 BuilderId 加号和 MFA 轮换共享的登录状态机
 （WAF 点击挑战、图片验证码、双密码、MFA、consent 全在里面）。改一处两边都生效。
 
-**待补**：`outlook_code.py`（无 TOTP seed 时登 Outlook 取邮箱验证码）、
-GitHub/social 流程。需要时重写进 `scripts/`，别再放 `/tmp`。
+## GitHub/social 账户登录（2026-10-09 走通）
+
+```bash
+TARGET_EMAIL=x@binus.ac.id PW='<GitHub 密码>' TOTP_SEED='<seed>' \
+  PYTHONPATH=scripts ~/.local/kiro-auto/venv/bin/python scripts/kiro_github_login.py
+```
+
+流程 = Kiro Desktop Auth social：
+`prod.us-east-1.auth.desktop.kiro.dev/login?idp=Github&redirect_uri=kiro://kiro.kiroAgent/authenticate-success`
+→ GitHub 登录（`#login_field`→`#password`→`#app_totp`）→ 授权 → `kiro://...?code=xxx`
+→ POST `/oauth/token` 换 token。约 20 秒/个。
+
+🔴 **两条路只有一条通**（反复失败的根因）：
+- ❌ `http://127.0.0.1:3128` + `app.kiro.dev/signin` —— signin callback 回不来，卡死
+- ✅ `kiro://` 深链 + `/login?idp=Github` —— GitHub 授权后发 `kiro://...?code=xxx`
+
+🔴 **拦 code 必须用 `page.on("request")`**（三路都挂：request / requestfailed / framenavigated）。
+`kiro://` 是自定义 scheme，浏览器 abort 它，但 request 事件能看到完整 URL。
+❌ **别用 `page.route`** —— 它 abort 掉请求反而拦不到。
+
+token exchange 走 `/oauth/token`（Kiro Desktop Auth），**不是** AWS OIDC `/token`。
+social 号 entry：`provider=Github, authMethod=social, clientId/clientSecret/clientIdHash 全 null`。
+
+**待补**：`outlook_code.py`（无 TOTP seed 时登 Outlook 取邮箱验证码）。
 
 ## AWS MFA 轮换（2026-10-08 实测）
 

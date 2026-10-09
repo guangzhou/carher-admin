@@ -278,6 +278,45 @@ DELETE_OLD=1 scripts/aws_mfa_rotate.sh /tmp/rotate-creds.ndjson  # 加完再删�
 | 5 | radio 选中了父 div 标题而非具体选项 | 选到「注册 MFA 设备」而非「身份验证器应用程序」 | 找最短 innerText 匹配 + index fallback |
 | 6 | `list_mfa_devices` 永远返回 0 | 误判设备没绑上 | SPA 用 div/card 非 table，量具坏了不影响操作 |
 
+## AWS 改密码（2026-10-09 实测，半成品）
+
+脚本 `scripts/aws_change_password.py` 骨架已写，流程卡在二次 MFA 验证。
+
+### 已验证路径
+
+```
+登录 profile.aws.amazon.com（WebAuthn 拦截 + TOTP 登录）
+  → credentials.signin.aws/#/security
+  → 点「更改密码」
+  → AWS 要求二次 MFA 验证（调 WebAuthn API）
+  → WebAuthn 失败后出现 fallback 选项：
+      「身份验证器应用程序」（= TOTP）
+      「Verify via email」（= 邮件验证码）
+```
+
+### 🔴 WebAuthn 拦截方案（cut.ansari 实测）
+
+| 方案 | 效果 |
+|------|------|
+| `add_init_script` 注入 `NotAllowedError` | 登录 OK（走 TOTP），但二次验证也被拦 → AWS 报错 |
+| CDP `WebAuthn.enable` + Virtual Authenticator | passkey 验证失败（没真凭据）→ **AWS 显示 fallback 选项** ✅ |
+| 登录后 `evaluate("window.__blockWebAuthn=false")` | `add_init_script` 在新导航后重新注入，解除无效 |
+
+**CDP Virtual Authenticator 是正确方案**：让 passkey 失败后 AWS 提供 TOTP fallback。
+
+### 🔴 当前卡点：「身份验证器应用程序」的 DOM 交互
+
+fallback 页面的按钮只有 `重试` 和 `Verify via email`。
+「身份验证器应用程序」在 body 文本里但**不在按钮列表中**——`dump_buttons` 找不到。
+用 `evaluate` 点它所在的最小 DOM 元素会**关闭所有 tab**（原因不明，可能是
+scheme handler 或 SPA 路由副作用）。
+
+**下一步：在 fallback 页面做完整 DOM dump**（所有可交互元素 + 「身份验证器应用程序」
+的父子元素结构），确认它到底是什么元素、怎么交互。
+
+备选路径：走 `Verify via email`（已确认是按钮、能点），用 Outlook 取验证码完成二次认证。
+需要 `outlook_code.py`（尚未重建）或类似的取码逻辑。
+
 ## 工具依赖
 
 ```bash

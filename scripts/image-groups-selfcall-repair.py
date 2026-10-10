@@ -86,6 +86,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -243,11 +244,21 @@ def gen(model):
 
 
 def cmd_verify(a):
+    """连打 N 次量**失败率**。
+
+    🔴 次数少了「全绿」和「真健康」长得一模一样 —— 组里混着死腿时，
+    轮到死腿那次才 0s H401。2026-10-10 实证（用户报 gpt-image-2 不可用）：
+    `--times 3` → 3/3 全绿（据此会回「没问题」）；`--times 8` → **7/8**，
+    同一时刻腿层实打只 15/40、25 条 acct 腿里 21 条是死腿。
+    ⇒ 默认 8 次，别往下调。失败一次就非零退出，自动化才判得了成败。
+    """
     names = [a.model] if a.model else list(TARGETS)
+    failed = {}
     for name in names:
         n = len(rows(name))
         if not n:
             print(f"{name}: 组不存在，跳过")
+            failed[name] = "组不存在"
             continue
         print(f"\n=== {name}（{n} 腿）打 {a.times} 次")
         good = 0
@@ -256,6 +267,15 @@ def cmd_verify(a):
             print(f"  {i + 1}/{a.times}: {'✅' if ok else '❌'} {note}", flush=True)
             good += ok
         print(f"  → {good}/{a.times} 成功")
+        if good < a.times:
+            failed[name] = f"{good}/{a.times}"
+    if failed:
+        # 间歇失败 = 组里还有死腿，不是「基本可用」。
+        raise SystemExit(
+            "\n❌ 不是全绿：" + "、".join(f"{k} {v}" for k, v in failed.items())
+            + "\n   组级时好时坏 = 死腿还在组里被轮到（既不是坏了也不是好着）。"
+              "\n   下一步：进 pod 跑 probe-accts 看腿层，别报「基本可用」。")
+    print(f"\n✅ 全绿：{len(names)} 组各 {a.times}/{a.times}")
 
 
 def cmd_prune_dead(a):
@@ -271,6 +291,11 @@ def cmd_prune_dead(a):
         dead = [m for m in rs if acct_of(m) is not None and acct_of(m) not in live]
         print(f"\n{group}: {len(rs)} 腿 → 摘 {len(dead)} 条僵腿"
               f"（{CARRIER} 已不认这些号）")
+        # 🔴 判据只是「5.5 组已摘」，摘不到「5.5 还认着但出图实打 401」的腿。
+        # 2026-10-10 实证：修复前 25 条腿里 21 条的号出不了图，其中只有 15 条
+        # 被 5.5 也摘了；剩 6 条（182/183/185/195/198/205）5.5 认着、出图 0s H401，
+        # prune-dead 跑完它们仍在组里 —— 这就是 verify 8 次里那 1 次失败的来源。
+        # ⇒ 清这类腿用 `prune-by-probe`（按实打结果摘），别以为本命令清干净了。
         for m in dead:
             mid_d, n = leg_id(m), acct_of(m)
             if not a.apply:
@@ -283,6 +308,66 @@ def cmd_prune_dead(a):
             print(f"  {group} 剩 {len(left)} 腿: {sorted(leg_id(m) for m in left)}")
     if a.apply:
         print("\n→ 现在再跑一次 verify，两组都要绿")
+        print("→ 再跑 prune-by-probe：本命令摘不到「5.5 认着但出图 401」的腿")
+
+
+def cmd_prune_by_probe(a):
+    """按**出图实打**结果摘腿：组里的号凡实打不通过就摘。
+
+    与 `prune-dead` 的分工（两条判据不是一回事，都要跑）：
+      prune-dead      判据 = 「CARRIER 组已摘这个号」——摘的是跟着 5.5 一起退役的
+      prune-by-probe  判据 = 「这个号出图实打不过」——摘的是 5.5 还认着但出图已死的
+
+    2026-10-10：后者比前者多逮到 6 条（182/183/185/195/198/205）。
+
+    🔴 必须在 pod 内跑（探叶子要集群 DNS），且**先补腿 + verify 绿再摘**，
+    否则可能把组摘空。摘之前自调用腿必须在位。
+    """
+    d = model_info()
+    # 候选 = 两组腿上现有的号（不是 5.5 成员）—— 要判的就是「组里这些号还行不行」
+    on_legs = sorted({acct_of(m) for g in TARGETS for m in rows(g, d)} - {None})
+    if not on_legs:
+        raise SystemExit("❌ 两组都没有 acct 腿 —— 没什么可摘的")
+    print(f"逐叶实打组里现有的 {len(on_legs)} 个号：{on_legs}")
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=a.jobs) as ex:
+        res = sorted(ex.map(probe_leaf, on_legs))
+
+    nodns = [n for n, _, s in res if s.startswith("NODNS")]
+    if nodns:
+        # 不加这道门禁，在 host 上跑会把全部活腿当成死腿摘光。
+        raise SystemExit(
+            f"❌ {len(nodns)}/{len(res)} 个是 DNS 解析失败（探针没出门）——"
+            f"在 198 host 上跑会把活腿全判死并摘光。先进 pod 再跑本命令。")
+
+    ok = {n for n, good, _ in res if good}
+    bad = {n for n, good, _ in res if not good}
+    print(f"\n实打通过 {len(ok)}/{len(res)}：{sorted(ok)}")
+    print(f"实打不过 {len(bad)}：{sorted(bad)}")
+    if not ok:
+        raise SystemExit("❌ 一个都没通过 —— 摘光就全断了。先读错误字串分病，"
+                         "再 probe-accts 找新号补腿。")
+
+    for group, mid in TARGETS.items():
+        rs = rows(group, d)
+        if not any(leg_id(m) == mid for m in rs):
+            print(f"\n❌ {group}: 自调用腿 {mid} 不在位 —— 先 add-selfcall，跳过")
+            continue
+        doomed = [m for m in rs if acct_of(m) in bad]
+        keep = len(rs) - len(doomed)
+        print(f"\n{group}: {len(rs)} 腿 → 摘 {len(doomed)} 条（实打不过），剩 {keep}")
+        if keep < 2:
+            print(f"  ⛔ 摘完只剩 {keep} 腿，太少了 —— 先补腿再来，本组跳过")
+            continue
+        for m in doomed:
+            if not a.apply:
+                print(f"  [dry-run] 摘 {leg_id(m)} (acct-{acct_of(m)})")
+                continue
+            api("POST", "/model/delete", {"id": leg_id(m)})
+            print(f"  ✅ 摘 {leg_id(m)} (acct-{acct_of(m)})")
+    if a.apply:
+        print("\n→ 连读 3 次确认收敛（副本刷新有延迟），再 verify --times 8")
 
 
 def acct_entry(group, n):
@@ -309,6 +394,18 @@ def acct_entry(group, n):
         },
         "model_info": {"id": f"acct-{n}-{group}", "mode": "image_generation"},
     }
+
+
+def _is_dns_failure(exc) -> bool:
+    """这个异常是不是「名字解析不了」—— 即探针根本没发出请求。
+
+    `*.svc.cluster.local` 只有集群内的 DNS 认，在 198 host 上一律
+    `gaierror(-3, 'Temporary failure in name resolution')`。
+    """
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, socket.gaierror):
+        return True
+    return "name resolution" in str(reason).lower()
 
 
 def probe_leaf(n, timeout=240):
@@ -342,6 +439,12 @@ def probe_leaf(n, timeout=240):
         return (n, False, f"H{e.code} {time.time()-t0:.0f}s "
                           f"{e.read().decode()[:90].replace(chr(10), ' ')}")
     except Exception as e:  # Connection refused = deployment 0/0，不是号坏
+        # 🔴 DNS 解析失败是**探针没出门**，不是号坏 —— 必须和真死号分开返回，
+        # 否则 40 行 ❌ 里混着两种病，只看「通过 0 个」分不出是池子全烂
+        # 还是脚本跑错了位置（2026-10-10 实证：在 198 host 上跑 0/40 全败，
+        # 进 pod 再跑 15/40）。判据是错误字串，不是通过数。
+        if isinstance(e, urllib.error.URLError) and _is_dns_failure(e):
+            return (n, False, f"NODNS {time.time()-t0:.0f}s {e.reason!r}")
         return (n, False, f"ERR {time.time()-t0:.0f}s {e!r}")
 
 
@@ -366,8 +469,34 @@ def cmd_probe_accts(a):
     bad = [(n, s) for n, good, s in res if not good]
     for n, s in bad:
         print(f"  ❌ acct-{n:<4} {s}")
+
+    # 🔴 断言「我量得到」排在「量出多少」之前。NODNS 占满 = 探针没出门，
+    # 这时候的「通过 0 个」是尺子的读数、不是池子的读数，**不许产名单**。
+    nodns = [n for n, _, s in res if s.startswith("NODNS")]
+    if nodns and not ok:
+        raise SystemExit(
+            f"\n❌ 尺子坏了，不是号坏：{len(nodns)}/{len(res)} 个是 DNS 解析失败"
+            f"（探针根本没发出请求），0 个真出图。\n"
+            f"   *.svc.cluster.local 只有集群内 DNS 认 —— 你多半在 198 host 上跑。\n"
+            f"   改成进 pod 跑（skill litellm-198-image-groups §B）：\n"
+            f"     POD=$(sudo kubectl -n litellm-product get pods \\\n"
+            f"       -l carher.net/litellm-production-route=enabled "
+            f"-o jsonpath='{{.items[0].metadata.name}}')\n"
+            f"     sudo kubectl -n litellm-product cp {os.path.basename(__file__)} "
+            f"$POD:/tmp/igr.py\n"
+            f"     sudo kubectl -n litellm-product exec $POD -- \\\n"
+            f"       env LITELLM_MASTER_KEY=\"$MK\" POOL_MASTER_KEY=\"$PK\" "
+            f"python3 /tmp/igr.py probe-accts")
+    if nodns:
+        print(f"\n⚠️ {len(nodns)} 个是 DNS 解析失败（探针没出门，不是号坏）："
+              f"{nodns} —— 这些号本轮**没被测到**，别当成死号")
+
     print(f"\n出图实测通过 {len(ok)}/{len(res)}")
     print("  " + ",".join(str(n) for n in ok))
+    if not ok:
+        raise SystemExit("\n❌ 0 个通过 —— 先逐行读上面的错误字串分病"
+                         "（H401=号真死 / NODNS=探针没出门 / H429=冷却），"
+                         "别直接当「池子全烂」")
     print(f"\n→ 补腿: {os.path.basename(__file__)} add-accts --accts "
           f"{','.join(str(n) for n in ok)} --apply")
 
@@ -381,6 +510,11 @@ def cmd_add_accts(a):
     也**不认** chatgpt-gpt-5.5 组成员（同日实测 33 个里只 25 个真能出图）。
     """
     want = [int(x) for x in a.accts.split(",") if x.strip()]
+    if not want:
+        # 空名单会一条不铺，然后 wait_visible 对空集合恒真 → 打印「全副本可见 ✅」。
+        # 那是假绿。probe-accts 全败时正好会生成 `--accts ` 空参的建议命令。
+        raise SystemExit("❌ --accts 是空的 —— 不会铺任何腿，但后面会打出"
+                         "「全副本可见 ✅」的假绿。先跑 probe-accts 拿到真名单。")
     d = model_info()
     for group in TARGETS:
         have = {acct_of(m) for m in rows(group, d)} - {None}
@@ -409,7 +543,8 @@ def main():
     for n in ("add-selfcall", "prune-dead"):
         sub.add_parser(n).add_argument("--apply", action="store_true")
     p = sub.add_parser("verify")
-    p.add_argument("--times", type=int, default=4)
+    # 默认 8：3~4 次抽不到死腿，「全绿」会伪装成「真健康」（见 cmd_verify docstring）
+    p.add_argument("--times", type=int, default=8)
     p.add_argument("--model")
     p = sub.add_parser("probe-accts")
     p.add_argument("--accts", default="",
@@ -419,11 +554,15 @@ def main():
     p.add_argument("--accts", required=True,
                    help="逗号分隔的 acct 编号，**必须是 probe-accts 实打通过的**")
     p.add_argument("--apply", action="store_true")
+    p = sub.add_parser("prune-by-probe")
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--jobs", type=int, default=10)
     a = ap.parse_args()
     {"audit": cmd_audit, "add-selfcall": cmd_add_selfcall,
      "verify": cmd_verify, "prune-dead": cmd_prune_dead,
      "probe-accts": cmd_probe_accts,
-     "add-accts": cmd_add_accts}[a.cmd](a)
+     "add-accts": cmd_add_accts,
+     "prune-by-probe": cmd_prune_by_probe}[a.cmd](a)
 
 
 if __name__ == "__main__":

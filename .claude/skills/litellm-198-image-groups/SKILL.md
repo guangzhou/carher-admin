@@ -23,6 +23,7 @@ description: >-
 
 | 现象 | 病 | 去哪节 |
 |------|----|--------|
+| `probe-accts` 打出 `NODNS` / 全 0 | **探针没出门**（在 host 上跑了），不是号坏 | §B |
 | 恒定 ~72s 然后 H500 | 腿指了 `openai/chatgpt-image`，codex token 失效 + 重试 5 次 | §A |
 | 0~1s 就 H401 `invalidated oauth token` | 那个号的 token 被作废了（真死号） | §C |
 | **组级时好时坏**（如 7/8、间歇 0s H401） | 死腿还在组里被轮到。**不是"坏了"也不是"好着"** | §C' |
@@ -30,6 +31,7 @@ description: >-
 | H400 `No connected db.` | **key 填错了**（母路由那把打叶子），假红 | §B |
 | 16~22s 后 OK | 正常。出图本来就这么慢 | — |
 | 组级绿但某个号坏 | 组级 200 被别的活腿盖住了，答不了单号死活 | §C |
+| `prune-dead` 清完但 verify 仍间歇失败 | 残留「5.5 认着但出图 401」的腿 | §D' |
 
 **判绿只认「拿到 b64 或 url」，不认 HTTP 200。** 也不能只认 b64 ——
 有的上游返 url（2026-09-28 踩过：只量 b64 把健康的 `sa-grok-imagine` 判成假绿，
@@ -99,12 +101,19 @@ sudo kubectl -n litellm-product exec $POD -- \
 | `chatgpt-gpt-5.5` 组成员 | 配额治理筛的是**聊天**活号。同日 33 个成员逐叶实打只 25 个真出图，差集 8 个全 401 |
 | deployment `READY>0` | 209-213 / 226-229 表上 ONLINE，实为 `0/0`，直打 `Connection refused` |
 
+第四个假来源：**`prune-dead` 清完 ≠ 组里没死腿**（它只认 5.5 组已摘），见 §D'。
+
 **唯一合法来源 = 逐叶实打 `/v1/images/generations` 拿到 b64 或 url：**
 
 ```bash
-python3 scripts/image-groups-selfcall-repair.py probe-accts        # 产名单
+python3 scripts/image-groups-selfcall-repair.py probe-accts        # 产名单（pod 内）
 python3 scripts/image-groups-selfcall-repair.py add-accts --accts <名单> --apply
 ```
+
+脚本已内置这几道门禁（2026-10-10 加，此前只在本文档里口述）：
+`probe-accts` 全是 NODNS 时拒绝产名单并打印进 pod 的命令 · 0 个通过时拒绝给名单
+（逼你先读错误字串分病）· `add-accts` 收到空 `--accts` 直接退出
+（否则铺 0 条腿却打印「全副本可见 ✅」的假绿）· `verify` 失败非零退出。
 
 🔴 **名单会过期，而且很快。** 2026-09-28 同一天内：上午实测 25/33 通过并据此补腿，
 几小时后重跑同一把尺子只剩 14/33 —— 183~189、200 这批在这期间被作废。
@@ -166,6 +175,28 @@ python3 scripts/image-groups-selfcall-repair.py add-accts --accts <名单> --app
 🔴 **188 governor 的 `models_for()` 不含任何 image 模型** ⇒ 逐 acct 腿被
 `pause_acct` 删掉后，`resume` 永远不会重建。这是逐 acct 腿必漂的第二个理由。
 
+## §D' 两条摘腿判据不是一回事，**两个都要跑**
+
+| 命令 | 判据 | 摘的是 |
+|------|------|--------|
+| `prune-dead` | CARRIER(`chatgpt-gpt-5.5`) 组已摘这个号 | 跟着 5.5 一起退役的 |
+| `prune-by-probe` | 这个号**出图实打**不通过 | 5.5 还认着、但出图已 401 的 |
+
+🔴 **`prune-dead` 摘不干净。** 2026-10-10 实证：修复前 25 条腿里 21 条的号出不了图，
+`prune-dead` 只摘掉 15 条（那 15 个 5.5 也摘了）；剩 **6 条（182/183/185/195/198/205）
+5.5 认着、出图 0s H401**，`prune-dead --apply` 跑完它们仍在组里 ——
+**这就是 `verify --times 8` 里那 1 次失败的来源**。补跑 `prune-by-probe --apply`
+摘掉这 6 条后，两组各 16 腿、`verify` **8/8 + 8/8 全绿**。
+
+```bash
+# 必须在 pod 内跑（探叶子要集群 DNS）；dry-run 先看
+python3 /tmp/igr.py prune-by-probe            # dry-run
+python3 /tmp/igr.py prune-by-probe --apply
+```
+
+内置两道护栏：全是 NODNS 时拒绝执行（否则在 host 上跑会把活腿全判死摘光）；
+摘完某组不足 2 腿时跳过该组（先补腿再来）。
+
 ## §E grok 也能出图，而且快 3~4 倍
 
 四个组全活（2026-09-28 实测 ×2），`api_base` 全指 sub2api
@@ -194,8 +225,10 @@ sub2api 侧运维见 `sub2api-grok-ops`。
 for p in $(sudo kubectl -n litellm-product get pods \
     -l carher.net/litellm-production-route=enabled -o name); do ... done
 
-# ② 腿层：逐条按 model_id 直打，不许拿组级 200 当单腿活证
-python3 scripts/image-groups-selfcall-repair.py verify --times 4
+# ② 组级：连打量失败率。默认已是 8 次，别往下调（3~4 次抽不到死腿）
+#    失败一次就非零退出 —— 间歇失败不是「基本可用」，是组里还有死腿
+python3 scripts/image-groups-selfcall-repair.py verify
+#    腿层单条：probe-accts（pod 内）才答得了「这一个号活不活」
 
 # ③ 用户层：克隆真 key 的白名单起临时 key，打组名 + 一个白名单外的阴性对照
 #    master key 绕过白名单，用它验等于没验用户那条路
@@ -232,12 +265,18 @@ probe-accts（pod 内跑）           15/40 真能出图
 add-accts --accts <15> --apply   纯加法补 11×2=22 条新腿 → 全副本可见 ✅
 verify --times 6                 12/12 全绿（绿了才允许进下一步）
 prune-dead --apply               摘 15×2=30 条僵腿 → 连读 3 次收敛到 22/22
-audit + verify --times 6         僵腿 0: []、12/12 全绿
+verify --times 6                 12/12 全绿 —— 但这是 6 次抽样，没抽到残留死腿
+prune-by-probe --apply           ⬅ 补这一步：又摘 6×2 条「5.5 认着但出图 401」
+verify（8 次）                    **16 腿 8/8 + 8/8**、exit=0 ← 真正的收口
 image-groups-userlayer-probe     3/3 OK 14~16s、阴性对照正确 403
 spend 核对                        90 分钟内外层 image-2 行 spend=0（没重复计费）
 ```
 
-⚠️ `prune-dead --apply` 刚跑完回读还会带着已删腿（副本刷新延迟），
+🔴 **只跑到 `prune-dead` 会停在 7/8。** 第一轮我报的"修好了"是 22 腿 + `verify 6/6`，
+但那 6 次恰好没抽到残留的 6 条死腿 —— 正确的收口是 `prune-by-probe` 之后的
+16 腿 8/8。**抽样次数不够时"全绿"会盖住没做完的工作**，与 §C' 同一个病。
+
+⚠️ `prune-*  --apply` 刚跑完回读还会带着已删腿（副本刷新延迟），
 **连读 3 次收敛才算摘干净**，别当成"删失败了"再删一遍。
 
 ## §H 已知未查清（别当成已知结论去讲）

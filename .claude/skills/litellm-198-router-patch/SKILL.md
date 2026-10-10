@@ -234,6 +234,14 @@ fail-open（自身异常 ⇒ 原事件原样交给原函数），env `RESPONSES_
 
 上游无 delta 是**随机**的（同模型 3~4/5），A/B 每侧至少 6 发，并保留「全 delta」那几发看逐字节不变。
 
+现成尺子（别再手搓）：
+- `scripts/litellm-198-toolcall-args-probe.py upstream`（叶子 pod 内，数上游每个调用有没有 delta；401/429 发不计数）
+- `scripts/litellm-198-toolcall-args-probe.py lanes --a … --b …`（两个入口交替打，含 single/text/nostream 阴性对照）
+- `scripts/litellm-198-toolcall-args-probe.py sql --day …`（全网「客户端回传参数为空」按天统计，单日窗口）
+- `scripts/openclaw-real-turn-probe.sh <provider> <model> <baseUrl> [rounds]`（her 容器内真回合）
+
+同一类病的入口症状写在 `carher-her-reply-failure-triage` 根因 M。
+
 - 计划与全部事实/推测表：`docs/dead-deployment-retry-plan.md`
 - [[project_dead_deployment_retry_patch_2026_09_07]]
 - [[litellm-hook-dev]] — 阿里云 ns `carher` 的 CustomLogger hook 开发（**不是这套 SOP**）

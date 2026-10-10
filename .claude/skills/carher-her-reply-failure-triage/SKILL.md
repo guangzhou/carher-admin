@@ -143,6 +143,9 @@ kubectl -n carher get deploy -l app=carher-user -o json \
         │           ├── 有,且持续数小时 + N reply(ies) active → 根因 F (hung reply 泄漏)
         │           └── 没有 → 进 (2)
         │
+        ├── (1c) log 里 rawError=「Provider returned an incomplete or malformed tool call」?
+        │       └── 有 → 根因 M（并行工具调用空参数），见下方 M 节；SpendLogs 那次往返是 200 成功，别去查鉴权/限流
+        │
         ├── (2) bot dispatch 后 LiteLLM 怎么回?
         │       └── 看 LiteLLM SpendLogs (key_alias=carher-NNN, 最近)
         │           ├── 调用根本没 record (dur=0s, response={}) → 进 (3) 鉴权问题
@@ -158,6 +161,29 @@ kubectl -n carher get deploy -l app=carher-user -o json \
 ```
 
 ## 已知根因 + 修复
+
+### M. 并行工具调用空参数 → "LLM request failed." / malformed tool call（2026-10-09 her-13，10-10 已修）
+
+**症状**：`[feishu] embedded run agent end: isError=true ... error=LLM request failed. rawError=Provider returned an incomplete or malformed tool call`，
+只在 chat 通道（`api: openai-completions`）的 GPT 模型上、且模型**一次发起多个工具调用**时出现；单调用正常。
+
+**根因**：ChatGPT 上游对并行调用**随机**不发 `function_call_arguments.delta`（同模型 3~4/5），198 母 router（1.103.2）
+responses→chat 流桥只认 delta ⇒ 每个 tool_call `arguments:""`。OpenClaw 2026.8.x 判 malformed 报错；
+Cursor 等客户端拿 `{}` 静默执行（同一病，不报错）。不是 her 升级引起：升级前回传参数 226/226 是满的。
+
+**已修**：198 三车道 callback `responses_tool_args_done_backfill`（git 7bcbd71），细节与回滚见
+`litellm-198-router-patch` §7。**再次出现先确认它还装着**（升级/helm 后可能被回退）：
+
+```bash
+# 198：逐 pod 装载 + sha
+python3 /root/cb-add-work/litellm-198-lane-callback-add.py verify litellm-proxy responses_tool_args_done_backfill.py responses_tool_args_done_backfill
+# 车道 A/B（her 容器内，key 用容器 env）
+KEY=$CARHER_PROD_KEY python3 scripts/litellm-198-toolcall-args-probe.py lanes --a <入口A> --b <入口B> --rounds 6
+# 真客户端回合（her 容器内，不碰在服务进程）
+bash scripts/openclaw-real-turn-probe.sh carher-pro-chat gpt-6-astra http://10.68.13.198:30402/v1 4
+```
+
+🔴 别把「换成 her-pro」当修法给用户——那是绕开，不修任何东西。
 
 ### L. H75 group-at inbound gate / footer 双路径不一致
 

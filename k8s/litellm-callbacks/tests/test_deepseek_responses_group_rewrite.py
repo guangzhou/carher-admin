@@ -79,6 +79,16 @@ class RewriteTest(unittest.TestCase):
         out = self._pre_call({"model": "deepseek-v4-pro", "input": []})
         self.assertEqual(out["model"], "deepseek-v4-pro-responses")
 
+    def test_v41_flash_rewritten_on_responses(self):
+        out = self._pre_call({"model": "deepseek-v4.1-flash", "input": []})
+        self.assertEqual(out["model"], "deepseek-v4.1-flash-responses")
+
+    def test_v41_flash_chat_untouched(self):
+        # OWUI / Cursor chat 流量走 /chat/completions，不能被改
+        out = self._pre_call({"model": "deepseek-v4.1-flash", "messages": []},
+                             call_type="acompletion")
+        self.assertEqual(out["model"], "deepseek-v4.1-flash")
+
     def test_chat_call_type_untouched(self):
         data = {"model": "deepseek-v4-flash", "messages": []}
         out = self._pre_call(data, call_type="acompletion")

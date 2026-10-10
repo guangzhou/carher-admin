@@ -180,6 +180,12 @@ _REWRITE_ENABLED = os.environ.get(
 _RESPONSES_GROUP_REWRITE = {
     "deepseek-v4-flash": "deepseek-v4-flash-responses",
     "deepseek-v4-pro": "deepseek-v4-pro-responses",
+    # 2026-10-10：v4.1 组（custom_openai/deepseek-flash, mode:chat）是 10-07 为 OWUI
+    # 建的，10-08 起财务/内审 18 把 key 只剩它。Codex 打它走 bridge，3 天 aresponses
+    # 失败 235 次：bridge 把 reasoning 项译成 chat 后丢了 reasoning_content（177 次
+    # "must be passed back"）、text.format 译成 response_format（58 次 "unavailable"）。
+    # 同上游的原生 /responses 组两种形状都 200（4/4 副本实测）。
+    "deepseek-v4.1-flash": "deepseek-v4.1-flash-responses",
 }
 
 

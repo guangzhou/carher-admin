@@ -211,7 +211,28 @@ pool key       → 3/3 健康叶子 /v1/models = 200，12 个 model       ← �
 **一个副本攒到 10 次至少要 10 分钟**，秒级抖动天然过不去。这个时间下限是实测的
 （同装置 32 枪只打中死腿 1 次）。别再试图用窗口 diff 去"验证"这个阈值。
 
+## 7. 流式格式桥补丁（chat↔responses）：`responses_tool_args_done_backfill`
 
+不是路由补丁，但同样是猴补丁、同样挂在母 router 上，判断和验证方法记在这里。
+
+**链路分清再下刀**：chat 客户端 → 母 router `/v1/chat/completions` → 母 router 以 **`POST /responses`** 打
+`chatgpt-acct` 叶子（`model_info.mode=responses`）→ 母 router 把 responses SSE 转回 chat。
+所以 responses→chat 的格式转换发生在**母 router**（1.103.2），叶子（1.90.2）的 chat 端点生产不走。
+🔴 直接打叶子 `/v1/chat/completions` 复现出的问题 ≠ 生产问题；10-09 我据此误判「要改叶子、重启 62 号」。
+判叶子走哪条路：叶子日志 `POST /responses` vs `POST /v1/chat/completions` 计数。
+
+**补丁本身**：包 `OpenAiResponsesToChatCompletionStreamIterator.chunk_parser`，按流记录哪些 output_index 收到过
+非空 delta；没收到的在 `*.done`/`output_item.done` 时合成一个 delta 事件交给原函数（同一张 index 映射、同一个流 id）。
+fail-open（自身异常 ⇒ 原事件原样交给原函数），env `RESPONSES_TOOL_ARGS_BACKFILL_DISABLED=1` 关。上游 #45356 合并升级后删。
+
+**验证三层，缺一层都可能假绿**：
+1. pod 内离线：`k8s/litellm-callbacks/tests/test_responses_tool_args_done_backfill.py`（30 项，每项先用原函数做阳性对照）
+2. 进程内 A/B：`litellm.Router`，deployment 字段**逐个照抄生产腿**（`openai/<名>` + `api_base` 叶子 + `model_info.mode=responses`），
+   打健康叶子。🔴 用 `litellm.acompletion(model="openai/responses/...")` 自己拼会走另一条路，读出「参数拼两遍」的假红。
+3. 真客户端：同容器 `openclaw agent --local`，隔离 `HOME` 下复制一份 runtime 配置只改 `carher-pro-chat.baseUrl`
+   指 gray `:30405` / prod `:30402` 交替打。10-10 读数 gray 4/4 OK vs 未补丁 4/4 MALFORMED。
+
+上游无 delta 是**随机**的（同模型 3~4/5），A/B 每侧至少 6 发，并保留「全 delta」那几发看逐字节不变。
 
 - 计划与全部事实/推测表：`docs/dead-deployment-retry-plan.md`
 - [[project_dead_deployment_retry_patch_2026_09_07]]

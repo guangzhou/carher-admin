@@ -57,6 +57,26 @@ CHART=$(ls "$RUN_DIR"/chart3/*.tgz | head -1)
 DIGEST=$(kubectl -n $NS get deploy $DEP -o jsonpath='{.spec.template.spec.containers[0].image}'); DIGEST=${DIGEST#*@}
 TS=$(date -u +%Y%m%dT%H%M%SZ); WORK=$I/swap-$TS; mkdir -p "$WORK"
 
+# 4. live 必须仍是 helm 渲染出来的样子。2026-10-10 起 litellm-198-lane-callback-add.py 会在 helm
+#    之外直接 patch Deployment（加新 callback）；那之后再从陈旧快照 helm upgrade，会把带外加的
+#    callback 和手工改过的 CM 一起静默回退，且下面的门禁比的是 helm manifest ↔ target，看不出来。
+#    ⇒ 动快照之前先比 live Deployment 与 helm manifest 引用的 ConfigMap 名，不一致就停。
+helm get manifest $REL -n $NS > "$WORK/helm-before.yaml"
+cm_refs_live=$(kubectl -n $NS get deploy $DEP -o json | python3 -c "import sys,json;s=json.load(sys.stdin)['spec']['template']['spec'];print(' '.join(sorted(v['name']+'='+v['configMap']['name'] for v in s['volumes'] if 'configMap' in v)))")
+cm_refs_helm=$(python3 - "$WORK/helm-before.yaml" "$DEP" <<'PY'
+import sys, yaml
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if d and d.get("kind") == "Deployment" and d["metadata"]["name"] == sys.argv[2]:
+        s = d["spec"]["template"]["spec"]
+        print(" ".join(sorted(v["name"] + "=" + v["configMap"]["name"] for v in s["volumes"] if "configMap" in v)))
+PY
+)
+[[ "$cm_refs_live" == "$cm_refs_helm" ]] || {
+  echo "STOP: live $DEP 引用的 ConfigMap 与 helm release 不一致（有带外改动，如 litellm-198-lane-callback-add.py）。" >&2
+  echo "  live: $cm_refs_live" >&2; echo "  helm: $cm_refs_helm" >&2
+  echo "  先把 live 的 callbacks/config 回填进 $SNAP 与 $DEPLOY_SRC 再跑，否则 helm upgrade 会静默回退。" >&2
+  exit 1; }
+
 declare -A WANT
 for f in "${FILES[@]}"; do
   [[ -f "$FILES_DIR/$f" ]] || { echo "missing $FILES_DIR/$f" >&2; exit 2; }

@@ -90,7 +90,27 @@ $SRC/scripts/lane-callback-swap.sh --lane prod        --run-dir $D --files-dir $
 2026-10-04 基线：三车道各 34 个与 git 逐字节一致；drift 仍报的 2 个「只有 repo 有」是**预期的**——
 `streaming_output_backfill_logonly.py`（阿里云专用）、`inject_prompt_cache_key.py`（198 未启用），别装上去。
 脚本只许「callbacks CM 换代 + 点名的 key 变」，冻结后断言 values 里的 sha 已变（防止 rev10 那种静默空操作），
-最后逐 pod 看 sha 和 ImportError。新 callback（还没挂载的）不走这个，走 `litellm-callback-install.py`。
+最后逐 pod 看 sha 和 ImportError。
+
+### 4.1 新增 callback（还没挂载的）：`scripts/litellm-198-lane-callback-add.py`
+
+`lane-callback-swap.sh` 只换已有 key；`litellm-callback-install.py` 是 helm 化之前的老路（写可变 CM，别用）。
+新增走这个脚本（198 root，以 **live** 为底、只做加法、每步断言）：
+
+```bash
+W=/root/cb-add-work   # 放脚本 + 要装的 .py（逐字节 = git）
+python3 $W/litellm-198-lane-callback-add.py install  litellm-proxy-gray $W/<mod>.py <mod>.<instance>   # 默认插在 responses_aclose 行后
+python3 $W/litellm-198-lane-callback-add.py verify   litellm-proxy-gray <mod>.py <日志tag>              # 逐 pod: sha / installed≥1 / 拒装=0 / ImportError=0
+python3 $W/litellm-198-lane-callback-add.py rollback litellm-proxy-gray /root/cb-add-backup/<deploy>.<ts>.json
+```
+
+顺序同上：gray（零流量）→ 实打验证 → prod → guarded-old。
+
+🔴 **它是 helm 带外改动**：装完以后 helm 冻结快照落后于 live。`lane-callback-swap.sh` 已加守卫
+（live Deployment 引用的 CM 名 ≠ helm manifest ⇒ STOP），**下一次 helm upgrade 之前必须先把 live 的
+callbacks / config 回填进快照目录和 `--deployment` 源**，否则会静默回退。
+2026-10-10 现状：三车道都带外加了 `responses_tool_args_done_backfill.py`；prod callbacks 另有当天
+手工换的 `deepseek_responses_adapt.py`（e291064）。
 
 🔴 漂移两个方向都踩过：
 - **git 新于线上**（修复入库没上线）：`sitecustomize` `/app` 路径、`pricing_overlay` 出图价、`chatgpt_responses_normalize`
@@ -105,6 +125,10 @@ $SRC/scripts/lane-callback-swap.sh --lane prod        --run-dir $D --files-dir $
    /v1/responses 上根本不被调用，但真正的病是上游 deepseek 对 custom `apply_patch` 回 function_call。
 4. **大表查询必须先加 `set statement_timeout`**，并且按单个 key / 窄时间窗查；10 天全表扫在生产库上跑了 15 分钟。
 5. **pod 日志会被冲掉**：跑了两天的 pod 里 grep 不到启动行 ≠ 没启动那个功能；判额度重置看 `budget_reset_at`。
+6. **「客户端升级后才报错」先查上游行为有没有变，再查客户端**（10-09 her-13 并行工具空参数）：
+   升级前后 SpendLogs 里客户端回传的 `messages[].tool_calls[].arguments` 就是它当时**实际收到**的东西，
+   按 call_id（去掉 `_` 再比）对上游 `response.output[]` 逐个配对，一次查询判清「以前就空被吞」还是「以前就是满的」。
+   那次是后者：真因是 ChatGPT 上游对并行调用**随机**不发 delta，与 her 升级同期，纯属巧合。
 
 ## 6. 回退
 

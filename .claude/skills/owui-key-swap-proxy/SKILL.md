@@ -174,6 +174,13 @@ P198=... $S/owui-model-gate-audit.sh                                   # 任何�
   ⇒ 现役组 `deepseek-v4.1-flash` = `custom_openai/deepseek-flash` @ `https://api.deepseek.com/v1`,
   `model_info.id=deepseek-official/deepseek-flash`。
 - LiteLLM 会把响应体 `model` 改写成对外名, 看真落点用响应头 `x-litellm-model-name`。
+- 🔴 **建 DeepSeek 的 mode:chat 组 = 同时建它的 `-responses` 孪生组 + 加改写映射**(10-10 补课)。
+  OWUI 只走 chat, 但同名会被 Cursor/Codex key 拿去打 `/v1/responses`。10-07 只建了 chat 组,
+  Codex 走 bridge 就丢 `reasoning_content`/译坏 `text.format`, 3 天 400 了 235 次。
+  孪生组: `deepseek-v4.1-flash-responses` = `openai/deepseek-flash`, `mode: responses`,
+  `id=deepseek-official/deepseek-flash-responses`; 映射写在
+  `k8s/litellm-callbacks/deepseek_responses_adapt.py` 的 `_RESPONSES_GROUP_REWRITE`。
+  验收: `scripts/codex-deepseek-triage.py --only groups` 必须 ✓。
 
 ### 6.1 原理: 必须拦两处, 只改列表 = 半道门
 

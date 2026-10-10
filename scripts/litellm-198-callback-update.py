@@ -226,9 +226,13 @@ def live_vs_git(fname: str, live: str) -> None:
 
 
 def pods():
+    # 🔴 2026-10-10：rollout status 返回时旧 RS 的 pod 还在优雅终止，phase 仍是
+    # Running ⇒ 只按 phase 过滤会把 4 个旧 pod 一起验，必报 4 个 ✗ 的假红
+    # （apply 当场 8 个副本 4✗4✓）。正在终止的 pod 带 deletionTimestamp，排除掉。
     out = sh("%s -n %s get po -l %s -o json" % (KUBECTL, NS, PROD_POD_SELECTOR))
     return [p["metadata"]["name"] for p in json.loads(out).get("items", [])
-            if p.get("status", {}).get("phase") == "Running"]
+            if p.get("status", {}).get("phase") == "Running"
+            and not p["metadata"].get("deletionTimestamp")]
 
 
 def cmd_plan(fname: str, force: bool) -> int:

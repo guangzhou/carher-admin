@@ -677,5 +677,6 @@ git push origin main
 | `kubectl get cm X -o jsonpath='{.data.openclaw\.json}'` 返空串（同命令对别的 cm 好用）| jsonpath 对某些对象静默返空 | 换 `-o go-template='{{index .data "openclaw.json"}}'` |
 | `/key/list?size=2000` → 422 | `size` 上限是 100 | 分页，或用 `/spend/keys` |
 | `/model/new` 返 200、`/model/info` 也读得到，但一发也打不通（尤其 `mode: video_generation` / 上游返 **415**）| 不是接入错了 —— **LiteLLM 那条标准 route 把请求改坏了**（如 `/v1/videos` 无条件发 multipart，是 upstream PR #38104 故意为之 ⇒ **升级永远修不好**）| 别写死条目。先跑「同 key 同 body 只变编码」的探针矩阵分清通路 vs 上游，然后走 `/config/pass_through_endpoint` ⇒ skill **`litellm-passthrough-endpoint`**（代价：不进 SpendLogs）|
+| 198 新建 DeepSeek 组，chat/OWUI 全绿，Codex 一用就 400「API 异常」（上游原文 `reasoning_content ... must be passed back` / `response_format type is unavailable`）| 组是 `mode: chat`，`/v1/responses` 请求走 responses→chat bridge，转换时丢 reasoning、译坏 text.format；同上游原生 `/responses` 两种形状都 200 | 同时建 `<名>-responses` 孪生组（`openai/<上游名>` + `mode: responses`），并在 `deepseek_responses_adapt._RESPONSES_GROUP_REWRITE` 加映射；验 `scripts/codex-deepseek-triage.py --only groups` 为 ✓（10-10 `deepseek-v4.1-flash` 漏了这步）|
 | 改 198 key 的 `key_alias` → 400 | 198 的 `key_alias` **全局唯一**，想用的名字已被一把无关的 key 占了 | 先 `/key/info` 确认；换个名字，⛔ 别去动那把无关的 key |
 | 撤了模型权限，验收 SQL 说"0 残留"，过一阵又能用了 | 验收把 `blocked` 的 key 过滤掉了；blocked 只挡认证、不清白名单，解封即复活 | 写入带 `--include-blocked`；验收按 blocked **分列**不过滤（`litellm-198-key-allowlist-verify.sh` 已内置） |

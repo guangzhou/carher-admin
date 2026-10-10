@@ -22,6 +22,12 @@ callback 的 counts 和请求形状里。
     # 只跑某一节
     python3 scripts/codex-deepseek-triage.py --only counts
 
+    # 用户只给了「API 异常 (req: 36ece9a2)」：反查上游原文 + 自动对签名
+    python3 scripts/codex-deepseek-triage.py --rid 36ece9a2
+
+    # 哪些 DeepSeek chat 组没有 Codex 的 -responses 改写（新建组后必跑）
+    python3 scripts/codex-deepseek-triage.py --only groups
+
 判据速查（脚本会自动标注）
 ==========================
 | 现象 | 根因 | 已修复于 |
@@ -32,6 +38,7 @@ callback 的 counts 和请求形状里。
 | ``counts={}`` 紧跟 400 | 网关没动手，是**客户端载荷**问题 | — |
 | ``reasoning_insert: N`` 紧跟 400 | 网关**自己插的**，见并行块配对 | 0ea2d71/b72e4ea |
 | ``completion_tokens`` 卡在某个整数反复重试 | 客户端 max_output_tokens 太小被截断 | 客户端侧 |
+| 400 ``reasoning_content ... must be passed back`` / ``response_format ... unavailable`` | /responses 打到 mode:chat 组走 bridge | e291064（加 -responses 改写）|
 
 相关：``~/.claude/skills/codex-deepseek-tool-triage/SKILL.md``
 """
@@ -157,14 +164,114 @@ GROUP BY 1 ORDER BY n DESC LIMIT 10;
     print("  提示：max_out 反复等于同一个整数（如 4096）= 客户端 max_output_tokens 撑爆")
 
 
+# 上游原文片段 -> (人话根因, 修法)。用户只看得到「API 异常 (req: xxx)」，原文在 SpendLogs。
+ERROR_SIGNATURES = [
+    ("reasoning_content` in the thinking mode must be passed back",
+     "chat 组上的工具历史缺 reasoning_content（/responses 进 chat 组时由 bridge 转换）",
+     "确认该组在 deepseek_responses_adapt._RESPONSES_GROUP_REWRITE 里有 -responses 映射（本脚本 groups 节）"),
+    ("response_format type is unavailable",
+     "text.format 经 bridge 译成 chat response_format，DeepSeek 不收",
+     "同上：responses 调用要走原生 -responses 组"),
+    ("No tool output found",
+     "并行工具调用块被插入项劈开", "见 feedback_deepseek_pairs_tool_calls_by_adjacency"),
+    ("unknown variant",
+     "tool_choice / tool type 形状 DeepSeek 不认", "见 test_deepseek_tool_choice_shapes.py 形状表"),
+    ("Unsupported custom tool",
+     "custom tool 名不是 apply_patch", "deepseek_responses_adapt 的 custom→function 降级"),
+]
+
+
+def section_rid(rid: str) -> None:
+    """用户报错里的 `req: xxxxxxxx` = request_id 前 8 位（error_sanitize）。"""
+    print(f"\n=== req {rid} 原文（SpendLogs）===")
+    if not re.fullmatch(r"[0-9a-f-]{6,36}", rid):
+        print("  ⛔ rid 只能是十六进制前缀")
+        return
+    # request_id 是主键，但 like 前缀 + 时间窗约 13s，不加时间窗会全表扫
+    sql = f"""
+SET statement_timeout='120s';
+SELECT s.\\"request_id\\", s.\\"startTime\\", COALESCE(k.\\"key_alias\\",'?') who,
+       s.\\"model_group\\", s.\\"model_id\\", s.\\"call_type\\", s.\\"status\\",
+       LEFT(s.\\"metadata\\"->'error_information'->>'error_message', 400) err
+FROM \\"LiteLLM_SpendLogs\\" s
+LEFT JOIN \\"LiteLLM_VerificationToken\\" k ON k.\\"token\\"=s.\\"api_key\\"
+WHERE s.\\"request_id\\" LIKE '{rid}%' AND s.\\"startTime\\" > NOW() - INTERVAL '7 days';
+"""
+    out = _ssh(f'kubectl -n {NS} exec litellm-db-0 -- psql -U litellm -d litellm -x -c "{sql}"')
+    print(out.rstrip() or "  （查不到：超过 7 天，或 SpendLogs 没落这条）")
+    if "ERROR:" in out:
+        print("  ⛔ psql 报错 —— 不是「查无此条」")
+    for sig, why, fix in ERROR_SIGNATURES:
+        if sig in out:
+            print(f"\n  命中签名：{sig}\n  根因：{why}\n  修法：{fix}")
+
+
+def _rewrite_table() -> dict:
+    """从本地 callback 源码读 _RESPONSES_GROUP_REWRITE（与线上同版时才准，先跑 callbacks-drift）。"""
+    import ast, os
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                        "k8s", "litellm-callbacks", "deepseek_responses_adapt.py")
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == "_RESPONSES_GROUP_REWRITE" for t in node.targets):
+            return ast.literal_eval(node.value)
+    return {}
+
+
+def section_groups() -> None:
+    """DeepSeek 的 mode:chat 组若没有 -responses 改写，Codex 打它必走 bridge ⇒ 工具历史/结构化输出 400。"""
+    print("\n=== DeepSeek 组 × Codex 改写覆盖 ===")
+    out = _ssh(f"""
+MK=$(kubectl -n {NS} get secret litellm-secrets -o jsonpath={{.data.LITELLM_MASTER_KEY}} | base64 -d)
+P=$(kubectl -n {NS} get pods -l carher.net/litellm-production-route=enabled -o jsonpath='{{.items[0].status.podIP}}')
+curl -s -m 60 http://$P:4000/model/info -H "Authorization: Bearer $MK" | python3 -c '
+import json,sys
+seen=set()
+for m in json.load(sys.stdin)["data"]:
+  n=m["model_name"]; mi=m.get("model_info") or {{}}
+  if "deepseek" in n.lower() and (n,mi.get("id")) not in seen:
+    seen.add((n,mi.get("id"))); print("%s\\t%s\\t%s" % (n, mi.get("mode"), (m.get("litellm_params") or {{}}).get("api_base")))
+'
+""")
+    rows = [l.split("\t") for l in out.splitlines() if l.count("\t") == 2]
+    if not rows:
+        print("  ⛔ /model/info 没读到 —— 量具坏了，不当绿")
+        return
+    names = {r[0] for r in rows}
+    table = _rewrite_table()
+    print(f"  改写表（本地源码）：{table}")
+    for n, mode, base in sorted(rows):
+        if mode != "chat" or "api.deepseek.com" not in str(base):
+            continue
+        tgt = table.get(n)
+        if tgt and tgt in names:
+            print(f"  ✓ {n:34} → {tgt}")
+        elif tgt:
+            print(f"  ⛔ {n:34} → {tgt}（目标组不存在！改写后必 400）")
+        else:
+            print(f"  ⚠ {n:34} 无改写 —— Codex 打它走 bridge（是否有 key 只剩它可选？）")
+    for src, tgt in table.items():
+        if src not in names:
+            print(f"  · 改写源 {src} 不在线上组里（死映射，无害）")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--since", default="30m", help="日志窗口，如 30m / 2h（默认 30m）")
     ap.add_argument("--key", help="只看某个 key_alias")
-    ap.add_argument("--only", choices=["counts", "errors", "shape", "spend"],
+    ap.add_argument("--rid", help="用户报错里的 req id（API 异常 (req: xxxx)），反查原文 + 签名")
+    ap.add_argument("--only", choices=["counts", "errors", "shape", "spend", "groups"],
                     help="只跑某一节")
     a = ap.parse_args()
+
+    if a.rid:
+        section_rid(a.rid)
+        return 0
+    if a.only == "groups":
+        section_groups()
+        return 0
 
     m = re.match(r"(\d+)([mh])$", a.since)
     since_min = int(m.group(1)) * (60 if m.group(2) == "h" else 1) if m else 30
@@ -186,6 +293,7 @@ def main() -> int:
         section_shape(log)
     if a.only is None:
         section_spend(a.key, since_min)
+        section_groups()
     return 0
 
 

@@ -5,11 +5,14 @@ description: >-
   插链首 / 换目标 / 回滚，并按「配置→装载→兜住」三层分别验收。含为什么全局一行能覆盖
   665 把 cursor key（per-key alias 用改写后的名字）、为什么 per-key fallbacks 反而覆盖不了
   （整表替换不是合并）、`router_settings` 每 30s 热加载（旧「必须 rollout」已作废）、
-  以及十一个会让你把「兜底存在」误读成「兜住了」、或者把「尺子坏了」误读成
-  「没装载」的坏尺子（含容器里没 curl、后台 exit 0 不等于跑完）。
+  以及十四个会让你把「兜底存在」误读成「兜住了」、或者把「尺子坏了」误读成
+  「没装载」的坏尺子（含容器里没 curl、后台 exit 0 不等于跑完、
+  `/key/info?key_alias=` 返 200 全 null、全局表被读成 0 行）。
+  **减法在 §8**：摘掉单把 key 单个组的整条兜底链（「把某人某个模型的兜底去掉、
+  别影响其他 key」），含判据必须看「这把 key 读的那张表」而不是全局表。
   Use when the user mentions 兜底/fallback 链、"X 挂了兜到 Y"、改 fallbacks、
   兜底没生效、兜底能不能兜住、fallback 回归验证、sa-grok-4.6、
-  或要给某个模型组换/加备用腿。
+  要给某个模型组换/加备用腿，或**去掉/摘掉/取消某人某把 key 某个模型的兜底**。
 ---
 
 # 198 全局兜底链改法与三层验收
@@ -26,10 +29,14 @@ description: >-
 | `scripts/litellm-198-fallback-prepend.py` | 把 target 插到**某一个** group 的链首 | 换某条链的首选腿 |
 | `scripts/litellm-198-fallback-insert-before.py` | 在**点名的一组** group 里，把 target 插到 **anchor 之前** | 升级某条既有腿（新腿在前、老腿保留为下一跳） |
 | `scripts/litellm-198-gpt-fallback-append.py` | 全表扫「以 anchor **结尾**」的链，往后追加 | 给一大批链加统一的末端兜底 |
+| `scripts/litellm-198-key-fallback.py drop` | **减法**：摘掉**单把 key 单个组**的整条链 | 「把某人某个模型的兜底去掉」见 §8 |
 
-三把都是 `--apply` 需 `--backup`、`--restore` 回滚、默认 dry-run。
+前三把都是 `--apply` 需 `--backup`、`--restore` 回滚、默认 dry-run。
 ⚠️ **`gpt-fallback-append.py` 的 pod selector 写死成 `app=litellm-proxy`**，见 §0.5 ——
 它现在会验到不在服务的车道，用它之前先改 selector。
+
+🔴 **本篇前七节全是「加/换」。「去掉某人某个模型的兜底」是减法，走 §8，别拿
+`prepend`/`insert-before` 凑** —— 它们改全局表，会动到所有调这个组的人。
 
 ## 0. 先决定粒度：全局一行 vs per-key
 
@@ -76,6 +83,23 @@ select count(*), a.key, a.value
 `sa-grok-4.6` 14d 落点里 cursor 占 74%，但 `aliyun-carher-pro198` 有 51.0k、
 `carher-75` 1.3k —— 它们**也会拿到这条新腿**。改之前用落点分布把这件事摆出来给用户拍板，
 不要事后才说。
+
+### 0.1 「给所有 key 加兜底」先问清是哪个组（10-04 踩过）
+
+兜底是**按源组**配的，不是按 key 配的 —— 一行就覆盖调这个组的所有 key，
+**不需要、也不应该**「给每把 key 加」。用户说「给所有 cursor/claude/her key 加 X 兜底」时，
+先确认**是哪个/哪几个组**，通常就是本轮刚上线的那一个。
+10-04 我把这句话理解成「key 能调的所有组」，算出 170 条、又想到通配，
+**用户要的只是新上的 `kiro-claude-sonnet-5-5` 一行**。
+
+LiteLLM 支持通配行 `{"*": [...]}`（`fallback_event_handlers.py:369`，有专属链的组优先，
+没有的才走它），但它会让出图/向量组也兜到聊天模型、而且影响全站 —— **用户没点名就别加**。
+`fallback-add-row.py` 故意不认 `--group "*"`（它要求 group 是真组）。
+
+🔴 **被用户拒掉的 `--apply` 可能已经落库。** 10-04 一次 `fallback-add-row.py --apply`
+在用户点「拒绝」时**已经执行完**（198 上留了 04:14 的 backup 文件，表 106→107 行），
+那行在线上待了 ~50 分钟。⇒ 任何写操作被拒/被打断后，**先回读表行数并找本轮 backup 文件**，
+有就 `--restore` 那份快照，再继续。
 
 ## 0.5 改哪条车道 —— 标签在 **Pod** 上，不在 Deployment 上
 
@@ -222,9 +246,11 @@ grok-4.20）不吃。不归本次改动，但新腿排前了会**更早**撞上�
 ⚠️ 400 是不可重试错误，链在这跳**停住**（该 request_id 只有一行，没继续兜到 4.6）——
 那一发用户是真失败。要不要治是另一件事，别混进"兜住没有"的结论里。
 
-## 4. 十二个坏尺子（每一个我都实际踩过）
+## 4. 十四个坏尺子（每一个我都实际踩过）
 
-> 前 8 个在本节，第 10/11 个在 §4.1，第 12 个（脚本自己的装载尺子写死组名）在 §4.2。
+> 前 8 个在本节，第 9 个在 §7.1，第 10/11 个在 §4.1，
+> 第 12 个（脚本自己的装载尺子写死组名）在 §4.2，
+> 第 13/14 个（`/key/info?key_alias=` 返 200 全 null、全局表被读成 0 行）在 §8.4。
 
 1. 🔴 **`metadata->>'model_group'` 必超时。** `LiteLLM_SpendLogs` 有**真列
    `model_group`**，走 JSONB 提取用不上索引 —— 我两次查询都 120s 超时进后台且永不返回。
@@ -239,6 +265,10 @@ grok-4.20）不吃。不归本次改动，但新腿排前了会**更早**撞上�
 3. ⛔ **`mock_testing_fallbacks` 在本镜像返硬 400**，当不了"强制触发"的尺子。
    （旧记忆写的是"静默丢弃"，实测是 400，形状不同。）
    **2026-09-21 复测仍是 400** —— 别每次改完都重新去试一遍，它没变。
+   **10-04 升级后复测仍是 400**，原文已拿到：`MockTestingParamsDisabledError`，
+   开关是 `general_settings.dangerously_allow_mock_testing_request_params: true`，
+   **只能改 config.yaml，Admin UI/API 改不了**。客户端看到的是被 sanitize 过的
+   `API 异常 (req: <id>)`，拿 req id 去 proxy 日志 grep `error_sanitize` 才看得到真因。
    推论：**「兜住没有」这件事只能等真实流量，不能合成。**
 4. ⛔ **想造"100% 失败的组"当载具基本走不通**：我挑的候选（`zk-116-gpt-5.4` 等
    24h 全挂）**压根没有 fallback 行**（读回 `None`）。
@@ -421,3 +451,171 @@ ct=0 全在 **failure 行**上（那是正常的），success 行**全部 ct>0**
 
 **判据**：不是「有多少 ct=0」，是「ct=0 落在哪个 status 上」。
 混在一起算会把一条健康的腿误判成空壳。
+
+## 8. 减法：摘掉**单把 key 单个组**的兜底（2026-10-10 加）
+
+诉求形状：「把 X 的 cursor key 的 gpt-6-astra 兜底去掉，不要影响别人、只改这一把」。
+
+```bash
+S=~/litellm-198-key-fallback-<sid>.py   # 198 多会话并行，文件名带会话号
+export LITELLM_MASTER_KEY=$(sudo kubectl -n litellm-product get secret litellm-secrets \
+  -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+
+python3 $S drop --key cursor-<name>-<sfx> --group gpt-6-astra              # ① dry-run
+python3 $S drop --key cursor-<name>-<sfx> --group gpt-6-astra \
+    --apply --backup ~/<name>-astra-nofb-$(date -u +%Y%m%dT%H%M%SZ).json   # ②
+python3 $S drop-check --key cursor-<name>-<sfx> --group gpt-6-astra        # ③ 验收
+```
+
+### 8.1 为什么「删一行」必须写成「照抄 22 行、唯独不含那一行」
+
+per-key `router_settings.fallbacks` **整表替换全局表，不是合并**。在生产镜像里核过
+（别靠记忆，这条我自己推过两次才站住）：
+
+```
+proxy/route_llm_request.py:511  elif "router_settings_override" in data:
+proxy/route_llm_request.py:515      override_settings = data.pop(...)   → data["fallbacks"]
+router.py:7421                  fallbacks = kwargs.get("fallbacks", self.fallbacks)
+```
+
+⇒ 没有「删除某一行」这种操作。要让一把 key 少一条链，只能**把它够得着的其余链
+全部照抄进 per-key 表**，然后不写那一行。10-10 实测：cursor key 照抄 22 行。
+
+**代价必须在报告里写出来：这张表是快照。** 以后全局表加腿/换腿，这把 key 不跟着变。
+`drop-check` 会把快照与当前全局表**逐行 diff**，漂移会报出来——这是故意的，
+让「不跟着变」可见，而不是静默。
+
+### 8.2 🔴 判「要不要改」的不是全局表，是**这把 key 读的那张表**
+
+这是本节最容易做错的一步，我 10-10 第一版就做错了：no-op 判据写成「全局表里有没有
+这个组的行」。**活着的组永远有全局行，所以这个判据没有分辨力** —— 它会把「已经改完的
+key」和「本来就没兜底的 key」一起放过去，然后原样重写一遍、报成功、什么也没变，
+还白白给这把 key 加一层快照冻结。
+
+正确判据按 per-key 表空不空分两种：
+
+| per-key 表 | key 实际读哪张 | 判「有没有兜底」看哪 |
+|---|---|---|
+| **空** | 全局表 | 全局表里有没有这组的行 |
+| **非空** | **只读 per-key 这张**（整表替换） | **per-key 表里有没有这组的行** |
+
+第二行就是 10-10 的 claude key：31 行表里**没有** opus-5.5 的行 ⇒ 它**本来就没有兜底**，
+全局那行 `kiro-claude-opus-5-5 → [sa-grok-4.20, anthropic.wangsu5.claude-opus-5]`
+对它压根不生效 ⇒ **什么都不用做**。用户说「照样处理一遍」时，正确回应是把这个讲清楚，
+不是照做一遍写个零变化。脚本现在会直接拒跑并打出判据。
+
+### 8.3 🔴 一个组有几个名字，就得摘几行
+
+`fallback_lookup_groups()`（`router_utils/fallback_event_handlers.py`）一个请求会按
+**多个名字**查链：pre-routing 选的 tier、metadata 里的 `model_group`、再到请求名。
+名字的第二来源有三处：
+
+| 来源 | 10-10 的实例 |
+|---|---|
+| 全局 `model_group_alias` | `gpt-6-astra` → `chatgpt-gpt-6-astra`，**全局表里两行都在** |
+| per-key `aliases` | 改写发生在 router **之前**，所以表按**改写后**的名字建 |
+| 裸名 | 没有任何 alias 的 key 用原名到达 router |
+
+⇒ 只摘用户说的那个名字 = **链在另一个拼法下活着，零症状**。
+`lookup_names()` 把三处并起来，`drop-check` 逐名断言缺失。
+
+⚠️ 两条 alias 规则方向相反（§0 已记）：router 级 `model_group_alias` 查**改写前**，
+per-key `aliases` 查**改写后**。拿不准读运行 pod 的源码。
+
+### 8.4 两个坏尺子（第 13、14 个，都是 10-10 实测，都已修）
+
+13. 🔴 **`/key/info?key_alias=<alias>` 返 HTTP 200 + 每个字段都是 `null`。**
+    `key_alias`/`token`/`models`/`aliases`/`router_settings` 全空。**没有任何异常**，
+    因为它是 200。后果链条：`models or []` 把 null 吞成空列表 ⇒ 算出的表 **0 行** ⇒
+    `lost_global_rows()`（本来就是防这个的闸门）**也从同一份空 info 算**，于是返空、
+    放行 ⇒ 发出 `{"key_alias": null, "fallbacks": []}`。
+    而**空表不等于没兜底**——空表让 key 落回全局表。所以症状是
+    **「脚本说成功、兜底一行没改」**。
+
+    三个端点实测：
+
+    | 端点 | 回什么 |
+    |---|---|
+    | `/key/info?key_alias=` | 200，**全 null** ⛔ |
+    | `/key/info?key=<token sha256>` | 有 models/aliases，但 `token` 仍 null |
+    | `/key/list?...&return_full_object=true` | ✅ 完整行，**用这个** |
+
+    还有四个脚本在用这个坏端点，待排查：`litellm-198-key-behavior-regress.py`、
+    `litellm-her-key-from-template.py`、`litellm-198-cursor-newnames-probe.py`，
+    以及 skill `litellm-198-key-allowlist` / `litellm-her-key-from-template` 的 SOP 文本。
+
+14. 🔴 **`global_fallbacks()` 把 109 行的全局表读成 0 行，然后退回读 `config.yaml`。**
+    `/get/config/callbacks` 的 `router_settings` 是 **dict**，老代码按
+    「`{field_name, field_value}` 的 list」解析 —— 遍历 dict 得到的是**字符串 key**，
+    `str.get` 抛 `AttributeError`，被 `except` 吞掉，表返空；接着 fall through 到
+    `/config/yaml`，而那份在 `STORE_MODEL_IN_DB=True` 下**是权威错的**（§1）。
+    这正是 §4.1 第 10 条记过的「dict 不是 list」的同一个形状，在另一个函数里又犯一次。
+
+    现在三条闸门：非 dict 直接拒、空表直接拒（"空表几乎一定是读坏了，
+    每个调用方都会把它当成『所有组都没兜底』"）、重复行拒。
+    **删掉 yaml 退路** —— 唯一保证与线上不一致的源，不该当兜底。
+
+**共同形状**：两个坏尺子都是**读失败伪装成「这里本来就是空的」**，而「空」在本节的
+语义里恰好是**合法输入**（空表 = 吃全局表；没有行 = 没有兜底）。
+⇒ **凡是「空」既可能是答案又可能是读坏了的地方，必须拒跑而不是继续算。**
+
+### 8.5 验收：这一节的三层长什么样
+
+| 层 | 判据 | 怎么量 |
+|---|---|---|
+| 1 配置 | 目标组在 key 表里**按每个名字**都查不到；其余行**逐字节**等于全局表 | `drop-check`（planned=written 且 0 problem） |
+| 2 隔离 | 全局表行数/astra 行/`model_group_alias`/`context_window_fallbacks` 全不变；同族其他 key 不变 | 见下面的 SQL |
+| 3 行为 | 主路挂时真的不再兜底 | **只能等真实故障**（§4 第 3 条：`mock_testing_fallbacks` 返 400，造不出来） |
+
+⛔ **`updated_at` 不能当「我改过谁」的尺子。** spend 记账也会把它顶起来 ——
+10-10 我查「近 3 小时改过的 key」得到 **92 行**，其中只有 1 行是我写的。
+隔离性要按**内容**查，别按时间戳：
+
+```sql
+-- 分母必须是「能调这个组的 key」，不是「所有带 per-key 表的 key」
+-- （第一版我写成后者：768 把里全是摸不到 astra 的 claude-code-*，分母没意义）
+WITH a AS (
+  SELECT key_alias,
+         (router_settings IS NULL OR router_settings::text IN ('{}','null')) AS on_global,
+         EXISTS (SELECT 1 FROM jsonb_array_elements(
+                   coalesce(router_settings->'fallbacks','[]'::jsonb)) e
+                  WHERE e ? 'gpt-6-astra' OR e ? 'chatgpt-gpt-6-astra') AS own_row
+    FROM "LiteLLM_VerificationToken"
+   WHERE 'gpt-6-astra' = ANY(models) OR aliases::text LIKE '%gpt-6-astra%')
+SELECT count(*) AS astra_capable,
+       count(*) FILTER (WHERE on_global) AS still_on_global_chain,
+       count(*) FILTER (WHERE NOT on_global AND NOT own_row) AS no_astra_fb
+  FROM a;
+```
+
+⚠️ `models` 是 **`text[]` 不是 jsonb** ⇒ 用 `= ANY(models)`，写 `@>` 会报
+`operator does not exist: text[] <@ jsonb`。
+
+10-10 收盘读数：astra_capable **780**，仍吃全局链 **559**，无 astra 兜底 **218**
+—— 那 218 里绝大多数是 `carher-*`（早先 per-key 作业留下的，本来就没有 astra 行），
+**不是本轮动的**。cursor 族带 per-key 表的只有 4 把，报告里要点名到具体 key，
+别只报一个总数。
+
+### 8.6 改完必须报的一句话：这些兜底次数会变成失败
+
+摘兜底前先查这把 key 该组 14 天的**兜底落点**（`model` ≠ 主落点的那些行）：
+
+```sql
+SELECT model_group, model, status, count(*) AS n,
+       sum(case when completion_tokens>0 then 1 else 0 end) AS ct_pos
+  FROM "LiteLLM_SpendLogs"
+ WHERE api_key = '<token sha256>' AND "startTime" > now() - interval '14 days'
+ GROUP BY 1,2,3 ORDER BY n DESC;
+```
+
+🔴 **按有索引的 `api_key`（= token sha256）查，别按 `metadata->>'user_api_key_alias'`**
+（JSONB 提取用不上索引，必超时 ⇒ [[feedback_spendlogs_api_key_not_jsonb_alias]]）。
+
+10-10 两把 key 的读数：边朝明 astra 主路 955 次成功、**兜底 11 次**（sol 5 / luna 5 /
+grok-4.20 1，全部出字）；傅天麒主路 189 次成功、**兜底 4 次**。
+⇒ 改完这 11 次和 4 次会变成**直接报错**。这是用户要的效果，但**数必须摆出来**，
+不能等他自己发现。
+
+- [[project_198_astra_fallback_dropped_per_key_2026_10_10]] — 本节首次使用全过程
+- [[feedback_key_info_by_alias_returns_all_null]] / [[feedback_empty_read_is_not_an_empty_table]]
+- [[litellm-key-provider-swap]] — 改单把 key 的 alias/映射（不是兜底）走那篇

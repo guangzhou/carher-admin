@@ -63,8 +63,27 @@ Usage (run on 198, where 127.0.0.1:30402 is the litellm-product NodePort)::
     # 5. rollback
     python3 $S restore --backup ~/fb-full-<ts>.json --apply
 
-``plan``/``check`` never write. ``apply`` requires either ``--backup`` or
-``--no-backup``; there is no unbacked default.
+Removing ONE group's fallback for ONE key (the inverse operation, added
+2026-10-10 for "take astra's fallback off this person's cursor key")::
+
+    python3 $S drop --key cursor-<name>-<sfx> --group gpt-6-astra
+    python3 $S drop --key cursor-<name>-<sfx> --group gpt-6-astra \
+        --apply --backup ~/<name>-astra-nofb-$(date -u +%Y%m%dT%H%M%SZ).json
+    python3 $S drop-check --key cursor-<name>-<sfx> --group gpt-6-astra
+
+Two things ``drop`` refuses to do, both learned the same day:
+
+* **It will not write when the group has no reachable global row.** A key whose
+  per-key table is already non-empty does not read the global table at all, so
+  a group missing from that table ALREADY has no fallback. "Doing it anyway"
+  would rewrite the same rows, report success, change nothing, and newly freeze
+  the table against future global edits.
+* **It will not write an empty table.** See ``key_info``: empty is not "no
+  fallbacks", it hands the key back to the global table.
+
+``plan``/``check``/``drop-check`` never write, and ``drop`` is dry-run until
+``--apply``. ``apply`` requires either ``--backup`` or ``--no-backup``; there is
+no unbacked default.
 """
 from __future__ import annotations
 
@@ -116,39 +135,99 @@ def live_groups() -> dict[str, str | None]:
 
 
 def global_fallbacks() -> dict[str, list[str]]:
-    """The global router_settings.fallbacks table, flattened to group -> targets."""
-    st, _, raw = api("GET", "/get/config/callbacks")
-    table: dict[str, list[str]] = {}
-    if st == 200:
-        try:
-            for section in json.loads(raw).get("router_settings", []) or []:
-                if section.get("field_name") == "fallbacks":
-                    for row in section.get("field_value") or []:
-                        table.update(row)
-        except (ValueError, AttributeError):
-            pass
-    if not table:
-        # Endpoint shape varies across versions; fall back to the config dump.
-        st, _, raw = api("GET", "/config/yaml")
-        if st == 200:
-            try:
-                import yaml  # optional; only needed on this path
+    """The global ``router_settings.fallbacks`` table, flattened to group -> targets.
 
-                for row in (yaml.safe_load(raw) or {}).get(
-                    "router_settings", {}
-                ).get("fallbacks", []) or []:
-                    table.update(row)
-            except Exception:
-                pass
+    🔴 ``router_settings`` here is a **dict**, not a list of
+    ``{field_name, field_value}`` sections. This function used to assume the
+    section shape; iterating a dict yields its KEYS (plain strings), so
+    ``section.get`` raised ``AttributeError``, which was caught and swallowed,
+    and the table came back EMPTY. It then fell through to ``/config/yaml`` --
+    the one source that is authoritatively WRONG here, because
+    ``STORE_MODEL_IN_DB=True`` makes Postgres the source of truth and the DB
+    value overlays yaml entirely. Measured 2026-10-10: the real table is 109
+    rows and this returned 0.
+
+    An empty table is never a believable reading: every caller treats "no
+    global row" as "this group has no fallback", so a blind read turns into
+    "nothing to do here" or into a table with every chain stripped. Refuse.
+    """
+    st, _, raw = api("GET", "/get/config/callbacks")
+    if st != 200:
+        die(f"/get/config/callbacks returned {st}: {raw[:200]!r}")
+    rs = json.loads(raw).get("router_settings")
+    if not isinstance(rs, dict):
+        die(f"router_settings came back as {type(rs).__name__}, not dict -- the "
+            f"endpoint shape changed, so this table and everything judged from "
+            f"it are suspect. Re-read the shape before trusting any result.")
+    table: dict[str, list[str]] = {}
+    for row in rs.get("fallbacks") or []:
+        if not isinstance(row, dict):
+            continue
+        for k, v in row.items():
+            if k in table:
+                die(f"duplicate global fallback row for {k!r} -- ambiguous which "
+                    f"chain is live; refusing to copy either")
+            table[k] = list(v) if isinstance(v, list) else v
+    if not table:
+        die("the global fallback table read as EMPTY. That is almost certainly a "
+            "broken read, not an empty table; every caller would mistake it for "
+            "'no group has any fallback'.")
     return table
 
 
-def key_info(alias: str) -> dict:
-    st, _, raw = api("GET", f"/key/info?key_alias={urllib.parse.quote(alias)}")
+def model_group_aliases() -> dict:
+    """The global ``router_settings.model_group_alias`` map.
+
+    Needed because a key can reach a group through this map with no per-key
+    alias at all, and then the chain is looked up under both spellings.
+    """
+    st, _, raw = api("GET", "/get/config/callbacks")
     if st != 200:
-        die(f"/key/info for {alias} returned {st}: {raw[:300]!r}")
-    d = json.loads(raw)
-    return d.get("info", d)
+        die(f"/get/config/callbacks returned {st}")
+    rs = json.loads(raw).get("router_settings")
+    if not isinstance(rs, dict):
+        die(f"router_settings came back as {type(rs).__name__}, not dict -- the "
+            f"endpoint shape changed, so every reading below it is suspect")
+    return rs.get("model_group_alias") or {}
+
+
+def key_info(alias: str) -> dict:
+    """Read one key by alias, via /key/list.
+
+    🔴 NOT ``/key/info?key_alias=``. On 198 (measured 2026-10-10) that endpoint
+    answers **HTTP 200 with every field null** -- key_alias, token, models,
+    aliases, router_settings. Nothing raises, because the failure is a 200.
+    ``reachable()`` then turns ``models: None`` into ``[]`` via ``or []``,
+    ``build_table()`` produces **zero rows**, and ``lost_global_rows()`` -- the
+    guard meant to catch exactly this -- also computes from the same empty
+    ``info``, so it returns empty and waves the write through. The result is
+    ``{"key_alias": null, "router_settings": {"fallbacks": []}}``: the script
+    prints success, and an EMPTY per-key table is not "no fallbacks", it makes
+    the key fall back to the global table. Symptom: "ran fine, nothing changed."
+
+    ``/key/info?key=<token sha256>`` does return models/aliases but still nulls
+    ``token``; ``/key/list&return_full_object=true`` is the only shape that
+    returns the whole row, so that is what this uses.
+    """
+    st, _, raw = api(
+        "GET",
+        "/key/list?page=1&size=100&return_full_object=true"
+        f"&key_alias={urllib.parse.quote(alias)}",
+    )
+    if st != 200:
+        die(f"/key/list for {alias} returned {st}: {raw[:300]!r}")
+    rows = json.loads(raw).get("keys") or []
+    rows = [r for r in rows if isinstance(r, dict) and r.get("key_alias") == alias]
+    if len(rows) != 1:
+        die(f"/key/list for {alias} matched {len(rows)} rows, expected exactly 1")
+    info = rows[0]
+    # A key with no models AND no aliases reaches nothing, so every table built
+    # from it is empty -- indistinguishable from a read that silently failed.
+    # Refuse rather than write a table computed from a blind read.
+    if not (info.get("models") or info.get("aliases")):
+        die(f"{alias}: read back with neither models nor aliases -- refusing to "
+            f"build a fallback table from a read that returned nothing usable")
+    return info
 
 
 def die(msg: str) -> None:
@@ -174,6 +253,58 @@ def reachable(info: dict, groups: dict[str, str | None]) -> tuple[list[str], lis
         n for n in names if n in groups and groups[n] not in NON_CHAT_MODES
     )
     return usable, non_chat, absent
+
+
+def lookup_names(info: dict, group: str, mga: dict) -> set[str]:
+    """Every name under which ``group``'s chain can be looked up for this key.
+
+    ``fallback_lookup_groups()`` tries several names for one request (the tier a
+    pre-routing hook picked, the routed group from metadata, then the requested
+    group), so dropping a chain means dropping it under ALL of them. The three
+    sources of a second name, each measured on 198:
+
+    * global ``model_group_alias`` -- ``gpt-6-astra`` -> ``chatgpt-gpt-6-astra``.
+      Both rows exist in the global table and both must go.
+    * per-key ``aliases`` -- the rewrite happens before the router, so the
+      POST-rewrite name is what the table is keyed on.
+    * the bare name itself, for a key that reaches the group unrewritten.
+
+    Dropping only the name the user said is the silent-failure shape: the chain
+    survives under the other spelling, with no symptom.
+    """
+    names = {group}
+    for src, dst in (info.get("aliases") or {}).items():
+        if src == group or str(dst) == group:
+            names.add(src)
+            names.add(str(dst))
+    for src, dst in (mga or {}).items():
+        tgt = dst.get("model") if isinstance(dst, dict) else dst
+        if src == group or str(tgt) == group:
+            names.add(src)
+            names.add(str(tgt))
+    return {n for n in names if isinstance(n, str) and n}
+
+
+def build_drop_table(info: dict, drop: set[str], glob: dict[str, list[str]]) -> list[dict]:
+    """The key's own copy of the global table, MINUS the dropped groups' rows.
+
+    Removing one group's fallback for one key cannot be written as a deletion:
+    a per-key table REPLACES the global one rather than merging with it
+    (``route_llm_request.py`` copies ``fallbacks`` into the request body and
+    ``router.py`` does ``kwargs.get("fallbacks", self.fallbacks)``). So "drop
+    one row" has to be written as "every row this key needs, except that one".
+
+    Cost this encodes: the written table is a SNAPSHOT of the global one. Later
+    edits to the global table stop reaching this key. ``check`` re-diffs the two
+    so the drift is visible instead of silent.
+    """
+    models = {m for m in (info.get("models") or []) if m}
+    al = info.get("aliases") or {}
+    # Union of allowlist, alias sources and alias targets: lookup can present
+    # either spelling, so copying a row for either is the conservative choice.
+    reach = models | set(al.keys()) | {str(v) for v in al.values()}
+    keep = sorted(n for n in reach if n in glob and n not in drop)
+    return [{n: list(glob[n])} for n in keep]
 
 
 def build_table(usable: list[str], target: str, glob: dict[str, list[str]]) -> list[dict]:
@@ -232,6 +363,120 @@ def cmd_plan(args) -> int:
     return 0
 
 
+def _drop_plan(alias: str, group: str) -> tuple[dict, dict, set[str], list[dict]]:
+    """Shared read+compute for ``drop``/``drop-check`` so both judge identically."""
+    info = key_info(alias)
+    glob, mga = global_fallbacks(), model_group_aliases()
+    drop = lookup_names(info, group, mga)
+    table = build_drop_table(info, drop, glob)
+    return info, glob, drop, table
+
+
+def _drop_report(alias: str, info: dict, glob: dict, drop: set[str],
+                 table: list[dict]) -> list[str]:
+    cur = (info.get("router_settings") or {}).get("fallbacks") or []
+    print(f"=== {alias}")
+    print(f"    token                  : {info.get('token')}")
+    print(f"    global rows            : {len(glob)}")
+    print(f"    current per-key rows   : {len(cur)}"
+          f"{'   (empty => this key currently uses the global table)' if not cur else ''}")
+    print(f"    names the chain is looked up under : {sorted(drop)}")
+    for n in sorted(drop):
+        print(f"      {n:<28} global chain = {glob.get(n, '(no global row)')}")
+    hit = sorted(n for n in drop if n in glob)
+    print(f"    rows actually dropped  : {hit}")
+    print(f"    rows to write          : {len(table)}")
+    return hit
+
+
+def cmd_drop(args) -> int:
+    """Remove ONE group's fallback chain for ONE key, leaving every other chain."""
+    info, glob, drop, table = _drop_plan(args.key[0], args.group)
+    hit = _drop_report(args.key[0], info, glob, drop, table)
+    # 🔴 The no-op judgement is "does THIS KEY currently have a chain for this
+    # group", NOT "is there a global row". A global row always exists for a
+    # live group, so testing `glob` has no discriminating power -- it waves
+    # through both the already-done key and the key that never had the chain.
+    # What is live for this key depends on which table it reads:
+    #   * per-key table non-empty -> it REPLACES the global table, so only the
+    #     per-key rows count (this is the claude-key case: 31 rows, no opus-5.5
+    #     row => opus-5.5 already has no fallback).
+    #   * per-key table empty     -> the key reads the global table.
+    cur_rows = (info.get("router_settings") or {}).get("fallbacks") or []
+    if cur_rows:
+        live = {k for row in cur_rows if isinstance(row, dict) for k in row}
+        source = f"its own {len(cur_rows)}-row per-key table"
+    else:
+        live = set(glob)
+        source = f"the global {len(glob)}-row table"
+    if not (drop & live):
+        die(f"{args.group} already has NO fallback on this key: none of "
+            f"{sorted(drop)} appears in {source}, which is what this key reads. "
+            f"Writing anyway would rewrite the same rows, report success, change "
+            f"nothing, and newly freeze the table against future global edits.")
+    if not hit:
+        die(f"{args.group} is live for this key but has no global row to copy "
+            f"from, so the resulting table could not preserve it correctly.")
+    if not table:
+        die("the table came out EMPTY -- see cmd_apply for why that is never a "
+            "legitimate write")
+    print("\nrows written (group -> chain):")
+    for row in table:
+        for g, v in row.items():
+            print(f"  {g:<28} {v}")
+    if not args.apply:
+        print("\nDRY-RUN. pass --apply (with --backup) to write.")
+        return 0
+    if not args.backup:
+        die("--apply needs --backup <path>")
+    with open(args.backup, "w") as fh:
+        json.dump({"key_alias": info.get("key_alias"), "token": info.get("token"),
+                   "group": args.group,
+                   "router_settings": info.get("router_settings") or {},
+                   "models": info.get("models") or [],
+                   "aliases": info.get("aliases") or {}}, fh,
+                  ensure_ascii=False, indent=2)
+    print(f"\nsnapshot -> {args.backup}")
+    # key_alias addresses the row; models/aliases are deliberately NOT sent, so
+    # /key/update cannot clobber the allowlist or the alias map.
+    st, _, raw = api("POST", "/key/update",
+                     {"key_alias": info.get("key_alias"),
+                      "router_settings": {"fallbacks": table}})
+    print(f"/key/update -> {st}" + ("" if st == 200 else f"  {raw[:400]!r}"))
+    return 0 if st == 200 else 1
+
+
+def cmd_drop_check(args) -> int:
+    """Audit a dropped chain: absent under every name, nothing else lost, no drift."""
+    info, glob, drop, expect_rows = _drop_plan(args.key[0], args.group)
+    written = {}
+    for row in (info.get("router_settings") or {}).get("fallbacks") or []:
+        written.update(row)
+    expect = {g: v for row in expect_rows for g, v in row.items()}
+    bad = []
+    for n in sorted(drop):
+        if n in written:
+            bad.append(f"chain for {n} is STILL PRESENT: {written[n]}")
+    for g, v in expect.items():
+        if g not in written:
+            bad.append(f"missing row {g} (its chain {v} was lost)")
+        elif written[g] != v:
+            bad.append(f"row {g} has DRIFTED from the global table: "
+                       f"key={written[g]} global={v}")
+    extra = sorted(set(written) - set(expect))
+    if extra:
+        bad.append(f"rows that are not in the planned set: {extra}")
+    print(f"{args.key[0]}: per-key rows={len(written)} planned={len(expect)} "
+          f"models={len(info.get('models') or [])} "
+          f"aliases={len(info.get('aliases') or {})}")
+    print(f"  {args.group} absent under every lookup name: "
+          f"{all(n not in written for n in drop)}  (names: {sorted(drop)})")
+    for b in bad:
+        print(f"  !! {b}")
+    print("\nOK" if not bad else f"\n{len(bad)} problem(s)")
+    return 0 if not bad else 1
+
+
 def cmd_apply(args) -> int:
     if not args.backup and not args.no_backup:
         die("apply needs --backup <path> (or an explicit --no-backup)")
@@ -241,6 +486,18 @@ def cmd_apply(args) -> int:
         info = key_info(alias)
         usable, _, _ = reachable(info, groups)
         table = build_table(usable, args.target, glob)
+        # An empty table is never a legitimate write. Writing it does NOT mean
+        # "this key has no fallbacks" -- a per-key table replaces the global one
+        # only when non-empty, so an empty table silently hands the key back to
+        # the global table while the script reports success. ``lost_global_rows``
+        # cannot catch this: it is computed from the same ``info``, so a read
+        # that came back empty makes the guard itself return empty.
+        if not table:
+            die(f"{alias}: the table came out EMPTY (reachable chat groups: "
+                f"{len(usable)}). Refusing to write -- an empty per-key table "
+                f"makes the key fall back to the global table, so this would "
+                f"look like success and change nothing. Check that the key read "
+                f"actually returned models/aliases.")
         lost = lost_global_rows(info, table, glob)
         if lost and not args.allow_dropping_global_rows:
             die(f"{alias}: writing this table would drop the global fallback tail of "
@@ -443,6 +700,25 @@ def main() -> int:
     sp = sub.add_parser("check", help="read-only audit; exit 1 if anything is off")
     common(sp)
     sp.set_defaults(func=cmd_check)
+
+    sp = sub.add_parser("drop",
+                        help="remove ONE group's fallback chain for ONE key "
+                             "(every other chain is preserved)")
+    sp.add_argument("--key", action="append", default=[], required=True)
+    sp.add_argument("--group", required=True,
+                    help="the model group whose chain to drop, as the client "
+                         "requests it (e.g. gpt-6-astra); every alias spelling "
+                         "is resolved and dropped too")
+    sp.add_argument("--apply", action="store_true")
+    sp.add_argument("--backup", help="required with --apply")
+    sp.set_defaults(func=cmd_drop)
+
+    sp = sub.add_parser("drop-check",
+                        help="audit a dropped chain (absence, no collateral "
+                             "loss, drift against the global table)")
+    sp.add_argument("--key", action="append", default=[], required=True)
+    sp.add_argument("--group", required=True)
+    sp.set_defaults(func=cmd_drop_check)
 
     sp = sub.add_parser("probe", help="clone the key and prove the fallback really fires")
     common(sp, need_target=False)

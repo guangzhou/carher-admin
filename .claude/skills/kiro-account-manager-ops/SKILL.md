@@ -219,9 +219,11 @@ clientIdHash = `sha1(JSON.stringify({"startUrl":"https://view.awsapps.com/start"
 | `scripts/aws_mfa_rotate.py` | AWS Builder ID MFA 设备轮换（加新 seed → 验证 → 可选删旧） |
 | `scripts/aws_mfa_rotate.sh` | 批量 MFA 轮换壳 |
 | `scripts/kiro_github_login.py` | **GitHub/social 账户登录**（已走通，9/9） |
+| `scripts/kiro_builderid_email_mfa.py` | **BuilderId + 邮箱 MFA 登录**（无 TOTP seed，Graph API 取码，8/8） |
 
-**`drive_login()`** 在 `kiro_oneshot.py` 里，是 BuilderId 加号和 MFA 轮换共享的登录状态机
-（WAF 点击挑战、图片验证码、双密码、MFA、consent 全在里面）。改一处两边都生效。
+**`drive_login()`** 在 `kiro_oneshot.py` 里，是所有登录流程共享的状态机
+（WAF 点击挑战、图片验证码、双密码、MFA、consent）。
+新增 `otp_callback` 参数：无 TOTP seed 时调它取码（典型：Graph 邮箱取码）。
 
 ## GitHub/social 账户登录（2026-10-09 走通）
 
@@ -246,7 +248,27 @@ TARGET_EMAIL=x@binus.ac.id PW='<GitHub 密码>' TOTP_SEED='<seed>' \
 token exchange 走 `/oauth/token`（Kiro Desktop Auth），**不是** AWS OIDC `/token`。
 social 号 entry：`provider=Github, authMethod=social, clientId/clientSecret/clientIdHash 全 null`。
 
-**待补**：`outlook_code.py`（无 TOTP seed 时登 Outlook 取邮箱验证码）。
+## BuilderId 邮箱 MFA 登录（2026-10-11 走通，Graph API 取码）
+
+```bash
+TARGET_EMAIL=x@outlook.com PW='<AWS密码>' GRAPH_RT='<refresh-token>' GRAPH_CID='<client-id>' \
+  PYTHONPATH=scripts ~/.local/kiro-auto/venv/bin/python scripts/kiro_builderid_email_mfa.py
+```
+
+适用：有 AWS 密码 + Outlook 邮箱的 Microsoft Graph refresh-token（无 TOTP seed）。
+8/8 全成，约 40~90 秒/个。
+
+**MFA 取码流程**：refresh-token → Graph access-token → 拉收件箱最新邮件 → 找 AWS 发的验证码。
+
+🔴 **三个坑**：
+1. **consumer 账号不支持 `$filter`**（400 InefficientFilter）——拉全部邮件代码内过滤
+2. **HTML 邮件里 `color:#555555` 被 `\d{6}` 误匹配**——优先找 `class="code"` 标签
+3. **同一个码只提交一次**（`used_codes` 去重 + `after_ts` 时间窗口）
+
+**OTP Check 字段格式**：`邮箱账号|邮箱密码|refresh-token|client-id`
+（5 个号共用同一个 client-id `9e5f94bc-...`）。
+
+**替代了 `outlook_code.py`**（浏览器登 Outlook 取码）——Graph API 更干净、更快、更稳。
 
 ## AWS MFA 轮换（2026-10-08 实测）
 
@@ -337,8 +359,8 @@ scheme handler 或 SPA 路由副作用）。
 **下一步：在 fallback 页面做完整 DOM dump**（所有可交互元素 + 「身份验证器应用程序」
 的父子元素结构），确认它到底是什么元素、怎么交互。
 
-备选路径：走 `Verify via email`（已确认是按钮、能点），用 Outlook 取验证码完成二次认证。
-需要 `outlook_code.py`（尚未重建）或类似的取码逻辑。
+备选路径：走 `Verify via email`（已确认是按钮、能点），用 Graph API 取验证码
+（`kiro_common.graph_fetch_aws_otp`，已在邮箱 MFA 登录中验证走通）。
 
 ## 工具依赖
 

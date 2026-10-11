@@ -128,8 +128,13 @@ def drive_login(
     stop,
     deadline: float,
     log=K.log,
+    otp_callback=None,
 ) -> bool:
     """驱动 AWS 登录页直到 `stop(page)` 为真或超时。返回是否达成。
+
+    otp_callback：无 TOTP seed 时调它取验证码（返回 6 位字符串或 None）。
+    典型用法：lambda: K.graph_fetch_aws_otp(rt, cid) 从 Outlook 收件箱取码。
+    不传且无 seed 则打印「人工接管」等 20 秒。
 
     抽出来是为了让「登录拿 token」和「登录改 MFA」**共用同一份** WAF/验证码/MFA/
     consent 逻辑。这些分支是 2026-10-08 一个个踩出来的（见 SKILL.md 陷阱 11~15），
@@ -196,9 +201,27 @@ def drive_login(
                 pw_fail_streak = 0
         elif shape == "mfa":
             if not totp_seed:
-                log("  !! 需要 MFA 但没有 TOTP seed，人工接管")
-                time.sleep(20)
-                continue
+                if otp_callback:
+                    log("  MFA: 无 TOTP seed，调 otp_callback 取码...")
+                    otp_code = otp_callback()
+                    if otp_code:
+                        fill_first(
+                            page,
+                            ['input[name="mfaCode"]', 'input[autocomplete="one-time-code"]',
+                             'input[name="code"]', 'input[type="text"]'],
+                            otp_code,
+                        )
+                        click_submit(page)
+                        time.sleep(4)
+                        continue
+                    else:
+                        log("  !! otp_callback 没取到码，等 20s 人工接管")
+                        time.sleep(20)
+                        continue
+                else:
+                    log("  !! 需要 MFA 但没有 TOTP seed 也没有 otp_callback，人工接管")
+                    time.sleep(20)
+                    continue
             import pyotp
 
             fill_first(

@@ -375,3 +375,95 @@ def build_idc_entry(email: str, token: dict, reg: dict, usage: dict | None, mach
         "successCount": 0,
         "enabled": True,
     }
+
+
+# ---------------------------------------------------------------- Graph 邮箱取 AWS 验证码
+
+MS_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+
+
+def graph_get_access_token(refresh_token: str, client_id: str) -> tuple[str, str]:
+    """用 Microsoft consumer refresh-token 换 Graph access-token。
+    返回 (access_token, new_refresh_token)。"""
+    resp = httpx.post(
+        MS_TOKEN_URL,
+        data={
+            "client_id": client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "scope": "https://graph.microsoft.com/.default offline_access",
+        },
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Graph token exchange {resp.status_code}: {resp.text[:200]}")
+    tok = resp.json()
+    return tok["access_token"], tok.get("refresh_token", refresh_token)
+
+
+def graph_fetch_aws_otp(
+    refresh_token: str, client_id: str, timeout: float = 90,
+    after_ts: str | None = None, used_codes: set | None = None,
+) -> str | None:
+    """从 Outlook 收件箱取最新的 AWS 验证码（6 位数字）。
+
+    after_ts：只取这个 ISO 时间戳之后的邮件（排除旧码）。
+    used_codes：已经提交过的码集合（同一个码只返回一次）。
+    """
+    import re as _re
+
+    access_token, _ = graph_get_access_token(refresh_token, client_id)
+    headers = {"Authorization": f"Bearer {access_token}"}
+    deadline = time.time() + timeout
+    if used_codes is None:
+        used_codes = set()
+
+    while time.time() < deadline:
+        # 拉最新邮件（不用 $filter——consumer 账号不支持 from 过滤，返回 400 InefficientFilter）
+        resp = httpx.get(
+            "https://graph.microsoft.com/v1.0/me/messages"
+            "?$top=5&$orderby=receivedDateTime desc"
+            "&$select=subject,body,from,receivedDateTime",
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            for msg in resp.json().get("value", []):
+                # 只看 AWS MFA 邮件（发件人 no-reply@login.awsapps.com）
+                sender = (msg.get("from", {}).get("emailAddress", {}).get("address", "")).lower()
+                if "awsapps.com" not in sender and "signin.aws" not in sender:
+                    continue
+                # 只取 after_ts 之后的邮件
+                received = msg.get("receivedDateTime", "")
+                if after_ts and received < after_ts:
+                    continue
+                # 从 body 提取验证码。
+                # 🔴 HTML 邮件里 color:#555555 等 CSS 颜色值也是 6 位数字，
+                # 会被 \d{6} 误匹配。真码在 class="code" 的 div 里。
+                # 策略：先找 class="code" 标签的内容，找不到再 fallback 到全文 \d{6}。
+                body_html = msg.get("body", {}).get("content", "")
+                subject = msg.get("subject", "")
+                # 优先：<div class="code"...>520151</div> 或类似
+                code_tag = _re.findall(r'class="code[^"]*"[^>]*>(\d{6})', body_html)
+                if code_tag:
+                    code = code_tag[0]
+                else:
+                    # fallback：找不在 CSS 属性里的 6 位数（排除 #NNNNNN 和 :NNNNNN 模式）
+                    # 用 body 纯文本（去 HTML 标签）
+                    text = _re.sub(r'<[^>]+>', ' ', body_html) + " " + subject
+                    all_codes = _re.findall(r'(?<![#:;])\b(\d{6})\b', text)
+                    code = all_codes[0] if all_codes else None
+                if code:
+                    if code in used_codes:
+                        continue
+                    used_codes.add(code)
+                    log(f"  Graph 取到验证码: {code} (来自 {received[:16]})")
+                    return code
+                if codes:
+                    log(f"  Graph 取到验证码: {codes[0]} (来自 {msg.get('receivedDateTime', '?')[:16]})")
+                    return codes[0]
+
+        time.sleep(5)
+
+    log("  !! Graph 轮询超时，没取到验证码")
+    return None

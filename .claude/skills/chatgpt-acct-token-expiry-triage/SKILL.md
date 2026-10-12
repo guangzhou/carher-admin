@@ -6,6 +6,8 @@ description: >-
   清点、12 号分流实测、重新 OAuth 后装回的门禁(比 hash 不比长度)、镜像漂移必须单独一轮收。
   Use when 用户说"看看几个 acct token 过期了""重新认证""token 失效/401/DEVICE_CODE_HELL"，
   or 提到 chatgpt-acct-refresh-grant.py / aliyun-acct-reauth-install.sh。
+  ⛔「这号掉 free 了」先跑 refresh grant 拿真档位再决定烧不烧 OAuth：id_token 的 plan 是
+  签发快照，2026-10-10 据它误报 acct-227 掉 free，实为 pro(200/订阅到11-09/配额0%)；含 198 侧单号跑法。
   端到端接新号在姊妹 skill aliyun-chatgpt-acct-onboard；续订在 chatgpt-sub-renew-eip；
   198 上的号「开了 pro 要加回 litellm」走 chatgpt-pool-198-add-acct(一条命令含本页分流)。
 ---
@@ -14,6 +16,54 @@ description: >-
 
 2026-09-28 阿里云一轮 12 个过期号全程跑通后沉淀。**核心是别把「token 过期」当一个桶。**
 那轮 12 个号分流出两类，处置成本差两个数量级：3 个几十秒白捡回来，9 个得烧浏览器 OAuth。
+
+## ⛔ 「这号掉 free 了」不是烧 OAuth 的理由 —— 先 refresh grant（2026-10-11）
+
+2026-10-10 我看 acct-227 pod 内 id_token 写着 `chatgpt_plan_type=free`，报「已掉 free」。
+用户纠正「227 是 pro」。**那个 claim 是 10-05 签发时刻的冻结快照** —— token 过期后它
+永久停在那个值，而实探拿不到档位，于是快照成了唯一可见的"档位"。
+
+10-11 对 227 单号跑 refresh grant：**HTTP 200 / `plan=pro` / `sub_plan_live=chatgptpro`
+/ `has_active=true` / 订阅到 2026-11-09 / 7d 配额 0% / `is_deactivated=false`**。
+号完全健康，**几十秒、零成本救回**，表上那一行从 `UPSTREAM:401 需re-OAuth` 翻成 `OK`。
+唯一真问题是 `will_renew=false`（到期不自动续订，11-09 前要人工处理）。
+
+**我差点因此白烧 9 轮 OAuth。** 当时还找到一条"更有力"的反面证据：这 9 个号 pod 里
+`.bak-*` 旧快照（9-21~9-29）全是 `pro`，而 10-06 重登后那份变成 `free` ⇒ 看着像「换了
+新凭据仍是 free，真掉档了」。**227 正是这个形状，实探却是 pro** —— 所以这条推理也是错的。
+
+| 想当判据的东西 | 实测结论 |
+|---|---|
+| id_token 的 `chatgpt_plan_type` | 签发快照，token 过期即冻结。**不是现状** |
+| SpendLogs 里 gpt-6 族有 success | 只是排序信号 —— 实探确认 free 的 acct-120 也有 591 次 |
+| 旧 bak 是 pro、新凭据是 free | **不是判据**，227 反例 |
+
+⇒ **顺序永远是：先 refresh grant 拿真档位，再决定要不要烧 OAuth。**
+批量找同形号（只读）：`python3 scripts/chatgpt-acct-plan-misverdict-audit.py`
+（10-11 扫出 35 个 JWT 说 free + 实探 401 的号）。
+
+### 198 侧单号跑法（本页其余部分是阿里云口径）
+
+198 的凭据在 **PVC**（`chatgpt-acct-<N>-auth`）不是 Secret，`/chatgpt-auth` 可写，
+pod 出口 CF-clean，所以直接 exec 进去跑权威脚本即可，不需要 EIP 节点：
+
+```bash
+cd scripts
+B64=$(base64 < chatgpt-acct-refresh-grant.py | tr -d '\n')   # docstring 带反引号/$，必须 b64
+ssh cltx@10.68.13.198 "export KUBECONFIG=~/.kube/config
+POD=\$(kubectl -n litellm-product get pod -l app=chatgpt-acct-<N> -o jsonpath='{.items[0].metadata.name}')
+kubectl -n litellm-product exec \$POD -- python3 -c \"import base64,sys;sys.argv=['rg','/chatgpt-auth/auth.json'];exec(compile(base64.b64decode('$B64'),'rg','exec'))\""
+```
+
+输出一行：`<file> 200 <email> plan=pro until=... rt_rotated=yes`。
+
+**写后必须回读断言**（RT 只发一次，拿到 200 没写回 = 烧掉凭据）：
+`refresh_token`/`access_token`/`id_token` 三个 sha 都要变、`account_id` 保留、
+`auth.json.bak-<epoch>` 存在。再用 skill `chatgpt-acct-quota-lark` 里的实探确认
+`plan_type`，最后跑一轮刷新让表反映真相。
+
+⚠ **一次只做一个号**，不要 9 个一起上：grant 是不可逆凭据写入，单号的信息量最大、
+可退性最高。227 这一枪的全部代价 = 几十秒 + 一份 bak。
 
 ## 顺序(不许跳第 1 步)
 

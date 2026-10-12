@@ -66,6 +66,14 @@ COLUMNS: list[tuple[str, str]] = [
     # 2026-08-05 语义再变：198 侧这一列现在是 **in-pod 实探**的结论，不再是引擎
     # 快照。引擎那份挪到 state_tier 并排放 —— 两者不一致本身就是要看的信号。
     ("upstream_tier", "upstream_tier"),
+    # 2026-10-10 新增。view 一直在取 `plan`（实探 /codex/usage 的 `plan_type`，
+    # 23 行有值）**但此前没有任何一列承载它** —— 整张表上没有一处显示档位。
+    # 后果（当天实测）：acct-227 token 10-05 过期、实探 401 ⇒ 这一列空，而唯一
+    # 能看到的"档位"是 pod 内 id_token 里冻结的 `chatgpt_plan_type=free`。
+    # 我据那个快照报了「它已掉 free」，被用户当场纠正 —— 227 是 pro。
+    # **`plan` 为空 = 没探到，不是 free。** state.json 全 170 条都没有 plan 字段
+    # （实测），所以这一列有值就必然来自实探，空就是真没探到。
+    ("plan", "plan"),
     # 实探这一格：live / off / no-pod / 401:<kind> / ERR:* / FETCH_FAIL。
     # 它是整行可信度的分界：FETCH_FAIL 意味着 7d%/reset 退回了引擎快照。
     ("live_probe", "live_probe"),
@@ -79,6 +87,14 @@ COLUMNS: list[tuple[str, str]] = [
     ("auth_sync", "auth_sync"),
     ("pod_cred", "pod_cred"),
     ("7d%", "pct7d"),
+    # 2026-10-10 新增，紧挨 `7d%` 放：`7d%` 只在**实探成功**时有值，实探回
+    # 401/off 时它是空的（三分支逻辑刻意置空，见 view 的 live_tier）。于是
+    # 「引擎快照说 100% 但探不到」的号在表上 `7d%` 为空 —— 任何按 `7d%` 筛的
+    # 视图（如 `预下线`: 7d% > 90）**结构性看不见它们**。2026-10-10 实测这类行
+    # 有 65 个，acct-227 是其中一个（state 快照 100%、实探 401:token_expired），
+    # 用户按 acct 搜视图搜不到，以为号不在表里。
+    # 这一列承载引擎快照那份 pct，空与非空的差别从此在表上可见。
+    ("state_7d%", "state_pct7d"),
     # GPT-5.3-Codex-Spark 的独立 7d 子窗口（additional_rate_limits[0]）。
     # 与主窗口不同尺度，实测主窗口 100% 时 Spark 常只有 3~5%。
     ("spark%", "spark_pct"),
@@ -144,6 +160,11 @@ NEW_FIELD_SPECS = [
     {"name": "live_probe", "type": "text"},
     {"name": "state_tier", "type": "text"},
     {"name": "spark%", "type": "number"},
+    # 2026-10-10：引擎快照那份 7d pct（`7d%` 实探失败时唯一有值的那列）
+    {"name": "state_7d%", "type": "number"},
+    # 2026-10-10：实探档位。**text 而非单选** —— 单选列新增枚举值必须先补 options，
+    # 否则 delete-all 之后写入全失败 ⇒ 整表清空（2026-08-05 事故）。
+    {"name": "plan", "type": "text"},
     # 2026-08-20：订阅实探来源标记 + 续订意向。**text 类型（非单选）** —— 单选列
     # 新增枚举值必须先补 options 否则 delete-all 后写入全失败清空整表（2026-08-05 事故）。
     {"name": "sub_src", "type": "text"},
@@ -248,6 +269,31 @@ def normalize_aliyun_live_fields(r: dict) -> None:
     r.setdefault("spark_pct", None)
 
 
+MIGRATED_VERDICT = "OFFLINE(198在服)"
+
+
+def mark_migrated_to_198(aliyun_rows: list[dict], rows_198: list[dict]) -> list[str]:
+    """阿里云 scale=0 的号若 198 同编号正在服务，把 verdict 改成 MIGRATED_VERDICT。
+
+    2026-10-07：用户按 acct 搜表看到 229 是 OFFLINE，以为号坏了。实际是阿里云那行
+    （10-06 迁 198 时有意 scale=0），198 那行 ONLINE/OK、10h 1018 次全 success。
+    裸 `OFFLINE` 分不出「停了」和「搬走了」。
+
+    只改 verdict（text 列，不涉及单选 options）；status 保持 OFFLINE 不动。
+    按编号 join：scale=0 的阿里云行取不到 email。编号在两侧漂过（210 的身份曾经不同），
+    所以这里只说「198 同编号在服」这一事实，不说「同一个号」。
+    """
+    serving = {r["acct"] for r in rows_198
+               if r.get("ready") not in (None, "", "-", "off")
+               and r.get("status") == "ONLINE"}
+    hit = []
+    for r in aliyun_rows:
+        if r.get("upstream_tier") == "SCALED_DOWN" and r.get("acct") in serving:
+            r["verdict"] = MIGRATED_VERDICT
+            hit.append(r["acct"])
+    return hit
+
+
 def load_rows(cards: dict | None = None,
               aliyun_payload: dict | None = None) -> tuple[list[list], dict]:
     payload = load_payload(ROWS_JSON, label="198", required=True)
@@ -264,6 +310,7 @@ def load_rows(cards: dict | None = None,
         for r in aliyun_rows:
             r.setdefault("site", "aliyun")
             normalize_aliyun_live_fields(r)
+        mark_migrated_to_198(aliyun_rows, src_rows)
         src_rows += aliyun_rows
     if aliyun_rows:
         print("[aliyun] state_tier 恒为 'no-engine'、spark% 恒空 —— 阿里云无 quota 引擎"
@@ -347,6 +394,49 @@ def report_zk_coverage(rows: list[list], payload: dict) -> None:
                   f"{[i['acct'] for i in items]}", file=sys.stderr)
 
 
+def report_plan_plane(rows: list[list]) -> None:
+    """档位平面：哪些行的 `plan` 是实探到的，哪些行**探不到**（空≠free）。
+
+    2026-10-10 加，起因是我自己的错误归因。acct-227 的 token 10-05 过期、实探回
+    `401:token_expired` ⇒ `plan` 列无值；我去读 pod 内 id_token 里的
+    `chatgpt_plan_type=free` 并据此报「227 已掉 free」。**那个 claim 是 10-05
+    签发时刻的冻结快照，不是现在的档位**（memory 里早有这条规则：id_token 的
+    plan 是签发快照≠活）。用户纠正：227 是 pro。
+
+    反证它是 pro 的数据不需要任何 token —— SpendLogs：227 在 10-06~10-09 四天里
+    gpt-6 族 **7327 success / 88M tokens**（含 gpt-6.1-sol、codex-auto-review），
+    free 档打不出这些模型；同批的 226/228/229 实探全是 `pro`、sub_until 11-06。
+
+    所以这一段只报「探到/探不到」，**不对探不到的行给档位结论**。
+    """
+    idx = {name: i for i, (name, _) in enumerate(COLUMNS)}
+    if "plan" not in idx:
+        return
+    probed: dict[str, list[str]] = {}
+    blind: list[str] = []
+    for r in rows:
+        label = f"{r[idx['site']] or '?'}/{r[idx['acct']]}"
+        plan = r[idx["plan"]]
+        if plan:
+            probed.setdefault(str(plan), []).append(label)
+        else:
+            blind.append(label)
+    for plan, accts in sorted(probed.items()):
+        print(f"[plan] 实探 {plan} ({len(accts)}): {' '.join(accts[:14])}"
+              f"{f' …另 {len(accts) - 14}' if len(accts) > 14 else ''}",
+              file=sys.stderr)
+    if blind:
+        print(f"[plan] ⓘ {len(blind)} 行**探不到档位**（实探 401/off/no-pod）—— "
+              f"这些行 `plan` 为空。**空不等于 free**：id_token 里的 "
+              f"chatgpt_plan_type 是签发时刻快照，不是现在的档位（2026-10-10 "
+              f"acct-227 据此被误报成掉 free，实为 pro）。判档位**只有实探一条路**"
+              f"（refresh grant 拿新 token → /codex/usage）；SpendLogs 里 pro-only "
+              f"模型的 success 只是排序信号，**不是判据** —— 实探确认 free 的 "
+              f"acct-120 也有 591 次 gpt-6 success。"
+              f"批量审计: scripts/chatgpt-acct-plan-misverdict-audit.py",
+              file=sys.stderr)
+
+
 def report_auth_plane(payload: dict) -> None:
     """凭证平面自检 —— 与 zk 覆盖率同理：写表前必须印，否则表上只剩一个
     `401 需re-OAuth` 标签，而底下是成因互不相同的若干组（认证没进 PVC /
@@ -394,18 +484,27 @@ def subscription_buckets(rows: list[list]) -> dict[str, list]:
         renew_s = f" renew={renew}" if renew and renew != "-" else ""
         return f"{tag} {until} ({cell(r, 'sub_left')}) src={cell(r, 'sub_src')}{renew_s}"
 
-    out: dict[str, list] = {"expired": [], "d7": [], "no_renew": [], "stale_src": []}
+    # 只有实探（live）或明确的 401:invalidated（token 被永久吊销）才是可信的
+    # 到期证据。其余 src 值（off/no-pod/state/401:token_expired/ERR:*/FETCH_FAIL）
+    # 意味着**没能实探到当前状态**、sub_until 是 state.json 的 JWT 冻结快照（铸时
+    # 的到期日），对这些行断言"已过期"或"7 天内到期"就是把陈旧快照当告警。
+    # 实证：2026-08-28 一轮里 acct-90/91/92/93/96/101/102/103 集体报 401:token_expired
+    # （access token 到期是常规轮换，不代表订阅死），旧逻辑把它们全塞到"已过期"里。
+    TRUSTED = {"live", "401:invalidated"}
+    out: dict[str, list] = {"expired": [], "d7": [], "no_renew": [],
+                            "stale_src": [], "stale_expired": []}
     for r in rows:
+        src = cell(r, "sub_src")
         if cell(r, "sub_left") == "expired":
-            out["expired"].append(brief(r))
+            (out["expired"] if src in TRUSTED else out["stale_expired"]).append(brief(r))
         d = days_left(r)
-        if d is not None and d < 7:
+        if d is not None and d < 7 and src in TRUSTED:
             out["d7"].append(brief(r))
         if cell(r, "will_renew") == "no":
             out["no_renew"].append(brief(r))
         # 日期不是现值的行（探不到/退快照），且确实带着一个日期 —— 单独点名，
         # 免得读者把冻结的 JWT 快照当续订后的现值
-        if cell(r, "sub_src") not in ("live", "") and cell(r, "sub_until"):
+        if src not in ("live", "") and cell(r, "sub_until"):
             out["stale_src"].append(cell(r, "acct"))
     return out
 
@@ -427,10 +526,118 @@ def report_subscription_plane(rows: list[list]) -> None:
             print(f"[sub]     {line}", file=sys.stderr)
     if not (b["expired"] or b["d7"] or b["no_renew"]):
         print("[sub] ✓ 无已过期/7天内到期/不续订的号", file=sys.stderr)
+    if b["stale_expired"]:
+        # 快照说"已过期"、但 src≠live/401:invalidated —— 冻结日期是 JWT 铸时的，
+        # 探不到当前订阅态，**不代表**这些号真过期。仅信息性列出，不当告警。
+        # 只印一行编号：2026-10-07 这一桶 126 行逐行打印，把上面真告警挤出了屏幕。
+        names = [line.split(" ", 1)[0] for line in b["stale_expired"]]
+        print(f"[sub] ⓘ 快照 sub_left=expired 但探不到当前态 (src≠live/401:invalidated) "
+              f"({len(names)}) —— 日期是 JWT 冻结快照，不代表真过期: "
+              f"{' '.join(names)}", file=sys.stderr)
     if b["stale_src"]:
         print(f"[sub] ⓘ {len(b['stale_src'])} 行的订阅日期是冻结快照（sub_src≠live，"
               f"scale=0/探针失败探不到）—— 这些行的到期日**不反映续订**，"
               f"以实际探到当日为准", file=sys.stderr)
+
+
+def _cell_matches(value: Any, op: str, want: Any) -> bool | None:
+    """单条视图 filter 条件对一个格子求值。返回 None = 这个算子我不认，别猜。"""
+    # 单选列在 filter JSON 里写成 list（["ONLINE"]），行里是裸字符串
+    if isinstance(want, list):
+        want = want[0] if len(want) == 1 else want
+    if op in ("isEmpty", "isNotEmpty"):
+        empty = value in (None, "", [], "-")
+        return empty if op == "isEmpty" else not empty
+    if op in ("==", "is", "!=", "isNot"):
+        eq = (value == want)
+        return eq if op in ("==", "is") else not eq
+    if op in (">", ">=", "<", "<="):
+        # 空格子参与不了数值比较 —— 飞书视图里它直接不满足条件（这正是
+        # `7d%` 为空的号在 `预下线` 视图里消失的机制）。
+        if value is None or isinstance(value, (str, list)):
+            return False
+        try:
+            v, w = float(value), float(want)
+        except (TypeError, ValueError):
+            return None
+        return {">" : v > w, ">=": v >= w, "<": v < w, "<=": v <= w}[op]
+    return None
+
+
+def report_view_blind_spots(base_token: str, table_id: str, rows: list[list]) -> None:
+    """自检：带 filter 的视图各会藏掉多少行，以及**因为格子是空**而被藏的是哪些。
+
+    2026-10-10 加。起因：用户按 acct 在视图里搜 acct-227 搜不到，判断「它不在表里」
+    —— 实际全表 190 行里它有两行（198 + aliyun），是两个视图各自把它滤掉了：
+      · `online`  filter = status==ONLINE AND sub_left!=expired
+        → 227 的 198 行 status=ONLINE 但 sub_left=expired（订阅真过期）
+      · `预下线`  filter = 7d% > 90
+        → 227 的 `7d%` 是**空**（实探 401），空格子不满足任何数值比较
+    **视图不是表。** 空格子在视图里和「不存在」长得一模一样，而写表这条路径此前
+    从不提及视图 —— 看表的人没有任何线索能区分「没写进去」和「被滤掉了」。
+    所以这段只报事实、不改视图：视图是用户自己配的，脚本无权动。
+    """
+    resp = lark_cli([
+        "base", "+view-list",
+        "--base-token", base_token, "--table-id", table_id,
+        "--as", "user", "--format", "json",
+    ])
+    if not resp.get("ok"):
+        print(f"[views] 读不到视图列表（跳过盲区自检）: "
+              f"{(resp.get('error') or {}).get('message', '?')}", file=sys.stderr)
+        return
+
+    idx = {name: i for i, (name, _) in enumerate(COLUMNS)}
+    views = (resp.get("data") or {}).get("views") or []
+    for v in views:
+        if not ((v.get("_meta") or {}).get("filter")):
+            continue          # 无 filter 的视图 = 全表，没有盲区
+        fr = lark_cli([
+            "base", "+view-get-filter",
+            "--base-token", base_token, "--table-id", table_id,
+            "--view-id", v.get("id") or "", "--as", "user", "--format", "json",
+        ])
+        flt = ((fr.get("data") or {}).get("filter") or {})
+        conds = flt.get("conditions") or []
+        logic = (flt.get("logic") or "and").lower()
+        unknown: list[str] = []
+        blank_hidden: dict[str, list[str]] = {}
+        shown = 0
+        for r in rows:
+            label = f"{r[idx['site']] or '?'}/{r[idx['acct']]}"
+            verdicts: list[bool] = []
+            for cond in conds:
+                if not isinstance(cond, list) or len(cond) < 2:
+                    continue
+                field, op = cond[0], cond[1]
+                want = cond[2] if len(cond) > 2 else None
+                if field not in idx:
+                    unknown.append(f"{field}(表外列)")
+                    continue
+                cell = r[idx[field]]
+                m = _cell_matches(cell, op, want)
+                if m is None:
+                    unknown.append(f"{field} {op}")
+                    continue
+                verdicts.append(m)
+                # 空格子导致不满足 —— 这是最会骗人的那一类
+                if not m and cell in (None, "", [], "-"):
+                    blank_hidden.setdefault(field, []).append(label)
+            if verdicts and (all(verdicts) if logic == "and" else any(verdicts)):
+                shown += 1
+        if unknown:
+            print(f"[views] 「{v.get('name')}」有我不认的条件 {sorted(set(unknown))}"
+                  f" —— 该视图可见行数不可信，跳过", file=sys.stderr)
+            continue
+        print(f"[views] 「{v.get('name')}」filter={logic} {conds} → "
+              f"{shown}/{len(rows)} 行可见，藏 {len(rows) - shown} 行", file=sys.stderr)
+        for field, accts in sorted(blank_hidden.items()):
+            # 去重：同一行可能在多个条件上都空
+            uniq = sorted(set(accts))
+            head = " ".join(uniq[:12])
+            tail = f" …另 {len(uniq) - 12}" if len(uniq) > 12 else ""
+            print(f"[views]   ⓘ 因 `{field}` 为空而被滤掉 {len(uniq)} 行（空≠不满足，"
+                  f"但在视图里和「不存在」同形）: {head}{tail}", file=sys.stderr)
 
 
 def ensure_fields(base_token: str, table_id: str) -> None:
@@ -519,10 +726,15 @@ def report_aliyun_plane(payload: dict) -> None:
     print(f"[aliyun] {len(rows)} 行 | 采样时刻={payload.get('serving_sampled_at')} "
           f"次数={payload.get('serving_samples')}", file=sys.stderr)
     for label, pred in [
-        ("scale=0(预期内下线,非故障)", lambda r: r.get("upstream_tier") == "SCALED_DOWN"),
+        ("已迁 198(阿里云 scale=0,198 同编号在服)",
+         lambda r: r.get("verdict") == MIGRATED_VERDICT),
+        ("scale=0(预期内下线,非故障)",
+         lambda r: r.get("upstream_tier") == "SCALED_DOWN"
+         and r.get("verdict") != MIGRATED_VERDICT),
         ("探针失败(状态未知,已 fail-closed 不接单)",
          lambda r: r.get("upstream_tier") == "PROBE_ERR"),
-        ("verdict 非 OK", lambda r: r.get("verdict") not in ("OK", "OFFLINE")),
+        ("verdict 非 OK",
+         lambda r: r.get("verdict") not in ("OK", "OFFLINE", MIGRATED_VERDICT)),
         ("device-code hell", lambda r: r.get("device_code") == "yes"),
         ("从未成功 refresh(exp_gap>0)",
          lambda r: isinstance(r.get("exp_gap"), (int, float)) and r["exp_gap"] > 0),
@@ -690,6 +902,47 @@ def batch_create_records(base_token: str, table_id: str, rows: list[list]) -> in
     return created
 
 
+def read_all_records(base_token: str, table_id: str,
+                     *, fields: list[str] | None = None) -> tuple[list[list], list[str]]:
+    """读回全表，列式返回 (rows, header)。
+
+    分页用 **`--offset`**，不是 `--page-token` —— `+record-list` 没有后者这个 flag
+    （实测 `unknown flag "--page-token"`，lark-cli 1.0.93）。原来那版第一页之后
+    必然拿到 validation error、`data` 为空 ⇒ 循环 break ⇒ verify 报
+    「200 records in table, expected N」。表只有 190 行时这条路径从没走到过，
+    **一过 200 行就会把每一轮成功写入都误判成失败**（rc=4）。池子现在 190 行。
+
+    `fields` 只投影需要的列（verify 要全列，自检只要三四列）。
+    """
+    out: list[list] = []
+    header: list[str] = []
+    offset = 0
+    PAGE = 200
+    while True:
+        cmd = [
+            "base", "+record-list",
+            "--base-token", base_token, "--table-id", table_id,
+            "--limit", str(PAGE), "--offset", str(offset),
+            "--as", "user", "--format", "json",
+        ]
+        for f in fields or []:
+            cmd.extend(["--field-id", f])
+        resp = lark_cli(cmd, timeout=60)
+        if not resp.get("ok"):
+            print(f"[read] ERROR offset={offset}: "
+                  f"{(resp.get('error') or {}).get('message', '?')}", file=sys.stderr)
+            break
+        d = resp.get("data", {})
+        header = d.get("fields") or header
+        page = d.get("data") or []
+        out.extend(page)
+        # has_more 与「本页有没有行」都要看：空页 + has_more=True 会无限循环。
+        if not d.get("has_more") or not page:
+            break
+        offset += len(page)
+    return out, header
+
+
 def verify_records(base_token: str, table_id: str, rows: list[list]) -> bool:
     """读回表格并逐格比对，不只数条数。
 
@@ -715,26 +968,7 @@ def verify_records(base_token: str, table_id: str, rows: list[list]) -> bool:
               f"{len(want)} 个唯一键，写入会互相覆盖", file=sys.stderr)
         return False
 
-    got_rows: list[list] = []
-    header: list[str] = []
-    page_token = None
-    while True:
-        cmd = [
-            "base", "+record-list",
-            "--base-token", base_token, "--table-id", table_id,
-            "--limit", "200", "--as", "user", "--format", "json",
-        ]
-        if page_token:
-            cmd.extend(["--page-token", page_token])
-        resp = lark_cli(cmd)
-        d = resp.get("data", {})
-        header = d.get("fields") or header
-        got_rows.extend(d.get("data") or [])
-        if not d.get("has_more"):
-            break
-        page_token = d.get("page_token", "")
-        if not page_token:
-            break
+    got_rows, header = read_all_records(base_token, table_id)
 
     if len(got_rows) != expected:
         print(f"[verify] MISMATCH: {len(got_rows)} records in table, "
@@ -785,6 +1019,92 @@ def verify_records(base_token: str, table_id: str, rows: list[list]) -> bool:
     return True
 
 
+def find_acct(base_token: str, table_id: str, needle: str) -> int:
+    """只读表回答「acct-N 在不在表上、被哪个视图藏了」。
+
+    2026-10-10 加。这是「acct-227 为什么不在表里」的直接答案路径：那次的真相是
+    行在表上（198 + aliyun 两行），两个视图各自把它滤掉了。重跑一轮 95s 的刷新
+    **回答不了这个问题** —— 刷新只会再写一遍同样的行，视图照样藏着它。
+    """
+    acct = needle if needle.startswith("acct-") else f"acct-{needle.lstrip('acct-')}"
+    got, header = read_all_records(base_token, table_id)
+    if "acct" not in header:
+        print("[find] 读不到表头", file=sys.stderr)
+        return 1
+    hp = {n: i for i, n in enumerate(header)}
+
+    def cell(row: list, name: str) -> Any:
+        v = row[hp[name]] if name in hp else None
+        return v[0] if isinstance(v, list) and v else (None if v in ("", []) else v)
+
+    hits = [r for r in got if cell(r, "acct") == acct]
+    print(f"[find] 全表 {len(got)} 行，{acct} 命中 {len(hits)} 行", file=sys.stderr)
+    if not hits:
+        print(f"[find] {acct} **不在表上** —— 行宇宙是 state.json key ∪ "
+              f"`kubectl get deploy` 名字，两边都没有它就不会有行。"
+              f"核对: ssh 198 'kubectl -n litellm-product get deploy chatgpt-acct-"
+              f"{acct.split('-')[-1]}'", file=sys.stderr)
+        return 1
+    for r in hits:
+        brief = {k: cell(r, k) for k in
+                 ("site", "status", "verdict", "plan", "upstream_tier", "live_probe",
+                  "7d%", "state_7d%", "sub_left", "ready", "snapshot_at")
+                 if k in hp}
+        print(f"[find]   {json.dumps(brief, ensure_ascii=False)}", file=sys.stderr)
+        # 探不到档位时显式说明，别让读者把空 plan 读成 free（2026-10-10 acct-227）
+        if not cell(r, "plan"):
+            print(f"[find]     ↳ plan 为空 = 实探探不到档位（live_probe="
+                  f"{cell(r, 'live_probe')}），**不是 free**。判档位: refresh grant "
+                  f"后实探，或查 SpendLogs 里 pro-only 模型有无 success",
+                  file=sys.stderr)
+
+    # 哪个视图藏了它 —— 用户看的是视图，不是全表
+    resp = lark_cli([
+        "base", "+view-list",
+        "--base-token", base_token, "--table-id", table_id,
+        "--as", "user", "--format", "json",
+    ])
+    for v in ((resp.get("data") or {}).get("views") or []):
+        vid, vname = v.get("id") or "", v.get("name")
+        has_filter = bool((v.get("_meta") or {}).get("filter"))
+        if not has_filter:
+            print(f"[find] 视图「{vname}」无 filter → 能看到", file=sys.stderr)
+            continue
+        vr = lark_cli([
+            "base", "+record-list",
+            "--base-token", base_token, "--table-id", table_id,
+            "--view-id", vid, "--field-id", "acct", "--field-id", "site",
+            "--limit", "200", "--as", "user", "--format", "json",
+        ], timeout=60)
+        vd = vr.get("data") or {}
+        vf = vd.get("fields") or []
+        vrows = vd.get("data") or []
+        ia = vf.index("acct") if "acct" in vf else None
+        seen = sum(1 for r in vrows if ia is not None and r[ia] == acct)
+        fr = lark_cli([
+            "base", "+view-get-filter",
+            "--base-token", base_token, "--table-id", table_id,
+            "--view-id", vid, "--as", "user", "--format", "json",
+        ])
+        conds = (((fr.get("data") or {}).get("filter") or {}).get("conditions") or [])
+        mark = "能看到" if seen else "**被滤掉**"
+        print(f"[find] 视图「{vname}」{mark}（该视图共 {len(vrows)} 行）"
+              f" filter={conds}", file=sys.stderr)
+        if not seen:
+            for cond in conds:
+                if not isinstance(cond, list) or len(cond) < 2 or cond[0] not in hp:
+                    continue
+                for r in hits:
+                    c = cell(r, cond[0])
+                    m = _cell_matches(c, cond[1], cond[2] if len(cond) > 2 else None)
+                    if m is False:
+                        why = "格子为空" if c in (None, "", "-") else f"实际 {c!r}"
+                        print(f"[find]     ↳ {cell(r, 'site')} 行不满足 "
+                              f"`{cond[0]} {cond[1]} {cond[2] if len(cond) > 2 else ''}`"
+                              f"（{why}）", file=sys.stderr)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Write 198 chatgpt-acct quota data to Lark Base")
     parser.add_argument("--run-quota", action="store_true", help="Run chatgpt-acct-quota.sh first")
@@ -802,7 +1122,15 @@ def main() -> int:
                              f" 不传且不加 --run-quota-aliyun 则只写 198)")
     parser.add_argument("--dry-run", action="store_true",
                         help="只取数+自检，不建列不删不写")
+    parser.add_argument("--find", metavar="ACCT", default="",
+                        help="只读表回答「acct-N 在不在表上/哪些视图藏了它」，"
+                             "不取数不动表（acct-227 或 227 都行）")
     args = parser.parse_args()
+
+    # --find 走纯读路径：不取数（省 95s）、不动表。用户问「为什么没有 acct-N」时
+    # 用它，而不是重跑整轮刷新 —— 整轮刷新回答不了「它被视图滤掉了」这个问题。
+    if args.find:
+        return find_acct(args.base_token, args.table_id, args.find)
 
     # ⚠ 取数必须全部走完再动表。写表是「先删全表再重建」，若阿里云取数失败发生在
     # 删除之后，结果是整表被清空、只写回 198 —— 阿里云那些行**静默消失**，
@@ -866,11 +1194,15 @@ def main() -> int:
     report_auth_plane(payload)
     report_serving_plane(payload)
     report_subscription_plane(rows)   # 订阅到期专项：两个集群一起看，2026-08-25 加
+    report_plan_plane(rows)           # 档位：探到的才给结论，空≠free（2026-10-10）
     if aliyun_payload:
         # 阿里云不复用 198 的三段自检：那些分桶的判据预设了 198 的平面
         # （auth_not_in_pvc 要有 /Data 镜像、zk 覆盖率要有 zk 池）。硬套会让 7 行
         # 阿里云数据涌进不适用的桶，把 198 的真信号淹掉。
         report_aliyun_plane(aliyun_payload)
+    # 视图盲区：行写进去了 ≠ 用户在他打开的那个视图里看得到（2026-10-10 acct-227）。
+    # 纯读 + 本地求值，不动表，所以 --dry-run 也跑。
+    report_view_blind_spots(args.base_token, args.table_id, rows)
 
     if args.dry_run:
         n_by_site: dict[str, int] = {}

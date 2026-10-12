@@ -1,11 +1,58 @@
 ---
 name: chatgpt-acct-quota-lark
-version: 5.1.0
-description: "查看 198 + 阿里云 chatgpt-acct 上游配额 + zerokey 累计消耗并写入飞书多维表格。入口 `scripts/chatgpt-acct-quota-refresh-lark.sh`。用户说"查看配额""写入飞书""更新配额表格""表上 acct-N offline 了"时使用。"
+version: 5.2.0
+description: "查看 198 + 阿里云 chatgpt-acct 上游配额 + zerokey 累计消耗并写入飞书多维表格。入口 `scripts/chatgpt-acct-quota-refresh-lark.sh`。用户说"查看配额""写入飞书""更新配额表格""表上 acct-N offline 了"时使用。「表上没有 acct-N」用 `--find N`(纯读,多半是视图滤掉的不是没写)；判 pro/free 只认实探,`plan` 列空=探不到≠free。"
 ---
 
 > 真身在仓内 `.claude/skills/chatgpt-acct-quota-lark/`（2026-10-07 从 `~/.claude/skills/` 同名独立副本迁入，
 > 迁入时两份 sha256 相同；全局那份按 CLAUDE.md 不动，此后会漂，以仓内为准）。
+
+## ⛔ 判 acct 档位（pro/free）：只认实探，`plan` 列空 = 探不到，**不是 free**
+
+2026-10-10 我把 acct-227 报成「已掉 free」。依据是 pod 内 id_token 的
+`chatgpt_plan_type=free` —— **那是 10-05 签发时刻的冻结快照**，该号 token 已过期、
+实探拿不到档位，于是快照成了唯一可见的"档位"。用户纠正「227 是 pro」。
+10-11 实跑 refresh grant：**200 / `plan=pro` / `sub_plan_live=chatgptpro` /
+`has_active=true` / 订阅到 11-09 / 7d 配额 0%** —— 账号全健康，只是 token 过期。
+
+**合法判据只有一条**：in-pod refresh grant 拿新 token → 实探 `/codex/usage` 读
+`plan_type`。三个诱人的替代判据**全部实测证伪**：
+
+| 替代判据 | 为什么错 |
+|---|---|
+| id_token / access_token 的 `chatgpt_plan_type` | 签发时刻快照，token 一过期就永久冻结在那个值 |
+| SpendLogs 里 pro-only 模型（gpt-6 族）有 success ⇒ pro | **实探确认 free 的 acct-120 也有 591 次 gpt-6 success**。只能当排序信号 |
+| pod 里 `.bak-*` 旧快照是 pro、新换的那份是 free ⇒ 真掉档 | 227 正是这形状，实探却是 pro。**换新凭据后仍显示 free ≠ 真的 free** |
+
+另两个坑：统计 pro-only 流量要按 **`model`（真正服务的模型）** 而非 `model_id`（腿名）
+—— 腿 `...-gpt-6-sol` 的行里 `model` 可能是 `chatgpt-gpt-5.6-luna`。表上
+`sub_left=expired` 若 `sub_src=401:*`，那也是冻结快照，不是真到期。
+
+批量找同形号（**只读**，不打 grant）：
+```bash
+python3 scripts/chatgpt-acct-plan-misverdict-audit.py        # 或 --json
+```
+2026-10-11 全量扫出 **35 个**与 227 同形（JWT 说 free + 实探 401）。
+救号走 skill `chatgpt-acct-token-expiry-triage`——RT 成功即轮转**必须同轮写回**，
+没有只读版本，属凭据写入，**先问用户**。
+
+## ⛔ 「表上没有 acct-N」先用 `--find`，别重跑刷新
+
+2026-10-10 用户问「为什么没有 acct-227，它明明在循环池里」。真相：**全表 190 行里
+它有两行**（198 + aliyun），是**视图**滤掉的 ——
+- `online` 视图 filter `status==ONLINE AND sub_left!=expired` ⇒ 227 的 198 行
+  `status=ONLINE` 但 `sub_left=expired`（且那个 expired 来自冻结快照）
+- `预下线` 视图 filter `7d% > 90` ⇒ 227 的 `7d%` 为**空**，而**空格子不满足任何
+  数值比较**（10-10 实测 164 行因此不可见）
+
+**视图不是表，空格子在视图里和「不存在」同形。** 重跑刷新只会写回同样的行，答不了
+这个问题。
+
+```bash
+./scripts/chatgpt-acct-quota-refresh-lark.sh --find 227   # 纯读，不取数/不动表/不抢锁
+```
+印：全表命中几行、每行关键列、**被哪个视图滤掉 + 具体哪条条件不满足**。
+每轮刷新也会印 `[views]` 段（各视图藏了多少行、哪些是因格子为空被藏）。
 
 ## ⛔ 用户说「acct-N offline 了」→ 先看是哪一行
 
@@ -200,6 +247,7 @@ bash scripts/chatgpt-acct-quota-aliyun.sh --summary            # 阿里云
 | `--run-quota-aliyun` | false | 先取阿里云（送 view 到 226 上跑）|
 | `--aliyun-rows` | "" | 直接吃现成的阿里云 rows JSON |
 | `--dry-run` | false | 只取数 + 自检，不建列不删不写 |
+| `--find <N>` | "" | **纯读**：`acct-N` 在不在表上、被哪个视图滤掉（不取数/不动表/不抢锁；`227` 或 `acct-227` 都行）|
 | `--base-token` | `YdrZb5xaNaziDHssawGcDpd1nqf` | 飞书 Base token |
 | `--table-id` | `tblsw3E1zZ2IuBbW` | 目标数据表 ID |
 | `--skip-delete` | false | 跳过删除旧记录（追加写入） |
@@ -243,11 +291,11 @@ bash scripts/chatgpt-acct-quota-aliyun.sh --summary            # 阿里云
 `created==parsed` 的 OK。所以两侧取数都在动表之前完成，任一侧失败就直接非零
 退出、不碰表。2026-08-04 阿里云那次 `Killed: 9` 就是靠这条兜住的。
 
-## 表格字段（43 列）
+## 表格字段（45 列）
 
 **site**, acct, email, take, status, verdict, ready, refresh_err, device_code,
-exp_gap, **upstream_tier, live_probe, state_tier**, probe_age, auth_sync, pod_cred,
-7d%, **spark%**, reset, main_n, main$, **main_n7, main$7**, codex_n, codex$,
+exp_gap, **upstream_tier, plan, live_probe, state_tier**, probe_age, auth_sync, pod_cred,
+7d%, **state_7d%**, **spark%**, reset, main_n, main$, **main_n7, main$7**, codex_n, codex$,
 **codex_n7, codex$7**, zk_n, zk$, zk_n7, zk$7,
 zk_lat_avg, zk_lat_p95, zk_empty%, next_reset, restore, sub_until, sub_left,
 **sub_src, will_renew**, reset_cards, cause, snapshot_at
@@ -282,6 +330,17 @@ zk_lat_avg, zk_lat_p95, zk_empty%, next_reset, restore, sub_until, sub_left,
   已过期 / 7 天内到期（<7d，边界与 aliyun `sub<7d` 一致）/ `will_renew=no` 三桶
   逐行点名（含到期日+sub_src），另点名 sub_src≠live 的行数——那些行的日期是冻结
   快照，不反映续订。纯函数 `subscription_buckets()` 有单测钉边界。
+- 2026-10-10 **`plan` + `state_7d%` 两列**（→ **45 列**，都是 text/number 非单选）。
+  两列都在补同一个洞：**view 早就取到了数据，但没有列承载 ⇒ 表上看不到 ⇒ 读者去读
+  更坏的替代品**。
+  - **`plan`**（源 `plan_type`，实探 `/codex/usage`）：此前整张表**没有任何档位列**。
+    于是 acct-227 实探 401 时，唯一可见的"档位"是 pod 内 id_token 里冻结的
+    `chatgpt_plan_type=free` —— 我据此报「227 已掉 free」，用户纠正，10-11 实跑
+    refresh grant 得 `plan=pro`、订阅到 11-09、7d 0%。详见下节「⛔ 判档位」。
+    `state.json` 全 170 条**都没有 plan 字段**（实测），所以这列有值必来自实探。
+  - **`state_7d%`**（源 `state_pct7d`，引擎快照）：`7d%` 只在实探成功时有值，实探
+    401 时**刻意置空**（三分支逻辑）。于是「快照说 100% 但探不到」的行两列全空，
+    与「真没量」同形，且**对 `7d% > 90` 这类视图结构性不可见**（10-10 实测 164 行）。
 
 ### `sub_src` 取值（语义同 `live_probe`）
 
@@ -671,10 +730,20 @@ acct-66 的 `expires_at` 是毫秒、JWT `exp` 是秒。没归一化时 `exp_gap
 ## verify 必须逐格比对，行主键是 (site, acct)
 
 原 `verify_records()` 只比 `len(record_id_list) == expected` —— 64 行全写成空格子
-也报 `[verify] OK`。已改为读回全部行 × 全部列（`len(COLUMNS)`，当前 43）逐格 diff，
+也报 `[verify] OK`。已改为读回全部行 × 全部列（`len(COLUMNS)`，当前 45）逐格 diff，
 不符则列前 15 处并 `return 4`。
 坑：`+record-list` 列式返回、select 列回读为 list、表格列顺序与脚本 `COLUMNS` 无关
 （必须按列名取）。
+
+### 🔴 分页只能用 `--offset`，`+record-list` 没有 `--page-token`
+
+2026-10-10 修。原 verify 的翻页循环传 `--page-token`，而该子命令**没这个 flag**
+（实测 `unknown flag "--page-token"`，lark-cli 1.0.93）⇒ 第一页之后必然拿 validation
+error、`data` 为空 ⇒ break。表只有 190 行（<200 一页装得下）时这条路径**从没走到过**，
+所以一直没暴露；**一过 200 行，每一轮成功写入都会被误判成失败**（`200 records in
+table, expected N` → rc=4）。池子现在 190 行，离这个坑一步之遥。
+已抽成 `read_all_records(base_token, table_id, fields=None)`：`--offset` 翻页、
+`fields` 可投影、空页也 break（`has_more=True` + 空页会无限循环）。
 
 ## 汇报纪律：state.json 的字段不是"验证过的结论"
 
@@ -731,7 +800,7 @@ zk 聚合按 `zk-N` 分组，但表格行来自 state.json。state 里没有的 
 `zerokey-account-usage.py` 头部注释「zerokey spend 恒为 0」**已过期**：实测 16116 行中
 15148 行 spend>0，累计 $1544.88。那脚本是 188 端口平面的老物，与 198 集群内平面无关。
 
-## 诊断输出（11 段）
+## 诊断输出（13 段）
 
 zerokey 平面（`zk_diagnostics`）：
 
@@ -752,6 +821,17 @@ zerokey 平面（`zk_diagnostics`）：
 **只收 `sub_src ∈ {live, 401:invalidated}`** 的行；其余「快照说 expired 但探不到」的放
 `ⓘ stale_expired` 桶，**只印一行编号**（10-07 这桶 126 行逐行打印，把真告警挤出了屏幕）。
 读 `[sub]` 时只把前三段当待处置清单。
+
+档位平面（`report_plan_plane`，2026-10-10 加）：按实探结果分 `实探 pro` / `实探 free`
+两桶逐个点名，**探不到的行单独一桶**并印明「空不等于 free」+ 判档位的唯一合法路径。
+10-11 实测分布：**pro 16 / free 8 / 探不到 166**。
+⚠ 这一段**刻意不对探不到的行给档位结论** —— 它存在的理由就是阻止 227 那类误判复发。
+
+视图盲区（`report_view_blind_spots`，2026-10-10 加）：读每个带 filter 的视图，**本地
+求值**算出各藏了多少行，并单列「因格子为空而被滤掉」的行。纯读+本地求值，`--dry-run`
+也跑。10-10 本地算出的 `预下线 10/190`、`online 15/190` 与线上视图**逐一对上**。
+不认的算子（`_cell_matches` 返回 `None`）整段跳过并说明 —— 猜算子会印出一个看着精确
+但是编的数字。**本段只报事实，绝不改视图**（视图是用户配的）。
 
 ## 稳定写入关键点
 

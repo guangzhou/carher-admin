@@ -260,8 +260,21 @@ async function main() {
     return 4;
   }
   if (before.who === "ours" && !args.remove) {
-    console.log("   ✅ 已经通了,而且确认是**我们的小代理**(/healthz 认得出) —— 隧道已经配好。");
-    console.log("      不需要改任何东西。本脚本到此为止。");
+    console.log("   ✅ 已经通了,而且确认是**我们的小代理**(/healthz 认得出) —— 隧道已经配好,ssh 配置不用改。");
+    // 隧道已配好的人也要补服务器组件 —— 他们恰恰是「升级 Cursor 后远程窗口出问题」的那批老用户。
+    if (args.apply) {
+      console.log("\n⑧ 服务器上的 Cursor 组件补丁");
+      const rp = sh(process.execPath, [path.join(__dirname, "cursor_remote_patch.js"), "--host", host, "--apply"], 240000);
+      const rpOut = (rp.stdout || "") + (rp.stderr || "");
+      if (/还没有和你本机同版本/.test(rpOut)) {
+        console.log("   ⏳ 服务器上还没有和你本机同版本的 Cursor 组件。先在 Cursor 里连一次这台服务器,再双击一次本脚本。");
+      } else if (rp.status === 0) {
+        console.log("   ✅ 已补好(" + rpOut.split("\n").filter((l) => /^\s*(✅ 已打|已打过)\s/.test(l)).length + " 个文件)。已开着的远程窗口关掉重连即可。");
+      } else {
+        console.log("   ⚠️ 没补成(不影响模型能不能用):");
+        rpOut.split("\n").filter((l) => /❌|⚠️/.test(l)).slice(0, 4).forEach((l) => console.log("      " + l.trim()));
+      }
+    }
     return 0;
   }
   if (!args.remove) console.log("   (000 = 远端那边确实什么都没有,符合预期)\n");
@@ -346,6 +359,23 @@ async function main() {
     return 1;
   }
   console.log("   ✅ 通了(401 = 打到你本机的小代理了,只是探针没带 Key —— 这正是我们要的)");
+  // ── 8) 服务器上的 Cursor 组件也补一下(远程窗口里 agent 扩展跑在服务器上)────────
+  // 本机安装器只补了 Mac 那份;远程窗口用的是服务器 cursor-server 里自带的那份 ⇒ 不补的话
+  // 远程窗口里会「每轮都压缩上下文」/ 偶发打到 Cursor 自家推理报 permission_denied。
+  // 服务器上要先有和本机**同 commit** 的 cursor-server(Cursor 第一次连上去时自己装)。
+  console.log("\n⑧ 服务器上的 Cursor 组件补丁");
+  const rp = sh(process.execPath, [path.join(__dirname, "cursor_remote_patch.js"), "--host", host, "--apply"], 240000);
+  const rpOut = (rp.stdout || "") + (rp.stderr || "");
+  if (/还没有和你本机同版本/.test(rpOut)) {
+    console.log("   ⏳ 服务器上还没有和你本机同版本的 Cursor 组件(第一次连这台机,或刚升级过 Cursor)。");
+    console.log("      先在 Cursor 里连一次这台服务器,等左下角显示已连接,**再双击一次本脚本**,它会补上。");
+  } else if (rp.status === 0) {
+    console.log("   ✅ 已补好(" + rpOut.split("\n").filter((l) => /^\s*(✅ 已打|已打过)\s/.test(l)).length + " 个文件)");
+  } else {
+    console.log("   ⚠️ 没补成(不影响模型能不能用,只影响远程窗口里的上下文压缩):");
+    rpOut.split("\n").filter((l) => /❌|⚠️/.test(l)).slice(0, 4).forEach((l) => console.log("      " + l.trim()));
+  }
+
   console.log("\n━━━ 接下来在 Cursor 里 ━━━");
   console.log("  1) 完全退出 Cursor(Cmd+Q),重新打开");
   console.log("  2) 左下角连到 " + alias + ",在那个窗口里随便发一条消息");
@@ -354,6 +384,7 @@ async function main() {
   console.log("\n提示:第二个窗口连同一台机时,ssh 可能提示");
   console.log("  \"remote port forwarding failed for listen port " + port + "\"");
   console.log("  —— 这是因为第一个窗口已经占着了,**无害,别去修**,模型照样能用。");
+  console.log("  **每次升级 Cursor 后**,连一次服务器、再双击一次本脚本(服务器要补的是新版本那份)。");
   return 0;
 }
 

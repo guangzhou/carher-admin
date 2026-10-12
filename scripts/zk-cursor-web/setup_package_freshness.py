@@ -46,6 +46,18 @@ GENERATED_ONLY = {
     "zk-delta/common/framing.js", "zk-delta/sidecar/sidecar.js",
     "zk-delta/SHA256SUMS.txt",
 }
+# 🔴 2026-10-13 补:**必须在包里的真源文件**。原来这道门只比"包里有的",不查"包里缺的"——
+#    打包脚本漏 cp 一个文件 ⇒ 那个成员根本不在 zip 里 ⇒ 没有可比的对象 ⇒ 门禁 PASS。
+#    当晚就踩到:cursor_remote_patch.js 没进包,三道门全绿,而 REMOTE-SSH 运行时会找不到它。
+#    缺一个就红。
+REQUIRED_MEMBERS = {
+    "cursor_team_setup.js", "cursor_team_setup.sh", "cursor_team_setup.cmd",
+    "cursor_remote_ssh.js", "cursor_remote_ssh.sh", "cursor_remote_patch.js",
+    "INSTALL-Mac.command", "UPGRADE-Mac.command", "REPAIR-Mac.command", "DOCTOR-Mac.command",
+    "REMOTE-SSH-Mac.command", "UNINSTALL-Mac.command",
+    "INSTALL-Windows.cmd", "UPGRADE-Windows.cmd", "REPAIR-Windows.cmd", "DOCTOR-Windows.cmd",
+    "REMOTE-SSH-Windows.cmd", "UNINSTALL-Windows.cmd", "cursor_remote_ssh.cmd", "README.txt",
+}
 JS_MEMBER = "cursor_team_setup.js"
 
 
@@ -113,11 +125,11 @@ def leg_zip_vs_worktree(members):
                   "package_team_setup.sh" % (name, len(members[name]),
                                              short(members[name]),
                                              len(disk_bytes), short(disk_bytes)))
-    # 反向:仓库里有、zip 里漏了的核心文件
-    for name in (JS_MEMBER, "cursor_team_setup.sh", "cursor_team_setup.cmd"):
+    # 反向:必须在包里、却漏了的文件(原来只查 3 个核心文件 ⇒ cursor_remote_patch.js 漏进包时三道门全绿)
+    for name in sorted(REQUIRED_MEMBERS | {JS_MEMBER}):
         if name not in members:
             fail = 1
-            print("❌ 核心文件 %r 不在 zip 里" % name)
+            print("❌ 必须在包里的 %r 不在 zip 里(打包脚本漏 cp 了?)" % name)
     if not fail:
         print("✅ 第①腿 zip vs 工作副本:%d 个逐字节相同,%d 个由打包脚本现生成(不在仓库)"
               % (same, gen))

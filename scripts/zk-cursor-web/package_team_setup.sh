@@ -16,6 +16,11 @@ cp "$HERE/cursor_team_setup.cmd" "$STAGE/"
 # 服务器"的同事有意义,大多数人一辈子不会双击它,不该拖着主安装流程一起变复杂。
 cp "$HERE/cursor_remote_ssh.js"  "$STAGE/"
 cp "$HERE/cursor_remote_ssh.sh"  "$STAGE/"
+# 远程窗口里 agent 扩展跑在**服务器**上,本机补丁管不到 ⇒ cursor_remote_ssh.js 调这个
+# 去服务器上补同一套件C/件D(从 cursor_team_setup.js 原文切补丁家族,不另抄一份)。
+cp "$HERE/cursor_remote_patch.js" "$STAGE/"
+# 它切补丁要读 cursor_team_setup.js,包里本来就有;少了它脚本会报「切不到」而不是静默跳过。
+[ -f "$STAGE/cursor_remote_patch.js" ] || { echo "FATAL: cursor_remote_patch.js 没进包" >&2; exit 1; }
 # Windows 启动器**从主启动器生成**,不另抄一份。那里面找 Cursor.exe 的六段逻辑
 # (固定路径/注册表 App Paths/卸载项/开始菜单/手输)是 09-03 同事踩坑后补的,
 # 手抄第二份 = 下次再补一段时两边悄悄分叉。
@@ -347,7 +352,16 @@ __MODEL_LIST__
        作用是:你 ssh 连过去的时候,顺手把远端的 8788 转回你本机的 8788。
        这样两边的地址都成立 —— **Cursor 里一个设置都不用改**,你的 Key 也始终
        只待在自己电脑上(不会落到那台服务器上,那种机器通常是多人共用的)。
+       它还会顺手把**服务器上的 Cursor 组件**补一下(远程窗口里有一部分 Cursor 组件跑在
+       服务器上,本机的补丁管不到那边;不补的话远程窗口会「每轮都在压缩上下文」)。
+       看到「⑧ … ✅ 已补好」就对了;看到「⏳ 服务器上还没有和你本机同版本」= 先用 Cursor
+       连一次那台服务器(第一次会在服务器上装组件,要几分钟),再双击一次。
   改完:完全退出 Cursor(Cmd+Q)重开,再连远程,发一条消息试试。
+  🔴 **每次升级 Cursor 之后**:先连一次服务器(Cursor 会在服务器上装新版本的组件),
+       再双击一次 REMOTE-SSH。服务器要补的是新版本那一份,不重跑 = 远程窗口又回到没补的样子。
+  如果它说「远端的 8788 端口被别的程序占着」:那台服务器上别人的服务占了这个端口,
+       隧道建不起来。请服务器管理员把那个程序换个端口;或者只在这台服务器上把
+       Cursor → Settings → Models 的 OpenAI Base URL 临时改成 https://cc.auto-link.com.cn/pro/v1。
   撤掉:同一个按钮里没有撤销;要撤跑 `sh cursor_remote_ssh.sh --host <那台> --remove --apply`,
        或直接还原它给你留的备份 ~/.ssh/config.bak-<时间戳>(它写之前一定先备份)。
   两个常见误会:
@@ -435,11 +449,15 @@ echo "模型清单 $(wc -l < "$STAGE/.models.txt" | tr -d ' ') 个,下架:$RETIR
 sed -e "/__MODEL_LIST__/r $STAGE/.models.txt" -e "/__MODEL_LIST__/d" \
     "$STAGE/README.txt" > "$STAGE/README.new" && mv "$STAGE/README.new" "$STAGE/README.txt"
 rm -f "$STAGE/.models.txt"
+# __MODEL_PREFIX__ 在启动器 / README 里当「产品名」用(「让远程窗口也能用 X 的模型」)。
+# 原来取 MODEL_PREFIXES 第一项 ⇒ 10-12 cr-g 整段下架后,同事双击 REMOTE-SSH 看到的仍是「cr-g 的模型」,
+# 而菜单里已经一个 cr-g 都没有了。产品名固定成包名,不再跟着前缀表的排序走。
+PRODUCT_NAME="cursor-g"
 # 占位符要**扫整个 stage**,不只 README —— UNINSTALL 启动器里也写了 __MODEL_PREFIX__,
 # 只替 README 的话同事双击看到的是字面量 "__MODEL_PREFIX__"(改这里时实测)。
 for f in "$STAGE/README.txt" "$STAGE"/*.command "$STAGE"/*.cmd; do
   [ -f "$f" ] || continue
-  sed -e "s/__DEFAULT_MODEL__/$DEF_MODEL/g" -e "s/__MODEL_PREFIX__/${MODEL_PFX%-}/g" \
+  sed -e "s/__DEFAULT_MODEL__/$DEF_MODEL/g" -e "s/__MODEL_PREFIX__/$PRODUCT_NAME/g" \
       -e "s/__RETIRED_MODELS__/$RETIRED/g" \
       "$f" > "$f.new" && mv "$f.new" "$f"
 done
@@ -448,7 +466,7 @@ LEFT=$(grep -rl "__DEFAULT_MODEL__\|__MODEL_PREFIX__\|__RETIRED_MODELS__\|__MODE
 if [ -n "$LEFT" ]; then
   echo "FATAL: 占位符没替换干净:$LEFT" >&2; exit 1
 fi
-echo "占位符替换完成:默认模型=$DEF_MODEL 前缀=${MODEL_PFX%-}"
+echo "占位符替换完成:默认模型=$DEF_MODEL 产品名=$PRODUCT_NAME"
 
 # 先删旧包。zip -r 是**往已有归档里追加**，不是重建：改过文件名之后旧名字会留在包里，
 # 同事解出来会多一个乱码文件(第一次改名时实测踩到)。

@@ -48,7 +48,11 @@ def run(email: str, passwords: list[str], graph_rt: str, graph_cid: str) -> int:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
             K.log("STEP 3  打开 AWS BuilderId authorize")
-            page.goto(authorize_url, wait_until="domcontentloaded", timeout=60000)
+            try:
+                page.goto(authorize_url, wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                pass  # OIDC authorize 重定向到 signin.aws 时可能 ERR_ABORTED
+            time.sleep(3)
 
             # 记住 MFA 开始前的时间戳——只取之后的邮件，排除旧码
             mfa_start_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

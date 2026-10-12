@@ -200,6 +200,8 @@ const DEFAULT_MODELS = [
   // gpt-6-sol 飞书正文一直写着、菜单里却没有 ⇒ 同事只能手敲(与 gpt-6-luna 同一个病)。
   // gpt-5.2 / gpt-5.4 在 std 上 alias 到 sa-grok-4.6(同一上游,两个名字读数逐字相同)。
   "gpt-6-sol", "gpt-6.1-sol", "gpt-5.2", "gpt-5.4",
+  // ── 2026-10-12 晚:std key 又改过一轮(32→35 名),本轮按用户点名「只加非出图的」──
+  "gemini-3.8-flash", "grok-4.3", "grok-build-0.1",
   /* ── ③ cr-g 段 2026-10-12 用户点名整段下架 ──
      原来 13 个名（`cr-g-5.6` / `-instant` / `-mini` / `-t-mini` / `cr-g-research` /
      `-thinking` / `-luna` + 6 个 thinking/luna 的 min/high/max 档）全部移出菜单，
@@ -219,6 +221,8 @@ const DEFAULT_MODELS = [
      上线面:带 grok-4.7 的 530 把当代 key 里 allowlist 518~530 把、alias 506~515 把。 */
   "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5",
   "claude-opus-5", "claude-sonnet-5",
+  // 2026-10-12 晚:std 新增的 claude 4.x 四个,cursor 线型实打 4/4 200 出字。
+  "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
   // ── ④ 其他 ──
   "codex-auto-review", "deepseek-v4-flash", "kimi-k2.7-code",
   "glm-5.3-flash", "qwen3-coder-next",
@@ -239,7 +243,24 @@ const DEFAULT_MODELS = [
    段序仍按用户点名的 ①grok/composer ②gpt ③claude ④其他。
    ⚠️ 覆盖面不是 100%:这 30 名在带 grok-4.7 的 530 把当代 key 上 allowlist 518~530、
    alias 506~522 ⇒ 少数 key 缺 alias 的会 400,那是 key 的事(补 alias 是另一轮生产变更),
-   不是名字的事(判据见 09-21「同一个名字在两把 key 上读数相反」那条)。 */
+   不是名字的事(判据见 09-21「同一个名字在两把 key 上读数相反」那条)。
+
+   ── 2026-10-12 晚:std key 自己又改了一轮(32 → **35** 名,`updated_at 13:52`)──
+   用户点名「只加非出图的，出图名一概不进」。菜单 30 → **37**,加的 7 个:
+     `claude-opus-4-8` / `-4-7` / `-4-6` / `claude-sonnet-4-6`(claude 4.x 老一代,4/4 200 出字)
+     `gemini-3.8-flash` / `grok-4.3` / `grok-build-0.1`(3/3 200 出字)
+   ⛔ **没进的 5 个,每个都有读数,别照着 std 再抄回来**:
+     `grok-imagine-image-2.0` / `grok-imagine-image-quality` → chat 线型 **500**;
+     `gpt-image-2` / `grok-imagine` → 200 但**同一轮里两个名字 mid 逐字相同**
+       (=被 alias 改写到同一个落点),且上午同一把尺子量到过「200 但出字为空」
+       ⇒ 读数自相矛盾,**没查清之前不进全员菜单**;
+     `deepseek-v4.1-flash` → **出字 4/6、空 2/6(失败率 33%)**,不是偶发。
+       它是 322 把 key 的主力名字,值得单独一轮查,但不能带着 33% 空回复进菜单。
+   ⚠️ std 已经**摘掉**但菜单保留的 7 个(`composer-2.5` / `deepseek-v4-flash` / `gpt-5.2` /
+   `gpt-5.4` / `grok-4.20-0309-reasoning` / `grok-4.5-latest` / `grok-4.6-latest`):
+   用户本轮只点名「加」,没点名摘 ⇒ **不动**。摘名字会让已装机的同事菜单里少东西,是另一次决策。
+   🔴 **std 是用户自己的实验 key,会频繁改**(10-12 一天内改了两次)⇒ 别把它当「标准模板」
+   拿去 `--converge-to` 同事的 key;对齐菜单每次都要重新实打,不许照抄它的 models 数组。 */
 /* RETIRED_MODELS：整表赋值之后，「退役」不再需要单独的摘除路径 —— 名字不在
    DEFAULT_MODELS 里，跑一遍就自然没了。这里**只留给选中位 re-point 用**：
    某个功能位正钉着一个已经不在菜单里的名字时，要把它改回 DEFAULT_MODEL，
@@ -300,9 +321,15 @@ let ACTIVE_DEFAULT_MODEL = DEFAULT_MODEL;
 //    `claude-sonnet-5` 同理),且不命中 `claude-opus-4.6` / `claude-4.6-sonnet` 这类别人的名字。
 // 2026-10-12 对齐 std 时 `jev` 是个**没有分隔符的裸名**,前缀表里要单独一条
 //    (`jev` 自己就是前缀,整名匹配)。少了它 parity 门会红 + `--uninstall` 摘不掉。
+// 2026-10-12 晚新增那 5 个:claude 4.x 四个 + gemini-3.8-flash。**整名当前缀(最窄)**,
+//    实测不命中同事自己可能有的 `claude-opus-4.6` / `claude-sonnet-4.6` / `claude-4.6-sonnet`
+//    / `gemini-3.8-pro`(点号 vs 连字符正好把两类名字分开)⇒ `--uninstall` 不会误删他的东西。
+//    ⚠️ `grok-4.3` / `grok-build-0.1` 已被既有的宽前缀 `grok-` 覆盖,不另加。
 const MODEL_PREFIXES = ["cr-g-", "grok-", "composer-", "sa-grok-", "sa-composer-",
   "qwen3-coder-", "gpt-", "codex-", "deepseek-", "kimi-", "glm-",
-  "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "jev"];
+  "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "jev",
+  "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
+  "gemini-3.8-flash"];
 /* `--bare-sa` 往这里塞它生成的裸名（`sa-grok-4.6` → `grok-4.6`）。
    为什么不直接往 MODEL_PREFIXES 里加 `grok-` / `composer-`：那两条会**同时命中
    Cursor 自带的 grok / composer 模型**，而 isOurs 已经是个偏宽的判据（`gpt-` 那条
@@ -838,9 +865,22 @@ const PATCHES = [
     // 这是目录写进 availableDefaultModels2 之前**最后一个能动的点**(下面紧跟两处 set…)。
     // `this` 在此是 refreshDefaultModels 的方法 this(紧随其后的 Jh(()=>{…this._reactiveStorageService…})
     // 同一 this)⇒ 直接从 reactiveStorage 读 userAddedModels,不依赖上文局部变量名。
+    /* 🔴 2026-10-12 修:原来这里连 `parameterDefinitions:[],variants:[]` 一起清掉,
+       **把档位选择器(High / Fast / Medium 那两个芯片)一并剥没了**。
+       现象只在**全新装机的人**身上出现,所以一直没被发现:
+         · 老用户(如本机)装机**前** Cursor 早已把撞名的 9 个名字认领进自带目录
+           (不在 userAddedModels)⇒ 本补丁条件不成立、碰不到它们 ⇒ 档位一直好着;
+         · 全新机器装完 `userAddedModels` 是**30 条全在**(老用户只有 14)⇒ 本补丁全部接管
+           ⇒ 干净 user 目录实测 **9/9 撞名名字的 variants 从 16/8/6/2/24/15/20/32/1 全被清成 0**,
+           而且条目变成"自定义"后在 Settings 里也不能编辑。
+       **清它的理由(注释原话"与活着的条目逐字段同形 ⇒ 走 BYOK")已被同一份文件证伪**:
+       走不走 BYOK 只看「模型名前缀 + useOpenAIKey」(`bOd`),**不看 isUserAdded**,
+       而 `byok-force` 已经让"名字在 userAddedModels 里就恒走 openai"。
+       ⇒ 认领(isUserAdded:!0,防被驱逐)是必要的,**剥档位不是**。两个字段都保留。
+       ⚠️ 别再"顺手"把它们清回去:档位是服务端按名字下发的数据,清掉用户自己救不回来。 */
     name: "keepmine-claim", marker: "@cxteam-keepmine2",
     rx: new RegExp("(const " + ID + "=" + ID + "\\((" + ID + ")\\);\\2=\\2\\.map\\((" + ID + ")=>" + ID + "\\(\\3\\)\\))", "g"),
-    sub: (m) => m[1] + "/*@cxteam-keepmine2*/.map(" + m[3] + "=>{try{const __cxu=this._reactiveStorageService.applicationUserPersistentStorage.aiSettings.userAddedModels||[];return __cxu.includes(" + m[3] + ".name)&&" + m[3] + ".isUserAdded!==!0?{..." + m[3] + ",isUserAdded:!0,parameterDefinitions:[],variants:[]}:" + m[3] + "}catch(__cxe){return " + m[3] + "}})",
+    sub: (m) => m[1] + "/*@cxteam-keepmine2*/.map(" + m[3] + "=>{try{const __cxu=this._reactiveStorageService.applicationUserPersistentStorage.aiSettings.userAddedModels||[];return __cxu.includes(" + m[3] + ".name)&&" + m[3] + ".isUserAdded!==!0?{..." + m[3] + ",isUserAdded:!0}:" + m[3] + "}catch(__cxe){return " + m[3] + "}})",
   },
 
   /* ── byok(2026-09-23):Free 档把 BYOK 开关关掉 ⇒ 我们的名字改道 Cursor 服务端 ─────────

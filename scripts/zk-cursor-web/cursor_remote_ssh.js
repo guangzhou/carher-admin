@@ -107,16 +107,28 @@ function sshBase() {
    返回 HTTP 状态码字符串；"000" = 根本连不上。
    ⚠️ 远端不一定有 curl（精简镜像常见），所以有 /dev/tcp 的备胎；
       备胎只能证明"端口通不通"，证不出 HTTP，因此它只回 "open"/"000"。 */
+/* 🔴 2026-10-13(188 实测):**只看 HTTP 码会把"别人占着这个端口"读成"隧道已经通了"**。
+   188 上 8788 被一个跑了 98 天的 zerokey-codex bridge 占着:带 RemoteForward 连进去,
+   ssh 只打一行 `remote port forwarding failed`(连接照建),远端打 127.0.0.1:8788 回 **200**
+   —— 但那是 codex bridge 的模型列表,不是我们的小代理。原来这个函数看到非 000 就判「已经通了」,
+   于是**正好在坏的那台上告诉用户不用改**,而 Cursor 的请求全打到了别人的服务上。
+   ⇒ 判据改成**认人不认码**:打 /healthz,只有回包里带小代理自己的字段(`delta_url`)才算是我们。
+   返回 code 之外再给 who:"ours"(我们的小代理)/"other"(端口有人但不是我们)/"none"(没人)。 */
 function probeRemote(host, port, withTunnel) {
   const base = sshBase();
   if (withTunnel) base.push("-R", port + ":127.0.0.1:" + port);
   const remote =
     "if command -v curl >/dev/null 2>&1; then " +
-    "curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:" + port + "/v1/models; " +
-    "else (exec 3<>/dev/tcp/127.0.0.1/" + port + ") >/dev/null 2>&1 && printf open || printf 000; fi";
+    "c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:" + port + "/v1/models); " +
+    "h=$(curl -s --max-time 6 http://127.0.0.1:" + port + "/healthz 2>/dev/null | head -c 400); " +
+    "case \"$h\" in *delta_url*) w=ours ;; *) [ \"$c\" = 000 ] && w=none || w=other ;; esac; " +
+    "printf '%s %s' \"$c\" \"$w\"; " +
+    "else (exec 3<>/dev/tcp/127.0.0.1/" + port + ") >/dev/null 2>&1 && printf 'open unknown' || printf '000 none'; fi";
   const r = sh("ssh", base.concat([host, remote]), 45000);
-  const out = (r.stdout || "").trim();
-  return { code: out || "000", err: (r.stderr || "").trim(), rc: r.status };
+  const out = (r.stdout || "").trim().split(/\s+/);
+  const err = (r.stderr || "").trim();
+  return { code: out[0] || "000", who: out[1] || "none", err, rc: r.status,
+           fwdFailed: /remote port forwarding failed/i.test(err) };
 }
 
 /* 本机小代理活着没 —— 第 0 步阳性对照。
@@ -231,9 +243,24 @@ async function main() {
 
   // ── 4) 阴性对照:现在远端打得通吗 ──────────────────────────────────────
   const before = probeRemote(host, port, false);
-  console.log("④ 阴性对照 · 远端直接打 127.0.0.1:" + port + " → " + before.code);
-  if (before.code !== "000" && !args.remove) {
-    console.log("   ✅ 已经通了 —— 说明隧道**已经配好**(或者你已有别的通道)。");
+  console.log("④ 阴性对照 · 远端直接打 127.0.0.1:" + port + " → " + before.code + "(" + before.who + ")");
+  if (before.who === "other" && !args.remove) {
+    // 端口被远端别的服务占了 ⇒ 我们的反向隧道**建不起来**,而 Cursor 会把请求打给那个服务。
+    console.log("   ❌ 远端的 " + port + " 端口已经被**别的程序**占着(不是我们的小代理)。");
+    console.log("      这时 ssh 只会打一行 `remote port forwarding failed` 然后照常连上,");
+    console.log("      Cursor 的模型请求全部打到那个程序上 ⇒ 模型报错,而且看不出原因。");
+    // ⚠️ 不能简单"换个远端端口":Cursor 里的模型地址是 127.0.0.1:8788,在远程窗口里请求从
+    //    远端发出 ⇒ 远端必须**恰好**在 8788 上有我们的小代理,换成 18788 Cursor 也不会去找它。
+    //    所以能走的只有两条:让出这台机器的 8788,或者这台机器上直接用公网地址(不走小代理)。
+    console.log("      解法(二选一):");
+    console.log("        a) 请这台服务器的管理员把占着 " + port + " 的程序换个端口(它可以换,我们不行)");
+    console.log("        b) 这台机器上不走本机小代理:Cursor → Settings → Models,把 OpenAI Base URL");
+    console.log("           临时改成  https://cc.auto-link.com.cn/pro/v1  (远程窗口天生就能用,只是没有增量传输)");
+    console.log("      占用者:  在服务器上跑  ss -ltnp | grep :" + port + "  能看到是谁");
+    return 4;
+  }
+  if (before.who === "ours" && !args.remove) {
+    console.log("   ✅ 已经通了,而且确认是**我们的小代理**(/healthz 认得出) —— 隧道已经配好。");
     console.log("      不需要改任何东西。本脚本到此为止。");
     return 0;
   }
@@ -304,7 +331,13 @@ async function main() {
 
   // ── 7) 阳性验收:同一把尺子再量一次 ───────────────────────────────────
   const after = probeRemote(host, port, false);
-  console.log("\n⑦ 阳性验收 · 远端再打 127.0.0.1:" + port + " → " + after.code);
+  console.log("\n⑦ 阳性验收 · 远端再打 127.0.0.1:" + port + " → " + after.code + "(" + after.who + ")");
+  if (after.who === "other" || after.fwdFailed) {
+    // 配置写对了,但隧道没建起来:远端端口被别人占了(ssh 只打一行 warning,连接照建)
+    console.log("   ❌ 隧道没建起来:远端 " + port + " 端口被别的程序占着,请求会打到它那里去。");
+    console.log("      见上面第④步的两条解法。回滚:重跑并加 --remove --apply。");
+    return 4;
+  }
   if (after.code === "000") {
     console.log("   ❌ 还是不通。配置写对了但没起作用,最可能是那台服务器禁了端口转发。");
     console.log("      ssh 的原始输出:");

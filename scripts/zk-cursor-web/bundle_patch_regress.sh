@@ -209,7 +209,27 @@ else
     [ -f "$REF/$b" ] || { skip "②:备份里没有 $b"; continue; }
     CX_APPLY_TO_FILE="$REF/$b" CX_APPLY_OUT="$TMP/old-$b" node "$JS" >/dev/null 2>"$TMP/old-$b.log"
     if cmp -s "$TMP/old-$b" "$LIVE_RES/out/vs/workbench/$b"; then ok "②$b BYTE-EQUAL live"
-    else bad "②$b 与 live 已打 bundle 不一致(旧代产物漂了:$TMP/old-$b)"; cp "$TMP/old-$b" /tmp/ 2>/dev/null; fi
+    else
+      # 🔴 这一红有**两种完全不同的成因**,别合成一句"旧代产物漂了"(2026-10-12 踩到):
+      #   A 真漂移:改动意外影响了别的补丁 ⇒ 必须查;
+      #   B **有意改了某个补丁**,而 live 上装的还是旧版 ⇒ 不一致是必然的。
+      # B 的正确处置(SOP:"别把有意加补丁导致的②红当已知问题挥掉")=
+      #   证明差异**恰好只有你改的那一处**:把 live 里的旧片段替换成新片段后,
+      #   与新产物 `cmp` 逐字节相同。下面把首个差异的位置和上下文打出来,
+      #   好让人当场判断落在哪一处补丁上,而不是只知道"不一致"。
+      bad "②$b 与 live 已打 bundle 不一致 —— 可能是真漂移,也可能你刚有意改了某个补丁(见下方首个差异)"
+      cp "$TMP/old-$b" /tmp/ 2>/dev/null
+      python3 - "$LIVE_RES/out/vs/workbench/$b" "$TMP/old-$b" <<'PYDIFF' || true
+import sys
+a=open(sys.argv[1],encoding='utf8',errors='replace').read()
+b=open(sys.argv[2],encoding='utf8',errors='replace').read()
+n=min(len(a),len(b)); i=0
+while i<n and a[i]==b[i]: i+=1
+print('        长度 live=%d 新产物=%d;首个差异 @%d'%(len(a),len(b),i))
+print('        live  : ...%s...'%a[max(0,i-70):i+70].replace('\n','\\n'))
+print('        新产物: ...%s...'%b[max(0,i-70):i+70].replace('\n','\\n'))
+PYDIFF
+    fi
   done
 fi
 

@@ -113,6 +113,8 @@ DEFAULT_MODELS = [
     # 2026-10-12 对齐 std key 补进来的 4 个(全部 200 出字)。gpt-6-sol 飞书正文一直写着、
     # 菜单里却没有 ⇒ 同事只能手敲(与 gpt-6-luna 同一个病)。
     "gpt-6-sol", "gpt-6.1-sol", "gpt-5.2", "gpt-5.4",
+    # 2026-10-12 晚:std 又改一轮(32→35),按用户点名「只加非出图的」补这 3 个(3/3 200 出字)。
+    "gemini-3.8-flash", "grok-4.3", "grok-build-0.1",
     # ── ③ cr-g 段 2026-10-12 用户点名整段下架(原 13 个名全部移出菜单,
     #    登记进 RETIRED_MODELS 供选中位 re-point)。
     #    ⚠️ MODEL_PREFIXES 里的 `cr-g-` 留着不删 —— 老用户库里还有这些名字要靠它摘。
@@ -123,6 +125,8 @@ DEFAULT_MODELS = [
     #    per-key alias → kiro-claude-*。
     "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5",
     "claude-opus-5", "claude-sonnet-5",
+    # 2026-10-12 晚:std 新增的 claude 4.x 四个,cursor 线型实打 4/4 200 出字。
+    "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
     # ── ④ 其他 ──
     "codex-auto-review", "deepseek-v4-flash", "kimi-k2.7-code",
     "glm-5.3-flash", "qwen3-coder-next",
@@ -161,7 +165,12 @@ DEFAULT_MODEL = "grok-4.7"
 # `jev` 是裸名(没有分隔符),它自己就是一条前缀。
 MODEL_PREFIXES = ["cr-g-", "grok-", "composer-", "sa-grok-", "sa-composer-",
                   "qwen3-coder-", "gpt-", "codex-", "deepseek-", "kimi-", "glm-",
-                  "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "jev"]
+                  "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "jev",
+                  # 10-12 晚新增 5 个:整名当前缀(最窄),实测不命中同事的 claude-opus-4.6 /
+                  # claude-sonnet-4.6 / gemini-3.8-pro(点号 vs 连字符把两类名字分开)。
+                  # grok-4.3 / grok-build-0.1 已被宽前缀 grok- 覆盖,不另加。
+                  "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
+                  "gemini-3.8-flash"]
 def is_ours(name):
     return isinstance(name, str) and any(name.startswith(p) for p in MODEL_PREFIXES)
 
@@ -362,7 +371,11 @@ PATCHES = [
          sub=lambda m: m.group(1) + '/*@cxteam-keepmine2*/.map(' + m.group(3)
                        + '=>{try{const __cxu=this._reactiveStorageService.applicationUserPersistentStorage.aiSettings.userAddedModels||[];return __cxu.includes('
                        + m.group(3) + '.name)&&' + m.group(3) + '.isUserAdded!==!0?{...' + m.group(3)
-                       + ',isUserAdded:!0,parameterDefinitions:[],variants:[]}:' + m.group(3)
+                       # 🔴 2026-10-12:不再清 parameterDefinitions/variants —— 那会把档位
+                       # 选择器(High/Fast/Medium)剥没,且只在全新装机的人身上发作。
+                       # 清它的理由("逐字段同形才走 BYOK")已被证伪:路由只看名字前缀+
+                       # useOpenAIKey,不看 isUserAdded。详注见 js 同名条目。
+                       + ',isUserAdded:!0}:' + m.group(3)
                        + '}catch(__cxe){return ' + m.group(3) + '}})'),
     # byok(2026-09-23):Free 档把 BYOK 开关关掉 ⇒ 请求改道 Cursor 服务端,弹
     # 「Named modes unavailable / Free plans can only use Auto」。详注见 js 同名条目。

@@ -725,13 +725,31 @@ ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor cursor_tea
 **10-12 真机读数(留作口径样例)**:5 发全 `ok`,菜单名 `claude-opus-5-5`/`claude-sonnet-5-5`
 → 落点 `kiro-claude-*`,key=`cursor-liuguoxian-std`,1.4~66.2s;小代理 `req_total` 0→6。
 
-**升级前必须先做的两件事**(做不到就别升):
+**升级前必须先做的三件事**(做不到就别升):
 - **跑一次腿②**(pristine 重打 == live 已打 BYTE-EQUAL)。升上去就**永久失去同版本参照物**,
   那腿以后只能 SKIP 或退化成弱判据。
+- **把那一版的 pristine bundle 存成长期资产**(🔴 **只能在升级前做**):
+  `~/.cursor-team-setup-backup/<ver>-<ts>/` 里的 `workbench.{desktop,glass}.main.js`
+  + 四条 `cxctxwin__*`,一代约 **200MB**。它是「新正则对旧版零漂移」唯一的量具
+  (②腿的替代判据)。10-12 本机按用户要求只留最新版,这批材料已经没了。
 - **留回滚素材**:Cursor 官方只放最新版 ⇒ **升上去退不回旧版**。
   `mv /Applications/Cursor.app /Applications/Cursor.app.old<ver>` 保一份整 app
   (`~/.cursor-team-setup-backup/` 里那些只能还原 **bundle**,跨版本盖会把 Cursor 弄坏)。
   这份旧 app 还是**阳性对照**的来源:keytar 那条判据就是靠"新版 false / 旧版 true"才证明尺子不是恒 false。
+  ⚠️ 删它之前先想清楚:删完"旧版里本来有什么"就再也问不出来了。
+
+**升级后、删旧版材料之前,必须先给新版造一份 ctxwin pristine 种子**(10-12 实操):
+腿⑤/⑦/⑧ 取 `~/.cursor-ctxwin-backup/*` 的 `tail -1`,而那些快照是**旧版**的。
+把旧的删掉而不补新的 ⇒ 三腿直接 SKIP(台架白摆着)。造法 = 从升级时自动落的
+`~/.cursor-team-setup-backup/<新版>-<ts>/` 里把 `cxctxwin__*` **剥掉前缀**拷过去:
+```sh
+SRC=~/.cursor-team-setup-backup/<新版>-<ts>; DST=~/.cursor-ctxwin-backup/<ts>-<新版>-pristine
+mkdir -p "$DST"; for f in "$SRC"/cxctxwin__*; do cp "$f" "$DST/$(basename "$f" | sed 's/^cxctxwin__//')"; done
+```
+验收三条:两个 marker 都 0(真 pristine)、目录名排序在最后(`tail -1` 能挑中它)、
+**新版标志在/旧版标志不在**(3.24.12 判据:`byok-connect-routed`>0 且
+`promptContextUsageSnapshotBlobId`=0)。⛔ 别拿 live 当种子 —— 它装完就带 marker,
+pristine 断言会正确判红,**那不是腿坏是喂错了**。
 - ⚠️ 覆盖安装前 `kill` 掉 **zk-delta 小代理** —— 它跑在即将被替换的二进制上
   (`pgrep -f "Cursor.app/Contents/MacOS/Cursor"` 会看到它,**那不是 GUI 没退干净**:
   判 GUI 退没退要排除「以 `.js` 为参数」的 node 模式进程)。
@@ -880,7 +898,18 @@ ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor cursor_tea
    **4b. 改 AST 定位层时的硬门**:`CX_FORCE_REGEX=1` 取正则基线,和 AST 产物 `cmp` **逐字节相同**,
    4 个版本 × 2 条 bundle 全过才算。09-15 实测:3.17.19/3.18.25/3.20.21 六条全 BYTE-EQUAL;
    3.16.29 两条 `AST_rc=2 == RX_rc=2`(同上,两实现一致拒绝,不是回归——跑 `git show HEAD:` 那版复现过同样的 hits=0)。
-   **②腿 SKIP 时的替代判据(2026-09-15 用过)**:live 已升级、拿不到同版本参照物时,别把 SKIP 当过——
+   🔴 **2026-10-12 起这条替代判据在本机已经没有材料了**:用户点名「只保留最新版」,
+   `~/.cursor-team-setup-backup/` 只剩 `3.24.12-*`、`~/.cursor-ctxwin-backup/` 只剩
+   `20261012-324-pristine`,两个旧 app(3.20.17 / 3.21.18)也删了。**官方只放最新版 ⇒ 下不回来。**
+   ⇒ 以后改锚点时「新正则对旧版零漂移」**量不到了**,别声称验过。
+   现实可行的两条退路:① 从**同事还没升级的机器**上拷一份旧 pristine bundle(最靠谱);
+   ② 下一次升级前,**先把那一版的 pristine bundle 存成长期资产**再升
+   (`~/.cursor-team-setup-backup/<ver>-*/` 里那两条 `workbench.*.js` + 四条 `cxctxwin__*`,
+   一代约 200MB)—— 这件事只能在升级前做,升完就没有了。
+   ⚠️ 判据纪律不变:**拿不到材料时报 SKIP 并说明"没有旧版参照物"**,
+   ⛔ 不许把"只验了新版"写成"两代都验过"。
+
+   **②腿 SKIP 时的替代判据(2026-09-15 用过;材料见上面那条红字)**:live 已升级、拿不到同版本参照物时,别把 SKIP 当过——
    改成「**只把改动的那几个字符回退**成旧形状生成基准实现(其余代码=当前版本,同一份钩子同一份
    `applyPatchesToText`),对 `~/.cursor-team-setup-backup/` 里**任意几个旧版 pristine** 各出一次产物,
    `cmp` 必须 BYTE-EQUAL」。这证明的是"新正则对旧版零漂移",比原②腿弱(不含 live 实机比对)但可复现,

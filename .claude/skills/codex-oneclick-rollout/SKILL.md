@@ -45,8 +45,15 @@ codex-oneclick/
 2. 干净 home 真跑：`printf '%s\n' "$KEY" | HOME=$T CODEX_HOME=$T/.codex bash install-mac.command`，
    跑完 `launchctl bootout gui/$(id -u)/net.carher.codex-models-sync` + 删 plist，别在本机留定时任务
 3. 传附件：`+media-insert` → **下载回来比 sha**（同 build.sh 打印的）→ `block_move_after` 到
-   「macOS / Linux 下载：」「Windows 下载：」两段后 → `block_delete` 旧 figure。顺序别反（先删再传失败 = 文档没附件）
+   「👇 macOS / Linux 一键脚本：」「👇 Windows 一键脚本：」两段后（10-13 起在第 1 节里，dmg/msix 在第 3 节） → `block_delete` 旧 figure。顺序别反（先删再传失败 = 文档没附件）
 4. 收尾核：figure 只有 4 个（两个安装器 + dmg + msix）、`<img>` 仍 2 张、旧 token 0 处
+
+**第 0 步自动装 codex 命令行（10-13 加）**：没有 / < 0.144 ⇒ Node 装 `~/.carher-node`、
+`npm -g @openai/codex` 走 npmmirror 装 `~/.carher-npm-global`，写 `# >>> carher-codex >>>` PATH 块
+（与 claude-oneclick 同一套，块名不同、互不覆盖）。**失败只 warn 不 die**：App 不依赖命令行。
+回归 `tests/test_cli_autoinstall.py` 用假 npm 跑真 bash；真下载 10-13 在空 HOME 实测过（装上 0.162.1，
+重跑只打「检测到」）。Windows 段只有静态断言（本机无 pwsh），没有 Windows 真机验过。
+Desktop App 不由脚本装 ⇒ 文档第 3 节挂 dmg/msix。
 
 用户侧文档只讲"下载一个文件、双击、粘 key、回车"。**别把本 skill 的排查细节写进用户文档**，
 也**别再挂 zip / .ps1 / .py**——用户原话「不要增加那么多脚本，让用户一脸茫然」。

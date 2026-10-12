@@ -181,14 +181,34 @@ cursor_remote_ssh.sh --host <h> [--apply|--remove --apply]   命令行版
   这些人白改 ssh 配置。端口也从这个地址里读，不写死 8788。
 - **第 ② 步先量本机 sidecar**。它没起来的话，隧道配对了症状照样是"模型连不上"，
   不先排这一步就会把"sidecar 没开"误判成"隧道没配好"。
-- **④ 阴性 → ⑦ 阳性用同一把尺子**（远端 `curl 127.0.0.1:<port>/v1/models`）：
-  改之前必须是 `000`，改之后必须非 `000`。④ 就非 000 = 已经配好，幂等早退。
+- **④ 阴性 → ⑦ 阳性认的是「监听者是谁」，不是状态码**（10-13 改）：远端打
+  `127.0.0.1:<port>/healthz`，body 含 `delta_url` 才判 `ours`。🔴 只看非 000 曾把
+  188 上 zerokey-codex bridge 占着的 8788（回 200 + codex 模型列表）读成「已经通了」。
+  `other` ⇒ 退出 4，给两条出路（管理员让端口 / 只这台把 Base URL 改公网 `/pro/v1`）。
+  ④=`ours` 幂等早退时，`--apply` 下仍跑 ⑧（老用户恰恰是升级后出问题那批）。
 - 所有 ssh 调用带 `ControlPath=none`：复用的老连接不带新 `RemoteForward`，
   验收会读出**假红**。
 - 测试钩子 `CRG_SSH_CONFIG` **同时改道写入和探针**（`ssh -F`）。只改"写哪个文件"
   而让探针照旧读真配置，写入分支就只能靠读代码发布 —— 而那正是同事用得最多的一条。
 - 加的行都带 `# cr-g-remote-ssh` 标记，`--remove` 只删带标记的行；写前必备份
   `~/.ssh/config.bak-<stamp>`，备份失败即中止。
+
+### 6.2 服务器上的 Cursor 组件也要补（10-13 加，⑧ 步）
+
+「升级 Cursor 后远程窗口坏了」的另一半：`cursor-agent-exec` / `cursor-agent-host` 没有
+`extensionKind` ⇒ 远程窗口里它们跑在**服务器 cursor-server 那份**上，本机安装器的件C/件D
+补丁管不到 ⇒ 远程窗口「每轮都压缩上下文」/ 偶发打到 Cursor 自家推理报 permission_denied。
+
+- 引擎 `scripts/zk-cursor-web/cursor_remote_patch.js`：从 `cursor_team_setup.js` **按行区间**
+  抠 ID 常量 / 件C / 件D 家族（⛔ 按语句切会把 `NOLOOP_MARKER` 切成两份），经 ssh 用服务器
+  `~/.cursor-server/bin/linux-x64/<本机commit>/node -` 执行；补 4 个文件，每个先备份
+  `<file>.carher-orig`、`node --check` 过了才写。模式 dry / `--apply` / `--revert`。
+- 服务器上没有本机同 commit 的目录 ⇒ 打 `NOSERVER`，⑧ 提示「先用 Cursor 连一次再双击」。
+  ⇒ **每次升级 Cursor：先连一次服务器（装新 commit），再双击 REMOTE-SSH**。文档和 README 都写了。
+- 验收（198，10-13）：出厂干净 cursor-server → ⑧「✅ 已补好(4 个文件)」→ 重连后
+  `agent-host-daemon ready`；**用 zip 解压出来的那份跑**，不是工作副本（工作副本绿≠包里有，
+  freshness 的 `REQUIRED_MEMBERS` 就是为此加的）。
+- 计数按「行首是 `✅ 已打` / `已打过`」的行数，⛔ 不按命中次数（每行尾还带一次「(已打过)」，曾报成 8）。
 
 ## 7. 踩坑速查
 

@@ -63,21 +63,29 @@ const AWAITER = `function __cxAwaiter(thisArg,_a,P,generator){
   });
 }`;
 
+/* 🔴 2026-10-12(3.24.12):路由器**不再经 TS downlevel 转译**,直接是原生 async 箭头
+   (`return async (runOptions) => {`)⇒ 根本没有 `__awaiter` 这个名字可抠。
+   原来这里直接 throw,结果**四条行为腿全报「原版跑崩」** —— 红的是阳性对照(原版)本身,
+   不是我们的补丁。这种红最容易被误读成"补丁把路由改坏了",方向完全相反。
+   ⇒ 返回 null 表示"这代不需要 awaiter 桩",让 buildRouter 少注入那一行即可。 */
 function awaiterName(fnText) {
   const m = fnText.match(/=>\s*([A-Za-z0-9_$]+)\s*\(this,\s*void 0,\s*void 0,\s*function\*/);
-  if (!m) throw new Error("抠不到 awaiter 名(路由器形状变了)");
-  return m[1];
+  if (m) return m[1];
+  // 原生 async 那代:确认它真的是 async 形状再放行,别把"形状彻底变了"也当成 async。
+  if (/return\s+async\s*\(?[A-Za-z0-9_$]*\)?\s*=>/.test(fnText)) return null;
+  throw new Error("抠不到 awaiter 名,也不是原生 async 形状(路由器形状变了)");
 }
 
 /* 造一个路由器实例。桩只做两件事:让控制流能走到目标出口,以及把"原版会返回什么"
  * 如实反映出来。桩里**不许**藏任何会改变判定的逻辑,否则测的是桩不是补丁。 */
 function buildRouter(fnText) {
-  const aw = awaiterName(fnText);
+  const aw = awaiterName(fnText);   // null = 3.24.12 起的原生 async 形状,不需要 awaiter 桩
   const prelude = `
     ${AWAITER}
-    const ${aw} = __cxAwaiter;
+    ${aw ? `const ${aw} = __cxAwaiter;` : "/* 原生 async:无 awaiter 可绑 */"}
     const AgentMode = { AGENT: 1, UNSPECIFIED: 0 };
-    const logger34 = { warn(){}, info(){}, error(){} };
+    // logger 的变量名带打包序号(3.21=logger34、3.24.12=logger109)⇒ 从函数文本里现抠,
+    // 不写死。抠不到就不声明(那代可能没用 logger),让真缺时报出来而不是悄悄兜住。
     const AGENT_HOST_LOCAL_LOOP_GATE = "agent_host_local_loop";
     // 这一句让 ③ 能被观察到:原版一进函数就把这一轮交给私有推理那支。
     function routePrivateInferenceTurn(){ return { runtime:"managed-local", reason:"private-inference-eligible" }; }
@@ -85,6 +93,13 @@ function buildRouter(fnText) {
     function toLocalLoopTurnRouteInput(o){ return __cxInput; }
     function failDecision(reason){ return { runtime:"fail", reason }; }
     function getIneligibilityReason(){ return __cxIneligible; }
+    /* 🔴 3.24.12 新增的两个依赖(旧代没有,桩里缺了会"原版跑崩"而不是报形状问题):
+       · connectDecision(reason) —— 原来各出口是就地 return 字面量,这版收敛成了 helper;
+       · logger109 —— logger 变量名带打包序号,会随版本变 ⇒ 用 Proxy 兜住任意 logger 名,
+         别一版一版去追 logger34/logger109(那是名字位,不该写死)。 */
+    function connectDecision(reason){ return { runtime:"connect", reason }; }
+    ${[...new Set((fnText.match(/\blogger\d*\b/g) || []))]
+        .map((n) => `const ${n} = { warn(){}, info(){}, error(){}, debug(){} };`).join("\n    ")}
   `;
   return new Function("__cxInput", "__cxIneligible", prelude + "\n" + fnText +
     "\nreturn createLocalLoopTurnRouter;");
@@ -108,11 +123,21 @@ const CASES = [
     expectPreRuntime: "managed-local",
   },
   {
-    name: "② gate on + 带 BYOK 凭据 ⇒ 原版 fail",
+    /* 🔴 2026-10-12:**上游把这个出口修了**,期望值因此是两代不同的。
+       3.21.18：BYOK 轮次落 `fail`（`private-model-not-supported`）—— 这正是件D 要治的病。
+       3.24.12：新增 `if (input.hasModelCredentials) return connectDecision("byok-connect-routed")`
+                ⇒ 原版自己就 connect 了，不再需要我们改判。
+       老版本作对照验过：3.21.18 的 daemon.cjs 里 `byok-connect-routed` 命中 **0**、
+       `private-model-not-supported` 命中 2 ⇒ 这是真的上游行为变更，不是桩没搭对。
+       ⚠️ 所以这一例在新代里**对补丁零判别力**（原版和打完都是 connect），按两代分别给期望值；
+       ⛔ 别为了让它绿就把期望改成 connect 然后当"补丁有效"——那是把阳性对照关掉。 */
+    name: "② gate on + 带 BYOK 凭据(3.21=fail / 3.24.12=connect,上游已修)",
     opts: { managedLocalAvailable: true, runtimeCapabilities: { checkFeatureGate: () => Promise.resolve(true) } },
     input: { modelId: "grok-4.7", hasModelCredentials: true, actionCase: "userMessageAction" },
     ineligible: "private-model-not-supported",
-    expectPreRuntime: "fail",
+    expectPreRuntime: (fnText) =>
+      /byok-connect-routed/.test(fnText) ? "connect" : "fail",
+    noDiscriminationWhen: (fnText) => /byok-connect-routed/.test(fnText),
   },
   {
     name: "③ privateInference 已配置(gate 检查之前就 return)⇒ 原版 managed-local",
@@ -134,8 +159,14 @@ const NEG = {
 };
 
 (async () => {
+  /* 🔴 3.24.12 的 gate 读法多了一层:先看 `runOptions.runOptions.localLoopGateEnabled`
+     这个 surface gate,只有它 === undefined 才回落 `options.runtimeCapabilities.checkFeatureGate`。
+     桩里缺这一层 ⇒ 读 undefined 的属性当场抛,四条腿全报「原版跑崩」(红在阳性对照上,
+     方向完全指错)。这里**显式给 undefined**,语义=「这一轮没有 surface gate」⇒ 走
+     checkFeatureGate 那条老路,各 case 的 opts 才仍然是有效变量。 */
   const mk = (txt, c) => buildRouter(txt)(c.input, c.ineligible)(c.opts)({
     ctx: {}, action: { action: { case: "userMessageAction" } },
+    runOptions: { localLoopGateEnabled: undefined },
   });
   for (const c of [...CASES, NEG]) {
     let pre, post;
@@ -143,8 +174,17 @@ const NEG = {
     try { post = await mk(postFn, c); } catch (e) { bad(c.name + " —— 打完跑崩:" + e.message); continue; }
     // 阳性/阴性对照:原版必须落在预期出口。不落 ⇒ 桩没把控制流送到目标分支,
     // 这一例对补丁零判别力,必须报红而不是当过。
-    if (pre.runtime !== c.expectPreRuntime) {
-      bad(c.name + " —— 对照不成立:原版返回 " + JSON.stringify(pre) + ",期望 runtime=" + c.expectPreRuntime);
+    // 期望值可以是函数(按被测文本分代),见 case ② 的说明。
+    const wantPre = typeof c.expectPreRuntime === "function"
+      ? c.expectPreRuntime(preFn) : c.expectPreRuntime;
+    if (pre.runtime !== wantPre) {
+      bad(c.name + " —— 对照不成立:原版返回 " + JSON.stringify(pre) + ",期望 runtime=" + wantPre);
+      continue;
+    }
+    // 这一代里原版已经自己走对了 ⇒ 老实说明它对补丁没有判别力,**不记成 PASS**。
+    if (typeof c.noDiscriminationWhen === "function" && c.noDiscriminationWhen(preFn)) {
+      console.log("  NOTE  " + c.name + " —— 这一代原版就是 " + wantPre +
+        "(上游已修)⇒ 本例对补丁零判别力,不计入通过");
       continue;
     }
     if (post.runtime !== "connect") {

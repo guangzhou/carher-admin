@@ -73,20 +73,27 @@ const TARGETS=[
 const ID="[A-Za-z0-9_$]+";
 
 // ── 锚点 A:tokenDetails 构造器 ──
+// 🔴 2026-10-12(3.24.12):上游**删掉了** `promptContextUsageSnapshotBlobId` 这个字段,
+// A 其余部分逐字不变 ⇒ 四个目标(含不 minify 的 daemon.cjs)全部命中 0。
+// 与 3.20.21/3.21.18 那两次不同:那是名字位被摇(ID 捕获能救),这次是**字段消失**。
+// 判据就是「连 daemon.cjs 都 0」。两代都认:字段写成可选组,回填用捕获到的原文。
 const A_MIN=new RegExp("function\\s+("+ID+")\\(("+ID+"),("+ID+")\\)\\{return\\{"
   +"usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,"
-  +"promptContextUsageSnapshotBlobId:void 0,\\.\\.\\.\\3,_privacyMode:\\2\\}\\}","g");
-const A_SRC=`function createRedactedConversationTokenDetails(privacyMode, partial2) {
+  +"(promptContextUsageSnapshotBlobId:void 0,)?\\.\\.\\.\\3,_privacyMode:\\2\\}\\}","g");
+const A_SRC_BLOB=`    promptContextUsageSnapshotBlobId: void 0,
+`;
+const aSrcOf=blobLine=>`function createRedactedConversationTokenDetails(privacyMode, partial2) {
   return {
     usedTokens: 0,
     maxTokens: 0,
     breakdown: void 0,
     promptContextUsageTree: void 0,
-    promptContextUsageSnapshotBlobId: void 0,
-    ...partial2,
+${blobLine}    ...partial2,
     _privacyMode: privacyMode
   };
 }`;
+const A_SRC=aSrcOf(A_SRC_BLOB);     // ≤3.21 那代
+const A_SRC_NEW=aSrcOf("");         // 3.24.12 起
 // ── 锚点 B:摘要触发阈值函数 ──
 // 🔴 2026-09-23:3.21.18 把局部变量 `const n=[]` 摇成 `const r=[]` ⇒ 写死名字的锚点命中 0。
 // 参数名与局部变量名一律用 ID 捕获 + 反向引用绑定语义,不许出现字面量 e/t/n/r。
@@ -120,9 +127,12 @@ function planFile(p, kind){
     const af=a[0][1], bf=b[0][1], cf=c[0][1];
     // A:参数名也是捕获来的(2=privacyMode,3=partial)
     const aPriv=a[0][2], aPart=a[0][3];
+    // 3.24.12 起那个字段可能不在 ⇒ 用捕获到的原文回填,捕获为空就一个字都不加
+    // (别凭空给新版插回上游已经删掉的键)。
+    const aBlob=a[0][4]||"";
     const aTo=`function ${af}(${aPriv},${aPart}){/*${MARK}*/${NORM_MIN}`
       +`const __cxR={usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,`
-      +`promptContextUsageSnapshotBlobId:void 0,...${aPart},_privacyMode:${aPriv}};`
+      +`${aBlob}...${aPart},_privacyMode:${aPriv}};`
       +`__cxR.maxTokens=__cxN(__cxR.maxTokens);`
       +`if(void 0!==__cxR.breakdown&&"object"==typeof __cxR.breakdown)__cxR.breakdown={...__cxR.breakdown,maxTokens:__cxN(__cxR.breakdown.maxTokens)};`
       +`return __cxR}`;
@@ -140,11 +150,17 @@ function planFile(p, kind){
                `B=${bf}(${bMax},..)@${b[0].index}`,
                `C=${cf}(..,${cMax},..)@${c[0].index}`);
   } else {
-    const ca=s.split(A_SRC).length-1, cb=s.split(B_SRC).length-1, cc=s.split(C_SRC).length-1;
-    if(ca!==1) return {err:`锚点A命中=${ca}(须 1)`};
+    // A 两代各数一次,**加起来必须恰好 1**(两代同时命中 = 文件里两个同名函数,形状变了,
+    // 和 0 命中一样不许动手)。
+    const caOld=s.split(A_SRC).length-1, caNew=s.split(A_SRC_NEW).length-1;
+    const ca=caOld+caNew;
+    const aSrc=caOld===1?A_SRC:A_SRC_NEW;
+    const aBlobSrc=caOld===1?A_SRC_BLOB:"";
+    const cb=s.split(B_SRC).length-1, cc=s.split(C_SRC).length-1;
+    if(ca!==1) return {err:`锚点A命中=${ca}(须 1;老代=${caOld} 新代=${caNew})`};
     if(cb!==1) return {err:`锚点B命中=${cb}(须 1)`};
     if(cc!==1) return {err:`锚点C命中=${cc}(须 1)`};
-    s=s.replace(A_SRC, `function createRedactedConversationTokenDetails(privacyMode, partial2) {
+    s=s.replace(aSrc, `function createRedactedConversationTokenDetails(privacyMode, partial2) {
   /*${MARK}*/
   const __cxN = (x) => typeof x === "number" && x > 0 && x < 4096 ? (x === 1 ? 1e6 : x * 1e3) : x;
   const __cxR = {
@@ -152,8 +168,7 @@ function planFile(p, kind){
     maxTokens: 0,
     breakdown: void 0,
     promptContextUsageTree: void 0,
-    promptContextUsageSnapshotBlobId: void 0,
-    ...partial2,
+${aBlobSrc}    ...partial2,
     _privacyMode: privacyMode
   };
   __cxR.maxTokens = __cxN(__cxR.maxTokens);

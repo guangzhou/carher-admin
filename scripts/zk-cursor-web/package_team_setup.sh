@@ -319,8 +319,11 @@ __MODEL_LIST__
   已下架:__RETIRED_MODELS__ —— 装过旧版的机器上,UPGRADE 会自动摘掉。
   注:sa-grok-imagine 已从菜单去掉。它是**出图专用**,在 Cursor 的聊天线型上直接
      报错(实测 400 invalid_request_error),留在菜单里只会让人点了报错。
-  注:cr-g-5.6-thinking-min/high/max、cr-g-5.6-luna-min/high/max 是**实验档**
-     (只换了 reasoning 档位,载体和已验过的那条一样)。
+  注:cr-g 那一段(cr-g-5.6 / -instant / -mini / -t-mini / cr-g-research / -thinking / -luna
+     以及 6 个 thinking/luna 档位变体)2026-10-12 已整段下架,菜单里不再有。
+     装过旧版的机器双击 UPGRADE 会自动摘掉;要是某个功能位正钉着它们,会自动改回默认模型。
+  注:claude 那 5 个名字要写全名(claude-opus-5-5 这种),没有 opus-5.5 这样的短名
+     —— 短名在网关上不存在,点了就报错。
 
 关于"增量传输"(装完自动开着,Mac 才有)
   装完之后你的 Cursor 不再直接连公网,而是先连本机一个小程序(127.0.0.1:8788),
@@ -408,8 +411,22 @@ fi
 # ——"README 里这一节是空的"同事不会来问,他只会按旧印象用。
 awk '/^const DEFAULT_MODELS = \[/{f=1;next} f&&/^\];/{exit} f' "$HERE/cursor_team_setup.js" \
   | tr ',' '\n' | sed -n 's/.*"\([^"]*\)".*/  - \1/p' > "$STAGE/.models.txt"
-RETIRED=$(awk '/^const RETIRED_MODELS = \[/{print;exit}' "$HERE/cursor_team_setup.js" \
-  | sed 's/.*\[//; s/\].*//; s/"//g; s/, */, /g')
+# 🔴 2026-10-12:原来这里是 `awk '…{print;exit}'` —— 只读**第一行**。那天 RETIRED_MODELS
+# 从 1 行长到 6 行(cr-g 整段下架进来),于是 README 里的"已下架"只印出头两个名字、
+# 尾巴 13 个静默消失,**而且打包照样成功**(非空就过)。下架名单印不全的后果是:
+# 同事在菜单里找不到某个名字、也不知道它是被下架了,只会以为包装坏了。
+# 现在整块读到 `];` 为止,并且**断言条数 == 常量里的条数**,数不上就中止打包。
+RETIRED=$(awk '/^const RETIRED_MODELS = \[/{f=1} f{print} f&&/\];/{exit}' "$HERE/cursor_team_setup.js" \
+  | sed 's|//.*||' | tr '\n' ' ' \
+  | sed 's/.*\[//; s/\].*//; s/"//g; s/,[[:space:]]*/, /g; s/^[[:space:]]*//; s/[[:space:]]*,[[:space:]]*$//')
+# ⚠️ 用 `tr ',' '\n' | wc -l` 数会少 1:最后一个名字后面没有逗号,末行无换行符 ——
+#    而 `wc -l` 数的是换行符个数。补一个换行再数(这个 off-by-one 是上面那条断言当场抓到的)。
+RET_N=$(printf '%s\n' "$RETIRED" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+RET_WANT=$(awk '/^const RETIRED_MODELS = \[/{f=1} f{print} f&&/\];/{exit}' "$HERE/cursor_team_setup.js" \
+  | sed 's|//.*||' | grep -o '"[^"]*"' | wc -l | tr -d ' ')
+if [ "$RET_N" != "$RET_WANT" ] || [ "${RET_WANT:-0}" -lt 1 ]; then
+  echo "FATAL: 下架名单抠了 $RET_N 个,常量里有 $RET_WANT 个 —— 抠法又被换行弄坏了" >&2; exit 1
+fi
 if [ ! -s "$STAGE/.models.txt" ] || [ -z "$RETIRED" ]; then
   echo "FATAL: 抠不到 DEFAULT_MODELS / RETIRED_MODELS(常量改名或换行了?)" >&2; exit 1
 fi

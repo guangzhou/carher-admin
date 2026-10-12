@@ -104,25 +104,42 @@ DEFAULT_MODELS = [
     "grok-4.7",
     "grok-4.6", "grok-4.6-latest", "grok-4.5-latest", "grok-4.5",
     "grok-4.20", "grok-4.20-0309-reasoning",
-    "composer-2.5-fast",
+    "composer-2.5-fast", "composer-2.5",
     # ── ② gpt-*(5 个里 4 个与 Cursor 自带同名,见上方说明)──
     "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5", "gpt-6-astra",
     # gpt-6-luna:09-23 198 全池上线,原来漏在清单外 ⇒ 同事只能手敲成 `GPT-6-luna`,
     # 撞上 LiteLLM key 白名单大小写敏感 ⇒ 403。补进来就不必手敲。
     "gpt-6-luna",
-    # ── ③ cr-*(前 7 个是载体代表,在真 Cursor 里跑过)──
-    "cr-g-5.6", "cr-g-5.6-instant", "cr-g-5.6-mini", "cr-g-5.6-t-mini",
-    "cr-g-research", "cr-g-5.6-thinking", "cr-g-5.6-luna",
-    # ↓ 实验档
-    "cr-g-5.6-thinking-min", "cr-g-5.6-thinking-high", "cr-g-5.6-thinking-max",
-    "cr-g-5.6-luna-min", "cr-g-5.6-luna-high", "cr-g-5.6-luna-max",
+    # 2026-10-12 对齐 std key 补进来的 4 个(全部 200 出字)。gpt-6-sol 飞书正文一直写着、
+    # 菜单里却没有 ⇒ 同事只能手敲(与 gpt-6-luna 同一个病)。
+    "gpt-6-sol", "gpt-6.1-sol", "gpt-5.2", "gpt-5.4",
+    # ── ③ cr-g 段 2026-10-12 用户点名整段下架(原 13 个名全部移出菜单,
+    #    登记进 RETIRED_MODELS 供选中位 re-point)。
+    #    ⚠️ MODEL_PREFIXES 里的 `cr-g-` 留着不删 —— 老用户库里还有这些名字要靠它摘。
+    # ── ③ claude(2026-10-12 用户点名加,参照 key = cursor-liuguoxian-std)──
+    # 🔴 必须用 `claude-*` 全名,不是 opus-5.5 那种短名(短名在 198 上 allowlist 和
+    #    per-key aliases 两边都查不到 ⇒ 写进菜单就是 400/403)。5 个名在 cursor 线型
+    #    (stream+tools+唯一 nonce)上 5/5 200 出字,假名阴性对照 403;落点是
+    #    per-key alias → kiro-claude-*。
+    "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5",
+    "claude-opus-5", "claude-sonnet-5",
     # ── ④ 其他 ──
     "codex-auto-review", "deepseek-v4-flash", "kimi-k2.7-code",
     "glm-5.3-flash", "qwen3-coder-next",
+    # 2026-10-12 对齐 std key 补进来:jev(openrouter 那条线,200 出字)。
+    "jev",
 ]
+# 2026-10-12 对齐 std:std 的 models 有 32 个,菜单 30 个 —— 差的 gpt-image-2(200 但出字为空)
+# 和 grok-imagine-image-2.0(500)是**实打判红**的出图专用名,与 sa-grok-imagine 同形,
+# 留在菜单里点一下就报错。别照着 std 的 models 再抄回来。
 # 整表赋值之后「退役」不再需要单独的摘除路径(名字不在 DEFAULT_MODELS 里,跑一遍就没了)。
 # 这里只留给选中位 re-point:功能位钉着一个菜单里已经没有的名字时要改回 DEFAULT_MODEL。
-RETIRED_MODELS = ["cr-g-5.6-pro", "sa-grok-imagine"]
+RETIRED_MODELS = ["cr-g-5.6-pro", "sa-grok-imagine",
+                  # 2026-10-12 用户点名把整个 cr-g 段摘掉(原段 ③ 那 13 个名)。
+                  "cr-g-5.6", "cr-g-5.6-instant", "cr-g-5.6-mini", "cr-g-5.6-t-mini",
+                  "cr-g-research", "cr-g-5.6-thinking", "cr-g-5.6-luna",
+                  "cr-g-5.6-thinking-min", "cr-g-5.6-thinking-high", "cr-g-5.6-thinking-max",
+                  "cr-g-5.6-luna-min", "cr-g-5.6-luna-high", "cr-g-5.6-luna-max"]
 # 装完直接选中它。2026-09-20 用户点名从 cr-g-5.6 改成 sa-grok-4.6-latest;
 # 2026-09-22 全员切裸名后改成 grok-4.6-latest(同一个上游组,走 per-key alias)。
 DEFAULT_MODEL = "grok-4.7"
@@ -137,8 +154,14 @@ DEFAULT_MODEL = "grok-4.7"
 # 2026-09-22:菜单换成裸名 ⇒ 必须加 grok- / composer- 两条,否则菜单名不命中前缀,
 #    --uninstall 的 drop_ours 摘不掉它们。这两条也命中 Cursor 自带的 grok / composer,
 #    与 gpt- 同病。sa-grok- / sa-composer- 保留:老用户库里还躺着上一代的 sa- 名字。
+# 2026-10-12:段 ③ 换成 claude 家族 ⇒ 要加能命中那 5 个名的前缀(门 setup_impl_parity.py 会红)。
+# 🔴 故意写三条**窄**前缀而不是一条 `claude-`:宽的那条当场被台架 ⑨ 腿判红 ——
+#    fixture 里同事自己加的第三方名正是 claude-opus-4.6,`claude-` 会让 is_ours 认领它,
+#    --uninstall 于是把他的名字删掉而不是还给他。别再扩大这个面。
+# `jev` 是裸名(没有分隔符),它自己就是一条前缀。
 MODEL_PREFIXES = ["cr-g-", "grok-", "composer-", "sa-grok-", "sa-composer-",
-                  "qwen3-coder-", "gpt-", "codex-", "deepseek-", "kimi-", "glm-"]
+                  "qwen3-coder-", "gpt-", "codex-", "deepseek-", "kimi-", "glm-",
+                  "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "jev"]
 def is_ours(name):
     return isinstance(name, str) and any(name.startswith(p) for p in MODEL_PREFIXES)
 
@@ -245,8 +268,15 @@ PATCHES = [
                        + _ID + r"\(" + _ID + r"\))(\}resolveModelNameToCatalog)"),
          sub=_gate_sub),
     dict(name="localagent", marker="@cxteam-localagent",
-         rx=re.compile(r"((?:clientSupportsRoutedModelUpdate:!0\}|localMode:" + _ID + r"\.localMode\}\));if\()("
-                       + _ID + r"\.localMode)(\)\{try\{)"),  # 3.18.25 前缀变了,两代都认
+         # 2026-10-12(3.24.12)加第三代前缀:那个对象字面量的**最后一个字段又换了**
+         # (`clientSupportsRoutedModelUpdate:!0}` → `localMode:X.localMode})` →
+         #  `enableSmokeTestDriver===!0})`),于是前两代前缀在 3.24.12 上命中 0。
+         # 这是**真的形状变了**(不是 minify 名字被摇),所以必须按 SOP 第 3 步补正则,
+         # 而不是指望 ID 捕获。锚的落点(`if(<ID>.localMode){try{`)三代逐字未变。
+         # 实测:三代各自 exactly-1(3.24.12 desktop `Cc` / glass `kl`,各 1 次)。
+         rx=re.compile(r"((?:clientSupportsRoutedModelUpdate:!0\}|localMode:" + _ID
+                       + r"\.localMode\}\)|enableSmokeTestDriver===!0\}\));if\()("
+                       + _ID + r"\.localMode)(\)\{try\{)"),  # 三代都认
          sub=lambda m: m.group(1) + "/*@cxteam-localagent*/!0" + m.group(3)),
     dict(name="dedicated", marker="@cxteam-dedicated",
          rx=re.compile(r"(" + _ID + r"\(this\.storageService,\"useDedicatedLocalAgentRuntimeHost\"\))(\?await this\.runLocalAgentInDedicatedExtensionHost\()"),

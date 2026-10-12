@@ -225,7 +225,9 @@ def main():
     # 09-29 从 30 改 32:上一份发出去的 zip 和这一份都是 32 个(第②腿对账 32→32、
     # 新增[]、删除[]),所以这是**默认值没跟上换代**,不是发错版本。改这个数之前先看
     # 第②腿的"新增/删除"两栏 —— 那两栏为空才说明菜单本身没动,只是尺子旧了。
-    ap.add_argument("--expect", type=int, default=32, help="期望菜单条数")
+    # 2026-10-12:32 → 30(摘掉 cr-g 那 13 个 + 对齐 std key 加 11 个)。
+    # 这个默认值会过期,过期的形状是"每次都红那么一条",所以换代时必须跟着改。
+    ap.add_argument("--expect", type=int, default=30, help="期望菜单条数")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:

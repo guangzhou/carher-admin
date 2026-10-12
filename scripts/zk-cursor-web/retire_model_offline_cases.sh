@@ -175,8 +175,16 @@ case "$OVE" in *'"my-own-gpt5"'*) bad "⑤ modelOverrideEnabled 里还留着 my-
 PN="$(jq_get "$B" 'd.aiSettings.modelConfig["plan-execution"].modelName')"
 [ "$PN" = "$DEF" ] && ok "⑤ plan-execution 钉的第三方名已改回 $DEF" \
   || bad "⑤ plan-execution 还钉着 $PN —— 名字被清掉了却没 re-point,点了就报错"
-# 新名必须真进库(否则"删对了"可能只是因为整段没跑)
-for m in sa-composer-2.5-fast qwen3-coder-next sa-grok-4.6-latest; do
+# 新名必须真进库(否则"删对了"可能只是因为整段没跑)。
+# 🔴 2026-09-22:这三个名字原来是**写死**的(sa-grok-4.6-latest / sa-composer-2.5-fast /
+#    qwen3-coder-next)。菜单切裸名那天它们当场变成两条红 —— 红的理由是台架陈旧,不是产品坏。
+#    写死名字的台架只在"常量没变"时是对的,而它存在的意义恰恰是守常量变更。改成从
+#    MODELS_JSON 里取首/中/末三个,常量怎么改都跟得上。
+SAMPLE3="$(echo "$MODELS_JSON" | env ELECTRON_RUN_AS_NODE=1 "$CXNODE" -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  const a=JSON.parse(s);
+  process.stdout.write([a[0],a[Math.floor(a.length/2)],a[a.length-1]].join(" "))});')"
+for m in $SAMPLE3; do
   case "$UAM" in *"\"$m\""*) ok "① 新名 $m 已进库" ;; *) bad "① 新名 $m 没进库:$UAM" ;; esac
 done
 # ⑦ 逐字且按序 == DEFAULT_MODELS。顺序是用户的显式要求(Grok + sa-composer 排最前),
@@ -260,12 +268,103 @@ case "$UAM9" in *'"my-own-gpt5"'*) ok "⑨ 卸载把他装前的 my-own-gpt5 还
 case "$UAM9" in *'"claude-opus-4.6"'*) ok "⑨ 卸载把 claude-opus-4.6 还回来了" ;;
   *) bad "⑨ 卸完 claude-opus-4.6 没回来:$UAM9" ;; esac
 # 还回去不等于把我们的名字也留着 —— 那就不是卸载了。
-case "$UAM9" in *'"sa-grok-4.6-latest"'*) bad "⑨ 卸完我们的名字还在库里:$UAM9" ;;
-  *) ok "⑨ 我们的名字全摘干净了" ;; esac
+# 🔴 这里原来写死 sa-grok-4.6-latest:菜单切裸名后那个名字根本不会被装,
+#    于是"没找到"恒真、这条腿退化成恒绿。改成查当前的 DEFAULT_MODEL($DEF)。
+case "$UAM9" in *"\"$DEF\""*) bad "⑨ 卸完我们的名字($DEF)还在库里:$UAM9" ;;
+  *) ok "⑨ 我们的名字($DEF)摘干净了" ;; esac
 UB9="$(jq_get "$B9" 'String(d.useOpenAIKey)')"
 [ "$UB9" = "false" ] && ok "⑨ useOpenAIKey 回到 false" || bad "⑨ useOpenAIKey=$UB9"
 fi
 
+# ── ⑩ --bare-sa:菜单去掉 sa- 前缀 ──────────────────────────────────────────
+# 这条腿的存在理由:`--bare-sa` 随包发给 686 个人,而**能不能用是 key 属性不是名字属性**。
+# 它必须做到两件事,少一件就是给人一个点了报错的菜单:
+#   · sa-* 那几个真的被换成裸名(而不是"加了裸名、sa- 还留着"——那样菜单里一个模型两份)
+#   · **非 sa- 的名字一个都不许动**(cr-g-*/gpt-* 跟这个旗标无关,被顺手改了就是越界)
+# 还有一件在这里量不到、由 setup_impl_parity.py 守着:它不许改 DEFAULT_MODELS 常量本身
+# (改了就是把全员默认也翻了,而不是本机开关)。
+echo ""
+UD10="$TMP/u10"
+DEF_BARE="$(printf '%s' "$DEF" | sed 's/^sa-//')"
+seed_db "$UD10" '{"openAIBaseUrl":"https://cc.auto-link.com.cn/pro/v1","useOpenAIKey":true,
+ "aiSettings":{"userAddedModels":[],"modelOverrideEnabled":[],"modelConfig":{}}}'
+L10="$TMP/run10.log"
+run_installer "$UD10" --bare-sa --apply </dev/null >"$L10" 2>&1 || true
+B10="$(read_blob "$UD10")"
+if [ -z "$B10" ]; then bad "⑩ --bare-sa 跑完读不到 blob(见 $L10)"; cp "$L10" /tmp/retire-run10.log; else
+UAM10="$(jq_get "$B10" 'd.aiSettings.userAddedModels')"
+# 尺子自检:清单为空的话下面"没有 sa-"会恒绿。
+N10="$(jq_get "$B10" 'String(d.aiSettings.userAddedModels.length)')"
+if [ "${N10:-0}" -lt 10 ]; then bad "⑩ 菜单只有 $N10 个 —— 下面几条会恒绿,拒绝当绿看(见 $L10)"; else
+  ok "⑩ 菜单写进去了($N10 个)"
+  case "$UAM10" in *'"sa-'*) bad "⑩ 还留着 sa- 开头的名字(应全部去前缀):$UAM10" ;;
+    *) ok "⑩ 菜单里 sa- 前缀一个不剩" ;; esac
+  case "$UAM10" in *"\"$DEF_BARE\""*) ok "⑩ 裸名 $DEF_BARE 进了菜单" ;;
+    *) bad "⑩ 裸名 $DEF_BARE 没进菜单:$UAM10" ;; esac
+  case "$UAM10" in *'"composer-2.5-fast"'*) ok "⑩ 裸名 composer-2.5-fast 进了菜单" ;;
+    *) bad "⑩ composer-2.5-fast 没去掉前缀:$UAM10" ;; esac
+  # 越界检查:跟 sa- 无关的名字必须原样还在。
+  # 🔴 2026-10-12 换过一次金丝雀:原来用 `cr-g-5.6`,而那一轮整个 cr-g 段被点名下架 ⇒
+  #    它不在菜单里了,这条腿于是**恒红且理由指错方向**(报成"--bare-sa 越界",
+  #    真相是金丝雀自己退役了)。金丝雀必须挑一个**当前菜单里真有、且不以 sa- 开头**的名字。
+  case "$UAM10" in *'"claude-opus-5-5"'*) ok "⑩ 非 sa- 名字(claude-opus-5-5)没被顺手动过" ;;
+    *) bad "⑩ claude-opus-5-5 丢了 —— --bare-sa 越界改了跟它无关的名字:$UAM10" ;; esac
+  case "$UAM10" in *'"qwen3-coder-next"'*) ok "⑩ 非 sa- 名字(qwen3-coder-next)没被顺手动过" ;;
+    *) bad "⑩ qwen3-coder-next 丢了:$UAM10" ;; esac
+  # 选中位必须钉在**裸的**默认名上,否则装完第一下就点在一个菜单里没有的名字上
+  CN10="$(jq_get "$B10" 'd.aiSettings.modelConfig.composer.modelName')"
+  [ "$CN10" = "$DEF_BARE" ] && ok "⑩ composer 选中位 = $DEF_BARE" \
+    || bad "⑩ composer 钉着 $CN10,而菜单里只有裸名 —— 装完就点不动"
+fi
+fi
+
+# ── ⑪ 老用户走 INSTALL(而不是 UPGRADE):上一代 sa-* 菜单必须被整份换掉 ──────────
+# 用户点名(09-22):「除了 UPGRADE 脚本更新模型,老用户如果用 install 脚本,也要做到完整
+# 用我们的新列表,新列表里不要有原来的模型。」
+# 这条腿和 ①-⑤ 不是一回事:①-⑤ 种的是"第三方名 + 当代名",证的是 EXACT 语义;
+# 这里种的是**上一代我们自己的菜单**(`sa-grok-*` / `sa-composer-*`),证的是
+# **换代**那一刀在 INSTALL 路径上也落下来了。两者会因为不同的 bug 分开红:
+# 比如有人为了"别动老用户的名字"给 sa- 开头的名字加一条豁免,①-⑤ 照样全绿,这条会红。
+# 判据三条:① 库里 `"sa-` 一个不剩 ② 两个数组逐字按序 == DEFAULT_MODELS
+#          ③ 钉着 sa- 名的功能位改回了 $DEF(不然他一发消息就点在一个菜单里没有的名字上)
+echo ""
+UD11="$TMP/u11"
+OLDGEN='"sa-grok-4.6-latest","sa-grok-4.6","sa-grok-4.5-latest","sa-grok-4.5","sa-grok-4.20","sa-composer-2.5-fast"'
+seed_db "$UD11" "{\"openAIBaseUrl\":\"https://cc.auto-link.com.cn/pro/v1\",\"useOpenAIKey\":true,
+ \"aiSettings\":{
+   \"userAddedModels\":[$OLDGEN,\"cr-g-5.6\"],
+   \"modelOverrideEnabled\":[$OLDGEN,\"cr-g-5.6\"],
+   \"modelConfig\":{
+     \"composer\":{\"modelName\":\"sa-grok-4.6-latest\",\"selectedModels\":[{\"modelId\":\"sa-grok-4.6-latest\",\"parameters\":[]}]},
+     \"cmd-k\":{\"modelName\":\"sa-composer-2.5-fast\",\"selectedModels\":[{\"modelId\":\"sa-composer-2.5-fast\",\"parameters\":[]}]}
+   }}}"
+L11="$TMP/run11.log"
+# **不带 --upgrade** —— 走的就是 INSTALL-Mac.command / INSTALL-Windows.cmd 那条路(`--apply`)。
+run_installer "$UD11" --apply </dev/null >"$L11" 2>&1 || true
+B11="$(read_blob "$UD11")"
+if [ -z "$B11" ]; then bad "⑪ INSTALL 跑完读不到 blob(见 $L11)"; cp "$L11" /tmp/retire-run11.log; else
+UAM11="$(jq_get "$B11" 'd.aiSettings.userAddedModels')"
+OVE11="$(jq_get "$B11" 'd.aiSettings.modelOverrideEnabled')"
+N11="$(jq_get "$B11" 'String(d.aiSettings.userAddedModels.length)')"
+# 尺子自检:清单为空会让"没有 sa-"恒绿。
+if [ "${N11:-0}" -lt 10 ]; then bad "⑪ 菜单只有 $N11 个 —— 下面几条会恒绿,拒绝当绿看(见 $L11)"; else
+  ok "⑪ INSTALL 把菜单写进去了($N11 个)"
+  case "$UAM11" in *'"sa-'*) bad "⑪ 老用户走 INSTALL 之后库里还留着上一代 sa- 名:$UAM11" ;;
+    *) ok "⑪ 上一代 sa- 名在 userAddedModels 里一个不剩" ;; esac
+  case "$OVE11" in *'"sa-'*) bad "⑪ modelOverrideEnabled 里还留着 sa- 名:$OVE11" ;;
+    *) ok "⑪ modelOverrideEnabled 里 sa- 名也清干净了" ;; esac
+  [ "$UAM11" = "$MODELS_JSON" ] && ok "⑪ INSTALL 后逐字按序 == DEFAULT_MODELS(完整用新列表)" \
+    || bad "⑪ INSTALL 后与 DEFAULT_MODELS 不是逐字按序相等
+        实际=$UAM11"
+  CN11="$(jq_get "$B11" 'd.aiSettings.modelConfig.composer.modelName')"
+  [ "$CN11" = "$DEF" ] && ok "⑪ composer 从 sa-grok-4.6-latest 改回 $DEF" \
+    || bad "⑪ composer 还钉着 $CN11 —— 那个名字菜单里已经没有了,他一发消息就报错"
+  KN11="$(jq_get "$B11" 'd.aiSettings.modelConfig["cmd-k"].modelName')"
+  [ "$KN11" = "$DEF" ] && ok "⑪ cmd-k 从 sa-composer-2.5-fast 改回 $DEF" \
+    || bad "⑪ cmd-k 还钉着 $KN11"
+fi
+fi
+
 echo ""
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi
-echo "✅ 全过(整表赋值:清单逐字按序 == DEFAULT_MODELS · 退役名/第三方名全摘净且选中位 re-point · 写库前有快照 · --upgrade 不问 Key 且幂等)"
+echo "✅ 全过(整表赋值:清单逐字按序 == DEFAULT_MODELS · 退役名/第三方名/上一代 sa- 名全摘净且选中位 re-point · INSTALL 与 UPGRADE 两条路都换代 · 写库前有快照 · --upgrade 不问 Key 且幂等 · --bare-sa 只动 sa- 那几个)"

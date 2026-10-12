@@ -1,4 +1,8 @@
-# Cursor 客户端 bundle 补丁 SOP(3.16.x~3.21.x;安装器跨平台,诊断/日志路径示例为 macOS)
+# Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x;安装器跨平台,诊断/日志路径示例为 macOS)
+
+> **现行菜单 = 30 名**(2026-10-12)。cr-g 整段下架、claude 家族进段 ③、并**对齐
+> `cursor-liuguoxian-std` 的 models 集合**(std 32 个 − 2 个出图名)。两篇飞书文档
+> **都已更新到同一版**,见「换飞书附件」那节。
 
 对象:同事/本机 **Cursor.app 本体**的 workbench bundle 补丁与 BYOK 配置,与网关线
 (zk-cursor-web-fc-iterate,改 198 CM)完全分层:**这边改的是用户 Mac 上的 Cursor,
@@ -339,7 +343,36 @@ AST 子节点的 `start/end` 里 `src.slice()` 出来搬运,不写进任何模�
   这不是注释能保证的事 ⇒ `setup_impl_parity.py` 里已落成**能红的门禁腿**
   (菜单名 orphan / 退役名 orphan / 同一个名字既在菜单又在下架名单)。
 
-### 现行菜单:30 名 / 四段(2026-09-21)
+### 现行菜单:30 名 / 四段(2026-10-12 换代;段序仍是产品要求)
+
+段序不变、段 ③ 换人:**①grok/composer ②gpt ③claude ④其他**,`DEFAULT_MODEL` 仍 `grok-4.7`。
+
+- **cr-g 整段下架**(13 个名),全部进 `RETIRED_MODELS` ⇒ 老机器 `UPGRADE` 自动摘 + 选中位 re-point。
+  `MODEL_PREFIXES` 里的 `cr-g-` **留着不许删**:老用户库里还躺着这些名字,靠它才摘得掉。
+- **claude 5 名**:`claude-opus-5-5` / `claude-sonnet-5-5` / `claude-haiku-4-5` /
+  `claude-opus-5` / `claude-sonnet-5`,落点是 per-key alias → `kiro-claude-*`。
+  🔴 **必须全名**。文档原来写的 `opus-5.5` / `sonnet-5.5` / `haiku-4.5` 这种短名,
+  在 198 整张 token 表里 **allowlist 和 aliases 两边都是 0 把 key 有**(psql 核过)⇒
+  照文档去点必 403/400。**短名不是"简称",是不存在的名字。**
+- **对齐 `cursor-liuguoxian-std`**(用户点名):std 的 `models` 有 **32** 个,菜单取 **30** ——
+  差的两个是**实打判红**的出图名:`gpt-image-2`(200 但**出字为空**)、
+  `grok-imagine-image-2.0`(**500**),与 09-20 `sa-grok-imagine` 同形(chat 线型恒坏)。
+  ⛔ **别照着 std 的 models 把它们抄回来。**
+  ⚠️ std 的数组顺序是**入库先后**,不是菜单顺序 ⇒ 对齐的是**集合**,不是排列。
+- 🔴 **新加前缀宁窄勿宽**:claude 那段我第一版写了一条 `claude-`,**当场被台架 ⑨ 腿判红** ——
+  fixture 里同事自己加的第三方名正是 `claude-opus-4.6`,宽前缀让 `isOurs` 认领它,
+  `--uninstall` 于是**把他的名字删掉而不是还给他**(dropOurs 在还原之后过滤)。
+  改成三条窄前缀 `claude-opus-5` / `claude-sonnet-5` / `claude-haiku-4-5`
+  (恰好覆盖 5 个菜单名,且不碰 `claude-opus-4.6` / `claude-4.6-sonnet` 这类别人的名字)。
+  `gpt-`/`grok-` 那种宽前缀是历史遗留、后果已登记 —— **新加的别再扩大这个面**。
+- ⚠️ **裸名(没有分隔符)要单独一条前缀**:`jev` 就是,漏了 parity 门会红、`--uninstall` 摘不掉。
+- ⚠️ **菜单常量的注释里不许出现双引号字符串**:`setup_impl_parity.py` 抠菜单是按引号切的,
+  注释里的引号会被读成一个模型名(10-12 当场踩到,菜单被读成 20 个,报"只在 js: ['这是我们装的']")。
+- **覆盖面不是 100%**:这 30 名在带 `grok-4.7` 的 530 把当代 key 上 allowlist 518~530、
+  alias 506~522 ⇒ 少数缺 alias 的 key 会 400。**那是 key 的事不是名字的事**
+  (判据见下面「同一个名字在两把 key 上读数相反」),补 alias 是另一轮生产变更。
+
+### 上一代菜单:30 名 / 四段(2026-09-21,已被上面那版取代)
 
 用户点名的**段序**是产品要求(数组顺序 == 菜单顺序,别按字母重排):
 **① `sa-*` → ② `gpt-*` → ③ `cr-*` → ④ 其他**。`DEFAULT_MODEL` 仍是 `sa-grok-4.6-latest`
@@ -439,7 +472,11 @@ AST 子节点的 `start/end` 里 `src.slice()` 出来搬运,不写进任何模�
 |---|---|---|
 | ① zip vs 工作副本 | **逐成员 sha256** 相等 | zip 是旧的,重跑 `package_team_setup.sh` |
 | ② vs 上次发出去那份 | 逐成员 size/sha diff + 菜单增删名单(**不返红**,是账) | 用来回答"为什么大小变了" |
-| ③ zip 内菜单条数 | `--expect 30`、无重名 | 发错版本,或 `--expect` 该更新 |
+| ③ zip 内菜单条数 | `--expect`(现 32)、无重名 | 发错版本,或 `--expect` 该更新 |
+
+🔴 **第②腿要手动给 `--against`,不给就整条腿不跑**(而汇总里**不会**写"这腿没跑")。
+换附件那一轮一定要跑带 `--against` 的那一发,材料就是刚 `+media-download` 下来的线上那份
+—— 它同时是**回滚素材**。只跑裸的一发会 `VERDICT: PASS`,但"为什么大小变了"没有账。
 
 - ⚠️ **zip 成员全带 `cursor-g-setup/` 前缀。**忘了剥它 ⇒ 每个成员都读成"工作副本里没这个文件",
   **一条腿都不红** = 假绿(09-21 第一次比就是这个形状)。
@@ -447,6 +484,13 @@ AST 子节点的 `start/end` 里 `src.slice()` 出来搬运,不写进任何模�
   脚本里是**显式白名单** `GENERATED_ONLY`,不是"找不到就跳过";少一个双击器要能红。
 - `--selftest` 是阳性对照:合成一份改了一个字节的 zip,第①腿必须变红;同时验模型名抠法的界。
   **跑结论前先跑它。**
+- 🔴 **这道门禁自己会过期,过期的形状是"每次都红那么几条"**(09-29 修掉两处)。当时三条红:
+  `DOCTOR-Mac.command` / `DOCTOR-Windows.cmd` 09-23 就随包发了却漏进 `GENERATED_ONLY`,
+  `--expect` 还钉在 30 而菜单早已 32。**常红的门禁等于没门禁** —— 那几行红会被当成老毛病跳过,
+  真出问题那天照样跳过。判"是尺子旧了还是真发错版本"有现成的岔:
+  看第②腿的 **新增/删除两栏**,两栏都空 = 菜单本身没动,只是 `--expect` 没跟上换代。
+  ⚠️ 改完 `GENERATED_ONLY` / `--expect` **必须再跑一次 `--selftest`**:这两处都是
+  "让门禁少红"的修改,很容易顺手改成恒绿,阳性对照是唯一能分开"修好了"和"关掉了"的东西。
 - 拉"上次发出去那份"只能用 `lark-cli docs +media-download --token <file_token> --output x.zip`;
   ⛔ `lark-cli drive +download` 对文档附件**静默不落盘**。
 - 🔴 **换飞书附件的命令形状**(09-23 踩过两次)。`docs +fetch` 用 `--doc`(不是 `--token`,
@@ -456,6 +500,20 @@ AST 子节点的 `start/end` 里 `src.slice()` 出来搬运,不写进任何模�
   `docs +update --command block_move_after|block_delete|block_insert_after|block_replace`。
   顺序照旧 **add → 回环下载 `cmp` 验字节 → move_after → 删旧**,别先删。
   验收三条:字符数(用同一个 `--detail` 比,否则数不可比)、`<img` 数、**旧 token 残留 0**。
+- 🔴 **`block_move_after` 报 `degrade_code=1011 produced no document changes` 不一定是失败**
+  (09-29 实测)。`+media-insert` 只能插到**文档末尾**,而这篇的旧附件本来就是最后一块 ⇒
+  新块落进来时已经紧贴旧块之后,move 是空操作,于是"成功的位置"和"命令没生效"**同一个返回形状**。
+  ⛔ 别在这里重试、也别改成 `block_insert_after` 硬塞。判据是**重 fetch 看兄弟顺序**:
+  两个 `<figure>` 是否已相邻且新的在后。顺序对就直接走 `block_delete` 删旧。
+  ⚠️ 同理别把 1011 读成"我没权限"——`ok:false` 但 `result` 那栏要自己看。
+- ⚠️ **`--dry-run` 不校验文件**(09-29 实测):传一个**根本不存在的路径**它照样
+  `ok:true` 并把四步 API 打出来 ⇒ 它只预览请求形状,**不能**用来预检"这个文件能不能传"。
+  想预检只有真传一次再回环下载 `cmp`。
+- ⚠️ 记忆里那条「`--file` 只认 cwd / `/tmp` / `~/files`,仓库路径会被白名单拒」**在 1.0.93
+  上已不成立**:09-29 直接传 `/Users/…/scripts/zk-cursor-web/cursor-g-setup.zip` 通过。
+  先试真路径,被拒了再 `cp /tmp`,别无条件先搬一次(搬完就多一份明文交付物要清)。
+- **换完的验收账要连"没掉东西"一起报**:`<figure>` 数必须**仍是 1**(不是 2,否则旧块没删净),
+  `<img`/`<whiteboard>` 数不变 —— 整篇 overwrite 曾把画板搞成孤儿,块操作也要按同一张表验。
 
 🔴 **抠 `DEFAULT_MODELS` 必须有界。**从 `js.index('DEFAULT_MODELS')` 松散切到第一个 `];`
 会读出 **36** 条,混着 `'use strict'` / `'path'` / `'crypto'` / `'darwin'` 和 `path.join(...)` 的碎片
@@ -468,9 +526,23 @@ AST 子节点的 `start/end` 里 `src.slice()` 出来搬运,不写进任何模�
 菜单 20→30(新增 10、删 0);`DEFAULT_MODEL`/`RETIRED_MODELS` 未变;把注释行剥掉后真代码只改 4 处。
 ⇒ 结论是"是最新的,而且装的逻辑没变",而不是"看 mtime 应该是新的"。
 
-**同事拿到的包在哪**:新文档 `FapXdudPLoTTRLxWGJQcqITpn9g`(《Cursor 一键配置》,09-21 重写,附件 63469 B)。
-⚠️ 旧文档 `OQCPdLd4MovEVoxGzdMcD3CJnCf` 的附件**还是 20 名那版(61876 B)**,
-从那儿下载的人装出来的菜单缺 `sa-grok-4.20` 和整个 `gpt-*` 段(10 个名)——**处置未定,别当它已经退役**。
+**同事拿到的包在哪:两篇同名《Cursor 一键配置》,2026-10-12 起必须同时更新。**
+
+| 文档 | id |
+|---|---|
+| A | `OQCPdLd4MovEVoxGzdMcD3CJnCf` |
+| B | `FapXdudPLoTTRLxWGJQcqITpn9g` |
+
+🔴 **只更新一篇 = 把新旧调个位,而且不报错。** 10-12 就这么踩了一次:我按用户给的链接只换了 A,
+B 于是从「现行入口」变成了陈旧那篇(还挂 32 名的包、还写「已适配 3.16~3.20.21」)。
+**最阴的一层**:B 的正文写的是「这 **30** 个模型」——数字跟新菜单**正好相同**,名字却是旧的 30
+(含 cr-g、含 `sa-` 名)⇒ **按数字对账会得到"一致"的假绿**,必须逐名比。
+⇒ 收口判据(两篇各跑一遍,不是只跑入口那篇):附件 token 新的 1 个 / 旧的 0 个、
+`<figure>` 仍 1 个、`<img>`/`<whiteboard>` 数不变、**30 个名字逐名命中**、
+`sa-` 残留 0、`cr-g-5.*` 真名只允许出现在「已下架」那句提示里、版本号写着 3.24.12
+且 `3.20.21`/`3.21.18` 残留 0。
+⚠️ B 的正文结构与 A **不同**(段 ③ 原来是 cr-g、默认名写的是 `sa-grok-4.6-latest`、
+"出问题了"是第 5 节),**别把 A 的 block id 套到 B 上**,逐篇重 fetch 取 id。
 
 ## 清单语义:并集 → 整表赋值(EXACT,2026-09-20 第二轮)
 
@@ -598,6 +670,13 @@ ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor cursor_tea
   (含 zip 内成员)扫一遍这个对撞**,别只扫肉眼可疑的那一行。
 - 同事那一侧的处置:Cursor 设置里把 Key **全选删掉重填**,别从飞书表格/聊天/文档里复制
   (那三个地方最容易带零宽字符);或跑一次 `INSTALL` / `--key`,让安装器替他剥。不用重启 Cursor。
+- 🔴 **`UPGRADE` 治不了这个病,而它恰好是我们平时让他点的那个按钮**。`--upgrade`
+  **按设计不问 Key、不覆盖 Key**(只读一次库确认存在性,见「老用户升级档」)⇒ 新版安装器里
+  那个 `sanitizeKey()` **根本不会被调到**。他双击 UPGRADE、看到"完成"、病还在 ——
+  **"修复已发布"和"他装上了修复"是两件事**,中间卡的是他点了哪个按钮。
+  ⇒ 凡是 Key 内容本身的病,给同事的话术只能是 **INSTALL(会重新问 Key)** 或
+  `--key <k>`,或在 Cursor 设置里全选重填。发版说明里要把这句写在按钮表**正上方**,
+  不能只写在"出问题了"那一节 —— 他照按钮表操作,不会先读排障节。
 
 ## 硬规矩
 
@@ -627,7 +706,124 @@ ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor cursor_tea
 - **升级策略**:默认允许 Cursor 自动升级,升级掀翻补丁后跑 `--repair` 一键重打
   (锚点=语义地标,3.16→3.19.19 全部存活);要锁死不升级才用 `--pin-update`。
 
-### 新版本漂移修复流程(3.18.25 / 3.19.19 / 3.20.21 三次都按这个走)
+### 🔴 离线台架全绿 ≠ 新版能用(2026-10-12 真机打脸)
+
+3.24.12 那一轮我先离线跑完 **12 腿全绿 / 0 SKIP** 就报了"适配完成"。
+用户让我升本机 Cursor 实测,**真机当场又挖出两处**离线台架看不见的东西:
+
+| 真机才发现 | 为什么离线看不见 |
+|---|---|
+| **件D noloop 锚点全灭**(doctor 报 `0 🔴 没摘`) | 腿⑦ 的种子取自 `~/.cursor-ctxwin-backup/*` =**旧版**快照 ⇒ 新版形状从没进过门禁;而件D「只告警跳过、不阻断」⇒ 包照样发 |
+| **上游删了 keytar 原生模块** ⇒ 自动写 Key 没了 | 台架从不碰钥匙串;`--doctor` 在 agent shell 里报的是"量不到",不是"坏了" |
+
+⇒ **律令:`VERIFIED_VERSIONS` 加一个大版本之前,必须有一台真机装完并真发一条消息。**
+判据(与 bot 升级同口径,见 `feedback_bot_upgrade_done_means_user_got_a_reply`):
+① `--doctor` 每个补丁家族都非 0(**含不阻断的件C/件D**);② 小代理 `req_total` 从基线涨;
+③ **SpendLogs 里按那把 key 查到该发、且有 `endTime`**(没 `endTime`=没回来)。
+⛔ 「台架全绿」「网关 200」「屏幕上有字」都不够 —— ③ 才是落点证据。
+
+**10-12 真机读数(留作口径样例)**:5 发全 `ok`,菜单名 `claude-opus-5-5`/`claude-sonnet-5-5`
+→ 落点 `kiro-claude-*`,key=`cursor-liuguoxian-std`,1.4~66.2s;小代理 `req_total` 0→6。
+
+**升级前必须先做的两件事**(做不到就别升):
+- **跑一次腿②**(pristine 重打 == live 已打 BYTE-EQUAL)。升上去就**永久失去同版本参照物**,
+  那腿以后只能 SKIP 或退化成弱判据。
+- **留回滚素材**:Cursor 官方只放最新版 ⇒ **升上去退不回旧版**。
+  `mv /Applications/Cursor.app /Applications/Cursor.app.old<ver>` 保一份整 app
+  (`~/.cursor-team-setup-backup/` 里那些只能还原 **bundle**,跨版本盖会把 Cursor 弄坏)。
+  这份旧 app 还是**阳性对照**的来源:keytar 那条判据就是靠"新版 false / 旧版 true"才证明尺子不是恒 false。
+- ⚠️ 覆盖安装前 `kill` 掉 **zk-delta 小代理** —— 它跑在即将被替换的二进制上
+  (`pgrep -f "Cursor.app/Contents/MacOS/Cursor"` 会看到它,**那不是 GUI 没退干净**:
+  判 GUI 退没退要排除「以 `.js` 为参数」的 node 模式进程)。
+- 升级后走 **`--apply`/UPGRADE 而不是 REPAIR**:REPAIR 按设计不碰配置和菜单,
+  而换代那一轮菜单/开关都要写(10-12 那台 `useOpenAIKey` 本来是 `false`、菜单还是 24 名)。
+- `--doctor` 在**刚装完还没启动 Cursor**时会报 `isUserAdded!==true 的 = 16 个 (keepmine 没兜住)` ——
+  **那是启动前的正常态**,启动一次 Cursor 让它整理目录后变 `0 个(全部兜住)`。别当故障查。
+
+### 3.24.12 适配(2026-10-12):离线两处真断 + 真机两处 + 三个门禁自己过期了
+
+官方从 3.21 **直接跳到 3.24**(3.22/3.23 我们没见过机器 ⇒ `VERIFIED_VERSIONS` 只加 `"3.24"`,
+不补没数过的版本:软闸漏报比假绿好)。解锁面 13 条非 multi 全 exactly-1、
+`nopromote` 2/5 与 `nocloud-set` 2/2 逐字不变。断的是这两处:
+
+- 🔴 **件C 锚 A = 0/4(四个目标全灭)**:上游把 `promptContextUsageSnapshotBlobId:void 0,`
+  **这个字段删了**,A 的其余部分逐字不变。
+  **与 3.20.21(`qUy`→`$7y`,函数名)/ 3.21.18(参数名与局部变量互换)不是同一个病** ——
+  那两次是名字位被摇,ID 捕获能救;这次是**字段消失**,捕获再狠也没用。
+  **分辨判据:连不 minify 的 `daemon.cjs` 都命中 0** ⇒ 不是 minify 漂移,是真改了结构。
+  修法 = 那个字段整段写成可选组 `(promptContextUsageSnapshotBlobId:void 0,)?`,
+  **重建产物时按捕获到的原文回填**(`a[0][4]||""`)—— ⛔ 不许无条件插回去,那等于
+  给新版凭空加一个上游已经删掉的键。`src` 那条路同理:两代各一份字面量,
+  **两代命中数相加必须恰好 1**(两代同时命中 = 文件里两个同名函数,和 0 命中一样不许动手)。
+  同一处改动要**同步 `cursor_ctxwin_patch.js`**(单机版是字节基准)。
+- 🔴 **`localagent` 正则命中 0,而 AST 15/15 全中**:那个对象字面量的**最后一个字段第三次换人**
+  (`clientSupportsRoutedModelUpdate:!0}` → `localMode:X.localMode})` → `enableSmokeTestDriver===!0})`),
+  落点 `if(<ID>.localMode){try{` 三代未变。⇒ 按第 3 步补**第三代前缀**(三代都认,仍要求 exactly-1)。
+  ⚠️ **这条正则同时是 `bundle_anchor_probe.js` 的量具** —— 探针读的是 **js 文件的 `PATCHES`**,
+  不是 py 的。所以「py 不进交付包、不用管」这个判断是错的:漏改 js 这条,
+  **探针会在 AST 已经打上的版本上报 hits=0**,看着像没适配;而且第③腿(js==py byte-equal)必红。
+  改完 js+py 两份,③ 在 3.24.12 上恢复 BYTE-EQUAL。
+- **老版本零漂移已验**:3.21.18 / 3.20.17 的 workbench 上 `localagent` 仍 exactly-1;
+  ②腿(pristine 重打 == live 已打)BYTE-EQUAL 两条全过(本机 live 还在 3.21.18,参照物在)。
+- **两处都配了阳性对照**:故意把新前缀 / 锚 A 写坏 → 分别 hits=0、`锚A count=0`,证明尺子会红。
+
+**顺带修掉三个"过期即静默少报"的门禁**(都是自己坏的,不是被测物坏):
+
+| 门禁 | 坏形状 | 后果 |
+|---|---|---|
+| `package_team_setup.sh` 抠 `RETIRED_MODELS` | `awk '…{print;exit}'` 只读**第一行** | 常量从 1 行长到 6 行后,README「已下架」只印 2/15 个名字,**打包照样成功**(非空就过)。同事在菜单里找不到某名字、也不知道它被下架了 |
+| 台架 ⑩ 的越界金丝雀 | 钉的是 `cr-g-5.6` | 那一轮它刚被下架 ⇒ 这条腿**恒红且理由完全指错**(报"--bare-sa 越界",真相是金丝雀自己退役了)。金丝雀必须挑**当前菜单里真有**的名字 |
+| `setup_package_freshness.py --expect` | 钉在 32 | 换代后常红 ⇒ 被当老毛病跳过 |
+
+⇒ 新规矩:**抠多行常量的地方要自带条数断言**(抠到的个数 == 常量里 `"…"` 的个数,
+不等就中止打包)。⚠️ `printf '%s' "$X" | tr ',' '\n' | wc -l` 会**少 1**(末行无换行符,
+而 `wc -l` 数换行符),写 `printf '%s\n'`。这个 off-by-one 就是那条新断言当场抓到的。
+
+**真机那两处(10-12 下午补)**:
+
+- 🔴 **件D noloop 两个目标锚点全灭,两层原因,第二层差点看错**:
+  ① 上游把 `__awaiter`+生成器那套转译产物换成**原生 async 箭头**
+  (`function h(e){return async t=>{` / `return async (runOptions) => {`);
+  ② 放宽 async 那代**仍然 count=0** —— 真正卡住的是锚点要求 gate 名 `agent_host_local_loop`
+  与 logger 名 `local-loop-turn-router` **相距 80 字以内**,而 3.24.12 在两者之间插了代码,
+  **实测 826 字**。
+  **诊断手法**:把正则**逐段加压**数命中(先只量两个字面量 → 再加 function 头 → 再加箭头),
+  发现**连第一段就已经是 0**,才看出问题不在 async 那半。⛔ 别一看到 async 就以为修完了。
+  **修法**:去掉"两个字面量必须挨得近"这个条件 —— 那是对**排版**的假设,不是对语义的,
+  排版每版都会动;logger 名自己就足够钉死语义。
+- 🔴 **上游删了 `keytar` 原生模块** ⇒ 自动写 Key 这条路没了,连带 ZWSP 剥除也没了
+  (`sanitizeKey()` 只挂在自动写那条路上)。见记忆
+  `feedback_cursor_324_removed_keytar_native_module`;提示语必须显式让他**别从飞书表格复制**。
+
+**修这两处时,被测物之外的三样东西也写死了旧形状**(同一个病的不同层,都会制造**假红**):
+
+| 坏在哪 | 形状 | 为什么危险 |
+|---|---|---|
+| 腿⑦ 位置断言 | 写死 `function\* *( *) *{ */\*marker\*/return{...` | 补丁打对了也报红,红字写"插进去也不会执行"⇒ **理由完全指错方向** |
+| 行为腿 `awaiterName()` | 抠不到就 `throw` | 四条腿全报「**原版**跑崩」—— 红在阳性对照上,最容易被读成"补丁把路由改坏了" |
+| 行为腿的桩 | 缺 `connectDecision()`、缺 `runOptions.runOptions.localLoopGateEnabled` 这层、logger 名写死 `logger34`(3.24.12 是 `logger109`) | 同上,全是"原版跑崩" |
+
+⇒ **改锚点时,断言与桩必须同代一起放宽**。logger 这种带打包序号的名字**从函数文本里现抠**
+(`fnText.match(/\blogger\d*\b/g)`),别一版一版去追。
+
+🔴 **还有一例"上游把病修了",期望值必须分代**:行为腿 case ② 原来断言「BYOK 轮次原版落 `fail`」
+—— 3.24.12 新增了 `if (input.hasModelCredentials) return connectDecision("byok-connect-routed")`,
+原版自己就 connect 了。**老版本作对照验过**:3.21.18 的 daemon.cjs 里 `byok-connect-routed`
+命中 **0** 而 `private-model-not-supported` 命中 2 ⇒ 真的是上游行为变更,不是桩没搭对。
+处置 = 期望值按被测文本分代,并且**老实报 `NOTE … 本例对补丁零判别力,不计入通过`**。
+⛔ 别为了让它绿就把期望直接改成 `connect` 然后当"补丁有效" —— 那是把阳性对照关掉。
+
+**腿⑦ 的种子挑选顺序**(10-12 重写):① `--new-app` 且那份 app **是 pristine**(marker=0,
+比如刚挂载的 dmg)→ ② `~/.cursor-team-setup-backup/<当前版本>-<ts>/` 的 pristine 快照
+→ ③ 旧的 `~/.cursor-ctxwin-backup/*`(标注"可能量不到新版")。
+⚠️ 拿 **live** app 当种子会被 pristine 断言正确判红(它装完就带 marker)——**那不是腿坏,是喂错了**。
+
+⚠️ **`node --check` 不认 `.out` 扩展名**:会报 `ERR_UNKNOWN_FILE_EXTENSION` 而不是语法错,
+我据此一度把"产物语法坏了"报出口,实际是**我的尺子坏了**。验产物先 `cp` 成 `.js`/`.cjs`,
+并且**随手配一个坏样本**确认检查器真会红(我第一个坏样本 `function x(){ return ;;; }` 居然合法,
+`;;;` 是三个空语句 ⇒ 对照恒绿;改成 `function x( { return 1 }` 才报红)。
+
+### 新版本漂移修复流程(3.18.25 / 3.19.19 / 3.20.21 / 3.24.12 四次都按这个走)
 
 同事报「锚点命中=0 → 拒绝动手」= 那处代码被官方重构了,**不是模型/LiteLLM 问题**。
 不需要同事的机器,自己**离线拿到那一版 bundle** 就能修完并回归:
@@ -702,8 +898,20 @@ ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor cursor_tea
    → 改过模型清单的话再跑 `sh retire_model_offline_cases.sh`
    → `sh package_team_setup.sh` 重打 zip
    → **`python3 setup_package_freshness.py`**(逐成员 sha256 == 工作副本;换附件前的最后一道门)
-   → 换飞书文档附件(现行入口 `FapXdudPLoTTRLxWGJQcqITpn9g`;
-   旧文档 `OQCPdLd4MovEVoxGzdMcD3CJnCf` 的附件仍是 20 名那版,处置未定)。
+   → 换飞书文档附件(**两篇都要换**:`OQCPdLd4MovEVoxGzdMcD3CJnCf` 与
+   `FapXdudPLoTTRLxWGJQcqITpn9g`;只换一篇 = 新旧调位且不报错,判据见上节那张表)。
+   **换附件这一步的固定六拍**(09-29 走通一遍,别省中间两拍):
+   ① `docs +media-download --token <线上旧 token>` 先把线上那份拉下来 ——
+      它既是**回滚素材**又是第②腿的 `--against` 材料;
+   ② `setup_package_freshness.py --selftest` 再 `--against /tmp/<刚拉的>`(要有账,不只 PASS);
+   ③ `docs +media-insert --type file --file-view card`(只能落文档末尾,记下返回的 `block_id`/`file_token`);
+   ④ `docs +media-download --token <新 token>` 回环下来 `cmp` **逐字节**等于本地 zip;
+   ⑤ `block_move_after`(1011 空操作要重 fetch 看顺序,别重试)→ `block_delete` 删旧 figure;
+   ⑥ 重 fetch 验:旧 token 残留 0、新 token 1、`<figure>` 仍 1 个、`<img>`/`<whiteboard>` 数不变。
+   🔴 **换完附件≠正文也对了**。09-29 换完包之后正文还写着「30 个模型」、默认 `sa-grok-4.6`、
+   REPAIR「已适配 3.16~3.20.21」,而包里是 32 名 / `grok-4.7` / 已适配 3.21 ——
+   同事照正文选模型名会选到已下架的 `sa-grok-*`。`README.txt` 是打包时从常量抠的**自动跟**,
+   飞书正文是**手写的不跟** ⇒ 把「正文里的清单/默认名/适配版本号」当成第 7 拍去比一次。
 6. 同事侧动作:纯补丁漂移 → **双击 `REPAIR-Mac.command`**;
    这一版还动了模型清单(加名/下架)→ 让他双击 **`UPGRADE-Mac.command`**(不问 Key,
    见「模型清单增减 + 老用户升级档」)。

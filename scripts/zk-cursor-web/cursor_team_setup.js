@@ -92,7 +92,7 @@ const APP_USER_KEY = "src.vs.platform.reactivestorage.browser.reactiveStorageSer
   ".persistentStorage.applicationUser";
 const BACKUP_ROOT = path.join(os.homedir(), ".cursor-team-setup-backup");
 
-const VERIFIED_VERSIONS = ["3.16", "3.17", "3.18", "3.19", "3.20", "3.21"];  // 锚点在这些大版本上数过命中(09-03: 3.16.x/3.17.19/3.18.25;09-10: 3.19.19;09-15: 3.20.17/3.20.21;09-22: 3.21.16)
+const VERIFIED_VERSIONS = ["3.16", "3.17", "3.18", "3.19", "3.20", "3.21", "3.24"];  // 锚点在这些大版本上数过命中(09-03: 3.16.x/3.17.19/3.18.25;09-10: 3.19.19;09-15: 3.20.17/3.20.21;09-22: 3.21.16;10-12: 3.24.12)
 /* 2026-09-22 加 "3.21" 的实测依据(不是"看起来应该行"):同事报 3.21.16/win32 弹未验告警,
    于是把 3.21.16 的真 bundle 拉下来数了命中 —— 下载 commit 8ae78e8ee1e63479c7e0504b664bc0a80c6800f
    的 darwin-arm64 dmg(win32 那份是 Inno 6.4 打的,本机 innoextract 1.9 解不开;同一 commit 的
@@ -115,7 +115,22 @@ const VERIFIED_VERSIONS = ["3.16", "3.17", "3.18", "3.19", "3.20", "3.21"];  // 
    三条 min bundle 全部命中 0(daemon.cjs 不受影响,它不 minify)。原因是我把 minify 的
    **参数名和局部变量名写死**了 —— 与 3.20.21 栽在函数名(`qUy`→`$7y`)同一个病,只是低一层。
    现已全部改成 ID 捕获 + 反向引用绑定语义;3.21.18 与 3.20.17 两代都 4/4,产物与单机版
-   逐字节相同。台架同时补了①b 腿(新版 app 件C 4/4),之前①只量 workbench,件C 没人看。 */
+   逐字节相同。台架同时补了①b 腿(新版 app 件C 4/4),之前①只量 workbench,件C 没人看。
+   2026-10-12 加 "3.24" 的实测依据(3.21 之后官方跳到 3.24,中间 3.22/3.23 我们没见过机器,
+   **故不写进 VERIFIED_VERSIONS** —— 这张表只记真数过命中的版本,软闸漏报比假绿好):
+   下 commit 37b865941ccb31e2fc90c685157534efca87f964 的 darwin-arm64 dmg(先比 Content-Length
+   295402051 再挂载),desktop+glass 两条跑 CX_REQUIRE_AST=1 + CX_APPLY_TO_FILE:
+     desktop: gate, localagent, dedicated, queue-pump, qserial, nosteer-mod, nopromote(x2),
+              norelay, nocloud-submit, nocloud-set(x2), keepmine-noevict, keepmine-claim,
+              byok-force, byok-keepon
+     glass  : 同上,nopromote(x5)
+   非 multi 的 13 条全 exactly-1(不是 1 就 exit(2),"列出来"本身即 ==1 的证据),
+   nopromote 的 multi 计数 2/5、nocloud-set 2/2 与 3.21.x 逐字不变。
+   🔴 **正则路径(py 那条)上 `localagent` 命中 0**,AST 路径 15/15 全中 ⇒ 这是 minify
+   名字漂移、不是结构变了,按 09-15 立的规矩**不动 LOCATORS 也不动正则**。
+   代价要说清:`cursor_team_setup.py` 在 3.24 上会少打 localagent 这一处;它不进交付 zip
+   (只发 js),所以同事侧无影响,但第③腿(js==py byte-equal)在 3.24 上不可能绿 ——
+   那是两实现对同一版本的真实分叉,不许靠改期望值糊过去。 */
 const DEFAULT_BASE_URL = "https://cc.auto-link.com.cn/pro/v1";
 /* 菜单 = 这个数组,**逐字、按序、全量**（2026-09-20 第二轮改成整表赋值,见 mergeConfig 的
    EXACT 语义：库里的 userAddedModels / modelOverrideEnabled 直接等于这份,不再是并集）。
@@ -123,10 +138,12 @@ const DEFAULT_BASE_URL = "https://cc.auto-link.com.cn/pro/v1";
    ⚠️ `sa-grok-imagine` 2026-09-20 当天加、当天又被点名移除：它在 Cursor 的 chat 线型上恒
       400（出图专用，只有 /v1/images/generations 才 200），留在菜单里 = 点了就报错。
       **别再把它加回来**；要出图走别的入口。
-   前 7 个 cr-g 是载体代表，在真 Cursor 里跑过；紧跟的 6 个是档位变体（只共用已验过的载体、
-   `reasoning_effort` 不同）—— 装机文档里标「实验档」。 */
+   ⚠️ 2026-10-12:cr-g 那 13 个名(7 个载体代表 + 6 个档位变体)**已整段下架**,
+      全部移进 RETIRED_MODELS;段 ③ 现在是 claude 家族。 */
 /* 2026-09-21 用户给了新清单(30 名)并点名排序:①sa-* ②gpt-* ③cr-* ④其他。
    数组顺序 == 菜单顺序,所以这四段的**段序与段内顺序都是产品要求**,别按字母重排。
+   2026-10-12 段 ③ 换代:cr-g 整段下架、claude 家族填进同一个位置,四段结构与段序不变
+   (①grok/composer ②gpt ③claude ④其他)。
 
    ⚠️ 这一版起清单里**故意含 5 个与 Cursor 自带模型同名**的名字
       (`gpt-5.5` / `gpt-5.6-luna` / `gpt-5.6-sol` / `gpt-5.6-terra` / `kimi-k2.7-code`)。
@@ -173,29 +190,68 @@ const DEFAULT_MODELS = [
   "grok-4.7",
   "grok-4.6", "grok-4.6-latest", "grok-4.5-latest", "grok-4.5",
   "grok-4.20", "grok-4.20-0309-reasoning",
-  "composer-2.5-fast",
+  "composer-2.5-fast", "composer-2.5",
   // ── ② gpt-*（5 个里 4 个与 Cursor 自带同名，见上方说明）──
   "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5", "gpt-6-astra",
   // gpt-6-luna:09-23 198 全池上线,原来漏在清单外 ⇒ 同事只能手敲,敲成 `GPT-6-luna`
   // 撞上 LiteLLM key 白名单大小写敏感 ⇒ 403。补进来就不必手敲。
   "gpt-6-luna",
-  // ── ③ cr-*（前 7 个是载体代表，在真 Cursor 里跑过）──
-  "cr-g-5.6", "cr-g-5.6-instant", "cr-g-5.6-mini", "cr-g-5.6-t-mini",
-  "cr-g-research", "cr-g-5.6-thinking", "cr-g-5.6-luna",
-  // ↓ 实验档（档位变体，只共用已验过的载体、reasoning_effort 不同）
-  "cr-g-5.6-thinking-min", "cr-g-5.6-thinking-high", "cr-g-5.6-thinking-max",
-  "cr-g-5.6-luna-min", "cr-g-5.6-luna-high", "cr-g-5.6-luna-max",
+  // 2026-10-12 对齐 std key 补进来的 4 个(全部 200 出字,见本段末「对齐实打」):
+  // gpt-6-sol 飞书正文一直写着、菜单里却没有 ⇒ 同事只能手敲(与 gpt-6-luna 同一个病)。
+  // gpt-5.2 / gpt-5.4 在 std 上 alias 到 sa-grok-4.6(同一上游,两个名字读数逐字相同)。
+  "gpt-6-sol", "gpt-6.1-sol", "gpt-5.2", "gpt-5.4",
+  /* ── ③ cr-g 段 2026-10-12 用户点名整段下架 ──
+     原来 13 个名（`cr-g-5.6` / `-instant` / `-mini` / `-t-mini` / `cr-g-research` /
+     `-thinking` / `-luna` + 6 个 thinking/luna 的 min/high/max 档）全部移出菜单，
+     并登记进 RETIRED_MODELS 供选中位 re-point。
+     ⚠️ `cr-g-` 这条前缀**留在 MODEL_PREFIXES 里不许删** —— 老用户库里还躺着这 13 个名字，
+     `--uninstall` 的 dropOurs 和 `isRetired` 都靠它认出这是我们装的。
+     ⚠️ 本段注释里不许出现双引号字符串:`setup_impl_parity.py` 抠菜单是按引号切的,
+     注释里的引号会被读成一个模型名(2026-10-12 当场踩到,菜单被读成 20 个)。 */
+  /* ── ③ claude(2026-10-12 用户点名加,参照 key = cursor-liuguoxian-std)──
+     🔴 菜单名必须是 `claude-*` 这个全名,不是 opus-5.5/sonnet-5.5 那种短名:
+     短名在 198 上 allowlist 和 per-key aliases **两边都查不到**(当天 psql 核过,0 把 key 有),
+     写进菜单 = 同事点一下 400/403。全名这 5 个在 cursor 线型上逐个探过
+     (`litellm-198-cursor-newnames-probe.py --clone-file <std key 形状>
+       --names claude-opus-5-5,claude-sonnet-5-5,claude-haiku-4-5,claude-opus-5,claude-sonnet-5`,
+     stream+tools+唯一 nonce,**5/5 200 出字**,假名阴性对照 403 `key_model_access_denied`)。
+     落点是 per-key alias → `kiro-claude-*`(std key 上 5 条 alias 都在),
+     上线面:带 grok-4.7 的 530 把当代 key 里 allowlist 518~530 把、alias 506~515 把。 */
+  "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5",
+  "claude-opus-5", "claude-sonnet-5",
   // ── ④ 其他 ──
   "codex-auto-review", "deepseek-v4-flash", "kimi-k2.7-code",
   "glm-5.3-flash", "qwen3-coder-next",
+  // 2026-10-12 对齐 std key 补进来:`jev`(openrouter 那条线,200 出字)。
+  "jev",
 ];
+/* ── 2026-10-12「对齐 cursor-liuguoxian-std」那一轮的账 ──
+   用户点名「菜单跟 std key 的模型列表对齐」。std 的 `models` 有 **32** 个名字,
+   菜单最终 **30** 个 —— 差的两个是**实打判红的**,不是漏抄:
+     `gpt-image-2`            200 但**出字为空**(出图名,chat 线型拿不到文本)
+     `grok-imagine-image-2.0` **500**
+   两个都是出图专用名,与 09-20 `sa-grok-imagine` 同一个形状(chat 线型恒坏)⇒
+   留在菜单里 = 同事点一下就报错。**别照着 std 的 models 再把它们抄回来。**
+   其余 30 名逐个过 cursor 线型(stream+tools+唯一 nonce,假名阴性对照 403):
+   claude 5 个 5/5、std-only 的 `composer-2.5`/`jev`/`gpt-6.1-sol`/`gpt-5.2`/`gpt-5.4` 5/5、
+   `gpt-6-sol` 与 `gpt-5.6-sol` 2/2。
+   ⚠️ std 自己的 `models` 数组顺序是**入库先后**,不是菜单顺序 ⇒ 对齐的是**集合**,
+   段序仍按用户点名的 ①grok/composer ②gpt ③claude ④其他。
+   ⚠️ 覆盖面不是 100%:这 30 名在带 grok-4.7 的 530 把当代 key 上 allowlist 518~530、
+   alias 506~522 ⇒ 少数 key 缺 alias 的会 400,那是 key 的事(补 alias 是另一轮生产变更),
+   不是名字的事(判据见 09-21「同一个名字在两把 key 上读数相反」那条)。 */
 /* RETIRED_MODELS：整表赋值之后，「退役」不再需要单独的摘除路径 —— 名字不在
    DEFAULT_MODELS 里，跑一遍就自然没了。这里**只留给选中位 re-point 用**：
    某个功能位正钉着一个已经不在菜单里的名字时，要把它改回 DEFAULT_MODEL，
    否则同事在菜单里找不到那个名字、也没法自己换回来。
    注意它已经不是「唯一的删除依据」了：EXACT 语义下，任何不在 DEFAULT_MODELS 里的名字
    都会被移出两个数组，不需要在这里登记。 */
-const RETIRED_MODELS = ["cr-g-5.6-pro", "sa-grok-imagine"];
+const RETIRED_MODELS = ["cr-g-5.6-pro", "sa-grok-imagine",
+  // 2026-10-12 用户点名把整个 cr-g 段摘掉（上面段 ③ 原来那 13 个名）。
+  "cr-g-5.6", "cr-g-5.6-instant", "cr-g-5.6-mini", "cr-g-5.6-t-mini",
+  "cr-g-research", "cr-g-5.6-thinking", "cr-g-5.6-luna",
+  "cr-g-5.6-thinking-min", "cr-g-5.6-thinking-high", "cr-g-5.6-thinking-max",
+  "cr-g-5.6-luna-min", "cr-g-5.6-luna-high", "cr-g-5.6-luna-max"];
 /* 与 Cursor 自带模型同名的那几个（2026-09-21 本机实测：写进 userAddedModels 的 30 条，
    Cursor 启动后自己剔掉了这 5 条 —— 读回来 userAddedModels=25 / modelOverrideEnabled=30，
    差集恰好是下面这张表）。
@@ -234,8 +290,19 @@ let ACTIVE_DEFAULT_MODEL = DEFAULT_MODEL;
 //    ⚠️ 这两条**也命中 Cursor 自带的 grok / composer 模型**，与 `gpt-` 同病，isOurs 因此更宽。
 //    `sa-grok-` / `sa-composer-` 两条**保留**：老用户库里还躺着上一代的 sa- 名字，
 //    不认它们就等于升级/卸载时摘不掉（整表赋值会换掉菜单，但 dropOurs 走的是 isOurs）。
+// 2026-10-12:段 ③ 换成 claude 家族 ⇒ 必须加能命中那 5 个名的前缀,否则菜单名不命中前缀,
+//    `--uninstall` 的 dropOurs 摘不掉它们(门 setup_impl_parity.py 会红)。
+// 🔴 **这里故意写三条窄前缀,不写一条 `claude-`**。写宽的那一条当场被台架 ⑨ 腿判红:
+//    fixture 里同事自己加的第三方名正是 `claude-opus-4.6`,`claude-` 会让 isOurs 认领它
+//    ⇒ `--uninstall` 把他的名字**删掉而不是还给他**(dropOurs 在还原之后过滤)。
+//    `gpt-`/`grok-` 那种宽前缀是历史遗留、后果已登记;新加的别再扩大这个面。
+//    这三条恰好覆盖全部 5 个菜单名(`claude-opus-5` 也前缀命中 `claude-opus-5-5`,
+//    `claude-sonnet-5` 同理),且不命中 `claude-opus-4.6` / `claude-4.6-sonnet` 这类别人的名字。
+// 2026-10-12 对齐 std 时 `jev` 是个**没有分隔符的裸名**,前缀表里要单独一条
+//    (`jev` 自己就是前缀,整名匹配)。少了它 parity 门会红 + `--uninstall` 摘不掉。
 const MODEL_PREFIXES = ["cr-g-", "grok-", "composer-", "sa-grok-", "sa-composer-",
-  "qwen3-coder-", "gpt-", "codex-", "deepseek-", "kimi-", "glm-"];
+  "qwen3-coder-", "gpt-", "codex-", "deepseek-", "kimi-", "glm-",
+  "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "jev"];
 /* `--bare-sa` 往这里塞它生成的裸名（`sa-grok-4.6` → `grok-4.6`）。
    为什么不直接往 MODEL_PREFIXES 里加 `grok-` / `composer-`：那两条会**同时命中
    Cursor 自带的 grok / composer 模型**，而 isOurs 已经是个偏宽的判据（`gpt-` 那条
@@ -630,8 +697,14 @@ const PATCHES = [
     name: "localagent", marker: "@cxteam-localagent",
     // 3.16/3.17: `clientSupportsRoutedModelUpdate:!0};if(x.localMode){try{`
     // 3.18.25:   `…localMode:vl.localMode});if(vl.localMode){try{h.onNetworkPhaseStart`(同一个 run(),只是前缀变了)
-    // 两代都认;命中仍必须恰好 1 次,多了照样拒。
-    rx: new RegExp("((?:clientSupportsRoutedModelUpdate:!0\\}|localMode:" + ID + "\\.localMode\\}\\));if\\()(" + ID + "\\.localMode)(\\)\\{try\\{)", "g"),
+    // 3.24.12:   `…enableSmokeTestDriver===!0});if(Cc.localMode){try{`(desktop;glass 是 `kl`)
+    //   —— 这是**真的形状变了**:那个对象字面量的最后一个字段第三次换人,不是 minify 名字被摇,
+    //   所以 ID 捕获救不了,必须按 SOP 第 3 步补一代前缀。锚的落点 `if(<ID>.localMode){try{` 三代未变。
+    //   ⚠️ 这条正则是 **py 那条路 + bundle_anchor_probe.js** 的量具(探针读的是本文件的 PATCHES,
+    //   不是 py 的)⇒ 漏改这里,探针会在 AST 已经打上的版本上报 hits=0,看着像没适配。
+    // 三代都认;命中仍必须恰好 1 次,多了照样拒。
+    rx: new RegExp("((?:clientSupportsRoutedModelUpdate:!0\\}|localMode:" + ID
+      + "\\.localMode\\}\\)|enableSmokeTestDriver===!0\\}\\));if\\()(" + ID + "\\.localMode)(\\)\\{try\\{)", "g"),
     sub: (m) => m[1] + "/*@cxteam-localagent*/!0" + m[3],
   },
   {
@@ -966,25 +1039,38 @@ const CTXWIN_TARGETS = [
 //    3.20.21 栽在函数名($7y);3.21.18 栽在局部变量名与参数名:B 的 `const n=[]` 摇成
 //    `const r=[]`,C 的第三参数与局部变量互换(`(e,t,n)/const r` → `(e,t,r)/const n`),
 //    写死名字的锚点当场命中 0。下面不许再出现字面量 e/t/n/r。
+// 🔴 2026-10-12(3.24.12):`promptContextUsageSnapshotBlobId:void 0,` 这一个字段被上游**删了**,
+//    A 的其余部分逐字不变 ⇒ 四个目标(含不 minify 的 daemon.cjs)锚 A 全部命中 0。
+//    这跟 3.20.21/3.21.18 那两次**不是同一个病**:那两次是名字位被摇,这次是**字段消失**,
+//    所以 ID 捕获救不了它 —— 判据就是「连不 minify 的 daemon.cjs 都命中 0」。
+//    修法 = 把那个字段整段写成可选 `(?:…)?`,两代都认(B/C 在 3.24.12 上逐字未变,不动)。
+//    ⚠️ 重建产物时也必须按**捕获到的实际字段**写回,不能照旧无条件插回那个字段
+//    (插回去 = 给新版凭空加一个上游已经删掉的键)。
 const CW_A_MIN = new RegExp("function\\s+(" + ID + ")\\((" + ID + "),(" + ID + ")\\)\\{return\\{"
   + "usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,"
-  + "promptContextUsageSnapshotBlobId:void 0,\\.\\.\\.\\3,_privacyMode:\\2\\}\\}", "g");
+  + "(promptContextUsageSnapshotBlobId:void 0,)?\\.\\.\\.\\3,_privacyMode:\\2\\}\\}", "g");
 const CW_B_MIN = new RegExp("function\\s+(" + ID + ")\\((" + ID + "),(" + ID + ")\\)\\{if\\(\\2<=0\\)return;"
   + "const (" + ID + ")=\\[\\];return void 0!==\\3\\.unusedTokensThresholdToStartBackgroundSummarization", "g");
 const CW_C_MIN = new RegExp("function\\s+(" + ID + ")\\((" + ID + "),(" + ID + "),(" + ID + ")\\)\\{"
   + "const (" + ID + ")=\\3-\\2;return\\s+" + ID + "\\(\\2,\\3,\\4\\)&&"
   + "\\(void 0!==\\4\\.unusedTokensThresholdToPersistBackgroundSummarization", "g");
-const CW_A_SRC = `function createRedactedConversationTokenDetails(privacyMode, partial2) {
+// 两代各一份字面量(daemon.cjs 不 minify,所以这里是精确字面量而不是正则)。
+// 3.24.12 删掉了 `promptContextUsageSnapshotBlobId` 那一行;≤3.21 还有。
+// 判法 = 谁命中就用谁,**两代都命中或都不命中都算锚点坏**(见下面 na 的算法)。
+const CW_A_SRC_BLOB = `    promptContextUsageSnapshotBlobId: void 0,
+`;
+const cwASrc = (blobLine) => `function createRedactedConversationTokenDetails(privacyMode, partial2) {
   return {
     usedTokens: 0,
     maxTokens: 0,
     breakdown: void 0,
     promptContextUsageTree: void 0,
-    promptContextUsageSnapshotBlobId: void 0,
-    ...partial2,
+${blobLine}    ...partial2,
     _privacyMode: privacyMode
   };
 }`;
+const CW_A_SRC = cwASrc(CW_A_SRC_BLOB);        // ≤3.21 那代
+const CW_A_SRC_NEW = cwASrc("");               // 3.24.12 起
 const CW_B_SRC = `function getBackgroundSummarizationTriggerThreshold(maxTokens, props) {
   if (maxTokens <= 0) {`;
 const CW_C_SRC = `function shouldPersistBackgroundSummarization(usedTokens, maxTokens, props) {
@@ -1006,12 +1092,15 @@ function ctxwinApplyToText(src, kind) {
     if (c.length !== 1) return { ok: false, why: "锚C count=" + c.length };
     const af = a[0][1], bf = b[0][1], cf = c[0][1];
     const aPriv = a[0][2], aPart = a[0][3];       // A 的两个参数名(捕获来的)
+    // 3.24.12 起 `promptContextUsageSnapshotBlobId:void 0,` 可能不在 ⇒ 用捕获到的原文回填,
+    // 捕获为空就一个字都不加(别凭空给新版插回上游删掉的键)。
+    const aBlob = a[0][4] || "";
     const bMax = b[0][2];                          // B 的第 1 参 = maxTokens
     const cMax = c[0][3];                          // C 的第 2 参 = maxTokens
     let out = src.replace(a[0][0],
       `function ${af}(${aPriv},${aPart}){/*${CTXWIN_MARKER}*/${CW_NORM_MIN}` +
       `const __cxR={usedTokens:0,maxTokens:0,breakdown:void 0,promptContextUsageTree:void 0,` +
-      `promptContextUsageSnapshotBlobId:void 0,...${aPart},_privacyMode:${aPriv}};` +
+      `${aBlob}...${aPart},_privacyMode:${aPriv}};` +
       `__cxR.maxTokens=__cxN(__cxR.maxTokens);` +
       `if(void 0!==__cxR.breakdown&&"object"==typeof __cxR.breakdown)__cxR.breakdown={...__cxR.breakdown,maxTokens:__cxN(__cxR.breakdown.maxTokens)};` +
       `return __cxR}`);
@@ -1022,11 +1111,18 @@ function ctxwinApplyToText(src, kind) {
     out = out.replace(c[0][0], cwIns(c[0][0], cMax));
     return { ok: true, out, applied: [`A=${af}`, `B=${bf}`, `C=${cf}`] };
   }
-  const na = src.split(CW_A_SRC).length - 1, nb = src.split(CW_B_SRC).length - 1, nc = src.split(CW_C_SRC).length - 1;
-  if (na !== 1) return { ok: false, why: "锚A count=" + na };
+  // A 有两代字面量:老的带 snapshotBlobId、3.24.12 起没有。各数一次,**加起来必须恰好 1**
+  // ——两代同时命中说明文件里有两个同名函数(形状变了),和 0 命中一样不许动手。
+  const naOld = src.split(CW_A_SRC).length - 1;
+  const naNew = src.split(CW_A_SRC_NEW).length - 1;
+  const na = naOld + naNew;
+  const aSrc = naOld === 1 ? CW_A_SRC : CW_A_SRC_NEW;
+  const aBlobSrc = naOld === 1 ? CW_A_SRC_BLOB : "";
+  const nb = src.split(CW_B_SRC).length - 1, nc = src.split(CW_C_SRC).length - 1;
+  if (na !== 1) return { ok: false, why: "锚A count=" + na + "(老代=" + naOld + " 新代=" + naNew + ")" };
   if (nb !== 1) return { ok: false, why: "锚B count=" + nb };
   if (nc !== 1) return { ok: false, why: "锚C count=" + nc };
-  let out = src.replace(CW_A_SRC, `function createRedactedConversationTokenDetails(privacyMode, partial2) {
+  let out = src.replace(aSrc, `function createRedactedConversationTokenDetails(privacyMode, partial2) {
   /*${CTXWIN_MARKER}*/
   const __cxN = (x) => typeof x === "number" && x > 0 && x < 4096 ? (x === 1 ? 1e6 : x * 1e3) : x;
   const __cxR = {
@@ -1034,8 +1130,7 @@ function ctxwinApplyToText(src, kind) {
     maxTokens: 0,
     breakdown: void 0,
     promptContextUsageTree: void 0,
-    promptContextUsageSnapshotBlobId: void 0,
-    ...partial2,
+${aBlobSrc}    ...partial2,
     _privacyMode: privacyMode
   };
   __cxR.maxTokens = __cxN(__cxR.maxTokens);
@@ -1141,15 +1236,35 @@ const NOLOOP_TARGETS = [
 // 🔴 名字位一律 ID 捕获 —— 压缩版里 `Ps/Js/Ms/e/t/Rs` 全是会摇的名字。锚点靠两个
 //    **字符串字面量**钉死语义:gate 名 `agent_host_local_loop` 与 logger 名
 //    `@anysphere/agent-host:local-loop-turn-router`,它们是源码里的常量,不参与混淆。
-const NL_MIN = new RegExp('"agent_host_local_loop",(' + ID + ')=[^;]{0,80}'
-  + '"@anysphere/agent-host:local-loop-turn-router"\\);'
-  + 'function (' + ID + ')\\((' + ID + ')\\)\\{return (' + ID + ')=>(' + ID + ')'
-  + '\\(this,void 0,void 0,function\\*\\(\\)\\{', "g");
+// 🔴 2026-10-12(3.24.12):**降级目标变了** —— 上游把 `__awaiter`+生成器那套转译产物
+//    换成了**原生 async 箭头**:`function h(e){return async t=>{`(min)、
+//    `function createLocalLoopTurnRouter(options2) { return async (runOptions) => {`(src)。
+//    语义一字未改,只是不再经 TS 的 downlevel 转译 ⇒ 写死 `(this,void 0,void 0,function*(){`
+//    的锚点必然 count=0。两代都认:生成器那代保留,新增原生 async 那代。
+//    ⚠️ **插入点对两代是同一个**(函数体第一句 `return` 我们的对象),所以 NL_RET 不用分叉:
+//    生成器那代靠 `__awaiter` 拿 {done:true,value} 直接 resolve;async 那代直接 return。
+//    🔴 这处是**离线台架漏掉的第三断**:它和件C 一样「不阻断、只告警跳过」,而台架腿⑦
+//    喂的是 ~/.cursor-ctxwin-backup 里的**旧版**快照 ⇒ 新版形状从来没进过门禁。
+//    教训与 09-23 件C 那次逐字相同:不阻断的补丁必须有一腿量**新版** app。
+// 🔴 同一轮还踩到第二层:原来锚点要求 gate 名 `agent_host_local_loop` 与 logger 名
+//    **相距 80 字以内**。3.24.12 上游在两者之间插了代码 ⇒ 实测距离 **826 字**,
+//    光放宽 async 那一代仍然 count=0。诊断手法 = 把正则**逐段加压**数命中,
+//    发现连第一段(两个字面量)就已经是 0,才看出问题不在 async 那半。
+//    ⇒ 去掉 gate 名这个联合条件:**logger 名 `local-loop-turn-router` 全文只出现 1 次**
+//    (实测 min=1 处 / daemon.cjs=3 处但只有一处紧跟函数定义),它自己就足够钉死语义,
+//    而"两个字面量必须挨得近"是对**排版**的假设,不是对语义的 —— 排版每版都会动。
+const NL_MIN = new RegExp('"@anysphere/agent-host:local-loop-turn-router"\\);'
+  + 'function (' + ID + ')\\((' + ID + ')\\)\\{return (?:'
+  + '(' + ID + ')=>(' + ID + ')\\(this,void 0,void 0,function\\*\\(\\)\\{'   // ≤3.21:转译产物
+  + '|async (' + ID + ')=>\\{'                                               // 3.24.12 起:原生 async
+  + ')', "g");
 // 未压缩那份(daemon.cjs)esbuild 保住了真名,但 `options2`/`__awaiter73` 这种后缀会随
 // 打包结果变 ⇒ 同样只钉函数名,参数名/helper 名全用 ID 捕获。
 const NL_SRC = new RegExp('function\\s+createLocalLoopTurnRouter\\((' + ID + ')\\)\\s*\\{\\s*'
-  + 'return\\s*\\((' + ID + ')\\)\\s*=>\\s*(' + ID + ')\\(this,\\s*void 0,\\s*void 0,\\s*'
-  + 'function\\*\\s*\\(\\)\\s*\\{', "g");
+  + 'return\\s*(?:'
+  + '\\((' + ID + ')\\)\\s*=>\\s*(' + ID + ')\\(this,\\s*void 0,\\s*void 0,\\s*function\\*\\s*\\(\\)\\s*\\{'
+  + '|async\\s*\\((' + ID + ')\\)\\s*=>\\s*\\{'
+  + ')', "g");
 // reason 用我们自己的字面量而不是照抄 "gate-off":日志里要能一眼看出这是**我们**摘的,
 // 而不是服务端本来就没开。把自己的动作伪装成环境的原样是给下一轮诊断埋雷。
 const NL_RET = 'return{runtime:"connect",reason:"cxteam-local-loop-off"};';
@@ -1639,6 +1754,16 @@ function setUpdateNone(dry) {
    已签名二进制,in-process 读不弹框);密文=v10+AES-128-CBC,iv=16空格,
    key=PBKDF2("saltysalt",mac 1003/linux 1,16,sha1)。
    诚实边界:Windows 的 OSCrypt 是 DPAPI,方案不同且本机无法验证 → 直接回退手填,不冒险写坏。 */
+/* 🔴 2026-10-12(3.24.12 真机):**上游把 keytar 的原生模块删了** ——
+   `node_modules/keytar/` 只剩 `package.json` + `lib/keytar.js`,而那个 js 第一行就是
+   `require('../build/Release/keytar.node')`,`build/` 整个目录没了 ⇒ require 必抛。
+   不是打包失误:同 app 里 node-pty / sqlite3 / kerberos 等 10 个原生模块**都还在**,
+   只有 keytar 被摘。3.21.18 里还有(`Cursor.app.old321` 可对照)。
+   失败路径本来就是安全的(返回 null → 跳过自动写 → 提示手填,不假绿),但有一个
+   **连带后果必须说出来**:ZWSP 那个病的修复挂在 `sanitizeKey()` 上,而它**只在自动写
+   这条路上被调到** ⇒ 3.24+ 的新装机只能手工粘 Key,从飞书表格复制带进来的零宽字符
+   没人替他剥,他会撞 `ByteString ... value of 8203` 且请求一个字节都没出网。
+   ⇒ 所以 3.24+ 上提示语必须**显式让他别从表格/聊天里复制**(见 writeOpenAIKey 的提示)。 */
 async function deriveOsCryptKey(RES) {
   if (process.platform === "win32") return null;
   let keytar;
@@ -1714,7 +1839,19 @@ async function writeOpenAIKey(rawKey, RES, dry) {
   if (process.platform === "win32")
     return { ok: false, reason: "Windows 暂不支持自动写(OSCrypt=DPAPI,未实测),请在 Cursor 里手动粘一次" };
   const key = await deriveOsCryptKey(RES);
-  if (!key) return { ok: false, reason: "读不到钥匙串主密码(keytar 不可用?)" };
+  if (!key) {
+    // 分清两种成因:keytar 原生模块**被上游摘了**(3.24.12 起) vs 真的读不到钥匙串。
+    // 合成一句"keytar 不可用"会让下一个人去查钥匙串权限,查错方向。
+    const kt = path.join(RES, "node_modules", "keytar", "build", "Release", "keytar.node");
+    if (!fs.existsSync(kt))
+      return { ok: false, reason:
+        "这版 Cursor 把 keytar 原生模块删了(3.24.12 起实测)⇒ 自动写 Key 这条路没了。" +
+        "请在 Cursor 里 Settings → Models 手工粘一次。" +
+        "🔴 **全选删掉重新输入,别从飞书表格/聊天/文档里复制** —— 那三个地方最容易带零宽字符," +
+        "而手工粘这条路上没有自动剥除,带进去会报 `ByteString ... 8203` 且请求根本不出网。" +
+        "粘完可以跑 `--doctor` 让它扫一遍码位。" };
+    return { ok: false, reason: "读不到钥匙串主密码(keytar 在,但取不到密码)" };
+  }
   /* 落盘前剥不可见字符,并**把剥了什么打出来**。不打=把病藏进密文里,
      下一次他自己在 Cursor 设置框里粘还会再中一次,而屏幕上只写了"✅ Key 已写入"。 */
   const san = sanitizeKey(rawKey);

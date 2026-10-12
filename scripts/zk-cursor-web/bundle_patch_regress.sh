@@ -383,11 +383,53 @@ fi
 #   🔴 main.js 那份是混淆名,靠猜名造桩测的是我的猜名能力不是补丁 ⇒ 它只有 a/b/c
 #      三条结构判据,没有行为判据。这半的强度低于 daemon.cjs 那半,不许合并成一句"全绿"。
 echo "--- 7) 件D noloop:Agent Host 轮次路由改判 connect ---"
-NLBK="$(ls -d "$HOME"/.cursor-ctxwin-backup/* 2>/dev/null | tail -1)"
+# 🔴 2026-10-12:这腿原来**只**喂 ~/.cursor-ctxwin-backup 里的旧版快照 ⇒ 新版形状从来没进过
+#    门禁。3.24.12 上 noloop 两个目标锚点全灭(上游把 __awaiter+生成器换成原生 async 箭头,
+#    且 gate 名与 logger 名之间插了代码从 80 字拉到 826 字),而件D 的设计是「只告警跳过、
+#    不阻断」⇒ 台架全绿、包照样发、真机上装完才发现没打上。与 09-23 件C 那次逐字同病。
+#    ⇒ 给了 --new-app 就**优先量新版**(从 app 真实目录取),没给才回落旧快照。
+#    ⚠️ 种子**必须是 pristine**(没打过补丁)。`--new-app` 指 live Cursor 时它早就打过了,
+#    下面的 pristine 断言会正确地判红 —— 那不是腿坏,是我喂错了东西。
+#    所以挑种子的顺序是:① `--new-app` 且那份 app 是干净的(marker=0,比如刚挂载的 dmg)
+#    → ② `~/.cursor-team-setup-backup/<当前版本>-<ts>/` 里的 pristine 快照(升级时自动落的,
+#    扁平名 `cxctxwin__…`)→ ③ 旧的 `~/.cursor-ctxwin-backup/*`。
+NLBK=""
+NL_SEED_WHY=""
+nl_try_seed() {   # $1=main.js 路径 $2=daemon.cjs 路径 $3=说明
+  [ -f "$1" ] && [ -f "$2" ] || return 1
+  grep -q '@cx-noloop' "$1" 2>/dev/null && return 1
+  grep -q '@cx-noloop' "$2" 2>/dev/null && return 1
+  NLBK="$(mktemp -d)"
+  cp "$1" "$NLBK/extensions__cursor-agent-host__dist__main.js" || return 1
+  cp "$2" "$NLBK/extensions__cursor-agent-host__dist__agent-host-daemon__dist__bin__daemon.cjs" || return 1
+  NL_SEED_WHY="$3"; return 0
+}
+if [ -n "$NEWAPP" ] && [ -d "$NEWAPP/Contents/Resources/app" ]; then
+  NAR="$NEWAPP/Contents/Resources/app"
+  nl_try_seed "$NAR/extensions/cursor-agent-host/dist/main.js" \
+              "$NAR/extensions/cursor-agent-host/dist/agent-host-daemon/dist/bin/daemon.cjs" \
+              "--new-app 的真实 bundle(pristine,量新版)" || true
+fi
+if [ -z "$NLBK" ]; then
+  LIVEVER="$(/usr/bin/defaults read "$APP/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null)"
+  for d in $(ls -dt "$HOME"/.cursor-team-setup-backup/${LIVEVER:-x}-* 2>/dev/null); do
+    [ -d "$d" ] || continue
+    nl_try_seed "$d/cxctxwin__extensions__cursor-agent-host__dist__main.js" \
+                "$d/cxctxwin__extensions__cursor-agent-host__dist__agent-host-daemon__dist__bin__daemon.cjs" \
+                "同版本 pristine 备份 $(basename "$d")(量 $LIVEVER)" && break
+  done
+fi
+if [ -z "$NLBK" ]; then
+  OLDBK="$(ls -d "$HOME"/.cursor-ctxwin-backup/* 2>/dev/null | tail -1)"
+  [ -n "$OLDBK" ] && nl_try_seed "$OLDBK/extensions__cursor-agent-host__dist__main.js" \
+      "$OLDBK/extensions__cursor-agent-host__dist__agent-host-daemon__dist__bin__daemon.cjs" \
+      "旧 ctxwin 快照(⚠️ 可能是旧版形状,量不到新版)" || true
+fi
+[ -n "$NLBK" ] && echo "    种子 = $NL_SEED_WHY"
 if [ -z "$CXNODE" ]; then
   skip "⑦:没找到 Cursor 的 electron(CXNODE 空),这腿没跑"
 elif [ -z "$NLBK" ] || [ ! -d "$NLBK" ]; then
-  skip "⑦:没有 ~/.cursor-ctxwin-backup/<ts>/ 原始快照(先在本机跑一次 cursor_ctxwin_patch.js --apply)"
+  skip "⑦:没有种子(既没给 --new-app,也没有 ~/.cursor-ctxwin-backup/<ts>/ 快照)"
 else
   NLTMP="$(mktemp -d)"
   NL_DAEMON_OUT=""
@@ -403,10 +445,14 @@ else
          CX_NOLOOP_OUT="$out" "$CXNODE" "$JS" >/dev/null 2>"$NLTMP/err"; then
       n=$(grep -o '@cx-noloop:v1' "$out" | wc -l | tr -d ' ')
       [ "$n" = "1" ] && ok "⑦${fn##*__} 锚点 exactly-1 且打上(marker x$n)" || bad "⑦${fn##*__} marker=$n(应为 1)"
-      # b) 位置:marker + return 必须紧接在 `function*(){` 之后
-      h=$(grep -o 'function\* *( *) *{ */\*@cx-noloop:v1\*/return{runtime:"connect"' "$out" | wc -l | tr -d ' ')
-      [ "$h" = "1" ] && ok "⑦${fn##*__} return 是生成器体第一条语句(会被执行)" \
-        || bad "⑦${fn##*__} marker 不在生成器体开头(命中=$h)⇒ 插进去也不会执行"
+      # b) 位置:marker + return 必须是**函数体第一条语句**。
+      # 🔴 两代形状不同,这条断言原来写死了 `function*(){` ⇒ 在 3.24.12 上即使补丁打对了
+      #    也会报红(假红,且理由指向"插进去不会执行"完全误导)。两代都认:
+      #      ≤3.21   : `function*(){ /*marker*/return{runtime:"connect"`
+      #      3.24.12+: `async t=>{ /*marker*/return{runtime:"connect"`(原生 async 箭头)
+      h=$(grep -oE '(function\* *\( *\)|async *\(?[A-Za-z0-9_$]*\)? *=>) *\{ */\*@cx-noloop:v1\*/return\{runtime:"connect"' "$out" | wc -l | tr -d ' ')
+      [ "$h" = "1" ] && ok "⑦${fn##*__} return 是函数体第一条语句(会被执行)" \
+        || bad "⑦${fn##*__} marker 不在函数体开头(命中=$h)⇒ 插进去也不会执行"
       node --check "$out" 2>/dev/null && ok "⑦${fn##*__} 打完 node --check 过" || bad "⑦${fn##*__} 打完语法坏了"
       [ "$kd" = "src" ] && NL_DAEMON_OUT="$out"
     else

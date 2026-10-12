@@ -116,6 +116,7 @@ a deploy.  D1's idle legs do NOT set it -- idleness is ambiguous by construction
 import argparse
 import atexit
 import datetime
+import hashlib
 import json
 import os
 import random
@@ -174,6 +175,18 @@ def delegate(argv):
     if ssh("mkdir -p %s && chmod 700 %s" % (q(REMOTE_DIR), q(REMOTE_DIR))).returncode:
         sys.exit("cannot reach %s over ssh" % REMOTE)
     code = [os.path.join(HERE, me), os.path.join(HERE, "sub2api_admin.py")]
+    # The default REMOTE_DIR is the copy the park-patrol cron runs every minute,
+    # so shipping here silently swaps the patrol's code too (2026-09-29 22:53: a
+    # read-only `health` from the Mac did exactly that).  Say so when it changes.
+    old = subprocess.run(["ssh", "-n", REMOTE, "sha256sum %s/%s 2>/dev/null"
+                          % (q(REMOTE_DIR), q(me))], capture_output=True, text=True)
+    old = (old.stdout.split() or ["<none>"])[0]
+    new = hashlib.sha256(open(code[0], "rb").read()).hexdigest()
+    if old != new:
+        print("    ⚠️ replacing %s:%s/%s  %s… -> %s…%s" % (
+            REMOTE, REMOTE_DIR, me, old[:12], new[:12],
+            "  (the park-patrol cron runs this copy)"
+            if REMOTE_DIR == "/home/cltx/grok-onboard" else ""), flush=True)
     if subprocess.run(["scp", "-q"] + code + ["%s:%s/" % (REMOTE, REMOTE_DIR)]).returncode:
         sys.exit("scp of the script failed")
 
@@ -618,8 +631,10 @@ def _sso_403_note(count, total):
     print("   gets 200 on the same URL in the same minute (positive control).")
     print("   ⛔ Do not blame sub2api's version, and do not re-ask the user for")
     print("      fresh credentials before checking the detour below.")
-    print("   ✅ Detour that works (4/4 on 09-28): capture on 225 through WARP,")
-    print("      then write the legs straight into the DB --")
+    print("   ✅ Detour that works (09-28 4/4, 09-29 2/2) -- ONE command from the Mac:")
+    print("        python3 grok-warp-onboard.py <creds file>")
+    print("      (it chains the steps below; by hand, capture on 225 through WARP,")
+    print("      then write the legs straight into the DB --)")
     print("        # on 225 (WARP socks5 127.0.0.1:40000)")
     print("        python3 xai_sso_device_oauth.py --creds <0600 file> \\")
     print("            --out-dir /tmp/xai-bundles")

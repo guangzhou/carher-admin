@@ -84,20 +84,43 @@ def shot(pg, name):
         log(f"  [shot-err] {name}: {e}")
 
 
+def settle(pg, budget_s=25):
+    """等跳转链停下来。x.ai 登录后会串一条 cookie-chain 重定向,
+    在它跑动时做任何 DOM 调用都会 Execution context was destroyed。"""
+    last = None
+    deadline = time.time() + budget_s
+    while time.time() < deadline:
+        try:
+            pg.wait_for_load_state("domcontentloaded", timeout=8000)
+        except Exception:
+            pass
+        u = pg.url
+        if u == last:
+            return u
+        last = u
+        time.sleep(2)
+    return last
+
+
 def dump(pg, tag):
-    log(f"\n===== DUMP {tag}  url={pg.url}")
-    log("[text]", bodytext(pg)[:700])
-    for sel in ["input", "button"]:
-        for e in pg.query_selector_all(sel)[:15]:
-            try:
-                t = (e.inner_text() or "").strip()
-                nm = e.get_attribute("name") or ""
-                ty = e.get_attribute("type") or ""
-                dt = e.get_attribute("data-testid") or ""
-                if t or nm or ty or dt:
-                    log(f"  <{sel}> text={t[:30]!r} name={nm!r} type={ty!r} testid={dt!r}")
-            except Exception:
-                pass
+    """⚠️ 整体 try 包住: 这是观测代码, 它自己绝不能终止抓取流程。"""
+    settle(pg)
+    try:
+        log(f"\n===== DUMP {tag}  url={pg.url}")
+        log("[text]", bodytext(pg)[:700])
+        for sel in ["input", "button"]:
+            for e in pg.query_selector_all(sel)[:15]:
+                try:
+                    t = (e.inner_text() or "").strip()
+                    nm = e.get_attribute("name") or ""
+                    ty = e.get_attribute("type") or ""
+                    dt = e.get_attribute("data-testid") or ""
+                    if t or nm or ty or dt:
+                        log(f"  <{sel}> text={t[:30]!r} name={nm!r} type={ty!r} testid={dt!r}")
+                except Exception:
+                    pass
+    except Exception as e:
+        log(f"  [dump-err] {tag}: {str(e)[:120]}")
     shot(pg, tag)
 
 
@@ -166,6 +189,64 @@ def wait_turnstile(pg, budget_s=40):
     return "NOTOKEN"
 
 
+def logged_in(pg):
+    """已经登录的判据: 出现 Sign out / Logout, 或已经落到设备授权页。
+
+    🔴 两条都是"正面证据", 不是"没看到 OTP"。
+    """
+    try:
+        u = pg.url or ""
+    except Exception:
+        u = ""
+    if "/oauth2/device" in u or "/oauth2/authorize" in u:
+        return f"url={u[:60]}"
+    for sel in ["button:has-text('Sign out')", "button:has-text('Log out')",
+                "button:has-text('Logout')", "a:has-text('Sign out')"]:
+        try:
+            if pg.query_selector(sel):
+                return sel
+        except Exception:
+            continue
+    try:
+        bt = bodytext(pg).lower()
+    except Exception:
+        bt = ""
+    if "code shown in your terminal" in bt or "sign out" in bt or "logout" in bt:
+        return "bodytext"
+    return ""
+
+
+def needs_otp(pg):
+    """是否真的在等邮箱验证码。
+
+    🔴 两次假红都踩在这里, 两次原因不同, 一起记下:
+      1. 别用散文判 —— 设备码页自己写着 "Enter the code shown in your terminal",
+         拿 'enter the code' 当锚点会把**已登录成功**判成 NEEDS_OTP。
+      2. 也别只看 `input[autocomplete=one-time-code]` —— 设备码页那 8 个
+         user_code 格子用的就是这个 autocomplete, 换成"找真输入框"照样假红。
+    ⇒ 只有在 logged_in() 拿不到任何正面证据、且仍停在 sign-in 页时, 才算真 OTP。
+    """
+    try:
+        u = pg.url or ""
+    except Exception:
+        u = ""
+    if "sign-in" not in u:
+        return ""
+    for sel in ["input[autocomplete='one-time-code']",
+                "input[name*='otp' i]", "input[data-testid*='code' i]"]:
+        try:
+            el = pg.query_selector(sel)
+        except Exception:
+            continue
+        if el:
+            try:
+                if el.is_visible():
+                    return sel
+            except Exception:
+                pass
+    return ""
+
+
 def do_login(pg):
     """accounts.x.ai sign-in: email → password → turnstile → submit"""
     pg.wait_for_selector("input[type=email]", timeout=25000)
@@ -184,11 +265,18 @@ def do_login(pg):
     log("[login] submitted")
     time.sleep(5)
     dump(pg, f"{TAG}-03-postlogin")
+    settle(pg)
+    li = logged_in(pg)
+    if li:
+        log(f"[login] logged-in evidence: {li}")
+        return "LOGGED_IN"
     bt = bodytext(pg).lower()
-    for k in ["incorrect", "invalid", "wrong", "does not match", "too many", "couldn"]:
+    for k in ["incorrect", "invalid", "wrong", "does not match", "too many"]:
         if k in bt:
             return "BADPW"
-    if "verification code" in bt or "enter the code" in bt or "one-time code" in bt:
+    sel = needs_otp(pg)
+    if sel:
+        log(f"[otp] still on sign-in page with code input: {sel}")
         return "NEEDS_OTP"
     return "LOGGED_IN"
 
@@ -196,14 +284,20 @@ def do_login(pg):
 def click_any(pg, testids=(), texts=()):
     """按 testid 优先, 再按可见文字点第一个匹配按钮。返回是否点到。"""
     for t in testids:
-        b = pg.query_selector(f"button[data-testid='{t}'], [data-testid='{t}']")
+        try:
+            b = pg.query_selector(f"button[data-testid='{t}'], [data-testid='{t}']")
+        except Exception as e:
+            log(f"  [click-skip] testid={t}: {str(e)[:60]}"); continue
         if b:
             try:
                 b.click(timeout=8000); log(f"  [click] testid={t}"); return True
             except Exception as e:
                 log(f"  [click-err] testid={t}: {str(e)[:80]}")
     for t in texts:
-        b = pg.query_selector(f"button:has-text('{t}')")
+        try:
+            b = pg.query_selector(f"button:has-text('{t}')")
+        except Exception as e:
+            log(f"  [click-skip] text={t}: {str(e)[:60]}"); continue
         if b:
             try:
                 b.click(timeout=8000); log(f"  [click] text={t!r}"); return True
@@ -327,9 +421,22 @@ def main():
             log("[warn] 未见 email 输入框, 直接尝试授权页")
 
         # ── Step 6: 登录后回到设备授权页, 确认授权 ──
+        # ⚠️ 登录成功后 x.ai 会把你甩到 accounts.x.ai 账号页(经 cookie-chain 重定向),
+        #    不会自己回设备授权页 ⇒ 必须显式再开一次 verification_uri_complete,
+        #    否则 Approve 永远点不到、poll_token 恒 authorization_pending。
+        try:
+            pg.goto(d["verification_uri_complete"], wait_until="domcontentloaded", timeout=60000)
+            settle(pg)
+        except Exception as e:
+            log("[reopen-device-page-err]", str(e)[:120])
+        dismiss_consent(pg)
         do_approve(pg, f"{TAG}-20-approve")
         # 有些流程需二次确认
-        if "/oauth2/device" in pg.url or "authorize" in bodytext(pg).lower():
+        try:
+            need2 = "/oauth2/device" in pg.url or "authorize" in bodytext(pg).lower()
+        except Exception:
+            need2 = False
+        if need2:
             do_approve(pg, f"{TAG}-21-approve2")
 
         tok = poll_token(d["device_code"], interval, expires)

@@ -32,7 +32,7 @@ CODEX_MAIN = "Ni2hdvtbgoqBFMxrAu5ckjPrnbg"
 # 与主文档唯一允许的差别:不带指向内部 Cursor/Claude 文档的那一行。
 # 10-13 用户删了 ObrNdZ06 / DhmidvMv 两篇,只剩这一篇外部分享
 CODEX_EXT = ["ZYNsdZCJIoCJEJxeMPGcl7jDn3f"]
-EXT_ONLY_DIFF = "另外两个也有一键配置"
+EXT_ONLY_DIFF = "其他一键配置："
 
 # 陈旧词:全文出现即红。「已下架」说明里允许提到的旧名放 ALLOW_IN 里按句豁免。
 COMMON_STALE = ["cr-g-5.6", "sa-grok-4.6-latest", "3.20.21", "3.21.18",

@@ -47,6 +47,20 @@ claude-oneclick/
   sudo chmod -R a+rX /var/www/ccdl
   ```
   (198 自己能直连 `downloads.claude.ai`。sha 由安装器对 App 内嵌 manifest 校验,不对就拒装。)
+- **App 安装包也镜像在这里**(10-13 加):`claude.ai/download` 国内跳「地区不可用」,官方 API 对国内/198 的
+  mac dmg 都回 403,只有 `RELEASES.json` + `downloads.claude.ai/releases/…` 能直取。文档链接用稳定名
+  `/ccdl/desktop/Claude-mac.zip`、`Claude-windows-x64.msix`、`Claude-windows-arm64.msix`(软链到 `<ver>/` 下原样文件)。
+  10-13 镜像的是 **2.31226.1**(mac zip 已验 codesign + Notarized Anthropic PBC),它钉的 Claude Code 是
+  **2.1.295** ⇒ 该版本的 `claude-code-releases/2.1.295/` 已同步补上(装新 App 的人预置才不 404)。
+  🔴 **换 App 镜像版本 = 两件事一起做**:更新 desktop 软链 **+** 补它钉的 Claude Code 版本(从新 App asar 读)。
+  ```bash
+  # 198 上;V/H 从 RELEASES.json 读
+  curl -s https://downloads.claude.ai/releases/darwin/universal/RELEASES.json   # currentRelease + url 里的 hash
+  D=/var/www/ccdl/desktop/$V; sudo mkdir -p $D && cd $D
+  for p in darwin/universal win32/x64 win32/arm64; do ext=$([ $p = darwin/universal ] && echo zip || echo msix)
+    sudo curl -fsSL -o "$(echo $p|tr / -)-Claude-$H.$ext" https://downloads.claude.ai/releases/$p/$V/Claude-$H.$ext; done
+  cd .. && sudo ln -sfn $V/darwin-universal-Claude-$H.zip Claude-mac.zip   # 另两个同理
+  ```
 - ⛔ 备份 nginx 配置**别放进 `sites-enabled/`**:nginx 会把那份也加载,`nginx -t` 直接报 duplicate。放 `/etc/nginx/backup-ccdl/`。
 
 ## 已知限制

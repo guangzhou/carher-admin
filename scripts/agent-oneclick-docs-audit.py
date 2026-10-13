@@ -34,7 +34,9 @@ CODEX_EXT = ["ZYNsdZCJIoCJEJxeMPGcl7jDn3f", "ObrNdZ06poMM3tx96SpcQm2WnSc", "Dhmi
 EXT_ONLY_DIFF = "另外两个也有一键配置"
 
 # 陈旧词:全文出现即红。「已下架」说明里允许提到的旧名放 ALLOW_IN 里按句豁免。
-COMMON_STALE = ["cr-g-5.6", "sa-grok-4.6-latest", "3.20.21", "3.21.18"]
+COMMON_STALE = ["cr-g-5.6", "sa-grok-4.6-latest", "3.20.21", "3.21.18",
+                # 国内直连 403 / 跳「地区不可用」的下载页,给同事等于没给
+                "openai.com/zh-Hans-CN/codex", "claude.ai/download"]
 DOCS = {
     CURSOR_A: dict(name="Cursor-A", figures=1, imgs=3,
                    attach={"cursor-g-setup.zip": ZIP},
@@ -62,6 +64,11 @@ DOCS = {
 }
 # 「已下架」那句提示里点名旧名是对的,不算残留
 ALLOW_IN = ("已下架", "已整段下架")
+MUST = {
+    "cursor": ["downloads.cursor.com/production/", "cursor.com/download", "Remote-SSH"],
+    "codex": ["npm install -g @openai/codex", "codex-app-prod/Codex.dmg", ".msix"],
+    "claude": ["npm install -g @anthropic-ai/claude-code", "ccdl/desktop/Claude-mac.zip", "ccdl/desktop/Claude-windows-x64.msix"],
+}
 KEY_RE = re.compile(r"sk-[A-Za-z0-9_-]{16,}")
 
 
@@ -108,8 +115,15 @@ def check_doc(xml, cfg, fetch_file):
         red.append(f"附件块 {n} 个,应为 {cfg['figures']}")
     if (n := xml.count("<img")) != cfg["imgs"]:
         red.append(f"图片 {n} 张,应为 {cfg['imgs']}")
-    if h := stale_hits(xml, cfg["stale"]):
+    raw_stale = [w for w in cfg["stale"] if "/" in w and w in xml]   # 链接在 href 里,正文文本看不到
+    if raw_stale:
+        red.append(f"国内打不开的下载链接:{raw_stale}")
+    if h := stale_hits(xml, [w for w in cfg["stale"] if "/" not in w]):
         red.append(f"陈旧词残留:{h}")
+    kind = "cursor" if cfg["name"].startswith("Cursor") else "codex" if cfg["name"].startswith("Codex") else "claude"
+    miss = [w for w in MUST[kind] if w not in xml]
+    if miss and cfg.get("must", True):
+        red.append(f"缺装软件入口(CLI/App 的链接或命令):{miss}")
     if KEY_RE.search(body_text(xml)):
         red.append("正文里有明文 key")
     srcs = sources(xml)
@@ -186,7 +200,7 @@ def selftest():
     tmp = Path(tempfile.mkdtemp(dir=ROOT / ".work" if (ROOT / ".work").exists() else None))
     good_file, bad_file = tmp / "good", tmp / "bad"
     good_file.write_bytes(b"v2"), bad_file.write_bytes(b"v1")
-    cfg = dict(name="T", figures=1, imgs=0, attach={"x.zip": good_file}, stale=["cr-g-5.6", "whiteboard"])
+    cfg = dict(name="T", must=False, figures=1, imgs=0, attach={"x.zip": good_file}, stale=["cr-g-5.6", "whiteboard"])
     ok_xml = '<p>装好了</p><p>已下架:cr-g-5.6</p><figure><source name="x.zip" token="T1"/></figure>'
     up = lambda content: (lambda t, d: d.write_bytes(content))
     global OUT

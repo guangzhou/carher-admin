@@ -1761,6 +1761,75 @@ class FamilyBudgetTest(unittest.TestCase):
         out = self._pre_fam(d, "acompletion", key=key)
         self.assertIn("GPT-5.3 系列 额度已用完", out.get("mock_response", ""))
 
+    # ---- 高配桶（2026-10-12）：只限 Opus 系列 + gpt-6-astra，共用一桶 ----
+    PREMIUM = "cursor-liuguoxian-std"
+
+    def test_premium_matcher_only_opus_and_astra(self):
+        k = _Key(alias=self.PREMIUM)
+        for m in ("kiro-claude-opus-5-5", "claude-opus-5-5", "kiro-claude-opus-4-6",
+                  "anthropic.claude-opus-4-8", "anthropic.wangsu5.claude-opus-5",
+                  "chatgpt-gpt-6-astra", "gpt-6-astra"):
+            self.assertEqual(M._family_of(m, k)[0], "premium", m)
+        for m in ("kiro-claude-sonnet-5-5", "claude-haiku-4-5", "gpt-6-sol",
+                  "chatgpt-gpt-6.1-sol", "gpt-5.5", "sa-grok-4.7",
+                  "deepseek-v4.1-flash", "gpt-6-astral", "claude-opusx"):
+            self.assertIsNone(M._family_of(m, k), m)
+
+    def test_premium_rules_only_for_listed_keys(self):
+        # 名单外的 cursor key 行为不变
+        self.assertEqual(M._family_of("kiro-claude-opus-5-5", _Key(alias="cursor-u1"))[0], "claude")
+        self.assertEqual(M._family_of("gpt-6-astra", _Key(alias="cursor-u1"))[0], "other")
+        out = _with_env({"BUDGET_FAMILY_PREMIUM_KEY_ALIASES": "cursor-u1"},
+                        lambda: M._family_of("gpt-6-astra", _Key(alias="cursor-u1"))[0])
+        self.assertEqual(out, "premium")
+        out = _with_env({"BUDGET_FAMILY_PREMIUM_KEY_ALIASES": ""},
+                        lambda: M._family_of("gpt-6-astra", _Key(alias=self.PREMIUM))[0])
+        self.assertEqual(out, "other")
+
+    def test_premium_limit_default_and_override(self):
+        k = _Key(alias=self.PREMIUM)
+        self.assertEqual(M._family_limit("premium", k), 300.0)
+        k.metadata = {"budget_family_overrides": {"premium": 50}}
+        self.assertEqual(M._family_limit("premium", k), 50.0)
+
+    def test_premium_shared_bucket_blocks_both_and_spares_others(self):
+        key = _Key(alias=self.PREMIUM, token="tok-prem")
+        self._seed("tok-prem", "premium", 300.0)
+        for model in ("claude-opus-5-5", "gpt-6-astra"):
+            out = self._pre_fam({"model": model, "messages": [{"role": "user", "content": "hi"}]},
+                                "acompletion", key=key)
+            self.assertIn("高配模型(Opus/Astra) 额度已用完", out.get("mock_response", ""), model)
+        # sonnet 不受任何系列额度约束（旧 claude 桶已去掉）
+        self._seed("tok-prem", "claude", 999.0)
+        self._seed("tok-prem", "other", 999.0)
+        for model in ("claude-sonnet-5-5", "gpt-6-sol", "grok-4.7"):
+            out = self._pre_fam({"model": model, "messages": [{"role": "user", "content": "hi"}]},
+                                "acompletion", key=key)
+            self.assertNotIn("mock_response", out, model)
+
+    def test_premium_accounting_lands_in_premium_bucket_only(self):
+        def log(model_group, cost):
+            slp = {"response_cost": cost, "model_group": model_group,
+                   "metadata": {"user_api_key_alias": self.PREMIUM, "user_api_key_hash": "tok-pacc"}}
+            _with_env(FAM_ENV, lambda: asyncio.run(M.budget_notice.async_log_success_event(
+                {"standard_logging_object": slp}, None, None, None)))
+        log("kiro-claude-opus-5-5", 2.0)
+        log("chatgpt-gpt-6-astra", 1.5)
+        log("kiro-claude-sonnet-5-5", 9.0)
+        log("sa-grok-4.7", 9.0)
+
+        async def rd():
+            return [await M._family_get_spend("tok-pacc", f) for f in ("premium", "claude", "other")]
+        self.assertEqual(asyncio.run(rd()), [3.5, 0.0, 0.0])
+
+    def test_premium_quota_reply_shows_premium_line(self):
+        key = _Key(alias=self.PREMIUM, token="tok-pq")
+        self._seed("tok-pq", "premium", 12.0)
+        out = self._pre_fam({"model": "gpt-6-sol", "messages": [{"role": "user", "content": "/查余额"}]},
+                            "acompletion", key=key)
+        self.assertIn("高配模型(Opus/Astra) $12.00/$300.00", out.get("mock_response", ""))
+        self.assertNotIn("Claude 家族", out["mock_response"])
+
 
 class CodexStopTest(unittest.TestCase):
     """codex goal 模式停机分支:超额时对 codex 客户端回 429 + usage_limit_reached +
@@ -1793,6 +1862,17 @@ class CodexStopTest(unittest.TestCase):
             return await M.budget_notice.async_pre_call_hook(
                 key or _Key(alias="cursor-u1"), None, data, _CallType(call_type))
         return _with_env(env, lambda: asyncio.run(go()))
+
+    def test_premium_codex_gets_429_without_other_bucket(self):
+        """高配桶没有可切换的兄弟桶：codex 仍拿 429 停机，不因 ofk=None 崩。"""
+        from litellm.proxy._types import ProxyException
+
+        key = _Key(alias="cursor-liuguoxian-std", token="tok-pcx")
+        self._seed("tok-pcx", "premium", 300.0)
+        with self.assertRaises(ProxyException) as ctx:
+            self._pre_fam(self._codex_data("gpt-6-astra"), "aresponses", key=key)
+        self.assertEqual(ctx.exception.type, "usage_limit_reached")
+        self.assertEqual(str(ctx.exception.code), "429")
 
     # ---- 客户端识别 ----
     def test_client_is_codex_detects_ua_and_originator(self):

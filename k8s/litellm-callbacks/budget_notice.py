@@ -67,6 +67,9 @@ BUDGET_FAMILY_ENABLED=1                        启用 ④ 系列额度（默认�
 BUDGET_FAMILY_GPT53_USD=200                    非 Cursor gated key 的 GPT-5.3 限额
 BUDGET_FAMILY_CLAUDE_USD=100                   ④ Claude 家族每日限额
 BUDGET_FAMILY_OTHER_USD=500                    ④ 其他所有模型每日限额（Cursor 含 GPT-5.3）
+BUDGET_FAMILY_PREMIUM_KEY_ALIASES=a,b          ④ 只限高配（Opus 系列 + gpt-6-astra 共用一桶）
+                                              的 key 名单；未设=只 cursor-liuguoxian-std
+BUDGET_FAMILY_PREMIUM_USD=300                  ④ 高配桶每日限额（metadata 覆盖键 premium）
 BUDGET_NOTICE_KEY_ALIASES=a,b                  精确灰度名单
 BUDGET_NOTICE_KEY_PREFIXES=claude-code-,cursor-  前缀放量
 两个 env 都未设置时默认 canary：claude-code-liuguoxian-50gj。
@@ -1474,10 +1477,24 @@ _FAMILY_RULES = (
     ("other", "其他模型",
     lambda m: True),
 )
-_FAMILY_DEFAULT_USD = {"gpt53": 200.0, "claude": 100.0, "other": 500.0}
+_FAMILY_DEFAULT_USD = {"gpt53": 200.0, "claude": 100.0, "other": 500.0, "premium": 300.0}
 
 # Cursor 专属规则：GPT-5.3 不再单独计账，直接进入 other。
 _CURSOR_FAMILY_RULES = tuple(rule for rule in _FAMILY_RULES if rule[0] != "gpt53")
+
+# 高配规则（2026-10-12 用户点名）：**只**限 Opus 系列 + gpt-6-astra，两者共用一个桶；
+# 其余模型（含 sonnet/haiku）不记账不拦，只受 key 自身 max_budget 约束。
+# 按 key 名放量而不是 metadata：记账路径（async_log_success_event）只拿得到
+# alias/hash，拿不到 key metadata，用 metadata 选规则会让执法和记账各认各的桶。
+# 默认名单写死一把（同 _DEFAULT_ALIASES 的灰度写法），设了 env 就以 env 为准。
+_PREMIUM_DEFAULT_ALIASES = frozenset({"cursor-liuguoxian-std"})
+_PREMIUM_MODEL_RE = _re.compile(
+    r"(?:^|[-_./])(?:opus(?=$|[-_./0-9])|gpt-6-astra(?=$|[-_./]))"
+)
+_PREMIUM_FAMILY_RULES = (
+    ("premium", "高配模型(Opus/Astra)",
+     lambda m: bool(_PREMIUM_MODEL_RE.search(m))),
+)
 
 # Model groups are not consistently prefixed: examples include
 # ``claude-fable-5``, ``anthropic.claude-opus-4-8``, ``fable5.1`` and
@@ -1509,19 +1526,29 @@ def _family_limit(fkey: str, user_api_key_dict: Any) -> float:
         pass
     env_name = {"gpt53": "BUDGET_FAMILY_GPT53_USD",
                 "claude": "BUDGET_FAMILY_CLAUDE_USD",
-                "other": "BUDGET_FAMILY_OTHER_USD"}.get(fkey, "")
+                "other": "BUDGET_FAMILY_OTHER_USD",
+                "premium": "BUDGET_FAMILY_PREMIUM_USD"}.get(fkey, "")
     try:
         return float(os.environ.get(env_name, _FAMILY_DEFAULT_USD[fkey]))
     except Exception:
         return _FAMILY_DEFAULT_USD.get(fkey, 0.0)
 
 
+def _premium_aliases() -> frozenset:
+    raw = os.environ.get("BUDGET_FAMILY_PREMIUM_KEY_ALIASES")
+    if raw is None:
+        return _PREMIUM_DEFAULT_ALIASES
+    return frozenset(x.strip() for x in raw.split(",") if x.strip())
+
+
 def _family_rules_for_key(user_api_key_dict: Any = None):
-    """Return the active family rules; only cursor-* retires gpt53."""
+    """Return the active family rules; premium keys > cursor-* (no gpt53) > legacy."""
     if isinstance(user_api_key_dict, str):
         alias = user_api_key_dict
     else:
         alias = getattr(user_api_key_dict, "key_alias", "") if user_api_key_dict else ""
+    if str(alias) in _premium_aliases():
+        return _PREMIUM_FAMILY_RULES
     if str(alias).startswith("cursor-"):
         return _CURSOR_FAMILY_RULES
     return _FAMILY_RULES

@@ -172,7 +172,12 @@ LIVE_VER="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("
 REF=""
 for d in "$BAK"/"$LIVE_VER"-*; do
   case "$d" in *-cfgonly) continue ;; esac
-  [ -f "$d/workbench.desktop.main.js" ] && REF="$d"
+  [ -f "$d/workbench.desktop.main.js" ] || continue
+  # 🔴 只认 **marker=0** 的备份当 pristine(10-13 实测):已打过补丁的机器再跑 UPGRADE 加新补丁,
+  #    落的备份是「旧补丁全在、只差新那个」的 bundle(9 个 marker)。按目录名取最新 ⇒ 拿它当种子,
+  #    ⑥ 在已打过 byok-force 的文本上找原版 bOd ⇒ 命中 0 报「尺子不可信」(②③④ 同样被污染)。
+  m=$(grep -c '@cxteam-\|@cx-queue-pump:' "$d/workbench.desktop.main.js" 2>/dev/null | head -1 | tr -dc '0-9')
+  [ "${m:-0}" = "0" ] && REF="$d"
 done
 # live 自己就是 pristine 的情况(补丁已 --revert / 这台机器从没装过 / 刚升过级还没 REPAIR):
 # 那两条 live bundle **本身就是**合法的 pristine 种子,②③④ 三腿都能靠它跑起来。

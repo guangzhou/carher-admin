@@ -23,7 +23,7 @@ cursor_team_setup.js — 一条命令给同事装好 cr-g(Cursor 3.16~3.21 验�
   5. #2 写 Key:mac 用 in-process keytar 读钥匙串主密码 + OSCrypt(AES-128-CBC)加密写
      secret://cursorAuth/openAIKey。写前两道自检(能解开现有 Key + 加密回环)才落盘,
      否则回退手填(防假绿 401)。win=DPAPI 未实测→回退手填;linux=best-effort。
-  6. 默认允许 Cursor 自动升级(升级后失效跑 --repair 一键重打补丁);--pin-update 才锁不升级。
+  6. 默认**禁止** Cursor 自动升级(10-13 起;--allow-update 才放开)—— 升级会冲掉全部补丁。
   7. zk-delta 本机小代理(默认开,只 macOS 实测):Cursor → 127.0.0.1:8788 → 公网只发增量
      → 198 上重建出逐字节相同的全量 → LiteLLM。**上游收到的字节和不装它时完全一样**,
      省的只是"你家宽带 → 机房"这一跳(实测 12 轮省 86.2%)。小代理用 Cursor 自带 Electron 跑
@@ -41,7 +41,8 @@ cursor_team_setup.js — 一条命令给同事装好 cr-g(Cursor 3.16~3.21 验�
   --uninstall        彻底恢复原状:bundle 还原(同版本备份→否则教你重装 Cursor)+ BYOK 配置清掉
                      + 摘 Key + 卸小代理 + 去掉 update.mode 锁。比 --revert 稳:不挑错版本的备份
   --key <k>          直接给 Key(CI/无人值守;否则 TTY 下交互粘)
-  --pin-update       写 "update.mode":"none" 锁定不升级(默认不写)
+  --allow-update     允许 Cursor 自动升级(默认**禁止**:写 update.mode=none 等三项,
+                     升级会冲掉全部补丁 ⇒ BYOK 又报 custom API keys)
   --chain            装 @cx-chain:v3 链式增量(默认**不装**:服务端那半已下线,装了只会
                      让上游静默少收上下文。不给这个开关时,安装器会把已装的自动摘掉。)
   --no-zk-delta      不装小代理 / 把已装的卸掉,BYOK 地址退回公网直连
@@ -1824,16 +1825,29 @@ function backupBlobBeforeWrite(raw) {
   return bdir;
 }
 
+/* 升级锁(2026-10-13 起**默认写**,用户点名「禁止 Cursor 升级」):
+   ① `update.mode:"none"` —— Cursor 自动升级会整包换掉 app,所有 bundle 补丁(含 noagenthost)一起没,
+      同事那边就又是「This model does not support custom API keys」;
+   ② `update.enableWindowsBackgroundUpdates:false` —— Windows 上后台静默装新版那条路;
+   ③ `cursor.agentHost.updateMode:"none"` —— Agent Host 自己有一条**独立的**在线更新通道
+      (默认 `default` 跟随 ①,显式写死更稳:它若单独被设成 on,会绕开我们打过补丁的那份)。
+   只写这三个键,其余设置原样保留;卸载时只删「值正是我们写的」那几个。 */
+const UPDATE_LOCK = { "update.mode": "none", "update.enableWindowsBackgroundUpdates": false, "cursor.agentHost.updateMode": "none" };
 function setUpdateNone(dry) {
   let s = {};
   if (fs.existsSync(SETTINGS_JSON)) {
     try { s = JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8") || "{}"); }
-    catch (e) { console.log('   !! settings.json 不是纯 JSON(含注释?)→ 跳过自动写,请手动加 "update.mode":"none"'); return; }
+    catch (e) { console.log('   !! settings.json 不是纯 JSON(含注释?)→ 跳过自动写,请在 Cursor 设置里把 Update: Mode 改成 none'); return; }
   }
-  const old = s["update.mode"];
-  if (old === "none") { console.log("   update.mode 已是 none"); return; }
-  console.log("   update.mode %j -> none", old === undefined ? null : old);
-  if (!dry) { s["update.mode"] = "none"; fs.writeFileSync(SETTINGS_JSON, JSON.stringify(s, null, 2)); }
+  const diff = Object.entries(UPDATE_LOCK).filter(([k, v]) => s[k] !== v);
+  if (!diff.length) { console.log("   已锁定:Cursor 不会自动升级"); return; }
+  for (const [k, v] of diff) console.log("   %s %j -> %j", k, s[k] === undefined ? null : s[k], v);
+  if (!dry) {
+    for (const [k, v] of diff) s[k] = v;
+    fs.mkdirSync(path.dirname(SETTINGS_JSON), { recursive: true });
+    fs.writeFileSync(SETTINGS_JSON, JSON.stringify(s, null, 2));
+    console.log("   ✔ 已锁定:Cursor 不会自动升级(新版本等管理员适配后,用 UPGRADE 一起换)");
+  }
 }
 
 /* ── #2 写 OpenAI Key 进 Cursor 的加密 secret(mac 实测;win/linux best-effort,自检回退) ──
@@ -2345,11 +2359,12 @@ async function uninstall(dry) {
     if (!fs.existsSync(SETTINGS_JSON)) console.log("   没有 settings.json,跳过");
     else {
       const s = JSON.parse(fs.readFileSync(SETTINGS_JSON, "utf8") || "{}");
-      if (s["update.mode"] === "none") {
-        delete s["update.mode"];
+      const ours = Object.entries(UPDATE_LOCK).filter(([k, v]) => s[k] === v).map(([k]) => k);
+      if (ours.length) {
+        for (const k of ours) delete s[k];
         if (!dry) fs.writeFileSync(SETTINGS_JSON, JSON.stringify(s, null, 2));
-        console.log("   %s update.mode:none(恢复自动升级)", dry ? "将删" : "已删");
-      } else console.log("   update.mode=%j,不是我们写的,不动", s["update.mode"] === undefined ? null : s["update.mode"]);
+        console.log("   %s %s(恢复自动升级)", dry ? "将删" : "已删", ours.join(" / "));
+      } else console.log("   升级锁不是我们写的(或没有),不动");
     }
   } catch (e) { console.log("   !! settings.json 不是纯 JSON(含注释?)→ 没动,可手动删掉 \"update.mode\":\"none\""); }
 
@@ -2851,7 +2866,7 @@ async function main() {
     upgrade: has("--upgrade"),
     apply: has("--apply") || has("--upgrade"), revert: has("--revert"), repair: has("--repair"),
     uninstall: has("--uninstall"),
-    forceVersion: has("--force-version"), pinUpdate: has("--pin-update"),
+    forceVersion: has("--force-version"), pinUpdate: !has("--allow-update"),
     // @cx-chain:v3 链式增量:默认**关**(服务端那半已下线)。不给这个开关时,
     // 安装器会把已装的 chain 补丁摘掉;服务端那半回来再用 --chain 装回去。
     chain: has("--chain"),
@@ -2972,6 +2987,9 @@ async function main() {
 
   // #4 修复模式:只重打 bundle(配置/Key 在库里,升级不动它们),不碰 config/update.mode/Key。
   if (args.repair) {
+    // REPAIR 也补上升级锁:修好之后别让 Cursor 当晚又自动升级、把刚打的补丁冲掉
+    console.log("--- 禁止 Cursor 自动升级 ---");
+    if (args.pinUpdate) setUpdateNone(false);
     // 🔴 `plans.length===0` 有两种含义,不许合并成一句「都在」:①真的都打过了 ②锚点认不出被跳过了。
     if (!plans.length) {
       if (reportMissed()) { process.exitCode = 5; return; }
@@ -3019,9 +3037,9 @@ async function main() {
 
   console.log("--- 3) BYOK 配置差异 ---");
   const oldBlob = await mergeConfig(args, !args.apply);
-  console.log("--- 4) update.mode ---");
+  console.log("--- 4) 禁止 Cursor 自动升级 ---");
   if (args.pinUpdate) setUpdateNone(!args.apply);
-  else console.log("   跳过(允许 Cursor 自动升级;升级后模型没了就双击 REPAIR / 跑 --repair)。加 --pin-update 可锁定不升级。");
+  else console.log("   跳过(--allow-update:允许 Cursor 自动升级;升级后模型没了就双击 REPAIR)");
 
   if (!args.apply) {
     if (reportMissed()) { process.exitCode = 5; console.log("\n[dry-run] 其余项通过,但上面列红的文件锚点认不出。"); return; }

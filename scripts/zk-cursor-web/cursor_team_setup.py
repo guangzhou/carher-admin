@@ -599,12 +599,17 @@ def set_update_none(dry):
         except Exception:
             print("   !! settings.json 不是纯 JSON(含注释?)→ 跳过自动写,请手动加 \"update.mode\":\"none\"")
             return None
-    old = s.get("update.mode")
-    if old == "none":
-        print("   update.mode 已是 none"); return json.dumps(s)
-    print("   update.mode %r -> none" % old)
+    # 10-13 起默认写三项(与 js 版 UPDATE_LOCK 同):Cursor 自动升级会冲掉全部补丁
+    lock = {"update.mode": "none", "update.enableWindowsBackgroundUpdates": False, "cursor.agentHost.updateMode": "none"}
+    diff = [(k, v) for k, v in lock.items() if s.get(k) != v]
+    if not diff:
+        print("   已锁定:Cursor 不会自动升级"); return json.dumps(s)
+    old = json.dumps(s)
+    for k, v in diff:
+        print("   %s %r -> %r" % (k, s.get(k), v))
     if not dry:
-        s["update.mode"] = "none"
+        for k, v in diff:
+            s[k] = v
         open(SETTINGS_JSON, "w", encoding="utf8").write(json.dumps(s, ensure_ascii=False, indent=2))
     return old
 
@@ -674,7 +679,7 @@ def main():
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--revert", action="store_true")
     ap.add_argument("--repair", action="store_true", help="只重打 bundle(Cursor 升级后失效用;不碰配置)")
-    ap.add_argument("--pin-update", action="store_true", help="写 update.mode:none 锁定不升级(默认不写)")
+    ap.add_argument("--allow-update", action="store_true", help="允许 Cursor 自动升级(默认禁止:升级会冲掉全部补丁)")
     ap.add_argument("--base-url", default=DEFAULT_BASE_URL)
     ap.add_argument("--models", default=",".join(DEFAULT_MODELS),
                     type=lambda s: [x.strip() for x in s.split(",") if x.strip()])
@@ -724,12 +729,12 @@ def main():
 
     print("--- 3) BYOK 配置差异 ---")
     old_blob = merge_config(dry=not ARGS.apply)
-    print("--- 4) update.mode ---")
-    if ARGS.pin_update:
+    print("--- 4) 禁止 Cursor 自动升级 ---")
+    if not ARGS.allow_update:
         old_settings = set_update_none(dry=not ARGS.apply)
     else:
         old_settings = None
-        print("   跳过(允许 Cursor 自动升级;升级后失效跑 --repair)。加 --pin-update 可锁定不升级。")
+        print("   跳过(--allow-update:允许 Cursor 自动升级)")
 
     if not ARGS.apply:
         print("\n[dry-run] 以上全部通过。加 --apply 执行(会先备份到 %s)。" % BACKUP_ROOT)

@@ -36,7 +36,9 @@ EXT_ONLY_DIFF = "另外两个也有一键配置"
 # 陈旧词:全文出现即红。「已下架」说明里允许提到的旧名放 ALLOW_IN 里按句豁免。
 COMMON_STALE = ["cr-g-5.6", "sa-grok-4.6-latest", "3.20.21", "3.21.18",
                 # 国内直连 403 / 跳「地区不可用」的下载页,给同事等于没给
-                "openai.com/zh-Hans-CN/codex", "claude.ai/download"]
+                "openai.com/zh-Hans-CN/codex", "claude.ai/download",
+                # 后端线路/上游名是内部实现,不写进给同事的文档(10-13 用户要求)
+                "kiro", "Kiro"]
 DOCS = {
     CURSOR_A: dict(name="Cursor-A", figures=1, imgs=3,
                    attach={"cursor-g-setup.zip": ZIP},

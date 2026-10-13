@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """三个 agent 一键配置的飞书文档收口门禁(只读)。
 
-改完 Cursor / Codex / Claude Code 任何一篇文档或附件后跑一次,全绿才算发出去:
+改完 Cursor×2 / Codex(主+3 篇外部分享)/ Claude Code 任何一篇文档或附件后跑一次,全绿才算发出去:
 
   python3 scripts/agent-oneclick-docs-audit.py            # 真跑(要 lark-cli 已登录)
   python3 scripts/agent-oneclick-docs-audit.py --selftest # 阳性对照:每条判据各喂一个坏样本必须红
@@ -27,6 +27,11 @@ OUT = ROOT / ".work" / "doc-audit"
 
 CURSOR_A, CURSOR_B = "OQCPdLd4MovEVoxGzdMcD3CJnCf", "FapXdudPLoTTRLxWGJQcqITpn9g"
 ZIP = ROOT / "scripts/zk-cursor-web/cursor-g-setup.zip"
+CODEX_MAIN = "Ni2hdvtbgoqBFMxrAu5ckjPrnbg"
+# 《Codex一键配置 外部分享》三篇副本(10-09~10-11 各复制过一次,10-13 前全停在旧版「先装好 codex」)。
+# 与主文档唯一允许的差别:不带指向内部 Cursor/Claude 文档的那一行。
+CODEX_EXT = ["ZYNsdZCJIoCJEJxeMPGcl7jDn3f", "ObrNdZ06poMM3tx96SpcQm2WnSc", "DhmidvMvKoCRkjxdOWlcCxgOnrh"]
+EXT_ONLY_DIFF = "另外两个也有一键配置"
 
 # 陈旧词:全文出现即红。「已下架」说明里允许提到的旧名放 ALLOW_IN 里按句豁免。
 COMMON_STALE = ["cr-g-5.6", "sa-grok-4.6-latest", "3.20.21", "3.21.18"]
@@ -43,6 +48,11 @@ DOCS = {
                 "install-windows.bat": ROOT / "codex-oneclick/install-windows.bat"},
         # 10-13 起脚本自动装 codex 命令行 ⇒「先装好 codex」的前提是旧真相
         stale=COMMON_STALE + ["已经装好 codex", "第一步：下载脚本"]),
+    **{d: dict(name=f"Codex-ext{i}", figures=4, imgs=2,
+               attach={"install-mac.command": ROOT / "codex-oneclick/install-mac.command",
+                       "install-windows.bat": ROOT / "codex-oneclick/install-windows.bat"},
+               stale=COMMON_STALE + ["已经装好 codex", "第一步：下载脚本"])
+       for i, d in enumerate(CODEX_EXT, 1)},
     "MeLad7oMiobwf6xnpA2cWy0nnSg": dict(
         name="ClaudeCode", figures=2, imgs=0,
         attach={"install-mac.command": ROOT / "claude-oneclick/install-mac.command",
@@ -117,8 +127,10 @@ def check_doc(xml, cfg, fetch_file):
     return red
 
 
-def twin_diff(xml_a, xml_b):
+def twin_diff(xml_a, xml_b, ignore=None):
     a, b = body_text(xml_a).split("\n"), body_text(xml_b).split("\n")
+    if ignore:
+        a, b = [l for l in a if ignore not in l], [l for l in b if ignore not in l]
     if a == b:
         return []
     only_a = [l for l in a if l not in b][:3]
@@ -158,6 +170,12 @@ def run():
     print(f"{'❌' if red else '✅'} 两篇 Cursor 文档正文逐字相同")
     for r in red:
         print(f"     · {r}")
+    for d in CODEX_EXT:
+        red = twin_diff(xmls[CODEX_MAIN], xmls[d], ignore=EXT_ONLY_DIFF)
+        bad += bool(red)
+        print(f"{'❌' if red else '✅'} Codex 外部分享 {d[:8]} 与主文档正文相同(除内部互链)")
+        for r in red:
+            print(f"     · {r}")
     print("\nVERDICT:", "FAIL" if bad else "PASS")
     return 1 if bad else 0
 

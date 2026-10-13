@@ -30,7 +30,8 @@ ZIP = ROOT / "scripts/zk-cursor-web/cursor-g-setup.zip"
 CODEX_MAIN = "Ni2hdvtbgoqBFMxrAu5ckjPrnbg"
 # 《Codex一键配置 外部分享》三篇副本(10-09~10-11 各复制过一次,10-13 前全停在旧版「先装好 codex」)。
 # 与主文档唯一允许的差别:不带指向内部 Cursor/Claude 文档的那一行。
-CODEX_EXT = ["ZYNsdZCJIoCJEJxeMPGcl7jDn3f", "ObrNdZ06poMM3tx96SpcQm2WnSc", "DhmidvMvKoCRkjxdOWlcCxgOnrh"]
+# 10-13 用户删了 ObrNdZ06 / DhmidvMv 两篇,只剩这一篇外部分享
+CODEX_EXT = ["ZYNsdZCJIoCJEJxeMPGcl7jDn3f"]
 EXT_ONLY_DIFF = "另外两个也有一键配置"
 
 # 陈旧词:全文出现即红。「已下架」说明里允许提到的旧名放 ALLOW_IN 里按句豁免。

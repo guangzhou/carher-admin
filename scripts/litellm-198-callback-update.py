@@ -97,6 +97,11 @@ PROD_POD_SELECTOR = "carher.net/litellm-production-route=enabled"
 # 但改的东西一个在服务的 pod 都没吃到（静默打空）。
 # 判据只认「谁的 pod 带路由标签」，名字是它的结果不是它的前提。
 _PROD_DEPLOY_CACHE = None
+# --deploy <name>: 换一条**非生产**车道（gray / guarded-old，零流量先验用）。
+# 这时只做 ①②，不碰共享 CM；验收按 app=<deploy> 选 pod。
+# 为什么不走 litellm-gray-rollout/scripts/lane-callback-swap.sh：10-10 起三车道有带外
+# 改动，live 引用的 CM ≠ helm manifest，那个脚本会 STOP（否则 helm upgrade 静默回退）。
+_LANE_OVERRIDE = None
 
 
 def sh(cmd, check=True, stdin_data=None):
@@ -144,6 +149,8 @@ def prod_deploy() -> str:
     那条查询会返空集，而空集在 shell 里长得跟「没问题」一模一样。
     """
     global _PROD_DEPLOY_CACHE
+    if _LANE_OVERRIDE:
+        return _LANE_OVERRIDE
     if _PROD_DEPLOY_CACHE:
         return _PROD_DEPLOY_CACHE
     out = sh("%s -n %s get po -l %s -o json" % (KUBECTL, NS, PROD_POD_SELECTOR))
@@ -190,6 +197,16 @@ def gray_volume_index() -> int:
     raise SystemExit("反查不到 volume 下标")
 
 
+def cm_prefix(cur_cm: str) -> str:
+    """新 CM 沿用当前 CM 的命名前缀（去掉末尾 12 位哈希）；生产车道仍是 litellm-stable-callbacks-。"""
+    if not _LANE_OVERRIDE:
+        return GRAY_CM_PREFIX
+    head, _, tail = cur_cm.rpartition("-")
+    if not head or len(tail) != 12:
+        raise SystemExit("当前 CM 名 %r 不是 <前缀>-<12位哈希>，不猜新名字" % cur_cm)
+    return head + "-"
+
+
 def cm_data(name: str) -> dict:
     out = sh("%s -n %s get cm %s -o json | base64 -w0" % (KUBECTL, NS, name))
     return json.loads(base64.b64decode(out.strip()).decode("utf-8", "replace"))["data"]
@@ -229,7 +246,8 @@ def pods():
     # 🔴 2026-10-10：rollout status 返回时旧 RS 的 pod 还在优雅终止，phase 仍是
     # Running ⇒ 只按 phase 过滤会把 4 个旧 pod 一起验，必报 4 个 ✗ 的假红
     # （apply 当场 8 个副本 4✗4✓）。正在终止的 pod 带 deletionTimestamp，排除掉。
-    out = sh("%s -n %s get po -l %s -o json" % (KUBECTL, NS, PROD_POD_SELECTOR))
+    sel = ("app=%s" % _LANE_OVERRIDE) if _LANE_OVERRIDE else PROD_POD_SELECTOR
+    out = sh("%s -n %s get po -l %s -o json" % (KUBECTL, NS, sel))
     return [p["metadata"]["name"] for p in json.loads(out).get("items", [])
             if p.get("status", {}).get("phase") == "Running"
             and not p["metadata"].get("deletionTimestamp")]
@@ -248,7 +266,7 @@ def cmd_plan(fname: str, force: bool) -> int:
     live = data[fname]
     live_vs_git(fname, live)
 
-    new_cm = GRAY_CM_PREFIX + h12("".join(
+    new_cm = cm_prefix(cur_cm) + h12("".join(
         "%s\0%s\0" % (k, want if k == fname else v) for k, v in sorted(data.items())))
     print("\n== 计划 ==")
     print("  文件        %s" % fname)
@@ -265,7 +283,10 @@ def cmd_plan(fname: str, force: bool) -> int:
     print("\n  将要：① 建新 CM %s（只换 %s 这一个 key）" % (new_cm, fname))
     print("        ② patch %s 的 volumes[%d] 指向新 CM → 滚动更新 4 副本"
           % (prod_deploy(), gray_volume_index()))
-    print("        ③ merge-patch 共享 CM %s 的 data（**不重启任何 acct pod**）" % SHARED_CM)
+    if _LANE_OVERRIDE:
+        print("        ③ 不碰共享 CM（非生产车道）")
+    else:
+        print("        ③ merge-patch 共享 CM %s 的 data（**不重启任何 acct pod**）" % SHARED_CM)
     print("\n  回滚：把 volumes[%d].configMap.name 改回 %s（旧 CM 不可变、不删）"
           % (gray_volume_index(), cur_cm))
     return 0
@@ -286,7 +307,7 @@ def cmd_apply(fname: str, force: bool) -> int:
     ts = time.strftime("%Y%m%d%H%M%S")
 
     # --- 备份（先做，路径打出来存档）---
-    for cm in (cur_cm, SHARED_CM):
+    for cm in ((cur_cm,) if _LANE_OVERRIDE else (cur_cm, SHARED_CM)):
         bak = "/tmp/bak_%s_%s.yaml" % (cm, ts)
         sh("%s -n %s get cm %s -o yaml > %s" % (KUBECTL, NS, cm, bak))
         print("备份 %s → 198:%s" % (cm, bak))
@@ -295,7 +316,7 @@ def cmd_apply(fname: str, force: bool) -> int:
         # --- ① 新 CM ---
         newdata = dict(data)
         newdata[fname] = want
-        new_cm = GRAY_CM_PREFIX + h12("".join(
+        new_cm = cm_prefix(cur_cm) + h12("".join(
             "%s\0%s\0" % (k, v) for k, v in sorted(newdata.items())))
         payload = json.dumps({"apiVersion": "v1", "kind": "ConfigMap",
                               "metadata": {"name": new_cm, "namespace": NS},
@@ -316,6 +337,9 @@ def cmd_apply(fname: str, force: bool) -> int:
         print("② %s volumes[%d] → %s，等滚动更新…" % (prod_deploy(), i, new_cm))
         print(sh("%s -n %s rollout status deploy %s --timeout=300s" % (KUBECTL, NS, prod_deploy())))
 
+    if _LANE_OVERRIDE:
+        print("③ 跳过共享 CM（--deploy %s 不是生产车道）" % _LANE_OVERRIDE)
+        return cmd_verify(fname)
     # --- ③ 共享 CM：只改 data，不重启 ---
     pj = json.dumps({"data": {fname: want}}, ensure_ascii=False)
     b64 = base64.b64encode(pj.encode()).decode()
@@ -358,6 +382,9 @@ def cmd_verify(fname: str) -> int:
                  bad, p))
         if not ok or bad != "0":
             rc = 1
+    if _LANE_OVERRIDE:
+        print("\n%s" % ("⛔ 有副本没对上" if rc else "✓ %s 逐副本对齐" % _LANE_OVERRIDE))
+        return rc
     print("\n共享 CM %s 里这个文件 sha=%s（%s）"
           % (SHARED_CM, h12(cm_data(SHARED_CM).get(fname, "")),
              "已同步" if sha(cm_data(SHARED_CM).get(fname, "")) == want_sha else "⚠️ 未同步"))
@@ -374,9 +401,16 @@ def main() -> int:
         description="更新 198 上一个**已在线**的 callback 文件（gray 哈希 CM 换代 + 共享 CM data 同步）")
     ap.add_argument("action", choices=["plan", "apply", "verify"])
     ap.add_argument("file", help="文件名，如 deepseek_responses_adapt.py")
+    ap.add_argument("--deploy", metavar="NAME",
+                    help="换一条非生产车道（如 litellm-proxy-gray）；不碰共享 CM")
     ap.add_argument("--force", action="store_true",
                     help="越过 git 门禁（会明确打印越过了什么）")
     a = ap.parse_args()
+    global _LANE_OVERRIDE
+    if a.deploy:
+        if a.deploy == prod_deploy():
+            raise SystemExit("--deploy %s 就是生产车道，去掉 --deploy 走正常路径（要同步共享 CM）" % a.deploy)
+        _LANE_OVERRIDE = a.deploy
     if a.action == "plan":
         return cmd_plan(a.file, a.force)
     if a.action == "apply":

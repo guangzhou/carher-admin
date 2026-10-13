@@ -228,6 +228,8 @@ const DEFAULT_MODELS = [
   "glm-5.3-flash", "qwen3-coder-next",
   // 2026-10-12 对齐 std key 补进来:`jev`(openrouter 那条线,200 出字)。
   "jev",
+  // 2026-10-13 用户点名「std 加了 muse 两个,脚本和文档更新」并拍板两个都进(见下方账)。
+  "muse-spark", "muse-image",
 ];
 /* ── 2026-10-12「对齐 cursor-liuguoxian-std」那一轮的账 ──
    用户点名「菜单跟 std key 的模型列表对齐」。std 的 `models` 有 **32** 个名字,
@@ -259,6 +261,12 @@ const DEFAULT_MODELS = [
    ⚠️ std 已经**摘掉**但菜单保留的 7 个(`composer-2.5` / `deepseek-v4-flash` / `gpt-5.2` /
    `gpt-5.4` / `grok-4.20-0309-reasoning` / `grok-4.5-latest` / `grok-4.6-latest`):
    用户本轮只点名「加」,没点名摘 ⇒ **不动**。摘名字会让已装机的同事菜单里少东西,是另一次决策。
+   ── 2026-10-13:std 又加 `muse-spark` / `muse-image`(muse.ai 号池)── 菜单 37 → **39**。
+   用户被告知读数后**拍板两个都进**(与 10-12「出图名一概不进」那条口径相反,以本次为准):
+     `muse-spark` chat 3/3 出字,但**带 tools 3/3 不发 tool_call**,反而文字回「文件不存在」
+       (同一探针 grok-4.7 / claude-opus-5-5 都正常发 read_file)⇒ Cursor 里能聊、**不能读改文件**;
+     `muse-image` 出图(`/images/generations` 回 url,相对路径 `/v1/media/…`),chat 也能出字。
+   ⚠️ muse 组 10-13 **只开给了 std**,同事 key 点了 403(开通是另一轮生产变更,用户未定)。
    🔴 **std 是用户自己的实验 key,会频繁改**(10-12 一天内改了两次)⇒ 别把它当「标准模板」
    拿去 `--converge-to` 同事的 key;对齐菜单每次都要重新实打,不许照抄它的 models 数组。 */
 /* RETIRED_MODELS：整表赋值之后，「退役」不再需要单独的摘除路径 —— 名字不在
@@ -329,7 +337,9 @@ const MODEL_PREFIXES = ["cr-g-", "grok-", "composer-", "sa-grok-", "sa-composer-
   "qwen3-coder-", "gpt-", "codex-", "deepseek-", "kimi-", "glm-",
   "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "jev",
   "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
-  "gemini-3.8-flash"];
+  "gemini-3.8-flash",
+  // 10-13 muse 两个:整名(最窄),同事库里不会有撞名的第三方 muse- 名
+  "muse-spark", "muse-image"];
 /* `--bare-sa` 往这里塞它生成的裸名（`sa-grok-4.6` → `grok-4.6`）。
    为什么不直接往 MODEL_PREFIXES 里加 `grok-` / `composer-`：那两条会**同时命中
    Cursor 自带的 grok / composer 模型**，而 isOurs 已经是个偏宽的判据（`gpt-` 那条

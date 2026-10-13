@@ -132,6 +132,8 @@ DEFAULT_MODELS = [
     "glm-5.3-flash", "qwen3-coder-next",
     # 2026-10-12 对齐 std key 补进来:jev(openrouter 那条线,200 出字)。
     "jev",
+    # 2026-10-13 std 加 muse 两个,用户拍板两个都进(账见 js 版注释)。
+    "muse-spark", "muse-image",
 ]
 # 2026-10-12 对齐 std:std 的 models 有 32 个,菜单 30 个 —— 差的 gpt-image-2(200 但出字为空)
 # 和 grok-imagine-image-2.0(500)是**实打判红**的出图专用名,与 sa-grok-imagine 同形,
@@ -170,7 +172,9 @@ MODEL_PREFIXES = ["cr-g-", "grok-", "composer-", "sa-grok-", "sa-composer-",
                   # claude-sonnet-4.6 / gemini-3.8-pro(点号 vs 连字符把两类名字分开)。
                   # grok-4.3 / grok-build-0.1 已被宽前缀 grok- 覆盖,不另加。
                   "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
-                  "gemini-3.8-flash"]
+                  "gemini-3.8-flash",
+                  # 10-13 muse 两个:整名(最窄)
+                  "muse-spark", "muse-image"]
 def is_ours(name):
     return isinstance(name, str) and any(name.startswith(p) for p in MODEL_PREFIXES)
 

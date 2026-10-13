@@ -15,20 +15,21 @@ description: >-
 
 | | 版本 | 怎么量 |
 |---|---|---|
-| **198 线上** | **v0.2.15**(`127.0.0.1:5000/sub2api:20261012-v0.2.15`,10-12 16:39 切) | `$S status` 的 `system.version` + deploy image |
-| 上游最新 | v0.2.16(10-13 15:20 发布,**198 未升**) | `git -C ~/codes/sub2api tag --sort=-v:refname \| head -1` |
+| **198 线上** | **v0.2.15**(`127.0.0.1:5000/sub2api:20261012-v0.2.15`,10-12 16:39 切) | `$S versions`(READY=1 那行)/ `$S status` 的 `system.version` |
+| 上游最新 | v0.2.16(10-13 15:20 发布,**198 未升**) | `$S versions` 末段 |
 | 源码 clone | `~/codes/sub2api` = origin/main(v0.2.16),全 tag 已拉 | |
 
 198 升级史(rs 镜像 tag):v0.2.7(09-20) → v0.2.8(09-24) → v0.2.11(10-01) → v0.2.13(10-02) → v0.2.15(10-12)。
 备份/探针在 198 `/root/sub2api-backup/`(10-12 那轮:dump + `probe-pre/post.json` 全 ok,8 条腿)。
-⚠️ **别信记忆里写的"当前线上版本"**,每次现量:
+⚠️ **别信记忆/skill 里写的"当前线上版本"**(10-13 发现停在 v0.2.11 十二天、漏了两次升级),每次现量:
 
 ```bash
-ssh cltx@10.68.13.198 "sudo -n kubectl -n litellm-dev get rs -o custom-columns=I:.spec.template.spec.containers[0].image,T:.metadata.creationTimestamp | grep sub2api: | sort -k2 | tail -3"
+scripts/sub2api-cli.sh versions   # 198 rs 镜像历史(READY=1 那行=线上)+ health + 上游最新 tag
 ```
 
 **读源码对 198 行为要看部署那个 tag**:`git -C ~/codes/sub2api show v0.2.15:<path>`,别看工作区(工作区已是 v0.2.16)。
-GitHub 偶尔从本地连不上 ⇒ 走 188:`ssh cltx@10.68.13.188 'curl -sL https://raw.githubusercontent.com/Wei-Shaw/sub2api/<tag>/<path>'`。
+本地到 GitHub **时通时不通**(10-13 同一天通过又断;断时 `git fetch` 静默挂几分钟,`versions` 限 20s)
+⇒ 不通走 188:`ssh cltx@10.68.13.188 'curl -sL https://raw.githubusercontent.com/Wei-Shaw/sub2api/<tag>/<path>'`。
 
 ## 工具
 
@@ -45,10 +46,20 @@ GitHub 偶尔从本地连不上 ⇒ 走 188:`ssh cltx@10.68.13.188 'curl -sL htt
   上游 `HKUDS/CLI-Anything` 10-13 对比:HARNESS.md / repl_skin / 模板一致,只有 `skill_generator.py` 上游更新(正则→AST)。
   生成器产出的 SKILL.md 是通用模板(含 project/undo 等不适用段落),**本 skill 手写,不用它覆盖**。
 
+## 198 升级之后要做的(否则下一个会话读错版本)
+
+1. `$S versions` 确认 READY=1 那行是新 tag;`$S status` 自报一致。
+2. 对 harness 路由:`git -C ~/codes/sub2api diff <旧tag> <新tag> -- backend/internal/server/routes/admin.go`
+   ——有删/改名的路由就改 `tools/cli-anything-sub2api` 并补测试;只新增可不动。
+3. 改「版本现状」表、本 skill 里所有 `show v0.2.15:` 的 tag;同步改 `sub2api-grok-ops` §G 的「当前线上」、
+   记忆 `project_sub2api_198_upgrade_v023_2026_09_08`(description + 末节)和 `topic_grok_index` 首节。
+4. 「写接口会骗人」表每一行都标了源码出处,升级跨了相关文件就按新 tag 复核一遍。
+
 ## 常用命令
 
 ```bash
 S=scripts/sub2api-cli.sh
+$S versions                                 # 现量版本(不登录)
 $S status                                   # 阳性对照:auth_scheme=bearer-jwt + system.version
 $S accounts list --platform grok            # 默认 lite、page_size 200;token 被服务端掩成空串
 $S accounts get 42
@@ -111,4 +122,6 @@ uv run --with pytest --with click --with prompt-toolkit python -m pytest cli_any
 ```
 
 E2E 用 `tests/conftest.py` 的假后端;加命令就同时加假路由+测试。改完不需重装(editable)。
-包内 `cli_anything/sub2api/skills/SKILL.md` 是生成器产物(英文通用版),不是这份。
+包内 `cli_anything/sub2api/skills/SKILL.md` 是随包分发的英文版(给装了 CLI 的别的 agent 用),
+加命令时两份都改;⛔ 别用上游 `skill_generator.py` 重生成覆盖它 —— 10-13 试过,产出的是通用模板
+(`project new` / undo-redo 等 sub2api 没有的命令),会把正确内容冲掉。

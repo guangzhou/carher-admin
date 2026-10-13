@@ -1,324 +1,103 @@
 ---
-name: >-
-  cli-anything-sub2api
-description: >-
-  Command-line interface for Sub2Api - Stateful CLI harness for operating a **Sub2API** deployment through its native administrator HTTP AP...
+name: cli-anything-sub2api
+description: Operate a Sub2API AI API gateway deployment through its native administrator HTTP API. Use when the user mentions Sub2API, sub2api admin, upstream account operations, redeem code generation, group or proxy management, dashboard metrics, or raw Sub2API admin API calls.
 ---
 
 # cli-anything-sub2api
 
-Stateful CLI harness for operating a **Sub2API** deployment through its native administrator HTTP API. The real backend is the deployed Go service at `SUB2API_BASE_URL`; this harness never reimplements account or gateway behavior.
+The CLI talks to the real deployed Sub2API Go backend. Install it with
+`pip install -e agent-harness` from the Sub2API source tree, or run it from the
+repository with `PYTHONPATH=agent-harness python3 -m
+cli_anything.sub2api.sub2api_cli`.
 
-## Installation
-
-This CLI is installed as part of the cli-anything-sub2api package:
-
-```bash
-pip install cli-anything-sub2api
-```
-
-**Prerequisites:**
-- Python 3.10+
-- sub2api must be installed on your system
-
-
-## Usage
-
-### Basic Commands
+## Configuration
 
 ```bash
-# Show help
-cli-anything-sub2api --help
-
-# Start interactive REPL mode
-cli-anything-sub2api
-
-# Create a new project
-cli-anything-sub2api project new -o project.json
-
-# Run with JSON output (for agent consumption)
-cli-anything-sub2api --json project info -p project.json
+export SUB2API_BASE_URL='https://your-sub2api-host'
+export SUB2API_ADMIN_API_KEY='<admin-api-key>'
+# Or, for administrator JWT deployments:
+# export SUB2API_JWT='<admin-access-token>'
 ```
 
-### REPL Mode
-
-When invoked without a subcommand, the CLI enters an interactive REPL session:
+198 shortcut (the deployed dev NodePort):
 
 ```bash
-cli-anything-sub2api
-# Enter commands interactively with tab-completion and history
+export SUB2API_ADMIN_API_KEY='<198-admin-api-key>'
+cli-anything-sub2api --target 198 --json status
 ```
 
+The default target URL is `http://10.68.13.198:31880`; override it with
+`SUB2API_198_BASE_URL` if needed. `--target 198-dev` is an alias.
+
+The admin API key is sent as `x-api-key`; when absent, the JWT is sent as
+`Authorization: Bearer`. Credentials are never written to disk. `profile set`
+stores only the base URL.
 
 ## Command Groups
 
-
-### Cli
-
-Operate a deployed Sub2API instance through its native administrator API.
-
-| Command | Description |
-|---------|-------------|
-
-| `status` | Verify native health and, when authenticated, report the deployed version. |
-
-| `api` | Call a supported admin endpoint not yet given a dedicated command. |
-
-| `repl` | Interactive shell; one-shot API semantics remain unchanged. |
-
-
-
-### Profile
-
-Manage the non-secret local connection profile.
-
-| Command | Description |
-|---------|-------------|
-
-| `show` | Show the saved base URL without reading or displaying credentials. |
-
-| `set` | Save a base URL locally; API keys and JWTs are deliberately excluded. |
-
-
-
-### Accounts
-
-Inspect and operate upstream provider accounts through admin account routes.
-
-| Command | Description |
-|---------|-------------|
-
-| `list` | List native account records with the same filters as the admin console. |
-
-| `get` | Fetch one upstream account by ID. |
-
-| `create` | Create an account using the native account payload schema. |
-
-| `update` | Apply a partial update to one account with the backend's native semantics. |
-
-| `delete` | Delete one account after explicit terminal confirmation. |
-
-| `command` | Read a native account diagnostic resource. |
-
-| `set-schedulable` | Enable or disable an account for scheduler selection. |
-
-| `set-status` | Set the backend account status field. |
-
-| `action` | Run a supported native account action without inventing business behavior. |
-
-| `bulk-update` | Update many accounts through the native bulk-update endpoint. |
-
-| `export` | Export sensitive credentials only to an explicit local file. |
-
-
-
-### Grok
-
-Operate Grok/xAI OAuth administration routes.
-
-| Command | Description |
-|---------|-------------|
-
-| `import-password` | Convert email/password to Grok OAuth and create one account.
-
-    The password is accepted only from stdin, used for the one authorization
-    request, and never included in output or the persisted account payload.
-    The server-side password authorization feature must already be enabled. |
-
-
-
-### Grok Oauth
-
-Inspect Grok OAuth capabilities and perform one-shot authorization.
-
-| Command | Description |
-|---------|-------------|
-
-| `capabilities` | Read whether optional Grok password authorization is enabled. |
-
-
-
-### Users
-
-Manage Sub2API panel users through documented user administration routes.
-
-| Command | Description |
-|---------|-------------|
-
-| `list` | List panel users with common native query filters. |
-
-| `get` | Fetch one user by ID. |
-
-| `create` | Create a panel user using the server's native schema. |
-
-| `update` | Apply a partial user update. |
-
-| `delete` | Delete one user after explicit confirmation. |
-
-| `balance` | Change the internal ledger balance through the dedicated balance route.
-
-    Writing `balance` via `users update` is not the audited path; this route
-    records balance history and enforces set/add/subtract semantics. |
-
-
-
-### Audit Logs
-
-Read native admin audit logs (who called which admin route, and when).
-
-| Command | Description |
-|---------|-------------|
-
-| `list` | List audit-log rows, newest first. |
-
-
-
-### Groups
-
-Manage API consumer groups through native group endpoints.
-
-| Command | Description |
-|---------|-------------|
-
-
-
-### Proxies
-
-Manage upstream proxy records through native proxy endpoints.
-
-| Command | Description |
-|---------|-------------|
-
-| `export` | Export sensitive proxy credentials only to an explicit local file. |
-
-
-
-### Redeem Codes
-
-Inspect and issue native Sub2API redemption codes.
-
-| Command | Description |
-|---------|-------------|
-
-| `list` | List redemption codes using the native pagination endpoint. |
-
-| `get` | Fetch one redemption code by ID. |
-
-| `stats` | Fetch redemption code totals from the native stats endpoint. |
-
-| `generate` | Generate codes; pass a stable idempotency key for payment-related flows. |
-
-| `expire` | Expire an existing redemption code. |
-
-
-
-### Dashboard
-
-Read native Sub2API dashboard metrics without screen-scraping the UI.
-
-| Command | Description |
-|---------|-------------|
-
-| `stats` | Fetch global dashboard statistics. |
-
-| `snapshot` | Fetch the v2 dashboard snapshot with optional native date filters. |
-
-
-
-### Settings
-
-Inspect or update native administrator settings.
-
-| Command | Description |
-|---------|-------------|
-
-| `get` | Read the current administrator settings. |
-
-| `update` | Apply a partial native administrator-settings update. |
-
-
-
-### Ops
-
-Read operational signals directly from the native administration API.
-
-| Command | Description |
-|---------|-------------|
-
-| `concurrency` | Fetch real-time concurrency statistics. |
-
-| `realtime-traffic` | Fetch the real-time traffic summary. |
-
-| `ingress-rejections` | Fetch bounded ingress-admission rejection aggregates. |
-
-
-
+- `accounts`: list/get/create/update/delete, usage/stats/today-stats/models,
+  schedulable/status/action, bulk-update, and sensitive export.
+- `users`: list/get/create/update/delete panel users; `balance` changes the
+  internal ledger via the dedicated balance route.
+- `audit-logs list`: who called which admin route, and when.
+- `groups`: list/all/get/create/update/delete, with platform and inactive filters.
+- `proxies`: list/all/get/create/update/delete and sensitive export.
+- `redeem-codes`: list/get/stats/generate/expire.
+- `dashboard`: stats and snapshot-v2 metrics.
+- `settings`: get and partial update of administrator settings.
+- `ops`: concurrency, realtime traffic, and ingress rejections.
+- `api`: raw native admin endpoint escape hatch.
+- `profile`: persist only the non-secret base URL.
+- `status`: verify native health and deployed version.
+- `grok oauth capabilities`: inspect Grok OAuth server capability flags.
+- `grok import-password`: one-shot Grok password-to-OAuth import; password is
+  accepted only from stdin and never persisted.
+
+## Agent Guidance
+
+- Always use `--json` for machine-readable output and parse the printed JSON.
+- Run read-only introspection (`accounts list`, `accounts get`, `groups all`)
+  before a write.
+- Use `--dry-run` to preview a mutating request; it prints `dry_run: true` and
+  sends no network traffic.
+- Sensitive exports (`accounts export`, `proxies export`, and raw `api` calls to
+  `/accounts/data` or `/proxies/data`) require `--output-file` and never print
+  credential contents.
+- Pass both `/admin/...` and `/api/v1/admin/...` paths to `api`; the CLI
+  normalizes them to the `/api/v1/admin/...` contract.
+- `INVALID_ADMIN_KEY` means the credential is missing or stale; regenerate the
+  admin API key or refresh the administrator JWT.
+- API payload schemas follow the backend's native fields; use `accounts get` or
+  the frontend admin types before constructing partial updates.
+- For 198, run `status`, then read-only account/group discovery before writes.
+  In the carher-admin repo prefer `scripts/sub2api-cli.sh`, which logs in with
+  the admin password and exports a short-lived JWT (see skill `cli-anything-sub2api`).
+- Some writes return 200 but change nothing: `accounts update` ignores
+  `schedulable` (use `set-schedulable` or `bulk-update`), `users update` ignores
+  `balance` (use `users balance`), and only `accounts action <id> clear-error`
+  clears a temporary park. Verify every write with a follow-up read.
+- `accounts delete` is a soft delete; the row keeps `deleted_at`.
+- Grok password import requires the server's explicit password-auth switch and
+  any upstream YesCaptcha prerequisite. Do not bypass either requirement.
+- Never pass a Grok password in argv, `--data`, or a file. Use
+  `printf '%s\n' "$GROK_PASSWORD" | cli-anything-sub2api --target 198 grok import-password --email ... --password-stdin`.
 
 ## Examples
 
-
-### Create a New Project
-
-Create a new sub2api project file.
-
 ```bash
-cli-anything-sub2api project new -o myproject.json
-# Or with JSON output for programmatic use
-cli-anything-sub2api --json project new -o myproject.json
+cli-anything-sub2api --json status
+cli-anything-sub2api --target 198 --json accounts list --platform grok
+cli-anything-sub2api --target 198 --json grok oauth capabilities
+printf '%s\n' "$GROK_PASSWORD" | cli-anything-sub2api --target 198 grok import-password --email account@example.com --password-stdin
+cli-anything-sub2api --json accounts list --status error --page-size 20
+cli-anything-sub2api --json accounts get 40
+cli-anything-sub2api --dry-run users balance 1 add 1000 --notes topup
+cli-anything-sub2api --json audit-logs list --page-size 20
+cli-anything-sub2api --dry-run accounts update 40 --data '{"concurrency":10}'
+cli-anything-sub2api accounts bulk-update --ids 40,39 --data '{"priority":2}'
+cli-anything-sub2api --json groups all --include-inactive
+cli-anything-sub2api --json redeem-codes list --status unused
+cli-anything-sub2api --json dashboard stats
+cli-anything-sub2api accounts export --ids 40,39 --output-file accounts-export.json
+cli-anything-sub2api --json api GET /admin/ops/request-errors --param status=open
 ```
-
-
-### Interactive REPL Session
-
-Start an interactive session with undo/redo support.
-
-```bash
-cli-anything-sub2api
-# Enter commands interactively
-# Use 'help' to see available commands
-# Use 'undo' and 'redo' for history navigation
-```
-
-
-## State Management
-
-The CLI maintains session state with:
-
-- **Undo/Redo**: Up to 50 levels of history
-- **Project persistence**: Save/load project state as JSON
-- **Session tracking**: Track modifications and changes
-
-## Output Formats
-
-All commands support dual output modes:
-
-- **Human-readable** (default): Tables, colors, formatted text
-- **Machine-readable** (`--json` flag): Structured JSON for agent consumption
-
-```bash
-# Human output
-cli-anything-sub2api project info -p project.json
-
-# JSON output for agents
-cli-anything-sub2api --json project info -p project.json
-```
-
-## For AI Agents
-
-When using this CLI programmatically:
-
-1. **Always use `--json` flag** for parseable output
-2. **Check return codes** - 0 for success, non-zero for errors
-3. **Parse stderr** for error messages on failure
-4. **Use absolute paths** for all file operations
-5. **Verify outputs exist** after export operations
-
-## More Information
-
-- Full documentation: See README.md in the package
-- Test coverage: See TEST.md in the package
-- Methodology: See HARNESS.md in the cli-anything-plugin
-
-## Version
-
-1.0.0

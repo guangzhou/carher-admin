@@ -22,7 +22,8 @@ claude-oneclick/
    ```
    看到「✔ 桌面 App 组件就绪」和「✔ 通了」才算。
 3. 传飞书:`+media-insert` → **下载回来比 sha** → `block_move_after` 到「macOS / Linux 下载：」「Windows 下载：」
-   两段后 → `block_delete` 旧 figure。`block_move_after` 回 1011 不一定是失败,重 fetch 看顺序。
+   两段后(10-13 起是「👇 macOS / Linux 下载：」「👇 Windows 下载：」,在第 7 节)→ `block_delete` 旧 figure。`block_move_after` 回 1011 不一定是失败,重 fetch 看顺序。
+4. 收口:`python3 scripts/agent-oneclick-docs-audit.py`(三个 agent 四篇文档一起验,全绿才算发出去)
 
 ## 桌面 App 的两个机制(都是从 App 自身 asar 读出来的,App 升级后要复核)
 

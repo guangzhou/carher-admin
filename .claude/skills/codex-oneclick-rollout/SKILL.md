@@ -47,6 +47,7 @@ codex-oneclick/
 3. 传附件：`+media-insert` → **下载回来比 sha**（同 build.sh 打印的）→ `block_move_after` 到
    「👇 macOS / Linux 一键脚本：」「👇 Windows 一键脚本：」两段后（10-13 起在第 1 节里，dmg/msix 在第 3 节） → `block_delete` 旧 figure。顺序别反（先删再传失败 = 文档没附件）
 4. 收尾核：figure 只有 4 个（两个安装器 + dmg + msix）、`<img>` 仍 2 张、旧 token 0 处
+   ⇒ 这一步已进代码：`python3 scripts/agent-oneclick-docs-audit.py`（只读，附件回环 sha + 块数 + 陈旧词，`--selftest` 有阳性对照）
 
 **第 0 步自动装 codex 命令行（10-13 加）**：没有 / < 0.144 ⇒ Node 装 `~/.carher-node`、
 `npm -g @openai/codex` 走 npmmirror 装 `~/.carher-npm-global`，写 `# >>> carher-codex >>>` PATH 块

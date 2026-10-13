@@ -1,8 +1,14 @@
 # Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x;安装器跨平台,诊断/日志路径示例为 macOS)
 
-> **现行菜单 = 30 名**(2026-10-12)。cr-g 整段下架、claude 家族进段 ③、并**对齐
-> `cursor-liuguoxian-std` 的 models 集合**(std 32 个 − 2 个出图名)。两篇飞书文档
-> **都已更新到同一版**,见「换飞书附件」那节。
+> **现行菜单 = 37 名**(2026-10-13,commit `297b176`)。cr-g 整段下架、claude 家族进段 ③;
+> std 改过一轮(32→35)后按用户「**只加非出图的**」补了 7 个文本名(claude-opus-4-8/4-7/4-6、
+> claude-sonnet-4-6、gemini-3.8-flash、grok-4.3、grok-build-0.1,实打全过)。没进:出图名一概不进;
+> `deepseek-v4.1-flash` 出字 4/6(失败率 33%)。菜单有而 std 没有的 7 个(`gpt-5.2` `gpt-5.4`
+> `composer-2.5` `deepseek-v4-flash` `grok-4.20-0309-reasoning` `grok-4.5-latest` `grok-4.6-latest`)
+> 同事 key 正常、std 点了 403 —— std 是实验 key,**「对齐 std」≠「同事能用」**,改菜单前先逐名实打。
+> 两篇飞书文档都是同一版;**改完文档/附件一律跑 `python3 scripts/agent-oneclick-docs-audit.py`**
+> (附件回环 sha + 两篇正文逐字相同 + 陈旧词 0,三个 agent 的文档一起验)。
+> ⛔ `grok-4.20-multi-agent` 别进菜单:官方不支持 function calling,带 tools 必兜到 deepseek 作答;std 已摘。
 
 对象:同事/本机 **Cursor.app 本体**的 workbench bundle 补丁与 BYOK 配置,与网关线
 (zk-cursor-web-fc-iterate,改 198 CM)完全分层:**这边改的是用户 Mac 上的 Cursor,
@@ -541,7 +547,9 @@ B 于是从「现行入口」变成了陈旧那篇(还挂 32 名的包、还写�
 `<figure>` 仍 1 个、`<img>`/`<whiteboard>` 数不变、**30 个名字逐名命中**、
 `sa-` 残留 0、`cr-g-5.*` 真名只允许出现在「已下架」那句提示里、版本号写着 3.24.12
 且 `3.20.21`/`3.21.18` 残留 0。
-⚠️ B 的正文结构与 A **不同**(段 ③ 原来是 cr-g、默认名写的是 `sa-grok-4.6-latest`、
+✅ 10-13 起两篇正文已改成**逐字相同**(章节 0~6 一致),上面这些判据已进 `python3 scripts/agent-oneclick-docs-audit.py`:
+两篇正文 diff 必须为空(图片 alt 是 AI 生成的不算)、附件回环 sha、陈旧词 0。
+⚠️(历史)B 的正文结构曾与 A **不同**(段 ③ 原来是 cr-g、默认名写的是 `sa-grok-4.6-latest`、
 "出问题了"是第 5 节),**别把 A 的 block id 套到 B 上**,逐篇重 fetch 取 id。
 
 ## 清单语义:并集 → 整表赋值(EXACT,2026-09-20 第二轮)

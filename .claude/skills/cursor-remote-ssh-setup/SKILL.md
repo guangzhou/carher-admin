@@ -205,6 +205,7 @@ cursor_remote_ssh.sh --host <h> [--apply|--remove --apply]   命令行版
   `<file>.carher-orig`、`node --check` 过了才写。模式 dry / `--apply` / `--revert`。
 - 服务器上没有本机同 commit 的目录 ⇒ 打 `NOSERVER`，⑧ 提示「先用 Cursor 连一次再双击」。
   ⇒ **每次升级 Cursor：先连一次服务器（装新 commit），再双击 REMOTE-SSH**。文档和 README 都写了。
+  用户侧写在两篇 Cursor 文档「2. 连远程服务器使用」+ zip 里 README.txt;改了提示文案要两处一起改。
 - 验收（198，10-13）：出厂干净 cursor-server → ⑧「✅ 已补好(4 个文件)」→ 重连后
   `agent-host-daemon ready`；**用 zip 解压出来的那份跑**，不是工作副本（工作副本绿≠包里有，
   freshness 的 `REQUIRED_MEMBERS` 就是为此加的）。

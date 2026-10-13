@@ -614,6 +614,22 @@ const LOCATORS = {
     return out;
   },
 
+  // noagenthost: `o=e.checkFeatureGate("cursor_agent_host",{…})` ← 右值前面插 `!1&&`
+  // 🔴 必须有 AST locator:没有的话这条退回正则、在 AST 区间落地前先改了 out ⇒ 后面
+  //    nosteer-mod 等按原偏移落地时错位(10-13 台架 ③④ 当场抓到:js/py 不等 + 重跑不幂等)。
+  noagenthost(ast, src) {
+    const out = [];
+    astWalk(ast, (n) => {
+      if (n.type !== "AssignmentExpression" || n.operator !== "=") return;
+      const c = n.right;
+      if (!c || c.type !== "CallExpression" || c.callee.type !== "MemberExpression") return;
+      if (c.callee.property.name !== "checkFeatureGate") return;
+      if (!(c.arguments[0] && c.arguments[0].type === "Literal" && c.arguments[0].value === "cursor_agent_host")) return;
+      out.push({ start: c.start, end: c.start, make: () => "/*@cxteam-noagenthost*/!1&&" });
+    });
+    return out;
+  },
+
   // queue-pump: addToQueue(x){if(!this.isValidQueueItem(x))return; ← 在这句之后插泵
   "queue-pump"(ast, src) {
     const out = [];
@@ -748,6 +764,28 @@ const PATCHES = [
     name: "dedicated", marker: "@cxteam-dedicated",
     rx: new RegExp("(" + ID + "\\(this\\.storageService,\"useDedicatedLocalAgentRuntimeHost\"\\))(\\?await this\\.runLocalAgentInDedicatedExtensionHost\\()", "g"),
     sub: (m) => "(/*@cxteam-dedicated*/!1)" + m[2],
+  },
+  /* ── noagenthost(2026-10-13):服务端灰度 `cursor_agent_host` 一开,BYOK 全报
+     「This model does not support custom API keys」──────────────────────────────
+     假设:请求没走本机 BYOK 线(agentExecProviderService.runLocalAgent → 小代理),而是被
+           Agent Host 拓扑送去了 Cursor 服务端,服务端不认自定义 key。
+     证伪条件:若假设错,成功与失败的会话应走同一条路。
+     数据(本机 3.24.12,同一台、同一 key、同一 grok-4.7):
+       10-12 21:43 会话 `cursor_agent_host gate is disabled … topology is disabled`
+         + `[AgentHostService] using legacy implementation` ⇒ `[local_agent_retries] Request successful`;
+       10-13 16:55 会话 `gate is enabled … topology is enabled` ⇒ agent-host 扩展日志
+         `Selected Agent Host turn runtime {"runtime":"connect",…}` ⇒ ConnectError invalid_argument
+         = 「does not support custom API keys」,小代理零请求。gate 由服务端按账号/时间下发,
+         所以同一台机器时好时坏、同事之间也不一样。
+     ⇒ 件D noloop 只把 agent host 里的 local-loop 改成 connect,**拦不住 agent host 本身**;
+       connect 运行时是服务端推理,BYOK 在那条路上根本不存在。
+     修:enablement 服务里读 gate 那一处恒 `!1` ⇒ topology 恒 disabled ⇒ 走 legacy 实现
+       (即 localagent/dedicated 补丁兜住的本机 BYOK 线)。全 app 只有 desktop/glass 两处读这个
+       gate(各 exactly-1),扩展里 0 处。private inference 那条腿(`||s`)不动。 */
+  {
+    name: "noagenthost", marker: "@cxteam-noagenthost",
+    rx: new RegExp("(try\\{" + ID + "=)(" + ID + "\\.checkFeatureGate\\(\"cursor_agent_host\",\\{disableExposureLog:" + ID + "\\}\\))", "g"),
+    sub: (m) => m[1] + "/*@cxteam-noagenthost*/!1&&" + m[2],
   },
   { name: "queue-pump", marker: QP_MARKER, rx: QP_ANCHOR, sub: (m) => m[1] + QP_SNIPPET },
   // qserial(2026-08-25):官方 tryDispatchNextQueueItem 闸门只看 status,不看"在飞派发"。
@@ -2641,7 +2679,7 @@ async function doDoctor() {
   //    `@cxteam-keepmine` 是 `@cxteam-keepmine2` 的子串,`-nocloud` 是 `-nocloudset` 的子串,
   //    裸数会互相灌水(我 09-23 在 `setUseOpenAIKey(!1)` 上已经栽过一次同形的假红)。
   // 名单不写死:直接把 bundle 里出现的所有 cxteam marker 枚举出来,免得以后加了补丁忘改这里。
-  const MUST = ["byokforce", "byokkeepon", "keepmine", "keepmine2", "nocloud", "nocloudset"];
+  const MUST = ["byokforce", "byokkeepon", "keepmine", "keepmine2", "nocloud", "nocloudset", "noagenthost"];
   for (const rel of BUNDLES) {
     const p = path.join(RES, rel);
     if (!fs.existsSync(p)) { P("  !!", rel, "不存在"); continue; }
@@ -2785,7 +2823,7 @@ async function doDoctor() {
       // 阳性对照:先证明这张表**查得到东西**。一个都查不到时,下面的 "NOT FOUND" 要能
       // 和"这个 gate 确实没下发"区分开 —— 会数东西的尺子必须先断言自己数得到。
       let hit = 0;
-      for (const name of ["agent_host_local_loop", "agent_host_enabled", "dedicated_local_agent_runtime_host"]) {
+      for (const name of ["cursor_agent_host", "agent_host_local_loop", "agent_host_enabled", "dedicated_local_agent_runtime_host"]) {  // cursor_agent_host=true 且没打 noagenthost ⇒ BYOK 报 custom API keys(10-13)
         const k = djb2(name);
         const g = gates[k];
         if (g) hit++;

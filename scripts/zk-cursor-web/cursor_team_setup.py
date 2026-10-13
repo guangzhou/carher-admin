@@ -294,6 +294,12 @@ PATCHES = [
     dict(name="dedicated", marker="@cxteam-dedicated",
          rx=re.compile(r"(" + _ID + r"\(this\.storageService,\"useDedicatedLocalAgentRuntimeHost\"\))(\?await this\.runLocalAgentInDedicatedExtensionHost\()"),
          sub=lambda m: "(/*@cxteam-dedicated*/!1)" + m.group(2)),
+    # noagenthost(2026-10-13):服务端灰度 cursor_agent_host 打开 ⇒ BYOK 被送去服务端 connect
+    # 运行时 ⇒「This model does not support custom API keys」。读 gate 那一处恒 false ⇒ 走 legacy
+    # 本机 BYOK 线。三段式与数据见 js 版注释。
+    dict(name="noagenthost", marker="@cxteam-noagenthost",
+         rx=re.compile(r"(try\{" + _ID + r"=)(" + _ID + r"\.checkFeatureGate\(\"cursor_agent_host\",\{disableExposureLog:" + _ID + r"\}\))"),
+         sub=lambda m: m.group(1) + "/*@cxteam-noagenthost*/!1&&" + m.group(2)),
     dict(name="queue-pump", marker=QP_MARKER,
          rx=QP_ANCHOR, sub=lambda m: m.group(1) + QP_SNIPPET),
     # qserial(2026-08-25):官方 tryDispatchNextQueueItem 的闸门 Vyb 只看 status,不看

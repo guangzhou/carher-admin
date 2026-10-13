@@ -335,8 +335,13 @@ def main():
     if not args:
         sys.exit('用法：python3 %s "画面描述" [输出路径.png]' % sys.argv[0])
     prompt = args[0]
-    out = args[1] if len(args) > 1 else os.path.join(
-        os.getcwd(), "image-%s.png" % time.strftime("%Y%m%d-%H%M%S"))
+    name = "image-%s.png" % time.strftime("%Y%m%d-%H%M%S")
+    out = args[1] if len(args) > 1 else os.getcwd()
+    # 🔴 10-13 本机回归:Codex 传了「.」当输出路径 ⇒ 原来拼成 `..webp`(隐藏文件,用户找不到)。
+    #    给的是目录(含 . / 结尾带斜杠)⇒ 在目录里自动起名;没有后缀的普通名字照常补。
+    if os.path.isdir(out) or out.endswith(("/", "\\")):
+        os.makedirs(out, exist_ok=True)
+        out = os.path.join(out, name)
     generate(prompt, out)   # 后缀按实际格式自动改(muse-image 出的是 .webp)
 
 

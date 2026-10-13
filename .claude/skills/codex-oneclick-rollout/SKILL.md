@@ -61,6 +61,12 @@ Desktop App 不由脚本装 ⇒ 文档第 3 节挂 dmg/msix。
 
 ## 2. 生图那一段（脚本第 6 步）
 
+> **10-13 起统一走 `muse-image`**(用户点名「画图都用 muse 那个工具」)。它返回**相对路径** `/v1/media/<32hex>.webp`,
+> 文件在 muse2api 上 ⇒ 198 nginx 加了只读出口 `https://cc.auto-link.com.cn/muse-media/<32hex>.<ext>`
+> (`# >>> carher-muse-media >>>` 段,备份在 `/etc/nginx/backup-ccdl/`,回滚=删段+reload),工具里改写过去下载;
+> 输出后缀按文件头改成 .webp。🔴 key **先读 auth.json 再兜底环境变量**:用户 shell 常有另一把 `OPENAI_API_KEY`(本机实测没开 muse ⇒ 恒 403)。
+> 验收=空 HOME 装完后 `codex exec "画一张…"` 日志里出现 `carher_image.py` 且产出图片(10-13 PASS)。
+
 内置 `image_gen` 是 ExtensionItem，本环境**全目录无模型声明该能力 ⇒ 没注册**，修不好，只能绕。
 细节与证据见 skill `codex-local-cli-toolchain` §4。绕法两件事：
 

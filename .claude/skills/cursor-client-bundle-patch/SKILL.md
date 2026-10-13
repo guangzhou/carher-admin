@@ -38,6 +38,15 @@
 **`@cxteam-norelay`(2026-08-25 连发折叠+僵尸真根因修)**。
 2026-09-23 加到 **10 处**:`@cxteam-nocloud` / `@cxteam-nocloudset`(见下「会话被改道去 Cloud Agents」)。
 
+## 服务端灰度 cursor_agent_host ⇒ BYOK 报 custom API keys(2026-10-13,@cxteam-noagenthost)
+
+gate 开 ⇒ renderer 日志 `effective agent-host topology is enabled` ⇒ 消息走 Agent Host connect(服务端推理)⇒
+任何模型都报「This model does not support custom API keys」,小代理零请求。件D noloop 拦不住(它在 agent host 内部)。
+修:workbench 读 gate 那一处(desktop/glass 各 exactly-1)前插 `!1&&` ⇒ 拓扑恒 legacy。js 必带 AST locator。
+验收判据=新会话日志 `using legacy implementation` + `[local_agent_retries] Request successful` + 小代理 req_total 涨。
+**同日起升级锁默认开**(update.mode / enableWindowsBackgroundUpdates / agentHost.updateMode 三键,`--allow-update` 放开):
+自动升级会把这些补丁全部冲掉。
+
 ## 会话被改道去 Cloud Agents(2026-09-23,@cxteam-nocloud / nocloudset)
 
 同事升 3.21.18 后每次发消息弹「Upgrade to run Cloud Agents / Cloud Agents are not available

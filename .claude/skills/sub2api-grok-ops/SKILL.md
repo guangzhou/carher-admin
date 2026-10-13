@@ -1096,11 +1096,23 @@ zerokey-pool-\* / claude-gpt-\* / claude-zerokey-\* / openrouter-\* / ua-split-\
 198 上常驻 `/Data/sub2api-ops/sub2api-upgrade.py`（源在 repo
 `scripts/grok-onboard/sub2api-upgrade.py`，两边 sha256 应逐字相等，改完必同步）。
 09-08（v0.1.179→v0.2.3）、09-10（v0.2.3→v0.2.4）、09-20（v0.2.4→v0.2.7）、
-09-24（v0.2.7→v0.2.8）四次，每次踩到的坑都已固化进脚本。**当前线上 v0.2.8**（09-24 14:27 切的），
-脚本 sha256 `aea83379…`（09-24 改过 `verify` 的错误窗口，见下面那条；repo 与 198
-`/Data/sub2api-ops/` 同值，改完必核。198 上留了 `sub2api-upgrade.py.bak-20260924` = 改之前那版）。
+09-24（v0.2.7→v0.2.8）、**10-01（v0.2.8→v0.2.11，跨三个版本）**、10-02 23:31（→v0.2.13）、
+10-12 16:39（v0.2.13→v0.2.15）七次，每次踩到的坑都已固化进脚本。
+**当前线上 v0.2.15**（10-13 现量；上游已有 v0.2.16 未升）。⚠️ 这行会过时 ⇒ 现量命令见 skill
+`cli-anything-sub2api`「版本现状」。升级用的那份**脚本**现 sha256 `268ce0e4…`（10-13 核过 198 = 仓内）
+（10-01 改了 `verify` 的三处 + `check` 的暴露面，见下；198 上旧版留作
+`sub2api-upgrade.py.bak-20261001` = `aea83379…`，更早的 `.bak-20260924`/`.bak-20260920` 也还在）。
 
-🔴 **`verify` 那段错误统计 09-24 修过两轮，形状变了：**
+🔴 **「两侧 sha 逐字相等」只证明 repo 工作区 == 198，不证明 git 里有这份。**
+10-01 核完 `aea83379…` 两边相等就开跑，事后 `git diff` 才发现：**那 326 行差异全是未提交改动**，
+`git HEAD` 里那份是 **09-24 修复之前**的旧版 —— `creationTimestamp` 锚点、probe delta、
+3 小时基线统统不在版本控制里（`grep -c creationTimestamp` 在 HEAD 版是 **0**，工作区是 2）。
+于是「从 git 重新 clone 一份来跑」会拿到一个会把切换前 18 分钟算进升级账的尺子。
+⇒ **三方核对，不是两方**：`git show HEAD:<path> | shasum -a 256`、工作区、198 三个值
+都要对上；只对后两个等于没核。这是
+[[feedback_sop_referenced_scripts_were_never_in_git]] 的第五次复现。
+
+🔴 **`verify` 那段错误统计前后修过四轮（09-24 两轮 + 10-01 两轮），形状变了：**
 
 - **旧版写着 `since cutover`，实际锚在 pre-state（备份）时刻**，中间隔着 probe/backup/pull
   三步的十几分钟。09-24 它把切换前就停了的 30 条 grok 502 算进升级账上。
@@ -1173,17 +1185,36 @@ dump 里含 `accounts` 表的 grok/kimi OAuth token，**是凭据文件**，脚�
   （`expires_at` / 末次 usage / 影响面），但**下结论仍然是人的事**：
   判据是「这 token 一小时前还活着吗」。几天前就过期 ⇒ 是重启的刷新周期
   把旧账揭出来了，不是这次升级。见 [[feedback_restart_token_refresher_reveals_pre_dead_tokens]]。
+- 🔴 **`verify` 里 `<-- CHECK` 那几行同样是提问。** 10-01 改完门禁后它喊出三条，
+  逐条查完**全不是升级造成的**：`400 ×14` = acct 70（当天 10:20 刚建的号）16:21~16:25
+  四分钟内 x.ai 回的 400；`502/internal ×13` = acct 68 在 13:29~13:39 的
+  `The model is currently at capacity due to high demand`（上游容量，原文就写着）；
+  `503/account_auth ×12` = `No healthy Grok OAuth account is currently available`，
+  分散 14:09~17:08 涉及 acct 18/19/20/27/30，是「新号 25~30h 烧成 spending-limit」
+  的日常形状。**三条最早的也在切换后 2h48m** ⇒ 门禁该喊的是「这格偏离了昨日同时段」，
+  不是「升级弄坏了」。
+- 🔴 **改 `verify` 那段门禁 = 改尺子本身，必须拿阳性对照验两个方向。**
+  只会说「没事」的尺子和坏尺子同形：10-01 第一版改完对真数据一条不喊，看着很干净，
+  阳性对照一跑就露出「全新故障被速率地板吞掉」。现成 harness（判定逻辑逐字照抄
+  `cmd_verify`，10 个 case 含今天 4 条真实行 + 安静夜真回归 + 无先例新故障 + 09-24 那次假红）
+  在 [[project_sub2api_198_upgrade_v023_2026_09_08]] 的 10-01 段落里，改完照抄重跑，
+  **10/10 才算过**。
 
-### 四次升级的实际数值（下次对照用）
+### 升级的实际数值（下次对照用）
 
-| | 09-08 v0.2.3 | 09-10 v0.2.4 | 09-20 v0.2.7 | **09-24 v0.2.8** |
-|---|---|---|---|---|
-| 迁移 | 8 条 → `236_…` | +1 → 284 | +2 → 286（两条都叫 238） | **+3 → 289**（含 `238b_…`，**b 后缀**，又一次证明只能认 `filename`） |
-| rollout | — | ~30s | 31s，`restartCount=0` | **31s**，`restartCount=0` |
-| 真 ERROR | 0 | 0 | 0 | **0** |
-| 账号 | — | 20 / 18 active | 41 / 39→33（6 个 antigravity，非升级所致） | 61 / **53→53，逐账号零翻转** |
-| 回归 | — | 8/8 | 7/8，delta 判定 0 regression | **4/4 pre 全绿 → 4/4 post 全绿，0 NEWLY BROKEN** |
-| 备份 | 2.9MB | 6.6MB | `sub2api-20260920-1324.dump`，sha256 `2f1daff4…` | `sub2api-20260924-1409.dump`，sha256 `f1fd9c0b…` |
+10-02 v0.2.13 / 10-12 v0.2.15 两次只留下这些可复核的数(10-13 从 198 现读):迁移 **+2 → `241_add_typesafe_platform.sql`**、
+**+1 → 292 / `242_drop_platform_check_constraints.sql`**;10-12 的 `probe-pre` 4/4 ok、`probe-post` 8/8 ok
+(`/root/sub2api-backup/`,dump `sub2api-20261012-1637.dump`,升级前镜像 `20261002-v0.2.13`、74 号/64 active);
+现 pod `restartCount=0`。rollout 时长、ERROR 数、verify 结果**没留记录**,别补编。
+
+| | 09-08 v0.2.3 | 09-10 v0.2.4 | 09-20 v0.2.7 | 09-24 v0.2.8 | **10-01 v0.2.11** |
+|---|---|---|---|---|---|
+| 迁移 | 8 条 → `236_…` | +1 → 284 | +2 → 286（两条都叫 238） | +3 → 289（含 `238b_…`，**b 后缀**，又一次证明只能认 `filename`） | **+0 → 289**（跨三个版本却零 schema 变更；head 仍 `240_affiliate_ledger_operation_id.sql`。脚本明写「没迁移也正常」，⛔ 别据此怀疑镜像没换 —— 判据是 label） |
+| rollout | — | ~30s | 31s，`restartCount=0` | 31s，`restartCount=0` | **30s**，`restartCount=0` |
+| 真 ERROR | 0 | 0 | 0 | 0 | **0** |
+| 账号 | — | 20 / 18 active | 41 / 39→33（6 个 antigravity，非升级所致） | 61 / 53→53，逐账号零翻转 | **71 / 62→62，逐账号零翻转** |
+| 回归 | — | 8/8 | 7/8，delta 判定 0 regression | 4/4 pre 全绿 → 4/4 post 全绿，0 NEWLY BROKEN | **4/4 pre → 8/8 post（含 4 条 kimi）全绿，0 NEWLY BROKEN** |
+| 备份 | 2.9MB | 6.6MB | `sub2api-20260920-1324.dump`，sha256 `2f1daff4…` | `sub2api-20260924-1409.dump`，sha256 `f1fd9c0b…` | `sub2api-20261001-1058.dump`，sha256 `e7d96ae2…` |
 
 **09-20 那次是白天高峰切的**（用户拍板接受 30~90s 断流），不是夜间窗口 ——
 我先把 probe pre / backup / pull 三步做完才去问，问的时候只剩一刀。
@@ -1376,7 +1407,7 @@ claude-/carher-/其他 398 把**没动**，要铺按同一条路径走。
    判活只能拿 pool key 打真实推理。
 
 全记录：[[project_kimi_allegro_sub2api_198_2026_09_08]]、
-升级史与 SOP（`created_at` 修复出自 v0.2.3；**当前线上 v0.2.8**，09-24 切的）：见 **§G** +
+升级史与 SOP（`created_at` 修复出自 v0.2.3；**当前线上 v0.2.15**，10-12 16:39 切的）：见 **§G** +
 [[project_sub2api_198_upgrade_v023_2026_09_08]]。
 
 ## 同一个 sub2api 上还挂着 antigravity（09-10 补到 6 条，09-16 又被加到 9 条）

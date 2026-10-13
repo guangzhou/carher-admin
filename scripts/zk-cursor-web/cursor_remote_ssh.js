@@ -172,8 +172,81 @@ function usage() {
   ].join("\n"));
 }
 
+function listHostsHint() {
+  const lines = fs.existsSync(SSH_CONFIG) ? fs.readFileSync(SSH_CONFIG, "utf8").split("\n") : [];
+  const names = [];
+  parseHosts(lines).forEach((x) => x.names.forEach((n) => { if (!n.includes("*") && !n.includes("?")) names.push(n); }));
+  console.log("\n③ 还没指定要连哪台。你 ~/.ssh/config 里现有的主机:");
+  if (names.length) names.forEach((n) => console.log("     " + n));
+  else console.log("     (一个都没有 —— 也可以直接填 用户名@IP)");
+  console.log("   (Cursor 左下角「Connect to Host」下拉**也只列这个文件里的机器**。)");
+}
+
+/* ⑧ 服务器上的 Cursor 组件补丁(远程窗口里 agent 扩展跑在服务器上,本机补丁管不到)。
+   服务器上要先有和本机**同 commit** 的 cursor-server(Cursor 第一次连上去时自己装)。 */
+function serverPatch(host, okTail) {
+  console.log("\n⑧ 服务器上的 Cursor 组件补丁");
+  const rp = sh(process.execPath, [path.join(__dirname, "cursor_remote_patch.js"), "--host", host, "--apply"], 240000);
+  const rpOut = (rp.stdout || "") + (rp.stderr || "");
+  if (/还没有和你本机同版本/.test(rpOut)) {
+    console.log("   ⏳ 服务器上还没有和你本机同版本的 Cursor 组件(第一次连这台机,或刚升级过 Cursor)。");
+    console.log("      先在 Cursor 里连一次这台服务器,等左下角显示已连接,**再双击一次本脚本**,它会补上。");
+    return;
+  }
+  if (rp.status === 0) {
+    // 每个文件一行,行首「✅ 已打」或「已打过」,行尾又带「(已打过)」⇒ 按行数,不按命中次数
+    const n = rpOut.split("\n").filter((l) => /^\s*(✅ 已打|已打过)\s/.test(l)).length;
+    console.log("   ✅ 已补好(" + n + " 个文件)" + (okTail || ""));
+    return;
+  }
+  console.log("   ⚠️ 没补成(不影响模型能不能用,只影响远程窗口里的上下文压缩):");
+  rpOut.split("\n").filter((l) => /❌|⚠️/.test(l)).slice(0, 4).forEach((l) => console.log("      " + l.trim()));
+}
+
+/* --wizard:双击版的「列主机 → 问哪台 → 预演 → 问 yes → 执行」在 JS 里做。
+   🔴 2026-10-13 同事 Windows 实机:REMOTE-SSH-Windows.cmd 原来把这套问答写在 .cmd 里(中文 echo +
+   set /p + chcp 65001 + 只有 LF 换行),cmd 按字节偏移逐行续读批处理 ⇒ 行首被吃,满屏
+   「…不是内部或外部命令」,连 --apply 那行都被切碎。.cmd 只留纯 ASCII + CRLF、无 chcp,
+   中文和交互全在这里(Node 输出 UTF-8)。Mac 启动器也走这里,两边一套逻辑。 */
+// 一个进程只开一个 readline、按行排队取:每问一次就新开/关一个 interface 的话,
+// stdin 里已经读进缓冲的后几行(管道/粘贴一次输入多行)会随 close 一起丢掉 ⇒ 第二问读到空(实测)。
+let _rl = null; const _lines = []; const _waiters = [];
+function ask(q) {
+  if (!_rl) {
+    _rl = require("readline").createInterface({ input: process.stdin, terminal: false });
+    _rl.on("line", (l) => { const w = _waiters.shift(); if (w) w(l); else _lines.push(l); });
+    _rl.on("close", () => { while (_waiters.length) _waiters.shift()(""); });
+  }
+  process.stdout.write(q);
+  return new Promise((res) => {
+    const done = (a) => res((a || "").trim());
+    if (_lines.length) done(_lines.shift()); else _waiters.push(done);
+  });
+}
+async function wizard(rest) {
+  const self = (extra) => spawnSync(process.execPath, [__filename, ...rest, ...extra], { stdio: ["ignore", "inherit", "inherit"] }).status;
+  console.log("让「Cursor 连远程服务器」的窗口里也能用 cursor-g 的模型。\n");
+  console.log("它做两件事:①(Mac 走本机小代理时)把远端的 127.0.0.1:8788 转回你本机;");
+  console.log("②补好服务器上的 Cursor 组件(远程窗口里有一部分组件跑在服务器上)。Cursor 里一个设置都不用改。\n");
+  const rc0 = self([]);
+  if (rc0 !== 0) return rc0;   // 小代理没起来等:上面已经说清楚了
+  const host = (await ask("\n要配哪台?(照着上面的名字填,或 用户名@IP;直接回车=退出): ")).replace(/"/g, "");
+  if (!host) { console.log("已退出,什么都没动。"); return 0; }
+  console.log("\n===== 先预演一遍,只显示要改什么,不落盘 =====");
+  const rc1 = self(["--host", host]);
+  if (rc1 !== 0) return rc1;   // ④ 端口被别人占着 / ssh 不通:已打印原因和解法,不再往下问
+  const ans = await ask("\n确认执行?输入 yes 回车(其它任何输入=取消): ");
+  if (ans.toLowerCase() !== "yes") { console.log("已取消,什么都没动。"); return 0; }
+  return self(["--host", host, "--apply"]);
+}
+
 async function main() {
   const argv = process.argv.slice(2);
+  if (argv.includes("--wizard")) {
+    const rc = await wizard(argv.filter((a) => a !== "--wizard"));
+    if (_rl) _rl.close();
+    return rc;
+  }
   const args = { apply: false, remove: false, host: "", port: 0 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -193,9 +266,16 @@ async function main() {
   console.log("① 你的 Cursor 模型地址:" + (b.url || "(空)"));
   const m = /^https?:\/\/(127\.0\.0\.1|localhost)(?::(\d+))?/i.exec(b.url || "");
   if (!m) {
-    console.log("   → 这是**公网直连**,不经过本机小代理。");
-    console.log("   ✅ 远程窗口天生就能用,不需要配隧道,本脚本到此为止(一个字都没改)。");
-    console.log("      (要是远程窗口里还是连不上,那是另一回事:先确认那台机能上外网。)");
+    // 公网直连不需要隧道,但服务器上的 Cursor 组件**照样要补**(与隧道无关)。
+    // 🔴 10-13 前这里直接 return ⇒ 走公网直连的 Windows 同事从来没补到服务器那份。
+    console.log("   → 这是**公网直连**,不经过本机小代理 ⇒ **不需要隧道**,ssh 配置一个字都不改。");
+    console.log("      (要是远程窗口里模型连不上,那是另一回事:先确认那台服务器能上外网。)");
+    console.log("   但服务器上的 Cursor 组件**照样要补**(远程窗口里有一部分组件跑在服务器上)。");
+    if (!args.host) { listHostsHint(); return 0; }
+    console.log("\n③ 目标主机:" + args.host);
+    if (!args.apply) { console.log("\n以上是**预演**:只会补服务器上的 Cursor 组件(先备份),不改 ssh 配置。"); return 0; }
+    serverPatch(args.host, "。已开着的远程窗口关掉重连即可。");
+    console.log("\n  **每次升级 Cursor 后**,连一次服务器、再双击一次本脚本(服务器要补的是新版本那份)。");
     return 0;
   }
   const port = args.port || parseInt(m[2] || "8788", 10);
@@ -218,17 +298,7 @@ async function main() {
   if (exists) lines = fs.readFileSync(SSH_CONFIG, "utf8").split("\n");
   const blocks = parseHosts(lines);
 
-  if (!args.host) {
-    console.log("③ 还没指定要连哪台。你 ~/.ssh/config 里现有的主机:");
-    const names = [];
-    blocks.forEach((x) => x.names.forEach((n) => { if (!n.includes("*") && !n.includes("?")) names.push(n); }));
-    if (names.length) names.forEach((n) => console.log("     " + n));
-    else console.log("     (一个都没有 —— 说明你还没配过 ssh 免密,先找管理员配好再来)");
-    console.log("\n   重跑并带上主机名,例如:  --host " + (names[0] || "me@1.2.3.4"));
-    console.log("   (Cursor 左下角「Connect to Host」下拉**也只列这个文件里的机器**,");
-    console.log("    所以这里为空 = Cursor 里也选不到它。)");
-    return 0;
-  }
+  if (!args.host) { listHostsHint(); return 0; }
   const host = args.host;
   const alias = host.includes("@") ? host.split("@")[1] : host;
   console.log("③ 目标主机:" + host);
@@ -262,19 +332,7 @@ async function main() {
   if (before.who === "ours" && !args.remove) {
     console.log("   ✅ 已经通了,而且确认是**我们的小代理**(/healthz 认得出) —— 隧道已经配好,ssh 配置不用改。");
     // 隧道已配好的人也要补服务器组件 —— 他们恰恰是「升级 Cursor 后远程窗口出问题」的那批老用户。
-    if (args.apply) {
-      console.log("\n⑧ 服务器上的 Cursor 组件补丁");
-      const rp = sh(process.execPath, [path.join(__dirname, "cursor_remote_patch.js"), "--host", host, "--apply"], 240000);
-      const rpOut = (rp.stdout || "") + (rp.stderr || "");
-      if (/还没有和你本机同版本/.test(rpOut)) {
-        console.log("   ⏳ 服务器上还没有和你本机同版本的 Cursor 组件。先在 Cursor 里连一次这台服务器,再双击一次本脚本。");
-      } else if (rp.status === 0) {
-        console.log("   ✅ 已补好(" + rpOut.split("\n").filter((l) => /^\s*(✅ 已打|已打过)\s/.test(l)).length + " 个文件)。已开着的远程窗口关掉重连即可。");
-      } else {
-        console.log("   ⚠️ 没补成(不影响模型能不能用):");
-        rpOut.split("\n").filter((l) => /❌|⚠️/.test(l)).slice(0, 4).forEach((l) => console.log("      " + l.trim()));
-      }
-    }
+    if (args.apply) serverPatch(host, "。已开着的远程窗口关掉重连即可。");
     return 0;
   }
   if (!args.remove) console.log("   (000 = 远端那边确实什么都没有,符合预期)\n");
@@ -363,18 +421,7 @@ async function main() {
   // 本机安装器只补了 Mac 那份;远程窗口用的是服务器 cursor-server 里自带的那份 ⇒ 不补的话
   // 远程窗口里会「每轮都压缩上下文」/ 偶发打到 Cursor 自家推理报 permission_denied。
   // 服务器上要先有和本机**同 commit** 的 cursor-server(Cursor 第一次连上去时自己装)。
-  console.log("\n⑧ 服务器上的 Cursor 组件补丁");
-  const rp = sh(process.execPath, [path.join(__dirname, "cursor_remote_patch.js"), "--host", host, "--apply"], 240000);
-  const rpOut = (rp.stdout || "") + (rp.stderr || "");
-  if (/还没有和你本机同版本/.test(rpOut)) {
-    console.log("   ⏳ 服务器上还没有和你本机同版本的 Cursor 组件(第一次连这台机,或刚升级过 Cursor)。");
-    console.log("      先在 Cursor 里连一次这台服务器,等左下角显示已连接,**再双击一次本脚本**,它会补上。");
-  } else if (rp.status === 0) {
-    console.log("   ✅ 已补好(" + rpOut.split("\n").filter((l) => /^\s*(✅ 已打|已打过)\s/.test(l)).length + " 个文件)");
-  } else {
-    console.log("   ⚠️ 没补成(不影响模型能不能用,只影响远程窗口里的上下文压缩):");
-    rpOut.split("\n").filter((l) => /❌|⚠️/.test(l)).slice(0, 4).forEach((l) => console.log("      " + l.trim()));
-  }
+  serverPatch(host);
 
   console.log("\n━━━ 接下来在 Cursor 里 ━━━");
   console.log("  1) 完全退出 Cursor(Cmd+Q),重新打开");

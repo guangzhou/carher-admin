@@ -41,6 +41,14 @@ if (!args.host) {
 
 // ── 本机 Cursor 的 commit(服务器上那份必须是同一个 commit,否则 Cursor 根本不用它)──
 function localCommit() {
+  // 首选「正在跑我的这个 Cursor」自己的 product.json:启动器就是用 Cursor 自带 node 跑的,
+  // execPath 就是那个 Cursor —— Windows 上装在 Program Files / D: / 自定义目录都对得上。
+  // 固定路径只作后备(10-13 前 Windows 只认 %LOCALAPPDATA%\Programs\cursor,别的装法读不到 commit)。
+  const d = path.dirname(process.execPath);
+  const own = process.platform === "darwin"
+    ? path.join(d, "..", "Resources", "app", "product.json")
+    : path.join(d, "resources", "app", "product.json");
+  try { const c = JSON.parse(fs.readFileSync(own, "utf8")).commit; if (c) return c; } catch {}
   const cands = process.platform === "darwin"
     ? ["/Applications/Cursor.app/Contents/Resources/app/product.json"]
     : process.platform === "win32"

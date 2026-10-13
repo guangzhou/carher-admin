@@ -7,6 +7,7 @@ rem 2026-09-03: a colleague hit "Cursor.exe not found" - the old launcher only k
 rem Now: CURSOR_BIN > common install dirs (per-user / system / x86 / D: ) > registry App Paths >
 rem      uninstall entry > Start-menu shortcut. Still nothing -> ask the user for the path.
 setlocal EnableExtensions
+rem chcp is safe here only because this file is pure ASCII (see package_team_setup.sh gate).
 chcp 65001 >nul
 set "SCRIPT_DIR=%~dp0"
 set "EXE="
@@ -49,12 +50,12 @@ if not defined EXE for %%L in (
 rem Last resort: ask
 if not defined EXE (
   echo.
-  echo !! 没找到 Cursor.exe。请在 Cursor 的桌面/开始菜单图标上右键 - 属性 - 复制"目标"里的完整路径,粘到下面:
-  set /p "EXE=Cursor.exe 路径: "
+  echo !! Cursor.exe not found. Right-click the Cursor icon - Properties - copy the full "Target" path and paste it below:
+  set /p "EXE=Cursor.exe path: "
   set "EXE=%EXE:"=%"
 )
 if not exist "%EXE%" (
-  echo !! 仍找不到: "%EXE%"  ^(也可设环境变量 CURSOR_BIN 后重试^)
+  echo !! Still not found: "%EXE%"  ^(or set env var CURSOR_BIN and retry^)
   exit /b 1
 )
 

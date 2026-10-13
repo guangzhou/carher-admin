@@ -59,7 +59,7 @@ MAC
 # 双击安装器(Windows):调用引擎并带 --apply,跑完 pause
 cat > "$STAGE/INSTALL-Windows.cmd" <<'WIN'
 @echo off
-chcp 65001 >nul
+setlocal
 call "%~dp0cursor_team_setup.cmd" --apply
 echo.
 pause
@@ -77,7 +77,7 @@ MACR
 # 双击修复器(Windows)
 cat > "$STAGE/REPAIR-Windows.cmd" <<'WINR'
 @echo off
-chcp 65001 >nul
+setlocal
 call "%~dp0cursor_team_setup.cmd" --repair
 echo.
 pause
@@ -103,11 +103,8 @@ MACUP
 # 双击升级器(Windows)
 cat > "$STAGE/UPGRADE-Windows.cmd" <<'WINUP'
 @echo off
-chcp 65001 >nul
-echo 升级 __MODEL_PREFIX__:同步模型菜单(加新名 / 摘掉已下架的名字)+ 重打 Cursor 补丁。
-echo 不会问你要 Key —— 你之前配过的 Key 原样保留。
-echo （Cursor 必须先完全退出：右键托盘图标 Quit）
-echo.
+setlocal
+rem Upgrade: sync menu + re-patch. Does not ask for the key. Quit Cursor first (tray icon - Quit).
 call "%~dp0cursor_team_setup.cmd" --upgrade
 echo.
 pause
@@ -132,9 +129,8 @@ MACD
 # 双击自检器(Windows)
 cat > "$STAGE/DOCTOR-Windows.cmd" <<'WIND'
 @echo off
-chcp 65001 >nul
-echo 自检（只读，不会改任何东西）。把下面整屏发给管理员即可。
-echo.
+setlocal
+rem Self-check, read-only. Send the whole screen to the admin.
 call "%~dp0cursor_team_setup.cmd" --doctor
 echo.
 pause
@@ -158,31 +154,7 @@ MACZ
 cat > "$STAGE/REMOTE-SSH-Mac.command" <<'MACRS'
 #!/bin/sh
 DIR="$(cd "$(dirname "$0")" && pwd)"
-echo "让「Cursor 连远程服务器」的窗口里也能用 __MODEL_PREFIX__ 的模型。"
-echo ""
-echo "为什么需要这一步:装完之后你的模型地址是 127.0.0.1:8788(你自己这台电脑上的小代理),"
-echo "而远程窗口里的 127.0.0.1 指的是**远端那台服务器**,那边没有这个东西 ⇒ 模型全连不上。"
-echo "这个脚本把远端的这个地址转回你本机。Cursor 里一个设置都不用改。"
-echo ""
-sh "$DIR/cursor_remote_ssh.sh"
-echo ""
-printf "要配哪台?(照着上面的名字填,或 用户名@IP;直接回车=退出): "
-read HOSTNAME_IN
-if [ -z "$HOSTNAME_IN" ]; then
-  echo "已退出,什么都没动。"
-  printf "按回车键关闭本窗口…"; read _; exit 0
-fi
-echo ""
-echo "===== 先预演一遍,只显示要往 ssh 配置里加什么,不落盘 ====="
-sh "$DIR/cursor_remote_ssh.sh" --host "$HOSTNAME_IN"
-echo ""
-printf "确认执行?输入 yes 回车(其它任何输入=取消): "
-read ans
-if [ "$ans" = "yes" ]; then
-  sh "$DIR/cursor_remote_ssh.sh" --host "$HOSTNAME_IN" --apply
-else
-  echo "已取消,什么都没动。"
-fi
+sh "$DIR/cursor_remote_ssh.sh" --wizard
 echo ""
 printf "按回车键关闭本窗口…"; read _
 MACRS
@@ -190,27 +162,11 @@ MACRS
 # 双击「远程开发也能用我们的模型」(Windows):同上
 cat > "$STAGE/REMOTE-SSH-Windows.cmd" <<'WINRS'
 @echo off
-chcp 65001 >nul
-echo 让「Cursor 连远程服务器」的窗口里也能用 __MODEL_PREFIX__ 的模型。
-echo.
-call "%~dp0cursor_remote_ssh.cmd"
-echo.
-set /p HOSTNAME_IN=要配哪台?(照着上面的名字填,或 用户名@IP;直接回车=退出):
-if "%HOSTNAME_IN%"=="" (
-  echo 已退出,什么都没动。
-  pause
-  exit /b 0
-)
-echo.
-echo ===== 先预演一遍,只显示要往 ssh 配置里加什么,不落盘 =====
-call "%~dp0cursor_remote_ssh.cmd" --host "%HOSTNAME_IN%"
-echo.
-set /p ans=确认执行?输入 yes 回车(其它任何输入=取消):
-if /i "%ans%"=="yes" (
-  call "%~dp0cursor_remote_ssh.cmd" --host "%HOSTNAME_IN%" --apply
-) else (
-  echo 已取消,什么都没动。
-)
+setlocal
+rem All prompts and Chinese text live in cursor_remote_ssh.js (--wizard).
+rem This file must stay pure ASCII + CRLF and never switch code page: cmd re-reads .cmd files by byte
+rem offset, and non-ASCII lines / LF-only endings shred the following lines (10-13, colleague).
+call "%~dp0cursor_remote_ssh.cmd" --wizard
 echo.
 pause
 WINRS
@@ -241,23 +197,38 @@ MACU
 # 双击恢复原状(Windows):同上
 cat > "$STAGE/UNINSTALL-Windows.cmd" <<'WINU'
 @echo off
-chcp 65001 >nul
-echo 把 Cursor 恢复成装 __MODEL_PREFIX__ 之前的样子。
-echo （Cursor 必须先完全退出：右键托盘图标 Quit）
-echo.
-echo ===== 先预演一遍,只显示要动什么,不落盘 =====
+setlocal
+rem Uninstall: dry-run first, then type yes. Quit Cursor first (tray icon - Quit).
 call "%~dp0cursor_team_setup.cmd" --uninstall
 echo.
-set /p ans=确认执行?输入 yes 回车(其它任何输入=取消):
+set /p ans=Type yes and press Enter to really uninstall (anything else = cancel): 
 if /i "%ans%"=="yes" (
   call "%~dp0cursor_team_setup.cmd" --uninstall --apply
 ) else (
-  echo 已取消,什么都没动。
+  echo Cancelled. Nothing changed.
 )
 echo.
 pause
 WINU
 
+# 🔴 Windows 启动器三条硬规矩(10-13 同事实机:REMOTE-SSH-Windows.cmd 满屏「不是内部或外部命令」):
+#   cmd 按**字节偏移**逐行续读 .cmd,行里有非 ASCII(中文 echo)、只有 LF 换行、或中途 chcp 改代码页,
+#   都会让后面的行从半截开始读 ⇒ 行首被吃、命令被切碎。⇒ 中文和交互全放 JS,.cmd 只留 ASCII。
+for f in "$STAGE"/*.cmd; do
+  python3 - "$f" <<'PYCRLF'
+import sys
+p=sys.argv[1]; b=open(p,'rb').read().replace(b'\r\n',b'\n').replace(b'\n',b'\r\n')
+open(p,'wb').write(b)
+PYCRLF
+done
+for f in "$STAGE"/*.cmd; do
+  if LC_ALL=C grep -q '[^ -~[:space:]]' "$f"; then
+    echo "FATAL: $f 里有非 ASCII 字符(cmd 会把后面的行读碎;中文提示请放进 JS)" >&2; exit 1; fi
+  case "$(basename "$f")" in *-Windows.cmd)
+    grep -qiE '^[[:space:]]*@?chcp' "$f" && { echo "FATAL: 双击启动器 $f 里不许 chcp(中途换代码页会让 cmd 续读错位)" >&2; exit 1; } ;; esac
+  python3 -c "import sys;b=open(sys.argv[1],'rb').read();sys.exit(0 if b.count(b'\n')==b.count(b'\r\n') else 1)" "$f" \
+    || { echo "FATAL: $f 不是纯 CRLF" >&2; exit 1; }
+done
 chmod +x "$STAGE/INSTALL-Mac.command" "$STAGE/UPGRADE-Mac.command" "$STAGE/REPAIR-Mac.command" "$STAGE/DOCTOR-Mac.command" "$STAGE/TURN-OFF-DELTA-Mac.command" "$STAGE/REMOTE-SSH-Mac.command" "$STAGE/UNINSTALL-Mac.command" "$STAGE/cursor_team_setup.sh" "$STAGE/cursor_remote_ssh.sh"
 
 cat > "$STAGE/README.txt" <<'RD'

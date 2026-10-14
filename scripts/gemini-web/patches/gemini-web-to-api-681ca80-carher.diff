@@ -1,0 +1,13 @@
+diff --git a/internal/modules/providers/gemini_service.go b/internal/modules/providers/gemini_service.go
+index dea273f..6bee701 100644
+--- a/internal/modules/providers/gemini_service.go
++++ b/internal/modules/providers/gemini_service.go
+@@ -1028,7 +1028,7 @@ func (c *Client) parseResponse(text string) (*Response, error) {
+ 				// acknowledgement) stream a turn as numbered-field updates,
+ 				// e.g. [null,["c_...","r_..."],{"7":["text"],"44":true}],
+ 				// instead of the classic candidates array at index 4.
+-				if len(payload) < 5 {
++				if len(payload) < 5 && len(payload) > 2 { // carher: guard payload[2] (upstream a72d9d9 panics on 1-element payloads)
+ 					if fields, ok := payload[2].(map[string]interface{}); ok {
+ 						if parts, ok := fields["7"].([]interface{}); ok && len(parts) > 0 {
+ 							if reply, ok := parts[0].(string); ok && reply != "" {

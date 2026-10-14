@@ -1,0 +1,301 @@
+diff --git a/app/server/chat.py b/app/server/chat.py
+index dad65f5..46b823f 100644
+--- a/app/server/chat.py
++++ b/app/server/chat.py
+@@ -800,13 +800,23 @@ def _instructions_to_messages(
+     return instruction_messages
+ 
+ 
++class _NamedModel(str):
++    """str that also exposes .model_name, which the LMDB session code reads."""
++
++    @property
++    def model_name(self) -> str:
++        return str(self)
++
++
+ def _get_model_by_name(name: str) -> Model:
+     """Retrieve a Model instance by name."""
+     strategy = g_config.gemini.model_strategy
+     custom_models = {m.model_name: m for m in g_config.gemini.models if m.model_name}
+ 
+     if name in custom_models:
+-        return Model.from_dict(custom_models[name].model_dump())
++        # carher patch: gemini_webapi 2.1 removed Model.from_dict; the library resolves a str
++        # against each account's live model registry (aliases include gemini-4-argon).
++        return _NamedModel(name)
+ 
+     if strategy == "overwrite":
+         raise ValueError(f"Model '{name}' not found in custom models (strategy='overwrite').")
+@@ -948,6 +958,32 @@ def _is_missing_chat_error(exc: Exception) -> bool:
+     return any(pattern.search(normalized) for pattern in _MISSING_CHAT_ERROR_PATTERNS)
+ 
+ 
++
++# carher p2 helpers -------------------------------------------------------------
++def _carher_is_account_error(exc: Exception) -> bool:
++    from gemini_webapi.exceptions import TemporarilyBlockedError, UsageLimitExceededError
++    from gemini_webapi.exceptions import TimeoutError as GeminiTimeoutError
++
++    return isinstance(exc, (UsageLimitExceededError, TemporarilyBlockedError, GeminiTimeoutError))
++
++
++def _carher_cooldown_seconds(exc: Exception) -> float:
++    from gemini_webapi.exceptions import UsageLimitExceededError
++
++    return 1800.0 if isinstance(exc, UsageLimitExceededError) else 300.0
++
++
++async def _carher_prime_stream(agen):
++    first = await agen.__anext__()
++
++    async def _chain():
++        yield first
++        async for item in agen:
++            yield item
++
++    return _chain()
++
++
+ async def _send_with_internal_fallback(
+     *,
+     pool: GeminiClientPool,
+@@ -962,15 +998,35 @@ async def _send_with_internal_fallback(
+     reused_session: bool,
+     temporary: bool,
+ ) -> tuple[AsyncGenerator[ModelOutput] | ModelOutput, ChatSession, GeminiClientWrapper]:
++    tried: set[str] = set()
++    while True:
++        try:
++            output = await _send_with_split(
++                session,
++                current_input,
++                files=files,
++                stream=stream,
++                temporary=temporary,
++            )
++            if stream:
++                # carher p2: pull the first chunk here so quota errors surface while we can still switch.
++                output = await _carher_prime_stream(output)
++            return output, session, client
++        except Exception as exc:
++            if reused_session or not _carher_is_account_error(exc):
++                break_exc = exc
++                break
++            tried.add(client.id)
++            pool.mark_cooldown(client.id, _carher_cooldown_seconds(exc))
++            try:
++                client = await pool.acquire(exclude=tried)
++            except Exception:
++                raise exc
++            logger.warning(f"[carher p2] {type(exc).__name__} -> retrying on client {client.id}")
++            session = client.start_chat(model=model)
++    exc = break_exc
+     try:
+-        output = await _send_with_split(
+-            session,
+-            current_input,
+-            files=files,
+-            stream=stream,
+-            temporary=temporary,
+-        )
+-        return output, session, client
++        raise exc
+     except Exception as exc:
+         should_fallback = (
+             reused_session
+@@ -1753,8 +1809,7 @@ async def list_models(api_key: str = Depends(verify_api_key)):
+     return ModelListResponse(data=models)
+ 
+ 
+-@router.post("/v1/chat/completions")
+-async def create_chat_completion(
++async def _carher_chat_inner(
+     request: ChatCompletionRequest,
+     raw_request: Request,
+     api_key: str = Depends(verify_api_key),
+@@ -1934,6 +1989,117 @@ async def create_chat_completion(
+     return payload
+ 
+ 
++# carher p3 ---------------------------------------------------------------------
++_CARHER_REFUSAL_RE = re.compile(
++    r"(无法|不能|没有办法|没办法)(直接)?(访问|读取|查看|执行|连接|运行|看到)|"
++    r"(你|您)可以(直接)?(在|使用|运行|执行|打开)|请(你|您)?(把|将|复制|粘贴|提供|告诉)|"
++    r"(cannot|can't|can not|unable to|don't have)\s+(directly\s+)?(access|read|see|run|execute|view)|"
++    r"you can (run|use|execute|share|paste|provide|copy|open)|please (paste|share|provide|run)|"  # carher p3.2
++    r"\bto (view|see|check|inspect|look at|analy[sz]e)\b[^.\n]{0,80}\byou\b|"
++    r"(i|I) (do not|don't|can't|cannot) have (direct )?access|"
++    r"(代码|目录|项目)结构(通常|一般|如下)",
++    re.IGNORECASE,
++)
++_CARHER_NUDGE = (
++    "\n\n[Tool use is mandatory for this turn] You DO have access to the user's machine, but only "
++    "through the tools listed in the system instructions. Do not describe what the user could do and "
++    "do not guess file contents. Reply now with ONLY a [ToolCalls] block that calls the most relevant tool."
++)
++
++
++def _carher_as_dict(resp):  # carher p3.1
++    if isinstance(resp, dict):
++        return resp
++    dump = getattr(resp, "model_dump", None)
++    return dump(mode="json") if callable(dump) else resp
++
++
++def _carher_wants_tools(request: ChatCompletionRequest) -> bool:
++    return bool(request.tools) and request.tool_choice != "none"
++
++
++def _carher_nudged(request: ChatCompletionRequest) -> ChatCompletionRequest:
++    req = request.model_copy(deep=True)
++    for msg in reversed(req.messages):
++        if msg.role != "user" or msg.content is None:
++            continue
++        if isinstance(msg.content, str):
++            msg.content = msg.content + _CARHER_NUDGE
++        else:
++            for part in reversed(msg.content):
++                if getattr(part, "type", None) == "text":
++                    part.text = (part.text or "") + _CARHER_NUDGE
++                    break
++            else:
++                msg.content.append(ContentItem(type="text", text=_CARHER_NUDGE.strip()))
++        break
++    return req
++
++
++def _carher_needs_retry(payload: dict) -> bool:
++    try:
++        msg = payload["choices"][0]["message"]
++    except (KeyError, IndexError, TypeError):
++        return False
++    if msg.get("tool_calls"):
++        return False
++    return bool(_CARHER_REFUSAL_RE.search(msg.get("content") or ""))
++
++
++def _carher_replay_as_stream(payload: dict) -> StreamingResponse:
++    async def gen():
++        base = {"id": payload["id"], "object": "chat.completion.chunk", "created": payload["created"], "model": payload["model"]}
++        choice = payload["choices"][0]
++        msg = choice["message"]
++        yield f"data: {orjson.dumps({**base, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]}).decode()}\n\n"
++        if msg.get("reasoning_content"):
++            yield f"data: {orjson.dumps({**base, 'choices': [{'index': 0, 'delta': {'reasoning_content': msg['reasoning_content']}, 'finish_reason': None}]}).decode()}\n\n"
++        if msg.get("content"):
++            yield f"data: {orjson.dumps({**base, 'choices': [{'index': 0, 'delta': {'content': msg['content']}, 'finish_reason': None}]}).decode()}\n\n"
++        for i, tc in enumerate(msg.get("tool_calls") or []):
++            delta = {"tool_calls": [{"index": i, "id": tc["id"], "type": "function",
++                                     "function": {"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]}}]}
++            yield f"data: {orjson.dumps({**base, 'choices': [{'index': 0, 'delta': delta, 'finish_reason': None}]}).decode()}\n\n"
++        final = {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": choice.get("finish_reason") or "stop"}]}
++        if payload.get("usage"):
++            final["usage"] = payload["usage"]
++        yield f"data: {orjson.dumps(final).decode()}\n\n"
++        yield "data: [DONE]\n\n"
++
++    return StreamingResponse(gen(), media_type="text/event-stream")
++
++
++@router.post("/v1/chat/completions")
++async def create_chat_completion(
++    request: ChatCompletionRequest,
++    raw_request: Request,
++    api_key: str = Depends(verify_api_key),
++    tmp_dir: Path = Depends(get_temp_dir),
++    image_store: Path = Depends(get_image_store_dir),
++):
++    if not _carher_wants_tools(request):
++        return await _carher_chat_inner(request, raw_request, api_key, tmp_dir, image_store)
++    wants_stream = bool(request.stream)
++    first = request.model_copy(update={"stream": False})
++    payload = _carher_as_dict(await _carher_chat_inner(first, raw_request, api_key, tmp_dir, image_store))
++    for attempt in (1, 2):
++        if not (isinstance(payload, dict) and _carher_needs_retry(payload)):
++            break
++        logger.warning(f"[carher p3] tool request answered in prose; nudged retry {attempt}/2")
++        retry = _carher_nudged(first)
++        try:
++            second = _carher_as_dict(await _carher_chat_inner(retry, raw_request, api_key, tmp_dir, image_store))
++            if isinstance(second, dict):
++                payload = second
++                logger.info(f"[carher p3] retry{attempt} tool_calls={bool(second['choices'][0]['message'].get('tool_calls'))}")
++        except HTTPException as exc:
++            logger.warning(f"[carher p3] retry{attempt} failed ({exc.status_code}); keeping previous answer")
++            break
++    if wants_stream and isinstance(payload, dict):
++        return _carher_replay_as_stream(payload)
++    return payload
++
++
+ @router.post("/v1/responses")
+ async def create_response(
+     request: ResponseCreateRequest,
+diff --git a/app/services/pool.py b/app/services/pool.py
+index 3b4197c..645074a 100644
+--- a/app/services/pool.py
++++ b/app/services/pool.py
+@@ -1,4 +1,5 @@
+ import asyncio
++import time
+ from collections import deque
+ 
+ from loguru import logger
+@@ -32,6 +33,8 @@ class GeminiClientPool(metaclass=Singleton):
+             self._id_map[c.id] = client
+             self._round_robin.append(client)
+             self._restart_locks[c.id] = asyncio.Lock()
++        # carher p2: client id -> unix ts until which it is skipped
++        self._cooldown: dict[str, float] = {}
+ 
+     async def init(self) -> None:
+         """Initialize all clients in the pool."""
+@@ -55,7 +58,7 @@ class GeminiClientPool(metaclass=Singleton):
+         if success_count == 0:
+             raise RuntimeError("Failed to initialize any Gemini clients")
+ 
+-    async def acquire(self, client_id: str | None = None) -> GeminiClientWrapper:
++    async def acquire(self, client_id: str | None = None, exclude: set[str] | None = None) -> GeminiClientWrapper:
+         """Return a healthy client by id or using round-robin."""
+         if not self._round_robin:
+             raise RuntimeError("No Gemini clients configured")
+@@ -70,13 +73,37 @@ class GeminiClientPool(metaclass=Singleton):
+                 f"Gemini client {client_id} is not running and could not be restarted"
+             )
+ 
++        exclude = exclude or set()
+         for _ in range(len(self._round_robin)):
+             client = self._round_robin[0]
+             self._round_robin.rotate(-1)
++            if client.id in exclude or not self.has_quota(client):
++                continue
+             if await self._ensure_client_ready(client):
+                 return client
+ 
+-        raise RuntimeError("No Gemini clients are currently available")
++        raise RuntimeError("No Gemini clients are currently available (all exhausted or cooling down)")
++
++    # carher p2 ---------------------------------------------------------------
++    def mark_cooldown(self, client_id: str, seconds: float) -> None:
++        self._cooldown[client_id] = time.time() + seconds
++        logger.warning(f"[carher p2] client {client_id} cooling down for {int(seconds)}s")
++
++    def has_quota(self, client: GeminiClientWrapper) -> bool:
++        now = time.time()
++        if self._cooldown.get(client.id, 0) > now:
++            return False
++        try:
++            quotas = client.quotas() or {}
++        except Exception:
++            return True
++        for q in quotas.values():
++            if not isinstance(q, dict) or "remaining" not in q:
++                continue
++            reset = q.get("reset_time") or 0
++            if q.get("remaining") == 0 and (q.get("total") or 0) > 0 and reset > now:
++                return False
++        return True
+ 
+     async def _ensure_client_ready(self, client: GeminiClientWrapper) -> bool:
+         """Make sure the client is running, attempting a restart if needed."""

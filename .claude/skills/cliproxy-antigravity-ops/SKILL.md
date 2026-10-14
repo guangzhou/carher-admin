@@ -264,6 +264,16 @@ sudo python3 .../cliproxy-antigravity-add-account.py install --creds /root/clipr
 sudo python3 .../cliproxy-antigravity-add-account.py install --creds ... --apply
 ```
 
+### 全自动（有密码 + 2FA 密钥的号，2026-10-14 跑通）
+
+consent 页不必真人点：`scripts/gemini-web/` 里三件套在 **188 现成的 playwright 镜像 + Xvfb + patchright** 里跑（同 ChatGPT toggle launcher，⛔别在 198 另造浏览器环境）：
+
+1. `google_oauth_consent.py <name>`：密码+自算 TOTP 登录 → 过 consent（含「Make sure that you downloaded this app from Google」页，按钮叫 **Sign in**）→ 截 `localhost:54545/callback` URL
+2. `ag_exchange_probe.py <name> < callback`（198 root）：换 token、两种 UA 逐模型探、存 `pending/<name>.creds.json`、抓 `validation_url`
+3. `google_validate.py <name>`：浏览器走完 validation（页面会显示 Authentication successful）——⚠️ 10-14 实测**走完 hub UA 仍 403**，最终仍按老号做法钉 `1.0.0` UA + `gemini-3.8-flash-tiered→gemini-3.8-flash-high` alias 后 `install --apply`，再 `sub2api-antigravity-add-account.py apply --yes`
+
+单副本重启前先起 canary + 挪 svc（见「升级网关镜像」），install 自带的 rollout 才不断流。
+
 ### 一批号（要加 100 个就走这条）
 
 **先逐个 `exchange` 把凭据攒在 `/root/cliproxy-manifests/`，最后一次性装：**
@@ -466,6 +476,25 @@ sub2api 也是池子，**池子级 nonce 全绿可能是一条好腿在扛全部
   看起来像 entry 写坏了 —— **别据此回滚**，等 2 分钟重打。
 - 模型清单**向网关 `GET /v1/models` 现拉，别写死**（Google 一直换名字）。
   ⚠️ 没有 `gemini-3.8-flash-lite`，flash-lite 只有 3.1 这一代。
+
+## 升级网关镜像（2026-10-04 做过一次，零中断）
+
+上游无可用镜像源（daocloud 不代理 tags/list），**在 198 上从源码 `docker build`**：
+`/root/cliproxy-build/src`（`git checkout <commit>`）→ `docker build --network host -t 127.0.0.1:5000/cli-proxy-api:<date>-<sha7>` → `docker push`。
+
+单副本 `Recreate` 本身有真空，所以切换走「先挪 svc 再升级」：
+
+1. 备份 deploy+svc yaml 到 `/root/cliproxy-manifests/cli-proxy-api-{deploy,svc}-<ts>.yaml`
+2. 复制一份 deploy 为 `cli-proxy-api-canary`（label `app: cli-proxy-api-canary`、新镜像、同 Secret）+ 独立 ClusterIP svc，
+   **直打 canary 跑全模型 nonce**（key 取 Secret `config.yaml` 的 `api-keys` 第一项）
+3. `patch svc cli-proxy-api` selector → canary ⇒ `set image` 生产 deploy（`cli-proxy-api` 和 initContainer `seed` 两个都换）⇒ rollout ⇒ selector 改回
+   （`cli-proxy-api-np` NodePort 没挪，这几十秒 NodePort 侧有真空；LiteLLM 走 ClusterIP 不受影响）
+4. `verify --all` + `regress --all`，再删 canary
+
+⛔ **别直接用 v8.0.13 tag**：它把 `claude-opus-4-6-thinking`/`claude-sonnet-4-6` 从内置清单删了（`8a945b3f` 恢复，未进 tag）。
+10-04 线上 = `20261004-8ef43e4`（main），内置清单含 4.6 + `claude-{opus,sonnet}-5-5-high`；回滚 = `set image` 回 `20260907-d5f660aa`。
+10-14 再升 `20261014-v8.0.28`（同流程，回滚到 `20261004-8ef43e4`）；v8.0.28 内置清单已去掉 3.6/3.7-flash、gemini-pro-agent、3.1-pro-low（上游对 Pro 号本就 404），新增 `gemini-4-argon-high`（仅 Ultra/Enterprise）。
+新版会按号的 `fetchAvailableModels` 过滤模型：号没开通 5.5 时 `/v1/models` 不列、调用返 400 `unknown provider`，开通后自动出现（15min 级刷新）。
 
 ## 排障
 

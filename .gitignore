@@ -77,4 +77,26 @@ zk-delta/tests/fixtures/
 .tmp-lark/
 **/.tmp-lark/
 .tmp-poison/
+# 探针临时 key 的形状导出与结果（models/aliases，不含明文 key，但不该进库）
+.tmp-agent-probe/
 .pytest_cache/
+
+# grok 加号：凭据行（email----pw----sso）与抓出来的 OAuth bundle 都是明文凭据。
+# 2026-09-29 凭据文件曾被写进 scripts/grok-onboard/ 且不在 ignore 里 —— 应放 repo 外，这里兜底。
+scripts/grok-onboard/*.txt
+scripts/grok-onboard/bundle*.json
+scripts/grok-onboard/bundles/
+scripts/grok-onboard/.pw
+scripts/grok-onboard/.s2apw*
+
+# kiro 加号的工作目录：kiro-batch-prepare.py --out 写的 creds/*.json 是**live
+# refreshToken**（social 号那一个字段就等于整个号），probe 产物里还有 accessToken。
+# 中间文件按约定放仓库内而不是 /tmp，所以这条 ignore 是前提，不是补充。
+.tmp-kiro/
+**/.tmp-kiro/
+
+# kiro 批量加号等工作日志目录（含账号邮箱/档位，勿入库）
+work-kiro-*/
+
+# 本地临时工作区(克隆的第三方仓库、原始导出等),耐久内容已移入 tools/
+/work/

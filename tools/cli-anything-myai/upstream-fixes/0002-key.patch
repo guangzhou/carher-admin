@@ -1,0 +1,390 @@
+From 9f250f8e1c1cccc39ca1ab079aed3df5d28e034c Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Wed, 14 Oct 2026 13:49:48 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?=E6=8C=89=20key=20=E8=A1=A5=E9=BD=90?=
+ =?UTF-8?q?=E7=94=A8=E6=88=B7=E8=A1=A8=E4=B9=8B=E5=A4=96=E7=9A=84=E7=94=A8?=
+ =?UTF-8?q?=E9=87=8F=20+=20=E5=8F=91=E5=B8=83=E5=89=8D=E4=B8=8E=E4=B8=8A?=
+ =?UTF-8?q?=E6=B8=B8=E6=80=BB=E8=8A=B1=E8=B4=B9=E5=AF=B9=E8=B4=A6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+按人回退只能逐个查 LiteLLM_UserTable 里的用户,key 的 owner 为空
+(carher-hangzhou 等)或不在用户表里(claude-code-*-std 等)的花费永远进不来,
+30 天约 $58k(上游 7.7%)。
+
+daily activity 路径末尾用不带 user_id 的 /user/daily/activity 拉全局
+models[m].api_key_breakdown,只补 owner 不在本次用户集合里的 key,
+不重复计算。owner 为空的 key 以 key:<alias> 单列(carher-hangzhou 可见)。
+补漏行 attribution_source=key_rollup、billing_eligible=false,只显示;
+计费仍走 key→组织映射。USAGE_SYNC_KEY_ROLLUP_ENABLED=false 可关。
+
+每次发布前把花费与上游全局对一次,偏差 >1% 记 warning。
+实测 10-06..10-12:published $142,853.64 vs upstream $142,853.92,偏差 0.00%。
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/litellm_client.py         |  83 ++++++++++++++++++
+ backend/usage_sync.py             |  93 ++++++++++++++++++++
+ tests/test_key_rollup_coverage.py | 137 ++++++++++++++++++++++++++++++
+ 3 files changed, 313 insertions(+)
+ create mode 100644 tests/test_key_rollup_coverage.py
+
+diff --git a/backend/litellm_client.py b/backend/litellm_client.py
+index ab4e7cb..2da7843 100644
+--- a/backend/litellm_client.py
++++ b/backend/litellm_client.py
+@@ -4279,6 +4279,89 @@ class LiteLLMClient:
+             raise HTTPException(status_code=502, detail="上游全员用量响应缺少日期字段")
+         return sorted(rows, key=lambda item: (item["date"], item["model"]))
+ 
++    async def key_rollup_rows(
++        self,
++        start_date: str,
++        end_date: str,
++        backend: LiteLLMBackend | None = None,
++    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
++        """Per-key x model daily rows from the global rollup, plus totals.
++
++        ``/user/daily/activity`` without ``user_id`` pages over every key in
++        LiteLLM_DailyUserSpend. Its ``models[m].api_key_breakdown[sha]`` covers
++        keys whose owner is absent from LiteLLM_UserTable or empty, which the
++        per-user fallback can never query. Dates are UTC buckets, the same
++        basis as the per-user daily-activity path.
++        """
++        backend = backend or self.backends[0]
++        await self._ensure_deployment_model_map(backend)
++        model_map = getattr(self, "_deployment_model_maps", {}).get(backend.id, {})
++        grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
++        totals = {"requestCount": 0, "spend": 0.0}
++        page, total_pages = 1, 1
++        max_pages = max(1, _env_int("USAGE_SYNC_KEY_ROLLUP_MAX_PAGES", 50))
++        while page <= total_pages and page <= max_pages:
++            payload = await self.request_backend(
++                backend,
++                "GET",
++                "/user/daily/activity",
++                params={"start_date": start_date, "end_date": end_date, "page": page, "page_size": 1000},
++            )
++            if not isinstance(payload, dict):
++                raise HTTPException(status_code=502, detail="上游全局用量响应格式错误")
++            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
++            total_pages = max(1, _as_int(_first(metadata, "total_pages", default=1)))
++            for item in _records(payload):
++                if not isinstance(item, dict) or not _first(item, "date", "day"):
++                    continue
++                day = _date_text(_first(item, "date", "day"))
++                breakdown = item.get("breakdown") if isinstance(item.get("breakdown"), dict) else {}
++                key_meta = {
++                    sha: (value.get("metadata") if isinstance(value, dict) and isinstance(value.get("metadata"), dict) else {})
++                    for sha, value in (breakdown.get("api_keys") or {}).items()
++                }
++                for model_name, model_value in (breakdown.get("models") or {}).items():
++                    if not isinstance(model_value, dict):
++                        continue
++                    model = resolve_canonical_model_name(model_name, deployment_map=model_map, diagnose_unknown=False)
++                    if not model:
++                        continue
++                    for sha, key_value in (model_value.get("api_key_breakdown") or {}).items():
++                        metrics = _metrics_dict(key_value)
++                        requests = _as_int(_first(metrics, "api_requests", "total_api_requests"))
++                        spend = _as_number(_first(metrics, "spend", "total_spend"))
++                        if not requests and not spend:
++                            continue
++                        row = grouped.get((day, model, sha))
++                        if row is None:
++                            meta = key_meta.get(sha) or (
++                                key_value.get("metadata") if isinstance(key_value.get("metadata"), dict) else {}
++                            )
++                            row = self._empty_usage_row(day, backend.source or "其他", model)
++                            row.update({
++                                "keyId": _clean_text(sha),
++                                "keyAlias": _clean_text(meta.get("key_alias")),
++                                "keyOwnerUserId": _clean_text(meta.get("user_id")),
++                                "keyTeamId": _clean_text(meta.get("team_id")),
++                                "keyExists": bool(meta.get("key_exists", True)),
++                            })
++                            grouped[(day, model, sha)] = row
++                        prompt = _as_int(_first(metrics, "prompt_tokens", "total_prompt_tokens"))
++                        completion = _as_int(_first(metrics, "completion_tokens", "total_completion_tokens"))
++                        failures = _as_int(_first(metrics, "failed_requests", "total_failed_requests"))
++                        row["promptTokens"] += prompt
++                        row["completionTokens"] += completion
++                        row["totalTokens"] += _as_int(_first(metrics, "total_tokens", default=prompt + completion))
++                        row["requestCount"] += requests
++                        row["failureCount"] += failures
++                        row["successCount"] += max(0, requests - failures)
++                        row["spend"] += spend
++            totals["requestCount"] += _as_int(_first(metadata, "total_api_requests", default=0))
++            totals["spend"] += _as_number(_first(metadata, "total_spend", default=0))
++            page += 1
++        totals["complete"] = page > total_pages
++        return list(grouped.values()), totals
++
+     async def global_activity_totals(self, start_date: str, end_date: str) -> dict[str, Any]:
+         """Read the upstream global request/token totals independently per backend."""
+         totals = self._usage_totals([])
+diff --git a/backend/usage_sync.py b/backend/usage_sync.py
+index cde39ec..3a5a872 100644
+--- a/backend/usage_sync.py
++++ b/backend/usage_sync.py
+@@ -800,6 +800,94 @@ class UsageSynchronizer:
+                 result[key] = (team_id, team_name)
+         return result
+ 
++    async def _key_rollup_gap_rows(
++        self,
++        backend: LiteLLMBackend,
++        start_date: str,
++        end_date: str,
++        known_user_ids: set[str],
++        directory: dict[str, Any] | None,
++    ) -> list[dict[str, Any]]:
++        """Usage of keys the per-user fallback cannot see.
++
++        The fallback queries one LiteLLM_UserTable user at a time, so spend on
++        keys whose owner is empty or absent from that table never arrives
++        (2026-10-14: ~$58k / 30 days, mostly carher-hangzhou). Fill exactly
++        those keys from the global per-key rollup. Keys owned by a known user
++        are skipped, so nothing is counted twice. Rows are display-only
++        (``billing_eligible`` false); token mappings still decide billing.
++        """
++        loader = getattr(self.client, "key_rollup_rows", None)
++        if not callable(loader):
++            return []
++        try:
++            rollup, totals = await loader(start_date, end_date, backend)
++        except Exception:
++            logger.exception("usage key rollup failed backend=%s", backend.id)
++            return []
++        gap: list[dict[str, Any]] = []
++        for row in rollup:
++            owner = _text(row.get("keyOwnerUserId"))
++            if owner and owner in known_user_ids:
++                continue
++            alias = _text(row.get("keyAlias"))
++            if owner:
++                user_id = owner
++                resolved = self._apply_identity_directory(backend, owner, {"name": "", "email": ""}, directory)
++                name = _text(resolved.get("name")) or alias or owner
++                email = _email(resolved.get("email"))
++                email_source = _text(resolved.get("emailSource")) if email else ""
++            else:
++                user_id = f"key:{alias or _text(row.get('keyId'))[:12] or 'unknown'}"
++                name = alias or ("已删除的 key" if row.get("keyExists") is False else user_id)
++                email, email_source = "", ""
++            item = {
++                key: value
++                for key, value in row.items()
++                if key not in {"keyOwnerUserId", "keyTeamId", "keyExists"}
++            }
++            item.update({
++                "_userId": user_id,
++                "employeeEmail": email,
++                "employeeName": name,
++                "emailSource": email_source,
++                "attributionSource": "key_rollup",
++                "billingEligible": False,
++            })
++            if _text(row.get("keyTeamId")) and not _text(item.get("teamId")):
++                item["userTeamId"] = _text(row.get("keyTeamId"))
++            gap.append(item)
++        seen_requests = sum(int(r.get("requestCount") or 0) for r in rollup)
++        gap_requests = sum(int(r.get("requestCount") or 0) for r in gap)
++        upstream = int(totals.get("requestCount") or 0)
++        logger.info(
++            "usage key rollup backend=%s start=%s end=%s keys_gap_rows=%s gap_requests=%s rollup_requests=%s upstream_requests=%s complete=%s",
++            backend.id, start_date, end_date, len(gap), gap_requests, seen_requests, upstream, totals.get("complete"),
++        )
++        self._last_rollup_totals = {"backend": backend.id, "start": start_date, "end": end_date, **totals}
++        return gap
++
++    def _log_coverage_gap(self, backend_id: str, start_date: str, end_date: str, rows: list[dict[str, Any]]) -> None:
++        """Warn when published spend drifts from the upstream global rollup.
++
++        Spend, not request count: requests on models the catalog cannot name
++        are dropped by design and carry no cost.
++        """
++        totals = getattr(self, "_last_rollup_totals", None) or {}
++        if totals.get("backend") != backend_id or totals.get("start") != start_date or totals.get("end") != end_date:
++            return
++        upstream = float(totals.get("spend") or 0)
++        if upstream <= 0:
++            return
++        published = sum(float(row.get("spend") or 0) for row in rows)
++        gap_pct = 100.0 * (upstream - published) / upstream
++        level = logging.WARNING if abs(gap_pct) > float(os.getenv("USAGE_SYNC_COVERAGE_GAP_PCT", "1")) else logging.INFO
++        logger.log(
++            level,
++            "usage coverage gap backend=%s start=%s end=%s published_spend=%.2f upstream_spend=%.2f gap_pct=%.2f",
++            backend_id, start_date, end_date, published, upstream, gap_pct,
++        )
++
+     def _backfill_team_from_membership(
+         self,
+         backend_id: str,
+@@ -1226,6 +1314,10 @@ class UsageSynchronizer:
+                 backend.id, fallback_stats["attemptedUsers"], fallback_stats["successfulUsers"], fallback_stats["failedUsers"],
+             )
+         rows = [row for batch in results for row in batch]
++        if log_rows is None and not backend.source and _env_bool("USAGE_SYNC_KEY_ROLLUP_ENABLED", True):
++            rows.extend(
++                await self._key_rollup_gap_rows(backend, start_date, end_date, set(account_users), directory)
++            )
+         # Full scans may contain user ids missing from /user/list. Preserve all
+         # buckets so stable principal mappings can still attribute them and
+         # unknown identities remain visible to data-quality checks.
+@@ -1253,6 +1345,7 @@ class UsageSynchronizer:
+                             "emailSource": _text(resolved.get("emailSource")) if fallback_email else "",
+                         }
+                     )
++        self._log_coverage_gap(backend.id, start_date, end_date, rows)
+         reclassified_rows = self._reclassify_primary_her_usage(backend, rows, directory)
+         reclassified_events = self._reclassify_primary_her_usage(backend, event_rows, directory)
+         if token_mapping_index:
+diff --git a/tests/test_key_rollup_coverage.py b/tests/test_key_rollup_coverage.py
+new file mode 100644
+index 0000000..807bdd3
+--- /dev/null
++++ b/tests/test_key_rollup_coverage.py
+@@ -0,0 +1,137 @@
++"""按 key 补齐按人统计看不到的用量(2026-10-14 线上缺 ~$58k/30d)。"""
++
++from __future__ import annotations
++
++import asyncio
++
++from backend.litellm_client import LiteLLMBackend, LiteLLMClient
++from backend.usage_sync import UsageSynchronizer
++
++
++PRIMARY = LiteLLMBackend(id="primary", label="通衢 API", base_url="http://x", admin_key="sk-admin")
++
++KNOWN_SHA = "a" * 64
++HANGZHOU_SHA = "b" * 64
++ORPHAN_SHA = "c" * 64
++DELETED_SHA = "d" * 64
++
++
++def _metrics(requests: int, spend: float) -> dict:
++    return {"metrics": {"api_requests": requests, "failed_requests": 0, "spend": spend,
++                        "prompt_tokens": requests * 10, "completion_tokens": requests, "total_tokens": requests * 11}}
++
++
++def _global_page() -> dict:
++    """Shape of LiteLLM 1.103 /user/daily/activity without user_id."""
++    return {
++        "results": [{
++            "date": "2026-10-12",
++            "breakdown": {
++                "api_keys": {
++                    KNOWN_SHA: {**_metrics(100, 10.0), "metadata": {"key_alias": "alice-key", "user_id": "alice", "key_exists": True}},
++                    HANGZHOU_SHA: {**_metrics(11955, 71.75), "metadata": {"key_alias": "carher-hangzhou", "user_id": None, "team_id": "team-hz", "key_exists": True}},
++                    ORPHAN_SHA: {**_metrics(1952, 4547.73), "metadata": {"key_alias": "claude-code-x-std", "user_id": "claude-code-x-std", "key_exists": True}},
++                    DELETED_SHA: {**_metrics(5, 0.5), "metadata": {"key_alias": None, "user_id": None, "key_exists": False}},
++                },
++                "models": {
++                    "gpt-5.6": {**_metrics(0, 0), "api_key_breakdown": {
++                        KNOWN_SHA: _metrics(100, 10.0),
++                        HANGZHOU_SHA: _metrics(11000, 60.0),
++                        DELETED_SHA: _metrics(5, 0.5),
++                    }},
++                    "claude-opus-5-5": {**_metrics(0, 0), "api_key_breakdown": {
++                        HANGZHOU_SHA: _metrics(955, 11.75),
++                        ORPHAN_SHA: _metrics(1952, 4547.73),
++                    }},
++                },
++            },
++        }],
++        "metadata": {"total_api_requests": 14012, "total_spend": 4629.98, "total_pages": 1, "page": 1},
++    }
++
++
++class _Client(LiteLLMClient):
++    def __init__(self) -> None:
++        self.backends = [PRIMARY]
++        self._deployment_model_maps = {}
++        self.calls: list[dict] = []
++
++    async def _ensure_deployment_model_map(self, _backend):
++        return {}
++
++    async def request_backend(self, backend, method, path, **kwargs):  # type: ignore[override]
++        self.calls.append({"path": path, **(kwargs.get("params") or {})})
++        assert path == "/user/daily/activity" and "user_id" not in (kwargs.get("params") or {})
++        return _global_page()
++
++
++def _gap(known: set[str]) -> list[dict]:
++    sync = UsageSynchronizer(_Client(), store=None)
++    return asyncio.run(sync._key_rollup_gap_rows(PRIMARY, "2026-10-12", "2026-10-12", known, {}))
++
++
++def test_rollup_rows_sum_to_upstream_per_key() -> None:
++    rows, totals = asyncio.run(_Client().key_rollup_rows("2026-10-12", "2026-10-12", PRIMARY))
++    by_key = {}
++    for r in rows:
++        by_key[r["keyId"]] = by_key.get(r["keyId"], 0) + r["requestCount"]
++    assert by_key == {KNOWN_SHA: 100, HANGZHOU_SHA: 11955, ORPHAN_SHA: 1952, DELETED_SHA: 5}
++    assert totals["requestCount"] == 14012 and totals["complete"] is True
++
++
++def test_keys_of_known_users_are_not_counted_twice() -> None:
++    gap = _gap({"alice"})
++    assert all(r["keyId"] != KNOWN_SHA for r in gap)
++
++
++def test_carher_hangzhou_is_shown_as_its_own_row() -> None:
++    gap = [r for r in _gap({"alice"}) if r["keyId"] == HANGZHOU_SHA]
++    assert {r["_userId"] for r in gap} == {"key:carher-hangzhou"}
++    assert {r["employeeName"] for r in gap} == {"carher-hangzhou"}
++    assert sum(r["requestCount"] for r in gap) == 11955
++    assert round(sum(r["spend"] for r in gap), 2) == 71.75
++    assert {r["model"] for r in gap} == {"gpt-5.6", "claude-opus-5-5"}
++    assert all(r["userTeamId"] == "team-hz" for r in gap)
++
++
++def test_orphan_owner_keeps_its_user_id() -> None:
++    gap = [r for r in _gap({"alice"}) if r["keyId"] == ORPHAN_SHA]
++    assert {r["_userId"] for r in gap} == {"claude-code-x-std"}
++    assert round(sum(r["spend"] for r in gap), 2) == 4547.73
++
++
++def test_gap_rows_are_display_only_not_billable() -> None:
++    gap = _gap({"alice"})
++    assert gap and all(r["billingEligible"] is False and r["attributionSource"] == "key_rollup" for r in gap)
++
++
++def test_deleted_key_is_labelled() -> None:
++    gap = [r for r in _gap({"alice"}) if r["keyId"] == DELETED_SHA]
++    assert gap and gap[0]["employeeName"] == "已删除的 key"
++
++
++def test_rollup_failure_does_not_break_sync() -> None:
++    class Broken(_Client):
++        async def request_backend(self, *a, **k):  # type: ignore[override]
++            raise RuntimeError("upstream down")
++
++    sync = UsageSynchronizer(Broken(), store=None)
++    assert asyncio.run(sync._key_rollup_gap_rows(PRIMARY, "2026-10-12", "2026-10-12", set(), {})) == []
++
++
++def test_every_upstream_request_is_covered_exactly_once() -> None:
++    """按人统计看到的(alice)+ 补漏行 == 上游全局总数,不多不少。"""
++    gap = _gap({"alice"})
++    per_user_seen = 100
++    assert per_user_seen + sum(r["requestCount"] for r in gap) == 14012
++
++
++def test_coverage_gap_warns_only_on_real_drift(caplog) -> None:
++    import logging as _logging
++    sync = UsageSynchronizer(_Client(), store=None)
++    sync._last_rollup_totals = {"backend": "primary", "start": "d", "end": "d", "spend": 1000.0}
++    with caplog.at_level(_logging.INFO, logger="ai-token-dashboard.usage-sync"):
++        sync._log_coverage_gap("primary", "d", "d", [{"spend": 995.0}])
++        sync._log_coverage_gap("primary", "d", "d", [{"spend": 700.0}])
++    levels = [r.levelno for r in caplog.records if "usage coverage gap" in r.getMessage()]
++    assert levels == [_logging.INFO, _logging.WARNING]
+-- 
+2.53.0
+

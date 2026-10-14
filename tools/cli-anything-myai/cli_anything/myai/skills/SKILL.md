@@ -17,7 +17,7 @@ description: >-
 |---|---|
 | 公网 | `https://myai.carher.net`（Cloudflare Tunnel `e22cc0ea…`，ingress 只这一条） |
 | 主机 | 243 `cltx@10.68.13.243`（hostname `AIYJY-litellm-ps`），🔴 密码末尾的 `'` 也是密码的一部分 |
-| 代码 | GitHub `davidzhu2021/ai_token_dashboard`（我们**没有推送权限**）。dashboard/realtime 跑 `2818c0d`；**sync worker 跑 `9f250f8`**（= `2818c0d` + 本地两个修复提交，补丁在 `work/myai-migration/patches/`）。243 上 `~/ai_token_dashboard` 在分支 `fix/log-scan-capped-window-split-v2` = 线上 sync worker |
+| 代码 | GitHub `davidzhu2021/ai_token_dashboard`（我们**没有推送权限**）。dashboard/realtime 跑 `2818c0d`；**sync worker 跑 `9f250f8`**（= `2818c0d` + 本地两个修复提交，补丁在 `tools/cli-anything-myai/upstream-fixes/`）。243 上 `~/ai_token_dashboard` 在分支 `fix/log-scan-capped-window-split-v2` = 线上 sync worker |
 | 镜像 | 本地导入，`imagePullPolicy: Never`；243 上没有 docker。dashboard/realtime = `ai-token-dashboard:latest`，sync worker = `ai-token-dashboard:fix-9f250f8` |
 | 交接文档 | 飞书 `LnDFdifILo1Wuix7irecEbKOnkh` |
 

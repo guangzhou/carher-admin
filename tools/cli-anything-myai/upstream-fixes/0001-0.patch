@@ -1,0 +1,492 @@
+From ce07a529ea0bfab0cdfc82678f7d6c74cfed0894 Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Wed, 14 Oct 2026 12:42:39 +0800
+Subject: [PATCH 1/2] =?UTF-8?q?=E6=97=A5=E5=BF=97=E6=89=AB=E6=8F=8F:?=
+ =?UTF-8?q?=E5=B0=81=E9=A1=B6=E8=AE=A1=E6=95=B0=E6=8C=89=E6=97=B6=E9=97=B4?=
+ =?UTF-8?q?=E4=BA=8C=E5=88=86=E8=AF=BB=E5=85=A8=20+=20=E5=8E=9F=E5=A7=8B?=
+ =?UTF-8?q?=E6=97=A5=E5=BF=97=E8=A2=AB=E6=B8=85=E7=A9=BA=E6=97=B6=E4=B8=8D?=
+ =?UTF-8?q?=E5=86=8D=E7=94=A8=200=20=E8=A6=86=E7=9B=96=E5=BF=AB=E7=85=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+1. LiteLLM >= 1.93(PR #31825)把 /spend/logs/v2 的计数封顶在 10000,
+   total_pages 只是下限;读满 100 页即停导致 09-30/10-01/10-05/10-08/10-10
+   只剩 1 万条。改为 total_is_capped 时按时间二分到每个子窗口计数精确,
+   逐窗口读全并校验去重后行数 == 精确计数;最小窗口仍封顶或行数不符则判不完整。
+   相邻子窗口共享边界秒(上游按秒比较、startTime 带毫秒),request_id 去重。
+   实测北京 10-08:17 个子窗口,122272 行与精确计数完全一致。
+
+2. 原始 SpendLogs 是短保留表(10-14 磁盘满被清空),而日汇总
+   LiteLLM_DailyUserSpend 保留历史。被清空的日子扫出 0 行,会被当成"没流量"
+   发布,把已有快照删成 0(10-14 实际删掉了 09-30/10-10/10-13 的 primary)。
+   扫描结果远低于日汇总(默认 <50% 且日汇总 >=100 请求)时判不完整,
+   回退到 daily activity 路径。
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/litellm_client.py             | 169 +++++++++++++++++++-
+ tests/test_usage_log_timezone_sync.py | 212 ++++++++++++++++++++++++++
+ 2 files changed, 375 insertions(+), 6 deletions(-)
+
+diff --git a/backend/litellm_client.py b/backend/litellm_client.py
+index d8e872b..ab4e7cb 100644
+--- a/backend/litellm_client.py
++++ b/backend/litellm_client.py
+@@ -3630,12 +3630,17 @@ class LiteLLMClient:
+             else _env_int("USAGE_SYNC_LOG_PAGE_RETRIES", 2),
+         )
+ 
+-        async def fetch_page(page: int) -> tuple[list[dict[str, Any]], int, bool]:
++        async def fetch_page(
++            page: int,
++            window: tuple[str, str] | None = None,
++            size: int | None = None,
++        ) -> tuple[list[dict[str, Any]], int, bool]:
++            window_start, window_end = window or (utc_start, utc_end)
+             params: dict[str, Any] = {
+-                "start_date": utc_start,
+-                "end_date": utc_end,
++                "start_date": window_start,
++                "end_date": window_end,
+                 "page": page,
+-                "page_size": page_size,
++                "page_size": size or page_size,
+                 "sort_by": "startTime",
+                 "sort_order": "asc",
+             }
+@@ -3662,9 +3667,36 @@ class LiteLLMClient:
+             has_more = bool(_first(payload, "has_more", "hasMore", default=False)) if isinstance(payload, dict) else False
+             return _records(payload), total_pages, has_more
+ 
++        async def window_count(window: tuple[str, str]) -> tuple[int, bool]:
++            """Exact row count of a window, or (cap, True) when upstream clamps it."""
++            params: dict[str, Any] = {
++                "start_date": window[0],
++                "end_date": window[1],
++                "page": 1,
++                "page_size": 1,
++                "sort_by": "startTime",
++                "sort_order": "asc",
++            }
++            if api_key:
++                params["api_key"] = safe_key_id(api_key)
++            for attempt in range(page_retries + 1):
++                try:
++                    payload = await self.request_backend(backend, "GET", "/spend/logs/v2", params=params)
++                    break
++                except Exception:
++                    if attempt >= page_retries:
++                        raise
++                    await asyncio.sleep(min(2.0, 0.25 * (2**attempt)))
++            if not isinstance(payload, dict):
++                return 0, False
++            return _as_int(_first(payload, "total", default=0)), bool(payload.get("total_is_capped"))
++
+         page_failed = False
+         try:
+             first_logs, total_pages, has_more = await fetch_page(1)
++            first_page_capped = False
++            if total_pages and total_pages * page_size >= _env_int("USAGE_SYNC_LOG_COUNT_CAP", 10000):
++                _, first_page_capped = await window_count((utc_start, utc_end))
+         except Exception:
+             logger.exception("usage log first page failed backend=%s", backend.id)
+             raise
+@@ -3673,6 +3705,43 @@ class LiteLLMClient:
+         pages_to_fetch = min(total_pages, max_pages) if total_pages else (max_pages if (first_logs or has_more) else 1)
+         truncated = bool(total_pages and total_pages > max_pages)
+ 
++        # LiteLLM >= 1.93 bounds the /spend/logs/v2 count (PR #31825): above
++        # 10000 rows it reports total=10000 and total_is_capped=true, so
++        # total_pages is a floor. There is no cursor pagination for plain rows,
++        # so split the window in time until every leaf has an exact count and
++        # read each leaf in full. Leaves share their boundary second because the
++        # filter is second-precision on both ends; request-id dedupe absorbs the
++        # overlap.
++        capped_windows: list[tuple[str, str, int]] | None = None
++        if first_page_capped:
++            capped_windows = []
++            min_window_seconds = max(1, _env_int("USAGE_SYNC_LOG_MIN_WINDOW_SECONDS", 60))
++
++            async def plan(window_start: datetime, window_end: datetime) -> None:
++                nonlocal truncated
++                count, capped = await window_count(
++                    (window_start.strftime("%Y-%m-%d %H:%M:%S"), window_end.strftime("%Y-%m-%d %H:%M:%S"))
++                )
++                if not capped:
++                    capped_windows.append(
++                        (window_start.strftime("%Y-%m-%d %H:%M:%S"), window_end.strftime("%Y-%m-%d %H:%M:%S"), count)
++                    )
++                    return
++                if (window_end - window_start).total_seconds() <= min_window_seconds:
++                    # A minute holding more than the cap cannot be read exactly.
++                    truncated = True
++                    return
++                midpoint = (window_start + (window_end - window_start) / 2).replace(microsecond=0)
++                await asyncio.gather(plan(window_start, midpoint), plan(midpoint, window_end))
++
++            await plan(
++                datetime.strptime(utc_start, "%Y-%m-%d %H:%M:%S"),
++                datetime.strptime(utc_end, "%Y-%m-%d %H:%M:%S"),
++            )
++            capped_windows.sort()
++            pages_to_fetch = 0
++            truncated = truncated or sum(max(1, -(-count // page_size)) for _, _, count in capped_windows) > max_pages
++
+         grouped: dict[str, dict[tuple[str, str, str, str, str, str], dict[str, Any]]] = defaultdict(dict)
+         event_rows: list[dict[str, Any]] = []
+         # Concurrent page reads can overlap while the upstream log table is
+@@ -3792,7 +3861,48 @@ class LiteLLMClient:
+ 
+         absorb(first_logs)
+ 
+-        if pages_to_fetch > 1:
++        if capped_windows is not None and not truncated:
++            semaphore = asyncio.Semaphore(concurrency)
++
++            def leaf_ids(logs: list[dict[str, Any]]) -> set[str]:
++                ids = set()
++                for log in logs:
++                    rid = _clean_text(_first(log, "request_id", "requestId", "litellm_call_id", default=""))
++                    ids.add(rid or json.dumps(log.get("startTime"), default=str) + json.dumps(log.get("spend"), default=str))
++                return ids
++
++            async def read_leaf(window_start: str, window_end: str, expected: int) -> bool:
++                pages = max(1, -(-expected // page_size))
++                seen: set[str] = set()
++
++                async def load_leaf_page(page: int) -> None:
++                    async with semaphore:
++                        logs, _, _ = await fetch_page(page, (window_start, window_end))
++                    # Absorb immediately: a leaf can hold ~10k rows of ~100KB each.
++                    seen.update(leaf_ids(logs))
++                    absorb(logs)
++
++                await asyncio.gather(*(load_leaf_page(page) for page in range(1, pages + 1)))
++                if len(seen) != expected:
++                    logger.warning(
++                        "usage log leaf count mismatch backend=%s window=%s/%s expected=%s read=%s",
++                        backend.id, window_start, window_end, expected, len(seen),
++                    )
++                    return False
++                return True
++
++            for window_start, window_end, expected in capped_windows:
++                try:
++                    if not await read_leaf(window_start, window_end, expected):
++                        truncated = True
++                except Exception:
++                    logger.exception("usage log leaf failed backend=%s window=%s/%s", backend.id, window_start, window_end)
++                    if not allow_partial:
++                        raise
++                    page_failed = True
++                pages_to_fetch += max(1, -(-expected // page_size))
++
++        if pages_to_fetch > 1 and capped_windows is None:
+             semaphore = asyncio.Semaphore(concurrency)
+ 
+             async def load(page: int) -> tuple[list[dict[str, Any]], bool]:
+@@ -3818,7 +3928,7 @@ class LiteLLMClient:
+                     break
+ 
+         logger.info(
+-            "usage log scan backend=%s pages=%s/%s users=%s start=%s end=%s truncated=%s",
++            "usage log scan backend=%s pages=%s/%s users=%s start=%s end=%s truncated=%s capped_windows=%s",
+             backend.id,
+             pages_to_fetch,
+             total_pages,
+@@ -3826,6 +3936,7 @@ class LiteLLMClient:
+             start_date,
+             end_date,
+             truncated,
++            len(capped_windows) if capped_windows is not None else 0,
+         )
+         if truncated:
+             logger.warning(
+@@ -3840,8 +3951,54 @@ class LiteLLMClient:
+             for user_id, bucket in grouped.items()
+         }, events=event_rows)
+         complete = not truncated and not page_failed and (bool(total_pages) or not has_more)
++        if complete and not api_key and _env_bool("USAGE_SYNC_LOG_COVERAGE_CHECK", True):
++            complete = await self._log_scan_covers_daily_activity(backend, start_date, end_date, result)
+         return result, complete
+ 
++    async def _log_scan_covers_daily_activity(
++        self,
++        backend: LiteLLMBackend,
++        start_date: str,
++        end_date: str,
++        rows: dict[str, list[dict[str, Any]]],
++    ) -> bool:
++        """Reject a log scan that saw far fewer requests than the daily rollup.
++
++        Raw SpendLogs are a short-retention table (operators prune or truncate
++        it when the disk fills), while LiteLLM_DailyUserSpend keeps history. A
++        scan of a pruned day returns zero rows that look like a quiet day and
++        would replace a good snapshot with nothing. The rollup is UTC-dated and
++        the scan is local-dated, so only a gross shortfall counts.
++        """
++        scanned = sum(
++            _as_int(row.get("requestCount"))
++            for key, bucket in rows.items()
++            if key != "__events__"
++            for row in bucket
++        )
++        try:
++            payload = await self.request_backend(
++                backend,
++                "GET",
++                "/user/daily/activity/aggregated",
++                params={"start_date": start_date, "end_date": end_date},
++            )
++        except Exception:
++            logger.exception("usage log coverage check failed backend=%s", backend.id)
++            return False
++        metadata = payload.get("metadata") if isinstance(payload, dict) else None
++        expected = _as_int(_first(metadata or {}, "total_api_requests", "totalApiRequests", default=0))
++        minimum = max(0, _env_int("USAGE_SYNC_LOG_COVERAGE_MIN_REQUESTS", 100))
++        ratio = max(0.0, min(1.0, float(os.getenv("USAGE_SYNC_LOG_COVERAGE_MIN_RATIO", "0.5"))))
++        if expected >= minimum and scanned < expected * ratio:
++            logger.warning(
++                "usage log scan below daily rollup backend=%s start=%s end=%s scanned=%s rollup=%s; "
++                "treating as incomplete (raw logs likely pruned)",
++                backend.id, start_date, end_date, scanned, expected,
++            )
++            return False
++        return True
++
+     async def incremental_events_from_logs(
+         self,
+         start_time: datetime,
+diff --git a/tests/test_usage_log_timezone_sync.py b/tests/test_usage_log_timezone_sync.py
+index c22f187..a4b8bc5 100644
+--- a/tests/test_usage_log_timezone_sync.py
++++ b/tests/test_usage_log_timezone_sync.py
+@@ -62,8 +62,14 @@ class _LogClient(LiteLLMClient):
+     async def _ensure_deployment_model_map(self, _backend):
+         return {}
+ 
++    # Daily rollup (LiteLLM_DailyUserSpend) total the coverage check compares
++    # against. 0 = unknown/quiet, which never rejects a scan.
++    rollup_requests = 0
++
+     async def request_backend(self, backend, method, path, **kwargs):  # type: ignore[override]
+         params = kwargs.get("params") or {}
++        if path == "/user/daily/activity/aggregated":
++            return {"results": [], "metadata": {"total_api_requests": self.rollup_requests}}
+         self.requests.append(params)
+         page = int(params.get("page") or 1)
+         data = self._pages[page - 1] if 0 < page <= len(self._pages) else []
+@@ -915,3 +921,209 @@ def test_incomplete_scan_falls_back(monkeypatch) -> None:
+ 
+     assert fake.usage_rows_calls == 1
+     assert snapshot.rows[0]["totalTokens"] == 9
++
++
++class _CappedSpendLogUpstream(_LogClient):
++    """Mimics LiteLLM >= 1.93 /spend/logs/v2 (PR #31825).
++
++    Rows are filtered by second-precision ``start_date <= startTime <= end_date``
++    (inclusive on both ends), ordered by startTime, and the count is bounded:
++    above ``cap`` rows it reports ``total=cap`` / ``total_is_capped=true`` while
++    OFFSET pages beyond still return real rows.
++    """
++
++    def __init__(self, rows: list[dict], cap: int) -> None:
++        super().__init__([])
++        self.rows = sorted(rows, key=lambda r: r["startTime"])
++        self.cap = cap
++        self.count_probes = 0
++
++    async def request_backend(self, backend, method, path, **kwargs):  # type: ignore[override]
++        from datetime import datetime as _dt
++        params = kwargs.get("params") or {}
++        if path == "/user/daily/activity/aggregated":
++            return {"results": [], "metadata": {"total_api_requests": self.rollup_requests}}
++        self.requests.append(params)
++        start = _dt.strptime(params["start_date"], "%Y-%m-%d %H:%M:%S")
++        end = _dt.strptime(params["end_date"], "%Y-%m-%d %H:%M:%S")
++
++        def ts(row):
++            return _dt.fromisoformat(row["startTime"].replace("+00:00", "")).replace(microsecond=0)
++
++        matched = [r for r in self.rows if start <= ts(r) <= end]
++        size = int(params.get("page_size") or 100)
++        page = int(params.get("page") or 1)
++        if size == 1:
++            self.count_probes += 1
++        capped = len(matched) > self.cap
++        total = self.cap if capped else len(matched)
++        return {
++            "data": matched[(page - 1) * size: page * size],
++            "total": total,
++            "total_pages": -(-total // size) if total else 0,
++            "total_is_capped": capped,
++            "page": page,
++        }
++
++
++def _full_page(page: int, size: int) -> list[dict]:
++    return [
++        {**_log("claude-code-alice", f"2026-07-28T02:{page % 60:02d}:{i % 60:02d}+00:00", 1, "0.01"), "request_id": f"p{page}-{i}"}
++        for i in range(size)
++    ]
++
++
++def _spread_rows(count: int, start_hour: int = 1, seconds: int = 3600, user: str = "claude-code-alice") -> list[dict]:
++    """``count`` rows spread across ``seconds`` with sub-second times, so many
++    rows share a second exactly like production traffic."""
++    rows = []
++    for i in range(count):
++        offset = (i * seconds) / count
++        whole, frac = int(offset), int((offset - int(offset)) * 1000)
++        hh, rem = divmod(whole, 3600)
++        mm, ss = divmod(rem, 60)
++        rows.append({
++            **_log(user, f"2026-07-28T{start_hour + hh:02d}:{mm:02d}:{ss:02d}.{frac:03d}+00:00", 1, "0.01"),
++            "request_id": f"r{i}",
++        })
++    return rows
++
++
++def _scan(client) -> tuple[dict, bool]:
++    return asyncio.run(client.sync_rows_from_logs("2026-07-28", "2026-07-28", PRIMARY))
++
++
++def _requests(rows: dict) -> int:
++    return sum(int(r["requestCount"]) for bucket in rows.values() for r in bucket)
++
++
++def _spend(rows: dict) -> float:
++    return round(sum(float(r["spend"]) for bucket in rows.values() for r in bucket), 6)
++
++
++def test_capped_count_splits_window_and_reads_every_row(monkeypatch) -> None:
++    """上游计数封顶时按时间二分到每个子窗口计数精确,读全部真实行。"""
++    monkeypatch.setenv("USAGE_TIMEZONE_OFFSET_MINUTES", "-480")
++    monkeypatch.setenv("USAGE_SYNC_LOG_PAGE_SIZE", "10")
++    monkeypatch.setenv("USAGE_SYNC_LOG_COUNT_CAP", "50")
++    client = _CappedSpendLogUpstream(_spread_rows(437), cap=50)
++
++    rows, complete = _scan(client)
++
++    assert complete is True
++    assert _requests(rows) == 437
++    assert _spend(rows) == round(437 * 0.01, 6)
++    assert client.count_probes > 1
++
++
++def test_capped_count_shared_boundary_second_is_not_lost(monkeypatch) -> None:
++    """很多行挤在同一秒、二分中点正好落在这一秒:两侧共享边界秒,去重后一行不丢也不重。"""
++    monkeypatch.setenv("USAGE_TIMEZONE_OFFSET_MINUTES", "-480")
++    monkeypatch.setenv("USAGE_SYNC_LOG_PAGE_SIZE", "10")
++    monkeypatch.setenv("USAGE_SYNC_LOG_COUNT_CAP", "40")
++    # 120 rows in an 8-second burst (15/s): every midpoint lands inside a
++    # populated second, and both leaves include that boundary second.
++    client = _CappedSpendLogUpstream(_spread_rows(120, seconds=8), cap=40)
++    monkeypatch.setenv("USAGE_SYNC_LOG_MIN_WINDOW_SECONDS", "1")
++
++    rows, complete = _scan(client)
++
++    assert complete is True
++    assert _requests(rows) == 120
++    assert _spend(rows) == round(120 * 0.01, 6)
++
++
++def test_capped_second_that_cannot_be_split_reports_incomplete(monkeypatch) -> None:
++    """最小窗口内仍超封顶值(读不精确)时必须判不完整,不能发布。"""
++    monkeypatch.setenv("USAGE_TIMEZONE_OFFSET_MINUTES", "-480")
++    monkeypatch.setenv("USAGE_SYNC_LOG_PAGE_SIZE", "10")
++    monkeypatch.setenv("USAGE_SYNC_LOG_COUNT_CAP", "20")
++    monkeypatch.setenv("USAGE_SYNC_LOG_MIN_WINDOW_SECONDS", "60")
++    # 200 rows inside a single second: no split can get below the cap.
++    client = _CappedSpendLogUpstream(_spread_rows(200, seconds=1), cap=20)
++
++    _, complete = _scan(client)
++
++    assert complete is False
++
++
++def test_leaf_short_read_reports_incomplete(monkeypatch) -> None:
++    """子窗口实际读到的行数和精确计数不一致(上游数据在变)时判不完整。"""
++    monkeypatch.setenv("USAGE_TIMEZONE_OFFSET_MINUTES", "-480")
++    monkeypatch.setenv("USAGE_SYNC_LOG_PAGE_SIZE", "10")
++    monkeypatch.setenv("USAGE_SYNC_LOG_COUNT_CAP", "50")
++
++    class _DroppingUpstream(_CappedSpendLogUpstream):
++        async def request_backend(self, backend, method, path, **kwargs):  # type: ignore[override]
++            payload = await super().request_backend(backend, method, path, **kwargs)
++            params = kwargs.get("params") or {}
++            if int(params.get("page_size") or 0) > 1 and int(params.get("page") or 1) == 2:
++                payload["data"] = payload["data"][:-1]
++            return payload
++
++    client = _DroppingUpstream(_spread_rows(437), cap=50)
++
++    _, complete = _scan(client)
++
++    assert complete is False
++
++
++def test_uncapped_day_keeps_original_path_without_extra_probes(monkeypatch) -> None:
++    """没封顶的日子(绝大多数)行为不变:不做计数探测,按 total_pages 读完。"""
++    monkeypatch.setenv("USAGE_TIMEZONE_OFFSET_MINUTES", "-480")
++    monkeypatch.setenv("USAGE_SYNC_LOG_PAGE_SIZE", "10")
++    monkeypatch.setenv("USAGE_SYNC_LOG_COUNT_CAP", "10000")
++    client = _CappedSpendLogUpstream(_spread_rows(95), cap=10000)
++
++    rows, complete = _scan(client)
++
++    assert complete is True
++    assert _requests(rows) == 95
++    assert client.count_probes == 0
++    assert max(int(p.get("page") or 1) for p in client.requests) == 10
++
++
++def test_pruned_raw_logs_are_not_published_as_a_quiet_day(monkeypatch) -> None:
++    """原始日志被清空(磁盘满 TRUNCATE)后扫出 0 行,但日汇总表说这天有 12 万请求:
++    必须判不完整,不能用 0 覆盖已有快照。2026-10-14 线上实际发生过。"""
++    monkeypatch.setenv("USAGE_TIMEZONE_OFFSET_MINUTES", "-480")
++    client = _LogClient([[]])
++    client.rollup_requests = 123284
++
++    rows, complete = _scan(client)
++
++    assert rows == {}
++    assert complete is False
++
++
++def test_partially_pruned_day_is_rejected(monkeypatch) -> None:
++    """只剩一小段(清空发生在当天中途):远低于日汇总,同样不发布。"""
++    monkeypatch.setenv("USAGE_TIMEZONE_OFFSET_MINUTES", "-480")
++    client = _LogClient([_full_page(1, 30)])
++    client.rollup_requests = 2000
++
++    _, complete = _scan(client)
++
++    assert complete is False
++
++
++def test_quiet_day_with_quiet_rollup_still_publishes(monkeypatch) -> None:
++    """真没流量的日子(日汇总也低于阈值)照常发布,不被误拦。"""
++    monkeypatch.setenv("USAGE_TIMEZONE_OFFSET_MINUTES", "-480")
++    client = _LogClient([[]])
++    client.rollup_requests = 40
++
++    _, complete = _scan(client)
++
++    assert complete is True
++
++
++def test_scan_close_to_rollup_publishes(monkeypatch) -> None:
++    """UTC/北京日界差导致的正常偏差(如 0.9 倍)不应被拦。"""
++    monkeypatch.setenv("USAGE_TIMEZONE_OFFSET_MINUTES", "-480")
++    client = _LogClient([_full_page(1, 90)])
++    client.rollup_requests = 100
++
++    _, complete = _scan(client)
++
++    assert complete is True
+-- 
+2.53.0
+

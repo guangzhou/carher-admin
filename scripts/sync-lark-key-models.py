@@ -47,13 +47,21 @@ TABLE_ID = "tblJT2s6Y6xjYj5A"
 KEY_FIELD = "API Key"
 ALIAS_FIELD = "key_alias"
 MODELS_FIELD = "可用模型"
+BUDGET_FIELD = "每日预算"            # number：key 的 max_budget（LiteLLM 原生每日总额）
+PREMIUM_FIELD = "高配额度($/天)"     # number：Opus 系列 + gpt-6-astra 共用的日额度
 CHUNK = 200
+
+# 高配额度规则与 k8s/litellm-callbacks/budget_notice.py 一致（10-15）：cursor-* 走高配桶，
+# 额度 = metadata.budget_family_overrides.premium，否则 max_budget × 0.5；其他前缀没有高配桶。
+PREMIUM_PREFIXES = ("cursor-",)
+PREMIUM_RATIO = 0.5
 
 SSH_HOST = "cltx@10.68.13.198"
 NS = "litellm-product"          # ⛔ 生产库是 litellm-product，不是 dev
 DB_POD = "litellm-db-0"
 SQL = ('select json_build_object('
-       "'token',token,'alias',key_alias,'models',models,'blocked',blocked)::text "
+       "'token',token,'alias',key_alias,'models',models,'blocked',blocked,"
+       "'max_budget',max_budget,'fam',metadata->'budget_family_overrides')::text "
        'from "LiteLLM_VerificationToken";')
 
 
@@ -71,6 +79,7 @@ def read_rows() -> list[dict]:
         rel = Path(d).name + "/rows.ndjson"
         lark("base", "+record-list", "--base-token", BASE_TOKEN, "--table-id", TABLE_ID,
              "--field-id", KEY_FIELD, "--field-id", ALIAS_FIELD, "--field-id", MODELS_FIELD,
+             *(["--field-id", BUDGET_FIELD, "--field-id", PREMIUM_FIELD] if WITH_LIMITS else []),
              "--format", "ndjson", "--output", rel, "--overwrite")
         path = Path(rel)
         if not path.exists():
@@ -88,6 +97,45 @@ def read_litellm() -> dict[str, dict]:
     if not rows:
         sys.exit(f"读 LiteLLM 库失败：{proc.stderr[:300]}")
     return {r["token"]: r for r in rows}
+
+
+WITH_LIMITS = False
+
+
+def premium_limit(rec: dict):
+    if not str(rec.get("alias") or "").startswith(PREMIUM_PREFIXES):
+        return None
+    ov = rec.get("fam") or {}
+    if isinstance(ov, dict) and "premium" in ov:
+        return round(float(ov["premium"]), 2)
+    mb = rec.get("max_budget")
+    return round(float(mb) * PREMIUM_RATIO, 2) if mb else None
+
+
+def norm_num(v):
+    if v in (None, ""):
+        return None
+    try:
+        return round(float(v), 2)
+    except (TypeError, ValueError):
+        return v
+
+
+def cur_fields(r: dict) -> dict:
+    out = {MODELS_FIELD: r.get(MODELS_FIELD).strip() if isinstance(r.get(MODELS_FIELD), str) else ""}
+    if WITH_LIMITS:
+        out[BUDGET_FIELD] = norm_num(r.get(BUDGET_FIELD))
+        out[PREMIUM_FIELD] = norm_num(r.get(PREMIUM_FIELD))
+    return out
+
+
+def want_fields(rec: dict) -> dict:
+    out = {MODELS_FIELD: want(rec.get("models"))}
+    if WITH_LIMITS:
+        mb = rec.get("max_budget")
+        out[BUDGET_FIELD] = round(float(mb), 2) if mb is not None else None
+        out[PREMIUM_FIELD] = premium_limit(rec)
+    return out
 
 
 def want(models: list) -> str:
@@ -109,11 +157,15 @@ def main() -> int:
                     help="只刷这些 key_alias 的行（匹配飞书表的 key_alias 列）")
     ap.add_argument("--backup", metavar="PATH",
                     help="目标行原值落盘路径（默认 .tmp-lark/ 下带时间戳）")
+    ap.add_argument("--with-limits", action="store_true",
+                    help="同时刷「每日预算」(max_budget) 与「高配额度($/天)」两列")
     ap.add_argument("--only-db-alias-file", metavar="PATH",
                     help="一行一个 **DB 的** key_alias；按 hash 找到表里对应的行再刷。"
                          "表里的 key_alias 列常与 DB 不同名（2026-10-14：545 个 DB alias "
                          "按表列名只匹配上 41 行），批量改完 key 后同步用这个")
     args = ap.parse_args()
+    global WITH_LIMITS
+    WITH_LIMITS = args.with_limits
 
     db = read_litellm()
     rows = read_rows()
@@ -121,9 +173,7 @@ def main() -> int:
 
     # 全表基线，在 --only 过滤之前取 —— 过滤之后就没法回答"有没有写坏别人"了。
     n_before = len(rows)
-    baseline = {r["record_id"]: (r.get(MODELS_FIELD).strip()
-                                 if isinstance(r.get(MODELS_FIELD), str) else "")
-                for r in rows}
+    baseline = {r["record_id"]: cur_fields(r) for r in rows}
 
     if args.only and args.only_db_alias_file:
         sys.exit("--only 与 --only-db-alias-file 二选一")
@@ -169,22 +219,29 @@ def main() -> int:
             continue
         if rec.get("blocked"):
             blocked.append(r.get(ALIAS_FIELD))      # 单独报，不折进模型列
-        cur = r.get(MODELS_FIELD)
-        cur = cur.strip() if isinstance(cur, str) else ""
-        new = want(rec.get("models"))
-        if cur == new:
+        cur = cur_fields(r)
+        new = want_fields(rec)
+        delta = {k: v for k, v in new.items() if cur.get(k) != v}
+        if not delta:
             same += 1
         else:
-            todo[r["record_id"]] = {MODELS_FIELD: new}
-            orig[r["record_id"]] = {"key_alias": r.get(ALIAS_FIELD), MODELS_FIELD: cur}
+            todo[r["record_id"]] = delta          # 只发要改的字段（batch-update 逐字段覆盖）
+            orig[r["record_id"]] = {"key_alias": r.get(ALIAS_FIELD), **{k: cur.get(k) for k in delta}}
 
     print(f"已是最新 {same} 行，需要更新 {len(todo)} 行，空 key {blank} 行")
     print(f"⚠️ LiteLLM 里查无此 key（不动它的模型列）{len(absent)} 把：{absent[:10]}")
     print(f"⚠️ LiteLLM 里是 blocked（模型列照常刷）{len(blocked)} 把：{blocked[:10]}")
 
     # 点名少数几行时，把逐行加减都摊开 —— 只报"N 行要改"看不出会删掉什么。
+    if WITH_LIMITS:
+        for f in (MODELS_FIELD, BUDGET_FIELD, PREMIUM_FIELD):
+            print(f"  字段 {f}: 要改 {sum(1 for v in todo.values() if f in v)} 行")
     if todo and len(todo) <= 20:
         for rid, v in todo.items():
+            if MODELS_FIELD not in v:
+                print(f"\n{orig[rid]['key_alias']} ({rid}): " + ", ".join(
+                    f"{k} {orig[rid].get(k)} -> {v[k]}" for k in v))
+                continue
             gone, add = diff(orig[rid][MODELS_FIELD], v[MODELS_FIELD])
             n_old = len([x for x in orig[rid][MODELS_FIELD].split(", ") if x])
             n_new = len(v[MODELS_FIELD].split(", "))
@@ -195,7 +252,7 @@ def main() -> int:
     if not args.apply:
         if len(todo) > 20:
             for rid, v in list(todo.items())[:3]:
-                print("  ", rid, v[MODELS_FIELD][:90])
+                print("  ", rid, json.dumps(v, ensure_ascii=False)[:120])
         print("\n预览模式，没写。要真写加 --apply")
         return 0
 
@@ -229,10 +286,9 @@ def main() -> int:
     bad, drift = [], []
     for r in after:
         key = r.get(KEY_FIELD)
-        cur = r.get(MODELS_FIELD)
-        cur = cur.strip() if isinstance(cur, str) else ""
+        cur = cur_fields(r)
         if r["record_id"] in todo:
-            if cur != todo[r["record_id"]][MODELS_FIELD]:
+            if any(cur.get(k) != v for k, v in todo[r["record_id"]].items()):
                 bad.append(r.get(ALIAS_FIELD))
             continue
         # 附带损伤：没在这一轮 patch 里的行，这一列必须逐字节没动。

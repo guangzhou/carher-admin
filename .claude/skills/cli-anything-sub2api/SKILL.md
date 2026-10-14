@@ -15,11 +15,11 @@ description: >-
 
 | | 版本 | 怎么量 |
 |---|---|---|
-| **198 线上** | **v0.2.15**(`127.0.0.1:5000/sub2api:20261012-v0.2.15`,10-12 16:39 切) | `$S versions`(READY=1 那行)/ `$S status` 的 `system.version` |
-| 上游最新 | v0.2.16(10-13 15:20 发布,**198 未升**) | `$S versions` 末段 |
+| **198 线上** | **v0.2.16**(`127.0.0.1:5000/sub2api:20261013-v0.2.16`,10-13 23:26 切) | `$S versions`(READY=1 那行)/ `$S status` 的 `system.version` |
+| 上游最新 | v0.2.16(10-14 现量,198 已同版) | `$S versions` 末段 |
 | 源码 clone | `~/codes/sub2api` = origin/main(v0.2.16),全 tag 已拉 | |
 
-198 升级史(rs 镜像 tag):v0.2.7(09-20) → v0.2.8(09-24) → v0.2.11(10-01) → v0.2.13(10-02) → v0.2.15(10-12)。
+198 升级史(rs 镜像 tag):v0.2.7(09-20) → v0.2.8(09-24) → v0.2.11(10-01) → v0.2.13(10-02) → v0.2.15(10-12) → v0.2.16(10-13)。
 备份/探针在 198 `/root/sub2api-backup/`(10-12 那轮:dump + `probe-pre/post.json` 全 ok,8 条腿)。
 ⚠️ **别信记忆/skill 里写的"当前线上版本"**(10-13 发现停在 v0.2.11 十二天、漏了两次升级),每次现量:
 
@@ -27,7 +27,7 @@ description: >-
 scripts/sub2api-cli.sh versions   # 198 rs 镜像历史(READY=1 那行=线上)+ health + 上游最新 tag
 ```
 
-**读源码对 198 行为要看部署那个 tag**:`git -C ~/codes/sub2api show v0.2.15:<path>`,别看工作区(工作区已是 v0.2.16)。
+**读源码对 198 行为要看部署那个 tag**:`git -C ~/codes/sub2api show v0.2.16:<path>`,别看工作区。
 本地到 GitHub **时通时不通**(10-13 同一天通过又断;断时 `git fetch` 静默挂几分钟,`versions` 限 20s)
 ⇒ 不通走 188:`ssh cltx@10.68.13.188 'curl -sL https://raw.githubusercontent.com/Wei-Shaw/sub2api/<tag>/<path>'`。
 
@@ -80,6 +80,12 @@ $S --dry-run api post /admin/accounts/bulk-update --data '{"account_ids":[42],"s
 `api` 逃生口:`api {get|post|put|patch|delete} /admin/... [--data JSON|--file F] [--param k=v]`。
 `/accounts/data`、`/proxies/data`、`/settings/admin-api-key` 强制 `--output-file`,不打印凭据。
 
+## grok 422 一键分诊(10-14)
+
+面板 `grok-4.7` `/v1/responses` 502(上游 422)、5 腿全 422 ⇒ 先看是不是同 IP 每 ~30s 一簇 6 条(=LiteLLM 重试放大),
+再按 skill `sub2api-grok-ops` §⚡ 的 422 段拿 A/B 探针 `scripts/grok-422/probe_agent_message.py` 定 item type。
+sub2api v0.2.16 的 grok responses 路径**不存 422 响应体**(`openai_gateway_grok.go` 无 `Detail:`),面板只会显示「422」。
+
 ## 写接口会骗人(收尾回读只认下表的尺子)
 
 | 操作 | 坑 | 正确做法 |
@@ -103,7 +109,7 @@ $S --dry-run api post /admin/accounts/bulk-update --data '{"account_ids":[42],"s
 命中关键词 ⇒ 用规则替代默认 30min。
 
 - **v0.2.15**:规则命中时若请求模型已知且非 401 ⇒ **只冷却该 (账号,模型)**,不停整号;grok 入口是否带模型进来未核。
-- **v0.2.16**(未部署)规则多一个 `scope: account|model`;不写 = 旧行为(模型已知且非 401 走模型级)。
+- **v0.2.16**(10-13 已部署)规则多一个 `scope: account|model`;不写 = 旧行为(模型已知且非 401 走模型级)。
 - 10-13 查 198 的 55 个 grok 号:**全没配**。`pool_mode` 只对 apikey 号生效,grok oauth 号用不上。
 - ⚠️ 写 credentials 前先确认 PUT 不会把 GET 时被掩成空串的 token 写回去 —— 没验证前别动。
 

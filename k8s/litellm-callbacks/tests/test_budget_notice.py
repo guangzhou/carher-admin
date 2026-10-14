@@ -224,7 +224,11 @@ def _load():
 
 M = _load()
 
-PREFIX_ENV = {"BUDGET_NOTICE_KEY_PREFIXES": "claude-code-,cursor-"}
+# 旧 claude/other 桶路径仍服务非 cursor 的 gated key（claude-code-*），也是一键退回的形状。
+# 10-14 起 cursor-* 默认走高配桶；老测试显式钉回旧规则（= 生产上的回滚开关），
+# 新默认由 PremiumFleetDefaultTest 单独覆盖。
+LEGACY_RULES_ENV = {"BUDGET_FAMILY_PREMIUM_KEY_PREFIXES": ""}
+PREFIX_ENV = {"BUDGET_NOTICE_KEY_PREFIXES": "claude-code-,cursor-", **LEGACY_RULES_ENV}
 
 
 class _Key:
@@ -1540,6 +1544,9 @@ class FamilyBudgetTest(unittest.TestCase):
 
     # ---- 匹配器 ----
     def test_family_matcher(self):
+        _with_env(LEGACY_RULES_ENV, self._family_matcher_legacy)
+
+    def _family_matcher_legacy(self):
         cursor_key = _Key(alias="cursor-u1")
         legacy_key = _Key(alias="claude-code-u1")
         for m in ("claude-fable-5", "fable5.1", "claude-sonnet-5",
@@ -1775,22 +1782,26 @@ class FamilyBudgetTest(unittest.TestCase):
                   "deepseek-v4.1-flash", "gpt-6-astral", "claude-opusx"):
             self.assertIsNone(M._family_of(m, k), m)
 
-    def test_premium_rules_only_for_listed_keys(self):
-        # 名单外的 cursor key 行为不变
-        self.assertEqual(M._family_of("kiro-claude-opus-5-5", _Key(alias="cursor-u1"))[0], "claude")
-        self.assertEqual(M._family_of("gpt-6-astra", _Key(alias="cursor-u1"))[0], "other")
-        out = _with_env({"BUDGET_FAMILY_PREMIUM_KEY_ALIASES": "cursor-u1"},
-                        lambda: M._family_of("gpt-6-astra", _Key(alias="cursor-u1"))[0])
-        self.assertEqual(out, "premium")
-        out = _with_env({"BUDGET_FAMILY_PREMIUM_KEY_ALIASES": ""},
-                        lambda: M._family_of("gpt-6-astra", _Key(alias=self.PREMIUM))[0])
-        self.assertEqual(out, "other")
+    def test_premium_rules_only_for_listed_keys_when_prefix_off(self):
+        # 前缀放量关掉（回滚开关）时，名单外的 cursor key 回旧 claude/other 桶
+        def go():
+            self.assertEqual(M._family_of("kiro-claude-opus-5-5", _Key(alias="cursor-u1"))[0], "claude")
+            self.assertEqual(M._family_of("gpt-6-astra", _Key(alias="cursor-u1"))[0], "other")
+            out = _with_env({"BUDGET_FAMILY_PREMIUM_KEY_ALIASES": "cursor-u1"},
+                            lambda: M._family_of("gpt-6-astra", _Key(alias="cursor-u1"))[0])
+            self.assertEqual(out, "premium")
+            out = _with_env({"BUDGET_FAMILY_PREMIUM_KEY_ALIASES": ""},
+                            lambda: M._family_of("gpt-6-astra", _Key(alias=self.PREMIUM))[0])
+            self.assertEqual(out, "other")
+        _with_env(LEGACY_RULES_ENV, go)
 
     def test_premium_limit_default_and_override(self):
-        k = _Key(alias=self.PREMIUM)
-        self.assertEqual(M._family_limit("premium", k), 300.0)
+        k = _Key(alias=self.PREMIUM, max_budget=800.0)
+        self.assertEqual(M._family_limit("premium", k), 400.0)       # 总额 × 50%
         k.metadata = {"budget_family_overrides": {"premium": 50}}
-        self.assertEqual(M._family_limit("premium", k), 50.0)
+        self.assertEqual(M._family_limit("premium", k), 50.0)        # metadata 优先
+        k = _Key(alias=self.PREMIUM, max_budget=None)
+        self.assertEqual(M._family_limit("premium", k), 300.0)       # 无总额 ⇒ 兜底额度
 
     def test_premium_shared_bucket_blocks_both_and_spares_others(self):
         key = _Key(alias=self.PREMIUM, token="tok-prem")
@@ -1827,8 +1838,78 @@ class FamilyBudgetTest(unittest.TestCase):
         self._seed("tok-pq", "premium", 12.0)
         out = self._pre_fam({"model": "gpt-6-sol", "messages": [{"role": "user", "content": "/查余额"}]},
                             "acompletion", key=key)
-        self.assertIn("高配模型(Opus/Astra) $12.00/$300.00", out.get("mock_response", ""))
+        self.assertIn("高配模型(Opus/Astra) $12.00/$35.00", out.get("mock_response", ""))  # 70 × 50%
         self.assertNotIn("Claude 家族", out["mock_response"])
+
+
+class PremiumFleetDefaultTest(unittest.TestCase):
+    """2026-10-14 生产默认：全部 cursor-* 去掉 Claude 家族/其他模型桶，只剩高配桶 = 总额 × 50%。
+    不钉任何 env —— 这里考的就是「什么都不设」时的行为。"""
+
+    ENV = {"BUDGET_NOTICE_KEY_PREFIXES": "claude-code-,cursor-", "BUDGET_FAMILY_ENABLED": "1"}
+
+    def setUp(self):
+        _ensure_stubs()
+        M._fam_local.clear()
+        M._OVER_BUDGET_MARKS.clear()
+        for k in ("BUDGET_FAMILY_PREMIUM_KEY_PREFIXES", "BUDGET_FAMILY_PREMIUM_KEY_ALIASES",
+                  "BUDGET_FAMILY_PREMIUM_RATIO"):
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        M._fam_local.clear()
+
+    def _pre(self, model, key, text="hi", call_type="acompletion"):
+        d = {"model": model, "messages": [{"role": "user", "content": text}]}
+        return _with_env(self.ENV, lambda: asyncio.run(M.budget_notice.async_pre_call_hook(
+            key, None, d, _CallType(call_type))))
+
+    def test_every_cursor_key_uses_premium_rules(self):
+        for alias in ("cursor-u1", "cursor-zhangsan-ab12", "cursor-0a0bac70-e7gi"):
+            k = _Key(alias=alias)
+            self.assertEqual(M._family_of("kiro-claude-opus-5-5", k)[0], "premium", alias)
+            self.assertEqual(M._family_of("gpt-6-astra", k)[0], "premium", alias)
+            for m in ("kiro-claude-sonnet-5-5", "claude-haiku-4-5", "gpt-6-sol", "sa-grok-4.7"):
+                self.assertIsNone(M._family_of(m, k), (alias, m))
+
+    def test_non_cursor_keys_keep_old_buckets(self):
+        k = _Key(alias="claude-code-u1")
+        self.assertEqual(M._family_of("claude-opus-5", k)[0], "claude")
+        self.assertEqual(M._family_of("gpt-5.3-codex", k)[0], "gpt53")
+        self.assertEqual(M._family_of("gpt-6-astra", k)[0], "other")
+
+    def test_premium_limit_is_half_of_each_key_budget(self):
+        for mb, want in ((500.0, 250.0), (800.0, 400.0), (10000.0, 5000.0), (100.0, 50.0)):
+            self.assertEqual(M._family_limit("premium", _Key(alias="cursor-u1", max_budget=mb)), want)
+        out = _with_env({"BUDGET_FAMILY_PREMIUM_RATIO": "0.3"},
+                        lambda: M._family_limit("premium", _Key(alias="cursor-u1", max_budget=500.0)))
+        self.assertAlmostEqual(out, 150.0)
+
+    def test_sonnet_no_longer_blocked_by_old_claude_bucket(self):
+        key = _Key(alias="cursor-u1", token="tok-fd1", max_budget=500.0)
+        M._fam_local[M._family_spend_key("claude", "tok-fd1")] = 150.0   # 旧桶上已超 $100
+        out = self._pre("claude-sonnet-5-5", key)
+        self.assertNotIn("mock_response", out)
+
+    def test_opus_and_astra_blocked_at_half_budget(self):
+        key = _Key(alias="cursor-u1", token="tok-fd2", max_budget=500.0)
+        M._fam_local[M._family_spend_key("premium", "tok-fd2")] = 250.0
+        for m in ("claude-opus-5-5", "gpt-6-astra"):
+            out = self._pre(m, key)
+            self.assertIn("高配模型(Opus/Astra) 额度已用完", out.get("mock_response", ""), m)
+        self.assertNotIn("mock_response", self._pre("gpt-6-sol", key))
+
+    def test_quota_reply_shows_half_budget_line(self):
+        key = _Key(alias="cursor-u1", token="tok-fd3", max_budget=500.0)
+        M._fam_local[M._family_spend_key("premium", "tok-fd3")] = 20.0
+        out = self._pre("gpt-6-sol", key, text="/查余额")
+        self.assertIn("高配模型(Opus/Astra) $20.00/$250.00", out.get("mock_response", ""))
+        self.assertNotIn("Claude 家族", out["mock_response"])
+
+    def test_prefix_kill_switch_restores_old_rules(self):
+        out = _with_env({"BUDGET_FAMILY_PREMIUM_KEY_PREFIXES": ""},
+                        lambda: M._family_of("claude-sonnet-5", _Key(alias="cursor-u1"))[0])
+        self.assertEqual(out, "claude")
 
 
 class CodexStopTest(unittest.TestCase):
@@ -2902,11 +2983,11 @@ class ProbeHookWiringTest(unittest.TestCase):
         ① /查余额 不打上游，所以放行；⑤ 打上游，所以照拦。"""
         # `m1` 不在任何 Claude/GPT-5.3 命名里 ⇒ 落 `other` 桶。桶名必须跟
         # `_family_of` 实际算出来的一致，不然这条测试是在考一个没人读的桶（假绿）。
-        fam = M._family_of("m1", self._key(alias="cursor-u1"))
+        fam = _with_env(LEGACY_RULES_ENV, lambda: M._family_of("m1", self._key(alias="cursor-u1")))
         self.assertEqual(fam[0], "other")
         M._fam_local[M._family_spend_key(fam[0], "tok-carher")] = 9999.0
         key = self._key(alias="cursor-u1")           # 共用门，④ 对它执法
-        env = {**PROBE_ENV, "BUDGET_FAMILY_ENABLED": "1"}
+        env = {**PROBE_ENV, **LEGACY_RULES_ENV, "BUDGET_FAMILY_ENABLED": "1"}
 
         blocked = self._pre("acompletion", env, key=key, text="/测模型")
         self.assertIn("额度已用完", blocked.get("mock_response", ""))

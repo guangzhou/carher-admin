@@ -68,8 +68,12 @@ BUDGET_FAMILY_GPT53_USD=200                    非 Cursor gated key 的 GPT-5.3 
 BUDGET_FAMILY_CLAUDE_USD=100                   ④ Claude 家族每日限额
 BUDGET_FAMILY_OTHER_USD=500                    ④ 其他所有模型每日限额（Cursor 含 GPT-5.3）
 BUDGET_FAMILY_PREMIUM_KEY_ALIASES=a,b          ④ 只限高配（Opus 系列 + gpt-6-astra 共用一桶）
-                                              的 key 名单；未设=只 cursor-liuguoxian-std
-BUDGET_FAMILY_PREMIUM_USD=300                  ④ 高配桶每日限额（metadata 覆盖键 premium）
+                                              的精确名单；未设=只 cursor-liuguoxian-std
+BUDGET_FAMILY_PREMIUM_KEY_PREFIXES=cursor-     ④ 高配规则的前缀放量；未设=cursor-（10-14 起
+                                              全部 cursor key）；设成空串=退回 claude/other 桶
+BUDGET_FAMILY_PREMIUM_RATIO=0.5                ④ 高配桶额度 = key 每日总额 × 该比例
+                                              （metadata 覆盖键 premium 优先）
+BUDGET_FAMILY_PREMIUM_USD=300                  ④ key 没有总额时高配桶的兜底额度
 BUDGET_NOTICE_KEY_ALIASES=a,b                  精确灰度名单
 BUDGET_NOTICE_KEY_PREFIXES=claude-code-,cursor-  前缀放量
 两个 env 都未设置时默认 canary：claude-code-liuguoxian-50gj。
@@ -1488,6 +1492,10 @@ _CURSOR_FAMILY_RULES = tuple(rule for rule in _FAMILY_RULES if rule[0] != "gpt53
 # alias/hash，拿不到 key metadata，用 metadata 选规则会让执法和记账各认各的桶。
 # 默认名单写死一把（同 _DEFAULT_ALIASES 的灰度写法），设了 env 就以 env 为准。
 _PREMIUM_DEFAULT_ALIASES = frozenset({"cursor-liuguoxian-std"})
+# 2026-10-14 用户：全部 cursor key 去掉 Claude 家族限额，改高配桶，额度 = 每日总额 × 50%。
+# 退回旧规则：env BUDGET_FAMILY_PREMIUM_KEY_PREFIXES 设成空串（不需要改代码）。
+_PREMIUM_DEFAULT_PREFIXES: Tuple[str, ...] = ("cursor-",)
+_PREMIUM_DEFAULT_RATIO = 0.5
 _PREMIUM_MODEL_RE = _re.compile(
     r"(?:^|[-_./])(?:opus(?=$|[-_./0-9])|gpt-6-astra(?=$|[-_./]))"
 )
@@ -1516,7 +1524,9 @@ def _family_enabled() -> bool:
 
 def _family_limit(fkey: str, user_api_key_dict: Any) -> float:
     """限额优先级：key metadata.budget_family_overrides[fkey] > env > 内置默认。
-    metadata 覆盖既是灰度/冒烟手段，也留了按人定制口子。"""
+    metadata 覆盖既是灰度/冒烟手段，也留了按人定制口子。
+    premium 例外：没有 metadata 覆盖时取 **key 每日总额 × 比例**（默认 50%），
+    总额缺失才退回 env/内置默认。"""
     try:
         meta = getattr(user_api_key_dict, "metadata", None) or {}
         ov = meta.get("budget_family_overrides") or {}
@@ -1524,6 +1534,13 @@ def _family_limit(fkey: str, user_api_key_dict: Any) -> float:
             return float(ov[fkey])
     except Exception:
         pass
+    if fkey == "premium":
+        try:
+            mb = float(getattr(user_api_key_dict, "max_budget", None) or 0.0)
+        except Exception:
+            mb = 0.0
+        if mb > 0:
+            return mb * _premium_ratio()
     env_name = {"gpt53": "BUDGET_FAMILY_GPT53_USD",
                 "claude": "BUDGET_FAMILY_CLAUDE_USD",
                 "other": "BUDGET_FAMILY_OTHER_USD",
@@ -1541,13 +1558,36 @@ def _premium_aliases() -> frozenset:
     return frozenset(x.strip() for x in raw.split(",") if x.strip())
 
 
+def _premium_prefixes() -> Tuple[str, ...]:
+    """高配规则的前缀放量（2026-10-14：全部 cursor-*）。设成空串 = 一键退回旧 claude/other 桶。"""
+    raw = os.environ.get("BUDGET_FAMILY_PREMIUM_KEY_PREFIXES")
+    if raw is None:
+        return _PREMIUM_DEFAULT_PREFIXES
+    return tuple(x.strip() for x in raw.split(",") if x.strip())
+
+
+def _premium_ratio() -> float:
+    try:
+        return float(os.environ.get("BUDGET_FAMILY_PREMIUM_RATIO", _PREMIUM_DEFAULT_RATIO))
+    except Exception:
+        return _PREMIUM_DEFAULT_RATIO
+
+
+def _is_premium_key(alias: str) -> bool:
+    alias = str(alias or "")
+    if alias in _premium_aliases():
+        return True
+    pre = _premium_prefixes()
+    return bool(pre) and alias.startswith(pre)
+
+
 def _family_rules_for_key(user_api_key_dict: Any = None):
     """Return the active family rules; premium keys > cursor-* (no gpt53) > legacy."""
     if isinstance(user_api_key_dict, str):
         alias = user_api_key_dict
     else:
         alias = getattr(user_api_key_dict, "key_alias", "") if user_api_key_dict else ""
-    if str(alias) in _premium_aliases():
+    if _is_premium_key(alias):
         return _PREMIUM_FAMILY_RULES
     if str(alias).startswith("cursor-"):
         return _CURSOR_FAMILY_RULES

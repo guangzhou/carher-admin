@@ -180,6 +180,15 @@ NAMES DROPPED from the allowlist: 49 distinct -- every key below starts 403ing o
 （09-26：`glm-5.3-flash` / `-low` / `-high` / `-medium` 各 752，
 其实是同一批 752 次；`claude-opus-5` 4709 与 `anthropic.claude-opus-5` 4705 同理）。
 
+> 🔴 **量 14 天之前先看明细从哪天起才有**（10-14 加）：`LiteLLM_SpendLogs` 是 10 天 retention，盘满时还会被整表
+> TRUNCATE（10-14 发生过，清完只剩几小时）。`select min("startTime") from "LiteLLM_SpendLogs"` 晚于 14 天前，
+> 明细量出的 0 就不能当"没人用"。这时改量**日汇总 `LiteLLM_DailyUserSpend`**（按 `api_key` + `model`，`date` 是 text）：
+> ```sql
+> select model, sum(api_requests), round(sum(spend)::numeric,2) from "LiteLLM_DailyUserSpend"
+>  where api_key = any(array['<sha>', ...]) and date >= (current_date - 14)::text group by 1 order by 2 desc;
+> ```
+> 它记的 `model` 和 SpendLogs 一样是改写后的组名，上面"尺子有个洞"那条照样成立。
+
 ### 🔴 `readback_ok=668/668 mismatches=0` 回答不了"全部改完了吗"（2026-09-26 加）
 
 `applied_ok` / `readback_ok` 只谈**它自己 planned 的那批**。而 scope 是**先被收窄**的 ——

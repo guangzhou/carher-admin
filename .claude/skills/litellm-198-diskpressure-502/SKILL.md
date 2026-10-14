@@ -172,6 +172,19 @@ pipefail 于是透出 ssh/psql 的真实退出码），并给循环加了逐表 
 - **`crictl rmi --prune`**：同理，释放量与 345G 的表不在一个量级。
 - 盘满时**别跑全盘 `du`**：慢且会被反复打断；直接查 `pg_total_relation_size` 排序定位。
 
+### 2.4 ★ TRUNCATE 之后：下游有谁在读 SpendLogs 历史（10-14 实测出过事）
+
+清表只清 `LiteLLM_SpendLogs`（逐条明细）；**日汇总 `LiteLLM_DailyUserSpend` 不受影响**，按天/按 key/按模型的历史都还在。
+但读明细的下游会把"表空了"当成"那几天没流量"：
+
+| 下游 | 清表后的表现 | 处理 |
+|---|---|---|
+| **myai.carher.net**（243 ai_token_dashboard，单日同步走 `/spend/logs/v2`） | 10-14 清表后单日扫描读到 0 行，**把 09-30/10-10/10-13 的看板数据删成了 0** | 已修（sync worker `fix-9f250f8`：扫描结果 < 日汇总 50% 判不完整、回退日汇总）。清表后用 skill `cli-anything-myai` 跑 `diagnose coverage` 复核 |
+| "封 key/收窄前先查 14 天流量"（`litellm-198-key-block`、`litellm-198-key-allowlist`、`feedback_traffic_data_must_land_before_apply`） | SpendLogs 只剩清表后的几小时 ⇒ 查出 0 次 ≠ 没人用 | 清表后改查 `LiteLLM_DailyUserSpend`（按 `api_key`、`date >= current_date-14`），它保留历史 |
+| her 日报 / 按 key 统计（`her-spend-stats`、`hermestest-cron-report-triage`） | 窗口内天数不完整 | 同上，或注明"清表日之前缺明细" |
+
+判"这天的明细还在不在"：`select min("startTime") from "LiteLLM_SpendLogs"`，早于它的日子只剩日汇总。
+
 ## 3. 清完不会立刻好：5 分钟转换期是预期，不是失败
 
 kubelet 的 **`eviction-pressure-transition-period` 默认 5 分钟**：盘已经空了，node 的

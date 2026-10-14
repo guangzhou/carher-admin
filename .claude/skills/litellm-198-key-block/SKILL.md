@@ -128,6 +128,14 @@ select status, count(*), count(distinct api_key) from "LiteLLM_SpendLogs"
 
 配套确认 `config.yaml` 里没有 jwt 字样（`enable_jwt_auth` 没开）⇒ JWT 结构性不可能过鉴权。
 
+> 🔴 **`LiteLLM_SpendLogs` 不是全量历史**：10 天 retention，盘满时还会被整表 TRUNCATE（10-14 发生过，只剩清表后几小时）。
+> 先 `select min("startTime") from "LiteLLM_SpendLogs"` 看明细从哪天起才有；**"封前查 14 天流量"改查日汇总**，它保留历史：
+> ```sql
+> select date, sum(api_requests), round(sum(spend)::numeric,2) from "LiteLLM_DailyUserSpend"
+>  where api_key = '<token sha256>' and date >= (current_date - 14)::text group by 1 order by 1;
+> ```
+> 明细查出 0 次 ≠ 没人在用。见 `litellm-198-diskpressure-502` §2.4。
+
 **证伪腿（必须打，不打会打瘸管理 UI）**：只按「JWT + 路径」两条件封会误伤 LiteLLM 管理 UI ——
 UI 前端包里**确实**有 `/v1/models`、`/v1/chat/completions`、`/v1/responses`（在 pod 里
 `grep -rhoE '"/?(v1/[a-z_/]+)"' .../proxy/_experimental/out` 实测到）。所以要第三个条件把

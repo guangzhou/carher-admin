@@ -202,3 +202,23 @@ def test_override_exports_commented_not_deleted():
     assert "#export ANTHROPIC_AUTH_TOKEN=already-commented" in lines, "已注释的行被重复处理"
     assert 'export PATH="/x:$PATH"' in lines, "我们自己的块被误伤"
     assert len(baks) == 1, "改 rc 前没留备份"
+
+
+def test_merge_repairs_router_model_name_and_adds_picker_rows():
+    """10-14 用户:新开窗口报 Model "claude-router-…" isn't recognized。
+    旧版存下的 claude-router-<hex> 要还原真名;非 claude 网关模型进 modelPicker(behavesAs)。"""
+    import json, os, re, subprocess, tempfile
+    from pathlib import Path
+    mac = (Path(__file__).resolve().parents[1] / "src" / "install-mac.sh").read_text(encoding="utf-8")
+    js = re.search(r"CARHER_SETTINGS=\"\$SETTINGS\" node -e '\n(.*?)\n' \|\| die", mac, re.S).group(1)
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "settings.json"
+        p.write_text(json.dumps({"model": "claude-router-" + "gemini-4-argon".encode().hex(), "theme": "dark"}))
+        env = dict(os.environ, CARHER_KEY="sk-FAKE", CARHER_BASE="https://gw.example/pro", CARHER_SETTINGS=str(p),
+                   CARHER_MODELS="claude-opus-5-5\ngpt-5.6-terra\ngrok-4.7\ngpt-image-2\ncodex-auto-review")
+        subprocess.run(["node", "-e", js], env=env, check=True)
+        out = json.loads(p.read_text())
+    assert out["model"] == "gemini-4-argon"
+    assert out["theme"] == "dark"
+    assert [r["model"] for r in out["modelPicker"]["options"]] == ["gpt-5.6-terra", "grok-4.7"]
+    assert all(r["behavesAs"] == "claude-sonnet-5-5" for r in out["modelPicker"]["options"])

@@ -149,6 +149,11 @@ if (Test-Path $settings) {
   Warn "↳ 已备份原有配置到:$bk"
 }
 # 用 Node 合并 JSON(上面已保证有 Node;PS5 的 ConvertTo-Json 会把嵌套对象截断、转义中文,不可靠)
+# 网关模型清单(给 modelPicker 用);拿不到就跳过这一项
+try {
+  $gm = Invoke-RestMethod -Uri "$baseUrl/v1/models" -Headers @{ "x-api-key" = $apiKey; "anthropic-version" = "2023-06-01" } -TimeoutSec 30
+  $env:CARHER_MODELS = (@($gm.data | ForEach-Object { $_.id }) -join "`n")
+} catch { $env:CARHER_MODELS = "" }
 $env:CARHER_KEY = $apiKey; $env:CARHER_BASE = $baseUrl; $env:CARHER_SETTINGS = $settings
 $merge = @'
 const fs = require("fs");
@@ -168,13 +173,21 @@ delete d.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 d.env.ANTHROPIC_BASE_URL = process.env.CARHER_BASE;
 d.env.ANTHROPIC_API_KEY = process.env.CARHER_KEY;
 d.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
+// 旧版 Claude Code 存下的 claude-router-<hex> 模型名 ⇒ 还原真名(与 mac 版同)
+const real = (n) => { const m = /^claude-router-([0-9a-f]+)$/.exec(n || ""); return m ? Buffer.from(m[1], "hex").toString("utf8") : n; };
+if (typeof d.model === "string") d.model = real(d.model);
+// 非 claude 网关模型加进 modelPicker(behavesAs),新开窗口不再报「isn't recognized」
+const ids = (process.env.CARHER_MODELS || "").split("\n").filter(Boolean);
+const rows = ids.filter((i) => !/^claude-/.test(i) && !/image|imagine/.test(i) && i !== "codex-auto-review")
+  .map((i) => ({ model: i, label: i, behavesAs: "claude-sonnet-5-5" }));
+if (rows.length) d.modelPicker = { options: rows };
 fs.writeFileSync(p, JSON.stringify(d, null, 2) + "\n");
 '@
 $mjs = Join-Path $env:TEMP "carher-merge-$([guid]::NewGuid().ToString('N')).js"
 [IO.File]::WriteAllText($mjs, $merge, (New-Object Text.UTF8Encoding $false))
 try { & node $mjs; $rc = $LASTEXITCODE } finally {
   Remove-Item $mjs -Force -ErrorAction SilentlyContinue
-  Remove-Item Env:CARHER_KEY, Env:CARHER_BASE, Env:CARHER_SETTINGS -ErrorAction SilentlyContinue
+  Remove-Item Env:CARHER_KEY, Env:CARHER_BASE, Env:CARHER_SETTINGS, Env:CARHER_MODELS -ErrorAction SilentlyContinue
 }
 if ($rc -ne 0) { Die "x 写配置失败" }
 Ok "√ 配置已写入 $settings"

@@ -165,7 +165,10 @@ if [ -f "$SETTINGS" ]; then
   cp "$SETTINGS" "$BK"; warn "↳ 已备份原有配置到:$BK"
 fi
 # 用 Node 合并 JSON(上面已保证有 Node,不依赖 python/jq)。key 走环境变量,不进命令行参数。
-CARHER_KEY="$APIKEY" CARHER_BASE="$BASE_URL" CARHER_SETTINGS="$SETTINGS" node -e '
+# 网关模型清单(给 modelPicker 用);拿不到就跳过这一项,不影响别的
+CARHER_MODELS="$(curl -fsS --max-time 30 -H "x-api-key: $APIKEY" -H "anthropic-version: 2023-06-01" "$BASE_URL/v1/models" 2>/dev/null \
+  | node -e "let b=\"\";process.stdin.on(\"data\",c=>b+=c).on(\"end\",()=>{try{console.log(JSON.parse(b).data.map(m=>m.id).join(\"\\n\"))}catch(e){}})" 2>/dev/null || true)"
+CARHER_MODELS="$CARHER_MODELS" CARHER_KEY="$APIKEY" CARHER_BASE="$BASE_URL" CARHER_SETTINGS="$SETTINGS" node -e '
 const fs = require("fs");
 const p = process.env.CARHER_SETTINGS;
 let d = {};
@@ -185,6 +188,16 @@ delete d.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 d.env.ANTHROPIC_BASE_URL = process.env.CARHER_BASE;
 d.env.ANTHROPIC_API_KEY = process.env.CARHER_KEY;
 d.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
+// 2026-10-14:旧版 Claude Code 把非 claude 的网关模型显示成 claude-router-<hex>,选了会存进 model;
+// 新版(2.1.29x 起)直接认真名,旧名每次新开窗口都报 Model isn t recognized ⇒ 还原成真名。
+const real = (n) => { const m = /^claude-router-([0-9a-f]+)$/.exec(n || ""); return m ? Buffer.from(m[1], "hex").toString("utf8") : n; };
+if (typeof d.model === "string") d.model = real(d.model);
+// 网关里非 claude 的模型(GPT/Grok/Kimi 等)Claude Code 不认识 ⇒ 每次新开窗口都打警告、上下文按 200k 算。
+// modelPicker 一行一个,behavesAs 指一个它认识的模型 ⇒ 不再警告,菜单里直接是真名。
+const ids = (process.env.CARHER_MODELS || "").split("\n").filter(Boolean);
+const rows = ids.filter((i) => !/^claude-/.test(i) && !/image|imagine/.test(i) && i !== "codex-auto-review")
+  .map((i) => ({ model: i, label: i, behavesAs: "claude-sonnet-5-5" }));
+if (rows.length) d.modelPicker = { options: rows };
 fs.writeFileSync(p, JSON.stringify(d, null, 2) + "\n", { mode: 0o600 });
 fs.chmodSync(p, 0o600);
 ' || die "✗ 写配置失败"

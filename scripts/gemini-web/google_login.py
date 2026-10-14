@@ -17,6 +17,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import re
 import struct
 import sys
@@ -25,10 +26,13 @@ from urllib.parse import urlparse
 
 from patchright.sync_api import TimeoutError as PWTimeout
 from patchright.sync_api import sync_playwright
+ACCT_DIR = os.environ.get("GW_ACCT_DIR", "/acct")
+OUT_DIR = os.environ.get("GW_OUT_DIR", "/out")
+WORK_DIR = os.environ.get("GW_WORK_DIR", "/work")
 
 NAME = sys.argv[1] if __name__ == "__main__" else None
-ACCT = json.load(open(f"/acct/{NAME}.json")) if NAME else None
-OUT = f"/out/{NAME}"
+ACCT = json.load(open(f"{ACCT_DIR}/{NAME}.json")) if NAME else None
+OUT = f"{OUT_DIR}/{NAME}"
 step_no = 0
 OPTIONAL_PROMPT_RE = re.compile(
     r"Add a selfie|with a selfie|selfie video|Add a recovery|recovery (phone|email)|Create a passkey|passkey|"

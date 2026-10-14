@@ -4,18 +4,22 @@ Runs on 188 (patchright, Xvfb). Reads /acct/<name>.json and /acct/<name>.validat
 Logs every page; stops (does not guess) on phone / SMS / ID verification steps.
 """
 import json
+import os
 import sys
 import time
 
 from patchright.sync_api import sync_playwright
 
-sys.path.insert(0, "/work")
+ACCT_DIR = os.environ.get("GW_ACCT_DIR", "/acct")
+OUT_DIR = os.environ.get("GW_OUT_DIR", "/out")
+WORK_DIR = os.environ.get("GW_WORK_DIR", "/work")
+sys.path.insert(0, WORK_DIR)
 from google_login import totp, visible_text  # noqa: E402
 
 NAME = sys.argv[1]
-ACCT = json.load(open(f"/acct/{NAME}.json"))
-VURL = open(f"/acct/{NAME}.validation_url").read().strip()
-OUT = f"/out/{NAME}"
+ACCT = json.load(open(f"{ACCT_DIR}/{NAME}.json"))
+VURL = open(f"{ACCT_DIR}/{NAME}.validation_url").read().strip()
+OUT = f"{OUT_DIR}/{NAME}"
 step = 0
 HARD_STOP = ("phone number", "Enter a phone", "text message", "Verify it's you with your phone", "ID", "selfie video")
 

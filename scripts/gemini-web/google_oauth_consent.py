@@ -6,18 +6,22 @@ Reads /acct/<name>.json and /acct/<name>.authurl; writes /out/<name>.callback (t
 Never prints password, TOTP secret, or the code.
 """
 import json
+import os
 import sys
 import time
 
 from patchright.sync_api import sync_playwright
 
-sys.path.insert(0, "/work")
+ACCT_DIR = os.environ.get("GW_ACCT_DIR", "/acct")
+OUT_DIR = os.environ.get("GW_OUT_DIR", "/out")
+WORK_DIR = os.environ.get("GW_WORK_DIR", "/work")
+sys.path.insert(0, WORK_DIR)
 from google_login import totp, visible_text  # noqa: E402  (reuse helpers)
 
 NAME = sys.argv[1]
-ACCT = json.load(open(f"/acct/{NAME}.json"))
-AUTH_URL = open(f"/acct/{NAME}.authurl").read().strip()
-OUT = f"/out/{NAME}"
+ACCT = json.load(open(f"{ACCT_DIR}/{NAME}.json"))
+AUTH_URL = open(f"{ACCT_DIR}/{NAME}.authurl").read().strip()
+OUT = f"{OUT_DIR}/{NAME}"
 step = 0
 
 

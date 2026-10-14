@@ -41,7 +41,7 @@ Google AI Pro 号 ──浏览器登录(188)──> __Secure-1PSID/1PSIDTS
 🔴 **两个网关必须用同一个号的两份独立登录**：共用一份 cookie 会互相轮换 1PSIDTS 把对方踢掉。
 
 **规模（10-15 00:40 现量，别照抄，跑 `kubectl -n litellm-dev logs deploy/gemini-web | grep "clients initialized"` 现看）**：
-gemini-web 52 号（jio + agoro + 10-14 夜 50 张卡密全进）；同 50 号也进了 cli-proxy-api（Secret 60 个 `antigravity-*`）与 sub2api（组 10，id 到 ~130）。
+gemini-web **58 号**（jio + agoro + 10-14/15 夜 56 张卡密）；同批也进了 cli-proxy-api（Secret 66 个 `antigravity-*`）与 sub2api（组 10，id 到 ~136）。
 同一出口 IP（Linode 大阪）一晚登 50+ 号未见风控（abuse=Clean、无验证码墙）；但当晚 `gemini-3.1-pro`/偶发 3.8-flash 回 Google 通用失败文案（I'm having a hard time / Sorry, something went wrong），**argon 同时正常** —— 用户定性「3.1 Pro 老模型不用管」，未查因。
 
 ## 加号（一条命令，全自动）
@@ -67,6 +67,7 @@ STAGES=antigravity scripts/gemini-web/add-account.sh -f cards.txt            # �
 - 读页面时页面在跳转（Execution context was destroyed）⇒ 当瞬态重查；脚本任何异常都必须打出 `STOP …` 一行，否则批量日志里是「静默失败」（10-14 第一批 5 号就是这样丢的）。
 - 到了 gemini.google.com 但 cookie 只有 `1PSIDTS` 没有 `1PSID` ⇒ 等 5s 刷新重读，最多 4 次。
 - 🔴 bash 循环里 `ssh` 会吃掉 `while read` 的 stdin ⇒ 循环只跑第一个号（10-14 第一批 Antigravity 只进 1/10）。读名单用 `read -u 3 … 3<<<"$LIST"`。
+- 🔴 **「Verify it's you / Confirm you're not a robot」出在输密码之前 = 号本身被风控，不是出口 IP**（10-15 实证：同一批 11 号在 188、阿里云 EIP .98、.100 三个出口全拦；同一 EIP 上老号 caplerial 对照照常登入）。reCAPTCHA 只能真人过 ⇒ 别换出口硬撞，报给用户（真人 VNC 过 / 找卖家换 / 隔天重试）。该批卡密留在 `.work/gemini-batch/cards-captcha-blocked-11.txt`。换出口工具：`scripts/gemini-web/aliyun-eip-login.sh login|oauth <name> < acct.json`（阿里云 EIP 节点 hostNetwork Job，规则同 aliyun-eip-onboard.sh）。
 - Antigravity consent 有一页「Make sure that you downloaded this app from Google」，按钮叫 **Sign in**；且 URL 里带 `totp` 字样，TOTP 判定要同时看输入框存在。
 - Antigravity 新号 hub UA 报 403 VALIDATION_REQUIRED；`google_validate.py` 能走完验证页（有时显示 Authentication successful、有时 Google 回 500）**都没用** ⇒ 照老号钉 `1.0.0` UA + `gemini-3.8-flash-tiered→high` alias。50/50 新号都是这样装进去的。
 

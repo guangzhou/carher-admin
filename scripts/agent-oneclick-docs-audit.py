@@ -39,7 +39,9 @@ COMMON_STALE = ["cr-g-5.6", "sa-grok-4.6-latest", "3.20.21", "3.21.18",
                 # 国内直连 403 / 跳「地区不可用」的下载页,给同事等于没给
                 "openai.com/zh-Hans-CN/codex", "claude.ai/download",
                 # 后端线路/上游名是内部实现,不写进给同事的文档(10-13 用户要求)
-                "kiro", "Kiro"]
+                "kiro", "Kiro",
+                # 10-13 用户点名的三处:CLI 写成 App 的附属、写死下载目录的终端命令、Claude 里的十六进制模型编码表
+                "想自己装命令行", "~/Downloads/", "claude-router-"]
 DOCS = {
     CURSOR_A: dict(name="Cursor-A", figures=1, imgs=3,
                    attach={"cursor-g-setup.zip": ZIP},
@@ -69,8 +71,9 @@ DOCS = {
 ALLOW_IN = ("已下架", "已整段下架")
 MUST = {
     "cursor": ["downloads.cursor.com/production/", "cursor.com/download", "Remote-SSH"],
-    "codex": ["npm install -g @openai/codex", "codex-app-prod/Codex.dmg", ".msix"],
-    "claude": ["npm install -g @anthropic-ai/claude-code", "ccdl/desktop/Claude-mac.zip", "ccdl/desktop/Claude-windows-x64.msix"],
+    # 命令行由一键脚本自动装(10-13 用户:别再给手动 npm 命令,CLI 与 App 是并列两个选项)
+    "codex": ["一键脚本发现没有会自动装", "codex-app-prod/Codex.dmg", ".msix"],
+    "claude": ["一键脚本发现没有会自动装", "ccdl/desktop/Claude-mac.zip", "ccdl/desktop/Claude-windows-x64.msix"],
 }
 KEY_RE = re.compile(r"sk-[A-Za-z0-9_-]{16,}")
 

@@ -43,6 +43,7 @@ def main():
         shot(page, "start")
 
         totp_done = False
+        st = {}
         deadline = time.time() + 180
         while time.time() < deadline and not callback["url"]:
             page.wait_for_timeout(2500)
@@ -55,7 +56,11 @@ def main():
                 email_box.first.fill(ACCT["email"]); page.keyboard.press("Enter"); shot(page, "email"); continue
             pw = page.locator('input[type="password"]:visible')
             if "challenge/pwd" in url and pw.count():
-                pw.first.fill(ACCT["password"]); page.keyboard.press("Enter"); shot(page, "password"); continue
+                # also covers a slow submit that leaves us on the password page (10-14 rosenbergereric115)
+                pw_tries = st.get("pw", 0) + 1; st["pw"] = pw_tries
+                if pw_tries > 3:
+                    shot(page, "password-stuck"); print("STOP password page stuck:", visible_text(page, 300), flush=True); return 8
+                pw.first.fill(ACCT["password"]); page.keyboard.press("Enter"); shot(page, "password"); page.wait_for_timeout(3000); continue
             if "/challenge/totp" in url.split("?")[0] and page.locator('input[name="totpPin"]').count():
                 if totp_done:
                     shot(page, "totp-rejected"); return 3

@@ -40,21 +40,35 @@ Google AI Pro 号 ──浏览器登录(188)──> __Secure-1PSID/1PSIDTS
 198 文件：`/root/gemini-web-build/`（config.yaml、accounts/*.json|*.cookies.json、api_key，全 root 600）、`/root/gwt-build/`。
 🔴 **两个网关必须用同一个号的两份独立登录**：共用一份 cookie 会互相轮换 1PSIDTS 把对方踢掉。
 
+**规模（10-15 00:40 现量，别照抄，跑 `kubectl -n litellm-dev logs deploy/gemini-web | grep "clients initialized"` 现看）**：
+gemini-web 52 号（jio + agoro + 10-14 夜 50 张卡密全进）；同 50 号也进了 cli-proxy-api（Secret 60 个 `antigravity-*`）与 sub2api（组 10，id 到 ~130）。
+同一出口 IP（Linode 大阪）一晚登 50+ 号未见风控（abuse=Clean、无验证码墙）；但当晚 `gemini-3.1-pro`/偶发 3.8-flash 回 Google 通用失败文案（I'm having a hard time / Sorry, something went wrong），**argon 同时正常** —— 用户定性「3.1 Pro 老模型不用管」，未查因。
+
 ## 加号（一条命令，全自动）
 
 ```bash
-scripts/gemini-web/add-account.sh 'Email----Password----2FA密钥'            # 也认 4 段（带辅助邮箱）
-STAGES=web scripts/gemini-web/add-account.sh '...'                           # 只加网页池
+# 卡密放仓库内 .work/（已 gitignore，chmod 600），一行一张；---- 两侧空格、空行自动忽略
+scripts/gemini-web/add-account.sh -f .work/gemini-batch/cards.txt
+scripts/gemini-web/add-account.sh 'Email----Password----2FA密钥'            # 单张；也认 4 段（带辅助邮箱）
+STAGES=web         scripts/gemini-web/add-account.sh -f cards.txt            # 只网页池
+STAGES=antigravity scripts/gemini-web/add-account.sh -f cards.txt            # 只 Antigravity（补跑用）
 ```
 
-默认两段：`web`（网页 cookie → gemini-web）+ `antigravity`（OAuth → cli-proxy-api canary 零中断 → sub2api）。
+批量模式：逐号登录，**最后 gemini-web 只重启一次、cli-proxy-api 只装一次**（canary 挡流量）、sub2api 一次。
+失败的号报出来跳过，其余照常进；重跑幂等（cookie/凭据覆盖刷新）。
+补跑 Antigravity 时别靠手记名单：从 Secret `cliproxy-secrets` 现读已有 `antigravity-*` key，差集就是待补。
+节奏（10-14 实测 50 号）：网页登录 ~30s/号，Antigravity ~1.5min/号；30 号一批 ≈ 15min + 45min。
 浏览器在 **188 现成的 playwright 镜像 + Xvfb + patchright** 里跑（⛔别在 198 再造浏览器环境；本机 Mac 连不上 Google）。
 
 踩过的坑（脚本已处理，改脚本时别回退）：
 - TOTP 页 URL 的 `continue=` 里带 `gemini.google.com` ⇒ 判「登录完成」必须看 **host 前缀**。
-- 登录后的「Add a selfie for sign-in」等可选页点 **Not now**，绝不登记任何东西。
+- **自拍提示页**（Add a selfie for sign-in / just in case / Protect your account access with a selfie）可能出在 `myaccount.google.com`，**也可能出在 URL 仍含 `challenge/totp` 的 accounts 页** ⇒ 按页面文字识别；且它的「Not now」**常常点了不动** ⇒ 第 2 次碰到就直接 `goto gemini.google.com/app`（会话此时已登录）。按钮 click 必须 `timeout=3000`，默认 30s × 5 次会把整个 150s 预算吃光。
+- 提交密码后仍停在密码页（慢）⇒ 重提最多 2 次；页面写 Wrong password 才判失败。
+- 读页面时页面在跳转（Execution context was destroyed）⇒ 当瞬态重查；脚本任何异常都必须打出 `STOP …` 一行，否则批量日志里是「静默失败」（10-14 第一批 5 号就是这样丢的）。
+- 到了 gemini.google.com 但 cookie 只有 `1PSIDTS` 没有 `1PSID` ⇒ 等 5s 刷新重读，最多 4 次。
+- 🔴 bash 循环里 `ssh` 会吃掉 `while read` 的 stdin ⇒ 循环只跑第一个号（10-14 第一批 Antigravity 只进 1/10）。读名单用 `read -u 3 … 3<<<"$LIST"`。
 - Antigravity consent 有一页「Make sure that you downloaded this app from Google」，按钮叫 **Sign in**；且 URL 里带 `totp` 字样，TOTP 判定要同时看输入框存在。
-- Antigravity 新号 hub UA 报 403 VALIDATION_REQUIRED；`google_validate.py` 能走完验证页（显示 Authentication successful）**但 10-14 实测仍 403** ⇒ 照老号钉 `1.0.0` UA + `gemini-3.8-flash-tiered→high` alias。
+- Antigravity 新号 hub UA 报 403 VALIDATION_REQUIRED；`google_validate.py` 能走完验证页（有时显示 Authentication successful、有时 Google 回 500）**都没用** ⇒ 照老号钉 `1.0.0` UA + `gemini-3.8-flash-tiered→high` alias。50/50 新号都是这样装进去的。
 
 `gemini-media` 不在脚本里：它只吃一个号。换号 = 188 跑一次 `google_login.py`（用一个新的 name 拿独立 session）→ 改 Secret `gemini-media-env` 的 `GEMINI_COOKIES` → rollout restart。
 
@@ -90,7 +104,7 @@ STAGES=web scripts/gemini-web/add-account.sh '...'                           # �
   ⇒ 适合聊天/轻工具；Claude Code 重度 agent 不稳。真稳 = Ultra 号进 Antigravity 或 AI Studio key。
 - **带工具时不是流式**：p3 为了判断推脱要先攒全文，整段一次出。不带工具仍真流式。待做：只攒开头 ~200 字再转实时流。
 - **延迟**：短问 2~3s、80~150KB Claude Code 体量 4~7s、冷启动 12s；经 LiteLLM ≈ 直打网关。
-- **额度**：每号 **2400 credits / ~5h 窗**，Flash/Pro/Argon 共池；一轮 5×3 Claude Code 回归≈几百 credits。视频另有很小的日额度（`quota_exceeded`）。
+- **额度**：新号 **2400 credits / ~5h 窗**，Flash/Pro/Argon 共池；一轮 5×3 Claude Code 回归≈几百 credits。10-14 夜 jio/agoro 两个老号的日志读数变成 `/48384`（原因未查：库换口径 or 档位不同）。视频另有很小的日额度（`quota_exceeded`）。p2 会跳过 remaining=0 的号，52 号池子下单号耗尽基本无感。
 - 媒体：图 ~15s；音乐 1.5~4 分钟 MP3（Google 偶回「I'm having a hard time」，换描述即可）；Deep Research 1~4 分钟万字报告。
 
 ## 回归（每次改补丁/换号后）

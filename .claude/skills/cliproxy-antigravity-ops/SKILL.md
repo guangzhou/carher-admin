@@ -274,7 +274,11 @@ consent 页不必真人点：`scripts/gemini-web/` 里三件套在 **188 现成�
 
 单副本重启前先起 canary + 挪 svc（见「升级网关镜像」），install 自带的 rollout 才不断流。
 
-### 一批号（要加 100 个就走这条）
+**以上三步 + canary + 一次 install + sub2api 已串成一条命令**（10-14 夜 50 号 50/50 跑通）：
+`STAGES=antigravity scripts/gemini-web/add-account.sh -f <卡密文件>`，SOP 与登录页坑全在 skill `gemini-web-pool-198` §加号。
+⇒ 下面「一批号」那节的手工 authurl/consent 流程只在**没有密码+2FA**（要真人点）时才用。
+
+### 一批号（无密码时的手工流程）
 
 **先逐个 `exchange` 把凭据攒在 `/root/cliproxy-manifests/`，最后一次性装：**
 

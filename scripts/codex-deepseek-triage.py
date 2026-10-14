@@ -57,7 +57,6 @@ from collections import Counter
 
 HOST = "10.68.13.198"
 USER = "cltx"
-PW = "Hn8#mKLp3QxZ"
 NS = "litellm-product"
 
 # counts 键 -> (人话, 是否代表异常)
@@ -79,14 +78,14 @@ COUNT_MEANING = {
 
 
 def _ssh(script: str, timeout: int = 300) -> str:
-    """把脚本 base64 内联送到 198 跑 —— 避免 scp 撞 /tmp 同名残留。"""
+    """把脚本 base64 内联送到 198 跑 —— 避免 scp 撞 /tmp 同名残留。走 ssh key + sudo -n，与 callback-update 同。"""
     b64 = base64.b64encode(script.encode()).decode()
     cmd = (
-        f"echo '{PW}' | sudo -S bash -c "
+        "sudo -n bash -c "
         f"'echo {b64} | base64 -d > /tmp/_cdt_$$.sh; bash /tmp/_cdt_$$.sh; rm -f /tmp/_cdt_$$.sh'"
     )
     p = subprocess.run(
-        ["sshpass", "-p", PW, "ssh", "-o", "StrictHostKeyChecking=no",
+        ["ssh", "-n", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
          "-o", "ConnectTimeout=25", f"{USER}@{HOST}", cmd],
         capture_output=True, text=True, timeout=timeout,
     )

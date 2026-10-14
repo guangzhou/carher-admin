@@ -858,6 +858,64 @@ def _rewrite_compaction_request(data: dict[str, Any], counts: dict[str, int]) ->
     return out
 
 
+# chat 路径（2026-10-14）：api.deepseek.com 的 thinking 模型要求**每条**带
+# tool_calls 的 assistant 消息回传 reasoning_content，漏一条就
+# 400 "The `reasoning_content` in the thinking mode must be passed back"。
+# VS Code / OpenAI 形客户端回放历史从不带它。LiteLLM 自带的
+# DeepSeekChatConfig._fill_reasoning_content 在这里不生效：组配的是
+# custom_openai/ 前缀（走 OpenAILikeChatConfig），且它还要求客户端显式传
+# thinking=enabled。实测：空串/空格占位 200；不带 tool_calls 的普通回复不需要。
+_CHAT_CALL_TYPES = {"completion", "acompletion"}
+_CHAT_RC_PLACEHOLDER = " "
+
+
+def _is_chat_call(call_type: Any) -> bool:
+    v = getattr(call_type, "value", call_type)
+    return str(v) in _CHAT_CALL_TYPES
+
+
+def _is_official_deepseek(kwargs: dict[str, Any]) -> bool:
+    base = kwargs.get("api_base")
+    return _is_deepseek(kwargs.get("model")) and isinstance(base, str) and "api.deepseek.com" in base
+
+
+def _fill_chat_reasoning_content(messages: Any, counts: dict[str, int]) -> Any:
+    if not isinstance(messages, list):
+        return messages
+    out: list[Any] | None = None
+    for i, msg in enumerate(messages):
+        if not (isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("tool_calls")):
+            continue
+        if isinstance(msg.get("reasoning_content"), str):
+            continue
+        psf = msg.get("provider_specific_fields")
+        stored = psf.get("reasoning_content") if isinstance(psf, dict) else None
+        patched = dict(msg)
+        if isinstance(stored, str) and stored:
+            patched["reasoning_content"] = stored
+            counts["chat_reasoning_content_restore"] = counts.get("chat_reasoning_content_restore", 0) + 1
+        else:
+            patched["reasoning_content"] = _CHAT_RC_PLACEHOLDER
+            counts["chat_reasoning_content_fill"] = counts.get("chat_reasoning_content_fill", 0) + 1
+        if out is None:
+            out = list(messages)
+        out[i] = patched
+    return messages if out is None else out
+
+
+def _adapt_chat(kwargs: dict[str, Any], source: str) -> dict[str, Any]:
+    if not _is_official_deepseek(kwargs):
+        return kwargs
+    counts: dict[str, int] = {}
+    msgs = _fill_chat_reasoning_content(kwargs.get("messages"), counts)
+    if not counts:
+        return kwargs
+    out = dict(kwargs)
+    out["messages"] = msgs
+    _log.warning("deepseek_responses_adapt: source=%s model=%s counts=%s", source, kwargs.get("model"), counts)
+    return out
+
+
 def _adapt(data: dict[str, Any], source: str) -> dict[str, Any]:
     if not _is_deepseek(data.get("model")):
         return data
@@ -942,6 +1000,8 @@ class DeepSeekResponsesAdapt(CustomLogger):
         try:
             if _is_responses_call(call_type) and isinstance(kwargs, dict):
                 return _adapt(kwargs, "pre_deployment:%s" % call_type)
+            if _is_chat_call(call_type) and isinstance(kwargs, dict):
+                return _adapt_chat(kwargs, "pre_deployment_chat")
         except Exception as exc:
             _log.warning("deepseek_responses_adapt: pre_deployment error: %r", exc)
         return kwargs

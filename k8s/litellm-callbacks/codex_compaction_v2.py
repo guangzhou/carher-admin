@@ -118,6 +118,13 @@ _RESPONSE_CALL_TYPES = {"responses", "aresponses"}
 # chatgpt-acct 是 ``http://chatgpt-acct-151...:4000``。
 _TARGET_API_BASE_MARK = os.environ.get("CODEX_COMPACTION_API_BASE_MARK", "://zero-")
 _TARGET_MODEL_ID_PREFIX = os.environ.get("CODEX_COMPACTION_MODEL_ID_PREFIX", "zk-")
+# sub2api → x.ai 的 grok 部署（model_info.id 形如 ``sa/grok-4.7``）。x.ai 对
+# ``compaction_trigger`` 回 422（2026-10-14 A/B：纯消息 200 / +trigger 502×3 /
+# 换成显式摘要指令 200），sub2api 换完 5 腿、LiteLLM 再重试，最后静默兜底 deepseek。
+# 只认 ``sa/grok`` —— 同一个 sub2api 上的 sa/kimi、sa/composer 没验过，不碰。
+_EXTRA_MODEL_ID_PREFIXES = tuple(
+    p for p in os.environ.get("CODEX_COMPACTION_EXTRA_MODEL_ID_PREFIXES", "sa/grok").split(",") if p
+)
 
 _TRIGGER_TYPES = {"compaction_trigger"}
 _COMPACTION_TYPES = {"compaction", "compaction_summary", "context_compaction"}
@@ -221,7 +228,10 @@ def _is_target(kwargs: dict[str, Any]) -> bool:
     """
     if _TARGET_API_BASE_MARK in _api_base_of(kwargs):
         return True
-    if _model_id_of(kwargs).startswith(_TARGET_MODEL_ID_PREFIX):
+    mid = _model_id_of(kwargs)
+    if mid.startswith(_TARGET_MODEL_ID_PREFIX):
+        return True
+    if _EXTRA_MODEL_ID_PREFIXES and mid.startswith(_EXTRA_MODEL_ID_PREFIXES):
         return True
     return False
 

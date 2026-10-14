@@ -115,6 +115,23 @@ class Gate(unittest.TestCase):
         self.assertEqual([i.get("type") for i in M.adapt_inbound(d, "test")["input"]][-1],
                          "compaction_trigger")
 
+    # 2026-10-14：x.ai 对 compaction_trigger 回 422，sub2api grok 部署也要接管
+    SUB2API = "http://sub2api.litellm-dev.svc.cluster.local:8080/v1"
+
+    def test_sub2api_grok_deployment_hit(self):
+        d = _req(CONV + [TRIGGER], base=self.SUB2API, tools=[{"type": "function", "name": "shell"}],
+                 model_info={"id": "sa/grok-4.7"})
+        out = M.adapt_inbound(d, "test")
+        self.assertNotIn("compaction_trigger", [i.get("type") for i in out["input"]])
+        self.assertNotIn("tools", out)
+        self.assertTrue(out["litellm_metadata"].get("codex_compaction_v2"))
+
+    def test_sub2api_kimi_and_composer_untouched(self):
+        for mid in ("sa/kimi-code-anthropic", "sa/composer-2.5", "0cdb6423-168x"):
+            d = _req(CONV + [TRIGGER], base=self.SUB2API, model_info={"id": mid})
+            out = M.adapt_inbound(d, "test")
+            self.assertEqual([i.get("type") for i in out["input"]][-1], "compaction_trigger", mid)
+
 
 class InboundTrigger(unittest.TestCase):
 

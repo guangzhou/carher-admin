@@ -14,6 +14,8 @@ cases：
   C  agent_enc    : user message + agent_message(content=[input_text, encrypted_content])
                     —— 与 10-14 抓到的被拒请求同形（Codex Desktop 0.162 子代理消息）
   D  agent_strip  : C 经过 strip_agent_message() 之后（修复方案的回归：必须 200）
+  E  cmp_trigger  : user message + 末尾 {"type":"compaction_trigger"}（Codex 压缩轮的唯一标记）
+  F  cmp_rewrite  : E 把 compaction_trigger 换成一条显式「请总结」user message
 """
 from __future__ import annotations
 
@@ -87,6 +89,12 @@ def body_for(case: str) -> dict:
         return base
     if case == "B":
         base["input"].insert(0, agent_message(with_enc=False))
+        return base
+    if case in ("E", "F"):
+        if case == "E":
+            base["input"].append({"type": "compaction_trigger"})
+        else:
+            base["input"].append(user("Summarize the conversation so far."))
         return base
     if case in ("C", "D"):
         base["input"].insert(0, agent_message(with_enc=True))

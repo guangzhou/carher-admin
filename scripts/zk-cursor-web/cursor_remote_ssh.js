@@ -324,8 +324,8 @@ async function main() {
     //    所以能走的只有两条:让出这台机器的 8788,或者这台机器上直接用公网地址(不走小代理)。
     console.log("      解法(二选一):");
     console.log("        a) 请这台服务器的管理员把占着 " + port + " 的程序换个端口(它可以换,我们不行)");
-    console.log("        b) 这台机器上不走本机小代理:Cursor → Settings → Models,把 OpenAI Base URL");
-    console.log("           临时改成  https://cc.auto-link.com.cn/pro/v1  (远程窗口天生就能用,只是没有增量传输)");
+    console.log("        b) 不走本机小代理:完全退出 Cursor,双击 TURN-OFF-DELTA-Mac.command,再连这台服务器");
+    console.log("           (远程窗口就能直接用,只是少了增量传输;想恢复双击 UPGRADE)");
     console.log("      占用者:  在服务器上跑  ss -ltnp | grep :" + port + "  能看到是谁");
     return 4;
   }

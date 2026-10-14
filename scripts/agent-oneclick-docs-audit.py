@@ -41,7 +41,9 @@ COMMON_STALE = ["cr-g-5.6", "sa-grok-4.6-latest", "3.20.21", "3.21.18",
                 # 后端线路/上游名是内部实现,不写进给同事的文档(10-13 用户要求)
                 "kiro", "Kiro",
                 # 10-13 用户点名的三处:CLI 写成 App 的附属、写死下载目录的终端命令、Claude 里的十六进制模型编码表
-                "想自己装命令行", "~/Downloads/", "claude-router-"]
+                "想自己装命令行", "~/Downloads/", "claude-router-",
+                # 10-14 用户:文档里不出现要用户手填的网关地址,该改的交给脚本/按钮
+                "cc.auto-link.com.cn/pro"]
 DOCS = {
     CURSOR_A: dict(name="Cursor-A", figures=1, imgs=3,
                    attach={"cursor-g-setup.zip": ZIP},

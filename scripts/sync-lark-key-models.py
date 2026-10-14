@@ -109,6 +109,10 @@ def main() -> int:
                     help="只刷这些 key_alias 的行（匹配飞书表的 key_alias 列）")
     ap.add_argument("--backup", metavar="PATH",
                     help="目标行原值落盘路径（默认 .tmp-lark/ 下带时间戳）")
+    ap.add_argument("--only-db-alias-file", metavar="PATH",
+                    help="一行一个 **DB 的** key_alias；按 hash 找到表里对应的行再刷。"
+                         "表里的 key_alias 列常与 DB 不同名（2026-10-14：545 个 DB alias "
+                         "按表列名只匹配上 41 行），批量改完 key 后同步用这个")
     args = ap.parse_args()
 
     db = read_litellm()
@@ -120,6 +124,27 @@ def main() -> int:
     baseline = {r["record_id"]: (r.get(MODELS_FIELD).strip()
                                  if isinstance(r.get(MODELS_FIELD), str) else "")
                 for r in rows}
+
+    if args.only and args.only_db_alias_file:
+        sys.exit("--only 与 --only-db-alias-file 二选一")
+    if args.only_db_alias_file:
+        wanted = {l.strip() for l in open(args.only_db_alias_file, encoding="utf-8")
+                  if l.strip() and not l.lstrip().startswith("#")}
+        by_alias = {r["alias"]: t for t, r in db.items() if r.get("alias") in wanted}
+        missing_db = sorted(wanted - set(by_alias))
+        if missing_db:
+            sys.exit(f"这些 DB alias 在 LiteLLM 库里查无此 key：{missing_db[:20]}")
+        tokens = set(by_alias.values())
+        def _tok(r):
+            k = r.get(KEY_FIELD)
+            return hashlib.sha256(k.strip().encode()).hexdigest() if isinstance(k, str) and k.strip() else None
+        rows = [r for r in rows if _tok(r) in tokens]
+        hit = {_tok(r) for r in rows}
+        no_row = sorted(a for a, t in by_alias.items() if t not in hit)
+        print(f"--only-db-alias-file 限定 {len(wanted)} 把 key，表里按 hash 匹配到 {len(rows)} 行"
+              f"（{len(hit)} 把 key 有行，{len(no_row)} 把表里没有行，不新增）")
+        if no_row:
+            print(f"  表里没有行的 key（前 15）：{no_row[:15]}")
 
     only = set(args.only or [])
     if only:

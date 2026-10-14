@@ -7,7 +7,7 @@ description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 
 
 > 实证：2026-09-10 生图全链路 + key 铺满；**2026-10-08/09 模型自动同步上线、改单文件、review 修 8 处**。
 > 档案：memory `project_codex_oneclick_imagegen_rollout_2026_09_10`、`project_codex_oneclick_models_autosync_2026_10_08`。
-> 用户文档：飞书《Codex一键配置》wiki `Q0pJwvdGiiMjHpk3487cyH33nTb` = docx `Ni2hdvtbgoqBFMxrAu5ckjPrnbg`。
+> 用户文档：飞书《Codex一键配置》wiki `Q0pJwvdGiiMjHpk3487cyH33nTb` = docx `Ni2hdvtbgoqBFMxrAu5ckjPrnbg` + 外部分享 `ZYNsdZCJIoCJEJxeMPGcl7jDn3f`(另两篇外部分享 10-13 已删);正文由 `scripts/agent-oneclick-docs/` 生成。
 > **同族**(2026-10-12 用户拍板:三个 agent 每人一把 cursor key 共用):
 > Cursor《一键配置》`OQCPdLd4MovEVoxGzdMcD3CJnCf` + `FapXdudPLoTTRLxWGJQcqITpn9g`(skill `cursor-client-bundle-patch`)、
 > Claude Code《一键配置》`MeLad7oMiobwf6xnpA2cWy0nnSg`(源 `claude-oneclick/`,结构照抄本目录的 `build.sh`)。
@@ -60,6 +60,10 @@ Desktop App 不由脚本装 ⇒ 文档第 3 节挂 dmg/msix。
 也**别再挂 zip / .ps1 / .py**——用户原话「不要增加那么多脚本，让用户一脸茫然」。
 
 ## 2. 生图那一段（脚本第 6 步）
+
+> 🔴 **10-13 本机回归抓到**:Codex 自己给 `carher_image.py` 传「.」当输出路径 ⇒ 旧逻辑写成隐藏文件 `..webp`;
+> 已改「给的是目录就在里面自动起名」。`codex exec` 不关 stdin 会挂在 `Reading additional input from stdin` ⇒ 一律 `< /dev/null`。
+> 在用户本机验安装器 = `config.toml` 被整份重写 ⇒ 先整目录 rsync 备份,验完还原 config/auth/chatgpt 三件 + 撤 LaunchAgent。
 
 > **10-13 起统一走 `muse-image`**(用户点名「画图都用 muse 那个工具」)。它返回**相对路径** `/v1/media/<32hex>.webp`,
 > 文件在 muse2api 上 ⇒ 198 nginx 加了只读出口 `https://cc.auto-link.com.cn/muse-media/<32hex>.<ext>`

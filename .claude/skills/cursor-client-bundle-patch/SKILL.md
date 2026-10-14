@@ -1,12 +1,12 @@
 # Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x;安装器跨平台,诊断/日志路径示例为 macOS)
 
-> **现行菜单 = 37 名**(2026-10-13,commit `297b176`)。cr-g 整段下架、claude 家族进段 ③;
+> **现行菜单 = 39 名**(2026-10-13 加 muse-spark / muse-image;37 名那轮 commit `297b176`)。cr-g 整段下架、claude 家族进段 ③;
 > std 改过一轮(32→35)后按用户「**只加非出图的**」补了 7 个文本名(claude-opus-4-8/4-7/4-6、
 > claude-sonnet-4-6、gemini-3.8-flash、grok-4.3、grok-build-0.1,实打全过)。没进:出图名一概不进;
 > `deepseek-v4.1-flash` 出字 4/6(失败率 33%)。菜单有而 std 没有的 7 个(`gpt-5.2` `gpt-5.4`
 > `composer-2.5` `deepseek-v4-flash` `grok-4.20-0309-reasoning` `grok-4.5-latest` `grok-4.6-latest`)
 > 同事 key 正常、std 点了 403 —— std 是实验 key,**「对齐 std」≠「同事能用」**,改菜单前先逐名实打。
-> 两篇飞书文档都是同一版;**改完文档/附件一律跑 `python3 scripts/agent-oneclick-docs-audit.py`**
+> 两篇飞书文档都是同一版,正文由 `scripts/agent-oneclick-docs/`(bodies.py + apply.py --all)生成;**改完文档/附件一律跑 `python3 scripts/agent-oneclick-docs-audit.py`**
 > (附件回环 sha + 两篇正文逐字相同 + 陈旧词 0,三个 agent 的文档一起验)。
 > ⛔ `grok-4.20-multi-agent` 别进菜单:官方不支持 function calling,带 tools 必兜到 deepseek 作答;std 已摘。
 
@@ -37,6 +37,28 @@
 `@cx-queue-pump:v4`(兜底泵)+ qserial / nosteer-mod / nopromote(排队纵深防御,`nopromote` 是 multi)+
 **`@cxteam-norelay`(2026-08-25 连发折叠+僵尸真根因修)**。
 2026-09-23 加到 **10 处**:`@cxteam-nocloud` / `@cxteam-nocloudset`(见下「会话被改道去 Cloud Agents」)。
+
+## 菜单里冒出 Cursor 自带模型(claude-fable-5-1 等,2026-10-14)
+
+显示规则(workbench 原文)`enabled.includes(n) || (!disabled.includes(n) && defaultOn)` ⇒ 服务端目录
+`availableDefaultModels2` 里 defaultOn 的自家模型,我们没登记也会显示;同事点了走 Cursor 自家推理
+(免费号报 Free plans can only use Auto / does not support custom API keys)。
+修:mergeConfig 把「defaultOn 且不在本方案清单」的名字写进 `modelOverrideDisabled`(`default`=Auto 不动,
+用户自己关的保留)。js/py 同步,retire 台架 ⑫ 带阳性对照。服务端会继续加新 defaultOn 模型 ⇒ UPGRADE 每次重算。
+⚠ 安装器检测到 Cursor 在跑会拒绝,连 `CURSOR_USER_DIR` 指副本也拒 ⇒ 离线验证直接调 py 的 `merge_config` 打副本。
+
+## 升级锁默认开 / 8788 被占的解法(2026-10-14)
+
+- INSTALL/UPGRADE/REPAIR 默认写 `update.mode=none`、`update.enableWindowsBackgroundUpdates=false`、
+  `cursor.agentHost.updateMode=none`(`--allow-update` 放开);自动升级会冲掉全部补丁。
+- REMOTE-SSH 报「远端 8788 被占」的 b 方案改成「退出 Cursor → 双击 TURN-OFF-DELTA」,不再让用户手填网关地址。
+- 3.24 删了 keytar ⇒ 新装机自动写 Key 失败时提示「还差一步」:Settings → Models → OpenAI API Key 粘贴 → Verify。
+
+## Windows .cmd 三条硬规矩(2026-10-13,同事实机满屏「不是内部或外部命令」)
+
+cmd 按字节偏移逐行续读 ⇒ `.cmd` 里**非 ASCII、只有 LF、双击启动器里 chcp** 都会让后续行从半截读。
+中文与交互全放 JS(`cursor_remote_ssh.js --wizard`),`.cmd` 纯 ASCII+CRLF;打包脚本门禁拦这三样。
+wizard 用单个 readline 排队读行(每问新开 interface 会丢缓冲里的后几行)。
 
 ## 服务端灰度 cursor_agent_host ⇒ BYOK 报 custom API keys(2026-10-13,@cxteam-noagenthost)
 

@@ -38,9 +38,13 @@ callback 的 counts 和请求形状里。
 | ``counts={}`` 紧跟 400 | 网关没动手，是**客户端载荷**问题 | — |
 | ``reasoning_insert: N`` 紧跟 400 | 网关**自己插的**，见并行块配对 | 0ea2d71/b72e4ea |
 | ``completion_tokens`` 卡在某个整数反复重试 | 客户端 max_output_tokens 太小被截断 | 客户端侧 |
-| 400 ``reasoning_content ... must be passed back`` / ``response_format ... unavailable`` | /responses 打到 mode:chat 组走 bridge | e291064（加 -responses 改写）|
+| 400 ``reasoning_content ... must be passed back``（aresponses）/ ``response_format ... unavailable`` | /responses 打到 mode:chat 组走 bridge | e291064（加 -responses 改写）|
+| 400 ``reasoning_content ... must be passed back``（acompletion）| OpenAI 形客户端回放工具历史不带 reasoning_content | db186fd（chat 路径每条补占位）|
 
-相关：``~/.claude/skills/codex-deepseek-tool-triage/SKILL.md``
+    # 全站近 24h 失败按「组 × 调用类型 × 签名」聚合 + 每个签名的受影响 key（SpendLogs，只读）
+    python3 scripts/codex-deepseek-triage.py --only sigs --since 24h
+
+相关：``.claude/skills/codex-deepseek-tool-triage/SKILL.md``
 """
 from __future__ import annotations
 
@@ -69,6 +73,8 @@ COUNT_MEANING = {
     "reasoning_between_calls_drop": ("删了并行块中间的 reasoning（正常）", False),
     "tool_choice_unwrapped": ("tool_choice 对象拆成裸串（正常，8d891d0）", False),
     "tool_choice_force_dropped": ("强制类 tool_choice 已删（正常）", False),
+    "chat_reasoning_content_fill": ("chat 工具轮补了占位 reasoning_content（正常，db186fd）", False),
+    "chat_reasoning_content_restore": ("chat 从 provider_specific_fields 还原 reasoning_content（正常）", False),
 }
 
 
@@ -167,8 +173,10 @@ GROUP BY 1 ORDER BY n DESC LIMIT 10;
 # 上游原文片段 -> (人话根因, 修法)。用户只看得到「API 异常 (req: xxx)」，原文在 SpendLogs。
 ERROR_SIGNATURES = [
     ("reasoning_content` in the thinking mode must be passed back",
-     "chat 组上的工具历史缺 reasoning_content（/responses 进 chat 组时由 bridge 转换）",
-     "确认该组在 deepseek_responses_adapt._RESPONSES_GROUP_REWRITE 里有 -responses 映射（本脚本 groups 节）"),
+     "带 tool_calls 的 assistant 没回传 reasoning_content。call_type=acompletion ⇒ VS Code/Cursor 等"
+     "OpenAI 形客户端回放历史本来就不带（db186fd 起网关每条补占位）；aresponses ⇒ /responses 进了 chat 组",
+     "acompletion：日志应有 chat_reasoning_content_fill，没有 ⇒ 部署 api_base 不是 api.deepseek.com"
+     "或 callback 没上；aresponses：查 _RESPONSES_GROUP_REWRITE（groups 节）"),
     ("response_format type is unavailable",
      "text.format 经 bridge 译成 chat response_format，DeepSeek 不收",
      "同上：responses 调用要走原生 -responses 组"),
@@ -204,6 +212,45 @@ WHERE s.\\"request_id\\" LIKE '{rid}%' AND s.\\"startTime\\" > NOW() - INTERVAL 
     for sig, why, fix in ERROR_SIGNATURES:
         if sig in out:
             print(f"\n  命中签名：{sig}\n  根因：{why}\n  修法：{fix}")
+
+
+def _psql(sql: str, flags: str = "-At -F ' | '") -> str:
+    """SQL 走 base64 进 pod 再 psql -f，避开三层 shell 引号（2026-10-14 手写转义连错两次）。"""
+    b64 = base64.b64encode(sql.encode()).decode()
+    return _ssh(f"echo {b64} | base64 -d | kubectl -n {NS} exec -i litellm-db-0 -- "
+                f"psql -U litellm -d litellm {flags} -f -", timeout=300)
+
+
+def section_sigs(since_min: int) -> None:
+    """全站 deepseek 组失败按 组×call_type×签名 聚合，再列每个签名的受影响 key。"""
+    print(f"\n=== deepseek 失败签名（SpendLogs 近 {since_min} 分钟）===")
+    win = f"\"startTime\" > now() - interval '{since_min} minutes'"
+    sql = f"""
+set statement_timeout='120s';
+select 'MIN_START', min("startTime")::text, '', '' from "LiteLLM_SpendLogs";
+select model_group, call_type,
+       left(regexp_replace(coalesce(metadata->'error_information'->>'error_message','?'),
+            '\\(request_id[^)]*\\)|No fallback model group.*$','','g'),130), count(*)
+from "LiteLLM_SpendLogs"
+where {win} and status='failure' and model_group ilike '%deepseek%'
+group by 1,2,3 order by 4 desc limit 20;
+select 'KEY', coalesce(v.key_alias,'?'), left(s.metadata->'error_information'->>'error_message',60), count(*)
+from "LiteLLM_SpendLogs" s left join "LiteLLM_VerificationToken" v on v.token=s.api_key
+where s.{win} and s.status='failure' and s.model_group ilike '%deepseek%'
+  and s.metadata->'error_information'->>'error_message' like '%must be passed back%'
+group by 2,3 order by 4 desc limit 20;
+"""
+    out = _psql(sql)
+    if not out.strip() or "ERROR:" in out:
+        print("  ⛔ 查询失败或空返回 —— 量具坏了，不当「零失败」\n" + out)
+        return
+    for line in out.splitlines():
+        if line.startswith("MIN_START"):
+            print(f"  SpendLogs 最早一行 = {line.split(' | ')[1]}（早于它的「零失败」是表被清空，不是没出事）")
+        elif line.startswith("KEY"):
+            print("  key  " + line[6:])
+        else:
+            print("  " + line)
 
 
 def _rewrite_table() -> dict:
@@ -262,7 +309,7 @@ def main() -> int:
     ap.add_argument("--since", default="30m", help="日志窗口，如 30m / 2h（默认 30m）")
     ap.add_argument("--key", help="只看某个 key_alias")
     ap.add_argument("--rid", help="用户报错里的 req id（API 异常 (req: xxxx)），反查原文 + 签名")
-    ap.add_argument("--only", choices=["counts", "errors", "shape", "spend", "groups"],
+    ap.add_argument("--only", choices=["counts", "errors", "shape", "spend", "groups", "sigs"],
                     help="只跑某一节")
     a = ap.parse_args()
 
@@ -280,6 +327,9 @@ def main() -> int:
 
     if a.only == "spend":
         section_spend(a.key, since_min)
+        return 0
+    if a.only == "sigs":
+        section_sigs(since_min)
         return 0
 
     log = _logs(a.since)

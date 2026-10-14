@@ -10,6 +10,8 @@ description: >-
   Use when: Codex/Cursor 打 deepseek-v4-flash-responses 出现 DSML 裸文本 /
   工具名对不上声明 / 工具不执行 / compaction Fatal / stream disconnected；
   or Codex 打任何 deepseek 名字报 400「API 异常 (req: xxx)」（`--rid` 反查原文）；
+  or VS Code / Cursor（chat 接口）打 deepseek 带工具历史报 400 / `502 Request Failed: 400`、
+  「新消息正常 try again 就挂」（根因 5，`--only sigs` 看全站谁中招）；
   or 排查任何「HTTP 200 但客户端行为不对」的网关问题需要方法论。
 ---
 
@@ -28,7 +30,8 @@ description: >-
 | 工具调用正常出来了，但客户端执行不了 | 客户端声明 `custom`，收到 `function_call` 认不出 | 出站还原 `custom_tool_call`（`090a1d7`）|
 | `remote compaction v2 expected exactly one compaction output item, got 0` | DeepSeek 忽略 `compaction_trigger`，回的是 `reasoning`+`message` | 入站换摘要指令 + 出站包 compaction（`f6a038f`）|
 | `stream disconnected: Incomplete response, reason: max_output_tokens` | **客户端**发的 `max_output_tokens` 装不下摘要 | 客户端侧，见下节 |
-| 400「API 异常」，原文 `reasoning_content ... must be passed back` 或 `response_format type is unavailable` | Codex 打的名字是 **mode:chat 组**，请求走 responses→chat bridge：转换时丢 reasoning、把 `text.format` 译成 chat 的 `response_format` | 建 `<名>-responses` 原生组 + `_RESPONSES_GROUP_REWRITE` 加映射（`e291064`，见「根因 4」）|
+| 400「API 异常」，原文 `reasoning_content ... must be passed back` 或 `response_format type is unavailable`，**call_type=aresponses** | Codex 打的名字是 **mode:chat 组**，请求走 responses→chat bridge：转换时丢 reasoning、把 `text.format` 译成 chat 的 `response_format` | 建 `<名>-responses` 原生组 + `_RESPONSES_GROUP_REWRITE` 加映射（`e291064`，见「根因 4」）|
+| 同一句 `reasoning_content ... must be passed back`，**call_type=acompletion**（VS Code / Cursor 走 chat）；新会话正常、带工具历史的 try again 必挂 | OpenAI 形客户端回放历史**从不带** `reasoning_content`；DeepSeek 要求**每条**带 `tool_calls` 的 assistant 都有 | chat 路径每条补占位（`db186fd`，见「根因 5」）|
 
 ## 根因 4：responses 请求打进了 chat 组（2026-10-10）
 
@@ -50,6 +53,39 @@ description: >-
 新建组后必跑 `--only groups`：列出所有官方 chat 组，`⚠ 无改写` 的就是下一个坑
 （10-10 时 `deepseek-official-v4-flash` 是 ⚠，但 7 天零 responses 流量，暂不处理）。
 ⚠️ 改写只对 `/v1/responses` 生效，chat / anthropic 流量不受影响；key 白名单校验用的是入站名，不用补。
+
+## 根因 5：chat 路径工具历史缺 reasoning_content（2026-10-14）
+
+用户报「新消息正常、try again 报 `502 Request Failed: 400`」。全站 24h 95 次，一个 VS Code 用户就占 76 次。
+**这个病 08-04 就记过**（`feedback_deepseek_pairs_tool_calls_by_adjacency` 末节：「chat 侧没有对应的补丁」），
+当时只修了 responses 那条路，chat 这条两个月没人补。建 DeepSeek 组先翻那条记忆。
+
+经 198 打 `deepseek-v4.1-flash`（`custom_openai/deepseek-flash` @ api.deepseek.com）的单变量实测：
+
+| assistant 消息形状 | 结果 |
+|---|---|
+| 带 tool_calls、无 reasoning_content | 400 |
+| 带 tool_calls、`reasoning_content=" "` 或 `""` | 200 |
+| 两轮工具，只有一轮带 | **400**（跟 responses「每轮开头补」不一样：chat 要**每条**都带）|
+| 普通回复（无 tool_calls）不带 | 200（不用补）|
+| 去掉 `tool_calls[].type` | 200（外部同事据此判成「type 被拒」——**相关但不是原因**，上游原话是缺 reasoning_content；为何能过没查，别当修法）|
+
+**LiteLLM 自带补丁为什么没救**：`DeepSeekChatConfig._fill_reasoning_content` 有两道门，这里都过不去：
+① 组是 `custom_openai/` 前缀，走的是 `OpenAILikeChatConfig`，根本不进 DeepSeek 配置；
+② 就算进了，`_thinking_mode_active` 还要客户端显式传 `thinking={"type":"enabled"}`，VS Code 不传。
+
+**修法**：`deepseek_responses_adapt.async_pre_call_deployment_hook` 加 chat 分支 `_adapt_chat`，
+门控 = model 含 deepseek **且** `api_base` 含 `api.deepseek.com`（自建 GPU / 网宿不碰）。
+有 `provider_specific_fields.reasoning_content` 就还原，否则补 `" "`。日志计数 `chat_reasoning_content_fill`。
+单测 `tests/test_deepseek_chat_reasoning_content_fill.py`（9 条）。
+
+**验收方法**（照抄）：隔离环境 = 生产 pod 里起一个独立 `litellm.Router`，**同一份**载荷先过旧 callback 再过新 callback，
+key 从 `LiteLLM_ProxyModelTable` 密文行在 pod 内解密（`/model/info` 不回 api_key）；
+**第一格必须是不带工具的阳性对照**，它不是 200 整轮作废（10-14 第一次跑全 500，就是 key 没解出来）。
+上线后经 NodePort 按「1轮/2轮/并行 × 流式/非流式」各 8 发，再逐副本数日志里的 fill 计数。
+
+⚠️ 上线后再数失败，**先剔掉自己的探针**：SpendLogs 里 `api_key` 关联不到 key_alias（master key）且时间在新 pod
+`startTime` 之前的，是你自己上线前的复现请求，不是「修了还在挂」。
 
 ## 根因 1：Codex responses-lite 把工具塞在 input 里
 
@@ -209,6 +245,7 @@ python3 scripts/codex-deepseek-triage.py            # 默认 30 分钟窗口
 python3 scripts/codex-deepseek-triage.py --since 2h --key cursor-liyun1-t6xm
 python3 scripts/codex-deepseek-triage.py --rid 36ece9a2    # 用户只给了 req id
 python3 scripts/codex-deepseek-triage.py --only groups     # chat 组 × 改写覆盖
+python3 scripts/codex-deepseek-triage.py --only sigs --since 24h  # 全站失败按 组×call_type×签名 + 受影响 key
 ```
 
 🔴 pod 日志只保留几分钟，用户报错几十分钟后再 grep 一定零命中。直接用 `--rid` 查 SpendLogs。

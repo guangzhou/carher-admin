@@ -1,0 +1,1184 @@
+diff -ruN '--exclude=target' '--exclude=node_modules' '--exclude=dist' '--exclude=.git' kiro.rs/src/anthropic/converter.rs kiro-ws/src/anthropic/converter.rs
+--- kiro.rs/src/anthropic/converter.rs	2026-10-02 14:36:59.668436280 +0800
++++ kiro-ws/src/anthropic/converter.rs	2026-10-15 01:40:55.000000000 +0800
+@@ -656,6 +656,19 @@
+     tools
+         .iter()
+         .map(|t| {
++            // 服务端搜索工具（web_search_20250305 / web_search）没有 input_schema，
++            // 原样塞给 Kiro 会 400 "Invalid tool use format"。换成带 query 的普通函数工具，
++            // 由 websearch::agentic 拦截模型的调用、调 MCP 搜完再把结果交回模型。
++            if super::websearch::is_server_web_search_tool(t) {
++                return Tool {
++                    tool_specification: ToolSpecification {
++                        name: super::websearch::WEB_SEARCH_TOOL_NAME.to_string(),
++                        description: super::websearch::WEB_SEARCH_TOOL_DESCRIPTION.to_string(),
++                        input_schema: InputSchema::from_json(super::websearch::web_search_input_schema()),
++                    },
++                };
++            }
++
+             let mut description = t.description.clone();
+ 
+             // 对 Write/Edit 工具追加自定义描述后缀
+@@ -889,6 +902,16 @@
+                                 tool_uses.push(ToolUseEntry::new(id, mapped_name).with_input(input));
+                             }
+                         }
++                        // 上一轮服务端搜索的回显块：srvtoolu id 从未进过 Kiro 历史，
++                        // 不能还原成 toolUse/toolResult（会破坏配对），拍平成文本让模型看得到搜过什么
++                        "server_tool_use" | "web_search_tool_result" => {
++                            if let Some(flat) = super::websearch::flatten_server_block(item) {
++                                if !text_content.is_empty() {
++                                    text_content.push_str("\n\n");
++                                }
++                                text_content.push_str(&flat);
++                            }
++                        }
+                         _ => {}
+                     }
+                 }
+diff -ruN '--exclude=target' '--exclude=node_modules' '--exclude=dist' '--exclude=.git' kiro.rs/src/anthropic/handlers.rs kiro-ws/src/anthropic/handlers.rs
+--- kiro.rs/src/anthropic/handlers.rs	2026-10-02 14:34:55.703892592 +0800
++++ kiro-ws/src/anthropic/handlers.rs	2026-10-15 01:47:44.000000000 +0800
+@@ -25,10 +25,11 @@
+ use super::middleware::AppState;
+ use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
+ use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
++use super::search_loop;
+ use super::websearch;
+ 
+ /// 将 KiroProvider 错误映射为 HTTP 响应
+-fn map_provider_error(err: Error) -> Response {
++pub(crate) fn map_provider_error(err: Error) -> Response {
+     let err_str = err.to_string();
+ 
+     // 上下文窗口满了（对话历史累积超出模型上下文窗口限制）
+@@ -396,7 +397,14 @@
+     // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
+     override_thinking_from_model_name(&mut payload);
+ 
+-    // 检查是否为 WebSearch 请求
++    // 带服务端搜索工具、且不是 Claude Code 的 WebSearch 子请求 ⇒ 服务端搜索回合
++    if websearch::has_server_web_search(&payload)
++        && !websearch::is_claude_code_search_subrequest(&payload)
++    {
++        return search_loop::handle_search_loop(provider, payload, state.extract_thinking).await;
++    }
++
++    // Claude Code 的 WebSearch 子请求：直接返回原始搜索结果
+     if websearch::has_web_search_tool(&payload) {
+         tracing::info!("检测到 WebSearch 工具，路由到 WebSearch 处理");
+ 
+@@ -911,7 +919,14 @@
+     // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
+     override_thinking_from_model_name(&mut payload);
+ 
+-    // 检查是否为 WebSearch 请求
++    // 带服务端搜索工具、且不是 Claude Code 的 WebSearch 子请求 ⇒ 服务端搜索回合
++    if websearch::has_server_web_search(&payload)
++        && !websearch::is_claude_code_search_subrequest(&payload)
++    {
++        return search_loop::handle_search_loop(provider, payload, state.extract_thinking).await;
++    }
++
++    // Claude Code 的 WebSearch 子请求：直接返回原始搜索结果
+     if websearch::has_web_search_tool(&payload) {
+         tracing::info!("检测到 WebSearch 工具，路由到 WebSearch 处理");
+ 
+diff -ruN '--exclude=target' '--exclude=node_modules' '--exclude=dist' '--exclude=.git' kiro.rs/src/anthropic/mod.rs kiro-ws/src/anthropic/mod.rs
+--- kiro.rs/src/anthropic/mod.rs	2026-09-12 00:18:22.712644920 +0800
++++ kiro-ws/src/anthropic/mod.rs	2026-10-15 01:47:44.000000000 +0800
+@@ -26,6 +26,7 @@
+ mod handlers;
+ mod middleware;
+ mod router;
++mod search_loop;
+ mod stream;
+ pub mod types;
+ mod websearch;
+diff -ruN '--exclude=target' '--exclude=node_modules' '--exclude=dist' '--exclude=.git' kiro.rs/src/anthropic/search_loop.rs kiro-ws/src/anthropic/search_loop.rs
+--- kiro.rs/src/anthropic/search_loop.rs	1970-01-01 08:00:00.000000000 +0800
++++ kiro-ws/src/anthropic/search_loop.rs	2026-10-15 01:49:26.000000000 +0800
+@@ -0,0 +1,832 @@
++//! 服务端搜索回合（server-side web_search agentic loop）
++//!
++//! 请求带 Anthropic 服务端搜索工具（`web_search_20250305` / Responses 桥过来的 `web_search`）时，
++//! Kiro 本身不认这类工具（原样转发会 400 "Invalid tool use format"）。
++//! 这里把它当普通函数工具交给模型（`converter::convert_tools` 已改写成带 query 的 schema），
++//! 模型调用 web_search 时由本模块用 Kiro MCP 搜索，结果作为 tool_result 交回模型继续生成，
++//! 直到模型给出回答或调用客户端工具。
++//!
++//! 客户端看到的是 Anthropic 原生的 `server_tool_use` + `web_search_tool_result` 块，
++//! 永远看不到需要自己执行的 web_search tool_use。
++//!
++//! 第一版整轮缓冲：所有回合跑完再一次性输出。流式请求先发 message_start，
++//! 等待期间每 25s 发 ping 保活，最后一次性发完所有内容块。
++
++use std::collections::HashMap;
++use std::convert::Infallible;
++use std::sync::Arc;
++use std::time::Duration;
++
++use axum::{
++    body::Body,
++    http::{StatusCode, header},
++    response::{IntoResponse, Json, Response},
++};
++use bytes::Bytes;
++use futures::{Stream, StreamExt, stream};
++use serde_json::{Value, json};
++use tokio::time::interval;
++use uuid::Uuid;
++
++use crate::kiro::model::events::Event;
++use crate::kiro::model::requests::kiro::KiroRequest;
++use crate::kiro::parser::decoder::EventStreamDecoder;
++use crate::kiro::provider::KiroProvider;
++use crate::token;
++
++use super::converter::{ConversionError, convert_request, get_context_window_size};
++use super::stream::{SseEvent, extract_thinking_from_complete_text};
++use super::types::{ErrorResponse, Message, MessagesRequest};
++use super::websearch;
++
++/// 没声明 max_uses 时每个请求最多搜几次
++const DEFAULT_MAX_USES: i32 = 5;
++/// max_uses 的硬上限（客户端声明再大也按这个封顶）
++const HARD_MAX_USES: i32 = 10;
++/// 最多调几轮模型（含最后作答那轮）
++const MAX_ROUNDS: usize = 8;
++const PING_INTERVAL_SECS: u64 = 25;
++
++/// 模型一轮的产出
++#[derive(Debug, Default)]
++pub(crate) struct Turn {
++    pub text: String,
++    pub tool_calls: Vec<ToolCall>,
++    /// 上游给出的非常规 stop_reason（max_tokens / model_context_window_exceeded）
++    pub stop_reason: Option<String>,
++    pub context_input_tokens: Option<i32>,
++}
++
++#[derive(Debug, Clone)]
++pub(crate) struct ToolCall {
++    pub id: String,
++    pub name: String,
++    pub input: Value,
++}
++
++/// 整个回合循环的输出（最终交给客户端的 message）
++#[derive(Debug)]
++pub(crate) struct LoopOutput {
++    pub content: Vec<Value>,
++    pub stop_reason: String,
++    pub input_tokens: i32,
++    pub output_tokens: i32,
++    pub searches: i32,
++}
++
++/// 入口：handlers 在检测到服务端搜索工具时调用
++pub async fn handle_search_loop(
++    provider: Arc<KiroProvider>,
++    payload: MessagesRequest,
++    extract_thinking_cfg: bool,
++) -> Response {
++    let estimated_input = token::count_all_tokens(
++        payload.model.clone(),
++        payload.system.clone(),
++        payload.messages.clone(),
++        payload.tools.clone(),
++    ) as i32;
++    let thinking_enabled = payload
++        .thinking
++        .as_ref()
++        .map(|t| t.is_enabled())
++        .unwrap_or(false);
++    // 与普通路径一致：流式恒提取 thinking，非流式看配置
++    let extract_thinking = thinking_enabled && (payload.stream || extract_thinking_cfg);
++
++    tracing::info!(
++        model = %payload.model,
++        stream = payload.stream,
++        "检测到服务端 web_search 工具，进入搜索回合"
++    );
++
++    // 第一轮在返回响应之前调，上游错误能以 HTTP 状态码交给 LiteLLM（照常走兜底）
++    let (body, tool_name_map) = match build_body(&payload) {
++        Ok(x) => x,
++        Err(resp) => return resp,
++    };
++    let first = match provider.call_api(&body).await {
++        Ok(resp) => resp,
++        Err(e) => return super::handlers::map_provider_error(e),
++    };
++
++    let model = payload.model.clone();
++    let stream_mode = payload.stream;
++    let message_id = format!("msg_{}", Uuid::new_v4().to_string().replace('-', ""));
++    let fut = run_loop(provider, payload, first, tool_name_map, extract_thinking, estimated_input);
++
++    if !stream_mode {
++        let out = fut.await;
++        return (StatusCode::OK, Json(to_message_json(&message_id, &model, &out))).into_response();
++    }
++
++    let (tx, rx) = tokio::sync::oneshot::channel();
++    tokio::spawn(async move {
++        let _ = tx.send(fut.await);
++    });
++    let start = message_start_event(&message_id, &model, estimated_input);
++    let body_stream = buffered_sse(start, rx);
++    Response::builder()
++        .status(StatusCode::OK)
++        .header(header::CONTENT_TYPE, "text/event-stream")
++        .header(header::CACHE_CONTROL, "no-cache")
++        .header(header::CONNECTION, "keep-alive")
++        .body(Body::from_stream(body_stream))
++        .unwrap()
++}
++
++/// MessagesRequest → Kiro 请求体（错误映射与 handlers 一致）
++fn build_body(payload: &MessagesRequest) -> Result<(String, HashMap<String, String>), Response> {
++    let conversion = convert_request(payload).map_err(|e| {
++        let (error_type, message) = match &e {
++            ConversionError::UnsupportedModel(model) => {
++                ("invalid_request_error", format!("模型不支持: {}", model))
++            }
++            ConversionError::EmptyMessages => ("invalid_request_error", "消息列表为空".to_string()),
++        };
++        tracing::warn!("请求转换失败: {}", e);
++        (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(error_type, message))).into_response()
++    })?;
++    let kiro_request = KiroRequest {
++        conversation_state: conversion.conversation_state,
++        profile_arn: None,
++    };
++    let body = serde_json::to_string(&kiro_request).map_err(|e| {
++        (
++            StatusCode::INTERNAL_SERVER_ERROR,
++            Json(ErrorResponse::new("internal_error", format!("序列化请求失败: {}", e))),
++        )
++            .into_response()
++    })?;
++    Ok((body, conversion.tool_name_map))
++}
++
++/// 解析一轮完整的 Kiro 事件流
++pub(crate) fn parse_turn(body: &[u8], model: &str, tool_name_map: &HashMap<String, String>) -> Turn {
++    let mut decoder = EventStreamDecoder::new();
++    if let Err(e) = decoder.feed(body) {
++        tracing::warn!("缓冲区溢出: {}", e);
++    }
++    let mut turn = Turn::default();
++    // 按首次出现顺序保留工具调用
++    let mut order: Vec<String> = Vec::new();
++    let mut buffers: HashMap<String, (String, String)> = HashMap::new();
++
++    for result in decoder.decode_iter() {
++        let Ok(frame) = result else { continue };
++        let Ok(event) = Event::from_frame(frame) else { continue };
++        match event {
++            Event::AssistantResponse(resp) => turn.text.push_str(&resp.content),
++            Event::ToolUse(tu) => {
++                let entry = buffers.entry(tu.tool_use_id.clone()).or_insert_with(|| {
++                    order.push(tu.tool_use_id.clone());
++                    (tu.name.clone(), String::new())
++                });
++                entry.1.push_str(&tu.input);
++            }
++            Event::ContextUsage(cu) => {
++                let window = get_context_window_size(model);
++                turn.context_input_tokens =
++                    Some((cu.context_usage_percentage * (window as f64) / 100.0) as i32);
++                if cu.context_usage_percentage >= 100.0 {
++                    turn.stop_reason = Some("model_context_window_exceeded".to_string());
++                }
++            }
++            Event::Exception { exception_type, .. } => {
++                if exception_type == "ContentLengthExceededException" {
++                    turn.stop_reason = Some("max_tokens".to_string());
++                }
++            }
++            _ => {}
++        }
++    }
++
++    for id in order {
++        let (name, buf) = buffers.remove(&id).unwrap_or_default();
++        let input = if buf.is_empty() {
++            json!({})
++        } else {
++            serde_json::from_str(&buf).unwrap_or_else(|e| {
++                tracing::warn!("工具输入 JSON 解析失败: {}, tool_use_id: {}", e, id);
++                json!({})
++            })
++        };
++        let name = tool_name_map.get(&name).cloned().unwrap_or(name);
++        turn.tool_calls.push(ToolCall { id, name, input });
++    }
++    turn
++}
++
++fn search_query(call: &ToolCall) -> Option<String> {
++    call.input
++        .get("query")
++        .and_then(|q| q.as_str())
++        .map(|q| q.trim().to_string())
++        .filter(|q| !q.is_empty())
++}
++
++/// 回合循环本体。第一轮的上游响应由调用方先拿到（以便错误能映射成 HTTP 状态码）。
++async fn run_loop(
++    provider: Arc<KiroProvider>,
++    mut payload: MessagesRequest,
++    first: reqwest::Response,
++    mut tool_name_map: HashMap<String, String>,
++    extract_thinking: bool,
++    estimated_input: i32,
++) -> LoopOutput {
++    let max_uses = websearch::server_web_search_max_uses(&payload)
++        .unwrap_or(DEFAULT_MAX_USES)
++        .clamp(1, HARD_MAX_USES);
++    let mut out = LoopOutput {
++        content: Vec::new(),
++        stop_reason: "end_turn".to_string(),
++        input_tokens: estimated_input,
++        output_tokens: 0,
++        searches: 0,
++    };
++    let mut pending = Some(first);
++    let mut finished = false;
++
++    for round in 0..MAX_ROUNDS {
++        let response = match pending.take() {
++            Some(r) => r,
++            None => {
++                let (body, map) = match build_body(&payload) {
++                    Ok(x) => x,
++                    Err(_) => {
++                        push_note(&mut out, "(Failed to continue after web search.)");
++                        break;
++                    }
++                };
++                tool_name_map = map;
++                match provider.call_api(&body).await {
++                    Ok(r) => r,
++                    Err(e) => {
++                        tracing::warn!(round, "搜索回合续调上游失败: {}", e);
++                        push_note(&mut out, "(The model call after web search failed; partial results above.)");
++                        break;
++                    }
++                }
++            }
++        };
++        let bytes = match response.bytes().await {
++            Ok(b) => b,
++            Err(e) => {
++                tracing::warn!(round, "读取搜索回合响应失败: {}", e);
++                push_note(&mut out, "(Reading the model response failed.)");
++                break;
++            }
++        };
++        let turn = parse_turn(&bytes, &payload.model, &tool_name_map);
++        let step = apply_turn(&mut out, turn, extract_thinking, max_uses);
++
++        match step {
++            Step::Done => {
++                finished = true;
++                break;
++            }
++            Step::Searched { searches, assistant_blocks, user_results } => {
++                let results = futures::future::join_all(searches.iter().map(|s| {
++                    let provider = provider.clone();
++                    let query = s.query.clone();
++                    async move {
++                        match query {
++                            Some(q) => Some(websearch::run_search(&provider, &q).await),
++                            None => None,
++                        }
++                    }
++                }))
++                .await;
++                let mut user_results = user_results;
++                for (s, r) in searches.iter().zip(results) {
++                    let text = match (&s.query, r) {
++                        (Some(q), Some((srv_id, res))) => {
++                            let (a, b) = websearch::build_server_blocks(&srv_id, q, &res);
++                            out.content.push(a);
++                            out.content.push(b);
++                            websearch::format_results_for_model(q, &res)
++                        }
++                        _ => s.refusal.clone(),
++                    };
++                    user_results.push(json!({
++                        "type": "tool_result",
++                        "tool_use_id": s.call_id,
++                        "content": text
++                    }));
++                }
++                payload.messages.push(Message {
++                    role: "assistant".to_string(),
++                    content: Value::Array(assistant_blocks),
++                });
++                payload.messages.push(Message {
++                    role: "user".to_string(),
++                    content: Value::Array(user_results),
++                });
++                // 只在第一轮尊重客户端的 tool_choice（例如强制搜索），否则会每轮都被逼着搜
++                payload.tool_choice = None;
++            }
++            Step::SearchedThenClientTools { searches } => {
++                // 同一轮里既搜索又调客户端工具：搜索照常执行并以服务端块交给客户端，
++                // 客户端工具 tool_use 已在 out.content 里，本轮以 tool_use 结束（下一轮历史会带回搜索结果）
++                let results = futures::future::join_all(searches.iter().map(|s| {
++                    let provider = provider.clone();
++                    let query = s.query.clone();
++                    async move {
++                        match query {
++                            Some(q) => Some(websearch::run_search(&provider, &q).await),
++                            None => None,
++                        }
++                    }
++                }))
++                .await;
++                let mut blocks = Vec::new();
++                for (s, r) in searches.iter().zip(results) {
++                    if let (Some(q), Some((srv_id, res))) = (&s.query, r) {
++                        let (a, b) = websearch::build_server_blocks(&srv_id, q, &res);
++                        blocks.push(a);
++                        blocks.push(b);
++                    }
++                }
++                // 服务端块插在客户端 tool_use 之前，符合"先搜后调工具"的阅读顺序
++                let first_tool = out
++                    .content
++                    .iter()
++                    .position(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
++                    .unwrap_or(out.content.len());
++                drop(out.content.splice(first_tool..first_tool, blocks));
++                finished = true;
++                break;
++            }
++        }
++    }
++
++    if !finished {
++        tracing::warn!(searches = out.searches, "搜索回合达到轮数上限，提前结束");
++        if !out
++            .content
++            .iter()
++            .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
++        {
++            push_note(&mut out, "(Stopped after the maximum number of web search rounds.)");
++        }
++    }
++    out
++}
++
++fn push_note(out: &mut LoopOutput, note: &str) {
++    out.content.push(json!({"type": "text", "text": note}));
++}
++
++#[derive(Debug)]
++pub(crate) struct PlannedSearch {
++    pub call_id: String,
++    /// None = 不执行（缺 query 或超出 max_uses），tool_result 用 refusal
++    pub query: Option<String>,
++    pub refusal: String,
++}
++
++#[derive(Debug)]
++pub(crate) enum Step {
++    /// 模型给出了回答或只调了客户端工具：结束
++    Done,
++    /// 模型只调了搜索：执行后续调下一轮
++    Searched {
++        searches: Vec<PlannedSearch>,
++        assistant_blocks: Vec<Value>,
++        user_results: Vec<Value>,
++    },
++    /// 模型同一轮既搜索又调客户端工具：执行搜索后结束
++    SearchedThenClientTools { searches: Vec<PlannedSearch> },
++}
++
++/// 把一轮产出并入输出，并决定下一步（纯函数，便于单测）
++pub(crate) fn apply_turn(out: &mut LoopOutput, turn: Turn, extract_thinking: bool, max_uses: i32) -> Step {
++    if let Some(t) = turn.context_input_tokens {
++        out.input_tokens = t;
++    }
++    if let Some(sr) = turn.stop_reason.clone() {
++        out.stop_reason = sr;
++    }
++
++    let (thinking, text) = if extract_thinking {
++        extract_thinking_from_complete_text(&turn.text)
++    } else {
++        (None, turn.text.clone())
++    };
++
++    let mut assistant_blocks = Vec::new();
++    if let Some(th) = thinking.filter(|t| !t.is_empty()) {
++        out.output_tokens += token::count_tokens(&th) as i32;
++        out.content.push(json!({"type": "thinking", "thinking": th}));
++        assistant_blocks.push(json!({"type": "thinking", "thinking": th}));
++    }
++    if !text.trim().is_empty() {
++        out.output_tokens += token::count_tokens(&text) as i32;
++        out.content.push(json!({"type": "text", "text": text}));
++        assistant_blocks.push(json!({"type": "text", "text": text}));
++    }
++
++    let (search_calls, client_calls): (Vec<_>, Vec<_>) = turn
++        .tool_calls
++        .into_iter()
++        .partition(|c| c.name == websearch::WEB_SEARCH_TOOL_NAME);
++
++    for c in &client_calls {
++        out.output_tokens += (serde_json::to_string(&c.input).unwrap_or_default().len() as i32 + 3) / 4;
++        out.content.push(json!({
++            "type": "tool_use",
++            "id": c.id,
++            "name": c.name,
++            "input": c.input
++        }));
++    }
++    if !client_calls.is_empty() {
++        out.stop_reason = "tool_use".to_string();
++    }
++
++    if search_calls.is_empty() {
++        return Step::Done;
++    }
++    // 上游说输出被截断 / 上下文已满：不再续调
++    if turn.stop_reason.is_some() {
++        return Step::Done;
++    }
++
++    let mut searches = Vec::new();
++    for c in &search_calls {
++        let query = search_query(c);
++        let (query, refusal) = match query {
++            None => (None, "Error: web_search requires a non-empty \"query\" string.".to_string()),
++            Some(_) if out.searches >= max_uses => (
++                None,
++                format!(
++                    "Web search limit reached ({} searches). Answer now using the information already gathered.",
++                    max_uses
++                ),
++            ),
++            Some(q) => {
++                out.searches += 1;
++                (Some(q), String::new())
++            }
++        };
++        searches.push(PlannedSearch { call_id: c.id.clone(), query, refusal });
++        assistant_blocks.push(json!({
++            "type": "tool_use",
++            "id": c.id,
++            "name": websearch::WEB_SEARCH_TOOL_NAME,
++            "input": c.input
++        }));
++    }
++
++    if !client_calls.is_empty() {
++        return Step::SearchedThenClientTools { searches };
++    }
++    Step::Searched { searches, assistant_blocks, user_results: Vec::new() }
++}
++
++fn usage_json(out: &LoopOutput) -> Value {
++    json!({
++        "input_tokens": out.input_tokens,
++        "output_tokens": out.output_tokens.max(1),
++        "server_tool_use": {"web_search_requests": out.searches}
++    })
++}
++
++pub(crate) fn to_message_json(message_id: &str, model: &str, out: &LoopOutput) -> Value {
++    json!({
++        "id": message_id,
++        "type": "message",
++        "role": "assistant",
++        "content": out.content,
++        "model": model,
++        "stop_reason": out.stop_reason,
++        "stop_sequence": null,
++        "usage": usage_json(out)
++    })
++}
++
++fn message_start_event(message_id: &str, model: &str, input_tokens: i32) -> SseEvent {
++    SseEvent::new(
++        "message_start",
++        json!({
++            "type": "message_start",
++            "message": {
++                "id": message_id,
++                "type": "message",
++                "role": "assistant",
++                "content": [],
++                "model": model,
++                "stop_reason": null,
++                "stop_sequence": null,
++                "usage": {"input_tokens": input_tokens, "output_tokens": 1}
++            }
++        }),
++    )
++}
++
++/// 内容块 → SSE 事件（不含 message_start）
++pub(crate) fn content_sse_events(out: &LoopOutput) -> Vec<SseEvent> {
++    let mut events = Vec::new();
++    for (i, block) in out.content.iter().enumerate() {
++        let index = i as i32;
++        let ty = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
++        let (start_block, delta) = match ty {
++            "text" => (
++                json!({"type": "text", "text": ""}),
++                Some(json!({"type": "text_delta", "text": block["text"]})),
++            ),
++            "thinking" => (
++                json!({"type": "thinking", "thinking": ""}),
++                Some(json!({"type": "thinking_delta", "thinking": block["thinking"]})),
++            ),
++            "tool_use" => (
++                json!({"type": "tool_use", "id": block["id"], "name": block["name"], "input": {}}),
++                Some(json!({
++                    "type": "input_json_delta",
++                    "partial_json": serde_json::to_string(&block["input"]).unwrap_or_else(|_| "{}".to_string())
++                })),
++            ),
++            // server_tool_use / web_search_tool_result：整块放在 content_block_start 里一次给全
++            _ => (block.clone(), None),
++        };
++        events.push(SseEvent::new(
++            "content_block_start",
++            json!({"type": "content_block_start", "index": index, "content_block": start_block}),
++        ));
++        if let Some(d) = delta {
++            events.push(SseEvent::new(
++                "content_block_delta",
++                json!({"type": "content_block_delta", "index": index, "delta": d}),
++            ));
++        }
++        events.push(SseEvent::new(
++            "content_block_stop",
++            json!({"type": "content_block_stop", "index": index}),
++        ));
++    }
++    events.push(SseEvent::new(
++        "message_delta",
++        json!({
++            "type": "message_delta",
++            "delta": {"stop_reason": out.stop_reason, "stop_sequence": null},
++            "usage": usage_json(out)
++        }),
++    ));
++    events.push(SseEvent::new("message_stop", json!({"type": "message_stop"})));
++    events
++}
++
++fn ping_bytes() -> Bytes {
++    Bytes::from("event: ping\ndata: {\"type\": \"ping\"}\n\n")
++}
++
++/// message_start → 等结果期间 ping → 一次性发完内容
++fn buffered_sse(
++    start: SseEvent,
++    rx: tokio::sync::oneshot::Receiver<LoopOutput>,
++) -> impl Stream<Item = Result<Bytes, Infallible>> {
++    let head = stream::iter(vec![Ok::<Bytes, Infallible>(Bytes::from(start.to_sse_string()))]);
++    let mut ticker = interval(Duration::from_secs(PING_INTERVAL_SECS));
++    ticker.reset(); // 第一次 tick 不立即触发
++    let rest = stream::unfold((Some(rx), ticker), |(rx, mut ticker)| async move {
++        let mut rx = rx?;
++        tokio::select! {
++            biased;
++            res = &mut rx => {
++                let events = match res {
++                    Ok(out) => content_sse_events(&out),
++                    Err(_) => {
++                        tracing::error!("搜索回合任务异常退出");
++                        content_sse_events(&LoopOutput {
++                            content: vec![json!({"type": "text", "text": "(Internal error during web search.)"})],
++                            stop_reason: "end_turn".to_string(),
++                            input_tokens: 0,
++                            output_tokens: 1,
++                            searches: 0,
++                        })
++                    }
++                };
++                let bytes: Vec<Result<Bytes, Infallible>> = events
++                    .into_iter()
++                    .map(|e| Ok(Bytes::from(e.to_sse_string())))
++                    .collect();
++                Some((stream::iter(bytes), (None, ticker)))
++            }
++            _ = ticker.tick() => {
++                Some((stream::iter(vec![Ok(ping_bytes())]), (Some(rx), ticker)))
++            }
++        }
++    })
++    .flatten();
++    head.chain(rest)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::anthropic::types::Tool;
++
++    fn out0() -> LoopOutput {
++        LoopOutput { content: vec![], stop_reason: "end_turn".into(), input_tokens: 10, output_tokens: 0, searches: 0 }
++    }
++    fn call(id: &str, name: &str, input: Value) -> ToolCall {
++        ToolCall { id: id.into(), name: name.into(), input }
++    }
++    fn ws_tool() -> Tool {
++        Tool { tool_type: Some("web_search_20250305".into()), name: "web_search".into(), description: String::new(), input_schema: Default::default(), max_uses: None }
++    }
++    fn fn_tool(name: &str) -> Tool {
++        let mut schema = HashMap::new();
++        schema.insert("type".to_string(), json!("object"));
++        Tool { tool_type: None, name: name.into(), description: "d".into(), input_schema: schema, max_uses: None }
++    }
++    fn req(tools: Vec<Tool>, first: &str) -> MessagesRequest {
++        MessagesRequest {
++            model: "claude-opus-5-5".into(), max_tokens: 1024,
++            messages: vec![Message { role: "user".into(), content: json!(first) }],
++            stream: false, system: None, tools: Some(tools), tool_choice: None,
++            thinking: None, output_config: None, metadata: None,
++        }
++    }
++
++    #[test]
++    fn text_only_turn_is_done() {
++        let mut out = out0();
++        let step = apply_turn(&mut out, Turn { text: "hello".into(), ..Default::default() }, false, 5);
++        assert!(matches!(step, Step::Done));
++        assert_eq!(out.content, vec![json!({"type":"text","text":"hello"})]);
++        assert_eq!(out.stop_reason, "end_turn");
++    }
++
++    #[test]
++    fn search_only_turn_continues_and_never_exposes_web_search_tool_use() {
++        let mut out = out0();
++        let turn = Turn { text: "Let me look.".into(), tool_calls: vec![
++            call("t1", "web_search", json!({"query":"a"})),
++            call("t2", "web_search", json!({"query":"b"})),
++        ], ..Default::default() };
++        let step = apply_turn(&mut out, turn, false, 5);
++        let Step::Searched { searches, assistant_blocks, .. } = step else { panic!("expected Searched") };
++        assert_eq!(searches.len(), 2);
++        assert_eq!(searches[0].query.as_deref(), Some("a"));
++        assert_eq!(out.searches, 2);
++        // 客户端输出里不能出现 web_search tool_use（只能是服务端块）
++        assert!(!out.content.iter().any(|b| b["type"] == "tool_use"));
++        // 喂回模型的 assistant 消息里要有 tool_use，配对 tool_result
++        assert_eq!(assistant_blocks.iter().filter(|b| b["type"] == "tool_use").count(), 2);
++        assert_eq!(out.stop_reason, "end_turn");
++    }
++
++    #[test]
++    fn max_uses_caps_searches() {
++        let mut out = out0();
++        out.searches = 4;
++        let turn = Turn { tool_calls: vec![
++            call("t1", "web_search", json!({"query":"a"})),
++            call("t2", "web_search", json!({"query":"b"})),
++        ], ..Default::default() };
++        let Step::Searched { searches, .. } = apply_turn(&mut out, turn, false, 5) else { panic!() };
++        assert_eq!(searches[0].query.as_deref(), Some("a"));
++        assert!(searches[1].query.is_none());
++        assert!(searches[1].refusal.contains("limit reached"));
++        assert_eq!(out.searches, 5);
++    }
++
++    #[test]
++    fn empty_query_is_refused_not_searched() {
++        let mut out = out0();
++        let turn = Turn { tool_calls: vec![call("t1", "web_search", json!({"query":"  "}))], ..Default::default() };
++        let Step::Searched { searches, .. } = apply_turn(&mut out, turn, false, 5) else { panic!() };
++        assert!(searches[0].query.is_none());
++        assert_eq!(out.searches, 0);
++    }
++
++    #[test]
++    fn client_tool_only_is_done_with_tool_use_stop() {
++        let mut out = out0();
++        let turn = Turn { tool_calls: vec![call("t1", "exec_command", json!({"cmd":"ls"}))], ..Default::default() };
++        assert!(matches!(apply_turn(&mut out, turn, false, 5), Step::Done));
++        assert_eq!(out.stop_reason, "tool_use");
++        assert_eq!(out.content[0]["name"], "exec_command");
++    }
++
++    #[test]
++    fn mixed_search_and_client_tool_ends_turn() {
++        let mut out = out0();
++        let turn = Turn { tool_calls: vec![
++            call("t1", "web_search", json!({"query":"a"})),
++            call("t2", "exec_command", json!({"cmd":"ls"})),
++        ], ..Default::default() };
++        assert!(matches!(apply_turn(&mut out, turn, false, 5), Step::SearchedThenClientTools { .. }));
++        assert_eq!(out.stop_reason, "tool_use");
++        assert_eq!(out.content.iter().filter(|b| b["type"] == "tool_use").count(), 1);
++    }
++
++    #[test]
++    fn upstream_truncation_stops_loop() {
++        let mut out = out0();
++        let turn = Turn { tool_calls: vec![call("t1", "web_search", json!({"query":"a"}))], stop_reason: Some("max_tokens".into()), ..Default::default() };
++        assert!(matches!(apply_turn(&mut out, turn, false, 5), Step::Done));
++        assert_eq!(out.stop_reason, "max_tokens");
++    }
++
++    #[test]
++    fn thinking_extracted_per_round() {
++        let mut out = out0();
++        let turn = Turn { text: "<thinking>plan</thinking>\n\nAnswer".into(), ..Default::default() };
++        apply_turn(&mut out, turn, true, 5);
++        assert_eq!(out.content[0]["type"], "thinking");
++        assert_eq!(out.content[1]["text"], "Answer");
++        // 第二轮再出 <thinking> 也要被提取，不能当成正文
++        let turn2 = Turn { text: "<thinking>again</thinking>\n\nMore".into(), ..Default::default() };
++        apply_turn(&mut out, turn2, true, 5);
++        assert_eq!(out.content[2]["type"], "thinking");
++        assert!(!out.content.iter().any(|b| b["type"] == "text" && b["text"].as_str().unwrap().contains("<thinking>")));
++    }
++
++    #[test]
++    fn sse_events_have_contiguous_indexes_and_server_blocks_inline() {
++        let (a, b) = websearch::build_server_blocks("srvtoolu_x", "q", &None);
++        let out = LoopOutput { content: vec![json!({"type":"text","text":"hi"}), a, b, json!({"type":"text","text":"done"})], stop_reason: "end_turn".into(), input_tokens: 5, output_tokens: 3, searches: 1 };
++        let ev = content_sse_events(&out);
++        let starts: Vec<i64> = ev.iter().filter(|e| e.event == "content_block_start").map(|e| e.data["index"].as_i64().unwrap()).collect();
++        assert_eq!(starts, vec![0, 1, 2, 3]);
++        let srv = ev.iter().find(|e| e.event == "content_block_start" && e.data["content_block"]["type"] == "server_tool_use").unwrap();
++        assert_eq!(srv.data["content_block"]["input"]["query"], "q");
++        let delta = ev.iter().find(|e| e.event == "message_delta").unwrap();
++        assert_eq!(delta.data["usage"]["server_tool_use"]["web_search_requests"], 1);
++        assert_eq!(ev.last().unwrap().event, "message_stop");
++    }
++
++    #[test]
++    fn message_json_shape() {
++        let out = LoopOutput { content: vec![json!({"type":"text","text":"x"})], stop_reason: "end_turn".into(), input_tokens: 5, output_tokens: 0, searches: 2 };
++        let m = to_message_json("msg_1", "claude-opus-5-5", &out);
++        assert_eq!(m["type"], "message");
++        assert_eq!(m["usage"]["output_tokens"], 1);
++        assert_eq!(m["usage"]["server_tool_use"]["web_search_requests"], 2);
++    }
++
++    #[test]
++    fn routing_mixed_request_goes_to_loop_claude_code_subrequest_does_not() {
++        let mixed = req(vec![fn_tool("exec_command"), ws_tool()], "What's new?");
++        assert!(websearch::has_server_web_search(&mixed));
++        assert!(!websearch::is_claude_code_search_subrequest(&mixed));
++
++        let cc = req(vec![ws_tool()], "Perform a web search for the query: kiro");
++        assert!(websearch::is_claude_code_search_subrequest(&cc));
++
++        // 只带搜索工具但不是 Claude Code 子请求（Cursor / Codex 经 LiteLLM 桥过来的形状）⇒ 走回合
++        let solo = req(vec![ws_tool()], "Search the web for the following query and return a concise answer with sources:\nX");
++        assert!(websearch::has_server_web_search(&solo));
++        assert!(!websearch::is_claude_code_search_subrequest(&solo));
++
++        // 阴性对照：只有函数工具 ⇒ 不走回合
++        let plain = req(vec![fn_tool("exec_command")], "hi");
++        assert!(!websearch::has_server_web_search(&plain));
++    }
++
++    #[test]
++    fn user_defined_web_search_function_tool_is_not_hijacked() {
++        // 客户端自己定义了同名函数工具（带 schema）⇒ 不当作服务端工具
++        let mut t = fn_tool("web_search");
++        t.input_schema.insert("properties".into(), json!({"q":{"type":"string"}}));
++        assert!(!websearch::is_server_web_search_tool(&t));
++    }
++
++    #[test]
++    fn convert_tools_rewrites_server_search_tool_with_schema() {
++        let r = req(vec![fn_tool("exec_command"), ws_tool()], "hi");
++        let conv = convert_request(&r).unwrap();
++        let v = serde_json::to_value(&conv.conversation_state).unwrap();
++        let s = v.to_string();
++        assert!(s.contains("\"web_search\""));
++        assert!(s.contains("\"query\""), "web_search 必须带 query schema: {}", s);
++    }
++
++    #[test]
++    fn history_server_blocks_are_flattened_not_dropped() {
++        let mut r = req(vec![fn_tool("exec_command")], "Who won?");
++        r.messages.push(Message { role: "assistant".into(), content: json!([
++            {"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"nobel 2026"}},
++            {"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","title":"Nobel","url":"https://nobelprize.org/x","encrypted_content":"Halzen won"}]},
++            {"type":"text","text":"Francis Halzen."}
++        ])});
++        r.messages.push(Message { role: "user".into(), content: json!("Which country?") });
++        let conv = convert_request(&r).unwrap();
++        let s = serde_json::to_value(&conv.conversation_state).unwrap().to_string();
++        assert!(s.contains("Searched the web for: nobel 2026"));
++        assert!(s.contains("https://nobelprize.org/x"));
++        assert!(s.contains("Halzen won"));
++        assert!(!s.contains("srvtoolu_1"), "srvtoolu id 不能进 Kiro 历史");
++    }
++
++    #[test]
++    fn flatten_skips_opaque_encrypted_content() {
++        let opaque = "A".repeat(500);
++        let item = json!({"type":"web_search_tool_result","content":[{"title":"t","url":"u","encrypted_content":opaque}]});
++        let flat = websearch::flatten_server_block(&item).unwrap();
++        assert!(!flat.contains("AAAA"));
++        assert!(flat.contains("t — u"));
++    }
++}
+diff -ruN '--exclude=target' '--exclude=node_modules' '--exclude=dist' '--exclude=.git' kiro.rs/src/anthropic/websearch.rs kiro-ws/src/anthropic/websearch.rs
+--- kiro.rs/src/anthropic/websearch.rs	2026-09-12 00:18:22.713644938 +0800
++++ kiro-ws/src/anthropic/websearch.rs	2026-10-15 01:43:48.000000000 +0800
+@@ -111,6 +111,185 @@
+     })
+ }
+ 
++/// Claude Code 的 WebSearch 子请求前缀（只带一个 web_search 工具，要的就是原始结果列表）
++pub const CLAUDE_CODE_SEARCH_PREFIX: &str = "Perform a web search for the query: ";
++
++/// 交给模型的搜索工具名（服务端搜索工具被改写成这个名字的普通函数工具）
++pub const WEB_SEARCH_TOOL_NAME: &str = "web_search";
++
++pub const WEB_SEARCH_TOOL_DESCRIPTION: &str = "Search the web for up-to-date information. \
++Use it for recent events, news, prices, releases, or anything that may have changed after your training data. \
++Returns a list of results with title, URL, publish date and snippet. \
++You may call it several times with different queries; cite the URLs you rely on.";
++
++/// web_search 函数工具的入参 schema
++pub fn web_search_input_schema() -> serde_json::Value {
++    json!({
++        "type": "object",
++        "properties": {
++            "query": {"type": "string", "description": "The search query"}
++        },
++        "required": ["query"],
++        "additionalProperties": false
++    })
++}
++
++/// 是否是 Anthropic 服务端搜索工具（`web_search_20250305` 等，没有 input_schema，由服务端执行）
++pub fn is_server_web_search_tool(t: &super::types::Tool) -> bool {
++    t.tool_type
++        .as_deref()
++        .is_some_and(|ty| ty.starts_with("web_search"))
++        || (t.name == WEB_SEARCH_TOOL_NAME && t.input_schema.is_empty())
++}
++
++/// 请求里是否带服务端搜索工具（不论还有没有别的工具）
++pub fn has_server_web_search(req: &MessagesRequest) -> bool {
++    req.tools
++        .as_ref()
++        .is_some_and(|tools| tools.iter().any(is_server_web_search_tool))
++}
++
++/// Claude Code 的 WebSearch 子请求：只有一个搜索工具，且首条消息带固定前缀。
++/// 这类请求保持老路径（直接返回原始结果列表），其余带搜索工具的请求走 search_loop。
++pub fn is_claude_code_search_subrequest(req: &MessagesRequest) -> bool {
++    if !has_web_search_tool(req) {
++        return false;
++    }
++    let Some(first) = req.messages.first() else {
++        return false;
++    };
++    let text = match &first.content {
++        serde_json::Value::String(s) => s.as_str(),
++        serde_json::Value::Array(arr) => arr
++            .first()
++            .and_then(|b| b.get("text"))
++            .and_then(|t| t.as_str())
++            .unwrap_or(""),
++        _ => "",
++    };
++    text.starts_with(CLAUDE_CODE_SEARCH_PREFIX)
++}
++
++/// 服务端搜索工具上声明的 max_uses（没有就返回 None）
++pub fn server_web_search_max_uses(req: &MessagesRequest) -> Option<i32> {
++    req.tools
++        .as_ref()?
++        .iter()
++        .find(|t| is_server_web_search_tool(t))
++        .and_then(|t| t.max_uses)
++}
++
++/// 生成一对 Anthropic 原生块：server_tool_use + web_search_tool_result
++pub fn build_server_blocks(
++    tool_use_id: &str,
++    query: &str,
++    results: &Option<WebSearchResults>,
++) -> (serde_json::Value, serde_json::Value) {
++    let server_tool_use = json!({
++        "type": "server_tool_use",
++        "id": tool_use_id,
++        "name": WEB_SEARCH_TOOL_NAME,
++        "input": {"query": query}
++    });
++    let content = match results {
++        Some(r) => serde_json::Value::Array(
++            r.results
++                .iter()
++                .map(|r| {
++                    let page_age = r.published_date.and_then(|ms| {
++                        chrono::DateTime::from_timestamp_millis(ms)
++                            .map(|dt| dt.format("%B %-d, %Y").to_string())
++                    });
++                    json!({
++                        "type": "web_search_result",
++                        "title": r.title,
++                        "url": r.url,
++                        "encrypted_content": r.snippet.clone().unwrap_or_default(),
++                        "page_age": page_age
++                    })
++                })
++                .collect(),
++        ),
++        None => json!({"type": "web_search_tool_result_error", "error_code": "unavailable"}),
++    };
++    let result = json!({
++        "type": "web_search_tool_result",
++        "tool_use_id": tool_use_id,
++        "content": content
++    });
++    (server_tool_use, result)
++}
++
++/// 搜索结果 → 交回模型的 tool_result 文本
++pub fn format_results_for_model(query: &str, results: &Option<WebSearchResults>) -> String {
++    let Some(results) = results else {
++        return format!("Web search for \"{}\" failed (search backend unavailable).", query);
++    };
++    if results.results.is_empty() {
++        return format!("Web search for \"{}\" returned no results.", query);
++    }
++    let mut out = format!("Web search results for \"{}\":\n\n", query);
++    for (i, r) in results.results.iter().enumerate() {
++        out.push_str(&format!("[{}] {}\nURL: {}\n", i + 1, r.title, r.url));
++        if let Some(date) = r.published_date.and_then(chrono::DateTime::from_timestamp_millis) {
++            out.push_str(&format!("Published: {}\n", date.format("%Y-%m-%d")));
++        }
++        if let Some(ref snippet) = r.snippet {
++            out.push_str(&truncate_chars(snippet, 600));
++            out.push('\n');
++        }
++        out.push('\n');
++    }
++    out
++}
++
++fn truncate_chars(s: &str, max: usize) -> String {
++    match s.char_indices().nth(max) {
++        Some((idx, _)) => format!("{}...", &s[..idx]),
++        None => s.to_string(),
++    }
++}
++
++/// 历史里客户端回显的服务端搜索块 → 一段文本（converter 用）
++///
++/// 真 Anthropic 返回的 encrypted_content 是不透明密文（长串、无空白），没有信息量，跳过；
++/// 本服务返回的 encrypted_content 是明文摘要，截断后保留。
++pub fn flatten_server_block(item: &serde_json::Value) -> Option<String> {
++    match item.get("type")?.as_str()? {
++        "server_tool_use" => {
++            if item.get("name").and_then(|n| n.as_str()) != Some(WEB_SEARCH_TOOL_NAME) {
++                return None;
++            }
++            let query = item
++                .get("input")
++                .and_then(|i| i.get("query"))
++                .and_then(|q| q.as_str())
++                .unwrap_or("");
++            Some(format!("[Searched the web for: {}]", query))
++        }
++        "web_search_tool_result" => {
++            let content = item.get("content")?;
++            let Some(arr) = content.as_array() else {
++                return Some("[Web search failed]".to_string());
++            };
++            let mut out = String::from("[Web search results]\n");
++            for (i, r) in arr.iter().enumerate() {
++                let title = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
++                let url = r.get("url").and_then(|v| v.as_str()).unwrap_or("");
++                out.push_str(&format!("{}. {} — {}\n", i + 1, title, url));
++                if let Some(snip) = r.get("encrypted_content").and_then(|v| v.as_str()) {
++                    let opaque = snip.len() > 200 && !snip.contains(char::is_whitespace);
++                    if !snip.is_empty() && !opaque {
++                        out.push_str(&format!("   {}\n", truncate_chars(snip, 300)));
++                    }
++                }
++            }
++            Some(out)
++        }
++        _ => None,
++    }
++}
++
+ /// 从消息中提取搜索查询
+ ///
+ /// 读取 messages 的第一条消息的第一个内容块
+@@ -505,8 +684,35 @@
+         }
+     };
+ 
+-    // 4. 生成 SSE 响应
++    // 4. 非流式请求返回 JSON（以前一律回 SSE，stream=false 的客户端解析失败 ⇒ LiteLLM 500 后兜底）
+     let model = payload.model.clone();
++    if !payload.stream {
++        let summary = generate_search_summary(&query, &search_results);
++        let (server_tool_use, result_block) =
++            build_server_blocks(&tool_use_id, &query, &search_results);
++        let body = json!({
++            "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
++            "type": "message",
++            "role": "assistant",
++            "model": model,
++            "content": [
++                {"type": "text", "text": format!("I'll search for \"{}\".", query)},
++                server_tool_use,
++                result_block,
++                {"type": "text", "text": summary}
++            ],
++            "stop_reason": "end_turn",
++            "stop_sequence": null,
++            "usage": {
++                "input_tokens": input_tokens,
++                "output_tokens": (summary.len() as i32 + 3) / 4,
++                "server_tool_use": {"web_search_requests": 1}
++            }
++        });
++        return (StatusCode::OK, Json(body)).into_response();
++    }
++
++    // 5. 流式请求生成 SSE 响应
+     let stream =
+         create_websearch_sse_stream(model, query, tool_use_id, search_results, input_tokens);
+ 
+@@ -519,6 +725,22 @@
+         .unwrap()
+ }
+ 
++/// 用 Kiro MCP 搜一次。返回 (srvtoolu id, 结果)；失败时结果为 None（不报错，交给模型说明）
++pub async fn run_search(
++    provider: &crate::kiro::provider::KiroProvider,
++    query: &str,
++) -> (String, Option<WebSearchResults>) {
++    let (tool_use_id, mcp_request) = create_mcp_request(query);
++    let results = match call_mcp_api(provider, &mcp_request).await {
++        Ok(response) => parse_search_results(&response),
++        Err(e) => {
++            tracing::warn!("MCP API 调用失败: {}", e);
++            None
++        }
++    };
++    (tool_use_id, results)
++}
++
+ /// 调用 Kiro MCP API
+ async fn call_mcp_api(
+     provider: &crate::kiro::provider::KiroProvider,

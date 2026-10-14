@@ -1,0 +1,405 @@
+diff --git a/src/anthropic/converter.rs b/src/anthropic/converter.rs
+index ab99b89..60627bd 100644
+--- a/src/anthropic/converter.rs
++++ b/src/anthropic/converter.rs
+@@ -77,11 +77,69 @@ Complete all chunked operations without commentary.";
+ 
+ /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
+ /// 严格对照版本号
++/// Kiro 上游的非 Claude 模型。这些 id 与上游 `ListAvailableModels` 返回的
++/// `modelId` 一字不差，无需翻译，直接透传即可。
++///
++/// 元组为 `(上游 modelId, 上下文窗口)`，窗口取自该账号 `ListAvailableModels`
++/// 的 `tokenLimits.maxInputTokens`，与 `get_context_window_size` 共用，
++/// 避免 usage 百分比按错误的窗口还原成 token 数。
++const PASSTHROUGH_MODELS: &[(&str, i32)] = &[
++    ("auto", 1_000_000),
++    ("gpt-5.6-sol", 272_000),
++    ("gpt-5.6-terra", 272_000),
++    ("gpt-5.6-luna", 272_000),
++    ("deepseek-3.2", 164_000),
++    ("minimax-m2.5", 196_000),
++    ("minimax-m2.1", 196_000),
++    ("glm-5", 200_000),
++    ("qwen3-coder-next", 256_000),
++];
++
++/// 可选的 `kiro-` / `kiro/` 别名前缀。
++///
++/// 为什么需要它：LiteLLM 的 `completion()` 派发在 `main.py:2656` 先判
++/// `model in litellm.open_ai_chat_completion_models`，**再**判 provider。
++/// `gpt-5.6-sol` / `-terra` / `-luna` 恰好是 LiteLLM 内置的 OpenAI 模型名，
++/// 于是即便显式写了 `anthropic/` 前缀 + `custom_llm_provider: anthropic`，
++/// 也会被劈到 OpenAI 分支 POST `/chat/completions`（本服务没有这个路由 ⇒ 404）。
++/// 那张表不能改——真正的 zerokey / chatgpt 池子用的就是这些同名模型走 OpenAI 路。
++/// 所以在**本侧**留一个逃生舱：调用方可以写 `kiro-gpt-5.6-sol`，这个名字不在
++/// LiteLLM 的 OpenAI 表里，于是走 Anthropic 路 POST `/v1/messages`，
++/// 到了这里再把前缀剥掉，上游拿到的仍是一字不差的 `gpt-5.6-sol`。
++///
++/// 前缀对 Claude 分支同样生效，纯属对称，避免将来再撞名时还要改代码。
++fn strip_kiro_alias_prefix(model_lower: &str) -> &str {
++    model_lower
++        .strip_prefix("kiro-")
++        .or_else(|| model_lower.strip_prefix("kiro/"))
++        .unwrap_or(model_lower)
++}
++
++/// 在透传表里查模型，容忍 `-thinking` 后缀（与 Claude 分支的行为一致）
++fn passthrough_model(model_lower: &str) -> Option<&'static (&'static str, i32)> {
++    let base = strip_kiro_alias_prefix(model_lower);
++    let base = base.strip_suffix("-thinking").unwrap_or(base);
++    PASSTHROUGH_MODELS.iter().find(|(id, _)| *id == base)
++}
++
+ pub fn map_model(model: &str) -> Option<String> {
+     let model_lower = model.to_lowercase();
++    let model_lower = strip_kiro_alias_prefix(&model_lower).to_string();
++    let model_lower = model_lower.as_str();
++
++    if let Some((id, _)) = passthrough_model(model_lower) {
++        return Some((*id).to_string());
++    }
+ 
+     if model_lower.contains("sonnet") {
+-        if model_lower.contains("sonnet-5") {
++        // ⚠️ 顺序敏感：`sonnet-5-5` / `sonnet-5.5` 必须排在 `sonnet-5` 之前。
++        // `contains("sonnet-5")` 对 "claude-sonnet-5-5" 同样为真，放后面会被静默
++        // 劫持成 claude-sonnet-5（HTTP 200 + 原样回显请求名 + in_tok 同族，
++        // 外观与成功完全同形）。2026-10-02 实测过这个劫持：发 sonnet-5-5 得 200、
++        // in_tok 6475 与 sonnet-5 同族。判落点只认 RUST_LOG=debug 的上游 modelId。
++        if model_lower.contains("sonnet-5-5") || model_lower.contains("sonnet-5.5") {
++            Some("claude-sonnet-5.5".to_string())
++        } else if model_lower.contains("sonnet-5") {
+             Some("claude-sonnet-5".to_string())
+         } else if model_lower.contains("4-6") || model_lower.contains("4.6") {
+             Some("claude-sonnet-4.6".to_string())
+@@ -91,7 +149,12 @@ pub fn map_model(model: &str) -> Option<String> {
+             None
+         }
+     } else if model_lower.contains("opus") {
+-        if model_lower.contains("opus-5") {
++        // ⚠️ 顺序敏感：`opus-5-5` / `opus-5.5` 必须排在 `opus-5` 之前。
++        // `contains("opus-5")` 对 "claude-opus-5-5" 同样为真，放后面会被静默
++        // 劫持成 claude-opus-5（HTTP 200 + 原样回显请求名，外观完全像成功）。
++        if model_lower.contains("opus-5-5") || model_lower.contains("opus-5.5") {
++            Some("claude-opus-5.5".to_string())
++        } else if model_lower.contains("opus-5") {
+             Some("claude-opus-5".to_string())
+         } else if model_lower.contains("4-5") || model_lower.contains("4.5") {
+             Some("claude-opus-4.5".to_string())
+@@ -115,10 +178,14 @@ pub fn map_model(model: &str) -> Option<String> {
+ ///
+ /// 复用 `map_model` 的映射逻辑，确保窗口大小判断与模型映射一致。
+ /// Kiro 于 2026-03-24 将 Opus 4.6 和 Sonnet 4.6 升级至 1M 上下文。
+-/// Sonnet 5 / Opus 4.7 / 4.8 / Opus 5 同 1M
++/// Sonnet 5 / Opus 4.7 / 4.8 / Opus 5 / Opus 5.5 同 1M
+ pub fn get_context_window_size(model: &str) -> i32 {
++    if let Some((_, window)) = passthrough_model(&model.to_lowercase()) {
++        return *window;
++    }
++
+     match map_model(model) {
+-        Some(mapped) if mapped == "claude-sonnet-5" || mapped == "claude-opus-5" || mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" || mapped == "claude-opus-4.7" || mapped == "claude-opus-4.8" => 1_000_000,
++        Some(mapped) if mapped == "claude-sonnet-5" || mapped == "claude-sonnet-5.5" || mapped == "claude-opus-5" || mapped == "claude-opus-5.5" || mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" || mapped == "claude-opus-4.7" || mapped == "claude-opus-4.8" => 1_000_000,
+         _ => 200_000,
+     }
+ }
+@@ -939,6 +1006,85 @@ mod tests {
+         assert!(map_model("gpt-4").is_none());
+     }
+ 
++    #[test]
++    fn test_map_model_passthrough_non_claude() {
++        // 非 Claude 模型 id 与上游一致，原样透传
++        for id in [
++            "auto",
++            "gpt-5.6-sol",
++            "gpt-5.6-terra",
++            "gpt-5.6-luna",
++            "deepseek-3.2",
++            "minimax-m2.5",
++            "minimax-m2.1",
++            "glm-5",
++            "qwen3-coder-next",
++        ] {
++            assert_eq!(map_model(id).as_deref(), Some(id), "{id}");
++            assert_eq!(
++                map_model(&format!("{id}-thinking")).as_deref(),
++                Some(id),
++                "{id}-thinking"
++            );
++        }
++    }
++
++    #[test]
++    fn test_passthrough_context_windows_match_upstream_catalog() {
++        // 窗口必须与 ListAvailableModels 的 maxInputTokens 一致，
++        // 否则 usage 百分比会被还原成错误的 token 数（4.6 曾经差 5 倍）
++        assert_eq!(get_context_window_size("gpt-5.6-sol"), 272_000);
++        assert_eq!(get_context_window_size("deepseek-3.2"), 164_000);
++        assert_eq!(get_context_window_size("minimax-m2.1"), 196_000);
++        assert_eq!(get_context_window_size("glm-5"), 200_000);
++        assert_eq!(get_context_window_size("qwen3-coder-next"), 256_000);
++        // Claude 分支不受影响
++        assert_eq!(get_context_window_size("claude-opus-5"), 1_000_000);
++        assert_eq!(get_context_window_size("claude-haiku-4.5"), 200_000);
++    }
++
++    #[test]
++    fn test_map_model_still_rejects_unknown() {
++        assert_eq!(map_model("claude-fable-5"), None);
++        assert_eq!(map_model("gpt-6"), None);
++        assert_eq!(map_model("totally-made-up"), None);
++    }
++
++    #[test]
++    fn test_kiro_alias_prefix_passthrough() {
++        // `kiro-` 前缀是绕开 LiteLLM 把 gpt-5.6-* 劈到 OpenAI 分支的逃生舱；
++        // 剥掉前缀后上游必须拿到一字不差的原始 id
++        for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "glm-5", "auto"] {
++            assert_eq!(map_model(&format!("kiro-{id}")).as_deref(), Some(id), "kiro-{id}");
++            assert_eq!(map_model(&format!("kiro/{id}")).as_deref(), Some(id), "kiro/{id}");
++            // 裸名必须继续可用：前缀是加法不是替换
++            assert_eq!(map_model(id).as_deref(), Some(id), "bare {id}");
++        }
++    }
++
++    #[test]
++    fn test_kiro_alias_prefix_claude_and_window() {
++        assert_eq!(map_model("kiro-claude-opus-5").as_deref(), Some("claude-opus-5"));
++        assert_eq!(
++            map_model("kiro-claude-sonnet-4-5-20250929").as_deref(),
++            Some("claude-sonnet-4.5")
++        );
++        // 窗口必须跟着别名走，否则 usage 百分比会按错误窗口还原成 token 数
++        assert_eq!(get_context_window_size("kiro-gpt-5.6-sol"), 272_000);
++        assert_eq!(get_context_window_size("kiro-glm-5"), 200_000);
++        assert_eq!(get_context_window_size("kiro-claude-opus-5"), 1_000_000);
++        // 前缀与 thinking 后缀同时出现
++        assert_eq!(map_model("kiro-gpt-5.6-sol-thinking").as_deref(), Some("gpt-5.6-sol"));
++    }
++
++    #[test]
++    fn test_kiro_alias_prefix_does_not_invent_models() {
++        // 剥前缀不能把不存在的模型变成存在的
++        assert_eq!(map_model("kiro-claude-fable-5-1"), None);
++        assert_eq!(map_model("kiro-nope"), None);
++        assert_eq!(map_model("kiro-"), None);
++    }
++
+     #[test]
+     fn test_map_model_thinking_suffix_sonnet() {
+         // thinking 后缀不应影响 sonnet 模型映射
+@@ -960,6 +1106,44 @@ mod tests {
+         assert_eq!(result, Some("claude-opus-4.6".to_string()));
+     }
+ 
++    #[test]
++    fn test_map_model_sonnet_5_5() {
++        // 四种拼法都要落 5.5
++        for name in [
++            "claude-sonnet-5-5",
++            "claude-sonnet-5.5",
++            "kiro-claude-sonnet-5-5",
++            "claude-sonnet-5-5-thinking",
++        ] {
++            assert_eq!(
++                map_model(name),
++                Some("claude-sonnet-5.5".to_string()),
++                "{} 应落 claude-sonnet-5.5",
++                name
++            );
++        }
++    }
++
++    #[test]
++    fn test_map_model_sonnet_5_not_hijacked_by_5_5() {
++        // 🔴 阳性对照：只测新名的绿证明不了没劫走老名。
++        // `contains("sonnet-5")` 对 "sonnet-5-5" 同样为真，分支顺序错了会让
++        // sonnet-5-5 静默落 sonnet-5（2026-10-02 实测过这个劫持）；
++        // 而顺序对了之后，必须反过来确认老名**仍然**落老模型。
++        for name in [
++            "claude-sonnet-5",
++            "claude-sonnet-5-thinking",
++            "kiro-claude-sonnet-5",
++        ] {
++            assert_eq!(
++                map_model(name),
++                Some("claude-sonnet-5".to_string()),
++                "{} 必须仍落 claude-sonnet-5，不能被 5.5 分支劫走",
++                name
++            );
++        }
++    }
++
+     #[test]
+     fn test_map_model_sonnet_5() {
+         assert_eq!(
+@@ -978,6 +1162,37 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn test_map_model_opus_5_5() {
++        // 主判据：opus-5.5 不能被 contains("opus-5") 劫持
++        assert_eq!(
++            map_model("claude-opus-5-5"),
++            Some("claude-opus-5.5".to_string())
++        );
++        assert_eq!(
++            map_model("claude-opus-5.5"),
++            Some("claude-opus-5.5".to_string())
++        );
++        assert_eq!(
++            map_model("claude-opus-5-5-thinking"),
++            Some("claude-opus-5.5".to_string())
++        );
++        assert_eq!(
++            map_model("kiro-claude-opus-5-5"),
++            Some("claude-opus-5.5".to_string())
++        );
++        // 阳性对照：opus-5 自己不能被新分支抢走
++        assert_eq!(map_model("claude-opus-5"), Some("claude-opus-5".to_string()));
++        assert_eq!(
++            map_model("claude-opus-5-thinking"),
++            Some("claude-opus-5".to_string())
++        );
++        // 窗口
++        assert_eq!(get_context_window_size("claude-opus-5-5"), 1_000_000);
++        assert_eq!(get_context_window_size("claude-opus-5.5"), 1_000_000);
++        assert_eq!(get_context_window_size("kiro-claude-opus-5-5"), 1_000_000);
++    }
++
+     #[test]
+     fn test_map_model_opus_5() {
+         assert_eq!(
+diff --git a/src/anthropic/handlers.rs b/src/anthropic/handlers.rs
+index 0db744f..51b335a 100644
+--- a/src/anthropic/handlers.rs
++++ b/src/anthropic/handlers.rs
+@@ -74,6 +74,125 @@ pub async fn get_models() -> impl IntoResponse {
+     tracing::info!("Received GET /v1/models request");
+ 
+     let models = vec![
++        // Kiro 上游的非 Claude 模型，id 直接透传（见 converter::PASSTHROUGH_MODELS）。
++        // max_tokens 取自该账号 ListAvailableModels 的 tokenLimits.maxOutputTokens。
++        Model {
++            id: "auto".to_string(),
++            object: "model".to_string(),
++            created: 1782777600,
++            owned_by: "kiro".to_string(),
++            display_name: "Auto (Kiro picks)".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 64_000,
++        },
++        Model {
++            id: "gpt-5.6-sol".to_string(),
++            object: "model".to_string(),
++            created: 1782777600,
++            owned_by: "openai".to_string(),
++            display_name: "GPT 5.6 Sol".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 128_000,
++        },
++        Model {
++            id: "gpt-5.6-terra".to_string(),
++            object: "model".to_string(),
++            created: 1782777600,
++            owned_by: "openai".to_string(),
++            display_name: "GPT 5.6 Terra".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 128_000,
++        },
++        Model {
++            id: "gpt-5.6-luna".to_string(),
++            object: "model".to_string(),
++            created: 1782777600,
++            owned_by: "openai".to_string(),
++            display_name: "GPT 5.6 Luna".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 128_000,
++        },
++        Model {
++            id: "deepseek-3.2".to_string(),
++            object: "model".to_string(),
++            created: 1782777600,
++            owned_by: "deepseek".to_string(),
++            display_name: "DeepSeek v3.2".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 64_000,
++        },
++        Model {
++            id: "minimax-m2.5".to_string(),
++            object: "model".to_string(),
++            created: 1782777600,
++            owned_by: "minimax".to_string(),
++            display_name: "MiniMax M2.5".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 64_000,
++        },
++        Model {
++            id: "minimax-m2.1".to_string(),
++            object: "model".to_string(),
++            created: 1782777600,
++            owned_by: "minimax".to_string(),
++            display_name: "MiniMax M2.1".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 64_000,
++        },
++        Model {
++            id: "glm-5".to_string(),
++            object: "model".to_string(),
++            created: 1782777600,
++            owned_by: "zhipu".to_string(),
++            display_name: "GLM 5".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 64_000,
++        },
++        Model {
++            id: "qwen3-coder-next".to_string(),
++            object: "model".to_string(),
++            created: 1782777600,
++            owned_by: "alibaba".to_string(),
++            display_name: "Qwen3 Coder Next".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 64_000,
++        },
++        Model {
++            id: "claude-sonnet-5-5".to_string(),
++            object: "model".to_string(),
++            created: 1790985600, // Oct 2, 2026 —— 上游 catalog 首次出现
++            owned_by: "anthropic".to_string(),
++            display_name: "Claude Sonnet 5.5".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 128_000,
++        },
++        Model {
++            id: "claude-sonnet-5-5-thinking".to_string(),
++            object: "model".to_string(),
++            created: 1790985600, // Oct 2, 2026
++            owned_by: "anthropic".to_string(),
++            display_name: "Claude Sonnet 5.5 (Thinking)".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 128_000,
++        },
++        Model {
++            id: "claude-opus-5-5".to_string(),
++            object: "model".to_string(),
++            created: 1790208000, // Sep 26, 2026
++            owned_by: "anthropic".to_string(),
++            display_name: "Claude Opus 5.5".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 128_000,
++        },
++        Model {
++            id: "claude-opus-5-5-thinking".to_string(),
++            object: "model".to_string(),
++            created: 1790208000, // Sep 26, 2026
++            owned_by: "anthropic".to_string(),
++            display_name: "Claude Opus 5.5 (Thinking)".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 128_000,
++        },
+         Model {
+             id: "claude-opus-5".to_string(),
+             object: "model".to_string(),

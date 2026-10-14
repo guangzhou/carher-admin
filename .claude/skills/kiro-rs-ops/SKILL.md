@@ -4,7 +4,7 @@ description: >-
   kiro.rs（198 集群 242 节点，Anthropic API → AWS Kiro/CodeWhisperer 代理）的全套运维：
   判某模型这个账号有没有（`ListAvailableModels` 是唯一权威判据）、查还剩多少 credit、
   加/改模型（**必须自建镜像，升 tag 是死路**）、加号/摘号（`scripts/kiro-pool.py`，零重启）、
-  逐号判死活（`scripts/kiro-probe.py`）、接进 198 LiteLLM 19 条 `kiro-*` 道
+  逐号判死活（`scripts/kiro-probe.py`）、接进 198 LiteLLM 20 条 `kiro-*` 道
   （含绕 LiteLLM 重名劫持的别名前缀）、回归压测、回滚。
   Use when 用户说 "kiro 还剩多少额度/credit"、"kiro 支持 xx 模型吗"、"kiro 打不通"、
   "给 kiro 加个模型"、"给 kiro 加个账号 / 把某个号摘掉"、"kiro-* 那些道怎么样了"、
@@ -20,14 +20,18 @@ description: >-
 | ns / Service | `kiro-rs`，ClusterIP **`10.43.109.5:8990`**（仅集群内，无 NodePort/ingress） |
 | 节点 | **`aiyjy-litellm-242`**，nodeSelector 硬钉 + toleration `dedicated=new-node:NoSchedule` |
 | 镜像 | **`kiro-rs:master-kiroalias`** —— 自建，**只在 242 本地 containerd** |
-| 账号 | 🔴 **一律现读，别信写死的数** —— 一条命令出全表（id / 邮箱 / `authMethod` / 档位 / live 余额 / 在役哪个 / 盘上一致否 / 零重启否）：<br>`python3 scripts/kiro-pool.py show --with-quota`<br>这张表 09-17~09-24 因为手维护漂过两次，**已不再在这里复述池子状态**。不可推导的部分（每个号的加入经过、备份路径、踩过的坑）在 §D4。<br>只留两条常驻事实：**档位不止一种**（PRO+ 2000 / **PRO MAX 5000**，算容量前读 live cap，别按 2000 硬算）；**`authMethod` 混编**（id≤10 全 `idc`，id11 起有 `social`，两条刷新路行为相反，见 §D3 第 0 步）。下次重置 **2026-10-01 00:00 UTC** |
+| 账号 | 🔴 **一律现读，别信写死的数** —— 一条命令出全表（id / 邮箱 / `authMethod` / 档位 / live 余额 / 在役哪个 / 盘上一致否 / 零重启否）：<br>`python3 scripts/kiro-pool.py show --with-quota`<br>这张表 09-17~09-24 因为手维护漂过两次，**已不再在这里复述池子状态**。不可推导的部分（每个号的加入经过、备份路径、踩过的坑）在 §D4。<br>只留两条常驻事实：**档位已见六种**（FREE **50** / PRO 1000 / **STUDENT 1000** / PRO+ 2000 / PRO MAX 5000 / POWER 10000，跨度 **200 倍** ⇒ **算容量前必读 live cap**，别按某个数硬算；每新加一个号都可能再冒一种）；**`authMethod` 混编且无规律**（idc / social 在 id 轴上交替出现，10-08 加的 21 个里 16 idc + 5 social；**别按 id 区间推 authMethod**，现读 `show` 那一列，两条刷新路行为相反见 §D3 第 0 步）。**盘上 `email` 可能是 null**（social 那种导出形状，id46~52 就是）⇒ 任何按 email 关联账号的脚本都要有第二把判据。重置为**每月 1 日 00:00 UTC** |
+| 档位↔模型 | 🔴 **「升档只买额度不买模型」已被推翻（10-01）** —— 那句话在 PRO+/MAX/POWER/STUDENT 四档之间成立（条数一致），但 **FREE 档只有 9 个模型**，且是付费档的**真子集**。<br>⚠️ **付费档的条数本身会变**：10-01 是 20，10-02 上游新出 `claude-sonnet-5.5`（1.3x，1M/128K）后变 **21** —— **别把条数写成判据，条数不对先查上游是不是出新模型**（见 [[project_kiro_sonnet55_appeared_upstream_no_lane_2026_10_02]]，198 侧至今 0 条道）。<br>FREE 能用：`auto` `claude-haiku-4.5` `claude-sonnet-4` `claude-sonnet-4.5` `deepseek-3.2` `glm-5` `minimax-m2.1` `minimax-m2.5` `qwen3-coder-next`<br>**掉档即失去的 11 个**：`claude-opus-4.5/4.6/4.7/4.8/5/5.5`、`claude-sonnet-4.6`、`claude-sonnet-5`、`gpt-5.6-sol/terra/luna` —— **全部 opus、sonnet-5/4.6 和三条 gpt 都在里面**，即 20 条道里**最贵也最常用的那批**。<br>⇒ 判「某个号能不能跑 opus」**必须看它当下的档位**，不能靠「它以前能跑」。订阅过期/掉 FREE 与「模型没了」是同一件事的两面。 |
 | 出口 | **全部经 `10.68.13.243:8120`**（Astrill Los Angeles → `104.129.16.172`，09-17 19:36 从 8119 Seattle 改指），见 §D2。⚠️**全局唯一，无 per-account 路由**；⚠️ 8118/8119/8120 **三条都与 `chatgpt-acct-*` 共用**（分别 8/7/6 个对象），**没有独占 IP 可选** |
 | 凭据 | PVC 内 `/app/config/credentials.json`（list = **真的多号池**，不是只用 `[0]`，见 §D3） |
-| 对外 | 198 LiteLLM ns `litellm-product` 的 **19 条 `kiro-*` 道**（09-29 加 opus-5-5）|
+| 对外 | 198 LiteLLM ns `litellm-product` 的 **20 条 `kiro-*` 道**（09-29 加 opus-5-5，10-04 加 sonnet-5-5）|
 | manifest | `198:~cltx/kiro-deploy/kiro-rs.yaml` |
 | 登录 | `ssh cltx@10.68.13.198`，kubectl 要 `sudo` |
 
-🔴 **Astrill 账号 2026-09-24 到期。** 到期后 `proxyUrl` 连不通 ⇒ **19 条道会再次全挂**，
+⚠️ **「Astrill 账号 2026-09-24 到期」这句已过期未更新** —— 10-01 实测（当时 19 条）
+19/19 走这条出口成功 ⇒ **它还活着**（续过费、或当时那个日期本身就记错了，没有数据，不下归因）。
+下面这段讲的是**到期后的症状形状**，仍然有用；但别再把它当"马上要断"的待办。
+到期后 `proxyUrl` 连不通 ⇒ **20 条道会再次全挂**，
 且症状是**超时不是 403**（跟被封停长得不一样，别误判成又被封了）。
 续费或把 `proxyUrl` 改指别的境外出口，二选一。
 
@@ -50,17 +54,48 @@ description: >-
 ⚠️ **镜像只在 242 本地**。Deployment 靠 nodeSelector 钉在 242 才成立，
 换节点/重装节点必须重新 import，否则起不来。构建产物留在 `188:/Data/kiro-build/`。
 
-## §0.1 五个脚本：读用 `kiro-probe.py`，写用 `kiro-pool.py`，回归用 `kiro-lane-regress.sh`
+### 🔴 §0.2 不在公司内网时：两条路都要搭，一条是 ssh 一条是出口（10-08 实测）
+
+这些脚本有**两条独立的内网依赖**，只搭一条会卡在第二条上，而且第二条的报错
+（`ConnectionRefusedError` 深在 urllib 栈里）长得完全不像"网络不通"：
+
+| 依赖 | 谁用 | 不通时的样子 |
+|---|---|---|
+| `cltx@10.68.13.198:22` | 全部脚本（内部自己 ssh） | `ssh: connect to host … port 22: Connection refused` |
+| 出口代理 `10.68.13.243:8120` | **只有 `kiro-probe.py`**（它直打 AWS，且恒从线上 `config.json` 读出口） | 一长串 urllib traceback 末尾 `URLError: [Errno 61] Connection refused` |
+
+```sh
+export KIRO_SSH_JUMP=pubSrv                       # ① ssh 走 ProxyJump（三个 py + regress.sh 都认）
+ssh -f -N -o ExitOnForwardFailure=yes -L 18120:10.68.13.243:8120 pubSrv
+export KIRO_PROXY_HOSTPORT=127.0.0.1:18120        # ② 只给 kiro-probe.py 改出口**接入点**
+# 用完：pkill -f "18120:10.68.13.243:8120"
+```
+
+- 两个变量**不设时逐字节保持原来的直连行为**，内网里不用管。
+- `KIRO_PROXY_HOSTPORT` **只换接入点，不换代理**：口令仍从线上 `config.json` 现读、
+  落地 IP 仍是 Astrill LA ⇒ 量的还是线上那条路。改写时脚本会打一行 ⚠️ 告诉你换了。
+  ⛔ **别改成 `--no-proxy`** —— 那是直连 AWS，与线上**不同路**，拿它的读数判号等于量了另一条路。
+- 🔴 **判「本机到底通不通 198」别用 ping**：10-08 实测 ICMP 到 198/188 **通**
+  （延迟 130ms，还会经 `192.168.3.x` 这种明显不是 IDC 的跳），TCP 22 却一律 refused，
+  而堡垒机 `10.68.13.189` 连 ICMP 都不通。⇒ **ping 通不代表在内网**，判据只认 `nc -z <host> 22`。
+- 先找一台能通的跳板：`ssh pubSrv 'nc -z -w4 10.68.13.198 22'`（10-08 `pubSrv` 通、
+  `priSrv` 不通）。`scripts/jms` 那条堡垒机路要求能到 `10.68.13.189:2222`，不在内网时同样不通。
+
+## §0.1 九个脚本：读用 `kiro-probe.py`，写用 `kiro-pool.py`，回归用 `kiro-lane-regress.sh`
 
 本仓 `scripts/` 下，都在**本机**跑（内部自己 ssh 198），不需要先登录：
 
 | 脚本 | 性质 | 干什么 |
 |---|---|---|
-| `kiro-pool.py` | **写**（admin API，零重启） | `show [--with-quota]` / `add <导出json>` / `remove <id>` / `priority <id> <n>` / `extract <备份> <who>` |
-| `kiro-probe.py` | **纯只读**（直打 AWS） | `catalog`（`ListAvailableModels` 逐号）/ `quota` / `both` / `has <模型…>`（退出码即判据）。凭据与出口都从 live pod 现取，401/403 自己走 refresh（**按 `authMethod` 分流 idc / social**）。social 号必带 `--out-rotated FILE`，见 §D3 第 0 步 |
-| `kiro-lane-regress.sh` | 只读压测 | 19 条道回归一条龙：车道名现取 + **条数断言** + bench + in_tok 容差带比对。见 §E |
+| `kiro-pool.py` | **写**（admin API，零重启） | `show [--with-quota]` / `add <导出json>` / **`add-batch <多个json>`**（10-08 加，批量加号走它，别手搓 for）/ `remove <id>` / `priority <id> <n>` / `extract <备份> <who>` |
+| `kiro-probe.py` | **纯只读**（直打 AWS） | `catalog`（`ListAvailableModels` 逐号）/ `quota` / `both` / `has <模型…>`（退出码即判据）。凭据与出口都从 live pod 现取，401/403 自己走 refresh（**按 `authMethod` 分流 idc / social**）。social 号必带 `--out-rotated FILE`，见 §D3 第 0 步。**批量验号用 `--summary-json`**，见下条红线 |
+| `kiro-batch-prepare.py` | 只读线上 + 写本地文件 | **批量加号的筛子**（10-02 入仓）：拿整库导出跟线上逐号比三把判据，只把**新增**的号拍平成 per-account 文件（0600）并过 6 道门。`--dry-run` 只比对不写。门禁 `backend/tests/test_kiro_batch_prepare.py` 30 条。见 §D3「一次加多个号」/ §D4.1 |
+| `kiro-lane-regress.sh` | 只读压测 | 20 条道回归一条龙：车道名现取 + **条数断言** + bench + in_tok 容差带比对。见 §E |
 | `kiro-lane-add.py` | 生成 CM（**不写集群**） | 加一条 `kiro-*` 道：`<src> <dst> --name … --template <照抄哪条道> --litellm-model … --upstream-id … --rate-multiplier …`。字段级替换 ⇒ 缓存价/窗口/`mode` 从模板**继承**而不是重打（漏 `mode` 会让 `/测模型` 报「⚠️ 未测」，与模型真坏同形）。自己拒的四种情形见 §D1 |
 | `litellm-198-key-behavior-regress.py` | 只读 + 一把短命 key | 改完 key 白名单/alias 的**行为层**回归：克隆真 key 形状起临时 key → 打新名/老名/**白名单外的名** → 删。见 §D1 |
+| `kiro-lane-limits-price-fix.py` | 生成 CM（**不写集群**） | 批量修 19 条道的 `max_input/output_tokens` 与 opus-5.5 价。窗口从 `--catalog` 读（**不硬编**），三道门：旧值断言 / 结构门（除目标字段外逐字段相等）/ 只增不删行数门。见 §D0.1 |
+| `kiro-lane-limits-verify.py` | 纯只读 | 逐**在役**副本验窗口/上限/价（按当前 RS 的 `pod-template-hash` 过滤，排掉 Terminating）。判据是 `/v1/model/info` 逐行，**不是** `/model_group/info`（那个 cap 是组内最大值不是闸门）|
+| `kiro-enable-overage.py` | **写**（Kiro Management API） | 为 social 号批量开启 overage（超额计费）。`<id…>` 按 id 指定 / `all-new` 选未消耗的 social 号 / `--check` 只读验证不写。从 PVC 读凭据 → refresh → `setUserPreference` → `getUsageLimits` 验证。⚠️ 200 不代表立刻可见（传播延迟数秒）；gmail 号可能有账号级限制导致开不了（10-14 实测 1/13 失败）|
 
 🔴 **`kiro-lane-add.py` 与 `litellm-198-key-behavior-regress.py` 是 09-29 从 198 盘上
 两个一次性脚本（`~cltx/add-kiro-opus55-lane.py`、`~cltx/o55-keytest.py`）泛化进仓的。**
@@ -71,6 +106,18 @@ description: >-
 
 **日常这一条就够**：`python3 scripts/kiro-pool.py show --with-quota`
 —— 池状态 + 盘上一致性 + pod 零重启 + **每个号的 live 档位/余额**，一屏出全。
+
+🔴 **`--json` 不能用来批量解析，`--summary-json` 才行（10-02 加的）。**
+`both --json` 吐的是 catalog 与 quota **两个原始响应拼在一起**，前面还有一行
+`===== id=… =====` 人类表头 ⇒ **整个 stdout 不是合法 JSON**（实测 `json.loads` 直接抛）。
+10-02 验 20 个号时我因此退回去 grep 人类表格，三条 grep 全写错格式
+（表格行**没有前导空白**、档位在 `订阅` 那一行），**20/20 全打出
+`tier=[] model_lines=0 err=0`，看着像整批凭据都废了** —— 实际 20 个全是好的。
+`--summary-json` 吐**一个合法 JSON 数组**，每号带
+`tier/modelCount/remaining/exhausted/rotated` + **`ok`/`error`**：
+一个号抛异常**不中断整批**，但失败**留在数据里**（`ok:false` + 原因），
+不会变成"安静地少一行" —— 那正是「全 0 却零报错」这种假象的来源。
+⇒ 批量时别在 shell 里 grep 人类输出。见 [[feedback_all_metrics_zero_at_once_is_the_ruler_not_the_fleet]]。
 
 🔴 **余额为什么走 `kiro-pool.py` 而不是 `kiro-probe.py quota`**：探针拿的是 pod 盘上那份
 凭据，401/403 时**自己发起刷新**，而 social 号刷新**会轮转 refreshToken** ⇒ 新值只留在
@@ -91,6 +138,10 @@ adminApiKey 走 `curl -K` 不进 argv；body 走临时文件不做 shell 转义�
 再比 —— 空集假绿见 §D3 第 0 步）；
 每个写操作前后各打一次 `show`，**同时比 API 状态与盘上 `credentials.json`**（判落盘）
 和 pod 的 `RESTARTS`/`startTime`（判零重启）；`remove` 自动先 `disabled` 再 `DELETE`。
+
+🔴 **`add` 10-08 起自己判落地并在失败时非零退出**（`assert_landed()`）——
+在那之前**服务端拒了它照样 exit 0**，因为 admin API 拒绝回的是 200 + `{"error":…}`
+而 `curl` 对此 rc=0。⇒ 现在才可以用退出码判成败；但判**池子最终状态**仍只认 `show`。
 
 ```sh
 python3 scripts/kiro-pool.py show                 # 池 + 盘上 + pod 代数，只读
@@ -269,10 +320,14 @@ ssh <188> "curl -s https://api.github.com/repos/hank9999/kiro.rs/commits?per_pag
 |---|---|
 | `src/anthropic/converter.rs` | `PASSTHROUGH_MODELS` 表：9 个非 Claude id → 真实上下文窗口，命中即原样透传 |
 | 同上 | `strip_kiro_alias_prefix()`：剥可选的 `kiro-` / `kiro/` 前缀再查表 —— **绕 LiteLLM 重名劫持的逃生舱**，见 §D |
-| `src/anthropic/handlers.rs` | 9 个透传条目前置进 `/v1/models` ⇒ 当时 27 个（09-29 后 29）|
+| `src/anthropic/handlers.rs` | 9 个透传条目前置进 `/v1/models` ⇒ 当时 27 个（09-29 后 29，**10-04 后 31**）|
 | `converter.rs` `map_model()` | **opus-5.5 分支（09-29 加）**：`contains("opus-5-5") \|\| contains("opus-5.5")` → 上游 `claude-opus-5.5`，**必须排在 opus-5 分支之前**（见下条红线）|
 | `converter.rs` 窗口表 | `claude-opus-5.5` → 1M input / 128K output（与 entitlement 实测一致）|
 | `handlers.rs` `/v1/models` | 加 `claude-opus-5-5` + `claude-opus-5-5-thinking` ⇒ **27 → 29 个** |
+| `converter.rs` `map_model()` | **sonnet-5.5 分支（10-04 加）**：`contains("sonnet-5-5") \|\| contains("sonnet-5.5")` → 上游 `claude-sonnet-5.5`，**必须排在 sonnet-5 分支之前**。🔴 加之前 sonnet 这一支**没有** 5.5 分支，发 `sonnet-5-5` 返 200 却静默落 `claude-sonnet-5`（实测 `in_tok=6475` 与 sonnet-5 同族）|
+| `converter.rs` 窗口表 | `claude-sonnet-5.5` → 1M input（与 entitlement 实测一致）|
+| `handlers.rs` `/v1/models` | 加 `claude-sonnet-5-5` + `-thinking` ⇒ **29 → 31 个**（10-04 实测）|
+| 脚本 | `scripts/kiro-rs-add-sonnet55-mapping.py` —— 幂等、自动备份、打回滚命令，**只改 188 工作区不构建不碰生产**；`--check` 验「改了没 + 顺序对不对」|
 
 #### 🔴 `map_model()` 是子串匹配 —— 新分支写在旧分支后面 = 静默被劫持
 
@@ -299,6 +354,23 @@ if m.contains("opus-5")   { return "claude-opus-5"; }
 `-thinking` 后缀在 master 里**只是名字别名**（`converter.rs:100` 直接 strip），
 真 thinking 由请求体的 `thinking` 字段（`enabled`/`adaptive`）驱动。
 
+### 服务端 web_search 搜索回合（10-15 上线，镜像 `master-websearch-loop`）
+
+源码补丁 `k8s/kiro-rs/patches/0002-websearch-server-tool-loop.patch`（说明见同目录 README）。
+带 `web_search_20250305` / `web_search` 服务端工具的请求 ⇒ `search_loop.rs` 整轮缓冲：模型调 web_search →
+Kiro MCP `https://q.<region>.amazonaws.com/mcp` 搜 → tool_result 交回 → 续调，客户端只见原生
+`server_tool_use` + `web_search_tool_result`。Claude Code 的 `Perform a web search for the query:` 子请求仍走老路径。
+
+- 🔴 判「kiro 自己接住」只认 LiteLLM 响应头 `x-litellm-attempted-fallbacks: 0` + SpendLogs `model_id` 落 `kiro-rs/…`。
+- 日志关键字：`进入搜索回合`（新路径）/ `路由到 WebSearch 处理`（老路径）/ `MCP API 调用失败`。
+- MCP 搜索实测**大概率不扣 credit**（闲置号 10 次后 10min 仍 0.0；缺阳性对照）。
+- Cursor 的 WebSearch 发 Responses `web_search_preview`，兜底到 grok 时由 LiteLLM callback
+  `grok_web_search_preview_rename` 改成 `web_search`（x.ai 不认 preview 会静默不搜）。
+- 回滚：`sudo kubectl -n kiro-rs set image deploy/kiro-rs kiro-rs=docker.io/library/kiro-rs:master-sonnet55 seed-config=docker.io/library/kiro-rs:master-sonnet55`
+  （改前整份 Deployment 在 `198:~/kiro-rs-deploy.pre-websearch-loop.json`）。
+- 🔴 本机 → 198 传镜像 scp/rsync 会断（10-15 两次「Operation timed out」，落地是 0 字节、sha 是空文件的 e3b0c4…）；
+  198 也 ssh 不进 188。可用：本机 `split -b 2m` 逐块 `ssh "cat > part"` 再拼，三处对 sha。
+
 ### 构建 → 落地流水线（每一步都有坑）
 
 ```bash
@@ -309,12 +381,40 @@ ssh <188> 'cd /Data/kiro-build/kiro.rs && docker build -t kiro-rs:master-<tag> .
 #    判据不是"全绿"，是"失败集合与干净 master 基线逐条相同"
 #    基线：干净 master 200 passed / 8 failed；打完补丁 207 passed / 同样 8 failed（09-29 opus-5.5 后）
 
-# 3. save → scp（两端必须对 sha256）
-ssh <188> 'docker save kiro-rs:master-<tag> | gzip -1 > /Data/kiro-build/img.tar.gz; sha256sum ...'
-scp 188:/Data/kiro-build/img.tar.gz 242:/tmp/
+# 3. save → 落到本机（两端必须对 sha256）
+ssh <188> 'cd /Data/kiro-build && docker save kiro-rs:master-<tag> | gzip -1 > img.tar.gz && sha256sum img.tar.gz'
+scp cltx@10.68.13.188:/Data/kiro-build/img.tar.gz /tmp/ && shasum -a 256 /tmp/img.tar.gz
 
-# 4. 242 上 import —— ⚠️ 必须先 gunzip！
-ssh 242 'gunzip -c /tmp/img.tar.gz | sudo k3s ctr -a /run/k3s/containerd/containerd.sock images import -'
+# 4. 送进 242 的 containerd —— 🔴 **不能 ssh 242**（见下），走特权 pod 挂 socket
+#    （10-04 实测可用；下面这段 yaml 原样可用，importer pod 用完即删）
+sudo kubectl apply -f - <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata: {name: kiro-img-importer, namespace: kiro-rs}
+spec:
+  restartPolicy: Never
+  nodeSelector: {kubernetes.io/hostname: aiyjy-litellm-242}
+  tolerations: [{key: dedicated, operator: Equal, value: new-node, effect: NoSchedule}]
+  containers:
+  - name: shell
+    image: docker.io/library/kiro-rs:master-opus55   # 用 242 上已有的任意镜像即可
+    command: ["sleep","900"]
+    securityContext: {privileged: true}
+    volumeMounts:
+    - {name: sock, mountPath: /run/k3s/containerd/containerd.sock}
+    - {name: hostbin, mountPath: /host-bin}
+  volumes:
+  - {name: sock, hostPath: {path: /run/k3s/containerd/containerd.sock, type: Socket}}
+  - {name: hostbin, hostPath: {path: /usr/local/bin, type: Directory}}
+YAML
+sudo kubectl -n kiro-rs cp /tmp/img.tar.gz kiro-img-importer:/tmp/img.tar.gz
+sudo kubectl -n kiro-rs exec kiro-img-importer -- sha256sum /tmp/img.tar.gz   # 第三处对 sha
+# ⚠️ 必须先 gunzip（k3s ctr 不吃 gzip）；k3s 二进制在宿主 /usr/local/bin，经 /host-bin 调
+sudo kubectl -n kiro-rs exec kiro-img-importer -- sh -c \
+  'gunzip -c /tmp/img.tar.gz | /host-bin/k3s ctr -a /run/k3s/containerd/containerd.sock images import -'
+sudo kubectl -n kiro-rs exec kiro-img-importer -- \
+  /host-bin/k3s ctr -a /run/k3s/containerd/containerd.sock images ls | grep kiro-rs   # 复核在了
+sudo kubectl -n kiro-rs delete pod kiro-img-importer --wait=false
 
 # 5. 两个容器都要改（seed-config initContainer 用的是同一个镜像）
 sudo kubectl -n kiro-rs set image deploy/kiro-rs \
@@ -323,6 +423,12 @@ sudo kubectl -n kiro-rs rollout status deploy/kiro-rs
 ```
 
 **坑：**
+- 🔴 **`ssh 242` 这条路不存在** —— `cltx` 登不上 242（publickey/password 全拒，
+  本机直连、188 跳板、198 跳板 10-04 三条都实测被拒）。§D2 早就记了这件事，
+  而这段流水线以前写的是 `ssh 242 'gunzip … import'`，**两处矛盾了一个月**。
+  进 242 的 containerd 只有上面那条「特权 pod 挂 socket」的路。
+- 🔴 **`scp` 打印 `lost connection` 却 `rc=0`** —— 10-04 从 188 往 242 推时实测，
+  退出码是 0 但文件根本没过去。**又一个「返回码不是判据」**，必须去目的地核文件与 sha。
 - **`k3s ctr images import` 不吃 gzip**。直接喂 `.tar.gz` 报 `archive/tar: invalid tar header`，
   而且**不给你看清退出码**。必须 `gunzip -c` 管道进去。
 - 242 上 **`crictl` 不在 PATH**，`k3s crictl` 缺 config，只能用
@@ -344,16 +450,43 @@ PVC 的正当性由上面那条**已实测**的回写事实支撑。）
 
 ## §D 接进 198 LiteLLM
 
+### §D-1 上游出新模型 → 开给全员：七步清单（opus-5.5 09-29、sonnet-5.5 10-04 都走这条）
+
+| # | 做什么 | 判据（不是 200） | 断服？ |
+|---|---|---|---|
+| 1 | `kiro-probe.py has <上游id>` 看几个号有 entitlement | 并集里有；FREE 档没有是正常的 | 否 |
+| 2 | 直打 kiro.rs 发新名 | 🔴 **200 不算**：先读 `map_model()` 源码看有没有分支，没有就是被短名劫持 | 否 |
+| 3 | 改源码（分支排在短名**前**）+ 单测带老名阳性对照 → 188 构建 | 失败集合 == 改前基线 | 否 |
+| 4 | 镜像送进 242（特权 pod，§C）→ `set image` 两个容器 + 同一次开 `RUST_LOG=debug` | 池子 `total/available/currentId` 与切前一致 | **是，~10s** |
+| 5 | 落点：nonce 配对读上游 `modelId`，新名 + 老名阳性对照，**直打和经 LiteLLM 各一次** → 立刻收回 `info` | `modelId` 逐字对 | 收 debug 再断 ~10s |
+| 6 | LiteLLM 加道（§D0）：**价要官网现查、`max_output_tokens` 按 catalog 改**（模板两样都会带错）；兜底 `fallback-add-row.py`；`EXPECT_LANES`+1、存基线 | 4/4 副本 `wc -c`；`kiro-lane-limits-verify.py` 绿 | 否（滚动）|
+| 7 | 开 key：按**上一个同族模型的 alias 覆盖面**导名单（skill `litellm-198-key-allowlist`「新模型开给和 X 一样的那批人」）→ 刷飞书表 | 回库数：带新名 key 数 == 带老名 key 数 | 否 |
+
+⚠️ 第 4、5 步能合成一次重启（切镜像时顺手开 debug），收 debug 那次省不掉。
+
 CM `litellm-config` 的 `model_list` **纯加法**（当时 74→92，added=18 / removed=0）。
 Secret `litellm-secrets` 加 `KIRO_RS_API_KEY` 用 **merge patch**，别整体替换。
 ⛔ litellm-proxy 变更**禁 apply**，只用 `set image`/`patch`。
 
 ### §D0 加一条 `kiro-*` 道（脚本 `scripts/kiro-lane-add.py`，09-29 泛化入仓）
 
-🔴 **改的不是 `cm/litellm-config`** —— pod 挂的是内容哈希派生的
-`litellm-cwfb-stable-<hash>`，走 `subPath`，**永不热更**（§E、
+🔴 **改的不是 `cm/litellm-config`** —— pod 挂的是**派生 CM**，走 `subPath`，**永不热更**（§E、
 `feedback_198_lane_pods_mount_derived_cwfb_cm_not_litellm_config`）。
 patch 母 CM 是零效果，而且这两份 09-29 实测已漂 161 行。
+
+🔴 **派生 CM 的命名体系 10-04 变过一次，所以名字一律现读，别按形状猜：**
+
+| 时期 | 名字 | 名字 = 内容 sha256 前 12 位？ |
+|---|---|---|
+| ~10-01 | `litellm-cwfb-stable-<hash>` | ✅ 成立（实测 `e17757c7b00a` 对得上）|
+| **10-04 LiteLLM 升级后** | **`litellm-product-proxy-config-<hash>`** | 🔴 **不成立**（内容 sha 是 `556e2e32d2f9`，实名 `29b11b9fce9a`）|
+
+⇒ 两条纪律：
+1. **CM 名只从 deploy 现读**（下面第 1 步那条命令），`kiro-lane-add.py` /
+   `kiro-lane-limits-price-fix.py` 的新名现在都**从 `--old-cm` 的前缀派生**，不写死。
+2. 🔴 **「名字对上 = 内容对上」那条自校验只对旧体系成立** ——
+   新体系下判内容只认在役副本内 `wc -c /app/config.yaml` 或自己算 sha，
+   **别拿 CM 名当内容判据**。门禁 `test_fix_script_derives_cm_name_from_old_cm`。
 
 ```sh
 # 1. 读 deploy 真挂的那个派生 CM（不是母 CM）
@@ -367,8 +500,9 @@ python3 scripts/kiro-lane-add.py /tmp/cm-cur.yaml /tmp/cm-new.yaml \
   --name kiro-claude-opus-5-5 --template kiro-claude-opus-5 \
   --litellm-model claude-opus-5-5 --upstream-id claude-opus-5.5 \
   --rate-multiplier 2.0
-# 它打印 NEW=litellm-cwfb-stable-<sha256(内容)[:12]> —— 这个名字是**自校验**的：
-# 派生 CM 名就是内容 sha 的前 12 位，名字对上 = 内容对上。
+# 它打印 NEW=<与 MOUNTED 同前缀>-<sha256(内容)[:12]>
+# ⚠️ 10-04 起**别把这个名字当自校验**：新体系的生产 CM 名不等于内容 sha（见上表）。
+# 判内容对不对只认在役副本内 `wc -c /app/config.yaml`。
 
 # 3. 建新 CM → 带 test op 的守卫式 patch → rollout（命令由脚本原样打出）
 ```
@@ -393,7 +527,58 @@ OpenAI 名，`main.py:2656` 在判 provider **之前**先查
 - 接新上游前自测一行：`python -c "import litellm; print('<id>' in litellm.open_ai_chat_completion_models)"`
 - **判据是落点不是 200**：看 pod 日志打的是 `/chat/completions` 还是 `/v1/messages`。
 
-其余 15 条走裸 id。全部 `input/output_cost_per_token: 0`，不进任何 fallback 链。
+其余 16 条走裸 id。
+
+⚠️ **「全部 `input/output_cost_per_token: 0`」已作废**（那是 09-12 刚接进来时的状态）。
+09-23 起全部 kiro 道**都有真价**（`scripts/litellm-198-kiro-pricing.py` 按上游第一方目录价标定），
+10-01 实测生产 **19/19 价 > 0、0 条为 0**。判价一律现读 CM，别信这类"当时的快照"。
+
+### §D0.1 窗口 / 输出上限 / 价格：三件在 10-01 修掉的偏差（改之前先读这节）
+
+加道之后**必须单独核这三样**，`--template` 一个都不保证：
+
+| 项 | 真源 | 10-01 查出的偏差 |
+|---|---|---|
+| `max_input_tokens` | **kiro 自己的 catalog**（见下） | gpt 三条填了 **272000**（codex 口径）而 kiro 给 **1000000** ⇒ 白扔 73% 窗口 |
+| `max_output_tokens` | 同上 | **19 条全缺**（整份 CM 89 条道只有 4 条有过这个字段）|
+| 四个价格字段 | 上游**第一方**目录价 | `kiro-claude-opus-5-5` 照抄了模板 opus-5 的 $5/$25 ⇒ **贵标 25%**（官方 $4/$20/$0.2/$5）|
+
+🔴 **窗口的真源是 kiro 自己的 `ListAvailableModels`，不是 `litellm-198-model-ceilings.json`。**
+那张表是 **codex 口径**；**同一个模型名经不同上游，窗口本来就不同**
+（`gpt-5.6-sol`：codex 872k / kiro **1M**）。拿 codex 的数去填 kiro 道，
+就是 272000 这个错值换个方向再犯一次。
+
+🔴 **`--template` 只保证形状，不保证价。** opus-5.5 是 Anthropic **降价**的一代，
+照抄 opus-5 的模板就把旧价带了过来，而每一格可观察量都正常。
+⇒ 加道后把四个价与官方第一方目录逐格比一遍（`model_prices_and_context_window.json`
+的第一方条目 + 厂商官网页），**别只看道通不通**。
+
+🔴 **计费读 `litellm_params`**：只写 `model_info` 会 200 且读得回，但照旧按老价记。
+价格两块都写；窗口/输出上限只在 `model_info`。
+
+```sh
+# 1. 取真源（catalog 的 tokenLimits；origin 必须 AI_EDITOR/KIRO_CLI，IDE(11)/CLI(3) 是子集会假红）
+python3 scripts/kiro-probe.py catalog --json > /tmp/kiro-cat.json
+# 2. 改（纯本地，三道门：旧值断言 / 结构门 / 只增不删行数门）
+python3 scripts/kiro-lane-limits-price-fix.py /tmp/cm-cur.yaml /tmp/cm-new.yaml \
+    --catalog /tmp/kiro-cat.json --old-cm "$MOUNTED"
+# 3. cutover 用它打印的命令（带 test op 守卫），然后逐**在役**副本验
+python3 scripts/kiro-lane-limits-verify.py --catalog /tmp/kiro-cat.json --expect-bytes <新字节数>
+```
+
+⚠️ **`kiro-lane-limits-verify.py` 新写出来时先喂三个阴性对照再信它的绿**：
+字节数故意写错 / 道数写错 / catalog 下毒一格（10-01 三个都报红，且第三个只报被下毒那一格）。
+
+🔴 **kiro 车道 0 行在 `LiteLLM_ProxyModelTable`**（纯 CM 承载）⇒ 两个后果：
+① `litellm-198-max-input-tokens-audit.sh 'kiro-rs/%'` 直接 `AUDIT ERROR` 退出，
+**那把尺子对 kiro 全盲**；② **没有 DB 自收敛那条 90 秒捷径**，改 kiro 道必须 rollout。
+⇒ 口径表已加 20 条 `kiro-` 前缀条目（key 写**组名**如 `kiro-auto`，不是 `model_info.id`
+`kiro-rs/auto` —— 审计只拿 slug 与 model_name 匹配）。门禁
+`backend/tests/test_kiro_lane_limits_fix.py`，含 codex 反向阳性对照。
+
+⚠️ **非第一方的四条不下对错判语**：glm-5 / minimax-m2.x / qwen3-coder-next 在 litellm
+价格表里**没有第一方条目**；deepseek-3.2 的 $0.40 与表里 `deepseek-chat` 的 $0.42 差 5%，
+但 `deepseek-chat` 不是它的权威源。`auto` 是**约定价**（按 sonnet-5，09-23 用户裁决）。
 
 **⚠️ 生产 key 目前只有 `cursor-liuguoxian04-5rub` 被授权了这 18 个名**
 （09-12 授权，143→161，备份 `198:~cltx/kiro-keygrant/models.before.20260912-124309.json`）。
@@ -592,7 +777,7 @@ sudo kubectl -n kiro-rs rollout restart deploy kiro-rs   # strategy: Recreate，
 |---|---|---|
 | 1 | 启动日志 | `已配置 HTTP 代理: http://10.68.13.243:8118` ← **kiro.rs 内置的阳性对照** |
 | 2 | pod 内 `netstat -tn` | 发请求时唯一出站是 `→ 10.68.13.243:8118 ESTABLISHED`，**零条直连 AWS** |
-| 3 | 真实推理 | 19 条道**文本非空**（不是 200），且各道 `prompt_tokens` 互不相同 |
+| 3 | 真实推理 | 20 条道**文本非空**（不是 200），且各道 `prompt_tokens` 互不相同 |
 
 ⛔ **别在 pod 里用 `wget` 打 IP 回显站验代理。Alpine busybox wget 完全无视
 `https_proxy`** —— 带/不带代理都读出宿主 IP，看起来像"代理没生效"。
@@ -608,7 +793,7 @@ sudo kubectl -n kiro-rs rollout restart deploy kiro-rs   # strategy: Recreate，
 打 `http://10.43.149.225:4000`（svc `litellm-proxy`），master key 在
 secret `litellm-secrets` 的 `LITELLM_MASTER_KEY`。**跑完 `/key/delete`**。
 
-⚠️ 批量压这 19 条时 `curl -m 120` 会偶发切断慢道（opus-4-6 中过一次，
+⚠️ 批量压这 20 条时 `curl -m 120` 会偶发切断慢道（opus-4-6 中过一次，
 单独复打两次都秒回）。**别把超时读成"这条道坏了"**，复打再判。
 
 ## §D3 多号池：加一个账号（2026-09-16 实测，无需重建镜像）
@@ -633,12 +818,151 @@ GET|PUT /api/admin/config/load-balancing
 **不改出口就别重启。** 走脚本：
 
 ```sh
+python3 scripts/kiro-pool.py show --with-quota                 # 0. 先看在役号的 prio 是几（下一步要对齐）
 python3 scripts/kiro-probe.py both --creds /tmp/newcred.json   # 1. 只读验号，不碰线上
-python3 scripts/kiro-pool.py --dry-run add /tmp/newcred.json   # 2. 看请求形状
-python3 scripts/kiro-pool.py add /tmp/newcred.json             # 3. 真加（自动备份+去重+前后复核）
+python3 scripts/kiro-pool.py --dry-run add /tmp/newcred.json --priority <对齐在役>  # 2. 看请求形状
+python3 scripts/kiro-pool.py add /tmp/newcred.json --priority <对齐在役>  # 3. 真加（自动备份+去重+前后复核）
 python3 scripts/kiro-pool.py show --with-quota                 # 4. 看在役号还剩多少，再决定切不切
-scripts/kiro-lane-regress.sh --rounds 3                        # 5. 19 条道回归（§E）
+scripts/kiro-lane-regress.sh --rounds 3                        # 5. 20 条道回归（§E）
 ```
+
+### 一次加多个号（10-01 实测 9 个；10-02 实测 20 个；10-08 实测 24 个；**10-09 `add-batch` 实测 9/9 一次过，~15 分钟**）
+
+🔴 **一份新导出里的「死号」可能根本没重登** —— 10-09 那轮 69 个里 12 个新增，
+3 个仍是 10-08 那三个死号，且 **refreshToken sha 与 `clientId` 逐字节相同、
+`status` 还是 `invalid`** ⇒ 是旧快照原样带出来的，不是「重登了又死」。
+⇒ **判「这批重登没」别看导出文件日期**，比两份导出里同一邮箱的 `refreshToken` sha +
+`status` 字段；相同就直接跳过，别再浪费一次 probe 和一次 `add`。
+
+**没有批量 API** —— 但 10-08 起**有批量入口 `add-batch`**（它内部仍是逐个 `add`，
+每个自带备份 + 去重 + 前后复核）。⛔ **别再手搓 `for f in …; do add "$f"; done`**：
+那段 for 挡不住下面三件事，10-08 全踩了（见本节末「🔴 rc=0 不是落地」）。
+
+```sh
+# 0. 在役号的 prio 是几（下一步 --priority 要对齐，别吃默认值 0）
+python3 scripts/kiro-pool.py show --with-quota
+
+# 1. 🔴 筛子：整库导出 → 只留新增 → 拍平过 6 道门（10-02 起有脚本，别再手搓 heredoc）
+python3 scripts/kiro-batch-prepare.py ~/Downloads/kiro-accounts-NN.json --dry-run   # 先看几个是新的
+python3 scripts/kiro-batch-prepare.py ~/Downloads/kiro-accounts-NN.json --out /tmp/kb
+
+# 2. 逐个只读验号（同时证明不是封停号、读出档位与模型数）。
+#    🔴 批量用 --summary-json，别 grep 人类表格（§0.1 那条红线）
+for f in /tmp/kb/creds/*.json; do
+  am=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['authMethod'])" "$f")
+  [ "$am" = social ] && rot=(--out-rotated "${f%.json}.rotated.json") || rot=()
+  python3 scripts/kiro-probe.py both --creds "$f" "${rot[@]}" --summary-json > "${f%.json}.probe.json"
+done
+# 判据：ok=true + modelCount 是付费档那个数。⚠️「全 0 且零报错」先查尺子
+# 🔴 remaining=0 **不是**「不能加」—— 见下面「三类号」那张表，别用它当 assert
+python3 - <<'PY'
+import json,glob
+rows=[json.load(open(p))[0] for p in glob.glob('/tmp/kb/creds/*.probe.json')]
+assert rows, "空集假绿：一个 probe 结果都没读到"
+dead=[r for r in rows if not r['ok']]                      # 真坏：refresh 就死
+live=[r for r in rows if r['ok'] and (r.get('remaining') or 0)>0]
+empty=[r for r in rows if r['ok'] and not (r.get('remaining') or 0)]
+print(f"有量 {len(live)} / 耗尽但活 {len(empty)} / 不可用 {len(dead)}  共 {len(rows)}")
+print(f"有量的合计剩余 {sum(r['remaining'] for r in live):.0f}")
+for r in dead: print("  🔴", r.get('email'), r.get('error'))
+PY
+# ⇒ 拿这三个数去问用户加哪些（耗尽但活的号 11-01 00:00 UTC 自动重置复活）
+
+# 3. 挑一个 --dry-run 看形状，然后 **add-batch** 真加（--priority 对齐在役）
+python3 scripts/kiro-pool.py --dry-run add /tmp/kb/creds/<随便一个>.json --priority <对齐在役>
+#    social 号要喂轮转后那份 ⇒ 先把 .rotated.json 顶掉原件，再整目录丢给 add-batch
+for f in /tmp/kb/creds/*.rotated.json; do [ -f "$f" ] && mv "$f" "${f%.rotated.json}.json"; done
+python3 scripts/kiro-pool.py add-batch /tmp/kb/creds/*.json --priority <对齐在役>
+#    ↑ 一个失败不中断；收尾一张「加成/跳过(重复)/失败」表；**有失败就非零退出**
+
+python3 scripts/kiro-pool.py show --with-quota && scripts/kiro-lane-regress.sh --rounds 1
+rm -rf /tmp/kb        # 里面是 live refreshToken
+```
+
+🔴 **`add` 的 rc=0 不等于落地 —— 10-08 的坑，批量时最致命。**
+admin API 拒绝时回的是 **HTTP 200 + body `{"error":{…}}`**，`curl` 对此 rc=0
+⇒ 整个 `add` 安静地 exit 0，**看着像加成功了**。10-08 加 24 个号时 3 个
+refreshToken 已死，服务端逐个拒，循环里**24 行全是 rc=0**；
+当时唯一能看出来的线索是「比对了盘上 N 个号」那个 **N 停涨**（46/46、51/51、53/53），
+而最终池子是 66 不是 45+24=69。
+⇒ 已修进代码：`assert_landed()` 两道门（条数门 + 身份门，身份门读**盘上**那份因为
+API 的行里没有 `machineId`、social 号 `email` 可能是 null），拒了就非零退出，
+门禁 `backend/tests/test_kiro_pool_add_landing.py` 13 条。
+**判加号成败一律看最终 `show` 的条数，别看返回码、别看输出像不像成功。**
+
+⚠️ **手搓 for 还有两个坑，`add-batch` 一并修了**：
+`dup_check` 命中会 `sys.exit` ⇒ 手搓循环**停在第一个重复上**（10-02 就写过这条警告，
+但没给替代入口）；每个 `add` 输出上百行池子表格 ⇒ 成败那一行**被刷走**。
+`add-batch` 把判重当「跳过」继续走，收尾出表。
+（判重靠**异常类型** `DupFound` 分流，不按消息文本 —— `dup_check` 有三条不同的消息，
+按文本匹配会漏 `machineId` 那条，把重复号记成失败。）
+
+### 导出里的号分三类，别只分「能加 / 不能加」（10-08 定型）
+
+| 类 | `probe --summary-json` 形状 | 能加吗 | 怎么处置 |
+|---|---|---|---|
+| 有量 | `ok=true` + `remaining>0` | ✅ | 直接加，立刻出力 |
+| **耗尽但活** | `ok=true` + `remaining=0` + `modelCount=21` | ✅ **能加** | 加进去此刻不出力，**11-01 00:00 UTC 自动重置复活**。10-08 用户拍板「两类都加」|
+| 不可用 | `ok=false` + `invalid_grant` | ❌ | 服务端也拒，**只能重新登录**（skill `kiro-account-manager-ops`）|
+
+🔴 **`remaining<=0` 当 assert 会把「耗尽但活」误杀成废号。** 10-02 那版 SOP 里
+`bad=[r for r if not ok or remaining<=0]` + `assert not bad` ⇒ 10-08 那批 24 个里
+13 个 remaining=0，这个 assert 会**在验号这一步就整批停住**，而它们全是好号。
+判「号是活的」只认 `ok=true` + `modelCount` 够数（catalog 打通了），**不是余额**
+—— 这是 §0 那条「余额尺子判不出死活」的另一面（它既会把封停号读成可用，
+也会把耗尽的好号读成废号）。
+
+🔴 **IdC `400` 至少三种含义，不看响应体分不开**（10-08 为此手搓脚本读 body 才定位）：
+
+| 响应体 | 含义 | 下一步 |
+|---|---|---|
+| `invalid_grant` / `Resource not found` | refreshToken 永久失效 | 重新登录，刷新救不回 |
+| `Invalid profileArn.` | `getUsageLimits` **该带没带** | 号是好的，配额读不到而已，见 [[feedback_kiro_usage_limits_now_demands_profilearn]] |
+| 其它 | 参数真拼错 | 读 body |
+
+`kiro-probe.py` 10-08 起把 idc 分支的 `HTTPError` 接住并**打出响应体 + 归类**
+（原来直接吐 20 行 urllib traceback，末尾只有 `HTTP Error 400: Bad Request`，
+**body 被丢掉**）。social 分支早就这么做了，两边现在对称。
+⇒ **分辨法**：单独跑 `kiro-probe.py catalog --creds <file>`，照样 400 的才是 token 死；
+`catalog` 通而只有 quota 挂的，是 profileArn 那条，号是好的。
+
+🔴 **阳性对照是第 0 步，不是事后补充。** 10-08 那 3 个 400 我先怀疑端点/调用形状，
+拿**同一调用形状**喂一个已知好号（`cut.ansari`）立刻拿到 230 字节 accessToken
+⇒ 一句话定位到「是这 3 个号」。没有这个对照，就会顺着「我 ARN 拼错了 / 端点变了」
+查下去（[[feedback_synthetic_red_is_as_untrusted_as_synthetic_green]]）。
+
+✅ **"同一个号的重新导出"10-01 已由 `dup_check()` 自动拦下，三把判据：**
+`refreshToken` sha256 / **`machineId`** / `email`，任一命中就 `exit` 不发请求。
+
+⚠️ **但 `dup_check` 是单号的最后一道保险，不是批量入口的筛子** ——
+它命中就 `sys.exit`，20 个号的 for 循环会**停在第一个重复上**。
+批量必须先跑 `kiro-batch-prepare.py` 把新增名单筛出来（第 1 步），
+这也是 10-02 那轮 32 个号里挑出 20 个的做法。
+
+背景：只比 refreshToken 的 sha **拦不住**这种 —— 重新注册 OAuth client 会把
+`clientId` + `refreshToken` 全换掉，sha 自然对不上。10-01 那批 10 个里就有 1 个是池里
+id14 的重复导出（`machineId` 逐字相同、只有 client 凭据换了），当时**靠邮箱那条 ⚠️
+人工比出来的，脚本放行了**。额度按**账号**算 ⇒ 并存只会白占一个 id 且共用同一个 credits 池。
+
+- ⛔ **别用 `userId` 做判据**：导出里有，但**服务端不落盘**（线上那 16 个键里没有它）
+  ⇒ 拿它跟池子比是拿一个池里不存在的字段比，**恒不命中**。
+  （10-01 第一版 SOP 就写错成 `userId`，根本执行不了，已改。）
+- ✅ `machineId` 落盘且实测 **15/15 互不相同**，在这个池子里有身份区分度。
+- 真要**替换**旧的那条：`remove <旧id>` 再 add，别两条并存。
+- 验收这道门用了阴性 + 阳性双对照：重放 10-01 那份漏过去的重复导出 ⇒ 拦住；
+  造一个全新号形状 ⇒ 放行。**只验"能拦"不验"不误杀"的话，一道全拒的门长得一样。**
+
+🔴 **`--priority` 默认 0，而在役号可能是 1 ⇒ 不传就会抢役。** 数字小 = 优先
+（`min_by_key`），默认 0 比在役的 1 小，新号立刻变 `currentId`。
+10-01 加 id14（**STUDENT 只有 1000 credits，全池最小档**）时差点吃这个默认值：
+抢役 ⇒ 约一天烧光、同时让 id11/12/13 的 1.7 万 credits 闲置、一天后又触发一次切换。
+⇒ **第 0 步先 `show` 看在役号的 prio，把 `--priority` 对齐着传**，让新号与它平级
+（平级取先出现的那条 ⇒ 老号仍在役）。
+⚠️ **但"加完是 prio=N"只描述写入那一拍，不是稳态**：10-01 我把 10 个号全写 `--priority 1`，
+两小时后现读变成了 0/1/2/3 四层，而我没执行过 `priority` 命令
+（[[feedback_kiro_pool_priority_and_disabled_change_without_us]]）。
+**dry-run 能看出这一点**（它复核时会打 `currentId`）
+—— 这是 dry-run 真正挡下来的东西，不是"看个形状"。
 
 ⚠️ 第 4 步**默认不切**：在役号还有余额时 `priority <老号id> 9` 等于把两个号的余额
 摊薄成半个。老号打满时 kiro.rs 自己 `QuotaExceeded` + `min_by_key` 重选 ——
@@ -704,7 +1028,9 @@ scripts/kiro-lane-regress.sh --rounds 3                        # 5. 19 条道回
 
 探针遇到 401/403 自己走
    OIDC refresh，**用户给的 `accessToken` 过期不影响**。
-   绿的样子：`AI_EDITOR` **19 个模型** + 档位/额度读出来（这一步同时证明**不是封停号**）。
+   绿的样子：`AI_EDITOR` 读出**付费档 21 个（10-02；10-01 还是 20）/ FREE 档 9 个**模型 + 档位/额度读出来
+   （这一步同时证明**不是封停号**）。🔴 **别把条数当固定判据** —— 09 月记的是 19、
+   10-01 付费档已是 20、FREE 档只有 9（见 §0 档位↔模型）。**条数变了先查档位，不是先怀疑探针。**
    ⚠️ 导出 json 里的 `expiresAt` 是**毫秒 epoch**，线上格式是 **ISO** ——
    `kiro-pool.py add` 索性**不传这个字段**，让服务端自己 OIDC 换，别手动转。
    ⚠️ `clientSecret` 是 ~4.8KB 的三段 JWT，**用 heredoc 单独写文件再注入**，
@@ -795,7 +1121,35 @@ scripts/kiro-lane-regress.sh --rounds 3                        # 5. 19 条道回
   命中后 kiro.rs 自动禁用该号（`disabledReason:"QuotaExceeded"`）**并回写 PVC**（`disabled` 真变 true）。
   ⇒ 判"某模型打不动"先看是不是**这个号**402 了，别赖到模型头上。
   🔑 续命选项：`overageCapability: OVERAGE_CAPABLE` + `overageCap 10000` + `overageRate 0.04 USD/credit`，
-  默认 `overageStatus: DISABLED`；在 kiro.dev 打开即可付费续用。**账单决定，别自己开。**
+  默认 `overageStatus: DISABLED`。
+
+### 开启 overage（10-14 实测，API 方式，无需登录 kiro.dev）
+
+```sh
+cd /tmp   # 🔴 避免 operator/__init__.py shadow
+python3 scripts/kiro-enable-overage.py --check 128 129 130   # 先只读看当前状态
+python3 scripts/kiro-enable-overage.py 128 129 130           # 真开
+python3 scripts/kiro-enable-overage.py all-new               # 或：所有未消耗的 social 号
+```
+
+API = `POST https://management.us-east-1.kiro.dev/setUserPreference`，body：
+```json
+{"overageConfiguration": {"overageStatus": "ENABLED"}, "profileArn": "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK"}
+```
+UA 与 `getUsageLimits` 相同（`kiro_client.rs:395` `with_kiro_runtime_management_headers`）。
+
+**三个坑（10-14 全踩了）：**
+1. 🔴 **200 不代表立刻生效**：`setUserPreference` 返回 200 后立刻 `getUsageLimits` 验证，
+   `overageStatus` 仍读出 `DISABLED`。**有传播延迟（数秒）**。第一轮 13 个号全报"开启失败"，
+   等几秒重验 12 个翻成 ENABLED。⇒ 验证前等 3~5 秒。
+2. 🔴 **gmail 号可能有账号级限制**：13 个号里 1 个（`nerbonnedrivepennino@gmail.com`，id=136）
+   200 OK 但 overageStatus 始终 DISABLED，且响应缺少 `overageCap` 字段（其他号都有）。
+   非 icloud 的 social 号可能受上游限制。
+3. 🔴 **只对 social 号可行**：脚本走 `/refreshToken`（social 刷新路径）。
+   IdC 号的 token 走 AWS OIDC `/token`，且 social 那个 `profileArn` 不认 IdC token（403）。
+
+**⚠️ 开了 overage 后该号用完 credits 按 $0.04/credit 继续计费，上限 10000 credits = $400。
+账单决定。**
 
 ### 摘掉一个账号 —— 走 `DELETE`，零重启（09-17 19:52 实测，约 1 分钟）
 
@@ -866,6 +1220,88 @@ key 的来源是 `secret/kiro-rs-bootstrap` 的 `config.json`（ns 里**没有**
 | 11 | `geovanamaya@googlegroups.com` | 09-24 09:01 | `…20260924-090110` | 🔴 **全池第一个 `authMethod:social`（Github）号**，也是第一个 **KIRO PRO MAX（5000）**。导出只有 `email`+`refreshToken`+`provider:"Github"`，两个脚本为此各加 social 分支（§D3 第 0 步第三种形状）。服务端日志实测打的是 `正在刷新 Social Token...`（不是 IdC），落盘带 `profileArn` |
 | 12 | `gurjardevbax8@gmail.com` | 09-26 15:52 | `…20260926-155201` | `provider:"Google"` —— **第三种 social 来源**（前有 Github/BuilderId），走的路与 id11 逐字相同：导出只有 `email`+`refreshToken`，`authMethod` 由 `auth_method_of()` 判成 `social`，`machineId` 按 `sha256("KotlinNativeAPI/<rt>")` 派生固化。**全程零新坑，脚本直通**。PRO MAX 5000 满额。⚠️ **本次探测又没轮转 refreshToken**（前后 sha256 相同）—— 这是第 2 个样本，仍**不足以说"social 不轮转"**，`--out-rotated` 照带 |
 | 13 | `ananada-yuutt@googlegroups.com` | 09-28 14:53 | `…20260928-145344` | `provider:"Github"`，形状与 id11/id12 相同，脚本直通零新坑。🔴 **全池第一个 `KIRO POWER`（10000 credits）** —— 见下「档位」那条。⚠️ social 第 3 个样本**又没轮转**（前后 sha256 相同，len=230）。🔴 **加完后 `currentId` 自己从 10 变成了 13，我没执行 `priority`** —— 见下 |
+| 14~25 | 10-01~10-02 那两批 | — | 见 `[[project_kiro_pool_batch_add_nine_student_2026_10_01]]` | 全 `KIRO STUDENT 1000`；id14 首见 STUDENT 档，id25 是第 5 个 social 号 |
+| 53 | `primmer.calcium-9o@icloud.com` | 10-08 09:26 | `credentials.json.20261008-092632` | `provider:"Github"` 第三种形状，脚本直通零新坑。**加进来时是全池唯一有量的号**：`KIRO PRO+ 2000/2000` 满额、21 个模型，而在役 id44 只剩 155.9 且在以 ≈17 credits/min 掉（四分钟后 86.67）⇒ 按 §D3 第 4 步仍**不切**，让 `QuotaExceeded` 那条兜底自己接。零重启、45/45 落盘、回归 40/40 绿。⚠️ social 第 **4** 个未轮转样本（前后 sha256 相同，len=230）—— 四个了仍不翻案，`--out-rotated` 照带。🔴 这轮不在公司内网，走的是 §0.2 那两条隧道 |
+| **26~45** | **20 个 `*@binus.ac.id`** | **10-02 22:5x** | 逐号 `credentials.json.<ts>`（`add` 每次自动备份，20 份） | **单轮最大批次**，源 `~/Downloads/kiro-accounts-32-2026-10-02.json` 的 32 个里**去重后剩 20 个**。全 `KIRO STUDENT 1000`、**21 个模型**（含 `claude-opus-5.5` + 上游 10-02 新出的 `claude-sonnet-5.5`），合计 ≈**19240 credits**。12 个 social（Github）+ 8 个 idc（BuilderId）。`--priority 2` 对齐在役 id17。回归 **19/19 绿**、`in_tok` 全在基线 ±5% 内、pod `restarts=0`、`currentId` 全程未动。详见下「§D4.1」 |
+| 46~52 | 7 个 `*@binus.ac.id` | 10-0x | — | 盘上 `email` 是 **null**（social 导出那种形状）⇒ 判「新增那条是不是我的」时 email 那把判据对它们**恒不命中**，身份门必须能只靠 `machineId` 认（`assert_landed()` 为此读盘上而不是 API）|
+| **54~74** | **21 个 `*@binus.ac.id`** | **10-08 14:2x~14:4x** | 逐号 `credentials.json.<ts>`（21 份） | 源 `~/Downloads/kiro-accounts-60-2026-10-08.json` 的 **60 个里 36 个已在池**（判重命中，含 4 个只中 `rt_sha+machineId` 的 social 漂移）、24 个新增、其中 **3 个加不进去**（refreshToken 死）。全 `KIRO STUDENT 1000` + 21 个模型；加进去时 11 个有量（≈10812 credits）、10 个耗尽但活。池 `45→66`、`available 2→18`，零重启，回归 **20/20 绿**。🔴 **加号过程中在役自己从 id53 换到 id58**：id53 的 PRO+ 从 150 掉到 0 ⇒ `QuotaExceeded` + `min_by_key` 重选，又一次兑现「别提前切 priority」那条兜底。详见下「§D4.2」 |
+| **75~83** | **9 个 `*@binus.ac.id`** | **10-09 18:3x** | 逐号 `credentials.json.<ts>`（9 份） | 源 `~/Downloads/kiro-accounts-69-2026-10-09.json` 的 **69 个里 57 个已在池**、12 个新增、其中 3 个仍是死号。**第一轮用 `add-batch`**：9/9 一次过、收尾表直接给结论（不用再数「盘上 N 个号」）。全 `KIRO STUDENT 1000` + 21 个模型，满额 ≈**9000 credits**。池 `66→75`，零重启，在役仍 id70（182 余额，按 §D3 第 4 步不切）。回归 20/20 绿。<br>🔴 **那 3 个死号（`aldi.iasha`/`christian.oey`/`denis.darmawan`）的 token 与 10-08 那份导出逐字节相同、`status` 仍是 `invalid` ⇒ 没重登过，是旧快照原样带出来的**。判「这批到底重登没」别看导出日期，比 **refreshToken sha + `status` 字段**。<br>⚠️ 本轮消耗速率：10-08 加的 11 个有量号，**一天后只剩 2 个**（id70 243、id74 满额）⇒ 一轮加 9~21 个号撑不过两三天，见 §0 那条 credit 墙。 |
+| 97 | `pedro-henrique@googlegroups.com` | 10-12 16:23 | `credentials.json.20261012-162331` | `provider:"Github"` 第三种形状（只有 `email`+`refreshToken`+`provider`），**单号 `add` 脚本直通零新坑**。`KIRO PRO+ 2000/2000` 满额、21 个模型（含 `claude-opus-5.5`/`claude-sonnet-5.5`）。池 `88→89`、`available 4→5`，零重启，在役仍 id93（prio 对齐 2，按 §D3 第 4 步**不切**）。回归 **20/20 绿**、`in_tok` 19 条全在基线 ±5% 内。⚠️ social 第 **5** 个未轮转样本（`--out-rotated` 写出来的那份 `rotated:false`、前后 sha256 相同、len=230）—— 五个了仍不翻案，照带。🔴 **加进来时它是全池唯一满额的号**：池里 89 条只有 5 条 available，id94~96 全 `succ=0`，其余 80+ 条都 `disabled=True reason=QuotaExceeded` |
+| **98~99** | `zahwa.zefira@binus.ac.id` / `sherley.suciati@binus.ac.id` | 10-12 16:35 | 逐号 `credentials.json.<ts>`（2 份） | 源 `~/Downloads/kiro-accounts-79-2026-10-12.json`：**79 个里 74 个判重命中、筛子报"新增 5 个"，但其中 3 个是已知死号**（`christian.oey`/`denis.darmawan`/`aldi.iasha`，rt sha + `clientId` 与 10-11 那份逐字节相同、`status` 仍 `invalid` ⇒ 没重登，按 §D3 那条直接跳过不浪费 probe/add）⇒ **真新的只有 2 个**，都 `status=active`、`KIRO STUDENT 1000` 近满额（999.99 / 999.97）、21 个模型、idc。`add-batch` **2/2 一次过**，池 `89→91`、`available 5→6`，零重启，回归 **20/20 绿**、`in_tok` 19 条全在基线 ±5% 内。<br>🔴 **这份导出里 8 个号的 `email` 从 `*@binus.ac.id` 改成了 `*@outlook.com`**（`remynfhqusai` 等，池里 id89~96）—— rt sha + `machineId` 与 10-11 那份逐字相同，只是 account-manager 里换了邮箱标签。判重**只中 `rt_sha+machineId` 不中 `email`** 正好拦住；⚠️ 反过来说**按 email 关联账号的任何脚本都会把它们当新号**，这是 §0 那条「盘上 email 不可靠、必须有第二把判据」的又一次兑现。<br>🔴 **加号过程中在役自己从 id93 换到 id94**（我没执行 `priority`），又一次 `QuotaExceeded` + `min_by_key` 兜底。 |
+| **128~140** | **13 个 social/Github PRO+ 2000**（12 个 `*@icloud.com` + 1 个 `*@gmail.com`） | **10-14** | 无单独备份（`add-batch` 内含） | 全部从 kiro-account-manager 导出，`authMethod=social`，**只需 `refreshToken` + `email`**（脚本自动派生 `machineId`）。12 个用 `add-batch --priority 2` 一次过 + 1 个 `add --priority 2`。全 `KIRO PRO+ 2000/2000` 满额、21 个模型。池 `119→132`，零重启。<br>🔴 **本轮首次用脚本批量开启 overage**（`kiro-enable-overage.py`）：13 个目标，12/13 返回 ENABLED，1 个（id=136 `nerbonnedrivepennino@gmail.com`）200 OK 但始终 DISABLED 且缺 `overageCap` 字段 —— gmail 号的账号级限制，非脚本 bug。<br>🔴 **setUserPreference 200 不代表立即生效**：第一轮验证全报 DISABLED，等数秒重验 12 个翻成 ENABLED（传播延迟）。 |
+
+### §D4.2 🔴 10-08 这批的三件事：rc=0 不是落地 / 余额不是死活尺子 / 400 有三义
+
+24 个新增号的**结局是三类不是两类**，而 10-02 那版 SOP 的 assert 只认两类：
+
+| 结局 | 个数 | 判据 |
+|---|---|---|
+| 加成功 | 21 | 池子条数真涨了，且涨的那条 email/machineId 与提交的一致 |
+| 加不进去 | 3 | 服务端回 200 + `{"error":"…IdC Token 刷新失败: 400 …invalid_grant…"}` |
+| （其中耗尽但活） | 10 | `ok=true` + `modelCount=21` + `remaining=0` ⇒ **能加**，11-01 自动复活 |
+
+三条已固化进代码/文档，别再手工记：
+
+1. **`add` 的 rc=0 不是落地** ⇒ `assert_landed()`（条数门 + 身份门）+ `add-batch` 收尾表，
+   门禁 `backend/tests/test_kiro_pool_add_landing.py` 13 条（七道门逐条删都实测变红，
+   阳性对照「真加成了放行」「全绿不非零退出」保持绿）。
+2. **`remaining<=0` 不是「不能加」** ⇒ 验号脚本改成三分类，不再 `assert remaining>0`。
+3. **IdC 400 至少三义** ⇒ `kiro-probe.py` idc 分支接住 `HTTPError` 打响应体并归类。
+
+还有一条**没有写进代码、只能靠纪律**的：
+🔴 **阳性对照是第 0 步。** 那 3 个 400 我先怀疑端点/调用形状变了，是拿**同一调用形状**
+喂一个已知好号（`cut.ansari`，立刻拿到 230 字节 accessToken）才一句话定位到
+「是这 3 个号」。这与 [[feedback_kiro_usage_limits_now_demands_profilearn]] 那轮
+（拿 3 个有 usageData 的老号打同样形状、全是同一个 400）是同一个手法，
+**两轮都是靠它才没顺着「我拼错了」查下去。**
+
+### §D4.1 🔴 一份导出里混着「已在池里的号」—— 判重的两种形状都在这批里出现了
+
+10-02 那份 32 个号的导出，**12 个已经在池里**（id14~25 那两批就是从同一个来源导出的），
+只有 20 个是新的。⇒ **用户给的导出文件不是「新号清单」，是账号管理器的整库快照**，
+拿到手第一件事是**跟线上逐号比**，别按文件名里的数字当新增数。
+
+🔴 **三把判据各拦一种漂移组合，一把都不能省** —— 这批把三种形状全实证了：
+
+| 形状 | 本批样本 | 命中的判据 |
+|---|---|---|
+| **原样重复导出** | 10 个（如 `alvin.abadi` ↔ id24）| rt sha / machineId / email **三把全中** |
+| **换过 OAuth client** | `ferril.wananda` ↔ id14 | machineId + email（**rt sha 不中** —— 重新注册 client 会把 `clientId`+`refreshToken` 全换掉）|
+| **social 刷新过** | `shyntha.respati` ↔ id25 | **只有 email 中**（rt 与 machineId 都漂了）|
+
+🔴 **最后一行是「邮箱那把门」第一次成为唯一有效判据。**
+10-01 补 `machineId` 的理由是「rt 换了但 machineId 不变」，而 social 号的 machineId
+派生式 `sha256("KotlinNativeAPI/<rt>")` **跟着 rt 一起漂**（§D3 第 0 步）
+⇒ **那条理由对 social 不成立**，只剩 email 能拦。
+⚠️ 10-02 23:05 那份 36 个号的导出里，`aurora.salsabila`（我当天刚加成 id31）
+也已经变成 `machineId+email` 命中、rt 不中了 —— **social 号的 rt 几小时内就会漂**。
+
+✅ **这一整套 10-02 已落成 `scripts/kiro-batch-prepare.py` + 30 条门禁**
+（`backend/tests/test_kiro_batch_prepare.py`）：比对三把判据 + 拍平 6 道门。
+**阴性对照实测**：删掉 email 那把门 ⇒ 3 条红（含那条「只有 email 命中」的）；
+删掉 machineId ⇒ 3 条红；拿掉不可见字符检查 ⇒ 3 条红；拿掉空集断言 ⇒ 1 条红。
+**阳性对照**：全新号必须放行（少了这条，一道**全拒**的门与好门读数逐字相同）。
+⚠️ 每条 `only_*` 用例刻意让**其余两把判据都不命中** ——
+10-01 第一版测试把邮箱也写成相同的，于是删掉 machineId 那道门它照样通过，
+**分不清谁拦的对照等于没有对照**。
+
+⚠️ **拍平后要为 social 丢掉 `region`/`clientId`/`clientSecret` 三个字段**（见 §D3 第 0 步
+第三种形状）：这批 12 个 social 号导出里 `region` 都是 `null`，但带 `profileArn`；
+线上 id25 落盘也是 `region=None` ⇒ 不传、让服务端回落 `config.json` 全局值。
+
+⚠️ **social 号必须拿 `--out-rotated` 那份去 `add`**：本批 16 个带 `--out-rotated` 的
+探测**前后 sha256 全部相同**（又是 16 个未轮转样本，累计 20 个）——
+**仍然不翻案**，代码按会轮转处理，`add` 照喂轮转后那份。
+
+🔴 **收尾那条「尺子坏了长得像 20 个号全死」**：第一轮我用
+`grep -E '^\s+(claude|gpt|…)'` 数模型行、`grep -oE 'KIRO [A-Z+ ]+'` 取档位，
+**20 个号全部打出 `tier=[] model_lines=0 err=0`** —— 看着像整批凭据都废了。
+真因是**探针输出的表格行没有前导空白、档位写在 `订阅` 那一行**，三条 grep 全都对不上。
+⚠️ **连"报错行"那条 grep 也是 0** ⇒ 「全 0」本身就该先怀疑尺子：
+**三个互相独立的量全部归零，比"20 个号同时死"更可能是一个共同的解析 bug**。
+✅ **根因已修**（不只是"下次小心"）：`kiro-probe.py --summary-json` 吐合法 JSON 数组，
+带 `ok`/`error` ⇒ 不用再 grep 人类输出，失败也不会变成"安静地少一行"。
+见 §0.1 那条红线 + [[feedback_all_metrics_zero_at_once_is_the_ruler_not_the_fleet]]。
 
 ### 已经不在池子里的
 
@@ -901,10 +1337,49 @@ key 的来源是 `secret/kiro-rs-bootstrap` 的 `config.json`（ns 里**没有**
 09-21 用户发来 `alhassanrashida749` 的导出写着 `usage.current: 0 / limit: 2000`，像个满额新号 ——
 但 `exportedAt` 解出来是 **09-17 08:13 UTC**，而该凭据（三个字段 sha256 与线上 id4 **逐字节相同**）
 live 读出来是 **`2000/2000` 已耗尽**。
-⇒ 判额度只认实时读；**判「是不是重复号」只认 `refreshToken` 的 sha256**，不看邮箱、
-不看导出里的 `id`/`userId` —— 这一条现在由 `kiro-pool.py add` **自动做**（§0.1）。
+⇒ 判额度只认实时读；判「是不是重复号」**不看导出里的 `usage`/`id`/`userId`**（`userId` 服务端
+压根不落盘），认 **`refreshToken` sha256 + `machineId` + `email` 三把** ——
+10-01 起由 `kiro-pool.py add` 的 `dup_check()` **自动做**，任一命中就 `exit` 不发请求。
+（⚠️ 这里以前写的是"只认 refreshToken sha256、**不看邮箱**" —— 那样会漏掉
+"同一个号重新注册 OAuth client 后的重新导出"，10-01 真漏过一个，见 §D3 批量那节。）
 
-### 重置日复活（`nextDateReset` 全是 `2026-10-01 00:00 UTC`）
+### 重置日复活（`nextDateReset` = **每月 1 日 00:00 UTC**，别写死某一天）
+
+🔴 **重置日会同时发生两件事，别只盯额度那一件（10-01 实测）：**
+1. 额度归零复活 —— id9/id10 的 `2000/2000 耗尽` 变成 `0/2000`。
+2. **订阅到期的号会掉成 `KIRO FREE`（cap 从 2000/5000/10000 变 50）并因此失去 11 个模型**
+   —— 10-01 一天之内 id9/id11/id13 三个号掉档（PRO+→FREE、PRO MAX→FREE、POWER→FREE）。
+   ⇒ **重置日后必须重读一次 `show --with-quota` 看档位，不是只看余额回没回来。**
+
+🔴 **掉档的号与付费号混在优先级里 = 一颗定时炸弹（10-01 发现，未处置）。**
+`filter(!disabled).min_by_key(priority)` 只看 `priority` 与 `disabled`，**不看档位** ⇒
+FREE 档的号被选中时，**11 条 opus/gpt 道当场全挂**（那些模型 FREE 档没有），
+而症状是模型级报错、不是「号死了」，很难一眼归因。
+
+⚠️ **这个风险的具体排布会自己变，处置前必须现读。** 10-01 当天两次读到的就不一样：
+- ~11:00 UTC：id12(PRO MAX) / id13(**FREE**) / id14(STUDENT) **三者同 prio=1**；
+- ~14:00 UTC：id12→prio **0**，id13(**FREE**)→prio **1**，10 个 STUDENT→prio **2**
+  ⇒ **FREE 的号优先级反而高于全部付费号**，比前一次更危险。
+
+🔴 **「额度复活」≠「kiro.rs 会自动重新启用被 402 禁用的号」（10-13 源码精读，skill `kiro-rs-src` §4）。**
+本节说的复活是 **AWS 侧**额度归零（`nextDateReset`）；kiro.rs **没有任何日期感知的自动复活逻辑**
+（grep `QuotaExceeded` 全仓只有枚举/禁用/显示三处）。`disabled_reason=QuotaExceeded` 的号要重新可用，
+靠 admin `POST /credentials/{id}/reset`（`InvalidConfig` 除外）或重建该凭据。
+且 402 禁用是**内存态**：`kiro_stats.json` 不存 disabled，但要小心池里任何一次 token 刷新成功
+都会触发 `persist_credentials` 把当时的 disabled 顺手写进 credentials.json（约 1h 内）⇒
+此后重启也不清。「remaining=0 但 catalog ok」的号（本节主场景）**没有被 402 禁用**，
+重置日后无需任何操作自然恢复 —— 两种「耗尽」别混。
+
+而这期间**我没执行过任何 `priority` 命令** —— 见
+[[feedback_kiro_pool_priority_and_disabled_change_without_us]]（`disabled` 也会自己变回 False）。
+⇒ **先 `show --with-quota` 现读「档位 + disabled + prio」三列**，再决定给谁降权；
+照着旧快照下 `priority` 命令可能打错对象。处置方式：`priority <id> 9` 降权或 `remove <id>`。
+
+⚠️ **掉成 FREE 的号 `currentUsage` 可以远超 cap 且 kiro.rs 不一定禁用它**：
+10-01 id13 是 `494.93/50.0`（超 10 倍）却仍 `disabled=False`，能被 `min_by_key` 选中去服务；
+而 id11 同样超额（723.63/50）已被禁用。**两个号同样超额、禁用状态不同，为什么没有数据，不下归因。**
+⇒ 判「这个号会不会被选去服务」只认 `show` 的 `disabled` 列现读，
+别从「它超额了所以一定被禁」推 —— 那条推理 10-01 就是错的。
 
 ```sh
 python3 scripts/kiro-pool.py extract \
@@ -927,13 +1402,33 @@ scripts/kiro-lane-regress.sh --save-baseline   # 确认上游确实改了前导�
 ```
 
 🔴 **09-29 修掉「量了一个生产根本没挂的产物」**：脚本第 2 步原来从 `cm/litellm-config`
-现取车道名，但 **litellm-proxy 挂的是派生的 `litellm-cwfb-stable-<hash>`**（`subPath`，不热更）。
+现取车道名，但 **litellm-proxy 挂的是派生 CM**（`subPath`，不热更）——
+名字现读别按形状猜，10-04 起是 `litellm-product-proxy-config-<hash>`（见 §D0 那张表）。
 09-29 实测两者**已漂 161 行**（09-25/09-26 那批 prometheus 指标配置只进了派生 CM），
 车道名也差一条 —— 刚加完 opus-5-5，门禁却报「18 条 ≠ 预期 19」。
 ⇒ 现在先读 `deploy/litellm-proxy` 的 `volumes[0].configMap.name`，再从**那个** CM 取车道名。
 
 ⚠️ 这不只是 kiro 的坑：**任何"从 `cm/litellm-config` 读生产状态"的尺子都是错的**。
 那份 CM 是下一次派生的输入，不是在跑的配置；两者漂了也不会报错。
+
+🔴 **10-09 修掉第三个同族缺陷：`paste -sd'|'` 在 macOS 上把 DEAD 正则拼成空串。**
+完整因果链（**只在真有道打挂那一轮触发** ⇒ 平时全绿看不出来，而它恰好在最需要这把
+尺子的那轮把尺子弄坏）：
+
+```
+paste -sd'|'            ← BSD(macOS)：-d 吃掉分隔符后没有文件参数 ⇒ 报 usage:
+  ⇒ DEAD_RE 是空串
+  ⇒ grep -vE "" "$CUR"  ← 空正则匹配每一行，-v 于是滤光**全部 20 行**
+  ⇒ $CUR 变 0 字节
+  ⇒ 报「打通的道有 19 条，却只解析出 0 条 in_tok ⇒ 这把尺子自己坏了」
+```
+
+症状又一次把人带去查解析器，真因是一个 `paste` 参数。两处都修了：
+加显式 `-` 读 stdin（GNU 下行为不变）、并把那行的 `|| true` 去掉改成空正则就 `exit 1`
+（**原来失败被咽掉，所以才表现成「尺子坏了」而不是「脚本报错」**）。
+⚠️ 第 79 行那个 `paste -sd,` 在 **ssh 字符串里、跑在 198 的 GNU 环境**，是合法的，别一起改。
+门禁 `backend/tests/test_kiro_lane_regress_dead_filter.py` 7 条
+（含一条阴性对照锁住「空正则 + `grep -v` = 全滤光」这个前提本身）。
 
 🔴 **09-28 修掉两个让第 4 步静默不跑的缺陷**（改之前，一条道挂 = 降级那把尺子一次都没量）：
 

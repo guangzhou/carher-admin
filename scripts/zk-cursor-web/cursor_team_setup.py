@@ -510,6 +510,18 @@ def merge_config(dry):
                 seen.add(x); outl.append(x)
         ai["userAddedModels"] = list(outl)
         ai["modelOverrideEnabled"] = list(outl)
+        # 本方案的名字从显式关闭表里剔掉;另把 Cursor 目录里 defaultOn 的自家模型(fable/argon…)
+        # 加进去隐藏 —— 同事点了它走 Cursor 自家推理,用不了我们的 key(2026-10-14,与 js 版同)。
+        ovd = [x for x in (ai.get("modelOverrideDisabled") or []) if x not in seen]
+        cat = d.get("availableDefaultModels2") if isinstance(d.get("availableDefaultModels2"), list) else []
+        hide = [m["name"] for m in cat if isinstance(m, dict) and m.get("defaultOn") and m.get("name")
+                and m["name"] != "default" and m["name"] not in seen]
+        for n in hide:
+            if n not in ovd:
+                ovd.append(n)
+        ai["modelOverrideDisabled"] = ovd
+        if hide:
+            print("   隐藏 Cursor 自带模型 %d 个(避免点到走不了我们 key 的模型):%s" % (len(hide), ", ".join(hide)))
     else:
         ai["userAddedModels"] = uam_before
         ai["modelOverrideEnabled"] = ove_before

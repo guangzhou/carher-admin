@@ -1720,6 +1720,16 @@ async function mergeConfig(args, dry) {
        处置：把本方案的名字从 Disabled 里整个剔掉；**不碰**他自己关的其它名字
        （那是他的选择，EXACT 语义清的是清单，不是他的开关偏好）。 */
     ai.modelOverrideDisabled = ovdBefore.filter((x) => !seen.has(x));
+    /* ── 2026-10-14 菜单里冒出 Cursor 自家的 claude-fable-5-1 / gemini-4-argon / muse-spark-1.3 ──
+       Cursor 的显示规则(workbench 原文):`enabled.includes(n) || (!disabled.includes(n) && defaultOn)`。
+       服务端目录里 defaultOn=true 的自家模型,我们没登记也会显示 ⇒ 同事一点就走 Cursor 自家推理
+       (免费号报 "Free plans can only use Auto" / "does not support custom API keys")。
+       ⇒ 把目录里 defaultOn、又不在本方案清单里的名字加进 Disabled(`default`=Auto 留着)。
+       目录随服务端变,UPGRADE/INSTALL 每次都按当时的目录重算;UNINSTALL 不还原这项(只是隐藏)。 */
+    const cat = Array.isArray(d.availableDefaultModels2) ? d.availableDefaultModels2 : [];
+    const hide = cat.filter((m) => m && m.defaultOn && m.name && m.name !== "default" && !seen.has(m.name)).map((m) => m.name);
+    for (const n of hide) if (!ai.modelOverrideDisabled.includes(n)) ai.modelOverrideDisabled.push(n);
+    if (hide.length) console.log("   隐藏 Cursor 自带模型 %d 个(避免点到走不了我们 key 的模型):%s", hide.length, hide.join(", "));
   } else {
     // --zk-delta-only:一个字不动。
     ai.userAddedModels = uamBefore;

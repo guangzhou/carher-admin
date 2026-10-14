@@ -365,6 +365,34 @@ if [ "${N11:-0}" -lt 10 ]; then bad "⑪ 菜单只有 $N11 个 —— 下面几�
 fi
 fi
 
+# ── ⑫ Cursor 自带的 defaultOn 模型(claude-fable-5-1 等)必须被隐藏 ───────────────
+# 10-14 用户:「为什么用户能在 cursor 里看到 fable-5.1」。Cursor 显示规则 =
+# enabled.includes(n) || (!disabled.includes(n) && defaultOn) ⇒ 服务端目录里 defaultOn 的自家模型
+# 我们没登记也显示,同事一点就走 Cursor 自家推理。判据:装完 disabled 含它们、default(Auto) 不进、
+# 用户自己关掉的别的名字原样保留;阳性对照=种子里它们确实 defaultOn。
+echo ""
+UD12="$TMP/u12"
+seed_db "$UD12" "{\"openAIBaseUrl\":\"http://127.0.0.1:8788/v1\",\"useOpenAIKey\":true,
+ \"availableDefaultModels2\":[
+   {\"name\":\"default\",\"defaultOn\":true},
+   {\"name\":\"claude-fable-5-1\",\"defaultOn\":true},
+   {\"name\":\"gemini-4-argon\",\"defaultOn\":true},
+   {\"name\":\"claude-fable-5\",\"defaultOn\":false},
+   {\"name\":\"grok-4.7\",\"defaultOn\":true}],
+ \"aiSettings\":{\"userAddedModels\":[],\"modelOverrideEnabled\":[],\"modelOverrideDisabled\":[\"my-own-off\",\"grok-4.7\"]}}"
+L12="$TMP/run12.log"
+run_installer "$UD12" --upgrade </dev/null >"$L12" 2>&1 || true
+B12="$(read_blob "$UD12")"
+if [ -z "$B12" ]; then bad "⑫ 跑完读不到 blob(见 $L12)"; else
+  DIS12="$(jq_get "$B12" 'JSON.stringify(d.aiSettings.modelOverrideDisabled)')"
+  echo "$DIS12" | grep -q '"claude-fable-5-1"' && echo "$DIS12" | grep -q '"gemini-4-argon"' \
+    && ok "⑫ Cursor 自带 defaultOn 模型已隐藏(fable-5-1 / gemini-4-argon)" || bad "⑫ 没隐藏 Cursor 自带模型:$DIS12"
+  echo "$DIS12" | grep -q '"default"' && bad "⑫ 把 Auto(default)也关了:$DIS12" || ok "⑫ Auto(default)没被关"
+  echo "$DIS12" | grep -q '"my-own-off"' && ok "⑫ 用户自己关掉的名字原样保留" || bad "⑫ 用户自己关的 my-own-off 被弄丢了:$DIS12"
+  echo "$DIS12" | grep -q '"grok-4.7"' && bad "⑫ 我们菜单里的 grok-4.7 还在关闭表里(会显示成灰的):$DIS12" || ok "⑫ 本方案的名字不在关闭表里"
+  echo "$DIS12" | grep -q '"claude-fable-5"' && bad "⑫ 本来就不显示的 claude-fable-5 也被加进去了(多余)" || ok "⑫ 原本就隐藏的不重复加"
+fi
+
 echo ""
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi
 echo "✅ 全过(整表赋值:清单逐字按序 == DEFAULT_MODELS · 退役名/第三方名/上一代 sa- 名全摘净且选中位 re-point · INSTALL 与 UPGRADE 两条路都换代 · 写库前有快照 · --upgrade 不问 Key 且幂等 · --bare-sa 只动 sa- 那几个)"

@@ -78,6 +78,19 @@ SSH = ["ssh", "-n", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=20",
        "cltx@10.68.13.198"]
 KUBECTL = "sudo -n kubectl"
 NS = "litellm-product"
+_CHUNK = 96 * 1024    # 单次 ssh stdin 上限（见 sh() 里 10-15 的说明）
+
+
+def _retry(fn, tries=6, wait=3.0):
+    """只用于**幂等**的远端读/写（分块上传、sha 校验、拼接）。不要包 kubectl create/patch。"""
+    last = None
+    for i in range(tries):
+        try:
+            return fn()
+        except SystemExit as exc:
+            last = exc
+            time.sleep(wait * (i + 1))
+    raise last
 REPO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "..", "k8s", "litellm-callbacks")
 VOLUME = "callbacks"
@@ -120,6 +133,34 @@ def sh(cmd, check=True, stdin_data=None):
     # ⚠️ SSH 里带着 `-n`（stdin 接 /dev/null，防循环里 ssh 吞掉外层输入）。
     # 要喂 stdin 就必须把 `-n` 摘掉，否则载荷被静默丢弃 —— `kubectl create -f -`
     # 会收到空输入，报的错跟"内容不对"长得一样，查起来很贵。
+    if stdin_data is not None and len(stdin_data) > _CHUNK:
+        # 🔴 2026-10-15：单条 ssh 会话喂 ≥~1 MB stdin 必断（`Read from remote host:
+        # Operation timed out`，rc=255），512 KB 以下 0.5s 正常 —— 是这台 Mac 经 VPN
+        # 到 198 的链路属性，不是 kubectl 或载荷内容。分块落到远端临时文件、核 sha
+        # 后再一次性喂给 cmd：失败只会停在上传阶段，集群零改动。
+        # 同日复测：256 KB 也会随机断（3 次里 2 次），128 KB 稳 ⇒ 链路是随机丢长连接，
+        # 不是固定阈值。每块写成独立文件（重试幂等），全部到齐后按序拼接再核 sha。
+        tmp = "/tmp/_cbup_%s" % sha(stdin_data)[:16]
+        _retry(lambda: sh("rm -rf %s %s.d && mkdir -p %s.d" % (tmp, tmp, tmp)))
+        parts = [stdin_data[i:i + _CHUNK] for i in range(0, len(stdin_data), _CHUNK)]
+        for n, part in enumerate(parts):
+            want = sha(part)
+            def put(n=n, part=part, want=want):
+                sh("cat > %s.d/%05d" % (tmp, n), stdin_data=part)
+                if sh("sha256sum %s.d/%05d | cut -c1-64" % (tmp, n)).strip() != want:
+                    raise SystemExit("chunk %d sha mismatch" % n)
+            _retry(put)
+        _retry(lambda: sh("cat %s.d/* > %s && rm -rf %s.d" % (tmp, tmp, tmp)))
+        got = _retry(lambda: sh("sha256sum %s | cut -c1-64" % tmp)).strip()
+        if got != sha(stdin_data):
+            sh("rm -f %s" % tmp, check=False)
+            raise SystemExit("分块上传后 sha 不符（%s != %s），集群未改动" % (got[:12], sha(stdin_data)[:12]))
+        try:
+            # cmd 读的是自己的 stdin（`base64 -d | ...`、`base64 -d > f && ...`），
+            # 把整条 cmd 包进子 shell 再重定向，语义与原来一条 ssh 喂 stdin 完全一致。
+            return sh("( %s ) < %s" % (cmd, tmp), check=check)
+        finally:
+            sh("rm -f %s" % tmp, check=False)
     argv = [a for a in SSH if a != "-n"] if stdin_data is not None else list(SSH)
     r = subprocess.run(argv + [cmd], input=stdin_data,
                        capture_output=True, text=True)

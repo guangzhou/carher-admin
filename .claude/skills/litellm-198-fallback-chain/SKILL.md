@@ -13,6 +13,8 @@ description: >-
   Use when the user mentions 兜底/fallback 链、"X 挂了兜到 Y"、改 fallbacks、
   兜底没生效、兜底能不能兜住、fallback 回归验证、sa-grok-4.6、
   要给某个模型组换/加备用腿，或**去掉/摘掉/取消某人某把 key 某个模型的兜底**。
+  or 「上游挂了，把所有 key 的 X 先切到 Y、原来的做兜底」/「恢复了改回来、Y 当第一兜底」
+  （§10：先审计 per-key 表、先补兜底再改映射、克隆真 key 演练、死主腿 ~30s 才兜底=num_retries）。
 ---
 
 # 198 全局兜底链改法与三层验收
@@ -30,6 +32,7 @@ description: >-
 | `scripts/litellm-198-fallback-insert-before.py` | 在**点名的一组** group 里，把 target 插到 **anchor 之前** | 升级某条既有腿（新腿在前、老腿保留为下一跳） |
 | `scripts/litellm-198-gpt-fallback-append.py` | 全表扫「以 anchor **结尾**」的链，往后追加 | 给一大批链加统一的末端兜底 |
 | `scripts/litellm-198-key-fallback.py drop` | **减法**：摘掉**单把 key 单个组**的整条链 | 「把某人某个模型的兜底去掉」见 §8 |
+| `scripts/litellm-198-key-fallback-add-row.py` | **per-key 表补一行**：`--audit` 找出「能路由到组却缺行」的 key，追加/回滚 | 全局行写完后必跑，见 §10.1 |
 | `scripts/litellm-198-fallback-set-rows.py` | **整行增/改**：spec 文件里每个组的链设成给定列表（没有就加、有就换），一次写入 | 一批组大多还没有行、或要整条替换时，见 §9 |
 
 前三把都是 `--apply` 需 `--backup`、`--restore` 回滚、默认 dry-run（`set-rows` 同）。
@@ -662,6 +665,9 @@ sudo python3 $S --restore ~/rs-bak/<file>.json --apply             # 整表回�
 | `sa-grok-imagine-image-2.0` / `sa-grok-imagine` / `sa-grok-imagine-image-quality` | `gpt-image-2` |
 
 | `ag-gemini-3.8-flash` | `web-gemini-3.8-flash`（10-14 加，全局，1468 把 key 共用） |
+| `deepseek-v4.1-flash` / `deepseek-v4.1-flash-responses` | `wangsu-deepseek-v4.1-flash` → `zai-coding-glm-5.3-flash` → `zai-claude-glm-5.3-flash`（10-15，见 §10） |
+| `deepseek-v4.1-flash-her`（her-pro 的官方组） | `wangsu-deepseek-v4.1-flash-her` → `sa-grok-4.7` → `openrouter-deepseek-v4.1-flash` → `deepseek-v4-flash-responses`（10-15） |
+| `wangsu-deepseek-v4.1-flash` / `-her` | 各自指回官方组 + 原链（主备互换时留下的，`attempted_targets` 去重，不会成环） |
 
 ⚠️ `web-gemini-3.8-flash` 是 Gemini 网页版（`litellm-dev/gemini-web` 单副本、小号池、约 5h/2400 credits、
 240k 上下文、三客户端工具实测 5/9）。用户知情选了全局一行：antigravity 整体故障时全员会压到它、
@@ -706,3 +712,70 @@ payload 打，要么写入后**立刻盯真流量 SpendLogs 的 status**（`api_
 `...pre-rollback-grok46-47-20261012T094308Z.json`、`...pre-grok6-openrouter-20261012T101722Z.json`、`...pre-grok420-reasoning-20261012T133647Z.json`。
 
 - [[feedback_deepseek_official_cannot_take_over_midstream_grok_fallback]]
+
+## 10. 换主腿 / 加兜底的完整做法（2026-10-15 DeepSeek 官方故障实战）
+
+诉求形状：「官方挂了，所有 key 的 X 先改走 Y，原来的做兜底」→ 恢复后「改回官方为主，Y 当第一兜底」。
+
+### 10.1 🔴 全局行写完 ≠ 全员生效：先审计 per-key 表
+
+per-key `router_settings.fallbacks` 非空就**整张替换**全局表（§0）。10-15 实测 198 有 4 张
+per-key 表、768 把 key：claude-code 550 把一张、carher 188/27/3 把各一张。给 `deepseek-v4.1-flash`
+加了全局行后，131 把能调它的 claude-code key **照样零兜底**（02:40~02:54 4 次失败
+`attempted_fallbacks=0`，报错里写着 `No fallback model group found`）。
+
+```bash
+S=~/kfb-addrow-<sid>.py      # scripts/litellm-198-key-fallback-add-row.py
+python3 $S --audit --group <组>                         # 只读：global_table / per_key_has_row / missing
+python3 $S --group <组> --target <腿1> --target <腿2>    # dry-run：给 missing 的 key 追加这一行
+python3 $S ... --limit 1 --apply --backup <f>           # 金丝雀 → 全量 → 重跑 to_append=0
+```
+
+只追加不改其他行；空表 key 不碰（写了反而把它从全局表上摘下来、冻结住）。
+单测 `backend/tests/test_litellm_198_key_fallback_add_row.py`。
+⚠️ 10-15 审计顺带发现：`sa-grok-4.7` 有 552 把 key（经 `claude-grok-4.7` alias）的 per-key 表缺行
+⇒ grok 挂了它们零兜底。**未修**，等用户定。
+
+### 10.2 换主腿的顺序：先补兜底，再改映射
+
+两种改法：A) per-key alias 把对外名指到新组（保留原组做兜底）；B) 撤 alias 回到原组、新组进兜底链首。
+不论哪种都**先写兜底（全局行 + per-key 行），再动 alias** —— 反过来中间那段新主腿是零兜底的。
+
+- 对外名要换的**组还没有任何 key 路由到**时，`--audit`/`plan` 按「能路由到」选出 0 把，
+  用 `--for-alias-source <对外名>` 按「有这个 alias」选（10-15 her-pro 就是这样）。
+- 同一对外名要**保留自己原来的兜底链**（her-pro 的 grok 链 ≠ cursor 的 glm 链）⇒ 不能共用一个组，
+  建一个同上游孪生组（`deepseek-v4.1-flash-her`，同 key 同价，`/model/new` **不传 mode**）挂自己的链。
+- alias 写用 `litellm-198-key-allowlist.py --only-file <精确名单> --alias X=Y` / `--rm-alias X`；
+  名单从 DB 导，`--include-blocked` 让 blocked key 一并改（解封后不会静默指回旧组）。
+  撤 alias 后用「切换前那份 full 快照」逐把比 models+aliases，应 ok=N drift=0。
+
+### 10.3 演练：克隆真 key，只把主腿换成死组
+
+`mock_testing_fallbacks` 在 198 被禁（400 `Mock testing request params are disabled`）。做法：
+`/model/new` 一个指 `127.0.0.1:9` 的死组 → `/key/generate` 临时 key，`models`=真 key 原样、
+`aliases` 里把对外名指到死组、`router_settings.fallbacks` = 真表里那一行的腿原样挂到死组下
+（无 per-key 表的 key 就用全局链）→ 按 chat/anthropic × 流式打 → 判 200 + `x-litellm-attempted-fallbacks=1`
+→ finally 删 key 和死组。**不碰任何生产行。**
+🔴 死组必须带**和真主腿相同的重试策略**（临时 key 上给 `model_group_retry_policy`），否则量出来的耗时不是真的。
+
+### 10.4 🔴 死主腿要拖 ~30s 才兜底：全局 `num_retries=5`
+
+10-15 演练每发 28~36s 才落兜底（流式/非流式一样）。pod 日志：死腿被重试约 6 次，间隔 1/2/5/9s 指数退避。
+修法：只给相关组加 `model_group_retry_policy`（单键 `jsonb_set`，与 §1 同纪律，先 `\o` 备份整行）：
+
+```sql
+update "LiteLLM_Config" set param_value = jsonb_set(param_value, '{model_group_retry_policy}',
+  coalesce(param_value->'model_group_retry_policy','{}'::jsonb) || $${"<组>":{"DefaultRetries":1}}$$::jsonb)
+ where param_name='router_settings';
+-- 回读断言：除该键外逐字节相同、旧组全部保留（<@）、组数 = 旧 + 新增
+```
+
+`DefaultRetries` 是兜底值：异常类型对应的 `*ErrorRetries` 有设置时优先（`get_retry_from_policy.py` 走 MRO）。
+热加载 ~30s，逐 pod 读 `/get/config/callbacks` 数组数确认。10-15 改后同一演练 **28~36s → 3.6~7.1s**。
+代价：主腿偶发抖动会更快切走 —— 兜底是同模型（网宿）时可接受；兜底是别家模型时先问用户。
+
+### 10.5 现行 `model_group_retry_policy`（10-15，10 组）
+
+grok 5 组 `{DefaultRetries:1, Timeout/RateLimit/ServiceUnavailable:5}`（早先就有）；
+DeepSeek 5 组 `{DefaultRetries:1}`：`deepseek-v4.1-flash` / `-responses` / `-her`、`wangsu-deepseek-v4.1-flash` / `-her`。
+回滚 `198:~/rs-bak/router_settings.pre-ds41-retry1-20261015T054748Z.json`。

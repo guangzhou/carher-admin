@@ -3,7 +3,7 @@ name: her-public-model-name
 description: >-
   给**全部** her（阿里云 `carher-*` 420 把 / 198 `litellm-product` 的 `carher-*` 227 把）
   增加 / 改名 / **改映射** / 摘掉一个**对外模型名**，用 per-key `aliases` 把它映射到真实组
-  （如 198 `her-pro`→`sa-grok-4.7` 兜底 deepseek-v4.1-flash、`her-flash`→`openrouter-deepseek-v4.1-flash`）。
+  （如 198 `her-pro`→`deepseek-v4.1-flash-her` 官方主·网宿兜底、`her-flash`→`openrouter-deepseek-v4.1-flash`）。
   含 198 前缀扫描会误伤 hangzhou/测试 key ⇒ `--only-file` 精确名单、兜底挂在组上不在对外名上、
   `--clone-key` 探针（算术判据，grok-4.7 拒复述 nonce）+ SpendLogs 判落点。含目标组不存在时先建组
   （CM 外科式 splice + rollout + 逐 pod sha 门禁）、改名走加法（add→verify→cutover→remove）、
@@ -231,7 +231,7 @@ output an exact token"）——HTTP 200、落点对、nonce 判据读成 8/8 FAI
 
 | 对外名 | 阿里云 alias 目标 | **198 alias 目标** | 198 落点 | 198 兜底（DB router_settings） |
 |---|---|---|---|---|
-| `her-pro` | `grok-4.6` | **`sa-grok-4.7`**（09-29 前 `sa-grok-4.6`） | `openai/grok-4.7`，`model_info.id=sa/grok-4.7` | `openrouter-deepseek-v4.1-flash` → `deepseek-v4-flash-responses` |
+| `her-pro` | `grok-4.6` | **`deepseek-v4.1-flash-her`**（10-15 起；09-29~10-15 `sa-grok-4.7`，更早 `sa-grok-4.6`） | `custom_openai/deepseek-flash` @ api.deepseek.com，`model_info.id=deepseek-official/deepseek-flash-her` | `wangsu-deepseek-v4.1-flash-her` → `sa-grok-4.7` → `openrouter-deepseek-v4.1-flash` → `deepseek-v4-flash-responses`（全局 + 218 把 per-key 表） |
 | `her-flash` | `openrouter-deepseek-v4.1-flash` | 同名 | `openrouter/deepseek/deepseek-v4.1-flash` | — |
 
 **兜底挂在组上，不在对外名上**：`her-pro` 走 per-key alias 改写成 `sa-grok-4.7` 后，
@@ -239,6 +239,12 @@ output an exact token"）——HTTP 200、落点对、nonce 判据读成 8/8 FAI
 是不是已经是 B（判生效只认 DB，见 [[feedback_db_router_settings_overlays_config_yaml]]）；
 是就只写 key，不是才动兜底（skill `litellm-198-fallback-chain`）。09-29 那轮 `sa-grok-4.7`
 的链首本来就是 deepseek-v4.1-flash ⇒ 零兜底改动、零重启。
+
+🔴 **10-15 改映射要连 per-key 兜底表一起改**：carher 有 218 把 key 带非空 per-key 表（整表替换全局表），
+光写全局行它们零兜底。顺序 = 建孪生组 → 全局行 → per-key 行（`litellm-198-key-fallback-add-row.py
+--for-alias-source her-pro`）→ 最后改 alias。孪生组是为了让 her-pro 保留自己的 grok 链、不跟 cursor
+共用 glm 链。全过程见 skill `litellm-198-fallback-chain` §10。备份 198 `~/ds41-wangsu-b07c/herpro-off-*`、
+`pkfb-herof-*`。
 
 09-29 备份 198 `~/herpro47-5e/{canary-20260929T153336,full-20260929T153611}.json`，
 回滚：先 `--restore full-… --apply` 再 `--restore canary-… --apply`（金丝雀那 1 把只在 canary 里）。

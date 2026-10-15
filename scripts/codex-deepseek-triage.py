@@ -44,6 +44,9 @@ callback 的 counts 和请求形状里。
     # 全站近 24h 失败按「组 × 调用类型 × 签名」聚合 + 每个签名的受影响 key（SpendLogs，只读）
     python3 scripts/codex-deepseek-triage.py --only sigs --since 24h
 
+    # 「大家都说 deepseek 不回」：先判是不是上游自己挂了（按小时 p50/p95，OWUI 单列）
+    python3 scripts/codex-deepseek-triage.py --only health --since 8h
+
 相关：``.claude/skills/codex-deepseek-tool-triage/SKILL.md``
 """
 from __future__ import annotations
@@ -252,6 +255,33 @@ group by 2,3 order by 4 desc limit 20;
             print("  " + line)
 
 
+def section_health(since_min: int) -> None:
+    """按小时看 deepseek 各组 成功/失败/p50/p95，OWUI(master key) 单列。判「是上游自己挂了」用这个。"""
+    print(f"\n=== deepseek 上游健康（SpendLogs 近 {since_min} 分钟，按小时）===")
+    win = f"\"startTime\" > now() - interval '{since_min} minutes'"
+    sql = f"""
+set statement_timeout='120s';
+select to_char(date_trunc('hour',"startTime"),'MM-DD HH24')||'Z',
+       case when api_key like 'litellm_pr%' then 'owui' else 'keys' end,
+       model_group, status, count(*),
+       round(percentile_cont(0.5) within group (order by extract(epoch from ("endTime"-"startTime")))::numeric,1),
+       round(percentile_cont(0.95) within group (order by extract(epoch from ("endTime"-"startTime")))::numeric,1)
+from "LiteLLM_SpendLogs" where {win} and model_group ilike '%deepseek-v4.1%'
+  and coalesce(metadata->>'user_api_key_alias','') not like 'tmp-%'
+group by 1,2,3,4 order by 1,3,2,4;
+"""
+    out = _psql(sql)
+    if not out.strip() or "ERROR:" in out:
+        print("  ⛔ 查询失败或空返回 —— 量具坏了\n" + out)
+        return
+    print("  小时(UTC) | 来源 | 组 | status | n | p50s | p95s")
+    for line in out.splitlines():
+        if line.strip() and line != "SET":
+            print("  " + line)
+    print("  提示：p50 从个位数跳到几百秒 + 900-second / Service is too busy = 上游自身故障，"
+          "先对 status.deepseek.com，别先怀疑网关补丁")
+
+
 def _rewrite_table() -> dict:
     """从本地 callback 源码读 _RESPONSES_GROUP_REWRITE（与线上同版时才准，先跑 callbacks-drift）。"""
     import ast, os
@@ -308,7 +338,7 @@ def main() -> int:
     ap.add_argument("--since", default="30m", help="日志窗口，如 30m / 2h（默认 30m）")
     ap.add_argument("--key", help="只看某个 key_alias")
     ap.add_argument("--rid", help="用户报错里的 req id（API 异常 (req: xxxx)），反查原文 + 签名")
-    ap.add_argument("--only", choices=["counts", "errors", "shape", "spend", "groups", "sigs"],
+    ap.add_argument("--only", choices=["counts", "errors", "shape", "spend", "groups", "sigs", "health"],
                     help="只跑某一节")
     a = ap.parse_args()
 
@@ -329,6 +359,9 @@ def main() -> int:
         return 0
     if a.only == "sigs":
         section_sigs(since_min)
+        return 0
+    if a.only == "health":
+        section_health(since_min)
         return 0
 
     log = _logs(a.since)

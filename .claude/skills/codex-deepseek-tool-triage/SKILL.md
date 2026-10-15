@@ -87,6 +87,15 @@ key 从 `LiteLLM_ProxyModelTable` 密文行在 pod 内解密（`/model/info` 不
 ⚠️ 上线后再数失败，**先剔掉自己的探针**：SpendLogs 里 `api_key` 关联不到 key_alias（master key）且时间在新 pod
 `startTime` 之前的，是你自己上线前的复现请求，不是「修了还在挂」。
 
+## 先排除：上游自己挂了（2026-10-15）
+
+「很多人说 deepseek 不回 / 是不是你昨天的改动」——**先跑 `--only health`**，别先怀疑自己的补丁。
+10-15 北京 08:11 起 DeepSeek 官方自身故障（status.deepseek.com incident，V4 Pro / V4.1 Flash / 网页都受影响）：
+`deepseek-v4.1-flash` p50 从 4~7s 跳到 **170~340s**，夹着 `900-second timeout` 和 `Service is too busy`；
+阿里云 her（完全不经过 198 的 callback）同一时段同样报错 = 与网关补丁无关的阴性对照。12 点后 p50 回到个位数。
+我当时先说「是我补丁导致的」，零数据，作废 —— 见 CLAUDE.md 三段式。
+应急切换（改映射到网宿 / 恢复后官方为主网宿兜底）走 skill `litellm-198-fallback-chain` §10。
+
 ## 根因 1：Codex responses-lite 把工具塞在 input 里
 
 Codex 的 "responses lite" 线路**不用顶层 `tools`**，而是放在 `input` 的一个 item 里：
@@ -246,6 +255,7 @@ python3 scripts/codex-deepseek-triage.py --since 2h --key cursor-liyun1-t6xm
 python3 scripts/codex-deepseek-triage.py --rid 36ece9a2    # 用户只给了 req id
 python3 scripts/codex-deepseek-triage.py --only groups     # chat 组 × 改写覆盖
 python3 scripts/codex-deepseek-triage.py --only sigs --since 24h  # 全站失败按 组×call_type×签名 + 受影响 key
+python3 scripts/codex-deepseek-triage.py --only health --since 8h # 按小时 p50/p95（OWUI 单列）：先判上游是不是自己挂了
 ```
 
 🔴 pod 日志只保留几分钟，用户报错几十分钟后再 grep 一定零命中。直接用 `--rid` 查 SpendLogs。

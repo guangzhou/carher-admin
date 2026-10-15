@@ -13,6 +13,12 @@ description: >-
 
 **现状 (2026-10-07)**: 镜像 `v0.11.4`, 全员只放 `deepseek-v4.1-flash`(DeepSeek 官方)。
 
+🔴 **OWUI 不吃任何 per-key alias / per-key 兜底**:反代用 **master key** 转发(见 [[owui-key-swap-proxy]]),
+所以给 cursor/claude/carher key 批量改 `deepseek-v4.1-flash` 的映射**管不到 OWUI**,它只走该组的**全局**兜底行。
+SpendLogs 里认它:`api_key like 'litellm_pr%'`、`requester_ip` = key-swap-proxy 两个 pod IP。
+10-15 DeepSeek 官方故障期间(北京 08:11~约 12:00)OWUI 发消息"没有回复" = 官方 p50 170~340s,
+不是 OWUI/反代问题;判断先看该时段 `deepseek-v4.1-flash` 的耗时分布,再看 OWUI 日志。
+
 OWUI 跑在 198 K3s `open-webui` namespace, 是内部 chat.auto-link.com.cn 的后端。
 **所有上游 LiteLLM 调用都经反代** `key-swap-proxy` (见 [[owui-key-swap-proxy]]),
 **身份认证经 Casdoor + 飞书** (见 [[owui-casdoor-sso]]),

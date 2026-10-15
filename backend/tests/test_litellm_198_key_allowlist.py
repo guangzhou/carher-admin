@@ -441,3 +441,44 @@ def test_read_only_file_skips_blank_and_comment_lines(tmp_path):
     path = tmp_path / "targets.txt"
     path.write_text("carher-1\n\n# spared: carher-hangzhou\n  carher-2  \n", encoding="utf-8")
     assert allowlist.read_only_file(str(path)) == ["carher-1", "carher-2"]
+
+
+def _target(tmp_path, data):
+    import json as _json
+    path = tmp_path / "target.json"
+    path.write_text(_json.dumps(data))
+    return str(path)
+
+
+def test_target_file_reads_models_and_aliases(tmp_path):
+    models, aliases = allowlist.read_target_file(_target(tmp_path, {
+        "models": ["grok-4.7", "jev"], "aliases": {"grok-4.7": "sa-grok-4.7"}}))
+    assert models == ["grok-4.7", "jev"] and aliases == {"grok-4.7": "sa-grok-4.7"}
+
+
+def test_target_file_refuses_empty_models_which_means_unrestricted(tmp_path):
+    import pytest
+    with pytest.raises(ValueError):
+        allowlist.read_target_file(_target(tmp_path, {"models": [], "aliases": {}}))
+
+
+def test_target_file_refuses_alias_whose_source_is_not_allowlisted(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="never fire"):
+        allowlist.read_target_file(_target(tmp_path, {
+            "models": ["grok-4.7"], "aliases": {"chatgpt-gpt-5.5": "sa-grok-4.7"}}))
+
+
+def test_target_file_refuses_duplicate_names(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="duplicate"):
+        allowlist.read_target_file(_target(tmp_path, {"models": ["jev", "jev"]}))
+
+
+def test_describe_change_lists_adds_removes_and_retargets():
+    lines = allowlist.describe_change(
+        key(models=["a", "b"], aliases={"a": "x", "b": "y"}),
+        ["b", "c"], {"b": "z", "c": "w"})
+    assert "  - model a" in lines and "  + model c" in lines
+    assert "  - alias a -> x" in lines and "  ~ alias b: y -> z" in lines
+    assert "  + alias c -> w" in lines

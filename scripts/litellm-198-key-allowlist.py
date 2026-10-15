@@ -383,6 +383,56 @@ def convergence_residual(
     return {name: sorted(values) for name, values in buckets.items()}
 
 
+def read_target_file(path: str) -> tuple[list[str], dict[str, str]]:
+    """Desired state from a JSON file: ``{"models": [...], "aliases": {...}}``.
+
+    The file form of ``--converge-to``, for a hand-curated shape that no existing
+    key carries yet (2026-10-12: merging two keys into a 36-name / 28-alias list
+    reviewed line by line with the user). Spelling that as 30 ``--add-model`` and
+    ``--alias`` flags inside ``ssh '...'`` gets re-split by the remote shell.
+
+    Refuses shapes that cannot be what the operator meant: an empty ``models``
+    (that is *unrestricted*), duplicate names, or an alias whose source is not in
+    ``models`` (the gate checks the pre-rewrite name, so such an alias never fires).
+    """
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    models = data.get("models")
+    aliases = data.get("aliases") or {}
+    if not isinstance(models, list) or not models or not all(isinstance(m, str) and m for m in models):
+        raise ValueError("target file: 'models' must be a non-empty list of names "
+                         "(an empty list would make the key unrestricted)")
+    if len(set(models)) != len(models):
+        dupes = sorted({m for m in models if models.count(m) > 1})
+        raise ValueError(f"target file: duplicate model names {dupes}")
+    if not isinstance(aliases, dict) or not all(
+            isinstance(k, str) and k and isinstance(v, str) and v for k, v in aliases.items()):
+        raise ValueError("target file: 'aliases' must map non-empty names to non-empty names")
+    dead = sorted(set(aliases) - set(models))
+    if dead:
+        raise ValueError(f"target file: alias sources not in models (would never fire): {dead}")
+    return list(models), dict(aliases)
+
+
+def describe_change(key: dict, ref_models: list[str], ref_aliases: dict[str, str]) -> list[str]:
+    """Line-by-line diff of one key against the desired state, for dry-run review."""
+    cur_m = list(key.get("models") or [])
+    cur_a = dict(key.get("aliases") or {})
+    lines = [f"  - model {m}" for m in cur_m if m not in ref_models]
+    lines += [f"  + model {m}" for m in ref_models if m not in cur_m]
+    for src in sorted(set(cur_a) | set(ref_aliases)):
+        old, new = cur_a.get(src), ref_aliases.get(src)
+        if old == new:
+            continue
+        if old is None:
+            lines.append(f"  + alias {src} -> {new}")
+        elif new is None:
+            lines.append(f"  - alias {src} -> {old}")
+        else:
+            lines.append(f"  ~ alias {src}: {old} -> {new}")
+    return lines
+
+
 def restore(path: str, do_apply: bool) -> int:
     with open(path, encoding="utf-8") as handle:
         snapshot = json.load(handle)
@@ -455,6 +505,9 @@ def main() -> int:
                         help="make every selected key's models+aliases identical to this "
                              "reference key (instead of --add-model/--rm-model diffing). "
                              "Refuses to run if the reference is unrestricted or not found.")
+    parser.add_argument("--converge-to-file", metavar="PATH",
+                        help='like --converge-to, but the desired state comes from a JSON '
+                             'file {"models": [...], "aliases": {...}} instead of a key')
     parser.add_argument("--allow-upstream-change", action="store_true",
                         help="with --converge-to: proceed even though some key keeps a name "
                              "whose alias target changes or disappears (silent provider swap)")
@@ -472,10 +525,17 @@ def main() -> int:
     (rm_models if args.remove else add_models).extend(args.model)
     set_aliases = dict(args.alias)
 
-    if args.converge_to:
+    if args.converge_to and args.converge_to_file:
+        print("--converge-to and --converge-to-file are exclusive", file=sys.stderr)
+        return 2
+    converging = bool(args.converge_to or args.converge_to_file)
+    if converging:
         if add_models or rm_models or set_aliases or args.rm_alias:
             print("--converge-to is exclusive with --add-model/--rm-model/--alias/--rm-alias",
                   file=sys.stderr)
+            return 2
+        if args.converge_to_file and not (args.only or args.only_file):
+            print("--converge-to-file needs an explicit --only/--only-file scope", file=sys.stderr)
             return 2
     elif not (add_models or rm_models or set_aliases or args.rm_alias):
         print("nothing to do: pass --add-model/--rm-model/--alias/--rm-alias "
@@ -535,8 +595,15 @@ def main() -> int:
             print(f"reference {args.converge_to!r} is inside the write scope; "
                   "exclude it so a no-op cannot be reported as a write", file=sys.stderr)
             return 2
-        print(f"reference={args.converge_to} ref_models={len(ref_models)} "
-              f"ref_aliases={len(ref_aliases)}")
+    elif args.converge_to_file:
+        try:
+            ref_models, ref_aliases = read_target_file(args.converge_to_file)
+        except (OSError, ValueError) as exc:
+            print(f"refusing: {exc}", file=sys.stderr)
+            return 2
+    if converging:
+        print(f"reference={args.converge_to or args.converge_to_file} "
+              f"ref_models={len(ref_models)} ref_aliases={len(ref_aliases)}")
         # The loud half: names leaving the allowlist entirely -> the next call
         # 403s. Reported, never gated -- only a human can say whether a dropped
         # name still has an equivalent under the new shape. Go measure these in
@@ -571,7 +638,7 @@ def main() -> int:
                       "--allow-upstream-change once that is the decision.", file=sys.stderr)
                 return 2
 
-    if args.converge_to:
+    if converging:
         planned = [(key, plan_converge(key, ref_models, ref_aliases)) for key in keys]
     else:
         planned = [
@@ -590,13 +657,17 @@ def main() -> int:
     print(f"scope_prefixes={list(prefixes)} scoped_keys={len(keys)} planned={len(planned)} "
           f"no_change={no_change} unrestricted_in_scope={unrestricted} "
           f"include_blocked={args.include_blocked} blocked_in_scope={blocked_in_scope}")
-    if args.converge_to:
-        print(f"converge_to={args.converge_to} "
+    if converging:
+        print(f"converge_to={args.converge_to or args.converge_to_file} "
               f"allow_upstream_change={args.allow_upstream_change}")
     else:
         print(f"add_models={add_models} rm_models={rm_models} "
               f"set_aliases={set_aliases} rm_aliases={list(args.rm_alias)}")
     if not args.apply:
+        if args.converge_to_file:
+            for key, _plan in planned:
+                print(f"diff {key.get('key_alias')}:")
+                print("\n".join(describe_change(key, ref_models, ref_aliases)))
         for key, plan in planned[:3]:
             print(f"  sample {key.get('key_alias')}: "
                   f"models {len(key.get('models') or [])}->{len(plan.get('models', key.get('models') or []))} "
@@ -639,7 +710,7 @@ def main() -> int:
         models = set(fresh.get("models") or [])
         aliases = dict(fresh.get("aliases") or {})
         ok = True
-        if args.converge_to:
+        if converging:
             # Equality, not containment: the add/rm sets are empty here, so the
             # generic assertions below would all pass vacuously.
             if fresh.get("models"):

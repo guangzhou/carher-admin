@@ -33,14 +33,15 @@ AUTHURL=""
 if [[ "$ACTION" == "oauth" ]]; then AUTHURL="$(cat "${3:?authurl file}")"; fi
 
 cleanup(){ $K delete job "$JOB" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-           $K delete secret "$JOB" cm "$JOB" --ignore-not-found >/dev/null 2>&1 || true; }
+           $K delete secret "$JOB" --ignore-not-found >/dev/null 2>&1 || true
+           $K delete configmap "$JOB" --ignore-not-found >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cleanup; $K wait --for=delete job/"$JOB" --timeout=60s >/dev/null 2>&1 || true
 
 $K create configmap "$JOB" --from-file=google_login.py="$HERE/google_login.py" \
-   --from-file=google_oauth_consent.py="$HERE/google_oauth_consent.py" >/dev/null
+   --from-file=google_oauth_consent.py="$HERE/google_oauth_consent.py" --dry-run=client -o yaml | $K apply -f - >/dev/null
 TMPD=$(mktemp -d); chmod 700 "$TMPD"; printf '%s' "$ACCT_JSON" > "$TMPD/acct.json"; printf '%s' "$AUTHURL" > "$TMPD/authurl"
-$K create secret generic "$JOB" --from-file=acct.json="$TMPD/acct.json" --from-file=authurl="$TMPD/authurl" >/dev/null
+$K create secret generic "$JOB" --from-file=acct.json="$TMPD/acct.json" --from-file=authurl="$TMPD/authurl" --dry-run=client -o yaml | $K apply -f - >/dev/null
 rm -rf "$TMPD"
 
 SCRIPT=google_login.py; [[ "$ACTION" == "oauth" ]] && SCRIPT=google_oauth_consent.py

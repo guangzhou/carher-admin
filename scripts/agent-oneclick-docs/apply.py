@@ -17,6 +17,7 @@ DOCS = {
     "FapXdudPLoTTRLxWGJQcqITpn9g": "cursor",     # Cursor 一键配置 B(同名,正文须逐字相同)
     "Ni2hdvtbgoqBFMxrAu5ckjPrnbg": "codex",      # Codex 一键配置(wiki Q0pJwvdG…)
     "ZYNsdZCJIoCJEJxeMPGcl7jDn3f": "codex-ext",  # Codex 一键配置 外部分享(不带内部互链)
+    "Q8q5dMBUHoFjZmx4O4tchQSgnOb": "codex-ext",  # Codex 一键配置 外部分享 #2(wiki RJpVwm2b…,10-15 用户新建)
     "MeLad7oMiobwf6xnpA2cWy0nnSg": "claude",     # Claude Code 一键配置
 }
 if len(sys.argv) > 1 and sys.argv[1] == "--all":

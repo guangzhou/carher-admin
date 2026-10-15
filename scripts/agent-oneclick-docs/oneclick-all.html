@@ -1,0 +1,465 @@
+<title>AI 编程一键配置</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&family=JetBrains+Mono:wght@500;700&display=swap">
+<style>
+/* Layout: 一条从上到下的引导线(左侧编号 + 竖线)。① 拿 key ② 选工具(三张大卡;电脑自动识别,一行小字可改) ③… 该工具步骤,编号接着数。底部「需要时再看」折叠。 */
+:root{
+  --bg:#f5f6f8; --surface:#ffffff; --fg:#151c27; --muted:#5d6878; --line:#e0e4ea; --rail:#cfd5de;
+  --code-bg:#eef1f5; --accent:#2f5bd3; --on-t:#ffffff; --t:#151c27;
+  --cursor:#2b3a52; --codex:#0d7a6b; --claude:#b3532b;
+  --font-body:"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono","SF Mono",Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0f141b; --surface:#171e28; --fg:#e7ecf3; --muted:#9aa6b6; --line:#29323f; --rail:#344050;
+  --code-bg:#1f2834; --accent:#86a7ff; --on-t:#0f141b; --t:#e7ecf3;
+  --cursor:#c9d4e6; --codex:#3fc2ad; --claude:#ec8d61; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f141b; --surface:#171e28; --fg:#e7ecf3; --muted:#9aa6b6; --line:#29323f; --rail:#344050;
+  --code-bg:#1f2834; --accent:#86a7ff; --on-t:#0f141b; --t:#e7ecf3;
+  --cursor:#c9d4e6; --codex:#3fc2ad; --claude:#ec8d61; color-scheme:dark}
+
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-body);font-size:15.5px;line-height:1.75;margin:0;
+  padding-left:max(20px,env(safe-area-inset-left,0px));padding-right:max(20px,env(safe-area-inset-right,0px));padding-block:44px 64px}
+body.tool-cursor{--t:var(--cursor)} body.tool-codex{--t:var(--codex)} body.tool-claude{--t:var(--claude)}
+.wrap{max-width:960px;margin:0 auto}
+p{margin:0}
+a{color:var(--accent);text-underline-offset:3px}
+a:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+code{font-family:var(--font-mono);font-size:.85em;background:var(--code-bg);padding:1px 6px;border-radius:4px;word-break:break-all}
+pre{margin:0;background:var(--code-bg);border-radius:8px;padding:10px 14px;overflow-x:auto;font-family:var(--font-mono);font-size:13.5px;line-height:1.6}
+pre code{background:none;padding:0}
+.codebox{position:relative}
+.codebox pre{padding-right:76px}
+.copy{position:absolute;top:7px;right:7px;appearance:none;border:1px solid var(--line);background:var(--surface);color:var(--fg);font:inherit;font-size:12.5px;line-height:1;padding:6px 10px;border-radius:6px;cursor:pointer}
+.copy:hover{border-color:var(--muted)}
+.copy.done{background:var(--t);color:var(--on-t);border-color:var(--t)}
+.sub{font-size:14px;color:var(--muted)}
+h2 .sub{font-weight:400}
+
+header{margin-bottom:34px}
+h1{font-size:32px;font-weight:900;line-height:1.3;margin:0;text-wrap:balance}
+.lead{color:var(--muted);margin-top:6px;font-size:16px}
+
+/* 引导线 */
+.flow{counter-reset:step;display:flex;flex-direction:column}
+.step{display:grid;grid-template-columns:44px minmax(0,1fr);gap:0 18px;counter-increment:step;position:relative;padding-bottom:30px}
+.step::before{content:counter(step);grid-row:1 / span 2;width:36px;height:36px;border-radius:50%;background:var(--t);color:var(--on-t);
+  font-weight:700;font-size:16px;display:grid;place-items:center;margin-top:2px;justify-self:center;position:relative;z-index:1}
+.step::after{content:"";position:absolute;left:21px;top:42px;bottom:4px;width:2px;background:var(--rail)}
+.step.last::after{display:none}
+.step h2{margin:0 0 10px;font-size:19px;font-weight:700;line-height:1.5;text-wrap:balance}
+.body{display:flex;flex-direction:column;gap:10px;min-width:0}
+.panel{display:contents}
+.panel[hidden]{display:none}
+
+.keybox{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 18px;display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px}
+.btn{display:inline-block;background:var(--t);color:var(--on-t);font-weight:700;text-decoration:none;padding:9px 18px;border-radius:9px;font-size:15px}
+.btn:hover{opacity:.9}
+.btn.alt{background:none;color:var(--t);border:1.5px solid var(--t);padding:7.5px 16px}
+.btn.key{background:var(--fg);color:var(--bg)}
+
+.tools{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.tool{appearance:none;font:inherit;text-align:left;cursor:pointer;background:var(--surface);color:var(--fg);border:1.5px solid var(--line);border-radius:12px;
+  padding:14px 16px;display:flex;flex-direction:column;gap:2px;min-width:0;position:relative}
+.tool b{font-size:17px}
+.tool span{font-size:13.5px;color:var(--muted)}
+.tool:hover{border-color:var(--muted)}
+.tool[aria-selected="true"]{border-color:var(--c);box-shadow:0 0 0 1px var(--c) inset}
+.tool[aria-selected="true"] b{color:var(--c)}
+.tool[aria-selected="true"]::after{content:"✓";position:absolute;top:10px;right:12px;width:22px;height:22px;border-radius:50%;background:var(--c);color:var(--on-t);font-size:13px;display:grid;place-items:center;font-weight:700}
+.tool[data-tool="cursor"]{--c:var(--cursor)} .tool[data-tool="codex"]{--c:var(--codex)} .tool[data-tool="claude"]{--c:var(--claude)}
+.os{font-size:14px;color:var(--muted)}
+.os b{color:var(--fg)}
+.linkbtn{appearance:none;border:0;background:none;padding:0;margin-left:6px;font:inherit;color:var(--accent);cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+
+ol.list{margin:0;padding-left:1.25em;display:flex;flex-direction:column;gap:4px}
+ol.list li::marker{color:var(--muted)}
+ol.list pre{margin-top:6px}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.two > div{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.two h3{margin:0;font-size:15px;color:var(--t)}
+img.shot{border:1px solid var(--line);border-radius:8px;max-width:100%;width:300px;height:auto}
+
+.more{display:flex;flex-direction:column;gap:10px;margin-left:62px}
+.more > h2{font-size:14px;color:var(--muted);font-weight:500;margin:0;letter-spacing:.06em}
+details{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:11px 18px;min-width:0}
+summary{cursor:pointer;font-weight:700}
+details[open] summary{margin-bottom:10px}
+details > :not(summary) + :not(summary){margin-top:10px}
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:8px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:500;letter-spacing:.06em;background:var(--bg)}
+tr:last-child td{border-bottom:0}
+td:first-child{width:46%}
+.models{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 14px;font-size:14px;margin:0}
+.models dt{color:var(--muted);white-space:nowrap}
+.models dd{margin:0;display:flex;flex-wrap:wrap;gap:4px}
+footer{color:var(--muted);font-size:12.5px;margin:28px 0 0 62px}
+
+body.os-mac .win-only, body.os-win .mac-only{display:none!important}
+body.tool-cursor .for-codex, body.tool-cursor .for-claude,
+body.tool-codex .for-cursor, body.tool-codex .for-claude,
+body.tool-claude .for-cursor, body.tool-claude .for-codex{display:none}
+
+@media (max-width:640px){
+  body{padding-block:28px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+  h1{font-size:24px}
+  .tools,.two{grid-template-columns:1fr}
+  .step{grid-template-columns:32px minmax(0,1fr);gap:0 12px}
+  .step::before{width:30px;height:30px;font-size:14px}
+  .step::after{left:15px;top:36px}
+  .more,footer{margin-left:0}
+}
+</style>
+
+<div class="wrap">
+<header>
+  <h1>Cursor · Codex · Claude Code 一键配置</h1>
+  <p class="lead">从上往下做，几分钟就能用上。三个工具共用一把 key。</p>
+</header>
+
+<div class="flow">
+  <section class="step">
+    <h2>拿到你的 key</h2>
+    <div class="body">
+      <div class="keybox">
+        <a class="btn key" href="https://t83dfrspj4.feishu.cn/share/base/query/shrcnf5OElDguABGM3ZZDVoO3cb" target="_blank" rel="noopener">查看我的 cursor key</a>
+        <p class="sub">打开后复制整格，别手敲。还没有？<a href="https://t83dfrspj4.feishu.cn/share/base/shrcnfnACoTPTWiZv6BD1Lz6Ufe" target="_blank" rel="noopener">点这里申请</a></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="step">
+    <h2>选你要用的工具</h2>
+    <div class="body">
+      <div class="tools" role="tablist" aria-label="工具">
+        <button type="button" class="tool" role="tab" id="tab-cursor" data-tool="cursor" aria-controls="p-cursor" aria-selected="true"><b>Cursor</b><span>写代码的编辑器</span></button>
+        <button type="button" class="tool" role="tab" id="tab-codex" data-tool="codex" aria-controls="p-codex" aria-selected="false"><b>Codex</b><span>命令行 + 桌面 App</span></button>
+        <button type="button" class="tool" role="tab" id="tab-claude" data-tool="claude" aria-controls="p-claude" aria-selected="false"><b>Claude Code</b><span>命令行 + 桌面 App</span></button>
+      </div>
+      <p class="os">下面按 <b id="os-name">Mac</b> 电脑显示。<button type="button" class="linkbtn" id="os-switch">我用的是 <span id="os-other">Windows</span></button></p>
+    </div>
+  </section>
+
+  <!-- ═══════════ Cursor ═══════════ -->
+  <div class="panel" id="p-cursor" role="tabpanel" aria-labelledby="tab-cursor">
+    <section class="step">
+      <h2>装 Cursor 并登录 <span class="sub">（装过的跳过）</span></h2>
+      <div class="body">
+        <p>
+          <a class="btn alt mac-only" href="https://downloads.cursor.com/production/37b865941ccb31e2fc90c685157534efca87f964/darwin/universal/Cursor-darwin-universal.dmg" target="_blank" rel="noopener">下载 Cursor</a>
+          <a class="btn alt win-only" href="https://downloads.cursor.com/production/37b865941ccb31e2fc90c685157534efca87f964/win32/x64/user-setup/CursorUserSetup-x64-3.24.12.exe" target="_blank" rel="noopener">下载 Cursor</a>
+        </p>
+        <p>打开 Cursor，点 <b>Sign Up</b> 用邮箱注册，有账号点 <b>Log In</b>。免费账号就够，不登录用不了。</p>
+      </div>
+    </section>
+    <section class="step">
+      <h2>一键配置</h2>
+      <div class="body">
+        <p>
+          <a class="btn mac-only" href="{{cursor-mac.zip}}" download="cursor-mac.zip">下载 cursor-mac.zip</a>
+          <a class="btn win-only" href="{{cursor-windows.zip}}" download="cursor-windows.zip">下载 cursor-windows.zip</a>
+        </p>
+        <ol class="list">
+          <li>把 Cursor 完全退出（<span class="mac-only"><code>Cmd + Q</code></span><span class="win-only">右键任务栏图标 → 退出</span>）。</li>
+          <li class="mac-only">打开「终端」，点代码块右上角「复制」，粘进终端，回车：
+            <pre><code>cd ~/Downloads
+[ -d cursor-mac ] || unzip -q cursor-mac.zip
+cd cursor-mac
+chmod +x *.command *.sh
+bash ./INSTALL-Mac.command</code></pre>
+            <span class="sub">文件没下到「下载」文件夹的，把第一行换成它所在的文件夹。</span>
+          </li>
+          <li class="win-only">解压，打开解压出来的文件夹，双击 <code>INSTALL-Windows.cmd</code>。<span class="sub">弹出蓝色提示点「更多信息」→「仍要运行」。</span></li>
+          <li>粘贴 key，回车，看到「完成」。</li>
+        </ol>
+      </div>
+    </section>
+    <section class="step last">
+      <h2>开始用</h2>
+      <div class="body">
+        <p>打开 Cursor 直接用，默认模型 <code>grok-4.7</code>。</p>
+        <p class="sub">安装最后提示「还差一步」：Settings → Models → OpenAI API Key，粘贴 key，点 Verify，再完全退出重开。</p>
+      </div>
+    </section>
+  </div>
+
+  <!-- ═══════════ Codex ═══════════ -->
+  <div class="panel" id="p-codex" role="tabpanel" aria-labelledby="tab-codex" hidden>
+    <section class="step">
+      <h2>装桌面 App <span class="sub">（只用命令行可以跳过）</span></h2>
+      <div class="body">
+        <p>
+          <a class="btn alt mac-only" href="https://persistent.oaistatic.com/codex-app-prod/Codex.dmg" target="_blank" rel="noopener">下载 Codex App</a>
+          <a class="btn alt win-only" href="https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi" target="_blank" rel="noopener">下载 Codex App</a>
+        </p>
+        <p><span class="mac-only">官方安装包，约 750 MB。双击 .dmg，把 Codex 拖进「应用程序」。</span><span class="win-only">下载的是微软商店安装器，双击后按提示安装。装不上找宋力开权限，或看<a href="https://developers.openai.com/codex/windows/windows-app" target="_blank" rel="noopener">官方说明</a>。</span>装好先别打开。</p>
+      </div>
+    </section>
+    <section class="step">
+      <h2>一键配置</h2>
+      <div class="body">
+        <p>
+          <a class="btn mac-only" href="{{codex-mac.command}}" download="codex-mac.command">下载 codex-mac.command</a>
+          <a class="btn win-only" href="{{codex-windows.bat}}" download="codex-windows.bat">下载 codex-windows.bat</a>
+        </p>
+        <ol class="list">
+          <li>开着的 Codex App 先完全退出。</li>
+          <li class="mac-only">打开「终端」，点代码块右上角「复制」，粘进终端，回车：
+            <pre><code>cd ~/Downloads
+chmod +x codex-mac.command
+bash ./codex-mac.command</code></pre>
+            <span class="sub">文件没下到「下载」文件夹的，把第一行换成它所在的文件夹。</span>
+          </li>
+          <li class="win-only">双击下载的文件。弹出蓝色提示点「更多信息」→「仍要运行」。</li>
+          <li>出现 <code>key:</code> 时粘贴 key，回车，看到「全部搞定！」。第一次约 2~5 分钟。</li>
+        </ol>
+      </div>
+    </section>
+    <section class="step last">
+      <h2>开始用</h2>
+      <div class="body">
+        <div class="two">
+          <div>
+            <h3>命令行</h3>
+            <p>新开<span class="mac-only">一个终端</span><span class="win-only">一个 PowerShell</span>，进项目文件夹：</p>
+            <pre><code>cd 你的项目文件夹
+codex</code></pre>
+            <p class="sub">输入 <code>/model</code> 换模型。</p>
+          </div>
+          <div>
+            <h3>桌面 App</h3>
+            <p>打开 App，点「使用其他方式登录」，粘贴 key。</p>
+            <img class="shot" src="{{img/codex-login.jpg}}" alt="Codex 登录页，红框标出「使用其他方式登录」" width="760" height="477">
+            <p class="sub">点底部的模型名换模型。</p>
+          </div>
+        </div>
+        <p class="sub">默认模型 <code>gpt-5.6-terra</code>。画图直接说「画一张……」，图存在当前文件夹。</p>
+      </div>
+    </section>
+  </div>
+
+  <!-- ═══════════ Claude Code ═══════════ -->
+  <div class="panel" id="p-claude" role="tabpanel" aria-labelledby="tab-claude" hidden>
+    <section class="step">
+      <h2>装桌面 App <span class="sub">（只用命令行可以跳过）</span></h2>
+      <div class="body">
+        <p>
+          <a class="btn alt mac-only" href="https://cc.auto-link.com.cn/ccdl/desktop/Claude-mac.zip" target="_blank" rel="noopener">下载 Claude App</a>
+          <a class="btn alt win-only" href="https://cc.auto-link.com.cn/ccdl/desktop/Claude-windows-x64.msix" target="_blank" rel="noopener">下载 Claude App</a>
+        </p>
+        <p><span class="mac-only">解压，把 Claude 拖进「应用程序」。</span><span class="win-only">双击 .msix 安装（ARM 电脑用<a href="https://cc.auto-link.com.cn/ccdl/desktop/Claude-windows-arm64.msix" target="_blank" rel="noopener">这个</a>）。</span><b>不用登录</b>，装好先别打开。</p>
+      </div>
+    </section>
+    <section class="step">
+      <h2>一键配置</h2>
+      <div class="body">
+        <p>
+          <a class="btn mac-only" href="{{claude-mac.command}}" download="claude-mac.command">下载 claude-mac.command</a>
+          <a class="btn win-only" href="{{claude-windows.bat}}" download="claude-windows.bat">下载 claude-windows.bat</a>
+        </p>
+        <ol class="list">
+          <li>开着的 Claude App 先完全退出。</li>
+          <li class="mac-only">打开「终端」，点代码块右上角「复制」，粘进终端，回车：
+            <pre><code>cd ~/Downloads
+chmod +x claude-mac.command
+bash ./claude-mac.command</code></pre>
+            <span class="sub">文件没下到「下载」文件夹的，把第一行换成它所在的文件夹。</span>
+          </li>
+          <li class="win-only">双击下载的文件。弹出蓝色提示点「更多信息」→「仍要运行」。</li>
+          <li>出现 <code>key:</code> 时粘贴 key，回车，看到「通了」和「完成！」。第一次约 2~5 分钟。</li>
+        </ol>
+      </div>
+    </section>
+    <section class="step last">
+      <h2>开始用</h2>
+      <div class="body">
+        <div class="two">
+          <div>
+            <h3>命令行</h3>
+            <p>新开<span class="mac-only">一个终端</span><span class="win-only">一个 PowerShell</span>，进项目文件夹：</p>
+            <pre><code>cd 你的项目文件夹
+claude</code></pre>
+            <p class="sub">输入 <code>/model</code> 换模型。</p>
+          </div>
+          <div>
+            <h3>桌面 App</h3>
+            <p>打开 App，左边点 <b>Code</b>，选一个项目文件夹，直接说要做什么。</p>
+            <p class="sub">点输入框旁边的模型名换模型。</p>
+          </div>
+        </div>
+        <p class="sub">默认模型 <code>claude-opus-5-5</code>。名字带 <code>image</code> 的是画图专用，别选来聊天。</p>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div class="more">
+  <h2>需要时再看</h2>
+
+  <details class="for-cursor">
+    <summary>出问题了</summary>
+    <div class="tw"><table>
+      <thead><tr><th>现象</th><th>怎么办</th></tr></thead>
+      <tbody>
+        <tr><td>报 <code>401</code>，或 key 没写上</td><td>Settings → Models → OpenAI API Key，粘贴 key → Verify → 完全退出重开</td></tr>
+        <tr><td>报 <code>key not allowed to access model</code></td><td>你的 key 没开通这个模型，换一个或找运维开通</td></tr>
+        <tr><td>报 <code>An unexpected error occurred</code> / <code>does not support custom API keys</code>；看不到 High / Fast；菜单里有 39 个以外的模型</td><td>下载最新的包，退出 Cursor，双击 <code>UPGRADE</code></td></tr>
+        <tr><td>模型不见了</td><td>完全退出 Cursor → 双击 <code>REPAIR</code> → 重开</td></tr>
+        <tr><td>REPAIR 提示「拒绝动手」</td><td>Cursor 出了还没适配的新版本，你的 Cursor 没被改动，把窗口文字发给运维</td></tr>
+        <tr><td>一直转圈 / 报 <code>502</code></td><td>换回 <code>grok-4.7</code>，把模型名和时间发给运维</td></tr>
+        <tr><td>远程窗口模型报错 / 每轮都在压缩上下文</td><td>再双击一次 <code>REMOTE-SSH</code></td></tr>
+        <tr><td>REMOTE-SSH 提示「8788 端口被占着」</td><td>让服务器管理员让出端口；或完全退出 Cursor，双击 <code>TURN-OFF-DELTA</code>，再连</td></tr>
+      </tbody>
+    </table></div>
+    <p class="sub">还不行：双击 <code>DOCTOR</code>，把窗口整屏文字发给运维（不含 key，别只发截图）。</p>
+  </details>
+  <details class="for-cursor">
+    <summary>连远程服务器（Remote-SSH）</summary>
+    <ol class="list">
+      <li>用 Cursor 连一次服务器（左下角 → Connect to Host），等显示已连接。</li>
+      <li><span class="win-only">双击安装包文件夹里的 <code>REMOTE-SSH-Windows.cmd</code>，</span><span class="mac-only">在终端运行：</span>
+        <pre class="mac-only"><code>cd ~/Downloads
+cd cursor-mac
+chmod +x *.command *.sh
+bash ./REMOTE-SSH-Mac.command</code></pre>
+        输入服务器名（照列出的填，或 <code>用户名@IP</code>），回车，再输 <code>yes</code>。</li>
+      <li>看到「✅ 已补好」，关掉远程窗口重连。</li>
+    </ol>
+    <p class="sub">每台服务器做一次。换了新安装包后，再双击一次 REMOTE-SSH。</p>
+  </details>
+  <details class="for-cursor">
+    <summary>全部 39 个模型</summary>
+    <dl class="models">
+      <dt>Grok / Gemini</dt><dd><code>grok-4.7</code><code>grok-4.6</code><code>grok-4.6-latest</code><code>grok-4.5-latest</code><code>grok-4.5</code><code>grok-4.3</code><code>grok-build-0.1</code><code>grok-4.20</code><code>grok-4.20-0309-reasoning</code><code>gemini-3.8-flash</code><code>composer-2.5-fast</code><code>composer-2.5</code></dd>
+      <dt>GPT</dt><dd><code>gpt-6-sol</code><code>gpt-6.1-sol</code><code>gpt-6-astra</code><code>gpt-6-luna</code><code>gpt-5.6-sol</code><code>gpt-5.6-luna</code><code>gpt-5.6-terra</code><code>gpt-5.5</code><code>gpt-5.4</code><code>gpt-5.2</code><code>codex-auto-review</code></dd>
+      <dt>Claude</dt><dd><code>claude-opus-5-5</code><code>claude-sonnet-5-5</code><code>claude-haiku-4-5</code><code>claude-opus-5</code><code>claude-sonnet-5</code><code>claude-opus-4-8</code><code>claude-opus-4-7</code><code>claude-opus-4-6</code><code>claude-sonnet-4-6</code></dd>
+      <dt>国产 / 其他</dt><dd><code>deepseek-v4-flash</code><code>kimi-k2.7-code</code><code>glm-5.3-flash</code><code>qwen3-coder-next</code><code>jev</code></dd>
+      <dt>muse</dt><dd><code>muse-spark</code><code>muse-image</code>（画图）</dd>
+    </dl>
+  </details>
+  <details class="for-cursor">
+    <summary>更新与卸载</summary>
+    <p><b>更新</b>：Cursor 不会自己升级。这个页面发了新版，就下载新包、解压、完全退出 Cursor，双击 <code>UPGRADE</code>，不用再输 key。</p>
+    <p><b>卸载</b>：完全退出 Cursor，双击 <code>UNINSTALL</code>，输入 <code>yes</code>。</p>
+    <p class="sub mac-only">Mac 上这些按钮（UPGRADE、UNINSTALL、REPAIR、DOCTOR）都可以像安装那样在终端跑：进到 <code>cursor-mac</code> 文件夹，先 <code>chmod +x *.command *.sh</code>，再执行 <code>bash ./UPGRADE-Mac.command</code>，名字换成要用的那个。</p>
+    <p class="sub">聊天记录都不动。模型菜单会换成上面 39 个，自己加的模型名会被清掉。</p>
+  </details>
+
+  <details class="for-codex">
+    <summary>出问题了</summary>
+    <p>先试：<b>重新跑一次安装文件</b>，再新开终端、完全退出 App 重开。</p>
+    <div class="tw"><table>
+      <thead><tr><th>现象</th><th>怎么办</th></tr></thead>
+      <tbody>
+        <tr><td>报 <code>401</code></td><td>key 错了，去 key 表复制整格，重新跑安装文件</td></tr>
+        <tr><td>报 <code>key not allowed to access model</code></td><td>你的 key 没开通这个模型，换一个或找运维开通</td></tr>
+        <tr><td>命令行提示找不到 <code>codex</code></td><td>关掉终端新开一个</td></tr>
+        <tr><td>App 没生效，或报错地址是 <code>api.openai.com</code></td><td>把 App 完全退出再打开</td></tr>
+        <tr><td>模型列表里只有几个 GPT</td><td>电脑要有 Python 3<span class="win-only">（从 python.org 装，勾选 Add python.exe to PATH）</span>，再重新跑安装文件</td></tr>
+        <tr><td>一直转圈 / 报 <code>502</code></td><td>换回 <code>gpt-5.6-terra</code>，把模型名和时间发给运维</td></tr>
+        <tr><td>用着用着被踢下线</td><td>别同时开多个 Codex</td></tr>
+      </tbody>
+    </table></div>
+    <p class="sub">还不行：把安装窗口整屏文字发给运维（不含 key）。</p>
+  </details>
+  <details class="for-codex">
+    <summary>更新与还原</summary>
+    <p><b>更新 / 换 key / 换电脑</b>：下载这个页面最新的安装文件，再跑一次。</p>
+    <p><b>还原</b>：原配置备份在 <code>~/.codex/</code> 里 <code>backup-carher-</code> 开头的文件夹，把里面的文件拷回 <code>~/.codex/</code>。</p>
+  </details>
+  <details class="for-codex">
+    <summary>更多用法</summary>
+    <ol class="list">
+      <li>Codex 读写飞书：对 Codex 说「安装 lark cli」。</li>
+      <li>用好 Codex：<a href="https://zhuanlan.zhihu.com/p/2067598557742469475" target="_blank" rel="noopener">这篇文章</a>。</li>
+      <li>AI 写飞书文档：her（找符金冬申请），或 <a href="https://chat.auto-link.com.cn/" target="_blank" rel="noopener">openchat</a>（免申请，支持飞书文档读写、群消息总结、PPT、画图）。</li>
+    </ol>
+  </details>
+
+  <details class="for-claude">
+    <summary>出问题了</summary>
+    <p>先试：<b>关掉终端、完全退出 App，重新跑一次安装文件，再打开</b>。</p>
+    <div class="tw"><table>
+      <thead><tr><th>现象</th><th>怎么办</th></tr></thead>
+      <tbody>
+        <tr><td>报 <code>401</code></td><td>key 错了，去 key 表复制整格，重新跑安装文件</td></tr>
+        <tr><td>报 <code>403</code> 或 <code>key not allowed to access model</code></td><td>你的 key 没开通这个模型，换一个或找运维开通</td></tr>
+        <tr><td>命令行 <code>/model</code> 里只有几个 Claude</td><td>关掉终端新开一个</td></tr>
+        <tr><td>App 提示「App unavailable」，或发消息很慢、一直不回</td><td>完全退出 App，重新跑安装文件，再打开；还不行找运维</td></tr>
+        <tr><td>App 里只能选一个模型</td><td>把 App 完全退出再打开</td></tr>
+        <tr><td>一直转圈 / 报 <code>502</code></td><td>换回 <code>claude-opus-5-5</code>，把模型名和时间发给运维</td></tr>
+      </tbody>
+    </table></div>
+    <p class="sub">还不行：把安装窗口整屏文字发给运维（不含 key）。</p>
+  </details>
+  <details class="for-claude">
+    <summary>更新与卸载</summary>
+    <p><b>更新 / 换 key</b>：下载这个页面最新的安装文件，再跑一次。原设置会自动备份。</p>
+    <p><b>卸载</b>：命令行删掉 <code>~/.claude/settings.json</code> 里 <code>env</code> 那几行；App 删掉这个文件夹：</p>
+    <pre class="mac-only"><code>~/Library/Application Support/Claude-3p</code></pre>
+    <pre class="win-only"><code>%LOCALAPPDATA%\Claude-3p</code></pre>
+  </details>
+</div>
+
+<footer>安装文件版本 {{BUILD}} · 有新版会重新发这个页面，用最新那份。</footer>
+</div>
+
+<script>
+(function(){
+  function get(k){try{return localStorage.getItem(k)}catch(e){return null}}
+  function set(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+  function q(s){return [].slice.call(document.querySelectorAll(s))}
+  var B=document.body, NAMES={mac:'Mac',win:'Windows'}, os='mac';
+  function mode(prefix,val,list){list.forEach(function(v){B.classList.remove(prefix+v)});B.classList.add(prefix+val)}
+  function pickTool(tool,save){
+    q('.tool').forEach(function(t){
+      var on=t.dataset.tool===tool;
+      t.setAttribute('aria-selected',on?'true':'false');
+      document.getElementById('p-'+t.dataset.tool).hidden=!on;
+    });
+    mode('tool-',tool,['cursor','codex','claude']);
+    if(save)set('oneclick-tool',tool);
+  }
+  function pickOS(v,save){
+    os=v; mode('os-',v,['mac','win']);
+    document.getElementById('os-name').textContent=NAMES[v];
+    document.getElementById('os-other').textContent=NAMES[v==='mac'?'win':'mac'];
+    if(save)set('oneclick-os',v);
+  }
+  q('pre').forEach(function(pre){
+    var box=document.createElement('div'); box.className='codebox';
+    pre.parentNode.insertBefore(box,pre); box.appendChild(pre);
+    var b=document.createElement('button'); b.type='button'; b.className='copy'; b.textContent='复制';
+    b.setAttribute('aria-label','复制这段命令');
+    box.appendChild(b);
+    function done(ok){
+      b.textContent=ok?'已复制':'按 Cmd/Ctrl+C'; b.classList.toggle('done',ok);
+      setTimeout(function(){b.textContent='复制';b.classList.remove('done')},1800);
+    }
+    function selectIt(){var r=document.createRange();r.selectNodeContents(pre);var sel=getSelection();sel.removeAllRanges();sel.addRange(r);return sel}
+    b.addEventListener('click',function(){
+      var text=pre.innerText.replace(/\s+$/,'')+'\n';
+      function fallback(){
+        var sel=selectIt(), ok=false;
+        try{ok=document.execCommand('copy')}catch(e){}
+        if(ok)sel.removeAllRanges();
+        done(ok);
+      }
+      if(navigator.clipboard&&navigator.clipboard.writeText){
+        navigator.clipboard.writeText(text).then(function(){done(true)},fallback);
+      }else fallback();
+    });
+  });
+  q('.tool').forEach(function(t){t.addEventListener('click',function(){pickTool(t.dataset.tool,true)})});
+  document.getElementById('os-switch').addEventListener('click',function(){pickOS(os==='mac'?'win':'mac',true)});
+  var h=(location.hash||'').slice(1);
+  pickTool(['cursor','codex','claude'].indexOf(h)>=0?h:(get('oneclick-tool')||'cursor'),false);
+  pickOS(get('oneclick-os')||(/Windows/i.test(navigator.userAgent||'')?'win':'mac'),false);
+})();
+</script>

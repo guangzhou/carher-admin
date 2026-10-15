@@ -8,6 +8,7 @@ description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的�
 用户文档:飞书《Claude Code 一键配置》`MeLad7oMiobwf6xnpA2cWy0nnSg`;正文由 `scripts/agent-oneclick-docs/` 生成(三篇同骨架),
 收口门禁 `scripts/agent-oneclick-docs-audit.py`。同族:Cursor(skill `cursor-client-bundle-patch`)、Codex(skill `codex-oneclick-rollout`)。
 三个 agent 每人一把 cursor key 共用。
+**给同事的入口 = 单页 https://chat.auto-link.com.cn/oneclick/**(skill `agent-oneclick-page`):重建了本工具的安装器后,必须再跑 `bash scripts/agent-oneclick-docs/publish_198.sh`,否则页面里内嵌的还是旧文件。
 
 ## 1. 文件与发版
 

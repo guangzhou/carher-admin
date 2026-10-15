@@ -8,6 +8,8 @@ description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 
 > 实证：2026-09-10 生图全链路 + key 铺满；**2026-10-08/09 模型自动同步上线、改单文件、review 修 8 处**。
 > 档案：memory `project_codex_oneclick_imagegen_rollout_2026_09_10`、`project_codex_oneclick_models_autosync_2026_10_08`。
 > 用户文档：飞书《Codex一键配置》wiki `BzVZwGMSOiSYOykc6UYcN2opn3b` = docx `HMj6d1ttlorc5KxbFnlcVuopntf`(10-15 起唯一一篇,外部分享已全删);正文由 `scripts/agent-oneclick-docs/` 生成。
+> **给同事的入口 = 单页 https://chat.auto-link.com.cn/oneclick/**(skill `agent-oneclick-page`):重建了本工具的安装器后,必须再跑 `bash scripts/agent-oneclick-docs/publish_198.sh`,否则页面里内嵌的还是旧文件。
+> Codex App 下载=官方直链(Mac `persistent.oaistatic.com/codex-app-prod/Codex.dmg`、Win `get.microsoft.com/installer/download/9PLM9XGG6VKS`,国内可达),不再用飞书附件。
 > **同族**(2026-10-12 用户拍板:三个 agent 每人一把 cursor key 共用):
 > Cursor《一键配置》`OQCPdLd4MovEVoxGzdMcD3CJnCf`(10-15 起只剩这一篇)(skill `cursor-client-bundle-patch`)、
 > Claude Code《一键配置》`MeLad7oMiobwf6xnpA2cWy0nnSg`(源 `claude-oneclick/`,结构照抄本目录的 `build.sh`)。

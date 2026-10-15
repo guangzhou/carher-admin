@@ -6,8 +6,9 @@
 > `deepseek-v4.1-flash` 出字 4/6(失败率 33%)。菜单有而 std 没有的 7 个(`gpt-5.2` `gpt-5.4`
 > `composer-2.5` `deepseek-v4-flash` `grok-4.20-0309-reasoning` `grok-4.5-latest` `grok-4.6-latest`)
 > 同事 key 正常、std 点了 403 —— std 是实验 key,**「对齐 std」≠「同事能用」**,改菜单前先逐名实打。
-> 两篇飞书文档都是同一版,正文由 `scripts/agent-oneclick-docs/`(bodies.py + apply.py --all)生成;**改完文档/附件一律跑 `python3 scripts/agent-oneclick-docs-audit.py`**
-> (附件回环 sha + 两篇正文逐字相同 + 陈旧词 0,三个 agent 的文档一起验)。
+> **给同事的入口 = 单页 https://chat.auto-link.com.cn/oneclick/**(skill `agent-oneclick-page`):重建了本工具的安装器后,必须再跑 `bash scripts/agent-oneclick-docs/publish_198.sh`,否则页面里内嵌的还是旧文件。
+> 飞书文档(10-15 起只剩 `OQCPdLd4…` 一篇),正文由 `scripts/agent-oneclick-docs/`(bodies.py + apply.py --all)生成;**改完文档/附件一律跑 `python3 scripts/agent-oneclick-docs-audit.py`**
+> (附件回环 sha + 块数 + 陈旧词 0,三个 agent 的文档一起验)。
 > ⛔ `grok-4.20-multi-agent` 别进菜单:官方不支持 function calling,带 tools 必兜到 deepseek 作答;std 已摘。
 
 对象:同事/本机 **Cursor.app 本体**的 workbench bundle 补丁与 BYOK 配置,与网关线

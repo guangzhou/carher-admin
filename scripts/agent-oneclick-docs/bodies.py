@@ -3,12 +3,12 @@
 统一骨架:
   🚀 一句话
   1. 准备        拿 key → 装客户端/App →(可选)命令行手动装法
-  2. 一键安装    Mac/Linux 下载双击 · Windows 下载双击 · 粘 key · 打不开怎么办
-  3. 开始用      命令行 · 桌面 App(Cursor:本机 · 远程服务器)
-  4. 模型
-  5. 出问题了    「先 X」一句话 + 现象|怎么办 表 + 「还不行」一句话
-  6. 更新与卸载
-  (Codex 另有 7. 其他工具)
+  2. 一键配置    Mac/Linux 下载双击 · Windows 下载双击 · 粘 key · 打不开怎么办
+  3. 开始用      命令行 · 桌面 App · 模型(Cursor:本机 · 远程服务器 · 模型)
+  4. 出问题了    「先 X」一句话 + 现象|怎么办 表 + 「还不行」一句话
+  5. 更新与卸载
+  (Codex 另有 6. 其他工具)
+  互链在 🚀 里:「本文只配 X。用别的看:…」(防下错文件)
 """
 
 # ── 共用小积木 ──────────────────────────────────────────────
@@ -54,10 +54,6 @@ L_CODEX = '<a href="https://t83dfrspj4.feishu.cn/wiki/BzVZwGMSOiSYOykc6UYcN2opn3
 L_CLAUDE = '<a href="https://t83dfrspj4.feishu.cn/docx/MeLad7oMiobwf6xnpA2cWy0nnSg">Claude Code 一键配置</a>'
 
 
-def others(*links):
-    return p("其他一键配置：" + " · ".join(links))
-
-
 def callout(txt):
     return ('<callout emoji="🚀" background-color="rgb(240,244,255)" border-color="rgb(130,167,252)"><p>'
             + txt + "</p></callout>")
@@ -69,8 +65,8 @@ def p(txt):
 
 # ───────────────────────── Cursor ─────────────────────────
 CURSOR = "".join([
-    callout("<b>下载一个包 → 解压 → 双击 → 粘一次 key。</b>Mac、Windows 都行，本机和远程服务器（Remote-SSH）都能用。"),
-    others(L_CODEX, L_CLAUDE),
+    callout("<b>下载一个包 → 解压 → 双击 → 粘一次 key。</b>本机和远程服务器（Remote-SSH）都能用。"
+            "<br/>本文只配 Cursor。用别的看：" + L_CODEX + " · " + L_CLAUDE),
     "<h1>1. 准备</h1>",
     p("<b>① 拿 key</b>：" + KEYLINK + "。Cursor、Codex、Claude Code 用同一把。"),
     p("<b>② 装 Cursor</b>（装过的跳过），按你的电脑选一个："),
@@ -80,7 +76,7 @@ CURSOR = "".join([
            ["其他", '<a href="https://cursor.com/download"><u>官网下载页</u></a>', "—"]]),
     p("<b>③ 注册并登录 Cursor 账号</b>（已登录的跳过）：打开 Cursor，点 <b>Sign Up</b> 用邮箱注册（已有账号点 <b>Log In</b>），"
       "在浏览器里完成后回到 Cursor。<b>免费账号就够</b>，不用买会员。不登录用不了我们的模型。"),
-    "<h1>2. 一键安装</h1>",
+    "<h1>2. 一键配置</h1>",
     p("按你的电脑下载一个包，解压。<b>Mac</b>（解压得到 <code>cursor-mac</code> 文件夹）："),
     ph("ZIP"),
     p("<b>Windows</b>（解压得到 <code>cursor-windows</code> 文件夹）："),
@@ -99,8 +95,7 @@ CURSOR = "".join([
        "双击 <code>REMOTE-SSH-Mac.command</code>（Windows：<code>REMOTE-SSH-Windows.cmd</code>），输入服务器名（照列出来的填，或 <code>用户名@IP</code>），回车；再输入 <code>yes</code>，回车。",
        "看到「✅ 已补好」，关掉远程窗口重连，就能用了。"),
     p("⚠️ 更新 Cursor 版本后，先连一次服务器，再双击一次 <code>REMOTE-SSH</code>。"),
-    "<h1>4. 模型</h1>",
-    p("共 39 个，<code>grok-4.7</code> 是默认，拿不定主意就用它。"),
+    p("<b>模型</b>：共 39 个，拿不定主意就用默认的 <code>grok-4.7</code>。"),
     table([["分类", "模型"],
            ["Grok / Gemini（快）",
             codes("grok-4.7", "grok-4.6", "grok-4.6-latest", "grok-4.5-latest", "grok-4.5", "grok-4.3", "grok-build-0.1",
@@ -114,24 +109,22 @@ CURSOR = "".join([
            ["国产 / 其他", codes("deepseek-v4-flash", "kimi-k2.7-code", "glm-5.3-flash", "qwen3-coder-next", "jev")],
            ["muse", "<code>muse-spark</code>、<code>muse-image</code>（画图）"]]),
     ph("IMG1"),
-    "<h1>5. 出问题了</h1>",
+    "<h1>4. 出问题了</h1>",
     p("<b>先对照下表自己试</b>；不行就双击 <code>DOCTOR</code>，把窗口里的整屏文字发给运维（不含 key；别只发截图）。"),
     table([["现象", "怎么办"],
            ["报 <code>401</code>，或 key 没写上", "key 错了或没写上：Settings → Models → OpenAI API Key，粘贴 key（去 key 表复制整格，别手敲）→ 点 Verify → 完全退出重开"],
            ["报 <code>key not allowed to access model</code>", "你的 key 没开通这个模型：换一个，或找运维开通（muse 是新加的，很多 key 还没开）"],
-           ["报 <code>An unexpected error occurred</code> 或 <code>does not support custom API keys</code>",
-            "下载最新的包，退出 Cursor，双击 <code>UPGRADE</code>（不是 REPAIR）"],
+           ["报 <code>An unexpected error occurred</code> / <code>does not support custom API keys</code>；看不到 High / Fast；菜单里有第 3 节模型表以外的模型",
+            "下载最新的包，退出 Cursor，双击 <code>UPGRADE</code>"],
            ["模型不见了", f"Cursor {QUIT} → 双击 <code>REPAIR</code> → 重开"],
-           ["REPAIR 提示「拒绝动手」", "Cursor 出了还没适配的新版本，不会改坏你的 Cursor，把窗口文字发给运维"],
-           ["看不到 High / Fast 档位", "双击 <code>UPGRADE</code>"],
-           ["菜单里有不在上表的模型（比如 Fable、Gemini 4、Auto 以外的）", "那是 Cursor 自带的，用不了我们的 key。双击 <code>UPGRADE</code> 会把它们藏起来"],
+           ["REPAIR 提示「拒绝动手」", "Cursor 出了还没适配的新版本，没有改动你的 Cursor，把窗口文字发给运维"],
            ["模型一直转圈 / 报 <code>502</code>", "换回 <code>grok-4.7</code>，把模型名和时间发给运维"],
            ["远程窗口模型报错 / 每轮都在压缩上下文", "按第 3 节再双击一次 <code>REMOTE-SSH</code>"],
            ["REMOTE-SSH 提示「8788 端口被别的程序占着」",
             "请服务器管理员让出这个端口；或 Cursor 完全退出后双击 <code>TURN-OFF-DELTA-Mac.command</code>，再连服务器"]]),
     p("提示没权限： 慎！！！"),
     ph("IMG2"),
-    "<h1>6. 更新与卸载</h1>",
+    "<h1>5. 更新与卸载</h1>",
     p("<b>更新</b>：第 2 节的包有新版时，重新下载你那个系统的包、解压 → 把 Cursor 完全退出 → 双击 <code>UPGRADE-Mac.command</code>"
       "（Windows：<code>UPGRADE-Windows.cmd</code>）。不用再输 key，聊天记录和设置不动；连远程服务器的，再双击一次 <code>REMOTE-SSH</code>。"),
     p("更新会把模型菜单换成上面这 39 个，你自己加的模型名会被清掉。"),
@@ -143,20 +136,20 @@ CURSOR = "".join([
 def codex(external):
     return "".join([
         callout("<b>下载一个文件 → 双击 → 粘一次 key。</b>命令行 <code>codex</code> 和桌面 App 一起配好，Mac、Windows、Linux 都行。"
-                '<b><span background-color="rgb(247,105,100)">不要开 VPN</span></b>（也别用 TC）。'),
-        "" if external else others(L_CURSOR, L_CLAUDE),
+                '<b><span background-color="rgb(247,105,100)">不要开 VPN</span></b>（也别用 TC）。'
+                + ("" if external else "<br/>本文只配 Codex。用别的看：" + L_CURSOR + " · " + L_CLAUDE)),
         "<h1>1. 准备</h1>",
         p("<b>① 拿 key</b>：" + KEYLINK + "。Cursor、Codex、Claude Code 用同一把。"),
         p("<b>② 选客户端</b>：命令行和桌面 App 用哪个都行，也可以都用，一键脚本会把两个一起配好。"),
         table([["客户端", "怎么装"],
                ["命令行 <code>codex</code>", "不用装，一键脚本发现没有会自动装"],
                ["桌面 App", f"装下面的安装包（装过的跳过）。装好先别打开，已经开着的{QUIT}"]]),
-        p('Mac：双击 .dmg，把 Codex 拖进「应用程序」（也可以<a href="https://persistent.oaistatic.com/codex-app-prod/Codex.dmg">下载官方最新版</a>）：'),
+        p('Mac：<a href="https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"><b><u>点这里下载官方安装包</u></b></a>，双击 .dmg，把 Codex 拖进「应用程序」。'),
         ph("DMG"),
-        p('Windows：双击 .msix 安装。装不上找<cite type="user" user-id="ou_36efe139cd762579ae266081764b59fc" user-name="宋力"></cite>开权限，'
-          '或看 <cite doc-id="La8twWEToibR9Jk6yZucTz78nDc" file-type="wiki" title="Codex 配置" type="doc"></cite>：'),
+        p('Windows：<a href="https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi"><b><u>点这里下载官方安装器</u></b></a>，双击后按提示安装。装不上找<cite type="user" user-id="ou_36efe139cd762579ae266081764b59fc" user-name="宋力"></cite>开权限，'
+          '或看 <cite doc-id="La8twWEToibR9Jk6yZucTz78nDc" file-type="wiki" title="Codex 配置" type="doc"></cite>。'),
         ph("MSIX"),
-        "<h1>2. 一键安装</h1>",
+        "<h1>2. 一键配置</h1>",
         p("按你的电脑下载一个，双击。<b>Mac / Linux</b>（文件名带 <code>-mac</code>）："),
         ph("MAC"),
         p("<b>Windows</b>（文件名带 <code>-windows</code>）："),
@@ -169,12 +162,9 @@ def codex(external):
         p("<b>桌面 App</b>：打开 App（装脚本前就开着的，要先完全退出再开，只关窗口不行）。出现登录页就点「使用其他方式登录」，再粘贴 key："),
         ph("IMG0"),
         ph("IMG1"),
-        p("<b>换模型</b>：命令行输入 <code>/model</code>；App 点底部的模型选择器。<b>画图</b>：直接说「画一张……」，图片存在当前文件夹。"),
-        p("别同时开多个 Codex，可能互相踢下线。"),
-        "<h1>4. 模型</h1>",
-        p("选择器里是你的 key 能用的全部模型，每天自动更新，默认 <code>gpt-5.6-terra</code>。"
-          ""),
-        "<h1>5. 出问题了</h1>",
+        p("<b>模型</b>：默认 <code>gpt-5.6-terra</code>。换模型：命令行输入 <code>/model</code>；App 点底部的模型选择器。列表就是你的 key 能用的全部模型，每天自动更新。"),
+        p("<b>画图</b>：直接说「画一张……」，图片存在当前文件夹。别同时开多个 Codex，可能互相踢下线。"),
+        "<h1>4. 出问题了</h1>",
         p("<b>先重新双击一次脚本</b>，再新开终端 / 退出重开 App，大多数问题都能好。"),
         table([["现象", "怎么办"],
                ["报 <code>401</code>", "key 错了：去 key 表复制整格重新粘，别手敲"],
@@ -184,10 +174,10 @@ def codex(external):
                ["模型一直转圈 / 报 <code>502</code>", "换回 <code>gpt-5.6-terra</code>，把模型名和时间发给运维"],
                ["选择器里只有几个 GPT", "电脑要有 Python 3（Windows 从 python.org 装，勾选 Add python.exe to PATH），再重新双击脚本"]]),
         p(STILL_BAD),
-        "<h1>6. 更新与卸载</h1>",
+        "<h1>5. 更新与卸载</h1>",
         p("<b>更新 / 换 key / 换电脑</b>：重新下载最新脚本双击一次就行，原配置会自动备份。"),
         p("<b>还原</b>：脚本改配置前会把原文件备份到 <code>~/.codex/</code> 里 <code>backup-carher-</code> 开头的文件夹，想还原就把里面的文件拷回 <code>~/.codex/</code>。"),
-        "<h1>7. 其他工具</h1>",
+        "<h1>6. 其他工具</h1>",
         "<ul><li>飞书和 codex 打通：对 codex 说「安装 lark cli」。</li>"
         "<li>高效使用 codex：https://zhuanlan.zhihu.com/p/2067598557742469475</li>"
         '<li>AI 写飞书文档：her（找<cite type="user" user-id="ou_b8e5bb0cc5c19b5059266d7409eabeb4" user-name="符金冬"></cite>申请），'
@@ -197,8 +187,8 @@ def codex(external):
 
 # ───────────────────────── Claude Code ─────────────────────────
 CLAUDE = "".join([
-    callout("<b>下载一个文件 → 双击 → 粘一次 key。</b>命令行 <code>claude</code> 和桌面 App 一起配好，Mac、Windows、Linux 都行。"),
-    others(L_CURSOR, L_CODEX),
+    callout("<b>下载一个文件 → 双击 → 粘一次 key。</b>命令行 <code>claude</code> 和桌面 App 一起配好，Mac、Windows、Linux 都行。"
+            "<br/>本文只配 Claude Code。用别的看：" + L_CURSOR + " · " + L_CODEX),
     "<h1>1. 准备</h1>",
     p("<b>① 拿 key</b>：" + KEYLINK + "。Cursor、Codex、Claude Code 用同一把。"),
     p("<b>② 选客户端</b>：命令行和桌面 App 用哪个都行，也可以都用，一键脚本会把两个一起配好。"),
@@ -208,7 +198,7 @@ CLAUDE = "".join([
             f'<a href="{CCDL}/Claude-mac.zip"><b><u>Mac 下载</u></b></a>（解压后拖进「应用程序」）　'
             f'<a href="{CCDL}/Claude-windows-x64.msix"><b><u>Windows 下载</u></b></a>（ARM 电脑用<a href="{CCDL}/Claude-windows-arm64.msix">这个</a>）。'
             f"装好<b>不用登录</b>，先别打开，已经开着的{QUIT}"]]),
-    "<h1>2. 一键安装</h1>",
+    "<h1>2. 一键配置</h1>",
     p("按你的电脑下载一个，双击。<b>Mac / Linux</b>（文件名带 <code>-mac</code>）："),
     ph("MAC"),
     p("<b>Windows</b>（文件名带 <code>-windows</code>）："),
@@ -219,13 +209,8 @@ CLAUDE = "".join([
     p("<b>命令行</b>：新开终端（Windows 开 PowerShell），进项目文件夹："),
     pre("cd 你的项目文件夹", "claude"),
     p("<b>桌面 App</b>：打开 App（不用登录，装脚本前就开着的要先完全退出再开），左边点 <b>Code</b>，选一个项目文件夹，直接说你要做什么。"),
-    p("<b>换模型</b>：命令行输入 <code>/model</code>；App 点输入框旁边的模型名。"),
-    "<h1>4. 模型</h1>",
-    p("输入 <code>/model</code> 看到的列表就是你的 key 能用的全部模型（Claude、GPT、Grok、Kimi 等），上下键选，回车。默认 <code>claude-opus-5-5</code>。"),
-    p("只这一次用别的模型，启动时加 <code>--model</code>，例如："),
-    pre("claude --model gpt-5.6-terra"),
-    p("💡 列表里名字带 <code>image</code> 的是画图专用，别选来聊天。"),
-    "<h1>5. 出问题了</h1>",
+    p("<b>模型</b>：默认 <code>claude-opus-5-5</code>。换模型：命令行输入 <code>/model</code>；App 点输入框旁边的模型名。列表就是你的 key 能用的全部模型。名字带 <code>image</code> 的是画图专用，别选来聊天。"),
+    "<h1>4. 出问题了</h1>",
     p("<b>先把 App 和终端都关掉 → 重新双击一次安装脚本 → 再打开</b>，大多数问题都能好。"),
     table([["现象", "怎么办"],
            ["报 <code>401</code>", "key 错了：去 key 表复制整格，重新双击脚本粘一次，别手敲"],
@@ -236,7 +221,7 @@ CLAUDE = "".join([
            ["<code>/model</code> 里只有几个 Claude", "关掉终端新开一个"],
            ["模型一直转圈 / 报 <code>502</code>", "换回 <code>claude-opus-5-5</code>，把模型名和时间发给运维"]]),
     p(STILL_BAD),
-    "<h1>6. 更新与卸载</h1>",
+    "<h1>5. 更新与卸载</h1>",
     p("<b>更新 / 换 key</b>：重新下载最新脚本双击一次就行，原设置会自动备份。"),
     p("<b>卸载</b>：命令行删掉 <code>~/.claude/settings.json</code> 里 <code>env</code> 那几行；桌面 App 删掉下面的文件夹，就回到官方默认："),
     p("Mac："),

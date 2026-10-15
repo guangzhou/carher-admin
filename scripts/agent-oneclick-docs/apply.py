@@ -1,7 +1,7 @@
-"""把 bodies.py 的正文套到飞书文档上;原有图片/附件原样保留,挪回 ⟦X⟧ 占位处。
+"""把 bodies.py 的正文套到飞书三篇详细文档上(给同事的主入口是网页 oneclick-all.html,见 build_html.py);原有图片/附件原样保留,挪回 ⟦X⟧ 占位处。
 
 用法:
-  python3 scripts/agent-oneclick-docs/apply.py --all          # 五篇都套(改完 bodies.py 后用这个)
+  python3 scripts/agent-oneclick-docs/apply.py --all          # 三篇都套(改完 bodies.py 后用这个)
   python3 scripts/agent-oneclick-docs/apply.py <doc_id>        # 只套一篇
 改完一律跑 scripts/agent-oneclick-docs-audit.py 收口。
 ⚠️ 只换正文文字;附件(zip/安装器)换新版本另外按 skill 里的「换附件」步骤做。

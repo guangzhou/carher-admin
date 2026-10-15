@@ -7,9 +7,9 @@ description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 
 
 > 实证：2026-09-10 生图全链路 + key 铺满；**2026-10-08/09 模型自动同步上线、改单文件、review 修 8 处**。
 > 档案：memory `project_codex_oneclick_imagegen_rollout_2026_09_10`、`project_codex_oneclick_models_autosync_2026_10_08`。
-> 用户文档：飞书《Codex一键配置》wiki `Q0pJwvdGiiMjHpk3487cyH33nTb` = docx `Ni2hdvtbgoqBFMxrAu5ckjPrnbg` + 外部分享 `ZYNsdZCJIoCJEJxeMPGcl7jDn3f`(另两篇外部分享 10-13 已删);正文由 `scripts/agent-oneclick-docs/` 生成。
+> 用户文档：飞书《Codex一键配置》wiki `BzVZwGMSOiSYOykc6UYcN2opn3b` = docx `HMj6d1ttlorc5KxbFnlcVuopntf`(10-15 起唯一一篇,外部分享已全删);正文由 `scripts/agent-oneclick-docs/` 生成。
 > **同族**(2026-10-12 用户拍板:三个 agent 每人一把 cursor key 共用):
-> Cursor《一键配置》`OQCPdLd4MovEVoxGzdMcD3CJnCf` + `FapXdudPLoTTRLxWGJQcqITpn9g`(skill `cursor-client-bundle-patch`)、
+> Cursor《一键配置》`OQCPdLd4MovEVoxGzdMcD3CJnCf`(10-15 起只剩这一篇)(skill `cursor-client-bundle-patch`)、
 > Claude Code《一键配置》`MeLad7oMiobwf6xnpA2cWy0nnSg`(源 `claude-oneclick/`,结构照抄本目录的 `build.sh`)。
 > 三篇文档里都有一句「同一把 key」+ 互链,改一篇时顺手核另两篇别说法打架。
 

@@ -576,7 +576,7 @@ AST 子节点的 `start/end` 里 `src.slice()` 出来搬运,不写进任何模�
 | 文档 | id |
 |---|---|
 | A | `OQCPdLd4MovEVoxGzdMcD3CJnCf` |
-| B | `FapXdudPLoTTRLxWGJQcqITpn9g` |
+| B | `FapXdudPLoTTRLxWGJQcqITpn9g`(**10-15 用户已删**,只剩 A) |
 
 🔴 **只更新一篇 = 把新旧调个位,而且不报错。** 10-12 就这么踩了一次:我按用户给的链接只换了 A,
 B 于是从「现行入口」变成了陈旧那篇(还挂 32 名的包、还写「已适配 3.16~3.20.21」)。

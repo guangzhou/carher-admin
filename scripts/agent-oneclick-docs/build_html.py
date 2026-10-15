@@ -25,6 +25,10 @@ FILES = {
     "codex-windows.bat": ROOT / "codex-oneclick/codex-windows.bat",
     "claude-mac.command": ROOT / "claude-oneclick/claude-mac.command",
     "claude-windows.bat": ROOT / "claude-oneclick/claude-windows.bat",
+    "codex-doctor-mac.command": ROOT / "codex-oneclick/codex-doctor-mac.command",
+    "codex-doctor-windows.bat": ROOT / "codex-oneclick/codex-doctor-windows.bat",
+    "claude-doctor-mac.command": ROOT / "claude-oneclick/claude-doctor-mac.command",
+    "claude-doctor-windows.bat": ROOT / "claude-oneclick/claude-doctor-windows.bat",
     "img/codex-login.jpg": HERE / "img/codex-login.jpg",
 }
 MIME = {".command": "application/octet-stream", ".bat": "application/octet-stream", ".zip": "application/zip"}

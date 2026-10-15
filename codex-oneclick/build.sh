@@ -56,8 +56,20 @@ assert not bat.startswith(b"\xef\xbb\xbf") and all(c < 128 for c in bat[:cut])
 assert b"chcp" not in bat.lower() and bat.count(b"\n") == bat.count(b"\r\n")
 Path("codex-windows.bat").write_bytes(bat)
 print("built codex-mac.command, codex-windows.bat")
+
+# 自检(doctor):只读,同一套 bat 头防线
+dm = embed((src / "doctor-mac.sh").read_text(encoding="utf-8"))
+Path("codex-doctor-mac.command").write_text(dm, encoding="utf-8", newline="\n")
+dps = embed((src / "doctor-windows.ps1").read_text(encoding="utf-8-sig"))
+dbat = (head + dps.replace("\r\n", "\n").replace("\n", "\r\n")).encode("utf-8")
+dcut = dbat.index(b"##CARHER-PS1")
+assert not dbat.startswith(b"\xef\xbb\xbf") and all(c < 128 for c in dbat[:dcut])
+assert b"chcp" not in dbat.lower() and dbat.count(b"\n") == dbat.count(b"\r\n")
+Path("codex-doctor-windows.bat").write_bytes(dbat)
+print("built codex-doctor-mac.command, codex-doctor-windows.bat")
 PY
-chmod +x codex-mac.command
+chmod +x codex-mac.command codex-doctor-mac.command
 bash -n codex-mac.command
+bash -n codex-doctor-mac.command
 # 上传到飞书后下载回来比这两个值，相同才算传对了
-shasum -a 256 codex-mac.command codex-windows.bat
+shasum -a 256 codex-mac.command codex-windows.bat codex-doctor-mac.command codex-doctor-windows.bat

@@ -10,6 +10,7 @@ description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 
 > 用户文档：飞书《Codex一键配置》wiki `BzVZwGMSOiSYOykc6UYcN2opn3b` = docx `HMj6d1ttlorc5KxbFnlcVuopntf`(10-15 起唯一一篇,外部分享已全删);正文由 `scripts/agent-oneclick-docs/` 生成。
 > **给同事的入口 = 单页 https://chat.auto-link.com.cn/oneclick/**(skill `agent-oneclick-page`):重建了本工具的安装器后,必须再跑 `bash scripts/agent-oneclick-docs/publish_198.sh`,否则页面里内嵌的还是旧文件。
 > Codex App 下载=官方直链(Mac `persistent.oaistatic.com/codex-app-prod/Codex.dmg`、Win `get.microsoft.com/installer/download/9PLM9XGG6VKS`,国内可达),不再用飞书附件。
+> **自检(doctor,10-16)**:`src/doctor-{mac.sh,windows.ps1}` → build 出 `codex-doctor-{mac.command,windows.bat}`,单页「出问题了」里可下载。只读;key 只打 len+sha8+异常字符数;查 CLI/App/config(当前 provider 段)/auth.json/两把 key 是否一致/零宽字符/env 里的 OPENAI_API_KEY/模型同步/画图/代理/网关连通/key 实打 /responses;结论列红黄项+修法,报告存桌面并复制到剪贴板。回归 `tests/test_doctor.py`(假网关,只读+不泄 key+每种坏配置都报)。
 > **同族**(2026-10-12 用户拍板:三个 agent 每人一把 cursor key 共用):
 > Cursor《一键配置》`OQCPdLd4MovEVoxGzdMcD3CJnCf`(10-15 起只剩这一篇)(skill `cursor-client-bundle-patch`)、
 > Claude Code《一键配置》`MeLad7oMiobwf6xnpA2cWy0nnSg`(源 `claude-oneclick/`,结构照抄本目录的 `build.sh`)。

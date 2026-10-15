@@ -352,8 +352,18 @@ bash ./REMOTE-SSH-Mac.command</code></pre>
   </details>
 
   <details class="for-codex">
-    <summary>出问题了</summary>
-    <p>先试：<b>重新跑一次安装文件</b>，再新开终端、完全退出 App 重开。</p>
+    <summary>出问题了（先跑自检，一键出报告）</summary>
+    <p><b>先跑自检</b>：它只检查、不改任何东西，跑完把结果复制好，直接粘给运维。</p>
+    <p>
+      <a class="btn mac-only" href="{{codex-doctor-mac.command}}" download="codex-doctor-mac.command">下载 codex-doctor-mac.command</a>
+      <a class="btn win-only" href="{{codex-doctor-windows.bat}}" download="codex-doctor-windows.bat">下载 codex-doctor-windows.bat</a>
+    </p>
+    <pre class="mac-only"><code>cd ~/Downloads
+chmod +x codex-doctor-mac.command
+bash ./codex-doctor-mac.command</code></pre>
+    <p class="sub win-only">双击下载的文件。弹出蓝色提示点「更多信息」→「仍要运行」。</p>
+    <p class="sub">报告会自动复制，也存一份在桌面（<code>codex-自检-时间.txt</code>），里面没有 key。最后的「结论」会写出查到的问题和怎么修。</p>
+    <p>也可以先试：<b>重新跑一次安装文件</b>，再新开终端、完全退出 App 重开。</p>
     <div class="tw"><table>
       <thead><tr><th>现象</th><th>怎么办</th></tr></thead>
       <tbody>
@@ -366,7 +376,7 @@ bash ./REMOTE-SSH-Mac.command</code></pre>
         <tr><td>用着用着被踢下线</td><td>别同时开多个 Codex</td></tr>
       </tbody>
     </table></div>
-    <p class="sub">还不行：把安装窗口整屏文字发给运维（不含 key）。</p>
+    <p class="sub">还不行：把自检报告发给运维。</p>
   </details>
   <details class="for-codex">
     <summary>更新与还原</summary>
@@ -383,8 +393,18 @@ bash ./REMOTE-SSH-Mac.command</code></pre>
   </details>
 
   <details class="for-claude">
-    <summary>出问题了</summary>
-    <p>先试：<b>关掉终端、完全退出 App，重新跑一次安装文件，再打开</b>。</p>
+    <summary>出问题了（先跑自检，一键出报告）</summary>
+    <p><b>先跑自检</b>：它只检查、不改任何东西，跑完把结果复制好，直接粘给运维。</p>
+    <p>
+      <a class="btn mac-only" href="{{claude-doctor-mac.command}}" download="claude-doctor-mac.command">下载 claude-doctor-mac.command</a>
+      <a class="btn win-only" href="{{claude-doctor-windows.bat}}" download="claude-doctor-windows.bat">下载 claude-doctor-windows.bat</a>
+    </p>
+    <pre class="mac-only"><code>cd ~/Downloads
+chmod +x claude-doctor-mac.command
+bash ./claude-doctor-mac.command</code></pre>
+    <p class="sub win-only">双击下载的文件。弹出蓝色提示点「更多信息」→「仍要运行」。</p>
+    <p class="sub">报告会自动复制，也存一份在桌面（<code>claude-自检-时间.txt</code>），里面没有 key。最后的「结论」会写出查到的问题和怎么修。</p>
+    <p>也可以先试：<b>关掉终端、完全退出 App，重新跑一次安装文件，再打开</b>。</p>
     <div class="tw"><table>
       <thead><tr><th>现象</th><th>怎么办</th></tr></thead>
       <tbody>
@@ -396,7 +416,7 @@ bash ./REMOTE-SSH-Mac.command</code></pre>
         <tr><td>一直转圈 / 报 <code>502</code></td><td>换回 <code>claude-opus-5-5</code>，把模型名和时间发给运维</td></tr>
       </tbody>
     </table></div>
-    <p class="sub">还不行：把安装窗口整屏文字发给运维（不含 key）。</p>
+    <p class="sub">还不行：把自检报告发给运维。</p>
   </details>
   <details class="for-claude">
     <summary>更新与卸载</summary>
@@ -433,7 +453,7 @@ bash ./REMOTE-SSH-Mac.command</code></pre>
     if(save)set('oneclick-os',v);
   }
   q('pre').forEach(function(pre){
-    var box=document.createElement('div'); box.className='codebox';
+    var box=document.createElement('div'); box.className='codebox'+(pre.classList.contains('mac-only')?' mac-only':pre.classList.contains('win-only')?' win-only':'');
     pre.parentNode.insertBefore(box,pre); box.appendChild(pre);
     var b=document.createElement('button'); b.type='button'; b.className='copy'; b.textContent='复制';
     b.setAttribute('aria-label','复制这段命令');

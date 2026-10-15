@@ -1,0 +1,194 @@
+@echo off
+setlocal
+set "CARHER_SELF=%~f0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$c=[IO.File]::ReadAllText($env:CARHER_SELF,[Text.Encoding]::UTF8);$i=$c.IndexOf('#'+'#CARHER-PS1');& ([scriptblock]::Create($c.Substring($i)))"
+echo.
+pause
+exit /b
+##CARHER-PS1
+# CarHer Claude Code 自检 (Windows) —— 只读,不改任何配置
+# 由 build.sh 生成，别直接改；源在 claude-oneclick/src/
+# 与 doctor-mac.sh 同一张判据表;key 只打长度 + sha256 前 8 位。只用 PowerShell 5.1 语法(Windows 自带的那版)。
+$ErrorActionPreference = 'Continue'
+$ProgressPreference = 'SilentlyContinue'
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+$claudeHome = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
+$wantBase = 'https://cc.auto-link.com.cn/pro'
+$claudeMin = [version]'2.1.257'
+$script:out = New-Object System.Collections.Generic.List[string]
+$script:red = New-Object System.Collections.Generic.List[string]
+$script:yel = New-Object System.Collections.Generic.List[string]
+function P([string]$s) { $script:out.Add($s); Write-Host $s }
+function Red([string]$s) { $script:red.Add($s) }
+function Yel([string]$s) { $script:yel.Add($s) }
+function Mask([string]$s) { if ($null -eq $s) { return '' }; return ($s -replace 'sk-[A-Za-z0-9_-]{6,}', 'sk-***') }
+function Sha8([string]$s) {
+  $h = [Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($s))
+  return (($h | ForEach-Object { $_.ToString('x2') }) -join '').Substring(0, 8)
+}
+function BadChars([string]$s) { if (-not $s) { return 0 }; return ([regex]::Matches($s, '[^\x21-\x7e]')).Count }
+function KeyFp([string]$s) { if (-not $s) { return '无' }; return "len=$($s.Length) sha=$(Sha8 $s) 异常字符=$(BadChars $s)" }
+function Http([string]$url, [hashtable]$headers, [string]$body) {
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    $p = @{ Uri = $url; Headers = $headers; TimeoutSec = 60; UseBasicParsing = $true }
+    if ($body) { $p.Method = 'Post'; $p.Body = [Text.Encoding]::UTF8.GetBytes($body); $p.ContentType = 'application/json' }
+    $r = Invoke-WebRequest @p
+    return @{ code = [int]$r.StatusCode; body = $r.Content; ms = $sw.ElapsedMilliseconds }
+  } catch {
+    $code = 0; $b = $_.Exception.Message
+    if ($_.Exception.Response) {
+      $code = [int]$_.Exception.Response.StatusCode
+      try { $b = (New-Object IO.StreamReader($_.Exception.Response.GetResponseStream())).ReadToEnd() } catch {}
+    }
+    return @{ code = $code; body = $b; ms = $sw.ElapsedMilliseconds }
+  }
+}
+function ReadJson([string]$f) { try { return (Get-Content $f -Raw -Encoding UTF8) -replace '^﻿', '' | ConvertFrom-Json } catch { return $null } }
+
+P "=== CarHer Claude Code 自检 (Windows) ==="
+P "时间    : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')"
+P "系统    : $([Environment]::OSVersion.VersionString) $env:PROCESSOR_ARCHITECTURE  PowerShell $($PSVersionTable.PSVersion)"
+P "配置目录: $claudeHome"
+
+P ""; P "--- 1) 命令行 claude ---"
+foreach ($d in @((Join-Path $env:USERPROFILE '.carher-node'), (Join-Path $env:USERPROFILE '.carher-npm-global'))) {
+  if (Test-Path $d) { $env:Path = "$d;$env:Path" }
+}
+$nd = Get-Command node -ErrorAction SilentlyContinue
+if ($nd) { P "node    : $((& node --version 2>$null))" } else { P "node    : 没找到" }
+$cl = Get-Command claude -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($cl) {
+  $cv = ''; $vs = (& claude --version 2>$null | Select-Object -First 1); if ($vs -match '(\d+\.\d+\.\d+)') { $cv = $matches[1] }
+  P "claude  : $($cl.Source)  $cv"
+  if ($cv -and ([version]$cv -lt $claudeMin)) { Red "Claude Code $cv 太旧(需要 ≥ $claudeMin,否则新模型报 400):重新双击 claude-windows.bat" }
+} else { P "claude  : 没找到"; Yel "找不到 claude:关掉 PowerShell 新开一个;还不行就重新双击 claude-windows.bat" }
+
+P ""; P "--- 2) settings.json ---"
+$s = Join-Path $claudeHome 'settings.json'; $key = ''; $model = ''
+if (Test-Path $s) {
+  P "settings.json : 有 ($((Get-Item $s).Length) 字节,改于 $((Get-Item $s).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')))"
+  $j = ReadJson $s
+  if (-not $j) { Red "settings.json 不是合法 JSON:把它发给运维,或删掉后重新双击 claude-windows.bat" } else {
+    $e = $j.env
+    $base = [string]$e.ANTHROPIC_BASE_URL; $key = [string]$e.ANTHROPIC_API_KEY; $tok = [string]$e.ANTHROPIC_AUTH_TOKEN
+    $disc = [string]$e.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY; $off = [string]$e.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+    $model = [string]$j.model
+    $npick = 0; if ($j.modelPicker -and $j.modelPicker.options) { $npick = @($j.modelPicker.options).Count }
+    P "  ANTHROPIC_BASE_URL = $(if ($base) { $base } else { '<没写>' })"
+    P "  ANTHROPIC_API_KEY  : $(KeyFp $key)"
+    if ($tok) { P "  ANTHROPIC_AUTH_TOKEN : $(KeyFp $tok)" }
+    P "  模型发现开关       = $(if ($disc) { $disc } else { '<没写>' })"
+    P "  model              = $(if ($model) { $model } else { '<默认>' })"
+    P "  modelPicker        = $npick 个"
+    if ($base -ne $wantBase) { Red "settings.json 没指向公司网关:重新双击 claude-windows.bat" }
+    if (-not $key) { Red "settings.json 里没有 key:重新双击 claude-windows.bat" }
+    if ($tok) { Red "同时有 AUTH_TOKEN 和 API_KEY(/model 里只剩几个 Claude):重新双击 claude-windows.bat" }
+    if ($off) { Red "开了 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC(会关掉模型发现):重新双击 claude-windows.bat" }
+    if ($disc -ne '1') { Yel "没开模型发现(/model 里只有几个 Claude):重新双击 claude-windows.bat" }
+    if ($model -like 'claude-router-*') { Red "model 存的是旧编码名 $model(新开窗口会报 isn't recognized):重新双击 claude-windows.bat" }
+  }
+} else { P "settings.json : 没有"; Red "没有 $s ⇒ 一键配置没跑成功:重新双击 claude-windows.bat" }
+if ((BadChars $key) -gt 0) { Red "key 里有看不见的字符(多半从飞书复制带进来的):去 key 表重新复制整格,重新双击 claude-windows.bat" }
+$ov = @()
+foreach ($v in 'ANTHROPIC_AUTH_TOKEN','ANTHROPIC_BASE_URL','ANTHROPIC_API_KEY','ANTHROPIC_MODEL','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC') {
+  if ([Environment]::GetEnvironmentVariable($v, 'User') -or [Environment]::GetEnvironmentVariable($v, 'Machine')) { $ov += $v }
+}
+if ($ov.Count) { P "系统环境变量里的覆盖项: $($ov -join ' ')"; Red "系统环境变量里有 $($ov -join ' ') 会盖过配置:重新双击 claude-windows.bat,或在「编辑系统环境变量」里删掉" }
+
+P ""; P "--- 3) 桌面 App ---"
+$pkg = $null
+try { $pkg = Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1 } catch {}
+$asar = $null
+if ($pkg -and $pkg.InstallLocation) { P "App     : MSIX $($pkg.Version)  $($pkg.InstallLocation)"; $c = Join-Path $pkg.InstallLocation 'app\resources\app.asar'; if (Test-Path $c) { $asar = $c } }
+if (-not $asar) {
+  foreach ($r in @($env:LOCALAPPDATA, (Join-Path $env:LOCALAPPDATA 'Programs'), $env:ProgramFiles)) {
+    if (-not $r -or -not (Test-Path $r)) { continue }
+    $hit = Get-ChildItem -Path $r -Filter app.asar -Recurse -Depth 5 -ErrorAction SilentlyContinue |
+      Where-Object { $_.Directory.Name -eq 'resources' -and (Test-Path (Join-Path $_.Directory.Parent.FullName 'claude.exe')) } | Select-Object -First 1
+    if ($hit) { $asar = $hit.FullName; P "App     : $($hit.Directory.Parent.FullName)"; break }
+  }
+}
+if (-not $pkg -and -not $asar) { P "App     : 没找到(只用命令行可以忽略)" }
+$run = Get-Process -Name 'claude' -ErrorAction SilentlyContinue
+P "运行中  : $(if ($run) { '是' } else { '否' })"
+$ud = Join-Path $env:LOCALAPPDATA 'Claude-3p'; $lib = Join-Path $ud 'configLibrary'
+if ($pkg -or $asar) {
+  $meta = ReadJson (Join-Path $lib '_meta.json')
+  if ($meta -and $meta.appliedId -and (Test-Path (Join-Path $lib ($meta.appliedId + '.json')))) {
+    $cf = ReadJson (Join-Path $lib ($meta.appliedId + '.json'))
+    P "App 网关配置 : provider=$($cf.inferenceProvider)  base=$($cf.inferenceGatewayBaseUrl)  key: $(KeyFp ([string]$cf.inferenceGatewayApiKey))"
+    if ($cf.inferenceProvider -ne 'gateway' -or $cf.inferenceGatewayBaseUrl -ne $wantBase) { Red "桌面 App 没指向公司网关:完全退出 App,重新双击 claude-windows.bat" }
+    if ($key -and $cf.inferenceGatewayApiKey -and $key -ne $cf.inferenceGatewayApiKey) { Red "命令行和桌面 App 用的不是同一把 key:重新双击 claude-windows.bat" }
+  } else { P "App 网关配置 : 没有 ($lib)"; Red "桌面 App 没配置过:完全退出 App,重新双击 claude-windows.bat" }
+  if ($asar) {
+    $pin = ''
+    try { $txt = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($asar)); if ($txt -match '\{"version":"(\d+\.\d+\.\d+)","manifest"') { $pin = $matches[1] } } catch {}
+    if ($pin) {
+      $d = Join-Path $ud "claude-code\$pin"
+      if ((Test-Path (Join-Path $d '.verified')) -and (Test-Path (Join-Path $d 'claude.exe'))) { P "App 组件     : Claude Code $pin 已就绪" }
+      else { P "App 组件     : Claude Code $pin 没准备好"; Red "桌面 App 需要的组件(Claude Code $pin)没准备好 ⇒ 发消息不回/很慢:完全退出 App,重新双击 claude-windows.bat" }
+      $mir = Http "https://cc.auto-link.com.cn/ccdl/claude-code-releases/$pin/manifest.json" @{} $null
+      P "公司镜像     : $pin → HTTP $($mir.code)"
+      if ($mir.code -ne 200) { Red "公司镜像里还没有 App 要的 Claude Code $pin(App 刚自动升级过):把这份报告发给运维" }
+    } else { P "App 组件     : 读不到 App 钉死的版本" }
+  }
+  # App 代码(1.46388):win32 有 LOCALAPPDATA 时 setAppLogsPath(LOCALAPPDATA + 相对 appData 的 logs 路径) ⇒ %LOCALAPPDATA%\Claude-3p\logs
+  $log = Join-Path $ud 'logs\main.log'
+  if (-not (Test-Path $log)) { $log = Join-Path $env:APPDATA 'Claude-3p\logs\main.log' }
+  if (Test-Path $log) {
+    P "App 日志 ($log) 最近的关键行:"
+    $tail = Get-Content $log -Tail 400 -Encoding UTF8
+    $tail | Select-String -Pattern '3P mode active|Model discovery|Host Claude Code binary not available|still initializing|\[error\]' | Select-Object -Last 8 |
+      ForEach-Object { $l = Mask $_.Line; if ($l.Length -gt 240) { $l = $l.Substring(0, 240) }; P "  $l" }
+    if ($tail -match 'Host Claude Code binary not available') { Red "App 日志最近有「Host Claude Code binary not available」⇒ 组件没准备好:完全退出 App,重新双击 claude-windows.bat" }
+  }
+}
+
+P ""; P "--- 4) 网络 ---"
+foreach ($v in 'HTTPS_PROXY','HTTP_PROXY','ALL_PROXY') {
+  $pv = [Environment]::GetEnvironmentVariable($v)
+  if ($pv) { P "代理变量 $v = $pv"; Yel "设了代理 $v:连公司网关不需要代理,先关掉 VPN/代理再试" }
+}
+try { $ie = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
+  if ($ie.ProxyEnable -eq 1 -or $ie.AutoConfigURL) { P "系统代理      : 开着 ($($ie.ProxyServer)$($ie.AutoConfigURL))"; Yel "系统代理/VPN 开着:连不上或很慢时先关掉再试" } } catch {}
+$n = Http "$wantBase/v1/models" @{} $null
+P "网关(不带 key): HTTP $($n.code)  $($n.ms)ms   (401 = 网关通;0 = 连不上)"
+if ($n.code -eq 0) { Red "连不上公司网关:检查网络,关掉 VPN/代理后再试" }
+
+P ""; P "--- 5) 用这把 key 实打 ---"
+if (-not $key) { P "(没有 key,跳过)" } else {
+  $i = Http "$wantBase/key/info" @{ Authorization = "Bearer $key" } $null
+  $alias = ''; if ($i.body -match '"key_alias"\s*:\s*"([^"]*)"') { $alias = $matches[1] }
+  P "key 名字      : $(if ($alias) { $alias } else { '<查不到>' })"
+  $h = @{ 'x-api-key' = $key; 'anthropic-version' = '2023-06-01' }
+  $m = Http "$wantBase/v1/models" $h $null
+  $ids = @([regex]::Matches([string]$m.body, '"id"\s*:\s*"([^"]*)"') | ForEach-Object { $_.Groups[1].Value })
+  P "可用模型      : HTTP $($m.code),$($ids.Count) 个"
+  if ($m.code -eq 401 -or $m.code -eq 403) { Red "key 无效(HTTP $($m.code)):去 key 表复制整格,重新双击 claude-windows.bat" }
+  elseif ($m.code -ne 200) { Red "拉模型列表失败(HTTP $($m.code)):把这份报告发给运维" }
+  $mm = if ($model) { $model } else { 'claude-opus-5-5' }
+  if ($m.code -eq 200) {
+    if ($ids -contains $mm) { P "  $mm : 已开通" } else { P "  $mm : 没开通"; Yel "这把 key 没开通 ${mm}:用 /model 换一个,或找运维开通" }
+    $r = Http "$wantBase/v1/messages" $h ('{"model":"' + $mm + '","max_tokens":64,"messages":[{"role":"user","content":"Reply with only: OK"}]}')
+    $txt = ''; try { $txt = (@(($r.body | ConvertFrom-Json).content | ForEach-Object { $_.text }) -join '') } catch {}
+    if ($txt.Length -gt 60) { $txt = $txt.Substring(0, 60) }
+    P "实打 $mm : HTTP $($r.code)  $($r.ms)ms  回答 $(if ($txt) { $txt } else { '<无文字>' })"
+    if ($r.code -ne 200) { $rb = Mask ([string]$r.body); if ($rb.Length -gt 300) { $rb = $rb.Substring(0, 300) }; P "  返回: $rb"; Red "用 $mm 实打失败(HTTP $($r.code)):把这份报告发给运维" }
+  }
+}
+
+P ""; P "=== 结论 ==="
+if ($script:red.Count -eq 0 -and $script:yel.Count -eq 0) { P "✅ 没查出问题。还有问题就把这份报告和出错时间、模型名一起发给运维。" }
+foreach ($x in $script:red) { P "🔴 $x" }
+foreach ($x in $script:yel) { P "⚠️  $x" }
+
+$desk = [Environment]::GetFolderPath('Desktop'); if (-not $desk -or -not (Test-Path $desk)) { $desk = $env:USERPROFILE }
+$rep = Join-Path $desk ("claude-自检-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".txt")
+[IO.File]::WriteAllText($rep, ($script:out -join "`r`n") + "`r`n", (New-Object Text.UTF8Encoding $true))
+Write-Host ""
+$copied = $false
+try { Set-Clipboard -Value ($script:out -join "`r`n") -ErrorAction Stop; $copied = $true } catch {}
+if ($copied) { Write-Host "📋 报告已复制到剪贴板,也存在:$rep —— 直接粘给运维即可(里面没有 key)" -ForegroundColor Green }
+else { Write-Host "📋 报告存在:$rep —— 把这个文件发给运维即可(里面没有 key)" -ForegroundColor Green }

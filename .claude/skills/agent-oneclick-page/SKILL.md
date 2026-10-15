@@ -15,12 +15,12 @@ description: 给同事的「Cursor · Codex · Claude Code 一键配置」单页
 scripts/agent-oneclick-docs/
   oneclick-all.html   ← 模板(唯一要手改的);{{文件名}} = 内嵌下载占位,{{BUILD}} = 版本戳
   img/codex-login.jpg ← 唯一保留的截图(Codex「使用其他方式登录」)
-  build_html.py       ← 内嵌 6 个一键文件 + 截图 → .work/oneclick-all/AI编程一键配置.html;--check 只核对
+  build_html.py       ← 内嵌 10 个文件(安装+自检) + 截图 → .work/oneclick-all/AI编程一键配置.html;--check 只核对
   publish_198.sh      ← build → jms scp → 198 /var/www/oneclick/index.html → 比线上 sha
   bodies.py / apply.py← 三篇飞书详细文档(另一条线,改文案时两边一起改)
 ```
 
-内嵌的 6 个文件来自各自构建产物:`scripts/zk-cursor-web/cursor-{mac,windows}.zip`、
+内嵌的 10 个文件(6 个安装 + 4 个自检 `*-doctor-*`)来自各自构建产物;自检放在 Codex / Claude「出问题了」折叠里,标题写「先跑自检，一键出报告」。安装:`scripts/zk-cursor-web/cursor-{mac,windows}.zip`、
 `codex-oneclick/codex-{mac.command,windows.bat}`、`claude-oneclick/claude-{mac.command,windows.bat}`。
 **换了安装器 ⇒ 先按各自 skill 重建(cursor-client-bundle-patch / codex-oneclick-rollout / claude-oneclick-rollout)⇒ 再 `publish_198.sh`**。
 

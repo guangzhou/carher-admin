@@ -51,8 +51,20 @@ assert not bat.startswith(b"\xef\xbb\xbf") and all(c < 128 for c in bat[:cut])
 assert b"chcp" not in bat.lower() and bat.count(b"\n") == bat.count(b"\r\n")
 Path("claude-windows.bat").write_bytes(bat)
 print("built claude-mac.command, claude-windows.bat")
+
+# 自检(doctor):只读,同一套 bat 头防线
+dm = finish((src / "doctor-mac.sh").read_text(encoding="utf-8"))
+Path("claude-doctor-mac.command").write_text(dm, encoding="utf-8", newline="\n")
+dps = finish((src / "doctor-windows.ps1").read_text(encoding="utf-8-sig"))
+dbat = (head + dps.replace("\r\n", "\n").replace("\n", "\r\n")).encode("utf-8")
+dcut = dbat.index(b"##CARHER-PS1")
+assert not dbat.startswith(b"\xef\xbb\xbf") and all(c < 128 for c in dbat[:dcut])
+assert b"chcp" not in dbat.lower() and dbat.count(b"\n") == dbat.count(b"\r\n")
+Path("claude-doctor-windows.bat").write_bytes(dbat)
+print("built claude-doctor-mac.command, claude-doctor-windows.bat")
 PY
-chmod +x claude-mac.command
+chmod +x claude-mac.command claude-doctor-mac.command
 bash -n claude-mac.command
+bash -n claude-doctor-mac.command
 # 上传到飞书后下载回来比这两个值，相同才算传对了
-shasum -a 256 claude-mac.command claude-windows.bat
+shasum -a 256 claude-mac.command claude-windows.bat claude-doctor-mac.command claude-doctor-windows.bat

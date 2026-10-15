@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CarHer Claude Code 一键配置 (macOS / Linux)
-# 用法：Finder 里双击本文件，或终端里执行 `bash install-mac.command`
-# ⚠️ 这是模板：改这里，然后跑 ../build.sh 生成用户拿到的 install-mac.command
+# 用法：Finder 里双击本文件，或终端里执行 `bash claude-mac.command`
+# ⚠️ 这是模板：改这里，然后跑 ../build.sh 生成用户拿到的 claude-mac.command
 #
 # 做四件事，用户只需要粘一次 key：
 #   1. 没有 Node.js ≥22 就装一个（Claude Code 硬要求）—— 装到 ~/.carher-node，不碰系统、不要 sudo
@@ -36,7 +36,7 @@ echo
 case "$(uname -s)" in
   Darwin) OS=darwin ;;
   Linux)  OS=linux ;;
-  *) die "✗ 不支持的系统：$(uname -s)。Windows 请用 install-windows.bat。" ;;
+  *) die "✗ 不支持的系统：$(uname -s)。Windows 请用 claude-windows.bat。" ;;
 esac
 case "$(uname -m)" in
   x86_64|amd64)  ARCH=x64 ;;

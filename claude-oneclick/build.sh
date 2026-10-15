@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # 把 src/ 下两个模板拼成给用户的两个单文件：
-#   install-mac.command  (macOS / Linux)
-#   install-windows.bat  (Windows，bat 头 + PowerShell 正文，双击即运行)
+#   claude-mac.command  (macOS / Linux)
+#   claude-windows.bat  (Windows，bat 头 + PowerShell 正文，双击即运行)
 # 改脚本只改 src/，改完跑本脚本，再把两个产物传到飞书文档。
 # 结构照抄 codex-oneclick/build.sh(那边 08-27 用户实机踩过 bat 头的坑,这里同一套防线)。
 set -euo pipefail
 cd "$(dirname "$0")"
+# 10-15:产物名带产品+系统(用户从三篇文档下载,原来 Codex/Claude 都叫 install-mac.command,下载目录里分不清)
+rm -f install-mac.command install-windows.bat
 
 python3 -m pytest tests -q -p no:cacheprovider
 bash -n src/install-mac.sh
@@ -23,7 +25,7 @@ def finish(template: str) -> str:
     return out
 
 mac = finish((src / "install-mac.sh").read_text(encoding="utf-8"))
-Path("install-mac.command").write_text(mac, encoding="utf-8", newline="\n")
+Path("claude-mac.command").write_text(mac, encoding="utf-8", newline="\n")
 
 # bat 头：cmd 只执行到 exit /b，后面整段交给 PowerShell 从自身文件里读出来执行。
 # 路径走环境变量传，避免路径里有引号/空格时拼命令出错。
@@ -47,10 +49,10 @@ bat = (head + ps1.replace("\r\n", "\n").replace("\n", "\r\n")).encode("utf-8")
 cut = bat.index(b"##CARHER-PS1")
 assert not bat.startswith(b"\xef\xbb\xbf") and all(c < 128 for c in bat[:cut])
 assert b"chcp" not in bat.lower() and bat.count(b"\n") == bat.count(b"\r\n")
-Path("install-windows.bat").write_bytes(bat)
-print("built install-mac.command, install-windows.bat")
+Path("claude-windows.bat").write_bytes(bat)
+print("built claude-mac.command, claude-windows.bat")
 PY
-chmod +x install-mac.command
-bash -n install-mac.command
+chmod +x claude-mac.command
+bash -n claude-mac.command
 # 上传到飞书后下载回来比这两个值，相同才算传对了
-shasum -a 256 install-mac.command install-windows.bat
+shasum -a 256 claude-mac.command claude-windows.bat

@@ -30,6 +30,9 @@ DOC = sys.argv[1]
 KIND = sys.argv[2] if len(sys.argv) > 2 else DOCS[DOC]
 BODY = {"cursor": bodies.CURSOR, "codex": bodies.codex(False), "codex-ext": bodies.codex(True), "claude": bodies.CLAUDE}[KIND]
 FIG = {"cursor-g-setup.zip": "ZIP", "install-mac.command": "MAC", "install-windows.bat": "WIN",
+       "cursor-mac.zip": "ZIP", "cursor-windows.zip": "ZIPW",
+       "codex-mac.command": "MAC", "codex-windows.bat": "WIN",
+       "claude-mac.command": "MAC", "claude-windows.bat": "WIN",
        "codex_20260831.dmg": "DMG", "Codex-Windows-x64-20260831.msix": "MSIX"}
 ET.fromstring("<r>" + BODY + "</r>")  # 先确认 XML 合法
 

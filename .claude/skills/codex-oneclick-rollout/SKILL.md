@@ -1,6 +1,6 @@
 ---
 name: codex-oneclick-rollout
-description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 SOP——每个系统一个文件（install-mac.command / install-windows.bat），写配置 + 装生图工具 + 把 key 能用的全部模型同步进 Codex CLI 和 Desktop App 的选择器并每日自动刷新。含 src/+build.sh 单文件打包、飞书《Codex一键配置》附件替换与 sha 回环、非 OpenAI 模型目录元数据的三个实测坑、gpt-image-2 白名单批量开通。Use when 要给同事配 codex / 改 codex-oneclick 下任何脚本 / 用户说选择器里没有某模型、选了 claude/grok 改不了文件、画图画成 SVG 或 403 / 要更新《Codex一键配置》文档。
+description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 SOP——每个系统一个文件（codex-mac.command / codex-windows.bat），写配置 + 装生图工具 + 把 key 能用的全部模型同步进 Codex CLI 和 Desktop App 的选择器并每日自动刷新。含 src/+build.sh 单文件打包、飞书《Codex一键配置》附件替换与 sha 回环、非 OpenAI 模型目录元数据的三个实测坑、gpt-image-2 白名单批量开通。Use when 要给同事配 codex / 改 codex-oneclick 下任何脚本 / 用户说选择器里没有某模型、选了 claude/grok 改不了文件、画图画成 SVG 或 403 / 要更新《Codex一键配置》文档。
 ---
 
 # Codex 一键接入（配置 + 生图 + 模型同步）
@@ -35,14 +35,14 @@ codex-oneclick/
   src/carher_models_sync.py ← 模型同步（唯一实现；scripts/sync-codex-model-catalog.py 只是转调它）
   tests/                    ← 回归测试，每条对应一个实测坑
   build.sh                  ← 跑测试 → 把两个 .py 内嵌 → 产出下面两个
-  install-mac.command       ← 给用户（macOS/Linux）
-  install-windows.bat       ← 给用户（bat 头 + PowerShell 正文，cmd 跑到 exit /b，后半段 PS 自读执行）
+  codex-mac.command       ← 给用户（macOS/Linux）
+  codex-windows.bat       ← 给用户（bat 头 + PowerShell 正文，cmd 跑到 exit /b，后半段 PS 自读执行）
 ```
 
 **发版四步，缺一步用户拿到的就是旧的**（10-08 前文档挂的一直是 08-27 旧包，10-01 那轮生图根本没传上去）：
 
 1. 只改 `src/`，`bash codex-oneclick/build.sh`（测试不过不出产物；末尾打印两个 sha256）
-2. 干净 home 真跑：`printf '%s\n' "$KEY" | HOME=$T CODEX_HOME=$T/.codex bash install-mac.command`，
+2. 干净 home 真跑：`printf '%s\n' "$KEY" | HOME=$T CODEX_HOME=$T/.codex bash codex-mac.command`，
    跑完 `launchctl bootout gui/$(id -u)/net.carher.codex-models-sync` + 删 plist，别在本机留定时任务
 3. 传附件：`+media-insert` → **下载回来比 sha**（同 build.sh 打印的）→ `block_move_after` 到
    「👇 macOS / Linux 一键脚本：」「👇 Windows 一键脚本：」两段后（10-13 起在第 1 节里，dmg/msix 在第 3 节） → `block_delete` 旧 figure。顺序别反（先删再传失败 = 文档没附件）

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CarHer Codex 一键配置 (macOS / Linux)
-# 用法：Finder 里双击本文件，或终端里执行 `bash install-mac.command`
-# ⚠️ 这是模板：改这里，然后跑 ../build.sh 生成用户拿到的 install-mac.command
+# 用法：Finder 里双击本文件，或终端里执行 `bash codex-mac.command`
+# ⚠️ 这是模板：改这里，然后跑 ../build.sh 生成用户拿到的 codex-mac.command
 # 没有 codex 命令行会自动装（npmmirror）；Desktop App 需用户自己装（文档里有安装包）
 set -euo pipefail
 

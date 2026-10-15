@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # CarHer Claude Code 一键配置 (macOS / Linux)
-# 用法：Finder 里双击本文件，或终端里执行 `bash install-mac.command`
+# 用法：Finder 里双击本文件，或终端里执行 `bash claude-mac.command`
 # 由 build.sh 生成，别直接改；源在 claude-oneclick/src/
 #
 # 做四件事，用户只需要粘一次 key：
@@ -36,7 +36,7 @@ echo
 case "$(uname -s)" in
   Darwin) OS=darwin ;;
   Linux)  OS=linux ;;
-  *) die "✗ 不支持的系统：$(uname -s)。Windows 请用 install-windows.bat。" ;;
+  *) die "✗ 不支持的系统：$(uname -s)。Windows 请用 claude-windows.bat。" ;;
 esac
 case "$(uname -m)" in
   x86_64|amd64)  ARCH=x64 ;;

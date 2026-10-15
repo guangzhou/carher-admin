@@ -38,6 +38,14 @@
 **`@cxteam-norelay`(2026-08-25 连发折叠+僵尸真根因修)**。
 2026-09-23 加到 **10 处**:`@cxteam-nocloud` / `@cxteam-nocloudset`(见下「会话被改道去 Cloud Agents」)。
 
+## 给同事的包按系统拆开(2026-10-15)
+
+用户点名「几篇文档的脚本同名、Mac/Windows 混在一起乱」。`package_team_setup.sh` 仍出完整包
+`cursor-g-setup.zip`(门禁/台架都对它做),再从同一个 STAGE 切出 **`cursor-mac.zip`**(*-Mac.command + .sh + zk-delta)
+与 **`cursor-windows.zip`**(*-Windows.cmd + .cmd,无 zk-delta);引擎 js 逐字节同完整包。
+飞书两篇 Cursor 文档挂这两个包(不再挂完整包);freshness 第④腿查两包逐成员 == 完整包且没混另一系统按钮(阳性对照已验)。
+Codex / Claude 同理改名 `codex-mac.command` / `codex-windows.bat`、`claude-mac.command` / `claude-windows.bat`。
+
 ## 菜单里冒出 Cursor 自带模型(claude-fable-5-1 等,2026-10-14)
 
 显示规则(workbench 原文)`enabled.includes(n) || (!disabled.includes(n) && defaultOn)` ⇒ 服务端目录

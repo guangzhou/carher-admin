@@ -1,5 +1,5 @@
 # CarHer Claude Code 一键配置 (Windows)
-# ⚠️ 这是模板：改这里，然后跑 ../build.sh，生成用户拿到的单文件 install-windows.bat
+# ⚠️ 这是模板：改这里，然后跑 ../build.sh，生成用户拿到的单文件 claude-windows.bat
 #    （bat 头 + 本脚本，双击即运行，不需要 .ps1）
 #
 # 做四件事，用户只需要粘一次 key：

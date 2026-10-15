@@ -445,3 +445,30 @@ rm -f "$HERE/cursor-g-setup.zip"
 ( cd "$(dirname "$STAGE")" && zip -r -X "$HERE/cursor-g-setup.zip" "cursor-g-setup" >/dev/null )
 echo "built: $HERE/cursor-g-setup.zip"
 unzip -l "$HERE/cursor-g-setup.zip"
+
+# ── 10-15 给同事的是按系统拆开的两个包(用户点名:几个文档的脚本同名、Mac/Windows 混在一起乱)──
+# cursor-g-setup.zip 仍是完整包(门禁/台架都对它做);下面从**同一个 STAGE** 切出两份:
+#   cursor-mac.zip     → 解压得 cursor-mac/    :只有 *-Mac.command + 引擎 + zk-delta
+#   cursor-windows.zip → 解压得 cursor-windows/:只有 *-Windows.cmd + 引擎
+# 引擎(cursor_team_setup.js / cursor_remote_*.js / README.txt)两边都放;逐字节同完整包。
+split_pkg() {  # $1=产物名(不带 .zip) $2=要剔掉的文件名 glob
+  local name="$1" drop="$2" d
+  d="$(dirname "$STAGE")/$name"
+  rm -rf "$d"; cp -R "$STAGE" "$d"
+  # shellcheck disable=SC2086
+  ( cd "$d" && rm -f $drop )
+  rm -f "$HERE/$name.zip"
+  ( cd "$(dirname "$STAGE")" && zip -r -X "$HERE/$name.zip" "$name" >/dev/null )
+  echo "built: $HERE/$name.zip ($(unzip -l "$HERE/$name.zip" | tail -1 | awk '{print $2}') files)"
+}
+split_pkg cursor-mac     "*-Windows.cmd cursor_team_setup.cmd cursor_remote_ssh.cmd"
+split_pkg cursor-windows "*-Mac.command cursor_team_setup.sh cursor_remote_ssh.sh"
+rm -rf "$(dirname "$STAGE")/zk-delta-win-unused"
+# Windows 不跑小代理(只 macOS 实测),它的源码留在 Windows 包里也不碍事,但别让人以为要用:删掉
+rm -rf "$(dirname "$STAGE")/cursor-windows/zk-delta"
+rm -f "$HERE/cursor-windows.zip"
+( cd "$(dirname "$STAGE")" && zip -r -X "$HERE/cursor-windows.zip" "cursor-windows" >/dev/null )
+for z in cursor-mac cursor-windows; do
+  other=$([ $z = cursor-mac ] && echo 'Windows\.cmd$' || echo 'Mac\.command$')
+  if unzip -l "$HERE/$z.zip" | grep -qE "$other"; then echo "FATAL: $z.zip 里混进了另一个系统的按钮" >&2; exit 1; fi
+done

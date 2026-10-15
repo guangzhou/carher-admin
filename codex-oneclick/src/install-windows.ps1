@@ -1,5 +1,5 @@
 # CarHer Codex 一键配置 (Windows)
-# ⚠️ 这是模板：改这里，然后跑 ../build.sh，生成用户拿到的单文件 install-windows.bat
+# ⚠️ 这是模板：改这里，然后跑 ../build.sh，生成用户拿到的单文件 codex-windows.bat
 #    （bat 头 + 本脚本 + 内嵌 Python，双击即运行，不需要 .ps1）
 # 没有 codex 命令行会自动装（npmmirror）；Desktop App 需用户自己装（文档里有安装包）
 $ErrorActionPreference = 'Stop'

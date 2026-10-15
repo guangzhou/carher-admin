@@ -1,6 +1,6 @@
 ---
 name: claude-oneclick-rollout
-description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的一键脚本 SOP——install-mac.command / install-windows.bat,自动装 Node/claude、合并 settings.json、配桌面 App 三方模式、预置 App 钉死的 Claude Code 组件、198 /ccdl/ 国内镜像(每日自动跟版)。Use when 改 claude-oneclick 下任何脚本 / 同事说 Claude App「App unavailable」「发消息很慢不回」「只能选一个模型」/ 新开窗口报 Model "claude-router-…" isn't recognized / 要更新《Claude Code 一键配置》文档 / App 自动升级后卡住。
+description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的一键脚本 SOP——claude-mac.command / claude-windows.bat,自动装 Node/claude、合并 settings.json、配桌面 App 三方模式、预置 App 钉死的 Claude Code 组件、198 /ccdl/ 国内镜像(每日自动跟版)。Use when 改 claude-oneclick 下任何脚本 / 同事说 Claude App「App unavailable」「发消息很慢不回」「只能选一个模型」/ 新开窗口报 Model "claude-router-…" isn't recognized / 要更新《Claude Code 一键配置》文档 / App 自动升级后卡住。
 ---
 
 # Claude Code 一键配置(CLI + 桌面 App)
@@ -15,11 +15,11 @@ description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的�
 claude-oneclick/
   src/install-mac.sh  src/install-windows.ps1   ← 只改这里
   tests/                                         ← 离线回归(build.sh 先跑,不过不出产物)
-  build.sh                                       → install-mac.command / install-windows.bat
+  build.sh                                       → claude-mac.command / claude-windows.bat
   ccdl-sync.sh                                   ← 198 镜像跟版(已装成 /usr/local/bin/carher-ccdl-sync.sh,cron 06:17)
 ```
 发版:`bash claude-oneclick/build.sh` → 干净 HOME 真跑
-(`printf '%s\n' "$KEY" | env -i HOME=$T PATH=/opt/homebrew/bin:/usr/bin:/bin TERM=xterm TMPDIR=$T bash install-mac.command`,
+(`printf '%s\n' "$KEY" | env -i HOME=$T PATH=/opt/homebrew/bin:/usr/bin:/bin TERM=xterm TMPDIR=$T bash claude-mac.command`,
 看到「✔ 桌面 App 组件就绪」「✔ 通了」)→ 换飞书附件(+media-insert → 下载回来比 sha → move_after → 删旧)→ 跑门禁。
 
 ## 2. 桌面 App 的三个坑(都从 App 自身 asar 读出来,App 升级后要复核)

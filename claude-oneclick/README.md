@@ -9,8 +9,8 @@ claude-oneclick/
   src/install-windows.ps1   ← 改这里(Windows)
   tests/                    ← 离线回归,每条对应一个实测坑
   build.sh                  ← 跑测试 → 产出下面两个
-  install-mac.command       ← 给用户
-  install-windows.bat       ← 给用户(bat 头纯 ASCII+CRLF + PowerShell 正文)
+  claude-mac.command       ← 给用户
+  claude-windows.bat       ← 给用户(bat 头纯 ASCII+CRLF + PowerShell 正文)
 ```
 
 ## 发版
@@ -18,7 +18,7 @@ claude-oneclick/
 1. 只改 `src/`,`bash claude-oneclick/build.sh`(测试不过不出产物,末尾打两个 sha256)
 2. 干净 HOME 真跑(**PATH 里不要有 node/claude/zstd**,才测得到全新机器):
    ```bash
-   printf '%s\n' "$KEY" | env -i HOME=$T PATH=/usr/bin:/bin TERM=xterm TMPDIR=$T bash install-mac.command
+   printf '%s\n' "$KEY" | env -i HOME=$T PATH=/usr/bin:/bin TERM=xterm TMPDIR=$T bash claude-mac.command
    ```
    看到「✔ 桌面 App 组件就绪」和「✔ 通了」才算。
 3. 传飞书:`+media-insert` → **下载回来比 sha** → `block_move_after` 到「macOS / Linux 下载：」「Windows 下载：」

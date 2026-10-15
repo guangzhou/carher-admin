@@ -228,6 +228,30 @@ def selftest():
     return rc
 
 
+def leg_per_os_packages(full_members):
+    """第④腿(10-15):按系统拆开的两个包 —— 每个成员逐字节 == 完整包,且没混进另一个系统的按钮。"""
+    ok = True
+    for name, prefix, other in [("cursor-mac.zip", "cursor-mac/", "-Windows.cmd"),
+                                ("cursor-windows.zip", "cursor-windows/", "-Mac.command")]:
+        path = os.path.join(BASE, name)
+        if not os.path.exists(path):
+            print("❌ 第④腿:%s 不存在(package_team_setup.sh 没跑完?)" % name); ok = False; continue
+        with zipfile.ZipFile(path) as z:
+            mem = {n[len(prefix):]: z.read(n) for n in z.namelist() if n.startswith(prefix) and not n.endswith("/")}
+        mixed = [n for n in mem if n.endswith(other)]
+        stale = [n for n, b in mem.items() if full_members.get(n) != b]
+        need = [n for n in REQUIRED_MEMBERS if not n.endswith(other)
+                and not (other == "-Mac.command" and n in ("cursor_team_setup.sh", "cursor_remote_ssh.sh"))
+                and not (other == "-Windows.cmd" and n in ("cursor_team_setup.cmd", "cursor_remote_ssh.cmd"))]
+        miss = [n for n in need if n not in mem]
+        if mixed or stale or miss:
+            ok = False
+            print("❌ 第④腿 %s:混进另一系统 %s / 与完整包不同 %s / 缺 %s" % (name, mixed[:3], stale[:3], miss[:3]))
+        else:
+            print("✅ 第④腿 %s:%d 个成员与完整包逐字节相同,没有另一系统的按钮" % (name, len(mem)))
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--zip", default=DEFAULT_ZIP)
@@ -251,6 +275,8 @@ def main():
              len(members)))
     fail = leg_zip_vs_worktree(members)
     fail |= leg_menu_shape(members, a.expect)
+    if a.zip == DEFAULT_ZIP:   # 只在比仓库这份时查拆开的两个包(--zip 指下载件时它们不一定在旁边)
+        fail |= not leg_per_os_packages(members)
     if a.against:
         leg_vs_previous(members, a.against, a.zip)
     print("\nVERDICT:", "FAIL" if fail else "PASS")

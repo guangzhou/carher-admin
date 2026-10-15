@@ -27,6 +27,8 @@ OUT = ROOT / ".work" / "doc-audit"
 
 CURSOR_A, CURSOR_B = "OQCPdLd4MovEVoxGzdMcD3CJnCf", "FapXdudPLoTTRLxWGJQcqITpn9g"
 ZIP = ROOT / "scripts/zk-cursor-web/cursor-g-setup.zip"
+ZIP_MAC = ROOT / "scripts/zk-cursor-web/cursor-mac.zip"
+ZIP_WIN = ROOT / "scripts/zk-cursor-web/cursor-windows.zip"
 CODEX_MAIN = "Ni2hdvtbgoqBFMxrAu5ckjPrnbg"
 # 《Codex一键配置 外部分享》三篇副本(10-09~10-11 各复制过一次,10-13 前全停在旧版「先装好 codex」)。
 # 与主文档唯一允许的差别:不带指向内部 Cursor/Claude 文档的那一行。
@@ -45,27 +47,27 @@ COMMON_STALE = ["cr-g-5.6", "sa-grok-4.6-latest", "3.20.21", "3.21.18",
                 # 10-14 用户:文档里不出现要用户手填的网关地址,该改的交给脚本/按钮
                 "cc.auto-link.com.cn/pro"]
 DOCS = {
-    CURSOR_A: dict(name="Cursor-A", figures=1, imgs=3,
-                   attach={"cursor-g-setup.zip": ZIP},
+    CURSOR_A: dict(name="Cursor-A", figures=2, imgs=3,   # 10-15 起 Mac / Windows 两个包
+                   attach={"cursor-mac.zip": ZIP_MAC, "cursor-windows.zip": ZIP_WIN},
                    stale=COMMON_STALE + ["whiteboard"]),
-    CURSOR_B: dict(name="Cursor-B", figures=1, imgs=3,
-                   attach={"cursor-g-setup.zip": ZIP},
+    CURSOR_B: dict(name="Cursor-B", figures=2, imgs=3,
+                   attach={"cursor-mac.zip": ZIP_MAC, "cursor-windows.zip": ZIP_WIN},
                    stale=COMMON_STALE + ["whiteboard"]),
     "Ni2hdvtbgoqBFMxrAu5ckjPrnbg": dict(
         name="Codex", figures=4, imgs=2,
-        attach={"install-mac.command": ROOT / "codex-oneclick/install-mac.command",
-                "install-windows.bat": ROOT / "codex-oneclick/install-windows.bat"},
+        attach={"codex-mac.command": ROOT / "codex-oneclick/codex-mac.command",
+                "codex-windows.bat": ROOT / "codex-oneclick/codex-windows.bat"},
         # 10-13 起脚本自动装 codex 命令行 ⇒「先装好 codex」的前提是旧真相
         stale=COMMON_STALE + ["已经装好 codex", "第一步：下载脚本"]),
     **{d: dict(name=f"Codex-ext{i}", figures=4, imgs=2,
-               attach={"install-mac.command": ROOT / "codex-oneclick/install-mac.command",
-                       "install-windows.bat": ROOT / "codex-oneclick/install-windows.bat"},
+               attach={"codex-mac.command": ROOT / "codex-oneclick/codex-mac.command",
+                       "codex-windows.bat": ROOT / "codex-oneclick/codex-windows.bat"},
                stale=COMMON_STALE + ["已经装好 codex", "第一步：下载脚本"])
        for i, d in enumerate(CODEX_EXT, 1)},
     "MeLad7oMiobwf6xnpA2cWy0nnSg": dict(
         name="ClaudeCode", figures=2, imgs=1,   # 10-15 用户加了一张「Claude 效果图」
-        attach={"install-mac.command": ROOT / "claude-oneclick/install-mac.command",
-                "install-windows.bat": ROOT / "claude-oneclick/install-windows.bat"},
+        attach={"claude-mac.command": ROOT / "claude-oneclick/claude-mac.command",
+                "claude-windows.bat": ROOT / "claude-oneclick/claude-windows.bat"},
         # 一键之前的手动步骤;AUTH_TOKEN 能聊天但拉不到 /model 列表
         stale=COMMON_STALE + ["ANTHROPIC_AUTH_TOKEN", "GATEWAY_MODEL_DISCOVERY", "settings.json 里用的是"]),
 }

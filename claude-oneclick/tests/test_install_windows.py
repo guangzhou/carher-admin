@@ -77,7 +77,7 @@ def test_ps_known_pitfalls_absent():
 def test_bat_header_is_ascii_crlf(tmp_path):
     """bat 头部必须纯 ASCII + CRLF、无 BOM、无 chcp(codex 那边 08-27 实机踩过:
     cmd 按字节偏移逐行续读,头部有非 ASCII 会吃掉行首字符)。build.sh 里也有同样断言,这里再守一道。"""
-    bat = ROOT / "install-windows.bat"
+    bat = ROOT / "claude-windows.bat"
     if not bat.exists():
         import pytest
         pytest.skip("还没 build")

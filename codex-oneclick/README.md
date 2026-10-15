@@ -12,9 +12,9 @@
 
 | 你的系统 | 双击运行 |
 |---------|---------|
-| **macOS** | `install-mac.command` |
-| **Windows** | `install-windows.bat` |
-| Linux | 终端执行 `bash install-mac.command` |
+| **macOS** | `codex-mac.command` |
+| **Windows** | `codex-windows.bat` |
+| Linux | 终端执行 `bash codex-mac.command` |
 
 ## 维护者：改脚本
 
@@ -74,8 +74,8 @@ Codex 内置的 `image_gen` 工具在本环境**没有注册**（模型目录里
 ## 常见问题
 
 - **macOS 双击提示「无法打开，来自身份不明的开发者」**：右键文件 → 打开 → 再点「打开」。
-  或终端执行 `bash install-mac.command`。
-- **macOS 双击没反应 / 权限**：浏览器下载的文件没有执行权限，属正常。终端执行 `bash ~/Downloads/install-mac.command`。
+  或终端执行 `bash codex-mac.command`。
+- **macOS 双击没反应 / 权限**：浏览器下载的文件没有执行权限，属正常。终端执行 `bash codex-mac.command`。
 - **Windows 提示脚本被禁用**：双击 `.bat` 即可（已加 `-ExecutionPolicy Bypass`）。弹「Windows 已保护你的电脑」点 更多信息 → 仍要运行。
 - **Desktop App 改完没生效**：必须**完全退出进程**再重开（Mac `Cmd+Q`，Windows 托盘右键 Quit）。
 - **想换模型**：终端 `codex` 里输入 `/model`；临时用一次 `codex -m <模型名>`；Desktop App 点底部选择器。

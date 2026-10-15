@@ -25,15 +25,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / ".work" / "doc-audit"
 
-CURSOR_A, CURSOR_B = "OQCPdLd4MovEVoxGzdMcD3CJnCf", "FapXdudPLoTTRLxWGJQcqITpn9g"
+CURSOR_A = "OQCPdLd4MovEVoxGzdMcD3CJnCf"   # 10-15 用户删了另一篇同名
 ZIP = ROOT / "scripts/zk-cursor-web/cursor-g-setup.zip"
 ZIP_MAC = ROOT / "scripts/zk-cursor-web/cursor-mac.zip"
 ZIP_WIN = ROOT / "scripts/zk-cursor-web/cursor-windows.zip"
-CODEX_MAIN = "Ni2hdvtbgoqBFMxrAu5ckjPrnbg"
+CODEX_MAIN = "HMj6d1ttlorc5KxbFnlcVuopntf"   # 10-15 新地址 wiki BzVZwGMSOiSYOykc6UYcN2opn3b
 # 《Codex一键配置 外部分享》三篇副本(10-09~10-11 各复制过一次,10-13 前全停在旧版「先装好 codex」)。
 # 与主文档唯一允许的差别:不带指向内部 Cursor/Claude 文档的那一行。
 # 10-13 用户删了 ObrNdZ06 / DhmidvMv 两篇,只剩这一篇外部分享
-CODEX_EXT = ["ZYNsdZCJIoCJEJxeMPGcl7jDn3f", "Q8q5dMBUHoFjZmx4O4tchQSgnOb"]   # 10-15 用户又建了一篇
+CODEX_EXT = []   # 10-15 用户删掉了全部外部分享
 EXT_ONLY_DIFF = "其他一键配置："
 
 # 陈旧词:全文出现即红。「已下架」说明里允许提到的旧名放 ALLOW_IN 里按句豁免。
@@ -50,10 +50,7 @@ DOCS = {
     CURSOR_A: dict(name="Cursor-A", figures=2, imgs=3,   # 10-15 起 Mac / Windows 两个包
                    attach={"cursor-mac.zip": ZIP_MAC, "cursor-windows.zip": ZIP_WIN},
                    stale=COMMON_STALE + ["whiteboard"]),
-    CURSOR_B: dict(name="Cursor-B", figures=2, imgs=3,
-                   attach={"cursor-mac.zip": ZIP_MAC, "cursor-windows.zip": ZIP_WIN},
-                   stale=COMMON_STALE + ["whiteboard"]),
-    "Ni2hdvtbgoqBFMxrAu5ckjPrnbg": dict(
+    CODEX_MAIN: dict(
         name="Codex", figures=4, imgs=2,
         attach={"codex-mac.command": ROOT / "codex-oneclick/codex-mac.command",
                 "codex-windows.bat": ROOT / "codex-oneclick/codex-windows.bat"},
@@ -189,11 +186,6 @@ def run():
         print(f"{'❌' if red else '✅'} {cfg['name']:<10} 章节 {heads}")
         for r in red:
             print(f"     · {r}")
-    red = twin_diff(xmls[CURSOR_A], xmls[CURSOR_B])
-    bad += bool(red)
-    print(f"{'❌' if red else '✅'} 两篇 Cursor 文档正文逐字相同")
-    for r in red:
-        print(f"     · {r}")
     for d in CODEX_EXT:
         red = twin_diff(xmls[CODEX_MAIN], xmls[d], ignore=EXT_ONLY_DIFF)
         bad += bool(red)

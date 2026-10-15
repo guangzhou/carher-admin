@@ -50,7 +50,7 @@ STILL_BAD = "还不行：把安装窗口的整屏文字发给运维（不含 key
 
 
 L_CURSOR = '<a href="https://t83dfrspj4.feishu.cn/docx/OQCPdLd4MovEVoxGzdMcD3CJnCf">Cursor 一键配置</a>'
-L_CODEX = '<a href="https://t83dfrspj4.feishu.cn/wiki/Q0pJwvdGiiMjHpk3487cyH33nTb">Codex 一键配置</a>'
+L_CODEX = '<a href="https://t83dfrspj4.feishu.cn/wiki/BzVZwGMSOiSYOykc6UYcN2opn3b">Codex 一键配置</a>'
 L_CLAUDE = '<a href="https://t83dfrspj4.feishu.cn/docx/MeLad7oMiobwf6xnpA2cWy0nnSg">Claude Code 一键配置</a>'
 
 

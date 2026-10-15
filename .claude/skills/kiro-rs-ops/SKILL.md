@@ -356,20 +356,20 @@ if m.contains("opus-5")   { return "claude-opus-5"; }
 
 ### 服务端 web_search 搜索回合（10-15 上线，镜像 `master-websearch-loop`）
 
-源码补丁 `k8s/kiro-rs/patches/0002-websearch-server-tool-loop.patch`（说明见同目录 README）。
-带 `web_search_20250305` / `web_search` 服务端工具的请求 ⇒ `search_loop.rs` 整轮缓冲：模型调 web_search →
-Kiro MCP `https://q.<region>.amazonaws.com/mcp` 搜 → tool_result 交回 → 续调，客户端只见原生
-`server_tool_use` + `web_search_tool_result`。Claude Code 的 `Perform a web search for the query:` 子请求仍走老路径。
+源码补丁 `k8s/kiro-rs/patches/0002-websearch-server-tool-loop.patch`，说明见同目录 README。
+**客户端线型、各后端谁真搜、回归命令统一放在 [[litellm-198-web-search]]**，这里只记 kiro 侧要注意的点：
 
-- 🔴 判「kiro 自己接住」只认 LiteLLM 响应头 `x-litellm-attempted-fallbacks: 0` + SpendLogs `model_id` 落 `kiro-rs/…`。
-- 日志关键字：`进入搜索回合`（新路径）/ `路由到 WebSearch 处理`（老路径）/ `MCP API 调用失败`。
-- MCP 搜索实测**大概率不扣 credit**（闲置号 10 次后 10min 仍 0.0；缺阳性对照）。
-- Cursor 的 WebSearch 发 Responses `web_search_preview`，兜底到 grok 时由 LiteLLM callback
-  `grok_web_search_preview_rename` 改成 `web_search`（x.ai 不认 preview 会静默不搜）。
+- 日志关键字：`进入搜索回合`（新路径）/ `路由到 WebSearch 处理`（Claude Code 子请求老路径）/ `MCP API 调用失败`。
+- 当前线上源码 = `188:/Data/kiro-build/kiro-ws/`（= kiro.rs + 0001 + 0002）。下次改 kiro **从这里起**，
+  别从 `kiro.rs/` 起，那份没有 0002。
+- 测试基线：239 个（新增 15 个），失败集合与干净 master 一样是那 8 条。跑法同下面流水线的第 2 步。
+- 上线前做了隔离 E2E：188 上 `docker run --network host` 起新镜像，挂一份只含**单个号、refreshToken 换成假值**的
+  credentials（盘上 accessToken 有效期内能用，过期也不会去刷新，不会把线上号的 token 轮转掉），打真 Kiro 上游。
+  用完删掉容器和凭据副本。
 - 回滚：`sudo kubectl -n kiro-rs set image deploy/kiro-rs kiro-rs=docker.io/library/kiro-rs:master-sonnet55 seed-config=docker.io/library/kiro-rs:master-sonnet55`
-  （改前整份 Deployment 在 `198:~/kiro-rs-deploy.pre-websearch-loop.json`）。
-- 🔴 本机 → 198 传镜像 scp/rsync 会断（10-15 两次「Operation timed out」，落地是 0 字节、sha 是空文件的 e3b0c4…）；
-  198 也 ssh 不进 188。可用：本机 `split -b 2m` 逐块 `ssh "cat > part"` 再拼，三处对 sha。
+  （改前整份 Deployment 存在 `198:~/kiro-rs-deploy.pre-websearch-loop.json`）。
+- 🔴 本机 → 198 传镜像，scp/rsync 会断：10-15 两次「Operation timed out」，落地 0 字节，sha 是空文件的 `e3b0c4…`。
+  198 也 ssh 不进 188。可用的办法：本机 `split -b 2m`，逐块 `ssh "cat > part"`，到 198 再拼，188、本机、198 三处对 sha。
 
 ### 构建 → 落地流水线（每一步都有坑）
 

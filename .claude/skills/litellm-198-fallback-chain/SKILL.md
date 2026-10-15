@@ -30,13 +30,26 @@ description: >-
 | `scripts/litellm-198-fallback-insert-before.py` | 在**点名的一组** group 里，把 target 插到 **anchor 之前** | 升级某条既有腿（新腿在前、老腿保留为下一跳） |
 | `scripts/litellm-198-gpt-fallback-append.py` | 全表扫「以 anchor **结尾**」的链，往后追加 | 给一大批链加统一的末端兜底 |
 | `scripts/litellm-198-key-fallback.py drop` | **减法**：摘掉**单把 key 单个组**的整条链 | 「把某人某个模型的兜底去掉」见 §8 |
+| `scripts/litellm-198-fallback-set-rows.py` | **整行增/改**：spec 文件里每个组的链设成给定列表（没有就加、有就换），一次写入 | 一批组大多还没有行、或要整条替换时，见 §9 |
 
-前三把都是 `--apply` 需 `--backup`、`--restore` 回滚、默认 dry-run。
+前三把都是 `--apply` 需 `--backup`、`--restore` 回滚、默认 dry-run（`set-rows` 同）。
 ⚠️ **`gpt-fallback-append.py` 的 pod selector 写死成 `app=litellm-proxy`**，见 §0.5 ——
 它现在会验到不在服务的车道，用它之前先改 selector。
 
 🔴 **本篇前七节全是「加/换」。「去掉某人某个模型的兜底」是减法，走 §8，别拿
 `prepend`/`insert-before` 凑** —— 它们改全局表，会动到所有调这个组的人。
+
+### 0.0 兜底目标先用真实客户端载荷打一发（10-14 踩过）
+
+🔴 **`sa-grok-4.20-multi-agent` 不能当兜底**：x.ai 对带任何函数工具的请求回 400
+`Client-side tools for multi-agent models require beta access`（我们的号没有 beta），
+而 Codex / Cursor 的请求都带函数工具 ⇒ 那一跳 0.5s 必挂，实际全部落到下一跳。
+那次用 `scripts/litellm-198-fallback-set-rows.py` 换上后又 `--restore` 回滚了。
+
+🔴 **直打目标组看到 200 不算数**：目标组自己也有兜底链。10-14 我直打 multi-agent 看到能正常调工具，
+其实是它自己的兜底 `openrouter-deepseek-v4.1-flash` 接住的。判据必须看 SpendLogs 的 `model_id`，
+或者带 `disable_fallbacks: true` 去打。
+搜索相关的兜底现状见 [[litellm-198-web-search]] §4。
 
 ## 0. 先决定粒度：全局一行 vs per-key
 
@@ -369,6 +382,10 @@ grok-4.20）不吃。不归本次改动，但新腿排前了会**更早**撞上�
   返 **200、0.72s、nonce 原样返回**，`/chat/completions` 做阳性对照也 200 ⇒
   `openai` 模式的组**可以**当 claude 组的兜底腿。
   ⚠️ 只打 `/chat/completions` 就通过，等于没测协议转换那一层。
+- 🔴 **跨模型家族的腿，单轮探针是假绿（2026-10-12）**：要验「它能**接管别家写到一半的对话**」，
+  不是「它能答一句新话」。DeepSeek 官方两组（`deepseek-v4.1-flash` / `-responses`）
+  单轮 chat/responses/messages 三端点全 200，挂到 `sa-grok-4.7` 后真流量 **5/5 失败** ——
+  Cursor 多轮历史里有 Grok 产生的推理/空 assistant 消息，官方 thinking 模式拒收。详见 §9。
 
 **兜底目标不受 key 的 `models` allowlist 限制** —— 用 cursor key 直打目标组拿 403
 是**预期行为**，不是故障。别为此去加白名单（我为此误判过一次）。
@@ -619,3 +636,77 @@ grok-4.20 1，全部出字）；傅天麒主路 189 次成功、**兜底 4 次**
 - [[project_198_astra_fallback_dropped_per_key_2026_10_10]] — 本节首次使用全过程
 - [[feedback_key_info_by_alias_returns_all_null]] / [[feedback_empty_read_is_not_an_empty_table]]
 - [[litellm-key-provider-swap]] — 改单把 key 的 alias/映射（不是兜底）走那篇
+
+## 9. 整行增/改：`fallback-set-rows.py`（2026-10-12 加）
+
+诉求形状：「grok 全系（含 composer，除出图）兜到 X；出图 grok ↔ gpt 互兜」。
+12 个组里 10 个**还没有行**，`prepend`/`insert-before` 都要求行已存在 ⇒ 用这把。
+
+```bash
+S=~/fb-setrows-<sid>.py                       # 198 多会话并行，文件名带会话号
+# spec：{"<组>": ["<腿>", ...], ...}，每个组的行整条设成这个列表
+sudo python3 $S --spec spec.json                                   # ① dry-run，逐行 ADD/REPLACE
+sudo python3 $S --spec spec.json --apply --backup ~/rs-bak/router_settings.pre-<what>-<utc>.json
+sudo python3 $S --spec spec.json --verify                          # 层 1+2：DB + 逐 pod
+sudo python3 $S --restore ~/rs-bak/<file>.json --apply             # 整表回滚
+```
+
+脚本自带的闸门：组和腿**都必须是运行 router 上的活组**；回读断言 13 个顶层键逐字节、
+**未点名的行逐字节不变**、行数 = 旧 + 新增数、点名行精确；全局表读成空/重复行直接拒跑
+（§8.4 第 14 条）。容器无 curl，逐 pod 读用 python3 urllib。单测
+`backend/tests/test_litellm_198_fallback_set_rows.py`。
+
+### 9.1 现行配置（10-12 终态，120 行）
+
+| 组 | 兜底 |
+|---|---|
+| `sa-grok-4.6` / `sa-grok-4.7` | `openrouter-deepseek-v4.1-flash` → `deepseek-v4-flash-responses` |
+| `sa-grok-4.20` / `-4.20-reasoning` / `-4.20-multi-agent` / `-4.3` / `-4.5` / `-build-0.1` / `sa-composer-2.5-fast` | `openrouter-deepseek-v4.1-flash` |
+| `gpt-image-2` | `sa-grok-imagine-image-2.0` |
+| `sa-grok-imagine-image-2.0` / `sa-grok-imagine` / `sa-grok-imagine-image-quality` | `gpt-image-2` |
+
+| `ag-gemini-3.8-flash` | `web-gemini-3.8-flash`（10-14 加，全局，1468 把 key 共用） |
+
+⚠️ `web-gemini-3.8-flash` 是 Gemini 网页版（`litellm-dev/gemini-web` 单副本、小号池、约 5h/2400 credits、
+240k 上下文、三客户端工具实测 5/9）。用户知情选了全局一行：antigravity 整体故障时全员会压到它、
+几分钟可能耗尽 —— 届时现象是兜底腿也报限额，不是这行没生效。备份
+`~/rs-bak/router_settings.pre-gemini38-ag-to-web-20261014T*.json`。
+
+出图互兜成环是安全的：`fallback_event_handlers.py` 的 `attempted_targets` 跨层共享去重，
+同一目标一次请求只试一次，外加 `max_fallbacks` 深度上限（读运行 pod 源码核过）。
+
+### 9.2 🔴 为什么不是 DeepSeek 官方：写入 3 分钟就回滚的那一版
+
+第一版按「Responses 请求要原生组」的推理写了
+`[deepseek-v4.1-flash-responses, deepseek-v4.1-flash]`。上线前单轮 nonce 三端点全 200。
+写入后 `sa-grok-4.7` 真流量兜底 **5/5 失败**，两段原文：
+
+- `-responses`：``The `reasoning_text` in the thinking mode must be passed back``
+- chat 组：`Invalid assistant message: content or tool_calls must be set`
+
+Cursor 的多轮历史里带着 **Grok 产生的推理与空 assistant 消息**，官方 thinking 模式接管
+别家写到一半的对话会拒；入口的 `_RESPONSES_GROUP_REWRITE` 只认请求原名，兜底跳转时不触发。
+`openrouter-deepseek-v4.1-flash` 不卡这一点：改前 24h 230 次 success，回滚后 10min 6/6。
+
+⇒ **跨家族兜底腿的验收**：单轮探针只证「这个组活着」。要么用带对方推理/工具历史的多轮
+payload 打，要么写入后**立刻盯真流量 SpendLogs 的 status**（`api_key` 列，按 `model` 落点分组），
+有失败就回滚 —— 这次就是靠后者 3 分钟内抓到的。
+
+### 9.3 ⚠️ `sa-grok-4.20-multi-agent` 带 tools 必兜底（上游属性，不是故障）
+
+不带 tools 200；带 tools（Cursor 每发都带）上游回 `Upstream rejected the request`，
+请求落到 `openrouter-deepseek-v4.1-flash`（`x-litellm-attempted-fallbacks: 1`）。
+⇒ 在 Cursor 里选这个名，**实际作答的是 deepseek**。
+官方文档 Limitations 明写三条：**不支持 client-side/custom tools（function calling）**、
+**不支持 Chat Completions**（只 Responses）、**不支持 `max_tokens`**；定位是 4/16 子智能体的
+联网深度调研（beta），所有子智能体 token 都计费 —— 实测同题 effort=low 约 20×、high 约 250× token。
+⇒ 对 Claude Code / Codex / Cursor **没有价值**，10-12 已从 `cursor-liuguoxian-std` 摘掉（兜底行保留）。
+
+⚠️ `sa-grok-4.20` 实落上游是 **`grok-4.20-non-reasoning`**（3 天 1349/1349），不会思考。
+要推理版用 `sa-grok-4.20-reasoning`（实测 reasoning_tokens>0，三客户端线型 9/9 工具调用）；
+10-12 起 std 的 `grok-4.20` 已映射到它，并补了兜底行。
+
+备份：`198:~/rs-bak/router_settings.pre-grok-ds41-image-20261012T093908Z.json`（本轮之前）、
+`...pre-rollback-grok46-47-20261012T094308Z.json`、`...pre-grok6-openrouter-20261012T101722Z.json`、`...pre-grok420-reasoning-20261012T133647Z.json`。
+
+- [[feedback_deepseek_official_cannot_take_over_midstream_grok_fallback]]

@@ -241,4 +241,7 @@ CLAUDE = "".join([
     pre("~/Library/Application Support/Claude-3p"),
     p("Windows："),
     pre("%LOCALAPPDATA%\\Claude-3p"),
+    # 10-15 用户手工加的效果图,放回文末
+    p("Claude 效果图："),
+    ph("IMG0"),
 ])

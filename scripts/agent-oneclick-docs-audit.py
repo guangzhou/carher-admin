@@ -63,7 +63,7 @@ DOCS = {
                stale=COMMON_STALE + ["已经装好 codex", "第一步：下载脚本"])
        for i, d in enumerate(CODEX_EXT, 1)},
     "MeLad7oMiobwf6xnpA2cWy0nnSg": dict(
-        name="ClaudeCode", figures=2, imgs=0,
+        name="ClaudeCode", figures=2, imgs=1,   # 10-15 用户加了一张「Claude 效果图」
         attach={"install-mac.command": ROOT / "claude-oneclick/install-mac.command",
                 "install-windows.bat": ROOT / "claude-oneclick/install-windows.bat"},
         # 一键之前的手动步骤;AUTH_TOKEN 能聊天但拉不到 /model 列表

@@ -39,16 +39,12 @@ description: >-
 🔴 **本篇前七节全是「加/换」。「去掉某人某个模型的兜底」是减法，走 §8，别拿
 `prepend`/`insert-before` 凑** —— 它们改全局表，会动到所有调这个组的人。
 
-### 0.0 兜底目标先用真实客户端载荷打一发（10-14 踩过）
+### 0.0 兜底目标先用真实客户端载荷打一发（10-14 又踩一次）
 
-🔴 **`sa-grok-4.20-multi-agent` 不能当兜底**：x.ai 对带任何函数工具的请求回 400
-`Client-side tools for multi-agent models require beta access`（我们的号没有 beta），
-而 Codex / Cursor 的请求都带函数工具 ⇒ 那一跳 0.5s 必挂，实际全部落到下一跳。
-那次用 `scripts/litellm-198-fallback-set-rows.py` 换上后又 `--restore` 回滚了。
-
-🔴 **直打目标组看到 200 不算数**：目标组自己也有兜底链。10-14 我直打 multi-agent 看到能正常调工具，
-其实是它自己的兜底 `openrouter-deepseek-v4.1-flash` 接住的。判据必须看 SpendLogs 的 `model_id`，
-或者带 `disable_fallbacks: true` 去打。
+🔴 **直打目标组看到 200 不算数**：目标组自己也有兜底链。10-14 我直打 `sa-grok-4.20-multi-agent`，
+看到能正常调工具，就把它换成 opus-5.5 的兜底。上线后这一跳 0.5s 必挂，原因见 §9.3
+（带函数工具就被上游拒），只好回滚。之前看到的 200 是它自己的兜底 `openrouter-deepseek-v4.1-flash` 接的。
+⇒ 直打一律带 `disable_fallbacks: true` + 真实客户端载荷（要带函数工具），落点看 SpendLogs `model_id`。
 搜索相关的兜底现状见 [[litellm-198-web-search]] §4。
 
 ## 0. 先决定粒度：全局一行 vs per-key

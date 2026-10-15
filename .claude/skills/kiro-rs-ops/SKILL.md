@@ -366,8 +366,14 @@ if m.contains("opus-5")   { return "claude-opus-5"; }
 - 上线前做了隔离 E2E：188 上 `docker run --network host` 起新镜像，挂一份只含**单个号、refreshToken 换成假值**的
   credentials（盘上 accessToken 有效期内能用，过期也不会去刷新，不会把线上号的 token 轮转掉），打真 Kiro 上游。
   用完删掉容器和凭据副本。
-- 回滚：`sudo kubectl -n kiro-rs set image deploy/kiro-rs kiro-rs=docker.io/library/kiro-rs:master-sonnet55 seed-config=docker.io/library/kiro-rs:master-sonnet55`
-  （改前整份 Deployment 存在 `198:~/kiro-rs-deploy.pre-websearch-loop.json`）。
+- 现役镜像 **`master-overage-fix`**（10-15 05:24 UTC，= 0001 + 0002 + 0003）。回滚到上一版：
+  `sudo kubectl -n kiro-rs set image deploy/kiro-rs kiro-rs=docker.io/library/kiro-rs:master-websearch-loop seed-config=docker.io/library/kiro-rs:master-websearch-loop`
+  （备份 `198:~/kiro-rs-deploy.pre-overage-fix.json`；再往前是 `master-sonnet55` / `~/kiro-rs-deploy.pre-websearch-loop.json`）。
+- 🔴 **开了 overage 的号用满后，上游回的是 `402 OVERAGE_REQUEST_LIMIT_EXCEEDED`**，不再是 `MONTHLY_REQUEST_COUNT`，
+  而且**不会继续计超额**：`currentOveragesWithPrecision` 恒 0，请求直接失败。补丁 0003 之前 kiro 不认这个 reason，
+  卡在死号上不换（10-15 #128 卡了 87 分钟）。判断「号是不是死了」：admin `/credentials/{id}/balance` 看 `remaining`，
+  或者 `getUsageLimits` 看 `currentOveragesWithPrecision`。
+- 188 上 `docker images` 里的 kiro 镜像会被清掉，tarball 还在 `/Data/kiro-build/kiro-rs-*.tar.gz`，要用时 `gunzip -c … | docker load`。
 - 🔴 本机 → 198 传镜像，scp/rsync 会断：10-15 两次「Operation timed out」，落地 0 字节，sha 是空文件的 `e3b0c4…`。
   198 也 ssh 不进 188。可用的办法：本机 `split -b 2m`，逐块 `ssh "cat > part"`，到 198 再拼，188、本机、198 三处对 sha。
 

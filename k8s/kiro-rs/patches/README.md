@@ -7,6 +7,7 @@
 |---|---|---|
 | `0001-carher-base-models.patch` | opus-5.5 / sonnet-5.5 映射、透传模型表、`/v1/models` 条目（09-29 / 10-04） | `master-sonnet55` |
 | `0002-websearch-server-tool-loop.patch` | 服务端 web_search 搜索回合（10-15） | `master-websearch-loop` |
+| `0003-overage-limit-exceeded-switch-credential.patch` | 402 `OVERAGE_REQUEST_LIMIT_EXCEEDED` 也算额度用尽 ⇒ 禁号换号（10-15） | `master-overage-fix`（现役） |
 
 ## 0002 做了什么
 
@@ -34,3 +35,15 @@ docker build -t kiro-rs:master-<tag> .
 ```
 
 上线流程见 skill `kiro-rs-ops` §C。
+
+## 0003 做了什么
+
+开了 overage 的号用满 2000 后，上游对每个请求都回 `402 OVERAGE_REQUEST_LIMIT_EXCEEDED`
+（不是 `MONTHLY_REQUEST_COUNT`）。kiro.rs 只认后者，结果把它当普通 4xx 原样返回、不换号。
+10-15 00:44~02:11 UTC 卡在 #128 上 87 分钟，期间 opus 全部兜底到 wangsu / grok。
+
+改动：`src/kiro/endpoint/mod.rs` 的 `default_is_monthly_request_limit` 认这两个 reason
+（加 2 条单测，含 4 个别的 reason 的阴性对照）。日志文案同步改了。
+
+验证：cargo 226 过，失败集合仍是基线那 8 条。隔离 A/B（死号 #128 优先、好号 #131 其次）：
+旧镜像 2/2 失败，currentId 停在 128；新镜像 2/2 成功，#128 → `QuotaExceeded` 禁用并切到 #131。

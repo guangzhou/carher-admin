@@ -74,10 +74,11 @@ SpendLogs 查法：`response->'usage'->>'num_server_side_tools_used'`。
 
 ## 4. 兜底链（DB `router_settings.fallbacks`，不在 CM）
 
-`kiro-claude-opus-5 → anthropic.wangsu5.claude-opus-5`；
-`kiro-claude-opus-5-5 → sa-grok-4.20 → wangsu5`（10-14 改成 multi-agent 后又回滚，现在就是这条）。
+`kiro-claude-opus-5` 和 `kiro-claude-opus-5-5` 现在都是 `sa-grok-4.20 → wangsu5`
+（opus-5 原来直连 wangsu5，10-15 05:34 UTC 应用户要求改成和 5.5 一样，备份 `198:~/fb-opus5-grok-20261015/rs-pre.json`；
+5.5 在 10-14 改成 multi-agent 后又回滚过）。
 搜索回合上线后，带搜索工具的请求基本不触发兜底。还会触发的是 kiro 上游 `500 MODEL_TEMPORARILY_UNAVAILABLE`
-（high load，9 次重试耗尽），这时 opus-5.5 的用户实际拿到的是 grok-4.20 的回答（走 Messages，不搜），看不出来。
+（high load，9 次重试耗尽），这时 opus-5 / 5.5 的用户实际拿到的是 grok-4.20 的回答（走 Messages，不搜），用户看不出来。
 
 判「kiro 接住了」：响应头 `x-litellm-attempted-fallbacks: 0`，并且 SpendLogs `model_id` 以 `kiro-rs/` 开头。
 

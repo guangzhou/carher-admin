@@ -87,3 +87,13 @@ def test_bat_header_is_ascii_crlf(tmp_path):
     assert all(c < 128 for c in b[:cut])
     assert b"chcp" not in b.lower()
     assert b.count(b"\n") == b.count(b"\r\n")
+
+
+def test_windows_finds_msix_app_and_test_prompt_survives_cmd():
+    """10-15 同事 Windows 实机两处:①装了 App 却「没找到安装目录」(官方包是 MSIX,
+    WindowsApps 目录普通用户列不出来)②测试题经 cmd /c 被切成「9511+」。"""
+    import re
+    assert "Get-AppxPackage -Name 'Claude'" in PS
+    assert "app\\\\resources\\\\app.asar" in PS or "app\\resources\\app.asar" in PS
+    q = re.search(r'\$q = "([^"]+)"', PS).group(1)
+    assert not [c for c in '+?&|<>^%"' if c in q], q

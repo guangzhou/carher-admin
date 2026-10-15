@@ -244,14 +244,25 @@ else { Warn "! 桌面 App 配置没写成(不影响命令行 claude)" }
 # 而是在几个常见位置里搜「同时有 resources\app.asar 且 exe 叫 claude.exe」的那个。找不到就跳过这一步
 # (只影响桌面 App,命令行 claude 不受影响),并明说跳过了。
 $appAsar = $null
+# 🔴 10-15 同事实机:App 装了却报「没找到安装目录」。官方 Windows 包是 **MSIX**,装在
+#    C:\Program Files\WindowsApps\Claude_<版本>_x64__<发布者>\app\ —— 那个目录普通用户**列不出来**,
+#    递归搜永远搜不到。⇒ 先问系统要 MSIX 的安装位置(Get-AppxPackage,不要管理员),
+#    文件本身是可读的(app\resources\app.asar),拿不到再退回老的目录搜索(兼容 .exe 安装版)。
+try {
+  $pkg = Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+  if ($pkg -and $pkg.InstallLocation) {
+    $cand = Join-Path $pkg.InstallLocation 'app\resources\app.asar'
+    if (Test-Path $cand) { $appAsar = $cand }
+  }
+} catch {}
 $roots = @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs')) | Where-Object { $_ -and (Test-Path $_) }
-foreach ($r in $roots) {
+if (-not $appAsar) { foreach ($r in $roots) {
   $hit = Get-ChildItem -Path $r -Filter app.asar -Recurse -Depth 5 -ErrorAction SilentlyContinue |
     Where-Object { $_.Directory.Name -eq 'resources' -and (Test-Path (Join-Path $_.Directory.Parent.FullName 'claude.exe')) } |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if ($hit) { $appAsar = $hit.FullName; break }
-}
-if (-not $appAsar) { Warn "! 没找到 Claude 桌面 App 的安装目录,跳过桌面 App 组件这一步(没装 App 可以忽略)" }
+} }
+if (-not $appAsar) { Warn "! 没找到 Claude 桌面 App 的安装目录,跳过桌面 App 组件这一步(没装 App 可以忽略;装了 App 的话先打开一次 App 再重跑本脚本)" }
 if ($appAsar) {
   Say "→ 准备桌面 App 需要的 Claude Code 组件(约 55MB)..."
   $env:CARHER_ASAR = $appAsar; $env:CARHER_UD = (Join-Path $env:LOCALAPPDATA 'Claude-3p')
@@ -298,7 +309,13 @@ Write-Host ""
 Say "→ 测试一下 ..."
 $a = Get-Random -Minimum 1000 -Maximum 9999; $b = Get-Random -Minimum 1000 -Maximum 9999
 foreach ($v in $override) { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
-try { $out = (& cmd /c "claude --print ""What is $a+$b? Answer with just the number."" < NUL 2>NUL" | Select-Object -Last 1) } catch { $out = '' }
+# 🔴 10-15 同事实机:原来走 `cmd /c "claude --print ""…$a+$b…"""`,cmd 把引号里的内容切了,
+#    claude 收到的只有「9511+」⇒ 回「第二个数呢」。⇒ 不经 cmd,PowerShell 直接调 claude,
+#    题目放变量里当一个参数传;stdin 用 $null 关掉(否则 claude 会等输入)。
+#    题目里不带 + 号和引号(只用字母和数字),走 cmd /c 也切不坏;claude 在 Windows 上是 npm 装的
+#    claude.cmd,必须经 cmd /c 调(直接调会撞执行策略)。stdin 接 NUL 免得它等输入。
+$q = "What is $a plus $b. Reply with only the number"
+try { $out = (& cmd /c "claude --print `"$q`" < NUL 2>NUL" | Select-Object -Last 1) } catch { $out = '' }
 if ("$out" -match [regex]::Escape([string]($a + $b))) { Ok "√ 通了(问 $a+$b,答 $out)" }
 else { Warn "! 测试没拿到预期回答(回:$out)。配置已写好,先新开一个终端试试 claude。" }
 

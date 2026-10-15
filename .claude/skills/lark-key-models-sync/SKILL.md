@@ -44,6 +44,23 @@ python3 scripts/sync-lark-key-models.py --only carher-13 carher-14 carher-75 --a
 ⚠️ 行数变了                   # 没出现这行才对
 ```
 
+## 限额两列（2026-10-15 加）：`--with-limits`
+
+```bash
+python3 scripts/sync-lark-key-models.py --with-limits            # 全表预览
+python3 scripts/sync-lark-key-models.py --with-limits --apply    # 真写（三列一起）
+```
+
+| 列 | 来源 |
+|---|---|
+| `每日预算` | key 的 `max_budget`（LiteLLM 原生每日总额；无上限=空） |
+| `高配额度($/天)` | Opus 系列 + gpt-6-astra 共用额度：`cursor-*` 取 `metadata.budget_family_overrides.premium`，否则 `max_budget × 0.5`；非 cursor key 留空（没有高配桶） |
+
+规则写死在脚本 `PREMIUM_PREFIXES/PREMIUM_RATIO`，与 `budget_notice.py` 同源；改执法规则时两处一起改。
+⚠️ 10-15 首刷前「每日预算」只有 149 行有值，其中 83 行是**过时的手填值**（如 claude-code-* 填 200、
+实际 1000），已全部按 DB 覆盖。备份 `.tmp-lark/lark-key-models-backup-20261015-013053.json`。
+批量改完一批 key 后只刷那批：`--only-db-alias-file <一行一个 DB alias>`（按 hash 圈行）。
+
 ## 对账：sha256(key) == token
 
 表的 `API Key` 列存明文 `sk-`，DB 的 `token` 列是它的 sha256。**用 hash 认人，不用

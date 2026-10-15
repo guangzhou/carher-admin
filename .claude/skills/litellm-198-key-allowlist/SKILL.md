@@ -126,6 +126,62 @@ python3 $S --only ... --converge-to cursor-liuguoxian-std \
 readback 在 `--converge-to` 下改判**相等**而不是包含 —— add/rm 集合是空的，
 原来那套 `set(add) <= models` 断言会**恒真通过**（假绿）。
 
+⚠️ **`cursor-liuguoxian-std` 10-12 起是刘国现的实验 key，不再是标准形状**（别的会话会随时往上加实验名，
+10-14 下午就加了 argon/muse/gemini-web 系列，到 10-15 是 44 名）。
+上面例子里拿它当 `--converge-to` 参考的写法**别照抄**：现在收敛过去会把同事的
+`gpt-5.2` / `gpt-5.4` / `composer-2.5` / `deepseek-v4-flash` / `grok-4.20-0309-reasoning` /
+`grok-4.5-latest` / `grok-4.6-latest` 一起删掉（Cursor 装机菜单里还有这 7 个名）。
+**10-14 起全员标准形状 = 「std 减实验名」那份文件**（见下一节「全员收敛」），不是 std 本身。
+
+### 期望态没有任何一把 key 带着时：`--converge-to-file`（2026-10-12 加）
+
+手工对齐出来的新形状（10-12：两把 key 合并去重后逐行和用户核对的 36 名 / 27 alias）
+没有现成参考 key。写成 JSON 文件，用文件当参考：
+
+```bash
+# target.json = {"models": [...按你要的顺序...], "aliases": {"公开名": "真实组", ...}}
+python3 $S --prefix cursor- --only <key> --converge-to-file ~/target-<sid>.json       # ① dry-run
+python3 $S --prefix cursor- --only <key> --converge-to-file ~/target-<sid>.json \
+  --allow-upstream-change --apply --backup ~/<key>-pre-$(date -u +%Y%m%dT%H%M%SZ).json
+```
+
+与 `--converge-to` 的差别：
+
+- **必须带 `--only`/`--only-file`**，不许拿一份文件扫整个前缀。
+- 文件本身先过三道闸门，不合格直接拒跑：`models` 为空（=全放行）、有重复名、
+  alias 的源名不在 `models` 里（闸门查改写前的名字，这种 alias 永远不触发 ——
+  10-12 实例就是 `chatgpt-gpt-5.5`）。
+- dry-run 逐项打印 `- model` / `+ model` / `- alias` / `+ alias` / `~ alias 旧 -> 新`，
+  可以直接贴给用户逐行确认。
+- `NAMES DROPPED` 与 `UPSTREAM CHANGE` 两块照常打印、照常门禁。
+
+⚠️ 写之前要先证明**每个名都能落到正式车道的活组**（per-key alias 优先，否则走全局
+`model_group_alias`，再否则同名组）：`/model_group/info` 和 `/get/config/callbacks`
+都在 pod 内用 python3 读。10-12 那次 36 个名全部解析成功，才去跑的 dry-run。
+
+### 全员收敛（10-14 实跑 545 把）：先金丝雀，参考 key 的「新名」要先过三客户端
+
+用户原话「除了 liuguoxian 系列，其他所有人的 cursor key 用 std 覆盖」。实际做法与必须问的四件事：
+
+1. **范围导成精确名单**（`--only-file`），三类要用户拍板：自己的系列（排除）、
+   `models=['deepseek-v4.1-flash']` 收窄过的 163 把（**跳过**，否则一下子放开 opus）、blocked（**一起写**）。
+2. **dry-run 的 `NAMES DROPPED` 必须按 14 天流量量出「谁在用」**再给用户：10-14 是 `gpt-5.2/5.4`
+   ≤1948 次/38 把、`deepseek-v4-flash` 520 次/8 把。还有一类富形状 key（19 把，56 名）会掉 43 个名 ——
+   查实全是 blocked 且 14 天 0 次，才放行。
+3. **金丝雀 3 把有流量的 key**，用克隆形状跑三客户端线型探针（Claude Code `/v1/messages`、Codex
+   `/v1/responses`、Cursor chat，**要求真发出工具调用**，不是回一句话）。10-14 金丝雀抓到 std 当天新加的
+   `gemini-4-argon`（网页版 2 号小池、提示词模拟工具）与 `muse-spark` 三客户端都不调工具 ⇒
+   用户改为「std 减这 3 个」的 `--converge-to-file`，35 名/26 alias。⛔ 直接 `--converge-to std` 会把实验名推给全员。
+4. **per-key `router_settings`** 不在 models/aliases 里，收敛不覆盖它；要「连兜底一起覆盖」得单独清
+   （`/key/update router_settings={}`，逐把存快照）。
+
+验收换尺子：psql 按 `models=<目标> and aliases=<目标>` 分组数（10-14：fleet 545/545、deepseek-only 0、liuguoxian 0），
+再克隆一把收敛后的 key 跑三客户端探针 + 删掉的名逐个打 403。
+
+⚠️ 探针提示词别写成命令式「你必须调用 X，不许文字回答」—— 5 个模型当成提示注入直接拒（10-12 实测）；
+用「这台机器 hostname 是什么？读 /etc/hostname 看」+ 编码 agent 系统提示。kiro 的 `claude-opus-4-7`
+对系统文件类问题恒回 `I can't discuss that.`（快汇那条不会），是既存现象不是收敛造成的。
+
 ### 🔴 模板 key ≠ 新 key：收敛会静默把人搬到另一个供应商
 
 新发的 key 是 `68 models / 0 aliases`，收敛过去只是减白名单。

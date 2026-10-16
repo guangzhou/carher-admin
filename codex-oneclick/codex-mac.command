@@ -124,6 +124,22 @@ case "$APIKEY" in
 esac
 echo
 
+# --- 1b. 默认模型按这把 key 选 ---
+# 🔴 10-16 同事实机:key 只开了 deepseek-v4.1-flash,脚本写死 gpt-5.6-terra ⇒ 每一轮都 403。
+#    网关 /models 已按 key 白名单过滤 ⇒ 默认模型在里面就用它,不在就用列表里第一个能聊天的。
+#    拿不到列表(网络问题)就保持原默认,不阻断安装。
+IDS="$(curl -fsS --max-time 20 -H "Authorization: Bearer $APIKEY" "$BASE_URL/models" 2>/dev/null \
+  | grep -oE '"id" *: *"[^"]+"' | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+if [ -n "$IDS" ]; then
+  if ! printf '%s\n' "$IDS" | grep -qx "$MODEL"; then
+    ALT="$(printf '%s\n' "$IDS" | grep -vE 'image|imagine|^codex-auto-review$' | head -n1)"
+    if [ -n "$ALT" ]; then
+      warn "↳ 你的 key 没开通 $MODEL,默认模型改用 $ALT"
+      MODEL="$ALT"
+    fi
+  fi
+fi
+
 # --- 2. 备份已有配置 ---
 mkdir -p "$CODEX_HOME"
 TS="$(date +%Y%m%d-%H%M%S)"

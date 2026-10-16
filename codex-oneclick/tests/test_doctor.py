@@ -116,6 +116,7 @@ def test_good_config_is_green_readonly_and_masked(tmp_path, gw):
     ("两把 key 不一致", dict(auth_key="sk-another00000000000"), "两把不同的 key"),
     ("零宽字符", dict(cfg=GOOD_CFG.replace(KEY, KEY + "​"), auth_key=KEY + "​"), "看不见的字符"),
     ("不是 apikey 模式", dict(mode="chatgpt"), "不是 apikey 模式"),
+    ("默认模型不在 key 里", dict(cfg=GOOD_CFG.replace('model = "gpt-5.6-terra"', 'model = "gpt-6-sol"')), "默认模型 gpt-6-sol 不在这把 key 里"),
     ("provider 指错", dict(cfg=GOOD_CFG.replace('base_url = "https://cc.auto-link.com.cn/pro/v1"\nwire', 'base_url = "https://api.openai.com/v1"\nwire')), "不指向公司网关"),
 ])
 def test_each_failure_is_reported(tmp_path, gw, case, kw, expect):
@@ -143,3 +144,42 @@ def test_no_bare_var_before_multibyte():
 def test_build_outputs_doctor_files():
     s = (ROOT / "build.sh").read_text()
     assert "codex-doctor-mac.command" in s and "codex-doctor-windows.bat" in s
+
+
+# ── 安装脚本「默认模型按 key 选」(10-16 fenglili:key 只有 deepseek-v4.1-flash,写死 gpt-5.6-terra ⇒ 每轮 403) ──
+INSTALL = (ROOT / "src" / "install-mac.sh").read_text(encoding="utf-8")
+
+
+def _pick_default(tmp_path, ids):
+    class G(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            b = json.dumps({"data": [{"id": i} for i in ids]}).encode()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b)
+
+    s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), G)
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    helpers = "\n".join(l for l in INSTALL.splitlines() if re.match(r"^(BLUE|say|ok|warn|die)", l))
+    body = re.search(r"^# --- 1b\..*?(?=^# --- 2\.)", INSTALL, re.S | re.M).group(0)
+    script = (helpers + f'\nBASE_URL="http://127.0.0.1:{s.server_port}/pro/v1"\nMODEL="gpt-5.6-terra"\nAPIKEY="sk-x"\n'
+              + body + '\necho "MODEL=$MODEL"\n')
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    s.shutdown()
+    return r.stdout.strip().splitlines()[-1]
+
+
+def test_default_model_kept_when_key_has_it(tmp_path):
+    assert _pick_default(tmp_path, ["gpt-5.6-terra", "grok-4.7"]) == "MODEL=gpt-5.6-terra"
+
+
+def test_default_model_falls_back_to_first_chat_model(tmp_path):
+    assert _pick_default(tmp_path, ["muse-image", "deepseek-v4.1-flash"]) == "MODEL=deepseek-v4.1-flash"
+
+
+def test_windows_installer_also_picks_default_by_key():
+    ps = (ROOT / "src" / "install-windows.ps1").read_text(encoding="utf-8-sig")
+    assert "# --- 1b. 默认模型按这把 key 选" in ps and "$baseUrl/models" in ps

@@ -145,6 +145,10 @@ if (-not $key) { P "(没有 key,跳过)" } else {
   if ($m.code -eq 401 -or $m.code -eq 403) { Red "key 无效(HTTP $($m.code)):去 key 表复制整格,重新双击 codex-windows.bat" }
   elseif ($m.code -ne 200) { Red "拉模型列表失败(HTTP $($m.code)):把这份报告发给运维" }
   $mm = if ($model) { $model } else { 'gpt-5.6-terra' }
+  if ($m.code -eq 200 -and -not ($ids -contains $mm)) {
+    $first = $ids | Where-Object { $_ -notmatch 'image|imagine' -and $_ -ne 'codex-auto-review' } | Select-Object -First 1
+    if ($first) { Red "默认模型 $mm 不在这把 key 里(每一轮都会 403)。下载最新的 codex-windows.bat 重跑一次会自动改成 ${first};或在 Codex 里用 /model 选 ${first}" }
+  }
   foreach ($x in @($mm, 'muse-image')) {
     if ($ids -contains $x) { P "  $x : 已开通" } else { P "  $x : 没开通"; if ($m.code -eq 200) { Yel "这把 key 没开通 ${x}:找运维开通,或换一个模型" } }
   }

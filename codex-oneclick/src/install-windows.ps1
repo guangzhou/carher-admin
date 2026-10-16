@@ -112,6 +112,18 @@ if ([string]::IsNullOrWhiteSpace($apiKey)) { Die "x 没有输入 key，已取消
 if (-not $apiKey.StartsWith('sk-')) { Warn "! key 不是 sk- 开头，仍然继续。" }
 Write-Host ""
 
+# --- 1b. 默认模型按这把 key 选 ---
+# 🔴 10-16 同事实机:key 只开了 deepseek-v4.1-flash,脚本写死 gpt-5.6-terra ⇒ 每一轮都 403。
+#    网关 /models 已按 key 白名单过滤 ⇒ 默认模型在里面就用它,不在就用列表里第一个能聊天的。
+try {
+  $ml = Invoke-RestMethod -Uri "$baseUrl/models" -Headers @{ Authorization = "Bearer $apiKey" } -TimeoutSec 20
+  $ids = @($ml.data | ForEach-Object { [string]$_.id })
+  if ($ids.Count -gt 0 -and -not ($ids -contains $model)) {
+    $alt = $ids | Where-Object { $_ -notmatch 'image|imagine' -and $_ -ne 'codex-auto-review' } | Select-Object -First 1
+    if ($alt) { Warn "↳ 你的 key 没开通 $model，默认模型改用 $alt"; $model = $alt }
+  }
+} catch {}
+
 # --- 2. 备份 ---
 if (-not (Test-Path $codexHome)) { New-Item -ItemType Directory -Path $codexHome -Force | Out-Null }
 $ts = Get-Date -Format 'yyyyMMdd-HHmmss'

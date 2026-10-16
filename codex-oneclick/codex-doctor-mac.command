@@ -142,6 +142,11 @@ else
     200) :;;
     *) red "拉模型列表失败(HTTP $CODE):把这份报告发给运维";;
   esac
+  # 默认模型不在这把 key 里 ⇒ 每一轮都会 403;直接告诉他该换成哪个(10-16 fenglili 就是这个)
+  if [ "$CODE" = 200 ] && ! printf '%s' "$BODY" | grep -q "\"${MODEL:-gpt-5.6-terra}\""; then
+    FIRST=$(printf '%s' "$BODY" | grep -o '"id" *: *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | grep -vE 'image|imagine|^codex-auto-review$' | head -n1)
+    [ -n "$FIRST" ] && red "默认模型 ${MODEL:-gpt-5.6-terra} 不在这把 key 里(每一轮都会 403)。下载最新的 codex-mac.command 重跑一次会自动改成 ${FIRST};或在 Codex 里用 /model 选 ${FIRST}"
+  fi
   for m in ${MODEL:-gpt-5.6-terra} muse-image; do
     if printf '%s' "$BODY" | grep -q "\"$m\""; then P "  $m : 已开通"; else P "  $m : 没开通"
       [ "$CODE" = 200 ] && yel "这把 key 没开通 $m:找运维开通,或换一个模型"; fi

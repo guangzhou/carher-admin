@@ -85,15 +85,19 @@ ol.list pre{margin-top:6px}
 img.shot{border:1px solid var(--line);border-radius:8px;max-width:100%;width:300px;height:auto}
 
 /* 装完后的两个口令:主线之后、「需要时再看」之前 */
-.tips{margin:0 0 30px 62px;background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--t);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:12px}
-.tips > p:first-child{font-weight:700}
+.tips{margin:0 0 30px 62px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:14px}
+.tips-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+.tips-h b{font-size:16.5px}
+.tips-h span{font-size:13.5px;color:var(--muted)}
 .cmds{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
-.cmd{display:flex;align-items:flex-start;gap:12px;min-width:0}
-.cmd kbd{flex:none;font-family:var(--font-body);font-weight:700;font-size:15px;background:var(--code-bg);border:1px solid var(--line);border-bottom-width:2px;border-radius:7px;padding:4px 12px;color:var(--fg);cursor:pointer;user-select:all}
-.cmd kbd:hover{border-color:var(--muted)}
+.cmd{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.cmd kbd{align-self:flex-start;font-family:var(--font-body);font-weight:700;font-size:17px;letter-spacing:.04em;background:var(--surface);border:1px solid var(--line);border-bottom-width:3px;border-radius:8px;padding:5px 16px;color:var(--fg);cursor:pointer;user-select:all}
+.cmd kbd:hover{border-color:var(--t)}
 .cmd kbd.done{background:var(--t);color:var(--on-t);border-color:var(--t)}
-.cmd span{font-size:14px;color:var(--muted);line-height:1.6}
-.tips .sub{font-size:13px}
+.cmd p{font-size:14.5px;line-height:1.65}
+.cmd .meta{display:flex;flex-wrap:wrap;gap:6px}
+.cmd .meta span{font-size:12.5px;color:var(--muted);background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:1px 9px}
+.tips-note{font-size:13.5px;color:var(--muted)}
 .fb{margin:0 0 30px 62px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;font-size:14.5px;color:var(--muted)}
 .fb a.btn{padding:7px 16px;font-size:14.5px}
 .more{display:flex;flex-direction:column;gap:10px;margin-left:62px}
@@ -313,12 +317,20 @@ claude</code></pre>
 </div>
 
 <div class="tips">
-  <p>装好后，在聊天框里直接发这两个词</p>
+  <div class="tips-h"><b>装好后，在聊天框里发这两个词</b><span>Cursor、Codex、Claude Code 的命令行和桌面 App 都能用</span></div>
   <div class="cmds">
-    <div class="cmd"><kbd data-copy="查余额" title="点一下复制">查余额</kbd><span>今天用了多少、还剩多少、什么时候重置，以及各模型的响应速度。</span></div>
-    <div class="cmd"><kbd data-copy="测模型" title="点一下复制">测模型</kbd><span>用你的 key 把能用的模型挨个试一遍，列出哪些能用、哪些不能用。约 1~2 分钟。</span></div>
+    <div class="cmd">
+      <kbd data-copy="查余额" title="点一下复制">查余额</kbd>
+      <p>看今天用了多少、还剩多少、什么时候重置，以及各模型的响应速度。</p>
+      <div class="meta"><span>立刻返回</span><span>不花钱</span></div>
+    </div>
+    <div class="cmd">
+      <kbd data-copy="测模型" title="点一下复制">测模型</kbd>
+      <p>把你能用的模型挨个试一遍，列出哪些能用、哪些不能用。</p>
+      <div class="meta"><span>约 1~2 分钟</span><span>花一点点额度</span></div>
+    </div>
   </div>
-  <p class="sub">Cursor、Codex、Claude Code 的命令行和桌面 App 里都能用，像平常聊天一样发出去就行。只发这一个词，前面不要加 <code>/</code>。查余额不花钱；测模型会每个模型发一句很短的话，花一点点额度。</p>
+  <p class="tips-note">只发这一个词，像平常聊天一样发出去；前面不要加 <code>/</code>。点上面的词可以直接复制。</p>
 </div>
 
 <div class="fb">

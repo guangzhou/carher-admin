@@ -108,10 +108,15 @@ $cat = Join-Path $codexHome 'carher-models.json'
 if (Test-Path $cat) { P "模型列表      : $(([regex]::Matches((Get-Content $cat -Raw), '"slug"')).Count) 个" }
 else { P "模型列表      : 没有 carher-models.json"; Yel "模型列表没同步(App 下拉里只有自带的几个 GPT,找不到 key 里的模型):下载最新的 codex-windows.bat 重跑一次" }
 $slog = Join-Path $codexHome 'carher-models-sync.log'
-if (Test-Path $slog) { P "  同步日志最后 3 行:"; Get-Content $slog -Tail 3 | ForEach-Object { P ("    " + (Mask $_)) } }
+if (Test-Path $slog) {
+  P "  同步日志最后 3 行:"; Get-Content $slog -Tail 3 | ForEach-Object { P ("    " + (Mask $_)) }
+  $last = Get-Content $slog | Select-String -Pattern '同步完成|失败' | Select-Object -Last 1
+  if ($last -and $last.Line -match '失败') { Red "模型同步最近一次失败(下拉里只有自带的 GPT):下载最新的 codex-windows.bat 重跑一次;还不行把这份报告发给运维" }
+}
+try { $tk = & schtasks.exe /Query /TN 'CarHer Codex Models Sync' 2>$null; if ($LASTEXITCODE -eq 0) { P "每日同步      : 已装" } else { P "每日同步      : 没装"; Yel "模型列表不会每天自动更新:重新双击 codex-windows.bat" } } catch {}
 $agents = Join-Path $codexHome 'AGENTS.md'
-if ((Test-Path (Join-Path $codexHome 'carher_image.py')) -and (Test-Path $agents) -and (Select-String -Path $agents -Pattern 'CARHER-IMAGE-BEGIN' -Quiet)) { P "画图工具      : 已装" }
-else { P "画图工具      : 没装"; Yel "画图工具没装上(多半没有 Python 3):装好 Python 3 后重新双击 codex-windows.bat" }
+if (((Test-Path (Join-Path $codexHome 'carher_image.js')) -or (Test-Path (Join-Path $codexHome 'carher_image.py'))) -and (Test-Path $agents) -and (Select-String -Path $agents -Pattern 'CARHER-IMAGE-BEGIN' -Quiet)) { P "画图工具      : 已装" }
+else { P "画图工具      : 没装"; Yel "画图工具没装上:下载最新的 codex-windows.bat 重跑一次" }
 
 P ""; P "--- 4) 网络 ---"
 foreach ($v in 'HTTPS_PROXY','HTTP_PROXY','ALL_PROXY') {

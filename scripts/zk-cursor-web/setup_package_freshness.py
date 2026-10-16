@@ -57,7 +57,7 @@ REQUIRED_MEMBERS = {
     "REMOTE-SSH-Mac.command", "UNINSTALL-Mac.command",
     "INSTALL-Windows.cmd", "UPGRADE-Windows.cmd", "REPAIR-Windows.cmd", "DOCTOR-Windows.cmd",
     "REMOTE-SSH-Windows.cmd", "UNINSTALL-Windows.cmd", "cursor_remote_ssh.cmd", "README.txt",
-    "cursor_tier_catalog.json",
+    "cursor_tier_catalog.json", "carher_image.js", "image_skill.md",
 }
 JS_MEMBER = "cursor_team_setup.js"
 
@@ -103,12 +103,19 @@ def extract_models(js):
     return re.findall(r'"([^"]+)"', body)
 
 
+# 包里有、但真源不在本目录的成员(10-16 画图工具与 Codex/Claude 一键共用一份源)
+SOURCE_ELSEWHERE = {
+    "carher_image.js": os.path.join(BASE, "..", "..", "codex-oneclick", "src", "carher_image.js"),
+    "image_skill.md": os.path.join(BASE, "..", "..", "codex-oneclick", "src", "image_skill.md"),
+}
+
+
 def leg_zip_vs_worktree(members):
     """第①腿:zip 里每个成员 == 仓库工作副本(逐成员 sha256)。"""
     fail = 0
     same = drift = gen = 0
     for name in sorted(members):
-        disk = os.path.join(BASE, name)
+        disk = SOURCE_ELSEWHERE.get(name) or os.path.join(BASE, name)
         if not os.path.exists(disk):
             if name in GENERATED_ONLY:
                 gen += 1

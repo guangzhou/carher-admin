@@ -58,7 +58,7 @@ def test_installers_fall_back_to_node_when_no_python():
     assert "$syncArg = $syncJs" in win
 
 
-def test_mac_step7_uses_node_when_no_python(tmp_path):
+def test_mac_step7_uses_node(tmp_path):
     """切出安装脚本第 7 步真跑:PYBIN 为空 ⇒ 必须用 node 跑 .js(10-16 那台机器的形状)。"""
     import re
     mac = (SRC / "install-mac.sh").read_text(encoding="utf-8")
@@ -71,8 +71,33 @@ def test_mac_step7_uses_node_when_no_python(tmp_path):
     (fake / "uname").write_text("#!/bin/sh\necho Linux\n")
     for f in fake.iterdir():
         f.chmod(0o755)
-    script = helpers + f'\nCODEX_HOME="{tmp_path}"\nPYBIN=""\n' + step7
+    script = helpers + f'\nCODEX_HOME="{tmp_path}"\nPYBIN=""\nNODEBIN="{fake}/node"\n' + step7
     r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True,
                        env={"PATH": f"{fake}:/bin", "HOME": str(tmp_path)}, timeout=30)
     assert f"RAN node {tmp_path}/carher_models_sync.js" in r.stdout, r.stdout + r.stderr
     assert "已同步模型列表" in r.stdout
+
+
+def test_mac_step7_prefers_node_even_with_python(tmp_path):
+    """10-16:Python 版要靠 codex 命令拿模板,定时任务 PATH 里没有 node ⇒ 静默失败;有 Node 就一律用 Node 版。"""
+    import re
+    mac = (SRC / "install-mac.sh").read_text(encoding="utf-8")
+    helpers = "\n".join(l for l in mac.splitlines() if re.match(r"^(BLUE|say|ok|warn|die)", l))
+    step7 = re.search(r"^# --- 7\..*?(?=^echo\nsay \"=)", mac, re.S | re.M).group(0)
+    fake = tmp_path / "bin"; fake.mkdir()
+    (fake / "node").write_text('#!/bin/sh\necho "RAN node $1"\n')
+    (fake / "py").write_text('#!/bin/sh\necho "RAN py $1"\n')
+    (fake / "uname").write_text("#!/bin/sh\necho Linux\n")
+    for f in fake.iterdir(): f.chmod(0o755)
+    script = helpers + f'\nCODEX_HOME="{tmp_path}"\nPYBIN="{fake}/py"\nNODEBIN="{fake}/node"\n' + step7
+    r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True,
+                       env={"PATH": f"{fake}:/bin", "HOME": str(tmp_path)}, timeout=30)
+    assert "RAN node" in r.stdout and "RAN py" not in r.stdout, r.stdout + r.stderr
+
+
+def test_image_tool_node_first_in_both_installers():
+    mac = (SRC / "install-mac.sh").read_text(encoding="utf-8")
+    win = (SRC / "install-windows.ps1").read_text(encoding="utf-8-sig")
+    assert "@@EMBED carher_image.js@@" in mac and "@@EMBED carher_image.js@@" in win
+    assert mac.index('IMG_CMD="\\"$NODEBIN\\"') < mac.index('IMG_CMD="\\"$PYBIN\\"')
+    assert "if ($nodeExe) { $imgCmd" in win

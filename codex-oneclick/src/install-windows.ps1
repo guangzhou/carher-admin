@@ -198,10 +198,14 @@ $imgSrc = @'
 $syncSrc = @'
 @@EMBED carher_models_sync.py@@
 '@
+$imgJsSrc = @'
+@@EMBED carher_image.js@@
+'@
 $syncJsSrc = @'
 @@EMBED carher_models_sync.js@@
 '@
 [System.IO.File]::WriteAllText((Join-Path $codexHome 'carher_image.py'), $imgSrc, $utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $codexHome 'carher_image.js'), $imgJsSrc, $utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $codexHome 'carher_models_sync.py'), $syncSrc, $utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $codexHome 'carher_models_sync.js'), $syncJsSrc, $utf8NoBom)
 if ($true) {
@@ -216,7 +220,15 @@ if ($true) {
     }
   }
 
-  if ($pyBin) {
+  # 🔴 10-16:原来只有 Python 版画图,没 Python 的同事整段跳过。现在优先 Node 版(第 0 步已保证有 Node)。
+  $nodeExe = $null
+  $nc = Get-Command node -ErrorAction SilentlyContinue
+  if ($nc) { $nodeExe = $nc.Source }
+  $imgCmd = $null
+  if ($nodeExe) { $imgCmd = '"' + $nodeExe + '" "' + (Join-Path $codexHome 'carher_image.js') + '"' }
+  elseif ($pyBin) { $imgCmd = '"' + $pyBin + '" "' + (Join-Path $codexHome 'carher_image.py') + '"' }
+
+  if ($imgCmd) {
     $agents = Join-Path $codexHome 'AGENTS.md'
     $begin  = '<!-- CARHER-IMAGE-BEGIN -->'
     $end    = '<!-- CARHER-IMAGE-END -->'
@@ -231,7 +243,6 @@ if ($true) {
         if (-not $skip) { $kept += $ln + "`n" }
       }
     }
-    $imgPy   = Join-Path $codexHome 'carher_image.py'
     $block = @"
 $begin
 ## 画图
@@ -239,7 +250,7 @@ $begin
 用户要画图、生成图片、出图、做配图/插画/海报/头像时，**只用下面这个命令**（它调公司的 muse-image），
 **不要询问、不要用 SVG / ASCII / HTML / matplotlib 代替，也不要用内置 image_gen 或别的生图方式**：
 
-    "$pyBin" "$imgPy" "画面描述" 输出路径
+    $imgCmd "画面描述" 输出路径
 
 - 画面描述用用户的原话，可以补充风格、构图、颜色等细节。
 - 约 30 秒出图。key 已配好，不要向用户索要，也不要在命令里写 key。
@@ -250,7 +261,7 @@ $end
     [System.IO.File]::WriteAllText($agents, ($kept + $block + "`n"), $utf8NoBom)
     Ok "√ 已开通生图能力"
   } else {
-    Warn "! 没找到可用的 Python，生图能力未开通（其余配置已生效）"
+    Warn "! 没有 Node 也没有 Python，生图能力未开通（其余配置已生效）"
   }
 }
 
@@ -264,8 +275,9 @@ $syncJs = Join-Path $codexHome 'carher_models_sync.js'
 $nodeExe = $null
 $nc = Get-Command node -ErrorAction SilentlyContinue
 if ($nc) { $nodeExe = $nc.Source }
-if ($pyBin) { $syncRun = $pyBin; $syncArg = $syncPy }
-elseif ($nodeExe) { $syncRun = $nodeExe; $syncArg = $syncJs }
+# 10-16:Node 版优先(Python 版要靠 codex 命令拿模板,codex.cmd 又要 node 在 PATH 里 ⇒ 计划任务里常静默失败)
+if ($nodeExe) { $syncRun = $nodeExe; $syncArg = $syncJs }
+elseif ($pyBin) { $syncRun = $pyBin; $syncArg = $syncPy }
 else { $syncRun = $null }
 if ($syncRun) {
   $env:CODEX_HOME = $codexHome
@@ -275,7 +287,7 @@ if ($syncRun) {
 
   # 计划任务不弹黑窗：Python 用 pythonw；Node 没有无窗口版，用 conhost --headless 包一层（Win10 21H2+ 有）。
   # CODEX_HOME 不用传：脚本默认就是 %USERPROFILE%\.codex；日志由脚本自己写到 carher-models-sync.log。
-  if ($pyBin) {
+  if ($syncArg -eq $syncPy) {
     $wName = if ((Split-Path $pyBin -Leaf) -ieq 'py.exe') { 'pyw.exe' } else { 'pythonw.exe' }
     $pyw = Join-Path (Split-Path $pyBin) $wName
     $runner = if (Test-Path $pyw) { $pyw } else { $pyBin }

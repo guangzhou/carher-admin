@@ -90,6 +90,9 @@ RC=$(grep -lE '^[[:space:]]*export[[:space:]]+(ANTHROPIC_(AUTH_TOKEN|BASE_URL|AP
 [ -n "$RC" ] && red "$(echo $RC) 里有 export ANTHROPIC_… 会盖过配置:重新跑一次 claude-mac.command(会自动注释掉并备份)"
 [ -z "$RC" ] && [ -n "$OV" ] && yel "当前这个终端带着旧变量($OV):关掉终端新开一个再用 claude"
 
+if [ -f "$CLAUDE_HOME/carher/carher_image.js" ] && [ -f "$CLAUDE_HOME/skills/carher-image/SKILL.md" ]; then P "画图工具      : 已装"
+else P "画图工具      : 没装"; yel "画图工具没装上:下载最新的 claude-mac.command 重跑一次"; fi
+
 P ""; P "--- 3) 桌面 App ---"
 APP="${CARHER_DOCTOR_APP:-/Applications/Claude.app}"
 if [ "$(uname -s)" = Darwin ] && [ -d "$APP" ]; then

@@ -200,8 +200,126 @@ ok "✔ 已写 $CODEX_HOME/auth.json"
 
 # --- 6. 装生图能力 ---
 # 内置画图工具在本环境未注册，Codex 会退化成画 SVG。装一个零依赖小工具 + 一条常驻授权，
-# 让 Codex 需要画图时直接调它。工具只用 Python 标准库，不需要 pip 装任何东西。
-# 两个 Python 小工具内嵌在本脚本里（build.sh 打包时填入），用户只需要这一个文件。
+# 让 Codex 需要画图时直接调它。
+# 🔴 10-16:原来只有 Python 版,没 Python 的同事整段跳过 ⇒ 画不了图。现在优先 Node 版(第 0 步已保证有 Node),
+#    没有 Node 才退回 Python 版。工具都内嵌在本脚本里（build.sh 打包时填入），用户只需要这一个文件。
+cat > "$CODEX_HOME/carher_image.js" <<'CARHER_PY_EOF'
+#!/usr/bin/env node
+/* CarHer 画图工具(Node 版)—— 由三个一键配置(Codex / Claude Code / Cursor)自动安装,用户无需关心。
+
+   为什么有 Node 版:Python 版(carher_image.py)要求电脑有 Python,很多 Windows 同事没有 ⇒ 画图整段不装。
+   三个一键脚本本来就会装 Node(codex / claude 命令行要),所以统一用这一份;逻辑与 .py 一致。
+
+   用法:  node carher_image.js "画面描述" [输出路径或目录]
+   key / 网关地址按顺序找(先找到的为准),不接受命令行传 key:
+     1. CARHER_IMAGE_KEY / CARHER_IMAGE_BASE 环境变量(给测试用)
+     2. ~/.codex/auth.json + ~/.codex/config.toml        (Codex 一键)
+     3. ~/.claude/settings.json 的 env.ANTHROPIC_API_KEY  (Claude Code 一键;网关地址加 /v1)
+     4. ~/.carher/image.json {"key","base"}              (Cursor 一键写的)
+   2026-10-13 起统一用 muse-image。它返回相对路径 /v1/media/<32hex>.webp(文件在 muse2api 上),
+   198 nginx 开了只读出口 https://<网关域名>/muse-media/<32hex>.<ext> ⇒ 改写过去下载。
+   输出文件后缀以实际图片格式为准(webp 就存 .webp)。 */
+"use strict";
+const fs = require("fs"), os = require("os"), path = require("path");
+
+const MODEL = process.env.CARHER_IMAGE_MODEL || "muse-image";
+const SIZE = "1024x1024";
+const HOME = os.homedir();
+
+function readJson(p) { try { return JSON.parse(fs.readFileSync(p, "utf8").replace(/^﻿/, "")); } catch (e) { return null; } }
+function die(msg) { console.error(msg); process.exit(1); }
+
+function credentials() {
+  if (process.env.CARHER_IMAGE_KEY && process.env.CARHER_IMAGE_BASE)
+    return [process.env.CARHER_IMAGE_KEY.trim(), process.env.CARHER_IMAGE_BASE.trim().replace(/\/+$/, "")];
+  // Codex
+  const ch = process.env.CODEX_HOME || path.join(HOME, ".codex");
+  const auth = readJson(path.join(ch, "auth.json"));
+  if (auth && auth.OPENAI_API_KEY) {
+    let base = "";
+    try { const m = /^\s*base_url\s*=\s*"([^"]+)"/m.exec(fs.readFileSync(path.join(ch, "config.toml"), "utf8")); if (m) base = m[1]; } catch (e) {}
+    if (base) return [String(auth.OPENAI_API_KEY).trim(), base.replace(/\/+$/, "")];
+  }
+  // Claude Code(网关地址不带 /v1)
+  const s = readJson(path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, ".claude"), "settings.json"));
+  const env = (s && s.env) || {};
+  if (env.ANTHROPIC_API_KEY && env.ANTHROPIC_BASE_URL)
+    return [String(env.ANTHROPIC_API_KEY).trim(), String(env.ANTHROPIC_BASE_URL).replace(/\/+$/, "") + "/v1"];
+  // Cursor
+  const c = readJson(path.join(HOME, ".carher", "image.json"));
+  if (c && c.key && c.base) return [String(c.key).trim(), String(c.base).replace(/\/+$/, "")];
+  die("找不到 key。请重新运行一次一键配置脚本。");
+}
+
+function mediaUrl(url, base) {
+  if (/^https?:\/\//.test(url)) return url;
+  const m = /^\/v1\/media\/([0-9a-f]{32}\.(?:webp|png|jpe?g))$/.exec(url);
+  if (!m) die("生成失败:看不懂返回的图片地址 " + url.slice(0, 120));
+  return /^(https?:\/\/[^/]+)/.exec(base)[1] + "/muse-media/" + m[1];
+}
+
+async function download(url) {
+  let last;
+  for (let i = 0; i < 3; i++) {   // 文件刚生成时偶有一两秒还没落盘
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(120000) });
+      if (r.ok) return Buffer.from(await r.arrayBuffer());
+      last = new Error("HTTP " + r.status);
+    } catch (e) { last = e; }
+    await new Promise((res) => setTimeout(res, 2000));
+  }
+  die("图片已生成但下载失败:" + (last && last.message));
+}
+
+function fixExt(p, d) {
+  let ext = "";
+  if (d.slice(0, 4).toString("latin1") === "RIFF" && d.slice(8, 12).toString("latin1") === "WEBP") ext = ".webp";
+  else if (d.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) ext = ".png";
+  else if (d[0] === 0xff && d[1] === 0xd8 && d[2] === 0xff) ext = ".jpg";
+  if (!ext) return p;
+  const cur = path.extname(p).toLowerCase();
+  if (cur === ext || (ext === ".jpg" && cur === ".jpeg")) return p;
+  return p.slice(0, p.length - path.extname(p).length) + ext;
+}
+
+async function generate(prompt, out) {
+  const [key, base] = credentials();
+  const t0 = Date.now();
+  console.log("正在生成,约需 30 秒…");
+  let r;
+  try {
+    r = await fetch(base + "/images/generations", {
+      method: "POST", signal: AbortSignal.timeout(300000),
+      headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: MODEL, prompt, size: SIZE, n: 1 }),
+    });
+  } catch (e) { die("生成失败:" + e.message); }
+  if (!r.ok) {
+    const detail = (await r.text()).slice(0, 300);
+    if (r.status === 403) die("你的 key 还没有开通画图模型 " + MODEL + ",请联系运维开通后重试。");
+    if (r.status === 401) die("key 已失效,请找运维重新颁发。");
+    die("生成失败(HTTP " + r.status + "):" + detail);
+  }
+  const item = ((await r.json()).data || [{}])[0] || {};
+  let data;
+  if (item.b64_json) data = Buffer.from(item.b64_json, "base64");
+  else if (item.url) data = await download(mediaUrl(item.url, base));
+  else die("生成失败:返回里没有图片数据。");
+  out = fixExt(out, data);
+  fs.writeFileSync(out, data);
+  console.log("已生成:" + out + "(" + (data.length / 1048576).toFixed(1) + " MB,用时 " + Math.round((Date.now() - t0) / 1000) + " 秒)");
+}
+
+const args = process.argv.slice(2).filter((a) => a.trim());
+if (!args.length) die('用法:node ' + path.basename(process.argv[1]) + ' "画面描述" [输出路径.png]');
+const pad = (n) => String(n).padStart(2, "0"), d = new Date();
+const name = "image-" + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + "-" + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds()) + ".png";
+let out = args[1] || process.cwd();
+// 给的是目录(含 . / 结尾带斜杠)⇒ 在目录里自动起名(10-13:传「.」曾拼成隐藏文件 ..webp)
+let isDir = false; try { isDir = fs.statSync(out).isDirectory(); } catch (e) {}
+if (isDir || /[\/\\]$/.test(out)) { fs.mkdirSync(out, { recursive: true }); out = path.join(out, name); }
+generate(args[0], out).catch((e) => die("生成失败:" + e.message));
+CARHER_PY_EOF
 cat > "$CODEX_HOME/carher_image.py" <<'CARHER_PY_EOF'
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -818,37 +936,42 @@ if (require.main === module) {
   main().then((rc) => process.exit(rc), (e) => { log(`失败：${e.message}`); process.exit(1); });
 }
 CARHER_PY_EOF
-if true; then
-  chmod +x "$CODEX_HOME/carher_image.py" 2>/dev/null || true
+chmod +x "$CODEX_HOME/carher_image.py" "$CODEX_HOME/carher_image.js" 2>/dev/null || true
 
-  # 探测真正能跑的 python：/usr/bin/python3 在没装开发者工具的机器上是个会弹窗的桩，
-  # 光看命令存在不算数，必须实际执行一次才算可用。
-  PYBIN=""
-  for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 python3 /usr/bin/python3; do
-    if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import json,urllib.request' >/dev/null 2>&1; then
-      PYBIN="$(command -v "$c")"; break
-    fi
-  done
+# 探测真正能跑的 python：/usr/bin/python3 在没装开发者工具的机器上是个会弹窗的桩，
+# 光看命令存在不算数，必须实际执行一次才算可用。
+PYBIN=""
+for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 python3 /usr/bin/python3; do
+  if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import json,urllib.request' >/dev/null 2>&1; then
+    PYBIN="$(command -v "$c")"; break
+  fi
+done
+# Node 用绝对路径写进 AGENTS.md / 定时任务:Codex 和 launchd 的 PATH 里未必有 ~/.carher-node
+NODEBIN="$(command -v node 2>/dev/null || true)"
+if [ -n "$NODEBIN" ] && [ "$("$NODEBIN" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -lt 18 ]; then NODEBIN=""; fi
+if [ -n "$NODEBIN" ]; then IMG_CMD="\"$NODEBIN\" \"$CODEX_HOME/carher_image.js\""
+elif [ -n "$PYBIN" ]; then IMG_CMD="\"$PYBIN\" \"$CODEX_HOME/carher_image.py\""
+else IMG_CMD=""; fi
 
-  if [ -n "$PYBIN" ]; then
-    # AGENTS.md 用标记块管理：重复运行只替换本块，不动用户自己写的内容
-    AGENTS="$CODEX_HOME/AGENTS.md"
-    BEGIN="<!-- CARHER-IMAGE-BEGIN -->"
-    END="<!-- CARHER-IMAGE-END -->"
-    if [ -f "$AGENTS" ]; then
-      [ -d "$BKDIR" ] || mkdir -p "$BKDIR"; cp "$AGENTS" "$BKDIR/AGENTS.md" 2>/dev/null || true
-      awk -v b="$BEGIN" -v e="$END" '
-        $0==b {skip=1} skip==0 {print} $0==e {skip=0}
-      ' "$AGENTS" > "$AGENTS.tmp" && mv "$AGENTS.tmp" "$AGENTS"
-    fi
-    cat >> "$AGENTS" <<EOF
+if [ -n "$IMG_CMD" ]; then
+  # AGENTS.md 用标记块管理：重复运行只替换本块，不动用户自己写的内容
+  AGENTS="$CODEX_HOME/AGENTS.md"
+  BEGIN="<!-- CARHER-IMAGE-BEGIN -->"
+  END="<!-- CARHER-IMAGE-END -->"
+  if [ -f "$AGENTS" ]; then
+    [ -d "$BKDIR" ] || mkdir -p "$BKDIR"; cp "$AGENTS" "$BKDIR/AGENTS.md" 2>/dev/null || true
+    awk -v b="$BEGIN" -v e="$END" '
+      $0==b {skip=1} skip==0 {print} $0==e {skip=0}
+    ' "$AGENTS" > "$AGENTS.tmp" && mv "$AGENTS.tmp" "$AGENTS"
+  fi
+  cat >> "$AGENTS" <<EOF
 $BEGIN
 ## 画图
 
 用户要画图、生成图片、出图、做配图/插画/海报/头像时，**只用下面这个命令**（它调公司的 muse-image），
 **不要询问、不要用 SVG / ASCII / HTML / matplotlib 代替，也不要用内置 image_gen 或别的生图方式**：
 
-    "$PYBIN" "$CODEX_HOME/carher_image.py" "画面描述" 输出路径
+    $IMG_CMD "画面描述" 输出路径
 
 - 画面描述用用户的原话，可以补充风格、构图、颜色等细节。
 - 约 30 秒出图。key 已配好，不要向用户索要，也不要在命令里写 key。
@@ -856,19 +979,21 @@ $BEGIN
 - 命令报错就把报错原文告诉用户，不要换别的方式硬画。
 $END
 EOF
-    ok "✔ 已开通生图能力"
-  else
-    warn "⚠ 没找到可用的 Python，生图能力未开通（其余配置已生效）"
-  fi
+  ok "✔ 已开通生图能力"
+else
+  warn "⚠ 没有 Node 也没有 Python，生图能力未开通（其余配置已生效）"
 fi
 
 # --- 7. 模型列表自动同步 ---
 # 网关 /v1/models 已按这把 key 的白名单过滤；同步进 Codex 的模型选择器，
 # 网关上新加的模型第二天自动出现。装好后立即跑一次，之后每天 10:17 一次（加登录时一次）。
 # 🔴 10-16:没有 Python 时这一步原来整段跳过 ⇒ App 下拉里只有自带的几个 GPT。没 Python 就用 Node 版(两份逻辑一致)。
+# 🔴 10-16:Node 版优先。Python 版要靠 `codex debug models` 拿模板,而 npm 装的 codex 自己要 node 在 PATH 里;
+#    定时任务的 PATH 里常没有 ~/.carher-node ⇒ Python 版每天静默失败(env: node: No such file or directory),
+#    下拉里只剩官方自带的 GPT。Node 版直接用当前 node 跑 codex.js,不受 PATH 影响。
 SYNC_RUN=""; SYNC_ARG=""
-if [ -n "${PYBIN:-}" ]; then SYNC_RUN="$PYBIN"; SYNC_ARG="$CODEX_HOME/carher_models_sync.py"
-elif command -v node >/dev/null 2>&1; then SYNC_RUN="$(command -v node)"; SYNC_ARG="$CODEX_HOME/carher_models_sync.js"
+if [ -n "${NODEBIN:-}" ]; then SYNC_RUN="$NODEBIN"; SYNC_ARG="$CODEX_HOME/carher_models_sync.js"
+elif [ -n "${PYBIN:-}" ]; then SYNC_RUN="$PYBIN"; SYNC_ARG="$CODEX_HOME/carher_models_sync.py"
 fi
 if [ -n "$SYNC_RUN" ]; then
   if CODEX_HOME="$CODEX_HOME" "$SYNC_RUN" "$SYNC_ARG"; then

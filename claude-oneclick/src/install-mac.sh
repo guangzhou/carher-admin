@@ -304,6 +304,35 @@ const ok=(dir,want)=>{try{return fs.readFileSync(path.join(dir,".verified"),"utf
   rm -f "$TMPDIR/carher-ccd.out" "$TMPDIR/carher-ccd.err"
 fi
 
+# ── 4d. 画图工具(10-16):命令行和桌面 App 的 Code 标签页都会读 ~/.claude/skills ──
+# 一个零依赖的 Node 小工具(调 muse-image)+ 一个 skill 告诉 Claude 要画图时调它。
+# skill 目录名固定 carher-image,重跑只覆盖这一个目录,不碰用户自己的 skill。
+IMG_DIR="$CLAUDE_HOME/carher"; mkdir -p "$IMG_DIR" "$CLAUDE_HOME/skills/carher-image"
+cat > "$IMG_DIR/carher_image.js" <<'CARHER_JS_EOF'
+@@EMBED carher_image.js@@
+CARHER_JS_EOF
+NODE_ABS="$(command -v node)"
+CARHER_NODE="$NODE_ABS" CARHER_TOOL="$IMG_DIR/carher_image.js" node -e '
+const fs=require("fs");let t=fs.readFileSync(0,"utf8");
+t=t.split("@@NODE@@").join(process.env.CARHER_NODE).split("@@TOOL@@").join(process.env.CARHER_TOOL);
+process.stdout.write(t);' > "$CLAUDE_HOME/skills/carher-image/SKILL.md" <<'CARHER_MD_EOF'
+@@EMBED image_skill.md@@
+CARHER_MD_EOF
+# 再在 ~/.claude/CLAUDE.md 里放一段带标记的常驻说明(10-16 实测:只有 skill 时,一句「画一张…」
+# Claude 常直接写 SVG,不去调 skill)。标记块重跑只替换本块,不碰用户自己写的内容;改前备份。
+CMD_MD="$CLAUDE_HOME/CLAUDE.md"
+[ -f "$CMD_MD" ] && cp -p "$CMD_MD" "$CMD_MD.bak-carher-$(date +%Y%m%d-%H%M%S)"
+CARHER_MD="$CMD_MD" CARHER_LINE="\"$NODE_ABS\" \"$IMG_DIR/carher_image.js\" \"画面描述\" 输出路径" node -e '
+const fs=require("fs"),p=process.env.CARHER_MD,B="<!-- CARHER-IMAGE-BEGIN -->",E="<!-- CARHER-IMAGE-END -->";
+let t="";try{t=fs.readFileSync(p,"utf8")}catch(e){}
+const i=t.indexOf(B),j=t.indexOf(E);if(i>=0&&j>i)t=t.slice(0,i)+t.slice(j+E.length);
+t=t.replace(/\n+$/,"");
+const blk=B+"\n## 画图\n\n用户要画图、生成图片、出图、做配图/插画/海报/头像时,**只用这个命令**(调公司的 muse-image,key 已配好),"
+ +"不要用 SVG / ASCII / HTML / 代码画图代替:\n\n    "+process.env.CARHER_LINE+"\n\n"
+ +"- 约 30 秒出图;以命令最后打印的「已生成:…」路径为准告诉用户。\n- 不要向用户要 key。命令报错就把原文告诉用户,不要换别的方式硬画。\n"+E+"\n";
+fs.writeFileSync(p,(t?t+"\n\n":"")+blk);'
+ok "✔ 已开通画图(说「画一张…」即可)"
+
 # (会盖过配置的旧 export 在第 5 步测试之后统一处理:注释掉 + 备份,见下)
 echo
 

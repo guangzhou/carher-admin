@@ -3139,6 +3139,12 @@ async function main() {
     console.log("   (没输入 Key,跳过——稍后在 Cursor 里粘一次即可)");
   }
 
+  // #6 画图(10-16):装一个 Cursor 个人 skill(~/.cursor/skills/carher-image)+ 零依赖画图小工具。
+  //    Key 在 Cursor 库里是加密的,工具读不到 ⇒ 用户这次粘了 Key 就另存一份到 ~/.carher/image.json(600);
+  //    --upgrade 不问 Key ⇒ 已有 image.json 就沿用,没有就只装 skill、提示下次 INSTALL 时补上。
+  //    Node 用 Cursor 自己的二进制(ELECTRON_RUN_AS_NODE=1),同事不用另装 Node。
+  if (!args.zkDeltaOnly) { try { installImageSkill(rawKey); } catch (e) { console.log("   ⚠️  画图这一步出错(不影响其余): " + (e && e.message || e)); } }
+
   if (args.lark) { try { await larkSetup(args); } catch (e) { console.log("   ⚠️  飞书这一步出错（不影响其余）: " + (e && e.message || e)); } }
 
   console.log("\n✅ 完成。" + (args.zkDeltaOnly
@@ -3153,6 +3159,32 @@ async function main() {
     console.log("     想退回公网直连: 启动器加 --no-zk-delta（Cursor 要先退出）");
   }
   console.log("   回滚整包:启动器加 --revert;Cursor 升级后失效:双击 REPAIR 或跑 --repair。");
+}
+
+function installImageSkill(rawKey) {
+  console.log("--- 6) 画图工具 ---");
+  const src = path.join(__dirname, "carher_image.js");
+  if (!fs.existsSync(src)) { console.log("   跳过(包里没有 carher_image.js)"); return; }
+  const home = os.homedir(), dir = path.join(home, ".carher"), cfg = path.join(dir, "image.json");
+  fs.mkdirSync(dir, { recursive: true });
+  const tool = path.join(dir, "carher_image.js");
+  fs.copyFileSync(src, tool);
+  const key = (rawKey || "").replace(/[\s\u00A0\u200B-\u200F\u2028-\u202F\uFEFF]/g, "");
+  if (key) {
+    fs.writeFileSync(cfg, JSON.stringify({ key, base: DEFAULT_BASE_URL }, null, 2) + "\n", { mode: 0o600 });
+    try { fs.chmodSync(cfg, 0o600); } catch (e) { /* Windows 无 chmod 语义 */ }
+  }
+  const md = fs.readFileSync(path.join(__dirname, "image_skill.md"), "utf8");
+  // Cursor 二进制在 node 模式下跑这个工具:命令里先设 ELECTRON_RUN_AS_NODE=1
+  const node = process.platform === "win32"
+    ? 'cmd /c "set ELECTRON_RUN_AS_NODE=1&& "' + EXEC + '""'
+    : "ELECTRON_RUN_AS_NODE=1 \"" + EXEC + "\"";
+  const sd = path.join(home, ".cursor", "skills", "carher-image");
+  fs.mkdirSync(sd, { recursive: true });
+  // 注意:skill 模板里命令是 `@@NODE@@ "@@TOOL@@"`,NODE 这里已带好自己的引号
+  fs.writeFileSync(path.join(sd, "SKILL.md"), md.split('@@NODE@@ "@@TOOL@@"').join(node + ' "' + tool + '"'));
+  if (fs.existsSync(cfg)) console.log("   ✅ 已开通画图:在 Cursor 里说「画一张…」即可(用 muse-image)");
+  else console.log("   ⚠️  画图 skill 已装,但还没有 Key —— 下次双击 INSTALL 粘一次 Key 就能画了");
 }
 
 main().catch((e) => { console.error("!! 未预期错误:", e && e.message ? e.message : e); process.exit(9); });

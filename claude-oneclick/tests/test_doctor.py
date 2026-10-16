@@ -142,3 +142,29 @@ def test_windows_doctor_static():
 def test_build_outputs_doctor_files():
     s = (ROOT / "build.sh").read_text()
     assert "claude-doctor-mac.command" in s and "claude-doctor-windows.bat" in s
+
+
+# ── 画图(10-16):安装器第 4d 步 + 常驻说明块 ──
+def _run_4d(home):
+    import subprocess, re
+    src = (ROOT / "claude-mac.command").read_text(encoding="utf-8")
+    helpers = "\n".join(l for l in src.splitlines() if re.match(r"^(BLUE|say|ok|warn|die)", l))
+    blk = re.search(r"^# ── 4d\..*?(?=^# \(会盖过配置)", src, re.S | re.M).group(0)
+    node = subprocess.run(["bash", "-lc", "command -v node"], capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["/bin/bash", "-c", helpers + f'\nCLAUDE_HOME="{home}/.claude"\n' + blk],
+                          capture_output=True, text=True, env={"PATH": str(Path(node).parent) + ":/usr/bin:/bin", "HOME": str(home)})
+
+
+def test_image_skill_installed_and_idempotent(tmp_path):
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "CLAUDE.md").write_text("# 我的规则\n不要用 emoji。\n")
+    for _ in range(2):
+        r = _run_4d(tmp_path)
+        assert r.returncode == 0, r.stderr
+    md = (tmp_path / ".claude" / "CLAUDE.md").read_text()
+    assert md.startswith("# 我的规则") and md.count("CARHER-IMAGE-BEGIN") == 1 and "carher_image.js" in md
+    sk = (tmp_path / ".claude" / "skills" / "carher-image" / "SKILL.md").read_text()
+    assert "@@" not in sk and "carher_image.js" in sk and sk.startswith("---\nname: carher-image")
+    tool = tmp_path / ".claude" / "carher" / "carher_image.js"
+    assert tool.read_bytes() == (ROOT.parent / "codex-oneclick" / "src" / "carher_image.js").read_bytes()
+    assert list((tmp_path / ".claude").glob("CLAUDE.md.bak-carher-*")), "改 CLAUDE.md 前要备份"

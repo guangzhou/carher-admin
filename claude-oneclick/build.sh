@@ -18,7 +18,16 @@ from pathlib import Path
 
 src = Path("src")
 
+SHARED = Path("../codex-oneclick/src")   # 画图工具和 skill 与 Codex 共用一份源(不复制,防漂移)
+
 def finish(template: str) -> str:
+    def repl(m):
+        body = (SHARED / m.group(1)).read_text(encoding="utf-8").rstrip("\n")
+        # 内嵌靠 heredoc / here-string 的结束符,正文里不能出现
+        assert not re.search(r"^(CARHER_JS_EOF|CARHER_MD_EOF|'@)", body, re.M), m.group(1)
+        return body
+    template = re.sub(r"^@@EMBED (\S+)@@$", repl, template, flags=re.M)
+    assert "@@EMBED" not in template
     out = re.sub(r"^# ⚠️ 这是模板：.*\n(#    .*\n)?",
                  "# 由 build.sh 生成，别直接改；源在 claude-oneclick/src/\n", template, flags=re.M)
     assert "这是模板" not in out

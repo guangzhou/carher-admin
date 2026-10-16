@@ -11,6 +11,9 @@ cp "$HERE/cursor_team_setup.sh"  "$STAGE/"
 cp "$HERE/cursor_team_setup.cmd" "$STAGE/"
 # 档位模板(10-16 keepmine-fill v2):服务端目录没给档位时用它补 High/Medium/Low 等;引擎启动时读,缺了只是不补档位
 cp "$HERE/cursor_tier_catalog.json" "$STAGE/"
+# 画图工具 + skill 模板(10-16):与 Codex / Claude 一键共用同一份源,不复制
+cp "$HERE/../../codex-oneclick/src/carher_image.js" "$STAGE/"
+cp "$HERE/../../codex-oneclick/src/image_skill.md" "$STAGE/"
 
 # 远程窗口直通(09-21 加)。本机包装好之后 BYOK 地址是 127.0.0.1:8788,而远程窗口里的
 # 127.0.0.1 是**远端那台机** ⇒ 模型全报连不上。这个引擎往 ~/.ssh/config 加一条反向

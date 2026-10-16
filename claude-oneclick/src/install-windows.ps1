@@ -291,6 +291,37 @@ https.get(`${process.env.CARHER_CCDL}/${V}/${host}/claude.exe.zst`,{headers:{"Us
   else { Warn "! 桌面 App 组件没准备好:$ccdOut。命令行 claude 不受影响。" }
 }
 
+# ── 4d. 画图工具(10-16):命令行和桌面 App 的 Code 标签页都会读 ~/.claude/skills ──
+# 一个零依赖的 Node 小工具(调 muse-image)+ 一个 skill;skill 目录名固定 carher-image,不碰用户自己的 skill。
+$imgDir = Join-Path $claudeHome 'carher'
+$skillDir = Join-Path $claudeHome 'skills\carher-image'
+New-Item -ItemType Directory -Force -Path $imgDir, $skillDir | Out-Null
+$imgJs = @'
+@@EMBED carher_image.js@@
+'@
+$imgMd = @'
+@@EMBED image_skill.md@@
+'@
+$noBom = New-Object Text.UTF8Encoding $false
+$toolPath = Join-Path $imgDir 'carher_image.js'
+[IO.File]::WriteAllText($toolPath, $imgJs, $noBom)
+$nodeAbs = (Get-Command node -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if ($nodeAbs) {
+  [IO.File]::WriteAllText((Join-Path $skillDir 'SKILL.md'), $imgMd.Replace('@@NODE@@', $nodeAbs).Replace('@@TOOL@@', $toolPath), $noBom)
+  # ~/.claude/CLAUDE.md 里放一段带标记的常驻说明(只有 skill 时一句「画一张…」常被写成 SVG);重跑只换本块,改前备份
+  $cmdMd = Join-Path $claudeHome 'CLAUDE.md'
+  $old = ''; if (Test-Path $cmdMd) { Copy-Item $cmdMd ($cmdMd + '.bak-carher-' + (Get-Date -Format 'yyyyMMdd-HHmmss')); $old = [IO.File]::ReadAllText($cmdMd) }
+  $B = '<!-- CARHER-IMAGE-BEGIN -->'; $E = '<!-- CARHER-IMAGE-END -->'
+  $i = $old.IndexOf($B); $j = $old.IndexOf($E)
+  if ($i -ge 0 -and $j -gt $i) { $old = $old.Substring(0, $i) + $old.Substring($j + $E.Length) }
+  $old = $old.TrimEnd()
+  $line = '"' + $nodeAbs + '" "' + $toolPath + '" "画面描述" 输出路径'
+  $blk = $B + "`n## 画图`n`n用户要画图、生成图片、出图、做配图/插画/海报/头像时,**只用这个命令**(调公司的 muse-image,key 已配好),不要用 SVG / ASCII / HTML / 代码画图代替:`n`n    " + $line + "`n`n- 约 30 秒出图;以命令最后打印的「已生成:…」路径为准告诉用户。`n- 不要向用户要 key。命令报错就把原文告诉用户,不要换别的方式硬画。`n" + $E + "`n"
+  if ($old) { $blk = $old + "`n`n" + $blk }
+  [IO.File]::WriteAllText($cmdMd, $blk, $noBom)
+  Ok "√ 已开通画图(说「画一张…」即可)"
+} else { Warn "! 没找到 Node,画图没开通(命令行 claude 不受影响)" }
+
 # 会盖过 settings.json 的旧环境变量(mac 10-13 实跑踩到:ANTHROPIC_MODEL=anthropic.claude-opus-5 是
 # claude-code-* 那族 key 的名字,cursor key 没有 ⇒ 每发 403,屏幕上只写 "Failed to authenticate")
 $override = 'ANTHROPIC_AUTH_TOKEN','ANTHROPIC_BASE_URL','ANTHROPIC_API_KEY','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',

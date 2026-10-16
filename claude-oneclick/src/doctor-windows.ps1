@@ -89,6 +89,9 @@ foreach ($v in 'ANTHROPIC_AUTH_TOKEN','ANTHROPIC_BASE_URL','ANTHROPIC_API_KEY','
 }
 if ($ov.Count) { P "系统环境变量里的覆盖项: $($ov -join ' ')"; Red "系统环境变量里有 $($ov -join ' ') 会盖过配置:重新双击 claude-windows.bat,或在「编辑系统环境变量」里删掉" }
 
+if ((Test-Path (Join-Path $claudeHome 'carher\carher_image.js')) -and (Test-Path (Join-Path $claudeHome 'skills\carher-image\SKILL.md'))) { P "画图工具      : 已装" }
+else { P "画图工具      : 没装"; Yel "画图工具没装上:下载最新的 claude-windows.bat 重跑一次" }
+
 P ""; P "--- 3) 桌面 App ---"
 $pkg = $null
 try { $pkg = Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1 } catch {}

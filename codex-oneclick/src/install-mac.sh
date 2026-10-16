@@ -200,8 +200,12 @@ ok "✔ 已写 $CODEX_HOME/auth.json"
 
 # --- 6. 装生图能力 ---
 # 内置画图工具在本环境未注册，Codex 会退化成画 SVG。装一个零依赖小工具 + 一条常驻授权，
-# 让 Codex 需要画图时直接调它。工具只用 Python 标准库，不需要 pip 装任何东西。
-# 两个 Python 小工具内嵌在本脚本里（build.sh 打包时填入），用户只需要这一个文件。
+# 让 Codex 需要画图时直接调它。
+# 🔴 10-16:原来只有 Python 版,没 Python 的同事整段跳过 ⇒ 画不了图。现在优先 Node 版(第 0 步已保证有 Node),
+#    没有 Node 才退回 Python 版。工具都内嵌在本脚本里（build.sh 打包时填入），用户只需要这一个文件。
+cat > "$CODEX_HOME/carher_image.js" <<'CARHER_PY_EOF'
+@@EMBED carher_image.js@@
+CARHER_PY_EOF
 cat > "$CODEX_HOME/carher_image.py" <<'CARHER_PY_EOF'
 @@EMBED carher_image.py@@
 CARHER_PY_EOF
@@ -211,37 +215,42 @@ CARHER_PY_EOF
 cat > "$CODEX_HOME/carher_models_sync.js" <<'CARHER_PY_EOF'
 @@EMBED carher_models_sync.js@@
 CARHER_PY_EOF
-if true; then
-  chmod +x "$CODEX_HOME/carher_image.py" 2>/dev/null || true
+chmod +x "$CODEX_HOME/carher_image.py" "$CODEX_HOME/carher_image.js" 2>/dev/null || true
 
-  # 探测真正能跑的 python：/usr/bin/python3 在没装开发者工具的机器上是个会弹窗的桩，
-  # 光看命令存在不算数，必须实际执行一次才算可用。
-  PYBIN=""
-  for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 python3 /usr/bin/python3; do
-    if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import json,urllib.request' >/dev/null 2>&1; then
-      PYBIN="$(command -v "$c")"; break
-    fi
-  done
+# 探测真正能跑的 python：/usr/bin/python3 在没装开发者工具的机器上是个会弹窗的桩，
+# 光看命令存在不算数，必须实际执行一次才算可用。
+PYBIN=""
+for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 python3 /usr/bin/python3; do
+  if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import json,urllib.request' >/dev/null 2>&1; then
+    PYBIN="$(command -v "$c")"; break
+  fi
+done
+# Node 用绝对路径写进 AGENTS.md / 定时任务:Codex 和 launchd 的 PATH 里未必有 ~/.carher-node
+NODEBIN="$(command -v node 2>/dev/null || true)"
+if [ -n "$NODEBIN" ] && [ "$("$NODEBIN" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -lt 18 ]; then NODEBIN=""; fi
+if [ -n "$NODEBIN" ]; then IMG_CMD="\"$NODEBIN\" \"$CODEX_HOME/carher_image.js\""
+elif [ -n "$PYBIN" ]; then IMG_CMD="\"$PYBIN\" \"$CODEX_HOME/carher_image.py\""
+else IMG_CMD=""; fi
 
-  if [ -n "$PYBIN" ]; then
-    # AGENTS.md 用标记块管理：重复运行只替换本块，不动用户自己写的内容
-    AGENTS="$CODEX_HOME/AGENTS.md"
-    BEGIN="<!-- CARHER-IMAGE-BEGIN -->"
-    END="<!-- CARHER-IMAGE-END -->"
-    if [ -f "$AGENTS" ]; then
-      [ -d "$BKDIR" ] || mkdir -p "$BKDIR"; cp "$AGENTS" "$BKDIR/AGENTS.md" 2>/dev/null || true
-      awk -v b="$BEGIN" -v e="$END" '
-        $0==b {skip=1} skip==0 {print} $0==e {skip=0}
-      ' "$AGENTS" > "$AGENTS.tmp" && mv "$AGENTS.tmp" "$AGENTS"
-    fi
-    cat >> "$AGENTS" <<EOF
+if [ -n "$IMG_CMD" ]; then
+  # AGENTS.md 用标记块管理：重复运行只替换本块，不动用户自己写的内容
+  AGENTS="$CODEX_HOME/AGENTS.md"
+  BEGIN="<!-- CARHER-IMAGE-BEGIN -->"
+  END="<!-- CARHER-IMAGE-END -->"
+  if [ -f "$AGENTS" ]; then
+    [ -d "$BKDIR" ] || mkdir -p "$BKDIR"; cp "$AGENTS" "$BKDIR/AGENTS.md" 2>/dev/null || true
+    awk -v b="$BEGIN" -v e="$END" '
+      $0==b {skip=1} skip==0 {print} $0==e {skip=0}
+    ' "$AGENTS" > "$AGENTS.tmp" && mv "$AGENTS.tmp" "$AGENTS"
+  fi
+  cat >> "$AGENTS" <<EOF
 $BEGIN
 ## 画图
 
 用户要画图、生成图片、出图、做配图/插画/海报/头像时，**只用下面这个命令**（它调公司的 muse-image），
 **不要询问、不要用 SVG / ASCII / HTML / matplotlib 代替，也不要用内置 image_gen 或别的生图方式**：
 
-    "$PYBIN" "$CODEX_HOME/carher_image.py" "画面描述" 输出路径
+    $IMG_CMD "画面描述" 输出路径
 
 - 画面描述用用户的原话，可以补充风格、构图、颜色等细节。
 - 约 30 秒出图。key 已配好，不要向用户索要，也不要在命令里写 key。
@@ -249,19 +258,21 @@ $BEGIN
 - 命令报错就把报错原文告诉用户，不要换别的方式硬画。
 $END
 EOF
-    ok "✔ 已开通生图能力"
-  else
-    warn "⚠ 没找到可用的 Python，生图能力未开通（其余配置已生效）"
-  fi
+  ok "✔ 已开通生图能力"
+else
+  warn "⚠ 没有 Node 也没有 Python，生图能力未开通（其余配置已生效）"
 fi
 
 # --- 7. 模型列表自动同步 ---
 # 网关 /v1/models 已按这把 key 的白名单过滤；同步进 Codex 的模型选择器，
 # 网关上新加的模型第二天自动出现。装好后立即跑一次，之后每天 10:17 一次（加登录时一次）。
 # 🔴 10-16:没有 Python 时这一步原来整段跳过 ⇒ App 下拉里只有自带的几个 GPT。没 Python 就用 Node 版(两份逻辑一致)。
+# 🔴 10-16:Node 版优先。Python 版要靠 `codex debug models` 拿模板,而 npm 装的 codex 自己要 node 在 PATH 里;
+#    定时任务的 PATH 里常没有 ~/.carher-node ⇒ Python 版每天静默失败(env: node: No such file or directory),
+#    下拉里只剩官方自带的 GPT。Node 版直接用当前 node 跑 codex.js,不受 PATH 影响。
 SYNC_RUN=""; SYNC_ARG=""
-if [ -n "${PYBIN:-}" ]; then SYNC_RUN="$PYBIN"; SYNC_ARG="$CODEX_HOME/carher_models_sync.py"
-elif command -v node >/dev/null 2>&1; then SYNC_RUN="$(command -v node)"; SYNC_ARG="$CODEX_HOME/carher_models_sync.js"
+if [ -n "${NODEBIN:-}" ]; then SYNC_RUN="$NODEBIN"; SYNC_ARG="$CODEX_HOME/carher_models_sync.js"
+elif [ -n "${PYBIN:-}" ]; then SYNC_RUN="$PYBIN"; SYNC_ARG="$CODEX_HOME/carher_models_sync.py"
 fi
 if [ -n "$SYNC_RUN" ]; then
   if CODEX_HOME="$CODEX_HOME" "$SYNC_RUN" "$SYNC_ARG"; then

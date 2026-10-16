@@ -106,12 +106,24 @@ else
   P "模型列表      : 没有 carher-models.json"
   yel "模型列表没同步(App 下拉里只有自带的几个 GPT,找不到 key 里的模型):下载最新的 codex-mac.command 重跑一次"
 fi
-[ -f "$CODEX_HOME/carher-models-sync.log" ] && { P "  同步日志最后 3 行:"; tail -n 3 "$CODEX_HOME/carher-models-sync.log" | mask | sed 's/^/    /'; }
-if [ -f "$CODEX_HOME/carher_image.py" ] && grep -q 'CARHER-IMAGE-BEGIN' "$CODEX_HOME/AGENTS.md" 2>/dev/null; then
+if [ -f "$CODEX_HOME/carher-models-sync.log" ]; then
+  P "  同步日志最后 3 行:"; tail -n 3 "$CODEX_HOME/carher-models-sync.log" | mask | sed 's/^/    /'
+  LAST=$(grep -E '同步完成|失败' "$CODEX_HOME/carher-models-sync.log" | tail -n 1)
+  case "$LAST" in *失败*) red "模型同步最近一次失败(下拉里只有自带的 GPT):下载最新的 codex-mac.command 重跑一次;还不行把这份报告发给运维";; esac
+fi
+# 定时同步装没装(Mac)
+if [ "$(uname -s)" = Darwin ]; then
+  if launchctl print "gui/$(id -u)/net.carher.codex-models-sync" >/dev/null 2>&1; then
+    P "每日同步      : 已装 ($(launchctl print "gui/$(id -u)/net.carher.codex-models-sync" 2>/dev/null | sed -n 's/^[[:space:]]*program = //p' | head -n1 | xargs basename 2>/dev/null))"
+  else
+    P "每日同步      : 没装"; yel "模型列表不会每天自动更新(网关新加的模型看不到):重新跑一次 codex-mac.command"
+  fi
+fi
+if { [ -f "$CODEX_HOME/carher_image.js" ] || [ -f "$CODEX_HOME/carher_image.py" ]; } && grep -q 'CARHER-IMAGE-BEGIN' "$CODEX_HOME/AGENTS.md" 2>/dev/null; then
   P "画图工具      : 已装"
 else
   P "画图工具      : 没装"
-  yel "画图工具没装上(多半没有可用的 Python 3):装好 Python 3 后重新跑一次 codex-mac.command"
+  yel "画图工具没装上:下载最新的 codex-mac.command 重跑一次"
 fi
 ls -d "$CODEX_HOME"/backup-carher-* >/dev/null 2>&1 && P "配置备份      : $(ls -d "$CODEX_HOME"/backup-carher-* | wc -l | tr -d ' ') 份,最新 $(ls -d "$CODEX_HOME"/backup-carher-* | tail -n1)"
 

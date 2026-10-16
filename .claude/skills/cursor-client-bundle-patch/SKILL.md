@@ -463,6 +463,18 @@ AST 子节点的 `start/end` 里 `src.slice()` 出来搬运,不写进任何模�
 `glm-5.3-flash→openrouter-glm-5.3-flash` / `qwen3-coder-next→kiro-qwen3-coder-next` 三条。
 补 alias 是**生产变更,单独一轮、要签字**。
 
+### 🔴 服务端目录**缺**我们的名字 ⇒ 菜单里没有(2026-10-16 根因,补丁 `keepmine-fill`)
+
+现场:liangjingyu(Win,3.24.12,补丁齐全,key 有全部 opus)菜单里没有任何 claude/gpt,网关 7 天 0 次 claude 请求。
+doctor:「目录 = 24 条,装了但目录里没有的名字」20 个 = 全部 gpt 系、claude 系、gemini-3.8-flash。
+同办公网本机同版本 64 条全在,直接调 `AvailableModels`(带 `additional_model_names`)本机也是 39/39。
+
+- ⛔ **不是地区/IP**:同网同出口的本机全在(我先归到"中国区"被用户当场否了)。是**服务端按账号**给的目录少了条目,原因不明。
+- 菜单只画目录(`computeAvailableDefaultModels` ← `availableDefaultModels2`);`keepmine-claim` 只能把**已有**条目认领成自定义,补不出缺的;重跑 UPGRADE/REPAIR 无效。
+- `keepmine-fill`:锚点 `{this.persistAvailableDefaultModels(X),this._reactiveStorageService.setApplicationUserPersistentStorage("modelPickerDisplayConfiguration"` 前插一段,把 userAddedModels 里目录缺的名字按**自定义条目形状**(取自本机活着的 21 字段条目)合成塞回;已有条目不碰。两条 bundle 各命中 1。
+- 验法:①打完 js==py ②从产物里切出插入段在假 this 上跑(24 条输入 → 44 条)③本机真装后**手动从 state.vscdb 删掉那 20 条再启动**,看 Cursor 刷完是否 39/39(删前备份 state.vscdb)。
+- 判据:doctor 第 1) 节 keepfill=1 且第 2) 节「装了但目录里没有」仍非空 ⇒ 补丁没生效,要再查;keepfill=0 ⇒ 让他 UPGRADE。
+
 ### 撞名:自定义名 == Cursor 自带名(2026-09-21 根因)
 
 **一个与 Cursor 自带模型同名的自定义名,不会被登记成自定义模型** —— 它**不进

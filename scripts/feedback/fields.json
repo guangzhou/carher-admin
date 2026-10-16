@@ -1,0 +1,18 @@
+[
+ {"name":"编号","type":"auto_number","style":{"rules":[{"type":"text","text":"FB-"},{"type":"incremental_number","length":4}]}},
+ {"name":"类型","type":"select","multiple":false,"options":[{"name":"用不了/报错","hue":"Red","lightness":"Light"},{"name":"想要新功能/新模型","hue":"Blue","lightness":"Light"},{"name":"文档看不懂","hue":"Orange","lightness":"Light"},{"name":"其他建议","hue":"Gray","lightness":"Light"}]},
+ {"name":"工具","type":"select","multiple":false,"options":[{"name":"Cursor"},{"name":"Codex"},{"name":"Claude Code"},{"name":"openchat 网页"},{"name":"其他"}]},
+ {"name":"详细描述","type":"text"},
+ {"name":"截图","type":"attachment"},
+ {"name":"电脑","type":"select","multiple":false,"options":[{"name":"Mac"},{"name":"Windows"},{"name":"Linux"},{"name":"不确定"}]},
+ {"name":"紧急程度","type":"select","multiple":false,"options":[{"name":"影响工作","hue":"Red","lightness":"Light"},{"name":"有替代办法","hue":"Orange","lightness":"Light"},{"name":"不急","hue":"Gray","lightness":"Light"}]},
+ {"name":"提交人","type":"user","multiple":false},
+ {"name":"提交人邮箱","type":"text","style":{"type":"email"}},
+ {"name":"来源页面","type":"text"},
+ {"name":"提交时间","type":"created_at"},
+ {"name":"状态","type":"select","multiple":false,"default_value":["新提交"],"options":[{"name":"新提交","hue":"Blue","lightness":"Light"},{"name":"已确认","hue":"Purple","lightness":"Light"},{"name":"处理中","hue":"Orange","lightness":"Light"},{"name":"已解决","hue":"Green","lightness":"Light"},{"name":"不处理","hue":"Gray","lightness":"Light"},{"name":"重复","hue":"Gray","lightness":"Lighter"}]},
+ {"name":"负责人","type":"user","multiple":false},
+ {"name":"处理说明","type":"text"},
+ {"name":"解决时间","type":"datetime"},
+ {"name":"已通知提交人","type":"checkbox"}
+]

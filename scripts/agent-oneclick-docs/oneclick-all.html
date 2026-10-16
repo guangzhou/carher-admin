@@ -94,6 +94,8 @@ img.shot{border:1px solid var(--line);border-radius:8px;max-width:100%;width:300
 .cmd kbd.done{background:var(--t);color:var(--on-t);border-color:var(--t)}
 .cmd span{font-size:14px;color:var(--muted);line-height:1.6}
 .tips .sub{font-size:13px}
+.fb{margin:0 0 30px 62px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;font-size:14.5px;color:var(--muted)}
+.fb a.btn{padding:7px 16px;font-size:14.5px}
 .more{display:flex;flex-direction:column;gap:10px;margin-left:62px}
 .more > h2{font-size:14px;color:var(--muted);font-weight:500;margin:0;letter-spacing:.06em}
 details{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:11px 18px;min-width:0}
@@ -123,7 +125,7 @@ body.tool-claude .for-cursor, body.tool-claude .for-codex{display:none}
   .step{grid-template-columns:32px minmax(0,1fr);gap:0 12px}
   .step::before{width:30px;height:30px;font-size:14px}
   .step::after{left:15px;top:36px}
-  .more,footer,.tips{margin-left:0}
+  .more,footer,.tips,.fb{margin-left:0}
   .cmds{grid-template-columns:1fr}
 }
 </style>
@@ -319,6 +321,11 @@ claude</code></pre>
   <p class="sub">Cursor、Codex、Claude Code 的命令行和桌面 App 里都能用，像平常聊天一样发出去就行。只发这一个词，前面不要加 <code>/</code>。查余额不花钱；测模型会每个模型发一句很短的话，花一点点额度。</p>
 </div>
 
+<div class="fb">
+  <a class="btn alt" id="fb-link" href="https://chat.auto-link.com.cn/feedback/">意见反馈 / 报问题</a>
+  <span>用不了、想要新模型、文档看不懂，都可以提。用飞书登录，解决后在飞书通知你。</span>
+</div>
+
 <div class="more">
   <h2>需要时再看</h2>
 
@@ -337,7 +344,7 @@ claude</code></pre>
         <tr><td>REMOTE-SSH 提示「8788 端口被占着」</td><td>让服务器管理员让出端口；或完全退出 Cursor，双击 <code>TURN-OFF-DELTA</code>，再连</td></tr>
       </tbody>
     </table></div>
-    <p class="sub">还不行：双击 <code>DOCTOR</code>，把窗口整屏文字发给运维（不含 key，别只发截图）。</p>
+    <p class="sub">还不行：双击 <code>DOCTOR</code>，把窗口整屏文字贴到 <a href="https://chat.auto-link.com.cn/feedback/?from=oneclick&tool=cursor&type=%E7%94%A8%E4%B8%8D%E4%BA%86%2F%E6%8A%A5%E9%94%99">意见反馈</a> 里（不含 key）。</p>
   </details>
   <details class="for-cursor">
     <summary>连远程服务器（Remote-SSH）</summary>
@@ -397,7 +404,7 @@ bash ./codex-doctor-mac.command</code></pre>
         <tr><td>用着用着被踢下线</td><td>别同时开多个 Codex</td></tr>
       </tbody>
     </table></div>
-    <p class="sub">还不行：把自检报告发给运维。</p>
+    <p class="sub">还不行：把自检报告贴到 <a href="https://chat.auto-link.com.cn/feedback/?from=oneclick&type=%E7%94%A8%E4%B8%8D%E4%BA%86%2F%E6%8A%A5%E9%94%99">意见反馈</a> 里。</p>
   </details>
   <details class="for-codex">
     <summary>更新与还原</summary>
@@ -437,7 +444,7 @@ bash ./claude-doctor-mac.command</code></pre>
         <tr><td>某个模型不回话 / 一直转圈 / 报 <code>502</code></td><td>先发 <b>测模型</b> 看它是不是暂时不可用；换回 <code>claude-opus-5-5</code>，把模型名和时间发给运维</td></tr>
       </tbody>
     </table></div>
-    <p class="sub">还不行：把自检报告发给运维。</p>
+    <p class="sub">还不行：把自检报告贴到 <a href="https://chat.auto-link.com.cn/feedback/?from=oneclick&type=%E7%94%A8%E4%B8%8D%E4%BA%86%2F%E6%8A%A5%E9%94%99">意见反馈</a> 里。</p>
   </details>
   <details class="for-claude">
     <summary>更新与卸载</summary>
@@ -473,6 +480,9 @@ bash ./claude-doctor-mac.command</code></pre>
     document.getElementById('os-other').textContent=NAMES[v==='mac'?'win':'mac'];
     if(save)set('oneclick-os',v);
   }
+  var fb=document.getElementById('fb-link');
+  function fbHref(){ var t=(B.className.match(/tool-(\w+)/)||[])[1]||''; fb.href='https://chat.auto-link.com.cn/feedback/?from=oneclick&tool='+t; }
+  q('.tool').forEach(function(t){t.addEventListener('click',fbHref)});
   q('kbd[data-copy]').forEach(function(k){
     k.addEventListener('click',function(){
       var t=k.getAttribute('data-copy'), old=k.textContent;
@@ -509,5 +519,6 @@ bash ./claude-doctor-mac.command</code></pre>
   var h=(location.hash||'').slice(1);
   pickTool(['cursor','codex','claude'].indexOf(h)>=0?h:(get('oneclick-tool')||'cursor'),false);
   pickOS(get('oneclick-os')||(/Windows/i.test(navigator.userAgent||'')?'win':'mac'),false);
+  fbHref();
 })();
 </script>

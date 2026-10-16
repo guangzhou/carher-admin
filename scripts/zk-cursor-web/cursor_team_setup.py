@@ -274,6 +274,11 @@ def _gate_sub(m):
     return m.group(1) + "/*@cxteam-gate*/" + GATE_FN + "(" + m.group(2) + ")" + m.group(3)
 
 
+# keepmine-fill 插入的那段(与 js 的 KEEPFILL 逐字相同)
+def KEEPFILL(v):
+    return '/*@cxteam-keepfill*/(()=>{try{const __cxs=this._reactiveStorageService.applicationUserPersistentStorage,__cxu=(__cxs.aiSettings&&__cxs.aiSettings.userAddedModels)||[],__cxh=new Set(' + v + '.map(__cxm=>__cxm.name));for(const __cxn of __cxu){if(typeof __cxn!=="string"||!__cxn||__cxh.has(__cxn))continue;__cxh.add(__cxn);' + v + '.push({name:__cxn,defaultOn:!1,supportsAgent:!0,degradationStatus:0,supportsThinking:!0,supportsImages:!0,supportsMaxMode:!0,supportsNonMaxMode:!0,serverModelName:__cxn,isRecommendedForBackgroundComposer:!1,supportsPlanMode:!0,supportsSandboxing:!0,isUserAdded:!0,inputboxShortModelName:__cxn,parameterDefinitions:[],variants:[],legacySlugs:[],idAliases:[],namedModelSectionIndex:1,cloudAgentEffortModes:[],modelPickerBadges:[]})}}catch(__cxe){}})(),'
+
+
 PATCHES = [
     dict(name="gate", marker="@cxteam-gate",
          # 3.20.21 glass 包装函数名是 `$7y`(见 _ID 注释);参数位旧写法钉死 `[a-z]`,一并放宽。
@@ -392,6 +397,11 @@ PATCHES = [
     # 与 keepmine 是两个病:keepmine 管"名字在不在菜单",这条管"请求发给谁"。
     # 数据:那句文案在 3.21.18 两份 bundle 里 0 命中(服务端下发);路由唯一判定
     # bOd() 只看模型名前缀 + useOpenAIKey,**不看 isUserAdded**。
+    # keepmine-fill(2026-10-16):服务端目录没给我们的名字 ⇒ 菜单里没有。目录落盘前把
+    # userAddedModels 里目录缺的名字按自定义条目形状合成塞回去。详注见 js 同名条目。
+    dict(name="keepmine-fill", marker="@cxteam-keepfill",
+         rx=re.compile(r'(\{)(this\.persistAvailableDefaultModels\((' + _ID + r')\),this\._reactiveStorageService\.setApplicationUserPersistentStorage\("modelPickerDisplayConfiguration")'),
+         sub=lambda m: m.group(1) + KEEPFILL(m.group(3)) + m.group(2)),
     dict(name="byok-force", marker="@cxteam-byokforce",
          rx=re.compile(r'function (' + _ID + r')\((' + _ID + r'),(' + _ID + r')\)\{return (' + _ID
                        + r')\(\2\)\?\3\.useClaudeKey\?"anthropic":void 0:(' + _ID

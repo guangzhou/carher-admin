@@ -739,6 +739,9 @@ const LOCATORS = {
   },
 };
 
+// keepmine-fill 插入的那段(变量名 v 是目录数组;只用 __cx 前缀的局部名,不碰原代码的 minify 名)
+const KEEPFILL = (v) => '/*@cxteam-keepfill*/(()=>{try{const __cxs=this._reactiveStorageService.applicationUserPersistentStorage,__cxu=(__cxs.aiSettings&&__cxs.aiSettings.userAddedModels)||[],__cxh=new Set(' + v + '.map(__cxm=>__cxm.name));for(const __cxn of __cxu){if(typeof __cxn!=="string"||!__cxn||__cxh.has(__cxn))continue;__cxh.add(__cxn);' + v + '.push({name:__cxn,defaultOn:!1,supportsAgent:!0,degradationStatus:0,supportsThinking:!0,supportsImages:!0,supportsMaxMode:!0,supportsNonMaxMode:!0,serverModelName:__cxn,isRecommendedForBackgroundComposer:!1,supportsPlanMode:!0,supportsSandboxing:!0,isUserAdded:!0,inputboxShortModelName:__cxn,parameterDefinitions:[],variants:[],legacySlugs:[],idAliases:[],namedModelSectionIndex:1,cloudAgentEffortModes:[],modelPickerBadges:[]})}}catch(__cxe){}})(),';
+
 const PATCHES = [
   {
     name: "gate", marker: "@cxteam-gate",
@@ -930,6 +933,23 @@ const PATCHES = [
     name: "keepmine-claim", marker: "@cxteam-keepmine2",
     rx: new RegExp("(const " + ID + "=" + ID + "\\((" + ID + ")\\);\\2=\\2\\.map\\((" + ID + ")=>" + ID + "\\(\\3\\)\\))", "g"),
     sub: (m) => m[1] + "/*@cxteam-keepmine2*/.map(" + m[3] + "=>{try{const __cxu=this._reactiveStorageService.applicationUserPersistentStorage.aiSettings.userAddedModels||[];return __cxu.includes(" + m[3] + ".name)&&" + m[3] + ".isUserAdded!==!0?{..." + m[3] + ",isUserAdded:!0}:" + m[3] + "}catch(__cxe){return " + m[3] + "}})",
+  },
+
+  /* ── keepmine-fill(2026-10-16):服务端目录**没给**我们的名字 ⇒ 菜单里根本没有它 ──────
+     现场:同事 liangjingyu(Win,3.24.12,补丁全在,key 有全部 opus)菜单里没有任何 claude/gpt。
+     他的 doctor:目录 24 条,我们 39 个名字里 20 个不在目录(全部 gpt 系、claude 系和 gemini-3.8-flash)。
+     同一办公网的本机 + 同版本:目录 64 条全在;直接调服务端 AvailableModels(带 additional_model_names)
+     本机也是 39/39 ⇒ 不是网络/地区,是**服务端按账号**下发的目录里少了这些条目。
+     菜单只画目录里有的条目(computeAvailableDefaultModels ← availableDefaultModels2),
+     keepmine-claim 只能认领"目录里已有"的条目,补不出缺的 ⇒ 名字在 userAddedModels 里也看不见。
+     修:目录落盘前,把 userAddedModels 里目录缺的名字**按自定义条目的形状合成**塞回去。
+       形状逐字段取自本机目录里活着的自定义条目(gpt-6-sol 等 21 字段,isUserAdded:!0、variants 空)。
+       走不走我们的 key 只看名字前缀 + useOpenAIKey(byok-force),与条目是谁合成的无关。
+     ⚠️ 只补"我们 userAddedModels 里有、目录里没有"的名字;目录里已有的一律不碰(档位等服务端数据保留)。 */
+  {
+    name: "keepmine-fill", marker: "@cxteam-keepfill",
+    rx: new RegExp("(\\{)(this\\.persistAvailableDefaultModels\\((" + ID + ")\\),this\\._reactiveStorageService\\.setApplicationUserPersistentStorage\\(\"modelPickerDisplayConfiguration\")", "g"),
+    sub: (m) => m[1] + KEEPFILL(m[3]) + m[2],
   },
 
   /* ── byok(2026-09-23):Free 档把 BYOK 开关关掉 ⇒ 我们的名字改道 Cursor 服务端 ─────────
@@ -2704,7 +2724,7 @@ async function doDoctor() {
   //    `@cxteam-keepmine` 是 `@cxteam-keepmine2` 的子串,`-nocloud` 是 `-nocloudset` 的子串,
   //    裸数会互相灌水(我 09-23 在 `setUseOpenAIKey(!1)` 上已经栽过一次同形的假红)。
   // 名单不写死:直接把 bundle 里出现的所有 cxteam marker 枚举出来,免得以后加了补丁忘改这里。
-  const MUST = ["byokforce", "byokkeepon", "keepmine", "keepmine2", "nocloud", "nocloudset", "noagenthost"];
+  const MUST = ["byokforce", "byokkeepon", "keepmine", "keepmine2", "keepfill", "nocloud", "nocloudset", "noagenthost"];
   for (const rel of BUNDLES) {
     const p = path.join(RES, rel);
     if (!fs.existsSync(p)) { P("  !!", rel, "不存在"); continue; }
@@ -2791,7 +2811,9 @@ async function doDoctor() {
     for (const e of bad) P("      -", e.name, "isUserAdded=" + JSON.stringify(e.isUserAdded),
       "params=" + ((e.parameterDefinitions || []).length));
     const miss = uam.filter((n) => !cat.some((e) => e.name === n));
-    if (miss.length) P("  ⚠️ 装了但目录里没有的名字:", miss.join(", "));
+    if (miss.length) P("  ⚠️ 装了但目录里没有的名字:", miss.join(", "),
+      "\n     ⇒ 服务端给这个账号的目录少了这些名字(10-16 liangjingyu:菜单里没有 opus 就是这个)。" +
+      "\n       keepfill 补丁会在 Cursor 刷目录时补回;上面第 1) 节 keepfill=0 就双击 UPGRADE,补丁在仍缺就把这份报告发给运维。");
   }
 
   P("\n--- 3) 最近几个会话选的模型(报错那一发选的是谁) ---");

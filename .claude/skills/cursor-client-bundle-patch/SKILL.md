@@ -1,3 +1,8 @@
+---
+name: cursor-client-bundle-patch
+description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 Cursor.app 的模型菜单(cursor-g 现行名单)、安装器、keepmine/noagenthost 等补丁与诊断。同事 Cursor 菜单缺模型、冒出不该有的模型、BYOK 报不支持时使用。"
+---
+
 # Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x;安装器跨平台,诊断/日志路径示例为 macOS)
 
 > **现行菜单 = 39 名**(2026-10-13 加 muse-spark / muse-image;37 名那轮 commit `297b176`)。cr-g 整段下架、claude 家族进段 ③;
@@ -462,6 +467,10 @@ AST 子节点的 `start/end` 里 `src.slice()` 出来搬运,不写进任何模�
 模板是 **04-5rub 那 27 条 `aliases`**,至少含 `kimi-k2.7-code→claude-kimi-k2.7-code` /
 `glm-5.3-flash→openrouter-glm-5.3-flash` / `qwen3-coder-next→kiro-qwen3-coder-next` 三条。
 补 alias 是**生产变更,单独一轮、要签字**。
+
+### 档位(10-16 keepmine-fill v2)与画图
+- wangzhongwei:名字在、`variants` 空 ⇒ opus 不能换 High/Medium/Low。v2 带 `cursor_tier_catalog.json`(本机 21 个有档位名字的快照)补档位;目录自带档位的不动。v1 机器 UPGRADE 原地升级。台架 `keepfill_offline_cases.js <已打 bundle>`。模板过期(加了新的带档位模型)⇒ 从一台正常机器重新导出这个 json。
+- 画图:INSTALL/UPGRADE 第 6 步装 `~/.cursor/skills/carher-image` + `~/.carher/image.json`(Key 只在 INSTALL 粘的那次写入);工具用 Cursor 二进制 `ELECTRON_RUN_AS_NODE=1` 跑。台架 `image_skill_offline_cases.js`。
 
 ### 🔴 服务端目录**缺**我们的名字 ⇒ 菜单里没有(2026-10-16 根因,补丁 `keepmine-fill`)
 

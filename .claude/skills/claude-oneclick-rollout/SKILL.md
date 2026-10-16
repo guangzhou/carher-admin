@@ -10,6 +10,7 @@ description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的�
 三个 agent 每人一把 cursor key 共用。
 **给同事的入口 = 单页 https://chat.auto-link.com.cn/oneclick/**(skill `agent-oneclick-page`):重建了本工具的安装器后,必须再跑 `bash scripts/agent-oneclick-docs/publish_198.sh`,否则页面里内嵌的还是旧文件。
 
+**画图(10-16)**:安装器第 4d 步装 `~/.claude/carher/carher_image.js`(源在 codex-oneclick/src,build.sh 的 @@EMBED 从那里取)+ `skills/carher-image` + `~/.claude/CLAUDE.md` 里 `CARHER-IMAGE` 标记块。🔴 只放 skill 不够:实测 `claude -p "画一张…"` 直接写 SVG,不调 skill;加了常驻说明块才真出图。
 **发版**:改完跑 `bash scripts/agent-oneclick-docs/release_all.sh`(网页 + 飞书附件 + 门禁一起)。
 **自检(doctor,10-16)**:`src/doctor-{mac.sh,windows.ps1}` → build 出 `claude-doctor-{mac.command,windows.bat}`,单页「出问题了」里可下载。只读;查 settings.json(BASE/API_KEY/AUTH_TOKEN 并存/发现开关/claude-router- 旧名)、rc 与当前终端的覆盖变量、桌面 App 3P 配置与两把 key 是否一致、App 钉死版本的组件是否预置 + 198 镜像有没有这版、App 日志 `Host Claude Code binary not available`、代理、key 实打 /v1/messages。回归 `tests/test_doctor.py`;Windows 版 App 日志路径按 App 代码=`%LOCALAPPDATA%\Claude-3p\logs`(未实机验)。
 

@@ -11,6 +11,8 @@ description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 
 > **给同事的入口 = 单页 https://chat.auto-link.com.cn/oneclick/**(skill `agent-oneclick-page`):重建了本工具的安装器后,必须再跑 `bash scripts/agent-oneclick-docs/publish_198.sh`,否则页面里内嵌的还是旧文件。
 > Codex App 下载=官方直链(Mac `persistent.oaistatic.com/codex-app-prod/Codex.dmg`、Win `get.microsoft.com/installer/download/9PLM9XGG6VKS`,国内可达),不再用飞书附件。
 > **默认模型按 key 选(10-16)**:安装器第 1b 步拉 `/models`,`gpt-5.6-terra` 不在 key 里就换成第一个能聊天的(只开 deepseek 的 key 300+ 把,写死就每轮 403)。
+> 🔴 **10-16 改成 Node 优先**:Python 版同步在定时任务里静默失败(要 `codex debug models`,npm 的 codex 又要 node 在 PATH 里),「很多同事只有 GPT」就是它。有 Node 一律用 `.js`;自检会报「最近一次同步失败」。
+> **画图**:`src/carher_image.js`(Node,三个一键共用一份源)+ `src/image_skill.md`(skill 模板);Codex 走 AGENTS.md,Claude 走 skill + ~/.claude/CLAUDE.md 标记块,Cursor 走 ~/.cursor/skills + ~/.carher/image.json。
 > **模型同步两份实现(10-16)**:`src/carher_models_sync.py` 与 `src/carher_models_sync.js` 逻辑**必须一致**(`tests/test_models_sync_js.py` 逐字段比);
 > 有 Python 用 .py,没有就 Node 跑 .js(第 0 步保证有 Node)。改同步逻辑 ⇒ 两份一起改。画图 `carher_image.py` 仍只有 Python 版。
 > 🔴 本机端到端跑安装器:launchd label `net.carher.codex-models-sync` 是全局的,会把你自己的定时任务指到测试目录 ⇒ 测完 `launchctl bootout gui/$(id -u)/net.carher.codex-models-sync` 再重跑一次真安装恢复。

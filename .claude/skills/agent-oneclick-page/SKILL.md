@@ -39,6 +39,8 @@ bash scripts/agent-oneclick-docs/publish_198.sh             # 上线并比 sha;�
 
 本地预览:`open .work/oneclick-all/AI编程一键配置.html`;截图自查用 headless Chrome(`--window-size=1440,…` 和 `400,…` 各一张)。
 
+页面上的「意见反馈 / 报问题」按钮和各处「还不行」链到 https://chat.auto-link.com.cn/feedback/ ,那条通道见 skill `feedback-intake`。
+
 ## 198 布置(10-15 已做好,一般不用再碰)
 
 - 静态文件 `/var/www/oneclick/index.html`

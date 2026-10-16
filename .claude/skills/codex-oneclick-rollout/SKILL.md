@@ -21,7 +21,8 @@ description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 
 | 现象 | 卡在 | 去哪节 |
 |---|---|---|
 | 401 / url 是 api.openai.com | 配置没写上 | 重跑脚本 |
-| 选择器里只有几个 GPT | 模型同步没跑（多半没 Python） | §3 |
+| 选择器/App 下拉里只有几个 GPT,找不到 key 里的模型 | 模型同步没跑。10-16 前没 Python 就整段跳过;现在没 Python 自动改用 `carher_models_sync.js`(Node,逻辑与 .py 一致,`tests/test_models_sync_js.py` 逐字段比对) | 下载最新脚本重跑 |
+| Codex 每一轮 403,key 只开了少数模型(如只剩 deepseek-v4.1-flash) | 默认模型 gpt-5.6-terra 不在 key 里 | 10-16 起安装时按 `/models` 选默认;老用户重跑或 `/model` 手选 |
 | 选了 claude/grok/kimi，改文件报 `first line of the patch must be '*** Begin Patch'`、或回 DONE 文件没变、或说没有 shell | 模型目录元数据不对 | §3 坑①② |
 | 长对话后 claude-haiku/sonnet-5 被上游拒 | 上下文上限按 272k 登记 | §3 坑③ |
 | 选了某模型报 `key not allowed to access model` | 这把 key 没开该模型 | §4 |

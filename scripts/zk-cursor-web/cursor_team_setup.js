@@ -2826,9 +2826,17 @@ async function doDoctor() {
     for (const e of bad) P("      -", e.name, "isUserAdded=" + JSON.stringify(e.isUserAdded),
       "params=" + ((e.parameterDefinitions || []).length));
     const miss = uam.filter((n) => !cat.some((e) => e.name === n));
+    /* 档位(10-16 wangzhongwei):名字在但 variants 空 ⇒ opus 只有一个、不能换 High/Medium/Low。
+       对照档位模板,模板里有档位、目录里却没有的名字逐个列出来。 */
+    try {
+      const tiers = JSON.parse(TIER_CATALOG_JSON || "{}");
+      const noTier = mine.filter((e) => tiers[e.name] && !(e.variants && e.variants.length)).map((e) => e.name);
+      P("  有档位的名字(High/Medium/Low 等):", mine.filter((e) => e.variants && e.variants.length).length, "个");
+      if (noTier.length) P("  ⚠️ 该有档位却没有的:", noTier.join(", "), "\n     ⇒ 不能换挡。用新包双击 UPGRADE(keepfill2 会补);补丁在仍没有就发报告。");
+    } catch (e) { /* 模板读不到不影响其余自检 */ }
     if (miss.length) P("  ⚠️ 装了但目录里没有的名字:", miss.join(", "),
       "\n     ⇒ 服务端给这个账号的目录少了这些名字(10-16 liangjingyu:菜单里没有 opus 就是这个)。" +
-      "\n       keepfill 补丁会在 Cursor 刷目录时补回;上面第 1) 节 keepfill=0 就双击 UPGRADE,补丁在仍缺就把这份报告发给运维。");
+      "\n       keepfill2 补丁会在 Cursor 刷目录时补回;上面第 1) 节没有 keepfill2 就用新包双击 UPGRADE,有了仍缺就把这份报告发给运维。");
   }
 
   P("\n--- 3) 最近几个会话选的模型(报错那一发选的是谁) ---");

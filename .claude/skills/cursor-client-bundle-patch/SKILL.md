@@ -482,7 +482,7 @@ doctor:「目录 = 24 条,装了但目录里没有的名字」20 个 = 全部 gp
 - 菜单只画目录(`computeAvailableDefaultModels` ← `availableDefaultModels2`);`keepmine-claim` 只能把**已有**条目认领成自定义,补不出缺的;重跑 UPGRADE/REPAIR 无效。
 - `keepmine-fill`:锚点 `{this.persistAvailableDefaultModels(X),this._reactiveStorageService.setApplicationUserPersistentStorage("modelPickerDisplayConfiguration"` 前插一段,把 userAddedModels 里目录缺的名字按**自定义条目形状**(取自本机活着的 21 字段条目)合成塞回;已有条目不碰。两条 bundle 各命中 1。
 - 验法:①打完 js==py ②从产物里切出插入段在假 this 上跑(24 条输入 → 44 条)③本机真装后**手动从 state.vscdb 删掉那 20 条再启动**,看 Cursor 刷完是否 39/39(删前备份 state.vscdb)。
-- 判据:doctor 第 1) 节 keepfill=1 且第 2) 节「装了但目录里没有」仍非空 ⇒ 补丁没生效,要再查;keepfill=0 ⇒ 让他 UPGRADE。
+- 判据:doctor 第 1) 节 `keepfill2=1`(v2,带档位)且第 2) 节「装了但目录里没有」仍非空 ⇒ 补丁没生效,要再查;只有 `keepfill=1`(v1)或都没有 ⇒ 让他用新包 UPGRADE。
 
 ### 撞名:自定义名 == Cursor 自带名(2026-09-21 根因)
 

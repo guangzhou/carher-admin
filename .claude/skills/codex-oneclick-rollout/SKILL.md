@@ -14,7 +14,7 @@ description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 
 > 🔴 **10-16 改成 Node 优先**:Python 版同步在定时任务里静默失败(要 `codex debug models`,npm 的 codex 又要 node 在 PATH 里),「很多同事只有 GPT」就是它。有 Node 一律用 `.js`;自检会报「最近一次同步失败」。
 > **画图**:`src/carher_image.js`(Node,三个一键共用一份源)+ `src/image_skill.md`(skill 模板);Codex 走 AGENTS.md,Claude 走 skill + ~/.claude/CLAUDE.md 标记块,Cursor 走 ~/.cursor/skills + ~/.carher/image.json。
 > **模型同步两份实现(10-16)**:`src/carher_models_sync.py` 与 `src/carher_models_sync.js` 逻辑**必须一致**(`tests/test_models_sync_js.py` 逐字段比);
-> 有 Python 用 .py,没有就 Node 跑 .js(第 0 步保证有 Node)。改同步逻辑 ⇒ 两份一起改。画图 `carher_image.py` 仍只有 Python 版。
+> **有 Node 一律用 .js**(10-16 晚改,见下一条),没 Node 才用 .py。改同步逻辑 ⇒ 两份一起改。画图同理:`carher_image.js` 优先,`.py` 兜底。
 > 🔴 本机端到端跑安装器:launchd label `net.carher.codex-models-sync` 是全局的,会把你自己的定时任务指到测试目录 ⇒ 测完 `launchctl bootout gui/$(id -u)/net.carher.codex-models-sync` 再重跑一次真安装恢复。
 > **发版**:改完跑 `bash scripts/agent-oneclick-docs/release_all.sh`(网页 + 飞书附件 + 门禁一起)。
 > **自检(doctor,10-16)**:`src/doctor-{mac.sh,windows.ps1}` → build 出 `codex-doctor-{mac.command,windows.bat}`,单页「出问题了」里可下载。只读;key 只打 len+sha8+异常字符数;查 CLI/App/config(当前 provider 段)/auth.json/两把 key 是否一致/零宽字符/env 里的 OPENAI_API_KEY/模型同步/画图/代理/网关连通/key 实打 /responses;结论列红黄项+修法,报告存桌面并复制到剪贴板。回归 `tests/test_doctor.py`(假网关,只读+不泄 key+每种坏配置都报)。

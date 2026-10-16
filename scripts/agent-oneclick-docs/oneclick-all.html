@@ -84,6 +84,16 @@ ol.list pre{margin-top:6px}
 .two h3{margin:0;font-size:15px;color:var(--t)}
 img.shot{border:1px solid var(--line);border-radius:8px;max-width:100%;width:300px;height:auto}
 
+/* 装完后的两个口令:主线之后、「需要时再看」之前 */
+.tips{margin:0 0 30px 62px;background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--t);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+.tips > p:first-child{font-weight:700}
+.cmds{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.cmd{display:flex;align-items:flex-start;gap:12px;min-width:0}
+.cmd kbd{flex:none;font-family:var(--font-body);font-weight:700;font-size:15px;background:var(--code-bg);border:1px solid var(--line);border-bottom-width:2px;border-radius:7px;padding:4px 12px;color:var(--fg);cursor:pointer;user-select:all}
+.cmd kbd:hover{border-color:var(--muted)}
+.cmd kbd.done{background:var(--t);color:var(--on-t);border-color:var(--t)}
+.cmd span{font-size:14px;color:var(--muted);line-height:1.6}
+.tips .sub{font-size:13px}
 .more{display:flex;flex-direction:column;gap:10px;margin-left:62px}
 .more > h2{font-size:14px;color:var(--muted);font-weight:500;margin:0;letter-spacing:.06em}
 details{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:11px 18px;min-width:0}
@@ -113,7 +123,8 @@ body.tool-claude .for-cursor, body.tool-claude .for-codex{display:none}
   .step{grid-template-columns:32px minmax(0,1fr);gap:0 12px}
   .step::before{width:30px;height:30px;font-size:14px}
   .step::after{left:15px;top:36px}
-  .more,footer{margin-left:0}
+  .more,footer,.tips{margin-left:0}
+  .cmds{grid-template-columns:1fr}
 }
 </style>
 
@@ -299,6 +310,15 @@ claude</code></pre>
   </div>
 </div>
 
+<div class="tips">
+  <p>装好后，在聊天框里直接发这两个词</p>
+  <div class="cmds">
+    <div class="cmd"><kbd data-copy="查余额" title="点一下复制">查余额</kbd><span>今天用了多少、还剩多少、什么时候重置，以及各模型的响应速度。</span></div>
+    <div class="cmd"><kbd data-copy="测模型" title="点一下复制">测模型</kbd><span>用你的 key 把能用的模型挨个试一遍，列出哪些能用、哪些不能用。约 1~2 分钟。</span></div>
+  </div>
+  <p class="sub">Cursor、Codex、Claude Code 的命令行和桌面 App 里都能用，像平常聊天一样发出去就行。只发这一个词，前面不要加 <code>/</code>。查余额不花钱；测模型会每个模型发一句很短的话，花一点点额度。</p>
+</div>
+
 <div class="more">
   <h2>需要时再看</h2>
 
@@ -308,11 +328,11 @@ claude</code></pre>
       <thead><tr><th>现象</th><th>怎么办</th></tr></thead>
       <tbody>
         <tr><td>报 <code>401</code>，或 key 没写上</td><td>Settings → Models → OpenAI API Key，粘贴 key → Verify → 完全退出重开</td></tr>
-        <tr><td>报 <code>key not allowed to access model</code></td><td>你的 key 没开通这个模型，换一个或找运维开通</td></tr>
+        <tr><td>报 <code>key not allowed to access model</code>，或提示额度用完</td><td>发 <b>查余额</b> 看额度；没开通的模型换一个或找运维开通</td></tr>
         <tr><td>报 <code>An unexpected error occurred</code> / <code>does not support custom API keys</code>；看不到 High / Fast；菜单里有 39 个以外的模型</td><td>下载最新的包，退出 Cursor，双击 <code>UPGRADE</code></td></tr>
         <tr><td>模型不见了</td><td>完全退出 Cursor → 双击 <code>REPAIR</code> → 重开</td></tr>
         <tr><td>REPAIR 提示「拒绝动手」</td><td>Cursor 出了还没适配的新版本，你的 Cursor 没被改动，把窗口文字发给运维</td></tr>
-        <tr><td>一直转圈 / 报 <code>502</code></td><td>换回 <code>grok-4.7</code>，把模型名和时间发给运维</td></tr>
+        <tr><td>某个模型不回话 / 一直转圈 / 报 <code>502</code></td><td>先发 <b>测模型</b> 看它是不是暂时不可用；换回 <code>grok-4.7</code>，把模型名和时间发给运维</td></tr>
         <tr><td>远程窗口模型报错 / 每轮都在压缩上下文</td><td>再双击一次 <code>REMOTE-SSH</code></td></tr>
         <tr><td>REMOTE-SSH 提示「8788 端口被占着」</td><td>让服务器管理员让出端口；或完全退出 Cursor，双击 <code>TURN-OFF-DELTA</code>，再连</td></tr>
       </tbody>
@@ -368,12 +388,12 @@ bash ./codex-doctor-mac.command</code></pre>
       <thead><tr><th>现象</th><th>怎么办</th></tr></thead>
       <tbody>
         <tr><td>报 <code>401</code></td><td>key 错了，去 key 表复制整格，重新跑安装文件</td></tr>
-        <tr><td>报 <code>key not allowed to access model</code></td><td>你的 key 没开通这个模型，换一个或找运维开通</td></tr>
+        <tr><td>报 <code>key not allowed to access model</code>，或提示额度用完</td><td>发 <b>查余额</b> 看额度；没开通的模型换一个或找运维开通</td></tr>
         <tr><td>命令行提示找不到 <code>codex</code></td><td>关掉终端新开一个</td></tr>
         <tr><td>App 没生效，或报错地址是 <code>api.openai.com</code></td><td>把 App 完全退出再打开</td></tr>
         <tr><td>模型列表里只有几个 GPT，找不到 key 里的模型</td><td>下载最新的安装文件重新跑一次</td></tr>
         <tr><td>每一轮都报 <code>403</code></td><td>默认模型你的 key 没开：下载最新的安装文件重新跑一次（会自动换成你能用的），或 <code>/model</code> 手动选</td></tr>
-        <tr><td>一直转圈 / 报 <code>502</code></td><td>换回 <code>gpt-5.6-terra</code>，把模型名和时间发给运维</td></tr>
+        <tr><td>某个模型不回话 / 一直转圈 / 报 <code>502</code></td><td>先发 <b>测模型</b> 看它是不是暂时不可用；换回 <code>gpt-5.6-terra</code>，把模型名和时间发给运维</td></tr>
         <tr><td>用着用着被踢下线</td><td>别同时开多个 Codex</td></tr>
       </tbody>
     </table></div>
@@ -410,11 +430,11 @@ bash ./claude-doctor-mac.command</code></pre>
       <thead><tr><th>现象</th><th>怎么办</th></tr></thead>
       <tbody>
         <tr><td>报 <code>401</code></td><td>key 错了，去 key 表复制整格，重新跑安装文件</td></tr>
-        <tr><td>报 <code>403</code> 或 <code>key not allowed to access model</code></td><td>你的 key 没开通这个模型，换一个或找运维开通</td></tr>
+        <tr><td>报 <code>403</code> 或 <code>key not allowed to access model</code>，或提示额度用完</td><td>发 <b>查余额</b> 看额度；没开通的模型换一个或找运维开通</td></tr>
         <tr><td>命令行 <code>/model</code> 里只有几个 Claude</td><td>关掉终端新开一个</td></tr>
         <tr><td>App 提示「App unavailable」，或发消息很慢、一直不回</td><td>完全退出 App，重新跑安装文件，再打开；还不行找运维</td></tr>
         <tr><td>App 里只能选一个模型</td><td>把 App 完全退出再打开</td></tr>
-        <tr><td>一直转圈 / 报 <code>502</code></td><td>换回 <code>claude-opus-5-5</code>，把模型名和时间发给运维</td></tr>
+        <tr><td>某个模型不回话 / 一直转圈 / 报 <code>502</code></td><td>先发 <b>测模型</b> 看它是不是暂时不可用；换回 <code>claude-opus-5-5</code>，把模型名和时间发给运维</td></tr>
       </tbody>
     </table></div>
     <p class="sub">还不行：把自检报告发给运维。</p>
@@ -453,6 +473,13 @@ bash ./claude-doctor-mac.command</code></pre>
     document.getElementById('os-other').textContent=NAMES[v==='mac'?'win':'mac'];
     if(save)set('oneclick-os',v);
   }
+  q('kbd[data-copy]').forEach(function(k){
+    k.addEventListener('click',function(){
+      var t=k.getAttribute('data-copy'), old=k.textContent;
+      function done(){k.textContent='已复制';k.classList.add('done');setTimeout(function(){k.textContent=old;k.classList.remove('done')},1500)}
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done,function(){})}
+    });
+  });
   q('pre').forEach(function(pre){
     var box=document.createElement('div'); box.className='codebox'+(pre.classList.contains('mac-only')?' mac-only':pre.classList.contains('win-only')?' win-only':'');
     pre.parentNode.insertBefore(box,pre); box.appendChild(pre);

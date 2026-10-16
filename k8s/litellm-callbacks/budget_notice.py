@@ -50,7 +50,7 @@ key 日额度（claude-code-* $70/天、cursor-* $100/天，北京 0 点重置�
 匹配规则（①⑤）
 ----------------
 取最后一条 user 消息的文本，**按行 strip 后全等**命中 {"/查余额","查余额",
-"/quota"}（quota 不分大小写）才触发；⑤ 同理，命中
+"/quota","quota","cye","/cye"}（英文不分大小写）才触发；⑤ 同理，命中
 {"/测模型","测模型","/testmodels"}。按行而非按整条消息，是因为 Cursor /
 Claude Code 都会把用户输入包进模板（文件上下文、system-reminder 等），整条
 全等永远不命中；按行全等又比子串包含安全 —— 正文里聊到「查余额」三个字不会
@@ -195,7 +195,9 @@ def _quota_gated(user_api_key_dict: Any) -> bool:
 # ------------------------------------------------------- request text 提取
 
 _TRIGGERS_EXACT = ("/查余额", "查余额")
-_TRIGGERS_CI = ("/quota",)
+# 裸词 quota / cye（「查余额」拼音首字母）2026-10-16 加：Cursor 把 `/` 开头的输入当命令
+# 面板拦掉，英文/拼音裸词打字最快。仍是整行全等（不分大小写），句子里出现不触发。
+_TRIGGERS_CI = ("/quota", "quota", "cye", "/cye")
 
 # ⑤ /测模型：逐个真打这把 key 白名单里的模型，报谁活谁死。
 _PROBE_TRIGGERS_EXACT = ("/测模型", "测模型")
@@ -699,9 +701,17 @@ def _wrap_models(models: str, width: int) -> List[str]:
     return chunks or [""]
 
 
-# TTFT 一条查询取回「今天这把 key 用过的每个模型」的 P50/P90。上限只为防一把 key
-# 一天里打了几十个模型时把消息撑爆；今日有流量的模型数远小于 key 的白名单长度
-# （实测 cursor-liuguoxian-std：白名单 41 个，今日有流量 5 个）。
+# 一条查询取回「今天这把 key 用过的每个模型」的花费、次数、TTFT P50/P90，外加
+# 全部模型的**今日累计消费**。上限只为防一把 key 一天里打了几十个模型时把消息撑爆；
+# 今日有流量的模型数远小于 key 的白名单长度（实测 cursor-liuguoxian-std：白名单
+# 41 个，今日有流量 5 个）。累计消费用窗口函数在 LIMIT **之前**求和，截掉的行也算进去。
+#
+# 为什么今日累计消费要从明细实算、不直接用 key 的 `spend`：`spend` 是「上次重置以来」
+# 的额度计数器 —— 手工重置（litellm-198-cursor-reset-all.sh 置 0）后偏小，日重置任务
+# 滞后时偏大（还挂着昨天的），没设 budget_duration 的 key 则是终身累计。它决定会不会
+# 被拦，回答不了「今天到底花了多少」。两个数都显示，各管各的。
+# ⚠️ 前提是今天的明细在：spendlog-retention 只删 10 天前的行、72h 前只置空正文
+# （spend 列不动），所以平时今天是全的；盘满应急 TRUNCATE 当天会偏小。
 _TTFT_MAX_ROWS = 15
 
 # 🔴 这条 SQL 的两个写法都是 2026-09-24 在 198 prod 库（litellm-db-0，
@@ -728,22 +738,34 @@ _TTFT_MAX_ROWS = 15
 # pool_timeout 又保证这条查询在有竞争时永远拿不到连接 → 抛异常 → 被 except 吞成
 # 空串。用户面症状就是「查余额很慢，而且 TTFT 那段根本不出现」。PG 侧
 # `statement_timeout = 0`，不会有人来把慢查询掐掉。
-_TTFT_SQL = '''SELECT "model_group" AS g,
-                      COUNT(*)::int AS n,
-                      ROUND((PERCENTILE_CONT(0.50) WITHIN GROUP (
-                        ORDER BY EXTRACT(EPOCH FROM ("completionStartTime" - "startTime"))
-                      ))::numeric, 2) AS p50,
-                      ROUND((PERCENTILE_CONT(0.90) WITHIN GROUP (
-                        ORDER BY EXTRACT(EPOCH FROM ("completionStartTime" - "startTime"))
-                      ))::numeric, 2) AS p90
-               FROM "LiteLLM_SpendLogs"
-               WHERE "api_key" = $1
-                 AND "startTime" >=
-                     DATE_TRUNC('day', NOW() + INTERVAL '8 hours') - INTERVAL '8 hours'
-                 AND "completionStartTime" IS NOT NULL
-                 AND "completionStartTime" > "startTime"
+#
+# 花费要算**全部**行（非流式、失败行也可能计费），TTFT 只算有正区间的流式行 ——
+# 所以流式条件不能再放 WHERE，挪进 CASE 产出 ttft 列（NULL 被 PERCENTILE_CONT /
+# COUNT(列) 自动忽略）。扫的行仍由同一个 api_key + startTime 条件决定。
+_TTFT_SQL = '''WITH t AS (
+                 SELECT "model_group" AS g,
+                        COALESCE("spend", 0) AS s,
+                        CASE WHEN "completionStartTime" IS NOT NULL
+                              AND "completionStartTime" > "startTime"
+                             THEN EXTRACT(EPOCH FROM ("completionStartTime" - "startTime"))
+                        END AS ttft
+                 FROM "LiteLLM_SpendLogs"
+                 WHERE "api_key" = $1
+                   AND "startTime" >=
+                       DATE_TRUNC('day', NOW() + INTERVAL '8 hours') - INTERVAL '8 hours'
+               )
+               SELECT g,
+                      COUNT(*)::int AS calls,
+                      COUNT(ttft)::int AS n,
+                      ROUND(SUM(s)::numeric, 6) AS cost,
+                      ROUND((SUM(SUM(s)) OVER ())::numeric, 6) AS total_cost,
+                      ROUND((PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY ttft))::numeric, 2)
+                        AS p50,
+                      ROUND((PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY ttft))::numeric, 2)
+                        AS p90
+               FROM t
                GROUP BY 1
-               ORDER BY n DESC
+               ORDER BY cost DESC, calls DESC
                LIMIT ''' + str(_TTFT_MAX_ROWS)
 
 
@@ -785,12 +807,34 @@ def _display_name_for_group(group: str, aliases: dict) -> str:
     return " / ".join(sorted(hits))
 
 
-async def _ttft_text(user_api_key_dict: Any) -> str:
-    """今日 per-model TTFT P50/P90，显示**用户自己发的模型名**。
+def _fmt_cost(value: Any) -> str:
+    """$ 两位小数；不足 1 分但非零的写「<$0.01」，免得看着像没花钱。"""
+    try:
+        c = float(value or 0.0)
+    except Exception:
+        c = 0.0
+    if 0.0 < c < 0.005:
+        return "<$0.01"
+    return f"${c:.2f}"
 
+
+def _fmt_secs(value: Any) -> str:
+    """TTFT 秒数；只有非流式请求的模型没有 TTFT，显示「—」。"""
+    if value is None:
+        return "—"
+    return f"{float(value):.2f}"
+
+
+async def _today_stats(user_api_key_dict: Any) -> Tuple[str, str]:
+    """返回 (今日累计消费那一行, 今日按模型的表)，一条 SQL、同一份 60s 缓存。
+
+    今日累计消费 = 北京时间今天 00:00 起本 key 全部明细行的 spend 之和（窗口函数在
+    LIMIT 之前求和，模型多于 _TTFT_MAX_ROWS 也不少算）。为什么不用 key 的 `spend`
+    见 `_TTFT_SQL` 上方注释。
+
+    表：每个模型一行，花费/次数算全部请求；TTFT P50/P90 只算流式请求 ——
     `completionStartTime` 由流式桥在上游第一个内容事件时写入，所以
-    `completionStartTime - startTime` 就是 TTFT。没有正区间的行（非流式、
-    失败行）全部排除 —— 它们没有 TTFT 可言。
+    `completionStartTime - startTime` 就是 TTFT，没有正区间的行没有 TTFT 可言。
 
     分组列用 `model_group`（请求名）而不是 `model`（落点名），但 per-key alias
     的 key 上 `model_group` **已经是改写后的名字**了（用户发
@@ -803,24 +847,30 @@ async def _ttft_text(user_api_key_dict: Any) -> str:
     if not token:
         # 只认 api_key（= VerificationToken.token 的哈希）。alias 那条路走
         # metadata JSON，实测 13 分钟，宁可不显示也不能再挂回去。
-        return "\n⚡ TTFT 今日：取不到本 key 标识，无法统计。"
+        return ("\n💰 今日累计消费：取不到本 key 标识，无法统计。", "")
     cached = _TTFT_CACHE.get(token)
     now = time.monotonic()
     if cached and now - cached[0] < _TTFT_CACHE_TTL:
         return cached[1]
 
-    def _keep(text: str) -> str:
-        _TTFT_CACHE[token] = (now, text)
-        return text
+    def _keep(result: Tuple[str, str]) -> Tuple[str, str]:
+        _TTFT_CACHE[token] = (now, result)
+        return result
 
+    unavailable = ("\n💰 今日累计消费：查询暂不可用，请稍后重试。", "")
     try:
         from litellm.proxy.proxy_server import prisma_client
         if prisma_client is None:
-            return _keep("\n⚡ TTFT 今日：查询暂不可用，请稍后重试。")
+            return _keep(unavailable)
 
         rows = await prisma_client.db.query_raw(_TTFT_SQL, token)
+        total = float(rows[0].get("total_cost") or 0.0) if rows else 0.0
+        spend_line = (
+            f"\n💰 今日累计消费 {_fmt_cost(total)}"
+            f"（北京时间 00:00 起按请求明细实算，含额度重置前的部分）"
+        )
         if not rows:
-            return _keep("\n⚡ TTFT 今日：暂无有效样本（今日尚无流式请求）。")
+            return _keep((spend_line, ""))
 
         aliases = getattr(user_api_key_dict, "aliases", None)
         if not isinstance(aliases, dict):
@@ -830,33 +880,33 @@ async def _ttft_text(user_api_key_dict: Any) -> str:
             group = row.get("g") or ""
             entries.append((
                 _display_name_for_group(group, aliases) or "（未知模型）",
-                f"{float(row['p50']):.2f}",
-                f"{float(row['p90']):.2f}",
-                str(row["n"]),
+                _fmt_cost(row.get("cost")),
+                str(row.get("calls") or 0),
+                _fmt_secs(row.get("p50")),
+                _fmt_secs(row.get("p90")),
             ))
 
-        w_name = max([_display_width("模型")] + [_display_width(e[0]) for e in entries])
-        w_p50 = max([len("P50")] + [len(e[1]) for e in entries])
-        w_p90 = max([len("P90")] + [len(e[2]) for e in entries])
-        w_n = max([_display_width("次数")] + [len(e[3]) for e in entries])
-        # 管道表：`---:` 让渲染器把三个数字列右对齐（小数点自然对齐）。
+        heads = ("模型", "花费", "次数", "P50", "P90")
+        widths = [max([_display_width(h)] + [_display_width(e[i]) for e in entries])
+                  for i, h in enumerate(heads)]
+        # 管道表：`---:` 让渲染器把数字列右对齐（小数点自然对齐）。
         # padding 只为复制出来的源文本好看，不影响渲染结果。
+        def _row(cells) -> str:
+            out = [_pad(_escape_pipes(cells[0]), widths[0])]
+            out += [_pad(c, w, True) for c, w in zip(cells[1:], widths[1:])]
+            return "| " + " | ".join(out) + " |"
+
         lines = [
-            "\n\n⚡ TTFT 今日（秒，仅今日有流量）\n",
-            f"| {_pad('模型', w_name)} | {_pad('P50', w_p50, True)}"
-            f" | {_pad('P90', w_p90, True)} | {_pad('次数', w_n, True)} |",
-            f"|{'-' * (w_name + 2)}|{'-' * (w_p50 + 1)}:"
-            f"|{'-' * (w_p90 + 1)}:|{'-' * (w_n + 1)}:|",
+            "\n\n📈 今日按模型（花费、次数含全部请求；TTFT 单位秒，只算流式请求）\n",
+            _row(heads),
+            f"|{'-' * (widths[0] + 2)}|"
+            + "|".join(f"{'-' * (w + 1)}:" for w in widths[1:]) + "|",
         ]
-        for name, p50, p90, count in entries:
-            lines.append(
-                f"| {_pad(_escape_pipes(name), w_name)} | {_pad(p50, w_p50, True)}"
-                f" | {_pad(p90, w_p90, True)} | {_pad(count, w_n, True)} |"
-            )
-        return _keep("\n".join(lines))
+        lines += [_row(e) for e in entries]
+        return _keep((spend_line, "\n".join(lines)))
     except Exception as exc:
-        _log.warning("budget_notice: TTFT query unavailable %r", exc)
-        return _keep("\n⚡ TTFT 今日：查询暂不可用，请稍后重试。")
+        _log.warning("budget_notice: today stats query unavailable %r", exc)
+        return _keep(unavailable)
 
 
 # ------------------------------------------------------- ⑤ /测模型 逐个真打
@@ -2168,16 +2218,17 @@ class BudgetNotice(CustomLogger):
                 _log.warning("budget_notice: probe query alias=%s route=%s", alias, v)
                 text = await _probe_text(user_api_key_dict)
             else:
-                family_text, ttft_text = await asyncio.gather(
+                family_text, (spend_line, model_table) = await asyncio.gather(
                     # 只过窄门的 key 不受 ④ 约束，就不该在回复里看到系列额度 ——
                     # 报一个不执法的数字只会让人以为自己被限了。
                     _family_usage_lines(token if gated else "", user_api_key_dict),
-                    _ttft_text(user_api_key_dict),
+                    _today_stats(user_api_key_dict),
                 )
-                # 顺序：额度 → 系列 → TTFT → 模型清单。TTFT 是用户主动要的那段，放在
-                # 12 行模型清单**前面**，不然它被挤到消息尾部要翻屏才看得到。
-                text = (_usage_text(user_api_key_dict) + family_text + ttft_text
-                        + _model_catalog_text(user_api_key_dict))
+                # 顺序：额度 → 今日累计消费 → 系列 → 按模型表 → 模型清单。额度计数器
+                # 和实际消费紧挨着，两个数一眼对照；按模型表放在 12 行模型清单**前面**，
+                # 不然它被挤到消息尾部要翻屏才看得到。
+                text = (_usage_text(user_api_key_dict) + spend_line + family_text
+                        + model_table + _model_catalog_text(user_api_key_dict))
             if v in ("anthropic_messages", "aanthropic_messages"):
                 from litellm.exceptions import ModifyResponseException
 

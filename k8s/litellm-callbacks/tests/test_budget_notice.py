@@ -281,8 +281,14 @@ def _pre(data, call_type, key=None):
 
 class TriggerMatchTest(unittest.TestCase):
     def test_exact_lines_trigger(self):
-        for t in ("/查余额", "查余额", "/quota", "/QUOTA", "  /查余额  "):
+        for t in ("/查余额", "查余额", "/quota", "/QUOTA", "  /查余额  ",
+                  "quota", "Quota", "cye", "CYE", "/cye",
+                  "<user_query>cye</user_query>", "ctx\n<user_query>quota</user_query>"):
             self.assertTrue(M._is_quota_query(t), t)
+
+    def test_bare_words_inside_sentence_do_not_trigger(self):
+        for t in ("my quota is low", "cye 是什么", "check quota please", "quotas", "cyes"):
+            self.assertFalse(M._is_quota_query(t), t)
 
     def test_wrapped_own_line_triggers(self):
         text = "<context>...</context>\n/查余额\n<system-reminder>x</system-reminder>"
@@ -301,7 +307,7 @@ class TriggerMatchTest(unittest.TestCase):
             self.assertFalse(M._is_quota_query(t), t)
 
     def test_substring_does_not_trigger(self):
-        for t in ("帮我看下 /查余额 的实现", "查余额功能坏了", "quota", "/quotas",
+        for t in ("帮我看下 /查余额 的实现", "查余额功能坏了", "/quotas",
                   "", "x" * 30000):
             self.assertFalse(M._is_quota_query(t), t[:40])
 
@@ -754,30 +760,71 @@ class TTFTTest(unittest.TestCase):
         else:
             sys.modules["litellm.proxy.proxy_server"] = self.old_proxy_server
 
-    def test_per_model_ttft_is_rendered_and_cached(self):
-        calls = []
-
+    @staticmethod
+    def _db(rows, calls=None):
         class DB:
             async def query_raw(self, query, value):
-                calls.append((query, value))
-                return [
-                    {"g": "gpt-5.6-sol", "n": 662, "p50": 1.25, "p90": 2.53},
-                    {"g": "sa-grok-4.6", "n": 1, "p50": 17.51, "p90": 17.51},
-                ]
+                if calls is not None:
+                    calls.append((query, value))
+                if isinstance(rows, BaseException):
+                    raise rows
+                return rows
+        return types.SimpleNamespace(db=DB())
 
-        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+    @staticmethod
+    def _row(g, calls, n, cost, total, p50, p90):
+        return {"g": g, "calls": calls, "n": n, "cost": cost,
+                "total_cost": total, "p50": p50, "p90": p90}
+
+    def _stats(self, key):
+        return asyncio.run(M._today_stats(key))
+
+    def test_per_model_table_and_total_are_rendered_and_cached(self):
+        calls = []
+        self.proxy_server.prisma_client = self._db([
+            self._row("gpt-5.6-sol", 662, 662, 12.345, 12.845, 1.25, 2.53),
+            self._row("sa-grok-4.6", 1, 1, 0.5, 12.845, 17.51, 17.51),
+        ], calls)
         key = _Key(alias="cursor-u1", token="hashed-token")
 
-        first = asyncio.run(M._ttft_text(key))
-        second = asyncio.run(M._ttft_text(key))
+        first = self._stats(key)
+        second = self._stats(key)
+        spend_line, table = first
 
-        self.assertIn("| gpt-5.6-sol |  1.25 |  2.53 |  662 |", first)
-        self.assertIn("| sa-grok-4.6 | 17.51 | 17.51 |    1 |", first)
+        self.assertIn("今日累计消费 $12.85", spend_line)
+        self.assertIn("| gpt-5.6-sol | $12.35 |  662 |  1.25 |  2.53 |", table)
+        self.assertIn("| sa-grok-4.6 |  $0.50 |    1 | 17.51 | 17.51 |", table)
         self.assertEqual(first, second)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1], "hashed-token")
 
-    def test_ttft_sql_keeps_the_two_measured_performance_constraints(self):
+    def test_total_comes_from_window_sum_not_from_visible_rows(self):
+        """模型数超过 _TTFT_MAX_ROWS 时表被 LIMIT 截断，总额必须是截断前的全量。"""
+        self.proxy_server.prisma_client = self._db([
+            self._row("gpt-5.6-sol", 3, 3, 1.0, 9.0, 1.0, 2.0),
+        ])
+        spend_line, _ = self._stats(_Key(alias="cursor-u1", token="tok-w"))
+        self.assertIn("$9.00", spend_line)
+        self.assertNotIn("$1.00", spend_line)
+
+    def test_nonstream_only_model_has_cost_but_no_ttft(self):
+        """只有非流式请求的模型：花费照算，TTFT 显示「—」而不是 0 或报错。"""
+        self.proxy_server.prisma_client = self._db([
+            self._row("wangsu-glm-5.2", 4, 0, 0.2, 0.2, None, None),
+        ])
+        spend_line, table = self._stats(_Key(alias="carher-14", token="tok-ns"))
+        self.assertIn("$0.20", spend_line)
+        self.assertIn("| wangsu-glm-5.2 | $0.20 |    4 |  — |  — |", table)
+
+    def test_tiny_nonzero_cost_is_not_shown_as_zero(self):
+        self.proxy_server.prisma_client = self._db([
+            self._row("gpt-5.4-mini", 2, 2, 0.001, 0.001, 0.5, 0.6),
+        ])
+        spend_line, table = self._stats(_Key(alias="cursor-u1", token="tok-t"))
+        self.assertIn("<$0.01", spend_line)
+        self.assertIn("<$0.01", table)
+
+    def test_sql_keeps_the_two_measured_performance_constraints(self):
         """把 2026-09-24 实测的两条硬约束钉住 —— 违反任一条都是 1000x 级退化。
 
         约束来自 198 prod 库实测（见 `_TTFT_SQL` 上方注释）：
@@ -795,27 +842,28 @@ class TTFTTest(unittest.TestCase):
         # 分组列必须是请求名 model_group，不是落点名 model
         self.assertIn('"model_group"', sql)
 
-    def test_ttft_query_failure_is_visible(self):
-        class DB:
-            async def query_raw(self, query, value):
-                raise RuntimeError("db unavailable")
+    def test_sql_counts_cost_on_every_row_not_only_streaming(self):
+        """流式条件只能出现在 TTFT 的 CASE 里；放进 WHERE 会把非流式请求的钱漏掉。"""
+        sql = M._TTFT_SQL
+        where = sql[sql.index("WHERE"):sql.index(")\n", sql.index("WHERE"))]
+        self.assertNotIn("completionStartTime", where)
+        self.assertIn('SUM(SUM(s)) OVER ()', sql)
+        self.assertLess(sql.index("OVER ()"), sql.index("LIMIT"))
 
-        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
-        text = asyncio.run(
-            M._ttft_text(_Key(alias="cursor-u1", token="hashed-token")))
-        self.assertIn("查询暂不可用", text)
+    def test_query_failure_is_visible(self):
+        self.proxy_server.prisma_client = self._db(RuntimeError("db unavailable"))
+        spend_line, table = self._stats(_Key(alias="cursor-u1", token="hashed-token"))
+        self.assertIn("今日累计消费", spend_line)
+        self.assertIn("查询暂不可用", spend_line)
+        self.assertEqual(table, "")
 
-    def test_ttft_no_rows_says_so_instead_of_vanishing(self):
-        class DB:
-            async def query_raw(self, query, value):
-                return []
+    def test_no_rows_shows_zero_spend_and_no_table(self):
+        self.proxy_server.prisma_client = self._db([])
+        spend_line, table = self._stats(_Key(alias="cursor-u1", token="hashed-token"))
+        self.assertIn("今日累计消费 $0.00", spend_line)
+        self.assertEqual(table, "")
 
-        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
-        text = asyncio.run(
-            M._ttft_text(_Key(alias="cursor-u1", token="hashed-token")))
-        self.assertIn("暂无有效样本", text)
-
-    def test_ttft_shows_the_name_the_user_sent_not_the_billed_one(self):
+    def test_shows_the_name_the_user_sent_not_the_billed_one(self):
         """🔴 用户发 `anthropic.claude-opus-5`，账里记的是 `kiro-claude-opus-5`。
 
         2026-09-27 在 198 prod 库实测：用户发的原始名 **SpendLogs 一列都没存**
@@ -823,19 +871,15 @@ class TTFTTest(unittest.TestCase):
         `metadata->>'original_model_group'` 全是改写后的），所以只能靠 key 自己
         的 alias 表反查。这条测试就是钉住「反查真的发生了」。
         """
-        class DB:
-            async def query_raw(self, query, value):
-                return [
-                    {"g": "kiro-claude-opus-5", "n": 8, "p50": 7.79, "p90": 12.85},
-                    {"g": "ag-gemini-3.8-flash", "n": 3, "p50": 3.05, "p90": 3.24},
-                ]
-
-        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        self.proxy_server.prisma_client = self._db([
+            self._row("kiro-claude-opus-5", 8, 8, 3.0, 3.1, 7.79, 12.85),
+            self._row("ag-gemini-3.8-flash", 3, 3, 0.1, 3.1, 3.05, 3.24),
+        ])
         key = _Key(alias="claude-code-liuguoxian-50gj", token="tok-50gj", aliases={
             "anthropic.claude-opus-5": "kiro-claude-opus-5",
             "claude-gemini-3.8-flash": "ag-gemini-3.8-flash",
         })
-        text = asyncio.run(M._ttft_text(key))
+        _, text = self._stats(key)
 
         self.assertIn("anthropic.claude-opus-5", text)
         self.assertIn("claude-gemini-3.8-flash", text)
@@ -843,50 +887,52 @@ class TTFTTest(unittest.TestCase):
         self.assertNotIn("kiro-claude-opus-5", text)
         self.assertNotIn("ag-gemini-3.8-flash", text)
 
-    def test_ttft_unmapped_group_is_shown_as_is(self):
+    def test_unmapped_group_is_shown_as_is(self):
         """没有人映到它 ⇒ 它本身就是用户发的名字（`claude-grok-4.6` 实测如此）。"""
-        class DB:
-            async def query_raw(self, query, value):
-                return [{"g": "claude-grok-4.6", "n": 2, "p50": 4.57, "p90": 5.15}]
-
-        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        self.proxy_server.prisma_client = self._db([
+            self._row("claude-grok-4.6", 2, 2, 0.3, 0.3, 4.57, 5.15)])
         key = _Key(alias="claude-code-liuguoxian-50gj", token="tok-a", aliases={
             "anthropic.claude-opus-5": "kiro-claude-opus-5",
         })
-        self.assertIn("claude-grok-4.6", asyncio.run(M._ttft_text(key)))
+        self.assertIn("claude-grok-4.6", self._stats(key)[1])
 
-    def test_ttft_many_to_one_lists_all_candidates(self):
+    def test_many_to_one_lists_all_candidates(self):
         """⚠️ 198 全库 1623 把带 alias 的 key 里 930 把有多对一。
 
         账里只剩落点名，**倒不回去是哪个公开名** —— 那个信息在成功行里根本不存在。
         这时列出全部候选，绝不挑一个冒充确定值。
         """
-        class DB:
-            async def query_raw(self, query, value):
-                return [{"g": "claude-gpt-5.6-terra", "n": 9, "p50": 2.0, "p90": 3.0}]
-
-        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        self.proxy_server.prisma_client = self._db([
+            self._row("claude-gpt-5.6-terra", 9, 9, 1.0, 1.0, 2.0, 3.0)])
         key = _Key(alias="claude-code-liuguoxian03", token="tok-03", aliases={
             "anthropic.claude-opus-5": "claude-gpt-5.6-terra",
             "anthropic.claude-opus-4-6": "claude-gpt-5.6-terra",
             "anthropic.claude-sonnet-5": "claude-gpt-5.6-terra",
         })
-        text = asyncio.run(M._ttft_text(key))
+        text = self._stats(key)[1]
         for n in ("anthropic.claude-opus-5", "anthropic.claude-opus-4-6",
                   "anthropic.claude-sonnet-5"):
             self.assertIn(n, text)
         self.assertNotIn("claude-gpt-5.6-terra", text)
 
-    def test_ttft_key_without_alias_table_is_unchanged(self):
+    def test_key_without_alias_table_is_unchanged(self):
         """没有 alias 表的 key（多数 key）行为零变化。"""
-        class DB:
-            async def query_raw(self, query, value):
-                return [{"g": "gpt-5.6-sol", "n": 5, "p50": 1.25, "p90": 2.53}]
+        self.proxy_server.prisma_client = self._db([
+            self._row("gpt-5.6-sol", 5, 5, 0.4, 0.4, 1.25, 2.53)])
+        self.assertIn("| gpt-5.6-sol |",
+                      self._stats(_Key(alias="cursor-u1", token="tok-b"))[1])
 
-        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
-        self.assertIn(
-            "| gpt-5.6-sol |",
-            asyncio.run(M._ttft_text(_Key(alias="cursor-u1", token="tok-b"))))
+    def test_quota_reply_keeps_counter_line_then_today_spend(self):
+        """整条 /查余额 回复：额度计数器（「今日用量」锚点不动）在前，今日累计消费紧跟。"""
+        self.proxy_server.prisma_client = self._db([
+            self._row("gpt-5.6-sol", 5, 5, 4.2, 4.2, 1.25, 2.53)])
+        d = {"messages": [{"role": "user", "content": "查余额"}]}
+        out = _pre(d, "acompletion", key=_Key(alias="cursor-u1", token="tok-q"))
+        text = out["mock_response"]
+        self.assertIn("今日用量", text)
+        self.assertIn("今日累计消费 $4.20", text)
+        self.assertLess(text.index("今日用量"), text.index("今日累计消费"))
+        self.assertLess(text.index("今日累计消费"), text.index("📈 今日按模型"))
 
     def test_display_name_helper_is_pure(self):
         f = M._display_name_for_group

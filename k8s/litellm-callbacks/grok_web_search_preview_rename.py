@@ -14,6 +14,16 @@ A/B（sa-grok-4.20 直打，问 2026 诺贝尔物理学奖）：
 type 以 ``web_search_preview`` 开头的项，换成干净的 ``{"type":"web_search"}``
 （preview 专属字段如 ``search_context_size`` / ``user_location`` 一并丢掉，x.ai 不保证认）。
 已有 ``web_search`` 时不重复追加。钩子自身出错原样放行。
+
+10-16 补 ``tool_choice``: Claude Code 的 WebSearch 经 Cursor key 发
+``tool_choice={"type":"web_search"}``（指名内置工具），x.ai 回 422
+``tool_choice: data did not match any variant of untagged enum ModelToolChoice``，
+经 sub2api 包成 502、LiteLLM 落兜底。10-15 01:12~01:16 一把 key 33/33 全失败。
+A/B（sa-grok-4.7，同一 web_search+filters 工具，关重试关兜底）：
+  {"type":"web_search"} → 422 ×3      "auto" → 200 ×3（真搜 1~2 次，答对）
+  "required"            → 200         不带   → 200
+改成 ``"required"``：保留「必须调工具」的原意，tools 里只有搜索时等价指名。
+function 型的 ``{"type":"function","name":..}`` 不动（那是 x.ai 认的变体）。
 """
 import logging
 from typing import Any
@@ -54,13 +64,24 @@ def rename_tools(tools: Any) -> int:
     return changed
 
 
+def normalize_tool_choice(kwargs: dict) -> bool:
+    """``tool_choice`` 指名内置搜索（``{"type":"web_search[_preview…]"}``）→ ``"required"``。"""
+    tc = kwargs.get("tool_choice")
+    if isinstance(tc, dict) and str(tc.get("type") or "").startswith("web_search"):
+        kwargs["tool_choice"] = "required"
+        return True
+    return False
+
+
 class GrokWebSearchPreviewRename(CustomLogger):
     async def async_pre_call_deployment_hook(self, kwargs: dict, call_type: Any) -> Any:
         try:
             if isinstance(kwargs, dict) and _SUB2API_MARKER in _api_base(kwargs):
                 n = rename_tools(kwargs.get("tools"))
-                if n:
-                    _log.warning("grok_web_search_preview_rename: renamed=%d model=%s", n, kwargs.get("model"))
+                tc = normalize_tool_choice(kwargs)
+                if n or tc:
+                    _log.warning("grok_web_search_preview_rename: renamed=%d tool_choice_fixed=%s model=%s",
+                                 n, tc, kwargs.get("model"))
         except Exception as exc:  # 防御：改不动也绝不能拦请求
             _log.warning("grok_web_search_preview_rename error: %r", exc)
         return kwargs

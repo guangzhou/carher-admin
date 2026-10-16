@@ -101,6 +101,34 @@ class RenameTools(unittest.TestCase):
             out = run(dict(kw))
             self.assertIsInstance(out, dict)
 
+    def test_tool_choice_named_web_search_becomes_required(self):
+        # 线上原样形状（10-15 17:12 cursor-heyinchuan-qnv5，x.ai 422 ModelToolChoice）
+        tools = [{"type": "web_search", "filters": {"allowed_domains": ["code.claude.com", "github.com"]}}]
+        kw = {"api_base": SUB2API, "tools": tools, "tool_choice": {"type": "web_search"}}
+        run(kw)
+        self.assertEqual(kw["tool_choice"], "required")
+        self.assertEqual(kw["tools"], [{"type": "web_search", "filters": {"allowed_domains": ["code.claude.com", "github.com"]}}])
+
+    def test_tool_choice_named_preview_becomes_required_and_tool_renamed(self):
+        kw = {"api_base": SUB2API, "tools": [{"type": "web_search_preview"}],
+              "tool_choice": {"type": "web_search_preview"}}
+        run(kw)
+        self.assertEqual(kw["tool_choice"], "required")
+        self.assertEqual(kw["tools"], [{"type": "web_search"}])
+
+    def test_other_tool_choice_untouched(self):
+        fn_choice = {"type": "function", "name": "exec_command"}
+        for tc in ("auto", "required", "none", fn_choice, None):
+            kw = {"api_base": SUB2API, "tools": [{"type": "web_search"}], "tool_choice": tc}
+            run(kw)
+            self.assertEqual(kw["tool_choice"], tc)
+
+    def test_tool_choice_gate_non_sub2api_untouched(self):
+        kw = {"api_base": "https://api.openai.com/v1", "tools": [{"type": "web_search"}],
+              "tool_choice": {"type": "web_search"}}
+        run(kw)
+        self.assertEqual(kw["tool_choice"], {"type": "web_search"})
+
     def test_returns_same_kwargs_object(self):
         kw = {"api_base": SUB2API, "tools": [{"type": "web_search_preview"}]}
         self.assertIs(run(kw), kw)

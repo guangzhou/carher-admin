@@ -740,7 +740,13 @@ const LOCATORS = {
 };
 
 // keepmine-fill 插入的那段(变量名 v 是目录数组;只用 __cx 前缀的局部名,不碰原代码的 minify 名)
-const KEEPFILL = (v) => '/*@cxteam-keepfill*/(()=>{try{const __cxs=this._reactiveStorageService.applicationUserPersistentStorage,__cxu=(__cxs.aiSettings&&__cxs.aiSettings.userAddedModels)||[],__cxh=new Set(' + v + '.map(__cxm=>__cxm.name));for(const __cxn of __cxu){if(typeof __cxn!=="string"||!__cxn||__cxh.has(__cxn))continue;__cxh.add(__cxn);' + v + '.push({name:__cxn,defaultOn:!1,supportsAgent:!0,degradationStatus:0,supportsThinking:!0,supportsImages:!0,supportsMaxMode:!0,supportsNonMaxMode:!0,serverModelName:__cxn,isRecommendedForBackgroundComposer:!1,supportsPlanMode:!0,supportsSandboxing:!0,isUserAdded:!0,inputboxShortModelName:__cxn,parameterDefinitions:[],variants:[],legacySlugs:[],idAliases:[],namedModelSectionIndex:1,cloudAgentEffortModes:[],modelPickerBadges:[]})}}catch(__cxe){}})(),';
+/* 档位模板(2026-10-16):本机目录里我们 21 个带档位的名字的 parameterDefinitions/variants 等原样快照,
+   见 cursor_tier_catalog.json。KEEPFILL 把它当字面量塞进 bundle;JSON 是合法 JS 表达式,里面没有 *\/ 和行分隔符。 */
+const TIER_CATALOG_JSON = (() => { try { return fs.readFileSync(path.join(__dirname, "cursor_tier_catalog.json"), "utf8").trim(); }
+  catch (e) { return "{}"; } })();
+// v1 整段(变量名在第 1 组),只用于识别老机器上已打的 v1 并原地换成 v2
+const KEEPFILL_V1_RX = /\/\*@cxteam-keepfill\*\/\(\(\)=>\{try\{const __cxs=.*?__cxh=new Set\(([A-Za-z_$][A-Za-z0-9_$]*)\.map\(.*?\}catch\(__cxe\)\{\}\}\)\(\),/g;
+const KEEPFILL = (v) => '/*@cxteam-keepfill2*/(()=>{try{const __cxs=this._reactiveStorageService.applicationUserPersistentStorage,__cxu=(__cxs.aiSettings&&__cxs.aiSettings.userAddedModels)||[],__cxt=globalThis.__cxTiers||(globalThis.__cxTiers=JSON.parse(@@TIERS@@)),__cxh=new Map(@@V@@.map((__cxm,__cxi)=>[__cxm.name,__cxi]));for(const __cxn of __cxu){if(typeof __cxn!=="string"||!__cxn)continue;const __cxk=__cxt[__cxn];if(__cxh.has(__cxn)){const __cxi=__cxh.get(__cxn),__cxo=@@V@@[__cxi];if(__cxk&&!(__cxo.variants&&__cxo.variants.length))@@V@@[__cxi]={...__cxo,...__cxk,name:__cxn,isUserAdded:!0};continue}__cxh.set(__cxn,@@V@@.length);@@V@@.push({name:__cxn,defaultOn:!1,supportsAgent:!0,degradationStatus:0,supportsThinking:!0,supportsImages:!0,supportsMaxMode:!0,supportsNonMaxMode:!0,serverModelName:__cxn,isRecommendedForBackgroundComposer:!1,supportsPlanMode:!0,supportsSandboxing:!0,inputboxShortModelName:__cxn,parameterDefinitions:[],variants:[],legacySlugs:[],idAliases:[],namedModelSectionIndex:1,cloudAgentEffortModes:[],modelPickerBadges:[],...(__cxk||{}),isUserAdded:!0})}}catch(__cxe){}})(),'.split("@@V@@").join(v).split("@@TIERS@@").join(JSON.stringify(TIER_CATALOG_JSON));
 
 const PATCHES = [
   {
@@ -947,7 +953,7 @@ const PATCHES = [
        走不走我们的 key 只看名字前缀 + useOpenAIKey(byok-force),与条目是谁合成的无关。
      ⚠️ 只补"我们 userAddedModels 里有、目录里没有"的名字;目录里已有的一律不碰(档位等服务端数据保留)。 */
   {
-    name: "keepmine-fill", marker: "@cxteam-keepfill",
+    name: "keepmine-fill", marker: "@cxteam-keepfill2",
     rx: new RegExp("(\\{)(this\\.persistAvailableDefaultModels\\((" + ID + ")\\),this\\._reactiveStorageService\\.setApplicationUserPersistentStorage\\(\"modelPickerDisplayConfiguration\")", "g"),
     sub: (m) => m[1] + KEEPFILL(m[3]) + m[2],
   },
@@ -1606,6 +1612,15 @@ function applyPatchesToText(src, quiet) {
     // 幂等判据看 out 就够:astEdits 里待落地的都是本轮新加的 marker,
     // 每个补丁的 marker 互不相同,不会自己把自己判成"已打过"。
     if (out.includes(pt.marker)) { say("   SKIP %s(已打过)", pt.name.padEnd(11)); continue; }
+    if (pt.name === "keepmine-fill") {
+      // v1 → v2 原地升级(10-16 v1 只补缺的名字、不带档位;v2 用档位模板补档位)
+      const m1 = KEEPFILL_V1_RX.exec(out); KEEPFILL_V1_RX.lastIndex = 0;
+      if (m1) {
+        flushAst();
+        out = out.slice(0, m1.index) + KEEPFILL(m1[1]) + out.slice(m1.index + m1[0].length);
+        applied.push("keepmine-fill(升级)"); continue;
+      }
+    }
     if (pt.name === "queue-pump") {
       const old = QP_OLD.find((s) => out.includes(s));
       if (old) {
@@ -2724,7 +2739,7 @@ async function doDoctor() {
   //    `@cxteam-keepmine` 是 `@cxteam-keepmine2` 的子串,`-nocloud` 是 `-nocloudset` 的子串,
   //    裸数会互相灌水(我 09-23 在 `setUseOpenAIKey(!1)` 上已经栽过一次同形的假红)。
   // 名单不写死:直接把 bundle 里出现的所有 cxteam marker 枚举出来,免得以后加了补丁忘改这里。
-  const MUST = ["byokforce", "byokkeepon", "keepmine", "keepmine2", "keepfill", "nocloud", "nocloudset", "noagenthost"];
+  const MUST = ["byokforce", "byokkeepon", "keepmine", "keepmine2", "keepfill2", "nocloud", "nocloudset", "noagenthost"];
   for (const rel of BUNDLES) {
     const p = path.join(RES, rel);
     if (!fs.existsSync(p)) { P("  !!", rel, "不存在"); continue; }

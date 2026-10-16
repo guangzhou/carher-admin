@@ -274,9 +274,20 @@ def _gate_sub(m):
     return m.group(1) + "/*@cxteam-gate*/" + GATE_FN + "(" + m.group(2) + ")" + m.group(3)
 
 
-# keepmine-fill 插入的那段(与 js 的 KEEPFILL 逐字相同)
+# keepmine-fill 插入的那段(与 js 的 KEEPFILL 逐字相同;__CXTIERS__ 换成 cursor_tier_catalog.json 的 JS 字符串字面量)
+def _tier_catalog_json():
+    try:
+        return open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "cursor_tier_catalog.json"), encoding="utf-8").read().strip()
+    except OSError:
+        return "{}"
+TIER_CATALOG_JSON = _tier_catalog_json()
+
+
+KEEPFILL_V1_RX = re.compile(r'/\*@cxteam-keepfill\*/\(\(\)=>\{try\{const __cxs=.*?__cxh=new Set\(([A-Za-z_$][A-Za-z0-9_$]*)\.map\(.*?\}catch\(__cxe\)\{\}\}\)\(\),')
+
+
 def KEEPFILL(v):
-    return '/*@cxteam-keepfill*/(()=>{try{const __cxs=this._reactiveStorageService.applicationUserPersistentStorage,__cxu=(__cxs.aiSettings&&__cxs.aiSettings.userAddedModels)||[],__cxh=new Set(' + v + '.map(__cxm=>__cxm.name));for(const __cxn of __cxu){if(typeof __cxn!=="string"||!__cxn||__cxh.has(__cxn))continue;__cxh.add(__cxn);' + v + '.push({name:__cxn,defaultOn:!1,supportsAgent:!0,degradationStatus:0,supportsThinking:!0,supportsImages:!0,supportsMaxMode:!0,supportsNonMaxMode:!0,serverModelName:__cxn,isRecommendedForBackgroundComposer:!1,supportsPlanMode:!0,supportsSandboxing:!0,isUserAdded:!0,inputboxShortModelName:__cxn,parameterDefinitions:[],variants:[],legacySlugs:[],idAliases:[],namedModelSectionIndex:1,cloudAgentEffortModes:[],modelPickerBadges:[]})}}catch(__cxe){}})(),'
+    return '/*@cxteam-keepfill2*/(()=>{try{const __cxs=this._reactiveStorageService.applicationUserPersistentStorage,__cxu=(__cxs.aiSettings&&__cxs.aiSettings.userAddedModels)||[],__cxt=globalThis.__cxTiers||(globalThis.__cxTiers=JSON.parse(@@TIERS@@)),__cxh=new Map(@@V@@.map((__cxm,__cxi)=>[__cxm.name,__cxi]));for(const __cxn of __cxu){if(typeof __cxn!=="string"||!__cxn)continue;const __cxk=__cxt[__cxn];if(__cxh.has(__cxn)){const __cxi=__cxh.get(__cxn),__cxo=@@V@@[__cxi];if(__cxk&&!(__cxo.variants&&__cxo.variants.length))@@V@@[__cxi]={...__cxo,...__cxk,name:__cxn,isUserAdded:!0};continue}__cxh.set(__cxn,@@V@@.length);@@V@@.push({name:__cxn,defaultOn:!1,supportsAgent:!0,degradationStatus:0,supportsThinking:!0,supportsImages:!0,supportsMaxMode:!0,supportsNonMaxMode:!0,serverModelName:__cxn,isRecommendedForBackgroundComposer:!1,supportsPlanMode:!0,supportsSandboxing:!0,inputboxShortModelName:__cxn,parameterDefinitions:[],variants:[],legacySlugs:[],idAliases:[],namedModelSectionIndex:1,cloudAgentEffortModes:[],modelPickerBadges:[],...(__cxk||{}),isUserAdded:!0})}}catch(__cxe){}})(),'.replace("@@V@@", v).replace("@@TIERS@@", json.dumps(TIER_CATALOG_JSON, ensure_ascii=False))
 
 
 PATCHES = [
@@ -399,7 +410,7 @@ PATCHES = [
     # bOd() 只看模型名前缀 + useOpenAIKey,**不看 isUserAdded**。
     # keepmine-fill(2026-10-16):服务端目录没给我们的名字 ⇒ 菜单里没有。目录落盘前把
     # userAddedModels 里目录缺的名字按自定义条目形状合成塞回去。详注见 js 同名条目。
-    dict(name="keepmine-fill", marker="@cxteam-keepfill",
+    dict(name="keepmine-fill", marker="@cxteam-keepfill2",
          rx=re.compile(r'(\{)(this\.persistAvailableDefaultModels\((' + _ID + r')\),this\._reactiveStorageService\.setApplicationUserPersistentStorage\("modelPickerDisplayConfiguration")'),
          sub=lambda m: m.group(1) + KEEPFILL(m.group(3)) + m.group(2)),
     dict(name="byok-force", marker="@cxteam-byokforce",
@@ -453,6 +464,12 @@ def apply_patches_to_text(src, quiet=False):
     for pt in PATCHES:
         if pt["marker"] in out:
             say("   SKIP %-11s(已打过)" % pt["name"]); continue
+        if pt["name"] == "keepmine-fill":
+            m1 = KEEPFILL_V1_RX.search(out)
+            if m1:
+                out = out[:m1.start()] + KEEPFILL(m1.group(1)) + out[m1.end():]
+                applied.append("keepmine-fill(升级)")
+                continue
         if pt["name"] == "queue-pump":
             old = next((s for s in QP_OLD_SNIPPETS if s in out), None)
             if old is not None:

@@ -57,6 +57,7 @@ REQUIRED_MEMBERS = {
     "REMOTE-SSH-Mac.command", "UNINSTALL-Mac.command",
     "INSTALL-Windows.cmd", "UPGRADE-Windows.cmd", "REPAIR-Windows.cmd", "DOCTOR-Windows.cmd",
     "REMOTE-SSH-Windows.cmd", "UNINSTALL-Windows.cmd", "cursor_remote_ssh.cmd", "README.txt",
+    "cursor_tier_catalog.json",
 }
 JS_MEMBER = "cursor_team_setup.js"
 

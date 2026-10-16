@@ -106,7 +106,7 @@ if ($env:OPENAI_API_KEY) {
 }
 $cat = Join-Path $codexHome 'carher-models.json'
 if (Test-Path $cat) { P "模型列表      : $(([regex]::Matches((Get-Content $cat -Raw), '"slug"')).Count) 个" }
-else { P "模型列表      : 没有 carher-models.json"; Yel "模型列表没同步(选择器里只有几个 GPT):装 Python 3(勾选 Add python.exe to PATH),再重新双击 codex-windows.bat" }
+else { P "模型列表      : 没有 carher-models.json"; Yel "模型列表没同步(App 下拉里只有自带的几个 GPT,找不到 key 里的模型):下载最新的 codex-windows.bat 重跑一次" }
 $slog = Join-Path $codexHome 'carher-models-sync.log'
 if (Test-Path $slog) { P "  同步日志最后 3 行:"; Get-Content $slog -Tail 3 | ForEach-Object { P ("    " + (Mask $_)) } }
 $agents = Join-Path $codexHome 'AGENTS.md'

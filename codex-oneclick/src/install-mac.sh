@@ -208,6 +208,9 @@ CARHER_PY_EOF
 cat > "$CODEX_HOME/carher_models_sync.py" <<'CARHER_PY_EOF'
 @@EMBED carher_models_sync.py@@
 CARHER_PY_EOF
+cat > "$CODEX_HOME/carher_models_sync.js" <<'CARHER_PY_EOF'
+@@EMBED carher_models_sync.js@@
+CARHER_PY_EOF
 if true; then
   chmod +x "$CODEX_HOME/carher_image.py" 2>/dev/null || true
 
@@ -255,8 +258,13 @@ fi
 # --- 7. 模型列表自动同步 ---
 # 网关 /v1/models 已按这把 key 的白名单过滤；同步进 Codex 的模型选择器，
 # 网关上新加的模型第二天自动出现。装好后立即跑一次，之后每天 10:17 一次（加登录时一次）。
-if [ -n "${PYBIN:-}" ]; then
-  if CODEX_HOME="$CODEX_HOME" "$PYBIN" "$CODEX_HOME/carher_models_sync.py"; then
+# 🔴 10-16:没有 Python 时这一步原来整段跳过 ⇒ App 下拉里只有自带的几个 GPT。没 Python 就用 Node 版(两份逻辑一致)。
+SYNC_RUN=""; SYNC_ARG=""
+if [ -n "${PYBIN:-}" ]; then SYNC_RUN="$PYBIN"; SYNC_ARG="$CODEX_HOME/carher_models_sync.py"
+elif command -v node >/dev/null 2>&1; then SYNC_RUN="$(command -v node)"; SYNC_ARG="$CODEX_HOME/carher_models_sync.js"
+fi
+if [ -n "$SYNC_RUN" ]; then
+  if CODEX_HOME="$CODEX_HOME" "$SYNC_RUN" "$SYNC_ARG"; then
     ok "✔ 已同步模型列表"
   else
     warn "⚠ 模型列表同步失败，选择器暂时只显示默认模型（其余配置已生效）"
@@ -270,10 +278,10 @@ if [ -n "${PYBIN:-}" ]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$PYBIN</string><string>$CODEX_HOME/carher_models_sync.py</string></array>
+  <key>ProgramArguments</key><array><string>$SYNC_RUN</string><string>$SYNC_ARG</string></array>
   <key>EnvironmentVariables</key><dict>
     <key>CODEX_HOME</key><string>$CODEX_HOME</string>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PATH</key><string>$HOME/.carher-npm-global/bin:$HOME/.carher-node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>StartCalendarInterval</key><dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>17</integer></dict>
@@ -283,12 +291,14 @@ EOF
     launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
     launchctl bootstrap "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 \
       && ok "✔ 已设置每天自动同步模型列表" \
-      || warn "⚠ 定时同步没装上，可手动运行：$PYBIN $CODEX_HOME/carher_models_sync.py"
+      || warn "⚠ 定时同步没装上，可手动运行：$SYNC_RUN $SYNC_ARG"
   elif command -v crontab >/dev/null 2>&1; then
-    ( crontab -l 2>/dev/null | grep -v carher_models_sync.py
-      echo "17 10 * * * CODEX_HOME='$CODEX_HOME' '$PYBIN' '$CODEX_HOME/carher_models_sync.py' >/dev/null 2>&1"
+    ( crontab -l 2>/dev/null | grep -v 'carher_models_sync\.'
+      echo "17 10 * * * CODEX_HOME='$CODEX_HOME' '$SYNC_RUN' '$SYNC_ARG' >/dev/null 2>&1"
     ) | crontab - && ok "✔ 已设置每天自动同步模型列表"
   fi
+else
+  warn "⚠ 没有 Python 也没有 Node，模型列表没同步（选择器里只显示默认模型）"
 fi
 
 echo

@@ -104,7 +104,7 @@ if [ -f "$CODEX_HOME/carher-models.json" ]; then
   P "模型列表      : $(grep -c '"slug"' "$CODEX_HOME/carher-models.json") 个 (carher-models.json 改于 $(date -r "$CODEX_HOME/carher-models.json" '+%F %T' 2>/dev/null))"
 else
   P "模型列表      : 没有 carher-models.json"
-  yel "模型列表没同步(选择器里只有几个 GPT):电脑要有 Python 3,再重新跑一次 codex-mac.command"
+  yel "模型列表没同步(App 下拉里只有自带的几个 GPT,找不到 key 里的模型):下载最新的 codex-mac.command 重跑一次"
 fi
 [ -f "$CODEX_HOME/carher-models-sync.log" ] && { P "  同步日志最后 3 行:"; tail -n 3 "$CODEX_HOME/carher-models-sync.log" | mask | sed 's/^/    /'; }
 if [ -f "$CODEX_HOME/carher_image.py" ] && grep -q 'CARHER-IMAGE-BEGIN' "$CODEX_HOME/AGENTS.md" 2>/dev/null; then

@@ -198,8 +198,12 @@ $imgSrc = @'
 $syncSrc = @'
 @@EMBED carher_models_sync.py@@
 '@
+$syncJsSrc = @'
+@@EMBED carher_models_sync.js@@
+'@
 [System.IO.File]::WriteAllText((Join-Path $codexHome 'carher_image.py'), $imgSrc, $utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $codexHome 'carher_models_sync.py'), $syncSrc, $utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $codexHome 'carher_models_sync.js'), $syncJsSrc, $utf8NoBom)
 if ($true) {
 
   # 探测真正能跑的 python：Windows 上通常是 python 或 py，不是 python3。
@@ -253,19 +257,34 @@ $end
 # --- 7. 模型列表自动同步 ---
 # 网关 /v1/models 已按这把 key 的白名单过滤；同步进 Codex 的模型选择器，
 # 网关上新加的模型第二天自动出现。装好后立即跑一次，之后每天 10:17 + 每次登录各一次。
-if ($pyBin) {
-  $syncPy = Join-Path $codexHome 'carher_models_sync.py'
+# 🔴 10-16 同事实机：没有 Python ⇒ 这一步整段被跳过 ⇒ App 下拉里只有自带的几个 GPT，key 里唯一的
+#    deepseek 找不到。⇒ 有 Python 用 Python 版；没有就用 Node 版（第 0 步已保证有 Node），两份逻辑一致。
+$syncPy = Join-Path $codexHome 'carher_models_sync.py'
+$syncJs = Join-Path $codexHome 'carher_models_sync.js'
+$nodeExe = $null
+$nc = Get-Command node -ErrorAction SilentlyContinue
+if ($nc) { $nodeExe = $nc.Source }
+if ($pyBin) { $syncRun = $pyBin; $syncArg = $syncPy }
+elseif ($nodeExe) { $syncRun = $nodeExe; $syncArg = $syncJs }
+else { $syncRun = $null }
+if ($syncRun) {
   $env:CODEX_HOME = $codexHome
-  & $pyBin $syncPy
+  & $syncRun $syncArg
   if ($LASTEXITCODE -eq 0) { Ok "√ 已同步模型列表" }
   else { Warn "! 模型列表同步失败，选择器暂时只显示默认模型（其余配置已生效）" }
 
-  # 计划任务直接调 pythonw（不弹黑窗）。CODEX_HOME 不用传：脚本默认就是 %USERPROFILE%\.codex，
-  # 日志由脚本自己写到 carher-models-sync.log，不靠 cmd 重定向（cmd /c 的引号嵌套在计划任务里很容易拼错）。
-  $wName = if ((Split-Path $pyBin -Leaf) -ieq 'py.exe') { 'pyw.exe' } else { 'pythonw.exe' }
-  $pyw = Join-Path (Split-Path $pyBin) $wName
-  $runner = if (Test-Path $pyw) { $pyw } else { $pyBin }
-  $tr = "`"$runner`" `"$syncPy`""
+  # 计划任务不弹黑窗：Python 用 pythonw；Node 没有无窗口版，用 conhost --headless 包一层（Win10 21H2+ 有）。
+  # CODEX_HOME 不用传：脚本默认就是 %USERPROFILE%\.codex；日志由脚本自己写到 carher-models-sync.log。
+  if ($pyBin) {
+    $wName = if ((Split-Path $pyBin -Leaf) -ieq 'py.exe') { 'pyw.exe' } else { 'pythonw.exe' }
+    $pyw = Join-Path (Split-Path $pyBin) $wName
+    $runner = if (Test-Path $pyw) { $pyw } else { $pyBin }
+    $tr = "`"$runner`" `"$syncPy`""
+  } else {
+    $conhost = Join-Path $env:WINDIR 'System32\conhost.exe'
+    if (Test-Path $conhost) { $tr = "`"$conhost`" --headless `"$nodeExe`" `"$syncJs`"" }
+    else { $tr = "`"$nodeExe`" `"$syncJs`"" }
+  }
   # 顶部 ErrorActionPreference=Stop，schtasks 不可用（被策略禁掉）时会直接中断整个脚本，所以包 try
   $okDaily = $false
   try {
@@ -274,8 +293,10 @@ if ($pyBin) {
     & schtasks.exe /Create /F /SC ONLOGON /TN 'CarHer Codex Models Sync (logon)' /TR $tr 2>$null | Out-Null
   } catch {}
   if ($okDaily) { Ok "√ 已设置每天自动同步模型列表" }
-  else { Warn "! 定时同步没装上（可能需要 IT 权限），可手动运行：$pyBin $syncPy" }
-  if ($codexHome -ne (Join-Path $env:USERPROFILE '.codex')) { Warn "! 你自定义了 CODEX_HOME，定时同步读的是默认目录；需要时手动运行：$pyBin $syncPy" }
+  else { Warn "! 定时同步没装上（可能需要 IT 权限），可手动运行：$syncRun $syncArg" }
+  if ($codexHome -ne (Join-Path $env:USERPROFILE '.codex')) { Warn "! 你自定义了 CODEX_HOME，定时同步读的是默认目录；需要时手动运行：$syncRun $syncArg" }
+} else {
+  Warn "! 没有 Python 也没有 Node，模型列表没同步（选择器里只显示默认模型）"
 }
 
 Write-Host ""

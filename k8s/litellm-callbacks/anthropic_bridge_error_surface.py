@@ -92,9 +92,16 @@ def _install_bridge_error_surface() -> None:
     try:
         import inspect
 
-        from litellm.llms.anthropic.experimental_pass_through.responses_adapters.streaming_iterator import (  # noqa: E501
-            AnthropicResponsesStreamWrapper,
-        )
+        try:
+            # 1.105+ 改名 pass_through（#43329）；该版 __anext__ 已自带「异常→流内 error 事件」，
+            # 下面的指纹守卫会拒装并沿用上游实现。
+            from litellm.llms.anthropic.pass_through.responses_adapters.streaming_iterator import (  # noqa: E501
+                AnthropicResponsesStreamWrapper,
+            )
+        except ImportError:
+            from litellm.llms.anthropic.experimental_pass_through.responses_adapters.streaming_iterator import (  # noqa: E501
+                AnthropicResponsesStreamWrapper,
+            )
     except ImportError as exc:
         verbose_logger.warning("%s: import failed, skip: %r", _MARKER, exc)
         return

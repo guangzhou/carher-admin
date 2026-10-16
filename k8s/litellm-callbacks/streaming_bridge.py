@@ -980,9 +980,15 @@ def _patch_base_anthropic_streaming_iterator() -> None:
     start_time.
     """
     try:
-        from litellm.llms.anthropic.experimental_pass_through.messages.streaming_iterator import (
-            BaseAnthropicMessagesStreamingIterator,
-        )
+        try:
+            # 1.105+ 把 experimental_pass_through 改名为 pass_through（上游 #43329）
+            from litellm.llms.anthropic.pass_through.messages.streaming_iterator import (
+                BaseAnthropicMessagesStreamingIterator,
+            )
+        except ImportError:
+            from litellm.llms.anthropic.experimental_pass_through.messages.streaming_iterator import (
+                BaseAnthropicMessagesStreamingIterator,
+            )
     except Exception as exc:
         _log.warning(
             "streaming_bridge: cannot import BaseAnthropicMessagesStreamingIterator: %r",
@@ -995,8 +1001,9 @@ def _patch_base_anthropic_streaming_iterator() -> None:
         return  # already patched (e.g. module imported twice)
 
     def patched_init(self, litellm_logging_obj, request_body):  # type: ignore[no-untyped-def]
-        self.litellm_logging_obj = litellm_logging_obj
-        self.request_body = request_body
+        # 先跑上游 __init__，保住它新增的字段（1.103+ 的 completion_start_time 每个 chunk 都读，
+        # 整个替换掉会 AttributeError），只覆盖 start_time。
+        original_init(self, litellm_logging_obj, request_body)
 
         proxy_entry_time = getattr(litellm_logging_obj, "start_time", None)
         if isinstance(proxy_entry_time, datetime.datetime):

@@ -1,0 +1,17 @@
+--- vanilla-v1.105.1/litellm/litellm_core_utils/streaming_handler.py
++++ carher/litellm/litellm_core_utils/streaming_handler.py
+@@ -2314,6 +2314,14 @@
+             raise mapped_exception
+         if original_status_code is not None and 400 <= original_status_code < 500 and original_status_code != 429:
+             raise mapped_exception
++
++        # [carher-patch] trigger cooldown before mid-stream fallback
++        try:
++            self.logging_obj.failure_handler(
++                mapped_exception, "]]]]END]]]" + str(self.response_uptil_now)
++            )
++        except Exception:
++            pass
+ 
+         raise MidStreamFallbackError(
+             message=str(mapped_exception),

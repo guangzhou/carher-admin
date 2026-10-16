@@ -239,7 +239,7 @@ codex</code></pre>
             <p class="sub">点底部的模型名换模型。</p>
           </div>
         </div>
-        <p class="sub">默认模型 <code>gpt-5.6-terra</code>。画图直接说「画一张……」，图存在当前文件夹。</p>
+        <p class="sub">默认模型 <code>gpt-5.6-terra</code>（你的 key 没开它就自动用你能用的第一个）。画图直接说「画一张……」，图存在当前文件夹。</p>
       </div>
     </section>
   </div>
@@ -372,6 +372,7 @@ bash ./codex-doctor-mac.command</code></pre>
         <tr><td>命令行提示找不到 <code>codex</code></td><td>关掉终端新开一个</td></tr>
         <tr><td>App 没生效，或报错地址是 <code>api.openai.com</code></td><td>把 App 完全退出再打开</td></tr>
         <tr><td>模型列表里只有几个 GPT，找不到 key 里的模型</td><td>下载最新的安装文件重新跑一次</td></tr>
+        <tr><td>每一轮都报 <code>403</code></td><td>默认模型你的 key 没开：下载最新的安装文件重新跑一次（会自动换成你能用的），或 <code>/model</code> 手动选</td></tr>
         <tr><td>一直转圈 / 报 <code>502</code></td><td>换回 <code>gpt-5.6-terra</code>，把模型名和时间发给运维</td></tr>
         <tr><td>用着用着被踢下线</td><td>别同时开多个 Codex</td></tr>
       </tbody>

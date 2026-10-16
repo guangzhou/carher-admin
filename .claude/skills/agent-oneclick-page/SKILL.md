@@ -1,6 +1,6 @@
 ---
 name: agent-oneclick-page
-description: 给同事的「Cursor · Codex · Claude Code 一键配置」单页网页(https://chat.auto-link.com.cn/oneclick/)的改版、构建、上线 SOP——模板 oneclick-all.html、内嵌 6 个一键文件的 build_html.py、198 nginx 静态发布 publish_198.sh,以及和三篇飞书详细文档的关系。Use when 用户要改/重新发「一键配置」页面、页面上的下载/命令/文案、换了安装器要同步到页面、同事说页面链接点不了/下载不了/下错文件、要把页面挂到别处或「上传到飞书」。
+description: 给同事的「Cursor · Codex · Claude Code 一键配置」单页网页(https://chat.auto-link.com.cn/oneclick/)的改版、构建、上线 SOP——模板 oneclick-all.html、内嵌 10 个文件(安装+自检)的 build_html.py、发版总入口 release_all.sh(网页上线 + 飞书三篇换附件 + 门禁),以及和三篇飞书详细文档的关系。Use when 用户要改/重新发「一键配置」页面、页面上的下载/命令/文案、换了安装器要同步到页面、同事说页面链接点不了/下载不了/下错文件、要把页面挂到别处或「上传到飞书」。
 ---
 
 # 一键配置单页(给同事的唯一入口)
@@ -17,6 +17,8 @@ scripts/agent-oneclick-docs/
   img/codex-login.jpg ← 唯一保留的截图(Codex「使用其他方式登录」)
   build_html.py       ← 内嵌 10 个文件(安装+自检) + 截图 → .work/oneclick-all/AI编程一键配置.html;--check 只核对
   publish_198.sh      ← build → jms scp → 198 /var/www/oneclick/index.html → 比线上 sha
+  swap_attachment.py  ← 飞书附件换新版:插入 → 回读比 sha → 挪到旧块后 → 删旧(失败不删旧;已是新版就跳过)
+  release_all.sh      ← **发版总入口**:重建 Codex/Claude → 网页上线 → 飞书三篇换附件 → 门禁
   bodies.py / apply.py← 三篇飞书详细文档(另一条线,改文案时两边一起改)
 ```
 
@@ -25,6 +27,9 @@ scripts/agent-oneclick-docs/
 **换了安装器 ⇒ 先按各自 skill 重建(cursor-client-bundle-patch / codex-oneclick-rollout / claude-oneclick-rollout)⇒ 再 `publish_198.sh`**。
 
 ## 改版 → 上线
+
+🔴 **一律用 `bash scripts/agent-oneclick-docs/release_all.sh`**(网页和飞书是同一批文件的两个出口)。
+10-16 只跑了 publish_198.sh,飞书 Codex 文档里还挂着旧脚本,收尾门禁才抓到。下面是单步命令:
 
 ```bash
 # 改 scripts/agent-oneclick-docs/oneclick-all.html 后

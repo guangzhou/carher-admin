@@ -10,6 +10,11 @@ description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 
 > 用户文档：飞书《Codex一键配置》wiki `BzVZwGMSOiSYOykc6UYcN2opn3b` = docx `HMj6d1ttlorc5KxbFnlcVuopntf`(10-15 起唯一一篇,外部分享已全删);正文由 `scripts/agent-oneclick-docs/` 生成。
 > **给同事的入口 = 单页 https://chat.auto-link.com.cn/oneclick/**(skill `agent-oneclick-page`):重建了本工具的安装器后,必须再跑 `bash scripts/agent-oneclick-docs/publish_198.sh`,否则页面里内嵌的还是旧文件。
 > Codex App 下载=官方直链(Mac `persistent.oaistatic.com/codex-app-prod/Codex.dmg`、Win `get.microsoft.com/installer/download/9PLM9XGG6VKS`,国内可达),不再用飞书附件。
+> **默认模型按 key 选(10-16)**:安装器第 1b 步拉 `/models`,`gpt-5.6-terra` 不在 key 里就换成第一个能聊天的(只开 deepseek 的 key 300+ 把,写死就每轮 403)。
+> **模型同步两份实现(10-16)**:`src/carher_models_sync.py` 与 `src/carher_models_sync.js` 逻辑**必须一致**(`tests/test_models_sync_js.py` 逐字段比);
+> 有 Python 用 .py,没有就 Node 跑 .js(第 0 步保证有 Node)。改同步逻辑 ⇒ 两份一起改。画图 `carher_image.py` 仍只有 Python 版。
+> 🔴 本机端到端跑安装器:launchd label `net.carher.codex-models-sync` 是全局的,会把你自己的定时任务指到测试目录 ⇒ 测完 `launchctl bootout gui/$(id -u)/net.carher.codex-models-sync` 再重跑一次真安装恢复。
+> **发版**:改完跑 `bash scripts/agent-oneclick-docs/release_all.sh`(网页 + 飞书附件 + 门禁一起)。
 > **自检(doctor,10-16)**:`src/doctor-{mac.sh,windows.ps1}` → build 出 `codex-doctor-{mac.command,windows.bat}`,单页「出问题了」里可下载。只读;key 只打 len+sha8+异常字符数;查 CLI/App/config(当前 provider 段)/auth.json/两把 key 是否一致/零宽字符/env 里的 OPENAI_API_KEY/模型同步/画图/代理/网关连通/key 实打 /responses;结论列红黄项+修法,报告存桌面并复制到剪贴板。回归 `tests/test_doctor.py`(假网关,只读+不泄 key+每种坏配置都报)。
 > **同族**(2026-10-12 用户拍板:三个 agent 每人一把 cursor key 共用):
 > Cursor《一键配置》`OQCPdLd4MovEVoxGzdMcD3CJnCf`(10-15 起只剩这一篇)(skill `cursor-client-bundle-patch`)、

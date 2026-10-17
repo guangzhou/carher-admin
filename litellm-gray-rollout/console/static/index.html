@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>升级驾驶台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* 布局：仪表盘——左侧「档位梯 + 判定」，右侧「决策卡 + 事件流」；窄屏堆成一列 */
+:root {
+  --bg: #f3f5f4; --panel: #ffffff; --fg: #18211e; --muted: #5f6b67; --line: #d7ddda;
+  --accent: #0f6e63;            /* 车道绿：机器在开 */
+  --ok: #1f7a43; --warn: #a76a00; --bad: #b4232c; --info: #2457a6;
+  --ok-bg: #e4f3ea; --warn-bg: #fbf0d9; --bad-bg: #fbe4e5; --info-bg: #e5ecf8;
+  --f-body: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --f-num: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f1513; --panel: #17201d; --fg: #e3ebe7; --muted: #94a39d; --line: #2a3632;
+  --accent: #3fb5a5; --ok: #5ccf86; --warn: #e9b44c; --bad: #f0707a; --info: #7fa6f0;
+  --ok-bg: #173324; --warn-bg: #3a2c10; --bad-bg: #3c1a1d; --info-bg: #1a2640; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0f1513; --panel: #17201d; --fg: #e3ebe7; --muted: #94a39d; --line: #2a3632;
+  --accent: #3fb5a5; --ok: #5ccf86; --warn: #e9b44c; --bad: #f0707a; --info: #7fa6f0;
+  --ok-bg: #173324; --warn-bg: #3a2c10; --bad-bg: #3c1a1d; --info-bg: #1a2640; color-scheme: dark; }
+* { box-sizing: border-box }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.6 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 16px 40px; }
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) }
+.wrap > * { min-width: 0 }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; justify-content: space-between }
+h1 { font-size: 18px; margin: 0; letter-spacing: .02em }
+.sub { color: var(--muted); font-size: 12px }
+.num { font-family: var(--f-num); font-variant-numeric: tabular-nums }
+.headline { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: grid; gap: 6px; min-width: 0 }
+#runid { overflow-wrap: anywhere }
+.headline .say { font-size: 20px; font-weight: 700; text-wrap: balance }
+.pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 600; letter-spacing: .04em }
+.s-PASS { background: var(--ok-bg); color: var(--ok) } .s-INCONCLUSIVE { background: var(--info-bg); color: var(--info) }
+.s-FAIL, .s-ROLLED_BACK { background: var(--bad-bg); color: var(--bad) } .s-HUMAN_STEP, .s-IDLE { background: var(--warn-bg); color: var(--warn) }
+.s-DONE { background: var(--ok-bg); color: var(--ok) }
+.grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px }
+@media (max-width: 860px) { .grid { grid-template-columns: minmax(0, 1fr) } .grid > .col:last-child { order: -1 } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 12px; min-width: 0; align-content: start }
+.col { display: grid; gap: 16px; min-width: 0; align-content: start }
+.panel h2 { font-size: 13px; margin: 0; color: var(--muted); letter-spacing: .08em; font-weight: 600 }
+/* 档位梯：像挡位一样的一排格子 */
+.ladder { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px }
+.rung { border: 1px solid var(--line); border-radius: 6px; padding: 8px 4px; text-align: center; font-size: 12px; color: var(--muted); min-width: 0 }
+.rung b { display: block; font: 600 15px var(--f-num); color: var(--fg) }
+.rung.done { background: var(--ok-bg); border-color: transparent; color: var(--ok) }
+.rung.done b { color: var(--ok) }
+.rung.cur { outline: 2px solid var(--accent); outline-offset: 1px; color: var(--accent) }
+.rung.cur b { color: var(--accent) }
+@media (max-width: 520px) { .ladder { grid-template-columns: repeat(4, minmax(0, 1fr)) } }
+.dwell { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden }
+.dwell > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .4s }
+@media (prefers-reduced-motion: reduce) { .dwell > i { transition: none } }
+table.cmp { width: 100%; border-collapse: collapse; font-size: 13px }
+table.cmp th, table.cmp td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: right }
+table.cmp th:first-child, table.cmp td:first-child { text-align: left; color: var(--muted); font-weight: 400 }
+table.cmp thead th { color: var(--muted); font-weight: 600; font-size: 12px }
+ul.reasons { margin: 0; padding-left: 18px; display: grid; gap: 4px }
+.odd { display: grid; gap: 4px; font-size: 13px }
+.odd div { display: flex; gap: 8px; align-items: baseline }
+.odd .k { width: 1.2em; text-align: center; font-weight: 700 }
+.k.ok { color: var(--ok) } .k.wait { color: var(--info) } .k.bad { color: var(--bad) }
+/* 决策卡：接管请求 */
+.card { border: 2px solid var(--warn); background: var(--warn-bg); border-radius: 10px; padding: 14px 16px; display: grid; gap: 10px }
+.card.bad { border-color: var(--bad); background: var(--bad-bg) }
+.card h3 { margin: 0; font-size: 16px }
+.opts { display: grid; gap: 8px }
+.opt { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px }
+.opt p { margin: 0; font-size: 13px; color: var(--muted) }
+.opt.rec { border-color: var(--accent) }
+button { font: 600 13px var(--f-body); border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); padding: 7px 14px; cursor: pointer }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--panel) }
+button.danger { border-color: var(--bad); color: var(--bad) }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+button:disabled { opacity: .5; cursor: not-allowed }
+.noans { font-size: 12px; color: var(--muted) }
+.confirm { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--panel); border: 1px dashed var(--bad); border-radius: 8px; padding: 10px }
+.events { display: grid; gap: 0; max-height: 460px; overflow: auto; font-size: 12.5px }
+.ev { display: grid; grid-template-columns: 4.6em 3.4em minmax(0, 1fr); gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line) }
+.ev .who { font-weight: 600 } .ev .who.human { color: var(--warn) } .ev .who.machine { color: var(--accent) }
+.ev .body { min-width: 0; overflow-wrap: anywhere }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center }
+.switch { display: inline-flex; align-items: center; gap: 8px; font-weight: 600 }
+.switch input { width: 18px; height: 18px; accent-color: var(--accent) }
+pre.log { margin: 0; max-height: 220px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: 12px/1.5 var(--f-num); white-space: pre-wrap; overflow-wrap: anywhere }
+.banner { border-radius: 8px; padding: 10px 14px; font-weight: 600 }
+.banner.take { background: var(--info-bg); color: var(--info) }
+.banner.err { background: var(--bad-bg); color: var(--bad) }
+.tok { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12px }
+.tok input { font: 12px var(--f-num); padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); width: 22em; max-width: 100% }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div><h1>升级驾驶台</h1><div class="sub">198 LiteLLM 灰度 · 机器开顺路，碰到判断不了的事停下等你</div></div>
+    <div class="controls">
+      <label class="switch" for="auto"><input type="checkbox" id="auto"> 自动推进</label>
+      <button id="refresh" type="button">刷新</button>
+      <span class="sub num" id="at">—</span>
+    </div>
+  </header>
+
+  <div id="banners"></div>
+
+  <section class="headline">
+    <div><span class="pill" id="pill">读取中</span> <span class="sub num" id="runid"></span></div>
+    <div class="say" id="say">正在读取当前状态…</div>
+    <div class="dwell" aria-hidden="true"><i id="dwellbar"></i></div>
+    <div class="sub" id="dwelltxt"></div>
+  </section>
+
+  <div class="grid">
+    <div class="col">
+      <section class="panel">
+        <h2>档位</h2>
+        <div class="ladder" id="ladder"></div>
+      </section>
+      <section class="panel">
+        <h2>新版 vs 旧版（本档以来，已排除巡检号）</h2>
+        <div style="overflow-x:auto">
+        <table class="cmp num">
+          <thead><tr><th></th><th>新版 1.105.x</th><th>旧版</th></tr></thead>
+          <tbody id="cmp"></tbody>
+        </table>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>机器自己开的条件</h2>
+        <div class="odd" id="odd"></div>
+      </section>
+    </div>
+    <div class="col">
+      <section id="decision"></section>
+      <section class="panel" id="actpanel" hidden>
+        <h2>正在执行</h2>
+        <pre class="log" id="actlog"></pre>
+      </section>
+      <section class="panel">
+        <h2>事件</h2>
+        <div class="events" id="events"></div>
+      </section>
+      <section class="panel">
+        <h2>操作口令</h2>
+        <div class="tok">
+          <label for="token">写操作要带口令（198 上 <span class="num">/root/l3/.console-token</span>）</label>
+          <input id="token" type="password" autocomplete="off" placeholder="粘贴口令">
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const RUNGS = [["试点", "pilot"], ["1%", 1], ["5%", 5], ["10%", 10], ["50%", 50], ["100%", 100], ["换生产", "conv"], ["完成", "done"]];
+const DWELL = {0: 25, 1: 25, 5: 25, 10: 25, 50: 30, 100: 30};
+const STATE_TXT = {PASS: "顺利", INCONCLUSIVE: "观察中", FAIL: "需要你看", ROLLED_BACK: "已自动回退", HUMAN_STEP: "等你拍板", IDLE: "没有进行中的灰度", DONE: "已完成"};
+let last = null, pendingConfirm = null;
+
+function tok() { try { return $("token").value || localStorage.getItem("gray-console-token") || ""; } catch (e) { return $("token").value || ""; } }
+$("token").addEventListener("change", () => { try { localStorage.setItem("gray-console-token", $("token").value); } catch (e) {} });
+try { $("token").value = localStorage.getItem("gray-console-token") || ""; } catch (e) {}
+
+async function post(path, body) {
+  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json", "X-Console-Token": tok()}, body: JSON.stringify(Object.assign({who: "刘国现"}, body))});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c])); }
+function hhmm(iso) { if (!iso) return "—"; const d = new Date(iso); return d.toLocaleTimeString("zh-CN", {hour12: false, hour: "2-digit", minute: "2-digit"}); }
+function rate(n, e) { return n ? (100 * (e || 0) / n).toFixed(2) + "%" : "—"; }
+
+function renderLadder(rd) {
+  const phase = rd?.phase, split = rd?.split ?? 0;
+  const order = ["pilot", 1, 5, 10, 50, 100, "conv", "done"];
+  let curIdx = 0;
+  if (phase === "committed") curIdx = 7;
+  else if (["convergence_ready", "prod_offline_upgrading", "prod_verified"].includes(phase)) curIdx = 6;
+  else if (phase === "normal_gray") curIdx = split === 0 ? 0 : order.indexOf(split);
+  $("ladder").innerHTML = RUNGS.map(([t], i) =>
+    `<div class="rung ${i < curIdx ? "done" : ""} ${i === curIdx && phase ? "cur" : ""}"><b>${esc(t)}</b>${i < curIdx ? "已过" : i === curIdx && phase ? "当前" : ""}</div>`).join("");
+}
+
+function renderCmp(raw, rd) {
+  const p = raw?.pools || {canary: [0, 0], stable: [0, 0]};
+  const pods = raw?.pods || {}, mon = raw?.monitor || {};
+  const rows = [
+    ["请求数", p.canary[0], p.stable[0]],
+    ["5xx", p.canary[1], p.stable[1]],
+    ["5xx 率", rate(p.canary[0], p.canary[1]), rate(p.stable[0], p.stable[1])],
+    ["worker 被杀", pods.killed ?? "—", "—"],
+    ["监控周期 正常/失败", `${mon.ok ?? "—"} / ${mon.bad ?? "—"}`, ""],
+  ];
+  $("cmp").innerHTML = rows.map(r => `<tr><th>${esc(r[0])}</th><td>${esc(r[1])}</td><td>${esc(r[2])}</td></tr>`).join("");
+}
+
+function renderOdd(v, rd, raw) {
+  const reasons = v?.reasons || [];
+  const split = rd?.split ?? 0, dwell = DWELL[split] ?? 30;
+  const pools = raw?.pools || {canary: [0, 0], stable: [0, 0]};
+  const gr = pools.canary[0] ? 100 * pools.canary[1] / pools.canary[0] : null;
+  const sr = pools.stable[0] ? 100 * pools.stable[1] / pools.stable[0] : null;
+  const items = [
+    [`驻留 ≥ ${dwell} 分钟`, rd?.minutes_at_split == null ? "wait" : rd.minutes_at_split >= dwell ? "ok" : "wait", rd?.minutes_at_split == null ? "" : `${Math.floor(rd.minutes_at_split)} 分钟`],
+    ["监控周期 ≥ 5 个全正常", rd?.bad_cycles ? "bad" : (rd?.ok_cycles ?? 0) >= 5 ? "ok" : "wait", `${rd?.ok_cycles ?? "—"} 个`],
+    ["新版 5xx ≤ 旧版 + 1 个百分点", pools.canary[0] < 50 ? "wait" : gr > (sr ?? 0) + 1 ? "bad" : "ok", pools.canary[0] < 50 ? `样本 ${pools.canary[0]} < 50` : `${gr?.toFixed(2)}% vs ${sr?.toFixed(2)}%`],
+    ["worker 被杀 = 0、重启不变", rd?.worker_killed || rd?.restarts_changed ? "bad" : rd?.worker_killed == null ? "wait" : "ok", ""],
+    ["监控循环在跑（止损已武装）", rd?.monitor_alive === false ? "bad" : rd?.monitor_alive ? "ok" : "wait", ""],
+    ["巡检号 / 杭州凭据钉在旧版", rd?.noisy_keys_protected === false ? "bad" : rd?.noisy_keys_protected ? "ok" : "wait", ""],
+    ["回退保险丝健康", rd?.guarded_old_health && rd.guarded_old_health !== 200 ? "bad" : rd?.guarded_old_health === 200 ? "ok" : "wait", rd?.guarded_old_ready || ""],
+  ];
+  const mark = {ok: "✓", wait: "…", bad: "✕"};
+  $("odd").innerHTML = items.map(([t, s, x]) => `<div><span class="k ${s}">${mark[s]}</span><span>${esc(t)}</span><span class="sub num">${esc(x)}</span></div>`).join("")
+    + (reasons.length ? `<div class="sub" style="margin-top:6px">机器的判断：</div><ul class="reasons">${reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : "");
+}
+
+function renderDecision(v) {
+  const d = v?.decision, box = $("decision");
+  if (!d) { box.innerHTML = ""; return; }
+  const bad = ["FAIL", "ROLLED_BACK"].includes(v.state);
+  box.innerHTML = `<div class="card ${bad ? "bad" : ""}">
+    <h3>${esc(d.title)}</h3>
+    <div>${esc(d.what)}</div>
+    <div class="opts">${d.options.map((o, i) => `
+      <div class="opt ${o.action === d.recommend ? "rec" : ""}">
+        <button type="button" id="opt-${i}" class="${o.action === "global_rollback" ? "danger" : o.action === d.recommend && o.action !== "noop" ? "primary" : ""}">${esc(o.label)}</button>
+        <p>${o.action === d.recommend ? "<b>建议</b>：" : ""}${esc(o.effect)}</p>
+      </div>`).join("")}</div>
+    <div id="confirmbox"></div>
+    <div class="noans">不选会怎样：${esc(d.if_no_answer)}</div>
+  </div>`;
+  d.options.forEach((o, i) => $("opt-" + i).addEventListener("click", () => choose(o)));
+}
+
+function choose(o) {
+  if (o.action === "noop" || o.action === "pause_auto") return send(o, false);
+  pendingConfirm = o;
+  $("confirmbox").innerHTML = `<div class="confirm"><span>确认要「${esc(o.label)}」？这会真的动线上。</span>
+    <button type="button" class="${o.action === "global_rollback" ? "danger" : "primary"}" id="cfm-yes">确认执行</button>
+    <button type="button" id="cfm-no">取消</button></div>`;
+  $("cfm-yes").addEventListener("click", () => send(pendingConfirm, true));
+  $("cfm-no").addEventListener("click", () => { $("confirmbox").innerHTML = ""; pendingConfirm = null; });
+}
+
+async function send(o, confirm) {
+  try {
+    await post("/api/action", {action: o.action, arg: o.arg, confirm});
+    $("confirmbox") && ($("confirmbox").innerHTML = `<div class="sub">已提交：${esc(o.label)}</div>`);
+    setTimeout(load, 1500);
+  } catch (e) {
+    $("confirmbox") && ($("confirmbox").innerHTML = `<div class="banner err">没执行：${esc(e.message)}</div>`);
+  }
+}
+
+const KIND_TXT = {verdict: "判断", auto_ramp: "自动放量", action_start: "开始执行", action_end: "执行结束", decision: "拍板", auto_toggle: "自动推进"};
+function evText(e) {
+  if (e.kind === "verdict") return `${STATE_TXT[e.state] || e.state}：${e.headline}`;
+  if (e.kind === "auto_ramp") return `升到 ${e.target}%：${e.result?.ok ? "已提交" : "没提交（" + (e.result?.error || "") + "）"}`;
+  if (e.kind === "action_start") return `${e.action}${e.arg != null ? " " + e.arg : ""}`;
+  if (e.kind === "action_end") return `${e.action} 结束 rc=${e.rc}${e.rc ? "（失败，见日志）" : ""}`;
+  if (e.kind === "decision") return `选了：${e.choice}${e.arg != null ? " " + e.arg : ""}`;
+  if (e.kind === "auto_toggle") return e.on ? "打开" : "关闭";
+  return JSON.stringify(e);
+}
+function renderEvents(evs) {
+  $("events").innerHTML = (evs || []).slice().reverse().map(e => `<div class="ev"><span class="num sub">${hhmm(e.ts)}</span>
+    <span class="who ${e.who === "machine" ? "machine" : "human"}">${e.who === "machine" ? "机器" : "人"}</span>
+    <span class="body"><b>${esc(KIND_TXT[e.kind] || e.kind)}</b> ${esc(evText(e))}</span></div>`).join("") || `<div class="sub">还没有事件。驾驶台启动后每一步都会记在这里。</div>`;
+}
+
+async function renderRunning(s) {
+  const ev = (s.events || []).filter(e => e.kind === "action_start").pop();
+  const running = Object.values(s.running || {}).some(x => !x.done);
+  $("actpanel").hidden = !ev;
+  if (!ev) return;
+  try { const r = await fetch("/api/log?path=" + encodeURIComponent(ev.log)); const j = await r.json(); $("actlog").textContent = (running ? "▶ 运行中\n" : "■ 已结束\n") + (j.tail || ""); } catch (e) {}
+}
+
+async function load() {
+  try {
+    const r = await fetch("/api/state", {cache: "no-store"});
+    const s = await r.json(); last = s;
+    const v = s.verdict || {}, rd = s.readings || {}, raw = s.raw || {};
+    $("pill").className = "pill s-" + (v.state || "IDLE"); $("pill").textContent = STATE_TXT[v.state] || "—";
+    $("say").textContent = v.headline || (s.error ? "读不到状态" : "—");
+    $("runid").textContent = rd.run_id ? `${rd.run_id} · ${rd.phase} · split=${rd.split}` : "";
+    $("at").textContent = "更新于 " + hhmm(s.at);
+    const dwell = DWELL[rd.split] ?? 30, m = rd.minutes_at_split;
+    $("dwellbar").style.width = m == null ? "0" : Math.min(100, 100 * m / dwell) + "%";
+    $("dwelltxt").textContent = rd.phase === "normal_gray" && m != null ? `本档已 ${Math.floor(m)} 分钟 / 至少 ${dwell} 分钟${raw.since ? "（自 " + hhmm(raw.since) + "）" : ""}` : "";
+    $("auto").checked = !!s.settings?.auto;
+    const b = [];
+    if (s.takeover) b.push(`<div class="banner take">人工接管中：有人在终端持有驾驶锁，驾驶台只看不动。</div>`);
+    if (s.error) b.push(`<div class="banner err">采集出错（不代表线上出事）：${esc(s.error)}</div>`);
+    if (s.settings && !s.settings.auto) b.push(`<div class="banner take">自动推进已关${s.settings.paused_by ? "（" + esc(s.settings.paused_by) + "）" : ""}：每一档都会停下来等你。</div>`);
+    $("banners").innerHTML = b.join("");
+    renderLadder(rd); renderCmp(raw, rd); renderOdd(v, rd, raw); renderDecision(v); renderEvents(s.events); renderRunning(s);
+  } catch (e) {
+    $("banners").innerHTML = `<div class="banner err">连不上驾驶台服务：${esc(e.message)}。确认 ssh -L 隧道还在。</div>`;
+  }
+}
+
+$("auto").addEventListener("change", async (e) => {
+  try { await post("/api/auto", {on: e.target.checked}); } catch (err) { e.target.checked = !e.target.checked; $("banners").insertAdjacentHTML("afterbegin", `<div class="banner err">没改成：${esc(err.message)}</div>`); }
+  setTimeout(load, 800);
+});
+$("refresh").addEventListener("click", async () => { try { await post("/api/refresh", {}); } catch (e) {} setTimeout(load, 1500); });
+load(); setInterval(load, 10000);
+</script>
+</body>
+</html>

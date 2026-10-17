@@ -35,6 +35,11 @@ curl -s https://api.github.com/repos/BerriAI/litellm/releases/tags/vX.Y.Z | pyth
 | 错误码 / 默认值变化（例：1.104 `BudgetExceededError` 429→422） | `budget_notice.py`/`error_sanitize.py` 按 429 设计 |
 | 启动拒绝条件（例：1.104 master key 为空/`sk-1234` 拒启动） | 在 pod 内只回布尔核一下，不打印 key |
 | 「配置开关在旧版到底生没生效」 | `log_raw_request_response` 在 1.100.1 是空操作、1.103 生效后把 worker 卡死 |
+| 鉴权语义变化（例：1.104 #43049 key aliases 收窄白名单） | 198 的 key 是「models 写对外名 + aliases 指内部组」，1.105.1 上 1323/2116 把会 403；只有**克隆真 key** 并排回归抓得到，master key 测不出 |
+| 稳定分支的修复是否进了新大版本（1.103.3 的 #44341 不在 1.105.1） | 不在就回移成烘焙补丁，带阴性对照（旧版复现 bug）+ 阳性对照 |
+
+烘焙补丁配方按版本放 `litellm-gray-rollout/patches/v<ver>/`（Dockerfile 每个补丁一个 grep 门禁 + md5 join 只许补丁文件不同）。
+1.105.1 那套：capacity / sse-lifecycle（重定锚点）/ stream-alias-pricing（#44341）/ key-alias-auth-compat（#43049），见该目录 README。
 
 ## 1. 灰度（现成状态机，不重造）
 
@@ -48,6 +53,13 @@ curl -s https://api.github.com/repos/BerriAI/litellm/releases/tags/vX.Y.Z | pyth
   `FOREIGN_RUN_ID`。持 `.monitor-cycle.lock` 备份后只留本 run 的行。
 - **monitor loop 截日志**：日志 > 40MB 时 `tail -c` 切在行中间，每轮 FAIL（已修 312b0a6）。
 - **split > 0 后 monitor 必须配 spend 探针 key**（只开一个便宜模型、小预算、短有效期；用完删 key、shred 文件）。
+  🔴 **启用前先手跑一次 `collect-spend-reconciliation.py --probes 3` 看到 `terminal=3 http=[200]`**：10-17 探针模型
+  上游 402（OpenRouter 余额），1% 档第一个周期就硬触发全局回退（spend 触发不走 sustain）。
+- **新 run 的 gray 冻结输入以 live prod 为底**（config/callbacks 从 live prod CM 取，`--deployment` 用上一轮冻结时那份
+  Deployment 再补上带外加的 callback mount）。10-17 第一版取了 live gray 的 config，少 3 个模型，并排回归才发现。
+- **nginx base template 用上一轮模板 + live 带外块拼出来，要求「重渲染 = live 逐字节」**才能用（10-16 live 多了
+  `/ccdl/`、`/muse-media/` 等 30 行，`build-base-template.py` 对已渲染的 live 拒绝）。
+- 每个 run 的 baseline 绑 run_id，开新 run 要重做；夜间流量薄时用 `--baseline-window-minutes 360 --baseline-exempt-class image`。
 - **SRC 目录脚本 775 会被 monitor-cycle 拒**（owner/mode unsafe）⇒ `chmod go-w`。
 - **试点要挑重度用户**（近 24h 单次输入最大），不要按编号取——编号 1/2 是 buyitian，按编号必中。
 - **要放到最后的 key** 用 `protect-prod`，否则放比例时会被哈希分到新版。
@@ -58,7 +70,10 @@ curl -s https://api.github.com/repos/BerriAI/litellm/releases/tags/vX.Y.Z | pyth
 
 最少：worker 被杀 = 0（`scripts/litellm-198-worker-kill-triage.py --lane gray --since 30m --probe`，卡顿 < 5s）；
 新旧并排回归一致（24 组×3 协议 / 三类 key / 预算软拦截 / kiro 19 / her 逐 pod / codex 压缩）；
-有效 router 设置 106/5/24 三车道同 hash。**单边绿不算过**，一律新旧并排；单边红先重跑 3 次再判。
+有效 router 设置三车道同 hash（10-17 = 129/5/24）。**单边绿不算过**，一律新旧并排；单边红先重跑 3 次再判。
+🔴 **加一项：真 key 形状鉴权并排**——从 VerificationToken 取全部不同的 (models, aliases) 形状，各克隆一把短命 key，
+对白名单里每个名字 + 一个白名单外名字，prod / gray 各打一发，比「403 与否」（10-17：33 形状 × 600 名，0 单边才放）。
+triage 脚本走密码；198 现行 ssh key + `sudo -n`，从本机跑时用 `.work/litellm-upgrade-1016/tools/triage_keyauth.py` 包一层。
 
 ## 3. 收敛转正（§7，原地升级 `litellm-proxy`，不搞车道轮换）
 

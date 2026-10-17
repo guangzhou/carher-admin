@@ -66,6 +66,15 @@ curl -s https://api.github.com/repos/BerriAI/litellm/releases/tags/vX.Y.Z | pyth
 - **试点失败率不能直接比**：10 把 key 时一把 key 的上游 403 就能拉到 20%。按 key×model 拆，对比旧版同 key 同 model 的历史。
 - **split 是按 key 哈希，不是按请求**：凌晨 5%/10% 档新版 25 分钟只有十几个请求，监控只报「样本不足」是正常的。
 
+### 1.1 操作层脚本 `litellm-gray-rollout/scripts/run/`（10-17 起入库）
+
+1.105.1 那轮在 198 现写的 8 个脚本已整理入库（参数化了 run 目录 / 版本 / 签字人）：
+`freeze.sh`（冻结三车道 values）· `sign.sh`（签 gate，签字人从 `$D/signer.env` 读）· `step.sh`（一档：驻留 → 判据 → ≥50 跑容量）·
+`ramp.sh` · `chain.sh`（在 198 上 `nohup setsid` 跑，SSH 断了不影响）· `converge.sh` / `commit.sh`（§7）· `obs.sh` ·
+`protect-noisy-keys.sh`（新 run 放比例前把 stability-probe / carher-hangzhou 钉旧版）。
+必需 env：`GRAY_PER_CONTAINER_CONCURRENCY`（10-17 实测生产单 pod 30~49 并发 / ~1 核，用 50；默认 8 会误判容量不足）。
+静态门禁 `tests/test_run_scripts.py` 钉住了 10-17 的四个坑（split 没变不报错、读到上轮 capacity 证据、R10 算进退出中的 pod、自动回退后链还在跑）。
+
 ## 2. 每档的判定（§5.5 R1~R10）
 
 最少：worker 被杀 = 0（`scripts/litellm-198-worker-kill-triage.py --lane gray --since 30m --probe`，卡顿 < 5s）；
@@ -85,7 +94,9 @@ triage 脚本走密码；198 现行 ssh key + `sudo -n`，从本机跑时用 `.w
 5. **验收「转正字节 = 灰度字节」**（R10）：逐 pod 对 3 个覆盖件 + `register_pricing.py` 取 sha，和 gray pod 比。
    rollout 绿 / health 200 / 回归全绿都看不出覆盖件版本错了（rev9 就是这样）。
 6. pin prod release → `prod_verified` → `gray-convergence-commit.sh`
-7. 收敛后：旧版 guarded-old 缩到 2 留作保险丝（只改 replicas），gray 热备。
+7. 收敛后：🔴 **guarded-old 要换成「上一版 + 升级前生产 config」**（10-17 发现它还停在两代前的 1.100.1、少 3 个模型、
+   没验过迁移后的库能读写 ⇒ 保险丝是坏的）。做法：`go-inputs/snap` 取升级前 live prod 的 CM，`freeze.sh guarded-old` 用上一版 digest，
+   上线后并排回归。clone 兼容腿的「old」就是上一版，迁移后库的读写已验。gray 缩 2 副本热备。
 
 chart 必须能渲染出 live 的样子（8e14e5f 补的四处，任一缺都会让 rollout 全绿、生产断）：
 ClusterIP `litellm-proxy`、路由标签值 `enabled`、Service 按路由标签选 pod、`topologySpreadConstraints`。

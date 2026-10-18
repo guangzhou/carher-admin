@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -32,6 +33,7 @@ import engine  # noqa: E402
 STATE: dict = {"verdict": None, "readings": None, "raw": None, "at": None, "error": None}
 SETTINGS = {"auto": True, "paused_by": None}
 _lock = threading.Lock()
+ALLOW: list = []  # 允许访问的来源网段；空 = 只允许本机
 TOKEN = ""  # 每次启动随机生成，写进 0600 文件；写操作必须带它（防同机其它进程/页面误触）
 
 
@@ -125,7 +127,16 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _allowed(self) -> bool:
+        try:
+            ip = ipaddress.ip_address(self.client_address[0])
+        except ValueError:
+            return False
+        return ip.is_loopback or any(ip in n for n in ALLOW)
+
     def do_GET(self):
+        if not self._allowed():
+            return self._send(403, {"error": "来源 IP 不在允许名单"})
         if self.path in ("/", "/index.html"):
             return self._send(200, (HERE / "static" / "index.html").read_bytes(), "text/html")
         if self.path == "/api/state":
@@ -139,6 +150,8 @@ class H(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._allowed():
+            return self._send(403, {"error": "来源 IP 不在允许名单"})
         if not hmac.compare_digest(self.headers.get("X-Console-Token", ""), TOKEN):
             return self._send(403, {"error": "缺少或错误的 token（见启动时打印的 token 文件）"})
         n = int(self.headers.get("Content-Length") or 0)
@@ -183,13 +196,18 @@ class H(BaseHTTPRequestHandler):
 
 
 def main():
-    global TOKEN
+    global TOKEN, ALLOW
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8795)
     ap.add_argument("--interval", type=int, default=60)
     ap.add_argument("--no-auto", action="store_true", help="启动时就关掉自动推进")
     ap.add_argument("--token-file", default="/root/l3/.console-token")
+    ap.add_argument("--bind", default="127.0.0.1", help="监听地址；内网直连用 198 的内网 IP")
+    ap.add_argument("--allow", action="append", default=[], help="允许访问的来源 IP/网段（可重复）；本机总是允许")
     a = ap.parse_args()
+    ALLOW = [ipaddress.ip_network(x, strict=False) for x in a.allow]
+    if a.bind not in ("127.0.0.1", "::1") and not ALLOW:
+        sys.exit("监听非本机地址时必须给 --allow（来源白名单），否则内网任何机器都能看/操作驾驶台")
     load_settings()
     if a.no_auto:
         SETTINGS["auto"] = False
@@ -197,8 +215,8 @@ def main():
     fd = os.open(a.token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.write(fd, TOKEN.encode()); os.close(fd)
     threading.Thread(target=loop, args=(a.interval,), daemon=True).start()
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), H)
-    print(f"gray console on http://127.0.0.1:{a.port}  token file {a.token_file}  auto={SETTINGS['auto']}", flush=True)
+    srv = ThreadingHTTPServer((a.bind, a.port), H)
+    print(f"gray console on http://{a.bind}:{a.port} allow={a.allow or ['loopback']}  token file {a.token_file}  auto={SETTINGS['auto']}", flush=True)
     srv.serve_forever()
 
 

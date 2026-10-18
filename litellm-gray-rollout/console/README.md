@@ -5,16 +5,19 @@
 
 ## 打开
 
-```bash
-# 198 上（root）启动；只监听 127.0.0.1:8795，不改 nginx、不开公网端口
-sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml nohup setsid python3 /opt/gray-console/console/server.py --port 8795 > /opt/gray-console/server.log 2>&1 &
+浏览器直接打开 **http://10.68.13.198:8795**（公司内网 / VPN 下）。
 
-# Mac 上开隧道，再浏览器打开 http://127.0.0.1:8795
-ssh -N -L 8795:127.0.0.1:8795 cltx@10.68.13.198
+```bash
+# 198 上（root）启动：监听内网 IP，来源白名单 = 10.68.30.0/24（办公网）+ 10.68.13.0/24（机房网段）
+sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml nohup setsid python3 /opt/gray-console/console/server.py \
+  --bind 10.68.13.198 --port 8795 --allow 10.68.30.0/24 --allow 10.68.13.0/24 > /opt/gray-console/server.log 2>&1 &
 
 # 写操作口令（页面右下「操作口令」里粘贴；每次启动重新生成）
 ssh cltx@10.68.13.198 'sudo cat /root/l3/.console-token'
 ```
+
+- 不在白名单的来源直接 403；只看页面不需要口令，任何会动线上的操作都要口令 + 页面上二次确认。
+- 不给 `--bind` 时只听 127.0.0.1（老方式，需要 ssh -L）。
 
 部署 / 更新：`tar -C litellm-gray-rollout -czf - console | ssh cltx@10.68.13.198 'sudo bash -c "cd /opt/gray-console && rm -rf console && tar xzf -"'`，再重启进程。
 

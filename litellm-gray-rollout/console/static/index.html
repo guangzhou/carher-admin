@@ -377,7 +377,7 @@ function renderReg() {
   $("reghist").innerHTML = REG.runs.map(x => {
     const st = Object.values(x.results || {}).map(r => r.status);
     const fail = st.filter(s => s === "FAIL" || s === "ERROR").length;
-    return `<button type="button" data-ts="${x.ts}" class="${x.ts === regSel ? "on" : ""}">${esc(hhmmd(x.started_at))} ${esc(LANE_TXT[x.lane_a] || x.lane_a)}↔${esc(LANE_TXT[x.lane_b] || x.lane_b)} ${fail ? "✕" + fail : "✓"}${x.imported ? "（手跑）" : ""}</button>`;
+    return `<button type="button" data-ts="${x.ts}" class="${x.ts === regSel ? "on" : ""}">${esc(hhmmd(x.started_at))} ${esc(LANE_TXT[x.lane_a] || x.lane_a)}↔${esc(LANE_TXT[x.lane_b] || x.lane_b)} ${!x.finished_at ? "跑着" : fail ? "✕" + fail : "✓"}${x.imported ? "（手跑）" : ""}</button>`;
   }).join("") || `<span class="sub">还没跑过。点「跑一遍全部用例」开始，约 20~40 分钟。</span>`;
   $("reghist").querySelectorAll("button").forEach(b => b.addEventListener("click", () => { regSel = b.dataset.ts; renderReg(); }));
   $("regmeta").textContent = run ? `这一轮：A = ${LANE_TXT[run.lane_a] || run.lane_a}${run.a_ip ? " " + run.a_ip : ""}，B = ${LANE_TXT[run.lane_b] || run.lane_b}${run.b_ip ? " " + run.b_ip : ""}；开始 ${hhmmd(run.started_at)}${run.finished_at ? "，结束 " + hhmmd(run.finished_at) : "（进行中）"}` : "";

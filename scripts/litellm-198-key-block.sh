@@ -421,7 +421,7 @@ TOTAL=$(db_q "select count(*) from \"LiteLLM_VerificationToken\"")
 echo "   命中 $N 把 / 全库 $TOTAL 把"
 db_q "select token, key_name, coalesce(key_alias,'-'), expires from \"LiteLLM_VerificationToken\" where key_name like '%$TAIL'"
 if [ "$N" != "1" ]; then
-  echo "!! 碰撞门不通过（需恰好 1 把，实得 $N）——拒绝安装，会误伤别人的 key"
+  echo "!! 碰撞门不通过（需恰好 1 把，实得 ${N}）——拒绝安装，会误伤别人的 key"
   exit 3
 fi
 

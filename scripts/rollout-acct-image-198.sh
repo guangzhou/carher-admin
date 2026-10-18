@@ -70,7 +70,7 @@ echo "== 目标镜像：$IMG"
 # 0) verify tag 在 198 registry（落 225 的号也从这拉）
 if ! curl -s http://127.0.0.1:5000/v2/litellm-carher/tags/list \
      | python3 -c "import sys,json;t='$SHORT';sys.exit(0 if t in json.load(sys.stdin).get('tags',[]) else 3)"; then
-  die "registry 127.0.0.1:5000 里没有 tag=$SHORT。先 docker push，或检查 tag 拼写。"
+  die "registry 127.0.0.1:5000 里没有 tag=${SHORT}。先 docker push，或检查 tag 拼写。"
 fi
 echo "   registry tag 确认存在 ✓"
 

@@ -53,7 +53,7 @@ backup() {
   k -n "$NS" get cm "$CB_CM"  -o yaml > "$BACKUP_DIR/$CB_CM.$ts.yaml"  || die "备份 $CB_CM 失败"
   k -n "$NS" get cm "$CFG_CM" -o yaml > "$BACKUP_DIR/$CFG_CM.$ts.yaml" || die "备份 $CFG_CM 失败"
   k -n "$NS" get deploy "$DEPLOY" -o yaml > "$BACKUP_DIR/$DEPLOY.$ts.yaml" || die "备份 deploy 失败"
-  echo "备份写入 $BACKUP_DIR（时间戳 $ts）"
+  echo "备份写入 ${BACKUP_DIR}（时间戳 ${ts}）"
 }
 
 # ---------------------------------------------------------------- install

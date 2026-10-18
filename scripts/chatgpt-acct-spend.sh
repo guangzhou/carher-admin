@@ -199,7 +199,7 @@ run_198() {
   build_sql "198" "$label" > "$sql_local"
 
   if [[ ! -x "$JMS" ]]; then
-    echo "找不到 $JMS（需 carher-admin/scripts/jms 包装器）" >&2
+    echo "找不到 ${JMS}（需 carher-admin/scripts/jms 包装器）" >&2
     return 1
   fi
 

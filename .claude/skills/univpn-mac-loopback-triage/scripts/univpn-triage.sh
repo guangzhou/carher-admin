@@ -37,7 +37,7 @@ say "127.0.0.1 当前出口接口 = ${iface:-未知}   flags=${flags:-未知}"
 case "$iface" in
   lo0) say "✓ 回环走 lo0，正常" ;;
   "")  say "✗ 取不到接口" ; rc=1 ;;
-  *)   say "✗ 回环被指到 $iface（应为 lo0）—— 回环已损坏" ; rc=1 ;;
+  *)   say "✗ 回环被指到 ${iface}（应为 lo0）—— 回环已损坏" ; rc=1 ;;
 esac
 # WASCLONED 是「这条路由是从 default 克隆出来的」的铁证，不是真实写入的路由，
 # 所以 `route delete -host 127.0.0.1 <gw>` 必然报 not in table —— 别浪费时间删它。
@@ -82,11 +82,11 @@ pgrep -f UniVPNCS >/dev/null 2>&1 || { say "✗ UniVPNCS 未运行 —— UI 等
 
 hr "④ 本机 RPC 29191（UI 和 PromoteService 的唯一通道）"
 listener="$(lsof -nP -iTCP:"$RPC_PORT" 2>/dev/null | tail -n +2)"
-say "${listener:-（无人监听 $RPC_PORT）}"
+say "${listener:-（无人监听 ${RPC_PORT}）}"
 if nc -z -G 3 127.0.0.1 "$RPC_PORT" 2>/dev/null; then
   say "✓ 能连上 127.0.0.1:$RPC_PORT"
 else
-  say "✗ 连不上 127.0.0.1:$RPC_PORT（若 ① 已报损坏，这是其后果而非独立故障）"
+  say "✗ 连不上 127.0.0.1:${RPC_PORT}（若 ① 已报损坏，这是其后果而非独立故障）"
 fi
 
 hr "⑤ 隧道是否已建立（utun 带 IPv4 才算通）"

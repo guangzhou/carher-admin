@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${KIRO_PY:-$HOME/.local/kiro-auto/venv/bin/python}"
 DELETE_OLD="${DELETE_OLD:-}"
 
-[[ -x "$PY" ]] || { echo "venv 不存在: $PY（见 SKILL.md 建 venv 一节）"; exit 1; }
+[[ -x "$PY" ]] || { echo "venv 不存在: ${PY}（见 SKILL.md 建 venv 一节）"; exit 1; }
 [[ -f "$CREDS" ]] || { echo "creds 不存在: $CREDS"; exit 1; }
 
 # 必须在依赖自检之前 cd 走：仓根的 operator/ 会 shadow 标准库（同 kiro_batch.sh）

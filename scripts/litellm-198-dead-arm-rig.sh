@@ -242,7 +242,7 @@ PY
 
   grep -o 'KEY=sk-[A-Za-z0-9_-]*' "$KEYFILE.raw" | head -1 | cut -d= -f2 > "$KEYFILE"
   if [ -s "$KEYFILE" ]; then
-    echo "临时 key 写入 $KEYFILE（24h 过期，只能访问 $GROUP）"
+    echo "临时 key 写入 ${KEYFILE}（24h 过期，只能访问 ${GROUP}）"
   else
     die "临时 key 生成失败，看 $KEYFILE.raw" 1
   fi
@@ -252,7 +252,7 @@ PY
 # ---------------------------------------------------------------- probe
 do_probe() {
   local path="${1:-responses}" nsess="${2:-16}" nshot="${3:-2}"
-  [ -s "$KEYFILE" ] || die "找不到临时 key（$KEYFILE），先跑 $0 up"
+  [ -s "$KEYFILE" ] || die "找不到临时 key（${KEYFILE}），先跑 $0 up"
   local key; key=$(cat "$KEYFILE")
   local pod; pod=$(proxy_pod)
 

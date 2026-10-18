@@ -96,7 +96,7 @@ PY
     "echo $RT_B64 | base64 -d > /tmp/mit_rt.py && python3 /tmp/mit_rt.py" 2>/dev/null \
     | grep -E '^[^|]*\|[^|]*\|' > "$WORK/rt.tsv"
   if [[ ! -s "$WORK/rt.tsv" ]]; then
-    echo "AUDIT ERROR: 运行时 /model/info 一行都没读到（pod=$POD）。空输出不是阴性结论，作废这一轮。" >&2
+    echo "AUDIT ERROR: 运行时 /model/info 一行都没读到（pod=${POD}）。空输出不是阴性结论，作废这一轮。" >&2
     exit 2
   fi
   echo "# 运行时判据 pod=$POD 行数=$(wc -l < "$WORK/rt.tsv")"

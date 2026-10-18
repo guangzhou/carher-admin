@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${KIRO_PY:-$HOME/.local/kiro-auto/venv/bin/python}"
 ACCTS="$HOME/Library/Application Support/.kiro-account-manager/accounts.json"
 
-[[ -x "$PY" ]] || { echo "venv 不存在: $PY（见 SKILL.md 建 venv 一节）"; exit 1; }
+[[ -x "$PY" ]] || { echo "venv 不存在: ${PY}（见 SKILL.md 建 venv 一节）"; exit 1; }
 [[ -f "$CREDS" ]] || { echo "creds 不存在: $CREDS"; exit 1; }
 
 # 🔴 一律在仓库外执行 python：carher-admin 仓根有 `operator/__init__.py`，

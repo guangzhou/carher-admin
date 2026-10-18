@@ -38,7 +38,7 @@ N=$(wc -l < $BAK)
 echo "== 备份 $BAK 行数=$N sha256=$(sha256sum $BAK | cut -d' ' -f1)"
 [ "$N" = "$EXPECT" ] || { echo "ABORT: 备份行数 $N != $EXPECT"; exit 1; }
 
-echo "== 门1：确认这 $EXPECT 行当前的 max_input_tokens 分布（旧值条件是 $COND）"
+echo "== 门1：确认这 $EXPECT 行当前的 max_input_tokens 分布（旧值条件是 ${COND}）"
 q "select coalesce(model_info->>'max_input_tokens','<none>') mit, count(*)
    from \"LiteLLM_ProxyModelTable\" where model_name in ($TARGETS) group by 1;"
 echo "== 门1b：将被这条件命中的行数（应等于你期望改的条数）"
@@ -53,7 +53,7 @@ q "select coalesce(model_info->>'max_input_tokens','<none>') mit, count(*)
 
 if [ "${1:-}" != "--apply" ]; then echo "dry-run，未写入。"; exit 0; fi
 
-echo "== 写入（$MODE，带旧值条件 $COND）"
+echo "== 写入（${MODE}，带旧值条件 ${COND}）"
 q "update \"LiteLLM_ProxyModelTable\"
    set model_info = jsonb_set(model_info::jsonb,'{max_input_tokens}',to_jsonb($NEW::bigint), true),
        updated_at = now()

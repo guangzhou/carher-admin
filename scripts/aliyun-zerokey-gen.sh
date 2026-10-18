@@ -197,7 +197,7 @@ else:
         -p "[{\"op\":\"add\",\"path\":\"/rules/$rule_idx/resourceNames\",\"value\":$json}]"; then
         echo "RBAC: zerokey-capture-rollout resourceNames ($n_before → $n_after) → $json"
       else
-        echo "ERROR: RBAC patch 失败（rule_idx=$rule_idx），刷新 rollout 会 403" >&2
+        echo "ERROR: RBAC patch 失败（rule_idx=${rule_idx}），刷新 rollout 会 403" >&2
       fi
     fi
   else

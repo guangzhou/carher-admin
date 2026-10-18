@@ -78,7 +78,7 @@ case "$SRV" in
 esac
 if [ -n "$EXPECT" ]; then
   case "$RMT" in
-    *"$EXPECT"*) echo "  ✅ 落点核对通过（$EXPECT）" ;;
-    *) echo "  ⚠️ 落点不符：期望 $EXPECT，实际 $RMT —— GUI 选错行了，重跑一次" >&2; exit 1 ;;
+    *"$EXPECT"*) echo "  ✅ 落点核对通过（${EXPECT}）" ;;
+    *) echo "  ⚠️ 落点不符：期望 ${EXPECT}，实际 $RMT —— GUI 选错行了，重跑一次" >&2; exit 1 ;;
   esac
 fi

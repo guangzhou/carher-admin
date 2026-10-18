@@ -1,0 +1,366 @@
+--- a/admin-ui/src/components/dashboard.tsx
++++ b/admin-ui/src/components/dashboard.tsx
+@@ -7,6 +7,7 @@
+ import { Button } from '@/components/ui/button'
+ import { Badge } from '@/components/ui/badge'
+ import { CredentialCard } from '@/components/credential-card'
++import { CredentialFilters, EMPTY_FILTERS, filterCredentials, type CredentialFilterState } from '@/components/credential-filters'
+ import { BalanceDialog } from '@/components/balance-dialog'
+ import { AddCredentialDialog } from '@/components/add-credential-dialog'
+ import { BatchImportDialog } from '@/components/batch-import-dialog'
+@@ -40,6 +41,7 @@
+   const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
+   const cancelVerifyRef = useRef(false)
+   const [currentPage, setCurrentPage] = useState(1)
++  const [filters, setFilters] = useState<CredentialFilterState>(EMPTY_FILTERS)
+   const itemsPerPage = 12
+   const [darkMode, setDarkMode] = useState(() => {
+     if (typeof window !== 'undefined') {
+@@ -70,11 +72,14 @@
+     return rank(a) - rank(b) || (ta === tb ? 0 : tb > ta ? 1 : -1)
+   })
+ 
++  // 查询条件只过滤显示；批量操作仍按勾选的 ID 走，「清除已禁用」仍针对全部已禁用凭据
++  const filteredCredentials = filterCredentials(sortedCredentials, filters)
++
+   // 计算分页
+-  const totalPages = Math.ceil(sortedCredentials.length / itemsPerPage)
++  const totalPages = Math.ceil(filteredCredentials.length / itemsPerPage)
+   const startIndex = (currentPage - 1) * itemsPerPage
+   const endIndex = startIndex + itemsPerPage
+-  const currentCredentials = sortedCredentials.slice(startIndex, endIndex)
++  const currentCredentials = filteredCredentials.slice(startIndex, endIndex)
+   const disabledCredentialCount = data?.credentials.filter(credential => credential.disabled).length || 0
+   const selectedDisabledCount = Array.from(selectedIds).filter(id => {
+     const credential = data?.credentials.find(c => c.id === id)
+@@ -86,6 +91,19 @@
+     setCurrentPage(1)
+   }, [data?.credentials.length])
+ 
++  // 改查询条件时回到第一页
++  const handleFiltersChange = (next: CredentialFilterState) => {
++    setFilters(next)
++    setCurrentPage(1)
++  }
++
++  // 30 秒自动刷新后筛选结果可能变少，页码越界时拉回最后一页
++  useEffect(() => {
++    if (totalPages > 0 && currentPage > totalPages) {
++      setCurrentPage(totalPages)
++    }
++  }, [currentPage, totalPages])
++
+   // 只保留当前仍存在的凭据缓存，避免删除后残留旧数据
+   useEffect(() => {
+     if (!data?.credentials) {
+@@ -719,6 +737,19 @@
+             </Card>
+           ) : (
+             <>
++              <CredentialFilters
++                credentials={data?.credentials || []}
++                filters={filters}
++                onChange={handleFiltersChange}
++                matchedCount={filteredCredentials.length}
++              />
++              {filteredCredentials.length === 0 && (
++                <Card>
++                  <CardContent className="py-8 text-center text-muted-foreground">
++                    没有符合条件的凭据
++                  </CardContent>
++                </Card>
++              )}
+               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                 {currentCredentials.map((credential) => (
+                   <CredentialCard
+@@ -745,7 +776,7 @@
+                     上一页
+                   </Button>
+                   <span className="text-sm text-muted-foreground">
+-                    第 {currentPage} / {totalPages} 页（共 {data?.credentials.length} 个凭据）
++                    第 {currentPage} / {totalPages} 页（共 {filteredCredentials.length} 个凭据）
+                   </span>
+                   <Button
+                     variant="outline"
+--- a/admin-ui/src/components/credential-card.tsx
++++ b/admin-ui/src/components/credential-card.tsx
+@@ -145,14 +145,27 @@
+     <>
+       <Card className={credential.isCurrent ? 'ring-2 ring-primary' : ''}>
+         <CardHeader className="pb-2">
+-          <div className="flex items-center justify-between">
+-            <div className="flex items-center gap-2">
++          <div className="flex items-center justify-between gap-2">
++            <div className="flex items-center gap-2 min-w-0">
+               <Checkbox
+                 checked={selected}
+                 onCheckedChange={onToggleSelect}
+               />
+-              <CardTitle className="text-lg flex items-center gap-2">
++              <CardTitle className="text-base truncate" title={credential.email || `凭据 #${credential.id}`}>
++                <span className="text-muted-foreground font-normal mr-1">#{credential.id}</span>
+                 {credential.email || `凭据 #${credential.id}`}
++              </CardTitle>
++            </div>
++            <div className="flex items-center gap-2 shrink-0">
++              <span className="text-sm text-muted-foreground whitespace-nowrap">启用</span>
++              <Switch
++                checked={!credential.disabled}
++                onCheckedChange={handleToggleDisabled}
++                disabled={setDisabled.isPending}
++              />
++            </div>
++          </div>
++          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                 {credential.isCurrent && (
+                   <Badge variant="success">当前</Badge>
+                 )}
+@@ -173,16 +186,6 @@
+                 {credential.endpoint && (
+                   <Badge variant="outline">{credential.endpoint}</Badge>
+                 )}
+-              </CardTitle>
+-            </div>
+-            <div className="flex items-center gap-2">
+-              <span className="text-sm text-muted-foreground">启用</span>
+-              <Switch
+-                checked={!credential.disabled}
+-                onCheckedChange={handleToggleDisabled}
+-                disabled={setDisabled.isPending}
+-              />
+-            </div>
+           </div>
+         </CardHeader>
+         <CardContent className="space-y-4">
+--- a/admin-ui/src/components/credential-filters.tsx
++++ b/admin-ui/src/components/credential-filters.tsx
+@@ -0,0 +1,229 @@
++import { Search, X } from 'lucide-react'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import type { CredentialStatusItem } from '@/types/api'
++
++// 凭据列表的查询条件。只在前端过滤显示，不改后端数据，也不影响调度。
++export interface CredentialFilterState {
++  keyword: string
++  // 'all' | 'enabled' | 'current' | 'disabled' | 'disabled:<原因>'
++  status: string
++  authMethod: string
++  priority: string
++  domain: string
++  onlyFailures: boolean
++}
++
++export const EMPTY_FILTERS: CredentialFilterState = {
++  keyword: '',
++  status: 'all',
++  authMethod: '',
++  priority: '',
++  domain: '',
++  onlyFailures: false,
++}
++
++const NO_EMAIL = '(无邮箱)'
++
++const REASON_LABELS: Record<string, string> = {
++  Manual: '手动禁用',
++  QuotaExceeded: '额度用尽',
++  TooManyFailures: '连续失败',
++  TooManyRefreshFailures: '刷新失败',
++  InvalidRefreshToken: 'Token 失效',
++  InvalidConfig: '配置无效',
++}
++
++const AUTH_LABELS: Record<string, string> = {
++  idc: 'IdC',
++  social: 'Social',
++  api_key: 'API Key',
++}
++
++function emailDomain(c: CredentialStatusItem): string {
++  const at = c.email ? c.email.lastIndexOf('@') : -1
++  return at >= 0 ? c.email!.slice(at + 1).toLowerCase() : NO_EMAIL
++}
++
++function hasFailures(c: CredentialStatusItem): boolean {
++  return c.failureCount > 0 || c.refreshFailureCount > 0
++}
++
++// 关键字：空格/逗号分隔多个，命中任意一个即可。纯数字（可带 #）同时按 ID 精确匹配。
++function matchKeyword(c: CredentialStatusItem, terms: string[]): boolean {
++  if (terms.length === 0) return true
++  const email = (c.email || '').toLowerCase()
++  return terms.some(t => {
++    const idMatch = /^#?(\d+)$/.exec(t)
++    if (idMatch && Number(idMatch[1]) === c.id) return true
++    return email.includes(t.replace(/^#/, ''))
++  })
++}
++
++function matchStatus(c: CredentialStatusItem, status: string): boolean {
++  if (status === 'all') return true
++  if (status === 'enabled') return !c.disabled
++  if (status === 'current') return c.isCurrent
++  if (status === 'disabled') return c.disabled
++  if (status.startsWith('disabled:')) {
++    return c.disabled && (c.disabledReason || '未知') === status.slice('disabled:'.length)
++  }
++  return true
++}
++
++export function filterCredentials(list: CredentialStatusItem[], f: CredentialFilterState): CredentialStatusItem[] {
++  const terms = f.keyword.toLowerCase().split(/[\s,，]+/).filter(Boolean)
++  return list.filter(c =>
++    matchKeyword(c, terms) &&
++    matchStatus(c, f.status) &&
++    (!f.authMethod || (c.authMethod || '') === f.authMethod) &&
++    (!f.priority || String(c.priority) === f.priority) &&
++    (!f.domain || emailDomain(c) === f.domain) &&
++    (!f.onlyFailures || hasFailures(c))
++  )
++}
++
++export function isFilterActive(f: CredentialFilterState): boolean {
++  return (
++    f.keyword.trim() !== '' ||
++    f.status !== 'all' ||
++    f.authMethod !== '' ||
++    f.priority !== '' ||
++    f.domain !== '' ||
++    f.onlyFailures
++  )
++}
++
++// 统计每个取值出现几次，按次数倒序（同次数按取值排序，保证顺序稳定）
++function countBy(list: CredentialStatusItem[], key: (c: CredentialStatusItem) => string): [string, number][] {
++  const m = new Map<string, number>()
++  list.forEach(c => {
++    const k = key(c)
++    m.set(k, (m.get(k) || 0) + 1)
++  })
++  return Array.from(m.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
++}
++
++const selectClass =
++  'h-9 rounded-md border border-input bg-background px-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
++
++interface CredentialFiltersProps {
++  credentials: CredentialStatusItem[]
++  filters: CredentialFilterState
++  onChange: (next: CredentialFilterState) => void
++  matchedCount: number
++}
++
++export function CredentialFilters({ credentials, filters, onChange, matchedCount }: CredentialFiltersProps) {
++  const set = <K extends keyof CredentialFilterState>(key: K, value: CredentialFilterState[K]) =>
++    onChange({ ...filters, [key]: value })
++
++  const enabledCount = credentials.filter(c => !c.disabled).length
++  const disabledList = credentials.filter(c => c.disabled)
++  const reasons = countBy(disabledList, c => c.disabledReason || '未知')
++  const auths = countBy(credentials, c => c.authMethod || '')
++  const priorities = countBy(credentials, c => String(c.priority)).sort((a, b) => Number(a[0]) - Number(b[0]))
++  const domains = countBy(credentials, emailDomain)
++  const failureCount = credentials.filter(hasFailures).length
++  const active = isFilterActive(filters)
++
++  return (
++    <div className="rounded-lg border bg-card p-3 space-y-3">
++      <div className="flex flex-wrap items-center gap-2">
++        <div className="relative flex-1 min-w-[220px]">
++          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" aria-hidden="true" />
++          <Input
++            value={filters.keyword}
++            onChange={e => set('keyword', e.target.value)}
++            placeholder="邮箱或 #ID，多个用空格分隔"
++            aria-label="搜索邮箱或 ID"
++            className="h-9 pl-8 pr-8"
++          />
++          {filters.keyword && (
++            <button
++              type="button"
++              onClick={() => set('keyword', '')}
++              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
++              aria-label="清空搜索"
++            >
++              <X className="h-4 w-4" />
++            </button>
++          )}
++        </div>
++
++        <label className="flex items-center gap-1 text-sm text-muted-foreground">
++          状态
++          <select className={selectClass} value={filters.status} onChange={e => set('status', e.target.value)}>
++            <option value="all">全部（{credentials.length}）</option>
++            <option value="enabled">启用（{enabledCount}）</option>
++            <option value="current">当前在用</option>
++            <option value="disabled">已禁用（{disabledList.length}）</option>
++            {reasons.map(([r, n]) => (
++              <option key={r} value={`disabled:${r}`}>
++                　└ {REASON_LABELS[r] || r}（{n}）
++              </option>
++            ))}
++          </select>
++        </label>
++
++        <label className="flex items-center gap-1 text-sm text-muted-foreground">
++          登录方式
++          <select className={selectClass} value={filters.authMethod} onChange={e => set('authMethod', e.target.value)}>
++            <option value="">全部</option>
++            {auths.map(([a, n]) => (
++              <option key={a || 'none'} value={a}>
++                {AUTH_LABELS[a] || a || '未知'}（{n}）
++              </option>
++            ))}
++          </select>
++        </label>
++
++        <label className="flex items-center gap-1 text-sm text-muted-foreground">
++          优先级
++          <select className={selectClass} value={filters.priority} onChange={e => set('priority', e.target.value)}>
++            <option value="">全部</option>
++            {priorities.map(([p, n]) => (
++              <option key={p} value={p}>
++                {p}（{n}）
++              </option>
++            ))}
++          </select>
++        </label>
++
++        <label className="flex items-center gap-1 text-sm text-muted-foreground">
++          邮箱域名
++          <select className={selectClass} value={filters.domain} onChange={e => set('domain', e.target.value)}>
++            <option value="">全部</option>
++            {domains.map(([d, n]) => (
++              <option key={d} value={d}>
++                {d}（{n}）
++              </option>
++            ))}
++          </select>
++        </label>
++
++        <label className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer select-none">
++          <input
++            type="checkbox"
++            className="h-4 w-4 accent-primary"
++            checked={filters.onlyFailures}
++            onChange={e => set('onlyFailures', e.target.checked)}
++          />
++          只看有失败（{failureCount}）
++        </label>
++      </div>
++
++      <div className="flex items-center justify-between text-sm">
++        <span className="text-muted-foreground" aria-live="polite">
++          {active ? `筛选出 ${matchedCount} / ${credentials.length} 个凭据` : `共 ${credentials.length} 个凭据`}
++        </span>
++        {active && (
++          <Button size="sm" variant="ghost" className="h-7" onClick={() => onChange(EMPTY_FILTERS)}>
++            <X className="h-4 w-4 mr-1" />
++            重置筛选
++          </Button>
++        )}
++      </div>
++    </div>
++  )
++}

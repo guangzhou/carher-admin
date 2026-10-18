@@ -1,8 +1,7 @@
-diff --git a/src/anthropic/converter.rs b/src/anthropic/converter.rs
-index ab99b89..60627bd 100644
---- a/src/anthropic/converter.rs
-+++ b/src/anthropic/converter.rs
-@@ -77,11 +77,69 @@ Complete all chunked operations without commentary.";
+diff -ruN -x dist a/src/anthropic/converter.rs b/src/anthropic/converter.rs
+--- a/src/anthropic/converter.rs	2026-10-08 17:40:39.000000000 +0800
++++ b/src/anthropic/converter.rs	2026-10-15 18:45:18.315471943 +0800
+@@ -77,15 +77,73 @@
  
  /// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
  /// 严格对照版本号
@@ -60,7 +59,11 @@ index ab99b89..60627bd 100644
 +        return Some((*id).to_string());
 +    }
  
-     if model_lower.contains("sonnet") {
+     if model_lower.contains("fable") {
+         // Kiro 侧 ID 为点号形式 claude-fable-5.1（实测 claude-fable-5-1 / claude-fable-5 均被上游拒绝）
+         // 目前 Kiro 仅上线 5.1 一个 Fable 版本，故与 haiku 分支一致采用无条件映射
+         Some("claude-fable-5.1".to_string())
+     } else if model_lower.contains("sonnet") {
 -        if model_lower.contains("sonnet-5") {
 +        // ⚠️ 顺序敏感：`sonnet-5-5` / `sonnet-5.5` 必须排在 `sonnet-5` 之前。
 +        // `contains("sonnet-5")` 对 "claude-sonnet-5-5" 同样为真，放后面会被静默
@@ -73,42 +76,29 @@ index ab99b89..60627bd 100644
              Some("claude-sonnet-5".to_string())
          } else if model_lower.contains("4-6") || model_lower.contains("4.6") {
              Some("claude-sonnet-4.6".to_string())
-@@ -91,7 +149,12 @@ pub fn map_model(model: &str) -> Option<String> {
-             None
-         }
-     } else if model_lower.contains("opus") {
--        if model_lower.contains("opus-5") {
-+        // ⚠️ 顺序敏感：`opus-5-5` / `opus-5.5` 必须排在 `opus-5` 之前。
-+        // `contains("opus-5")` 对 "claude-opus-5-5" 同样为真，放后面会被静默
-+        // 劫持成 claude-opus-5（HTTP 200 + 原样回显请求名，外观完全像成功）。
-+        if model_lower.contains("opus-5-5") || model_lower.contains("opus-5.5") {
-+            Some("claude-opus-5.5".to_string())
-+        } else if model_lower.contains("opus-5") {
-             Some("claude-opus-5".to_string())
-         } else if model_lower.contains("4-5") || model_lower.contains("4.5") {
-             Some("claude-opus-4.5".to_string())
-@@ -115,10 +178,14 @@ pub fn map_model(model: &str) -> Option<String> {
+@@ -122,12 +180,17 @@
  ///
  /// 复用 `map_model` 的映射逻辑，确保窗口大小判断与模型映射一致。
  /// Kiro 于 2026-03-24 将 Opus 4.6 和 Sonnet 4.6 升级至 1M 上下文。
--/// Sonnet 5 / Opus 4.7 / 4.8 / Opus 5 同 1M
-+/// Sonnet 5 / Opus 4.7 / 4.8 / Opus 5 / Opus 5.5 同 1M
+-/// Sonnet 5 / Opus 4.7 / 4.8 / Opus 5 / 5.5 / Fable 5.1 同 1M
++/// Sonnet 5 / 5.5 / Opus 4.7 / 4.8 / Opus 5 / 5.5 / Fable 5.1 同 1M
  pub fn get_context_window_size(model: &str) -> i32 {
 +    if let Some((_, window)) = passthrough_model(&model.to_lowercase()) {
 +        return *window;
 +    }
 +
      match map_model(model) {
--        Some(mapped) if mapped == "claude-sonnet-5" || mapped == "claude-opus-5" || mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" || mapped == "claude-opus-4.7" || mapped == "claude-opus-4.8" => 1_000_000,
-+        Some(mapped) if mapped == "claude-sonnet-5" || mapped == "claude-sonnet-5.5" || mapped == "claude-opus-5" || mapped == "claude-opus-5.5" || mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" || mapped == "claude-opus-4.7" || mapped == "claude-opus-4.8" => 1_000_000,
-         _ => 200_000,
-     }
- }
-@@ -939,6 +1006,85 @@ mod tests {
-         assert!(map_model("gpt-4").is_none());
+         Some(mapped)
+             if mapped == "claude-fable-5.1"
+                 || mapped == "claude-sonnet-5"
++                || mapped == "claude-sonnet-5.5"
+                 || mapped == "claude-opus-5.5"
+                 || mapped == "claude-opus-5"
+                 || mapped == "claude-sonnet-4.6"
+@@ -1001,6 +1064,85 @@
      }
  
-+    #[test]
+     #[test]
 +    fn test_map_model_passthrough_non_claude() {
 +        // 非 Claude 模型 id 与上游一致，原样透传
 +        for id in [
@@ -147,7 +137,6 @@ index ab99b89..60627bd 100644
 +
 +    #[test]
 +    fn test_map_model_still_rejects_unknown() {
-+        assert_eq!(map_model("claude-fable-5"), None);
 +        assert_eq!(map_model("gpt-6"), None);
 +        assert_eq!(map_model("totally-made-up"), None);
 +    }
@@ -182,19 +171,20 @@ index ab99b89..60627bd 100644
 +    #[test]
 +    fn test_kiro_alias_prefix_does_not_invent_models() {
 +        // 剥前缀不能把不存在的模型变成存在的
-+        assert_eq!(map_model("kiro-claude-fable-5-1"), None);
++        // 前缀只是剥掉，落点与裸名一致（上游 10-08 起支持 fable-5.1）
++        assert_eq!(map_model("kiro-claude-fable-5-1").as_deref(), Some("claude-fable-5.1"));
 +        assert_eq!(map_model("kiro-nope"), None);
 +        assert_eq!(map_model("kiro-"), None);
 +    }
 +
-     #[test]
++    #[test]
      fn test_map_model_thinking_suffix_sonnet() {
          // thinking 后缀不应影响 sonnet 模型映射
-@@ -960,6 +1106,44 @@ mod tests {
-         assert_eq!(result, Some("claude-opus-4.6".to_string()));
+         let result = map_model("claude-sonnet-4-5-20250929-thinking");
+@@ -1022,6 +1164,44 @@
      }
  
-+    #[test]
+     #[test]
 +    fn test_map_model_sonnet_5_5() {
 +        // 四种拼法都要落 5.5
 +        for name in [
@@ -232,52 +222,14 @@ index ab99b89..60627bd 100644
 +        }
 +    }
 +
-     #[test]
++    #[test]
      fn test_map_model_sonnet_5() {
          assert_eq!(
-@@ -978,6 +1162,37 @@ mod tests {
-         );
-     }
- 
-+    #[test]
-+    fn test_map_model_opus_5_5() {
-+        // 主判据：opus-5.5 不能被 contains("opus-5") 劫持
-+        assert_eq!(
-+            map_model("claude-opus-5-5"),
-+            Some("claude-opus-5.5".to_string())
-+        );
-+        assert_eq!(
-+            map_model("claude-opus-5.5"),
-+            Some("claude-opus-5.5".to_string())
-+        );
-+        assert_eq!(
-+            map_model("claude-opus-5-5-thinking"),
-+            Some("claude-opus-5.5".to_string())
-+        );
-+        assert_eq!(
-+            map_model("kiro-claude-opus-5-5"),
-+            Some("claude-opus-5.5".to_string())
-+        );
-+        // 阳性对照：opus-5 自己不能被新分支抢走
-+        assert_eq!(map_model("claude-opus-5"), Some("claude-opus-5".to_string()));
-+        assert_eq!(
-+            map_model("claude-opus-5-thinking"),
-+            Some("claude-opus-5".to_string())
-+        );
-+        // 窗口
-+        assert_eq!(get_context_window_size("claude-opus-5-5"), 1_000_000);
-+        assert_eq!(get_context_window_size("claude-opus-5.5"), 1_000_000);
-+        assert_eq!(get_context_window_size("kiro-claude-opus-5-5"), 1_000_000);
-+    }
-+
-     #[test]
-     fn test_map_model_opus_5() {
-         assert_eq!(
-diff --git a/src/anthropic/handlers.rs b/src/anthropic/handlers.rs
-index 0db744f..51b335a 100644
---- a/src/anthropic/handlers.rs
-+++ b/src/anthropic/handlers.rs
-@@ -74,6 +74,125 @@ pub async fn get_models() -> impl IntoResponse {
+             map_model("claude-sonnet-5"),
+diff -ruN -x dist a/src/anthropic/handlers.rs b/src/anthropic/handlers.rs
+--- a/src/anthropic/handlers.rs	2026-10-08 17:40:39.000000000 +0800
++++ b/src/anthropic/handlers.rs	2026-10-15 18:45:18.316471962 +0800
+@@ -74,6 +74,107 @@
      tracing::info!("Received GET /v1/models request");
  
      let models = vec![
@@ -382,24 +334,6 @@ index 0db744f..51b335a 100644
 +            model_type: "chat".to_string(),
 +            max_tokens: 128_000,
 +        },
-+        Model {
-+            id: "claude-opus-5-5".to_string(),
-+            object: "model".to_string(),
-+            created: 1790208000, // Sep 26, 2026
-+            owned_by: "anthropic".to_string(),
-+            display_name: "Claude Opus 5.5".to_string(),
-+            model_type: "chat".to_string(),
-+            max_tokens: 128_000,
-+        },
-+        Model {
-+            id: "claude-opus-5-5-thinking".to_string(),
-+            object: "model".to_string(),
-+            created: 1790208000, // Sep 26, 2026
-+            owned_by: "anthropic".to_string(),
-+            display_name: "Claude Opus 5.5 (Thinking)".to_string(),
-+            model_type: "chat".to_string(),
-+            max_tokens: 128_000,
-+        },
          Model {
-             id: "claude-opus-5".to_string(),
+             id: "claude-fable-5-1".to_string(),
              object: "model".to_string(),

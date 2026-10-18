@@ -1,0 +1,31 @@
+--- a/admin-ui/src/components/dashboard.tsx
++++ b/admin-ui/src/components/dashboard.tsx
+@@ -55,11 +55,26 @@
+   const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
+   const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
+ 
++  // 显示顺序：启用（当前在用置顶）→ 已禁用；组内按 lastUsedAt 倒序（最近用完/用过的在前），
++  // 从未使用的排组尾；其余保持后端的 priority 顺序（sort 是稳定的）。只影响显示，调度不变。
++  // lastUsedAt 是 RFC3339 且带 9 位小数，部分浏览器 Date.parse 不认 ⇒ 先截到毫秒
++  const lastUsedMs = (s: string | null) => {
++    if (!s) return -Infinity
++    const t = Date.parse(s.replace(/(\.\d{3})\d+/, '$1'))
++    return Number.isNaN(t) ? -Infinity : t
++  }
++  const sortedCredentials = [...(data?.credentials || [])].sort((a, b) => {
++    const rank = (c: { isCurrent: boolean; disabled: boolean }) => (c.disabled ? 2 : c.isCurrent ? 0 : 1)
++    const ta = lastUsedMs(a.lastUsedAt)
++    const tb = lastUsedMs(b.lastUsedAt)
++    return rank(a) - rank(b) || (ta === tb ? 0 : tb > ta ? 1 : -1)
++  })
++
+   // 计算分页
+-  const totalPages = Math.ceil((data?.credentials.length || 0) / itemsPerPage)
++  const totalPages = Math.ceil(sortedCredentials.length / itemsPerPage)
+   const startIndex = (currentPage - 1) * itemsPerPage
+   const endIndex = startIndex + itemsPerPage
+-  const currentCredentials = data?.credentials.slice(startIndex, endIndex) || []
++  const currentCredentials = sortedCredentials.slice(startIndex, endIndex)
+   const disabledCredentialCount = data?.credentials.filter(credential => credential.disabled).length || 0
+   const selectedDisabledCount = Array.from(selectedIds).filter(id => {
+     const credential = data?.credentials.find(c => c.id === id)

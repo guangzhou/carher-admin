@@ -1,0 +1,61 @@
+--- a/src/anthropic/converter.rs
++++ b/src/anthropic/converter.rs
+@@ -93,6 +93,8 @@
+     ("minimax-m2.1", 196_000),
+     ("glm-5", 200_000),
+     ("qwen3-coder-next", 256_000),
++    // 10-16 上游 catalog 新出（付费档 21→22），rateMultiplier 2.4，1M / 输出 131072
++    ("kimi-k3", 1_000_000),
+ ];
+ 
+ /// 可选的 `kiro-` / `kiro/` 别名前缀。
+@@ -1099,6 +1101,7 @@
+             "minimax-m2.1",
+             "glm-5",
+             "qwen3-coder-next",
++            "kimi-k3",
+         ] {
+             assert_eq!(map_model(id).as_deref(), Some(id), "{id}");
+             assert_eq!(
+@@ -1118,12 +1121,23 @@
+         assert_eq!(get_context_window_size("minimax-m2.1"), 196_000);
+         assert_eq!(get_context_window_size("glm-5"), 200_000);
+         assert_eq!(get_context_window_size("qwen3-coder-next"), 256_000);
++        assert_eq!(get_context_window_size("kimi-k3"), 1_000_000);
++        assert_eq!(get_context_window_size("kiro-kimi-k3"), 1_000_000);
+         // Claude 分支不受影响
+         assert_eq!(get_context_window_size("claude-opus-5"), 1_000_000);
+         assert_eq!(get_context_window_size("claude-haiku-4.5"), 200_000);
+     }
+ 
+     #[test]
++    fn test_map_model_kimi_k3_passthrough() {
++        // kimi-k3 是透传 id；kiro- 前缀剥掉后上游拿到原名
++        assert_eq!(map_model("kimi-k3").as_deref(), Some("kimi-k3"));
++        assert_eq!(map_model("kiro-kimi-k3").as_deref(), Some("kimi-k3"));
++        // 阴性对照：别的 kimi 名不会被它吃掉
++        assert_eq!(map_model("kimi-k2.7-code"), None);
++    }
++
++    #[test]
+     fn test_map_model_still_rejects_unknown() {
+         assert_eq!(map_model("gpt-6"), None);
+         assert_eq!(map_model("totally-made-up"), None);
+--- a/src/anthropic/handlers.rs
++++ b/src/anthropic/handlers.rs
+@@ -159,6 +159,15 @@
+             max_tokens: 64_000,
+         },
+         Model {
++            id: "kimi-k3".to_string(),
++            object: "model".to_string(),
++            created: 1782777600,
++            owned_by: "moonshot".to_string(),
++            display_name: "Kimi K3".to_string(),
++            model_type: "chat".to_string(),
++            max_tokens: 131_072,
++        },
++        Model {
+             id: "claude-sonnet-5-5".to_string(),
+             object: "model".to_string(),
+             created: 1790985600, // Oct 2, 2026 —— 上游 catalog 首次出现

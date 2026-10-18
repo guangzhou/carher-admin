@@ -1,0 +1,9 @@
+PASS S1 key over-budget 200
+PASS S2 key over-budget responses stream 200
+PASS S3 family first call passes
+FAIL S4 accounting landed in redis :: key=budget_notice:fam:other:765a86f46ee3527b294a3966f23931897402233804e30389f119d0f2a860a86c:20261017
+FAIL S5 family second call blocked 200 :: 200 {"id":"resp_VNVNBRvZwamESQam1sQTxJgOo46lhLqQg-48soPtgp2LuPUpXVTEBywsYyv2tqW_p8fR5FawjZbO92Gpr7V9X8vMoCjiCY-gxsMZQt1KV3ZSCSrmSTLGXNtFGqBTGlPyw-4VOvVT1qLAy7LMdwhcvWq1Gr6UID8GhZ
+FAIL S6 gpt53 uses other bucket :: 200 {"id":"resp__L-qyz9Kafzy8QVEPHmUmP4Zw_uRecGI6Tpe4kmR6rtMkFq7v7D27BBtKPyuZpFrfG4I0p-UN5XHhlNhRtCrKMo3bSw3KB0V56ejEBxTcxP9JWHX2_4XJ2evJNAgo7uOF8uUU7sk5nNbomutmoUXQ5z5RPEXtjxEkpV5QsbHs
+FAIL S6b non-Claude other shares bucket :: kiro-deepseek-3.2 200 {"id":"chatcmpl-a73ce5b6-f971-4acb-b283-2a46da8650a1","created":1792174621,"model":"kiro-deepseek-3.2","object":"chat.completion","choices":[{"finish_reaso
+PASS S7 quota query shows families
+PASS S8 cleanup

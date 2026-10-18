@@ -95,6 +95,27 @@ pre.log { margin: 0; max-height: 220px; overflow: auto; background: var(--bg); b
 .banner.err { background: var(--bad-bg); color: var(--bad) }
 .tok { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 12px }
 .tok input { font: 12px var(--f-num); padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); width: 22em; max-width: 100% }
+
+/* 回归 */
+.reg { display: grid; gap: 10px }
+.reg-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between }
+.reg-ctl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px }
+.reg-ctl select { font: 13px var(--f-body); padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg) }
+.case { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px 12px; align-items: start; border-top: 1px solid var(--line); padding: 10px 0 }
+.case:first-of-type { border-top: 0 }
+.case .nm { font-weight: 700 }
+.case .ds { grid-column: 2 / 4; font-size: 13px; color: var(--muted); display: grid; gap: 2px }
+.case .ds b { color: var(--fg); font-weight: 500 }
+.case .rs { text-align: right; font-size: 13px }
+.case details { grid-column: 2 / 4; font-size: 12px }
+.case details pre { margin: 6px 0 0; max-height: 200px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: 12px/1.5 var(--f-num); white-space: pre-wrap; overflow-wrap: anywhere }
+.st { display: inline-block; min-width: 4.5em; text-align: center; border-radius: 999px; padding: 1px 8px; font-size: 12px; font-weight: 700 }
+.st-PASS { background: var(--ok-bg); color: var(--ok) } .st-FAIL, .st-ERROR { background: var(--bad-bg); color: var(--bad) }
+.st-SAME_FAIL { background: var(--warn-bg); color: var(--warn) } .st-RUN { background: var(--info-bg); color: var(--info) } .st-NONE { background: var(--bg); color: var(--muted) }
+.hist { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px }
+.hist button { font-size: 12px; padding: 3px 9px }
+.hist button.on { border-color: var(--accent); color: var(--accent) }
+.legend { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 12px }
 </style>
 </head>
 <body>
@@ -117,6 +138,23 @@ pre.log { margin: 0; max-height: 220px; overflow: auto; background: var(--bg); b
     <div class="sub" id="dwelltxt"></div>
   </section>
 
+
+  <section class="panel reg" id="regress">
+    <div class="reg-head">
+      <h2>用例回归（新旧并排）</h2>
+      <div class="reg-ctl">
+        <label for="laneA">A</label><select id="laneA"></select>
+        <span>对比</span>
+        <label for="laneB">B</label><select id="laneB"></select>
+        <button type="button" id="regrun" class="primary">跑一遍全部用例</button>
+      </div>
+    </div>
+    <div id="regconfirm"></div>
+    <div class="legend"><span><span class="st st-PASS">通过</span> 两边都过</span><span><span class="st st-SAME_FAIL">同形</span> 两边一样不过 = 上游或用例本身的问题，不是版本问题</span><span><span class="st st-FAIL">不过</span> 只有一边不过 / 两边不一样</span></div>
+    <div class="hist" id="reghist"></div>
+    <div class="sub" id="regmeta"></div>
+    <div id="regcases"></div>
+  </section>
   <div class="grid">
     <div class="col">
       <section class="panel">
@@ -262,7 +300,7 @@ async function send(o, confirm) {
   }
 }
 
-const KIND_TXT = {verdict: "判断", auto_ramp: "自动放量", action_start: "开始执行", action_end: "执行结束", decision: "拍板", auto_toggle: "自动推进"};
+const KIND_TXT = {regress_start: "回归开始", regress_case: "回归用例", regress_end: "回归结束", verdict: "判断", auto_ramp: "自动放量", action_start: "开始执行", action_end: "执行结束", decision: "拍板", auto_toggle: "自动推进"};
 function evText(e) {
   if (e.kind === "verdict") return `${STATE_TXT[e.state] || e.state}：${e.headline}`;
   if (e.kind === "auto_ramp") return `升到 ${e.target}%：${e.result?.ok ? "已提交" : "没提交（" + (e.result?.error || "") + "）"}`;
@@ -270,6 +308,9 @@ function evText(e) {
   if (e.kind === "action_end") return `${e.action} 结束 rc=${e.rc}${e.rc ? "（失败，见日志）" : ""}`;
   if (e.kind === "decision") return `选了：${e.choice}${e.arg != null ? " " + e.arg : ""}`;
   if (e.kind === "auto_toggle") return e.on ? "打开" : "关闭";
+  if (e.kind === "regress_start") return `${(e.cases || []).length} 条用例，${e.lane_a} ↔ ${e.lane_b}`;
+  if (e.kind === "regress_case") return `${e.case}：${e.status} ${e.summary || ""}`;
+  if (e.kind === "regress_end") return `通过 ${e.passed}，同形 ${e.same}，不过 ${e.failed}`;
   return JSON.stringify(e);
 }
 function renderEvents(evs) {
@@ -316,6 +357,55 @@ $("auto").addEventListener("change", async (e) => {
 });
 $("refresh").addEventListener("click", async () => { try { await post("/api/refresh", {}); } catch (e) {} setTimeout(load, 1500); });
 load(); setInterval(load, 10000);
+
+const REG_ST = {PASS: "通过", FAIL: "不过", SAME_FAIL: "同形", ERROR: "出错", RUN: "跑着", NONE: "没跑"};
+const LANE_TXT = {gray: "gray 热备", prod: "生产", "guarded-old": "保险丝(旧版)"};
+let REG = null, regSel = null;
+async function loadReg() {
+  try {
+    const r = await fetch("/api/regress", {cache: "no-store"}); REG = await r.json();
+    if (!$("laneA").options.length) {
+      for (const id of ["laneA", "laneB"]) $(id).innerHTML = REG.lanes.map(l => `<option value="${l}">${esc(LANE_TXT[l] || l)}</option>`).join("");
+      $("laneA").value = "gray"; $("laneB").value = "prod";
+    }
+    if (!regSel || !REG.runs.find(x => x.ts === regSel)) regSel = REG.runs[0]?.ts || null;
+    renderReg();
+  } catch (e) {}
+}
+function renderReg() {
+  const run = REG.runs.find(x => x.ts === regSel), job = REG.job || {};
+  $("reghist").innerHTML = REG.runs.map(x => {
+    const st = Object.values(x.results || {}).map(r => r.status);
+    const fail = st.filter(s => s === "FAIL" || s === "ERROR").length;
+    return `<button type="button" data-ts="${x.ts}" class="${x.ts === regSel ? "on" : ""}">${esc(hhmmd(x.started_at))} ${esc(LANE_TXT[x.lane_a] || x.lane_a)}↔${esc(LANE_TXT[x.lane_b] || x.lane_b)} ${fail ? "✕" + fail : "✓"}${x.imported ? "（手跑）" : ""}</button>`;
+  }).join("") || `<span class="sub">还没跑过。点「跑一遍全部用例」开始，约 20~40 分钟。</span>`;
+  $("reghist").querySelectorAll("button").forEach(b => b.addEventListener("click", () => { regSel = b.dataset.ts; renderReg(); }));
+  $("regmeta").textContent = run ? `这一轮：A = ${LANE_TXT[run.lane_a] || run.lane_a}${run.a_ip ? " " + run.a_ip : ""}，B = ${LANE_TXT[run.lane_b] || run.lane_b}${run.b_ip ? " " + run.b_ip : ""}；开始 ${hhmmd(run.started_at)}${run.finished_at ? "，结束 " + hhmmd(run.finished_at) : "（进行中）"}` : "";
+  $("regrun").disabled = !!job.running;
+  $("regrun").textContent = job.running ? `正在跑：${(REG.cases.find(c => c.id === job.current) || {}).name || "准备中"}` : "跑一遍全部用例";
+  $("regcases").innerHTML = REG.cases.map(c => {
+    const r = run?.results?.[c.id];
+    const st = r ? r.status : (job.running && run && !run.finished_at && run.cases.includes(c.id) ? (job.current === c.id ? "RUN" : "NONE") : "NONE");
+    const det = r?.details?.length ? `<details><summary>明细（${r.details.length} 行）</summary><pre>${esc(r.details.join("\n"))}</pre></details>` : "";
+    return `<div class="case"><span class="st st-${st}">${REG_ST[st]}</span><span class="nm">${esc(c.name)}${c.paired ? "" : ' <span class="sub">（每条车道各跑一遍）</span>'}</span>
+      <span class="rs num">${esc(r?.summary || "")}${r?.seconds != null ? ` <span class="sub">${Math.round(r.seconds / 60)}分</span>` : ""}</span>
+      <div class="ds"><span><b>测什么</b>　${esc(c.what)}</span><span><b>过的判据</b>　${esc(c.pass)}</span><span><b>为什么要有</b>　${esc(c.why)}</span></div>${det}</div>`;
+  }).join("");
+}
+function hhmmd(iso) { if (!iso) return "—"; const d = new Date(iso); return d.toLocaleString("zh-CN", {hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit"}); }
+$("regrun").addEventListener("click", () => {
+  const a = $("laneA").value, b = $("laneB").value;
+  if (a === b) { $("regconfirm").innerHTML = `<div class="banner err">A 和 B 不能是同一条车道。</div>`; return; }
+  $("regconfirm").innerHTML = `<div class="confirm"><span>会在 ${esc(LANE_TXT[a])} 和 ${esc(LANE_TXT[b])} 上起几十把 15 分钟的临时 key、打真实上游（花几美分）。不改路由、不改任何用户 key。确认？</span>
+    <button type="button" class="primary" id="regyes">确认开跑</button><button type="button" id="regno">取消</button></div>`;
+  $("regyes").addEventListener("click", async () => {
+    try { await post("/api/regress/run", {lane_a: a, lane_b: b, confirm: true}); $("regconfirm").innerHTML = `<div class="sub">已开跑。</div>`; regSel = null; setTimeout(loadReg, 1500); }
+    catch (e) { $("regconfirm").innerHTML = `<div class="banner err">没开跑：${esc(e.message)}</div>`; }
+  });
+  $("regno").addEventListener("click", () => { $("regconfirm").innerHTML = ""; });
+});
+loadReg(); setInterval(loadReg, 15000);
+
 </script>
 </body>
 </html>

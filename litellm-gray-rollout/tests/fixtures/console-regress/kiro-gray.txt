@@ -1,0 +1,95 @@
+✅ 阴性对照通过：不存在的模型 code=400，量具能报红。
+
+r1  kiro-auto                  OK  code=200  ttft=1.38    total=1.50    in=5878   out=11   
+r1  kiro-claude-haiku-4-5      OK  code=200  ttft=1.00    total=1.14    in=4111   out=12   
+r1  kiro-claude-opus-4-5       OK  code=200  ttft=1.38    total=1.55    in=4110   out=8    
+r1  kiro-claude-opus-4-6       OK  code=200  ttft=1.63    total=1.78    in=4171   out=8    
+r1  kiro-claude-opus-4-7       OK  code=200  ttft=0.76    total=1.26    in=5996   out=31   
+r1  kiro-claude-opus-4-8       OK  code=200  ttft=0.97    total=1.23    in=6484   out=11   
+r1  kiro-claude-opus-5         OK  code=200  ttft=0.98    total=1.17    in=6748   out=8    
+r1  kiro-claude-opus-5-5       OK  code=200  ttft=2.78    total=2.94    in=6752   out=11   
+r1  kiro-claude-sonnet-4-5     OK  code=200  ttft=1.48    total=2.05    in=4123   out=24   
+r1  kiro-claude-sonnet-4-6     OK  code=200  ttft=0.95    total=1.02    in=4110   out=8    
+r1  kiro-claude-sonnet-5       OK  code=200  ttft=1.19    total=1.33    in=6482   out=8    
+r1  kiro-claude-sonnet-5-5     OK  code=200  ttft=0.80    total=0.85    in=6485   out=10   
+r1  kiro-deepseek-3.2          OK  code=200  ttft=1.30    total=3.14    in=3847   out=134  
+r1  kiro-glm-5                 OK  code=200  ttft=0.93    total=1.23    in=3734   out=43   
+r1  kiro-gpt5.6-luna           OK  code=200  ttft=0.71    total=0.79    in=430    out=14   
+r1  kiro-gpt5.6-sol            OK  code=200  ttft=0.81    total=0.96    in=430    out=15   
+r1  kiro-gpt5.6-terra          OK  code=200  ttft=1.04    total=1.11    in=430    out=17   
+r1  kiro-kimi-k3               OK  code=200  ttft=1.96    total=1.98    in=4288   out=12   
+r1  kiro-minimax-m2.1          OK  code=200  ttft=0.99    total=1.03    in=3707   out=8    
+r1  kiro-minimax-m2.5          OK  code=200  ttft=0.92    total=1.01    in=3701   out=9    
+r1  kiro-qwen3-coder-next      OK  code=200  ttft=0.75    total=0.79    in=3715   out=8    
+---- round 1 done ----
+r2  kiro-auto                  OK  code=200  ttft=1.02    total=1.26    in=5878   out=10   
+r2  kiro-claude-haiku-4-5      OK  code=200  ttft=0.73    total=1.58    in=4160   out=82   
+r2  kiro-claude-opus-4-5       OK  code=200  ttft=1.68    total=1.89    in=4110   out=8    
+r2  kiro-claude-opus-4-6       OK  code=200  ttft=1.57    total=1.73    in=4171   out=8    
+r2  kiro-claude-opus-4-7       OK  code=200  ttft=1.86    total=1.96    in=5974   out=11   
+r2  kiro-claude-opus-4-8       OK  code=200  ttft=1.00    total=1.23    in=6484   out=10   
+r2  kiro-claude-opus-5         OK  code=200  ttft=1.14    total=1.35    in=6748   out=8    
+r2  kiro-claude-opus-5-5       OK  code=200  ttft=2.09    total=2.24    in=6752   out=11   
+r2  kiro-claude-sonnet-4-5     OK  code=200  ttft=1.49    total=2.28    in=4137   out=40   
+r2  kiro-claude-sonnet-4-6     OK  code=200  ttft=0.89    total=1.00    in=4110   out=8    
+r2  kiro-claude-sonnet-5       OK  code=200  ttft=1.12    total=1.24    in=6482   out=8    
+r2  kiro-claude-sonnet-5-5     OK  code=200  ttft=0.78    total=0.87    in=6485   out=10   
+r2  kiro-deepseek-3.2          OK  code=200  ttft=0.94    total=5.74    in=3810   out=94   
+r2  kiro-glm-5                 OK  code=200  ttft=0.92    total=1.35    in=3736   out=46   
+r2  kiro-gpt5.6-luna           OK  code=200  ttft=3.77    total=3.87    in=430    out=12   
+r2  kiro-gpt5.6-sol            OK  code=200  ttft=0.72    total=0.74    in=429    out=8    
+r2  kiro-gpt5.6-terra          OK  code=200  ttft=0.94    total=0.96    in=429    out=10   
+r2  kiro-kimi-k3               OK  code=200  ttft=3.28    total=3.34    in=4265   out=12   
+r2  kiro-minimax-m2.1          OK  code=200  ttft=0.89    total=0.97    in=3713   out=10   
+r2  kiro-minimax-m2.5          OK  code=200  ttft=0.86    total=0.89    in=3699   out=10   
+r2  kiro-qwen3-coder-next      OK  code=200  ttft=0.66    total=0.67    in=3715   out=8    
+---- round 2 done ----
+r3  kiro-auto                  OK  code=200  ttft=1.17    total=1.62    in=5903   out=33   
+r3  kiro-claude-haiku-4-5      OK  code=200  ttft=1.10    total=1.22    in=4109   out=9    
+r3  kiro-claude-opus-4-5       OK  code=200  ttft=1.44    total=1.62    in=4110   out=8    
+r3  kiro-claude-opus-4-6       OK  code=200  ttft=1.52    total=1.67    in=4171   out=8    
+r3  kiro-claude-opus-4-7       OK  code=200  ttft=0.76    total=1.35    in=5996   out=31   
+r3  kiro-claude-opus-4-8       OK  code=200  ttft=0.89    total=1.00    in=6484   out=11   
+r3  kiro-claude-opus-5         OK  code=200  ttft=1.12    total=1.25    in=6748   out=7    
+r3  kiro-claude-opus-5-5       OK  code=200  ttft=1.54    total=1.62    in=6752   out=10   
+r3  kiro-claude-sonnet-4-5     OK  code=200  ttft=1.44    total=2.36    in=4139   out=43   
+r3  kiro-claude-sonnet-4-6     OK  code=200  ttft=0.99    total=1.21    in=4110   out=8    
+r3  kiro-claude-sonnet-5       OK  code=200  ttft=1.31    total=1.43    in=6482   out=8    
+r3  kiro-claude-sonnet-5-5     OK  code=200  ttft=0.79    total=0.90    in=6485   out=11   
+r3  kiro-deepseek-3.2          OK  code=200  ttft=0.91    total=4.30    in=3795   out=59   
+r3  kiro-glm-5                 OK  code=200  ttft=0.88    total=1.18    in=3736   out=45   
+r3  kiro-gpt5.6-luna           OK  code=200  ttft=0.74    total=0.85    in=430    out=14   
+r3  kiro-gpt5.6-sol            OK  code=200  ttft=0.78    total=0.81    in=429    out=8    
+r3  kiro-gpt5.6-terra          OK  code=200  ttft=1.03    total=1.06    in=430    out=15   
+r3  kiro-kimi-k3               OK  code=200  ttft=1.63    total=1.76    in=4271   out=39   
+r3  kiro-minimax-m2.1          OK  code=200  ttft=0.88    total=0.90    in=3705   out=10   
+r3  kiro-minimax-m2.5          OK  code=200  ttft=1.02    total=1.08    in=3700   out=9    
+r3  kiro-qwen3-coder-next      OK  code=200  ttft=0.66    total=0.66    in=3715   out=8    
+---- round 3 done ----
+
+model                      ok/n    ttft_p50  ttft_p95  ttft_min  ttft_max  in_tok  
+kiro-auto                  3/3     1.17      1.38      1.02      1.38      5878    
+kiro-claude-haiku-4-5      3/3     1.00      1.10      0.73      1.10      4111    
+kiro-claude-opus-4-5       3/3     1.44      1.68      1.38      1.68      4110    
+kiro-claude-opus-4-6       3/3     1.57      1.63      1.52      1.63      4171    
+kiro-claude-opus-4-7       3/3     0.76      1.86      0.76      1.86      5996    
+kiro-claude-opus-4-8       3/3     0.97      1.00      0.89      1.00      6484    
+kiro-claude-opus-5         3/3     1.12      1.14      0.98      1.14      6748    
+kiro-claude-opus-5-5       3/3     2.09      2.78      1.54      2.78      6752    
+kiro-claude-sonnet-4-5     3/3     1.48      1.49      1.44      1.49      4137    
+kiro-claude-sonnet-4-6     3/3     0.95      0.99      0.89      0.99      4110    
+kiro-claude-sonnet-5       3/3     1.19      1.31      1.12      1.31      6482    
+kiro-claude-sonnet-5-5     3/3     0.79      0.80      0.78      0.80      6485    
+kiro-deepseek-3.2          3/3     0.94      1.30      0.91      1.30      3810    
+kiro-glm-5                 3/3     0.92      0.93      0.88      0.93      3736    
+kiro-gpt5.6-luna           3/3     0.74      3.77      0.71      3.77      430     
+kiro-gpt5.6-sol            3/3     0.78      0.81      0.72      0.81      429     
+kiro-gpt5.6-terra          3/3     1.03      1.04      0.94      1.04      430     
+kiro-kimi-k3               3/3     1.96      3.28      1.63      3.28      4271    
+kiro-minimax-m2.1          3/3     0.89      0.99      0.88      0.99      3707    
+kiro-minimax-m2.5          3/3     0.92      1.02      0.86      1.02      3700    
+kiro-qwen3-coder-next      3/3     0.66      0.75      0.66      0.75      3715    
+
+全局 63/63 成功（100.0%），TTFT p50 1.00 / p95 2.09
+⚠️ 短输出负载下 TTFT≈总时延，别把它当「流式首字很快」的证据。
+⚠️ 10 发样本判不了长尾，别拿 max 当 SLO。

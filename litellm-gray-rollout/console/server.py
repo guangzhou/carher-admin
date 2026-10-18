@@ -13,6 +13,7 @@ import datetime as dt
 import hmac
 import ipaddress
 import json
+import re
 import os
 import secrets
 import sys
@@ -29,6 +30,7 @@ sys.path.insert(0, str(HERE))
 import actions  # noqa: E402
 import collect  # noqa: E402
 import engine  # noqa: E402
+import regress  # noqa: E402
 
 STATE: dict = {"verdict": None, "readings": None, "raw": None, "at": None, "error": None}
 SETTINGS = {"auto": True, "paused_by": None}
@@ -143,6 +145,19 @@ class H(BaseHTTPRequestHandler):
             with _lock:
                 body = dict(STATE, settings=SETTINGS, events=actions.read_events(80))
             return self._send(200, body)
+        if self.path == "/api/regress":
+            return self._send(200, regress.state())
+        if self.path.startswith("/api/regress/log?"):
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            ts, name = q.get("ts", [""])[0], q.get("f", [""])[0]
+            base = regress._dir()
+            if not base or not re.fullmatch(r"\d{8}T\d{6}Z", ts) or not re.fullmatch(r"[a-z_]+-[A-Za-z_]+\.log", name):
+                return self._send(400, {"error": "bad args"})
+            try:
+                return self._send(200, {"text": (base / ts / name).read_text(errors="ignore")[-20000:]})
+            except OSError:
+                return self._send(404, {"error": "no such log"})
         if self.path.startswith("/api/log?"):
             from urllib.parse import parse_qs, urlparse
             p = parse_qs(urlparse(self.path).query).get("path", [""])[0]
@@ -188,6 +203,11 @@ class H(BaseHTTPRequestHandler):
             actions.log_event("decision", who, choice=act, arg=req.get("arg"))
             res = actions.start(act, req.get("arg"), who=who)
             threading.Thread(target=tick, kwargs={"auto_act": False}, daemon=True).start()
+            return self._send(200 if res.get("ok") else 409, res)
+        if self.path == "/api/regress/run":
+            if not req.get("confirm"):
+                return self._send(400, {"error": "跑回归会起短命 key、打真实上游（花少量钱），需要 confirm=true"})
+            res = regress.start(list(req.get("cases") or []), str(req.get("lane_a") or "gray"), str(req.get("lane_b") or "prod"), who=who)
             return self._send(200 if res.get("ok") else 409, res)
         if self.path == "/api/refresh":
             threading.Thread(target=tick, kwargs={"auto_act": False}, daemon=True).start()

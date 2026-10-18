@@ -1314,6 +1314,8 @@ key 的来源是 `secret/kiro-rs-bootstrap` 的 `config.json`（ns 里**没有**
 
 | **188~192** | `deni.aprizal` / `jovin.antono` / `maximillian.matthew` / `mohammed.akbar` / `redanka.karim`（均 @binus.ac.id，IdC/BuilderId） | **10-19 12:5x~13:0x** | `add-batch` 自动备份 | 用户给明文凭据 5 个号，走 10-17 那条「先改密码+轮转 2FA 再加号」全流程，**本轮 5/5 两项全成**（10-17 那批 2FA 3/3 失败的 AWS 改版问题，在 `aws_mfa_rotate.py` 的 `DELETE_OLD=1` delete-before-register + 页脚按钮过滤修好后不再出现）。`batch_pwd_2fa.sh` 本轮改成从 creds ndjson 读账号（原先账号硬编码在脚本里，而脚本在 git 跟踪区）。链路：`batch_pwd_2fa.sh`(5/5) → `kiro_batch.sh` 用新密码+新 seed 登录(5/5，AcctMgr 156→161) → AcctMgr 条目当导出喂 `kiro-batch-prepare.py`(判重 0 命中) → probe 全 `KIRO STUDENT` 21 模型 → `add-batch --priority 0` 5/5，池 178→183、available 25→30，在役 id186 不切。IdC 不开 overage。飞书表 108→113 条新建（表里原先一条都没有）。回归 21/21 绿。🔴 **`kiro-batch-prepare.py --out` 的 glob 会同时匹配 `*.json` 和 `*.rotated.json`**，`add-batch split/creds/*.json` 直接把每个号加两遍（dry-run 报「加成 10」才看出来）⇒ IdC 号 probe 报 `rotated:false`，加号前必须 `grep -v rotated` |
 
+| **193** | `septian.aji@binus.ac.id`（IdC/BuilderId） | **10-19 13:2x~13:3x** | `add` 自动备份 | 同 id188~192 那条链，单号跑。用户**只给了 Kiro 密码 + MFA seed，没给邮箱密码** ⇒ `BINUS_PW` 为空也全程跑通（删旧 MFA 后重登确实不要 MFA，邮箱验证码兜底没被用上）。密码+2FA 1/1，登录 1/1（CAPTCHA 错一次自动重试），`KIRO STUDENT` 21 模型，`add --priority 0` 池 183→184，在役 id187 不切。飞书 113→114 新建。回归 21/21 绿。🔴 **「21 模型」别再顺手写成「无 kimi-k3」**：现读 catalog，kimi-k3 **在**（2.4x / 1M / 131K），缺的是 `fable-5.1`；10-17 批次那句「21 模型（无 kimi-k3）」是 kimi-k3 上线（10-16）前的旧话，本轮照抄说错了，id187/188/192 现查全是「含 kimi-k3、无 fable-5.1」，飞书 6 条备注已改正 |
+
 ### §D4.2 🔴 10-08 这批的三件事：rc=0 不是落地 / 余额不是死活尺子 / 400 有三义
 
 24 个新增号的**结局是三类不是两类**，而 10-02 那版 SOP 的 assert 只认两类：

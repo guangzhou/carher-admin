@@ -97,6 +97,18 @@ def test_markdown_mailto_cell_is_parsed():
     assert m.mail_of(None) == ""
 
 
+def test_lark_output_not_in_tmp():
+    """🔴 `lark-cli --output` 有路径白名单，写 /tmp 或 $TMPDIR 会被拒：
+    `unsafe output path: … outside the built-in allowlist`。
+    必须落在仓内 work-kiro-*/（已 gitignore）。这个坑只有不带 --lark-cache
+    跑端到端才暴露，别为了「省一次导出」把它改回 /tmp。
+    """
+    src = open(SCRIPT, encoding="utf-8").read()
+    assert "work-kiro-reconcile" in src
+    assert 'TMPDIR' not in src, "不许把 lark 导出落到 $TMPDIR"
+    assert "allowlist" in src, "这条坑的说明不许删"
+
+
 def test_row_range_parsing():
     m = _mod()
     assert m.parse_rows("59-81", 126) == set(range(59, 82))

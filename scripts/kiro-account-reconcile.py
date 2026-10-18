@@ -71,14 +71,25 @@ def disk_pool() -> list[dict]:
 
 
 def lark_rows(cache: Path | None) -> list[dict]:
+    """导出飞书凭据表。
+
+    🔴 `lark-cli --output` 有路径白名单：写 `$TMPDIR` / `/tmp` 会被拒
+    （`unsafe output path: … outside the built-in allowlist; allowed roots are
+    the current directory …`）⇒ 落到仓内 `work-kiro-reconcile/`（已被
+    `.gitignore` 的 `work-kiro-*/` 覆盖），**不是 /tmp**。
+    这个坑只有不带 `--lark-cache` 跑端到端才会暴露。
+    """
     if cache and cache.exists():
         return [json.loads(l) for l in cache.read_text().splitlines() if l.strip()]
-    out = Path(os.environ.get("TMPDIR", "/tmp")) / "kiro-reconcile-lark.ndjson"
+    work = REPO / "work-kiro-reconcile"
+    work.mkdir(exist_ok=True)
+    work.chmod(0o700)
+    out = work / "lark-rows.ndjson"
     r = subprocess.run(
         ["lark-cli", "base", "+record-list", "--base-token", BASE_TOKEN,
          "--table-id", TABLE_ID, "--format", "ndjson", "--output", str(out),
          "--overwrite", "--as", "user"],
-        capture_output=True, text=True)
+        cwd=str(REPO), capture_output=True, text=True)
     if not out.exists():
         sys.exit(f"🔴 读飞书表失败：{(r.stderr or r.stdout)[:300]}")
     out.chmod(0o600)

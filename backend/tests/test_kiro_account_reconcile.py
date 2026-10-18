@@ -105,8 +105,15 @@ def test_lark_output_not_in_tmp():
     """
     src = open(SCRIPT, encoding="utf-8").read()
     assert "work-kiro-reconcile" in src
-    assert 'TMPDIR' not in src, "不许把 lark 导出落到 $TMPDIR"
     assert "allowlist" in src, "这条坑的说明不许删"
+    # 只禁**真用法**（os.environ 取 TMPDIR / 拼 /tmp 路径），
+    # 注释里提到这两个词是在警示，不该被拦 —— 第一版断言 `"TMPDIR" not in src`
+    # 就把自己的警示注释判成了违规。
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.lstrip().startswith(("#", "*", '"""', "'''"))
+                     and "🔴" not in l and "`" not in l)
+    assert "TMPDIR" not in code, "不许把 lark 导出落到 $TMPDIR"
+    assert 'Path("/tmp' not in code and "'/tmp" not in code, "不许写死 /tmp"
 
 
 def test_row_range_parsing():

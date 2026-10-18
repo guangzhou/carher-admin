@@ -12,7 +12,13 @@
 用 page.on("request") 主拦 + requestfailed 兜底，两个都挂。
 ❌ 别用 page.route（会 abort 掉请求干扰事件）。
 
+🔴 **2026-10-19 起必须先过 AWS WAF**（否则到不了 github.com，空转 180s 超时）：
+Kiro 在 `/github/authorize` 前加了 WAF 人机验证（九宫格选图 "Choose all the X"）。
+先跑 `waf_solve.py` 过一次题拿 `aws-waf-token`（约 4 天有效、非 httpOnly），
+再用 `WAF_COOKIES=<那个 json>` 把它注入进来，后续所有号复用同一个 token。
+
 用法：
+  WAF_COOKIES=/path/waf-cookies.json \
   TARGET_EMAIL=x@binus.ac.id PW='<GitHub 密码>' TOTP_SEED='<seed>' \
     PYTHONPATH=<此目录> ~/.local/kiro-auto/venv/bin/python kiro_github_login.py
 
@@ -20,6 +26,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import sys
@@ -70,9 +77,32 @@ def run(email: str, password: str, totp_seed: str | None) -> int:
                 headless=False,
                 args=["--disable-blink-features=AutomationControlled", "--no-first-run"],
             )
-            page = browser.new_context(
+            ctx = browser.new_context(
                 viewport={"width": 1280, "height": 800}, locale="en-US"
-            ).new_page()
+            )
+
+            # 🔴 2026-10-19 起 Kiro 在 social 登录链上加了 **AWS WAF 人机验证**：
+            #   /login?idp=Github → 302 Cognito/oauth2/authorize → 302
+            #   /github/authorize ⇒ 这里被 WAF 截下（HTTP 405 + "Let's confirm you are human"
+            #   九宫格选图题），**永远到不了 github.com** ⇒ 下面那段填表逻辑（只在 url 含
+            #   github.com 时才跑）一次都不触发，空转满 180s 报「没收到 authorization code」。
+            # 解法：先用 `waf_solve.py` 过一次题拿 `aws-waf-token`（有效期约 4 天、非
+            #   httpOnly），存盘后在这里注入，后续所有号直接复用，不用每号做一道题。
+            waf_file = os.environ.get("WAF_COOKIES", "").strip()
+            if waf_file and os.path.exists(waf_file):
+                try:
+                    with open(waf_file) as f:
+                        cookies = json.load(f)
+                    keep = [c for c in cookies
+                            if "waf" in c["name"].lower() or "kiro.dev" in c.get("domain", "")]
+                    ctx.add_cookies(keep)
+                    K.log(f"  已注入 {len(keep)} 条 WAF/kiro cookie（{waf_file}）")
+                except Exception as exc:
+                    K.log(f"  !! 注入 WAF cookie 失败: {str(exc)[:120]}")
+            else:
+                K.log("  ⚠️ 未提供 WAF_COOKIES ⇒ 会撞 AWS WAF 选图挑战并超时，先跑 waf_solve.py")
+
+            page = ctx.new_page()
 
             # 🔴 三处都挂上拦截，kiro:// code 在哪个事件冒出来都能抓到
             page.on("request", lambda r: _grab_code(r.url, auth_code))

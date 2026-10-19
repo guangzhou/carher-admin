@@ -22,7 +22,7 @@ const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const CONFIG = path.join(CODEX_HOME, "config.toml");
 const DEFAULT_CATALOG = path.join(CODEX_HOME, "carher-models.json");
 const TEMPLATE_SLUG = "gpt-5.5";   // 非 OpenAI 模型套 gpt-5.5 的元数据(普通函数调用),理由见 Python 版
-const SKIP = /image|imagine|^codex-auto-review$/;   // 出图名(含 grok-imagine)不能对话
+const SKIP = /image|imagine|video|music|^codex-auto-review$/;   // 出图/视频/音乐生成名不能对话
 const PREFERRED = "gpt-5.6-terra";   // 与一键脚本的默认模型一致
 const LOG_FILE = path.join(CODEX_HOME, "carher-models-sync.log");
 
@@ -139,13 +139,27 @@ function buildCatalog(ids, templates, limits) {
 
 /* config 里钉着的 model 已不在这把 key 里 ⇒ 每一轮都 403。换成 PREFERRED(在的话)或列表第一个。
    返回新文本;不用改返回 null。只动顶层 `model = "…"` 那一行(任何 [table] 之前)。 */
-function fixDefaultModel(text, shown, preferred) {
+function fixDefaultModel(text, shown, preferred, ourProvider) {
   const first = /^\[/m.exec(text);
   const head = first ? text.slice(0, first.index) : text;
   const m = /^(\s*model\s*=\s*)"([^"]*)"/m.exec(head);
   if (!m || !shown.length || shown.includes(m[2])) return null;
+  // 只在顶层 provider 是我们网关时才动:用户切到官方登录等别的 provider,他的 model 不归这把 key 管
+  const pv = /^\s*model_provider\s*=\s*"([^"]+)"/m.exec(head);
+  if (!pv || pv[1] !== ourProvider) return null;
   const next = shown.includes(preferred) ? preferred : shown[0];
   return { text: text.slice(0, m.index) + m[1] + JSON.stringify(next) + text.slice(m.index + m[0].length), from: m[2], to: next };
+}
+
+/* config.toml 里 base_url 等于这次同步所用网关的那个 [model_providers.X] 的名字 X(没有返回 null)。 */
+function ourProviderName(text, base) {
+  const re = /^\[model_providers\.([^\]\s]+)\]\s*$([\s\S]*?)(?=^\[|(?![\s\S]))/gm;
+  let m;
+  while ((m = re.exec(text))) {
+    const bu = /^\s*base_url\s*=\s*"([^"]+)"/m.exec(m[2]);
+    if (bu && bu[1].replace(/\/+$/, "") === String(base).replace(/\/+$/, "")) return m[1];
+  }
+  return null;
 }
 
 function catalogPathFromConfig(text) {
@@ -196,16 +210,17 @@ async function main() {
   if (before.length && added.length) log(`新增 ${added.length}：${added.join(", ")}`);
   if (before.length && removed.length) log(`删除 ${removed.length}：${removed.join(", ")}`);
   if (before.length && !added.length && !removed.length) log("和上次一样，没有变化");
+  const ours = ourProviderName(configText, base);
   for (const f of [CONFIG, path.join(CODEX_HOME, "chatgpt.config.toml")]) {
     let t; try { t = fs.readFileSync(f, "utf8"); } catch (e) { continue; }
-    const r = fixDefaultModel(t, shown, PREFERRED);
+    const r = fixDefaultModel(t, shown, PREFERRED, ours);
     if (r) { fs.writeFileSync(f, r.text, "utf8"); log(`默认模型 ${r.from} 你的 key 已不能用，改成 ${r.to}（${path.basename(f)}）`); }
   }
   log("Codex App 要完全退出重开才会看到新模型");
   return 0;
 }
 
-module.exports = { buildCatalog, catalogPathFromConfig, ensureConfigLine, fixDefaultModel };
+module.exports = { buildCatalog, catalogPathFromConfig, ensureConfigLine, fixDefaultModel, ourProviderName };
 
 if (require.main === module) {
   try { if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 512 * 1024) fs.writeFileSync(LOG_FILE, ""); } catch (e) {}

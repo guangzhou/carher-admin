@@ -24,7 +24,7 @@ const BEHAVES_AS = "claude-sonnet-5-5";
 function pickerRows(ids) {
   const seen = new Set();
   return ids.filter((i) => typeof i === "string" && i && !seen.has(i) && seen.add(i))
-    .filter((i) => !/^claude-/.test(i) && !/image|imagine/.test(i) && i !== "codex-auto-review")
+    .filter((i) => !/^claude-/.test(i) && !/image|imagine|video|music/.test(i) && i !== "codex-auto-review")
     .map((i) => ({ model: i, label: i, behavesAs: BEHAVES_AS }));
 }
 

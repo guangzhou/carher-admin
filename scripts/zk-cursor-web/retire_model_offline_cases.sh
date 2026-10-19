@@ -65,7 +65,7 @@ DEF=$(grep -m1 '^const DEFAULT_MODEL = ' "$JS" | sed 's/.*"\(.*\)".*/\1/')
 # ⑦ 要按序比。10-19 起菜单 = 这把 Key 在网关上的模型(动态),台架不出网:
 #    用 CX_MODELS_JSON 注入一份「网关返回」(含出图名 + 乱序 + 一个 Key 里新上的名字),
 #    期望菜单 = 安装器自己的 orderMenu 算出来的那份(不在这里另写一遍规则)。
-export CX_MODELS_JSON='{"data":[{"id":"gpt-reserve"},{"id":"claude-opus-5-5"},{"id":"grok-4.7"},{"id":"kimi-k3"},{"id":"gpt-image-2"},{"id":"grok-imagine"},{"id":"composer-2.5-fast"},{"id":"gpt-5.5"},{"id":"deepseek-v4.1-flash"},{"id":"grok-4.6"}]}'
+export CX_MODELS_JSON='{"data":[{"id":"gpt-reserve"},{"id":"claude-opus-5-5"},{"id":"grok-4.7"},{"id":"kimi-k3"},{"id":"gpt-image-2"},{"id":"grok-imagine"},{"id":"web-gemini-video"},{"id":"gemini-music"},{"id":"composer-2.5-fast"},{"id":"gpt-5.5"},{"id":"deepseek-v4.1-flash"},{"id":"grok-4.6"}]}'
 MODELS_JSON=$(env ELECTRON_RUN_AS_NODE=1 "$CXNODE" -e '
 const src=require("fs").readFileSync(process.argv[1],"utf8");
 const pick=(n)=>{const i=src.indexOf(n);let d=0,j=src.indexOf("{",i);for(;j<src.length;j++){if(src[j]=="{")d++;else if(src[j]=="}"&&--d==0)break}return src.slice(i,j+1)};

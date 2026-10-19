@@ -245,7 +245,7 @@ def test_refresh_drops_revoked_and_adds_new(tmp_path):
     s = {"env": {"ANTHROPIC_API_KEY": "sk-FAKE", "ANTHROPIC_BASE_URL": "https://gw.example/pro"}, "theme": "dark",
          "model": "deepseek-v4-flash",
          "modelPicker": {"options": [{"model": m, "label": m, "behavesAs": "claude-sonnet-5-5"} for m in ("grok-4.7", "deepseek-v4-flash")]}}
-    rc, out, d = _refresh(s, "claude-opus-5-5\ngrok-4.7\nkimi-k3\ngpt-image-2\ngrok-imagine", tmp_path)
+    rc, out, d = _refresh(s, "claude-opus-5-5\ngrok-4.7\nkimi-k3\ngpt-image-2\ngrok-imagine\nweb-gemini-video\ngemini-music", tmp_path)
     assert rc == 0, out
     assert [o["model"] for o in d["modelPicker"]["options"]] == ["grok-4.7", "kimi-k3"]
     assert "新增 1:kimi-k3" in out and "删除 1:deepseek-v4-flash" in out

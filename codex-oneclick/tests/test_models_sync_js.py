@@ -103,25 +103,30 @@ def test_image_tool_node_first_in_both_installers():
     assert "if ($nodeExe) { $imgCmd" in win
 
 
-@pytest.mark.parametrize("text,shown", [
-    ('model = "gpt-5.6-terra"\nmodel_provider = "p"\n\n[model_providers.p]\nmodel = "x"\n', ["deepseek-v4.1-flash"]),   # 默认失效 ⇒ 换第一个
-    ('model = "grok-4.7"\n', ["gpt-5.6-terra", "grok-4.7"]),                                     # 还能用 ⇒ 不动
-    ('model = "deepseek-v4-flash"\n', ["grok-4.7", "gpt-5.6-terra"]),                            # 失效 ⇒ 优先 gpt-5.6-terra
-    ('[model_providers.p]\nmodel = "x"\n', ["grok-4.7"]),                                        # 表里的 model 不是顶层 ⇒ 不动
+CFG = 'model = "{m}"\nmodel_provider = "carher_prod"\n\n[model_providers.carher_prod]\nbase_url = "https://gw/pro/v1"\nmodel = "x"\n'
+
+
+@pytest.mark.parametrize("text,shown,changes", [
+    (CFG.format(m="gpt-5.6-terra"), ["deepseek-v4.1-flash"], "deepseek-v4.1-flash"),   # 默认失效 ⇒ 换第一个
+    (CFG.format(m="grok-4.7"), ["gpt-5.6-terra", "grok-4.7"], None),                     # 还能用 ⇒ 不动
+    (CFG.format(m="deepseek-v4-flash"), ["grok-4.7", "gpt-5.6-terra"], "gpt-5.6-terra"), # 失效 ⇒ 优先 gpt-5.6-terra
+    (CFG.format(m="gpt-5.5").replace('model_provider = "carher_prod"', 'model_provider = "openai"'), ["grok-4.7"], None),  # 用户切到别的 provider ⇒ 不动
+    ('model = "deepseek-v4-flash"\nmodel_provider = "carher_prod"\n', ["grok-4.7"], "grok-4.7"),   # chatgpt.config.toml 形状(provider 定义在主配置)
 ])
-def test_fix_default_model_identical(text, shown):
+def test_fix_default_model_identical(text, shown, changes):
     """10-19:key 里删掉了 config 钉的默认模型 ⇒ 每轮 403。同步时自动换掉,两份实现一致。"""
-    got_js = js("fixDefaultModel", text, shown, "gpt-5.6-terra")
-    got_py = py.fix_default_model(text, shown, "gpt-5.6-terra")
+    ours_js = js("ourProviderName", CFG.format(m="x"), "https://gw/pro/v1/")
+    assert ours_js == py.our_provider_name(CFG.format(m="x"), "https://gw/pro/v1/") == "carher_prod"
+    got_js = js("fixDefaultModel", text, shown, "gpt-5.6-terra", "carher_prod")
+    got_py = py.fix_default_model(text, shown, "gpt-5.6-terra", "carher_prod")
     assert got_js == got_py
-    if got_py:
-        assert got_py["to"] in shown
-        if "[model_providers.p]" in text:
-            assert "[model_providers.p]\nmodel = \"x\"" in got_py["text"], "表里的 model 被误改"
+    assert (got_py or {}).get("to") == changes
+    if got_py and "[model_providers.carher_prod]" in text:
+        assert '[model_providers.carher_prod]\nbase_url = "https://gw/pro/v1"\nmodel = "x"' in got_py["text"], "表里的 model 被误改"
 
 
 def test_imagine_names_stay_out_of_picker():
-    cat = js("buildCatalog", ["grok-4.7", "grok-imagine", "gpt-image-2"], TEMPLATES, {})
+    cat = js("buildCatalog", ["grok-4.7", "grok-imagine", "gpt-image-2", "web-gemini-video", "gemini-music"], TEMPLATES, {})
     assert [m["slug"] for m in cat["models"] if m["visibility"] == "list"] == ["grok-4.7"]
 
 

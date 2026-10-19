@@ -35,7 +35,7 @@ DEFAULT_CATALOG = CODEX_HOME / "carher-models.json"
 # use_responses_lite 是 OpenAI 专属工具形状，套给 grok 实测拿不到 shell，一个文件都建不出来。
 TEMPLATE_SLUG = "gpt-5.5"
 # 不进选择器：生图模型不能对话；审查专用模型 codex 自己会调
-SKIP = re.compile(r"image|imagine|^codex-auto-review$")  # 出图名(含 grok-imagine)不能对话
+SKIP = re.compile(r"image|imagine|video|music|^codex-auto-review$")  # 出图/视频/音乐生成名不能对话
 PREFERRED = "gpt-5.6-terra"  # 与一键脚本的默认模型一致
 
 
@@ -185,16 +185,28 @@ def build_catalog(ids: list[str], templates: list[dict], limits: dict[str, int])
     return {"models": out}
 
 
-def fix_default_model(text: str, shown: list[str], preferred: str) -> dict | None:
+def fix_default_model(text: str, shown: list[str], preferred: str, our_provider: str | None) -> dict | None:
     """config 里钉着的 model 已不在这把 key 里 ⇒ 每一轮都 403。换成 preferred(在的话)或列表第一个。
-    只动顶层 `model = "…"` 那一行(任何 [table] 之前);不用改返回 None。与 Node 版 fixDefaultModel 一致。"""
+    只动顶层 `model = "…"`,且只在顶层 model_provider 是我们网关时才动。与 Node 版 fixDefaultModel 一致。"""
     first = re.search(r"^\[", text, re.M)
     head = text[: first.start()] if first else text
     m = re.search(r'^(\s*model\s*=\s*)"([^"]*)"', head, re.M)
     if not m or not shown or m.group(2) in shown:
         return None
+    pv = re.search(r'^\s*model_provider\s*=\s*"([^"]+)"', head, re.M)
+    if not pv or pv.group(1) != our_provider:
+        return None
     nxt = preferred if preferred in shown else shown[0]
     return {"text": text[: m.start()] + m.group(1) + json.dumps(nxt) + text[m.end():], "from": m.group(2), "to": nxt}
+
+
+def our_provider_name(text: str, base: str) -> str | None:
+    """config.toml 里 base_url 等于这次同步所用网关的那个 [model_providers.X] 的名字 X。"""
+    for m in re.finditer(r"^\[model_providers\.([^\]\s]+)\]\s*$(.*?)(?=^\[|\Z)", text, re.M | re.S):
+        bu = re.search(r'^\s*base_url\s*=\s*"([^"]+)"', m.group(2), re.M)
+        if bu and bu.group(1).rstrip("/") == str(base).rstrip("/"):
+            return m.group(1)
+    return None
 
 
 def catalog_path_from_config(text: str) -> Path | None:
@@ -265,12 +277,13 @@ def main() -> int:
         log(f"删除 {len(removed)}：{', '.join(removed)}")
     if before and not added and not removed:
         log("和上次一样，没有变化")
+    ours = our_provider_name(config_text, base_url)
     for f in (CONFIG, CODEX_HOME / "chatgpt.config.toml"):
         try:
             t = f.read_text(encoding="utf-8")
         except OSError:
             continue
-        r = fix_default_model(t, shown, PREFERRED)
+        r = fix_default_model(t, shown, PREFERRED, ours)
         if r:
             f.write_text(r["text"], encoding="utf-8")
             log(f"默认模型 {r['from']} 你的 key 已不能用，改成 {r['to']}（{f.name}）")

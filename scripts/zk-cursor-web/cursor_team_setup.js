@@ -141,13 +141,13 @@ const DEFAULT_BASE_URL = "https://cc.auto-link.com.cn/pro/v1";
    用户点名:执行脚本时从这把 key 的模型列表现拉,旧的删、新的加。
    ⇒ INSTALL / UPGRADE / `--refresh-models`(「刷模型」)都走 fetchKeyModels → orderMenu。
    规则(用户 10-19 拍板):
-     · 出图专用名(名字里有 image / imagine)不进聊天菜单 —— chat 线型上点了就报错,画图走 carher-image skill。
+     · 出图/视频/音乐专用名(名字里有 image / imagine / video / music)不进聊天菜单 —— chat 线型上点了就报错,画图走 carher-image skill。
      · 按家族分段:① grok / composer ② gpt ③ claude ④ 其他;段内 DEFAULT_MODEL 排第一,其余按名字。
      · 拉不到(没 Key / 断网 / 网关返回空)就**不动**现有菜单,明说原因 —— 绝不拿空列表把人家菜单清空。
    ⚠️ 「/v1/models 里有」≠「点了一定出字」(缺 alias 的名字 400、上游挂了 502),那是 key/上游的事,
       同事发「测模型」能看到逐个读数。历史读数(cr-g 下架、出图名实打 400/500、同名撞 Cursor
       自带模型等)见 git 历史与 skill cursor-client-bundle-patch。 */
-const MENU_SKIP = /image|imagine/i;
+const MENU_SKIP = /image|imagine|video|music/i;   // 出图/视频/音乐生成名(10-19 网关 mode 实读:web-gemini-video=video_generation)
 const MENU_SEGMENTS = [/^(grok-|composer-)/, /^gpt-/, /^claude-/];
 function orderMenu(ids, preferred) {
   const seen = new Set(), names = [];

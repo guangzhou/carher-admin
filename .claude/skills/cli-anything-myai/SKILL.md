@@ -1,7 +1,8 @@
 ---
 name: cli-anything-myai
 description: >-
-  只读排查 myai.carher.net（通衢 API / ai_token_dashboard，跑在 243 K3s 的 ns `ai-token-dashboard`）：
+  只读排查 myai.carher.net / chat.auto-link.com.cn/myai/（通衢 API / ai_token_dashboard，跑在 243 K3s 的 ns `ai-token-dashboard`）；
+  也管国内入口 chat.auto-link.com.cn/myai/ 的部署和回滚（`scripts/myai-chat-subpath/deploy.sh`）。「myai 打不开/很慢」也走这里：
   看健康、同步卡没卡、看板每天花费和上游对不对得上、哪些 key 不在用户表、刷新队列、实时结算、账单/outbox、临时只读 SQL。
   入口是 `scripts/myai-cli.sh`（默认带 --json）。
   适用场景：用户说「myai 看板数据不对/不更新」「lastSuccessAt 不动」「同步卡住」「通衢 API 健康检查 degraded」
@@ -15,7 +16,7 @@ description: >-
 
 | | |
 |---|---|
-| 公网 | `https://myai.carher.net`（Cloudflare Tunnel `e22cc0ea…`，ingress 只这一条） |
+| 公网 | 两个入口，**同一个库**：① `https://myai.carher.net`（Cloudflare Tunnel `e22cc0ea…`；🔴 国内常被分到 CF LAX，1~20s 甚至超时）② **`https://chat.auto-link.com.cn/myai/`**（10-19 起，国内直连，中位 0.07s）。②的细节见下面「§国内入口」 |
 | 主机 | 243 `cltx@10.68.13.243`（hostname `AIYJY-litellm-ps`），🔴 密码末尾的 `'` 也是密码的一部分 |
 | 代码 | GitHub `davidzhu2021/ai_token_dashboard`（我们**没有推送权限**）。dashboard/realtime 跑 `2818c0d`；**sync worker 跑 `9f250f8`**（= `2818c0d` + 本地两个修复提交，补丁在 `tools/cli-anything-myai/upstream-fixes/`）。243 上 `~/ai_token_dashboard` 在分支 `fix/log-scan-capped-window-split-v2` = 线上 sync worker |
 | 镜像 | 本地导入，`imagePullPolicy: Never`；243 上没有 docker。dashboard/realtime = `ai-token-dashboard:latest`，sync worker = `ai-token-dashboard:fix-9f250f8` |
@@ -27,6 +28,32 @@ description: >-
 外加 `usage-db-0`（pg16）、`usage-redis-0`、`mail-relay-0`、`cloudflared`×2。
 
 两个数据源：`primary` = `LITELLM_BASE_URL`（`cc.auto-link.com.cn/pro`），`her` = `HER_LITELLM_BASE_URL`（`litellm.carher.net`）。
+
+## 国内入口 chat.auto-link.com.cn/myai/（10-19）
+
+用户说「myai 打不开 / 很慢」，先跑 `scripts/host-243-disk-check.sh` 排除 243 的问题，再分别测两个入口。只有 myai.carher.net 慢、`/cdn-cgi/trace` 也慢 ⇒ 是 CF 线路的问题（见记忆 `project_myai_slow_is_cf_lax_route_2026_10_16`），**让用户改用 chat 入口**。
+
+链路：IT 入口 58.241.5.230 → 198 nginx `chat.auto-link.com.cn.conf` 里的 `# >>> myai-subpath >>>` 段 → 243 NodePort **30810** → `deploy/ai-token-dashboard-chat`（`k8s/myai-243-chat-subpath.yaml`）。
+
+```bash
+HOST243_PW=... scripts/myai-chat-subpath/deploy.sh apply     # 243 + Casdoor 回调 + nginx 段 + 验收（各步幂等）
+scripts/myai-chat-subpath/deploy.sh nginx                     # 只更新 nginx 段（改了 nginx-block.conf 之后）
+scripts/myai-chat-subpath/deploy.sh verify                    # 16 项外网验收，含 4 个旁路服务和原入口
+HOST243_PW=... scripts/myai-chat-subpath/deploy.sh rollback  # 三处全撤，myai.carher.net 不受影响
+```
+
+**为什么是第二个 Deployment，不是给原来那份加一个域名**（读 2818c0d 源码确认）：`enforce_csrf` 拿 Origin 和 `APP_BASE_URL` 严格比 scheme+netloc；`sso_start` 用 `APP_BASE_URL + /api/auth/callback` 作为回调 ⇒ 一个进程只认一个域名。第二份同镜像、同 CM/Secret、同库、同 app-data，只在 `env` 里把 `APP_BASE_URL` 盖成 `https://chat.auto-link.com.cn/myai`，并关掉 `ADMIN_LIVE_TOTALS_PREFETCH`（每 60s 打一次 198，没必要跑两份）。
+🔴 **往 243 导新的 `latest` 后要两份都 rollout**：`deploy/ai-token-dashboard` 和 `deploy/ai-token-dashboard-chat`。
+
+**nginx 段做了什么（全在 `scripts/myai-chat-subpath/nginx-block.conf`）**
+- `sub_filter` 改写前端写死的根路径：`"/api` `` `/api `` `src="/assets/` → 加 `/myai` 前缀。上游要发 `Accept-Encoding: ""` 才能改写，对外的 gzip 由 198 nginx 再做。2818c0d 实测改写 86 处、残留 0。**前端升级后验收里「86」这一项会变，要重新数一遍**
+- `proxy_redirect ~^/(.*)$ https://chat.auto-link.com.cn/myai/$1`：后端登录完回 `"/?auth_callback=success"`。🔴 替换串必须写全 https 域名，写成 `/myai/$1` 时 nginx 会自己补成 `http://...`，而对外 80 不通 ⇒ 扫码登录完落到空页（10-19 用桩上游测出来的）。SSO 的绝对跳转（飞书 / dash）不匹配这条，会原样放行
+- `proxy_cookie_path / /myai/`：session cookie 只在 /myai 下发送，不和 Open WebUI 的混在一起
+- `location = /myai` 用 `absolute_redirect off`：IT 回源时 Host 会被改写，绝对跳转会带错域名（见记忆 `feedback_198_gateway_host_rewrite_redirect_ip_fixed`）
+
+**登录**：Casdoor `admin/ai-token-dashboard` 的 redirectUris 里加了 `https://chat.auto-link.com.cn/myai/api/auth/callback`（原有 3 条没动）。飞书后台不用改：飞书回调的是 Casdoor（`dash.auto-link.com.cn/callback`）。
+🔴 验 SSO 回调**不能只 grep Location**：`OIDC_SKIP_CASDOOR_PAGE=true` 时 Location 直接是飞书，myai 自己的 redirect_uri 藏在飞书 `state`（base64）和 session cookie 的 `_state_*` 里。verify 两处都解开比对，并且拿原入口做对照。
+没验到的：**真人扫码登录完整走一遍**（需要人）。
 
 ## 工具
 

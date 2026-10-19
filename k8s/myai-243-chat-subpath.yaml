@@ -1,0 +1,71 @@
+# myai（ai_token_dashboard）的第二个入口：https://chat.auto-link.com.cn/myai/
+# 跑在 243 单节点 k3s，ns ai-token-dashboard。myai.carher.net 那份（deploy/ai-token-dashboard）不动。
+#
+# 为什么是第二个 Deployment，而不是给原来那份多加一个域名（读 2818c0d 源码确认）:
+#   - enforce_csrf 拿 Origin 和 APP_BASE_URL 严格比 scheme+netloc ⇒ 一个进程只认一个域名
+#   - sso_start 的 redirect_uri = APP_BASE_URL + /api/auth/callback
+# 同镜像、同 ConfigMap/Secret、同库、同 app-data PVC（auth.sqlite3 是 WAL + busy_timeout，同节点已有 3 个 pod 共用）。
+# 只覆盖 APP_BASE_URL，并关掉没必要跑两份的后台预取。
+#
+# 前面是 198 nginx（chat.auto-link.com.cn.conf 里 `# >>> myai-subpath >>>` 那一段），转发到下面的 NodePort。
+# 部署/回滚走 scripts/myai-chat-subpath-deploy.sh；SOP 见 skill host-243-disk-ops 旁边的 cli-anything-myai §入口。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-token-dashboard-chat
+  namespace: ai-token-dashboard
+  labels: {app: ai-token-dashboard-chat}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: ai-token-dashboard-chat}
+  template:
+    metadata:
+      labels: {app: ai-token-dashboard-chat}
+    spec:
+      containers:
+      - name: dashboard
+        image: ai-token-dashboard:latest
+        imagePullPolicy: Never
+        envFrom:
+        - configMapRef: {name: dashboard-config}
+        - secretRef: {name: dashboard-secrets}
+        # env 优先级高于 envFrom ⇒ 这里的值会盖过 Secret 里的 APP_BASE_URL
+        env:
+        - {name: APP_BASE_URL, value: "https://chat.auto-link.com.cn/myai"}
+        - {name: ADMIN_LIVE_TOTALS_PREFETCH_ENABLED, value: "false"}
+        - {name: USAGE_SYNC_ROLE, value: reader}
+        - {name: USAGE_DB_POOL_MIN_SIZE, value: "1"}
+        - {name: USAGE_DB_POOL_MAX_SIZE, value: "5"}
+        - {name: USAGE_REDIS_URL, value: "redis://usage-redis:6379/0"}
+        ports:
+        - {containerPort: 8000, name: http}
+        readinessProbe:
+          httpGet: {path: /api/health, port: http}
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet: {path: /api/health, port: http}
+          initialDelaySeconds: 20
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 5
+        resources:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits: {cpu: "2", memory: 2Gi}
+        volumeMounts:
+        - {mountPath: /app/.data, name: app-data}
+      volumes:
+      - name: app-data
+        persistentVolumeClaim: {claimName: app-data}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-token-dashboard-chat
+  namespace: ai-token-dashboard
+spec:
+  type: NodePort
+  selector: {app: ai-token-dashboard-chat}
+  ports:
+  - {name: http, port: 8000, targetPort: http, nodePort: 30810}

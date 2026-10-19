@@ -25,7 +25,8 @@ BASE = "https://cc.auto-link.com.cn/pro"
 
 
 def _settings(**over):
-    env = {"ANTHROPIC_BASE_URL": BASE, "ANTHROPIC_API_KEY": KEY, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"}
+    env = {"ANTHROPIC_BASE_URL": BASE, "ANTHROPIC_API_KEY": KEY, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+           "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5"}
     env.update({k: v for k, v in over.items() if k.isupper()})
     d = {"env": {k: v for k, v in env.items() if v is not None}}
     if "model" in over:
@@ -52,7 +53,7 @@ class _GW(http.server.BaseHTTPRequestHandler):
             return self._send(401, {"error": "no key"})
         if self.path.endswith("/key/info"):
             return self._send(200, {"info": {"key_alias": "cursor-test"}})
-        return self._send(200, {"data": [{"id": "claude-opus-5-5"}, {"id": "gpt-5.6-terra"}]})
+        return self._send(200, {"data": [{"id": "claude-opus-5-5"}, {"id": "claude-sonnet-5-5"}, {"id": "claude-haiku-4-5"}, {"id": "gpt-5.6-terra"}]})
 
     def do_POST(self):
         self.rfile.read(int(self.headers.get("content-length", 0)))
@@ -119,12 +120,24 @@ def test_good_config_is_green_readonly_and_masked(tmp_path, gw):
     ("零宽字符", dict(settings=_settings(ANTHROPIC_API_KEY=KEY + "​")), "看不见的字符"),
     ("rc 里有覆盖 export", dict(zshrc="export ANTHROPIC_BASE_URL=https://x\n"), "会盖过配置"),
     ("JSON 坏了", dict(settings="{not json"), "不是合法 JSON"),
+    # 10-19 sunqiang:没设 haiku ⇒ Claude Code 默认要 claude-haiku-5-5,网关没有 ⇒ 后台任务报错
+    ("haiku 默认值网关没有", dict(settings=_settings(ANTHROPIC_DEFAULT_HAIKU_MODEL=None)), "claude-haiku-5-5 你的 key 没有"),
 ])
+
 def test_each_failure_is_reported(tmp_path, gw, case, kw, expect):
     h = _home(tmp_path, **kw)
     out, rep, concl = _run(h, gw)
     assert expect in concl, f"[{case}] 结论里没报出来:\n{concl}"
     assert KEY not in rep
+
+def test_alias_model_is_probed_by_real_name(tmp_path, gw):
+    """10-19 sunqiang:model=sonnet 被原样拿去实打 ⇒ 403 误报。简称要换成 Claude Code 实际发的真名。"""
+    import json
+    st = json.loads(_settings()); st["model"] = "sonnet"
+    h = _home(tmp_path, settings=json.dumps(st))
+    out, rep, concl = _run(h, gw)
+    assert "实打 claude-sonnet-5-5 : HTTP 200" in rep, rep
+    assert "🔴" not in concl, concl
 
 
 def test_no_bare_var_before_multibyte():

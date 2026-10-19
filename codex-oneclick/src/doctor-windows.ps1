@@ -121,7 +121,8 @@ else { P "画图工具      : 没装"; Yel "画图工具没装上:下载最新�
 P ""; P "--- 4) 网络 ---"
 foreach ($v in 'HTTPS_PROXY','HTTP_PROXY','ALL_PROXY') {
   $pv = [Environment]::GetEnvironmentVariable($v)
-  if ($pv) { P "代理变量 $v = $pv"; Yel "设了代理 $v:连公司网关不需要代理,先关掉 VPN/代理再试" }
+  # ${v}:写成 "$v:中文" 时 PowerShell 当成驱动器作用域变量,整段被吞(10-19 claude 自检同病)
+  if ($pv) { P "代理变量 ${v} = $pv"; Yel "设了代理 ${v}:网关通就不用管;连不上或很慢时先关掉 VPN/代理再试" }
 }
 try { $ie = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
   if ($ie.ProxyEnable -eq 1 -or $ie.AutoConfigURL) { P "系统代理      : 开着 ($($ie.ProxyServer)$($ie.AutoConfigURL))"; Yel "系统代理/VPN 开着:连不上或很慢时先关掉再试" } } catch {}

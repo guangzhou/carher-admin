@@ -279,3 +279,19 @@ def test_installers_embed_refresh_and_write_claude_md_block():
         t = (src / f).read_text(encoding=enc)
         assert "@@EMBED carher_models_refresh.js@@" in t and "@@EMBED refresh_skill.md@@" in t, f
         assert "CARHER-REFRESH-BEGIN" in t, f + ":只装 skill 不够(画图那次实测),要 CLAUDE.md 常驻块"
+
+
+def test_refresh_points_haiku_to_one_the_key_has(tmp_path):
+    """10-19 sunqiang:Claude Code 2.1.30x 后台默认要 claude-haiku-5-5,网关没有 ⇒ 一直 403。
+    本机实测:不设 ANTHROPIC_DEFAULT_HAIKU_MODEL 时 `claude -p --model haiku` 403,设成 claude-haiku-4-5 回 OK。"""
+    base = {"env": {"ANTHROPIC_API_KEY": "sk-FAKE", "ANTHROPIC_BASE_URL": "https://gw.example/pro"}}
+    rc, out, d = _refresh(dict(base), "claude-opus-5-5\nclaude-haiku-4-5\ngrok-4.7", tmp_path)
+    assert rc == 0 and d["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-haiku-4-5" and "claude-haiku-4-5" in out
+    # 用户自己设的、key 里有 ⇒ 不动
+    s = {"env": dict(base["env"], ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-sonnet-5-5")}
+    rc, out, d = _refresh(s, "claude-sonnet-5-5\nclaude-haiku-4-5", tmp_path)
+    assert d["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-sonnet-5-5"
+    # key 里一个 haiku 都没有 ⇒ 不乱指(删掉我们以前写的)
+    s = {"env": dict(base["env"], ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-haiku-4-5")}
+    rc, out, d = _refresh(s, "deepseek-v4.1-flash", tmp_path)
+    assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in d["env"]

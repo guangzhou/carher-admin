@@ -5,7 +5,7 @@
    网关模型要靠 settings.json 里的 modelPicker(behavesAs)才不报「isn't recognized」。那张表以前只在
    安装时写一次 ⇒ 网关删掉的模型一直留在 /model 里(点了 403),新开通的进不来。
    本脚本:读 settings.json 里的 key/地址 → GET /v1/models → 重写 modelPicker(旧的删、新的加)
-   → 删模型缓存 → 当前 model 已没权限就清掉(回到默认)。安装器第 4 步和「刷模型」共用这一份。
+   → 删模型缓存 → 当前 model 已没权限就清掉(回到默认)→ haiku 默认指到 key 里真有的那个。安装器第 4 步和「刷模型」共用这一份。
 
    只用 Node 自带模块(Node ≥ 18)。用法:
      node carher_models_refresh.js                 # 拉网关并写入
@@ -42,8 +42,20 @@ function applyModels(d, ids) {
     const bare = d.model.replace(/\[[^\]]*\]$/, "");
     if ((before.includes(bare) || /^claude-/.test(bare)) && !ids.includes(bare)) { modelReset = d.model; delete d.model; }
   }
+  /* 10-19 sunqiang/linsen:Claude Code 2.1.30x 的 haiku 默认是 claude-haiku-5-5(后台起标题、子任务用),
+     网关没有这个模型 ⇒ 后台请求一直 403。⇒ 指到这把 key 里真有的 haiku(按版本新→旧挑);
+     一个都没有就删掉这项(让 Claude Code 自己决定)。用户自己设的、且仍可用的不动。 */
+  d.env = Object.assign({}, d.env || {});
+  const haikus = ids.filter((i) => /^claude-haiku-\d/.test(i)).sort().reverse();
+  const curH = d.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+  let haikuSet = null;
+  if (!(curH && ids.includes(curH))) {
+    if (haikus.length) { d.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikus[0]; haikuSet = haikus[0]; }
+    else delete d.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+  }
   return {
     d,
+    haikuSet,
     added: after.filter((m) => !before.includes(m)),
     removed: before.filter((m) => !after.includes(m)),
     modelReset,
@@ -86,6 +98,7 @@ async function main() {
   if (r.removed.length) console.log(`删除 ${r.removed.length}:${r.removed.join(", ")}`);
   if (!r.added.length && !r.removed.length) console.log("菜单和上次一样,没有变化");
   if (r.modelReset) console.log(`你之前选的 ${r.modelReset} 已经没有权限,已改回默认模型`);
+  if (r.haikuSet) console.log(`后台小任务用的模型设为 ${r.haikuSet}(网关没有 claude-haiku-5-5)`);
   console.log("新开一个 Claude Code 会话(或桌面 App 新开对话)后 /model 里就是新列表");
 }
 

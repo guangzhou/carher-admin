@@ -27,10 +27,21 @@ done
 BODY_SRC="$1"
 
 B64=$(printf '%s' "$PW" | base64 | tr -d '\n')
-{
+# 整段 payload 先放进变量：认证失败重试时 stdin 已经被读走了，要能再发一遍
+PAYLOAD=$(
   printf 'set -o pipefail\n'
   printf 'AP=$(mktemp); printf "#!/bin/sh\\necho %%s | base64 -d\\n" %q > "$AP"; chmod 700 "$AP"\n' "$B64"
   printf 'export SUDO_ASKPASS="$AP"; S(){ sudo -A "$@"; }; trap '"'"'rm -f "$AP"'"'"' EXIT\n'
   printf '%s' "$ASSIGN"
   if [ "$BODY_SRC" = "-" ]; then cat; else cat "$BODY_SRC"; fi
-} | SSHPASS="$PW" sshpass -e ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ServerAliveInterval=30 "$HOST" 'bash -s'
+  printf '\n'
+)
+# 243 的 sshd 偶尔会对正确口令回 "Failed password"（10-18~19 实测 146 次登录里有 4 次，sshd 日志里是
+# preauth 阶段失败，原因没查明）。sshpass 返回 5 = 口令被拒，此时远端什么都没执行 ⇒ 只对这种情况重试。
+for attempt in 1 2 3; do
+  rc=0
+  printf '%s' "$PAYLOAD" | SSHPASS="$PW" sshpass -e ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ServerAliveInterval=30 "$HOST" 'bash -s' || rc=$?
+  [ "$rc" = 5 ] || exit "$rc"
+  echo "[host-243-run] 口令被拒（第 ${attempt} 次），2s 后重试" >&2; sleep 2
+done
+exit 5

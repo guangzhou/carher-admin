@@ -68,7 +68,7 @@ M=scripts/myai-cli.sh                           # 默认 --json；要人读格�
 ## 排查顺序
 
 ```bash
-$M status                      # 第 0 步：公网 /api/health 摘要，findings 列出每一项异常
+$M status                      # 第 0 步：公网 /api/health 摘要，findings 列出每一项异常（10-19 起默认打国内入口；要看 CF 那条腿加 --public-url https://myai.carher.net）
 $M diagnose sync-stuck         # lastSuccessAt 不动时先跑这个（默认 7 天，约 90s）
 $M diagnose coverage           # 🔴 每天 看板花费 vs 上游全局花费，偏差 >1% 给出原因提示（漏数据的总入口）
 $M diagnose truncation         # 看板某天请求数正好 10000：上游计数封顶截断
@@ -154,6 +154,7 @@ git archive --format=tgz -o /tmp/x.tgz <commit>                       # 只打�
 #      🔴 tar 留在 /Data/migration 别删、别放 /tmp：镜像没 pin 会被 image GC 删，拉不回（10-17 停机 19h，见 skill host-243-disk-ops）
 kubectl -n ai-token-dashboard exec usage-db-0 -- pg_dump ... -t usage_daily -t usage_sync_coverage -t usage_team_membership_daily --data-only -Fc > /Data/migration/<备份>.dump
 kubectl -n ai-token-dashboard set image deploy/usage-sync-worker worker=ai-token-dashboard:fix-<commit>
+# 换的是 dashboard 用的 latest 时：deploy/ai-token-dashboard 和 deploy/ai-token-dashboard-chat 都要 rollout restart（导入脚本最后会列出来）
 ```
 验收看 `diagnose coverage`、`sync runs`（无 TimeoutError）、worker 重启数。回滚：`set image … worker=ai-token-dashboard:latest`。
 🔴 镜像里的文件要和 commit 逐个 sha 对过再 rollout（`git show <c>:<f> | shasum` vs `docker run … sha256sum`）。

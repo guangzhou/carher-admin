@@ -1,6 +1,8 @@
 # cli-anything-myai
 
-只读运维 CLI,对象是 `https://myai.carher.net`(通衢 API / `davidzhu2021/ai_token_dashboard`),
+只读运维 CLI,对象是 myai(通衢 API / `davidzhu2021/ai_token_dashboard`)。公网两个入口同一个库:
+默认打国内入口 `https://chat.auto-link.com.cn/myai`;`https://myai.carher.net` 走 CF,国内常慢,用 `--public-url` 指定。
+
 跑在 243(`AIYJY-litellm-ps`)单节点 K3s 的 `ai-token-dashboard` 命名空间。
 
 ## 依赖

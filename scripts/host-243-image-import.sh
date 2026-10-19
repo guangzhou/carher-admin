@@ -58,5 +58,15 @@ for r in want:
   st="missing" if not m else ("pinned" if m[0].get("pinned") else "UNPINNED")
   print("%-9s %s  %s" % (st, r, m[0]["id"][:19] if m else ""))
   bad|= st!="pinned"
-sys.exit(bad)' "$(echo $REFS)"
+sys.exit(bad)' "$(echo $REFS)" || exit 1
+# 导入只换了镜像，正在跑的 pod 不会自己换。列出用到这些镜像的 Deployment，提醒要 rollout 哪几个
+# （🔴 myai 有两份：ai-token-dashboard 和 ai-token-dashboard-chat，换 latest 时两份都要）
+short=$(for r in $REFS; do echo "${r#docker.io/library/}"; done)
+# 🔴 `cond && echo` 作为循环最后一条、且最后一行不匹配时，循环 rc=1 ⇒ set -e 直接把脚本杀掉、什么都不打（10-19 实测）
+users=$(k3s kubectl get deploy -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{" "}{.spec.template.spec.containers[*].image}{"\n"}{end}' \
+  | while read -r d imgs; do for i in $imgs; do if echo "$short" | grep -qxF "$i"; then echo "$d"; break; fi; done; done || true)
+if [ -n "$users" ]; then
+  echo "用到这些镜像的 Deployment（要生效需逐个 rollout restart）:"
+  echo "$users" | sed 's/^/  /'
+fi
 EOF

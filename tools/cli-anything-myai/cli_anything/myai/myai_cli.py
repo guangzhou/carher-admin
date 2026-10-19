@@ -60,7 +60,7 @@ def _sql(ctx: click.Context, statement: str, title: str) -> None:
 @click.option("--json", "use_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.option("--host", help="ssh target (default cltx@10.68.13.243 or MYAI_HOST).")
 @click.option("--namespace", help="K8s namespace (default ai-token-dashboard).")
-@click.option("--public-url", help="Public base URL (default https://myai.carher.net).")
+@click.option("--public-url", help="Public base URL (default https://chat.auto-link.com.cn/myai; CF 腿用 https://myai.carher.net).")
 @click.option("--timeout", type=click.FloatRange(min=1), default=180.0, show_default=True)
 @click.option("--probe-pod", "use_probe_pod", is_flag=True, help="Run upstream probes in the isolated pod/myai-probe (see `probe-pod up`).")
 @click.version_option(__version__)

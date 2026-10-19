@@ -1,9 +1,9 @@
 ---
 name: host-243-disk-ops
 description: >-
-  243（10.68.13.243，单节点 k3s + snap LXD，跑 myai.carher.net 和 Astrill 出口）的磁盘布局、巡检、
+  243（10.68.13.243，单节点 k3s + snap LXD，跑 myai 和 Astrill 出口）的磁盘布局、巡检、
   以及「根盘满 ⇒ myai 挂」的排查和恢复。根盘只有 38G，会涨的东西都放在 500G 的 /Data。
-  Use when: myai.carher.net 报 Cloudflare 1033 / 502、pod 全部 Pending 或 ErrImageNeverPull、
+  Use when: myai 打不开（myai.carher.net 报 Cloudflare 1033 / 502，或 chat.auto-link.com.cn/myai/ 报 502）、pod 全部 Pending 或 ErrImageNeverPull、
   节点 DiskPressure、「243 磁盘满了」、要往 243 导镜像、要新建或挪 LXD 容器、要动 243 的 k3s 数据目录。
 ---
 
@@ -30,11 +30,11 @@ k3s 和 LXD 不启动，而不是在空目录上起来。
 
 | 脚本 | 干什么 | 动不动东西 |
 |---|---|---|
-| `host-243-disk-check.sh` | **第 0 步**。检查用量、DiskPressure、各挂载源、RequiresMountsFor、swap、journald，以及所有 `imagePullPolicy=Never` 的镜像在不在、有没有 pin | 只读，rc=1 表示有 WARN |
-| `host-243-image-import.sh <243上的/Data/…tar> [额外tag]` | 导入镜像，同时打 `io.cri-containerd.pinned`，回读确认 | 加/覆盖镜像引用，不碰 pod |
+| `host-243-disk-check.sh` | **第 0 步**。检查用量、DiskPressure、各挂载源、RequiresMountsFor、swap、journald、所有 `imagePullPolicy=Never` 的镜像在不在/有没有 pin，以及 myai 两个入口的 dashboard（`ai-token-dashboard`、`ai-token-dashboard-chat` + NodePort 30810） | 只读，rc=1 表示有 WARN |
+| `host-243-image-import.sh <243上的/Data/…tar> [额外tag]` | 导入镜像，同时打 `io.cri-containerd.pinned`，回读确认，**最后列出用到这些镜像、需要 rollout 的 Deployment** | 加/覆盖镜像引用，不碰 pod |
 | `host-243-lxd-move-to-data.sh <容器>` | 先导出备份，再停 → 挪到 `data` 池 → 起 → 回读 | 停该容器 1~2 分钟。在服务的三个、以及 Frozen 状态的默认拒绝 |
 | `host-243-k3s-datadir-move.sh` | 把 `/var/lib/rancher` 搬到数据盘（**已经做过**；再跑会因为已是挂载点而直接退出）。换机器或重装时用 | 停业务 ns，失败自动回滚 |
-| `host-243-run.sh [VAR=val…] <file\|->` | 底层：把本地脚本拿到 243 上跑，里面用 `S <cmd>` 拿 root | 看 body |
+| `host-243-run.sh [VAR=val…] <file\|->` | 底层：把本地脚本拿到 243 上跑，里面用 `S <cmd>` 拿 root。sshd 偶尔会拒绝正确口令（10-18~19 实测 146 次里 4 次，原因没查明），只在 sshpass rc=5（远端什么都没执行）时自动重试 3 次 | 看 body |
 
 ```bash
 export HOST243_PW='...'
@@ -43,11 +43,12 @@ scripts/host-243-disk-check.sh
 
 ## §2 myai 打不开时的排查顺序
 
+0. **先分清是"坏了"还是"慢"**：巡检全绿、只有 myai.carher.net 慢或时好时坏 ⇒ 是 CF 线路问题，不是 243，让用户改用 `https://chat.auto-link.com.cn/myai/`（skill `cli-anything-myai` §国内入口）。10-19 用户报「又打不开」就是这种情况
 1. **`host-243-disk-check.sh`**。1033 = 隧道没进程（cloudflared 没在跑），502 = 隧道通了但 dashboard 没起来
 2. `DiskPressure=True` ⇒ 节点有 NoSchedule 污点，pod 全部 Pending；kubelet 还会**驱逐所有 pod（包括 cloudflared）**，
    同时跑 image GC（高水位 85%，降到 80%）。先腾空间（§3），污点会自动消失
 3. pod 报 `ErrImageNeverPull` ⇒ 本地镜像被 GC 删了。`host-243-image-import.sh /Data/migration/image-*.tar`，
-   导完 kubelet 会自己重试，不用重启 pod
+   导完 kubelet 会自己重试，不用重启 pod。（如果是**换新版本**，正在跑的 pod 不会自动换，要按脚本最后列出的 Deployment 逐个 rollout）
 4. 镜像在、pod 却 CrashLoop，日志是 `LockNotAvailableError ... apply_usage_schema`：
    dashboard 启动时做 DDL，`lock_timeout=3s`；此时 sync worker 正在长事务里写库 ⇒ 等它跑完，dashboard 会自己起来（10-18 实测约 5 分钟）。**别去杀 pg 连接**
 5. 都绿了，health 还是 `degraded`：`organization` 403 是常驻的，`usageRealtime` 的 her 积压是 her 迁去杭州网关导致的（老问题），跟磁盘无关。

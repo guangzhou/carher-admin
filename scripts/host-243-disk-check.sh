@@ -32,6 +32,14 @@ systemctl show k3s -p RequiresMountsFor | grep -q /var/lib/rancher && ok "k3s Re
 systemctl show snap.lxd.daemon -p RequiresMountsFor | grep -q /mnt/lxd-data && ok "snap.lxd.daemon RequiresMountsFor=/mnt/lxd-data" || warn "snap.lxd.daemon 缺 RequiresMountsFor"
 [ "$(findmnt -no SOURCE /mnt/lxd-data || true)" = "/dev/vdb1[/lxd/pool]" ] && ok "/mnt/lxd-data ← /Data/lxd/pool" || warn "/mnt/lxd-data 没挂上"
 
+# myai 两个入口各自的 dashboard：myai.carher.net ← deploy/ai-token-dashboard；chat.auto-link.com.cn/myai/ ← deploy/ai-token-dashboard-chat（NodePort 30810，198 nginx 转发过来）
+for dpl in ai-token-dashboard ai-token-dashboard-chat; do
+  rd=$(kubectl -n ai-token-dashboard get deploy "$dpl" -o jsonpath='{.status.readyReplicas}/{.spec.replicas}' 2>/dev/null || echo "missing")
+  case "$rd" in 1/1) ok "deploy/$dpl ready $rd";; *) warn "deploy/$dpl ready=${rd}（不 ready ⇒ 对应入口 502）";; esac
+done
+c=$(curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:30810/api/health || true)
+[ "$c" = 200 ] && ok "NodePort 30810 /api/health 200（chat 入口的源站）" || warn "NodePort 30810 /api/health=$c"
+
 sw=$(swapon --noheadings --show=NAME | tr '\n' ' ')
 [[ "$sw" == *"/Data/"* ]] && ok "swap: $sw" || warn "swap 不在 /Data: '$sw'"
 [ -f /etc/systemd/journald.conf.d/99-size-cap.conf ] && ok "宿主 journald 上限 $(grep -h SystemMaxUse /etc/systemd/journald.conf.d/99-size-cap.conf)" || warn "宿主 journald 没设上限"

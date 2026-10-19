@@ -44,6 +44,8 @@ release 原文用 `curl api.github.com/.../releases/tags/vX.Y.Z` 取（WebFetch 
 | **鉴权语义**（1.104 #43049 key aliases 收窄白名单） | 1323/2116 把 key 会对白名单内名字 403；只有「真 key 形状鉴权并排」抓得到 |
 | 稳定分支的修复进没进新大版本（1.103.3 #44341 不在 1.105.1） | 不在就回移成烘焙补丁，带阴性（旧版复现）+ 阳性对照 |
 | 老补丁的指纹在新版还命中吗 | `midstream_fallback_loop` 指纹在 1.105 仍命中 ⇒ 会覆盖上游新多跳 ⇒ 必须下线 |
+| live callbacks 引用的上游符号 | `scripts/litellm-callback-upstream-audit.py --old <tag> --new <tag> --cb-dir <live CM 落盘>`（198 root）：GONE = 会静默 skip，CHANGED = 被包装的函数体变了，要回归 |
+| 烘焙补丁 / 覆盖件能不能打到新源码 | 补丁脚本直接对 `git archive <tag>` 的树跑；覆盖件 `patch --dry-run`（1.106 passthrough 那份因为上游改名失败） |
 
 ## 1. 镜像与补丁
 

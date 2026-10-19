@@ -20,7 +20,7 @@ description: >-
 | swap 4G | `/Data/swap.img` | fstab `nofail` |
 | LXD 池 `data` | `/Data/lxd/pool` | fstab bind → `/mnt/lxd-data`，`snap.lxd.daemon` drop-in `RequiresMountsFor=/mnt/lxd-data` |
 | LXD 池 `default`（还在根盘） | `/var/snap/lxd/common/lxd/storage-pools/default` | – |
-| journald | 宿主上限 300M，astrill/test-lxd-2 容器内 150M | `/etc/systemd/journald.conf.d/99-size-cap.conf` |
+| journald | 宿主上限 300M；test-lxd-2、astrill-2~5 容器内 150M（test-lxd 冻结，没设） | `/etc/systemd/journald.conf.d/99-size-cap.conf` |
 
 容器所在池：astrill-4/5 在 `data`；**test-lxd-2 / astrill-2 / astrill-3（在服务）和 test-lxd（FROZEN）还在 `default`**。
 所有 bind 和 swap 都带 `nofail,x-systemd.requires-mounts-for=/Data`：`/Data` 挂不上时，机器照样能起来、能 ssh，

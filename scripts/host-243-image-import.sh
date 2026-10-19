@@ -21,14 +21,15 @@ case "$TAR" in /Data/*) ;; *) echo "tar 请放在 /Data 下（根盘只有 38G�
 
 "$DIR/host-243-run.sh" TAR="$TAR" EXTRA="$EXTRA" - <<'EOF'
 set -eu
-[ -f "$TAR" ] || { echo "243 上没有 $TAR" >&2; exit 2; }
+S test -f "$TAR" || { echo "243 上没有 $TAR" >&2; exit 2; }
 # tar 里的镜像名（docker save 的 manifest.json / OCI 的 index.json annotation 二选一）
-REFS=$(tar xOf "$TAR" manifest.json 2>/dev/null | python3 -c '
+S test -r "$TAR" || { echo "root 也读不了 $TAR" >&2; exit 2; }
+REFS=$(S tar xOf "$TAR" manifest.json 2>/dev/null | python3 -c '
 import sys,json
 for m in json.load(sys.stdin):
   for t in m.get("RepoTags") or []:
     print(t if "/" in t.split(":")[0] else "docker.io/library/"+t)' 2>/dev/null || true)
-[ -n "$REFS" ] || REFS=$(tar xOf "$TAR" index.json | python3 -c '
+[ -n "$REFS" ] || REFS=$(S tar xOf "$TAR" index.json | python3 -c '
 import sys,json
 for m in json.load(sys.stdin)["manifests"]:
   n=m.get("annotations",{}).get("io.containerd.image.name")

@@ -38,14 +38,20 @@ WAS=$(inst 'd["status"]')
 case "$WAS" in Running|Stopped) ;; *) echo "$C 状态=${WAS}（只处理 Running/Stopped；Frozen 不确定是谁冻的、为什么冻 ⇒ 不动，先问清楚）" >&2; exit 2;; esac
 
 S mkdir -p /Data/migration/lxd-export
-OUT=/Data/migration/lxd-export/$C.tar.gz
+# 带时间戳，不覆盖以前的备份
+OUT=/Data/migration/lxd-export/$C-$(date -u +%Y%m%dT%H%M).tar.gz
 # snap 里看 /Data 要走 hostfs
 S lxc export "$C" "/var/lib/snapd/hostfs$OUT" --instance-only --compression gzip </dev/null | tail -1
 S test -s "$OUT" || { echo "导出包为空，停止" >&2; exit 1; }
 echo "export: $(S ls -lh "$OUT" | awk '{print $5}')  state=$WAS"
 
 S lxc stop "$C" --timeout 30 </dev/null || S lxc stop "$C" --force </dev/null
-S lxc move "$C" --storage data </dev/null
+# dir 驱动是先拷后删：move 失败时原容器还在 default 池，把它按原状态拉起来再退出
+if ! S lxc move "$C" --storage data </dev/null; then
+  echo "lxc move 失败，容器仍在 $(inst 'd["expanded_devices"]["root"]["pool"]') 池" >&2
+  [ "$WAS" = Running ] && S lxc start "$C" </dev/null
+  exit 1
+fi
 [ "$WAS" = Running ] && S lxc start "$C" </dev/null
 sleep 8
 pool=$(inst 'd["expanded_devices"]["root"]["pool"]')

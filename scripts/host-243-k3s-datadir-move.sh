@@ -1,6 +1,7 @@
 #!/bin/bash
 # host-243-k3s-datadir-move.sh —— 单节点 k3s 的 /var/lib/rancher 整体搬到数据盘，再用 fstab bind 挂回原路径。
-# 2026-10-18 在 243 上跑过一次（根盘 38G → 腾出 2.7G，myai 停约 70s）。现在 243 已经是挂载点，再跑会直接退出。
+# 2026-10-18 在 243 上跑过一次（根盘 38G → 腾出 2.7G；隧道断约 1.5 分钟，dashboard 停约 2 分钟）。现在 243 已经是挂载点，再跑会直接退出。
+# 失败回滚后 $DST 会留着（不自动删，里面可能是唯一一份新拷贝）；确认没用后手动挪走，才能重跑。
 #
 # ⚠️ 以 root 在目标机上跑，并且必须脱离 ssh 会话（ssh 断开不能把它杀在半路）:
 #   scp 本文件 cltx@<host>:/Data/migration/  然后
@@ -91,7 +92,11 @@ for _ in $(seq 1 36); do
   n=$($K -n "$NS" get pods --no-headers 2>/dev/null | grep -vcE "Completed|Evicted|Error")
   [ "$n" = 0 ] && break; sleep 5
 done
-$K -n "$NS" get pods --no-headers | grep -vE "Completed|Evicted|Error" && rollback "pods did not stop"
+# 🔴 这里不能走 rollback：rollback 会跑 k3s-killall（kill -9），会把还没停下的 pg 硬杀。k3s 还没动，按原副本数拉回去即可
+if $K -n "$NS" get pods --no-headers | grep -vE "Completed|Evicted|Error"; then
+  say "!!! pods did not stop, k3s untouched, scaling back up"
+  scale_up; echo FAILED > "$M/k3s-move.status"; exit 1
+fi
 say "all $NS pods gone"
 
 # 3. 停 k3s

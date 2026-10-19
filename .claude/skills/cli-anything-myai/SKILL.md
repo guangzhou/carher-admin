@@ -20,6 +20,7 @@ description: >-
 | 代码 | GitHub `davidzhu2021/ai_token_dashboard`（我们**没有推送权限**）。dashboard/realtime 跑 `2818c0d`；**sync worker 跑 `9f250f8`**（= `2818c0d` + 本地两个修复提交，补丁在 `tools/cli-anything-myai/upstream-fixes/`）。243 上 `~/ai_token_dashboard` 在分支 `fix/log-scan-capped-window-split-v2` = 线上 sync worker |
 | 镜像 | 本地导入，`imagePullPolicy: Never`；243 上没有 docker。dashboard/realtime = `ai-token-dashboard:latest`，sync worker = `ai-token-dashboard:fix-9f250f8` |
 | 交接文档 | 飞书 `LnDFdifILo1Wuix7irecEbKOnkh` |
+| 磁盘 | 根盘只有 38G，k3s 数据在 `/Data/rancher`。**myai 报 1033/502、pod Pending 或 ErrImageNeverPull，先走 skill `host-243-disk-ops`**（`scripts/host-243-disk-check.sh`）。`latest` 现在是从 `2818c0d` 重建的（`985f9288`，依赖按 9f250f8 锁定）；10-10 原版已经丢了 |
 
 进程：`ai-token-dashboard`（FastAPI，`USAGE_SYNC_ROLE=reader`）、`usage-sync-worker`、
 `usage-realtime-worker`（都是 `python -m backend.usage_worker`，靠 `USAGE_REALTIME_ENABLED` 区分），
@@ -121,7 +122,9 @@ GitHub 推不了，镜像在 188 构建（与 243 同为 x86_64）：
 git archive --format=tgz -o /tmp/x.tgz <commit>                       # 只打包已提交内容
 # 188: 解包到新目录 /Data/myai-build-<commit> → docker build -t ai-token-dashboard:fix-<commit> .
 #      docker run 一遍新测试；docker save -o image.tar（🔴 别用管道 save|ssh import：docker 29 的 OCI 包 ctr 从 stdin 认不出）
-# 243: scp image.tar → sudo k3s ctr -n k8s.io images import /tmp/image.tar（/ 只剩约 2.5G，导完删 tar）
+# 243: ssh 188 'cat image.tar' | ssh 243 'cat > /Data/migration/image-fix-<commit>.tar'
+#      HOST243_PW=... scripts/host-243-image-import.sh /Data/migration/image-fix-<commit>.tar   # 导入 + pin + 回读
+#      🔴 tar 留在 /Data/migration 别删、别放 /tmp：镜像没 pin 会被 image GC 删，拉不回（10-17 停机 19h，见 skill host-243-disk-ops）
 kubectl -n ai-token-dashboard exec usage-db-0 -- pg_dump ... -t usage_daily -t usage_sync_coverage -t usage_team_membership_daily --data-only -Fc > /Data/migration/<备份>.dump
 kubectl -n ai-token-dashboard set image deploy/usage-sync-worker worker=ai-token-dashboard:fix-<commit>
 ```

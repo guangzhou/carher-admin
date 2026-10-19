@@ -150,6 +150,8 @@ scripts/ipok-score.py -f ips.txt --proxy-file proxies.txt --json out.json    # �
   helper 里走 base64 传递
 - ⚠️ **`set -e` 会把这些脚本搞成静默失败**：轮询 tun0 时 grep 无匹配返回非 0，
   那是正常中间态。survey/switch 都**故意不用 `set -e`**
+- **存储池（2026-10-18 起）**：根盘只有 38G。新池 `data`（`/Data` 上），astrill-4/5 已迁到这里；test-lxd-2/astrill-2/astrill-3/test-lxd 还在根盘的 `default` 池。**新建或克隆容器一律加 `-s data`**；挪池用 `scripts/host-243-lxd-move-to-data.sh`。细节见 skill `host-243-disk-ops`
+- 🔴 **查单个容器的状态用 `lxc query /1.0/instances/<name>`**，不要用 `lxc list <name>`（前缀过滤：`test-lxd` 会同时命中 `test-lxd-2`）
 - 克隆容器必须 `rm -f Astrill.ini client.crt client.key ca.crt` 再重新登录，否则身份相同互踢
 - ⚠️ **GUI 活不过重启**（`astrill-gui.service` 是 oneshot，子进程秒死）。**服务本身没修**。
   手动救活：`setsid runuser -u astrill -- env HOME=/home/astrill DISPLAY=:99 /usr/local/Astrill/astrill --no-xshm &`

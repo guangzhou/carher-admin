@@ -89,7 +89,7 @@ img.shot{border:1px solid var(--line);border-radius:8px;max-width:100%;width:300
 .tips-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
 .tips-h b{font-size:16.5px}
 .tips-h span{font-size:13.5px;color:var(--muted)}
-.cmds{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.cmds{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
 .cmd{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
 .cmd kbd{align-self:flex-start;font-family:var(--font-body);font-weight:700;font-size:17px;letter-spacing:.04em;background:var(--surface);border:1px solid var(--line);border-bottom-width:3px;border-radius:8px;padding:5px 16px;color:var(--fg);cursor:pointer;user-select:all}
 .cmd kbd:hover{border-color:var(--t)}
@@ -318,7 +318,7 @@ claude</code></pre>
 </div>
 
 <div class="tips">
-  <div class="tips-h"><b>装好后，在聊天框里发这两个词</b><span>Cursor、Codex、Claude Code 的命令行和桌面 App 都能用</span></div>
+  <div class="tips-h"><b>装好后，在聊天框里发这三个词</b><span>Cursor、Codex、Claude Code 的命令行和桌面 App 都能用</span></div>
   <div class="cmds">
     <div class="cmd">
       <kbd data-copy="查余额" title="点一下复制">查余额</kbd>
@@ -330,8 +330,13 @@ claude</code></pre>
       <p>把你能用的模型挨个试一遍，列出哪些能用、哪些不能用。</p>
       <div class="meta"><span>约 1~2 分钟</span><span>花一点点额度</span></div>
     </div>
+    <div class="cmd">
+      <kbd data-copy="刷模型" title="点一下复制">刷模型</kbd>
+      <p>按你的 key 更新模型列表：新开通的加上，没权限的删掉。</p>
+      <div class="meta"><span>Cursor 会自己重开</span><span>Codex / Claude 新开会话生效</span></div>
+    </div>
   </div>
-  <p class="tips-note">只发这一个词，像平常聊天一样发出去；前面不要加 <code>/</code>。点上面的词可以直接复制。</p>
+  <p class="tips-note">只发这一个词，像平常聊天一样发出去；前面不要加 <code>/</code>。点上面的词可以直接复制。「刷模型」要先用最新的包装过一次。</p>
 </div>
 
 <div class="fb">
@@ -349,7 +354,7 @@ claude</code></pre>
       <tbody>
         <tr><td>报 <code>401</code>，或 key 没写上</td><td>Settings → Models → OpenAI API Key，粘贴 key → Verify → 完全退出重开</td></tr>
         <tr><td>报 <code>key not allowed to access model</code>，或提示额度用完</td><td>发 <b>查余额</b> 看额度；没开通的模型换一个或找运维开通</td></tr>
-        <tr><td>报 <code>An unexpected error occurred</code> / <code>does not support custom API keys</code>；看不到 High / Fast；菜单里有 39 个以外的模型</td><td>下载最新的包，退出 Cursor，双击 <code>UPGRADE</code></td></tr>
+        <tr><td>报 <code>An unexpected error occurred</code> / <code>does not support custom API keys</code>；看不到 High / Fast</td><td>下载最新的包，退出 Cursor，双击 <code>UPGRADE</code></td></tr>
         <tr><td>模型不见了</td><td>完全退出 Cursor → 双击 <code>REPAIR</code> → 重开</td></tr>
         <tr><td>REPAIR 提示「拒绝动手」</td><td>Cursor 出了还没适配的新版本，你的 Cursor 没被改动，把窗口文字发给运维</td></tr>
         <tr><td>某个模型不回话 / 一直转圈 / 报 <code>502</code></td><td>先发 <b>测模型</b> 看它是不是暂时不可用；换回 <code>grok-4.7</code>，把模型名和时间发给运维</td></tr>
@@ -374,21 +379,11 @@ bash ./REMOTE-SSH-Mac.command</code></pre>
     <p class="sub">每台服务器做一次。换了新安装包后，再双击一次 REMOTE-SSH。</p>
   </details>
   <details class="for-cursor">
-    <summary>全部 39 个模型</summary>
-    <dl class="models">
-      <dt>Grok / Gemini</dt><dd><code>grok-4.7</code><code>grok-4.6</code><code>grok-4.6-latest</code><code>grok-4.5-latest</code><code>grok-4.5</code><code>grok-4.3</code><code>grok-build-0.1</code><code>grok-4.20</code><code>grok-4.20-0309-reasoning</code><code>gemini-3.8-flash</code><code>composer-2.5-fast</code><code>composer-2.5</code></dd>
-      <dt>GPT</dt><dd><code>gpt-6-sol</code><code>gpt-6.1-sol</code><code>gpt-6-astra</code><code>gpt-6-luna</code><code>gpt-5.6-sol</code><code>gpt-5.6-luna</code><code>gpt-5.6-terra</code><code>gpt-5.5</code><code>gpt-5.4</code><code>gpt-5.2</code><code>codex-auto-review</code></dd>
-      <dt>Claude</dt><dd><code>claude-opus-5-5</code><code>claude-sonnet-5-5</code><code>claude-haiku-4-5</code><code>claude-opus-5</code><code>claude-sonnet-5</code><code>claude-opus-4-8</code><code>claude-opus-4-7</code><code>claude-opus-4-6</code><code>claude-sonnet-4-6</code></dd>
-      <dt>国产 / 其他</dt><dd><code>deepseek-v4-flash</code><code>kimi-k2.7-code</code><code>glm-5.3-flash</code><code>qwen3-coder-next</code><code>jev</code></dd>
-      <dt>muse</dt><dd><code>muse-spark</code><code>muse-image</code>（画图）</dd>
-    </dl>
-  </details>
-  <details class="for-cursor">
     <summary>更新与卸载</summary>
     <p><b>更新</b>：Cursor 不会自己升级。这个页面发了新版，就下载新包、解压、完全退出 Cursor，双击 <code>UPGRADE</code>，不用再输 key。</p>
     <p><b>卸载</b>：完全退出 Cursor，双击 <code>UNINSTALL</code>，输入 <code>yes</code>。</p>
     <p class="sub mac-only">Mac 上这些按钮（UPGRADE、UNINSTALL、REPAIR、DOCTOR）都可以像安装那样在终端跑：进到 <code>cursor-mac</code> 文件夹，先 <code>chmod +x *.command *.sh</code>，再执行 <code>bash ./UPGRADE-Mac.command</code>，名字换成要用的那个。</p>
-    <p class="sub">聊天记录都不动。模型菜单会换成上面 39 个，自己加的模型名会被清掉。</p>
+    <p class="sub">聊天记录都不动。模型菜单会换成你的 key 能用的模型，自己加的模型名会被清掉。</p>
   </details>
 
   <details class="for-codex">

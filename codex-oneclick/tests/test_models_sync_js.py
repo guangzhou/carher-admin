@@ -101,3 +101,31 @@ def test_image_tool_node_first_in_both_installers():
     assert "@@EMBED carher_image.js@@" in mac and "@@EMBED carher_image.js@@" in win
     assert mac.index('IMG_CMD="\\"$NODEBIN\\"') < mac.index('IMG_CMD="\\"$PYBIN\\"')
     assert "if ($nodeExe) { $imgCmd" in win
+
+
+@pytest.mark.parametrize("text,shown", [
+    ('model = "gpt-5.6-terra"\nmodel_provider = "p"\n\n[model_providers.p]\nmodel = "x"\n', ["deepseek-v4.1-flash"]),   # 默认失效 ⇒ 换第一个
+    ('model = "grok-4.7"\n', ["gpt-5.6-terra", "grok-4.7"]),                                     # 还能用 ⇒ 不动
+    ('model = "deepseek-v4-flash"\n', ["grok-4.7", "gpt-5.6-terra"]),                            # 失效 ⇒ 优先 gpt-5.6-terra
+    ('[model_providers.p]\nmodel = "x"\n', ["grok-4.7"]),                                        # 表里的 model 不是顶层 ⇒ 不动
+])
+def test_fix_default_model_identical(text, shown):
+    """10-19:key 里删掉了 config 钉的默认模型 ⇒ 每轮 403。同步时自动换掉,两份实现一致。"""
+    got_js = js("fixDefaultModel", text, shown, "gpt-5.6-terra")
+    got_py = py.fix_default_model(text, shown, "gpt-5.6-terra")
+    assert got_js == got_py
+    if got_py:
+        assert got_py["to"] in shown
+        if "[model_providers.p]" in text:
+            assert "[model_providers.p]\nmodel = \"x\"" in got_py["text"], "表里的 model 被误改"
+
+
+def test_imagine_names_stay_out_of_picker():
+    cat = js("buildCatalog", ["grok-4.7", "grok-imagine", "gpt-image-2"], TEMPLATES, {})
+    assert [m["slug"] for m in cat["models"] if m["visibility"] == "list"] == ["grok-4.7"]
+
+
+def test_installers_write_refresh_block():
+    for f, enc in (("install-mac.sh", "utf-8"), ("install-windows.ps1", "utf-8-sig")):
+        t = (SRC / f).read_text(encoding=enc)
+        assert "CARHER-REFRESH-BEGIN" in t and "## 刷模型" in t, f

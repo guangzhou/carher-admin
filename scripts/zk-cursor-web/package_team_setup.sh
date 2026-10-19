@@ -295,16 +295,9 @@ __MODEL_PREFIX__ 一键安装(零依赖,不用装 Python / Node)
 
 看到"完成"就装好了:启动 Cursor,模型菜单默认就是 __DEFAULT_MODEL__,直接用。
 
-模型清单(本版会把你的菜单**整份换成**这份,顺序就是你在菜单里看到的顺序)
-__MODEL_LIST__
-  已下架:__RETIRED_MODELS__ —— 装过旧版的机器上,UPGRADE 会自动摘掉。
-  注:sa-grok-imagine 已从菜单去掉。它是**出图专用**,在 Cursor 的聊天线型上直接
-     报错(实测 400 invalid_request_error),留在菜单里只会让人点了报错。
-  注:cr-g 那一段(cr-g-5.6 / -instant / -mini / -t-mini / cr-g-research / -thinking / -luna
-     以及 6 个 thinking/luna 档位变体)2026-10-12 已整段下架,菜单里不再有。
-     装过旧版的机器双击 UPGRADE 会自动摘掉;要是某个功能位正钉着它们,会自动改回默认模型。
-  注:claude 那 5 个名字要写全名(claude-opus-5-5 这种),没有 opus-5.5 这样的短名
-     —— 短名在网关上不存在,点了就报错。
+模型清单:不写死。装的时候按你的 Key 从公司网关现拉 —— 你的 Key 能用哪些就放哪些
+  (画图专用的不进聊天菜单),新开通的加上、已经没权限的删掉。
+  以后要更新,在 Cursor 里说「刷模型」就行(Cursor 会自动退出、更新、再打开)。
 
 关于"增量传输"(装完自动开着,Mac 才有)
   装完之后你的 Cursor 不再直接连公网,而是先连本机一个小程序(127.0.0.1:8788),
@@ -397,34 +390,14 @@ MODEL_PFX=$(grep -m1 '^const MODEL_PREFIXES = ' "$HERE/cursor_team_setup.js" | s
 if [ -z "$DEF_MODEL" ] || [ -z "$MODEL_PFX" ]; then
   echo "FATAL: 从 cursor_team_setup.js 抠不到 DEFAULT_MODEL / MODEL_PREFIX(常量改名了?)" >&2; exit 1
 fi
-# 模型清单 / 下架名单同理从常量抠。抠不到就**中止打包**,不许默默出一份没有清单的 README
-# ——"README 里这一节是空的"同事不会来问,他只会按旧印象用。
-awk '/^const DEFAULT_MODELS = \[/{f=1;next} f&&/^\];/{exit} f' "$HERE/cursor_team_setup.js" \
-  | tr ',' '\n' | sed -n 's/.*"\([^"]*\)".*/  - \1/p' > "$STAGE/.models.txt"
-# 🔴 2026-10-12:原来这里是 `awk '…{print;exit}'` —— 只读**第一行**。那天 RETIRED_MODELS
-# 从 1 行长到 6 行(cr-g 整段下架进来),于是 README 里的"已下架"只印出头两个名字、
-# 尾巴 13 个静默消失,**而且打包照样成功**(非空就过)。下架名单印不全的后果是:
-# 同事在菜单里找不到某个名字、也不知道它是被下架了,只会以为包装坏了。
-# 现在整块读到 `];` 为止,并且**断言条数 == 常量里的条数**,数不上就中止打包。
+# 下架名单从常量抠(README 里已不再列;只做一次断言,常量坏了就中止打包)。
 RETIRED=$(awk '/^const RETIRED_MODELS = \[/{f=1} f{print} f&&/\];/{exit}' "$HERE/cursor_team_setup.js" \
-  | sed 's|//.*||' | tr '\n' ' ' \
-  | sed 's/.*\[//; s/\].*//; s/"//g; s/,[[:space:]]*/, /g; s/^[[:space:]]*//; s/[[:space:]]*,[[:space:]]*$//')
-# ⚠️ 用 `tr ',' '\n' | wc -l` 数会少 1:最后一个名字后面没有逗号,末行无换行符 ——
-#    而 `wc -l` 数的是换行符个数。补一个换行再数(这个 off-by-one 是上面那条断言当场抓到的)。
-RET_N=$(printf '%s\n' "$RETIRED" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-RET_WANT=$(awk '/^const RETIRED_MODELS = \[/{f=1} f{print} f&&/\];/{exit}' "$HERE/cursor_team_setup.js" \
   | sed 's|//.*||' | grep -o '"[^"]*"' | wc -l | tr -d ' ')
-if [ "$RET_N" != "$RET_WANT" ] || [ "${RET_WANT:-0}" -lt 1 ]; then
-  echo "FATAL: 下架名单抠了 $RET_N 个,常量里有 $RET_WANT 个 —— 抠法又被换行弄坏了" >&2; exit 1
+[ "${RETIRED:-0}" -ge 1 ] || { echo "FATAL: 抠不到 RETIRED_MODELS" >&2; exit 1; }
+# 10-19 起菜单按 Key 动态拉取:装机包里不许再有写死的 DEFAULT_MODELS。
+if grep -q '^const DEFAULT_MODELS = \[' "$HERE/cursor_team_setup.js"; then
+  echo "FATAL: cursor_team_setup.js 里又有写死的 DEFAULT_MODELS(菜单应按 Key 现拉)" >&2; exit 1
 fi
-if [ ! -s "$STAGE/.models.txt" ] || [ -z "$RETIRED" ]; then
-  echo "FATAL: 抠不到 DEFAULT_MODELS / RETIRED_MODELS(常量改名或换行了?)" >&2; exit 1
-fi
-echo "模型清单 $(wc -l < "$STAGE/.models.txt" | tr -d ' ') 个,下架:$RETIRED"
-# __MODEL_LIST__ 是多行,走 sed 的 r(插入文件)+ d(删占位行);单行的走下面那个通用循环。
-sed -e "/__MODEL_LIST__/r $STAGE/.models.txt" -e "/__MODEL_LIST__/d" \
-    "$STAGE/README.txt" > "$STAGE/README.new" && mv "$STAGE/README.new" "$STAGE/README.txt"
-rm -f "$STAGE/.models.txt"
 # __MODEL_PREFIX__ 在启动器 / README 里当「产品名」用(「让远程窗口也能用 X 的模型」)。
 # 原来取 MODEL_PREFIXES 第一项 ⇒ 10-12 cr-g 整段下架后,同事双击 REMOTE-SSH 看到的仍是「cr-g 的模型」,
 # 而菜单里已经一个 cr-g 都没有了。产品名固定成包名,不再跟着前缀表的排序走。
@@ -434,7 +407,6 @@ PRODUCT_NAME="cursor-g"
 for f in "$STAGE/README.txt" "$STAGE"/*.command "$STAGE"/*.cmd; do
   [ -f "$f" ] || continue
   sed -e "s/__DEFAULT_MODEL__/$DEF_MODEL/g" -e "s/__MODEL_PREFIX__/$PRODUCT_NAME/g" \
-      -e "s/__RETIRED_MODELS__/$RETIRED/g" \
       "$f" > "$f.new" && mv "$f.new" "$f"
 done
 chmod +x "$STAGE"/*.command

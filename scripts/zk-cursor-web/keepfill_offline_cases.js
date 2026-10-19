@@ -10,10 +10,8 @@ const END = "}catch(__cxe){}})(),";
 const raw = bundle.slice(i, bundle.indexOf(END, i) + END.length - 1);
 const v = /__cxh=new Map\(([A-Za-z_$][\w$]*)\.map/.exec(raw)[1];
 const tiers = JSON.parse(fs.readFileSync(path.join(__dirname, "cursor_tier_catalog.json"), "utf8"));
-const setup = fs.readFileSync(path.join(__dirname, "cursor_team_setup.js"), "utf8");
-// 菜单常量里夹着 /* */ 和 // 注释 ⇒ 不 JSON.parse,只抠引号里的名字(同 setup_impl_parity.py 的口径)
-const menuBlock = /const DEFAULT_MODELS = \[([\s\S]*?)\];/.exec(setup)[1].replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-const ours = [...menuBlock.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+// 10-19 起菜单按 Key 动态拉取,没有写死清单 ⇒ 输入 = 档位模板里的名字 + 两个模板外的(gpt-reserve/kimi-k3 这类新上的)
+const ours = Object.keys(tiers).concat(["gpt-reserve", "kimi-k3", "gpt-6-sol"]);
 function run(uam, cat) {
   delete globalThis.__cxTiers;
   const self = { _reactiveStorageService: { applicationUserPersistentStorage: { aiSettings: { userAddedModels: uam } } } };
@@ -26,8 +24,7 @@ const ok = (b, m) => { console.log((b ? "  PASS " : "  FAIL ") + m); if (!b) fai
 const by = (c) => Object.fromEntries(c.map((e) => [e.name, e]));
 const bare = (n) => ({ name: n, isUserAdded: true, parameterDefinitions: [], variants: [], serverModelName: n });
 const builtin = ["default", "composer-2", "auto-a", "auto-b", "auto-c"].map((n) => ({ name: n, defaultOn: true }));
-ok(ours.length === 39 && Object.keys(tiers).length >= 20, "输入:菜单 39 个、档位模板 " + Object.keys(tiers).length + " 个");
-ok(Object.keys(tiers).every((n) => ours.includes(n)), "档位模板里的名字都在菜单里(没有过期名)");
+ok(Object.keys(tiers).length >= 20, "输入:菜单 " + ours.length + " 个、档位模板 " + Object.keys(tiers).length + " 个");
 // ① wangzhongwei:名字都在、没档位
 const wz = ours.map(bare).concat(builtin), o = by(run(ours, wz));
 ok(o["claude-opus-5-5"].variants.length === tiers["claude-opus-5-5"].variants.length && o["claude-opus-5-5"].variants.length > 0, "无档位 ⇒ 补回档位(opus-5-5 " + o["claude-opus-5-5"].variants.length + " 个)");

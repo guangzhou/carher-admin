@@ -308,6 +308,27 @@ EOF
       echo "17 10 * * * CODEX_HOME='$CODEX_HOME' '$SYNC_RUN' '$SYNC_ARG' >/dev/null 2>&1"
     ) | crontab - && ok "✔ 已设置每天自动同步模型列表"
   fi
+  # 「刷模型」:用户在 Codex 里说这三个字,agent 就跑一次同步(不用等第二天的定时任务)
+  AGENTS="$CODEX_HOME/AGENTS.md"
+  RB="<!-- CARHER-REFRESH-BEGIN -->"; RE="<!-- CARHER-REFRESH-END -->"
+  if [ -f "$AGENTS" ]; then
+    [ -d "$BKDIR" ] || mkdir -p "$BKDIR"; [ -f "$BKDIR/AGENTS.md" ] || cp "$AGENTS" "$BKDIR/AGENTS.md" 2>/dev/null || true
+    awk -v b="$RB" -v e="$RE" '$0==b {skip=1} skip==0 {print} $0==e {skip=0}' "$AGENTS" > "$AGENTS.tmp" && mv "$AGENTS.tmp" "$AGENTS"
+  fi
+  cat >> "$AGENTS" <<EOF
+$RB
+## 刷模型
+
+用户说「刷模型」「更新模型」「刷新模型列表」或说模型列表不对时，**直接运行下面这条命令，不要先问**：
+
+    CODEX_HOME="$CODEX_HOME" "$SYNC_RUN" "$SYNC_ARG"
+
+- 它按用户的 key 从公司网关重新拉模型列表：新开通的加上、没权限的删掉；默认模型不能用了会自动换。
+- 把输出里「新增 / 删除 / 默认模型」那几行原样告诉用户，并提醒：终端里新开一个 codex 会话就能看到；Desktop App 要完全退出再打开。
+- 报错就把原文告诉用户，不要自己改配置文件。
+$RE
+EOF
+  ok "✔ 以后在 Codex 里说「刷模型」就能立即更新模型列表"
 else
   warn "⚠ 没有 Python 也没有 Node，模型列表没同步（选择器里只显示默认模型）"
 fi
@@ -322,7 +343,7 @@ echo "  2) Desktop App：完全退出(Cmd+Q)再重开即可"
 echo
 echo "顶部应显示 model: $MODEL"
 echo "想画图直接跟 Codex 说「画一张…」即可。"
-echo "想换模型（列表里都是你这把 key 能用的，每天自动更新）："
+echo "想换模型（列表里都是你这把 key 能用的，每天自动更新；想立即更新就说「刷模型」）："
 echo "  - 终端 codex：输入 /model 回车，上下键选，回车确认（会记住，下次默认用它）"
 echo "  - 只这一次用某个模型：codex -m grok-4.7"
 echo "  - Desktop App：点底部的模型选择器"

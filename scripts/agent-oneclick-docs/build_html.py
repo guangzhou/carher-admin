@@ -54,13 +54,11 @@ def check(tpl: str) -> list:
             red.append(f"缺文件 {k}: {p}")
     if hits := [w for w in BANNED if w in tpl]:
         red.append(f"页面里有内部词: {hits}")
-    # 页面里列的 Cursor 菜单必须和装机脚本 DEFAULT_MODELS 一一对应(改菜单忘改页面 = 用户对不上)
-    setup = (ROOT / "scripts/zk-cursor-web/cursor_team_setup.py").read_text()
-    menu = re.findall(r"<code>([a-z0-9][a-z0-9.\-]+)</code>", tpl.split("全部 39 个模型")[1].split("</dl>")[0]) if "全部 39 个模型" in tpl else []
-    if len(set(menu)) != 39:
-        red.append(f"页面模型表 {len(set(menu))} 个,应为 39(标题写的是 39)")
-    if miss := [m for m in menu if f'"{m}"' not in setup]:
-        red.append(f"页面里的模型不在 cursor_team_setup.py: {miss}")
+    # 10-19 起三个工具的模型菜单都按 key 动态拉取,页面里不许再列写死的模型清单
+    if "全部 39 个模型" in tpl or re.search(r"全部 \d+ 个模型", tpl):
+        red.append("页面里又写死了模型清单(菜单已按 key 动态拉取,发「刷模型」更新)")
+    if "刷模型" not in tpl:
+        red.append("页面里没有「刷模型」提示")
     # Mac 终端命令必须先 chmod 再 bash ./
     for blk in re.findall(r"<pre[^>]*><code>(.*?)</code></pre>", tpl, re.S):
         if "bash ./" in blk and "chmod +x" not in blk:

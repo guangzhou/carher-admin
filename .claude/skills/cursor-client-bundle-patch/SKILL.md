@@ -44,6 +44,27 @@ description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 
 **`@cxteam-norelay`(2026-08-25 连发折叠+僵尸真根因修)**。
 2026-09-23 加到 **10 处**:`@cxteam-nocloud` / `@cxteam-nocloudset`(见下「会话被改道去 Cloud Agents」)。
 
+## 🔴 菜单按 Key 动态拉取,不再写死(2026-10-19 起)
+
+`DEFAULT_MODELS` 常量**已删**。下文所有「改 `DEFAULT_MODELS`」「抠 `DEFAULT_MODELS`」「菜单 39 个」都是历史。现状:
+
+- INSTALL / UPGRADE:`resolveMenu` → `fetchKeyModels`(GET `{base}/models`,网关按 key 白名单过滤)→ `orderMenu`
+  (去掉名字含 `image|imagine` 的;分段 ① grok/composer ② gpt ③ claude ④ 其他,段内 `grok-4.7` 排首、其余按名字)
+  → `mergeConfig` 整表赋值。`pickDefault`:key 里有 `grok-4.7` 就选它,没有就选菜单第一个。
+- **拉不到列表(没 Key / 断网 / 空)就不改菜单**,输出写明原因(台架 ⑬)。
+- Key 从哪来:INSTALL 粘的(现在在写菜单**之前**问);UPGRADE / 刷模型读 `~/.carher/image.json`(600,画图共用),
+  读不到再试解库里的密文(3.24.12 起 keytar 被摘,解不开)。都没有时,UPGRADE 在 TTY 下问一次。
+- **「刷模型」= `--refresh-models`**:只改菜单,不碰 bundle、Key、小代理。Cursor 开着时**直接写库没用**(退出时会把内存里的旧菜单写回去),
+  所以先返回(让 agent 说完话),再起一个脱离的 worker:等 8 秒 → osascript 正常退出(有弹窗就等,不强杀,
+  最多 3 分钟)→ 写库 → `open` 重开。日志 `~/.carher/cursor-refresh.log`。skill 装在
+  `~/.cursor/skills/carher-refresh-models/`,命令指向 `~/.carher/cursor-setup/cursor_team_setup.js`(安装时复制过去,
+  解压目录被删也能用)。
+- 菜单账本 `~/.carher/cursor-menu.json`:前缀表认不出的新名字(网关明天上的)靠它让 `isOurs`/`--uninstall` 认出。
+- 台架:`retire_model_offline_cases.sh` 用 `CX_MODELS_JSON` 注入网关返回,不出网;⑬ 没 Key 不动、⑭ 刷模型(删/加/改回默认/幂等/没 Key 拒绝)。
+  `setup_impl_parity.py` / `setup_package_freshness.py` 第③腿改成断言「无写死清单 + 有 fetchKeyModels/刷模型」。
+- 10-19 本机实测:Cursor 开着时跑 `--refresh-models`,1 秒退出、写库、重开;重开 30 秒后读库,菜单仍是 40 个(含 kimi-k3 / gpt-reserve,
+  deepseek-v4-flash 已删),没被写回。`cursor-agent -p "刷模型"` 能命中 skill。
+
 ## 给同事的包按系统拆开(2026-10-15)
 
 用户点名「几篇文档的脚本同名、Mac/Windows 混在一起乱」。`package_team_setup.sh` 仍出完整包

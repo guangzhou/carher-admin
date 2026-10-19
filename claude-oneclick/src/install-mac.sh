@@ -165,10 +165,15 @@ if [ -f "$SETTINGS" ]; then
   cp "$SETTINGS" "$BK"; warn "↳ 已备份原有配置到:$BK"
 fi
 # 用 Node 合并 JSON(上面已保证有 Node,不依赖 python/jq)。key 走环境变量,不进命令行参数。
-# 网关模型清单(给 modelPicker 用);拿不到就跳过这一项,不影响别的
+# 网关模型清单(给 modelPicker 用);拿不到就跳过这一项,不影响别的。
+# 「刷模型」用的是同一份逻辑(carher_models_refresh.js),这里先落盘,合并时直接 require 它。
+mkdir -p "$CLAUDE_HOME/carher"
+cat > "$CLAUDE_HOME/carher/carher_models_refresh.js" <<'CARHER_JS_EOF'
+@@EMBED carher_models_refresh.js@@
+CARHER_JS_EOF
 CARHER_MODELS="$(curl -fsS --max-time 30 -H "x-api-key: $APIKEY" -H "anthropic-version: 2023-06-01" "$BASE_URL/v1/models" 2>/dev/null \
   | node -e "let b=\"\";process.stdin.on(\"data\",c=>b+=c).on(\"end\",()=>{try{console.log(JSON.parse(b).data.map(m=>m.id).join(\"\\n\"))}catch(e){}})" 2>/dev/null || true)"
-CARHER_MODELS="$CARHER_MODELS" CARHER_KEY="$APIKEY" CARHER_BASE="$BASE_URL" CARHER_SETTINGS="$SETTINGS" node -e '
+CARHER_REFRESH="$CLAUDE_HOME/carher/carher_models_refresh.js" CARHER_MODELS="$CARHER_MODELS" CARHER_KEY="$APIKEY" CARHER_BASE="$BASE_URL" CARHER_SETTINGS="$SETTINGS" node -e '
 const fs = require("fs");
 const p = process.env.CARHER_SETTINGS;
 let d = {};
@@ -194,10 +199,9 @@ const real = (n) => { const m = /^claude-router-([0-9a-f]+)$/.exec(n || ""); ret
 if (typeof d.model === "string") d.model = real(d.model);
 // 网关里非 claude 的模型(GPT/Grok/Kimi 等)Claude Code 不认识 ⇒ 每次新开窗口都打警告、上下文按 200k 算。
 // modelPicker 一行一个,behavesAs 指一个它认识的模型 ⇒ 不再警告,菜单里直接是真名。
+// 旧的删、新的加、选中的已没权限就回默认 —— 与「刷模型」同一份逻辑(carher_models_refresh.js)。
 const ids = (process.env.CARHER_MODELS || "").split("\n").filter(Boolean);
-const rows = ids.filter((i) => !/^claude-/.test(i) && !/image|imagine/.test(i) && i !== "codex-auto-review")
-  .map((i) => ({ model: i, label: i, behavesAs: "claude-sonnet-5-5" }));
-if (rows.length) d.modelPicker = { options: rows };
+if (ids.length) require(process.env.CARHER_REFRESH).applyModels(d, ids);
 fs.writeFileSync(p, JSON.stringify(d, null, 2) + "\n", { mode: 0o600 });
 fs.chmodSync(p, 0o600);
 ' || die "✗ 写配置失败"
@@ -332,6 +336,24 @@ const blk=B+"\n## 画图\n\n用户要画图、生成图片、出图、做配图/
  +"- 约 30 秒出图;以命令最后打印的「已生成:…」路径为准告诉用户。\n- 不要向用户要 key。命令报错就把原文告诉用户,不要换别的方式硬画。\n"+E+"\n";
 fs.writeFileSync(p,(t?t+"\n\n":"")+blk);'
 ok "✔ 已开通画图(说「画一张…」即可)"
+
+# ── 4e. 「刷模型」(10-19):说这三个字就按 key 重拉 /model 菜单(旧的删、新的加)──
+mkdir -p "$CLAUDE_HOME/skills/carher-refresh-models"
+CARHER_NODE="$NODE_ABS" CARHER_TOOL="$CLAUDE_HOME/carher/carher_models_refresh.js" node -e '
+const fs=require("fs");let t=fs.readFileSync(0,"utf8");
+t=t.split("@@NODE@@").join(process.env.CARHER_NODE).split("@@TOOL@@").join(process.env.CARHER_TOOL);
+process.stdout.write(t);' > "$CLAUDE_HOME/skills/carher-refresh-models/SKILL.md" <<'CARHER_MD_EOF'
+@@EMBED refresh_skill.md@@
+CARHER_MD_EOF
+CARHER_MD="$CMD_MD" CARHER_LINE="\"$NODE_ABS\" \"$CLAUDE_HOME/carher/carher_models_refresh.js\"" node -e '
+const fs=require("fs"),p=process.env.CARHER_MD,B="<!-- CARHER-REFRESH-BEGIN -->",E="<!-- CARHER-REFRESH-END -->";
+let t="";try{t=fs.readFileSync(p,"utf8")}catch(e){}
+const i=t.indexOf(B),j=t.indexOf(E);if(i>=0&&j>i)t=t.slice(0,i)+t.slice(j+E.length);
+t=t.replace(/\n+$/,"");
+const blk=B+"\n## 刷模型\n\n用户说「刷模型」「更新模型」「刷新模型列表」,或说 /model 里的模型不对时,**直接运行这条命令,不要先问**:\n\n    "+process.env.CARHER_LINE+"\n\n"
+ +"- 把输出里「新增 / 删除 / 已改回默认模型」几行原样告诉用户,并提醒新开一个会话后 /model 里就是新列表。\n- 报错就把原文告诉用户,不要自己改 settings.json。\n"+E+"\n";
+fs.writeFileSync(p,(t?t+"\n\n":"")+blk);'
+ok "✔ 以后在 Claude Code 里说「刷模型」就能更新模型列表"
 
 # (会盖过配置的旧 export 在第 5 步测试之后统一处理:注释掉 + 备份,见下)
 echo

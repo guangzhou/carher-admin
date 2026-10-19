@@ -23,6 +23,16 @@ description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 
 > Claude Code《一键配置》`MeLad7oMiobwf6xnpA2cWy0nnSg`(源 `claude-oneclick/`,结构照抄本目录的 `build.sh`)。
 > 三篇文档里都有一句「同一把 key」+ 互链,改一篇时顺手核另两篇别说法打架。
 
+## 刷模型(2026-10-19)
+
+- 同步脚本(两份)现在会打印「新增 N / 删除 N / 和上次一样」;`model =` 钉着的名字 key 里没了,就改成 `gpt-5.6-terra`(在的话)
+  或第一个,`config.toml` 和 `chatgpt.config.toml` 都改(`fixDefaultModel` / `fix_default_model`,测试逐项比对两份)。
+  出图名 `imagine` 也跳过。
+- 安装器第 7 步往 `~/.codex/AGENTS.md` 写 `CARHER-REFRESH` 标记块:用户说「刷模型」,agent 就跑同步命令(绝对路径)。
+  终端新开 codex 会话生效,Desktop App 要完全退出再开。
+- 10-19 本机实测(隔离 CODEX_HOME):`codex exec "刷模型"` 跑通,新增 17 / 删除 7;再跑一次显示「没有变化」。
+  🔴 `codex exec` 不关 stdin 会一直挂着 ⇒ 测试要加 `< /dev/null`。
+
 ## 0. 先判卡在哪
 
 | 现象 | 卡在 | 去哪节 |

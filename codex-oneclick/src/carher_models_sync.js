@@ -22,7 +22,8 @@ const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const CONFIG = path.join(CODEX_HOME, "config.toml");
 const DEFAULT_CATALOG = path.join(CODEX_HOME, "carher-models.json");
 const TEMPLATE_SLUG = "gpt-5.5";   // 非 OpenAI 模型套 gpt-5.5 的元数据(普通函数调用),理由见 Python 版
-const SKIP = /image|^codex-auto-review$/;
+const SKIP = /image|imagine|^codex-auto-review$/;   // 出图名(含 grok-imagine)不能对话
+const PREFERRED = "gpt-5.6-terra";   // 与一键脚本的默认模型一致
 const LOG_FILE = path.join(CODEX_HOME, "carher-models-sync.log");
 
 function pad(n) { return String(n).padStart(2, "0"); }
@@ -136,6 +137,17 @@ function buildCatalog(ids, templates, limits) {
   return { models: out };
 }
 
+/* config 里钉着的 model 已不在这把 key 里 ⇒ 每一轮都 403。换成 PREFERRED(在的话)或列表第一个。
+   返回新文本;不用改返回 null。只动顶层 `model = "…"` 那一行(任何 [table] 之前)。 */
+function fixDefaultModel(text, shown, preferred) {
+  const first = /^\[/m.exec(text);
+  const head = first ? text.slice(0, first.index) : text;
+  const m = /^(\s*model\s*=\s*)"([^"]*)"/m.exec(head);
+  if (!m || !shown.length || shown.includes(m[2])) return null;
+  const next = shown.includes(preferred) ? preferred : shown[0];
+  return { text: text.slice(0, m.index) + m[1] + JSON.stringify(next) + text.slice(m.index + m[0].length), from: m[2], to: next };
+}
+
 function catalogPathFromConfig(text) {
   const m = /^\s*model_catalog_json\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')/m.exec(text);
   if (!m) return null;
@@ -159,6 +171,8 @@ async function main() {
   const target = catalogPathFromConfig(configText) || DEFAULT_CATALOG;
   const codex = findCodex();
   const catalog = buildCatalog(ids, loadTemplates(codex, target), await fetchInputLimits(key, base));
+  let before = [];
+  try { before = JSON.parse(fs.readFileSync(target, "utf8")).models.filter((m) => m.visibility === "list").map((m) => m.slug); } catch (e) {}
 
   const tmp = path.join(CODEX_HOME, `.carher-models-${process.pid}-${Date.now()}.json`);
   fs.writeFileSync(tmp, JSON.stringify(catalog, null, 1), "utf8");
@@ -178,11 +192,20 @@ async function main() {
   }
   const shown = catalog.models.filter((m) => m.visibility === "list").map((m) => m.slug);
   log(`同步完成：选择器 ${shown.length} 个模型（网关可见 ${ids.length} 个）-> ${target}`);
+  const added = shown.filter((x) => !before.includes(x)), removed = before.filter((x) => !shown.includes(x));
+  if (before.length && added.length) log(`新增 ${added.length}：${added.join(", ")}`);
+  if (before.length && removed.length) log(`删除 ${removed.length}：${removed.join(", ")}`);
+  if (before.length && !added.length && !removed.length) log("和上次一样，没有变化");
+  for (const f of [CONFIG, path.join(CODEX_HOME, "chatgpt.config.toml")]) {
+    let t; try { t = fs.readFileSync(f, "utf8"); } catch (e) { continue; }
+    const r = fixDefaultModel(t, shown, PREFERRED);
+    if (r) { fs.writeFileSync(f, r.text, "utf8"); log(`默认模型 ${r.from} 你的 key 已不能用，改成 ${r.to}（${path.basename(f)}）`); }
+  }
   log("Codex App 要完全退出重开才会看到新模型");
   return 0;
 }
 
-module.exports = { buildCatalog, catalogPathFromConfig, ensureConfigLine };
+module.exports = { buildCatalog, catalogPathFromConfig, ensureConfigLine, fixDefaultModel };
 
 if (require.main === module) {
   try { if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 512 * 1024) fs.writeFileSync(LOG_FILE, ""); } catch (e) {}

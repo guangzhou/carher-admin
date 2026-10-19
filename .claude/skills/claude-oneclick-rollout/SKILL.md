@@ -14,6 +14,15 @@ description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的�
 **发版**:改完跑 `bash scripts/agent-oneclick-docs/release_all.sh`(网页 + 飞书附件 + 门禁一起)。
 **自检(doctor,10-16)**:`src/doctor-{mac.sh,windows.ps1}` → build 出 `claude-doctor-{mac.command,windows.bat}`,单页「出问题了」里可下载。只读;查 settings.json(BASE/API_KEY/AUTH_TOKEN 并存/发现开关/claude-router- 旧名)、rc 与当前终端的覆盖变量、桌面 App 3P 配置与两把 key 是否一致、App 钉死版本的组件是否预置 + 198 镜像有没有这版、App 日志 `Host Claude Code binary not available`、代理、key 实打 /v1/messages。回归 `tests/test_doctor.py`;Windows 版 App 日志路径按 App 代码=`%LOCALAPPDATA%\Claude-3p\logs`(未实机验)。
 
+## 刷模型(2026-10-19)
+
+- 新文件 `src/carher_models_refresh.js`(安装器和「刷模型」共用,`applyModels` 是纯函数):按 `settings.json` 里的 key
+  拉 `/v1/models` → 重写 `modelPicker`(删掉没权限的、加上新开通的)→ 删 `cache/gateway-models.json` → 当前 `model` 是网关名
+  且已没权限就删掉(`opus` 这类别名和 `[1m]` 后缀不动)。拉不到就不改,改之前备份成 `settings.json.bak-carher-refresh`。
+- 安装器第 4 步落盘这个文件,合并时 `require` 它;第 4e 步装 skill `carher-refresh-models` 和 `~/.claude/CLAUDE.md` 的
+  `CARHER-REFRESH` 块(只装 skill 不够,画图那次实测过)。`build.sh` 嵌入时优先用本目录 `src/`,再用 codex 的共用源。
+- 10-19 本机实测(隔离 CLAUDE_CONFIG_DIR):`claude -p "刷模型"` 自己调了命令,菜单 23 → 30 个(+ kimi-k3、gpt-reserve 等 7 个)。
+
 ## 1. 文件与发版
 
 ```

@@ -1,4 +1,4 @@
-# CarHer Codex 一键配置 (Windows)
+﻿# CarHer Codex 一键配置 (Windows)
 # ⚠️ 这是模板：改这里，然后跑 ../build.sh，生成用户拿到的单文件 codex-windows.bat
 #    （bat 头 + 本脚本 + 内嵌 Python，双击即运行，不需要 .ps1）
 # 没有 codex 命令行会自动装（npmmirror）；Desktop App 需用户自己装（文档里有安装包）
@@ -307,6 +307,36 @@ if ($syncRun) {
   if ($okDaily) { Ok "√ 已设置每天自动同步模型列表" }
   else { Warn "! 定时同步没装上（可能需要 IT 权限），可手动运行：$syncRun $syncArg" }
   if ($codexHome -ne (Join-Path $env:USERPROFILE '.codex')) { Warn "! 你自定义了 CODEX_HOME，定时同步读的是默认目录；需要时手动运行：$syncRun $syncArg" }
+  # 「刷模型」:用户在 Codex 里说这三个字,agent 就跑一次同步
+  $agents = Join-Path $codexHome 'AGENTS.md'
+  $rb = '<!-- CARHER-REFRESH-BEGIN -->'; $re = '<!-- CARHER-REFRESH-END -->'
+  $kept = ''
+  if (Test-Path $agents) {
+    if (-not (Test-Path $bkDir)) { New-Item -ItemType Directory -Path $bkDir -Force | Out-Null }
+    if (-not (Test-Path (Join-Path $bkDir 'AGENTS.md'))) { Copy-Item $agents (Join-Path $bkDir 'AGENTS.md') -Force }
+    $skip = $false
+    foreach ($ln in Get-Content $agents -Encoding UTF8) {
+      if ($ln -eq $rb) { $skip = $true; continue }
+      if ($ln -eq $re) { $skip = $false; continue }
+      if (-not $skip) { $kept += $ln + "`n" }
+    }
+  }
+  $refreshCmd = '"' + $syncRun + '" "' + $syncArg + '"'
+  $rblock = @"
+$rb
+## 刷模型
+
+用户说「刷模型」「更新模型」「刷新模型列表」或说模型列表不对时，**直接运行下面这条命令，不要先问**：
+
+    $refreshCmd
+
+- 它按用户的 key 从公司网关重新拉模型列表：新开通的加上、没权限的删掉；默认模型不能用了会自动换。
+- 把输出里「新增 / 删除 / 默认模型」那几行原样告诉用户，并提醒：终端里新开一个 codex 会话就能看到；Desktop App 要完全退出再打开。
+- 报错就把原文告诉用户，不要自己改配置文件。
+$re
+"@
+  [System.IO.File]::WriteAllText($agents, ($kept + $rblock + "`n"), $utf8NoBom)
+  Ok "√ 以后在 Codex 里说「刷模型」就能立即更新模型列表"
 } else {
   Warn "! 没有 Python 也没有 Node，模型列表没同步（选择器里只显示默认模型）"
 }

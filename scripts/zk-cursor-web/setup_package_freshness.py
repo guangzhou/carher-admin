@@ -173,7 +173,7 @@ def leg_vs_previous(members, old_path, new_path):
     print("  改动成员未压缩净增:%+d B(zip 总大小差 %+d B,压缩率不同属正常)"
           % (delta, os.path.getsize(new_path) - os.path.getsize(old_path)))
 
-    if JS_MEMBER in members and JS_MEMBER in old:
+    if JS_MEMBER in members and JS_MEMBER in old and "const DEFAULT_MODELS" in members[JS_MEMBER].decode("utf-8"):
         new_names = extract_models(members[JS_MEMBER].decode("utf-8"))
         old_names = extract_models(old[JS_MEMBER].decode("utf-8"))
         added = [n for n in new_names if n not in old_names]
@@ -183,21 +183,23 @@ def leg_vs_previous(members, old_path, new_path):
     return 0
 
 
-def leg_menu_shape(members, expect_n):
-    """第③腿:zip 里那份 js 的菜单条数 == 期望值,且抠法本身没坏。"""
+def leg_menu_shape(members, expect_n=None):
+    """第③腿(2026-10-19 起):zip 里那份 js 的菜单必须是**动态**的 ——
+    有按 Key 现拉的 fetchKeyModels/orderMenu/--refresh-models,且没有写死的 DEFAULT_MODELS 数组。
+    发出一份还写死菜单的旧 js = 同事又看到已下架的名字、看不到新开通的。"""
     if JS_MEMBER not in members:
         print("❌ 第③腿:zip 里没有 %s" % JS_MEMBER)
         return 1
-    names = extract_models(members[JS_MEMBER].decode("utf-8"))
-    if len(names) != expect_n:
-        print("❌ 第③腿:zip 里的菜单是 %d 个而不是 %d —— 要么发错版本,要么 --expect "
-              "该更新了。名单:%r" % (len(names), expect_n, names))
+    js = members[JS_MEMBER].decode("utf-8")
+    need = ["async function fetchKeyModels(", "function orderMenu(", '"--refresh-models"', "function installRefreshSkill("]
+    miss = [n for n in need if n not in js]
+    if miss:
+        print("❌ 第③腿:zip 里的 js 不是动态菜单版,缺 %r" % miss)
         return 1
-    dup = sorted({n for n in names if names.count(n) > 1})
-    if dup:
-        print("❌ 第③腿:菜单有重名 %r" % dup)
+    if re.search(r"const DEFAULT_MODELS\s*=\s*\[", js):
+        print("❌ 第③腿:zip 里的 js 还有写死的 DEFAULT_MODELS 菜单")
         return 1
-    print("✅ 第③腿 zip 内菜单 %d 个、无重名" % len(names))
+    print("✅ 第③腿 zip 内菜单是按 Key 现拉的(无写死清单,含「刷模型」)")
     return 0
 
 
@@ -271,7 +273,7 @@ def main():
     # 第②腿的"新增/删除"两栏 —— 那两栏为空才说明菜单本身没动,只是尺子旧了。
     # 2026-10-12:32 → 30(摘掉 cr-g 那 13 个 + 对齐 std key 加 11 个)。
     # 这个默认值会过期,过期的形状是"每次都红那么一条",所以换代时必须跟着改。
-    ap.add_argument("--expect", type=int, default=39, help="期望菜单条数")
+    ap.add_argument("--expect", type=int, default=None, help="(已废弃:10-19 起菜单按 Key 动态拉取)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:

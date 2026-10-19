@@ -22,7 +22,8 @@ SHARED = Path("../codex-oneclick/src")   # 画图工具和 skill 与 Codex 共�
 
 def finish(template: str) -> str:
     def repl(m):
-        body = (SHARED / m.group(1)).read_text(encoding="utf-8").rstrip("\n")
+        own = src / m.group(1)   # 本工具自己的(如 carher_models_refresh.js)优先,其余取共用那份
+        body = (own if own.exists() else SHARED / m.group(1)).read_text(encoding="utf-8").rstrip("\n")
         # 内嵌靠 heredoc / here-string 的结束符,正文里不能出现
         assert not re.search(r"^(CARHER_JS_EOF|CARHER_MD_EOF|'@)", body, re.M), m.group(1)
         return body

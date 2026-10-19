@@ -35,7 +35,8 @@ DEFAULT_CATALOG = CODEX_HOME / "carher-models.json"
 # use_responses_lite 是 OpenAI 专属工具形状，套给 grok 实测拿不到 shell，一个文件都建不出来。
 TEMPLATE_SLUG = "gpt-5.5"
 # 不进选择器：生图模型不能对话；审查专用模型 codex 自己会调
-SKIP = re.compile(r"image|^codex-auto-review$")
+SKIP = re.compile(r"image|imagine|^codex-auto-review$")  # 出图名(含 grok-imagine)不能对话
+PREFERRED = "gpt-5.6-terra"  # 与一键脚本的默认模型一致
 
 
 LOG_FILE = CODEX_HOME / "carher-models-sync.log"
@@ -184,6 +185,18 @@ def build_catalog(ids: list[str], templates: list[dict], limits: dict[str, int])
     return {"models": out}
 
 
+def fix_default_model(text: str, shown: list[str], preferred: str) -> dict | None:
+    """config 里钉着的 model 已不在这把 key 里 ⇒ 每一轮都 403。换成 preferred(在的话)或列表第一个。
+    只动顶层 `model = "…"` 那一行(任何 [table] 之前);不用改返回 None。与 Node 版 fixDefaultModel 一致。"""
+    first = re.search(r"^\[", text, re.M)
+    head = text[: first.start()] if first else text
+    m = re.search(r'^(\s*model\s*=\s*)"([^"]*)"', head, re.M)
+    if not m or not shown or m.group(2) in shown:
+        return None
+    nxt = preferred if preferred in shown else shown[0]
+    return {"text": text[: m.start()] + m.group(1) + json.dumps(nxt) + text[m.end():], "from": m.group(2), "to": nxt}
+
+
 def catalog_path_from_config(text: str) -> Path | None:
     m = re.search(r"""^\s*model_catalog_json\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')""", text, re.M)
     if not m:
@@ -216,6 +229,10 @@ def main() -> int:
     target = catalog_path_from_config(config_text) or DEFAULT_CATALOG
     codex = find_codex()
     catalog = build_catalog(ids, load_templates(codex, target), fetch_input_limits(key, base_url))
+    try:
+        before = [m["slug"] for m in json.loads(target.read_text(encoding="utf-8"))["models"] if m.get("visibility") == "list"]
+    except (OSError, ValueError, KeyError, TypeError):
+        before = []
 
     fd, tmp_name = tempfile.mkstemp(prefix=".carher-models-", suffix=".json", dir=str(CODEX_HOME))
     tmp = Path(tmp_name)
@@ -240,6 +257,23 @@ def main() -> int:
 
     shown = [m["slug"] for m in catalog["models"] if m["visibility"] == "list"]
     log(f"同步完成：选择器 {len(shown)} 个模型（网关可见 {len(ids)} 个）-> {target}")
+    added = [x for x in shown if x not in before]
+    removed = [x for x in before if x not in shown]
+    if before and added:
+        log(f"新增 {len(added)}：{', '.join(added)}")
+    if before and removed:
+        log(f"删除 {len(removed)}：{', '.join(removed)}")
+    if before and not added and not removed:
+        log("和上次一样，没有变化")
+    for f in (CONFIG, CODEX_HOME / "chatgpt.config.toml"):
+        try:
+            t = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        r = fix_default_model(t, shown, PREFERRED)
+        if r:
+            f.write_text(r["text"], encoding="utf-8")
+            log(f"默认模型 {r['from']} 你的 key 已不能用，改成 {r['to']}（{f.name}）")
     log("Codex App 要完全退出重开才会看到新模型")
     return 0
 

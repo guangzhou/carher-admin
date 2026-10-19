@@ -9,6 +9,12 @@ description: 给同事的「Cursor · Codex · Claude Code 一键配置」单页
 **为什么有它**:三篇飞书文档(Cursor / Codex / Claude Code)同事经常下错文件、看错篇;10-15 用户要求合成一页。
 三篇飞书文档仍保留作详细版(生成器 `apply.py --all`),但**发给同事的是这个网址**。
 
+## 模型清单不写死(2026-10-19)
+
+页面已删掉「全部 39 个模型」那张表,提示卡加了第三个词「刷模型」。`build_html.py` 会拦住:页面又写出「全部 N 个模型」,
+或者「刷模型」不见了,都会报红。三个工具的菜单都按 key 现拉,见 skill `cursor-client-bundle-patch` /
+`codex-oneclick-rollout` / `claude-oneclick-rollout` 里的「刷模型」一节。
+
 ## 文件
 
 ```

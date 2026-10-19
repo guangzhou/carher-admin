@@ -215,6 +215,7 @@ def test_merge_repairs_router_model_name_and_adds_picker_rows():
         p = Path(d) / "settings.json"
         p.write_text(json.dumps({"model": "claude-router-" + "gemini-4-argon".encode().hex(), "theme": "dark"}))
         env = dict(os.environ, CARHER_KEY="sk-FAKE", CARHER_BASE="https://gw.example/pro", CARHER_SETTINGS=str(p),
+                   CARHER_REFRESH=str(Path(__file__).resolve().parents[1] / "src" / "carher_models_refresh.js"),
                    CARHER_MODELS="claude-opus-5-5\ngpt-5.6-terra\ngrok-4.7\ngpt-image-2\ncodex-auto-review")
         subprocess.run(["node", "-e", js], env=env, check=True)
         out = json.loads(p.read_text())
@@ -222,3 +223,59 @@ def test_merge_repairs_router_model_name_and_adds_picker_rows():
     assert out["theme"] == "dark"
     assert [r["model"] for r in out["modelPicker"]["options"]] == ["gpt-5.6-terra", "grok-4.7"]
     assert all(r["behavesAs"] == "claude-sonnet-5-5" for r in out["modelPicker"]["options"])
+
+
+REFRESH = Path(__file__).resolve().parents[1] / "src" / "carher_models_refresh.js"
+
+
+def _refresh(settings: dict, models: str, home):
+    """跑「刷模型」脚本:CARHER_MODELS 注入网关列表(不出网)。返回 (rc, stdout+stderr, 新 settings)。"""
+    import json, os, subprocess
+    p = home / "settings.json"
+    p.write_text(json.dumps(settings))
+    (home / "cache").mkdir(exist_ok=True)
+    (home / "cache" / "gateway-models.json").write_text("{}")
+    env = dict(os.environ, CLAUDE_CONFIG_DIR=str(home), CARHER_MODELS=models)
+    r = subprocess.run(["node", str(REFRESH)], env=env, capture_output=True, text=True)
+    return r.returncode, r.stdout + r.stderr, json.loads(p.read_text())
+
+
+def test_refresh_drops_revoked_and_adds_new(tmp_path):
+    """10-19 用户:网关删了的模型要从本地菜单删掉,新开通的加上;不碰别的设置。"""
+    s = {"env": {"ANTHROPIC_API_KEY": "sk-FAKE", "ANTHROPIC_BASE_URL": "https://gw.example/pro"}, "theme": "dark",
+         "model": "deepseek-v4-flash",
+         "modelPicker": {"options": [{"model": m, "label": m, "behavesAs": "claude-sonnet-5-5"} for m in ("grok-4.7", "deepseek-v4-flash")]}}
+    rc, out, d = _refresh(s, "claude-opus-5-5\ngrok-4.7\nkimi-k3\ngpt-image-2\ngrok-imagine", tmp_path)
+    assert rc == 0, out
+    assert [o["model"] for o in d["modelPicker"]["options"]] == ["grok-4.7", "kimi-k3"]
+    assert "新增 1:kimi-k3" in out and "删除 1:deepseek-v4-flash" in out
+    assert "model" not in d and "已改回默认模型" in out, "钉着已删的模型 ⇒ 每次新开窗口都报错"
+    assert d["theme"] == "dark" and d["env"]["ANTHROPIC_API_KEY"] == "sk-FAKE"
+    assert not (tmp_path / "cache" / "gateway-models.json").exists(), "模型缓存不删 ⇒ /model 还是旧的"
+    assert (tmp_path / "settings.json.bak-carher-refresh").exists()
+
+
+def test_refresh_keeps_alias_and_valid_model(tmp_path):
+    s = {"env": {"ANTHROPIC_API_KEY": "sk-FAKE", "ANTHROPIC_BASE_URL": "https://gw.example/pro"}, "model": "opus"}
+    rc, out, d = _refresh(s, "claude-opus-5-5\ngrok-4.7", tmp_path)
+    assert rc == 0 and d["model"] == "opus", "opus/sonnet 这类别名不是网关名,不许清"
+    s["model"] = "claude-opus-5-5[1m]"
+    rc, out, d = _refresh(s, "claude-opus-5-5\ngrok-4.7", tmp_path)
+    assert d["model"] == "claude-opus-5-5[1m]"
+
+
+def test_refresh_empty_list_leaves_settings_untouched(tmp_path):
+    import json
+    s = {"env": {"ANTHROPIC_API_KEY": "sk-FAKE", "ANTHROPIC_BASE_URL": "https://gw.example/pro"},
+         "modelPicker": {"options": [{"model": "grok-4.7", "label": "grok-4.7", "behavesAs": "claude-sonnet-5-5"}]}}
+    rc, out, d = _refresh(s, "", tmp_path)
+    assert rc != 0 and "菜单没动" in out
+    assert d == s
+
+
+def test_installers_embed_refresh_and_write_claude_md_block():
+    src = Path(__file__).resolve().parents[1] / "src"
+    for f, enc in (("install-mac.sh", "utf-8"), ("install-windows.ps1", "utf-8-sig")):
+        t = (src / f).read_text(encoding=enc)
+        assert "@@EMBED carher_models_refresh.js@@" in t and "@@EMBED refresh_skill.md@@" in t, f
+        assert "CARHER-REFRESH-BEGIN" in t, f + ":只装 skill 不够(画图那次实测),要 CLAUDE.md 常驻块"

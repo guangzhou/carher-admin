@@ -2,13 +2,13 @@
 # retire_model_offline_cases.sh —— 模型清单**整表赋值**(EXACT)+ --upgrade 档的离线台架。
 #
 # 为什么要单独一条腿:`mergeConfig` 的 dedup 原来是**纯并集**,没有删除路径 ——
-# 从 DEFAULT_MODELS 里删掉一个名字只影响新装机器,已装的同事库里那个名字会**永远留着**
+# 从菜单里删掉一个名字只影响新装机器,已装的同事库里那个名字会**永远留着**
 # (2026-09-20 下架 cr-g-5.6-pro 时就是这个形状:文档说没了,他菜单里还在,一点就报错)。
 # 所以判据不能是"常量里没有它了",必须是**真跑一遍安装器、再把库读出来看那个名字在不在**。
 #
 # 2026-09-20 第二轮语义翻转:用户点名「除文档里那份之外全部去掉,包括他自己配的乱七八糟的」。
 # 于是 mergeConfig 从并集改成**整表赋值**:userAddedModels / modelOverrideEnabled 直接等于
-# DEFAULT_MODELS(顺序也一样)。**case ⑤ 的期望因此反过来了** —— 从"第三方名一个都不许动"
+# 本次菜单(10-19 起 = 这把 Key 现拉的列表,顺序也一样)。**case ⑤ 的期望因此反过来了** —— 从"第三方名一个都不许动"
 # 变成"第三方名必须被清掉、钉在第三方名上的功能位必须改回 DEFAULT_MODEL"。
 # 保留这条历史注释是为了:下次看到 git blame 里 ⑤ 被反转,别以为是谁写错了想"修回去"。
 #
@@ -24,7 +24,7 @@
 #   ④ 退役名被非 composer 功能位(deep-search)选中 → 一样要改回来(按值扫,不只扫 composer/cmd-k)
 #   ⑤ 同事自己加的第三方名 → **必须被清掉**(整表赋值),钉着它的功能位改回 DEFAULT_MODEL
 #   ⑥ --upgrade 不问 Key、不覆盖已有 Key,且新名全部进库(幂等重跑无变化)
-#   ⑦ 两个数组 == DEFAULT_MODELS **逐字且按序**(菜单顺序 = 数组顺序,用户点名 Grok 排最前)
+#   ⑦ 两个数组 == Key 现拉的菜单 **逐字且按序**(菜单顺序 = 数组顺序,用户点名 Grok 排最前)
 #   ⑧ 写库**之前**必须落一份 `<ver>-<ts>-preconfig/applicationUser.blob.json`
 #      (破坏性那一步的正前方要有快照,否则旧清单只存在过内存里)
 #   ⑨ --uninstall 必须把他装前自己加的名字**还回去**。整表赋值之后"库里留下的就是他的"
@@ -40,7 +40,7 @@ LIVE_RES="$APP/Contents/Resources/app"
 TMP="$(mktemp -d)"
 FAIL=0
 cleanup() { rm -rf "$TMP"; }
-trap cleanup EXIT
+trap cleanup EXIT; [ -n "${KEEP_TMP:-}" ] && trap - EXIT
 ok()  { echo "  PASS  $*"; }
 bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 
@@ -62,15 +62,23 @@ RET1=$(env ELECTRON_RUN_AS_NODE=1 CX_DUMP_CONSTANTS=1 "$CXNODE" "$JS" 2>/dev/nul
 let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
   try{process.stdout.write((JSON.parse(s).RETIRED_MODELS||[])[0]||"")}catch(e){}});')
 DEF=$(grep -m1 '^const DEFAULT_MODEL = ' "$JS" | sed 's/.*"\(.*\)".*/\1/')
-# ⑦ 要按序比,所以把整份 DEFAULT_MODELS 也抠出来(同样不写死,走 CX_DUMP_CONSTANTS)。
-MODELS_JSON=$(env ELECTRON_RUN_AS_NODE=1 CX_DUMP_CONSTANTS=1 "$CXNODE" "$JS" 2>/dev/null \
-  | env ELECTRON_RUN_AS_NODE=1 "$CXNODE" -e '
-let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-  try{process.stdout.write(JSON.stringify(JSON.parse(s).DEFAULT_MODELS||[]))}catch(e){}});')
+# ⑦ 要按序比。10-19 起菜单 = 这把 Key 在网关上的模型(动态),台架不出网:
+#    用 CX_MODELS_JSON 注入一份「网关返回」(含出图名 + 乱序 + 一个 Key 里新上的名字),
+#    期望菜单 = 安装器自己的 orderMenu 算出来的那份(不在这里另写一遍规则)。
+export CX_MODELS_JSON='{"data":[{"id":"gpt-reserve"},{"id":"claude-opus-5-5"},{"id":"grok-4.7"},{"id":"kimi-k3"},{"id":"gpt-image-2"},{"id":"grok-imagine"},{"id":"composer-2.5-fast"},{"id":"gpt-5.5"},{"id":"deepseek-v4.1-flash"},{"id":"grok-4.6"}]}'
+MODELS_JSON=$(env ELECTRON_RUN_AS_NODE=1 "$CXNODE" -e '
+const src=require("fs").readFileSync(process.argv[1],"utf8");
+const pick=(n)=>{const i=src.indexOf(n);let d=0,j=src.indexOf("{",i);for(;j<src.length;j++){if(src[j]=="{")d++;else if(src[j]=="}"&&--d==0)break}return src.slice(i,j+1)};
+const DEFAULT_MODEL=/const DEFAULT_MODEL = "([^"]+)"/.exec(src)[1];
+eval(/const MENU_SKIP = .*\n/.exec(src)[0]+/const MENU_SEGMENTS = .*\n/.exec(src)[0]+pick("function orderMenu(")+";globalThis.orderMenu=orderMenu");
+const ids=JSON.parse(process.env.CX_MODELS_JSON).data.map(x=>x.id);
+process.stdout.write(JSON.stringify(orderMenu(ids,DEFAULT_MODEL)));' "$JS")
 [ -n "$RET1" ] && [ -n "$DEF" ] || { echo "!! 抠不到 RETIRED_MODELS / DEFAULT_MODEL" >&2; exit 1; }
 # 这把尺子自己先得量得到东西:空数组会让 ⑦ 变成"两个空的相等"= 恒绿。
-case "$MODELS_JSON" in [][]|"") echo "!! 抠不到 DEFAULT_MODELS(拿到 $MODELS_JSON)——⑦ 会恒绿,拒绝往下跑" >&2; exit 1 ;; esac
-echo "退役名=$RET1  默认名=$DEF  菜单=$(echo "$MODELS_JSON" | tr -cd ',' | wc -c | tr -d ' ') 个逗号"
+case "$MODELS_JSON" in [][]|"") echo "!! 算不出期望菜单(拿到 $MODELS_JSON)——⑦ 会恒绿,拒绝往下跑" >&2; exit 1 ;; esac
+WANT_N=$(( $(echo "$MODELS_JSON" | tr -cd ',' | wc -c | tr -d ' ') + 1 ))
+[ "$WANT_N" -ge 5 ] || { echo "!! 期望菜单只有 $WANT_N 个,台架量不出东西" >&2; exit 1; }
+echo "退役名=$RET1  默认名=$DEF  期望菜单=$WANT_N 个(注入的网关返回去掉出图名)"
 echo ""
 
 # ── 造一个假 app:bundle 必须是**真 bundle 的副本** ──
@@ -120,7 +128,10 @@ run_installer() {  # $1=userdir  $2..=args
   env ELECTRON_RUN_AS_NODE=1 HOME="$TMP/home" CURSOR_APP_ROOT="$FAKE" CURSOR_USER_DIR="$UD" \
       CX_SKIP_RUNNING_CHECK=1 "$CXNODE" "$JS" "$@" --no-zk-delta --force-version
 }
-mkdir -p "$TMP/home"
+mkdir -p "$TMP/home/.carher"
+# 10-19 动态菜单:安装器要有 Key 才去拉列表(台架用 CX_MODELS_JSON 注入响应,不出网)。
+# 假 Key 副本放在假 HOME 里;真 Key 绝不进台架。
+printf '{"key":"sk-FAKE-bench","base":"https://gw.example/pro/v1"}\n' > "$TMP/home/.carher/image.json"
 
 # ── ①②③④⑤ 一次种入,一次跑完,分别判 ──
 UD="$TMP/u1"
@@ -187,14 +198,16 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
 for m in $SAMPLE3; do
   case "$UAM" in *"\"$m\""*) ok "① 新名 $m 已进库" ;; *) bad "① 新名 $m 没进库:$UAM" ;; esac
 done
-# ⑦ 逐字且按序 == DEFAULT_MODELS。顺序是用户的显式要求(Grok + sa-composer 排最前),
+case "$UAM" in *'"gpt-image-2"'*|*'"grok-imagine"'*) bad "⑦ 出图专用名进了聊天菜单:$UAM" ;;
+  *) ok "⑦ 出图专用名(gpt-image-2 / grok-imagine)没进聊天菜单" ;; esac
+# ⑦ 逐字且按序 == Key 现拉的菜单。顺序是用户的显式要求(Grok + sa-composer 排最前),
 #    只比集合会让"顺序被打乱"这种回归静默通过。
-[ "$UAM" = "$MODELS_JSON" ] && ok "⑦ userAddedModels 逐字按序 == DEFAULT_MODELS" \
-  || bad "⑦ userAddedModels 与 DEFAULT_MODELS 不是逐字按序相等
+[ "$UAM" = "$MODELS_JSON" ] && ok "⑦ userAddedModels 逐字按序 == Key 现拉的菜单" \
+  || bad "⑦ userAddedModels 与 Key 现拉的菜单不是逐字按序相等
         实际=$UAM
         期望=$MODELS_JSON"
-[ "$OVE" = "$MODELS_JSON" ] && ok "⑦ modelOverrideEnabled 逐字按序 == DEFAULT_MODELS" \
-  || bad "⑦ modelOverrideEnabled 与 DEFAULT_MODELS 不是逐字按序相等
+[ "$OVE" = "$MODELS_JSON" ] && ok "⑦ modelOverrideEnabled 逐字按序 == Key 现拉的菜单" \
+  || bad "⑦ modelOverrideEnabled 与 Key 现拉的菜单不是逐字按序相等
         实际=$OVE"
 # ⑧ 破坏性那一步的正前方要有快照。目录名带 -preconfig,HOME 已经指到 $TMP/home。
 PRE="$(ls -d "$TMP/home/.cursor-team-setup-backup/"*-preconfig 2>&1 | head -1)"
@@ -281,8 +294,7 @@ fi
 # 它必须做到两件事,少一件就是给人一个点了报错的菜单:
 #   · sa-* 那几个真的被换成裸名(而不是"加了裸名、sa- 还留着"——那样菜单里一个模型两份)
 #   · **非 sa- 的名字一个都不许动**(cr-g-*/gpt-* 跟这个旗标无关,被顺手改了就是越界)
-# 还有一件在这里量不到、由 setup_impl_parity.py 守着:它不许改 DEFAULT_MODELS 常量本身
-# (改了就是把全员默认也翻了,而不是本机开关)。
+# (10-19 起菜单来自 Key;--bare-sa 只改这一趟的名字,不改 DEFAULT_MODEL 常量。)
 echo ""
 UD10="$TMP/u10"
 DEF_BARE="$(printf '%s' "$DEF" | sed 's/^sa-//')"
@@ -295,7 +307,7 @@ if [ -z "$B10" ]; then bad "⑩ --bare-sa 跑完读不到 blob(见 $L10)"; cp "$
 UAM10="$(jq_get "$B10" 'd.aiSettings.userAddedModels')"
 # 尺子自检:清单为空的话下面"没有 sa-"会恒绿。
 N10="$(jq_get "$B10" 'String(d.aiSettings.userAddedModels.length)')"
-if [ "${N10:-0}" -lt 10 ]; then bad "⑩ 菜单只有 $N10 个 —— 下面几条会恒绿,拒绝当绿看(见 $L10)"; else
+if [ "${N10:-0}" -lt "$WANT_N" ]; then bad "⑩ 菜单只有 $N10 个 —— 下面几条会恒绿,拒绝当绿看(见 $L10)"; else
   ok "⑩ 菜单写进去了($N10 个)"
   case "$UAM10" in *'"sa-'*) bad "⑩ 还留着 sa- 开头的名字(应全部去前缀):$UAM10" ;;
     *) ok "⑩ 菜单里 sa- 前缀一个不剩" ;; esac
@@ -309,8 +321,8 @@ if [ "${N10:-0}" -lt 10 ]; then bad "⑩ 菜单只有 $N10 个 —— 下面几�
   #    真相是金丝雀自己退役了)。金丝雀必须挑一个**当前菜单里真有、且不以 sa- 开头**的名字。
   case "$UAM10" in *'"claude-opus-5-5"'*) ok "⑩ 非 sa- 名字(claude-opus-5-5)没被顺手动过" ;;
     *) bad "⑩ claude-opus-5-5 丢了 —— --bare-sa 越界改了跟它无关的名字:$UAM10" ;; esac
-  case "$UAM10" in *'"qwen3-coder-next"'*) ok "⑩ 非 sa- 名字(qwen3-coder-next)没被顺手动过" ;;
-    *) bad "⑩ qwen3-coder-next 丢了:$UAM10" ;; esac
+  case "$UAM10" in *'"kimi-k3"'*) ok "⑩ 非 sa- 名字(kimi-k3)没被顺手动过" ;;
+    *) bad "⑩ kimi-k3 丢了:$UAM10" ;; esac
   # 选中位必须钉在**裸的**默认名上,否则装完第一下就点在一个菜单里没有的名字上
   CN10="$(jq_get "$B10" 'd.aiSettings.modelConfig.composer.modelName')"
   [ "$CN10" = "$DEF_BARE" ] && ok "⑩ composer 选中位 = $DEF_BARE" \
@@ -325,7 +337,7 @@ fi
 # 这里种的是**上一代我们自己的菜单**(`sa-grok-*` / `sa-composer-*`),证的是
 # **换代**那一刀在 INSTALL 路径上也落下来了。两者会因为不同的 bug 分开红:
 # 比如有人为了"别动老用户的名字"给 sa- 开头的名字加一条豁免,①-⑤ 照样全绿,这条会红。
-# 判据三条:① 库里 `"sa-` 一个不剩 ② 两个数组逐字按序 == DEFAULT_MODELS
+# 判据三条:① 库里 `"sa-` 一个不剩 ② 两个数组逐字按序 == Key 现拉的菜单
 #          ③ 钉着 sa- 名的功能位改回了 $DEF(不然他一发消息就点在一个菜单里没有的名字上)
 echo ""
 UD11="$TMP/u11"
@@ -347,14 +359,14 @@ UAM11="$(jq_get "$B11" 'd.aiSettings.userAddedModels')"
 OVE11="$(jq_get "$B11" 'd.aiSettings.modelOverrideEnabled')"
 N11="$(jq_get "$B11" 'String(d.aiSettings.userAddedModels.length)')"
 # 尺子自检:清单为空会让"没有 sa-"恒绿。
-if [ "${N11:-0}" -lt 10 ]; then bad "⑪ 菜单只有 $N11 个 —— 下面几条会恒绿,拒绝当绿看(见 $L11)"; else
+if [ "${N11:-0}" -lt "$WANT_N" ]; then bad "⑪ 菜单只有 $N11 个 —— 下面几条会恒绿,拒绝当绿看(见 $L11)"; else
   ok "⑪ INSTALL 把菜单写进去了($N11 个)"
   case "$UAM11" in *'"sa-'*) bad "⑪ 老用户走 INSTALL 之后库里还留着上一代 sa- 名:$UAM11" ;;
     *) ok "⑪ 上一代 sa- 名在 userAddedModels 里一个不剩" ;; esac
   case "$OVE11" in *'"sa-'*) bad "⑪ modelOverrideEnabled 里还留着 sa- 名:$OVE11" ;;
     *) ok "⑪ modelOverrideEnabled 里 sa- 名也清干净了" ;; esac
-  [ "$UAM11" = "$MODELS_JSON" ] && ok "⑪ INSTALL 后逐字按序 == DEFAULT_MODELS(完整用新列表)" \
-    || bad "⑪ INSTALL 后与 DEFAULT_MODELS 不是逐字按序相等
+  [ "$UAM11" = "$MODELS_JSON" ] && ok "⑪ INSTALL 后逐字按序 == Key 现拉的菜单(完整用新列表)" \
+    || bad "⑪ INSTALL 后与 Key 现拉的菜单不是逐字按序相等
         实际=$UAM11"
   CN11="$(jq_get "$B11" 'd.aiSettings.modelConfig.composer.modelName')"
   [ "$CN11" = "$DEF" ] && ok "⑪ composer 从 sa-grok-4.6-latest 改回 $DEF" \
@@ -393,6 +405,41 @@ if [ -z "$B12" ]; then bad "⑫ 跑完读不到 blob(见 $L12)"; else
   echo "$DIS12" | grep -q '"claude-fable-5"' && bad "⑫ 本来就不显示的 claude-fable-5 也被加进去了(多余)" || ok "⑫ 原本就隐藏的不重复加"
 fi
 
+
+# ── ⑭ 「刷模型」--refresh-models:Cursor 没开 ⇒ 直接改库;旧的删、新的加、钉着已删名字的改回默认、不碰 Key ──
+UD14="$TMP/u14"
+seed_db "$UD14" '{"openAIBaseUrl":"https://cc.auto-link.com.cn/pro/v1","useOpenAIKey":true,"aiSettings":{"userAddedModels":["grok-4.7","deepseek-v4-flash","gpt-5.2"],"modelOverrideEnabled":["grok-4.7","deepseek-v4-flash","gpt-5.2"],"modelConfig":{"composer":{"modelName":"gpt-5.2","selectedModels":[{"modelId":"gpt-5.2","parameters":[]}]},"cmd-k":{"modelName":"grok-4.7","selectedModels":[{"modelId":"grok-4.7","parameters":[]}]}}}}'
+L14="$TMP/run14.log"
+run_installer "$UD14" --refresh-models </dev/null >"$L14" 2>&1 || true
+B14="$(read_blob "$UD14")"
+UAM14="$(jq_get "$B14" 'd.aiSettings.userAddedModels')"
+[ "$UAM14" = "$MODELS_JSON" ] && ok "⑭ 刷模型后菜单 == Key 现拉的菜单" || bad "⑭ 刷模型后菜单不对:$UAM14(见 $L14)"
+grep -q '删除 2:deepseek-v4-flash, gpt-5.2' "$L14" && ok "⑭ 输出点名删掉的 deepseek-v4-flash / gpt-5.2" || bad "⑭ 没点名删了什么(见 $L14)"
+grep -q '新增 .*kimi-k3' "$L14" && ok "⑭ 输出点名新增的 kimi-k3" || bad "⑭ 没点名新增(见 $L14)"
+CN14="$(jq_get "$B14" 'd.aiSettings.modelConfig.composer.modelName')"
+[ "$CN14" = "$DEF" ] && ok "⑭ composer 钉的已删名字 gpt-5.2 改回 $DEF" || bad "⑭ composer 还钉着 $CN14"
+BASE14="$(jq_get "$B14" 'd.openAIBaseUrl')"
+[ "$BASE14" = "https://cc.auto-link.com.cn/pro/v1" ] && ok "⑭ 地址原样没动" || bad "⑭ 刷模型改了地址:$BASE14"
+grep -q 'patched:' "$L14" && bad "⑭ 刷模型动了 bundle(不该)" || ok "⑭ 没碰 bundle"
+# 幂等:再刷一次 ⇒「已经是最新的」且 blob 逐字节不变
+run_installer "$UD14" --refresh-models </dev/null >"$L14.b" 2>&1 || true
+grep -q '已经是最新的' "$L14.b" && [ "$(read_blob "$UD14")" = "$B14" ] && ok "⑭ 再刷一次:已是最新、库不变" || bad "⑭ 再刷不幂等(见 $L14.b)"
+# 没 Key ⇒ 拒绝并告诉下一步
+run_installer_nokey() { UD="$1"; shift; env ELECTRON_RUN_AS_NODE=1 HOME="$TMP/home14nk" CURSOR_APP_ROOT="$FAKE" CURSOR_USER_DIR="$UD" CX_SKIP_RUNNING_CHECK=1 "$CXNODE" "$JS" "$@"; }
+run_installer_nokey "$UD14" --refresh-models </dev/null >"$L14.c" 2>&1; RC14=$?
+[ "$RC14" != 0 ] && grep -q 'INSTALL 粘一次 Key' "$L14.c" && [ "$(read_blob "$UD14")" = "$B14" ] \
+  && ok "⑭ 没 Key 的机器:拒绝 + 指路 + 库不变" || bad "⑭ 没 Key 时行为不对 rc=$RC14(见 $L14.c)"
+
+# ── ⑬ 拉不到列表(没 Key)⇒ 菜单一个字不动(绝不拿空列表把人家菜单清空)──
+UD13="$TMP/u13"
+seed_db "$UD13" '{"openAIBaseUrl":"https://x/v1","useOpenAIKey":true,"aiSettings":{"userAddedModels":["grok-4.7","my-own-x"],"modelOverrideEnabled":["grok-4.7","my-own-x"]}}'
+L13="$TMP/run13.log"
+env ELECTRON_RUN_AS_NODE=1 HOME="$TMP/home13" CURSOR_APP_ROOT="$FAKE" CURSOR_USER_DIR="$UD13" \
+    CX_SKIP_RUNNING_CHECK=1 "$CXNODE" "$JS" --upgrade --no-zk-delta --force-version </dev/null >"$L13" 2>&1 || true
+UAM13="$(jq_get "$(read_blob "$UD13")" 'd.aiSettings.userAddedModels')"
+[ "$UAM13" = '["grok-4.7","my-own-x"]' ] && ok "⑬ 没 Key ⇒ 菜单原样不动" || bad "⑬ 没 Key 却改了菜单:$UAM13(见 $L13)"
+grep -q '没拉到模型列表' "$L13" && ok "⑬ 并说明了原因" || bad "⑬ 没说为什么菜单没动(见 $L13)"
+
 echo ""
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi
-echo "✅ 全过(整表赋值:清单逐字按序 == DEFAULT_MODELS · 退役名/第三方名/上一代 sa- 名全摘净且选中位 re-point · INSTALL 与 UPGRADE 两条路都换代 · 写库前有快照 · --upgrade 不问 Key 且幂等 · --bare-sa 只动 sa- 那几个)"
+echo "✅ 全过(整表赋值:清单逐字按序 == Key 现拉的菜单 · 退役名/第三方名/上一代 sa- 名全摘净且选中位 re-point · INSTALL 与 UPGRADE 两条路都换代 · 写库前有快照 · --upgrade 不问 Key 且幂等 · --bare-sa 只动 sa- 那几个)"

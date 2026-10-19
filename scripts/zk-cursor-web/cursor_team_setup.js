@@ -18,8 +18,8 @@ cursor_team_setup.js — 一条命令给同事装好 cr-g(Cursor 3.16~3.21 验�
      锚点=稳定语义地标+通用捕获,全文件恰好命中 1 次才动手;补完整 bundle 过
      `--check` 语法校验才落盘。旧版排队泵(v1/v2diag)在场则原地升级 v3。
   4. BYOK 配置并进 state.vscdb applicationUser blob(node:sqlite,读旧去重合并):
-     base-url、useOpenAIKey、DEFAULT_MODELS 那 21 个模型,并把默认选中模型设为 DEFAULT_MODEL;
-     RETIRED_MODELS 里的名字反向摘掉(dedup 是并集,退役名必须单独走删除路径)。
+     base-url、useOpenAIKey、**这把 Key 在网关上能用的模型**(现拉 /models,出图名除外,按家族排),
+     默认选中 DEFAULT_MODEL(Key 里没有就用第一个);不在新清单里的旧名字整表删掉。
   5. #2 写 Key:mac 用 in-process keytar 读钥匙串主密码 + OSCrypt(AES-128-CBC)加密写
      secret://cursorAuth/openAIKey。写前两道自检(能解开现有 Key + 加密回环)才落盘,
      否则回退手填(防假绿 401)。win=DPAPI 未实测→回退手填;linux=best-effort。
@@ -32,10 +32,11 @@ cursor_team_setup.js — 一条命令给同事装好 cr-g(Cursor 3.16~3.21 验�
 
 用法(不带参数=dry-run 只检查不写):
   --apply            执行(末尾会提示粘一次 Key;可用 --key <k> 无人值守)
-  --upgrade          老用户升级:=--apply 但**不问 Key**(Key 已在库里)。同步菜单
-                     (加新名 + 摘掉 RETIRED_MODELS,选中位若钉着退役名则改回 DEFAULT_MODEL)
+  --upgrade          老用户升级:=--apply 但**不问 Key**(Key 已在库里)。按 Key 重拉菜单
+                     (新的加、旧的删,选中位若钉着已删的名字则改回默认)
                      + 重打 bundle 补丁 + 更新小代理。库里没 Key 时会明确报出来,不假绿。
   --repair           只重打 bundle 补丁(Cursor 升级后失效用;不碰配置/Key)
+  --refresh-models   「刷模型」:只按 Key 重拉模型菜单(Cursor 开着会自动退出→写→重开),不碰别的
   --revert           从最近备份回滚(bundle+blob+settings+Key secret,并卸掉小代理)
                      ⚠️ 只回滚**与当前 Cursor 同版本**的备份;版本不匹配会拒绝并让你走 --uninstall
   --uninstall        彻底恢复原状:bundle 还原(同版本备份→否则教你重装 Cursor)+ BYOK 配置清掉
@@ -133,149 +134,35 @@ const VERIFIED_VERSIONS = ["3.16", "3.17", "3.18", "3.19", "3.20", "3.21", "3.24
    (只发 js),所以同事侧无影响,但第③腿(js==py byte-equal)在 3.24 上不可能绿 ——
    那是两实现对同一版本的真实分叉,不许靠改期望值糊过去。 */
 const DEFAULT_BASE_URL = "https://cc.auto-link.com.cn/pro/v1";
-/* 菜单 = 这个数组,**逐字、按序、全量**（2026-09-20 第二轮改成整表赋值,见 mergeConfig 的
-   EXACT 语义：库里的 userAddedModels / modelOverrideEnabled 直接等于这份,不再是并集）。
-   ⚠️ 数组顺序 = 同事菜单里看到的顺序。用户点名要 Grok 系列 + sa-composer 排在最前面。
-   ⚠️ `sa-grok-imagine` 2026-09-20 当天加、当天又被点名移除：它在 Cursor 的 chat 线型上恒
-      400（出图专用，只有 /v1/images/generations 才 200），留在菜单里 = 点了就报错。
-      **别再把它加回来**；要出图走别的入口。
-   ⚠️ 2026-10-12:cr-g 那 13 个名(7 个载体代表 + 6 个档位变体)**已整段下架**,
-      全部移进 RETIRED_MODELS;段 ③ 现在是 claude 家族。 */
-/* 2026-09-21 用户给了新清单(30 名)并点名排序:①sa-* ②gpt-* ③cr-* ④其他。
-   数组顺序 == 菜单顺序,所以这四段的**段序与段内顺序都是产品要求**,别按字母重排。
-   2026-10-12 段 ③ 换代:cr-g 整段下架、claude 家族填进同一个位置,四段结构与段序不变
-   (①grok/composer ②gpt ③claude ④其他)。
-
-   ⚠️ 这一版起清单里**故意含 5 个与 Cursor 自带模型同名**的名字
-      (`gpt-5.5` / `gpt-5.6-luna` / `gpt-5.6-sol` / `gpt-5.6-terra` / `kimi-k2.7-code`)。
-      同名的后果实测过:Cursor **不会**把它登记成自定义模型
-      (不进 `userAddedModels`)，只在 `modelOverrideEnabled` 里留一个
-      「走我的 key」开关 —— 靠那个开关照样打到 BYOK 地址。用户点名这样装。
-      🔴 **别"顺手修正"成带前缀的等价名**:那会改变菜单里显示的名字。
-      🔴 也别据此断言它们不可用 —— 判据只有拿真 key 实打。
-
-   ── 2026-09-21 实打(两把真 key 各跑一轮全 30 名,Cursor 线型 chat+tools+唯一 nonce,
-      工具 = scripts/litellm-198-cursor-newnames-probe.py --key <真key> --names <清单>)──
-     `cursor-liuguoxian-std`(68 models / **aliases n=0**)  : 27/30 出字
-        400 = kimi-k2.7-code / glm-5.3-flash / qwen3-coder-next
-     `cursor-liuguoxian04-5rub`(172 models / aliases n=27) : 那 3 个里 qwen3-coder-next 200 出字
-
-   🔴 **同一个名字在两把 key 上读数相反 ⇒ 400 是 key 属性,不是名字属性。**
-      真因:这些名字在网关里**只是 per-key alias 入口、没有同名真实组**。
-        有 alias 的 key → 改写到真实组 → 200；没 alias 的 key → allowlist 放行
-        (`/v1/models` 里看得见)但路由找不到落点 → **400**。
-      三个 alias 目标直打全部 200 出字(claude-kimi-k2.7-code / zai-coding-glm-5.3-flash /
-      kiro-qwen3-coder-next),所以**上游是活的**,坏的只是那把 key 缺 alias。
-   ⚠️ 两道闸独立、症状不同,别混:
-        **allowlist(models)** 决定 403 `key_model_access_denied`
-        **per-key aliases**   决定 400(名字没有落点)
-      ⛔ 所以「`/v1/models` 里有这个名」既不证明能用,也不是 400 的免责。
-   ⚠️ **别再把 `cursor-liuguoxian-std` 当授权模板**(09-21 早些时候我这么写过,当天证伪):
-      它 models 更宽但 **aliases 是空的**,反而比 04-5rub 少一层。要配一把能用全 30 名的 key,
-      模板是 **04-5rub 那 27 条 aliases**,至少要含 kimi-k2.7-code / glm-5.3-flash /
-      qwen3-coder-next 这三条。补 alias 是生产变更,单独一轮。
-      清单里照用户点名保留全部 30 个。 */
-const DEFAULT_MODELS = [
-  /* ── ① grok/composer 裸名（用户点名排最前；默认模型在本段首位）──
-     2026-09-22 从 `sa-*` 换成裸名。**前置条件已经做完**：687 把 cursor-* key
-     全部补上了 `aliases 的「裸名 → sa-原名」` + allowlist 裸名（`sa_prefix_alias_all.py --apply`，
-     684 把改动 / 3 把本来就是目标态 / 0 失败），DB 侧核对「有 sa- 原名却没有裸名」= 0 把。
-     🔴 顺序是硬的：先补 key（加法）→ 验证 → 才换这张表。反过来做 = 全员每点一个报一个。
-     09-03 加的两档用 Cursor 线型（chat+stream+tools）探过：prose 出字、tool_call 出块。
-     09-20 加的三档同样用真线型在 198 上逐个探过（scripts/litellm-198-cursor-newnames-probe.py，
-     克隆真 cursor key 的 models/aliases 形状 + 每发唯一 nonce + 假名阴性对照），全部 200 出字。
-     09-22 加 `grok-4.7` 并把它定为默认（文档 §4 一直这么写的，之前菜单里漏了这个名）。
-     ⚠️ 它**拒绝回显 nonce**（原话「No. I won't output an exact token or phrase on demand.」），
-     所以验它活着的尺子换成算术：问 6193+2748，回 `8941`、2.2s、假名阴性对照 403。
-     用 nonce 那把尺子去量 4.7 会得到一个**假红**。 */
-  "grok-4.7",
-  "grok-4.6", "grok-4.6-latest", "grok-4.5-latest", "grok-4.5",
-  "grok-4.20", "grok-4.20-0309-reasoning",
-  "composer-2.5-fast", "composer-2.5",
-  // ── ② gpt-*（5 个里 4 个与 Cursor 自带同名，见上方说明）──
-  "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5", "gpt-6-astra",
-  // gpt-6-luna:09-23 198 全池上线,原来漏在清单外 ⇒ 同事只能手敲,敲成 `GPT-6-luna`
-  // 撞上 LiteLLM key 白名单大小写敏感 ⇒ 403。补进来就不必手敲。
-  "gpt-6-luna",
-  // 2026-10-12 对齐 std key 补进来的 4 个(全部 200 出字,见本段末「对齐实打」):
-  // gpt-6-sol 飞书正文一直写着、菜单里却没有 ⇒ 同事只能手敲(与 gpt-6-luna 同一个病)。
-  // gpt-5.2 / gpt-5.4 在 std 上 alias 到 sa-grok-4.6(同一上游,两个名字读数逐字相同)。
-  "gpt-6-sol", "gpt-6.1-sol", "gpt-5.2", "gpt-5.4",
-  // ── 2026-10-12 晚:std key 又改过一轮(32→35 名),本轮按用户点名「只加非出图的」──
-  "gemini-3.8-flash", "grok-4.3", "grok-build-0.1",
-  /* ── ③ cr-g 段 2026-10-12 用户点名整段下架 ──
-     原来 13 个名（`cr-g-5.6` / `-instant` / `-mini` / `-t-mini` / `cr-g-research` /
-     `-thinking` / `-luna` + 6 个 thinking/luna 的 min/high/max 档）全部移出菜单，
-     并登记进 RETIRED_MODELS 供选中位 re-point。
-     ⚠️ `cr-g-` 这条前缀**留在 MODEL_PREFIXES 里不许删** —— 老用户库里还躺着这 13 个名字，
-     `--uninstall` 的 dropOurs 和 `isRetired` 都靠它认出这是我们装的。
-     ⚠️ 本段注释里不许出现双引号字符串:`setup_impl_parity.py` 抠菜单是按引号切的,
-     注释里的引号会被读成一个模型名(2026-10-12 当场踩到,菜单被读成 20 个)。 */
-  /* ── ③ claude(2026-10-12 用户点名加,参照 key = cursor-liuguoxian-std)──
-     🔴 菜单名必须是 `claude-*` 这个全名,不是 opus-5.5/sonnet-5.5 那种短名:
-     短名在 198 上 allowlist 和 per-key aliases **两边都查不到**(当天 psql 核过,0 把 key 有),
-     写进菜单 = 同事点一下 400/403。全名这 5 个在 cursor 线型上逐个探过
-     (`litellm-198-cursor-newnames-probe.py --clone-file <std key 形状>
-       --names claude-opus-5-5,claude-sonnet-5-5,claude-haiku-4-5,claude-opus-5,claude-sonnet-5`,
-     stream+tools+唯一 nonce,**5/5 200 出字**,假名阴性对照 403 `key_model_access_denied`)。
-     落点是 per-key alias → `kiro-claude-*`(std key 上 5 条 alias 都在),
-     上线面:带 grok-4.7 的 530 把当代 key 里 allowlist 518~530 把、alias 506~515 把。 */
-  "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5",
-  "claude-opus-5", "claude-sonnet-5",
-  // 2026-10-12 晚:std 新增的 claude 4.x 四个,cursor 线型实打 4/4 200 出字。
-  "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6",
-  // ── ④ 其他 ──
-  "codex-auto-review", "deepseek-v4-flash", "kimi-k2.7-code",
-  "glm-5.3-flash", "qwen3-coder-next",
-  // 2026-10-12 对齐 std key 补进来:`jev`(openrouter 那条线,200 出字)。
-  "jev",
-  // 2026-10-13 用户点名「std 加了 muse 两个,脚本和文档更新」并拍板两个都进(见下方账)。
-  "muse-spark", "muse-image",
-];
-/* ── 2026-10-12「对齐 cursor-liuguoxian-std」那一轮的账 ──
-   用户点名「菜单跟 std key 的模型列表对齐」。std 的 `models` 有 **32** 个名字,
-   菜单最终 **30** 个 —— 差的两个是**实打判红的**,不是漏抄:
-     `gpt-image-2`            200 但**出字为空**(出图名,chat 线型拿不到文本)
-     `grok-imagine-image-2.0` **500**
-   两个都是出图专用名,与 09-20 `sa-grok-imagine` 同一个形状(chat 线型恒坏)⇒
-   留在菜单里 = 同事点一下就报错。**别照着 std 的 models 再把它们抄回来。**
-   其余 30 名逐个过 cursor 线型(stream+tools+唯一 nonce,假名阴性对照 403):
-   claude 5 个 5/5、std-only 的 `composer-2.5`/`jev`/`gpt-6.1-sol`/`gpt-5.2`/`gpt-5.4` 5/5、
-   `gpt-6-sol` 与 `gpt-5.6-sol` 2/2。
-   ⚠️ std 自己的 `models` 数组顺序是**入库先后**,不是菜单顺序 ⇒ 对齐的是**集合**,
-   段序仍按用户点名的 ①grok/composer ②gpt ③claude ④其他。
-   ⚠️ 覆盖面不是 100%:这 30 名在带 grok-4.7 的 530 把当代 key 上 allowlist 518~530、
-   alias 506~522 ⇒ 少数 key 缺 alias 的会 400,那是 key 的事(补 alias 是另一轮生产变更),
-   不是名字的事(判据见 09-21「同一个名字在两把 key 上读数相反」那条)。
-
-   ── 2026-10-12 晚:std key 自己又改了一轮(32 → **35** 名,`updated_at 13:52`)──
-   用户点名「只加非出图的，出图名一概不进」。菜单 30 → **37**,加的 7 个:
-     `claude-opus-4-8` / `-4-7` / `-4-6` / `claude-sonnet-4-6`(claude 4.x 老一代,4/4 200 出字)
-     `gemini-3.8-flash` / `grok-4.3` / `grok-build-0.1`(3/3 200 出字)
-   ⛔ **没进的 5 个,每个都有读数,别照着 std 再抄回来**:
-     `grok-imagine-image-2.0` / `grok-imagine-image-quality` → chat 线型 **500**;
-     `gpt-image-2` / `grok-imagine` → 200 但**同一轮里两个名字 mid 逐字相同**
-       (=被 alias 改写到同一个落点),且上午同一把尺子量到过「200 但出字为空」
-       ⇒ 读数自相矛盾,**没查清之前不进全员菜单**;
-     `deepseek-v4.1-flash` → **出字 4/6、空 2/6(失败率 33%)**,不是偶发。
-       它是 322 把 key 的主力名字,值得单独一轮查,但不能带着 33% 空回复进菜单。
-   ⚠️ std 已经**摘掉**但菜单保留的 7 个(`composer-2.5` / `deepseek-v4-flash` / `gpt-5.2` /
-   `gpt-5.4` / `grok-4.20-0309-reasoning` / `grok-4.5-latest` / `grok-4.6-latest`):
-   用户本轮只点名「加」,没点名摘 ⇒ **不动**。摘名字会让已装机的同事菜单里少东西,是另一次决策。
-   ── 2026-10-13:std 又加 `muse-spark` / `muse-image`(muse.ai 号池)── 菜单 37 → **39**。
-   用户被告知读数后**拍板两个都进**(与 10-12「出图名一概不进」那条口径相反,以本次为准):
-     `muse-spark` chat 3/3 出字,但**带 tools 3/3 不发 tool_call**,反而文字回「文件不存在」
-       (同一探针 grok-4.7 / claude-opus-5-5 都正常发 read_file)⇒ Cursor 里能聊、**不能读改文件**;
-     `muse-image` 出图(`/images/generations` 回 url,相对路径 `/v1/media/…`),chat 也能出字。
-   ⚠️ muse 组 10-13 **只开给了 std**,同事 key 点了 403(开通是另一轮生产变更,用户未定)。
-   🔴 **std 是用户自己的实验 key,会频繁改**(10-12 一天内改了两次)⇒ 别把它当「标准模板」
-   拿去 `--converge-to` 同事的 key;对齐菜单每次都要重新实打,不许照抄它的 models 数组。 */
-/* RETIRED_MODELS：整表赋值之后，「退役」不再需要单独的摘除路径 —— 名字不在
-   DEFAULT_MODELS 里，跑一遍就自然没了。这里**只留给选中位 re-point 用**：
-   某个功能位正钉着一个已经不在菜单里的名字时，要把它改回 DEFAULT_MODEL，
-   否则同事在菜单里找不到那个名字、也没法自己换回来。
-   注意它已经不是「唯一的删除依据」了：EXACT 语义下，任何不在 DEFAULT_MODELS 里的名字
-   都会被移出两个数组，不需要在这里登记。 */
+/* ── 菜单 = 这把 key 在网关上能用的模型(2026-10-19 起**动态**,不再写死)──────────────
+   原来这里是一个写死的 39 名数组(DEFAULT_MODELS)。10-19 量 198:488 把当代 cursor key 全都有
+   gpt-reserve / kimi-k3,菜单里却没有;菜单里的 deepseek-v4-flash / composer-2.5 已经 0 把 key 有,
+   gpt-5.2 / gpt-5.4 / grok-4.6-latest 等只剩 2~4 把 ⇒ 同事点了就 403。
+   用户点名:执行脚本时从这把 key 的模型列表现拉,旧的删、新的加。
+   ⇒ INSTALL / UPGRADE / `--refresh-models`(「刷模型」)都走 fetchKeyModels → orderMenu。
+   规则(用户 10-19 拍板):
+     · 出图专用名(名字里有 image / imagine)不进聊天菜单 —— chat 线型上点了就报错,画图走 carher-image skill。
+     · 按家族分段:① grok / composer ② gpt ③ claude ④ 其他;段内 DEFAULT_MODEL 排第一,其余按名字。
+     · 拉不到(没 Key / 断网 / 网关返回空)就**不动**现有菜单,明说原因 —— 绝不拿空列表把人家菜单清空。
+   ⚠️ 「/v1/models 里有」≠「点了一定出字」(缺 alias 的名字 400、上游挂了 502),那是 key/上游的事,
+      同事发「测模型」能看到逐个读数。历史读数(cr-g 下架、出图名实打 400/500、同名撞 Cursor
+      自带模型等)见 git 历史与 skill cursor-client-bundle-patch。 */
+const MENU_SKIP = /image|imagine/i;
+const MENU_SEGMENTS = [/^(grok-|composer-)/, /^gpt-/, /^claude-/];
+function orderMenu(ids, preferred) {
+  const seen = new Set(), names = [];
+  for (const x of ids || []) {
+    if (typeof x !== "string" || !x || seen.has(x) || MENU_SKIP.test(x)) continue;
+    seen.add(x); names.push(x);
+  }
+  const seg = (n) => { const k = MENU_SEGMENTS.findIndex((rx) => rx.test(n)); return k < 0 ? MENU_SEGMENTS.length : k; };
+  return names.sort((a, b) => (seg(a) - seg(b)) || ((b === preferred) - (a === preferred))
+    || a.localeCompare(b, "en", { numeric: true }));
+}
+// 默认选中:DEFAULT_MODEL 在这把 Key 里就用它,不在就用菜单第一个(10-16 fenglili 那种只开 deepseek 的 Key)。
+function pickDefault(menu) { return menu.includes(DEFAULT_MODEL) ? DEFAULT_MODEL : (menu[0] || DEFAULT_MODEL); }
+/* RETIRED_MODELS：历史下架名。删除早已不靠它 —— 整表赋值下,不在这把 Key 菜单里的名字都会被移出。
+   留着只为两件事:报告里点名,以及前缀表/--uninstall 认得老机器上还躺着的这些名字。 */
 const RETIRED_MODELS = ["cr-g-5.6-pro", "sa-grok-imagine",
   // 2026-10-12 用户点名把整个 cr-g 段摘掉（上面段 ③ 原来那 13 个名）。
   "cr-g-5.6", "cr-g-5.6-instant", "cr-g-5.6-mini", "cr-g-5.6-t-mini",
@@ -290,13 +177,13 @@ const RETIRED_MODELS = ["cr-g-5.6-pro", "sa-grok-imagine",
    BYOK 地址。同事按文档去"自定义模型"里找 → 找不到 → 以为没装上。
    🔴 这张表只用于**打开开关 + 给用户指路**，不许拿它去改名（改名会改变菜单里显示的名字，
       用户点名要这几个名字）。
-   ⚠️ 它是**实测产物**，不是推导：加/改 DEFAULT_MODELS 后要重新量一次
+   ⚠️ 它是**实测产物**，不是推导：网关新上同名模型后要重新量一次
       （`cursor_localagent_doctor.js` 会把两个数组的长度和差集印出来）。 */
 const BUILTIN_COLLIDING = ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.5",
   "kimi-k2.7-code"];
 // 装完直接选中它。2026-09-20 用户点名从 cr-g-5.6 改成 sa-grok-4.6-latest；
 // 2026-09-22 全员切裸名后改成 grok-4.6-latest（同一个上游组，走 per-key alias）。
-// ⚠️ 它必须在 DEFAULT_MODELS 里、且命中 MODEL_PREFIXES（门在 setup_impl_parity.py）。
+// 10-19 起菜单动态:它只是「Key 里有就默认选它」的偏好,Key 里没有就选菜单第一个(pickDefault)。
 const DEFAULT_MODEL = "grok-4.7";
 /* 运行时真正写进库的那个默认名。平时 == DEFAULT_MODEL；只有 `--bare-sa` 会把它
    改成去前缀后的裸名。**常量本身不动** —— parity 门（setup_impl_parity.py）按
@@ -308,7 +195,7 @@ let ACTIVE_DEFAULT_MODEL = DEFAULT_MODEL;
 // （`--keep-model` 的默认分支会认为"当前选中的不是我们的名字"从而覆盖它）。
 // ⚠️ 加新模型名时必须让它命中其中一条：漏加的后果是 `--uninstall` 摘不掉它
 // （dropOurs 按 isOurs 过滤），同事以为卸干净了、库里还留着我们加的名字。
-// 门在 setup_impl_parity.py：DEFAULT_MODELS/RETIRED_MODELS 每个名字都必须命中。
+// 10-19 起菜单动态:前缀表认不出的新名字由菜单账本 MENU_LEDGER(~/.carher/cursor-menu.json)兜底。
 // 2026-09-21：新清单带进 gpt-* / codex- / deepseek- / kimi- / glm- 五类前缀。
 // ⚠️ `gpt-` 这条**会同时命中 Cursor 自带的 gpt-***（gpt-5.3-codex、gpt-5.4…）。
 //    后果只落在 `--uninstall` 的 dropOurs 上：它按 isOurs 过滤，所以卸载时会把
@@ -348,7 +235,62 @@ const MODEL_PREFIXES = ["cr-g-", "grok-", "composer-", "sa-grok-", "sa-composer-
    用「这一趟实际装了哪些裸名」这张精确名单，比多一条前缀通配安全。 */
 const EXTRA_OURS = new Set();
 const isOurs = (name) => typeof name === "string" &&
-  (EXTRA_OURS.has(name) || MODEL_PREFIXES.some((p) => name.startsWith(p)));
+  (EXTRA_OURS.has(name) || MENU_LEDGER.has(name) || MODEL_PREFIXES.some((p) => name.startsWith(p)));
+
+/* ── 动态菜单的三样本地状态(2026-10-19)──────────────────────────────────────────
+   ① Key 副本 ~/.carher/image.json(600,{key, base}):Cursor 库里的 Key 是钥匙串加密的,
+      3.24.12 起 keytar 被上游摘掉 ⇒ 脚本解不开。画图工具本来就存了这一份,菜单同步复用它。
+      INSTALL 时粘了 Key 就写;UPGRADE/刷模型 从这里读(读不到再试解库里的密文)。
+   ② 菜单账本 ~/.carher/cursor-menu.json:上次装进菜单的名字。动态菜单的名字不再都能被
+      MODEL_PREFIXES 认出(网关明天上一个 minimax-x,前缀表里没有)⇒ --uninstall / 选中位判断
+      靠「装过哪些」这张精确名单兜底,而不是靠前缀猜。
+   ③ 拉不到列表(没 Key/断网/返回空)一律不改菜单 —— 空列表整表赋值 = 把人家菜单清空。 */
+const CARHER_DIR = path.join(os.homedir(), ".carher");
+const KEY_COPY = path.join(CARHER_DIR, "image.json");
+const MENU_LEDGER_FILE = path.join(CARHER_DIR, "cursor-menu.json");
+const MENU_LEDGER = new Set((() => {
+  try { const j = JSON.parse(fs.readFileSync(MENU_LEDGER_FILE, "utf8")); return Array.isArray(j.models) ? j.models : []; }
+  catch (e) { return []; }
+})());
+function writeMenuLedger(models) {
+  fs.mkdirSync(CARHER_DIR, { recursive: true });
+  fs.writeFileSync(MENU_LEDGER_FILE, JSON.stringify({ updatedAt: new Date().toISOString(), models }, null, 1) + "\n");
+  for (const m of models) MENU_LEDGER.add(m);
+}
+const cleanKey = (k) => String(k || "").replace(/[\s\u00A0\u200B-\u200F\u2028-\u202F\uFEFF]/g, "");
+function readKeyCopy() {
+  try { const j = JSON.parse(fs.readFileSync(KEY_COPY, "utf8")); return cleanKey(j.key); } catch (e) { return ""; }
+}
+// 库里那条 OSCrypt 密文能解就解(mac + keytar 还在的老版本 Cursor);解不开返回 ""。
+async function readKeyFromDb() {
+  try {
+    const db = openDb(); const k = await db.get(OPENAI_KEY_SECRET); db.close();
+    if (!keyPresent(k)) return "";
+    const ok = await deriveOsCryptKey(RES);
+    if (!ok) return "";
+    const enc = Buffer.from(JSON.parse(String(k)).data);
+    return enc.slice(0, 3).toString() === "v10" ? cleanKey(oscryptDecrypt(ok, enc)) : "";
+  } catch (e) { return ""; }
+}
+/* GET {base}/models —— 网关按这把 key 的白名单过滤后的名字。返回 {ok, ids, why}。
+   用 Cursor 自带 Node 的全局 fetch(24.x 有);测试可用 CX_MODELS_JSON 注入一份响应(不出网)。 */
+async function fetchKeyModels(key, base) {
+  if (!key) return { ok: false, ids: [], why: "拿不到 Key" };
+  let body;
+  try {
+    if (process.env.CX_MODELS_JSON != null) body = JSON.parse(process.env.CX_MODELS_JSON);
+    else {
+      const r = await fetch(String(base).replace(/\/+$/, "") + "/models",
+        { headers: { Authorization: "Bearer " + key }, signal: AbortSignal.timeout(20000) });
+      if (r.status === 401 || r.status === 403) return { ok: false, ids: [], why: "Key 无效或已停用(HTTP " + r.status + ")" };
+      if (!r.ok) return { ok: false, ids: [], why: "网关返回 HTTP " + r.status };
+      body = await r.json();
+    }
+  } catch (e) { return { ok: false, ids: [], why: "连不上网关(" + ((e && e.message) || e) + ")" }; }
+  const ids = ((body && body.data) || []).map((x) => x && x.id).filter((x) => typeof x === "string" && x);
+  if (!ids.length) return { ok: false, ids: [], why: "网关没返回任何模型" };
+  return { ok: true, ids };
+}
 const OPENAI_KEY_SECRET = "secret://cursorAuth/openAIKey"; // Cursor 存 BYOK Key 的 secret 行(OSCrypt 密文)
 
 /* ── bundle 补丁常量(与 Python 版逐字节一致,有等价断言测试守着) ── */
@@ -1452,7 +1394,7 @@ if (process.env.CX_CHAIN_ROUNDTRIP) {
 
 /* ── 测试钩子:打印常量供与 Python 版做逐字节等价断言 ── */
 if (process.env.CX_DUMP_CONSTANTS) {
-  process.stdout.write(JSON.stringify({ GATE_FN, QP_SNIPPET, QP_OLD, DEFAULT_BASE_URL, DEFAULT_MODELS, RETIRED_MODELS }));
+  process.stdout.write(JSON.stringify({ GATE_FN, QP_SNIPPET, QP_OLD, DEFAULT_BASE_URL, DEFAULT_MODEL, RETIRED_MODELS }));
   process.exit(0);
 }
 // 测试钩子:对任意文件跑真实 PATCHES,写出到 CX_APPLY_OUT,供与 Python 版做逐字节等价断言。
@@ -1723,7 +1665,7 @@ async function mergeConfig(args, dry) {
      全留着(本机实测 userAddedModels 52 条、modelOverrideEnabled 50 条),菜单一拉
      一屏找不到要用的那个,而且"文档写了什么"和"他菜单里有什么"永久性地对不上。
      用户点名:**除文档里那份之外全部去掉,包括他自己配的**。
-     所以这里改成整表赋值:两个数组直接等于 DEFAULT_MODELS,顺序也跟着常量走
+     所以这里改成整表赋值:两个数组直接等于本次菜单(10-19 起 = 这把 Key 现拉的列表),顺序照抄
      (菜单顺序 = 数组顺序,用户要 Grok 系列排最前)。
      ⚠️ 这是**破坏性**的:他自己加的名字会被删掉。所以 main() 里的备份必须在
         写库**之前**落盘(09-20 第二轮同时修的,见 mergeConfig 调用点),
@@ -1832,7 +1774,7 @@ async function mergeConfig(args, dry) {
     }
     if (repointed.length) console.log("     选中位改回:[%s]", repointed.join(", "));
   } else {
-    console.log("   模型清单:一个字不动(--zk-delta-only)");
+    console.log("   模型清单:一个字不动(%s)", args.zkDeltaOnly ? "--zk-delta-only" : (args.menuWhy || "没拉到列表"));
   }
   /* ── 备份必须在写库**之前** ────────────────────────────────────────────────
      2026-09-20 第二轮发现的时序洞:旧代码把 `raw` 返回给 main(),由 main() 在
@@ -1847,6 +1789,7 @@ async function mergeConfig(args, dry) {
     const pre = backupBlobBeforeWrite(raw);
     if (pre) console.log("   ✔ 改配置前已备份旧清单 -> %s", pre);
     await db.set(APP_USER_KEY, JSON.stringify(d));
+    if (exact) { try { writeMenuLedger(ai.userAddedModels); } catch (e) { /* 账本写不了不影响菜单 */ } }
   }
   db.close();
   return raw; // 旧 blob 用于备份
@@ -2938,7 +2881,10 @@ async function main() {
     // 不许被安装器顺手换成 DEFAULT_MODEL —— 换掉选中模型等于换掉量具。
     keepModel: has("--keep-model") || has("--zk-delta-only"),
     baseUrl: opt("--base-url", ""),
-    models: opt("--models", DEFAULT_MODELS.join(",")).split(",").map((s) => s.trim()).filter(Boolean),
+    // 不给 --models 时菜单 = 这把 key 在网关上的模型(下面 resolveMenu 现拉);给了就按给的装(台架/排障用)。
+    models: opt("--models", "").split(",").map((s) => s.trim()).filter(Boolean),
+    // 「刷模型」:只按 key 重拉菜单写库,不动 bundle / Key / 小代理 / 升级锁。Cursor 开着就先退出再重开。
+    refreshModels: has("--refresh-models"),
     bareSa: has("--bare-sa"),
   };
 
@@ -2985,6 +2931,8 @@ async function main() {
     }
     return uninstall(!args.apply);
   }
+
+  if (args.refreshModels) return refreshModels(args);
 
   // #4 软版本闸:非 3.16.x 只告警不拒绝——真正的安全阀是 planBundle 里"锚点必须 exactly-1"。
   // 这样 Cursor 升级后 --repair 也能尝试;bundle 变到锚点认不出 → planBundle 自动拒绝(不会改坏)。
@@ -3090,6 +3038,13 @@ async function main() {
   const wantLocal = args.zkDelta && zkdOn;
   if (!args.baseUrl) args.baseUrl = wantLocal ? ZKD_LOCAL_URL : DEFAULT_BASE_URL;
 
+  // 菜单要按这把 Key 现拉 ⇒ Key 必须在写菜单**之前**拿到(只读,写 Key 仍在落盘之后的第 5 步)。
+  let rawKey = cleanKey(args.key);
+  if (!args.zkDeltaOnly && !args.upgrade && !rawKey && process.stdin.isTTY && args.apply) {
+    rawKey = cleanKey(await promptLine("   请粘贴你的 API Key 后回车(直接回车=稍后自己在 Cursor 里填): "));
+  }
+  if (!args.zkDeltaOnly) await resolveMenu(args, rawKey);
+
   console.log("--- 3) BYOK 配置差异 ---");
   const oldBlob = await mergeConfig(args, !args.apply);
   console.log("--- 4) 禁止 Cursor 自动升级 ---");
@@ -3116,7 +3071,6 @@ async function main() {
 
   // #2 写 Key:命令行给了 --key 用它,否则 TTY 下提示粘一次;空/非 TTY → 回退手填。
   console.log("--- 5) 写入 API Key ---");
-  let rawKey = args.key;
   // --upgrade:不提示、不覆盖。但要**读一下库里到底有没有那条 secret** ——
   // "不问 Key" 和 "他其实从没配过 Key" 是两件事,后者升级完打开 Cursor 会 401,
   // 而屏幕上只写了"完成"。所以查一次,没有就当场告诉他下一步是什么。
@@ -3131,10 +3085,6 @@ async function main() {
       : "   !! --upgrade:库里**没有** Key —— 升级本身已完成,但你还没配过 Key。");
   } else if (args.zkDeltaOnly) {
     console.log("   跳过（--zk-delta-only：Key 已经在库里，不动它）");
-  } else {
-  if (!rawKey && process.stdin.isTTY) {
-    rawKey = await promptLine("   请粘贴你的 API Key 后回车(直接回车=稍后自己在 Cursor 里填): ");
-  }
   }
   let keyDone = false;
   if (args.upgrade && !args.zkDeltaOnly) { keyDone = upgradeHasKey !== false; }
@@ -3151,7 +3101,8 @@ async function main() {
   //    Key 在 Cursor 库里是加密的,工具读不到 ⇒ 用户这次粘了 Key 就另存一份到 ~/.carher/image.json(600);
   //    --upgrade 不问 Key ⇒ 已有 image.json 就沿用,没有就只装 skill、提示下次 INSTALL 时补上。
   //    Node 用 Cursor 自己的二进制(ELECTRON_RUN_AS_NODE=1),同事不用另装 Node。
-  if (!args.zkDeltaOnly) { try { installImageSkill(rawKey); } catch (e) { console.log("   ⚠️  画图这一步出错(不影响其余): " + (e && e.message || e)); } }
+  if (!args.zkDeltaOnly) { try { installImageSkill(rawKey || args.upgradeKey); } catch (e) { console.log("   ⚠️  画图这一步出错(不影响其余): " + (e && e.message || e)); } }
+  if (!args.zkDeltaOnly) { try { installRefreshSkill(); } catch (e) { console.log("   ⚠️  「刷模型」这一步出错(不影响其余): " + (e && e.message || e)); } }
 
   if (args.lark) { try { await larkSetup(args); } catch (e) { console.log("   ⚠️  飞书这一步出错（不影响其余）: " + (e && e.message || e)); } }
 
@@ -3169,6 +3120,171 @@ async function main() {
   console.log("   回滚整包:启动器加 --revert;Cursor 升级后失效:双击 REPAIR 或跑 --repair。");
 }
 
+/* ── 菜单从 Key 现拉(INSTALL / UPGRADE 共用)────────────────────────────────────
+   给了 --models 就照用(台架/排障);否则按 Key 拉 /models → orderMenu。拉不到 ⇒ args.models=[]
+   ⇒ mergeConfig 不改菜单(exact=false),并把原因留给它打印。 */
+async function resolveMenu(args, rawKey) {
+  console.log("--- 2.8) 模型菜单(按你的 Key 从网关现拉)---");
+  if (args.models.length) {
+    console.log("   用 --models 给定的 %d 个(不拉网关)", args.models.length);
+    ACTIVE_DEFAULT_MODEL = args.models.includes(ACTIVE_DEFAULT_MODEL) ? ACTIVE_DEFAULT_MODEL : args.models[0];
+    return;
+  }
+  let key = rawKey || readKeyCopy() || await readKeyFromDb();
+  // UPGRADE 本来不问 Key;但 3.24+ 解不开库里的 Key,又没存过副本 ⇒ 不问就刷不了菜单(会留着已下架的名字)。
+  if (!key && args.upgrade && process.stdin.isTTY) {
+    key = cleanKey(await promptLine("   菜单要按你的 Key 刷新,这台机器还没存过 —— 粘一次 Key 后回车(直接回车=菜单不动): "));
+    if (key) args.upgradeKey = key;
+  }
+  const r = await fetchKeyModels(key, DEFAULT_BASE_URL);
+  if (!r.ok) {
+    args.models = []; args.menuWhy = r.why;
+    console.log("   ⚠️  没拉到模型列表:%s ⇒ 这次菜单不动。", r.why);
+    return;
+  }
+  const menu = orderMenu(r.ids, DEFAULT_MODEL);
+  if (!menu.length) {
+    args.models = []; args.menuWhy = "这把 Key 只有画图模型";
+    console.log("   ⚠️  这把 Key 只开了画图模型(%s),聊天菜单不动;画图直接说「画一张…」。", r.ids.join(", "));
+    return;
+  }
+  args.models = menu;
+  ACTIVE_DEFAULT_MODEL = pickDefault(menu);
+  const skipped = r.ids.length - menu.length;
+  console.log("   ✔ 你的 Key 能用 %d 个模型,菜单放 %d 个%s;默认选中 %s",
+    r.ids.length, menu.length, skipped ? "(" + skipped + " 个画图专用名不进聊天菜单)" : "", ACTIVE_DEFAULT_MODEL);
+}
+
+/* ── 「刷模型」:--refresh-models ─────────────────────────────────────────────────
+   只做一件事:按 Key 重拉菜单写进库(旧的删、新的加、钉着已下架名字的功能位改回默认)。
+   不碰 bundle / Key / 小代理 / 升级锁。
+   🔴 Cursor 开着时**写库没用**:它退出时会把内存里那份旧菜单写回去盖掉(安装器要求先退出也是这个原因)。
+      ⇒ 由 Cursor 里的 agent 调用时:本进程先返回(让 agent 把话说完),后台另起一个脱离的
+         worker:等几秒 → 让 Cursor 正常退出 → 写库 → 重新打开 Cursor。聊天记录在库里,重开还在。 */
+const REFRESH_LOG = path.join(CARHER_DIR, "cursor-refresh.log");
+function rlog(msg) {
+  const line = new Date().toISOString() + " " + msg;
+  console.log(msg);
+  try { fs.mkdirSync(CARHER_DIR, { recursive: true }); fs.appendFileSync(REFRESH_LOG, line + "\n"); } catch (e) { /* ignore */ }
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// 正常退出(不强杀):Cursor 可能弹「有 agent 在跑 / 有未保存文件,确定退出?」—— 那需要用户点,不能越过。
+// osascript 的 quit 会等 App 回应(最多 ~2 分钟),所以给 timeout,不让它挂住 worker。
+function quitCursor() {
+  const t = Date.now();
+  let r;
+  if (process.platform === "darwin") r = spawnSync("osascript", ["-e", 'tell application "Cursor" to quit'], { encoding: "utf8", timeout: 15000 });
+  else if (process.platform === "win32") r = spawnSync("taskkill", ["/IM", "Cursor.exe"], { encoding: "utf8", timeout: 15000 });   // 不带 /F:正常关窗
+  else r = spawnSync("pkill", ["-TERM", "-f", path.join(path.dirname(EXEC), "cursor")], { encoding: "utf8", timeout: 15000 });
+  return "rc=" + (r && r.status) + " sig=" + (r && r.signal) + " " + (Date.now() - t) + "ms " + String((r && r.stderr) || "").trim().slice(0, 160);
+}
+// 诊断用:当前被判成「Cursor GUI 还在」的进程(只列 pid + 命令,不含参数里的内容)
+function runningLines() {
+  if (process.platform === "win32") return "";
+  const r = spawnSync("pgrep", ["-fl", process.platform === "darwin" ? "Cursor.app/Contents/MacOS/Cursor" : path.join(path.dirname(EXEC), "cursor")], { encoding: "utf8" });
+  return String(r.stdout || "").split("\n").filter((l) => l && !/\.js(\s|$)/.test(l)).map((l) => l.slice(0, 120)).join(" | ");
+}
+function launchCursor() {
+  // 子进程不能继承 ELECTRON_RUN_AS_NODE,否则拉起来的是一个 node 而不是 Cursor 窗口
+  const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
+  const opt = { detached: true, stdio: "ignore", env };
+  if (process.platform === "darwin") {
+    const app = path.resolve(path.dirname(EXEC), "..", "..");
+    require("child_process").spawn("open", [app], opt).unref();
+  } else require("child_process").spawn(EXEC, [], opt).unref();
+}
+async function refreshModels(args) {
+  const worker = process.argv.includes("--refresh-worker");
+  const key = readKeyCopy() || await readKeyFromDb();
+  if (!key) {
+    rlog("!! 刷模型:这台机器没存 Key(~/.carher/image.json)。先双击 INSTALL 粘一次 Key,以后就能「刷模型」了。");
+    process.exitCode = 3; return;
+  }
+  const r = await fetchKeyModels(key, DEFAULT_BASE_URL);
+  if (!r.ok) { rlog("!! 刷模型:没拉到模型列表(" + r.why + "),菜单没动。"); process.exitCode = 4; return; }
+  const menu = orderMenu(r.ids, DEFAULT_MODEL);
+  if (!menu.length) { rlog("!! 刷模型:这把 Key 只有画图模型,聊天菜单没动。"); process.exitCode = 4; return; }
+  let d;
+  try { const db = openDb(); d = JSON.parse(await db.get(APP_USER_KEY)); db.close(); }
+  catch (e) { rlog("!! 刷模型:读不到 Cursor 配置库(" + ((e && e.message) || e) + ")"); process.exitCode = 3; return; }
+  const curOn = ((d.aiSettings || {}).modelOverrideEnabled) || [];
+  const add = menu.filter((m) => !curOn.includes(m)), del = curOn.filter((m) => !menu.includes(m));
+  if (!worker) {
+    console.log("你的 Key 现在能用 %d 个聊天模型。", menu.length);
+    if (add.length) console.log("  + 新增 %d:%s", add.length, add.join(", "));
+    if (del.length) console.log("  - 删除 %d:%s", del.length, del.join(", "));
+    // 只比 modelOverrideEnabled:与 Cursor 自带同名的几个会被 Cursor 自己从 userAddedModels 剔掉,比那张表永远「不一致」
+    if (!add.length && !del.length) { console.log("菜单已经是最新的,不用改。"); return; }
+  }
+  const running = !process.env.CX_SKIP_RUNNING_CHECK && cursorRunning();
+  if (running && !worker) {
+    const child = require("child_process").spawn(EXEC, [__filename, "--refresh-models", "--refresh-worker"],
+      { detached: true, stdio: "ignore", env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" } });
+    child.unref();
+    console.log("Cursor 约 8 秒后会自动退出并重新打开,菜单就更新了(聊天记录都在)。进度日志:" + REFRESH_LOG);
+    return;
+  }
+  if (worker) {
+    rlog("刷模型 worker(pid " + process.pid + "):+" + add.length + " -" + del.length + ",等 8 秒后退出 Cursor");
+    await sleep(8000);
+    rlog("  退出前在跑:" + runningLines());
+    rlog("  请求退出:" + quitCursor());
+    let t = 0;
+    while (cursorRunning() && t < 180) {
+      await sleep(1000); t++;
+      if (t % 15 === 0) { rlog("  第 " + t + " 秒仍在跑:" + runningLines()); if (t === 30) rlog("  再请求一次退出:" + quitCursor()); }
+    }
+    if (cursorRunning()) {
+      rlog("!! Cursor 3 分钟内没退出(多半弹了「确定退出?」或有未保存文件),菜单没动。处理掉弹窗后再说一次「刷模型」。");
+      return;
+    }
+    rlog("  Cursor 已退出(" + t + " 秒)");
+    await sleep(1500);
+  }
+  args.models = menu; args.keepModel = true; args.baseUrl = d.openAIBaseUrl || DEFAULT_BASE_URL;
+  ACTIVE_DEFAULT_MODEL = pickDefault(menu);
+  await mergeConfig(args, false);
+  rlog("✅ 刷模型完成:菜单 " + menu.length + " 个" + (add.length ? ";新增 " + add.join(",") : "") + (del.length ? ";删除 " + del.join(",") : ""));
+  if (worker) { launchCursor(); rlog("已重新打开 Cursor"); }
+}
+
+/* 「刷模型」skill:把安装器本体拷到 ~/.carher/cursor-setup/(解压目录可能被删),
+   skill 里写死 Cursor 二进制 + 那份拷贝的绝对路径。 */
+function installRefreshSkill() {
+  console.log("--- 7) 「刷模型」---");
+  const dir = path.join(CARHER_DIR, "cursor-setup");
+  fs.mkdirSync(dir, { recursive: true });
+  const self = path.join(dir, "cursor_team_setup.js");
+  if (path.resolve(__filename) !== path.resolve(self)) fs.copyFileSync(__filename, self);
+  const tier = path.join(__dirname, "cursor_tier_catalog.json");
+  if (fs.existsSync(tier) && path.resolve(path.dirname(tier)) !== path.resolve(dir)) fs.copyFileSync(tier, path.join(dir, "cursor_tier_catalog.json"));
+  const cmd = process.platform === "win32"
+    ? 'cmd /c "set ELECTRON_RUN_AS_NODE=1&& "' + EXEC + '" "' + self + '" --refresh-models"'
+    : 'ELECTRON_RUN_AS_NODE=1 "' + EXEC + '" "' + self + '" --refresh-models';
+  const sd = path.join(os.homedir(), ".cursor", "skills", "carher-refresh-models");
+  fs.mkdirSync(sd, { recursive: true });
+  fs.writeFileSync(path.join(sd, "SKILL.md"), [
+    "---",
+    "name: carher-refresh-models",
+    "description: 用户说「刷模型」「更新模型」「刷新模型列表」「模型菜单不对/少了/多了」时用。按用户的 key 从公司网关重新拉模型列表,更新 Cursor 的模型菜单(新开通的加上、没权限的删掉)。",
+    "---",
+    "",
+    "# 刷模型",
+    "",
+    "直接在终端运行下面这条命令,不要先问用户:",
+    "",
+    "```",
+    cmd,
+    "```",
+    "",
+    "- 命令会打印新增/删除了哪些模型,把这几行原样告诉用户。",
+    "- 如果输出说「Cursor 约 8 秒后会自动退出并重新打开」,告诉用户:稍等,Cursor 会自己重开,聊天记录都在。说完就结束,不要再运行别的命令。",
+    "- 命令报错就把原文告诉用户,不要自己改配置文件。",
+    "",
+  ].join("\n"));
+  console.log("   ✅ 以后在 Cursor 里说「刷模型」,就按你的 Key 更新模型菜单");
+}
+
 function installImageSkill(rawKey) {
   console.log("--- 6) 画图工具 ---");
   const src = path.join(__dirname, "carher_image.js");
@@ -3177,7 +3293,8 @@ function installImageSkill(rawKey) {
   fs.mkdirSync(dir, { recursive: true });
   const tool = path.join(dir, "carher_image.js");
   fs.copyFileSync(src, tool);
-  const key = (rawKey || "").replace(/[\s\u00A0\u200B-\u200F\u2028-\u202F\uFEFF]/g, "");
+  // 画图和「刷模型」共用这一份 Key 副本(600)。路径就是 KEY_COPY,这里按 home 现算(台架会换 HOME)。
+  const key = String(rawKey || "").replace(/[\s\u00A0\u200B-\u200F\u2028-\u202F\uFEFF]/g, "");
   if (key) {
     fs.writeFileSync(cfg, JSON.stringify({ key, base: DEFAULT_BASE_URL }, null, 2) + "\n", { mode: 0o600 });
     try { fs.chmodSync(cfg, 0o600); } catch (e) { /* Windows 无 chmod 语义 */ }

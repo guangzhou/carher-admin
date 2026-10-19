@@ -95,7 +95,7 @@ CURSOR = "".join([
        "双击 <code>REMOTE-SSH-Mac.command</code>（Windows：<code>REMOTE-SSH-Windows.cmd</code>），输入服务器名（照列出来的填，或 <code>用户名@IP</code>），回车；再输入 <code>yes</code>，回车。",
        "看到「✅ 已补好」，关掉远程窗口重连，就能用了。"),
     p("⚠️ 更新 Cursor 版本后，先连一次服务器，再双击一次 <code>REMOTE-SSH</code>。"),
-    p("<b>模型</b>：共 39 个，拿不定主意就用默认的 <code>grok-4.7</code>。"),
+    p("<b>模型</b>：菜单就是你的 key 能用的模型，拿不定主意就用默认的 <code>grok-4.7</code>；key 开通了新模型，在 Cursor 里发「刷模型」。"),
     p("<b>画图</b>：直接说「画一张……」，图片存在当前项目文件夹。"),
     table([["分类", "模型"],
            ["Grok / Gemini（快）",
@@ -128,7 +128,7 @@ CURSOR = "".join([
     "<h1>5. 更新与卸载</h1>",
     p("<b>更新</b>：第 2 节的包有新版时，重新下载你那个系统的包、解压 → 把 Cursor 完全退出 → 双击 <code>UPGRADE-Mac.command</code>"
       "（Windows：<code>UPGRADE-Windows.cmd</code>）。不用再输 key，聊天记录和设置不动；连远程服务器的，再双击一次 <code>REMOTE-SSH</code>。"),
-    p("更新会把模型菜单换成上面这 39 个，你自己加的模型名会被清掉。"),
+    p("更新会把模型菜单换成你的 key 能用的模型，你自己加的模型名会被清掉。"),
     p(f"<b>卸载</b>：把 Cursor {QUIT} → 双击 <code>UNINSTALL-Mac.command</code>（Windows：<code>UNINSTALL-Windows.cmd</code>）→ 输入 <code>yes</code>。聊天记录不动。"),
 ])
 

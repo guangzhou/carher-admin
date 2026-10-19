@@ -148,6 +148,15 @@ try {
   $env:CARHER_MODELS = (@($gm.data | ForEach-Object { $_.id }) -join "`n")
 } catch { $env:CARHER_MODELS = "" }
 $env:CARHER_KEY = $apiKey; $env:CARHER_BASE = $baseUrl; $env:CARHER_SETTINGS = $settings
+# 「刷模型」用的是同一份逻辑,先落盘,合并时 require 它
+$carherDir = Join-Path $claudeHome 'carher'
+New-Item -ItemType Directory -Force -Path $carherDir | Out-Null
+$refreshJs = @'
+@@EMBED carher_models_refresh.js@@
+'@
+$refreshPath = Join-Path $carherDir 'carher_models_refresh.js'
+[IO.File]::WriteAllText($refreshPath, $refreshJs, (New-Object Text.UTF8Encoding $false))
+$env:CARHER_REFRESH = $refreshPath
 $merge = @'
 const fs = require("fs");
 const p = process.env.CARHER_SETTINGS;
@@ -169,18 +178,17 @@ d.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
 // 旧版 Claude Code 存下的 claude-router-<hex> 模型名 ⇒ 还原真名(与 mac 版同)
 const real = (n) => { const m = /^claude-router-([0-9a-f]+)$/.exec(n || ""); return m ? Buffer.from(m[1], "hex").toString("utf8") : n; };
 if (typeof d.model === "string") d.model = real(d.model);
-// 非 claude 网关模型加进 modelPicker(behavesAs),新开窗口不再报「isn't recognized」
+// 非 claude 网关模型加进 modelPicker(behavesAs),新开窗口不再报「isn't recognized」;
+// 旧的删、新的加、选中的已没权限就回默认 —— 与「刷模型」同一份逻辑(carher_models_refresh.js)
 const ids = (process.env.CARHER_MODELS || "").split("\n").filter(Boolean);
-const rows = ids.filter((i) => !/^claude-/.test(i) && !/image|imagine/.test(i) && i !== "codex-auto-review")
-  .map((i) => ({ model: i, label: i, behavesAs: "claude-sonnet-5-5" }));
-if (rows.length) d.modelPicker = { options: rows };
+if (ids.length) require(process.env.CARHER_REFRESH).applyModels(d, ids);
 fs.writeFileSync(p, JSON.stringify(d, null, 2) + "\n");
 '@
 $mjs = Join-Path $env:TEMP "carher-merge-$([guid]::NewGuid().ToString('N')).js"
 [IO.File]::WriteAllText($mjs, $merge, (New-Object Text.UTF8Encoding $false))
 try { & node $mjs; $rc = $LASTEXITCODE } finally {
   Remove-Item $mjs -Force -ErrorAction SilentlyContinue
-  Remove-Item Env:CARHER_KEY, Env:CARHER_BASE, Env:CARHER_SETTINGS, Env:CARHER_MODELS -ErrorAction SilentlyContinue
+  Remove-Item Env:CARHER_KEY, Env:CARHER_BASE, Env:CARHER_SETTINGS, Env:CARHER_MODELS, Env:CARHER_REFRESH -ErrorAction SilentlyContinue
 }
 if ($rc -ne 0) { Die "x 写配置失败" }
 Ok "√ 配置已写入 $settings"
@@ -320,7 +328,25 @@ if ($nodeAbs) {
   if ($old) { $blk = $old + "`n`n" + $blk }
   [IO.File]::WriteAllText($cmdMd, $blk, $noBom)
   Ok "√ 已开通画图(说「画一张…」即可)"
-} else { Warn "! 没找到 Node,画图没开通(命令行 claude 不受影响)" }
+
+  # ── 4e. 「刷模型」(10-19):说这三个字就按 key 重拉 /model 菜单 ──
+  $rsDir = Join-Path $claudeHome 'skills\carher-refresh-models'
+  New-Item -ItemType Directory -Force -Path $rsDir | Out-Null
+  $rsMd = @'
+@@EMBED refresh_skill.md@@
+'@
+  [IO.File]::WriteAllText((Join-Path $rsDir 'SKILL.md'), $rsMd.Replace('@@NODE@@', $nodeAbs).Replace('@@TOOL@@', $refreshPath), $noBom)
+  $old = [IO.File]::ReadAllText($cmdMd)
+  $B = '<!-- CARHER-REFRESH-BEGIN -->'; $E = '<!-- CARHER-REFRESH-END -->'
+  $i = $old.IndexOf($B); $j = $old.IndexOf($E)
+  if ($i -ge 0 -and $j -gt $i) { $old = $old.Substring(0, $i) + $old.Substring($j + $E.Length) }
+  $old = $old.TrimEnd()
+  $line = '"' + $nodeAbs + '" "' + $refreshPath + '"'
+  $blk = $B + "`n## 刷模型`n`n用户说「刷模型」「更新模型」「刷新模型列表」,或说 /model 里的模型不对时,**直接运行这条命令,不要先问**:`n`n    " + $line + "`n`n- 把输出里「新增 / 删除 / 已改回默认模型」几行原样告诉用户,并提醒新开一个会话后 /model 里就是新列表。`n- 报错就把原文告诉用户,不要自己改 settings.json。`n" + $E + "`n"
+  if ($old) { $blk = $old + "`n`n" + $blk }
+  [IO.File]::WriteAllText($cmdMd, $blk, $noBom)
+  Ok "√ 以后在 Claude Code 里说「刷模型」就能更新模型列表"
+} else { Warn "! 没找到 Node,画图和「刷模型」没开通(命令行 claude 不受影响)" }
 
 # 会盖过 settings.json 的旧环境变量(mac 10-13 实跑踩到:ANTHROPIC_MODEL=anthropic.claude-opus-5 是
 # claude-code-* 那族 key 的名字,cursor key 没有 ⇒ 每发 403,屏幕上只写 "Failed to authenticate")

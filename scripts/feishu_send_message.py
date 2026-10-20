@@ -203,6 +203,14 @@ def build_content(args: argparse.Namespace) -> tuple[str, dict]:
     if args.text is not None:
         text = sys.stdin.read() if args.text == "-" else args.text
         return "text", {"text": text}
+    if args.card_file:
+        # 完整卡片 JSON（schema 2.0），原样发出；需要 header/按钮/分栏时用这个
+        with open(args.card_file, encoding="utf-8") as fh:
+            card = json.load(fh)
+        if card.get("schema") != "2.0":
+            print("--card-file 必须是 schema 2.0 的完整卡片 JSON", file=sys.stderr)
+            raise SystemExit(2)
+        return "interactive", card
     if args.markdown is not None or args.markdown_file:
         if args.markdown_file:
             with open(args.markdown_file, encoding="utf-8") as fh:
@@ -214,7 +222,7 @@ def build_content(args: argparse.Namespace) -> tuple[str, dict]:
             "schema": "2.0",
             "body": {"elements": [{"tag": "markdown", "content": md}]},
         }
-    print("必须给 --text / --markdown / --markdown-file 之一", file=sys.stderr)
+    print("必须给 --text / --markdown / --markdown-file / --card-file 之一", file=sys.stderr)
     raise SystemExit(2)
 
 
@@ -230,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--text", help="纯文本内容；传 - 从 stdin 读")
     ap.add_argument("--markdown", help="markdown 内容（发成卡片）；传 - 从 stdin 读")
     ap.add_argument("--markdown-file", help="从文件读 markdown")
+    ap.add_argument("--card-file", help="从文件读完整卡片 JSON（schema 2.0），原样发送")
     ap.add_argument("--uuid", help="幂等键，同一 uuid 重发不会重复投递")
     ap.add_argument("--dry-run", action="store_true", help="只取 token + 解析收件人，不真发")
     ap.add_argument("--resolve-only", action="store_true",

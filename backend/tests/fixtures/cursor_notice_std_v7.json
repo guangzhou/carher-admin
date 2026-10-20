@@ -1,0 +1,410 @@
+{
+ "models": [
+  "claude-haiku-4-5",
+  "claude-opus-4-6",
+  "claude-opus-4-7",
+  "claude-opus-4-8",
+  "claude-opus-5",
+  "claude-opus-5-5",
+  "claude-sonnet-4-6",
+  "claude-sonnet-5",
+  "claude-sonnet-5-5",
+  "codex-auto-review",
+  "composer-2.5-fast",
+  "deepseek-v4.1-flash",
+  "gemini-3.1-pro",
+  "gemini-3.5-flash-lite",
+  "gemini-3.8-flash",
+  "gemini-4-argon",
+  "gemini-image",
+  "gemini-music",
+  "gemini-video",
+  "glm-5.3-flash",
+  "gpt-5.5",
+  "gpt-5.6-luna",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-6-astra",
+  "gpt-6-luna",
+  "gpt-6-sol",
+  "gpt-6.1-sol",
+  "gpt-image-2",
+  "gpt-reserve",
+  "grok-4.20",
+  "grok-4.3",
+  "grok-4.5",
+  "grok-4.6",
+  "grok-4.7",
+  "grok-build-0.1",
+  "grok-imagine",
+  "grok-imagine-image-2.0",
+  "grok-imagine-image-quality",
+  "jev",
+  "kimi-k2.7-code",
+  "kimi-k3",
+  "muse-image",
+  "muse-spark",
+  "qwen3-coder-next",
+  "web-gemini-video"
+ ],
+ "card": {
+  "schema": "2.0",
+  "config": {
+   "width_mode": "default",
+   "summary": {
+    "content": "你的 Cursor Key 模型权限已更新"
+   }
+  },
+  "header": {
+   "title": {
+    "tag": "plain_text",
+    "content": "Cursor Key 模型权限已更新"
+   },
+   "subtitle": {
+    "tag": "plain_text",
+    "content": "您好，已清理上游不再支持的旧模型"
+   },
+   "template": "blue",
+   "icon": {
+    "tag": "standard_icon",
+    "token": "myai_colorful"
+   },
+   "text_tag_list": [
+    {
+     "tag": "text_tag",
+     "text": {
+      "tag": "plain_text",
+      "content": "46 个模型"
+     },
+     "color": "blue"
+    }
+   ]
+  },
+  "body": {
+   "direction": "vertical",
+   "padding": "12px 12px 20px 12px",
+   "elements": [
+    {
+     "tag": "interactive_container",
+     "width": "fill",
+     "background_style": "green-50",
+     "corner_radius": "8px",
+     "has_border": false,
+     "padding": "12px 12px 12px 12px",
+     "vertical_spacing": "8px",
+     "margin": "0px 0px 12px 0px",
+     "behaviors": [],
+     "elements": [
+      {
+       "tag": "markdown",
+       "content": "**本次主推**"
+      },
+      {
+       "tag": "markdown",
+       "content": "<text_tag color='green'>claude-opus-5-5</text_tag>  <text_tag color='green'>claude-sonnet-5-5</text_tag>  <text_tag color='green'>gpt-6.1-sol</text_tag>  <text_tag color='green'>deepseek-v4.1-flash</text_tag>  <text_tag color='green'>kimi-k3</text_tag>"
+      }
+     ]
+    },
+    {
+     "tag": "interactive_container",
+     "width": "fill",
+     "background_style": "grey-50",
+     "corner_radius": "8px",
+     "has_border": false,
+     "padding": "12px 12px 12px 12px",
+     "vertical_spacing": "8px",
+     "margin": "0px 0px 12px 0px",
+     "behaviors": [],
+     "elements": [
+      {
+       "tag": "markdown",
+       "content": "**你当前可访问的模型**　<font color='grey'>共 46 个</font>"
+      },
+      {
+       "tag": "interactive_container",
+       "width": "fill",
+       "background_style": "bg-white",
+       "corner_radius": "8px",
+       "has_border": false,
+       "padding": "10px 12px 10px 12px",
+       "vertical_spacing": "6px",
+       "behaviors": [],
+       "elements": [
+        {
+         "tag": "markdown",
+         "content": "**Claude**　<font color='grey'>9</font>"
+        },
+        {
+         "tag": "markdown",
+         "content": "<text_tag color='green'>claude-opus-5-5</text_tag> <text_tag color='green'>claude-sonnet-5-5</text_tag> <text_tag color='neutral'>claude-opus-5</text_tag> <text_tag color='neutral'>claude-sonnet-5</text_tag> <text_tag color='neutral'>claude-opus-4-8</text_tag> <text_tag color='neutral'>claude-opus-4-7</text_tag> <text_tag color='neutral'>claude-opus-4-6</text_tag> <text_tag color='neutral'>claude-sonnet-4-6</text_tag> <text_tag color='neutral'>claude-haiku-4-5</text_tag>"
+        }
+       ]
+      },
+      {
+       "tag": "interactive_container",
+       "width": "fill",
+       "background_style": "bg-white",
+       "corner_radius": "8px",
+       "has_border": false,
+       "padding": "10px 12px 10px 12px",
+       "vertical_spacing": "6px",
+       "behaviors": [],
+       "elements": [
+        {
+         "tag": "markdown",
+         "content": "**GPT**　<font color='grey'>10</font>"
+        },
+        {
+         "tag": "markdown",
+         "content": "<text_tag color='green'>gpt-6.1-sol</text_tag> <text_tag color='neutral'>gpt-6-astra</text_tag> <text_tag color='neutral'>gpt-6-luna</text_tag> <text_tag color='neutral'>gpt-6-sol</text_tag> <text_tag color='neutral'>gpt-5.6-luna</text_tag> <text_tag color='neutral'>gpt-5.6-sol</text_tag> <text_tag color='neutral'>gpt-5.6-terra</text_tag> <text_tag color='neutral'>gpt-5.5</text_tag> <text_tag color='neutral'>codex-auto-review</text_tag> <text_tag color='neutral'>gpt-reserve</text_tag>"
+        }
+       ]
+      },
+      {
+       "tag": "interactive_container",
+       "width": "fill",
+       "background_style": "bg-white",
+       "corner_radius": "8px",
+       "has_border": false,
+       "padding": "10px 12px 10px 12px",
+       "vertical_spacing": "6px",
+       "behaviors": [],
+       "elements": [
+        {
+         "tag": "markdown",
+         "content": "**Grok / Composer**　<font color='grey'>7</font>"
+        },
+        {
+         "tag": "markdown",
+         "content": "<text_tag color='neutral'>grok-4.20</text_tag> <text_tag color='neutral'>grok-4.7</text_tag> <text_tag color='neutral'>grok-4.6</text_tag> <text_tag color='neutral'>grok-4.5</text_tag> <text_tag color='neutral'>grok-4.3</text_tag> <text_tag color='neutral'>composer-2.5-fast</text_tag> <text_tag color='neutral'>grok-build-0.1</text_tag>"
+        }
+       ]
+      },
+      {
+       "tag": "interactive_container",
+       "width": "fill",
+       "background_style": "bg-white",
+       "corner_radius": "8px",
+       "has_border": false,
+       "padding": "10px 12px 10px 12px",
+       "vertical_spacing": "6px",
+       "behaviors": [],
+       "elements": [
+        {
+         "tag": "markdown",
+         "content": "**Gemini**　<font color='grey'>4</font>"
+        },
+        {
+         "tag": "markdown",
+         "content": "<text_tag color='neutral'>gemini-4-argon</text_tag> <text_tag color='neutral'>gemini-3.8-flash</text_tag> <text_tag color='neutral'>gemini-3.5-flash-lite</text_tag> <text_tag color='neutral'>gemini-3.1-pro</text_tag>"
+        }
+       ]
+      },
+      {
+       "tag": "interactive_container",
+       "width": "fill",
+       "background_style": "bg-white",
+       "corner_radius": "8px",
+       "has_border": false,
+       "padding": "10px 12px 10px 12px",
+       "vertical_spacing": "6px",
+       "behaviors": [],
+       "elements": [
+        {
+         "tag": "markdown",
+         "content": "**其他**　<font color='grey'>7</font>"
+        },
+        {
+         "tag": "markdown",
+         "content": "<text_tag color='green'>deepseek-v4.1-flash</text_tag> <text_tag color='green'>kimi-k3</text_tag> <text_tag color='neutral'>glm-5.3-flash</text_tag> <text_tag color='neutral'>qwen3-coder-next</text_tag> <text_tag color='neutral'>kimi-k2.7-code</text_tag> <text_tag color='neutral'>jev</text_tag> <text_tag color='neutral'>muse-spark</text_tag>"
+        }
+       ]
+      },
+      {
+       "tag": "collapsible_panel",
+       "expanded": false,
+       "background_color": "bg-white",
+       "border": {
+        "color": "grey-100",
+        "corner_radius": "8px"
+       },
+       "padding": "4px 12px 10px 12px",
+       "vertical_spacing": "6px",
+       "header": {
+        "title": {
+         "tag": "markdown",
+         "content": "**出图**　<font color='grey'>9 · 点击展开</font>"
+        },
+        "icon": {
+         "tag": "standard_icon",
+         "token": "down_outlined",
+         "color": "grey",
+         "size": "16px 16px"
+        },
+        "icon_position": "right",
+        "icon_expanded_angle": -180
+       },
+       "elements": [
+        {
+         "tag": "markdown",
+         "content": "<text_tag color='neutral'>gpt-image-2</text_tag> <text_tag color='neutral'>grok-imagine-image-2.0</text_tag> <text_tag color='neutral'>gemini-image</text_tag> <text_tag color='neutral'>gemini-music</text_tag> <text_tag color='neutral'>gemini-video</text_tag> <text_tag color='neutral'>grok-imagine</text_tag> <text_tag color='neutral'>grok-imagine-image-quality</text_tag> <text_tag color='neutral'>muse-image</text_tag> <text_tag color='neutral'>web-gemini-video</text_tag>"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "tag": "interactive_container",
+     "width": "fill",
+     "background_style": "red-50",
+     "corner_radius": "8px",
+     "has_border": false,
+     "padding": "12px 12px 12px 12px",
+     "vertical_spacing": "4px",
+     "margin": "0px 0px 12px 0px",
+     "behaviors": [],
+     "elements": [
+      {
+       "tag": "markdown",
+       "content": "**<font color='red'>原先单独的 Claude Key 将于 10 月底下线</font>**"
+      },
+      {
+       "tag": "markdown",
+       "content": "后续只需一把 Cursor Key，即可覆盖以上全部模型，无需再单独申请和维护。"
+      }
+     ]
+    },
+    {
+     "tag": "markdown",
+     "content": "**自助查询**　<font color='grey'>在终端或 IDE 对话框里直接输入</font>",
+     "margin": "4px 0px 8px 0px"
+    },
+    {
+     "tag": "column_set",
+     "flex_mode": "bisect",
+     "horizontal_spacing": "8px",
+     "margin": "0px 0px 16px 0px",
+     "columns": [
+      {
+       "tag": "column",
+       "width": "weighted",
+       "weight": 1,
+       "background_style": "wathet-50",
+       "padding": "12px 12px 12px 12px",
+       "vertical_spacing": "6px",
+       "elements": [
+        {
+         "tag": "markdown",
+         "content": "`查余额`　<font color='grey'>或</font> `cye`"
+        },
+        {
+         "tag": "markdown",
+         "content": "<font color='grey'>当天总限额、已用额度，及高配模型（Opus 系列、gpt-6-astra）系列额度</font>",
+         "text_size": "notation"
+        }
+       ]
+      },
+      {
+       "tag": "column",
+       "width": "weighted",
+       "weight": 1,
+       "background_style": "wathet-50",
+       "padding": "12px 12px 12px 12px",
+       "vertical_spacing": "6px",
+       "elements": [
+        {
+         "tag": "markdown",
+         "content": "`测模型`"
+        },
+        {
+         "tag": "markdown",
+         "content": "<font color='grey'>逐个验证这把 Key 下的模型当前是否可用</font>",
+         "text_size": "notation"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "tag": "button",
+     "text": {
+      "tag": "plain_text",
+      "content": "Cursor · Codex · Claude Code 一键配置"
+     },
+     "type": "primary_filled",
+     "width": "fill",
+     "size": "medium",
+     "behaviors": [
+      {
+       "type": "open_url",
+       "default_url": "https://chat.auto-link.com.cn/oneclick/",
+       "pc_url": "",
+       "ios_url": "",
+       "android_url": ""
+      }
+     ]
+    },
+    {
+     "tag": "column_set",
+     "flex_mode": "bisect",
+     "horizontal_spacing": "8px",
+     "margin": "8px 0px 0px 0px",
+     "columns": [
+      {
+       "tag": "column",
+       "width": "weighted",
+       "weight": 1,
+       "elements": [
+        {
+         "tag": "button",
+         "text": {
+          "tag": "plain_text",
+          "content": "查看自己的 Key"
+         },
+         "type": "default",
+         "width": "fill",
+         "size": "medium",
+         "behaviors": [
+          {
+           "type": "open_url",
+           "default_url": "https://t83dfrspj4.feishu.cn/share/base/query/shrcnf5OElDguABGM3ZZDVoO3cb",
+           "pc_url": "",
+           "ios_url": "",
+           "android_url": ""
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "tag": "column",
+       "width": "weighted",
+       "weight": 1,
+       "elements": [
+        {
+         "tag": "button",
+         "text": {
+          "tag": "plain_text",
+          "content": "模型使用情况看板"
+         },
+         "type": "default",
+         "width": "fill",
+         "size": "medium",
+         "behaviors": [
+          {
+           "type": "open_url",
+           "default_url": "https://chat.auto-link.com.cn/myai",
+           "pc_url": "",
+           "ios_url": "",
+           "android_url": ""
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

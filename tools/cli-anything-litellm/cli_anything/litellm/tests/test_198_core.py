@@ -144,8 +144,8 @@ _LIVE_198_MODULES = frozenset({
     'grok_gif_to_png', 'grok_web_search_preview_rename', 'local_gpu_max_tokens_clamp', 'log_truncate',
     'mock_heartbeat', 'null_byte_sanitize', 'observability_attempt_pusher', 'openrouter_provider_pin',
     'opus_47_fix', 'pricing_overlay', 'reasoning_effort_minimal_normalize', 'responses_aclose',
-    'responses_tool_args_done_backfill', 'sitecustomize', 'streaming_bridge', 'streaming_output_backfill',
-    'weighted_affinity',
+    'responses_tool_args_done_backfill', 'same_group_failover_cap', 'sitecustomize', 'streaming_bridge',
+    'streaming_output_backfill', 'weighted_affinity',
 })
 
 

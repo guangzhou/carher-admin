@@ -3,7 +3,7 @@ name: litellm-198-version-upgrade
 description: >-
   198 LiteLLM（ns litellm-product）整版本升级的总 runbook：看新版变更 → 烘焙补丁 → DB 迁移 → 灰度（驾驶台或命令行）→
   收敛转正 → 修保险丝 → 转正后换 callback。串起现成工具（gray-rollout 状态机 / scripts/run/ 操作层 / 升级驾驶台 /
-  7 条并排回归 / prepare-values / 删除集+形状门禁 / worker-kill 分诊 / lane-callback-swap），每一步都写了
+  8 条并排回归（含主组全挂兜底契约）/ prepare-values / 删除集+形状门禁 / worker-kill 分诊 / lane-callback-swap），每一步都写了
   10-02 v1.103.2、10-17 v1.105.1 两轮踩过的坑。
   Use when 用户说「升级 litellm / 看看新版本有什么变更 / 新版本能不能上 / 灰度新版本 / 把新版设为正式 /
   旧版缩容 / 驾驶台 / 回归一下 / 用例回归 / 新旧并排对比 / 线上 callback 要换 / 三条车道补丁不一致」。
@@ -44,6 +44,27 @@ release 原文用 `curl api.github.com/.../releases/tags/vX.Y.Z` 取（WebFetch 
 | **鉴权语义**（1.104 #43049 key aliases 收窄白名单） | 1323/2116 把 key 会对白名单内名字 403；只有「真 key 形状鉴权并排」抓得到 |
 | 稳定分支的修复进没进新大版本（1.103.3 #44341 不在 1.105.1） | 不在就回移成烘焙补丁，带阴性（旧版复现）+ 阳性对照 |
 | 老补丁的指纹在新版还命中吗 | `midstream_fallback_loop` 指纹在 1.105 仍命中 ⇒ 会覆盖上游新多跳 ⇒ 必须下线 |
+| 🔴 **下线任何补丁前：它提供的每一条行为，新版谁来提供** | 见下方「下线补丁 = 删行为」。10-17 下线 `midstream_fallback_loop` 只核了「上游有多跳」，它另外两条行为（同组换号 ≤3、总预算 10）没人接 ⇒ 10-20 过载风暴全打穿 |
+
+### 下线补丁 = 删行为（10-20 复盘）
+
+**发生了什么**：1.105.1 升级时 `midstream_fallback_loop` 下线（理由成立：指纹仍命中、会盖掉上游新多跳）。
+但这个文件不只修了「中流单发」一件事，09-17 / 09-28 又往里加了**同组换号上限 3** 和**总预算 10**，用户拍过板。
+1.105.1 上游的 `_maybe_run_weighted_failover` 没有同组上限，且同组换号和跨组兜底共用 `max_fallbacks`（默认 5）
+⇒ 16 腿组过载时 5 次全花在换号上，跨组一跳都不走。转正后 3 天第一次 ChatGPT 大面积过载，群里一片「rate limit exceeded」。
+
+**为什么没被拦住**（三层，缺一层都会漏）：
+1. **判据只看了补丁的主要目的**：README 写「上游已有多跳 midstream（#42283/#43133/#43238）」——对，但只覆盖了文件头写的那条。
+   后加的行为写在常量旁的注释里，没进任何清单。
+2. **回归全是健康流量**：7 条用例都在问「请求能不能通」，没有一条逼出「主组整组挂掉」。行为丢了，7/7 照样绿。
+3. **漏掉的配置只在故障时才有人用**：09-28 量过，平时 25 分钟 36 次换号里 32 次第 1 发就成、4 次到第 2 发、第 3 发及以上 0 次。
+   日常指标、灰度 5xx 对比都看不出来，只有上游大面积出问题时才暴露。
+
+**以后怎么做**：
+- 下线补丁前，把它**全文**（含常量注释、`[日期]` 段）列成「行为清单」，每条写「新版谁提供 + 怎么验」，
+  写不出来的就不许下线，或者先做好替代件再下线。清单写进 `patches/v<ver>/README.md`。
+- 这类「只在故障时生效」的行为必须有**故障注入式回归**：§4 新增「主组全挂兜底契约」就是这一条。
+- 恢复件：`k8s/litellm-callbacks/same_group_failover_cap.py` + env `ROUTER_MAX_FALLBACKS=10`（两样都要，单抬上限没用：同族组也过载，次数照样被换号吃满）。
 | live callbacks 引用的上游符号 | `scripts/litellm-callback-upstream-audit.py --old <tag> --new <tag> --cb-dir <live CM 落盘>`（198 root）：GONE = 会静默 skip，CHANGED = 被包装的函数体变了，要回归 |
 | 烘焙补丁 / 覆盖件能不能打到新源码 | 补丁脚本直接对 `git archive <tag>` 的树跑；覆盖件 `patch --dry-run`（1.106 passthrough 那份因为上游改名失败） |
 
@@ -94,7 +115,7 @@ worker 0 被杀、重启不变、监控循环在跑、巡检号已钉旧版；�
 其它坑：心跳账本 append-only ⇒ 新 run 先持锁只留本 run 行；SRC 目录 `chown root` + `chmod go-w`；
 split 按 key 哈希（凌晨 1% 档新版可能只有个位数请求）；试点失败率要按 key×model 拆、对旧版同 key 同 model。
 
-## 4. 回归（每档判定 + 转正前 + 转正后）：7 条用例，一律新旧并排
+## 4. 回归（每档判定 + 转正前 + 转正后）：8 条用例，一律新旧并排
 
 驾驶台「用例回归」区一键跑（选 A/B 车道，要口令 + 二次确认，约 35 分钟）；结果三态：
 **通过** / **同形**（两边一样不过 = 上游或用例问题，不是版本问题）/ **不过**（单边或两边不一样 ⇒ 停）。
@@ -108,6 +129,14 @@ split 按 key 哈希（凌晨 1% 档新版可能只有个位数请求）；试�
 | her 逐 pod | `scripts/litellm-198-her-name-probe.py --clone-key` | 每 pod 每名 OK、阴性被拒 | 每个 pod 各自缓存 key |
 | 预算软拦截 | `scripts/litellm-198-budget-notice-smoke.sh`（`BASE_OVERRIDE`） | 8/8 | 依赖 429；10-14 起 cursor 走高配桶 |
 | codex 压缩 | `scripts/codex-compaction-regression.py` | compaction 格两边恒 1 | 普通格 reasoning 有无是随机的，不算 |
+| **主组全挂兜底契约** | `scripts/litellm-198-failover-contract-check.py [--lane X]` | 每车道 `OK`：成功、主组 ≤4 次、7 跳链每跳恰 1 次 | 10-20 下线补丁丢了同组上限，健康流量回归全绿 |
+
+**兜底契约怎么量**：在车道 pod 里按该车道 `/app/config.yaml` 的 callbacks 顺序 import 全部补丁 + 用 pod 自己的 env
+建真 `Router`，假上游（不出网）让主组 16 腿开流即过载，走真 `aresponses(stream=True)`；同 pod 再用 `python3 -S`（vanilla）跑一遍。
+它量的是**行为**，不管谁提供 ⇒ 下线补丁、helm 冲掉带外补丁、env 被改都会红。10-20 读数：
+prod/gray/guarded-old 全 `主组=4 链=1/1/1/1/1/1`；阴性对照「线上补丁去掉 cap + 上限 5」= `主组=6 链=0/0/0/0/0/0` 抛错（= 事故现场）。
+vanilla 也绿时打 `NOTE`（上游自带了 ⇒ 补丁可评估下线），不算红。🔴 假流对象要带 `_hidden_params`，
+否则 1.103.2 会多包一层、`isinstance` 失败、中流兜底不接 ⇒ 夹具自己的假红（第一版就是这样把 guarded-old 量红的）。
 
 另外每档：worker 被杀 = 0 + 卡顿探针（本机跑 `scripts/litellm-198-worker-kill-triage-keyauth.py --lane all --since 30m --probe`）；
 有效 router 设置（fallbacks/cwf/alias 条数）三车道同 hash。
@@ -143,6 +172,9 @@ python3 $W/litellm-198-lane-callback-add.py rollback litellm-proxy-gray /root/cb
 - swap 只许「callbacks CM 换代 + 点名的 key 变」，冻结后断言 values 里 sha 已变（防 rev10 静默空操作）。
 - drift 报「只有 repo 有」的 `streaming_output_backfill_logonly.py`（阿里云专用）、`inject_prompt_cache_key.py`（198 未启用）是预期的，别装。
 - 🔴 add 是 helm 带外改动：swap 有守卫（live 引用的 CM 名 ≠ helm manifest ⇒ STOP），**下次 helm upgrade 前必须先把 live 回填进快照**。
+  `--env K=V` 可在同一个 patch 里加 env（同名已存在拒绝）；rollback 同时还原 env。
+  10-20 带外装的 `same_group_failover_cap` + `ROUTER_MAX_FALLBACKS=10`（prod/gray）**还不在 helm values 里**；
+  helm upgrade 后先跑兜底契约检查，红了就是被冲掉了。
 - `litellm-callback-install.py` 是 helm 化之前的老路（写可变 CM），别用。
 - 漂移两个方向都踩过（git 新于线上 / 线上独有，10-03 一次入库 14 个）：动之前先把线上版原样入库作基线。
 

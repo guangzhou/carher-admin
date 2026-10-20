@@ -47,6 +47,10 @@ CASES = [
      "what": "超预算 key 两种协议都返回 200 友好文案；高配桶记账落 redis、第二发被拦；非高配模型不拦（阴性对照）",
      "pass": "8/8 PASS",
      "why": "budget_notice 依赖 429 状态码；1.104+ 默认改 422，必须验"},
+    {"id": "failover", "name": "主组全挂兜底契约", "paired": False,
+     "what": "按车道自己的 callbacks + env 建真 Router，主组 16 腿全部开流即过载、7 跳链只有最后一跳活，走真 aresponses 流式；同 pod 再跑一遍不带补丁的 vanilla 当对照",
+     "pass": "每条车道都 OK：请求成功、主组 ≤4 次、链上每跳恰好 1 次",
+     "why": "10-20 升级下线 midstream_fallback_loop 时连带丢了「同组换号≤3」，健康流量的回归全绿，第一次大面积过载就全打穿"},
     {"id": "codex", "name": "codex 压缩", "paired": True,
      "what": "zerokey / chatgpt 池 / deepseek 三条路的压缩轮和普通轮，比输出项形状",
      "pass": "compaction 三格两边都 compaction=1；其余格两边形状同类（模型随机出不出 reasoning 不算差异）",
@@ -139,6 +143,10 @@ def _cmds(case: str, a_ip: str, b_ip: str, out: Path) -> list[tuple[str, list[st
     if case == "budget":
         return [(side, ["bash", str(S / "litellm-198-budget-notice-smoke.sh")], {"BASE_OVERRIDE": f"http://{ip}:4000"})
                 for side, ip in (("A", a_ip), ("B", b_ip))]
+    if case == "failover":
+        lanes = [k for k, v in LANE_CHOICES.items() if v in (_LANES["A"], _LANES["B"])]
+        return [("A+B", ["python3", str(S / "litellm-198-failover-contract-check.py"), "--local",
+                         *[x for lane in lanes for x in ("--lane", lane)]], {})]
     if case == "codex":
         return [(side, ["python3", str(S / "codex-compaction-regression.py"), "before" if side == "B" else "after"],
                  {"LITELLM_BASE": f"http://{ip}:4000/v1", "REG_OUT_DIR": str(out)}) for side, ip in (("A", a_ip), ("B", b_ip))] \
@@ -210,6 +218,14 @@ def parse(case: str, logs: dict[str, str]) -> dict:
         (pa, fa), (pb, fb) = cnt.get("A", (0, [])), cnt.get("B", (0, []))
         st = "PASS" if not fa and not fb else ("SAME_FAIL" if sorted(fa) == sorted(fb) else "FAIL")
         return {"status": st, "summary": f"A {pa}/{pa + len(fa)} · B {pb}/{pb + len(fb)}", "details": d[:20]}
+    if case == "failover":
+        t = "\n".join(logs.values())
+        m = re.search(r"^SUMMARY (.+)$", t, re.M)
+        d = [ln.strip() for ln in t.splitlines() if ln.startswith(("FAIL", "STOP", "NOTE", "OK"))]
+        if not m:
+            return {"status": "ERROR", "summary": "没拿到 SUMMARY 行", "details": t.splitlines()[-5:]}
+        st = "PASS" if "FAIL" not in m.group(1) and "STOP" not in m.group(1) else ("ERROR" if "STOP" in m.group(1) else "FAIL")
+        return {"status": st, "summary": m.group(1), "details": d}
     if case == "codex":
         t = logs.get("diff", "")
         changed = re.search(r"变了: \[(.*?)\]", t)

@@ -31,6 +31,18 @@ md5 join：两边各 20575 个文件、零增删，只 5 个文件不同（下�
 ## callback / config 变化
 
 - 下线 `midstream_fallback_loop`：1.105.1 上游已有多跳 midstream（#42283/#43133/#43238），老补丁指纹仍命中会覆盖上游实现。
+
+  🔴 **10-20 补记：这条下线漏了两条行为**（当时只核了第一行）。按「行为清单」重列：
+
+  | 老补丁提供的行为 | 1.105.1 谁提供 | 怎么验 |
+  |---|---|---|
+  | 中流失败后继续兜底（不是单发） | 上游 #42283/#43133/#43238 | 读码 + 兜底契约检查 |
+  | 链子逐层下降（attempted_targets 去重） | 上游 `mid_stream_fallback_hop_kwargs` 共享 attempted_targets | 兜底契约检查：链每跳恰 1 次 |
+  | **同组换号 ≤3 次再走链**（09-17） | ❌ 没人 → 10-20 补 `same_group_failover_cap.py` | 兜底契约检查：主组 ≤4 |
+  | **总预算 10**（09-28，用户拍板） | ❌ 默认 5 → 10-20 补 env `ROUTER_MAX_FALLBACKS=10` | 兜底契约检查：7 跳全走到 |
+  | trace id 进 failover 日志 | 部分（上游日志无 trace）→ cap 补丁的日志带 trace | — |
+
+  后果与复盘见 skill `litellm-198-version-upgrade`「下线补丁 = 删行为」。
 - `streaming_bridge.py` / `anthropic_bridge_error_surface.py`：先 import `pass_through`（#43329 改名），回落 `experimental_pass_through`。
   streaming_bridge 的 `patched_init` 改为先调上游 `__init__`（1.103+ 有 `completion_start_time`）。
   bridge_error_surface 在 1.105.1 上指纹不符自动拒装，用上游自带的流内 error 事件（#43126/#41826）。

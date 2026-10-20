@@ -75,7 +75,7 @@ def volume_index(spec, name):
     return idx[0]
 
 
-def install(deploy, path, entry, after):
+def install(deploy, path, entry, after, env=()):
     fname = os.path.basename(path)
     content = open(path, encoding="utf-8").read()
     d = get_json("deploy", deploy)
@@ -133,7 +133,13 @@ def install(deploy, path, entry, after):
         {"op": "add", "path": "/spec/template/spec/containers/0/volumeMounts/-",
          "value": {"name": "callbacks", "mountPath": f"/app/{fname}", "subPath": fname, "readOnly": True}},
     ]
-    print(f"patch: callbacks {old_cb} -> {new_cb}; config {old_cfg} -> {new_cfg}; +mount /app/{fname}")
+    # 可选：同一个 patch 里加 env（同一次滚动生效，不多滚一轮）。已存在的同名 env 拒绝，不覆盖。
+    have = {e["name"] for e in c.get("env", [])}
+    for kv in env:
+        k, v = kv.split("=", 1)
+        assert k not in have, f"env {k} already set on {deploy}"
+        ops.append({"op": "add", "path": "/spec/template/spec/containers/0/env/-", "value": {"name": k, "value": v}})
+    print(f"patch: callbacks {old_cb} -> {new_cb}; config {old_cfg} -> {new_cfg}; +mount /app/{fname}; +env {list(env)}")
     kc("patch", "deploy", deploy, "--type", "json", "-p", json.dumps(ops))
     print(kc("rollout", "status", f"deploy/{deploy}", "--timeout=1500s").strip().splitlines()[-1])
     print(f"ROLLBACK: python3 {sys.argv[0]} rollback {deploy} {bk}")
@@ -169,7 +175,9 @@ def rollback(deploy, bk):
     os_ = old["spec"]["template"]["spec"]
     ops = [{"op": "replace", "path": "/spec/template/spec/volumes", "value": os_["volumes"]},
            {"op": "replace", "path": "/spec/template/spec/containers/0/volumeMounts",
-            "value": os_["containers"][0]["volumeMounts"]}]
+            "value": os_["containers"][0]["volumeMounts"]},
+           {"op": "replace", "path": "/spec/template/spec/containers/0/env",
+            "value": os_["containers"][0].get("env", [])}]
     kc("patch", "deploy", deploy, "--type", "json", "-p", json.dumps(ops))
     print(kc("rollout", "status", f"deploy/{deploy}", "--timeout=1500s").strip().splitlines()[-1])
 
@@ -178,7 +186,8 @@ if __name__ == "__main__":
     a = sys.argv[1:]
     if a[:1] == ["install"] and len(a) >= 4:
         after = a[a.index("--after") + 1] if "--after" in a else "responses_aclose.responses_aclose"
-        install(a[1], a[2], a[3], after)
+        env = [a[i + 1] for i, x in enumerate(a) if x == "--env"]
+        install(a[1], a[2], a[3], after, env)
     elif a[:1] == ["verify"] and len(a) == 4:
         verify(a[1], a[2], a[3])
     elif a[:1] == ["rollback"] and len(a) == 3:

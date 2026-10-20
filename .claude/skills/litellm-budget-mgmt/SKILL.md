@@ -107,7 +107,7 @@ PG psql 命令行 default autocommit，单条 UPDATE 就是单条事务。对 �
 
 | 环境 / key | 超额行为 | 载体 |
 |---|---|---|
-| 198 `claude-code-*` / `cursor-*`（gated）| **HTTP 200** 助手消息「🚫 你的 key 今日额度已用完：已消费 $X / 限额 $Y。北京时间明日 00:00 自动重置…」| budget_notice.py ③ 软拦截（auth 层 monkey-patch 吞 BudgetExceededError → pre-call 出 mock，零上游零计费）|
+| 198 `claude-code-*` / `cursor-*`（gated）| **HTTP 200** 助手消息「🚫 **你的 key 今日额度已用完**，北京时间 MM-DD 00:00 自动重置…」+ 三列额度表（10-20 起 markdown，样例见下方「文案长什么样」）| budget_notice.py ③ 软拦截（auth 层 monkey-patch 吞 BudgetExceededError → pre-call 出 mock，零上游零计费）|
 | 198 其余 key | HTTP 429 + 友好中文 body + `type=budget_exceeded` | error_sanitize.py 的 BudgetExceededError 分支 |
 | **阿里云 `carher-*`（her bot）**| HTTP 429 原生（**③ 用 `BUDGET_FRIENDLY_MOCK_DISABLED=1` 关着**，bot 侧行为不变；①查余额②90%预警已开，gate `BUDGET_NOTICE_KEY_PREFIXES=carher-`。要开③删该 env 即可）| 同一份 budget_notice.py（三拷贝 md5 全等），repo 清单 `k8s/litellm-proxy.yaml` |
 | **198 `carher-*`（her bot，2026-09-27 起）**| 超额行为不变（走上面"198 其余 key"那行的原生 429）；**多了 ① `/查余额` 和 ⑤ `/测模型`**，gate 是独立窄门 `BUDGET_NOTICE_QUOTA_KEY_PREFIXES=carher-`（⑤ 还要 `BUDGET_NOTICE_PROBE_ENABLED=1`，已开）| budget_notice.py `_quota_gated` |
@@ -117,7 +117,7 @@ PG psql 命令行 default autocommit，单条 UPDATE 就是单条事务。对 �
 `BUDGET_NOTICE_KEY_PREFIXES` / `_KEY_ALIASES` 是 **①②③④ 共用**的一道门。
 往里加一个前缀 = 同时给这批 key 打开：
 
-- ② 90% 提醒**注入进它回复用户的话里**（bot 场景 = 同事看到运维文案）
+- ② 80%/95% 提醒**注入进它回复用户的话里**（bot 场景 = 同事看到运维文案）
 - ③ 超预算从原生 429 改成 200 假助手消息
 - ④ 每日系列额度桶。🔴 **198 三条 lane 实测 `BUDGET_FAMILY_ENABLED=1`**
   （`GPT53=200 / OTHER=500 / CLAUDE=100`），加进去会**真的掐住生产 bot**。
@@ -165,7 +165,31 @@ CLI 用户才看得到我们的英文 promo。要给 IDE 用户可读文案没�
 
 配套能力（同一个 hook，`BUDGET_NOTICE_KEY_PREFIXES=claude-code-,cursor-` 门控）：
 - 用户发 `/查余额`（Cursor 用户须发裸词 `查余额`，`/` 开头会被 Cursor 命令面板拦截）→ 200 返回今日用量，零计费
-- 已用 ≥90% → 响应流末尾注入一次性预警（每 key 每北京日一次）
+- ② **80% / 95% 双档提醒**（10-20 起，原单档 90%）：总额度和**本次请求模型所属的系列桶**（cursor = 高配 Opus/Astra）各自跨档时注入一次。去重键 `budget_notice:warn:<桶>:<档>:<token>:<北京日>`（每桶每档每天一次）；一步跳到 95% 只发 95% 并把 80% 记成已用。档位 env `BUDGET_NOTICE_WARN_RATIOS=0.8,0.95`（旧单值 `BUDGET_NOTICE_WARN_RATIO` 仍认）。
+  - 提醒里附 cye 同一张「今日按模型」表（开流时并行查、流尾注入，查不到只少表、提醒照发）；系列桶跨档时一并列「用完后仍可用」模型表
+  - 系列桶只读**本次模型所属的那一个**（每请求多 1 次 redis GET）：用 gpt 时总额跨档，提醒里不显示高配桶 —— 有意为之
+
+### 文案长什么样（10-20 用户逐版敲定，改前先给用户看 demo）
+
+规则：**全部 markdown 管道表**（照 cye 的 `_model_catalog_text` 写法，对齐交给渲染器，数字列 `---:`）；
+额度表**三列**「额度 / 已用 / 限额 / 用量」，**不放「剩余」列**，**重置时间放表上方一句「⏰ 北京时间 MM-DD 00:00 重置」**
+（各桶时刻不同就分开说，不压成一个）；模型一律**产品名**（per-key alias 反查，见下方 TTFT 节）；
+提示语固定 `单独发一行 查余额或者cye 可查完整明细`（⛔ 别写 `/查余额`，Cursor 吞 `/`）；**不附「找谁提额」**（用户明确不要）。
+
+```
+⚠️ **额度提醒**：高配模型(Opus/Astra) 今日已用 82%
+⏰ 北京时间 10-21 00:00 重置
+| 额度 | 已用 / 限额 | 用量 |            ← 跨档那行前缀 ⚠️，陪同展示的桶不标
+🔀 **高配模型(Opus/Astra) 用完后仍可用**（31 个）
+| 系列 | 模型（粗体 = 今天用过） |      ← 按厂商分行；今天用过的加粗排本行最前，行按今日花费排
+💰 今日累计消费 … + 📈 今日按模型表（= cye 同一张）
+单独发一行 查余额或者cye 可查完整明细。（额度到 80%/95% 各提醒一次）
+```
+
+- ④ 系列用完：`🚫 **你的 key 今日 <桶> 额度已用完**。` + ⏰ 句 + 额度表（该桶 + 总额）+ `✅ **其他模型不受影响**…（N 个）` + 可用模型表**全量**。可用 = 白名单 − 被拦桶 − 其他已满桶 − 明确判出的画图/语音/视频/embedding（mode 判不出算聊天）。白名单为空 ⇒ 退回泛化一句「其他系列的模型不受影响」
+- ③ 总额用完：标题带重置时间 + 一行额度表 + 「所有模型都计入总额度，切换模型无法继续」，**不列模型**
+- cye 开头：`📊 **<alias> 今日用量**（数据约 1 分钟延迟）` + ⏰ 句 + 汇总表（今日总额度 / 系列额度 · X / 今日累计消费）；累计消费查不到时**不进表**，表下原样给「查询暂不可用」
+- T0/smoke 锚点，改文案时别动：「今日用量」「系列额度」「今日额度已用」「额度已用完」「不受影响」「$5.00」
 
 ### ⑤ `/测模型` —— 逐个真打白名单，报谁活谁死（2026-09-27 起）
 
@@ -258,10 +282,19 @@ pod 日志里也没有（router 只打落点名）。根因：**per-key alias �
 ⚠️ 拿这个反查去回答「他实际发的是哪个名」时先看这把 key 是不是一对一。
 （用户自己那把 `-50gj` 是 11 进 11 出一对一，他看到的永远精确。）
 
-🔴 **`_TTFT_SQL` 一字不许动**，两条 2026-09-24 实测的 1000x 级硬约束：
+🔴 **兜底行的 `model_group` = 兜底组，不是用户发的**（10-20 gray 冒烟实测）：发
+`wangsu7-gpt-5.6-sol` 走了兜底，落库 `model_group=chatgpt-gpt-5.6-sol`，原名在
+`metadata->>'original_model_group'`。不处理 ⇒ 表里冒出用户从没选过的名字。
+修法：`_TTFT_SQL` 第二个参数 `$2` = 这把 key 认识的组名 JSON 数组（白名单 + key 级 alias
+落点 + router 组别名落点，`_known_group_names`）；`model_group` 不在里面的行**才** CASE
+惰性读 metadata。实测 cursor-liuguoxian-std 今日 1571 行：整列读 metadata **9,406 ms** /
+CASE 惰性 **15 ms** / 原 SQL 297 ms ⇒ 新 SQL 286 ms。`$2` 为空数组 ⇒ 永不读 metadata。
+
+🔴 **`_TTFT_SQL` 的硬约束**（改之前先 EXPLAIN ANALYZE 实测，单测 `test_sql_keeps_the_two_measured_performance_constraints` 钉着）：
 过滤列必须是 `api_key`（773 ms），**不能**是 `metadata->>'user_api_key_alias'`
-（791,457 ms）；`"startTime"` 上**不许套算术**（索引会死）。proxy
-`connection_limit=1`，一条慢查询饿死全部 DB 访问。
+（791,457 ms）；`"startTime"` 上**不许套算术**（索引会死）；**metadata 只许在 SELECT 的
+CASE 里按行惰性读、绝不进 WHERE、绝不整列读**。DB 连接池 10-20 起 1→3（另一会话
+prod rev21），但仍是个位数，一条慢查询照样饿死全部 DB 访问。
 
 止血 env（改 deploy litellm-proxy env 即生效）：`BUDGET_NOTICE_DISABLED=1`
 全关；`BUDGET_FRIENDLY_MOCK_DISABLED=1` 只关 200 软拦截退回友好 429；
@@ -269,7 +302,18 @@ pod 日志里也没有（router 只打落点名）。根因：**per-key alias �
 **`BUDGET_NOTICE_PROBE_ENABLED=0`（或删掉）只关 ⑤ `/测模型`** —— 它是唯一会
 主动花钱的功能，出事先关这个，别动整个 hook。
 排障日志判据：`kubectl -n litellm-product logs -l app=litellm-proxy --tail=-1 | grep "budget_notice: soft-block"`。
-prod 冒烟：`scripts/litellm-198-budget-notice-smoke.sh`（198 上 sudo 跑，8 检查项）。
+prod 冒烟：`scripts/litellm-198-budget-notice-smoke.sh`（198 上 sudo 跑，13 检查项；
+`SVC=litellm-proxy-gray-nodeport` 指定车道，默认 prod `litellm-proxy`）。S9~S11 = ② 双档 /
+同档不重复 / 高配跨档带可用列表 / 表里只出现用户发的名字。
+
+### 🔴 改 budget_notice 的上线 SOP（10-20 走通，顺序不能省）
+
+1. 本地单测 `python3 -m pytest k8s/litellm-callbacks/tests/test_budget_notice.py -q`（全目录跑有 7 个与本文件无关的收集错误，是既存的桩冲突）
+2. **改文案先给用户看 demo**：`python3 scripts/budget-notice/demo.py` 用 198 真 key 白名单 fixture（`scripts/budget-notice/fixtures/`，只读拉的，只有模型名/mode/上限）渲染一整天 8 个场景。⛔ 别拿手写假 key 演示：没 `aliases` 时反查落空，会把 `kiro-*` 落点名漏出来被用户当成 bug。改了 hook 函数签名记得同步 demo 里的桩，否则表格退化成「查询暂不可用」
+3. gray：`$SRC/scripts/lane-callback-swap.sh --lane gray --run-dir $D --files-dir <放着新文件的目录> budget_notice.py`（198 root；`D=/root/l3/up1051-20261016T161310Z`）→ `SVC=litellm-proxy-gray-nodeport bash /root/litellm-198-budget-notice-smoke.sh`
+4. 🔴 **再用两种客户端线型各真打一发**：`SVC=litellm-proxy-gray-nodeport python3 /root/litellm-198-budget-notice-wire-probe.py`（repo `scripts/budget-notice/wire-probe.py`；`/v1/messages` + `/v1/responses` 流式，断言提醒+表+提示语都到、流正常收尾；临时 key 用完即删）。10-20 冒烟全绿但 `/v1/messages` 一个字没注入：claude-opus-4.8 桥接流**不发 `content_block_stop`**，旧注入状态机永远等不到注入点（旧版 ② 在这类流上一直是哑的）。单测和冒烟（chat/completions）都测不出
+5. guarded-old → prod（prod 旧 pod 优雅退出最长 10 分钟，脚本会一直等，正常）→ prod 冒烟 + `python3 /root/litellm-198-budget-notice-wire-probe.py`（默认 prod）+ `python3 scripts/litellm-198-callbacks-drift.py --file budget_notice.py` 三车道对齐
+6. 🔴 别的会话可能同时在动同一条车道（10-20 prod rev21 是另一会话的 `lane-config-tune.sh`）：上线前 `helm history` 看最新 revision 是不是自己的；swap 是从 helm 快照起步，不会回退别人已入快照的改动
 实现/上线全记录见 [[project_198_budget_notice_suite_2026_08_19]] 与
 `.cursor/skills/litellm-hook-dev/SKILL.md` 的 budget_notice 案例。
 

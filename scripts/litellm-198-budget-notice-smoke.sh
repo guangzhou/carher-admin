@@ -6,6 +6,9 @@
 #
 # 2026-10-20 加 S9~S11:② 改成总额/高配桶 80%/95% 双档 + 附 cye 按模型表 + 满后可用模型;
 #   ④ 拦截文案列出可用模型。
+#   🔴 本脚本只走 /v1/chat/completions。13/13 全绿时 /v1/messages 上的提醒曾一个字没注入
+#   (桥接流不发 content_block_stop)。上线前后还要跑线型探针:
+#   sudo [SVC=...] python3 /root/litellm-198-budget-notice-wire-probe.py   (repo scripts/budget-notice/wire-probe.py)
 #
 # 2026-09-24 基线:8/8 PASS。三个烧过的坑已内置:
 #   - ③ 文案里的金额含预算预留层的**预估成本**(capacity patch),别断言精确

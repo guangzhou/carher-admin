@@ -174,6 +174,10 @@ python3 $W/litellm-198-lane-callback-add.py rollback litellm-proxy-gray /root/cb
 - swap 只许「callbacks CM 换代 + 点名的 key 变」，冻结后断言 values 里 sha 已变（防 rev10 静默空操作）。
 - drift 报「只有 repo 有」的 `streaming_output_backfill_logonly.py`（阿里云专用）、`inject_prompt_cache_key.py`（198 未启用）是预期的，别装。
 - 🔴 add 是 helm 带外改动：swap 有守卫（live 引用的 CM 名 ≠ helm manifest ⇒ STOP），**下次 helm upgrade 前必须先把 live 回填进快照**。
+  10-20 起守卫**只比真挂载的卷**：live 上「只声明未挂载」的旧卷（历次升级残留，如 prod 曾有 4 个 `litellm-stable-*`）
+  逐条打印 `ignore unmounted live volume …` 后忽略，helm upgrade 会顺手去掉它们（不影响运行）。挂载卷不一致照旧 STOP。
+- swap 前先 `helm history <release>` 看最新 revision 是不是自己的：同一天别的会话会用 `lane-config-tune.sh` 在同车道改配置/下线 callback（10-20 prod rev21）。
+  swap 从 helm 快照起步，别人已入快照的改动不会被回退；但别拿「我上次部署的是 revN」当现状。
   `--env K=V` 可在同一个 patch 里加 env（同名已存在拒绝）；rollback 同时还原 env。
   带外装完要把 live 回填进车道快照（`$I/snap` + `--deployment` 那份 yaml），**只回填、不 helm upgrade**
   （下一次计划内的 `lane-config-tune.sh --adopt-live` / swap 顺带收编，省一次滚动）。回填只许「live − 快照 = 刚加的那条

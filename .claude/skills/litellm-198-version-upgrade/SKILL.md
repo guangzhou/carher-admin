@@ -65,6 +65,7 @@ release 原文用 `curl api.github.com/.../releases/tags/vX.Y.Z` 取（WebFetch 
   写不出来的就不许下线，或者先做好替代件再下线。清单写进 `patches/v<ver>/README.md`。
 - 这类「只在故障时生效」的行为必须有**故障注入式回归**：§4 新增「主组全挂兜底契约」就是这一条。
 - 恢复件：`k8s/litellm-callbacks/same_group_failover_cap.py` + env `ROUTER_MAX_FALLBACKS=10`（两样都要，单抬上限没用：同族组也过载，次数照样被换号吃满）。
+| 🔴 文档里的开关在**当前 tag 源码**里有没有 | `git -C /root/litellm-fork grep -c <name> v<当前版本> -- litellm` ——10-20 查到 4 个只在文档里（`reasoning_effort_rounding` 1.108+、`fallback_on_unsupported_params` 1.107…），照文档配不生效 |
 | live callbacks 引用的上游符号 | `scripts/litellm-callback-upstream-audit.py --old <tag> --new <tag> --cb-dir <live CM 落盘>`（198 root）：GONE = 会静默 skip，CHANGED = 被包装的函数体变了，要回归 |
 | 烘焙补丁 / 覆盖件能不能打到新源码 | 补丁脚本直接对 `git archive <tag>` 的树跑；覆盖件 `patch --dry-run`（1.106 passthrough 那份因为上游改名失败） |
 
@@ -187,6 +188,33 @@ python3 $W/litellm-198-lane-callback-add.py rollback litellm-proxy-gray /root/cb
   任何 helm upgrade 前后跑兜底契约检查，红了就是被冲掉了。
 - `litellm-callback-install.py` 是 helm 化之前的老路（写可变 CM），别用。
 - 漂移两个方向都踩过（git 新于线上 / 线上独有，10-03 一次入库 14 个）：动之前先把线上版原样入库作基线。
+
+### 6.1 改 config 标量 / 下线 callback：`lane-config-tune.sh`（10-20 起）
+
+```bash
+# 198 root；--set 只认三段 settings 下的一行标量（JSON 值，null=删键）；--drop-callback 去列表条目 + 删快照文件 + 去 mount
+flock -n $D/.console.lock bash $SRC/scripts/lane-config-tune.sh --lane gray --run-dir $D [--adopt-live] --dry-run \
+  --set general_settings.user_api_key_cache_max_size=3000 --drop-callback log_truncate
+# 去掉 --dry-run 才落地；回滚：同命令换成 --restore $I/tune-<ts>
+```
+
+- 门禁：config 语义 diff **恰好** = 声明项（+ 去掉的 callbacks 条目），callbacks CM 只少声明的 key，Deployment 只许卷名/checksum/被下线 mount 变。
+- 一次也没声明 ⇒ 拒绝（「no-op --set 收编带外」走不通，也不是 no-op：CM 名换代 + 悬空 mount 被去掉 ⇒ 照样滚一次）。
+- `--adopt-live`：live 有带外改动、且已按上面规则回填进快照时用 —— 基线换成 live 对象；live 上 subPath 不在 CM 里的悬空 mount 逐条打印忽略。
+- 容器里 `/app/.venv/bin/test` 是 python 入口，会盖掉 coreutils `test` ⇒ pod 内判文件存在一律 `sh -c '[ -e … ]'`。
+- 选 gray 先（零流量），回归 8 条 + 下面两把量具，再同参数上 prod；改 prod 前给同车道活跃会话发消息。
+- 10-20 实例：pool 1→3（每 pod 6 连接，库 50/100）+ 鉴权缓存 3000 + 下线 log_truncate/pingfix ⇒ gray rev26 / prod rev21。
+
+198 上的副本在 `/opt/gray-console/scripts/`，和仓库逐字节一致；改了仓库要同步过去。
+
+| 量具 | 用途 | 判据 |
+|---|---|---|
+| `scripts/litellm-198-spend-row-parity.py --lane-a … --lane-b … --model …` | 每个请求都落 SpendLogs 行且 token>0（下线日志类 callback / 改连接池后必跑） | 两车道 n/n。按每车道独立短命 key 的 `api_key` 计数——`request_id` ≠ `x-litellm-call-id`，按它匹配全 0 是量具坏 |
+| `scripts/litellm-198-auth-latency-ab.py --keys 1200` | N 把临时 key 打 `/v1/models`，量鉴权缓存命中前后 | key 数 > 缓存时每轮都回源（p50 不降）；装得下第 2 轮起 p50 降 |
+| `scripts/litellm-198-failover-contract-check.py --local --lane X` | 主组全挂兜底契约（同组上限 + 逐跳） | 任何 helm upgrade 前后各跑一次；并发跑会撞 `/tmp/.fcc.py`，STOP 先重跑 |
+
+🔴 回归期间**别的会话 rollout 了 B 侧车道** ⇒ B 侧 -1 / `No route to host`，单边全挂 = 量具（pod 被换掉），重跑那几条即可；
+codex 压缩格假红两类已修（model_id 变 12 位 hex 哈希不再按族比；`keepalive` 心跳算噪声）。
 
 ## 7. 排查原则
 

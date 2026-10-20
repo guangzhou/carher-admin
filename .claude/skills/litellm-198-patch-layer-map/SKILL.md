@@ -8,6 +8,7 @@ description: >-
   熟悉 litellm 代码和补丁 / 某个上游函数被谁 patch 了 / 三条车道补丁一样吗 / 保险丝和生产差在哪 /
   升级前先摸清补丁面」。装/换单个补丁走 [[litellm-198-router-patch]] 或 lane 脚本，整版本升级走
   [[litellm-198-version-upgrade]]，写新 hook 走 [[litellm-hook-dev]]；本 skill 只回答「现在是什么样」。
+  读上游源码 / 看每个补丁接管了哪个上游函数 / 查生产库，走 [[cli-anything-litellm]]（`src` / `patches` / `db`）。
 ---
 
 # 198 LiteLLM 补丁层全景
@@ -92,8 +93,8 @@ deepseek_id_prefix → streaming_output_backfill → codex_compaction_v2 → van
 | 稳定分支 | 已 fetch 成 `up/stable-1.105.x`、`up/stable-1.106.x`；有没有新回移：`git rev-list --count v1.106.0..up/stable-1.106.x` |
 | 线上真实代码 | 不是 tag，是 tag + ③④；要看「线上这个函数长什么样」就 `kubectl exec … cat <pkg>/<path>`，再和 tag `diff -u` |
 
-本机 `~/codes/litellm` 停在 5 月，别用它判线上行为。本机 `cli-anything-litellm`（仓外
-`~/Documents/调研/litellm/agent-harness`，8/2 生成的通用版，装的是 litellm 1.79）只能打 proxy HTTP API，看不到补丁层。
+本机 `~/codes/litellm` 停在 5 月，别用它判线上行为。读源码直接用
+`cli-anything-litellm src find <符号>` / `src show <path:line>`（自动取线上版本的 tag，见 [[cli-anything-litellm]]）。
 
 ## 坑（都踩过）
 

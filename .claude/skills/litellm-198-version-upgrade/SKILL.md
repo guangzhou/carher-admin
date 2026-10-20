@@ -14,7 +14,7 @@ description: >-
 **一句话**：看清新版改了什么 → 补丁按版本烘进镜像 → clone 上验过迁移再迁生产 → 灰度放量（驾驶台自动开顺路）→
 §7 原地升级 `litellm-proxy` → 保险丝换成上一版。每一步都有门禁，门禁红了先查门禁说的是不是真的，不许绕过。
 
-相关：[[litellm-198-patch-layer-map]] 升级前先现量线上四层补丁面 · [[litellm-gray-key-rollout]] 选人/切 key · [[litellm-198-worker-kill-502]] worker 被心跳杀 ·
+相关：[[litellm-198-patch-layer-map]] 升级前先现量线上四层补丁面 · [[cli-anything-litellm]] `src find --tag <新版>` 对比上游函数、`patches compare` 看三车道 · [[litellm-gray-key-rollout]] 选人/切 key · [[litellm-198-worker-kill-502]] worker 被心跳杀 ·
 [[litellm-198-key-allowlist]] 改 key 白名单/别名 · 手册 `litellm-gray-rollout/docs/litellm-198-gray-operator-manual.md`
 （§5.5 R1~R10、§7 收敛、§7.0 后台任务交接）
 

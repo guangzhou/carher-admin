@@ -173,8 +173,12 @@ python3 $W/litellm-198-lane-callback-add.py rollback litellm-proxy-gray /root/cb
 - drift 报「只有 repo 有」的 `streaming_output_backfill_logonly.py`（阿里云专用）、`inject_prompt_cache_key.py`（198 未启用）是预期的，别装。
 - 🔴 add 是 helm 带外改动：swap 有守卫（live 引用的 CM 名 ≠ helm manifest ⇒ STOP），**下次 helm upgrade 前必须先把 live 回填进快照**。
   `--env K=V` 可在同一个 patch 里加 env（同名已存在拒绝）；rollback 同时还原 env。
-  10-20 带外装的 `same_group_failover_cap` + `ROUTER_MAX_FALLBACKS=10`（prod/gray）**还不在 helm values 里**；
-  helm upgrade 后先跑兜底契约检查，红了就是被冲掉了。
+  带外装完要把 live 回填进车道快照（`$I/snap` + `--deployment` 那份 yaml），**只回填、不 helm upgrade**
+  （下一次计划内的 `lane-config-tune.sh --adopt-live` / swap 顺带收编，省一次滚动）。回填只许「live − 快照 = 刚加的那条
+  callbacks 条目 + 文件 + env + mount」，别的差异一律停；env 只追加新名字，**不从 live 整份抄**（gray 的
+  `PROXY_BATCH_POLLING_ENABLED` 是 prepare-values 覆盖的）。验收 = `lane-config-tune.sh --adopt-live --dry-run` 门禁 PASS 且 target.yaml 里有它。
+  10-20：sgfc 回填 gray（rev26 已收编）、prod（`prod-target/backfill-20261020T101624Z`，待下次 prod tune 收编）。
+  任何 helm upgrade 前后跑兜底契约检查，红了就是被冲掉了。
 - `litellm-callback-install.py` 是 helm 化之前的老路（写可变 CM），别用。
 - 漂移两个方向都踩过（git 新于线上 / 线上独有，10-03 一次入库 14 个）：动之前先把线上版原样入库作基线。
 

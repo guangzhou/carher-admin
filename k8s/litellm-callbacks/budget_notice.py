@@ -16,7 +16,11 @@ key 日额度（claude-code-* $70/天、cursor-* $100/天，北京 0 点重置�
    ``ModifyResponseException``（路由对它有原生 200 + stream 处理；
    ``litellm_params.mock_response`` 在该路径返回非流式对象，与 Claude Code 的
    stream:true 错配）。
-② 已用 ≥ WARN_RATIO（默认 90%）且未超限 —— 把一段提醒注入**本次响应最后一个
+② 总额度、以及本次请求模型所属的系列桶（cursor = 高配 Opus/Astra），已用跨过
+   80% / 95%（2026-10-20 起双档，`BUDGET_NOTICE_WARN_RATIOS` 可调）且未满 ——
+   每 (桶, 档位) 每北京日提醒一次，附 cye 同款「今日累计 + 按模型」表；系列桶跨档时
+   一并列出满后仍可用的模型。④ 系列桶用完的拦截文案列出全部可用模型。
+   原单档行为：把一段提醒注入**本次响应最后一个
    text block 内部**（其 content_block_stop 之前；Claude Code 只把最后一个
    text block 当结果展示，追加独立尾块会顶掉真正的答案，2026-08-19 canary
    实测）。每 key 每北京日最多一次（redis 去重，解析链照抄 weighted_affinity
@@ -85,7 +89,8 @@ BUDGET_NOTICE_QUOTA_KEY_PREFIXES=carher-       ①（且只有①）的独立窄
                                               系列额度桶，线上 FAMILY_ENABLED=1
                                               会真掐住 bot）。只想开 /查余额 就
                                               用这个 env。不设 = 零行为变化。
-BUDGET_NOTICE_WARN_RATIO=0.9                   ② 的阈值
+BUDGET_NOTICE_WARN_RATIOS=0.8,0.95             ② 的档位（默认 80%/95%）；旧单值
+                                              BUDGET_NOTICE_WARN_RATIO 仍认（=单档）
 BUDGET_NOTICE_PROBE_ENABLED=1                  启用 ⑤ /测模型（默认关）。
                                               🔴 它逐个模型**真打一次、真花钱**，
                                               所以必须能单独关掉，不复用上面任何
@@ -117,6 +122,8 @@ _MODEL_CATALOG_CACHE_TTL = 300.0
 _TTFT_CACHE_TTL = 60.0
 _MODEL_CATALOG_CACHE: dict = {}
 _TTFT_CACHE: dict = {}
+_TODAY_USED: dict = {}   # token -> (monotonic, [今日用过的产品名，按花费降序])
+_TODAY_TOTAL: dict = {}  # token -> (monotonic, 今日累计消费 float)；cye 汇总表用数值，不解析文案
 
 # ---------------------------------------------------------------- env gates
 
@@ -149,11 +156,30 @@ def _gate_prefixes() -> Tuple[str, ...]:
     return tuple(x.strip() for x in raw.split(",") if x.strip())
 
 
-def _warn_ratio() -> float:
-    try:
-        return float(os.environ.get("BUDGET_NOTICE_WARN_RATIO", "0.9"))
-    except Exception:
-        return 0.9
+_WARN_RATIOS_DEFAULT: Tuple[float, ...] = (0.8, 0.95)
+
+
+def _warn_ratios() -> Tuple[float, ...]:
+    """② 的提醒档位，升序。每档每 key 每北京日最多一次（2026-10-20 用户定 80%/95%）。
+
+    ``BUDGET_NOTICE_WARN_RATIOS=0.8,0.95`` 优先；只设了旧的单值
+    ``BUDGET_NOTICE_WARN_RATIO`` 时按单档处理；都没设 = 80%/95%。
+    解析不出合法档位（0<r<1）一律回默认，不让一个手滑的 env 把提醒整个关掉。
+    """
+    raw = os.environ.get("BUDGET_NOTICE_WARN_RATIOS")
+    if raw is None:
+        raw = os.environ.get("BUDGET_NOTICE_WARN_RATIO")
+    if raw is None:
+        return _WARN_RATIOS_DEFAULT
+    out = set()
+    for part in raw.split(","):
+        try:
+            r = float(part)
+        except (TypeError, ValueError):
+            continue
+        if 0.0 < r < 1.0:
+            out.add(r)
+    return tuple(sorted(out)) or _WARN_RATIOS_DEFAULT
 
 
 def _gated(user_api_key_dict: Any) -> bool:
@@ -742,8 +768,22 @@ _TTFT_MAX_ROWS = 15
 # 花费要算**全部**行（非流式、失败行也可能计费），TTFT 只算有正区间的流式行 ——
 # 所以流式条件不能再放 WHERE，挪进 CASE 产出 ttft 列（NULL 被 PERCENTILE_CONT /
 # COUNT(列) 自动忽略）。扫的行仍由同一个 api_key + startTime 条件决定。
+#
+# 🔴 分组列（2026-10-20 gray 冒烟实测）：请求走了兜底时，`model_group` 记的是**兜底组**
+# （用户发 `wangsu7-gpt-5.6-sol`，落库 `model_group=chatgpt-gpt-5.6-sol`，
+# `metadata.original_model_group=wangsu7-gpt-5.6-sol`），表里冒出用户从没选过的名字。
+# 所以 `model_group` 不在这把 key 认识的名字集合（$2 = 白名单 + alias 落点，JSON 数组）
+# 里时，才回落到 `metadata->>'original_model_group'`。
+# ⚠️ metadata 只能在 CASE 里**按行惰性**读、绝不进 WHERE：同一把 key（cursor-liuguoxian-std，
+# 今日 1571 行）实测 —— 整列读 metadata 9,406 ms；CASE 只给不认识的行读 15 ms；原 SQL 297 ms。
+# $2 为空数组（key 没白名单）⇒ 永远不读 metadata，退回老行为。
 _TTFT_SQL = '''WITH t AS (
-                 SELECT "model_group" AS g,
+                 SELECT CASE WHEN jsonb_array_length($2::jsonb) = 0
+                               OR "model_group" IN (SELECT jsonb_array_elements_text($2::jsonb))
+                             THEN "model_group"
+                             ELSE COALESCE(NULLIF("metadata"->>'original_model_group', ''),
+                                           "model_group")
+                        END AS g,
                         COALESCE("spend", 0) AS s,
                         CASE WHEN "completionStartTime" IS NOT NULL
                               AND "completionStartTime" > "startTime"
@@ -767,6 +807,21 @@ _TTFT_SQL = '''WITH t AS (
                GROUP BY 1
                ORDER BY cost DESC, calls DESC
                LIMIT ''' + str(_TTFT_MAX_ROWS)
+
+
+def _known_group_names(user_api_key_dict: Any) -> List[str]:
+    """这把 key 自己会落到的组名：白名单公开名 + per-key alias 落点 + router 组别名落点。
+    不在这里面的 `model_group` = 兜底换过组，见 `_TTFT_SQL` 上方注释。白名单为空 ⇒ []。"""
+    names = _allowed_names(user_api_key_dict)
+    if not names:
+        return []
+    aliases = getattr(user_api_key_dict, "aliases", None)
+    if not isinstance(aliases, dict):
+        aliases = {}
+    out = list(names)
+    out += [str(v) for v in aliases.values() if v]
+    out += [t for t in (_router_group_alias_target(n) for n in names) if t]
+    return list(dict.fromkeys(out))
 
 
 def _display_name_for_group(group: str, aliases: dict) -> str:
@@ -863,8 +918,10 @@ async def _today_stats(user_api_key_dict: Any) -> Tuple[str, str]:
         if prisma_client is None:
             return _keep(unavailable)
 
-        rows = await prisma_client.db.query_raw(_TTFT_SQL, token)
+        rows = await prisma_client.db.query_raw(
+            _TTFT_SQL, token, json.dumps(_known_group_names(user_api_key_dict)))
         total = float(rows[0].get("total_cost") or 0.0) if rows else 0.0
+        _TODAY_TOTAL[token] = (now, total)
         spend_line = (
             f"\n💰 今日累计消费 {_fmt_cost(total)}"
             f"（北京时间 00:00 起按请求明细实算，含额度重置前的部分）"
@@ -876,8 +933,13 @@ async def _today_stats(user_api_key_dict: Any) -> Tuple[str, str]:
         if not isinstance(aliases, dict):
             aliases = {}
         entries = []
+        used: List[str] = []
         for row in rows:
             group = row.get("g") or ""
+            # 多对一时显示名是「名A / 名B」，排序时每个候选都算「今天用过」
+            for pub in (_display_name_for_group(group, aliases) or "").split(" / "):
+                if pub and pub not in used:
+                    used.append(pub)
             entries.append((
                 _display_name_for_group(group, aliases) or "（未知模型）",
                 _fmt_cost(row.get("cost")),
@@ -903,6 +965,8 @@ async def _today_stats(user_api_key_dict: Any) -> Tuple[str, str]:
             + "|".join(f"{'-' * (w + 1)}:" for w in widths[1:]) + "|",
         ]
         lines += [_row(e) for e in entries]
+        # 今日用过的产品名（按花费降序），给「满后仍可用」排序用 —— 复用同一条 SQL，不另查
+        _TODAY_USED[token] = (now, used)
         return _keep((spend_line, "\n".join(lines)))
     except Exception as exc:
         _log.warning("budget_notice: today stats query unavailable %r", exc)
@@ -1312,16 +1376,101 @@ def _probe_targets(user_api_key_dict: Any) -> list:
             if cand and str(cand) in row_lookup:
                 send = str(cand)
                 break
-        # mode 按同一优先级找第一个查得到的 —— 纯 alias 名没有自己的部署行。
-        mode = ""
-        for cand in (key_target, name, router_target):
-            if not cand:
-                continue
-            mode = _probe_model_mode(str(cand), row_lookup)
-            if mode:
-                break
-        out.append((name, send or name, mode))
+        out.append((name, send or name,
+                    _resolve_mode(name, row_lookup, key_target, router_target)))
     return out
+
+
+def _resolve_mode(name: str, row_lookup: dict, key_target: Any = None,
+                  router_target: Any = None) -> str:
+    """mode 按 key 级 alias 落点 → 公开名 → router 级组别名落点的顺序找第一个查得到的
+    —— 纯 alias 名没有自己的部署行。优先级理由见 `_probe_targets`。"""
+    for cand in (key_target, name, router_target):
+        if not cand:
+            continue
+        mode = _probe_model_mode(str(cand), row_lookup)
+        if mode:
+            return mode
+    return ""
+
+
+# 「换个模型继续用」只推荐能聊天的模型。mode 判不出（kiro-*/wangsu-* 常见）也算 ——
+# 那批是聊天模型、只是没写 mode；画图/embedding/语音明确判出来的才排除。
+_CHAT_MODES = frozenset({"", "chat", "responses", "completion"})
+
+
+def _allowed_names(user_api_key_dict: Any) -> List[str]:
+    allowed = getattr(user_api_key_dict, "models", None)
+    if isinstance(allowed, dict):
+        allowed = list(allowed.keys())
+    names = [str(m) for m in (allowed or [])]
+    return list(dict.fromkeys(n for n in names if n and "*" not in n))
+
+
+async def _available_models(user_api_key_dict: Any, blocked: str) -> List[str]:
+    """``blocked`` 这个系列桶满了以后，这把 key 白名单里**还能打**的聊天模型。
+
+    还能打 = 不归任何系列桶（高配规则下 Opus/Astra 之外全是这种），或归另一个
+    **还没满**的桶。key 总额（max_budget）满了时 ③ 先拦，走不到这里。
+    白名单为空（= 不限制）返回 []：几百个组列出来没有意义，文案退回「其他模型不受影响」。
+    """
+    names = _allowed_names(user_api_key_dict)
+    if not names:
+        return []
+    token = getattr(user_api_key_dict, "token", "") or ""
+    row_lookup: dict = {}
+    for row in _runtime_model_list():
+        if isinstance(row, dict) and row.get("model_name"):
+            row_lookup.setdefault(str(row["model_name"]), []).append(row)
+    aliases = getattr(user_api_key_dict, "aliases", None)
+    if not isinstance(aliases, dict):
+        aliases = {}
+
+    full: dict = {}
+
+    async def _bucket_full(fkey: str) -> bool:
+        if fkey not in full:
+            limit = _family_limit(fkey, user_api_key_dict)
+            spent = await _family_get_spend(token, fkey) if token else 0.0
+            full[fkey] = limit > 0 and spent >= limit
+        return full[fkey]
+
+    out = []
+    for name in names:
+        fam = _family_of(name, user_api_key_dict)
+        if fam is not None and (fam[0] == blocked or await _bucket_full(fam[0])):
+            continue
+        mode = _resolve_mode(name, row_lookup, aliases.get(name),
+                             _router_group_alias_target(name))
+        if mode not in _CHAT_MODES:
+            continue
+        out.append(name)
+    return _used_first(out, await _today_used(user_api_key_dict))
+
+
+async def _today_used(user_api_key_dict: Any) -> List[str]:
+    """今日用过的产品名（按花费降序）。读 `_today_stats` 顺手记下的结果；没有就让它
+    查一次（同一条 SQL、同一份 60s 缓存，cye/提醒都会复用）。拿不到 = []，只影响排序。"""
+    token = getattr(user_api_key_dict, "token", "") or ""
+    if not token:
+        return []
+    ent = _TODAY_USED.get(token)
+    if ent is None or time.monotonic() - ent[0] >= _TTFT_CACHE_TTL:
+        try:
+            await asyncio.wait_for(_today_stats(user_api_key_dict),
+                                   timeout=_WARN_STATS_TIMEOUT_S)
+        except Exception:
+            return []
+        ent = _TODAY_USED.get(token)
+    return list(ent[1]) if ent else []
+
+
+def _used_first(names: List[str], used: List[str]) -> List[str]:
+    """今天用过的排前面（按今日花费降序），其余保持白名单原顺序。
+    提醒只放得下前 12 个，用户最可能切过去的应该在最前面。"""
+    rank = {n: i for i, n in enumerate(used)}
+    return sorted(names, key=lambda n: (0, rank[n]) if n in rank else (1, 0)) \
+        if rank else list(names)
 
 
 async def _probe_text(user_api_key_dict: Any) -> str:
@@ -1434,15 +1583,142 @@ async def _probe_text(user_api_key_dict: Any) -> str:
     return "\n".join(lines)
 
 
-def _warn_text(user_api_key_dict: Any) -> str:
-    spend = float(getattr(user_api_key_dict, "spend", None) or 0.0)
-    max_budget = float(getattr(user_api_key_dict, "max_budget", None) or 0.0)
-    pct = spend / max_budget * 100.0 if max_budget else 0.0
-    return (
-        f"\n\n----\n⚠️ 你的 key 今日额度已用 {pct:.0f}%"
-        f"（${spend:.2f}/${max_budget:.2f}），{_beijing_reset_str(user_api_key_dict)} 重置。"
-        f"发送 /查余额 可随时查询。（本提醒每天最多一次）"
-    )
+# 提醒/拦截文案里教用户怎么查明细。🔴 不写 `/查余额`：Cursor 把 `/` 开头的输入当
+# 命令面板拦掉（10-16 加裸词 cye 的原因），教一个会被吞掉的写法等于没教。
+_QUOTA_HINT = "单独发一行 查余额或者cye 可查完整明细"
+
+# ② 提醒里「满了之后还能用」那行最多列几个名字；拦截文案（④）给全量。
+_WARN_FALLBACK_MAX = 12
+
+
+def _beijing_tomorrow_str() -> str:
+    """系列桶按北京日期换桶（`_family_spend_key` 里的日期），重置点 = 北京明日 0 点。"""
+    bj = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)
+    nxt = bj + datetime.timedelta(days=1)
+    return f"北京时间 {nxt.month:02d}-{nxt.day:02d} 00:00"
+
+
+def _join_models(names: List[str], cap: Optional[int] = None) -> str:
+    if cap is not None and len(names) > cap:
+        return "、".join(names[:cap]) + f" 等 {len(names)} 个"
+    return "、".join(names)
+
+
+# ② ④ 的展示统一用 markdown 管道表，与 cye（`_today_stats` / `_model_catalog_text`）同一套
+# 写法：对齐交给渲染器，数字列 `---:` 右对齐，padding 只为复制出来的源文本好看。
+# 理由见 `_model_catalog_text` 里 09-25 Codex 截图那段：靠空格/「、」长串排版在会渲染
+# markdown 的客户端里必乱，而 Cursor / Claude Code / Codex 全都渲染。
+
+def _md_table(heads: Tuple[str, ...], rows: List[Tuple[str, ...]],
+              right: Tuple[int, ...] = ()) -> str:
+    widths = [max([_display_width(h)] + [_display_width(r[i]) for r in rows])
+              for i, h in enumerate(heads)]
+
+    def _row(cells) -> str:
+        return "| " + " | ".join(
+            _pad(_escape_pipes(c), w, i in right)
+            for i, (c, w) in enumerate(zip(cells, widths))) + " |"
+
+    sep = "|" + "|".join(
+        ("-" * (w + 1) + ":") if i in right else ("-" * (w + 2))
+        for i, w in enumerate(widths)) + "|"
+    return "\n".join([_row(heads), sep] + [_row(r) for r in rows])
+
+
+def _vendor_of(name: str) -> str:
+    """只用于**展示分组**（把 31 个名字折成十来行），不参与任何判定/计费。
+    取第一个 `-` 前的词：gpt-5.5 → gpt、deepseek-v4.1-flash → deepseek、jev → jev。"""
+    return (name.split("-", 1)[0] or name).lower()
+
+
+def _models_table(names: List[str], used: Optional[List[str]] = None) -> str:
+    """可用模型按厂商分行的表。今天用过的**加粗**且排在本行最前，行按「本行最早出现
+    的名字」排序 —— 所以今天用得最多的那一家在第一行。名字一个不丢。"""
+    used = used or []
+    groups: dict = {}
+    for n in names:
+        groups.setdefault(_vendor_of(n), []).append(n)
+    rows = []
+    for vendor, members in groups.items():
+        cells = "、".join(f"**{m}**" if m in used else m for m in members)
+        rows.append((vendor, cells))
+    return _md_table(("系列", "模型（粗体 = 今天用过）"), rows)
+
+
+# 额度表三列（2026-10-20 用户定：去掉「剩余」列，重置时间挪到表上方一句话）
+_BUCKET_HEADS = ("额度", "已用 / 限额", "用量")
+
+
+def _bucket_reset(user_api_key_dict: Any, label: str) -> str:
+    """总额按 key 的 budget_reset_at；系列桶按北京日期换桶。"""
+    return (_beijing_reset_str(user_api_key_dict) if label == "今日额度"
+            else _beijing_tomorrow_str())
+
+
+def _bucket_rows(user_api_key_dict: Any, buckets) -> List[Tuple[str, ...]]:
+    rows = []
+    for label, spent, limit, tier in buckets:
+        pct = spent / limit * 100.0 if limit else 0.0
+        name = "今日总额度" if label == "今日额度" else label
+        rows.append((("⚠️ " if tier is not None else "") + name,
+                     f"${spent:.2f} / ${limit:.2f}", f"{pct:.0f}%"))
+    return rows
+
+
+def _reset_sentence(user_api_key_dict: Any, buckets) -> str:
+    """表上方那句重置时间。所有桶同一时刻 ⇒ 一句；不同（总额被手工重置过等）⇒ 分开说，
+    不把两个时间压成一个。"""
+    resets: dict = {}
+    for label, *_rest in buckets:
+        name = "总额度" if label == "今日额度" else label
+        resets.setdefault(_bucket_reset(user_api_key_dict, label), []).append(name)
+    if len(resets) == 1:
+        return f"⏰ {next(iter(resets))} 重置"
+    return "⏰ " + "；".join(f"{'、'.join(names)} {t} 重置" for t, names in resets.items())
+
+
+def _bucket_block(user_api_key_dict: Any, buckets) -> str:
+    return (_reset_sentence(user_api_key_dict, buckets) + "\n\n"
+            + _md_table(_BUCKET_HEADS, _bucket_rows(user_api_key_dict, buckets),
+                        right=(1, 2)))
+
+
+def _warn_text(user_api_key_dict: Any, buckets=None, model_table: str = "",
+               fallback=None) -> str:
+    """② 提醒全文。
+
+    ``buckets``：[(label, spent, limit, tier)]，tier = 本次跨过的档位（0.8/0.95），
+    None 表示这个桶只陪同展示、没跨档。不传 = 只算 key 总额（老调用方/测试）。
+    ``model_table``：/查余额（cye）同一张「今日按模型」表，让用户直接看到钱花在哪。
+    ``fallback``：(桶名, [模型]) —— 系列桶满了之后仍能用的模型，提前告诉用户。
+
+    「今日额度已用」四个字是 T0 冒烟（tests/t0_budget_notice.py G1~G4）的锚点，别改。
+    """
+    if buckets is None:
+        spend = float(getattr(user_api_key_dict, "spend", None) or 0.0)
+        mx = float(getattr(user_api_key_dict, "max_budget", None) or 0.0)
+        buckets = [("今日额度", spend, mx, _warn_ratios()[0])]
+    # 标题只报**跨档**的桶；陪同展示的桶只进下面的表
+    heads = []
+    for label, spent, limit, tier in buckets:
+        if tier is None:
+            continue
+        pct = spent / limit * 100.0 if limit else 0.0
+        heads.append(f"你的 key 今日额度已用 {pct:.0f}%" if label == "今日额度"
+                     else f"{label} 今日已用 {pct:.0f}%")
+    lines = ["", "", "----", "",
+             "⚠️ **额度提醒**：" + "；".join(heads), "",
+             _bucket_block(user_api_key_dict, buckets)]
+    if fallback and fallback[1]:
+        names, used = fallback[1], (fallback[2] if len(fallback) > 2 else [])
+        lines += ["", f"🔀 **{fallback[0]} 用完后仍可用**（{len(names)} 个）", "",
+                  _models_table(names, used)]
+    text = "\n".join(lines)
+    if model_table:
+        # 🔴 表后必须空一行：model_table 以「\n💰…」开头，直接接在表尾会被渲染器当成表的续行
+        text += "\n" + model_table
+    tiers = "/".join(f"{r * 100:.0f}%" for r in _warn_ratios())
+    return text + f"\n\n{_QUOTA_HINT}。（额度到 {tiers} 各提醒一次）"
 
 
 def _over_budget_text(user_api_key_dict: Any, cost=None, mx=None) -> str:
@@ -1457,12 +1733,19 @@ def _over_budget_text(user_api_key_dict: Any, cost=None, mx=None) -> str:
         cost = float(cost)
     except Exception:
         cost = 0.0
-    limit_str = f"限额 ${float(mx):.2f}" if mx else "今日限额"
-    return (
-        f"🚫 你的 key 今日额度已用完：已消费 ${cost:.2f} / {limit_str}。\n"
-        f"{_beijing_reset_str(user_api_key_dict)} 自动重置，届时可继续使用。\n"
-        f"（可随时发送 /查余额 查询当前用量）"
-    )
+    head = (f"🚫 **你的 key 今日额度已用完**，{_beijing_reset_str(user_api_key_dict)} "
+            f"自动重置，届时可继续使用。")
+    try:
+        mxf = float(mx) if mx else 0.0
+    except Exception:
+        mxf = 0.0
+    if mxf <= 0:
+        return f"{head}\n已消费 ${cost:.2f}。\n\n{_QUOTA_HINT}。"
+    table = _md_table(_BUCKET_HEADS,
+                      _bucket_rows(user_api_key_dict, [("今日额度", cost, mxf, None)]),
+                      right=(1, 2))
+    # 总额覆盖所有模型 ⇒ 不列「可切换模型」（切了也一样被拦）
+    return f"{head}\n\n{table}\n\n所有模型都计入总额度，切换模型无法继续。{_QUOTA_HINT}。"
 
 
 # ------------------------------------------------ ③ 超预算 mark（patch→pre_call）
@@ -1697,13 +1980,77 @@ async def _family_get_spend(token: str, fkey: str) -> float:
     return float(_fam_local.get(key, 0.0))
 
 
-def _family_over_text(label: str, spent: float, limit: float) -> str:
-    return (
-        f"🚫 你的 key 今日 {label} 额度已用完：该系列已消费 ${spent:.2f} / "
-        f"限额 ${limit:.2f}。\n"
-        f"北京时间明日 00:00 自动重置；**其他系列的模型不受影响**，可切换使用。\n"
-        f"（可发送 /查余额 查询各系列用量）"
-    )
+def _family_over_text(label: str, spent: float, limit: float,
+                      available: Optional[List[str]] = None,
+                      user_api_key_dict: Any = None,
+                      used: Optional[List[str]] = None) -> str:
+    """④ 系列桶满了的 200 文案。``available`` = 这把 key 还能用的模型（全量列出，
+    用户要照着切）；空/None 时退回泛化的「其他系列不受影响」。
+
+    「额度已用完」「不受影响」是 T0 / smoke（S5、F2）的断言锚点，别改。
+    """
+    lines = [f"🚫 **你的 key 今日 {label} 额度已用完**。", ""]
+    buckets = [(label, spent, limit, None)]
+    if user_api_key_dict is not None:
+        try:
+            mx = float(getattr(user_api_key_dict, "max_budget", None) or 0.0)
+            sp = float(getattr(user_api_key_dict, "spend", None) or 0.0)
+        except Exception:
+            mx = 0.0
+        if mx > 0:
+            buckets.append(("今日额度", sp, mx, None))
+    lines.append(_bucket_block(user_api_key_dict, buckets))
+    lines.append("")
+    if available:
+        lines += [f"✅ **其他模型不受影响**，切换到下面任一个即可继续（{len(available)} 个）：",
+                  "", _models_table(available, used)]
+    else:
+        lines.append("✅ **其他系列的模型不受影响**，可切换使用。")
+    lines += ["", f"{_QUOTA_HINT}。"]
+    return "\n".join(lines)
+
+
+async def _family_buckets(token: str, user_api_key_dict: Any) -> list:
+    """[(label, spent, limit)]，cye 汇总表用。未启用 / 无 token / 出错 = []。"""
+    if not _family_enabled() or not token:
+        return []
+    try:
+        rules = _family_rules_for_key(user_api_key_dict)
+        spends = await asyncio.gather(
+            *(_family_get_spend(token, fkey) for fkey, _label, _pred in rules))
+        return [(label, spent, _family_limit(fkey, user_api_key_dict))
+                for (fkey, label, _pred), spent in zip(rules, spends)]
+    except Exception as exc:
+        _log.warning("budget_notice: family buckets error %r", exc)
+        return []
+
+
+def _quota_summary_text(user_api_key_dict: Any, families: list, spend_line: str) -> str:
+    """cye 开头的汇总：总额度、系列额度、今日累计消费放进同一张 markdown 表
+    （2026-10-20 用户要求，原来是三行散文）。
+
+    锚点：「今日用量」（T0 A~D3 / smoke S7）、「系列额度」（T0 F4）都保留在文案里。
+    """
+    alias = getattr(user_api_key_dict, "key_alias", None) or "（无别名）"
+    spend = float(getattr(user_api_key_dict, "spend", None) or 0.0)
+    mx = getattr(user_api_key_dict, "max_budget", None)
+    if not mx:
+        return (f"📊 {alias} 用量\n"
+                f"本 key 未设周期限额，累计已用 ${spend:.2f}。" + spend_line)
+    buckets = [("今日额度", spend, float(mx), None)]
+    buckets += [(f"系列额度 · {label}", sp, lim, None)
+                for label, sp, lim in families if lim and lim > 0]
+    rows = _bucket_rows(user_api_key_dict, buckets)
+    token = getattr(user_api_key_dict, "token", "") or ""
+    ent = _TODAY_TOTAL.get(token) if token else None
+    tail = ""
+    if ent is not None and time.monotonic() - ent[0] < _TTFT_CACHE_TTL:
+        rows.append(("今日累计消费（明细实算，含重置前）", _fmt_cost(ent[1]), "-"))
+    else:
+        tail = "\n" + spend_line  # 查不到时原样给出「暂不可用」那句，不编数；空行防被并进表
+    table = _md_table(("项目", "已用 / 限额", "用量"), rows, right=(1, 2))
+    return (f"📊 **{alias} 今日用量**（数据约 1 分钟延迟）\n\n"
+            f"{_reset_sentence(user_api_key_dict, buckets)}\n\n{table}" + tail)
 
 
 async def _family_usage_lines(token: str, user_api_key_dict: Any) -> str:
@@ -1925,10 +2272,17 @@ def _beijing_date() -> str:
     ).strftime("%Y%m%d")
 
 
-async def _acquire_daily(token: str) -> bool:
-    """今天第一次见到该 key 返回 True。get→set 存在跨 pod 竞态窗口，
+def _warn_dedupe_key(token: str, slot: str = "") -> str:
+    """slot = 「桶:档位」，如 ``total:0.8`` / ``premium:0.95``。每个 slot 每北京日一次。"""
+    if not slot:
+        return f"budget_notice:90:{token}:{_beijing_date()}"
+    return f"budget_notice:warn:{slot}:{token}:{_beijing_date()}"
+
+
+async def _acquire_daily(token: str, slot: str = "") -> bool:
+    """今天第一次见到该 key（的这个 slot）返回 True。get→set 存在跨 pod 竞态窗口，
     最坏后果是同一瞬间并发请求各注入一次提醒 —— 可接受，不为此上锁。"""
-    key = f"budget_notice:90:{token}:{_beijing_date()}"
+    key = _warn_dedupe_key(token, slot)
     rc = _resolve_redis()
     if rc is not None:
         try:
@@ -1947,10 +2301,10 @@ async def _acquire_daily(token: str) -> bool:
     return True
 
 
-async def _release_daily(token: str) -> None:
+async def _release_daily(token: str, slot: str = "") -> None:
     """注入没有真正落到流里（比如该轮以 tool_use 结尾、没有 text block）时
     释放当日名额，让下一个请求再试。best effort，失败不抛。"""
-    key = f"budget_notice:90:{token}:{_beijing_date()}"
+    key = _warn_dedupe_key(token, slot)
     _local_seen.discard(key)
     rc = _resolve_redis()
     if rc is not None:
@@ -1958,6 +2312,108 @@ async def _release_daily(token: str) -> None:
             await rc.async_delete_cache(key)
         except Exception:
             pass
+
+
+# ---------------------------------------------------------- ② 多档提醒决策
+#
+# 2026-10-20 用户定：总额度与系列桶（cursor = 高配 Opus/Astra）各在 80% / 95% 提醒一次，
+# 提醒里附 cye 同款「今日按模型」表；系列桶跨档时提前列出满了之后还能用的模型。
+#
+# 去重粒度 = (桶, 档位, key, 北京日)。一步从 70% 跳到 96% 只发 95% 那条，并把 80%
+# 一并记成已用 —— 否则下一轮会冒出一条「已用 80%」的倒退提醒。
+# 系列桶只查**本次请求模型所属**的那一个（一次 redis GET）：每个流式请求都要过这里，
+# 不能为了提醒把所有桶都读一遍。
+
+_WARN_STATS_TIMEOUT_S = 3.0
+
+
+def _top_tier(spent: float, limit: float) -> Optional[float]:
+    """已跨过的最高档；没跨档或已经满了（满了归 ③/④ 管）返回 None。"""
+    if not limit or limit <= 0 or spent >= limit:
+        return None
+    crossed = [r for r in _warn_ratios() if spent / limit >= r]
+    return max(crossed) if crossed else None
+
+
+async def _claim_tier(token: str, bucket: str, tier: Optional[float]) -> bool:
+    """抢 (bucket, tier) 当日名额；抢到再顺手把更低档记成已用。"""
+    if tier is None:
+        return False
+    if not await _acquire_daily(token, f"{bucket}:{tier}"):
+        return False
+    for r in _warn_ratios():
+        if r < tier:
+            await _acquire_daily(token, f"{bucket}:{r}")
+    return True
+
+
+async def _warn_plan(user_api_key_dict: Any, request_data: Any):
+    """返回 (buckets, slots, fam) 或 None。
+
+    buckets 交给 `_warn_text`；slots 是本次抢到的**最高档**名额（注入失败时只释放它们，
+    下一个请求再试）；fam = 跨档的系列桶 (fkey, label)，用来算「满了之后还能用」。
+    """
+    token = getattr(user_api_key_dict, "token", "") or ""
+    if not token:
+        return None
+    spend = float(getattr(user_api_key_dict, "spend", None) or 0.0)
+    mx = float(getattr(user_api_key_dict, "max_budget", None) or 0.0)
+    slots: List[str] = []
+
+    t_total = _top_tier(spend, mx)
+    if await _claim_tier(token, "total", t_total):
+        slots.append(f"total:{t_total}")
+    else:
+        t_total = None
+
+    fam_entry = None
+    t_fam = None
+    if _family_enabled():
+        model = str((request_data or {}).get("model") or "") \
+            if isinstance(request_data, dict) else ""
+        fam = _family_of(model, user_api_key_dict)
+        if fam is not None:
+            fkey, flabel = fam
+            flimit = _family_limit(fkey, user_api_key_dict)
+            fspent = await _family_get_spend(token, fkey)
+            t_fam = _top_tier(fspent, flimit)
+            if await _claim_tier(token, fkey, t_fam):
+                slots.append(f"{fkey}:{t_fam}")
+            else:
+                t_fam = None
+            if flimit > 0:
+                fam_entry = (fkey, flabel, fspent, flimit)
+
+    if not slots:
+        return None
+    buckets = []
+    if mx > 0:
+        buckets.append(("今日额度", spend, mx, t_total))
+    if fam_entry is not None:
+        buckets.append((fam_entry[1], fam_entry[2], fam_entry[3], t_fam))
+    fam_hit = (fam_entry[0], fam_entry[1]) if (fam_entry and t_fam is not None) else None
+    return buckets, slots, fam_hit
+
+
+async def _build_warn_notice(user_api_key_dict: Any, buckets, fam_hit) -> str:
+    """提醒全文：档位行 + 满后可用模型 + cye 同款今日累计/按模型表。
+    明细查询失败只是少一张表，提醒本身照发。"""
+    model_table = ""
+    fallback = None
+    try:
+        spend_line, table = await _today_stats(user_api_key_dict)
+        if table:
+            model_table = spend_line + table
+    except Exception as exc:
+        _log.warning("budget_notice: warn stats error %r", exc)
+    if fam_hit is not None:
+        try:
+            names = await _available_models(user_api_key_dict, fam_hit[0])
+            if names:
+                fallback = (fam_hit[1], names, await _today_used(user_api_key_dict))
+        except Exception as exc:
+            _log.warning("budget_notice: warn fallback models error %r", exc)
+    return _warn_text(user_api_key_dict, buckets, model_table, fallback)
 
 
 # ---------------------------------------------------------- 流注入（②）
@@ -2149,7 +2605,19 @@ class BudgetNotice(CustomLogger):
                     limit = _family_limit(fkey, user_api_key_dict)
                     if limit > 0 and spent >= limit:
                         alias = getattr(user_api_key_dict, "key_alias", "") or ""
-                        fam_text = _family_over_text(flabel, spent, limit)
+                        try:
+                            available = await _available_models(
+                                user_api_key_dict, fkey)
+                        except Exception as exc:
+                            # 列表是锦上添花，拿不到就退回泛化文案，绝不影响拦截本身
+                            _log.warning("budget_notice: available models error %r", exc)
+                            available = []
+                        try:
+                            used = await _today_used(user_api_key_dict)
+                        except Exception:
+                            used = []
+                        fam_text = _family_over_text(
+                            flabel, spent, limit, available, user_api_key_dict, used)
                         if v in (
                             "completion", "acompletion",
                             "responses", "aresponses", "_aresponses_websocket",
@@ -2218,16 +2686,15 @@ class BudgetNotice(CustomLogger):
                 _log.warning("budget_notice: probe query alias=%s route=%s", alias, v)
                 text = await _probe_text(user_api_key_dict)
             else:
-                family_text, (spend_line, model_table) = await asyncio.gather(
+                families, (spend_line, model_table) = await asyncio.gather(
                     # 只过窄门的 key 不受 ④ 约束，就不该在回复里看到系列额度 ——
                     # 报一个不执法的数字只会让人以为自己被限了。
-                    _family_usage_lines(token if gated else "", user_api_key_dict),
+                    _family_buckets(token if gated else "", user_api_key_dict),
                     _today_stats(user_api_key_dict),
                 )
-                # 顺序：额度 → 今日累计消费 → 系列 → 按模型表 → 模型清单。额度计数器
-                # 和实际消费紧挨着，两个数一眼对照；按模型表放在 12 行模型清单**前面**，
-                # 不然它被挤到消息尾部要翻屏才看得到。
-                text = (_usage_text(user_api_key_dict) + spend_line + family_text
+                # 顺序：汇总表（总额 → 系列 → 今日累计消费）→ 按模型表 → 模型清单。
+                # 按模型表放在模型清单**前面**，不然它被挤到消息尾部要翻屏才看得到。
+                text = (_quota_summary_text(user_api_key_dict, families, spend_line)
                         + model_table + _model_catalog_text(user_api_key_dict))
             if v in ("anthropic_messages", "aanthropic_messages"):
                 from litellm.exceptions import ModifyResponseException
@@ -2414,22 +2881,25 @@ class BudgetNotice(CustomLogger):
             _log.warning("budget_notice: debug stream shapes route=%s items=%s",
                          route, seen)
             return
+        slots: List[str] = []
+        buckets = None
+        notice_task = None
         try:
             if injectable_route and not _disabled() and _gated(user_api_key_dict):
-                spend = float(getattr(user_api_key_dict, "spend", None) or 0.0)
-                max_budget = getattr(user_api_key_dict, "max_budget", None)
-                if max_budget and spend / float(max_budget) >= _warn_ratio() \
-                        and spend < float(max_budget):
+                plan = await _warn_plan(user_api_key_dict, request_data)
+                if plan is not None:
+                    buckets, slots, fam_hit = plan
                     token = getattr(user_api_key_dict, "token", "") or ""
-                    if token and await _acquire_daily(token):
-                        inject = True
-                        notice = _warn_text(user_api_key_dict)
-                        _log.warning(
-                            "budget_notice: warn inject alias=%s spend=%.2f/%.2f route=%s",
-                            getattr(user_api_key_dict, "key_alias", ""),
-                            spend, float(max_budget),
-                            getattr(user_api_key_dict, "request_route", ""),
-                        )
+                    inject = True
+                    # 明细表（一条 SQL）在流开始时就并行去查，注入点在流尾，
+                    # 通常早就查完了 —— 不拖首字。
+                    notice_task = asyncio.ensure_future(
+                        _build_warn_notice(user_api_key_dict, buckets, fam_hit))
+                    _log.warning(
+                        "budget_notice: warn inject alias=%s slots=%s route=%s",
+                        getattr(user_api_key_dict, "key_alias", ""), slots,
+                        getattr(user_api_key_dict, "request_route", ""),
+                    )
         except Exception as exc:
             _log.warning("budget_notice: warn gate error %r", exc)
 
@@ -2437,6 +2907,18 @@ class BudgetNotice(CustomLogger):
             async for item in response:
                 yield item
             return
+
+        async def _resolve_notice() -> str:
+            nonlocal notice
+            if notice:
+                return notice
+            try:
+                notice = await asyncio.wait_for(
+                    asyncio.shield(notice_task), timeout=_WARN_STATS_TIMEOUT_S)
+            except Exception as exc:
+                _log.warning("budget_notice: warn notice fallback %r", exc)
+                notice = _warn_text(user_api_key_dict, buckets)
+            return notice
 
         # --- 需要注入：按 item 形态分两路。任何异常都退化为透传剩余流；
         #     没能真正注入时释放当日去重名额，下一个请求再试。 ---
@@ -2446,6 +2928,10 @@ class BudgetNotice(CustomLogger):
             held_stop = None       # anthropic:持有中的 text block stop 事件
             held_index = None
             block_types = {}       # index -> content_block type
+            # 最后一个已开始、尚未 stop 的 block。2026-10-20 gray 实测：claude-opus-4.8 的
+            # 桥接流**不发 content_block_stop**，text delta 之后直接 message_delta ——
+            # 只认 stop 事件的状态机永远等不到注入点（旧版同样漏，不是回归）。
+            open_last = None
             r_holding = False      # responses:持有 text.done/part.done/item.done
             r_held = []
             r_last_delta = None    # responses:最近一个真实 output_text.delta 事件
@@ -2460,17 +2946,30 @@ class BudgetNotice(CustomLogger):
                         if held_stop is not None:
                             if not injected and etype in ("message_delta",
                                                           "message_stop"):
-                                yield _notice_delta_bytes(notice, held_index)
+                                yield _notice_delta_bytes(
+                                    await _resolve_notice(), held_index)
                                 injected = True
                             yield held_stop
                             held_stop = None
+                        if (not injected and held_stop is None
+                                and etype in ("message_delta", "message_stop")
+                                and open_last is not None
+                                and block_types.get(open_last) == "text"):
+                            # 最后一个 block 是还开着的 text ⇒ 就在它内部注入
+                            yield _notice_delta_bytes(await _resolve_notice(), open_last)
+                            injected = True
                         if etype == "content_block_start":
                             block_types[idx] = btype
+                            open_last = idx
                             yield ev_full
                         elif (etype == "content_block_stop" and not injected
                               and block_types.get(idx) == "text"):
                             held_stop, held_index = ev_full, idx
+                            if open_last == idx:
+                                open_last = None
                         else:
+                            if etype == "content_block_stop" and open_last == idx:
+                                open_last = None
                             yield ev_full
                     continue
 
@@ -2497,6 +2996,7 @@ class BudgetNotice(CustomLogger):
                         import copy
 
                         d = copy.deepcopy(r_last_delta)
+                        notice = await _resolve_notice()
                         try:
                             d.delta = notice
                         except Exception:
@@ -2523,7 +3023,7 @@ class BudgetNotice(CustomLogger):
 
                 # ---- chat 路径的 ModelResponseStream 对象 ----
                 if not injected and chat_route and _finish_chunk(item):
-                    synthetic = _make_notice_chunk(item, notice)
+                    synthetic = _make_notice_chunk(item, await _resolve_notice())
                     if synthetic is not None:
                         yield synthetic
                         injected = True
@@ -2542,8 +3042,12 @@ class BudgetNotice(CustomLogger):
                 yield item
         finally:
             if inject and not injected and token:
-                await _release_daily(token)
-                _log.warning("budget_notice: warn inject missed, dedupe released")
+                # 只释放本次抢到的最高档；顺手记掉的低档不还 —— 下一轮重试仍是这一档
+                for slot in slots:
+                    await _release_daily(token, slot)
+                _log.warning("budget_notice: warn inject missed, dedupe released %s", slots)
+            if notice_task is not None and not notice_task.done():
+                notice_task.cancel()
 
 
 def _finish_chunk(item: Any) -> bool:

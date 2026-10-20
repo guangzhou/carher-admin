@@ -763,9 +763,9 @@ class TTFTTest(unittest.TestCase):
     @staticmethod
     def _db(rows, calls=None):
         class DB:
-            async def query_raw(self, query, value):
+            async def query_raw(self, query, value, *args):
                 if calls is not None:
-                    calls.append((query, value))
+                    calls.append((query, value) + args)
                 if isinstance(rows, BaseException):
                     raise rows
                 return rows
@@ -835,12 +835,25 @@ class TTFTTest(unittest.TestCase):
         """
         sql = M._TTFT_SQL
         self.assertIn('"api_key" = $1', sql)
-        self.assertNotIn("metadata", sql)
+        # metadata 只许在 SELECT 的 CASE 里惰性读（兜底行回原请求名），绝不进 WHERE
+        where = sql[sql.index("WHERE"):]
+        self.assertNotIn("metadata", where)
+        self.assertIn("original_model_group", sql)
         # startTime 必须裸列参与比较，偏移挪到右边
         self.assertIn('"startTime" >=', sql)
         self.assertNotIn('"startTime" + INTERVAL', sql)
         # 分组列必须是请求名 model_group，不是落点名 model
         self.assertIn('"model_group"', sql)
+
+    def test_known_names_sent_as_second_param(self):
+        calls = []
+        self.proxy_server.prisma_client = self._db([], calls)
+        key = _Key(alias="cursor-u1", token="hashed-token",
+                   aliases={"claude-opus-5-5": "kiro-claude-opus-5-5"})
+        key.models = ["claude-opus-5-5", "wangsu7-gpt-5.6-sol"]
+        self._stats(key)
+        self.assertEqual(json.loads(calls[0][2]),
+                         ["claude-opus-5-5", "wangsu7-gpt-5.6-sol", "kiro-claude-opus-5-5"])
 
     def test_sql_counts_cost_on_every_row_not_only_streaming(self):
         """流式条件只能出现在 TTFT 的 CASE 里；放进 WHERE 会把非流式请求的钱漏掉。"""
@@ -930,7 +943,10 @@ class TTFTTest(unittest.TestCase):
         out = _pre(d, "acompletion", key=_Key(alias="cursor-u1", token="tok-q"))
         text = out["mock_response"]
         self.assertIn("今日用量", text)
-        self.assertIn("今日累计消费 $4.20", text)
+        self.assertIn("| 今日累计消费（明细实算，含重置前） |          $4.20 |    - |", text)
+        self.assertIn("| 今日总额度 ", text)
+        self.assertIn("⏰ 北京时间 08-20 00:00 重置", text)
+        self.assertNotIn("剩余", text.split("📈")[0])
         self.assertLess(text.index("今日用量"), text.index("今日累计消费"))
         self.assertLess(text.index("今日累计消费"), text.index("📈 今日按模型"))
 
@@ -1170,6 +1186,34 @@ class AnthropicInjectTest(unittest.TestCase):
         wire_text = _anthropic_wire()
         out2 = b"".join(_run_stream([wire_text], _warn_key("tok-tool-1")))
         self.assertEqual(out2.count("今日额度已用".encode()), 1)
+
+    def test_bridge_stream_without_block_stop_still_injects(self):
+        """10-20 gray 实测形状：text delta 后直接 message_delta，没有 content_block_stop。"""
+        def ev(name, obj):
+            return (f"event: {name}\ndata: " + json.dumps(obj) + "\n\n").encode()
+        md = ev("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}})
+        wire = (ev("message_start", {"type": "message_start", "message": {"id": "m", "content": []}})
+                + ev("content_block_start", {"type": "content_block_start", "index": 0,
+                                             "content_block": {"type": "text", "text": ""}})
+                + ev("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                             "delta": {"type": "text_delta", "text": "好"}})
+                + md + ev("message_stop", {"type": "message_stop"}))
+        key = _warn_key("tok-nostop-1")
+        out = b"".join(_run_stream([wire], key))
+        self.assertEqual(out, wire.replace(md, M._notice_delta_bytes(M._warn_text(key), 0) + md, 1))
+
+    def test_bridge_stream_tool_use_last_open_block_not_injected(self):
+        def ev(name, obj):
+            return (f"event: {name}\ndata: " + json.dumps(obj) + "\n\n").encode()
+        wire = (ev("content_block_start", {"type": "content_block_start", "index": 0,
+                                           "content_block": {"type": "text", "text": ""}})
+                + ev("content_block_start", {"type": "content_block_start", "index": 1,
+                                             "content_block": {"type": "tool_use", "id": "t",
+                                                               "name": "bash", "input": {}}})
+                + ev("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
+                + ev("message_stop", {"type": "message_stop"}))
+        out = b"".join(_run_stream([wire], _warn_key("tok-nostop-2")))
+        self.assertEqual(out, wire)
 
     def test_no_marker_passthrough_no_loss(self):
         wire = b"data: {\"foo\": 1}\n\ndata: [DONE]\n\n"
@@ -1772,13 +1816,15 @@ class FamilyBudgetTest(unittest.TestCase):
         out = self._pre_fam(d, "acompletion")
         self.assertIn("今日用量", out.get("mock_response", ""))
         self.assertIn("系列额度", out["mock_response"])
-        self.assertIn("其他模型 $250.00/$500.00", out["mock_response"])
+        self.assertIn("| 系列额度 · 其他模型    | $250.00 / $500.00 |  50% |",
+                      out["mock_response"])
 
         self._seed("tok-default", "claude", 100.01)
         d = {"model": "claude-opus-5",
              "messages": [{"role": "user", "content": "/查余额"}]}
         out = self._pre_fam(d, "acompletion")
-        self.assertIn("Claude 家族 $100.01/$100.00", out["mock_response"])
+        self.assertIn("| 系列额度 · Claude 家族 | $100.01 / $100.00 | 100% |",
+                      out["mock_response"])
 
     def test_family_disabled_by_default(self):
         self._seed("tok-default", "other", 250.0)
@@ -1884,7 +1930,7 @@ class FamilyBudgetTest(unittest.TestCase):
         self._seed("tok-pq", "premium", 12.0)
         out = self._pre_fam({"model": "gpt-6-sol", "messages": [{"role": "user", "content": "/查余额"}]},
                             "acompletion", key=key)
-        self.assertIn("高配模型(Opus/Astra) $12.00/$35.00", out.get("mock_response", ""))  # 70 × 50%
+        self.assertIn("| 系列额度 · 高配模型(Opus/Astra) | $12.00 / $35.00 |", out.get("mock_response", ""))  # 70 × 50%
         self.assertNotIn("Claude 家族", out["mock_response"])
 
 
@@ -1949,7 +1995,7 @@ class PremiumFleetDefaultTest(unittest.TestCase):
         key = _Key(alias="cursor-u1", token="tok-fd3", max_budget=500.0)
         M._fam_local[M._family_spend_key("premium", "tok-fd3")] = 20.0
         out = self._pre("gpt-6-sol", key, text="/查余额")
-        self.assertIn("高配模型(Opus/Astra) $20.00/$250.00", out.get("mock_response", ""))
+        self.assertIn("| 系列额度 · 高配模型(Opus/Astra) | $20.00 / $250.00 |", out.get("mock_response", ""))
         self.assertNotIn("Claude 家族", out["mock_response"])
 
     def test_prefix_kill_switch_restores_old_rules(self):
@@ -3057,6 +3103,215 @@ class ProbeHookWiringTest(unittest.TestCase):
                         {**PREFIX_ENV, "BUDGET_NOTICE_QUOTA_KEY_PREFIXES": "carher-"})
         self.assertIn("未启用", out.get("mock_response", ""))
         self.assertEqual(self.router.calls, [])
+
+
+# ------------------------------------------- ② 80%/95% 双档 + 高配桶 + 明细（10-20）
+
+class TieredWarnTest(unittest.TestCase):
+    """总额与高配桶各在 80% / 95% 提醒一次；提醒带 cye 同款按模型表与满后可用模型；
+    高配桶用完的拦截文案列出全部可用模型。"""
+
+    ENV = {"BUDGET_NOTICE_KEY_PREFIXES": "claude-code-,cursor-", "BUDGET_FAMILY_ENABLED": "1"}
+
+    def setUp(self):
+        _ensure_stubs()
+        M._fam_local.clear()
+        M._local_seen.clear()
+        M._TTFT_CACHE.clear()
+        M._TODAY_USED.clear()
+        M._OVER_BUDGET_MARKS.clear()
+        for k in ("BUDGET_FAMILY_PREMIUM_KEY_PREFIXES", "BUDGET_FAMILY_PREMIUM_KEY_ALIASES",
+                  "BUDGET_FAMILY_PREMIUM_RATIO", "BUDGET_NOTICE_WARN_RATIO",
+                  "BUDGET_NOTICE_WARN_RATIOS"):
+            os.environ.pop(k, None)
+        self.proxy_server = types.ModuleType("litellm.proxy.proxy_server")
+        self.old_proxy_server = sys.modules.get("litellm.proxy.proxy_server")
+        sys.modules["litellm.proxy.proxy_server"] = self.proxy_server
+        self.proxy_server.llm_router = types.SimpleNamespace(model_list=[
+            {"model_name": "kiro-claude-opus-5-5", "model_info": {"mode": "chat"},
+             "litellm_params": {"model": "anthropic/claude-opus-5-5"}},
+            {"model_name": "gpt-6-astra", "model_info": {"mode": "responses"},
+             "litellm_params": {"model": "openai/gpt-6-astra"}},
+            {"model_name": "claude-sonnet-5-5", "model_info": {"mode": "chat"},
+             "litellm_params": {"model": "anthropic/claude-sonnet-5-5"}},
+            {"model_name": "gpt-6-sol", "model_info": {"mode": "responses"},
+             "litellm_params": {"model": "openai/gpt-6-sol"}},
+            {"model_name": "grok-imagine-image-2.0",
+             "model_info": {"mode": "image_generation"},
+             "litellm_params": {"model": "xai/grok-imagine-image-2.0"}},
+        ], model_group_alias={})
+        self.proxy_server.prisma_client = None
+
+    def tearDown(self):
+        M._fam_local.clear()
+        M._local_seen.clear()
+        M._TTFT_CACHE.clear()
+        if self.old_proxy_server is None:
+            sys.modules.pop("litellm.proxy.proxy_server", None)
+        else:
+            sys.modules["litellm.proxy.proxy_server"] = self.old_proxy_server
+
+    def _key(self, token, spend=100.0, mx=1000.0):
+        k = _Key(alias="cursor-u1", spend=spend, max_budget=mx, token=token)
+        k.models = ["kiro-claude-opus-5-5", "gpt-6-astra", "claude-sonnet-5-5",
+                    "gpt-6-sol", "grok-imagine-image-2.0"]
+        k.metadata = {}
+        return k
+
+    def _stream(self, key, model="claude-sonnet-5-5"):
+        items = [_Chunk("答案"), _Chunk(None, finish="stop")]
+
+        async def go():
+            out = []
+            gen = M.budget_notice.async_post_call_streaming_iterator_hook(
+                key, _agen(items), {"model": model})
+            async for x in gen:
+                out.append(x)
+            return out
+        out = _with_env(self.ENV, lambda: asyncio.run(go()))
+        return out[1].choices[0].delta.content if len(out) == 3 else None
+
+    def test_default_tiers(self):
+        self.assertEqual(M._warn_ratios(), (0.8, 0.95))
+        self.assertEqual(_with_env({"BUDGET_NOTICE_WARN_RATIO": "0.9"}, M._warn_ratios), (0.9,))
+        self.assertEqual(_with_env({"BUDGET_NOTICE_WARN_RATIOS": "x,2"}, M._warn_ratios),
+                         (0.8, 0.95))
+
+    def test_total_80_then_95_each_once(self):
+        self.assertIsNone(self._stream(self._key("tw1", spend=790.0)))      # 79% 不提醒
+        n80 = self._stream(self._key("tw1", spend=810.0))
+        self.assertIn("今日额度已用 81%", n80)
+        self.assertIn("单独发一行 查余额或者cye 可查完整明细", n80)
+        self.assertNotIn("/查余额", n80)
+        self.assertIsNone(self._stream(self._key("tw1", spend=850.0)))      # 80 档已发
+        n95 = self._stream(self._key("tw1", spend=960.0))
+        self.assertIn("今日额度已用 96%", n95)
+        self.assertIsNone(self._stream(self._key("tw1", spend=990.0)))      # 95 档已发
+
+    def test_jump_straight_to_95_skips_80(self):
+        self.assertIn("96%", self._stream(self._key("tw2", spend=960.0)))
+        # 之后不能再冒出一条倒退的 80% 提醒
+        self.assertIsNone(self._stream(self._key("tw2", spend=970.0)))
+
+    def test_premium_bucket_warns_independently_with_fallback_list(self):
+        # 总额 30%（不跨档），高配桶 $500 的 82%
+        M._fam_local[M._family_spend_key("premium", "tw3")] = 410.0
+        n = self._stream(self._key("tw3", spend=300.0), model="kiro-claude-opus-5-5")
+        self.assertIn("**额度提醒**：高配模型(Opus/Astra) 今日已用 82%", n)
+        self.assertNotIn("你的 key 今日额度已用", n)            # 总额没跨档，不进标题
+        self.assertIn("| 今日总额度  ", n)                       # 只在表里陪同展示，不打 ⚠️
+        self.assertIn("| ⚠️ 高配模型(Opus/Astra) |", n)
+        self.assertIn("|  82% |", n)
+        self.assertIn("用完后仍可用**（2 个）", n)
+        self.assertIn("| claude | claude-sonnet-5-5 ", n)
+        self.assertIn("| gpt    | gpt-6-sol ", n)
+        self.assertNotIn("grok-imagine", n)                       # 画图模型不推荐
+        # 再打一发 sonnet：premium 80 档已用，总额没跨档 ⇒ 不提醒
+        self.assertIsNone(self._stream(self._key("tw3", spend=300.0)))
+        M._fam_local[M._family_spend_key("premium", "tw3")] = 480.0
+        self.assertIn("96%", self._stream(self._key("tw3", spend=300.0),
+                                          model="gpt-6-astra"))
+
+    def test_non_premium_model_does_not_read_premium_bucket(self):
+        M._fam_local[M._family_spend_key("premium", "tw4")] = 410.0
+        self.assertIsNone(self._stream(self._key("tw4", spend=300.0), model="gpt-6-sol"))
+
+    def test_notice_carries_today_model_table(self):
+        class DB:
+            async def query_raw(self, q, v, *a):
+                return [{"g": "kiro-claude-opus-5-5", "calls": 40, "n": 40, "cost": 700.0,
+                         "total_cost": 820.0, "p50": 1.2, "p90": 3.4},
+                        {"g": "gpt-6-sol", "calls": 9, "n": 9, "cost": 120.0,
+                         "total_cost": 820.0, "p50": 0.8, "p90": 1.1}]
+        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        n = self._stream(self._key("tw5", spend=820.0))
+        self.assertIn("今日累计消费 $820.00", n)
+        self.assertIn("| kiro-claude-opus-5-5 | $700.00 |", n)
+        self.assertIn("| gpt-6-sol            | $120.00 |", n)
+
+    def test_notice_table_shows_product_names_not_landing_groups(self):
+        """SpendLogs 只存 per-key alias 改写后的落点名（kiro-claude-opus-5-5），
+        提醒里的表必须和 cye 一样翻回用户选的产品名。"""
+        class DB:
+            async def query_raw(self, q, v, *a):
+                return [{"g": "kiro-claude-opus-5-5", "calls": 40, "n": 40, "cost": 700.0,
+                         "total_cost": 820.0, "p50": 1.2, "p90": 3.4}]
+        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        k = self._key("tw9", spend=820.0)
+        k.aliases = {"claude-opus-5-5": "kiro-claude-opus-5-5"}
+        n = self._stream(k)
+        self.assertIn("| claude-opus-5-5 | $700.00 |", n)
+        self.assertNotIn("kiro-", n)
+
+    def test_available_models_used_today_first(self):
+        """满后可用列表：今天用过的按花费降序排前面（产品名），其余保持白名单顺序。"""
+        class DB:
+            async def query_raw(self, q, v, *a):
+                return [{"g": "kiro-claude-opus-5-5", "calls": 9, "n": 9, "cost": 500.0,
+                         "total_cost": 620.0, "p50": 1.0, "p90": 2.0},
+                        {"g": "chatgpt-gpt-6-sol", "calls": 9, "n": 9, "cost": 100.0,
+                         "total_cost": 620.0, "p50": 1.0, "p90": 2.0},
+                        {"g": "kiro-claude-sonnet-5-5", "calls": 3, "n": 3, "cost": 20.0,
+                         "total_cost": 620.0, "p50": 1.0, "p90": 2.0}]
+        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        M._fam_local[M._family_spend_key("premium", "tw10")] = 500.0
+        k = self._key("tw10", spend=620.0)
+        k.models = ["kiro-claude-opus-5-5", "claude-haiku-4-5", "claude-sonnet-5-5",
+                    "gpt-6-sol"]
+        k.aliases = {"claude-sonnet-5-5": "kiro-claude-sonnet-5-5",
+                     "gpt-6-sol": "chatgpt-gpt-6-sol"}
+        d = {"model": "kiro-claude-opus-5-5",
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = _with_env(self.ENV, lambda: asyncio.run(M.budget_notice.async_pre_call_hook(
+            k, None, d, _CallType("acompletion"))))
+        t = out.get("mock_response", "")
+        # 今天用过的加粗、排本行最前；花费最高的那家（gpt）排第一行
+        self.assertLess(t.index("| gpt "), t.index("| claude "))
+        self.assertIn("| gpt    | **gpt-6-sol** ", t)
+        self.assertIn("| claude | **claude-sonnet-5-5**、claude-haiku-4-5 |", t)
+
+    def test_available_models_order_without_stats_keeps_allowlist(self):
+        self.assertEqual(M._used_first(["a", "b", "c"], []), ["a", "b", "c"])
+        self.assertEqual(M._used_first(["a", "b", "c"], ["c", "x"]), ["c", "a", "b"])
+
+    def test_stats_failure_still_warns(self):
+        class DB:
+            async def query_raw(self, q, v, *a):
+                raise RuntimeError("db down")
+        self.proxy_server.prisma_client = types.SimpleNamespace(db=DB())
+        n = self._stream(self._key("tw6", spend=820.0))
+        self.assertIn("今日额度已用 82%", n)
+        self.assertNotIn("按模型", n)
+
+    def test_premium_block_lists_all_available_models(self):
+        M._fam_local[M._family_spend_key("premium", "tw7")] = 500.0
+        d = {"model": "kiro-claude-opus-5-5",
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = _with_env(self.ENV, lambda: asyncio.run(M.budget_notice.async_pre_call_hook(
+            self._key("tw7", spend=600.0), None, d, _CallType("acompletion"))))
+        t = out.get("mock_response", "")
+        self.assertIn("高配模型(Opus/Astra) 额度已用完", t)
+        self.assertIn("不受影响", t)
+        self.assertIn("即可继续（2 个）", t)
+        self.assertIn("| claude | claude-sonnet-5-5 ", t)
+        self.assertIn("| gpt    | gpt-6-sol ", t)
+        self.assertNotIn("gpt-6-astra", t.split("即可继续")[1])
+        self.assertIn("| $600.00 / $1000.00 |  60% |", t)
+        self.assertNotIn("剩余", t)
+        # 两个桶重置时刻不同 ⇒ 分开说，不压成一个
+        self.assertIn("⏰ 高配模型(Opus/Astra) 北京时间 ", t)
+        self.assertIn("；总额度 北京时间 08-20 00:00 重置", t)
+        self.assertIn("cye", t)
+        self.assertNotIn("提额", t)
+
+    def test_block_without_allowlist_falls_back_to_generic(self):
+        M._fam_local[M._family_spend_key("premium", "tw8")] = 500.0
+        k = self._key("tw8")
+        k.models = []
+        d = {"model": "gpt-6-astra", "messages": [{"role": "user", "content": "hi"}]}
+        out = _with_env(self.ENV, lambda: asyncio.run(M.budget_notice.async_pre_call_hook(
+            k, None, d, _CallType("acompletion"))))
+        self.assertIn("其他系列的模型不受影响", out.get("mock_response", ""))
 
 
 if __name__ == "__main__":

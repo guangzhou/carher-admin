@@ -62,7 +62,17 @@ TS=$(date -u +%Y%m%dT%H%M%SZ); WORK=$I/swap-$TS; mkdir -p "$WORK"
 #    callback 和手工改过的 CM 一起静默回退，且下面的门禁比的是 helm manifest ↔ target，看不出来。
 #    ⇒ 动快照之前先比 live Deployment 与 helm manifest 引用的 ConfigMap 名，不一致就停。
 helm get manifest $REL -n $NS > "$WORK/helm-before.yaml"
-cm_refs_live=$(kubectl -n $NS get deploy $DEP -o json | python3 -c "import sys,json;s=json.load(sys.stdin)['spec']['template']['spec'];print(' '.join(sorted(v['name']+'='+v['configMap']['name'] for v in s['volumes'] if 'configMap' in v)))")
+#    只比**真挂载**的卷（2026-10-20）：live 上「只声明未挂载」的旧卷（gray 1 个、prod 4 个
+#    litellm-stable-*，历次升级残留）不影响运行，helm upgrade 把它们去掉也不会回退任何东西
+#    （version-upgrade SKILL §5：mounted=False 的旧卷可以删）。忽略的逐条打印，不静默。
+cm_refs_live=$(kubectl -n $NS get deploy $DEP -o json | python3 -c "
+import sys,json
+s=json.load(sys.stdin)['spec']['template']['spec']
+mounted={m['name'] for c in s.get('containers',[])+s.get('initContainers',[]) for m in c.get('volumeMounts',[])}
+for v in s['volumes']:
+    if 'configMap' in v and v['name'] not in mounted:
+        print('  ignore unmounted live volume', v['name'], '->', v['configMap']['name'], file=sys.stderr)
+print(' '.join(sorted(v['name']+'='+v['configMap']['name'] for v in s['volumes'] if 'configMap' in v and v['name'] in mounted)))")
 cm_refs_helm=$(python3 - "$WORK/helm-before.yaml" "$DEP" <<'PY'
 import sys, yaml
 for d in yaml.safe_load_all(open(sys.argv[1])):
@@ -96,7 +106,7 @@ COMMON=(--profile "$PROF" --repository 127.0.0.1:5000/litellm-carher --digest "$
   --snapshot anthropic-logging-patch="$SNAP/anthropic-logging-patch"
   --deployment "$DEPLOY_SRC" --secret-metadata "$RUN_DIR/go-inputs/secret-metadata.json"
   --ingress-cidr 10.42.0.0/32 --ingress-cidr 10.42.0.1/32 --ingress-cidr 10.42.0.0/24 --ingress-cidr 10.42.1.0/24
-  --ingress-cidr 10.42.2.0/24 --ingress-cidr 10.68.13.0/24 --termination-grace-seconds 600)
+  --ingress-cidr 10.42.2.0/24 --ingress-cidr 10.68.13.0/24 --ingress-cidr 10.42.3.0/24 --ingress-cidr 10.68.10.37/32 --termination-grace-seconds 600)
 REPLICAS=$(python3 -c "import yaml,sys;print(yaml.safe_load(open(sys.argv[1]))['replicas'])" "$VAL")
 EV=$WORK/scheduler-evidence.json
 SOURCE="clone:litellm-clone-c-sched-suppressed-20261002"; [[ $MODE == primary ]] && SOURCE="direct:litellm-198-prod-reset-budget-owner"

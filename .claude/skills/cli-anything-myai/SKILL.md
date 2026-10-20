@@ -18,8 +18,8 @@ description: >-
 |---|---|
 | 公网 | 两个入口，**同一个库**：① `https://myai.carher.net`（Cloudflare Tunnel `e22cc0ea…`；🔴 国内常被分到 CF LAX，1~20s 甚至超时）② **`https://chat.auto-link.com.cn/myai/`**（10-19 起，国内直连，中位 0.07s）。②的细节见下面「§国内入口」 |
 | 主机 | 243 `cltx@10.68.13.243`（hostname `AIYJY-litellm-ps`），🔴 密码末尾的 `'` 也是密码的一部分 |
-| 代码 | GitHub `davidzhu2021/ai_token_dashboard`（我们**没有推送权限**）。**10-20 起 4 个工作负载（两份 dashboard、realtime、sync worker）统一跑 `22fdbc2`** = `2818c0d` + 本地 6 个提交（补丁 `tools/cli-anything-myai/upstream-fixes/0001~0006`）。本地分支在 `.work/myai-admin-perf/ai_token_dashboard`（`perf/admin-board-latency`）；243 上 `~/ai_token_dashboard` 已切到同一提交（分支 `perf/admin-board-latency`） |
-| 镜像 | 本地导入，`imagePullPolicy: Never`；243 上没有 docker。**现役 `ai-token-dashboard:perf-22fdbc2`**（`2a2ba3a9`，依赖按 9f250f8 锁死）。回滚用的旧镜像：dashboard/realtime 原来是 `latest`（`985f9288`），sync worker 原来是 `fix-9f250f8`，改前清单 `/Data/migration/images-pre-perf-22fdbc2.txt` |
+| 代码 | GitHub `davidzhu2021/ai_token_dashboard`（我们**没有推送权限**）。线上 = `2818c0d` + 本地补丁（`tools/cli-anything-myai/upstream-fixes/0001~`，见那里的 README）。本地仓库 `.work/myai-admin-perf/ai_token_dashboard`，243 上 `~/ai_token_dashboard` 与线上同一提交 |
+| 镜像 | 本地导入，`imagePullPolicy: Never`，名字 `ai-token-dashboard:perf-<commit>`，4 个工作负载（两份 dashboard、realtime、sync worker）统一用同一个。🔴 **现役版本只认现量**：`kubectl -n ai-token-dashboard get deploy -o custom-columns=N:.metadata.name,IMG:.spec.template.spec.containers[0].image`（这里写死的版本号每次发布都会过时）；每次发布前的版本在 `/Data/migration/images-pre-perf-*.txt` |
 | 交接文档 | 飞书 `LnDFdifILo1Wuix7irecEbKOnkh` |
 | 磁盘 | 根盘只有 38G，k3s 数据在 `/Data/rancher`。**myai 报 1033/502、pod Pending 或 ErrImageNeverPull，先走 skill `host-243-disk-ops`**（`scripts/host-243-disk-check.sh`）。`latest` 现在是从 `2818c0d` 重建的（`985f9288`，依赖按 9f250f8 锁定）；10-10 原版已经丢了 |
 
@@ -113,8 +113,15 @@ $M db tables | db sql "SELECT ..."
 **阳性对照**：`--end 2026-09-21 --days 2` 得到 161 人和 172 人，不拦。尺子两个方向都量得对。
 ⇒ 判定：her 上游从 09-28 起几乎没有流量，同步卡住是门禁按设计生效，**不是采集坏了**。her 的流量去了哪里，还没查。
 
-修复方向（都要改生产，需要用户或项目负责人拍板）：her 源改指新网关、下掉 her 源，或者改门禁（全局请求本来就近 0 时，空结果算正常）。
-只调 `USAGE_SYNC_FALLBACK_MIN_NONEMPTY_RATIO` 修不干净：`max(1, …)` 保证零流量的天仍会被拦。
+✅ **10-20 已修（补丁 0006，线上已跑）**：门禁触发时再查一次上游全局 `/user/daily/activity/aggregated` 的 metadata，
+全局请求 ≤ 每天 `USAGE_SYNC_SPARSE_MAX_DAILY_REQUESTS`（默认 100）就放行；设 0 恢复旧行为。日志：
+`sparse fallback upstream check backend=her ... upstream_requests=21 ... confirmed=True`。
+（只调 `USAGE_SYNC_FALLBACK_MIN_NONEMPTY_RATIO` 修不干净：`max(1, …)` 保证零流量的天仍会被拦。）
+
+**刷新队列另外两个坑（也已修）**：
+- 只按 `requested_at` 领取 ⇒ 重试上千次的老请求永远排在最前，新日期 attempts=0 从没被领过 ⇒ 补丁 0005 改成 `ORDER BY attempts, requested_at`
+- 历史日期的刷新每次都先陪跑「今天」的稳定性扫描（2000+ 页，约 23 分钟）⇒ 撞 `USAGE_REFRESH_TASK_TIMEOUT_SECONDS=1800` 被杀 ⇒ 补丁 0007 让 `end_date < 今天` 时跳过（日志 `stability sync skipped for historical refresh`）
+- 读队列别读错：`last_error=sync failed`、`duration_ms` 只有几毫秒 = 拿不到同步锁被 skipped（`usage_sync_runs.status=skipped`、`已有同步任务正在运行`），不是真失败
 
 ## 看板少算钱：三种已知形状（10-13/10-14 实测，均已修进 `9f250f8`）
 
@@ -142,23 +149,23 @@ $M db tables | db sql "SELECT ..."
   ```
 - 要在 pod 里跑**改过的**本地代码：`tar czf p.tgz backend` → `kubectl cp` 到 `/tmp/patched` → `sys.path.insert(0, "/tmp/patched")`，用 `UsageSynchronizer(client, NoWriteStore())` 调 `collect_backend` 做不落库的干跑（10-14 用这个验证了三个修复）。
 
-## 发布（sync worker 热修复的走法）
+## 发布（`scripts/myai-release.sh`）
 
-GitHub 推不了，镜像在 188 构建（与 243 同为 x86_64）：
+GitHub 推不了。本地仓库 `.work/myai-admin-perf/ai_token_dashboard`（分支 `perf/admin-board-latency`，从 243 的 `~/ai_token_dashboard` 用 `git bundle` 拉来）。
+改完、提交，然后：
+
 ```bash
-git archive --format=tgz -o /tmp/x.tgz <commit>                       # 只打包已提交内容
-# 188: 解包到新目录 /Data/myai-build-<commit> → docker build -t ai-token-dashboard:fix-<commit> .
-#      docker run 一遍新测试；docker save -o image.tar（🔴 别用管道 save|ssh import：docker 29 的 OCI 包 ctr 从 stdin 认不出）
-# 243: ssh 188 'cat image.tar' | ssh 243 'cat > /Data/migration/image-fix-<commit>.tar'
-#      HOST243_PW=... scripts/host-243-image-import.sh /Data/migration/image-fix-<commit>.tar   # 导入 + pin + 回读
-#      🔴 tar 留在 /Data/migration 别删、别放 /tmp：镜像没 pin 会被 image GC 删，拉不回（10-17 停机 19h，见 skill host-243-disk-ops）
-kubectl -n ai-token-dashboard exec usage-db-0 -- pg_dump ... -t usage_daily -t usage_sync_coverage -t usage_team_membership_daily --data-only -Fc > /Data/migration/<备份>.dump
-kubectl -n ai-token-dashboard set image deploy/usage-sync-worker worker=ai-token-dashboard:fix-<commit>
-# 换的是 dashboard 用的 latest 时：deploy/ai-token-dashboard 和 deploy/ai-token-dashboard-chat 都要 rollout restart（导入脚本最后会列出来）
+HOST243_PW=... scripts/myai-release.sh build     # 本地测试门禁 → 188 构建（pip 锁 9f250f8 的 freeze）→ 源码 sha 对提交 → 导入 243 + pin
+HOST243_PW=... scripts/myai-release.sh deploy    # 记录现镜像 + 备份 4 张表 → 金丝雀(chat) → 主看板 → realtime → sync，逐个等就绪、间隔 30~40s
+HOST243_PW=... scripts/myai-release.sh rollback  # 按 /Data/migration/images-pre-perf-<commit>.txt 逐个换回
 ```
-验收看 `diagnose coverage`、`sync runs`（无 TimeoutError）、worker 重启数。回滚：`set image … worker=ai-token-dashboard:latest`。
-🔴 镜像里的文件要和 commit 逐个 sha 对过再 rollout（`git show <c>:<f> | shasum` vs `docker run … sha256sum`）。
-🔴 改完 sync worker 别忘了把 243 上 `~/ai_token_dashboard` 也切到同一提交（用 `git bundle` 搬），否则又会和线上对不上。
+- **测试门禁比的是失败集合**：ai_token_dashboard 改前就有 15 个失败（前端/静态资源断言），基线在 `.work/myai-admin-perf/baseline.txt`。不能要求全绿，只要求不新增
+- 🔴 **worker 不能同时 rollout**：启动时 `apply_usage_schema` 会互相死锁（10-20 第一次发布时各重启 1~2 次）。补丁 0008 让锁冲突改为等锁重试；脚本仍然逐个换
+- 🔴 `docker save | ssh ctr import -` 管道不行（docker 29 的 OCI 包 ctr 从 stdin 认不出），脚本是落 tar 再导入
+- 🔴 tar 留在 `/Data/migration` 别删：没 pin 的镜像会被 image GC 删、拉不回（见 skill `host-243-disk-ops`）
+- 发布后把 243 的 `~/ai_token_dashboard` 切到同一提交（`git bundle` 搬过去），否则下次又对不上
+- 改补丁后重新导出：`git format-patch 9f250f8..perf/admin-board-latency --start-number 3 -o tools/cli-anything-myai/upstream-fixes/`；`git am` 必须 `--keep-cr`
+- 验收看：pod 重启数、`diagnose coverage`、`sync runs`（无 TimeoutError）、`logs sync --grep "sparse fallback|stability sync skipped"`
 
 ## 只读保证
 

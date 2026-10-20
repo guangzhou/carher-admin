@@ -1,0 +1,168 @@
+From 9f277e301b0cab9d5179845bfd1ec405546f2318 Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Tue, 20 Oct 2026 19:18:17 +0800
+Subject: [PATCH 8/8] =?UTF-8?q?=E5=90=AF=E5=8A=A8=E6=97=B6=E5=BB=BA?=
+ =?UTF-8?q?=E8=A1=A8=E9=81=87=E5=88=B0=E9=94=81=E5=86=B2=E7=AA=81=E6=94=B9?=
+ =?UTF-8?q?=E4=B8=BA=E7=AD=89=E9=94=81=E9=87=8D=E8=AF=95=EF=BC=8C=E4=B8=8D?=
+ =?UTF-8?q?=E5=86=8D=20CrashLoop?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+apply_usage_schema 每条 DDL 的 lock_timeout=3s 是对的（拿不到锁就放手，不堵读写），但拿不到
+就让进程启动失败。2026-10-18/20 每次发布：dashboard 因 sync worker 正在长事务里写库而
+LockNotAvailableError 重启 4 次；两个 worker 同时启动互相 DeadlockDetectedError 各重启 1~2 次。
+
+只对 LockNotAvailableError / DeadlockDetectedError 整轮重试（语句全是幂等的 IF NOT EXISTS /
+OR REPLACE），退避 1/2/4/8/15s，USAGE_SCHEMA_LOCK_RETRIES 次（默认 20，累计约 5 分钟）后再抛。
+其它错误照旧立即失败。
+
+tests/test_usage_schema_apply.py 新增 3 条（含阴性对照），2 条在改前代码上失败。
+---
+ backend/usage_store.py           | 38 +++++++++++++--
+ tests/test_usage_schema_apply.py | 80 ++++++++++++++++++++++++++++++++
+ 2 files changed, 113 insertions(+), 5 deletions(-)
+
+diff --git a/backend/usage_store.py b/backend/usage_store.py
+index b237da7..558e53e 100644
+--- a/backend/usage_store.py
++++ b/backend/usage_store.py
+@@ -1055,14 +1055,42 @@ def split_sql_statements(script: str) -> list[str]:
+     return statements
+ 
+ 
++def _is_retryable_schema_lock_error(exc: BaseException) -> bool:
++    """lock_timeout / 死锁：别的会话（sync worker 长事务、另一个进程同时启动）拿着锁，等一会儿就好。"""
++
++    if asyncpg is None:
++        return False
++    return isinstance(exc, (asyncpg.exceptions.LockNotAvailableError, asyncpg.exceptions.DeadlockDetectedError))
++
++
+ async def apply_usage_schema(pool: Any, schema: str = USAGE_SCHEMA) -> None:
+-    """Apply DDL one statement at a time so a blocked ALTER cannot lock unrelated tables."""
++    """Apply DDL one statement at a time so a blocked ALTER cannot lock unrelated tables.
++
++    每条语句 lock_timeout=3s 是故意的（拿不到锁就放手，不排在长事务后面把读写都堵住）。
++    但拿不到锁就让整个进程启动失败，代价是 CrashLoop：2026-10-18/20 每次发布，dashboard
++    因 sync worker 正在长事务里写库而重启 4 次，两个 worker 同时启动还会互相死锁。
++    所以只对锁冲突这一类错误整轮重试（语句都是幂等的 IF NOT EXISTS / OR REPLACE），带退避，
++    USAGE_SCHEMA_LOCK_RETRIES 次（默认 20 次，累计约 5 分钟）之后再抛。
++    """
+ 
+     statements = split_sql_statements(schema)
+-    async with pool.acquire() as connection:
+-        await connection.execute("SELECT set_config('lock_timeout', $1, false)", "3s")
+-        for statement in statements:
+-            await connection.execute(statement)
++    retries = max(0, int(os.getenv("USAGE_SCHEMA_LOCK_RETRIES", "20")))
++    for attempt in range(retries + 1):
++        try:
++            async with pool.acquire() as connection:
++                await connection.execute("SELECT set_config('lock_timeout', $1, false)", "3s")
++                for statement in statements:
++                    await connection.execute(statement)
++            return
++        except Exception as exc:
++            if attempt >= retries or not _is_retryable_schema_lock_error(exc):
++                raise
++            delay = min(15.0, 1.0 * (2 ** min(attempt, 4)))
++            logger.warning(
++                "usage schema apply blocked by a lock, retrying attempt=%s/%s delay=%.0fs error=%s",
++                attempt + 1, retries, delay, exc.__class__.__name__,
++            )
++            await asyncio.sleep(delay)
+ 
+ 
+ class UsageStore:
+diff --git a/tests/test_usage_schema_apply.py b/tests/test_usage_schema_apply.py
+index a64fe58..5f33bf1 100644
+--- a/tests/test_usage_schema_apply.py
++++ b/tests/test_usage_schema_apply.py
+@@ -53,3 +53,83 @@ def test_apply_usage_schema_sets_lock_timeout_and_executes_each_statement() -> N
+     assert "CREATE TABLE IF NOT EXISTS usage_daily" in executed[1]
+     assert "CREATE TABLE IF NOT EXISTS usage_sync_coverage" in executed[2]
+     assert len(executed) == 3
++
++
++def _flaky_pool(errors):
++    """前 len(errors) 次 acquire 后执行第一条 DDL 时抛对应异常，之后正常。"""
++    state = {"rounds": 0, "executed": []}
++
++    class Connection:
++        async def execute(self, sql, *args):
++            if sql.startswith("SELECT set_config"):
++                return "OK"
++            if state["rounds"] <= len(errors):
++                raise errors[state["rounds"] - 1]
++            state["executed"].append(sql)
++            return "OK"
++
++    class Pool:
++        def acquire(self):
++            return self
++
++        async def __aenter__(self):
++            state["rounds"] += 1
++            return Connection()
++
++        async def __aexit__(self, exc_type, exc, tb):
++            return False
++
++    return Pool(), state
++
++
++def test_apply_usage_schema_retries_lock_conflicts_instead_of_crashing(monkeypatch) -> None:
++    """发布时 sync worker 拿着锁 ⇒ 以前直接启动失败、CrashLoop 4 次；现在等锁重试。"""
++    import asyncpg
++    from backend import usage_store
++
++    sleeps: list[float] = []
++
++    async def fake_sleep(seconds):
++        sleeps.append(seconds)
++
++    monkeypatch.setattr(usage_store.asyncio, "sleep", fake_sleep)
++    pool, state = _flaky_pool([asyncpg.exceptions.LockNotAvailableError("lock timeout"), asyncpg.exceptions.DeadlockDetectedError("deadlock")])
++
++    asyncio.run(apply_usage_schema(pool, "CREATE TABLE IF NOT EXISTS t (id TEXT);"))
++
++    assert state["rounds"] == 3
++    assert state["executed"] == ["CREATE TABLE IF NOT EXISTS t (id TEXT)"]
++    assert sleeps == [1.0, 2.0]
++
++
++def test_apply_usage_schema_does_not_retry_other_errors(monkeypatch) -> None:
++    """阴性对照：SQL 写错之类的错误照旧立即失败，不能被重试掩盖。"""
++    import pytest
++    from backend import usage_store
++
++    async def fake_sleep(_seconds):
++        raise AssertionError("不该重试")
++
++    monkeypatch.setattr(usage_store.asyncio, "sleep", fake_sleep)
++    pool, state = _flaky_pool([ValueError("syntax error")])
++
++    with pytest.raises(ValueError):
++        asyncio.run(apply_usage_schema(pool, "CREATE TABLE IF NOT EXISTS t (id TEXT);"))
++    assert state["rounds"] == 1
++
++
++def test_apply_usage_schema_gives_up_after_the_retry_budget(monkeypatch) -> None:
++    import asyncpg
++    import pytest
++    from backend import usage_store
++
++    async def fake_sleep(_seconds):
++        return None
++
++    monkeypatch.setattr(usage_store.asyncio, "sleep", fake_sleep)
++    monkeypatch.setenv("USAGE_SCHEMA_LOCK_RETRIES", "2")
++    pool, state = _flaky_pool([asyncpg.exceptions.LockNotAvailableError("x")] * 5)
++
++    with pytest.raises(asyncpg.exceptions.LockNotAvailableError):
++        asyncio.run(apply_usage_schema(pool, "CREATE TABLE IF NOT EXISTS t (id TEXT);"))
++    assert state["rounds"] == 3
+-- 
+2.53.0
+

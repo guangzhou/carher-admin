@@ -1,0 +1,144 @@
+From 6784bc175aa0e4ce504d91a9569632b896ef2150 Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Tue, 20 Oct 2026 19:06:12 +0800
+Subject: [PATCH 7/8] =?UTF-8?q?=E5=8E=86=E5=8F=B2=E6=97=A5=E6=9C=9F?=
+ =?UTF-8?q?=E7=9A=84=E5=88=B7=E6=96=B0=E4=B8=8D=E5=86=8D=E9=99=AA=E8=B7=91?=
+ =?UTF-8?q?=E3=80=8C=E4=BB=8A=E5=A4=A9=E3=80=8D=E7=9A=84=E7=A8=B3=E5=AE=9A?=
+ =?UTF-8?q?=E6=80=A7=E6=89=AB=E6=8F=8F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+稳定性扫描终点固定是 usage_today()，跟同步窗口无关。2026-10-20 生产（perf-22fdbc2 上线后）：
+刷新队列里 10-15/16/19、09-20..10-19 每条都先花约 23 分钟扫今天的原始日志（2000+ 页），
+再做本该做的那天，于是全部撞 USAGE_REFRESH_TASK_TIMEOUT_SECONDS=1800 被杀、记回 pending，
+只有恰好在 1530s 内跑完的 10-13 成功了。
+
+end_date < 今天时跳过；含今天的周期同步和今天的刷新照旧扫。_stability_collected_separately
+两种情况都要置 True，否则 collect_backend 的后备路径会逐后端再扫一遍（同样扫到今天）。
+
+tests/test_historical_refresh_skips_stability.py 4 条，其中 1 条在改前代码上失败。
+---
+ backend/usage_sync.py                         | 19 +++--
+ ...test_historical_refresh_skips_stability.py | 78 +++++++++++++++++++
+ 2 files changed, 92 insertions(+), 5 deletions(-)
+ create mode 100644 tests/test_historical_refresh_skips_stability.py
+
+diff --git a/backend/usage_sync.py b/backend/usage_sync.py
+index 1ce58ee..e13b862 100644
+--- a/backend/usage_sync.py
++++ b/backend/usage_sync.py
+@@ -1028,12 +1028,21 @@ class UsageSynchronizer:
+                 str(item.get("backend_id")): item for item in states if isinstance(item, dict)
+             }
+             publish_stability = getattr(self.store, "publish_stability_events", None)
++            # 稳定性扫描永远扫"今天"（_stability_scan_plan 以 usage_today() 为终点），跟本次同步的
++            # 日期窗口无关。历史日期的刷新（end_date < 今天）带着它跑纯属陪跑：2026-10-20 生产
++            # 每次约 23 分钟（今天 2000+ 页），刷新任务因此撞 1800s 超时、被杀、记 pending，
++            # 10-14/15/16/19 反复重来。含今天的同步（周期同步、今天的刷新）照常带上。
++            stability_due = end_date >= usage_today().isoformat()
+             if _env_bool("ADMIN_OBSERVABILITY_DASHBOARDS_ENABLED", False) and callable(publish_stability):
+-                for backend in self.client.backends:
+-                    try:
+-                        await self._sync_stability_backend(backend, publish_stability)
+-                    except Exception:
+-                        logger.exception("standalone stability sync failed for backend %s", backend.id)
++                if stability_due:
++                    for backend in self.client.backends:
++                        try:
++                            await self._sync_stability_backend(backend, publish_stability)
++                        except Exception:
++                            logger.exception("standalone stability sync failed for backend %s", backend.id)
++                else:
++                    logger.info("stability sync skipped for historical refresh end=%s", end_date)
++                # 不置这个标记，collect_backend 会退回到逐后端再扫一遍稳定性（同样扫到今天），跳了等于没跳
+                 self._stability_collected_separately = True
+             for backend in self.client.backends:
+                 try:
+diff --git a/tests/test_historical_refresh_skips_stability.py b/tests/test_historical_refresh_skips_stability.py
+new file mode 100644
+index 0000000..69fa6a9
+--- /dev/null
++++ b/tests/test_historical_refresh_skips_stability.py
+@@ -0,0 +1,78 @@
++"""历史日期的刷新不再陪跑「今天」的稳定性扫描。
++
++稳定性扫描终点固定是 usage_today()，跟同步窗口无关。2026-10-20 生产：刷新 10-15 这类历史日期时
++它每次约 23 分钟（今天 2000+ 页），整个刷新撞 USAGE_REFRESH_TASK_TIMEOUT_SECONDS=1800 被杀，
++同一批日期反复重来。
++"""
++
++import asyncio
++from datetime import date
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++import pytest
++
++from backend import usage_sync
++from backend.usage_sync import UsageSynchronizer
++
++
++def _snapshot(backend_id):
++    return SimpleNamespace(
++        backend_id=backend_id, rows=[], memberships=[], events=None,
++        departments=[], identities=[], quality={"complete": True},
++    )
++
++
++def _sync(monkeypatch):
++    monkeypatch.setenv("ADMIN_OBSERVABILITY_DASHBOARDS_ENABLED", "true")
++    monkeypatch.setattr(usage_sync, "usage_today", lambda: date(2026, 10, 20))
++    store = SimpleNamespace(
++        begin_sync_run=AsyncMock(return_value=1),
++        try_acquire_sync_lock=AsyncMock(return_value=object()),
++        release_sync_lock=AsyncMock(), finish_sync_run=AsyncMock(),
++        publish_snapshots=AsyncMock(return_value={"rowCount": 0, "snapshotRevision": "r"}),
++        stability_sync_states=AsyncMock(return_value=[]),
++        publish_stability_events=AsyncMock(),
++    )
++    sync = UsageSynchronizer(SimpleNamespace(backends=[SimpleNamespace(id="primary")]), store)
++    sync._identity_directory = AsyncMock(return_value={})
++    sync._refresh_historical_identity = AsyncMock()
++    sync._sync_stability_backend = AsyncMock()
++    seen = {}
++
++    async def collect(backend, *_args):
++        # collect_backend 里有一条后备路径：标记没置时会自己再扫一遍稳定性
++        seen["collected_separately"] = getattr(sync, "_stability_collected_separately", False)
++        return _snapshot(backend.id)
++
++    sync.collect_backend = collect
++    return sync, seen
++
++
++def test_historical_refresh_skips_the_today_stability_scan(monkeypatch) -> None:
++    sync, seen = _sync(monkeypatch)
++
++    result = asyncio.run(sync.sync("2026-10-15", "2026-10-15"))
++
++    assert result["status"] == "ok"
++    sync._sync_stability_backend.assert_not_awaited()
++    assert seen["collected_separately"] is True, "标记不置，collect_backend 会退回去再扫一遍，跳了等于没跳"
++
++
++@pytest.mark.parametrize("window", [("2026-10-20", "2026-10-20"), ("2026-10-18", "2026-10-20")])
++def test_ranges_ending_today_still_scan_stability(monkeypatch, window) -> None:
++    """阳性对照：周期同步和今天的刷新照旧带稳定性。"""
++    sync, _ = _sync(monkeypatch)
++
++    asyncio.run(sync.sync(*window))
++
++    sync._sync_stability_backend.assert_awaited_once()
++
++
++def test_observability_disabled_never_scans(monkeypatch) -> None:
++    sync, _ = _sync(monkeypatch)
++    monkeypatch.setenv("ADMIN_OBSERVABILITY_DASHBOARDS_ENABLED", "false")
++
++    asyncio.run(sync.sync("2026-10-20", "2026-10-20"))
++
++    sync._sync_stability_backend.assert_not_awaited()
+-- 
+2.53.0
+

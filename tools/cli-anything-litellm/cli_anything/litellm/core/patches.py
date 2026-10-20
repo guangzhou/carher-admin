@@ -61,6 +61,7 @@ PURPOSE: Final[dict[str, str]] = {
     "embedding_sanitize": "pre-call (embeddings): strip lone UTF-16 surrogates",
     "deepseek_responses_adapt": "pre-call + deployment hook: let DeepSeek take gpt/Codex-shaped Responses requests (tools, reasoning_content)",
     "codex_custom_tool_bridge": "chat-schema targets accept Codex custom tools (wraps responses<->chat tool transforms)",
+    "same_group_failover_cap": "cap same-group weighted failover at N excluded legs (default 3) so cross-group fallbacks still get max_fallbacks budget",
 }
 
 

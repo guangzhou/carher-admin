@@ -24,6 +24,7 @@ TARGETS = {
     "Router.should_retry_this_error": ("litellm.router", "Router.should_retry_this_error"),
     "Router.async_get_available_deployment": ("litellm.router", "Router.async_get_available_deployment"),
     "Router._ageneric_api_call_with_fallbacks_helper": ("litellm.router", "Router._ageneric_api_call_with_fallbacks_helper"),
+    "Router._maybe_run_weighted_failover": ("litellm.router", "Router._maybe_run_weighted_failover"),
     "cooldown_handlers._is_cooldown_required": ("litellm.router_utils.cooldown_handlers", "_is_cooldown_required"),
     "fallback_event_handlers.run_async_fallback": ("litellm.router_utils.fallback_event_handlers", "run_async_fallback"),
     "router.run_async_fallback": ("litellm.router", "run_async_fallback"),

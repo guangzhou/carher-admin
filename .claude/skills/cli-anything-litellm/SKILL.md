@@ -150,6 +150,14 @@ PrismaClient.jsonify_object                      : sitecustomize → null_byte_s
 | 13 | 鉴权 key 缓存 60s、**每 worker 一份、默认上限 200 条**（2121 把 key）⇒ 多数请求读库；直接改 DB 最多 60s 生效 | 读码 | — |
 | 14 | `#43049` 回退补丁的代价：鉴权只看「请求名在 `key.models` 里」，alias 指向哪里不查 ⇒ alias 变成白名单外的路由表；key 所有者/团队成员能改 alias（`key_management_endpoints.py:3138-3158`），198 上谁能改未核 | 读码 | 列入 #43049 长期解的考量 |
 
+**10-20 下午车道又变了**（别人在推，`patches compare` 现量 24/28 一致）：
+- gray（08:41 滚）新增 `same_group_failover_cap`：包 `Router._maybe_run_weighted_failover`，同组已排除 3 条腿就停，
+  把 `max_fallbacks` 预算留给跨组兜底——**正好针对上表第 5 条**（它自己的实测：60 分钟里放弃 191 次、跨组到 grok 只有 9 次）。
+  文件在仓里还是未跟踪（`k8s/litellm-callbacks/same_group_failover_cap.py`）。
+- gray 去掉了 `anthropic_passthrough_pingfix`、`log_truncate`（呼应第 8 条：pingfix 已是空操作）。
+- prod（08:48 滚）只换了 `budget_notice.py`，和工作区未提交的那份对得上。
+⇒ 这些都没进 git；照 repo 重建车道会静默回退。核 drift 用 `scripts/litellm-198-callbacks-drift.py`。
+
 **核过、不成立的**（别再当风险报）：每 30s 重载往 callbacks 里追加字符串（实测 40s 前后长度不变，success/failure 列表 0 个裸字符串）·
 预算重置并发导致负 spend（实测只有 3 把 -5.7e-14 的浮点尘）· keepalive 让每个 chunk 都丢 contextvar（实测生产 keepalive 关着，只剩首块那一种情况，未实测）。
 

@@ -18,8 +18,8 @@ description: >-
 |---|---|
 | 公网 | 两个入口，**同一个库**：① `https://myai.carher.net`（Cloudflare Tunnel `e22cc0ea…`；🔴 国内常被分到 CF LAX，1~20s 甚至超时）② **`https://chat.auto-link.com.cn/myai/`**（10-19 起，国内直连，中位 0.07s）。②的细节见下面「§国内入口」 |
 | 主机 | 243 `cltx@10.68.13.243`（hostname `AIYJY-litellm-ps`），🔴 密码末尾的 `'` 也是密码的一部分 |
-| 代码 | GitHub `davidzhu2021/ai_token_dashboard`（我们**没有推送权限**）。dashboard/realtime 跑 `2818c0d`；**sync worker 跑 `9f250f8`**（= `2818c0d` + 本地两个修复提交，补丁在 `tools/cli-anything-myai/upstream-fixes/`）。243 上 `~/ai_token_dashboard` 在分支 `fix/log-scan-capped-window-split-v2` = 线上 sync worker |
-| 镜像 | 本地导入，`imagePullPolicy: Never`；243 上没有 docker。dashboard/realtime = `ai-token-dashboard:latest`，sync worker = `ai-token-dashboard:fix-9f250f8` |
+| 代码 | GitHub `davidzhu2021/ai_token_dashboard`（我们**没有推送权限**）。**10-20 起 4 个工作负载（两份 dashboard、realtime、sync worker）统一跑 `22fdbc2`** = `2818c0d` + 本地 6 个提交（补丁 `tools/cli-anything-myai/upstream-fixes/0001~0006`）。本地分支在 `.work/myai-admin-perf/ai_token_dashboard`（`perf/admin-board-latency`）；243 上 `~/ai_token_dashboard` 已切到同一提交（分支 `perf/admin-board-latency`） |
+| 镜像 | 本地导入，`imagePullPolicy: Never`；243 上没有 docker。**现役 `ai-token-dashboard:perf-22fdbc2`**（`2a2ba3a9`，依赖按 9f250f8 锁死）。回滚用的旧镜像：dashboard/realtime 原来是 `latest`（`985f9288`），sync worker 原来是 `fix-9f250f8`，改前清单 `/Data/migration/images-pre-perf-22fdbc2.txt` |
 | 交接文档 | 飞书 `LnDFdifILo1Wuix7irecEbKOnkh` |
 | 磁盘 | 根盘只有 38G，k3s 数据在 `/Data/rancher`。**myai 报 1033/502、pod Pending 或 ErrImageNeverPull，先走 skill `host-243-disk-ops`**（`scripts/host-243-disk-check.sh`）。`latest` 现在是从 `2818c0d` 重建的（`985f9288`，依赖按 9f250f8 锁定）；10-10 原版已经丢了 |
 

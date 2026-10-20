@@ -1,7 +1,7 @@
 # ai_token_dashboard 上游修复（未进 GitHub）
 
 `davidzhu2021/ai_token_dashboard` 我们没有推送权限。0001/0002 是 243 sync worker 正在跑的
-`ai-token-dashboard:fix-9f250f8` 相对线上 `2818c0d` 的两个提交；0003~0006（2026-10-20，**还没上线**）
+`ai-token-dashboard:fix-9f250f8` 相对线上 `2818c0d` 的两个提交；0003~0006（2026-10-20，**10-20 已上线**）
 叠在 9f250f8 上，修全员看板慢和刷新队列卡死。等有权限或交给项目负责人合并：
 
 | 文件 | 内容 |

@@ -437,6 +437,220 @@ def build(world: World, who: str) -> tuple[str, dict, str, list[str]]:
     return "member", x, doc, "\n".join(lines), [re.sub(r"（.*?）$", "", x["n"])]
 
 
+# ---------------------------------------------------------------- 交互页（10-21 用户：「它是把网页版发到飞书上实现了交互」）
+# 全员日报的「打开 AI 用量总账」按钮背后是一个原样上传到飞书云空间的 HTML 文件：飞书文件预览里
+# 页内 JS / SVG / 按钮切换 / 悬停都能用，只拦跳出去的链接和下载（见 memory
+# feedback_feishu_upload_html_means_raw_file_and_preview_blocks_links）。个人版照做，但：
+#   - 一人一个文件，bot 上传，**链接分享保持关闭**，只把本人加成「可阅读」⇒ 别人拿到链接也打不开。
+#   - 文件里只装本人（leader 再加本人团队）的数据，不是全员数据加前端过滤——源码里就没有别人。
+TMPL = Path(__file__).resolve().parent / "page.tmpl.html"
+STRIP = lambda n: re.sub(r"（.*?）$", "", n)
+
+
+def person_blob(world: World, p: dict, with_rank: bool) -> dict:
+    s = p["s"][:-1] + [p["y"]]          # 最后一天换北京日口径，和「昨天」大数一致
+    nz = [i for i, v in enumerate(s) if v > 0]
+    b = {"n": STRIP(p["n"]), "dept": p["l2"] if p["l2"] != p["l1"] else p["l1"],
+         "s": [round(v, 1) for v in s], "y": round(p["y"], 1), "t": round(p["t"], 1),
+         "ty": {k: v for k, v in p["ty"].items() if k in TOOLS and v},
+         "first": world.dates[nz[0]] if nz else ""}
+    if with_rank:
+        b["pct"] = world.pct_rank(p["d30"])
+    return b
+
+
+def page_data(world: World, who: str) -> tuple[dict, list[str]]:
+    """返回 (塞进页面的数据, 页面里出现的人名——给隐私门禁)。"""
+    x = world.person(who)
+    if not x:
+        raise SystemExit(f"总账里找不到唯一的「{who}」（没用过、累计 <$20 或同名）")
+    data = {"dates": world.dates, "co": {"yavg": round(world.co_avg_y, 1), "yn": world.co_active,
+                                         "d30n": len(world.d30_sorted)},
+            "team": [], "idleExtra": [], "ambiguous": []}
+    named = [STRIP(x["n"])]
+    if who in world.leaders and world.team.get(who):
+        data["me"] = person_blob(world, x, with_rank=False)
+        for n in world.team[who]:
+            st, p = world.resolve(n)
+            if st == "ok":
+                data["team"].append(person_blob(world, p, with_rank=False)); named.append(STRIP(p["n"]))
+            else:
+                data["idleExtra" if st == "absent" else "ambiguous"].append(n); named.append(n)
+    else:
+        data["me"] = person_blob(world, x, with_rank=True)
+    return data, named
+
+
+def page_html(data: dict) -> str:
+    html_ = TMPL.read_text(encoding="utf-8").replace("/*__DATA__*/null", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+    assert html_.lstrip().lower().startswith("<!doctype") and 'charset="utf-8"' in html_[:400]
+    return html_
+
+
+def preview_html(data: dict) -> str:
+    """卡片里那张预览图：只放最重要的几个数 + 一条 30 天柱，日期压成右上角一行小字。"""
+    me, team = data["me"], data["team"]
+    leader = bool(team)
+    allp = [me] + team
+    D = data["dates"]; n = len(D)
+    S = [sum(p["s"][i] for p in allp) for i in range(n)] if leader else me["s"]
+    y = sum(p["y"] for p in allp) if leader else me["y"]
+    lw = S[n - 8] if n >= 8 else 0
+    wk, pw = sum(S[-7:]) / 7, sum(S[-14:-7]) / 7
+    d = (y / lw - 1) if lw else None
+    asof = f"截至 {int(D[-1][5:7])}/{int(D[-1][8:])} 周{WEEK[dt.date.fromisoformat(D[-1]).weekday()]}"
+    if leader:
+        act = sum(1 for p in allp if p["y"] > 0)
+        head = len(allp) + len(data["idleExtra"]) + len(data["ambiguous"])
+        idle = sum(1 for p in team if sum(p["s"][-30:]) <= 0) + len(data["idleExtra"])
+        title, sub = f"{me['n']} 的团队", f"{head} 人"
+        side = [("昨天在用", f"{act}<em>/{len(allp)}</em>"), ("近 7 天日均", money_k(wk)),
+                ("近 30 天没用过", f"{idle}<em>人</em>"), ("我昨天", money_k(me["y"]))]
+        bigk = "团队昨天"
+    else:
+        co = data["co"]
+        title, sub = me["n"], me["dept"]
+        side = [("近 7 天日均", money_k(wk)), ("近 30 天", money_k(sum(S[-30:]))),
+                ("用量位置", f"前 {me['pct']}<em>%</em>" if me.get("pct") else "—"),
+                ("vs 全员人均", f"{y / co['yavg']:.1f}<em>倍</em>" if co["yavg"] and y else "—")]
+        bigk = "我昨天"
+    v = S[-30:]; mx = max(max(v), 1) * 1.08; bw = 100 / len(v)
+    bars = "".join(
+        f'<i style="left:{i * bw:.2f}%;width:{bw * .7:.2f}%;height:{max(0.6, 100 * x / mx) if x > 0 else 0:.1f}%;'
+        f'background:{"#c2832e" if i == len(v) - 1 else ("#9cc3b5" if dt.date.fromisoformat(D[-30 + i]).weekday() >= 5 else "#1f6f5c")}"></i>'
+        for i, x in enumerate(v))
+    delta = (f'<span class="{"up" if d >= 0 else "dn"}">{sign(d)}</span> 比上周同一天' if d is not None else "上周同一天没有用量")
+    cells = "".join(f'<div class="c"><div class="k">{k}</div><div class="v">{val}</div></div>' for k, val in side)
+    return f'''<!doctype html><html><head><meta charset="utf-8"><style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{width:{W}px;background:#f6f7f4;color:#1b1f1d;font-family:"PingFang SC","Noto Sans CJK SC",sans-serif;-webkit-font-smoothing:antialiased;padding:28px}}
+.card{{background:#fff;border:1px solid #e1e5df;border-radius:22px;padding:30px 34px 26px}}
+.hd{{display:flex;justify-content:space-between;align-items:baseline}}
+.who{{font-size:34px;font-weight:700}} .who small{{font-size:20px;font-weight:400;color:#6a756f;margin-left:12px}}
+.asof{{font-size:18px;color:#8a948e}}
+.main{{display:grid;grid-template-columns:1.05fr 1.6fr;gap:26px;margin-top:22px;align-items:center}}
+.bk{{font-size:18px;color:#6a756f}} .bv{{font-family:"SF Mono",Menlo,"Noto Sans Mono CJK SC",monospace;font-size:76px;font-weight:500;color:#1f6f5c;line-height:1.05;letter-spacing:-.02em}}
+.bs{{font-size:18px;color:#6a756f;margin-top:6px}} .up{{color:#1f6f5c;font-weight:600}} .dn{{color:#c2832e;font-weight:600}}
+.grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
+.c{{background:#f4f6f3;border-radius:14px;padding:14px 18px}} .k{{font-size:16px;color:#6a756f}}
+.v{{font-family:"SF Mono",Menlo,"Noto Sans Mono CJK SC",monospace;font-size:32px;font-weight:500;margin-top:2px}} .v em{{font-style:normal;font-size:17px;color:#6a756f;margin-left:3px;font-family:"PingFang SC",sans-serif}}
+.bars{{position:relative;height:96px;margin-top:24px;border-bottom:1px solid #e4e8e3}}
+.bars i{{position:absolute;bottom:0;border-radius:3px 3px 0 0}}
+.ft{{display:flex;justify-content:space-between;font-size:16px;color:#8a948e;margin-top:10px}}
+</style></head><body><div class="card">
+<div class="hd"><div class="who">{esc(title)}<small>{esc(sub)}</small></div><div class="asof">{asof}</div></div>
+<div class="main"><div><div class="bk">{bigk}</div><div class="bv">{money_k(y)}</div><div class="bs">{delta}</div></div>
+<div class="grid">{cells}</div></div>
+<div class="bars">{bars}</div>
+<div class="ft"><span>近 30 天每日用量</span><span>点下方按钮看可交互的完整版</span></div>
+</div></body></html>'''
+
+
+def drive_upload(token: str, html_: str, name: str) -> str:
+    """bot 上传到自己的云空间根目录，返回 file_token。BOM 必须带：iOS 飞书预览没 BOM 按 GBK 解成乱码。"""
+    def call(method, path, body=None, raw=None, ctype="application/json"):
+        req = urllib.request.Request("https://open.feishu.cn" + path, method=method,
+                                     data=raw if raw is not None else (json.dumps(body).encode() if body is not None else None),
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": ctype})
+        try:
+            return json.loads(urllib.request.urlopen(req, timeout=60).read())
+        except urllib.error.HTTPError as e:
+            return json.loads(e.read() or b"{}")
+    root = call("GET", "/open-apis/drive/explorer/v2/root_folder/meta")["data"]["token"]
+    data = html_.encode("utf-8-sig")
+    b = uuid.uuid4().hex
+    parts = [f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+             for k, v in (("file_name", name), ("parent_type", "explorer"), ("parent_node", root), ("size", str(len(data))))]
+    parts.append(f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="{name}"\r\nContent-Type: text/html\r\n\r\n'.encode() + data + b"\r\n")
+    parts.append(f"--{b}--\r\n".encode())
+    up = call("POST", "/open-apis/drive/v1/files/upload_all", raw=b"".join(parts), ctype=f"multipart/form-data; boundary={b}")
+    if up.get("code") != 0:
+        raise RuntimeError(f"上传交互页失败：{up.get('code')} {up.get('msg')}")
+    return up["data"]["file_token"]
+
+
+def drive_share_to(token: str, file_token: str, open_id: str) -> None:
+    """只给这一个人「可阅读」，并确认链接分享是关着的。"""
+    def call(method, path, body=None):
+        req = urllib.request.Request("https://open.feishu.cn" + path, method=method,
+                                     data=json.dumps(body).encode() if body is not None else None,
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            return json.loads(urllib.request.urlopen(req, timeout=30).read())
+        except urllib.error.HTTPError as e:
+            return json.loads(e.read() or b"{}")
+    r = call("POST", f"/open-apis/drive/v1/permissions/{file_token}/members?type=file&need_notification=false",
+             {"member_type": "openid", "member_id": open_id, "perm": "view"})
+    if r.get("code") != 0:
+        raise RuntimeError(f"加阅读权限失败：{r.get('code')} {r.get('msg')}")
+    pub = call("GET", f"/open-apis/drive/v1/permissions/{file_token}/public?type=file")
+    if ((pub.get("data") or {}).get("permission_public") or {}).get("link_share_entity") != "closed":
+        raise RuntimeError("链接分享没有关闭，拒绝发（花费类页面不能靠链接传播）")
+
+
+def page_card(data: dict, img_key: str, url: str) -> dict:
+    me = data["me"]; leader = bool(data["team"])
+    title = f"{me['n']} 的团队 · AI 用量" if leader else "我的 AI 用量"
+    D = data["dates"]
+    return {"schema": "2.0",
+            "config": {"summary": {"content": f"{title}（截至 {D[-1][5:]}）"}},
+            "header": {"title": {"tag": "plain_text", "content": title},
+                       "subtitle": {"tag": "plain_text", "content": "每天早上更新 · 只有你能看到"},
+                       "template": "turquoise", "icon": {"tag": "standard_icon", "token": "myai_colorful"}},
+            "body": {"elements": [
+                {"tag": "img", "img_key": img_key, "alt": {"tag": "plain_text", "content": title},
+                 "scale_type": "fit_horizontal", "preview": True, "corner_radius": "8px"},
+                {"tag": "button", "type": "primary_filled", "width": "fill", "size": "large",
+                 "text": {"tag": "plain_text", "content": "打开完整版 · 可切时间窗、悬停看每天" + ("、点成员看走势" if leader else "")},
+                 "behaviors": [{"type": "open_url", "default_url": url}]},
+                {"tag": "markdown", "content": f"<font color='grey'>[Cursor · Codex · Claude Code 一键配置]({ONECLICK})</font>",
+                 "text_size": "notation", "margin": "4px 0px 0px 0px"}]}}
+
+
+def cmd_page(a) -> int:
+    """出交互页 + 预览图到本地（不上传不发）。"""
+    world = World()
+    for who in a.who:
+        data, named = page_data(world, who)
+        doc = page_html(data)
+        leak = privacy_gate(world, doc, named)
+        if leak:
+            log(f"🔴 {who}：页面里出现了不该看到的人 {leak[:5]}"); return 1
+        out = WORK / "out"; out.mkdir(parents=True, exist_ok=True)
+        (out / f"{who}.page.html").write_text(doc, encoding="utf-8-sig")
+        h = render(preview_html(data), out / f"{who}.preview.png")
+        log(f"{who}：{'leader' if data['team'] else 'member'}，页面 {len(doc.encode()) // 1024} KB，预览图 {W}x{h}，页面里出现 {len(named)} 人")
+    return 0
+
+
+def cmd_send_page(a) -> int:
+    world = World()
+    token = tenant_token()
+    for who in a.who:
+        data, named = page_data(world, who)
+        doc = page_html(data)
+        if privacy_gate(world, doc, named):
+            log(f"🔴 {who} 隐私门禁不过，不发"); return 1
+        png = WORK / "out" / f"{who}.preview.png"
+        render(preview_html(data), png)
+        ft = drive_upload(token, doc, f"AI用量-{who}-{data['dates'][-1]}.html")
+        drive_share_to(token, ft, a.to)
+        url = f"https://t83dfrspj4.feishu.cn/file/{ft}"
+        card = page_card(data, upload_image(token, png), url)
+        req = urllib.request.Request("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+                                     data=json.dumps({"receive_id": a.to, "msg_type": "interactive",
+                                                      "content": json.dumps(card, ensure_ascii=False)}).encode(),
+                                     method="POST", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            d = json.loads(urllib.request.urlopen(req, timeout=30).read())
+        except urllib.error.HTTPError as e:
+            d = json.loads(e.read() or b"{}")
+        log(f"{who} → {a.to}：code={d.get('code')} {(d.get('data') or {}).get('message_id') or d.get('msg')} · 页面 {url}")
+        if d.get("code") != 0:
+            return 1
+    return 0
+
+
 def privacy_gate(world: World, doc: str, allowed: list[str]) -> list[str]:
     """图里不许出现名单之外的任何同事名字。返回泄露的名字。"""
     body = re.sub(r"<style>[\s\S]*?</style>", "", doc)
@@ -490,8 +704,12 @@ def main() -> int:
     sub.add_parser("fetch")
     r = sub.add_parser("render"); r.add_argument("--who", nargs="+", required=True)
     s = sub.add_parser("send"); s.add_argument("--who", nargs="+", required=True); s.add_argument("--to", required=True)
+    pg = sub.add_parser("page", help="交互页 + 预览图出到本地"); pg.add_argument("--who", nargs="+", required=True)
+    sp = sub.add_parser("send-page", help="上传交互页（只给 --to 可阅读）+ 发预览卡片")
+    sp.add_argument("--who", nargs="+", required=True); sp.add_argument("--to", required=True)
     a = ap.parse_args()
-    return {"fetch": cmd_fetch, "render": cmd_render, "send": cmd_send}[a.cmd](a)
+    return {"fetch": cmd_fetch, "render": cmd_render, "send": cmd_send,
+            "page": cmd_page, "send-page": cmd_send_page}[a.cmd](a)
 
 
 if __name__ == "__main__":

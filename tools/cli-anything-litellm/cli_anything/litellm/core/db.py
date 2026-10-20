@@ -170,6 +170,60 @@ def spend_reconcile(date: str, model_group_like: str | None = None, limit: int =
     return {"date": date, "model_group_like": model_group_like, "totals": totals[0] if totals else {}, "keys": rows}
 
 
+_REQ_RE: Final = re.compile(r"^[0-9a-f]{6,8}$|^[0-9a-f]{8}-[0-9a-f-]{27}$")
+_ERR_SQL: Final = "metadata->'error_information'->>'error_message'"
+
+
+def request_lookup(req: str, hours: int = 48) -> list[dict[str, str]]:
+    """The SpendLogs row behind a client-facing 'API 异常 (req: xxxxxxxx)'.
+
+    error_sanitize masks the real error to the client and keeps the first 8 hex of request_id;
+    the original text is only here (2026-10-20: 'rate limit exceeded' was really upstream
+    'servers are currently overloaded'). ``like 'prefix%'`` on the pkey alone still scans,
+    so the startTime window is mandatory.
+    """
+    _lit(req, _REQ_RE)
+    rows = remote198.psql(
+        "select request_id, \"startTime\", status, call_type, model_group,"
+        " coalesce(metadata->>'original_model_group','') as original_model_group,"
+        " regexp_replace(coalesce(api_base,''),'^https?://([^/:]+).*','\\1') as upstream,"
+        " coalesce(metadata->>'user_api_key_alias','') as key_alias,"
+        " round(extract(epoch from \"endTime\"-\"startTime\")::numeric,1) as seconds,"
+        f" left(coalesce({_ERR_SQL},''),600) as error"
+        " from \"LiteLLM_SpendLogs\""
+        f" where \"startTime\" > now() - interval '{int(hours)} hours' and request_id like '{req}%'",
+        timeout_ms=110000,
+    )
+    return rows
+
+
+def failure_rate(groups: list[str], minutes: int = 60, bucket: int = 10, needle: str = "overloaded") -> list[dict[str, str]]:
+    """Per time bucket: requests / failures / failures whose text contains NEEDLE, for these groups.
+
+    Groups match on ``coalesce(original_model_group, model_group)`` so a request rescued by a
+    cross-group fallback counts under the group the client asked for, not where it landed.
+    SpendLogs has no index on model_group/status: 60 min takes ~100s at 10-20 traffic; 3h timed out.
+    For longer history use DailyUserSpend (no error text there, though).
+    """
+    if not groups:
+        raise remote198.RemoteError("need at least one model group")
+    gl = ",".join(_lit(g) for g in groups)
+    nd = _lit(needle, re.compile(r"^[A-Za-z0-9 _.:-]{1,40}$"))[1:-1]
+    b = max(1, min(60, int(bucket)))
+    rows = remote198.psql(
+        f"select to_char(date_trunc('hour',\"startTime\") + floor(extract(minute from \"startTime\")/{b})*interval '{b} min','MM-DD HH24:MI') as t,"
+        " count(*) as n, count(*) filter (where status='failure') as fail,"
+        f" count(*) filter (where status='failure' and {_ERR_SQL} ilike '%{nd}%') as matched,"
+        " count(*) filter (where status='success' and coalesce(metadata->>'original_model_group','') not in ('', model_group)) as rescued_elsewhere"
+        " from \"LiteLLM_SpendLogs\""
+        f" where \"startTime\" > now() - interval '{int(minutes)} minutes'"
+        f" and coalesce(nullif(metadata->>'original_model_group',''), model_group) in ({gl})"
+        " group by 1 order by 1",
+        timeout_ms=115000,
+    )
+    return rows
+
+
 def spendlog_retention() -> dict[str, str]:
     rows = remote198.psql('select min("startTime") as oldest, max("startTime") as newest from "LiteLLM_SpendLogs"')
     daily = remote198.psql('select min(date) as oldest, max(date) as newest from "LiteLLM_DailyUserSpend"')

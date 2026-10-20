@@ -33,9 +33,10 @@
 
     python3 scripts/litellm-198-failover-contract-check.py                 # 三条车道
     python3 scripts/litellm-198-failover-contract-check.py --lane gray     # 只查 gray
+    python3 scripts/litellm-198-failover-contract-check.py --negative      # 加跑事故配置，证明夹具量得出病
     python3 /opt/gray-console/scripts/litellm-198-failover-contract-check.py --local   # 198 上 root（驾驶台这么调）
 
-退出码：0 全部车道通过；1 有车道不通过；2 跑不起来 / 拿不到结果（尺子坏，不许当绿）。
+退出码：0 全部车道通过；1 有车道不通过；2 跑不起来 / 拿不到结果 / --negative 下事故配置也绿（尺子坏，不许当绿）。
 """
 from __future__ import annotations
 
@@ -60,14 +61,14 @@ CHILD = r'''
 import asyncio, json, os, sys, types
 from collections import Counter
 import logging; logging.disable(logging.CRITICAL)
-MODE = sys.argv[1]            # live | vanilla
+MODE = sys.argv[1]            # live | vanilla | incident（live 补丁面但关掉 cap、上限回到 5 = 10-20 事故现场）
 MAIN = sys.argv[2]; CHAIN = sys.argv[3].split(",")
 if MODE == "vanilla":
     import site; site.main()  # -S 关掉了 site-packages；找回来但不跑 sitecustomize
 import litellm
 from litellm.router import Router
 loaded, errs = [], []
-if MODE == "live":
+if MODE in ("live", "incident"):
     import importlib, yaml
     sys.path.insert(0, "/app")
     cfg = yaml.safe_load(open("/app/config.yaml"))
@@ -130,6 +131,7 @@ async def main():
     print(json.dumps({"mode": MODE, "ok": ok, "err": err, "max_fallbacks": r.max_fallbacks,
                       "main_sends": per[MAIN], "hops": {c: per[c] for c in CHAIN},
                       "callbacks_loaded": len(loaded), "import_errors": errs,
+                      "has_cap": any(c.startswith("same_group_failover_cap.") for c in loaded),
                       "litellm": getattr(litellm, "__version__", None) or __import__("importlib.metadata").metadata.version("litellm")}))
 asyncio.run(main())
 '''
@@ -142,9 +144,13 @@ def in_pod(args: argparse.Namespace) -> int:
         fh.write(CHILD)
     out = {}
     try:
-        for mode, flags in (("live", []), ("vanilla", ["-S"])):
+        # incident 的 env 必须在进程启动时给：sitecustomize 在脚本第一行之前就 import 了 litellm，
+        # ROUTER_MAX_FALLBACKS 是 import 时读进常量的，脚本里再改 os.environ 已经晚了（第一版就这样假绿）。
+        incident_env = dict(os.environ, SAME_GROUP_FAILOVER_CAP_DISABLED="1", ROUTER_MAX_FALLBACKS="5")
+        modes = [("live", [], None), ("vanilla", ["-S"], None)] + ([("incident", [], incident_env)] if args.negative else [])
+        for mode, flags, env in modes:
             p = subprocess.run([sys.executable, *flags, path, mode, MAIN, ",".join(CHAIN)],
-                               capture_output=True, text=True, timeout=300, cwd="/app")
+                               capture_output=True, text=True, timeout=300, cwd="/app", env=env)
             line = next((l for l in reversed(p.stdout.splitlines()) if l.startswith("{")), None)
             out[mode] = json.loads(line) if line else {"error": (p.stderr or "")[-400:]}
     finally:
@@ -154,7 +160,8 @@ def in_pod(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- 本机
-LOCAL = False  # --local：已经在 198 上（驾驶台以 root 跑），直接 sh -c，不走 ssh
+LOCAL = False     # --local：已经在 198 上（驾驶台以 root 跑），直接 sh -c，不走 ssh
+NEGATIVE = False  # --negative：再跑一遍「事故配置」，必须红，否则夹具作废（exit 2）
 
 
 def ssh(cmd: str, stdin: str | None = None, timeout: int = 900) -> subprocess.CompletedProcess:
@@ -189,8 +196,8 @@ def check_lane(lane: str, me: str) -> int:
     pod = pods[0]
     b64 = base64.b64encode(me.encode()).decode()
     r = ssh("echo %s | base64 -d | %s exec -i %s -- sh -c 'cat > /tmp/.fcc.py' && "
-            "%s exec %s -- sh -c 'cd /app && python3 /tmp/.fcc.py --in-pod; rc=$?; rm -f /tmp/.fcc.py; exit $rc'"
-            % (b64, KUBE, pod, KUBE, pod))
+            "%s exec %s -- sh -c 'cd /app && python3 /tmp/.fcc.py --in-pod%s; rc=$?; rm -f /tmp/.fcc.py; exit $rc'"
+            % (b64, KUBE, pod, KUBE, pod, " --negative" if NEGATIVE else ""))
     line = next((l for l in r.stdout.splitlines() if l.startswith("RESULT ")), None)
     if not line:
         print("STOP %-11s %s 没拿到结果 rc=%d %s" % (lane, pod, r.returncode, (r.stderr or r.stdout)[-300:]))
@@ -207,6 +214,17 @@ def check_lane(lane: str, me: str) -> int:
     print("     %-11s %s litellm=%s callbacks=%s" % (lane, pod, live.get("litellm"), live.get("callbacks_loaded")))
     print("       线上补丁面: %s" % desc(live))
     print("       阳性对照(vanilla): %s" % desc(van))
+    if NEGATIVE and not live.get("has_cap"):
+        # 这条车道的同组上限不是 sgfc 给的（guarded-old = 1.103.2 的 midstream_fallback_loop），
+        # 关 sgfc 改变不了它的行为 ⇒ 这里的「事故配置」不是事故配置，读数不能当对照
+        print("       事故配置: 跳过（本车道没加载 same_group_failover_cap，上限由别的补丁提供）")
+    elif NEGATIVE:
+        inc = res.get("incident", {})
+        inc_ok, _ = judge(inc)
+        print("       事故配置(去 cap+上限5): %s" % desc(inc))
+        if inc_ok:
+            print("STOP %-11s 事故配置也判绿 ⇒ 夹具量不出这次的病，本轮作废" % lane)
+            return 2
     if van_ok:
         # vanilla 也绿 = 上游自己已经满足契约（不是坏事），但这一轮量不出补丁有没有用——如实报，不算红
         print("NOTE %-11s vanilla 也满足契约：上游已自带该行为，补丁可评估下线" % lane)
@@ -222,15 +240,16 @@ def main() -> int:
     ap.add_argument("--lane", action="append", choices=list(LANES))
     ap.add_argument("--in-pod", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--local", action="store_true", help="已在 198 上运行（驾驶台），不走 ssh")
+    ap.add_argument("--negative", action="store_true", help="加跑事故配置（关 cap + 上限 5），它必须红")
     a = ap.parse_args()
     if a.in_pod:
         return in_pod(a)
-    global LOCAL
-    LOCAL = a.local
+    global LOCAL, NEGATIVE
+    LOCAL, NEGATIVE = a.local, a.negative
     me = open(os.path.abspath(__file__), encoding="utf-8").read()
     lanes = a.lane or list(LANES)
     rcs = {lane: check_lane(lane, me) for lane in lanes}
-    worst = max(rcs.values())
+    worst = 2 if 2 in rcs.values() else max(rcs.values())
     print("SUMMARY %s" % " ".join("%s=%s" % (k, {0: "OK", 1: "FAIL", 2: "STOP"}[v]) for k, v in rcs.items()))
     return worst
 

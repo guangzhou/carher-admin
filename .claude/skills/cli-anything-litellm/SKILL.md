@@ -8,7 +8,8 @@ description: >-
   「哪些已在生产上实测」清单，含 14 条按影响排序的结论（SpendLogs 丢行根因、流内失败不进冷却、几个补丁已成空操作等）。
   Use when 用户说「看 litellm 源码 / 这个函数在哪 / 上游这段怎么写的 / 哪个补丁改了 X / 补丁到底生没生效 /
   三条车道补丁一样吗 / 某个 router_settings 改了不生效 / fallbacks 在 DB 还是 yaml / 查 litellm 库 / 库里有哪些表 /
-  SpendLogs 少行 / 明细和日表对不上 / 熟悉 litellm 代码」。线上补丁分几层、各在哪见 [[litellm-198-patch-layer-map]]；
+  SpendLogs 少行 / 明细和日表对不上 / 熟悉 litellm 代码 / 用户贴了 req:xxxx 报错 / rate limit exceeded / API 异常 /
+  某组失败率多少 / 过载被兜住没有」。线上补丁分几层、各在哪见 [[litellm-198-patch-layer-map]]；
   装/换补丁见 [[litellm-198-router-patch]]；升级见 [[litellm-198-version-upgrade]]。
 ---
 
@@ -39,6 +40,14 @@ cli-anything-litellm src path                              # 一个请求怎么�
 | 某个 router_settings 到底谁说了算 | `db config-owner` |
 | SpendLogs 有没有少行 | `db spend-reconcile 2026-10-20 [--model-group 'kiro-claude-*']` |
 | 明细能查多远 | `db retention`（SpendLogs ~6 天；日表从 05-02 起） |
+| **用户贴了「API 异常 (req: xxxxxxxx)」，真实报错是什么** | `db req 2d910055 [--hours 48]`（8 位前缀或完整 id；查不到会提示三种可能） |
+| **某几个组现在失败率多少、多少是过载、多少被别的组救了** | `db failure-rate chatgpt-gpt-5.6-luna gpt-6-astra ... [--minutes 60 --bucket 10 --needle overloaded]` |
+
+🔴 **用户报「rate limit exceeded / API 异常」先 `db req`**：`error_sanitize` 把真实错误打码成一句话给客户端，原文只在
+SpendLogs。10-20 那句「rate limit」实为上游 `servers are currently overloaded`（`streaming_output_backfill` 为触发换号把它
+改写成 RateLimitError）——照字面去查 key 预算/7d 配额就全错。
+`db failure-rate` 按「客户端请求的组」（`original_model_group`）归类，被兜底救到别组的算原组成功（`rescued` 列）；
+model_group/status 没索引，**窗口上限 90 分钟**（60 分钟约 20~100 秒；3h、5h 实测超时）。
 
 `src` 默认读 prod 的线上版本 tag；显式给了 `--lane` 又给了对不上的 `--tag` 会被拒（exit 1）。
 `patches targets` 有 callback import 失败时 exit 1。
@@ -139,7 +148,7 @@ PrismaClient.jsonify_object                      : sitecustomize → null_byte_s
 | 2 | **`/v1/responses` 流内失败不进冷却**：`streaming_output_backfill` 换掉 `_handle_failure` 后只跑 async 失败处理；router 冷却挂在 sync 那条上（`router.py:1180-1183`）。这个补丁防的事件循环卡死，上游 1.105.1 已自己修了（`streaming_iterator.py:886-931` 先 async 后 sync，后台任务、不 join） | 实测（pod 内该方法归属 + 函数体不调 sync）+ 离线实验 | 删掉 09-14 那段；先在 gray 用死腿做流中失败阳性对照 |
 | 3 | **`chatgpt_responses_normalize` 的 deployment hook 永不触发**：传进来的是 `CallTypes` 枚举，`str()` 得 `'CallTypes.aresponses'`，门控 `str(call_type) in (...)` 恒假（`:523`）。同一个坑 `deepseek_responses_adapt` 08-03 就记过并修了，这个文件没修 ⇒ 只在入口跑一次，兜底换腿时不跑 | 实测（py3.13 pod） | 改成取 `.value` |
 | 4 | **callback 上的 `async_pre_routing_hook` 是死代码**：Router 只调自己的那个方法（`router.py:13796`，跑 routing plugin），不遍历 callbacks ⇒ chatgpt_normalize / deepseek_adapt 里定义的从不执行 | 读码 | 别再往这个钩子里写东西 |
-| 5 | **一个请求打上游次数没有总上限**：`max_fallbacks=5` 只限递归深度，同组 weighted failover 失败后会重置已试集合再走一遍兜底链。离线（真 Router，`router-experiments/01-router-exp7.py`，我复跑过）：A(40)→B(20)/C(10) 全 500 = **84 次**；全 429 = 66；全 400 = 14；**只有 A 坏 = 37 次后才成功**（A 打了 36 次） | 离线实验（复现）；生产 `num_retries_per_request`/`max_fallbacks` 实测未设 | 评估设 `litellm_settings.num_retries_per_request` |
+| 5 | **一个请求打上游次数没有总上限**：`max_fallbacks=5` 只限递归深度，同组 weighted failover 失败后会重置已试集合再走一遍兜底链。离线（真 Router，`router-experiments/01-router-exp7.py`，我复跑过）：A(40)→B(20)/C(10) 全 500 = **84 次**；全 429 = 66；全 400 = 14；**只有 A 坏 = 37 次后才成功**（A 打了 36 次）。**反面同样要命**：同组换号和跨组兜底共用这 5 次 ⇒ 16 腿组过载时 5 次全换号、跨组 0 跳（10-20 事故） | 离线实验 + 生产事故 | ✅ 10-20 `same_group_failover_cap`（同组≤3）+ `ROUTER_MAX_FALLBACKS=10` 上 prod/gray（helm prod rev21/gray rev26）；同实验复跑：全 500 96→72 次、40/20/10 形状 84→60。🔴 只抬上限不加 cap = 150 次。`num_retries_per_request` 仍未设 |
 | 6 | **per-key `router_settings.fallbacks` 是整体替换，不是合并**（764 把 key 有）：没列进去的组完全没有兜底；这条路还跳过「Model is blocked」的 403（`route_llm_request.py:516-546`），blocked 腿仍会被路由层过滤 | 读码（两份独立确认） | 改 key 兜底时把要保留的全局兜底一并写进去 |
 | 7 | `fallbacks` / `model_group_retry_policy` 的 key 必须是**客户端发来的名字**（alias），写真实组名不生效；配了 `context_window_fallbacks` 后，没列进去的组遇到超长直接失败、不走普通兜底 | 读码 + 离线实验 | 改兜底时按 alias 写；生产 24 个 alias 未逐条核 |
 | 8 | **几个补丁在 1.105.1 上已经是空操作**：`encrypted_content_degrade_strip`（上游 affinity check 不再 raise，0 个 raise 语句）· `anthropic_passthrough_pingfix`（唯一调用方已自己 catch）· `budget_notice._patch_proxy_max_budget_limiter`（目标模块不存在，`except: return` 吞了）· `streaming_output_backfill` 的空流升格（上游空流直接抛）· `responses_failed_deployment_stamp`（上游已盖章）· anthropic logging 覆盖件（上游已转 dict） | 实测（前一个）/ 读码 | 下次升级时删，减少维护面 |
@@ -150,13 +159,13 @@ PrismaClient.jsonify_object                      : sitecustomize → null_byte_s
 | 13 | 鉴权 key 缓存 60s、**每 worker 一份、默认上限 200 条**（2121 把 key）⇒ 多数请求读库；直接改 DB 最多 60s 生效 | 读码 | — |
 | 14 | `#43049` 回退补丁的代价：鉴权只看「请求名在 `key.models` 里」，alias 指向哪里不查 ⇒ alias 变成白名单外的路由表；key 所有者/团队成员能改 alias（`key_management_endpoints.py:3138-3158`），198 上谁能改未核 | 读码 | 列入 #43049 长期解的考量 |
 
-**10-20 下午车道又变了**（别人在推，`patches compare` 现量 24/28 一致）：
-- gray（08:41 滚）新增 `same_group_failover_cap`：包 `Router._maybe_run_weighted_failover`，同组已排除 3 条腿就停，
-  把 `max_fallbacks` 预算留给跨组兜底——**正好针对上表第 5 条**（它自己的实测：60 分钟里放弃 191 次、跨组到 grok 只有 9 次）。
-  文件在仓里还是未跟踪（`k8s/litellm-callbacks/same_group_failover_cap.py`）。
-- gray 去掉了 `anthropic_passthrough_pingfix`、`log_truncate`（呼应第 8 条：pingfix 已是空操作）。
-- prod（08:48 滚）只换了 `budget_notice.py`，和工作区未提交的那份对得上。
-⇒ 这些都没进 git；照 repo 重建车道会静默回退。核 drift 用 `scripts/litellm-198-callbacks-drift.py`。
+**10-20 车道现状**（傍晚）：
+- prod（helm rev21）/ gray（rev26）都有 `same_group_failover_cap`（包 `Router._maybe_run_weighted_failover`，
+  同组已排除 3 条腿就返回 None 交给兜底链）+ env `ROUTER_MAX_FALLBACKS=10`，已进 helm values 和 git（`8a85fc8`）。
+  行为验收不靠 `patches targets`，靠 `scripts/litellm-198-failover-contract-check.py`（见 [[litellm-198-version-upgrade]] §4）。
+- prod/gray 都去掉了 `anthropic_passthrough_pingfix`、`log_truncate`（呼应第 8 条），加了 pool=3、key cache=3000。
+- guarded-old（1.103.2）仍是老的 `midstream_fallback_loop`，兜底契约同样 OK。
+- 核 drift 用 `scripts/litellm-198-callbacks-drift.py`。
 
 **核过、不成立的**（别再当风险报）：每 30s 重载往 callbacks 里追加字符串（实测 40s 前后长度不变，success/failure 列表 0 个裸字符串）·
 预算重置并发导致负 spend（实测只有 3 把 -5.7e-14 的浮点尘）· keepalive 让每个 chunk 都丢 contextvar（实测生产 keepalive 关着，只剩首块那一种情况，未实测）。
@@ -186,6 +195,8 @@ PrismaClient.jsonify_object                      : sitecustomize → null_byte_s
 ## 扩展这个 CLI
 
 - 真身 `tools/cli-anything-litellm/`；设计说明 `LITELLM.md`；测试计划/结果 `cli_anything/litellm/tests/TEST.md`。
+- 加新的 SpendLogs 查询：没索引的列（model_group/status/metadata）一律带短 `startTime` 窗口并在 CLI 上限死；
+  先拿真数据量一次耗时再定上限（`failure-rate` 就是 3h 超时后才收到 90 分钟）。
 - 加新的被 patch 符号：改 `probes/patch_targets.py` 的 `TARGETS`，并在 `core/patches.py` 的 `PURPOSE` 补一行。
   新 callback 上线后 `test_198_core.py::_LIVE_198_MODULES` 也要加（字面量，故意不从 PURPOSE 推）。
 - 新的 DB 视图：在 `core/db.py` 加函数，用户输入一律过 `_lit()` 白名单；先 `explain` 确认走索引。

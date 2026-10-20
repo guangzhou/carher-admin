@@ -129,12 +129,14 @@ split 按 key 哈希（凌晨 1% 档新版可能只有个位数请求）；试�
 | her 逐 pod | `scripts/litellm-198-her-name-probe.py --clone-key` | 每 pod 每名 OK、阴性被拒 | 每个 pod 各自缓存 key |
 | 预算软拦截 | `scripts/litellm-198-budget-notice-smoke.sh`（`BASE_OVERRIDE`） | 8/8 | 依赖 429；10-14 起 cursor 走高配桶 |
 | codex 压缩 | `scripts/codex-compaction-regression.py` | compaction 格两边恒 1 | 普通格 reasoning 有无是随机的，不算 |
-| **主组全挂兜底契约** | `scripts/litellm-198-failover-contract-check.py [--lane X]` | 每车道 `OK`：成功、主组 ≤4 次、7 跳链每跳恰 1 次 | 10-20 下线补丁丢了同组上限，健康流量回归全绿 |
+| **主组全挂兜底契约** | `scripts/litellm-198-failover-contract-check.py [--lane X] [--negative]` | 每车道 `OK`：成功、主组 ≤4 次、7 跳链每跳恰 1 次 | 10-20 下线补丁丢了同组上限，健康流量回归全绿 |
 
 **兜底契约怎么量**：在车道 pod 里按该车道 `/app/config.yaml` 的 callbacks 顺序 import 全部补丁 + 用 pod 自己的 env
 建真 `Router`，假上游（不出网）让主组 16 腿开流即过载，走真 `aresponses(stream=True)`；同 pod 再用 `python3 -S`（vanilla）跑一遍。
 它量的是**行为**，不管谁提供 ⇒ 下线补丁、helm 冲掉带外补丁、env 被改都会红。10-20 读数：
-prod/gray/guarded-old 全 `主组=4 链=1/1/1/1/1/1`；阴性对照「线上补丁去掉 cap + 上限 5」= `主组=6 链=0/0/0/0/0/0` 抛错（= 事故现场）。
+prod/gray/guarded-old 全 `主组=4 链=1/1/1/1/1/1`；`--negative` 现场复现事故配置（关 cap + 上限 5）= `主组=6 链=0/0/0/0/0/0` 抛错，
+它要是也绿就 exit 2（夹具量不出病）；没装 sgfc 的车道（guarded-old）跳过这一项。🔴 事故配置的 env 必须在**进程启动时**给：
+sitecustomize 在脚本第一行前就 import 了 litellm，`ROUTER_MAX_FALLBACKS` 是 import 时读成常量的（第一版在脚本里改 env ⇒ 假绿）。
 vanilla 也绿时打 `NOTE`（上游自带了 ⇒ 补丁可评估下线），不算红。🔴 假流对象要带 `_hidden_params`，
 否则 1.103.2 会多包一层、`isinstance` 失败、中流兜底不接 ⇒ 夹具自己的假红（第一版就是这样把 guarded-old 量红的）。
 

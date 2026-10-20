@@ -149,6 +149,28 @@ stub 用**母 router 自己的镜像**（节点本地已有，`IfNotPresent` 不
 同族坑：429 mid-stream 换号循环也只装了 `/v1/responses` 一半
 （[[litellm-midstream-failover-defense]]）。**在 198 上，「这个功能装了没」要按端点分别问。**
 
+### 范例 2：`same_group_failover_cap`（10-20，1.105.1）
+
+包 `Router._maybe_run_weighted_failover`：本请求排除表 `meta["_failover_excluded_ids"]` ≥ N 就返回 None
+（= 上游「不适用」的返回值，common_utils 随即走兜底链），只读不写排除表，其它情况原样调原函数。
+配 env `ROUTER_MAX_FALLBACKS=10`（`max_fallbacks` 不在 `update_settings` 白名单，只认 env）。
+
+它示范了这一类补丁的验法，比第 2 节的死腿装置更省事：**不起 stub、不碰上游**，在车道 pod 里起新进程，
+按 `/app/config.yaml` 顺序 import 全部 callbacks（= 线上补丁面）+ pod 自己的 env，建真 `Router`，
+把 `litellm.aresponses` 换成假上游，走真 `Router.aresponses(stream=True)` 数落点。
+同 pod 再 `python3 -S` 跑 vanilla 当对照。成品：`scripts/litellm-198-failover-contract-check.py`。
+
+两个夹具坑（第一版都踩了）：
+- 假流对象必须继承 `BaseResponsesAPIStreamingIterator` **且带 `_hidden_params`**，否则 1.103.2 外面再包一层
+  `HiddenParamsAsyncIteratorWrapper`，`isinstance` 失败，中流兜底不接 ⇒ 把好车道量成红。
+- `litellm.aresponses` 要在**建 Router 之前**换：Router 构造时就把它绑成 `original_generic_function`。
+
+离线读「一个请求最多打多少次上游」用 [[cli-anything-litellm]] 的 `router-experiments/01-router-exp7.py` 套路
+（真 Router + `mock_response=<异常>`）：这个补丁让全 500 从 96 次降到 72 次；**只抬上限不加 cap 会涨到 150 次**。
+
+装法：新增 callback 走 `scripts/litellm-198-lane-callback-add.py install ... --env K=V`（同一个 patch 加 env，rollback 一起还原），
+装完**立刻把 live 回填进车道快照**，否则下次 helm upgrade 静默冲掉（见 [[litellm-198-version-upgrade]] §6）。
+
 ## 4. 四个会制造假绿/假红的测量坑
 
 1. **LiteLLM 响应缓存是开的** —— body 完全相同的请求根本不出门。

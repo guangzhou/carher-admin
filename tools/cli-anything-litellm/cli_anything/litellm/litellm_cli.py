@@ -527,6 +527,46 @@ def db_retention(ctx: Context) -> None:
     _emit(ctx, r, "\n".join(f"{k:18s} {v}" for k, v in r.items()))
 
 
+@db_group.command("req")
+@click.argument("req_id")
+@click.option("--hours", type=click.IntRange(1, 168), default=48, show_default=True)
+@click.pass_obj
+def db_req(ctx: Context, req_id: str, hours: int) -> None:
+    """Real error behind a client's 'API 异常 (req: xxxxxxxx)' (8-hex prefix or full id)."""
+    try:
+        rows = db_core.request_lookup(req_id, hours)
+    except remote198.RemoteError as exc:
+        _fail(ctx, exc)
+        return
+    if not rows:
+        human = (f"no SpendLogs row for {req_id} in the last {hours}h — widen --hours, or the row was dropped "
+                 "(null-byte sanitizer drops ~1.3%; check DailyUserSpend), or it never reached this proxy")
+    else:
+        human = "\n".join("\n".join(f"{k:22s} {v}" for k, v in r.items()) for r in rows)
+    _emit(ctx, rows, human)
+
+
+@db_group.command("failure-rate")
+@click.argument("groups", nargs=-1, required=True)
+@click.option("--minutes", type=click.IntRange(5, 90), default=60, show_default=True,
+              help="Window. model_group/status have no index: 60min ~100s, 3h and 5h timed out (10-20).")
+@click.option("--bucket", type=click.IntRange(1, 60), default=10, show_default=True, help="Bucket size in minutes.")
+@click.option("--needle", default="overloaded", show_default=True, help="Count failures whose error text contains this.")
+@click.pass_obj
+def db_failure_rate(ctx: Context, groups: tuple[str, ...], minutes: int, bucket: int, needle: str) -> None:
+    """Requests / failures / NEEDLE-failures / rescued-by-other-group per bucket, keyed by the group the client asked for."""
+    try:
+        rows = db_core.failure_rate(list(groups), minutes, bucket, needle)
+    except remote198.RemoteError as exc:
+        _fail(ctx, exc)
+        return
+    lines = [f"  {'time(UTC)':12s} {'n':>6s} {'fail':>5s} {'%':>5s} {needle[:10]:>10s} {'rescued':>8s}"]
+    for r in rows:
+        n, f = int(r["n"]), int(r["fail"])
+        lines.append(f"  {r['t']:12s} {n:6d} {f:5d} {100 * f / n if n else 0:5.1f} {r['matched']:>10s} {r['rescued_elsewhere']:>8s}")
+    _emit(ctx, rows, "\n".join(lines))
+
+
 @cli.group(context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 def native() -> None:
     """Invoke upstream LiteLLM executables without a shell."""

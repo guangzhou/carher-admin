@@ -7,12 +7,29 @@ description: >-
   每次重发都重新命中第 1 个目标。含带阳性对照的 mock 回归夹具（`descend` / `guard`
   两个子命令）、链表必须是"一行五目标"形状 B 的理由、以及指纹守卫必须按后果分两级
   （读不到源码只告警、缺类才硬拒装 —— 混为一谈会让坏尺子关停 4/4 生产副本）。
+  ⚠️ 本篇的补丁只在 ≤1.103.2；1.105.1 上同组上限由 same_group_failover_cap 提供（文首对照表）。
   Use when the user mentions 兜底链不下降 / fallback 只试第一层 / 重发全落同一组 /
   attempted_targets / astra 链子 / midstream_fallback_loop 改动后回归 /
-  中流失败重试次数对不上 / 指纹守卫拒装。
+  中流失败重试次数对不上 / 指纹守卫拒装 / 同组换号上限 / same_group_failover_cap / 过载没兜住 / 没 fallback 到可用模型。
 ---
 
 # 198 中流失败的链子逐层下降
+
+> 🔴 **版本边界（10-20）**：下面写的 `midstream_fallback_loop.py` 只在 **≤1.103.2** 上有（现在只剩保险丝
+> guarded-old）。**prod/gray 是 1.105.1，这个补丁已下线**：中流多跳和 `attempted_targets` 去重上游自带了，
+> 但上游**没有**「同组换号 ≤3」，同组换号和跨组兜底共用 `max_fallbacks`（默认 5）⇒ 10-20 过载时 5 次全换号、跨组 0 跳。
+> 1.105.1 上的对应物：
+>
+> | 本篇讲的 | 1.105.1 上是谁 |
+> |---|---|
+> | `_MAX_SAME_GROUP_RETRIES = 3` | `k8s/litellm-callbacks/same_group_failover_cap.py`（包 `Router._maybe_run_weighted_failover`，env `SAME_GROUP_FAILOVER_CAP`） |
+> | `_MAX_MIDSTREAM_FAILOVERS = 10` | env `ROUTER_MAX_FALLBACKS=10`（DB / `/config/update` 都不生效，只认 env） |
+> | §3 mock 夹具 `descend` | `scripts/litellm-198-failover-contract-check.py`（按车道真 callbacks+env、三车道一起、自带 vanilla 对照） |
+> | §5 装载锚点 `patched Router._aresponses_streaming_iterator` | `same_group_failover_cap: installed`；运行期证据 `handing over to fallbacks chain` |
+> | 生产侧「兜住没有」 | `cli-anything-litellm db failure-rate <组...>`（按客户端请求的组归类，`rescued` 列 = 被别组救下） |
+>
+> §1 的真因分析、§2 链表形状 B、§4 守卫分两级、§5「sha 对 ≠ 装上」这些**原理仍然成立**，可以照读。
+> 下线这类补丁前先列行为清单，见 [[litellm-198-version-upgrade]]「下线补丁 = 删行为」。
 
 > 作用域：**198，ns `litellm-product`**，补丁文件 `k8s/litellm-callbacks/midstream_fallback_loop.py`。
 > 装 / 回滚 Router 猴补丁的三步 SOP 看 [[litellm-198-router-patch]]；

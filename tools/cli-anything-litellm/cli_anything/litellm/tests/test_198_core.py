@@ -109,6 +109,37 @@ def test_spend_reconcile_sql_is_index_friendly(monkeypatch):
     assert "l.model_group like 'kiro-claude-%'" in sql
 
 
+@pytest.mark.parametrize("bad", ["2d91005", "2d910055'", "2D910055", "x", "2d910055%"])
+def test_request_lookup_rejects_non_hex(bad, monkeypatch):
+    monkeypatch.setattr(remote198, "psql", lambda sql, timeout_ms=0: pytest.fail("must not reach SQL"))
+    if bad == "2d91005":  # 7 hex is a legal prefix
+        monkeypatch.setattr(remote198, "psql", lambda sql, timeout_ms=0: [])
+        assert db_core.request_lookup(bad) == []
+        return
+    with pytest.raises(remote198.RemoteError):
+        db_core.request_lookup(bad)
+
+
+def test_request_lookup_is_time_bounded(monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(remote198, "psql", lambda sql, timeout_ms=0: seen.append(sql) or [])
+    db_core.request_lookup("2d910055", hours=6)
+    assert "\"startTime\" > now() - interval '6 hours'" in seen[0] and "request_id like '2d910055%'" in seen[0]
+
+
+def test_failure_rate_keys_on_requested_group(monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(remote198, "psql", lambda sql, timeout_ms=0: seen.append(sql) or [])
+    db_core.failure_rate(["chatgpt-gpt-5.6-luna", "gpt-6-astra"], minutes=30, bucket=5)
+    sql = seen[0]
+    assert "coalesce(nullif(metadata->>'original_model_group',''), model_group) in ('chatgpt-gpt-5.6-luna','gpt-6-astra')" in sql
+    assert "interval '30 minutes'" in sql and "interval '5 min'" in sql and "ilike '%overloaded%'" in sql
+    with pytest.raises(remote198.RemoteError):
+        db_core.failure_rate(["x'; drop"])
+    with pytest.raises(remote198.RemoteError):
+        db_core.failure_rate(["g"], needle="a'b")
+
+
 def test_spend_reconcile_rejects_bad_date():
     with pytest.raises(remote198.RemoteError):
         db_core.spend_reconcile("2026-10-20; select 1")

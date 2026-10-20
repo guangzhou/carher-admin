@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -149,7 +150,8 @@ SHAPE_KEYS = ("status", "items", "compaction", "finish", "has_content")
 
 # 事件**计数**随生成文本长短天然浮动（delta 帧数），拿它当判据全是假阳性。
 # 只比出现过哪些事件类型；delta 类连类型也不比（有没有 delta 取决于内容）。
-_NOISY_EVENTS = ("delta",)
+# keepalive = 网关在上游沉默时插的心跳（streaming_bridge / 原生 sse_keepalive），有没有取决于上游那一下快不快，不是形状差异
+_NOISY_EVENTS = ("delta", "keepalive")
 
 
 def _shape(rec):
@@ -158,8 +160,11 @@ def _shape(rec):
         out["event_types"] = sorted(
             t for t in rec["events"] if not any(n in t for n in _NOISY_EVENTS))
     mid = rec.get("model_id") or ""
-    # 落点每次可能换账号（weighted affinity），只比"族"
-    out["model_family"] = (mid.split("-gpt-")[0].rstrip("0123456789-") or mid)[:24]
+    # 落点每次可能换账号（weighted affinity），只比"族"。
+    # 🔴 10-20：1.105 起 model_id 是 12 位 hex 哈希（如 36ec9f6fa1e0），不再是「acct-82-gpt-…」这种名字，
+    # 下面的「去掉尾部数字」会把同族不同号的两个哈希算成两个族 ⇒ 每次换号都假红。哈希形状一律不参与比较。
+    if not re.fullmatch(r"[0-9a-f]{8,}", mid):
+        out["model_family"] = (mid.split("-gpt-")[0].rstrip("0123456789-") or mid)[:24]
     return out
 
 

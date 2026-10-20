@@ -1,0 +1,128 @@
+From 3677eaa4b381499054f24288b252ab4343885e6f Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Tue, 20 Oct 2026 15:20:11 +0800
+Subject: [PATCH 3/6] =?UTF-8?q?=E5=85=A8=E5=91=98=E7=9C=8B=E6=9D=BF?=
+ =?UTF-8?q?=EF=BC=9A=E9=83=A8=E9=97=A8=E5=90=8D=E6=9F=A5=E8=AF=A2=E5=8E=BB?=
+ =?UTF-8?q?=E6=8E=89=E6=95=B4=E8=A1=A8=E7=AA=97=E5=8F=A3=E5=87=BD=E6=95=B0?=
+ =?UTF-8?q?=EF=BC=881.2s=20=E2=86=92=200.3s=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+_employee_department_names 以前对 usage_team_membership_daily 全表（每天约 3000 行、
+保留半年 ≈ 45 万行）做 OVER (PARTITION BY backend_id, user_id)，work_mem 4MB 下排序
+溢出到磁盘 44MB，单次 1.2 秒，占全员看板 SQL 的九成。
+
+改成先 GROUP BY 求每个 (backend_id, user_id) 的两个最新日期，再按主键回表。
+2026-10-20 生产库只读对比 5 种组合（当天、30 天、员工筛选命中/不命中、无数据区间），
+结果 md5 全部一致；默认范围 1196ms → 298ms，筛选员工时持平。
+
+两个测试的"逐员工明细查询"判定原本按 "GROUP BY ... user_id" 识别，新查询也按 user_id
+分组（求每人最新快照日），按其独有列 fallback_latest_date 排除；阳性对照
+test_admin_rows_still_queries_detail_for_a_selected_employee /
+test_department_rows_still_queries_detail_for_a_selected_department 仍通过。
+---
+ backend/usage_store.py                  | 34 +++++++++++++++----------
+ tests/test_admin_member_department.py   |  6 ++++-
+ tests/test_usage_detail_rows_skipped.py |  7 ++++-
+ 3 files changed, 32 insertions(+), 15 deletions(-)
+
+diff --git a/backend/usage_store.py b/backend/usage_store.py
+index 84fe3f3..c5f5087 100644
+--- a/backend/usage_store.py
++++ b/backend/usage_store.py
+@@ -4435,29 +4435,37 @@ class UsageStore:
+         """
+ 
+         conditions = [
+-            "snapshot_date <= $2::date",
+-            "backend_id = ANY($3::text[])",
++            "m.snapshot_date <= $2::date",
++            "m.backend_id = ANY($3::text[])",
+         ]
+         args: list[Any] = [_as_date(start_date), _as_date(end_date), backend_ids]
+         if employee_filter:
+             conditions.append(
+-                "(position($4 IN lower(user_id)) > 0 OR position($4 IN lower(employee_email)) > 0 OR position($4 IN lower(employee_name)) > 0)"
++                "(position($4 IN lower(m.user_id)) > 0 OR position($4 IN lower(m.employee_email)) > 0 OR position($4 IN lower(m.employee_name)) > 0)"
+             )
+             args.append(employee_filter)
++        where_sql = " AND ".join(conditions)
++        # 先按 (backend_id, user_id) 求出两个"最新日期"，再按主键回表取那一天的行。
++        # 以前写成整表窗口函数（OVER PARTITION BY backend_id, user_id）：快照表每天
++        # 约 3000 行、保留半年 ≈ 45 万行，排序溢出到磁盘，单次 1.2 秒，占全员看板
++        # SQL 的九成。这样改结果逐行相同（2026-10-20 生产库 5 种日期/筛选组合 md5
++        # 一致），默认范围约 0.3 秒。
+         records = await self._require_pool().fetch(
+-            """
+-            WITH ranked AS (
+-                SELECT user_id, employee_email, team_id, team_name, snapshot_date,
+-                       MAX(snapshot_date) FILTER (WHERE snapshot_date BETWEEN $1::date AND $2::date)
+-                           OVER (PARTITION BY backend_id, user_id) AS range_latest_date,
+-                       MAX(snapshot_date) OVER (PARTITION BY backend_id, user_id) AS fallback_latest_date
+-                FROM usage_team_membership_daily
+-                WHERE """ + " AND ".join(conditions) + """
++            f"""
++            WITH latest AS (
++                SELECT m.backend_id, m.user_id,
++                       MAX(m.snapshot_date) FILTER (WHERE m.snapshot_date BETWEEN $1::date AND $2::date) AS range_latest_date,
++                       MAX(m.snapshot_date) AS fallback_latest_date
++                FROM usage_team_membership_daily m
++                WHERE {where_sql}
++                GROUP BY m.backend_id, m.user_id
+             )
+             SELECT DISTINCT user_id, employee_email, team_id, team_name, snapshot_date,
+                    range_latest_date, fallback_latest_date
+-            FROM ranked
+-            WHERE snapshot_date = COALESCE(range_latest_date, fallback_latest_date)
++            FROM latest l
++            JOIN usage_team_membership_daily m USING (backend_id, user_id)
++            WHERE m.snapshot_date = COALESCE(l.range_latest_date, l.fallback_latest_date)
++              AND {where_sql}
+             """,
+             *args,
+         )
+diff --git a/tests/test_admin_member_department.py b/tests/test_admin_member_department.py
+index f233a3d..78e2e62 100644
+--- a/tests/test_admin_member_department.py
++++ b/tests/test_admin_member_department.py
+@@ -114,10 +114,14 @@ def test_admin_rows_keeps_skipping_the_per_employee_detail_without_a_filter() ->
+ 
+     asyncio.run(store.admin_rows("2026-07-01", "2026-07-30", "all", None, ["primary", "her"]))
+ 
++    # 成员-部门名查询（特征列 fallback_latest_date）也按 user_id 分组求每人最新快照日，但它不是逐员工用量明细
+     detail = [
+         q
+         for q in pool.queries
+-        if "GROUP BY" in q and "user_id" in q.split("GROUP BY", 1)[1] and "WITH filtered" not in q
++        if "GROUP BY" in q
++        and "user_id" in q.split("GROUP BY", 1)[1]
++        and "WITH filtered" not in q
++        and "fallback_latest_date" not in q
+     ]
+     assert detail == [], "未筛选成员时仍查询了逐员工明细"
+ 
+diff --git a/tests/test_usage_detail_rows_skipped.py b/tests/test_usage_detail_rows_skipped.py
+index 121d1c9..16dbb0a 100644
+--- a/tests/test_usage_detail_rows_skipped.py
++++ b/tests/test_usage_detail_rows_skipped.py
+@@ -29,10 +29,15 @@ class _FakePool:
+ 
+     def detail_queries(self) -> list[str]:
+         # 明细查询的判别特征：按 user_id 分组且不是 employees 的 CTE 汇总。
++        # 成员-部门名查询（_employee_department_names，特征列 fallback_latest_date）也按
++        # user_id 分组求每人最新快照日，但它不是逐员工用量明细，不算。
+         return [
+             q
+             for q in self.queries
+-            if "GROUP BY" in q and "user_id" in q.split("GROUP BY", 1)[1] and "WITH filtered" not in q
++            if "GROUP BY" in q
++            and "user_id" in q.split("GROUP BY", 1)[1]
++            and "WITH filtered" not in q
++            and "fallback_latest_date" not in q
+         ]
+ 
+ 
+-- 
+2.53.0
+

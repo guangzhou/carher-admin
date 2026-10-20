@@ -1,0 +1,354 @@
+From a3c0dfb8a849d9d0c1da886f901da9bee358bb05 Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Tue, 20 Oct 2026 15:20:11 +0800
+Subject: [PATCH 4/6] =?UTF-8?q?=E5=85=A8=E5=91=98=E7=9C=8B=E6=9D=BF?=
+ =?UTF-8?q?=EF=BC=9A=E6=B4=BB=E5=8A=A8=E6=B1=87=E6=80=BB=E5=B7=B2=E6=9C=89?=
+ =?UTF-8?q?=E9=87=91=E9=A2=9D=E6=97=B6=E4=B8=8D=E5=86=8D=E6=89=AB=E6=98=8E?=
+ =?UTF-8?q?=E7=BB=86=EF=BC=9B=E7=BC=93=E5=AD=98=E4=B8=8D=E5=86=8D=E8=A2=AB?=
+ =?UTF-8?q?=20Redis=20=E5=AE=9E=E6=97=B6=E8=AE=A1=E6=95=B0=E6=89=93?=
+ =?UTF-8?q?=E7=A9=BF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+2026-10-20 生产实测一次刷新约 3.3 秒，前端每 5 秒自动刷新：
+- get_live_totals_cached("spend") 扫 /spend/logs/ui，primary 一天超过 10000 条必然
+  UpstreamResultLimit ⇒ complete=false ⇒ 永不进缓存，每次请求同步再扫约 2 秒。
+  而活动汇总完整且带金额时（activity_spend_available），金额根本不用它。
+  现在只有活动汇总缺金额时才取明细；后台预取同一判据。
+- 缓存 key 带 snapshot_revision 末尾的 ":live:<Redis 计数>"，每进一条请求 +1，实测
+  10 秒内就变，命中率主入口 27%、chat 入口 47%。SQL 读的是 Postgres 实时归档，
+  它的发布已体现在 ":rt:<revision>:<updated_at>"（实测约 3 分钟一次）。key 去掉
+  Redis 计数；含今天的范围按 ADMIN_LIVE_TOTALS_CACHE_TTL_SECONDS（默认 60s）分桶，
+  顶部实时总数最多多旧一个桶。命中时新鲜度按当前实时状态重算。
+
+tests/test_admin_board_latency.py 8 条，其中 5 条在改前代码上失败（阳性对照）。
+---
+ backend/main.py                   |  66 +++++++---
+ tests/test_admin_board_latency.py | 198 ++++++++++++++++++++++++++++++
+ 2 files changed, 247 insertions(+), 17 deletions(-)
+ create mode 100644 tests/test_admin_board_latency.py
+
+diff --git a/backend/main.py b/backend/main.py
+index c64c938..74da640 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -13,6 +13,7 @@ import secrets
+ import smtplib
+ import socket
+ import ssl
++import time
+ import uuid
+ from contextlib import asynccontextmanager
+ from collections import defaultdict
+@@ -4238,10 +4239,11 @@ async def admin_live_totals_prefetch_loop() -> None:
+         windows = [(today - timedelta(days=days - 1)).isoformat() for days in (1, 3)]
+         for start_date in windows:
+             try:
+-                await asyncio.gather(
+-                    get_live_totals_cached("activity", start_date, today.isoformat()),
+-                    get_live_totals_cached("spend", start_date, today.isoformat()),
+-                )
++                activity = await get_live_totals_cached("activity", start_date, today.isoformat())
++                value = activity.get("value") or {}
++                # 与 admin_usage_payload 同一判据：活动汇总自带完整金额时用不到明细，不预取
++                if not (value.get("complete") and value.get("spendAvailable", True)):
++                    await get_live_totals_cached("spend", start_date, today.isoformat())
+             except Exception as exc:
+                 logger.warning("admin live totals prefetch failed error=%s", exc.__class__.__name__)
+         if stop is None:
+@@ -4966,12 +4968,32 @@ async def admin_usage_payload(admin: dict[str, Any], start_date: str, end_date:
+     revision = "development-upstream"
+     if usage_store() is not None:
+         revision = await snapshot_revision(start_date, end_date)
+-    cache_key = admin_usage_cache_key(admin["email"], start_date, end_date, source, employee, revision, model)
++    # 缓存 key 用 data_revision：去掉 snapshot_revision 末尾的 ":live:<Redis 计数>"。
++    # 那个计数每进一条请求就 +1（实测几秒一变），而这里的 SQL 读的是 Postgres 里的
++    # 实时归档，归档只在 usage_realtime_state 发布时才变（实测约 3 分钟一次），
++    # 发布本身已经体现在 store.snapshot_revision 的 ":rt:<revision>:<updated_at>" 里。
++    # 带着 Redis 计数做 key ⇒ 全员看板缓存命中率只有 27%，每 5 秒的自动刷新几乎都重查。
++    # 实时新鲜度（延迟、是否落后）在命中时照样按当前状态重算，不会显示旧的。
++    data_revision = revision.split(":live:", 1)[0]
++    if ":live:" in revision:
++        # 含今天的范围，顶部「上游实时总数」(liveTotals) 也跟着缓存走；按活动汇总的缓存 TTL
++        # 分时间桶，它最多比以前多旧一个桶（默认 60 秒）。用量明细本身仍随实时归档发布刷新
++        bucket_seconds = max(1, env_int("ADMIN_LIVE_TOTALS_CACHE_TTL_SECONDS", 60))
++        data_revision = f"{data_revision}:t{int(time.time() // bucket_seconds)}"
++    cache_key = admin_usage_cache_key(admin["email"], start_date, end_date, source, employee, data_revision, model)
++
++    def cached_payload(value: dict[str, Any], ttl_seconds: int) -> dict[str, Any]:
++        payload = dict(value)
++        last_synced = payload.pop("_lastSyncedAt", None)
++        if "dataFreshness" in payload:
++            attach_snapshot_freshness(payload, last_synced, start_date, end_date, revision)
++        payload["cache"] = {"hit": True, "ttlSeconds": ttl_seconds}
++        return payload
++
+     if not refresh:
+         hit, value, ttl_seconds = admin_usage_cache.get(cache_key)
+         if hit:
+-            payload = dict(value)
+-            payload["cache"] = {"hit": True, "ttlSeconds": ttl_seconds}
++            payload = cached_payload(value, ttl_seconds)
+             logger.info("admin usage cache hit records=%s", len(payload.get("rows") or []))
+             return payload
+ 
+@@ -4979,9 +5001,7 @@ async def admin_usage_payload(admin: dict[str, Any], start_date: str, end_date:
+         if not refresh:
+             hit, value, ttl_seconds = admin_usage_cache.get(cache_key)
+             if hit:
+-                payload = dict(value)
+-                payload["cache"] = {"hit": True, "ttlSeconds": ttl_seconds}
+-                return payload
++                return cached_payload(value, ttl_seconds)
+         store = usage_store()
+         if store is None:
+             payload = await client().admin_usage_rows(start_date, end_date, source, employee)
+@@ -5002,11 +5022,22 @@ async def admin_usage_payload(admin: dict[str, Any], start_date: str, end_date:
+                 attach_snapshot_freshness(stored, last_synced, start_date, end_date, revision)
+                 default_scope = source == "all" and not employee and not (model or [])
+                 if default_scope:
+-                    activity_cached, spend_cached = await asyncio.gather(
+-                        get_live_totals_cached("activity", start_date, end_date, refresh),
+-                        get_live_totals_cached("spend", start_date, end_date, refresh),
+-                    )
++                    activity_cached = await get_live_totals_cached("activity", start_date, end_date, refresh)
+                     activity_live = activity_cached.get("value") or {}
++                    # 活动汇总完整且自带金额时，下面根本不用逐请求明细的金额。而明细在上游
++                    # 一天超过 10000 条时必然 UpstreamResultLimit（不完整 ⇒ 永不进缓存），
++                    # 以前每次请求都同步再扫一遍，约 2 秒白等，还每 5 秒给上游压一次。
++                    # 只有活动汇总缺金额时才去取明细。
++                    if activity_live.get("complete") and activity_live.get("spendAvailable", True):
++                        spend_cached = {
++                            "value": {"complete": True, "missingBackends": [], "perBackend": {}, "skipped": "activity_spend_available"},
++                            "cacheStatus": activity_cached.get("cacheStatus"),
++                            "cacheAgeSeconds": activity_cached.get("cacheAgeSeconds", 0),
++                            "refreshInProgress": False,
++                            "refreshError": "",
++                        }
++                    else:
++                        spend_cached = await get_live_totals_cached("spend", start_date, end_date, refresh)
+                     spend_live = spend_cached.get("value") or {}
+                     snapshot_totals = aggregate_usage_totals(stored.get("summaryRows") or stored.get("rows") or [])
+                     activity_totals = activity_live.get("totals") or empty_usage_totals()
+@@ -5057,9 +5088,10 @@ async def admin_usage_payload(admin: dict[str, Any], start_date: str, end_date:
+                     stored["dataQuality"] = quality
+                     live["available"] = bool(activity_live.get("complete"))
+                     stored["liveTotals"] = live
+-                admin_usage_cache.set(cache_key, stored, env_int("ADMIN_USAGE_CACHE_TTL_SECONDS", 300))
+-                stored["cache"] = {"hit": False, "ttlSeconds": 0}
+-                return stored
++                # 命中时要用 last_synced 重算新鲜度，跟着缓存一起存（返回前去掉，不进响应）
++                admin_usage_cache.set(cache_key, {**stored, "_lastSyncedAt": last_synced}, env_int("ADMIN_USAGE_CACHE_TTL_SECONDS", 300))
++                stored["cache"] = {"hit": False, "ttlSeconds": 0}
++                return stored
+         except Exception as exc:
+             logger.exception("local admin usage query failed")
+             raise manual_refresh_database_unavailable() from exc
+diff --git a/tests/test_admin_board_latency.py b/tests/test_admin_board_latency.py
+new file mode 100644
+index 0000000..75b970f
+--- /dev/null
++++ b/tests/test_admin_board_latency.py
+@@ -0,0 +1,198 @@
++"""全员看板（/api/admin/usage）的三处耗时修复。
++
++2026-10-20 生产实测：一次刷新约 3.3 秒，前端每 5 秒自动刷新一次。
++- 逐请求明细金额（spend）在上游一天超过 10000 条时必然不完整、永不进缓存，
++  每次请求都同步扫一遍（约 2 秒），而活动汇总自带完整金额时根本用不到它
++- 缓存 key 带着 Redis 实时计数（几秒一变），命中率只有 27%
++"""
++
++import asyncio
++from datetime import datetime, timezone
++
++from backend import main
++
++
++class _Store:
++    """admin_rows 计数；snapshot_revision 由测试控制。"""
++
++    def __init__(self) -> None:
++        self.admin_rows_calls = 0
++        self.revision = "2026-10-20 06:00:00+00:rt:100:2026-10-20 06:00:00+00"
++
++    async def connect(self):
++        return None
++
++    async def snapshot_revision(self, *_args):
++        return self.revision
++
++    async def admin_rows(self, *_args):
++        self.admin_rows_calls += 1
++        return {
++            "rows": [],
++            "summaryRows": [{"source": "Codex", "model": "m", "totalTokens": 10, "requestCount": 1, "spend": 1.0}],
++            "employees": [],
++            "lastSyncedAt": datetime(2026, 10, 20, 6, 0, tzinfo=timezone.utc),
++        }
++
++
++def _patch_common(monkeypatch, store: _Store, live_calls: list[str], activity_value: dict) -> None:
++    async def fake_live(kind, start_date, end_date, refresh=False):
++        live_calls.append(kind)
++        if kind == "activity":
++            return {"value": activity_value, "cacheStatus": "fresh", "cacheAgeSeconds": 1, "refreshInProgress": False, "refreshError": ""}
++        return {"value": {"complete": False, "missingBackends": ["primary"], "perBackend": {}}, "cacheStatus": "miss", "cacheAgeSeconds": 0, "refreshInProgress": False, "refreshError": ""}
++
++    monkeypatch.setattr(main, "usage_store", lambda: store)
++    monkeypatch.setattr(main, "usage_backend_ids", lambda: ["primary", "her"])
++    monkeypatch.setattr(main, "get_live_totals_cached", fake_live)
++    monkeypatch.setattr(main, "realtime_enabled", lambda: False)
++    main.admin_usage_cache.clear()
++
++
++COMPLETE_ACTIVITY = {"complete": True, "spendAvailable": True, "totals": {"totalTokens": 10, "requestCount": 1, "spend": 1.0}, "perBackend": {}}
++
++
++def _payload(start="2026-10-01", end="2026-10-05"):
++    return asyncio.run(main.admin_usage_payload({"email": "admin@example.com"}, start, end, "all", None))
++
++
++def test_complete_activity_skips_the_capped_spend_scan(monkeypatch) -> None:
++    store, calls = _Store(), []
++    _patch_common(monkeypatch, store, calls, COMPLETE_ACTIVITY)
++
++    payload = _payload()
++
++    assert calls == ["activity"], "活动汇总已带完整金额时不该再扫逐请求明细"
++    live = payload["liveTotals"]
++    assert live["spendAvailable"] is True
++    assert live["totals"]["spend"] == 1.0
++    # 没去扫明细，就不能把它报成"金额不可用"
++    assert payload["dataQuality"].get("liveSpendStatus") != "unavailable"
++
++
++def test_activity_without_spend_still_falls_back_to_the_spend_scan(monkeypatch) -> None:
++    """阴性对照：活动汇总没有金额时，照旧去取明细金额。"""
++    store, calls = _Store(), []
++    _patch_common(monkeypatch, store, calls, {**COMPLETE_ACTIVITY, "spendAvailable": False})
++
++    payload = _payload()
++
++    assert calls == ["activity", "spend"]
++    assert payload["liveTotals"]["spendAvailable"] is False
++
++
++def test_incomplete_activity_still_falls_back_to_the_spend_scan(monkeypatch) -> None:
++    store, calls = _Store(), []
++    _patch_common(monkeypatch, store, calls, {**COMPLETE_ACTIVITY, "complete": False})
++
++    _payload()
++
++    assert calls == ["activity", "spend"]
++
++
++def test_redis_live_counter_change_does_not_bust_the_cache(monkeypatch) -> None:
++    """snapshot_revision 末尾的 :live:<Redis 计数> 几秒一变，不能让缓存失效。"""
++    store, calls = _Store(), []
++    _patch_common(monkeypatch, store, calls, COMPLETE_ACTIVITY)
++    revisions = iter(["base:live:1", "base:live:2", "base:live:3"])
++
++    async def fake_revision(*_args):
++        return next(revisions)
++
++    monkeypatch.setattr(main, "snapshot_revision", fake_revision)
++    monkeypatch.setattr(main, "attach_snapshot_freshness", lambda payload, *_a, **_k: payload)
++
++    first = _payload("2026-10-20", "2026-10-20")
++    second = _payload("2026-10-20", "2026-10-20")
++    third = _payload("2026-10-20", "2026-10-20")
++
++    assert store.admin_rows_calls == 1
++    assert first["cache"]["hit"] is False
++    assert second["cache"]["hit"] is True and third["cache"]["hit"] is True
++    assert "_lastSyncedAt" not in second, "内部字段不能出现在响应里"
++
++
++def test_archived_realtime_publish_still_busts_the_cache(monkeypatch) -> None:
++    """阳性对照：Postgres 里的实时归档发布了（:rt:<revision> 变了）就必须重查。"""
++    store, calls = _Store(), []
++    _patch_common(monkeypatch, store, calls, COMPLETE_ACTIVITY)
++    revisions = iter(["cov:rt:100:t1:live:1", "cov:rt:101:t2:live:1"])
++
++    async def fake_revision(*_args):
++        return next(revisions)
++
++    monkeypatch.setattr(main, "snapshot_revision", fake_revision)
++    monkeypatch.setattr(main, "attach_snapshot_freshness", lambda payload, *_a, **_k: payload)
++
++    _payload("2026-10-20", "2026-10-20")
++    _payload("2026-10-20", "2026-10-20")
++
++    assert store.admin_rows_calls == 2
++
++
++def test_cache_hit_recomputes_freshness_with_the_current_revision(monkeypatch) -> None:
++    """命中缓存时，新鲜度要按当前实时状态重算，而不是沿用缓存里那份。"""
++    store, calls = _Store(), []
++    _patch_common(monkeypatch, store, calls, COMPLETE_ACTIVITY)
++    revisions = iter(["base:live:1", "base:live:2"])
++    seen: list[tuple] = []
++
++    async def fake_revision(*_args):
++        return next(revisions)
++
++    def fake_freshness(payload, last_synced, start, end, revision):
++        seen.append((last_synced, revision))
++        payload["dataFreshness"] = {"realtimeRevision": revision}
++        return payload
++
++    monkeypatch.setattr(main, "snapshot_revision", fake_revision)
++    monkeypatch.setattr(main, "attach_snapshot_freshness", fake_freshness)
++
++    _payload("2026-10-20", "2026-10-20")
++    second = _payload("2026-10-20", "2026-10-20")
++
++    assert second["cache"]["hit"] is True
++    assert second["dataFreshness"]["realtimeRevision"] == "base:live:2"
++    assert seen[-1] == (datetime(2026, 10, 20, 6, 0, tzinfo=timezone.utc), "base:live:2")
++
++
++def test_today_cache_key_rolls_over_with_the_live_totals_ttl(monkeypatch) -> None:
++    """含今天的范围：顶部实时总数跟着缓存走，时间桶保证它不比 ADMIN_LIVE_TOTALS_CACHE_TTL_SECONDS 更旧。"""
++    store, calls = _Store(), []
++    _patch_common(monkeypatch, store, calls, COMPLETE_ACTIVITY)
++    now = [60 * 1000.0]  # 正好在一个 60 秒桶的起点
++
++    async def fake_revision(*_args):
++        return "base:live:1"
++
++    monkeypatch.setattr(main, "snapshot_revision", fake_revision)
++    monkeypatch.setattr(main, "attach_snapshot_freshness", lambda payload, *_a, **_k: payload)
++    monkeypatch.setattr(main.time, "time", lambda: now[0])
++    monkeypatch.setenv("ADMIN_LIVE_TOTALS_CACHE_TTL_SECONDS", "60")
++
++    _payload("2026-10-20", "2026-10-20")
++    now[0] += 59  # 同一个桶
++    _payload("2026-10-20", "2026-10-20")
++    assert store.admin_rows_calls == 1, "同一个桶内应命中缓存"
++    now[0] += 2  # 跨到下一个桶
++    _payload("2026-10-20", "2026-10-20")
++    assert store.admin_rows_calls == 2, "跨过 TTL 桶必须重算"
++
++
++def test_history_range_cache_key_has_no_time_bucket(monkeypatch) -> None:
++    """不含今天的历史范围：数据只随快照发布变，不需要时间桶。"""
++    store, calls = _Store(), []
++    _patch_common(monkeypatch, store, calls, COMPLETE_ACTIVITY)
++    now = [1_000_000.0]
++
++    async def fake_revision(*_args):
++        return "2026-10-05 00:00:00+00"
++
++    monkeypatch.setattr(main, "snapshot_revision", fake_revision)
++    monkeypatch.setattr(main.time, "time", lambda: now[0])
++
++    _payload()
++    now[0] += 200  # 跨过好几个 60 秒桶，但仍在 ADMIN_USAGE_CACHE_TTL_SECONDS（300）内
++    _payload()
++
++    assert store.admin_rows_calls == 1
+-- 
+2.53.0
+

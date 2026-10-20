@@ -1,0 +1,242 @@
+From 22fdbc29560429041f7ae49a7f552b7a9dddcfe5 Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Tue, 20 Oct 2026 15:20:11 +0800
+Subject: [PATCH 6/6] =?UTF-8?q?=E5=90=8C=E6=AD=A5=E9=97=A8=E7=A6=81?=
+ =?UTF-8?q?=EF=BC=9A=E4=B8=8A=E6=B8=B8=E5=85=A8=E5=B1=80=E6=B1=87=E6=80=BB?=
+ =?UTF-8?q?=E8=AF=81=E6=98=8E=E5=87=A0=E4=B9=8E=E6=B2=A1=E6=B5=81=E9=87=8F?=
+ =?UTF-8?q?=E6=97=B6=EF=BC=8C"=E9=9D=9E=E7=A9=BA=E7=94=A8=E6=88=B7?=
+ =?UTF-8?q?=E8=BF=87=E5=B0=91"=E4=B8=8D=E5=86=8D=E5=88=A4=E4=B8=8D?=
+ =?UTF-8?q?=E5=AE=8C=E6=95=B4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+her 09-28 迁走后上游每天全局请求个位数（生产探针：10-01 为 0、10-14 为 27、10-19 为 3），
+305 个账号里 0~1 人有用量，门禁 max(1, 305×5%)=15 人永远不达标 ⇒ 每次 partial ⇒
+刷新队列无限重试。
+
+门禁触发时再查一次上游 /user/daily/activity/aggregated 的 metadata（与看板顶部实时
+总数同源）：全局请求数 ≤ 每天 USAGE_SYNC_SPARSE_MAX_DAILY_REQUESTS（默认 100）才放行，
+最多漏掉阈值以内的零头。上游有量而按人回退漏了（门禁要挡的）照旧拦下；查询失败、
+缺字段一律维持判不完整；设成 0 恢复旧行为。门禁不触发时不额外打上游。
+
+tests/test_sparse_fallback_upstream_confirmation.py 8 条（含阴性对照、失败回退、阈值随天数），
+其中 2 条在改前代码上失败。
+---
+ backend/usage_sync.py                         |  49 +++++++
+ ...t_sparse_fallback_upstream_confirmation.py | 136 ++++++++++++++++++
+ 2 files changed, 185 insertions(+)
+ create mode 100644 tests/test_sparse_fallback_upstream_confirmation.py
+
+diff --git a/backend/usage_sync.py b/backend/usage_sync.py
+index 3a5a872..1ce58ee 100644
+--- a/backend/usage_sync.py
++++ b/backend/usage_sync.py
+@@ -867,6 +867,48 @@ class UsageSynchronizer:
+         self._last_rollup_totals = {"backend": backend.id, "start": start_date, "end": end_date, **totals}
+         return gap
+ 
++    async def _upstream_confirms_near_zero_traffic(
++        self,
++        backend: LiteLLMBackend,
++        start_date: str,
++        end_date: str,
++        collected_requests: int,
++    ) -> bool:
++        """上游全局汇总能否证明「这段时间本来就几乎没流量」。
++
++        只认上游 /user/daily/activity/aggregated 的 metadata（与看板顶部实时总数同源）：
++        全局请求数 ≤ 每天 USAGE_SYNC_SPARSE_MAX_DAILY_REQUESTS（默认 100）才放行。
++        上游有量而按人回退漏了的情况（门禁真正要挡的）全局数会远超这个阈值，照旧拦下；
++        放行时最多漏掉阈值以内的零头。任何异常、缺字段都返回 False，维持原来的「判不完整」。
++        """
++        max_daily = max(0, int(os.getenv("USAGE_SYNC_SPARSE_MAX_DAILY_REQUESTS", "100")))
++        if max_daily <= 0:
++            return False
++        request = getattr(self.client, "request_backend", None)
++        if not callable(request):
++            return False
++        try:
++            from .litellm_client import usage_timezone_offset_minutes
++
++            payload = await request(
++                backend, "GET", "/user/daily/activity/aggregated",
++                params={"start_date": start_date, "end_date": end_date, "timezone": usage_timezone_offset_minutes()},
++            )
++            metadata = payload.get("metadata") if isinstance(payload, dict) else None
++            if not isinstance(metadata, dict) or metadata.get("total_api_requests") is None:
++                return False
++            upstream_requests = int(metadata.get("total_api_requests") or 0)
++        except Exception:
++            logger.exception("sparse fallback upstream check failed backend=%s", backend.id)
++            return False
++        days = (date.fromisoformat(end_date) - date.fromisoformat(start_date)).days + 1
++        confirmed = upstream_requests <= max_daily * max(1, days)
++        logger.info(
++            "sparse fallback upstream check backend=%s start=%s end=%s upstream_requests=%s collected_requests=%s confirmed=%s",
++            backend.id, start_date, end_date, upstream_requests, collected_requests, confirmed,
++        )
++        return confirmed
++
+     def _log_coverage_gap(self, backend_id: str, start_date: str, end_date: str, rows: list[dict[str, Any]]) -> None:
+         """Warn when published spend drifts from the upstream global rollup.
+ 
+@@ -1421,6 +1463,13 @@ class UsageSynchronizer:
+             and fallback_stats["attemptedUsers"] >= 20
+             and fallback_stats["usersWithUsage"] < expected_nonempty
+         )
++        if sparse_fallback and await self._upstream_confirms_near_zero_traffic(backend, start_date, end_date, request_count):
++            # 「非空用户过少」本意是挡住按人回退漏数据。如果上游自己的全局汇总也说这几天
++            # 几乎没请求（her 09-28 迁走后每天个位数），空结果就是真的，不该判不完整。
++            # 以前这里永远判 partial ⇒ 刷新队列里这类请求无限重试（10-20 最多 1002 次），
++            # 而队列按 requested_at 升序领取，排在后面的新日期一直轮不到（看板少算 69%~81%）。
++            fallback_stats["sparseConfirmedByUpstream"] = True
++            sparse_fallback = False
+         quality = {
+             "complete": bool(
+                 fallback_complete
+diff --git a/tests/test_sparse_fallback_upstream_confirmation.py b/tests/test_sparse_fallback_upstream_confirmation.py
+new file mode 100644
+index 0000000..8d03e80
+--- /dev/null
++++ b/tests/test_sparse_fallback_upstream_confirmation.py
+@@ -0,0 +1,136 @@
++"""「非空用户过少」门禁：上游全局汇总证明本来就没流量时，空结果算完整。
++
++2026-10-20 生产：her 09-28 迁走后每天全局请求个位数（10-01 为 0，10-19 为 3），
++305 个账号里 0~1 人有用量 ⇒ 门禁每次判不完整 ⇒ 刷新队列无限重试（最多 1002 次），
++排在后面的新日期一直轮不到，看板 10-14 少 69%、10-18 少 81%。
++"""
++
++import asyncio
++
++from backend.usage_sync import UsageSynchronizer
++
++
++class Backend:
++    id = "her"
++    source = "Her"
++
++
++def _client(upstream_requests, *, users=30, used_by=0, upstream_error=False):
++    calls: list[str] = []
++
++    class FakeClient:
++        backends = [Backend()]
++
++        def _admin_user_map(self, raw):
++            return {u["user_id"].lower(): {"name": u["user_id"], "email": f"{u['user_id']}@example.com"} for u in raw}
++
++        def _is_backend_usage_account(self, _backend, _user_id):
++            return True
++
++        async def users(self, _backend):
++            return [{"user_id": f"u{i}", "user_email": f"u{i}@example.com"} for i in range(users)]
++
++        async def her_account_index(self, _backend):
++            return {}
++
++        def _encode_account_id(self, backend, user_id):
++            return f"{backend.id}:{user_id}"
++
++        async def usage_rows(self, user_id, _start, _end, _source):
++            index = int(user_id.split(":u", 1)[1])
++            if index < used_by:
++                return [{"date": "2026-10-19", "source": "Her", "model": "m", "totalTokens": 5, "requestCount": 1}]
++            return []
++
++        async def teams(self, _backend):
++            return []
++
++        async def request_backend(self, _backend, _method, path, *, params):
++            calls.append(path)
++            if upstream_error:
++                raise TimeoutError()
++            return {"daily_data": [], "metadata": {"total_api_requests": upstream_requests, "total_spend": 0.0}}
++
++    return FakeClient(), calls
++
++
++def _collect(client, start="2026-10-19", end="2026-10-19"):
++    return asyncio.run(UsageSynchronizer(client, object()).collect_backend(Backend(), start, end))
++
++
++def test_near_zero_upstream_traffic_makes_a_sparse_result_complete() -> None:
++    client, calls = _client(upstream_requests=3)
++
++    snapshot = _collect(client)
++
++    assert calls == ["/user/daily/activity/aggregated"]
++    assert snapshot.quality["complete"] is True
++    assert snapshot.quality["degradedReason"] == ""
++    assert snapshot.quality["fallback"]["sparseConfirmedByUpstream"] is True
++
++
++def test_real_upstream_traffic_keeps_the_sparse_gate_closed() -> None:
++    """阴性对照：上游一天有几千条，按人回退却几乎是空的 ⇒ 这才是门禁要挡的漏数据。"""
++    client, _ = _client(upstream_requests=5000)
++
++    snapshot = _collect(client)
++
++    assert snapshot.quality["complete"] is False
++    assert snapshot.quality["degradedReason"] == "用户 daily activity 返回非空用户过少"
++
++
++def test_threshold_scales_with_the_number_of_days() -> None:
++    client, _ = _client(upstream_requests=250)
++    assert _collect(client, "2026-10-17", "2026-10-19").quality["complete"] is True  # 3 天 × 100
++
++    client, _ = _client(upstream_requests=350)
++    assert _collect(client, "2026-10-17", "2026-10-19").quality["complete"] is False
++
++
++def test_upstream_check_failure_keeps_the_gate_closed() -> None:
++    client, _ = _client(upstream_requests=0, upstream_error=True)
++
++    assert _collect(client).quality["complete"] is False
++
++
++def test_missing_metadata_keeps_the_gate_closed() -> None:
++    client, _ = _client(upstream_requests=None)
++
++    assert _collect(client).quality["complete"] is False
++
++
++def test_setting_threshold_to_zero_restores_the_old_behaviour(monkeypatch) -> None:
++    monkeypatch.setenv("USAGE_SYNC_SPARSE_MAX_DAILY_REQUESTS", "0")
++    client, calls = _client(upstream_requests=0)
++
++    assert _collect(client).quality["complete"] is False
++    assert calls == []
++
++
++def test_non_sparse_result_does_not_call_upstream() -> None:
++    """门禁没触发时不额外打上游。"""
++    client, calls = _client(upstream_requests=0, users=30, used_by=10)
++
++    snapshot = _collect(client)
++
++    assert snapshot.quality["complete"] is True
++    assert calls == []
++
++
++def test_refresh_claim_prefers_fewer_attempts_before_age() -> None:
++    """刷新队列：反复失败的老请求不能永远排在新日期前面。"""
++    from backend.usage_store import UsageStore
++
++    class Pool:
++        query = ""
++
++        async def fetch(self, query, *_args):
++            self.query = query
++            return []
++
++    store = UsageStore("postgresql://unused")
++    store.pool = Pool()
++    asyncio.run(store.claim_refresh_requests())
++
++    order = " ".join(store.pool.query.split()).split("ORDER BY", 1)[1].split("FOR UPDATE", 1)[0].strip()
++    assert order == "attempts, requested_at"
+-- 
+2.53.0
+

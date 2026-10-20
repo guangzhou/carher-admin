@@ -30,6 +30,12 @@ description: >-
 ## 1. 装一个补丁是**三步**，漏任何一步都是静默失效
 
 母 router 的每个补丁文件在 Deployment 里都有**自己独立的 `subPath` volumeMount**
+> 🔴 **2026-10-20 起：下面写的 `litellm-callbacks` / `litellm-config` 是 base CM，三条车道（prod/gray/guarded-old）都不挂它们**
+> （三车道挂 `litellm-product-<lane>-callbacks-<hash>`，从 Deployment volumes 反查）。
+> `litellm-198-router-patch-install.sh` 默认就改这两个 base CM ⇒ 对三车道直接跑 = 改错对象、全绿。
+> 三车道新增 callback 用 `scripts/litellm-198-lane-callback-add.py`，换已有的用 `litellm-gray-rollout/scripts/lane-callback-swap.sh`。
+> 线上现在有哪些补丁、挂在哪 ⇒ [[litellm-198-patch-layer-map]]。
+
 （2026-09-07 时 39 条）。只往 `litellm-callbacks` CM 里加 data，**容器里根本不会出现这个文件，
 而且不会报任何错** —— callbacks 里那行 import 失败会被吞掉，你会以为装上了。
 

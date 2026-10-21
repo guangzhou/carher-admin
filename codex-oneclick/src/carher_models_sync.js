@@ -108,7 +108,9 @@ function loadTemplates(cands, current) {
     if (r.status === 0) {
       try { return { codex: c, models: JSON.parse(r.stdout).models }; } catch (e) { why.push(`${c[1][0] || c[0]}:输出不是 JSON`); continue; }
     }
-    why.push(`${c[1][0] || c[0]}:${String(r.stderr || r.error || "").trim().split("\n")[0].slice(0, 120)}`);
+    // 10-21 guozhenhua:只记第一行时日志里只剩 clap 的 usage 尾巴,看不出是哪个 codex、什么参数被拒 ⇒ 记全
+    const err = String(r.stderr || r.error || "").trim().replace(/\s*\n\s*/g, " ⏎ ").slice(0, 400);
+    why.push(`[${[c[0], ...c[1]].join(" ")} debug models --bundled] rc=${r.status} ${err}`);
   }
   if (why.length) log(`这些 codex 拿不到自带目录(版本太老?):${why.join(" | ")}`);
   if (fs.existsSync(current)) return { codex: null, models: JSON.parse(fs.readFileSync(current, "utf8")).models };

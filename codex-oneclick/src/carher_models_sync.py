@@ -158,7 +158,8 @@ def load_templates(cands: list[str], current: Path) -> tuple[str | None, list[di
             except (ValueError, KeyError):
                 why.append(f"{c}:输出不是 JSON")
                 continue
-        why.append(f"{c}:{(r.stderr.strip().splitlines() or [''])[0][:120]}")
+        err = " ⏎ ".join(l.strip() for l in r.stderr.strip().splitlines())[:400]
+        why.append(f"[{c} debug models --bundled] rc={r.returncode} {err}")
     if why:
         log(f"这些 codex 拿不到自带目录(版本太老?):{' | '.join(why)}")
     if current.exists():

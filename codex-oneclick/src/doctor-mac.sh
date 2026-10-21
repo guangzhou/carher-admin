@@ -120,6 +120,21 @@ if [ -f "$CODEX_HOME/carher-models-sync.log" ]; then
   LAST=$(grep -E '同步完成|失败' "$CODEX_HOME/carher-models-sync.log" | tail -n 1)
   case "$LAST" in *失败*) red "模型同步最近一次失败(下拉里只有自带的 GPT):下载最新的 codex-mac.command 重跑一次;还不行把这份报告发给运维";; esac
 fi
+# 现场复现同步要用的那一步(只读:只跑 debug models --bundled,不写任何文件),把每个候选 codex 的原样结果列出来
+SJ="$CODEX_HOME/carher_models_sync.js"
+if [ -f "$SJ" ] && command -v node >/dev/null 2>&1; then
+  P "  同步脚本      : $SJ ($(grep -q 'function codexCandidates' "$SJ" && echo 新版 || echo '旧版,没有逐个试 codex'))"
+  if grep -q 'function codexCandidates' "$SJ"; then
+    CODEX_HOME="$CODEX_HOME" node -e '
+const m=require(process.argv[1]);const cp=require("child_process");
+for(const c of m.codexCandidates()){
+  const r=cp.spawnSync(c[0],[...c[1],"debug","models","--bundled"],{encoding:"utf8",timeout:60000,env:process.env});
+  let n="";try{n=JSON.parse(r.stdout).models.length+" 个模板"}catch(e){}
+  const v=cp.spawnSync(c[0],[...c[1],"--version"],{encoding:"utf8",timeout:20000}).stdout.trim();
+  console.log("  试 codex      : "+[c[0],...c[1]].join(" ")+"  "+v+"  rc="+r.status+"  "+(n||String(r.stderr||r.error||"").trim().replace(/\s*\n\s*/g," ⏎ ").slice(0,300)));
+}' "$SJ" 2>&1 | mask | while IFS= read -r l; do P "$l"; done
+  fi
+fi
 # 定时同步装没装(Mac)
 if [ "$(uname -s)" = Darwin ]; then
   if launchctl print "gui/$(id -u)/net.carher.codex-models-sync" >/dev/null 2>&1; then

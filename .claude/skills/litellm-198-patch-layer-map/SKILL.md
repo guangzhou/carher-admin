@@ -38,13 +38,20 @@ scripts/litellm-198-patch-layer-map.py --tag v1.105.1 --probe-chain --json   # �
 
 脚本把 ③④ 合在一把尺子里抓（都落在 site-packages），再按 mount 反查分开。
 
-## 现状快照（2026-10-20 实测，数字会过时，以脚本现量为准）
+## 现状快照（2026-10-20 晚实测，数字会过时，以脚本现量为准）
 
-| lane | 版本 | ① callbacks | ③ 覆盖件 | ④ 烘焙文件 |
+| lane | 版本 | ① callbacks（含内置 prometheus） | ③ 覆盖件 | ④ 烘焙文件 |
 |---|---|---|---|---|
-| prod `litellm-proxy`（4 副本） | 1.105.1 | 37 个，36 import OK + `prometheus` 内置 | 3 | 5 |
-| gray `litellm-proxy-gray`（2） | 1.105.1 | 同 prod | 3 | 5 |
-| guarded-old（2，保险丝） | **1.103.2** | 38 个（多 `midstream_fallback_loop`，该版本应在） | 3 | 2 |
+| prod `litellm-proxy`（4 副本，helm rev21） | 1.105.1 | 37 个，36 import OK | 3 | 5 |
+| gray `litellm-proxy-gray`（2，helm rev26） | 1.105.1 | 38 个，37 import OK | 3 | 5 |
+| guarded-old（2，保险丝） | **1.103.2** | 38 个（含 `midstream_fallback_loop`，该版本应在） | 3 | 2 |
+
+10-20 当天的变化（都已进 helm values 和 git `8a85fc8`）：
+- prod/gray 加了 `same_group_failover_cap`（包 `Router._maybe_run_weighted_failover`，同组已排除 3 条腿就交给兜底链）
+  + env `ROUTER_MAX_FALLBACKS=10`；摘掉了 `anthropic_passthrough_pingfix`、`log_truncate`；DB 连接池 3、key 缓存 3000。
+  行为验收不靠补丁地图，靠 `scripts/litellm-198-failover-contract-check.py`（见 [[litellm-198-version-upgrade]] §4）。
+- guarded-old 仍是老的 `midstream_fallback_loop`，兜底契约同样过。
+- 三车道 callbacks 和 git 是否一致：`scripts/litellm-198-callbacks-drift.py`；补丁归属三车道比对：`cli-anything-litellm patches compare`。
 
 ③ 覆盖件（三条都有，按版本各自重做）：`litellm_core_utils/streaming_handler.py`、
 `proxy/pass_through_endpoints/streaming_handler.py`、`…/llm_provider_handlers/anthropic_passthrough_logging_handler.py`。

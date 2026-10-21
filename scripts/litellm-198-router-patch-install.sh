@@ -192,9 +192,27 @@ PY
   k -n "$NS" rollout status deploy/"$DEPLOY" --timeout=600s
 }
 
+# 写之前先核：要改的两个 CM 必须真是这个 Deployment 挂着的那两个。
+# 2026-10-20 实测 litellm-proxy / -gray / -guarded-old 三车道挂的都是带 hash 的派生 CM
+# （litellm-product-<lane>-callbacks-<hash>），默认的 litellm-callbacks / litellm-config 三车道都不挂
+# ⇒ 不核就会改错对象，rollout、sha、import 全绿。三车道新增用 litellm-198-lane-callback-add.py，
+# 换已有的用 litellm-gray-rollout/scripts/lane-callback-swap.sh。
+require_mounted_cms() {
+  local mounted
+  mounted=$(k -n "$NS" get deploy "$DEPLOY" \
+    -o jsonpath='{range .spec.template.spec.volumes[*]}{.configMap.name}{"\n"}{end}') \
+    || die "读不到 deploy/${DEPLOY} 的 volumes"
+  local cm
+  for cm in "$CB_CM" "$CFG_CM"; do
+    grep -qxF "$cm" <<<"$mounted" || die "deploy/${DEPLOY} 没挂 CM ${cm}（它挂的是：$(tr '\n' ' ' <<<"$mounted")）。
+改这个 CM 不会影响 ${DEPLOY}。三车道用 scripts/litellm-198-lane-callback-add.py 或
+litellm-gray-rollout/scripts/lane-callback-swap.sh；确认要改别的对象就显式设 CB_CM / CFG_CM。"
+  done
+}
+
 case "${1:-}" in
-  install)  [ $# -eq 3 ] || die "用法: $0 install <本地模块.py> <callbacks 条目>"; do_install "$2" "$3" ;;
+  install)  [ $# -eq 3 ] || die "用法: $0 install <本地模块.py> <callbacks 条目>"; require_mounted_cms; do_install "$2" "$3" ;;
   verify)   [ $# -eq 2 ] || die "用法: $0 verify <模块文件名.py>"; do_verify "$2" ;;
-  rollback) [ $# -eq 3 ] || die "用法: $0 rollback <模块文件名.py> <callbacks 条目>"; do_rollback "$2" "$3" ;;
+  rollback) [ $# -eq 3 ] || die "用法: $0 rollback <模块文件名.py> <callbacks 条目>"; require_mounted_cms; do_rollback "$2" "$3" ;;
   *) die "用法: $0 {install|verify|rollback} ..." ;;
 esac

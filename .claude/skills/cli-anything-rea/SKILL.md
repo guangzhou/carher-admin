@@ -47,7 +47,17 @@ cli-anything-rea run doctor                             # rea doctor，引擎 vs
 5. **会执行或注入目标的工具默认就注册**：frida、adb、进程捕获、`capture_electron_scenario`（`-r` 注入 hook，**child_process 和 dlopen 照常执行，不是沙箱**）、`gdb_console`、`execute_rizin_command`（跑完关掉当前 target）。REA 自己没开关，只靠 MCP 的 `destructiveHint` 让客户端审批（31 个）。只对信得过的目标用。
 6. **`rea mcp --http` 无鉴权**：默认绑 127.0.0.1；绑到别的地址后 Host/Origin 校验也关掉。远程用要带鉴权的代理或 ssh 隧道。新客户端 `initialize` 会顶掉旧会话。
 
-## `rea setup` 会改什么（还没跑，要用户点头）
+## 已接进 Claude Code（10-21）
+
+`rea setup --client claude_code --yes` 已跑：`~/.claude.json` 加了 `mcpServers.rea`（命令 = 本地 `~/codes/rea/scripts/rea.mjs mcp`，
+env 带 GHIDRA_INSTALL_DIR / JAVA_HOME / REA_KUNA_COMMAND / REA_JADX_MCP_JAR），装了 `~/.claude/skills/reverse-engineer-anything/`。
+另在 `~/.claude/settings.json` 的 env 加了 `MCP_TOOL_TIMEOUT=450000`（REA 给其他客户端推的默认值：Ghidra 启动 330s + 120s 余量；
+Claude Code 默认太短，大目标会被切断）。备份：`~/.claude.json.rea.backup` 与 `~/codes/rea-deps/backup-20261021-213603/`。
+撤销：`rea uninstall --client claude_code`，再删 settings 里那个 env。**需要重启 Claude Code 才生效。**
+
+注意：注册的命令用 `#!/usr/bin/env node` 起，PATH 上默认 node 是 26.x（REA 也支持）；若哪天默认 node 掉到 <22.19 会起不来。
+
+## `rea setup` 会改什么
 
 对 Claude Code 只两处：`~/.claude.json` 顶层 `mcpServers.rea`（`npx -y rea-agents@6.7.0 mcp` 或本地入口绝对路径 + provider 探测出的 env），
 和 `~/.claude/skills/reverse-engineer-anything/` 下 7 个 md。写前整份备份到 `~/.claude.json.rea.backup`（**uninstall 不删这份备份**）；

@@ -5,7 +5,9 @@ description: >-
   Claude Code / multica）怎么发搜索、落到哪个后端（kiro / grok sub2api / wangsu / DeepSeek 官方）、
   谁真搜谁假装搜，以及一条命令的回归 `scripts/litellm-198-web-search-regress.py`。
   Use when 用户问「搜索生效了吗」「为什么 opus 落到 wangsu/grok」「模型说搜过但答的是旧信息」
-  「X 模型能不能联网」，或改动 kiro.rs 搜索回合 / grok_web_search_preview_rename callback 之后验收。
+  「X 模型能不能联网」，或改动 kiro.rs 搜索回合 / grok_web_search_preview_rename /
+  chat_annotation_nest callback 之后验收。her 实例 / 杭州 bot 的 perplexity 名搜索走
+  hermestest-web-search-provider（§先决定改哪一层、§7 杭州）。
 ---
 
 # 198 联网搜索：谁真搜、谁假装搜
@@ -63,14 +65,24 @@ SpendLogs 查法：`response->'usage'->>'num_server_side_tools_used'`。
   走 **Messages 时 grok-4.20 / grok-build 不搜**，回答还自称已联网。
   `grok-4.20-multi-agent` 带任何函数工具都 400 `Client-side tools for multi-agent models require beta access`
   ⇒ **不能当兜底**（10-14 试过，那一跳 0.5s 必挂）。
+  但它是 **chat 入口、不带任何工具也会自己搜** 的唯一 grok 组 ⇒ her 实例 / 杭州 bot 的 perplexity 名都映射到它
+  （见 [[hermestest-web-search-provider]]）。10-21 实测：单次 9~35s、10~27 次搜索、10~45 万 prompt token、$0.04~0.57。
+  🔴 它走 chat→Responses 桥回来的 `annotations` 是**平铺**的（`{type,url,title,start_index,end_index}`），
+  严格按 OpenAI 规范解析的客户端（杭州 gw litellm 1.101.0）会 500；10-21 起 callback `chat_annotation_nest`
+  在 198 出口补嵌套 `url_citation:{…}`（加法，平铺字段保留）。
 - **wangsu5 claude-opus-5**：原生搜索，单发 `web_search_requests=2` 证实过，约 $0.5/条。
   线上 235 条兜底的 response 里看不到搜索块，是截断还是确实没搜，**没定论**。
-- **DeepSeek 官方（`deepseek-v4.1-flash-responses`，`api.deepseek.com`）**：🔴 **不搜**。
-  10-15 两次（带不带 `{"type":"web_search"}`）答案一字不差（「截至 2026年5月7日尚未公布」），
-  0 个 `web_search_call`、usage 里没有搜索字段，每次 165~179s。
-  `deepseek_responses_adapt.py` 里「W4 web_search 200」说的是**参数被接受**，**不代表执行了搜索**。
-  `deepseek-v4-pro-responses` 180s 超时，没测出结果。⇒ 要让 DeepSeek 能搜，得像 kiro 那样自己接搜索后端，
-  不是改个参数的事。
+- **DeepSeek 官方**（10-17 开放搜索，10-20 用 `scripts/litellm-198-deepseek-search-probe.sh` 直连复测）：
+  - ✅ `deepseek-v4-pro` + Responses `tools:[{"type":"web_search"}]`：真搜（`output[]` 有 `web_search_call`），约 4s。
+  - ⛔ `deepseek-flash`（= v4.1-flash，也就是我们在用的）：Responses / chat `web_search_options` / Anthropic 端点**全部忽略搜索**，
+    只会答「尚未公布」。官方文档也写了 web_search 仅 v4-pro。**flash 想联网只能靠外部搜索工具喂结果**。
+  - ⚠️ Anthropic 端点 + `web_search_20250305`（pro）：同一天一轮结果全是 `web_search_tool_result_error: unavailable`、
+    一轮正常 10 条 ⇒ 不稳。`usage.server_tool_use.web_search_requests>0` **不等于搜到**，要数 `web_search_result` 条数。
+  - ✅ 独立接口 `POST /v1/tools/search`（0.6s，结果带 date/summary）、`/v1/tools/fetch`（转 Markdown），各 $0.75/千次。
+  - litellm 桥 `openai/responses/deepseek-v4-pro` + `web_search_options:{}` 从 chat 入口也能搜（12s）。
+  - 198 上 pro 档 09-09 起全员撤权；10-20 用户再次确认 carher-14 只开 `deepseek-v4.1-flash`、不开 pro。
+  - 10-15 那次「DeepSeek 不搜」测的是 `deepseek-v4.1-flash-responses`（flash），结论对 flash 仍然成立。
+  - 客户端侧官方接法：OpenClaw 的 DeepSeek 搜索插件见 [[hermestest-web-search-provider]] §6（截至 10-20 未发版）。
 
 ## 4. 兜底链（DB `router_settings.fallbacks`，不在 CM）
 
@@ -82,9 +94,16 @@ SpendLogs 查法：`response->'usage'->>'num_server_side_tools_used'`。
 
 判「kiro 接住了」：响应头 `x-litellm-attempted-fallbacks: 0`，并且 SpendLogs `model_id` 以 `kiro-rs/` 开头。
 
+🔴 `sa-grok-4.20-multi-agent → deepseek-v4.1-flash`（全局）：grok 池 503 时搜索请求会被 flash 接住，
+**200、不带引用、答「尚未公布」**，用户看不出来没搜。判据：SpendLogs `model_group=deepseek-v4.1-flash`
+且请求名是 perplexity 名。要不要改成「搜不了就报错」10-21 还没定。
+
 ## 5. 未做 / 已知缺口
 
 - kiro 搜索回合是**整轮缓冲**：带搜索工具的请求首字延迟等于整轮耗时（简单问题 6~30s，多次搜索 90s+，期间 25s 发一次 ping）。
   下一步是最后一轮逐字流式（[[kiro-rs-ops]] 搜索回合一节）。
-- DeepSeek 不搜（见 §3）。
+- DeepSeek flash 不搜（见 §3）；要联网就得在客户端侧接搜索工具，或用 v4-pro。
 - MCP 扣不扣 credit 缺阳性对照：在闲置号上发一条普通对话，等 10min 看读数涨不涨。
+- grok multi-agent 搜索依赖 sub2api 池：10-21 两次塌到 1 条腿（14:50 / 18:14），14 和杭州同时 503 或落 flash。
+  池子薄时先 `sub2api-grok-onboard.py health` 看真腿数（从 Mac 跑设 `S2A_REMOTE_DIR=<临时目录>`，否则会覆盖 198 cron 副本）。
+- hermestest-14 插件有 30s 硬超时，multi-agent 重查询常超 30s ⇒ 198 success、客户端超时。要改得动实例配置，用户 10-14 定过不改 pod。

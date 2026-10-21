@@ -182,6 +182,13 @@ curl -s -X POST http://127.0.0.1:4000/key/delete \
 - `/opt/llm-gateway` **不是 git 仓**，机上脚本只有一份。权威副本在本仓 `scripts/`，
   两边改动要自己对齐（判据 = `sha256sum` 逐字相同）。
 - 杭州库里时间**全是 UTC**，机器本地 CST(+8)。直接当本地时间读会把「刚刚」读成「8 小时前没流量」。
+- 杭州 gw 是 **litellm 1.101.0**（`docker.1ms.run/litellm/litellm:main-stable`，09-23 拉的），**容器运行时是 nerdctl**（机上没有 docker）；
+  `config.yaml` 里 `request_timeout: 10`（10-15 调的，全局）、`cache: true`（redis）。
+  经它转发到 198 的长请求 / 非标准回包形状都会在这一跳出事 —— websearch 的完整故障链和测法见
+  skill [[hermestest-web-search-provider]] §7。
+- 杭州机够不到 198 内网 NodePort，只能走公网 `https://cc.auto-link.com.cn/pro/v1`；往机上送文件用
+  `jms ssh vllm "bash -s"` 的 stdin（`jms scp` 会 `Permission denied`）。
+- 杭州 SpendLogs **只记成功、`proxy_server_request` 为空**，看请求形状要去 198 按 `carher-hangzhou` 的 `api_key` 查。
 
 ## 配套
 

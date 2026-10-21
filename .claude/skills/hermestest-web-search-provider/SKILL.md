@@ -146,9 +146,67 @@ perplexity: {
 实例 14 09-23 的闭环样本见记忆
 `project_her14_perplexity_via_198_litellm_2026_09_23`。
 
+## 6. DeepSeek 搜索（官方插件，截至 10-20 未发版）
+
+OpenClaw 官方文档已写 DeepSeek web_search（docs.openclaw.ai/providers/deepseek#web-search），
+实现在 GitHub `extensions/deepseek/web-search-provider.runtime.ts`（10-17 合入 main，#175729）：
+直接调 `https://api.deepseek.com/v1/tools/search`，返回标题/链接/摘要/日期给主模型读，**不额外调大模型**。
+
+```json5
+tools: { web: { search: { provider: "deepseek" } } },
+plugins: { entries: { deepseek: { config: { webSearch: { apiKey: "<DeepSeek key>" } } } } },
+```
+
+- 🔴 地址写死 api.deepseek.com，**不读 baseUrl ⇒ 不能经 198**，实例里得放真 DeepSeek key。
+- 🔴 npm `@openclaw/deepseek-provider` latest `2026.10.5`、beta `2026.10.10-beta.2` 的 manifest **都还没有** `webSearchProviders`
+  （判据：`npm pack` 后看 `openclaw.plugin.json#contracts`，别信文档）。插件 `pluginApi>=2026.10.x`，14 是 2026.8.1 ⇒ 要等发版 + 升实例。
+- 那之前别自己在 198 造「搜索+flash 总结」转接——就是在重写这个插件（10-20 被用户批「闭门造车」）。
+- DeepSeek 模型本身能不能搜见 [[litellm-198-web-search]] §3：flash 不能，只有 v4-pro。
+
+## 7. 杭州 bot 也用同一套映射：比 14 多一跳，问题全在那一跳（10-21）
+
+杭州 bot 的 websearch 链路是：bot → **杭州 gw**（`vllm` 47.96.23.21，litellm **1.101.0**，compose 非 K8s）
+→ 198（key `carher-hangzhou`）→ per-key alias → `sa-grok-4.20-multi-agent`。
+14 是 bot 直连 198，所以 **14 通了，杭州不一定通**。🔴 不要推翻映射方案，对着 14 逐跳比，只查多出来的那一跳。
+
+| 层 | 症状 | 真因 / 修法 |
+|---|---|---|
+| 198 key | 401 `insufficient_quota` → 进冷却后 429 | 10-14 的 grok alias 只加在 13/14/75，`carher-hangzhou` 没有，请求直打 Perplexity。补 alias：`litellm-198-key-allowlist.py --prefix carher-hangzhou --only carher-hangzhou --alias perplexity-sonar=… --alias perplexity-sonar-search=…`（🔴 `--prefix` 必须给 `carher-hangzhou`，`carher-` 也行但别漏） |
+| 杭州 gw 超时 | 408，`timeout value=10.0` | 杭州 `config.yaml` `request_timeout: 10`（10-15 router-tune 调的，全局）。只改两行 perplexity 模型：杭州 DB `litellm_params ||= {"timeout":60}`，不动全局 |
+| 杭州 gw 解析 | 500 `Invalid response object` / `annotations.N.url_citation: Input should be a valid dictionary` | 198 chat→Responses 桥把 annotation **平铺**（`{type,url,title,…}`）；杭州 openai SDK 解出 `url_citation=None`，1.101.0 `Message` 校验失败。198 callback `chat_annotation_nest` 补嵌套 `url_citation:{…}`（平铺字段保留，14 插件两种都认）。10-21 三车道之 gray/prod 已上 |
+| 杭州 gw 缓存 | 4ms 回 200、答「尚未公布」 | 杭州 `cache: true`（redis）吃到修好前的旧答案。测试题必须带 nonce；真实用户换个问法就不命中 |
+| 198 兜底 | 200 但 ann=0、答「尚未公布」 | multi-agent 503 后走全局兜底 `sa-grok-4.20-multi-agent → deepseek-v4.1-flash`，flash 不搜。看 SpendLogs `model_group` 是不是 flash |
+| grok 池 | 503 `Service temporarily unavailable`，~30s | sub2api 池只剩 1 条腿在服务（`sub2api-grok-onboard.py health`：`phase=routing account_id=NULL` 成千上万）⇒ 加号。**这条 14 和杭州同时挂** |
+
+### 杭州侧怎么测才算数
+
+- 🔴 **验解析修复别用 `Message(...)` 直接构造**：平铺形能过（假绿）。要走杭州真路径：
+  openai SDK `construct_type(type_=ChatCompletion, value=raw)` → litellm `convert_to_model_response_object`，
+  在 `llm-gateway-litellm-1` 容器里用 `/app/.venv/bin/python` 跑。
+- 杭州机够不到 198 内网 NodePort（30402/30405 都 000），走公网 `https://cc.auto-link.com.cn/pro/v1`。
+  对比 gray/prod 只能在 198 上用 `carher-hangzhou` 明文打 127.0.0.1:30405 / 30402 抓原始回包，再把回包 base64 走 `jms ssh vllm "bash -s"` 的 stdin 送进杭州容器解析
+  （🔴 `jms scp` 会 `Permission denied`）。
+- 明文 key 只在杭州 `/opt/llm-gateway/.env` 的 `REMOTE_LITELLM_API_KEY`，取用后 sha256 前 8 位对 `aa820a93`，用完删。
+- 端到端：杭州机 `curl 127.0.0.1:4000/v1/chat/completions`（master key），两个名字 × 3~4 道**训练截止后**的新题，每题带 nonce；
+  判据 = 200 + `annotations` 非空 + 答对。ann=0 的那发去 198 SpendLogs 看是不是落了 flash。
+- 杭州容器日志判解析回归：`nerdctl logs -t --since 30m llm-gateway-litellm-1 | grep _handle_llm_api_exception | grep -c 'Invalid response object'`。
+- 杭州 SpendLogs **只记成功、`proxy_server_request` 是空的**，看不出请求形状 ⇒ 请求形状只能去 198 SpendLogs 按 `api_key` 看。
+- 198 SpendLogs 里 `carher-hangzhou` 的 perplexity 名流量 ~80% 是杭州 gw 健康检查（`Hey how's it going?` / `What's 1 + 1?`，`max_tokens:16`），
+  算真实搜索量和成本前先按最后一条 message 排除这两句。
+
+### 量具 L2 红了先看哪里（14 侧）
+
+`hermestest-web-search-verify.py` 10-21 起 L2 会把插件报错原文打出来：
+- `req: xxxxxxxx` ⇒ 网关报错，`cli-anything-litellm db req <id>` 读 198 原文，多半是 grok 池 503。
+- `fetch-timeout … 30000ms` ⇒ 插件 30s 硬超时，198 那条可能已经 success（multi-agent 重查询 30s+ 常见），换短题再判。
+
 ## 相关
 
-- 量具脚本：`scripts/hermestest-web-search-verify.py`
+- 量具脚本：`scripts/hermestest-web-search-verify.py`；DeepSeek 直连探针 `scripts/litellm-198-deepseek-search-probe.sh`
+- 198 回包形状修复：`k8s/litellm-callbacks/chat_annotation_nest.py`（加 / 换走 `scripts/litellm-198-lane-callback-add.py`）
+- 杭州网关基本面：skill [[litellm-her-key-from-template]]（compose、`.env`、UTC 时间、key 形状）
+- grok 池加号 / 体检：skill [[sub2api-grok-ops]]、`scripts/grok-onboard/sub2api-grok-onboard.py health`（从 Mac 跑设 `S2A_REMOTE_DIR=<临时目录>`）
+- 改 198 映射：`scripts/litellm-198-key-allowlist.py`（skill [[litellm-198-key-allowlist]]）
 - `carher-instance-config-override` —— K8s 那套形状（`${ENV}` 语义相反）
 - `her-public-model-name` / `add-litellm-model` —— 198 侧建组、key 白名单
 - `carher-her-reply-failure-triage` —— 实例不回消息时的 WS 车道判别

@@ -75,7 +75,7 @@ docker logs $C 2>&1 | grep -F 'config hot reload applied' | tail -5
 docker logs $C 2>&1 | grep -F 'config reload skipped' | tail -3
 
 echo "{MARK}L2"
-$X timeout {a.timeout} openclaw infer web search --query {json.dumps(a.query)} 2>&1 | grep -E '^\\{{"result"' | tail -1
+$X timeout {a.timeout} openclaw infer web search --query {json.dumps(a.query)} 2>&1 | grep -v '^\\[config\\] warnings' | tail -5
 
 echo "{MARK}L3_STATE"
 docker inspect -f 'running={{{{.State.Running}}}} restarts={{{{.RestartCount}}}} health={{{{if .State.Health}}}}{{{{.State.Health.Status}}}}{{{{else}}}}none{{{{end}}}}' $C 2>&1
@@ -233,22 +233,43 @@ def main() -> int:
     if a.max_layer >= 2:
         raw = sec.get("L2", "").strip()
         got = {}
+        # 只取 {"result" 那一行；其余行是插件报错原文（503 req id / 30s fetch-timeout），
+        # 10-21 前这里 grep 掉了它们，L2 红时只剩「（空）」，每次都要再手动跑一遍才知道为什么
+        result_lines = [l for l in raw.splitlines() if l.startswith('{"result"')]
+        err_text = "\n".join(l for l in raw.splitlines() if not l.startswith('{"result"')).strip()
         try:
-            got = json.loads(raw).get("result", {})
+            got = json.loads(result_lines[-1]).get("result", {}) if result_lines else {}
         except Exception:
             pass
         body = (got.get("content") or "")
+        hits = [h for h in (a.expect_hit or "").split(",") if h]
+        answered = (not hits) or any(h in body for h in hits)
         ok = (got.get("provider") == a.expect_provider
-              and got.get("model") == a.expect_model and len(body) > 40)
+              and got.get("model") == a.expect_model and len(body) > 40 and answered)
         res["L2"] = {"ok": ok, "provider": got.get("provider"), "model": got.get("model"),
                      "tookMs": got.get("tookMs"), "content_len": len(body),
-                     "citations": len(got.get("citations") or [])}
+                     "citations": len(got.get("citations") or []),
+                     "expect_hit": hits, "answered": answered}
         print(f"[L2] {'✓' if ok else '✗'} provider={got.get('provider')} "
-              f"model={got.get('model')} tookMs={got.get('tookMs')} 正文={len(body)}字")
+              f"model={got.get('model')} tookMs={got.get('tookMs')} 正文={len(body)}字"
+              + (f" 命中={answered}" if hits else ""))
+        if got and got.get("model") != a.expect_model:
+            print(f"     ⚠️ model={got.get('model')} ≠ 期望 {a.expect_model} —— 先确认实例配的是哪个名字，"
+                  "再决定是改期望还是真错了")
+        if got and hits and not answered:
+            print(f"     ✗ 正文里没有 {hits} 任一 ⇒ 很可能没真搜（上游答的是训练数据）。"
+                  "200 + 有字数 ≠ 搜了")
         if not ok and not got:
-            print(f"     原样输出：{raw[:300] or '（空）'}")
-            print("     ⚠️ 空输出先查调用形状：是 `infer web search --query <文本>`，"
-                  "裸位置参数会报 Missing required option 并 exit 0（假绿）")
+            print(f"     原样输出：{err_text[:400] or '（空）'}")
+            if m := re.search(r"req: ([0-9a-f]{8})", err_text):
+                print(f"     ⇒ 网关报错，先读 198 原文：cli-anything-litellm db req {m.group(1)}"
+                      "（多半是映射目标组 503，不是插件或配置的问题）")
+            elif "fetch-timeout" in err_text or "timed out" in err_text:
+                print("     ⇒ 插件 30s 硬超时（fetchWithSsrFGuard 30000ms）。198 那条可能已经 success，"
+                      "去 SpendLogs 看耗时；multi-agent 重查询常 30s+，换个短题再判")
+            else:
+                print("     ⚠️ 空输出先查调用形状：是 `infer web search --query <文本>`，"
+                      "裸位置参数会报 Missing required option 并 exit 0（假绿）")
         if ok:
             print("     ↑ 这一层过了才说明 ${VAR} 插值成功 —— "
                   "config get 会把 secret 打成 __OPENCLAW_REDACTED__，验不了插值")

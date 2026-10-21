@@ -81,6 +81,10 @@ python3 $S --restore ~/<M>-full-<ts>.json --apply               # ④ 回滚(mod
 🔴 **前缀 ≠ 意图集合**：198 `--prefix carher-` 扫出 237 把，其中 `carher-hangzhou`（杭州 gw 上游凭据）
 和 09-28 的测试 key（`*probe*`/`*iso*`/`*slow8*`/`*landing8*`）不该动。给「全部 her」写就先导出精确名单再 `--only-file`
 （导法见 skill `her-public-model-name`「198 的三处与阿里云不同」）。
+🔴 **反过来，给一把实例 key 换后端（alias）时，要问「同一个能力还有谁在用」**：10-14 把 perplexity → grok 只加在
+`carher-13/14/75`，漏了 `carher-hangzhou`（杭州全部 bot 的上游，perplexity 名真实流量最大的那把），杭州 7 天 401 无人发现。
+判据：`SpendLogs` 按 `proxy_server_request->>'model'` 看这个名字近 7 天都有哪些 `api_key` 在打，每一把都要有映射或明确不管。
+只改一把时 `--only <alias>` 也要配一个能覆盖它的 `--prefix`（`--prefix carher-hangzhou --only carher-hangzhou`），不然报 `not in scope` 拒跑。
 
 验收另有一支尺子，**不要手搓 SQL**（手搓极易漏掉 blocked，见下）：
 

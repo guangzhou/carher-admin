@@ -94,7 +94,17 @@ def fetch_input_limits(key: str, base_url: str) -> dict[str, int]:
     return limits
 
 
-def find_codex() -> str | None:
+def codex_candidates() -> list[str]:
+    """本机所有 codex 候选,按优先级。10-21 guozhenhua:先查到了老的 /opt/homebrew 版(没有 debug models)
+    ⇒ 同步失败。⇒ 一键装的 ~/.carher-npm-global 排第一,load_templates 失败就换下一个。与 Node 版一致。"""
+    out: list[str] = []
+
+    def add(c):
+        if c and Path(c).exists() and c not in out:
+            out.append(c)
+
+    for pre in (Path.home() / ".carher-npm-global" / "bin" / "codex",):
+        add(str(pre))
     appdata = os.environ.get("APPDATA")
     if appdata:  # Windows npm 装的：优先真二进制，绕开 codex.cmd 这层 cmd 转义
         npm = Path(appdata) / "npm" / "node_modules" / "@openai"
@@ -103,7 +113,7 @@ def find_codex() -> str | None:
         except OSError:
             hit = None
         if hit:
-            return str(hit)
+            add(str(hit))
     candidates = [
         shutil.which("codex"),
         "/Applications/Codex.app/Contents/Resources/codex",
@@ -115,8 +125,7 @@ def find_codex() -> str | None:
     if local:  # Windows App 常见位置
         candidates += [str(Path(local) / "Programs" / "codex" / "codex.exe")]
     for c in candidates:
-        if c and Path(c).exists():
-            return c
+        add(c)
     # Windows 只装了 Desktop App（msix）时，codex.exe 在 App 包目录里
     for root in (os.environ.get("ProgramFiles"), local):
         if not root:
@@ -127,8 +136,8 @@ def find_codex() -> str | None:
             except OSError:  # WindowsApps 目录可能没有列目录权限
                 hit = None
             if hit:
-                return str(hit)
-    return None
+                add(str(hit))
+    return out
 
 
 def run_codex(codex: str, *args: str) -> subprocess.CompletedProcess:
@@ -138,14 +147,24 @@ def run_codex(codex: str, *args: str) -> subprocess.CompletedProcess:
                           encoding="utf-8", errors="replace", timeout=60, env=env)
 
 
-def load_templates(codex: str | None, current: Path) -> list[dict]:
-    if codex:
-        r = run_codex(codex, "--bundled")
+def load_templates(cands: list[str], current: Path) -> tuple[str | None, list[dict]]:
+    """依次试候选,第一个能吐出自带目录的就用它(也用它校验新目录)。"""
+    why = []
+    for c in cands:
+        r = run_codex(c, "--bundled")
         if r.returncode == 0:
-            return json.loads(r.stdout)["models"]
-        log(f"codex --bundled 失败，改用现有目录当模板：{r.stderr.strip()[:200]}")
+            try:
+                return c, json.loads(r.stdout)["models"]
+            except (ValueError, KeyError):
+                why.append(f"{c}:输出不是 JSON")
+                continue
+        why.append(f"{c}:{(r.stderr.strip().splitlines() or [''])[0][:120]}")
+    if why:
+        log(f"这些 codex 拿不到自带目录(版本太老?):{' | '.join(why)}")
     if current.exists():
-        return json.loads(current.read_text(encoding="utf-8"))["models"]
+        return None, json.loads(current.read_text(encoding="utf-8"))["models"]
+    if cands:
+        raise RuntimeError("本机的 codex 都太老(没有 debug models),也没有现有目录可当模板:重跑一次一键配置装新版")
     raise RuntimeError("找不到 codex，也没有现有目录可当模板")
 
 
@@ -239,8 +258,8 @@ def main() -> int:
 
     config_text = CONFIG.read_text(encoding="utf-8")
     target = catalog_path_from_config(config_text) or DEFAULT_CATALOG
-    codex = find_codex()
-    catalog = build_catalog(ids, load_templates(codex, target), fetch_input_limits(key, base_url))
+    codex, templates = load_templates(codex_candidates(), target)
+    catalog = build_catalog(ids, templates, fetch_input_limits(key, base_url))
     try:
         before = [m["slug"] for m in json.loads(target.read_text(encoding="utf-8"))["models"] if m.get("visibility") == "list"]
     except (OSError, ValueError, KeyError, TypeError):

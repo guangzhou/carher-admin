@@ -41,6 +41,15 @@ else
   yel "终端里找不到 codex:关掉终端新开一个;还不行就重新跑一次 codex-mac.command"
 fi
 if command -v node >/dev/null 2>&1; then P "node    : $(node --version 2>/dev/null)"; else P "node    : 没找到"; fi
+# 10-21 guozhenhua:机器上还有一份老 codex(没有 debug models),同步脚本抓到它 ⇒ 模型列表同步失败。把每一份都列出来
+for cj in /opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js /usr/local/lib/node_modules/@openai/codex/bin/codex.js \
+          "$HOME/.carher-npm-global/lib/node_modules/@openai/codex/bin/codex.js"; do
+  [ -f "$cj" ] || continue
+  CV=$(node "$cj" --version 2>/dev/null | head -n1)
+  if node "$cj" debug models --bundled >/dev/null 2>&1; then P "另一份 codex: ${cj%/bin/codex.js}  ${CV}"
+  else P "另一份 codex: ${cj%/bin/codex.js}  ${CV}(太老,没有 debug models)"
+    yel "机器上有一份老 codex(${CV:-版本未知}),旧版同步脚本会抓到它导致同步失败:下载最新的 codex-mac.command 重跑一次"; fi
+done
 grep -ls '>>> carher-codex >>>' "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" 2>/dev/null | sed 's/^/PATH 块 : /'
 
 P ""; P "--- 2) 桌面 App ---"

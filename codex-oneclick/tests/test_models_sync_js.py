@@ -134,3 +134,37 @@ def test_installers_write_refresh_block():
     for f, enc in (("install-mac.sh", "utf-8"), ("install-windows.ps1", "utf-8-sig")):
         t = (SRC / f).read_text(encoding=enc)
         assert "CARHER-REFRESH-BEGIN" in t and "## 刷模型" in t, f
+
+
+def test_old_codex_first_falls_back_to_working_one(tmp_path):
+    """10-21 guozhenhua:老 codex(没有 debug models)被先选中 ⇒ 同步失败「找不到 codex,也没有现有目录可当模板」。
+    现在:一键装的 ~/.carher-npm-global/lib 排第一;前面的调用失败就换下一个。用两个假 codex.js 复现。"""
+    import os
+    home = tmp_path / "home"
+
+    def fake(prefix, ok):
+        d = prefix / "node_modules" / "@openai" / "codex" / "bin"
+        d.mkdir(parents=True)
+        body = (f"process.stdout.write(JSON.stringify({{models:{json.dumps(TEMPLATES)}}}))" if ok
+                else "process.stderr.write(\"error: unrecognized subcommand 'models'\\n\");process.exit(2)")
+        (d / "codex.js").write_text(body)
+
+    sysp = tmp_path / "sys"
+    fake(sysp, ok=False)                                  # 系统里的老版本
+
+    def run(extra=""):
+        code = (f"const m=require({json.dumps(str(SRC / 'carher_models_sync.js'))});"
+                "const c=m.codexCandidates();let r;try{r=m.loadTemplates(c,'/nonexistent');r={ok:1,n:r.models.length,who:r.codex[1][0]}}"
+                "catch(e){r={ok:0,err:e.message}};process.stdout.write('\\n'+JSON.stringify({n:c.length,r})+'\\n')")
+        import shutil
+        out = subprocess.run([shutil.which("node"), "-e", code], capture_output=True, text=True, check=True,
+                             env=dict(os.environ, HOME=str(home), CODEX_HOME=str(tmp_path / "ch"), PATH="/usr/bin:/bin",
+                                      CARHER_CODEX_SYS_PREFIXES=str(sysp)))
+        return json.loads(out.stdout.rstrip().splitlines()[-1])
+
+    only_old = run()
+    assert only_old["r"]["ok"] == 0 and "太老" in only_old["r"]["err"], only_old
+    fake(home / ".carher-npm-global" / "lib", ok=True)     # 一键装的新版本
+    both = run()
+    assert both["n"] == 2 and both["r"]["ok"] == 1 and both["r"]["n"] == len(TEMPLATES), both
+    assert ".carher-npm-global" in both["r"]["who"]

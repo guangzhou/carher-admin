@@ -68,24 +68,29 @@ async function fetchInputLimits(key, base) {
   return limits;
 }
 
-/* 返回 [可执行文件, 前置参数]。npm 装的 codex 是 bin/codex.js,用当前 node 直接跑它:
-   🔴 Windows 上 spawn codex.cmd 不带 shell 会被 Node 拒(EINVAL),带 shell 又要过 cmd 的引号转义。 */
-function findCodex() {
-  if (process.env.CARHER_CODEX === "none") return null;   // 测试用
+/* 本机所有 codex 候选,按优先级:[可执行文件, 前置参数]。npm 装的 codex 是 bin/codex.js,用当前 node 直接跑它:
+   🔴 Windows 上 spawn codex.cmd 不带 shell 会被 Node 拒(EINVAL),带 shell 又要过 cmd 的引号转义。
+   🔴 10-21 guozhenhua:一键装的 0.163 在 ~/.carher-npm-global/lib,但原来先查 /opt/homebrew/lib ⇒ 抓到他以前
+      自己装的老 codex(没有 `debug models` 子命令)⇒ 模板拿不到 ⇒ 同步失败,下拉里只有自带 GPT。
+      ⇒ 一键装的那份排第一;调用失败就换下一个(loadTemplates)。 */
+function codexCandidates() {
+  if (process.env.CARHER_CODEX === "none") return [];   // 测试用
   const js = (prefix) => path.join(prefix, "node_modules", "@openai", "codex", "bin", "codex.js");
-  const prefixes = [path.join(os.homedir(), ".carher-npm-global")];
+  const out = [], seen = new Set();
+  const add = (c) => { const k = c[1][0] || c[0]; if (!seen.has(k)) { seen.add(k); out.push(c); } };
+  const prefixes = [path.join(os.homedir(), ".carher-npm-global", "lib"), path.join(os.homedir(), ".carher-npm-global")];
   if (process.env.APPDATA) prefixes.push(path.join(process.env.APPDATA, "npm"));
-  prefixes.push("/opt/homebrew/lib", "/usr/local/lib", path.join(os.homedir(), ".carher-npm-global", "lib"));
-  for (const p of prefixes) if (fs.existsSync(js(p))) return [process.execPath, [js(p)]];
+  prefixes.push(...(process.env.CARHER_CODEX_SYS_PREFIXES ? process.env.CARHER_CODEX_SYS_PREFIXES.split(path.delimiter) : ["/opt/homebrew/lib", "/usr/local/lib"]));   // 环境变量仅测试用
+  for (const p of prefixes) if (fs.existsSync(js(p))) add([process.execPath, [fs.realpathSync(js(p))]]);
   // PATH 里的 codex:posix 上多半是指向 codex.js 的软链
   const which = process.platform === "win32" ? null : cp.spawnSync("sh", ["-c", "command -v codex"], { encoding: "utf8" }).stdout.trim();
   if (which) {
     let real = which; try { real = fs.realpathSync(which); } catch (e) {}
-    return real.endsWith(".js") ? [process.execPath, [real]] : [real, []];
+    add(real.endsWith(".js") ? [process.execPath, [real]] : [real, []]);
   }
   for (const c of ["/Applications/Codex.app/Contents/Resources/codex", "/Applications/OpenAI Codex.app/Contents/Resources/codex"])
-    if (fs.existsSync(c)) return [c, []];
-  return null;
+    if (fs.existsSync(c)) add([c, []]);
+  return out;
 }
 
 function runCodex(codex, args) {
@@ -95,14 +100,20 @@ function runCodex(codex, args) {
   });
 }
 
-function loadTemplates(codex, current) {
-  if (codex) {
-    const r = runCodex(codex, ["--bundled"]);
-    if (r.status === 0) return JSON.parse(r.stdout).models;
-    log(`codex --bundled 失败，改用现有目录当模板：${String(r.stderr || r.error || "").trim().slice(0, 200)}`);
+/* 依次试候选,第一个能吐出自带目录的就用它(也用它校验新目录)。返回 {codex, models}。 */
+function loadTemplates(cands, current) {
+  const why = [];
+  for (const c of cands) {
+    const r = runCodex(c, ["--bundled"]);
+    if (r.status === 0) {
+      try { return { codex: c, models: JSON.parse(r.stdout).models }; } catch (e) { why.push(`${c[1][0] || c[0]}:输出不是 JSON`); continue; }
+    }
+    why.push(`${c[1][0] || c[0]}:${String(r.stderr || r.error || "").trim().split("\n")[0].slice(0, 120)}`);
   }
-  if (fs.existsSync(current)) return JSON.parse(fs.readFileSync(current, "utf8")).models;
-  throw new Error("找不到 codex，也没有现有目录可当模板");
+  if (why.length) log(`这些 codex 拿不到自带目录(版本太老?):${why.join(" | ")}`);
+  if (fs.existsSync(current)) return { codex: null, models: JSON.parse(fs.readFileSync(current, "utf8")).models };
+  throw new Error(cands.length ? "本机的 codex 都太老(没有 debug models),也没有现有目录可当模板:重跑一次 codex-mac.command 装新版"
+                               : "找不到 codex，也没有现有目录可当模板");
 }
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -183,8 +194,9 @@ async function main() {
   if (!ids.length) throw new Error("网关没返回任何模型，保持现有目录不变");
   const configText = fs.readFileSync(CONFIG, "utf8");
   const target = catalogPathFromConfig(configText) || DEFAULT_CATALOG;
-  const codex = findCodex();
-  const catalog = buildCatalog(ids, loadTemplates(codex, target), await fetchInputLimits(key, base));
+  const tpl = loadTemplates(codexCandidates(), target);
+  const codex = tpl.codex;
+  const catalog = buildCatalog(ids, tpl.models, await fetchInputLimits(key, base));
   let before = [];
   try { before = JSON.parse(fs.readFileSync(target, "utf8")).models.filter((m) => m.visibility === "list").map((m) => m.slug); } catch (e) {}
 
@@ -220,7 +232,7 @@ async function main() {
   return 0;
 }
 
-module.exports = { buildCatalog, catalogPathFromConfig, ensureConfigLine, fixDefaultModel, ourProviderName };
+module.exports = { buildCatalog, catalogPathFromConfig, ensureConfigLine, fixDefaultModel, ourProviderName, codexCandidates, loadTemplates };
 
 if (require.main === module) {
   try { if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 512 * 1024) fs.writeFileSync(LOG_FILE, ""); } catch (e) {}

@@ -1,0 +1,882 @@
+diff -ruN a/admin-ui/src/components/credential-card.tsx b/admin-ui/src/components/credential-card.tsx
+--- a/admin-ui/src/components/credential-card.tsx	2026-10-18 02:29:07
++++ b/admin-ui/src/components/credential-card.tsx	2026-10-22 12:16:37
+@@ -250,7 +250,7 @@
+               <span className="font-medium">
+                 {loadingBalance ? (
+                   <Loader2 className="inline w-3 h-3 animate-spin" />
+-                ) : balance?.subscriptionTitle || '未知'}
++                ) : balance?.subscriptionTitle || credential.subscriptionTitle || '未知'}
+               </span>
+             </div>
+             <div>
+diff -ruN a/admin-ui/src/components/credential-filters.tsx b/admin-ui/src/components/credential-filters.tsx
+--- a/admin-ui/src/components/credential-filters.tsx	2026-10-18 02:29:07
++++ b/admin-ui/src/components/credential-filters.tsx	2026-10-22 12:05:55
+@@ -11,6 +11,8 @@
+   authMethod: string
+   priority: string
+   domain: string
++  // 订阅等级原文（如 'KIRO PRO+'），'' = 全部，'(未知)' = 没拿到等级
++  tier: string
+   onlyFailures: boolean
+ }
+ 
+@@ -20,11 +22,29 @@
+   authMethod: '',
+   priority: '',
+   domain: '',
++  tier: '',
+   onlyFailures: false,
+ }
+ 
+ const NO_EMAIL = '(无邮箱)'
++const NO_TIER = '(未知)'
+ 
++// 下拉里按档位高低排；没见过的新档位排在已知档位之后
++const TIER_ORDER = ['KIRO POWER', 'KIRO PRO MAX', 'KIRO PRO+', 'KIRO PRO', 'KIRO STUDENT', 'KIRO FREE']
++
++function tierOf(c: CredentialStatusItem): string {
++  return c.subscriptionTitle?.trim() || NO_TIER
++}
++
++function tierLabel(t: string): string {
++  return t === NO_TIER ? t : t.replace(/^KIRO\s+/i, '')
++}
++
++function tierRank(t: string): number {
++  const i = TIER_ORDER.indexOf(t.toUpperCase())
++  return i >= 0 ? i : t === NO_TIER ? TIER_ORDER.length + 1 : TIER_ORDER.length
++}
++
+ const REASON_LABELS: Record<string, string> = {
+   Manual: '手动禁用',
+   QuotaExceeded: '额度用尽',
+@@ -79,6 +99,7 @@
+     (!f.authMethod || (c.authMethod || '') === f.authMethod) &&
+     (!f.priority || String(c.priority) === f.priority) &&
+     (!f.domain || emailDomain(c) === f.domain) &&
++    (!f.tier || tierOf(c) === f.tier) &&
+     (!f.onlyFailures || hasFailures(c))
+   )
+ }
+@@ -90,6 +111,7 @@
+     f.authMethod !== '' ||
+     f.priority !== '' ||
+     f.domain !== '' ||
++    f.tier !== '' ||
+     f.onlyFailures
+   )
+ }
+@@ -124,6 +146,7 @@
+   const auths = countBy(credentials, c => c.authMethod || '')
+   const priorities = countBy(credentials, c => String(c.priority)).sort((a, b) => Number(a[0]) - Number(b[0]))
+   const domains = countBy(credentials, emailDomain)
++  const tiers = countBy(credentials, tierOf).sort((a, b) => tierRank(a[0]) - tierRank(b[0]) || a[0].localeCompare(b[0]))
+   const failureCount = credentials.filter(hasFailures).length
+   const active = isFilterActive(filters)
+ 
+@@ -173,6 +196,18 @@
+             {auths.map(([a, n]) => (
+               <option key={a || 'none'} value={a}>
+                 {AUTH_LABELS[a] || a || '未知'}（{n}）
++              </option>
++            ))}
++          </select>
++        </label>
++
++        <label className="flex items-center gap-1 text-sm text-muted-foreground">
++          账户等级
++          <select className={selectClass} value={filters.tier} onChange={e => set('tier', e.target.value)}>
++            <option value="">全部</option>
++            {tiers.map(([t, n]) => (
++              <option key={t} value={t}>
++                {tierLabel(t)}（{n}）
+               </option>
+             ))}
+           </select>
+diff -ruN a/admin-ui/src/components/dashboard.tsx b/admin-ui/src/components/dashboard.tsx
+--- a/admin-ui/src/components/dashboard.tsx	2026-10-22 10:32:01
++++ b/admin-ui/src/components/dashboard.tsx	2026-10-22 12:14:17
+@@ -10,11 +10,12 @@
+ import { CredentialFilters, EMPTY_FILTERS, filterCredentials, type CredentialFilterState } from '@/components/credential-filters'
+ import { BalanceDialog } from '@/components/balance-dialog'
+ import { WindowSettingsDialog } from '@/components/window-settings-dialog'
++import { ModeSwitchDialog, MODE_INFO, type LbMode } from '@/components/mode-switch-dialog'
+ import { AddCredentialDialog } from '@/components/add-credential-dialog'
+ import { BatchImportDialog } from '@/components/batch-import-dialog'
+ import { KamImportDialog } from '@/components/kam-import-dialog'
+ import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
+-import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
++import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode } from '@/hooks/use-credentials'
+ import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
+ import { extractErrorMessage } from '@/lib/utils'
+ import type { BalanceResponse } from '@/types/api'
+@@ -27,6 +28,7 @@
+   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
+   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
+   const [windowDialogOpen, setWindowDialogOpen] = useState(false)
++  const [modeDialogOpen, setModeDialogOpen] = useState(false)
+   const [addDialogOpen, setAddDialogOpen] = useState(false)
+   const [batchImportDialogOpen, setBatchImportDialogOpen] = useState(false)
+   const [kamImportDialogOpen, setKamImportDialogOpen] = useState(false)
+@@ -57,7 +59,6 @@
+   const { mutate: deleteCredential } = useDeleteCredential()
+   const { mutate: resetFailure } = useResetFailure()
+   const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
+-  const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
+ 
+   // 显示顺序：启用（当前在用置顶）→ 已禁用；组内按 lastUsedAt 倒序（最近用完/用过的在前），
+   // 从未使用的排组尾；其余保持后端的 priority 顺序（sort 是稳定的）。只影响显示，调度不变。
+@@ -527,24 +528,8 @@
+   }
+ 
+   // 切换负载均衡模式
+-  // 三态循环：优先级 → 小窗口(K 个号轮换) → 均衡负载 → 优先级
+-  const modeLabel = (m?: string) =>
+-    m === 'priority' ? '优先级模式' : m === 'window' ? '小窗口轮换' : '均衡负载'
+-  const handleToggleLoadBalancing = () => {
+-    const currentMode = loadBalancingData?.mode || 'priority'
+-    const newMode = currentMode === 'priority' ? 'window' : currentMode === 'window' ? 'balanced' : 'priority'
++  const modeLabel = (m?: string) => MODE_INFO[(m || 'priority') as LbMode]?.label || m || '未知'
+ 
+-    setLoadBalancingMode(newMode, {
+-      onSuccess: () => {
+-        const modeName = modeLabel(newMode)
+-        toast.success(`已切换到${modeName}`)
+-      },
+-      onError: (error) => {
+-        toast.error(`切换失败: ${extractErrorMessage(error)}`)
+-      }
+-    })
+-  }
+-
+   if (isLoading) {
+     return (
+       <div className="min-h-screen flex items-center justify-center bg-background">
+@@ -586,11 +571,11 @@
+             <Button
+               variant="outline"
+               size="sm"
+-              onClick={handleToggleLoadBalancing}
+-              disabled={isLoadingMode || isSettingMode}
+-              title="切换负载均衡模式"
++              onClick={() => setModeDialogOpen(true)}
++              disabled={isLoadingMode}
++              title="切换调度模式（会弹出确认）"
+             >
+-              {isLoadingMode ? '加载中...' : modeLabel(loadBalancingData?.mode)}
++              {isLoadingMode ? '加载中...' : `调度：${modeLabel(loadBalancingData?.mode)}`}
+             </Button>
+             <Button
+               variant="outline"
+@@ -814,6 +799,8 @@
+       />
+ 
+       <WindowSettingsDialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen} />
++
++      <ModeSwitchDialog open={modeDialogOpen} onOpenChange={setModeDialogOpen} />
+ 
+       {/* 添加凭据对话框 */}
+       <AddCredentialDialog
+diff -ruN a/admin-ui/src/components/mode-switch-dialog.tsx b/admin-ui/src/components/mode-switch-dialog.tsx
+--- a/admin-ui/src/components/mode-switch-dialog.tsx	1970-01-01 08:00:00
++++ b/admin-ui/src/components/mode-switch-dialog.tsx	2026-10-22 12:13:51
+@@ -0,0 +1,102 @@
++import { useEffect, useState } from 'react'
++import { toast } from 'sonner'
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from '@/components/ui/dialog'
++import { Button } from '@/components/ui/button'
++import { useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
++import { extractErrorMessage } from '@/lib/utils'
++
++export type LbMode = 'priority' | 'window' | 'balanced'
++
++export const MODE_INFO: Record<LbMode, { label: string; desc: string; warn?: string }> = {
++  priority: { label: '优先级模式', desc: '只用优先级最高的 1 个号，用完额度再换下一个。' },
++  window: {
++    label: '小窗口轮换',
++    desc: '只让优先级最前的几个号同时在线（数量在「窗口设置」里调），同一会话尽量固定同一个号；被限流就立刻换号，其余号冷备。',
++  },
++  balanced: {
++    label: '均衡负载',
++    desc: '全池所有启用的号一起分摊请求。',
++    warn: '全部号同时在线，一旦触发封号影响整池。',
++  },
++}
++
++interface ModeSwitchDialogProps {
++  open: boolean
++  onOpenChange: (open: boolean) => void
++}
++
++// 切换调度模式：先选、再确认。避免循环按钮连点把模式点过头。
++export function ModeSwitchDialog({ open, onOpenChange }: ModeSwitchDialogProps) {
++  const { data } = useLoadBalancingMode()
++  const { mutate, isPending } = useSetLoadBalancingMode()
++  const current = (data?.mode || 'priority') as LbMode
++  const [target, setTarget] = useState<LbMode>(current)
++
++  useEffect(() => {
++    if (open) setTarget(current)
++  }, [open, current])
++
++  const handleConfirm = () => {
++    if (target === current) return
++    mutate(target, {
++      onSuccess: () => {
++        toast.success(`已切换：${MODE_INFO[current].label} → ${MODE_INFO[target].label}`)
++        onOpenChange(false)
++      },
++      onError: (e) => toast.error(`切换失败: ${extractErrorMessage(e)}`),
++    })
++  }
++
++  return (
++    <Dialog open={open} onOpenChange={onOpenChange}>
++      <DialogContent className="sm:max-w-lg">
++        <DialogHeader>
++          <DialogTitle>切换调度模式</DialogTitle>
++          <DialogDescription>当前：{MODE_INFO[current].label}。立即对线上所有请求生效。</DialogDescription>
++        </DialogHeader>
++        <div className="space-y-2 py-2" role="radiogroup" aria-label="调度模式">
++          {(Object.keys(MODE_INFO) as LbMode[]).map((m) => (
++            <label
++              key={m}
++              className={`flex gap-3 rounded-md border p-3 cursor-pointer ${target === m ? 'border-primary bg-accent' : ''}`}
++            >
++              <input
++                type="radio"
++                name="lb-mode"
++                className="mt-1 accent-primary"
++                checked={target === m}
++                onChange={() => setTarget(m)}
++              />
++              <span className="space-y-1">
++                <span className="block text-sm font-medium">
++                  {MODE_INFO[m].label}
++                  {m === current && <span className="ml-2 text-xs text-muted-foreground">（当前）</span>}
++                </span>
++                <span className="block text-xs text-muted-foreground">{MODE_INFO[m].desc}</span>
++                {MODE_INFO[m].warn && <span className="block text-xs text-red-500">{MODE_INFO[m].warn}</span>}
++              </span>
++            </label>
++          ))}
++        </div>
++        {target !== current && (
++          <p className="text-sm" aria-live="polite">
++            将从 <b>{MODE_INFO[current].label}</b> 切换为 <b>{MODE_INFO[target].label}</b>
++          </p>
++        )}
++        <DialogFooter>
++          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
++          <Button onClick={handleConfirm} disabled={target === current || isPending}>
++            {isPending ? '切换中...' : '确认切换'}
++          </Button>
++        </DialogFooter>
++      </DialogContent>
++    </Dialog>
++  )
++}
+diff -ruN a/admin-ui/src/components/window-settings-dialog.tsx b/admin-ui/src/components/window-settings-dialog.tsx
+--- a/admin-ui/src/components/window-settings-dialog.tsx	2026-10-22 10:31:40
++++ b/admin-ui/src/components/window-settings-dialog.tsx	2026-10-22 12:14:17
+@@ -10,7 +10,8 @@
+ } from '@/components/ui/dialog'
+ import { Button } from '@/components/ui/button'
+ import { Input } from '@/components/ui/input'
+-import { useSetWindowSettings, useWindowSettings } from '@/hooks/use-credentials'
++import { useLoadBalancingMode, useSetWindowSettings, useWindowSettings } from '@/hooks/use-credentials'
++import { MODE_INFO, type LbMode } from '@/components/mode-switch-dialog'
+ import { extractErrorMessage } from '@/lib/utils'
+ 
+ interface WindowSettingsDialogProps {
+@@ -24,6 +25,8 @@
+ export function WindowSettingsDialog({ open, onOpenChange }: WindowSettingsDialogProps) {
+   const { data } = useWindowSettings()
+   const { mutate, isPending } = useSetWindowSettings()
++  const { data: lb } = useLoadBalancingMode()
++  const mode = (lb?.mode || 'priority') as LbMode
+   const [minK, setMinK] = useState('2')
+   const [maxK, setMaxK] = useState('3')
+   const [cooldown, setCooldown] = useState('60')
+@@ -69,6 +72,10 @@
+             只让优先级最前的几个号同时在线，其余号冷备。号被限流时冷却并立刻换号，冷却期间从后面补位，最多补到上限。保存后立即生效。
+           </DialogDescription>
+         </DialogHeader>
++        <p className={`text-sm rounded-md border px-3 py-2 ${mode === 'window' ? '' : 'border-amber-500 text-amber-700 dark:text-amber-400'}`}>
++          当前调度模式：<b>{MODE_INFO[mode]?.label || mode}</b>
++          {mode !== 'window' && '（这里的设置只在「小窗口轮换」模式下生效，切模式请点页头的「调度」按钮）'}
++        </p>
+         <div className="space-y-4 py-2">
+           <label className="block space-y-1">
+             <span className="text-sm font-medium">平时同时在线的号数</span>
+diff -ruN a/admin-ui/src/types/api.ts b/admin-ui/src/types/api.ts
+--- a/admin-ui/src/types/api.ts	2026-10-08 17:40:39
++++ b/admin-ui/src/types/api.ts	2026-10-22 12:05:46
+@@ -27,6 +27,7 @@
+   refreshFailureCount: number
+   disabledReason?: string
+   endpoint: string
++  subscriptionTitle?: string
+ }
+ 
+ // 余额响应
+diff -ruN a/src/admin/service.rs b/src/admin/service.rs
+--- a/src/admin/service.rs	2026-10-22 10:30:44
++++ b/src/admin/service.rs	2026-10-22 12:05:46
+@@ -87,6 +87,7 @@
+                 refresh_failure_count: entry.refresh_failure_count,
+                 disabled_reason: entry.disabled_reason,
+                 endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),
++                subscription_title: entry.subscription_title,
+             })
+             .collect();
+ 
+diff -ruN a/src/admin/types.rs b/src/admin/types.rs
+--- a/src/admin/types.rs	2026-10-08 17:40:39
++++ b/src/admin/types.rs	2026-10-22 12:05:46
+@@ -62,6 +62,9 @@
+     pub disabled_reason: Option<String>,
+     /// 端点名称（决定该凭据走哪套 Kiro API，已回退到默认端点）
+     pub endpoint: String,
++    /// 订阅等级（如 KIRO PRO+），未知时不返回
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub subscription_title: Option<String>,
+ }
+ 
+ // ============ 操作请求 ============
+diff -ruN a/src/anthropic/converter.rs b/src/anthropic/converter.rs
+--- a/src/anthropic/converter.rs	2026-10-18 02:29:07
++++ b/src/anthropic/converter.rs	2026-10-22 12:13:39
+@@ -213,8 +213,38 @@
+     pub conversation_state: ConversationState,
+     /// 工具名称映射（短名称 → 原始名称），仅当存在超长工具名时非空
+     pub tool_name_map: HashMap<String, String>,
++    /// 会话键（window 模式选号用，同一会话尽量落同一个号；见 [`session_key`]）
++    pub session_key: Option<String>,
+ }
+ 
++/// 会话键：同一段对话的每一轮请求应算出同一个值。
++///
++/// 1. Claude Code 在 `metadata.user_id` 里带 session UUID ⇒ 直接用（`sid:` 前缀）
++/// 2. 否则用「系统提示 + 第一条 user 消息」的 sha256（`anc:` 前缀）：
++///    多轮对话里这两段不变，后面的消息只是往后追加
++/// 3. 两者都没有 ⇒ None（按在途数挑号）
++pub fn session_key(req: &MessagesRequest) -> Option<String> {
++    if let Some(sid) = req
++        .metadata
++        .as_ref()
++        .and_then(|m| m.user_id.as_ref())
++        .and_then(|u| extract_session_id(u))
++    {
++        return Some(format!("sid:{}", sid));
++    }
++    let first_user = req.messages.iter().find(|m| m.role == "user")?;
++    let mut h = Sha256::new();
++    if let Some(sys) = &req.system {
++        for s in sys {
++            h.update(s.text.as_bytes());
++            h.update([0u8]);
++        }
++    }
++    h.update([1u8]);
++    h.update(first_user.content.to_string().as_bytes());
++    Some(format!("anc:{}", hex::encode(&h.finalize()[..12])))
++}
++
+ /// 转换错误
+ #[derive(Debug)]
+ pub enum ConversionError {
+@@ -419,6 +449,7 @@
+     Ok(ConversionResult {
+         conversation_state,
+         tool_name_map,
++        session_key: session_key(req),
+     })
+ }
+ 
+@@ -1653,6 +1684,49 @@
+         let user_id = "user_xxx_session_invalid-uuid";
+         let session_id = extract_session_id(user_id);
+         assert_eq!(session_id, None);
++    }
++
++    #[test]
++    fn test_session_key_prefers_claude_code_session_then_anchor() {
++        use super::super::types::{Message as AnthropicMessage, Metadata, SystemMessage};
++        let msg = |role: &str, text: &str| AnthropicMessage {
++            role: role.to_string(),
++            content: serde_json::json!(text),
++        };
++        let mk = |messages: Vec<AnthropicMessage>, system: Option<&str>, user_id: Option<&str>| MessagesRequest {
++            model: "claude-opus-5-5".to_string(),
++            max_tokens: 64,
++            messages,
++            stream: false,
++            system: system.map(|s| vec![SystemMessage { text: s.to_string() }]),
++            tools: None,
++            tool_choice: None,
++            thinking: None,
++            output_config: None,
++            metadata: user_id.map(|u| Metadata { user_id: Some(u.to_string()) }),
++        };
++        let sid = r#"{"device_id":"d","account_uuid":"","session_id":"8bb5523b-ec7c-4540-a9ca-beb6d79f1552"}"#;
++        assert_eq!(
++            session_key(&mk(vec![msg("user", "hi")], Some("sys"), Some(sid))).as_deref(),
++            Some("sid:8bb5523b-ec7c-4540-a9ca-beb6d79f1552")
++        );
++
++        // 无 session：同一段对话后续轮次（往后追加消息）算出同一个键
++        let turn1 = session_key(&mk(vec![msg("user", "写个排序")], Some("你是助手"), None)).unwrap();
++        let turn3 = session_key(&mk(
++            vec![msg("user", "写个排序"), msg("assistant", "好的"), msg("user", "改成降序")],
++            Some("你是助手"),
++            None,
++        ))
++        .unwrap();
++        assert!(turn1.starts_with("anc:"));
++        assert_eq!(turn1, turn3, "多轮对话键不变");
++        // 换了开场白或系统提示 ⇒ 不同会话
++        assert_ne!(turn1, session_key(&mk(vec![msg("user", "写个查找")], Some("你是助手"), None)).unwrap());
++        assert_ne!(turn1, session_key(&mk(vec![msg("user", "写个排序")], Some("别的提示"), None)).unwrap());
++        // convert_request 带出同一个键
++        let r = mk(vec![msg("user", "写个排序")], Some("你是助手"), None);
++        assert_eq!(convert_request(&r).unwrap().session_key, Some(turn1));
+     }
+ 
+     #[test]
+diff -ruN a/src/anthropic/handlers.rs b/src/anthropic/handlers.rs
+--- a/src/anthropic/handlers.rs	2026-10-18 02:29:07
++++ b/src/anthropic/handlers.rs	2026-10-22 12:12:51
+@@ -506,6 +506,7 @@
+         .unwrap_or(false);
+ 
+     let tool_name_map = conversion_result.tool_name_map;
++    let session_key = conversion_result.session_key;
+ 
+     if payload.stream {
+         // 流式响应
+@@ -516,12 +517,13 @@
+             input_tokens,
+             thinking_enabled,
+             tool_name_map,
++            session_key.as_deref(),
+         )
+         .await
+     } else {
+         // 非流式响应：仅在配置开启时提取 thinking 块
+         let extract_thinking = state.extract_thinking && thinking_enabled;
+-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, extract_thinking, tool_name_map).await
++        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, extract_thinking, tool_name_map, session_key.as_deref()).await
+     }
+ }
+ 
+@@ -533,9 +535,10 @@
+     input_tokens: i32,
+     thinking_enabled: bool,
+     tool_name_map: std::collections::HashMap<String, String>,
++    session_key: Option<&str>,
+ ) -> Response {
+     // 调用 Kiro API（支持多凭据故障转移）
+-    let response = match provider.call_api_stream(request_body).await {
++    let response = match provider.call_api_stream_for(request_body, session_key).await {
+         Ok(resp) => resp,
+         Err(e) => return map_provider_error(e),
+     };
+@@ -669,9 +672,10 @@
+     input_tokens: i32,
+     thinking_enabled: bool,
+     tool_name_map: std::collections::HashMap<String, String>,
++    session_key: Option<&str>,
+ ) -> Response {
+     // 调用 Kiro API（支持多凭据故障转移）
+-    let response = match provider.call_api(request_body).await {
++    let response = match provider.call_api_for(request_body, session_key).await {
+         Ok(resp) => resp,
+         Err(e) => return map_provider_error(e),
+     };
+@@ -1029,6 +1033,7 @@
+         .unwrap_or(false);
+ 
+     let tool_name_map = conversion_result.tool_name_map;
++    let session_key = conversion_result.session_key;
+ 
+     if payload.stream {
+         // 流式响应（缓冲模式）
+@@ -1039,12 +1044,13 @@
+             input_tokens,
+             thinking_enabled,
+             tool_name_map,
++            session_key.as_deref(),
+         )
+         .await
+     } else {
+         // 非流式响应：仅在配置开启时提取 thinking 块
+         let extract_thinking = state.extract_thinking && thinking_enabled;
+-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, extract_thinking, tool_name_map).await
++        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, extract_thinking, tool_name_map, session_key.as_deref()).await
+     }
+ }
+ 
+@@ -1059,9 +1065,10 @@
+     estimated_input_tokens: i32,
+     thinking_enabled: bool,
+     tool_name_map: std::collections::HashMap<String, String>,
++    session_key: Option<&str>,
+ ) -> Response {
+     // 调用 Kiro API（支持多凭据故障转移）
+-    let response = match provider.call_api_stream(request_body).await {
++    let response = match provider.call_api_stream_for(request_body, session_key).await {
+         Ok(resp) => resp,
+         Err(e) => return map_provider_error(e),
+     };
+diff -ruN a/src/anthropic/search_loop.rs b/src/anthropic/search_loop.rs
+--- a/src/anthropic/search_loop.rs	2026-10-18 02:29:07
++++ b/src/anthropic/search_loop.rs	2026-10-22 12:12:51
+@@ -105,7 +105,8 @@
+         Ok(x) => x,
+         Err(resp) => return resp,
+     };
+-    let first = match provider.call_api(&body).await {
++    let session_key = super::converter::session_key(&payload);
++    let first = match provider.call_api_for(&body, session_key.as_deref()).await {
+         Ok(resp) => resp,
+         Err(e) => return super::handlers::map_provider_error(e),
+     };
+@@ -259,7 +260,7 @@
+                     }
+                 };
+                 tool_name_map = map;
+-                match provider.call_api(&body).await {
++                match provider.call_api_for(&body, super::converter::session_key(&payload).as_deref()).await {
+                     Ok(r) => r,
+                     Err(e) => {
+                         tracing::warn!(round, "搜索回合续调上游失败: {}", e);
+diff -ruN a/src/kiro/provider.rs b/src/kiro/provider.rs
+--- a/src/kiro/provider.rs	2026-10-22 00:58:53
++++ b/src/kiro/provider.rs	2026-10-22 12:12:28
+@@ -112,14 +112,32 @@
+     ///
+     /// 支持多凭据故障转移（见 [`Self::call_api_with_retry`]）
+     pub async fn call_api(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+-        self.call_api_with_retry(request_body, false).await
++        self.call_api_with_retry(request_body, false, None).await
+     }
+ 
++    /// 发送非流式 API 请求，带会话键（window 模式下同一会话尽量落同一个号）
++    pub async fn call_api_for(
++        &self,
++        request_body: &str,
++        session_key: Option<&str>,
++    ) -> anyhow::Result<reqwest::Response> {
++        self.call_api_with_retry(request_body, false, session_key).await
++    }
++
+     /// 发送流式 API 请求
+     pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+-        self.call_api_with_retry(request_body, true).await
++        self.call_api_with_retry(request_body, true, None).await
+     }
+ 
++    /// 发送流式 API 请求，带会话键
++    pub async fn call_api_stream_for(
++        &self,
++        request_body: &str,
++        session_key: Option<&str>,
++    ) -> anyhow::Result<reqwest::Response> {
++        self.call_api_with_retry(request_body, true, session_key).await
++    }
++
+     /// 发送 MCP API 请求（WebSearch 等工具调用）
+     pub async fn call_mcp(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+         self.call_mcp_with_retry(request_body).await
+@@ -280,6 +298,7 @@
+         &self,
+         request_body: &str,
+         is_stream: bool,
++        session_key: Option<&str>,
+     ) -> anyhow::Result<reqwest::Response> {
+         let total_credentials = self.token_manager.total_count();
+         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
+@@ -292,7 +311,11 @@
+ 
+         for attempt in 0..max_retries {
+             // 获取调用上下文（绑定 index、credentials、token）
+-            let ctx = match self.token_manager.acquire_context(model.as_deref()).await {
++            let ctx = match self
++                .token_manager
++                .acquire_context_for(model.as_deref(), session_key)
++                .await
++            {
+                 Ok(c) => c,
+                 Err(e) => {
+                     last_error = Some(e);
+diff -ruN a/src/kiro/token_manager.rs b/src/kiro/token_manager.rs
+--- a/src/kiro/token_manager.rs	2026-10-22 10:32:06
++++ b/src/kiro/token_manager.rs	2026-10-22 12:17:56
+@@ -491,6 +491,9 @@
+     /// 端点名称（未显式配置时返回 None，由 Admin 层回退到默认值）
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub endpoint: Option<String>,
++    /// 订阅等级（如 KIRO PRO+；加号/刷新额度时写入，未知为 None）
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub subscription_title: Option<String>,
+ }
+ 
+ /// 凭据管理器状态快照
+@@ -579,6 +582,7 @@
+     now: Instant,
+     min_k: usize,
+     max_k: usize,
++    session_key: Option<&str>,
+ ) -> Option<&'a CredentialEntry> {
+     if available.is_empty() {
+         return None;
+@@ -598,15 +602,46 @@
+         k += 1;
+     }
+     let window = &sorted[..k];
+-    window
++    let live: Vec<&CredentialEntry> = window.iter().filter(|e| !cooling(e)).copied().collect();
++    if live.is_empty() {
++        return window.iter().min_by_key(|e| e.cooldown_until).copied();
++    }
++    // 没有会话标识：在途少的优先；平局取累计成功少的 ⇒ 窗口内各号轮流分担
++    let least = live
+         .iter()
+-        .filter(|e| !cooling(e))
+-        // 在途少的优先；平局取累计成功少的 ⇒ 窗口内各号轮流分担，而不是只用第一个
+         .min_by_key(|e| (e.in_flight, e.success_count))
+-        .or_else(|| window.iter().min_by_key(|e| e.cooldown_until))
+-        .copied()
++        .copied();
++    let Some(key) = session_key else { return least };
++    // 会话粘性：rendezvous hash（最高随机权重）。
++    // 「家」= 在基础窗口（前 min_k 个，不论是否冷却）里得分最高的号 ⇒ 窗口因冷却扩容时家不变；
++    // 家在冷却 ⇒ 只有这些会话改投当前可用号里得分最高的，其余会话不动；冷却结束自动回家。
++    let base = &sorted[..min_k.min(sorted.len())];
++    let home = base.iter().max_by_key(|e| rendezvous_score(key, e.id)).copied()?;
++    let sticky = if cooling(home) {
++        live.iter().max_by_key(|e| rendezvous_score(key, e.id)).copied()?
++    } else {
++        home
++    };
++    // 防热点：很多会话撞到同一个号（例如同一套系统提示 + 同一句开场白）时，
++    // 粘的那个号在途比最闲的多出 SESSION_SPILL_IN_FLIGHT 个以上就临时让给最闲的。
++    match least {
++        Some(l) if sticky.in_flight >= l.in_flight + SESSION_SPILL_IN_FLIGHT => Some(l),
++        _ => Some(sticky),
++    }
+ }
+ 
++/// 会话粘的号比最闲的号多出这么多在途请求时，临时溢出到最闲的号
++const SESSION_SPILL_IN_FLIGHT: u32 = 4;
++
++/// rendezvous hash 打分：sha256(会话键 + 凭据 id) 前 8 字节
++fn rendezvous_score(session_key: &str, id: u64) -> u64 {
++    let mut h = Sha256::new();
++    h.update(session_key.as_bytes());
++    h.update(id.to_le_bytes());
++    let d = h.finalize();
++    u64::from_le_bytes(d[..8].try_into().expect("sha256 至少 8 字节"))
++}
++
+ /// 每个凭据最大 API 调用失败次数
+ const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
+ /// 统计数据持久化防抖间隔
+@@ -785,7 +820,11 @@
+     ///
+     /// # 参数
+     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
+-    fn select_next_credential(&self, model: Option<&str>) -> Option<(u64, KiroCredentials)> {
++    fn select_next_credential(
++        &self,
++        model: Option<&str>,
++        session_key: Option<&str>,
++    ) -> Option<(u64, KiroCredentials)> {
+         let entries = self.entries.lock();
+ 
+         // 检查是否是 opus 模型
+@@ -819,7 +858,7 @@
+             "window" => {
+                 let now = Instant::now();
+                 let ws = *self.window_settings.lock();
+-                let picked = pick_window(&available, now, ws.min_k, ws.max_k)?;
++                let picked = pick_window(&available, now, ws.min_k, ws.max_k, session_key)?;
+                 Some((picked.id, picked.credentials.clone()))
+             }
+             "balanced" => {
+@@ -850,6 +889,15 @@
+     /// # 参数
+     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
+     pub async fn acquire_context(&self, model: Option<&str>) -> anyhow::Result<CallContext> {
++        self.acquire_context_for(model, None).await
++    }
++
++    /// 同 [`Self::acquire_context`]，额外带会话键：window 模式下同一会话尽量落同一个号
++    pub async fn acquire_context_for(
++        &self,
++        model: Option<&str>,
++        session_key: Option<&str>,
++    ) -> anyhow::Result<CallContext> {
+         let total = self.total_count();
+         let max_attempts = (total * MAX_FAILURES_PER_CREDENTIAL as usize).max(1);
+         let mut attempt_count = 0;
+@@ -887,7 +935,7 @@
+                     hit
+                 } else {
+                     // 当前凭据不可用或 balanced 模式，根据负载均衡策略选择
+-                    let mut best = self.select_next_credential(model);
++                    let mut best = self.select_next_credential(model, session_key);
+ 
+                     // 没有可用凭据：如果是"自动禁用导致全灭"，做一次类似重启的自愈
+                     if best.is_none() {
+@@ -906,7 +954,7 @@
+                                 }
+                             }
+                             drop(entries);
+-                            best = self.select_next_credential(model);
++                            best = self.select_next_credential(model, session_key);
+                         }
+                     }
+ 
+@@ -1594,6 +1642,7 @@
+                         DisabledReason::InvalidConfig => "InvalidConfig",
+                     }.to_string()),
+                     endpoint: e.credentials.endpoint.clone(),
++                    subscription_title: e.credentials.subscription_title.clone(),
+                 })
+                 .collect(),
+             current_id,
+@@ -2132,7 +2181,7 @@
+         let mut seen = std::collections::HashSet::new();
+         for _ in 0..20 {
+             let r: Vec<&CredentialEntry> = es.iter().collect();
+-            let p = pick_window(&r, now, 2, 4).unwrap().id;
++            let p = pick_window(&r, now, 2, 4, None).unwrap().id;
+             seen.insert(p);
+             es.iter_mut().find(|e| e.id == p).unwrap().success_count += 1;
+         }
+@@ -2147,7 +2196,7 @@
+         let mut picks = std::collections::HashSet::new();
+         for _ in 0..20 {
+             let r: Vec<&CredentialEntry> = es.iter().collect();
+-            let p = pick_window(&r, now, 2, 4).unwrap().id;
++            let p = pick_window(&r, now, 2, 4, None).unwrap().id;
+             picks.insert(p);
+             es.iter_mut().find(|e| e.id == p).unwrap().success_count += 1;
+         }
+@@ -2155,7 +2204,7 @@
+         // 冷却结束 ⇒ 缩回前 2 个
+         let later = now + StdDuration::from_secs(61);
+         let r: Vec<&CredentialEntry> = es.iter().collect();
+-        assert!(matches!(pick_window(&r, later, 2, 4).unwrap().id, 1 | 2));
++        assert!(matches!(pick_window(&r, later, 2, 4, None).unwrap().id, 1 | 2));
+     }
+ 
+     #[test]
+@@ -2167,15 +2216,94 @@
+         }
+         let r: Vec<&CredentialEntry> = es.iter().collect();
+         // 前 4 个全冷却、上限 4 ⇒ 不扩到 #5 #6，选最早解冻的 #1（直接发，不等）
+-        assert_eq!(pick_window(&r, now, 2, 4).unwrap().id, 1);
++        assert_eq!(pick_window(&r, now, 2, 4, None).unwrap().id, 1);
+     }
+ 
+     #[test]
++    fn test_window_session_sticks_to_one_credential() {
++        let mut es: Vec<CredentialEntry> = (1..=5).map(|i| win_entry(i, i as u32)).collect();
++        let now = Instant::now();
++        for s in 0..50 {
++            let key = format!("sid:session-{s}");
++            let mut seen = std::collections::HashSet::new();
++            for _ in 0..10 {
++                let r: Vec<&CredentialEntry> = es.iter().collect();
++                let p = pick_window(&r, now, 2, 3, Some(&key)).unwrap().id;
++                seen.insert(p);
++                // 别的会话在跑 ⇒ 成功数变化不影响粘性
++                es.iter_mut().find(|e| e.id == p).unwrap().success_count += 1;
++            }
++            assert_eq!(seen.len(), 1, "会话 {key} 落到了多个号 {seen:?}");
++            assert!(seen.iter().all(|id| *id <= 2), "只能落在前 2 个号");
++        }
++    }
++
++    #[test]
++    fn test_window_sessions_spread_across_window() {
++        let es: Vec<CredentialEntry> = (1..=5).map(|i| win_entry(i, i as u32)).collect();
++        let r: Vec<&CredentialEntry> = es.iter().collect();
++        let now = Instant::now();
++        let mut cnt = std::collections::HashMap::new();
++        for s in 0..400 {
++            let key = format!("anc:{s:08x}");
++            *cnt.entry(pick_window(&r, now, 2, 3, Some(&key)).unwrap().id).or_insert(0) += 1;
++        }
++        let (a, b) = (cnt.get(&1).copied().unwrap_or(0), cnt.get(&2).copied().unwrap_or(0));
++        assert_eq!(a + b, 400);
++        assert!((140..=260).contains(&a), "两号分摊应接近一半：{a}/{b}");
++    }
++
++    #[test]
++    fn test_window_session_moves_only_when_its_credential_cools() {
++        let mut es: Vec<CredentialEntry> = (1..=5).map(|i| win_entry(i, i as u32)).collect();
++        let now = Instant::now();
++        let keys: Vec<String> = (0..200).map(|s| format!("sid:{s}")).collect();
++        let before: Vec<u64> = {
++            let r: Vec<&CredentialEntry> = es.iter().collect();
++            keys.iter().map(|k| pick_window(&r, now, 2, 3, Some(k)).unwrap().id).collect()
++        };
++        es[0].cooldown_until = Some(now + StdDuration::from_secs(60));
++        let r: Vec<&CredentialEntry> = es.iter().collect();
++        for (k, b) in keys.iter().zip(&before) {
++            let a = pick_window(&r, now, 2, 3, Some(k)).unwrap().id;
++            if *b == 2 {
++                assert_eq!(a, 2, "原本在 #2 的会话不该被 #1 的冷却带走");
++            } else {
++                assert!(a == 2 || a == 3, "原本在 #1 的会话只能去窗口内的 #2/#3，实际 #{a}");
++            }
++        }
++        // 冷却结束 ⇒ 全部回到原来的号
++        let later = now + StdDuration::from_secs(61);
++        for (k, b) in keys.iter().zip(&before) {
++            assert_eq!(pick_window(&r, later, 2, 3, Some(k)).unwrap().id, *b);
++        }
++    }
++
++    #[test]
++    fn test_window_session_spills_when_hot() {
++        let mut es: Vec<CredentialEntry> = (1..=2).map(|i| win_entry(i, i as u32)).collect();
++        let now = Instant::now();
++        let key = "sid:hot";
++        let home = {
++            let r: Vec<&CredentialEntry> = es.iter().collect();
++            pick_window(&r, now, 2, 2, Some(key)).unwrap().id
++        };
++        let other = if home == 1 { 2 } else { 1 };
++        es.iter_mut().find(|e| e.id == home).unwrap().in_flight = SESSION_SPILL_IN_FLIGHT - 1;
++        let r: Vec<&CredentialEntry> = es.iter().collect();
++        assert_eq!(pick_window(&r, now, 2, 2, Some(key)).unwrap().id, home, "差距没到阈值不溢出");
++        drop(r);
++        es.iter_mut().find(|e| e.id == home).unwrap().in_flight = SESSION_SPILL_IN_FLIGHT;
++        let r: Vec<&CredentialEntry> = es.iter().collect();
++        assert_eq!(pick_window(&r, now, 2, 2, Some(key)).unwrap().id, other, "到阈值溢出到最闲的号");
++    }
++
++    #[test]
+     fn test_window_prefers_fewer_in_flight() {
+         let mut es: Vec<CredentialEntry> = (1..=3).map(|i| win_entry(i, i as u32)).collect();
+         es[0].in_flight = 3;
+         let r: Vec<&CredentialEntry> = es.iter().collect();
+-        assert_eq!(pick_window(&r, Instant::now(), 2, 4).unwrap().id, 2);
++        assert_eq!(pick_window(&r, Instant::now(), 2, 4, None).unwrap().id, 2);
+     }
+ 
+     #[test]

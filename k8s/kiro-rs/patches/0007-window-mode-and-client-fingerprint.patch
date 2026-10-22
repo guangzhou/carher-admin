@@ -1,0 +1,884 @@
+diff -ruN a/admin-ui/src/api/credentials.ts b/admin-ui/src/api/credentials.ts
+--- a/admin-ui/src/api/credentials.ts	2026-10-08 17:40:39
++++ b/admin-ui/src/api/credentials.ts	2026-10-22 10:31:22
+@@ -94,13 +94,32 @@
+ }
+ 
+ // 获取负载均衡模式
+-export async function getLoadBalancingMode(): Promise<{ mode: 'priority' | 'balanced' }> {
+-  const { data } = await api.get<{ mode: 'priority' | 'balanced' }>('/config/load-balancing')
++export async function getLoadBalancingMode(): Promise<{ mode: 'priority' | 'window' | 'balanced' }> {
++  const { data } = await api.get<{ mode: 'priority' | 'window' | 'balanced' }>('/config/load-balancing')
+   return data
+ }
+ 
+ // 设置负载均衡模式
+-export async function setLoadBalancingMode(mode: 'priority' | 'balanced'): Promise<{ mode: 'priority' | 'balanced' }> {
+-  const { data } = await api.put<{ mode: 'priority' | 'balanced' }>('/config/load-balancing', { mode })
++export async function setLoadBalancingMode(mode: 'priority' | 'window' | 'balanced'): Promise<{ mode: 'priority' | 'window' | 'balanced' }> {
++  const { data } = await api.put<{ mode: 'priority' | 'window' | 'balanced' }>('/config/load-balancing', { mode })
++  return data
++}
++
++// window 模式参数：平时在线数 / 上限 / 429 冷却秒数
++export interface WindowSettings {
++  minK: number
++  maxK: number
++  cooldownSecs: number
++}
++
++// 获取 window 模式参数
++export async function getWindowSettings(): Promise<WindowSettings> {
++  const { data } = await api.get<WindowSettings>('/config/window')
++  return data
++}
++
++// 设置 window 模式参数（立即生效并写回 config.json）
++export async function setWindowSettings(settings: WindowSettings): Promise<WindowSettings> {
++  const { data } = await api.put<WindowSettings>('/config/window', settings)
+   return data
+ }
+diff -ruN a/admin-ui/src/components/dashboard.tsx b/admin-ui/src/components/dashboard.tsx
+--- a/admin-ui/src/components/dashboard.tsx	2026-10-18 02:29:07
++++ b/admin-ui/src/components/dashboard.tsx	2026-10-22 10:32:01
+@@ -9,6 +9,7 @@
+ import { CredentialCard } from '@/components/credential-card'
+ import { CredentialFilters, EMPTY_FILTERS, filterCredentials, type CredentialFilterState } from '@/components/credential-filters'
+ import { BalanceDialog } from '@/components/balance-dialog'
++import { WindowSettingsDialog } from '@/components/window-settings-dialog'
+ import { AddCredentialDialog } from '@/components/add-credential-dialog'
+ import { BatchImportDialog } from '@/components/batch-import-dialog'
+ import { KamImportDialog } from '@/components/kam-import-dialog'
+@@ -25,6 +26,7 @@
+ export function Dashboard({ onLogout }: DashboardProps) {
+   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
+   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
++  const [windowDialogOpen, setWindowDialogOpen] = useState(false)
+   const [addDialogOpen, setAddDialogOpen] = useState(false)
+   const [batchImportDialogOpen, setBatchImportDialogOpen] = useState(false)
+   const [kamImportDialogOpen, setKamImportDialogOpen] = useState(false)
+@@ -525,13 +527,16 @@
+   }
+ 
+   // 切换负载均衡模式
++  // 三态循环：优先级 → 小窗口(K 个号轮换) → 均衡负载 → 优先级
++  const modeLabel = (m?: string) =>
++    m === 'priority' ? '优先级模式' : m === 'window' ? '小窗口轮换' : '均衡负载'
+   const handleToggleLoadBalancing = () => {
+     const currentMode = loadBalancingData?.mode || 'priority'
+-    const newMode = currentMode === 'priority' ? 'balanced' : 'priority'
++    const newMode = currentMode === 'priority' ? 'window' : currentMode === 'window' ? 'balanced' : 'priority'
+ 
+     setLoadBalancingMode(newMode, {
+       onSuccess: () => {
+-        const modeName = newMode === 'priority' ? '优先级模式' : '均衡负载模式'
++        const modeName = modeLabel(newMode)
+         toast.success(`已切换到${modeName}`)
+       },
+       onError: (error) => {
+@@ -585,8 +590,16 @@
+               disabled={isLoadingMode || isSettingMode}
+               title="切换负载均衡模式"
+             >
+-              {isLoadingMode ? '加载中...' : (loadBalancingData?.mode === 'priority' ? '优先级模式' : '均衡负载')}
++              {isLoadingMode ? '加载中...' : modeLabel(loadBalancingData?.mode)}
+             </Button>
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => setWindowDialogOpen(true)}
++              title="设置同时在线的号数（小窗口轮换模式）"
++            >
++              窗口设置
++            </Button>
+             <Button variant="ghost" size="icon" onClick={toggleDarkMode}>
+               {darkMode ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
+             </Button>
+@@ -799,6 +812,8 @@
+         open={balanceDialogOpen}
+         onOpenChange={setBalanceDialogOpen}
+       />
++
++      <WindowSettingsDialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen} />
+ 
+       {/* 添加凭据对话框 */}
+       <AddCredentialDialog
+diff -ruN a/admin-ui/src/components/window-settings-dialog.tsx b/admin-ui/src/components/window-settings-dialog.tsx
+--- a/admin-ui/src/components/window-settings-dialog.tsx	1970-01-01 08:00:00
++++ b/admin-ui/src/components/window-settings-dialog.tsx	2026-10-22 10:31:40
+@@ -0,0 +1,96 @@
++import { useEffect, useState } from 'react'
++import { toast } from 'sonner'
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from '@/components/ui/dialog'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import { useSetWindowSettings, useWindowSettings } from '@/hooks/use-credentials'
++import { extractErrorMessage } from '@/lib/utils'
++
++interface WindowSettingsDialogProps {
++  open: boolean
++  onOpenChange: (open: boolean) => void
++}
++
++// 与后端 WINDOW_K_HARD_CAP 一致
++const K_CAP = 20
++
++export function WindowSettingsDialog({ open, onOpenChange }: WindowSettingsDialogProps) {
++  const { data } = useWindowSettings()
++  const { mutate, isPending } = useSetWindowSettings()
++  const [minK, setMinK] = useState('2')
++  const [maxK, setMaxK] = useState('3')
++  const [cooldown, setCooldown] = useState('60')
++
++  useEffect(() => {
++    if (open && data) {
++      setMinK(String(data.minK))
++      setMaxK(String(data.maxK))
++      setCooldown(String(data.cooldownSecs))
++    }
++  }, [open, data])
++
++  const min = Number(minK)
++  const max = Number(maxK)
++  const cd = Number(cooldown)
++  const error =
++    !Number.isInteger(min) || min < 1 ? '平时在线数至少为 1'
++      : !Number.isInteger(max) || max < min ? '上限不能小于平时在线数'
++        : max > K_CAP ? `上限不能超过 ${K_CAP}`
++          : !Number.isInteger(cd) || cd < 1 || cd > 3600 ? '冷却秒数需在 1~3600 之间'
++            : null
++
++  const handleSave = () => {
++    if (error) return
++    mutate(
++      { minK: min, maxK: max, cooldownSecs: cd },
++      {
++        onSuccess: (r) => {
++          toast.success(`已保存：平时 ${r.minK} 个号在线，最多 ${r.maxK} 个，冷却 ${r.cooldownSecs} 秒`)
++          onOpenChange(false)
++        },
++        onError: (e) => toast.error(`保存失败: ${extractErrorMessage(e)}`),
++      }
++    )
++  }
++
++  return (
++    <Dialog open={open} onOpenChange={onOpenChange}>
++      <DialogContent className="sm:max-w-md">
++        <DialogHeader>
++          <DialogTitle>窗口设置（小窗口轮换模式）</DialogTitle>
++          <DialogDescription>
++            只让优先级最前的几个号同时在线，其余号冷备。号被限流时冷却并立刻换号，冷却期间从后面补位，最多补到上限。保存后立即生效。
++          </DialogDescription>
++        </DialogHeader>
++        <div className="space-y-4 py-2">
++          <label className="block space-y-1">
++            <span className="text-sm font-medium">平时同时在线的号数</span>
++            <Input type="number" min={1} max={K_CAP} value={minK} onChange={(e) => setMinK(e.target.value)} />
++          </label>
++          <label className="block space-y-1">
++            <span className="text-sm font-medium">最多同时在线（限流补位时的上限）</span>
++            <Input type="number" min={1} max={K_CAP} value={maxK} onChange={(e) => setMaxK(e.target.value)} />
++          </label>
++          <label className="block space-y-1">
++            <span className="text-sm font-medium">被限流后冷却秒数</span>
++            <Input type="number" min={1} max={3600} value={cooldown} onChange={(e) => setCooldown(e.target.value)} />
++          </label>
++          {error && <p className="text-sm text-red-500" role="alert">{error}</p>}
++        </div>
++        <DialogFooter>
++          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
++          <Button onClick={handleSave} disabled={!!error || isPending}>
++            {isPending ? '保存中...' : '保存'}
++          </Button>
++        </DialogFooter>
++      </DialogContent>
++    </Dialog>
++  )
++}
+diff -ruN a/admin-ui/src/hooks/use-credentials.ts b/admin-ui/src/hooks/use-credentials.ts
+--- a/admin-ui/src/hooks/use-credentials.ts	2026-10-08 17:40:39
++++ b/admin-ui/src/hooks/use-credentials.ts	2026-10-22 10:31:29
+@@ -9,6 +9,8 @@
+   addCredential,
+   deleteCredential,
+   getLoadBalancingMode,
++  getWindowSettings,
++  setWindowSettings,
+   setLoadBalancingMode,
+ } from '@/api/credentials'
+ import type { AddCredentialRequest } from '@/types/api'
+@@ -115,6 +117,25 @@
+     mutationFn: setLoadBalancingMode,
+     onSuccess: () => {
+       queryClient.invalidateQueries({ queryKey: ['loadBalancingMode'] })
++    },
++  })
++}
++
++// 获取 window 模式参数
++export function useWindowSettings() {
++  return useQuery({
++    queryKey: ['windowSettings'],
++    queryFn: getWindowSettings,
++  })
++}
++
++// 设置 window 模式参数
++export function useSetWindowSettings() {
++  const queryClient = useQueryClient()
++  return useMutation({
++    mutationFn: setWindowSettings,
++    onSuccess: () => {
++      queryClient.invalidateQueries({ queryKey: ['windowSettings'] })
+     },
+   })
+ }
+diff -ruN a/src/admin/handlers.rs b/src/admin/handlers.rs
+--- a/src/admin/handlers.rs	2026-10-08 17:40:39
++++ b/src/admin/handlers.rs	2026-10-22 10:30:44
+@@ -140,3 +140,21 @@
+         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+     }
+ }
++
++/// GET /api/admin/config/window
++/// 获取 window 模式参数（平时在线数 / 上限 / 冷却秒数）
++pub async fn get_window_settings(State(state): State<AdminState>) -> impl IntoResponse {
++    Json(state.service.get_window_settings())
++}
++
++/// PUT /api/admin/config/window
++/// 设置 window 模式参数，立即生效并写回 config.json
++pub async fn set_window_settings(
++    State(state): State<AdminState>,
++    Json(payload): Json<crate::kiro::token_manager::WindowSettings>,
++) -> impl IntoResponse {
++    match state.service.set_window_settings(payload) {
++        Ok(response) => Json(response).into_response(),
++        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
++    }
++}
+diff -ruN a/src/admin/router.rs b/src/admin/router.rs
+--- a/src/admin/router.rs	2026-10-08 17:40:39
++++ b/src/admin/router.rs	2026-10-22 10:30:44
+@@ -8,8 +8,8 @@
+ use super::{
+     handlers::{
+         add_credential, delete_credential, force_refresh_token, get_all_credentials,
+-        get_credential_balance, get_load_balancing_mode, reset_failure_count,
+-        set_credential_disabled, set_credential_priority, set_load_balancing_mode,
++        get_credential_balance, get_load_balancing_mode, get_window_settings, reset_failure_count,
++        set_credential_disabled, set_credential_priority, set_load_balancing_mode, set_window_settings,
+     },
+     middleware::{AdminState, admin_auth_middleware},
+ };
+@@ -27,6 +27,8 @@
+ /// - `GET /credentials/:id/balance` - 获取凭据余额
+ /// - `GET /config/load-balancing` - 获取负载均衡模式
+ /// - `PUT /config/load-balancing` - 设置负载均衡模式
++/// - `GET /config/window` - 获取 window 模式参数
++/// - `PUT /config/window` - 设置 window 模式参数（立即生效并持久化）
+ ///
+ /// # 认证
+ /// 需要 Admin API Key 认证，支持：
+@@ -47,6 +49,10 @@
+         .route(
+             "/config/load-balancing",
+             get(get_load_balancing_mode).put(set_load_balancing_mode),
++        )
++        .route(
++            "/config/window",
++            get(get_window_settings).put(set_window_settings),
+         )
+         .layer(middleware::from_fn_with_state(
+             state.clone(),
+diff -ruN a/src/admin/service.rs b/src/admin/service.rs
+--- a/src/admin/service.rs	2026-10-08 17:40:39
++++ b/src/admin/service.rs	2026-10-22 10:30:44
+@@ -280,15 +280,33 @@
+         }
+     }
+ 
++    /// 获取 window 模式参数
++    pub fn get_window_settings(&self) -> crate::kiro::token_manager::WindowSettings {
++        self.token_manager.get_window_settings()
++    }
++
++    /// 设置 window 模式参数（校验失败 400，写盘失败 500）
++    pub fn set_window_settings(
++        &self,
++        ws: crate::kiro::token_manager::WindowSettings,
++    ) -> Result<crate::kiro::token_manager::WindowSettings, AdminServiceError> {
++        ws.validate()
++            .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))?;
++        self.token_manager
++            .set_window_settings(ws)
++            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
++        Ok(self.token_manager.get_window_settings())
++    }
++
+     /// 设置负载均衡模式
+     pub fn set_load_balancing_mode(
+         &self,
+         req: SetLoadBalancingModeRequest,
+     ) -> Result<LoadBalancingModeResponse, AdminServiceError> {
+         // 验证模式值
+-        if req.mode != "priority" && req.mode != "balanced" {
++        if req.mode != "priority" && req.mode != "balanced" && req.mode != "window" {
+             return Err(AdminServiceError::InvalidCredential(
+-                "mode 必须是 'priority' 或 'balanced'".to_string(),
++                "mode 必须是 'priority'、'balanced' 或 'window'".to_string(),
+             ));
+         }
+ 
+diff -ruN a/src/kiro/endpoint/ide.rs b/src/kiro/endpoint/ide.rs
+--- a/src/kiro/endpoint/ide.rs	2026-10-08 17:40:39
++++ b/src/kiro/endpoint/ide.rs	2026-10-22 00:57:12
+@@ -32,16 +32,18 @@
+ 
+     fn x_amz_user_agent(&self, ctx: &RequestContext<'_>) -> String {
+         format!(
+-            "aws-sdk-js/1.0.34 KiroIDE-{}-{}",
+-            ctx.config.kiro_version, ctx.machine_id
++            "aws-sdk-js/{} KiroIDE-{}-{}",
++            ctx.config.sdk_version, ctx.config.kiro_version, ctx.machine_id
+         )
+     }
+ 
+     fn user_agent(&self, ctx: &RequestContext<'_>) -> String {
+         format!(
+-            "aws-sdk-js/1.0.34 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererstreaming#1.0.34 m/E KiroIDE-{}-{}",
++            "aws-sdk-js/{} ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererstreaming#{} m/E KiroIDE-{}-{}",
++            ctx.config.sdk_version,
+             ctx.config.system_version,
+             ctx.config.node_version,
++            ctx.config.sdk_version,
+             ctx.config.kiro_version,
+             ctx.machine_id
+         )
+diff -ruN a/src/kiro/provider.rs b/src/kiro/provider.rs
+--- a/src/kiro/provider.rs	2026-10-08 17:40:39
++++ b/src/kiro/provider.rs	2026-10-22 00:58:53
+@@ -330,7 +330,11 @@
+                 .header("Connection", "close");
+             let request = endpoint.decorate_api(base, &rctx);
+ 
+-            let response = match request.send().await {
++            // 在途计数只用于 window 模式选号（同一瞬间涌进来的请求别全挑同一个号）
++            self.token_manager.begin_request(ctx.id);
++            let sent = request.send().await;
++            self.token_manager.end_request(ctx.id);
++            let response = match sent {
+                 Ok(resp) => resp,
+                 Err(e) => {
+                     tracing::warn!(
+@@ -432,6 +436,28 @@
+                     body
+                 ));
+                 continue;
++            }
++
++            // window 模式下的 429：这个号冷却，立刻换窗口里的下一个号重发，不 sleep。
++            // （priority/balanced 仍走下面的原逻辑：同号退避重试）
++            if status.as_u16() == 429 && self.token_manager.is_window_mode() {
++                last_error = Some(anyhow::anyhow!(
++                    "{} API 请求失败: {} {}",
++                    api_type,
++                    status,
++                    body
++                ));
++                if self.token_manager.report_rate_limited(ctx.id) {
++                    tracing::warn!(
++                        "API 请求 429（尝试 {}/{}），凭据 #{} 冷却并立刻换号: {}",
++                        attempt + 1,
++                        max_retries,
++                        ctx.id,
++                        body
++                    );
++                    continue;
++                }
++                // 窗口上限内的号全在冷却：没得换，按原逻辑短退避重试
+             }
+ 
+             // 429/408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
+diff -ruN a/src/kiro/token_manager.rs b/src/kiro/token_manager.rs
+--- a/src/kiro/token_manager.rs	2026-10-18 02:29:07
++++ b/src/kiro/token_manager.rs	2026-10-22 10:32:06
+@@ -414,6 +414,10 @@
+     success_count: u64,
+     /// 最后一次 API 调用时间（RFC3339 格式）
+     last_used_at: Option<String>,
++    /// window 模式：被 429 后冷却到这个时刻（只在内存，不落盘）
++    cooldown_until: Option<Instant>,
++    /// window 模式：当前在途请求数（选号时取最少的）
++    in_flight: u32,
+ }
+ 
+ /// 禁用原因
+@@ -526,8 +530,83 @@
+     last_stats_save_at: Mutex<Option<Instant>>,
+     /// 统计数据是否有未落盘更新
+     stats_dirty: AtomicBool,
++    /// window 模式参数（运行时可改，Admin 页面设置）
++    window_settings: Mutex<WindowSettings>,
+ }
+ 
++/// window 模式参数
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct WindowSettings {
++    /// 平时同时在线的号数
++    pub min_k: usize,
++    /// 冷却补位时最多扩到几个号
++    pub max_k: usize,
++    /// 号被 429 后冷却秒数
++    pub cooldown_secs: u64,
++}
++
++/// 窗口参数上限（防误填把全池拉上线）
++pub const WINDOW_K_HARD_CAP: usize = 20;
++
++impl WindowSettings {
++    pub fn validate(&self) -> anyhow::Result<()> {
++        if self.min_k < 1 {
++            anyhow::bail!("平时在线数（minK）至少为 1");
++        }
++        if self.max_k < self.min_k {
++            anyhow::bail!("上限（maxK）不能小于平时在线数（minK）");
++        }
++        if self.max_k > WINDOW_K_HARD_CAP {
++            anyhow::bail!("上限（maxK）不能超过 {}", WINDOW_K_HARD_CAP);
++        }
++        if !(1..=3600).contains(&self.cooldown_secs) {
++            anyhow::bail!("冷却秒数需在 1~3600 之间");
++        }
++        Ok(())
++    }
++}
++
++/// window 模式选号（纯函数，便于单测）。
++///
++/// 1. 可用号按 (priority, id) 排序 —— 窗口永远是排在最前面的那几个，其余号不碰（冷备）。
++/// 2. 窗口大小 K = min_k + 窗口里正在冷却的号数，封顶 max_k：
++///    平时 K=min_k；有号被 429 冷却就往后多拉一个顶上，冷却结束自动缩回。
++/// 3. 窗口内跳过冷却中的号，选在途最少的（平局按排序先后）。
++/// 4. 窗口里全在冷却 ⇒ 选最早结束冷却的那个（不等待，直接发；用户不多等一毫秒）。
++fn pick_window<'a>(
++    available: &[&'a CredentialEntry],
++    now: Instant,
++    min_k: usize,
++    max_k: usize,
++) -> Option<&'a CredentialEntry> {
++    if available.is_empty() {
++        return None;
++    }
++    let min_k = min_k.max(1);
++    let max_k = max_k.max(min_k);
++    let mut sorted: Vec<&CredentialEntry> = available.to_vec();
++    sorted.sort_by_key(|e| (e.credentials.priority, e.id));
++    let cooling = |e: &CredentialEntry| e.cooldown_until.is_some_and(|t| t > now);
++
++    let mut k = min_k.min(sorted.len());
++    while k < max_k.min(sorted.len()) {
++        let cooled_in_window = sorted[..k].iter().filter(|e| cooling(e)).count();
++        if k >= min_k + cooled_in_window {
++            break;
++        }
++        k += 1;
++    }
++    let window = &sorted[..k];
++    window
++        .iter()
++        .filter(|e| !cooling(e))
++        // 在途少的优先；平局取累计成功少的 ⇒ 窗口内各号轮流分担，而不是只用第一个
++        .min_by_key(|e| (e.in_flight, e.success_count))
++        .or_else(|| window.iter().min_by_key(|e| e.cooldown_until))
++        .copied()
++}
++
+ /// 每个凭据最大 API 调用失败次数
+ const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
+ /// 统计数据持久化防抖间隔
+@@ -599,6 +678,8 @@
+                     },
+                     success_count: 0,
+                     last_used_at: None,
++                    cooldown_until: None,
++                    in_flight: 0,
+                 }
+             })
+             .collect();
+@@ -644,6 +725,15 @@
+             .unwrap_or(0);
+ 
+         let load_balancing_mode = config.load_balancing_mode.clone();
++        // config 里填坏了也不阻断启动：夹到合法范围
++        let window_settings = {
++            let min_k = config.window_min_k.clamp(1, WINDOW_K_HARD_CAP);
++            WindowSettings {
++                min_k,
++                max_k: config.window_max_k.clamp(min_k, WINDOW_K_HARD_CAP),
++                cooldown_secs: config.window_cooldown_secs.clamp(1, 3600),
++            }
++        };
+         let manager = Self {
+             config,
+             proxy,
+@@ -655,6 +745,7 @@
+             load_balancing_mode: Mutex::new(load_balancing_mode),
+             last_stats_save_at: Mutex::new(None),
+             stats_dirty: AtomicBool::new(false),
++            window_settings: Mutex::new(window_settings),
+         };
+ 
+         // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
+@@ -725,6 +816,12 @@
+         let mode = mode.as_str();
+ 
+         match mode {
++            "window" => {
++                let now = Instant::now();
++                let ws = *self.window_settings.lock();
++                let picked = pick_window(&available, now, ws.min_k, ws.max_k)?;
++                Some((picked.id, picked.credentials.clone()))
++            }
+             "balanced" => {
+                 // Least-Used 策略：选择成功次数最少的凭据
+                 // 平局时按优先级排序（数字越小优先级越高）
+@@ -767,7 +864,11 @@
+             }
+ 
+             let (id, credentials) = {
+-                let is_balanced = self.load_balancing_mode.lock().as_str() == "balanced";
++                // window 与 balanced 一样每次重选（窗口内按在途数挑），不粘 current_id
++                let is_balanced = matches!(
++                    self.load_balancing_mode.lock().as_str(),
++                    "balanced" | "window"
++                );
+ 
+                 // balanced 模式：每次请求都重新均衡选择，不固定 current_id
+                 // priority 模式：优先使用 current_id 指向的凭据
+@@ -1142,6 +1243,45 @@
+         self.save_stats_debounced();
+     }
+ 
++    /// 当前是否 window 模式
++    pub fn is_window_mode(&self) -> bool {
++        self.load_balancing_mode.lock().as_str() == "window"
++    }
++
++    /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
++    /// 返回窗口外是否还有别的号可换（调用方据此决定立刻换号还是按原逻辑处理）。
++    pub fn report_rate_limited(&self, id: u64) -> bool {
++        let ws = *self.window_settings.lock();
++        let mut entries = self.entries.lock();
++        let now = Instant::now();
++        if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
++            e.cooldown_until = Some(now + StdDuration::from_secs(ws.cooldown_secs));
++        }
++        // 只有「窗口上限内还有没在冷却的号」才算有得换；整窗都在冷却就别连珠炮重发，
++        // 交回原逻辑（短退避），避免 9 次请求在 1 秒内全砸向上游。
++        let mut avail: Vec<&CredentialEntry> = entries.iter().filter(|e| !e.disabled).collect();
++        avail.sort_by_key(|e| (e.credentials.priority, e.id));
++        let max_k = ws.max_k.max(ws.min_k).max(1);
++        avail
++            .iter()
++            .take(max_k)
++            .any(|e| e.cooldown_until.is_none_or(|t| t <= now))
++    }
++
++    /// 在途计数 +1（发请求前）
++    pub fn begin_request(&self, id: u64) {
++        if let Some(e) = self.entries.lock().iter_mut().find(|e| e.id == id) {
++            e.in_flight += 1;
++        }
++    }
++
++    /// 在途计数 -1（拿到响应头后；流式正文仍在传，但上游并发判定发生在请求受理时）
++    pub fn end_request(&self, id: u64) {
++        if let Some(e) = self.entries.lock().iter_mut().find(|e| e.id == id) {
++            e.in_flight = e.in_flight.saturating_sub(1);
++        }
++    }
++
+     /// 报告指定凭据 API 调用失败
+     ///
+     /// 增加失败计数，达到阈值时禁用凭据并切换到优先级最高的可用凭据
+@@ -1757,6 +1897,8 @@
+                 disabled_reason: None,
+                 success_count: 0,
+                 last_used_at: None,
++                cooldown_until: None,
++                in_flight: 0,
+             });
+         }
+ 
+@@ -1878,6 +2020,37 @@
+         self.load_balancing_mode.lock().clone()
+     }
+ 
++    /// 获取 window 模式参数
++    pub fn get_window_settings(&self) -> WindowSettings {
++        *self.window_settings.lock()
++    }
++
++    /// 设置 window 模式参数（Admin API）：校验 → 写回 config.json → 生效。写盘失败则不生效。
++    pub fn set_window_settings(&self, ws: WindowSettings) -> anyhow::Result<()> {
++        use anyhow::Context;
++        ws.validate()?;
++        if let Some(path) = self.config.config_path() {
++            let mut config = Config::load(path)
++                .with_context(|| format!("重新加载配置失败: {}", path.display()))?;
++            config.window_min_k = ws.min_k;
++            config.window_max_k = ws.max_k;
++            config.window_cooldown_secs = ws.cooldown_secs;
++            config
++                .save()
++                .with_context(|| format!("持久化窗口参数失败: {}", path.display()))?;
++        } else {
++            tracing::warn!("配置文件路径未知，窗口参数仅在当前进程生效");
++        }
++        *self.window_settings.lock() = ws;
++        tracing::info!(
++            "窗口参数已设置: 平时在线 {} / 上限 {} / 冷却 {}s",
++            ws.min_k,
++            ws.max_k,
++            ws.cooldown_secs
++        );
++        Ok(())
++    }
++
+     fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
+         use anyhow::Context;
+ 
+@@ -1902,7 +2075,7 @@
+     /// 设置负载均衡模式（Admin API）
+     pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
+         // 验证模式值
+-        if mode != "priority" && mode != "balanced" {
++        if mode != "priority" && mode != "balanced" && mode != "window" {
+             anyhow::bail!("无效的负载均衡模式: {}", mode);
+         }
+ 
+@@ -1934,6 +2107,153 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    fn win_entry(id: u64, priority: u32) -> CredentialEntry {
++        let mut c = KiroCredentials::default();
++        c.priority = priority;
++        CredentialEntry {
++            id,
++            credentials: c,
++            failure_count: 0,
++            refresh_failure_count: 0,
++            disabled: false,
++            disabled_reason: None,
++            success_count: 0,
++            last_used_at: None,
++            cooldown_until: None,
++            in_flight: 0,
++        }
++    }
++
++    #[test]
++    fn test_window_only_uses_top_min_k() {
++        let mut es: Vec<CredentialEntry> = (1..=5).map(|i| win_entry(i, i as u32)).collect();
++        let now = Instant::now();
++        let mut seen = std::collections::HashSet::new();
++        for _ in 0..20 {
++            let r: Vec<&CredentialEntry> = es.iter().collect();
++            let p = pick_window(&r, now, 2, 4).unwrap().id;
++            seen.insert(p);
++            es.iter_mut().find(|e| e.id == p).unwrap().success_count += 1;
++        }
++        assert_eq!(seen, [1u64, 2].into_iter().collect(), "平时只轮换前 2 个号，其余冷备");
++    }
++
++    #[test]
++    fn test_window_grows_when_member_cooling_and_shrinks_after() {
++        let mut es: Vec<CredentialEntry> = (1..=5).map(|i| win_entry(i, i as u32)).collect();
++        let now = Instant::now();
++        es[0].cooldown_until = Some(now + StdDuration::from_secs(60));
++        let mut picks = std::collections::HashSet::new();
++        for _ in 0..20 {
++            let r: Vec<&CredentialEntry> = es.iter().collect();
++            let p = pick_window(&r, now, 2, 4).unwrap().id;
++            picks.insert(p);
++            es.iter_mut().find(|e| e.id == p).unwrap().success_count += 1;
++        }
++        assert_eq!(picks, [2u64, 3].into_iter().collect(), "#1 冷却 ⇒ K 扩到 3，用 #2 #3，不碰 #1 #4 #5");
++        // 冷却结束 ⇒ 缩回前 2 个
++        let later = now + StdDuration::from_secs(61);
++        let r: Vec<&CredentialEntry> = es.iter().collect();
++        assert!(matches!(pick_window(&r, later, 2, 4).unwrap().id, 1 | 2));
++    }
++
++    #[test]
++    fn test_window_caps_at_max_k_and_never_waits() {
++        let mut es: Vec<CredentialEntry> = (1..=6).map(|i| win_entry(i, i as u32)).collect();
++        let now = Instant::now();
++        for (i, e) in es.iter_mut().take(4).enumerate() {
++            e.cooldown_until = Some(now + StdDuration::from_secs(10 + i as u64));
++        }
++        let r: Vec<&CredentialEntry> = es.iter().collect();
++        // 前 4 个全冷却、上限 4 ⇒ 不扩到 #5 #6，选最早解冻的 #1（直接发，不等）
++        assert_eq!(pick_window(&r, now, 2, 4).unwrap().id, 1);
++    }
++
++    #[test]
++    fn test_window_prefers_fewer_in_flight() {
++        let mut es: Vec<CredentialEntry> = (1..=3).map(|i| win_entry(i, i as u32)).collect();
++        es[0].in_flight = 3;
++        let r: Vec<&CredentialEntry> = es.iter().collect();
++        assert_eq!(pick_window(&r, Instant::now(), 2, 4).unwrap().id, 2);
++    }
++
++    #[test]
++    fn test_report_rate_limited_has_alternative_only_inside_max_k() {
++        let mut config = Config::default();
++        config.load_balancing_mode = "window".to_string();
++        config.window_min_k = 1;
++        config.window_max_k = 2;
++        let creds: Vec<KiroCredentials> = (0..3)
++            .map(|p| {
++                let mut c = KiroCredentials::default();
++                c.priority = p;
++                c
++            })
++            .collect();
++        let m = MultiTokenManager::new(config, creds, None, None, false).unwrap();
++        assert!(m.is_window_mode());
++        assert!(m.report_rate_limited(1), "#2 在上限内且未冷却 ⇒ 可换");
++        assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");
++    }
++
++    #[test]
++    fn test_window_settings_validate_and_persist() {
++        let config_path = std::env::temp_dir().join(format!("kiro-window-{}.json", uuid::Uuid::new_v4()));
++        std::fs::write(&config_path, r#"{"loadBalancingMode":"window"}"#).unwrap();
++        let config = Config::load(&config_path).unwrap();
++        let m = MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false).unwrap();
++        assert_eq!(m.get_window_settings(), WindowSettings { min_k: 2, max_k: 3, cooldown_secs: 60 });
++
++        for bad in [
++            WindowSettings { min_k: 0, max_k: 2, cooldown_secs: 60 },
++            WindowSettings { min_k: 3, max_k: 2, cooldown_secs: 60 },
++            WindowSettings { min_k: 2, max_k: WINDOW_K_HARD_CAP + 1, cooldown_secs: 60 },
++            WindowSettings { min_k: 2, max_k: 3, cooldown_secs: 0 },
++        ] {
++            assert!(m.set_window_settings(bad).is_err(), "{:?} 应被拒", bad);
++        }
++        assert_eq!(m.get_window_settings().max_k, 3, "被拒的设置不得生效");
++
++        let ok = WindowSettings { min_k: 3, max_k: 5, cooldown_secs: 30 };
++        m.set_window_settings(ok).unwrap();
++        assert_eq!(m.get_window_settings(), ok);
++        let persisted = Config::load(&config_path).unwrap();
++        assert_eq!((persisted.window_min_k, persisted.window_max_k, persisted.window_cooldown_secs), (3, 5, 30));
++        assert_eq!(persisted.load_balancing_mode, "window", "写窗口参数不得改掉别的字段");
++        std::fs::remove_file(&config_path).unwrap();
++    }
++
++    #[test]
++    fn test_window_settings_clamped_from_bad_config() {
++        let mut config = Config::default();
++        config.window_min_k = 0;
++        config.window_max_k = 999;
++        config.window_cooldown_secs = 0;
++        let m = MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false).unwrap();
++        assert_eq!(m.get_window_settings(), WindowSettings { min_k: 1, max_k: WINDOW_K_HARD_CAP, cooldown_secs: 1 });
++    }
++
++    #[test]
++    fn test_window_settings_change_takes_effect_on_rate_limit() {
++        let mut config = Config::default();
++        config.load_balancing_mode = "window".to_string();
++        config.window_min_k = 1;
++        config.window_max_k = 1;
++        let creds: Vec<KiroCredentials> = (0..3).map(|p| { let mut c = KiroCredentials::default(); c.priority = p; c }).collect();
++        let m = MultiTokenManager::new(config, creds, None, None, false).unwrap();
++        assert!(!m.report_rate_limited(1), "上限 1 ⇒ 无号可换");
++        m.set_window_settings(WindowSettings { min_k: 1, max_k: 2, cooldown_secs: 60 }).unwrap();
++        assert!(m.report_rate_limited(1), "页面把上限改成 2 后立刻能换到 #2");
++    }
++
++    #[test]
++    fn test_window_mode_accepted_by_setter() {
++        let m = MultiTokenManager::new(Config::default(), vec![KiroCredentials::default()], None, None, false).unwrap();
++        m.set_load_balancing_mode("window".to_string()).unwrap();
++        assert_eq!(m.get_load_balancing_mode(), "window");
++        assert!(m.set_load_balancing_mode("nope".to_string()).is_err());
++    }
+ 
+     #[test]
+     fn test_is_token_expired_with_expired_token() {
+diff -ruN a/src/model/config.rs b/src/model/config.rs
+--- a/src/model/config.rs	2026-10-08 17:40:39
++++ b/src/model/config.rs	2026-10-22 10:32:06
+@@ -55,6 +55,22 @@
+     #[serde(default = "default_node_version")]
+     pub node_version: String,
+ 
++    /// streaming SDK 版本（拼进 user-agent 的 `aws-sdk-js/<v>` 与 `api/codewhispererstreaming#<v>`）
++    #[serde(default = "default_sdk_version")]
++    pub sdk_version: String,
++
++    /// window 模式：平时同时在用的号数（K 下限）
++    #[serde(default = "default_window_min_k")]
++    pub window_min_k: usize,
++
++    /// window 模式：被 429 冷却时最多补到几个号（K 上限，其余号不碰）
++    #[serde(default = "default_window_max_k")]
++    pub window_max_k: usize,
++
++    /// window 模式：号被 429 后冷却多少秒（冷却期间不选它，不等待）
++    #[serde(default = "default_window_cooldown_secs")]
++    pub window_cooldown_secs: u64,
++
+     #[serde(default = "default_tls_backend")]
+     pub tls_backend: TlsBackend,
+ 
+@@ -151,6 +167,22 @@
+     "priority".to_string()
+ }
+ 
++fn default_sdk_version() -> String {
++    "1.0.34".to_string()
++}
++
++fn default_window_min_k() -> usize {
++    2
++}
++
++fn default_window_max_k() -> usize {
++    3
++}
++
++fn default_window_cooldown_secs() -> u64 {
++    60
++}
++
+ fn default_extract_thinking() -> bool {
+     true
+ }
+@@ -172,6 +204,10 @@
+             api_key: None,
+             system_version: default_system_version(),
+             node_version: default_node_version(),
++            sdk_version: default_sdk_version(),
++            window_min_k: default_window_min_k(),
++            window_max_k: default_window_max_k(),
++            window_cooldown_secs: default_window_cooldown_secs(),
+             tls_backend: default_tls_backend(),
+             count_tokens_api_url: None,
+             count_tokens_api_key: None,

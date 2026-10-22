@@ -12,6 +12,8 @@ description: >-
   "给 kiro 加个模型 / 把 kiro 上的新模型开给大家"、"给 kiro 加个账号 / 把某个号摘掉"、
   "admin 上看不了余额 / 权限不足 403"、"kiro-* 那些道怎么样了"、
   "升级 kiro.rs / 官方有新版吗 / 新版有什么提升"、"30890 那个 kiro admin 界面 / 改界面 / 排序"、
+  "Claude Code 走走停停 / opus-5.5 空回复 / 0 token end_turn"、
+  "kiro 协议太老 / 11-09 断连 / profileArn is required / 学生号没有 profileArn"、
   或者要给生产 key 授权 `kiro-*` 名字。
 ---
 
@@ -86,13 +88,13 @@ export KIRO_PROXY_HOSTPORT=127.0.0.1:18120        # ② 只给 kiro-probe.py 改
 - 先找一台能通的跳板：`ssh pubSrv 'nc -z -w4 10.68.13.198 22'`（10-08 `pubSrv` 通、
   `priSrv` 不通）。`scripts/jms` 那条堡垒机路要求能到 `10.68.13.189:2222`，不在内网时同样不通。
 
-## §0.1 十三个脚本：读用 `kiro-probe.py`，写用 `kiro-pool.py`，回归用 `kiro-lane-regress.sh`，改镜像用 `kiro-rs-build/ship/e2e`，改 UI 先 `kiro-admin-ui/verify.sh`
+## §0.1 十四个脚本：读用 `kiro-probe.py`（直打上游推理用 `kiro-upstream-probe.py`），写用 `kiro-pool.py`，回归用 `kiro-lane-regress.sh`，改镜像用 `kiro-rs-build/ship/e2e`，改 UI 先 `kiro-admin-ui/verify.sh`
 
 本仓 `scripts/` 下，都在**本机**跑（内部自己 ssh 198），不需要先登录：
 
 | 脚本 | 性质 | 干什么 |
 |---|---|---|
-| `kiro-pool.py` | **写**（admin API，零重启） | `show [--with-quota] [--tier]` / `add <导出json>` / **`add-batch <多个json>`**（10-08 加，批量加号走它，别手搓 for）/ `remove <id>` / `priority <id> <n>` / **`priority-batch --ids 1,2,3 <n>`** 或 **`priority-batch --by-tier STUDENT <n>`**（10-17 加，批量改优先级一次备份一次复核）/ `extract <备份> <who>`。`--tier` 只查 enabled 号的档位（比 `--with-quota` 快） |
+| `kiro-pool.py` | **写**（admin API，零重启） | `show [--with-quota] [--tier]` / **`show --summary`**（10-22 加：auth×档位×启用×有无 ARN 计数表，读盘上字段秒出；「学生号有几个/启用的是什么号」用它）/ `add <导出json>` / **`add-batch <多个json>`**（10-08 加，批量加号走它，别手搓 for）/ `remove <id>` / `priority <id> <n>` / **`priority-batch --ids 1,2,3 <n>`** 或 **`priority-batch --by-tier STUDENT <n>`**（10-17 加，批量改优先级一次备份一次复核）/ `extract <备份> <who>`。`--tier` 只查 enabled 号的档位（比 `--with-quota` 快） |
 | `kiro-probe.py` | **纯只读**（直打 AWS） | `catalog`（`ListAvailableModels` 逐号）/ `quota` / `both` / `has <模型…>`（退出码即判据）。凭据与出口都从 live pod 现取，401/403 自己走 refresh（**按 `authMethod` 分流 idc / social**）。social 号必带 `--out-rotated FILE`，见 §D3 第 0 步。**批量验号用 `--summary-json`**，见下条红线 |
 | `kiro-batch-prepare.py` | 只读线上 + 写本地文件 | **批量加号的筛子**（10-02 入仓）：拿整库导出跟线上逐号比三把判据，只把**新增**的号拍平成 per-account 文件（0600）并过 6 道门。`--dry-run` 只比对不写。门禁 `backend/tests/test_kiro_batch_prepare.py` 30 条。见 §D3「一次加多个号」/ §D4.1 |
 | `kiro-lane-regress.sh` | 只读压测 | 21 条道（10-16 现读）回归一条龙：车道名现取 + **条数断言** + bench + in_tok 容差带比对。见 §E |
@@ -104,6 +106,7 @@ export KIRO_PROXY_HOSTPORT=127.0.0.1:18120        # ② 只给 kiro-probe.py 改
 | `kiro-rs-ship.sh` | 送镜像；**`--switch` 才写生产** | 188→本机→198（2MB 分块）→242 containerd，四处对 sha。`--switch` 备份 deploy + set image 两容器 + 打印回滚 + 比切前切后池子。见 §C |
 | `kiro-rs-e2e.sh` | 隔离容器（不碰生产） | 198 docker 起新镜像，单号 + 假 refreshToken，打真上游 11 例（含 sonnet-5 对照、tool_result 夹图片、web_search）。用例在 `kiro_rs_e2e_cases.py`。跑旧 tag 即阴性对照。见 §C |
 | `kiro-admin-ui/verify.sh` | 只读线上（一次 GET /credentials）+ 本机 | **改 Admin UI 先跑它**（10-18 加）：干净上游 admin-ui + 全部 UI 补丁 → tsc/vite → mock 回放 live 池子（写请求一律 403 并计数）→ Playwright 逐条件对条数。见 §C「改 Admin UI」 |
+| `kiro-upstream-probe.py` | **纯只读**（直打 `generateAssistantResponse`，绕过 kiro.rs） | 10-22 加。`dump`（原样打印 HTTP 头 + 每帧全部帧头，不过滤）/ `ruler`（空回复判据 8 场景自校验）/ `gate`（版本 × profileArn 闸门矩阵）。判据门禁 `backend/tests/test_kiro_upstream_empty_verdict.py`（合成帧离线跑；判据改回「缺 metering」会挂）。凭据/出口/指纹复用 `kiro-probe.py`；缺省自动挑一个能回话的启用 idc 号。见 §G |
 | `kiro-enable-overage.py` | **写**（Kiro Management API） | 为 social 号批量开启 overage（超额计费）。`<id…>` 按 id 指定 / `all-new` 选未消耗的 social 号 / `--check` 只读验证不写。从 PVC 读凭据 → refresh → `setUserPreference` → `getUsageLimits` 验证。开完自动轮询到 ENABLED（`--wait N`，默认 45s，10-15 实测 ~30s 才翻）；退出码全 ENABLED=0。cap/rate 读 `usageBreakdownList[0]`（10-15 修：之前读错位置恒 None）|
 
 🔴 **`kiro-lane-add.py` 与 `litellm-198-key-behavior-regress.py` 是 09-29 从 198 盘上
@@ -1320,6 +1323,10 @@ key 的来源是 `secret/kiro-rs-bootstrap` 的 `config.json`（ns 里**没有**
 | **203** | `valencia.jusza@binus.ac.id`（IdC/BuilderId） | 10-19 19:5x~20:0x | `add` 自动备份 | 同批第 10 个，2FA 轮转首轮失败后补做成功。`KIRO STUDENT` 21 模型，`add --priority 0` 池 193→194，在役 id156 不切。AcctMgr 171→172。🔴 **首轮失败的真因 = 第二步没带 `TOTP_SEED` 登录**（该号密码已在第一步改掉，壳把新密码传进去了，但 2FA 那步该用的旧 seed 仍然有效，我却据结果文件的 `deleted_old: True` 认定旧 seed 已失效）⇒ 用户指出「旧的就可以」，带旧 seed 重跑**原脚本一次走通**：删旧设备 → 选中「身份验证器应用程序」→ 取新 seed → 分配 MFA。⛔ 我当时拿「`devices_before: []` + passkey 页」编了「该号从未设过 authenticator app ⇒ AWS 不给选设备类型」的故事，**这是错的**：成功那轮 `devices_before` 照样是 `[]`，日志里却明确「精确点击『删除』→ 旧设备已删除」 ⇒ 该字段是 10-08 就记过的坏量具（SPA 用 div/card 非 table，`list_mfa_devices` 恒回 0），**不能当「这号没 MFA」的判据**；`deleted_old: True` 同理只表示点了删除按钮 |
 
 | **204~206** | `andreea.alexandra.stoian` / `etelka.pop` / `hanes.eduardo`（均 @stud.ubbcluj.ro，**GitHub social**） | **10-19 00:0x** | `add-batch` 自动备份 | 核查飞书 59~81 行时发现这 3 个标着「已添加」但两边都没有 ⇒ 补齐。🔴 **过程中撞上新的 AWS WAF 九宫格选图题**（卡 `/github/authorize` 回 405、**从不跳 github.com**），解法见 `kiro-account-manager-ops` §「2026-10-19 这条链上多了一道 AWS WAF 选图题」：`kiro_waf_solve.py` 过一次题导出 `aws-waf-token`（约 4 天）→ `kiro_github_login.py` 带 `WAF_COOKIES=` 复用，3/3 各约 20s。`KIRO STUDENT` 21 模型、probe `rotated=False` ⇒ 用原 json 加，`add-batch --priority 0` 3/3，池 194→197、AcctMgr 172→175，在役 id195 不切。回归 21/21 绿。🔴 **开 overage 回 403** `not authorized to make this call`；阳性对照 id143（PRO+ social）`--check` 回 ENABLED ⇒ 非脚本问题。池里 social 号全是 PRO+，这 3 个是唯一 STUDENT social ⇒「STUDENT social 开不了 overage」与数据一致但**无第二样本可证**，未下定论；不影响使用 |
+| **248** | `drab_dilemma1s@icloud.com`（**GitHub social**，非 binus） | 10-20 16:4x | `add-batch` 自动备份 | 用户贴单份 refreshToken 导出（自带 us-east-1 profileArn），按 `kiro-account-manager-ops`「只拿到一份导出」七步直通。**`KIRO PRO MAX` 5000**、21 模型，overage `--wait 90` 一轮 ENABLED（cap 10000）。`--priority 0` 池 238→239，在役 id230 不切。AcctMgr 216→217，App 开着、80s 后复读仍在。回归 21/21；gpt5.6 三道 in_tok +8% 偏基线（与加号无关，待 §G 查） |
+| **256** | `elinagilhuly@gmail.com`（**Google social**） | 10-21 00:2x | `add-batch` 自动备份 | 用户贴单份导出（带 `apiRegion: eu-central-1`，筛子已丢弃），七步直通。**`KIRO PRO MAX` 5000**、21 模型，overage `--wait 90` ENABLED（cap 10000）。`--priority 0` 池 246→247，在役 id254 不切。AcctMgr 223→224。回归 21/21；gpt5.6 三道 in_tok +8.4% 同 id248 那次的旧偏离 |
+| **260~262** | `hamitkoyun349@gmail.com`（Google social）+ `wallemondderom` / `wadalebygreaielle@gmail.com`（BuilderId IdC） | 10-21 14:5x | `add-batch` 自动备份（末份 `credentials.json.20261021-145405`） | 用户分两次贴导出（IdC 两份带 `apiRegion: eu-central-1`，筛子已改）。按要求 `--priority 1`，池 250→253，在役 id239（prio 1）不切。id260 `KIRO PRO MAX` 5000、overage ENABLED（cap 10000）；IdC 两个不开超额。AcctMgr 227→230。回归 21/21；gpt5.6 三道 in_tok +8% 同旧偏离 |
+| **275** | `mastanshah70250@gmail.com`（**BuilderId IdC**，非 binus） | 10-22 13:35 | `credentials.json.20261022-133502` | 用户贴单份导出（带 `apiRegion: eu-central-1`，筛子已改成 us-east-1），按 `kiro-account-manager-ops`「只拿到一份导出」七步直通。判重 0 命中，probe `KIRO PRO MAX` 5000 满额、21 模型、`rotated:false`。`add --priority 2` 落地 id275（身份门过），池 265→266、available 27→28，在役 id262 不切（现读 262 余 1396/5000 ⇒ 按 SOP 不动 priority）。⛔ IdC 不开 overage。AcctMgr 242→243（App 未开，现读 `len`+按 email 复核）。回归 **20/21**：`minimax-m2.1` 首发 180s 超时，`--only … --rounds 3` 复打 **3/3**（ttft 151.9/5.6/1.9，in_tok 3709 在基线内）⇒ 上游长尾抖动不是坏道。🔴 **写入 `--priority 2`，10 分钟后现读变成 prio=1**（在役 262 也从 prio=1 漂成 0），又一次 [[feedback_kiro_pool_priority_and_disabled_change_without_us]] |
 | ⛔ **darren.philipsintoro**（进不了池） | — | 10-13 入 AcctMgr | — | **AWS 把号封停了**：探针 403 `Your User ID (b4b89498-…) temporarily is suspended. We've locked your account as a security precaution.`，指向 `app.kiro.dev/account/usage?support_form` 提工单验证身份 ⇒ 自动化救不了。这解释了它为何只在 AcctMgr（token 还活）却从来没进池 |
 | ⏳ **nur.inayah**（待凭据） | — | — | — | 两边都没有。飞书直连查（`record_scope=all_records` `field_scope=all_fields`）确认「新Kiro密码/新2fa/新邮箱密码」三栏全空，只有原始的 `密码` + `2fa`。密码能过（登录到了 MFA 页）但**那个 seed 被 AWS 拒**（反复填码不过）⇒ 2FA 大概换过没回填。另：它「邮箱密码」栏是转发邮箱地址不是密码 ⇒ 无邮箱取码能力 |
 
@@ -1592,6 +1599,67 @@ kiro.rs 日志 `API 请求失败（上游瞬态错误，尝试 N/9）: 500 Inter
 | 整个拆掉 | `kubectl delete ns kiro-rs` —— 全程只新建对象，零既有 workload 改动 |
 
 ## §G 坑清单
+
+**🔴 判「上游是不是真空回复」别用「缺 `meteringEvent`」——那把尺子量的是别的东西。**
+10-22 实测 12 发全部落地（凭据 211，走线上同一代理出口）：
+
+| 场景 | 帧序列 | metering |
+|---|---|---|
+| 不发 origin，1 字 / 58 字 / 224 字 / 敏感 135 字拒绝 | `assistantResponseEvent×N` 裸结束 | **N** |
+| **发** origin，1 字回答 | `assistantResponseEvent → contextUsageEvent → meteringEvent` | Y |
+| **发** origin，opus-4.6 敏感 373 字 | `…×111 → contextUsageEvent → meteringEvent` | Y |
+| **发** origin，opus-5.5 敏感（真空） | **仅 `contextUsageEvent`**（148B） | N |
+| 发 origin + 工具 | `toolUseEvent×2`（零文本但正常！） | N |
+
+⇒ 8 个**有内容**的回包里 **5 个缺 `meteringEvent`**。
+`meteringEvent`/`contextUsageEvent` 这两个收尾帧**只在带 origin 时出现**，
+所以「缺 metering」其实在量「有没有发 origin」，不是在量「有没有内容」。
+照它改 ⇒ 5 个正常回复被判成空 ⇒ 重试+换号 ⇒ 重演 Quorinex/Kiro-Go #147/#158
+那个「IdC 账号全打死、100% 失败」事故。**我们池里启用号全是 `authMethod=idc`。**
+
+**正确判据**（带 origin 这条路径，也就是 kiro-rs 实际走的）：
+`收到 contextUsageEvent` 且 `assistantResponseEvent==0` 且 `toolUseEvent==0`。
+不发 origin 的那些正常回复连 `contextUsageEvent` 都没有，不在同一路径，不会被误判。
+🔴 **零文本 ≠ 空回复**：必须把 `toolUseEvent` 算进去（实测工具轮就是零文本）。
+
+动空回复处理前先跑 `python3 scripts/kiro-upstream-probe.py ruler`
+（8 场景含工具轮，期望值写死在用例里；未落地的标 ⚪ 不计入，0 落地判废；误判 ⇒ exit 1）。
+10-22 复跑 8/8 正确（工具轮 `toolUseEvent×2` 零文本判非空）。
+业界共识：**绝不伪造 `end_turn`，重试 + 耗尽后显式报错，不注占位文本。**
+
+**🔴 opus-5.5 静默空回（Claude Code「走走停停」的根因）。**
+三个条件同时满足才吞：`claude-opus-5.5` + 请求里**有** `origin` 字段（AI_EDITOR→148B 仅
+contextUsageEvent；KIRO_CLI→0 字节）+ 指名第三方平台的改账号密码类 prompt。
+不发 origin ⇒ 正常文本拒绝；opus-4.6 同 prompt ⇒ 正常文本拒绝。
+上游**零提示**：HTTP 200、无 `:exception-type`、无 CONTENT_FILTERED（那个只在官方 CLI 的
+stream-json 包装层可见，底层事件流里没有承载帧）。kiro.rs 把它翻成 `end_turn`+空 content。
+现场取证：`kiro-upstream-probe.py dump --sensitive [--origin none|KIRO_CLI]`。
+原始帧 + requestId：`docs/kiro-opus55-silent-empty-raw-evidence-2026-10-22.txt`。
+
+**🔴 11-09 版本闸门：报 KiroIDE ≥0.11.133 强制要 `profileArn`，idc 号用 BuilderId 占位 ARN 解。**
+官方 kirodotdev/Kiro#11335：**2026-11-09** 断 IDE <0.11.133（我们报 0.11.107）；#11966：2027-01-15 再断 0.11.133~0.12.291。
+`kiro-upstream-probe.py gate --with-social-arn` 实测（10-22，idc 号 212/214/240/262/266）：
+
+| 版本 | 不带 ARN | BuilderId 占位 `…638616132270:profile/AAAACCCCXXXX` | 借 social ARN |
+|---|---|---|---|
+| 0.11.107 | 200 | 200 | 403 bearer invalid |
+| 0.11.133 / 0.12.155 | **400 profileArn is required** | **200 正常回字** | 403 |
+
+- 占位 ARN 出自 Kiro IDE 源码 `FixedProfileArns`（BuilderId 写死；Github/Google 是 social 那个）。
+  Builder ID 个人号（学生号=学校邮箱+SheerID）**没有真 profile，账户页也没有可设置项**；
+  官方 CLI 只对企业 IdC 选 profile（aws/amazon-q-developer-cli `cli/user.rs:177`）。
+- 落地 = kiro.rs `endpoint/ide.rs::inject_profile_arn` 对无 ARN 的 idc 号注入占位 +
+  `config.json` 写 `kiroVersion`（不写则吃 `config.rs:129` 默认 0.11.107）。**只给推理请求注入**：
+  据 Kiro-account-manager v1.7.3，占位 ARN 发 `ListAvailableModels` 会 403（我们没测）。
+- ⚠️ 10-22 SG 压测：报 1.4.13 + 借 ARN 时 429 reason 变 `USER_REQUEST_RATE_EXCEEDED`、成功量掉到 1/4~1/5
+  ⇒ **只调到够过闸的版本，别追最新**；切之前先在 SG 实例用 0.11.133 压一轮对比限流。
+- 未知：官方不承诺占位 ARN 长期有效，11-09 当天服务端会不会开始校验它无法预知 ⇒ 当天实测。
+
+⚠️ **盘上 `credentials.json` 的 accessToken 是陈旧快照 ⇒ 直打上游一片 403，
+那不是「号没额度」。** 10-22 我拿盘上 token 探 31 个启用号得到 29 个 403，
+误读成「全池耗尽」；admin API 逐个 `POST /credentials/{id}/refresh` 后立刻 3/3 可用。
+判「有没有额度」只认刷新后真打一发：402 `MONTHLY_REQUEST_COUNT` 才是耗尽，403 是 token 旧。
+（`getUsageLimits` 对我们的 idc 号缺 profileArn 读不到配额，号是好的，别误判。）
 
 **🔴 模型名会静默降级，「200 且能回话」判不出模型对不对。**
 v2026.2.7 的 `converter.rs:map_model` 只做子串匹配、没有 5 系分支，

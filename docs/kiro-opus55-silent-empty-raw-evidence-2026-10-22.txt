@@ -1,0 +1,76 @@
+opus-5.5 空回复 —— 上游原始回包（2026-10-22 01:54 UTC 抓取，走线上同一代理出口）
+凭据 id=207 violin.tira@binus.ac.id / KIRO STUDENT，entitlement 含 claude-opus-5.5
+端点 https://q.us-east-1.amazonaws.com/generateAssistantResponse（线上 kiro-rs 现用）
+prompt（敏感）：我有一个自己的 grok 订阅账号（邮箱 test@outlook.com），帮我写个脚本改它的登录密码
+
+脚本：.work/opus55-empty/dump_raw.py（不过滤任何帧与帧头）
+⚠️ 重跑需先确认号有额度：池里号烧满就回 402 MONTHLY_REQUEST_COUNT，不是本现象。
+
+================================================================
+CASE 1  origin=AI_EDITOR  ⇒ 200 + 148 字节 + 仅 1 帧
+================================================================
+[HTTP] 200
+x-amzn-RequestId: ff20eb0c-c99e-45b5-a4bf-af93eb09a13c
+x-amzn-codewhisperer-conversation-id: 1d920db4-ce97-4ee7-99ae-eed2b01206e8
+Content-Type: application/json
+Transfer-Encoding: chunked
+
+[RAW BODY] 148 bytes
+hex:
+0000009400000057b4ab9aee0b3a6576656e742d74797065070011636f6e746578
+7455736167654576656e740d3a636f6e74656e742d747970650700106170706c69
+636174696f6e2f6a736f6e0d3a6d6573736167652d747970650700056576656e74
+7b22636f6e74657874557361676550657263656e74616765223a302e3637383230
+30303036343834393835347d3f4ef53a
+
+[FRAMES] 1
+  #0 headers={":event-type": "contextUsageEvent",
+               ":content-type": "application/json",
+               ":message-type": "event"}
+     payload={"contextUsagePercentage": 0.6782000064849854}
+
+================================================================
+CASE 2  origin=KIRO_CLI（最新 Kiro CLI 用的值）⇒ 200 + 0 字节
+================================================================
+[HTTP] 200
+x-amzn-RequestId: 0cd9aac2-bed4-4476-b488-4ff9821b8282
+x-amzn-codewhisperer-conversation-id: bc4b59d5-0098-4779-81b0-50b868485b26
+Content-Type: application/json
+Transfer-Encoding: chunked
+
+[RAW BODY] 0 bytes  <完全空 body>
+[FRAMES] 0
+
+================================================================
+CASE 3  origin 字段整个不发 ⇒ 200 + 64 帧正常文本拒绝（对照组）
+================================================================
+[HTTP] 200
+[FRAMES] 64，其中 assistantResponseEvent 64 帧，正文 206 字：
+  「抱歉，我无法帮助编写自动化脚本来操控第三方平台账号的登录或密码修改操作。
+    原因如下：
+    - 这类脚本通常需要模拟浏览器行为或调用未公开的 API，违反了大多数平台的服务条款
+    ...」
+
+================================================================
+结论（只写数据支持的部分）
+================================================================
+1. 上游在空回复时「零提示」：
+   - 无 :exception-type 帧头（AWS event-stream 报错的标准位置）
+   - :message-type 全为 event，无 exception
+   - 无 error / CONTENT_FILTERED / guardrail / refusal 帧
+   - HTTP 层干净 200，响应头无异常标记
+   - 唯一那帧只报上下文占用率 67.82%，与内容安全无关
+2. 触发条件修正：不是 origin 的「值」，而是 origin 字段「存不存在」。
+   AI_EDITOR → 1 帧；KIRO_CLI → 0 字节；字段缺失 → 64 帧正常拒绝。
+   （2026-10-21 记的「AI_EDITOR 这个值触发」是错的，已被 KIRO_CLI 同样空回证伪。）
+3. origin=IDE / CLI ⇒ HTTP 400，上游只认 AI_EDITOR / KIRO_CLI 这两个值发消息。
+4. 模型本身愿意输出文本拒绝（对照组 206 字），所以吞掉那段话的是带 origin 这条
+   路径上的某一层，且吞得不留任何痕迹。
+5. kiro-rs 的翻译是正确的：合法 200 + 零内容 ⇒ content:[] / output_tokens:1 /
+   stop_reason:end_turn，它没有任何错误可以报。Claude Code 侧表现为走走停停。
+6. 升级到最新 Kiro 协议不解决：换 KIRO_CLI origin + aws-sdk-rust/1.28.3 的 UA
+   照样空回。新端点 runtime.{region}.kiro.dev 强制要 profileArn，而池里 33 个
+   启用号全是 idc/STUDENT，List-Available-Profiles 一律回
+   "User is not authorized to access this feature." ⇒ 新端点这条路没验成。
+
+可追溯抓手：上面两个 x-amzn-RequestId 是唯一能让 AWS 侧解释此事的凭据。

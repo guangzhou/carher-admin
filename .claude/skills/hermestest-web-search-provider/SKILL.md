@@ -166,19 +166,30 @@ perplexity: {
 [reload] config hot reload applied (plugins.entries.perplexity.config)
 ```
 
-**这行带具体路径，是「gateway 进程本身吃进了这个改动」的直接证据，比重启更好。**
-`docker restart` 是多余动作。配置无效时 fail-closed：
+**这行带具体路径，是「gateway 进程本身吃进了这个改动」的证据 —— 但不证明回复路径没事。**
+🔴 **10-23 hermestest-13/75：热重载 applied、`infer web search` 也通，之后每条飞书消息 0.5s 内报
+`PreparedModelCatalogConfigReplacedError: prepared model catalog owner config was replaced during the read`，全部不回复**
+（OpenClaw 2026.8.1，模型目录快照和热重载后的新配置对不上）。`docker restart` 后恢复。
+⇒ **改 `openclaw.runtime.json5` 后一律 `docker restart`**（断 ~1 分钟，动前跟用户说），
+验收看 restart 后真实 dispatch 的 `dispatch complete (… replies=1)` 和 `grep -c PreparedModelCatalog`=0。配置无效时 fail-closed：
 `[reload] config reload skipped (invalid config): <reason>`。
 
 🔴 **判 skipped 不能只看「日志里有没有」** —— 整条日志史里任何一次历史失败
 都会让它永久判红。只有**最近一次 reload 事件是 skipped** 才是红
 （量具里比的是两者的时间戳，同 tz ISO 串字典序即时间序）。
 
+🔴 **别用 `sed -i` / 编辑器「另存」改 `openclaw.runtime.json5`**（2026-10-13 踩）：它是**单文件
+bind mount**，`sed -i` 写新 inode，容器仍挂着旧 inode ⇒ 宿主文件变了、容器里没变、**永远不会出 reload 行**。
+容器侧只读，不能从里面写。改法：`cp -p` 备份后用 `cat new > $F` 原地覆写（保 inode）；
+已经 `sed -i` 了 ⇒ `docker restart hermestest-14`（重绑挂载）。判据：宿主 `ls -i $F` 与
+`docker exec … ls -i /data/.openclaw/openclaw.json` 同号。重启后约 1 分钟内 runtime-plugins 在重建，
+这时跑量具 L2 会假红（`plugin path not found: …/carher-engine-swap`），等 `.carher-prepared-v3` 落地再测。
+
 ## 4. 坏尺子清单（这条路上我全踩过）
 
 | 坏尺子 | 症状 | 真相 |
 |---|---|---|
-| `docker exec` 不带 `-e HOME=/data` | 每个键都 `Config path not found` | HOME=/root，CLI 没读到任何配置。**结构性假红**，阳性对照 = `config get gateway` |
+| `docker exec` 不带 `-e HOME=/data` | 2026.6：`Config path not found`；🔴 **2026.8：`Config path is valid but unset: gateway` 且 rc=0** | HOME=/root，CLI 没读到任何配置。**结构性假红**。L0 只认读回 JSON 对象（10-20 旧判据被新措辞骗绿，`--no-home-fix` 不再 exit 3，已修） |
 | `openclaw infer web search "<问题>"` | `Missing required option "--query"` **且 exit 0** | 裸位置参数不吃，**假绿**。必须 `--query "<文本>"` |
 | `openclaw config get …apiKey` 验插值 | 返 `__OPENCLAW_REDACTED__` | **config get 验不了插值**，只有 L2 实打能验 |
 | 容器内 `curl 127.0.0.1:29131` | 返 `000`，像 gateway 死了 | 容器内是 **18789**，29131 是宿主映射 |

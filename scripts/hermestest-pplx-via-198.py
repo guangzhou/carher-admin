@@ -18,6 +18,9 @@ OpenClaw perplexity 插件只有在 ``plugins.entries.perplexity.config.webSearc
    （单文件 bind mount，``sed -i`` 换 inode 容器看不到，见 skill hermestest-web-search-provider §3）。
 5. 等 gateway 打 ``config hot reload applied``。
 6. ``infer web search`` 实打一题，断言 ``provider=perplexity`` + 有引用。
+7. **``docker restart``**（``--no-restart`` 可跳过）：只热重载的话 OpenClaw 2026.8.1 之后每条飞书消息都报
+   ``PreparedModelCatalogConfigReplacedError`` 不回复（10-23 13/75 实测）。重启后等 ``ws client ready``，
+   断言 ``PreparedModelCatalog`` 计数为 0。会断约 1 分钟，先跟用户说。
 
 model 名必须在这把 key 的 198 白名单里：13/75 只有 ``perplexity-sonar``，14 另有 ``-search``。
 脚本不替你判白名单——``--model`` 默认 ``perplexity-sonar``，L2 报 403 就是不在白名单。
@@ -127,6 +130,13 @@ else
   echo "  ⇒ 有 req: xxxxxxxx 就去 198 查原文（cli-anything-litellm db req <id>）；403 多半是 model 不在这把 key 的白名单"
   exit 1
 fi
+if [ "$RESTART" != 1 ]; then echo "⚠️ 没重启：热重载后回复路径可能坏（PreparedModelCatalogConfigReplacedError），尽快 docker restart $C"; exit 0; fi
+T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+docker restart "$C" >/dev/null
+for i in $(seq 1 40); do docker logs --since "$T0" "$C" 2>&1 | grep -q 'ws client ready' && break; sleep 5; done
+N=$(docker logs --since "$T0" "$C" 2>&1 | grep -c PreparedModelCatalog || true)
+echo "restart: ws_ready=$(docker logs --since "$T0" "$C" 2>&1 | grep -c 'ws client ready') catalog_errors=$N"
+[ "$N" = 0 ] || { echo 'STOP: 重启后仍报 PreparedModelCatalog'; exit 1; }
 '''
 
 
@@ -158,6 +168,8 @@ def main() -> int:
                     help="必须是训练截止后的事实，否则没搜也能答对")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--no-restart", action="store_true",
+                    help="只热重载不重启（不推荐：13/75 实测热重载后不回复）")
     a = ap.parse_args()
     if a.self_test:
         return self_test()
@@ -168,6 +180,7 @@ def main() -> int:
         return 2
     env = "".join(f"{k}={shlex.quote(v)}\n" for k, v in (
         ("C", a.instance), ("APPLY", "1" if a.apply else "0"), ("MODEL", a.model), ("QUERY", a.query),
+        ("RESTART", "0" if a.no_restart else "1"),
         ("PYB64", base64.b64encode(REMOTE_PY.encode()).decode())))
     p = subprocess.run([JMS, "ssh", a.asset, "bash -s"], input=env + REMOTE_SH, text=True)
     return 4 if p.returncode == 255 else p.returncode

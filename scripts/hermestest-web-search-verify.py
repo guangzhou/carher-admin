@@ -61,21 +61,25 @@ set -u
 C={a.instance}
 X="docker exec {home} $C"
 
+# 13/75 的 CLI 每次先打一行 `⚠ [carher] OpenClaw config has N deprecated key(s)...`，
+# 混在 JSON 前面 ⇒ L0/L1 json.loads 失败 ⇒ 10-23 两台都被判「尺子坏了」（假红）。只滤这一种前缀。
+NOISE='^⚠ \\[carher\\]|^\\[config\\] warnings'
+
 echo "{MARK}L0"
-$X openclaw config get gateway 2>&1 | head -20
+$X openclaw config get gateway 2>&1 | grep -v -E "$NOISE" | head -20
 
 echo "{MARK}L1_VALIDATE"
-$X openclaw config validate 2>&1 | tail -40
+$X openclaw config validate 2>&1 | grep -v -E "$NOISE" | tail -40
 
 echo "{MARK}L1_READBACK"
-$X openclaw config get plugins.entries.{a.plugin}.config 2>&1 | head -20
+$X openclaw config get plugins.entries.{a.plugin}.config 2>&1 | grep -v -E "$NOISE" | head -20
 
 echo "{MARK}L1_RELOAD"
 docker logs $C 2>&1 | grep -F 'config hot reload applied' | tail -5
 docker logs $C 2>&1 | grep -F 'config reload skipped' | tail -3
 
 echo "{MARK}L2"
-$X timeout {a.timeout} openclaw infer web search --query {json.dumps(a.query)} 2>&1 | grep -v '^\\[config\\] warnings' | tail -5
+$X timeout {a.timeout} openclaw infer web search --query {json.dumps(a.query)} 2>&1 | grep -v -E "$NOISE" | tail -5
 
 echo "{MARK}L3_STATE"
 docker inspect -f 'running={{{{.State.Running}}}} restarts={{{{.RestartCount}}}} health={{{{if .State.Health}}}}{{{{.State.Health.Status}}}}{{{{else}}}}none{{{{end}}}}' $C 2>&1

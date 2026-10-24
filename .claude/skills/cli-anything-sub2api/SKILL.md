@@ -11,15 +11,15 @@ description: >-
 
 # cli-anything-sub2api
 
-## 版本现状(2026-10-13 实测)
+## 版本现状(2026-10-24 实测)
 
 | | 版本 | 怎么量 |
 |---|---|---|
-| **198 线上** | **v0.2.16**(`127.0.0.1:5000/sub2api:20261013-v0.2.16`,10-13 23:26 切) | `$S versions`(READY=1 那行)/ `$S status` 的 `system.version` |
-| 上游最新 | v0.2.16(10-14 现量,198 已同版) | `$S versions` 末段 |
-| 源码 clone | `~/codes/sub2api` = origin/main(v0.2.16),全 tag 已拉 | |
+| **198 线上** | **v0.2.18 + 本地补丁 ps429b**(`127.0.0.1:5000/sub2api:20261024-v0.2.18-ps429b`,10-24 16:01 切;补丁见 `sub2api-grok-ops` §G) | `$S versions`(READY=1 那行)/ `$S status` 的 `system.version` |
+| 上游最新 | v0.2.18(10-24 现量,198 已同版) | `$S versions` 末段 |
+| 源码 clone | `~/codes/sub2api`,v0.2.18 tag 已在本地(10-24 核) | |
 
-198 升级史(rs 镜像 tag):v0.2.7(09-20) → v0.2.8(09-24) → v0.2.11(10-01) → v0.2.13(10-02) → v0.2.15(10-12) → v0.2.16(10-13)。
+198 升级史(rs 镜像 tag):v0.2.7(09-20) → v0.2.8(09-24) → v0.2.11(10-01) → v0.2.13(10-02) → v0.2.15(10-12) → v0.2.16(10-13) → v0.2.17(10-16) → v0.2.17-ps429b(10-22) → v0.2.18-ps429b(10-24)。
 备份/探针在 198 `/root/sub2api-backup/`(10-12 那轮:dump + `probe-pre/post.json` 全 ok,8 条腿)。
 ⚠️ **别信记忆/skill 里写的"当前线上版本"**(10-13 发现停在 v0.2.11 十二天、漏了两次升级),每次现量:
 
@@ -27,7 +27,7 @@ description: >-
 scripts/sub2api-cli.sh versions   # 198 rs 镜像历史(READY=1 那行=线上)+ health + 上游最新 tag
 ```
 
-**读源码对 198 行为要看部署那个 tag**:`git -C ~/codes/sub2api show v0.2.16:<path>`,别看工作区。
+**读源码对 198 行为要看部署那个 tag**:`git -C ~/codes/sub2api show v0.2.18:<path>`(+ 补丁 `scripts/grok-onboard/patches/`),别看工作区。
 本地到 GitHub **时通时不通**(10-13 同一天通过又断;断时 `git fetch` 静默挂几分钟,`versions` 限 20s)
 ⇒ 不通走 188:`ssh cltx@10.68.13.188 'curl -sL https://raw.githubusercontent.com/Wei-Shaw/sub2api/<tag>/<path>'`。
 
@@ -42,6 +42,10 @@ scripts/sub2api-cli.sh versions   # 198 rs 镜像历史(READY=1 那行=线上)+ 
   已设 `SUB2API_JWT`/`SUB2API_ADMIN_API_KEY` 跳过登录;`S2A_HUMAN=1` 出人读格式。
 - 兼容性:harness 用到的 admin 路由 v0.2.15 / v0.2.16 全在;**v0.2.15→v0.2.16 admin 路由零变化**,
   只有 group 多了可选 `i18n` 字段 ⇒ 198 升 v0.2.16 后 CLI 不用改。
+  **v0.2.16→v0.2.17 `routes/admin.go` 零 diff**,admin handler 只改了 codex 导入和 antigravity 测试模型过滤通配符;
+  10-16 实跑 `versions`/`status`(自报 0.2.17)+ harness 测试 35/35 ⇒ CLI 不用改。
+  **v0.2.17→v0.2.18 `routes/admin.go` 零 diff**;10-24 `status` 自报 0.2.18、auth_scheme=bearer-jwt ⇒ CLI 不用改。
+  「写接口会骗人」表引用的 `openai_gateway_grok.go` / `grok_upstream_errors.go` / `admin_user.go` 在这两版之间零 diff,表照旧成立。
 - cli-anything 本体 = Codex skill `~/.codex/skills/cli-anything`(不是 PATH 命令);
   上游 `HKUDS/CLI-Anything` 10-13 对比:HARNESS.md / repl_skin / 模板一致,只有 `skill_generator.py` 上游更新(正则→AST)。
   生成器产出的 SKILL.md 是通用模板(含 project/undo 等不适用段落),**本 skill 手写,不用它覆盖**。
@@ -84,7 +88,7 @@ $S --dry-run api post /admin/accounts/bulk-update --data '{"account_ids":[42],"s
 
 面板 `grok-4.7` `/v1/responses` 502(上游 422)、5 腿全 422 ⇒ 先看是不是同 IP 每 ~30s 一簇 6 条(=LiteLLM 重试放大),
 再按 skill `sub2api-grok-ops` §⚡ 的 422 段拿 A/B 探针 `scripts/grok-422/probe_agent_message.py` 定 item type。
-sub2api v0.2.16 的 grok responses 路径**不存 422 响应体**(`openai_gateway_grok.go` 无 `Detail:`),面板只会显示「422」。
+sub2api v0.2.16/v0.2.17 的 grok responses 路径**不存 422 响应体**(`openai_gateway_grok.go` 无 `Detail:`,两版零 diff),面板只会显示「422」。
 
 ## 写接口会骗人(收尾回读只认下表的尺子)
 
@@ -113,12 +117,40 @@ sub2api v0.2.16 的 grok responses 路径**不存 422 响应体**(`openai_gatewa
 - 10-13 查 198 的 55 个 grok 号:**全没配**。`pool_mode` 只对 apikey 号生效,grok oauth 号用不上。
 - ⚠️ 写 credentials 前先确认 PUT 不会把 GET 时被掩成空串的 token 写回去 —— 没验证前别动。
 
+## 上游 404 → model_rate_limited 30 分钟冷却（10-15 发现）
+
+sub2api 对上游 **404（model not found）** 也会触发 `model_rate_limited`，**每个号冷却 30 分钟**。
+日志关键词：`upstream_model_not_found_model_rate_limited`，`reason: upstream_404_model_not_found`。
+症状：`account_select_failed` 报 `pool=N, filtered: model_rate_limited=N` → 后续全 429 `no available accounts`。
+
+**10-15 实例**：LiteLLM DB 里 `sa-grok-4.6-latest` 的上游模型配成了 `openai/grok-4.6-latest`，
+但 x.ai `/v1/models` 里只有 `grok-4.6`，不认 `-latest` 后缀 → 3 个 ultra 号（credentials.model_mapping
+里声明支持 `grok-4.6-latest` 的那三个）逐个被 404 打进冷却 → 全池不可用。
+
+```bash
+# 查法
+sudo kubectl -n litellm-dev logs deploy/sub2api --tail=2000 | grep upstream_model_not_found_model_rate_limited
+# 修法（两步）
+# 1. LiteLLM 侧改上游模型名
+curl -X POST -H "Authorization: Bearer $MASTER_KEY" -H "Content-Type: application/json" \
+  http://127.0.0.1:30402/model/update \
+  -d '{"model_info":{"id":"sa/grok-4.6-latest"},"litellm_params":{"model":"openai/grok-4.6","api_base":"http://sub2api.litellm-dev.svc.cluster.local:8080/v1"}}'
+# 2. 清 sub2api 冷却
+$S accounts action 78 clear-error
+$S accounts action 79 clear-error
+$S accounts action 80 clear-error
+```
+
+⚠️ **pool 只含 `credentials.model_mapping` 里声明支持该模型名的账号**，不是全部 grok 号。
+59 个号的 `grok_observed_models` 都有 `grok-4.6`，但只有 3 个 ultra 号的 `model_mapping`
+里有 `grok-4.6-latest` 这个键 → `pool=3`。
+
 ## 别用它做的事
 
 - grok 加号 / reauth / rescue:`scripts/grok-onboard/sub2api-grok-onboard.py`(skill `sub2api-grok-ops`),
   已焊好上面这些尺子,别拿 CLI 手搓。
 - 并发闸(user vs account):skill `sub2api-concurrency-gate`。
-- 升级镜像:`scripts/grok-onboard/sub2api-upgrade.py`(198 `/Data/sub2api-ops/` 那份与仓内 sha256 逐字相等,10-13 核过)。
+- 升级镜像:`scripts/grok-onboard/sub2api-upgrade.py go`(生产带本地补丁 `scripts/grok-onboard/patches/`,`go` 会从源码重打;198 `/Data/sub2api-ops/` 那份与仓内 sha256 逐字相等,10-24 核过 `68bbfc55…`)。流程见 `sub2api-grok-ops` §G。
 
 ## 改 harness
 

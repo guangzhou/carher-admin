@@ -1,0 +1,77 @@
+diff --git a/backend/internal/service/grok_upstream_failure.go b/backend/internal/service/grok_upstream_failure.go
+index 53d9d5500..58217dc27 100644
+--- a/backend/internal/service/grok_upstream_failure.go
++++ b/backend/internal/service/grok_upstream_failure.go
+@@ -468,7 +468,19 @@ func isGrokModelCapacityText(low string) bool {
+ 		strings.Contains(low, "overloaded") ||
+ 		strings.Contains(low, "server_busy") ||
+ 		strings.Contains(low, "too many concurrent") ||
+-		strings.Contains(low, "engine_overloaded")
++		strings.Contains(low, "engine_overloaded") ||
++		isGrokPerSecondRateLimitText(low)
++}
++
++// isGrokPerSecondRateLimitText matches xAI's per-second team+model ceiling,
++// e.g. "Requests per Second (actual/limit): 2/2". A one-second burst cap is
++// request pressure, not quota exhaustion: the same requests spaced out all
++// succeed and other models on the team are unaffected. Treating it as a plain
++// rate limit cools the whole account and, with a single serving leg, takes
++// every model in the pool down for the fallback window. Per-minute and token
++// limits deliberately stay on the rate-limit path.
++func isGrokPerSecondRateLimitText(low string) bool {
++	return strings.Contains(low, "requests per second")
+ }
+ 
+ func isGrokRateLimitText(low string) bool {
+diff --git a/backend/internal/service/grok_upstream_failure_test.go b/backend/internal/service/grok_upstream_failure_test.go
+index 4f6514cde..54a5f2c5e 100644
+--- a/backend/internal/service/grok_upstream_failure_test.go
++++ b/backend/internal/service/grok_upstream_failure_test.go
+@@ -308,3 +308,47 @@ func TestHandleGrokAccountUpstreamError_Entitlement403Unchanged(t *testing.T) {
+ 	require.Greater(t, repo.lastTempUnschedUntil, before.Add(29*time.Minute))
+ 	require.Less(t, repo.lastTempUnschedUntil, before.Add(31*time.Minute))
+ }
++
++// xAI's per-second team+model limit (observed 2026-10-22 on grok-4.20-multi-agent:
++// "Requests per Second (actual/limit): 2/2"). Three concurrent requests in one
++// second get one 429; the same requests spaced 600ms apart all succeed, and a
++// different model on the same team succeeds right after. So this is a
++// one-second burst ceiling, not quota exhaustion -- it must take the
++// capacity path (short same-account retry, no account-wide cooldown) instead
++// of the rate-limit path that freezes every model on the account.
++const grokPerSecondTeamModel429 = `{"code":"resource-exhausted","error":"Too many requests for team 14f1ea58-bf65-40a9-ad10-f1f860de47d2 and model grok-4.20-multi-agent-0309. Your team's rate limit is — Requests per Second (actual/limit): 2/2. Your rate limit tier is determined based on your historical API spend."}`
++
++func TestClassifyGrokUpstreamFailure_PerSecondTeamModelLimitIsCapacity(t *testing.T) {
++	d := classifyGrokUpstreamFailure(http.StatusTooManyRequests, []byte(grokPerSecondTeamModel429), "grok-4.20-multi-agent")
++	require.Equal(t, GrokFailureModelCapacity, d.Class)
++	require.False(t, d.BlockModel)
++	require.True(t, d.ShouldFailover)
++}
++
++func TestShouldMarkGrokTeamModelRateLimit_SkipsPerSecondLimit(t *testing.T) {
++	require.False(t, shouldMarkGrokTeamModelRateLimit(http.StatusTooManyRequests, []byte(grokPerSecondTeamModel429)))
++}
++
++func TestGrokSameAccountRetryMetadata_PerSecondLimitRetriesOnce(t *testing.T) {
++	account := &Account{Platform: PlatformGrok, Type: AccountTypeOAuth}
++	retryable, delay, _, maxRetries := grokSameAccountRetryMetadata(account, http.StatusTooManyRequests, []byte(grokPerSecondTeamModel429))
++	require.True(t, retryable)
++	require.Equal(t, 500*time.Millisecond, delay)
++	require.Equal(t, 1, maxRetries)
++}
++
++// Negative controls: the new pattern must not swallow real quota/rate-limit
++// 429s, or a genuinely exhausted account would stay schedulable and burn every
++// request on a guaranteed failure.
++func TestClassifyGrokUpstreamFailure_PlainRateLimitStaysRateLimit(t *testing.T) {
++	for _, body := range []string{
++		`{"code":"resource-exhausted","error":"Too many requests for team abc and model grok-4.6. Your team's rate limit is — Requests per Minute (actual/limit): 60/60."}`,
++		`{"error":"Upstream rate limit exceeded, please retry later"}`,
++		`{"code":"resource-exhausted","error":"Too many requests for team abc and model grok-4.6. Your team's rate limit is — Tokens per Minute (actual/limit): 53000000/53000000."}`,
++		``,
++	} {
++		d := classifyGrokUpstreamFailure(http.StatusTooManyRequests, []byte(body), "grok-4.6")
++		require.Equal(t, GrokFailureRateLimit, d.Class, "body=%q", body)
++		require.True(t, shouldMarkGrokTeamModelRateLimit(http.StatusTooManyRequests, []byte(body)), "body=%q", body)
++	}
++}

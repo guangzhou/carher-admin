@@ -3,19 +3,36 @@ name: sub2api-grok-ops
 description: >-
   198 LiteLLM 上 grok 的运维：**现存三条互相独立的 grok 路径**的分诊(修好一条不等于
   grok 好了；路 A grok-proxy 已于 2026-09-08 彻底删除，报错是预期别去修)、
-  sub2api 内部虚拟余额充值、**加号=§C 顶部 `grok-warp-onboard.py` 一条命令（225 WARP 抓+198 建号）**、`sa-grok-4.6` 作为 cursor gpt 系 fallback、两层回归。
+  sub2api 内部虚拟余额充值、**加号=§C 顶部 `grok-warp-onboard.py` 一条命令（225 WARP 抓+198 建号；10-13 起 approve 走 225 浏览器，纯 HTTP 恒 403 castle；只有邮箱+x.ai密码没 sso 加 `--password-login`）**、
+  **判档位（heavy/SuperGrok）只认 grok.com `dominantPlan`+JWT `tier`(5/1)，供应商说法和 53M 头都不算（§C 10-19）**、`sa-grok-4.6` 作为 cursor gpt 系 fallback、两层回归。
   同一台 sub2api 上还挂着 Kimi Allegro（`sa-kimi-k3` / `sa-kimi-code*`，group 8/9），
-  动它前先看影响面。**升级 sub2api 本体也在这里（§G，一条命令 `sub2api-upgrade.py go`）**。
+  动它前先看影响面。**升级 sub2api 本体也在这里（§G，一条命令 `sub2api-upgrade.py go`；生产带本地补丁，`go` 会从源码重打）**。
   **「grok 又被全部停下了 / 重新认证下」= §⚡ 最前面那一节：先确认巡检还在跑（`rescue`
   单跑撑不过两分钟，一条 403 park 的是整池），而且九成不该跑 reauth（腿通常是健康的，
   被 sub2api 自己 park 了）。**
   **grok 的 24 个名字里有 22 个走 model_list，2 个 video 走 pass-through（§H）——
   LiteLLM 的 `/v1/videos` 结构性不兼容 sub2api 且升级永远修不好。**
+  **查/兑官方重置卡(rate-limit reset token)⇒ skill `grok-reset-card`，不在这里。**
   Use when 用户说"grok 不能用了"/"我的 grok 又被停了/全停了"/"grok 重新认证下"/
   "重新授权 grok"/"sub2api 403"/"grok 报余额不足"/
-  "再加一个 grok 账号"/"sa-grok-*/grok-4.5 打不通"/"kimi 不能用了"/"sa-kimi-* 报错"/
+  "再加一个 grok 账号"/"加 N 个 grok 号(邮箱----密码----ai密码)"/"这号是什么类型/是不是 heavy/订阅什么时候到期"/"sa-grok-*/grok-4.5 打不通"/"kimi 不能用了"/"sa-kimi-* 报错"/
   "sub2api 有新版本了升级下"/"grok 出图能用出视频不能用"/"视频模型打不通"。
 ---
+
+> **别走错：** Heavy 号 SSO 要 `grok-chat-heavy`（grok.com Web 通道）⇒ skill `grok2api-heavy-ops`（ns `grok2api`，另一套网关）；
+> 问「Grok Bot 能不能用 Opus」⇒ skill `grokbot-opus-check`。本 skill 只管 sub2api。
+
+## ⚡ 面板一堆 `grok-4.7` 502(上游 422)、5 腿全 422 —— 先当「请求形状」查，别查号（10-14）
+
+10-14 真因：Codex Desktop 0.162 的 `agent_message` item，x.ai 每个号都拒；sub2api 换完 5 腿回 502，LiteLLM 再重试 6 次
+⇒ 1 个坏请求 = 同一 LiteLLM pod IP、约 30s 内 6 条 502（间隔 3→10s 递增）。已上 callback `grok_agent_message_flatten`
+（三车道）+ grok 组 `model_group_retry_policy` DefaultRetries=1，修后真实 422 链 0。
+
+1. 聚类判放大：按 `client_ip` + 25s 间隔分簇，簇大小=6 ⇒ 是重试放大，真实失败数 = 簇数。
+2. sub2api 不存 422 响应体（v0.2.16 grok responses 路径无 `Detail:`）⇒ 去 LiteLLM `LiteLLM_SpendLogs` 找
+   `model_group='sa-grok-4.7' and model ilike '%deepseek%'`（被兜底的就是被拒的），比 input item type 集合。
+3. 定因只认 A/B：`scripts/grok-422/probe_agent_message.py`（pod 内跑，关重试关兜底；第一格阳性对照不 200 整轮作废；
+   ⛔ 别带 `tags`，tag 过滤会直接 500）。新出现别的 item type 就照 callback 的写法加分支。
 
 ## ⚡「我的 grok 又被全部停下了」—— 先看巡检，而且它**不是** reauth
 
@@ -215,7 +232,7 @@ Cursor/客户端 → litellm-product :4000  (entry sa-grok-4.5 / sa-grok-4.6 / s
 | keys | `/api/v1/keys`（**不是** `/admin/api-keys`） |
 | accounts / groups | `/api/v1/admin/*` |
 | 生产 key | `grok-litellm` id=5，绑 group 7「grok账号分组」 |
-| grok 账号 | **51 条腿**（10-01 10:27 加完 70/71），同时刻只 **9 条** 在服务、其余多为 `spending-limit`；逐号历史见 memory `topic_grok_index`。⚠️ **别拿腿总数当容量**，跑 `health` 拿真数 |
+| grok 账号 | **59 条腿**（10-14 21:36 加完 acct 79/80），同时刻只 **3 条** 在服务（10-14 实测 3/59）、其余多为 `spending-limit`；逐号历史见 memory `topic_grok_index`。⚠️ **别拿腿总数当容量**，跑 `health` 拿真数 |
 | DB | postgres pod 里 `psql -U sub2api` |
 | helper | `scripts/grok-onboard/sub2api_admin.py` |
 
@@ -240,6 +257,58 @@ SELECT error_phase, coalesce(account_id::text,'NULL'), count(*)
 FROM ops_error_logs WHERE created_at > now() - interval '30 minutes'
   AND platform='grok' GROUP BY 1,2 ORDER BY 3 DESC;
 ```
+
+### 🔴 2026-10-21：池里只剩一条腿时，**一个小众模型的 429 会把整号冻 2 分钟 ⇒ 全模型 503**
+
+用户说「163 怎么了，为什么限流」。号**没被封、没烧完**：`status=active`、
+`schedulable=t`、`rate_limited_at` 空、grok-4.6 的头还是满格 8300/53M、周额度 47%。
+真因是 sub2api 自己的冷却粒度：
+
+| 三段式 | |
+|---|---|
+| 假设 | `grok-4.20-multi-agent` 的 429 → sub2api 冷却**整个号** → 单腿池全模型 `pool=0` → 503 |
+| 证伪条件 | 若无关，503 的分钟分布应与 429 的时刻无关；或冷却期里别的模型仍能选到腿 |
+| 数据 | 36 条 429 里 **35 条是 `grok-4.20-multi-agent*`**；每条 429 之后**所有**模型立刻报 `no available Grok accounts ...(pool=0)`，持续 ~2min（22:48:24 → 22:50:22），与源码 `grokRateLimitFallbackCooldown=2m` 逐秒吻合；429 约每 6min 一发 ⇒ 约 **1/3 时间整池断**，断的那几分钟 no_leg 65~281/min 而 163 自己 ok=0 |
+
+机制在源码里（`~/codes/sub2api`）：`grok-4.20-multi-agent` 的 429 body 是
+`Upstream rate limit exceeded`，**不带 Retry-After / reset 头** ⇒
+`grokRateLimitResetAt()` 落到 `grokRateLimitFallbackCooldown = 2 * time.Minute`，
+`persistGrokRateLimit()` 写的是 **account 级** `rate_limited_at/rate_limit_reset_at`，
+不是 model 级。重复 429 还会自适应加长（2min → 10min → 30min → 1h，
+`grokRateLimitRepeatCooldown` 一族）。
+
+**判这个形状的两步**（别只看 `health` 的服务腿数，它会显示"有一条腿在服务"）：
+
+```sql
+-- ① 429 是不是集中在一个模型
+select coalesce(requested_model,model), count(*) from ops_error_logs
+ where account_id=<id> and status_code=429 group by 1 order by 2 desc;
+-- ② 503 是不是跟在 429 后面（分钟级对齐，三列一起看才看得出因果）
+with m as (select generate_series(date_trunc('minute',now()-interval '50 minute'),
+                                  date_trunc('minute',now()), interval '1 minute') t)
+select to_char(m.t at time zone 'Asia/Shanghai','HH24:MI'),
+ (select count(*) from usage_logs u where u.account_id=<id>
+    and u.created_at>=m.t and u.created_at<m.t+interval '1 minute') ok,
+ (select count(*) from ops_error_logs e where e.account_id=<id> and e.status_code=429
+    and e.created_at>=m.t and e.created_at<m.t+interval '1 minute') r429,
+ (select count(*) from ops_error_logs e where e.platform='grok' and e.error_phase='routing'
+    and e.created_at>=m.t and e.created_at<m.t+interval '1 minute') no_leg
+from m order by 1;
+```
+
+pod 日志里的直接判据：`openai.account_select_failed` 带
+`no available Grok accounts supporting model: X (pool=0)`。
+`pool=N, filtered: <原因>=n` 那个括号是 sub2api 自己给的排除统计
+（`openAISelectionFilterStats.summary`），**有 `filtered:` 就照它说的原因去查**，
+`pool=0` 则是连候选都没进来（`listSchedulableAccounts` 就空了）。
+
+⚠️ 没验证的一格：冷却那 2 分钟里 x.ai 是否真的也拒别的模型 ——
+sub2api 在冷却期**根本不发请求**，从外面测不到，别写成"x.ai 只限了这一个模型"。
+
+修法三选（10-21 未动，待用户定）：①继续加号（只稀释，单号仍会被冻）
+②在 LiteLLM 给 `multi-agent` 限并发 / 把它挪出这个池（去触发源）
+③改 sub2api 成模型级冷却（最对症，要改源码+发版）。
+→ [[project_sub2api_grok_multiagent_429_freezes_single_leg_2026_10_21]]
 
 ### 09-17 那次的完整形状（下次对号入座）
 
@@ -339,6 +408,32 @@ token，过期后直打 x.ai 报 `403 unauthenticated:bad-credentials`，**把�
 `upstream` 相位占多数（`account_id` 是真 id）时加号没用。09-17 加完号之后残留的
 就是这种：1~2 条/分 `upstream`，属常态噪声，不是故障。
 
+## A-1. 🔴「这个号还是会员吗 / 掉订阅了吗」—— 订阅真源只在 grok.com，要 sso，且**走 188**
+
+2026-10-18 实跑（76/155/156 三条腿定性 + park）。**x.ai 侧的 token 看不到订阅**，
+判订阅只能打 `grok.com/rest/subscriptions`（要 sso cookie），库里 `credentials` **不存 sso**，
+只有 `refresh_token` ⇒ 没 sso 就只能退一步用「上游判词 + token claim」旁证。
+
+| 量具 | 怎么读 | 坑 |
+|---|---|---|
+| `grok.com/rest/subscriptions` | 唯一真源：`productId` + `status` + `expiryTime` | 要 sso；🔴 **本地 Mac 打不通，走 188**（[[feedback_github_chatgpt_via_188]]）。401 `Failed to look up session ID` = **cookie 失效，不是出口问题** —— 判据是同机同分钟另一把 sso 回 200（阳性对照） |
+| 新 token 直打 `/v1/chat/completions` | `spending-limit` / `resource-exhausted 0/0` / 200 | 🔴 **必须先用 `refresh_token` 换新 token**：存量 token 过期会回 `bad-credentials` **盖住**底下的 `spending-limit` |
+| access_token 的 `tier` claim | 活号有（heavy=5、**SuperGrok=1**，10-19），**掉订阅的号连这个 claim 都没有** | 判档可用，判活不行 |
+| ⛔ `/v1/models` | **不能判活** | 死腿照样 **200 + 列全部模型**；也**不带** rate-limit 头 |
+
+**10-18 这轮结果**：76 `ultra INACTIVE / 10-16 04:20Z 过期` + 上游 `spending-limit`（两量具同向）；
+155 `spending-limit`；156 限流 **0/0**（配额档位归零，不是打太多）；157 `ultra ACTIVE 到 11-12` + `200 PONG`（阳性对照）；
+75 的 sso 已 401 ⇒ **订阅状态无数据，别下结论**，要查得让用户重新登录拿新 sso。
+三条死腿已 park（`bulk-update`，postgres 回读 `f`），`health` = **2 of 60 served**（157+72），零错误行。
+
+🔴 **155/156 的额度是前身 79/80 烧光的**（10-14~15 共 3152+5160 req / ~5500 万 tok）：
+**重建一条 sub2api 腿不会带来新额度** —— xAI 的余额跟 xAI 账号走，不跟库里的行走
+（155/156 与 79/80 `credentials->>'sub'` 逐字相等，生涯请求数 **0**）。
+
+⚠️ **我说错过一句，别再传**：「一条 403 会 park 整池」是**错的**。真相见
+[[feedback_sub2api_grok_park_is_pool_wide_not_per_leg]]：一个坏请求沿 failover 打 10 条腿、逐个被 park，
+**403 是请求的属性不是账号的**。park 死腿的正当理由是：订阅没了的腿留在池里只会吃 failover 再失败、拉长重试链。
+
 ## A. 路 B(sub2api)报 403 —— 第一刀分诊
 
 ⚠️ **先分清是 403（余额闸）还是 500 + `Concurrency limit exceeded for user`（并发闸）。**
@@ -392,6 +487,27 @@ python3 sub2api_admin.py GET /api/v1/admin/users/1
 
 ## C. 加一个新 grok 订阅号
 
+### ⚡⚡⚡ 2026-10-23：用户说「加一个 grok 到 sub2api + 换密码 + 登记多维表格」= 三条命令，别拆开手搓
+
+粘来的是 `email----Gx!…----eyJ…`（中间段 = x.ai 密码，§C6）。凭据放 `.work/grok-<MMDD>/creds.txt`（0600）：
+
+```bash
+cd <repo>/scripts/grok-onboard
+python3 grok-warp-onboard.py ../../.work/grok-<MMDD>/creds.txt --dry-run   # 看基线「N of M legs served」
+python3 grok-warp-onboard.py ../../.work/grok-<MMDD>/creds.txt             # 建号 + 回归 + 第5步登记表
+python3 grok-pw-rotate.py --creds ../../.work/grok-<MMDD>/creds.txt --dry-run
+python3 grok-pw-rotate.py --creds ../../.work/grok-<MMDD>/creds.txt        # 先写表→改→两发探针→补ID列
+python3 grok_bitable.py sync                                               # 自查：这个号不该出现在输出里
+rm -P ../../.work/grok-<MMDD>/creds.txt
+```
+
+- **顺序：先建号再改密。** 建号用的是粘来的 sso，改密不吊销 sso（§C6 ④），反过来也行但没必要
+- 10-23 acct 165 实测全程约 15 分钟一把过；改密后复量服务腿不变
+- **表的读写只走 `grok_bitable.py`**（两个脚本都 import 它）。规则：**只填空不覆盖**，已有值≠sub2api ⇒ 报 `MISMATCH` 由人判
+- 🔴 10-23 之前建号脚本**从不写表**：`sync` 当天量出 sub2api 68 个 grok 号、表 36 行、**56 处缺**（20+ 个号没行，含 164）。
+  `sync --apply` 会批量写共享表 ⇒ **先问用户**；新建的行只有账号/ID，sso/密码不在 sub2api 里补不出来
+- 阳性对照：`sync` 的输出里不该有刚登记好的那个号（10-23：163/165 不在列表里，164 在 NO ROW 里）
+
 ### ⚡⚡ 2026-09-29 起的现行路径：**一条命令 `grok-warp-onboard.py`**（先看这里）
 
 用户粘来 `email----pw----sso`（或 8 段长行）⇒ 凭据写到 **repo 外**的 0600 文件，然后：
@@ -406,7 +522,9 @@ shred -u ~/x/creds.txt
 它只编排、不重写任何一步：本地 parse → `health` 基线（打印「N of M legs served」+ 既存
 `routing`）→ 225 mktemp 目录跑 `xai_sso_device_oauth.py`（WARP）→ **只把抓取器判
 `OK` 的 bundle** `scp -3` 到 198 mktemp 目录 → `create-grok-oauth-account.py`（模板默认
-acct 61）→ 等 `--wait` 秒 → `regress` + `health`，打印服务腿数前后对比。
+acct 61）→ 等 `--wait` 秒 → `regress` + `health`，打印服务腿数前后对比 →
+**（10-23 起）第 5 步登记飞书 grok 账号表**（账号/Grok SSO/Grok密码 + 从 sub2api 回读的
+Sub2API账户ID/Grok UserID，只填空；失败不影响建号结果，提示跑 `grok_bitable.py sync --apply`；`--no-bitable` 跳过）。
 两端临时目录 finally 里 shred+rm；远端副本先比 sha256 与 repo 逐字相等才跑。
 
 | 为什么不再用下面 §C0 / 09-21 那条 `sub2api-grok-onboard.py onboard` | |
@@ -414,7 +532,267 @@ acct 61）→ 等 `--wait` 秒 → `regress` + `health`，打印服务腿数前�
 | 它第 2 步 `verify` 走 sub2api 自带 SSO 端点 | 09-25 起从 pod 出口**恒 403**（`accounts.x.ai` 挡机房，§C1b），整条中止 |
 | 它从 Mac 跑会 `delegate()` 覆盖 `/home/cltx/grok-onboard/` | 那份是 **park 巡检 cron 每分钟跑的代码**；本脚本用 `S2A_REMOTE_DIR=<mktemp>` 绕开，常驻副本不动 |
 
+### ⚡⚡ 2026-10-22：approve 报 `Request could not be verified`（Castle 403）**脚本已自动兜底**
+
+默认 `--approve browser` 撞到 Castle 403 会**当场切到 Authorization Code 授权**，不用加参数、不用转 WARP、
+不用找人手点。日志里看到 `device approve hit Castle ... -> falling back to authorization-code grant`
+接着 `[authcode] code N chars, state ok` 就是兜住了。也可以 `--approve authcode` 直接跳过 device flow。
+原理、三个坑、测试 ⇒ 下面「approve 必须走浏览器」那节末尾的 10-22 小节。
+
+### ⚡ 2026-10-19：凭据**只有「邮箱----邮箱密码----x.ai密码」没有 sso** ⇒ 同一条命令加 `--password-login`
+
+先判形状：第 3 段是 `eyJ…` = sso ⇒ 照上面跑；是短密码（如 `aa112233@`）= x.ai 密码 ⇒：
+
+```bash
+# 凭据放 repo 内 .work/<任务>/（已在 .git/info/exclude），0600；跑完 rm -P
+python3 grok-warp-onboard.py --password-login .work/grok-<MMDD>/pw-creds.txt --dry-run
+python3 grok-warp-onboard.py --password-login .work/grok-<MMDD>/pw-creds.txt
+```
+
+225 同一个私有 Xvfb 里先跑 `xai_pw_login_sso.py`（登录**复用** `xai_device_capture.do_login()`，
+只多取 `sso` cookie）→ 写 `creds.txt` → 接原第 2 步。只有拿到 sso 的号往下走；`STOP <email>: …` 的号原因打在输出里。
+10-19 首跑（当时手动两段）**4/4** 拿到 sso（Turnstile INTERACTIVE 点一次即 PASS、无 OTP）→ EXIT=0 建出 **158~161**，
+服务腿 2/60 → 6/64。合进编排器后 `--dry-run` 已在两端实跑过；真跑合并版还没跑过，下次盯 `[password-login]` 那几行。
+
+### 🔴 2026-10-19：**供应商说 heavy ≠ heavy** —— 判档以 grok.com `dominantPlan` + JWT `tier` 为准（已焊进脚本）
+
+158~161 供应商报 heavy，实为 **SuperGrok（$30/月）**：
+
+| 量具 | 已知 heavy 72/157 | 158~161 | 分得开？ |
+|---|---|---|---|
+| grok.com `/rest/subscriptions` `dominantPlan.plan` / `tier` | heavy | **`supergrok` / `SUBSCRIPTION_TIER_GROK_PRO`**，`SURFACE_JWT=GROK_PRO` | ✅ |
+| access_token JWT `tier` | **5** | **1** | ✅ |
+| productId / offer | `grok.ultra` | `grok.pro.monthly.30`（apple，winback 付1送2，offer id `sg_…`） | ✅ |
+| x.ai chat 头 `limit-tokens/requests` | 53M/8300 | **53M/8300**（158 有一次快照 10M/480 = 老 supergrok 形状） | ⛔ 会翻 |
+| sub2api `plan_from_45_responses` | heavy | **heavy** | ⛔ 看来是从上面的头推的（没读源码确认） |
+
+⇒ **头和 `plan_from_45` 只能判活，不能判档**；下面 10-18 那条「三个量具互证」里的这两把作废。
+已修 `xai_sso_device_oauth.py`：`subscription_of()` 带出 `dominantPlan.plan` / `tier` 枚举 / apple 的
+`billingPeriodEnd`（apple 条目没有 `expiryTime`）/ `autoRenewOn` / offer；`tier_of()` **先认 plan 再认 productId**
+（两者打架时用 plan 并告警），`PRODUCT_TO_TIER` 补 `grok.pro.monthly.30→supergrok`；建号前打一行
+`TIER … jwt_tier=…`，订阅档与 JWT 档对不上就打 `🔴 TIER MISMATCH`。对照 `test_subscription_tier_pick.py` **17 case 全绿**
+（含阴性对照：plan=heavy 仍读 heavy、未知 plan+SKU 留空）。158~161 库里已回填 `supergrok`（备份
+`/home/cltx/grok-onboard/acct158-161-tier-before-20261019T095942Z.txt`，psql + admin API 两处回读）。
+⚠️ `JWT_TIER` 只登记了见过的 1/5；`PLAN_TO_TIER` 里只有 `supergrok` 是见过的词。
+⚠️ 198 宿主机直打 api.x.ai 会 connection reset ⇒ 实探头要从 **225** 打（token 从 198 用管道送过去，不落盘）。
+⚠️ 池里老 supergrok 46~50 现在都 402，**没有活的 supergrok 阳性对照**；「tier=1=SuperGrok」靠的是 grok.com 自报。
+
+### 🔴 2026-10-18：UI「平台/类型」那列显示 `grok.lite` = **建号时自己写错的快照**，不是真档位（已修）
+
+acct 157 在 `http://10.68.13.198:31880/admin/accounts` 上显示 lite、别的号显示 heavy。
+UI 渲染的是 `credentials.subscription_tier`，admin API 回包里确实是 `grok.lite`，
+**这一列是建号时抓的快照、不参与调度**（157 当时正常收流量）。真档位是 heavy。
+
+| 真因 | 数据 |
+|---|---|
+| `subscription_of()` 取 `/rest/subscriptions` **第一条**带 productId 的，不看 status | 157 名下三条：① `grok.lite` INACTIVE(10-12 过期) ② `grok.ultra` INACTIVE ③ **`grok.ultra` ACTIVE**(11-12) ⇒ 挑中 ① |
+| 映射 `"supergrok_heavy" if tier=="grok.ultra" else tier` 对未知值**原样穿过** | `grok.lite` 不等于 `grok.ultra` ⇒ 商店商品名直接落进档位列 |
+| 为什么以前没发现 | 156 及之前每个号名下**只有一条**订阅，第一条就是对的；157 是池里第一个带「历史订阅堆叠」的号 |
+
+~~⇒ 判真档位三个量具互证：`plan_from_45_responses`、JWT `tier`、标称头 `53000000`/`8300`~~
+⛔ **10-19 修正**：`plan_from_45` 和 53M/8300 头在 SuperGrok 号上同样读成 heavy（上一节），
+判档只认 **grok.com `dominantPlan.plan` + JWT `tier`（heavy=5 / supergrok=1）**。157 这两项都指 heavy，结论不变。
+`productId` 是商店 SKU（Google/Apple 各一套），只当次要依据；
+`tier` 枚举要整串读：`SUBSCRIPTION_TIER_SUPER_GROK_PRO`（157，heavy）≠ `SUBSCRIPTION_TIER_GROK_PRO`（158~161，SuperGrok），只差 `SUPER_`。
+
+**已修**（`xai_sso_device_oauth.py`）：`subscription_of()` 优先挑 `ACTIVE`（排除 `INACTIVE` 的子串误匹配），
+无 ACTIVE 则回退首条并在 `picked` 里打 `first-of-N-none-active` + 告警；
+新增 `PRODUCT_TO_TIER` 显式映射表 + `tier_of()`，**未知 productId 留空并告警，绝不原样穿过**
+（空值看得出缺，错值看不出）。对照 `test_subscription_tier_pick.py` **11 case 全绿**，
+含阴性对照：真 lite 号仍须读成 lite（case 3，防止把尺子改成「一律答 heavy」）、
+未知商品留空（case 6）、`INACTIVE` 不许被当 `ACTIVE`（case 8）。
+⚠️ 踩到的坑：`def tier_of(sub, log=log)` 这种**默认参数在 def 期绑定**，
+测试换掉 `m.log` 收不到告警（两条 case 假红）⇒ 改成 `log or globals()["log"]` 调用期解析。
+
+### 🔴 同一列上的**第二个**病（10-18 同日）：探测整发失败 ⇒ 档位列**空**，且会躲过回扫
+
+🔴 **我第一版回扫查询是坏尺子**：它比对 `stored` vs 实探，**两边都空就算"相等"**，
+于是「整列缺失」这一类被整类滤掉，我据此说了「只有 157 一行」——错的。
+正确说法是「只有 157 一行**值写错**，另有两行**根本没写**」。
+⇒ 回扫必须把空值显式折成一个哨兵值（`coalesce(nullif(x,''),'(EMPTY)')`）再比，
+并单独跑一条「哪些 live 号档位为空」。同族：[[feedback_all_metrics_zero_at_once_is_the_ruler_not_the_fleet]]。
+
+| | 病 | 列里的值 |
+|---|---|---|
+| acct 157 | 挑了第一条（过期 lite），不看 status | 写**错**成 `grok.lite` |
+| acct 155/156 | `/rest/subscriptions` 整发失败 ⇒ `subscription_of()` 返 `None` ⇒ 调用方 `or ""` | **根本没写**（空） |
+
+**155/156 的定因证据**（不是推测）：它们自己的 `admin.accounts.create` 请求体里写着
+`"_probe":{"subscription":null,"xai_models":"200 usable (14 models)"}` —— 订阅探测是 null，
+而同一轮 x.ai 判词 200 可用。查 `audit_logs`（⛔ 没有 `details` 列，是 `request_body`；
+`\d audit_logs` 先看列名）。
+
+**真档位怎么定的**（四把尺子全不可用时的出路）：155/156 当时 `plan_from_45` 无、
+token 没有 `tier` claim、`/quota` 返 `source=billing_probe`+`snapshot=null`（**连已知 heavy 的 157 都读不出**，
+记忆里记过这个坏形状）、直打 `/v1/chat/completions` 155 回 **402**、156 回 **429**。
+⇒ 决定性证据来自库本身：**155/156 是 79/80 的重建版**（10-16 重建），
+`credentials->>'sub'`（xAI userId）**逐字相等**（`832d9b04…` / `1d03a3e9…`），
+而 79/80 在 10-14 那次建号探测出 `supergrok_heavy`。同一个 xAI 账号 ⇒ 同一档位。
+⚠️ 只比邮箱同名不够（可能重名），必须比 `sub`。
+⛔ `/v1/models` **不带** rate-limit 头，别拿它当档位尺子；要打 `/v1/chat/completions`。
+
+**库里回扫**（空值折成哨兵后重跑）：157 写错 + 155/156 为空，三行已全部改成 `supergrok_heavy`
+（157：where 钉 id+旧值+实探值，`UPDATE 1`；155/156：where 钉 `exists(同 sub 的前身号 = supergrok_heavy)`，
+`UPDATE 2`；旧值先存 198 `/tmp/acct157-tier-before-<UTC>.txt`、`/tmp/acct155-156-tier-before-<UTC>.txt`），
+postgres 与 admin API 两处回读一致。157 改后仍收流量；155/156 零流量**是 402/429 的既存状态**（改的是展示字段，不参与调度）。
+收尾全池：**heavy 54 / `supergrok` 5 / plus 1，零空值**。
+⚠️ 那 5 个 `supergrok` 是**实探自己回的词**、stored 与实探一致，不是写错的，别动。
+⚠️ 剩 **acct 7** `supergrok_plus` vs 实探 heavy 是 09-08 就记过的另一回事
+（[[feedback_grok_ratelimit_remaining_is_not_a_balance]]：credentials 陈旧后升级过，无数据分辨），不在这轮范围。
+
+**也已修**：`subscription_of()` 对非 200 **重试 3 次**（CF 403 先 `rotate_warp()`），
+始终不通就打 `🔴 … subscription_tier will be EMPTY; set it from the live plan probe after creating`，
+不再静默留空。对照 case 10/11。
+
+### 🔴 2026-10-18：`SSO DEAD: get-user http=403` + Cloudflare 拦截页 = **出口被挡，不是凭据死**（已焊进 `check_sso`）
+
+加 acct 157 第一跑，抓取器一发就判 `SSO DEAD: get-user http=403 <!DOCTYPE html>…`，
+一个号都没抓到。**三组对照把它翻了面：**
+
+| 对照 | 结果 | 结论 |
+|---|---|---|
+| 225 WARP，真 sso ×3 | 403 `<title>Attention Required! \| Cloudflare</title>` | — |
+| 225 WARP，**假 sso** ×3 | **同一个 403 页** | 回包与 cookie 无关 |
+| 225 WARP，**完全不带 cookie** ×3 | **同一个 403 页** | ⇒ 是出口被 grok.com 的 CF 挡 |
+| Mac 直连，真 sso ×2 | **200**，`userId` 与粘来的 grok id 逐字相等 | sso 本来就是活的 |
+| Mac 直连，不带 cookie | **401** JSON `no-credentials` | 出口通时的形状 |
+
+⇒ **判出口通不通的尺子：不带 cookie 打 `grok.com/rest/auth/get-user`，`401 JSON` = 通，`403 Cloudflare 页` = 挡。**
+WARP 连转 5 次实测 `403/401/401/401/403` —— 封锁**跟着 IPv6 /64 段走、按次随机**，
+同一把 sso 在不同出口上一会儿「死」一会儿活。⛔ 别拿这个 403 去要新凭据、也别改 jar。
+
+🔴 两个 403 必须按**包体**分，不能按状态码分：
+- `<title>Attention Required! | Cloudflare</title>` ⇒ 出口（本节）
+- `<title>Request could not be verified</title>` ⇒ castle/csrf（下一节，要浏览器）
+- JSON（`{"code":16,…}`）⇒ 真·grok.com 对 cookie 的判词，**一发即死，不许重试**
+
+已改 `xai_sso_device_oauth.py`：`_cf_block()` 认 CF 拦截页，`_get_user_transient()` 把它算瞬时，
+`check_sso()` 碰到它**先 `rotate_warp()`（`sudo -n warp-cli disconnect/connect`，换一段出口 IP）再重试**，
+而不是在同一个被封的出口上干等 —— 封锁跟着 IP，原地重试永远不清。
+对照 `test_xai_sso_check_retry.py` 现 **11 case 全绿**，含两条阴性对照：
+JSON 403（case 6）和 401（case 5）仍必须一发判死（只测翻面会放过一个「从不拒绝任何号」的坏尺子）。
+
+### 🔴 2026-10-13 起 approve 必须走浏览器（已焊进脚本，默认 `--approve browser`）
+
+acct 75（`ziuojqpanh@outlook.com`）一轮踩出两个抓取器的病，**都已修**：
+
+| 现象 | 真相 | 判据 | 现在脚本怎么做 |
+|---|---|---|---|
+| `SSO DEAD: get-user http=499 Timeout expired` | grok.com 自己超时，**不是 sso 死** | **假 sso 也回同一包 499**（阴性对照），225 上 6 发里第 5 发起 200 | `check_sso()` 对 499/5xx/curl 失败重试 6×10s；只有 401/403 等真答复才判 DEAD；一直不清的打 `SSO UNCHECKED … TRANSIENT`，⛔ 别据此要新凭据 |
+| `device/approve http=403 <title>Request could not be verified</title>` 连 4 次 | consent 表单多了**空的 `castle_request_token`**（Castle 反机器人，只有页面 JS 会填），纯 HTTP 提交恒拒；页面正文 "We could not verify this browser. Allow scripts…" | jar 里 `__cf_bm`/`gb_anon_id` **都在** ⇒ 不是 09-28 那个 jar 没串；同 sso 换浏览器一把过 | `browser_approve()`：225 patchright 经同一个 WARP，种 `sso`/`sso-rw` 到 `.x.ai`，点 Continue→Allow，**只认落到 `/oauth2/device/done`**；consent 页见到空 castle 字段会先喊一句 |
+
+⛔ 那条 403 的 `<title>` 仍是 `csrf` 那一类，脚本旧提示「jar 没带 cookie，换机器没用」**对一半**：
+换机器确实没用，但调 jar 也没用 —— 要的是浏览器。看到 csrf 403 先看 consent 表单有没有空的 JS 字段。
+
+🔴 **10-13 晚用 ~8 次失败换来的定律：⛔ 不要等 `castle_request_token` 填上再点 Allow。**
+当天加第二个号（venetiaindy9343）时给 `browser_approve()` 加了「等 castle 字段 40s 再点」，
+连挂 6+ 次（token 始终空 ⇒ 空 token 提交 ⇒ 403）；而**两次成功**（acct 75 14:32、acct 76 23:39）
+用的都是同一版「按钮一出现（~4-8s、字段还空着）就点」的原版逻辑，都落到 `/device/done`。
+干等 40 秒再点的形状更像机器人；Castle 的 token 明显是**搭提交的车**，不是按钟点发。
+同一批失败还多盖了一层 `user_agent=UA` 覆盖 —— 两次成功都没盖（patchright 原生 UA），
+两个都别再加。诊断岔路上的死胡同，别再走：40s 采样 token 恒空 ≠ 时机不对（不是早快点就行）；
+WebGL/SwiftShader 修好照样挂；WARP 出口换 5 次全落同段 IPv6。（未完全隔离：成功那轮 WARP IP
+也正好换过，A/B 没跑；下次真再挂 403，先重转 WARP 再重试，但**别把等 castle 加回来**。）
+
+#### 🔴 2026-10-21 修正上面那句「先重转 WARP」：**先打阳性对照，再决定要不要转**
+
+转 WARP 只在**出口真被挡**时有用，而出口有独立尺子。加 `xsohltwqbz@outlook.com`
+连挂 3 次（种 sso ×2 + `--password-login` ×1 —— 后者**登录成功、拿到全新 sso**，
+approve 照样 403，所以也不是"sso 是种进去的、浏览器没真登过"），四组数据：
+
+| 量 | 结果 | 结论 |
+|---|---|---|
+| 不带 cookie 打 `grok.com/rest/auth/get-user` | **401 JSON** | 出口**通**（403 CF 页才是被挡） |
+| `accounts.x.ai/sign-in` | 200 | 同上 |
+| WARP 换段 `2a09:bac5:42f4…` → `2a09:bac1:3b00…` | 两跑都挂 | 换出口**无效** |
+| **阳性对照：acct 163 的 sso，同出口 / 同代码 / 同样空 castle** | **一发落 `/device/done`** | ⇒ 出口、代码、空 castle **全都不是原因**，是**这个号**过不了 |
+
+⇒ `castle_request_token` 在**成功和失败两边都是 `value_len=0`** ⇒ 这个字段**零判别力**，
+别再围着它改。⛔ 别再转 WARP、别改 jar、别盖 UA。
+→ [[feedback_castle_403_needs_a_positive_control_before_rotating_warp]]
+
+#### ✅ 2026-10-22 解法：**换授权方式**，不是换出口 —— 已焊进脚本，默认自动兜底
+
+这个号后来连**人在真实浏览器里点 Allow** 都 403 了两次（另有一次人点成功但我的脚本 bug 丢了 token）。
+所以不是"自动化浏览器的指纹差"那么简单：**device flow 的 approve 端点对这个号就是过不去。**
+
+真解：**不走 device flow，改走 Authorization Code + PKCE。** `auth.x.ai/oauth2/authorize`
+落到的是**另一个** consent 页（`/oauth2/consent`，标题 "Authorize Grok Build"），
+它的 Allow 按钮**不受 Castle 守**。点了之后跳 loopback `redirect_uri` 带 `?code=`，
+拿 code + PKCE verifier 去 `/oauth2/token` 换 token。上游同病同解：grok2api issue #1078 / PR #1082
+（PR 走纯协议 Next-Action，10-22 **仍未合并**；我们用浏览器点，不依赖会变的 actionID）。
+
+```bash
+# 默认就会自动兜底：device approve 撞 castle 403 ⇒ 当场切 authcode，不用加参数
+python3 grok-warp-onboard.py ~/x/creds.txt
+# 想直接跳过 device flow：
+python3 grok-warp-onboard.py ~/x/creds.txt --approve authcode
+```
+
+10-22 用 `xsohltwqbz` 实测：`--approve authcode` 整条一把过（code 86 字符、state 对、
+token 850 字符、`200 usable (14 models)`、`jwt_tier=5`），建出 **acct 164**。
+
+🔴 这一节的三个坑（都在代码注释里）：
+1. **必须浏览器，不能 curl**：`/oauth2/authorize` 只带 sso cookie 会被弹回 `/sign-in`，
+   它还要 `cf_clearance`（只有浏览器拿得到）⇒ 先访问一次 `accounts.x.ai/account` 种上。
+2. **`127.0.0.1:56121` 上没人监听**，跳过去的那次导航**本来就会失败**，这是正常的 ——
+   code 从**请求 URL** 上读（`page.on("request")`），不是从响应里读。
+3. **`state` 必须比对**，不一致就拒收 code。
+对照 `test_authcode_fallback.py` **6 case 全绿**，含两条阴性对照：
+非 castle 的失败**不许**兜底（case 2，防止兜底吞掉所有错误）、兜底本身失败要原样报出来（case 5）。
+
+另：x.ai 那句 "Request could not be verified / could not verify this browser" 对**过期的设备码**
+也会出（10-22 一个码隔了 7 小时才点）⇒ 先看码过没过期，再判是不是 Castle。
+
+只读诊断脚本 `.work/grok-1021b/consent_recon.py`（`CLICK_ALLOW=1` 才点 Allow，
+打出 consent 页的 castle 字段长度 + 失败请求清单）。
+
+编排器在 225 上**自起私有 Xvfb**（`:80~:89` 里第一个空的，跑完 kill；⛔ 别碰 `:91/:95~:99`，
+那是别的抓取任务的），`PYTHONPATH=/Data/grok-onboard/pyenv/...` +
+`PLAYWRIGHT_BROWSERS_PATH=/Data/grok-onboard/browsers`。截图落 `bundles/shots-<tag>/`，
+随临时目录一起 shred。`--approve http` 保留旧四跳，只用于诊断表单是否又变了。
+对照：`test_xai_sso_check_retry.py`（9 case：499×4→200 绿 / 401·403 一发即死不重试 /
+499 永不清=TRANSIENT / castle 空字段喊、填了不喊）+ 真机阴性对照（假 sso 在 225 一发 401 判死）。
+⚠️ 浏览器路径 10-13 晚已随「别等 castle」的修正回到制胜版。✅ **10-14 acct 78 编排器整条真跑首次端到端一把过**
+（browser approve 一把过 → bundle OK → create → regress EXIT=0）；acct 75/76 当时都是「独立脚本抓 + 手工建号」。
+加号盯 `[browser] -> clicked Allow` 和 `after: …/device/done` 两行。
+
 实跑：09-29 **68/69 一把过**（当时手搓 7 步，脚本是事后泛化的）。
+**10-13 acct 75**：编排器 6 次全挂在抓取（2×499 误判 + 4×castle 403），手跑浏览器 approve
+→ `create-grok-oauth-account.py` 建出 75，真服务腿 **4/54 → 5/55**，75 首个 15min 窗口
+22 req / picked 24 / first-pick 1；四条 `sa-grok-*` nonce 全对；窗口内 upstream 错误在
+27/29/30 且 30 的首个早于建号 ⇒ 既存。
+**10-13 晚 acct 76**（venetiaindy9343@hotmail.com，grok.ultra **2026-10-16 04:20Z 到期**）：
+编排器两轮挂在 castle-wait 上（上面那条定律的由来），改跑 14:32 制胜版独立脚本一把过
+（点 Allow → `/device/done` → token 818/86 → `200 usable (14 models)`）→ 手工建号
+**acct 76**（group 7 / prio 1 / conc 200，mapping 1080B `matches_template=t`），
+真服务腿 **4/55 → 5/56**，76 首个 15min 窗口 2 req / picked 24 / first-pick 1（SERVING），
+窗口内 fail=0；upstream 错误在 27/29/30 且首个（23:34:08）早于建号（23:41:32）⇒ 既存。
+**10-14 acct 78**（htuwkjdckr@outlook.com，x.subscription.ultra **2026-11-13 17:43Z 到期**）：
+编排器 `grok-warp-onboard.py` **一把过**（dry-run → 真跑 EXIT=0），浏览器 approve 一发成功
+（clicked Continue → clicked Allow → `/device/done`），token 818/86 → `200 usable (14 models)`
+→ acct 78（group 7 / prio 1 / conc 200，mapping 1080B `matches_template=t`），
+加号时整池 **0/56 outage**（全部 routing 503），78 上线后独扛全部流量，
+真服务腿 **0/56 → 1/57**，78 首个 15min 窗口 246 req / picked 1 / first-pick 1；
+四条 `sa-grok-*` D2 nonce 全对；upstream 错误 5 条在 acct 78 属正常噪声。
+**10-14 acct 79/80**（wtjhlryulce@outlook.com / qzxouodwwrl@outlook.com，x.subscription.ultra **2026-11-13** 到期）：
+编排器 `grok-warp-onboard.py` **两个号都一把过**（browser approve 各一发成功），
+token 818/86 → `200 usable (14 models)` → acct 79/80（group 7 / prio 1 / conc 200，
+mapping 1080B `matches_template=t`），加号时整池 1/57（既存 routing outage），
+真服务腿 **1/57 → 3/59**；79 窗口 18 req picked 1 / 80 窗口 15 req picked 1 first-pick 1；
+D2 四条 nonce 全对；EXIT=0。**编排器首次两号批量端到端一把过。**
+**10-18 acct 157**（ShanonCassinxceaa@hotmail.com，`grok.ultra` / `SUPER_GROK_PRO` **ACTIVE，2026-11-12 07:13Z 到期**；
+同号另有两条 INACTIVE 的 lite/ultra 旧订阅，读档位要挑 `SUBSCRIPTION_STATUS_ACTIVE` 那条）：
+第一跑挂在上面那条 CF-403 尺子病上（0 个 bundle），修完 `check_sso` 后**第二跑一把过**，
+`EXIT=0`、mapping 1080B `matches_template=t`、group 7 / prio 1。
+真服务腿 **1/59 → 2/60**（基线既存 routing outage 233 条），
+157 首个 15min 窗口 **50 req**、D2 四条 `sa-grok-*` nonce 全对、window 内 every-leg-422=0；
+`phase=upstream acct=156` 那 1 条（23:54:51）早于建号（23:56:13）⇒ 既存。
+🔴 **粘来的 11 段长行要按 SHORT 形状落盘**：表头是
+`账号----邮箱密码----辅邮----辅邮密码----Cursor密码----Token----手机号----取件URL----grok sso----grok id`，
+而 `parse_creds` 对 ≥8 段的行按**旧 LONG 布局**取第 8 段当 sso、第 7 段当 userid ——
+照原样喂进去 sso 会取到取件 URL。⇒ 自己切出 `email----pw----<grok sso>` 三段再喂。
+
 **10-01 这个编排器第一次完整真跑**（70/71）：`--dry-run` 绿 → 真跑建出 **acct 70**，
 腿 49→50、真服务腿 **7/49 → 8/50**，70 在 15 分钟窗口 41 req；四条 `sa-grok-*` nonce 全对；
 用户面 16 分钟 457 ok / 2 fail；错误面首个时间戳 10:11:58 **早于** 建号 10:20:33 ⇒ 既存。
@@ -610,9 +988,8 @@ sudo S2A_PW_FILE=/run/.s2apw python3 sub2api-grok-onboard.py health          # �
 **要的是第 7、8 段**；第 4 段是 **Cursor** 的 token（`iss=authentication.cursor.sh`），
 拿它去换 grok 必失败。免费交叉校验：`sso-token` 端点返的 `data.sub` 必须与第 7 段逐字相等。
 
-档位的**权威自报**是 SSO→OAuth 换回来的 `data.subscription_tier`（xAI 自己说的）+
-sub2api 从 grok-4.5 响应里推的 `extra.grok_usage_snapshot.plan_from_45_responses`，
-再加 access_token JWT 里的 `tier`（heavy=5）。
+档位的**权威自报**是 grok.com `/rest/subscriptions` 的 `dominantPlan.plan` + access_token JWT 里的 `tier`
+（heavy=5 / supergrok=1）。⛔ `plan_from_45_responses` 10-19 被证伪（SuperGrok 号也读 heavy，见 §C 10-19）。
 ⚠️ **`53000000`/`8300` 这两个数不能分档**：acct-7 的 `credentials.subscription_tier` 是
 `supergrok_plus`，头里照样是 53000000/8300（也可能是它 credentials 陈旧、后来升级了，
 我没数据分辨）。所以见到这两个数只能说"没对不上"，不能说"是 heavy"。
@@ -718,14 +1095,19 @@ python3 create-grok-oauth-account.py .newacct-<tag>.json ...
 
 #### ⚡ 手里有 `sso` 时的首选：`xai_sso_device_oauth.py`（09-28 新增，4/4 一把过）
 
-**不用 Playwright、不用 DISPLAY** —— `sso` cookie 本身就是登录态，整条设备码流程纯 HTTP
-可走完。`scripts/grok-onboard/xai_sso_device_oauth.py`（已进 git；⚠️ 225 `/tmp/` 下那份是旧版，别直接用，`grok-warp-onboard.py` 每次现传 repo 版）：
+~~不用 Playwright、不用 DISPLAY~~ ⛔ **10-13 起 approve 那一跳必须浏览器**（castle_request_token，
+见 §C 顶部 10-13 那张表）；其余跳仍是纯 HTTP，`sso` cookie 本身就是登录态，不碰 Turnstile。
+`scripts/grok-onboard/xai_sso_device_oauth.py`（已进 git；⚠️ 225 `/tmp/` 下那份是旧版，别直接用，`grok-warp-onboard.py` 每次现传 repo 版、自起 Xvfb）。
+单跑时（一般别单跑，用编排器）：
 
 ```bash
-# 在 225 上（必须，见上面出口表）
-scp .gc.txt cltx@10.68.13.225:/tmp/.gc.txt   # 0600，短格式 email----pw----sso
-ssh cltx@10.68.13.225 'python3 xai_sso_device_oauth.py --creds /tmp/.gc.txt --out-dir /tmp/xai-bundles'
-# 逐号打印 approve http=303 / token ok / x.ai verdict，输出 bundle-<局部>.json（0600）
+# 在 225 上（必须，见上面出口表）；要 Xvfb + 225 pyenv
+Xvfb :80 -screen 0 1440x1000x24 -nolisten tcp & XP=$!
+DISPLAY=:80 PYTHONPATH=/Data/grok-onboard/pyenv/local/lib/python3.14/dist-packages \
+  PLAYWRIGHT_BROWSERS_PATH=/Data/grok-onboard/browsers \
+  python3 xai_sso_device_oauth.py --creds <0600 creds> --out-dir <mktemp>/b   # --approve browser 是默认
+kill $XP
+# 逐号打印 [browser] … device authorized / token ok / x.ai verdict，输出 bundle-<局部>.json（0600）
 ```
 
 每号自带三道对照，**任何一道不过就别往库里写**：
@@ -798,7 +1180,10 @@ try 包住（观测代码不许终止抓取）、登录后**必须显式再开�
 `POST /api/v1/admin/accounts`（platform=grok, oauth），然后绑 group 7，
 **GET 回读 `account_groups` 确认出现 `<acct>|7|1` 那一行**。
 
-📐 **建完判档别用 JWT 的 `tier` 数字。** 设备码流程的 access_token 有 `tier: 5`，
+⛔ **下面这段 10-19 已被推翻**：设备码 token 的 JWT `tier` **能**判档（heavy=5、SuperGrok=1，有 grok.com 自报对上），
+`plan_from_45` 反而**不能**（SuperGrok 号也读 heavy）。只有 SSO 换来的 token 没有这个 claim，那时才退回 grok.com 订阅接口。
+
+~~📐 建完判档别用 JWT 的 `tier` 数字。~~ 设备码流程的 access_token 有 `tier: 5`，
 而池子里 SSO 换来的 token **根本没有 `tier` 这个 claim**（acct 54/59/61 实测全 None）
 ⇒ 手里没有 5→`supergrok_heavy` 的映射表，照数字填就是编。
 **真尺子是 x.ai 自己回的** `extra.grok_usage_snapshot.plan_from_45_responses`：
@@ -931,6 +1316,60 @@ postgres 验过，值还是 `f`）。能写进去的是
 所以**所有 `FROM accounts` 的查询都必须带 `AND deleted_at IS NULL`**，否则：
 `health` 会把已删的号列成一条腿、`add` 会因为"名字已存在"跳过一个其实已经不存在的号。
 脚本里五处查询 09-18 已全部补上。回滚点：把 `deleted_at` 清成 NULL 就能把号捞回来。
+
+### C6. 🔑 换 x.ai **登录密码** —— 🛠 `grok-pw-rotate.py`（2026-10-21 新增）
+
+用户说「改下这个号的密码」时先分清是哪一个：飞书 grok 账号表里
+**`Grok密码` 列 = x.ai 登录密码**（本节），`邮箱密码` 列才是 Outlook 的
+（34 行里只有 1 行有值，基本没在维护）。粘来的 `email----Gx!…----eyJ…`
+中间那段就是 `Grok密码` 这一列的东西 —— 同一批号 23 行都是这个形状。
+
+```bash
+cd <repo>/scripts/grok-onboard
+python3 grok-pw-rotate.py --creds ~/x/one.txt --dry-run   # 开弹窗 dump，不写表不提交
+python3 grok-pw-rotate.py --creds ~/x/one.txt             # 生成→写表→改→两发探针
+rm -P ~/x/one.txt
+```
+
+**顺序是硬的：先把新密码写进飞书表（逐字回读 3/3 相等），再去改。**
+改密码不幂等，先改后写中途挂一下 = 新密码只活在一个已经退出的进程里，号变砖。
+脚本里 `COL_NEW="新Grok密码"` 这一列 10-21 新建；没有这一列时自己补，
+有就复用，`Grok密码` 列**保留旧值**不动（输入列留旧、产出列写新，
+同 [[feedback_bitable_input_col_keeps_old_value]]）。
+两发探针都过后（10-23 起）顺手调 `grok_bitable.fill_ids()` 补空的 `Sub2API账户ID`/`Grok UserID`
+（165 那次是手补的）；这个号还没进 sub2api 时只喊不写。
+
+#### 🔴 这一节的四条，前两条是「会点错东西」的 UI 坑
+
+**① `accounts.x.ai/account#security` 上有三个 `Change` 按钮**（改名 / 改邮箱 / 改密码）。
+`button:has-text('Change')` 取第一个 ⇒ 开出来是 **Edit name** 弹窗，截图一看就知道点错了。
+判据：从 `Manage the password` 那段文字往上找**只含一个** Change 按钮的最小祖先
+（往上找太高会把前两个也圈进来）。已焊进 `xai_change_pw.py: password_change_button()`。
+
+**② OneTrust cookie 横幅本身是 `[role=dialog]`** ⇒ `query_selector("[role=dialog]")`
+抓到它，于是「可见 password input = 0」，形状像「x.ai 改版了 / 这个号不让改密码」。
+真因只是选错了元素。判据：挑 dialog 要排掉 `privacy preference`，并断言弹窗文字含
+`password`。弹窗真身：`[data-testid=oldPassword]` + `[data-testid=password]` +
+`button[type=submit]:has-text('Save password')`，**无 OTP、无二次验证**。
+
+**③ 回验必须两发，少一发等于没验：**
+新密码探针 `state=LOGGED_IN sso_cookie=True` + **旧密码探针 `state=BADPW`（阴性对照）**。
+只测新密码能登会放过「其实没改成、两把都能登」这一类
+（同族 [[feedback_synthetic_red_is_as_untrusted_as_synthetic_green]]）。
+工具 `xai_pw_probe.py MODE=new|old`，全新浏览器、不带 sso，所以对正在服务的腿零影响。
+
+**④ 🔴 x.ai 改密码不吊销 sso / OAuth refresh_token** —— 10-21 acct 163 实测：
+改完旧 sso 打 `get-user` **3/3 200**、sub2api `accounts action 163 refresh` 正常
+（`_token_version` 顶新、0 条 401/403）、腿改前改后都在收流量。
+⇒ **不需要停腿、不需要先 reauth、不需要挑低峰**。
+我改前判断过「改完 token 可能全失效、而 163 是唯一在服务的腿」——
+这个担心实测不成立，别再据此拖着不改。⚠️ 这条只对 x.ai 成立；
+Kiro 那边反过来（改密码立刻 `TooManyRefreshFailures`，
+[[project_kiro_cred_rotation_sop_2026_10_19]]），别互相套。
+
+⚠️ `xai_device_capture.py` **import 期**就 `os.makedirs("/work/ss-xai")` ⇒
+cltx 用户下 PermissionError，形状像「脚本坏了」。任何复用它的脚本都必须先给
+`SCREENSHOT_DIR` / `OAUTH_OUTPUT`（`grok-pw-rotate.py` 的远端命令里已带）。
 
 ## D. 回归（两层，缺一不可）
 
@@ -1093,13 +1532,53 @@ zerokey-pool-\* / claude-gpt-\* / claude-zerokey-\* / openrouter-\* / ua-split-\
 
 ## G. 升级 sub2api 本体 —— 🛠 `sub2api-upgrade.py`，别再手搓
 
+### 🔴🔴 2026-10-22 起生产带一个**本地补丁**，升级时必须重打，否则 grok 每几分钟整池 503
+
+| | |
+|---|---|
+| 病 | x.ai multi-agent 限 **每号每模型每秒 2 个**（429 `resource-exhausted` … `Requests per Second (actual/limit): 2/2`）。原版 sub2api 当普通限流 ⇒ **冻整个号 2min、所有模型一起停**；单腿时整池 503。10-22 下午 5h 断 25 次、13700 请求没接住 |
+| 补丁 | `grok_upstream_failure.go`：`isGrokModelCapacityText` 加认 `requests per second` ⇒ 走 capacity 分支（同号 0.5s 重试 1 次、不冻号）。每分钟/token 限流照旧冻号（阴性对照测试守着） |
+| 源 | 🔴 **以 repo `scripts/grok-onboard/patches/sub2api-grok-per-second-429-as-capacity.patch` 为准**（sha256 `56995d09…`，2 文件 57 行，**0 migration**）。`~/codes/sub2api` 那个分支上**零提交**，补丁只是工作区未提交改动（10-24 才发现），别指望 cherry-pick |
+| 线上镜像 | `127.0.0.1:5000/sub2api:20261024-v0.2.18-ps429b`（10-24 16:01 切；= 0.2.17 prod 镜像为 base，换 `/app/sub2api` + `/app/resources`，label 改 0.2.18）。前一版 `20261022-v0.2.17-ps429b` |
+| 回滚 | `kubectl -n litellm-dev set image deploy/sub2api sub2api=127.0.0.1:5000/sub2api:20261022-v0.2.17-ps429b`（0.2.18 只加迁移 246=把 gemini/antigravity 分组生图开关置 true，旧版不读这列的语义差，回退不用 pg_restore；dump `/root/sub2api-backup/sub2api-20261024-1534.dump`） |
+| 闸门 | `sub2api-upgrade.py cutover` 读目标镜像二进制里有没有 `LOCAL_PATCH_MARKERS`，**没有就拒绝**；上游修了才用 `--drop-local-patches` |
+
+**升级 = 一条 `go`，补丁由脚本重打**（10-24 把手跑的七步收进脚本 `build` / `patch-regress`，同日在 198 实跑 `build` 一遍：约 12min，补丁标记 present、自报 0.2.18）：
+
+```bash
+sudo python3 /Data/sub2api-ops/sub2api-upgrade.py go      # check → probe pre → backup → build → [窗口闸] → cutover → verify → probe post → patch-regress
+sudo python3 /Data/sub2api-ops/sub2api-upgrade.py build --version 0.2.19   # 单跑：只出镜像，不碰线上
+sudo python3 /Data/sub2api-ops/sub2api-upgrade.py patch-regress            # 单跑：专打补丁那条
+```
+
+`build` 做的事（每步失败都停，不会出半成品）：
+① **上游修了没**：拉新 tag 下补丁动过的那个文件，查 marker 字面量（`requests per second`）；在 ⇒ 停下让人读上游改法，读不到 ⇒ 判 UNKNOWN 不判「已修」；
+② 198 直接 `codeload.github.com` 下源码包（2s，不用经 Mac 传）→ `patch -p1 --forward` 打 `PATCHES` 列表里每个补丁；
+③ 去 BuildKit 语法存 `Dockerfile.198`（注释行不算；有不认识的语法就停）；
+④ golang 容器跑每个补丁登记的 `go test -tags=unit -run …`（模块缓存 `/Data/sub2api-gomod-cache`）；
+⑤ classic build（~10min，日志 `/Data/sub2api-build-<ver>/build.log`）；
+⑥ 以**现役镜像**为 base 换 `/app/sub2api` + `/app/resources`、改 label；顺手比 `docker-entrypoint.sh`，上游改了会喊；
+⑦ push + k3s 拉得到 + 二进制 `--version` / label / 补丁标记三样都对上才给 `next: cutover --image …`。
+**新增补丁** = patch 文件放 `scripts/grok-onboard/patches/` + 在脚本 `PATCHES` 加一行（file / marker / test）——`cutover` 闸门的 `LOCAL_PATCH_MARKERS` 由它派生，不用另改。
+
+`patch-regress` 判据与边界（10-24 第二次实跑踩出来的）：
+- 先数**能服务的 grok 腿**（active+schedulable+没在冷却），**<3 条默认跳过**：它是打在生产池上的真流量。10-24 16:30 只剩 156/165 两条腿时跑了一次，5/5 成功，但同一分钟 165 被冻 2min、真实调用方 sa-grok 丢了 9 条；
+- 那次冻 165 的是 **`grok-4.5` 的 429**（不是压测的 multi-agent），而 `ops_error_logs` 只存 sub2api 改写过的 `Upstream rate limit exceeded`，**x.ai 原始 body 不落库** ⇒ 是每秒（补丁该接）还是每分钟/额度（本就该冻）**从库里判不了**，脚本把这类 429 行列出来、标 `not the burst model`，FAIL 文案写明「不是对补丁的判决」；
+- 没抽到 429 ⇒ INCONCLUSIVE（补丁那条分支根本没跑），不算 PASS。
+
+🔴 `pull`（拉上游原版镜像）在 198 上**推不进 registry**：`does not provide any platform`，加 `--platform linux/amd64` 也一样（containerd 同一病）。生产带补丁后它只在 `--drop-local-patches` 时才有用，`go` 已不走它。
+🔴 本机给 198 跑多行脚本别用 `ssh -n … <<EOF`：`-n` 把 stdin 接到 /dev/null，heredoc 整段被吞，**rc=1 且零输出**（10-24 repack 脚本一行没跑）⇒ scp 脚本过去再 `sudo -n bash`。
+
+**上线后怎么判修好了**：sub2api 日志出现 `openai.pool_mode_same_account_retry … upstream_status 429 … retry_delay 500`
+（= 走了 capacity 同号重试），且同一分钟 `ops_error_logs` routing no_leg = 0。
+
 198 上常驻 `/Data/sub2api-ops/sub2api-upgrade.py`（源在 repo
 `scripts/grok-onboard/sub2api-upgrade.py`，两边 sha256 应逐字相等，改完必同步）。
 09-08（v0.1.179→v0.2.3）、09-10（v0.2.3→v0.2.4）、09-20（v0.2.4→v0.2.7）、
 09-24（v0.2.7→v0.2.8）、**10-01（v0.2.8→v0.2.11，跨三个版本）**、10-02 23:31（→v0.2.13）、
-10-12 16:39（v0.2.13→v0.2.15）七次，每次踩到的坑都已固化进脚本。
-**当前线上 v0.2.15**（10-13 现量；上游已有 v0.2.16 未升）。⚠️ 这行会过时 ⇒ 现量命令见 skill
-`cli-anything-sub2api`「版本现状」。升级用的那份**脚本**现 sha256 `268ce0e4…`（10-13 核过 198 = 仓内）
+10-12 16:39（v0.2.13→v0.2.15）、10-13（→v0.2.16）、10-16（→v0.2.17）、10-22（补丁 ps429b）、10-24（→v0.2.18-ps429b，首次带补丁升级）共十一次，每次踩到的坑都已固化进脚本。
+**当前线上 v0.2.18-ps429b**（10-24 16:01 切，迁移 +1→297，用户面切换那分钟 ok=39/fail=1，0 ERROR，165 号/153 active 零翻转，post 8/8 绿）。⚠️ 这行会过时 ⇒ 现量命令见 skill
+`cli-anything-sub2api`「版本现状」。升级用的那份**脚本**现 sha256 `68bbfc55…`（10-24 加 `build`/`patch-regress`、`go` 改走 build；198 旧版留 `.bak-20261024`=`65a369c8…`）。更早 `08a40bd2…`（10-16 改：Hub API 不通回退 GitHub releases；user plane 只数 sub2api 腿——旧版按名字含 grok/kimi 数，把 router9 `cursor-fc-grok-*` 504/openrouter 402/网宿黑名单 37 条切换前失败算成「Recreate 空档」；198 旧版留 `.bak-20261016`=`268ce0e4…`）
 （10-01 改了 `verify` 的三处 + `check` 的暴露面，见下；198 上旧版留作
 `sub2api-upgrade.py.bak-20261001` = `aea83379…`，更早的 `.bak-20260924`/`.bak-20260920` 也还在）。
 
@@ -1125,6 +1604,26 @@ zerokey-pool-\* / claude-gpt-\* / claude-zerokey-\* / openrouter-\* / ua-split-\
   就不是基线。** **已修**：基线固定**至少 3 小时**，两边都换算成 `/min` 速率，
   且只在「post ≥ 5 条 **且** 速率 ≥ 3× 基线」时才喊 CHECK；post 窗口不足 10 分钟会
   明写「太薄，清不了任何东西，一小时后重跑」。
+- 🔴 **10-01 第三轮：pre 腿与 post 腿横跨昼夜分界，而 pre 腿干脆是空的。**
+  11:21 切换 ⇒ pre 窗口 = 北京 05:21~11:21，这张表在那 6 小时**一行都没有**；
+  原版照样拿它当分母，算出 `grok 502 pre=0.17/min post=0.88/min` 喊 5×。
+  实际 10-01 全天 grok-4.7 的 502 只有 337 条，**低于近一周日均**（09-30 974 / 09-29 500 /
+  09-28 442）。**零基线不是低基线，它根本不是基线。** **已修**：加**第三条腿 `yday`
+  = 24 小时前同一个时钟窗口**（它带昼夜形状，pre 腿带不了），只在 post **同时**超 pre 与
+  yday 3× 时才喊；pre 腿为空时整段明写「pre leg is EMPTY，只认 yday」并让 pre 腿**不投票**
+  （否则安静夜切换时真回归会被放过去）。
+- 🔴 **10-01 第四轮，同一轮里 `status_code` 把两种故障合成一格。**
+  那 319 条「502」里 **306 条的 `upstream_status_code` 是 422** —— `status_code` 是
+  **sub2api 回给调用方的码**，它把 x.ai 的 422 包成 502。只按它分组，96% 的既存上游拒绝
+  会把 13 条真网关 502 盖掉。**已修**：分组键加 `upstream_status_code`，表头打
+  `code = 调用方拿到的 / up = 上游真给的`。
+- 🔴 **阳性对照抓出的第五个病：地板写成速率就会随窗口放大。**
+  `max(ryday, 0.05)` 这个 `0.05/min` 在 371 分钟窗口下等于 **18 条**，于是
+  「两边都没先例的全新故障」（pre=0 yday=0 post=50）被判 quiet —— 原版同样有这病，
+  只是被 pre 腿掩着。**已修**：地板回到**行数**（`post>=5`），比例只在基线非零时要求；
+  `yday==0` 且 post≥5 直接喊 `NO PRECEDENT on either leg (new fault shape)`。
+  ⚠️ **改完这段必须重跑那 10 case 的阳性对照**（两个方向都要分得开，只会说「没事」的
+  尺子和坏尺子同形）：见 §G 末尾那段。
 
 ⇒ **这张表永远只能读 delta，不能读绝对值**：这台机 24h 内 grok 常态背景就是
 502 x556 / 400 x957 / 422 x916，一条事故都没有。
@@ -1132,12 +1631,12 @@ zerokey-pool-\* / claude-gpt-\* / claude-zerokey-\* / openrouter-\* / ua-split-\
 ```bash
 ssh cltx@10.68.13.198
 sudo python3 /Data/sub2api-ops/sub2api-upgrade.py check   # 当前版本 vs hub latest + release notes
-sudo python3 /Data/sub2api-ops/sub2api-upgrade.py go      # 全流程
-# 或者分步：probe --tag pre / backup / pull / cutover / verify / probe --tag post
+sudo python3 /Data/sub2api-ops/sub2api-upgrade.py go      # 全流程（含 build 重打补丁 + patch-regress）
+# 或者分步：probe --tag pre / backup / build / cutover --image <tag> / verify / probe --tag post / patch-regress
 sudo python3 /Data/sub2api-ops/sub2api-upgrade.py rollback-plan
 ```
 
-**`go` 白天跑是安全的（09-20 起）。** 它把 check/probe/backup/pull 四步**无条件**跑完
+**`go` 白天跑是安全的（09-20 起）。** 它把 check/probe/backup/build 四步**无条件**跑完
 （这四步不碰线上），然后在 `cutover` 前撞窗口门禁停住，打印「dump 和镜像已就位，
 只剩一条命令」。**这个顺序是刻意的**：要跟人确认断流时，该确认的只剩一刀，
 而不是带着一个什么都没准备的问题去问。想在窗口外继续 = `go --force` 或单跑 `cutover --yes`。
@@ -1164,6 +1663,11 @@ dump 里含 `accounts` 表的 grok/kimi OAuth token，**是凭据文件**，脚�
 | **既存故障把 post 判成红** | 09-20 `sa-grok-4.20` 升级前后都是 503（半数腿被 x.ai 限流 park 到 09-22+）。判绝对全绿 ⇒ 只要有一条既存故障 `go` 就永久不可用，还得人眼 diff 两屏 | `probe` 落盘逐条判词，post 打 **delta**（fixed / pre-existing / **NEWLY BROKEN**），**只在 newly-broken 上返非零**；pre 红不再阻塞（它是基线）；两边跑的集合不一致会喊 `NOT RE-RUN` |
 | ERROR 计数假阳性 | `grep -i '\bERROR\b'` 会命中健康 WARN 行里 JSON 的 `"error":` 键（09-10 实测 11 条全假） | 大小写敏感 + 锚在制表符分隔的日志级别字段 |
 | **错误窗口锚错 + 基线太薄** | 09-24 两连坑：① 标题写 `since cutover` 实际锚在备份时刻，把切换前 18 分钟算进升级账；② 改成等长窗口后，切完 7 分钟报 `grok 400 pre=0 post=4 NEW`，而那是烧了 22 小时的背景 | 锚点=运行中 pod 的 `creationTimestamp`；基线**至少 3 小时**、两边换算 `/min` 速率；只在 post≥5 且 ≥3× 基线时喊；post 窗口 <10min 明写「太薄，一小时后重跑」 |
+| 🔴 **基线横跨昼夜 / pre 腿是空的** | 10-01：11:21 切换 ⇒ pre 窗口落在凌晨零行，拿 0 当分母喊出 5×，而当天 502 实际低于一周日均 | 加第三条腿 **`yday`=24h 前同一时钟窗口**，须同时超 pre 与 yday 3× 才喊；pre 为空时明写 `pre leg is EMPTY` 且不让它投票 |
+| 🔴 **`status_code` 把上游拒绝和网关故障合成一格** | 10-01：319 条「502」里 306 条的 `upstream_status_code` 其实是 422（sub2api 把 x.ai 的 422 包成 502），13 条真 502 被盖掉 | 分组键加 `upstream_status_code`，表头标明 `code`=调用方拿到的 / `up`=上游真给的 |
+| 🔴 **地板写成速率 ⇒ 窗口越长越吞新故障** | 阳性对照抓到：`0.05/min` 在 371min 窗口下 = 18 条，于是 pre=0 yday=0 post=50 的全新故障被判 quiet（原版同病） | 地板回到**行数** `post>=5`；比例只在基线非零时要求；`yday==0` 直接喊 `NO PRECEDENT on either leg` |
+| 🔴 **整段 `verify` 从不量用户面** | 10-01 真正给出结论的两个数字（切换那 1 秒 5 条 `APIConnectionError`、之后 100/0）全靠事后手搓 `SpendLogs` | 新增 `=== user plane ===` 段：切换前 3min~后 10min **逐分钟** ok/fail + 「切换+1min 至今」总计，直接读 `LiteLLM_SpendLogs` |
+| 🔴 **release notes 的「默认开启」不等于与我们无关** | 0.2.11 带 key 创建上限 200/60 与余额在途预占两条默认开启项，是我手查 `api_keys` / balance 才敢说碰不到 | `check` 检出「破坏性/BREAKING」小节时**自己量暴露面**：逐 user 的 active key 数、user 1 的 balance，量不到时明写「别读成不受影响」 |
 
 ### 回归的边界（脚本会自己喊出来，别替它下结论）
 
@@ -1229,6 +1733,31 @@ Codex 根级联合 schema 致 `/v1/responses`→`/v1/messages` 400。
 逐个 park」的症状 —— ⚠️ **这是 release notes 的说法，不是我实测的**，下次再出全池 park
 先照 §⚡ 数 failover 链验它）、Grok 冷却期间允许配额查询、工具 Schema 清洗（null required /
 prefixItems）避免上游 400、原生 Grok 4.7 / GPT-6 Sol·Luna / Opus 5.5 支持。
+
+**10-01 v0.2.11 也是白天切的**（11:21，同一套「四步先做完再问一刀」，用户当场拍板"现在就切"）。
+跨 0.2.9/0.2.10/0.2.11 三个版本一跳。**断流的代价这次量到了具体数字**：LiteLLM `SpendLogs` 里
+grok 恰好 **5 条 `APIConnectionError` 全落在 11:21:28~29 这两秒**（= 新 pod `creationTimestamp`），
+之后 4 分钟 **100 成功 / 0 失败**。⇒ 以后说「断 30~90s」要补一句：用户面真正吃到的是
+**切换那一两秒内在飞的请求**，不是整段 rollout。
+
+🔴 **0.2.11 有两条「破坏性变更」默认开启，升之前先算自己碰不碰得到**（10-01 实测我们碰不到，
+但这是**量过**才敢说的，别下次照抄结论）：
+
+| 新默认 | 怎么量我们受不受影响 | 10-01 实测 |
+|---|---|---|
+| API Key 创建限制（单用户 200 把有效 / 每小时 60 次） | `select user_id, status, count(*) from api_keys group by 1,2` | **1 个 user、9 把 active** ⇒ 离 200 极远 |
+| 余额在途预占（按预估成本预占，余额低的并发会更早被拒） | pre-state 里的 `balance` | **1.0e9（内部虚拟账本）** ⇒ 预占吃不穿 |
+
+要关是 `api_key_create.max_active_per_user` / `max_per_user_per_hour` / `billing.inflight_reservation`
+设 0 或关闭 —— 这次**没动**。
+⚠️ `api_keys.status` 是 **varchar**（值 `'active'`），`status=1` 会报
+`operator does not exist: character varying = integer`。
+
+0.2.9~0.2.11 与我们相关的修复里值得专门回归的：**0.2.9「客户端断开统一标记为 499，
+不再被误记为 502/200 上游错误」** —— 它直接改掉我们那张「常态背景 502 x556」表的读法，
+下次拿 `ops_error_logs` 的 502 当判据前先确认这批 499 去哪了；0.2.10 修「复合（composite）分组
+在旧版调度与 WebSocket 别名下的模型归属与路由」、「账号模型白名单与模型映射冲突」。
+另外 0.2.11 自带 GPT-6.1 Sol 与 Astra Ultrafast 的识别/计费，和我们 09-30 在 198 上手接的那套平行。
 
 🔴 **`verify` 那段 `ops_error_logs since cutover` 的窗口比字面宽，会把切换前的行算进来。**
 09-24 它报 grok `502 x30 / 422 x6 / 400 x1`，而按分钟拆开后**切换时刻（14:27）之后一条都没有**，
@@ -1372,6 +1901,12 @@ claude-/carher-/其他 398 把**没动**，要铺按同一条路径走。
 验收脚本 `scripts/litellm-198-grok6-cursor-probe.py`，SOP = skill
 `litellm-198-key-allowlist`。⚠️ 那两个 image 名必须走 `/v1/images/generations`。
 
+⚠️ **`-latest` 后缀模型名 x.ai 不认（10-15 修）**：`sa-grok-4.6-latest` / `sa-grok-4.5-latest` / `sa-grok-4.3-latest`
+的上游 model 原本配成 `openai/grok-X.Y-latest`，x.ai 返 404，sub2api 按 `upstream_404_model_not_found` 触发
+30 分钟模型级冷却。pool 只含 ultra 号（credentials.model_mapping 有 `-latest` 条目的 3 个），全 404 后整个模型 429。
+已改为 `openai/grok-4.6` / `openai/grok-4.5` / `openai/grok-4.3`。
+剩余 3 个（`sa-grok-4.20-multi-agent-latest` / `sa-grok-latest` / `sa-grok-build-latest`）base name 不在 observed_models，暂未动。
+
 ## 同一个 sub2api 上还挂着 kimi（2026-09-08 起）
 
 **动这台 sub2api 不只影响 grok。** 它同时承载 Kimi Allegro 会员，
@@ -1407,7 +1942,7 @@ claude-/carher-/其他 398 把**没动**，要铺按同一条路径走。
    判活只能拿 pool key 打真实推理。
 
 全记录：[[project_kimi_allegro_sub2api_198_2026_09_08]]、
-升级史与 SOP（`created_at` 修复出自 v0.2.3；**当前线上 v0.2.15**，10-12 16:39 切的）：见 **§G** +
+升级史与 SOP（`created_at` 修复出自 v0.2.3；**当前线上 v0.2.18-ps429b**，10-24 16:01 切的）：见 **§G** +
 [[project_sub2api_198_upgrade_v023_2026_09_08]]。
 
 ## 同一个 sub2api 上还挂着 antigravity（09-10 补到 6 条，09-16 又被加到 9 条）

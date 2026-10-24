@@ -6,13 +6,25 @@ Run ON 198 (needs `sudo kubectl`, `sudo docker`, and the node's own egress).
   sudo python3 sub2api-upgrade.py check            # what version, what changed
   sudo python3 sub2api-upgrade.py probe --tag pre  # POSITIVE CONTROL, before touching anything
   sudo python3 sub2api-upgrade.py backup           # pg_dump + sha256 (rollback needs it)
-  sudo python3 sub2api-upgrade.py pull             # docker pull/retag/push to 127.0.0.1:5000
+  sudo python3 sub2api-upgrade.py build            # upstream source + OUR patches -> image
+                                                   # (production runs patched; see PATCHES)
+  sudo python3 sub2api-upgrade.py pull             # plain upstream image (only with
+                                                   # --drop-local-patches; broken on 198, see cmd_pull)
   sudo python3 sub2api-upgrade.py cutover          # set image + rollout status
   sudo python3 sub2api-upgrade.py verify           # migrations delta / ERROR / state diff
   sudo python3 sub2api-upgrade.py probe --tag post # same probe again
+  sudo python3 sub2api-upgrade.py patch-regress    # aim at what the local patch fixes
   sudo python3 sub2api-upgrade.py go               # all of the above; stops BEFORE
                                                    # cutover outside 23:00-06:00,
                                                    # leaving dump+image ready
+
+10-24 (v0.2.17-ps429b -> v0.2.18-ps429b) added `build` + `patch-regress`.  Since
+10-22 production is NOT the upstream image: it carries PATCHES (below), so every
+upgrade has to rebuild from source.  The first time that was done by hand it
+took seven steps and three traps -- the patch lived only as uncommitted changes
+in a local clone (a branch with zero commits), `ssh -n ... <<EOF` silently ate
+the repack script, and `docker push` of the pulled upstream image fails on this
+node ("does not provide any platform") -- so the steps live here now.
 
 WHY THIS EXISTS (2026-09-10, after the second upgrade).  Both upgrades so far
 (v0.1.179 -> v0.2.3 on 09-08, v0.2.3 -> v0.2.4 on 09-10) were hand-driven, and
@@ -72,10 +84,12 @@ never chosen.  `verify` says so out loud instead of printing a green.  Re-run
 `sub2api-grok-onboard.py regress` in a daytime window to close that leg.
 """
 import argparse
+import datetime
 import json
 import os
 import random
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -90,6 +104,34 @@ GH_RELEASES = "https://api.github.com/repos/Wei-Shaw/sub2api/releases?per_page=1
 HUB_TAGS = ("https://hub.docker.com/v2/repositories/weishaw/sub2api/tags"
             "?page_size=30&ordering=last_updated")
 STATE_DIR = os.path.expanduser("~/sub2api-backup")
+CODELOAD = "https://codeload.github.com/Wei-Shaw/sub2api/tar.gz/refs/tags/v%s"
+RAW = "https://raw.githubusercontent.com/Wei-Shaw/sub2api/v%s/%s"
+BUILD_ROOT = "/Data/sub2api-build-%s"          # per version; source, logs, repack
+GOMOD_CACHE = "/Data/sub2api-gomod-cache"      # 1.3G; reused across versions
+PATCH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "patches")
+
+# Local patches production runs, applied by `build` in this order.  The repo copy
+# (scripts/grok-onboard/patches/) is the ONLY source: until 10-24 the 10-22 patch
+# existed solely as uncommitted edits in ~/codes/sub2api, on a branch with zero
+# commits -- one `git checkout .` from gone.
+#   marker = a literal that exists in the binary only when the patch is built in
+#            (cutover reads the real /app/sub2api for it, not the tag name)
+#   test   = `go test -run` regex + package, run on the patched tree before build
+PATCHES = [
+    {"file": "sub2api-grok-per-second-429-as-capacity.patch",
+     "marker": "requests per second",      # isGrokPerSecondRateLimitText
+     "test_run": "Grok", "test_pkg": "./internal/service/"},
+]
+LOCAL_PATCH_MARKERS = tuple(p["marker"] for p in PATCHES)
+LOCAL_PATCH_SUFFIX = "ps429b"                  # image tag = <date>-v<ver>-<suffix>
+
+# Which SpendLogs rows actually went through sub2api.  Matching on "grok"/"kimi"
+# in the name is NOT that: 10-16 the cutover window showed 37 failures, every
+# one of them cursor-fc-grok-* (router9 504 "cursor stall"), openrouter-* (402)
+# or wangsu-*kimi* (IP blacklist) -- none touch sub2api, all before the new pod
+# existed -- while the sa-* lanes were 0 fail.  Some sa-* rows carry an empty
+# api_base, hence the model_group fallback.
+SUB2API_ROWS = ("(api_base ILIKE '%%sub2api%%' OR model_group LIKE 'sa-%%')")
 
 # model:protocol.  Kept in one place so `pre` and `post` cannot drift apart --
 # a post-upgrade run over a different set is not a comparison.
@@ -164,7 +206,15 @@ def vtuple(v):
 # ---------------------------------------------------------------- check
 
 def latest_tag():
-    d = get(HUB_TAGS)
+    # 10-16 hub.docker.com's API died mid-TLS-handshake from 198 (SSL EOF, both
+    # urllib and curl) and `check` crashed with a traceback.  GitHub releases is
+    # reachable from 198, and `pull` still proves the image by its label.
+    try:
+        d = get(HUB_TAGS)
+    except Exception as e:
+        print("(Docker Hub tags API unreachable: %s -- using GitHub releases)" % e)
+        d = {"results": [{"name": r["tag_name"].lstrip("v")}
+                         for r in get(GH_RELEASES) if not r.get("prerelease")]}
     vers = [r["name"] for r in d["results"]
             if re.fullmatch(r"\d+\.\d+\.\d+", r["name"] or "")]
     if not vers:
@@ -424,6 +474,11 @@ def cmd_backup(a):
 # ---------------------------------------------------------------- pull
 
 def cmd_pull(a):
+    """Plain upstream image.  Since 10-22 production runs PATCHES, so this is
+    only for --drop-local-patches; `go` uses `build`.  It also no longer works
+    on this node: 10-24 the pulled :latest (label 0.2.18, correct) refused to
+    push with `does not provide any platform`, and `docker push --platform
+    linux/amd64` with `... does not provide the specified platform`."""
     want = a.version or latest_tag()
     # The mirror in front of Docker Hub 525s on version tags but serves
     # :latest.  So we pull :latest and PROVE it is `want` from the label,
@@ -449,7 +504,272 @@ def cmd_pull(a):
     return 0
 
 
+# ---------------------------------------------------------------- build
+
+def upstream_fixed(ver, patch):
+    """Did upstream ship this fix itself?  The patch's marker literal appearing
+    in the new tag's version of the file it touches = yes.  Network failure is
+    'unknown', never 'fixed' -- dropping a patch on a guess re-opens the
+    pool-wide 503s it exists to stop."""
+    text = open(os.path.join(PATCH_DIR, patch["file"])).read()
+    files = sorted(set(re.findall(r"^\+\+\+ b/(\S+)", text, re.M)) - {"/dev/null"})
+    src = [f for f in files if not f.endswith("_test.go")]
+    try:
+        body = "".join(urllib.request.urlopen(RAW % (ver, f), timeout=25).read()
+                       .decode("utf-8", "replace") for f in src)
+    except Exception as e:
+        return None, "could not read upstream source (%s)" % str(e)[:120]
+    return patch["marker"] in body.lower(), ", ".join(src)
+
+
+def _buildx_free(dockerfile):
+    """198 has no buildx and DOCKER_BUILDKIT=1 is not usable here (see the
+    containerd notes in cmd_pull).  Strip the BuildKit-only syntax; caching
+    is lost, nothing else."""
+    out = []
+    for line in dockerfile.splitlines():
+        if line.startswith("# syntax="):
+            continue
+        line = re.sub(r"^FROM --platform=\$\{?BUILDPLATFORM\}? ", "FROM ", line)
+        if re.match(r"^RUN --mount=type=cache,\S+ *\\$", line):
+            line = "RUN \\"
+        elif re.match(r"^\s+--mount=type=cache,\S+ *\\$", line):
+            continue
+        out.append(line)
+    left = [l for l in out if not l.lstrip().startswith("#")
+            and ("--mount=" in l or "--platform=" in l)]
+    if left:
+        sys.exit("Dockerfile has BuildKit syntax this stripper does not know:\n  "
+                 + "\n  ".join(left))
+    return "\n".join(out) + "\n"
+
+
+def cmd_build(a):
+    """Upstream source for <version> + PATCHES -> unit tests -> image in the
+    local registry, tagged <date>-v<ver>-<suffix>.
+
+    The image is NOT the upstream Dockerfile's output.  On this node (docker 29,
+    containerd snapshotter) a classic build leaves its compressed layers out of
+    the content store: `docker push` dies with `content digest ... not found` and
+    `docker save` writes a 9KB shell (10-22; `save -> rmi -> load` then
+    overwrote a good image with that shell).  What works is taking the built
+    /app/sub2api + /app/resources out with `docker cp` and layering them on the
+    running production image, whose layers ARE in the store."""
+    ver = a.version or latest_tag()
+    root = BUILD_ROOT % ver
+    src = os.path.join(root, "src")
+    tag = getattr(a, "tag", None) or "%s:%s-v%s-%s" % (
+        REGISTRY, time.strftime("%Y%m%d"), ver, LOCAL_PATCH_SUFFIX)
+    if tag == running_image():
+        # Re-pushing the running tag swaps what a pod restart would pull.
+        sys.exit("REFUSING: %s is the running image; pass --tag <other>" % tag)
+
+    print("=== upstream already fixed it? ===")
+    for p in PATCHES:
+        fixed, where = upstream_fixed(ver, p)
+        print("  %-48s %s  (%s)" % (p["file"], {True: "FIXED UPSTREAM", False:
+              "still needed", None: "UNKNOWN"}[fixed], where))
+        if fixed:
+            sys.exit("\nv%s already contains '%s'.  Re-read the upstream change; if "
+                     "it is the same fix, take this patch out of PATCHES and cut over "
+                     "a plain image with --drop-local-patches." % (ver, p["marker"]))
+
+    print("\n=== source v%s -> %s ===" % (ver, src))
+    sh("rm -rf %s && mkdir -p %s" % (shlex.quote(src), shlex.quote(src)))
+    sh("curl -fsSL -m 300 %s | tar -xz -C %s --strip-components=1"
+       % (shlex.quote(CODELOAD % ver), shlex.quote(src)))
+    for p in PATCHES:
+        pf = os.path.join(PATCH_DIR, p["file"])
+        print(sh("patch -p1 -d %s --forward --batch < %s"
+                 % (shlex.quote(src), shlex.quote(pf))).strip())
+    df = os.path.join(root, "Dockerfile.198")
+    open(df, "w").write(_buildx_free(open(os.path.join(src, "Dockerfile")).read()))
+    golang = re.search(r"^ARG GOLANG_IMAGE=(\S+)", open(df).read(), re.M).group(1)
+
+    print("\n=== unit tests on the patched tree (%s) ===" % golang)
+    # Go tests on the Mac get SIGKILLed by Huorong (137), fresh inode or not.
+    for p in PATCHES:
+        p_ = subprocess.run(
+            "docker run --rm -v %s/backend:/src -v %s:/go/pkg/mod -w /src "
+            "-e GOPROXY=https://goproxy.cn,direct -e GOSUMDB=sum.golang.google.cn "
+            "%s go test -tags=unit -count=1 -run %s %s"
+            % (src, GOMOD_CACHE, golang, shlex.quote(p["test_run"]), p["test_pkg"]),
+            shell=True, capture_output=True, text=True)
+        tail = (p_.stdout + p_.stderr).strip().splitlines()[-3:]
+        print("  " + "\n  ".join(tail))
+        if p_.returncode:
+            sys.exit("tests failed for %s -- the patch does not hold on v%s"
+                     % (p["file"], ver))
+
+    print("\n=== docker build (classic, ~10min) -> sub2api-build:%s ===" % ver)
+    commit = sh("curl -fsS -m 25 https://api.github.com/repos/Wei-Shaw/sub2api/"
+                "commits/v%s | python3 -c 'import json,sys;print(json.load(sys.stdin)"
+                "[\"sha\"][:7])'" % ver, check=False).strip() or "unknown"
+    log = os.path.join(root, "build.log")
+    rc = subprocess.run("cd %s && DOCKER_BUILDKIT=0 docker build -f %s "
+                        "--build-arg VERSION=%s --build-arg COMMIT=%s-carher-%s "
+                        "-t sub2api-build:%s . > %s 2>&1"
+                        % (src, df, ver, commit, LOCAL_PATCH_SUFFIX, ver, log),
+                        shell=True).returncode
+    if rc:
+        sys.exit("docker build failed, see %s:\n%s" % (log, sh("tail -15 %s" % log)))
+
+    print("\n=== repack onto the running image (layers that ARE in the store) ===")
+    pkg = os.path.join(root, "pkg")
+    sh("rm -rf %s && mkdir -p %s" % (pkg, pkg))
+    cid = sh("docker create sub2api-build:%s" % ver).strip()
+    sh("docker cp %s:/app/sub2api %s/sub2api && docker cp %s:/app/resources "
+       "%s/resources" % (cid, pkg, cid, pkg))
+    sh("docker rm %s" % cid, check=False)
+    base = running_image()
+    open(os.path.join(pkg, "Dockerfile"), "w").write(
+        "FROM %s\n"
+        "COPY --chown=sub2api:sub2api sub2api /app/sub2api\n"
+        "COPY --chown=sub2api:sub2api resources /app/resources\n"
+        'LABEL org.opencontainers.image.version="%s" '
+        'org.opencontainers.image.revision="%s+carher-%s"\n'
+        % (base, ver, commit, LOCAL_PATCH_SUFFIX))
+    # The base is the running image, so anything ELSE upstream changed in the
+    # runtime layer (entrypoint, apk packages) would be silently missing.
+    # (no `<(...)`: subprocess shell=True is /bin/sh, not bash)
+    sh("docker run --rm --entrypoint cat %s /app/docker-entrypoint.sh > "
+       "%s/entrypoint.base" % (base, pkg))
+    ent = sh("cmp -s %s/deploy/docker-entrypoint.sh %s/entrypoint.base && echo same "
+             "|| echo DIFFERS" % (src, pkg), check=False).strip().splitlines()[-1:]
+    print("  entrypoint vs base: %s" % (ent[0] if ent else "?"))
+    if ent and ent[0] == "DIFFERS":
+        print("  !! upstream changed docker-entrypoint.sh -- add a COPY for it "
+              "before cutting over")
+    sh("cd %s && DOCKER_BUILDKIT=0 docker build -q -t %s ." % (pkg, tag))
+    print(sh("docker push %s" % tag, check=False).strip()[-160:])
+    tags = json.loads(sh("curl -s http://127.0.0.1:5000/v2/sub2api/tags/list"))
+    if tag.split(":")[-1] not in tags.get("tags", []):
+        sys.exit("push did not land in the registry: %s" % tags)
+    print(sh("k3s ctr -n k8s.io images pull --plain-http %s" % tag).strip()
+          .splitlines()[-1])
+
+    selfv = sh("docker run --rm --entrypoint /app/sub2api %s --version 2>&1 | "
+               "grep -o 'Sub2API [^)]*)' | head -1" % tag, check=False).strip()
+    print("\n  binary says : %s" % selfv)
+    print("  label       : %s" % image_version(tag))
+    print("  patch marks : %s" % ("present" if image_has_local_patches(tag)
+                                  else "MISSING"))
+    if image_version(tag) != ver or not image_has_local_patches(tag):
+        sys.exit("built image does not prove itself -- not cutting over this")
+    print("\nnext: cutover --image %s" % tag)
+    a.built_image = tag
+    return 0
+
+
+# ---------------------------------------------------------------- patch-regress
+
+_BURST = r'''
+import json,sys,urllib.request,urllib.error,threading,time
+mk,model,n=sys.argv[1],sys.argv[2],int(sys.argv[3]); res=[]
+def one(i):
+    b={"model":model,"messages":[{"role":"user","content":"reply with the word ok%d"%i}],"max_tokens":32}
+    r=urllib.request.Request("http://127.0.0.1:4000/v1/chat/completions",data=json.dumps(b).encode(),
+        headers={"Authorization":"Bearer "+mk,"Content-Type":"application/json"})
+    t=time.time()
+    try: urllib.request.urlopen(r,timeout=150).read(); res.append((i,"200",time.time()-t))
+    except urllib.error.HTTPError as e: res.append((i,str(e.code),time.time()-t))
+    except Exception as e: res.append((i,"err:"+str(e)[:60],time.time()-t))
+ts=[threading.Thread(target=one,args=(i,)) for i in range(n)]
+[t.start() for t in ts]; [t.join() for t in ts]
+for i,c,s in sorted(res): print("  #%d %s %.1fs"%(i,c,s))
+print("__OK__%d"%sum(1 for r in res if r[1]=="200"))
+'''
+
+
+def cmd_patch_regress(a):
+    """Aim the regression at what the local patch fixes: a burst of concurrent
+    multi-agent calls trips xAI's 2-requests-per-second ceiling.  Unpatched,
+    the leg that 429s is frozen for 2min and every grok model goes pool=0; with
+    the patch it retries the same account once and stays schedulable.
+
+    Pass = callers all succeeded AND no grok account got rate_limited_at inside
+    the window AND sub2api logged no pool=0.  Seeing the same-account retry line
+    is the proof the patched branch actually ran; a burst that never drew a 429
+    proves nothing either way and is reported as such (10-24: 1 of 5 drew it)."""
+    # 10-24: the second run of this burst landed while only two legs could
+    # serve (the rest parked to 11-01 on spending limits); one leg froze inside
+    # the window and real callers lost 9 requests that minute.  The burst is
+    # production traffic on a production pool -- on a thin pool, don't add to it.
+    legs = pg("SELECT id::text FROM accounts WHERE platform='grok' AND deleted_at "
+              "IS NULL AND status='active' AND schedulable AND (rate_limit_reset_at "
+              "IS NULL OR rate_limit_reset_at < now()) AND (temp_unschedulable_until "
+              "IS NULL OR temp_unschedulable_until < now());")
+    print("grok legs serving now: %d (%s)" % (len(legs), ",".join(r[0] for r in legs)))
+    if len(legs) < a.min_legs and not a.force:
+        print("SKIPPED -- fewer than %d legs; a burst here can freeze the last one "
+              "and cost real callers.  --force to run anyway." % a.min_legs)
+        return 0
+    t0 = sh("date -u +%Y-%m-%dT%H:%M:%SZ").strip()
+    mk = sh("kubectl -n %s get secret litellm-secrets -o jsonpath="
+            "'{.data.LITELLM_MASTER_KEY}' | base64 -d" % PROD_NS).strip()
+    pod = pod_of(PROD_NS, "app=litellm-proxy")
+    tmp = "/tmp/.s2a-burst-%d.py" % random.randint(10**6, 10**7)
+    open(tmp, "w").write(_BURST)
+    sh("kubectl -n %s cp %s %s:%s" % (PROD_NS, tmp, pod, tmp))
+    print("=== %d concurrent %s via litellm-proxy (t0 %s) ===" % (a.n, a.model, t0))
+    out = sh("kubectl -n %s exec %s -- python3 %s '%s' %s %d"
+             % (PROD_NS, pod, tmp, mk, a.model, a.n), check=False)
+    sh("kubectl -n %s exec %s -- rm -f %s" % (PROD_NS, pod, tmp), check=False)
+    os.unlink(tmp)
+    ok = int((re.findall(r"__OK__(\d+)", out) or ["0"])[0])
+    print("\n".join(l for l in out.splitlines() if not l.startswith("__OK__")))
+    time.sleep(5)
+    logs = sh("kubectl -n %s logs deploy/%s --since-time=%s"
+              % (DEV_NS, DEPLOY, t0), check=False)
+    retry = len(re.findall(r"pool_mode_same_account_retry.*upstream_status\D+429", logs))
+    pool0 = logs.count("pool=0")
+    frozen = pg("SELECT id::text FROM accounts WHERE platform='grok' AND "
+                "deleted_at IS NULL AND rate_limited_at >= timestamptz '%s';" % t0)
+    print("\n  callers ok           : %d/%d" % (ok, a.n))
+    print("  same-account retries : %d  (the patched branch ran)" % retry)
+    print("  pool=0 lines         : %d" % pool0)
+    print("  grok accts frozen    : %s" % (",".join(r[0] for r in frozen) or "none"))
+    # A freeze is only evidence against the patch if a per-second 429 caused it.
+    # 10-24 the freezing row was a grok-4.5 429 (not the burst model), and
+    # ops_error_logs keeps only sub2api's rewritten "Upstream rate limit
+    # exceeded" -- xAI's own body is not stored, so per-second vs per-minute is
+    # NOT decidable from here.  Print the rows; don't let the verdict pretend.
+    for r in pg("SELECT to_char(created_at,'HH24:MI:SS'), account_id::text, model, "
+                "coalesce(error_message,'') FROM ops_error_logs WHERE platform='grok' "
+                "AND upstream_status_code=429 AND created_at >= timestamptz '%s' "
+                "ORDER BY created_at LIMIT 12;" % t0):
+        print("    429 %s acct %-4s %-28s %s%s" % (r[0], r[1], r[2], r[3][:70],
+              "" if r[2] == a.model.replace("sa-", "", 1) else "  <-- not the burst model"))
+    if ok < a.n or frozen:
+        print("\nFAIL -- callers lost requests or a leg froze.  NOT yet a verdict on "
+              "the patch: if the freezing 429 above is another model, it may be real "
+              "traffic hitting a per-minute/quota limit (those SHOULD freeze).  "
+              "xAI's raw body is not in ops_error_logs; decide before blaming the patch.")
+        return 1
+    if pool0:
+        print("\n(pool=0 lines with no freeze and all callers ok = background, not "
+              "this burst; compare against the minutes before t0)")
+    if not retry:
+        print("\nINCONCLUSIVE -- no 429 was drawn, so the patched branch never ran. "
+              "Re-run, or raise --n.")
+        return 0
+    print("\nPASS")
+    return 0
+
+
 # ---------------------------------------------------------------- cutover
+
+def image_has_local_patches(img):
+    """True when every marker is in /app/sub2api of `img`.  Reads the real
+    binary, not the tag: a tag name proves nothing about what was built."""
+    for marker in LOCAL_PATCH_MARKERS:
+        out = sh("docker run --rm --entrypoint sh %s -c %s"
+                 % (img, shlex.quote("grep -c %s /app/sub2api || true"
+                                     % shlex.quote(marker))), check=False).strip()
+        if not out.splitlines() or out.splitlines()[-1].strip() in ("", "0"):
+            return False
+    return True
+
 
 def cmd_cutover(a):
     img = a.image
@@ -461,6 +781,16 @@ def cmd_cutover(a):
     if img == cur:
         print("already running %s" % img)
         return 0
+    # 10-22: production carries a local patch (per-second grok 429 = capacity,
+    # not an account-wide freeze).  Swapping in a plain upstream image silently
+    # drops it and brings back the pool-wide 503s every few minutes.  Refuse
+    # unless the target binary carries the patch or the operator says so.
+    if not image_has_local_patches(img) and not getattr(a, "drop_local_patches", False):
+        sys.exit("REFUSING: %s lacks the local patch(es) %s that production runs.\n"
+                 "  Build the new version with them first: `build --version <v>`\n"
+                 "  (patches = scripts/grok-onboard/patches/ in carher-admin),\n"
+                 "  or pass --drop-local-patches if upstream has fixed this."
+                 % (img, ", ".join(LOCAL_PATCH_MARKERS)))
     print("!! sub2api deploy is Recreate + replicas=1: there IS a gap of ~30-90s.")
     print("   It takes down grok (sa-grok-*), kimi (sa-kimi-*), AND the cursor")
     print("   gpt-group fallback chain that has sa-grok-4.6 in it.")
@@ -772,15 +1102,21 @@ def cmd_verify(a):
                  FROM "LiteLLM_SpendLogs"
                  WHERE "startTime" BETWEEN timestamptz '%s' - interval '3 minutes'
                                        AND timestamptz '%s' + interval '10 minutes'
-                   AND (model_group ILIKE '%%grok%%' OR model ILIKE '%%grok%%'
-                        OR model_group ILIKE '%%kimi%%' OR model ILIKE '%%kimi%%')
-                 GROUP BY 1 ORDER BY 1;""" % (anchor, anchor),
+                   AND %s
+                 GROUP BY 1 ORDER BY 1;""" % (anchor, anchor, SUB2API_ROWS),
               ns=PROD_NS, user="litellm", db="litellm", pod="litellm-db-0")
     if rows:
-        print("  (UTC minutes; cutover second = %s)" % anchor)
+        print("  (UTC minutes; cutover second = %s; sub2api lanes only)" % anchor)
+        # In-flight requests can have started up to a minute before the swap.
+        a0 = datetime.datetime.strptime(anchor[:16], "%Y-%m-%d %H:%M")
+        near = {(a0 - datetime.timedelta(minutes=d)).strftime("%H:%M")
+                for d in (0, 1)}
         for t, ok, bad in rows:
-            print("  %s  ok=%-5s fail=%-5s %s"
-                  % (t, ok, bad, "<-- the Recreate gap" if bad != "0" else ""))
+            tag = ""
+            if bad != "0":
+                tag = ("<-- the Recreate gap" if t in near else
+                       "<-- FAIL outside the cutover minute: not the gap, look at it")
+            print("  %s  ok=%-5s fail=%-5s %s" % (t, ok, bad, tag))
         print("  The gap is expected to cost exactly the requests IN FLIGHT during")
         print("  the swap -- 10-01 that was 5 APIConnectionErrors inside ONE second,")
         print("  not 30-90s worth.  Report that number, not the rollout duration.")
@@ -791,9 +1127,9 @@ def cmd_verify(a):
                         count(*) FILTER (WHERE "status"<>'success')::text
                  FROM "LiteLLM_SpendLogs"
                  WHERE "startTime" > timestamptz '%s' + interval '1 minute'
-                   AND (model_group ILIKE '%%grok%%' OR model ILIKE '%%grok%%'
-                        OR model_group ILIKE '%%kimi%%' OR model ILIKE '%%kimi%%');"""
-              % anchor, ns=PROD_NS, user="litellm", db="litellm", pod="litellm-db-0")
+                   AND %s;"""
+              % (anchor, SUB2API_ROWS), ns=PROD_NS, user="litellm", db="litellm",
+              pod="litellm-db-0")
     if rows:
         print("  since cutover+1min: ok=%s fail=%s" % tuple(rows[0][:2]))
 
@@ -828,7 +1164,7 @@ def cmd_rollback_plan(a):
 # ---------------------------------------------------------------- go
 
 def cmd_go(a):
-    """check/probe/backup/pull touch nothing, so they run at any hour.  The
+    """check/probe/backup/build touch nothing live, so they run at any hour.  The
     window gate sits where the risk is -- immediately before `cutover`.
 
     That ordering is not cosmetic.  Gating the whole sequence means an operator
@@ -836,16 +1172,18 @@ def cmd_go(a):
     the four reversible steps first means the question left to ask is exactly
     one step, with the image already verified and the dump already on disk
     (which is how the 09-20 run went, by hand)."""
-    for fn, args in ((cmd_check, {}),
-                     (cmd_probe, {"tag": "pre", "kimi": a.kimi}),
-                     (cmd_backup, {}),
-                     (cmd_pull, {"version": None, "source_tag": "latest"})):
+    build_ns = argparse.Namespace(version=None, tag=None)
+    for fn, ns in ((cmd_check, argparse.Namespace()),
+                   (cmd_probe, argparse.Namespace(tag="pre", kimi=a.kimi)),
+                   (cmd_backup, argparse.Namespace()),
+                   (cmd_build, build_ns)):
         print("\n" + "=" * 70 + "\n== %s\n" % fn.__name__ + "=" * 70)
-        rc = fn(argparse.Namespace(**args))
+        rc = fn(ns)
         if rc:
             sys.exit("%s returned %s -- stopping.  Nothing has changed yet."
                      % (fn.__name__, rc))
         time.sleep(1)
+    img = build_ns.built_image
 
     hour = int(time.strftime("%H"))
     if not (hour >= 23 or hour <= 6) and not a.force:
@@ -853,12 +1191,15 @@ def cmd_go(a):
                  "grok + kimi + the cursor fallback chain for ~1min.\n"
                  "The dump and the verified image are already in place, so the "
                  "only step left is one command:\n"
-                 "  cutover --yes   (or re-run `go --force` to continue here)"
-                 % hour)
+                 "  cutover --image %s --yes\n"
+                 "then: verify / probe --tag post / patch-regress"
+                 % (hour, img))
 
-    for fn, args in ((cmd_cutover, {"image": None, "yes": a.yes}),
+    for fn, args in ((cmd_cutover, {"image": img, "yes": a.yes}),
                      (cmd_verify, {}),
-                     (cmd_probe, {"tag": "post", "kimi": None})):
+                     (cmd_probe, {"tag": "post", "kimi": None}),
+                     (cmd_patch_regress, {"model": "sa-grok-4.20-multi-agent", "n": 5,
+                                          "min_legs": 3, "force": False})):
         print("\n" + "=" * 70 + "\n== %s\n" % fn.__name__ + "=" * 70)
         rc = fn(argparse.Namespace(**args))
         if rc:
@@ -899,9 +1240,26 @@ def main():
                    help="upstream tag to pull; version tags 525 via the mirror")
     p.set_defaults(fn=cmd_pull)
 
+    p = sub.add_parser("build", help="upstream source + PATCHES -> tested image")
+    p.add_argument("--version", help="upstream version; default = latest release")
+    p.add_argument("--tag", help="full image ref to push; default <date>-v<ver>-%s"
+                   % LOCAL_PATCH_SUFFIX)
+    p.set_defaults(fn=cmd_build)
+
+    p = sub.add_parser("patch-regress", help="burst that trips the per-second 429")
+    p.add_argument("--model", default="sa-grok-4.20-multi-agent")
+    p.add_argument("--n", type=int, default=5)
+    p.add_argument("--min-legs", type=int, default=3,
+                   help="skip when fewer grok legs can serve (default 3)")
+    p.add_argument("--force", action="store_true", help="burst even on a thin pool")
+    p.set_defaults(fn=cmd_patch_regress)
+
     p = sub.add_parser("cutover", help="set image + rollout status")
     p.add_argument("--image", help="default = newest tag in the local registry")
     p.add_argument("--yes", action="store_true")
+    p.add_argument("--drop-local-patches", action="store_true",
+                   help="cut over to an image WITHOUT our local patches (only once "
+                        "upstream has fixed what they fix; see LOCAL_PATCH_MARKERS)")
     p.set_defaults(fn=cmd_cutover)
 
     sub.add_parser("verify", help="migrations / ERROR / silent-change diff"

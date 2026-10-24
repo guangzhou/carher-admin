@@ -18,7 +18,12 @@ description: >-
 OpenAI 协议反代 (FastAPI), 部署在 198 K3s `open-webui` namespace, 2 副本。
 所有 OWUI 用户的 LLM 调用都先经它, 再到真正的 LiteLLM。
 
-**线上 tag: `v0.3.0`** (v0.1.0 / v0.1.1 / v0.2.0 是历史)。
+**线上 tag: `v0.3.1`** (10-24; v0.3.0 及更早是历史)。
+
+🔴 v0.3.1 = 转发时写死 `Accept-Encoding: identity`。原因: `_iter()` 用 `aiter_raw` 透传原始字节,
+却把 `content-encoding` 头丢了 ⇒ LiteLLM 回 gzip 时客户端拿到**没标头的裸 gzip**(首字节 `1f8b`)。
+OWUI ≤v0.11 碰巧不发 gzip 没事; v0.12 非流式(标题/追问/审计)全报 `'utf-8' codec can't decode byte 0x8b`。
+流式 SSE 不压缩, 不受影响。改透传逻辑时别把这行删了。备份 `198:/Data/key-swap-proxy-ops/backup-20261024T155537-identity/`。
 镜像 registry 是 `127.0.0.1:5000`, **198 上用 `docker` 不是 nerdctl**。
 
 ## 1. 核心责任
@@ -59,28 +64,27 @@ scripts/jms ssh AIYJY-litellm "kubectl run owui-test --rm -i --restart=Never --i
 ```
 
 **关键文件**:
-- 198:`/root/key-swap-proxy/main.py` (源码 ~250 行)
-- 198:`/root/key-swap-proxy/Dockerfile`
+- **仓库 `src/`(main.py / Dockerfile / requirements.txt) = 源码真身**, 10-24 从 198 拷进来, 与 v0.3.1 容器逐字节一致
+- 198:`/root/key-swap-proxy/` = build 目录(从仓库 `src/` 同步过去再 build, 别直接在上面 vim)
 - 198:`/root/open-webui-manifests/key-swap-proxy.yaml` (manifest)
 
 ## 3. 改代码 → 升级流程
 
+反代是 2 副本 RollingUpdate / maxUnavailable=0 ⇒ **换镜像无感**, 不用提前告知(和 OWUI 相反)。
+
 ```bash
-scripts/jms ssh AIYJY-litellm '
-NEW=v0.2.1  # bump version
-
-# 1. 改源码 (vim/python script patch)
-cd /root/key-swap-proxy
-vim main.py    # 改逻辑
-
-# 2. build + push
-docker build -t 127.0.0.1:5000/key-swap-proxy:$NEW .
-docker push 127.0.0.1:5000/key-swap-proxy:$NEW
-
-# 3. rollout (2 副本, maxUnavailable=0 零中断)
-kubectl set image -n open-webui deployment/key-swap-proxy proxy=127.0.0.1:5000/key-swap-proxy:$NEW
-kubectl rollout status deployment/key-swap-proxy -n open-webui --timeout=120s
-'
+NEW=v0.3.2   # bump
+# 0. 在仓库 src/main.py 改, 本地先过语法
+python3 -c "import ast;ast.parse(open('.claude/skills/owui-key-swap-proxy/src/main.py').read())"
+# 1. 备份 198 当前源码 + Deployment, 同步过去
+ssh cltx@10.68.13.198 'sudo -n sh -c "BK=/Data/key-swap-proxy-ops/backup-$(date +%Y%m%dT%H%M%S); mkdir -p $BK;
+  cp /root/key-swap-proxy/main.py $BK/main.py.orig; kubectl -n open-webui get deploy key-swap-proxy -o yaml > $BK/deploy.yaml; echo $BK"'
+ssh cltx@10.68.13.198 'sudo -n tee /root/key-swap-proxy/main.py >/dev/null' < .claude/skills/owui-key-swap-proxy/src/main.py
+# 2. build + push(本地 Dockerfile 自己 build, docker push 没问题; 推公网镜像才要 host-198-registry-mirror.sh)
+ssh cltx@10.68.13.198 "cd /root/key-swap-proxy && sudo -n docker build -q -t 127.0.0.1:5000/key-swap-proxy:$NEW . && sudo -n docker push -q 127.0.0.1:5000/key-swap-proxy:$NEW"
+# 3. rollout + 验收
+ssh cltx@10.68.13.198 "sudo -n kubectl set image -n open-webui deployment/key-swap-proxy proxy=127.0.0.1:5000/key-swap-proxy:$NEW && sudo -n kubectl rollout status deployment/key-swap-proxy -n open-webui --timeout=180s"
+.claude/skills/owui-ops/scripts/owui-model-gate-audit.sh     # 要 RESULT PASS, 含 non-stream body plain
 ```
 
 ## 4. 5 种 ConfigMap 改动场景
@@ -286,7 +290,8 @@ kubectl -n open-webui exec deploy/open-webui -- curl -s -o /dev/null -w '%{http_
 
 1. **反代用 master key 转发**: 安全敏感, 任何登录用户消费都按 master key 计 spend, 只通过 body.user 字段归类报表
 2. **个人 budget 不强制**: 反代不查个人累计 spend, 超额不阻断。F4 (反代加 30 天累计 spend deny cache) 待做
-3. **响应必须 streaming 透传**: SSE 不能 buffer, FastAPI `StreamingResponse` 已配
+3. **响应必须 streaming 透传**: SSE 不能 buffer, FastAPI `StreamingResponse` 已配。
+   透传用的是 `aiter_raw`(原始字节) ⇒ **转发头必须保留 `Accept-Encoding: identity`**, 否则见 §9 第 11 条
 4. **2 副本 + maxUnavailable=0**: 零中断 rolling update
 5. **ClusterIP only**: 不暴露 NodePort, 外部不可直接调反代
 
@@ -306,6 +311,11 @@ kubectl -n open-webui exec deploy/open-webui -- curl -s -o /dev/null -w '%{http_
 10. **`_gate` 把 deny 缓存 `CACHE_TTL`(默认 600s), 且没有 flush 接口** ⇒ 改完 LiteLLM 侧
     要么等 10 分钟, 要么 `kubectl rollout restart`, 否则读出"没修好"的假红。
     `/healthz` 的 `cache_size` 能看缓存里有多少条
+11. 🔴 **裸 gzip(10-24, v0.3.1 修)**: `_iter()` 用 `aiter_raw` 原样转发, 却把 `content-encoding` 头 drop 了。
+    客户端一发 `Accept-Encoding: gzip`, LiteLLM 就回 gzip ⇒ 下游拿到**没标头的 gzip**(首字节 `1f8b`)。
+    OWUI ≤v0.11.4 时没出事, v0.12.3 非流式(标题/追问)全报 `'utf-8' codec can't decode byte 0x8b`;流式 SSE 不压缩所以主对话好的。
+    修 = 往 LiteLLM 的请求头写死 `Accept-Encoding: identity`。判据: gate audit 的 `L2 proxy non-stream body plain`。
+    ⚠️ v0.11.4 为什么没撞上**没查**(新旧 OWUI 的 aiohttp 请求头没对比过), 别当已知结论讲。
 
 ## 10. 备份 / 回滚
 
@@ -315,7 +325,9 @@ kubectl -n open-webui exec deploy/open-webui -- curl -s -o /dev/null -w '%{http_
 - `deploy.yaml` (当时的 Deployment)
 - `patch-grok-only.py` (那次的迁移脚本)
 
-回滚 = 拿 `.orig` 覆盖 `main.py` 重 build 一个新 tag, 或 `kubectl set image` 回 `v0.2.0`。
+- `backup-20261024T155537-identity/`: v0.3.0 源码 + Deployment(加 AE identity 之前)
+
+回滚 = `kubectl set image` 回上一个 tag(v0.3.0 在 registry 里还在)。🔴 回 v0.3.0 会让 OWUI v0.12 非流式重新全挂, 除非 OWUI 也一起回。
 **⛔ 不要 `kubectl apply`**, 用 `set image` / `patch`。
 
 ## 11. 相关 skill / docs

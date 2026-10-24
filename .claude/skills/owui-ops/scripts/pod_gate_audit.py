@@ -47,7 +47,10 @@ tok = {"Authorization": "Bearer " + create_token({"id": uid})}
 for m in ARGS["allowed"]:
     s, b = http(OWUI + "/api/chat/completions", tok,
                 {"model": m, "stream": False, "messages": [{"role": "user", "content": "reply exactly: nonce-3317"}]})
-    out = json.loads(b)["choices"][0]["message"]["content"] if s == 200 else b
+    try:  # 200 也可能是错误体(10-24 v0.12 非流式坏掉时 200 + 无 choices), 别让 KeyError 盖住原文
+        out = json.loads(b)["choices"][0]["message"]["content"] if s == 200 else b
+    except (ValueError, KeyError, IndexError, TypeError):
+        out = "unparsable: " + b[:160]
     check(s == 200 and "nonce-3317" in out, f"L1 chat {m} -> {s} {out[:80]!r}")
 
 # L2 —— 直接打反代,模拟历史会话里存着的旧模型名
@@ -55,6 +58,17 @@ hdr = {"X-OpenWebUI-User-Email": email}
 s, b = http(PROXY + "/v1/models", hdr)
 ids = sorted(m["id"] for m in json.loads(b)["data"]) if s == 200 else b
 check(s == 200 and [i.lower() for i in ids] == sorted(allowed), f"L2 proxy /v1/models = {ids}")
+# 反代非流式回包必须是明文 JSON: 反代 aiter_raw 透传却丢 content-encoding, 上游一 gzip 就是裸 gzip
+# (首字节 1f8b, OWUI 报 'utf-8' codec can't decode byte 0x8b)。v0.3.1 写死 AE identity 修的, 防回退。
+req = urllib.request.Request(PROXY + "/v1/chat/completions", headers={"Content-Type": "application/json", **hdr},
+                             data=json.dumps({"model": ARGS["allowed"][0], "max_tokens": 5, "stream": False,
+                                              "messages": [{"role": "user", "content": "hi"}]}).encode())
+try:
+    with urllib.request.urlopen(req, timeout=120) as r:
+        head, ce = r.read(2), r.headers.get("Content-Encoding")
+except Exception as e:
+    head, ce = getattr(e, "read", lambda: b"")()[:2], f"err {getattr(e, 'code', e)}"
+check(head != b"\x1f\x8b" or bool(ce), f"L2 proxy non-stream body plain (first={head.hex()} CE={ce})")
 for m in blocked:
     s, b = http(PROXY + "/v1/chat/completions", hdr,
                 {"model": m, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5})

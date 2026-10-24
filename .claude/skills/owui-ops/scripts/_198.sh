@@ -11,7 +11,7 @@
 # 为什么不用 heredoc / kubectl exec -i:见 memory kubectl_exec_i_eats_heredoc_stdin、
 # feedback_jms_ssh_multiline_python_needs_heredoc_not_dash_c。
 
-: "${P198:?env P198 required (198 cltx 密码)}"
+# 没设 P198 ⇒ 走 ssh key + `sudo -n`(本机已配好免密,优先这条,不碰明文密码)。
 M198=${M198:-10.68.13.198}
 
 _b64() { base64 | tr -d '\n'; }
@@ -19,6 +19,11 @@ _b64() { base64 | tr -d '\n'; }
 r198() {
   local b
   b=$(printf '%s\n' "$1" | _b64)
+  if [ -z "${P198:-}" ]; then
+    ssh -o BatchMode=yes -o ConnectTimeout=30 -o ClearAllForwardings=yes "cltx@$M198" \
+      "sudo -n bash -c \"\$(echo $b | base64 -d)\""
+    return
+  fi
   sshpass -p "$P198" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 "cltx@$M198" \
     "printf '%s\n' '$P198' | sudo -S -p '' bash -c \"\$(echo $b | base64 -d)\""
 }

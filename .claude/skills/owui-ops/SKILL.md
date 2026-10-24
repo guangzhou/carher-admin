@@ -11,7 +11,7 @@ description: >-
 
 # Open WebUI 综合运维 (198 内网)
 
-**现状 (2026-10-07)**: 镜像 `v0.11.4`, 全员只放 `deepseek-v4.1-flash`(DeepSeek 官方)。
+**现状 (2026-10-24)**: 镜像 `v0.12.3`, 反代 `key-swap-proxy:v0.3.1`, 全员只放 `deepseek-v4.1-flash`(DeepSeek 官方)。
 
 🔴 **OWUI 不吃任何 per-key alias / per-key 兜底**:反代用 **master key** 转发(见 [[owui-key-swap-proxy]]),
 所以给 cursor/claude/carher key 批量改 `deepseek-v4.1-flash` 的映射**管不到 OWUI**,它只走该组的**全局**兜底行。
@@ -26,22 +26,26 @@ OWUI 跑在 198 K3s `open-webui` namespace, 是内部 chat.auto-link.com.cn 的�
 
 ## 1. 快速入口
 
-**登 198 = sshpass 直连 `cltx@10.68.13.198` + sudo**, 不走 jms(jms 吞 sudo 密码、PTY 丢块)。
-下文老命令里的 `scripts/jms ssh AIYJY-litellm "..."` 一律等价替换成 `_198.sh` 的 `r198 '...'`。
+**登 198 = ssh key 直连 `cltx@10.68.13.198` + `sudo -n`**(本机已配免密), 不走 jms(jms 吞 sudo 密码、PTY 丢块)。
+设了 env `P198` 才退回 sshpass+密码。下文老命令里的 `scripts/jms ssh AIYJY-litellm "..."` 一律等价替换成 `_198.sh` 的 `r198 '...'`。
 
-### 1.1 脚本 (`scripts/`, 都要 env `P198`)
+### 1.1 脚本 (`scripts/`, 不用设 env)
 
 | 脚本 | 干什么 | 写? |
 |---|---|---|
-| `owui-model-gate-audit.sh` | 三层验收「用户只能用名单里的模型」, 名单读反代 CM | 只读 |
+| `owui-model-gate-audit.sh` | 三层验收「用户只能用名单里的模型」, 名单读反代 CM; 含非流式真发 + 反代回包不是裸 gzip | 只读 |
 | `owui-set-allowed-models.sh <a,b> [--apply]` | 换名单一条命令(见 [[owui-key-swap-proxy]] §6.0) | 默认 dry-run |
-| `owui-upgrade.sh vX.Y.Z [--set-env K=V] [--apply]` | 升级: 查 pypatch 挂点 / 残留 Pod → 备份 → 推镜像 → 一次重启 → 验收 | 默认 dry-run; 🔴 apply 会硬中断 ~2min |
+| `owui-upgrade.sh vX.Y.Z [--set-env K=V] [--apply --announced]` | 升级: 推镜像 → 查 pypatch 挂点 / 残留 Pod → 备份 → 一次重启 → 验收 | 默认 dry-run; 🔴 apply 硬中断 ~1~2min, 不带 `--announced` 拒跑 |
 | `_198.sh` | 公共函数: `r198 '<bash>'` 远端 root 跑; `pypod <ns> <deploy> <file.py> [json]` pod 里跑本地 python | — |
+| 仓库 `scripts/host-198-registry-mirror.sh <src> <dst>` | 公网多架构镜像 → 198 `127.0.0.1:5000`(只 amd64, 走 k3s ctr) | 只写 registry |
 | `pod_*.py` | 上面几个脚本在 pod 里执行的部分, 不单独跑 | — |
 
 `pypod` 把 python 文件 base64 后下发, 参数以 `ARGS` 变量注入(已 import `json`)。在 OWUI pod 里
 `from open_webui.utils.auth import create_token` 可以按**真实用户 id** 签 token 测 `/api/*`,
 不用拿 admin 代测(admin 看到的和普通用户不一样)。
+
+站点 502 / 告警说「nginx 502」⇒ `scripts/host-198-nginx-5xx.sh [分钟]` (本机直接跑, ssh key + `sudo -n`):
+按站点拆 502, 同窗口列 OOMKilled; chat.auto-link 的上游是 `:30880`。
 
 ### 1.2 手工
 
@@ -87,20 +91,27 @@ scripts/jms ssh AIYJY-litellm "kubectl exec -n open-webui deployment/open-webui 
 ### 2.2 OWUI 镜像升级 —— 用 `scripts/owui-upgrade.sh`
 
 ```bash
-P198=... scripts/owui-upgrade.sh v0.11.5                       # dry-run 检查
-P198=... scripts/owui-upgrade.sh v0.11.5 --apply               # 先告知用户会中断
-P198=... scripts/owui-upgrade.sh v0.11.5 --set-env A=1 --apply # 顺带改 env, 只重启一次
+scripts/owui-upgrade.sh v0.12.4                                    # dry-run: 推镜像+查挂点+查残留 Pod, 不碰线上
+# ↓ 先跟用户说一句「站点会断 1~2 分钟」, 再跑
+scripts/owui-upgrade.sh v0.12.4 --apply --announced
+scripts/owui-upgrade.sh v0.12.4 --set-env A=1 --apply --announced  # 顺带改 env, 只重启一次
 ```
+
+**升之前**:读 GitHub release 的 `### Changed` 段 + 全文搜 `Database Migrations`/`breaking`/
+我们用到的东西(`REDIS`/`WEBSOCKET`/`OAUTH`/`SQLite`)。有 DB 迁移 ⇒ 回滚必须连 PVC 库一起恢复。
+给用户讲新特性只挑我们用得上的(飞书 SSO、SQLite、单副本), MCP/Ollama/向量库的修复略过。
 
 脚本把下面这些坑全做成了门禁:
 1. **pypatch 挂点**: 补丁换的是 `utils/misc.convert_output_to_messages`、
    `utils/middleware.get_source_context`、`config.OAUTH_PROVIDERS['feishu']` 三个模块属性。
-   新版改名不会报错, 只会静默失效 ⇒ 升前 grep 新版源码, 升后要日志 `pypatch final:` 三个 True。
-2. **残留 Pod**: Recreate 会被非 Running 的老 Pod 永久卡成 0 副本 ⇒ 有就停。
+   新版改名不会报错, 只会静默失效 ⇒ 升前 grep 新版镜像里的文件, 升后要日志 `pypatch final:` 三个 True。
+2. **残留 Pod**: Recreate 会被非 Running 的老 Pod 永久卡成 0 副本 ⇒ 已退出的(Succeeded/Failed)apply 时自动删, Pending 才拦。
 3. **只中断一次**: `rollout pause` → `set image` + `set env` → `resume`。
 4. **判版本用 `/api/version`**, 别看 `last-applied-configuration`(陈旧)。
-5. 镜像源 `ghcr.nju.edu.cn` → 推 `127.0.0.1:5000`, 禁止 `:main` 漂移 tag。
-6. 从 GitHub raw 拉源码偶尔 30s+ 超时, 脚本已 `--retry 3 --max-time 90`。
+5. 镜像源 `ghcr.nju.edu.cn` → `host-198-registry-mirror.sh` → `127.0.0.1:5000`, 禁止 `:main` 漂移 tag。
+6. **验收必须含非流式 chat**(gate audit L1 chat + L2 non-stream)。只看 `/api/version` + 页面能开是假绿:
+   10-24 主对话(流式)全好, 标题/追问(非流式)全挂, 只有这一发抓得到。
+7. **验收 FAIL 先分锅再回滚**: 看报错落在 OWUI 还是反代/LiteLLM(10-24 是反代), 有 DB 迁移的版本回滚代价大。
 
 v0.11.4 要注意的 changelog: slim 镜像砍了大量能力(**我们用标准镜像, 不受影响**);
 `langchain-community` 不再内置(自定义 tool/function import 它要自己声明; 10-07 库里 function 0 个);
@@ -110,6 +121,11 @@ Integrations 个人设置页默认隐藏。
 |---|---|---|---|
 | 09-19 | v0.9.5 → v0.11.3 | — | 并行会话升的; `config` 表变 key/value 三列 |
 | 10-07 | v0.11.3 → v0.11.4 | 19:49~19:51 ≈110s | 同批 `ENABLE_DIRECT_CONNECTIONS=false`; 备份 `webui.db.bak-pre-0114-ds41-20261007` |
+| 10-24 | v0.11.4 → v0.12.3 | 15:51:37~15:52:28 ≈51s | 含 DB 迁移(不可降级, 回滚要恢复 `webui.db.bak-20261024T155051`); 升后非流式 0x8b ⇒ 反代 v0.3.1 修(见 [[owui-key-swap-proxy]]); 删了 1 个 16 天前的 Completed Pod; 备份 `/Data/owui-ops/backup-20261024T155051-upgrade-v0.12.3` |
+
+🔴 **拉/推公网镜像一律 `scripts/host-198-registry-mirror.sh`, 别手打 docker pull/tag/push**(10-24 OWUI、sub2api 各撞一次):
+198 docker 29 开了 containerd snapshotter, 拉多架构镜像只落 amd64 层, tag 后仍是整个 index ⇒ push 报
+`does not provide any platform`; 加 `--platform`、按 amd64 digest 拉都不行。k3s ctr `push --platform` 能推。
 
 ### 2.3 查 OWUI sqlite user 表 / 合并账号 / 重置
 
@@ -197,6 +213,18 @@ c.commit()   # 期望 rowcount == 1
 ⇒ **加内存治的是 OOMKilled, 没有 OOM 就不要加**。0 restarts 是最强的反证。
 当用户问"是不是要加内存"时, 先把这四个数量出来再回答; 这一轮真正的故障是
 §2.3.6 的向量化模型名, 跟资源无关。
+
+**2026-10-21 真 OOM 了, 已加到 6Gi**:
+- 形状: 10:17:36 容器 `OOMKilled` exit 137 (内核 memcg: python3 anon-rss ≈4.17GB 顶到 4Gi limit), 40 秒后新容器起来;
+  这 40 秒 nginx `connect() failed (111)` → 60 个 502 (终端 `execute`/`ports` + socket.io), heartbeat 报成「LiteLLM 198 告警」。
+  稳态只用 0.7~1.1Gi ⇒ 是某个操作瞬间撑爆, 什么撑爆的**没查** (内核日志只留 ~1 天)。
+- 判 OOM 的证据: `kubectl -n open-webui get pod <p> -o json` 的 `lastState.terminated.reason` +
+  `journalctl -k | grep 'Memory cgroup out of memory'` 里 `cpuset=cri-containerd-<容器id>` 对得上。
+  ⚠️ pod 被 rollout 换掉后 lastState 跟着没了; 7 天 4 次重启里前 3 次原因已查不到。
+- 改法: `kubectl -n open-webui set resources deploy/open-webui -c open-webui --requests=memory=2Gi --limits=memory=6Gi`
+  (备份 `198:/home/cltx/backups/open-webui-deploy-20261021150830.yaml`)。**会触发 Recreate 中断 ~45s (§2.3.5)**。
+  选 6Gi 的依据: 节点 127G、可用 ~38G、requests 只分配 20% ⇒ limit 是上限不是占用, request 只多 1G。
+- ⚠️ `/root/open-webui-manifests/open-webui.yaml` 仍写 4Gi (cpu limit 也是旧的 2, 线上 4) —— 别 `kubectl apply` 它, 会把内存打回去。
 
 ### 2.4 Redis session 排障
 

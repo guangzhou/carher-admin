@@ -253,6 +253,26 @@ def cm_data(name: str) -> dict:
     return json.loads(base64.b64decode(out.strip()).decode("utf-8", "replace"))["data"]
 
 
+# 门禁 0：已知坏版本指纹（与 litellm-198-callbacks-drift.py 的 KNOWN_BAD 同一份清单）。
+# 🔴 2026-10-25：spendlog 清洗旧版（_LITERAL_HIGH_LONE_RE）把字面 \u0000 删成孤立反斜杠
+# ⇒ SpendLogs 丢行，87515f0 修复。旧版在 198 历代快照 / .work 拷贝里到处都有，
+# 从那些地方拿文件发版 = 把 bug 带回来，且 git 门禁看不出（入库后 HEAD 也是坏的）。
+KNOWN_BAD = {
+    "null_byte_sanitize.py": ("_LITERAL_HIGH_LONE_RE", "spendlog 清洗旧版（87515f0 之前）⇒ SpendLogs 丢行"),
+    "sitecustomize.py": ("_LITERAL_HIGH_LONE_RE", "spendlog 清洗旧版（87515f0 之前）⇒ SpendLogs 丢行"),
+}
+
+
+def known_bad_preflight(fname: str, content: str) -> None:
+    """门禁 0：要发的内容命中已知坏版本指纹 ⇒ 拒绝，--force 也不越过。"""
+    needle, why = KNOWN_BAD.get(fname, (None, None))
+    if needle and needle in content:
+        raise SystemExit("⛔ 门禁0 要发的 %s 是已知坏版本：%s。\n"
+                         "   这一条 --force 不越过；确实要回退就手工 patch，并在记录里写明原因。"
+                         % (fname, why))
+    print("✓ 门禁0 不是已知坏版本")
+
+
 def git_preflight(fname: str, force: bool) -> None:
     """门禁 1：工作区那份文件相对 HEAD 必须干净。"""
     rel = "k8s/litellm-callbacks/" + fname
@@ -297,6 +317,7 @@ def pods():
 def cmd_plan(fname: str, force: bool) -> int:
     path = os.path.join(REPO_DIR, fname)
     want = open(path, encoding="utf-8").read()
+    known_bad_preflight(fname, want)
     git_preflight(fname, force)
 
     cur_cm = gray_cm_name()
@@ -336,6 +357,7 @@ def cmd_plan(fname: str, force: bool) -> int:
 def cmd_apply(fname: str, force: bool) -> int:
     path = os.path.join(REPO_DIR, fname)
     want = open(path, encoding="utf-8").read()
+    known_bad_preflight(fname, want)
     git_preflight(fname, force)
 
     cur_cm = gray_cm_name()

@@ -60,6 +60,23 @@ PROD_POD_SELECTOR = "carher.net/litellm-production-route=enabled"
 IDLE_CANDIDATES = ["litellm-proxy", "litellm-proxy-gray"]
 VOLUME = "callbacks"
 
+# 已知坏版本的指纹：文件名 → (只在坏版本里出现的字串, 说明)。
+# 跟 repo 比对之外再查一次，因为「repo 和线上一致」挡不住两边一起是坏的
+# （例如有人从旧快照 / .work 里的旧拷贝把文件发上去，再把它入了库）。
+# 🔴 2026-10-25：spendlog 清洗旧版把对话里的字面 \u0000 删成孤立反斜杠 ⇒
+# prisma DataError ⇒ SpendLogs 丢行（修复 87515f0）。旧版独有 _LITERAL_HIGH_LONE_RE。
+KNOWN_BAD = {
+    "null_byte_sanitize.py": ("_LITERAL_HIGH_LONE_RE", "spendlog 清洗旧版（87515f0 之前）⇒ SpendLogs 丢行"),
+    "sitecustomize.py": ("_LITERAL_HIGH_LONE_RE", "spendlog 清洗旧版（87515f0 之前）⇒ SpendLogs 丢行"),
+}
+SHARED_CM = "litellm-callbacks"   # 13 个 chatgpt-acct 挂的可变共享 CM
+
+
+def known_bad_hits(data):
+    """返回 [(文件, 说明)]：这份 CM 里命中已知坏版本指纹的文件。"""
+    return [(f, why) for f, (needle, why) in KNOWN_BAD.items()
+            if needle in (data.get(f) or "")]
+
 
 def sh(cmd, check=True):
     r = subprocess.run(SSH + [cmd], capture_output=True, text=True)
@@ -105,6 +122,9 @@ def compare(lane, deploy, repo, only_file, show_diff):
         print("? %-12s CM %s 读不到" % (lane, cm))
         return 1
     print("\n== lane %s（deploy %s）→ CM %s ==" % (lane, deploy, cm))
+    bad = known_bad_hits(data)
+    for f, why in bad:
+        print("  ✗ %-42s 线上是已知坏版本：%s" % (f, why))
 
     keys = sorted(set(repo) | set(data))
     if only_file:
@@ -130,8 +150,8 @@ def compare(lane, deploy, repo, only_file, show_diff):
                     b.splitlines(), a.splitlines(),
                     fromfile="live/" + k, tofile="repo/" + k, lineterm="", n=2))[:120]:
                 print("      " + line)
-    print("  小计：%d 一致，%d 内容不同，%d 只存在于一侧" % (same, drift, missing))
-    return 1 if (drift or missing) else 0
+    print("  小计：%d 一致，%d 内容不同，%d 只存在于一侧，%d 已知坏版本" % (same, drift, missing, len(bad)))
+    return 1 if (drift or missing or bad) else 0
 
 
 def prod_deploy():
@@ -182,6 +202,10 @@ def main():
     a = ap.parse_args()
 
     repo = repo_data()
+    rc = 0
+    for f, why in known_bad_hits(repo):
+        print("✗ repo 里的 %s 是已知坏版本：%s —— 别从它发版" % (f, why))
+        rc = 1
     all_lanes = live_lanes()
     print("车道实测：" + "  ".join("%s=%s" % (k, v) for k, v in all_lanes.items()))
     if a.lane:
@@ -190,9 +214,17 @@ def main():
         lanes = {a.lane: all_lanes[a.lane]}
     else:
         lanes = all_lanes
-    rc = 0
     for lane, deploy in lanes.items():
         rc |= compare(lane, deploy, repo, a.file, a.diff)
+    if not a.lane:
+        # 共享 CM 不做逐文件对账（它本来就落后，acct 池不重启），只查已知坏版本
+        shared = cm_data(SHARED_CM)
+        bad = known_bad_hits(shared) if shared is not None else []
+        print("\n== 共享 CM %s：%s ==" % (SHARED_CM, "读不到" if shared is None
+                                        else "%d 个已知坏版本" % len(bad)))
+        for f, why in bad:
+            print("  ✗ %-42s %s" % (f, why))
+        rc |= 1 if (shared is None or bad) else 0
     if rc:
         print("\n⛔ 有不一致。**方向要你自己看 diff 定**：线上那份可能是别人没提交的新改动，"
               "\n   也可能是漂移。禁 blanket cp —— 只有一侧是严格超集才谈覆盖。")

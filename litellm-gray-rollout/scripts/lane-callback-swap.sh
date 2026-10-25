@@ -87,6 +87,18 @@ PY
   echo "  先把 live 的 callbacks/config 回填进 $SNAP 与 $DEPLOY_SRC 再跑，否则 helm upgrade 会静默回退。" >&2
   exit 1; }
 
+# 5. 已知坏版本指纹（与 scripts/litellm-198-callbacks-drift.py 的 KNOWN_BAD 同一份清单），动快照之前就拒。
+#    2026-10-25：spendlog 清洗旧版（_LITERAL_HIGH_LONE_RE）⇒ SpendLogs 丢行，git 87515f0 修复；
+#    旧版在历代快照 / .work 拷贝里到处都有，拿错一份发上去 = bug 回来且所有门禁全绿。
+for f in "${FILES[@]}"; do
+  case "$f" in
+    null_byte_sanitize.py|sitecustomize.py)
+      if grep -q '_LITERAL_HIGH_LONE_RE' "$FILES_DIR/$f" 2>/dev/null; then
+        echo "STOP: $FILES_DIR/$f 是 spendlog 清洗旧版（87515f0 之前，会让 SpendLogs 丢行）" >&2; exit 1
+      fi ;;
+  esac
+done
+
 declare -A WANT
 for f in "${FILES[@]}"; do
   [[ -f "$FILES_DIR/$f" ]] || { echo "missing $FILES_DIR/$f" >&2; exit 2; }

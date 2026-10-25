@@ -30,6 +30,8 @@ Expected: all tests pass in well under 10 seconds.
 | `test_deepseek_responses_group_rewrite.py` | `/v1/responses` 入口把裸名 `deepseek-v4-flash/pro` 改写到官方 `-responses` 组（`deepseek_responses_adapt.py`，让 Codex 免装 DeepSeek models.json）。钉住：chat 调用不改写、已是 -responses 名不改写、`DEEPSEEK_RESPONSES_REWRITE=off` 一键停用、不就地污染入参 dict。 |
 | `test_responses_tool_args_done_backfill.py` | chat↔responses 桥并行工具调用无 delta 时补发 `.done` 参数（`responses_tool_args_done_backfill.py`）。**必须在 1.103.2 pod 里跑**（真迭代器，不 mock）：`PYTHONPATH=<dir> python tests/test_responses_tool_args_done_backfill.py`。30 项，每个补发场景先用原函数做阳性对照；钉住全 delta/单调用/纯文本补丁前后逐字节相同、混合 delta 不重复、custom_tool_call、reasoning 前置 index 连续、畸形事件与原函数同结果。 |
 
+| `test_spendlog_scrub.py` | SpendLogs 行清洗两层（`null_byte_sanitize.py` + `sitecustomize.py`）。钉住 10-20/10-25 丢行根因：对话里的字面 `\u0000` 不再被删成孤立 `\` ⇒ 非法转义。阳性对照（旧实现照抄）必须红；fuzz 4 万例「合法 JSON 进、合法 JSON 出、两层逐字节一致、幂等」；真 NUL / 孤立代理仍删、emoji 保留。 |
+
 > 表格历史上只列了一个文件，实际目录里有十几个 `test_*.py`；新增时顺手补一行。
 
 ## Adding a new hook test

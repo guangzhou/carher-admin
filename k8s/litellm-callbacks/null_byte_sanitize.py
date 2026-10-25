@@ -112,9 +112,11 @@ Trade-offs
   * **Lossiness**: stripping ``\\x00`` from a string discards what was
     almost certainly garbage anyway (PG cannot store it, the LLM
     cannot tokenize it cleanly, and most tools that generate it are
-    binary-mode artifacts). The literal text ``\\u0000`` *that the user
-    typed* will also be stripped — extremely rare in practice and
-    losing it is preferable to losing the entire 1000-row batch.
+    binary-mode artifacts). Literal text the user typed (``\\u0000`` in
+    code, regexes like ``[\\ud800-\\udfff]``) is NOT touched: inside the
+    JSON columns it is ``\\\\u0000`` and the escape-aware scan keeps it
+    (deleting it naively left an invalid escape and lost the row — see
+    ``_ESCAPE_RE``).
 
     Lone surrogates only exist in strings that are already broken
     UTF-16 fragments (e.g. half of an emoji). They cannot tokenize as
@@ -160,12 +162,12 @@ _log = logging.getLogger(__name__)
 
 
 # ── core sanitizer ─────────────────────────────────────────────────────
-# Strip both the raw NUL byte and its JSON-escaped literal form. The
-# literal ``\\u0000`` arrives whenever upstream code already ran
-# ``json.dumps`` on a NUL-containing value (which is exactly what
-# ``jsonify_object`` does for nested dicts, see docstring above).
+# Strip the raw NUL byte and raw lone surrogate codepoints, plus their
+# JSON-escape forms. The escape forms arrive because the spend-log text
+# columns (``messages`` / ``response`` / ``proxy_server_request`` /
+# ``metadata``) are ALREADY JSON text by the time ``jsonify_object`` sees
+# them (upstream builds them with ``safe_dumps``).
 _NUL_RAW = "\x00"
-_NUL_ESCAPED = "\\u0000"
 
 # Lone (unpaired) UTF-16 surrogate code points. CPython auto-collapses
 # correctly-paired surrogates to a single >U+FFFF codepoint, so this
@@ -173,46 +175,50 @@ _NUL_ESCAPED = "\\u0000"
 # emoji that was byte-truncated upstream.
 _LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
-# JSON-escape *literal* form of a lone surrogate (6 ASCII chars: \uDxxx).
-# Reaches the spend-log buffer when upstream code has already run
-# ``json.dumps`` once on a value containing a lone surrogate codepoint,
-# so by the time our patch sees it the codepoint is gone but the
-# 6-character escape sequence remains. Prisma's Rust serde_json driver
-# rejects this literal form just as harshly as the codepoint form
-# ("unexpected end of hex escape").
+# 🔴 2026-10-25 rewrite — the old version deleted ``\u0000`` / lone
+# ``\uDxxx`` with a plain replace / lookaround regex, which does not know
+# whether the backslash in front of ``u`` is itself escaped. When the
+# conversation contains the LITERAL text ``\u0000`` (code like
+# ``'\u0000'`` or ``r'[\ud800-\udfff]'``) the JSON column holds
+# ``\\u0000``; deleting the last 6 chars leaves a lone ``\`` -> invalid
+# escape -> prisma DataError -> upstream poison isolation drops the row.
+# Every later turn of that conversation carries the same history, so the
+# whole session stops landing in SpendLogs (measured 10-20 / 10-25: ~1-2%
+# of rows/day, concentrated on long-session keys; billing unaffected).
 #
-# We must NOT strip *paired* surrogate literals like ``\\ud83d\\ude00`` —
-# those are the JSON spec's official way to encode codepoints above
-# U+FFFF (e.g. emoji) and prisma accepts them. Hence the lookahead /
-# lookbehind to require the partner be missing.
-_LITERAL_HIGH_LONE_RE = re.compile(
-    # high surrogate `\uD800..\uDBFF` NOT followed by a low surrogate
-    r"\\u[dD][89aAbB][0-9a-fA-F]{2}"
-    r"(?!\\u[dD][c-fC-F][0-9a-fA-F]{2})"
+# The fix scans escapes left-to-right like a JSON lexer: ``\\`` (escaped
+# backslash) is consumed as one unit and kept, so the ``u`` after it is
+# never mistaken for an escape. Removing a whole escape sequence can never
+# leave JSON text invalid. Plain Python strings inside dict columns (scrubbed
+# BEFORE json.dumps) behave as before: a 6-char ``\u0000`` there is dropped,
+# which is lossy but harmless — json.dumps escapes whatever is left.
+#   group 1 (kept): escaped backslash, or a paired surrogate escape
+#                   (``😀`` = emoji, valid JSON, prisma accepts)
+#   dropped:        ``\u0000``, or any other (= lone) ``\uD800..\uDFFF``
+_ESCAPE_RE = re.compile(
+    r"(\\\\"
+    r"|\\u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2})"
+    r"|\\u0000"
+    r"|\\u[dD][89a-fA-F][0-9a-fA-F]{2}"
 )
-_LITERAL_LOW_LONE_RE = re.compile(
-    # low surrogate `\uDC00..\uDFFF` NOT preceded by a high surrogate
-    r"(?<!\\u[dD][89aAbB][0-9a-fA-F]{2})"
-    r"\\u[dD][c-fC-F][0-9a-fA-F]{2}"
-)
+# Cheap pre-check: without one of these there is nothing to drop, so the
+# common case (CJK text escapes, ``\\n`` ...) skips the substitution pass.
+_ESCAPE_HINT_RE = re.compile(r"\\u(?:0000|[dD][89a-fA-F])")
 
 
 def _scrub_str(s: str) -> str:
     """Strip every byte sequence that crashes our PG/prisma write path.
 
-    Three independent checks; cheap-existence test first so the common
-    case (clean string) allocates nothing.
+    Idempotent, and never turns valid JSON text into invalid JSON text
+    (pinned by ``tests/test_spendlog_scrub.py``). Cheap-existence tests
+    first so the common case (clean string) allocates nothing.
     """
-    if _NUL_RAW in s or _NUL_ESCAPED in s:
-        s = s.replace(_NUL_RAW, "").replace(_NUL_ESCAPED, "")
+    if _NUL_RAW in s:
+        s = s.replace(_NUL_RAW, "")
     if _LONE_SURROGATE_RE.search(s):
         s = _LONE_SURROGATE_RE.sub("", s)
-    # ``\\u`` only appears in strings that have been json-dumped at least
-    # once, so this short-circuit avoids two re.sub passes on every
-    # input string in the common case.
-    if "\\u" in s:
-        s = _LITERAL_HIGH_LONE_RE.sub("", s)
-        s = _LITERAL_LOW_LONE_RE.sub("", s)
+    if "\\u" in s and _ESCAPE_HINT_RE.search(s):
+        s = _ESCAPE_RE.sub(r"\1", s)
     return s
 
 

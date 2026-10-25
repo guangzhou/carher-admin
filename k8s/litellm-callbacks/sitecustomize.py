@@ -79,27 +79,33 @@ def _install_spendlog_sanitizer():
 
     _TARGET = "litellm.proxy.utils"
 
-    # ── scrub logic (mirrors null_byte_sanitize.py) ──────────────────────
+    # ── scrub logic (mirrors null_byte_sanitize.py — keep the two in sync,
+    #    tests/test_spendlog_scrub.py asserts they behave identically) ─────
+    # 🔴 2026-10-25: the old replace/lookaround version deleted the tail of
+    # an ESCAPED backslash (``\\u0000`` = literal text ``\u0000`` in the
+    # conversation) -> lone ``\`` -> invalid escape -> prisma DataError ->
+    # row dropped, and every later turn of that session with it. The scan
+    # below consumes ``\\`` as one unit (kept), like a JSON lexer; see the
+    # long comment above ``_ESCAPE_RE`` in null_byte_sanitize.py.
     _NUL_RAW = "\x00"
-    _NUL_ESCAPED = "\\u0000"
     _LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
-    # literal \uD800..\uDBFF NOT followed by a low surrogate (unpaired high)
-    _LITERAL_HIGH_LONE_RE = re.compile(
-        r"\\u[dD][89aAbB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2})"
+    # group 1 kept: escaped backslash / paired surrogate escape (emoji).
+    # dropped: \u0000, or any other (= lone) \uD800..\uDFFF escape.
+    _ESCAPE_RE = re.compile(
+        r"(\\\\"
+        r"|\\u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2})"
+        r"|\\u0000"
+        r"|\\u[dD][89a-fA-F][0-9a-fA-F]{2}"
     )
-    # literal \uDC00..\uDFFF NOT preceded by a high surrogate (unpaired low)
-    _LITERAL_LOW_LONE_RE = re.compile(
-        r"(?<!\\u[dD][89aAbB][0-9a-fA-F]{2})\\u[dD][c-fC-F][0-9a-fA-F]{2}"
-    )
+    _ESCAPE_HINT_RE = re.compile(r"\\u(?:0000|[dD][89a-fA-F])")
 
     def _scrub_str(s):
-        if _NUL_RAW in s or _NUL_ESCAPED in s:
-            s = s.replace(_NUL_RAW, "").replace(_NUL_ESCAPED, "")
+        if _NUL_RAW in s:
+            s = s.replace(_NUL_RAW, "")
         if _LONE_SURROGATE_RE.search(s):
             s = _LONE_SURROGATE_RE.sub("", s)
-        if "\\u" in s:
-            s = _LITERAL_HIGH_LONE_RE.sub("", s)
-            s = _LITERAL_LOW_LONE_RE.sub("", s)
+        if "\\u" in s and _ESCAPE_HINT_RE.search(s):
+            s = _ESCAPE_RE.sub(r"\1", s)
         return s
 
     def _scrub(v):

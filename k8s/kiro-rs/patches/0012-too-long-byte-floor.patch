@@ -1,0 +1,150 @@
+diff --git a/src/anthropic/handlers.rs b/src/anthropic/handlers.rs
+--- a/src/anthropic/handlers.rs
++++ b/src/anthropic/handlers.rs
+@@ -38,14 +38,21 @@
+ ///
+ /// 上游不告诉我们实际 token 数，`input_tokens` 是本地估算，可能比窗口小；
+ /// 官方文案恒为 N > M，所以至少报 M+1。
+-fn prompt_too_long_message(model: &str, input_tokens: i32) -> String {
++///
++/// 0012（10-25）：只报 M+1 时 Claude Code 算出「只差 1 个」，每次压缩只多砍几条再试 ——
++/// 现场同一会话 25 分钟 ~150 次超长 400。真实形状 mock（请求真超才拒）只变报数：
++/// M+1 ⇒ 485 次请求；报真实值 ⇒ 5 次。按字节估：`bytes/3` ⇒ 81 次（偏低，砍不够）、
++/// `bytes/3×1.1` ⇒ 5 次（≈真实值）、`×1.25` ⇒ 7 次但压缩后只剩 197 条（砍过头）。都是单次样本。
++/// ⇒ 用 `bytes/3×1.1` 当下限；只有真超长才走这里，平时请求不受影响。
++fn prompt_too_long_message(model: &str, input_tokens: i32, request_bytes: usize) -> String {
+     let window = super::converter::get_context_window_size(model);
+-    let tokens = input_tokens.max(window.saturating_add(1));
++    let by_bytes = ((request_bytes / 3) as u64).saturating_mul(11).saturating_div(10).min(i32::MAX as u64) as i32;
++    let tokens = input_tokens.max(by_bytes).max(window.saturating_add(1));
+     format!("prompt is too long: {} tokens > {} maximum", tokens, window)
+ }
+ 
+ /// 将 KiroProvider 错误映射为 HTTP 响应
+-pub(crate) fn map_provider_error(err: Error, model: &str, input_tokens: i32) -> Response {
++pub(crate) fn map_provider_error(err: Error, model: &str, input_tokens: i32, request_bytes: usize) -> Response {
+     let err_str = err.to_string();
+ 
+     // 上下文窗口满了（对话历史累积超出模型上下文窗口限制）；
+@@ -56,7 +63,7 @@
+             StatusCode::BAD_REQUEST,
+             Json(ErrorResponse::new(
+                 "invalid_request_error",
+-                prompt_too_long_message(model, input_tokens),
++                prompt_too_long_message(model, input_tokens, request_bytes),
+             )),
+         )
+             .into_response();
+@@ -573,7 +580,7 @@
+     // 调用 Kiro API（支持多凭据故障转移）
+     let response = match provider.call_api_stream_for(request_body, session_key).await {
+         Ok(resp) => resp,
+-        Err(e) => return map_provider_error(e, model, input_tokens),
++        Err(e) => return map_provider_error(e, model, input_tokens, request_body.len()),
+     };
+ 
+     // 创建流处理上下文
+@@ -710,7 +717,7 @@
+     // 调用 Kiro API（支持多凭据故障转移）
+     let response = match provider.call_api_for(request_body, session_key).await {
+         Ok(resp) => resp,
+-        Err(e) => return map_provider_error(e, model, input_tokens),
++        Err(e) => return map_provider_error(e, model, input_tokens, request_body.len()),
+     };
+ 
+     // 读取响应体
+@@ -1105,7 +1112,7 @@
+     // 调用 Kiro API（支持多凭据故障转移）
+     let response = match provider.call_api_stream_for(request_body, session_key).await {
+         Ok(resp) => resp,
+-        Err(e) => return map_provider_error(e, model, estimated_input_tokens),
++        Err(e) => return map_provider_error(e, model, estimated_input_tokens, request_body.len()),
+     };
+ 
+     // 创建缓冲流处理上下文
+@@ -1247,7 +1254,7 @@
+ 
+     #[tokio::test]
+     async fn too_long_uses_anthropic_wording_with_numbers() {
+-        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_TOO_LONG), "claude-opus-5-5", 1_012_345);
++        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_TOO_LONG), "claude-opus-5-5", 1_012_345, 0);
+         let (status, body) = body_of(resp).await;
+         assert_eq!(status, StatusCode::BAD_REQUEST);
+         assert_eq!(body["error"]["type"], "invalid_request_error");
+@@ -1259,7 +1266,7 @@
+     #[tokio::test]
+     async fn too_long_with_low_local_estimate_still_reports_over_window() {
+         // 本地估算 79 万（linsen 10-19 那种：上游按别的尺子拒），文案仍须 N > M
+-        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_TOO_LONG), "claude-opus-5-5", 796_092);
++        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_TOO_LONG), "claude-opus-5-5", 796_092, 0);
+         let (_, body) = body_of(resp).await;
+         let (n, m) = claude_code_parses(body["error"]["message"].as_str().unwrap()).unwrap();
+         assert_eq!(m, 1_000_000);
+@@ -1267,15 +1274,35 @@
+     }
+ 
+     #[tokio::test]
++    async fn too_long_reports_byte_floor_so_one_compaction_is_enough() {
++        // 0012:本地估算偏低(大段工具说明/图片没算全)时,按请求字节给下限并往大说,
++        // 让 Claude Code 一次就压缩够,而不是「只差 1 个」砍几条再试几百次。
++        let bytes = 3_600_000; // ≈ 10-25 现场那单的请求体
++        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_TOO_LONG), "claude-opus-5-5", 796_092, bytes);
++        let (_, body) = body_of(resp).await;
++        let (n, m) = claude_code_parses(body["error"]["message"].as_str().unwrap()).unwrap();
++        assert_eq!(m, 1_000_000);
++        assert_eq!(n, 1_320_000, "bytes/3 ×1.1");
++        // 估算已经更大 ⇒ 用估算
++        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_TOO_LONG), "claude-opus-5-5", 2_000_000, bytes);
++        let (_, body) = body_of(resp).await;
++        assert_eq!(claude_code_parses(body["error"]["message"].as_str().unwrap()).unwrap().0, 2_000_000);
++        // 超大请求不溢出
++        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_TOO_LONG), "claude-opus-5-5", 1, usize::MAX);
++        let (_, body) = body_of(resp).await;
++        assert_eq!(claude_code_parses(body["error"]["message"].as_str().unwrap()).unwrap().0, i32::MAX as u64);
++    }
++
++    #[tokio::test]
+     async fn too_long_200k_model_reports_its_own_window() {
+-        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_TOO_LONG), "claude-haiku-4-5", 210_000);
++        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_TOO_LONG), "claude-haiku-4-5", 210_000, 0);
+         let (_, body) = body_of(resp).await;
+         assert_eq!(body["error"]["message"], "prompt is too long: 210000 tokens > 200000 maximum");
+     }
+ 
+     #[tokio::test]
+     async fn message_only_input_is_too_long_also_maps() {
+-        let resp = map_provider_error(anyhow::Error::msg(r#"400 Bad Request {"message":"Input is too long."}"#), "claude-opus-5-5", 5);
++        let resp = map_provider_error(anyhow::Error::msg(r#"400 Bad Request {"message":"Input is too long."}"#), "claude-opus-5-5", 5, 0);
+         let (status, body) = body_of(resp).await;
+         assert_eq!(status, StatusCode::BAD_REQUEST);
+         assert!(body["error"]["message"].as_str().unwrap().starts_with("prompt is too long: "));
+@@ -1284,7 +1311,7 @@
+     #[tokio::test]
+     async fn old_wording_is_gone() {
+         // 阴性对照：旧文案不再出现（它不被 Claude Code / LiteLLM 识别）
+-        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_TOO_LONG), "claude-opus-5-5", 1);
++        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_TOO_LONG), "claude-opus-5-5", 1, 0);
+         let (_, body) = body_of(resp).await;
+         let msg = body["error"]["message"].as_str().unwrap();
+         assert!(!msg.contains("Context window is full"));
+@@ -1294,7 +1321,7 @@
+     #[tokio::test]
+     async fn rate_limit_is_untouched() {
+         // 429 等其他错误维持 502 原样（LiteLLM 照常换号/兜底）
+-        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_429), "claude-opus-5-5", 1_012_345);
++        let resp = map_provider_error(anyhow::Error::msg(UPSTREAM_429), "claude-opus-5-5", 1_012_345, 0);
+         let (status, body) = body_of(resp).await;
+         assert_eq!(status, StatusCode::BAD_GATEWAY);
+         assert_eq!(body["error"]["type"], "api_error");
+diff --git a/src/anthropic/search_loop.rs b/src/anthropic/search_loop.rs
+--- a/src/anthropic/search_loop.rs
++++ b/src/anthropic/search_loop.rs
+@@ -117,7 +117,7 @@
+     };
+     let first = match provider.call_api_for(&body, session_key.as_deref()).await {
+         Ok(resp) => resp,
+-        Err(e) => return super::handlers::map_provider_error(e, &payload.model, estimated_input),
++        Err(e) => return super::handlers::map_provider_error(e, &payload.model, estimated_input, body.len()),
+     };
+ 
+     let model = payload.model.clone();

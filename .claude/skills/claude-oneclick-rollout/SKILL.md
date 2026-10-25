@@ -75,6 +75,7 @@ claude-oneclick/
 
 ## 3. 命令行的坑
 
+- 🔴 **大 MCP 工具包撑爆上下文(10-25 本机 rea 210 工具≈1MB)**:Claude Code 2.1.304 前走网关**不**按需加载 MCP 工具,老会话也按老规矩 ⇒ 每句整份发。安装器默认写 `env.ENABLE_TOOL_SEARCH="true"`(用户自己写过含 false 不动)。
 - `ANTHROPIC_AUTH_TOKEN` 能聊天但拉不到网关模型列表 ⇒ 只留 `ANTHROPIC_API_KEY`;两个同时在启动就告警。
   老终端窗口还带着改配置前的环境变量 ⇒ **关掉旧窗口新开**(10-13 本机 00:10 开的标签页一直报)。
 - `.zshrc` 里旧 `ANTHROPIC_MODEL=anthropic.claude-opus-5` 等会盖过 settings.json ⇒ 安装器注释掉并备份。

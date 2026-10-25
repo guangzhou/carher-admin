@@ -1,6 +1,6 @@
 ---
 name: claude-oneclick-rollout
-description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的一键脚本 SOP——claude-mac.command / claude-windows.bat,自动装 Node/claude、合并 settings.json、配桌面 App 三方模式、预置 App 钉死的 Claude Code 组件、198 /ccdl/ 国内镜像(每日自动跟版)。Use when 改 claude-oneclick 下任何脚本 / 同事说 Claude App「App unavailable」「发消息很慢不回」「只能选一个模型」/ 新开窗口报 Model "claude-router-…" isn't recognized / 要更新《Claude Code 一键配置》文档 / App 自动升级后卡住。
+description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的一键脚本 SOP——claude-mac.command / claude-windows.bat,自动装 Node/claude、合并 settings.json、配桌面 App 三方模式、预置 App 钉死的 Claude Code 组件、198 /ccdl/ 国内镜像(每日自动跟版)。Use when 改 claude-oneclick 下任何脚本 / 同事说 Claude App「App unavailable」「发消息很慢不回」「只能选一个模型」/ /model 菜单重复、太多、有画图模型或 Fable / App 里 npm install 失败、设置页「严格沙箱 · 组织开启」/ 新开窗口报 Model "claude-router-…" isn't recognized / 要更新《Claude Code 一键配置》文档 / App 自动升级后卡住。
 ---
 
 # Claude Code 一键配置(CLI + 桌面 App)
@@ -14,14 +14,28 @@ description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的�
 **发版**:改完跑 `bash scripts/agent-oneclick-docs/release_all.sh`(网页 + 飞书附件 + 门禁一起)。
 **自检(doctor,10-16)**:`src/doctor-{mac.sh,windows.ps1}` → build 出 `claude-doctor-{mac.command,windows.bat}`,单页「出问题了」里可下载。只读;查 settings.json(BASE/API_KEY/AUTH_TOKEN 并存/发现开关/claude-router- 旧名)、rc 与当前终端的覆盖变量、桌面 App 3P 配置与两把 key 是否一致、App 钉死版本的组件是否预置 + 198 镜像有没有这版、App 日志 `Host Claude Code binary not available`、代理、key 实打 /v1/messages。回归 `tests/test_doctor.py`;Windows 版 App 日志路径按 App 代码=`%LOCALAPPDATA%\Claude-3p\logs`(未实机验)。
 
-## 刷模型(2026-10-19)
+## /model 菜单 = 只放我们按 key 生成的那份(10-25 定型)
 
-- 新文件 `src/carher_models_refresh.js`(安装器和「刷模型」共用,`applyModels` 是纯函数):按 `settings.json` 里的 key
-  拉 `/v1/models` → 重写 `modelPicker`(删掉没权限的、加上新开通的)→ 删 `cache/gateway-models.json` → 当前 `model` 是网关名
-  且已没权限就删掉(`opus` 这类别名和 `[1m]` 后缀不动)。拉不到就不改,改之前备份成 `settings.json.bak-carher-refresh`。
-- 安装器第 4 步落盘这个文件,合并时 `require` 它;第 4e 步装 skill `carher-refresh-models` 和 `~/.claude/CLAUDE.md` 的
-  `CARHER-REFRESH` 块(只装 skill 不够,画图那次实测过)。`build.sh` 嵌入时优先用本目录 `src/`,再用 codex 的共用源。
-- 10-19 本机实测(隔离 CLAUDE_CONFIG_DIR):`claude -p "刷模型"` 自己调了命令,菜单 23 → 30 个(+ kimi-k3、gpt-reserve 等 7 个)。
+**菜单是三拨叠加的**:Claude Code 自带(Default/Opus/Fable/Sonnet/Haiku)+ 网关发现(`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`,
+标「From gateway」)+ `settings.json` 的 `modelPicker`(标「Custom model」)。10-25 用户截图 74 行(10+64)而脚本说 26 ——
+数 JSON 永远对不上屏幕,**判菜单只用 `scripts/cc-model-menu.sh`**(真起 claude、按 /model 滚到底、报总行数和重复)。
+
+现行做法(`src/carher_models_refresh.js`,安装器和「刷模型」共用,`applyModels`/`pickerRows`/`hookEntry` 是纯函数):
+- `modelPicker.options` = 这把 key **全部可聊天模型**:`claude-*` 在前(fable→opus→sonnet→haiku,同家族版本新→旧,
+  **不写 label** ⇒ Claude Code 自己显示 Opus 5.5);非 claude 带 `behavesAs: claude-sonnet-5-5`(不写就每次启动告警按 200k 算)。
+  出图/视频/音乐、`codex-auto-review` 不进。
+- `replaceBuiltInOptions: true` ⇒ 菜单只剩「Default + 这些行」,自带行和网关发现全隐藏(官方 settings-reference#modelpicker)。
+  本机实测 37 行无重复、无出图、无 Fable;grok/kimi/gpt/haiku-5.5/sonnet 实打 OK 无告警。
+- ⛔ **别改成「只靠网关发现」**(用户 10-25 提过,对照否了):198 对 claude-cli UA 把非 claude 模型改名成 `claude-router-<hex>`
+  (发现只收含 claude 的 id),显示乱码 + 每次启动 `unrecognized_model` 告警;出图模型进菜单;自带 Fable 打出去 403。
+- **自动刷新**:安装器在 `hooks.SessionStart` 挂 `{matcher:"startup", command:<node绝对路径>, args:[脚本,"--quiet"], async:true, timeout:60}`。
+  exec 形式不经 shell(路径带空格、Windows 无 Git Bash 都行,需 2.1.139+);`--quiet` 不出声、失败退 0、只写
+  `~/.claude/carher/refresh.log`;先写临时文件再 rename(Claude Code 监视 settings.json)。重跑幂等,用户自己的 hook 不动。
+  实测:菜单删掉 kimi-k3 + 塞假名 ⇒ 开一次会话自动恢复。「刷模型」skill + `CLAUDE.md` 的 `CARHER-REFRESH` 块保留当「立刻刷」。
+- 当前 `model` 是网关名且已没权限 ⇒ 删掉回默认(`opus` 别名、`[1m]` 后缀不动)。拉不到列表就不改;改前备份 `.bak-carher-refresh`。
+- **haiku**:写 `env.ANTHROPIC_DEFAULT_HAIKU_MODEL` = key 里最新的 `claude-haiku-*`(版本按数字比);我们写过的老 haiku 会升,
+  用户指到非 haiku 的不动。10-25 网关已上 `claude-haiku-5-5`(Claude Code 默认要它,之前 403)。
+- doctor 报「菜单去重 / 开机自动刷菜单 / 后台小任务模型」。回归:`tests/test_install_mac.py`(去重、hook 幂等、quiet 失败退 0)。
 
 ## 1. 文件与发版
 
@@ -31,10 +45,18 @@ claude-oneclick/
   tests/                                         ← 离线回归(build.sh 先跑,不过不出产物)
   build.sh                                       → claude-mac.command / claude-windows.bat
   ccdl-sync.sh                                   ← 198 镜像跟版(已装成 /usr/local/bin/carher-ccdl-sync.sh,cron 06:17)
+  src/carher_models_refresh.js                   ← 菜单 + haiku + 自动刷新 hook(两个安装器 @@EMBED)
+.claude/skills/claude-oneclick-rollout/scripts/
+  cc-model-menu.sh      ← 真实 /model 菜单(行数/重复),可指隔离 CLAUDE_CONFIG_DIR
+  app-sandbox-ab.sh     ← App 严格沙箱对照(--managed-settings 喂 App 那份 vs 不加)
 ```
 发版:`bash claude-oneclick/build.sh` → 干净 HOME 真跑
 (`printf '%s\n' "$KEY" | env -i HOME=$T PATH=/opt/homebrew/bin:/usr/bin:/bin TERM=xterm TMPDIR=$T bash claude-mac.command`,
 看到「✔ 桌面 App 组件就绪」「✔ 通了」)→ 换飞书附件(+media-insert → 下载回来比 sha → move_after → 删旧)→ 跑门禁。
+- 在用户本机跑真安装器(10-25 做过两次):key 从 settings.json 读、经 stdin 喂(`printf '%s\n' "$K" | bash claude-mac.command`),
+  先把 settings.json / zshrc / bashrc / `Claude-3p/configLibrary` 备份进 `.work/pre-install-<ts>/`,跑完逐键 diff
+  (只该变 hooks/modelPicker,env 必须原样)。已有 `~/.claude/CLAUDE.md` 会被追加标记块,不会覆盖。
+- 发完验「真的上线了」:下载 https://chat.auto-link.com.cn/oneclick/ ,解出 `data:` 内嵌的 claude-*.command/.bat,数关键串(sha 对上 + 新逻辑在)。
 
 ## 2. 桌面 App 的四个坑(都从 App 自身 asar 读出来,App 升级后要复核)
 
@@ -45,6 +67,8 @@ claude-oneclick/
 | App 的 Code/Cowork 里 `npm install` 失败,设置页「严格沙箱 · 组织开启」,开 bypass 也没用,终端正常(10-25 mac 同事) | 3P 配置没写 `coworkEgressAllowedHosts` ⇒ App 按 failClosed 当 `[]` ⇒ 给会话下发 `sandbox{enabled,allowUnsandboxedCommands:false,network.allowedDomains:[],allowManagedDomainsOnly}`;对照:`claude -p --managed-settings '<那份>'` ⇒ npm E403 `user denied`、curl 000。只放 npm 源也不够(沙箱挡 `~/.npm` 写,EPERM) | 安装器写 `coworkEgressAllowedHosts:["*"]`(官方:含 `*` 且无 `allowedWorkspaceFolders` ⇒ 两种沙箱都不开);用户自己写过非空列表不动;doctor 报「App 外网放行」。改后要**完全退出 App 重开** |
 | 🔴 **App 自动升级后又卡**(10-14 本机:1.15962 → 1.46388.4,钉 2.1.260,镜像没有) | 每次升级都换钉死版本 | `ccdl-sync.sh` 每天跟官方最新 App;同事 App 是旧版就 `sudo carher-ccdl-sync.sh --cc <ver>` 补;本机用安装器同款逻辑预置后**完全退出重开** |
 
+真 App 验沙箱(10-25 本机做过):`claude://code/new?folder=<编码目录>&q=<编码提示>` 深链开 Code 会话 → `osascript` 回车发送 →
+让命令把结果写到文件再读(截图会被同屏终端遮住)。改 configLibrary 后必须**确认旧 App 进程退干净**(`osascript quit` 后轮询 pgrep)再开。
 读钉死版本:`app.asar` 里 `JSON.parse('{"version":…,"manifest":{…}}')` 的 `manifest.version`。
 ⚠ `grep` 大文件会被 ugrep 复杂度限制误报 0 命中 ⇒ 用 python 读 bytes 数。
 仍在反复下载的 `vms/linux/<arch>/<sha>/rootfs.img.zst`(1.2G)是 Cowork VM 用的,Code 标签页不依赖,未镜像。
@@ -57,8 +81,9 @@ claude-oneclick/
 - 🔴 **新开窗口报 `Model "claude-router-<hex>" isn't recognized`(10-14)**:旧版 Claude Code 把非 claude 网关模型显示成
   `claude-router-<hex>` 并存进 `"model"`;2.1.29x 起直接认真名。安装器现在:① 把 `claude-router-<hex>` 还原成真名
   ② 拉 `/v1/models`,非 claude 文本模型写进 `modelPicker.options`(`behavesAs: claude-sonnet-5-5`,出图名/codex-auto-review 不进)
-  ⇒ 不告警、菜单里就是真名。`claude --model gpt-5.6-terra` 直接可用(无 picker 时只打一行警告,照样能回)。
-- 验菜单长什么样:tmux 里起 `claude` 再发 `/model`,**HOME 指干净安装目录 + unset 本机 ANTHROPIC_***,否则看到的是你自己的旧变量。
+  ⇒ 不告警、菜单里就是真名。10-25 起菜单整份由我们生成并 `replaceBuiltInOptions`,见上「/model 菜单」节。
+- 验菜单长什么样:`scripts/cc-model-menu.sh [CLAUDE_CONFIG_DIR]`(内部是 tmux 起 claude 发 /model 滚到底)。隔离验时
+  CLAUDE_CONFIG_DIR 指一个只放 settings.json + `.claude.json`(hasCompletedOnboarding、projects 信任)的目录;本机 rc 的旧变量会串进来。
   首次进目录有「信任此文件夹」默认选 No ⇒ 先 Down 再 Enter。`.claude.json` 没有 `hasCompletedOnboarding` 会卡在 OAuth 登录页。
 
 ## 4. 文档里别写的

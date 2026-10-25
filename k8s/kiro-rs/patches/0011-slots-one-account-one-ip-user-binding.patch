@@ -19,7 +19,7 @@
    return data
  }
  
-@@ -121,5 +121,153 @@
+@@ -121,5 +121,166 @@
  // 设置 window 模式参数（立即生效并写回 config.json）
  export async function setWindowSettings(settings: WindowSettings): Promise<WindowSettings> {
    const { data } = await api.put<WindowSettings>('/config/window', settings)
@@ -79,6 +79,19 @@
 +  limits: SlotLimits
 +  spare: number
 +  slots: SlotView[]
++}
++
++export interface BurnTrend {
++  bucket: 'hour' | 'day'
++  points: { t: number; credits: number }[]
++  total: number
++  since: number | null
++  byAccount: { id: number; credits: number; email: string | null }[]
++}
++
++export async function getBurnTrend(hours: number): Promise<BurnTrend> {
++  const { data } = await api.get<BurnTrend>('/credits/trend', { params: { hours } })
++  return data
 +}
 +
 +export async function getSlots(): Promise<SlotsOverview> {
@@ -1133,6 +1146,175 @@
 +    </div>
 +  )
 +}
+--- a/admin-ui/src/components/credits-trend.tsx
++++ b/admin-ui/src/components/credits-trend.tsx
+@@ -0,0 +1,166 @@
++import { useState } from 'react'
++import { useQuery } from '@tanstack/react-query'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++import { getBurnTrend, type BurnTrend } from '@/api/credentials'
++
++const RANGES = [
++  { hours: 24, label: '24 小时' },
++  { hours: 168, label: '7 天' },
++  { hours: 720, label: '30 天' },
++] as const
++
++const fmt = (n: number) => (n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : Math.round(n).toLocaleString())
++
++// 北京时间标签
++function label(t: number, bucket: string): string {
++  const d = new Date((t + 8 * 3600) * 1000)
++  const mm = String(d.getUTCMonth() + 1).padStart(2, '0')
++  const dd = String(d.getUTCDate()).padStart(2, '0')
++  const hh = String(d.getUTCHours()).padStart(2, '0')
++  return bucket === 'day' ? `${mm}-${dd}` : `${mm}-${dd} ${hh}:00`
++}
++
++function Chart({ data }: { data: BurnTrend }) {
++  const [hover, setHover] = useState<number | null>(null)
++  const pts = data.points
++  const W = 1000, H = 220, PL = 48, PR = 8, PT = 12, PB = 26
++  const max = Math.max(1, ...pts.map(p => p.credits))
++  // 刻度取整：1/2/5 × 10^n
++  const step = (() => {
++    const raw = max / 4
++    const p = Math.pow(10, Math.floor(Math.log10(raw)))
++    return [1, 2, 5, 10].map(m => m * p).find(s => s >= raw) || raw
++  })()
++  const top = Math.ceil(max / step) * step
++  const iw = W - PL - PR, ih = H - PT - PB
++  const bw = iw / Math.max(1, pts.length)
++  const y = (v: number) => PT + ih - (v / top) * ih
++  const nonZero = pts.filter(p => p.credits > 0)
++  const avg = nonZero.length ? data.total / pts.length : 0
++  // x 轴最多 8 个标签
++  const every = Math.max(1, Math.ceil(pts.length / 8))
++  const h = hover != null ? pts[hover] : null
++
++  return (
++    <div className="relative">
++      <svg viewBox={`0 0 ${W} ${H}`} className="h-56 w-full" role="img"
++        aria-label={`积分消耗趋势，共 ${pts.length} 个时间段，合计 ${Math.round(data.total)}`}
++        onMouseLeave={() => setHover(null)}>
++        {Array.from({ length: Math.round(top / step) + 1 }, (_, i) => i * step).map(v => (
++          <g key={v}>
++            <line x1={PL} x2={W - PR} y1={y(v)} y2={y(v)} className="stroke-border" strokeWidth={1} />
++            <text x={PL - 6} y={y(v) + 4} textAnchor="end" className="fill-muted-foreground text-[11px]">{fmt(v)}</text>
++          </g>
++        ))}
++        {pts.map((p, i) => {
++          const x = PL + i * bw
++          const bh = PT + ih - y(p.credits)
++          return (
++            <g key={p.t} onMouseEnter={() => setHover(i)}>
++              <rect x={x} y={PT} width={bw} height={ih} fill="transparent" />
++              <rect x={x + bw * 0.15} y={y(p.credits)} width={Math.max(1, bw * 0.7)} height={Math.max(0, bh)} rx={Math.min(3, bw * 0.2)}
++                className={hover === i ? 'fill-primary' : 'fill-primary/60'} />
++              {i % every === 0 && (
++                <text x={x + bw / 2} y={H - 8} textAnchor="middle" className="fill-muted-foreground text-[11px]">
++                  {label(p.t, data.bucket).slice(data.bucket === 'day' ? 0 : 6)}
++                </text>
++              )}
++            </g>
++          )
++        })}
++        {avg > 0 && (
++          <g>
++            <line x1={PL} x2={W - PR} y1={y(avg)} y2={y(avg)} className="stroke-amber-500" strokeDasharray="6 4" strokeWidth={1.5} />
++            <text x={W - PR} y={y(avg) - 4} textAnchor="end" className="fill-amber-600 text-[11px]">平均 {fmt(avg)}</text>
++          </g>
++        )}
++      </svg>
++      {h && (
++        <div className="pointer-events-none absolute top-1 rounded-md border bg-popover px-2.5 py-1.5 text-xs shadow-sm"
++          style={{ left: `${Math.min(80, ((hover! + 0.5) / pts.length) * 100)}%` }}>
++          <div className="text-muted-foreground">{label(h.t, data.bucket)}</div>
++          <div className="font-medium tabular-nums">{fmt(h.credits)} 积分</div>
++        </div>
++      )}
++    </div>
++  )
++}
++
++/** 号池积分消耗趋势：柱 = 每小时 / 每天用掉多少积分，虚线 = 区间平均，右侧 = 用得最多的号 */
++export function CreditsTrend() {
++  const [hours, setHours] = useState<number>(24)
++  const { data, isLoading, error } = useQuery({
++    queryKey: ['burnTrend', hours],
++    queryFn: () => getBurnTrend(hours),
++    refetchInterval: 60000,
++  })
++  const unit = data?.bucket === 'day' ? '天' : '小时'
++  const filled = data?.points.filter(p => p.credits > 0).length || 0
++  const peak = data?.points.reduce((a, p) => (p.credits > a.credits ? p : a), { t: 0, credits: 0 })
++  const top = (data?.byAccount || []).slice(0, 5)
++  const topMax = Math.max(1, ...top.map(a => a.credits))
++
++  return (
++    <Card>
++      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 pb-2">
++        <CardTitle className="text-base">积分消耗趋势</CardTitle>
++        <div className="flex rounded-md border p-0.5" role="tablist" aria-label="时间范围">
++          {RANGES.map(r => (
++            <button key={r.hours} type="button" role="tab" aria-selected={hours === r.hours}
++              onClick={() => setHours(r.hours)}
++              className={`rounded px-3 py-1 text-sm transition-colors ${hours === r.hours ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}>
++              {r.label}
++            </button>
++          ))}
++        </div>
++      </CardHeader>
++      <CardContent>
++        {isLoading && <div className="h-56 animate-pulse rounded-md bg-muted" />}
++        {error && <p className="py-10 text-center text-sm text-red-600">趋势数据加载失败</p>}
++        {data && (
++          <div className="grid gap-6 lg:grid-cols-[1fr_280px]">
++            <div className="space-y-3">
++              <div className="flex flex-wrap gap-x-8 gap-y-1 text-sm">
++                <span>合计 <b className="text-lg tabular-nums">{fmt(data.total)}</b> 积分</span>
++                <span className="text-muted-foreground">平均每{unit} <b className="text-foreground tabular-nums">{fmt(data.total / Math.max(1, data.points.length))}</b></span>
++                {peak && peak.credits > 0 && (
++                  <span className="text-muted-foreground">峰值 <b className="text-foreground tabular-nums">{fmt(peak.credits)}</b>（{label(peak.t, data.bucket)}）</span>
++                )}
++              </div>
++              {filled === 0
++                ? <p className="py-16 text-center text-sm text-muted-foreground">这个时间段还没有消耗记录</p>
++                : <Chart data={data} />}
++              <p className="text-xs text-muted-foreground">
++                每 10 分钟查一次所有启用号的剩余积分，按同一个号的下降累加（加号、换号、月初重置不算消耗）。
++                {data.since && `记录从 ${label(data.since, 'hour')} 开始，最多保留 30 天。`}
++              </p>
++            </div>
++            <div>
++              <div className="mb-2 text-sm font-medium">用得最多的号</div>
++              {top.length === 0
++                ? <p className="text-sm text-muted-foreground">暂无</p>
++                : (
++                  <ol className="space-y-2.5">
++                    {top.map(a => (
++                      <li key={a.id} className="text-sm">
++                        <div className="flex items-baseline justify-between gap-2">
++                          <span className="truncate"><span className="text-muted-foreground">#{a.id}</span> {a.email || '(无邮箱)'}</span>
++                          <span className="shrink-0 tabular-nums">{fmt(a.credits)}</span>
++                        </div>
++                        <div className="mt-1 h-1.5 rounded-full bg-muted">
++                          <div className="h-1.5 rounded-full bg-primary/70" style={{ width: `${(a.credits / topMax) * 100}%` }} />
++                        </div>
++                      </li>
++                    ))}
++                  </ol>
++                )}
++              {data.bucket === 'hour' && hours === 24 && (
++                <p className="mt-3 text-xs text-muted-foreground">排行按北京自然日汇总（含今天和昨天）</p>
++              )}
++            </div>
++          </div>
++        )}
++      </CardContent>
++    </Card>
++  )
++}
 --- a/admin-ui/src/components/dashboard.tsx
 +++ b/admin-ui/src/components/dashboard.tsx
 @@ -1,22 +1,27 @@
@@ -1182,7 +1364,7 @@
    const [windowDialogOpen, setWindowDialogOpen] = useState(false)
    const [modeDialogOpen, setModeDialogOpen] = useState(false)
    const [addDialogOpen, setAddDialogOpen] = useState(false)
-@@ -43,6 +50,9 @@
+@@ -43,10 +50,27 @@
    const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
    const [batchRefreshing, setBatchRefreshing] = useState(false)
    const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
@@ -1192,7 +1374,26 @@
    const cancelVerifyRef = useRef(false)
    const [currentPage, setCurrentPage] = useState(1)
    const [filters, setFilters] = useState<CredentialFilterState>(EMPTY_FILTERS)
-@@ -72,7 +82,8 @@
+-  const itemsPerPage = 12
++  // 每页条数：10 / 100 / 1000（表头全选 = 全选本页，大页面方便批量操作）；记在本浏览器
++  const PAGE_SIZES = [10, 100, 1000]
++  const [itemsPerPage, setItemsPerPage] = useState<number>(() => {
++    try {
++      const v = Number(localStorage.getItem('kiroAdminPageSize'))
++      return PAGE_SIZES.includes(v) ? v : 10
++    } catch {
++      return 10
++    }
++  })
++  const changePageSize = (n: number) => {
++    setItemsPerPage(n)
++    setCurrentPage(1)
++    try { localStorage.setItem('kiroAdminPageSize', String(n)) } catch { /* 无痕模式等写不进去就算了 */ }
++  }
+   const [darkMode, setDarkMode] = useState(() => {
+     if (typeof window !== 'undefined') {
+       return document.documentElement.classList.contains('dark')
+@@ -72,7 +96,8 @@
      const rank = (c: { isCurrent: boolean; disabled: boolean }) => (c.disabled ? 2 : c.isCurrent ? 0 : 1)
      const ta = lastUsedMs(a.lastUsedAt)
      const tb = lastUsedMs(b.lastUsedAt)
@@ -1202,7 +1403,7 @@
    })
  
    // 查询条件只过滤显示；批量操作仍按勾选的 ID 走，「清除已禁用」仍针对全部已禁用凭据
-@@ -146,11 +157,6 @@
+@@ -146,11 +171,6 @@
      document.documentElement.classList.toggle('dark')
    }
  
@@ -1214,7 +1415,7 @@
    const handleRefresh = () => {
      refetch()
      toast.success('已刷新凭据列表')
-@@ -177,6 +183,35 @@
+@@ -177,6 +197,35 @@
      setSelectedIds(new Set())
    }
  
@@ -1250,7 +1451,7 @@
    // 批量删除（仅删除已禁用项）
    const handleBatchDelete = async () => {
      if (selectedIds.size === 0) {
-@@ -327,6 +362,47 @@
+@@ -327,6 +376,47 @@
      deselectAll()
    }
  
@@ -1298,7 +1499,7 @@
    // 一键清除所有已禁用凭据
    const handleClearAll = async () => {
      if (!data?.credentials || data.credentials.length === 0) {
-@@ -377,68 +453,43 @@
+@@ -377,68 +467,44 @@
    }
  
    // 查询当前页凭据信息（逐个查询，避免瞬时并发）
@@ -1316,7 +1517,7 @@
 +  const queryBalances = async (ids: number[], label: string) => {
      if (ids.length === 0) {
 -      toast.error('当前页没有可查询的启用凭据')
-+      toast.error(`${label}没有可查询的启用账户`)
++      toast.error(`${label}没有可查询的账户`)
        return
      }
 -
@@ -1384,17 +1585,18 @@
 -    }
 +    ;(fail ? toast.warning : toast.success)(`${label}余额查询完成：成功 ${ok}${fail ? `，失败 ${fail}` : ''}`)
    }
-+  const enabledIds = (list: { id: number; disabled: boolean }[]) => list.filter((c) => !c.disabled).map((c) => c.id)
-+  const handleQueryCurrentPageInfo = () => queryBalances(enabledIds(currentCredentials), '本页')
-+  const handleQueryAllBalances = () => queryBalances(enabledIds(filteredCredentials), '全部')
++  // 停用的号也查：额度用尽停用的要看什么时候重置、手动停用的要看还剩多少（查额度不发推理请求，不会把号用掉）
++  const allIds = (list: { id: number }[]) => list.map((c) => c.id)
++  const handleQueryCurrentPageInfo = () => queryBalances(allIds(currentCredentials), '本页')
++  const handleQueryAllBalances = () => queryBalances(allIds(filteredCredentials), '全部')
 +  const handleQuerySelectedBalances = () =>
-+    queryBalances(enabledIds((data?.credentials || []).filter((c) => selectedIds.has(c.id))), '已选')
++    queryBalances(allIds((data?.credentials || []).filter((c) => selectedIds.has(c.id))), '已选')
  
 -  // 批量验活
    const handleBatchVerify = async () => {
      if (selectedIds.size === 0) {
        toast.error('请先选择要验活的凭据')
-@@ -562,169 +613,105 @@
+@@ -562,169 +628,105 @@
      <div className="min-h-screen bg-background">
        {/* 顶部导航 */}
        <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -1593,8 +1795,8 @@
 +                    </Button>
 +                  </DropdownMenuTrigger>
 +                  <DropdownMenuContent>
-+                    <DropdownMenuItem onSelect={handleQueryAllBalances}>查全部启用账户（{enabledIds(filteredCredentials).length} 个）</DropdownMenuItem>
-+                    <DropdownMenuItem onSelect={handleQueryCurrentPageInfo}>只查本页（{enabledIds(currentCredentials).length} 个）</DropdownMenuItem>
++                    <DropdownMenuItem onSelect={handleQueryAllBalances}>查全部账户（{filteredCredentials.length} 个，含停用）</DropdownMenuItem>
++                    <DropdownMenuItem onSelect={handleQueryCurrentPageInfo}>只查本页（{currentCredentials.length} 个）</DropdownMenuItem>
 +                    <DropdownMenuItem onSelect={handleQuerySelectedBalances} disabled={selectedIds.size === 0}>只查已选（{selectedIds.size} 个）</DropdownMenuItem>
 +                  </DropdownMenuContent>
 +                </DropdownMenu>
@@ -1641,7 +1843,7 @@
              </div>
            </div>
            {data?.credentials.length === 0 ? (
-@@ -748,19 +735,19 @@
+@@ -748,23 +750,23 @@
                    </CardContent>
                  </Card>
                )}
@@ -1673,8 +1875,37 @@
 +              />
  
                {/* 分页控件 */}
-               {totalPages > 1 && (
-@@ -791,13 +778,21 @@
+-              {totalPages > 1 && (
+-                <div className="flex justify-center items-center gap-4 mt-6">
++              {filteredCredentials.length > 0 && (
++                <div className="mt-6 flex flex-wrap items-center justify-center gap-4">
+                   <Button
+                     variant="outline"
+                     size="sm"
+@@ -780,10 +782,21 @@
+                     variant="outline"
+                     size="sm"
+                     onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+-                    disabled={currentPage === totalPages}
++                    disabled={currentPage >= totalPages}
+                   >
+                     下一页
+                   </Button>
++                  <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
++                    每页
++                    <select
++                      className="h-8 rounded-md border border-input bg-background px-2 text-sm"
++                      value={itemsPerPage}
++                      onChange={e => changePageSize(Number(e.target.value))}
++                      aria-label="每页条数"
++                    >
++                      {PAGE_SIZES.map(n => <option key={n} value={n}>{n} 条</option>)}
++                    </select>
++                  </label>
+                 </div>
+               )}
+             </>
+@@ -791,13 +804,21 @@
          </div>
        </main>
  
@@ -1701,7 +1932,7 @@
        <WindowSettingsDialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen} />
  
        <ModeSwitchDialog open={modeDialogOpen} onOpenChange={setModeDialogOpen} />
-@@ -806,6 +801,15 @@
+@@ -806,6 +827,15 @@
        <AddCredentialDialog
          open={addDialogOpen}
          onOpenChange={setAddDialogOpen}
@@ -1965,7 +2196,8 @@
 +}
 --- a/admin-ui/src/components/slots-panel.tsx
 +++ b/admin-ui/src/components/slots-panel.tsx
-@@ -0,0 +1,377 @@
+@@ -0,0 +1,379 @@
++import { CreditsTrend } from '@/components/credits-trend'
 +import { useEffect, useState } from 'react'
 +import { toast } from 'sonner'
 +import { Button } from '@/components/ui/button'
@@ -2313,6 +2545,7 @@
 +        </div>
 +      )}
 +      <Summary d={data} />
++      <CreditsTrend />
 +      {data.slots.length > 0 ? (
 +        <SlotTable slots={data.slots} today={today} />
 +      ) : (
@@ -2392,7 +2625,7 @@
 +)
 --- a/admin-ui/src/components/usage-dialog.tsx
 +++ b/admin-ui/src/components/usage-dialog.tsx
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,97 @@
 +import { useState } from 'react'
 +import { useQuery } from '@tanstack/react-query'
 +import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -2401,7 +2634,8 @@
 +
 +// 某个 kiro 账户的用量：按模型列 请求数 / 成功 / 失败 / 输入 token / 输出 token，可切「今天 / 最近 7 天」
 +const fmt = (n: number) => n.toLocaleString('zh-CN')
-+const short = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n))
++// 和账户表格同一套单位（万 / 亿）；10-25 这里用 M、表格用万 ⇒ 6384.8万 vs 63.79M 被当成对不上
++const short = (n: number) => (n >= 1e8 ? `${(n / 1e8).toFixed(1)}亿` : n >= 1e4 ? `${(n / 1e4).toFixed(1)}万` : n.toLocaleString('zh-CN'))
 +
 +export function UsageDialog({ credentialId, email, open, onOpenChange }: {
 +  credentialId: number | null
@@ -2453,7 +2687,7 @@
 +                  <tr>
 +                    <th className='px-3 py-2 text-left font-medium'>模型</th>
 +                    <th className={TH}>请求</th><th className={TH}>成功</th><th className={TH}>失败</th>
-+                    <th className={TH}>输入 token</th><th className={TH}>输出 token</th>
++                    <th className={TH}>输入 token</th><th className={TH}>输出 token</th><th className={TH}>合计 token</th>
 +                  </tr>
 +                </thead>
 +                <tbody>
@@ -2465,6 +2699,7 @@
 +                      <td className={`${TD} ${r.failed ? 'font-semibold text-red-600' : 'text-muted-foreground'}`}>{fmt(r.failed)}</td>
 +                      <td className={TD} title={fmt(r.inputTokens)}>{short(r.inputTokens)}</td>
 +                      <td className={TD} title={fmt(r.outputTokens)}>{short(r.outputTokens)}</td>
++                      <td className={TD} title={fmt(r.inputTokens + r.outputTokens)}>{short(r.inputTokens + r.outputTokens)}</td>
 +                    </tr>
 +                  ))}
 +                  <tr className='border-t bg-muted/30 font-medium'>
@@ -2474,6 +2709,7 @@
 +                    <td className={TD}>{fmt(sum.failed)}</td>
 +                    <td className={TD} title={fmt(sum.inputTokens)}>{short(sum.inputTokens)}</td>
 +                    <td className={TD} title={fmt(sum.outputTokens)}>{short(sum.outputTokens)}</td>
++                    <td className={TD} title={fmt(sum.inputTokens + sum.outputTokens)}>{short(sum.inputTokens + sum.outputTokens)}</td>
 +                  </tr>
 +                </tbody>
 +              </table>
@@ -2481,7 +2717,7 @@
 +          )
 +        )}
 +        <p className='text-xs text-muted-foreground'>
-+          输入 token 来自上游返回的上下文用量；输出 token 按回复文本和工具参数估算，和 LiteLLM 账单可能有约 1% 出入。
++          账户表格里的「7 日 token」= 这里最近 7 天的「合计 token」（输入 + 输出）。输入 token 来自上游返回的上下文用量；输出 token 按回复文本和工具参数估算，和 LiteLLM 账单可能有约 1% 出入。
 +        </p>
 +      </DialogContent>
 +    </Dialog>
@@ -2574,7 +2810,7 @@
    hasProfileArn: boolean
 --- a/src/admin/handlers.rs
 +++ b/src/admin/handlers.rs
-@@ -158,3 +158,179 @@
+@@ -158,3 +158,192 @@
          Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
      }
  }
@@ -2582,6 +2818,19 @@
 +/// GET /api/admin/slots —— 槽位总览（每槽号/在途/排队/上限/429 统计）
 +pub async fn get_slots(State(state): State<AdminState>) -> impl IntoResponse {
 +    Json(state.service.get_slots())
++}
++
++#[derive(serde::Deserialize)]
++pub struct TrendQuery {
++    pub hours: Option<i64>,
++}
++
++/// GET /api/admin/credits/trend?hours=24|168|720 —— 号池积分消耗趋势（只读，数据来自 10 分钟一次的余额轮询）
++pub async fn get_burn_trend(
++    State(state): State<AdminState>,
++    axum::extract::Query(q): axum::extract::Query<TrendQuery>,
++) -> impl IntoResponse {
++    Json(state.service.get_burn_trend(q.hours.unwrap_or(24)))
 +}
 +
 +/// PUT /api/admin/slots/limits —— 改在途上限（起始/下限/上限/自动调节），立即生效并写回 config.json
@@ -2796,7 +3045,7 @@
          add_credential, delete_credential, force_refresh_token, get_all_credentials,
          get_credential_balance, get_load_balancing_mode, get_window_settings, reset_failure_count,
          set_credential_disabled, set_credential_priority, set_load_balancing_mode, set_window_settings,
-+        get_slots, set_slot_limits, set_slot_lock, get_slot_configs, set_slot_configs, get_slot_gray, set_slot_gray, test_slot, test_all_slots, get_credential_usage, get_credentials_usage_totals,
++        get_slots, get_burn_trend, set_slot_limits, set_slot_lock, get_slot_configs, set_slot_configs, get_slot_gray, set_slot_gray, test_slot, test_all_slots, get_credential_usage, get_credentials_usage_totals,
      },
      middleware::{AdminState, admin_auth_middleware},
  };
@@ -2809,11 +3058,12 @@
          .route(
              "/config/load-balancing",
              get(get_load_balancing_mode).put(set_load_balancing_mode),
-@@ -54,6 +57,14 @@
+@@ -54,6 +57,15 @@
              "/config/window",
              get(get_window_settings).put(set_window_settings),
          )
 +        .route("/slots", get(get_slots))
++        .route("/credits/trend", get(get_burn_trend))
 +        .route("/slots/stats", get(get_slots))
 +        .route("/slots/limits", axum::routing::put(set_slot_limits))
 +        .route("/slots/config", get(get_slot_configs).put(set_slot_configs))
@@ -2872,7 +3122,7 @@
                  expires_at: entry.expires_at,
                  auth_method: entry.auth_method,
                  has_profile_arn: entry.has_profile_arn,
-@@ -299,16 +318,86 @@
+@@ -299,16 +318,107 @@
          Ok(self.token_manager.get_window_settings())
      }
  
@@ -2886,6 +3136,27 @@
 +            "limits": self.token_manager.get_slot_limits(),
 +            "spare": self.token_manager.slot_spare_count(),
 +            "slots": self.token_manager.slots_snapshot(),
++        })
++    }
++
++    /// 号池积分消耗趋势（附邮箱，前端排行用）
++    pub fn get_burn_trend(&self, hours: i64) -> serde_json::Value {
++        let tr = self.token_manager.burn_trend(hours);
++        let emails: std::collections::HashMap<u64, Option<String>> = self
++            .token_manager
++            .snapshot()
++            .entries
++            .into_iter()
++            .map(|e| (e.id, e.email))
++            .collect();
++        serde_json::json!({
++            "bucket": tr.bucket,
++            "points": tr.points,
++            "total": tr.total,
++            "since": tr.since,
++            "byAccount": tr.by_account.iter().map(|(id, v)| serde_json::json!({
++                "id": id, "credits": v, "email": emails.get(id).cloned().flatten()
++            })).collect::<Vec<_>>(),
 +        })
 +    }
 +
@@ -4405,7 +4676,7 @@
  }
 --- a/src/kiro/slots.rs
 +++ b/src/kiro/slots.rs
-@@ -0,0 +1,751 @@
+@@ -0,0 +1,875 @@
 +//! 槽位模式：固定 N 个槽位，每槽 = 1 个号 + 1 个固定出口。
 +//!
 +//! - 用户（LiteLLM key hash）第一次来分到「没封口、在途最少」的槽，之后一直固定；绑定落盘。
@@ -4414,7 +4685,7 @@
 +//!
 +//! 本模块只放纯逻辑 + 状态，不做网络；接线在 token_manager / provider。
 +
-+use std::collections::{HashMap, VecDeque};
++use std::collections::{BTreeMap, HashMap, VecDeque};
 +use std::time::{Duration, Instant};
 +
 +use serde::{Deserialize, Serialize};
@@ -4838,6 +5109,36 @@
 +    /// 上一次轮询每个号的剩余（算 burns 用）
 +    #[serde(default)]
 +    pub last: HashMap<u64, f64>,
++    /// 趋势图：每小时消耗（key = 整点 unix 秒），留 30 天
++    #[serde(default)]
++    pub hourly: BTreeMap<i64, f64>,
++    /// 趋势图：每个号每个北京日的消耗（key = "YYYY-MM-DD"），留 30 天
++    #[serde(default)]
++    pub daily_by_account: BTreeMap<String, HashMap<u64, f64>>,
++}
++
++pub const TREND_RETAIN_SECS: i64 = 30 * 24 * 3600;
++
++/// 趋势图一个点
++#[derive(Debug, Clone, Serialize, PartialEq)]
++#[serde(rename_all = "camelCase")]
++pub struct BurnPoint {
++    /// 桶起点（unix 秒）：小时桶 = 整点；天桶 = 北京日 00:00
++    pub t: i64,
++    pub credits: f64,
++}
++
++#[derive(Debug, Clone, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct BurnTrend {
++    /// "hour" | "day"
++    pub bucket: &'static str,
++    pub points: Vec<BurnPoint>,
++    pub total: f64,
++    /// 区间内每个号的消耗，倒序（按北京日汇总，区间按天取整）
++    pub by_account: Vec<(u64, f64)>,
++    /// 趋势数据最早从什么时候开始有（之前没记录）
++    pub since: Option<i64>,
 +}
 +
 +#[derive(Debug, Clone, Serialize)]
@@ -4868,15 +5169,78 @@
 +    pub fn record_accounts(&mut self, now: i64, per: &HashMap<u64, f64>) {
 +        let total: f64 = per.values().sum();
 +        if !self.last.is_empty() {
-+            let burn: f64 = per
++            let each: Vec<(u64, f64)> = per
 +                .iter()
-+                .filter_map(|(id, r)| self.last.get(id).map(|prev| (prev - r).max(0.0)))
-+                .sum();
++                .filter_map(|(id, r)| self.last.get(id).map(|prev| (*id, (prev - r).max(0.0))))
++                .collect();
++            let burn: f64 = each.iter().map(|(_, b)| b).sum();
 +            self.burns.push((now, burn));
 +            self.burns.retain(|(t, _)| now - *t <= BALANCE_HISTORY_SECS);
++            *self.hourly.entry(now - now.rem_euclid(3600)).or_default() += burn;
++            let day = crate::kiro::account_usage::beijing_day(now);
++            let d = self.daily_by_account.entry(day).or_default();
++            for (id, b) in each.into_iter().filter(|(_, b)| *b > 0.0) {
++                *d.entry(id).or_default() += b;
++            }
++            self.prune_trend(now);
 +        }
 +        self.last = per.clone();
 +        self.record(now, total);
++    }
++
++    fn prune_trend(&mut self, now: i64) {
++        self.hourly.retain(|t, _| now - *t <= TREND_RETAIN_SECS);
++        let oldest = crate::kiro::account_usage::beijing_day(now - TREND_RETAIN_SECS);
++        self.daily_by_account.retain(|d, _| d.as_str() >= oldest.as_str());
++    }
++
++    /// 老数据（升级前）只有 24h 的 burns：第一次加载时补进小时桶，趋势图不会从 0 开始
++    pub fn backfill_hourly(&mut self) {
++        if !self.hourly.is_empty() {
++            return;
++        }
++        for (t, b) in &self.burns {
++            *self.hourly.entry(t - t.rem_euclid(3600)).or_default() += b;
++        }
++    }
++
++    /// 趋势：最近 hours 小时。≤ 7 天按小时出点，更长按北京日出点；没数据的桶补 0（图上看得出空档）
++    pub fn trend(&self, now: i64, hours: i64) -> BurnTrend {
++        let hours = hours.clamp(1, TREND_RETAIN_SECS / 3600);
++        let since = self.hourly.keys().next().copied();
++        let start_hour = (now - now.rem_euclid(3600)) - (hours - 1) * 3600;
++        let by_day = hours > 7 * 24;
++        let mut points: Vec<BurnPoint> = Vec::new();
++        if by_day {
++            const BJ: i64 = 8 * 3600;
++            let day_of = |t: i64| t - (t + BJ).rem_euclid(86400);
++            let mut acc: BTreeMap<i64, f64> = BTreeMap::new();
++            let mut d = day_of(start_hour);
++            while d <= now {
++                acc.insert(d, 0.0);
++                d += 86400;
++            }
++            for (t, v) in self.hourly.range(start_hour..) {
++                *acc.entry(day_of(*t)).or_default() += v;
++            }
++            points.extend(acc.into_iter().map(|(t, credits)| BurnPoint { t, credits }));
++        } else {
++            for i in 0..hours {
++                let t = start_hour + i * 3600;
++                points.push(BurnPoint { t, credits: self.hourly.get(&t).copied().unwrap_or(0.0) });
++            }
++        }
++        let total = points.iter().map(|p| p.credits).sum();
++        let first_day = crate::kiro::account_usage::beijing_day(start_hour);
++        let mut by: HashMap<u64, f64> = HashMap::new();
++        for (_, m) in self.daily_by_account.range(first_day..) {
++            for (id, v) in m {
++                *by.entry(*id).or_default() += v;
++            }
++        }
++        let mut by_account: Vec<(u64, f64)> = by.into_iter().collect();
++        by_account.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
++        BurnTrend { bucket: if by_day { "day" } else { "hour" }, points, total, by_account, since }
 +    }
 +
 +    /// 只累加相邻两点之间的下降（加号 / 换号 / 月初重置会让总额上跳，上跳不算消耗）
@@ -4911,6 +5275,37 @@
 +
 +    fn p() -> LimitParams {
 +        LimitParams { start: 8, min: 2, max: 16, auto_tune: true }
++    }
++
++    #[test]
++    fn trend_buckets_by_hour_and_day_and_ignores_resets() {
++        let mut h = BalanceHistory::default();
++        let t0 = 1_793_000_000 - 1_793_000_000 % 3600; // 整点
++        h.record_accounts(t0, &HashMap::from([(1, 1000.0), (2, 500.0)]));
++        h.record_accounts(t0 + 600, &HashMap::from([(1, 900.0), (2, 450.0)])); // 150
++        h.record_accounts(t0 + 3600, &HashMap::from([(1, 800.0), (2, 2000.0)])); // #1 -100，#2 重置上跳不算
++        h.record_accounts(t0 + 4200, &HashMap::from([(1, 790.0), (3, 300.0)])); // #2 退池、#3 新增都不算
++        let tr = h.trend(t0 + 4200, 3);
++        assert_eq!(tr.bucket, "hour");
++        assert_eq!(tr.points.len(), 3);
++        assert_eq!(tr.points[1], BurnPoint { t: t0, credits: 150.0 });
++        assert_eq!(tr.points[2], BurnPoint { t: t0 + 3600, credits: 110.0 });
++        assert!((tr.total - 260.0).abs() < 1e-9);
++        assert_eq!(tr.by_account, vec![(1, 210.0), (2, 50.0)]);
++        let d = h.trend(t0 + 4200, 30 * 24);
++        assert_eq!(d.bucket, "day");
++        assert!((d.points.iter().map(|p| p.credits).sum::<f64>() - 260.0).abs() < 1e-9);
++        assert!(d.points.len() >= 30, "30 天每天一个点（没数据补 0）: {}", d.points.len());
++    }
++
++    #[test]
++    fn trend_backfills_from_old_24h_burns_once() {
++        let mut h = BalanceHistory { burns: vec![(7200 + 100, 5.0), (7200 + 700, 7.0), (10800 + 5, 1.0)], ..Default::default() };
++        h.backfill_hourly();
++        assert_eq!(h.hourly.get(&7200), Some(&12.0));
++        assert_eq!(h.hourly.get(&10800), Some(&1.0));
++        h.backfill_hourly();
++        assert_eq!(h.hourly.get(&7200), Some(&12.0), "只补一次");
 +    }
 +
 +    #[test]
@@ -5423,7 +5818,7 @@
          }
  
          tracing::debug!("已回写凭据到文件: {:?}", path);
-@@ -1291,9 +1431,841 @@
+@@ -1291,9 +1431,847 @@
          self.save_stats_debounced();
      }
  
@@ -5989,12 +6384,18 @@
 +    }
 +
 +    fn load_pool_balance_history(&self) {
-+        let h: crate::kiro::slots::BalanceHistory = self
++        let mut h: crate::kiro::slots::BalanceHistory = self
 +            .pool_balance_path()
 +            .and_then(|p| std::fs::read_to_string(p).ok())
 +            .and_then(|c| serde_json::from_str(&c).ok())
 +            .unwrap_or_default();
++        h.backfill_hourly();
 +        self.pool_balance.lock().1 = h;
++    }
++
++    /// 积分消耗趋势（最近 hours 小时）
++    pub fn burn_trend(&self, hours: i64) -> crate::kiro::slots::BurnTrend {
++        self.pool_balance.lock().1.trend(chrono::Utc::now().timestamp(), hours)
 +    }
 +
 +    /// 轮询号池（启用的号）余额，记一笔总剩余。跳过禁用号；单号失败沿用上次值
@@ -6266,7 +6667,7 @@
      }
  
      /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
-@@ -1640,6 +2612,7 @@
+@@ -1640,6 +2618,7 @@
                          DisabledReason::QuotaExceeded => "QuotaExceeded",
                          DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                          DisabledReason::InvalidConfig => "InvalidConfig",
@@ -6274,7 +6675,7 @@
                      }.to_string()),
                      endpoint: e.credentials.endpoint.clone(),
                      subscription_title: e.credentials.subscription_title.clone(),
-@@ -1671,6 +2644,12 @@
+@@ -1671,6 +2650,12 @@
          }
          // 持久化更改
          self.persist_credentials()?;
@@ -6287,7 +6688,7 @@
          Ok(())
      }
  
-@@ -1955,6 +2934,9 @@
+@@ -1955,6 +2940,9 @@
          self.persist_credentials()?;
  
          tracing::info!("成功添加凭据 #{}", new_id);
@@ -6297,7 +6698,7 @@
          Ok(new_id)
      }
  
-@@ -2020,6 +3002,27 @@
+@@ -2020,6 +3008,27 @@
          // 立即回写统计数据，清除已删除凭据的残留条目
          self.save_stats();
  
@@ -6325,7 +6726,7 @@
          tracing::info!("已删除凭据 #{}", id);
          Ok(())
      }
-@@ -2124,7 +3127,7 @@
+@@ -2124,7 +3133,7 @@
      /// 设置负载均衡模式（Admin API）
      pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
          // 验证模式值
@@ -6334,7 +6735,7 @@
              anyhow::bail!("无效的负载均衡模式: {}", mode);
          }
  
-@@ -2140,9 +3143,35 @@
+@@ -2140,9 +3149,35 @@
              return Err(err);
          }
  
@@ -6370,7 +6771,7 @@
  }
  
  impl Drop for MultiTokenManager {
-@@ -2150,6 +3179,7 @@
+@@ -2150,6 +3185,7 @@
          if self.stats_dirty.load(Ordering::Relaxed) {
              self.save_stats();
          }
@@ -6378,7 +6779,7 @@
      }
  }
  
-@@ -2323,6 +3353,507 @@
+@@ -2323,6 +3359,507 @@
          assert!(m.is_window_mode());
          assert!(m.report_rate_limited(1), "#2 在上限内且未冷却 ⇒ 可换");
          assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");

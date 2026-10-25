@@ -119,6 +119,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from litellm.integrations.custom_logger import CustomLogger
@@ -353,6 +354,23 @@ def _repair_tool_pairing(items: Any, counts: dict[str, int]) -> Any:
 # 收尾。DEEPSEEK_INPUT_BYTE_BUDGET=0 停用。
 _INPUT_BYTE_BUDGET = int(os.environ.get("DEEPSEEK_INPUT_BYTE_BUDGET", "3000000"))
 
+# 2026-10-22：字节预算必须**不算图片**。V4.1-Flash（09-10 起原生多模态）让 Codex 的
+# view_image 真把截图发过来（detail=original，单张 base64 几 MB），而图片字节大、
+# token 极少。cursor-tusuhai 一张 3.5MB 截图 ⇒ 按字节判「超 3MB」⇒ 从老删到只剩那条
+# 带图 output ⇒ 它的 call 已删 ⇒ repair 当孤儿删 ⇒ input=[] ⇒ 400「Input items array
+# must not be empty」（一天 7 次，进网关 4~13MB）。api.deepseek.com 直打实测：
+# 1 张 3.5MB 图 in_tok=1033、20 张 37MB 仍 200（413 墙对图不存在）——而补丁把前两种
+# 删成 0 条。所以图片 data URL 按固定小额计入，预算只管真正吃 token 的文本。
+_DATA_URL_RE = re.compile(r'"data:image/[^"]*"')
+_IMAGE_BUDGET_BYTES = 4096  # 每张图折算的字节数（≈1k token 量级，与实测 in_tok 同量级）
+
+
+def _budget_size(item: Any) -> int:
+    s = json.dumps(item, ensure_ascii=False)
+    if "data:image/" not in s:
+        return len(s)
+    return len(_DATA_URL_RE.sub('""', s)) + _IMAGE_BUDGET_BYTES * len(_DATA_URL_RE.findall(s))
+
 
 def _trim_oversize_input(data: dict[str, Any], counts: dict[str, int]) -> dict[str, Any]:
     if _INPUT_BYTE_BUDGET <= 0:
@@ -361,7 +379,7 @@ def _trim_oversize_input(data: dict[str, Any], counts: dict[str, int]) -> dict[s
     if not isinstance(items, list) or len(items) < 2:
         return data
     try:
-        sizes = [len(json.dumps(it, ensure_ascii=False)) for it in items]
+        sizes = [_budget_size(it) for it in items]
     except (TypeError, ValueError):
         return data
     total = sum(sizes)
@@ -371,6 +389,15 @@ def _trim_oversize_input(data: dict[str, Any], counts: dict[str, int]) -> dict[s
     while keep_from < len(items) - 1 and total > _INPUT_BYTE_BUDGET:
         total -= sizes[keep_from]
         keep_from += 1
+    # 切点不许落在工具调用块中间：切口后的 output 会被 repair 当孤儿删，尾部全是
+    # output 时就删成空。往回退到块首，把 call 和它的 output 一起留下。
+    tool = _TOOL_CALL_TYPES + _TOOL_OUTPUT_TYPES
+    while (keep_from > 0 and _item_type(items[keep_from]) in tool
+           and _item_type(items[keep_from - 1]) in tool):
+        keep_from -= 1
+        total += sizes[keep_from]
+    if keep_from == 0:
+        return data
     counts["oversize_items_trimmed"] = keep_from
     counts["oversize_bytes_after"] = total
     out = dict(data)

@@ -176,6 +176,61 @@ class TrimTest(unittest.TestCase):
         self.assertIs(mod._trim_oversize_input(data, {}), data)
 
 
+def _img_out(cid, n_bytes):
+    url = "data:image/png;base64," + "A" * n_bytes
+    return {"type": "function_call_output", "call_id": cid,
+            "output": [{"type": "input_image", "image_url": url, "detail": "original"}]}
+
+
+class ImageBudgetTest(unittest.TestCase):
+    """2026-10-22 cursor-tusuhai：view_image 截图 3.5MB ⇒ 旧逻辑按字节删成 input=[]。"""
+
+    R = {"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "r"}]}
+
+    def _view(self, cid):
+        return {"type": "function_call", "call_id": cid, "name": "view_image",
+                "arguments": '{"path":"a.png","detail":"original"}'}
+
+    def test_big_screenshot_is_not_trimmed(self):
+        # 线上同形：[user, reasoning, view_image call, 3.5MB 带图 output]
+        items = [U, self.R, self._view("c1"), _img_out("c1", 3_500_000)]
+        data = {"model": "deepseek-v4.1-flash-responses", "input": items}
+        out = MOD._adapt(dict(data), "unit")
+        self.assertEqual(len(out["input"]), 4)
+        self.assertEqual(out["input"][-1], items[-1])  # 图原样保留
+
+    def test_four_screenshots_9mb_untouched(self):
+        items = [U, self.R] + [self._view("c%d" % k) for k in range(4)] \
+            + [_img_out("c%d" % k, 2_200_000) for k in range(4)]
+        out = MOD._adapt({"model": "deepseek-v4.1-flash-responses", "input": items}, "unit")
+        self.assertEqual(len(out["input"]), len(items))
+
+    def test_text_still_trimmed_by_bytes(self):
+        # 预算管的是文本：4MB 纯文本工具输出照旧按条裁（上游 1M token 墙是真的）
+        mod = _load_module("dsra_trim_text", env={"DEEPSEEK_INPUT_BYTE_BUDGET": "3000000"})
+        old = {"type": "function_call_output", "call_id": "c0", "output": "x" * 3_500_000}
+        items = [U, fc("c0"), old, U2, fc("c1"), fco("c1"), U2]
+        out = mod._adapt({"model": "deepseek-v4.1-flash-responses", "input": items}, "unit")
+        self.assertNotIn(old, out["input"])
+        self.assertEqual(out["input"][-1], U2)
+
+    def test_cut_never_lands_inside_call_block(self):
+        mod = _load_module("dsra_trim_block", env={"DEEPSEEK_INPUT_BYTE_BUDGET": "300"})
+        filler = {"role": "user", "content": [{"type": "input_text", "text": "z" * 1000}]}
+        data = {"input": [filler, fc("b1"), fc("b2"), fco("b1"), fco("b2"), U2]}
+        out = mod._trim_oversize_input(data, {})
+        types_ = [i.get("type") for i in out["input"]]
+        self.assertEqual(types_[:2], ["function_call", "function_call"])
+
+    def test_never_empty_after_adapt_when_last_block_is_text_huge(self):
+        # 最后一块本身就超预算：宁可原样发（上游给可读的超长报错），也不删成空
+        mod = _load_module("dsra_trim_lastblock", env={"DEEPSEEK_INPUT_BYTE_BUDGET": "1000"})
+        items = [U, fc("c9"), {"type": "function_call_output", "call_id": "c9", "output": "y" * 5000}]
+        out = mod._adapt({"model": "deepseek-v4.1-flash-responses", "input": items}, "unit")
+        self.assertTrue(out["input"])
+        self.assertIn("c9", [i.get("call_id") for i in out["input"] if i.get("type") == "function_call_output"])
+
+
 class AdaptEndToEndTest(unittest.TestCase):
     def test_adapt_repairs_orphans_and_reports_counts(self):
         mod = _load_module("dsra_e2e_small", env={"DEEPSEEK_INPUT_BYTE_BUDGET": "1200"})

@@ -165,7 +165,9 @@ if [ -n "$EXPECT_UI" ]; then
   # 先落变量再 grep（pipefail 下 curl | grep -q 会被 SIGPIPE 打成假 STOP，见 skill §C）
   body=$(curl -s -m 15 "http://10.68.13.198:$ADMIN_PORT$js" || true)
   [ -n "$body" ] || fail "bundle $js 拉回来是空的"
-  printf '%s' "$body" | grep -Fq -- "$EXPECT_UI" \
+  # 🔴 不用 -q：grep -q 命中就退出 ⇒ printf 写大 bundle 时 SIGPIPE ⇒ pipefail 下假 STOP（10-25 slots28 踩到）
+  hits=$(printf '%s' "$body" | grep -Fc -- "$EXPECT_UI" || true)
+  [ "${hits:-0}" -gt 0 ] \
     || fail "线上 bundle 里没有 「${EXPECT_UI}」 ⇒ 新 UI 没上（回滚命令见上）"
   echo "   ✅ 线上 bundle 含 「${EXPECT_UI}」"
 fi

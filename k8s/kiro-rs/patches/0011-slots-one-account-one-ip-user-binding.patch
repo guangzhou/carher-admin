@@ -852,15 +852,101 @@
 +}
 --- a/admin-ui/src/components/credential-filters.tsx
 +++ b/admin-ui/src/components/credential-filters.tsx
-@@ -179,7 +179,7 @@
+@@ -126,6 +126,12 @@
+   return Array.from(m.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+ }
+ 
++// 当前选中的值不在选项里（比如批量改完优先级，原来的「2」没了）⇒ 补一条「（0）」，
++// 否则原生 select 会显示第一项「全部」，实际却还按旧值过滤 ⇒ 列表空了还看不出原因
++function withSelected(opts: [string, number][], selected: string): [string, number][] {
++  return selected && !opts.some(([v]) => v === selected) ? [...opts, [selected, 0]] : opts
++}
++
+ const selectClass =
+   'h-9 rounded-md border border-input bg-background px-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
+ 
+@@ -140,14 +146,23 @@
+   const set = <K extends keyof CredentialFilterState>(key: K, value: CredentialFilterState[K]) =>
+     onChange({ ...filters, [key]: value })
+ 
+-  const enabledCount = credentials.filter(c => !c.disabled).length
+-  const disabledList = credentials.filter(c => c.disabled)
++  // 每个下拉的计数 = 套用「其它」筛选条件后的结果（不含它自己），选了哪项就能筛出几个，数对得上
++  const facet = <K extends keyof CredentialFilterState>(key: K) =>
++    filterCredentials(credentials, { ...filters, [key]: EMPTY_FILTERS[key] })
++  const statusBase = facet('status')
++  const enabledCount = statusBase.filter(c => !c.disabled).length
++  const currentCount = statusBase.filter(c => c.isCurrent).length
++  const disabledList = statusBase.filter(c => c.disabled)
+   const reasons = countBy(disabledList, c => c.disabledReason || '未知')
+-  const auths = countBy(credentials, c => c.authMethod || '')
+-  const priorities = countBy(credentials, c => String(c.priority)).sort((a, b) => Number(a[0]) - Number(b[0]))
+-  const domains = countBy(credentials, emailDomain)
+-  const tiers = countBy(credentials, tierOf).sort((a, b) => tierRank(a[0]) - tierRank(b[0]) || a[0].localeCompare(b[0]))
+-  const failureCount = credentials.filter(hasFailures).length
++  const selectedReason = filters.status.startsWith('disabled:') ? filters.status.slice('disabled:'.length) : ''
++  const reasonOpts = withSelected(reasons, selectedReason)
++  const auths = withSelected(countBy(facet('authMethod'), c => c.authMethod || ''), filters.authMethod)
++  const priorities = withSelected(countBy(facet('priority'), c => String(c.priority)), filters.priority)
++    .sort((a, b) => Number(a[0]) - Number(b[0]))
++  const domains = withSelected(countBy(facet('domain'), emailDomain), filters.domain)
++  const tiers = withSelected(countBy(facet('tier'), tierOf), filters.tier)
++    .sort((a, b) => tierRank(a[0]) - tierRank(b[0]) || a[0].localeCompare(b[0]))
++  const failureCount = facet('onlyFailures').filter(hasFailures).length
+   const active = isFilterActive(filters)
+ 
+   return (
+@@ -177,11 +192,11 @@
+         <label className="flex items-center gap-1 text-sm text-muted-foreground">
+           状态
            <select className={selectClass} value={filters.status} onChange={e => set('status', e.target.value)}>
-             <option value="all">全部（{credentials.length}）</option>
+-            <option value="all">全部（{credentials.length}）</option>
++            <option value="all">全部（{statusBase.length}）</option>
              <option value="enabled">启用（{enabledCount}）</option>
 -            <option value="current">当前在用</option>
-+            <option value="current">当前在用（在槽）</option>
++            <option value="current">当前在用（{currentCount}）</option>
              <option value="disabled">已禁用（{disabledList.length}）</option>
-             {reasons.map(([r, n]) => (
+-            {reasons.map(([r, n]) => (
++            {reasonOpts.map(([r, n]) => (
                <option key={r} value={`disabled:${r}`}>
+                 　└ {REASON_LABELS[r] || r}（{n}）
+               </option>
+@@ -192,7 +207,7 @@
+         <label className="flex items-center gap-1 text-sm text-muted-foreground">
+           登录方式
+           <select className={selectClass} value={filters.authMethod} onChange={e => set('authMethod', e.target.value)}>
+-            <option value="">全部</option>
++            <option value="">全部（{facet('authMethod').length}）</option>
+             {auths.map(([a, n]) => (
+               <option key={a || 'none'} value={a}>
+                 {AUTH_LABELS[a] || a || '未知'}（{n}）
+@@ -204,7 +219,7 @@
+         <label className="flex items-center gap-1 text-sm text-muted-foreground">
+           账户等级
+           <select className={selectClass} value={filters.tier} onChange={e => set('tier', e.target.value)}>
+-            <option value="">全部</option>
++            <option value="">全部（{facet('tier').length}）</option>
+             {tiers.map(([t, n]) => (
+               <option key={t} value={t}>
+                 {tierLabel(t)}（{n}）
+@@ -216,7 +231,7 @@
+         <label className="flex items-center gap-1 text-sm text-muted-foreground">
+           优先级
+           <select className={selectClass} value={filters.priority} onChange={e => set('priority', e.target.value)}>
+-            <option value="">全部</option>
++            <option value="">全部（{facet('priority').length}）</option>
+             {priorities.map(([p, n]) => (
+               <option key={p} value={p}>
+                 {p}（{n}）
+@@ -228,7 +243,7 @@
+         <label className="flex items-center gap-1 text-sm text-muted-foreground">
+           邮箱域名
+           <select className={selectClass} value={filters.domain} onChange={e => set('domain', e.target.value)}>
+-            <option value="">全部</option>
++            <option value="">全部（{facet('domain').length}）</option>
+             {domains.map(([d, n]) => (
+               <option key={d} value={d}>
+                 {d}（{n}）
 --- a/admin-ui/src/components/credential-table.tsx
 +++ b/admin-ui/src/components/credential-table.tsx
 @@ -0,0 +1,183 @@
@@ -1164,7 +1250,7 @@
    // 批量删除（仅删除已禁用项）
    const handleBatchDelete = async () => {
      if (selectedIds.size === 0) {
-@@ -327,6 +362,43 @@
+@@ -327,6 +362,47 @@
      deselectAll()
    }
  
@@ -1196,6 +1282,10 @@
 +    setPrioritySaving(false)
 +    queryClient.invalidateQueries({ queryKey: ['credentials'] })
 +    const skip = unchanged > 0 ? `，${unchanged} 个本来就是这个值` : ''
++    // 正按优先级筛选时，改完的号会从列表里消失 ⇒ 跟到新值（统一设为）或清掉这个条件（加减）
++    if (filters.priority !== '') {
++      handleFiltersChange({ ...filters, priority: op === 'set' ? String(Math.max(0, value)) : '' })
++    }
 +    if (failed.length === 0) {
 +      toast.success(`已修改 ${plan.length} 个账户的优先级${skip}`)
 +      setPriorityDialogOpen(false)
@@ -1208,7 +1298,7 @@
    // 一键清除所有已禁用凭据
    const handleClearAll = async () => {
      if (!data?.credentials || data.credentials.length === 0) {
-@@ -377,68 +449,43 @@
+@@ -377,68 +453,43 @@
    }
  
    // 查询当前页凭据信息（逐个查询，避免瞬时并发）
@@ -1304,7 +1394,7 @@
    const handleBatchVerify = async () => {
      if (selectedIds.size === 0) {
        toast.error('请先选择要验活的凭据')
-@@ -562,169 +609,105 @@
+@@ -562,169 +613,105 @@
      <div className="min-h-screen bg-background">
        {/* 顶部导航 */}
        <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -1551,7 +1641,7 @@
              </div>
            </div>
            {data?.credentials.length === 0 ? (
-@@ -748,19 +731,19 @@
+@@ -748,19 +735,19 @@
                    </CardContent>
                  </Card>
                )}
@@ -1584,7 +1674,7 @@
  
                {/* 分页控件 */}
                {totalPages > 1 && (
-@@ -791,13 +774,21 @@
+@@ -791,13 +778,21 @@
          </div>
        </main>
  
@@ -1611,7 +1701,7 @@
        <WindowSettingsDialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen} />
  
        <ModeSwitchDialog open={modeDialogOpen} onOpenChange={setModeDialogOpen} />
-@@ -806,6 +797,15 @@
+@@ -806,6 +801,15 @@
        <AddCredentialDialog
          open={addDialogOpen}
          onOpenChange={setAddDialogOpen}

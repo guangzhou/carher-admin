@@ -191,6 +191,11 @@ python3 $W/litellm-198-lane-callback-add.py rollback litellm-proxy-gray /root/cb
 
 ### 6.1 改 config 标量 / 下线 callback：`lane-config-tune.sh`（10-20 起）
 
+- 🔴 **已知坏版本指纹闸门（10-25）**：spendlog 清洗旧版（`_LITERAL_HIGH_LONE_RE`，会让 SpendLogs 丢行，`87515f0` 修）在 198 历代 CM、
+  dev/staging/clone、`.work` 拷贝里到处都有。`callback-update.py`（门禁0，`--force` 不越过）/ `lane-callback-swap.sh` / `callbacks-drift.py`
+  三处都认这枚指纹。新踩到「修好的东西会被旧拷贝带回来」的同类坑，就往这三处的 `KNOWN_BAD` 各加一行。
+  三条车道快照 `/root/l3/up1051-20261016T161310Z/{prod-target,gray-inputs,go-inputs}/snap/callbacks` 已于 10-25 回填两个修好的文件
+  （只动这 2 个 key，备份 `…/backfill-20261025T144436Z/`）；**新开 run 目录时快照要从 live 取，别从旧 run 拷**。
 ```bash
 # 198 root；--set 只认三段 settings 下的一行标量（JSON 值，null=删键）；--drop-callback 去列表条目 + 删快照文件 + 去 mount
 flock -n $D/.console.lock bash $SRC/scripts/lane-config-tune.sh --lane gray --run-dir $D [--adopt-live] --dry-run \

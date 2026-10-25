@@ -90,6 +90,10 @@ cli-anything-litellm db req 2d910055                       # 最常用：用户�
 **10-25 修法**（`87515f0`）：两层的 `_scrub_str` 改成按 JSON 词法从左往右扫的一条正则 —— `\\` 整体保留、成对代理转义（emoji）保留，只删 `\u0000` 和孤立代理转义。测试 `k8s/litellm-callbacks/tests/test_spendlog_scrub.py`（旧实现照抄做阳性对照必须红）。上线验收：同一条带字面 `\u0000` 的请求，上线前 prod 丢、gray 落；上线后 prod/gray 4/4 落；prod 4 pod 上线后 `dropping spend log row` = 0。**10-25 17:10 北京时间以前的明细仍然缺**（丢掉的行补不回来），对那段时间的账还是以日表为准。
 ⚠️ `litellm-198-callback-update.py verify` 验 `sitecustomize.py` 恒报「sha 读不到」：它挂在 site-packages 不在 `/app/`，那是量具的假红，要自己 `sha256sum /app/.venv/lib/python3.13/site-packages/sitecustomize.py`。
 
+**「是不是被别人反复覆盖」10-25 核过 —— 不是**：198 上留存的 118 代车道 CM 里这两个文件从来只有旧版，正确版本今天之前一次都没上过；
+10-19~10-24 每天都丢 0.5~1.4%（明细保留 6 天，再早量不到）。每次「修 SpendLogs」修的都是别的环节（04-27 NUL、07-24 每 worker 生效、09-19 误判传输错误），
+同一个删法一直在。往后的风险是旧拷贝被拿去发版 ⇒ 三处指纹闸门（见 [[litellm-198-version-upgrade]] §6）。
+
 以下是 10-20 的原始定案：
 
 10-20 当天日表 236299 次 vs SpendLogs 232778 行，缺约 1.5%，集中在少数长会话 key。**计费不受影响**（日表另走一条路）。

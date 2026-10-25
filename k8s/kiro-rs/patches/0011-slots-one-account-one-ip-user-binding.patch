@@ -173,6 +173,92 @@
 +  const { data } = await api.get('/credentials/usage-totals', { params: { days } })
    return data
  }
+--- a/admin-ui/src/components/batch-priority-dialog.tsx
++++ b/admin-ui/src/components/batch-priority-dialog.tsx
+@@ -0,0 +1,83 @@
++import { useState, useEffect } from 'react'
++import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++
++export type PriorityOp = 'set' | 'add'
++
++interface BatchPriorityDialogProps {
++  open: boolean
++  onOpenChange: (open: boolean) => void
++  count: number
++  running: boolean
++  progress: { current: number; total: number }
++  onSubmit: (op: PriorityOp, value: number) => void
++}
++
++/** 批量调整优先级：设为同一个值，或在各自原值上加减（数字越小越先用，最小 0） */
++export function BatchPriorityDialog({ open, onOpenChange, count, running, progress, onSubmit }: BatchPriorityDialogProps) {
++  const [op, setOp] = useState<PriorityOp>('set')
++  const [value, setValue] = useState('0')
++
++  useEffect(() => {
++    if (open) {
++      setOp('set')
++      setValue('0')
++    }
++  }, [open])
++
++  const n = parseInt(value, 10)
++  const valid = !isNaN(n) && (op === 'add' ? n !== 0 : n >= 0)
++
++  return (
++    <Dialog open={open} onOpenChange={o => !running && onOpenChange(o)}>
++      <DialogContent className="sm:max-w-md">
++        <DialogHeader>
++          <DialogTitle>批量调整优先级</DialogTitle>
++          <DialogDescription>已选 {count} 个账户。数字越小越先用（0 最优先）；槽位模式下冷备顶号也按它挑。</DialogDescription>
++        </DialogHeader>
++        <div className="space-y-4">
++          <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="调整方式">
++            {([['set', '统一设为'], ['add', '在原值上加减']] as const).map(([k, label]) => (
++              <button
++                key={k}
++                type="button"
++                role="radio"
++                aria-checked={op === k}
++                onClick={() => setOp(k)}
++                className={`rounded-md border px-3 py-2 text-sm transition-colors ${op === k ? 'border-primary bg-primary/10 font-medium' : 'hover:bg-muted'}`}
++              >
++                {label}
++              </button>
++            ))}
++          </div>
++          <div className="space-y-1.5">
++            <label htmlFor="batch-priority-value" className="text-sm font-medium">
++              {op === 'set' ? '优先级' : '加减量（负数 = 提前）'}
++            </label>
++            <Input
++              id="batch-priority-value"
++              type="number"
++              min={op === 'set' ? 0 : undefined}
++              value={value}
++              onChange={e => setValue(e.target.value)}
++              disabled={running}
++            />
++            {op === 'add' && <p className="text-xs text-muted-foreground">结果小于 0 的按 0 处理</p>}
++          </div>
++          {running && (
++            <p className="text-sm text-muted-foreground" aria-live="polite">
++              正在修改 {progress.current}/{progress.total}
++            </p>
++          )}
++        </div>
++        <DialogFooter>
++          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={running}>取消</Button>
++          <Button onClick={() => onSubmit(op, n)} disabled={!valid || running}>
++            {running ? '修改中…' : `修改 ${count} 个`}
++          </Button>
++        </DialogFooter>
++      </DialogContent>
++    </Dialog>
++  )
++}
 --- a/admin-ui/src/components/credential-card.tsx
 +++ b/admin-ui/src/components/credential-card.tsx
 @@ -1,12 +1,13 @@
@@ -963,10 +1049,10 @@
 +}
 --- a/admin-ui/src/components/dashboard.tsx
 +++ b/admin-ui/src/components/dashboard.tsx
-@@ -1,15 +1,19 @@
+@@ -1,22 +1,27 @@
  import { useState, useEffect, useRef } from 'react'
 -import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2 } from 'lucide-react'
-+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, MoreVertical, Wallet } from 'lucide-react'
++import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, MoreVertical, Wallet, ArrowUpDown } from 'lucide-react'
  import { useQueryClient } from '@tanstack/react-query'
  import { toast } from 'sonner'
  import { storage } from '@/lib/storage'
@@ -988,7 +1074,16 @@
  import { ModeSwitchDialog, MODE_INFO, type LbMode } from '@/components/mode-switch-dialog'
  import { AddCredentialDialog } from '@/components/add-credential-dialog'
  import { BatchImportDialog } from '@/components/batch-import-dialog'
-@@ -25,8 +29,10 @@
+ import { KamImportDialog } from '@/components/kam-import-dialog'
+ import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
+ import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode } from '@/hooks/use-credentials'
+-import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
++import { getCredentialBalance, forceRefreshToken, setCredentialPriority } from '@/api/credentials'
++import { BatchPriorityDialog, type PriorityOp } from '@/components/batch-priority-dialog'
+ import { extractErrorMessage } from '@/lib/utils'
+ import type { BalanceResponse } from '@/types/api'
+ 
+@@ -25,8 +30,10 @@
  }
  
  export function Dashboard({ onLogout }: DashboardProps) {
@@ -1001,7 +1096,17 @@
    const [windowDialogOpen, setWindowDialogOpen] = useState(false)
    const [modeDialogOpen, setModeDialogOpen] = useState(false)
    const [addDialogOpen, setAddDialogOpen] = useState(false)
-@@ -72,7 +78,8 @@
+@@ -43,6 +50,9 @@
+   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
+   const [batchRefreshing, setBatchRefreshing] = useState(false)
+   const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
++  const [priorityDialogOpen, setPriorityDialogOpen] = useState(false)
++  const [prioritySaving, setPrioritySaving] = useState(false)
++  const [priorityProgress, setPriorityProgress] = useState({ current: 0, total: 0 })
+   const cancelVerifyRef = useRef(false)
+   const [currentPage, setCurrentPage] = useState(1)
+   const [filters, setFilters] = useState<CredentialFilterState>(EMPTY_FILTERS)
+@@ -72,7 +82,8 @@
      const rank = (c: { isCurrent: boolean; disabled: boolean }) => (c.disabled ? 2 : c.isCurrent ? 0 : 1)
      const ta = lastUsedMs(a.lastUsedAt)
      const tb = lastUsedMs(b.lastUsedAt)
@@ -1011,7 +1116,7 @@
    })
  
    // 查询条件只过滤显示；批量操作仍按勾选的 ID 走，「清除已禁用」仍针对全部已禁用凭据
-@@ -146,11 +153,6 @@
+@@ -146,11 +157,6 @@
      document.documentElement.classList.toggle('dark')
    }
  
@@ -1023,7 +1128,7 @@
    const handleRefresh = () => {
      refetch()
      toast.success('已刷新凭据列表')
-@@ -177,6 +179,35 @@
+@@ -177,6 +183,35 @@
      setSelectedIds(new Set())
    }
  
@@ -1059,7 +1164,51 @@
    // 批量删除（仅删除已禁用项）
    const handleBatchDelete = async () => {
      if (selectedIds.size === 0) {
-@@ -377,68 +408,43 @@
+@@ -327,6 +362,43 @@
+     deselectAll()
+   }
+ 
++  // 批量调整优先级：逐个调已有的单号接口（零重启），失败的报出来
++  const handleBatchPriority = async (op: PriorityOp, value: number) => {
++    const targets = Array.from(selectedIds)
++      .map(id => data?.credentials.find(c => c.id === id))
++      .filter((c): c is NonNullable<typeof c> => !!c)
++    const plan = targets
++      .map(c => ({ id: c.id, priority: Math.max(0, op === 'set' ? value : c.priority + value), old: c.priority }))
++      .filter(p => p.priority !== p.old)
++    const unchanged = targets.length - plan.length
++    if (plan.length === 0) {
++      toast.info('选中的账户优先级都已经是这个值')
++      setPriorityDialogOpen(false)
++      return
++    }
++    setPrioritySaving(true)
++    setPriorityProgress({ current: 0, total: plan.length })
++    const failed: number[] = []
++    for (let i = 0; i < plan.length; i++) {
++      try {
++        await setCredentialPriority(plan[i].id, plan[i].priority)
++      } catch {
++        failed.push(plan[i].id)
++      }
++      setPriorityProgress({ current: i + 1, total: plan.length })
++    }
++    setPrioritySaving(false)
++    queryClient.invalidateQueries({ queryKey: ['credentials'] })
++    const skip = unchanged > 0 ? `，${unchanged} 个本来就是这个值` : ''
++    if (failed.length === 0) {
++      toast.success(`已修改 ${plan.length} 个账户的优先级${skip}`)
++      setPriorityDialogOpen(false)
++      deselectAll()
++    } else {
++      toast.warning(`成功 ${plan.length - failed.length} 个，失败 ${failed.length} 个（#${failed.join(' #')}）${skip}`)
++    }
++  }
++
+   // 一键清除所有已禁用凭据
+   const handleClearAll = async () => {
+     if (!data?.credentials || data.credentials.length === 0) {
+@@ -377,68 +449,43 @@
    }
  
    // 查询当前页凭据信息（逐个查询，避免瞬时并发）
@@ -1155,7 +1304,7 @@
    const handleBatchVerify = async () => {
      if (selectedIds.size === 0) {
        toast.error('请先选择要验活的凭据')
-@@ -562,169 +568,104 @@
+@@ -562,169 +609,105 @@
      <div className="min-h-screen bg-background">
        {/* 顶部导航 */}
        <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -1318,6 +1467,7 @@
 +                    <DropdownMenuItem onSelect={handleBatchForceRefresh} disabled={batchRefreshing}>
 +                      <RefreshCw className="h-4 w-4" />{batchRefreshing ? `刷新中 ${batchRefreshProgress.current}/${batchRefreshProgress.total}` : '批量刷新 Token'}
 +                    </DropdownMenuItem>
++                    <DropdownMenuItem onSelect={() => setPriorityDialogOpen(true)}><ArrowUpDown className="h-4 w-4" />批量调整优先级</DropdownMenuItem>
 +                    <DropdownMenuItem onSelect={handleBatchResetFailure}><RotateCcw className="h-4 w-4" />清零失败次数</DropdownMenuItem>
 +                    <DropdownMenuSeparator />
 +                    <DropdownMenuItem danger onSelect={handleBatchDelete} disabled={selectedDisabledCount === 0}>
@@ -1401,7 +1551,7 @@
              </div>
            </div>
            {data?.credentials.length === 0 ? (
-@@ -748,19 +689,19 @@
+@@ -748,19 +731,19 @@
                    </CardContent>
                  </Card>
                )}
@@ -1434,7 +1584,7 @@
  
                {/* 分页控件 */}
                {totalPages > 1 && (
-@@ -791,11 +732,19 @@
+@@ -791,13 +774,21 @@
          </div>
        </main>
  
@@ -1449,16 +1599,34 @@
 +        onClose={() => setDrawerId(null)}
 +        onQueryBalance={fetchOneBalance}
 +        onDelete={handleDeleteOne}
-+      />
-+
+       />
+ 
 +      <UsageDialog
 +        credentialId={usageId}
 +        email={data?.credentials.find((c) => c.id === usageId)?.email}
 +        open={usageId != null}
 +        onOpenChange={(o) => { if (!o) setUsageId(null) }}
++      />
++
+       <WindowSettingsDialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen} />
+ 
+       <ModeSwitchDialog open={modeDialogOpen} onOpenChange={setModeDialogOpen} />
+@@ -806,6 +797,15 @@
+       <AddCredentialDialog
+         open={addDialogOpen}
+         onOpenChange={setAddDialogOpen}
++      />
++
++      <BatchPriorityDialog
++        open={priorityDialogOpen}
++        onOpenChange={setPriorityDialogOpen}
++        count={selectedIds.size}
++        running={prioritySaving}
++        progress={priorityProgress}
++        onSubmit={handleBatchPriority}
        />
  
-       <WindowSettingsDialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen} />
+       {/* 批量导入对话框 */}
 --- a/admin-ui/src/components/mode-switch-dialog.tsx
 +++ b/admin-ui/src/components/mode-switch-dialog.tsx
 @@ -12,13 +12,17 @@
@@ -1707,7 +1875,7 @@
 +}
 --- a/admin-ui/src/components/slots-panel.tsx
 +++ b/admin-ui/src/components/slots-panel.tsx
-@@ -0,0 +1,375 @@
+@@ -0,0 +1,377 @@
 +import { useEffect, useState } from 'react'
 +import { toast } from 'sonner'
 +import { Button } from '@/components/ui/button'
@@ -1961,7 +2129,9 @@
 +      <Stat title='预计还能撑' tone={r?.alert ? 'red' : undefined}>
 +        <div className={`text-2xl font-bold ${r?.alert ? 'text-red-600' : ''}`}>{left}</div>
 +        <p className='mt-1 text-xs text-muted-foreground'>
-+          {r?.burnPerHour == null ? '需观测 ≥30 分钟' : `近 ${r.windowMinutes} 分钟 ${fmt(r.burnPerHour)}/小时`}
++          {r?.burnPerHour == null
++            ? '需观测 ≥30 分钟'
++            : `剩余 ${fmt(r.totalRemaining)} ÷ 近 ${r.windowMinutes >= 90 ? `${Math.round(r.windowMinutes / 60)} 小时` : `${r.windowMinutes} 分钟`}平均每小时用 ${fmt(r.burnPerHour)}`}
 +        </p>
 +      </Stat>
 +      <Stat title='冷备可用' tone={d.spare < d.slots.length ? 'red' : undefined}>

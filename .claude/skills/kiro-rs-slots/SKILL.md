@@ -23,7 +23,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 |---|---|
 | 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 Recreate，grace 300s），Admin `http://10.68.13.198:30891/admin`，adminApiKey 在实例自己的 `config.json`（和老实例不同）|
 | 老实例 | deploy `kiro-rs`（:30890，镜像 ctxwin）。只剩 `carher-hangzhou`、`claude-code-buyitian` 两把 key 主走它，另外是新实例的兜底 |
-| 镜像 | `kiro-rs:v2026.10.1-carher-slots25`（10-25 14:53 UTC，回滚 tag slots24）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
+| 镜像 | `kiro-rs:v2026.10.1-carher-slots26`（10-25 17:29，加「批量调整优先级」+ 撑多久卡片写明算法；回滚 tag slots25）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
 | manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、secret `kiro-rs-slots-bootstrap`）|
 | 槽 | 4 个：`jp-172.235.204.67`（经 243 代理）、`sg-47.84.112.136`、`sg-47.84.85.100`、`sg-47.236.200.98`；出口配在 `config.json.slots[]`，全局 `proxyUrl=null` |
 | 并发参数 | 起步 16 / 最小 2 / 最大 24 / 自动调；排队超时 120s；「暂不接新人」倍数 1.5 |
@@ -92,6 +92,12 @@ python3 kiro-slots-switch-keys.py restore ~/kiro-deploy/backup/alias-XXX-*.json 
 - LiteLLM 组 `kiro-claude-haiku-5-5` / `kiro-slots-claude-haiku-5-5`：`scripts/kiro-haiku55-groups.py plan|apply|remove`（官方价 ≤100K $0.10/$0.50、缓存写 $0.125、1h $0.20、读 $0.01；>100K $0.50/$2.50/$0.625/$1.00/$0.05）。兜底先回 `kiro-claude-haiku-4-5`。
 - 只给 cursor key：`claude-haiku-4-5` 别名改指 `kiro-slots-claude-haiku-5-5`（用户无感升级，651 把，blocked 的 61 把不动），另外加 `claude-haiku-5-5` 名字到白名单（713 把，走 skill `litellm-198-key-allowlist`，备份 `haiku55-full-*`）。
 
+## 5.1 「预计还能撑 N 小时」怎么算
+
+每 10 分钟查一次所有**启用号**的剩余积分。消耗 = 相邻两次都在池里的**同一个号**的下降之和（加号/换号/月初重置让总额上跳的不算）。
+`还能撑 = 当前总剩余 ÷（近 24 小时总消耗 ÷ 实际跨度小时）`，不足 30 分钟或 3 个点不估，< 24h 标红。
+⚠️ 这是**24 小时平均**：白天高峰每小时 1300~2900、夜里 100~500，按高峰算会短得多；「总剩余」含冷备号（真到冷备用完才算撑不住）。
+
 ## 6. 按号用量统计（Admin 抽屉 / 表格「7 日请求」）
 
 - 来源：kiro.rs 转发时旁路解码事件流，按 **号 × 模型 × 北京日** 记次数、输入/输出 token（`kiro_account_usage.json`，30s 落盘）。
@@ -113,6 +119,8 @@ python3 kiro-slots-switch-keys.py restore ~/kiro-deploy/backup/alias-XXX-*.json 
 
 - 🔴 **上下文治理判据**：`scripts/litellm-198-model-ceilings.json` 要有每个 `kiro-X` 的条目（数取 `kiro-probe.py --json catalog` 的 `tokenLimits`）；`kiro-slots-X` 审计时自动映射到 `kiro-X`（10-25 前 13 个 kiro-slots 组 + haiku-5.5/kimi-k3 全落 UNKNOWN）。新加 kiro 模型要同时加这张表。
 
+- 🔴 **换号只认上游 402**：额度显示 0（10 分钟一查）≠ 上游开始拒。10-25 #3 justin 页面早显示用尽，上游实际到 09:24 才回 402，09:25 第一个 402 进来当场换 #13，那个请求自动重发不失败。
+- 🔴 **换镜像那 15 秒新连接会失败，且没被兜底接住**：10-25 slots26 切换时 `claude-code-ruanyitai` 4 发「Cannot connect to host kiro-rs-slots」，SpendLogs 里没有落老实例的行（原因未查；演练 1 scale 0 时兜底是生效的），客户端自己重试第 5 发成功。
 - 🔴 **新老两个实例的号 id 都从 1 编，会撞**：说「#6」要带实例。
 - 🔴 现在新实例扛大部分流量 ⇒ 任何操作先想「会不会打断在途请求」：改配置走 Admin API（热生效），换镜像提前说，别 `kubectl delete pod`。
 - 🔴 绑定表里的测试绑定（`anc:` `sid:` `u:smoke-*`）会虚增「绑定人数」，影响新人均摊。

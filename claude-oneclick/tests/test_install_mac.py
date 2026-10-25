@@ -385,3 +385,13 @@ def test_installers_register_auto_refresh_hook():
     src = Path(__file__).resolve().parents[1] / "src"
     for f, enc in (("install-mac.sh", "utf-8"), ("install-windows.ps1", "utf-8")):
         assert ".hookEntry(d, process.env.CARHER_NODE, process.env.CARHER_REFRESH)" in (src / f).read_text(encoding=enc), f
+
+
+def test_refresh_also_backfills_tool_search_default(tmp_path):
+    """自动刷新每次开会话都跑 ⇒ 顺带补 ENABLE_TOOL_SEARCH,同事不用重跑安装;用户写过 false 不动。"""
+    base = {"env": {"ANTHROPIC_API_KEY": "sk-FAKE", "ANTHROPIC_BASE_URL": "https://gw.example/pro"}}
+    rc, out, d = _refresh(json.loads(json.dumps(base)), "claude-opus-5-5", tmp_path)
+    assert rc == 0 and d["env"]["ENABLE_TOOL_SEARCH"] == "true"
+    s = {"env": dict(base["env"], ENABLE_TOOL_SEARCH="false")}
+    rc, out, d = _refresh(s, "claude-opus-5-5", tmp_path)
+    assert d["env"]["ENABLE_TOOL_SEARCH"] == "false"

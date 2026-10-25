@@ -230,6 +230,8 @@ function applyModels(d, ids) {
      10-25 网关上了 claude-haiku-5-5:之前写进去的老 haiku(4-5)仍可用但不是最新 ⇒ 也升到最新;
      用户指到非 haiku 的(比如 sonnet)仍不动。 */
   d.env = Object.assign({}, d.env || {});
+  // 10-25:每次开会话的自动刷新顺带补上这项 ⇒ 装过带 hook 版本的同事以后不用重跑安装也能拿到(用户自己写过不动)
+  if (!d.env.ENABLE_TOOL_SEARCH) d.env.ENABLE_TOOL_SEARCH = "true";
   const haikus = ids.filter((i) => /^claude-haiku-\d/.test(i))
     .sort((a, b) => b.localeCompare(a, "en", { numeric: true }));
   const curH = d.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;

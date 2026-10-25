@@ -55,6 +55,7 @@ python3 scripts/kiro-slots-watch.py --minutes 10
 - 🔴 grace 300s 之前（slots23 及以前）每次换镜像都切断在途请求 ⇒ 按号用量会比上游记录少十几次，那是丢的，不是统计错。
 - 🔴 `kiro-lane-regress.sh` 只测老实例的 `kiro-*` 道，**不经过 30891**，别拿它当槽位回归。
 - 本地改代码：工作树 `.work/kiro-0011/work`（基线 `.work/kiro-0011/base`），改完 `diff` 重新生成 0011 补丁再走 build。
+- 0012(10-26,未上线)超长报 `max(估算, bytes/3×1.1, 窗口+1)`,工作树 `.work/kiro-0012/{base,work}`;选值依据见记忆 project_cc_old_session_toolsearch_latch_rea_overflow。
 
 ## 4. LiteLLM 侧（198 `litellm-product`）
 

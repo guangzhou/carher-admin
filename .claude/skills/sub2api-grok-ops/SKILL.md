@@ -296,6 +296,25 @@ select to_char(m.t at time zone 'Asia/Shanghai','HH24:MI'),
 from m order by 1;
 ```
 
+🛠 **别手搓这两条查询：`diag/grok-pool-watch.sh`** 每分钟采一行 CSV
+（`served,no_leg,r429,r429_ma,<每条腿>,keys`），`no_leg` 超阈值的那分钟连同**前 3 分钟的 429 明细**
+写进事件文件，因果同行。改前改后各跑一份直接对比：
+
+```bash
+cd <repo>/scripts/grok-onboard/diag
+OUT=before END_HHMM=1830 ./grok-pool-watch.sh     # 改前
+OUT=after  END_HHMM=2330 ./grok-pool-watch.sh     # 改后
+awk -F, 'NR>1&&NF>5{n++;s+=$2;nl+=$3;if($3>=20){b++;if(!o)st++;o=1}else o=0}
+  END{printf "minutes=%d served=%d outages=%d outage_min=%d unserved=%d\n",n,s,st,b,nl}' before.csv
+```
+
+🔴 腿的列是**现量**的（最近 2h 真发过请求的 account_id），别写死号 —— 写死 163/164 这种，
+换了号就恒读 0，长得像「这条腿没流量」的假绿。
+🔴 判「改好了没」**必须带改前那份**：10-22 晚上改后 0 次断流，但晚间流量只有下午的 1/4
+（46 → 12 req/min），单看「改后 0 次」不足以下结论，真正的证据是 22:15 那次
+**同形状的 429 没有导致整池断**（同 30s 内该腿照接 18 个模型 33 个请求）。
+⇒ [[feedback_quiet_window_is_not_proof_the_fix_works]]
+
 pod 日志里的直接判据：`openai.account_select_failed` 带
 `no available Grok accounts supporting model: X (pool=0)`。
 `pool=N, filtered: <原因>=n` 那个括号是 sub2api 自己给的排除统计
@@ -744,8 +763,28 @@ token 850 字符、`200 usable (14 models)`、`jwt_tier=5`），建出 **acct 16
 另：x.ai 那句 "Request could not be verified / could not verify this browser" 对**过期的设备码**
 也会出（10-22 一个码隔了 7 小时才点）⇒ 先看码过没过期，再判是不是 Castle。
 
-只读诊断脚本 `.work/grok-1021b/consent_recon.py`（`CLICK_ALLOW=1` 才点 Allow，
+只读诊断脚本 `diag/consent_recon.py`（`CLICK_ALLOW=1` 才点 Allow，
 打出 consent 页的 castle 字段长度 + 失败请求清单）。
+
+#### 🔴 2026-10-22 两轮带仪表：**Castle 在 225 上根本不发请求** ⇒ 别再调浏览器
+
+`diag/castle_diag.py` / `castle_diag2.py`（记 console、失败请求、castle 相关网络、
+consent 页脚本清单 + castle 全局、60s 采样 token）量到：
+
+| 量 | 结果 |
+|---|---|
+| consent 页 castle 配置 | `enable_castle: true`、`castlePk` 在，SDK **已打进页面** |
+| `cdn.castle.io` 请求 | **一次都没发过**（两轮都没有） |
+| castle 全局对象 / `castle_request_token` 60s | 没有 / **恒空** |
+| 轮 1 console | 刷 `Automatic fallback to software WebGL has been deprecated` |
+| 轮 2：加 `--enable-unsafe-swiftshader` 修好 WebGL + 点掉 OneTrust | **行为一点没变** |
+
+⇒ 轮 1 很容易推成「WebGL 先失败 ⇒ Castle SDK 没起来」，**轮 2 把它证伪了**。
+这是**指纹级拒绝**（数据中心出口 + Xvfb 浏览器），不是哪个开关没开 ⇒
+⛔ 别调浏览器参数 / 别等 castle 字段 / 别盖 UA / 别转 WARP，**直接让脚本兜底到 authcode**。
+真要人工过一次：`diag/mac_approve.py`（本机真 Chrome，`ssh -L 40000:127.0.0.1:40000 cltx@10.68.13.225 -N -f`
+借 225 的 WARP 出口；只换 approve 那跳 + api.x.ai 传输，其余检查全复用 `xai_sso_device_oauth.py`）。
+→ [[feedback_castle_never_fires_on_225_is_fingerprint_not_webgl]]
 
 编排器在 225 上**自起私有 Xvfb**（`:80~:89` 里第一个空的，跑完 kill；⛔ 别碰 `:91/:95~:99`，
 那是别的抓取任务的），`PYTHONPATH=/Data/grok-onboard/pyenv/...` +

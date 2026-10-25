@@ -15,6 +15,13 @@
 #   scripts/kiro-rs-ship.sh <镜像tag> <sha256> --keep-tarball  # 同上，198 留 ~/kiro-ship/img.tar.gz 给 e2e
 #   scripts/kiro-rs-ship.sh <镜像tag> <sha256> --switch   # 送进 242 + 切生产（停机约 10s）
 #   scripts/kiro-rs-ship.sh <镜像tag> <sha256> --switch --expect-ui '(\.\d{3})\d+/'  # 改了 admin-ui 时必带
+#   scripts/kiro-rs-ship.sh <镜像tag> <sha256> --switch --slots   # 切槽位实例 kiro-rs-slots（:30891）而不是老实例
+#
+# --slots（10-25 加）：deploy=kiro-rs-slots，Admin 端口 30891；切前把 PVC 里四个状态文件
+#   （config/credentials/kiro_slots/kiro_account_usage.json）备份到 198:~/kiro-deploy/backup/slots-pre-<tag>-<ts>/。
+#   🔴 槽位实例 terminationGracePeriodSeconds=300：老 pod 等在途请求跑完才退 ⇒ 用户请求不断，
+#   但**这 1~2 分钟 Admin 页面打不开**（单副本 Recreate），先跟用户说一声。
+#   🔴 10-25 前本脚本切前切后读池子用的 kiro-pool.py 默认已指向 slots ⇒ 切老实例时比的是另一个实例；现按目标实例传环境变量。
 #
 # --expect-ui <字面串>：切完拉线上 Admin bundle，必须含这个字面串（grep -F），否则 STOP（但不自动回滚）。
 #   🔴 只看「Admin UI 200 + 有 bundle」是假绿：旧镜像也 200、也有 bundle。字面串必须是补丁**新增**、
@@ -28,7 +35,7 @@ set -euo pipefail
 TAG="${1:?用法: $0 <镜像tag> <sha256> [--switch] [--keep-tarball]}"
 SHA="${2:?用法: $0 <镜像tag> <sha256> [--switch] [--keep-tarball]}"
 fail() { echo "🔴 STOP: $*"; exit 1; }
-SWITCH=0; KEEP=0; EXPECT_UI=""
+SWITCH=0; KEEP=0; SLOTS=0; EXPECT_UI=""
 ARGS=("${@:3}")
 for ((i=0; i<${#ARGS[@]}; i++)); do
   arg="${ARGS[$i]}"
@@ -38,7 +45,8 @@ for ((i=0; i<${#ARGS[@]}; i++)); do
     # 🔴 10-16：不带它时第 3 步末尾删 198 上的 tarball ⇒ 紧接着跑 kiro-rs-e2e.sh --tarball 找不到文件，
     #    只能再分块送一遍。e2e 之前的那次 ship 带上它，e2e 跑完 `rm -rf ~/kiro-ship`。
     --keep-tarball) KEEP=1 ;;
-    *) fail "未知参数 ${arg}（只认 --switch / --keep-tarball / --expect-ui <字面串>）" ;;
+    --slots) SLOTS=1 ;;
+    *) fail "未知参数 ${arg}（只认 --switch / --slots / --keep-tarball / --expect-ui <字面串>）" ;;
   esac
 done
 
@@ -47,6 +55,13 @@ PROD="${KIRO_PROD_HOST:-cltx@10.68.13.198}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$REPO_ROOT/work-kiro-ship-$TAG"     # .gitignore 已忽略 work-kiro-*/
 IMG="docker.io/library/kiro-rs:$TAG"
+if [ "$SLOTS" = 1 ]; then
+  DEPLOY=kiro-rs-slots; ADMIN_PORT=30891; WAIT=420s
+  POOL_ENV=()   # kiro-pool.py 默认就是 slots 实例
+else
+  DEPLOY=kiro-rs; ADMIN_PORT=30890; WAIT=180s
+  POOL_ENV=(KIRO_DEPLOY=kiro-rs KIRO_CLUSTER_IP=10.43.109.5:8990 KIRO_SECRET_NAME=kiro-rs-bootstrap)
+fi
 
 shasum_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 
@@ -118,32 +133,44 @@ EOF
 
 [ "$SWITCH" = 1 ] || { echo "== 未带 --switch：只送进 242，生产没动"; exit 0; }
 
-echo "== 4. 切生产（Recreate，停机约 10s）"
-pool() { python3 "$REPO_ROOT/scripts/kiro-pool.py" show 2>/dev/null | grep '^API' | sed 's/^API *//'; }
+echo "== 4. 切生产 deploy/${DEPLOY}（Recreate）"
+pool() { env ${POOL_ENV[@]+"${POOL_ENV[@]}"} python3 "$REPO_ROOT/scripts/kiro-pool.py" show 2>/dev/null | grep '^API' | sed 's/^API *//'; }
 BEFORE=$(pool); echo "   切前 $BEFORE"
-ssh "$PROD" "IMG='$IMG' TAG='$TAG' bash -s" <<'EOF'
+ssh "$PROD" "IMG='$IMG' TAG='$TAG' DEPLOY='$DEPLOY' WAIT='$WAIT' SLOTS='$SLOTS' bash -s" <<'EOF'
 set -euo pipefail
 K="sudo -n kubectl -n kiro-rs"
-BAK=~/kiro-rs-deploy.pre-$TAG.json
-$K get deploy kiro-rs -o json > $BAK && chmod 600 $BAK
-OLD=$($K get deploy kiro-rs -o jsonpath='{.spec.template.spec.containers[0].image}')
-$K set image deploy/kiro-rs kiro-rs=$IMG seed-config=$IMG >/dev/null
-$K rollout status deploy/kiro-rs --timeout=180s
+BAK=~/${DEPLOY}-deploy.pre-$TAG.json
+$K get deploy $DEPLOY -o json > $BAK && chmod 600 $BAK
+if [ "$SLOTS" = 1 ]; then
+  D=~/kiro-deploy/backup/slots-pre-$TAG-$(date +%Y%m%dT%H%M%S); mkdir -p $D && chmod 700 $D
+  P=$($K get pod -l app=kiro-rs-slots -o name | head -1)
+  for f in config.json credentials.json kiro_slots.json kiro_account_usage.json; do
+    $K exec $P -c kiro-rs -- cat /app/config/$f > $D/$f 2>/dev/null || echo "   ⚠️ $f 没读到（新文件可能还不存在）"
+  done
+  chmod 600 $D/*; echo "   状态文件备份 198:$D"
+fi
+OLD=$($K get deploy $DEPLOY -o jsonpath='{.spec.template.spec.containers[0].image}')
+$K set image deploy/$DEPLOY kiro-rs=$IMG seed-config=$IMG >/dev/null
+$K rollout status deploy/$DEPLOY --timeout=$WAIT
 echo "   备份 198:$BAK"
-echo "   回滚: sudo kubectl -n kiro-rs set image deploy/kiro-rs kiro-rs=$OLD seed-config=$OLD"
+echo "   回滚: sudo kubectl -n kiro-rs set image deploy/$DEPLOY kiro-rs=$OLD seed-config=$OLD"
 EOF
 AFTER=$(pool); echo "   切后 $AFTER"
 [ "$BEFORE" = "$AFTER" ] || echo "⚠️ 池子读数切前切后不同（currentId 在两次读之间自然轮换也会变，人工看一眼）"
 
-js=$(curl -s -m 8 http://10.68.13.198:30890/admin | grep -o '/admin/assets/index-[^"]*\.js' || true)
+js=$(curl -s -m 8 http://10.68.13.198:$ADMIN_PORT/admin | grep -o '/admin/assets/index-[^"]*\.js' || true)
 [ -n "$js" ] && echo "   Admin UI 200，bundle $js" || echo "⚠️ Admin UI 没拿到 bundle"
 if [ -n "$EXPECT_UI" ]; then
   [ -n "$js" ] || fail "--expect-ui 要验 bundle，但没拿到 bundle 路径"
   # 先落变量再 grep（pipefail 下 curl | grep -q 会被 SIGPIPE 打成假 STOP，见 skill §C）
-  body=$(curl -s -m 15 "http://10.68.13.198:30890$js" || true)
+  body=$(curl -s -m 15 "http://10.68.13.198:$ADMIN_PORT$js" || true)
   [ -n "$body" ] || fail "bundle $js 拉回来是空的"
   printf '%s' "$body" | grep -Fq -- "$EXPECT_UI" \
     || fail "线上 bundle 里没有 「${EXPECT_UI}」 ⇒ 新 UI 没上（回滚命令见上）"
   echo "   ✅ 线上 bundle 含 「${EXPECT_UI}」"
 fi
-echo "✅ 下一步: scripts/kiro-lane-regress.sh --rounds 2"
+if [ "$SLOTS" = 1 ]; then
+  echo "✅ 下一步: python3 scripts/kiro-slots-watch.py --minutes 10（lane-regress 只测老实例的 kiro-* 道，不经过 30891）"
+else
+  echo "✅ 下一步: scripts/kiro-lane-regress.sh --rounds 2"
+fi

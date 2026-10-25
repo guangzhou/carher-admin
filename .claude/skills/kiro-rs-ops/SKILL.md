@@ -15,24 +15,28 @@ description: >-
   "Claude Code 走走停停 / opus-5.5 空回复 / 0 token end_turn"、
   "kiro 协议太老 / 11-09 断连 / profileArn is required / 学生号没有 profileArn"、
   或者要给生产 key 授权 `kiro-*` 名字。
+  槽位实例（30891，一号一IP按人绑槽）的调度/切 key/换镜像/用量统计 ⇒ skill `kiro-rs-slots`。
 ---
 
 # kiro.rs 运维
+
+> 🔴 **10-25 起绝大多数 kiro 流量走槽位实例 `kiro-rs-slots`（:30891）**，老实例 `kiro-rs`（:30890）只剩 2 把 key + 当兜底。
+> 槽位相关（槽/冷备/封口、`kiro-slots-*` 组、按 key 切换、身份头 callback、换镜像 `--slots`、用量统计口径）全在 skill **`kiro-rs-slots`**。
 
 ## §0 拓扑速查
 
 | 项 | 值 |
 |---|---|
-| ns / Service | `kiro-rs`，ClusterIP **`10.43.109.5:8990`**（仅集群内，无 NodePort/ingress） |
+| ns / Service | `kiro-rs`。**两个实例**：旧 `kiro-rs` ClusterIP `10.43.109.5:8990`（NodePort 30890）；🔴**加号目标** `kiro-rs-slots` ClusterIP `10.43.170.188:8990`（NodePort 30891，LiteLLM 侧 DB 里的 `kiro-slots-*` 组走 svc `kiro-rs-slots` `10.43.252.245`）。本文下面手搓命令里的 `10.43.109.5` / `deploy/kiro-rs` / `kiro-rs-bootstrap` 都是旧实例，操作 30891 时换成 slots 那三个 |
 | 节点 | **`aiyjy-litellm-242`**，nodeSelector 硬钉 + toleration `dedicated=new-node:NoSchedule` |
-| 镜像 | **`kiro-rs:v2026.10.1-carher-sort2`**（10-16 起 = 上游 v2026.10.1 + 本仓补丁 0001~0005，见 §C）—— 自建，**只在 242 本地 containerd** |
+| 镜像 | 老实例 **`kiro-rs:v2026.10.1-carher-ctxwin`**（0001~0008+0010）；槽位实例 **`v2026.10.1-carher-slots25`**（+0011）。现读：`sudo kubectl -n kiro-rs get deploy -o wide`。自建，**只在 242 本地 containerd**（见 §C）|
 | 账号 | 🔴 **一律现读，别信写死的数** —— 一条命令出全表（id / 邮箱 / `authMethod` / 档位 / live 余额 / 在役哪个 / 盘上一致否 / 零重启否）：<br>`python3 scripts/kiro-pool.py show --with-quota`<br>这张表 09-17~09-24 因为手维护漂过两次，**已不再在这里复述池子状态**。不可推导的部分（每个号的加入经过、备份路径、踩过的坑）在 §D4。<br>只留两条常驻事实：**档位已见六种**（FREE **50** / PRO 1000 / **STUDENT 1000** / PRO+ 2000 / PRO MAX 5000 / POWER 10000，跨度 **200 倍** ⇒ **算容量前必读 live cap**，别按某个数硬算；每新加一个号都可能再冒一种）；**`authMethod` 混编且无规律**（idc / social 在 id 轴上交替出现，10-08 加的 21 个里 16 idc + 5 social；**别按 id 区间推 authMethod**，现读 `show` 那一列，两条刷新路行为相反见 §D3 第 0 步）。**盘上 `email` 可能是 null**（social 那种导出形状，id46~52 就是）⇒ 任何按 email 关联账号的脚本都要有第二把判据。重置为**每月 1 日 00:00 UTC** |
 | 档位↔模型 | 🔴 **「升档只买额度不买模型」已被推翻（10-01）** —— 那句话在 PRO+/MAX/POWER/STUDENT 四档之间成立（条数一致），但 **FREE 档只有 9 个模型**，且是付费档的**真子集**。<br>⚠️ **付费档的条数本身会变**：10-01 是 20，10-02 上游新出 `claude-sonnet-5.5`（1.3x，1M/128K）后变 **21** —— **别把条数写成判据，条数不对先查上游是不是出新模型**（见 [[project_kiro_sonnet55_appeared_upstream_no_lane_2026_10_02]]，198 侧至今 0 条道）。<br>FREE 能用：`auto` `claude-haiku-4.5` `claude-sonnet-4` `claude-sonnet-4.5` `deepseek-3.2` `glm-5` `minimax-m2.1` `minimax-m2.5` `qwen3-coder-next`<br>**掉档即失去的 11 个**：`claude-opus-4.5/4.6/4.7/4.8/5/5.5`、`claude-sonnet-4.6`、`claude-sonnet-5`、`gpt-5.6-sol/terra/luna` —— **全部 opus、sonnet-5/4.6 和三条 gpt 都在里面**，即 20 条道里**最贵也最常用的那批**。<br>⇒ 判「某个号能不能跑 opus」**必须看它当下的档位**，不能靠「它以前能跑」。订阅过期/掉 FREE 与「模型没了」是同一件事的两面。 |
 | 出口 | **全部经 `10.68.13.243:8120`**（Astrill Los Angeles → `104.129.16.172`，09-17 19:36 从 8119 Seattle 改指），见 §D2。⚠️**全局唯一，无 per-account 路由**；⚠️ 8118/8119/8120 **三条都与 `chatgpt-acct-*` 共用**（分别 8/7/6 个对象），**没有独占 IP 可选** |
 | 凭据 | PVC 内 `/app/config/credentials.json`（list = **真的多号池**，不是只用 `[0]`，见 §D3） |
 | 对外 | 198 LiteLLM ns `litellm-product` 的 **21 条 `kiro-*` 道**（09-29 加 opus-5-5，10-04 加 sonnet-5-5，10-16 加 kimi-k3）|
-| manifest | `198:~cltx/kiro-deploy/kiro-rs.yaml` |
-| Admin UI | **`http://10.68.13.198:30890/admin`**（Service `kiro-rs-admin` NodePort 30890 → 8990，前端嵌在二进制里，改界面 = 改 `admin-ui/` + 重建镜像）|
+| manifest | 旧 `198:~cltx/kiro-deploy/kiro-rs.yaml`；slots 本仓 `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（出口按槽位配在 `config.json.slots[]`，全局 `proxyUrl=null`） |
+| Admin UI | 🔴 **2026-10-24 起新加的号一律进 `http://10.68.13.198:30891/admin`**（slots 实例：deploy/secret `kiro-rs-slots`/`kiro-rs-slots-bootstrap`，ClusterIP `10.43.170.188:8990`，manifest `k8s/kiro-rs/slots/`）。加号链五个脚本（`kiro-batch-prepare.py`/`kiro-probe.py`/`kiro-pool.py`/`kiro-enable-overage.py`/`kiro_import_social_rt.py`）默认就打它；判重读两边并集。要操作旧实例 = 前面加 `KIRO_DEPLOY=kiro-rs KIRO_CLUSTER_IP=10.43.109.5:8990 KIRO_SECRET_NAME=kiro-rs-bootstrap`。<br>旧实例 `http://10.68.13.198:30890/admin`（Service `kiro-rs-admin`）只读/存量，不再加号。前端嵌在二进制里，改界面 = 改 `admin-ui/` + 重建镜像 |
 | 登录 | `ssh cltx@10.68.13.198`，kubectl 要 `sudo` |
 
 ⚠️ **「Astrill 账号 2026-09-24 到期」这句已过期未更新** —— 10-01 实测（当时 19 条）
@@ -107,6 +111,7 @@ export KIRO_PROXY_HOSTPORT=127.0.0.1:18120        # ② 只给 kiro-probe.py 改
 | `kiro-rs-e2e.sh` | 隔离容器（不碰生产） | 198 docker 起新镜像，单号 + 假 refreshToken，打真上游 11 例（含 sonnet-5 对照、tool_result 夹图片、web_search）。用例在 `kiro_rs_e2e_cases.py`。跑旧 tag 即阴性对照。见 §C |
 | `kiro-admin-ui/verify.sh` | 只读线上（一次 GET /credentials）+ 本机 | **改 Admin UI 先跑它**（10-18 加）：干净上游 admin-ui + 全部 UI 补丁 → tsc/vite → mock 回放 live 池子（写请求一律 403 并计数）→ Playwright 逐条件对条数。见 §C「改 Admin UI」 |
 | `kiro-upstream-probe.py` | **纯只读**（直打 `generateAssistantResponse`，绕过 kiro.rs） | 10-22 加。`dump`（原样打印 HTTP 头 + 每帧全部帧头，不过滤）/ `ruler`（空回复判据 8 场景自校验）/ `gate`（版本 × profileArn 闸门矩阵）。判据门禁 `backend/tests/test_kiro_upstream_empty_verdict.py`（合成帧离线跑；判据改回「缺 metering」会挂）。凭据/出口/指纹复用 `kiro-probe.py`；缺省自动挑一个能回话的启用 idc 号。见 §G |
+| `kiro-slots-watch.py` / `kiro-slots-groups.py` / `kiro-slots-router.py` / `kiro-slots-switch-keys.py` / `kiro-haiku55-groups.py` | 槽位实例五件套（10-24~25） | 观察 / 加 `kiro-slots-*` 组 / 兜底+重试0 / 按 key 切新老 / haiku-5.5 组。用法见 skill `kiro-rs-slots` §4 |
 | `kiro-enable-overage.py` | **写**（Kiro Management API） | 为 social 号批量开启 overage（超额计费）。`<id…>` 按 id 指定 / `all-new` 选未消耗的 social 号 / `--check` 只读验证不写。从 PVC 读凭据 → refresh → `setUserPreference` → `getUsageLimits` 验证。开完自动轮询到 ENABLED（`--wait N`，默认 45s，10-15 实测 ~30s 才翻）；退出码全 ENABLED=0。cap/rate 读 `usageBreakdownList[0]`（10-15 修：之前读错位置恒 None）|
 
 🔴 **`kiro-lane-add.py` 与 `litellm-198-key-behavior-regress.py` 是 09-29 从 198 盘上
@@ -330,7 +335,7 @@ ssh <188> "curl -s https://api.github.com/repos/hank9999/kiro.rs/commits?per_pag
 
 | 项 | 值 |
 |---|---|
-| 现役镜像 | **`kiro-rs:v2026.10.1-carher-filter`**（10-18 上线，0006 Admin 查询栏；回滚 tag `v2026.10.1-carher-sort2`，备份 `198:~/kiro-rs-deploy.pre-v2026.10.1-carher-filter.json`）|
+| 现役镜像 | 槽位实例 `v2026.10.1-carher-slots25`（10-25，= 0001~0008+0010+0011，换镜像 `kiro-rs-ship.sh … --switch --slots`）；老实例 **`kiro-rs:v2026.10.1-carher-ctxwin`**（10-23 上线，= 0001~0008 + 0010；回滚 tag `v2026.10.1-carher-sticky`，备份 `198:~/kiro-rs-deploy.pre-v2026.10.1-carher-ctxwin.json`）|
 | 上游基线 | `hank9999/kiro.rs` master `22f36e69`（v2026.10.1，10-08）|
 | 补丁真源 | **本仓 `k8s/kiro-rs/patches/000N-*.patch`**（按文件名序打；`*.5ca5703.patch` 是旧基线存档，不打）。每个补丁做什么、验证记录 ⇒ 同目录 `README.md` |
 | 构建树（188）| `/Data/kiro-build/kiro-up/`（= 上游 + 补丁，**脚本每次从干净上游重建**）· 干净上游 `kiro-up-pristine/` · 旧基线 `kiro.rs/` `kiro-ws/` `kiro-ui/` 只读留档 |
@@ -344,6 +349,16 @@ ssh <188> "curl -s https://api.github.com/repos/hank9999/kiro.rs/commits?per_pag
 | 0004 | Admin UI（`:30890/admin`）列表：启用（在用置顶）→ 禁用，组内按 `lastUsedAt` 倒序（只改前端，调度仍按 priority）|
 | 0005 | `kimi-k3` 透传（10-16，见 §D-2）|
 | 0006 | Admin UI 查询栏（关键字/状态+禁用原因/登录方式/优先级/域名/只看失败）+ 卡片标题栏防溢出；只改前端，过滤在排序后分页前 |
+| 0007~0008 | window 模式 / 会话粘性 / 调度切换确认 / 按等级筛选（10-22）|
+| 0011 | **槽位模式**（一槽一号一出口、按 key 绑槽、AIMD 并发、排队→529、额度/被限换号、槽动态增删停用、灰度名单、按号用量统计、Admin 槽位面板）。只在槽位实例 `kiro-rs-slots` 用（10-25 `slots24`），老实例不打。详见 skill `kiro-rs-slots` |
+| 0010 | **上游超长 ⇒ 400 `prompt is too long: N tokens > M maximum`**（Anthropic 原句，N≥M+1）。旧文案「Context window is full」LiteLLM 不映射 ContextWindowExceeded ⇒ 被兜底到 grok 复读；CC 也不认 ⇒ 不压缩。10-23 上线 `v2026.10.1-carher-ctxwin`（0001~0008+0010） |
+
+🔴 **重建镜像前先看目录里有没有别的会话没提交的补丁**：`kiro-rs-build.sh` 把 `[0-9]{4}-*.patch` 全打上。
+10-23 目录里有未上线的 0009（window 严格粘号 / 会话 id 按号隔离 / 空回复去 origin 重发，三开关默认关）和 0011，
+ctxwin 是在隔离目录里只带 0001~0008+0010 构建的。
+
+🔴 **opus-5.5 写长总结随机提前收尾**（10-23 重放 CC 压缩请求 6 发 4 发半截，`end_turn`、无 exception/unknown 帧，
+RUST_LOG=debug 隔离容器看 kiro.rs 原样转发）⇒ CC 压缩后失忆。重放脚本 `.work/cc-ctxwin-1023/replay_summary.py`（未入仓）。
 
 上游 v2026.10.1 自带、对我们有用的只有一条：**`tool_result` 里的图片不再被丢**
 （10-15 同号同请求 A/B：旧版两次都答「只收到文字 screenshot captured」，新版答对绿/蓝）。

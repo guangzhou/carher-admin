@@ -1,0 +1,131 @@
+# kiro-rs 槽位实例（0011，与生产 kiro-rs 并行，按 LiteLLM 别名灰度切流）。
+# 号池独立：生产里对应号已禁用，两边不共用号。回滚 = LiteLLM 删别名（秒级），再 scale 0。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: kiro-rs-slots-config, namespace: kiro-rs}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources: {requests: {storage: 1Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: kiro-rs-slots, namespace: kiro-rs}
+spec:
+  selector: {app: kiro-rs-slots}
+  ports: [{name: http, port: 8990, targetPort: 8990}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: kiro-rs-slots-admin, namespace: kiro-rs}
+spec:
+  type: NodePort
+  selector: {app: kiro-rs-slots}
+  ports: [{name: http, port: 8990, targetPort: 8990, nodePort: 30891}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kiro-rs-slots
+  namespace: kiro-rs
+  labels:
+    app: kiro-rs-slots
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kiro-rs-slots
+  template:
+    metadata:
+      labels:
+        app: kiro-rs-slots
+    spec:
+      containers:
+      - args:
+        - -c
+        - /app/config/config.json
+        - --credentials
+        - /app/config/credentials.json
+        command:
+        - ./kiro-rs
+        env:
+        - name: RUST_LOG
+          value: info
+        image: docker.io/library/kiro-rs:v2026.10.1-carher-slots9
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          successThreshold: 1
+          tcpSocket:
+            port: 8990
+          timeoutSeconds: 1
+        name: kiro-rs
+        ports:
+        - containerPort: 8990
+          name: http
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 3
+          periodSeconds: 10
+          successThreshold: 1
+          tcpSocket:
+            port: 8990
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: '2'
+            memory: 512Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /app/config
+          name: config
+      dnsPolicy: ClusterFirst
+      initContainers:
+      - command:
+        - /bin/sh
+        - -c
+        - "set -e\nfor f in config.json credentials.json; do\n  if [ -f \"/app/config/$f\"\
+          \ ]; then\n    echo \"keep existing /app/config/$f\"\n  else\n    cp \"\
+          /bootstrap/$f\" \"/app/config/$f\"\n    echo \"seeded /app/config/$f\"\n\
+          \  fi\ndone\n"
+        image: docker.io/library/kiro-rs:v2026.10.1-carher-slots9
+        imagePullPolicy: IfNotPresent
+        name: seed-config
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /app/config
+          name: config
+        - mountPath: /bootstrap
+          name: bootstrap
+          readOnly: true
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-242
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      tolerations:
+      - effect: NoSchedule
+        key: dedicated
+        operator: Equal
+        value: new-node
+      volumes:
+      - name: config
+        persistentVolumeClaim:
+          claimName: kiro-rs-slots-config
+      - name: bootstrap
+        secret:
+          defaultMode: 420
+          secretName: kiro-rs-slots-bootstrap
+

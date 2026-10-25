@@ -779,3 +779,7 @@ update "LiteLLM_Config" set param_value = jsonb_set(param_value, '{model_group_r
 grok 5 组 `{DefaultRetries:1, Timeout/RateLimit/ServiceUnavailable:5}`（早先就有）；
 DeepSeek 5 组 `{DefaultRetries:1}`：`deepseek-v4.1-flash` / `-responses` / `-her`、`wangsu-deepseek-v4.1-flash` / `-her`。
 回滚 `198:~/rs-bak/router_settings.pre-ds41-retry1-20261015T054748Z.json`。
+🔴 **整个上游实例停掉的场景更狠**（10-24 kiro 槽位实例演练）：不是慢 30s，而是请求挂 120s+ 直到实例恢复，兜底一次都没走。
+`kiro-slots-*` 组现在全部 `*Retries=0`（兜底是同模型的老 kiro 实例），加新 `kiro-slots-*` 组后跑
+`scripts/kiro-slots-router.py plan|apply` 补兜底行 + 重试 0（见 skill `kiro-rs-slots` §4）。
+

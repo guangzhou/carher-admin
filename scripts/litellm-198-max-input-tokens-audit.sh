@@ -115,6 +115,9 @@ KEYS = sorted(CEIL, key=len, reverse=True)
 
 
 def match(*names):
+    # 槽位实例的组 `kiro-slots-X` 和老实例 `kiro-X` 打的是同一个上游、同一份目录 ⇒ 用同一条天花板
+    # （10-25 前没这行：13 个 kiro-slots-* 组全落 UNKNOWN，上下文治理对它们没有判据）
+    names = [n.replace("kiro-slots-", "kiro-") if n else n for n in names]
     for n in names:
         if not n:
             continue

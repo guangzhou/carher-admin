@@ -1,6 +1,6 @@
 # kiro.rs 本地补丁
 
-上游 `hank9999/kiro.rs`。**线上镜像 `kiro-rs:v2026.10.1-carher-filter`（10-18 起）= 上游 v2026.10.1（master `22f36e69`，10-08）+ 下面 0001~0006 按文件名序打上。**
+上游 `hank9999/kiro.rs`。**槽位实例 `kiro-rs-slots` 镜像 `v2026.10.1-carher-slots24`（10-25，= 0001~0008 + 0010 + 0011）；老实例 `kiro-rs` 镜像 `kiro-rs:v2026.10.1-carher-ctxwin`（10-23 起，= 0001~0008 + 0010；0009 未入镜像）**；更早 `kiro-rs:v2026.10.1-carher-filter`（10-18 起）= 上游 v2026.10.1（master `22f36e69`，10-08）+ 下面 0001~0006 按文件名序打上。**
 本目录是补丁的唯一真源；188 上的构建树只是产物，`scripts/kiro-rs-build.sh` 每次从干净上游重建。
 
 ```bash
@@ -23,6 +23,8 @@ scripts/kiro-lane-regress.sh --rounds 2                     # 经 LiteLLM 回归
 | `0004-admin-ui-sort-current-enabled-first.patch` | Admin UI（`:30890/admin`）列表：启用（在用置顶）→ 禁用，组内按 `lastUsedAt` 倒序（最近用完的在前，从未用的垫底）；只改前端，调度不变 | 10-15 `master-ui-sort`；10-16 改组内排序 `v2026.10.1-carher-sort2` |
 | `0005-kimi-k3-passthrough.patch` | 透传表加 `kimi-k3`（1M 窗口）+ `/v1/models` 一条 + 单测（含 `kimi-k2.7-code` 阴性对照）。cargo test 235→236，E2E 13/13 | 10-16 `v2026.10.1-carher-kimi` |
 | `0006-admin-ui-filters-and-card-header.patch` | Admin UI 查询栏（新文件 `credential-filters.tsx`）：关键字（邮箱子串 / `#ID`，空格分隔多词 OR）、状态（启用/当前/已禁用/按禁用原因）、登录方式、优先级、邮箱域名、只看有失败；下拉带计数。卡片标题栏修溢出（`#ID` 前缀、邮箱截断、开关不换行、徽章挪下一行）。只改前端：过滤在 0004 排序之后、分页之前；批量操作仍按勾选 ID，「清除已禁用」仍针对全部禁用号 | 10-18 `v2026.10.1-carher-filter` |
+| `0010-context-overflow-anthropic-wording.patch` | 上游超长（`CONTENT_LENGTH_EXCEEDS_THRESHOLD` / `Input is too long`）⇒ 400 `prompt is too long: N tokens > M maximum`（Anthropic 原句，N≥M+1）。Claude Code 只认这句才自动压缩；LiteLLM 只认这句才映射 ContextWindowExceeded、不走普通兜底（修前被兜到 sa-grok-4.20 复读）。6 个单测；e2e 加「超长拒收」一例（新 14/14，旧 sticky 13/14 = 阴性对照） | 10-23 `v2026.10.1-carher-ctxwin`（= 0001~0008 + 0010，**不含 0009**） |
+| `0011-slots-one-account-one-ip-user-binding.patch` | 槽位模式 `loadBalancingMode=slots`：N 个命名槽，每槽 1 号 + 1 固定出口；带身份（`x-litellm-user_api_key_hash`，只在本模式读、不发 Kiro 官方）的 key 绑槽；AIMD 并发 + 排队超时 529；429 官方退避；402/被限退役换冷备；槽运行时增删停用（按名字 reconcile，停用即换绑）；灰度名单；按号×模型×北京日用量 + 统计前基线；SIGTERM 优雅停机；haiku-5.5 映射；Admin 槽位面板/配置/测试/批量查额度。cargo test 321 | 10-25 `v2026.10.1-carher-slots25`（被限探测改中性问题+号自己的 ARN；slots24 用户原文探测会冤退役好号）（**只给槽位实例**）。运维见 skill `kiro-rs-slots` |
 
 存档：`0001-carher-base-models.5ca5703.patch` 是旧基线版 0001（含 opus-5.5，上游后来自带了），`kiro-rs-build.sh` 不会打它。
 

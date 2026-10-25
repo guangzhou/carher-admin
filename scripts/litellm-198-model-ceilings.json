@@ -18,6 +18,13 @@
       "fetched_at": "2026-09-25",
       "fetched_from": "acct-165",
       "caveat": "client_version < 1.0.0 会返 200 {\"models\":[]}（空列表假红），必须填 1.0.0"
+    },
+    "kiro_catalog": {
+      "url": "AWS CodeWhisperer ListAvailableModels (origin=AI_EDITOR)，取法见 scripts/kiro-probe.py catalog",
+      "field": "tokenLimits.{maxInputTokens,maxOutputTokens}",
+      "fetched_at": "2026-10-01",
+      "fetched_from": "kiro 池 id14 ferril.wananda（20 个模型，与 id11~13 一致）",
+      "caveat": "🔴 同一个模型名在 codex 与 kiro 两条上游的窗口**本来就不同**（gpt-5.6-sol: codex 872000 / kiro 1000000）。审计是**子串匹配 + 长 key 优先**，所以 `kiro-` 前缀的 key 必须存在，否则 `anthropic/kiro-gpt-5.6-sol` 会命中 codex 那条、把正确的 1000000 判成 OVER。2026-10-01 实测过这个假红。origin 必须 AI_EDITOR/KIRO_CLI，IDE(11)/CLI(3) 是子集会假红。"
     }
   },
   "ceilings": {
@@ -28,7 +35,30 @@
     "gpt-6-sol": { "max_input_tokens": 872000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 },
     "gpt-6-luna": { "max_input_tokens": 872000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 },
     "gpt-5.5": { "max_input_tokens": 272000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 },
-    "gpt-5.3-codex": { "max_input_tokens": 272000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 }
+    "gpt-5.3-codex": { "max_input_tokens": 272000, "max_output_tokens": 128000, "source": "codex_catalog", "context_window": 272000 },
+
+    "kiro-gpt-5.6-sol": { "max_input_tokens": 1000000, "max_output_tokens": 128000, "source": "kiro_catalog" },
+    "kiro-gpt-5.6-terra": { "max_input_tokens": 1000000, "max_output_tokens": 128000, "source": "kiro_catalog" },
+    "kiro-gpt-5.6-luna": { "max_input_tokens": 1000000, "max_output_tokens": 128000, "source": "kiro_catalog" },
+    "kiro-claude-opus-5-5": { "max_input_tokens": 1000000, "max_output_tokens": 128000, "source": "kiro_catalog" },
+    "kiro-claude-opus-5": { "max_input_tokens": 1000000, "max_output_tokens": 128000, "source": "kiro_catalog" },
+    "kiro-claude-opus-4-8": { "max_input_tokens": 1000000, "max_output_tokens": 128000, "source": "kiro_catalog" },
+    "kiro-claude-opus-4-7": { "max_input_tokens": 1000000, "max_output_tokens": 128000, "source": "kiro_catalog" },
+    "kiro-claude-opus-4-6": { "max_input_tokens": 1000000, "max_output_tokens": 64000, "source": "kiro_catalog" },
+    "kiro-claude-opus-4-5": { "max_input_tokens": 200000, "max_output_tokens": 64000, "source": "kiro_catalog" },
+    "kiro-claude-sonnet-5-5": { "max_input_tokens": 1000000, "max_output_tokens": 128000, "source": "kiro_catalog", "_note": "10-04 上游新出。⚠️ 输出上限是 128000 而 sonnet-5 是 64000 —— 加道时模板会继承错，必须按 catalog 改。" },
+    "kiro-claude-sonnet-5": { "max_input_tokens": 1000000, "max_output_tokens": 64000, "source": "kiro_catalog" },
+    "kiro-claude-sonnet-4-6": { "max_input_tokens": 1000000, "max_output_tokens": 64000, "source": "kiro_catalog" },
+    "kiro-claude-sonnet-4-5": { "max_input_tokens": 200000, "max_output_tokens": 64000, "source": "kiro_catalog" },
+    "kiro-claude-haiku-4-5": { "max_input_tokens": 200000, "max_output_tokens": 64000, "source": "kiro_catalog" },
+    "kiro-claude-haiku-5-5": { "max_input_tokens": 1000000, "max_output_tokens": 128000, "source": "kiro_catalog", "fetched_at": "2026-10-25" },
+    "kiro-kimi-k3": { "max_input_tokens": 1000000, "max_output_tokens": 131072, "source": "kiro_catalog", "fetched_at": "2026-10-25" },
+    "kiro-deepseek-3.2": { "max_input_tokens": 164000, "max_output_tokens": 64000, "source": "kiro_catalog" },
+    "kiro-minimax-m2.5": { "max_input_tokens": 196000, "max_output_tokens": 64000, "source": "kiro_catalog" },
+    "kiro-minimax-m2.1": { "max_input_tokens": 196000, "max_output_tokens": 64000, "source": "kiro_catalog" },
+    "kiro-glm-5": { "max_input_tokens": 200000, "max_output_tokens": 64000, "source": "kiro_catalog" },
+    "kiro-qwen3-coder-next": { "max_input_tokens": 256000, "max_output_tokens": 64000, "source": "kiro_catalog" },
+    "kiro-auto": { "max_input_tokens": 1000000, "max_output_tokens": 64000, "source": "kiro_catalog", "_note": "key 写 `kiro-auto`（组名）而不是 `kiro-rs/auto`（那是 model_info.id）：审计只拿 slug=`anthropic/auto` 与 model_name=`kiro-auto` 去匹配，id 不参与。`auto` 由 kiro.rs 自选模型，窗口取目录里 auto 那条自己的声明。" }
   },
   "retired": {
     "_note": "已退役：实打返 `The '<name>' model is not supported when using Codex with a ChatGPT account.` 给死模型填上限是空操作，审计里单独分类，不要当成「缺配置」去补。",

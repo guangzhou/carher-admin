@@ -223,6 +223,13 @@ Object.assign(cfg, {
   inferenceGatewayAuthScheme: "x-api-key",
   inferenceCredentialKind: "static",
 });
+// 10-25 同事反馈:App 的 Code/Cowork 里 npm install 失败,设置页显示「严格沙箱 · 组织开启」,
+//    bypass 也没用,终端里正常。真因:这项不写 ⇒ App 按 failClosed 当成 [] ⇒ 给会话下发
+//    sandbox{enabled, allowUnsandboxedCommands:false, network.allowedDomains:[], allowManagedDomainsOnly}
+//    ⇒ 命令一个外网都连不上(npm E403 "user denied")。官方文档:含 "*" 且没设 allowedWorkspaceFolders
+//    时两种沙箱都不开(和终端里的 claude 一样)。只列 npm 源不够:沙箱还挡 ~/.npm 缓存写入(实测 EPERM)。
+//    用户/管理员自己在这条里写过非空列表 ⇒ 尊重,不覆盖。
+if (!Array.isArray(cfg.coworkEgressAllowedHosts) || !cfg.coworkEgressAllowedHosts.length) cfg.coworkEgressAllowedHosts = ["*"];
 fs.writeFileSync(cfgP, JSON.stringify(cfg, null, 2) + "\n");
 fs.writeFileSync(metaP, JSON.stringify(meta, null, 2) + "\n");
 '@

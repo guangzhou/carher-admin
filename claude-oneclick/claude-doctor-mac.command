@@ -56,7 +56,7 @@ if [ -f "$S" ]; then
   if command -v node >/dev/null 2>&1; then
     BASE=$(jget "$S" env.ANTHROPIC_BASE_URL); KEY=$(jget "$S" env.ANTHROPIC_API_KEY); TOK=$(jget "$S" env.ANTHROPIC_AUTH_TOKEN)
     DISC=$(jget "$S" env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY); OFF=$(jget "$S" env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)
-    MODEL=$(jget "$S" model); NPICK=$(jget "$S" modelPicker.options | grep -o '"model"' | wc -l | tr -d ' ')
+    MODEL=$(jget "$S" model); HAIKU=$(jget "$S" env.ANTHROPIC_DEFAULT_HAIKU_MODEL); NPICK=$(jget "$S" modelPicker.options | grep -o '"model"' | wc -l | tr -d ' ')
     case "$BASE$KEY" in *"<JSON坏了>"*) red "settings.json 不是合法 JSON:把它发给运维,或删掉后重新跑 claude-mac.command";; esac
     P "  ANTHROPIC_BASE_URL = ${BASE:-<没写>}"
     P "  ANTHROPIC_API_KEY  : $(keyfp "$KEY")"
@@ -107,6 +107,10 @@ if [ "$(uname -s)" = Darwin ] && [ -d "$APP" ]; then
       P "App 网关配置 : provider=$PV  base=$GB  key: $(keyfp "$GK")"
       [ "$PV" = gateway ] && [ "$GB" = "$WANT_BASE" ] || red "桌面 App 没指向公司网关:完全退出 App,重新跑一次 claude-mac.command"
       [ -n "$KEY" ] && [ -n "$GK" ] && [ "$KEY" != "$GK" ] && red "命令行和桌面 App 用的不是同一把 key:重新跑一次 claude-mac.command"
+      # 10-25:这项没写 ⇒ App 给 Code/Cowork 会话开「严格沙箱」且一个外网都不放 ⇒ npm install 失败(终端正常)
+      EG=$(jget "$CF" coworkEgressAllowedHosts)
+      P "App 外网放行 : ${EG:-(没设 ⇒ 严格沙箱,命令连不上外网)}"
+      case "$EG" in *'"*"'*) :;; *) red "桌面 App 里跑命令连不上外网(npm install 会失败,设置页显示严格沙箱):完全退出 App,重新跑一次 claude-mac.command";; esac
     else
       P "App 网关配置 : _meta.json 指向的配置不存在"; red "桌面 App 配置缺了:重新跑一次 claude-mac.command"
     fi
@@ -138,9 +142,11 @@ elif [ "$(uname -s)" = Darwin ]; then
 fi
 
 P ""; P "--- 4) 网络 ---"
+PX=""
 for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy; do
-  eval "pv=\${$v:-}"; [ -n "$pv" ] && P "代理变量 $v = $pv" && yel "终端里设了代理 $v:连公司网关不需要代理,先关掉 VPN/代理再试"
+  eval "pv=\${$v:-}"; [ -n "$pv" ] && P "代理变量 ${v} = ${pv}" && PX="${PX} ${v}"
 done
+[ -n "$PX" ] && yel "终端里设了代理(${PX# }):网关通就不用管;连不上或很慢时先关掉 VPN/代理再试"
 if [ "$(uname -s)" = Darwin ] && scutil --proxy 2>/dev/null | grep -qE 'HTTPSEnable : 1|ProxyAutoConfigEnable : 1'; then
   P "系统代理      : 开着"; yel "系统代理/VPN 开着:连不上或很慢时先关掉再试"
 fi
@@ -164,9 +170,16 @@ else
     200) :;;
     *) red "拉模型列表失败(HTTP $CODE):把这份报告发给运维";;
   esac
-  M="${MODEL:-claude-opus-5-5}"
+  # opus / sonnet / haiku 是 Claude Code 的简称,发出去前会换成真名 ⇒ 实打要用真名(10-19 拿 sonnet 直打 403 是误报)
+  M="${MODEL:-claude-opus-5-5}"; M="${M%%\[*}"
+  HK="${HAIKU:-claude-haiku-5-5}"
+  case "$M" in opus|default) M=claude-opus-5-5;; sonnet) M=claude-sonnet-5-5;; haiku) M="$HK";; esac
   if [ "$CODE" = 200 ]; then
-    printf '%s' "$BODY" | grep -q "\"$M\"" && P "  $M : 已开通" || { P "  $M : 没开通"; yel "这把 key 没开通 $M:用 /model 换一个,或找运维开通"; }
+    printf '%s' "$BODY" | grep -q "\"$M\"" && P "  $M : 已开通" || { P "  $M : 没开通"; yel "这把 key 没开通 ${M}:用 /model 换一个,或找运维开通"; }
+    # 后台小任务(起标题、子任务)用 haiku。Claude Code 2.1.30x 默认要 claude-haiku-5-5;key 没开通 ⇒ 时不时报错
+    if printf '%s' "$BODY" | grep -q "\"$HK\""; then P "  后台小任务模型 ${HK} : 已开通"
+    else P "  后台小任务模型 ${HK} : 没开通${HAIKU:-(Claude Code 默认值)}"
+      red "后台小任务用的 ${HK} 你的 key 没有 ⇒ 时不时报错:下载最新的 claude-mac.command 重跑一次(会改成你 key 里有的 haiku)"; fi
     R=$(curl -s -w '\n%{http_code} %{time_total}s' --max-time 60 -H "x-api-key: $KEY" -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' \
       "$GW/v1/messages" -d "{\"model\":\"$M\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with only: OK\"}]}" 2>/dev/null)
     RC=$(printf '%s' "$R" | tail -n1); RB=$(printf '%s' "$R" | sed '$d')

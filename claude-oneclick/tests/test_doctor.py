@@ -181,3 +181,11 @@ def test_image_skill_installed_and_idempotent(tmp_path):
     tool = tmp_path / ".claude" / "carher" / "carher_image.js"
     assert tool.read_bytes() == (ROOT.parent / "codex-oneclick" / "src" / "carher_image.js").read_bytes()
     assert list((tmp_path / ".claude").glob("CLAUDE.md.bak-carher-*")), "改 CLAUDE.md 前要备份"
+
+
+def test_doctor_flags_unset_app_egress():
+    """10-25:App 配置没写 coworkEgressAllowedHosts ⇒ Code/Cowork 严格沙箱、命令连不上外网(npm 装不了)。
+    App 那一节测试里不跑(不碰真 App)⇒ 两边静态断言。"""
+    mac = DOC.read_text(encoding="utf-8")
+    for src in (mac, PS):
+        assert "coworkEgressAllowedHosts" in src and "npm install 会失败" in src

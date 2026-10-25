@@ -117,6 +117,10 @@ if ($pkg -or $asar) {
     P "App 网关配置 : provider=$($cf.inferenceProvider)  base=$($cf.inferenceGatewayBaseUrl)  key: $(KeyFp ([string]$cf.inferenceGatewayApiKey))"
     if ($cf.inferenceProvider -ne 'gateway' -or $cf.inferenceGatewayBaseUrl -ne $wantBase) { Red "桌面 App 没指向公司网关:完全退出 App,重新双击 claude-windows.bat" }
     if ($key -and $cf.inferenceGatewayApiKey -and $key -ne $cf.inferenceGatewayApiKey) { Red "命令行和桌面 App 用的不是同一把 key:重新双击 claude-windows.bat" }
+    # 10-25:这项没写 ⇒ App 给 Code/Cowork 会话开「严格沙箱」且一个外网都不放 ⇒ npm install 失败(终端正常)
+    $eg = @($cf.coworkEgressAllowedHosts)
+    P "App 外网放行 : $(if ($cf.coworkEgressAllowedHosts) { $eg -join ',' } else { '(没设 ⇒ 严格沙箱,命令连不上外网)' })"
+    if (-not ($eg -contains '*')) { Red "桌面 App 里跑命令连不上外网(npm install 会失败,设置页显示严格沙箱):完全退出 App,重新双击 claude-windows.bat" }
   } else { P "App 网关配置 : 没有 ($lib)"; Red "桌面 App 没配置过:完全退出 App,重新双击 claude-windows.bat" }
   if ($asar) {
     $pin = ''
@@ -180,7 +184,7 @@ if (-not $key) { P "(没有 key,跳过)" } else {
   switch ($mm) { 'opus' { $mm = 'claude-opus-5-5' } 'sonnet' { $mm = 'claude-sonnet-5-5' } 'haiku' { $mm = $hk } 'default' { $mm = 'claude-opus-5-5' } }
   if ($m.code -eq 200) {
     if ($ids -contains $mm) { P "  $mm : 已开通" } else { P "  $mm : 没开通"; Yel "这把 key 没开通 ${mm}:用 /model 换一个,或找运维开通" }
-    # 后台小任务(起标题、子任务)用 haiku。Claude Code 2.1.30x 默认要 claude-haiku-5-5,网关没有 ⇒ 时不时报错
+    # 后台小任务(起标题、子任务)用 haiku。Claude Code 2.1.30x 默认要 claude-haiku-5-5;key 没开通 ⇒ 时不时报错
     if ($ids -contains $hk) { P "  后台小任务模型 ${hk} : 已开通" }
     else { P "  后台小任务模型 ${hk} : 没开通$(if (-not $haiku) { '(Claude Code 默认值)' })"; Red "后台小任务用的 ${hk} 你的 key 没有 ⇒ 时不时报错:下载最新的 claude-windows.bat 重跑一次(会改成你 key 里有的 haiku)" }
     $r = Http "$wantBase/v1/messages" $h ('{"model":"' + $mm + '","max_tokens":64,"messages":[{"role":"user","content":"Reply with only: OK"}]}')

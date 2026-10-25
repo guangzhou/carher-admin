@@ -295,3 +295,17 @@ def test_refresh_points_haiku_to_one_the_key_has(tmp_path):
     s = {"env": dict(base["env"], ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-haiku-4-5")}
     rc, out, d = _refresh(s, "deepseek-v4.1-flash", tmp_path)
     assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in d["env"]
+
+
+def test_refresh_upgrades_our_old_haiku_to_newest(tmp_path):
+    """10-25 网关上了 claude-haiku-5-5:我们之前写进去的 claude-haiku-4-5 仍可用,但要升到最新;
+    数字按版本比(haiku-10 > haiku-5);用户指到非 haiku 的不动。"""
+    base = {"env": {"ANTHROPIC_API_KEY": "sk-FAKE", "ANTHROPIC_BASE_URL": "https://gw.example/pro",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5"}}
+    rc, out, d = _refresh(json.loads(json.dumps(base)), "claude-haiku-4-5\nclaude-haiku-5-5\nclaude-opus-5-5", tmp_path)
+    assert rc == 0 and d["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-haiku-5-5" and "claude-haiku-5-5" in out
+    rc, out, d = _refresh(json.loads(json.dumps(base)), "claude-haiku-5-5\nclaude-haiku-10-0", tmp_path)
+    assert d["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-haiku-10-0"
+    s = {"env": dict(base["env"], ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-sonnet-5-5")}
+    rc, out, d = _refresh(s, "claude-sonnet-5-5\nclaude-haiku-5-5", tmp_path)
+    assert d["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-sonnet-5-5"

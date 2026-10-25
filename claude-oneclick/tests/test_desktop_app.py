@@ -53,7 +53,33 @@ def test_fresh_install_shape():
             "inferenceGatewayApiKey": "sk-FAKEapp",
             "inferenceGatewayAuthScheme": "x-api-key",
             "inferenceCredentialKind": "static",
+            "coworkEgressAllowedHosts": ["*"],
         }
+
+
+def test_egress_unset_means_strict_sandbox_so_we_write_star():
+    """10-25 同事:App 里 npm install 失败、设置页「严格沙箱 · 组织开启」,终端正常。
+    受控对照(本机 claude 2.1.x,--managed-settings 喂 App 在 coworkEgressAllowedHosts 缺省时下发的那份):
+    allowedDomains=[] ⇒ npm E403 "user denied"、curl 000;不带沙箱 ⇒ 正常装上。⇒ 安装器写 ["*"]。"""
+    for js in (_mac_js(), _win_js()):
+        assert 'cfg.coworkEgressAllowedHosts = ["*"]' in js
+
+
+def test_user_egress_list_preserved():
+    """管理员/用户自己写过放行列表 ⇒ 尊重,不改成 *。空列表当没写。"""
+    with tempfile.TemporaryDirectory() as d:
+        lib = Path(d) / "configLibrary"
+        _run(_mac_js(), lib)
+        meta, cfg = _read(lib)
+        p = lib / (meta["appliedId"] + ".json")
+        cfg["coworkEgressAllowedHosts"] = ["registry.npmjs.org"]
+        p.write_text(json.dumps(cfg))
+        _run(_mac_js(), lib)
+        assert _read(lib)[1]["coworkEgressAllowedHosts"] == ["registry.npmjs.org"]
+        cfg["coworkEgressAllowedHosts"] = []
+        p.write_text(json.dumps(cfg))
+        _run(_mac_js(), lib)
+        assert _read(lib)[1]["coworkEgressAllowedHosts"] == ["*"]
 
 
 def test_rerun_is_idempotent_no_duplicate_entries():

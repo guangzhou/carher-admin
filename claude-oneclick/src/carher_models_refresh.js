@@ -44,12 +44,16 @@ function applyModels(d, ids) {
   }
   /* 10-19 sunqiang/linsen:Claude Code 2.1.30x 的 haiku 默认是 claude-haiku-5-5(后台起标题、子任务用),
      网关没有这个模型 ⇒ 后台请求一直 403。⇒ 指到这把 key 里真有的 haiku(按版本新→旧挑);
-     一个都没有就删掉这项(让 Claude Code 自己决定)。用户自己设的、且仍可用的不动。 */
+     一个都没有就删掉这项(让 Claude Code 自己决定)。用户自己设的、且仍可用的不动。
+     10-25 网关上了 claude-haiku-5-5:之前写进去的老 haiku(4-5)仍可用但不是最新 ⇒ 也升到最新;
+     用户指到非 haiku 的(比如 sonnet)仍不动。 */
   d.env = Object.assign({}, d.env || {});
-  const haikus = ids.filter((i) => /^claude-haiku-\d/.test(i)).sort().reverse();
+  const haikus = ids.filter((i) => /^claude-haiku-\d/.test(i))
+    .sort((a, b) => b.localeCompare(a, "en", { numeric: true }));
   const curH = d.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
   let haikuSet = null;
-  if (!(curH && ids.includes(curH))) {
+  const staleHaiku = curH && /^claude-haiku-\d/.test(curH) && haikus.length && curH !== haikus[0];
+  if (!(curH && ids.includes(curH)) || staleHaiku) {
     if (haikus.length) { d.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikus[0]; haikuSet = haikus[0]; }
     else delete d.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
   }
@@ -98,7 +102,7 @@ async function main() {
   if (r.removed.length) console.log(`删除 ${r.removed.length}:${r.removed.join(", ")}`);
   if (!r.added.length && !r.removed.length) console.log("菜单和上次一样,没有变化");
   if (r.modelReset) console.log(`你之前选的 ${r.modelReset} 已经没有权限,已改回默认模型`);
-  if (r.haikuSet) console.log(`后台小任务用的模型设为 ${r.haikuSet}(网关没有 claude-haiku-5-5)`);
+  if (r.haikuSet) console.log(`后台小任务用的模型设为 ${r.haikuSet}(你的 key 里最新的 haiku)`);
   console.log("新开一个 Claude Code 会话(或桌面 App 新开对话)后 /model 里就是新列表");
 }
 

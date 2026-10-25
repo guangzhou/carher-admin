@@ -75,6 +75,7 @@ if (Test-Path $s) {
     $base = [string]$e.ANTHROPIC_BASE_URL; $key = [string]$e.ANTHROPIC_API_KEY; $tok = [string]$e.ANTHROPIC_AUTH_TOKEN
     $disc = [string]$e.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY; $off = [string]$e.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
     $model = [string]$j.model
+    $haiku = [string]$e.ANTHROPIC_DEFAULT_HAIKU_MODEL
     $npick = 0; if ($j.modelPicker -and $j.modelPicker.options) { $npick = @($j.modelPicker.options).Count }
     P "  ANTHROPIC_BASE_URL = $(if ($base) { $base } else { '<没写>' })"
     P "  ANTHROPIC_API_KEY  : $(KeyFp $key)"
@@ -124,14 +125,24 @@ if ($pkg -or $asar) {
     P "App 网关配置 : provider=$($cf.inferenceProvider)  base=$($cf.inferenceGatewayBaseUrl)  key: $(KeyFp ([string]$cf.inferenceGatewayApiKey))"
     if ($cf.inferenceProvider -ne 'gateway' -or $cf.inferenceGatewayBaseUrl -ne $wantBase) { Red "桌面 App 没指向公司网关:完全退出 App,重新双击 claude-windows.bat" }
     if ($key -and $cf.inferenceGatewayApiKey -and $key -ne $cf.inferenceGatewayApiKey) { Red "命令行和桌面 App 用的不是同一把 key:重新双击 claude-windows.bat" }
+    # 10-25:这项没写 ⇒ App 给 Code/Cowork 会话开「严格沙箱」且一个外网都不放 ⇒ npm install 失败(终端正常)
+    $eg = @($cf.coworkEgressAllowedHosts)
+    P "App 外网放行 : $(if ($cf.coworkEgressAllowedHosts) { $eg -join ',' } else { '(没设 ⇒ 严格沙箱,命令连不上外网)' })"
+    if (-not ($eg -contains '*')) { Red "桌面 App 里跑命令连不上外网(npm install 会失败,设置页显示严格沙箱):完全退出 App,重新双击 claude-windows.bat" }
   } else { P "App 网关配置 : 没有 ($lib)"; Red "桌面 App 没配置过:完全退出 App,重新双击 claude-windows.bat" }
   if ($asar) {
     $pin = ''
     try { $txt = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($asar)); if ($txt -match '\{"version":"(\d+\.\d+\.\d+)","manifest"') { $pin = $matches[1] } } catch {}
     if ($pin) {
-      $d = Join-Path $ud "claude-code\$pin"
-      if ((Test-Path (Join-Path $d '.verified')) -and (Test-Path (Join-Path $d 'claude.exe'))) { P "App 组件     : Claude Code $pin 已就绪" }
-      else { P "App 组件     : Claude Code $pin 没准备好"; Red "桌面 App 需要的组件(Claude Code $pin)没准备好 ⇒ 发消息不回/很慢:完全退出 App,重新双击 claude-windows.bat" }
+      # MSIX 版 App 的本地数据可能被系统重定向到 Packages\Claude_*\LocalCache\Local 下 ⇒ 两处都找
+      $cands = @(Join-Path $ud "claude-code\$pin")
+      Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Packages') -Filter 'Claude_*' -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { $cands += (Join-Path $_.FullName "LocalCache\Local\Claude-3p\claude-code\$pin") }
+      $hitDir = $cands | Where-Object { (Test-Path (Join-Path $_ '.verified')) -and (Test-Path (Join-Path $_ 'claude.exe')) } | Select-Object -First 1
+      $anyExe = $cands | Where-Object { Test-Path (Join-Path $_ 'claude.exe') } | Select-Object -First 1
+      if ($hitDir) { P "App 组件     : Claude Code $pin 已就绪 ($hitDir)" }
+      elseif ($anyExe) { P "App 组件     : Claude Code $pin 有 claude.exe 但没有 .verified ($anyExe)"; Yel "桌面 App 组件可能没校验过:发消息不回时完全退出 App,重新双击 claude-windows.bat" }
+      else { P "App 组件     : Claude Code $pin 没找到 (查了:$($cands -join ' ; '))"; Yel "桌面 App 组件没找到:如果 App 能正常回消息就不用管(App 可能自己下好放在别处);发消息不回再完全退出 App,重新双击 claude-windows.bat" }
       $mir = Http "https://cc.auto-link.com.cn/ccdl/claude-code-releases/$pin/manifest.json" @{} $null
       P "公司镜像     : $pin → HTTP $($mir.code)"
       if ($mir.code -ne 200) { Red "公司镜像里还没有 App 要的 Claude Code $pin(App 刚自动升级过):把这份报告发给运维" }
@@ -150,10 +161,14 @@ if ($pkg -or $asar) {
 }
 
 P ""; P "--- 4) 网络 ---"
+# 🔴 10-19 sunqiang 报告:原来写 "设了代理 $v:…",PowerShell 把 `$v:连公司…` 当成驱动器作用域变量 ⇒
+#    整段被吞成「设了代理 ,先关掉…」,且 HTTPS/HTTP 各打一遍。⇒ ${v} + 合成一条。
+$px = @()
 foreach ($v in 'HTTPS_PROXY','HTTP_PROXY','ALL_PROXY') {
   $pv = [Environment]::GetEnvironmentVariable($v)
-  if ($pv) { P "代理变量 $v = $pv"; Yel "设了代理 $v:连公司网关不需要代理,先关掉 VPN/代理再试" }
+  if ($pv) { P "代理变量 ${v} = $pv"; $px += $v }
 }
+if ($px.Count) { Yel ("设了代理(" + ($px -join ' / ') + "):网关通就不用管;连不上或很慢时先关掉 VPN/代理再试") }
 try { $ie = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
   if ($ie.ProxyEnable -eq 1 -or $ie.AutoConfigURL) { P "系统代理      : 开着 ($($ie.ProxyServer)$($ie.AutoConfigURL))"; Yel "系统代理/VPN 开着:连不上或很慢时先关掉再试" } } catch {}
 $n = Http "$wantBase/v1/models" @{} $null
@@ -171,9 +186,15 @@ if (-not $key) { P "(没有 key,跳过)" } else {
   P "可用模型      : HTTP $($m.code),$($ids.Count) 个"
   if ($m.code -eq 401 -or $m.code -eq 403) { Red "key 无效(HTTP $($m.code)):去 key 表复制整格,重新双击 claude-windows.bat" }
   elseif ($m.code -ne 200) { Red "拉模型列表失败(HTTP $($m.code)):把这份报告发给运维" }
-  $mm = if ($model) { $model } else { 'claude-opus-5-5' }
+  # opus / sonnet / haiku 是 Claude Code 自己的简称,发出去前会换成真名 ⇒ 实打要用真名(10-19 sunqiang:拿 sonnet 直打 403 是误报)
+  $mm = if ($model) { $model -replace '\[[^\]]*\]$', '' } else { 'claude-opus-5-5' }
+  $hk = if ($haiku) { $haiku } else { 'claude-haiku-5-5' }
+  switch ($mm) { 'opus' { $mm = 'claude-opus-5-5' } 'sonnet' { $mm = 'claude-sonnet-5-5' } 'haiku' { $mm = $hk } 'default' { $mm = 'claude-opus-5-5' } }
   if ($m.code -eq 200) {
     if ($ids -contains $mm) { P "  $mm : 已开通" } else { P "  $mm : 没开通"; Yel "这把 key 没开通 ${mm}:用 /model 换一个,或找运维开通" }
+    # 后台小任务(起标题、子任务)用 haiku。Claude Code 2.1.30x 默认要 claude-haiku-5-5;key 没开通 ⇒ 时不时报错
+    if ($ids -contains $hk) { P "  后台小任务模型 ${hk} : 已开通" }
+    else { P "  后台小任务模型 ${hk} : 没开通$(if (-not $haiku) { '(Claude Code 默认值)' })"; Red "后台小任务用的 ${hk} 你的 key 没有 ⇒ 时不时报错:下载最新的 claude-windows.bat 重跑一次(会改成你 key 里有的 haiku)" }
     $r = Http "$wantBase/v1/messages" $h ('{"model":"' + $mm + '","max_tokens":64,"messages":[{"role":"user","content":"Reply with only: OK"}]}')
     $txt = ''; try { $txt = (@(($r.body | ConvertFrom-Json).content | ForEach-Object { $_.text }) -join '') } catch {}
     if ($txt.Length -gt 60) { $txt = $txt.Substring(0, 60) }

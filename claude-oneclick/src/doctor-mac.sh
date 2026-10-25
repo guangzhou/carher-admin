@@ -107,6 +107,10 @@ if [ "$(uname -s)" = Darwin ] && [ -d "$APP" ]; then
       P "App 网关配置 : provider=$PV  base=$GB  key: $(keyfp "$GK")"
       [ "$PV" = gateway ] && [ "$GB" = "$WANT_BASE" ] || red "桌面 App 没指向公司网关:完全退出 App,重新跑一次 claude-mac.command"
       [ -n "$KEY" ] && [ -n "$GK" ] && [ "$KEY" != "$GK" ] && red "命令行和桌面 App 用的不是同一把 key:重新跑一次 claude-mac.command"
+      # 10-25:这项没写 ⇒ App 给 Code/Cowork 会话开「严格沙箱」且一个外网都不放 ⇒ npm install 失败(终端正常)
+      EG=$(jget "$CF" coworkEgressAllowedHosts)
+      P "App 外网放行 : ${EG:-(没设 ⇒ 严格沙箱,命令连不上外网)}"
+      case "$EG" in *'"*"'*) :;; *) red "桌面 App 里跑命令连不上外网(npm install 会失败,设置页显示严格沙箱):完全退出 App,重新跑一次 claude-mac.command";; esac
     else
       P "App 网关配置 : _meta.json 指向的配置不存在"; red "桌面 App 配置缺了:重新跑一次 claude-mac.command"
     fi
@@ -172,7 +176,7 @@ else
   case "$M" in opus|default) M=claude-opus-5-5;; sonnet) M=claude-sonnet-5-5;; haiku) M="$HK";; esac
   if [ "$CODE" = 200 ]; then
     printf '%s' "$BODY" | grep -q "\"$M\"" && P "  $M : 已开通" || { P "  $M : 没开通"; yel "这把 key 没开通 ${M}:用 /model 换一个,或找运维开通"; }
-    # 后台小任务(起标题、子任务)用 haiku。Claude Code 2.1.30x 默认要 claude-haiku-5-5,网关没有 ⇒ 时不时报错
+    # 后台小任务(起标题、子任务)用 haiku。Claude Code 2.1.30x 默认要 claude-haiku-5-5;key 没开通 ⇒ 时不时报错
     if printf '%s' "$BODY" | grep -q "\"$HK\""; then P "  后台小任务模型 ${HK} : 已开通"
     else P "  后台小任务模型 ${HK} : 没开通${HAIKU:-(Claude Code 默认值)}"
       red "后台小任务用的 ${HK} 你的 key 没有 ⇒ 时不时报错:下载最新的 claude-mac.command 重跑一次(会改成你 key 里有的 haiku)"; fi

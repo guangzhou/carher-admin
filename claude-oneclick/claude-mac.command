@@ -165,10 +165,127 @@ if [ -f "$SETTINGS" ]; then
   cp "$SETTINGS" "$BK"; warn "↳ 已备份原有配置到:$BK"
 fi
 # 用 Node 合并 JSON(上面已保证有 Node,不依赖 python/jq)。key 走环境变量,不进命令行参数。
-# 网关模型清单(给 modelPicker 用);拿不到就跳过这一项,不影响别的
+# 网关模型清单(给 modelPicker 用);拿不到就跳过这一项,不影响别的。
+# 「刷模型」用的是同一份逻辑(carher_models_refresh.js),这里先落盘,合并时直接 require 它。
+mkdir -p "$CLAUDE_HOME/carher"
+cat > "$CLAUDE_HOME/carher/carher_models_refresh.js" <<'CARHER_JS_EOF'
+#!/usr/bin/env node
+/* 「刷模型」—— 按这把 key 重写 Claude Code 的模型菜单(2026-10-19)。
+
+   Claude Code 自己会做网关模型发现(CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1),但非 claude 的
+   网关模型要靠 settings.json 里的 modelPicker(behavesAs)才不报「isn't recognized」。那张表以前只在
+   安装时写一次 ⇒ 网关删掉的模型一直留在 /model 里(点了 403),新开通的进不来。
+   本脚本:读 settings.json 里的 key/地址 → GET /v1/models → 重写 modelPicker(旧的删、新的加)
+   → 删模型缓存 → 当前 model 已没权限就清掉(回到默认)→ haiku 默认指到 key 里真有的那个。安装器第 4 步和「刷模型」共用这一份。
+
+   只用 Node 自带模块(Node ≥ 18)。用法:
+     node carher_models_refresh.js                 # 拉网关并写入
+     CARHER_MODELS="a\nb" node carher_models_refresh.js   # 不出网,用给定列表(安装器/测试用)
+   拉不到列表就不动 settings.json(绝不拿空列表把菜单清空)。改前备份到 settings.json.bak-carher-refresh。 */
+"use strict";
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const CLAUDE_HOME = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+const SETTINGS = process.env.CARHER_SETTINGS || path.join(CLAUDE_HOME, "settings.json");
+const BEHAVES_AS = "claude-sonnet-5-5";
+
+// 进 modelPicker 的:非 claude(claude-* Claude Code 自己认)、非出图、非审查专用
+function pickerRows(ids) {
+  const seen = new Set();
+  return ids.filter((i) => typeof i === "string" && i && !seen.has(i) && seen.add(i))
+    .filter((i) => !/^claude-/.test(i) && !/image|imagine|video|music/.test(i) && i !== "codex-auto-review")
+    .map((i) => ({ model: i, label: i, behavesAs: BEHAVES_AS }));
+}
+
+/* 把网关列表并进 settings 对象。返回 {d, added, removed, modelReset}。纯函数,测试直接调。 */
+function applyModels(d, ids) {
+  const before = ((d.modelPicker && d.modelPicker.options) || []).map((o) => o && o.model).filter(Boolean);
+  const rows = pickerRows(ids);
+  const after = rows.map((r) => r.model);
+  if (rows.length) d.modelPicker = { ...(d.modelPicker || {}), options: rows };
+  else delete d.modelPicker;
+  // 当前钉着的 model 已不在网关里 ⇒ 每次新开窗口都报错。清掉 = 回到 Claude Code 默认模型。
+  // 只认「网关名」:上次菜单里的,或 claude-* 全名(`[1m]` 后缀先剥)。opus / sonnet 这类别名不动。
+  let modelReset = null;
+  if (typeof d.model === "string" && d.model) {
+    const bare = d.model.replace(/\[[^\]]*\]$/, "");
+    if ((before.includes(bare) || /^claude-/.test(bare)) && !ids.includes(bare)) { modelReset = d.model; delete d.model; }
+  }
+  /* 10-19 sunqiang/linsen:Claude Code 2.1.30x 的 haiku 默认是 claude-haiku-5-5(后台起标题、子任务用),
+     网关没有这个模型 ⇒ 后台请求一直 403。⇒ 指到这把 key 里真有的 haiku(按版本新→旧挑);
+     一个都没有就删掉这项(让 Claude Code 自己决定)。用户自己设的、且仍可用的不动。
+     10-25 网关上了 claude-haiku-5-5:之前写进去的老 haiku(4-5)仍可用但不是最新 ⇒ 也升到最新;
+     用户指到非 haiku 的(比如 sonnet)仍不动。 */
+  d.env = Object.assign({}, d.env || {});
+  const haikus = ids.filter((i) => /^claude-haiku-\d/.test(i))
+    .sort((a, b) => b.localeCompare(a, "en", { numeric: true }));
+  const curH = d.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+  let haikuSet = null;
+  const staleHaiku = curH && /^claude-haiku-\d/.test(curH) && haikus.length && curH !== haikus[0];
+  if (!(curH && ids.includes(curH)) || staleHaiku) {
+    if (haikus.length) { d.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikus[0]; haikuSet = haikus[0]; }
+    else delete d.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+  }
+  return {
+    d,
+    haikuSet,
+    added: after.filter((m) => !before.includes(m)),
+    removed: before.filter((m) => !after.includes(m)),
+    modelReset,
+  };
+}
+
+async function fetchIds(base, key) {
+  if (process.env.CARHER_MODELS != null) return process.env.CARHER_MODELS.split("\n").map((s) => s.trim()).filter(Boolean);
+  const r = await fetch(String(base).replace(/\/+$/, "") + "/v1/models", {
+    headers: { "x-api-key": key, "anthropic-version": "2023-06-01" }, signal: AbortSignal.timeout(30000),
+  });
+  if (r.status === 401 || r.status === 403) throw new Error(`key 无效或已停用(HTTP ${r.status})`);
+  if (!r.ok) throw new Error(`网关返回 HTTP ${r.status}`);
+  return ((await r.json()).data || []).map((m) => m && m.id).filter(Boolean);
+}
+
+async function main() {
+  let raw;
+  try { raw = fs.readFileSync(SETTINGS, "utf8").replace(/^﻿/, ""); }
+  catch (e) { throw new Error(`找不到 ${SETTINGS},先跑一键配置脚本`); }
+  const d = raw.trim() ? JSON.parse(raw) : {};
+  const env = d.env || {};
+  const key = process.env.CARHER_KEY || env.ANTHROPIC_API_KEY, base = process.env.CARHER_BASE || env.ANTHROPIC_BASE_URL;
+  if (!key || !base) throw new Error("settings.json 里没有 ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL,先跑一键配置脚本");
+  let ids;
+  try { ids = await fetchIds(base, key); }
+  catch (e) { throw new Error(`没拉到模型列表(${e.message}),菜单没动`); }
+  if (!ids.length) throw new Error("网关没返回任何模型,菜单没动");
+  const r = applyModels(d, ids);
+  const out = JSON.stringify(r.d, null, 2) + "\n";
+  if (out !== raw) {
+    if (raw.trim()) fs.writeFileSync(SETTINGS + ".bak-carher-refresh", raw, { mode: 0o600 });
+    fs.writeFileSync(SETTINGS, out, { mode: 0o600 });
+    try { fs.chmodSync(SETTINGS, 0o600); } catch (e) { /* Windows */ }
+  }
+  try { fs.unlinkSync(path.join(CLAUDE_HOME, "cache", "gateway-models.json")); } catch (e) { /* 没有就算了 */ }
+  const claude = ids.filter((i) => /^claude-/.test(i)).length;
+  console.log(`你的 key 能用 ${ids.length} 个模型(Claude ${claude} 个 + 其他 ${r.d.modelPicker ? r.d.modelPicker.options.length : 0} 个进 /model 菜单)`);
+  if (r.added.length) console.log(`新增 ${r.added.length}:${r.added.join(", ")}`);
+  if (r.removed.length) console.log(`删除 ${r.removed.length}:${r.removed.join(", ")}`);
+  if (!r.added.length && !r.removed.length) console.log("菜单和上次一样,没有变化");
+  if (r.modelReset) console.log(`你之前选的 ${r.modelReset} 已经没有权限,已改回默认模型`);
+  if (r.haikuSet) console.log(`后台小任务用的模型设为 ${r.haikuSet}(你的 key 里最新的 haiku)`);
+  console.log("新开一个 Claude Code 会话(或桌面 App 新开对话)后 /model 里就是新列表");
+}
+
+module.exports = { pickerRows, applyModels };
+
+if (require.main === module) {
+  main().catch((e) => { console.error("✗ " + e.message); process.exit(1); });
+}
+CARHER_JS_EOF
 CARHER_MODELS="$(curl -fsS --max-time 30 -H "x-api-key: $APIKEY" -H "anthropic-version: 2023-06-01" "$BASE_URL/v1/models" 2>/dev/null \
   | node -e "let b=\"\";process.stdin.on(\"data\",c=>b+=c).on(\"end\",()=>{try{console.log(JSON.parse(b).data.map(m=>m.id).join(\"\\n\"))}catch(e){}})" 2>/dev/null || true)"
-CARHER_MODELS="$CARHER_MODELS" CARHER_KEY="$APIKEY" CARHER_BASE="$BASE_URL" CARHER_SETTINGS="$SETTINGS" node -e '
+CARHER_REFRESH="$CLAUDE_HOME/carher/carher_models_refresh.js" CARHER_MODELS="$CARHER_MODELS" CARHER_KEY="$APIKEY" CARHER_BASE="$BASE_URL" CARHER_SETTINGS="$SETTINGS" node -e '
 const fs = require("fs");
 const p = process.env.CARHER_SETTINGS;
 let d = {};
@@ -194,10 +311,9 @@ const real = (n) => { const m = /^claude-router-([0-9a-f]+)$/.exec(n || ""); ret
 if (typeof d.model === "string") d.model = real(d.model);
 // 网关里非 claude 的模型(GPT/Grok/Kimi 等)Claude Code 不认识 ⇒ 每次新开窗口都打警告、上下文按 200k 算。
 // modelPicker 一行一个,behavesAs 指一个它认识的模型 ⇒ 不再警告,菜单里直接是真名。
+// 旧的删、新的加、选中的已没权限就回默认 —— 与「刷模型」同一份逻辑(carher_models_refresh.js)。
 const ids = (process.env.CARHER_MODELS || "").split("\n").filter(Boolean);
-const rows = ids.filter((i) => !/^claude-/.test(i) && !/image|imagine/.test(i) && i !== "codex-auto-review")
-  .map((i) => ({ model: i, label: i, behavesAs: "claude-sonnet-5-5" }));
-if (rows.length) d.modelPicker = { options: rows };
+if (ids.length) require(process.env.CARHER_REFRESH).applyModels(d, ids);
 fs.writeFileSync(p, JSON.stringify(d, null, 2) + "\n", { mode: 0o600 });
 fs.chmodSync(p, 0o600);
 ' || die "✗ 写配置失败"
@@ -238,6 +354,13 @@ Object.assign(cfg, {
   inferenceGatewayAuthScheme: "x-api-key",
   inferenceCredentialKind: "static",
 });
+// 10-25 同事反馈:App 的 Code/Cowork 里 npm install 失败,设置页显示「严格沙箱 · 组织开启」,
+//    bypass 也没用,终端里正常。真因:这项不写 ⇒ App 按 failClosed 当成 [] ⇒ 给会话下发
+//    sandbox{enabled, allowUnsandboxedCommands:false, network.allowedDomains:[], allowManagedDomainsOnly}
+//    ⇒ 命令一个外网都连不上(npm E403 "user denied")。官方文档:含 "*" 且没设 allowedWorkspaceFolders
+//    时两种沙箱都不开(和终端里的 claude 一样)。只列 npm 源不够:沙箱还挡 ~/.npm 缓存写入(实测 EPERM)。
+//    用户/管理员自己在这条里写过非空列表 ⇒ 尊重,不覆盖。
+if (!Array.isArray(cfg.coworkEgressAllowedHosts) || !cfg.coworkEgressAllowedHosts.length) cfg.coworkEgressAllowedHosts = ["*"];
 fs.writeFileSync(cfgP, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 }); fs.chmodSync(cfgP, 0o600);
 fs.writeFileSync(metaP, JSON.stringify(meta, null, 2) + "\n", { mode: 0o600 });
 ' && ok "✔ Claude 桌面 App 已配好(Code 标签页走同一个网关)" \
@@ -463,6 +586,39 @@ const blk=B+"\n## 画图\n\n用户要画图、生成图片、出图、做配图/
  +"- 约 30 秒出图;以命令最后打印的「已生成:…」路径为准告诉用户。\n- 不要向用户要 key。命令报错就把原文告诉用户,不要换别的方式硬画。\n"+E+"\n";
 fs.writeFileSync(p,(t?t+"\n\n":"")+blk);'
 ok "✔ 已开通画图(说「画一张…」即可)"
+
+# ── 4e. 「刷模型」(10-19):说这三个字就按 key 重拉 /model 菜单(旧的删、新的加)──
+mkdir -p "$CLAUDE_HOME/skills/carher-refresh-models"
+CARHER_NODE="$NODE_ABS" CARHER_TOOL="$CLAUDE_HOME/carher/carher_models_refresh.js" node -e '
+const fs=require("fs");let t=fs.readFileSync(0,"utf8");
+t=t.split("@@NODE@@").join(process.env.CARHER_NODE).split("@@TOOL@@").join(process.env.CARHER_TOOL);
+process.stdout.write(t);' > "$CLAUDE_HOME/skills/carher-refresh-models/SKILL.md" <<'CARHER_MD_EOF'
+---
+name: carher-refresh-models
+description: 用户说「刷模型」「更新模型」「刷新模型列表」,或说 /model 里的模型不对、少了、多了、点了没权限时用。按用户的 key 从公司网关重新拉模型列表,更新 Claude Code 的模型菜单(新开通的加上、没权限的删掉)。
+---
+
+# 刷模型
+
+直接运行下面这条命令,不要先问用户:
+
+```
+@@NODE@@ "@@TOOL@@"
+```
+
+- 把输出里「新增 / 删除 / 已改回默认模型」那几行原样告诉用户。
+- 提醒用户:新开一个 Claude Code 会话(桌面 App 新开对话)后,`/model` 里就是新列表。
+- 命令报错就把原文告诉用户,不要自己改 settings.json。
+CARHER_MD_EOF
+CARHER_MD="$CMD_MD" CARHER_LINE="\"$NODE_ABS\" \"$CLAUDE_HOME/carher/carher_models_refresh.js\"" node -e '
+const fs=require("fs"),p=process.env.CARHER_MD,B="<!-- CARHER-REFRESH-BEGIN -->",E="<!-- CARHER-REFRESH-END -->";
+let t="";try{t=fs.readFileSync(p,"utf8")}catch(e){}
+const i=t.indexOf(B),j=t.indexOf(E);if(i>=0&&j>i)t=t.slice(0,i)+t.slice(j+E.length);
+t=t.replace(/\n+$/,"");
+const blk=B+"\n## 刷模型\n\n用户说「刷模型」「更新模型」「刷新模型列表」,或说 /model 里的模型不对时,**直接运行这条命令,不要先问**:\n\n    "+process.env.CARHER_LINE+"\n\n"
+ +"- 把输出里「新增 / 删除 / 已改回默认模型」几行原样告诉用户,并提醒新开一个会话后 /model 里就是新列表。\n- 报错就把原文告诉用户,不要自己改 settings.json。\n"+E+"\n";
+fs.writeFileSync(p,(t?t+"\n\n":"")+blk);'
+ok "✔ 以后在 Claude Code 里说「刷模型」就能更新模型列表"
 
 # (会盖过配置的旧 export 在第 5 步测试之后统一处理:注释掉 + 备份,见下)
 echo

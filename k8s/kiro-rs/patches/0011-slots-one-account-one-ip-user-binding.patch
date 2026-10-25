@@ -962,9 +962,9 @@
                  {d}（{n}）
 --- a/admin-ui/src/components/credential-table.tsx
 +++ b/admin-ui/src/components/credential-table.tsx
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,230 @@
 +import { toast } from 'sonner'
-+import { MoreHorizontal, Wallet, BarChart3, RefreshCw, RotateCcw, Trash2, ChevronUp, ChevronDown } from 'lucide-react'
++import { MoreHorizontal, Wallet, BarChart3, RefreshCw, RotateCcw, Trash2, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react'
 +import { Badge } from '@/components/ui/badge'
 +import { Button } from '@/components/ui/button'
 +import { Checkbox } from '@/components/ui/checkbox'
@@ -1057,9 +1057,40 @@
 +    </DropdownMenu>
 +  )
 +}
++// 可排序的列。默认（key=null）= 原来的顺序：在槽 → 启用 → 停用，组内按槽号 / 最近使用
++export type SortKey = 'id' | 'email' | 'status' | 'tier' | 'used' | 'requests' | 'tokens' | 'lastUsed' | 'priority'
++export interface SortState { key: SortKey | null; dir: 'asc' | 'desc' }
++
++// 第一次点：数字/时间类先看最大的（倒序），文字类先 A→Z；再点反过来；第三次回默认
++const FIRST_DIR: Record<SortKey, 'asc' | 'desc'> = {
++  id: 'asc', email: 'asc', status: 'asc', tier: 'desc', used: 'desc', requests: 'desc', tokens: 'desc', lastUsed: 'desc', priority: 'asc',
++}
++export function nextSort(cur: SortState, key: SortKey): SortState {
++  if (cur.key !== key) return { key, dir: FIRST_DIR[key] }
++  if (cur.dir === FIRST_DIR[key]) return { key, dir: FIRST_DIR[key] === 'asc' ? 'desc' : 'asc' }
++  return { key: null, dir: 'asc' }
++}
++
++function SortTh({ label, k, sort, onSort, align = 'left', title }: {
++  label: string; k: SortKey; sort: SortState; onSort: (k: SortKey) => void; align?: 'left' | 'right' | 'center'; title?: string
++}) {
++  const on = sort.key === k
++  const Icon = !on ? ChevronsUpDown : sort.dir === 'asc' ? ChevronUp : ChevronDown
++  const justify = align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'
++  return (
++    <th className={`px-3 py-2.5 text-xs font-medium whitespace-nowrap text-${align}`}
++      aria-sort={on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
++      <button type="button" onClick={() => onSort(k)} title={title || `按${label}排序`}
++        className={`inline-flex w-full items-center gap-1 ${justify} rounded hover:text-foreground ${on ? 'text-foreground' : 'text-muted-foreground'}`}>
++        {label}
++        <Icon className={`h-3.5 w-3.5 ${on ? '' : 'opacity-40'}`} aria-hidden="true" />
++      </button>
++    </th>
++  )
++}
 +
 +export function CredentialTable({
-+  rows, today, balances, loadingBalance, selected, onToggle, onToggleAll, onOpen, onBalance, onUsage, onDelete,
++  rows, today, balances, loadingBalance, selected, onToggle, onToggleAll, onOpen, onBalance, onUsage, onDelete, sort, onSort,
 +}: {
 +  rows: CredentialStatusItem[]
 +  today: Record<string, TodayUsage>
@@ -1072,6 +1103,8 @@
 +  onBalance: (id: number) => void
 +  onUsage: (id: number) => void
 +  onDelete: (id: number) => void
++  sort: SortState
++  onSort: (k: SortKey) => void
 +}) {
 +  const setDisabled = useSetDisabled()
 +  const allOn = rows.length > 0 && rows.every((r) => selected.has(r.id))
@@ -1079,21 +1112,35 @@
 +    setDisabled.mutate({ id: c.id, disabled: !c.disabled }, {
 +      onSuccess: (r) => toast.success(r.message), onError: (e) => toast.error((e as Error).message),
 +    })
-+  const TH = 'px-3 py-2.5 text-left text-xs font-medium text-muted-foreground whitespace-nowrap'
 +  return (
 +    <div className="overflow-x-auto rounded-lg border bg-card">
 +      <table className="w-full text-sm">
 +        <thead className="border-b bg-muted/40">
 +          <tr>
 +            <th className="w-10 px-3 py-2.5"><Checkbox checked={allOn} onCheckedChange={(v) => onToggleAll(!!v)} aria-label="全选本页" /></th>
-+            <th className={TH}>账户</th>
-+            <th className={TH}>状态</th>
-+            <th className={TH}>等级</th>
-+            <th className={TH}>已用额度</th>
-+            <th className={`${TH} text-right`}>7 日请求</th>
-+            <th className={`${TH} text-right`}>7 日 token</th>
-+            <th className={TH}>最后使用</th>
-+            <th className={`${TH} text-center`}>优先级</th>
++            <th className="px-3 py-2.5 text-left text-xs font-medium whitespace-nowrap"
++              aria-sort={sort.key === 'id' || sort.key === 'email' ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
++              <div className="flex items-center gap-3">
++                {(['id', 'email'] as const).map(k => {
++                  const on = sort.key === k
++                  const Icon = !on ? ChevronsUpDown : sort.dir === 'asc' ? ChevronUp : ChevronDown
++                  return (
++                    <button key={k} type="button" onClick={() => onSort(k)} title={k === 'id' ? '按账户 ID 排序' : '按邮箱排序'}
++                      className={`inline-flex items-center gap-1 rounded hover:text-foreground ${on ? 'text-foreground' : 'text-muted-foreground'}`}>
++                      {k === 'id' ? '账户 ID' : '邮箱'}
++                      <Icon className={`h-3.5 w-3.5 ${on ? '' : 'opacity-40'}`} aria-hidden="true" />
++                    </button>
++                  )
++                })}
++              </div>
++            </th>
++            <SortTh label="状态" k="status" sort={sort} onSort={onSort} title="在槽 → 启用 → 停用" />
++            <SortTh label="等级" k="tier" sort={sort} onSort={onSort} />
++            <SortTh label="已用额度" k="used" sort={sort} onSort={onSort} title="按已用比例排序；没查过额度的排最后（先点「批量查额度」）" />
++            <SortTh label="7 日请求" k="requests" sort={sort} onSort={onSort} align="right" />
++            <SortTh label="7 日 token" k="tokens" sort={sort} onSort={onSort} align="right" />
++            <SortTh label="最后使用" k="lastUsed" sort={sort} onSort={onSort} />
++            <SortTh label="优先级" k="priority" sort={sort} onSort={onSort} align="center" />
 +            <th className="w-12 px-2" />
 +          </tr>
 +        </thead>
@@ -1329,7 +1376,7 @@
  import { Button } from '@/components/ui/button'
 -import { Badge } from '@/components/ui/badge'
 -import { CredentialCard } from '@/components/credential-card'
-+import { CredentialTable } from '@/components/credential-table'
++import { CredentialTable, nextSort, type SortKey, type SortState } from '@/components/credential-table'
 +import { CredentialDrawer } from '@/components/credential-drawer'
 +import { useQuery } from '@tanstack/react-query'
 +import { getUsageTotals } from '@/api/credentials'
@@ -1364,7 +1411,7 @@
    const [windowDialogOpen, setWindowDialogOpen] = useState(false)
    const [modeDialogOpen, setModeDialogOpen] = useState(false)
    const [addDialogOpen, setAddDialogOpen] = useState(false)
-@@ -43,10 +50,27 @@
+@@ -43,10 +50,28 @@
    const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
    const [batchRefreshing, setBatchRefreshing] = useState(false)
    const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
@@ -1375,6 +1422,7 @@
    const [currentPage, setCurrentPage] = useState(1)
    const [filters, setFilters] = useState<CredentialFilterState>(EMPTY_FILTERS)
 -  const itemsPerPage = 12
++  const [sort, setSort] = useState<SortState>({ key: null, dir: 'asc' })
 +  // 每页条数：10 / 100 / 1000（表头全选 = 全选本页，大页面方便批量操作）；记在本浏览器
 +  const PAGE_SIZES = [10, 100, 1000]
 +  const [itemsPerPage, setItemsPerPage] = useState<number>(() => {
@@ -1393,7 +1441,7 @@
    const [darkMode, setDarkMode] = useState(() => {
      if (typeof window !== 'undefined') {
        return document.documentElement.classList.contains('dark')
-@@ -72,7 +96,8 @@
+@@ -72,11 +97,43 @@
      const rank = (c: { isCurrent: boolean; disabled: boolean }) => (c.disabled ? 2 : c.isCurrent ? 0 : 1)
      const ta = lastUsedMs(a.lastUsedAt)
      const tb = lastUsedMs(b.lastUsedAt)
@@ -1403,7 +1451,43 @@
    })
  
    // 查询条件只过滤显示；批量操作仍按勾选的 ID 走，「清除已禁用」仍针对全部已禁用凭据
-@@ -146,11 +171,6 @@
+-  const filteredCredentials = filterCredentials(sortedCredentials, filters)
++  // 点表头排序：在分页之前排（排的是筛选后的全部，不只是本页）；相同值保持默认顺序
++  const sortValue = (c: (typeof sortedCredentials)[number], k: SortKey): number | string | null => {
++    const u = today[String(c.id)]
++    switch (k) {
++      case 'id': return c.id
++      case 'email': return (c.email || '').toLowerCase() || null
++      case 'status': return c.disabled ? 2 : c.isCurrent ? 0 : 1
++      case 'tier': {
++        const t = (balanceMap.get(c.id)?.subscriptionTitle || c.subscriptionTitle || '').toUpperCase()
++        const rank = ['KIRO FREE', 'KIRO STUDENT', 'KIRO PRO', 'KIRO PRO+', 'KIRO PRO MAX', 'KIRO POWER'].indexOf(t)
++        return t ? (rank >= 0 ? rank : 2.5) : null
++      }
++      case 'used': { const b = balanceMap.get(c.id); return b ? b.usagePercentage : null }
++      case 'requests': return u ? u.requests : 0
++      case 'tokens': return u ? u.inputTokens + u.outputTokens : 0
++      case 'lastUsed': { const t = lastUsedMs(c.lastUsedAt); return Number.isFinite(t) ? t : null }
++      case 'priority': return c.priority
++    }
++  }
++  const sortedForView = sort.key == null ? sortedCredentials : [...sortedCredentials].sort((a, b) => {
++    const va = sortValue(a, sort.key!), vb = sortValue(b, sort.key!)
++    if (va == null && vb == null) return 0
++    if (va == null) return 1 // 没数据的（没查过额度 / 从未使用）不管升降都排最后
++    if (vb == null) return -1
++    const r = typeof va === 'string' ? va.localeCompare(String(vb)) : (va as number) - (vb as number)
++    return sort.dir === 'asc' ? r : -r
++  })
++  const filteredCredentials = filterCredentials(sortedForView, filters)
++  const handleSort = (k: SortKey) => {
++    setSort(cur => nextSort(cur, k))
++    setCurrentPage(1)
++  }
+ 
+   // 计算分页
+   const totalPages = Math.ceil(filteredCredentials.length / itemsPerPage)
+@@ -146,11 +203,6 @@
      document.documentElement.classList.toggle('dark')
    }
  
@@ -1415,7 +1499,7 @@
    const handleRefresh = () => {
      refetch()
      toast.success('已刷新凭据列表')
-@@ -177,6 +197,35 @@
+@@ -177,6 +229,35 @@
      setSelectedIds(new Set())
    }
  
@@ -1451,7 +1535,7 @@
    // 批量删除（仅删除已禁用项）
    const handleBatchDelete = async () => {
      if (selectedIds.size === 0) {
-@@ -327,6 +376,47 @@
+@@ -327,6 +408,47 @@
      deselectAll()
    }
  
@@ -1499,7 +1583,7 @@
    // 一键清除所有已禁用凭据
    const handleClearAll = async () => {
      if (!data?.credentials || data.credentials.length === 0) {
-@@ -377,68 +467,44 @@
+@@ -377,68 +499,44 @@
    }
  
    // 查询当前页凭据信息（逐个查询，避免瞬时并发）
@@ -1596,7 +1680,7 @@
    const handleBatchVerify = async () => {
      if (selectedIds.size === 0) {
        toast.error('请先选择要验活的凭据')
-@@ -562,169 +628,105 @@
+@@ -562,169 +660,105 @@
      <div className="min-h-screen bg-background">
        {/* 顶部导航 */}
        <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -1843,7 +1927,7 @@
              </div>
            </div>
            {data?.credentials.length === 0 ? (
-@@ -748,23 +750,23 @@
+@@ -748,23 +782,25 @@
                    </CardContent>
                  </Card>
                )}
@@ -1872,6 +1956,8 @@
 +                onBalance={fetchOneBalance}
 +                onUsage={setUsageId}
 +                onDelete={handleDeleteOne}
++                sort={sort}
++                onSort={handleSort}
 +              />
  
                {/* 分页控件 */}
@@ -1882,7 +1968,7 @@
                    <Button
                      variant="outline"
                      size="sm"
-@@ -780,10 +782,21 @@
+@@ -780,10 +816,21 @@
                      variant="outline"
                      size="sm"
                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
@@ -1905,7 +1991,7 @@
                  </div>
                )}
              </>
-@@ -791,13 +804,21 @@
+@@ -791,13 +838,21 @@
          </div>
        </main>
  
@@ -1932,7 +2018,7 @@
        <WindowSettingsDialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen} />
  
        <ModeSwitchDialog open={modeDialogOpen} onOpenChange={setModeDialogOpen} />
-@@ -806,6 +827,15 @@
+@@ -806,6 +861,15 @@
        <AddCredentialDialog
          open={addDialogOpen}
          onOpenChange={setAddDialogOpen}

@@ -23,7 +23,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 |---|---|
 | 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 Recreate，grace 300s），Admin `http://10.68.13.198:30891/admin`，adminApiKey 在实例自己的 `config.json`（和老实例不同）|
 | 老实例 | deploy `kiro-rs`（:30890，镜像 ctxwin）。只剩 `carher-hangzhou`、`claude-code-buyitian` 两把 key 主走它，另外是新实例的兜底 |
-| 镜像 | `kiro-rs:v2026.10.1-carher-slots29`（10-25 19:33，积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
+| 镜像 | `kiro-rs:v2026.10.1-carher-slots30`（10-25 20:53，账户表点表头排序（ID/邮箱/状态/等级/已用额度/7日请求/7日token/最后使用/优先级，分页前排）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
 | manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、secret `kiro-rs-slots-bootstrap`）|
 | 槽 | 4 个：`jp-172.235.204.67`（经 243 代理）、`sg-47.84.112.136`、`sg-47.84.85.100`、`sg-47.236.200.98`；出口配在 `config.json.slots[]`，全局 `proxyUrl=null` |
 | 并发参数 | 起步 16 / 最小 2 / 最大 24 / 自动调；排队超时 120s；「暂不接新人」倍数 1.5 |
@@ -97,6 +97,12 @@ python3 kiro-slots-switch-keys.py restore ~/kiro-deploy/backup/alias-XXX-*.json 
 每 10 分钟查一次所有**启用号**的剩余积分。消耗 = 相邻两次都在池里的**同一个号**的下降之和（加号/换号/月初重置让总额上跳的不算）。
 `还能撑 = 当前总剩余 ÷（近 24 小时总消耗 ÷ 实际跨度小时）`，不足 30 分钟或 3 个点不估，< 24h 标红。
 ⚠️ 这是**24 小时平均**：白天高峰每小时 1300~2900、夜里 100~500，按高峰算会短得多；「总剩余」含冷备号（真到冷备用完才算撑不住）。
+
+## 5.2 「这个号每次比别的号贵」先看它上下文多长
+
+Kiro 按 token 计 credit：10-25 实测 4 个能算的号**每百万输入 token 都是 ≈5 credit**（opus-5.5 为主），每次贵的号就是每次输入多。
+槽 3（sg-47.84.85.100）绑的 cursor-buyitian / claude-code-ruanyitai / sunlei 每次输入 47~67 万 token，其它槽 14~19 万 ⇒ 槽 3 上的号每次 2.2~2.4 credit，其它 0.8。
+判据：`credit ÷ 统计后输入 token`，**只用统计前=0 的号算**（已用额度含统计前的消耗，分母对不上）。号本身没问题，换号也一样贵。
 
 ## 6. 按号用量统计（Admin 抽屉 / 表格「7 日请求」）
 

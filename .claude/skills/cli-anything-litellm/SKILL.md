@@ -58,7 +58,7 @@ cli-anything-litellm db req 2d910055                       # 最常用：用户�
 
 1. **路由配置：yaml 写了的键盖 DB，yaml 没写的归 DB。** 现在 `fallbacks`(129)、`model_group_alias`、`num_retries`、`timeout`
    都归 DB。🔴 往 yaml 的 `router_settings` 加 `fallbacks` = 把 DB 那 129 条整个盖掉，rollout 全绿看不出来。
-2. **算请求量和花费以 `LiteLLM_DailyUserSpend` 为准**，别数 SpendLogs：明细表在丢行（见下），日表另走一条路不受影响。
+2. **算请求量和花费以 `LiteLLM_DailyUserSpend` 为准**，别数 SpendLogs：10-25 17:10 前的明细丢过行（见下，已修），日表另走一条路不受影响。
 3. **补丁装没装，看 `patches targets`**，别信 import 成功、文件 sha、CM 名：指纹守卫拒装时这三样全绿。
 
 ## 读源码得出的结论（10-20，按影响排序）
@@ -69,7 +69,7 @@ cli-anything-litellm db req 2d910055                       # 最常用：用户�
 
 | # | 问题 | 证据 | 现状 |
 |---|---|---|---|
-| 1 | **SpendLogs 每天少 1~2% 行 = 我们自己的两层清洗补丁**（详见下一节） | 实测 | 🔴 未修，要拍板 |
+| 1 | **SpendLogs 每天少 1~2% 行 = 我们自己的两层清洗补丁**（详见下一节） | 实测 | ✅ 10-25 已修上线（`87515f0`，prod+gray） |
 | 2 | **`/v1/responses` 流中途失败，出错的号不进冷却**：`streaming_output_backfill` 换掉了 `_handle_failure`，只跑 async 失败处理，冷却挂在 sync 那条上。它防的事件循环卡死，上游 1.105.1 已自己修了 | 实测 + 离线实验 | 🔴 未修。删那段之前先在 gray 用死腿做「流中失败 → 该腿被冷却」阳性对照 |
 | 3 | **`chatgpt_responses_normalize` 的 deployment hook 永不触发**：传进来的是 `CallTypes` 枚举，`str()` 得 `'CallTypes.aresponses'`，门控 `str(call_type) in (...)` 恒假。`deepseek_responses_adapt` 08-03 记过同一个坑并改了，这个文件没改 | 实测 | 🔴 未修。改成取 `.value` |
 | 4 | callback 上的 `async_pre_routing_hook` 是死代码：Router 只调自己的方法，不遍历 callbacks | 读码 | 别再往这个钩子里写东西 |
@@ -85,7 +85,12 @@ cli-anything-litellm db req 2d910055                       # 最常用：用户�
 **核过、不成立的**（别再当风险报）：30s 重载往 callbacks 里追加字符串（实测 40s 前后长度不变）·
 预算重置并发导致负 spend（实测只有 3 把 -5.7e-14 的浮点尘）· keepalive 让每个 chunk 丢 contextvar（实测生产 keepalive 关着）。
 
-## SpendLogs 少行 = 我们自己的清洗补丁（未修）
+## SpendLogs 少行 = 我们自己的清洗补丁（✅ 10-25 已修）
+
+**10-25 修法**（`87515f0`）：两层的 `_scrub_str` 改成按 JSON 词法从左往右扫的一条正则 —— `\\` 整体保留、成对代理转义（emoji）保留，只删 `\u0000` 和孤立代理转义。测试 `k8s/litellm-callbacks/tests/test_spendlog_scrub.py`（旧实现照抄做阳性对照必须红）。上线验收：同一条带字面 `\u0000` 的请求，上线前 prod 丢、gray 落；上线后 prod/gray 4/4 落；prod 4 pod 上线后 `dropping spend log row` = 0。**10-25 17:10 北京时间以前的明细仍然缺**（丢掉的行补不回来），对那段时间的账还是以日表为准。
+⚠️ `litellm-198-callback-update.py verify` 验 `sitecustomize.py` 恒报「sha 读不到」：它挂在 site-packages 不在 `/app/`，那是量具的假红，要自己 `sha256sum /app/.venv/lib/python3.13/site-packages/sitecustomize.py`。
+
+以下是 10-20 的原始定案：
 
 10-20 当天日表 236299 次 vs SpendLogs 232778 行，缺约 1.5%，集中在少数长会话 key。**计费不受影响**（日表另走一条路）。
 

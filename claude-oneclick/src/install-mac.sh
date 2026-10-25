@@ -361,6 +361,15 @@ const blk=B+"\n## 刷模型\n\n用户说「刷模型」「更新模型」「刷�
  +"- 把输出里「新增 / 删除 / 已改回默认模型」几行原样告诉用户,并提醒新开一个会话后 /model 里就是新列表。\n- 报错就把原文告诉用户,不要自己改 settings.json。\n"+E+"\n";
 fs.writeFileSync(p,(t?t+"\n\n":"")+blk);'
 ok "✔ 以后在 Claude Code 里说「刷模型」就能更新模型列表"
+# 10-25:每次开 Claude Code 后台自动刷一次菜单(SessionStart 异步 hook,不挡输入、不出声)
+#    ⇒ 管理员给 key 开/关模型,用户下次开就对了;「刷模型」留着当立刻刷的手动入口。
+CARHER_REFRESH="$CLAUDE_HOME/carher/carher_models_refresh.js" CARHER_NODE="$NODE_ABS" CARHER_SETTINGS="$SETTINGS" node -e '
+const fs = require("fs"), p = process.env.CARHER_SETTINGS;
+const d = JSON.parse(fs.readFileSync(p, "utf8").replace(/^\uFEFF/, ""));
+require(process.env.CARHER_REFRESH).hookEntry(d, process.env.CARHER_NODE, process.env.CARHER_REFRESH);
+fs.writeFileSync(p, JSON.stringify(d, null, 2) + "\n", { mode: 0o600 });' \
+  && ok "✔ 以后每次打开 Claude Code 会自动按 key 更新 /model 菜单" \
+  || warn "⚠ 自动刷新没挂上(说「刷模型」照样能手动刷)"
 
 # (会盖过配置的旧 export 在第 5 步测试之后统一处理:注释掉 + 备份,见下)
 echo

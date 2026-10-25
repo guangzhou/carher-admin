@@ -83,11 +83,17 @@ if (Test-Path $s) {
     P "  模型发现开关       = $(if ($disc) { $disc } else { '<没写>' })"
     P "  model              = $(if ($model) { $model } else { '<默认>' })"
     P "  modelPicker        = $npick 个"
+    # 10-25:菜单只放我们按 key 生成的那份(每个模型一次);每次开 Claude Code 后台自动刷
+    $rpl = ($j.modelPicker -and $j.modelPicker.replaceBuiltInOptions -eq $true)
+    $hook = ($j.hooks -and (($j.hooks.SessionStart | ConvertTo-Json -Depth 8 -Compress) -match 'carher_models_refresh'))
+    P "  菜单去重           = $(if ($rpl) { '是' } else { '否' })"
+    P "  开机自动刷菜单     = $(if ($hook) { '已挂' } else { '没挂' })"
+    if (-not $rpl) { Yel "/model 菜单里同一个模型会出现两次、还有画图模型:重新双击 claude-windows.bat" }
+    if (-not $hook) { Yel "没挂开机自动刷菜单(key 新开的模型要手动说「刷模型」):重新双击 claude-windows.bat" }
     if ($base -ne $wantBase) { Red "settings.json 没指向公司网关:重新双击 claude-windows.bat" }
     if (-not $key) { Red "settings.json 里没有 key:重新双击 claude-windows.bat" }
     if ($tok) { Red "同时有 AUTH_TOKEN 和 API_KEY(/model 里只剩几个 Claude):重新双击 claude-windows.bat" }
     if ($off) { Red "开了 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC(会关掉模型发现):重新双击 claude-windows.bat" }
-    if ($disc -ne '1') { Yel "没开模型发现(/model 里只有几个 Claude):重新双击 claude-windows.bat" }
     if ($model -like 'claude-router-*') { Red "model 存的是旧编码名 $model(新开窗口会报 isn't recognized):重新双击 claude-windows.bat" }
   }
 } else { P "settings.json : 没有"; Red "没有 $s ⇒ 一键配置没跑成功:重新双击 claude-windows.bat" }

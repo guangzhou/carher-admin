@@ -221,8 +221,9 @@ def test_merge_repairs_router_model_name_and_adds_picker_rows():
         out = json.loads(p.read_text())
     assert out["model"] == "gemini-4-argon"
     assert out["theme"] == "dark"
-    assert [r["model"] for r in out["modelPicker"]["options"]] == ["gpt-5.6-terra", "grok-4.7"]
-    assert all(r["behavesAs"] == "claude-sonnet-5-5" for r in out["modelPicker"]["options"])
+    rows = out["modelPicker"]["options"]
+    assert [r["model"] for r in rows] == ["claude-opus-5-5", "gpt-5.6-terra", "grok-4.7"]
+    assert all(r["behavesAs"] == "claude-sonnet-5-5" for r in rows if not r["model"].startswith("claude-"))
 
 
 REFRESH = Path(__file__).resolve().parents[1] / "src" / "carher_models_refresh.js"
@@ -247,8 +248,8 @@ def test_refresh_drops_revoked_and_adds_new(tmp_path):
          "modelPicker": {"options": [{"model": m, "label": m, "behavesAs": "claude-sonnet-5-5"} for m in ("grok-4.7", "deepseek-v4-flash")]}}
     rc, out, d = _refresh(s, "claude-opus-5-5\ngrok-4.7\nkimi-k3\ngpt-image-2\ngrok-imagine\nweb-gemini-video\ngemini-music", tmp_path)
     assert rc == 0, out
-    assert [o["model"] for o in d["modelPicker"]["options"]] == ["grok-4.7", "kimi-k3"]
-    assert "新增 1:kimi-k3" in out and "删除 1:deepseek-v4-flash" in out
+    assert [o["model"] for o in d["modelPicker"]["options"]] == ["claude-opus-5-5", "grok-4.7", "kimi-k3"]
+    assert "新增 2:claude-opus-5-5, kimi-k3" in out and "删除 1:deepseek-v4-flash" in out
     assert "model" not in d and "已改回默认模型" in out, "钉着已删的模型 ⇒ 每次新开窗口都报错"
     assert d["theme"] == "dark" and d["env"]["ANTHROPIC_API_KEY"] == "sk-FAKE"
     assert not (tmp_path / "cache" / "gateway-models.json").exists(), "模型缓存不删 ⇒ /model 还是旧的"
@@ -309,3 +310,71 @@ def test_refresh_upgrades_our_old_haiku_to_newest(tmp_path):
     s = {"env": dict(base["env"], ANTHROPIC_DEFAULT_HAIKU_MODEL="claude-sonnet-5-5")}
     rc, out, d = _refresh(s, "claude-sonnet-5-5\nclaude-haiku-5-5", tmp_path)
     assert d["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-sonnet-5-5"
+
+
+def test_menu_is_one_row_per_model_and_hides_builtin_and_discovery(tmp_path):
+    """10-25 用户:/model 里 74 个(10+64),同一个模型出现两次、还有画图模型和用不了的 Fable。
+    原因:我们的 26 行叠在 Claude Code 自带 + 网关发现上。⇒ 菜单只放这一份(replaceBuiltInOptions),
+    claude 也由我们按 key 列(同家族新→旧,不写 label 让 Claude Code 显示 Opus 5.5 这类名字)。"""
+    base = {"env": {"ANTHROPIC_API_KEY": "sk-FAKE", "ANTHROPIC_BASE_URL": "https://gw.example/pro"}}
+    ids = "\n".join(["claude-haiku-4-5", "claude-opus-4-6", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5",
+                     "gpt-5.6-terra", "grok-4.7", "gpt-image-2", "gemini-video", "codex-auto-review", "grok-4.7"])
+    rc, out, d = _refresh(json.loads(json.dumps(base)), ids, tmp_path)
+    mp = d["modelPicker"]
+    assert rc == 0 and mp["replaceBuiltInOptions"] is True
+    models = [o["model"] for o in mp["options"]]
+    assert models == ["claude-opus-5-5", "claude-opus-4-6", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-haiku-4-5",
+                      "gpt-5.6-terra", "grok-4.7"]
+    assert len(models) == len(set(models)), "同一个模型出现两次"
+    assert all("label" not in o and "behavesAs" not in o for o in mp["options"] if o["model"].startswith("claude-"))
+    assert "一共 7 个模型" in out
+
+
+HOOK_JS = Path(__file__).resolve().parents[1] / "src" / "carher_models_refresh.js"
+
+
+def _hook(d):
+    import json, subprocess
+    js = ("const m=require(process.argv[1]);const d=JSON.parse(process.argv[2]);"
+          "m.hookEntry(d,'/x/node','/y/carher/carher_models_refresh.js');console.log(JSON.stringify(d))")
+    return json.loads(subprocess.check_output(["node", "-e", js, str(HOOK_JS), json.dumps(d)], text=True))
+
+
+def test_session_start_hook_is_idempotent_and_keeps_user_hooks():
+    """10-25:每次开 Claude Code 后台自动刷菜单。重跑安装不能叠出第二条;用户自己的 hook 一条不动。"""
+    mine = {"type": "command", "command": "echo mine"}
+    d = {"hooks": {"SessionStart": [{"hooks": [mine]}], "Stop": [{"hooks": [mine]}]}}
+    d = _hook(_hook(d))
+    ss = d["hooks"]["SessionStart"]
+    ours = [h for g in ss for h in g["hooks"] if "carher_models_refresh.js" in json.dumps(h)]
+    assert len(ours) == 1, "重跑叠出了第二条"
+    assert ours[0] == {"type": "command", "command": "/x/node", "args": ["/y/carher/carher_models_refresh.js", "--quiet"],
+                       "async": True, "timeout": 60}, "必须后台(async)+ exec 形式(路径带空格不怕)"
+    assert {"hooks": [mine]} in ss and d["hooks"]["Stop"] == [{"hooks": [mine]}], "用户的 hook 被动了"
+    assert _hook({})["hooks"]["SessionStart"][0]["matcher"] == "startup"
+
+
+def test_quiet_mode_is_silent_and_never_fails(tmp_path):
+    """后台自动刷:不往屏幕/对话打字;拉不到(断网、key 失效)也退 0,只记日志,菜单不动。"""
+    import os, subprocess
+    s = {"env": {"ANTHROPIC_API_KEY": "sk-FAKE", "ANTHROPIC_BASE_URL": "http://127.0.0.1:9/pro"},
+         "modelPicker": {"options": [{"model": "grok-4.7"}]}}
+    p = tmp_path / "settings.json"; p.write_text(json.dumps(s))
+    (tmp_path / "carher").mkdir()
+    env = {k: v for k, v in os.environ.items() if k != "CARHER_MODELS"}
+    env["CLAUDE_CONFIG_DIR"] = str(tmp_path)
+    r = subprocess.run(["node", str(REFRESH), "--quiet"], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and r.stdout == "" and r.stderr == ""
+    assert json.loads(p.read_text()) == s, "拉不到还改了菜单"
+    assert "skip" in (tmp_path / "carher" / "refresh.log").read_text()
+    env["CARHER_MODELS"] = "claude-opus-5-5\ngrok-4.7"
+    r = subprocess.run(["node", str(REFRESH), "--quiet"], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and r.stdout == ""
+    assert [o["model"] for o in json.loads(p.read_text())["modelPicker"]["options"]] == ["claude-opus-5-5", "grok-4.7"]
+    assert "ok menu=2" in (tmp_path / "carher" / "refresh.log").read_text()
+
+
+def test_installers_register_auto_refresh_hook():
+    src = Path(__file__).resolve().parents[1] / "src"
+    for f, enc in (("install-mac.sh", "utf-8"), ("install-windows.ps1", "utf-8")):
+        assert ".hookEntry(d, process.env.CARHER_NODE, process.env.CARHER_REFRESH)" in (src / f).read_text(encoding=enc), f

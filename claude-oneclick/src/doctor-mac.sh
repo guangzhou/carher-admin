@@ -64,11 +64,16 @@ if [ -f "$S" ]; then
     P "  模型发现开关       = ${DISC:-<没写>}"
     P "  model              = ${MODEL:-<默认>}"
     P "  modelPicker        = ${NPICK} 个"
+    # 10-25:菜单只放我们按 key 生成的那份(每个模型一次);每次开 Claude Code 后台自动刷
+    RPL=$(jget "$S" modelPicker.replaceBuiltInOptions); HOOK=$(jget "$S" hooks.SessionStart | grep -c carher_models_refresh)
+    P "  菜单去重           = $([ "$RPL" = true ] && echo 是 || echo 否)"
+    P "  开机自动刷菜单     = $([ "${HOOK:-0}" -gt 0 ] && echo 已挂 || echo 没挂)"
+    [ "$RPL" = true ] || yel "/model 菜单里同一个模型会出现两次、还有画图模型:重新跑一次 claude-mac.command"
+    [ "${HOOK:-0}" -gt 0 ] || yel "没挂开机自动刷菜单(key 新开的模型要手动说「刷模型」):重新跑一次 claude-mac.command"
     [ "$BASE" = "$WANT_BASE" ] || red "settings.json 没指向公司网关(ANTHROPIC_BASE_URL=${BASE:-空}):重新跑一次 claude-mac.command"
     [ -n "$KEY" ] || red "settings.json 里没有 key:重新跑一次 claude-mac.command"
     [ -n "$TOK" ] && red "同时有 AUTH_TOKEN 和 API_KEY(/model 里只剩几个 Claude):重新跑一次 claude-mac.command"
     [ -n "$OFF" ] && red "开了 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC(会关掉模型发现):重新跑一次 claude-mac.command"
-    [ "$DISC" = "1" ] || yel "没开模型发现(/model 里只有几个 Claude):重新跑一次 claude-mac.command"
     case "$MODEL" in claude-router-*) red "model 存的是旧编码名 $MODEL(新开窗口会报 isn't recognized):重新跑一次 claude-mac.command";; esac
   else
     P "  (没有 node,读不了 JSON)"

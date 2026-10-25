@@ -353,6 +353,21 @@ if ($nodeAbs) {
   if ($old) { $blk = $old + "`n`n" + $blk }
   [IO.File]::WriteAllText($cmdMd, $blk, $noBom)
   Ok "√ 以后在 Claude Code 里说「刷模型」就能更新模型列表"
+  # 10-25:每次开 Claude Code 后台自动刷一次菜单(SessionStart 异步 hook,不挡输入、不出声),与 mac 同
+  $env:CARHER_REFRESH = $refreshPath; $env:CARHER_NODE = $nodeAbs; $env:CARHER_SETTINGS = $settings
+  $hookJs = @'
+const fs = require("fs"), p = process.env.CARHER_SETTINGS;
+const d = JSON.parse(fs.readFileSync(p, "utf8").replace(/^\uFEFF/, ""));
+require(process.env.CARHER_REFRESH).hookEntry(d, process.env.CARHER_NODE, process.env.CARHER_REFRESH);
+fs.writeFileSync(p, JSON.stringify(d, null, 2) + "\n");
+'@
+  $hjs = Join-Path $env:TEMP "carher-hook-$([guid]::NewGuid().ToString('N')).js"
+  [IO.File]::WriteAllText($hjs, $hookJs, $noBom)
+  try { & node $hjs; $hrc = $LASTEXITCODE } finally {
+    Remove-Item $hjs -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:CARHER_REFRESH, Env:CARHER_NODE, Env:CARHER_SETTINGS -ErrorAction SilentlyContinue
+  }
+  if ($hrc -eq 0) { Ok "√ 以后每次打开 Claude Code 会自动按 key 更新 /model 菜单" } else { Warn "! 自动刷新没挂上(说「刷模型」照样能手动刷)" }
 } else { Warn "! 没找到 Node,画图和「刷模型」没开通(命令行 claude 不受影响)" }
 
 # 会盖过 settings.json 的旧环境变量(mac 10-13 实跑踩到:ANTHROPIC_MODEL=anthropic.claude-opus-5 是

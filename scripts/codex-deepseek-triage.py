@@ -184,6 +184,11 @@ ERROR_SIGNATURES = [
      "同上：responses 调用要走原生 -responses 组"),
     ("No tool output found",
      "并行工具调用块被插入项劈开", "见 feedback_deepseek_pairs_tool_calls_by_adjacency"),
+    ("Input items array must not be empty",
+     "转出去的 input 是空的。进网关 body 大 ⇒ 我们 _trim_oversize_input 删光的（10-22：view_image 截图"
+     "几 MB 但 token ~1k，按字节被当超限）；body 小才是客户端",
+     "litellm-198-key-error-triage.py rid <id> 看 body 大小 + 前一轮工具；10-25 ea4da5c 起图片不计字节，"
+     "再出现=新形状，见 SKILL 根因 6"),
     ("unknown variant",
      "tool_choice / tool type 形状 DeepSeek 不认", "见 test_deepseek_tool_choice_shapes.py 形状表"),
     ("Unsupported custom tool",

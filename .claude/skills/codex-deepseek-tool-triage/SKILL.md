@@ -10,6 +10,8 @@ description: >-
   Use when: Codex/Cursor 打 deepseek-v4-flash-responses 出现 DSML 裸文本 /
   工具名对不上声明 / 工具不执行 / compaction Fatal / stream disconnected；
   or Codex 打任何 deepseek 名字报 400「API 异常 (req: xxx)」（`--rid` 反查原文）；
+  or `Input items array must not be empty` / 空 input / 看截图后报错 / view_image（根因 6）；
+  or 改完 deepseek callback 要上线 + 车道回归（`litellm-198-deepseek-lane-regress.py`）；
   or VS Code / Cursor（chat 接口）打 deepseek 带工具历史报 400 / `502 Request Failed: 400`、
   「新消息正常 try again 就挂」（根因 5，`--only sigs` 看全站谁中招）；
   or 排查任何「HTTP 200 但客户端行为不对」的网关问题需要方法论。
@@ -32,6 +34,7 @@ description: >-
 | `stream disconnected: Incomplete response, reason: max_output_tokens` | **客户端**发的 `max_output_tokens` 装不下摘要 | 客户端侧，见下节 |
 | 400「API 异常」，原文 `reasoning_content ... must be passed back` 或 `response_format type is unavailable`，**call_type=aresponses** | Codex 打的名字是 **mode:chat 组**，请求走 responses→chat bridge：转换时丢 reasoning、把 `text.format` 译成 chat 的 `response_format` | 建 `<名>-responses` 原生组 + `_RESPONSES_GROUP_REWRITE` 加映射（`e291064`，见「根因 4」）|
 | 同一句 `reasoning_content ... must be passed back`，**call_type=acompletion**（VS Code / Cursor 走 chat）；新会话正常、带工具历史的 try again 必挂 | OpenAI 形客户端回放历史**从不带** `reasoning_content`；DeepSeek 要求**每条**带 `tool_calls` 的 assistant 都有 | chat 路径每条补占位（`db186fd`，见「根因 5」）|
+| 400 `Input items array must not be empty`，落点 `openrouter-glm-5.3-flash`；进网关几 MB、出去 0 条；前一轮调了 `view_image` | 截图 base64 几 MB 但 token ~1k，`_trim_oversize_input` 按字节判超限删光 | 图片不计字节 + 不切调用块（`ea4da5c`，见「根因 6」）|
 
 ## 根因 4：responses 请求打进了 chat 组（2026-10-10）
 
@@ -86,6 +89,43 @@ key 从 `LiteLLM_ProxyModelTable` 密文行在 pod 内解密（`/model/info` 不
 
 ⚠️ 上线后再数失败，**先剔掉自己的探针**：SpendLogs 里 `api_key` 关联不到 key_alias（master key）且时间在新 pod
 `startTime` 之前的，是你自己上线前的复现请求，不是「修了还在挂」。
+
+## 根因 6：截图被按字节当超限，整单删成空 input（2026-10-22，10-25 修）
+
+**签名**：400 `Input items array must not be empty`，落点常是兜底链末腿 `openrouter-glm-5.3-flash`
+（看着像 OpenRouter 的锅，不是）。`--rid` 或 `litellm-198-key-error-triage.py rid <id>` 会打
+「进网关 body xMB / 出去 0 条 / 前一轮调的工具：view_image×N」。
+
+**链条**：Codex `view_image`（detail=original）把截图 base64 原样塞进 `function_call_output`
+→ 单张几 MB，**token 才 ~1k** → `_trim_oversize_input` 按**字节**判 >3MB → 从老删到只剩那条
+带图 output → 它的 call 已删 → `_repair_tool_pairing` 当孤儿删 → `[]`。
+
+**判别三步（按这个顺序，10-22 我跳步错了三次）**：
+1. `content-length`（`proxy_server_request.litellm_metadata.headers`）大、出去 0 条 ⇒ **我们删的**，不是客户端。
+   UA `Python/aiohttp` 是 ws-ingress（Codex WS 入口）转发的，不是用户脚本。
+2. 看**前一轮 `response.output` 调了什么工具** —— SpendLogs 文本列截到 2048 字符，量不出 item 多大，
+   但工具名是完整的。13/13 次前一轮都有 `view_image`。
+3. 判「太大」只认 **token**。直打 api.deepseek.com：1 张 3.5MB 图 in_tok=1033，20 张 44.8MB 仍 200；
+   纯文本 4MB=400 `maximum context length is 1048576 tokens`。⇒ 图片既不撞 413 也不撞上下文墙。
+
+**排除过的方向（别再走）**：
+- 「DeepSeek 10-17 升级 V4.1-Flash-1017」—— 官方 changelog 确有升级，但直打行为与升级无关。
+- 「补丁升级时被扔了」—— 三车道 CM 与 git 逐字节一致。
+- 「改成截断工具输出头尾」—— 截图不是文本，截了等于丢图；且文本截断也是继续瞒着 Codex。
+- 「回 `context_length_exceeded` 让 Codex 压缩」—— Codex 按 API 回报的 token 判压缩
+  （`core/src/session/context_window.rs`，窗口 90%）；图片 token 少，不压缩是**对的**。
+
+**修法**（`ea4da5c`）：`_budget_size` 把 `data:image/...` 每张按 4KB 计；切点不落在工具调用块中间；
+删不出东西就原样发（上游给可读报错，不再造空请求）。
+
+**上线前后对照**：`scripts/litellm-198-deepseek-lane-regress.py`（10 条）。上线前 prod 7/10（3 条截图
+400）、gray 新代码 10/10、上线后 prod 10/10。⚠️ deepseek 看完图常继续调工具 —— 「回答为空」不算失败。
+
+**为什么 10-19 才冒头**：未证实。10-10 起 Codex 直选 deepseek 走原生 `-responses` 组 + 一键目录模板
+`gpt-5.5` 带 `input_modalities=[text,image]`、`supports_image_detail_original=true`，可能相关，没验。
+
+**仍未处理**：纯文本真超 1M token 时，DeepSeek 回 400 `maximum context length`，但 `code` 不是
+`context_length_exceeded`，Codex 认不出 ⇒ 不会自动压缩。10-25 时没有真用户撞到，没做。
 
 ## 先排除：上游自己挂了（2026-10-15）
 
@@ -333,6 +373,10 @@ print(d(value="<密文>", key="api_key"))   # key= 传字段名,不是密钥
 - `k8s/litellm-callbacks/deepseek_id_prefix.py` — 出站：id 前缀 + SSE 层还原 custom
 - `k8s/litellm-callbacks/tests/test_deepseek_*.py` — 4 套回归测试
 - `scripts/codex-deepseek-triage.py` — 一键体检（`--rid` / `--only groups` 是 10-10 加的）
+- `scripts/litellm-198-deepseek-lane-regress.py` — 换 deepseek callback 前后的 10 条车道回归（截图/文本/工具/chat/对照）
+- 上线：`scripts/litellm-198-callback-update.py plan|apply <file> [--deploy litellm-proxy-gray]`
+  先 gray 再 prod；它只换这一个 key、门禁 git 对账、共享 CM 只改 data 不重启 acct pod。
+  🔴 10-10 起三车道有带外改动，`lane-callback-swap.sh` 会 STOP —— 换已在线的 callback 用本脚本
 - 提交：`2b14561`（hoist）、`090a1d7`（custom 还原）、`f6a038f`（compaction v2）、`456b317`（id 前缀，见下）、`e291064`（v4.1 改写）
 
 **关于 `456b317`**：它给 DeepSeek 的裸 UUID 补 `fc_`/`rs_` 前缀。当时以为是根因，

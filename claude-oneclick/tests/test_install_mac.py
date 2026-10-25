@@ -58,6 +58,13 @@ def test_merge_preserves_user_settings():
     assert d["env"]["ANTHROPIC_API_KEY"] == "sk-FAKEtestkey0000000000"
     assert d["env"]["ANTHROPIC_BASE_URL"] == "https://gw.example/pro"
     assert d["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+    assert d["env"]["ENABLE_TOOL_SEARCH"] == "true", "老版本走网关默认不按需加载 MCP 工具 ⇒ 大工具包会把上下文撑爆"
+
+
+def test_merge_keeps_user_tool_search_choice():
+    rc, out, err, _ = _merge(json.dumps({"env": {"ENABLE_TOOL_SEARCH": "false"}}))
+    assert rc == 0, err
+    assert json.loads(out)["env"]["ENABLE_TOOL_SEARCH"] == "false", "用户自己关的不许改回去"
 
 
 def test_merge_removes_auth_token_and_nonessential_switch():

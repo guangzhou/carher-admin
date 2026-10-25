@@ -355,6 +355,10 @@ delete d.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 d.env.ANTHROPIC_BASE_URL = process.env.CARHER_BASE;
 d.env.ANTHROPIC_API_KEY = process.env.CARHER_KEY;
 d.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1";
+// 10-25:MCP 工具按需加载(tool search)。Claude Code 2.1.304 起走网关才默认开,装机下限 2.1.257 ⇒ 老版本同事
+// 每句话都把所有 MCP 工具说明整份发出去(本机 rea 210 个工具约 1MB,叠上聊天记录超 100 万上限卡 25 分钟)。
+// 用户自己写过(包括 false)就不动。
+if (!d.env.ENABLE_TOOL_SEARCH) d.env.ENABLE_TOOL_SEARCH = "true";
 // 2026-10-14:旧版 Claude Code 把非 claude 的网关模型显示成 claude-router-<hex>,选了会存进 model;
 // 新版(2.1.29x 起)直接认真名,旧名每次新开窗口都报 Model isn t recognized ⇒ 还原成真名。
 const real = (n) => { const m = /^claude-router-([0-9a-f]+)$/.exec(n || ""); return m ? Buffer.from(m[1], "hex").toString("utf8") : n; };

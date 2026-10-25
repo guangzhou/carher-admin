@@ -94,6 +94,11 @@ cli-anything-litellm db req 2d910055                       # 最常用：用户�
 10-19~10-24 每天都丢 0.5~1.4%（明细保留 6 天，再早量不到）。每次「修 SpendLogs」修的都是别的环节（04-27 NUL、07-24 每 worker 生效、09-19 误判传输错误），
 同一个删法一直在。往后的风险是旧拷贝被拿去发版 ⇒ 三处指纹闸门（见 [[litellm-198-version-upgrade]] §6）。
 
+**每日对账告警（10-25 上线）**：198 root cron 每天 09:30（北京）跑 `scripts/litellm-198-spendlog-reconcile-alert.py`
+（装在 `/usr/local/sbin/`，日志 `/var/log/litellm-spendlog-reconcile.log`），对昨天 UTC：日表请求数 vs SpendLogs 行数，
+全库 >0.3% 或单 key >2% 且 ≥50 行 ⇒ 飞书卡片给刘国现；明细被清表 / 脚本出错也报；顺带核三车道 + 共享 CM 清洗代码是不是旧版
+（兜 `helm rollback` / 手工切旧 CM）。改阈值先 `--date <过去某天> --dry-run` 对过去几天量一遍。
+
 以下是 10-20 的原始定案：
 
 10-20 当天日表 236299 次 vs SpendLogs 232778 行，缺约 1.5%，集中在少数长会话 key。**计费不受影响**（日表另走一条路）。

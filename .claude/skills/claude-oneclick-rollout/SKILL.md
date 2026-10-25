@@ -36,12 +36,13 @@ claude-oneclick/
 (`printf '%s\n' "$KEY" | env -i HOME=$T PATH=/opt/homebrew/bin:/usr/bin:/bin TERM=xterm TMPDIR=$T bash claude-mac.command`,
 看到「✔ 桌面 App 组件就绪」「✔ 通了」)→ 换飞书附件(+media-insert → 下载回来比 sha → move_after → 删旧)→ 跑门禁。
 
-## 2. 桌面 App 的三个坑(都从 App 自身 asar 读出来,App 升级后要复核)
+## 2. 桌面 App 的四个坑(都从 App 自身 asar 读出来,App 升级后要复核)
 
 | 症状 | 真因 | 处置 |
 |---|---|---|
 | 「App unavailable / only in certain regions」 | App 不读 `~/.claude/settings.json`;它有独立三方模式 `<userData>-3p/configLibrary/`(`_meta.json` appliedId + `<uuid>.json` inferenceProvider=gateway…) | 安装器写这两个文件 |
 | 发消息很慢/一直不回,日志 `still initializing; queued message`、`downloads.claude.ai … Stalled` | App 每开会话先下载它**钉死版本**的 Claude Code;国内连不上 | 198 `/ccdl/claude-code-releases/<ver>/` 镜像 + 安装器按 `storageDir/<ver>/` + `.verified`(=manifest sha)预置 |
+| App 的 Code/Cowork 里 `npm install` 失败,设置页「严格沙箱 · 组织开启」,开 bypass 也没用,终端正常(10-25 mac 同事) | 3P 配置没写 `coworkEgressAllowedHosts` ⇒ App 按 failClosed 当 `[]` ⇒ 给会话下发 `sandbox{enabled,allowUnsandboxedCommands:false,network.allowedDomains:[],allowManagedDomainsOnly}`;对照:`claude -p --managed-settings '<那份>'` ⇒ npm E403 `user denied`、curl 000。只放 npm 源也不够(沙箱挡 `~/.npm` 写,EPERM) | 安装器写 `coworkEgressAllowedHosts:["*"]`(官方:含 `*` 且无 `allowedWorkspaceFolders` ⇒ 两种沙箱都不开);用户自己写过非空列表不动;doctor 报「App 外网放行」。改后要**完全退出 App 重开** |
 | 🔴 **App 自动升级后又卡**(10-14 本机:1.15962 → 1.46388.4,钉 2.1.260,镜像没有) | 每次升级都换钉死版本 | `ccdl-sync.sh` 每天跟官方最新 App;同事 App 是旧版就 `sudo carher-ccdl-sync.sh --cc <ver>` 补;本机用安装器同款逻辑预置后**完全退出重开** |
 
 读钉死版本:`app.asar` 里 `JSON.parse('{"version":…,"manifest":{…}}')` 的 `manifest.version`。

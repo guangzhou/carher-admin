@@ -31,9 +31,15 @@ description: 给同事的「Cursor · Codex · Claude Code 一键配置」单页
 - 校验:字节数对官方 Content-Length / 微软目录;msix 另比 SHA1;全过才切软链。下载回本机 `spctl -a -t open --context context:primary-signature` 应为 Notarized Developer ID。
 - `build_html.py` 门禁:App 链接回到官方直链(downloads.cursor.com / persistent.oaistatic.com / get.microsoft.com)即红;镜像链接逐个 HEAD 须 200 且 >10MB(离线构建设 `CX_SKIP_MIRROR_HEAD=1`)。
 - Codex 飞书文档原有 8-31 的 dmg/msix 附件已删(`apply.py` 的 RETIRED 集合)。
-- **Linux(10-26 加)**:Cursor `Cursor-linux-{x64,arm64}.AppImage`(官方只有 AppImage)· Codex `Codex-linux-{amd64,arm64}.deb` +
-  `Codex-linux-{x86_64,aarch64}.rpm`(官方固定 latest 名)· Claude `Claude-linux-{amd64,arm64}.deb`(官方只有 apt 仓库,Debian 系;
-  按 Packages 索引取最大 Version 并比 SHA256)。页面不加 Linux 切换,每个 App 下面一行 `Linux:` 链接。
+- **Linux(10-26)**:页面顶部「我用的是」= 另外两个系统的按钮,三选一(UA 认 Linux)。CSS:`mac-only` / `win-only` / `linux-only`,
+  **`unix-only` = Mac+Linux 共用**(终端命令、`-mac` 脚本、`~/` 路径、doctor)。只有 dmg / 拖进应用程序 / Cmd+Q / `~/Library` 才是 mac-only。
+  Linux 一键配置**就用 -mac 脚本**(三个都认 `uname -s` = Linux)。
+  安装包:Cursor `Cursor-linux-{amd64,arm64}.deb` + `{x86_64,aarch64}.rpm`(⛔不发 AppImage:每次解到随机 /tmp/.mount_*,
+  安装器找不到也打不进补丁;官方 API 没有 deb/rpm 平台名,用 AppImage 那条的 commit 拼 `production/<commit>/linux/x64/deb/amd64/deb/…`)·
+  Codex `Codex-linux-{amd64,arm64}.deb` + `{x86_64,aarch64}.rpm` · Claude `Claude-linux-{amd64,arm64}.deb`(只有 Debian 系)。
+- 🔴 Linux 真跑(188 Ubuntu 22.04,空 HOME)踩到并修了:① `curl | grep | head -n1` + pipefail ⇒ SIGPIPE 假失败「取不到 Node 版本列表(网络?)」
+  (mac 碰巧不炸);② Cursor 没打开过 ⇒ 没有 state.vscdb ⇒ @vscode/sqlite3 原生 abort(exit 134,try 接不住)⇒ openDb 先判文件。
+  验页面三种系统:headless Chrome 末尾注入「点 .os-pick + 展开 details」再截图(localStorage 注入在 file:// 下不生效)。
 
 ## 文件
 

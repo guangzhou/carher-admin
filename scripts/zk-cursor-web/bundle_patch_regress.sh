@@ -6,6 +6,8 @@
 #   sh bundle_patch_regress.sh --new-bundles /tmp/cx319   # 再加第①腿:新版 bundle 锚点全 exactly-1
 #   sh bundle_patch_regress.sh --new-app "/Volumes/Cursor Installer/Cursor.app"   # ①b:新版件C 4/4
 #   sh bundle_patch_regress.sh --fetch              # 自己去官方拉最新 dmg 抽 bundle,再跑全四腿
+#   sh bundle_patch_regress.sh --fetch-latest       # 同上,但拉**更新通道**的最新版(10-26:同事自动升到的 3.27.14
+#                                                   #   不在 stable 下载页上,stable 那时还是 3.27.12 ⇒ --fetch 量的不是他那版)
 #
 # 各腿(照 skill cursor-client-bundle-patch「新版本漂移修复流程」第 4 步):
 #   ① 新版两条 bundle:每个非 multi 锚点 hits=1(multi ≥1)——证明新正则认得出新版
@@ -35,14 +37,15 @@ APP="${CURSOR_APP:-/Applications/Cursor.app}"
 LIVE_RES="$APP/Contents/Resources/app"
 BAK="${CURSOR_BACKUP_DIR:-$HOME/.cursor-team-setup-backup}"
 TMP="$(mktemp -d)"
-NEWDIR=""; NEWAPP=""; FETCH=0; FAIL=0; SKIP=0
+NEWDIR=""; NEWAPP=""; FETCH=0; CHANNEL=stable; FAIL=0; SKIP=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --new-bundles) NEWDIR="$2"; shift 2 ;;
     --new-app) NEWAPP="$2"; shift 2 ;;
     --fetch) FETCH=1; shift ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    --fetch-latest) FETCH=1; CHANNEL=latest; shift ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "未知参数:$1" >&2; exit 64 ;;
   esac
 done
@@ -82,13 +85,22 @@ fi
 
 # ── 拉新版 dmg(可选):不用装,挂载后直接拷两条 workbench bundle ──
 if [ "$FETCH" = "1" ]; then
-  echo "--- fetch: 官方最新 stable(darwin-arm64)---"
-  META="$(curl -fsS https://api2.cursor.sh/updates/api/download/stable/darwin-arm64/cursor)" || { bad "取更新元数据失败"; META=""; }
+  echo "--- fetch: 官方最新 $CHANNEL(darwin-arm64)---"
+  META="$(curl -fsS https://api2.cursor.sh/updates/api/download/$CHANNEL/darwin-arm64/cursor)" || { bad "取更新元数据失败"; META=""; }
   URL="$(printf '%s' "$META" | sed -n 's/.*"downloadUrl":"\([^"]*\)".*/\1/p')"
   VER="$(printf '%s' "$META" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')"
   if [ -n "$URL" ]; then
     echo "  版本 $VER"
-    curl -fsSL "$URL" -o "$TMP/cursor.dmg" || bad "下载 dmg 失败"
+    # 10-26:300MB 一次下载 900s 超时只到 310/316MB,hdiutil 报「无法识别映像」像是包坏了 ⇒
+    #   按 Content-Length 续传到够数再挂,不够就判红(不许拿半截文件往下跑)
+    WANT="$(curl -fsSI "$URL" | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r')"
+    for _try in 1 2 3 4 5 6; do
+      HAVE="$(stat -f %z "$TMP/cursor.dmg" 2>/dev/null || stat -c %s "$TMP/cursor.dmg" 2>/dev/null || echo 0)"
+      [ -n "$WANT" ] && [ "$HAVE" = "$WANT" ] && break
+      curl -fsSL -C - --max-time 1200 "$URL" -o "$TMP/cursor.dmg" || true
+    done
+    HAVE="$(stat -f %z "$TMP/cursor.dmg" 2>/dev/null || stat -c %s "$TMP/cursor.dmg" 2>/dev/null || echo 0)"
+    [ -n "$WANT" ] && [ "$HAVE" = "$WANT" ] || bad "下载 dmg 不完整($HAVE / ${WANT:-?} 字节)"
     MNT="$TMP/mnt"; mkdir -p "$MNT"
     if hdiutil attach -nobrowse -readonly -mountpoint "$MNT" "$TMP/cursor.dmg" >/dev/null; then
       NEWDIR="$TMP/new-$VER"; mkdir -p "$NEWDIR"

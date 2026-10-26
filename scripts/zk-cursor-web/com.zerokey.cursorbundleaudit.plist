@@ -5,8 +5,8 @@
     <key>Label</key>
     <string>com.zerokey.cursorbundleaudit</string>
 
-    <!-- 每天问一次官方 stable 版本号(~1KB)。版本没变就静默退出,不下 dmg。
-         变了才跑 bundle_patch_regress.sh --fetch 的全四腿,绿红都告警。
+    <!-- 每天问一次官方 latest(更新通道)版本号(~1KB)。版本没变就静默退出,不下 dmg。
+         变了才跑 bundle_patch_regress.sh --fetch-latest 的全四腿,绿红都告警。
          没有这条:同事升级 Cursor → 补丁全掉 → 要等他反馈"模型不见了"才知道。 -->
     <key>ProgramArguments</key>
     <array>

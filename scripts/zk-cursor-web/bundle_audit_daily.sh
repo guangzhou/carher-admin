@@ -6,7 +6,7 @@
 # 这个巡检把发现时间从「同事反馈」提前到「官方放版本当天」。
 #
 # 逻辑(便宜 + 吵):
-#   1. 问官方 stable 元数据拿版本号。~1KB 请求,每天一次。
+#   1. 问官方 latest(更新通道)元数据拿版本号(10-26 前是 stable,会漏掉自动升级先到的版本)。~1KB 请求,每天一次。
 #   2. 和状态文件里「上次审过的版本」比。**没变就直接退出,不下 dmg、不出声。**
 #   3. 变了 → 跑 `bundle_patch_regress.sh --fetch`(它自己下 dmg 抽两条 bundle 跑全四腿)。
 #   4. 无论绿红都告警(绿=一条"新版已验过,可以重打包";红=贴失败项)。
@@ -24,6 +24,9 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE_DIR="${CX_AUDIT_STATE:-$HOME/.cursor-bundle-audit}"
 STATE="$STATE_DIR/last_audited_version"
+# 10-26:launchd 起的进程 PATH 只有 /usr/bin:/bin ⇒ 台架开头 `command -v node` 失败直接 exit 1,
+#   10-24 起每天都红、但告警正文里没有 FAIL 行(根本没跑到腿)⇒ 看着像「失败了 0 项」。补上常见 node 目录。
+PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.carher-node/bin:$PATH"; export PATH
 LOG_DIR="$STATE_DIR/logs"
 mkdir -p "$LOG_DIR"
 FORCE=0
@@ -59,7 +62,9 @@ PY
   esac
 }
 
-META="$(curl -fsS --max-time 30 https://api2.cursor.sh/updates/api/download/stable/darwin-arm64/cursor 2>/dev/null)" || META=""
+# 10-26:量**更新通道**(latest)而不是下载页(stable)。同事的 Cursor 是自动升级拿的版本 ——
+#   那天 stable=3.27.12、latest=3.27.14,同事已经在 3.27.14 上全红,只看 stable 的巡检什么都不会报。
+META="$(curl -fsS --max-time 30 https://api2.cursor.sh/updates/api/download/latest/darwin-arm64/cursor 2>/dev/null)" || META=""
 VER="$(printf '%s' "$META" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')"
 if [ -z "$VER" ]; then
   # 取不到版本要出声:静默失败会让巡检变成"永远绿"的装饰品
@@ -69,12 +74,12 @@ fi
 
 LAST="$(cat "$STATE" 2>/dev/null || echo '')"
 if [ "$FORCE" = "0" ] && [ "$VER" = "$LAST" ]; then
-  echo "$(date '+%F %T')  最新 stable=$VER,与上次审过的一致 → 不下 dmg,静默退出" >>"$LOG_DIR/quiet.log"
+  echo "$(date '+%F %T')  最新 latest=$VER,与上次审过的一致 → 不下 dmg,静默退出" >>"$LOG_DIR/quiet.log"
   exit 0
 fi
 
-echo "=== $(date '+%F %T')  官方最新 stable=$VER(上次审过=${LAST:-<无>})→ 跑四腿 ===" | tee "$LOG"
-sh "$HERE/bundle_patch_regress.sh" --fetch >>"$LOG" 2>&1
+echo "=== $(date '+%F %T')  官方最新 latest=$VER(上次审过=${LAST:-<无>})→ 跑四腿 ===" | tee "$LOG"
+sh "$HERE/bundle_patch_regress.sh" --fetch-latest >>"$LOG" 2>&1
 RC=$?
 
 # ⚠️ 两个踩过的坑,别"简化"回去:
@@ -83,6 +88,8 @@ RC=$?
 #  2. `grep -c` 没命中时会**打印 0 并且退出码 1** → `$(grep -c … || echo 0)` 会吐出两行 "0\n0",
 #     告警里出现 "FAIL=0\n0"。所以用 wc -l 数,它没命中也只给一个 0、退出码 0。
 SUMMARY="$(grep -E '^  (FAIL|SKIP)  ' "$LOG" | sed 's/^  //' | head -12)"
+# 台架在跑腿之前就退出(缺 node、下载失败…)时没有 FAIL 行 ⇒ 把日志最后几行当原因贴进告警,别发一条空的红
+[ "$RC" != "0" ] && [ -z "$SUMMARY" ] && SUMMARY="台架没跑到任何一腿就退出了(rc=$RC):$(tail -3 "$LOG" | tr '\n' ' ')"
 countline() { grep -c "$1" "$LOG" 2>/dev/null | head -1 | tr -d ' \n'; }
 PASSN="$(countline '^  PASS  ')"
 FAILN="$(countline '^  FAIL  ')"

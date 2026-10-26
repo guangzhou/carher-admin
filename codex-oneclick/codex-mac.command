@@ -51,9 +51,11 @@ ensure_node() {
   case "$(uname -m)" in x86_64|amd64) arch=x64 ;; arm64|aarch64) arch=arm64 ;; *) return 1 ;; esac
   if [ "$os" = darwin ] && [ "$arch" = x64 ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ]; then arch=arm64; fi
   say "→ 装一个 Node.js 到 $NODE_HOME(不需要管理员密码，不影响你原来的)"
-  ver="$(curl -fsSL --max-time 30 "$NODE_MIRROR/index.json" \
+  # 先整份拿下来再挑(管道里 head 提前关会让 curl 被 SIGPIPE,pipefail 下整条假失败;10-26 Ubuntu 实测)
+  local idx; idx="$(curl -fsSL --max-time 30 "$NODE_MIRROR/index.json")" || return 1
+  ver="$(printf '%s' "$idx" \
     | grep -oE '"version":"v'"$NODE_INSTALL_MAJOR"'\.[0-9]+\.[0-9]+"[^}]*"lts":"[A-Za-z]+"' \
-    | head -n1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+')" || return 1
+    | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sed -n 1p)"
   [ -n "$ver" ] || return 1
   pkg="node-$ver-$os-$arch"; tmp="$(mktemp -d)"
   curl -fSL --max-time 600 --progress-bar -o "$tmp/$pkg.$ext" "$NODE_MIRROR/$ver/$pkg.$ext" || { rm -rf "$tmp"; return 1; }
@@ -520,7 +522,8 @@ DEFAULT_CATALOG = CODEX_HOME / "carher-models.json"
 # use_responses_lite 是 OpenAI 专属工具形状，套给 grok 实测拿不到 shell，一个文件都建不出来。
 TEMPLATE_SLUG = "gpt-5.5"
 # 不进选择器：生图模型不能对话；审查专用模型 codex 自己会调
-SKIP = re.compile(r"image|^codex-auto-review$")
+SKIP = re.compile(r"image|imagine|video|music|^codex-auto-review$")  # 出图/视频/音乐生成名不能对话
+PREFERRED = "gpt-5.6-terra"  # 与一键脚本的默认模型一致
 
 
 LOG_FILE = CODEX_HOME / "carher-models-sync.log"
@@ -578,7 +581,17 @@ def fetch_input_limits(key: str, base_url: str) -> dict[str, int]:
     return limits
 
 
-def find_codex() -> str | None:
+def codex_candidates() -> list[str]:
+    """本机所有 codex 候选,按优先级。10-21 guozhenhua:先查到了老的 /opt/homebrew 版(没有 debug models)
+    ⇒ 同步失败。⇒ 一键装的 ~/.carher-npm-global 排第一,load_templates 失败就换下一个。与 Node 版一致。"""
+    out: list[str] = []
+
+    def add(c):
+        if c and Path(c).exists() and c not in out:
+            out.append(c)
+
+    for pre in (Path.home() / ".carher-npm-global" / "bin" / "codex",):
+        add(str(pre))
     appdata = os.environ.get("APPDATA")
     if appdata:  # Windows npm 装的：优先真二进制，绕开 codex.cmd 这层 cmd 转义
         npm = Path(appdata) / "npm" / "node_modules" / "@openai"
@@ -587,7 +600,7 @@ def find_codex() -> str | None:
         except OSError:
             hit = None
         if hit:
-            return str(hit)
+            add(str(hit))
     candidates = [
         shutil.which("codex"),
         "/Applications/Codex.app/Contents/Resources/codex",
@@ -599,8 +612,7 @@ def find_codex() -> str | None:
     if local:  # Windows App 常见位置
         candidates += [str(Path(local) / "Programs" / "codex" / "codex.exe")]
     for c in candidates:
-        if c and Path(c).exists():
-            return c
+        add(c)
     # Windows 只装了 Desktop App（msix）时，codex.exe 在 App 包目录里
     for root in (os.environ.get("ProgramFiles"), local):
         if not root:
@@ -611,8 +623,8 @@ def find_codex() -> str | None:
             except OSError:  # WindowsApps 目录可能没有列目录权限
                 hit = None
             if hit:
-                return str(hit)
-    return None
+                add(str(hit))
+    return out
 
 
 def run_codex(codex: str, *args: str) -> subprocess.CompletedProcess:
@@ -622,14 +634,25 @@ def run_codex(codex: str, *args: str) -> subprocess.CompletedProcess:
                           encoding="utf-8", errors="replace", timeout=60, env=env)
 
 
-def load_templates(codex: str | None, current: Path) -> list[dict]:
-    if codex:
-        r = run_codex(codex, "--bundled")
+def load_templates(cands: list[str], current: Path) -> tuple[str | None, list[dict]]:
+    """依次试候选,第一个能吐出自带目录的就用它(也用它校验新目录)。"""
+    why = []
+    for c in cands:
+        r = run_codex(c, "--bundled")
         if r.returncode == 0:
-            return json.loads(r.stdout)["models"]
-        log(f"codex --bundled 失败，改用现有目录当模板：{r.stderr.strip()[:200]}")
+            try:
+                return c, json.loads(r.stdout)["models"]
+            except (ValueError, KeyError):
+                why.append(f"{c}:输出不是 JSON")
+                continue
+        err = " ⏎ ".join(l.strip() for l in r.stderr.strip().splitlines())[:400]
+        why.append(f"[{c} debug models --bundled] rc={r.returncode} {err}")
+    if why:
+        log(f"这些 codex 拿不到自带目录(版本太老?):{' | '.join(why)}")
     if current.exists():
-        return json.loads(current.read_text(encoding="utf-8"))["models"]
+        return None, json.loads(current.read_text(encoding="utf-8"))["models"]
+    if cands:
+        raise RuntimeError("本机的 codex 都太老(没有 debug models),也没有现有目录可当模板:重跑一次一键配置装新版")
     raise RuntimeError("找不到 codex，也没有现有目录可当模板")
 
 
@@ -669,6 +692,30 @@ def build_catalog(ids: list[str], templates: list[dict], limits: dict[str, int])
     return {"models": out}
 
 
+def fix_default_model(text: str, shown: list[str], preferred: str, our_provider: str | None) -> dict | None:
+    """config 里钉着的 model 已不在这把 key 里 ⇒ 每一轮都 403。换成 preferred(在的话)或列表第一个。
+    只动顶层 `model = "…"`,且只在顶层 model_provider 是我们网关时才动。与 Node 版 fixDefaultModel 一致。"""
+    first = re.search(r"^\[", text, re.M)
+    head = text[: first.start()] if first else text
+    m = re.search(r'^(\s*model\s*=\s*)"([^"]*)"', head, re.M)
+    if not m or not shown or m.group(2) in shown:
+        return None
+    pv = re.search(r'^\s*model_provider\s*=\s*"([^"]+)"', head, re.M)
+    if not pv or pv.group(1) != our_provider:
+        return None
+    nxt = preferred if preferred in shown else shown[0]
+    return {"text": text[: m.start()] + m.group(1) + json.dumps(nxt) + text[m.end():], "from": m.group(2), "to": nxt}
+
+
+def our_provider_name(text: str, base: str) -> str | None:
+    """config.toml 里 base_url 等于这次同步所用网关的那个 [model_providers.X] 的名字 X。"""
+    for m in re.finditer(r"^\[model_providers\.([^\]\s]+)\]\s*$(.*?)(?=^\[|\Z)", text, re.M | re.S):
+        bu = re.search(r'^\s*base_url\s*=\s*"([^"]+)"', m.group(2), re.M)
+        if bu and bu.group(1).rstrip("/") == str(base).rstrip("/"):
+            return m.group(1)
+    return None
+
+
 def catalog_path_from_config(text: str) -> Path | None:
     m = re.search(r"""^\s*model_catalog_json\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')""", text, re.M)
     if not m:
@@ -699,8 +746,12 @@ def main() -> int:
 
     config_text = CONFIG.read_text(encoding="utf-8")
     target = catalog_path_from_config(config_text) or DEFAULT_CATALOG
-    codex = find_codex()
-    catalog = build_catalog(ids, load_templates(codex, target), fetch_input_limits(key, base_url))
+    codex, templates = load_templates(codex_candidates(), target)
+    catalog = build_catalog(ids, templates, fetch_input_limits(key, base_url))
+    try:
+        before = [m["slug"] for m in json.loads(target.read_text(encoding="utf-8"))["models"] if m.get("visibility") == "list"]
+    except (OSError, ValueError, KeyError, TypeError):
+        before = []
 
     fd, tmp_name = tempfile.mkstemp(prefix=".carher-models-", suffix=".json", dir=str(CODEX_HOME))
     tmp = Path(tmp_name)
@@ -725,6 +776,24 @@ def main() -> int:
 
     shown = [m["slug"] for m in catalog["models"] if m["visibility"] == "list"]
     log(f"同步完成：选择器 {len(shown)} 个模型（网关可见 {len(ids)} 个）-> {target}")
+    added = [x for x in shown if x not in before]
+    removed = [x for x in before if x not in shown]
+    if before and added:
+        log(f"新增 {len(added)}：{', '.join(added)}")
+    if before and removed:
+        log(f"删除 {len(removed)}：{', '.join(removed)}")
+    if before and not added and not removed:
+        log("和上次一样，没有变化")
+    ours = our_provider_name(config_text, base_url)
+    for f in (CONFIG, CODEX_HOME / "chatgpt.config.toml"):
+        try:
+            t = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        r = fix_default_model(t, shown, PREFERRED, ours)
+        if r:
+            f.write_text(r["text"], encoding="utf-8")
+            log(f"默认模型 {r['from']} 你的 key 已不能用，改成 {r['to']}（{f.name}）")
     log("Codex App 要完全退出重开才会看到新模型")
     return 0
 
@@ -769,7 +838,8 @@ const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const CONFIG = path.join(CODEX_HOME, "config.toml");
 const DEFAULT_CATALOG = path.join(CODEX_HOME, "carher-models.json");
 const TEMPLATE_SLUG = "gpt-5.5";   // 非 OpenAI 模型套 gpt-5.5 的元数据(普通函数调用),理由见 Python 版
-const SKIP = /image|^codex-auto-review$/;
+const SKIP = /image|imagine|video|music|^codex-auto-review$/;   // 出图/视频/音乐生成名不能对话
+const PREFERRED = "gpt-5.6-terra";   // 与一键脚本的默认模型一致
 const LOG_FILE = path.join(CODEX_HOME, "carher-models-sync.log");
 
 function pad(n) { return String(n).padStart(2, "0"); }
@@ -814,24 +884,29 @@ async function fetchInputLimits(key, base) {
   return limits;
 }
 
-/* 返回 [可执行文件, 前置参数]。npm 装的 codex 是 bin/codex.js,用当前 node 直接跑它:
-   🔴 Windows 上 spawn codex.cmd 不带 shell 会被 Node 拒(EINVAL),带 shell 又要过 cmd 的引号转义。 */
-function findCodex() {
-  if (process.env.CARHER_CODEX === "none") return null;   // 测试用
+/* 本机所有 codex 候选,按优先级:[可执行文件, 前置参数]。npm 装的 codex 是 bin/codex.js,用当前 node 直接跑它:
+   🔴 Windows 上 spawn codex.cmd 不带 shell 会被 Node 拒(EINVAL),带 shell 又要过 cmd 的引号转义。
+   🔴 10-21 guozhenhua:一键装的 0.163 在 ~/.carher-npm-global/lib,但原来先查 /opt/homebrew/lib ⇒ 抓到他以前
+      自己装的老 codex(没有 `debug models` 子命令)⇒ 模板拿不到 ⇒ 同步失败,下拉里只有自带 GPT。
+      ⇒ 一键装的那份排第一;调用失败就换下一个(loadTemplates)。 */
+function codexCandidates() {
+  if (process.env.CARHER_CODEX === "none") return [];   // 测试用
   const js = (prefix) => path.join(prefix, "node_modules", "@openai", "codex", "bin", "codex.js");
-  const prefixes = [path.join(os.homedir(), ".carher-npm-global")];
+  const out = [], seen = new Set();
+  const add = (c) => { const k = c[1][0] || c[0]; if (!seen.has(k)) { seen.add(k); out.push(c); } };
+  const prefixes = [path.join(os.homedir(), ".carher-npm-global", "lib"), path.join(os.homedir(), ".carher-npm-global")];
   if (process.env.APPDATA) prefixes.push(path.join(process.env.APPDATA, "npm"));
-  prefixes.push("/opt/homebrew/lib", "/usr/local/lib", path.join(os.homedir(), ".carher-npm-global", "lib"));
-  for (const p of prefixes) if (fs.existsSync(js(p))) return [process.execPath, [js(p)]];
+  prefixes.push(...(process.env.CARHER_CODEX_SYS_PREFIXES ? process.env.CARHER_CODEX_SYS_PREFIXES.split(path.delimiter) : ["/opt/homebrew/lib", "/usr/local/lib"]));   // 环境变量仅测试用
+  for (const p of prefixes) if (fs.existsSync(js(p))) add([process.execPath, [fs.realpathSync(js(p))]]);
   // PATH 里的 codex:posix 上多半是指向 codex.js 的软链
   const which = process.platform === "win32" ? null : cp.spawnSync("sh", ["-c", "command -v codex"], { encoding: "utf8" }).stdout.trim();
   if (which) {
     let real = which; try { real = fs.realpathSync(which); } catch (e) {}
-    return real.endsWith(".js") ? [process.execPath, [real]] : [real, []];
+    add(real.endsWith(".js") ? [process.execPath, [real]] : [real, []]);
   }
   for (const c of ["/Applications/Codex.app/Contents/Resources/codex", "/Applications/OpenAI Codex.app/Contents/Resources/codex"])
-    if (fs.existsSync(c)) return [c, []];
-  return null;
+    if (fs.existsSync(c)) add([c, []]);
+  return out;
 }
 
 function runCodex(codex, args) {
@@ -841,14 +916,22 @@ function runCodex(codex, args) {
   });
 }
 
-function loadTemplates(codex, current) {
-  if (codex) {
-    const r = runCodex(codex, ["--bundled"]);
-    if (r.status === 0) return JSON.parse(r.stdout).models;
-    log(`codex --bundled 失败，改用现有目录当模板：${String(r.stderr || r.error || "").trim().slice(0, 200)}`);
+/* 依次试候选,第一个能吐出自带目录的就用它(也用它校验新目录)。返回 {codex, models}。 */
+function loadTemplates(cands, current) {
+  const why = [];
+  for (const c of cands) {
+    const r = runCodex(c, ["--bundled"]);
+    if (r.status === 0) {
+      try { return { codex: c, models: JSON.parse(r.stdout).models }; } catch (e) { why.push(`${c[1][0] || c[0]}:输出不是 JSON`); continue; }
+    }
+    // 10-21 guozhenhua:只记第一行时日志里只剩 clap 的 usage 尾巴,看不出是哪个 codex、什么参数被拒 ⇒ 记全
+    const err = String(r.stderr || r.error || "").trim().replace(/\s*\n\s*/g, " ⏎ ").slice(0, 400);
+    why.push(`[${[c[0], ...c[1]].join(" ")} debug models --bundled] rc=${r.status} ${err}`);
   }
-  if (fs.existsSync(current)) return JSON.parse(fs.readFileSync(current, "utf8")).models;
-  throw new Error("找不到 codex，也没有现有目录可当模板");
+  if (why.length) log(`这些 codex 拿不到自带目录(版本太老?):${why.join(" | ")}`);
+  if (fs.existsSync(current)) return { codex: null, models: JSON.parse(fs.readFileSync(current, "utf8")).models };
+  throw new Error(cands.length ? "本机的 codex 都太老(没有 debug models),也没有现有目录可当模板:重跑一次 codex-mac.command 装新版"
+                               : "找不到 codex，也没有现有目录可当模板");
 }
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -883,6 +966,31 @@ function buildCatalog(ids, templates, limits) {
   return { models: out };
 }
 
+/* config 里钉着的 model 已不在这把 key 里 ⇒ 每一轮都 403。换成 PREFERRED(在的话)或列表第一个。
+   返回新文本;不用改返回 null。只动顶层 `model = "…"` 那一行(任何 [table] 之前)。 */
+function fixDefaultModel(text, shown, preferred, ourProvider) {
+  const first = /^\[/m.exec(text);
+  const head = first ? text.slice(0, first.index) : text;
+  const m = /^(\s*model\s*=\s*)"([^"]*)"/m.exec(head);
+  if (!m || !shown.length || shown.includes(m[2])) return null;
+  // 只在顶层 provider 是我们网关时才动:用户切到官方登录等别的 provider,他的 model 不归这把 key 管
+  const pv = /^\s*model_provider\s*=\s*"([^"]+)"/m.exec(head);
+  if (!pv || pv[1] !== ourProvider) return null;
+  const next = shown.includes(preferred) ? preferred : shown[0];
+  return { text: text.slice(0, m.index) + m[1] + JSON.stringify(next) + text.slice(m.index + m[0].length), from: m[2], to: next };
+}
+
+/* config.toml 里 base_url 等于这次同步所用网关的那个 [model_providers.X] 的名字 X(没有返回 null)。 */
+function ourProviderName(text, base) {
+  const re = /^\[model_providers\.([^\]\s]+)\]\s*$([\s\S]*?)(?=^\[|(?![\s\S]))/gm;
+  let m;
+  while ((m = re.exec(text))) {
+    const bu = /^\s*base_url\s*=\s*"([^"]+)"/m.exec(m[2]);
+    if (bu && bu[1].replace(/\/+$/, "") === String(base).replace(/\/+$/, "")) return m[1];
+  }
+  return null;
+}
+
 function catalogPathFromConfig(text) {
   const m = /^\s*model_catalog_json\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')/m.exec(text);
   if (!m) return null;
@@ -904,8 +1012,11 @@ async function main() {
   if (!ids.length) throw new Error("网关没返回任何模型，保持现有目录不变");
   const configText = fs.readFileSync(CONFIG, "utf8");
   const target = catalogPathFromConfig(configText) || DEFAULT_CATALOG;
-  const codex = findCodex();
-  const catalog = buildCatalog(ids, loadTemplates(codex, target), await fetchInputLimits(key, base));
+  const tpl = loadTemplates(codexCandidates(), target);
+  const codex = tpl.codex;
+  const catalog = buildCatalog(ids, tpl.models, await fetchInputLimits(key, base));
+  let before = [];
+  try { before = JSON.parse(fs.readFileSync(target, "utf8")).models.filter((m) => m.visibility === "list").map((m) => m.slug); } catch (e) {}
 
   const tmp = path.join(CODEX_HOME, `.carher-models-${process.pid}-${Date.now()}.json`);
   fs.writeFileSync(tmp, JSON.stringify(catalog, null, 1), "utf8");
@@ -925,11 +1036,21 @@ async function main() {
   }
   const shown = catalog.models.filter((m) => m.visibility === "list").map((m) => m.slug);
   log(`同步完成：选择器 ${shown.length} 个模型（网关可见 ${ids.length} 个）-> ${target}`);
+  const added = shown.filter((x) => !before.includes(x)), removed = before.filter((x) => !shown.includes(x));
+  if (before.length && added.length) log(`新增 ${added.length}：${added.join(", ")}`);
+  if (before.length && removed.length) log(`删除 ${removed.length}：${removed.join(", ")}`);
+  if (before.length && !added.length && !removed.length) log("和上次一样，没有变化");
+  const ours = ourProviderName(configText, base);
+  for (const f of [CONFIG, path.join(CODEX_HOME, "chatgpt.config.toml")]) {
+    let t; try { t = fs.readFileSync(f, "utf8"); } catch (e) { continue; }
+    const r = fixDefaultModel(t, shown, PREFERRED, ours);
+    if (r) { fs.writeFileSync(f, r.text, "utf8"); log(`默认模型 ${r.from} 你的 key 已不能用，改成 ${r.to}（${path.basename(f)}）`); }
+  }
   log("Codex App 要完全退出重开才会看到新模型");
   return 0;
 }
 
-module.exports = { buildCatalog, catalogPathFromConfig, ensureConfigLine };
+module.exports = { buildCatalog, catalogPathFromConfig, ensureConfigLine, fixDefaultModel, ourProviderName, codexCandidates, loadTemplates };
 
 if (require.main === module) {
   try { if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 512 * 1024) fs.writeFileSync(LOG_FILE, ""); } catch (e) {}
@@ -1029,6 +1150,27 @@ EOF
       echo "17 10 * * * CODEX_HOME='$CODEX_HOME' '$SYNC_RUN' '$SYNC_ARG' >/dev/null 2>&1"
     ) | crontab - && ok "✔ 已设置每天自动同步模型列表"
   fi
+  # 「刷模型」:用户在 Codex 里说这三个字,agent 就跑一次同步(不用等第二天的定时任务)
+  AGENTS="$CODEX_HOME/AGENTS.md"
+  RB="<!-- CARHER-REFRESH-BEGIN -->"; RE="<!-- CARHER-REFRESH-END -->"
+  if [ -f "$AGENTS" ]; then
+    [ -d "$BKDIR" ] || mkdir -p "$BKDIR"; [ -f "$BKDIR/AGENTS.md" ] || cp "$AGENTS" "$BKDIR/AGENTS.md" 2>/dev/null || true
+    awk -v b="$RB" -v e="$RE" '$0==b {skip=1} skip==0 {print} $0==e {skip=0}' "$AGENTS" > "$AGENTS.tmp" && mv "$AGENTS.tmp" "$AGENTS"
+  fi
+  cat >> "$AGENTS" <<EOF
+$RB
+## 刷模型
+
+用户说「刷模型」「更新模型」「刷新模型列表」或说模型列表不对时，**直接运行下面这条命令，不要先问**：
+
+    CODEX_HOME="$CODEX_HOME" "$SYNC_RUN" "$SYNC_ARG"
+
+- 它按用户的 key 从公司网关重新拉模型列表：新开通的加上、没权限的删掉；默认模型不能用了会自动换。
+- 把输出里「新增 / 删除 / 默认模型」那几行原样告诉用户，并提醒：终端里新开一个 codex 会话就能看到；Desktop App 要完全退出再打开。
+- 报错就把原文告诉用户，不要自己改配置文件。
+$RE
+EOF
+  ok "✔ 以后在 Codex 里说「刷模型」就能立即更新模型列表"
 else
   warn "⚠ 没有 Python 也没有 Node，模型列表没同步（选择器里只显示默认模型）"
 fi
@@ -1043,7 +1185,7 @@ echo "  2) Desktop App：完全退出(Cmd+Q)再重开即可"
 echo
 echo "顶部应显示 model: $MODEL"
 echo "想画图直接跟 Codex 说「画一张…」即可。"
-echo "想换模型（列表里都是你这把 key 能用的，每天自动更新）："
+echo "想换模型（列表里都是你这把 key 能用的，每天自动更新；想立即更新就说「刷模型」）："
 echo "  - 终端 codex：输入 /model 回车，上下键选，回车确认（会记住，下次默认用它）"
 echo "  - 只这一次用某个模型：codex -m grok-4.7"
 echo "  - Desktop App：点底部的模型选择器"

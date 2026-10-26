@@ -51,9 +51,11 @@ ensure_node() {
   case "$(uname -m)" in x86_64|amd64) arch=x64 ;; arm64|aarch64) arch=arm64 ;; *) return 1 ;; esac
   if [ "$os" = darwin ] && [ "$arch" = x64 ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ]; then arch=arm64; fi
   say "→ 装一个 Node.js 到 $NODE_HOME(不需要管理员密码，不影响你原来的)"
-  ver="$(curl -fsSL --max-time 30 "$NODE_MIRROR/index.json" \
+  # 先整份拿下来再挑(管道里 head 提前关会让 curl 被 SIGPIPE,pipefail 下整条假失败;10-26 Ubuntu 实测)
+  local idx; idx="$(curl -fsSL --max-time 30 "$NODE_MIRROR/index.json")" || return 1
+  ver="$(printf '%s' "$idx" \
     | grep -oE '"version":"v'"$NODE_INSTALL_MAJOR"'\.[0-9]+\.[0-9]+"[^}]*"lts":"[A-Za-z]+"' \
-    | head -n1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+')" || return 1
+    | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sed -n 1p)"
   [ -n "$ver" ] || return 1
   pkg="node-$ver-$os-$arch"; tmp="$(mktemp -d)"
   curl -fSL --max-time 600 --progress-bar -o "$tmp/$pkg.$ext" "$NODE_MIRROR/$ver/$pkg.$ext" || { rm -rf "$tmp"; return 1; }

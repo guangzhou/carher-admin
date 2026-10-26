@@ -9,7 +9,8 @@
 #   Claude App 已经由 claude-oneclick/ccdl-sync.sh 镜像在 /ccdl/desktop/,这里补另外两个。
 #
 # 布局(稳定名永远指最新一版,页面只链稳定名):
-#   /var/www/ccdl/apps/cursor/<ver>/{Cursor-mac.dmg, Cursor-windows-{x64,arm64}.exe, Cursor-linux-{x64,arm64}.AppImage}
+#   /var/www/ccdl/apps/cursor/<ver>/{Cursor-mac.dmg, Cursor-windows-{x64,arm64}.exe,
+#                                     Cursor-linux-{amd64,arm64}.deb, Cursor-linux-{x86_64,aarch64}.rpm}
 #   /var/www/ccdl/apps/codex/<ver>/{Codex-mac.dmg, Codex-windows-{x64,arm64}.msix,
 #                                    Codex-linux-{amd64,arm64}.deb, Codex-linux-{x86_64,aarch64}.rpm}
 #   /var/www/ccdl/apps/claude/<ver>/Claude-linux-{amd64,arm64}.deb   (mac/win 的 Claude 在 /ccdl/desktop,ccdl-sync.sh 管)
@@ -77,16 +78,24 @@ sync_cursor() {
     url="$(printf '%s' "$j" | python3 -c 'import json,sys;print(json.load(sys.stdin)["downloadUrl"])')"
     fetch "$url" "$D/Cursor-windows-$a.exe" "$(remote_len "$url")"
   done
-  # Linux 只发 AppImage(官方 API 没有 deb/rpm 平台名,10-26 实测 linux-x64-deb 等回 Unknown platform)
-  for a in x64 arm64; do
-    j="$(curl -fsS -m 30 -A "$UA" "$api/linux-$a/cursor")"
-    [ "$(printf '%s' "$j" | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')" = "$ver" ] \
-      || { echo "✗ Cursor linux-$a 版本和 mac 不一致,先不切" >&2; return 1; }
-    url="$(printf '%s' "$j" | python3 -c 'import json,sys;print(json.load(sys.stdin)["downloadUrl"])')"
-    fetch "$url" "$D/Cursor-linux-$a.AppImage" "$(remote_len "$url")"
-    chmod a+x "$D/Cursor-linux-$a.AppImage"
+  # Linux 发 deb/rpm,不发 AppImage(10-26):AppImage 每次运行都解到随机 /tmp/.mount_* 再跑 ⇒ 一键配置找不到
+  #   也打不进补丁(下次启动又是原版)。官方 deb/rpm 装到 /usr/share/cursor/cursor,正是 cursor_team_setup.sh
+  #   第一个找的位置。api2 的 latest 接口没有 deb/rpm 平台名(Unknown platform),cursor.com/api/download 回
+  #   「Failed to fetch」⇒ 用 AppImage 那条拿到的 commit 拼官方路径(downloads.cursor.com/production/<commit>/linux/…),
+  #   HEAD 200 + 大小对上才算数;路径若改了这里会 404 判红,不会下错东西。
+  local commit
+  commit="$(curl -fsS -m 30 -A "$UA" "$api/linux-x64/cursor" | python3 -c 'import json,sys;print(json.load(sys.stdin)["commitSha"])')"
+  local C="https://downloads.cursor.com/production/$commit/linux"
+  for pair in "x64/deb/amd64/deb/cursor_${ver}_amd64.deb:Cursor-linux-amd64.deb" \
+              "arm64/deb/arm64/deb/cursor_${ver}_arm64.deb:Cursor-linux-arm64.deb" \
+              "x64/rpm/x86_64/cursor-${ver}.el8.x86_64.rpm:Cursor-linux-x86_64.rpm" \
+              "arm64/rpm/aarch64/cursor-${ver}.el8.aarch64.rpm:Cursor-linux-aarch64.rpm"; do
+    url="$C/${pair%%:*}"
+    fetch "$url" "$D/${pair##*:}" "$(remote_len "$url")"
   done
-  ( cd "$ROOT" && for f in Cursor-mac.dmg Cursor-windows-x64.exe Cursor-windows-arm64.exe Cursor-linux-x64.AppImage Cursor-linux-arm64.AppImage; do ln -sfn "cursor/$ver/$f" "$f"; done )
+  ( cd "$ROOT" && for f in Cursor-mac.dmg Cursor-windows-x64.exe Cursor-windows-arm64.exe \
+      Cursor-linux-amd64.deb Cursor-linux-arm64.deb Cursor-linux-x86_64.rpm Cursor-linux-aarch64.rpm; do ln -sfn "cursor/$ver/$f" "$f"; done
+    rm -f Cursor-linux-x64.AppImage Cursor-linux-arm64.AppImage )
   set_version cursor "$ver"; echo "✔ Cursor 稳定链接 → $ver"
 }
 

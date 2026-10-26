@@ -66,10 +66,14 @@ else
   else
     say "→ 没有 Node.js,装一个到 $NODE_HOME(不需要管理员密码)"
   fi
-  NODE_VER="$(curl -fsSL --max-time 30 "$NODE_MIRROR/index.json" \
-    | grep -oE '"version":"v'"$NODE_MAJOR_MIN"'\.[0-9]+\.[0-9]+"[^}]*"lts":"[A-Za-z]+"' \
-    | head -n1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+')" \
+  # 10-26:先整份拿下来再挑。原来 `curl | grep | head -n1` 在 set -o pipefail 下,head 拿到第一行就关管道 ⇒
+  #   curl 写剩下的内容时 SIGPIPE/exit 23 ⇒ 整条判失败,报「取不到版本列表(网络?)」—— 其实版本号已经拿到了。
+  #   mac 上 index.json 下得快、curl 常在 head 关管道前写完所以碰巧不炸;Ubuntu 22.04 实测每次必炸。
+  NODE_IDX="$(curl -fsSL --max-time 30 "$NODE_MIRROR/index.json")" \
     || die "✗ 取不到 Node.js 版本列表(网络?):$NODE_MIRROR"
+  NODE_VER="$(printf '%s' "$NODE_IDX" \
+    | grep -oE '"version":"v'"$NODE_MAJOR_MIN"'\.[0-9]+\.[0-9]+"[^}]*"lts":"[A-Za-z]+"' \
+    | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sed -n 1p)"
   [ -n "$NODE_VER" ] || die "✗ 没找到 Node.js v$NODE_MAJOR_MIN 的 LTS 版本"
   if [ "$OS" = darwin ]; then EXT=tar.gz; else EXT=tar.xz; fi
   PKG="node-$NODE_VER-$OS-$ARCH"

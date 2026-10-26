@@ -41,6 +41,15 @@ else
   yel "终端里找不到 codex:关掉终端新开一个;还不行就重新跑一次 codex-mac.command"
 fi
 if command -v node >/dev/null 2>&1; then P "node    : $(node --version 2>/dev/null)"; else P "node    : 没找到"; fi
+# 10-21 guozhenhua:机器上还有一份老 codex(没有 debug models),同步脚本抓到它 ⇒ 模型列表同步失败。把每一份都列出来
+for cj in /opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js /usr/local/lib/node_modules/@openai/codex/bin/codex.js \
+          "$HOME/.carher-npm-global/lib/node_modules/@openai/codex/bin/codex.js"; do
+  [ -f "$cj" ] || continue
+  CV=$(node "$cj" --version 2>/dev/null | head -n1)
+  if node "$cj" debug models --bundled >/dev/null 2>&1; then P "另一份 codex: ${cj%/bin/codex.js}  ${CV}"
+  else P "另一份 codex: ${cj%/bin/codex.js}  ${CV}(太老,没有 debug models)"
+    yel "机器上有一份老 codex(${CV:-版本未知}),旧版同步脚本会抓到它导致同步失败:下载最新的 codex-mac.command 重跑一次"; fi
+done
 grep -ls '>>> carher-codex >>>' "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" 2>/dev/null | sed 's/^/PATH 块 : /'
 
 P ""; P "--- 2) 桌面 App ---"
@@ -110,6 +119,21 @@ if [ -f "$CODEX_HOME/carher-models-sync.log" ]; then
   P "  同步日志最后 3 行:"; tail -n 3 "$CODEX_HOME/carher-models-sync.log" | mask | sed 's/^/    /'
   LAST=$(grep -E '同步完成|失败' "$CODEX_HOME/carher-models-sync.log" | tail -n 1)
   case "$LAST" in *失败*) red "模型同步最近一次失败(下拉里只有自带的 GPT):下载最新的 codex-mac.command 重跑一次;还不行把这份报告发给运维";; esac
+fi
+# 现场复现同步要用的那一步(只读:只跑 debug models --bundled,不写任何文件),把每个候选 codex 的原样结果列出来
+SJ="$CODEX_HOME/carher_models_sync.js"
+if [ -f "$SJ" ] && command -v node >/dev/null 2>&1; then
+  P "  同步脚本      : $SJ ($(grep -q 'function codexCandidates' "$SJ" && echo 新版 || echo '旧版,没有逐个试 codex'))"
+  if grep -q 'function codexCandidates' "$SJ"; then
+    CODEX_HOME="$CODEX_HOME" node -e '
+const m=require(process.argv[1]);const cp=require("child_process");
+for(const c of m.codexCandidates()){
+  const r=cp.spawnSync(c[0],[...c[1],"debug","models","--bundled"],{encoding:"utf8",timeout:60000,env:process.env});
+  let n="";try{n=JSON.parse(r.stdout).models.length+" 个模板"}catch(e){}
+  const v=cp.spawnSync(c[0],[...c[1],"--version"],{encoding:"utf8",timeout:20000}).stdout.trim();
+  console.log("  试 codex      : "+[c[0],...c[1]].join(" ")+"  "+v+"  rc="+r.status+"  "+(n||String(r.stderr||r.error||"").trim().replace(/\s*\n\s*/g," ⏎ ").slice(0,300)));
+}' "$SJ" 2>&1 | mask | while IFS= read -r l; do P "$l"; done
+  fi
 fi
 # 定时同步装没装(Mac)
 if [ "$(uname -s)" = Darwin ]; then

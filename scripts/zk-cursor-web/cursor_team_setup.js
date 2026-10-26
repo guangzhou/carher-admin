@@ -1640,6 +1640,14 @@ function planBundle(rel) {
    set 用 UPSERT(INSERT OR REPLACE)不用 UPDATE:secret://cursorAuth/openAIKey 这行在
    从没填过 key 的新用户机器上不存在,UPDATE 会 0 行静默成功=假绿(printed 写了其实没写)。 */
 function openDb() {
+  /* 10-26(Linux 实测,mac 同样复现):Cursor 从没打开过 ⇒ state.vscdb 不存在 ⇒ node:sqlite 抛错落到备胎
+     @vscode/sqlite3,它在打不开的库上跑查询时**原生层直接 abort**(`terminating due to uncaught exception
+     of type Napi::Error`,exit 134,core dump),try/catch 接不住,屏幕上停在「--- 2.8) 模型菜单」什么都不说。
+     ⇒ 先看文件在不在,不在就抛一个普通错误,调用方各自给人话提示。 */
+  if (!fs.existsSync(STATE_DB)) {
+    const e = new Error("找不到 Cursor 的设置库 " + STATE_DB + "(Cursor 还没打开过?先打开一次 Cursor 并登录,再完全退出后重跑)");
+    e.cxNoDb = true; throw e;
+  }
   try {
     const { DatabaseSync } = require("node:sqlite");
     const db = new DatabaseSync(STATE_DB);
@@ -1660,7 +1668,9 @@ function openDb() {
 }
 
 async function mergeConfig(args, dry) {
-  const db = openDb();
+  let db;
+  try { db = openDb(); }
+  catch (e) { if (!e.cxNoDb) throw e; console.log("   !! " + e.message); process.exit(3); }
   const raw = await db.get(APP_USER_KEY);
   if (!raw) { console.log("   !! applicationUser blob 不存在(Cursor 没初始化过?)"); db.close(); process.exit(3); }
   const d = JSON.parse(raw);

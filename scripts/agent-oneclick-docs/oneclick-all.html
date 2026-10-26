@@ -117,7 +117,11 @@ td:first-child{width:46%}
 .models dd{margin:0;display:flex;flex-wrap:wrap;gap:4px}
 footer{color:var(--muted);font-size:12.5px;margin:28px 0 0 62px}
 
-body.os-mac .win-only, body.os-win .mac-only{display:none!important}
+/* 三个系统:mac-only / win-only / linux-only;unix-only = Mac 和 Linux 共用(终端命令、-mac 脚本、~/ 路径) */
+body.os-mac .win-only, body.os-mac .linux-only,
+body.os-win .mac-only, body.os-win .linux-only, body.os-win .unix-only,
+body.os-linux .mac-only, body.os-linux .win-only{display:none!important}
+.os .linkbtn+.linkbtn{margin-left:10px}
 body.tool-cursor .for-codex, body.tool-cursor .for-claude,
 body.tool-codex .for-cursor, body.tool-codex .for-claude,
 body.tool-claude .for-cursor, body.tool-claude .for-codex{display:none}
@@ -159,7 +163,7 @@ body.tool-claude .for-cursor, body.tool-claude .for-codex{display:none}
         <button type="button" class="tool" role="tab" id="tab-codex" data-tool="codex" aria-controls="p-codex" aria-selected="false"><b>Codex</b><span>命令行 + 桌面 App</span></button>
         <button type="button" class="tool" role="tab" id="tab-claude" data-tool="claude" aria-controls="p-claude" aria-selected="false"><b>Claude Code</b><span>命令行 + 桌面 App</span></button>
       </div>
-      <p class="os">下面按 <b id="os-name">Mac</b> 电脑显示。<button type="button" class="linkbtn" id="os-switch">我用的是 <span id="os-other">Windows</span></button></p>
+      <p class="os">下面按 <b id="os-name">Mac</b> 电脑显示。我用的是 <button type="button" class="linkbtn os-pick" data-os="win">Windows</button><button type="button" class="linkbtn os-pick" data-os="linux">Linux</button></p>
     </div>
   </section>
 
@@ -171,9 +175,10 @@ body.tool-claude .for-cursor, body.tool-claude .for-codex{display:none}
         <p>
           <a class="btn alt mac-only" href="https://cc.auto-link.com.cn/ccdl/apps/Cursor-mac.dmg" target="_blank" rel="noopener">下载 Cursor</a>
           <a class="btn alt win-only" href="https://cc.auto-link.com.cn/ccdl/apps/Cursor-windows-x64.exe" target="_blank" rel="noopener">下载 Cursor</a>
+          <a class="btn alt linux-only" href="https://cc.auto-link.com.cn/ccdl/apps/Cursor-linux-amd64.deb" target="_blank" rel="noopener">下载 Cursor（.deb）</a>
+          <a class="btn alt linux-only" href="https://cc.auto-link.com.cn/ccdl/apps/Cursor-linux-x86_64.rpm" target="_blank" rel="noopener">下载 Cursor（.rpm）</a>
         </p>
-        <p><span class="mac-only">打开 .dmg，把 Cursor 拖进「应用程序」。</span><span class="win-only">双击 .exe 安装（ARM 电脑用<a href="https://cc.auto-link.com.cn/ccdl/apps/Cursor-windows-arm64.exe" target="_blank" rel="noopener">这个</a>）。</span>公司服务器上的官方原版安装包，国内下载快。</p>
-        <p class="sub">Linux：<a href="https://cc.auto-link.com.cn/ccdl/apps/Cursor-linux-x64.AppImage" target="_blank" rel="noopener">x64 AppImage</a>　<a href="https://cc.auto-link.com.cn/ccdl/apps/Cursor-linux-arm64.AppImage" target="_blank" rel="noopener">arm64 AppImage</a>　下载后 <code>chmod +x</code> 再双击运行</p>
+        <p><span class="mac-only">打开 .dmg，把 Cursor 拖进「应用程序」。</span><span class="win-only">双击 .exe 安装（ARM 电脑用<a href="https://cc.auto-link.com.cn/ccdl/apps/Cursor-windows-arm64.exe" target="_blank" rel="noopener">这个</a>）。</span><span class="linux-only">Ubuntu / Debian 用 .deb，Fedora / RHEL 用 .rpm，在下载目录运行 <code>sudo apt install ./Cursor-linux-amd64.deb</code>（或 <code>sudo dnf install ./Cursor-linux-x86_64.rpm</code>）。ARM 电脑用 <a href="https://cc.auto-link.com.cn/ccdl/apps/Cursor-linux-arm64.deb" target="_blank" rel="noopener">.deb</a> / <a href="https://cc.auto-link.com.cn/ccdl/apps/Cursor-linux-aarch64.rpm" target="_blank" rel="noopener">.rpm</a>。</span>公司服务器上的官方原版安装包，国内下载快。</p>
         <p>打开 Cursor，点 <b>Sign Up</b> 用邮箱注册，有账号点 <b>Log In</b>。免费账号就够，不登录用不了。</p>
       </div>
     </section>
@@ -181,12 +186,13 @@ body.tool-claude .for-cursor, body.tool-claude .for-codex{display:none}
       <h2>一键配置</h2>
       <div class="body">
         <p>
-          <a class="btn mac-only" href="{{cursor-mac.zip}}" download="cursor-mac.zip">下载 cursor-mac.zip</a>
+          <a class="btn unix-only" href="{{cursor-mac.zip}}" download="cursor-mac.zip">下载 cursor-mac.zip</a>
           <a class="btn win-only" href="{{cursor-windows.zip}}" download="cursor-windows.zip">下载 cursor-windows.zip</a>
         </p>
         <ol class="list">
-          <li>把 Cursor 完全退出（<span class="mac-only"><code>Cmd + Q</code></span><span class="win-only">右键任务栏图标 → 退出</span>）。</li>
-          <li class="mac-only">打开「终端」，点代码块右上角「复制」，粘进终端，回车：
+          <li class="linux-only">装完 Cursor 要先打开一次、登录，再往下做（没打开过，安装器找不到 Cursor 的设置）。</li>
+          <li>把 Cursor 完全退出（<span class="mac-only"><code>Cmd + Q</code></span><span class="win-only">右键任务栏图标 → 退出</span><span class="linux-only">菜单 File → Exit，或 <code>Ctrl + Q</code></span>）。</li>
+          <li class="unix-only">打开「终端」，点代码块右上角「复制」，粘进终端，回车：
             <pre><code>cd ~/Downloads
 [ -d cursor-mac ] || unzip -q cursor-mac.zip
 cd cursor-mac
@@ -217,21 +223,22 @@ bash ./INSTALL-Mac.command</code></pre>
         <p>
           <a class="btn alt mac-only" href="https://cc.auto-link.com.cn/ccdl/apps/Codex-mac.dmg" target="_blank" rel="noopener">下载 Codex App</a>
           <a class="btn alt win-only" href="https://cc.auto-link.com.cn/ccdl/apps/Codex-windows-x64.msix" target="_blank" rel="noopener">下载 Codex App</a>
+          <a class="btn alt linux-only" href="https://cc.auto-link.com.cn/ccdl/apps/Codex-linux-amd64.deb" target="_blank" rel="noopener">下载 Codex App（.deb）</a>
+          <a class="btn alt linux-only" href="https://cc.auto-link.com.cn/ccdl/apps/Codex-linux-x86_64.rpm" target="_blank" rel="noopener">下载 Codex App（.rpm）</a>
         </p>
-        <p><span class="mac-only">官方安装包，约 800 MB。双击 .dmg，把 Codex 拖进「应用程序」。</span><span class="win-only">约 1 GB，双击 .msix 按提示安装（ARM 电脑用<a href="https://cc.auto-link.com.cn/ccdl/apps/Codex-windows-arm64.msix" target="_blank" rel="noopener">这个</a>）。装不上找宋力开权限，或看<a href="https://developers.openai.com/codex/windows/windows-app" target="_blank" rel="noopener">官方说明</a>。</span>都是公司服务器上的官方原版安装包。装好先别打开。</p>
-        <p class="sub">Linux：<a href="https://cc.auto-link.com.cn/ccdl/apps/Codex-linux-amd64.deb" target="_blank" rel="noopener">Ubuntu/Debian x64</a>　<a href="https://cc.auto-link.com.cn/ccdl/apps/Codex-linux-arm64.deb" target="_blank" rel="noopener">arm64</a>　<a href="https://cc.auto-link.com.cn/ccdl/apps/Codex-linux-x86_64.rpm" target="_blank" rel="noopener">Fedora/RHEL x64</a>　<a href="https://cc.auto-link.com.cn/ccdl/apps/Codex-linux-aarch64.rpm" target="_blank" rel="noopener">arm64</a>　用 <code>sudo apt install ./文件名</code> 或 <code>sudo dnf install ./文件名</code> 安装</p>
+        <p><span class="mac-only">官方安装包，约 800 MB。双击 .dmg，把 Codex 拖进「应用程序」。</span><span class="win-only">约 1 GB，双击 .msix 按提示安装（ARM 电脑用<a href="https://cc.auto-link.com.cn/ccdl/apps/Codex-windows-arm64.msix" target="_blank" rel="noopener">这个</a>）。装不上找宋力开权限，或看<a href="https://developers.openai.com/codex/windows/windows-app" target="_blank" rel="noopener">官方说明</a>。</span><span class="linux-only">Ubuntu / Debian 用 .deb，Fedora / RHEL 用 .rpm：<code>sudo apt install ./Codex-linux-amd64.deb</code>（或 <code>sudo dnf install ./Codex-linux-x86_64.rpm</code>）。ARM 电脑用 <a href="https://cc.auto-link.com.cn/ccdl/apps/Codex-linux-arm64.deb" target="_blank" rel="noopener">.deb</a> / <a href="https://cc.auto-link.com.cn/ccdl/apps/Codex-linux-aarch64.rpm" target="_blank" rel="noopener">.rpm</a>。</span>都是公司服务器上的官方原版安装包。装好先别打开。</p>
       </div>
     </section>
     <section class="step">
       <h2>一键配置</h2>
       <div class="body">
         <p>
-          <a class="btn mac-only" href="{{codex-mac.command}}" download="codex-mac.command">下载 codex-mac.command</a>
+          <a class="btn unix-only" href="{{codex-mac.command}}" download="codex-mac.command">下载 codex-mac.command</a>
           <a class="btn win-only" href="{{codex-windows.bat}}" download="codex-windows.bat">下载 codex-windows.bat</a>
         </p>
         <ol class="list">
           <li>开着的 Codex App 先完全退出。</li>
-          <li class="mac-only">打开「终端」，点代码块右上角「复制」，粘进终端，回车：
+          <li class="unix-only">打开「终端」，点代码块右上角「复制」，粘进终端，回车：
             <pre><code>cd ~/Downloads
 chmod +x codex-mac.command
 bash ./codex-mac.command</code></pre>
@@ -248,7 +255,7 @@ bash ./codex-mac.command</code></pre>
         <div class="two">
           <div>
             <h3>命令行</h3>
-            <p>新开<span class="mac-only">一个终端</span><span class="win-only">一个 PowerShell</span>，进项目文件夹：</p>
+            <p>新开<span class="unix-only">一个终端</span><span class="win-only">一个 PowerShell</span>，进项目文件夹：</p>
             <pre><code>cd 你的项目文件夹
 codex</code></pre>
             <p class="sub">输入 <code>/model</code> 换模型。</p>
@@ -273,21 +280,21 @@ codex</code></pre>
         <p>
           <a class="btn alt mac-only" href="https://cc.auto-link.com.cn/ccdl/desktop/Claude-mac.zip" target="_blank" rel="noopener">下载 Claude App</a>
           <a class="btn alt win-only" href="https://cc.auto-link.com.cn/ccdl/desktop/Claude-windows-x64.msix" target="_blank" rel="noopener">下载 Claude App</a>
+          <a class="btn alt linux-only" href="https://cc.auto-link.com.cn/ccdl/apps/Claude-linux-amd64.deb" target="_blank" rel="noopener">下载 Claude App（.deb）</a>
         </p>
-        <p><span class="mac-only">解压，把 Claude 拖进「应用程序」。</span><span class="win-only">双击 .msix 安装（ARM 电脑用<a href="https://cc.auto-link.com.cn/ccdl/desktop/Claude-windows-arm64.msix" target="_blank" rel="noopener">这个</a>）。</span><b>不用登录</b>，装好先别打开。</p>
-        <p class="sub">Linux：<a href="https://cc.auto-link.com.cn/ccdl/apps/Claude-linux-amd64.deb" target="_blank" rel="noopener">Ubuntu/Debian x64</a>　<a href="https://cc.auto-link.com.cn/ccdl/apps/Claude-linux-arm64.deb" target="_blank" rel="noopener">arm64</a>　用 <code>sudo apt install ./文件名</code> 安装（只支持 Debian 系，其他发行版用命令行 claude）</p>
+        <p><span class="mac-only">解压，把 Claude 拖进「应用程序」。</span><span class="win-only">双击 .msix 安装（ARM 电脑用<a href="https://cc.auto-link.com.cn/ccdl/desktop/Claude-windows-arm64.msix" target="_blank" rel="noopener">这个</a>）。</span><span class="linux-only">只有 Ubuntu / Debian 版：<code>sudo apt install ./Claude-linux-amd64.deb</code>（ARM 电脑用<a href="https://cc.auto-link.com.cn/ccdl/apps/Claude-linux-arm64.deb" target="_blank" rel="noopener">这个</a>）。别的发行版只用命令行就行。</span><b>不用登录</b>，装好先别打开。</p>
       </div>
     </section>
     <section class="step">
       <h2>一键配置</h2>
       <div class="body">
         <p>
-          <a class="btn mac-only" href="{{claude-mac.command}}" download="claude-mac.command">下载 claude-mac.command</a>
+          <a class="btn unix-only" href="{{claude-mac.command}}" download="claude-mac.command">下载 claude-mac.command</a>
           <a class="btn win-only" href="{{claude-windows.bat}}" download="claude-windows.bat">下载 claude-windows.bat</a>
         </p>
         <ol class="list">
           <li>开着的 Claude App 先完全退出。</li>
-          <li class="mac-only">打开「终端」，点代码块右上角「复制」，粘进终端，回车：
+          <li class="unix-only">打开「终端」，点代码块右上角「复制」，粘进终端，回车：
             <pre><code>cd ~/Downloads
 chmod +x claude-mac.command
 bash ./claude-mac.command</code></pre>
@@ -304,7 +311,7 @@ bash ./claude-mac.command</code></pre>
         <div class="two">
           <div>
             <h3>命令行</h3>
-            <p>新开<span class="mac-only">一个终端</span><span class="win-only">一个 PowerShell</span>，进项目文件夹：</p>
+            <p>新开<span class="unix-only">一个终端</span><span class="win-only">一个 PowerShell</span>，进项目文件夹：</p>
             <pre><code>cd 你的项目文件夹
 claude</code></pre>
             <p class="sub">输入 <code>/model</code> 换模型。</p>
@@ -372,8 +379,8 @@ claude</code></pre>
     <summary>连远程服务器（Remote-SSH）</summary>
     <ol class="list">
       <li>用 Cursor 连一次服务器（左下角 → Connect to Host），等显示已连接。</li>
-      <li><span class="win-only">双击安装包文件夹里的 <code>REMOTE-SSH-Windows.cmd</code>，</span><span class="mac-only">在终端运行：</span>
-        <pre class="mac-only"><code>cd ~/Downloads
+      <li><span class="win-only">双击安装包文件夹里的 <code>REMOTE-SSH-Windows.cmd</code>，</span><span class="unix-only">在终端运行：</span>
+        <pre class="unix-only"><code>cd ~/Downloads
 cd cursor-mac
 chmod +x *.command *.sh
 bash ./REMOTE-SSH-Mac.command</code></pre>
@@ -386,7 +393,7 @@ bash ./REMOTE-SSH-Mac.command</code></pre>
     <summary>更新与卸载</summary>
     <p><b>更新</b>：Cursor 不会自己升级。这个页面发了新版，就下载新包、解压、完全退出 Cursor，双击 <code>UPGRADE</code>，不用再输 key。</p>
     <p><b>卸载</b>：完全退出 Cursor，双击 <code>UNINSTALL</code>，输入 <code>yes</code>。</p>
-    <p class="sub mac-only">Mac 上这些按钮（UPGRADE、UNINSTALL、REPAIR、DOCTOR）都可以像安装那样在终端跑：进到 <code>cursor-mac</code> 文件夹，先 <code>chmod +x *.command *.sh</code>，再执行 <code>bash ./UPGRADE-Mac.command</code>，名字换成要用的那个。</p>
+    <p class="sub unix-only">Mac / Linux 上这些按钮（UPGRADE、UNINSTALL、REPAIR、DOCTOR）都可以像安装那样在终端跑：进到 <code>cursor-mac</code> 文件夹，先 <code>chmod +x *.command *.sh</code>，再执行 <code>bash ./UPGRADE-Mac.command</code>，名字换成要用的那个。</p>
     <p class="sub">聊天记录都不动。模型菜单会换成你的 key 能用的模型，自己加的模型名会被清掉。</p>
   </details>
 
@@ -394,10 +401,10 @@ bash ./REMOTE-SSH-Mac.command</code></pre>
     <summary>出问题了（先跑自检，一键出报告）</summary>
     <p><b>先跑自检</b>：它只检查、不改任何东西，跑完把结果复制好，直接粘给运维。</p>
     <p>
-      <a class="btn mac-only" href="{{codex-doctor-mac.command}}" download="codex-doctor-mac.command">下载 codex-doctor-mac.command</a>
+      <a class="btn unix-only" href="{{codex-doctor-mac.command}}" download="codex-doctor-mac.command">下载 codex-doctor-mac.command</a>
       <a class="btn win-only" href="{{codex-doctor-windows.bat}}" download="codex-doctor-windows.bat">下载 codex-doctor-windows.bat</a>
     </p>
-    <pre class="mac-only"><code>cd ~/Downloads
+    <pre class="unix-only"><code>cd ~/Downloads
 chmod +x codex-doctor-mac.command
 bash ./codex-doctor-mac.command</code></pre>
     <p class="sub win-only">双击下载的文件。弹出蓝色提示点「更多信息」→「仍要运行」。</p>
@@ -436,10 +443,10 @@ bash ./codex-doctor-mac.command</code></pre>
     <summary>出问题了（先跑自检，一键出报告）</summary>
     <p><b>先跑自检</b>：它只检查、不改任何东西，跑完把结果复制好，直接粘给运维。</p>
     <p>
-      <a class="btn mac-only" href="{{claude-doctor-mac.command}}" download="claude-doctor-mac.command">下载 claude-doctor-mac.command</a>
+      <a class="btn unix-only" href="{{claude-doctor-mac.command}}" download="claude-doctor-mac.command">下载 claude-doctor-mac.command</a>
       <a class="btn win-only" href="{{claude-doctor-windows.bat}}" download="claude-doctor-windows.bat">下载 claude-doctor-windows.bat</a>
     </p>
-    <pre class="mac-only"><code>cd ~/Downloads
+    <pre class="unix-only"><code>cd ~/Downloads
 chmod +x claude-doctor-mac.command
 bash ./claude-doctor-mac.command</code></pre>
     <p class="sub win-only">双击下载的文件。弹出蓝色提示点「更多信息」→「仍要运行」。</p>
@@ -463,6 +470,7 @@ bash ./claude-doctor-mac.command</code></pre>
     <p><b>更新 / 换 key</b>：下载这个页面最新的安装文件，再跑一次。原设置会自动备份。</p>
     <p><b>卸载</b>：命令行删掉 <code>~/.claude/settings.json</code> 里 <code>env</code> 那几行；App 删掉这个文件夹：</p>
     <pre class="mac-only"><code>~/Library/Application Support/Claude-3p</code></pre>
+    <pre class="linux-only"><code>~/.config/Claude-3p</code></pre>
     <pre class="win-only"><code>%LOCALAPPDATA%\Claude-3p</code></pre>
   </details>
 </div>
@@ -475,7 +483,7 @@ bash ./claude-doctor-mac.command</code></pre>
   function get(k){try{return localStorage.getItem(k)}catch(e){return null}}
   function set(k,v){try{localStorage.setItem(k,v)}catch(e){}}
   function q(s){return [].slice.call(document.querySelectorAll(s))}
-  var B=document.body, NAMES={mac:'Mac',win:'Windows'}, os='mac';
+  var B=document.body, NAMES={mac:'Mac',win:'Windows',linux:'Linux'}, OSES=['mac','win','linux'], os='mac';
   function mode(prefix,val,list){list.forEach(function(v){B.classList.remove(prefix+v)});B.classList.add(prefix+val)}
   function pickTool(tool,save){
     q('.tool').forEach(function(t){
@@ -487,9 +495,11 @@ bash ./claude-doctor-mac.command</code></pre>
     if(save)set('oneclick-tool',tool);
   }
   function pickOS(v,save){
-    os=v; mode('os-',v,['mac','win']);
+    if(OSES.indexOf(v)<0)v='mac';
+    os=v; mode('os-',v,OSES);
     document.getElementById('os-name').textContent=NAMES[v];
-    document.getElementById('os-other').textContent=NAMES[v==='mac'?'win':'mac'];
+    var others=OSES.filter(function(x){return x!==v});
+    q('.os-pick').forEach(function(b,i){b.dataset.os=others[i];b.textContent=NAMES[others[i]]});
     if(save)set('oneclick-os',v);
   }
   var fb=document.getElementById('fb-link');
@@ -503,7 +513,7 @@ bash ./claude-doctor-mac.command</code></pre>
     });
   });
   q('pre').forEach(function(pre){
-    var box=document.createElement('div'); box.className='codebox'+(pre.classList.contains('mac-only')?' mac-only':pre.classList.contains('win-only')?' win-only':'');
+    var box=document.createElement('div'); box.className='codebox'+['mac-only','win-only','linux-only','unix-only'].filter(function(c){return pre.classList.contains(c)}).map(function(c){return ' '+c}).join('');
     pre.parentNode.insertBefore(box,pre); box.appendChild(pre);
     var b=document.createElement('button'); b.type='button'; b.className='copy'; b.textContent='复制';
     b.setAttribute('aria-label','复制这段命令');
@@ -527,10 +537,11 @@ bash ./claude-doctor-mac.command</code></pre>
     });
   });
   q('.tool').forEach(function(t){t.addEventListener('click',function(){pickTool(t.dataset.tool,true)})});
-  document.getElementById('os-switch').addEventListener('click',function(){pickOS(os==='mac'?'win':'mac',true)});
+  q('.os-pick').forEach(function(b){b.addEventListener('click',function(){pickOS(b.dataset.os,true)})});
   var h=(location.hash||'').slice(1);
   pickTool(['cursor','codex','claude'].indexOf(h)>=0?h:(get('oneclick-tool')||'cursor'),false);
-  pickOS(get('oneclick-os')||(/Windows/i.test(navigator.userAgent||'')?'win':'mac'),false);
+  var ua=navigator.userAgent||'';
+  pickOS(get('oneclick-os')||(/Windows/i.test(ua)?'win':(/Linux|X11|CrOS/i.test(ua)&&!/Android/i.test(ua))?'linux':'mac'),false);
   fbHref();
 })();
 </script>

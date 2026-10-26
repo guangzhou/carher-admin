@@ -23,7 +23,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 |---|---|
 | 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 Recreate，grace 300s），Admin `http://10.68.13.198:30891/admin`，adminApiKey 在实例自己的 `config.json`（和老实例不同）|
 | 老实例 | deploy `kiro-rs`（:30890，镜像 ctxwin）。只剩 `carher-hangzhou`、`claude-code-buyitian` 两把 key 主走它，另外是新实例的兜底 |
-| 镜像 | `kiro-rs:v2026.10.1-carher-slots40`（10-26，无缝换版：零断流；slots31 空回复明细；回滚 tag slots31）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
+| 镜像 | 待上：`slots41`（10-26 已进 242 未切：= slots40 + 重新分配 / 槽位权重 / 手动挪 key，sha `cbef9f8e…`）。现网 `slots31`。`kiro-rs:v2026.10.1-carher-slots40`（10-26，无缝换版：零断流；slots31 空回复明细；回滚 tag slots31）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
 | manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、secret `kiro-rs-slots-bootstrap`）|
 | 槽 | 4 个：`jp-172.235.204.67`（经 243 代理）、`sg-47.84.112.136`、`sg-47.84.85.100`、`sg-47.236.200.98`；出口配在 `config.json.slots[]`，全局 `proxyUrl=null` |
 | 并发参数 | 起步 16 / 最小 2 / 最大 24 / 自动调；排队超时 120s；「暂不接新人」倍数 1.5 |
@@ -32,7 +32,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 
 ## 2. 调度规则（界面上的字是什么意思）
 
-- **绑人**：只有带身份的请求（`u:<key hash>`）才写绑定表，新人分给（在途少 → 绑定人数少 → 30 分钟用量低）的槽（`slots.rs::choose_slot_for_new_user`）。没身份的按会话哈希临时挑槽，不写绑定。
+- **绑人**：只有带身份的请求（`u:<key hash>`）才写绑定表，新人分给（在途 ÷ 权重少 → 绑定人数 ÷ 权重少 → 30 分钟用量 ÷ 权重低）的槽（`slots.rs::choose_slot_weighted`）。没身份的按会话哈希临时挑槽，不写绑定。
 - **已封口 / 暂不接新人**：某槽 30 分钟用量 > 平均 ×1.5 且 ≥20 次 ⇒ 不再分新人，**已绑的人照常用**。四个全封口时忽略封口照同样顺序挑，不会没人接（10-24 用户问过）。
 - **并发**：每槽 AIMD —— 429 时上限 ×0.7；安静 5 分钟且打满 ⇒ +1。满了排队，排队超 120s 回 529（LiteLLM 兜底到老实例）。
 - **429**：先按官方退避 + retry-after 重试；**402 额度用尽 / 被限（restricted）才退役换号**，冷备里挑一个顶上（要 opus 的槽只挑能跑 opus 的号）。别的错误不退役。
@@ -40,6 +40,12 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
   🔴 slots24 及以前拿**用户原文**去探 ⇒ 敏感内容在任何号上都 CONTENT_FILTERED ⇒ 10-25 #3 justin 被冤退役；且用占位 ARN ⇒ social 号恒 403 永远测不出。slots25 修。
 - **槽停用 / 删除**：在 Admin「槽位设置」关开关 ⇒ 该槽的人在下一个请求自动换到别的槽（`SLOT_GONE` ⇒ 重选），在途的跑完。删除只允许先停用。8 个停用分支都有单测。
 - **冷备数** = 启用 − 在槽 − 退役（只算 quota/restricted）。手动在 Admin 启用一个号会清掉它的退役标记。
+- **权重（slots41 起）**：`config.json.slots[].weight` 1~10，默认 5，界面「设置 → 槽位配置」改。作用三处：新人分配、封口判定（用量 ÷ 权重）、在途上限（自动值 × 权重/5，手动锁定值不缩放）。**改权重不自动挪已绑的人**，要挪点「重新分配用户」。
+- **重新分配（slots41 起）**：槽位卡片上方「重新分配用户」⇒ 先预览再确认。负载 = 槽上所有人**近 24 小时请求数**之和，目标按权重配比；只挪「10 分钟没发请求、且没有在跑的请求、且没被固定」的人；偏差在目标 ±10% 或 <5 次不挪；用量 0 的人不挪（挪了白丢缓存）。执行时每条再核一遍，不满足就跳过（返回 moved/requested）。重新分配挪的人**不固定**。
+- **手动挪 key（slots41 起）**：卡片上点「用户」数字 ⇒ 该槽 key 列表（别名、7 日请求 / token、最后使用、在用、是否固定）⇒「挪到」。手动挪 = 固定（重新分配不动），可「取消」。下一个请求起走新槽，在途的跑完。🔴 换槽 = 换号，那个人的 Kiro 缓存作废（缓存按号，见记忆 project_kiro_prompt_cache_works_ttl_5min）。
+  - 别名 / 7 日数据存在 `kiro_slots.json.userMeta`（30s 落一次盘），**从 slots41 上线起才开始记**；老用户别名要等它下次请求。固定存 `pinned`；绑定没了（槽停用/删）固定也作废。
+  - API：`GET /slots/users?slot=`、`POST /slots/users/rebind {user,slot}`、`POST /slots/users/unpin {user}`、`GET|POST /slots/rebalance`。待命 / 已交接实例拒绝这些写操作。
+- **首字耗时**：卡片「首字 Xs」= 近 30 分钟「发出 → 首个有内容事件」平均，跟 prompt 大小和模型强相关，只作参考，没参与调度。
 - **槽全停** ⇒ 529，不回老路径（老路径同一出口会和槽撞 IP）；LiteLLM 层兜底到老实例。
 
 ## 3. 换镜像
@@ -55,8 +61,8 @@ python3 scripts/kiro-slots-watch.py --minutes 10
 - 🔴 grace 300s 之前（slots23 及以前）每次换镜像都切断在途请求 ⇒ 按号用量会比上游记录少十几次，那是丢的，不是统计错。
 - 🔴 `kiro-lane-regress.sh` 只测老实例的 `kiro-*` 道，**不经过 30891**，别拿它当槽位回归。
 - 本地改代码：工作树 `.work/kiro-0011/work`（基线 `.work/kiro-0011/base`），改完 `diff` 重新生成 0011 补丁再走 build。
-- 0012(10-26,未上线)超长报 `max(估算, bytes/3×1.1, 窗口+1)`,工作树 `.work/kiro-0012/{base,work}`;选值依据见记忆 project_cc_old_session_toolsearch_latch_rea_overflow。
-  🔴 **它已经在 `k8s/kiro-rs/patches/` 里** ⇒ `kiro-rs-build.sh` 按目录全打,**下一次任何人构建镜像都会带上它**。现网 slots31 是 0001~0011,不含 0012。用户还没点头上线 0012:构建别的改动前先问,或临时把 0012 挪出目录。
+- 0012 超长报 `max(估算, bytes/3×1.1, 窗口+1)`,工作树 `.work/kiro-0012/{base,work}`;选值依据见记忆 project_cc_old_session_toolsearch_latch_rea_overflow。
+  🔴 **它在 `k8s/kiro-rs/patches/` 里 ⇒ 构建按目录全打**。10-26 查 `build-slots31.log`:**现网 slots31 已含 0012**(构建时就打进去了,之前这里写「不含」是错的);slots40/41 同样含。
 
 ## 3.1 无缝换版是怎么做到的（动它之前先读这节）
 

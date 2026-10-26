@@ -136,6 +136,7 @@ body.tool-claude .for-cursor, body.tool-claude .for-codex{display:none}
   .more,footer,.tips,.fb{margin-left:0}
   .cmds{grid-template-columns:1fr}
 }
+pre,code{font-variant-ligatures:none;font-feature-settings:"liga" 0,"calt" 0}
 </style>
 
 <div class="wrap">
@@ -193,12 +194,11 @@ body.tool-claude .for-cursor, body.tool-claude .for-codex{display:none}
           <li class="linux-only">装完 Cursor 要先打开一次、登录，再往下做（没打开过，安装器找不到 Cursor 的设置）。</li>
           <li>把 Cursor 完全退出（<span class="mac-only"><code>Cmd + Q</code></span><span class="win-only">右键任务栏图标 → 退出</span><span class="linux-only">菜单 File → Exit，或 <code>Ctrl + Q</code></span>）。</li>
           <li class="unix-only">打开「终端」，点代码块右上角「复制」，粘进终端，回车：
-            <pre><code>cd ~/Downloads
-[ -d cursor-mac ] || unzip -q cursor-mac.zip
-cd cursor-mac
-chmod +x *.command *.sh
-bash ./INSTALL-Mac.command</code></pre>
-            <span class="sub">文件没下到「下载」文件夹的，把第一行换成它所在的文件夹。</span>
+            <pre><code>d=$(xdg-user-dir DOWNLOAD 2&gt;/dev/null); [ -d "$d" ] &amp;&amp; [ "$d" != "$HOME" ] || d=~/Downloads; cd "$d"
+z=$(ls -t | grep '^cursor-mac' | head -n 1)
+case "$z" in *.zip) unzip -q -o "$z" &amp;&amp; z=cursor-mac ;; esac
+if [ -n "$z" ]; then sh "$z/INSTALL-Mac.command"; else echo "没找到 cursor-mac，先点上面的按钮下载"; fi</code></pre>
+            <span class="sub">文件没下到「下载」文件夹的，把第一行换成 <code>cd 它所在的文件夹</code>。</span>
           </li>
           <li class="win-only">解压，打开解压出来的文件夹，双击 <code>INSTALL-Windows.cmd</code>。<span class="sub">弹出蓝色提示点「更多信息」→「仍要运行」。</span></li>
           <li>粘贴 key，回车，看到「完成」。</li>
@@ -239,10 +239,10 @@ bash ./INSTALL-Mac.command</code></pre>
         <ol class="list">
           <li>开着的 Codex App 先完全退出。</li>
           <li class="unix-only">打开「终端」，点代码块右上角「复制」，粘进终端，回车：
-            <pre><code>cd ~/Downloads
-chmod +x codex-mac.command
-bash ./codex-mac.command</code></pre>
-            <span class="sub">文件没下到「下载」文件夹的，把第一行换成它所在的文件夹。</span>
+            <pre><code>d=$(xdg-user-dir DOWNLOAD 2&gt;/dev/null); [ -d "$d" ] &amp;&amp; [ "$d" != "$HOME" ] || d=~/Downloads; cd "$d"
+f=$(ls -t | grep '^codex-mac.*command$' | head -n 1)
+if [ -n "$f" ]; then bash "$f"; else echo "没找到 codex-mac，先点上面的按钮下载"; fi</code></pre>
+            <span class="sub">文件没下到「下载」文件夹的，把第一行换成 <code>cd 它所在的文件夹</code>。</span>
           </li>
           <li class="win-only">双击下载的文件。弹出蓝色提示点「更多信息」→「仍要运行」。</li>
           <li>出现 <code>key:</code> 时粘贴 key，回车，看到「全部搞定！」。第一次约 2~5 分钟。</li>
@@ -295,10 +295,10 @@ codex</code></pre>
         <ol class="list">
           <li>开着的 Claude App 先完全退出。</li>
           <li class="unix-only">打开「终端」，点代码块右上角「复制」，粘进终端，回车：
-            <pre><code>cd ~/Downloads
-chmod +x claude-mac.command
-bash ./claude-mac.command</code></pre>
-            <span class="sub">文件没下到「下载」文件夹的，把第一行换成它所在的文件夹。</span>
+            <pre><code>d=$(xdg-user-dir DOWNLOAD 2&gt;/dev/null); [ -d "$d" ] &amp;&amp; [ "$d" != "$HOME" ] || d=~/Downloads; cd "$d"
+f=$(ls -t | grep '^claude-mac.*command$' | head -n 1)
+if [ -n "$f" ]; then bash "$f"; else echo "没找到 claude-mac，先点上面的按钮下载"; fi</code></pre>
+            <span class="sub">文件没下到「下载」文件夹的，把第一行换成 <code>cd 它所在的文件夹</code>。</span>
           </li>
           <li class="win-only">双击下载的文件。弹出蓝色提示点「更多信息」→「仍要运行」。</li>
           <li>出现 <code>key:</code> 时粘贴 key，回车，看到「通了」和「完成！」。第一次约 2~5 分钟。</li>
@@ -380,10 +380,10 @@ claude</code></pre>
     <ol class="list">
       <li>用 Cursor 连一次服务器（左下角 → Connect to Host），等显示已连接。</li>
       <li><span class="win-only">双击安装包文件夹里的 <code>REMOTE-SSH-Windows.cmd</code>，</span><span class="unix-only">在终端运行：</span>
-        <pre class="unix-only"><code>cd ~/Downloads
-cd cursor-mac
-chmod +x *.command *.sh
-bash ./REMOTE-SSH-Mac.command</code></pre>
+        <pre class="unix-only"><code>d=$(xdg-user-dir DOWNLOAD 2&gt;/dev/null); [ -d "$d" ] &amp;&amp; [ "$d" != "$HOME" ] || d=~/Downloads; cd "$d"
+z=$(ls -t | grep '^cursor-mac' | head -n 1)
+case "$z" in *.zip) unzip -q -o "$z" &amp;&amp; z=cursor-mac ;; esac
+if [ -n "$z" ]; then sh "$z/REMOTE-SSH-Mac.command"; else echo "没找到 cursor-mac，先点上面的按钮下载"; fi</code></pre>
         输入服务器名（照列出的填，或 <code>用户名@IP</code>），回车，再输 <code>yes</code>。</li>
       <li>看到「✅ 已补好」，关掉远程窗口重连。</li>
     </ol>
@@ -393,7 +393,7 @@ bash ./REMOTE-SSH-Mac.command</code></pre>
     <summary>更新与卸载</summary>
     <p><b>更新</b>：Cursor 不会自己升级。这个页面发了新版，就下载新包、解压、完全退出 Cursor，双击 <code>UPGRADE</code>，不用再输 key。</p>
     <p><b>卸载</b>：完全退出 Cursor，双击 <code>UNINSTALL</code>，输入 <code>yes</code>。</p>
-    <p class="sub unix-only">Mac / Linux 上这些按钮（UPGRADE、UNINSTALL、REPAIR、DOCTOR）都可以像安装那样在终端跑：进到 <code>cursor-mac</code> 文件夹，先 <code>chmod +x *.command *.sh</code>，再执行 <code>bash ./UPGRADE-Mac.command</code>，名字换成要用的那个。</p>
+    <p class="sub unix-only">Mac / Linux 上这些按钮（UPGRADE、UNINSTALL、REPAIR、DOCTOR）都可以在终端跑：复制第 4 步那段命令，把最后一行的 <code>INSTALL</code> 换成要用的那个（比如 <code>UPGRADE</code>）。会自动用你最新下载的那个包。</p>
     <p class="sub">聊天记录都不动。模型菜单会换成你的 key 能用的模型，自己加的模型名会被清掉。</p>
   </details>
 
@@ -404,9 +404,9 @@ bash ./REMOTE-SSH-Mac.command</code></pre>
       <a class="btn unix-only" href="{{codex-doctor-mac.command}}" download="codex-doctor-mac.command">下载 codex-doctor-mac.command</a>
       <a class="btn win-only" href="{{codex-doctor-windows.bat}}" download="codex-doctor-windows.bat">下载 codex-doctor-windows.bat</a>
     </p>
-    <pre class="unix-only"><code>cd ~/Downloads
-chmod +x codex-doctor-mac.command
-bash ./codex-doctor-mac.command</code></pre>
+    <pre class="unix-only"><code>d=$(xdg-user-dir DOWNLOAD 2&gt;/dev/null); [ -d "$d" ] &amp;&amp; [ "$d" != "$HOME" ] || d=~/Downloads; cd "$d"
+f=$(ls -t | grep '^codex-doctor-mac.*command$' | head -n 1)
+if [ -n "$f" ]; then bash "$f"; else echo "没找到 codex-doctor-mac，先点上面的按钮下载"; fi</code></pre>
     <p class="sub win-only">双击下载的文件。弹出蓝色提示点「更多信息」→「仍要运行」。</p>
     <p class="sub">报告会自动复制，也存一份在桌面（<code>codex-自检-时间.txt</code>），里面没有 key。最后的「结论」会写出查到的问题和怎么修。</p>
     <p>也可以先试：<b>重新跑一次安装文件</b>，再新开终端、完全退出 App 重开。</p>
@@ -446,9 +446,9 @@ bash ./codex-doctor-mac.command</code></pre>
       <a class="btn unix-only" href="{{claude-doctor-mac.command}}" download="claude-doctor-mac.command">下载 claude-doctor-mac.command</a>
       <a class="btn win-only" href="{{claude-doctor-windows.bat}}" download="claude-doctor-windows.bat">下载 claude-doctor-windows.bat</a>
     </p>
-    <pre class="unix-only"><code>cd ~/Downloads
-chmod +x claude-doctor-mac.command
-bash ./claude-doctor-mac.command</code></pre>
+    <pre class="unix-only"><code>d=$(xdg-user-dir DOWNLOAD 2&gt;/dev/null); [ -d "$d" ] &amp;&amp; [ "$d" != "$HOME" ] || d=~/Downloads; cd "$d"
+f=$(ls -t | grep '^claude-doctor-mac.*command$' | head -n 1)
+if [ -n "$f" ]; then bash "$f"; else echo "没找到 claude-doctor-mac，先点上面的按钮下载"; fi</code></pre>
     <p class="sub win-only">双击下载的文件。弹出蓝色提示点「更多信息」→「仍要运行」。</p>
     <p class="sub">报告会自动复制，也存一份在桌面（<code>claude-自检-时间.txt</code>），里面没有 key。最后的「结论」会写出查到的问题和怎么修。</p>
     <p>也可以先试：<b>关掉终端、完全退出 App，重新跑一次安装文件，再打开</b>。</p>

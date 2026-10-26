@@ -19,6 +19,9 @@ echo "== 1/4 构建 Codex / Claude =="
 bash codex-oneclick/build.sh  | tail -3
 bash claude-oneclick/build.sh | tail -3
 
+echo "== 1.5 页面终端命令场景回归(zsh+bash 真跑) =="
+python3 "$D/test_page_terminal_blocks.py" | tail -1
+
 echo "== 2/4 网页上线 =="
 bash "$D/publish_198.sh" | tail -1
 

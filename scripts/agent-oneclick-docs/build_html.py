@@ -8,7 +8,7 @@
 上线 = bash scripts/agent-oneclick-docs/publish_198.sh(→ https://chat.auto-link.com.cn/oneclick/)。
 ⚠️ 只能用浏览器打开真网址:飞书文件预览禁一切跳转(链接全点不了),claude.ai Artifact 沙箱拦 data: 下载。
 改了任一安装器 → 先按各自 skill 重新构建 → 再跑 publish_198.sh。
-Mac 运行一律写 `cd ~/Downloads` + `chmod +x` + `bash ./x`:浏览器下载会丢执行位,zsh 不认行尾 # 注释。
+Mac/Linux 终端命令 = 进「下载」文件夹(Linux 先问 xdg-user-dir)→ 取最新那份 → sh/bash 直接跑;改完跑 test_page_terminal_blocks.py。zsh 不认行尾 # 注释。
 """
 import base64, datetime, hashlib, mimetypes, os, re, sys, urllib.request
 from pathlib import Path
@@ -73,10 +73,12 @@ def check(tpl: str) -> list:
         red.append("页面里又写死了模型清单(菜单已按 key 动态拉取,发「刷模型」更新)")
     if "刷模型" not in tpl:
         red.append("页面里没有「刷模型」提示")
-    # Mac 终端命令必须先 chmod 再 bash ./
+    # 10-26 起终端命令:自动找「下载」文件夹里最新那份,用 sh/bash 直接跑(不写死文件名、不 chmod、不 cd ~/Downloads)。
+    #   旧写法三种坏形状(旧文件夹里的旧脚本被执行 / 第二次下载成 (1) 找不到 / 中文 Linux 叫 ~/下载)全由
+    #   test_page_terminal_blocks.py 在假下载文件夹里真跑来抓;这里只拦「又写回旧模板」。
     for blk in re.findall(r"<pre[^>]*><code>(.*?)</code></pre>", tpl, re.S):
-        if "bash ./" in blk and "chmod +x" not in blk:
-            red.append(f"代码块缺 chmod +x: {blk.splitlines()[-1]}")
+        if "cd ~/Downloads" in blk or "chmod +x" in blk or re.search(r"bash \./[\w-]+\.command", blk) or "[ -d cursor-mac ] ||" in blk:
+            red.append(f"终端命令又写回了写死文件名的旧模板: {blk.splitlines()[-1][:80]}")
     if KEY_RE.search(tpl) or any(KEY_RE.search(p.read_bytes().decode("latin-1")) for p in FILES.values() if p.exists()):
         red.append("页面或内嵌文件里有明文 key")
     return red

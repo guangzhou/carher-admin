@@ -56,6 +56,7 @@ python3 scripts/kiro-slots-watch.py --minutes 10
 - 🔴 `kiro-lane-regress.sh` 只测老实例的 `kiro-*` 道，**不经过 30891**，别拿它当槽位回归。
 - 本地改代码：工作树 `.work/kiro-0011/work`（基线 `.work/kiro-0011/base`），改完 `diff` 重新生成 0011 补丁再走 build。
 - 0012(10-26,未上线)超长报 `max(估算, bytes/3×1.1, 窗口+1)`,工作树 `.work/kiro-0012/{base,work}`;选值依据见记忆 project_cc_old_session_toolsearch_latch_rea_overflow。
+  🔴 **它已经在 `k8s/kiro-rs/patches/` 里** ⇒ `kiro-rs-build.sh` 按目录全打,**下一次任何人构建镜像都会带上它**。现网 slots31 是 0001~0011,不含 0012。用户还没点头上线 0012:构建别的改动前先问,或临时把 0012 挪出目录。
 
 ## 4. LiteLLM 侧（198 `litellm-product`）
 

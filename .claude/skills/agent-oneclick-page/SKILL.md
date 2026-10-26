@@ -15,6 +15,23 @@ description: 给同事的「Cursor · Codex · Claude Code 一键配置」单页
 或者「刷模型」不见了,都会报红。三个工具的菜单都按 key 现拉,见 skill `cursor-client-bundle-patch` /
 `codex-oneclick-rollout` / `claude-oneclick-rollout` 里的「刷模型」一节。
 
+## 三个桌面 App 安装包都在 198 镜像(2026-10-26)
+
+| App | 稳定链接(页面/飞书只链这些) | 谁维护 |
+|---|---|---|
+| Claude | `cc.auto-link.com.cn/ccdl/desktop/Claude-{mac.zip,windows-x64.msix,windows-arm64.msix}` | `claude-oneclick/ccdl-sync.sh`,cron 06:17 |
+| Cursor | `…/ccdl/apps/Cursor-{mac.dmg,windows-x64.exe,windows-arm64.exe}` | `scripts/agent-oneclick-docs/app-mirror-sync.sh`(198 `/usr/local/bin/carher-app-mirror-sync.sh`),cron 06:37 |
+| Codex | `…/ccdl/apps/Codex-{mac.dmg,windows-x64.msix,windows-arm64.msix}` | 同上 |
+
+- 版本号:`/ccdl/apps/versions.json`;日志 198 `/var/log/carher-app-mirror-sync.log`。手动跟版:`sudo carher-app-mirror-sync.sh [cursor|codex]`。
+- Cursor 跟 **latest 更新通道**(同事自动升级拿的就是它),所以镜像可能比补丁台架验过的版本新;每日巡检同样看 latest。
+- Codex Windows 只有微软商店:`msstore_msix_urls.py 9PLM9XGG6VKS` 走微软 displaycatalog + FE3 拿官方 msix 直链。
+  坑:第三方 rg-adguard 有 Cloudflare 人机验证;FE3 证书是 Windows 私有根(只对该主机跳过校验);
+  一个更新回主包 + 1MB BlockMap cab 两条地址,必须按 FileDigest 取主包;文件名是随机 GUID,按大小对上架构。
+- 校验:字节数对官方 Content-Length / 微软目录;msix 另比 SHA1;全过才切软链。下载回本机 `spctl -a -t open --context context:primary-signature` 应为 Notarized Developer ID。
+- `build_html.py` 门禁:App 链接回到官方直链(downloads.cursor.com / persistent.oaistatic.com / get.microsoft.com)即红;镜像链接逐个 HEAD 须 200 且 >10MB(离线构建设 `CX_SKIP_MIRROR_HEAD=1`)。
+- Codex 飞书文档原有 8-31 的 dmg/msix 附件已删(`apply.py` 的 RETIRED 集合)。
+
 ## 文件
 
 ```

@@ -931,6 +931,19 @@ pristine 断言会正确判红,**那不是腿坏是喂错了**。
 并且**随手配一个坏样本**确认检查器真会红(我第一个坏样本 `function x(){ return ;;; }` 居然合法,
 `;;;` 是三个空语句 ⇒ 对照恒绿;改成 `function x( { return 1 }` 才报红)。
 
+### 3.27.12 / 3.27.14 适配(2026-10-26,程文旭 DOCTOR 全红报上来)
+
+- 🔴 **同事的版本 ≠ 下载页版本**:`/download/stable/...` 回 3.27.12,同事是 **3.27.14**,来自
+  更新通道 `/updates/api/update/darwin-arm64/cursor/<当前版本>/<commit>/stable`(或 `/download/latest/...`)。
+  ⇒ 适配要对**同事 DOCTOR 报的那个版本号**抽 bundle,不是对下载页。`--fetch` 只拿 stable,要另下。
+- 四处改动(js+py+`cursor_ctxwin_patch.js` 同步):
+  ① localagent:`if(aGo.releaseAfterSend(u.conversationId),mc.localMode){try{` —— 条件成逗号表达式,AST 取最后一项,正则把前缀项并进第 1 组原样保留;
+  ② 件C daemon.cjs 去掉了空白 ⇒ 字面量锚点全 0,改「名字逐字、只容忍空白」正则 `CW_*_SRC_RX`;
+  ③ 件D daemon.cjs `async runOptions=>{` 单参无括号;
+  ④ 我们自己的 bug:`let SOFT_MISS` 在 `CX_APPLY_TO_FILE` 钩子之后才声明 ⇒ 锚点一 miss 报 ReferenceError,盖住真错误(改 var)。
+- 验:3.27.12 75 PASS、3.27.14 74 PASS(`--new-bundles <dir> --new-app <挂载的 .app>`),均 0 FAIL 0 SKIP;3.24.12 旧产物逐字节不变。
+  ⚠️ **仍未真机实测**(本机还是 3.24.12)。dmg 第一次下载 900s 超时只到 310/316MB ⇒ 下载用 `curl -C -` 续传 + 比 Content-Length。
+
 ### 新版本漂移修复流程(3.18.25 / 3.19.19 / 3.20.21 / 3.24.12 四次都按这个走)
 
 同事报「锚点命中=0 → 拒绝动手」= 那处代码被官方重构了,**不是模型/LiteLLM 问题**。

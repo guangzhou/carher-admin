@@ -94,7 +94,7 @@ const APP_USER_KEY = "src.vs.platform.reactivestorage.browser.reactiveStorageSer
   ".persistentStorage.applicationUser";
 const BACKUP_ROOT = path.join(os.homedir(), ".cursor-team-setup-backup");
 
-const VERIFIED_VERSIONS = ["3.16", "3.17", "3.18", "3.19", "3.20", "3.21", "3.24"];  // 锚点在这些大版本上数过命中(09-03: 3.16.x/3.17.19/3.18.25;09-10: 3.19.19;09-15: 3.20.17/3.20.21;09-22: 3.21.16;10-12: 3.24.12)
+const VERIFIED_VERSIONS = ["3.16", "3.17", "3.18", "3.19", "3.20", "3.21", "3.24", "3.27"];  // 锚点在这些大版本上数过命中(09-03: 3.16.x/3.17.19/3.18.25;09-10: 3.19.19;09-15: 3.20.17/3.20.21;09-22: 3.21.16;10-12: 3.24.12;10-26: 3.27.12)
 /* 2026-09-22 加 "3.21" 的实测依据(不是"看起来应该行"):同事报 3.21.16/win32 弹未验告警,
    于是把 3.21.16 的真 bundle 拉下来数了命中 —— 下载 commit 8ae78e8ee1e63479c7e0504b664bc0a80c6800f
    的 darwin-arm64 dmg(win32 那份是 Inno 6.4 打的,本机 innoextract 1.9 解不开;同一 commit 的
@@ -530,7 +530,9 @@ const LOCATORS = {
     const out = [];
     astWalk(ast, (n) => {
       if (n.type !== "IfStatement") return;
-      const t = n.test;
+      // 3.27.12 起条件变成逗号表达式 `if(X.releaseAfterSend(u.conversationId),mc.localMode){try{`
+      // ⇒ 只换最后那一项(前面的 releaseAfterSend 调用必须照常执行),替换范围还是那个成员表达式。
+      const t = n.test.type === "SequenceExpression" ? n.test.expressions[n.test.expressions.length - 1] : n.test;
       if (!(t.type === "MemberExpression" && t.property && t.property.name === "localMode")) return;
       if (n.consequent.type !== "BlockStatement") return;
       const first = n.consequent.body[0];
@@ -708,8 +710,11 @@ const PATCHES = [
     //   ⚠️ 这条正则是 **py 那条路 + bundle_anchor_probe.js** 的量具(探针读的是本文件的 PATCHES,
     //   不是 py 的)⇒ 漏改这里,探针会在 AST 已经打上的版本上报 hits=0,看着像没适配。
     // 三代都认;命中仍必须恰好 1 次,多了照样拒。
+    // 3.27.12: `…enableSmokeTestDriver===!0});if(aGo.releaseAfterSend(u.conversationId),mc.localMode){try{` —— 条件前多了
+    //   一个逗号项;它必须原样保留(副作用调用),所以并进第 1 组,只换 `<ID>.localMode`。
     rx: new RegExp("((?:clientSupportsRoutedModelUpdate:!0\\}|localMode:" + ID
-      + "\\.localMode\\}\\)|enableSmokeTestDriver===!0\\}\\));if\\()(" + ID + "\\.localMode)(\\)\\{try\\{)", "g"),
+      + "\\.localMode\\}\\)|enableSmokeTestDriver===!0\\}\\));if\\((?:" + ID + "\\.releaseAfterSend\\(" + ID + "\\.conversationId\\),)?)("
+      + ID + "\\.localMode)(\\)\\{try\\{)", "g"),
     sub: (m) => m[1] + "/*@cxteam-localagent*/!0" + m[3],
   },
   {
@@ -1132,6 +1137,10 @@ const CW_B_SRC = `function getBackgroundSummarizationTriggerThreshold(maxTokens,
   if (maxTokens <= 0) {`;
 const CW_C_SRC = `function shouldPersistBackgroundSummarization(usedTokens, maxTokens, props) {
   const unusedTokens = maxTokens - usedTokens;`;
+// daemon.cjs 的三处锚点:名字逐字钉死,只容忍空白;A 的第 1 组 = 老代那行 snapshotBlobId(有就是 ≤3.21)
+const CW_A_SRC_RX = /function\s+createRedactedConversationTokenDetails\(\s*privacyMode\s*,\s*partial2\s*\)\s*\{\s*return\s*\{\s*usedTokens:\s*0,\s*maxTokens:\s*0,\s*breakdown:\s*void 0,\s*promptContextUsageTree:\s*void 0,\s*(promptContextUsageSnapshotBlobId:\s*void 0,\s*)?\.\.\.partial2,\s*_privacyMode:\s*privacyMode\s*\};?\s*\}/g;
+const CW_B_SRC_RX = /function\s+getBackgroundSummarizationTriggerThreshold\(\s*maxTokens\s*,\s*props\s*\)\s*\{(?=\s*if\s*\(\s*maxTokens\s*<=\s*0\s*\))/g;
+const CW_C_SRC_RX = /function\s+shouldPersistBackgroundSummarization\(\s*usedTokens\s*,\s*maxTokens\s*,\s*props\s*\)\s*\{(?=\s*const\s+unusedTokens\s*=\s*maxTokens\s*-\s*usedTokens\s*;)/g;
 const CW_NORM_MIN = 'function __cxN(x){return "number"==typeof x&&x>0&&x<4096?(1===x?1e6:1e3*x):x}';
 const cwNormSrc = (v) =>
   `${v} = typeof ${v} === "number" && ${v} > 0 && ${v} < 4096 ? (${v} === 1 ? 1e6 : ${v} * 1e3) : ${v};`;
@@ -1170,16 +1179,18 @@ function ctxwinApplyToText(src, kind) {
   }
   // A 有两代字面量:老的带 snapshotBlobId、3.24.12 起没有。各数一次,**加起来必须恰好 1**
   // ——两代同时命中说明文件里有两个同名函数(形状变了),和 0 命中一样不许动手。
-  const naOld = src.split(CW_A_SRC).length - 1;
-  const naNew = src.split(CW_A_SRC_NEW).length - 1;
-  const na = naOld + naNew;
-  const aSrc = naOld === 1 ? CW_A_SRC : CW_A_SRC_NEW;
+  // 3.27.12 起 daemon.cjs 去掉了空白(`function createRedactedConversationTokenDetails(privacyMode,partial2){return{…`),
+  // 名字没变 ⇒ 字面量锚点全 0。改成「只容忍空白差异」的正则(名字仍逐字钉死),换进去的代码与原来逐字相同。
+  const aM = [...src.matchAll(CW_A_SRC_RX)], bM = [...src.matchAll(CW_B_SRC_RX)], cM = [...src.matchAll(CW_C_SRC_RX)];
+  const naOld = aM.filter((m) => m[1]).length, naNew = aM.length - naOld;
+  const na = aM.length;
   const aBlobSrc = naOld === 1 ? CW_A_SRC_BLOB : "";
-  const nb = src.split(CW_B_SRC).length - 1, nc = src.split(CW_C_SRC).length - 1;
+  const nb = bM.length, nc = cM.length;
   if (na !== 1) return { ok: false, why: "锚A count=" + na + "(老代=" + naOld + " 新代=" + naNew + ")" };
   if (nb !== 1) return { ok: false, why: "锚B count=" + nb };
   if (nc !== 1) return { ok: false, why: "锚C count=" + nc };
-  let out = src.replace(aSrc, `function createRedactedConversationTokenDetails(privacyMode, partial2) {
+  const aSrc = aM[0][0];
+  let out = src.replace(aSrc, () => `function createRedactedConversationTokenDetails(privacyMode, partial2) {
   /*${CTXWIN_MARKER}*/
   const __cxN = (x) => typeof x === "number" && x > 0 && x < 4096 ? (x === 1 ? 1e6 : x * 1e3) : x;
   const __cxR = {
@@ -1196,14 +1207,13 @@ ${aBlobSrc}    ...partial2,
   }
   return __cxR;
 }`);
-  out = out.replace(CW_B_SRC, `function getBackgroundSummarizationTriggerThreshold(maxTokens, props) {
+  // B/C:正则只吃到函数体的 `{`(后面靠前瞻钉语义),所以只在 `{` 后插入,原函数体一个字不动
+  out = out.replace(bM[0][0], (m) => m + `
   /*${CTXWIN_MARKER}*/
-  ${cwNormSrc("maxTokens")}
-  if (maxTokens <= 0) {`);
-  out = out.replace(CW_C_SRC, `function shouldPersistBackgroundSummarization(usedTokens, maxTokens, props) {
+  ${cwNormSrc("maxTokens")}`);
+  out = out.replace(cM[0][0], (m) => m + `
   /*${CTXWIN_MARKER}*/
-  ${cwNormSrc("maxTokens")}
-  const unusedTokens = maxTokens - usedTokens;`);
+  ${cwNormSrc("maxTokens")}`);
   return { ok: true, out, applied: ["A", "B", "C"] };
 }
 
@@ -1320,7 +1330,7 @@ const NL_MIN = new RegExp('"@anysphere/agent-host:local-loop-turn-router"\\);'
 const NL_SRC = new RegExp('function\\s+createLocalLoopTurnRouter\\((' + ID + ')\\)\\s*\\{\\s*'
   + 'return\\s*(?:'
   + '\\((' + ID + ')\\)\\s*=>\\s*(' + ID + ')\\(this,\\s*void 0,\\s*void 0,\\s*function\\*\\s*\\(\\)\\s*\\{'
-  + '|async\\s*\\((' + ID + ')\\)\\s*=>\\s*\\{'
+  + '|async\\s*\\(?(' + ID + ')\\)?\\s*=>\\s*\\{'      // 3.27.12 起单参数不带括号:`async runOptions=>{`
   + ')', "g");
 // reason 用我们自己的字面量而不是照抄 "gate-off":日志里要能一眼看出这是**我们**摘的,
 // 而不是服务端本来就没开。把自己的动作伪装成环境的原样是给下一轮诊断埋雷。
@@ -1507,8 +1517,10 @@ function planByAst(src) {
    现在:planBundle 捕获 → 这个文件整份跳过(一个字节不动)→ 别的家族照常打 → 结尾大声报红 + 非 0 退出。
    ⚠️ 测试钩子(CX_APPLY_TO_FILE)是直调 applyPatchesToText,不开软失败 ⇒ 台架原来靠
       exit 2 断言锚点的那几腿语义**一个字没变**。 */
-let SOFT_MISS = false;
-const MISSED = [];
+// var 不是 let:测试钩子 CX_APPLY_TO_FILE 在文件更靠前的位置就调 applyPatchesToText,锚点一 miss 走到 patchRefuse
+// 会碰到这里 —— let 在声明之前读是 TDZ 报错(10-26 3.27.12 台架③腿 ReferenceError),掩盖真正的「哪个锚点没认出」。
+var SOFT_MISS = false;
+var MISSED = [];
 function patchRefuse(msg) {
   if (SOFT_MISS) { const e = new Error(msg); e.cxRefuse = true; throw e; }
   console.log(msg);

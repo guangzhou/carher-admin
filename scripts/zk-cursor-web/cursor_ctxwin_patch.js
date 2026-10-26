@@ -92,6 +92,9 @@ ${blobLine}    ...partial2,
     _privacyMode: privacyMode
   };
 }`;
+const A_SRC_RX=/function\s+createRedactedConversationTokenDetails\(\s*privacyMode\s*,\s*partial2\s*\)\s*\{\s*return\s*\{\s*usedTokens:\s*0,\s*maxTokens:\s*0,\s*breakdown:\s*void 0,\s*promptContextUsageTree:\s*void 0,\s*(promptContextUsageSnapshotBlobId:\s*void 0,\s*)?\.\.\.partial2,\s*_privacyMode:\s*privacyMode\s*\};?\s*\}/g;
+const B_SRC_RX=/function\s+getBackgroundSummarizationTriggerThreshold\(\s*maxTokens\s*,\s*props\s*\)\s*\{(?=\s*if\s*\(\s*maxTokens\s*<=\s*0\s*\))/g;
+const C_SRC_RX=/function\s+shouldPersistBackgroundSummarization\(\s*usedTokens\s*,\s*maxTokens\s*,\s*props\s*\)\s*\{(?=\s*const\s+unusedTokens\s*=\s*maxTokens\s*-\s*usedTokens\s*;)/g;
 const A_SRC=aSrcOf(A_SRC_BLOB);     // ≤3.21 那代
 const A_SRC_NEW=aSrcOf("");         // 3.24.12 起
 // ── 锚点 B:摘要触发阈值函数 ──
@@ -152,15 +155,17 @@ function planFile(p, kind){
   } else {
     // A 两代各数一次,**加起来必须恰好 1**(两代同时命中 = 文件里两个同名函数,形状变了,
     // 和 0 命中一样不许动手)。
-    const caOld=s.split(A_SRC).length-1, caNew=s.split(A_SRC_NEW).length-1;
-    const ca=caOld+caNew;
-    const aSrc=caOld===1?A_SRC:A_SRC_NEW;
+    // 3.27.12 起 daemon.cjs 去掉了空白 ⇒ 字面量全 0。改「名字逐字、只容忍空白」的正则(与安装器 CW_*_SRC_RX 同一份)。
+    const aM=[...s.matchAll(A_SRC_RX)], bM=[...s.matchAll(B_SRC_RX)], cM=[...s.matchAll(C_SRC_RX)];
+    const caOld=aM.filter((m)=>m[1]).length, caNew=aM.length-caOld;
+    const ca=aM.length;
     const aBlobSrc=caOld===1?A_SRC_BLOB:"";
-    const cb=s.split(B_SRC).length-1, cc=s.split(C_SRC).length-1;
+    const cb=bM.length, cc=cM.length;
     if(ca!==1) return {err:`锚点A命中=${ca}(须 1;老代=${caOld} 新代=${caNew})`};
     if(cb!==1) return {err:`锚点B命中=${cb}(须 1)`};
     if(cc!==1) return {err:`锚点C命中=${cc}(须 1)`};
-    s=s.replace(aSrc, `function createRedactedConversationTokenDetails(privacyMode, partial2) {
+    const aSrc=aM[0][0];
+    s=s.replace(aSrc, ()=>`function createRedactedConversationTokenDetails(privacyMode, partial2) {
   /*${MARK}*/
   const __cxN = (x) => typeof x === "number" && x > 0 && x < 4096 ? (x === 1 ? 1e6 : x * 1e3) : x;
   const __cxR = {
@@ -177,14 +182,13 @@ ${aBlobSrc}    ...partial2,
   }
   return __cxR;
 }`);
-    s=s.replace(B_SRC, `function getBackgroundSummarizationTriggerThreshold(maxTokens, props) {
+    const NORM='maxTokens = typeof maxTokens === "number" && maxTokens > 0 && maxTokens < 4096 ? (maxTokens === 1 ? 1e6 : maxTokens * 1e3) : maxTokens;';
+    s=s.replace(bM[0][0], (m)=>m+`
   /*${MARK}*/
-  maxTokens = typeof maxTokens === "number" && maxTokens > 0 && maxTokens < 4096 ? (maxTokens === 1 ? 1e6 : maxTokens * 1e3) : maxTokens;
-  if (maxTokens <= 0) {`);
-    s=s.replace(C_SRC, `function shouldPersistBackgroundSummarization(usedTokens, maxTokens, props) {
+  ${NORM}`);
+    s=s.replace(cM[0][0], (m)=>m+`
   /*${MARK}*/
-  maxTokens = typeof maxTokens === "number" && maxTokens > 0 && maxTokens < 4096 ? (maxTokens === 1 ? 1e6 : maxTokens * 1e3) : maxTokens;
-  const unusedTokens = maxTokens - usedTokens;`);
+  ${NORM}`);
     notes.push("A=createRedactedConversationTokenDetails()", "B=getBackgroundSummarizationTriggerThreshold()", "C=shouldPersistBackgroundSummarization()");
   }
   return {out:s, notes};

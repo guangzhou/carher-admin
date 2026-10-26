@@ -303,9 +303,11 @@ PATCHES = [
          # 这是**真的形状变了**(不是 minify 名字被摇),所以必须按 SOP 第 3 步补正则,
          # 而不是指望 ID 捕获。锚的落点(`if(<ID>.localMode){try{`)三代逐字未变。
          # 实测:三代各自 exactly-1(3.24.12 desktop `Cc` / glass `kl`,各 1 次)。
+         # 3.27.12:条件前多一个逗号项 `X.releaseAfterSend(u.conversationId),`,原样保留(并进第 1 组)
          rx=re.compile(r"((?:clientSupportsRoutedModelUpdate:!0\}|localMode:" + _ID
-                       + r"\.localMode\}\)|enableSmokeTestDriver===!0\}\));if\()("
-                       + _ID + r"\.localMode)(\)\{try\{)"),  # 三代都认
+                       + r"\.localMode\}\)|enableSmokeTestDriver===!0\}\));if\((?:" + _ID
+                       + r"\.releaseAfterSend\(" + _ID + r"\.conversationId\),)?)("
+                       + _ID + r"\.localMode)(\)\{try\{)"),  # 四代都认
          sub=lambda m: m.group(1) + "/*@cxteam-localagent*/!0" + m.group(3)),
     dict(name="dedicated", marker="@cxteam-dedicated",
          rx=re.compile(r"(" + _ID + r"\(this\.storageService,\"useDedicatedLocalAgentRuntimeHost\"\))(\?await this\.runLocalAgentInDedicatedExtensionHost\()"),

@@ -4,7 +4,7 @@ description: >-
   198 LiteLLM（ns litellm-product）整版本升级的总 runbook：看新版变更 → 烘焙补丁 → DB 迁移 → 灰度（驾驶台或命令行）→
   收敛转正 → 修保险丝 → 转正后换 callback。串起现成工具（gray-rollout 状态机 / scripts/run/ 操作层 / 升级驾驶台 /
   8 条并排回归（含主组全挂兜底契约）/ prepare-values / 删除集+形状门禁 / worker-kill 分诊 / lane-callback-swap），每一步都写了
-  10-02 v1.103.2、10-17 v1.105.1 两轮踩过的坑。
+  10-02 v1.103.2、10-17 v1.105.1、10-26 v1.106.4 三轮踩过的坑（10-26 那轮全程自主、零回退，用的就是本页的顺序）。
   Use when 用户说「升级 litellm / 看看新版本有什么变更 / 新版本能不能上 / 灰度新版本 / 把新版设为正式 /
   旧版缩容 / 驾驶台 / 回归一下 / 用例回归 / 新旧并排对比 / 线上 callback 要换 / 三条车道补丁不一致」。
 ---
@@ -28,6 +28,20 @@ description: >-
 | 补丁配方 | `litellm-gray-rollout/patches/v<ver>/`（Dockerfile + 烘焙脚本 + overlays/ + README） |
 | LiteLLM 源码 | 198 `/root/litellm-fork`：`git show <tag>:<path>`，**不 checkout**；fetch 走 `https://www.github.com/BerriAI/litellm.git` |
 | 198 登录 | `ssh -o BatchMode=yes cltx@10.68.13.198 'sudo -n bash -s'`（ssh key，不用密码） |
+| 上一轮实跑 | v1.106.4 = `/root/l3/up1064-20261025T164519Z/`（clone/ mig-prod/ gray/ prod-target/ go/ 都是能直接当模板的实跑件）；配方+坑 `patches/v1.106.4/README.md` |
+
+**操作层脚本一览**（`litellm-gray-rollout/scripts/run/`，198 root，拷进 `$D/` 用；都读 `$D/target.env`）：
+
+| 步骤 | 脚本 | 一句话 |
+|---|---|---|
+| §2 clone | `clone-qualify.sh <模板run> <tag>` | dump→A→migrate→post-dump→B→C→四腿，串行、红就停 |
+| §2 生产 | `prod-migrate.sh <模板run> <tag>` | 查长事务→before→migrate→after→零重写/零丢失判定；CIC 卡住只 cancel 只读 psql |
+| §3.1 快照 | `snap-from-live.py --out … --prev-shape … [--overlays-dir …] [--carry-gray-extras]` | live prod CM + 新覆盖件 + 上轮形状，gray 带外件照 live 位置 |
+| 冻结 | `freeze.sh` / 或按 `$D/gray/` 里的 prepare-values 链 | — |
+| 门禁 | `gates.sh <release> <deploy> <manifest> <dir> [--approve "<consumer>"]` | 删除集+形状，固定口径自动批，口径外 STOP |
+| §3.2 | `step.sh` / `chain.sh` / `ramp.sh` / `obs.sh` / `protect-noisy-keys.sh` | 放量 |
+| ≥50 | `capacity.sh <50\|100>` | 驾驶台卡「容量还没测」时现量一份本 generation 的 |
+| §5 | `converge.sh "<依据>"`（要 `GO_VERSION` `ROUTER_COUNTS` `DB_MIGRATIONS`）→ `commit.sh "<回归依据>"` | 收敛转正 |
 
 ## 0. 看新版本（只读）
 
@@ -68,6 +82,10 @@ release 原文用 `curl api.github.com/.../releases/tags/vX.Y.Z` 取（WebFetch 
 | 🔴 文档里的开关在**当前 tag 源码**里有没有 | `git -C /root/litellm-fork grep -c <name> v<当前版本> -- litellm` ——10-20 查到 4 个只在文档里（`reasoning_effort_rounding` 1.108+、`fallback_on_unsupported_params` 1.107…），照文档配不生效 |
 | live callbacks 引用的上游符号 | `scripts/litellm-callback-upstream-audit.py --old <tag> --new <tag> --cb-dir <live CM 落盘>`（198 root）：GONE = 会静默 skip，CHANGED = 被包装的函数体变了，要回归 |
 | 烘焙补丁 / 覆盖件能不能打到新源码 | 补丁脚本直接对 `git archive <tag>` 的树跑；覆盖件 `patch --dry-run`（1.106 passthrough 那份因为上游改名失败） |
+| 选哪个补丁版 | 稳定线每 1~3 天出补丁（10-21→10-25 1.106.2→.3→.4 只是镜像卫生：cosign 换钥、去 eMudhra CA、价格表 ImportError）； `git diff --stat vA vB -- 'litellm/*.py'` 看 Python 业务改了几行，**0 行 = 直接取最新**，不用重审 |
+| 客户端可见的返回形状变了吗 | 1.106 `/v1/models?client_version=` 改回 Codex 原生 `{"models":[…]}`、超 1 MB 截尾（日志 `Codex model catalog cut`）。 判影响：先 grep 生产 pod 日志里谁带这个参数（10-26：6h 2 次，只有少数 Codex Desktop）；一键配置走 `model_catalog_json` 本地文件不受影响， 用 `codex debug models`（隔离 CODEX_HOME，key 走 env）对新旧车道各跑一次、输出逐字节比 |
+| 计费口径 | 1.106 带 LIT-145：超时 / 499 / 重试失败行开始计价、每个计费超时重试单独一行 ⇒ 额度烧得更快，属修 bug；`spend-row-parity` 并排 9/9 照验 |
+| 上游新冷却规则 | 1.106 `_is_cooldown_required` 加了 402（欠费上游自动冷却）——和 `dead_deployment_retry` 只包 400 不冲突，CHANGED 审计里逐条这么核 |
 
 ## 1. 镜像与补丁
 
@@ -78,19 +96,38 @@ release 原文用 `curl api.github.com/.../releases/tags/vX.Y.Z` 取（WebFetch 
 - 整文件覆盖件（core / passthrough streaming_handler、anthropic logging handler）**每个版本按新源重做**到 `overlays/`。
 - 行为探针在 `--network none` 容器里对比 旧 / vanilla 新 / 补丁新 三个镜像（SSE 生命周期、别名计价都这么验）。
 - callback 套件在新旧两个镜像里逐文件跑 pytest（本机缺依赖；wheel 下载后解压进 PYTHONPATH），**两边通过数和失败集合要一样**。
+  现成 runner：`$上一轮run/../rev1106/cbsuite/run.sh` 形状（`docker run --network none -v $S:/s:ro <img> sh /s/run.sh`，新旧并行跑）。
+  🔴 `--network none` 下拉不到价格表，pytest 汇总行会被 `model cost map fetch … failed` 的 WARNING 顶掉（读成 NO_SUMMARY）⇒ 只认 `tail -1`，
+  那几个文件单独加 `LITELLM_LOCAL_MODEL_COST_MAP=True` 重跑。
+- 覆盖件重做：旧 `.diff` 对新源 `patch` 打；失败块多半是上游改名（1.106：`_update_completion_start_time`→`update_completion_start_time`），
+  sed 改 diff 里的名字再打，**允许 fuzz 但要语义复核**（调用点个数、改动行数 = 上一版同数，`diff -rq` 全树只许 3 个文件不同）。
 
 ## 2. DB（clone 先过、生产后迁）
 
-`$D/dumpprod.sh`（排除两张日志表数据）→ clone dump → restore A → migrate A → post-dump → restore B/C →
-兼容四腿（new/old/concurrent，**runner CM 要用带 `BARRIER_ACK_KEYS` 的那份**，旧的会复现竞态）→ 生产 migrate Job（`lock_timeout=5s`）→
-比 relfilenode（零重写）和列集合（零丢失）。🔴 `kubectl exec -i` 往 pod 灌 80MB 会卡死 apiserver websocket ⇒ 校验 dump 用 `kubectl cp`。
+`$D/dumpprod.sh`（排除两张日志表数据）→ `run/clone-qualify.sh`（clone dump → restore A → migrate A → post-dump → restore B/C →
+兼容四腿 new/old/concurrent，**runner CM 要用带 `BARRIER_ACK_KEYS` 的那份**，旧的会复现竞态）→ `run/prod-migrate.sh`（生产 migrate Job，
+`lock_timeout=5s`，比 relfilenode 零重写、列/索引/表零丢失）。🔴 `kubectl exec -i` 往 pod 灌 80MB 会卡死 apiserver websocket ⇒ 校验 dump 用 `kubectl cp`。
+
+10-26 v1.106.4 新踩的（都已焊进两个脚本）：
+- 🔴 **CONCURRENTLY 索引在生产被别人的长只读查询卡住**（Lock/virtualxid，一条 13 分钟的 SpendLogs psql）：clone 上 0.01s 的迁移在生产等了 10 分钟。
+  迁移前先看 >2 分钟事务；卡住时 `pg_blocking_pids` 找阻塞者，**只读 + `application_name=psql` 才 `pg_cancel_backend`**（`LONG_TXN_CANCEL=1`）。
+- wait 超时要 >10 分钟，否则 after 快照取在半截；before/after 比较 `LC_ALL=C sort`。
+- clone dump 的「非日志表 ≤1 GiB」闸门已过时（DailyTagSpend 等合计 1.1 GB）⇒ `DUMP_LIMIT_BYTES` 默认 4 GiB。
+- post-mig dump 与 restore B/C 必须串行；`GRAY_IMAGE_DIGEST` 写裸 digest（写全引用 ⇒ runner `execution binding checksum is invalid`）。
 
 ## 3. 灰度
 
 ### 3.1 冻结 gray（`scripts/run/freeze.sh`）
 
-- 🔴 **以 live prod 为底**：config / callbacks 取 live prod 的 CM（不是 live gray，10-17 取错少 3 个模型）。
+- 🔴 **以 live prod 为底**：config / callbacks 取 live prod 的 CM（不是 live gray，10-17 取错少 3 个模型）。`run/snap-from-live.py` 一步做完。
 - `--deployment` 用上一轮冻结时那份 Deployment 形状（卷名对得上），再补上带外加的 callback mount、去掉要下线的。
+  🔴 **不能直接拿 live Deployment**：helm 渲染出的卷名是 `snapshot-*`，prepare-values 报 `volume snapshot-… has no --snapshot`；
+  live 上的悬空 mount（`websearch_you_com.py`，CM 无此 key）也要去掉，否则报 `mounts … which the audited directory lacks`。
+- gray 要保留的带外件（10-26：sec_redact 影子 + `SEC_REDACT_SHADOW=1`）照 **live gray 的列表位置** 插（放末尾 ⇒ 形状门禁报 ORDER）。
+- 冻结出的 gray replicas 取 live 值；放量前扩到 **= prod 副本数**（10-26 2→4），只改 replicas、渲染 diff 恰 2 行，扩完重 pin + 重 baseline、
+  monitor `--expected-ready` 跟着改。转正后再缩回 2（同样只改 replicas）。
+- 开新 run 前若有闲置的旧 run 占着 `active`（10-26：sec-redact 影子 run，split=0 force-gray 空）：停它的 monitor → 签 `global_rollback` → `gray-global-rollback.sh`
+  → 签 `run_close` → `gray-run-close.sh`，再 `gray-run-init`。动 gray 前给同车道会话发消息。
 - 冻结后逐项和 live prod 比：只许差计划内的改动（+ gray 自带的 `disable_reset_budget`）。
 - nginx base template = 上一轮模板 + live 带外块，要求**重渲染 = live 逐字节**才用。
 
@@ -111,7 +148,13 @@ worker 0 被杀、重启不变、监控循环在跑、巡检号已钉旧版；�
 3. buyitian 两把 `protect-prod`（放最后）；试点 10 把 = 近 24h 单次输入最大的在职用户
 4. monitor loop：baseline 每个 run 重做（夜里 `--baseline-window-minutes 360 --baseline-exempt-class image`）；
    🔴 **spend 探针模型先手跑 `collect-spend-reconciliation.py --probes 3` 见 `terminal=3 http=[200]`**（10-17 openrouter 402 ⇒ 1% 档首周期自动回退）
-5. `GRAY_PER_CONTAINER_CONCURRENCY=50`（10-17 实测单 pod 30~49 并发 / ~1 核；默认 8 会误判容量不足）
+5. `GRAY_PER_CONTAINER_CONCURRENCY=50`（10-17 实测单 pod 30~49 并发 / ~1 核；默认 8 会误判容量不足）。
+   🔴 **驾驶台进程也要带这个 env 启动**（还有 `GRAY_RUN_POINTER`）：它调的 step.sh 在 ≥50 档读它，没有就报缺参停住。
+6. 试点 key 明文从飞书 cursor 账户表 `API Key` 列按 sha256 对上 token 取（只在内存里，b64 过 stdin 给 198，用完 `rm -P`）；
+   **名单事务每把都轮转 generation ⇒ `key_pilot_entry` 每把 force-gray / remove 前重签**（10-26 第 2 把就报 generation mismatch）。
+
+驾驶台在 50/100 档前停在「容量还没测」：上一档 split 事务把容量证据的 generation 作废了，它只读不量 ⇒ `run/capacity.sh <50|100>` 现量一份，下一 tick 就走。
+各档耗时（10-26 实测）：每档 = 驻留 25/30 分钟 + step.sh 自己再等 5 个新周期（~25 分钟）⇒ 0→100 约 4.5 小时。
 
 其它坑：心跳账本 append-only ⇒ 新 run 先持锁只留本 run 行；SRC 目录 `chown root` + `chmod go-w`；
 split 按 key 哈希（凌晨 1% 档新版可能只有个位数请求）；试点失败率要按 key×model 拆、对旧版同 key 同 model。
@@ -147,16 +190,21 @@ vanilla 也绿时打 `NOTE`（上游自带了 ⇒ 补丁可评估下线），不
 ## 5. 收敛转正（§7，`scripts/run/converge.sh` → 回归 → `commit.sh`）
 
 1. 四份 convergence 证据 → prepare（/pro/ 全到 gray）→ 100 秒后 30402 = 0 → `prod_zero` → `prod_offline_upgrading`
-2. prod values 用和 gray **同一套快照**（只差 `disable_reset_budget`）；`--deployment` 用升级前的 live Deployment；
+2. prod values 用和 gray **同一套快照**（只差 `disable_reset_budget` 和 gray 独有的带外件，如 sec_redact）；`--deployment` 同 §3.1 规则（上轮冻结形状 + 新 mount）；
    整文件覆盖件必须是**新版那一套**（= gray），不能从 live prod CM 取（那是旧版的，rev9 就这么错过）。
-   `check-release-deletion-set.py`（不许删 ClusterIP `litellm-proxy`）+ `check-pod-spec-shape.py` 逐条批准
-   （live prod 上「只声明未挂载」的旧卷可以删，先确认 `mounted=False`）
+   **在灰度放量期间提前冻好**（prod-target 与 go 两份），收敛时不用等：冻完逐项核 config 字节 = live prod、callbacks = live prod CM、
+   additionalSnapshots 与 gray 逐项相同（R10 的前提）。
+   门禁 `run/gates.sh litellm-product-proxy litellm-proxy … --approve "…"`（不许删 ClusterIP `litellm-proxy`；
+   live prod 上「只声明未挂载」的旧卷可以删，脚本自己判 `mounted=False`）
+   `converge.sh` 要三个 env：`GO_VERSION`（保险丝当前版本）、`ROUTER_COUNTS`（三车道 `/router/settings` 条数，先量、要同 hash）、`DB_MIGRATIONS`（生产迁移后条数）。
 3. 备份 → `helm upgrade` → rollout → **R10 逐 pod 6 个文件 sha = gray**（只看非 terminating 的 pod，旧 pod 优雅退出要 10 分钟；
    rollout 绿 / health 200 / 回归全绿都看不出覆盖件版本错了）
 4. pin（三个 release 一起重报）→ 直打 30402 跑回归 → `prod_verified` → commit
 5. 🔴 **修保险丝**：guarded-old 换成「上一版 digest + 升级前生产 config 快照」（10-17 它还停在 1.100.1、少 3 模型、没验过新库）；
-   上线后并排回归。gray 缩到 2 副本热备（只改 replicas，门禁断言只变这一项）。关 run。
-6. 收尾：探针 key 删、明文 key 文件 shred、驾驶台留着。
+   快照 = `snap-from-live.py --out $D/go-inputs`（**不给 --overlays-dir** ⇒ 覆盖件取 live prod 的上一版那套），profile `values-guarded-old.yaml`，digest = `PREV_DIGEST`。
+   上线后并排回归 + 兜底契约。gray 缩到 2 副本热备（只改 replicas，门禁断言只变这一项）。关 run（签 `run_close` → `gray-run-close.sh`）。
+6. 收尾：停 monitor loop、探针 key 文件 shred、明文 key 文件 `rm -P`、驾驶台留着；给同车道会话发「已完成、run 目录在哪」。
+   10-26 收尾读数：转正后 15 分钟 5274 请求 5xx 0；三车道兜底契约 OK；三车道 router 142/5/24 同 hash。
 
 chart 必须渲染出 live 的样子（8e14e5f 四处）：ClusterIP `litellm-proxy`、路由标签值 `enabled`、Service 按路由标签选、`topologySpreadConstraints`。
 
@@ -220,6 +268,14 @@ flock -n $D/.console.lock bash $SRC/scripts/lane-config-tune.sh --lane gray --ru
 
 🔴 回归期间**别的会话 rollout 了 B 侧车道** ⇒ B 侧 -1 / `No route to host`，单边全挂 = 量具（pod 被换掉），重跑那几条即可；
 codex 压缩格假红两类已修（model_id 变 12 位 hex 哈希不再按族比；`keepalive` 心跳算噪声）。
+
+10-26 又修两条量具假红（不是版本问题，先判量具）：
+- `key_behavior` claude-code 两边 404 `Key not found` = 参考 key 的 alias 10-25 被批量改成姓名拼音（user_id 不动）⇒ `regress.py` 改 `claude-code-shangwenze-7729`；
+  以后参考 key 404 先查 `BACKUP_key_alias_pinyin_*` 表里新名。
+- `budget` 两边 `KeyError: 'data'` = 冒烟脚本先把 key 打满再 `/v1/models`，超额 key 连列模型都 429 ⇒ 改成先列模型再打满。
+  剩下 S1/S2「超额软拦截应 200」在 1.103.2 / 1.105.1 / 1.106.4 三车道都回 429 = 既有行为（未查），不挡升级。
+- `kiro` 超时 = 老 kiro.rs 实例一批组（kiro-auto / sonnet-4-5 / gpt5.6-* / minimax / qwen3-coder-next …）10-25 15:00 起**生产同样整组 502**；
+  判法：同一组模型直打 30402 和 30405 各一发（`litellm-lane-bench.py --rounds 1`），两边同 code 就是上游。
 
 ## 7. 排查原则
 

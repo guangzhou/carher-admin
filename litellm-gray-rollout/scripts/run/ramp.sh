@@ -19,4 +19,4 @@ bash $D/sign.sh split_sample "$BASIS" >/dev/null
 bash $SRC/scripts/gray-split-update.sh $PCT 2>&1 | grep -vE 'render-production-nginx|syntax is ok|test is successful' | tail -2
 bash $SRC/scripts/gray-phase.sh current | grep -E '^(split|generation)='
 echo "health=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -H 'Host: cc.auto-link.com.cn' http://127.0.0.1/pro/health/liveliness) at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-NOW=$(awk -F= '$1=="split"{print $2}' /etc/nginx/gray-route/active/state.env); [ "$NOW" = "$PCT" ] || { echo "STOP: split 未变成 $PCT（现 $NOW）"; exit 1; }
+NOW=$(awk -F= '$1=="split"{print $2}' /etc/nginx/gray-route/active/state.env); [ "$NOW" = "$PCT" ] || { echo "STOP: split 未变成 ${PCT}（现 ${NOW}）"; exit 1; }

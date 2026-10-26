@@ -1,31 +1,38 @@
 #!/usr/bin/env bash
-# 在 198 上串行下发一批 key 到 force-gray。
+# 在 198 上串行下发一批 key 到 force-gray（或 protect-prod / remove / force-prod）。
 #
 # 用法（在 198 上跑）:
-#   apply-batch.sh <run_id> <keys-file> [logfile]
+#   apply-batch.sh <keys-file> [action=force-gray] [logfile] ["<签字依据>"]
 # 例:
-#   apply-batch.sh litellm-198-v195-20260914 /root/l3/h50.keys
+#   apply-batch.sh /root/l3/h50.keys force-gray
+# run 目录取 ${GRAY_RUN_POINTER:-/root/l3/.gray-run-latest}（10-17 起的 run/ 操作层布局：$D/target.env 的 SRC、$D/nginx/frozen-env.sh、$D/sign.sh）。
 #
 # 设计约束（都是踩出来的，别"优化"掉）:
 #   - key 只走隐藏 stdin（printf | bash），永不进 argv / history / 日志
 #   - 一把一次调用、一次 nginx reload —— 脚本本身没有批量模式
 #   - 失败即停（break），好定位。恢复时从 FAIL 行的 N+1 续跑，别整个文件重跑
 #   - 约 1 把/秒，300 把以上必然超前台超时，用后台任务跑
+#   - 🔴 每个名单事务都轮转 generation ⇒ force-gray（以及 split≠0 时的 remove）每把前都要按当前 generation 重签 key_pilot_entry
+#     （10-26 只签一次 ⇒ 第 2 把就 `invalid key_pilot_entry gate evidence: generation mismatch`）
 set -uo pipefail
 
-RUN_ID="${1:-}"
-KEYS="${2:-}"
+KEYS="${1:-}"
+ACTION="${2:-force-gray}"
 LOG="${3:-}"
+BASIS="${4:-指名 key 试点（名单与选人依据见 run 目录 pilot/）}"
 
-if [[ -z "$RUN_ID" || -z "$KEYS" ]]; then
-  echo "用法: $0 <run_id> <keys-file> [logfile]" >&2
+if [[ -z "$KEYS" ]]; then
+  echo "用法: $0 <keys-file> [force-gray|protect-prod|remove|force-prod] [logfile] [\"<签字依据>\"]" >&2
   exit 2
 fi
+case "$ACTION" in force-gray|protect-prod|remove|force-prod) ;; *) echo "action 不认识: $ACTION" >&2; exit 2 ;; esac
 
-RUN="/root/litellm-gray-run/$RUN_ID"
+RUN=$(cat "${GRAY_RUN_POINTER:-/root/l3/.gray-run-latest}")
+# shellcheck disable=SC1091
+. "$RUN/target.env"
 ENVF="$RUN/nginx/frozen-env.sh"
-S="$RUN/src-3914155/litellm-gray-rollout/scripts/gray-key-route.sh"
-LOG="${LOG:-/root/l3/$(basename "$KEYS" .keys).applylog}"
+S="$SRC/scripts/gray-key-route.sh"
+LOG="${LOG:-$RUN/pilot/$(basename "$KEYS" .keys).applylog}"
 
 [[ -f "$ENVF" ]] || { echo "找不到 $ENVF —— run_id 对吗？" >&2; exit 1; }
 [[ -x "$S" || -f "$S" ]] || { echo "找不到 $S" >&2; exit 1; }
@@ -60,7 +67,11 @@ n=0; ok=0; fail=0
 while IFS= read -r k; do
   [[ -n "$k" ]] || continue
   n=$((n+1))
-  if printf "%s" "$k" | bash "$S" force-gray >>"$LOG" 2>&1; then
+  # force-prod / protect-prod 永不设闸；force-gray 与 remove 要当前 generation 的 key_pilot_entry
+  if [[ "$ACTION" == force-gray || "$ACTION" == remove ]]; then
+    bash "$RUN/sign.sh" key_pilot_entry "$BASIS；第 $n 把" >/dev/null || { echo "签 key_pilot_entry 失败（signer.env？）" >&2; break; }
+  fi
+  if printf "%s" "$k" | bash "$S" "$ACTION" >>"$LOG" 2>&1; then
     ok=$((ok+1))
   else
     fail=$((fail+1))

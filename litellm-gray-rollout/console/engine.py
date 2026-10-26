@@ -135,7 +135,8 @@ def evaluate(r: Readings, auto_enabled: bool = True) -> Verdict:
     # 3. ≥50 档的额外条件
     if nxt is not None and nxt >= 50:
         if r.capacity_status is None:
-            unsure.append("容量还没测（升 50/100 前必须测）")
+            # 上一档 split 事务会把容量证据的 generation 作废；驾驶台只读不量（10-26 卡在这里 1 小时）
+            unsure.append(f"容量还没测（升 50/100 前必须测）：198 上跑 bash $D/capacity.sh {nxt}")
         elif r.capacity_status != "PASS":
             fails.append(f"容量检查不过：{', '.join(r.capacity_errors) or r.capacity_status}")
         elif r.capacity_bound_to_run is False:

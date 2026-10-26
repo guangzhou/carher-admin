@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 灰度切流后的双尺子验证 + 容量体检。在 198 上跑。
 #
-# 用法: verify-rollout.sh <run_id> [观察分钟数，默认10]
+# 用法: verify-rollout.sh [观察分钟数，默认10]   （run 目录 = ${GRAY_RUN_POINTER:-/root/l3/.gray-run-latest}）
 #
 # 两把尺子，缺一不可:
 #   尺子一 = 映射表 sid 清单（证明"配置里有")
@@ -9,12 +9,11 @@
 # 只有尺子一叫"脚本回显"，不算验证。
 set -uo pipefail
 
-RUN_ID="${1:-}"
-MINS="${2:-10}"
-[[ -n "$RUN_ID" ]] || { echo "用法: $0 <run_id> [分钟数]" >&2; exit 2; }
-
-RUN="/root/litellm-gray-run/$RUN_ID"
-S="$RUN/src-3914155/litellm-gray-rollout/scripts/gray-key-route.sh"
+MINS="${1:-10}"
+RUN=$(cat "${GRAY_RUN_POINTER:-/root/l3/.gray-run-latest}")
+# shellcheck disable=SC1091
+. "$RUN/target.env"
+S="$SRC/scripts/gray-key-route.sh"
 G=/var/log/nginx/cc-auto-link.gray.log
 
 set -a

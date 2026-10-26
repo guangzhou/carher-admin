@@ -92,9 +92,10 @@ description: 198 LiteLLM 网关按 key 名单灰度切流到新版本（force-gr
 ## 1. 环境（不 source 就全盘失败）
 
 ```bash
-RUN=/root/litellm-gray-run/<run_id>          # 例 litellm-198-v195-20260914
+RUN=$(cat /root/l3/.gray-run-latest)         # 10-17 起的 run/ 操作层布局（例 /root/l3/up1064-20261025T164519Z）
+. $RUN/target.env                            # 给出 SRC
 set -a; . $RUN/nginx/frozen-env.sh; set +a   # ← 忘了这句，下面全报错
-S=$RUN/src-3914155/litellm-gray-rollout/scripts/gray-key-route.sh
+S=$SRC/scripts/gray-key-route.sh
 bash $S list                                  # 冒烟：能列出 sid 才算环境对
 ```
 
@@ -187,24 +188,25 @@ kubectl describe nodes | grep -A5 'Allocated resources'   # 看 requests 不是�
 
 **一把 key 一次调用，一次 nginx reload，没有批量模式**（`grep -rn "batch|while read|--file|xargs"` 在脚本里查无此物）。所以：
 
-**下发前先把 `key_pilot_entry` 证据备好**，否则第一把 key 就会被门禁挡下：
+**`key_pilot_entry` 每把都要按当前 generation 签**（每个名单事务都会轮转 generation，签一次只够第一把）。
+用 run 目录的 `sign.sh`（签字人取 `$RUN/signer.env`，不手写 JSON）；`scripts/apply-batch.sh` 已经每把前自动重签：
 
 ```bash
-# 人签证据。signer 写真名，不是 root / operator / FILL_ME。
-# run_id / generation / config_checksum 从当前状态读，不要手抄。
-eval "$(bash $RUN/src-*/litellm-gray-rollout/scripts/gray-phase.sh current | sed 's/^/S_/')"
-CS=$(sudo awk -F= '$1=="config_checksum"{print $2}' /etc/nginx/gray-route/active/state.env)
-umask 077
-sudo tee /root/litellm-gray-run/evidence/key_pilot_entry.json >/dev/null <<EOF
-{"gate":"key_pilot_entry","status":"PASS","signer":"刘国现",
- "run_id":"$S_run_id","generation":"$S_generation","config_checksum":"$CS",
- "captured_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
-EOF
-sudo chmod 600 /root/litellm-gray-run/evidence/key_pilot_entry.json
+bash $RUN/sign.sh key_pilot_entry "<选人依据>；本把 sid <sid>"     # force-gray，以及 split≠0 时的 remove
 ```
 
-证据吃 `run_id`+`generation`+`config_checksum`+24h，所以**中途 pin 过 workload
-就要重开一份**（generation 轮转了）。这不是麻烦，这就是机制本身。
+10-26 v1.106.4：只签一次 ⇒ 第 2 把 `invalid key_pilot_entry gate evidence: generation mismatch`，停在第 1 把（失败即停起作用了）。
+
+**试点明文的另一种来源**（只取少数几把时更省事）：先在 198 用 SQL 选出 token hash（例：近 24h 单次输入最大的在职用户，R8），
+再在 Mac 上拉飞书表 `API Key` 列、本地算 sha256 对上，只把对上的那几把 base64 过 stdin 发去 198，用完 `rm -P`：
+
+```bash
+lark-cli base +record-list --base-token DlT9bsrwMad12VsogEpcK9Ptncc --table-id tblJT2s6Y6xjYj5A \
+  --field-id key_alias --field-id 'API Key' --format ndjson --output ./bt.ndjson --overwrite
+# python：sha256(API Key) ∈ 198 给的 hash 集合 ⇒ 收进 pilot.b64（0600）；bt.ndjson 立刻删
+ssh cltx@10.68.13.198 'sudo -n bash -c "umask 077; base64 -d > /root/l3/pilot.keys; bash apply-batch.sh /root/l3/pilot.keys force-gray; shred -u /root/l3/pilot.keys"' < pilot.b64
+rm -P pilot.b64       # apply-batch 要读 keys 文件三遍（格式校验/计数/下发），不能喂 /dev/stdin
+```
 
 ```bash
 # 明文落地：base64 → 0600 文件，永不进 argv

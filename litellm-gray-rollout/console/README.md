@@ -9,9 +9,13 @@
 
 ```bash
 # 198 上（root）启动：监听内网 IP，来源白名单 = 10.68.30.0/24（办公网）+ 10.68.13.0/24（机房网段）
-sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml GRAY_REPO_SCRIPTS=/opt/gray-console/scripts nohup setsid python3 /opt/gray-console/console/server.py \
-  --bind 10.68.13.198 --port 8795 --allow 10.68.30.0/24 --allow 10.68.13.0/24 --no-auto > /opt/gray-console/server.log 2>&1 &
+sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml GRAY_REPO_SCRIPTS=/opt/gray-console/scripts \
+  GRAY_PER_CONTAINER_CONCURRENCY=50 GRAY_RUN_POINTER=/root/l3/.gray-run-latest \
+  nohup setsid python3 /opt/gray-console/console/server.py \
+  --bind 10.68.13.198 --port 8795 --allow 10.68.30.0/24 --allow 10.68.13.0/24 --no-auto > /opt/gray-console/server.log 2>&1 < /dev/null &
 # 没有灰度在跑时用 --no-auto；开新一轮灰度、想让它自己升档时去掉 --no-auto 重启（或页面上打开「自动推进」）
+# 🔴 GRAY_PER_CONTAINER_CONCURRENCY 不带 ⇒ ≥50 档它调的 step.sh 报缺参停住（10-26）。开新 run 前先把 /root/l3/.gray-run-latest 指向新 run 目录再重启。
+# 50/100 档前页面停在「容量还没测」= 上一档事务把容量证据作废了，按页面提示跑 $D/capacity.sh <50|100>。
 
 # 写操作口令（页面右下「操作口令」里粘贴；每次启动重新生成）
 ssh cltx@10.68.13.198 'sudo cat /root/l3/.console-token'

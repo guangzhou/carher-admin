@@ -52,6 +52,6 @@ if [ "$NEXT" -ge 50 ]; then
   GO=$(kubectl -n litellm-product get deploy litellm-proxy-guarded-old -o jsonpath='{.status.readyReplicas}/{.spec.replicas}')
   H=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:30406/health/liveliness)
   [ "$GO" == "2/2" ] && [ "$H" == "200" ] || { echo "STOP: guarded-old $GO health=$H"; exit 1; }
-  bash $D/sign.sh split_bridge "guarded-old $GO Ready、30406 liveliness $H（回退时 bridge 承接）" >/dev/null
+  bash $D/sign.sh split_bridge "guarded-old ${GO} Ready、30406 liveliness ${H}（回退时 bridge 承接）" >/dev/null
 fi
 bash $D/ramp.sh $NEXT $WS "$BASIS" 2>&1 | grep -vE 'syntax is ok|test is successful'

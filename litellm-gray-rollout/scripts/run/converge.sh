@@ -24,7 +24,7 @@ n=$(awk -v cut="$(date -d '100 seconds ago' +%Y-%m-%dT%H:%M:%S)" '{split($1,a,"=
 g=$(awk -v cut="$(date -d '100 seconds ago' +%Y-%m-%dT%H:%M:%S)" '{split($1,a,"=");if(substr(a[2],1,19)<cut)next;if($0~/upstream=127.0.0.1:30405/)c++}END{print c+0}' /var/log/nginx/cc-auto-link.gray.log)
 echo "after prepare: nginx->30402=$n nginx->30405=$g"
 [ "$n" -eq 0 ] || die "nginx 仍有请求到 30402 ($n)"
-bash $D/sign.sh prod_zero "convergence mode=1 后 100 秒：nginx→30402 = 0，→30405 = $g；force-prod 空" "旧 prod 余下仅 ClusterIP 集群内消费者（非 nginx），RollingUpdate maxUnavailable=0 不断服"
+bash $D/sign.sh prod_zero "convergence mode=1 后 100 秒：nginx→30402 = 0，→30405 = ${g}；force-prod 空" "旧 prod 余下仅 ClusterIP 集群内消费者（非 nginx），RollingUpdate maxUnavailable=0 不断服"
 bash $SRC/scripts/gray-phase.sh set prod_offline_upgrading 2>&1 | tail -1
 TS=$(date -u +%Y%m%dT%H%M%SZ); B=$P/backup-$TS; mkdir -p $B
 helm -n litellm-product get values litellm-product-proxy -o yaml > $B/helm-values.yaml

@@ -70,6 +70,11 @@ imgs = [e.get("id") for e in els if e.tag == "img"]
 for i, x in enumerate(imgs):
     keep[f"IMG{i}"] = x
 want = set(re.findall(r"⟦(\w+)⟧", BODY))
+# 10-26 起 Codex 的 dmg/msix 改链 198 镜像(app-mirror-sync.sh 每天跟版),文档里那两个 8-31 的旧附件不再用 ⇒
+#   正文不留占位就从文档里删掉;别的附件(安装器 .command/.bat、截图)缺占位仍然报错,防止误删。
+RETIRED = {"DMG", "MSIX"}
+for k in sorted((set(keep) - want) & RETIRED):
+    print("   删除已退役附件", k, keep[k]); upd("block_delete", block_id=keep.pop(k))
 assert want == set(keep), (sorted(want), sorted(keep))
 kids = list(keep.values())
 

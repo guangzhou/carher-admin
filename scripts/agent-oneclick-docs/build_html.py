@@ -10,7 +10,7 @@
 改了任一安装器 → 先按各自 skill 重新构建 → 再跑 publish_198.sh。
 Mac 运行一律写 `cd ~/Downloads` + `chmod +x` + `bash ./x`:浏览器下载会丢执行位,zsh 不认行尾 # 注释。
 """
-import base64, datetime, hashlib, mimetypes, re, sys
+import base64, datetime, hashlib, mimetypes, os, re, sys, urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +54,20 @@ def check(tpl: str) -> list:
             red.append(f"缺文件 {k}: {p}")
     if hits := [w for w in BANNED if w in tpl]:
         red.append(f"页面里有内部词: {hits}")
+    # 10-26 起三个桌面 App 的安装包都走 198 镜像(/ccdl/desktop = Claude、/ccdl/apps = Cursor/Codex)。
+    #   官方直链会过期(Cursor 写死 3.24.12 那次)或在国内卡住(Codex 商店在线安装器),不许再回来。
+    if hits := re.findall(r'href="(https://(?:downloads\.cursor\.com|persistent\.oaistatic\.com|get\.microsoft\.com)[^"]*)"', tpl):
+        red.append(f"App 下载又指向官方直链(应走 cc.auto-link.com.cn/ccdl/apps): {hits[:3]}")
+    # 镜像链接必须真能下(HEAD 200 且有字节数);离线构建设 CX_SKIP_MIRROR_HEAD=1 跳过,但发版脚本不设
+    if not os.environ.get("CX_SKIP_MIRROR_HEAD"):
+        for u in sorted(set(re.findall(r'href="(https://cc\.auto-link\.com\.cn/ccdl/(?:apps|desktop)/[^"]+)"', tpl))):
+            try:
+                r = urllib.request.urlopen(urllib.request.Request(u, method="HEAD"), timeout=30)
+                n = int(r.headers.get("Content-Length") or 0)
+                if r.status != 200 or n < 10_000_000:
+                    red.append(f"镜像链接下不了或太小: {u} (HTTP {r.status}, {n} 字节)")
+            except Exception as e:
+                red.append(f"镜像链接下不了: {u} ({e})")
     # 10-19 起三个工具的模型菜单都按 key 动态拉取,页面里不许再列写死的模型清单
     if "全部 39 个模型" in tpl or re.search(r"全部 \d+ 个模型", tpl):
         red.append("页面里又写死了模型清单(菜单已按 key 动态拉取,发「刷模型」更新)")

@@ -17,7 +17,7 @@ KEYLINK = ('<a href="https://t83dfrspj4.feishu.cn/share/base/query/shrcnf5OElDgu
 KEY_LI = f'<b>拿 key</b>：{KEYLINK}。Cursor、Codex、Claude Code 用同一把。'
 QUIT = '完全退出（Mac 按 <code>Cmd + Q</code>；Windows 右键任务栏图标 → 退出）'
 WIN_WARN = '<p>Windows 弹出蓝色安全提示：点「更多信息」→「仍要运行」。</p>'
-C = "https://downloads.cursor.com/production/37b865941ccb31e2fc90c685157534efca87f964"
+APPS = "https://cc.auto-link.com.cn/ccdl/apps"   # 10-26 起 Cursor/Codex 安装包也走 198 镜像(app-mirror-sync.sh 每天跟版)
 CCDL = "https://cc.auto-link.com.cn/ccdl/desktop"
 
 
@@ -71,8 +71,8 @@ CURSOR = "".join([
     p("<b>① 拿 key</b>：" + KEYLINK + "。Cursor、Codex、Claude Code 用同一把。"),
     p("<b>② 装 Cursor</b>（装过的跳过），按你的电脑选一个："),
     table([["电脑", "下载", "装法"],
-           ["Mac", f'<a href="{C}/darwin/universal/Cursor-darwin-universal.dmg"><b><u>点这里下载</u></b></a>', "打开 .dmg，把 Cursor 拖进「应用程序」"],
-           ["Windows", f'<a href="{C}/win32/x64/user-setup/CursorUserSetup-x64-3.24.12.exe"><b><u>点这里下载</u></b></a>', "双击 .exe 安装"],
+           ["Mac", f'<a href="{APPS}/Cursor-mac.dmg"><b><u>点这里下载</u></b></a>', "打开 .dmg，把 Cursor 拖进「应用程序」"],
+           ["Windows", f'<a href="{APPS}/Cursor-windows-x64.exe"><b><u>点这里下载</u></b></a>（ARM 电脑用<a href="{APPS}/Cursor-windows-arm64.exe">这个</a>）', "双击 .exe 安装"],
            ["其他", '<a href="https://cursor.com/download"><u>官网下载页</u></a>', "—"]]),
     p("<b>③ 注册并登录 Cursor 账号</b>（已登录的跳过）：打开 Cursor，点 <b>Sign Up</b> 用邮箱注册（已有账号点 <b>Log In</b>），"
       "在浏览器里完成后回到 Cursor。<b>免费账号就够</b>，不用买会员。不登录用不了我们的模型。"),
@@ -145,11 +145,9 @@ def codex(external):
         table([["客户端", "怎么装"],
                ["命令行 <code>codex</code>", "不用装，一键脚本发现没有会自动装"],
                ["桌面 App", f"装下面的安装包（装过的跳过）。装好先别打开，已经开着的{QUIT}"]]),
-        p('Mac：<a href="https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"><b><u>点这里下载官方安装包</u></b></a>，双击 .dmg，把 Codex 拖进「应用程序」。'),
-        ph("DMG"),
-        p('Windows：<a href="https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi"><b><u>点这里下载官方安装器</u></b></a>，双击后按提示安装。装不上找<cite type="user" user-id="ou_36efe139cd762579ae266081764b59fc" user-name="宋力"></cite>开权限，'
+        p(f'Mac：<a href="{APPS}/Codex-mac.dmg"><b><u>点这里下载官方安装包</u></b></a>，双击 .dmg，把 Codex 拖进「应用程序」。'),
+        p(f'Windows：<a href="{APPS}/Codex-windows-x64.msix"><b><u>点这里下载官方安装包</u></b></a>（ARM 电脑用<a href="{APPS}/Codex-windows-arm64.msix">这个</a>），双击 .msix 按提示安装。装不上找<cite type="user" user-id="ou_36efe139cd762579ae266081764b59fc" user-name="宋力"></cite>开权限，'
           '或看 <cite doc-id="La8twWEToibR9Jk6yZucTz78nDc" file-type="wiki" title="Codex 配置" type="doc"></cite>。'),
-        ph("MSIX"),
         "<h1>2. 一键配置</h1>",
         p("按你的电脑下载一个，双击。<b>Mac / Linux</b>（文件名带 <code>-mac</code>）："),
         ph("MAC"),

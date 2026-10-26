@@ -51,7 +51,7 @@ DOCS = {
                    attach={"cursor-mac.zip": ZIP_MAC, "cursor-windows.zip": ZIP_WIN},
                    stale=COMMON_STALE + ["whiteboard"]),
     CODEX_MAIN: dict(
-        name="Codex", figures=4, imgs=2,
+        name="Codex", figures=2, imgs=2,   # 10-26 起 dmg/msix 走 198 镜像链接,8-31 那两个旧附件已删
         attach={"codex-mac.command": ROOT / "codex-oneclick/codex-mac.command",
                 "codex-windows.bat": ROOT / "codex-oneclick/codex-windows.bat"},
         # 10-13 起脚本自动装 codex 命令行 ⇒「先装好 codex」的前提是旧真相
@@ -71,9 +71,10 @@ DOCS = {
 # 「已下架」那句提示里点名旧名是对的,不算残留
 ALLOW_IN = ("已下架", "已整段下架")
 MUST = {
-    "cursor": ["downloads.cursor.com/production/", "cursor.com/download", "Remote-SSH"],
+    # 10-26 起三个 App 都走 198 镜像(/ccdl/apps = Cursor/Codex,/ccdl/desktop = Claude),不再要求官方直链
+    "cursor": ["ccdl/apps/Cursor-mac.dmg", "ccdl/apps/Cursor-windows-x64.exe", "Remote-SSH"],
     # 命令行由一键脚本自动装(10-13 用户:别再给手动 npm 命令,CLI 与 App 是并列两个选项)
-    "codex": ["一键脚本发现没有会自动装", "codex-app-prod/Codex.dmg", ".msix"],
+    "codex": ["一键脚本发现没有会自动装", "ccdl/apps/Codex-mac.dmg", "ccdl/apps/Codex-windows-x64.msix"],
     "claude": ["一键脚本发现没有会自动装", "ccdl/desktop/Claude-mac.zip", "ccdl/desktop/Claude-windows-x64.msix"],
 }
 KEY_RE = re.compile(r"sk-[A-Za-z0-9_-]{16,}")

@@ -23,6 +23,17 @@ spec:
   selector: {app: kiro-rs-slots}
   ports: [{name: http, port: 8990, targetPort: 8990, nodePort: 30891}]
 ---
+# 交接用：headless + 发布未就绪地址 ⇒ 新 pod（待命、未就绪）能解析到旧 pod 的 IP，
+# 主动请求它交接。普通 Service 只含 ready 的 pod，交接期拿不到对方地址。
+apiVersion: v1
+kind: Service
+metadata: {name: kiro-rs-slots-peer, namespace: kiro-rs}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: {app: kiro-rs-slots}
+  ports: [{name: http, port: 8990, targetPort: 8990}]
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,8 +43,25 @@ metadata:
     app: kiro-rs-slots
 spec:
   replicas: 1
+  # 无缝换版（见 skill kiro-rs-slots「换镜像」）。
+  # 原来 Recreate：先停旧 pod 再起新 pod，旧 pod 一收 SIGTERM 就不收新连接、却要等
+  # 300s 优雅期里的长请求跑完，新 pod 又必须等旧 pod 退完才起 ⇒ 实测断流约 2 分钟
+  # （10-26 slots31：41 次失败 / 4 把 key）。
+  #
+  # 🔴 maxUnavailable 必须是 0：k8s 一旦开始停旧 pod，就把它的 ready 置 False、
+  # 立刻不再给它派新流量（实测 ready=False/serving=True，serving 只保已有连接）。
+  # 而新 pod 还要几秒才 ready ⇒ maxUnavailable=1 时实测有约 4.2s 没有可用后端。
+  # maxUnavailable=0 的语义是「新 pod ready 之后才停旧 pod」，正是要的顺序。
+  #
+  # 曾经的死锁（已解除）：新 pod 要等旧 pod 交出租约才 ready，旧 pod 要等 k8s 停它才交租约。
+  # 解法 = 新 pod 待命时主动调旧 pod 的 /api/admin/handoff（经 kiro-rs-slots-peer 解析地址）：
+  # 旧 pod 立刻交出状态目录但**仍留在 Service 后端继续接客**，新 pod 随即接管并 ready，
+  # 之后 k8s 才停旧 pod ⇒ 全程都有 ready 的后端。
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: kiro-rs-slots
@@ -53,29 +81,66 @@ spec:
         env:
         - name: RUST_LOG
           value: info
+        # 自己的 pod 名（租约持有者标识 + 让新 pod 能精确直连旧 pod）。
+        # 🔴 不能用 HOSTNAME：容器里本来就有这个变量，用 fieldRef 覆盖它实测会变成空字符串
+        # （10-26 实测：HOSTNAME= 空 ⇒ 持有者名为空、主动交接的 URL 拼不出来 ⇒ 回到死锁）。
+        - name: KIRO_POD_NAME
+          valueFrom:
+            fieldRef: {fieldPath: metadata.name}
+        # 自己的 pod IP：写进租约文件，供下一个实例直连请求交接。
+        # 🔴 不能靠 DNS：Deployment 的 pod 没有稳定 DNS 名（StatefulSet 才有），
+        # 实测 <pod>.<headless-svc> 解析失败 ⇒ 交接请求发不出去、滚动更新死锁。
+        - name: KIRO_POD_IP
+          valueFrom:
+            fieldRef: {fieldPath: status.podIP}
         image: docker.io/library/kiro-rs:v2026.10.1-carher-slots9
         imagePullPolicy: IfNotPresent
+        # liveness 只看进程活着：待命期（等旧 pod 交接）也必须 200，否则会被重启
         livenessProbe:
           failureThreshold: 3
           initialDelaySeconds: 15
           periodSeconds: 20
           successThreshold: 1
-          tcpSocket:
+          httpGet:
+            path: /healthz
             port: 8990
-          timeoutSeconds: 1
+          timeoutSeconds: 2
         name: kiro-rs
+        # 🔴 preStop：k8s 一决定停这个 pod，就立刻把它从 Service 后端摘掉，
+        # 而新 pod 要 1~2s 才被加进后端 ⇒ 这段时间后端数为 0，请求无处可去
+        # （10-26 实测：后端为 0 持续约 1.4s）。
+        # preStop 让 kubelet 先等 8s 再发 SIGTERM：这 8s 里旧 pod 仍在 Endpoints 里正常接客，
+        # 足够新 pod 接管并被 kube-proxy 加进后端，之后旧 pod 才开始收尾。
+        lifecycle:
+          preStop:
+            exec:
+              # 顺序：①主动交接（交出状态目录 + 释放租约，但本 pod 仍在 Endpoints 里继续接客）
+              #      ②等 8s —— 新 pod 用这段时间接管并被 kube-proxy 加进后端
+              #      之后 kubelet 才发 SIGTERM，本 pod 收尾退出 ⇒ 全程后端里都有人在接客。
+              # 🔴 不能只 sleep 不交接：新 pod 要等租约释放才会就绪，干等只是把空档推后。
+              # adminApiKey 从挂载的 config.json 现读（和 Admin API 同一把）。
+              command:
+              - /bin/sh
+              - -c
+              - |
+                K=$(sed -n 's/.*"adminApiKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /app/config/config.json | head -1)
+                wget -q -O- --header="x-api-key: $K" --post-data='' http://127.0.0.1:8990/api/admin/handoff || true
+                sleep 8
         ports:
         - containerPort: 8990
           name: http
           protocol: TCP
+        # 🔴 必须用 HTTP 探 /readyz，不能用 TCP：待命期端口已在监听（要回 /healthz），
+        # TCP 探针会直接判就绪 ⇒ 流量在接管前就被切过来，请求会失败。
         readinessProbe:
-          failureThreshold: 3
-          initialDelaySeconds: 3
-          periodSeconds: 10
+          failureThreshold: 2
+          initialDelaySeconds: 2
+          periodSeconds: 2
           successThreshold: 1
-          tcpSocket:
+          httpGet:
+            path: /readyz
             port: 8990
-          timeoutSeconds: 1
+          timeoutSeconds: 2
         resources:
           limits:
             cpu: '2'
@@ -114,7 +179,9 @@ spec:
       restartPolicy: Always
       schedulerName: default-scheduler
       securityContext: {}
-      terminationGracePeriodSeconds: 30
+      # 线上是 300：换版时旧 pod 要等在途长流（最长几分钟）跑完再退。
+      # 滚动更新下这段时间不再断流——新 pod 已经待命，旧 pod 交接后它立刻接管。
+      terminationGracePeriodSeconds: 300
       tolerations:
       - effect: NoSchedule
         key: dedicated

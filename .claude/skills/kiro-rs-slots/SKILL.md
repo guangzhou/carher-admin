@@ -23,7 +23,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 |---|---|
 | 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 Recreate，grace 300s），Admin `http://10.68.13.198:30891/admin`，adminApiKey 在实例自己的 `config.json`（和老实例不同）|
 | 老实例 | deploy `kiro-rs`（:30890，镜像 ctxwin）。只剩 `carher-hangzhou`、`claude-code-buyitian` 两把 key 主走它，另外是新实例的兜底 |
-| 镜像 | `kiro-rs:v2026.10.1-carher-slots31`（10-26 11:09，「空回复给了用户」可点开看 198 LiteLLM key 明细 `GET /slots/empty-events`，内存环形 500 条、重启清空；回滚 tag slots30）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
+| 镜像 | `kiro-rs:v2026.10.1-carher-slots40`（10-26，无缝换版：零断流；slots31 空回复明细；回滚 tag slots31）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
 | manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、secret `kiro-rs-slots-bootstrap`）|
 | 槽 | 4 个：`jp-172.235.204.67`（经 243 代理）、`sg-47.84.112.136`、`sg-47.84.85.100`、`sg-47.236.200.98`；出口配在 `config.json.slots[]`，全局 `proxyUrl=null` |
 | 并发参数 | 起步 16 / 最小 2 / 最大 24 / 自动调；排队超时 120s；「暂不接新人」倍数 1.5 |
@@ -57,6 +57,35 @@ python3 scripts/kiro-slots-watch.py --minutes 10
 - 本地改代码：工作树 `.work/kiro-0011/work`（基线 `.work/kiro-0011/base`），改完 `diff` 重新生成 0011 补丁再走 build。
 - 0012(10-26,未上线)超长报 `max(估算, bytes/3×1.1, 窗口+1)`,工作树 `.work/kiro-0012/{base,work}`;选值依据见记忆 project_cc_old_session_toolsearch_latch_rea_overflow。
   🔴 **它已经在 `k8s/kiro-rs/patches/` 里** ⇒ `kiro-rs-build.sh` 按目录全打,**下一次任何人构建镜像都会带上它**。现网 slots31 是 0001~0011,不含 0012。用户还没点头上线 0012:构建别的改动前先问,或临时把 0012 挪出目录。
+
+## 3.1 无缝换版是怎么做到的（动它之前先读这节）
+
+状态目录（绑定表 / 用量 / 余额历史 / 凭据）只允许一个进程写，两个一起写会互相覆盖；
+同一个 Kiro 号被两边同时用还会破坏「一号一出口」，social 号刷新更会把对方手上的 refreshToken 作废。
+所以换版必须是**交接**，不是并存。流程：
+
+1. 新 pod 起来 → 先开始服务（`/healthz` 200、`/readyz` 503 = 待命），**再**后台等租约。
+2. 新 pod 读租约里持有者的 pod IP，直连 `POST /api/admin/handoff` 请它交接。
+3. 旧 pod 收到后：强制落一次全部状态 → 置「已交接」（此后不写盘、不刷 token）→ 释放租约，
+   但**仍留在 Service 后端继续接客**，直到 k8s 停它。
+4. 新 pod 拿到租约 → 重读盘上状态 → 对齐槽位 → `/readyz` 200。
+5. k8s 看到新 pod ready（`maxUnavailable: 0`）才停旧 pod；旧 pod 把在途请求跑完退出。
+
+五个踩过的坑（都实测过，改之前先确认没踩回去）：
+
+| 坑 | 症状 | 正确做法 |
+|---|---|---|
+| 先等租约再 serve | 待命期端口连不上（探针 `000`），liveness 失败 ⇒ 等交接的新 pod 被杀重启 | 先 serve，后台等租约 |
+| readiness 用 TCP 探针 | 待命期端口已监听 ⇒ 直接判就绪，流量在接管前被切过来 | 必须 HTTP 探 `/readyz` |
+| `maxUnavailable: 1` | 旧 pod 一进 terminating 就 `ready=False`（`serving=True` 只保已有连接），新 pod 还要几秒 ⇒ 实测 4.2s 没有可用后端 | `maxUnavailable: 0` + 新 pod 主动请求交接（否则死锁） |
+| 用 `HOSTNAME` 传 pod 名 | 容器里本来就有这个变量，`fieldRef` 覆盖后**变成空字符串** ⇒ 持有者名为空、交接地址拼不出 ⇒ 死锁 | 用 `KIRO_POD_NAME` |
+| 靠 DNS 找旧 pod | Deployment 的 pod 没有稳定 DNS 名（StatefulSet 才有），`<pod>.<headless-svc>` 解析失败 | 持有者把自己的 pod IP 写进租约，新 pod 直连 |
+
+还有一个绕不开的限制：旧 pod 收尾期（最长 300s）不刷新 token。若它手上某个长请求正好撞上 token 过期，
+那一发会失败（token 有效期 1 小时，撞上的概率很低）。宁可这样，也不能让它刷新去作废新 pod 的凭据。
+
+相关代码：`src/kiro/lease.rs`（租约 + 心跳 + 地址）、`src/kiro/ready.rs`（就绪闸门）、
+`src/main.rs`（启动与交接顺序）、`token_manager` 的 `handoff_flush_and_mark` / `is_handed_off` 闸门。
 
 ## 4. LiteLLM 侧（198 `litellm-product`）
 
@@ -130,7 +159,8 @@ Kiro 按 token 计 credit：10-25 实测 4 个能算的号**每百万输入 toke
 - 🔴 **换号只认上游 402**：额度显示 0（10 分钟一查）≠ 上游开始拒。10-25 #3 justin 页面早显示用尽，上游实际到 09:24 才回 402，09:25 第一个 402 进来当场换 #13，那个请求自动重发不失败。
 - 🔴 **兜底到老实例 = 兜到一个死池**：10-25 实测老实例 305 号 available=0（257 手动禁用 + 46 额度用尽），兜底请求在老实例回「所有凭据已用尽 403」⇒ 再往下兜 grok/deepseek。换镜像空窗的失败就是这么来的。老池补号或兜底链跳过老实例前，换镜像空窗用户会看到失败或降级到别家模型。
 - 🔴 **换镜像那 15 秒新连接会失败，且没被兜底接住**（原因见上一条）
-- 🔴 **真实断流不是 15 秒而是约 2 分钟**（10-26 slots31 实测）：Recreate 下旧 pod 收 SIGTERM 后**立刻不收新连接**，却要等 300s 优雅期里的长请求跑完才退，新 pod 要等旧 pod 退了才起 ⇒ 这段时间所有新请求「Cannot connect」。那次 41 次失败 / 4 把 key（carher-75 18、ruanyitai 10、wuqi 9、gongchenhao 4）。根治=无缝切换（待做）。：10-25 slots26 切换时 `claude-code-ruanyitai` 4 发「Cannot connect to host kiro-rs-slots」，SpendLogs 里没有落老实例的行（原因未查；演练 1 scale 0 时兜底是生效的），客户端自己重试第 5 发成功。
+- ✅ **slots40 起换镜像零断流**（连续 3 轮滚动更新实测后端为 0 的时长均 0.0s，强杀持有者 2s 恢复）。机制与五个坑见 §3.1。
+- 🔴 **slots40 之前**：真实断流不是 15 秒而是约 2 分钟（10-26 slots31 实测）：Recreate 下旧 pod 收 SIGTERM 后**立刻不收新连接**，却要等 300s 优雅期里的长请求跑完才退，新 pod 要等旧 pod 退了才起 ⇒ 这段时间所有新请求「Cannot connect」。那次 41 次失败 / 4 把 key（carher-75 18、ruanyitai 10、wuqi 9、gongchenhao 4）。根治=无缝切换（待做）。：10-25 slots26 切换时 `claude-code-ruanyitai` 4 发「Cannot connect to host kiro-rs-slots」，SpendLogs 里没有落老实例的行（原因未查；演练 1 scale 0 时兜底是生效的），客户端自己重试第 5 发成功。
 - 🔴 **新老两个实例的号 id 都从 1 编，会撞**：说「#6」要带实例。
 - 🔴 现在新实例扛大部分流量 ⇒ 任何操作先想「会不会打断在途请求」：改配置走 Admin API（热生效），换镜像提前说，别 `kubectl delete pod`。
 - 🔴 绑定表里的测试绑定（`anc:` `sid:` `u:smoke-*`）会虚增「绑定人数」，影响新人均摊。

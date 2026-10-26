@@ -3040,7 +3040,7 @@
    hasProfileArn: boolean
 --- a/src/admin/handlers.rs
 +++ b/src/admin/handlers.rs
-@@ -158,3 +158,206 @@
+@@ -158,3 +158,213 @@
          Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
      }
  }
@@ -3048,6 +3048,13 @@
 +/// GET /api/admin/slots —— 槽位总览（每槽号/在途/排队/上限/429 统计）
 +pub async fn get_slots(State(state): State<AdminState>) -> impl IntoResponse {
 +    Json(state.service.get_slots())
++}
++
++/// POST /api/admin/handoff —— 无缝换版：主动交出状态目录（由 pod 的 preStop 调）。
++/// 调完本实例仍继续接请求，只是不再写盘 / 刷 token，新实例可立刻接管。
++pub async fn post_handoff(State(state): State<AdminState>) -> impl IntoResponse {
++    tracing::info!("收到交接请求（preStop）：交出状态目录，继续接客直到退出");
++    Json(state.service.handoff())
 +}
 +
 +#[derive(serde::Deserialize)]
@@ -3289,7 +3296,7 @@
          add_credential, delete_credential, force_refresh_token, get_all_credentials,
          get_credential_balance, get_load_balancing_mode, get_window_settings, reset_failure_count,
          set_credential_disabled, set_credential_priority, set_load_balancing_mode, set_window_settings,
-+        get_slots, get_burn_trend, get_empty_events, set_slot_limits, set_slot_lock, get_slot_configs, set_slot_configs, get_slot_gray, set_slot_gray, test_slot, test_all_slots, get_credential_usage, get_credentials_usage_totals,
++        get_slots, get_burn_trend, get_empty_events, post_handoff, set_slot_limits, set_slot_lock, get_slot_configs, set_slot_configs, get_slot_gray, set_slot_gray, test_slot, test_all_slots, get_credential_usage, get_credentials_usage_totals,
      },
      middleware::{AdminState, admin_auth_middleware},
  };
@@ -3302,13 +3309,14 @@
          .route(
              "/config/load-balancing",
              get(get_load_balancing_mode).put(set_load_balancing_mode),
-@@ -54,6 +57,16 @@
+@@ -54,6 +57,17 @@
              "/config/window",
              get(get_window_settings).put(set_window_settings),
          )
 +        .route("/slots", get(get_slots))
 +        .route("/credits/trend", get(get_burn_trend))
 +        .route("/slots/empty-events", get(get_empty_events))
++        .route("/handoff", post(post_handoff))
 +        .route("/slots/stats", get(get_slots))
 +        .route("/slots/limits", axum::routing::put(set_slot_limits))
 +        .route("/slots/config", get(get_slot_configs).put(set_slot_configs))
@@ -3367,7 +3375,7 @@
                  expires_at: entry.expires_at,
                  auth_method: entry.auth_method,
                  has_profile_arn: entry.has_profile_arn,
-@@ -299,16 +318,127 @@
+@@ -299,16 +318,143 @@
          Ok(self.token_manager.get_window_settings())
      }
  
@@ -3382,6 +3390,22 @@
 +            "spare": self.token_manager.slot_spare_count(),
 +            "slots": self.token_manager.slots_snapshot(),
 +        })
++    }
++
++    /// 无缝换版：主动交出状态目录（preStop 调）。
++    /// 此刻本实例**仍在 Service 后端里继续接客**，但已不写盘、不刷 token，
++    /// 新实例可以立刻接管 ⇒ 等新实例被 kube-proxy 加进后端后，本实例再退出，中间没有空档。
++    pub fn handoff(&self) -> serde_json::Value {
++        // 🔴 没接管的实例收到这个请求要原样拒绝：交接用的 headless Service 会解析到所有
++        // pod（含请求方自己），打到待命实例身上时若也置「已交接」，它接管后会永久不写盘。
++        if !self.token_manager.holds_takeover() {
++            return serde_json::json!({"handedOff": false, "reason": "not_holder"});
++        }
++        let already = self.token_manager.is_handed_off();
++        if !already {
++            self.token_manager.handoff_flush_and_mark();
++        }
++        serde_json::json!({"handedOff": true, "alreadyHandedOff": already})
 +    }
 +
 +    /// 空回复明细（最新在前）+ 按 key 汇总
@@ -3728,6 +3752,13 @@
  mod handlers;
  mod middleware;
  mod router;
+@@ -31,4 +31,5 @@
+ pub mod types;
+ mod websearch;
+ 
+-pub use router::create_router_with_provider;
++#[allow(unused_imports)] // create_router_with_provider 对外保留（库用法），main 走 _with_ready
++pub use router::{create_router_with_provider, create_router_with_ready};
 --- a/src/anthropic/router.rs
 +++ b/src/anthropic/router.rs
 @@ -14,6 +14,18 @@
@@ -3749,7 +3780,7 @@
  /// 请求体最大大小限制 (50MB)
  const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
  
-@@ -36,7 +48,7 @@
+@@ -36,9 +48,19 @@
  /// 创建带有 KiroProvider 的 Anthropic API 路由
  pub fn create_router_with_provider(
      api_key: impl Into<String>,
@@ -3757,9 +3788,40 @@
 +    kiro_provider: Option<std::sync::Arc<KiroProvider>>,
      extract_thinking: bool,
  ) -> Router {
++    create_router_with_ready(api_key, kiro_provider, extract_thinking, crate::kiro::ready::ReadyGate::new())
++}
++
++/// 带就绪闸门的版本（无缝换版：待命期 /readyz 回 503，k8s 不把流量切过来）
++pub fn create_router_with_ready(
++    api_key: impl Into<String>,
++    kiro_provider: Option<std::sync::Arc<KiroProvider>>,
++    extract_thinking: bool,
++    ready: crate::kiro::ready::ReadyGate,
++) -> Router {
      let mut state = AppState::new(api_key, extract_thinking);
-@@ -67,7 +79,43 @@
+     if let Some(provider) = kiro_provider {
+         state = state.with_kiro_provider(provider);
+@@ -64,10 +86,62 @@
+             auth_middleware,
+         ));
+ 
++    // 探针不走认证：liveness 只看进程活着，readiness 看有没有接管槽位
++    let g = ready.clone();
      Router::new()
++        .route("/healthz", get(|| async { "ok" }))
++        .route(
++            "/readyz",
++            get(move || {
++                let g = g.clone();
++                async move {
++                    if g.is_ready() {
++                        (axum::http::StatusCode::OK, "ready")
++                    } else {
++                        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "standby")
++                    }
++                }
++            }),
++        )
          .nest("/v1", v1_routes)
          .nest("/cc/v1", cc_v1_routes)
 +        .layer(middleware::from_fn(caller_identity_layer))
@@ -4038,17 +4100,317 @@
      use super::inject_profile_arn;
      use serde_json::Value;
  
+--- a/src/kiro/lease.rs
++++ b/src/kiro/lease.rs
+@@ -0,0 +1,295 @@
++//! 接管租约（无缝换版用）
++//!
++//! 为什么需要：槽位实例的状态（绑定表 / 用量 / 余额历史 / 凭据）都在同一个目录里，
++//! 两个进程同时跑会互相覆盖；同一个 Kiro 号被两边同时用还会破坏「一号一出口」，
++//! social 号刷新 token 更会把对方手上的凭据作废。
++//!
++//! 所以换版本必须是**交接**而不是并存：新进程先起来待命（只回健康检查），
++//! 旧进程收到 SIGTERM 后跑完在途请求、落盘、删掉租约文件，新进程拿到租约才开始接管。
++//!
++//! 实现：目录下一个 `kiro_lease.json`，内容 = 持有者 id + 心跳时间。
++//! - 抢占：文件不存在，或者心跳已过期（旧进程被 SIGKILL / 机器掉电）⇒ 可以抢。
++//! - 心跳：持有者每 2s 写一次时间戳，证明自己还活着。
++//! - 释放：优雅退出时删文件，新进程立刻就能接管（不用等过期）。
++//!
++//! 🔴 写入用 tmp + rename（同目录内原子），避免新进程读到半个文件。
++
++use std::path::{Path, PathBuf};
++use std::sync::Arc;
++use std::sync::atomic::{AtomicBool, Ordering};
++
++use serde::{Deserialize, Serialize};
++
++/// 心跳间隔
++pub const HEARTBEAT_SECS: u64 = 2;
++/// 心跳多久没更新就认为持有者已死（= 5 个心跳，容忍一次卡顿 / 时钟抖动）
++pub const STALE_AFTER_SECS: i64 = 10;
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++#[serde(rename_all = "camelCase")]
++pub struct LeaseFile {
++    /// 持有者标识（pod 名 / 进程 id，仅用于排查）
++    pub holder: String,
++    /// 最后一次心跳的 unix 秒
++    pub beat_at: i64,
++    /// 持有者启动时间（同一 holder 重启后能区分）
++    #[serde(default)]
++    pub since: i64,
++    /// 持有者的可达地址（host:port）。新实例用它直连请求交接。
++    /// 🔴 为什么不用 DNS：Deployment 的 pod 没有稳定 DNS 名（那是 StatefulSet 才有），
++    /// 实测 `<pod>.<headless-svc>` 解析失败 ⇒ 主动交接发不出去，回到死锁。
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub addr: Option<String>,
++}
++
++/// 抢占判定（纯函数，便于单测）：当前租约内容 + 现在时间 ⇒ 能不能抢
++#[derive(Debug, PartialEq, Eq)]
++pub enum Claim {
++    /// 没有持有者（文件不存在 / 内容坏了）
++    Free,
++    /// 持有者心跳过期，可以抢（带上过期了多少秒，用于日志）
++    Stale(i64),
++    /// 持有者还活着，要等
++    Held { holder: String, age: i64 },
++}
++
++pub fn classify(cur: Option<&LeaseFile>, now: i64) -> Claim {
++    match cur {
++        None => Claim::Free,
++        Some(l) => {
++            let age = now - l.beat_at;
++            // 时钟回拨（age 负）也按「还活着」处理，宁可等不要抢
++            if age > STALE_AFTER_SECS {
++                Claim::Stale(age)
++            } else {
++                Claim::Held { holder: l.holder.clone(), age }
++            }
++        }
++    }
++}
++
++pub fn lease_path(dir: &Path) -> PathBuf {
++    dir.join("kiro_lease.json")
++}
++
++/// 当前持有者（给新实例「主动请求对方交接」用）
++pub fn current_holder(dir: &Path) -> Option<String> {
++    read(&lease_path(dir)).map(|l| l.holder)
++}
++
++/// 当前持有者的 (名字, 可达地址)
++pub fn current_holder_addr(dir: &Path) -> Option<(String, Option<String>)> {
++    read(&lease_path(dir)).map(|l| (l.holder, l.addr))
++}
++
++fn read(path: &Path) -> Option<LeaseFile> {
++    let s = std::fs::read_to_string(path).ok()?;
++    serde_json::from_str(&s).ok()
++}
++
++fn write_atomic(path: &Path, l: &LeaseFile) -> std::io::Result<()> {
++    let tmp = path.with_extension("json.tmp");
++    let json = serde_json::to_string(l).unwrap_or_default();
++    std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path))
++}
++
++/// 租约持有者：拿到后后台心跳，Drop / release 时删文件
++pub struct Lease {
++    path: PathBuf,
++    holder: String,
++    alive: Arc<AtomicBool>,
++}
++
++impl Lease {
++    /// 一直等到能抢到租约。每秒看一次，顺便打日志说在等谁。
++    pub async fn acquire(dir: &Path, holder: String) -> std::io::Result<Self> {
++        Self::acquire_with(dir, holder, |_, _| {}).await
++    }
++
++    /// 同 acquire，但每轮等待时回调一次当前持有者名字。
++    /// 用途：新实例主动请求旧实例交接（否则 maxUnavailable=0 下会死锁：
++    /// k8s 要「新的就绪才停旧的」，而新的要「旧的放手才就绪」）。
++    pub async fn acquire_with<F>(dir: &Path, holder: String, mut on_wait: F) -> std::io::Result<Self>
++    where
++        F: FnMut(&str, Option<&str>),
++    {
++        Self::acquire_full(dir, holder, None, on_wait).await
++    }
++
++    /// 同 acquire_with，外加把自己的可达地址写进租约（供下一个实例直连请求交接）
++    pub async fn acquire_full<F>(dir: &Path, holder: String, my_addr: Option<String>, mut on_wait: F) -> std::io::Result<Self>
++    where
++        F: FnMut(&str, Option<&str>),
++    {
++        let path = lease_path(dir);
++        let since = chrono::Utc::now().timestamp();
++        let mut waited = 0u64;
++        loop {
++            let now = chrono::Utc::now().timestamp();
++            match classify(read(&path).as_ref(), now) {
++                Claim::Free => {}
++                Claim::Stale(age) => {
++                    tracing::warn!("上一个持有者心跳已过期 {}s（可能被强杀），接管租约", age);
++                }
++                Claim::Held { holder: h, age } => {
++                    if waited % 5 == 0 {
++                        tracing::info!("等待上一个实例交接：持有者 {}（心跳 {}s 前），已等 {}s", h, age, waited);
++                    }
++                    let addr = read(&path).and_then(|l| l.addr);
++                    on_wait(&h, addr.as_deref());
++                    waited += 1;
++                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
++                    continue;
++                }
++            }
++            write_atomic(&path, &LeaseFile { holder: holder.clone(), beat_at: now, since, addr: my_addr.clone() })?;
++            // 回读确认是自己写的（两个新进程同时抢时，后写的赢，前者退回去继续等）
++            match read(&path) {
++                Some(l) if l.holder == holder && l.since == since => {
++                    tracing::info!("已取得接管租约：{}（等待 {}s）", holder, waited);
++                    let alive = Arc::new(AtomicBool::new(true));
++                    let hb = Arc::clone(&alive);
++                    let p = path.clone();
++                    let h = holder.clone();
++                    let a = my_addr.clone();
++                    tokio::spawn(async move {
++                        let mut iv = tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_SECS));
++                        while hb.load(Ordering::Relaxed) {
++                            iv.tick().await;
++                            if !hb.load(Ordering::Relaxed) {
++                                break;
++                            }
++                            let l = LeaseFile { holder: h.clone(), beat_at: chrono::Utc::now().timestamp(), since, addr: a.clone() };
++                            if let Err(e) = write_atomic(&p, &l) {
++                                tracing::warn!("租约心跳写入失败（不影响在途请求）: {}", e);
++                            }
++                        }
++                    });
++                    return Ok(Self { path, holder, alive });
++                }
++                _ => {
++                    tracing::info!("租约被另一个实例抢先，继续等");
++                    waited += 1;
++                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
++                }
++            }
++        }
++    }
++
++    /// 优雅退出时调用：停心跳 + 删文件，让新实例立刻接管（不用等 10s 过期）
++    pub fn release(&self) {
++        self.alive.store(false, Ordering::Relaxed);
++        // 只删自己持有的那份：别人已经接管时不动它
++        if read(&self.path).is_some_and(|l| l.holder == self.holder) {
++            if let Err(e) = std::fs::remove_file(&self.path) {
++                tracing::warn!("删除租约文件失败（新实例将等心跳过期后接管）: {}", e);
++            } else {
++                tracing::info!("已释放接管租约：{}", self.holder);
++            }
++        }
++    }
++}
++
++/// 等到租约被别人接管（或超时）。旧进程释放租约后调用：
++/// 在新进程真正接管之前继续接请求，避免出现「旧的已经不接、新的还没接」的空档。
++pub async fn wait_until_taken(dir: &Path, prev_holder: &str, max_wait: std::time::Duration) -> bool {
++    let path = lease_path(dir);
++    let deadline = tokio::time::Instant::now() + max_wait;
++    while tokio::time::Instant::now() < deadline {
++        match read(&path) {
++            // 有人写了新租约，且不是自己 ⇒ 已被接管
++            Some(l) if l.holder != prev_holder => {
++                tracing::info!("新实例已接管（{}），本实例可以停止接新请求", l.holder);
++                return true;
++            }
++            _ => {}
++        }
++        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
++    }
++    tracing::warn!("等待新实例接管超时（{}s），按原计划停止接新请求", max_wait.as_secs());
++    false
++}
++
++impl Drop for Lease {
++    fn drop(&mut self) {
++        self.release();
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn l(holder: &str, beat_at: i64) -> LeaseFile {
++        LeaseFile { holder: holder.into(), beat_at, since: 0, addr: None }
++    }
++
++    #[test]
++    fn classify_free_held_stale() {
++        assert_eq!(classify(None, 100), Claim::Free);
++        assert_eq!(classify(Some(&l("a", 95)), 100), Claim::Held { holder: "a".into(), age: 5 });
++        // 正好到期不算死（> 才算），多 1 秒才算
++        assert_eq!(classify(Some(&l("a", 90)), 100), Claim::Held { holder: "a".into(), age: 10 });
++        assert_eq!(classify(Some(&l("a", 89)), 100), Claim::Stale(11));
++        // 时钟回拨：宁可等
++        assert!(matches!(classify(Some(&l("a", 200)), 100), Claim::Held { .. }));
++    }
++
++    #[tokio::test]
++    async fn acquire_waits_for_release_then_takes_over() {
++        let dir = std::env::temp_dir().join(format!("kiro-lease-{}", uuid::Uuid::new_v4()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let old = Lease::acquire(&dir, "old".into()).await.unwrap();
++        // 旧的还在 ⇒ 新的抢不到
++        let t = tokio::time::timeout(std::time::Duration::from_millis(1500), Lease::acquire(&dir, "new".into())).await;
++        assert!(t.is_err(), "旧实例持有租约时，新实例必须等");
++        old.release();
++        let new = tokio::time::timeout(std::time::Duration::from_secs(3), Lease::acquire(&dir, "new".into()))
++            .await
++            .expect("释放后应能立刻接管")
++            .unwrap();
++        assert_eq!(read(&lease_path(&dir)).unwrap().holder, "new");
++        new.release();
++        assert!(read(&lease_path(&dir)).is_none(), "释放后文件应删掉");
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    /// 旧进程释放租约后要等新进程真正接管才停止接请求，否则出现「谁都不接」的空档
++    /// （10-26 实测这个空档是 3s）。
++    #[tokio::test]
++    async fn wait_until_taken_returns_when_someone_else_takes_over() {
++        let dir = std::env::temp_dir().join(format!("kiro-lease-{}", uuid::Uuid::new_v4()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let old = Lease::acquire(&dir, "old".into()).await.unwrap();
++        old.release();
++        // 没人接管 ⇒ 必须一直等（这里用短超时验证它不会提前返回 true）
++        let t = wait_until_taken(&dir, "old", std::time::Duration::from_millis(400)).await;
++        assert!(!t, "没人接管时不能说「已被接管」");
++        // 新实例接管后 ⇒ 立刻返回 true
++        let d2 = dir.clone();
++        tokio::spawn(async move {
++            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
++            let _new = Lease::acquire(&d2, "new".into()).await.unwrap();
++            // 故意不 release：模拟新实例持续持有
++            std::mem::forget(_new);
++        });
++        let t = wait_until_taken(&dir, "old", std::time::Duration::from_secs(5)).await;
++        assert!(t, "新实例接管后应立刻返回");
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    #[tokio::test]
++    async fn stale_lease_is_taken_over_without_waiting() {
++        let dir = std::env::temp_dir().join(format!("kiro-lease-{}", uuid::Uuid::new_v4()));
++        std::fs::create_dir_all(&dir).unwrap();
++        // 模拟被 SIGKILL：文件留着但心跳很旧
++        write_atomic(&lease_path(&dir), &l("killed", chrono::Utc::now().timestamp() - 60)).unwrap();
++        let new = tokio::time::timeout(std::time::Duration::from_millis(500), Lease::acquire(&dir, "new".into()))
++            .await
++            .expect("心跳过期应立刻接管")
++            .unwrap();
++        assert_eq!(read(&lease_path(&dir)).unwrap().holder, "new");
++        new.release();
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++}
 --- a/src/kiro/mod.rs
 +++ b/src/kiro/mod.rs
-@@ -1,8 +1,10 @@
+@@ -1,8 +1,12 @@
  //! Kiro API 客户端模块
  
 +pub mod account_usage;
  pub mod endpoint;
++pub mod lease;
  pub mod machine_id;
  pub mod model;
  pub mod parser;
  pub mod provider;
++pub mod ready;
 +pub mod slots;
  pub mod token_manager;
 --- a/src/kiro/provider.rs
@@ -5045,6 +5407,66 @@
 +        assert_eq!(got.key_hash, "h1");
      }
  }
+--- a/src/kiro/ready.rs
++++ b/src/kiro/ready.rs
+@@ -0,0 +1,57 @@
++//! 「能不能接客」闸门（无缝换版用）
++//!
++//! 换版本时新 pod 会先起来，但它还没拿到接管租约（旧 pod 在跑完在途请求）。
++//! 这段时间它**必须不被 k8s 当成可用后端**，否则 Service 会把请求转过来，
++//! 而它还没接管槽位，请求会失败。
++//!
++//! 所以分两个探针：
++//! - liveness → `/healthz`：进程活着就 200（待命期也 200，否则 k8s 会把它杀了重启）
++//! - readiness → `/readyz`：只有拿到租约、真正接管后才 200；待命期 503
++//!
++//! 🔴 不能两个探针都用 TCP 端口：端口在待命期就已经监听了（要回 /healthz），
++//! TCP 探针会直接判「就绪」，于是流量在接管前就被切过来。必须用 HTTP 探 /readyz。
++
++use std::sync::Arc;
++use std::sync::atomic::{AtomicBool, Ordering};
++
++/// 就绪闸门：初始关着（待命），接管后打开；收到 SIGTERM 立刻关上（让 k8s 先摘流量）
++#[derive(Clone, Default)]
++pub struct ReadyGate(Arc<AtomicBool>);
++
++impl ReadyGate {
++    pub fn new() -> Self {
++        Self(Arc::new(AtomicBool::new(false)))
++    }
++
++    pub fn open(&self) {
++        self.0.store(true, Ordering::Relaxed);
++    }
++
++    /// 收到退出信号时调用：先摘流量，再等在途请求跑完
++    pub fn close(&self) {
++        self.0.store(false, Ordering::Relaxed);
++    }
++
++    pub fn is_ready(&self) -> bool {
++        self.0.load(Ordering::Relaxed)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn gate_starts_closed_opens_then_closes() {
++        let g = ReadyGate::new();
++        assert!(!g.is_ready(), "待命期必须不就绪，否则流量会在接管前被切过来");
++        g.open();
++        assert!(g.is_ready());
++        g.close();
++        assert!(!g.is_ready(), "收到 SIGTERM 要先摘流量");
++        // clone 共享同一个状态
++        let g2 = g.clone();
++        g.open();
++        assert!(g2.is_ready());
++    }
++}
 --- a/src/kiro/slots.rs
 +++ b/src/kiro/slots.rs
 @@ -0,0 +1,939 @@
@@ -6006,7 +6428,7 @@
  }
  
  /// 统计数据持久化条目
-@@ -535,6 +538,31 @@
+@@ -535,6 +538,39 @@
      stats_dirty: AtomicBool,
      /// window 模式参数（运行时可改，Admin 页面设置）
      window_settings: Mutex<WindowSettings>,
@@ -6028,6 +6450,14 @@
 +    slot_secrets: Mutex<HashMap<String, String>>,
 +    /// 最近的空回复明细（Admin「空回复给了用户」点进去看）
 +    empty_events: Mutex<crate::kiro::slots::EmptyEvents>,
++    /// 交接时要调用的「释放租约」回调（由 main 注入；交接后新实例才能接管）
++    release_lease: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
++    /// 本实例已接管状态目录（待命期为 false）
++    took_over: AtomicBool,
++    /// 已交出状态目录（无缝换版：收到 SIGTERM ⇒ 立刻交接，之后只把在途请求跑完）。
++    /// 置位后本进程**不再**写任何状态文件、不再刷新 token——新进程已经接管，
++    /// 两边同时写会互相覆盖，social 号刷新更会把对方手上的凭据作废。
++    handed_off: AtomicBool,
 +    /// 号池余额：号 id → (剩余, 上限)；历史用于估算还能撑多久
 +    pool_balance: Mutex<(HashMap<u64, (f64, f64)>, crate::kiro::slots::BalanceHistory)>,
 +    /// 上次余额预警推送时刻（节流）
@@ -6038,7 +6468,7 @@
  }
  
  /// window 模式参数
-@@ -661,6 +689,79 @@
+@@ -661,6 +697,79 @@
      pub token: String,
  }
  
@@ -6118,7 +6548,7 @@
  impl MultiTokenManager {
      /// 创建多凭据 Token 管理器
      ///
-@@ -769,6 +870,24 @@
+@@ -769,6 +878,24 @@
                  cooldown_secs: config.window_cooldown_secs.clamp(1, 3600),
              }
          };
@@ -6143,7 +6573,7 @@
          let manager = Self {
              config,
              proxy,
-@@ -781,6 +900,19 @@
+@@ -781,6 +908,22 @@
              last_stats_save_at: Mutex::new(None),
              stats_dirty: AtomicBool::new(false),
              window_settings: Mutex::new(window_settings),
@@ -6156,6 +6586,9 @@
 +            write_lock: Mutex::new(()),
 +            slot_secrets: Mutex::new(initial_slot_secrets),
 +            empty_events: Mutex::new(Default::default()),
++            release_lease: Mutex::new(None),
++            took_over: AtomicBool::new(false),
++            handed_off: AtomicBool::new(false),
 +            pool_balance: Mutex::new(Default::default()),
 +            last_runway_alert: Mutex::new(None),
 +            account_usage: Mutex::new(Default::default()),
@@ -6163,17 +6596,25 @@
          };
  
          // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
-@@ -794,6 +926,9 @@
+@@ -794,6 +937,17 @@
  
          // 加载持久化的统计数据（success_count, last_used_at）
          manager.load_stats();
-+        manager.init_slots();
++        // 🔴 init_slots 会把槽位出口写进号（= 接管动作）。无缝换版时新进程必须先待命、
++        // 等旧进程交出租约才接管 ⇒ 设了 KIRO_DEFER_TAKEOVER=1（main 在启动最早期设）时这里跳过，
++        // 由 main 拿到租约后调。不设时保持原行为（构造即接管），单实例部署与单测都不受影响。
++        // 用环境变量而不是构造参数：构造点有 30 多处（含大量单测），加参数会把它们全改一遍。
++        // ⚠️ 单测不要去动这个变量（进程级，会污染并发跑的其它测试）——交接路径由
++        //    lease / ready 两个模块的单测 + 隔离环境的真实滚动更新验证。
++        if std::env::var("KIRO_DEFER_TAKEOVER").as_deref() != Ok("1") {
++            manager.init_slots();
++        }
 +        manager.load_pool_balance_history();
 +        manager.load_account_usage();
  
          Ok(manager)
      }
-@@ -825,6 +960,8 @@
+@@ -825,6 +979,8 @@
          model: Option<&str>,
          session_key: Option<&str>,
      ) -> Option<(u64, KiroCredentials)> {
@@ -6182,7 +6623,7 @@
          let entries = self.entries.lock();
  
          // 检查是否是 opus 模型
-@@ -832,11 +969,12 @@
+@@ -832,11 +988,12 @@
              .map(|m| m.to_lowercase().contains("opus"))
              .unwrap_or(false);
  
@@ -6196,7 +6637,7 @@
                      return false;
                  }
                  // 如果是 opus 模型，需要检查订阅等级
-@@ -852,7 +990,8 @@
+@@ -852,7 +1009,8 @@
          }
  
          let mode = self.load_balancing_mode.lock().clone();
@@ -6206,7 +6647,7 @@
  
          match mode {
              "window" => {
-@@ -915,7 +1054,7 @@
+@@ -915,7 +1073,7 @@
                  // window 与 balanced 一样每次重选（窗口内按在途数挑），不粘 current_id
                  let is_balanced = matches!(
                      self.load_balancing_mode.lock().as_str(),
@@ -6215,7 +6656,7 @@
                  );
  
                  // balanced 模式：每次请求都重新均衡选择，不固定 current_id
-@@ -923,11 +1062,12 @@
+@@ -923,11 +1081,12 @@
                  let current_hit = if is_balanced {
                      None
                  } else {
@@ -6229,7 +6670,31 @@
                          .map(|e| (e.id, e.credentials.clone()))
                  };
  
-@@ -1140,6 +1280,8 @@
+@@ -1049,7 +1208,10 @@
+         }
+ 
+         // 第一次检查（无锁）：快速判断是否需要刷新
+-        let needs_refresh = is_token_expired(credentials) || is_token_expiring_soon(credentials);
++        // 🔴 已交接（无缝换版收尾期）：绝不刷新。social 号刷新会轮转 refreshToken，
++        // 把新进程手上那份作废 ⇒ 整个号当场失效。宁可这一发请求因 token 过期失败。
++        let needs_refresh = !self.is_handed_off()
++            && (is_token_expired(credentials) || is_token_expiring_soon(credentials));
+ 
+         let creds = if needs_refresh {
+             // 获取刷新锁，确保同一时间只有一个刷新操作
+@@ -1130,6 +1292,11 @@
+     fn persist_credentials(&self) -> anyhow::Result<bool> {
+         use anyhow::Context;
+ 
++        // 已交接：新进程在管这个目录，这里再写会覆盖它的数据
++        if self.is_handed_off() {
++            return Ok(false);
++        }
++
+         // 仅多凭据格式才回写
+         if !self.is_multiple_format {
+             return Ok(false);
+@@ -1140,6 +1307,8 @@
              None => return Ok(false),
          };
  
@@ -6238,7 +6703,7 @@
          // 收集所有凭据
          let credentials: Vec<KiroCredentials> = {
              let entries = self.entries.lock();
-@@ -1158,12 +1300,13 @@
+@@ -1158,12 +1327,13 @@
          // 序列化为 pretty JSON
          let json = serde_json::to_string_pretty(&credentials).context("序列化凭据失败")?;
  
@@ -6256,7 +6721,17 @@
          }
  
          tracing::debug!("已回写凭据到文件: {:?}", path);
-@@ -1291,9 +1434,866 @@
+@@ -1216,6 +1386,9 @@
+ 
+     /// 将当前统计数据持久化到磁盘
+     fn save_stats(&self) {
++        if self.is_handed_off() {
++            return;
++        }
+         let path = match self.stats_path() {
+             Some(p) => p,
+             None => return,
+@@ -1291,9 +1464,967 @@
          self.save_stats_debounced();
      }
  
@@ -6289,8 +6764,45 @@
 +        })
 +    }
 +
-+    /// 启动：读 kiro_slots.json，按当前槽位配置对齐
-+    fn init_slots(&self) {
++    /// 接管前重读盘上状态：旧进程在交接前最后写的一次（绑定表 / 用量 / 余额历史 / 凭据）
++    /// 发生在本进程启动之后，不重读会丢。
++    /// 🔴 顺序：先读凭据（token 可能刚被旧进程刷新过），再读其它。
++    pub fn reload_state_from_disk(&self) {
++        // 凭据：旧进程可能在交接前刷新过 token（尤其 social 号会轮转 refreshToken）
++        if let Some(path) = self.credentials_path.clone() {
++            match crate::kiro::model::credentials::CredentialsConfig::load(path.to_string_lossy().as_ref()) {
++                Ok(cfg) => {
++                    let fresh = cfg.into_sorted_credentials();
++                    let mut entries = self.entries.lock();
++                    let mut n = 0;
++                    for e in entries.iter_mut() {
++                        if let Some(f) = fresh.iter().find(|c| c.id == Some(e.id)) {
++                            // 只覆盖 token 相关字段：disabled / 统计等运行时状态由各自文件管
++                            if e.credentials.access_token != f.access_token
++                                || e.credentials.refresh_token != f.refresh_token
++                            {
++                                e.credentials.access_token = f.access_token.clone();
++                                e.credentials.refresh_token = f.refresh_token.clone();
++                                e.credentials.expires_at = f.expires_at.clone();
++                                n += 1;
++                            }
++                        }
++                    }
++                    if n > 0 {
++                        tracing::info!("接管前重读凭据：{} 个号的 token 已更新为盘上最新", n);
++                    }
++                }
++                Err(e) => tracing::warn!("接管前重读凭据失败（用内存里的）: {}", e),
++            }
++        }
++        self.load_stats();
++        self.load_pool_balance_history();
++        self.load_account_usage();
++    }
++
++    /// 接管状态目录：读 kiro_slots.json，按当前槽位配置对齐，把槽位出口写进号。
++    /// 🔴 只能在拿到接管租约之后调用（见 kiro::lease）。幂等：重复调用等价于重新对齐一次。
++    pub fn init_slots(&self) {
 +        let file: crate::kiro::slots::SlotsFile = self
 +            .slots_path()
 +            .and_then(|p| std::fs::read_to_string(p).ok())
@@ -6369,6 +6881,10 @@
 +
 +    /// Admin：改灰度名单，立即生效并写回 config.json
 +    pub fn set_slot_gray(&self, list: Vec<String>) -> anyhow::Result<()> {
++        // 已交接：配置写入交给新进程（这里再写会覆盖它）
++        if self.is_handed_off() {
++            return Ok(());
++        }
 +        use anyhow::Context;
 +        let list: Vec<String> = list.into_iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
 +        if let Some(path) = self.config.config_path() {
@@ -6458,6 +6974,10 @@
 +    }
 +
 +    fn persist_slots(&self) {
++        // 已交接：不再写状态文件（新进程已接管）
++        if self.is_handed_off() {
++            return;
++        }
 +        let Some(path) = self.slots_path() else { return };
 +        // 写锁内取快照并写完：两个并发写不会让旧快照后落盘，也不会共用同一个 tmp
 +        let _w = self.write_lock.lock();
@@ -6663,6 +7183,51 @@
 +        }
 +    }
 +
++    /// main 注入「释放租约」回调：交接（handoff_flush_and_mark）时会调用它，
++    /// 让新实例能立刻接管，而本实例继续接客直到退出。
++    pub fn set_release_lease_hook(&self, f: Box<dyn Fn() + Send + Sync>) {
++        *self.release_lease.lock() = Some(f);
++    }
++
++    /// 无缝换版：交接前把全部状态强制落一次盘，然后置位「已交接」。
++    /// 🔴 必须一起做：置位后所有写盘都被禁掉，这是最后的机会。
++    /// 🔴 `save_account_usage` 带 dirty 判断，定时任务可能刚把标记清掉 ⇒ 这里强制置脏再写。
++    pub fn handoff_flush_and_mark(&self) {
++        self.account_usage_dirty.store(true, Ordering::Relaxed);
++        self.save_account_usage();
++        self.persist_slots();
++        self.save_stats();
++        if let Err(e) = self.persist_credentials() {
++            tracing::warn!("交接前回写凭据失败: {}", e);
++        }
++        self.handed_off.store(true, Ordering::SeqCst);
++        // 释放租约：新实例立刻接管（本实例仍在 Service 后端继续接客，所以没有空档）
++        if let Some(f) = self.release_lease.lock().as_ref() {
++            f();
++        }
++    }
++
++    /// 无缝换版：交出状态目录。此后只跑在途请求，不写盘、不刷 token。
++    pub fn mark_handed_off(&self) {
++        self.handed_off.store(true, Ordering::SeqCst);
++    }
++
++    /// 本实例是否已接管状态目录（待命实例返回 false）。
++    /// 交接请求只有持有者该响应：headless Service 会解析到所有 pod，含请求方自己。
++    pub fn holds_takeover(&self) -> bool {
++        self.took_over.load(Ordering::SeqCst)
++    }
++
++    /// main 在拿到租约、完成接管后调用
++    pub fn mark_took_over(&self) {
++        self.took_over.store(true, Ordering::SeqCst);
++    }
++
++    /// 已交出状态目录？（写盘 / 刷新 token 前都要查）
++    pub fn is_handed_off(&self) -> bool {
++        self.handed_off.load(Ordering::SeqCst)
++    }
++
 +    /// 记一条空回复明细（谁、哪个号、什么模型、救没救回来）
 +    pub fn record_empty_event(&self, slot: usize, account_id: u64, key_alias: &str, key_hash: &str, model: &str, returned: bool, reason: &str) {
 +        let name = self.slots.lock().states.get(slot).map(|s| s.name.clone()).unwrap_or_default();
@@ -6688,8 +7253,11 @@
 +        }
 +    }
 +
-+    /// 周期调用（每 30s）：AIMD 上调
++    /// 周期调用（每 30s）：AIMD 上调。已交接时跳过（新进程在管）
 +    pub fn slot_tick(&self) {
++        if self.is_handed_off() {
++            return;
++        }
 +        let p = *self.slot_limits.lock();
 +        let now = Instant::now();
 +        let mut grew = false;
@@ -6858,7 +7426,8 @@
 +    /// 轮询号池（启用的号）余额，记一笔总剩余。跳过禁用号；单号失败沿用上次值
 +    pub async fn poll_pool_balance(&self) {
 +        // 只在槽位模式查（其它模式不给上游加额外的额度查询流量）
-+        if !self.is_slots_mode() {
++        // 已交接：后台任务停掉，避免和新进程重复查、重复写
++        if !self.is_slots_mode() || self.is_handed_off() {
 +            return;
 +        }
 +        let ids: Vec<u64> = self.entries.lock().iter().filter(|e| !e.disabled).map(|e| e.id).collect();
@@ -6982,6 +7551,9 @@
 +
 +    /// 周期落盘（有变化才写）
 +    pub fn save_account_usage(&self) {
++        if self.is_handed_off() {
++            return;
++        }
 +        if !self.account_usage_dirty.swap(false, Ordering::Relaxed) {
 +            return;
 +        }
@@ -7064,6 +7636,10 @@
 +
 +    /// Admin：改在途上限参数，立即生效并写回 config.json
 +    pub fn set_slot_limits(&self, p: crate::kiro::slots::LimitParams) -> anyhow::Result<()> {
++        // 已交接：配置写入交给新进程（这里再写会覆盖它）
++        if self.is_handed_off() {
++            return Ok(());
++        }
 +        use anyhow::Context;
 +        p.validate()?;
 +        if let Some(path) = self.config.config_path() {
@@ -7124,7 +7700,7 @@
      }
  
      /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
-@@ -1640,6 +2640,7 @@
+@@ -1640,6 +2771,7 @@
                          DisabledReason::QuotaExceeded => "QuotaExceeded",
                          DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                          DisabledReason::InvalidConfig => "InvalidConfig",
@@ -7132,7 +7708,7 @@
                      }.to_string()),
                      endpoint: e.credentials.endpoint.clone(),
                      subscription_title: e.credentials.subscription_title.clone(),
-@@ -1671,6 +2672,12 @@
+@@ -1671,6 +2803,12 @@
          }
          // 持久化更改
          self.persist_credentials()?;
@@ -7145,7 +7721,20 @@
          Ok(())
      }
  
-@@ -1955,6 +2962,9 @@
+@@ -1736,9 +2874,9 @@
+                 .clone()
+                 .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
+         } else {
+-            // 检查是否需要刷新 token
+-            let needs_refresh =
+-                is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
++            // 检查是否需要刷新 token（已交接时不刷，理由同 acquire_context）
++            let needs_refresh = !self.is_handed_off()
++                && (is_token_expired(&credentials) || is_token_expiring_soon(&credentials));
+ 
+             if needs_refresh {
+                 let _guard = self.refresh_lock.lock().await;
+@@ -1955,6 +3093,9 @@
          self.persist_credentials()?;
  
          tracing::info!("成功添加凭据 #{}", new_id);
@@ -7155,7 +7744,7 @@
          Ok(new_id)
      }
  
-@@ -2020,6 +3030,27 @@
+@@ -2020,6 +3161,27 @@
          // 立即回写统计数据，清除已删除凭据的残留条目
          self.save_stats();
  
@@ -7183,7 +7772,30 @@
          tracing::info!("已删除凭据 #{}", id);
          Ok(())
      }
-@@ -2124,7 +3155,7 @@
+@@ -2029,6 +3191,11 @@
+     /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
+     /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
+     pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
++        // 已交接（无缝换版收尾期）：不刷新。social 号刷新会轮转 refreshToken，
++        // 把新进程手上那份作废。这一发请求宁可失败（客户端会重试，落到新进程）。
++        if self.is_handed_off() {
++            anyhow::bail!("实例正在交接，不刷新 token（请重试）");
++        }
+         let credentials = {
+             let entries = self.entries.lock();
+             entries
+@@ -2101,6 +3268,10 @@
+     }
+ 
+     fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
++        // 已交接：配置写入交给新进程（这里再写会覆盖它）
++        if self.is_handed_off() {
++            return Ok(());
++        }
+         use anyhow::Context;
+ 
+         let config_path = match self.config.config_path() {
+@@ -2124,7 +3295,7 @@
      /// 设置负载均衡模式（Admin API）
      pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
          // 验证模式值
@@ -7192,7 +7804,7 @@
              anyhow::bail!("无效的负载均衡模式: {}", mode);
          }
  
-@@ -2140,9 +3171,35 @@
+@@ -2140,9 +3311,35 @@
              return Err(err);
          }
  
@@ -7228,7 +7840,7 @@
  }
  
  impl Drop for MultiTokenManager {
-@@ -2150,6 +3207,7 @@
+@@ -2150,6 +3347,7 @@
          if self.stats_dirty.load(Ordering::Relaxed) {
              self.save_stats();
          }
@@ -7236,12 +7848,10 @@
      }
  }
  
-@@ -2323,6 +3381,507 @@
-         assert!(m.is_window_mode());
-         assert!(m.report_rate_limited(1), "#2 在上限内且未冷却 ⇒ 可换");
+@@ -2325,7 +3523,508 @@
          assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");
-+    }
-+
+     }
+ 
 +    fn slot_mgr(n_slots: usize, n_accts: u32) -> (std::sync::Arc<MultiTokenManager>, std::path::PathBuf) {
 +        let dir = std::env::temp_dir().join(format!("kiro-slots-{}", uuid::Uuid::new_v4()));
 +        std::fs::create_dir_all(&dir).unwrap();
@@ -7271,7 +7881,7 @@
 +        (std::sync::Arc::new(m), dir)
 +    }
 +
-+    #[test]
+     #[test]
 +    fn test_slots_init_fills_and_stamps_proxy() {
 +        let (m, dir) = slot_mgr(3, 6);
 +        assert!(m.is_slots_mode());
@@ -7741,12 +8351,93 @@
 +        assert_eq!((s.stats.first_429, s.stats.retry_429), (1, 1));
 +        assert_eq!(m.slots_snapshot()[1].limit, 8, "别的槽不受影响");
 +        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
+     fn test_window_settings_validate_and_persist() {
+         let config_path = std::env::temp_dir().join(format!("kiro-window-{}.json", uuid::Uuid::new_v4()));
+         std::fs::write(&config_path, r#"{"loadBalancingMode":"window"}"#).unwrap();
+@@ -2441,6 +4140,65 @@
+         credentials.refresh_token = Some("a".repeat(150));
+         let result = validate_refresh_token(&credentials);
+         assert!(result.is_ok());
++    }
++
++    /// 无缝换版：交接后禁止一切写盘。旧进程的收尾期和新进程重叠，
++    /// 这里再写会覆盖新进程的数据（10-26 review 发现的第 2 个问题）。
++    #[tokio::test(flavor = "multi_thread")]
++    async fn test_handed_off_blocks_all_state_writes() {
++        let (m, dir) = test_mgr_with_dir();
++        // 先正常写一次，拿到基线内容
++        m.record_account_usage(1, "m", true, 10, 1);
++        m.save_account_usage();
++        let usage = dir.join("kiro_account_usage.json");
++        let before = std::fs::read_to_string(&usage).unwrap_or_default();
++        assert!(before.contains("\"m\""), "交接前应能正常落盘: {}", before);
++
++        // 交接：强制落盘 + 置位
++        m.handoff_flush_and_mark();
++        assert!(m.is_handed_off());
++
++        // 之后再记再写都不能落到盘上
++        m.record_account_usage(1, "AFTER_HANDOFF", true, 999, 9);
++        m.save_account_usage();
++        m.persist_slots();
++        m.save_stats();
++        let after = std::fs::read_to_string(&usage).unwrap_or_default();
++        assert!(
++            !after.contains("AFTER_HANDOFF"),
++            "交接后不许再写盘（会覆盖新进程的数据），实际写进去了: {}",
++            after
++        );
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    /// 交接后不许刷新 token：social 号刷新会轮转 refreshToken，把新进程手上那份作废。
++    #[tokio::test(flavor = "multi_thread")]
++    async fn test_handed_off_refuses_force_refresh() {
++        let (m, dir) = test_mgr_with_dir();
++        m.mark_handed_off();
++        let err = m.force_refresh_token_for(1).await.unwrap_err().to_string();
++        assert!(err.contains("交接"), "应明确拒绝并提示重试，实际: {}", err);
++        let _ = std::fs::remove_dir_all(&dir);
++    }
++
++    /// 交接前那次强制落盘必须真的写（save_account_usage 带 dirty 判断，
++    /// 定时任务可能刚把标记清掉 ⇒ handoff_flush_and_mark 要强制置脏）
++    #[tokio::test(flavor = "multi_thread")]
++    async fn test_handoff_flush_writes_even_when_not_dirty() {
++        let (m, dir) = test_mgr_with_dir();
++        m.record_account_usage(1, "before-flush", true, 5, 1);
++        m.save_account_usage(); // 这一步把 dirty 清掉
++        let usage = dir.join("kiro_account_usage.json");
++        std::fs::remove_file(&usage).ok(); // 删掉文件，模拟「盘上没有最新内容」
++        m.handoff_flush_and_mark();
++        let after = std::fs::read_to_string(&usage).unwrap_or_default();
++        assert!(
++            after.contains("before-flush"),
++            "交接前必须强制落盘一次，否则最后的用量会丢: {}",
++            after
++        );
++        let _ = std::fs::remove_dir_all(&dir);
      }
  
      #[test]
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -141,12 +141,36 @@
+@@ -31,6 +31,11 @@
+         )
+         .init();
+ 
++    // 无缝换版：构造 TokenManager 时先不接管状态目录（见 kiro::lease / kiro::ready），
++    // 等拿到接管租约后再 init_slots()。只影响本进程，不改库的默认行为。
++    // SAFETY: 单线程启动阶段，还没 spawn 任何任务。
++    unsafe { std::env::set_var("KIRO_DEFER_TAKEOVER", "1") };
++
+     // 加载配置
+     let config_path = args
+         .config
+@@ -141,12 +146,36 @@
          std::process::exit(1);
      });
      let token_manager = Arc::new(token_manager);
@@ -7785,16 +8476,25 @@
  
      // 初始化 count_tokens 配置
      token::init_config(token::CountTokensConfig {
-@@ -160,7 +184,7 @@
+@@ -157,11 +186,15 @@
+         tls_backend: config.tls_backend,
+     });
+ 
++    // 就绪闸门：拿到接管租约前只回健康检查，/readyz 回 503 ⇒ k8s 不把流量切过来
++    let ready = kiro::ready::ReadyGate::new();
++
      // 构建 Anthropic API 路由（profile_arn 由 provider 层根据实际凭据动态注入）
-     let anthropic_app = anthropic::create_router_with_provider(
+-    let anthropic_app = anthropic::create_router_with_provider(
++    let anthropic_app = anthropic::create_router_with_ready(
          &api_key,
 -        Some(kiro_provider),
 +        Some(kiro_provider.clone()),
          config.extract_thinking,
++        ready.clone(),
      );
  
-@@ -179,7 +203,7 @@
+     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
+@@ -179,7 +212,7 @@
          } else {
              let admin_service =
                  admin::AdminService::new(token_manager.clone(), endpoint_names.clone());
@@ -7803,20 +8503,151 @@
              let admin_app = admin::create_admin_router(admin_state);
  
              // 创建 Admin UI 路由
-@@ -215,5 +239,32 @@
+@@ -215,5 +248,163 @@
      }
  
      let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 -    axum::serve(listener, app).await.unwrap();
-+    // 收到 SIGTERM（k8s 停 pod）/ Ctrl-C：不再接新连接，等在途请求（含长流）跑完再退出；
-+    // 上限由 k8s terminationGracePeriodSeconds 决定。退出前落盘用量 / 统计。
++
++    // ---- 无缝换版的交接（见 kiro::lease 文档）----
++    // 🔴 顺序很重要：**先开始服务**（回 /healthz 与 /readyz），**再**后台等旧 pod 交出租约。
++    // 反过来写（先等租约再 serve）会让待命期连端口都连不上：k8s liveness 探针失败
++    // ⇒ 正在等交接的新 pod 被杀掉重启，永远接管不了（10-26 隔离实测：探针 000 而不是 503）。
++    //
++    // 状态目录只允许一个进程接管：绑定表 / 用量 / 凭据都在那里，两个一起写会互相覆盖，
++    // 同一个 Kiro 号被两边同时用还会破坏「一号一出口」（social 号刷新更会把对方凭据作废）。
++    // 🔴 优先 KIRO_POD_NAME：HOSTNAME 在容器里已存在，用 fieldRef 覆盖会变空（10-26 实测）
++    let holder_id = std::env::var("KIRO_POD_NAME")
++        .ok()
++        .filter(|v| !v.trim().is_empty())
++        .or_else(|| std::env::var("HOSTNAME").ok().filter(|v| !v.trim().is_empty()))
++        .unwrap_or_else(|| format!("pid-{}", std::process::id()));
++    let lease_slot: Arc<std::sync::Mutex<Option<kiro::lease::Lease>>> = Arc::new(std::sync::Mutex::new(None));
++    {
++        let tm = token_manager.clone();
++        let ready_open = ready.clone();
++        let slot = Arc::clone(&lease_slot);
++        let dir = token_manager.cache_dir();
++        let holder = holder_id.clone();
++        let config_admin_key = config.admin_api_key.clone().filter(|k| !k.trim().is_empty());
++        // 自己的可达地址：pod IP + 监听端口，写进租约供下一个实例直连
++        let my_addr = std::env::var("KIRO_POD_IP")
++            .ok()
++            .filter(|v| !v.trim().is_empty())
++            .map(|ip| format!("{}:{}", ip, config.port));
++        tokio::spawn(async move {
++            match dir {
++                Some(dir) => {
++                    tracing::info!("待命中（/readyz 返回 503），等待接管状态目录: {}", dir.display());
++                    // 🔴 主动请求旧实例交接，否则 maxUnavailable=0 下会死锁：
++                    //   k8s 要「新 pod 就绪后才停旧 pod」，而新 pod 要「旧 pod 放手才就绪」。
++                    // 旧实例收到 /api/admin/handoff 会立刻交出状态目录，但**仍留在 Service
++                    // 后端继续接客**，直到 k8s 停它 ⇒ 全程都有 ready 的后端，不断流。
++                    // 地址：同 Service 下的 peer pod（headless 解析不可靠时用 Pod IP 段探测过于复杂，
++                    // 这里用 k8s 注入的 Service DNS + 自己的 pod 名排除自己）。
++                    let admin_key = config_admin_key.clone();
++                    let mut poked = std::collections::HashSet::new();
++                    // addr 来自租约文件里持有者自己写的 host:port（pod IP），不依赖 DNS
++                    let on_wait = |h: &str, addr: Option<&str>| {
++                        // 同一个持有者只敲一次，避免刷日志
++                        if !poked.insert(h.to_string()) {
++                            return;
++                        }
++                        let Some(key) = admin_key.clone() else { return };
++                        // 🔴 直连持有者自己写在租约里的地址（pod IP）。
++                        // 不用 Service：headless 会轮询到所有 pod，实测打到过自己身上；
++                        // 也不用 <pod>.<headless-svc> DNS：Deployment 的 pod 没有稳定 DNS 名
++                        // （那是 StatefulSet 才有），实测解析失败 ⇒ 交接发不出去、回到死锁。
++                        let Some(addr) = addr else {
++                            tracing::info!("持有者 {} 没写可达地址（可能是旧版本），等 preStop 触发交接", h);
++                            return;
++                        };
++                        let url = format!("http://{addr}/api/admin/handoff");
++                        tracing::info!("请求旧实例 {} 主动交接: {}", h, url);
++                        tokio::spawn(async move {
++                            let c = reqwest::Client::builder()
++                                .timeout(std::time::Duration::from_secs(5))
++                                .build();
++                            if let Ok(c) = c {
++                                match c.post(&url).header("x-api-key", key).send().await {
++                                    Ok(r) => {
++                                        let st = r.status();
++                                        let body = r.text().await.unwrap_or_default();
++                                        tracing::info!("交接请求返回 {}：{}", st, body.chars().take(120).collect::<String>());
++                                    }
++                                    // 失败不致命：k8s 的 preStop 也会触发交接，这里只是让它更快
++                                    Err(e) => tracing::warn!("交接请求失败（preStop 仍会触发交接）: {}", e),
++                                }
++                            }
++                        });
++                    };
++                    match kiro::lease::Lease::acquire_full(&dir, holder, my_addr, on_wait).await {
++                        Ok(l) => *slot.lock().unwrap() = Some(l),
++                        // 拿不到租约（目录不可写等）不阻塞服务：按单实例继续
++                        Err(e) => tracing::warn!("接管租约不可用，按单实例继续: {}", e),
++                    }
++                }
++                None => tracing::info!("没有状态目录，按单实例继续"),
++            }
++            // 真正接管：先重读盘上状态（旧进程交接前最后写的那次发生在本进程启动之后），
++            // 再对齐槽位，最后开闸放流量。
++            tm.reload_state_from_disk();
++            tm.init_slots();
++            // 注入「释放租约」回调：preStop 调 /api/admin/handoff 时会交接并释放，
++            // 让下一个实例立刻接管，而本实例继续接客到退出 ⇒ 后端始终有人，无空档。
++            {
++                let slot2 = Arc::clone(&slot);
++                tm.set_release_lease_hook(Box::new(move || {
++                    if let Some(l) = slot2.lock().unwrap().take() {
++                        l.release();
++                    }
++                }));
++            }
++            tm.mark_took_over();
++            ready_open.open();
++            tracing::info!("已接管，/readyz 返回 200");
++        });
++    }
++
++    // 收到 SIGTERM（k8s 停 pod）/ Ctrl-C：先摘流量（/readyz 立刻 503），不再接新连接，
++    // 等在途请求（含长流）跑完；上限由 k8s terminationGracePeriodSeconds 决定。
++    // 退出前落盘用量 / 统计，最后释放租约让新实例立刻接管。
 +    let tm_exit = token_manager.clone();
++    let ready_exit = ready.clone();
++    let lease_exit = Arc::clone(&lease_slot);
++    let holder_exit = holder_id.clone();
 +    axum::serve(listener, app)
-+        .with_graceful_shutdown(shutdown_signal())
++        .with_graceful_shutdown(async move {
++            shutdown_signal().await;
++            // ---- 收到 SIGTERM：立刻交接，然后只把在途请求跑完 ----
++            // 🔴 顺序必须是「先交接、再收尾」，不能等在途请求跑完才交接：
++            // k8s 滚动更新是「新 pod 就绪后才停旧 pod」，如果旧 pod 要等请求跑完才放手，
++            // 新 pod 就一直等租约、永远不就绪 ⇒ 两边互相等，换版十分钟后失败。
++            // 1) 强制落一次全部状态（用量 / 绑定表 / 统计 / 凭据），然后置位「已交接」：
++            //    之后本进程不再写盘、不再刷 token（新进程将接管同一个目录）。
++            //    🔴 注意这里**还不能**摘流量：新 pod 要等租约释放才能接管，
++            //    提前 503 会留出一段谁都不接的空档。
++            tm_exit.handoff_flush_and_mark();
++            // 4) 释放租约，新 pod 立刻就能接管（不用等 10s 心跳过期）
++            if let Some(l) = lease_exit.lock().unwrap().take() {
++                l.release();
++            }
++            tracing::info!("已交接状态目录：不再写盘、不再刷 token。继续接请求直到新实例接管");
++            // 5) 🔴 关键：释放租约后**继续接新请求**，直到新 pod 真的接管。
++            //    不这样做就会出现「旧的已经不接、新的还没接」的空档
++            //    （10-26 实测 3s：旧 pod 一交接就 503，新 pod 还要 1~2s 才接管）。
++            //    新 pod 接管后 kube-proxy 也会把流量切给它，这里再停止 accept 才真正无缝。
++            if let Some(dir) = tm_exit.cache_dir() {
++                kiro::lease::wait_until_taken(&dir, &holder_exit, std::time::Duration::from_secs(60)).await;
++            }
++            // 6) 此时新 pod 已在接客：摘掉本 pod 的就绪状态，给 kube-proxy 一点时间剔除后端，
++            //    然后停止 accept 新连接（在途请求继续跑完）。
++            ready_exit.close();
++            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
++        })
 +        .await
 +        .unwrap();
 +    tracing::info!("在途请求已处理完，退出");
-+    tm_exit.save_account_usage();
 +}
 +
 +async fn shutdown_signal() {

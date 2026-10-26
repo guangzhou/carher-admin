@@ -935,14 +935,22 @@ pristine 断言会正确判红,**那不是腿坏是喂错了**。
 
 - 🔴 **同事的版本 ≠ 下载页版本**:`/download/stable/...` 回 3.27.12,同事是 **3.27.14**,来自
   更新通道 `/updates/api/update/darwin-arm64/cursor/<当前版本>/<commit>/stable`(或 `/download/latest/...`)。
-  ⇒ 适配要对**同事 DOCTOR 报的那个版本号**抽 bundle,不是对下载页。`--fetch` 只拿 stable,要另下。
+  ⇒ 适配要对**同事 DOCTOR 报的那个版本号**抽 bundle,不是对下载页:用 `bundle_patch_regress.sh --fetch-latest`,
+  或自己下好挂载后 `--new-bundles <dir> --new-app <挂载的 Cursor.app>`。
 - 四处改动(js+py+`cursor_ctxwin_patch.js` 同步):
   ① localagent:`if(aGo.releaseAfterSend(u.conversationId),mc.localMode){try{` —— 条件成逗号表达式,AST 取最后一项,正则把前缀项并进第 1 组原样保留;
   ② 件C daemon.cjs 去掉了空白 ⇒ 字面量锚点全 0,改「名字逐字、只容忍空白」正则 `CW_*_SRC_RX`;
   ③ 件D daemon.cjs `async runOptions=>{` 单参无括号;
   ④ 我们自己的 bug:`let SOFT_MISS` 在 `CX_APPLY_TO_FILE` 钩子之后才声明 ⇒ 锚点一 miss 报 ReferenceError,盖住真错误(改 var)。
 - 验:3.27.12 75 PASS、3.27.14 74 PASS(`--new-bundles <dir> --new-app <挂载的 .app>`),均 0 FAIL 0 SKIP;3.24.12 旧产物逐字节不变。
-  ⚠️ **仍未真机实测**(本机还是 3.24.12)。dmg 第一次下载 900s 超时只到 310/316MB ⇒ 下载用 `curl -C -` 续传 + 比 Content-Length。
+- 真机:10-26 本机 3.24.12 → 3.27.14(旧 app 留在 `/Applications/Cursor.app.old3.24.12`),**用网页上解出的包**双击同款
+  `UPGRADE-Mac.command`:全部家族打上、菜单 40→37(+haiku-5-5);DOCTOR 启动前报 `claude-haiku-5-5 isUserAdded=undefined`
+  (=上文「启动前的正常态」),启动一次后 `0 个(全部兜住)`。同事程文旭同一包装完反馈已解决。
+  ⚠️ 本机 GUI 发消息那步没测成(小代理 req_total 一直 0,按键没落进聊天框、第 3 条粘进了终端),**别把它当真机发送证据**。
+- dmg 下载:`bundle_patch_regress.sh` 已按 Content-Length 续传(10-26 一次 900s 超时只到 310/316MB,hdiutil 报「无法识别映像」)。
+- 🔴 **每日巡检之前漏报的两个原因(10-26 修)**:① 只看 stable,同事自动升级拿的是 latest;② launchd PATH 没有 node,
+  10-24 起每天 exit 1 但告警里 0 条失败项、状态文件停在 3.20.21。现在 `bundle_audit_daily.sh` 看 latest、补 PATH、
+  没跑到腿时把日志尾巴贴进告警;`env -i PATH=/usr/bin:/bin sh bundle_audit_daily.sh` 实测 3.27.14 全绿。
 
 ### 新版本漂移修复流程(3.18.25 / 3.19.19 / 3.20.21 / 3.24.12 四次都按这个走)
 

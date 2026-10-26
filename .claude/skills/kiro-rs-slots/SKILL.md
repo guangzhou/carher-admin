@@ -23,7 +23,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 |---|---|
 | 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 Recreate，grace 300s），Admin `http://10.68.13.198:30891/admin`，adminApiKey 在实例自己的 `config.json`（和老实例不同）|
 | 老实例 | deploy `kiro-rs`（:30890，镜像 ctxwin）。只剩 `carher-hangzhou`、`claude-code-buyitian` 两把 key 主走它，另外是新实例的兜底 |
-| 镜像 | **现网 `slots41`**（10-26 19:25 上线 = slots40 无缝换版 + 重新分配 / 槽位权重 / 手动挪 key，sha `cbef9f8e…`）。🔴 回滚到 slots31 **不能 `set image`**：slots31 没有 `/readyz`，新 manifest 的 readiness 永远不过 ⇒ 要 `kubectl replace -f 198:~/kiro-rs-slots-deploy.pre-slots41.json`（旧 Recreate + TCP 探针整份 deploy），切前状态文件在 `198:~/kiro-deploy/backup/slots-pre-v2026.10.1-carher-slots41-20261026T192216/`。`kiro-rs:v2026.10.1-carher-slots40`（10-26，无缝换版：零断流；slots31 空回复明细；回滚 tag slots31）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
+| 镜像 | **现网 `slots42`**（10-27 01:16 滚动上线，ready 后端全程不为 0、34 请求 0 失败；= slots41 + 告警只看 24h/可清除 + 接新人开关 + 专属 key 槽；回滚 `set image … slots41` 即可，两版探针相同；切前备份 `198:~/kiro-deploy/backup/slots-pre-v2026.10.1-carher-slots42-20261027T011640/`）。slots41（10-26 19:25 上线 = slots40 无缝换版 + 重新分配 / 槽位权重 / 手动挪 key，sha `cbef9f8e…`）。🔴 回滚到 slots31 **不能 `set image`**：slots31 没有 `/readyz`，新 manifest 的 readiness 永远不过 ⇒ 要 `kubectl replace -f 198:~/kiro-rs-slots-deploy.pre-slots41.json`（旧 Recreate + TCP 探针整份 deploy），切前状态文件在 `198:~/kiro-deploy/backup/slots-pre-v2026.10.1-carher-slots41-20261026T192216/`。`kiro-rs:v2026.10.1-carher-slots40`（10-26，无缝换版：零断流；slots31 空回复明细；回滚 tag slots31）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
 | manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、secret `kiro-rs-slots-bootstrap`）|
 | 槽 | 4 个：`jp-172.235.204.67`（经 243 代理）、`sg-47.84.112.136`、`sg-47.84.85.100`、`sg-47.236.200.98`；出口配在 `config.json.slots[]`，全局 `proxyUrl=null` |
 | 并发参数 | 起步 16 / 最小 2 / 最大 24 / 自动调；排队超时 120s；「暂不接新人」倍数 1.5 |
@@ -45,6 +45,11 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 - **手动挪 key（slots41 起）**：卡片上点「用户」数字 ⇒ 该槽 key 列表（别名、7 日请求 / token、最后使用、在用、是否固定）⇒「挪到」。手动挪 = 固定（重新分配不动），可「取消」。下一个请求起走新槽，在途的跑完。🔴 换槽 = 换号，那个人的 Kiro 缓存作废（缓存按号，见记忆 project_kiro_prompt_cache_works_ttl_5min）。
   - 别名 / 7 日数据存在 `kiro_slots.json.userMeta`（30s 落一次盘），**从 slots41 上线起才开始记**；老用户别名要等它下次请求。固定存 `pinned`；绑定没了（槽停用/删）固定也作废。
   - API：`GET /slots/users?slot=`、`POST /slots/users/rebind {user,slot}`、`POST /slots/users/unpin {user}`、`GET|POST /slots/rebalance`。待命 / 已交接实例拒绝这些写操作。
+- **卡片告警（slots42 起）**：「有异常」只算**最近 24 小时、且在点「清除」之后**的 429 / 空回复给了用户 / 排队超时 / 用尽 / 被限；累计数在「明细」里不删。全是换下去的旧号上发生的 ⇒ 黄色「之前的号有异常」。清除时刻存 `kiro_slots.json.alarmAck`；🔴 事件流水在内存，**pod 重启 / 换镜像后告警从 0 起**（累计计数同样清零）。API `POST /slots/alarms/ack {slot?}`。
+- **接新人开关 / 专属 key（slots42 起）**：「设置 → 槽位配置」每槽两列。
+  - 关「接新人」：自动分配、重新分配、无身份请求（会话键 / MCP）都不进来；已绑的人照常用；手动挪进来可以。全部槽都关时兜底照常分（不让人没处去）。
+  - 「专属 key」填 LiteLLM key **别名前缀**（逗号 / 换行分隔，同灰度名单规则）：命中的 key **下一个请求起自动挪进**这个槽（换号 ⇒ 缓存作废一次）；普通人分不进来；手动固定在别处的 VIP 不被抢；专属槽没号时 VIP 照常分到别的槽。VIP 槽一般同时关「接新人」，否则普通新人仍可能被分进来——🔴 其实不会：有专属名单的槽在自动分配里**照样按「接新人」开关**判断，要独享就把开关关掉。
+  - 这两类槽不参与「重新分配」（不往里挪、也不往外挪），预览里会写「不参与」。
 - **首字耗时**：卡片「首字 Xs」= 近 30 分钟「发出 → 首个有内容事件」平均，跟 prompt 大小和模型强相关，只作参考，没参与调度。
 - **槽全停** ⇒ 529，不回老路径（老路径同一出口会和槽撞 IP）；LiteLLM 层兜底到老实例。
 

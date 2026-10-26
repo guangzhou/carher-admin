@@ -19,7 +19,7 @@
    return data
  }
  
-@@ -121,5 +121,246 @@
+@@ -121,5 +121,270 @@
  // 设置 window 模式参数（立即生效并写回 config.json）
  export async function setWindowSettings(settings: WindowSettings): Promise<WindowSettings> {
    const { data } = await api.put<WindowSettings>('/config/window', settings)
@@ -64,6 +64,26 @@
 +  weight: number
 +  latencyMs: number | null
 +  latencySamples: number
++  alarms: SlotAlarms
++  acceptNew: boolean
++  vipAliases: string[]
++  vipUsers: number
++}
++
++export interface SlotAlarms {
++  http429: number
++  emptyReturned: number
++  queueTimeouts: number
++  exhausted: number
++  restricted: number
++  lastAt: number | null
++  onCurrentAccount: number
++  since: number
++  ackedAt: number | null
++}
++
++export async function ackSlotAlarms(slot: string | null): Promise<void> {
++  await api.post('/slots/alarms/ack', slot ? { slot } : {})
 +}
 +
 +export interface Runway {
@@ -159,6 +179,8 @@
 +  slots: { name: string; weight: number; loadNow: number; loadTarget: number; loadAfter: number }[]
 +  skippedActive: number
 +  skippedPinned: number
++  skippedLocked: number
++  excludedSlots: string[]
 +}
 +
 +export async function getRebalancePlan(): Promise<RebalancePlan> {
@@ -194,6 +216,8 @@
 +  proxyPassword?: string | null
 +  enabled: boolean
 +  weight: number
++  acceptNew: boolean
++  vipAliases: string[]
 +}
 +
 +export async function getSlotConfigs(): Promise<SlotConfig[]> {
@@ -2356,7 +2380,7 @@
 +              </div>
 +            )}
 +            <p className='text-xs text-muted-foreground'>
-+              没动：{data.skippedActive} 人最近 10 分钟在用 · {data.skippedPinned} 人已固定。执行时每个人会再核一次，刚开始用的会自动跳过。
++              没动：{data.skippedActive} 人最近 10 分钟在用 · {data.skippedPinned} 人已固定{data.excludedSlots.length > 0 ? ` · ${data.excludedSlots.join('、')} 不接新人 / 专属，不参与（上面 ${data.skippedLocked} 人不动）` : ''}。执行时每个人会再核一次，刚开始用的会自动跳过。
 +            </p>
 +          </div>
 +        )}
@@ -2372,7 +2396,7 @@
 +}
 --- a/admin-ui/src/components/slot-config-editor.tsx
 +++ b/admin-ui/src/components/slot-config-editor.tsx
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,150 @@
 +import { useEffect, useState } from 'react'
 +import { toast } from 'sonner'
 +import { Button } from '@/components/ui/button'
@@ -2391,11 +2415,13 @@
 +  const { data } = useSlotConfigs()
 +  const { mutate, isPending } = useSetSlotConfigs()
 +  const [rows, setRows] = useState<SlotConfig[]>([])
-+  useEffect(() => { if (data) setRows(data) }, [data])
++  // 专属名单输入框原文（边打字边解析，逗号不能被吃掉）
++  const [vipText, setVipText] = useState<Record<number, string>>({})
++  useEffect(() => { if (data) { setRows(data); setVipText({}) } }, [data])
 +
 +  const set = (i: number, patch: Partial<SlotConfig>) =>
 +    setRows((r) => r.map((x, j) => (j === i ? { ...x, ...patch } : x)))
-+  const add = () => setRows((r) => [...r, { name: '', proxyUrl: null, proxyUsername: null, proxyPassword: null, enabled: true, weight: 5 }])
++  const add = () => setRows((r) => [...r, { name: '', proxyUrl: null, proxyUsername: null, proxyPassword: null, enabled: true, weight: 5, acceptNew: true, vipAliases: [] }])
 +  const remove = (i: number) => {
 +    const n = rows[i].name || '（未命名）'
 +    if (!window.confirm(`彻底删除槽位「${n}」的配置（出口、账号、密码）？删除后要重新填写。`)) return
@@ -2414,6 +2440,10 @@
 +    if (error) return
 +    const was = new Map((data || []).map((o) => [o.name, o.enabled]))
 +    const off = rows.filter((r) => !r.enabled && was.get(r.name) !== false).map((r) => r.name)
++    const vipSlots = rows.filter((r) => r.enabled && r.vipAliases.length > 0)
++    const before = new Map((data || []).map((o) => [o.name, o.vipAliases.join(',')]))
++    const vipChanged = vipSlots.filter((r) => before.get(r.name) !== r.vipAliases.join(','))
++    if (vipChanged.length && !window.confirm(`专属名单有变化：${vipChanged.map((r) => `${r.name} ← ${r.vipAliases.join('、')}`).join('；')}。\n命中的 key 下一个请求起自动进专属槽（换槽 = 换号，缓存作废一次）；手动固定过的 key 不受影响。确认？`)) return
 +    if (off.length && !window.confirm(`将停用：${off.join('、')}。这些槽上的号回冷备，绑定的用户下次请求换到其他槽。配置保留，可随时再打开。确认？`)) return
 +    mutate(rows.map((r) => ({ ...r, name: r.name.trim() })), {
 +      onSuccess: () => toast.success('已保存，立即生效'),
@@ -2450,6 +2480,8 @@
 +              <th className='px-3 py-2 text-left font-medium'>用户名</th>
 +              <th className='px-3 py-2 text-left font-medium'>密码</th>
 +              <th className='px-3 py-2 text-left font-medium' title='1~10，默认 5。越大分到的人越多、在途上限越高（10 = 标准的两倍）'>权重</th>
++              <th className='px-3 py-2 text-left font-medium' title='关掉 = 不自动分配新用户进来（已绑的人照常用，手动挪进来可以）'>接新人</th>
++              <th className='px-3 py-2 text-left font-medium' title='填 LiteLLM key 别名前缀，逗号或换行分隔。命中的 key 自动进这个槽；普通用户不会被分进来'>专属 key</th>
 +              <th className='w-16 px-3 py-2'></th>
 +            </tr>
 +          </thead>
@@ -2477,6 +2509,22 @@
 +                    onChange={(e) => set(i, { weight: e.target.value === '' ? NaN : Number(e.target.value) })}
 +                  />
 +                </td>
++                <td className='px-3 py-2'>
++                  <Switch checked={r.acceptNew} onCheckedChange={(v) => set(i, { acceptNew: v })} aria-label={`${r.name} 接新人`} />
++                </td>
++                <td className='min-w-48 px-3 py-2'>
++                  <textarea
++                    className='h-8 min-h-8 w-full resize-y rounded-md border bg-background px-2 py-1 text-xs'
++                    placeholder='如 claude-code-boss, vip-'
++                    aria-label={`${r.name} 专属 key 别名前缀`}
++                    value={vipText[i] ?? r.vipAliases.join(', ')}
++                    onChange={(e) => {
++                      const t = e.target.value
++                      setVipText((v) => ({ ...v, [i]: t }))
++                      set(i, { vipAliases: t.split(/[,，\n]/).map((x) => x.trim()).filter(Boolean) })
++                    }}
++                  />
++                </td>
 +                <td className='px-3 py-2 text-right'>
 +                  {!r.enabled && (
 +                    <Button size='sm' variant='ghost' className='text-red-600' onClick={() => remove(i)}>删除</Button>
@@ -2485,7 +2533,7 @@
 +              </tr>
 +            ))}
 +            {rows.length === 0 && (
-+              <tr><td colSpan={7} className='px-3 py-6 text-center text-muted-foreground'>还没有槽位</td></tr>
++              <tr><td colSpan={9} className='px-3 py-6 text-center text-muted-foreground'>还没有槽位</td></tr>
 +            )}
 +          </tbody>
 +        </table>
@@ -2737,7 +2785,7 @@
 +                        onChange={(e) => e.target.value && move(u.user, u.keyAlias, e.target.value)}
 +                      >
 +                        <option value=''>{targets.length ? '选择槽…' : '没有别的槽'}</option>
-+                        {targets.map((t) => <option key={t.name} value={t.name}>槽 {t.index + 1} · {t.name}</option>)}
++                        {targets.map((t) => <option key={t.name} value={t.name}>槽 {t.index + 1} · {t.name}{t.vipAliases.length ? '（专属）' : !t.acceptNew ? '（不接新人）' : ''}</option>)}
 +                      </select>
 +                    </td>
 +                  </tr>
@@ -2752,7 +2800,7 @@
 +}
 --- a/admin-ui/src/components/slots-panel.tsx
 +++ b/admin-ui/src/components/slots-panel.tsx
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,463 @@
 +import { CreditsTrend } from '@/components/credits-trend'
 +import { EmptyEventsDialog } from '@/components/empty-events-dialog'
 +import { SlotUsersDialog } from '@/components/slot-users-dialog'
@@ -2764,6 +2812,8 @@
 +import { Badge } from '@/components/ui/badge'
 +import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 +import { useSetSlotLimits, useSetSlotLock, useSlots } from '@/hooks/use-credentials'
++import { useQueryClient } from '@tanstack/react-query'
++import { ackSlotAlarms } from '@/api/credentials'
 +import type { SlotView, SlotsOverview, SlotTestResult, SlotTestScenario } from '@/api/credentials'
 +import { SlotTestDialog } from '@/components/slot-test-dialog'
 +import { SlotNo } from '@/components/credential-table'
@@ -2810,6 +2860,15 @@
 +
 +const tierShort = (t: string) => t.replace(/^KIRO\s*/i, '')
 +
++function fmtAgo(t: number | null) {
++  if (!t) return '—'
++  const s = Math.max(0, Math.floor(Date.now() / 1000 - t))
++  if (s < 60) return '刚刚'
++  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`
++  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`
++  return `${Math.floor(s / 86400)} 天前`
++}
++
 +// 测试结果的中文判定 + 颜色
 +const VERDICT: Record<SlotTestResult['verdict'], { label: string; cls: string }> = {
 +  ok: { label: '可用', cls: 'text-green-600' },
@@ -2837,11 +2896,29 @@
 +  const [more, setMore] = useState(false)
 +  const [emptyOpen, setEmptyOpen] = useState(false)
 +  const [usersOpen, setUsersOpen] = useState(false)
++  const [acking, setAcking] = useState(false)
++  const qc = useQueryClient()
 +  const st = s.stats
++  // 告警只看最近 24 小时、且在「清除告警」之后的；累计数在「明细」里
++  const al = s.alarms
 +  const issues = ([
-+    ['429', st.first429 + st.retry429], ['空回复给了用户', st.emptyReturned], ['排队超时', st.queueTimeouts],
-+    ['额度用尽', st.exhausted], ['被限制', st.restricted],
++    ['429', al.http429], ['空回复给了用户', al.emptyReturned], ['排队超时', al.queueTimeouts],
++    ['额度用尽', al.exhausted], ['被限制', al.restricted],
 +  ] as [string, number][]).filter(([, n]) => n > 0)
++  const total = issues.reduce((a, [, n]) => a + n, 0)
++  const oldAccount = total > 0 && al.onCurrentAccount === 0
++  const ack = async () => {
++    setAcking(true)
++    try {
++      await ackSlotAlarms(s.name)
++      toast.success(`已清除「${s.name}」的告警（累计数仍在明细里）`)
++      qc.invalidateQueries({ queryKey: ['slots'] })
++    } catch (e) {
++      toast.error(`清除失败: ${extractErrorMessage(e)}`)
++    } finally {
++      setAcking(false)
++    }
++  }
 +  const load = s.limit ? Math.min(100, (s.inFlight / s.limit) * 100) : 0
 +  const detail: [string, string][] = [
 +    ['7 日 token', today ? short(today.inputTokens + today.outputTokens) : '0'],
@@ -2849,6 +2926,8 @@
 +    ['权重', `${s.weight}（在途上限 ×${(s.weight / 5).toFixed(1)}）`],
 +    ['首字平均', s.latencyMs == null ? '—' : `${(s.latencyMs / 1000).toFixed(1)}s（${s.latencySamples} 次）`],
 +    ['发出（自重启）', String(st.sent)],
++    ['累计 429 / 排队超时', `${st.first429 + st.retry429} / ${st.queueTimeouts}`],
++    ['告警起算', fmtAgo(al.since)],
 +    ['首发 429', `${st.first429}（${pct(st.first429, st.sent)}）`],
 +    ['重试 429', String(st.retry429)],
 +    ['空回复 / 救回', `${st.empty} / ${st.empty - st.emptyReturned}`],
@@ -2865,8 +2944,13 @@
 +          <div className='truncate text-xs text-muted-foreground'>出口 {s.egress ? s.egress.replace(/^https?:\/\//, '') : '本机'}</div>
 +          </div>
 +        </div>
-+        {s.closed ? <Badge variant='warning' title='近 30 分钟用量明显高于其它槽，暂不分配新用户；老用户不受影响'>暂不接新人</Badge>
-+          : issues.length ? <Badge variant='destructive'>有异常</Badge> : <Badge variant='success'>正常</Badge>}
++        <div className='flex shrink-0 flex-wrap justify-end gap-1'>
++          {s.vipAliases.length > 0 && <Badge variant='default' title={`专属：${s.vipAliases.join('、')}（别名前缀命中的 key 自动进这个槽）`}>专属</Badge>}
++          {!s.acceptNew && s.vipAliases.length === 0 && <Badge variant='secondary' title='手动锁定：不分配新用户，已绑的人照常用'>不接新人</Badge>}
++          {s.closed && s.acceptNew ? <Badge variant='warning' title='近 30 分钟用量明显高于其它槽，暂不分配新用户；老用户不受影响'>暂不接新人</Badge>
++            : issues.length ? <Badge variant={oldAccount ? 'warning' : 'destructive'} title={oldAccount ? '这些告警发生在之前的号上，当前号没有' : ''}>{oldAccount ? '之前的号有异常' : '有异常'}</Badge>
++              : <Badge variant='success'>正常</Badge>}
++        </div>
 +      </div>
 +      <div className='mt-3 rounded-md bg-muted/40 px-3 py-2 text-sm'>
 +        {s.accountId ? (
@@ -2887,7 +2971,7 @@
 +        <div><div className='text-xs text-muted-foreground'>7 日请求</div><div className='font-semibold tabular-nums'>{today?.requests ?? 0}</div></div>
 +      </div>
 +      <div className='mt-2 flex justify-between text-xs text-muted-foreground'>
-+        <span title='权重越大分到的人越多、在途上限越高（5 = 标准）'>权重 {s.weight}</span>
++        <span title='权重越大分到的人越多、在途上限越高（5 = 标准）'>权重 {s.weight}{s.vipAliases.length > 0 ? ` · 专属用户 ${s.vipUsers}` : ''}</span>
 +        <span title='近 30 分钟「发出 → 首个有内容事件」的平均耗时，跟请求大小和模型关系很大，仅供参考'>
 +          首字 {s.latencyMs == null ? '—' : `${(s.latencyMs / 1000).toFixed(1)}s`}
 +        </span>
@@ -2907,7 +2991,13 @@
 +              </span>
 +            ))}
 +          </span>
-+        ) : <span className='text-muted-foreground'>无 429 · 无空回复 · 无排队超时</span>}
++        ) : <span className='text-muted-foreground'>{al.ackedAt && al.ackedAt > Date.now() / 1000 - 86400 ? `清除后无异常（${fmtAgo(al.ackedAt)}清除）` : '近 24 小时无 429 · 无空回复 · 无排队超时'}</span>}
++        {issues.length > 0 && (
++          <span className='ml-1 text-muted-foreground'>
++            · 最近 {fmtAgo(al.lastAt)}
++            <button type='button' className='ml-2 underline underline-offset-2 hover:text-foreground disabled:opacity-50' disabled={acking} onClick={ack} title='已经处理过 / 是旧号的事：清掉卡片上的告警（累计数不删，之后再发生会重新报）'>清除</button>
++          </span>
++        )}
 +        {s.queued > 0 && <span className='ml-2 text-amber-600'>排队 {s.queued}</span>}
 +      </div>
 +      {more && (
@@ -2949,6 +3039,16 @@
 +  const [busy, setBusy] = useState<Record<number, boolean>>({})
 +  const [all, setAll] = useState(false)
 +  const [rebalance, setRebalance] = useState(false)
++  const qc = useQueryClient()
++  const ackAll = async () => {
++    try {
++      await ackSlotAlarms(null)
++      toast.success('已清除全部槽位的告警')
++      qc.invalidateQueries({ queryKey: ['slots'] })
++    } catch (e) {
++      toast.error(`清除失败: ${extractErrorMessage(e)}`)
++    }
++  }
 +  const one = async (i: number) => {
 +    setBusy((b) => ({ ...b, [i]: true }))
 +    try {
@@ -2994,7 +3094,8 @@
 +        {SCENARIOS.map((x) => <option key={x.k} value={x.k}>{x.label}</option>)}
 +      </select>
 +      <Button size='sm' variant='outline' disabled={all} onClick={everyone}>{all ? '测试中…' : '全部槽位测一遍'}</Button>
-+      <Button size='sm' variant='outline' className='ml-auto' onClick={() => setRebalance(true)} title='按权重和近 24 小时用量重新分配用户（先预览）'>重新分配用户</Button>
++      <Button size='sm' variant='ghost' className='ml-auto' disabled={!slots.some((s) => s.alarms.http429 + s.alarms.emptyReturned + s.alarms.queueTimeouts + s.alarms.exhausted + s.alarms.restricted > 0)} onClick={ackAll} title='把所有槽卡片上的告警清零（累计数不删，之后再发生会重新报）'>清除全部告警</Button>
++      <Button size='sm' variant='outline' onClick={() => setRebalance(true)} title='按权重和近 24 小时用量重新分配用户（先预览）'>重新分配用户</Button>
 +      <RebalanceDialog open={rebalance} onOpenChange={setRebalance} />
 +      <span className='text-xs text-muted-foreground'>用该槽的号、走该槽出口真打一发；不占并发、不计统计、不换号。点结果看输入/输出</span>
 +    </div>
@@ -3397,7 +3498,7 @@
    hasProfileArn: boolean
 --- a/src/admin/handlers.rs
 +++ b/src/admin/handlers.rs
-@@ -158,3 +158,280 @@
+@@ -158,3 +158,294 @@
          Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
      }
  }
@@ -3506,6 +3607,20 @@
 +pub async fn post_slot_unpin(State(state): State<AdminState>, Json(p): Json<SlotUnpinRequest>) -> impl IntoResponse {
 +    match state.service.slot_unpin(&p.user) {
 +        Ok(changed) => Json(serde_json::json!({"ok": true, "changed": changed})).into_response(),
++        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
++    }
++}
++
++#[derive(serde::Deserialize)]
++pub struct AckAlarmsRequest {
++    /// 槽名；不传 = 全部槽位
++    pub slot: Option<String>,
++}
++
++/// POST /api/admin/slots/alarms/ack —— 清除卡片告警（只重设起算时间，累计计数不动）
++pub async fn post_slot_ack_alarms(State(state): State<AdminState>, Json(p): Json<AckAlarmsRequest>) -> impl IntoResponse {
++    match state.service.slot_ack_alarms(p.slot.as_deref().filter(|s| !s.is_empty())) {
++        Ok(n) => Json(serde_json::json!({"ok": true, "slots": n})).into_response(),
 +        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
 +    }
 +}
@@ -3720,7 +3835,7 @@
          add_credential, delete_credential, force_refresh_token, get_all_credentials,
          get_credential_balance, get_load_balancing_mode, get_window_settings, reset_failure_count,
          set_credential_disabled, set_credential_priority, set_load_balancing_mode, set_window_settings,
-+        get_slots, get_burn_trend, get_empty_events, get_slot_users, post_slot_rebind, post_slot_unpin, get_slot_rebalance, post_slot_rebalance, post_handoff, set_slot_limits, set_slot_lock, get_slot_configs, set_slot_configs, get_slot_gray, set_slot_gray, test_slot, test_all_slots, get_credential_usage, get_credentials_usage_totals,
++        get_slots, get_burn_trend, get_empty_events, get_slot_users, post_slot_rebind, post_slot_unpin, get_slot_rebalance, post_slot_rebalance, post_slot_ack_alarms, post_handoff, set_slot_limits, set_slot_lock, get_slot_configs, set_slot_configs, get_slot_gray, set_slot_gray, test_slot, test_all_slots, get_credential_usage, get_credentials_usage_totals,
      },
      middleware::{AdminState, admin_auth_middleware},
  };
@@ -3733,7 +3848,7 @@
          .route(
              "/config/load-balancing",
              get(get_load_balancing_mode).put(set_load_balancing_mode),
-@@ -54,6 +57,21 @@
+@@ -54,6 +57,22 @@
              "/config/window",
              get(get_window_settings).put(set_window_settings),
          )
@@ -3744,6 +3859,7 @@
 +        .route("/slots/users/rebind", post(post_slot_rebind))
 +        .route("/slots/users/unpin", post(post_slot_unpin))
 +        .route("/slots/rebalance", get(get_slot_rebalance).post(post_slot_rebalance))
++        .route("/slots/alarms/ack", post(post_slot_ack_alarms))
 +        .route("/handoff", post(post_handoff))
 +        .route("/slots/stats", get(get_slots))
 +        .route("/slots/limits", axum::routing::put(set_slot_limits))
@@ -3803,7 +3919,7 @@
                  expires_at: entry.expires_at,
                  auth_method: entry.auth_method,
                  has_profile_arn: entry.has_profile_arn,
-@@ -299,16 +318,165 @@
+@@ -299,16 +318,169 @@
          Ok(self.token_manager.get_window_settings())
      }
  
@@ -3939,6 +4055,10 @@
 +
 +    pub fn slot_unpin(&self, user: &str) -> Result<bool, AdminServiceError> {
 +        self.token_manager.slot_unpin(user).map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))
++    }
++
++    pub fn slot_ack_alarms(&self, slot: Option<&str>) -> Result<usize, AdminServiceError> {
++        self.token_manager.slot_ack_alarms(slot).map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))
 +    }
 +
 +    pub fn slot_rebalance_plan(&self) -> crate::kiro::slots::RebalancePlan {
@@ -5052,7 +5172,7 @@
              }
  
              // 失败响应：读取 body 用于日志/错误信息
-@@ -539,6 +682,352 @@
+@@ -539,6 +682,353 @@
          }))
      }
  
@@ -5074,11 +5194,12 @@
 +        let mut tries_429 = 0u32;
 +        let mut regone = 0u32;
 +        // 一个用户请求记一次（重试 / 换号不重复记）；别名只本地显示，不转发给 Kiro
-+        self.token_manager.slot_touch_user(user_key, &caller().key_alias);
++        let alias = caller().key_alias;
++        self.token_manager.slot_touch_user(user_key, &alias);
 +        // 在跑计数：成功时守卫跟着响应流走（读完才 -1），其它出口函数返回时 -1
 +        let mut user_guard = self.token_manager.slot_user_guard(user_key);
 +        for attempt in 0..SLOT_MAX_ATTEMPTS {
-+            let (slot, ctx) = self.token_manager.acquire_slot_context(user_key).await?;
++            let (slot, ctx) = self.token_manager.acquire_slot_context_as(user_key, &alias).await?;
 +            let permit = match self.token_manager.acquire_slot_permit(slot).await {
 +                Ok(p) => p,
 +                // 排队时这个槽被删 / 停用：用户绑定已随槽清掉，重新选槽即落到别的槽，用户无感
@@ -5405,7 +5526,7 @@
      /// 从请求体中提取模型信息
      ///
      /// 尝试解析 JSON 请求体，提取 conversationState.currentMessage.userInputMessage.modelId
-@@ -564,5 +1053,474 @@
+@@ -564,5 +1054,474 @@
          let jitter_max = (backoff / 4).max(1);
          let jitter = fastrand::u64(0..=jitter_max);
          Duration::from_millis(backoff.saturating_add(jitter))
@@ -5942,7 +6063,7 @@
 +}
 --- a/src/kiro/slots.rs
 +++ b/src/kiro/slots.rs
-@@ -0,0 +1,1440 @@
+@@ -0,0 +1,1708 @@
 +//! 槽位模式：固定 N 个槽位，每槽 = 1 个号 + 1 个固定出口。
 +//!
 +//! - 用户（LiteLLM key hash）第一次来分到「没封口、在途最少」的槽，之后一直固定；绑定落盘。
@@ -6023,6 +6144,10 @@
 +    pub created_at: Instant,
 +    /// 槽位权重 1~10（默认 5）：在途上限按 权重/5 缩放，分配新用户 / 重新分配按权重配比
 +    pub weight: u32,
++    /// 接不接新用户（false = 自动分配和重新分配都不往这里放；已绑的人照常用；手动挪进来可以）
++    pub accept_new: bool,
++    /// 专属 key 别名前缀：命中的 key 自动落到这个槽（空 = 不是专属槽）
++    pub vip: Vec<String>,
 +}
 +
 +impl SlotState {
@@ -6041,7 +6166,22 @@
 +            paused_until: None,
 +            created_at: Instant::now(),
 +            weight: WEIGHT_DEFAULT,
++            accept_new: true,
++            vip: Vec::new(),
 +        }
++    }
++
++    /// 换号 / 重建槽状态时保留配置项（名字、权重、接新人、专属名单）
++    pub fn keep_settings(&mut self, old: &SlotState) {
++        self.name = old.name.clone();
++        self.weight = old.weight;
++        self.accept_new = old.accept_new;
++        self.vip = old.vip.clone();
++    }
++
++    /// 别名是否命中本槽专属名单（前缀匹配，与灰度名单同规则）
++    pub fn is_vip(&self, alias: &str) -> bool {
++        !alias.is_empty() && self.vip.iter().any(|p| !p.is_empty() && alias.starts_with(p.as_str()))
 +    }
 +
 +    /// 实际在途上限：手动锁定值原样用；自动值按权重缩放（权重 5 = 原值，10 = 两倍，1 = 五分之一，至少 1，最多 64）
@@ -6125,6 +6265,76 @@
 +    /// 手动挪过的用户：重新分配时不动（用户 10-26 定：手动挪 = 固定）
 +    #[serde(default)]
 +    pub pinned: std::collections::BTreeSet<String>,
++    /// 槽名 → 告警清零时刻（unix 秒）。卡片告警只算这之后的事件（累计计数不动）
++    #[serde(default)]
++    pub alarm_ack: HashMap<String, i64>,
++}
++
++/// 告警类事件：卡片上「有异常」只看最近 24 小时、且晚于手动清零的这些事件
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
++#[serde(rename_all = "snake_case")]
++pub enum Issue {
++    Http429,
++    EmptyReturned,
++    QueueTimeout,
++    Exhausted,
++    Restricted,
++}
++
++pub const ISSUE_WINDOW_SECS: i64 = 24 * 3600;
++
++/// 每槽告警事件流水（内存，按槽名；重启清空 ⇒ 重启后告警从 0 起）
++#[derive(Debug, Default, Clone)]
++pub struct IssueLog {
++    /// (unix 秒, 事件, 当时的号)
++    items: VecDeque<(i64, Issue, Option<u64>)>,
++}
++
++/// 卡片告警：每类次数 + 最近一次时间 + 涉及的号
++#[derive(Debug, Clone, Default, Serialize, PartialEq)]
++#[serde(rename_all = "camelCase")]
++pub struct SlotAlarms {
++    pub http429: u64,
++    pub empty_returned: u64,
++    pub queue_timeouts: u64,
++    pub exhausted: u64,
++    pub restricted: u64,
++    /// 最近一次告警事件的 unix 秒
++    pub last_at: Option<i64>,
++    /// 这些告警里有多少是发生在「当前这个号」上的（换号后旧号的告警会显示为「之前的号」）
++    pub on_current_account: u64,
++    /// 告警从什么时候开始算（max(24 小时前, 手动清零时刻)）
++    pub since: i64,
++    pub acked_at: Option<i64>,
++}
++
++impl IssueLog {
++    pub fn push(&mut self, at: i64, what: Issue, account: Option<u64>) {
++        self.items.push_back((at, what, account));
++        // 只留 24 小时，且最多 5000 条（排队超时可能一分钟十几条）
++        while self.items.front().is_some_and(|x| x.0 < at - ISSUE_WINDOW_SECS) || self.items.len() > 5000 {
++            self.items.pop_front();
++        }
++    }
++
++    pub fn summary(&self, now: i64, acked: Option<i64>, current: Option<u64>) -> SlotAlarms {
++        let since = (now - ISSUE_WINDOW_SECS).max(acked.unwrap_or(0));
++        let mut a = SlotAlarms { since, acked_at: acked, ..Default::default() };
++        for &(t, what, acct) in self.items.iter().filter(|x| x.0 > since || (x.0 == since && acked.is_none())) {
++            match what {
++                Issue::Http429 => a.http429 += 1,
++                Issue::EmptyReturned => a.empty_returned += 1,
++                Issue::QueueTimeout => a.queue_timeouts += 1,
++                Issue::Exhausted => a.exhausted += 1,
++                Issue::Restricted => a.restricted += 1,
++            }
++            a.last_at = Some(a.last_at.map_or(t, |x| x.max(t)));
++            if acct.is_some() && acct == current {
++                a.on_current_account += 1;
++            }
++        }
++        a
++    }
 +}
 +
 +/// 绑定表里每个用户的显示信息
@@ -6256,11 +6466,13 @@
 +        let w = weights.get(i).copied().unwrap_or(WEIGHT_DEFAULT).clamp(WEIGHT_MIN, WEIGHT_MAX) as u64;
 +        v.saturating_mul(1_000_000) / w
 +    };
-+    let pick = |allow_closed: bool| {
++    // 档 0：接新人且没封口；档 1：接新人（忽略封口）；档 2：任何有号的槽（全都不接新人时兜底，不能让人没处去）
++    let pick = |level: u8| {
 +        states
 +            .iter()
 +            .filter(|s| s.account_id.is_some())
-+            .filter(|s| allow_closed || !closed.get(s.index).copied().unwrap_or(false))
++            .filter(|s| level >= 2 || s.accept_new)
++            .filter(|s| level >= 1 || !closed.get(s.index).copied().unwrap_or(false))
 +            .min_by_key(|s| {
 +                (
 +                    per_w(s.in_flight as u64, s.index),
@@ -6271,7 +6483,7 @@
 +            })
 +            .map(|s| s.index)
 +    };
-+    pick(false).or_else(|| pick(true))
++    pick(0).or_else(|| pick(1)).or_else(|| pick(2))
 +}
 +
 +/// 封口判定（按权重）：用量 ÷ 权重 > 各槽平均(用量 ÷ 权重) × ratio。权重大的槽封口门槛相应高。
@@ -6311,6 +6523,10 @@
 +    /// 因为最近 10 分钟在用 / 被固定而没动的人数
 +    pub skipped_active: usize,
 +    pub skipped_pinned: usize,
++    /// 绑在「不接新人 / 专属」槽上、不参与配平的人数
++    pub skipped_locked: usize,
++    /// 不参与配平的槽
++    pub excluded_slots: Vec<String>,
 +}
 +
 +#[derive(Debug, Clone, Serialize)]
@@ -6409,6 +6625,8 @@
 +            .collect(),
 +        skipped_active: active_users,
 +        skipped_pinned,
++        skipped_locked: 0,
++        excluded_slots: Vec::new(),
 +    }
 +}
 +
@@ -6443,6 +6661,8 @@
 +    pub latency: HashMap<String, UsageWindow>,
 +    /// 每个用户正在跑的请求数（长流式请求开始时间可能早于 10 分钟，在跑就不算空闲）
 +    pub user_in_flight: HashMap<String, u32>,
++    /// 每槽告警事件（按槽名）
++    pub issues: HashMap<String, IssueLog>,
 +    pub file: SlotsFile,
 +    pub stats: Vec<SlotStats>,
 +    /// 启动时发现：配置里已没有、但文件里还挂着号的槽 ⇒ 这些号要放回冷备
@@ -6517,7 +6737,7 @@
 +impl SlotsRuntime {
 +    /// names = 当前配置的槽位名（顺序即展示顺序）。号/绑定从 file 按名字恢复。
 +    pub fn new(names: &[String], start: u32, file: SlotsFile) -> Self {
-+        let mut rt = Self { states: Vec::new(), usage: Vec::new(), latency: HashMap::new(), user_in_flight: HashMap::new(), file, stats: Vec::new(), offline_released: Vec::new() };
++        let mut rt = Self { states: Vec::new(), usage: Vec::new(), latency: HashMap::new(), user_in_flight: HashMap::new(), issues: HashMap::new(), file, stats: Vec::new(), offline_released: Vec::new() };
 +        for (i, name) in names.iter().enumerate() {
 +            let mut st = SlotState::new(i, start);
 +            st.name = name.clone();
@@ -6583,10 +6803,31 @@
 +
 +    /// 用户键 → 槽位下标；新用户按规则分配并按名字记下。返回 (下标, 是否新绑定)
 +    pub fn slot_for_user(&mut self, user: &str, ratio: f64, now: Instant) -> Option<(usize, bool)> {
-+        if let Some(name) = self.file.bindings.get(user) {
-+            if let Some(i) = self.states.iter().position(|s| &s.name == name && s.account_id.is_some()) {
-+                return Some((i, false));
++        self.slot_for_user_as(user, "", ratio, now)
++    }
++
++    /// 同上，带 key 别名：别名命中某槽专属名单 ⇒ 落到专属槽（已绑别处也挪过来，挪一次后绑定即固定在专属槽）。
++    /// 🔴 固定（手动挪）的人不被专属名单抢走：手动操作优先。
++    pub fn slot_for_user_as(&mut self, user: &str, alias: &str, ratio: f64, now: Instant) -> Option<(usize, bool)> {
++        let vip = self.vip_slot_for(alias);
++        let bound = self
++            .file
++            .bindings
++            .get(user)
++            .and_then(|name| self.states.iter().position(|s| &s.name == name && s.account_id.is_some()));
++        if let Some(v) = vip {
++            let pinned = self.file.pinned.contains(user);
++            match bound {
++                Some(i) if i == v || pinned => return Some((i, false)),
++                Some(i) if self.states[i].is_vip(alias) => return Some((i, false)),
++                _ => {
++                    self.file.bindings.insert(user.to_string(), self.states[v].name.clone());
++                    return Some((v, true));
++                }
 +            }
++        }
++        if let Some(i) = bound {
++            return Some((i, false));
 +        }
 +        let usage = self.usage_sums(now);
 +        let users = self.user_counts();
@@ -6594,6 +6835,48 @@
 +        let i = choose_slot_weighted(&self.states, &usage, &users, ratio, &weights)?;
 +        self.file.bindings.insert(user.to_string(), self.states[i].name.clone());
 +        Some((i, true))
++    }
++
++    /// 别名命中的专属槽（有号的；多个命中取最长前缀，再按槽顺序）
++    pub fn vip_slot_for(&self, alias: &str) -> Option<usize> {
++        if alias.is_empty() {
++            return None;
++        }
++        self.states
++            .iter()
++            .filter(|s| s.account_id.is_some())
++            .filter_map(|s| {
++                s.vip.iter().filter(|p| !p.is_empty() && alias.starts_with(p.as_str())).map(|p| p.len()).max().map(|l| (l, s.index))
++            })
++            .max_by_key(|&(l, i)| (l, std::cmp::Reverse(i)))
++            .map(|(_, i)| i)
++    }
++
++    pub fn record_issue(&mut self, slot: usize, what: Issue, at: i64) {
++        if let Some(st) = self.states.get(slot) {
++            let (name, acct) = (st.name.clone(), st.account_id);
++            self.issues.entry(name).or_default().push(at, what, acct);
++        }
++    }
++
++    /// 某槽当前告警（24 小时内、清零之后）
++    pub fn alarms(&self, slot: usize, now: i64) -> SlotAlarms {
++        let Some(st) = self.states.get(slot) else { return SlotAlarms::default() };
++        let acked = self.file.alarm_ack.get(&st.name).copied();
++        self.issues.get(&st.name).map(|l| l.summary(now, acked, st.account_id)).unwrap_or(SlotAlarms {
++            since: (now - ISSUE_WINDOW_SECS).max(acked.unwrap_or(0)),
++            acked_at: acked,
++            ..Default::default()
++        })
++    }
++
++    /// 清除告警（只动「从什么时候开始算」，累计计数和事件不删）
++    pub fn ack_alarms(&mut self, slot_name: Option<&str>, now: i64) -> usize {
++        let names: Vec<String> = self.states.iter().map(|s| s.name.clone()).filter(|n| slot_name.is_none_or(|x| x == n)).collect();
++        for n in &names {
++            self.file.alarm_ack.insert(n.clone(), now);
++        }
++        names.len()
 +    }
 +
 +    pub fn weights(&self) -> Vec<u32> {
@@ -6689,12 +6972,24 @@
 +
 +    /// 重新分配预览：负载 = 近 24 小时请求数；只挪空闲 10 分钟以上、没被固定的
 +    pub fn plan_rebalance(&self, now: i64) -> RebalancePlan {
-+        let slots: Vec<(String, u32, bool)> =
-+            self.states.iter().map(|s| (s.name.clone(), s.weight, s.account_id.is_some())).collect();
++        // 「不接新人」的槽、专属槽：不参与自动配平（不往里挪，也不从里面挪走人；只有手动挪能动它们）
++        let auto = |s: &SlotState| s.accept_new && s.vip.is_empty();
++        let slots: Vec<(String, u32, bool)> = self
++            .states
++            .iter()
++            .filter(|s| auto(s))
++            .map(|s| (s.name.clone(), s.weight, s.account_id.is_some()))
++            .collect();
++        let excluded: Vec<&str> = self.states.iter().filter(|s| !auto(s)).map(|s| s.name.as_str()).collect();
 +        let mut users = Vec::new();
 +        let mut aliases = HashMap::new();
 +        let mut active = 0usize;
++        let mut skipped_locked = 0usize;
 +        for (u, slot) in &self.file.bindings {
++            if excluded.contains(&slot.as_str()) {
++                skipped_locked += 1;
++                continue;
++            }
 +            let meta = self.file.user_meta.get(u);
 +            let load = meta.map(|m| m.req_24h(now)).unwrap_or(0);
 +            let pinned = self.file.pinned.contains(u);
@@ -6708,7 +7003,10 @@
 +            users.push((u.clone(), slot.clone(), load, idle && !pinned, pinned));
 +        }
 +        users.sort_by(|a, b| a.0.cmp(&b.0));
-+        plan_rebalance(&slots, &users, &aliases, active)
++        let mut plan = plan_rebalance(&slots, &users, &aliases, active);
++        plan.skipped_locked = skipped_locked;
++        plan.excluded_slots = excluded.iter().map(|s| s.to_string()).collect();
++        plan
 +    }
 +
 +    /// 执行预览里确认过的挪动：每条再核一遍（还在原槽、没被固定、仍空闲、目标槽还在且有号），不满足就跳过。
@@ -6719,8 +7017,9 @@
 +            let ok_from = self.file.bindings.get(user) == Some(from);
 +            let ok_pin = !self.file.pinned.contains(user);
 +            let ok_idle = self.user_idle(user, now);
-+            let ok_to = self.states.iter().any(|s| &s.name == to && s.account_id.is_some());
-+            if ok_from && ok_pin && ok_idle && ok_to && from != to {
++            let ok_to = self.states.iter().any(|s| &s.name == to && s.account_id.is_some() && s.accept_new && s.vip.is_empty());
++            let ok_src = self.states.iter().any(|s| &s.name == from && s.accept_new && s.vip.is_empty());
++            if ok_from && ok_pin && ok_idle && ok_to && ok_src && from != to {
 +                self.file.bindings.insert(user.clone(), to.clone());
 +                n += 1;
 +            }
@@ -6730,18 +7029,23 @@
 +
 +    /// 没有用户身份的请求（会话键 / MCP）选槽：不写绑定表，按「会话键 × 槽名」做 rendezvous 哈希，
 +    /// 同一会话稳定落同一个槽（保住 prompt cache）；某个槽没了只有落在它上面的会话会挪走
++    /// 🔴 不接新人 / 专属槽不接这类请求（VIP 槽要留给 VIP）；全都锁了才退回所有有号的槽
 +    pub fn pick_ephemeral(&self, key: &str) -> Option<usize> {
 +        use std::hash::{Hash, Hasher};
-+        self.states
-+            .iter()
-+            .filter(|s| s.account_id.is_some())
-+            .max_by_key(|s| {
-+                let mut h = std::collections::hash_map::DefaultHasher::new();
-+                key.hash(&mut h);
-+                s.name.hash(&mut h);
-+                h.finish()
-+            })
-+            .map(|s| s.index)
++        let pick = |open_only: bool| {
++            self.states
++                .iter()
++                .filter(|s| s.account_id.is_some())
++                .filter(|s| !open_only || (s.accept_new && s.vip.is_empty()))
++                .max_by_key(|s| {
++                    let mut h = std::collections::hash_map::DefaultHasher::new();
++                    key.hash(&mut h);
++                    s.name.hash(&mut h);
++                    h.finish()
++                })
++                .map(|s| s.index)
++        };
++        pick(true).or_else(|| pick(false))
 +    }
 +
 +    /// 把槽 i 的号换成 new_id；旧号记退役原因；绑定（按名字）不动
@@ -6752,10 +7056,9 @@
 +                self.file.retired.insert(old, retired_reason.to_string());
 +            }
 +        }
-+        let (idx, name, w) = (self.states[i].index, self.states[i].name.clone(), self.states[i].weight);
-+        self.states[i] = SlotState::new(idx, start);
-+        self.states[i].name = name;
-+        self.states[i].weight = w;
++        let keep = self.states[i].clone();
++        self.states[i] = SlotState::new(keep.index, start);
++        self.states[i].keep_settings(&keep);
 +        self.states[i].account_id = Some(new_id);
 +        if !self.file.ever_slotted.contains(&new_id) {
 +            self.file.ever_slotted.push(new_id);
@@ -6964,6 +7267,92 @@
 +
 +    fn u(id: &str, slot: &str, load: u64) -> (String, String, u64, bool, bool) {
 +        (id.into(), slot.into(), load, true, false)
++    }
++
++    fn rt3() -> SlotsRuntime {
++        let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
++        let mut f = SlotsFile::default();
++        for (i, n) in names.iter().enumerate() {
++            f.slot_accounts.insert(n.clone(), i as u64 + 1);
++        }
++        SlotsRuntime::new(&names, 8, f)
++    }
++
++    #[test]
++    fn alarms_window_ack_and_account_split() {
++        let mut rt = rt3();
++        let t = 1_900_000_000;
++        rt.record_issue(0, Issue::QueueTimeout, t - 25 * 3600);
++        rt.record_issue(0, Issue::QueueTimeout, t - 100);
++        rt.record_issue(0, Issue::Http429, t - 50);
++        let a = rt.alarms(0, t);
++        assert_eq!((a.queue_timeouts, a.http429), (1, 1), "超过 24 小时的不算");
++        assert_eq!(a.on_current_account, 2);
++        // 换号：旧号上的告警不算「当前号」
++        rt.swap_account(0, 99, "quota", 8);
++        assert_eq!(rt.alarms(0, t).on_current_account, 0);
++        assert!(rt.states[0].accept_new, "换号保留设置");
++        // 清除：之前的不算，之后的照算；累计计数（stats）不受影响
++        rt.ack_alarms(Some("a"), t);
++        assert_eq!(rt.alarms(0, t), SlotAlarms { since: t, acked_at: Some(t), ..Default::default() });
++        rt.record_issue(0, Issue::EmptyReturned, t + 5);
++        assert_eq!(rt.alarms(0, t + 10).empty_returned, 1);
++        assert_eq!(rt.ack_alarms(None, t + 20), 3, "不传槽名 = 全部");
++        assert_eq!(rt.ack_alarms(Some("zz"), t), 0);
++        assert!(rt.file.alarm_ack.contains_key("c"));
++    }
++
++    #[test]
++    fn closed_to_new_slot_keeps_old_users_and_is_last_resort() {
++        let mut rt = rt3();
++        rt.states[0].accept_new = false;
++        rt.states[1].accept_new = false;
++        let now = Instant::now();
++        rt.file.bindings.insert("u:old".into(), "a".into());
++        assert_eq!(rt.slot_for_user("u:old", 1.5, now), Some((0, false)), "已绑的人照常用");
++        for k in 0..5 {
++            assert_eq!(rt.slot_for_user(&format!("u:n{}", k), 1.5, now).unwrap().0, 2, "新人只进接新人的槽");
++        }
++        rt.states[2].accept_new = false;
++        assert!(rt.slot_for_user("u:z", 1.5, now).is_some(), "全不接新人时兜底，不能没处去");
++        // 手动挪进不接新人的槽可以
++        rt.states[2].accept_new = true;
++        rt.rebind_user("u:n0", "a").unwrap();
++        assert_eq!(rt.file.bindings["u:n0"], "a");
++        // 无身份请求不进锁住的槽
++        assert!((0..50).all(|k| rt.pick_ephemeral(&format!("s{}", k)) == Some(2)));
++    }
++
++    #[test]
++    fn vip_slot_routes_by_alias_prefix() {
++        let mut rt = rt3();
++        rt.states[1].vip = vec!["claude-code-boss".into(), "vip-".into()];
++        rt.states[1].accept_new = false;
++        let now = Instant::now();
++        // 新 VIP 直接进专属槽
++        assert_eq!(rt.slot_for_user_as("u:v1", "vip-zhang", 1.5, now), Some((1, true)));
++        // 已绑别处的 VIP：下一次请求挪进专属槽
++        rt.file.bindings.insert("u:v2".into(), "c".into());
++        assert_eq!(rt.slot_for_user_as("u:v2", "claude-code-boss-x", 1.5, now), Some((1, true)));
++        assert_eq!(rt.slot_for_user_as("u:v2", "claude-code-boss-x", 1.5, now), Some((1, false)), "挪过一次就稳定");
++        // 手动固定在别处的 VIP 不被抢
++        rt.file.bindings.insert("u:v3".into(), "c".into());
++        rt.file.pinned.insert("u:v3".into());
++        assert_eq!(rt.slot_for_user_as("u:v3", "vip-li", 1.5, now), Some((2, false)));
++        // 普通人进不了 VIP 槽
++        for k in 0..6 {
++            assert_ne!(rt.slot_for_user_as(&format!("u:p{}", k), "cursor-x", 1.5, now).unwrap().0, 1);
++        }
++        // 专属槽没号了 ⇒ VIP 照常分到别的槽
++        rt.states[1].account_id = None;
++        assert_ne!(rt.slot_for_user_as("u:v9", "vip-wang", 1.5, now).unwrap().0, 1);
++        // 重新分配不碰专属槽和它上面的人
++        rt.states[1].account_id = Some(2);
++        let p = rt.plan_rebalance(2_000_000_000);
++        assert!(p.slots.iter().all(|s| s.name != "b"));
++        assert!(p.moves.iter().all(|m| m.from != "b" && m.to != "b"));
++        assert_eq!(p.excluded_slots, vec!["b".to_string()]);
++        assert_eq!(rt.apply_moves(&[("u:v1".into(), "b".into(), "a".into())], 2_000_000_000), 0);
 +    }
 +
 +    #[test]
@@ -7444,7 +7833,7 @@
  }
  
  /// window 模式参数
-@@ -661,6 +699,96 @@
+@@ -661,6 +699,102 @@
      pub token: String,
  }
  
@@ -7536,12 +7925,18 @@
 +    /// 近 30 分钟「发出到首个有内容事件」平均毫秒（仅供参考：和请求大小、模型强相关）
 +    pub latency_ms: Option<u64>,
 +    pub latency_samples: usize,
++    /// 卡片告警：最近 24 小时、手动清零之后（累计数仍在 stats 里）
++    pub alarms: crate::kiro::slots::SlotAlarms,
++    pub accept_new: bool,
++    pub vip_aliases: Vec<String>,
++    /// 绑在这里的人里，命中专属名单的有几个
++    pub vip_users: usize,
 +}
 +
  impl MultiTokenManager {
      /// 创建多凭据 Token 管理器
      ///
-@@ -769,6 +897,24 @@
+@@ -769,6 +903,24 @@
                  cooldown_secs: config.window_cooldown_secs.clamp(1, 3600),
              }
          };
@@ -7566,7 +7961,7 @@
          let manager = Self {
              config,
              proxy,
-@@ -781,6 +927,23 @@
+@@ -781,6 +933,23 @@
              last_stats_save_at: Mutex::new(None),
              stats_dirty: AtomicBool::new(false),
              window_settings: Mutex::new(window_settings),
@@ -7590,7 +7985,7 @@
          };
  
          // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
-@@ -794,6 +957,17 @@
+@@ -794,6 +963,17 @@
  
          // 加载持久化的统计数据（success_count, last_used_at）
          manager.load_stats();
@@ -7608,7 +8003,7 @@
  
          Ok(manager)
      }
-@@ -825,6 +999,8 @@
+@@ -825,6 +1005,8 @@
          model: Option<&str>,
          session_key: Option<&str>,
      ) -> Option<(u64, KiroCredentials)> {
@@ -7617,7 +8012,7 @@
          let entries = self.entries.lock();
  
          // 检查是否是 opus 模型
-@@ -832,11 +1008,12 @@
+@@ -832,11 +1014,12 @@
              .map(|m| m.to_lowercase().contains("opus"))
              .unwrap_or(false);
  
@@ -7631,7 +8026,7 @@
                      return false;
                  }
                  // 如果是 opus 模型，需要检查订阅等级
-@@ -852,7 +1029,8 @@
+@@ -852,7 +1035,8 @@
          }
  
          let mode = self.load_balancing_mode.lock().clone();
@@ -7641,7 +8036,7 @@
  
          match mode {
              "window" => {
-@@ -915,7 +1093,7 @@
+@@ -915,7 +1099,7 @@
                  // window 与 balanced 一样每次重选（窗口内按在途数挑），不粘 current_id
                  let is_balanced = matches!(
                      self.load_balancing_mode.lock().as_str(),
@@ -7650,7 +8045,7 @@
                  );
  
                  // balanced 模式：每次请求都重新均衡选择，不固定 current_id
-@@ -923,11 +1101,12 @@
+@@ -923,11 +1107,12 @@
                  let current_hit = if is_balanced {
                      None
                  } else {
@@ -7664,7 +8059,7 @@
                          .map(|e| (e.id, e.credentials.clone()))
                  };
  
-@@ -1049,7 +1228,10 @@
+@@ -1049,7 +1234,10 @@
          }
  
          // 第一次检查（无锁）：快速判断是否需要刷新
@@ -7676,7 +8071,7 @@
  
          let creds = if needs_refresh {
              // 获取刷新锁，确保同一时间只有一个刷新操作
-@@ -1130,6 +1312,11 @@
+@@ -1130,6 +1318,11 @@
      fn persist_credentials(&self) -> anyhow::Result<bool> {
          use anyhow::Context;
  
@@ -7688,7 +8083,7 @@
          // 仅多凭据格式才回写
          if !self.is_multiple_format {
              return Ok(false);
-@@ -1140,6 +1327,8 @@
+@@ -1140,6 +1333,8 @@
              None => return Ok(false),
          };
  
@@ -7697,7 +8092,7 @@
          // 收集所有凭据
          let credentials: Vec<KiroCredentials> = {
              let entries = self.entries.lock();
-@@ -1158,12 +1347,13 @@
+@@ -1158,12 +1353,13 @@
          // 序列化为 pretty JSON
          let json = serde_json::to_string_pretty(&credentials).context("序列化凭据失败")?;
  
@@ -7715,7 +8110,7 @@
          }
  
          tracing::debug!("已回写凭据到文件: {:?}", path);
-@@ -1216,6 +1406,9 @@
+@@ -1216,6 +1412,9 @@
  
      /// 将当前统计数据持久化到磁盘
      fn save_stats(&self) {
@@ -7725,7 +8120,7 @@
          let path = match self.stats_path() {
              Some(p) => p,
              None => return,
-@@ -1291,9 +1484,1122 @@
+@@ -1291,9 +1490,1177 @@
          self.save_stats_debounced();
      }
  
@@ -7827,13 +8222,15 @@
 +        }
 +    }
 +
-+    /// 把配置里的权重写到运行时槽（按名字）；改了权重要唤醒排队（上限可能变大）
++    /// 把配置里的权重 / 接不接新人 / 专属名单写到运行时槽（按名字）；改了权重要唤醒排队（上限可能变大）
 +    fn apply_slot_weights(&self, cfgs: &[crate::model::config::SlotConfig]) {
 +        {
 +            let mut rt = self.slots.lock();
 +            for st in rt.states.iter_mut() {
 +                if let Some(c) = cfgs.iter().find(|c| c.name == st.name) {
 +                    st.weight = c.weight.clamp(crate::kiro::slots::WEIGHT_MIN, crate::kiro::slots::WEIGHT_MAX);
++                    st.accept_new = c.accept_new;
++                    st.vip = c.vip_aliases.iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
 +                }
 +            }
 +        }
@@ -7935,6 +8332,11 @@
 +        if let Some(c) = cfgs.iter().find(|c| !(crate::kiro::slots::WEIGHT_MIN..=crate::kiro::slots::WEIGHT_MAX).contains(&c.weight)) {
 +            anyhow::bail!("槽位 {} 的权重要在 {}~{} 之间", c.name, crate::kiro::slots::WEIGHT_MIN, crate::kiro::slots::WEIGHT_MAX);
 +        }
++        for c in &cfgs {
++            if c.vip_aliases.len() > 200 || c.vip_aliases.iter().any(|x| x.len() > 128) {
++                anyhow::bail!("槽位 {} 的专属名单太长（最多 200 条、每条 128 字）", c.name);
++            }
++        }
 +        if cfgs.iter().filter(|c| c.enabled).count() > 20 {
 +            anyhow::bail!("同时生效的槽位最多 20 个");
 +        }
@@ -8035,10 +8437,9 @@
 +        if rt.states[i].account_id.is_some() {
 +            rt.swap_account(i, new_id, reason, start);
 +        } else {
-+            let (name, w) = (rt.states[i].name.clone(), rt.states[i].weight);
++            let keep = rt.states[i].clone();
 +            rt.states[i] = crate::kiro::slots::SlotState::new(i, start);
-+            rt.states[i].name = name;
-+            rt.states[i].weight = w;
++            rt.states[i].keep_settings(&keep);
 +            rt.states[i].account_id = Some(new_id);
 +            if !rt.file.ever_slotted.contains(&new_id) {
 +                rt.file.ever_slotted.push(new_id);
@@ -8060,12 +8461,17 @@
 +
 +    /// 槽位模式选号：用户键 → 槽 → 号。返回 (槽, 号id, 凭据)
 +    fn select_slot_credential(&self, user_key: &str) -> Option<(usize, u64, KiroCredentials)> {
++        self.select_slot_credential_as(user_key, "")
++    }
++
++    /// alias = LiteLLM key 别名（专属槽名单按它匹配；只在本地用，不转发给 Kiro）
++    fn select_slot_credential_as(&self, user_key: &str, alias: &str) -> Option<(usize, u64, KiroCredentials)> {
 +        let ratio = self.config.slot_heavy_ratio;
 +        let (slot, is_new, id) = {
 +            let mut rt = self.slots.lock();
 +            // 带用户身份的永久绑定；其它（会话键 / MCP）只按哈希挑槽，不写绑定表
 +            let (slot, is_new) = if user_key.starts_with("u:") {
-+                rt.slot_for_user(user_key, ratio, Instant::now())?
++                rt.slot_for_user_as(user_key, alias, ratio, Instant::now())?
 +            } else {
 +                (rt.pick_ephemeral(user_key)?, false)
 +            };
@@ -8128,6 +8534,7 @@
 +                if let Some(i) = rt.states.iter().position(|s| s.name == name) {
 +                    rt.states[i].queued = rt.states[i].queued.saturating_sub(1);
 +                    rt.stats[i].queue_timeouts += 1;
++                    rt.record_issue(i, crate::kiro::slots::Issue::QueueTimeout, chrono::Utc::now().timestamp());
 +                }
 +                anyhow::bail!("{}: 槽位 {} 排队超过 {}s", crate::kiro::slots::OVERLOADED_MARK, name, wait.as_secs());
 +            }
@@ -8180,6 +8587,7 @@
 +            return;
 +        }
 +        rt.states[slot].on_429(&p, Instant::now(), retry_after);
++        rt.record_issue(slot, crate::kiro::slots::Issue::Http429, chrono::Utc::now().timestamp());
 +        if first {
 +            rt.stats[slot].first_429 += 1;
 +        } else {
@@ -8189,11 +8597,15 @@
 +
 +    /// 槽位记一次空回复；returned = 最终原样给了用户（没换号救回）
 +    pub fn slot_report_empty(&self, slot: usize, returned: bool) {
-+        if let Some(s) = self.slots.lock().stats.get_mut(slot) {
++        let mut rt = self.slots.lock();
++        if let Some(s) = rt.stats.get_mut(slot) {
 +            s.empty += 1;
 +            if returned {
 +                s.empty_returned += 1;
 +            }
++        }
++        if returned {
++            rt.record_issue(slot, crate::kiro::slots::Issue::EmptyReturned, chrono::Utc::now().timestamp());
 +        }
 +    }
 +
@@ -8262,9 +8674,11 @@
 +    }
 +
 +    pub fn slot_report_exhausted(&self, slot: usize) {
-+        if let Some(s) = self.slots.lock().stats.get_mut(slot) {
++        let mut rt = self.slots.lock();
++        if let Some(s) = rt.stats.get_mut(slot) {
 +            s.exhausted += 1;
 +        }
++        rt.record_issue(slot, crate::kiro::slots::Issue::Exhausted, chrono::Utc::now().timestamp());
 +    }
 +
 +    /// 周期调用（每 30s）：AIMD 上调。已交接时跳过（新进程在管）
@@ -8309,9 +8723,11 @@
 +            }
 +        }
 +        if reason == "restricted" {
-+            if let Some(s) = self.slots.lock().stats.get_mut(slot) {
++            let mut rt = self.slots.lock();
++            if let Some(s) = rt.stats.get_mut(slot) {
 +                s.restricted += 1;
 +            }
++            rt.record_issue(slot, crate::kiro::slots::Issue::Restricted, chrono::Utc::now().timestamp());
 +        }
 +        let new_id = self.fill_slot(slot, reason);
 +        if let Err(e) = self.persist_credentials() {
@@ -8433,6 +8849,20 @@
 +        Ok(r)
 +    }
 +
++    /// Admin：清除告警（slot=None 全部）。只重设「告警从什么时候算」，累计计数不动；落盘，重启后仍有效
++    pub fn slot_ack_alarms(&self, slot: Option<&str>) -> anyhow::Result<usize> {
++        if self.is_handed_off() || self.standby() {
++            anyhow::bail!("本实例正在交接，请稍后重试");
++        }
++        let n = self.slots.lock().ack_alarms(slot, chrono::Utc::now().timestamp());
++        if n == 0 {
++            anyhow::bail!("没有这个槽位: {}", slot.unwrap_or(""));
++        }
++        self.persist_slots();
++        tracing::info!("清除告警：{}", slot.unwrap_or("全部槽位"));
++        Ok(n)
++    }
++
 +    /// Admin：重新分配预览（不改任何东西）
 +    pub fn slot_rebalance_plan(&self) -> crate::kiro::slots::RebalancePlan {
 +        self.slots.lock().plan_rebalance(chrono::Utc::now().timestamp())
@@ -8456,8 +8886,12 @@
 +
 +    /// 槽位模式取上下文：用户 → 槽 → 号（号的代理已在上槽时写成槽位代理），确保 token 有效
 +    pub async fn acquire_slot_context(&self, user_key: &str) -> anyhow::Result<(usize, CallContext)> {
++        self.acquire_slot_context_as(user_key, "").await
++    }
++
++    pub async fn acquire_slot_context_as(&self, user_key: &str, alias: &str) -> anyhow::Result<(usize, CallContext)> {
 +        let (slot, id, creds) = self
-+            .select_slot_credential(user_key)
++            .select_slot_credential_as(user_key, alias)
 +            .ok_or_else(|| anyhow::anyhow!("{}: 槽位模式没有可用槽位（冷备号已用尽？）", crate::kiro::slots::OVERLOADED_MARK))?;
 +        match self.try_ensure_token(id, &creds).await {
 +            Ok(ctx) => Ok((slot, ctx)),
@@ -8755,6 +9189,18 @@
 +        let closed = crate::kiro::slots::closed_slots_weighted(&usage, self.config.slot_heavy_ratio, &rt.weights());
 +        let users = rt.user_counts();
 +        let lat = rt.latency_avgs(now);
++        let unix = chrono::Utc::now().timestamp();
++        let vip_users: Vec<usize> = rt
++            .states
++            .iter()
++            .map(|s| {
++                rt.file
++                    .bindings
++                    .iter()
++                    .filter(|(u, n)| **n == s.name && rt.file.user_meta.get(*u).is_some_and(|m| s.is_vip(&m.key_alias)))
++                    .count()
++            })
++            .collect();
 +        rt.states
 +            .iter()
 +            .map(|s| SlotView {
@@ -8775,6 +9221,10 @@
 +                weight: s.weight,
 +                latency_ms: lat[s.index].0,
 +                latency_samples: lat[s.index].1,
++                alarms: rt.alarms(s.index, unix),
++                accept_new: s.accept_new,
++                vip_aliases: s.vip.clone(),
++                vip_users: vip_users[s.index],
 +            })
 +            .collect()
 +    }
@@ -8849,7 +9299,7 @@
      }
  
      /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
-@@ -1640,6 +2946,7 @@
+@@ -1640,6 +3007,7 @@
                          DisabledReason::QuotaExceeded => "QuotaExceeded",
                          DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                          DisabledReason::InvalidConfig => "InvalidConfig",
@@ -8857,7 +9307,7 @@
                      }.to_string()),
                      endpoint: e.credentials.endpoint.clone(),
                      subscription_title: e.credentials.subscription_title.clone(),
-@@ -1671,6 +2978,12 @@
+@@ -1671,6 +3039,12 @@
          }
          // 持久化更改
          self.persist_credentials()?;
@@ -8870,7 +9320,7 @@
          Ok(())
      }
  
-@@ -1736,9 +3049,9 @@
+@@ -1736,9 +3110,9 @@
                  .clone()
                  .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
          } else {
@@ -8883,7 +9333,7 @@
  
              if needs_refresh {
                  let _guard = self.refresh_lock.lock().await;
-@@ -1955,6 +3268,9 @@
+@@ -1955,6 +3329,9 @@
          self.persist_credentials()?;
  
          tracing::info!("成功添加凭据 #{}", new_id);
@@ -8893,7 +9343,7 @@
          Ok(new_id)
      }
  
-@@ -2020,6 +3336,27 @@
+@@ -2020,6 +3397,27 @@
          // 立即回写统计数据，清除已删除凭据的残留条目
          self.save_stats();
  
@@ -8921,7 +9371,7 @@
          tracing::info!("已删除凭据 #{}", id);
          Ok(())
      }
-@@ -2029,6 +3366,11 @@
+@@ -2029,6 +3427,11 @@
      /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
      /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
      pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
@@ -8933,7 +9383,7 @@
          let credentials = {
              let entries = self.entries.lock();
              entries
-@@ -2101,6 +3443,10 @@
+@@ -2101,6 +3504,10 @@
      }
  
      fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
@@ -8944,7 +9394,7 @@
          use anyhow::Context;
  
          let config_path = match self.config.config_path() {
-@@ -2124,7 +3470,7 @@
+@@ -2124,7 +3531,7 @@
      /// 设置负载均衡模式（Admin API）
      pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
          // 验证模式值
@@ -8953,7 +9403,7 @@
              anyhow::bail!("无效的负载均衡模式: {}", mode);
          }
  
-@@ -2140,9 +3486,35 @@
+@@ -2140,9 +3547,35 @@
              return Err(err);
          }
  
@@ -8989,7 +9439,7 @@
  }
  
  impl Drop for MultiTokenManager {
-@@ -2150,6 +3522,7 @@
+@@ -2150,6 +3583,7 @@
          if self.stats_dirty.load(Ordering::Relaxed) {
              self.save_stats();
          }
@@ -8997,7 +9447,7 @@
      }
  }
  
-@@ -2325,7 +3698,541 @@
+@@ -2325,7 +3759,567 @@
          assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");
      }
  
@@ -9032,6 +9482,32 @@
 +    }
 +
      #[test]
++    fn test_slot_config_accept_new_vip_and_alarm_ack_persist() {
++        let (m, dir) = slot_mgr(2, 4);
++        let mut cfgs = m.get_slot_configs();
++        cfgs[0].accept_new = false;
++        cfgs[0].vip_aliases = vec![" vip- ".into(), "".into()];
++        m.set_slot_configs(cfgs).unwrap();
++        let snap = m.slots_snapshot();
++        assert!(!snap[0].accept_new);
++        assert_eq!(snap[0].vip_aliases, vec!["vip-".to_string()], "名单去空格去空行");
++        let (s, _, _) = m.select_slot_credential_as("u:p", "cursor-a").unwrap();
++        assert_eq!(s, 1, "普通人不进锁住的槽");
++        let (s, _, _) = m.select_slot_credential_as("u:v", "vip-boss").unwrap();
++        assert_eq!(s, 0, "VIP 进专属槽");
++        m.slot_report_429(1, true, None);
++        assert_eq!(m.slots_snapshot()[1].alarms.http429, 1);
++        m.slot_ack_alarms(None).unwrap();
++        let after = m.slots_snapshot();
++        assert_eq!(after[1].alarms.http429, 0, "清除后告警为 0");
++        assert_eq!(after[1].stats.first_429, 1, "累计计数不动");
++        let txt = std::fs::read_to_string(dir.join("kiro_slots.json")).unwrap();
++        let f: crate::kiro::slots::SlotsFile = serde_json::from_str(&txt).unwrap();
++        assert_eq!(f.alarm_ack.len(), 2, "清零时刻落盘，重启后仍有效");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
 +    fn test_slot_weight_from_config_and_rebind_survives_restart() {
 +        let (m, dir) = slot_mgr(2, 4);
 +        let mut cfgs = m.get_slot_configs();
@@ -9539,7 +10015,7 @@
      fn test_window_settings_validate_and_persist() {
          let config_path = std::env::temp_dir().join(format!("kiro-window-{}.json", uuid::Uuid::new_v4()));
          std::fs::write(&config_path, r#"{"loadBalancingMode":"window"}"#).unwrap();
-@@ -2441,6 +4348,65 @@
+@@ -2441,6 +4435,65 @@
          credentials.refresh_token = Some("a".repeat(150));
          let result = validate_refresh_token(&credentials);
          assert!(result.is_ok());
@@ -9908,7 +10384,7 @@
      #[serde(default = "default_tls_backend")]
      pub tls_backend: TlsBackend,
  
-@@ -183,6 +231,74 @@
+@@ -183,6 +231,80 @@
      60
  }
  
@@ -9964,6 +10440,12 @@
 +    /// 权重 1~10（默认 5）：在途上限按 权重/5 缩放；分新用户、重新分配按权重配比
 +    #[serde(default = "default_slot_weight")]
 +    pub weight: u32,
++    /// 接不接新用户（false = 自动分配、重新分配都不往这里放；已绑的人照常用；手动挪进来可以）
++    #[serde(default = "default_slot_enabled")]
++    pub accept_new: bool,
++    /// 专属 key：别名前缀命中的 key 自动落到这个槽（如 VIP 名单）；空 = 普通槽
++    #[serde(default)]
++    pub vip_aliases: Vec<String>,
 +}
 +
 +fn default_slot_enabled() -> bool {
@@ -9976,14 +10458,14 @@
 +
 +impl Default for SlotConfig {
 +    fn default() -> Self {
-+        Self { name: String::new(), proxy_url: None, proxy_username: None, proxy_password: None, enabled: true, weight: default_slot_weight() }
++        Self { name: String::new(), proxy_url: None, proxy_username: None, proxy_password: None, enabled: true, weight: default_slot_weight(), accept_new: true, vip_aliases: Vec::new() }
 +    }
 +}
 +
  fn default_extract_thinking() -> bool {
      true
  }
-@@ -208,6 +324,18 @@
+@@ -208,6 +330,18 @@
              window_min_k: default_window_min_k(),
              window_max_k: default_window_max_k(),
              window_cooldown_secs: default_window_cooldown_secs(),

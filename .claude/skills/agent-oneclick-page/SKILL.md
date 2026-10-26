@@ -107,3 +107,17 @@ bash scripts/agent-oneclick-docs/publish_198.sh             # 上线并比 sha;�
   Win `get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi`;`openai.com/codex` 国内 403。
   飞书附件直链(/file/<token>)不登录 302 到登录页、且文档未开链接分享 ⇒ 别用。
 - lark-cli 没有 `space:document:delete`,误建的飞书文档删不掉 ⇒ 别先建再说,建前想清楚。
+
+## 页面上的终端命令(10-26 重写,用户 review 抓出来的)
+
+模板(6 段都是这个形状,别再写死文件名):
+```
+d=$(xdg-user-dir DOWNLOAD 2>/dev/null); [ -d "$d" ] && [ "$d" != "$HOME" ] || d=~/Downloads; cd "$d"
+f=$(ls -t | grep '^codex-mac.*command$' | head -n 1)          # Cursor:z=$(ls -t | grep '^cursor-mac' | head -n 1)
+if [ -n "$f" ]; then bash "$f"; else echo "没找到 …"; fi       # Cursor:是 zip 就 unzip -q -o 覆盖,再 sh "$z/INSTALL-Mac.command"
+```
+- 为什么:旧的 `[ -d cursor-mac ] || unzip` 会**跑旧文件夹里的旧脚本**;写死名字遇浏览器 `(1)` 就找不到;中文 Linux 叫 ~/下载;
+  `chmod +x` 对 `sh/bash x` 无意义。xdg-user-dir 没配时返回 **$HOME 本身**(不是空)⇒ 必须判 `!= "$HOME"`。
+- 改命令必跑 `python3 scripts/agent-oneclick-docs/test_page_terminal_blocks.py`(release_all 已接):抠页面原文真跑,
+  6 个场景 × zsh/bash × xdg 两种;拿旧命令跑同一套会全红(阳性对照)。Linux 机器上也要跑一次(188),本机 Mac 测不到 xdg 那支。
+- 代码块字体关连字(`!=` 会被 JetBrains Mono 显示成 ≠,用户照抄会错)。

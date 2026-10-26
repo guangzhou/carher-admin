@@ -23,7 +23,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 |---|---|
 | 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 Recreate，grace 300s），Admin `http://10.68.13.198:30891/admin`，adminApiKey 在实例自己的 `config.json`（和老实例不同）|
 | 老实例 | deploy `kiro-rs`（:30890，镜像 ctxwin）。只剩 `carher-hangzhou`、`claude-code-buyitian` 两把 key 主走它，另外是新实例的兜底 |
-| 镜像 | 待上：`slots41`（10-26 已进 242 未切：= slots40 + 重新分配 / 槽位权重 / 手动挪 key，sha `cbef9f8e…`）。现网 `slots31`。`kiro-rs:v2026.10.1-carher-slots40`（10-26，无缝换版：零断流；slots31 空回复明细；回滚 tag slots31）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
+| 镜像 | **现网 `slots41`**（10-26 19:25 上线 = slots40 无缝换版 + 重新分配 / 槽位权重 / 手动挪 key，sha `cbef9f8e…`）。🔴 回滚到 slots31 **不能 `set image`**：slots31 没有 `/readyz`，新 manifest 的 readiness 永远不过 ⇒ 要 `kubectl replace -f 198:~/kiro-rs-slots-deploy.pre-slots41.json`（旧 Recreate + TCP 探针整份 deploy），切前状态文件在 `198:~/kiro-deploy/backup/slots-pre-v2026.10.1-carher-slots41-20261026T192216/`。`kiro-rs:v2026.10.1-carher-slots40`（10-26，无缝换版：零断流；slots31 空回复明细；回滚 tag slots31）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
 | manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、secret `kiro-rs-slots-bootstrap`）|
 | 槽 | 4 个：`jp-172.235.204.67`（经 243 代理）、`sg-47.84.112.136`、`sg-47.84.85.100`、`sg-47.236.200.98`；出口配在 `config.json.slots[]`，全局 `proxyUrl=null` |
 | 并发参数 | 起步 16 / 最小 2 / 最大 24 / 自动调；排队超时 120s；「暂不接新人」倍数 1.5 |
@@ -165,6 +165,7 @@ Kiro 按 token 计 credit：10-25 实测 4 个能算的号**每百万输入 toke
 - 🔴 **换号只认上游 402**：额度显示 0（10 分钟一查）≠ 上游开始拒。10-25 #3 justin 页面早显示用尽，上游实际到 09:24 才回 402，09:25 第一个 402 进来当场换 #13，那个请求自动重发不失败。
 - 🔴 **兜底到老实例 = 兜到一个死池**：10-25 实测老实例 305 号 available=0（257 手动禁用 + 46 额度用尽），兜底请求在老实例回「所有凭据已用尽 403」⇒ 再往下兜 grok/deepseek。换镜像空窗的失败就是这么来的。老池补号或兜底链跳过老实例前，换镜像空窗用户会看到失败或降级到别家模型。
 - 🔴 **换镜像那 15 秒新连接会失败，且没被兜底接住**（原因见上一条）
+- 10-26 19:22 从 slots31 首次切到 slots41（Recreate→RollingUpdate 那一次仍是旧方式）：19:22:30~19:25:00 LiteLLM 没有任何 kiro-slots 行，19:25 起恢复；可见失败 3 次（`claude-code-ruanyitai` 「Cannot connect」19:25:02~13），槽→号、123 条绑定、退役 23 个切前切后一致。此后换镜像走滚动更新。
 - ✅ **slots40 起换镜像零断流**（连续 3 轮滚动更新实测后端为 0 的时长均 0.0s，强杀持有者 2s 恢复）。机制与五个坑见 §3.1。
 - 🔴 **slots40 之前**：真实断流不是 15 秒而是约 2 分钟（10-26 slots31 实测）：Recreate 下旧 pod 收 SIGTERM 后**立刻不收新连接**，却要等 300s 优雅期里的长请求跑完才退，新 pod 要等旧 pod 退了才起 ⇒ 这段时间所有新请求「Cannot connect」。那次 41 次失败 / 4 把 key（carher-75 18、ruanyitai 10、wuqi 9、gongchenhao 4）。根治=无缝切换（待做）。：10-25 slots26 切换时 `claude-code-ruanyitai` 4 发「Cannot connect to host kiro-rs-slots」，SpendLogs 里没有落老实例的行（原因未查；演练 1 scale 0 时兜底是生效的），客户端自己重试第 5 发成功。
 - 🔴 **新老两个实例的号 id 都从 1 编，会撞**：说「#6」要带实例。

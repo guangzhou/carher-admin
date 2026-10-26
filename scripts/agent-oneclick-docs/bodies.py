@@ -73,6 +73,7 @@ CURSOR = "".join([
     table([["电脑", "下载", "装法"],
            ["Mac", f'<a href="{APPS}/Cursor-mac.dmg"><b><u>点这里下载</u></b></a>', "打开 .dmg，把 Cursor 拖进「应用程序」"],
            ["Windows", f'<a href="{APPS}/Cursor-windows-x64.exe"><b><u>点这里下载</u></b></a>（ARM 电脑用<a href="{APPS}/Cursor-windows-arm64.exe">这个</a>）', "双击 .exe 安装"],
+           ["Linux", f'<a href="{APPS}/Cursor-linux-x64.AppImage"><b><u>x64</u></b></a> · <a href="{APPS}/Cursor-linux-arm64.AppImage">arm64</a>', "AppImage,<code>chmod +x</code> 后双击运行"],
            ["其他", '<a href="https://cursor.com/download"><u>官网下载页</u></a>', "—"]]),
     p("<b>③ 注册并登录 Cursor 账号</b>（已登录的跳过）：打开 Cursor，点 <b>Sign Up</b> 用邮箱注册（已有账号点 <b>Log In</b>），"
       "在浏览器里完成后回到 Cursor。<b>免费账号就够</b>，不用买会员。不登录用不了我们的模型。"),
@@ -148,6 +149,9 @@ def codex(external):
         p(f'Mac：<a href="{APPS}/Codex-mac.dmg"><b><u>点这里下载官方安装包</u></b></a>，双击 .dmg，把 Codex 拖进「应用程序」。'),
         p(f'Windows：<a href="{APPS}/Codex-windows-x64.msix"><b><u>点这里下载官方安装包</u></b></a>（ARM 电脑用<a href="{APPS}/Codex-windows-arm64.msix">这个</a>），双击 .msix 按提示安装。装不上找<cite type="user" user-id="ou_36efe139cd762579ae266081764b59fc" user-name="宋力"></cite>开权限，'
           '或看 <cite doc-id="La8twWEToibR9Jk6yZucTz78nDc" file-type="wiki" title="Codex 配置" type="doc"></cite>。'),
+        p(f'Linux：<a href="{APPS}/Codex-linux-amd64.deb"><b><u>Ubuntu/Debian x64</u></b></a> · <a href="{APPS}/Codex-linux-arm64.deb">arm64</a>'
+          f'　<a href="{APPS}/Codex-linux-x86_64.rpm"><b><u>Fedora/RHEL x64</u></b></a> · <a href="{APPS}/Codex-linux-aarch64.rpm">arm64</a>，'
+          '用 <code>sudo apt install ./文件名</code> 或 <code>sudo dnf install ./文件名</code> 安装。'),
         "<h1>2. 一键配置</h1>",
         p("按你的电脑下载一个，双击。<b>Mac / Linux</b>（文件名带 <code>-mac</code>）："),
         ph("MAC"),
@@ -198,6 +202,7 @@ CLAUDE = "".join([
            ["桌面 App",
             f'<a href="{CCDL}/Claude-mac.zip"><b><u>Mac 下载</u></b></a>（解压后拖进「应用程序」）　'
             f'<a href="{CCDL}/Claude-windows-x64.msix"><b><u>Windows 下载</u></b></a>（ARM 电脑用<a href="{CCDL}/Claude-windows-arm64.msix">这个</a>）。'
+            f'<a href="{APPS}/Claude-linux-amd64.deb"><b><u>Linux 下载</u></b></a>（Ubuntu/Debian,arm64 用<a href="{APPS}/Claude-linux-arm64.deb">这个</a>，<code>sudo apt install ./文件名</code>）。'
             f"装好<b>不用登录</b>，先别打开，已经开着的{QUIT}"]]),
     "<h1>2. 一键配置</h1>",
     p("按你的电脑下载一个，双击。<b>Mac / Linux</b>（文件名带 <code>-mac</code>）："),

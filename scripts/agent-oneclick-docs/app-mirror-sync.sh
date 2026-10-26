@@ -9,8 +9,10 @@
 #   Claude App 已经由 claude-oneclick/ccdl-sync.sh 镜像在 /ccdl/desktop/,这里补另外两个。
 #
 # 布局(稳定名永远指最新一版,页面只链稳定名):
-#   /var/www/ccdl/apps/cursor/<ver>/{Cursor-mac.dmg, Cursor-windows-x64.exe, Cursor-windows-arm64.exe}
-#   /var/www/ccdl/apps/codex/<ver>/{Codex-mac.dmg, Codex-windows-x64.msix, Codex-windows-arm64.msix}
+#   /var/www/ccdl/apps/cursor/<ver>/{Cursor-mac.dmg, Cursor-windows-{x64,arm64}.exe, Cursor-linux-{x64,arm64}.AppImage}
+#   /var/www/ccdl/apps/codex/<ver>/{Codex-mac.dmg, Codex-windows-{x64,arm64}.msix,
+#                                    Codex-linux-{amd64,arm64}.deb, Codex-linux-{x86_64,aarch64}.rpm}
+#   /var/www/ccdl/apps/claude/<ver>/Claude-linux-{amd64,arm64}.deb   (mac/win 的 Claude 在 /ccdl/desktop,ccdl-sync.sh 管)
 #   /var/www/ccdl/apps/{Cursor-mac.dmg, Cursor-windows-x64.exe, …}  → 软链到上面
 #   /var/www/ccdl/apps/versions.json   页面/巡检读版本号用
 #
@@ -21,8 +23,8 @@
 #     skill cursor-client-bundle-patch「3.27 适配」)。⚠️ 这意味着页面上的 Cursor 可能比补丁台架验过的新 ——
 #     安装器 VERIFIED_VERSIONS 软闸会提醒,每日巡检 bundle_audit_daily.sh 同样看 latest,两边对齐。
 #
-# 用法(198): sudo bash app-mirror-sync.sh        # 两个都跟到最新
-#             sudo bash app-mirror-sync.sh cursor # 只跟一个
+# 用法(198): sudo bash app-mirror-sync.sh               # 全部跟到最新
+#             sudo bash app-mirror-sync.sh cursor|codex|claude-linux   # 只跟一个
 # 依赖:同目录 msstore_msix_urls.py(装到 /usr/local/bin/carher-msstore-msix-urls.py)
 set -euo pipefail
 ROOT=/var/www/ccdl/apps
@@ -75,7 +77,16 @@ sync_cursor() {
     url="$(printf '%s' "$j" | python3 -c 'import json,sys;print(json.load(sys.stdin)["downloadUrl"])')"
     fetch "$url" "$D/Cursor-windows-$a.exe" "$(remote_len "$url")"
   done
-  ( cd "$ROOT" && for f in Cursor-mac.dmg Cursor-windows-x64.exe Cursor-windows-arm64.exe; do ln -sfn "cursor/$ver/$f" "$f"; done )
+  # Linux 只发 AppImage(官方 API 没有 deb/rpm 平台名,10-26 实测 linux-x64-deb 等回 Unknown platform)
+  for a in x64 arm64; do
+    j="$(curl -fsS -m 30 -A "$UA" "$api/linux-$a/cursor")"
+    [ "$(printf '%s' "$j" | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')" = "$ver" ] \
+      || { echo "✗ Cursor linux-$a 版本和 mac 不一致,先不切" >&2; return 1; }
+    url="$(printf '%s' "$j" | python3 -c 'import json,sys;print(json.load(sys.stdin)["downloadUrl"])')"
+    fetch "$url" "$D/Cursor-linux-$a.AppImage" "$(remote_len "$url")"
+    chmod a+x "$D/Cursor-linux-$a.AppImage"
+  done
+  ( cd "$ROOT" && for f in Cursor-mac.dmg Cursor-windows-x64.exe Cursor-windows-arm64.exe Cursor-linux-x64.AppImage Cursor-linux-arm64.AppImage; do ln -sfn "cursor/$ver/$f" "$f"; done )
   set_version cursor "$ver"; echo "✔ Cursor 稳定链接 → $ver"
 }
 
@@ -99,16 +110,48 @@ sync_codex() {
   local lm; lm="$(curl -fsSI -m 60 -A "$UA" "$mac" | awk -F': ' 'tolower($1)=="last-modified"{print $2}' | tr -d '\r')"
   echo "    Codex.dmg Last-Modified: $lm"
   fetch "$mac" "$D/Codex-mac.dmg" "$(remote_len "$mac")"
-  ( cd "$ROOT" && for f in Codex-mac.dmg Codex-windows-x64.msix Codex-windows-arm64.msix; do ln -sfn "codex/$ver/$f" "$f"; done )
+  # Linux:官方 deb/rpm 是固定 latest 名(developers.openai.com/codex/linux/linux-app),同样按 Content-Length 校验
+  local L=https://persistent.oaistatic.com/codex-app-prod/linux
+  for pair in "deb/latest/chatgpt_amd64.deb:Codex-linux-amd64.deb" "deb/latest/chatgpt_arm64.deb:Codex-linux-arm64.deb" \
+              "rpm/latest/chatgpt.x86_64.rpm:Codex-linux-x86_64.rpm" "rpm/latest/chatgpt.aarch64.rpm:Codex-linux-aarch64.rpm"; do
+    fetch "$L/${pair%%:*}" "$D/${pair##*:}" "$(remote_len "$L/${pair%%:*}")"
+  done
+  ( cd "$ROOT" && for f in Codex-mac.dmg Codex-windows-x64.msix Codex-windows-arm64.msix \
+      Codex-linux-amd64.deb Codex-linux-arm64.deb Codex-linux-x86_64.rpm Codex-linux-aarch64.rpm; do ln -sfn "codex/$ver/$f" "$f"; done )
   set_version codex "$ver"; echo "✔ Codex 稳定链接 → $ver"
+}
+
+sync_claude_linux() {
+  # Claude Desktop 的 Linux 版只有 apt 仓库(Debian/Ubuntu,x86_64/arm64,官方 desktop-linux 文档)。
+  # 版本 + SHA256 从仓库 Packages 索引读,下完逐字节比 SHA256 ⇒ 与 apt 自己的校验同一份依据。
+  local R=https://downloads.claude.ai/claude-desktop/apt/stable a idx ver fn sz sha D got
+  for a in amd64 arm64; do
+    idx="$(curl -fsS -m 30 -A "$UA" "$R/dists/stable/main/binary-$a/Packages")"
+    # 索引里多版本并存 ⇒ 取 Version 最大的那一段
+    read -r ver fn sz sha < <(printf '%s\n' "$idx" | python3 -c '
+import sys,re
+blk=[b for b in sys.stdin.read().split("\n\n") if "Package: claude-desktop" in b]
+key=lambda b:[int(x) for x in re.search(r"^Version: (\S+)",b,re.M).group(1).split(".") if x.isdigit()]
+b=max(blk,key=key); g=lambda k:re.search("^"+k+r": (\S+)",b,re.M).group(1)
+print(g("Version"),g("Filename"),g("Size"),g("SHA256"))')
+    D="$ROOT/claude/$ver"; mkdir -p "$D"
+    echo "→ Claude Linux $ver ($a)"
+    fetch "$R/$fn" "$D/Claude-linux-$a.deb" "$sz"
+    got="$(sha256sum "$D/Claude-linux-$a.deb" | cut -d' ' -f1)"
+    [ "$got" = "$sha" ] || { echo "✗ Claude-linux-$a.deb SHA256 对不上,删掉不发" >&2; rm -f "$D/Claude-linux-$a.deb"; return 1; }
+    echo "    SHA256 与 apt 索引一致"
+    ( cd "$ROOT" && ln -sfn "claude/$ver/Claude-linux-$a.deb" "Claude-linux-$a.deb" )
+  done
+  set_version claude-linux "$ver"; echo "✔ Claude Linux 稳定链接 → $ver"
 }
 
 rc=0
 case "$ONLY" in
-  all) sync_cursor || rc=1; sync_codex || rc=1 ;;
+  all) sync_cursor || rc=1; sync_codex || rc=1; sync_claude_linux || rc=1 ;;
   cursor) sync_cursor || rc=1 ;;
   codex) sync_codex || rc=1 ;;
-  *) echo "用法: $0 [all|cursor|codex]" >&2; exit 64 ;;
+  claude-linux) sync_claude_linux || rc=1 ;;
+  *) echo "用法: $0 [all|cursor|codex|claude-linux]" >&2; exit 64 ;;
 esac
 chmod -R a+rX "$ROOT"
 exit "$rc"

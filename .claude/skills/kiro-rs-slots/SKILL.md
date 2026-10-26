@@ -23,7 +23,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 |---|---|
 | 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 Recreate，grace 300s），Admin `http://10.68.13.198:30891/admin`，adminApiKey 在实例自己的 `config.json`（和老实例不同）|
 | 老实例 | deploy `kiro-rs`（:30890，镜像 ctxwin）。只剩 `carher-hangzhou`、`claude-code-buyitian` 两把 key 主走它，另外是新实例的兜底 |
-| 镜像 | `kiro-rs:v2026.10.1-carher-slots30`（10-25 20:53，账户表点表头排序（ID/邮箱/状态/等级/已用额度/7日请求/7日token/最后使用/优先级，分页前排）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
+| 镜像 | `kiro-rs:v2026.10.1-carher-slots31`（10-26 11:09，「空回复给了用户」可点开看 198 LiteLLM key 明细 `GET /slots/empty-events`，内存环形 500 条、重启清空；回滚 tag slots30）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
 | manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、secret `kiro-rs-slots-bootstrap`）|
 | 槽 | 4 个：`jp-172.235.204.67`（经 243 代理）、`sg-47.84.112.136`、`sg-47.84.85.100`、`sg-47.236.200.98`；出口配在 `config.json.slots[]`，全局 `proxyUrl=null` |
 | 并发参数 | 起步 16 / 最小 2 / 最大 24 / 自动调；排队超时 120s；「暂不接新人」倍数 1.5 |
@@ -128,10 +128,15 @@ Kiro 按 token 计 credit：10-25 实测 4 个能算的号**每百万输入 toke
 
 - 🔴 **换号只认上游 402**：额度显示 0（10 分钟一查）≠ 上游开始拒。10-25 #3 justin 页面早显示用尽，上游实际到 09:24 才回 402，09:25 第一个 402 进来当场换 #13，那个请求自动重发不失败。
 - 🔴 **兜底到老实例 = 兜到一个死池**：10-25 实测老实例 305 号 available=0（257 手动禁用 + 46 额度用尽），兜底请求在老实例回「所有凭据已用尽 403」⇒ 再往下兜 grok/deepseek。换镜像空窗的失败就是这么来的。老池补号或兜底链跳过老实例前，换镜像空窗用户会看到失败或降级到别家模型。
-- 🔴 **换镜像那 15 秒新连接会失败，且没被兜底接住**（原因见上一条）：10-25 slots26 切换时 `claude-code-ruanyitai` 4 发「Cannot connect to host kiro-rs-slots」，SpendLogs 里没有落老实例的行（原因未查；演练 1 scale 0 时兜底是生效的），客户端自己重试第 5 发成功。
+- 🔴 **换镜像那 15 秒新连接会失败，且没被兜底接住**（原因见上一条）
+- 🔴 **真实断流不是 15 秒而是约 2 分钟**（10-26 slots31 实测）：Recreate 下旧 pod 收 SIGTERM 后**立刻不收新连接**，却要等 300s 优雅期里的长请求跑完才退，新 pod 要等旧 pod 退了才起 ⇒ 这段时间所有新请求「Cannot connect」。那次 41 次失败 / 4 把 key（carher-75 18、ruanyitai 10、wuqi 9、gongchenhao 4）。根治=无缝切换（待做）。：10-25 slots26 切换时 `claude-code-ruanyitai` 4 发「Cannot connect to host kiro-rs-slots」，SpendLogs 里没有落老实例的行（原因未查；演练 1 scale 0 时兜底是生效的），客户端自己重试第 5 发成功。
 - 🔴 **新老两个实例的号 id 都从 1 编，会撞**：说「#6」要带实例。
 - 🔴 现在新实例扛大部分流量 ⇒ 任何操作先想「会不会打断在途请求」：改配置走 Admin API（热生效），换镜像提前说，别 `kubectl delete pod`。
 - 🔴 绑定表里的测试绑定（`anc:` `sid:` `u:smoke-*`）会虚增「绑定人数」，影响新人均摊。
 - 判槽健康看 `kiro-slots-watch.py` 的「首发 429 / 被限 / 排队超时」，不是看 LiteLLM 失败率（兜底把失败吞了）。
 - 兜底到老实例的量：SpendLogs 里 `model_group like 'kiro-slots-%'` 但 `api_base` 是老实例的行；10-25 有 54 次，原因未查。
 - 新加坡 `kiro-sg` 两个测试实例还挂着老池 7 个号凭据（建议 scale 0，等用户定）。
+- 🔴 **槽 2~4 的出口代理是阿里云 ns `kiro-sg` 里三个 squid**（deploy `kiro-egress-226/122/86` ⇒ 47.84.112.136 / 47.84.85.100 / 47.236.200.98，CM `kiro-egress-squid`，本机经 `jms proxy k8s-work-226 16443 …` 隧道操作）。
+  10-26 起同时放行 ChatGPT（`acl chatgpt_dst dstdomain .chatgpt.com .openai.com`），给 198 ChatGPT 号池分出口用。
+  改 ACL：先 `squid -k parse` 在 pod 里验新文件 → apply CM（~5s 同步进 pod）→ **逐个 `kubectl exec <pod> -- kill -HUP 1`** 热加载
+  （`squid -k reconfigure` 不能用：配置里 `pid_filename none` ⇒ FATAL）。每个之后从 198 经该槽代理各打一发 kiro（404）和 chatgpt（401）再动下一个。

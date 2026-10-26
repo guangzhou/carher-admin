@@ -19,7 +19,7 @@
    return data
  }
  
-@@ -121,5 +121,166 @@
+@@ -121,5 +121,188 @@
  // 设置 window 模式参数（立即生效并写回 config.json）
  export async function setWindowSettings(settings: WindowSettings): Promise<WindowSettings> {
    const { data } = await api.put<WindowSettings>('/config/window', settings)
@@ -79,6 +79,28 @@
 +  limits: SlotLimits
 +  spare: number
 +  slots: SlotView[]
++}
++
++export interface EmptyEvent {
++  at: number
++  slot: string
++  accountId: number
++  keyAlias: string
++  keyHash: string
++  model: string
++  returned: boolean
++  reason: string
++}
++
++export interface EmptyEvents {
++  items: EmptyEvent[]
++  byKey: { keyAlias: string; keyHash: string; count: number; returned: number; lastAt: number }[]
++  keep: number
++}
++
++export async function getEmptyEvents(slot: string | null, returned: boolean): Promise<EmptyEvents> {
++  const { data } = await api.get<EmptyEvents>('/slots/empty-events', { params: { ...(slot ? { slot } : {}), returned } })
++  return data
 +}
 +
 +export interface BurnTrend {
@@ -2034,6 +2056,115 @@
        />
  
        {/* 批量导入对话框 */}
+--- a/admin-ui/src/components/empty-events-dialog.tsx
++++ b/admin-ui/src/components/empty-events-dialog.tsx
+@@ -0,0 +1,106 @@
++import { useState } from 'react'
++import { useQuery } from '@tanstack/react-query'
++import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
++import { getEmptyEvents } from '@/api/credentials'
++import { extractErrorMessage } from '@/lib/utils'
++
++const REASON: Record<string, string> = {
++  not_probed: '非 opus，不探测',
++  probe_not_restricted: '探测：号正常',
++  probe_restricted_swapped: '号被限，已换号救回',
++  probe_restricted_no_swap_left: '号被限，换号次数用完',
++  probe_restricted_no_spare: '号被限，冷备没号',
++}
++
++const fmtTime = (t: number) => {
++  const d = new Date((t + 8 * 3600) * 1000)
++  const p = (n: number) => String(n).padStart(2, '0')
++  return `${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`
++}
++
++/** 空回复明细：哪把 198 LiteLLM key、哪个号、什么模型、救没救回来。数据在内存里，kiro.rs 重启后清空 */
++export function EmptyEventsDialog({ slot, open, onOpenChange }: {
++  slot: string | null
++  open: boolean
++  onOpenChange: (o: boolean) => void
++}) {
++  const [onlyReturned, setOnlyReturned] = useState(true)
++  const { data, isLoading, error } = useQuery({
++    queryKey: ['emptyEvents', slot, onlyReturned],
++    queryFn: () => getEmptyEvents(slot, onlyReturned),
++    enabled: open,
++    refetchInterval: open ? 10000 : false,
++  })
++  const items = data?.items || []
++  const byKey = data?.byKey || []
++  const TH = 'px-3 py-2 text-left font-medium whitespace-nowrap'
++  const TD = 'px-3 py-2 whitespace-nowrap'
++  return (
++    <Dialog open={open} onOpenChange={onOpenChange}>
++      <DialogContent className='sm:max-w-4xl'>
++        <DialogHeader>
++          <DialogTitle>空回复明细{slot ? ` · ${slot}` : ''}</DialogTitle>
++          <DialogDescription>
++            上游返回 200 但没有任何文字和工具调用。「key」是 198 LiteLLM 的 key 别名。只保留最近 {data?.keep ?? 500} 条，kiro.rs 重启后清空（与卡片计数同口径）。
++          </DialogDescription>
++        </DialogHeader>
++        <label className='flex items-center gap-2 text-sm text-muted-foreground'>
++          <input type='checkbox' className='h-4 w-4 accent-primary' checked={onlyReturned} onChange={(e) => setOnlyReturned(e.target.checked)} />
++          只看原样返回给用户的（没救回来）
++        </label>
++        {isLoading && <p className='py-6 text-center text-sm text-muted-foreground'>加载中…</p>}
++        {error && <p className='py-6 text-center text-sm text-red-600'>加载失败：{extractErrorMessage(error)}</p>}
++        {!isLoading && !error && (items.length === 0 ? (
++          <p className='py-6 text-center text-sm text-muted-foreground'>
++            暂无记录（明细从这个版本上线后开始记，上线前的计数没有明细）
++          </p>
++        ) : (
++          <div className='space-y-4'>
++            <div>
++              <div className='mb-1 text-sm font-medium'>按 key 汇总</div>
++              <div className='overflow-x-auto rounded-md border'>
++                <table className='w-full text-sm'>
++                  <thead className='bg-muted/50 text-xs text-muted-foreground'>
++                    <tr><th className={TH}>key</th><th className={`${TH} text-right`}>空回复</th><th className={`${TH} text-right`}>给了用户</th><th className={TH}>最近一次</th></tr>
++                  </thead>
++                  <tbody>
++                    {byKey.map((k) => (
++                      <tr key={k.keyAlias + k.keyHash} className='border-t'>
++                        <td className={`${TD} font-mono text-xs`} title={k.keyHash ? `LiteLLM token: ${k.keyHash}` : ''}>{k.keyAlias || '(未带身份头)'}</td>
++                        <td className={`${TD} text-right tabular-nums`}>{k.count}</td>
++                        <td className={`${TD} text-right tabular-nums ${k.returned ? 'text-red-600' : ''}`}>{k.returned}</td>
++                        <td className={`${TD} text-muted-foreground`}>{fmtTime(k.lastAt)}</td>
++                      </tr>
++                    ))}
++                  </tbody>
++                </table>
++              </div>
++            </div>
++            <div>
++              <div className='mb-1 text-sm font-medium'>逐条（最新在前，{items.length} 条）</div>
++              <div className='max-h-80 overflow-auto rounded-md border'>
++                <table className='w-full text-sm'>
++                  <thead className='sticky top-0 bg-muted text-xs text-muted-foreground'>
++                    <tr><th className={TH}>时间</th><th className={TH}>key</th><th className={TH}>模型</th><th className={TH}>结果</th></tr>
++                  </thead>
++                  <tbody>
++                    {items.map((e, i) => (
++                      <tr key={i} className='border-t' title={`当时槽上的号 #${e.accountId}（号用尽/被限会自动换号）`}>
++                        <td className={`${TD} tabular-nums text-muted-foreground`}>{fmtTime(e.at)}</td>
++                        <td className={`${TD} font-mono text-xs`}>{e.keyAlias || '(未带身份头)'}</td>
++                        <td className={`${TD} font-mono text-xs`}>{e.model}</td>
++                        <td className={`${TD} ${e.returned ? 'text-red-600' : 'text-emerald-600'}`}>
++                          {e.returned ? '给了用户' : '救回'} · <span className='text-muted-foreground'>{REASON[e.reason] || e.reason}</span>
++                        </td>
++                      </tr>
++                    ))}
++                  </tbody>
++                </table>
++              </div>
++            </div>
++          </div>
++        ))}
++      </DialogContent>
++    </Dialog>
++  )
++}
 --- a/admin-ui/src/components/mode-switch-dialog.tsx
 +++ b/admin-ui/src/components/mode-switch-dialog.tsx
 @@ -12,13 +12,17 @@
@@ -2282,8 +2413,9 @@
 +}
 --- a/admin-ui/src/components/slots-panel.tsx
 +++ b/admin-ui/src/components/slots-panel.tsx
-@@ -0,0 +1,379 @@
+@@ -0,0 +1,392 @@
 +import { CreditsTrend } from '@/components/credits-trend'
++import { EmptyEventsDialog } from '@/components/empty-events-dialog'
 +import { useEffect, useState } from 'react'
 +import { toast } from 'sonner'
 +import { Button } from '@/components/ui/button'
@@ -2362,6 +2494,7 @@
 +  result?: SlotTestResult; testing: boolean; onTest: () => void; onOpen: () => void
 +}) {
 +  const [more, setMore] = useState(false)
++  const [emptyOpen, setEmptyOpen] = useState(false)
 +  const st = s.stats
 +  const issues = ([
 +    ['429', st.first429 + st.retry429], ['空回复给了用户', st.emptyReturned], ['排队超时', st.queueTimeouts],
@@ -2410,8 +2543,18 @@
 +        <div className={`h-1.5 rounded-full ${load >= 100 ? 'bg-red-500' : load >= 70 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${load}%` }} />
 +      </div>
 +      <div className='mt-3 min-h-5 text-xs'>
-+        {issues.length ? <span className='text-red-600'>{issues.map(([k, n]) => `${k} ${n}`).join(' · ')}</span>
-+          : <span className='text-muted-foreground'>无 429 · 无空回复 · 无排队超时</span>}
++        {issues.length ? (
++          <span className='text-red-600'>
++            {issues.map(([k, n], i) => (
++              <span key={k}>
++                {i > 0 && ' · '}
++                {k === '空回复给了用户'
++                  ? <button type='button' className='underline underline-offset-2 hover:text-red-700' onClick={() => setEmptyOpen(true)} title='看是哪把 198 LiteLLM key、什么模型'>{k} {n}</button>
++                  : `${k} ${n}`}
++              </span>
++            ))}
++          </span>
++        ) : <span className='text-muted-foreground'>无 429 · 无空回复 · 无排队超时</span>}
 +        {s.queued > 0 && <span className='ml-2 text-amber-600'>排队 {s.queued}</span>}
 +      </div>
 +      {more && (
@@ -2427,6 +2570,7 @@
 +        <Button size='sm' variant='ghost' className='ml-auto' onClick={() => setMore((x) => !x)} aria-expanded={more}>{more ? '收起' : '明细'}</Button>
 +      </div>
 +      {result && <TestBadge r={result} onOpen={onOpen} />}
++      <EmptyEventsDialog slot={s.name} open={emptyOpen} onOpenChange={setEmptyOpen} />
 +    </div>
 +  )
 +}
@@ -2896,7 +3040,7 @@
    hasProfileArn: boolean
 --- a/src/admin/handlers.rs
 +++ b/src/admin/handlers.rs
-@@ -158,3 +158,192 @@
+@@ -158,3 +158,206 @@
          Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
      }
  }
@@ -2904,6 +3048,20 @@
 +/// GET /api/admin/slots —— 槽位总览（每槽号/在途/排队/上限/429 统计）
 +pub async fn get_slots(State(state): State<AdminState>) -> impl IntoResponse {
 +    Json(state.service.get_slots())
++}
++
++#[derive(serde::Deserialize)]
++pub struct EmptyEventsQuery {
++    pub slot: Option<String>,
++    pub returned: Option<bool>,
++}
++
++/// GET /api/admin/slots/empty-events?slot=<槽名>&returned=true —— 空回复明细（哪把 LiteLLM key、哪个号、什么模型），重启清空
++pub async fn get_empty_events(
++    State(state): State<AdminState>,
++    axum::extract::Query(q): axum::extract::Query<EmptyEventsQuery>,
++) -> impl IntoResponse {
++    Json(state.service.get_empty_events(q.slot.as_deref().filter(|s| !s.is_empty()), q.returned.unwrap_or(false)))
 +}
 +
 +#[derive(serde::Deserialize)]
@@ -3131,7 +3289,7 @@
          add_credential, delete_credential, force_refresh_token, get_all_credentials,
          get_credential_balance, get_load_balancing_mode, get_window_settings, reset_failure_count,
          set_credential_disabled, set_credential_priority, set_load_balancing_mode, set_window_settings,
-+        get_slots, get_burn_trend, set_slot_limits, set_slot_lock, get_slot_configs, set_slot_configs, get_slot_gray, set_slot_gray, test_slot, test_all_slots, get_credential_usage, get_credentials_usage_totals,
++        get_slots, get_burn_trend, get_empty_events, set_slot_limits, set_slot_lock, get_slot_configs, set_slot_configs, get_slot_gray, set_slot_gray, test_slot, test_all_slots, get_credential_usage, get_credentials_usage_totals,
      },
      middleware::{AdminState, admin_auth_middleware},
  };
@@ -3144,12 +3302,13 @@
          .route(
              "/config/load-balancing",
              get(get_load_balancing_mode).put(set_load_balancing_mode),
-@@ -54,6 +57,15 @@
+@@ -54,6 +57,16 @@
              "/config/window",
              get(get_window_settings).put(set_window_settings),
          )
 +        .route("/slots", get(get_slots))
 +        .route("/credits/trend", get(get_burn_trend))
++        .route("/slots/empty-events", get(get_empty_events))
 +        .route("/slots/stats", get(get_slots))
 +        .route("/slots/limits", axum::routing::put(set_slot_limits))
 +        .route("/slots/config", get(get_slot_configs).put(set_slot_configs))
@@ -3208,7 +3367,7 @@
                  expires_at: entry.expires_at,
                  auth_method: entry.auth_method,
                  has_profile_arn: entry.has_profile_arn,
-@@ -299,16 +318,107 @@
+@@ -299,16 +318,127 @@
          Ok(self.token_manager.get_window_settings())
      }
  
@@ -3223,6 +3382,26 @@
 +            "spare": self.token_manager.slot_spare_count(),
 +            "slots": self.token_manager.slots_snapshot(),
 +        })
++    }
++
++    /// 空回复明细（最新在前）+ 按 key 汇总
++    pub fn get_empty_events(&self, slot: Option<&str>, only_returned: bool) -> serde_json::Value {
++        let items = self.token_manager.empty_events(slot, only_returned);
++        let mut by: std::collections::BTreeMap<(String, String), (u64, u64, i64)> = Default::default();
++        for e in &items {
++            let ent = by.entry((e.key_alias.clone(), e.key_hash.clone())).or_insert((0, 0, 0));
++            ent.0 += 1;
++            if e.returned {
++                ent.1 += 1;
++            }
++            ent.2 = ent.2.max(e.at);
++        }
++        let mut by_key: Vec<_> = by
++            .into_iter()
++            .map(|((alias, hash), (n, ret, last))| serde_json::json!({"keyAlias": alias, "keyHash": hash, "count": n, "returned": ret, "lastAt": last}))
++            .collect();
++        by_key.sort_by(|a, b| b["count"].as_u64().cmp(&a["count"].as_u64()));
++        serde_json::json!({"items": items, "byKey": by_key, "keep": crate::kiro::slots::EMPTY_EVENTS_KEEP})
 +    }
 +
 +    /// 号池积分消耗趋势（附邮箱，前端排行用）
@@ -3551,7 +3730,26 @@
  mod router;
 --- a/src/anthropic/router.rs
 +++ b/src/anthropic/router.rs
-@@ -36,7 +36,7 @@
+@@ -14,6 +14,18 @@
+     middleware::{AppState, auth_middleware, cors_layer},
+ };
+ 
++/// 把 LiteLLM 带来的 key 身份放进本请求的 task-local（只给本地统计用，例如空回复明细）。
++/// 流式响应体在 handler 返回后才被消费，但空回复判定发生在 handler 内调用上游时，此时作用域仍有效。
++async fn caller_identity_layer(req: axum::extract::Request, next: middleware::Next) -> axum::response::Response {
++    let h = req.headers();
++    let get = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string()).unwrap_or_default();
++    let who = crate::kiro::provider::CallerIdentity {
++        key_alias: get("x-litellm-user_api_key_alias"),
++        key_hash: get("x-litellm-user_api_key_hash"),
++    };
++    crate::kiro::provider::CALLER.scope(who, next.run(req)).await
++}
++
+ /// 请求体最大大小限制 (50MB)
+ const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
+ 
+@@ -36,7 +48,7 @@
  /// 创建带有 KiroProvider 的 Anthropic API 路由
  pub fn create_router_with_provider(
      api_key: impl Into<String>,
@@ -3560,6 +3758,50 @@
      extract_thinking: bool,
  ) -> Router {
      let mut state = AppState::new(api_key, extract_thinking);
+@@ -67,7 +79,43 @@
+     Router::new()
+         .nest("/v1", v1_routes)
+         .nest("/cc/v1", cc_v1_routes)
++        .layer(middleware::from_fn(caller_identity_layer))
+         .layer(cors_layer())
+         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+         .with_state(state)
++}
++
++#[cfg(test)]
++mod caller_layer_tests {
++    use super::*;
++    use axum::{body::Body, http::Request, routing::get};
++
++    async fn hit(app: Router, req: Request<Body>) -> String {
++        // 不引 tower：起一个本地监听，用 reqwest 打（与线上同一条 middleware 链）
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let addr = listener.local_addr().unwrap();
++        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
++        let mut rb = reqwest::Client::new().get(format!("http://{}{}", addr, req.uri()));
++        for (k, v) in req.headers() {
++            rb = rb.header(k.as_str(), v.to_str().unwrap());
++        }
++        rb.send().await.unwrap().text().await.unwrap()
++    }
++
++    #[tokio::test]
++    async fn layer_puts_litellm_key_headers_into_task_local() {
++        let app = || Router::new()
++            .route("/x", get(|| async {
++                let c = crate::kiro::provider::CALLER.try_with(|c| c.clone()).unwrap_or_default();
++                format!("{}|{}", c.key_alias, c.key_hash)
++            }))
++            .layer(middleware::from_fn(caller_identity_layer));
++        let req = Request::builder().uri("/x")
++            .header("x-litellm-user_api_key_alias", "cursor-bob")
++            .header("x-litellm-user_api_key_hash", "abc")
++            .body(Body::empty()).unwrap();
++        assert_eq!(hit(app(), req).await, "cursor-bob|abc");
++        // 阴性对照：不带头 ⇒ 空
++        assert_eq!(hit(app(), Request::builder().uri("/x").body(Body::empty()).unwrap()).await, "|");
++    }
+ }
 --- a/src/anthropic/search_loop.rs
 +++ b/src/anthropic/search_loop.rs
 @@ -79,6 +79,7 @@
@@ -3811,7 +4053,7 @@
  pub mod token_manager;
 --- a/src/kiro/provider.rs
 +++ b/src/kiro/provider.rs
-@@ -25,6 +25,66 @@
+@@ -25,6 +25,81 @@
  /// 总重试次数硬上限（避免无限重试）
  const MAX_TOTAL_RETRIES: usize = 9;
  
@@ -3819,6 +4061,21 @@
 +const SLOT_MAX_ATTEMPTS: usize = 6;
 +/// 槽位模式：单个请求最多换号次数
 +const SLOT_MAX_SWAPS: u32 = 2;
++/// 本次请求是哪把 LiteLLM key（只用于本地统计，不转发给 Kiro）。由 anthropic 层在处理请求时设置。
++#[derive(Debug, Clone, Default)]
++pub struct CallerIdentity {
++    pub key_alias: String,
++    pub key_hash: String,
++}
++
++tokio::task_local! {
++    pub static CALLER: CallerIdentity;
++}
++
++fn caller() -> CallerIdentity {
++    CALLER.try_with(|c| c.clone()).unwrap_or_default()
++}
++
 +/// 被限探测只发这句：不带用户内容，避免把「这条内容被拦」当成「号被限」
 +const RESTRICTED_PROBE_PROMPT: &str = "只回答一个字：是";
 +
@@ -3878,7 +4135,7 @@
  /// Kiro API Provider
  ///
  /// 核心组件，负责与 Kiro API 通信
-@@ -121,6 +181,10 @@
+@@ -121,6 +196,10 @@
          request_body: &str,
          session_key: Option<&str>,
      ) -> anyhow::Result<reqwest::Response> {
@@ -3889,7 +4146,7 @@
          self.call_api_with_retry(request_body, false, session_key).await
      }
  
-@@ -135,9 +199,64 @@
+@@ -135,9 +214,64 @@
          request_body: &str,
          session_key: Option<&str>,
      ) -> anyhow::Result<reqwest::Response> {
@@ -3954,7 +4211,7 @@
      /// 发送 MCP API 请求（WebSearch 等工具调用）
      pub async fn call_mcp(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
          self.call_mcp_with_retry(request_body).await
-@@ -151,8 +270,16 @@
+@@ -151,8 +285,16 @@
          let mut force_refreshed: HashSet<u64> = HashSet::new();
  
          for attempt in 0..max_retries {
@@ -3973,7 +4230,7 @@
                  Ok(c) => c,
                  Err(e) => {
                      last_error = Some(e);
-@@ -381,7 +508,8 @@
+@@ -381,7 +523,8 @@
              // 成功响应
              if status.is_success() {
                  self.token_manager.report_success(ctx.id);
@@ -3983,7 +4240,7 @@
              }
  
              // 失败响应：读取 body 用于日志/错误信息
-@@ -539,6 +667,336 @@
+@@ -539,6 +682,345 @@
          }))
      }
  
@@ -4064,24 +4321,33 @@
 +                    Peeked::Empty(r) => r,
 +                };
 +                drop(permit);
++                let who = caller();
++                let model = Self::extract_model_from_request(request_body).unwrap_or_default();
++                let note = |returned: bool, reason: &str| {
++                    self.token_manager.record_empty_event(slot, ctx.id, &who.key_alias, &who.key_hash, &model, returned, reason);
++                };
 +                if !(is_opus && self.token_manager.config().slot_restricted_probe) {
 +                    self.token_manager.slot_report_empty(slot, true);
-+                    tracing::warn!("槽位 {} 号 #{} 空回复（非 opus / 未开探测），原样返回", slot, ctx.id);
++                    note(true, "not_probed");
++                    tracing::warn!("槽位 {} 号 #{} 空回复（非 opus / 未开探测），原样返回 key={}", slot, ctx.id, who.key_alias);
 +                    return Ok(response);
 +                }
 +                let restricted = self.probe_restricted(&ctx, &machine_id, request_body).await;
 +                if !restricted || swaps >= SLOT_MAX_SWAPS {
 +                    self.token_manager.slot_report_empty(slot, true);
-+                    tracing::warn!("槽位 {} 号 #{} 空回复，探测 restricted={}，原样返回", slot, ctx.id, restricted);
++                    note(true, if restricted { "probe_restricted_no_swap_left" } else { "probe_not_restricted" });
++                    tracing::warn!("槽位 {} 号 #{} 空回复，探测 restricted={}，原样返回 key={}", slot, ctx.id, restricted, who.key_alias);
 +                    return Ok(response);
 +                }
 +                swaps += 1;
 +                if self.token_manager.slot_retire_account(ctx.id, "restricted").is_none() {
 +                    self.token_manager.slot_report_empty(slot, true);
-+                    tracing::error!("槽位 {} 号 #{} 被限制，冷备已无可用号", slot, ctx.id);
++                    note(true, "probe_restricted_no_spare");
++                    tracing::error!("槽位 {} 号 #{} 被限制，冷备已无可用号 key={}", slot, ctx.id, who.key_alias);
 +                    return Ok(response);
 +                }
 +                self.token_manager.slot_report_empty(slot, false);
++                note(false, "probe_restricted_swapped");
 +                continue;
 +            }
 +            let body = response.text().await.unwrap_or_default();
@@ -4320,7 +4586,7 @@
      /// 从请求体中提取模型信息
      ///
      /// 尝试解析 JSON 请求体，提取 conversationState.currentMessage.userInputMessage.modelId
-@@ -564,5 +1022,439 @@
+@@ -564,5 +1046,458 @@
          let jitter_max = (backoff / 4).max(1);
          let jitter = fastrand::u64(0..=jitter_max);
          Duration::from_millis(backoff.saturating_add(jitter))
@@ -4758,11 +5024,30 @@
 +        assert_eq!(b.pointer("/conversationState/history").unwrap(), &serde_json::json!([]));
 +        assert_eq!(b["profileArn"], "arn:own");
 +        assert!(!s.contains("tools"), "不带工具定义");
++    }
++}
++
++#[cfg(test)]
++mod caller_identity_tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn caller_visible_inside_scope_and_default_outside() {
++        assert_eq!(caller().key_alias, "", "作用域外取默认值，不 panic");
++        let who = CallerIdentity { key_alias: "cursor-alice".into(), key_hash: "h1".into() };
++        let got = CALLER
++            .scope(who, async {
++                tokio::task::yield_now().await;
++                caller()
++            })
++            .await;
++        assert_eq!(got.key_alias, "cursor-alice");
++        assert_eq!(got.key_hash, "h1");
      }
  }
 --- a/src/kiro/slots.rs
 +++ b/src/kiro/slots.rs
-@@ -0,0 +1,875 @@
+@@ -0,0 +1,939 @@
 +//! 槽位模式：固定 N 个槽位，每槽 = 1 个号 + 1 个固定出口。
 +//!
 +//! - 用户（LiteLLM key hash）第一次来分到「没封口、在途最少」的槽，之后一直固定；绑定落盘。
@@ -5047,6 +5332,52 @@
 +    /// 其中最终原样返回给用户的次数（没救回来）
 +    #[serde(default)]
 +    pub empty_returned: u64,
++}
++
++/// 一次「空回复」明细：哪个槽、哪个号、哪把 LiteLLM key、什么模型、救没救回来
++#[derive(Debug, Clone, Serialize, PartialEq)]
++#[serde(rename_all = "camelCase")]
++pub struct EmptyEvent {
++    pub at: i64,
++    pub slot: String,
++    pub account_id: u64,
++    /// LiteLLM key 别名（x-litellm-user_api_key_alias）；没带身份头时为空
++    pub key_alias: String,
++    /// LiteLLM key 哈希（= 198 LiteLLM_VerificationToken.token），便于在 LiteLLM 后台定位
++    pub key_hash: String,
++    pub model: String,
++    /// true = 原样返回给了用户；false = 换号救回
++    pub returned: bool,
++    /// opus 时的被限探测结论：probe_fine / probe_restricted / probe_unknown / not_probed
++    pub reason: String,
++}
++
++pub const EMPTY_EVENTS_KEEP: usize = 500;
++
++/// 最近的空回复明细（内存环形，重启清空）
++#[derive(Debug, Default)]
++pub struct EmptyEvents {
++    items: VecDeque<EmptyEvent>,
++}
++
++impl EmptyEvents {
++    pub fn push(&mut self, e: EmptyEvent) {
++        if self.items.len() >= EMPTY_EVENTS_KEEP {
++            self.items.pop_front();
++        }
++        self.items.push_back(e);
++    }
++
++    /// 最新在前；slot 为空不过滤
++    pub fn list(&self, slot: Option<&str>, only_returned: bool) -> Vec<EmptyEvent> {
++        self.items
++            .iter()
++            .rev()
++            .filter(|e| slot.is_none_or(|s| e.slot == s))
++            .filter(|e| !only_returned || e.returned)
++            .cloned()
++            .collect()
++    }
 +}
 +
 +impl SlotsRuntime {
@@ -5364,6 +5695,24 @@
 +    }
 +
 +    #[test]
++    fn empty_events_ring_keeps_latest_and_filters() {
++        let mut ev = EmptyEvents::default();
++        for i in 0..(EMPTY_EVENTS_KEEP as i64 + 3) {
++            ev.push(EmptyEvent {
++                at: i, slot: if i % 2 == 0 { "a".into() } else { "b".into() }, account_id: 1,
++                key_alias: format!("k{i}"), key_hash: String::new(), model: "m".into(),
++                returned: i % 3 != 0, reason: "not_probed".into(),
++            });
++        }
++        let all = ev.list(None, false);
++        assert_eq!(all.len(), EMPTY_EVENTS_KEEP);
++        assert_eq!(all[0].at, EMPTY_EVENTS_KEEP as i64 + 2, "最新在前");
++        assert_eq!(all.last().unwrap().at, 3, "最老的 3 条被挤掉");
++        assert!(ev.list(Some("a"), false).iter().all(|e| e.slot == "a"));
++        assert!(ev.list(None, true).iter().all(|e| e.returned));
++    }
++
++    #[test]
 +    fn trend_buckets_by_hour_and_day_and_ignores_resets() {
 +        let mut h = BalanceHistory::default();
 +        let t0 = 1_793_000_000 - 1_793_000_000 % 3600; // 整点
@@ -5657,7 +6006,7 @@
  }
  
  /// 统计数据持久化条目
-@@ -535,6 +538,29 @@
+@@ -535,6 +538,31 @@
      stats_dirty: AtomicBool,
      /// window 模式参数（运行时可改，Admin 页面设置）
      window_settings: Mutex<WindowSettings>,
@@ -5677,6 +6026,8 @@
 +    write_lock: Mutex<()>,
 +    /// 槽位名 → 代理密码（删槽后保留，加回来时沿用；只在内存）
 +    slot_secrets: Mutex<HashMap<String, String>>,
++    /// 最近的空回复明细（Admin「空回复给了用户」点进去看）
++    empty_events: Mutex<crate::kiro::slots::EmptyEvents>,
 +    /// 号池余额：号 id → (剩余, 上限)；历史用于估算还能撑多久
 +    pool_balance: Mutex<(HashMap<u64, (f64, f64)>, crate::kiro::slots::BalanceHistory)>,
 +    /// 上次余额预警推送时刻（节流）
@@ -5687,7 +6038,7 @@
  }
  
  /// window 模式参数
-@@ -661,6 +687,79 @@
+@@ -661,6 +689,79 @@
      pub token: String,
  }
  
@@ -5767,7 +6118,7 @@
  impl MultiTokenManager {
      /// 创建多凭据 Token 管理器
      ///
-@@ -769,6 +868,24 @@
+@@ -769,6 +870,24 @@
                  cooldown_secs: config.window_cooldown_secs.clamp(1, 3600),
              }
          };
@@ -5792,7 +6143,7 @@
          let manager = Self {
              config,
              proxy,
-@@ -781,6 +898,18 @@
+@@ -781,6 +900,19 @@
              last_stats_save_at: Mutex::new(None),
              stats_dirty: AtomicBool::new(false),
              window_settings: Mutex::new(window_settings),
@@ -5804,6 +6155,7 @@
 +            slot_gray: Mutex::new(initial_slot_gray),
 +            write_lock: Mutex::new(()),
 +            slot_secrets: Mutex::new(initial_slot_secrets),
++            empty_events: Mutex::new(Default::default()),
 +            pool_balance: Mutex::new(Default::default()),
 +            last_runway_alert: Mutex::new(None),
 +            account_usage: Mutex::new(Default::default()),
@@ -5811,7 +6163,7 @@
          };
  
          // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
-@@ -794,6 +923,9 @@
+@@ -794,6 +926,9 @@
  
          // 加载持久化的统计数据（success_count, last_used_at）
          manager.load_stats();
@@ -5821,7 +6173,7 @@
  
          Ok(manager)
      }
-@@ -825,6 +957,8 @@
+@@ -825,6 +960,8 @@
          model: Option<&str>,
          session_key: Option<&str>,
      ) -> Option<(u64, KiroCredentials)> {
@@ -5830,7 +6182,7 @@
          let entries = self.entries.lock();
  
          // 检查是否是 opus 模型
-@@ -832,11 +966,12 @@
+@@ -832,11 +969,12 @@
              .map(|m| m.to_lowercase().contains("opus"))
              .unwrap_or(false);
  
@@ -5844,7 +6196,7 @@
                      return false;
                  }
                  // 如果是 opus 模型，需要检查订阅等级
-@@ -852,7 +987,8 @@
+@@ -852,7 +990,8 @@
          }
  
          let mode = self.load_balancing_mode.lock().clone();
@@ -5854,7 +6206,7 @@
  
          match mode {
              "window" => {
-@@ -915,7 +1051,7 @@
+@@ -915,7 +1054,7 @@
                  // window 与 balanced 一样每次重选（窗口内按在途数挑），不粘 current_id
                  let is_balanced = matches!(
                      self.load_balancing_mode.lock().as_str(),
@@ -5863,7 +6215,7 @@
                  );
  
                  // balanced 模式：每次请求都重新均衡选择，不固定 current_id
-@@ -923,11 +1059,12 @@
+@@ -923,11 +1062,12 @@
                  let current_hit = if is_balanced {
                      None
                  } else {
@@ -5877,7 +6229,7 @@
                          .map(|e| (e.id, e.credentials.clone()))
                  };
  
-@@ -1140,6 +1277,8 @@
+@@ -1140,6 +1280,8 @@
              None => return Ok(false),
          };
  
@@ -5886,7 +6238,7 @@
          // 收集所有凭据
          let credentials: Vec<KiroCredentials> = {
              let entries = self.entries.lock();
-@@ -1158,12 +1297,13 @@
+@@ -1158,12 +1300,13 @@
          // 序列化为 pretty JSON
          let json = serde_json::to_string_pretty(&credentials).context("序列化凭据失败")?;
  
@@ -5904,7 +6256,7 @@
          }
  
          tracing::debug!("已回写凭据到文件: {:?}", path);
-@@ -1291,9 +1431,847 @@
+@@ -1291,9 +1434,866 @@
          self.save_stats_debounced();
      }
  
@@ -6309,6 +6661,25 @@
 +                s.empty_returned += 1;
 +            }
 +        }
++    }
++
++    /// 记一条空回复明细（谁、哪个号、什么模型、救没救回来）
++    pub fn record_empty_event(&self, slot: usize, account_id: u64, key_alias: &str, key_hash: &str, model: &str, returned: bool, reason: &str) {
++        let name = self.slots.lock().states.get(slot).map(|s| s.name.clone()).unwrap_or_default();
++        self.empty_events.lock().push(crate::kiro::slots::EmptyEvent {
++            at: chrono::Utc::now().timestamp(),
++            slot: name,
++            account_id,
++            key_alias: key_alias.to_string(),
++            key_hash: key_hash.to_string(),
++            model: model.to_string(),
++            returned,
++            reason: reason.to_string(),
++        });
++    }
++
++    pub fn empty_events(&self, slot: Option<&str>, only_returned: bool) -> Vec<crate::kiro::slots::EmptyEvent> {
++        self.empty_events.lock().list(slot, only_returned)
 +    }
 +
 +    pub fn slot_report_exhausted(&self, slot: usize) {
@@ -6753,7 +7124,7 @@
      }
  
      /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
-@@ -1640,6 +2618,7 @@
+@@ -1640,6 +2640,7 @@
                          DisabledReason::QuotaExceeded => "QuotaExceeded",
                          DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                          DisabledReason::InvalidConfig => "InvalidConfig",
@@ -6761,7 +7132,7 @@
                      }.to_string()),
                      endpoint: e.credentials.endpoint.clone(),
                      subscription_title: e.credentials.subscription_title.clone(),
-@@ -1671,6 +2650,12 @@
+@@ -1671,6 +2672,12 @@
          }
          // 持久化更改
          self.persist_credentials()?;
@@ -6774,7 +7145,7 @@
          Ok(())
      }
  
-@@ -1955,6 +2940,9 @@
+@@ -1955,6 +2962,9 @@
          self.persist_credentials()?;
  
          tracing::info!("成功添加凭据 #{}", new_id);
@@ -6784,7 +7155,7 @@
          Ok(new_id)
      }
  
-@@ -2020,6 +3008,27 @@
+@@ -2020,6 +3030,27 @@
          // 立即回写统计数据，清除已删除凭据的残留条目
          self.save_stats();
  
@@ -6812,7 +7183,7 @@
          tracing::info!("已删除凭据 #{}", id);
          Ok(())
      }
-@@ -2124,7 +3133,7 @@
+@@ -2124,7 +3155,7 @@
      /// 设置负载均衡模式（Admin API）
      pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
          // 验证模式值
@@ -6821,7 +7192,7 @@
              anyhow::bail!("无效的负载均衡模式: {}", mode);
          }
  
-@@ -2140,9 +3149,35 @@
+@@ -2140,9 +3171,35 @@
              return Err(err);
          }
  
@@ -6857,7 +7228,7 @@
  }
  
  impl Drop for MultiTokenManager {
-@@ -2150,6 +3185,7 @@
+@@ -2150,6 +3207,7 @@
          if self.stats_dirty.load(Ordering::Relaxed) {
              self.save_stats();
          }
@@ -6865,7 +7236,7 @@
      }
  }
  
-@@ -2323,6 +3359,507 @@
+@@ -2323,6 +3381,507 @@
          assert!(m.is_window_mode());
          assert!(m.report_rate_limited(1), "#2 在上限内且未冷却 ⇒ 可换");
          assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");

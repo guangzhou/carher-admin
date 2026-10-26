@@ -1,0 +1,24 @@
+--- vanilla-v1.106.4/litellm/proxy/pass_through_endpoints/llm_provider_handlers/anthropic_passthrough_logging_handler.py
++++ carher/litellm/proxy/pass_through_endpoints/llm_provider_handlers/anthropic_passthrough_logging_handler.py
+@@ -285,6 +285,21 @@
+             if custom_llm_provider and not model.startswith(f"{custom_llm_provider}/")
+             else model
+         )
++        # Wangsu Anthropic-compatible GLM returns usage.server_tool_use as a plain
++        # dict; LiteLLM cost/log serialization expects Anthropic SDK objects.
++        # (CarHer patch, ported from the 1.100.1 overlay to 1.103.2's
++        # _compute_response_cost; behaviour unchanged: normalise in place.)
++        usage = getattr(litellm_model_response, "usage", None)
++        server_tool_use = getattr(usage, "server_tool_use", None)
++        if isinstance(server_tool_use, dict):
++            try:
++                from anthropic.types.server_tool_usage import ServerToolUsage
++
++                usage.server_tool_use = ServerToolUsage(
++                    web_search_requests=server_tool_use.get("web_search_requests", 0)
++                )
++            except Exception:
++                usage.server_tool_use = None
+         return litellm.completion_cost(
+             completion_response=litellm_model_response,
+             model=model_for_cost,

@@ -15,8 +15,8 @@ die(){ echo "STOP: $*"; exit 1; }
 GO=$(kubectl -n litellm-product get deploy litellm-proxy-guarded-old -o jsonpath='{.status.readyReplicas}/{.spec.replicas}'); [ "$GO" = 2/2 ] || die "guarded-old $GO"
 BASIS_STABLE="$1"
 bash $D/sign.sh convergence_stable "$BASIS_STABLE"
-bash $D/sign.sh convergence_bridge "guarded-old 1.100.1 $GO Ready，30406 liveliness $(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:30406/health/liveliness)"
-bash $D/sign.sh convergence_control_plane "三车道有效 router 129/5/24 同 hash（gray vs prod 逐项相同）；DB 已迁移 196 条，旧版读写已验" "gray/guarded-old scheduler disabled，prod 持后台任务；收敛窗口远离 16:00 UTC 额度重置" "收敛期 /pro/ 全到 gray（同库）"
+bash $D/sign.sh convergence_bridge "guarded-old ${GO_VERSION:-上一版} $GO Ready，30406 liveliness $(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:30406/health/liveliness)"
+bash $D/sign.sh convergence_control_plane "三车道有效 router ${ROUTER_COUNTS:?先量三车道 /router/settings 条数+hash} 同 hash（gray vs prod 逐项相同）；DB 已迁移 ${DB_MIGRATIONS:?生产迁移后条数} 条，旧版读写已验" "gray/guarded-old scheduler disabled，prod 持后台任务；收敛窗口远离 16:00 UTC 额度重置" "收敛期 /pro/ 全到 gray（同库）"
 bash $D/sign.sh convergence_bypass_disposition "ClusterIP litellm-proxy 集群内消费者经 RollingUpdate maxUnavailable=0 + preStop 30s + grace 600 不断服" "NetworkPolicy 与 live 相同（10.42.0-3.0/24、10.68.13.0/24、10.68.10.37/32、SNAT /32）"
 bash $SRC/scripts/gray-convergence-prepare.sh 2>&1 | grep -vE 'syntax is ok|test is successful|render-production' | tail -2
 sleep 120

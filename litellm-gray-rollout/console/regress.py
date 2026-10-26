@@ -126,7 +126,8 @@ def _cmds(case: str, a_ip: str, b_ip: str, out: Path) -> list[tuple[str, list[st
                         "--clone-from", "cursor-miaosen-5pn4", "--new", "grok-4.7", "--old", "gpt-6-astra", "--old", "claude-opus-5",
                         "--old", "claude-opus-5-5", "--outside", "o3-pro", "--protocol", "openai"], {}))
             res.append((side + ":claude-code", ["python3", str(S / "litellm-198-key-behavior-regress.py"), "--base", f"http://{ip}:4000",
-                        "--clone-from", "claude-code-00a715a4-7729", "--new", "anthropic.claude-opus-5", "--old", "anthropic.claude-sonnet-4-6",
+                        # 10-25 存量 key alias 改成姓名拼音（user_id 不动）：原 claude-code-00a715a4-7729
+                        "--clone-from", "claude-code-shangwenze-7729", "--new", "anthropic.claude-opus-5", "--old", "anthropic.claude-sonnet-4-6",
                         "--outside", "o3-pro", "--protocol", "anthropic"], {}))
         return res
     if case == "kiro":

@@ -65,9 +65,10 @@ ts=str(int(time.time()))
 # --- ③ key 总额度软拦截(三道闸门都要被吞;金额只断限额) ---
 st,b = call("/key/generate", {"key_alias":"claude-code-smoke-"+ts,"max_budget":5.0,"budget_duration":"1d"})
 k=json.loads(b)["key"]
-call("/key/update", {"key":k,"spend":9.0})
+# 先列模型再把额度打满：超额 key 连 /v1/models 都被预算闸门 429（10-26 新旧三车道实测一致），反过来就拿不到模型名
 st,b = call("/v1/models", key=k, method="GET")
 model = json.loads(b)["data"][0]["id"]
+call("/key/update", {"key":k,"spend":9.0})
 st,b = call("/v1/chat/completions", {"model":model,"messages":[{"role":"user","content":"hello"}]}, key=k)
 check("S1 key over-budget 200", st==200 and "额度已用完" in all_text(b) and "$5.00" in all_text(b), f"{st} {b[:300]}")
 st,b = call("/v1/responses", {"model":model,"input":"hello","stream":True}, key=k)
@@ -138,7 +139,7 @@ redis("SET", f"budget_notice:fam:premium:{tw}:{bj}", "0.85", "EX", "3600")
 st,b = call("/v1/chat/completions", {"model":PMODEL, **msg}, key=kw)
 t=all_text(b)
 check("S10 premium 80% tier injected with fallback list",
-      st==200 and "高配模型(Opus/Astra) 今日已用 85%" in t and "用完后仍可用" in t and BMODEL in t,
+      st==200 and "高配模型(Opus/Astra/Kimi-K3) 今日已用 85%" in t and "用完后仍可用" in t and BMODEL in t,
       f"{st} {t[-600:]}")
 # S11:表里的名字 = 用户发的那个(这把 key 发的就是 PMODEL/BMODEL,它们本身是组名);
 # 只看表的第一列(全文还有可用模型行等,不该参与判定)。

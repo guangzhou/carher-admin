@@ -1,26 +1,26 @@
 diff -ruN -x t base/admin-ui/src/components/empty-events-dialog.tsx work/admin-ui/src/components/empty-events-dialog.tsx
 --- base/admin-ui/src/components/empty-events-dialog.tsx	2026-10-27 09:54:03
-+++ work/admin-ui/src/components/empty-events-dialog.tsx	2026-10-27 10:08:47
++++ work/admin-ui/src/components/empty-events-dialog.tsx	2026-10-27 22:27:47
 @@ -10,6 +10,8 @@
    probe_restricted_swapped: '号被限，已换号救回',
    probe_restricted_no_swap_left: '号被限，换号次数用完',
    probe_restricted_no_spare: '号被限，冷备没号',
-+  refusal_switched_model: '安全审查，已改用 Opus 4.8 回答',
-+  refusal_fallback_also_empty: '安全审查，4.8 也没答，已提示用户',
++  refusal_switched_model: '安全审查，已改用 Opus 5 回答',
++  refusal_fallback_also_empty: '安全审查，Opus 5 也没答，已提示用户',
  }
  
  const fmtTime = (t: number) => {
 diff -ruN -x t base/src/kiro/provider.rs work/src/kiro/provider.rs
 --- base/src/kiro/provider.rs	2026-10-27 09:54:03
-+++ work/src/kiro/provider.rs	2026-10-27 10:08:47
++++ work/src/kiro/provider.rs	2026-10-27 22:27:47
 @@ -97,6 +97,98 @@
      })
  }
  
 +/// opus-5.5 安全审查兜底：上游拦下后什么都不发（200 + 零内容），客户端只看到空白。
 +/// 号没被限时换成配置里的备用模型重答一次，并在回答末尾告诉用户；同一会话之后直接用备用模型（同 Cursor）。
-+const REFUSAL_SWITCH_NOTICE: &str = "\n\n---\n> ⚠️ Claude Opus 5.5 对这条消息触发了安全审查，没有作答（不是网络或服务故障）。本条已自动改由 {to} 回答，本会话接下来也会继续用 {to}；想用回 Opus 5.5 请新开一个会话。";
-+const REFUSAL_BOTH_NOTICE: &str = "⚠️ 这条消息触发了 Claude 的安全审查：Claude Opus 5.5 和自动改用的 {to} 都没有作答（不是网络或服务故障）。请换个说法，或新开一个会话再试。";
++const REFUSAL_SWITCH_NOTICE: &str = "\n\n---\n> ⚠️ Claude Opus 5.5 对这条消息触发了安全审查。本条已自动改由 {to} 回答，本会话接下来也会继续用 {to}；想用回 Opus 5.5 请新开一个会话。";
++const REFUSAL_BOTH_NOTICE: &str = "⚠️ 这条消息触发了 Claude 的安全审查：Claude Opus 5.5 和自动改用的 {to} 都没有作答。请换个说法，或新开一个会话再试。";
 +/// 同一会话粘在备用模型上多久
 +const REFUSAL_STICKY_SECS: i64 = 6 * 3600;
 +const REFUSAL_STICKY_MAX: usize = 5000;
@@ -140,7 +140,7 @@ diff -ruN -x t base/src/kiro/provider.rs work/src/kiro/provider.rs
 +        let fb_model = self.token_manager.config().slot_refusal_fallback_model.clone();
 +        let refusal_on = orig_model == "claude-opus-5.5" && !fb_model.is_empty() && fb_model != orig_model;
 +        let conv = if refusal_on { conversation_id(request_body) } else { None };
-+        // 这个会话之前被安全审查拦过 ⇒ 直接用备用模型（同 Cursor：本会话继续用 4.8，新会话才回 5.5）
++        // 这个会话之前被安全审查拦过 ⇒ 直接用备用模型（同 Cursor：本会话继续用备用模型，新会话才回 5.5）
 +        let sticky_body = conv
 +            .as_deref()
 +            .filter(|c| self.refusal_sticky_hit(c))
@@ -227,7 +227,7 @@ diff -ruN -x t base/src/kiro/provider.rs work/src/kiro/provider.rs
      /// 空回复后用同号打官方 runtime 入口一次，判这个号是不是被上游限了。
      ///
      /// 🔴 10-25 误判（#3 justin 被冤退役）：旧版拿**用户那条请求原文**去探，敏感内容在任何号上都回
-@@ -1523,5 +1674,75 @@
+@@ -1523,5 +1674,76 @@
              .await;
          assert_eq!(got.key_alias, "cursor-alice");
          assert_eq!(got.key_hash, "h1");
@@ -242,9 +242,9 @@ diff -ruN -x t base/src/kiro/provider.rs work/src/kiro/provider.rs
 +
 +    #[test]
 +    fn rewrite_changes_current_and_history_model_only() {
-+        let out = rewrite_model_id(BODY, "claude-opus-5.5", "claude-opus-4.8").unwrap();
++        let out = rewrite_model_id(BODY, "claude-opus-5.5", "claude-opus-5").unwrap();
 +        assert!(!out.contains("claude-opus-5.5"));
-+        assert_eq!(out.matches("claude-opus-4.8").count(), 2);
++        assert_eq!(out.matches("\"claude-opus-5\"").count(), 2);
 +        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
 +        assert_eq!(v["conversationState"]["currentMessage"]["userInputMessage"]["content"], "hi");
 +        assert_eq!(v["profileArn"], "x");
@@ -297,15 +297,16 @@ diff -ruN -x t base/src/kiro/provider.rs work/src/kiro/provider.rs
 +
 +    #[test]
 +    fn notices_name_the_fallback_model() {
-+        let n = REFUSAL_SWITCH_NOTICE.replace("{to}", &model_display("claude-opus-4.8"));
-+        assert!(n.contains("Claude Opus 4.8") && n.contains("安全审查") && !n.contains("{to}"));
-+        let b = REFUSAL_BOTH_NOTICE.replace("{to}", &model_display("claude-opus-4.8"));
-+        assert!(b.contains("Claude Opus 4.8") && !b.contains("{to}"));
++        let n = REFUSAL_SWITCH_NOTICE.replace("{to}", &model_display("claude-opus-5"));
++        assert!(n.contains("改由 Claude Opus 5 回答") && n.contains("安全审查") && !n.contains("{to}"));
++        assert!(!n.contains("没有作答") && !n.contains("网络或服务故障"));
++        let b = REFUSAL_BOTH_NOTICE.replace("{to}", &model_display("claude-opus-5"));
++        assert!(b.contains("Claude Opus 5 都没有作答") && !b.contains("{to}"));
      }
  }
 diff -ruN -x t base/src/model/config.rs work/src/model/config.rs
 --- base/src/model/config.rs	2026-10-27 09:54:03
-+++ work/src/model/config.rs	2026-10-27 10:07:32
++++ work/src/model/config.rs	2026-10-27 22:27:47
 @@ -107,6 +107,10 @@
      #[serde(default = "default_true")]
      pub slot_restricted_probe: bool,
@@ -322,7 +323,7 @@ diff -ruN -x t base/src/model/config.rs work/src/model/config.rs
  }
  
 +fn default_slot_refusal_fallback_model() -> String {
-+    "claude-opus-4.8".to_string()
++    "claude-opus-5".to_string()
 +}
 +
  fn default_true() -> bool {

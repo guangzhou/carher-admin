@@ -62,7 +62,10 @@ DASHBOARD = "https://chat.auto-link.com.cn/myai"
 KEY_QUERY = "https://t83dfrspj4.feishu.cn/share/base/query/shrcnf5OElDguABGM3ZZDVoO3cb"
 # 本轮主推（用户 10-19 点名）。⚠️ 口头说的 opus-5.5 / sonnet-5.5 不是真名，真名是 claude-opus-5-5。
 HIGHLIGHT = {"kimi-k3", "deepseek-v4.1-flash", "claude-opus-5-5", "claude-sonnet-5-5",
-             "gpt-6.1-sol"}
+             "gpt-6.1-sol", "gpt-6.1-terra"}
+# 体验版：在名字后面挂一个小标签（10-27 用户：gpt-6.1-terra（experience））。
+# 只是展示标注，模型真名不变 ⇒ 门禁按真名比对，标签单独加在名字外面。
+EXPERIENCE = {"gpt-6.1-terra"}
 MODEL_TAG_COLOR = "green"
 # 出图名：Cursor 不调用，单独一类并默认折叠
 MEDIA = {"muse-image", "gpt-image-2", "gemini-image", "gemini-video", "gemini-music",
@@ -114,7 +117,8 @@ def _md(content: str, **kw) -> dict:
 
 
 def _tag(text: str, color: str) -> str:
-    return f"<text_tag color='{color}'>{text}</text_tag>"
+    tail = "<font color='grey'>（experience）</font>" if text in EXPERIENCE else ""
+    return f"<text_tag color='{color}'>{text}</text_tag>{tail}"
 
 
 def _block(bg: str, elements: list[dict], spacing: str = "8px", last: bool = False) -> dict:
@@ -209,8 +213,8 @@ def build_card(live: list[str]) -> dict:
         _md("后续只需一把 Cursor Key，即可覆盖以上全部模型，无需再单独申请和维护。"),
     ], spacing="4px"))
 
-    # ④ 自助查询（11:23 版样式）
-    elements.append(_md("**自助查询**　<font color='grey'>在终端或 IDE 对话框里直接输入</font>",
+    # ④ 自助查询（11:23 版样式；10-27 加「刷模型」成三条）
+    elements.append(_md("**自助查询**　<font color='grey'>在 Cursor / Codex / Claude Code 的对话框里直接发这几个字</font>",
                         margin="4px 0px 8px 0px"))
 
     def cmd_card(cmd: str, alias: str, desc: str) -> dict:
@@ -221,12 +225,14 @@ def build_card(live: list[str]) -> dict:
                 "elements": [_md(head), _md(f"<font color='grey'>{desc}</font>",
                                             text_size="notation")]}
 
+    # trisect：三列等宽；窄屏飞书会自动折行，不会横向溢出
     elements.append({
-        "tag": "column_set", "flex_mode": "bisect", "horizontal_spacing": "8px",
+        "tag": "column_set", "flex_mode": "trisect", "horizontal_spacing": "8px",
         "margin": "0px 0px 16px 0px",
         "columns": [
-            cmd_card("查余额", "cye", "当天总限额、已用额度，及高配模型（Opus 系列、gpt-6-astra）系列额度"),
-            cmd_card("测模型", "", "逐个验证这把 Key 下的模型当前是否可用"),
+            cmd_card("查余额", "cye", "今天用了多少、还剩多少；高配模型（Opus / Astra / Kimi-K3）单独一栏"),
+            cmd_card("测模型", "", "把你能用的模型逐个试一遍，哪个能用、哪个不通一目了然"),
+            cmd_card("刷模型", "", "按你的 Key 重新拉模型列表，新开通的出现、下线的消失"),
         ]})
 
     # ⑤ 按钮：一主两次
@@ -448,7 +454,7 @@ def gate(card: dict, blob: str, models: list[str]) -> str:
         return "含内部上游名"
     if f"{len(models)} 个模型" not in blob:
         return "header 数字不对"
-    for need in ("10 月底下线", "`查余额`", "`cye`", "`测模型`", ONECLICK, KEY_QUERY, DASHBOARD):
+    for need in ("10 月底下线", "`查余额`", "`cye`", "`测模型`", "`刷模型`", ONECLICK, KEY_QUERY, DASHBOARD):
         if need not in blob:
             return f"缺 {need}"
     if "<u>" in blob:

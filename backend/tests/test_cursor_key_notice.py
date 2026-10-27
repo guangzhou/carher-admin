@@ -32,7 +32,7 @@ def chips(card):
 # ------------------------------------------------------------ 定稿卡片
 
 def test_card_matches_the_version_user_signed_off():
-    # 10-19 用户确认的就是这张（11:17 骨架 + 11:23 自助查询 + 新看板链接）。
+    # 10-19 用户确认的骨架（11:17 + 11:23 自助查询 + 新看板链接）；10-27 加 terra（experience）和「刷模型」。
     # 改样式必须连夹具一起更新，并重新发给刘国现确认。
     assert nb.build_card(STD_MODELS) == FIXTURE["card"]
 
@@ -60,6 +60,18 @@ def test_header_count_is_per_person():
 def test_no_highlight_block_when_person_has_none():
     card = nb.build_card(["gpt-5.5", "grok-4.7", "glm-5.3-flash", "jev", "qwen3-coder-next"])
     assert "本次主推" not in json.dumps(card, ensure_ascii=False)
+
+
+def test_experience_label_only_on_terra_and_gate_still_matches_real_name():
+    blob = json.dumps(nb.build_card(STD_MODELS), ensure_ascii=False)
+    assert "gpt-6.1-terra</text_tag><font color='grey'>（experience）</font>" in blob
+    assert blob.count("（experience）") == blob.count("gpt-6.1-terra</text_tag>")
+
+
+def test_self_service_has_three_commands():
+    blob = json.dumps(nb.build_card(MAINSTREAM), ensure_ascii=False)
+    for c in ("`查余额`", "`cye`", "`测模型`", "`刷模型`"):
+        assert c in blob
 
 
 def test_media_models_collapsed():

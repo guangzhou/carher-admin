@@ -6,7 +6,8 @@ description: >-
   LiteLLM 侧 `kiro-slots-*` 组 / 兜底 / 重试 0 / 身份头 callback、按 key 切过去或切回、故障演练与回滚。
   Use when 用户说 "槽位 / 30891 / 新版 kiro admin"、"已封口 / 暂不接新人 / 冷备"、"把某些 key 切到新版 / 切回老版"、
   "老环境还有哪些 key"、"槽被禁用了用户会不会受影响"、"按 kiro 账户看用了什么模型多少 token"、
-  "用量对不上 / 次数对不上"、"30891 打不开"、"加个槽 / 减个槽 / 换出口"、"kiro 上 haiku-5.5"。
+  "用量对不上 / 次数对不上"、"30891 打不开"、"加个槽 / 减个槽 / 换出口"、"kiro 上 haiku-5.5"、
+  "opus-5.5 空回复 / 安全审查 / 被拦 / 自动换 opus-5 / 改备用模型 / 改提示文案"。
 ---
 
 # kiro.rs 槽位实例（0011）
@@ -23,7 +24,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 |---|---|
 | 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 Recreate，grace 300s），Admin `http://10.68.13.198:30891/admin`，adminApiKey 在实例自己的 `config.json`（和老实例不同）|
 | 老实例 | deploy `kiro-rs`（:30890，镜像 ctxwin）。只剩 `carher-hangzhou`、`claude-code-buyitian` 两把 key 主走它，另外是新实例的兜底 |
-| 镜像 | **现网 `slots46`**（10-27 17:20 北京 = slots45 + 卡片「额度用尽」改名「429 重试仍失败」并加悬停说明（它数的是撞 429 后 6 次重试仍失败报错给用户的请求，不是号额度用完）+「排队超时」悬停说明；回滚 `set image … slots45`，状态备份 `slots-pre-v2026.10.1-carher-slots43-20261027T171551`——目录名是撞号时取的，内容就是切 46 前的状态）。之前 `slots45`（10-27 14:30 北京 = slots43 + 0014 tool_use_id 规整：历史 id 含非法字符或 >64 字符被 Kiro 400 `Invalid tool use format` ⇒ 兜底 grok；回滚 `set image … slots43`，状态备份 `slots-pre-v2026.10.1-carher-slots45-20261027T143038`）。之前 `slots43`（10-27 10:30 = slots42 + 0013 opus-5.5 安全审查自动换 4.8；回滚 `set image … slots42`，状态备份 `slots-pre-v2026.10.1-carher-slots43-20261027T103017`）。之前 **`slots42`**（10-27 01:16 滚动上线，ready 后端全程不为 0、34 请求 0 失败；= slots41 + 告警只看 24h/可清除 + 接新人开关 + 专属 key 槽；回滚 `set image … slots41` 即可，两版探针相同；切前备份 `198:~/kiro-deploy/backup/slots-pre-v2026.10.1-carher-slots42-20261027T011640/`）。slots41（10-26 19:25 上线 = slots40 无缝换版 + 重新分配 / 槽位权重 / 手动挪 key，sha `cbef9f8e…`）。🔴 回滚到 slots31 **不能 `set image`**：slots31 没有 `/readyz`，新 manifest 的 readiness 永远不过 ⇒ 要 `kubectl replace -f 198:~/kiro-rs-slots-deploy.pre-slots41.json`（旧 Recreate + TCP 探针整份 deploy），切前状态文件在 `198:~/kiro-deploy/backup/slots-pre-v2026.10.1-carher-slots41-20261026T192216/`。`kiro-rs:v2026.10.1-carher-slots40`（10-26，无缝换版：零断流；slots31 空回复明细；回滚 tag slots31）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
+| 镜像 | **现网 `slots47`**（10-27 22:48 北京 = slots46 + 0013 改版：安全审查提示去掉「没有作答（不是网络或服务故障）」、默认文案按备用模型名；**现网 `slotRefusalFallbackModel=claude-opus-5`**；回滚 `set image … slots46`，状态备份 `slots-pre-v2026.10.1-carher-slots47-20261027T224743`，配置备份 `config-pre-opus5-fallback-20261027T224711`）。之前 `slots46`（10-27 17:20 北京 = slots45 + 卡片「额度用尽」改名「429 重试仍失败」并加悬停说明（它数的是撞 429 后 6 次重试仍失败报错给用户的请求，不是号额度用完）+「排队超时」悬停说明；回滚 `set image … slots45`，状态备份 `slots-pre-v2026.10.1-carher-slots43-20261027T171551`——目录名是撞号时取的，内容就是切 46 前的状态）。之前 `slots45`（10-27 14:30 北京 = slots43 + 0014 tool_use_id 规整：历史 id 含非法字符或 >64 字符被 Kiro 400 `Invalid tool use format` ⇒ 兜底 grok；回滚 `set image … slots43`，状态备份 `slots-pre-v2026.10.1-carher-slots45-20261027T143038`）。之前 `slots43`（10-27 10:30 = slots42 + 0013 opus-5.5 安全审查自动换 4.8；回滚 `set image … slots42`，状态备份 `slots-pre-v2026.10.1-carher-slots43-20261027T103017`）。之前 **`slots42`**（10-27 01:16 滚动上线，ready 后端全程不为 0、34 请求 0 失败；= slots41 + 告警只看 24h/可清除 + 接新人开关 + 专属 key 槽；回滚 `set image … slots41` 即可，两版探针相同；切前备份 `198:~/kiro-deploy/backup/slots-pre-v2026.10.1-carher-slots42-20261027T011640/`）。slots41（10-26 19:25 上线 = slots40 无缝换版 + 重新分配 / 槽位权重 / 手动挪 key，sha `cbef9f8e…`）。🔴 回滚到 slots31 **不能 `set image`**：slots31 没有 `/readyz`，新 manifest 的 readiness 永远不过 ⇒ 要 `kubectl replace -f 198:~/kiro-rs-slots-deploy.pre-slots41.json`（旧 Recreate + TCP 探针整份 deploy），切前状态文件在 `198:~/kiro-deploy/backup/slots-pre-v2026.10.1-carher-slots41-20261026T192216/`。`kiro-rs:v2026.10.1-carher-slots40`（10-26，无缝换版：零断流；slots31 空回复明细；回滚 tag slots31）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
 | manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、secret `kiro-rs-slots-bootstrap`）|
 | 槽 | 生效 4 个：`jp-172.235.204.67`（经 243 代理）、`sg-47.84.112.136`、`sg-47.84.85.100`、`sg-47.84.101.218`（10-27 加）；停用 `sg-47.236.200.98`；出口配在 `config.json.slots[]`，全局 `proxyUrl=null` |
 | 并发参数 | 起步 16 / 最小 2 / 最大 24 / 自动调；排队超时 120s；「暂不接新人」倍数 1.5 |
@@ -38,10 +39,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 - **429**：先按官方退避 + retry-after 重试；**402 额度用尽 / 被限（restricted）才退役换号**，冷备里挑一个顶上（要 opus 的槽只挑能跑 opus 的号）。别的错误不退役。
 - **判「号被限」**（opus 空回复后）：用同号、号**自己的** profileArn 打 runtime 入口，发**固定中性问题**（不带用户内容）。中性问题也 CONTENT_FILTERED ⇒ 被限换号；正常出字 ⇒ 号没事；403/超时 ⇒ 测不了、不换。
   🔴 slots24 及以前拿**用户原文**去探 ⇒ 敏感内容在任何号上都 CONTENT_FILTERED ⇒ 10-25 #3 justin 被冤退役；且用占位 ARN ⇒ social 号恒 403 永远测不出。slots25 修。
-- **opus-5.5 安全审查（slots43 起，补丁 0013）**：opus-5.5 碰到敏感内容时上游不报错、只回 200 + 零内容。被限探测说号没事 ⇒ 同槽同号把整个请求（当前消息 + 历史）的 modelId 改成 `config.json.slotRefusalFallbackModel`（代码默认 `claude-opus-4.8`；**现网 config.json 配的是 `claude-opus-5`**（10-27 用户定，slots47 起）；空串 = 关闭）重答，回答**末尾**加一段提示「Opus 5.5 对这条消息触发了安全审查。本条已自动改由 Claude Opus 5 回答，本会话接下来也会继续用；想用回 5.5 请新开会话」（放末尾是因为放开头会排到 thinking 块前面）。同一 conversationId 之后 6 小时直接走备用模型、不再提示（内存，重启清空，同 Cursor）。备用模型也空 ⇒ 回一段「两个都没作答，请换说法或新开会话」，不再给空白。只认上游 modelId == `claude-opus-5.5`；号被限仍走原来的换号。空回复明细里原因记 `refusal_switched_model` / `refusal_fallback_also_empty`（这两种都不算「空回复给了用户」）。
-  - 回归：隔离实例（冷备号、假 refreshToken）真敏感 prompt 9 例新版 9/9、slots42 对照 3/9；mock 上游覆盖「4.8 也空」「号被限换号」「非 opus 不动」；经 LiteLLM（生产镜像）anthropic / chat 流式非流式 / responses 4/4；真 Claude Code 2.1.310 敏感题出提示、正常 Write+Edit 3 轮不受影响。
-  - opus-5 作备用的实测（10-27）：直打敏感题 22/22 有回答；同会话紧跟 5.5 被拦后 10/10 有回答；但隔离 1 次 + 现网 1 次换过去后 opus-5 也空（偶发，原因未查），这时用户看到「两个都没作答」提示。改配置只改 PVC 里 config.json，**要重启进程才生效**（换镜像顺带），备份 `198:~/kiro-deploy/backup/config-pre-opus5-fallback-*`。
-  - 🔴 判断空回复是不是这个原因：SpendLogs 里表现为 `completion_tokens=1` + 耗时 50~100s + success（不是 0，按 0 查查不到）。
+- **opus-5.5 安全审查**：空回复且号没被限 ⇒ 自动换备用模型重答 + 提示，见 §2.1。
 - **槽停用 / 删除**：在 Admin「槽位设置」关开关 ⇒ 该槽的人在下一个请求自动换到别的槽（`SLOT_GONE` ⇒ 重选），在途的跑完。删除只允许先停用。8 个停用分支都有单测。
 - **冷备数** = 启用 − 在槽 − 退役（只算 quota/restricted）。手动在 Admin 启用一个号会清掉它的退役标记。
 - **权重（slots41 起）**：`config.json.slots[].weight` 1~10，默认 5，界面「设置 → 槽位配置」改。作用三处：新人分配、封口判定（用量 ÷ 权重）、在途上限（自动值 × 权重/5，手动锁定值不缩放）。**改权重不自动挪已绑的人**，要挪点「重新分配用户」。
@@ -56,6 +54,43 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
   - 这两类槽不参与「重新分配」（不往里挪、也不往外挪），预览里会写「不参与」。
 - **首字耗时**：卡片「首字 Xs」= 近 30 分钟「发出 → 首个有内容事件」平均，跟 prompt 大小和模型强相关，只作参考，没参与调度。
 - **槽全停** ⇒ 529，不回老路径（老路径同一出口会和槽撞 IP）；LiteLLM 层兜底到老实例。
+
+## 2.1 opus-5.5 安全审查 ⇒ 自动换备用模型（补丁 0013，slots43 起）
+
+**一句话**：opus-5.5 碰敏感内容（如「帮我改某平台账号密码」）上游不报错，只回 200 + 零内容，用户看到空白、以为网络或模型坏了。现在改成：同槽同号换备用模型重答，回答末尾说明换过模型。
+
+| 情况 | 用户看到 |
+|---|---|
+| 5.5 空、号没被限、备用答了 | 正文 +「⚠️ Claude Opus 5.5 对这条消息触发了安全审查。本条已自动改由 Claude Opus 5 回答，本会话接下来也会继续用 Claude Opus 5；想用回 Opus 5.5 请新开一个会话。」 |
+| 同一会话后续请求（6 小时内） | 直接走备用模型，**不再提示**（同 Cursor：本会话继续用，新会话回 5.5） |
+| 备用模型也空 | 「⚠️ 这条消息触发了 Claude 的安全审查：Claude Opus 5.5 和自动改用的 Claude Opus 5 都没有作答。请换个说法，或新开一个会话再试。」 |
+| 号被限（中性探测也被拦） | 照旧退役换号，**不换模型** |
+| 非 opus-5.5 的空回复 | 照旧原样返回，不动 |
+
+- **配置**：`config.json.slotRefusalFallbackModel`（上游 modelId，点号写法）。代码默认 `claude-opus-4.8`；**现网配的是 `claude-opus-5`**（10-27 用户定）。空串 = 关闭。
+  🔴 改它 = 改 PVC 里的 config.json（先备份到 `198:~/kiro-deploy/backup/config-pre-*`），**进程只在启动时读 ⇒ 要换镜像/滚动重启才生效**，没有 Admin API。
+- **文案**：在 `provider.rs` 的 `REFUSAL_SWITCH_NOTICE` / `REFUSAL_BOTH_NOTICE`，`{to}` 由 `model_display()` 换成展示名（新备用模型要在那里加一行，否则显示原始 id）。
+  提示放**末尾**：放开头会排到 thinking 块前面，客户端解析错位。
+- **实现要点**：只认上游 modelId == `claude-opus-5.5`；`rewrite_model_id` 把当前消息 + 历史里所有该 modelId 一起改；粘住按 `conversationId`（Claude Code 的 session id；没有就是每请求新 uuid ⇒ 不粘），内存表 6h/5000 条，**重启清空**。
+- **Admin 空回复明细**：原因 `refusal_switched_model`（已换模型答上）/ `refusal_fallback_also_empty`（备用也空，已提示）——这两种都不计入「空回复给了用户」。
+- **为什么在 kiro.rs 出字，不用 Claude Code 自带的**：Claude Code 认 `stop_reason:"refusal"` + `stop_details.category` 会提示并按类别切 opus-4-8，但 Kiro 上游根本不给这些字段；而且 Cursor / OpenAI chat / responses 客户端认不了 Anthropic 的 refusal。只有把提示写进正文，四种线型都看得见。
+
+### 量具
+
+- 🔴 **SpendLogs 里这种空回复是 `completion_tokens=1`**（+ success + 耗时 50~100s），不是 0；按 `=0` 查一条都查不到。
+- 现场复现：直打 30891 `/v1/messages` 不带身份头（不写绑定），敏感 prompt 见 `scripts/kiro-upstream-probe.py` 的 `SENSITIVE`。🔴 shell 里把「模型 场景」拼成一个 `$a` 传参会变成一个参数，kiro.rs 会**静默接受**名叫 `claude-opus-5-5 sensitive` 的模型并回正常内容 ⇒ 假阴性。
+- 实测（10-27）：opus-5 直打敏感题 22/22、同会话紧跟 5.5 被拦后 10/10 有回答；opus-4.8 10/10；但换过去后 opus-5 也空出现过 2 次（偶发，原因未查）。
+
+### 上线前回归（一条命令）
+
+```bash
+scripts/kiro-slots-refusal/regress.sh v2026.10.1-carher-slotsNN --control <现网tag> --mock --litellm
+```
+
+隔离 ns + 冷备号（refreshToken 换假值）跑：真敏感 prompt × 流式/非流式/thinking//cc 缓冲 + 阴性（中性、sonnet）+ 会话粘住；`--control` 旧版须在敏感用例上失败；`--mock` 测「备用也空 / 号被限 / 非 opus」；`--litellm` 起生产同镜像的一次性 LiteLLM 测四种线型。退出自动清理。
+- 🔴 冷备号要**非 FREE**：`KIRO FREE` 号被 opus 选号过滤 ⇒ 隔离实例全 529「没有可用槽位」（10-27 #94），LiteLLM 那层再变 500。脚本已排除；单号也会被用到额度用尽退役（#74），所以每次现挑。
+- 🔴 mock 判「发没发备用模型」要整行匹配：`model=claude-opus-5` 是 `model=claude-opus-5.5` 的前缀。
+- 真 Claude Code 端到端（本机）：`CLAUDE_CONFIG_DIR=<空目录>` 且目录里 `settings.json` 写 `ANTHROPIC_BASE_URL/API_KEY`（🔴 `~/.claude/settings.json` 的 env 会盖掉命令行 env ⇒ 打到生产网关 403）；`-p "<prompt>"` 放第一个（🔴 `--disallowedTools A B` 会把后面的 prompt 吞成工具名）。正常任务（Write+Edit）也要跑一遍确认没多出提示。
 
 ## 3. 换镜像
 

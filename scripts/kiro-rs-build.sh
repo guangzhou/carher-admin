@@ -46,7 +46,7 @@ ssh "$HOST" "rm -rf /tmp/kiro-patches && mkdir /tmp/kiro-patches"
 scp -q "${PATCHES[@]/#/$PATCH_DIR/}" "$HOST:/tmp/kiro-patches/"
 
 # 远端命令行是 ssh 拼起来再交给 shell 的 ⇒ 带空格的值必须自己加引号（文件名只含 [0-9a-z.-]，单引号安全）
-ssh "$HOST" "REF='$REF' TAG='$TAG' SKIP_BUILD='$SKIP_BUILD' PATCHES='${PATCHES[*]}' bash -s" <<'EOF'
+ssh "$HOST" "REF='$REF' TAG='$TAG' SKIP_BUILD='$SKIP_BUILD' KIRO_BUILD_OVERWRITE='${KIRO_BUILD_OVERWRITE:-0}' PATCHES='${PATCHES[*]}' bash -s" <<'EOF'
 set -euo pipefail
 B=/Data/kiro-build; cd $B
 fail() { echo "🔴 STOP: $*"; exit 1; }
@@ -98,6 +98,11 @@ rm -rf /tmp/kiro-chain; echo "   ✅ 逐字相同"
 [ "$SKIP_BUILD" = 1 ] && { echo "== --skip-build，到此为止"; exit 0; }
 
 echo "== 5. 构建 kiro-rs:${TAG}（约 4~5 分钟）"
+# 🔴 10-27 两个会话各自从自己的工作树往上数版本号，撞了两次（slots43、slots44）：后建的覆盖了别人
+# 已上线 tag 的 tarball，回滚目标就指向了错的镜像。tag 已有 tarball 就停，要覆盖显式 KIRO_BUILD_OVERWRITE=1。
+if [ -e "kiro-rs-$TAG.tar.gz" ] && [ "${KIRO_BUILD_OVERWRITE:-0}" != 1 ]; then
+  fail "188 上已有 kiro-rs-$TAG.tar.gz（$(date -r kiro-rs-$TAG.tar.gz '+%m-%d %H:%M')，可能是别的会话的版本）。现有最大: $(ls kiro-rs-v*.tar.gz | sort -V | tail -1)。换个新号，或确认是自己的再 KIRO_BUILD_OVERWRITE=1"
+fi
 rm -rf kiro-up/admin-ui/dist
 ( cd kiro-up && docker build -q -t kiro-rs:$TAG . ) >/dev/null || fail "docker build 失败"
 docker save kiro-rs:$TAG | gzip -1 > kiro-rs-$TAG.tar.gz

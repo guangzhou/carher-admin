@@ -102,7 +102,7 @@
       },
       {
        "tag": "markdown",
-       "content": "<text_tag color='green'>claude-opus-5-5</text_tag>  <text_tag color='green'>claude-sonnet-5-5</text_tag>  <text_tag color='green'>gpt-6.1-sol</text_tag>  <text_tag color='green'>gpt-6.1-terra</text_tag><font color='grey'>（experience）</font>  <text_tag color='green'>deepseek-v4.1-flash</text_tag>  <text_tag color='green'>kimi-k3</text_tag>"
+       "content": "<text_tag color='green'>claude-opus-5-5</text_tag>  <text_tag color='green'>claude-sonnet-5-5</text_tag>  <text_tag color='green'>gpt-6.1-sol</text_tag>  <text_tag color='orange'>gpt-6.1-terra</text_tag><font color='orange'>（NEW · experience）</font>"
       }
      ]
     },
@@ -157,7 +157,7 @@
         },
         {
          "tag": "markdown",
-         "content": "<text_tag color='green'>gpt-6.1-sol</text_tag> <text_tag color='green'>gpt-6.1-terra</text_tag><font color='grey'>（experience）</font> <text_tag color='neutral'>gpt-6-astra</text_tag> <text_tag color='neutral'>gpt-6-luna</text_tag> <text_tag color='neutral'>gpt-6-sol</text_tag> <text_tag color='neutral'>gpt-5.6-luna</text_tag> <text_tag color='neutral'>gpt-5.6-sol</text_tag> <text_tag color='neutral'>gpt-5.6-terra</text_tag> <text_tag color='neutral'>gpt-5.5</text_tag> <text_tag color='neutral'>codex-auto-review</text_tag> <text_tag color='neutral'>gpt-reserve</text_tag>"
+         "content": "<text_tag color='green'>gpt-6.1-sol</text_tag> <text_tag color='orange'>gpt-6.1-terra</text_tag><font color='orange'>（NEW · experience）</font> <text_tag color='neutral'>gpt-6-astra</text_tag> <text_tag color='neutral'>gpt-6-luna</text_tag> <text_tag color='neutral'>gpt-6-sol</text_tag> <text_tag color='neutral'>gpt-5.6-luna</text_tag> <text_tag color='neutral'>gpt-5.6-sol</text_tag> <text_tag color='neutral'>gpt-5.6-terra</text_tag> <text_tag color='neutral'>gpt-5.5</text_tag> <text_tag color='neutral'>codex-auto-review</text_tag> <text_tag color='neutral'>gpt-reserve</text_tag>"
         }
        ]
       },
@@ -217,7 +217,7 @@
         },
         {
          "tag": "markdown",
-         "content": "<text_tag color='green'>deepseek-v4.1-flash</text_tag> <text_tag color='green'>kimi-k3</text_tag> <text_tag color='neutral'>glm-5.3-flash</text_tag> <text_tag color='neutral'>qwen3-coder-next</text_tag> <text_tag color='neutral'>kimi-k2.7-code</text_tag> <text_tag color='neutral'>muse-spark</text_tag>"
+         "content": "<text_tag color='neutral'>glm-5.3-flash</text_tag> <text_tag color='neutral'>deepseek-v4.1-flash</text_tag> <text_tag color='neutral'>kimi-k3</text_tag> <text_tag color='neutral'>qwen3-coder-next</text_tag> <text_tag color='neutral'>kimi-k2.7-code</text_tag> <text_tag color='neutral'>muse-spark</text_tag>"
         }
        ]
       },

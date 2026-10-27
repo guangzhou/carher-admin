@@ -25,7 +25,7 @@ MAINSTREAM = [m for m in STD_MODELS
 
 
 def chips(card):
-    return re.findall(r"<text_tag color='(?:green|neutral)'>([^<]+)</text_tag>",
+    return re.findall(r"<text_tag color='(?:green|neutral|orange)'>([^<]+)</text_tag>",
                       json.dumps(card, ensure_ascii=False))
 
 
@@ -64,8 +64,17 @@ def test_no_highlight_block_when_person_has_none():
 
 def test_experience_label_only_on_terra_and_gate_still_matches_real_name():
     blob = json.dumps(nb.build_card(STD_MODELS), ensure_ascii=False)
-    assert "gpt-6.1-terra</text_tag><font color='grey'>（experience）</font>" in blob
-    assert blob.count("（experience）") == blob.count("gpt-6.1-terra</text_tag>")
+    assert "<text_tag color='orange'>gpt-6.1-terra</text_tag><font color='orange'>（NEW · experience）</font>" in blob
+    assert blob.count("NEW · experience") == blob.count("gpt-6.1-terra</text_tag>")
+    # 体验版不能再是绿色（和主推混在一起看不出是新的）
+    assert "<text_tag color='green'>gpt-6.1-terra" not in blob
+
+
+def test_deepseek_and_kimi_are_not_highlighted():
+    blob = json.dumps(nb.build_card(STD_MODELS), ensure_ascii=False)
+    for m in ("deepseek-v4.1-flash", "kimi-k3"):
+        assert f"<text_tag color='neutral'>{m}</text_tag>" in blob
+        assert f"<text_tag color='green'>{m}</text_tag>" not in blob
 
 
 def test_self_service_has_three_commands():

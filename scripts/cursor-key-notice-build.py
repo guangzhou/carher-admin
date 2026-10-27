@@ -61,8 +61,8 @@ ONECLICK = "https://chat.auto-link.com.cn/oneclick/"
 DASHBOARD = "https://chat.auto-link.com.cn/myai"
 KEY_QUERY = "https://t83dfrspj4.feishu.cn/share/base/query/shrcnf5OElDguABGM3ZZDVoO3cb"
 # 本轮主推（用户 10-19 点名）。⚠️ 口头说的 opus-5.5 / sonnet-5.5 不是真名，真名是 claude-opus-5-5。
-HIGHLIGHT = {"kimi-k3", "deepseek-v4.1-flash", "claude-opus-5-5", "claude-sonnet-5-5",
-             "gpt-6.1-sol", "gpt-6.1-terra"}
+# 10-27 用户：deepseek-v4.1-flash、kimi-k3 不再算主推。
+HIGHLIGHT = {"claude-opus-5-5", "claude-sonnet-5-5", "gpt-6.1-sol", "gpt-6.1-terra"}
 # 体验版：在名字后面挂一个小标签（10-27 用户：gpt-6.1-terra（experience））。
 # 只是展示标注，模型真名不变 ⇒ 门禁按真名比对，标签单独加在名字外面。
 EXPERIENCE = {"gpt-6.1-terra"}
@@ -116,9 +116,15 @@ def _md(content: str, **kw) -> dict:
     return {"tag": "markdown", "content": content, **kw}
 
 
+NEW_TAG_COLOR = "orange"   # 新上的体验模型换一个色，和绿色主推区分开（10-27 用户）
+
+
 def _tag(text: str, color: str) -> str:
-    tail = "<font color='grey'>（experience）</font>" if text in EXPERIENCE else ""
-    return f"<text_tag color='{color}'>{text}</text_tag>{tail}"
+    if text in EXPERIENCE:
+        # 体验版无论在主推里还是在清单里，一律橙色标签 + 「NEW · experience」小字
+        return (f"<text_tag color='{NEW_TAG_COLOR}'>{text}</text_tag>"
+                f"<font color='orange'>（NEW · experience）</font>")
+    return f"<text_tag color='{color}'>{text}</text_tag>"
 
 
 def _block(bg: str, elements: list[dict], spacing: str = "8px", last: bool = False) -> dict:
@@ -447,7 +453,7 @@ def gate(card: dict, blob: str, models: list[str]) -> str:
     """每张卡发出前必过。返回空串 = 通过。"""
     if card.get("schema") != "2.0":
         return "不是 schema 2.0"
-    chips = re.findall(r"<text_tag color='(?:green|neutral)'>([^<]+)</text_tag>", blob)
+    chips = re.findall(r"<text_tag color='(?:green|neutral|orange)'>([^<]+)</text_tag>", blob)
     if set(chips) != set(models):
         return f"模型集合与本人 key 不符（多 {sorted(set(chips)-set(models))} 少 {sorted(set(models)-set(chips))}）"
     if any(m.startswith(INTERNAL_PREFIXES) for m in chips):

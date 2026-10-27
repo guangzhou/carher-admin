@@ -54,7 +54,7 @@ python3 scripts/sync-lark-key-models.py --with-limits --apply    # 真写（三�
 | 列 | 来源 |
 |---|---|
 | `每日预算` | key 的 `max_budget`（LiteLLM 原生每日总额；无上限=空） |
-| `高配额度($/天)` | Opus 系列 + gpt-6-astra 共用额度：`cursor-*` 取 `metadata.budget_family_overrides.premium`，否则 `max_budget × 0.5`；非 cursor key 留空（没有高配桶） |
+| `高配额度($/天)` | Opus 系列 + gpt-6-astra + kimi-k3 共用额度：`cursor-*` 取 `metadata.budget_family_overrides.premium`，否则 `max_budget × 0.5`；非 cursor key 留空（没有高配桶） |
 
 规则写死在脚本 `PREMIUM_PREFIXES/PREMIUM_RATIO`，与 `budget_notice.py` 同源；改执法规则时两处一起改。
 ⚠️ 10-15 首刷前「每日预算」只有 149 行有值，其中 83 行是**过时的手填值**（如 claude-code-* 填 200、
@@ -77,10 +77,46 @@ python3 scripts/sync-lark-key-models.py --with-limits --apply    # 真写（三�
    列出来由人决定。
 3. **不排除 blocked 的行**。模型列照常刷 —— 它记录的是白名单内容，与能不能用无关。
 
+## 按部门圈人：两列部门口径，且 `部门` 那列是废列（2026-10-08 实测）
+
+用户说「把 X 部门的 key 怎么怎么样」时，部门信息在**两列**里，覆盖面不同：
+
+| 列 | 类型 | 选项数 | 说明 |
+|---|---|---|---|
+| `姓名.部门` | MultiSelect（通讯录带出） | 74 | **主口径**，451/1401 行有值 |
+| `部门名称` | MultiSelect | 110 | 另一套口径，含公司名/「12」这类脏值 |
+| `部门` | Text | — | ⛔ **废列**，1401 行里只有 2 行值是「公共Key」 |
+
+⇒ 圈人要**两列取并集**（`姓名.部门` ∪ `部门名称`），只看一列会漏：10-08「内审部」
+在两列都有、而 huangzhiyuan 的 `部门名称` 是空的，只查 `部门名称` 就会漏掉他 2 把 key。
+
+🔴 **部门名在表里查不到时，不许自己找个近似的替上。** 10-08 用户要「HR 和财务部及内审部」，
+两列 74+110 个选项里**没有任何 HR/人力资源口径**，全表 1401 行搜
+「人力/人事/招聘/薪酬」**零命中** ⇒ 正确处置是**把这一项挂起来问用户**，
+而不是拿「综合服务部」「办公室」之类去猜。
+⚠️ `grep -i hr` 会命中 **723 行**，全是 `ant`**`hr`**`opic` —— 这是假命中，别拿它当"HR 存在"的证据。
+
+⛔ 通讯录 `GET /contact/v3/departments/search` **不吃关键字**，传 `query` 报
+`99992357 ... not a valid {open_department_id}`，别指望用它反查部门是否存在。
+
+### view 的筛选条件要现读，别信 URL 里的 view 名
+
+用户贴的链接带 `?view=xxx`，那个 view 可能自带筛选（和他的意图无关）。先读：
+
+```bash
+lark-cli api GET /open-apis/bitable/v1/apps/<base>/tables/<tbl>/views/<view_id>
+# property.filter_info.conditions 里的 field_id + value（选项 id）要拿 fields 接口翻成名字
+```
+
+10-08 第一个 view `vewcwvKeEo` 的筛选是「`姓名.部门` ∈ {AI Infra部, AI 产品部, AI 算法部, AI 工程部} 且 账户类型=Cursor」，
+跟「HR/财务/内审」毫无关系；第二个 `vewylryqse` 是「全表格」无筛选。
+**筛选条件里的 value 是选项 id（如 `opt3uIUoOo`），必须拿 fields 接口的 `property.options` 翻译**，
+否则读不出它在筛什么。
+
 ## 🔴 白名单里有这个名 ≠ 这个名真能用
 
 这一列表达的只是「允许请求哪些名字」。缺 alias 目标会 400、同名组挂死会假红。要判
-**真能不能用**，走 keyprobe `http://10.68.13.198:30920/` 真打，或
+**真能不能用**，走 keyprobe `https://chat.auto-link.com.cn/keyprobe/` 真打，或
 skill `litellm-198-key-allowlist` 的行为层回归。别拿这一列当可用性结论。
 
 ## 尺子自检（每轮都做）

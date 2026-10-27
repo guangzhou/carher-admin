@@ -89,6 +89,12 @@ for raw in r:
         txt.append(ev.get("delta", ""))
     if ev.get("type") == "response.completed":
         usage = ev["response"].get("usage")
+    # 2026-10-27 gpt-6.1-terra：HTTP 200 里夹着 response.failed（code=invalid_prompt），
+    # 不认它就被算成「200 空流」。单列出来，别和瞬态节流混。
+    if ev.get("type") == "response.failed":
+        code = ((ev.get("response") or {}).get("error") or {}).get("code") or "failed"
+        print("RESULT\t%s\tFAILED200\t%.1f\t%s" % (model, time.time() - t, code))
+        raise SystemExit(0)
 out = "".join(txt)
 print("RESULT\t%s\t200\t%.1f\t%s|usage=%s" % (model, time.time() - t, out[:60].replace("\t", " "), bool(usage)))
 '''
@@ -133,6 +139,10 @@ def classify(status, body):
     if status == "200":
         # 有回显 = 活；空流 = 瞬态节流，调用方要复打
         return "OK" if body.split("|")[0].strip() else "EMPTY200"
+    if status == "FAILED200":
+        # 200 + response.failed。invalid_prompt 在 terra 上同号同 prompt 时有时无，
+        # 阳性对照不中 ⇒ 是号×模型的组合，不是号死、也不是瞬态空流
+        return "INVALID_PROMPT" if body.strip() == "invalid_prompt" else "FAILED200"
     if status == "HTTP404":
         return "404"          # model_not_found —— 付费号拿不到这个名
     if status == "HTTP400":

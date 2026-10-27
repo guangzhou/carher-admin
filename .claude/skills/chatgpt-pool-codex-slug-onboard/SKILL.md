@@ -180,6 +180,11 @@ ssh cltx@10.68.13.198 'python3 ~/pool-add-<sid>.py --slug gpt-6-sol \
     --targets ~/sol-targets.txt --in-cost 2e-06 --out-cost 1e-05 --apply'
 ```
 
+有缓存价的模型建组时用 `--extra-cost` 一起写（可重复，双写 litellm_params+model_info），
+例：gpt-6.1-terra（2026-10-27）`--extra-cost cache_read_input_token_cost=5e-08
+--extra-cost cache_creation_input_token_cost=1.25e-06 --extra-cost cache_read_input_token_cost_above_272k_tokens=1e-07`。
+⛔ 没有的档位别写 0（字面 0 = 按免费计）。
+
 组名默认 `chatgpt-<slug>`，行 id `chatgpt-acct-<N>-<slug>`。四个字段一个都不能漏：
 
 | 字段 | 漏了会怎样 |

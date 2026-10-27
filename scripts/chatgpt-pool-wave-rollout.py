@@ -76,6 +76,11 @@ for raw in r:
         continue
     if ev.get("type") == "response.output_text.delta":
         txt.append(ev.get("delta") or "")
+    elif ev.get("type") == "response.failed":
+        # 200 里夹的失败（gpt-6.1-terra 上的 invalid_prompt），别读成空流
+        code = ((ev.get("response") or {}).get("error") or {}).get("code") or "failed"
+        print("RESULT\t%s\tFAILED200\t\t%s" % (model, code))
+        raise SystemExit(0)
     elif ev.get("type") == "response.completed":
         for it in (ev.get("response") or {}).get("output") or []:
             for c in it.get("content") or []:
@@ -128,7 +133,12 @@ def probe(acct, ns, sudo, models, nonce, remote, expect_names):
             mm = RESULT_RE.match(line)
             if mm and mm.group(1) == m:
                 st, body = mm.group(2), mm.group(4)
-                got = ("OK" if body.strip() == "YES" else "EMPTY200") if st == "200" else st
+                if st == "200":
+                    got = "OK" if body.strip() == "YES" else "EMPTY200"
+                elif st == "FAILED200":
+                    got = "INVALID_PROMPT" if body.strip() == "invalid_prompt" else "FAILED200"
+                else:
+                    got = st
         res[m] = got or "NOPARSE"
     return acct, res, cnt
 

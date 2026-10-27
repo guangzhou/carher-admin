@@ -49,10 +49,10 @@ def sh(cmd):
     return r.stdout.strip()
 
 
-def build_row(acct, group, slug, ns, api_key, in_cost, out_cost, max_in, max_out):
+def build_row(acct, group, slug, ns, api_key, in_cost, out_cost, max_in, max_out, extra_cost=None):
     """一行 deployment。形状对齐现有 chatgpt-gpt-6-astra 族，逐字段照抄，别自创。"""
     mid = "chatgpt-acct-%s-%s" % (acct, slug)
-    return mid, {
+    row = {
         "model_name": group,
         "litellm_params": {
             # 🔴 这里是 openai/<组名>，不是 openai/<slug>。acct pod 内部才把组名翻成
@@ -73,6 +73,19 @@ def build_row(acct, group, slug, ns, api_key, in_cost, out_cost, max_in, max_out
             "output_cost_per_token": out_cost,
         },
     }
+    # 缓存价等附加计费字段：计费只读 litellm_params，model_info 同写便于工具读。
+    # 2026-10-27 gpt-6.1-terra 起建组时就写，免得事后 patch 还要重启 proxy。
+    for k, v in (extra_cost or {}).items():
+        row["litellm_params"][k] = v
+        row["model_info"][k] = v
+    return mid, row
+
+
+def parse_extra_cost(spec):
+    k, sep, v = spec.partition("=")
+    if not sep or "cost" not in k:
+        raise argparse.ArgumentTypeError("want <cost_field>=<float>, got %r" % spec)
+    return k, float(v)
 
 
 def main():
@@ -87,6 +100,9 @@ def main():
     ap.add_argument("--max-in", type=int, default=872000,
                     help="上游 max_context_window。⛔ 别填 10000000，那是把闸门关掉")
     ap.add_argument("--max-out", type=int, default=128000)
+    ap.add_argument("--extra-cost", action="append", default=[], type=parse_extra_cost,
+                    help="附加计费字段，可重复，如 cache_read_input_token_cost=5e-08。"
+                         "⛔ 没有的档位别写 0（字面 0 = 按免费计）")
     ap.add_argument("--ns", default=NS_DEFAULT)
     ap.add_argument("--proxy", default=PROXY_DEFAULT)
     ap.add_argument("--apply", action="store_true")
@@ -118,10 +134,16 @@ def main():
     accts = [l.strip() for l in open(args.targets) if l.strip() and not l.startswith("#")]
     if not accts:
         sys.exit("targets 为空 —— survey 说 0 个可用就不该建组")
+    # 2026-10-05:targets 写成 `acct-207` ⇒ 建出 chatgpt-acct-acct-207-*,api_base 指向不存在的 svc,
+    # 脚本照报 added=1。targets 只收裸号。
+    badfmt = [a for a in accts if not a.isdigit()]
+    if badfmt:
+        sys.exit("🔴 targets 只收裸号(207),不收 %s" % badfmt[:3])
 
     def row(a):
         return build_row(a, group, args.slug, args.ns, ak,
-                         args.in_cost, args.out_cost, args.max_in, args.max_out)
+                         args.in_cost, args.out_cost, args.max_in, args.max_out,
+                         dict(args.extra_cost))
 
     existing = set()
     try:

@@ -105,4 +105,6 @@ hermestest-14 全链路：`scripts/deepseek-search/run-probe.sh docker hermestes
 镜像 `vanilla-v1.106.4.capacity.sse-fix-bare.keyalias-auth.dssearch.uvloop023-20261027-164202` = `sha256:92410b94ce1f43245d59152d77b26eca02490523417dc9d30242d2c9e7359fbe`（配方 `uvloop-0.23/`：wheel 按 PyPI sha256 校验后直接解压替换，venv 里没有 pip；构建期行为断言 cancel 后 `fileno()==-1`）。
 md5 join 对 `5461b2d6`：只有 `site-packages/uvloop/` 与 dist-info 变，其它 0 变化。
 上线（§5.5 换 digest）：values 恰 1 处替换，helm template 对 live manifest 只差 image 一行；gray 先（rev31），回归并排后 prod。
+**10-27 上线结果**：gray rev31（16:47）→ 驾驶台并排回归 gray vs prod（`console/regress/20261027T085011Z`）：sweep 同形 66/69 单边 0、key_behavior / auth_parity（451 名单边 0）/ her / failover / codex 全 PASS、budget 同形 11/13（既有 S1/S2）、kiro 用例被老实例死组拖到超时（已知量具问题）⇒ 改用 kiro-slots 7 组两边各 1 发，全 200 出字。
+prod rev24（17:57→18:02，滚动；回退 = `helm upgrade … -f $D/uvloop023-20261027/prod-values.rollback.yaml --reset-values`）。4 pod 全 `92410b94` / uvloop 0.23.0 / ImportError 0 / died 0；切换窗口每分钟 260~320 请求，失败只有原本就有的白名单 / 上游类；nginx 18:0x premature-close 0。guarded-old 仍 1.105.1 不动。
 

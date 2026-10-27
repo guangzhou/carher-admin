@@ -37,6 +37,18 @@ description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的�
   用户指到非 haiku 的不动。10-25 网关已上 `claude-haiku-5-5`(Claude Code 默认要它,之前 403)。
 - doctor 报「菜单去重 / 开机自动刷菜单 / 后台小任务模型」。回归:`tests/test_install_mac.py`(去重、hook 幂等、quiet 失败退 0)。
 
+## 桌面 App 菜单 + 「Not logged in」(10-27,王德升)
+
+- **App 的模型菜单不读 settings.json**:App 启动时自己拉一次网关 `/v1/models`,结果只在内存里。App 配置(configLibrary/<id>.json)
+  写了 `inferenceModels` ⇒ App 不再自己拉、菜单 = 这份(日志 `Model discovery: skipped (inferenceModels obviates discovery); picker = N`)。
+  `carher_models_refresh.js` 的 `syncAppModels` 把 key 里的 `claude-*` 写进**我们那条**(_meta 里叫 CarHer、且 key 一样);
+  App 网关模式只收 Anthropic 名(`wCe`:不像 Anthropic 模型就拒),所以非 claude 不写。key 里没 claude ⇒ 删掉这项交回 App。
+  ⚠️ App 要**完全退出再开**才读新配置。验:真 App 改配置 → 重启 → 看 main.log 那行 + Code 标签页右下角模型名。
+- **「Not logged in · Run /login」**:首次启动「Do you want to use this API key?」默认 **No**,回车就写进 `~/.claude.json`
+  (`CLAUDE_CONFIG_DIR` 下则是那里的 `.claude.json`)的 `customApiKeyResponses.rejected`,按 key **末 20 位**比较。
+  安装器和刷模型都调 `approveApiKey` 记成 approved。doctor 报「这把 key 已同意使用」。
+- 同事 403「key_model_access_denied」= key 白名单没那个模型(王德升只有 deepseek-v4.1-flash / claude-haiku-5-5),不是脚本问题;开权限要用户定。
+
 ## 1. 文件与发版
 
 ```

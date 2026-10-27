@@ -38,6 +38,9 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 - **429**：先按官方退避 + retry-after 重试；**402 额度用尽 / 被限（restricted）才退役换号**，冷备里挑一个顶上（要 opus 的槽只挑能跑 opus 的号）。别的错误不退役。
 - **判「号被限」**（opus 空回复后）：用同号、号**自己的** profileArn 打 runtime 入口，发**固定中性问题**（不带用户内容）。中性问题也 CONTENT_FILTERED ⇒ 被限换号；正常出字 ⇒ 号没事；403/超时 ⇒ 测不了、不换。
   🔴 slots24 及以前拿**用户原文**去探 ⇒ 敏感内容在任何号上都 CONTENT_FILTERED ⇒ 10-25 #3 justin 被冤退役；且用占位 ARN ⇒ social 号恒 403 永远测不出。slots25 修。
+- **opus-5.5 安全审查（slots43 起，补丁 0013）**：opus-5.5 碰到敏感内容时上游不报错、只回 200 + 零内容。被限探测说号没事 ⇒ 同槽同号把整个请求（当前消息 + 历史）的 modelId 改成 `config.json.slotRefusalFallbackModel`（默认 `claude-opus-4.8`，空串 = 关闭）重答，回答**末尾**加一段提示「Opus 5.5 触发了安全审查…已自动改由 Claude Opus 4.8 回答，本会话接下来也会继续用；想用回 5.5 请新开会话」（放末尾是因为放开头会排到 thinking 块前面）。同一 conversationId 之后 6 小时直接走 4.8、不再提示（内存，重启清空，同 Cursor）。4.8 也空 ⇒ 回一段「两个都没作答，请换说法或新开会话」，不再给空白。只认上游 modelId == `claude-opus-5.5`；号被限仍走原来的换号。空回复明细里原因记 `refusal_switched_model` / `refusal_fallback_also_empty`（这两种都不算「空回复给了用户」）。
+  - 回归：隔离实例（冷备号、假 refreshToken）真敏感 prompt 9 例新版 9/9、slots42 对照 3/9；mock 上游覆盖「4.8 也空」「号被限换号」「非 opus 不动」；经 LiteLLM（生产镜像）anthropic / chat 流式非流式 / responses 4/4；真 Claude Code 2.1.310 敏感题出提示、正常 Write+Edit 3 轮不受影响。
+  - 🔴 判断空回复是不是这个原因：SpendLogs 里表现为 `completion_tokens=1` + 耗时 50~100s + success（不是 0，按 0 查查不到）。
 - **槽停用 / 删除**：在 Admin「槽位设置」关开关 ⇒ 该槽的人在下一个请求自动换到别的槽（`SLOT_GONE` ⇒ 重选），在途的跑完。删除只允许先停用。8 个停用分支都有单测。
 - **冷备数** = 启用 − 在槽 − 退役（只算 quota/restricted）。手动在 Admin 启用一个号会清掉它的退役标记。
 - **权重（slots41 起）**：`config.json.slots[].weight` 1~10，默认 5，界面「设置 → 槽位配置」改。作用三处：新人分配、封口判定（用量 ÷ 权重）、在途上限（自动值 × 权重/5，手动锁定值不缩放）。**改权重不自动挪已绑的人**，要挪点「重新分配用户」。

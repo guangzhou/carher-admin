@@ -1,0 +1,338 @@
+diff -ruN -x t base/admin-ui/src/components/empty-events-dialog.tsx work/admin-ui/src/components/empty-events-dialog.tsx
+--- base/admin-ui/src/components/empty-events-dialog.tsx	2026-10-27 09:54:03
++++ work/admin-ui/src/components/empty-events-dialog.tsx	2026-10-27 10:08:47
+@@ -10,6 +10,8 @@
+   probe_restricted_swapped: '号被限，已换号救回',
+   probe_restricted_no_swap_left: '号被限，换号次数用完',
+   probe_restricted_no_spare: '号被限，冷备没号',
++  refusal_switched_model: '安全审查，已改用 Opus 4.8 回答',
++  refusal_fallback_also_empty: '安全审查，4.8 也没答，已提示用户',
+ }
+ 
+ const fmtTime = (t: number) => {
+diff -ruN -x t base/src/kiro/provider.rs work/src/kiro/provider.rs
+--- base/src/kiro/provider.rs	2026-10-27 09:54:03
++++ work/src/kiro/provider.rs	2026-10-27 10:08:47
+@@ -97,6 +97,98 @@
+     })
+ }
+ 
++/// opus-5.5 安全审查兜底：上游拦下后什么都不发（200 + 零内容），客户端只看到空白。
++/// 号没被限时换成配置里的备用模型重答一次，并在回答末尾告诉用户；同一会话之后直接用备用模型（同 Cursor）。
++const REFUSAL_SWITCH_NOTICE: &str = "\n\n---\n> ⚠️ Claude Opus 5.5 对这条消息触发了安全审查，没有作答（不是网络或服务故障）。本条已自动改由 {to} 回答，本会话接下来也会继续用 {to}；想用回 Opus 5.5 请新开一个会话。";
++const REFUSAL_BOTH_NOTICE: &str = "⚠️ 这条消息触发了 Claude 的安全审查：Claude Opus 5.5 和自动改用的 {to} 都没有作答（不是网络或服务故障）。请换个说法，或新开一个会话再试。";
++/// 同一会话粘在备用模型上多久
++const REFUSAL_STICKY_SECS: i64 = 6 * 3600;
++const REFUSAL_STICKY_MAX: usize = 5000;
++
++/// 上游模型 id ⇒ 展示名（只用于提示文案）
++fn model_display(id: &str) -> String {
++    match id {
++        "claude-opus-4.8" => "Claude Opus 4.8".into(),
++        "claude-opus-4.6" => "Claude Opus 4.6".into(),
++        "claude-opus-5" => "Claude Opus 5".into(),
++        other => other.to_string(),
++    }
++}
++
++/// 把请求体里所有 `modelId == from` 改成 `to`（当前消息 + 历史）。没改到任何一处返回 None。
++fn rewrite_model_id(body: &str, from: &str, to: &str) -> Option<String> {
++    fn walk(v: &mut serde_json::Value, from: &str, to: &str, n: &mut usize) {
++        match v {
++            serde_json::Value::Object(m) => {
++                for (k, x) in m.iter_mut() {
++                    if k == "modelId" && x.as_str() == Some(from) {
++                        *x = serde_json::Value::String(to.to_string());
++                        *n += 1;
++                    } else {
++                        walk(x, from, to, n);
++                    }
++                }
++            }
++            serde_json::Value::Array(a) => a.iter_mut().for_each(|x| walk(x, from, to, n)),
++            _ => {}
++        }
++    }
++    let mut v: serde_json::Value = serde_json::from_str(body).ok()?;
++    let mut n = 0;
++    walk(&mut v, from, to, &mut n);
++    (n > 0).then(|| v.to_string())
++}
++
++fn conversation_id(body: &str) -> Option<String> {
++    let v: serde_json::Value = serde_json::from_str(body).ok()?;
++    v.pointer("/conversationState/conversationId")?.as_str().map(|s| s.to_string())
++}
++
++/// 合成一帧 Kiro assistantResponseEvent（下游 anthropic 层按普通文本处理，流式/非流式/思考模式都走原逻辑）
++fn kiro_text_frame(text: &str) -> Vec<u8> {
++    use crate::kiro::parser::crc::crc32;
++    let payload = serde_json::json!({ "content": text }).to_string();
++    let mut headers = Vec::new();
++    for (k, v) in [(":message-type", "event"), (":event-type", "assistantResponseEvent"), (":content-type", "application/json")] {
++        headers.push(k.len() as u8);
++        headers.extend_from_slice(k.as_bytes());
++        headers.push(7u8);
++        headers.extend_from_slice(&(v.len() as u16).to_be_bytes());
++        headers.extend_from_slice(v.as_bytes());
++    }
++    let total = 12 + headers.len() + payload.len() + 4;
++    let mut buf = Vec::with_capacity(total);
++    buf.extend_from_slice(&(total as u32).to_be_bytes());
++    buf.extend_from_slice(&(headers.len() as u32).to_be_bytes());
++    let pc = crc32(&buf[..8]);
++    buf.extend_from_slice(&pc.to_be_bytes());
++    buf.extend_from_slice(&headers);
++    buf.extend_from_slice(payload.as_bytes());
++    let mc = crc32(&buf);
++    buf.extend_from_slice(&mc.to_be_bytes());
++    buf
++}
++
++/// 在响应流末尾追加一段文本（放末尾而不是开头：开头会排到 thinking 块前面）
++fn append_text(resp: reqwest::Response, text: &str) -> reqwest::Response {
++    use futures::StreamExt;
++    let status = resp.status();
++    let headers = resp.headers().clone();
++    let tail = futures::stream::iter([Ok::<_, std::io::Error>(bytes::Bytes::from(kiro_text_frame(text)))]);
++    let s = resp.bytes_stream().map(|c| c.map_err(std::io::Error::other)).chain(tail);
++    let mut b = http::Response::builder().status(status);
++    if let Some(h) = b.headers_mut() {
++        *h = headers;
++    }
++    reqwest::Response::from(b.body(reqwest::Body::wrap_stream(s)).expect("rebuild response"))
++}
++
++/// 只有一段文本的 200 响应
++fn text_only_response(text: &str) -> reqwest::Response {
++    let body = reqwest::Body::from(kiro_text_frame(text));
++    reqwest::Response::from(http::Response::builder().status(200).body(body).expect("text response"))
++}
++
+ /// 探测 runtime 入口时用的 profileArn（IDE 写死的 BuilderId 占位，10-22 实测 IdC 号可用）
+ const RUNTIME_PROBE_ARN: &str = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX";
+ 
+@@ -118,6 +210,8 @@
+     endpoints: HashMap<String, Arc<dyn KiroEndpoint>>,
+     /// 默认端点名称（凭据未指定 endpoint 时使用）
+     default_endpoint: String,
++    /// opus-5.5 被安全审查拦过的会话：conversationId → 失效时间（之后这个会话直接用备用模型）
++    refusal_sticky: Mutex<HashMap<String, i64>>,
+ }
+ 
+ impl KiroProvider {
+@@ -150,6 +244,7 @@
+             token_manager,
+             global_proxy: proxy,
+             client_cache: Mutex::new(cache),
++            refusal_sticky: Mutex::new(HashMap::new()),
+             tls_backend,
+             endpoints,
+             default_endpoint,
+@@ -691,9 +786,19 @@
+         user_key: &str,
+     ) -> anyhow::Result<reqwest::Response> {
+         let api_type = if is_stream { "流式" } else { "非流式" };
+-        let is_opus = Self::extract_model_from_request(request_body)
+-            .map(|m| m.to_lowercase().contains("opus"))
+-            .unwrap_or(false);
++        let orig_model = Self::extract_model_from_request(request_body).unwrap_or_default();
++        let fb_model = self.token_manager.config().slot_refusal_fallback_model.clone();
++        let refusal_on = orig_model == "claude-opus-5.5" && !fb_model.is_empty() && fb_model != orig_model;
++        let conv = if refusal_on { conversation_id(request_body) } else { None };
++        // 这个会话之前被安全审查拦过 ⇒ 直接用备用模型（同 Cursor：本会话继续用 4.8，新会话才回 5.5）
++        let sticky_body = conv
++            .as_deref()
++            .filter(|c| self.refusal_sticky_hit(c))
++            .and_then(|_| rewrite_model_id(request_body, &orig_model, &fb_model));
++        let mut body_now: String = sticky_body.unwrap_or_else(|| request_body.to_string());
++        // 本次请求是否在这一轮里刚切到备用模型（拿到内容时在末尾提示用户；粘住的会话不再重复提示）
++        let mut switched = false;
++        let is_opus = orig_model.to_lowercase().contains("opus");
+         let mut last_error: Option<anyhow::Error> = None;
+         let mut forced_refresh = false;
+         let mut swaps = 0u32;
+@@ -705,6 +810,8 @@
+         // 在跑计数：成功时守卫跟着响应流走（读完才 -1），其它出口函数返回时 -1
+         let mut user_guard = self.token_manager.slot_user_guard(user_key);
+         for attempt in 0..SLOT_MAX_ATTEMPTS {
++            // 切到备用模型后本轮起发改写过的请求体
++            let request_body: &str = &body_now.clone();
+             let (slot, ctx) = self.token_manager.acquire_slot_context_as(user_key, &alias).await?;
+             let permit = match self.token_manager.acquire_slot_permit(slot).await {
+                 Ok(p) => p,
+@@ -761,6 +868,11 @@
+                     Peeked::Ready(r) => {
+                         self.token_manager.slot_record_latency(slot, sent_at.elapsed().as_millis() as u64);
+                         let model = Self::extract_model_from_request(request_body).unwrap_or_default();
++                        let r = if switched {
++                            append_text(r, &REFUSAL_SWITCH_NOTICE.replace("{to}", &model_display(&fb_model)))
++                        } else {
++                            r
++                        };
+                         let metered = meter_response_for(r, self.token_manager.clone(), ctx.id, model, user_guard.take());
+                         return Ok(hold_permit(metered, permit));
+                     }
+@@ -778,7 +890,28 @@
+                     tracing::warn!("槽位 {} 号 #{} 空回复（非 opus / 未开探测），原样返回 key={}", slot, ctx.id, who.key_alias);
+                     return Ok(response);
+                 }
++                // 已经在备用模型上还是空 ⇒ 不再探测/换号，明确告诉用户被安全审查拦了（不给空白）
++                if refusal_on && model == fb_model {
++                    self.token_manager.slot_report_empty(slot, false);
++                    note(false, "refusal_fallback_also_empty");
++                    tracing::warn!("槽位 {} 号 #{} 备用模型 {} 也空回复，回安全审查提示 key={}", slot, ctx.id, fb_model, who.key_alias);
++                    return Ok(text_only_response(&REFUSAL_BOTH_NOTICE.replace("{to}", &model_display(&fb_model))));
++                }
+                 let restricted = self.probe_restricted(&ctx, &machine_id, request_body).await;
++                // 号没事 ⇒ 是这条内容被 opus-5.5 安全审查拦了：换备用模型重答（同号同槽，不算换号）
++                if !restricted && refusal_on {
++                    if let Some(b) = rewrite_model_id(request_body, &orig_model, &fb_model) {
++                        self.token_manager.slot_report_empty(slot, false);
++                        note(false, "refusal_switched_model");
++                        tracing::warn!("槽位 {} 号 #{} opus-5.5 安全审查空回复，改用 {} 重答 key={}", slot, ctx.id, fb_model, who.key_alias);
++                        if let Some(c) = conv.as_deref() {
++                            self.refusal_sticky_mark(c);
++                        }
++                        body_now = b;
++                        switched = true;
++                        continue;
++                    }
++                }
+                 if !restricted || swaps >= SLOT_MAX_SWAPS {
+                     self.token_manager.slot_report_empty(slot, true);
+                     note(true, if restricted { "probe_restricted_no_swap_left" } else { "probe_not_restricted" });
+@@ -857,6 +990,24 @@
+         Some(Duration::from_millis(ms))
+     }
+ 
++    /// 这个会话是否在备用模型粘性期内
++    fn refusal_sticky_hit(&self, conv: &str) -> bool {
++        let now = chrono::Utc::now().timestamp();
++        self.refusal_sticky.lock().get(conv).is_some_and(|&exp| exp > now)
++    }
++
++    fn refusal_sticky_mark(&self, conv: &str) {
++        let now = chrono::Utc::now().timestamp();
++        let mut m = self.refusal_sticky.lock();
++        if m.len() >= REFUSAL_STICKY_MAX {
++            m.retain(|_, exp| *exp > now);
++            if m.len() >= REFUSAL_STICKY_MAX {
++                m.clear();
++            }
++        }
++        m.insert(conv.to_string(), now + REFUSAL_STICKY_SECS);
++    }
++
+     /// 空回复后用同号打官方 runtime 入口一次，判这个号是不是被上游限了。
+     ///
+     /// 🔴 10-25 误判（#3 justin 被冤退役）：旧版拿**用户那条请求原文**去探，敏感内容在任何号上都回
+@@ -1523,5 +1674,75 @@
+             .await;
+         assert_eq!(got.key_alias, "cursor-alice");
+         assert_eq!(got.key_hash, "h1");
++    }
++}
++
++#[cfg(test)]
++mod refusal_switch_tests {
++    use super::*;
++
++    const BODY: &str = r#"{"conversationState":{"conversationId":"c-1","currentMessage":{"userInputMessage":{"content":"hi","modelId":"claude-opus-5.5"}},"history":[{"userInputMessage":{"content":"sys","modelId":"claude-opus-5.5"}},{"assistantResponseMessage":{"content":"ok"}}]},"profileArn":"x"}"#;
++
++    #[test]
++    fn rewrite_changes_current_and_history_model_only() {
++        let out = rewrite_model_id(BODY, "claude-opus-5.5", "claude-opus-4.8").unwrap();
++        assert!(!out.contains("claude-opus-5.5"));
++        assert_eq!(out.matches("claude-opus-4.8").count(), 2);
++        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
++        assert_eq!(v["conversationState"]["currentMessage"]["userInputMessage"]["content"], "hi");
++        assert_eq!(v["profileArn"], "x");
++    }
++
++    #[test]
++    fn rewrite_returns_none_when_model_absent() {
++        assert!(rewrite_model_id(BODY, "claude-sonnet-5", "claude-opus-4.8").is_none());
++        assert!(rewrite_model_id("not json", "a", "b").is_none());
++    }
++
++    #[test]
++    fn conversation_id_extracted() {
++        assert_eq!(conversation_id(BODY).as_deref(), Some("c-1"));
++        assert_eq!(conversation_id("{}"), None);
++    }
++
++    /// 合成的提示帧必须能被真实解码器解成 assistantResponseEvent（下游 anthropic 层靠它出字）
++    #[test]
++    fn synthetic_frame_decodes_as_assistant_text() {
++        use crate::kiro::model::events::Event;
++        use crate::kiro::parser::decoder::EventStreamDecoder;
++        let mut d = EventStreamDecoder::new();
++        d.feed(&kiro_text_frame("中文 ⚠️ \"quoted\"\n")).unwrap();
++        let evs: Vec<_> = d.decode_iter().flatten().map(|f| Event::from_frame(f).unwrap()).collect();
++        assert_eq!(evs.len(), 1);
++        match &evs[0] {
++            Event::AssistantResponse(r) => assert_eq!(r.content, "中文 ⚠️ \"quoted\"\n"),
++            other => panic!("期望文本帧，实际 {:?}", other),
++        }
++    }
++
++    /// 末尾追加后：原有帧在前，提示在后，peek 判为有内容
++    #[tokio::test]
++    async fn append_text_keeps_original_then_notice() {
++        use crate::kiro::model::events::Event;
++        use crate::kiro::parser::decoder::EventStreamDecoder;
++        let orig = reqwest::Response::from(http::Response::builder().status(200).body(reqwest::Body::from(kiro_text_frame("答案"))).unwrap());
++        let out = append_text(orig, "提示");
++        let bytes = out.bytes().await.unwrap();
++        let mut d = EventStreamDecoder::new();
++        d.feed(&bytes).unwrap();
++        let texts: Vec<String> = d.decode_iter().flatten().filter_map(|f| match Event::from_frame(f) {
++            Ok(Event::AssistantResponse(r)) => Some(r.content),
++            _ => None,
++        }).collect();
++        assert_eq!(texts, vec!["答案".to_string(), "提示".to_string()]);
++        assert!(matches!(peek_for_content(text_only_response("x")).await, Peeked::Ready(_)));
++    }
++
++    #[test]
++    fn notices_name_the_fallback_model() {
++        let n = REFUSAL_SWITCH_NOTICE.replace("{to}", &model_display("claude-opus-4.8"));
++        assert!(n.contains("Claude Opus 4.8") && n.contains("安全审查") && !n.contains("{to}"));
++        let b = REFUSAL_BOTH_NOTICE.replace("{to}", &model_display("claude-opus-4.8"));
++        assert!(b.contains("Claude Opus 4.8") && !b.contains("{to}"));
+     }
+ }
+diff -ruN -x t base/src/model/config.rs work/src/model/config.rs
+--- base/src/model/config.rs	2026-10-27 09:54:03
++++ work/src/model/config.rs	2026-10-27 10:07:32
+@@ -107,6 +107,10 @@
+     #[serde(default = "default_true")]
+     pub slot_restricted_probe: bool,
+ 
++    /// 槽位：opus-5.5 安全审查空回复（号没被限）时改用的上游模型；同一会话之后都用它。空串 = 关闭，照旧回空
++    #[serde(default = "default_slot_refusal_fallback_model")]
++    pub slot_refusal_fallback_model: String,
++
+     /// 仅测试用：这些号 id 的 q / runtime 上游改打该地址（mock）。默认空 = 不生效，生产不配
+     #[serde(default)]
+     pub test_upstream_override: Option<TestUpstreamOverride>,
+@@ -251,6 +255,10 @@
+     1.5
+ }
+ 
++fn default_slot_refusal_fallback_model() -> String {
++    "claude-opus-4.8".to_string()
++}
++
+ fn default_true() -> bool {
+     true
+ }
+@@ -339,6 +347,7 @@
+             slot_heavy_ratio: default_slot_heavy_ratio(),
+             slot_unbound_key_aliases: Vec::new(),
+             slot_restricted_probe: true,
++            slot_refusal_fallback_model: default_slot_refusal_fallback_model(),
+             test_upstream_override: None,
+             slot_gray_aliases: Vec::new(),
+             alert_feishu_webhook: None,

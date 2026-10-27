@@ -25,7 +25,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 | 老实例 | deploy `kiro-rs`（:30890，镜像 ctxwin）。只剩 `carher-hangzhou`、`claude-code-buyitian` 两把 key 主走它，另外是新实例的兜底 |
 | 镜像 | **现网 `slots43`**（10-27 10:30 = slots42 + 0013 opus-5.5 安全审查自动换 4.8；回滚 `set image … slots42`，状态备份 `slots-pre-v2026.10.1-carher-slots43-20261027T103017`）。之前 **`slots42`**（10-27 01:16 滚动上线，ready 后端全程不为 0、34 请求 0 失败；= slots41 + 告警只看 24h/可清除 + 接新人开关 + 专属 key 槽；回滚 `set image … slots41` 即可，两版探针相同；切前备份 `198:~/kiro-deploy/backup/slots-pre-v2026.10.1-carher-slots42-20261027T011640/`）。slots41（10-26 19:25 上线 = slots40 无缝换版 + 重新分配 / 槽位权重 / 手动挪 key，sha `cbef9f8e…`）。🔴 回滚到 slots31 **不能 `set image`**：slots31 没有 `/readyz`，新 manifest 的 readiness 永远不过 ⇒ 要 `kubectl replace -f 198:~/kiro-rs-slots-deploy.pre-slots41.json`（旧 Recreate + TCP 探针整份 deploy），切前状态文件在 `198:~/kiro-deploy/backup/slots-pre-v2026.10.1-carher-slots41-20261026T192216/`。`kiro-rs:v2026.10.1-carher-slots40`（10-26，无缝换版：零断流；slots31 空回复明细；回滚 tag slots31）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
 | manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、secret `kiro-rs-slots-bootstrap`）|
-| 槽 | 4 个：`jp-172.235.204.67`（经 243 代理）、`sg-47.84.112.136`、`sg-47.84.85.100`、`sg-47.236.200.98`；出口配在 `config.json.slots[]`，全局 `proxyUrl=null` |
+| 槽 | 生效 4 个：`jp-172.235.204.67`（经 243 代理）、`sg-47.84.112.136`、`sg-47.84.85.100`、`sg-47.84.101.218`（10-27 加）；停用 `sg-47.236.200.98`；出口配在 `config.json.slots[]`，全局 `proxyUrl=null` |
 | 并发参数 | 起步 16 / 最小 2 / 最大 24 / 自动调；排队超时 120s；「暂不接新人」倍数 1.5 |
 | 状态文件（PVC） | `config.json` `credentials.json` `kiro_slots.json`（绑定/槽→号/退役/原代理）`kiro_account_usage.json`（按号×模型×北京日，留 8 天）|
 | 状态备份 | `198:~/kiro-deploy/backup/slots-pre-<tag>-<ts>/`（每次换镜像前四个文件）；实例初始配置 `198:~/kiro-deploy/slots-inst/` |
@@ -182,7 +182,8 @@ Kiro 按 token 计 credit：10-25 实测 4 个能算的号**每百万输入 toke
 - 判槽健康看 `kiro-slots-watch.py` 的「首发 429 / 被限 / 排队超时」，不是看 LiteLLM 失败率（兜底把失败吞了）。
 - 兜底到老实例的量：SpendLogs 里 `model_group like 'kiro-slots-%'` 但 `api_base` 是老实例的行；10-25 有 54 次，原因未查。
 - 新加坡 `kiro-sg` 两个测试实例还挂着老池 7 个号凭据（建议 scale 0，等用户定）。
-- 🔴 **槽 2~4 的出口代理是阿里云 ns `kiro-sg` 里三个 squid**（deploy `kiro-egress-226/122/86` ⇒ 47.84.112.136 / 47.84.85.100 / 47.236.200.98，CM `kiro-egress-squid`，本机经 `jms proxy k8s-work-226 16443 …` 隧道操作）。
+- 🔴 **新加坡槽的出口代理是阿里云 ns `kiro-sg` 里的 squid**（deploy `kiro-egress-226/122/86/241` ⇒ 47.84.112.136 / 47.84.85.100 / 47.236.200.98 / 47.84.101.218，hostNetwork + `nodeName` 钉在对应节点，共用 CM `kiro-egress-squid` 和 secret `kiro-egress-auth`（用户 `kiro`，密码与其它槽相同），本机经 `jms proxy k8s-work-226 16443 172.16.1.163 6443` 隧道操作）。
+  **加一个 IP 槽 = 三步**（10-27 加 218 就这么做的，5 分钟）：① 那台机器若是 `kubectl get nodes -o wide` 里 EXTERNAL-IP 对得上的节点，复制 `kiro-egress-86` 的 deploy，只改名字 / `node` 标签 / `nodeName`，apply；② 从 198 经 `http://kiro:<pw>@<IP>:3128` 打 q.us-east-1（404）、chatgpt（401）、无密码（000）、非白名单（000）；③ Admin `PUT /slots/config` 追加一条（密码取现有槽的），再 `POST /slots/<i>/test` 打 hello + tool 两发。不需要登那台机器装东西。
   10-26 起同时放行 ChatGPT（`acl chatgpt_dst dstdomain .chatgpt.com .openai.com`），给 198 ChatGPT 号池分出口用。
   改 ACL：先 `squid -k parse` 在 pod 里验新文件 → apply CM（~5s 同步进 pod）→ **逐个 `kubectl exec <pod> -- kill -HUP 1`** 热加载
   （`squid -k reconfigure` 不能用：配置里 `pid_filename none` ⇒ FATAL）。每个之后从 198 经该槽代理各打一发 kiro（404）和 chatgpt（401）再动下一个。

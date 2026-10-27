@@ -1464,8 +1464,16 @@ function cursorRunning() {
     const m = line.match(/^(\d+)\s+(.*)$/); if (!m) return false;
     const pid = Number(m[1]), cmd = m[2];
     if (pid === process.pid || pid === process.ppid) return false;
+    if (!isCursorExe(cmd)) return false;      // 只是参数里提到了 Cursor 路径(比如一条 zsh -c "…Cursor…" 命令)
     return !/\.js(\s|$)/.test(cmd);            // 带 .js 参数 = node 模式(小代理/安装器),不是 GUI
   });
+}
+/* 10-27:pgrep -f 按整行匹配 ⇒ 一个 `zsh -c "…/Cursor.app/Contents/MacOS/Cursor …"` 的 shell 也被当成 Cursor GUI,
+   刷模型 worker 等它「退出」等了 53 秒(实测)。⇒ 只认**可执行文件本身**是 Cursor 的进程(命令行以它开头)。 */
+function isCursorExe(cmd) {
+  const exe = process.platform === "darwin" ? "/Contents/MacOS/Cursor" : path.join(path.dirname(EXEC), "cursor");
+  const first = String(cmd).trim();
+  return first.startsWith(exe) || new RegExp("^\\S*" + exe.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&") + "(\\s|$)").test(first);
 }
 
 function syntaxCheck(text, tag) {
@@ -3204,7 +3212,7 @@ function quitCursor() {
 function runningLines() {
   if (process.platform === "win32") return "";
   const r = spawnSync("pgrep", ["-fl", process.platform === "darwin" ? "Cursor.app/Contents/MacOS/Cursor" : path.join(path.dirname(EXEC), "cursor")], { encoding: "utf8" });
-  return String(r.stdout || "").split("\n").filter((l) => l && !/\.js(\s|$)/.test(l)).map((l) => l.slice(0, 120)).join(" | ");
+  return String(r.stdout || "").split("\n").filter((l) => { const m = l.match(/^(\d+)\s+(.*)$/); return m && isCursorExe(m[2]) && !/\.js(\s|$)/.test(m[2]); }).map((l) => l.slice(0, 120)).join(" | ");
 }
 function launchCursor() {
   // 子进程不能继承 ELECTRON_RUN_AS_NODE,否则拉起来的是一个 node 而不是 Cursor 窗口
@@ -3283,12 +3291,15 @@ function installRefreshSkill() {
   const cmd = process.platform === "win32"
     ? 'cmd /c "set ELECTRON_RUN_AS_NODE=1&& "' + EXEC + '" "' + self + '" --refresh-models"'
     : 'ELECTRON_RUN_AS_NODE=1 "' + EXEC + '" "' + self + '" --refresh-models';
-  const sd = path.join(os.homedir(), ".cursor", "skills", "carher-refresh-models");
+  // 10-27:Cursor 的 agent 也读 ~/.claude/skills;两边都叫 carher-refresh-models 时它挑了 Claude 那份(实测「刷模型」
+  //   在 Cursor 里跑成 Claude 的刷新)⇒ 改名 + 描述写死只给 Cursor 用;删掉旧名目录。
+  try { fs.rmSync(path.join(os.homedir(), ".cursor", "skills", "carher-refresh-models"), { recursive: true, force: true }); } catch (e) {}
+  const sd = path.join(os.homedir(), ".cursor", "skills", "carher-refresh-models-cursor");
   fs.mkdirSync(sd, { recursive: true });
   fs.writeFileSync(path.join(sd, "SKILL.md"), [
     "---",
-    "name: carher-refresh-models",
-    "description: 用户说「刷模型」「更新模型」「刷新模型列表」「模型菜单不对/少了/多了」时用。按用户的 key 从公司网关重新拉模型列表,更新 Cursor 的模型菜单(新开通的加上、没权限的删掉)。",
+    "name: carher-refresh-models-cursor",
+    "description: 仅限 Cursor 里用:用户说「刷模型」「更新模型」「刷新模型列表」「模型菜单不对/少了/多了」时。按用户的 key 从公司网关重新拉模型列表,更新 Cursor 的模型菜单(新开通的加上、没权限的删掉)。⛔ 你在 Cursor 里时,一律用这个,不要用 carher-refresh-models-claude(那是 Claude Code 的)。",
     "---",
     "",
     "# 刷模型",

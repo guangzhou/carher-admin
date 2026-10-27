@@ -343,7 +343,9 @@ if ($nodeAbs) {
   Ok "√ 已开通画图(说「画一张…」即可)"
 
   # ── 4e. 「刷模型」(10-19):说这三个字就按 key 重拉 /model 菜单 ──
-  $rsDir = Join-Path $claudeHome 'skills\carher-refresh-models'
+  # 10-27:旧名和 Cursor 的同名 ⇒ Cursor agent 读到这份、跑成 Claude 的刷新。改名并删旧目录
+  Remove-Item (Join-Path $claudeHome 'skills\carher-refresh-models') -Recurse -Force -ErrorAction SilentlyContinue
+  $rsDir = Join-Path $claudeHome 'skills\carher-refresh-models-claude'
   New-Item -ItemType Directory -Force -Path $rsDir | Out-Null
   $rsMd = @'
 @@EMBED refresh_skill.md@@
@@ -355,7 +357,7 @@ if ($nodeAbs) {
   if ($i -ge 0 -and $j -gt $i) { $old = $old.Substring(0, $i) + $old.Substring($j + $E.Length) }
   $old = $old.TrimEnd()
   $line = '"' + $nodeAbs + '" "' + $refreshPath + '"'
-  $blk = $B + "`n## 刷模型`n`n用户说「刷模型」「更新模型」「刷新模型列表」,或说 /model 里的模型不对时,**直接运行这条命令,不要先问**:`n`n    " + $line + "`n`n- 把输出里「新增 / 删除 / 已改回默认模型」几行原样告诉用户,并提醒新开一个会话后 /model 里就是新列表。`n- 报错就把原文告诉用户,不要自己改 settings.json。`n" + $E + "`n"
+  $blk = $B + "`n## 刷模型`n`n(仅 Claude Code / Claude 桌面 App)用户说「刷模型」「更新模型」「刷新模型列表」,或说 /model 里的模型不对时,**直接运行这条命令,不要先问**:`n`n    " + $line + "`n`n- 把输出里「新增 / 删除 / 已改回默认模型」几行原样告诉用户,并提醒新开一个会话后 /model 里就是新列表。`n- 报错就把原文告诉用户,不要自己改 settings.json。`n" + $E + "`n"
   if ($old) { $blk = $old + "`n`n" + $blk }
   [IO.File]::WriteAllText($cmdMd, $blk, $noBom)
   Ok "√ 以后在 Claude Code 里说「刷模型」就能更新模型列表"

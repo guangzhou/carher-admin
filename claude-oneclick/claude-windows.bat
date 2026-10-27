@@ -733,12 +733,14 @@ if ($nodeAbs) {
   Ok "√ 已开通画图(说「画一张…」即可)"
 
   # ── 4e. 「刷模型」(10-19):说这三个字就按 key 重拉 /model 菜单 ──
-  $rsDir = Join-Path $claudeHome 'skills\carher-refresh-models'
+  # 10-27:旧名和 Cursor 的同名 ⇒ Cursor agent 读到这份、跑成 Claude 的刷新。改名并删旧目录
+  Remove-Item (Join-Path $claudeHome 'skills\carher-refresh-models') -Recurse -Force -ErrorAction SilentlyContinue
+  $rsDir = Join-Path $claudeHome 'skills\carher-refresh-models-claude'
   New-Item -ItemType Directory -Force -Path $rsDir | Out-Null
   $rsMd = @'
 ---
-name: carher-refresh-models
-description: 用户说「刷模型」「更新模型」「刷新模型列表」,或说 /model 里的模型不对、少了、多了、点了没权限时用。按用户的 key 从公司网关重新拉模型列表,更新 Claude Code 的模型菜单(新开通的加上、没权限的删掉)。
+name: carher-refresh-models-claude
+description: 仅限 Claude Code(命令行 claude 或 Claude 桌面 App)里用:用户说「刷模型」「更新模型」「刷新模型列表」,或说 /model 里的模型不对时。按用户的 key 从公司网关重新拉模型列表,同时更新 Claude Code 命令行和 Claude 桌面 App 的模型菜单。⛔ 如果你是 Cursor 或 Codex,不要用这个,用你自己那个工具的刷模型。
 ---
 
 # 刷模型
@@ -750,7 +752,7 @@ description: 用户说「刷模型」「更新模型」「刷新模型列表」,
 ```
 
 - 把输出里「新增 / 删除 / 已改回默认模型」那几行原样告诉用户。
-- 提醒用户:新开一个 Claude Code 会话(桌面 App 新开对话)后,`/model` 里就是新列表。
+- 提醒用户:命令行新开一个 claude 会话就是新列表;Claude 桌面 App 要**完全退出再打开**才显示新菜单。
 - 命令报错就把原文告诉用户,不要自己改 settings.json。
 - 平时不用手动刷:每次打开 Claude Code 都会在后台自动刷一次。说「刷模型」= 现在立刻刷。
 '@
@@ -761,7 +763,7 @@ description: 用户说「刷模型」「更新模型」「刷新模型列表」,
   if ($i -ge 0 -and $j -gt $i) { $old = $old.Substring(0, $i) + $old.Substring($j + $E.Length) }
   $old = $old.TrimEnd()
   $line = '"' + $nodeAbs + '" "' + $refreshPath + '"'
-  $blk = $B + "`n## 刷模型`n`n用户说「刷模型」「更新模型」「刷新模型列表」,或说 /model 里的模型不对时,**直接运行这条命令,不要先问**:`n`n    " + $line + "`n`n- 把输出里「新增 / 删除 / 已改回默认模型」几行原样告诉用户,并提醒新开一个会话后 /model 里就是新列表。`n- 报错就把原文告诉用户,不要自己改 settings.json。`n" + $E + "`n"
+  $blk = $B + "`n## 刷模型`n`n(仅 Claude Code / Claude 桌面 App)用户说「刷模型」「更新模型」「刷新模型列表」,或说 /model 里的模型不对时,**直接运行这条命令,不要先问**:`n`n    " + $line + "`n`n- 把输出里「新增 / 删除 / 已改回默认模型」几行原样告诉用户,并提醒新开一个会话后 /model 里就是新列表。`n- 报错就把原文告诉用户,不要自己改 settings.json。`n" + $E + "`n"
   if ($old) { $blk = $old + "`n`n" + $blk }
   [IO.File]::WriteAllText($cmdMd, $blk, $noBom)
   Ok "√ 以后在 Claude Code 里说「刷模型」就能更新模型列表"

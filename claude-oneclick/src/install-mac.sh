@@ -355,11 +355,13 @@ fs.writeFileSync(p,(t?t+"\n\n":"")+blk);'
 ok "✔ 已开通画图(说「画一张…」即可)"
 
 # ── 4e. 「刷模型」(10-19):说这三个字就按 key 重拉 /model 菜单(旧的删、新的加)──
-mkdir -p "$CLAUDE_HOME/skills/carher-refresh-models"
+# 10-27:旧名 carher-refresh-models 和 Cursor 的同名 ⇒ Cursor agent 也读 ~/.claude/skills,说「刷模型」跑成了 Claude 的刷新。改名并删旧目录
+rm -rf "$CLAUDE_HOME/skills/carher-refresh-models"
+mkdir -p "$CLAUDE_HOME/skills/carher-refresh-models-claude"
 CARHER_NODE="$NODE_ABS" CARHER_TOOL="$CLAUDE_HOME/carher/carher_models_refresh.js" node -e '
 const fs=require("fs");let t=fs.readFileSync(0,"utf8");
 t=t.split("@@NODE@@").join(process.env.CARHER_NODE).split("@@TOOL@@").join(process.env.CARHER_TOOL);
-process.stdout.write(t);' > "$CLAUDE_HOME/skills/carher-refresh-models/SKILL.md" <<'CARHER_MD_EOF'
+process.stdout.write(t);' > "$CLAUDE_HOME/skills/carher-refresh-models-claude/SKILL.md" <<'CARHER_MD_EOF'
 @@EMBED refresh_skill.md@@
 CARHER_MD_EOF
 CARHER_MD="$CMD_MD" CARHER_LINE="\"$NODE_ABS\" \"$CLAUDE_HOME/carher/carher_models_refresh.js\"" node -e '
@@ -367,7 +369,7 @@ const fs=require("fs"),p=process.env.CARHER_MD,B="<!-- CARHER-REFRESH-BEGIN -->"
 let t="";try{t=fs.readFileSync(p,"utf8")}catch(e){}
 const i=t.indexOf(B),j=t.indexOf(E);if(i>=0&&j>i)t=t.slice(0,i)+t.slice(j+E.length);
 t=t.replace(/\n+$/,"");
-const blk=B+"\n## 刷模型\n\n用户说「刷模型」「更新模型」「刷新模型列表」,或说 /model 里的模型不对时,**直接运行这条命令,不要先问**:\n\n    "+process.env.CARHER_LINE+"\n\n"
+const blk=B+"\n## 刷模型\n\n(仅 Claude Code / Claude 桌面 App)用户说「刷模型」「更新模型」「刷新模型列表」,或说 /model 里的模型不对时,**直接运行这条命令,不要先问**:\n\n    "+process.env.CARHER_LINE+"\n\n"
  +"- 把输出里「新增 / 删除 / 已改回默认模型」几行原样告诉用户,并提醒新开一个会话后 /model 里就是新列表。\n- 报错就把原文告诉用户,不要自己改 settings.json。\n"+E+"\n";
 fs.writeFileSync(p,(t?t+"\n\n":"")+blk);'
 ok "✔ 以后在 Claude Code 里说「刷模型」就能更新模型列表"

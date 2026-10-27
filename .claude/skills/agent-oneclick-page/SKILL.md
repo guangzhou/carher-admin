@@ -121,3 +121,16 @@ if [ -n "$f" ]; then bash "$f"; else echo "没找到 …"; fi       # Cursor:是
 - 改命令必跑 `python3 scripts/agent-oneclick-docs/test_page_terminal_blocks.py`(release_all 已接):抠页面原文真跑,
   6 个场景 × zsh/bash × xdg 两种;拿旧命令跑同一套会全红(阳性对照)。Linux 机器上也要跑一次(188),本机 Mac 测不到 xdg 那支。
 - 代码块字体关连字(`!=` 会被 JetBrains Mono 显示成 ≠,用户照抄会错)。
+
+## 三个 App 里的「刷模型」(10-27 逐个真验)
+
+| App | 菜单从哪来 | 「刷模型」怎么触发 | 验法 |
+|---|---|---|---|
+| Claude App | App 配置 `inferenceModels`(写了就不再自己拉) | skill `carher-refresh-models-claude` + `~/.claude/CLAUDE.md` 块 | 改配置 → 完全退出重开 → main.log `picker = N (inferenceModels)` |
+| Codex App | 自带 codex 的 app-server `model/list` ⇒ `config.toml` 的 `model_catalog_json` | `~/.codex/AGENTS.md` 的 `CARHER-REFRESH` 块 | 跑 `<App>/Contents/Resources/codex-cli/bin/codex app-server` 发 `model/list` 数条数 |
+| Cursor App | Cursor 设置库 userAddedModels | skill `carher-refresh-models-cursor`(worker 自动退出→写→重开) | `cursor-agent -p "刷模型"` + `~/.carher/cursor-refresh.log` |
+
+- 🔴 **skill 不许同名**:Cursor 的 agent 也读 `~/.claude/skills`,两边都叫 `carher-refresh-models` 时它挑了 Claude 那份,
+  Cursor 菜单根本没动。现在两个名字带工具后缀,描述写「仅限 X」。新加跨工具 skill 都按这个规矩。
+- Cursor 退出检测只认可执行文件本身是 Cursor 的进程(`isCursorExe`);整行匹配会把命令行里带 Cursor 路径的 shell 当 GUI,等 53 秒。
+- Codex 隔离测:`CODEX_HOME=<临时目录>` 跑安装器会**覆盖全局 LaunchAgent `net.carher.codex-models-sync`**(label 全局),测完 bootout 并删 plist。

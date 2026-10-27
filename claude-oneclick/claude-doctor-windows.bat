@@ -90,6 +90,12 @@ if (Test-Path $s) {
     P "  开机自动刷菜单     = $(if ($hook) { '已挂' } else { '没挂' })"
     if (-not $rpl) { Yel "/model 菜单里同一个模型会出现两次、还有画图模型:重新双击 claude-windows.bat" }
     if (-not $hook) { Yel "没挂开机自动刷菜单(key 新开的模型要手动说「刷模型」):重新双击 claude-windows.bat" }
+    # 10-27:「Not logged in · Run /login」= 首次启动问「用不用这把 key」时回车选了默认的 No
+    $gj = if ($env:CLAUDE_CONFIG_DIR) { Join-Path $env:CLAUDE_CONFIG_DIR '.claude.json' } else { Join-Path $env:USERPROFILE '.claude.json' }
+    $kt = if ($key.Length -ge 20) { $key.Substring($key.Length - 20) } else { $key }
+    $ks = 'new'; try { $r = (Get-Content $gj -Raw | ConvertFrom-Json).customApiKeyResponses; if ($r.rejected -contains $kt) { $ks = 'rejected' } elseif ($r.approved -contains $kt) { $ks = 'approved' } } catch {}
+    P "  这把 key 已同意使用 = $(switch ($ks) { 'approved' { '是' } 'rejected' { '否(之前点了 No)' } default { '还没问过' } })"
+    if ($ks -eq 'rejected') { Red "命令行显示「Not logged in」:这把 key 之前被选了「不使用」。下载最新的 claude-windows.bat 重跑一次(或在 Claude Code 里说「刷模型」)就会修好" }
     if ($base -ne $wantBase) { Red "settings.json 没指向公司网关:重新双击 claude-windows.bat" }
     if (-not $key) { Red "settings.json 里没有 key:重新双击 claude-windows.bat" }
     if ($tok) { Red "同时有 AUTH_TOKEN 和 API_KEY(/model 里只剩几个 Claude):重新双击 claude-windows.bat" }
@@ -134,6 +140,7 @@ if ($pkg -or $asar) {
     # 10-25:这项没写 ⇒ App 给 Code/Cowork 会话开「严格沙箱」且一个外网都不放 ⇒ npm install 失败(终端正常)
     $eg = @($cf.coworkEgressAllowedHosts)
     P "App 外网放行 : $(if ($cf.coworkEgressAllowedHosts) { $eg -join ',' } else { '(没设 ⇒ 严格沙箱,命令连不上外网)' })"
+    P "App 模型菜单 : $(if ($cf.inferenceModels) { @($cf.inferenceModels) -join ',' } else { '(没设 ⇒ App 自己拉,说「刷模型」后会和 key 一致)' })"
     if (-not ($eg -contains '*')) { Red "桌面 App 里跑命令连不上外网(npm install 会失败,设置页显示严格沙箱):完全退出 App,重新双击 claude-windows.bat" }
   } else { P "App 网关配置 : 没有 ($lib)"; Red "桌面 App 没配置过:完全退出 App,重新双击 claude-windows.bat" }
   if ($asar) {

@@ -210,6 +210,8 @@ if (typeof d.model === "string") d.model = real(d.model);
 // 旧的删、新的加、选中的已没权限就回默认 —— 与「刷模型」同一份逻辑(carher_models_refresh.js)。
 const ids = (process.env.CARHER_MODELS || "").split("\n").filter(Boolean);
 if (ids.length) require(process.env.CARHER_REFRESH).applyModels(d, ids);
+// 10-27:不预先同意 ⇒ 首次启动问「用不用这把 key」默认 No,回车就被记成拒绝 ⇒ 永远「Not logged in」
+try { require(process.env.CARHER_REFRESH).approveApiKey(process.env.CARHER_KEY, process.env.CLAUDE_CONFIG_DIR); } catch (e) {}
 fs.writeFileSync(p, JSON.stringify(d, null, 2) + "\n", { mode: 0o600 });
 fs.chmodSync(p, 0o600);
 ' || die "✗ 写配置失败"

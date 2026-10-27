@@ -189,3 +189,13 @@ def test_doctor_flags_unset_app_egress():
     mac = DOC.read_text(encoding="utf-8")
     for src in (mac, PS):
         assert "coworkEgressAllowedHosts" in src and "npm install 会失败" in src
+
+
+@pytest.mark.parametrize("state,red", [("rejected", True), ("approved", False)])
+def test_doctor_flags_rejected_api_key(tmp_path, gw, state, red):
+    """10-27 王德升「Not logged in · Run /login」= ~/.claude.json 里这把 key 在 customApiKeyResponses.rejected。
+    阳性对照:approved 时不许报红。"""
+    h = _home(tmp_path)
+    (h / ".claude.json").write_text(json.dumps({"customApiKeyResponses": {state: [KEY[-20:]]}}))
+    out, rep, concl = _run(h, gw)
+    assert ("Not logged in" in concl) == red, concl

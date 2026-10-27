@@ -395,3 +395,68 @@ def test_refresh_also_backfills_tool_search_default(tmp_path):
     s = {"env": dict(base["env"], ENABLE_TOOL_SEARCH="false")}
     rc, out, d = _refresh(s, "claude-opus-5-5", tmp_path)
     assert d["env"]["ENABLE_TOOL_SEARCH"] == "false"
+
+
+def _node(js, *args, env=None):
+    import json, subprocess
+    r = subprocess.run(["node", "-e", js, str(REFRESH), *args], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def test_approve_api_key_fixes_not_logged_in(tmp_path):
+    """10-27 王德升:命令行右下角一直「Not logged in · Run /login」。真因:首次启动问「用不用这把 key」默认 No,
+    回车就进了 customApiKeyResponses.rejected。本机隔离复现 rejected ⇒ Not logged in;approved ⇒ 正常。"""
+    key = "sk-FAKEwangdeshengkey00001"
+    tail = key[-20:]
+    cfg = tmp_path / ".claude.json"
+    cfg.write_text(json.dumps({"theme": "dark", "customApiKeyResponses": {"approved": ["old-key-tail-xxxxxxxx"], "rejected": [tail]}}))
+    js = "const m=require(process.argv[1]);console.log(m.approveApiKey(process.argv[2],process.argv[3]))"
+    assert _node(js, key, str(tmp_path)).strip() == "true"
+    g = json.loads(cfg.read_text())
+    assert g["theme"] == "dark", "别的设置被动了"
+    assert tail in g["customApiKeyResponses"]["approved"] and tail not in g["customApiKeyResponses"]["rejected"]
+    assert "old-key-tail-xxxxxxxx" in g["customApiKeyResponses"]["approved"], "原来同意过的别删"
+    assert _node(js, key, str(tmp_path)).strip() == "false", "已同意 ⇒ 不重复写"
+    # 坏 JSON 不覆盖
+    cfg.write_text("{bad")
+    assert _node(js, key, str(tmp_path)).strip() == "false" and cfg.read_text() == "{bad"
+
+
+def _app_lib(home, key):
+    lib = home / "Library" / "Application Support" / "Claude-3p" / "configLibrary"
+    lib.mkdir(parents=True)
+    me, other = "11111111-2222-3333-4444-555555555555", "99999999-2222-3333-4444-555555555555"
+    (lib / "_meta.json").write_text(json.dumps({"appliedId": me, "entries": [{"id": me, "name": "CarHer"}, {"id": other, "name": "My Bedrock"}]}))
+    (lib / f"{me}.json").write_text(json.dumps({"inferenceProvider": "gateway", "inferenceGatewayApiKey": key}))
+    (lib / f"{other}.json").write_text(json.dumps({"inferenceProvider": "bedrock"}))
+    return lib / f"{me}.json", lib / f"{other}.json"
+
+
+def test_refresh_also_sets_desktop_app_menu(tmp_path):
+    """10-27 用户:「刷模型在 App 里也搞定啊」。App 不读 settings.json,写 inferenceModels 后它不再自己拉,
+    菜单 = 这份(本机真 App 日志:skipped (inferenceModels obviates discovery); picker = 2)。只写 claude-*(App 拒非 Anthropic 名)。"""
+    import os, subprocess, sys
+    if sys.platform != "darwin":
+        import pytest; pytest.skip("路径按 mac 布局造")
+    home = tmp_path / "home"; (home / ".claude").mkdir(parents=True)
+    key = "sk-FAKEappkey0000000001"
+    mine, other = _app_lib(home, key)
+    (home / ".claude" / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_API_KEY": key, "ANTHROPIC_BASE_URL": "https://gw.example/pro"}}))
+    env = dict(os.environ, HOME=str(home), CARHER_MODELS="deepseek-v4.1-flash\nclaude-haiku-5-5\nclaude-opus-4-7\nclaude-opus-5-5\ngpt-image-2")
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    r = subprocess.run(["node", str(REFRESH)], env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    c = json.loads(mine.read_text())
+    assert c["inferenceModels"] == ["claude-opus-5-5", "claude-opus-4-7", "claude-haiku-5-5"]
+    assert json.loads(other.read_text()) == {"inferenceProvider": "bedrock"}, "别的 App 配置被动了"
+    assert "完全退出再打开" in r.stdout
+    # 换了 key 的那条不是我们这把 ⇒ 不动
+    c["inferenceGatewayApiKey"] = "sk-someone-else"; c.pop("inferenceModels"); mine.write_text(json.dumps(c))
+    subprocess.run(["node", str(REFRESH)], env=env, capture_output=True, text=True)
+    assert "inferenceModels" not in json.loads(mine.read_text())
+    # key 里没有任何 claude ⇒ 删掉我们写的列表,交回 App 自己拉(别写空菜单)
+    c["inferenceGatewayApiKey"] = key; c["inferenceModels"] = ["claude-opus-5-5"]; mine.write_text(json.dumps(c))
+    env["CARHER_MODELS"] = "deepseek-v4.1-flash"
+    subprocess.run(["node", str(REFRESH)], env=env, capture_output=True, text=True)
+    assert "inferenceModels" not in json.loads(mine.read_text())

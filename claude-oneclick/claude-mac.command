@@ -254,6 +254,80 @@ function applyModels(d, ids) {
   };
 }
 
+/* 桌面 App(Code 标签页)的模型菜单(10-27 用户:「刷模型在 App 里也搞定啊」)。
+   App 不读 settings.json 的 modelPicker,它自己在**启动时**去网关拉一次 /v1/models,结果只存在内存里。
+   App 配置项 `inferenceModels` 一旦写了,App 就不再自己拉、菜单 = 这份列表(本机实测日志:
+   「Model discovery: skipped (inferenceModels obviates discovery); picker = 2 (inferenceModels)」)。
+   ⇒ 刷模型把 key 里的 claude-* 写进去(App 只认 Claude 模型,非 claude 写进去会被它拒),菜单就和 key 完全一致;
+   App 要**完全退出再打开**才读新配置。只改我们自己那条(_meta.json 里叫 CarHer 的),别的配置不碰。 */
+function appConfigEntries() {
+  const roots = [];
+  if (process.platform === "darwin") roots.push(path.join(os.homedir(), "Library", "Application Support", "Claude-3p"));
+  else if (process.platform === "win32") {
+    if (process.env.LOCALAPPDATA) roots.push(path.join(process.env.LOCALAPPDATA, "Claude-3p"));
+    if (process.env.APPDATA) roots.push(path.join(process.env.APPDATA, "Claude-3p"));
+    // MSIX 版数据会被重定向到 Packages\Claude_*\LocalCache\Local\Claude-3p
+    try {
+      const pk = path.join(process.env.LOCALAPPDATA || "", "Packages");
+      for (const d of fs.readdirSync(pk)) if (/^Claude_/i.test(d)) roots.push(path.join(pk, d, "LocalCache", "Local", "Claude-3p"));
+    } catch (e) { /* 没有就算了 */ }
+  } else roots.push(path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "Claude-3p"));
+  const out = [];
+  for (const r of roots) {
+    const lib = path.join(r, "configLibrary");
+    let meta; try { meta = JSON.parse(fs.readFileSync(path.join(lib, "_meta.json"), "utf8")); } catch (e) { continue; }
+    for (const e of (meta && meta.entries) || []) {
+      if (e && e.name === "CarHer" && /^[a-f0-9-]{36}$/.test(e.id || "")) out.push(path.join(lib, e.id + ".json"));
+    }
+  }
+  return out;
+}
+function syncAppModels(ids, key) {
+  const want = ids.filter((i) => /^claude-/.test(i) && !/image|imagine|video|music/.test(i))
+    .sort((a, b) => familyRank(a) - familyRank(b) || b.localeCompare(a, "en", { numeric: true }));
+  const res = [];
+  for (const p of appConfigEntries()) {
+    let c; try { c = JSON.parse(fs.readFileSync(p, "utf8")); } catch (e) { continue; }
+    if (key && c.inferenceGatewayApiKey && c.inferenceGatewayApiKey !== key) continue;   // 不是这把 key 配的那条,不动
+    const before = Array.isArray(c.inferenceModels) ? c.inferenceModels.map((m) => (typeof m === "string" ? m : m && m.name)).filter(Boolean) : null;
+    if (!want.length) {
+      // key 里一个 Claude 模型都没有 ⇒ 别写空列表(App 会没有可选的),交回 App 自己拉
+      if (before) { delete c.inferenceModels; } else continue;
+    } else {
+      if (before && before.join("\n") === want.join("\n")) { res.push({ p, changed: false, models: want }); continue; }
+      c.inferenceModels = want;
+    }
+    const tmp = p + ".carher-tmp-" + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(c, null, 2) + "\n", { mode: 0o600 });
+    fs.renameSync(tmp, p);
+    res.push({ p, changed: true, models: want, added: want.filter((m) => !(before || []).includes(m)), removed: (before || []).filter((m) => !want.includes(m)) });
+  }
+  return res;
+}
+
+/* 把这把 key 记成「已同意」(10-27 王德升:命令行右下角一直「Not logged in · Run /login」)。
+   Claude Code 第一次看到 settings 里的 ANTHROPIC_API_KEY 会问「Do you want to use this API key?」,默认选中 **No**;
+   回车一下就记进全局配置 customApiKeyResponses.rejected,之后**每次启动都不用这把 key** ⇒ 显示未登录(请求照样走,
+   因为 App / -p 另有来源,但交互界面认为没登录)。本机隔离复现:rejected ⇒ Not logged in;approved ⇒ 正常。
+   比较的是 key 末尾 20 个字符(Claude Code 自己的 Vpe())。用户换 key 后旧条目留着无害。
+   配置文件:CLAUDE_CONFIG_DIR/.claude.json,没设时是 ~/.claude.json(和 settings.json 不在一个目录)。 */
+function approveApiKey(key, configDir) {
+  const tail = String(key || "").trim().slice(-20);
+  if (!tail) return false;
+  const p = configDir ? path.join(configDir, ".claude.json") : path.join(os.homedir(), ".claude.json");
+  let g = {};
+  try { g = JSON.parse(fs.readFileSync(p, "utf8").replace(/^\uFEFF/, "")) || {}; } catch (e) { if (fs.existsSync(p)) return false; }
+  const r = (g.customApiKeyResponses && typeof g.customApiKeyResponses === "object") ? g.customApiKeyResponses : {};
+  const approved = Array.isArray(r.approved) ? r.approved.filter((x) => typeof x === "string") : [];
+  const rejected = Array.isArray(r.rejected) ? r.rejected.filter((x) => typeof x === "string") : [];
+  if (approved.includes(tail) && !rejected.includes(tail)) return false;
+  g.customApiKeyResponses = { ...r, approved: approved.includes(tail) ? approved : [...approved, tail], rejected: rejected.filter((x) => x !== tail) };
+  const tmp = p + ".carher-tmp-" + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(g, null, 2) + "\n", { mode: 0o600 });
+  fs.renameSync(tmp, p);
+  return true;
+}
+
 /* 在 settings.hooks.SessionStart 里挂(或更新)我们那一条自动刷新 hook。重跑幂等:先摘掉旧的
    (认 command 里的 carher_models_refresh.js),用户自己的 hook 一条不动。
    exec 形式(args)不经 shell ⇒ 路径带空格/中文、Windows 没 Git Bash 都不怕(hook args 需 2.1.139+)。 */
@@ -318,6 +392,12 @@ async function main() {
     try { fs.chmodSync(SETTINGS, 0o600); } catch (e) { /* Windows */ }
   }
   try { fs.unlinkSync(path.join(CLAUDE_HOME, "cache", "gateway-models.json")); } catch (e) { /* 没有就算了 */ }
+  let app = [];
+  try { app = syncAppModels(ids, key); } catch (e) { logLine("app sync failed " + e.message); }
+  for (const a of app) if (a.changed) logLine("app menu " + a.models.join(","));
+  let keyFixed = false;
+  try { keyFixed = approveApiKey(key, process.env.CLAUDE_CONFIG_DIR); } catch (e) { /* 写不了就算了,不影响菜单 */ }
+  if (keyFixed) logLine("approved api key (was rejected/unanswered)");
   const n = r.d.modelPicker ? r.d.modelPicker.options.length : 0;
   logLine(`ok menu=${n} added=${r.added.join(",") || "-"} removed=${r.removed.join(",") || "-"}` +
     (r.modelReset ? ` reset=${r.modelReset}` : "") + (r.haikuSet ? ` haiku=${r.haikuSet}` : ""));
@@ -327,10 +407,18 @@ async function main() {
   if (!r.added.length && !r.removed.length) say("菜单和上次一样,没有变化");
   if (r.modelReset) say(`你之前选的 ${r.modelReset} 已经没有权限,已改回默认模型`);
   if (r.haikuSet) say(`后台小任务用的模型设为 ${r.haikuSet}(你的 key 里最新的 haiku)`);
+  for (const a of app) {
+    if (!a.changed) { say(`桌面 App 菜单和上次一样(${a.models.length} 个 Claude 模型)`); continue; }
+    say(`桌面 App 菜单已更新为 ${a.models.length} 个 Claude 模型:${a.models.join(", ")}`);
+    if (a.added && a.added.length) say(`  App 新增:${a.added.join(", ")}`);
+    if (a.removed && a.removed.length) say(`  App 删除:${a.removed.join(", ")}`);
+    say("  ⚠️ 桌面 App 要**完全退出再打开**才会显示新菜单(Mac:Cmd+Q;Windows:右下角托盘图标右键退出)");
+  }
+  if (keyFixed) say("已修好「Not logged in」:这把 key 之前被拒绝过,现在记成已同意");
   say("新开一个 Claude Code 会话(或桌面 App 新开对话)后 /model 里就是新列表");
 }
 
-module.exports = { pickerRows, applyModels, hookEntry };
+module.exports = { pickerRows, applyModels, hookEntry, approveApiKey, syncAppModels, appConfigEntries };
 
 if (require.main === module) {
   main().catch((e) => {
@@ -374,6 +462,8 @@ if (typeof d.model === "string") d.model = real(d.model);
 // 旧的删、新的加、选中的已没权限就回默认 —— 与「刷模型」同一份逻辑(carher_models_refresh.js)。
 const ids = (process.env.CARHER_MODELS || "").split("\n").filter(Boolean);
 if (ids.length) require(process.env.CARHER_REFRESH).applyModels(d, ids);
+// 10-27:不预先同意 ⇒ 首次启动问「用不用这把 key」默认 No,回车就被记成拒绝 ⇒ 永远「Not logged in」
+try { require(process.env.CARHER_REFRESH).approveApiKey(process.env.CARHER_KEY, process.env.CLAUDE_CONFIG_DIR); } catch (e) {}
 fs.writeFileSync(p, JSON.stringify(d, null, 2) + "\n", { mode: 0o600 });
 fs.chmodSync(p, 0o600);
 ' || die "✗ 写配置失败"

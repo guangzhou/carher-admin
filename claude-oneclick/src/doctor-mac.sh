@@ -70,6 +70,13 @@ if [ -f "$S" ]; then
     P "  开机自动刷菜单     = $([ "${HOOK:-0}" -gt 0 ] && echo 已挂 || echo 没挂)"
     [ "$RPL" = true ] || yel "/model 菜单里同一个模型会出现两次、还有画图模型:重新跑一次 claude-mac.command"
     [ "${HOOK:-0}" -gt 0 ] || yel "没挂开机自动刷菜单(key 新开的模型要手动说「刷模型」):重新跑一次 claude-mac.command"
+    # 10-27 王德升:「Not logged in · Run /login」= 首次启动问「用不用这把 key」时回车选了默认的 No
+    GJ="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/.claude.json}"; GJ="${GJ:-$HOME/.claude.json}"
+    KT="$(printf '%s' "$KEY" | tail -c 20)"
+    KS=$(CARHER_F="$GJ" CARHER_T="$KT" node -e 'try{const r=(JSON.parse(require("fs").readFileSync(process.env.CARHER_F,"utf8")).customApiKeyResponses)||{};const t=process.env.CARHER_T;process.stdout.write((r.rejected||[]).includes(t)?"rejected":(r.approved||[]).includes(t)?"approved":"new")}catch(e){process.stdout.write("new")}' 2>/dev/null)
+    KSW="还没问过"; [ "$KS" = approved ] && KSW="是"; [ "$KS" = rejected ] && KSW="否(之前点了 No)"
+    P "  这把 key 已同意使用 = ${KSW}"
+    [ "$KS" = rejected ] && red "命令行显示「Not logged in」:这把 key 之前被选了「不使用」。下载最新的 claude-mac.command 重跑一次(或在 Claude Code 里说「刷模型」)就会修好"
     [ "$BASE" = "$WANT_BASE" ] || red "settings.json 没指向公司网关(ANTHROPIC_BASE_URL=${BASE:-空}):重新跑一次 claude-mac.command"
     [ -n "$KEY" ] || red "settings.json 里没有 key:重新跑一次 claude-mac.command"
     [ -n "$TOK" ] && red "同时有 AUTH_TOKEN 和 API_KEY(/model 里只剩几个 Claude):重新跑一次 claude-mac.command"
@@ -115,6 +122,8 @@ if [ "$(uname -s)" = Darwin ] && [ -d "$APP" ]; then
       # 10-25:这项没写 ⇒ App 给 Code/Cowork 会话开「严格沙箱」且一个外网都不放 ⇒ npm install 失败(终端正常)
       EG=$(jget "$CF" coworkEgressAllowedHosts)
       P "App 外网放行 : ${EG:-(没设 ⇒ 严格沙箱,命令连不上外网)}"
+      AM=$(jget "$CF" inferenceModels)
+      P "App 模型菜单 : ${AM:-(没设 ⇒ App 自己拉,说「刷模型」后会和 key 一致)}"
       case "$EG" in *'"*"'*) :;; *) red "桌面 App 里跑命令连不上外网(npm install 会失败,设置页显示严格沙箱):完全退出 App,重新跑一次 claude-mac.command";; esac
     else
       P "App 网关配置 : _meta.json 指向的配置不存在"; red "桌面 App 配置缺了:重新跑一次 claude-mac.command"

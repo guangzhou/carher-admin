@@ -288,6 +288,7 @@ __MODEL_PREFIX__ 一键安装(零依赖,不用装 Python / Node)
   Mac     :双击 INSTALL-Mac.command
            (若提示"无法打开、来自身份不明的开发者",右键该文件→打开→再点"打开")
   Windows :双击 INSTALL-Windows.cmd
+  Linux   :在这个文件夹打开终端,运行 sh ./INSTALL-Mac.command(Cursor 要先打开过一次并登录)
            (若弹安全提示,选"仍要运行")
 
   安装过程中窗口会让你「粘贴 API Key 后回车」——粘一次就好,脚本自动写进去。
@@ -370,6 +371,7 @@ Cursor 升级后 __MODEL_PREFIX__ 的模型不见了怎么办?
   先完全退出 Cursor(Mac: Cmd+Q;Windows: 右键托盘图标退出),然后
   Mac     :双击 UNINSTALL-Mac.command
   Windows :双击 UNINSTALL-Windows.cmd
+  Linux   :在这个文件夹打开终端,运行 sh ./UNINSTALL-Mac.command
   它会**先预演一遍**列出要动什么,你输入 yes 才真的执行。做四件事:
   1) 把 Cursor 的界面文件从备份还原(只用与当前 Cursor 同版本的备份 —— 版本不对它会
      拒绝,并让你用官方安装包覆盖安装一次,那样也能回原厂,聊天记录和设置不会丢)

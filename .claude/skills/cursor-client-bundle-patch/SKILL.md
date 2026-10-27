@@ -57,8 +57,10 @@ description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 
 - **「刷模型」= `--refresh-models`**:只改菜单,不碰 bundle、Key、小代理。Cursor 开着时**直接写库没用**(退出时会把内存里的旧菜单写回去),
   所以先返回(让 agent 说完话),再起一个脱离的 worker:等 8 秒 → osascript 正常退出(有弹窗就等,不强杀,
   最多 3 分钟)→ 写库 → `open` 重开。日志 `~/.carher/cursor-refresh.log`。skill 装在
-  `~/.cursor/skills/carher-refresh-models/`,命令指向 `~/.carher/cursor-setup/cursor_team_setup.js`(安装时复制过去,
-  解压目录被删也能用)。
+  `~/.cursor/skills/carher-refresh-models-cursor/`(10-27 改名:原名和 Claude 那份同名,Cursor agent 也读 `~/.claude/skills`,
+  选了 Claude 那份、Cursor 菜单根本没动;安装时删旧名),命令指向 `~/.carher/cursor-setup/cursor_team_setup.js`(安装时复制过去,
+  解压目录被删也能用)。worker 判「Cursor 退了没」只认**可执行文件本身**是 Cursor 的进程(`isCursorExe`);
+  原来 pgrep -f 整行匹配,把命令行里带 Cursor 路径的 zsh 也当 GUI,等了 53 秒。验:`cursor-agent -p "刷模型"` + 看 refresh.log。
 - 菜单账本 `~/.carher/cursor-menu.json`:前缀表认不出的新名字(网关明天上的)靠它让 `isOurs`/`--uninstall` 认出。
 - 台架:`retire_model_offline_cases.sh` 用 `CX_MODELS_JSON` 注入网关返回,不出网;⑬ 没 Key 不动、⑭ 刷模型(删/加/改回默认/幂等/没 Key 拒绝)。
   `setup_impl_parity.py` / `setup_package_freshness.py` 第③腿改成断言「无写死清单 + 有 fetchKeyModels/刷模型」。

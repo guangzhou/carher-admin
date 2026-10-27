@@ -20,7 +20,7 @@ description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的�
 标「From gateway」)+ `settings.json` 的 `modelPicker`(标「Custom model」)。10-25 用户截图 74 行(10+64)而脚本说 26 ——
 数 JSON 永远对不上屏幕,**判菜单只用 `scripts/cc-model-menu.sh`**(真起 claude、按 /model 滚到底、报总行数和重复)。
 
-现行做法(`src/carher_models_refresh.js`,安装器和「刷模型」共用,`applyModels`/`pickerRows`/`hookEntry` 是纯函数):
+现行做法(`src/carher_models_refresh.js`,安装器、「刷模型」、开会话 hook 三处共用;导出 `applyModels`/`pickerRows`/`hookEntry`/`approveApiKey`/`syncAppModels`/`appConfigEntries`):
 - `modelPicker.options` = 这把 key **全部可聊天模型**:`claude-*` 在前(fable→opus→sonnet→haiku,同家族版本新→旧,
   **不写 label** ⇒ Claude Code 自己显示 Opus 5.5);非 claude 带 `behavesAs: claude-sonnet-5-5`(不写就每次启动告警按 200k 算)。
   出图/视频/音乐、`codex-auto-review` 不进。
@@ -31,7 +31,7 @@ description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的�
 - **自动刷新**:安装器在 `hooks.SessionStart` 挂 `{matcher:"startup", command:<node绝对路径>, args:[脚本,"--quiet"], async:true, timeout:60}`。
   exec 形式不经 shell(路径带空格、Windows 无 Git Bash 都行,需 2.1.139+);`--quiet` 不出声、失败退 0、只写
   `~/.claude/carher/refresh.log`;先写临时文件再 rename(Claude Code 监视 settings.json)。重跑幂等,用户自己的 hook 不动。
-  实测:菜单删掉 kimi-k3 + 塞假名 ⇒ 开一次会话自动恢复。「刷模型」skill + `CLAUDE.md` 的 `CARHER-REFRESH` 块保留当「立刻刷」。
+  实测:菜单删掉 kimi-k3 + 塞假名 ⇒ 开一次会话自动恢复。「刷模型」skill(`carher-refresh-models-claude`)+ `CLAUDE.md` 的 `CARHER-REFRESH` 块保留当「立刻刷」。
 - 当前 `model` 是网关名且已没权限 ⇒ 删掉回默认(`opus` 别名、`[1m]` 后缀不动)。拉不到列表就不改;改前备份 `.bak-carher-refresh`。
 - **haiku**:写 `env.ANTHROPIC_DEFAULT_HAIKU_MODEL` = key 里最新的 `claude-haiku-*`(版本按数字比);我们写过的老 haiku 会升,
   用户指到非 haiku 的不动。10-25 网关已上 `claude-haiku-5-5`(Claude Code 默认要它,之前 403)。
@@ -60,6 +60,7 @@ claude-oneclick/
   src/carher_models_refresh.js                   ← 菜单 + haiku + 自动刷新 hook(两个安装器 @@EMBED)
 .claude/skills/claude-oneclick-rollout/scripts/
   cc-model-menu.sh      ← 真实 /model 菜单(行数/重复),可指隔离 CLAUDE_CONFIG_DIR
+  app-model-menu.sh     ← 桌面 App 当前菜单从哪来(inferenceModels / 自己拉)+ 最近一次 Model discovery 日志行
   app-sandbox-ab.sh     ← App 严格沙箱对照(--managed-settings 喂 App 那份 vs 不加)
 ```
 发版:`bash claude-oneclick/build.sh` → 干净 HOME 真跑

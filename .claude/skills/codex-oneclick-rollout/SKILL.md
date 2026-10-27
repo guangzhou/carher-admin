@@ -285,3 +285,11 @@ grep -c 'CARHER-IMAGE-BEGIN' ~/.codex/AGENTS.md   # 必须 == 1
 
 相关 skill：`codex-local-cli-toolchain`（内置工具为何没注册、137 分诊）·
 `litellm-198-key-allowlist`（白名单通用 SOP）·`codex-desktop-startup-diagnose`（启动卡顿，另一条线）。
+
+## Codex App 的菜单从哪来(10-27 真验)
+
+App 不自己拉网关:它启动自带 codex(`<App>/Contents/Resources/codex-cli/bin/codex`,10-27 是 0.160)的 `app-server`,
+菜单 = `model/list`,读 `config.toml` 的 `model_catalog_json`(刷模型 / 每日同步写的那份)。
+判菜单对不对:`python3 .claude/skills/codex-oneclick-rollout/scripts/codex-app-model-list.py`(可配 `CODEX_HOME`)。
+10-27 隔离假网关只给 3 个模型:跑同步后 model/list 37 → 3。`codex exec "刷模型"` 会照 AGENTS.md 的 `CARHER-REFRESH` 块跑同步。
+⚠ 在隔离 `CODEX_HOME` 里跑安装器会**覆盖全局 LaunchAgent `net.carher.codex-models-sync`**(label 全局),测完 `launchctl bootout` 并删 plist。

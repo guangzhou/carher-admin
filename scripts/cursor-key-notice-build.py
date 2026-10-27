@@ -248,9 +248,9 @@ def build_card(live: list[str]) -> dict:
         "margin": "8px 0px 0px 0px",
         "columns": [
             {"tag": "column", "width": "weighted", "weight": 1,
-             "elements": [_btn("查看自己的 Key", KEY_QUERY, "default")]},
+             "elements": [_btn("查看自己的 Key", KEY_QUERY, "primary_filled")]},
             {"tag": "column", "width": "weighted", "weight": 1,
-             "elements": [_btn("模型使用情况看板", DASHBOARD, "default")]},
+             "elements": [_btn("模型使用情况看板", DASHBOARD, "primary_filled")]},
         ]})
 
     return {

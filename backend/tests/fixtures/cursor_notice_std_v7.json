@@ -381,7 +381,7 @@
           "tag": "plain_text",
           "content": "查看自己的 Key"
          },
-         "type": "default",
+         "type": "primary_filled",
          "width": "fill",
          "size": "medium",
          "behaviors": [
@@ -407,7 +407,7 @@
           "tag": "plain_text",
           "content": "模型使用情况看板"
          },
-         "type": "default",
+         "type": "primary_filled",
          "width": "fill",
          "size": "medium",
          "behaviors": [

@@ -2800,7 +2800,7 @@
 +}
 --- a/admin-ui/src/components/slots-panel.tsx
 +++ b/admin-ui/src/components/slots-panel.tsx
-@@ -0,0 +1,463 @@
+@@ -0,0 +1,467 @@
 +import { CreditsTrend } from '@/components/credits-trend'
 +import { EmptyEventsDialog } from '@/components/empty-events-dialog'
 +import { SlotUsersDialog } from '@/components/slot-users-dialog'
@@ -2903,7 +2903,7 @@
 +  const al = s.alarms
 +  const issues = ([
 +    ['429', al.http429], ['空回复给了用户', al.emptyReturned], ['排队超时', al.queueTimeouts],
-+    ['额度用尽', al.exhausted], ['被限制', al.restricted],
++    ['429 重试仍失败', al.exhausted], ['被限制', al.restricted],
 +  ] as [string, number][]).filter(([, n]) => n > 0)
 +  const total = issues.reduce((a, [, n]) => a + n, 0)
 +  const oldAccount = total > 0 && al.onCurrentAccount === 0
@@ -2932,7 +2932,7 @@
 +    ['重试 429', String(st.retry429)],
 +    ['空回复 / 救回', `${st.empty} / ${st.empty - st.emptyReturned}`],
 +    ['排队超时', String(st.queueTimeouts)],
-+    ['用尽 / 被限', `${st.exhausted} / ${st.restricted}`],
++    ['429 重试仍失败 / 被限', `${st.exhausted} / ${st.restricted}`],
 +  ]
 +  return (
 +    <div className={`flex flex-col rounded-lg border bg-card p-4 ${s.closed ? 'border-amber-400' : ''}`}>
@@ -2985,7 +2985,11 @@
 +            {issues.map(([k, n], i) => (
 +              <span key={k}>
 +                {i > 0 && ' · '}
-+                {k === '空回复给了用户'
++                {k === '429 重试仍失败'
++                  ? <span title='上游一直回 429（太忙），本槽重试了 6 次都没成功，最后把错误还给了用户（LiteLLM 会再走兜底）。不是号的额度用完——额度用完会自动换号，不计在这里'>{k} {n}</span>
++                  : k === '排队超时'
++                  ? <span title='槽满了，请求在这里排队 120 秒还没轮到，返回「上游繁忙」；LiteLLM 收到后按兜底顺序换别的模型回答（现在多半落到 Grok），用户不会看到报错但会等很久'>{k} {n}</span>
++                  : k === '空回复给了用户'
 +                  ? <button type='button' className='underline underline-offset-2 hover:text-red-700' onClick={() => setEmptyOpen(true)} title='看是哪把 198 LiteLLM key、什么模型'>{k} {n}</button>
 +                  : `${k} ${n}`}
 +              </span>

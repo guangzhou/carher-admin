@@ -17,6 +17,8 @@
  *   ZKD_MAX_CONV       最多缓存多少条会话，默认 400
  *   ZKD_MAX_BYTES      会话缓存总字节上限，默认 800MB
  *   ZKD_TTL_MIN        会话闲置多久淘汰，默认 240 分钟
+ *   ZKD_RETRY_ONCE     上游连接被断且还没回任何字节时，自动重发一次（默认 1；0 = 关）
+ *   ZKD_MAX_SOCKETS    到 LiteLLM 的连接池上限，默认 256
  */
 
 const http = require('http')
@@ -30,9 +32,19 @@ const UPSTREAM = process.env.ZKD_UPSTREAM || 'http://litellm-proxy.litellm-produ
 const MAX_CONV = parseInt(process.env.ZKD_MAX_CONV || '400', 10)
 const MAX_BYTES = parseInt(process.env.ZKD_MAX_BYTES || String(800 * 1024 * 1024), 10)
 const TTL_MS = parseInt(process.env.ZKD_TTL_MIN || '240', 10) * 60 * 1000
+// 2026-10-27：LiteLLM worker 偶发崩溃（uvloop 0.22.1 fd 双关 bug）会把在途连接全掐断，
+// zk-delta 这边看到 `socket hang up`，用户收到 502 白等 8 秒。崩的那一瞬只要还没回过一个字节，
+// 上游就还没开始给客户端吐内容，这时换一条新连接重发一次，用户基本无感。
+// 已经开始回字节的不能重发（会重复内容），照旧把错误交给客户端。
+const RETRY_ONCE = process.env.ZKD_RETRY_ONCE !== '0'
+// 显式连接池：并发多起来时给一个明确上限；空闲连接 4s 就关
+// （低于 uvicorn timeout_keep_alive=5s，避免拿到对面正在关的旧连接——那是另一种 socket hang up）。
+const MAX_SOCKETS = parseInt(process.env.ZKD_MAX_SOCKETS || '256', 10)
 
 const up = new URL(UPSTREAM)
 const upMod = up.protocol === 'https:' ? https : http
+const upAgent = new upMod.Agent({ keepAlive: true, keepAliveMsecs: 1000, maxSockets: MAX_SOCKETS, maxFreeSockets: 64, scheduling: 'lifo' })
+upAgent.on('free', (sock) => { sock.setTimeout(4000, () => sock.destroy()) })
 
 // ---------- 计数器（G4：每一次降级都要有数） ----------
 const M = {
@@ -56,6 +68,12 @@ const M = {
   // 注意 401/403 不进这两个字段（它们本来就不算硬失败），否则语义又被稀释了。
   upstream_last_hard_at: 0,   // epoch ms；0 = 从来没有过
   upstream_ok_since_hard: 0,  // 自最后一发硬失败以来连续 2xx 的发数
+  upstream_conn_error: 0,     // 到 LiteLLM 的连接被断 / 连不上（socket hang up / ECONNRESET …）
+  upstream_retry_ok: 0,       // 其中自动重发一次后拿到响应的
+  upstream_retry_fail: 0,     // 重发也没救回来的（这些用户会收到 502）
+  upstream_midstream_abort: 0, // 已经开始回字节后上游断了（不能重发，只能断开客户端让它自己重试）
+  inflight: 0,                // 当前正在转发的请求数
+  inflight_peak: 0,           // 自启动以来最高并发
   bytes_in: 0,          // 客户端 → 本服务（广域网这一跳）
   bytes_out: 0,         // 本服务 → LiteLLM（集群内这一跳）
   conv_live: 0,
@@ -156,7 +174,12 @@ function log (ev, kv) {
 }
 
 // ---------- 转发 ----------
-function forward (req, res, path, bodyBuf, extraRespHeaders) {
+// 日志里带上是谁的请求：key 别名不在请求里，只能用 authorization 哈希前缀（同 handle 校验用的那个）。
+// 有了它，断线那一行能直接对上是哪把 key，不用再靠对时间去猜（10-27 那次就是猜出来的）。
+function whoOf (req) { return authHashOf(req).slice(0, 12) }
+
+function forward (req, res, path, bodyBuf, extraRespHeaders, tag, attempt) {
+  attempt = attempt || 1
   const headers = {}
   for (const k of Object.keys(req.headers)) {
     const lk = k.toLowerCase()
@@ -175,7 +198,13 @@ function forward (req, res, path, bodyBuf, extraRespHeaders) {
     port: up.port || (up.protocol === 'https:' ? 443 : 80),
     method: req.method,
     path: (up.pathname === '/' ? '' : up.pathname.replace(/\/$/, '')) + path,
-    headers
+    headers,
+    agent: upAgent
+  }
+  if (attempt === 1) {
+    M.inflight++; if (M.inflight > M.inflight_peak) M.inflight_peak = M.inflight
+    let counted = true
+    res.on('close', () => { if (counted) { counted = false; M.inflight-- } })
   }
 
   const ureq = upMod.request(opts, (ures) => {
@@ -187,14 +216,33 @@ function forward (req, res, path, bodyBuf, extraRespHeaders) {
         M.upstream_last_hard_at = Date.now(); M.upstream_ok_since_hard = 0
       }
     }
+    if (attempt > 1) M.upstream_retry_ok++
     const h = Object.assign({}, ures.headers, extraRespHeaders || {})
     delete h['transfer-encoding']
     delete h['connection']
     res.writeHead(ures.statusCode, h)
+    // 上游回到一半被掐断（worker 崩）：pipe 不会替你结束 res ⇒ 客户端一直挂着等，直到 Cursor 自己超时。
+    // 立刻把客户端连接也断掉，让它知道这一轮没了、可以重试（10-27 实测旧版这里挂 >8s 不结束）。
+    ures.on('aborted', () => {
+      M.upstream_midstream_abort++
+      log('upstream_midstream_abort', Object.assign({ who: whoOf(req), status: ures.statusCode }, tag || {}))
+      res.destroy()
+    })
     ures.pipe(res)
   })
   ureq.on('error', (e) => {
-    log('upstream_error', { msg: e.message })
+    M.upstream_conn_error++
+    const kv = Object.assign({ msg: e.message, who: whoOf(req), attempt, bytes: bodyBuf.length, path }, tag || {})
+    // 还没给客户端回过任何东西、客户端也还在 ⇒ 换一条新连接重发一次
+    if (RETRY_ONCE && attempt === 1 && !res.headersSent && !res.destroyed) {
+      log('upstream_error_retry', kv)
+      const r2 = forward(req, res, path, bodyBuf, extraRespHeaders, tag, 2)
+      // 把第二发的 response 转给调用方（handleDelta 靠它在 2xx 后提交会话状态）
+      r2.on('response', (ures) => ureq.emit('retried_response', ures))
+      return
+    }
+    if (attempt > 1) M.upstream_retry_fail++
+    log('upstream_error', kv)
     if (!res.headersSent) sendJson(res, 502, { error: { type: 'zkd_upstream_error', message: e.message, code: '502' } })
     else res.end()
   })
@@ -291,6 +339,7 @@ async function handleDelta (req, res) {
 
   log('turn', {
     handle: handle.slice(0, 12),
+    who: whoOf(req),
     mode: env.handle ? 'delta' : 'full',
     base: env.handle ? env.base_count : 0,
     delta_items: delta.length,
@@ -306,8 +355,8 @@ async function handleDelta (req, res) {
     'x-zk-handle': handle,
     'x-zk-count': String(newCount),
     'x-zk-rebuilt-bytes': String(fullBuf.length)
-  })
-  ureq.on('response', (ures) => {
+  }, { handle: handle.slice(0, 12), items: newCount })
+  const commit = (ures) => {
     if (ures.statusCode >= 200 && ures.statusCode < 300) {
       const old = store.get(handle)
       if (old) storeBytes -= old.bytes
@@ -317,7 +366,9 @@ async function handleDelta (req, res) {
       storeBytes += bytes
       evictIfNeeded()
     }
-  })
+  }
+  ureq.on('response', commit)
+  ureq.on('retried_response', commit)
 }
 
 // ---------- HTTP 服务 ----------

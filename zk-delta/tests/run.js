@@ -350,6 +350,10 @@ async function main () {
       console.log('     样本 ' + st.checked + ' 条：进增量 ' + st.proved + '，退全量 ' + st.refused)
     }
 
+    // ---------- ⑪ 上游断线自动重发一次（2026-10-27）----------
+    console.log('\n[11] 上游把连接掐断：重发一次 / 不重复重发 / 已出字不重发 / 开关')
+    await require('./retry_hangup').run(ok)
+
     // ---------- 汇总 ----------
     const ms = await metrics(P_SIDECAR)
     const mv = JSON.parse((await H.get(P_SERVER, '/metrics.json')).body.toString())

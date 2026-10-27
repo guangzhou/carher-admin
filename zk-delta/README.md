@@ -121,6 +121,23 @@ zk-delta 等于白装。所以要求 100%，不留余量。
 
 ⑩a 里那条「说 ok 却重建错」是**唯一会静默污染上游**的失败模式，必须恒为 0。
 
+## 上游断线（10-27）
+
+**现象**：日志 `upstream_error msg=socket hang up`（上线以来 ~60 次，10-09 以后 13 次）。
+**根因不在 zk-delta**：LiteLLM 某个 worker 崩了，它手上所有在途连接一起断（uvloop 0.22.1 fd 双关 bug，
+见 `litellm-gray-rollout/patches/v1.106.4/README.md` 10-27 节，已换 0.23.0）。zk-delta 只是被断的那一方。
+
+zk-delta 这边做三件事，让它断了用户也少受罪（`server.js`，测试 `tests/retry_hangup.js`，进 run.js 第 [11] 组）：
+1. **还没回过任何字节就被断 ⇒ 自动重发一次**（`ZKD_RETRY_ONCE=0` 关）。上游那时还没开始给客户端吐内容，重发安全；
+   第二发也断就照旧 502，不无限重试。已经开始回字节的不重发（会重复内容）。
+2. **回到一半被断 ⇒ 立刻把客户端连接也断掉**。旧版这里 `pipe` 不结束 `res`，客户端一直挂着（实测 >8s 不结束），
+   现在客户端马上知道这轮没了、可以重试。计数 `upstream_midstream_abort`。
+3. **日志带 `who=`**（authorization 哈希前 12 位）+ `handle=`，断线那一行能直接对上是哪把 key，不用再对时间猜。
+
+并发：显式 Agent（keepAlive，`ZKD_MAX_SOCKETS` 默认 256，空闲 4s 关——低于 uvicorn `timeout_keep_alive=5s`，
+避免拿到对面正在关的旧连接）；`/metrics.json` 加 `inflight` / `inflight_peak`。
+实测单副本不是瓶颈：2.3MB / 600 条的会话重建 + 全量摘要 ~3.7ms 一轮，10-27 白天 peak 并发个位数、CPU 13m。
+
 ## 部署
 
 ```bash

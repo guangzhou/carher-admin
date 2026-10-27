@@ -278,7 +278,8 @@ def kind_of(ep):
         return "zerokey-cursor"
     if re.match(r"zero-\d+", ep):
         return "zerokey账号"
-    if "kiro" in ep:
+    # aws-* = kiro 槽位实例改名后的组（10-27），api_base 是裸 ClusterIP ⇒ 走「外部网关」后按组名再认
+    if "kiro" in ep or ep.startswith("aws-"):
         return "kiro"
     if "copilot" in ep:
         return "copilot2api"

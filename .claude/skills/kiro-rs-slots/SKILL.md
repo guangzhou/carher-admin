@@ -81,6 +81,15 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 - 现场复现：直打 30891 `/v1/messages` 不带身份头（不写绑定），敏感 prompt 见 `scripts/kiro-upstream-probe.py` 的 `SENSITIVE`。🔴 shell 里把「模型 场景」拼成一个 `$a` 传参会变成一个参数，kiro.rs 会**静默接受**名叫 `claude-opus-5-5 sensitive` 的模型并回正常内容 ⇒ 假阴性。
 - 实测（10-27）：opus-5 直打敏感题 22/22、同会话紧跟 5.5 被拦后 10/10 有回答；opus-4.8 10/10；但换过去后 opus-5 也空出现过 2 次（偶发，原因未查）。
 
+### tool_use_id 规整（补丁 0014，slots45 起）
+
+Kiro 只认 `^[A-Za-z0-9_-]{1,64}$`，否则整单 400 `Invalid tool use format` ⇒ LiteLLM 兜底到 `sa-grok-4.20`。
+Cursor 同一对话里先用 grok 再切 opus，历史 id 是 `call-<uuid>-N\nfc_…`（81 字符）⇒ 10-27 罗开杰 27/27 兜底。
+converter 里 tool_use.id 与 tool_result.tool_use_id 走同一个 `normalize_tool_use_id`：合法原样；不合法 ⇒ 非法字符换 `_`、截 55 + `_` + **原 id** 的 8 位 sha256（只差一个字符/尾巴的两个 id 不撞）。只改历史，本轮新 id 由上游下发，客户端不用反向映射。
+- 验：`scripts/kiro-tool-shape-probe.py`（直打）/ `--target gateway`；排查：`scripts/kiro-fallback-shape-triage.py <alias>`（skill `litellm-198-key-error-triage`）。
+- 未修同类：工具参数是数组/字符串（`Improperly formed request`）、工具无 description。老实例 `kiro-rs` 没打 0014。
+- slots44 是只修长度的中间版（在 242 里，别用）。
+
 ### 上线前回归（一条命令）
 
 ```bash
@@ -88,6 +97,7 @@ scripts/kiro-slots-refusal/regress.sh v2026.10.1-carher-slotsNN --control <现�
 ```
 
 隔离 ns + 冷备号（refreshToken 换假值）跑：真敏感 prompt × 流式/非流式/thinking//cc 缓冲 + 阴性（中性、sonnet）+ 会话粘住；`--control` 旧版须在敏感用例上失败；`--mock` 测「备用也空 / 号被限 / 非 opus」；`--litellm` 起生产同镜像的一次性 LiteLLM 测四种线型。退出自动清理。
+- 每次都会跑 `1b. 工具形状`（`scripts/kiro-tool-shape-probe.py --expect-fixed`）：坏 tool id / 超长 id 在新版必须 200（补丁 0014）；`--control` 旧版同样跑一遍只报告。
 - 🔴 冷备号要**非 FREE**：`KIRO FREE` 号被 opus 选号过滤 ⇒ 隔离实例全 529「没有可用槽位」（10-27 #94），LiteLLM 那层再变 500。脚本已排除；单号也会被用到额度用尽退役（#74），所以每次现挑。
 - 🔴 mock 判「发没发备用模型」要整行匹配：`model=claude-opus-5` 是 `model=claude-opus-5.5` 的前缀。
 - 真 Claude Code 端到端（本机）：`CLAUDE_CONFIG_DIR=<空目录>` 且目录里 `settings.json` 写 `ANTHROPIC_BASE_URL/API_KEY`（🔴 `~/.claude/settings.json` 的 env 会盖掉命令行 env ⇒ 打到生产网关 403）；`-p "<prompt>"` 放第一个（🔴 `--disallowedTools A B` 会把后面的 prompt 吞成工具名）。正常任务（Write+Edit）也要跑一遍确认没多出提示。
@@ -137,7 +147,22 @@ python3 scripts/kiro-slots-watch.py --minutes 10
 相关代码：`src/kiro/lease.rs`（租约 + 心跳 + 地址）、`src/kiro/ready.rs`（就绪闸门）、
 `src/main.rs`（启动与交接顺序）、`token_manager` 的 `handoff_flush_and_mark` / `is_handed_off` 闸门。
 
-## 4. LiteLLM 侧（198 `litellm-product`）
+## 4.0 🔴 10-27 起现役组名是 `aws-*`，不是 `kiro-slots-*`
+
+用户定「后台 kiro 统一改 aws，避免别人看到」。槽位实例的 LiteLLM 组全换成 `aws-X`（22 个 = 原 12 个 kiro-slots + 老实例独有 9 个 + `aws-auto`），
+key 别名 `kiro-slots-X / kiro-X → aws-X`，key 白名单里直写的 `kiro-*` 换成对外名。`kiro-*` / `kiro-slots-*` 组**改名不删**，留着当回退。
+
+| 件 | 脚本（本仓 `scripts/`） | 要点 |
+|---|---|---|
+| 建组 | `aws-groups.py plan\|apply\|remove <slots_api_key>`（pod 内跑；198 上包装 `~/aws-*/run-groups.sh`） | api_base 写 **ClusterIP** `10.43.252.245:8990`（`/v2/model/info` 对普通 key 也吐 api_base，服务名里有 kiro）；model_info.id `aws/X`；`kiro_rate_multiplier/kiro_upstream_model_id` 改名 `upstream_*`；`anthropic/kiro-kimi-k3` → `anthropic/kimi-k3`，gpt-5.6 三个 → `anthropic/GPT-5.6-*`（大写躲 LiteLLM OpenAI 同名表，kiro.rs 先 to_lowercase）；价格字段同时写进 litellm_params（yaml 行只在 model_info 有缓存价） |
+| 兜底+重试0 | `aws-router.py plan\|apply\|restore` | 链 = 对应 kiro-slots 组的链**去掉所有 kiro-* 腿**（老池死，不兜它）；`aws-auto` 用 sonnet-5.5 的链；没链的（qwen3、老实例独有 9 个）只设重试 0 |
+| 身份头 | `kiro_slots_identity.py` 默认 hosts 加了 ClusterIP（三车道 sha `bbfcd346`） | **换 svc / ClusterIP 变了必须同步改这里**，否则 aws-* 请求不带身份 ⇒ 槽位乱跳 |
+| 切 key | `aws-switch-keys.py plan\|apply\|restore`（`--prefix`/`--only[-file]`/`--add-auto`/`--backup`） | 扫 `/key/list`（size 上限 100）；改别名 + 白名单直写名；`--add-auto` 加 `auto→aws-auto`（白名单为空的不写白名单）；改前回读、改后回读、写备份 |
+| 回归 | `aws-groups-regress.py`（KEY=临时 key） | 每组 chat/messages/responses 流式 + 工具调用 + 扫头和 body 里的 kiro |
+
+`auto`：对外名 `auto` → 组 `aws-auto`（Kiro 上游自动选模型），计价与 sonnet-5.5 完全一致（用户定），给全部 cursor / her(carher-*) key。
+
+## 4. LiteLLM 侧（198 `litellm-product`）（10-27 前的 kiro-slots-* 形状，工具仍可用于回退）
 
 四件东西，缺一件都不对：
 

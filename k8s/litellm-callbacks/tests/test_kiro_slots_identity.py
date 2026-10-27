@@ -44,6 +44,12 @@ def test_adds_headers_only_for_slots_target():
     assert out["headers"] == {"x-keep": "1", mod.HDR_HASH: "h123", mod.HDR_ALIAS: "cursor-alice"}
 
 
+def test_slots_cluster_ip_also_matches():
+    # aws-* 组的 api_base 写 ClusterIP（不在 /v2/model/info 里露服务名）
+    out = run({"litellm_params": {"api_base": "http://10.43.252.245:8990"}, "litellm_metadata": dict(MD)})
+    assert out["headers"][mod.HDR_HASH] == "h123"
+
+
 def test_other_providers_untouched():
     for base in (
         "http://10.43.109.5:8990",  # 老 kiro-rs

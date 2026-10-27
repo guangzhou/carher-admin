@@ -23,8 +23,12 @@ LiteLLM 自带的 `add_user_information_to_llm_headers` + `model_group_settings`
 
 开关
 ----
-环境变量 `KIRO_SLOTS_IDENTITY_HOSTS`（逗号分隔，默认 `kiro-rs-slots.kiro-rs.svc.cluster.local`），
-只有 api_base 的 host 完全等于其中一个才生效。设为空串 = 整体关闭。
+环境变量 `KIRO_SLOTS_IDENTITY_HOSTS`（逗号分隔，默认 `kiro-rs-slots.kiro-rs.svc.cluster.local`
++ 它的 ClusterIP `10.43.252.245`），只有 api_base 的 host 完全等于其中一个才生效。设为空串 = 整体关闭。
+
+为什么要认 IP（2026-10-27）：`aws-*` 组的 api_base 写 ClusterIP 而不是服务名 ——
+`/v2/model/info` 对普通 key 也吐 litellm_params.api_base，写服务名等于把后端线路名给每个人看。
+ClusterIP 只在删重建 svc 时才变；变了这里要跟着改（`kubectl -n kiro-rs get svc kiro-rs-slots`）。
 
 注册（litellm_settings.callbacks）::
 
@@ -38,7 +42,7 @@ from urllib.parse import urlparse
 
 from litellm.integrations.custom_logger import CustomLogger
 
-_DEFAULT_HOSTS = "kiro-rs-slots.kiro-rs.svc.cluster.local"
+_DEFAULT_HOSTS = "kiro-rs-slots.kiro-rs.svc.cluster.local,10.43.252.245"
 HDR_HASH = "x-litellm-user_api_key_hash"
 HDR_ALIAS = "x-litellm-user_api_key_alias"
 

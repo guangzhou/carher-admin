@@ -72,7 +72,7 @@ MEDIA = {"muse-image", "gpt-image-2", "gemini-image", "gemini-video", "gemini-mu
          "web-gemini-video", "gemini-3.1-flash-image"}
 FAMILY_ORDER = ["Claude", "GPT", "Grok / Composer", "Gemini", "其他", "出图"]
 # 老 key 白名单里直接写了上游组名，发给同事等于泄露后端线路 ⇒ 一律滤掉
-INTERNAL_PREFIXES = ("ag-", "chatgpt-", "sa-", "kiro-", "zai-", "openrouter-",
+INTERNAL_PREFIXES = ("ag-", "chatgpt-", "sa-", "kiro-", "aws-", "zai-", "openrouter-",
                      "muse2api-", "zerokey-", "anthropic.", "cursor-fc-", "wangsu-")
 
 

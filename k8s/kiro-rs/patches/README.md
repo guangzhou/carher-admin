@@ -25,6 +25,7 @@ scripts/kiro-lane-regress.sh --rounds 2                     # 经 LiteLLM 回归
 | `0006-admin-ui-filters-and-card-header.patch` | Admin UI 查询栏（新文件 `credential-filters.tsx`）：关键字（邮箱子串 / `#ID`，空格分隔多词 OR）、状态（启用/当前/已禁用/按禁用原因）、登录方式、优先级、邮箱域名、只看有失败；下拉带计数。卡片标题栏修溢出（`#ID` 前缀、邮箱截断、开关不换行、徽章挪下一行）。只改前端：过滤在 0004 排序之后、分页之前；批量操作仍按勾选 ID，「清除已禁用」仍针对全部禁用号 | 10-18 `v2026.10.1-carher-filter` |
 | `0010-context-overflow-anthropic-wording.patch` | 上游超长（`CONTENT_LENGTH_EXCEEDS_THRESHOLD` / `Input is too long`）⇒ 400 `prompt is too long: N tokens > M maximum`（Anthropic 原句，N≥M+1）。Claude Code 只认这句才自动压缩；LiteLLM 只认这句才映射 ContextWindowExceeded、不走普通兜底（修前被兜到 sa-grok-4.20 复读）。6 个单测；e2e 加「超长拒收」一例（新 14/14，旧 sticky 13/14 = 阴性对照） | 10-23 `v2026.10.1-carher-ctxwin`（= 0001~0008 + 0010，**不含 0009**） |
 | `0011-slots-one-account-one-ip-user-binding.patch` | 槽位模式 `loadBalancingMode=slots`：N 个命名槽，每槽 1 号 + 1 固定出口；带身份（`x-litellm-user_api_key_hash`，只在本模式读、不发 Kiro 官方）的 key 绑槽；AIMD 并发 + 排队超时 529；429 官方退避；402/被限退役换冷备；槽运行时增删停用（按名字 reconcile，停用即换绑）；灰度名单；按号×模型×北京日用量 + 统计前基线；SIGTERM 优雅停机；haiku-5.5 映射；Admin 槽位面板/配置/测试/批量查额度。cargo test 321 | 10-25 `v2026.10.1-carher-slots25`（被限探测改中性问题+号自己的 ARN；slots24 用户原文探测会冤退役好号）（**只给槽位实例**）。运维见 skill `kiro-rs-slots` |
+| `0013-opus55-refusal-switch-model.patch` | 槽位：opus-5.5 安全审查静默空回复（号没被限）⇒ 同槽改用 `slotRefusalFallbackModel`（默认 opus-4.8）重答 + 末尾提示，同会话 6h 粘住；4.8 也空回明确提示。cargo test 352 | 10-27 `v2026.10.1-carher-slots43`（只给槽位实例） |
 
 存档：`0001-carher-base-models.5ca5703.patch` 是旧基线版 0001（含 opus-5.5，上游后来自带了），`kiro-rs-build.sh` 不会打它。
 

@@ -914,6 +914,42 @@ PY14B
   fi
 fi
 
+# ── 15) 落盘的路径不许指到 node(2026-10-28)────────────────────────────────────
+#    病:EXEC=process.execPath 被写进三处会长期留在机器上的东西 —— 小代理的 launchd
+#    plist、「刷模型」skill、画图 skill;以及 launchCursor 从它推 .app。普通 node 跑
+#    安装器 ⇒ 全被写成 `/opt/homebrew/Cellar/node/<版本>/bin/node`,homebrew 升级 node
+#    后小代理起不来(而 BYOK 地址还指着 127.0.0.1:8788 = 彻底连不上)、两个 skill 失效,
+#    **都不报错**。阳性对照 = 就地重实现旧行为(直接用 process.execPath)。
+echo "--- 15) plist / skill 里写的必须是 Cursor 二进制 ---"
+if [ ! -d "$LIVE_RES" ]; then
+  skip "⑮:本机没有 live Cursor"
+else
+  B15=$(node -e '
+const fs=require("fs"),path=require("path"),os=require("os");
+const src=fs.readFileSync(process.argv[1],"utf8");
+const seg=src.slice(src.indexOf("const EXEC = process.execPath"), src.indexOf("const BUNDLES = ["));
+const r=new Function("fs","path","os","process",seg+"; return cursorBin();")(fs,path,os,process);
+console.log(r);' "$JS" 2>/dev/null)
+  OLD15="$(node -e 'console.log(process.execPath)')"
+  case "$OLD15" in
+    *Cursor*) echo "  NOTE ⑮这台机器的 node 就是 Cursor ⇒ 本腿无判别力,跳过"; SKIP=$((SKIP+1)) ;;
+    *)
+      ok "⑮阳性对照成立:旧行为会把 $OLD15 写进 plist/skill(node 升级即失效)"
+      case "$B15" in
+        */Cursor.app/Contents/MacOS/Cursor|*/Cursor.exe|*/cursor) ok "⑮新行为落盘用的是 Cursor 二进制($B15)" ;;
+        *) bad "⑮落盘路径还是不对:$B15" ;;
+      esac
+      # 四处落盘/拉起点都必须走 cursorBin(),不许再出现裸 EXEC
+      for pat in '<string>${esc(cursorBin())}</string>' 'spawn(cursorBin(), [__filename'; do
+        grep -qF "$pat" "$JS" && ok "⑮已改用 cursorBin():$(echo "$pat" | cut -c1-34)…" \
+          || bad "⑮这一处还在用裸 EXEC:$pat"
+      done
+      grep -q 'const bin = cursorBin();' "$JS" && ok "⑮launchCursor 用 cursorBin() 推 .app" \
+        || bad "⑮launchCursor 还在从 process.execPath 推 .app(刷模型会关了 Cursor 打不开)"
+      ;;
+  esac
+fi
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

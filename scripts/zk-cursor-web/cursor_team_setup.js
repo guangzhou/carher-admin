@@ -70,7 +70,18 @@ const readline = require("readline");
 const { spawnSync } = require("child_process");
 
 /* ── 平台路径推导(全部从运行时自身出发,不猜安装位置) ── */
-const EXEC = process.execPath; // = Cursor 可执行文件(node 模式跑在它身上)
+/* 🔴 2026-10-28:EXEC 被**写进三处会长期留在机器上的东西**里:
+     ① zk-delta 小代理的 launchd plist(ProgramArguments[0])
+     ② 「刷模型」skill 里那条命令 ③ 画图 skill 里那条命令
+   被 Cursor 二进制当 node 跑时它就是 Cursor,写进去是对的(本机现状即如此)。
+   但管理员在仓库里直接 `node cursor_team_setup.js --apply` 时它是 **node 自己**,
+   例如 `/opt/homebrew/Cellar/node/26.12.0/bin/node` —— 带版本号的目录,
+   homebrew 一升级 node 这个路径就不存在了 ⇒ 小代理起不来(而 Cursor 的 BYOK 地址
+   还指着 127.0.0.1:8788 = 直接连不上)、两个 skill 也一起失效,**全都不报错**。
+   ⇒ 落盘用的那个二进制单独算一份:优先用「真的是 Cursor」的那个,
+     推不出来再退回 RES 推导出的安装位置;两者都不是才退回 process.execPath。
+   纯读的地方(syntaxCheck 的 --check、pgrep 模式)仍用 process.execPath,行为不变。 */
+const EXEC = process.execPath; // 当前运行时(被 Cursor 当 node 跑时 = Cursor 本体)
 /* 🔴 2026-10-28:`process.execPath` 只有在**被 Cursor 二进制当 node 跑**时才指向 Cursor
    (打包里的 cursor_team_setup.sh 就是这么起的)。直接 `node cursor_team_setup.js`
    (管理员在仓库里最常这么跑)时它指向 node 自己 ⇒ RES 算成 node 的 Resources/app,
@@ -107,6 +118,21 @@ function userDir() {
   return path.join(os.homedir(), ".config", "Cursor", "User");
 }
 const RES = appRoot();
+/* 写进 plist / skill 的 Cursor 二进制。只在「要落盘的路径」用它,不改只读逻辑。
+   mac: <app>/Contents/MacOS/Cursor(RES = <app>/Contents/Resources/app);
+   win/linux: <dir>/Cursor.exe | <dir>/cursor(RES = <dir>/resources/app)。 */
+function cursorBin() {
+  const isCursorExe = (p) => /(?:^|[\\/])(?:Cursor(?:\.exe)?|cursor)$/.test(p);
+  if (isCursorExe(EXEC)) return EXEC;                       // 被 Cursor 当 node 跑(打包启动器)
+  // RES = mac:<app>/Contents/Resources/app ; win/linux:<dir>/resources/app
+  //   ⇒ mac 的二进制在 RES/../../MacOS/Cursor;win/linux 在 RES/../../<exe>
+  const up2 = path.resolve(RES, "..", "..");                 // mac: <app>/Contents ; win/linux: <dir>
+  const cands = process.platform === "darwin" ? [path.join(up2, "MacOS", "Cursor")]
+    : process.platform === "win32" ? [path.join(up2, "Cursor.exe")]
+    : [path.join(up2, "cursor"), path.join(up2, "Cursor")];
+  for (const c of cands) { try { if (fs.existsSync(c)) return c; } catch (e) { /* 继续 */ } }
+  return EXEC;                                              // 找不到就维持原行为(不假装)
+}
 const BUNDLES = [
   path.join("out", "vs", "workbench", "workbench.desktop.main.js"),
   path.join("out", "vs", "workbench", "workbench.glass.main.js"),
@@ -2527,7 +2553,7 @@ function zkdInstall(dry) {
   <key>Label</key><string>com.zkdelta.sidecar</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${esc(EXEC)}</string>
+    <string>${esc(cursorBin())}</string>
     <string>${esc(path.join(ZKD_HOME, "sidecar", "sidecar.js"))}</string>
   </array>
   <key>EnvironmentVariables</key><dict>
@@ -3261,10 +3287,14 @@ function launchCursor() {
   // 子进程不能继承 ELECTRON_RUN_AS_NODE,否则拉起来的是一个 node 而不是 Cursor 窗口
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
   const opt = { detached: true, stdio: "ignore", env };
+  // 🔴 10-28:原来从 process.execPath 推 .app —— 普通 node 跑时会去 open 一个
+  //    `/opt/homebrew/Cellar/node/26.12.0` 目录(或 spawn 一个裸 node),
+  //    结果是「刷模型」把 Cursor 关了却再也没打开。走 cursorBin() 才是真二进制。
+  const bin = cursorBin();
   if (process.platform === "darwin") {
-    const app = path.resolve(path.dirname(EXEC), "..", "..");
+    const app = path.resolve(path.dirname(bin), "..", "..");
     require("child_process").spawn("open", [app], opt).unref();
-  } else require("child_process").spawn(EXEC, [], opt).unref();
+  } else require("child_process").spawn(bin, [], opt).unref();
 }
 async function refreshModels(args) {
   const worker = process.argv.includes("--refresh-worker");
@@ -3291,7 +3321,9 @@ async function refreshModels(args) {
   }
   const running = !process.env.CX_SKIP_RUNNING_CHECK && cursorRunning();
   if (running && !worker) {
-    const child = require("child_process").spawn(EXEC, [__filename, "--refresh-models", "--refresh-worker"],
+    // worker 也要用真 Cursor 二进制:普通 node 下 EXEC 是 node,worker 起来后
+    // launchCursor/quitCursor 全是错的对象(10-28)。
+    const child = require("child_process").spawn(cursorBin(), [__filename, "--refresh-models", "--refresh-worker"],
       { detached: true, stdio: "ignore", env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" } });
     child.unref();
     console.log("Cursor 约 8 秒后会自动退出并重新打开,菜单就更新了(聊天记录都在)。进度日志:" + REFRESH_LOG);
@@ -3331,9 +3363,10 @@ function installRefreshSkill() {
   if (path.resolve(__filename) !== path.resolve(self)) fs.copyFileSync(__filename, self);
   const tier = path.join(__dirname, "cursor_tier_catalog.json");
   if (fs.existsSync(tier) && path.resolve(path.dirname(tier)) !== path.resolve(dir)) fs.copyFileSync(tier, path.join(dir, "cursor_tier_catalog.json"));
+  const CB = cursorBin();
   const cmd = process.platform === "win32"
-    ? 'cmd /c "set ELECTRON_RUN_AS_NODE=1&& "' + EXEC + '" "' + self + '" --refresh-models"'
-    : 'ELECTRON_RUN_AS_NODE=1 "' + EXEC + '" "' + self + '" --refresh-models';
+    ? 'cmd /c "set ELECTRON_RUN_AS_NODE=1&& "' + CB + '" "' + self + '" --refresh-models"'
+    : 'ELECTRON_RUN_AS_NODE=1 "' + CB + '" "' + self + '" --refresh-models';
   // 10-27:Cursor 的 agent 也读 ~/.claude/skills;两边都叫 carher-refresh-models 时它挑了 Claude 那份(实测「刷模型」
   //   在 Cursor 里跑成 Claude 的刷新)⇒ 改名 + 描述写死只给 Cursor 用;删掉旧名目录。
   try { fs.rmSync(path.join(os.homedir(), ".cursor", "skills", "carher-refresh-models"), { recursive: true, force: true }); } catch (e) {}
@@ -3378,8 +3411,8 @@ function installImageSkill(rawKey) {
   const md = fs.readFileSync(path.join(__dirname, "image_skill.md"), "utf8");
   // Cursor 二进制在 node 模式下跑这个工具:命令里先设 ELECTRON_RUN_AS_NODE=1
   const node = process.platform === "win32"
-    ? 'cmd /c "set ELECTRON_RUN_AS_NODE=1&& "' + EXEC + '""'
-    : "ELECTRON_RUN_AS_NODE=1 \"" + EXEC + "\"";
+    ? 'cmd /c "set ELECTRON_RUN_AS_NODE=1&& "' + cursorBin() + '""'
+    : "ELECTRON_RUN_AS_NODE=1 \"" + cursorBin() + "\"";
   const sd = path.join(home, ".cursor", "skills", "carher-image");
   fs.mkdirSync(sd, { recursive: true });
   // 注意:skill 模板里命令是 `@@NODE@@ "@@TOOL@@"`,NODE 这里已带好自己的引号

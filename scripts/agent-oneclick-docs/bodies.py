@@ -91,7 +91,7 @@ CURSOR = "".join([
     p("如果最后提示「还差一步」：打开 Cursor → <b>Settings → Models</b> → <b>OpenAI API Key</b>，粘贴 key，点 <b>Verify</b>，再完全退出重开。"
       "（key 去 key 表复制整格，别手敲。）"),
     "<h1>3. 开始用</h1>",
-    p("<b>本机</b>：打开 Cursor，默认模型 <code>grok-4.7</code>，直接用。装好后 Cursor <b>不会自动升级</b>（自动升级会冲掉补丁，表现是每发一句都很慢）。10 月 13 日之前装的可能已经被升级过，重新跑一次 <code>UPGRADE</code> 就会锁住。"),
+    p("<b>本机</b>：打开 Cursor，默认模型 <code>grok-4.7</code>，直接用。10 月 13 日之后装好的 Cursor <b>不会自动升级</b>（自动升级会冲掉补丁，表现是每发一句都很慢）；更早装的可能已经被升级过，重新跑一次 <code>UPGRADE</code> 就会锁住。"),
     p("<b>连远程服务器（Remote-SSH）</b>，每台服务器做一次："),
     ol("用 Cursor 连一次这台服务器（左下角 → Connect to Host），等显示已连接。",
        "双击 <code>REMOTE-SSH-Mac.command</code>（Windows：<code>REMOTE-SSH-Windows.cmd</code>），输入服务器名（照列出来的填，或 <code>用户名@IP</code>），回车；再输入 <code>yes</code>，回车。",

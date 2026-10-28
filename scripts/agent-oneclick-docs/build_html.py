@@ -73,6 +73,20 @@ def check(tpl: str) -> list:
         red.append("页面里又写死了模型清单(菜单已按 key 动态拉取,发「刷模型」更新)")
     if "刷模型" not in tpl:
         red.append("页面里没有「刷模型」提示")
+    # 10-28:「Cursor 不会自己升级」**不加限定**是不实的 —— 升级锁 10-13 才默认开,
+    #   更早装的人恰恰被自动升级冲掉了补丁、开始每条消息都压缩(同事说「比 Claude 慢」的根因)。
+    #   必须带上时间限定或「重跑 UPGRADE 就会锁住」,否则拦下。
+    #   🔴 豁免只看**同一句**(到下一个句号为止)里有没有限定。第一版看「后 120 字有没有 UPGRADE」,
+    #      结果原句后面紧跟的「双击 UPGRADE」把它豁免了 —— 塞回旧句子门禁照样绿,阳性对照才抓出来。
+    for m in re.finditer(r"Cursor[^。<>]{0,6}不会(?:自己|自动)升级", tpl):
+        a = max(tpl.rfind("。", 0, m.start()), tpl.rfind(">", 0, m.start())) + 1
+        e = tpl.find("。", m.end()); e = len(tpl) if e < 0 else e
+        sent = tpl[a:e]
+        if not re.search(r"10 月 13 日|13 日之前|13 日之后", sent):
+            red.append(f"又写了不加限定的「Cursor 不会自动升级」(对 10-13 前装的人不成立): {sent.strip()[:70]}")
+    # 排障表必须有「慢」这一行 —— 那是同事真实的说法,也是最常见的那个病
+    if "每发一句都要等很久" not in tpl:
+        red.append("Cursor 排障表里没有「每发一句都要等很久」那一行(最常见的那个病)")
     # 10-26 起终端命令:自动找「下载」文件夹里最新那份,用 sh/bash 直接跑(不写死文件名、不 chmod、不 cd ~/Downloads)。
     #   旧写法三种坏形状(旧文件夹里的旧脚本被执行 / 第二次下载成 (1) 找不到 / 中文 Linux 叫 ~/下载)全由
     #   test_page_terminal_blocks.py 在假下载文件夹里真跑来抓;这里只拦「又写回旧模板」。

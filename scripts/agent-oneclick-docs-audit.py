@@ -134,6 +134,16 @@ def check_doc(xml, cfg, fetch_file):
         red.append(f"缺装软件入口(CLI/App 的链接或命令):{miss}")
     if KEY_RE.search(body_text(xml)):
         red.append("正文里有明文 key")
+    # 10-28 与 build_html.py 同一口径:「Cursor 不会自动升级」不加时间限定是不实的
+    #   (升级锁 10-13 才默认开,更早装的人恰恰被升级冲掉了补丁)。豁免只看**同一句**。
+    if kind == "cursor":
+        txt = body_text(xml)
+        for m in re.finditer(r"不会(?:自己|自动)升级", txt):
+            a = txt.rfind("。", 0, m.start()) + 1
+            e = txt.find("。", m.end()); e = len(txt) if e < 0 else e
+            sent = txt[a:e]
+            if not re.search(r"10 月 13 日|13 日之前|13 日之后", sent):
+                red.append(f"又写了不加限定的「不会自动升级」(对 10-13 前装的人不成立): {sent.strip()[:70]}")
     srcs = sources(xml)
     for name, local in cfg["attach"].items():
         toks = [t for n, t in srcs if n == name]

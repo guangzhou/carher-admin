@@ -238,6 +238,11 @@ Kiro 按 token 计 credit：10-25 实测 4 个能算的号**每百万输入 toke
 - ✅ **slots40 起换镜像零断流**（连续 3 轮滚动更新实测后端为 0 的时长均 0.0s，强杀持有者 2s 恢复）。机制与五个坑见 §3.1。
 - 🔴 **slots40 之前**：真实断流不是 15 秒而是约 2 分钟（10-26 slots31 实测）：Recreate 下旧 pod 收 SIGTERM 后**立刻不收新连接**，却要等 300s 优雅期里的长请求跑完才退，新 pod 要等旧 pod 退了才起 ⇒ 这段时间所有新请求「Cannot connect」。那次 41 次失败 / 4 把 key（carher-75 18、ruanyitai 10、wuqi 9、gongchenhao 4）。根治=无缝切换（待做）。：10-25 slots26 切换时 `claude-code-ruanyitai` 4 发「Cannot connect to host kiro-rs-slots」，SpendLogs 里没有落老实例的行（原因未查；演练 1 scale 0 时兜底是生效的），客户端自己重试第 5 发成功。
 - 🔴 **新老两个实例的号 id 都从 1 编，会撞**：说「#6」要带实例。
+- 🔴 **国内 IP 直连 Kiro：Claude 全系 400 `INVALID_MODEL_ID`，其它厂商的模型能用**（10-28 实测，无锡联通 58.241.5.230，不走 VPN）：
+  claude-opus/sonnet/haiku 5.5、5、4.8、4.6、4.5 全部 400；gpt-5.6 三档、kimi-k3、deepseek-3.2、minimax、glm-5、qwen3-coder-next 能正常回话。
+  同号同脚本换日本出口（243 / 198 本机 Akamai）或新加坡出口（47.84.85.100）⇒ Claude 全部 200。学生号、POWER 号（social）结果一样 ⇒ 按来源 IP 地区拦，不是按号。
+  注意：模型目录（ListAvailableModels）在国内 IP 下照样列出 Claude ⇒ 「目录里有」不代表能用，要真打一发。
+  复测：`python3 scripts/kiro-upstream-probe.py models --account <冷备号> --no-proxy`（不加 --no-proxy 走线上出口作对照）。
 - 🔴 **内存上限 2Gi（10-28 前是 512Mi）**：10-28 10:42~11:12 被 OOMKill 6 次（峰值 492Mi；上千条消息的长会话并发时请求体都在内存里），每次重启那几十秒 LiteLLM 报 `Server disconnected` / `Cannot connect to host 10.43.252.245` / `TransferEncodingError`，30 分钟 163 次失败，兜底只接住 7 次。页面「Network Error」就是这个。查法：`kubectl -n kiro-rs get pod -o jsonpath='{..lastState.terminated.reason}'` 看 OOMKilled；Prometheus `10.43.32.210:9090` 查 `container_memory_working_set_bytes{namespace="kiro-rs"}`。
 - 🔴 **构建前先看现网和 188 上已有的最大 tag**：`ls /Data/kiro-build/ | sort -V | tail` + skill 头部「现网」行。两个会话各自从 `.work/kiro-0011` 往上数会撞号——10-27 我建了第二个 `slots43` 覆盖了别人 10:30 的 slots43（tarball 和 242 上的 tag 都被顶掉），`ship.sh` 打印的回滚目标还是 45 才发现。处理：我的改名 slots46；242 上用 content store 里还在的原 manifest `f11a4f25` 重新 import 回 `slots43`（脚本 `.work/kiro-0011/restore43.sh` 的做法）。
 - 🔴 现在新实例扛大部分流量 ⇒ 任何操作先想「会不会打断在途请求」：改配置走 Admin API（热生效），换镜像提前说，别 `kubectl delete pod`。

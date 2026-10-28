@@ -8,12 +8,14 @@
   dump   原样打印一发的 HTTP 状态、全部响应头、每一帧的全部帧头和 payload（什么都不过滤）。
   ruler  验「空回复判据」：多场景采样，自动找反例。分母为 0 判废，不假绿。
   gate   版本闸门矩阵：版本 × {不带 ARN, BuilderId 占位 ARN}。
+  models 逐个模型真打一发短 prompt（目录里有 ≠ 真能回话），报 状态 / 首包耗时 / 回了几个字。
+         配 --no-proxy 量「本机出口直连」（10-28 用来判国内 IP 不走 VPN 能不能用）。
 
 判空回复的唯一正确尺子（10-22 定型）：
   0 字节，或「有 contextUsageEvent 但 assistantResponseEvent==0 且 toolUseEvent==0」。
   ⛔ 别用「缺 meteringEvent」——它只在发了 origin 时出现，会把正常回复误判。
 """
-import argparse, importlib.util, json, os, struct, sys, uuid
+import argparse, importlib.util, json, os, struct, sys, time, uuid
 import urllib.error, urllib.request
 
 _spec = importlib.util.spec_from_file_location(
@@ -198,10 +200,31 @@ def cmd_gate(s, a):
             print(f"  ver={ver:<9} arn={name:<10} {st} {note}")
 
 
+def cmd_models(s, a):
+    cat = a.models.split(",") if a.models else [
+        "claude-opus-5.5", "claude-sonnet-5.5", "claude-haiku-5.5", "claude-opus-5", "claude-sonnet-5",
+        "claude-opus-4.8", "claude-sonnet-4.6", "claude-haiku-4.5", "gpt-5.6-sol", "gpt-5.6-terra",
+        "gpt-5.6-luna", "kimi-k3", "deepseek-3.2", "minimax-m2.5", "glm-5", "qwen3-coder-next"]
+    ok = 0
+    for m in cat:
+        t0 = time.time()
+        st, _, raw = s.send(NEUTRAL, model=m)
+        dt = time.time() - t0
+        v = verdict(raw, parse_frames(raw)) if st == 200 else None
+        good = st == 200 and v and not v["empty"] and not v["exceptions"]
+        ok += bool(good)
+        detail = (repr(v["text"][:30]) if v and v["text"] else ("空回复" if v and v["empty"] else
+                  (str(v["exceptions"])[:80] if v and v["exceptions"] else raw[:120].decode("utf8", "replace"))))
+        print(f"{'✅' if good else '🔴'} {m:<20} HTTP {st}  {dt:5.1f}s  {detail}")
+    print(f"\n{ok}/{len(cat)} 个模型真回了字")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", choices=["dump", "ruler", "gate"])
+    p.add_argument("command", choices=["dump", "ruler", "gate", "models"])
+    p.add_argument("--no-proxy", action="store_true", help="不走线上出口，用本机网络直连（与线上不同路）")
+    p.add_argument("--models", help="models 用：逗号分隔；缺省 16 个常用")
     p.add_argument("--account", help="纯数字=id；缺省自动挑一个能回话的启用 idc 号")
     p.add_argument("--model", default="claude-opus-5.5")
     p.add_argument("--origin", default="AI_EDITOR", help="dump 用；none=不发该字段")
@@ -213,10 +236,10 @@ def main():
                    help="gate 额外试 social ARN（idc 号预期 403，只作阴性对照）")
     a = p.parse_args()
     pool = kp.load_pool(None)
-    proxy = kp.pod_proxy()
+    proxy = None if a.no_proxy else kp.pod_proxy()
     print(f"# 出口 {kp.mask(proxy)}", file=sys.stderr)
     s = pick(pool, kp.build_opener(proxy), a.account)
-    {"dump": cmd_dump, "ruler": cmd_ruler, "gate": cmd_gate}[a.command](s, a)
+    {"dump": cmd_dump, "ruler": cmd_ruler, "gate": cmd_gate, "models": cmd_models}[a.command](s, a)
 
 
 if __name__ == "__main__":

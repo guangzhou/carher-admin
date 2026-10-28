@@ -1170,6 +1170,39 @@ assert pathlib.Path(sys.argv[1]+".carher-bak").exists(), "没留备份"
 PY20
 fi
 
+# ── 21) 安装器要用的辅助文件必须真打进包(2026-10-28)────────────────────────
+#    今天踩过两次同形的坑:①「刷模型」跑的是 ~/.carher 里的旧副本 ②探针写完了但
+#    package_team_setup.sh 没 cp 它 ⇒ 安装器那一步静默跳过。**发出去 ≠ 装上**。
+#    🔴 判据只认**产物**:不看打包脚本里有没有那行 cp —— 第一版那么写,结果把
+#    `cp "$HERE/../../codex-oneclick/src/carher_image.js"` 这种跨目录来源误报成缺失。
+#    凡是 cursor_team_setup.js 按 __dirname 找的同目录文件,zip 里就必须有同名条目。
+echo "--- 21) 辅助文件打进包了吗(按产物判)---"
+if [ ! -f "$HERE/cursor-mac.zip" ]; then
+  skip "㉑:还没打过包(先跑 sh package_team_setup.sh)"
+else
+  NEED=$(grep -oE 'path\.join\(__dirname, "[A-Za-z0-9_.-]+"\)' "$JS" | sed 's/.*"\(.*\)".*/\1/' | sort -u)
+  Z21="$TMP/zip21.txt"; unzip -l "$HERE/cursor-mac.zip" > "$Z21" 2>/dev/null
+  # 自检:列表里必须有安装器本体,否则这把尺子在量空气
+  grep -q 'cursor_team_setup.js' "$Z21" || bad "㉑尺子坏了:zip 列表里连安装器本体都没有"
+  # 🔴 有意不随包的要豁免,否则这腿恒红、下次没人看它:
+  #    lark-skills 是 09-03 用户定的「默认不带」(LARK_SKILLS=1 才打进去,且安装器要 --lark),
+  #    而且安装器 fs.existsSync 不在时会**明说原因**而不是静默跳过 ⇒ 不算本腿要抓的病。
+  OPTIN21="lark-skills"
+  M21=""
+  for f in $NEED; do
+    case " $OPTIN21 " in *" $f "*) continue ;; esac
+    grep -qF "/$f" "$Z21" || M21="$M21 $f"
+  done
+  [ -z "$M21" ] && ok "㉑安装器按 __dirname 取的文件 zip 里都有(豁免按需项:$OPTIN21)" \
+    || bad "㉑这些文件安装器会去找、但 zip 里没有 ⇒ 那一步会静默跳过:$M21"
+  # 豁免项也要有阳性对照:它缺席时安装器必须**说得出原因**,不许静默
+  grep -q '包里没有 lark-skills/ 目录' "$JS" \
+    && ok "㉑豁免项缺席时安装器会明说原因(不是静默跳过)" \
+    || bad "㉑lark-skills 缺席时安装器没有明说的分支 ⇒ 不能豁免它"
+  grep -qF '/cursor_precompact_probe.js' "$Z21" \
+    && ok "㉑探针在 zip 里(本轮新增那个)" || bad "㉑探针没进 zip"
+fi
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

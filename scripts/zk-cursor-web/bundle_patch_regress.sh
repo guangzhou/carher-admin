@@ -818,6 +818,102 @@ else
   bad "⑫Key sanitize 腿不符:"; sed -n '/FAIL/p' "$TMP/leg12.log"
 fi
 
+# ── 13) DOCTOR 用普通 node 跑也要找得到 Cursor(2026-10-28 的假红)─────────────
+#    病:RES 从 process.execPath 推,只有「被 Cursor 二进制当 node 跑」时才对。
+#    管理员直接 `node cursor_team_setup.js --doctor` ⇒ 推成 node 自己的 Resources/app,
+#    workbench / ctxwin / noloop 全报「不存在」= 满屏假红,而机器上补丁好好的。
+#    阳性对照就地重实现旧行为(只按 execPath 推),它必须红;新行为必须绿。
+echo "--- 13) 普通 node 跑 DOCTOR 不许假红 ---"
+if [ -d "$LIVE_RES/out/vs/workbench" ]; then
+  # 阳性对照:旧逻辑(纯 execPath)在 node 下指到哪
+  OLDRES=$(node -e 'const p=require("path");const d=p.dirname(process.execPath);console.log(process.platform==="darwin"?p.join(d,"..","Resources","app"):p.join(d,"resources","app"))')
+  if [ -d "$OLDRES/out/vs/workbench" ]; then
+    echo "  NOTE ⑬这台机器的 node 恰好就在 Cursor 里 ⇒ 本腿无判别力,跳过"; SKIP=$((SKIP+1))
+  else
+    ok "⑬阳性对照成立:旧逻辑在普通 node 下指到 $OLDRES(没有 workbench)⇒ 会假红"
+    NEWRES=$(node "$JS" --doctor 2>/dev/null | sed -n 's/^资源目录  *: *//p' | head -1)
+    if [ "$NEWRES" = "$LIVE_RES" ]; then ok "⑬新逻辑退回到了真安装位置($NEWRES)"
+    else bad "⑬新逻辑还是没找到 Cursor:报的是 '$NEWRES',应为 '$LIVE_RES'"; fi
+    if node "$JS" --doctor 2>/dev/null | grep -q '^  workbench.desktop.main.js: .*byokforce='; then
+      ok "⑬普通 node 下补丁行有真读数(不是『不存在』)"
+    else bad "⑬普通 node 下仍报不出 workbench 补丁读数(假红没修掉)"; fi
+    # CURSOR_APP_ROOT 测试钩子不许被 fallback 盖掉(台架自己全靠它)
+    FAKE="$TMP/leg13-fake"; mkdir -p "$FAKE"
+    R13=$(CURSOR_APP_ROOT="$FAKE" node "$JS" --doctor 2>/dev/null | sed -n 's/^资源目录  *: *//p' | head -1)
+    if [ "$R13" = "$FAKE" ]; then ok "⑬CURSOR_APP_ROOT 仍然最高优先(台架钩子没被 fallback 抢走)"
+    else bad "⑬CURSOR_APP_ROOT 被忽略了:报的是 '$R13'"; fi
+  fi
+else
+  echo "  SKIP ⑬:本机没有 live Cursor bundle"; SKIP=$((SKIP+1))
+fi
+
+# ── 14) 件C/件D 锚点认不出 ⇒ 必须收尾列红 + 退出码 5(2026-10-28)──────────────
+#    病:原来件C/件D 打不上只在屏幕中段打一行 ⚠️ 就 return,**不进 MISSED** ⇒ 收尾
+#    仍是「✅ 完成」、exit 0。件C 没打上的实际后果是每轮自动压缩对话(10-28 实测 4 人
+#    每百条主请求压 10~54 次),同事只觉得「Cursor 比 Claude 慢」,不知道要双击 REPAIR。
+#    ⑧量的是"别的家族漂了件C 照样打上";这一腿量的是"件C **自己**漂了说不说"。
+#    阳性对照就地重实现旧行为(把 MISSED.push 那两行摘掉)⇒ 必须 exit 0 + 没有红字。
+echo "--- 14) 件C/件D 自己的锚点漂了要说出来 ---"
+if [ ! -f "$X8" ] || [ ! -f "$N8" ] || [ "${SEED_MK:-x}" != "0" ]; then
+  skip "⑭:复用不到 ⑧ 的 pristine fixture(见 ⑧ 的跳过原因)"
+else
+  # 摇件C 的锚点 A(所有 kind=min 的目标都靠它)——只摇 agent-exec 一个文件
+  break_ctxwin() {
+    python3 - "$X8" <<'PY14' || return 3
+import sys
+p=sys.argv[1]
+s=open(p,encoding="utf8",errors="surrogateescape").read()
+old="usedTokens:0,maxTokens:0,breakdown:void 0"
+if old not in s: sys.exit(3)
+open(p,"w",encoding="utf8",errors="surrogateescape").write(s.replace(old,"usedTokens:0,maxTokens:0,breakdownX:void 0"))
+PY14
+  }
+  # 阳性对照用的旧版脚本:摘掉本次新加的两处 MISSED.push
+  OLDJS="$TMP/leg14-oldbehavior.js"
+  python3 - "$JS" "$OLDJS" <<'PY14B'
+import re,sys
+s=open(sys.argv[1],encoding="utf8").read()
+n=0
+for fam in ("件C(上下文窗口归一)","件D(关本地循环)"):
+    pat=re.compile(r"\n\s*MISSED\.push\(\{ rel: t\.rel, why: \""+re.escape(fam)+r"[^\n]*\n")
+    s,k=pat.subn("\n",s); n+=k
+open(sys.argv[2],"w",encoding="utf8").write(s)
+sys.exit(0 if n==2 else 7)
+PY14B
+  if [ $? != 0 ]; then
+    skip "⑭:造不出阳性对照(没摘到两处 MISSED.push)⇒ 这腿没有判别力,不许算通过"
+  else
+    mk8; break_ctxwin
+    if [ $? != 0 ]; then
+      skip "⑭:种子里找不到件C 锚点 A(Cursor 版本变了)"
+    else
+      L14A="$TMP/leg14-old.log"
+      env ELECTRON_RUN_AS_NODE=1 HOME="$FH8" CURSOR_APP_ROOT="$FA8" CURSOR_USER_DIR="$FU8" \
+        CX_SKIP_RUNNING_CHECK=1 CX_REQUIRE_AST=1 "$CXNODE" "$OLDJS" --repair >"$L14A" 2>&1
+      RC14A=$?
+      if [ "$RC14A" = "0" ] && ! grep -qF '这部分补丁没打上' "$L14A"; then
+        ok "⑭阳性对照成立:旧行为下件C 漂了仍然 exit 0、收尾无红字(= 静默)"
+      else
+        bad "⑭阳性对照不成立(exit=$RC14A)⇒ 这腿量不到东西,见 $L14A"
+      fi
+      mk8; break_ctxwin
+      L14B="$TMP/leg14-new.log"
+      env ELECTRON_RUN_AS_NODE=1 HOME="$FH8" CURSOR_APP_ROOT="$FA8" CURSOR_USER_DIR="$FU8" \
+        CX_SKIP_RUNNING_CHECK=1 CX_REQUIRE_AST=1 "$CXNODE" "$JS" --repair >"$L14B" 2>&1
+      RC14B=$?
+      grep -qF '这部分补丁没打上' "$L14B" && ok "⑭新行为:件C 漂了收尾列进红字清单" \
+        || bad "⑭件C 漂了收尾还是没列红(见 $L14B)"
+      grep -qF '每轮自动压缩对话' "$L14B" && ok "⑭红字里写清了后果(体感『慢』⇒ 同事知道要 REPAIR)" \
+        || bad "⑭红字没写后果,同事看不出该干什么"
+      [ "$RC14B" = "5" ] && ok "⑭退出码 5(部分完成)" || bad "⑭退出码=$RC14B(应为 5)"
+      # 其余家族不许被连坐
+      C_D14=$(n8 "$D8" '@cxteam-'); C_N14=$(n8 "$N8" '@cx-noloop:v1')
+      { [ "$C_D14" -gt 0 ] && [ "$C_N14" = "1" ]; } && ok "⑭workbench 与件D 照常打上(desktop=$C_D14 noloop=$C_N14)" \
+        || bad "⑭件C 自己漂了却连坐了别人(desktop=$C_D14 noloop=$C_N14)"
+    fi
+  fi
+fi
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

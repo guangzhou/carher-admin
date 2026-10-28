@@ -71,11 +71,34 @@ const { spawnSync } = require("child_process");
 
 /* ── 平台路径推导(全部从运行时自身出发,不猜安装位置) ── */
 const EXEC = process.execPath; // = Cursor 可执行文件(node 模式跑在它身上)
+/* 🔴 2026-10-28:`process.execPath` 只有在**被 Cursor 二进制当 node 跑**时才指向 Cursor
+   (打包里的 cursor_team_setup.sh 就是这么起的)。直接 `node cursor_team_setup.js`
+   (管理员在仓库里最常这么跑)时它指向 node 自己 ⇒ RES 算成 node 的 Resources/app,
+   于是 DOCTOR 把 workbench / ctxwin / noloop 全报「不存在」= 满屏假红,
+   而那台机器上补丁其实好好的。判据:推出来的目录里**没有 package.json**。
+   ⇒ 推不出来就退回常规安装位置;仍找不到才如实说找不到(不假装有)。
+   不改 Cursor 二进制跑时的行为:那条路径有 package.json,第一发就返回。 */
 function appRoot() {
   if (process.env.CURSOR_APP_ROOT) return process.env.CURSOR_APP_ROOT; // 测试钩子
   const d = path.dirname(EXEC);
-  if (process.platform === "darwin") return path.join(d, "..", "Resources", "app");
-  return path.join(d, "resources", "app"); // win32 / linux
+  const fromExec = process.platform === "darwin"
+    ? path.join(d, "..", "Resources", "app")
+    : path.join(d, "resources", "app"); // win32 / linux
+  const looksLikeCursor = (r) => { try { return fs.existsSync(path.join(r, "out", "vs", "workbench")); } catch (e) { return false; } };
+  if (looksLikeCursor(fromExec)) return fromExec;
+  for (const c of appRootFallbacks()) if (looksLikeCursor(c)) return c;
+  return fromExec;   // 都不是 ⇒ 维持原值,由调用方如实报「不存在」
+}
+// 常规安装位置(只在 execPath 推不出来时才查)。CURSOR_APP 允许手动指。
+function appRootFallbacks() {
+  const out = [];
+  const add = (app) => { if (app) out.push(process.platform === "darwin" ? path.join(app, "Contents", "Resources", "app") : path.join(app, "resources", "app")); };
+  add(process.env.CURSOR_APP);
+  if (process.platform === "darwin") { add("/Applications/Cursor.app"); add(path.join(os.homedir(), "Applications", "Cursor.app")); }
+  else if (process.platform === "win32") {
+    for (const b of [process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs", "cursor"), process.env.ProgramFiles && path.join(process.env.ProgramFiles, "cursor")]) if (b) out.push(path.join(b, "resources", "app"));
+  } else { out.push("/usr/share/cursor/resources/app", "/opt/cursor/resources/app"); }
+  return out;
 }
 function userDir() {
   if (process.env.CURSOR_USER_DIR) return process.env.CURSOR_USER_DIR; // 测试钩子
@@ -1228,7 +1251,15 @@ function planCtxwinBundle(t, baseText) {
   const src = baseText != null ? baseText : fs.readFileSync(p, "utf8");
   const r = ctxwinApplyToText(src, t.kind);
   if (!r.ok) {
-    if (!r.skip) console.log("   ⚠️  ctxwin %s 锚点问题(%s)→ 跳过(不阻断解锁补丁)", path.basename(t.rel), r.why);
+    /* 🔴 2026-10-28:原来这里只在屏幕中段打一行 ⚠️ 就 return,**不进 MISSED** ⇒ 收尾仍是
+       「✅ 完成」、退出码 0。件C 没打上的后果是用户每轮都被自动压缩(10-28 实测 4 个人
+       每 100 条主请求压 10~54 次、触发时上下文只有 8~30k,压缩本身中位数 43~98s),
+       他只会觉得「Cursor 比 Claude 慢」,不会知道要来双击 REPAIR。
+       ⇒ 和 workbench 家族同等对待:进 MISSED,收尾列红、退出码 5。仍然不阻断其余补丁。 */
+    if (!r.skip) {
+      console.log("   ⚠️  ctxwin %s 锚点问题(%s)→ 跳过(不阻断解锁补丁)", path.basename(t.rel), r.why);
+      MISSED.push({ rel: t.rel, why: "件C(上下文窗口归一)锚点认不出:" + r.why + " —— 没打上会每轮自动压缩对话,体感『很慢』" });
+    }
     return null;
   }
   console.log("   ctxwin %s: 将打 [%s]", path.basename(t.rel), r.applied.join(", "));
@@ -1357,7 +1388,12 @@ function planNoloopBundle(t, baseText) {
   const src = baseText != null ? baseText : fs.readFileSync(p, "utf8");
   const r = noloopApplyToText(src, t.kind);
   if (!r.ok) {
-    if (!r.skip) console.log("   ⚠️  noloop %s 锚点问题(%s)→ 跳过(不阻断其它补丁)", path.basename(t.rel), r.why);
+    // 同件C(见 planCtxwinBundle):没打上 ⇒ 这一轮可能打到 Cursor 自家 InferenceService
+    // (BYOK 的 key 压根不参与),后果比"慢"更硬。必须进 MISSED,不许收尾只写「✅ 完成」。
+    if (!r.skip) {
+      console.log("   ⚠️  noloop %s 锚点问题(%s)→ 跳过(不阻断其它补丁)", path.basename(t.rel), r.why);
+      MISSED.push({ rel: t.rel, why: "件D(关本地循环)锚点认不出:" + r.why + " —— 没打上可能发不到公司网关" });
+    }
     return null;
   }
   console.log("   noloop %s: 将打 [%s]", path.basename(t.rel), r.applied.join(", "));
@@ -2724,13 +2760,20 @@ async function doDoctor() {
     const missing = MUST.filter((n) => !seen.has("/*@cxteam-" + n + "*/"));
     if (missing.length) P("    🔴 缺:" + missing.join(", ") + " ⇒ 这台机器没跑过新版安装器(或 Cursor 升级后冲掉了,双击 REPAIR)");
   }
+  /* 件C:每个目标应当 =3(锚点 A/B/C)。<3 ⇒ Cursor 会在上下文还很空时就每轮自动压缩
+     对话,那一发压缩中位数 43~98s(10-28 实测),同事只会说「Cursor 比 Claude 慢」。
+     原来这里只打数字、不解释,一屏数字里 "0" 和 "3" 没人看得出区别。 */
   P("  ctxwin(" + CTXWIN_MARKER + "):");
+  let cwBad = 0;
   for (const t of CTXWIN_TARGETS) {
     const p = path.join(RES, t.rel);
-    if (!fs.existsSync(p)) { P("    !!", t.rel, "不存在"); continue; }
+    if (!fs.existsSync(p)) { P("    !!", t.rel, "不存在"); cwBad++; continue; }
     const n = fs.readFileSync(p, "utf8").split(CTXWIN_MARKER).length - 1;
-    P("    " + n + "  " + t.rel);
+    if (n < 3) cwBad++;
+    P("    " + n + "  " + t.rel + (n < 3 ? "   🔴 应为 3" : ""));
   }
+  if (cwBad) P("    🔴 件C 没打全(" + cwBad + "/" + CTXWIN_TARGETS.length + " 个文件不对)⇒ 会**每轮都自动压缩对话**,"
+    + "表现就是「发一句要等很久」。先双击 REPAIR,再重启 Cursor;修完还慢就把这份报告发给管理员。");
   // 件D:0 = local loop 没被摘 ⇒ 若下面第 4 节那个 gate 是 on,这台机器就会把这一轮
   // 打到 Cursor 自家 InferenceService(BYOK 的 key 压根不参与)。
   P("  noloop(" + NOLOOP_MARKER + "):");

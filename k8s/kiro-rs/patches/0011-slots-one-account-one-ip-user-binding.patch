@@ -5176,7 +5176,7 @@
              }
  
              // 失败响应：读取 body 用于日志/错误信息
-@@ -539,6 +682,357 @@
+@@ -539,6 +682,372 @@
          }))
      }
  
@@ -5202,9 +5202,20 @@
 +        self.token_manager.slot_touch_user(user_key, &alias);
 +        // 在跑计数：成功时守卫跟着响应流走（读完才 -1），其它出口函数返回时 -1
 +        let mut user_guard = self.token_manager.slot_user_guard(user_key);
++        // 整个请求的预算（排队 + 429 退避 + 重发，到拿到上游响应头为止）。用完 ⇒ 529 交给 LiteLLM 兜底，
++        // 不再在本槽里死等（10-28：排队 120s × 多次重排 + 429 退避，用户干等 6~8 分钟才超时，兜底也来不及）
++        let budget = Duration::from_secs(self.token_manager.config().slot_request_budget_secs.max(5));
++        let started = std::time::Instant::now();
++        let deadline = started + budget;
++        let over_budget = |what: &str| {
++            anyhow::anyhow!("{}: 槽位{}，{}s 内没拿到上游响应，交给兜底", crate::kiro::slots::OVERLOADED_MARK, what, budget.as_secs())
++        };
 +        for attempt in 0..SLOT_MAX_ATTEMPTS {
++            if std::time::Instant::now() >= deadline {
++                return Err(last_error.map(|e| over_budget(&format!("重试中（上一发：{}）", e.to_string().chars().take(60).collect::<String>()))).unwrap_or_else(|| over_budget("繁忙")));
++            }
 +            let (slot, ctx) = self.token_manager.acquire_slot_context_as(user_key, &alias).await?;
-+            let permit = match self.token_manager.acquire_slot_permit(slot).await {
++            let permit = match self.token_manager.acquire_slot_permit_until(slot, Some(deadline)).await {
 +                Ok(p) => p,
 +                // 排队时这个槽被删 / 停用：用户绑定已随槽清掉，重新选槽即落到别的槽，用户无感
 +                Err(e) if e.to_string().contains(crate::kiro::slots::SLOT_GONE_MARK) && regone < 2 => {
@@ -5251,7 +5262,7 @@
 +                    drop(permit);
 +                    tracing::warn!("槽位 {} 请求发送失败（{}/{}）: {}", slot, attempt + 1, SLOT_MAX_ATTEMPTS, e);
 +                    last_error = Some(e.into());
-+                    sleep(Self::slot_backoff(attempt as u32, None)).await;
++                    sleep_until_budget(deadline, Self::slot_backoff(attempt as u32, None)).await;
 +                    continue;
 +                }
 +            };
@@ -5321,12 +5332,12 @@
 +                if let Some(i) = cur_slot() { self.token_manager.slot_report_429(i, tries_429 == 0, ra); }
 +                tries_429 += 1;
 +                last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
-+                sleep(Self::slot_backoff(tries_429, ra)).await;
++                sleep_until_budget(deadline, Self::slot_backoff(tries_429, ra)).await;
 +                continue;
 +            }
 +            last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
 +            if status.is_server_error() || status.as_u16() == 408 {
-+                sleep(Self::slot_backoff(attempt as u32, None)).await;
++                sleep_until_budget(deadline, Self::slot_backoff(attempt as u32, None)).await;
 +                continue;
 +            }
 +            break;
@@ -5335,6 +5346,10 @@
 +            if let Some((slot, _)) = self.token_manager.peek_slot(user_key) {
 +                self.token_manager.slot_report_exhausted(slot);
 +            }
++            // 撞 429 重试仍失败 = 这个号此刻太忙，不是请求坏了 ⇒ 529（handler 识别 OVERLOADED_MARK），
++            // LiteLLM 会把它当可兜底错误换别的模型；以前落成普通 502，带 per-key 表的 key 直接把错误给了用户（10-28）
++            return Err(anyhow::anyhow!("{}: 槽位上游持续 429（{}）", crate::kiro::slots::OVERLOADED_MARK,
++                last_error.map(|e| e.to_string().chars().take(80).collect::<String>()).unwrap_or_default()));
 +        }
 +        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("{} API 请求失败：槽位重试用尽", api_type)))
 +    }
@@ -5534,7 +5549,7 @@
      /// 从请求体中提取模型信息
      ///
      /// 尝试解析 JSON 请求体，提取 conversationState.currentMessage.userInputMessage.modelId
-@@ -564,5 +1058,474 @@
+@@ -564,5 +1073,480 @@
          let jitter_max = (backoff / 4).max(1);
          let jitter = fastrand::u64(0..=jitter_max);
          Duration::from_millis(backoff.saturating_add(jitter))
@@ -5651,6 +5666,12 @@
 +}
 +
 +/// 读响应直到出现第一个有内容的事件；见到就把已读部分 + 剩余流拼回原样返回（不破坏流式）。
++/// 退避睡眠不超过整个请求的剩余预算（预算用完就该交给兜底，不该再睡）
++async fn sleep_until_budget(deadline: std::time::Instant, d: Duration) {
++    let left = deadline.saturating_duration_since(std::time::Instant::now());
++    sleep(d.min(left)).await
++}
++
 +async fn peek_for_content(response: reqwest::Response) -> Peeked {
 +    use crate::kiro::model::events::Event;
 +    use crate::kiro::parser::decoder::EventStreamDecoder;
@@ -8162,7 +8183,7 @@
          let path = match self.stats_path() {
              Some(p) => p,
              None => return,
-@@ -1291,9 +1500,1209 @@
+@@ -1291,9 +1500,1218 @@
          self.save_stats_debounced();
      }
  
@@ -8561,6 +8582,11 @@
 +
 +    /// 槽位占一个在途名额；满了排队，超时返回 Err（调用方回 529）
 +    pub async fn acquire_slot_permit(self: &Arc<Self>, slot: usize) -> anyhow::Result<SlotPermit> {
++        self.acquire_slot_permit_until(slot, None).await
++    }
++
++    /// 同上，但排队最多等到 `until`（整个请求的剩余预算），与配置的单次排队上限取较早者
++    pub async fn acquire_slot_permit_until(self: &Arc<Self>, slot: usize, until: Option<Instant>) -> anyhow::Result<SlotPermit> {
 +        // 下标只用来取名字；之后全程按名字找（运行中增删槽不会错扣别的槽、也不会越界）
 +        let name = self
 +            .slots
@@ -8570,7 +8596,11 @@
 +            .map(|s| s.name.clone())
 +            .ok_or_else(|| anyhow::anyhow!("{}: 槽位 {} 已不存在", crate::kiro::slots::SLOT_GONE_MARK, slot))?;
 +        let wait = StdDuration::from_secs(self.config.slot_queue_timeout_secs);
-+        let deadline = Instant::now() + wait;
++        let queued_at = Instant::now();
++        let deadline = match until {
++            Some(u) => u.min(queued_at + wait),
++            None => queued_at + wait,
++        };
 +        let mut queued = false;
 +        loop {
 +            let notified = self.slot_notify.notified();
@@ -8598,7 +8628,7 @@
 +                    rt.stats[i].queue_timeouts += 1;
 +                    rt.record_issue(i, crate::kiro::slots::Issue::QueueTimeout, chrono::Utc::now().timestamp());
 +                }
-+                anyhow::bail!("{}: 槽位 {} 排队超过 {}s", crate::kiro::slots::OVERLOADED_MARK, name, wait.as_secs());
++                anyhow::bail!("{}: 槽位 {} 排队超过 {}s", crate::kiro::slots::OVERLOADED_MARK, name, queued_at.elapsed().as_secs());
 +            }
 +            let left = (deadline - now).min(StdDuration::from_millis(500));
 +            let _ = tokio::time::timeout(left, notified).await;
@@ -9373,7 +9403,7 @@
      }
  
      /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
-@@ -1640,6 +3049,7 @@
+@@ -1640,6 +3058,7 @@
                          DisabledReason::QuotaExceeded => "QuotaExceeded",
                          DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                          DisabledReason::InvalidConfig => "InvalidConfig",
@@ -9381,7 +9411,7 @@
                      }.to_string()),
                      endpoint: e.credentials.endpoint.clone(),
                      subscription_title: e.credentials.subscription_title.clone(),
-@@ -1671,6 +3081,12 @@
+@@ -1671,6 +3090,12 @@
          }
          // 持久化更改
          self.persist_credentials()?;
@@ -9394,7 +9424,7 @@
          Ok(())
      }
  
-@@ -1736,9 +3152,9 @@
+@@ -1736,9 +3161,9 @@
                  .clone()
                  .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
          } else {
@@ -9407,7 +9437,7 @@
  
              if needs_refresh {
                  let _guard = self.refresh_lock.lock().await;
-@@ -1955,6 +3371,9 @@
+@@ -1955,6 +3380,9 @@
          self.persist_credentials()?;
  
          tracing::info!("成功添加凭据 #{}", new_id);
@@ -9417,7 +9447,7 @@
          Ok(new_id)
      }
  
-@@ -2020,6 +3439,27 @@
+@@ -2020,6 +3448,27 @@
          // 立即回写统计数据，清除已删除凭据的残留条目
          self.save_stats();
  
@@ -9445,7 +9475,7 @@
          tracing::info!("已删除凭据 #{}", id);
          Ok(())
      }
-@@ -2029,6 +3469,11 @@
+@@ -2029,6 +3478,11 @@
      /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
      /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
      pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
@@ -9457,7 +9487,7 @@
          let credentials = {
              let entries = self.entries.lock();
              entries
-@@ -2076,6 +3521,9 @@
+@@ -2076,6 +3530,9 @@
  
      /// 设置 window 模式参数（Admin API）：校验 → 写回 config.json → 生效。写盘失败则不生效。
      pub fn set_window_settings(&self, ws: WindowSettings) -> anyhow::Result<()> {
@@ -9467,7 +9497,7 @@
          use anyhow::Context;
          ws.validate()?;
          if let Some(path) = self.config.config_path() {
-@@ -2101,6 +3549,10 @@
+@@ -2101,6 +3558,10 @@
      }
  
      fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
@@ -9478,7 +9508,7 @@
          use anyhow::Context;
  
          let config_path = match self.config.config_path() {
-@@ -2123,8 +3575,11 @@
+@@ -2123,8 +3584,11 @@
  
      /// 设置负载均衡模式（Admin API）
      pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
@@ -9491,7 +9521,7 @@
              anyhow::bail!("无效的负载均衡模式: {}", mode);
          }
  
-@@ -2140,9 +3595,35 @@
+@@ -2140,9 +3604,35 @@
              return Err(err);
          }
  
@@ -9527,7 +9557,7 @@
  }
  
  impl Drop for MultiTokenManager {
-@@ -2150,6 +3631,7 @@
+@@ -2150,6 +3640,7 @@
          if self.stats_dirty.load(Ordering::Relaxed) {
              self.save_stats();
          }
@@ -9535,7 +9565,7 @@
      }
  }
  
-@@ -2325,7 +3807,606 @@
+@@ -2325,7 +3816,622 @@
          assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");
      }
  
@@ -10110,6 +10140,22 @@
 +    }
 +
 +    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++    async fn test_slot_permit_queue_respects_request_budget() {
++        // 10-28：整个请求的预算比单次排队上限更早到 ⇒ 按预算提前放弃（交给 LiteLLM 兜底），不等满单次上限
++        let (m, dir) = slot_mgr(1, 2);
++        m.set_slot_lock(0, Some(1)).unwrap();
++        let _p1 = m.acquire_slot_permit(0).await.unwrap();
++        let t0 = Instant::now();
++        let until = t0 + StdDuration::from_millis(300);
++        let err = m.acquire_slot_permit_until(0, Some(until)).await.err().unwrap().to_string();
++        let took = t0.elapsed();
++        assert!(err.contains(crate::kiro::slots::OVERLOADED_MARK), "{}", err);
++        assert!(took < StdDuration::from_millis(900), "按预算 0.3s 放弃，而不是单次上限 1s：{:?}", took);
++        assert_eq!(m.slots_snapshot()[0].queued, 0, "放弃后排队数归零");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 +    async fn test_slot_permit_queues_then_times_out_and_releases() {
 +        let (m, dir) = slot_mgr(1, 2);
 +        m.set_slot_lock(0, Some(2)).unwrap();
@@ -10142,7 +10188,7 @@
      fn test_window_settings_validate_and_persist() {
          let config_path = std::env::temp_dir().join(format!("kiro-window-{}.json", uuid::Uuid::new_v4()));
          std::fs::write(&config_path, r#"{"loadBalancingMode":"window"}"#).unwrap();
-@@ -2441,6 +4522,65 @@
+@@ -2441,6 +4547,65 @@
          credentials.refresh_token = Some("a".repeat(150));
          let result = validate_refresh_token(&credentials);
          assert!(result.is_ok());
@@ -10458,7 +10504,7 @@
  }
 --- a/src/model/config.rs
 +++ b/src/model/config.rs
-@@ -71,6 +71,54 @@
+@@ -71,6 +71,58 @@
      #[serde(default = "default_window_cooldown_secs")]
      pub window_cooldown_secs: u64,
  
@@ -10485,6 +10531,10 @@
 +    /// 槽位：排队最长等待秒数，超时返回 529 交给 LiteLLM 兜底
 +    #[serde(default = "default_slot_queue_timeout_secs")]
 +    pub slot_queue_timeout_secs: u64,
++    /// 一个请求在本实例里「还没出第一个字」最多耗多久（排队 + 429 退避重试合计）。
++    /// 超过就回 529 让 LiteLLM 立刻兜底到别的模型，而不是让用户干等（10-28 用户定：超过 1 分钟就交给兜底）。
++    #[serde(default = "default_slot_request_budget_secs")]
++    pub slot_request_budget_secs: u64,
 +
 +    /// 槽位：某槽近 30 分钟用量 > 各槽平均 × 该倍数 ⇒ 不再分新用户
 +    #[serde(default = "default_slot_heavy_ratio")]
@@ -10513,7 +10563,7 @@
      #[serde(default = "default_tls_backend")]
      pub tls_backend: TlsBackend,
  
-@@ -183,6 +231,80 @@
+@@ -183,6 +235,84 @@
      60
  }
  
@@ -10530,7 +10580,11 @@
 +}
 +
 +fn default_slot_queue_timeout_secs() -> u64 {
-+    120
++    60
++}
++
++fn default_slot_request_budget_secs() -> u64 {
++    60
 +}
 +
 +fn default_slot_heavy_ratio() -> f64 {
@@ -10594,7 +10648,7 @@
  fn default_extract_thinking() -> bool {
      true
  }
-@@ -208,6 +330,18 @@
+@@ -208,6 +338,19 @@
              window_min_k: default_window_min_k(),
              window_max_k: default_window_max_k(),
              window_cooldown_secs: default_window_cooldown_secs(),
@@ -10604,6 +10658,7 @@
 +            slot_max_in_flight: default_slot_max_in_flight(),
 +            slot_auto_tune: true,
 +            slot_queue_timeout_secs: default_slot_queue_timeout_secs(),
++            slot_request_budget_secs: default_slot_request_budget_secs(),
 +            slot_heavy_ratio: default_slot_heavy_ratio(),
 +            slot_unbound_key_aliases: Vec::new(),
 +            slot_restricted_probe: true,

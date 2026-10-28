@@ -1,6 +1,5 @@
-diff -ruN -x t base/admin-ui/src/components/empty-events-dialog.tsx work/admin-ui/src/components/empty-events-dialog.tsx
---- base/admin-ui/src/components/empty-events-dialog.tsx	2026-10-27 09:54:03
-+++ work/admin-ui/src/components/empty-events-dialog.tsx	2026-10-27 22:27:47
+--- a/admin-ui/src/components/empty-events-dialog.tsx
++++ b/admin-ui/src/components/empty-events-dialog.tsx
 @@ -10,6 +10,8 @@
    probe_restricted_swapped: '号被限，已换号救回',
    probe_restricted_no_swap_left: '号被限，换号次数用完',
@@ -10,9 +9,8 @@ diff -ruN -x t base/admin-ui/src/components/empty-events-dialog.tsx work/admin-u
  }
  
  const fmtTime = (t: number) => {
-diff -ruN -x t base/src/kiro/provider.rs work/src/kiro/provider.rs
---- base/src/kiro/provider.rs	2026-10-27 09:54:03
-+++ work/src/kiro/provider.rs	2026-10-27 22:27:47
+--- a/src/kiro/provider.rs
++++ b/src/kiro/provider.rs
 @@ -97,6 +97,98 @@
      })
  }
@@ -152,18 +150,18 @@ diff -ruN -x t base/src/kiro/provider.rs work/src/kiro/provider.rs
          let mut last_error: Option<anyhow::Error> = None;
          let mut forced_refresh = false;
          let mut swaps = 0u32;
-@@ -705,6 +810,8 @@
-         // 在跑计数：成功时守卫跟着响应流走（读完才 -1），其它出口函数返回时 -1
-         let mut user_guard = self.token_manager.slot_user_guard(user_key);
+@@ -713,6 +818,8 @@
+             anyhow::anyhow!("{}: 槽位{}，{}s 内没拿到上游响应，交给兜底", crate::kiro::slots::OVERLOADED_MARK, what, budget.as_secs())
+         };
          for attempt in 0..SLOT_MAX_ATTEMPTS {
 +            // 切到备用模型后本轮起发改写过的请求体
 +            let request_body: &str = &body_now.clone();
-             let (slot, ctx) = self.token_manager.acquire_slot_context_as(user_key, &alias).await?;
-             let permit = match self.token_manager.acquire_slot_permit(slot).await {
-                 Ok(p) => p,
-@@ -761,6 +868,11 @@
+             if std::time::Instant::now() >= deadline {
+                 return Err(last_error.map(|e| over_budget(&format!("重试中（上一发：{}）", e.to_string().chars().take(60).collect::<String>()))).unwrap_or_else(|| over_budget("繁忙")));
+             }
+@@ -776,6 +883,11 @@
                      Peeked::Ready(r) => {
-                         self.token_manager.slot_record_latency(slot, sent_at.elapsed().as_millis() as u64);
+                         if let Some(i) = cur_slot() { self.token_manager.slot_record_latency(i, sent_at.elapsed().as_millis() as u64); }
                          let model = Self::extract_model_from_request(request_body).unwrap_or_default();
 +                        let r = if switched {
 +                            append_text(r, &REFUSAL_SWITCH_NOTICE.replace("{to}", &model_display(&fb_model)))
@@ -173,7 +171,7 @@ diff -ruN -x t base/src/kiro/provider.rs work/src/kiro/provider.rs
                          let metered = meter_response_for(r, self.token_manager.clone(), ctx.id, model, user_guard.take());
                          return Ok(hold_permit(metered, permit));
                      }
-@@ -778,7 +890,28 @@
+@@ -793,7 +905,28 @@
                      tracing::warn!("槽位 {} 号 #{} 空回复（非 opus / 未开探测），原样返回 key={}", slot, ctx.id, who.key_alias);
                      return Ok(response);
                  }
@@ -200,9 +198,9 @@ diff -ruN -x t base/src/kiro/provider.rs work/src/kiro/provider.rs
 +                    }
 +                }
                  if !restricted || swaps >= SLOT_MAX_SWAPS {
-                     self.token_manager.slot_report_empty(slot, true);
+                     if let Some(i) = cur_slot() { self.token_manager.slot_report_empty(i, true); }
                      note(true, if restricted { "probe_restricted_no_swap_left" } else { "probe_not_restricted" });
-@@ -857,6 +990,24 @@
+@@ -876,6 +1009,24 @@
          Some(Duration::from_millis(ms))
      }
  
@@ -227,7 +225,7 @@ diff -ruN -x t base/src/kiro/provider.rs work/src/kiro/provider.rs
      /// 空回复后用同号打官方 runtime 入口一次，判这个号是不是被上游限了。
      ///
      /// 🔴 10-25 误判（#3 justin 被冤退役）：旧版拿**用户那条请求原文**去探，敏感内容在任何号上都回
-@@ -1523,5 +1674,76 @@
+@@ -1548,5 +1699,76 @@
              .await;
          assert_eq!(got.key_alias, "cursor-alice");
          assert_eq!(got.key_hash, "h1");
@@ -304,10 +302,9 @@ diff -ruN -x t base/src/kiro/provider.rs work/src/kiro/provider.rs
 +        assert!(b.contains("Claude Opus 5 都没有作答") && !b.contains("{to}"));
      }
  }
-diff -ruN -x t base/src/model/config.rs work/src/model/config.rs
---- base/src/model/config.rs	2026-10-27 09:54:03
-+++ work/src/model/config.rs	2026-10-27 22:27:47
-@@ -107,6 +107,10 @@
+--- a/src/model/config.rs
++++ b/src/model/config.rs
+@@ -111,6 +111,10 @@
      #[serde(default = "default_true")]
      pub slot_restricted_probe: bool,
  
@@ -318,7 +315,7 @@ diff -ruN -x t base/src/model/config.rs work/src/model/config.rs
      /// 仅测试用：这些号 id 的 q / runtime 上游改打该地址（mock）。默认空 = 不生效，生产不配
      #[serde(default)]
      pub test_upstream_override: Option<TestUpstreamOverride>,
-@@ -251,6 +255,10 @@
+@@ -259,6 +263,10 @@
      1.5
  }
  
@@ -329,7 +326,7 @@ diff -ruN -x t base/src/model/config.rs work/src/model/config.rs
  fn default_true() -> bool {
      true
  }
-@@ -339,6 +347,7 @@
+@@ -348,6 +356,7 @@
              slot_heavy_ratio: default_slot_heavy_ratio(),
              slot_unbound_key_aliases: Vec::new(),
              slot_restricted_probe: true,

@@ -144,10 +144,11 @@ spec:
         resources:
           limits:
             cpu: '2'
-            memory: 512Mi
+            # 10-28 512Mi 被 OOMKill 6 次（10:42~11:12，峰值 492Mi，上千条消息的长会话并发时请求体都在内存里）⇒ 2Gi
+            memory: 2Gi
           requests:
             cpu: 50m
-            memory: 64Mi
+            memory: 512Mi
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         volumeMounts:

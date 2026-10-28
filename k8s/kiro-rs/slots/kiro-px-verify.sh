@@ -70,7 +70,7 @@ EOF
     m=${t%%:*}; sc=${t##*:}
     out=$(curl -s -m 200 -X POST -H "x-api-key: $AK" -H "content-type: application/json" -d "{\"model\":\"$m\",\"scenario\":\"$sc\"}" $B/slots/$I/test \
       | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['verdict'], d['status'], str(d['ms'])+'ms', 'acct', d['accountId'], 'tools', len(d.get('toolCalls') or []), (d.get('detail') or '')[:120])")
-    echo "$SLOT slot#$I $m $sc: $out"
+    echo "$SLOT 槽$((I+1)) $m $sc: $out"
     case "$out" in ok*) ;; *) echo "$SLOT STOP: slot test failed — disable it in Admin"; exit 1;; esac
   done
   echo "$SLOT OK"

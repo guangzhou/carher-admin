@@ -175,10 +175,14 @@ if [ -n "$NEWAPP" ]; then
     sed 's/^/    /' "$TMP/cw.txt"
     NOK=$(grep -c '^OK ' "$TMP/cw.txt")
     NXX=$(grep -c '^XX ' "$TMP/cw.txt")
-    # 判据:4 个 OK 且 0 个 XX。先断言自己数得到(NOK 非空且是数字),否则尺子坏了当红。
+    NNA=$(grep -c '^NA ' "$TMP/cw.txt")
+    # 判据:XX 必须 0,且 OK+NA 覆盖全部 4 个目标。
+    # 🔴 NA =「这份 bundle 不含摘要阈值,上游挪走了」(3.28.5 的 agent-host),不是失败;
+    #    但 NA **不许全覆盖** —— 四个都 NA 说明换了结构或路径错了,那是真问题。
     case "$NOK" in ''|*[!0-9]*) bad "①b 尺子坏了:数不出 OK 行数";; *)
-      if [ "$NOK" = "4" ] && [ "$NXX" = "0" ]; then ok "①b 件C 新版 4/4 锚点 exactly-1"
-      else bad "①b 件C 新版 OK=$NOK XX=$NXX(须 4/0)"; fi ;;
+      if [ "$NXX" = "0" ] && [ "$((NOK+NNA))" = "4" ] && [ "$NOK" -gt 0 ]; then
+        ok "①b 件C 新版锚点全 exactly-1(该打的 $NOK 个全过,$NNA 个不适用)"
+      else bad "①b 件C 新版 OK=$NOK XX=$NXX NA=$NNA(须 XX=0、OK+NA=4、OK>0)"; fi ;;
     esac
   else skip "①b:$NEWAPP 里找不到 extensions/cursor-agent-exec/dist/main.js"; fi
 else skip "①b:没给 --new-app / --fetch(新版本漂移时这腿必须跑)"; fi
@@ -1015,6 +1019,52 @@ printf '%s' "$OUT17C" | grep -q '这个大版本没验过' \
   && ok "⑰3.25.9(大版本没验过)仍走原来的告警,没被新分支吞掉" \
   || bad "⑰3.25.9 的大版本告警丢了"
 rm -rf "$TMP/v17"
+
+# ── 18) 「上游把那段挪走了」不许报成「锚点漂了」(2026-10-28,3.28.5)──────────────
+#    3.28.5 把摘要阈值整段从 cursor-agent-host 挪到另两条 bundle(那两条仍 3/3)。
+#    旧逻辑两种情况都回 `锚A count=0` ⇒ ①被当成漂移去追 ②新加的红字把无害情况
+#    报成「没打上会很慢」= 假红,让人去跑一个修不了也不用修的 REPAIR。
+#    判据用上游自己的字段名 `unusedTokensThresholdTo…`(不被 minify)。
+#    阳性对照:造一份**真漂移**(有阈值、但锚点被摇坏)⇒ 必须仍报漂移、仍红。
+echo "--- 18) 不适用 vs 真漂移要分得开 ---"
+if [ ! -f "$X8" ]; then
+  skip "⑱:缺 pristine agent-exec fixture(见 ⑧)"
+else
+  # 🔴 ⑧/⑭ 跑完后 $X8 已被打过/摇坏 ⇒ 这里必须重铺一份 pristine,
+  #    否则"找不到锚点 A"会被当成本腿的结论(实际是上一腿的残留)。
+  mk8
+  N18="$TMP/leg18-na.js"; D18="$TMP/leg18-drift.js"
+  # (a) 不适用:把阈值名整段删掉(= 上游挪走的样子)
+  python3 - "$X8" "$N18" <<'PY18'
+import sys,re
+s=open(sys.argv[1],encoding="utf8",errors="surrogateescape").read()
+s2=re.sub(r"unusedTokensThresholdTo(Start|Persist)BackgroundSummarization","__moved_away__",s)
+assert s2!=s, "fixture 里本来就没有阈值名,这腿造不出来"
+open(sys.argv[2],"w",encoding="utf8",errors="surrogateescape").write(s2)
+PY18
+  # (b) 真漂移:阈值名留着,只摇锚点 A
+  python3 - "$X8" "$D18" <<'PY18B'
+import sys
+s=open(sys.argv[1],encoding="utf8",errors="surrogateescape").read()
+old="usedTokens:0,maxTokens:0,breakdown:void 0"
+assert old in s, "fixture 里找不到锚点 A"
+open(sys.argv[2],"w",encoding="utf8",errors="surrogateescape").write(s.replace(old,"usedTokens:0,maxTokens:0,breakdownX:void 0"))
+PY18B
+  R18A=$(CX_CTXWIN_APPLY_TO_FILE="$N18" CX_CTXWIN_KIND=min CX_CTXWIN_OUT=/dev/null node "$JS" 2>&1 | tail -1)
+  R18B=$(CX_CTXWIN_APPLY_TO_FILE="$D18" CX_CTXWIN_KIND=min CX_CTXWIN_OUT=/dev/null node "$JS" 2>&1 | tail -1)
+  case "$R18A" in *不适用*) ok "⑱阈值被挪走 ⇒ 说「不适用」而不是「锚点漂了」" ;; *) bad "⑱不适用被报成别的:$R18A" ;; esac
+  case "$R18B" in *"锚A count=0"*) ok "⑱阳性对照:真漂移仍报锚A count=0(没被新判据吞掉)" ;; *) bad "⑱真漂移报成了:$R18B" ;; esac
+  # DOCTOR 侧:不适用的那份不许进红字计数
+  FH18="$TMP/leg18-app"; rm -rf "$FH18"; mkdir -p "$FH18/extensions/cursor-agent-exec/dist" "$FH18/out/vs/workbench"
+  cp "$LIVE_RES/package.json" "$FH18/package.json" 2>/dev/null
+  cp "$N18" "$FH18/extensions/cursor-agent-exec/dist/main.js"
+  L18=$(CURSOR_APP_ROOT="$FH18" node "$JS" --doctor 2>&1 | sed -n '/ctxwin(/,/noloop(/p')
+  printf '%s' "$L18" | grep -q '不适用' && ok "⑱DOCTOR 把挪走的那份标成「不适用」" \
+    || { bad "⑱DOCTOR 没标不适用:"; printf '%s\n' "$L18" | head -4; }
+  printf '%s' "$L18" | grep -q '件C 没打全' \
+    && bad "⑱DOCTOR 仍把不适用算成「没打全」= 假红" \
+    || ok "⑱不适用不计入红字(不会让人去跑无用的 REPAIR)"
+fi
 
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"

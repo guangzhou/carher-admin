@@ -157,6 +157,7 @@ const VERIFIED_EXACT = [
   "3.21.16", "3.21.18",                   // 09-22 / 09-23(件C 四目标 4/4)
   "3.24.12",                              // 10-12
   "3.27.12", "3.27.14",                   // 10-26
+  "3.28.5",                               // 10-28(件C:agent-host 那份上游挪走了 ⇒ 3 个该打的全过 + 1 个不适用)
 ];
 const VERIFIED_VERSIONS = [...new Set(VERIFIED_EXACT.map((v) => v.split(".").slice(0, 2).join(".")))];
 /* 2026-09-22 加 "3.21" 的实测依据(不是"看起来应该行"):同事报 3.21.16/win32 弹未验告警,
@@ -1211,8 +1212,19 @@ const cwNormSrc = (v) =>
 
 // 纯函数:把件C 打进一段文本。三锚点任一不是 exactly-1 ⇒ {ok:false},调用方整条跳过。
 // 与 scripts/zk-cursor-web/cursor_ctxwin_patch.js 逐字节同语义(单机版供已装好的人补打)。
+/* 🔴 2026-10-28(3.28.5):`cursor-agent-host/dist/main.js` 里那段代码**整段搬走了** ——
+   `unusedTokens`/`createRedactedConversationTokenDetails` 全 0,只剩 protobuf 字段声明,
+   阈值算术都挪到 agent-exec 与 local-agent-runtime(这两个仍 3/3)。
+   「这个文件里压根没有要补的东西」和「锚点漂了」后果完全不同:前者无害,
+   后者=用户每轮被压缩,但原来两者都回同一句 `锚A count=0` ⇒ 会被当成漂移去追,
+   更糟的是上面新加的红字会把无害情况也报成「没打上会很慢」,制造假红。
+   判据(不是猜):这个文件里有没有 `unusedTokensThresholdTo…` 这两个阈值名 ——
+   它们是 B/C 两处要改的那段算术的名字,**不被 minify**(上游自己的字段名)。
+   一个都没有 ⇒ 这份 bundle 不参与摘要判定 ⇒ 不适用,不是漂移。 */
+const CW_RELEVANT = /unusedTokensThresholdTo(?:Start|Persist)BackgroundSummarization/;
 function ctxwinApplyToText(src, kind) {
   if (src.includes(CTXWIN_MARKER)) return { ok: false, why: "已打过", skip: true };
+  if (!CW_RELEVANT.test(src)) return { ok: false, why: "这份 bundle 不含摘要阈值(上游把那段挪走了)⇒ 不适用", skip: true, na: true };
   if (kind === "min") {
     CW_A_MIN.lastIndex = 0; const a = [...src.matchAll(CW_A_MIN)];
     CW_B_MIN.lastIndex = 0; const b = [...src.matchAll(CW_B_MIN)];
@@ -2805,16 +2817,21 @@ async function doDoctor() {
      对话,那一发压缩中位数 43~98s(10-28 实测),同事只会说「Cursor 比 Claude 慢」。
      原来这里只打数字、不解释,一屏数字里 "0" 和 "3" 没人看得出区别。 */
   P("  ctxwin(" + CTXWIN_MARKER + "):");
-  let cwBad = 0;
+  let cwBad = 0, cwNeed = 0;
   for (const t of CTXWIN_TARGETS) {
     const p = path.join(RES, t.rel);
-    if (!fs.existsSync(p)) { P("    !!", t.rel, "不存在"); cwBad++; continue; }
-    const n = fs.readFileSync(p, "utf8").split(CTXWIN_MARKER).length - 1;
-    if (n < 3) cwBad++;
-    P("    " + n + "  " + t.rel + (n < 3 ? "   🔴 应为 3" : ""));
+    if (!fs.existsSync(p)) { P("    !!", t.rel, "不存在"); continue; }
+    const s = fs.readFileSync(p, "utf8");
+    const n = s.split(CTXWIN_MARKER).length - 1;
+    /* 3.28.5 起 agent-host 那份里上游把摘要阈值整段挪走了 ⇒ 它**本来就不该有** marker。
+       把它算成"缺"= 假红,会让人去跑一个修不了也不用修的 REPAIR。 */
+    const need = n > 0 || CW_RELEVANT.test(s);
+    if (need) { cwNeed++; if (n < 3) cwBad++; }
+    P("    " + n + "  " + t.rel + (!need ? "   (这版不含摘要阈值,不适用)" : n < 3 ? "   🔴 应为 3" : ""));
   }
-  if (cwBad) P("    🔴 件C 没打全(" + cwBad + "/" + CTXWIN_TARGETS.length + " 个文件不对)⇒ 会**每轮都自动压缩对话**,"
+  if (cwBad) P("    🔴 件C 没打全(该打的 " + cwNeed + " 个文件里有 " + cwBad + " 个不对)⇒ 会**每轮都自动压缩对话**,"
     + "表现就是「发一句要等很久」。先双击 REPAIR,再重启 Cursor;修完还慢就把这份报告发给管理员。");
+  else if (!cwNeed) P("    ⚠️ 四个文件都不含摘要阈值 —— 要么 Cursor 换了结构,要么路径不对,把这份报告发给管理员。");
   // 件D:0 = local loop 没被摘 ⇒ 若下面第 4 节那个 gate 是 on,这台机器就会把这一轮
   // 打到 Cursor 自家 InferenceService(BYOK 的 key 压根不参与)。
   P("  noloop(" + NOLOOP_MARKER + "):");

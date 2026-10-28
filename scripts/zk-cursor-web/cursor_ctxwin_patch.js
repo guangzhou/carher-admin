@@ -114,9 +114,14 @@ const C_SRC=`function shouldPersistBackgroundSummarization(usedTokens, maxTokens
 
 const NORM_MIN='function __cxN(x){return "number"==typeof x&&x>0&&x<4096?(1===x?1e6:1e3*x):x}';
 
+// 🔴 2026-10-28(3.28.5):上游把摘要阈值整段从 cursor-agent-host 挪到另两条 bundle。
+//    「这份里压根没有要补的东西」≠「锚点漂了」。判据用上游自己的字段名(不被 minify)。
+//    与 cursor_team_setup.js 的 CW_RELEVANT 同语义,两边必须一起改。
+const RELEVANT=/unusedTokensThresholdTo(?:Start|Persist)BackgroundSummarization/;
 function planFile(p, kind){
   let s; try{ s=fs.readFileSync(p,"utf8"); }catch(e){ return {err:"读不到: "+e.code}; }
   if(s.includes(MARK)) return {skip:true};
+  if(!RELEVANT.test(s)) return {skip:true, na:true};
   for(const m of OLD_MARKS) if(s.includes(m))
     return {err:`带着旧补丁 ${m} —— 先跑 --revert 还原,再打 v3`};
   const notes=[];
@@ -214,7 +219,7 @@ for(const t of TARGETS){
   const p=path.join(ROOT,t.f);
   const r=planFile(p,t.kind);
   if(r.err){ console.log(`XX ${t.f}\n     ${r.err}`); hardFail=true; continue; }
-  if(r.skip){ console.log(`== ${t.f}  已是 ${MARK},跳过`); plan.push({p,t,skip:true}); continue; }
+  if(r.skip){ console.log(r.na ? `NA ${t.f}\n     这版不含摘要阈值(上游把那段挪走了)⇒ 不适用` : `== ${t.f}  已是 ${MARK},跳过`); plan.push({p,t,skip:true,na:r.na}); continue; }
   console.log(`OK ${t.f}\n     ${r.notes.join("  ")}  三锚点均 exactly-1`);
   plan.push({p,t,out:r.out,orig:fs.readFileSync(p,"utf8")});
 }

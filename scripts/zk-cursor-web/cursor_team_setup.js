@@ -2881,6 +2881,26 @@ async function doDoctor() {
       "\n       keepfill2 补丁会在 Cursor 刷目录时补回;上面第 1) 节没有 keepfill2 就用新包双击 UPGRADE,有了仍缺就把这份报告发给运维。");
   }
 
+  /* 🔴 2026-10-28:「刷模型」跑的不是用户手上这个包,而是 INSTALL/UPGRADE 当时拷到
+     ~/.carher/cursor-setup/ 的那一份(解压目录会被删,所以必须拷)。它**只在再跑一次
+     INSTALL/UPGRADE 时才更新** ⇒ 管理员修好的东西,对只点过「刷模型」的人等于没发布,
+     而屏幕上没有任何地方说得出这件事。这里把那份副本的日期/版本打出来,让它可见。 */
+  P("\n--- 2.5) 「刷模型」用的那份脚本(可能比你手上的包旧) ---");
+  try {
+    const self = path.join(CARHER_DIR, "cursor-setup", "cursor_team_setup.js");
+    if (!fs.existsSync(self)) P("  没有(这台机器没跑过带「刷模型」的安装器)⇒ 说「刷模型」不会生效,双击 UPGRADE 一次即可");
+    else {
+      const crypto2 = require("crypto");
+      const h = (f) => crypto2.createHash("sha256").update(fs.readFileSync(f)).digest("hex").slice(0, 12);
+      const mine = h(self), now = h(__filename);
+      P("  " + self);
+      P("  改于 " + new Date(fs.statSync(self).mtimeMs).toISOString().slice(0, 16).replace("T", " ")
+        + "  sha=" + mine + (path.resolve(self) === path.resolve(__filename) ? "(就是当前这份)" : "  当前这份 sha=" + now));
+      if (path.resolve(self) !== path.resolve(__filename) && mine !== now)
+        P("    ⚠️ 两份不一样 ⇒ 「刷模型」走的是旧逻辑。想让它跟上:双击一次 UPGRADE(不会问 Key、不动聊天记录)");
+    }
+  } catch (e) { P("  量不到(" + ((e && e.message) || e) + ")"); }
+
   P("\n--- 3) 最近几个会话选的模型(报错那一发选的是谁) ---");
   // ⚠️ `composerData:*` 躺在 **globalStorage/state.vscdb 的 cursorDiskKV** 表里,
   //    不在 workspaceStorage —— 第一版写错了路径,拿到 0 行还把它当成"没有会话"打出去,

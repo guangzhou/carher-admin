@@ -950,6 +950,31 @@ console.log(r);' "$JS" 2>/dev/null)
   esac
 fi
 
+# ── 16) 「刷模型」用的那份旧副本要被看见(2026-10-28)────────────────────────────
+#    病:「刷模型」跑的是 ~/.carher/cursor-setup/ 里的副本,只在再跑 INSTALL/UPGRADE
+#    时才更新 ⇒ 管理员修好的东西对只点「刷模型」的人等于没发布,且屏幕上无处可知。
+#    现在 DOCTOR 打出它的 sha/日期并在不一致时给出下一步。
+#    阳性对照:放一份**内容不同**的副本进假 HOME,必须报不一致;放一份相同的,必须不报。
+echo "--- 16) 「刷模型」副本陈旧要报出来 ---"
+FH16="$TMP/leg16-home"; mkdir -p "$FH16/.carher/cursor-setup"
+printf 'console.log("old")\n' > "$FH16/.carher/cursor-setup/cursor_team_setup.js"
+D16A="$TMP/leg16-stale.log"
+env HOME="$FH16" node "$JS" --doctor >"$D16A" 2>&1
+grep -q '两份不一样' "$D16A" && ok "⑯副本内容不同 ⇒ 报「刷模型走的是旧逻辑」+ 给出 UPGRADE" \
+  || bad "⑯副本陈旧却没报出来(见 $D16A)"
+grep -qE 'sha=[0-9a-f]{12}' "$D16A" && ok "⑯打了两份的 sha(可对账,不是只说一句『可能旧』)" \
+  || bad "⑯没打 sha"
+cp "$JS" "$FH16/.carher/cursor-setup/cursor_team_setup.js"
+D16B="$TMP/leg16-fresh.log"
+env HOME="$FH16" node "$JS" --doctor >"$D16B" 2>&1
+grep -q '两份不一样' "$D16B" && bad "⑯阴性对照红了:副本和当前一致却仍报不一样(见 $D16B)" \
+  || ok "⑯阴性对照:副本一致时不报警(尺子不是恒红)"
+rm -rf "$FH16/.carher/cursor-setup"
+D16C="$TMP/leg16-none.log"
+env HOME="$FH16" node "$JS" --doctor >"$D16C" 2>&1
+grep -q '没跑过带「刷模型」的安装器' "$D16C" && ok "⑯压根没有副本时说清了「刷模型不会生效」" \
+  || bad "⑯没有副本时没说清(见 $D16C)"
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

@@ -136,6 +136,69 @@ async function run (ok) {
       await new Promise((r) => srv0.close(() => r()))
     }
   }
+  // R6~R9：10-28 独立 review 抓到的四个缺陷，各留一条回归
+  {
+    const PU = 18970; const PS = 18971
+    let mode = 'slowstream'; let wrote = 0; let closedEarly = 0; const hdrs = []
+    const srv0 = http.createServer((req, res) => {
+      hdrs.push(req.headers)
+      req.on('data', () => {})
+      req.on('end', () => {
+        if (mode === 'slowstream') {          // R6：每 100ms 吐一块，共 50 块
+          res.writeHead(200, { 'content-type': 'text/event-stream' })
+          let i = 0
+          const t = setInterval(() => { if (res.destroyed) { clearInterval(t); closedEarly++; return } res.write('data: {"i":' + (i++) + '}\n\n'); wrote++; if (i >= 50) { clearInterval(t); res.end() } }, 100)
+          res.on('close', () => { if (i < 50) { clearInterval(t); closedEarly++ } })
+        } else if (mode === 'rst') {          // R7：回头 + 一块后 RST
+          res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write('data: {"i":1}\n\n')
+          setTimeout(() => { req.socket.resetAndDestroy ? req.socket.resetAndDestroy() : req.socket.destroy() }, 80)
+        } else if (mode === 'slowdrop') {     // R8：等 3.5s 才断（新连接）
+          setTimeout(() => req.socket.destroy(), 3500)
+        } else { res.writeHead(200); res.end('data: [DONE]\n\n') }
+      })
+    })
+    await new Promise((r) => srv0.listen(PU, '127.0.0.1', r))
+    const logs = []
+    const sp = H.spawnNode(path.join(__dirname, '../server/server.js'), { ZKD_PORT: String(PS), ZKD_UPSTREAM: 'http://127.0.0.1:' + PU }, '[srv]', logs)
+    const mget = async () => JSON.parse((await H.get(PS, '/metrics.json')).body.toString())
+    try {
+      await H.waitHealthy(PS)
+      // R6
+      await new Promise((resolve) => {
+        const b = Buffer.from(JSON.stringify(fullEnvelope().env))
+        const rq = http.request({ host: '127.0.0.1', port: PS, path: '/zkd/v1/delta', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': b.length, authorization: 'Bearer sk-test-zkd', 'x-zkd-client': 'sidecar/1' } }, (res) => {
+          res.on('data', () => {}); setTimeout(() => { rq.destroy(); setTimeout(resolve, 700) }, 300)
+        })
+        rq.on('error', () => {}); rq.end(b)
+      })
+      const m6 = await mget()
+      ok('R6 客户端 300ms 取消 ⇒ 上游不再继续生成（写出 < 10 块）', wrote < 10, 'wrote=' + wrote)
+      ok('R6 上游连接被提前关、client_cancel=1', closedEarly >= 1 && m6.client_cancel === 1, JSON.stringify([closedEarly, m6.client_cancel]))
+      ok('R6 不算成中流断线', m6.upstream_midstream_abort === 0, String(m6.upstream_midstream_abort))
+      ok('R9 x-zkd-* 头不往上游带', hdrs.length > 0 && !('x-zkd-client' in hdrs[0]) && !('x-zkd-synthetic' in hdrs[0]), JSON.stringify(Object.keys(hdrs[0] || {})))
+      // R7
+      mode = 'rst'
+      const r7 = await postRaw(PS, '/zkd/v1/delta', JSON.stringify(fullEnvelope().env))
+      const m7 = await mget()
+      ok('R7 头已发出后上游 RST ⇒ 客户端收到连接错误（不是假装完整的 200）', String(r7.status).startsWith('conn_error'), String(r7.status))
+      ok('R7 midstream_abort +1', m7.upstream_midstream_abort === 1, String(m7.upstream_midstream_abort))
+      // R8：慢断不重发
+      mode = 'slowdrop'
+      await new Promise((r) => setTimeout(r, 4500))   // 让池里旧连接过期，保证下一发是新连接
+      const before = hdrs.length
+      const r8 = await postRaw(PS, '/zkd/v1/delta', JSON.stringify(fullEnvelope().env))
+      const m8 = await mget()
+      ok('R8 新连接等 3.5s 才断 ⇒ 不重发，直接 502', r8.status === 502 && hdrs.length - before === 1, String(r8.status) + ' sends=' + (hdrs.length - before))
+      ok('R8 计数 no_retry_slow=1', m8.upstream_no_retry_slow === 1, String(m8.upstream_no_retry_slow))
+      // R9：连接多次复用不泄漏 timeout 监听
+      mode = 'ok'
+      for (let i = 0; i < 15; i++) await postRaw(PS, '/zkd/v1/delta', JSON.stringify(fullEnvelope().env))
+      ok('R9 同一连接复用 15 次无 MaxListeners 告警', !logs.some((l) => /MaxListenersExceeded/.test(l)))
+    } finally {
+      sp.kill(); srv0.closeAllConnections && srv0.closeAllConnections()
+      await new Promise((r) => srv0.close(() => r()))
+    }
+  }
   await scenario(ok, 'R4', ['drop', 'ok'], { ZKD_RETRY_ONCE: '0' }, ({ r, got }) => {
     ok('R4 关掉开关 ⇒ 首次断就 502', r.status === 502, String(r.status))
     ok('R4 上游只收到 1 发', got.length === 1, String(got.length))

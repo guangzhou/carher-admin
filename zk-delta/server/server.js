@@ -47,7 +47,15 @@ const upAgent = new upMod.Agent({ keepAlive: true, keepAliveMsecs: 1000, maxSock
 // 空闲连接 4s 后关。🔴 计时器只能管「躺在池里」的那段：socket 被下一发拿走时必须清掉，
 // 否则上游首字慢于 4s（opus 长上下文常见）就会被自己掐断——10-28 上线后 lupeng1 几乎每发首次都被这样断，
 // 第二发也恰好 4.000s 后断（03:38:47.31 → 03:38:51.31）。
-upAgent.on('free', (sock) => { sock.setTimeout(4000, () => sock.destroy()) })
+// 每条连接只挂一个 timeout 监听（不能每次 free 都 setTimeout(ms, cb)：cb 会累加成监听泄漏），
+// 触发时再确认真的空闲（没有挂着的请求）才关。
+upAgent.on('free', (sock) => {
+  if (!sock._zkdIdleWatch) {
+    sock._zkdIdleWatch = true
+    sock.on('timeout', () => { if (!sock._httpMessage) sock.destroy() })
+  }
+  sock.setTimeout(4000)
+})
 
 // ---------- 计数器（G4：每一次降级都要有数） ----------
 const M = {
@@ -75,6 +83,8 @@ const M = {
   upstream_retry_ok: 0,       // 其中自动重发一次后拿到响应的
   upstream_retry_fail: 0,     // 重发也没救回来的（这些用户会收到 502）
   upstream_midstream_abort: 0, // 已经开始回字节后上游断了（不能重发，只能断开客户端让它自己重试）
+  upstream_no_retry_slow: 0,  // 断线时已经等了很久（可能上游已开始生成），不重发直接 502
+  client_cancel: 0,           // 客户端中途走了，我们把上游那一发也掐掉的次数
   inflight: 0,                // 当前正在转发的请求数
   inflight_peak: 0,           // 自启动以来最高并发
   bytes_in: 0,          // 客户端 → 本服务（广域网这一跳）
@@ -181,13 +191,18 @@ function log (ev, kv) {
 // 有了它，断线那一行能直接对上是哪把 key，不用再靠对时间去猜（10-27 那次就是猜出来的）。
 function whoOf (req) { return authHashOf(req).slice(0, 12) }
 
+// 不往上游带的头：本服务 / 小代理自己的（x-zk- / x-zkd-）+ 逐跳头
+const HOP = new Set(['host', 'content-length', 'connection', 'transfer-encoding', 'keep-alive', 'te', 'trailer', 'upgrade', 'proxy-authorization', 'proxy-connection'])
+// 重发一次只在「多半还没真正打到上游」时做：拿的是池里的旧连接（对面刚关），或者发出后很快就断。
+// 等了很久才断（可能上游已经在生成、已经计费）就不重发，直接 502 交给客户端——避免一次提问扣两次钱、等两倍时间。
+const RETRY_FAST_MS = parseInt(process.env.ZKD_RETRY_FAST_MS || '3000', 10)
+
 function forward (req, res, path, bodyBuf, extraRespHeaders, tag, attempt) {
   attempt = attempt || 1
   const headers = {}
   for (const k of Object.keys(req.headers)) {
     const lk = k.toLowerCase()
-    if (lk === 'host' || lk === 'content-length' || lk === 'connection' ||
-        lk === 'transfer-encoding' || lk.startsWith('x-zk-')) continue
+    if (HOP.has(lk) || lk.startsWith('x-zk')) continue
     headers[k] = req.headers[k]
   }
   headers['content-length'] = String(bodyBuf.length)
@@ -204,13 +219,23 @@ function forward (req, res, path, bodyBuf, extraRespHeaders, tag, attempt) {
     headers,
     agent: upAgent
   }
+  // 当前这一发（重发时会换成第二发）：客户端走了要把它也掐掉，否则上游照样把整段生成完（白白计费），
+  // 连接还可能卡在背压上占着池子（10-28 review 复现：客户端 300ms 取消，上游仍写满 10s）。
   if (attempt === 1) {
     M.inflight++; if (M.inflight > M.inflight_peak) M.inflight_peak = M.inflight
     let counted = true
-    res.on('close', () => { if (counted) { counted = false; M.inflight-- } })
+    res.on('close', () => {
+      if (counted) { counted = false; M.inflight-- }
+      if (!res.writableFinished && res._zkdCur && !res._zkdCur.destroyed) {
+        M.client_cancel++
+        res._zkdCur.destroy()
+      }
+    })
   }
+  const sentAt = Date.now()
 
   const ureq = upMod.request(opts, (ures) => {
+    if (res.destroyed) { ures.destroy(); return }   // 客户端已经走了：不要再读也不要算成中流断线
     if (ures.statusCode >= 200 && ures.statusCode < 300) { M.upstream_2xx++; M.upstream_ok_since_hard++ }
     else {
       M.upstream_non2xx++; bump(M.upstream_by_status, String(ures.statusCode))
@@ -226,20 +251,25 @@ function forward (req, res, path, bodyBuf, extraRespHeaders, tag, attempt) {
     res.writeHead(ures.statusCode, h)
     // 上游回到一半被掐断（worker 崩）：pipe 不会替你结束 res ⇒ 客户端一直挂着等，直到 Cursor 自己超时。
     // 立刻把客户端连接也断掉，让它知道这一轮没了、可以重试（10-27 实测旧版这里挂 >8s 不结束）。
-    ures.on('aborted', () => {
-      M.upstream_midstream_abort++
-      log('upstream_midstream_abort', Object.assign({ who: whoOf(req), status: ures.statusCode }, tag || {}))
-      res.destroy()
+    ures.on('close', () => {
+      // 上游回到一半没了（FIN 或 RST 都算）。客户端主动取消引起的不算（那时 res 已 destroyed）。
+      if (!ures.complete && !res.destroyed) {
+        M.upstream_midstream_abort++
+        log('upstream_midstream_abort', Object.assign({ who: whoOf(req), status: ures.statusCode }, tag || {}))
+        res.destroy()
+      }
     })
     ures.pipe(res)
   })
+  res._zkdCur = ureq
   // 从池里拿到的旧连接：清掉空闲计时器（见 upAgent 那段）
   ureq.on('socket', (sock) => sock.setTimeout(0))
   ureq.on('error', (e) => {
     M.upstream_conn_error++
     const kv = Object.assign({ msg: e.message, who: whoOf(req), attempt, bytes: bodyBuf.length, path }, tag || {})
-    // 还没给客户端回过任何东西、客户端也还在 ⇒ 换一条新连接重发一次
-    if (RETRY_ONCE && attempt === 1 && !res.headersSent && !res.destroyed) {
+    // 还没给客户端回过任何东西、客户端也还在、而且多半还没真正打到上游 ⇒ 换一条新连接重发一次
+    const fast = ureq.reusedSocket || (Date.now() - sentAt) < RETRY_FAST_MS
+    if (RETRY_ONCE && attempt === 1 && !res.headersSent && !res.destroyed && fast) {
       log('upstream_error_retry', kv)
       const r2 = forward(req, res, path, bodyBuf, extraRespHeaders, tag, 2)
       // 把第二发的 response 转给调用方（handleDelta 靠它在 2xx 后提交会话状态）
@@ -247,9 +277,12 @@ function forward (req, res, path, bodyBuf, extraRespHeaders, tag, attempt) {
       return
     }
     if (attempt > 1) M.upstream_retry_fail++
-    log('upstream_error', kv)
+    if (attempt === 1 && !fast && !res.headersSent) M.upstream_no_retry_slow++
+    log('upstream_error', Object.assign(kv, { waited_ms: Date.now() - sentAt, reused: !!ureq.reusedSocket }))
+    if (res.destroyed) return
     if (!res.headersSent) sendJson(res, 502, { error: { type: 'zkd_upstream_error', message: e.message, code: '502' } })
-    else res.end()
+    // 头已发出后上游 RST：不能 res.end()（客户端会当成一个完整的 200），必须断开让它知道没完
+    else { M.upstream_midstream_abort++; res.destroy() }
   })
   ureq.end(bodyBuf)
   return ureq

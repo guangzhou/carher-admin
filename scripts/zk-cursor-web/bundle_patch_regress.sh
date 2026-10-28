@@ -180,9 +180,15 @@ if [ -n "$NEWAPP" ]; then
     # 🔴 NA =「这份 bundle 不含摘要阈值,上游挪走了」(3.28.5 的 agent-host),不是失败;
     #    但 NA **不许全覆盖** —— 四个都 NA 说明换了结构或路径错了,那是真问题。
     case "$NOK" in ''|*[!0-9]*) bad "①b 尺子坏了:数不出 OK 行数";; *)
-      if [ "$NXX" = "0" ] && [ "$((NOK+NNA))" = "4" ] && [ "$NOK" -gt 0 ]; then
-        ok "①b 件C 新版锚点全 exactly-1(该打的 $NOK 个全过,$NNA 个不适用)"
-      else bad "①b 件C 新版 OK=$NOK XX=$NXX NA=$NNA(须 XX=0、OK+NA=4、OK>0)"; fi ;;
+      # 🔴 10-28:没给 --new-app 时这腿**退回原厂快照**(= 当前版本),上面只打了一行小字,
+      #    结论却照样写「新版」⇒ 同一个 app 两次跑出 4/0 和 3/1,看着像尺子抽风。
+      #    现在把量的是哪一版写进结论里:快照来源 ⇒ 明说不是新版,且算 SKIP(跳过不是通过)。
+      NVER="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("version","?"))' "$NAPP_RES/package.json" 2>/dev/null || echo '?')"
+      if [ "$NEWAPP_IS_SNAPSHOT" = "1" ]; then
+        skip "①b:没给 --new-app ⇒ 量的是 $CWSNAP 那份原厂快照(**不是新版**;快照目录里没有 package.json,所以这里不报版本号);新版本漂移时必须给 --new-app"
+      elif [ "$NXX" = "0" ] && [ "$((NOK+NNA))" = "4" ] && [ "$NOK" -gt 0 ]; then
+        ok "①b 件C 在 $NVER 上锚点全 exactly-1(该打的 $NOK 个全过,$NNA 个不适用)"
+      else bad "①b 件C 在 $NVER 上 OK=$NOK XX=$NXX NA=$NNA(须 XX=0、OK+NA=4、OK>0)"; fi ;;
     esac
   else skip "①b:$NEWAPP 里找不到 extensions/cursor-agent-exec/dist/main.js"; fi
 else skip "①b:没给 --new-app / --fetch(新版本漂移时这腿必须跑)"; fi

@@ -1113,6 +1113,63 @@ console.log(JSON.stringify(r));' "$JS"; }
   sed -n '/async function refreshModels/,/^}/p' "$JS" | grep -q 'writeFileSync'     && bad "⑲refreshModels 里出现了写文件 —— 不许在 Cursor 开着时偷偷改 bundle"     || ok "⑲只读:没在刷模型里自动改 bundle"
 fi
 
+# ── 20) 压缩现场探针(2026-10-28)────────────────────────────────────────────
+#    官方 preCompact 钩子在压缩真发生时被调用,payload 带 context_window_size。
+#    件C 失效时它是档位数字(300/500/1),正常时 300000 ⇒ 这是**现场证据**,
+#    比让同事去数 marker 直接。官方明说这个钩子拦不住压缩,所以它只是量具。
+#    判据:①坏值判 tier-number ②正常值判 real-tokens ③垃圾/空输入不许崩(否则同事发不出消息)
+#    ④stdout 必须是合法 JSON ⑤合并写 hooks.json 时用户自己的钩子一个字不能动。
+echo "--- 20) 压缩现场探针 ---"
+PROBE="$HERE/cursor_precompact_probe.js"
+if [ ! -f "$PROBE" ]; then
+  skip "⑳:包里没有 cursor_precompact_probe.js"
+else
+  # 🔴 探针是追加写的 ⇒ 同一个 HOME 跑两遍计数就变 2,断言「=1」会莫名其妙地红。
+  #    每次重铺一个干净的 HOME,量的才是这一次的三发。
+  P20="$TMP/leg20"; rm -rf "$P20"; mkdir -p "$P20"
+  j20() { echo "$1" | HOME="$P20" node "$PROBE" 2>&1; }
+  O20A=$(j20 '{"trigger":"auto","context_window_size":300,"context_tokens":20100}')
+  O20B=$(j20 '{"trigger":"auto","context_window_size":300000,"context_tokens":271000}')
+  O20C=$(j20 'not json at all'); RC20C=$?
+  O20D=$(printf '' | HOME="$P20" node "$PROBE" 2>&1); RC20D=$?
+  for pair in "A:$O20A" "B:$O20B" "C:$O20C" "D:$O20D"; do
+    case "${pair#*:}" in "{}") ;; *) bad "⑳stdout 不是 {}(会干扰 Cursor):${pair%%:*} ⇒ ${pair#*:}" ;; esac
+  done
+  ok "⑳四种输入 stdout 都是合法 JSON {}"
+  { [ "$RC20C" = 0 ] && [ "$RC20D" = 0 ]; } && ok "⑳垃圾输入/空输入退出码 0(不会让同事发不出消息)" \
+    || bad "⑳异常输入退出码非 0(C=$RC20C D=$RC20D)"
+  R20=$(HOME="$P20" node "$PROBE" --report 2>&1)
+  printf '%s' "$R20" | grep -qE '档位数字\(坏\)[[:space:]]*1' && ok "⑳坏值(窗口=300)判成档位数字" \
+    || { bad "⑳坏值没判出来:"; printf '%s\n' "$R20" | head -4; }
+  printf '%s' "$R20" | grep -qE '真实 token\(正常\)[[:space:]]*1' && ok "⑳正常值(窗口=300000)判成真实 token(不是恒红)" \
+    || bad "⑳正常值被误判"
+  printf '%s' "$R20" | grep -q '每一轮都压缩' && ok "⑳抓到坏值时写了后果 + 指向 REPAIR" || bad "⑳没写后果"
+  # 阳性对照:界必须在 4096(300 判坏、200000 判好);5000 这种中间值也该判真实
+  O20E=$(j20 '{"context_window_size":5000}')
+  HOME="$P20" node "$PROBE" --report 2>/dev/null | grep -qE '真实 token\(正常\)[[:space:]]*2' \
+    && ok "⑳界用 4096:5000 判真实(与件C 的 __cxN 同界)" || bad "⑳界不对:5000 没判成真实"
+  # ⑤ 合并写:用户原有钩子不许动
+  H20="$TMP/leg20-home"; rm -rf "$H20"; mkdir -p "$H20/.cursor"
+  printf '{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":"echo mine"}]}}' > "$H20/.cursor/hooks.json"
+  HOME="$H20" node -e '
+const fs=require("fs"),path=require("path"),os=require("os");
+const src=fs.readFileSync(process.argv[1],"utf8");
+const head=src.slice(src.indexOf("const EXEC = process.execPath"), src.indexOf("const BUNDLES = ["));
+const cd=src.slice(src.indexOf("const CARHER_DIR"), src.indexOf("const KEY_COPY"));
+const fn=src.slice(src.indexOf("const PROBE_REL"), src.indexOf("function installImageSkill"));
+new Function("fs","path","os","process","__dirname","console", head+cd+fn+"; installPrecompactProbe(false);")(fs,path,os,process,process.argv[2],{log(){}});
+' "$JS" "$HERE" 2>/dev/null
+  python3 - "$H20/.cursor/hooks.json" <<'PY20' && ok "⑳合并写:用户原有钩子保住 + 我们那条加上了 + 留了备份" || bad "⑳合并写坏了(见上)"
+import json,sys,pathlib
+d=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf8"))
+h=d.get("hooks",{})
+assert [x.get("command") for x in h.get("beforeSubmitPrompt",[])]==["echo mine"], "用户原有钩子被动了"
+pc=h.get("preCompact") or []
+assert any("cursor_precompact_probe.js" in (x.get("command") or "") for x in pc), "我们那条没加上"
+assert pathlib.Path(sys.argv[1]+".carher-bak").exists(), "没留备份"
+PY20
+fi
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

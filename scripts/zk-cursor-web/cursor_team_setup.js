@@ -2933,6 +2933,30 @@ async function doDoctor() {
     }
   } catch (e) { P("  量不到(" + ((e && e.message) || e) + ")"); }
 
+  /* 压缩现场:探针记下的是 Cursor **自己算出来的窗口值**。比数 marker 更直接 ——
+     marker 在不在说明"补丁装没装",这里说明"压缩真发生时它用的是哪个口径"。 */
+  P("\n--- 2.6) 压缩现场记录(preCompact 探针)---");
+  try {
+    const lg = path.join(CARHER_DIR, "cursor-precompact.jsonl");
+    const hp = path.join(os.homedir(), ".cursor", "hooks.json");
+    let hooked = false;
+    try { const hd = JSON.parse(fs.readFileSync(hp, "utf8"));
+      hooked = (hd.hooks?.preCompact || []).some((h) => h && typeof h.command === "string" && h.command.includes("cursor_precompact_probe.js")); } catch (e) {}
+    P("  探针挂上了吗: " + (hooked ? "是" : "没有(双击一次 UPGRADE 就会装)"));
+    if (!fs.existsSync(lg)) P("  记录: 还没有 —— 装上之后一次自动压缩都没发生(好消息),或探针没跑起来");
+    else {
+      const rows = fs.readFileSync(lg, "utf8").trim().split("\n")
+        .map((l) => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
+      const bad = rows.filter((r) => r.verdict === "tier-number");
+      const good = rows.filter((r) => r.verdict === "real-tokens");
+      P("  记录: 共 " + rows.length + " 次压缩;窗口是档位数字(坏) " + bad.length + ",真实 token(正常) " + good.length);
+      for (const r of rows.slice(-3)) P("    " + String(r.ts || "").slice(0, 19).replace("T", " ")
+        + "  窗口=" + r.context_window_size + " 已用=" + r.context_tokens + " ⇒ " + r.verdict);
+      if (bad.length) P("    🔴 抓到坏值:Cursor 把档位数字当成了真实窗口 ⇒ **每轮都压缩**(每次 40~100 秒)。"
+        + "这就是「发一句要等很久」的原因。处置:完全退出 Cursor → 双击 REPAIR → 重开。");
+    }
+  } catch (e) { P("  量不到(" + ((e && e.message) || e) + ")"); }
+
   P("\n--- 3) 最近几个会话选的模型(报错那一发选的是谁) ---");
   // ⚠️ `composerData:*` 躺在 **globalStorage/state.vscdb 的 cursorDiskKV** 表里,
   //    不在 workspaceStorage —— 第一版写错了路径,拿到 0 行还把它当成"没有会话"打出去,
@@ -3261,6 +3285,7 @@ async function main() {
   //    Node 用 Cursor 自己的二进制(ELECTRON_RUN_AS_NODE=1),同事不用另装 Node。
   if (!args.zkDeltaOnly) { try { installImageSkill(rawKey || args.upgradeKey); } catch (e) { console.log("   ⚠️  画图这一步出错(不影响其余): " + (e && e.message || e)); } }
   if (!args.zkDeltaOnly) { try { installRefreshSkill(); } catch (e) { console.log("   ⚠️  「刷模型」这一步出错(不影响其余): " + (e && e.message || e)); } }
+  if (!args.zkDeltaOnly) { try { installPrecompactProbe(false); } catch (e) { console.log("   ⚠️  探针这一步出错(不影响其余): " + (e && e.message || e)); } }
 
   if (args.lark) { try { await larkSetup(args); } catch (e) { console.log("   ⚠️  飞书这一步出错（不影响其余）: " + (e && e.message || e)); } }
 
@@ -3490,6 +3515,52 @@ function installRefreshSkill() {
     "",
   ].join("\n"));
   console.log("   ✅ 以后在 Cursor 里说「刷模型」,就按你的 Key 更新模型菜单");
+}
+
+/* ── 压缩现场探针(2026-10-28)────────────────────────────────────────────────
+   官方 preCompact 钩子(cursor.com/docs/hooks)在**压缩真发生时**被调用,payload 带
+   `context_window_size`。件C 失效时这个值是档位数字(300/500/1),正常时是 300000 ——
+   于是不用让同事去数 marker,机器自己就留下现场证据。
+   官方原话:"an observational hook that cannot block or modify the compaction behavior"
+   ⇒ 它**拦不住压缩**,只是量具。装它不改任何 Cursor 行为。
+   🔴 合并写入:hooks.json 是用户自己的文件(本机已有 motif 的 4 个钩子),只往
+   preCompact 数组里**追加我们这一条**,其余一个字不动;已有同一条就不重复加。 */
+const PROBE_REL = "cursor_precompact_probe.js";
+function installPrecompactProbe(dry) {
+  console.log("--- 7.5) 压缩现场探针(只读,记录 Cursor 自己算的窗口值)---");
+  const src = path.join(__dirname, PROBE_REL);
+  if (!fs.existsSync(src)) { console.log("   跳过(包里没有 " + PROBE_REL + ")"); return; }
+  const dir = path.join(CARHER_DIR, "cursor-setup");
+  const dst = path.join(dir, PROBE_REL);
+  const hp = path.join(os.homedir(), ".cursor", "hooks.json");
+  const cmd = process.platform === "win32"
+    ? 'cmd /c "set ELECTRON_RUN_AS_NODE=1&& "' + cursorBin() + '" "' + dst + '""'
+    : 'ELECTRON_RUN_AS_NODE=1 "' + cursorBin() + '" "' + dst + '"';
+  let d = { version: 1, hooks: {} };
+  try { if (fs.existsSync(hp)) d = JSON.parse(fs.readFileSync(hp, "utf8")) || d; }
+  catch (e) { console.log("   ⚠️  hooks.json 解不开(" + ((e && e.message) || e) + ")⇒ 不动它,跳过探针"); return; }
+  if (!d.hooks || typeof d.hooks !== "object") d.hooks = {};
+  const arr = Array.isArray(d.hooks.preCompact) ? d.hooks.preCompact : [];
+  const had = arr.some((h) => h && typeof h.command === "string" && h.command.includes(PROBE_REL));
+  if (dry) {
+    console.log("   [dry-run] 会把探针拷到 %s,并%s hooks.json 的 preCompact(现有 %d 条)",
+      dst, had ? "保持" : "追加一条到", arr.length);
+    return;
+  }
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(src, dst);
+    if (!had) {
+      // 先备份用户原文件,再写(改别人配置之前必须有退路)
+      if (fs.existsSync(hp)) fs.copyFileSync(hp, hp + ".carher-bak");
+      arr.push({ command: cmd });
+      d.hooks.preCompact = arr;
+      fs.mkdirSync(path.dirname(hp), { recursive: true });
+      fs.writeFileSync(hp, JSON.stringify(d, null, 2) + "\n");
+      console.log("   ✅ 已挂上(原 hooks.json 备份在 %s)", path.basename(hp) + ".carher-bak");
+    } else console.log("   ✅ 已经挂过了,没重复加");
+    console.log("   看结果:ELECTRON_RUN_AS_NODE=1 \"%s\" \"%s\" --report", cursorBin(), dst);
+  } catch (e) { console.log("   ⚠️  装探针出错(不影响其余): " + ((e && e.message) || e)); }
 }
 
 function installImageSkill(rawKey) {

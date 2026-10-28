@@ -366,6 +366,7 @@ claude</code></pre>
         <tr><td>报 <code>401</code>，或 key 没写上</td><td>Settings → Models → OpenAI API Key，粘贴 key → Verify → 完全退出重开</td></tr>
         <tr><td>报 <code>key not allowed to access model</code>，或提示额度用完</td><td>发 <b>查余额</b> 看额度；没开通的模型换一个或找运维开通</td></tr>
         <tr><td>报 <code>An unexpected error occurred</code> / <code>does not support custom API keys</code>；看不到 High / Fast</td><td>下载最新的包，退出 Cursor，双击 <code>UPGRADE</code></td></tr>
+        <tr><td>每发一句都要等很久，界面上反复出现 <code>Summarizing</code>（比 Claude Code 慢很多）</td><td>多半是 Cursor 升级把补丁冲掉了，它开始每条消息都压缩一遍对话。完全退出 Cursor → 双击 <code>REPAIR</code> → 重开。Mac 上装过新包的，退出 Cursor 后 5 分钟内会自己补好</td></tr>
         <tr><td>模型不见了</td><td>完全退出 Cursor → 双击 <code>REPAIR</code> → 重开</td></tr>
         <tr><td>REPAIR 提示「拒绝动手」</td><td>Cursor 出了还没适配的新版本，你的 Cursor 没被改动，把窗口文字发给运维</td></tr>
         <tr><td>某个模型不回话 / 一直转圈 / 报 <code>502</code></td><td>先发 <b>测模型</b> 看它是不是暂时不可用；换回 <code>grok-4.7</code>，把模型名和时间发给运维</td></tr>
@@ -391,7 +392,7 @@ if [ -n "$z" ]; then sh "$z/REMOTE-SSH-Mac.command"; else echo "没找到 cursor
   </details>
   <details class="for-cursor">
     <summary>更新与卸载</summary>
-    <p><b>更新</b>：Cursor 不会自己升级。这个页面发了新版，就下载新包、解压、完全退出 Cursor，双击 <code>UPGRADE</code>，不用再输 key。</p>
+    <p><b>更新</b>：10 月 13 日之后装的，Cursor 不会自己升级；更早装的可能已经被自动升级过（补丁会被冲掉，表现是每发一句都很慢），重新跑一次 <code>UPGRADE</code> 就会锁住。这个页面发了新版，就下载新包、解压、完全退出 Cursor，双击 <code>UPGRADE</code>，不用再输 key。</p>
     <p><b>卸载</b>：完全退出 Cursor，双击 <code>UNINSTALL</code>，输入 <code>yes</code>。</p>
     <p class="sub unix-only">Mac / Linux 上这些按钮（UPGRADE、UNINSTALL、REPAIR、DOCTOR）都可以在终端跑：复制第 4 步那段命令，把最后一行的 <code>INSTALL</code> 换成要用的那个（比如 <code>UPGRADE</code>）。会自动用你最新下载的那个包。</p>
     <p class="sub">聊天记录都不动。模型菜单会换成你的 key 能用的模型，自己加的模型名会被清掉。</p>

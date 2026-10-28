@@ -44,6 +44,9 @@ const MAX_SOCKETS = parseInt(process.env.ZKD_MAX_SOCKETS || '256', 10)
 const up = new URL(UPSTREAM)
 const upMod = up.protocol === 'https:' ? https : http
 const upAgent = new upMod.Agent({ keepAlive: true, keepAliveMsecs: 1000, maxSockets: MAX_SOCKETS, maxFreeSockets: 64, scheduling: 'lifo' })
+// 空闲连接 4s 后关。🔴 计时器只能管「躺在池里」的那段：socket 被下一发拿走时必须清掉，
+// 否则上游首字慢于 4s（opus 长上下文常见）就会被自己掐断——10-28 上线后 lupeng1 几乎每发首次都被这样断，
+// 第二发也恰好 4.000s 后断（03:38:47.31 → 03:38:51.31）。
 upAgent.on('free', (sock) => { sock.setTimeout(4000, () => sock.destroy()) })
 
 // ---------- 计数器（G4：每一次降级都要有数） ----------
@@ -230,6 +233,8 @@ function forward (req, res, path, bodyBuf, extraRespHeaders, tag, attempt) {
     })
     ures.pipe(res)
   })
+  // 从池里拿到的旧连接：清掉空闲计时器（见 upAgent 那段）
+  ureq.on('socket', (sock) => sock.setTimeout(0))
   ureq.on('error', (e) => {
     M.upstream_conn_error++
     const kv = Object.assign({ msg: e.message, who: whoOf(req), attempt, bytes: bodyBuf.length, path }, tag || {})

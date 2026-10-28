@@ -101,6 +101,41 @@ async function run (ok) {
     ok('R3 retry_ok=0、midstream_abort=1', m.upstream_retry_ok === 0 && m.upstream_midstream_abort === 1, JSON.stringify([m.upstream_retry_ok, m.upstream_midstream_abort]))
     ok('R3 客户端连接被立刻断开（不挂着）', String(r.status).startsWith('conn_error') && r.ms < 2000, String(r.status) + ' ' + r.ms + 'ms')
   })
+  // R5：复用池里的旧连接时，上游首字慢于 4s 不能被我们自己掐断（10-28 上线后的回归）
+  {
+    const PU = 18968; const PS = 18969
+    let n = 0
+    const got = []
+    const srv0 = http.createServer((req, res) => {
+      const cs = []
+      req.on('data', (c) => cs.push(c))
+      req.on('end', () => {
+        got.push(1)
+        const delay = n++ === 0 ? 0 : 5500   // 第一发秒回（连接回池），第二发 5.5s 才出首字
+        setTimeout(() => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n') }, delay)
+      })
+    })
+    srv0.keepAliveTimeout = 30000
+    await new Promise((r) => srv0.listen(PU, '127.0.0.1', r))
+    const logs = []
+    const sp = H.spawnNode(path.join(__dirname, '../server/server.js'), { ZKD_PORT: String(PS), ZKD_UPSTREAM: 'http://127.0.0.1:' + PU }, '[srv]', logs)
+    try {
+      await H.waitHealthy(PS)
+      const r1 = await postRaw(PS, '/zkd/v1/delta', JSON.stringify(fullEnvelope().env))
+      await new Promise((r) => setTimeout(r, 300))   // 让连接回池并挂上 4s 空闲计时器
+      const t0 = Date.now()
+      const r2 = await Promise.race([postRaw(PS, '/zkd/v1/delta', JSON.stringify(fullEnvelope().env)),
+        new Promise((resolve) => setTimeout(() => resolve({ status: 'HANG' }), 12000))])
+      const m = JSON.parse((await H.get(PS, '/metrics.json')).body.toString())
+      ok('R5 首发 200', r1.status === 200, String(r1.status))
+      ok('R5 复用连接、首字 5.5s 也拿到 200（不被自己 4s 掐断）', r2.status === 200, String(r2.status) + ' ' + (Date.now() - t0) + 'ms')
+      ok('R5 没有断线计数', m.upstream_conn_error === 0, String(m.upstream_conn_error))
+      ok('R5 上游只收到 2 发（没重发）', got.length === 2, String(got.length))
+    } finally {
+      sp.kill(); srv0.closeAllConnections && srv0.closeAllConnections()
+      await new Promise((r) => srv0.close(() => r()))
+    }
+  }
   await scenario(ok, 'R4', ['drop', 'ok'], { ZKD_RETRY_ONCE: '0' }, ({ r, got }) => {
     ok('R4 关掉开关 ⇒ 首次断就 502', r.status === 502, String(r.status))
     ok('R4 上游只收到 1 发', got.length === 1, String(got.length))

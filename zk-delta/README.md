@@ -136,6 +136,8 @@ zk-delta 这边做三件事，让它断了用户也少受罪（`server.js`，测
 
 并发：显式 Agent（keepAlive，`ZKD_MAX_SOCKETS` 默认 256，空闲 4s 关——低于 uvicorn `timeout_keep_alive=5s`，
 避免拿到对面正在关的旧连接）；`/metrics.json` 加 `inflight` / `inflight_peak`。
+🔴 10-28 回归：空闲 4s 计时器挂在 socket 上，连接被下一发复用时没清 ⇒ 首字慢于 4s（opus 长上下文常见）就被自己掐断，
+重发那一发再慢就 502（lupeng1 11:21~11:40 断 20 多次、2 次 502）。修：`ureq.on('socket', s => s.setTimeout(0))`；测试 R5 复现旧行为、修后过。
 实测单副本不是瓶颈：2.3MB / 600 条的会话重建 + 全量摘要 ~3.7ms 一轮，10-27 白天 peak 并发个位数、CPU 13m。
 
 ## 部署

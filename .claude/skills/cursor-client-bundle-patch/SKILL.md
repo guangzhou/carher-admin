@@ -67,6 +67,30 @@ description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 
 
 | 6 | **「上游把那段挪走了」被报成「锚点漂了」**(10-28 `--fetch-latest` 量到 3.28.5):`cursor-agent-host/dist/main.js` 里 `unusedTokens` / `createRedactedConversationTokenDetails` 全 0、只剩 protobuf 字段声明,阈值算术整段挪到 `agent-exec` 与 `local-agent-runtime`(这两条仍 3/3)。原来两种情况都回 `锚A count=0` ⇒ 被当漂移追,且第 1 条新加的红字会把无害情况报成「没打上会很慢」= **假红**,让人去跑一个修不了也不用修的 REPAIR | 判据用上游自己的字段名 `unusedTokensThresholdTo{Start,Persist}BackgroundSummarization`(**不被 minify**):一个都没有 ⇒ `na:true` 不适用。`cursor_team_setup.js`(`CW_RELEVANT`)与 `cursor_ctxwin_patch.js`(`RELEVANT`)**两份必须一起改**;DOCTOR 按「该打的个数」判红;台架 ①b 改成 `XX=0 且 OK+NA=4 且 OK>0`(四个全 NA 仍算真问题),新增 ⑱ 腿分辨两者 |
 
+### 压缩的官方口径 + 现场探针(2026-10-28)
+
+**官方原话(forum.cursor.com,deanrie / Colin)**:
+- 后台压缩「大约窗口用到 90%」触发,**阈值固定、服务端设定、不是用户可配的**(07-20)。
+- 「用户可配 + 更早触发 + 严格 turn 边界」**都不在 roadmap 上**(08-11)。
+- `preCompact` 钩子 "cannot block or modify the compaction behavior" ⇒ **拦不住,只能观测**。
+- BYOK 不在 catalog 里的模型**默认窗口 1M**;官方报告的 BYOK 问题方向是「压缩来得太晚」,
+  **从没人报过我们这种「每轮都压」** —— 也查不到任何人提过「档位数字 vs 真实 token」这层单位错误。
+- `cursor/cursor` 的 GitHub issues 已关闭,唯一渠道是论坛(Discourse JSON API `/t/{id}.json` 直连可用)。
+- 3.28.5 只在 `latest` 轨,**没有公开 release notes**;`stable` 是 3.27.22。
+
+**官方默认值**(从 3.27.14 `cursor-agent-exec` 读出,对象 `Zze`):
+`unusedTokensThresholdToStart=1e4`、`unusedPercent=.1`、`unusedTokensToPersist=5e3`、
+`unusedPercentToPersist=.05`、`requestBodyCharsToStart=8388608`。
+压缩有**四条独立触发腿**,件C 只管前两条(带 maxTokens)。算式:
+件C 生效 ⇒ `min(300000-1e4, 300000*.9)` = 27 万;失效 ⇒ `min(300-1e4, 300*.9)` = **-9700 ⇒ 恒真 ⇒ 每轮必压**。
+第三条腿 8MiB 与 maxTokens 无关、补丁碰不到,但实测同事最大约 27 万字符,差 30 倍。
+
+**现场探针** `cursor_precompact_probe.js`:挂官方 `preCompact` 钩子,压缩真发生时记
+`context_window_size`。`<4096` ⇒ `tier-number`(坏值,同件C `__cxN` 的界)。
+安装器第 7.5 步**合并写** `~/.cursor/hooks.json`(只追加我们这条,写前备份 `.carher-bak`),
+DOCTOR 2.6 节报现场记录。探针任何异常都静默输出 `{}`(绝不能让同事发不出消息)。
+本机真机验收:Cursor **热加载** hooks.json,日志立刻出现 `Loaded 5 user hook(s) … preCompact`。
+
 🔴 **NA 不是万能挡箭牌**:`OK>0` 这个条件是故意的 —— 四个目标全判「不适用」说明
 Cursor 换了结构或我们路径写错了,那是真问题,不许被 NA 吞掉。
 

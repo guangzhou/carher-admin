@@ -2658,16 +2658,89 @@
 +}
 --- a/admin-ui/src/components/slot-users-dialog.tsx
 +++ b/admin-ui/src/components/slot-users-dialog.tsx
-@@ -0,0 +1,139 @@
-+import { useState } from 'react'
+@@ -0,0 +1,298 @@
++import { useMemo, useState } from 'react'
 +import { useQuery, useQueryClient } from '@tanstack/react-query'
 +import { toast } from 'sonner'
++import { Search, X, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react'
 +import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 +import { Button } from '@/components/ui/button'
 +import { Badge } from '@/components/ui/badge'
++import { Input } from '@/components/ui/input'
 +import { getSlotUsers, rebindSlotUser, unpinSlotUser } from '@/api/credentials'
-+import type { SlotView } from '@/api/credentials'
++import type { SlotUser, SlotView } from '@/api/credentials'
 +import { extractErrorMessage } from '@/lib/utils'
++
++// 只在前端筛选 / 排序显示，不改后端数据，也不影响调度
++type StatusFilter = 'all' | 'active' | 'idle' | 'pinned' | 'auto' | 'noAlias'
++type ActivityFilter = 'all' | 'has7d' | 'none7d' | 'has24h'
++type SortKey = 'alias' | 'requests7d' | 'tokens7d' | 'requests24h' | 'lastUsed'
++interface SortState { key: SortKey | null; dir: 'asc' | 'desc' }
++
++// 第一次点：数字/时间先看最大的（倒序），别名先 A→Z；再点反过来；第三次回默认（后端顺序 = 7 日请求倒序）
++const FIRST_DIR: Record<SortKey, 'asc' | 'desc'> = {
++  alias: 'asc', requests7d: 'desc', tokens7d: 'desc', requests24h: 'desc', lastUsed: 'desc',
++}
++function nextSort(cur: SortState, key: SortKey): SortState {
++  if (cur.key !== key) return { key, dir: FIRST_DIR[key] }
++  if (cur.dir === FIRST_DIR[key]) return { key, dir: FIRST_DIR[key] === 'asc' ? 'desc' : 'asc' }
++  return { key: null, dir: 'asc' }
++}
++
++function sortValue(u: SlotUser, k: SortKey): number | string {
++  switch (k) {
++    case 'alias': return (u.keyAlias || '').toLowerCase()
++    case 'requests7d': return u.requests7d
++    case 'tokens7d': return u.tokens7d
++    case 'requests24h': return u.requests24h
++    case 'lastUsed': return u.lastUsed ?? 0
++  }
++}
++
++function matchStatus(u: SlotUser, f: StatusFilter): boolean {
++  switch (f) {
++    case 'all': return true
++    case 'active': return !u.idle
++    case 'idle': return u.idle
++    case 'pinned': return u.pinned
++    case 'auto': return !u.pinned
++    case 'noAlias': return !u.keyAlias
++  }
++}
++
++function matchActivity(u: SlotUser, f: ActivityFilter): boolean {
++  switch (f) {
++    case 'all': return true
++    case 'has7d': return u.requests7d > 0
++    case 'none7d': return u.requests7d === 0
++    case 'has24h': return u.requests24h > 0
++  }
++}
++
++const SORT_LABEL: Record<SortKey, string> = {
++  alias: '别名', requests7d: '7 日请求', tokens7d: '7 日 token', requests24h: '24 小时请求', lastUsed: '最后使用',
++}
++// 下拉里列出的组合；表头点出来的其它组合（如 24 小时请求 少→多）临时补一项显示
++const SORT_OPTIONS = new Set([
++  'requests24h:desc', 'requests7d:asc', 'tokens7d:desc', 'tokens7d:asc', 'lastUsed:desc', 'lastUsed:asc', 'alias:asc', 'alias:desc',
++])
++
++function SortTh({ label, k, sort, onSort, align = 'left' }: {
++  label: string; k: SortKey; sort: SortState; onSort: (k: SortKey) => void; align?: 'left' | 'right'
++}) {
++  const on = sort.key === k
++  const Icon = !on ? ChevronsUpDown : sort.dir === 'asc' ? ChevronUp : ChevronDown
++  return (
++    <th className={`px-3 py-2 font-medium whitespace-nowrap text-${align}`}
++      aria-sort={on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
++      <button type='button' onClick={() => onSort(k)} title={`按${label}排序`}
++        className={`inline-flex w-full items-center gap-1 ${align === 'right' ? 'justify-end' : 'justify-start'} rounded hover:text-foreground ${on ? 'text-foreground' : ''}`}>
++        {label}
++        <Icon className={`h-3.5 w-3.5 ${on ? '' : 'opacity-40'}`} aria-hidden='true' />
++      </button>
++    </th>
++  )
++}
 +
 +const short = (n: number) => (n >= 1e8 ? `${(n / 1e8).toFixed(1)}亿` : n >= 1e4 ? `${(n / 1e4).toFixed(1)}万` : n.toLocaleString('zh-CN'))
 +
@@ -2696,6 +2769,30 @@
 +    refetchInterval: open ? 15000 : false,
 +  })
 +  const items = data?.items || []
++  const [keyword, setKeyword] = useState('')
++  const [status, setStatus] = useState<StatusFilter>('all')
++  const [activity, setActivity] = useState<ActivityFilter>('all')
++  const [sort, setSort] = useState<SortState>({ key: null, dir: 'asc' })
++  const filtered = useMemo(() => {
++    const kw = keyword.trim().toLowerCase()
++    const rows = items.filter((u) =>
++      (!kw || (u.keyAlias || '').toLowerCase().includes(kw) || u.keyHash.toLowerCase().includes(kw))
++      && matchStatus(u, status) && matchActivity(u, activity))
++    if (!sort.key) return rows
++    const k = sort.key
++    const sign = sort.dir === 'asc' ? 1 : -1
++    return [...rows].sort((a, b) => {
++      const va = sortValue(a, k), vb = sortValue(b, k)
++      // 别名排序时「待下次请求」（空别名）恒排最后
++      if (k === 'alias' && (!va || !vb)) return va ? -1 : vb ? 1 : 0
++      const c = typeof va === 'number' && typeof vb === 'number' ? va - vb : String(va).localeCompare(String(vb), 'zh-CN')
++      return c !== 0 ? c * sign : a.user.localeCompare(b.user)
++    })
++  }, [items, keyword, status, activity, sort])
++  const count = (f: (u: SlotUser) => boolean) => items.filter(f).length
++  const filtering = keyword.trim() !== '' || status !== 'all' || activity !== 'all'
++  const reset = () => { setKeyword(''); setStatus('all'); setActivity('all'); setSort({ key: null, dir: 'asc' }) }
++  const onSort = (k: SortKey) => setSort((s) => nextSort(s, k))
 +  const targets = slots.filter((s) => s.name !== slot && s.accountId != null)
 +  const refresh = () => {
 +    qc.invalidateQueries({ queryKey: ['slotUsers'] })
@@ -2727,41 +2824,103 @@
 +      setBusy(null)
 +    }
 +  }
++  const SEL = 'h-8 rounded-md border bg-background px-2 text-sm'
 +  const TH = 'px-3 py-2 text-left font-medium whitespace-nowrap'
 +  const TD = 'px-3 py-2 whitespace-nowrap'
 +  return (
 +    <Dialog open={open} onOpenChange={onOpenChange}>
-+      <DialogContent className='sm:max-w-4xl'>
++      <DialogContent className='sm:max-w-6xl'>
 +        <DialogHeader>
-+          <DialogTitle>{slot} 上的 key（{items.length}）</DialogTitle>
++          <DialogTitle>{slot} 上的 key（{filtering ? `${filtered.length} / ${items.length}` : items.length}）</DialogTitle>
 +          <DialogDescription>
 +            「key」是 198 LiteLLM 的 key 别名；老用户的别名要等它下一次请求后才显示。7 日按北京时间、含今天，从这个版本上线起开始记。
 +          </DialogDescription>
 +        </DialogHeader>
 +        {isLoading && <p className='py-6 text-center text-sm text-muted-foreground'>加载中…</p>}
 +        {error && <p className='py-6 text-center text-sm text-red-600'>加载失败：{extractErrorMessage(error)}</p>}
++        {!isLoading && !error && items.length > 0 && (
++          <div className='flex flex-wrap items-center gap-2'>
++            <div className='relative min-w-[200px] flex-1'>
++              <Search className='pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground' aria-hidden='true' />
++              <Input
++                aria-label='按 key 别名或 hash 搜索'
++                placeholder='搜索 key 别名 / hash'
++                className='h-8 pl-8'
++                value={keyword}
++                onChange={(e) => setKeyword(e.target.value)}
++              />
++            </div>
++            <select aria-label='按状态筛选' className={SEL} value={status} onChange={(e) => setStatus(e.target.value as StatusFilter)}>
++              <option value='all'>全部状态（{items.length}）</option>
++              <option value='active'>在用（{count((u) => !u.idle)}）</option>
++              <option value='idle'>空闲（{count((u) => u.idle)}）</option>
++              <option value='pinned'>已固定（{count((u) => u.pinned)}）</option>
++              <option value='auto'>自动（{count((u) => !u.pinned)}）</option>
++              <option value='noAlias'>待显示别名（{count((u) => !u.keyAlias)}）</option>
++            </select>
++            <select aria-label='按用量筛选' className={SEL} value={activity} onChange={(e) => setActivity(e.target.value as ActivityFilter)}>
++              <option value='all'>全部用量</option>
++              <option value='has24h'>24 小时有请求（{count((u) => u.requests24h > 0)}）</option>
++              <option value='has7d'>7 日有请求（{count((u) => u.requests7d > 0)}）</option>
++              <option value='none7d'>7 日无请求（{count((u) => u.requests7d === 0)}）</option>
++            </select>
++            <select
++              aria-label='排序'
++              className={SEL}
++              value={sort.key ? `${sort.key}:${sort.dir}` : ''}
++              onChange={(e) => {
++                const [k, d] = e.target.value.split(':') as [SortKey, 'asc' | 'desc']
++                setSort(e.target.value ? { key: k, dir: d } : { key: null, dir: 'asc' })
++              }}
++            >
++              <option value=''>默认排序（7 日请求多→少）</option>
++              <option value='requests24h:desc'>24 小时请求 多→少</option>
++              <option value='requests7d:asc'>7 日请求 少→多</option>
++              <option value='tokens7d:desc'>7 日 token 多→少</option>
++              <option value='tokens7d:asc'>7 日 token 少→多</option>
++              <option value='lastUsed:desc'>最近使用 新→旧</option>
++              <option value='lastUsed:asc'>最近使用 旧→新</option>
++              <option value='alias:asc'>别名 A→Z</option>
++              <option value='alias:desc'>别名 Z→A</option>
++              {sort.key && !SORT_OPTIONS.has(`${sort.key}:${sort.dir}`) && (
++                <option value={`${sort.key}:${sort.dir}`}>按表头：{SORT_LABEL[sort.key]} {sort.dir === 'asc' ? '升序' : '降序'}</option>
++              )}
++            </select>
++            {(filtering || sort.key) && (
++              <Button size='sm' variant='ghost' className='h-8 px-2' onClick={reset}>
++                <X className='h-4 w-4' aria-hidden='true' />清除
++              </Button>
++            )}
++          </div>
++        )}
 +        {!isLoading && !error && (items.length === 0 ? (
 +          <p className='py-6 text-center text-sm text-muted-foreground'>这个槽上还没有绑定的用户</p>
++        ) : filtered.length === 0 ? (
++          <p className='py-6 text-center text-sm text-muted-foreground'>
++            没有符合条件的 key <Button size='sm' variant='link' className='h-auto p-0' onClick={reset}>清除筛选</Button>
++          </p>
 +        ) : (
 +          <div className='max-h-[60vh] overflow-auto rounded-md border'>
 +            <table className='w-full text-sm'>
 +              <thead className='sticky top-0 bg-muted text-xs text-muted-foreground'>
 +                <tr>
-+                  <th className={TH}>key</th>
-+                  <th className={`${TH} text-right`}>7 日请求</th>
-+                  <th className={`${TH} text-right`}>7 日 token</th>
-+                  <th className={TH}>最后使用</th>
++                  <SortTh label='key' k='alias' sort={sort} onSort={onSort} />
++                  <SortTh label='24 小时请求' k='requests24h' sort={sort} onSort={onSort} align='right' />
++                  <SortTh label='7 日请求' k='requests7d' sort={sort} onSort={onSort} align='right' />
++                  <SortTh label='7 日 token' k='tokens7d' sort={sort} onSort={onSort} align='right' />
++                  <SortTh label='最后使用' k='lastUsed' sort={sort} onSort={onSort} />
 +                  <th className={TH}>状态</th>
 +                  <th className={TH}>挪到</th>
 +                </tr>
 +              </thead>
 +              <tbody>
-+                {items.map((u) => (
++                {filtered.map((u) => (
 +                  <tr key={u.user} className='border-t'>
 +                    <td className={TD}>
 +                      <div className='font-medium'>{u.keyAlias || <span className='text-muted-foreground'>（待下次请求）</span>}</div>
 +                      <div className='font-mono text-xs text-muted-foreground' title={u.keyHash}>{u.keyHash.slice(0, 12)}…</div>
 +                    </td>
++                    <td className={`${TD} text-right tabular-nums`}>{u.requests24h.toLocaleString('zh-CN')}</td>
 +                    <td className={`${TD} text-right tabular-nums`}>{u.requests7d.toLocaleString('zh-CN')}</td>
 +                    <td className={`${TD} text-right tabular-nums`}>{short(u.tokens7d)}</td>
 +                    <td className={TD}>

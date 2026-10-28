@@ -1,0 +1,68 @@
+# UK egress proxy for one kiro slot (10-28). Same shape as kiro-us-egress.yaml, separate Deployment so
+# changing one never restarts the other. Pinned to a single node "UK - 英国 - 01" (213.255.246.28, London):
+# the subscription has only two UK nodes and no auto group, so the IP stays fixed; if that node dies the slot
+# dies too ⇒ disable the slot in Admin, re-pin to "UK - 英国 - 02" (185.245.83.24), re-test, rename the slot.
+# Config + node credentials + proxy password in Secret kiro-uk-egress (source 198:~/kiro-uk-egress/, not in git).
+# The slot in Admin: http://kiro-uk-egress.kiro-rs.svc:7890, user kiro.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kiro-uk-egress
+  namespace: kiro-rs
+  labels: {app: kiro-uk-egress}
+spec:
+  replicas: 1
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector:
+    matchLabels: {app: kiro-uk-egress}
+  template:
+    metadata:
+      labels: {app: kiro-uk-egress}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: aiyjy-litellm-242}
+      tolerations: [{key: dedicated, operator: Equal, value: new-node, effect: NoSchedule}]
+      securityContext: {runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, runAsNonRoot: true}
+      containers:
+        - name: mihomo
+          image: 127.0.0.1:5000/mihomo:v1.19.33-carher1
+          imagePullPolicy: IfNotPresent
+          args: ["-d", "/work", "-f", "/cfg/config.yaml"]
+          ports: [{name: proxy, containerPort: 7890}]
+          readinessProbe: {tcpSocket: {port: 7890}, periodSeconds: 5}
+          livenessProbe: {tcpSocket: {port: 7890}, periodSeconds: 20, failureThreshold: 3}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: cfg, mountPath: /cfg, readOnly: true}
+            - {name: work, mountPath: /work}
+      volumes:
+        - name: cfg
+          secret: {secretName: kiro-uk-egress, defaultMode: 0440}
+        - name: work
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kiro-uk-egress
+  namespace: kiro-rs
+spec:
+  type: ClusterIP
+  selector: {app: kiro-uk-egress}
+  ports: [{name: proxy, port: 7890, targetPort: 7890}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kiro-uk-egress-ingress
+  namespace: kiro-rs
+spec:
+  podSelector: {matchLabels: {app: kiro-uk-egress}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app: kiro-rs-slots}}
+        - podSelector: {matchLabels: {kiro-uk-egress-probe: "1"}}
+      ports: [{port: 7890, protocol: TCP}]

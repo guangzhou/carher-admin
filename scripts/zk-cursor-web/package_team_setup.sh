@@ -11,6 +11,8 @@ cp "$HERE/cursor_team_setup.js"  "$STAGE/"
 # 官方 preCompact 钩子。🔴 忘了打进包 = 安装器找不到它、那一步静默跳过 —— 今天刚在
 # 「刷模型副本」上踩过同一个坑:发出去 ≠ 装上。
 cp "$HERE/cursor_precompact_probe.js" "$STAGE/"
+# 补丁自愈(2026-10-28):安装器第 7.6 步装 launchd,Cursor 关着且补丁被升级冲掉时自动 --repair
+cp "$HERE/cursor_selfheal.sh" "$STAGE/"
 cp "$HERE/cursor_team_setup.sh"  "$STAGE/"
 cp "$HERE/cursor_team_setup.cmd" "$STAGE/"
 # 档位模板(10-16 keepmine-fill v2):服务端目录没给档位时用它补 High/Medium/Low 等;引擎启动时读,缺了只是不补档位

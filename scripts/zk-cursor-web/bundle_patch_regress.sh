@@ -1203,6 +1203,136 @@ else
     && ok "㉑探针在 zip 里(本轮新增那个)" || bad "㉑探针没进 zip"
 fi
 
+# ── 22) 补丁自愈(2026-10-28)───────────────────────────────────────────────
+#    Cursor 自动升级冲掉补丁 ⇒ 件C 没了 ⇒ 每条消息都压缩。launchd 每 5 分钟拉
+#    cursor_selfheal.sh:Cursor **关着**且补丁缺了才 --repair。五种状态都要量:
+#      a) 补丁被冲掉 + Cursor 关着 ⇒ 必须补回来        (这是功能本身)
+#      b) 补丁齐全                ⇒ 一个字节不动、不写日志(绝大多数时候)
+#      c) Cursor 开着             ⇒ 一个字节不动        (安全闸)
+#      d) 新版锚点认不出           ⇒ 1 小时内不重试      (防刷屏)
+#      e) --uninstall 之后         ⇒ 自愈必须被摘掉      (否则会把补丁悄悄打回去 = 无视用户选择)
+#    副本二进制必须是**真拷贝**不能是软链:软链会让 pgrep 量到本机开着的那个 Cursor。
+echo "--- 22) 补丁自愈 ---"
+SH22="$HERE/cursor_selfheal.sh"
+# 🔴 `case … ;; esac` 写进 `$( )` 里 sh 会报 unexpected token —— 本 session 第二次踩
+#    (第一次是页面终端命令)。所以挑种子写成普通函数,再用 $( ) 调它。
+pick_pristine22() {
+  for d in "$BAK"/*; do
+    [ -d "$d" ] || continue
+    case "$d" in *-cfgonly|*-preconfig) continue ;; esac
+    [ -f "$d/workbench.desktop.main.js" ] || continue
+    m=$(grep -c '@cxteam-' "$d/workbench.desktop.main.js" 2>/dev/null | tr -dc '0-9')
+    [ "${m:-0}" = 0 ] && echo "$d"
+  done | tail -1
+}
+PRIS22="$(pick_pristine22)"
+if [ ! -f "$SH22" ]; then skip "㉒:没有 cursor_selfheal.sh"
+elif [ -z "$PRIS22" ]; then skip "㉒:本机备份里没有 pristine workbench(造不出「升级后」的样子)"
+elif [ ! -d "$LIVE_RES" ]; then skip "㉒:本机没有 live Cursor"
+else
+  A22="$TMP/leg22-app"; H22="$TMP/leg22-home"; rm -rf "$A22" "$H22"
+  mkdir -p "$A22/Contents/MacOS" "$A22/Contents/Resources/app/out/vs/workbench" "$H22/.carher/cursor-setup" \
+           "$H22/Library/Application Support/Cursor/User/globalStorage"
+  cp "$APP/Contents/MacOS/Cursor" "$A22/Contents/MacOS/Cursor"
+  ln -sfn "$APP/Contents/Frameworks" "$A22/Contents/Frameworks"
+  # 🔴 没有 Info.plist 的 Cursor 二进制**一启动就被系统 SIGKILL(rc=137)**,而且没有任何输出。
+  #    单变量实测 10-28:不链 0/5 存活、链上 5/5。第一版漏了它,整腿恒红,
+  #    我还先误判成「偶发」—— 因为手工测的那几次碰巧都带着 Info.plist。
+  ln -sfn "$APP/Contents/Info.plist" "$A22/Contents/Info.plist"
+  ELECTRON_RUN_AS_NODE=1 "$A22/Contents/MacOS/Cursor" -e '1' >/dev/null 2>&1 \
+    || bad "㉒fixture 自检:副本 Cursor 二进制起不来(rc=$?)⇒ 下面全部无判别力"
+  R22="$A22/Contents/Resources/app"
+  cp "$LIVE_RES/package.json" "$R22/"
+  # 只放 workbench 两份 + 件C/件D 目标(够 repair 跑,不必拷 760MB)
+  for rel in extensions/cursor-agent-exec/dist/main.js extensions/cursor-local-agent-runtime/dist/main.js \
+             extensions/cursor-agent-host/dist/main.js extensions/cursor-agent-host/dist/agent-host-daemon/dist/bin/daemon.cjs; do
+    mkdir -p "$R22/$(dirname "$rel")"; cp "$LIVE_RES/$rel" "$R22/$rel"
+  done
+  wipe22() {   # = 自动升级后的样子:换回原厂 bundle
+    cp "$PRIS22/workbench.desktop.main.js" "$PRIS22/workbench.glass.main.js" "$R22/out/vs/workbench/"
+    for f in "$PRIS22"/cxctxwin__*; do [ -f "$f" ] || continue
+      rel=$(basename "$f" | sed 's/^cxctxwin__//; s|__|/|g'); cp "$f" "$R22/$rel"; done
+  }
+  cp "$JS" "$HERE/cursor_tier_catalog.json" "$H22/.carher/cursor-setup/"
+  cp "$HOME/Library/Application Support/Cursor/User/globalStorage/state.vscdb" \
+     "$H22/Library/Application Support/Cursor/User/globalStorage/" 2>/dev/null
+  LOG22="$H22/Library/Logs/carher-cursor-selfheal.log"
+  run22() { env HOME="$H22" CURSOR_APP="$A22" "$@" sh "$SH22"; }
+  # 诊断:a 失败时把 repair 自己说了什么打出来(不靠猜)
+  diag22() {
+    echo "    ↳ 诊断 1:谁在用副本二进制跑(第一道闸看的就是这个)"
+    pgrep -fl "$A22/Contents/MacOS/Cursor" 2>/dev/null | sed 's/^/      /' || echo "      (没有)"
+    echo "    ↳ 诊断 2:补丁检测看到的"
+    echo "      byokforce=$(bf22)  文件在吗=$([ -f "$R22/out/vs/workbench/workbench.desktop.main.js" ] && echo 在 || echo 不在)"
+    echo "    ↳ 诊断 2b:每道 exit 0 的条件此刻的真值"
+    echo "      BIN 可执行=$([ -x "$A22/Contents/MacOS/Cursor" ] && echo 是 || echo 否)  SETUP 在=$([ -f "$H22/.carher/cursor-setup/cursor_team_setup.js" ] && echo 是 || echo 否)  STAMP 在=$([ -f "$H22/.carher/cursor-selfheal.last" ] && echo 是 || echo 否)"
+    [ -f "$H22/.carher/cursor-selfheal.last" ] && echo "      STAMP 内容=$(cat "$H22/.carher/cursor-selfheal.last")"
+    echo "    ↳ 诊断 3:selfheal 的 -x 关键行"
+    env HOME="$H22" CURSOR_APP="$A22" CX_SKIP_RUNNING_CHECK=1 sh -x "$SH22" 2>&1 \
+      | grep -vE "^\+ (for f|p=|continue)" | sed -n '/need=1/,$p' | head -12 | sed 's/^/      /'
+  }
+  bf22() { grep -c 'cxteam-byokforce' "$R22/out/vs/workbench/workbench.desktop.main.js" 2>/dev/null | tr -dc '0-9'; }
+
+  # a) 冲掉 + 关着 ⇒ 补回来
+  # 🔴 每个子用例开头清防抖记录。第一版没清:H22 在 $TMP 里跨次复用不了,但同一次跑里
+  #    ㉒d 写的「修失败」记录会挡住后面任何一次补 —— 而第一版 a 恰好排在 d 后面重跑时就恒红。
+  rm -f "$H22/.carher/cursor-selfheal.last"; mkdir -p "$(dirname "$LOG22")"; : > "$LOG22"
+  wipe22; [ "$(bf22)" = 0 ] || bad "㉒fixture 自检:wipe 之后居然还有补丁(种子不是原厂)"
+  run22 env CX_SKIP_RUNNING_CHECK=1
+  if [ "$(bf22)" -gt 0 ]; then ok "㉒a 补丁被冲掉 + Cursor 关着 ⇒ 自己补回来了"
+  else bad "㉒a 没补回来(见 $LOG22)"; diag22; fi
+  grep -q '修好了' "$LOG22" 2>/dev/null && ok "㉒a 日志写了「修好了」" || bad "㉒a 日志没写"
+
+  # b) 齐全 ⇒ 不动、不写
+  S22=$(shasum -a 256 "$R22/out/vs/workbench/workbench.desktop.main.js" | cut -c1-16); L22=$(wc -l < "$LOG22")
+  run22 env CX_SKIP_RUNNING_CHECK=1
+  [ "$S22" = "$(shasum -a 256 "$R22/out/vs/workbench/workbench.desktop.main.js" | cut -c1-16)" ] && [ "$L22" = "$(wc -l < "$LOG22")" ] \
+    && ok "㉒b 补丁齐全 ⇒ 一个字节不动、不写日志" || bad "㉒b 补丁齐全却动了东西"
+
+  # c) 开着 ⇒ 不动(起一个命令行 = 副本二进制、不带 .js 的进程冒充 GUI)
+  wipe22; rm -f "$H22/.carher/cursor-selfheal.last"
+  ( exec -a "$A22/Contents/MacOS/Cursor" sleep 20 ) & FK22=$!; sleep 1
+  run22 env   # 注意:这里**不**设 CX_SKIP_RUNNING_CHECK —— 量的就是闸
+  kill $FK22 2>/dev/null; wait $FK22 2>/dev/null
+  [ "$(bf22)" = 0 ] && ok "㉒c Cursor 开着 ⇒ 一个字节不动(安全闸)" || bad "㉒c Cursor 开着却动手打补丁了!"
+  # c 的阳性对照:小代理那种「Cursor 二进制 + .js」进程**不许**挡住自愈(否则 7×24 永不触发)
+  rm -f "$H22/.carher/cursor-selfheal.last"
+  ( exec -a "$A22/Contents/MacOS/Cursor /tmp/sidecar.js" sleep 20 ) & SC22=$!; sleep 1
+  run22 env CX_SKIP_RUNNING_CHECK=1
+  kill $SC22 2>/dev/null; wait $SC22 2>/dev/null
+  [ "$(bf22)" -gt 0 ] && ok "㉒c 阳性对照:只有小代理(带 .js)在跑 ⇒ 不算开着,照常补回" \
+    || bad "㉒c 小代理把自愈挡住了 ⇒ 装了小代理的机器自愈永远不触发"
+
+  # d) 锚点认不出 ⇒ 防抖
+  wipe22; rm -f "$H22/.carher/cursor-selfheal.last"; : > "$LOG22"
+  python3 - "$R22/out/vs/workbench/workbench.desktop.main.js" <<'PY22'
+import sys
+p=sys.argv[1]; s=open(p,encoding="utf8",errors="surrogateescape").read()
+open(p,"w",encoding="utf8",errors="surrogateescape").write(s.replace("this.setUseOpenAIKey(!1)","this.setUseOpenAIKey(!1,void 0)"))
+PY22
+  for _ in 1 2 3; do run22 env CX_SKIP_RUNNING_CHECK=1; done
+  n22=$(grep -c '自动修复$' "$LOG22" 2>/dev/null | tr -dc '0-9')
+  [ "${n22:-0}" = 1 ] && ok "㉒d 修不了时连跑 3 次只真跑 1 次(1 小时防抖)" || bad "㉒d 修不了还在反复重试(真跑了 ${n22:-0} 次)"
+  grep -q '需要管理员出新锚点' "$LOG22" && ok "㉒d 日志说清了要找管理员" || bad "㉒d 没说清下一步"
+  # d2) 管理员出了新锚点、同事 UPGRADE 换了安装器 ⇒ 防抖**不许**再挡(键里带安装器指纹)
+  wipe22                                                     # 这次锚点是好的
+  printf '\n// new-anchors %s\n' "$(date +%s)" >> "$H22/.carher/cursor-setup/cursor_team_setup.js"   # 模拟换了新安装器
+  run22 env CX_SKIP_RUNNING_CHECK=1
+  [ "$(bf22)" -gt 0 ] && ok "㉒d2 换了安装器 ⇒ 不被旧防抖挡,立刻补上" \
+    || bad "㉒d2 换了新安装器还被旧防抖挡着 ⇒ 管理员修好了同事要白等一小时"
+
+  # e) 卸载 ⇒ 摘掉
+  grep -q 'removeSelfheal(false);' "$JS" && sed -n '/^async function revert()/,/^}/p' "$JS" | grep -q 'removeSelfheal' \
+    && ok "㉒e --revert 入口先摘自愈" || bad "㉒e --revert 没摘自愈 ⇒ 回滚后 5 分钟补丁又回来"
+  sed -n '/^async function uninstall(dry)/,/^}/p' "$JS" | grep -q 'removeSelfheal(dry)' \
+    && ok "㉒e --uninstall 入口先摘自愈" || bad "㉒e --uninstall 没摘自愈 ⇒ 卸载后补丁会被悄悄打回去"
+  # 自愈必须进包(㉑ 按 __dirname 抓不到 .sh,这里单独看产物)
+  if [ -f "$HERE/cursor-mac.zip" ]; then
+    unzip -l "$HERE/cursor-mac.zip" | grep -q 'cursor_selfheal.sh' && ok "㉒自愈脚本在 cursor-mac.zip 里" \
+      || bad "㉒自愈脚本没进包 —— 重跑 package_team_setup.sh"
+  fi
+fi
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

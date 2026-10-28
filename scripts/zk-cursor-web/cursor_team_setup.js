@@ -2213,6 +2213,7 @@ function keyPresent(k) {
 }
 
 async function revert() {
+  removeSelfheal(false);
   const baks = listBackupDirs();
   if (!baks.length) { console.log("!! 无备份可回滚"); process.exit(1); }
   const ver = cursorVersion();
@@ -2294,6 +2295,7 @@ async function revert() {
    配置那半永远做得到,且它才是同事真正在意的("模型菜单里那堆 cr-g-* 清掉、别再用我的 Key")。
    即使 bundle 没法还原也照做,并**明确告诉他哪半做了哪半没做** —— 不许报一个含糊的"已恢复"。 */
 async function uninstall(dry) {
+  removeSelfheal(dry);
   const ver = cursorVersion();
   console.log("=== 恢复原状(--uninstall)%s ===", dry ? " [dry-run,什么都不写]" : "");
 
@@ -2935,6 +2937,22 @@ async function doDoctor() {
 
   /* 压缩现场:探针记下的是 Cursor **自己算出来的窗口值**。比数 marker 更直接 ——
      marker 在不在说明"补丁装没装",这里说明"压缩真发生时它用的是哪个口径"。 */
+  /* 自愈:Cursor 自动升级冲掉补丁后,launchd 在 Cursor 关着时自动 --repair。
+     修不了(新版锚点认不出)时,日志在 ~/Library/Logs 里**没人会去看** ⇒ 必须在这里报。 */
+  P("\n--- 2.55) 补丁自愈(Cursor 关着时自动补回)---");
+  try {
+    const pl = path.join(os.homedir(), "Library", "LaunchAgents", "com.carher.cursor-selfheal.plist");
+    const lg = path.join(os.homedir(), "Library", "Logs", "carher-cursor-selfheal.log");
+    P("  装上了吗: " + (fs.existsSync(pl) ? "是(每 5 分钟看一眼,Cursor 开着时绝不动手)" : "没有(双击一次 UPGRADE 就会装)"));
+    if (fs.existsSync(lg)) {
+      const ls = fs.readFileSync(lg, "utf8").trim().split("\n").filter((l) => /^\d{4}-/.test(l));
+      const last = ls.slice(-2);
+      if (last.length) { P("  最近: "); for (const l of last) P("    " + l); }
+      if (ls.length && /⚠️|失败/.test(ls[ls.length - 1]))
+        P("    🔴 上次自动修复没成功 —— 多半是 Cursor 升到了我们还没适配的版本。把这份报告发给管理员。");
+    } else P("  最近: 还没触发过(补丁一直在,好消息)");
+  } catch (e) { P("  量不到(" + ((e && e.message) || e) + ")"); }
+
   P("\n--- 2.6) 压缩现场记录(preCompact 探针)---");
   try {
     const lg = path.join(CARHER_DIR, "cursor-precompact.jsonl");
@@ -3286,6 +3304,7 @@ async function main() {
   if (!args.zkDeltaOnly) { try { installImageSkill(rawKey || args.upgradeKey); } catch (e) { console.log("   ⚠️  画图这一步出错(不影响其余): " + (e && e.message || e)); } }
   if (!args.zkDeltaOnly) { try { installRefreshSkill(); } catch (e) { console.log("   ⚠️  「刷模型」这一步出错(不影响其余): " + (e && e.message || e)); } }
   if (!args.zkDeltaOnly) { try { installPrecompactProbe(false); } catch (e) { console.log("   ⚠️  探针这一步出错(不影响其余): " + (e && e.message || e)); } }
+  if (!args.zkDeltaOnly) { try { installSelfheal(false); } catch (e) { console.log("   ⚠️  自愈这一步出错(不影响其余): " + (e && e.message || e)); } }
 
   if (args.lark) { try { await larkSetup(args); } catch (e) { console.log("   ⚠️  飞书这一步出错（不影响其余）: " + (e && e.message || e)); } }
 
@@ -3435,6 +3454,15 @@ async function refreshModels(args) {
     if (del.length) console.log("  - 删除 %d:%s", del.length, del.join(", "));
     // 只比 modelOverrideEnabled:与 Cursor 自带同名的几个会被 Cursor 自己从 userAddedModels 剔掉,比那张表永远「不一致」
     const h = patchHealth();
+    try {
+      const lg = path.join(os.homedir(), "Library", "Logs", "carher-cursor-selfheal.log");
+      const ls = fs.existsSync(lg) ? fs.readFileSync(lg, "utf8").trim().split("\n").filter((l) => /^\d{4}-/.test(l)) : [];
+      if (ls.length && /⚠️|失败/.test(ls[ls.length - 1])) {
+        console.log("");
+        console.log("⚠️  后台自动修补丁上次没成功:" + ls[ls.length - 1].replace(/^\S+ \S+ /, ""));
+        console.log("    这台 Cursor 可能升到了我们还没适配的版本,请把 DOCTOR 报告发给管理员。");
+      }
+    } catch (e) { /* 读不到就不报 */ }
     if (!h.ok) {
       console.log("");
       console.log("⚠️  顺手查到:" + h.lines.join(";"));
@@ -3515,6 +3543,62 @@ function installRefreshSkill() {
     "",
   ].join("\n"));
   console.log("   ✅ 以后在 Cursor 里说「刷模型」,就按你的 Key 更新模型菜单");
+}
+
+/* ── 补丁自愈(2026-10-28)───────────────────────────────────────────────────
+   Cursor 自动升级会整个换掉 app 目录 ⇒ 补丁全没、不报错 ⇒ 件C 没了就**每条消息都压缩**。
+   升级锁(10-13 起默认开)防得住以后,防不住锁开之前装的人,也防不住用户自己点了升级。
+   ⇒ launchd 每 5 分钟拉一次 cursor_selfheal.sh:Cursor **关着**且补丁缺了才 --repair。
+   安全性靠两道现成的闸:selfheal.sh 自己判 GUI 在跑就走人;--repair 自己再判一次(exit 2)。
+   修不了(新版锚点认不出)时 1 小时内不重试,并在 DOCTOR / 刷模型里报出来。
+   🔴 只在 macOS 装:Windows/Linux 没 launchd,不写一个没验证过的计划任务假装支持。 */
+const SELFHEAL_LABEL = "com.carher.cursor-selfheal";
+const SELFHEAL_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", SELFHEAL_LABEL + ".plist");
+function installSelfheal(dry) {
+  console.log("--- 7.6) 补丁自愈(Cursor 自动升级冲掉补丁后,关着时自动补回)---");
+  if (process.platform !== "darwin") { console.log("   跳过(只在 macOS 实测过;别的系统先靠「刷模型」里的提醒)"); return; }
+  const src = path.join(__dirname, "cursor_selfheal.sh");
+  if (!fs.existsSync(src)) { console.log("   跳过(包里没有 cursor_selfheal.sh)"); return; }
+  const dir = path.join(CARHER_DIR, "cursor-setup");
+  const dst = path.join(dir, "cursor_selfheal.sh");
+  const app = path.resolve(path.dirname(cursorBin()), "..", "..");
+  if (dry) { console.log("   [dry-run] 会装 %s,每 5 分钟检查一次(Cursor 开着时绝不动手)", SELFHEAL_PLIST); return; }
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(src, dst); fs.chmodSync(dst, 0o755);
+    const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    fs.mkdirSync(path.dirname(SELFHEAL_PLIST), { recursive: true });
+    fs.writeFileSync(SELFHEAL_PLIST, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${SELFHEAL_LABEL}</string>
+  <key>ProgramArguments</key><array><string>/bin/sh</string><string>${esc(dst)}</string></array>
+  <key>EnvironmentVariables</key><dict><key>CURSOR_APP</key><string>${esc(app)}</string></dict>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>/dev/null</string>
+</dict></plist>
+`);
+    spawnSync("launchctl", ["unload", SELFHEAL_PLIST], { stdio: "ignore" });
+    const r = spawnSync("launchctl", ["load", SELFHEAL_PLIST], { encoding: "utf8" });
+    if (r.status === 0) console.log("   ✅ 已装好:Cursor 关着时每 5 分钟看一眼,补丁没了就自己补(日志 ~/Library/Logs/carher-cursor-selfheal.log)");
+    else console.log("   ⚠️  launchctl load 失败:%s(其余不受影响)", (r.stderr || "").trim());
+  } catch (e) { console.log("   ⚠️  装自愈出错(不影响其余): " + ((e && e.message) || e)); }
+}
+
+/* 🔴 --revert / --uninstall 都是「我要回原版 Cursor」。自愈如果还留着,5 分钟后就会
+   把补丁**重新打回去**,而且是在用户关着 Cursor 时悄悄做 —— 等于无视他的选择。
+   这是整个自愈功能里最危险的失效形状,所以两条退路都必须先摘掉它。 */
+function removeSelfheal(dry) {
+  if (process.platform !== "darwin") return;
+  const dst = path.join(CARHER_DIR, "cursor-setup", "cursor_selfheal.sh");
+  if (!fs.existsSync(SELFHEAL_PLIST) && !fs.existsSync(dst)) return;
+  if (dry) { console.log("   [dry-run] 会先摘掉补丁自愈(%s),否则它会把补丁打回去", SELFHEAL_PLIST); return; }
+  spawnSync("launchctl", ["unload", SELFHEAL_PLIST], { stdio: "ignore" });
+  try { fs.rmSync(SELFHEAL_PLIST, { force: true }); } catch (e) {}
+  try { fs.rmSync(dst, { force: true }); } catch (e) {}
+  console.log("   ✅ 已摘掉补丁自愈(不然它会在你关着 Cursor 时把补丁重新打回去)");
 }
 
 /* ── 压缩现场探针(2026-10-28)────────────────────────────────────────────────

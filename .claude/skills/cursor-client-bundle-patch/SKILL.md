@@ -65,6 +65,11 @@ description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 
 | 4 | 「刷模型」跑的是 `~/.carher/cursor-setup/` 里的**副本**,只在再跑 INSTALL/UPGRADE 时更新 ⇒ 修好的东西对只点「刷模型」的人等于没发布,屏幕上无处可知 | DOCTOR 新增 2.5 节:打两份 sha + 日期,不一致就说「走的是旧逻辑,双击一次 UPGRADE」。台架 ⑯ |
 | 5 | **软版本闸按大版本判,证据是小版本** ⇒ 同事的 `3.24.18` / `3.27.22` 大版本对得上就**一声不吭**,而那几个小版本从没数过锚点(10-28 压缩风暴 4 人里就有 3.24.18;3.21.18 倒是 09-23 真数过) | 表改成 `VERIFIED_EXACT`(记真量过的小版本),大版本推导自它。小版本没量过 ⇒ 打一行 `ℹ️` 并指明「打完双击 DOCTOR 看 ctxwin 四行是否都 =3」。**只改说什么、不改做什么**(照样尝试,安全阀仍是锚点 exactly-1)。台架 ⑰ |
 
+| 6 | **「上游把那段挪走了」被报成「锚点漂了」**(10-28 `--fetch-latest` 量到 3.28.5):`cursor-agent-host/dist/main.js` 里 `unusedTokens` / `createRedactedConversationTokenDetails` 全 0、只剩 protobuf 字段声明,阈值算术整段挪到 `agent-exec` 与 `local-agent-runtime`(这两条仍 3/3)。原来两种情况都回 `锚A count=0` ⇒ 被当漂移追,且第 1 条新加的红字会把无害情况报成「没打上会很慢」= **假红**,让人去跑一个修不了也不用修的 REPAIR | 判据用上游自己的字段名 `unusedTokensThresholdTo{Start,Persist}BackgroundSummarization`(**不被 minify**):一个都没有 ⇒ `na:true` 不适用。`cursor_team_setup.js`(`CW_RELEVANT`)与 `cursor_ctxwin_patch.js`(`RELEVANT`)**两份必须一起改**;DOCTOR 按「该打的个数」判红;台架 ①b 改成 `XX=0 且 OK+NA=4 且 OK>0`(四个全 NA 仍算真问题),新增 ⑱ 腿分辨两者 |
+
+🔴 **NA 不是万能挡箭牌**:`OK>0` 这个条件是故意的 —— 四个目标全判「不适用」说明
+Cursor 换了结构或我们路径写错了,那是真问题,不许被 NA 吞掉。
+
 🔴 **加新版本的规矩**:在 `VERIFIED_EXACT` 里加**量过的那个小版本号**,别加大版本。
 官方只提供最新版下载(`api2.cursor.sh/updates/api/download/{stable,latest}/...`,
 带版本号的 URL 是 404),所以**老小版本的包事后拿不到** —— 同事升到某个小版本时

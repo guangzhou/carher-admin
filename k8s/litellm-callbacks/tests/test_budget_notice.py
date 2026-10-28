@@ -798,6 +798,24 @@ class TTFTTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1], "hashed-token")
 
+    def test_renamed_group_rows_merge_into_one_public_name(self):
+        """10-27 组改名：旧名行 + 新名行翻成同一个公开名 ⇒ 合成一行，花费次数相加，分位数取请求多的。"""
+        from unittest import mock
+        self.proxy_server.prisma_client = self._db([
+            self._row("kiro-slots-claude-opus-5-5", 207, 207, 560.96, 1140.0, 6.04, 20.06),
+            self._row("aws-claude-opus-5-5", 206, 206, 579.14, 1140.0, 5.18, 9.00),
+            self._row("chatgpt-gpt-6-luna", 3, 3, 0.04, 1140.0, 3.32, 3.49),
+        ])
+        key = _Key(alias="cursor-u1", token="tok-merge")
+        key.aliases = {"claude-opus-5-5": "aws-claude-opus-5-5", "gpt-6-luna": "chatgpt-gpt-6-luna"}
+        with mock.patch.object(M, "_router_group_alias_target",
+                               side_effect=lambda n: {"kiro-slots-claude-opus-5-5": "aws-claude-opus-5-5"}.get(n, "")):
+            _, table = self._stats(key)
+        self.assertEqual(table.count("claude-opus-5-5"), 1, table)
+        self.assertIn("| claude-opus-5-5 | $1140.10 |  413 | 6.04 | 20.06 |", table)
+        self.assertNotIn("kiro", table)
+        self.assertNotIn("aws-", table)
+
     def test_total_comes_from_window_sum_not_from_visible_rows(self):
         """模型数超过 _TTFT_MAX_ROWS 时表被 LIMIT 截断，总额必须是截断前的全量。"""
         self.proxy_server.prisma_client = self._db([
@@ -959,6 +977,18 @@ class TTFTTest(unittest.TestCase):
         self.assertEqual(f("", {"a": "b"}), "")
         self.assertEqual(f("x", None), "x")
         self.assertEqual(f("t", {"b": "t", "a": "t"}), "a / b")  # 排序稳定
+
+    def test_display_name_follows_renamed_group_alias(self):
+        """10-27 组改名：改名前的账行记旧组名，key alias 已指新组 ⇒ 顺 router 组别名翻回公开名。"""
+        f = M._display_name_for_group
+        al = {"claude-opus-5-5": "aws-claude-opus-5-5"}
+        from unittest import mock
+        with mock.patch.object(M, "_router_group_alias_target",
+                               side_effect=lambda n: {"kiro-slots-claude-opus-5-5": "aws-claude-opus-5-5"}.get(n, "")):
+            self.assertEqual(f("kiro-slots-claude-opus-5-5", al), "claude-opus-5-5")
+            self.assertEqual(f("aws-claude-opus-5-5", al), "claude-opus-5-5")
+            # 别名指向的组这把 key 没映射 ⇒ 原样显示（不瞎猜）
+            self.assertEqual(f("kiro-slots-claude-opus-5-5", {}), "kiro-slots-claude-opus-5-5")
 
     def test_responses_sets_mock_response(self):
         d = {"input": "/quota"}

@@ -112,7 +112,7 @@ import os
 import re as _re
 import time
 import unicodedata
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from litellm.integrations.custom_logger import CustomLogger
 
@@ -855,6 +855,13 @@ def _display_name_for_group(group: str, aliases: dict) -> str:
         return group
     hits = [str(pub) for pub, tgt in aliases.items() if str(tgt) == group]
     if not hits:
+        # 2026-10-27 后台组改名（kiro-slots-X → aws-X），旧组名变成 router 级隐藏别名。
+        # 改名前的账行 model_group 仍是旧名，而 key 的 alias 已指向新名 ⇒ 顺着组别名
+        # 再翻一层，否则表里冒出后台旧名（10-27 cursor-liuguoxian-std 实测）。
+        tgt = _router_group_alias_target(group)
+        if tgt and tgt != group:
+            hits = [str(pub) for pub, t in aliases.items() if str(t) == tgt]
+    if not hits:
         # 没有人映到它 ⇒ 它本身就是用户发的名字（例如 `claude-grok-4.6`）。
         return group
     if len(hits) == 1:
@@ -934,19 +941,34 @@ async def _today_stats(user_api_key_dict: Any) -> Tuple[str, str]:
             aliases = {}
         entries = []
         used: List[str] = []
+        # 10-27 组改名后同一个公开名会对应两个账里的组（旧名行 + 新名行）⇒ 按显示名合并：
+        # 花费、次数相加；P50/P90 是分位数不能相加，取请求多的那行的（不编造合并分位数）。
+        merged: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
         for row in rows:
             group = row.get("g") or ""
+            name = _display_name_for_group(group, aliases) or "（未知模型）"
             # 多对一时显示名是「名A / 名B」，排序时每个候选都算「今天用过」
-            for pub in (_display_name_for_group(group, aliases) or "").split(" / "):
+            for pub in (name if name != "（未知模型）" else "").split(" / "):
                 if pub and pub not in used:
                     used.append(pub)
-            entries.append((
-                _display_name_for_group(group, aliases) or "（未知模型）",
-                _fmt_cost(row.get("cost")),
-                str(row.get("calls") or 0),
-                _fmt_secs(row.get("p50")),
-                _fmt_secs(row.get("p90")),
-            ))
+            calls = int(row.get("calls") or 0)
+            cost = float(row.get("cost") or 0.0)
+            m = merged.get(name)
+            if m is None:
+                merged[name] = {"cost": cost, "calls": calls, "top": calls,
+                                "p50": row.get("p50"), "p90": row.get("p90")}
+                order.append(name)
+                continue
+            m["cost"] += cost
+            m["calls"] += calls
+            if calls > m["top"]:
+                m.update(top=calls, p50=row.get("p50"), p90=row.get("p90"))
+        order.sort(key=lambda n: (-merged[n]["cost"], -merged[n]["calls"]))
+        for name in order:
+            m = merged[name]
+            entries.append((name, _fmt_cost(m["cost"]), str(m["calls"]),
+                            _fmt_secs(m["p50"]), _fmt_secs(m["p90"])))
 
         heads = ("模型", "花费", "次数", "P50", "P90")
         widths = [max([_display_width(h)] + [_display_width(e[i]) for e in entries])

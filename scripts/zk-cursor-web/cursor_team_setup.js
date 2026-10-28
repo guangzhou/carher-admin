@@ -3355,6 +3355,39 @@ function launchCursor() {
     require("child_process").spawn("open", [app], opt).unref();
   } else require("child_process").spawn(bin, [], opt).unref();
 }
+/* 🔴 2026-10-28 定住的因果链:Cursor **自动升级会冲掉全部 bundle 补丁**,而升级锁是
+   10-13 才默认开的。10-13 之前装的人(实测那 4 位都是 3.21~3.24)升级后件C 失效 ⇒
+   `getBackgroundSummarizationTriggerThreshold` 拿到档位数字 300 ⇒
+   阈值 = min(300-10000, 300*0.9) = **-9700** ⇒ `used >= -9700` 恒真 ⇒ **每轮都压缩对话**,
+   每压一次 43~98s。他只会说「Cursor 比 Claude 慢」,而装完那次脚本写的是「✅ 完成」。
+   (官方默认值从 3.27.14 的 cursor-agent-exec 读出:unusedTokensThresholdToStart=1e4、
+    unusedPercent=.1;第三条腿 requestBodyChars=8MiB 与 maxTokens 无关、补丁碰不到,
+    他们最大 27 万字符差 30 倍,已排除。)
+   ⇒ 「刷模型」是同事**唯一会主动用**的入口,让它顺手查一次补丁在不在。
+   只读、不自动改:发现缺了就告诉他双击 REPAIR(自动打 bundle 要先退出 Cursor,
+   而「刷模型」正跑在 Cursor 里,不能在这里偷偷动手)。 */
+function patchHealth() {
+  const out = { ok: true, lines: [] };
+  try {
+    for (const rel of BUNDLES) {
+      const p = path.join(RES, rel);
+      if (!fs.existsSync(p)) continue;
+      const s = fs.readFileSync(p, "utf8");
+      if (!s.includes("/*@cxteam-byokforce*/")) { out.ok = false; out.lines.push("解锁补丁没了(" + path.basename(rel) + ")"); }
+    }
+    let need = 0, have = 0;
+    for (const tt of CTXWIN_TARGETS) {
+      const p = path.join(RES, tt.rel);
+      if (!fs.existsSync(p)) continue;
+      const s = fs.readFileSync(p, "utf8");
+      const n = s.split(CTXWIN_MARKER).length - 1;
+      if (n > 0 || CW_RELEVANT.test(s)) { need++; if (n >= 3) have++; }
+    }
+    if (need && have < need) { out.ok = false; out.lines.push("件C 上下文补丁没了(" + have + "/" + need + ")⇒ 会每轮自动压缩对话,发一句要等很久"); }
+  } catch (e) { return { ok: true, lines: [] }; }   // 量不到就别吓人
+  return out;
+}
+
 async function refreshModels(args) {
   const worker = process.argv.includes("--refresh-worker");
   const key = readKeyCopy() || await readKeyFromDb();
@@ -3376,7 +3409,13 @@ async function refreshModels(args) {
     if (add.length) console.log("  + 新增 %d:%s", add.length, add.join(", "));
     if (del.length) console.log("  - 删除 %d:%s", del.length, del.join(", "));
     // 只比 modelOverrideEnabled:与 Cursor 自带同名的几个会被 Cursor 自己从 userAddedModels 剔掉,比那张表永远「不一致」
-    if (!add.length && !del.length) { console.log("菜单已经是最新的,不用改。"); return; }
+    const h = patchHealth();
+    if (!h.ok) {
+      console.log("");
+      console.log("⚠️  顺手查到:" + h.lines.join(";"));
+      console.log("    多半是 Cursor 自动升级把补丁冲掉了。处理:完全退出 Cursor,双击 REPAIR,再打开。");
+    }
+    if (!add.length && !del.length) { console.log("菜单已经是最新的,不用改。"); if (!h.ok) console.log("(菜单不用改,但上面那条要处理)"); return; }
   }
   const running = !process.env.CX_SKIP_RUNNING_CHECK && cursorRunning();
   if (running && !worker) {

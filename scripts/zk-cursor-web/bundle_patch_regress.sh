@@ -1072,6 +1072,47 @@ PY18B
     || ok "⑱不适用不计入红字(不会让人去跑无用的 REPAIR)"
 fi
 
+# ── 19) 「刷模型」顺手查补丁在不在(2026-10-28)────────────────────────────────
+#    因果链(算出来的,不是猜):Cursor **自动升级会冲掉全部 bundle 补丁**,升级锁 10-13
+#    才默认开 ⇒ 10-13 前装的人升级后件C 失效 ⇒ 阈值 min(300-1e4, 300*.9) = **-9700**
+#    ⇒ used>=-9700 恒真 ⇒ 每轮都压缩(单次 43~98s),他只会说「Cursor 比 Claude 慢」。
+#    「刷模型」是同事唯一会主动用的入口 ⇒ 让它顺手查一次。
+#    判据:补丁齐全必须**一声不吭**(别天天吓人);被抹掉必须点名 + 写后果 + 指向 REPAIR。
+echo "--- 19) 刷模型顺手查补丁 ---"
+if [ ! -d "$LIVE_RES/out/vs/workbench" ]; then
+  skip "⑲:本机没有 live Cursor"
+else
+  PH="$TMP/leg19"; rm -rf "$PH"; mkdir -p "$PH/ok" "$PH/bad"
+  for d in ok bad; do
+    ( cd "$LIVE_RES" && tar -cf - package.json out/vs/workbench/workbench.desktop.main.js         extensions/cursor-agent-exec/dist/main.js         extensions/cursor-agent-host/dist/agent-host-daemon/dist/bin/daemon.cjs ) | tar -xf - -C "$PH/$d"
+  done
+  python3 - "$PH/bad" <<'PY19'
+import pathlib,sys
+# 模拟自动升级冲掉补丁:抹掉两种 marker
+for f in list(pathlib.Path(sys.argv[1]).rglob("*.js"))+list(pathlib.Path(sys.argv[1]).rglob("*.cjs")):
+    s=f.read_text(encoding="utf8",errors="surrogateescape")
+    f.write_text(s.replace("/*@cx-ctxwin:v3*/","").replace("/*@cxteam-byokforce*/",""),encoding="utf8",errors="surrogateescape")
+PY19
+  ph() { CURSOR_APP_ROOT="$1" node -e '
+const fs=require("fs"),path=require("path"),os=require("os");
+const src=fs.readFileSync(process.argv[1],"utf8");
+const head=src.slice(src.indexOf("const EXEC = process.execPath"), src.indexOf("const STATE_DB"));
+const cw=src.slice(src.indexOf("const CTXWIN_MARKER"), src.indexOf("const CW_A_MIN"));
+const rel=src.slice(src.indexOf("const CW_RELEVANT"), src.indexOf("function ctxwinApplyToText"));
+const fn=src.slice(src.indexOf("function patchHealth()"), src.indexOf("async function refreshModels"));
+const r=new Function("fs","path","os","process", head+cw+rel+fn+"; return patchHealth();")(fs,path,os,process);
+console.log(JSON.stringify(r));' "$JS"; }
+  R19A=$(ph "$PH/ok"); R19B=$(ph "$PH/bad")
+  printf '%s' "$R19A" | grep -q '"ok":true' && ok "⑲补丁齐全 ⇒ 一声不吭(不天天吓人)"     || bad "⑲补丁齐全却报警了:$R19A"
+  printf '%s' "$R19B" | grep -q '"ok":false' && ok "⑲补丁被冲掉 ⇒ 报出来"     || bad "⑲补丁被冲掉却没报:$R19B"
+  printf '%s' "$R19B" | grep -q '每轮自动压缩对话' && ok "⑲写了后果(发一句要等很久)"     || bad "⑲没写后果,同事看不出这跟「慢」有关"
+  printf '%s' "$R19B" | grep -q '件C' && ok "⑲点名是哪个补丁(件C)" || bad "⑲没点名"
+  # 阳性对照:旧行为(刷模型压根不查)⇒ 屏幕上一个字都没有
+  grep -q 'patchHealth()' "$JS" && ok "⑲阳性对照:旧版没有 patchHealth,这一行就是新增的那把尺子"     || bad "⑲patchHealth 不在脚本里"
+  # 只读:不许在 refreshModels 里自动改 bundle(那要先退出 Cursor,而它正跑在 Cursor 里)
+  sed -n '/async function refreshModels/,/^}/p' "$JS" | grep -q 'writeFileSync'     && bad "⑲refreshModels 里出现了写文件 —— 不许在 Cursor 开着时偷偷改 bundle"     || ok "⑲只读:没在刷模型里自动改 bundle"
+fi
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

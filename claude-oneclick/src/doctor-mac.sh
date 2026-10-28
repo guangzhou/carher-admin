@@ -135,8 +135,12 @@ if [ "$(uname -s)" = Darwin ] && [ -d "$APP" ]; then
   ASAR="$APP/Contents/Resources/app.asar"
   PIN=$(LC_ALL=C grep -aoE '\{"version":"[0-9]+\.[0-9]+\.[0-9]+","manifest"' "$ASAR" 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
   if [ -n "$PIN" ]; then
-    D="$UD/claude-code/$PIN"
-    if [ -f "$D/.verified" ] && [ -x "$D/claude.app/Contents/MacOS/claude" ]; then P "App 组件     : Claude Code $PIN 已就绪"
+    # 10-28:App 4.29 起目录是 claude-code/<ver>/<sha 前 12 位>/(老版是 claude-code/<ver>/)⇒ 两种都认
+    D=""
+    for c in "$UD/claude-code/$PIN" "$UD/claude-code/$PIN"/*/; do
+      c="${c%/}"; [ -f "$c/.verified" ] && [ -x "$c/claude.app/Contents/MacOS/claude" ] && { D="$c"; break; }
+    done
+    if [ -n "$D" ]; then P "App 组件     : Claude Code $PIN 已就绪"
     else P "App 组件     : Claude Code $PIN 没准备好"
       red "桌面 App 需要的组件(Claude Code $PIN)没准备好 ⇒ 发消息不回/很慢:完全退出 App,重新跑一次 claude-mac.command"; fi
     MIR=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://cc.auto-link.com.cn/ccdl/claude-code-releases/$PIN/manifest.json")

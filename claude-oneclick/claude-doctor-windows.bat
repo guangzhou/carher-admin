@@ -148,9 +148,12 @@ if ($pkg -or $asar) {
     try { $txt = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($asar)); if ($txt -match '\{"version":"(\d+\.\d+\.\d+)","manifest"') { $pin = $matches[1] } } catch {}
     if ($pin) {
       # MSIX 版 App 的本地数据可能被系统重定向到 Packages\Claude_*\LocalCache\Local 下 ⇒ 两处都找
-      $cands = @(Join-Path $ud "claude-code\$pin")
+      $bases = @(Join-Path $ud "claude-code\$pin")
       Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Packages') -Filter 'Claude_*' -Directory -ErrorAction SilentlyContinue |
-        ForEach-Object { $cands += (Join-Path $_.FullName "LocalCache\Local\Claude-3p\claude-code\$pin") }
+        ForEach-Object { $bases += (Join-Path $_.FullName "LocalCache\Local\Claude-3p\claude-code\$pin") }
+      # 10-28:App 4.29 起目录是 claude-code\<ver>\<sha 前 12 位>\(老版是 claude-code\<ver>\)⇒ 两种都认
+      $cands = @()
+      foreach ($bd in $bases) { $cands += $bd; $cands += @(Get-ChildItem $bd -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) }
       $hitDir = $cands | Where-Object { (Test-Path (Join-Path $_ '.verified')) -and (Test-Path (Join-Path $_ 'claude.exe')) } | Select-Object -First 1
       $anyExe = $cands | Where-Object { Test-Path (Join-Path $_ 'claude.exe') } | Select-Object -First 1
       if ($hitDir) { P "App 组件     : Claude Code $pin 已就绪 ($hitDir)" }

@@ -142,7 +142,7 @@ def test_manifest_regex_matches_real_app():
     asar = Path("/Applications/Claude.app/Contents/Resources/app.asar")
     if not asar.exists():
         pytest.skip("本机没装 Claude App")
-    js = _ccd_js(MAC, r"CARHER_ARCH=\"\$ARCH\" node -e '\n(.*?)\n' >\"\$TMPDIR/carher-ccd\.out\"")
+    js = _ccd_js(MAC, r"CARHER_OS=\"\$OS\" node -e '\n(.*?)\n' >\"\$TMPDIR/carher-ccd\.out\"")
     rx = re.search(r"b\.match\((/.*?/)\);", js).group(1)
     # JS 正则里的 \x27 是单引号;换成 Python 的写法
     py = rx[1:-1].replace(r"\x27", "'")
@@ -155,14 +155,95 @@ def test_manifest_regex_matches_real_app():
 
 def test_seed_refuses_bad_checksum():
     """镜像被换成别的文件 ⇒ 必须拒绝安装(不能把没校验过的二进制塞给 App 执行)。"""
-    js = _ccd_js(MAC, r"CARHER_ARCH=\"\$ARCH\" node -e '\n(.*?)\n' >\"\$TMPDIR/carher-ccd\.out\"")
-    assert js.count("sha256 不对,拒绝安装") == 2, "host/VM 两份都要校验"
+    js = _ccd_js(MAC, r"CARHER_OS=\"\$OS\" node -e '\n(.*?)\n' >\"\$TMPDIR/carher-ccd\.out\"")
+    assert js.count("sha256 不对,拒绝安装") == 3, "mac host / Linux host / VM 三份都要校验"
     wjs = re.search(r"\$ccdJs = @'\n(.*?)\n'@", PS, re.S).group(1)
     assert "sha256 不对,拒绝安装" in wjs
 
 
 def test_seed_does_not_need_system_zstd():
     """同事 Mac 默认没有 zstd;第一版 shell 出去调 zstd,只在装了 brew zstd 的机器上能过 = 假绿。"""
-    js = _ccd_js(MAC, r"CARHER_ARCH=\"\$ARCH\" node -e '\n(.*?)\n' >\"\$TMPDIR/carher-ccd\.out\"")
+    js = _ccd_js(MAC, r"CARHER_OS=\"\$OS\" node -e '\n(.*?)\n' >\"\$TMPDIR/carher-ccd\.out\"")
     assert "zstdDecompressSync" in js
     assert not re.search(r"\bzstd -dc\b|\bunzstd\b", js), "又依赖系统 zstd 了"
+
+
+# ── 10-28 App 4.29:本机组件目录 = claude-code/<ver>/<sha 前 12 位>/ ─────────────────
+def _seed_run(js, asar_text, os_name, arch, tmp):
+    """真跑预置脚本:假 asar + 本地 http 镜像(官方原样 zstd 文件,sha 与假 manifest 对上)。"""
+    import hashlib, http.server, threading, zlib
+    payload = {}
+    def zst(raw):
+        out = subprocess.run(["node", "-e", "process.stdout.write(require('zlib').zstdCompressSync(require('fs').readFileSync(0)))"],
+                             input=raw, capture_output=True, check=True).stdout
+        return out, hashlib.sha256(out).hexdigest()
+    plain, ck_plain = zst(b"#!/bin/sh\necho fake-claude\n")
+    plats = {}
+    for p in ("linux-x64", "linux-arm64", "darwin-arm64", "darwin-x64"):
+        payload[f"/9.9.9/{p}/claude.zst"] = plain
+        plats[p] = {"binary": "claude.zst", "checksum": ck_plain, "size": len(plain)}
+    # mac bundle:tar 里放 claude.app/Contents/MacOS/claude
+    bd = tmp / "bundle"; (bd / "claude.app/Contents/MacOS").mkdir(parents=True)
+    (bd / "claude.app/Contents/MacOS/claude").write_text("#!/bin/sh\n"); 
+    tarb = subprocess.run(["tar", "-cf", "-", "-C", str(bd), "claude.app"], capture_output=True, check=True).stdout
+    bz, ck_b = zst(tarb)
+    for p in ("darwin-arm64", "darwin-x64"):
+        payload[f"/9.9.9/{p}/claude.app.tar.zst"] = bz
+        plats[p]["bundle"] = {"checksum": ck_b, "size": len(bz)}
+    man = json.dumps({"version": "9.9.9", "manifest": {"version": "9.9.9", "platforms": plats}, "baseUrl": "x"}, separators=(",", ":"))  # 真 App 内嵌的是紧凑 JSON
+    asar = tmp / "app.asar"; asar.write_text(asar_text.replace("@@MAN@@", man), encoding="latin1")
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            b = payload.get(self.path)
+            self.send_response(200 if b else 404); self.end_headers(); self.wfile.write(b or b"")
+        def log_message(self, *a): pass
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H); threading.Thread(target=srv.serve_forever, daemon=True).start()
+    # 脚本用 https.get ⇒ 测试里换成 http
+    js2 = js.replace('require("https")', 'require("http")')
+    ud = tmp / "ud"
+    env = dict(os.environ, CARHER_ASAR=str(asar), CARHER_UD=str(ud), CARHER_CCDL=f"http://127.0.0.1:{srv.server_port}",
+               CARHER_ARCH=arch, CARHER_OS=os_name)
+    r = subprocess.run(["node", "-e", js2], env=env, capture_output=True, text=True)
+    srv.shutdown()
+    assert r.returncode == 0, r.stderr
+    return ud, ck_plain, ck_b
+
+
+NEW_APP = "x;throw Error(`... it cannot name an install folder`);JSON.parse('@@MAN@@');"
+OLD_APP = "x;JSON.parse('@@MAN@@');"
+
+
+def test_seed_uses_hashed_dir_on_new_app_mac(tmp_path):
+    """App 4.29(本机 3.1623 起)只认 claude-code/<ver>/<sha12>/;写老目录 ⇒ doctor 误报 + 重跑又下 100MB。"""
+    js = _ccd_js(MAC, r"CARHER_OS=\"\$OS\" node -e '\n(.*?)\n' >\"\$TMPDIR/carher-ccd\.out\"").replace("\\x27", "'")
+    ud, _, ck_b = _seed_run(js, NEW_APP, "darwin", "arm64", tmp_path)
+    d = ud / "claude-code/9.9.9" / ck_b[:12]
+    assert (d / ".verified").read_text() == ck_b and (d / "claude.app/Contents/MacOS/claude").exists()
+    assert not (ud / "claude-code/9.9.9/.verified").exists()
+    assert (ud / "claude-code-vm/9.9.9/.verified").exists(), "VM 那份目录没变"
+
+
+def test_seed_keeps_flat_dir_on_old_app_mac(tmp_path):
+    js = _ccd_js(MAC, r"CARHER_OS=\"\$OS\" node -e '\n(.*?)\n' >\"\$TMPDIR/carher-ccd\.out\"").replace("\\x27", "'")
+    ud, _, ck_b = _seed_run(js, OLD_APP, "darwin", "arm64", tmp_path)
+    assert (ud / "claude-code/9.9.9/.verified").read_text() == ck_b
+
+
+def test_seed_linux_app_plain_binary_hashed_dir(tmp_path):
+    """Linux App(deb)本机这份是单个 claude 二进制(useBundle 只在 darwin),同样进 <sha12>/。"""
+    js = _ccd_js(MAC, r"CARHER_OS=\"\$OS\" node -e '\n(.*?)\n' >\"\$TMPDIR/carher-ccd\.out\"").replace("\\x27", "'")
+    ud, ck, _ = _seed_run(js, NEW_APP, "linux", "x64", tmp_path)
+    exe = ud / "claude-code/9.9.9" / ck[:12] / "claude"
+    assert exe.read_bytes().startswith(b"#!/bin/sh") and os.access(exe, os.X_OK)
+
+
+def test_seed_windows_hashed_dir(tmp_path):
+    js = re.search(r"\$ccdJs = @'\n(.*?)\n'@", PS, re.S).group(1)
+    assert 'it cannot name an install folder' in js and 'e.checksum.slice(0,12)' in js
+
+
+def test_doctors_accept_both_layouts():
+    dm = (ROOT / "src/doctor-mac.sh").read_text()
+    assert '"$UD/claude-code/$PIN"/*/' in dm
+    dw = (ROOT / "src/doctor-windows.ps1").read_text()
+    assert "Get-ChildItem $bd -Directory" in dw

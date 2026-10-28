@@ -273,27 +273,51 @@ fs.writeFileSync(metaP, JSON.stringify(meta, null, 2) + "\n", { mode: 0o600 });
 #    (npm 版是 plain 二进制,App 在 mac 上要 claude.app bundle;实测两者 sha 不同)。
 #    ⇒ 从我们自己的镜像 cc.auto-link.com.cn/ccdl/ 取**官方原样**文件,按 App 的目录形状放好,
 #    并用 App 内嵌 manifest 的 sha256 校验。版本号从 App 里读(App 升级后自动跟)。
-APP_ASAR="/Applications/Claude.app/Contents/Resources/app.asar"
+# 10-28 起 Linux 也有官方 App(deb,/usr/lib/claude-desktop),同样每开会话先去国外下组件 ⇒ 一起预置。
+if [ "$OS" = darwin ]; then APP_ASAR="/Applications/Claude.app/Contents/Resources/app.asar"
+else APP_ASAR="/usr/lib/claude-desktop/resources/app.asar"; fi
 CCDL="https://cc.auto-link.com.cn/ccdl/claude-code-releases"
-if [ "$OS" = darwin ] && [ -f "$APP_ASAR" ]; then
+if [ -f "$APP_ASAR" ]; then
   say "→ 准备桌面 App 需要的 Claude Code 组件(约 100MB,首次会慢一点)..."
-  CARHER_ASAR="$APP_ASAR" CARHER_UD="$APP_UD" CARHER_CCDL="$CCDL" CARHER_ARCH="$ARCH" node -e '
+  CARHER_ASAR="$APP_ASAR" CARHER_UD="$APP_UD" CARHER_CCDL="$CCDL" CARHER_ARCH="$ARCH" CARHER_OS="$OS" node -e '
 const fs=require("fs"),path=require("path"),crypto=require("crypto"),zlib=require("zlib"),cp=require("child_process"),https=require("https");
 const b=fs.readFileSync(process.env.CARHER_ASAR).toString("latin1");
 // App 内嵌 manifest:JSON.parse(\x27{"version":"2.1.x","manifest":{...},"baseUrl":...}\x27)
 const m=b.match(/JSON\.parse\(\x27(\{"version":"(\d+\.\d+\.\d+)","manifest".*?)\x27\)/);
 if(!m){console.error("读不到 App 内嵌的 Claude Code 版本(App 版本太新/太旧?)");process.exit(2);}
 const d=JSON.parse(m[1]), V=d.manifest.version, P=d.manifest.platforms;
-const host = "darwin-"+(process.env.CARHER_ARCH==="arm64"?"arm64":"x64");
+const mac  = process.env.CARHER_OS==="darwin";
+const host = (mac?"darwin-":"linux-")+(process.env.CARHER_ARCH==="arm64"?"arm64":"x64");
 const vm   = "linux-"+(process.env.CARHER_ARCH==="arm64"?"arm64":"x64");
-const get=(u)=>new Promise((res,rej)=>{https.get(u,{headers:{"User-Agent":"carher-oneclick"}},r=>{
+const get1=(u)=>new Promise((res,rej)=>{https.get(u,{headers:{"User-Agent":"carher-oneclick"}},r=>{
   if(r.statusCode!==200){rej(new Error(u+" HTTP "+r.statusCode));r.resume();return;}
-  const bufs=[];r.on("data",x=>bufs.push(x));r.on("end",()=>res(Buffer.concat(bufs)));}).on("error",rej);});
+  const bufs=[];r.on("data",x=>bufs.push(x));r.on("error",rej);r.on("aborted",()=>rej(new Error("下载中断")));
+  r.on("end",()=>res(Buffer.concat(bufs)));}).on("error",rej);});
+// 10-28 隔离实测:100MB 下载偶发 socket hang up(连跑 4 次都好)⇒ 断了自动重试 3 次再报
+const get=async(u)=>{for(let i=1;;i++){try{return await get1(u);}catch(e){if(i>=3||/HTTP 4/.test(e.message))throw e;await new Promise(r=>setTimeout(r,2000*i));}}};
 const sha=(x)=>crypto.createHash("sha256").update(x).digest("hex");
 const ok=(dir,want)=>{try{return fs.readFileSync(path.join(dir,".verified"),"utf8").trim()===want;}catch{return false;}};
+// 10-28 复核 App 4.29(本机 3.1623.4 已是):本机组件目录改成 claude-code/<ver>/<sha 前 12 位>/
+//   (App 代码:installDirFor ⇒ join(storageDir,ver,checksum.slice(0,12)));老的 claude-code/<ver>/ 只当
+//   legacy,App 启动时搬进新目录。只写老目录 ⇒ App 搬走后下次跑脚本又判「没有」再下 100MB,doctor 也误报。
+//   ⇒ App 是新布局就直接写新目录;老 App(没有这段代码)仍写老目录。VM 那份目录没变。
+const newLayout=b.includes("it cannot name an install folder");
+const hostDir=(ck)=>path.join(process.env.CARHER_UD,"claude-code",V,...(newLayout?[ck.slice(0,12).toLowerCase()]:[]));
 (async()=>{
-  // ① 本机这份(mac 上是 claude.app bundle)
-  const hb=P[host]&&P[host].bundle; const hd=path.join(process.env.CARHER_UD,"claude-code",V);
+  // ① 本机这份(mac 上是 claude.app bundle;Linux 上是单个 claude 二进制,App 代码 useBundle 只认 darwin)
+  if(!mac){
+    const e=P[host]; if(!e) throw new Error("manifest 里没有 "+host);
+    const ld=hostDir(e.checksum), exe=path.join(ld,"claude");
+    if(!(ok(ld,e.checksum) && fs.existsSync(exe))){
+      const z=await get(`${process.env.CARHER_CCDL}/${V}/${host}/claude.zst`);
+      if(sha(z)!==e.checksum) throw new Error("本机组件 sha256 不对,拒绝安装");
+      if(typeof zlib.zstdDecompressSync!=="function") throw new Error("Node 不支持 zstd(需要 Node>=22.15)");
+      fs.mkdirSync(ld,{recursive:true}); fs.writeFileSync(exe,zlib.zstdDecompressSync(z)); fs.chmodSync(exe,0o755);
+      fs.writeFileSync(path.join(ld,".verified"),e.checksum);
+    }
+    console.log(V); return;   // Linux 只预置本机这份;App 的隔离工作区(VM)在 Linux 上是否启用没实测过,先不下那 100MB
+  }
+  const hb=P[host]&&P[host].bundle; const hd=hb?hostDir(hb.checksum):"";
   if(hb && !(ok(hd,hb.checksum) && fs.existsSync(path.join(hd,"claude.app/Contents/MacOS/claude")))){
     const z=await get(`${process.env.CARHER_CCDL}/${V}/${host}/claude.app.tar.zst`);
     if(sha(z)!==hb.checksum) throw new Error("本机组件 sha256 不对,拒绝安装");

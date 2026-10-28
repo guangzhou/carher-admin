@@ -548,18 +548,23 @@ if(!m){console.error("读不到 App 内嵌的 Claude Code 版本");process.exit(
 const d=JSON.parse(m[1]), V=d.manifest.version, P=d.manifest.platforms;
 const host="win32-"+(process.env.CARHER_ARCH==="arm64"?"arm64":"x64");
 const e=P[host]; if(!e){console.error("manifest 里没有 "+host);process.exit(2);}
-const dir=path.join(process.env.CARHER_UD,"claude-code",V), exe=path.join(dir,"claude.exe");
+// 10-28 App 4.29 起本机组件目录 = claude-code\<ver>\<sha 前 12 位>\(老 App 没这段代码 ⇒ 仍是 claude-code\<ver>\)
+const newLayout=b.includes("it cannot name an install folder");
+const dir=path.join(process.env.CARHER_UD,"claude-code",V,...(newLayout?[e.checksum.slice(0,12).toLowerCase()]:[])), exe=path.join(dir,"claude.exe");
 try{ if(fs.readFileSync(path.join(dir,".verified"),"utf8").trim()===e.checksum && fs.existsSync(exe)){console.log(V);process.exit(0);} }catch{}
 if(typeof zlib.zstdDecompressSync!=="function"){console.error("Node 不支持 zstd(需要 Node>=22.15)");process.exit(3);}
-https.get(`${process.env.CARHER_CCDL}/${V}/${host}/claude.exe.zst`,{headers:{"User-Agent":"carher-oneclick"}},r=>{
-  if(r.statusCode!==200){console.error("HTTP "+r.statusCode);process.exit(3);}
-  const bufs=[]; r.on("data",x=>bufs.push(x)); r.on("end",()=>{
-    const z=Buffer.concat(bufs);
-    if(crypto.createHash("sha256").update(z).digest("hex")!==e.checksum){console.error("sha256 不对,拒绝安装");process.exit(3);}
-    fs.mkdirSync(dir,{recursive:true}); fs.writeFileSync(exe,zlib.zstdDecompressSync(z));
-    fs.writeFileSync(path.join(dir,".verified"),e.checksum); console.log(V);
-  });
-}).on("error",x=>{console.error(x.message);process.exit(3);});
+const get1=(u)=>new Promise((res,rej)=>{https.get(u,{headers:{"User-Agent":"carher-oneclick"}},r=>{
+  if(r.statusCode!==200){rej(new Error("HTTP "+r.statusCode));r.resume();return;}
+  const bufs=[]; r.on("data",x=>bufs.push(x)); r.on("error",rej); r.on("aborted",()=>rej(new Error("下载中断")));
+  r.on("end",()=>res(Buffer.concat(bufs)));}).on("error",rej);});
+// 10-28:大文件下载偶发 socket hang up ⇒ 断了自动重试 3 次再报
+(async()=>{
+  let z; for(let i=1;;i++){try{z=await get1(`${process.env.CARHER_CCDL}/${V}/${host}/claude.exe.zst`);break;}
+    catch(x){if(i>=3||/HTTP 4/.test(x.message))throw x;await new Promise(r=>setTimeout(r,2000*i));}}
+  if(crypto.createHash("sha256").update(z).digest("hex")!==e.checksum){console.error("sha256 不对,拒绝安装");process.exit(3);}
+  fs.mkdirSync(dir,{recursive:true}); fs.writeFileSync(exe,zlib.zstdDecompressSync(z));
+  fs.writeFileSync(path.join(dir,".verified"),e.checksum); console.log(V);
+})().catch(x=>{console.error(x.message);process.exit(3);});
 '@
   $ccdMjs = Join-Path $env:TEMP "carher-ccd-$([guid]::NewGuid().ToString('N')).js"
   [IO.File]::WriteAllText($ccdMjs, $ccdJs, (New-Object Text.UTF8Encoding $false))

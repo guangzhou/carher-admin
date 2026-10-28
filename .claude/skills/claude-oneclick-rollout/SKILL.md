@@ -79,6 +79,12 @@ claude-oneclick/
 | 发消息很慢/一直不回,日志 `still initializing; queued message`、`downloads.claude.ai … Stalled` | App 每开会话先下载它**钉死版本**的 Claude Code;国内连不上 | 198 `/ccdl/claude-code-releases/<ver>/` 镜像 + 安装器按 `storageDir/<ver>/` + `.verified`(=manifest sha)预置 |
 | App 的 Code/Cowork 里 `npm install` 失败,设置页「严格沙箱 · 组织开启」,开 bypass 也没用,终端正常(10-25 mac 同事) | 3P 配置没写 `coworkEgressAllowedHosts` ⇒ App 按 failClosed 当 `[]` ⇒ 给会话下发 `sandbox{enabled,allowUnsandboxedCommands:false,network.allowedDomains:[],allowManagedDomainsOnly}`;对照:`claude -p --managed-settings '<那份>'` ⇒ npm E403 `user denied`、curl 000。只放 npm 源也不够(沙箱挡 `~/.npm` 写,EPERM) | 安装器写 `coworkEgressAllowedHosts:["*"]`(官方:含 `*` 且无 `allowedWorkspaceFolders` ⇒ 两种沙箱都不开);用户自己写过非空列表不动;doctor 报「App 外网放行」。改后要**完全退出 App 重开** |
 | 🔴 **App 自动升级后又卡**(10-14 本机:1.15962 → 1.46388.4,钉 2.1.260,镜像没有) | 每次升级都换钉死版本 | `ccdl-sync.sh` 每天跟官方最新 App;同事 App 是旧版就 `sudo carher-ccdl-sync.sh --cc <ver>` 补;本机用安装器同款逻辑预置后**完全退出重开** |
+| 🔴 **组件目录换布局**(10-28 复核 4.29 发现;本机 3.1623.4 已是) | 本机那份从 `claude-code/<ver>/` 改成 `claude-code/<ver>/<sha 前 12 位>/`(App 代码 `installDirFor`;老目录当 legacy 启动时搬走);VM 那份 `claude-code-vm/<ver>/` 不变。只写老目录 ⇒ App 一搬走 doctor 就误报「组件没准备好」、重跑又下 100MB | 安装器按 asar 里有没有 `it cannot name an install folder` 判新/老布局;doctor 两种目录都认;回归 `tests/test_desktop_app.py -k hashed`(真跑预置脚本 + 本地假镜像) |
+| Linux App(deb `/usr/lib/claude-desktop`)| 10-28 起有官方 Linux 版,同样每开会话下组件;本机那份是**单个 `claude` 二进制**(useBundle 只在 darwin),userData = `~/.config/Claude-3p` | 安装器 Linux 分支同样预置(不下 VM 那份,Linux 是否起 VM 没实测) |
+
+**App 升级后复核流程**(10-28 跑过):从镜像下 mac zip / win msix / linux deb 各解出 app.asar →
+① manifest 正则能读到 ② `Claude-3p`/`coworkEgressAllowedHosts`/`inferenceModels` 键还在 ③ 读 `installDirFor`/`getHostTarget` 看目录规则 →
+把安装器里的预置 JS 切出来对三个 asar 真跑(`CARHER_ASAR/CARHER_UD/CARHER_OS/CARHER_ARCH`),目录名要等于 manifest sha 前 12 位 → 干净 HOME 真装 + doctor。
 
 真 App 验沙箱(10-25 本机做过):`claude://code/new?folder=<编码目录>&q=<编码提示>` 深链开 Code 会话 → `osascript` 回车发送 →
 让命令把结果写到文件再读(截图会被同屏终端遮住)。改 configLibrary 后必须**确认旧 App 进程退干净**(`osascript quit` 后轮询 pgrep)再开。

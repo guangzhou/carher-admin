@@ -91,6 +91,29 @@ description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 
 DOCTOR 2.6 节报现场记录。探针任何异常都静默输出 `{}`(绝不能让同事发不出消息)。
 本机真机验收:Cursor **热加载** hooks.json,日志立刻出现 `Loaded 5 user hook(s) … preCompact`。
 
+### 补丁自愈(2026-10-28,`cursor_selfheal.sh` + launchd `com.carher.cursor-selfheal`)
+
+用户原话:「我们不是要关掉压缩,而是不让他每条消息都压缩」。补丁在 ⇒ 只在快满才压(对的);
+补丁丢 ⇒ 每条都压。所以修的是**补丁别丢**。launchd 每 300s:Cursor 关着 + 补丁缺 ⇒ `--repair`。
+
+| 状态 | 期望 | 台架 |
+|---|---|---|
+| 冲掉 + 关着 | 补回来,日志「修好了」 | ㉒a |
+| 补丁齐全 | 一个字节不动、**不写日志** | ㉒b |
+| Cursor 开着 | 一个字节不动 | ㉒c |
+| 只有小代理在跑(Cursor 二进制 + `.js`) | **不算开着**,照常补(否则装了小代理的机器永不触发) | ㉒c 阳性对照 |
+| 新版锚点认不出 | 1 小时内不重试,日志说找管理员 | ㉒d |
+| 同事 UPGRADE 换了安装器 | **立刻**重试,不被旧防抖挡(键 = `ver@cksum(setup)`) | ㉒d2 |
+| `--revert` / `--uninstall` | 先摘自愈(否则 5 分钟后悄悄把补丁打回去) | ㉒e |
+
+🔴 **改 live bundle 之前必须当场 pgrep 证明 GUI 已退,不能信 `osascript … quit` 的返回码**:
+10-28 真机验收时 quit 返回成功、PID 还在,我紧接着换了 bundle ⇒ Cursor 开着时被改。
+立刻从备份还原(6 个逐字节对上)。规矩:改之前整份备份 + 记 sha;判退出用
+`pgrep -fl …/MacOS/Cursor | grep -v '\.js'` 为空,不用 quit 的返回值。
+
+🔴 **fixture:Cursor 二进制旁边必须有 `Contents/Info.plist`**,否则一启动就被系统 SIGKILL(rc=137)
+且**没有任何输出**。单变量:不链 0/5、链上 5/5。
+
 🔴 **NA 不是万能挡箭牌**:`OK>0` 这个条件是故意的 —— 四个目标全判「不适用」说明
 Cursor 换了结构或我们路径写错了,那是真问题,不许被 NA 吞掉。
 

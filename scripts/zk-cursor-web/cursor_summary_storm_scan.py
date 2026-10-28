@@ -66,6 +66,31 @@ q -t -A -F '|' -c "$SQLTEXT"
 """
 
 
+# 10-28:只看"压缩风暴"会漏掉真实风险面 —— 同事跑在**我们从没量过锚点**的小版本上时,
+# 补丁可能压根没打上,而他只要那天没怎么用 Cursor 就不会出现在风暴名单里。
+# 所以同时报一张版本覆盖表。量过的清单与 cursor_team_setup.js 的 VERIFIED_EXACT 同源:
+# 这里不复制一份常量,直接从那个文件读,免得两边漂。
+def verified_exact(repo_root):
+    import pathlib, re as _re
+    f = pathlib.Path(repo_root) / "scripts/zk-cursor-web/cursor_team_setup.js"
+    try:
+        s = f.read_text(encoding="utf8")
+        blk = s[s.index("const VERIFIED_EXACT"):s.index("const VERIFIED_VERSIONS")]
+        return set(_re.findall(r'"(\d+\.\d+\.\d+)"', blk))
+    except Exception:
+        return None          # 读不到就明说,不猜
+
+
+VER_SQL = """
+SET statement_timeout='200s';
+SELECT coalesce(substring(request_tags::text from 'Cursor/([0-9.]+)'),'(未知)') ver,
+       count(DISTINCT metadata->>'user_api_key_alias') people, count(*) reqs
+FROM "LiteLLM_SpendLogs"
+WHERE "startTime" > now() - interval '%d hours' AND request_tags::text LIKE '%%User-Agent: Cursor%%'
+GROUP BY 1 ORDER BY 2 DESC, 3 DESC;
+"""
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=int, default=24)
@@ -99,8 +124,21 @@ def main():
             "storm": summ >= MIN_SUMM and rate >= STORM_RATE and low >= MIN_SUMM,
         })
 
+    # 版本覆盖表(同一次 ssh 再跑一条,只读)
+    vr = subprocess.run(
+        ["ssh", "-o", "ConnectTimeout=20", "-o", "ClearAllForwardings=yes", a.host,
+         "SQLTEXT=" + json_quote(VER_SQL % a.hours) + " bash -s"],
+        input=REMOTE, capture_output=True, text=True, timeout=600)
+    vrows = []
+    for line in vr.stdout.splitlines():
+        p2 = line.split("|")
+        if len(p2) == 3 and p2[1].isdigit():
+            vrows.append((p2[0], int(p2[1]), int(p2[2])))
+
     if a.json:
-        print(json.dumps(rows, ensure_ascii=False, indent=1))
+        print(json.dumps({"storms": rows, "versions": [
+            {"cursor": v, "people": p3, "requests": r3} for v, p3, r3 in vrows]},
+            ensure_ascii=False, indent=1))
         return
 
     storms = [x for x in rows if x["storm"]]
@@ -112,8 +150,11 @@ def main():
               (x["alias"][:28], x["cursor"], x["main"], x["summaries"], x["per_100_main"],
                x["ctx_at_trigger_k_p50"], x["summary_minutes"], "   ← 疑似件C没生效" if x["storm"] else ""))
     print()
+    import os as _os
+    repo_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     if not storms:
         print("没有符合风暴形状的 key(发得勤 + 触发时上下文 <%dk 都要满足)。" % (LOW_CTX_TOKENS // 1000))
+        print_versions(vrows, a.hours, repo_root)
         return
     print("疑似件C(@cx-ctxwin:v3)没生效的 %d 个人:" % len(storms))
     for x in storms:
@@ -122,6 +163,27 @@ def main():
                  x["ctx_at_trigger_k_min"], x["summary_minutes"]))
     print("\n🔴 这只是名单,不是结论。让本人双击 DOCTOR,看 ctxwin(@cx-ctxwin:v3) 那四行:")
     print("   四行都 =3 ⇒ 件C 在,压缩是别的原因(回来重查);任一行 <3 ⇒ 双击 REPAIR 后复测。")
+    print_versions(vrows, a.hours, repo_root)
+
+
+def print_versions(rows, hours, repo_root):
+    """版本覆盖:谁跑在我们没量过锚点的小版本上(= 补丁可能压根没打上的风险面)。"""
+    ve = verified_exact(repo_root)
+    print("\n=== 版本覆盖(近 %dh,风险面不等于上面的风暴名单)===" % hours)
+    if ve is None:
+        print("  ⚠️ 读不到 cursor_team_setup.js 的 VERIFIED_EXACT ⇒ 这张表只报版本分布,不判量没量过")
+    print("  %-10s %6s %8s  %s" % ("Cursor", "人数", "请求数", "锚点"))
+    unmeasured_people = unmeasured_vers = 0
+    for ver, people, reqs in rows:
+        tag = "" if ve is None else ("量过" if ver in ve else "**没量过**")
+        if ve is not None and ver not in ve and ver != "(未知)":
+            unmeasured_people += people; unmeasured_vers += 1
+        print("  %-10s %6d %8d  %s" % (ver, people, reqs, tag))
+    if ve is not None and unmeasured_people:
+        print("\n  🔴 %d 人跑在 %d 个没量过锚点的小版本上 —— 他们的补丁是否打上**没有证据**。"
+              % (unmeasured_people, unmeasured_vers))
+        print("     官方只提供最新版下载(带版本号的 URL 是 404)⇒ 老小版本事后拿不到,")
+        print("     只能请本人双击一次 DOCTOR 把报告发来。")
 
 
 def json_quote(s):

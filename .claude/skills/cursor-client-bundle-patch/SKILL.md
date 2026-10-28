@@ -31,7 +31,7 @@ description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 
 | `cursor_ctx_param_gate.js` | `context` 档位参数门禁(⏸ 还没接进安装器/巡检) | — |
 | `cursor_queue_diag_patch.py` | 诊断用:把泵换成"每秒打 tick 日志"版,只观测不改行为 | `@cx-queue-diag:v3.2` |
 | `bundle_anchor_probe.js` | 只读数锚点命中(live Cursor 或**显式给 bundle 文件**,新版预检不用装) | — |
-| `bundle_patch_regress.sh` | **改 PATCHES 后的四腿离线回归台架**(见「新版本漂移修复流程」) | — |
+| `bundle_patch_regress.sh` | **改 PATCHES 后的离线回归台架(⑯ 腿)**(见「新版本漂移修复流程」) | — |
 | `retire_model_offline_cases.sh` | **改模型清单后的九腿/28 断言离线台架**(整表赋值逐字按序 + 选中位 re-point + 写库前快照 + `--uninstall` 还原 + `--upgrade` 不问 Key;带 `RETIRE_JS=` 阳性对照) | — |
 | `cursor_key_read.js` | **只读解开本机 BYOK Key**(默认掩码,`--reveal` 才明文);诊断用,**不进交付 zip** | — |
 | `cursor_keysan_offline_cases.js` | 台架第 ⑫ 腿:**Key 不可见字符**(真 `new Headers()` 对账 + 旧行为阳性对照,51 项);见「Key 里的不可见字符」 | — |
@@ -43,6 +43,37 @@ description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 
 `@cx-queue-pump:v4`(兜底泵)+ qserial / nosteer-mod / nopromote(排队纵深防御,`nopromote` 是 multi)+
 **`@cxteam-norelay`(2026-08-25 连发折叠+僵尸真根因修)**。
 2026-09-23 加到 **10 处**:`@cxteam-nocloud` / `@cxteam-nocloudset`(见下「会话被改道去 Cloud Agents」)。
+
+## 🔴 「同事说 Cursor 比 Claude 慢」怎么查(2026-10-28)
+
+先按**承载它的 kiro 槽**分组比,不按客户端整体比 —— 人和槽不是随机分布的。
+10-28 实测:同槽里 Cursor 与 Claude Code 一样快(85.100 槽两者首字 p50 都 9.2s),
+慢的是 STUDENT 槽 `sg-47.236.200.98`(首字 p50 121s)与排队中的 jp 槽,
+而那两个槽上的人恰好大多用 Cursor ⇒ 看着像「Cursor 慢」。工具:
+`.work/cursor-slow/slot_latency.sh`(198 上 `bash -s -- <小时>`)。
+已证伪:Cursor 线型 vs Claude 线型同速(300KB 上下文也一样)、zk-delta 小代理与直连同速
+(长回答不攒批)、Cursor 本地准备 p50 0.14s、hooks 均 <60ms。
+→ [[project_cursor_slow_is_kiro_slot_not_client_2026_10_28]]
+
+**客户端侧真找到的四件事(都已修,commit 805541e / 45fd8d9 / 2bc2131)**:
+
+| # | 病 | 判据 / 修法 |
+|---|---|---|
+| 1 | 件C/件D 锚点认不出只打一行 ⚠️ 就 return,**不进 MISSED** ⇒ 收尾仍「✅ 完成」exit 0 | 件C 没打上 = 每轮自动压缩对话(实测 4 人每百条主请求压 10~54 次、触发时上下文仅 8~30k、单发 43~98s),同事只觉得「慢」。改成进 MISSED:列红 + exit 5 + 红字写后果。台架 ⑭ |
+| 2 | `RES` 只按 `process.execPath` 推 ⇒ 直接 `node cursor_team_setup.js --doctor` 时指到 **node 自己**的目录,补丁全报「不存在」= 满屏假红 | 加 `appRootFallbacks()` 退回常规安装位置;`CURSOR_APP_ROOT` 仍最高优先。打包启动器(mac sh / win cmd)一直是对的,只坑在仓库里直跑的管理员。台架 ⑬ |
+| 3 | `EXEC` 被写进**三处长期留在机器上的东西**(小代理 launchd plist、「刷模型」skill、画图 skill),`launchCursor` 也从它推 .app ⇒ 普通 node 跑 `--apply` 会写死 `/opt/homebrew/Cellar/node/<版本>/bin/node`,homebrew 升级 node 后小代理起不来(而 BYOK 地址还指着 127.0.0.1:8788 = 彻底连不上)、两个 skill 失效、「刷模型」关了 Cursor 打不开,**全不报错** | 新增 `cursorBin()`:优先确实是 Cursor 的那个,否则从 RES 推安装位置,都不是才退回 execPath(不假装)。只读逻辑(`--check`、pgrep)不动。台架 ⑮ |
+| 4 | 「刷模型」跑的是 `~/.carher/cursor-setup/` 里的**副本**,只在再跑 INSTALL/UPGRADE 时更新 ⇒ 修好的东西对只点「刷模型」的人等于没发布,屏幕上无处可知 | DOCTOR 新增 2.5 节:打两份 sha + 日期,不一致就说「走的是旧逻辑,双击一次 UPGRADE」。台架 ⑯ |
+
+**扫谁在频繁自动压缩**:`python3 scripts/zk-cursor-web/cursor_summary_storm_scan.py [--hours N]`
+(只读 198 SpendLogs)。判据是**压缩率 + 触发时上下文**,不是版本号 —— 10-28 对照组:
+3.18.25 的 jialixiang 压缩率 1% 且都在 227k(正常),3.21.18 的 xueqingwen 49% 且在 10~34k(异常)。
+🔴 **它只给名单不下结论**:确认要本人双击 DOCTOR 看 `ctxwin(@cx-ctxwin:v3)` 四行是否都 =3。
+
+🔴 **⛔ 不许用 osascript 模拟键盘/点击做任何测量**。10-28 用它跑「真客户端 A/B」时
+Cursor 没拿到焦点,按键打进了用户另一个终端里正在跑的 CC 会话(bypass 模式),
+把他没写完的草稿提前发了出去。量客户端只用:读 `cursor.requestTraces.log`(span 名
+`agent.request` / `client.network_ttft` / `ComposerChatService.preNetwork`,
+见 `.work/cursor-slow/spans.py`)+ 直接发请求。
 
 ## 🔴 菜单按 Key 动态拉取,不再写死(2026-10-19 起)
 

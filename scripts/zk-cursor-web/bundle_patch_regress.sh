@@ -1,5 +1,5 @@
 #!/bin/sh
-# bundle_patch_regress.sh —— 改了 cursor_team_setup.{js,py} 之后的离线回归台架(①~⑪)。
+# bundle_patch_regress.sh —— 改了 cursor_team_setup.{js,py} 之后的离线回归台架(①~⑯)。
 # 全程只读 live Cursor(不用退出、不改任何东西),产物都在临时目录。
 #
 #   sh bundle_patch_regress.sh                      # 三腿(旧版零漂移 / js==py / 假 app 端到端)
@@ -24,6 +24,11 @@
 #   ⑨ 还原源逐路径解析(两代备份)+ 还原后复查残留 marker(exit 6)
 #   ⑩ 空串 Key 不算 Key:--uninstall 置空后再 --upgrade 必须说「还差一步」而不是「直接用」
 #   ⑪ 小代理装不上但**活着**时,BYOK 地址不许被降级成公网直连(死了才降)
+#   ⑫ Key 不可见字符 sanitize + 真 Headers 对账
+#   ⑬ 普通 node 跑 DOCTOR 不许假红(RES 退回安装位置)
+#   ⑭ 件C/件D **自己**的锚点漂了要列红 + exit 5(⑧ 量的是别人漂了它照打)
+#   ⑮ plist / skill / launchCursor 落盘的必须是 Cursor 二进制,不是 node
+#   ⑯ 「刷模型」副本比当前包旧要报出来
 #
 # 🔴 ⑧~⑪ 的**阳性对照一律在本腿里就地重实现旧行为**,不许写成 `git show HEAD:...` ——
 #    修好的版本一进 HEAD,那种对照就退化成"新 vs 新",永远绿,等于台架上少了一腿却没人知道。

@@ -63,6 +63,12 @@ description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 
 | 2 | `RES` 只按 `process.execPath` 推 ⇒ 直接 `node cursor_team_setup.js --doctor` 时指到 **node 自己**的目录,补丁全报「不存在」= 满屏假红 | 加 `appRootFallbacks()` 退回常规安装位置;`CURSOR_APP_ROOT` 仍最高优先。打包启动器(mac sh / win cmd)一直是对的,只坑在仓库里直跑的管理员。台架 ⑬ |
 | 3 | `EXEC` 被写进**三处长期留在机器上的东西**(小代理 launchd plist、「刷模型」skill、画图 skill),`launchCursor` 也从它推 .app ⇒ 普通 node 跑 `--apply` 会写死 `/opt/homebrew/Cellar/node/<版本>/bin/node`,homebrew 升级 node 后小代理起不来(而 BYOK 地址还指着 127.0.0.1:8788 = 彻底连不上)、两个 skill 失效、「刷模型」关了 Cursor 打不开,**全不报错** | 新增 `cursorBin()`:优先确实是 Cursor 的那个,否则从 RES 推安装位置,都不是才退回 execPath(不假装)。只读逻辑(`--check`、pgrep)不动。台架 ⑮ |
 | 4 | 「刷模型」跑的是 `~/.carher/cursor-setup/` 里的**副本**,只在再跑 INSTALL/UPGRADE 时更新 ⇒ 修好的东西对只点「刷模型」的人等于没发布,屏幕上无处可知 | DOCTOR 新增 2.5 节:打两份 sha + 日期,不一致就说「走的是旧逻辑,双击一次 UPGRADE」。台架 ⑯ |
+| 5 | **软版本闸按大版本判,证据是小版本** ⇒ 同事的 `3.24.18` / `3.27.22` 大版本对得上就**一声不吭**,而那几个小版本从没数过锚点(10-28 压缩风暴 4 人里就有 3.24.18;3.21.18 倒是 09-23 真数过) | 表改成 `VERIFIED_EXACT`(记真量过的小版本),大版本推导自它。小版本没量过 ⇒ 打一行 `ℹ️` 并指明「打完双击 DOCTOR 看 ctxwin 四行是否都 =3」。**只改说什么、不改做什么**(照样尝试,安全阀仍是锚点 exactly-1)。台架 ⑰ |
+
+🔴 **加新版本的规矩**:在 `VERIFIED_EXACT` 里加**量过的那个小版本号**,别加大版本。
+官方只提供最新版下载(`api2.cursor.sh/updates/api/download/{stable,latest}/...`,
+带版本号的 URL 是 404),所以**老小版本的包事后拿不到** —— 同事升到某个小版本时
+就得当场 `--fetch-latest` 量一次,过了就补进表里。
 
 **扫谁在频繁自动压缩**:`python3 scripts/zk-cursor-web/cursor_summary_storm_scan.py [--hours N]`
 (只读 198 SpendLogs)。判据是**压缩率 + 触发时上下文**,不是版本号 —— 10-28 对照组:

@@ -143,7 +143,22 @@ const APP_USER_KEY = "src.vs.platform.reactivestorage.browser.reactiveStorageSer
   ".persistentStorage.applicationUser";
 const BACKUP_ROOT = path.join(os.homedir(), ".cursor-team-setup-backup");
 
-const VERIFIED_VERSIONS = ["3.16", "3.17", "3.18", "3.19", "3.20", "3.21", "3.24", "3.27"];  // 锚点在这些大版本上数过命中(09-03: 3.16.x/3.17.19/3.18.25;09-10: 3.19.19;09-15: 3.20.17/3.20.21;09-22: 3.21.16;10-12: 3.24.12;10-26: 3.27.12)
+/* 🔴 2026-10-28:这张表原来只按**大版本**判(["3.16",…,"3.24","3.27"]),而证据是**小版本**
+   (10-12 只在 3.24.12 上数过)。后果:同事的 3.24.18 / 3.25.9 / 3.27.22 大版本对得上 ⇒
+   软闸**一声不吭**,而那几个小版本我们从没数过锚点。10-28 的「自动压缩风暴」4 个人里
+   就有 3.24.18。锚点真漂了有 planBundle 兜底(命中 !=1 就拒绝)、现在还会列红,
+   但屏幕上**事先**不该假装"这版验过"。
+   ⇒ 改成记真实量过的小版本;大版本对得上、小版本没量过 ⇒ 打一行提示并指向 DOCTOR。
+   (只改"说什么",不改"做什么":照样继续尝试,真正的安全阀仍是锚点 exactly-1。) */
+const VERIFIED_EXACT = [
+  "3.16.0", "3.17.19", "3.18.25",        // 09-03
+  "3.19.19",                              // 09-10
+  "3.20.17", "3.20.21",                   // 09-15
+  "3.21.16", "3.21.18",                   // 09-22 / 09-23(件C 四目标 4/4)
+  "3.24.12",                              // 10-12
+  "3.27.12", "3.27.14",                   // 10-26
+];
+const VERIFIED_VERSIONS = [...new Set(VERIFIED_EXACT.map((v) => v.split(".").slice(0, 2).join(".")))];
 /* 2026-09-22 加 "3.21" 的实测依据(不是"看起来应该行"):同事报 3.21.16/win32 弹未验告警,
    于是把 3.21.16 的真 bundle 拉下来数了命中 —— 下载 commit 8ae78e8ee1e63479c7e0504b664bc0a80c6800f
    的 darwin-arm64 dmg(win32 那份是 Inno 6.4 打的,本机 innoextract 1.9 解不开;同一 commit 的
@@ -3055,9 +3070,16 @@ async function main() {
 
   // #4 软版本闸:非 3.16.x 只告警不拒绝——真正的安全阀是 planBundle 里"锚点必须 exactly-1"。
   // 这样 Cursor 升级后 --repair 也能尝试;bundle 变到锚点认不出 → planBundle 自动拒绝(不会改坏)。
-  if (!VERIFIED_VERSIONS.some((v) => ver.startsWith(v + ".")) && !args.forceVersion) {
-    console.log("⚠️  本安装器在 Cursor %s 上验过,当前 %s 没验过。将继续尝试;若锚点认不出会自动拒绝(不会改坏),请把这段输出发给管理员。",
-      VERIFIED_VERSIONS.map((v) => v + ".x").join(" / "), ver);
+  if (!args.forceVersion && !VERIFIED_EXACT.includes(ver)) {
+    const majorOk = VERIFIED_VERSIONS.some((v) => ver.startsWith(v + "."));
+    if (!majorOk) {
+      console.log("⚠️  本安装器在 Cursor %s 上验过,当前 %s 这个大版本没验过。将继续尝试;若锚点认不出会自动拒绝(不会改坏),请把这段输出发给管理员。",
+        VERIFIED_VERSIONS.map((v) => v + ".x").join(" / "), ver);
+    } else {
+      // 大版本对得上但这个小版本没量过:别假装验过。打完建议他自查一次。
+      console.log("ℹ️  当前 Cursor %s 这个**小版本**没在台架上数过锚点(量过的:%s)。将继续尝试,打完请双击一次 DOCTOR,看 ctxwin 那四行是否都 =3;不是就把报告发给管理员。",
+        ver, VERIFIED_EXACT.join(" / "));
+    }
   }
   if (!process.env.CX_SKIP_RUNNING_CHECK && cursorRunning()) {
     console.log("!! Cursor 正在运行 —— 请先完全退出(mac ⌘Q / Windows 右键托盘图标退出)再跑。");

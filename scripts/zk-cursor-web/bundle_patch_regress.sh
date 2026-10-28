@@ -980,6 +980,42 @@ env HOME="$FH16" node "$JS" --doctor >"$D16C" 2>&1
 grep -q '没跑过带「刷模型」的安装器' "$D16C" && ok "⑯压根没有副本时说清了「刷模型不会生效」" \
   || bad "⑯没有副本时没说清(见 $D16C)"
 
+# ── 17) 小版本没量过不许假装验过(2026-10-28)──────────────────────────────────
+#    病:软闸原来只按**大版本**判 ⇒ 同事的 3.24.18 / 3.27.22 大版本对得上就**一声不吭**,
+#    而那几个小版本我们从没数过锚点(10-28 压缩风暴 4 人里就有 3.24.18)。
+#    阳性对照 = 就地重实现旧规则(按大版本 startsWith),它对 3.24.18 必须什么都不说。
+echo "--- 17) 小版本没量过要提示自查 ---"
+mkv17() { mkdir -p "$TMP/v17"; python3 -c "
+import json,sys,pathlib
+src=pathlib.Path('$LIVE_RES/package.json')
+d=json.loads(src.read_text()) if src.exists() else {'name':'cursor'}
+d['version']=sys.argv[1]
+pathlib.Path('$TMP/v17/package.json').write_text(json.dumps(d))" "$1"; }
+g17() { mkv17 "$1"; env CURSOR_APP_ROOT="$TMP/v17" CX_SKIP_RUNNING_CHECK=1 node "$JS" 2>&1 | sed -n '1,3p'; }
+# 阳性对照:旧规则对 3.24.18 静默
+OLDQ=$(node -e '
+const V=["3.16","3.17","3.18","3.19","3.20","3.21","3.24","3.27"];
+console.log(V.some(v=>"3.24.18".startsWith(v+"."))?"silent":"warn");')
+[ "$OLDQ" = silent ] && ok "⑰阳性对照成立:旧规则(按大版本)对 3.24.18 一声不吭" \
+  || bad "⑰阳性对照不成立(旧规则居然会报)⇒ 这腿没判别力"
+OUT17=$(g17 3.24.18)
+printf '%s' "$OUT17" | grep -q '这个\*\*小版本\*\*没在台架上数过锚点' \
+  && ok "⑰3.24.18(大版本对得上、小版本没量过)⇒ 提示自查 DOCTOR" \
+  || { bad "⑰3.24.18 没给提示:"; printf '%s\n' "$OUT17" | sed -n 2p; }
+printf '%s' "$OUT17" | grep -q 'ctxwin 那四行' && ok "⑰提示里写明看哪一项(ctxwin 四行 =3)" \
+  || bad "⑰提示没说看哪里,等于让人干瞪眼"
+# 阴性对照一:量过的小版本必须什么都不说
+OUT17B=$(g17 3.24.12)
+printf '%s' "$OUT17B" | grep -qE 'ℹ️|⚠️' \
+  && bad "⑰阴性对照红了:3.24.12 量过却还在提示(尺子恒红)" \
+  || ok "⑰阴性对照:量过的 3.24.12 一声不吭"
+# 阴性对照二:大版本都没验过的仍走原来那条告警
+OUT17C=$(g17 3.25.9)
+printf '%s' "$OUT17C" | grep -q '这个大版本没验过' \
+  && ok "⑰3.25.9(大版本没验过)仍走原来的告警,没被新分支吞掉" \
+  || bad "⑰3.25.9 的大版本告警丢了"
+rm -rf "$TMP/v17"
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

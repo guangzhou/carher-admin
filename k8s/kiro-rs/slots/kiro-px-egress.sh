@@ -6,6 +6,8 @@
 # re-pinning one never restarts another. The node is whatever 198:~/mihomo-harness/acct2 pins that port to
 # (single node ⇒ fixed IP). Proxy password per port in ~/kiro-px-egress/<n>/pw (0600), node credentials only
 # in the Secret — nothing secret goes to git. Slot in Admin: http://kiro-px-<n>.kiro-rs.svc:7890, user kiro.
+# Slot name = <country code>-<exit IP> (kr-/ph-/sg-/de-…), set by kiro-px-verify.sh from ipinfo through the proxy.
+# 🔴 Renaming a slot later clears its user bindings (bindings are keyed by slot name) ⇒ get the name right first time.
 set -euo pipefail
 PORT=$1 IP=$2
 N=${PORT: -1}

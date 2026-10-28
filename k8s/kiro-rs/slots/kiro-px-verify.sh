@@ -21,20 +21,21 @@ EOF
 $K wait --for=condition=Ready pod/px-egress-probe --timeout=120s >/dev/null
 trap '$K delete pod px-egress-probe --wait=false >/dev/null 2>&1' EXIT
 for spec in "$@"; do
-  IFS=: read -r PORT IP W <<<"$spec"; N=${PORT: -1}; NAME=kiro-px-$N; SLOT=px-$IP
+  IFS=: read -r PORT IP W <<<"$spec"; N=${PORT: -1}; NAME=kiro-px-$N; SLOT=
   PW=$(cat ~/kiro-px-egress/$N/pw)
   R=$($K exec -i px-egress-probe -- env PW="$PW" HOST="$NAME" WANT="$IP" python3 - <<'EOF'
 import os, urllib.request, json, time
 h, pw, want = os.environ["HOST"], os.environ["PW"], os.environ["WANT"]
 def get(url, proxy):
     o = urllib.request.build_opener(urllib.request.ProxyHandler({"https": proxy})); t = time.time()
-    try: r = o.open(url, timeout=20); return r.status, r.read()[:200].decode(), round(time.time() - t, 2)
+    try: r = o.open(url, timeout=20); return r.status, r.read()[:2000].decode(), round(time.time() - t, 2)
     except urllib.error.HTTPError as e: return e.code, "", round(time.time() - t, 2)
     except Exception as e: return "ERR", str(e)[:80], round(time.time() - t, 2)
 good = f"http://kiro:{pw}@{h}:7890"
 ips = []
 for _ in range(3):
     s, b, t = get("https://ipinfo.io/ip", good); ips.append(b.strip())
+cc = (json.loads(get("https://ipinfo.io/json", good)[1] or "{}").get("country") or "??").lower()
 q = get("https://q.us-east-1.amazonaws.com/", good)
 a = get("https://prod.us-east-1.auth.desktop.kiro.dev/", good)
 n = get("https://q.us-east-1.amazonaws.com/", f"http://{h}:7890")
@@ -42,10 +43,13 @@ bad = []
 if any(i != want for i in ips): bad.append(f"exit ip {ips} != {want}")
 if q[0] != 404 or a[0] != 404: bad.append(f"kiro {q[0]}/{a[0]}")
 if "407" not in str(n[1]): bad.append(f"no-pw not rejected: {n[:2]}")
-print(("STOP " + "; ".join(bad)) if bad else f"OK ip={want} kiro={q[2]}s/{a[2]}s no-pw=407")
+print(("STOP " + "; ".join(bad)) if bad else f"OK ip={want} kiro={q[2]}s/{a[2]}s no-pw=407 cc={cc}")
 EOF
 )
+  # slot name = <country code>-<exit IP>, same as jp-/sg-/us-/uk- slots; country measured through the proxy itself
+  CC=${R##* cc=}; SLOT=$CC-$IP
   echo "$SLOT probe: $R"; case "$R" in OK*) ;; *) exit 1;; esac
+  [ ${#CC} = 2 ] || { echo "$IP STOP: no country code from ipinfo ($CC)"; exit 1; }
   curl -s -m 10 -H "x-api-key: $AK" $B/slots/config > /tmp/px-cur.json
   cp /tmp/px-cur.json ~/kiro-px-egress/slots-config-before-$SLOT-$(date +%Y%m%dT%H%M%S).json
   PW="$PW" SLOT="$SLOT" URL="http://$NAME.kiro-rs.svc:7890" W="$W" python3 - <<'EOF' > /tmp/px-new.json

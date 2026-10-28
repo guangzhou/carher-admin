@@ -28,6 +28,9 @@ description: 给同事的「Cursor · Codex · Claude Code 一键配置」单页
 - Codex Windows 只有微软商店:`msstore_msix_urls.py 9PLM9XGG6VKS` 走微软 displaycatalog + FE3 拿官方 msix 直链。
   坑:第三方 rg-adguard 有 Cloudflare 人机验证;FE3 证书是 Windows 私有根(只对该主机跳过校验);
   一个更新回主包 + 1MB BlockMap cab 两条地址,必须按 FileDigest 取主包;文件名是随机 GUID,按大小对上架构。
+- Codex 有两个版本号:Windows 跟商店(`versions.json` 的 `codex`,目录 `codex/<ver>/`),mac/Linux 是官方原地覆盖的固定名、
+  比商店更新勤(10-28 商店 26.1023.6123 / mac 26.1023.51421),版本读 `codex-app-prod/appcast.xml` 第一条
+  `shortVersionString` ⇒ `codex-mac`,目录 `codex/mac-<ver>/`。判「镜像是不是最新」两个都要对官方比,只看商店会漏 mac/Linux。
 - 校验:字节数对官方 Content-Length / 微软目录;msix 另比 SHA1;全过才切软链。下载回本机 `spctl -a -t open --context context:primary-signature` 应为 Notarized Developer ID。
 - `build_html.py` 门禁:App 链接回到官方直链(downloads.cursor.com / persistent.oaistatic.com / get.microsoft.com)即红;镜像链接逐个 HEAD 须 200 且 >10MB(离线构建设 `CX_SKIP_MIRROR_HEAD=1`)。
 - Codex 飞书文档原有 8-31 的 dmg/msix 附件已删(`apply.py` 的 RETIRED 集合)。

@@ -118,16 +118,27 @@ sync_codex() {
   # mac:固定 URL 会被官方原地覆盖 ⇒ 每次比 Content-Length + Last-Modified,变了就进新目录名
   local lm; lm="$(curl -fsSI -m 60 -A "$UA" "$mac" | awk -F': ' 'tolower($1)=="last-modified"{print $2}' | tr -d '\r')"
   echo "    Codex.dmg Last-Modified: $lm"
-  fetch "$mac" "$D/Codex-mac.dmg" "$(remote_len "$mac")"
   # Linux:官方 deb/rpm 是固定 latest 名(developers.openai.com/codex/linux/linux-app),同样按 Content-Length 校验
   local L=https://persistent.oaistatic.com/codex-app-prod/linux
-  for pair in "deb/latest/chatgpt_amd64.deb:Codex-linux-amd64.deb" "deb/latest/chatgpt_arm64.deb:Codex-linux-arm64.deb" \
+  # 10-28:mac/Linux 包是官方原地覆盖的固定名,版本比微软商店更新得勤(10-28 商店 26.1023.6123,mac 已到 26.1023.51421)。
+  #   原来整个目录按商店版本号命名 ⇒ mac/Linux 换了新包却写进同名老目录,看不出版本、也会把同一目录里的旧文件覆盖。
+  #   ⇒ mac/Linux 另放 codex/mac-<appcast 版本>/,稳定名软链各指各的;版本号从官方 appcast 读。
+  local mver; mver="$(curl -fsS -m 30 -A "$UA" https://persistent.oaistatic.com/codex-app-prod/appcast.xml \
+    | grep -o '<sparkle:shortVersionString>[^<]*' | head -n 1 | sed 's/.*>//')"
+  [ -n "$mver" ] || { echo "✗ 读不到 Codex mac 版本号(appcast)" >&2; return 1; }
+  local DM="$ROOT/codex/mac-$mver"; mkdir -p "$DM"
+  local src out
+  for pair in "../Codex.dmg:Codex-mac.dmg" "deb/latest/chatgpt_amd64.deb:Codex-linux-amd64.deb" "deb/latest/chatgpt_arm64.deb:Codex-linux-arm64.deb" \
               "rpm/latest/chatgpt.x86_64.rpm:Codex-linux-x86_64.rpm" "rpm/latest/chatgpt.aarch64.rpm:Codex-linux-aarch64.rpm"; do
-    fetch "$L/${pair%%:*}" "$D/${pair##*:}" "$(remote_len "$L/${pair%%:*}")"
+    src="$L/${pair%%:*}"; out="${pair##*:}"; want="$(remote_len "$src")"
+    # 旧版脚本已下到商店版本目录、且大小与官方一致 ⇒ 挪过来,不重下
+    if [ ! -s "$DM/$out" ] && [ -s "$D/$out" ] && [ "$(size_of "$D/$out")" = "$want" ]; then mv -f "$D/$out" "$DM/$out"; fi
+    fetch "$src" "$DM/$out" "$want"
   done
-  ( cd "$ROOT" && for f in Codex-mac.dmg Codex-windows-x64.msix Codex-windows-arm64.msix \
-      Codex-linux-amd64.deb Codex-linux-arm64.deb Codex-linux-x86_64.rpm Codex-linux-aarch64.rpm; do ln -sfn "codex/$ver/$f" "$f"; done )
-  set_version codex "$ver"; echo "✔ Codex 稳定链接 → $ver"
+  ( cd "$ROOT" && for f in Codex-windows-x64.msix Codex-windows-arm64.msix; do ln -sfn "codex/$ver/$f" "$f"; done
+    for f in Codex-mac.dmg Codex-linux-amd64.deb Codex-linux-arm64.deb Codex-linux-x86_64.rpm Codex-linux-aarch64.rpm; do ln -sfn "codex/mac-$mver/$f" "$f"; done )
+  set_version codex "$ver"; set_version codex-mac "$mver"
+  echo "✔ Codex 稳定链接 → Windows $ver · Mac/Linux $mver"
 }
 
 sync_claude_linux() {

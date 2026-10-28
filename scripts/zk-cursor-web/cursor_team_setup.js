@@ -1546,7 +1546,13 @@ function cursorRunning() {
     if (t.status !== 0 || !t.stdout) return false;
     return t.stdout.split(/\r?\n/).some((line) => { const m = line.match(/^"Cursor\.exe","(\d+)"/i); return m && Number(m[1]) !== process.pid; });
   }
-  const pat = process.platform === "darwin" ? "Cursor.app/Contents/MacOS/Cursor" : path.join(path.dirname(EXEC), "cursor");
+  /* 🔴 10-28:给了 CURSOR_APP_ROOT(副本测试)时只认**那个副本**的二进制。原来固定按
+     "Cursor.app/Contents/MacOS/Cursor" 子串找,于是对副本做自愈测试时会量到本机开着的
+     那个 Cursor ⇒ 永远判「开着」⇒ 测试恒红;反过来,真机上也可能被别处的 Cursor 干扰。
+     默认(没给)行为不变。 */
+  const pat = process.env.CURSOR_APP_ROOT && process.platform === "darwin"
+    ? path.join(path.resolve(process.env.CURSOR_APP_ROOT, "..", ".."), "MacOS", "Cursor")
+    : process.platform === "darwin" ? "Cursor.app/Contents/MacOS/Cursor" : path.join(path.dirname(EXEC), "cursor");
   const r = spawnSync("pgrep", ["-fl", pat], { encoding: "utf8" });
   if (r.status !== 0 || !r.stdout) return false;
   return r.stdout.split(/\r?\n/).filter(Boolean).some((line) => {
@@ -1560,7 +1566,9 @@ function cursorRunning() {
 /* 10-27:pgrep -f 按整行匹配 ⇒ 一个 `zsh -c "…/Cursor.app/Contents/MacOS/Cursor …"` 的 shell 也被当成 Cursor GUI,
    刷模型 worker 等它「退出」等了 53 秒(实测)。⇒ 只认**可执行文件本身**是 Cursor 的进程(命令行以它开头)。 */
 function isCursorExe(cmd) {
-  const exe = process.platform === "darwin" ? "/Contents/MacOS/Cursor" : path.join(path.dirname(EXEC), "cursor");
+  const exe = process.env.CURSOR_APP_ROOT && process.platform === "darwin"
+    ? path.join(path.resolve(process.env.CURSOR_APP_ROOT, "..", ".."), "MacOS", "Cursor")
+    : process.platform === "darwin" ? "/Contents/MacOS/Cursor" : path.join(path.dirname(EXEC), "cursor");
   const first = String(cmd).trim();
   return first.startsWith(exe) || new RegExp("^\\S*" + exe.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&") + "(\\s|$)").test(first);
 }
@@ -3056,6 +3064,7 @@ async function main() {
     // 先给他一屏 dry-run 再要他找终端敲 --apply。
     upgrade: has("--upgrade"),
     apply: has("--apply") || has("--upgrade"), revert: has("--revert"), repair: has("--repair"),
+    selfheal: has("--selfheal"),
     uninstall: has("--uninstall"),
     forceVersion: has("--force-version"), pinUpdate: !has("--allow-update"),
     // @cx-chain:v3 链式增量:默认**关**(服务端那半已下线)。不给这个开关时,
@@ -3112,7 +3121,8 @@ async function main() {
 
   if (!fs.existsSync(RES)) { console.log("!! 找不到 Cursor 资源目录:", RES); process.exit(1); }
   const ver = cursorVersion();
-  console.log("Cursor version:", ver, "| platform:", process.platform, "| runtime:", process.version);
+  // --selfheal 每 5 分钟被拉一次,绝大多数时候什么都不做 ⇒ 别每次都打一行版本横幅
+  if (!args.selfheal) console.log("Cursor version:", ver, "| platform:", process.platform, "| runtime:", process.version);
 
   if (args.revert) return revert();
   // --uninstall 也吃 Cursor 运行检查(下面那段)和 dry-run 默认:不带 --apply 只预览。
@@ -3126,6 +3136,7 @@ async function main() {
   }
 
   if (args.refreshModels) return refreshModels(args);
+  if (args.selfheal) return selfhealOnce(args);
 
   // #4 软版本闸:非 3.16.x 只告警不拒绝——真正的安全阀是 planBundle 里"锚点必须 exactly-1"。
   // 这样 Cursor 升级后 --repair 也能尝试;bundle 变到锚点认不出 → planBundle 自动拒绝(不会改坏)。
@@ -3556,7 +3567,8 @@ const SELFHEAL_LABEL = "com.carher.cursor-selfheal";
 const SELFHEAL_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", SELFHEAL_LABEL + ".plist");
 function installSelfheal(dry) {
   console.log("--- 7.6) 补丁自愈(Cursor 自动升级冲掉补丁后,关着时自动补回)---");
-  if (process.platform !== "darwin") { console.log("   跳过(只在 macOS 实测过;别的系统先靠「刷模型」里的提醒)"); return; }
+  if (process.platform === "win32") return installSelfhealWin(dry);
+  if (process.platform !== "darwin") { console.log("   跳过(Linux 没实测过;先靠「刷模型」里的提醒)"); return; }
   const src = path.join(__dirname, "cursor_selfheal.sh");
   if (!fs.existsSync(src)) { console.log("   跳过(包里没有 cursor_selfheal.sh)"); return; }
   const dir = path.join(CARHER_DIR, "cursor-setup");
@@ -3587,10 +3599,43 @@ function installSelfheal(dry) {
   } catch (e) { console.log("   ⚠️  装自愈出错(不影响其余): " + ((e && e.message) || e)); }
 }
 
+/* Windows 版自愈(2026-10-28):判定已全在 JS 的 --selfheal 里,计划任务只需每 5 分钟调它。
+   🔴 **没在 Windows 真机上跑过**。按本仓规矩,不写一个没验证过的系统服务假装支持 ⇒
+   默认**不装**,必须显式 `--selfheal-win` 才装,且屏幕上明说没实测。
+   (10-28 实测有 7 个 Cursor 同事在 Windows 上 —— 他们暂时只有「刷模型」里那条提醒。)
+   能在 mac 上验的部分都验了:命令行拼得对不对、schtasks 参数、卸载能不能删干净(台架 ㉓)。 */
+const SELFHEAL_TASK = "CarherCursorSelfheal";
+function selfhealWinCmd() {
+  const self = path.join(CARHER_DIR, "cursor-setup", "cursor_team_setup.js");
+  // schtasks /TR 只收一条命令行;用 cmd /c 设环境变量再调 Cursor.exe(与「刷模型」skill 同一写法。
+  // 🔴 那条也**没有** Windows 真机证据 —— 同形只是为了两处一起改,不是「已验证」)
+  return 'cmd /c "set ELECTRON_RUN_AS_NODE=1&& "' + cursorBin() + '" "' + self + '" --selfheal"';
+}
+function installSelfhealWin(dry) {
+  if (!process.argv.includes("--selfheal-win")) {
+    console.log("   跳过(Windows 版没在真机上验过,默认不装;要试就加 --selfheal-win。没装也有「刷模型」里的提醒)");
+    return;
+  }
+  const args = ["/Create", "/F", "/SC", "MINUTE", "/MO", "5", "/TN", SELFHEAL_TASK, "/TR", selfhealWinCmd()];
+  if (dry) { console.log("   [dry-run] schtasks %s", args.join(" ")); return; }
+  const r = spawnSync("schtasks", args, { encoding: "utf8" });
+  if (r.status === 0) console.log("   ⚠️  已装(**未在 Windows 真机验证**):每 5 分钟看一眼,Cursor 关着且补丁缺了才补。日志 %s",
+    path.join(CARHER_DIR, "cursor-selfheal.log"));
+  else console.log("   ⚠️  schtasks 失败:%s(其余不受影响)", ((r.stderr || r.stdout || "").trim()));
+}
+function removeSelfhealWin(dry) {
+  if (dry) { console.log("   [dry-run] 会删计划任务 %s", SELFHEAL_TASK); return; }
+  const q = spawnSync("schtasks", ["/Query", "/TN", SELFHEAL_TASK], { encoding: "utf8" });
+  if (q.status !== 0) return;          // 没装过
+  spawnSync("schtasks", ["/Delete", "/F", "/TN", SELFHEAL_TASK], { encoding: "utf8" });
+  console.log("   ✅ 已删补丁自愈计划任务(不然它会在你关着 Cursor 时把补丁重新打回去)");
+}
+
 /* 🔴 --revert / --uninstall 都是「我要回原版 Cursor」。自愈如果还留着,5 分钟后就会
    把补丁**重新打回去**,而且是在用户关着 Cursor 时悄悄做 —— 等于无视他的选择。
    这是整个自愈功能里最危险的失效形状,所以两条退路都必须先摘掉它。 */
 function removeSelfheal(dry) {
+  if (process.platform === "win32") return removeSelfhealWin(dry);
   if (process.platform !== "darwin") return;
   const dst = path.join(CARHER_DIR, "cursor-setup", "cursor_selfheal.sh");
   if (!fs.existsSync(SELFHEAL_PLIST) && !fs.existsSync(dst)) return;
@@ -3599,6 +3644,54 @@ function removeSelfheal(dry) {
   try { fs.rmSync(SELFHEAL_PLIST, { force: true }); } catch (e) {}
   try { fs.rmSync(dst, { force: true }); } catch (e) {}
   console.log("   ✅ 已摘掉补丁自愈(不然它会在你关着 Cursor 时把补丁重新打回去)");
+}
+
+/* ── --selfheal:一次「看一眼、缺了就补」(2026-10-28)────────────────────────
+   由 macOS launchd / Windows 计划任务定时调用。**判定全在 JS 里**,两个平台共用一份:
+   原来 mac 那版写在 cursor_selfheal.sh 里,判「Cursor 开着没有」是照着 cursorRunning()
+   手抄了一份 shell —— 两份迟早漂。现在 .sh 只剩"找到 Cursor 二进制再调我"这一层。
+   安全:① cursorRunning() 为真 ⇒ 直接走人(它已经排除了小代理/安装器自身/zsh -c);
+         ② 后面复用 --repair 原样那条路径,它自己还有一道 exit 2 的闸。
+   防抖键 = Cursor 版本 @ 安装器自身指纹:换了新安装器(管理员出了新锚点)立刻重试。 */
+const SELFHEAL_LOG = process.platform === "darwin"
+  ? path.join(os.homedir(), "Library", "Logs", "carher-cursor-selfheal.log")
+  : path.join(CARHER_DIR, "cursor-selfheal.log");
+const SELFHEAL_STAMP = path.join(CARHER_DIR, "cursor-selfheal.last");
+function shlog(msg) {
+  try {
+    fs.mkdirSync(path.dirname(SELFHEAL_LOG), { recursive: true });
+    const ts = new Date(Date.now() - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 19).replace("T", " ");
+    fs.appendFileSync(SELFHEAL_LOG, ts + " " + msg + "\n");
+  } catch (e) { /* 日志写不了也不能影响别的 */ }
+}
+async function selfhealOnce(args) {
+  if (!process.env.CX_SKIP_RUNNING_CHECK && cursorRunning()) return;     // ① 开着 ⇒ 走人,不写日志
+  const h = patchHealth();
+  if (h.ok) return;                                                       // 绝大多数时候:什么都不做
+  const ver = cursorVersion();
+  const who = require("crypto").createHash("sha256").update(fs.readFileSync(__filename)).digest("hex").slice(0, 12);
+  const key = ver + "@" + who;
+  try {
+    const [lk, lts, lrc] = fs.readFileSync(SELFHEAL_STAMP, "utf8").trim().split(/\s+/);
+    if (lk === key && lrc !== "0" && Date.now() / 1000 - Number(lts) < 3600) return;   // 防抖
+  } catch (e) { /* 没有记录 = 第一次 */ }
+  shlog("检测到补丁缺失(Cursor " + ver + ",多半是自动升级冲掉的):" + h.lines.join(";") + " ⇒ Cursor 已关闭,自动修复");
+  // 复用 --repair 原样那条路径(子进程跑,拿退出码;它自己还会再判一次 Cursor 在不在)
+  const r = spawnSync(EXEC, [__filename, "--repair"], {
+    encoding: "utf8", env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, timeout: 10 * 60 * 1000,
+  });
+  const rc = r.status === null ? 124 : r.status;
+  try { fs.mkdirSync(CARHER_DIR, { recursive: true }); fs.writeFileSync(SELFHEAL_STAMP, key + " " + Math.floor(Date.now() / 1000) + " " + rc + "\n"); } catch (e) {}
+  const out = (r.stdout || "") + (r.stderr || "");
+  if (rc === 0) shlog("✅ 修好了。下次打开 Cursor 就不会每条消息都压缩。");
+  else if (rc === 2) shlog("Cursor 在修的那一刻被打开了 ⇒ repair 拒绝动手(正常,下一轮再试)");
+  else if (rc === 5) {
+    shlog("⚠️ 部分修好:有文件的锚点认不出(Cursor " + ver + " 太新)。需要管理员出新锚点。");
+    for (const l of out.split("\n").filter((x) => /❌|·|件C|锚点/.test(x)).slice(0, 6)) shlog("   " + l.trim());
+  } else {
+    shlog("⚠️ 修复失败 rc=" + rc + ",一小时后再试");
+    for (const l of out.trim().split("\n").slice(-4)) shlog("   " + l.trim());
+  }
 }
 
 /* ── 压缩现场探针(2026-10-28)────────────────────────────────────────────────

@@ -1333,6 +1333,38 @@ PY22
   fi
 fi
 
+# ── 23) Windows 版自愈:能在 mac 上验的部分(2026-10-28)───────────────────────
+#    **没有 Windows 真机**。按规矩默认不装、要显式 --selfheal-win;这腿只验能离线验的:
+#    ① 命令行引号配平、路径没有双反斜杠 ② 和「刷模型」skill 同一写法
+#       (🔴 别写成「那条在 Windows 上跑通过」—— 查过,**没有任何证据**它在同事 Windows 上跑过;
+#        SpendLogs 看不到 skill 执行,记忆里也没有。同形只保证两处一起改,不保证能用)
+#    ③ 默认不装(没给开关就跳过并明说)④ 卸载路径会删计划任务。
+#    🔴 这四条全绿 ≠ Windows 上能用。屏幕上已明说「未在 Windows 真机验证」。
+echo "--- 23) Windows 版自愈(离线可验部分)---"
+W23=$(node -e '
+const fs=require("fs"),path=require("path");
+const src=fs.readFileSync(process.argv[1],"utf8");
+const a=src.indexOf("const SELFHEAL_TASK"), b=src.indexOf("function installSelfhealWin");
+const D=String.raw`C:\Users\u\.carher`, B=()=>String.raw`C:\Users\u\AppData\Local\Programs\cursor\Cursor.exe`;
+console.log(new Function("path","CARHER_DIR","cursorBin", src.slice(a,b)+"; return selfhealWinCmd();")(path.win32,D,B));' "$JS" 2>&1)
+NQ=$(printf '%s' "$W23" | tr -cd '"' | wc -c | tr -d ' ')
+[ $((NQ % 2)) = 0 ] && [ "$NQ" -gt 0 ] && ok "㉓命令行双引号配平($NQ 个)" || bad "㉓引号不配平:$W23"
+printf '%s' "$W23" | grep -q '\\\\' && bad "㉓路径里出现双反斜杠:$W23" || ok "㉓路径没有双反斜杠"
+printf '%s' "$W23" | grep -q -- '--selfheal"$' && ok "㉓调的是 --selfheal(判定在 JS 里,mac/Windows 共用一份)" || bad "㉓没调 --selfheal:$W23"
+# ② 和刷模型 skill 同一写法
+grep -q "cmd /c \"set ELECTRON_RUN_AS_NODE=1&& \"' + CB + '\" \"' + self + '\" --refresh-models\"" "$JS" \
+  && ok "㉓与「刷模型」skill 同一种 cmd /c 写法(两处同形,改一处会提醒改另一处)" || bad "㉓写法和刷模型那条不一致"
+# ③ 默认不装
+grep -q 'process.argv.includes("--selfheal-win")' "$JS" && ok "㉓默认不装,要显式 --selfheal-win" || bad "㉓Windows 版默认就装了(没真机验过)"
+grep -q '未在 Windows 真机验证' "$JS" && ok "㉓装上时屏幕明说未在真机验证" || bad "㉓没说清没验过"
+# ④ 卸载会删
+sed -n '/^function removeSelfheal(dry)/,/^}/p' "$JS" | grep -q 'removeSelfhealWin' \
+  && ok "㉓--revert/--uninstall 在 Windows 上也会删计划任务" || bad "㉓Windows 卸载不删计划任务 ⇒ 会把补丁悄悄打回去"
+# 判定只有一份:shell 包装里不许再出现「判 Cursor 开没开」「数 marker」的逻辑
+grep -qE 'pgrep|cx-ctxwin|cxteam-byokforce' "$HERE/cursor_selfheal.sh" \
+  && bad "㉓cursor_selfheal.sh 里又出现了判定逻辑(pgrep/marker)⇒ 与 JS 两份会漂" \
+  || ok "㉓shell 包装只剩「找二进制再调 JS」,判定只有 JS 一份"
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

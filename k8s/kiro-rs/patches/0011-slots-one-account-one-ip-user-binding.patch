@@ -5176,7 +5176,7 @@
              }
  
              // 失败响应：读取 body 用于日志/错误信息
-@@ -539,6 +682,353 @@
+@@ -539,6 +682,357 @@
          }))
      }
  
@@ -5214,6 +5214,10 @@
 +                }
 +                Err(e) => return Err(e),
 +            };
++            // 之后所有「记到某个槽」的统计都按槽名现查下标（等待期间可能增删槽，见 slot_index_of）
++            let slot_name = permit.slot_name().to_string();
++            let tm = self.token_manager.clone();
++            let cur_slot = move || tm.slot_index_of(&slot_name);
 +            let config = self.token_manager.config();
 +            let machine_id = machine_id::generate_from_credentials(&ctx.credentials, config);
 +            let endpoint = self.endpoint_for(&ctx.credentials)?;
@@ -5257,7 +5261,7 @@
 +                // 槽位模式所有模型都看一眼首个有内容的事件：有内容立刻放行（流式不缓冲），空回复才处理
 +                let response = match peek_for_content(response).await {
 +                    Peeked::Ready(r) => {
-+                        self.token_manager.slot_record_latency(slot, sent_at.elapsed().as_millis() as u64);
++                        if let Some(i) = cur_slot() { self.token_manager.slot_record_latency(i, sent_at.elapsed().as_millis() as u64); }
 +                        let model = Self::extract_model_from_request(request_body).unwrap_or_default();
 +                        let metered = meter_response_for(r, self.token_manager.clone(), ctx.id, model, user_guard.take());
 +                        return Ok(hold_permit(metered, permit));
@@ -5268,29 +5272,29 @@
 +                let who = caller();
 +                let model = Self::extract_model_from_request(request_body).unwrap_or_default();
 +                let note = |returned: bool, reason: &str| {
-+                    self.token_manager.record_empty_event(slot, ctx.id, &who.key_alias, &who.key_hash, &model, returned, reason);
++                    if let Some(i) = cur_slot() { self.token_manager.record_empty_event(i, ctx.id, &who.key_alias, &who.key_hash, &model, returned, reason); }
 +                };
 +                if !(is_opus && self.token_manager.config().slot_restricted_probe) {
-+                    self.token_manager.slot_report_empty(slot, true);
++                    if let Some(i) = cur_slot() { self.token_manager.slot_report_empty(i, true); }
 +                    note(true, "not_probed");
 +                    tracing::warn!("槽位 {} 号 #{} 空回复（非 opus / 未开探测），原样返回 key={}", slot, ctx.id, who.key_alias);
 +                    return Ok(response);
 +                }
 +                let restricted = self.probe_restricted(&ctx, &machine_id, request_body).await;
 +                if !restricted || swaps >= SLOT_MAX_SWAPS {
-+                    self.token_manager.slot_report_empty(slot, true);
++                    if let Some(i) = cur_slot() { self.token_manager.slot_report_empty(i, true); }
 +                    note(true, if restricted { "probe_restricted_no_swap_left" } else { "probe_not_restricted" });
 +                    tracing::warn!("槽位 {} 号 #{} 空回复，探测 restricted={}，原样返回 key={}", slot, ctx.id, restricted, who.key_alias);
 +                    return Ok(response);
 +                }
 +                swaps += 1;
 +                if self.token_manager.slot_retire_account(ctx.id, "restricted").is_none() {
-+                    self.token_manager.slot_report_empty(slot, true);
++                    if let Some(i) = cur_slot() { self.token_manager.slot_report_empty(i, true); }
 +                    note(true, "probe_restricted_no_spare");
 +                    tracing::error!("槽位 {} 号 #{} 被限制，冷备已无可用号 key={}", slot, ctx.id, who.key_alias);
 +                    return Ok(response);
 +                }
-+                self.token_manager.slot_report_empty(slot, false);
++                if let Some(i) = cur_slot() { self.token_manager.slot_report_empty(i, false); }
 +                note(false, "probe_restricted_swapped");
 +                continue;
 +            }
@@ -5314,7 +5318,7 @@
 +            }
 +            if status.as_u16() == 429 {
 +                let ra = Self::retry_after(&body);
-+                self.token_manager.slot_report_429(slot, tries_429 == 0, ra);
++                if let Some(i) = cur_slot() { self.token_manager.slot_report_429(i, tries_429 == 0, ra); }
 +                tries_429 += 1;
 +                last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
 +                sleep(Self::slot_backoff(tries_429, ra)).await;
@@ -5530,7 +5534,7 @@
      /// 从请求体中提取模型信息
      ///
      /// 尝试解析 JSON 请求体，提取 conversationState.currentMessage.userInputMessage.modelId
-@@ -564,5 +1054,474 @@
+@@ -564,5 +1058,474 @@
          let jitter_max = (backoff / 4).max(1);
          let jitter = fastrand::u64(0..=jitter_max);
          Duration::from_millis(backoff.saturating_add(jitter))
@@ -6067,7 +6071,7 @@
 +}
 --- a/src/kiro/slots.rs
 +++ b/src/kiro/slots.rs
-@@ -0,0 +1,1708 @@
+@@ -0,0 +1,1732 @@
 +//! 槽位模式：固定 N 个槽位，每槽 = 1 个号 + 1 个固定出口。
 +//!
 +//! - 用户（LiteLLM key hash）第一次来分到「没封口、在途最少」的槽，之后一直固定；绑定落盘。
@@ -6475,7 +6479,9 @@
 +        states
 +            .iter()
 +            .filter(|s| s.account_id.is_some())
-+            .filter(|s| level >= 2 || s.accept_new)
++            // 专属槽（填了 VIP 名单）不分普通新人，哪怕「接新人」开着（10-28 review #5：
++            // 只填名单不关开关时普通人会被分进来，且重新分配不碰专属槽 ⇒ 卡死在里面）
++            .filter(|s| level >= 2 || (s.accept_new && s.vip.is_empty()))
 +            .filter(|s| level >= 1 || !closed.get(s.index).copied().unwrap_or(false))
 +            .min_by_key(|s| {
 +                (
@@ -6833,6 +6839,8 @@
 +        if let Some(i) = bound {
 +            return Some((i, false));
 +        }
++        // 走到这里 = 新人，或原来绑的槽没了 / 没号：重新挑。原来的「手动固定」也随之作废（固定的是一个已经不存在的选择）
++        self.file.pinned.remove(user);
 +        let usage = self.usage_sums(now);
 +        let users = self.user_counts();
 +        let weights = self.weights();
@@ -7327,6 +7335,26 @@
 +        assert!((0..50).all(|k| rt.pick_ephemeral(&format!("s{}", k)) == Some(2)));
 +    }
 +
++    /// 10-28 review #5：只填了专属名单、「接新人」仍开着 ⇒ 普通新人也不进
++    #[test]
++    fn vip_slot_with_accept_new_still_excludes_normal_users() {
++        let mut rt = rt3();
++        rt.states[1].vip = vec!["vip-".into()];
++        assert!(rt.states[1].accept_new);
++        let now = Instant::now();
++        for k in 0..9 {
++            assert_ne!(rt.slot_for_user_as(&format!("u:n{}", k), "cursor-x", 1.5, now).unwrap().0, 1, "普通人不进专属槽");
++        }
++        assert_eq!(rt.slot_for_user_as("u:v", "vip-a", 1.5, now).unwrap().0, 1);
++        // review #8：固定在一个已经没号的槽 ⇒ 重新挑并清掉固定
++        rt.file.bindings.insert("u:p".into(), "c".into());
++        rt.file.pinned.insert("u:p".into());
++        rt.states[2].account_id = None;
++        let got = rt.slot_for_user_as("u:p", "cursor-y", 1.5, now).unwrap().0;
++        assert_ne!(got, 2);
++        assert!(!rt.file.pinned.contains("u:p"), "被迫换槽后固定作废");
++    }
++
 +    #[test]
 +    fn vip_slot_routes_by_alias_prefix() {
 +        let mut rt = rt3();
@@ -7795,7 +7823,7 @@
  }
  
  /// 统计数据持久化条目
-@@ -535,6 +538,41 @@
+@@ -535,6 +538,43 @@
      stats_dirty: AtomicBool,
      /// window 模式参数（运行时可改，Admin 页面设置）
      window_settings: Mutex<WindowSettings>,
@@ -7821,6 +7849,8 @@
 +    release_lease: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 +    /// 本实例已接管状态目录（待命期为 false）
 +    took_over: AtomicBool,
++    /// 启动时是否「先待命、拿到租约再接管」（KIRO_DEFER_TAKEOVER=1，main 在最早期设）。构造时读一次
++    defer_takeover: AtomicBool,
 +    /// 已交出状态目录（无缝换版：收到 SIGTERM ⇒ 立刻交接，之后只把在途请求跑完）。
 +    /// 置位后本进程**不再**写任何状态文件、不再刷新 token——新进程已经接管，
 +    /// 两边同时写会互相覆盖，social 号刷新更会把对方手上的凭据作废。
@@ -7837,7 +7867,7 @@
  }
  
  /// window 模式参数
-@@ -661,6 +699,102 @@
+@@ -661,6 +701,109 @@
      pub token: String,
  }
  
@@ -7881,6 +7911,13 @@
 +    /// 拿名额时槽上的号（换号后旧名额不扣新号的在途）
 +    account_id: Option<u64>,
 +    done: bool,
++}
++
++impl SlotPermit {
++    /// 拿名额时的槽名（下标会因运行中增删槽而变，名字不变）
++    pub fn slot_name(&self) -> &str {
++        &self.slot_name
++    }
 +}
 +
 +impl Drop for SlotPermit {
@@ -7940,7 +7977,7 @@
  impl MultiTokenManager {
      /// 创建多凭据 Token 管理器
      ///
-@@ -769,6 +903,24 @@
+@@ -769,6 +912,24 @@
                  cooldown_secs: config.window_cooldown_secs.clamp(1, 3600),
              }
          };
@@ -7965,7 +8002,7 @@
          let manager = Self {
              config,
              proxy,
-@@ -781,6 +933,23 @@
+@@ -781,6 +942,24 @@
              last_stats_save_at: Mutex::new(None),
              stats_dirty: AtomicBool::new(false),
              window_settings: Mutex::new(window_settings),
@@ -7980,6 +8017,7 @@
 +            empty_events: Mutex::new(Default::default()),
 +            release_lease: Mutex::new(None),
 +            took_over: AtomicBool::new(false),
++            defer_takeover: AtomicBool::new(std::env::var("KIRO_DEFER_TAKEOVER").as_deref() == Ok("1")),
 +            handed_off: AtomicBool::new(false),
 +            pool_balance: Mutex::new(Default::default()),
 +            last_runway_alert: Mutex::new(None),
@@ -7989,7 +8027,7 @@
          };
  
          // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
-@@ -794,6 +963,17 @@
+@@ -794,6 +973,17 @@
  
          // 加载持久化的统计数据（success_count, last_used_at）
          manager.load_stats();
@@ -7999,7 +8037,7 @@
 +        // 用环境变量而不是构造参数：构造点有 30 多处（含大量单测），加参数会把它们全改一遍。
 +        // ⚠️ 单测不要去动这个变量（进程级，会污染并发跑的其它测试）——交接路径由
 +        //    lease / ready 两个模块的单测 + 隔离环境的真实滚动更新验证。
-+        if std::env::var("KIRO_DEFER_TAKEOVER").as_deref() != Ok("1") {
++        if !manager.defer_takeover.load(Ordering::SeqCst) {
 +            manager.init_slots();
 +        }
 +        manager.load_pool_balance_history();
@@ -8007,7 +8045,7 @@
  
          Ok(manager)
      }
-@@ -825,6 +1005,8 @@
+@@ -825,6 +1015,8 @@
          model: Option<&str>,
          session_key: Option<&str>,
      ) -> Option<(u64, KiroCredentials)> {
@@ -8016,7 +8054,7 @@
          let entries = self.entries.lock();
  
          // 检查是否是 opus 模型
-@@ -832,11 +1014,12 @@
+@@ -832,11 +1024,12 @@
              .map(|m| m.to_lowercase().contains("opus"))
              .unwrap_or(false);
  
@@ -8030,7 +8068,7 @@
                      return false;
                  }
                  // 如果是 opus 模型，需要检查订阅等级
-@@ -852,7 +1035,8 @@
+@@ -852,7 +1045,8 @@
          }
  
          let mode = self.load_balancing_mode.lock().clone();
@@ -8040,7 +8078,7 @@
  
          match mode {
              "window" => {
-@@ -915,7 +1099,7 @@
+@@ -915,7 +1109,7 @@
                  // window 与 balanced 一样每次重选（窗口内按在途数挑），不粘 current_id
                  let is_balanced = matches!(
                      self.load_balancing_mode.lock().as_str(),
@@ -8049,7 +8087,7 @@
                  );
  
                  // balanced 模式：每次请求都重新均衡选择，不固定 current_id
-@@ -923,11 +1107,12 @@
+@@ -923,11 +1117,12 @@
                  let current_hit = if is_balanced {
                      None
                  } else {
@@ -8063,31 +8101,31 @@
                          .map(|e| (e.id, e.credentials.clone()))
                  };
  
-@@ -1049,7 +1234,10 @@
+@@ -1049,7 +1244,10 @@
          }
  
          // 第一次检查（无锁）：快速判断是否需要刷新
 -        let needs_refresh = is_token_expired(credentials) || is_token_expiring_soon(credentials);
 +        // 🔴 已交接（无缝换版收尾期）：绝不刷新。social 号刷新会轮转 refreshToken，
 +        // 把新进程手上那份作废 ⇒ 整个号当场失效。宁可这一发请求因 token 过期失败。
-+        let needs_refresh = !self.is_handed_off()
++        let needs_refresh = self.may_write()
 +            && (is_token_expired(credentials) || is_token_expiring_soon(credentials));
  
          let creds = if needs_refresh {
              // 获取刷新锁，确保同一时间只有一个刷新操作
-@@ -1130,6 +1318,11 @@
+@@ -1130,6 +1328,11 @@
      fn persist_credentials(&self) -> anyhow::Result<bool> {
          use anyhow::Context;
  
 +        // 已交接：新进程在管这个目录，这里再写会覆盖它的数据
-+        if self.is_handed_off() {
++        if self.is_handed_off() || self.standby() {
 +            return Ok(false);
 +        }
 +
          // 仅多凭据格式才回写
          if !self.is_multiple_format {
              return Ok(false);
-@@ -1140,6 +1333,8 @@
+@@ -1140,6 +1343,8 @@
              None => return Ok(false),
          };
  
@@ -8096,7 +8134,7 @@
          // 收集所有凭据
          let credentials: Vec<KiroCredentials> = {
              let entries = self.entries.lock();
-@@ -1158,12 +1353,13 @@
+@@ -1158,12 +1363,13 @@
          // 序列化为 pretty JSON
          let json = serde_json::to_string_pretty(&credentials).context("序列化凭据失败")?;
  
@@ -8114,17 +8152,17 @@
          }
  
          tracing::debug!("已回写凭据到文件: {:?}", path);
-@@ -1216,6 +1412,9 @@
+@@ -1216,6 +1422,9 @@
  
      /// 将当前统计数据持久化到磁盘
      fn save_stats(&self) {
-+        if self.is_handed_off() {
++        if !self.may_write() {
 +            return;
 +        }
          let path = match self.stats_path() {
              Some(p) => p,
              None => return,
-@@ -1291,9 +1490,1177 @@
+@@ -1291,9 +1500,1209 @@
          self.save_stats_debounced();
      }
  
@@ -8292,8 +8330,8 @@
 +    /// Admin：改灰度名单，立即生效并写回 config.json
 +    pub fn set_slot_gray(&self, list: Vec<String>) -> anyhow::Result<()> {
 +        // 已交接：配置写入交给新进程（这里再写会覆盖它）
-+        if self.is_handed_off() {
-+            return Ok(());
++        if !self.may_write() {
++            anyhow::bail!("本实例正在交接，请稍后重试");
 +        }
 +        use anyhow::Context;
 +        let list: Vec<String> = list.into_iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
@@ -8316,6 +8354,10 @@
 +    /// 按名字对齐：没变的槽号和绑定都不动；改了出口的槽，号的代理同步改。
 +    pub fn set_slot_configs(&self, cfgs: Vec<crate::model::config::SlotConfig>) -> anyhow::Result<()> {
 +        use anyhow::Context;
++        // 已交接 / 待命：这里写了 config.json 但在岗实例内存不知道，管理员却看到「成功」（10-28 review #6）
++        if !self.may_write() {
++            anyhow::bail!("本实例正在交接，请稍后重试");
++        }
 +        let mut seen = std::collections::HashSet::new();
 +        for c in &cfgs {
 +            if c.name.trim().is_empty() {
@@ -8394,7 +8436,7 @@
 +
 +    fn persist_slots(&self) {
 +        // 已交接：不再写状态文件（新进程已接管）
-+        if self.is_handed_off() {
++        if !self.may_write() {
 +            return;
 +        }
 +        let Some(path) = self.slots_path() else { return };
@@ -8419,6 +8461,13 @@
 +
 +    /// 槽 i 换一个从没上过槽的号；返回新号 id。reason 写进旧号退役原因
 +    fn fill_slot(&self, i: usize, reason: &str) -> Option<u64> {
++        self.fill_slot_expect(i, reason, None)
++    }
++
++    /// expect = Some(旧号)：只有槽上**此刻**还是这个号才换（10-28 review：同一号 8 个请求同时撞 402，
++    /// 第二个请求进来时槽上已是新号 B，旧代码会把 B 也当「用尽」退役掉 ⇒ 好号被永久拉黑）。
++    /// 槽上已经不是它 ⇒ 不动，返回槽上现在的号（调用方直接重发即可）。
++    fn fill_slot_expect(&self, i: usize, reason: &str, expect: Option<u64>) -> Option<u64> {
 +        let candidates: Vec<(u64, u32, bool, bool)> = self
 +            .entries
 +            .lock()
@@ -8428,6 +8477,15 @@
 +        let start = self.slot_limits.lock().start;
 +        let live_ids: Vec<u64> = candidates.iter().map(|c| c.0).collect();
 +        let mut rt = self.slots.lock();
++        // 运行中增删槽后下标可能已越界（review #3/#4）：不 panic，什么也不做
++        if i >= rt.states.len() {
++            return None;
++        }
++        if let Some(old) = expect {
++            if rt.states[i].account_id != Some(old) {
++                return rt.states[i].account_id;
++            }
++        }
 +        // 槽上挂着的号已被删除：先清掉引用（不记退役，它不是被限/用尽）
 +        if rt.states[i].account_id.is_some_and(|id| !live_ids.contains(&id)) {
 +            rt.states[i].account_id = None;
@@ -8493,7 +8551,7 @@
 +        }
 +        // 槽上的号已不可用（被手动禁用 / 连续失败 / 刷新失效等）⇒ 就地补号，不让这个槽一直报错
 +        tracing::warn!("槽位 {} 的号 #{} 已不可用，就地补号", slot, id);
-+        let new_id = self.fill_slot(slot, "dead")?;
++        let new_id = self.fill_slot_expect(slot, "dead", Some(id))?;
 +        let _ = self.persist_credentials();
 +        self.persist_slots();
 +        let entries = self.entries.lock();
@@ -8581,6 +8639,12 @@
 +            }
 +        }
 +        self.slot_notify.notify_waiters();
++    }
++
++    /// 按槽名取**此刻**的下标（10-28 review #3：provider 拿到下标后要经过排队 / 上游等待，
++    /// 期间管理员删了中间某个槽，后面的下标会整体前移，按旧下标报 429 会压错别的槽的上限）。槽没了返回 None。
++    pub fn slot_index_of(&self, name: &str) -> Option<usize> {
++        self.slots.lock().states.iter().position(|s| s.name == name)
 +    }
 +
 +    /// 槽位撞 429：AIMD 下降并计数；first = 该请求第一次发出
@@ -8687,7 +8751,7 @@
 +
 +    /// 周期调用（每 30s）：AIMD 上调。已交接时跳过（新进程在管）
 +    pub fn slot_tick(&self) {
-+        if self.is_handed_off() {
++        if !self.may_write() {
 +            return;
 +        }
 +        let p = *self.slot_limits.lock();
@@ -8733,7 +8797,7 @@
 +            }
 +            rt.record_issue(slot, crate::kiro::slots::Issue::Restricted, chrono::Utc::now().timestamp());
 +        }
-+        let new_id = self.fill_slot(slot, reason);
++        let new_id = self.fill_slot_expect(slot, reason, Some(account_id));
 +        if let Err(e) = self.persist_credentials() {
 +            tracing::warn!("退役号 #{} 后回写凭据失败: {}", account_id, e);
 +        }
@@ -8779,9 +8843,14 @@
 +        self.slots.lock().record_latency(slot, ms, Instant::now());
 +    }
 +
++    /// 能不能写状态目录 / 刷 token：已交接的不行，还没接管的待命实例也不行（10-28 review #2）
++    fn may_write(&self) -> bool {
++        !self.is_handed_off() && !self.standby()
++    }
++
 +    /// 待命实例（还没接管）：内存里的槽位表是空的，绝不能写盘 / 改绑定
 +    fn standby(&self) -> bool {
-+        std::env::var("KIRO_DEFER_TAKEOVER").as_deref() == Ok("1") && !self.holds_takeover()
++        self.defer_takeover.load(Ordering::SeqCst) && !self.holds_takeover()
 +    }
 +
 +    /// 定时（30s）：用户显示信息有变就落一次盘
@@ -9009,8 +9078,9 @@
 +    /// 轮询号池（启用的号）余额，记一笔总剩余。跳过禁用号；单号失败沿用上次值
 +    pub async fn poll_pool_balance(&self) {
 +        // 只在槽位模式查（其它模式不给上游加额外的额度查询流量）
-+        // 已交接：后台任务停掉，避免和新进程重复查、重复写
-+        if !self.is_slots_mode() || self.is_handed_off() {
++        // 已交接 / 还没接管（待命）：都不查——查额度会顺手刷 token 并回写凭据文件（10-28 review #2）：
++        // 待命实例手里是开机时的旧凭据，social 号刷新会把在岗实例的 refreshToken 作废。
++        if !self.is_slots_mode() || self.is_handed_off() || self.standby() {
 +            return;
 +        }
 +        let ids: Vec<u64> = self.entries.lock().iter().filter(|e| !e.disabled).map(|e| e.id).collect();
@@ -9134,7 +9204,7 @@
 +
 +    /// 周期落盘（有变化才写）
 +    pub fn save_account_usage(&self) {
-+        if self.is_handed_off() {
++        if self.is_handed_off() || self.standby() {
 +            return;
 +        }
 +        if !self.account_usage_dirty.swap(false, Ordering::Relaxed) {
@@ -9240,8 +9310,8 @@
 +    /// Admin：改在途上限参数，立即生效并写回 config.json
 +    pub fn set_slot_limits(&self, p: crate::kiro::slots::LimitParams) -> anyhow::Result<()> {
 +        // 已交接：配置写入交给新进程（这里再写会覆盖它）
-+        if self.is_handed_off() {
-+            return Ok(());
++        if !self.may_write() {
++            anyhow::bail!("本实例正在交接，请稍后重试");
 +        }
 +        use anyhow::Context;
 +        p.validate()?;
@@ -9303,7 +9373,7 @@
      }
  
      /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
-@@ -1640,6 +3007,7 @@
+@@ -1640,6 +3049,7 @@
                          DisabledReason::QuotaExceeded => "QuotaExceeded",
                          DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                          DisabledReason::InvalidConfig => "InvalidConfig",
@@ -9311,7 +9381,7 @@
                      }.to_string()),
                      endpoint: e.credentials.endpoint.clone(),
                      subscription_title: e.credentials.subscription_title.clone(),
-@@ -1671,6 +3039,12 @@
+@@ -1671,6 +3081,12 @@
          }
          // 持久化更改
          self.persist_credentials()?;
@@ -9324,7 +9394,7 @@
          Ok(())
      }
  
-@@ -1736,9 +3110,9 @@
+@@ -1736,9 +3152,9 @@
                  .clone()
                  .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
          } else {
@@ -9332,12 +9402,12 @@
 -            let needs_refresh =
 -                is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
 +            // 检查是否需要刷新 token（已交接时不刷，理由同 acquire_context）
-+            let needs_refresh = !self.is_handed_off()
++            let needs_refresh = self.may_write()
 +                && (is_token_expired(&credentials) || is_token_expiring_soon(&credentials));
  
              if needs_refresh {
                  let _guard = self.refresh_lock.lock().await;
-@@ -1955,6 +3329,9 @@
+@@ -1955,6 +3371,9 @@
          self.persist_credentials()?;
  
          tracing::info!("成功添加凭据 #{}", new_id);
@@ -9347,7 +9417,7 @@
          Ok(new_id)
      }
  
-@@ -2020,6 +3397,27 @@
+@@ -2020,6 +3439,27 @@
          // 立即回写统计数据，清除已删除凭据的残留条目
          self.save_stats();
  
@@ -9375,39 +9445,53 @@
          tracing::info!("已删除凭据 #{}", id);
          Ok(())
      }
-@@ -2029,6 +3427,11 @@
+@@ -2029,6 +3469,11 @@
      /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
      /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
      pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
 +        // 已交接（无缝换版收尾期）：不刷新。social 号刷新会轮转 refreshToken，
 +        // 把新进程手上那份作废。这一发请求宁可失败（客户端会重试，落到新进程）。
-+        if self.is_handed_off() {
++        if !self.may_write() {
 +            anyhow::bail!("实例正在交接，不刷新 token（请重试）");
 +        }
          let credentials = {
              let entries = self.entries.lock();
              entries
-@@ -2101,6 +3504,10 @@
+@@ -2076,6 +3521,9 @@
+ 
+     /// 设置 window 模式参数（Admin API）：校验 → 写回 config.json → 生效。写盘失败则不生效。
+     pub fn set_window_settings(&self, ws: WindowSettings) -> anyhow::Result<()> {
++        if !self.may_write() {
++            anyhow::bail!("本实例正在交接，请稍后重试");
++        }
+         use anyhow::Context;
+         ws.validate()?;
+         if let Some(path) = self.config.config_path() {
+@@ -2101,6 +3549,10 @@
      }
  
      fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
-+        // 已交接：配置写入交给新进程（这里再写会覆盖它）
-+        if self.is_handed_off() {
++        // 已交接 / 待命：配置写入交给在岗进程（这里再写会覆盖它）
++        if !self.may_write() {
 +            return Ok(());
 +        }
          use anyhow::Context;
  
          let config_path = match self.config.config_path() {
-@@ -2124,7 +3531,7 @@
+@@ -2123,8 +3575,11 @@
+ 
      /// 设置负载均衡模式（Admin API）
      pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
++        if !self.may_write() {
++            anyhow::bail!("本实例正在交接，请稍后重试");
++        }
          // 验证模式值
 -        if mode != "priority" && mode != "balanced" && mode != "window" {
 +        if mode != "priority" && mode != "balanced" && mode != "window" && mode != "slots" {
              anyhow::bail!("无效的负载均衡模式: {}", mode);
          }
  
-@@ -2140,9 +3547,35 @@
+@@ -2140,9 +3595,35 @@
              return Err(err);
          }
  
@@ -9443,7 +9527,7 @@
  }
  
  impl Drop for MultiTokenManager {
-@@ -2150,6 +3583,7 @@
+@@ -2150,6 +3631,7 @@
          if self.stats_dirty.load(Ordering::Relaxed) {
              self.save_stats();
          }
@@ -9451,7 +9535,7 @@
      }
  }
  
-@@ -2325,7 +3759,567 @@
+@@ -2325,7 +3807,606 @@
          assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");
      }
  
@@ -9718,6 +9802,45 @@
 +        let old = m.slots_snapshot()[0].account_id.unwrap();
 +        assert!(m.slot_retire_account(old, "quota").is_some());
 +        assert!(m.slot_retire_account(old, "quota").is_some(), "同号第二个请求：已换好号 ⇒ Some，重发即可");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    /// 10-28 review #1：同一号的两个请求「都已判到在槽上」后才进入换号（真实并发的交错形态）。
++    /// 旧代码第二个会把刚换上的好号 B 也记成用尽退役。
++    #[test]
++    fn test_interleaved_retire_does_not_retire_fresh_account() {
++        let (m, dir) = slot_mgr(1, 4);
++        let a = m.slots_snapshot()[0].account_id.unwrap();
++        // 第一个请求完成换号 A→B
++        let b = m.fill_slot_expect(0, "quota", Some(a)).unwrap();
++        assert_ne!(a, b);
++        // 第二个请求（它看到的还是 A）晚到：不许把 B 换掉、更不许把 B 记退役
++        let got = m.fill_slot_expect(0, "quota", Some(a));
++        assert_eq!(got, Some(b), "槽上已不是 A ⇒ 不动，返回 B 让调用方重发");
++        assert_eq!(m.slots_snapshot()[0].account_id, Some(b));
++        assert!(!m.slots.lock().file.retired.contains_key(&b), "好号 B 没被误退役");
++        // 越界下标不 panic（运行中删槽后的旧下标）
++        assert_eq!(m.fill_slot_expect(9, "quota", None), None);
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    /// 10-28 review #2：待命实例（KIRO_DEFER_TAKEOVER=1 且未接管）不许写凭据 / 槽位 / 统计，也不许改配置
++    #[test]
++    fn test_standby_never_writes() {
++        let (m, dir) = slot_mgr(1, 2);
++        // 模拟待命：构造时没设 env，这里直接打开字段（不改进程 env，免得污染并行跑的别的测试）
++        m.took_over.store(false, Ordering::SeqCst);
++        m.defer_takeover.store(true, Ordering::SeqCst);
++        let p = dir.join("kiro_slots.json");
++        let before = std::fs::metadata(&p).map(|x| x.modified().ok()).ok().flatten();
++        std::thread::sleep(StdDuration::from_millis(20));
++        m.persist_slots();
++        let after = std::fs::metadata(&p).map(|x| x.modified().ok()).ok().flatten();
++        let cfg_err = m.set_slot_configs(m.get_slot_configs()).is_err();
++        let creds_wrote = m.persist_credentials().unwrap_or(true);
++        assert_eq!(before, after, "待命不写 kiro_slots.json");
++        assert!(cfg_err, "待命改槽位配置要报错，不是静默成功");
++        assert!(!creds_wrote, "待命不回写凭据");
 +        std::fs::remove_dir_all(dir).ok();
 +    }
 +
@@ -10019,7 +10142,7 @@
      fn test_window_settings_validate_and_persist() {
          let config_path = std::env::temp_dir().join(format!("kiro-window-{}.json", uuid::Uuid::new_v4()));
          std::fs::write(&config_path, r#"{"loadBalancingMode":"window"}"#).unwrap();
-@@ -2441,6 +4435,65 @@
+@@ -2441,6 +4522,65 @@
          credentials.refresh_token = Some("a".repeat(150));
          let result = validate_refresh_token(&credentials);
          assert!(result.is_ok());
@@ -10166,7 +10289,7 @@
              let admin_app = admin::create_admin_router(admin_state);
  
              // 创建 Admin UI 路由
-@@ -215,5 +249,163 @@
+@@ -215,5 +249,165 @@
      }
  
      let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
@@ -10254,6 +10377,9 @@
 +            }
 +            // 真正接管：先重读盘上状态（旧进程交接前最后写的那次发生在本进程启动之后），
 +            // 再对齐槽位，最后开闸放流量。
++            // 先标「已接管」再对齐：init_slots 里的补号 / 回写凭据 / 写绑定都要能落盘
++            // （待命实例一律不许写，10-28 review #2 把这条闸门扩到了所有写盘路径）
++            tm.mark_took_over();
 +            tm.reload_state_from_disk();
 +            tm.init_slots();
 +            // 注入「释放租约」回调：preStop 调 /api/admin/handoff 时会交接并释放，
@@ -10266,7 +10392,6 @@
 +                    }
 +                }));
 +            }
-+            tm.mark_took_over();
 +            ready_open.open();
 +            tracing::info!("已接管，/readyz 返回 200");
 +        });

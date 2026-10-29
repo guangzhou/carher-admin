@@ -157,6 +157,7 @@ const VERIFIED_EXACT = [
   "3.21.16", "3.21.18",                   // 09-22 / 09-23(件C 四目标 4/4)
   "3.24.12",                              // 10-12
   "3.27.12", "3.27.14",                   // 10-26
+  "3.27.22",                              // 10-29 lupeng1 实报后量:workbench 16 锚点 ×2 全过、件C 4/4、件D 2/2;--upgrade/--repair/自愈都在副本上打全
   "3.28.5",                               // 10-28 全量量过:workbench 16 锚点 ×2 份全 exactly-1、件D 2/2、件C 3 个该打的全过 + 1 个不适用(agent-host 那份上游挪走了)
 ];
 const VERIFIED_VERSIONS = [...new Set(VERIFIED_EXACT.map((v) => v.split(".").slice(0, 2).join(".")))];
@@ -2958,7 +2959,16 @@ async function doDoctor() {
       if (last.length) { P("  最近: "); for (const l of last) P("    " + l); }
       if (ls.length && /⚠️|失败/.test(ls[ls.length - 1]))
         P("    🔴 上次自动修复没成功 —— 多半是 Cursor 升到了我们还没适配的版本。把这份报告发给管理员。");
-    } else P("  最近: 还没触发过(补丁一直在,好消息)");
+    } else {
+      /* 🔴 10-29 lupeng1 实报:「还没触发过(补丁一直在,好消息)」印在**补丁全 0** 的那一节正下方。
+         没日志 ≠ 补丁在:自愈只在 Cursor **关着**时动手,一直开着就一直不触发、也不写日志。
+         所以这里必须拿真实补丁状态对一遍,不许从「没日志」推出「好消息」。 */
+      const hh = patchHealth();
+      if (hh.ok) P("  最近: 还没触发过(补丁都在,不需要它)");
+      else P("  最近: 还没触发过 —— 🔴 但补丁**现在就缺**(" + hh.lines.join(";") + ")。"
+        + "\n    自愈只在 Cursor **完全退出**后才动手(开着改文件会坏)。你一直开着 Cursor,它就一直等。"
+        + "\n    处置:⌘Q 完全退出 Cursor,5 分钟内会自动补好;不想等就双击 REPAIR。");
+    }
   } catch (e) { P("  量不到(" + ((e && e.message) || e) + ")"); }
 
   P("\n--- 2.6) 压缩现场记录(preCompact 探针)---");
@@ -3044,6 +3054,21 @@ async function doDoctor() {
         P("  " + name + " = " + (g ? JSON.stringify(g.value) : "(未下发)") + "  [djb2=" + k + "]");
       }
       if (!hit) P("  ⚠️ 三个都查不到 ⇒ 要么哈希算法换了,要么这几个 gate 都没下发。别只凭这一格下结论。");
+      /* 🔴 10-29 lupeng1:这一节只打 gate 值、不和第 1) 节连起来,读报告的人看不出要命的组合:
+         `agent_host_local_loop = true` + 件D(noloop)没摘 ⇒ 每一轮都被路由到 Cursor 自家后端,
+         而 Cursor 源码写明 local loop **不支持 BYOK**("Turns with custom model credentials
+         (BYOK/private models) are not supported on the local loop")⇒ 报错或打到没权限的地方。
+         这比「慢」更硬,必须当场点名。 */
+      const ll = gates[djb2("agent_host_local_loop")];
+      let nlOk = true;
+      for (const tt of NOLOOP_TARGETS) {
+        const pp = path.join(RES, tt.rel);
+        if (fs.existsSync(pp) && !fs.readFileSync(pp, "utf8").includes(NOLOOP_MARKER)) nlOk = false;
+      }
+      if (ll && ll.value === true && !nlOk)
+        P("  🔴 要命的组合:服务端给你开了 agent_host_local_loop,而件D(关本地循环)没打上 ⇒"
+          + "\n     **每条消息都被送到 Cursor 自家后端**,那条路 Cursor 自己写明不支持自带 key ⇒ 报错 / 没反应 / 很慢。"
+          + "\n     处置:⌘Q 完全退出 Cursor → 双击 REPAIR → 重开。");
     }
   } catch (e) { P("  !! 读 feature gate 失败:", e && e.message || e); }
 
@@ -3477,7 +3502,12 @@ async function refreshModels(args) {
     if (!h.ok) {
       console.log("");
       console.log("⚠️  顺手查到:" + h.lines.join(";"));
-      console.log("    多半是 Cursor 自动升级把补丁冲掉了。处理:完全退出 Cursor,双击 REPAIR,再打开。");
+      // 10-29 lupeng1:自愈装上了却一直不触发 —— 它只在 Cursor **完全退出**后动手,
+      //   他整天开着就一直等。这一行要让人知道「关掉 Cursor」本身就是修法,不只有 REPAIR。
+      const shOn = process.platform === "darwin" && fs.existsSync(path.join(os.homedir(), "Library", "LaunchAgents", "com.carher.cursor-selfheal.plist"));
+      console.log(shOn
+        ? "    多半是 Cursor 自动升级把补丁冲掉了。处理:⌘Q 完全退出 Cursor,5 分钟内会自动补好(或者直接双击 REPAIR),再打开。"
+        : "    多半是 Cursor 自动升级把补丁冲掉了。处理:完全退出 Cursor,双击 REPAIR,再打开。");
     }
     if (!add.length && !del.length) { console.log("菜单已经是最新的,不用改。"); if (!h.ok) console.log("(菜单不用改,但上面那条要处理)"); return; }
   }

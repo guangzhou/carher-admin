@@ -1365,6 +1365,39 @@ grep -qE 'pgrep|cx-ctxwin|cxteam-byokforce' "$HERE/cursor_selfheal.sh" \
   && bad "㉓cursor_selfheal.sh 里又出现了判定逻辑(pgrep/marker)⇒ 与 JS 两份会漂" \
   || ok "㉓shell 包装只剩「找二进制再调 JS」,判定只有 JS 一份"
 
+# ── 24) DOCTOR 不许在补丁全缺时报「好消息」(2026-10-29 lupeng1 实报)──────────────
+#    病:2.55 节「还没触发过(补丁一直在,好消息)」印在**补丁全 0** 那一节正下方 —— 从
+#    「没日志」推出「补丁在」。自愈只在 Cursor 关着时动手,一直开着就一直不写日志。
+#    第 4) 节只打 gate 值,不和第 1) 节连起来 ⇒ 看不出 local_loop=true + 件D 没摘这个要命组合。
+#    阳性对照:就地重实现旧文案(不看 patchHealth)⇒ 对补丁全缺的副本必须说「好消息」。
+echo "--- 24) DOCTOR 不许在补丁全缺时报好消息 ---"
+if [ -z "${PRIS22:-}" ] || [ ! -d "${A22:-/nonexistent}" ]; then
+  skip "㉔:复用 ㉒ 的副本(那腿跳过了)"
+else
+  wipe22   # 补丁全缺
+  for f in extensions/cursor-agent-host/dist/main.js extensions/cursor-agent-host/dist/agent-host-daemon/dist/bin/daemon.cjs; do
+    [ -f "$PRIS22/cxctxwin__$(echo $f | sed 's|/|__|g')" ] && cp "$PRIS22/cxctxwin__$(echo $f | sed 's|/|__|g')" "$R22/$f"
+  done
+  mkdir -p "$H22/Library/LaunchAgents"; : > "$H22/Library/LaunchAgents/com.carher.cursor-selfheal.plist"
+  rm -f "$LOG22"
+  D24=$(env HOME="$H22" CURSOR_APP_ROOT="$R22" CURSOR_USER_DIR="$H22/Library/Application Support/Cursor/User" \
+        ELECTRON_RUN_AS_NODE=1 "$A22/Contents/MacOS/Cursor" "$JS" --doctor 2>&1)
+  S24=$(printf '%s\n' "$D24" | sed -n '/2.55)/,/2.6)/p')
+  printf '%s' "$S24" | grep -q '好消息' && bad "㉔补丁全缺时 2.55 节还在说「好消息」(lupeng1 那张截图的病)" \
+    || ok "㉔补丁全缺时 2.55 节不再说「好消息」"
+  printf '%s' "$S24" | grep -q '补丁\*\*现在就缺' && ok "㉔明说补丁现在就缺" || bad "㉔没明说补丁现在就缺"
+  printf '%s' "$S24" | grep -q '完全退出' && ok "㉔告诉他自愈要等 Cursor 完全退出" || bad "㉔没说自愈要等退出 ⇒ 他会一直开着等"
+  # 阴性对照:补丁齐全时仍可以说「不需要它」(尺子不是恒红)
+  run22 env CX_SKIP_RUNNING_CHECK=1; rm -f "$LOG22"
+  S24B=$(env HOME="$H22" CURSOR_APP_ROOT="$R22" CURSOR_USER_DIR="$H22/Library/Application Support/Cursor/User" \
+        ELECTRON_RUN_AS_NODE=1 "$A22/Contents/MacOS/Cursor" "$JS" --doctor 2>&1 | sed -n '/2.55)/,/2.6)/p')
+  printf '%s' "$S24B" | grep -q '补丁都在,不需要它' && ok "㉔阴性对照:补丁齐全时正常报「补丁都在」" \
+    || { bad "㉔补丁齐全时报错了:"; printf '%s\n' "$S24B" | head -4; }
+  # 第 4) 节要命组合的判据在不在
+  grep -q '要命的组合:服务端给你开了 agent_host_local_loop' "$JS" && ok "㉔第 4) 节会把 local_loop=true + 件D 没摘连起来报" \
+    || bad "㉔第 4) 节还是只打 gate 值、不连第 1) 节"
+fi
+
 echo ""
 [ "$SKIP" -gt 0 ] && echo "($SKIP 腿跳过——跳过不是通过,看上面原因)"
 if [ "$FAIL" -gt 0 ]; then echo "❌ $FAIL 项失败"; exit 1; fi

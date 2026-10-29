@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# myai.carher.net(ai_token_dashboard @ 243 K3s)只读运维 CLI 包装。
+# myai（chat.auto-link.com.cn/myai/，ai_token_dashboard @ 243 K3s）只读运维 CLI 包装。
 #
 # 用法(本地 Mac,需能 ssh cltx@10.68.13.243):
 #   scripts/myai-cli.sh install            # 首次:从仓内 tools/ 装 CLI(uv tool, editable)

@@ -165,7 +165,8 @@ print(" ".join(sorted(out)))')
   chk "旁路 /oneclick/"        "$(curl -sS -m 20 -o /dev/null -w '%{http_code}' $U/oneclick/)" 200
   chk "旁路 /feedback/"        "$(curl -sS -m 20 -o /dev/null -w '%{http_code}' $U/feedback/)" 200
   chk "旁路 /keyprobe/"        "$(curl -sS -m 20 -o /dev/null -w '%{http_code}' $U/keyprobe/)" 200
-  chk "原入口 myai.carher.net /api/health" "$(curl -sS -m 30 -o /dev/null -w '%{http_code}' https://myai.carher.net/api/health)" 200
+  # 2026-10-29 起 myai.carher.net 已下线（主看板 + cloudflared 缩到 0），只认本入口；这里确认它没被意外拉起
+  chk "老入口 myai.carher.net 已下线（主看板副本数）" "$(SSHPASS="${HOST243_PW:-}" sshpass -e ssh -o ConnectTimeout=15 -o ClearAllForwardings=yes cltx@10.68.13.243 'kubectl -n ai-token-dashboard get deploy ai-token-dashboard -o jsonpath={.spec.replicas}' 2>/dev/null || echo '?')" 0
   [ $fail = 0 ] && echo "=== ALL OK" || echo "=== 有 FAIL"
   return $fail
 }
@@ -186,6 +187,9 @@ EOF
   verify) verify ;;
   rollback)
     : "${HOST243_PW:?需要 HOST243_PW}"
+    # 🔴 2026-10-29 起这是唯一入口，回滚 = myai 全站不可用。确需回滚先恢复老入口：
+    #   243: kubectl -n ai-token-dashboard apply -f /Data/migration/myai-retire-carher-net-20261029T0707/deploys.yaml
+    [ "${I_KNOW_THIS_IS_THE_ONLY_ENTRY:-}" = 1 ] || { echo "这是唯一入口，回滚会让 myai 全站不可用；确认请设 I_KNOW_THIS_IS_THE_ONLY_ENTRY=1" >&2; exit 2; }
     nginx_del
     casdoor del
     "$ROOT/scripts/host-243-run.sh" - <<'EOF'

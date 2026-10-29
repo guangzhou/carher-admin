@@ -32,7 +32,8 @@ systemctl show k3s -p RequiresMountsFor | grep -q /var/lib/rancher && ok "k3s Re
 systemctl show snap.lxd.daemon -p RequiresMountsFor | grep -q /mnt/lxd-data && ok "snap.lxd.daemon RequiresMountsFor=/mnt/lxd-data" || warn "snap.lxd.daemon 缺 RequiresMountsFor"
 [ "$(findmnt -no SOURCE /mnt/lxd-data || true)" = "/dev/vdb1[/lxd/pool]" ] && ok "/mnt/lxd-data ← /Data/lxd/pool" || warn "/mnt/lxd-data 没挂上"
 
-# myai 两个入口各自的 dashboard：myai.carher.net ← deploy/ai-token-dashboard；chat.auto-link.com.cn/myai/ ← deploy/ai-token-dashboard-chat（NodePort 30810，198 nginx 转发过来）
+# myai 唯一入口 chat.auto-link.com.cn/myai/ ← deploy/ai-token-dashboard-chat（NodePort 30810，198 nginx 转发过来）；
+# myai.carher.net（deploy/ai-token-dashboard + cloudflared）2026-10-29 已缩到 0
 for dpl in ai-token-dashboard ai-token-dashboard-chat; do
   rd=$(kubectl -n ai-token-dashboard get deploy "$dpl" -o jsonpath='{.status.readyReplicas}/{.spec.replicas}' 2>/dev/null || echo "missing")
   case "$rd" in 1/1) ok "deploy/$dpl ready $rd";; *) warn "deploy/$dpl ready=${rd}（不 ready ⇒ 对应入口 502）";; esac

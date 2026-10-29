@@ -21,8 +21,7 @@ from dataclasses import dataclass, field
 
 DEFAULT_HOST = "cltx@10.68.13.243"
 DEFAULT_NAMESPACE = "ai-token-dashboard"
-# 国内入口（10-19 起）。myai.carher.net 走 CF，国内常被分到 LAX，15s 超时会让 `status` 假报故障；
-# 两个入口后端同库、/api/health 内容相同。要看 CF 那条腿时用 --public-url https://myai.carher.net
+# 唯一入口（10-29 起）。myai.carher.net 已下线（国内被 CF 分到 LAX，常超时）。
 DEFAULT_PUBLIC_URL = "https://chat.auto-link.com.cn/myai"
 
 DB_POD = "usage-db-0"

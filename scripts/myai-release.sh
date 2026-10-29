@@ -98,13 +98,14 @@ roll(){  # $1 deploy  $2 container  $3 extra wait
 }
 echo "== 金丝雀 ai-token-dashboard-chat"; roll ai-token-dashboard-chat dashboard 30 || exit 1
 c=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' http://127.0.0.1:30810/api/health); [ "$c" = 200 ] || { echo "!!! 金丝雀 health=${c}，停止" >&2; exit 1; }
-echo "== 主看板"; roll ai-token-dashboard dashboard 30 || exit 1
+# 2026-10-29 起主看板（myai.carher.net）已缩到 0，只给它换镜像不滚动，以免回滚老入口时版本落后
+$K set image deploy/ai-token-dashboard dashboard=$TAG >/dev/null && echo "   ai-token-dashboard -> ${TAG}（0 副本，仅换镜像）"
 echo "== realtime worker"; roll usage-realtime-worker worker 40 || exit 1
 echo "== sync worker"; roll usage-sync-worker worker 40 || exit 1
 $K get pods --no-headers | grep -v Completed | awk '{print "   "$1, $3, "restarts="$4}'
 EOF
   echo "== 外网验收（chat 入口）"
-  "$ROOT/scripts/myai-chat-subpath/deploy.sh" verify | grep -vE "myai.carher.net" | tail -3
+  HOST243_PW="$HOST243_PW" "$ROOT/scripts/myai-chat-subpath/deploy.sh" verify | tail -3
 }
 
 rollback(){

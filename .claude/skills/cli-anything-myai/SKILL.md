@@ -1,7 +1,7 @@
 ---
 name: cli-anything-myai
 description: >-
-  只读排查 myai.carher.net / chat.auto-link.com.cn/myai/（通衢 API / ai_token_dashboard，跑在 243 K3s 的 ns `ai-token-dashboard`）；
+  只读排查 chat.auto-link.com.cn/myai/（myai 唯一入口；myai.carher.net 10-29 已下线）（通衢 API / ai_token_dashboard，跑在 243 K3s 的 ns `ai-token-dashboard`）；
   也管国内入口 chat.auto-link.com.cn/myai/ 的部署和回滚（`scripts/myai-chat-subpath/deploy.sh`）。「myai 打不开/很慢」也走这里：
   看健康、同步卡没卡、看板每天花费和上游对不对得上、哪些 key 不在用户表、刷新队列、实时结算、账单/outbox、临时只读 SQL。
   入口是 `scripts/myai-cli.sh`（默认带 --json）。
@@ -16,7 +16,7 @@ description: >-
 
 | | |
 |---|---|
-| 公网 | 两个入口，**同一个库**：① `https://myai.carher.net`（Cloudflare Tunnel `e22cc0ea…`；🔴 国内常被分到 CF LAX，1~20s 甚至超时）② **`https://chat.auto-link.com.cn/myai/`**（10-19 起，国内直连，中位 0.07s）。②的细节见下面「§国内入口」 |
+| 公网 | 🔴 **2026-10-29 起只有一个入口 `https://chat.auto-link.com.cn/myai/`**（国内直连，细节见「§国内入口」）。`myai.carher.net`（Cloudflare Tunnel `e22cc0ea…`，国内常被分到 CF LAX 超时）已下线：`deploy/ai-token-dashboard` 和 `deploy/cloudflared` 缩到 0，共享的 `APP_BASE_URL` 已改成 chat 入口，Casdoor 删了老回调。恢复材料 `/Data/migration/myai-retire-carher-net-20261029T0707/` |
 | 主机 | 243 `cltx@10.68.13.243`（hostname `AIYJY-litellm-ps`），🔴 密码末尾的 `'` 也是密码的一部分 |
 | 代码 | GitHub `davidzhu2021/ai_token_dashboard`（我们**没有推送权限**）。线上 = `2818c0d` + 本地补丁（`tools/cli-anything-myai/upstream-fixes/0001~`，见那里的 README）。本地仓库 `.work/myai-admin-perf/ai_token_dashboard`，243 上 `~/ai_token_dashboard` 与线上同一提交 |
 | 镜像 | 本地导入，`imagePullPolicy: Never`，名字 `ai-token-dashboard:perf-<commit>`，4 个工作负载（两份 dashboard、realtime、sync worker）统一用同一个。🔴 **现役版本只认现量**：`kubectl -n ai-token-dashboard get deploy -o custom-columns=N:.metadata.name,IMG:.spec.template.spec.containers[0].image`（这里写死的版本号每次发布都会过时）；每次发布前的版本在 `/Data/migration/images-pre-perf-*.txt` |
@@ -31,7 +31,7 @@ description: >-
 
 ## 国内入口 chat.auto-link.com.cn/myai/（10-19）
 
-用户说「myai 打不开 / 很慢」，先跑 `scripts/host-243-disk-check.sh` 排除 243 的问题，再分别测两个入口。只有 myai.carher.net 慢、`/cdn-cgi/trace` 也慢 ⇒ 是 CF 线路的问题（见记忆 `project_myai_slow_is_cf_lax_route_2026_10_16`），**让用户改用 chat 入口**。
+用户说「myai 打不开 / 很慢」：先跑 `scripts/host-243-disk-check.sh` 排除 243，再测 `https://chat.auto-link.com.cn/myai/api/health`。（myai.carher.net 已下线，别再让人去用它。）
 
 链路：IT 入口 58.241.5.230 → 198 nginx `chat.auto-link.com.cn.conf` 里的 `# >>> myai-subpath >>>` 段 → 243 NodePort **30810** → `deploy/ai-token-dashboard-chat`（`k8s/myai-243-chat-subpath.yaml`）。
 
@@ -39,7 +39,7 @@ description: >-
 HOST243_PW=... scripts/myai-chat-subpath/deploy.sh apply     # 243 + Casdoor 回调 + nginx 段 + 验收（各步幂等）
 scripts/myai-chat-subpath/deploy.sh nginx                     # 只更新 nginx 段（改了 nginx-block.conf 之后）
 scripts/myai-chat-subpath/deploy.sh verify                    # 16 项外网验收，含 4 个旁路服务和原入口
-HOST243_PW=... scripts/myai-chat-subpath/deploy.sh rollback  # 三处全撤，myai.carher.net 不受影响
+HOST243_PW=... scripts/myai-chat-subpath/deploy.sh rollback  # 🔴 唯一入口，回滚=全站不可用；要设 I_KNOW_THIS_IS_THE_ONLY_ENTRY=1
 ```
 
 **为什么是第二个 Deployment，不是给原来那份加一个域名**（读 2818c0d 源码确认）：`enforce_csrf` 拿 Origin 和 `APP_BASE_URL` 严格比 scheme+netloc；`sso_start` 用 `APP_BASE_URL + /api/auth/callback` 作为回调 ⇒ 一个进程只认一个域名。第二份同镜像、同 CM/Secret、同库、同 app-data，只在 `env` 里把 `APP_BASE_URL` 盖成 `https://chat.auto-link.com.cn/myai`，并关掉 `ADMIN_LIVE_TOTALS_PREFETCH`（每 60s 打一次 198，没必要跑两份）。
@@ -68,7 +68,7 @@ M=scripts/myai-cli.sh                           # 默认 --json；要人读格�
 ## 排查顺序
 
 ```bash
-$M status                      # 第 0 步：公网 /api/health 摘要，findings 列出每一项异常（10-19 起默认打国内入口；要看 CF 那条腿加 --public-url https://myai.carher.net）
+$M status                      # 第 0 步：公网 /api/health 摘要，findings 列出每一项异常（默认打唯一入口 chat.auto-link.com.cn/myai）
 $M diagnose sync-stuck         # lastSuccessAt 不动时先跑这个（默认 7 天，约 90s）
 $M diagnose coverage           # 🔴 每天 看板花费 vs 上游全局花费，偏差 >1% 给出原因提示（漏数据的总入口）
 $M diagnose truncation         # 看板某天请求数正好 10000：上游计数封顶截断

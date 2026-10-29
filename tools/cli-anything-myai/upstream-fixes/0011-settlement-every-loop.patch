@@ -1,0 +1,175 @@
+From 44c697987d13aafbe4e9c0a09b7e8fc14044126a Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Thu, 29 Oct 2026 11:39:27 +0800
+Subject: [PATCH] =?UTF-8?q?=E5=AE=9E=E6=97=B6=E7=BB=93=E7=AE=97=E5=8D=95?=
+ =?UTF-8?q?=E7=8B=AC=E6=AF=8F=E8=BD=AE=E6=8B=89=E8=B5=B7=EF=BC=8C=E4=B8=8D?=
+ =?UTF-8?q?=E5=86=8D=E6=8E=92=E5=9C=A8=E6=88=90=E6=9C=AC/=E5=8E=86?=
+ =?UTF-8?q?=E5=8F=B2=E5=9B=9E=E5=A1=AB=E8=BD=AE=E8=BD=AC=E9=87=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+10-29 实测：结算和 cost/backfill 三项轮转，约 56~80s 才轮到一次，
+结算滞后 90~200s，一半时间超过 120s 阈值，健康检查在 ok/degraded 之间跳。
+改成主循环每轮单独 spawn（上一轮没完就跳过），轮转只剩 cost/backfill。
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/usage_realtime_worker.py | 20 ++++++---
+ tests/test_usage_realtime.py     | 70 +++++++++++++++++++++++++++++++-
+ 2 files changed, 83 insertions(+), 7 deletions(-)
+
+diff --git a/backend/usage_realtime_worker.py b/backend/usage_realtime_worker.py
+index 8c80d07..3b62280 100644
+--- a/backend/usage_realtime_worker.py
++++ b/backend/usage_realtime_worker.py
+@@ -725,11 +725,9 @@ class UsageRealtimeWorker:
+         the starting operation prevents a successful settlement from starving
+         cost and historical backfill work forever.
+         """
++        # 结算不在这里轮转：它单独由主循环每轮拉起（见 settle_in_background），
++        # 否则要排在成本回填/历史回填后面，约 1 分钟才轮到一次，结算滞后常年顶在健康阈值上。
+         operations = (
+-            (
+-                lambda: self.settle_pending_windows(now),
+-                max(2, float(getattr(self, "settlement_timeout_seconds", 20))),
+-            ),
+             (
+                 self.backfill_cost_aggregates,
+                 max(1, float(getattr(self, "background_budget_seconds", 5))),
+@@ -764,6 +762,14 @@ class UsageRealtimeWorker:
+                 )
+                 continue
+ 
++    async def settle_in_background(self, now: datetime) -> None:
++        """One bounded settlement pass; scheduled every main-loop iteration."""
++        timeout = max(2, float(getattr(self, "settlement_timeout_seconds", 20)))
++        try:
++            await asyncio.wait_for(self.settle_pending_windows(now), timeout=timeout)
++        except asyncio.TimeoutError:
++            logger.warning("HISTORICAL_BACKFILL_PARTIAL operation=settlement budget_seconds=%s", timeout)
++
+     async def reconcile_once(self, now: datetime) -> None:
+         """Re-scan the last 15 minutes for late upstream writes (dedup by request id)."""
+         for backend in self.client.backends:
+@@ -777,14 +783,15 @@ class UsageRealtimeWorker:
+             except Exception:
+                 logger.exception("REALTIME_RECONCILE_FAILED backend=%s", backend.id)
+ 
+-    def _spawn_periodic(self, name: str, factory: Any) -> bool:
++    def _spawn_periodic(self, name: str, factory: Any, *, quiet: bool = False) -> bool:
+         """Run slow periodic work beside the live loop; skip if the last run is still going."""
+         tasks = getattr(self, "_periodic_tasks", None)
+         if tasks is None:
+             tasks = self._periodic_tasks = {}
+         task = tasks.get(name)
+         if task is not None and not task.done():
+-            logger.info("realtime periodic task still running, skipped name=%s", name)
++            if not quiet:
++                logger.info("realtime periodic task still running, skipped name=%s", name)
+             return False
+ 
+         async def run() -> None:
+@@ -977,6 +984,7 @@ class UsageRealtimeWorker:
+                 if (now - last_reconcile).total_seconds() >= self.reconcile_seconds:
+                     self._spawn_periodic("reconcile", lambda at=now: self.reconcile_once(at))
+                     last_reconcile = now
++                self._spawn_periodic("settlement", lambda at=now: self.settle_in_background(at), quiet=True)
+                 await self.schedule_background_once(now)
+                 try:
+                     await asyncio.wait_for(
+diff --git a/tests/test_usage_realtime.py b/tests/test_usage_realtime.py
+index 8d54951..5d75710 100644
+--- a/tests/test_usage_realtime.py
++++ b/tests/test_usage_realtime.py
+@@ -839,6 +839,8 @@ def test_background_settlement_runs_before_a_long_refresh_queue() -> None:
+     worker.backfill_cost_aggregates = lambda: asyncio.sleep(0)
+     worker.backfill_once = lambda: asyncio.sleep(0)
+ 
++    worker.settlement_timeout_seconds = 0.01
++    asyncio.run(worker.settle_in_background(datetime(2026, 8, 25, 8, 0, tzinfo=timezone.utc)))
+     asyncio.run(worker.run_background_once(datetime(2026, 8, 25, 8, 0, tzinfo=timezone.utc)))
+ 
+     assert calls == ["settlement"]
+@@ -1132,7 +1134,8 @@ def test_realtime_background_operations_rotate_after_successful_settlement() ->
+     asyncio.run(worker.run_background_once(datetime(2026, 8, 25, tzinfo=timezone.utc)))
+     asyncio.run(worker.run_background_once(datetime(2026, 8, 25, tzinfo=timezone.utc)))
+ 
+-    assert calls == ["settlement", "cost"]
++    # 结算已拆出轮转（每轮单独拉起），这里只剩成本/历史回填两项轮流
++    assert calls == ["cost", "backfill"]
+ 
+ 
+ def test_realtime_background_work_is_scheduled_without_blocking_live_loop() -> None:
+@@ -1362,3 +1365,68 @@ def test_periodic_task_is_not_stacked_while_previous_run_is_active() -> None:
+ 
+     asyncio.run(scenario())
+     assert runs == 2
++
++
++def test_settlement_is_spawned_every_loop_iteration_not_round_robin(monkeypatch) -> None:
++    """10-29: 结算排在 cost/backfill 轮转里，约 60s 才轮到一次，滞后常年 90~200s 顶着 120s 阈值。"""
++    settle_calls = 0
++    loops = 0
++
++    class Store:
++        async def connect(self):
++            return None
++
++    class Realtime:
++        async def connect(self):
++            return None
++
++        async def acquire_worker_lock(self, _worker_id):
++            return True
++
++        async def release_worker_lock(self, _worker_id):
++            return None
++
++    worker = UsageRealtimeWorker.__new__(UsageRealtimeWorker)
++    worker.store = Store()
++    worker.realtime = Realtime()
++    worker.synchronizer = type("Sync", (), {"organization_repository": None})()
++    worker.client = type("Client", (), {"backends": []})()
++    worker.worker_id = "worker-a"
++    worker.poll_seconds = 0
++    worker.directory_refresh_seconds = 10**9
++    worker.reconcile_seconds = 10**9
++    worker.live_cycle_timeout_seconds = 5
++    worker.settlement_timeout_seconds = 5
++    worker.current_day = __import__("backend.usage_realtime_worker", fromlist=["usage_today"]).usage_today()
++    worker.stop_event = asyncio.Event()
++    worker._lock_lost = asyncio.Event()
++    worker._lock_renew_task = None
++    worker._startup_member_sync_task = None
++    worker._startup_reconcile_task = None
++
++    async def noop(*_args, **_kwargs):
++        return None
++
++    async def settle(_now):
++        nonlocal settle_calls
++        settle_calls += 1
++
++    async def live_once(_now):
++        nonlocal loops
++        loops += 1
++        await asyncio.sleep(0.01)
++        if loops >= 6:
++            worker.stop_event.set()
++
++    monkeypatch.setattr(worker, "_connect_repository", noop)
++    monkeypatch.setattr(worker, "_renew_worker_lock_loop", lambda: worker.stop_event.wait())
++    monkeypatch.setattr(worker, "recover", noop)
++    monkeypatch.setattr(worker, "startup_member_snapshot_sync", noop)
++    monkeypatch.setattr(worker, "startup_reconcile", noop)
++    monkeypatch.setattr(worker, "settle_pending_windows", settle)
++    monkeypatch.setattr(worker, "run_live_once", live_once)
++    monkeypatch.setattr(worker, "schedule_background_once", noop)
++
++    asyncio.run(asyncio.wait_for(worker.run(), timeout=5))
++
++    assert settle_calls >= 5
+-- 
+2.53.0
+

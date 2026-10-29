@@ -1,0 +1,117 @@
+From 3eab99b5674cf5cc47a5c1316187d3fd03c8f8e6 Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Thu, 29 Oct 2026 13:54:15 +0800
+Subject: [PATCH] =?UTF-8?q?=E7=BB=93=E7=AE=97=E6=BB=9E=E5=90=8E=E9=98=88?=
+ =?UTF-8?q?=E5=80=BC=E6=8C=89=E7=BB=93=E6=9E=84=E4=B8=8B=E9=99=90=E7=AE=97?=
+ =?UTF-8?q?=EF=BC=8C=E4=B8=8D=E5=86=8D=E8=AF=AF=E6=8A=A5=20degraded?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+结算水位取整到分钟、只做已关闭 60s 的窗口，正常滞后天生在 60~120s 再加扫描耗时；
+旧阈值 delay*2=120s 落在正常区间（10-29 实测正常 p90=123s、max=130s），约 18% 时间误报。
+新阈值 = delay + 60 + 宽限（USAGE_REALTIME_SETTLEMENT_GRACE_SECONDS，默认 60）= 180s。
+阴性对照：落后 240s 仍报 degraded；600s 仍 unhealthy 不变。
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/main.py                      | 10 ++++--
+ tests/test_snapshot_reader_worker.py | 47 ++++++++++++++++++++++++++++
+ 2 files changed, 55 insertions(+), 2 deletions(-)
+
+diff --git a/backend/main.py b/backend/main.py
+index c287d75..95ff87b 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -6712,6 +6712,12 @@ async def health() -> dict[str, Any]:
+             settlement_delay = max(
+                 60, env_int("USAGE_REALTIME_SETTLEMENT_DELAY_SECONDS", 60)
+             )
++            # 结算只做「已关闭 settlement_delay 秒以上的整分钟」，水位向下取整到分钟：
++            # 正常滞后天生就在 delay ~ delay+60 之间，再加一轮扫描耗时。旧阈值 delay*2=120s
++            # 落在正常区间里（10-29 实测正常 p90=123s），健康检查约 18% 时间误报 degraded。
++            settlement_lag_limit = settlement_delay + 60 + max(
++                0, env_int("USAGE_REALTIME_SETTLEMENT_GRACE_SECONDS", 60)
++            )
+             now = datetime.now(timezone.utc)
+             settlement_lags: dict[str, int | None] = {}
+             for backend_id, raw_value in (realtime_status.get("verifiedThrough") or {}).items():
+@@ -6735,7 +6741,7 @@ async def health() -> dict[str, Any]:
+                 not realtime_status.get("ready")
+                 or realtime_status.get("backfillActive")
+                 or (lag is not None and lag > stale_seconds)
+-                or any(value is None or value > settlement_delay * 2 for value in settlement_lags.values())
++                or any(value is None or value > settlement_lag_limit for value in settlement_lags.values())
+             ):
+                 status = "degraded"
+             if (lag is not None and lag > 120) or (max_settlement_lag is not None and max_settlement_lag > 600):
+@@ -6784,7 +6790,7 @@ async def health() -> dict[str, Any]:
+                     or value.get("verifiedThrough") is None
+                     or (
+                         value.get("lagSeconds") is not None
+-                        and value["lagSeconds"] > settlement_delay * 2
++                        and value["lagSeconds"] > settlement_lag_limit
+                     )
+                 ),
+                 "maxLagSeconds": max_settlement_lag,
+diff --git a/tests/test_snapshot_reader_worker.py b/tests/test_snapshot_reader_worker.py
+index 8377de6..ffaf451 100644
+--- a/tests/test_snapshot_reader_worker.py
++++ b/tests/test_snapshot_reader_worker.py
+@@ -896,6 +896,53 @@ def test_health_marks_configured_backend_without_settlement_state_as_unsettled(m
+     assert payload["settlement"]["backends"]["her"]["status"] == "verifying"
+ 
+ 
++def _health_with_settlement_lag(monkeypatch, lag_seconds):
++    now = datetime.now(timezone.utc)
++
++    class Store:
++        async def health(self):
++            return {"enabled": True, "connected": True, "status": "ok"}
++
++        async def sync_state(self):
++            return {"status": "idle", "heartbeatAt": now, "publishedAt": now}
++
++    class Realtime:
++        async def connect(self):
++            return None
++
++        async def status(self):
++            return {
++                "ready": True,
++                "latestEventLagSeconds": 5,
++                "latestEventAt": now,
++                "verifiedThrough": {"primary": (now - timedelta(seconds=lag_seconds)).isoformat()},
++                "settlementStatuses": {"primary": {"status": "settled", "error": ""}},
++            }
++
++    monkeypatch.setenv("USAGE_SYNC_ROLE", "reader")
++    monkeypatch.setattr(main, "realtime_enabled", lambda: True)
++    monkeypatch.setattr(main, "usage_backend_ids", lambda: ["primary"])
++    monkeypatch.setattr(main, "local_data_mode", lambda: "real")
++    monkeypatch.setattr(main, "_usage_store", Store())
++    monkeypatch.setattr(main, "_usage_realtime_store", Realtime())
++    monkeypatch.setattr(main, "organization_real_enabled", lambda: False)
++    return asyncio.run(main.health())
++
++
++def test_normal_minute_rounding_lag_is_not_reported_as_stale(monkeypatch) -> None:
++    """10-29 实测正常结算滞后 p90=123s、max=130s（60s 延迟 + 取整到分钟 + 扫描）。"""
++    payload = _health_with_settlement_lag(monkeypatch, 130)
++    assert payload["usageRealtime"]["status"] == "ok"
++    assert payload["settlement"]["unsettledBackends"] == []
++
++
++def test_settlement_falling_behind_is_still_reported(monkeypatch) -> None:
++    """阴性对照：落后 4 分钟以上（结算真的跟不上）仍报 degraded。"""
++    payload = _health_with_settlement_lag(monkeypatch, 240)
++    assert payload["usageRealtime"]["status"] == "degraded"
++    assert payload["settlement"]["unsettledBackends"] == ["primary"]
++
++
+ def test_team_leader_scope_reports_multiple_teams() -> None:
+     class Pool:
+         async def fetch(self, _query, *_args):
+-- 
+2.53.0
+

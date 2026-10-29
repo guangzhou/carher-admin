@@ -1,0 +1,133 @@
+From d7f028d538cfc37b461a8c346395932286c306b9 Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Thu, 29 Oct 2026 14:08:13 +0800
+Subject: [PATCH] =?UTF-8?q?=E7=A8=B3=E5=AE=9A=E6=80=A7=E7=9C=8B=E6=9D=BF?=
+ =?UTF-8?q?=E5=B0=9D=E8=AF=95=E6=B1=87=E6=80=BB=E5=8D=95=E7=8B=AC=E8=BF=9E?=
+ =?UTF-8?q?=E6=8E=A5=20+=20=E9=95=BF=E8=B6=85=E6=97=B6=20+=20=E4=BA=8B?=
+ =?UTF-8?q?=E5=8A=A1=E7=BA=A7=20work=5Fmem?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+一周约 66 万条尝试的去重排序实测 16~59s（排序落盘 400MB），池默认 command_timeout=30s 每次都掐断，
+稳定性看板 10-26 起快照一直不更新。改为独立连接、事务内 work_mem=256MB（实测 11s ×3），
+超时 STABILITY_ATTEMPT_QUERY_TIMEOUT_SECONDS 默认 110（小于看板构建预算 120）。
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/usage_store.py              | 19 ++++++++--
+ tests/test_stability_query_shape.py | 57 ++++++++++++++++++++++++++++-
+ 2 files changed, 71 insertions(+), 5 deletions(-)
+
+diff --git a/backend/usage_store.py b/backend/usage_store.py
+index c705231..f0abae5 100644
+--- a/backend/usage_store.py
++++ b/backend/usage_store.py
+@@ -5649,8 +5649,7 @@ class UsageStore:
+                      COALESCE(NULLIF(attempt_id,''), attempt_index::text || ':' || actual_model || ':' || route_name),
+                      COALESCE(ended_at,event_time) DESC, event_id DESC
+         """
+-        attempt_summary_query = pool.fetchrow(
+-            f"""
++        attempt_summary_sql = f"""
+             WITH terminal AS MATERIALIZED ({terminal_attempts}),
+             traces AS MATERIALIZED (
+                 SELECT COALESCE(NULLIF(requested_model_group,''), NULLIF(actual_model,''), 'unknown') AS dimension,
+@@ -5694,8 +5693,20 @@ class UsageStore:
+                    COALESCE((SELECT json_agg(by_model) FROM by_model), '[]'::json) AS model_attempts,
+                    COALESCE((SELECT json_agg(by_day ORDER BY dimension) FROM by_day), '[]'::json) AS daily_attempts
+             FROM overall
+-            """, *attempt_args,
+-        )
++            """
++
++        async def attempt_summary_query_run() -> Any:
++            # 一周约 66 万条尝试要整体去重排序：实测 16~59s（冷缓存最慢），池默认
++            # command_timeout=30s 会在稳定性看板构建时掐断它（10-26 起看板一直停在旧快照）。
++            # 单独一条连接：事务内调大 work_mem 让排序少落盘，超时跟随看板构建预算。
++            timeout = max(30, _env_int("STABILITY_ATTEMPT_QUERY_TIMEOUT_SECONDS", 110))
++            work_mem = _clean_text(os.getenv("STABILITY_ATTEMPT_WORK_MEM", "256MB")) or "256MB"
++            async with pool.acquire() as connection:
++                async with connection.transaction():
++                    await connection.execute("SELECT set_config('work_mem', $1, true)", work_mem)
++                    return await connection.fetchrow(attempt_summary_sql, *attempt_args, timeout=timeout)
++
++        attempt_summary_query = attempt_summary_query_run()
+         overall, daily, models, scenarios, attempt_summary = await asyncio.gather(
+             overall_query, daily_query, models_query, scenarios_query, attempt_summary_query,
+         )
+diff --git a/tests/test_stability_query_shape.py b/tests/test_stability_query_shape.py
+index f904e44..9b7b15e 100644
+--- a/tests/test_stability_query_shape.py
++++ b/tests/test_stability_query_shape.py
+@@ -19,7 +19,7 @@ def test_stability_terminal_attempt_query_projects_only_required_columns():
+     """The large stability CTE must not materialize every attempt-event column."""
+ 
+     start = USAGE_STORE.index("terminal_attempts = f\"\"\"")
+-    end = USAGE_STORE.index("attempt_summary_query = pool.fetchrow", start)
++    end = USAGE_STORE.index("attempt_summary_sql = f\"\"\"", start)
+     query = USAGE_STORE[start:end]
+ 
+     assert "SELECT DISTINCT ON" in query
+@@ -122,3 +122,58 @@ def test_stability_overview_skips_litellm_reader_and_mirror_row_scan() -> None:
+     assert payload["data"]["overview"]["requestCount"] == 2
+     assert payload["data"]["modelRankings"] == []
+     assert payload["data"]["topScenarios"] == []
++
++
++def test_attempt_summary_runs_on_own_connection_with_long_timeout_and_work_mem(monkeypatch) -> None:
++    """10-29: 一周 66 万条尝试去重实测 16~59s，池默认 30s 掐断 ⇒ 稳定性看板 10-26 起一直不更新。"""
++    from backend.usage_store import UsageStore
++
++    calls: list[tuple] = []
++
++    class Transaction:
++        async def __aenter__(self):
++            return None
++
++        async def __aexit__(self, *_args):
++            return None
++
++    class Connection:
++        def transaction(self):
++            return Transaction()
++
++        async def execute(self, query, *args, **kwargs):
++            calls.append(("execute", query, args, kwargs))
++
++        async def fetchrow(self, query, *args, **kwargs):
++            calls.append(("conn.fetchrow", query, args, kwargs))
++            return {"attempts": "{}", "model_attempts": "[]", "daily_attempts": "[]"}
++
++    class Acquire:
++        async def __aenter__(self):
++            return Connection()
++
++        async def __aexit__(self, *_args):
++            return None
++
++    class Pool:
++        def acquire(self):
++            return Acquire()
++
++        async def fetchrow(self, query, *args, **kwargs):
++            calls.append(("pool.fetchrow", query, args, kwargs))
++            return {}
++
++        async def fetch(self, query, *args, **kwargs):
++            return []
++
++    monkeypatch.delenv("STABILITY_ATTEMPT_QUERY_TIMEOUT_SECONDS", raising=False)
++    monkeypatch.delenv("STABILITY_ATTEMPT_WORK_MEM", raising=False)
++    store = UsageStore("postgresql://unused")
++    store.pool = Pool()
++    asyncio.run(store.stability_overview_aggregates("2026-10-23", "2026-10-29", ""))
++
++    attempt = [c for c in calls if c[0] == "conn.fetchrow"]
++    assert len(attempt) == 1 and "stability_attempt_events" in attempt[0][1]
++    assert attempt[0][3]["timeout"] == 110
++    assert ("execute", "SELECT set_config('work_mem', $1, true)", ("256MB",), {}) in calls
++    assert not any("stability_attempt_events" in c[1] for c in calls if c[0] == "pool.fetchrow")
+-- 
+2.53.0
+

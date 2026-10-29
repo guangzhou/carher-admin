@@ -14,6 +14,16 @@
 | `0006-sparse-gate-upstream-near-zero.patch` | 「非空用户过少」门禁：上游全局汇总 ≤ 每天 100 请求时放行（her 迁走后的零流量日不再无限重试）。`USAGE_SYNC_SPARSE_MAX_DAILY_REQUESTS=0` 恢复旧行为 |
 | `0007-skip-stability-scan-on-historical-refresh.patch` | 历史日期的刷新不再陪跑「今天」的稳定性扫描（约 23 分钟，导致刷新撞 1800s 超时被杀） |
 | `0008-schema-apply-retry-on-lock-conflict.patch` | 启动时建表遇到锁冲突（LockNotAvailable / Deadlock）等锁重试，不再 CrashLoop |
+| `0009-publish-merge-long-timeout.patch` | （2026-10-29 上线 `perf-3318401`）发布阶段的表合并单独给 600s 超时（`USAGE_PUBLISH_MERGE_TIMEOUT_SECONDS`）；整天约 20 万行事件合并实测 43~74s，池默认 30s 会掐断 |
+| `0010-realtime-periodic-off-main-loop.patch` | （10-29）实时 worker 的目录刷新 / 15 分钟回扫移到后台，主循环不再每 5 分钟停摆约 100s |
+| `0011-settlement-every-loop.patch` | （10-29）实时结算每轮单独拉起，不再排在成本/历史回填轮转后面 |
+| `0012-realtime-watermark-monotonic.patch` | （10-29）Redis 结算水位只前进不后退；重启不再误报滞后 4 万秒 |
+| `0013-her-key-rollup-and-coverage-gate.patch` | （10-29）her 也走 key 补漏（owner 为空的 carher-1 等）；稀疏门禁加覆盖率放行 |
+| `0014-health-org-license-known-limitation.patch` | （10-29）上游缺 Enterprise 许可导致的组织探针 403 不拉低整体 health（其它失败照报） |
+| `0015-sparse-gate-spend-coverage.patch` | （10-29）稀疏门禁覆盖率按花费比（不带 key 的鉴权失败花费 0、无法归属） |
+| `0016-settlement-lag-threshold.patch` | （10-29）结算滞后阈值 = delay+60+宽限(60)=180s；旧 120s 落在正常区间内 |
+| `0017-stability-attempt-query-timeout.patch` | （10-29）稳定性看板尝试汇总独立连接 + work_mem 256MB + 110s 超时（10-26 起看板停更） |
+| `0018-realtime-drop-unread-event-copy.patch` | （10-29）不再写无人读取的 `usage:realtime:event:*`（1.1GB，撑满 Redis 触发淘汰） |
 | `DESIGN-log-scan-cap.md` / `DESIGN-key-coverage.md` | 0001/0002 的设计与实测数据 |
 | `litellm_spendlog_cap_report.md` | LiteLLM 10000 计数封顶的来源调研（PR #31825 等） |
 

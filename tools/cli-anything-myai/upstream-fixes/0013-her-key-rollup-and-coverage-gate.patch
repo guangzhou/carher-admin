@@ -1,0 +1,93 @@
+From 5db4379b4848396e3cf1a5058ec085b43dd64827 Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Thu, 29 Oct 2026 12:12:53 +0800
+Subject: [PATCH] =?UTF-8?q?her=20=E4=B9=9F=E8=B5=B0=20key=20=E8=A1=A5?=
+ =?UTF-8?q?=E6=BC=8F=EF=BC=9B=E9=87=87=E5=88=B0=E9=87=8F=E8=A6=86=E7=9B=96?=
+ =?UTF-8?q?=E4=B8=8A=E6=B8=B8=2099%=20=E6=97=B6=E4=BA=BA=E5=B0=91=E4=B8=8D?=
+ =?UTF-8?q?=E5=86=8D=E5=88=A4=E4=B8=8D=E5=AE=8C=E6=95=B4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+10-29 实测：her 10 月上游 189 请求，carher-1/carher-67 等 key 的 owner 为空，按人回退只采到 72 条；
+10-15 因「非空用户过少」被挡 125 次，刷新队列一直挂着。
+- key 补漏不再只对 primary
+- 稀疏门禁：采到请求数 ≥ 上游全局 99% 时放行（阴性对照：采到 72/189 仍挡）
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/usage_sync.py                         |  9 +++--
+ ...t_sparse_fallback_upstream_confirmation.py | 33 +++++++++++++++++++
+ 2 files changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/backend/usage_sync.py b/backend/usage_sync.py
+index e13b862..1982bf3 100644
+--- a/backend/usage_sync.py
++++ b/backend/usage_sync.py
+@@ -902,7 +902,10 @@ class UsageSynchronizer:
+             logger.exception("sparse fallback upstream check failed backend=%s", backend.id)
+             return False
+         days = (date.fromisoformat(end_date) - date.fromisoformat(start_date)).days + 1
+-        confirmed = upstream_requests <= max_daily * max(1, days)
++        # 门禁要挡的是「上游有量、我们没采到」。采到的（含 key 补漏）已覆盖上游全局总数的 99%，
++        # 说明人少只是量集中在少数 key 上，不是漏数据（her 10-15：189 条几乎全在 carher-1 等 3 把 key）。
++        coverage_ok = upstream_requests > 0 and collected_requests >= upstream_requests * 0.99
++        confirmed = upstream_requests <= max_daily * max(1, days) or coverage_ok
+         logger.info(
+             "sparse fallback upstream check backend=%s start=%s end=%s upstream_requests=%s collected_requests=%s confirmed=%s",
+             backend.id, start_date, end_date, upstream_requests, collected_requests, confirmed,
+@@ -1365,7 +1368,9 @@ class UsageSynchronizer:
+                 backend.id, fallback_stats["attemptedUsers"], fallback_stats["successfulUsers"], fallback_stats["failedUsers"],
+             )
+         rows = [row for batch in results for row in batch]
+-        if log_rows is None and not backend.source and _env_bool("USAGE_SYNC_KEY_ROLLUP_ENABLED", True):
++        # her 也要补：10-29 实测 her 10 月 189 请求里 carher-1/carher-67 等 key 的 owner 为空，
++        # 按人回退永远查不到，只采到 72 条；10-15 因此被「非空用户过少」门禁挡了 125 次。
++        if log_rows is None and _env_bool("USAGE_SYNC_KEY_ROLLUP_ENABLED", True):
+             rows.extend(
+                 await self._key_rollup_gap_rows(backend, start_date, end_date, set(account_users), directory)
+             )
+diff --git a/tests/test_sparse_fallback_upstream_confirmation.py b/tests/test_sparse_fallback_upstream_confirmation.py
+index 8d03e80..aeaa5d6 100644
+--- a/tests/test_sparse_fallback_upstream_confirmation.py
++++ b/tests/test_sparse_fallback_upstream_confirmation.py
+@@ -134,3 +134,36 @@ def test_refresh_claim_prefers_fewer_attempts_before_age() -> None:
+ 
+     order = " ".join(store.pool.query.split()).split("ORDER BY", 1)[1].split("FOR UPDATE", 1)[0].strip()
+     assert order == "attempts, requested_at"
++
++
++def test_sparse_users_but_full_coverage_passes_the_gate() -> None:
++    """10-29: her 10-15 上游 189 条几乎都在 owner 为空的 carher-1 等 key 上，
++    补漏后采到的已等于上游总数 ⇒ 人少不是漏数据，不该挡（之前挡了 125 次）。"""
++    client, _ = _client(upstream_requests=189)
++    snapshot = asyncio.run(
++        _with_rollup(client, rollup_requests=189)
++    )
++    assert snapshot.quality["complete"] is True
++
++
++def test_sparse_users_with_real_gap_still_blocked() -> None:
++    """阴性对照：补漏后仍明显少于上游全局 ⇒ 照旧挡。"""
++    client, _ = _client(upstream_requests=189)
++    snapshot = asyncio.run(
++        _with_rollup(client, rollup_requests=72)
++    )
++    assert snapshot.quality["complete"] is False
++
++
++async def _with_rollup(client, *, rollup_requests):
++    async def key_rollup_rows(_start, _end, _backend=None):
++        rows = [{
++            "date": "2026-10-19", "source": "Her", "model": "m", "totalTokens": 1,
++            "requestCount": rollup_requests, "successCount": rollup_requests, "failureCount": 0,
++            "spend": 0.0, "keyId": "sha-1", "keyAlias": "carher-1", "keyOwnerUserId": "",
++            "keyTeamId": "", "keyExists": True,
++        }]
++        return rows, {"requestCount": rollup_requests, "spend": 0.0}
++
++    client.key_rollup_rows = key_rollup_rows
++    return await UsageSynchronizer(client, object()).collect_backend(Backend(), "2026-10-19", "2026-10-19")
+-- 
+2.53.0
+

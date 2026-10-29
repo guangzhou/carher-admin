@@ -1,0 +1,2688 @@
+From a4b017b7f9e2f6b5b35a9829b091a8f97cb02862 Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Thu, 29 Oct 2026 12:37:37 +0800
+Subject: [PATCH] =?UTF-8?q?=E5=81=A5=E5=BA=B7=E6=A3=80=E6=9F=A5=EF=BC=9A?=
+ =?UTF-8?q?=E4=B8=8A=E6=B8=B8=E7=BC=BA=20Enterprise=20=E8=AE=B8=E5=8F=AF?=
+ =?UTF-8?q?=E5=AF=BC=E8=87=B4=E7=9A=84=E7=BB=84=E7=BB=87=E6=8E=A2=E9=92=88?=
+ =?UTF-8?q?=20403=20=E4=B8=8D=E5=86=8D=E6=8B=89=E4=BD=8E=E6=95=B4=E4=BD=93?=
+ =?UTF-8?q?=E7=8A=B6=E6=80=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+198 没有 LITELLM_LICENSE，/organization/list 永远 403，整体 health 常年 degraded，真故障被淹没。
+只在「teams/keys 正常、唯一失败是 organizations 且为许可 403」时视为已知限制：
+organization.status=unavailable + knownLimitation，整体不降级；组织管理功能仍 fail-closed。
+阴性对照：管理员 key 失效（三项全 403）、5xx、非许可 403、探针异常仍报 degraded。
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/main.py                               | 2089 +++++++++--------
+ tests/test_health_org_license_limitation.py   |   60 +
+ .../test_organization_capability_recovery.py  |   41 +
+ 3 files changed, 1157 insertions(+), 1033 deletions(-)
+ create mode 100644 tests/test_health_org_license_limitation.py
+
+diff --git a/backend/main.py b/backend/main.py
+index 74da640..c287d75 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -39,7 +39,7 @@ from starlette.middleware.gzip import GZipMiddleware
+ from starlette.middleware.sessions import SessionMiddleware
+ from starlette.types import Scope
+ 
+-from .cache import AsyncJSONCache, AsyncStaleJSONCache, TTLCache
++from .cache import AsyncJSONCache, AsyncStaleJSONCache, TTLCache
+ from .auth import (
+     SESSION_USER_KEY,
+     allowed_email_domain,
+@@ -77,9 +77,9 @@ from .auth_store import (
+ from .billing_store import (
+     BillingStore,
+     BillingStoreError,
+-    CHANNEL_EPAY,
+-    CHANNEL_MOCK,
+-    CHANNEL_MANUAL_QR,
++    CHANNEL_EPAY,
++    CHANNEL_MOCK,
++    CHANNEL_MANUAL_QR,
+     ORDER_PENDING,
+     SYNC_DONE,
+     SYNC_PENDING,
+@@ -91,10 +91,10 @@ from .litellm_client import (
+     department_key,
+     mask_key,
+     model_display_name,
+-    normalize_model_display_name,
+-    usage_today,
+-    usage_timezone_offset_minutes,
+-)
++    normalize_model_display_name,
++    usage_today,
++    usage_timezone_offset_minutes,
++)
+ from .observability import (
+     STABILITY_DEFINITIONS_VERSION,
+     metric_envelope,
+@@ -224,8 +224,8 @@ async def app_lifespan(_app: FastAPI):
+         return
+     await start_billing_store()
+     await start_organization_service()
+-    await start_usage_sync()
+-    start_admin_live_totals_prefetch()
++    await start_usage_sync()
++    start_admin_live_totals_prefetch()
+     if _litellm_stability_reader is not None:
+         try:
+             await _litellm_stability_reader.start()
+@@ -234,9 +234,9 @@ async def app_lifespan(_app: FastAPI):
+     start_observability_warmup()
+     try:
+         yield
+-    finally:
+-        await stop_admin_live_totals_prefetch()
+-        await stop_observability_warmup()
++    finally:
++        await stop_admin_live_totals_prefetch()
++        await stop_observability_warmup()
+         if _litellm_stability_reader is not None:
+             await _litellm_stability_reader.close()
+         await close_litellm_client()
+@@ -374,31 +374,31 @@ team_member_directory_cache = TTLCache()
+ team_member_key_cache = TTLCache()
+ _team_member_key_inflight: dict[tuple[str, int, bool], asyncio.Task[Any]] = {}
+ _team_member_key_cache_versions: dict[str, int] = {}
+-_observability_refresh_tasks: dict[str, asyncio.Task[Any]] = {}
+-_observability_refresh_lock = asyncio.Lock()
+-_stability_refresh_slot = asyncio.Semaphore(1)
++_observability_refresh_tasks: dict[str, asyncio.Task[Any]] = {}
++_observability_refresh_lock = asyncio.Lock()
++_stability_refresh_slot = asyncio.Semaphore(1)
+ _observability_memory_snapshots: dict[str, dict[str, Any]] = {}
+ _observability_refresh_failures: dict[str, tuple[float, str]] = {}
+ try:
+     _observability_drilldown_ttl = max(1, int(os.getenv("OBSERVABILITY_DRILLDOWN_CACHE_SECONDS", "60")))
+ except ValueError:
+     _observability_drilldown_ttl = 60
+-_observability_drilldown_cache = AsyncJSONCache(ttl_seconds=_observability_drilldown_ttl)
+-def _startup_env_int(name: str, default: int) -> int:
+-    try:
+-        return int(os.getenv(name, str(default)))
+-    except (TypeError, ValueError):
+-        return default
+-
+-
+-_admin_live_totals_cache = AsyncStaleJSONCache(
+-    ttl_seconds=max(1, _startup_env_int("ADMIN_LIVE_TOTALS_CACHE_TTL_SECONDS", 60)),
+-    stale_seconds=max(1, _startup_env_int("ADMIN_LIVE_TOTALS_STALE_SECONDS", 300)),
+-)
+-_admin_live_refresh_tasks: dict[str, asyncio.Task[Any]] = {}
+-_admin_live_refresh_lock = asyncio.Lock()
+-_admin_live_prefetch_task: asyncio.Task[Any] | None = None
+-_admin_live_prefetch_stop: asyncio.Event | None = None
++_observability_drilldown_cache = AsyncJSONCache(ttl_seconds=_observability_drilldown_ttl)
++def _startup_env_int(name: str, default: int) -> int:
++    try:
++        return int(os.getenv(name, str(default)))
++    except (TypeError, ValueError):
++        return default
++
++
++_admin_live_totals_cache = AsyncStaleJSONCache(
++    ttl_seconds=max(1, _startup_env_int("ADMIN_LIVE_TOTALS_CACHE_TTL_SECONDS", 60)),
++    stale_seconds=max(1, _startup_env_int("ADMIN_LIVE_TOTALS_STALE_SECONDS", 300)),
++)
++_admin_live_refresh_tasks: dict[str, asyncio.Task[Any]] = {}
++_admin_live_refresh_lock = asyncio.Lock()
++_admin_live_prefetch_task: asyncio.Task[Any] | None = None
++_admin_live_prefetch_stop: asyncio.Event | None = None
+ _usage_singleflight: dict[str, asyncio.Task[Any]] = {}
+ _usage_singleflight_lock = asyncio.Lock()
+ _usage_last_good_payloads: dict[str, dict[str, Any]] = {}
+@@ -445,7 +445,7 @@ def _observability_snapshot_key(payload: dict[str, Any]) -> str:
+     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+ 
+ 
+-def _observability_cache_meta(
++def _observability_cache_meta(
+     record: dict[str, Any] | None,
+     *,
+     state: str,
+@@ -454,9 +454,9 @@ def _observability_cache_meta(
+     response_bytes: int | None = None,
+ ) -> dict[str, Any]:
+     generated = record.get("generated_at") if record else None
+-    parsed = _parse_generated_at(generated)
+-    generated_at = parsed.isoformat() if parsed else (str(generated or "") or None)
+-    age_seconds = max(0, int((datetime.now(timezone.utc) - parsed).total_seconds())) if parsed else None
++    parsed = _parse_generated_at(generated)
++    generated_at = parsed.isoformat() if parsed else (str(generated or "") or None)
++    age_seconds = max(0, int((datetime.now(timezone.utc) - parsed).total_seconds())) if parsed else None
+     return {
+         "state": state,
+         "generatedAt": generated_at,
+@@ -466,22 +466,22 @@ def _observability_cache_meta(
+         "dataRevision": str((record or {}).get("data_revision") or ""),
+         "layer": layer,
+         "responseBytes": response_bytes,
+-    }
+-
+-
+-def _parse_generated_at(value: Any) -> datetime | None:
+-    if isinstance(value, datetime):
+-        parsed = value
+-    elif value:
+-        try:
+-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+-        except (TypeError, ValueError):
+-            return None
+-    else:
+-        return None
+-    if parsed.tzinfo is None:
+-        parsed = parsed.replace(tzinfo=timezone.utc)
+-    return parsed.astimezone(timezone.utc)
++    }
++
++
++def _parse_generated_at(value: Any) -> datetime | None:
++    if isinstance(value, datetime):
++        parsed = value
++    elif value:
++        try:
++            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
++        except (TypeError, ValueError):
++            return None
++    else:
++        return None
++    if parsed.tzinfo is None:
++        parsed = parsed.replace(tzinfo=timezone.utc)
++    return parsed.astimezone(timezone.utc)
+ 
+ 
+ def _observability_response_bytes(payload: dict[str, Any]) -> int:
+@@ -532,24 +532,24 @@ def _observability_pending_payload(dashboard_type: str, key_payload: dict[str, A
+     return payload
+ 
+ 
+-async def _observability_refresh(
++async def _observability_refresh(
+     dashboard_type: str,
+     snapshot_key: str,
+     builder: Any,
+ ) -> dict[str, Any]:
+-    store = _admin_observability_store()
+-    started = asyncio.get_running_loop().time()
+-    try:
+-        timeout_name = "STABILITY_REFRESH_TIMEOUT_SECONDS" if dashboard_type == "stability" else "OBSERVABILITY_REFRESH_TIMEOUT_SECONDS"
+-        timeout_default = 120 if dashboard_type == "stability" else 30
+-        if dashboard_type == "stability":
+-            async with _stability_refresh_slot:
+-                built = await asyncio.wait_for(builder(), timeout=max(1, env_int(timeout_name, timeout_default)))
+-        else:
+-            built = await asyncio.wait_for(builder(), timeout=max(1, env_int(timeout_name, timeout_default)))
+-        payload = jsonable_encoder(built)
+-        build_ms = (asyncio.get_running_loop().time() - started) * 1000
+-        save_started = asyncio.get_running_loop().time()
++    store = _admin_observability_store()
++    started = asyncio.get_running_loop().time()
++    try:
++        timeout_name = "STABILITY_REFRESH_TIMEOUT_SECONDS" if dashboard_type == "stability" else "OBSERVABILITY_REFRESH_TIMEOUT_SECONDS"
++        timeout_default = 120 if dashboard_type == "stability" else 30
++        if dashboard_type == "stability":
++            async with _stability_refresh_slot:
++                built = await asyncio.wait_for(builder(), timeout=max(1, env_int(timeout_name, timeout_default)))
++        else:
++            built = await asyncio.wait_for(builder(), timeout=max(1, env_int(timeout_name, timeout_default)))
++        payload = jsonable_encoder(built)
++        build_ms = (asyncio.get_running_loop().time() - started) * 1000
++        save_started = asyncio.get_running_loop().time()
+         state = await _call_store_optional(store, ("snapshot_state",), default={})
+         revision = str((state or {}).get("revision") or (state or {}).get("snapshotRevision") or "")
+         record = await _call_store_optional(
+@@ -566,55 +566,55 @@ async def _observability_refresh(
+                 "payload": payload,
+                 "generated_at": datetime.now(timezone.utc),
+                 "data_revision": revision,
+-                "last_refresh_error": "",
+-            }
+-        save_ms = (asyncio.get_running_loop().time() - save_started) * 1000
++                "last_refresh_error": "",
++            }
++        save_ms = (asyncio.get_running_loop().time() - save_started) * 1000
+         memory_key = f"{dashboard_type}:{snapshot_key}"
+         _observability_memory_snapshots[memory_key] = dict(record)
+         _observability_refresh_failures.pop(memory_key, None)
+-        response_bytes = _observability_response_bytes(payload)
+-        logger.info(
+-            "observability refresh dashboard=%s start_date=%s end_date=%s model=%s eventCount=%s aggregateRows=%s build_ms=%.0f save_ms=%.0f total_ms=%.0f cache_state=stored",
+-            dashboard_type,
+-            payload.get("startDate") if dashboard_type == "stability" else "",
+-            payload.get("endDate") if dashboard_type == "stability" else "",
+-            payload.get("model") if dashboard_type == "stability" else "",
+-            ((payload.get("coverage") or {}).get("eventCount") if dashboard_type == "stability" else None),
+-            (
+-                sum(
+-                    len((payload.get("data") or {}).get(key) or [])
+-                    for key in ("daily", "modelRankings", "topScenarios")
+-                )
+-                if dashboard_type == "stability"
+-                else None
+-            ),
+-            build_ms,
+-            save_ms,
+-            (asyncio.get_running_loop().time() - started) * 1000,
++        response_bytes = _observability_response_bytes(payload)
++        logger.info(
++            "observability refresh dashboard=%s start_date=%s end_date=%s model=%s eventCount=%s aggregateRows=%s build_ms=%.0f save_ms=%.0f total_ms=%.0f cache_state=stored",
++            dashboard_type,
++            payload.get("startDate") if dashboard_type == "stability" else "",
++            payload.get("endDate") if dashboard_type == "stability" else "",
++            payload.get("model") if dashboard_type == "stability" else "",
++            ((payload.get("coverage") or {}).get("eventCount") if dashboard_type == "stability" else None),
++            (
++                sum(
++                    len((payload.get("data") or {}).get(key) or [])
++                    for key in ("daily", "modelRankings", "topScenarios")
++                )
++                if dashboard_type == "stability"
++                else None
++            ),
++            build_ms,
++            save_ms,
++            (asyncio.get_running_loop().time() - started) * 1000,
+         )
+         return {**payload, "cache": _observability_cache_meta(record, state="fresh", layer="rebuild", response_bytes=response_bytes)}
+-    except Exception as exc:
+-        error_type = exc.__class__.__name__
+-        memory_key = f"{dashboard_type}:{snapshot_key}"
+-        _observability_refresh_failures[memory_key] = (
+-            asyncio.get_running_loop().time(),
+-            error_type,
+-        )
+-        # Keep the last-known-good payload and timestamp while surfacing the
+-        # failed refresh in subsequent stale responses.
+-        prior = _observability_memory_snapshots.get(memory_key)
+-        if prior:
+-            failed_record = dict(prior)
+-            failed_record["last_refresh_error"] = error_type
+-            failed_record["refreshing"] = False
+-            _observability_memory_snapshots[memory_key] = failed_record
+-        await _call_store_optional(
+-            store,
+-            ("mark_observability_snapshot_refresh",),
+-            dashboard_type,
+-            snapshot_key,
+-            refreshing=False,
+-            error=error_type,
++    except Exception as exc:
++        error_type = exc.__class__.__name__
++        memory_key = f"{dashboard_type}:{snapshot_key}"
++        _observability_refresh_failures[memory_key] = (
++            asyncio.get_running_loop().time(),
++            error_type,
++        )
++        # Keep the last-known-good payload and timestamp while surfacing the
++        # failed refresh in subsequent stale responses.
++        prior = _observability_memory_snapshots.get(memory_key)
++        if prior:
++            failed_record = dict(prior)
++            failed_record["last_refresh_error"] = error_type
++            failed_record["refreshing"] = False
++            _observability_memory_snapshots[memory_key] = failed_record
++        await _call_store_optional(
++            store,
++            ("mark_observability_snapshot_refresh",),
++            dashboard_type,
++            snapshot_key,
++            refreshing=False,
++            error=error_type,
+             default=None,
+         )
+         logger.exception("observability refresh failed dashboard=%s", dashboard_type)
+@@ -651,7 +651,7 @@ async def _start_observability_refresh(
+         return task
+ 
+ 
+-async def _cached_observability_dashboard(
++async def _cached_observability_dashboard(
+     dashboard_type: str,
+     key_payload: dict[str, Any],
+     builder: Any,
+@@ -672,41 +672,41 @@ async def _cached_observability_dashboard(
+             _observability_memory_snapshots[memory_key] = dict(record)
+     fresh_seconds = max(1, env_int("OBSERVABILITY_CACHE_FRESH_SECONDS", 300))
+     stale_seconds = max(fresh_seconds, env_int("OBSERVABILITY_CACHE_STALE_MAX_SECONDS", 86400))
+-    age = None
+-    parsed_generated = _parse_generated_at(record.get("generated_at")) if record else None
+-    if parsed_generated:
+-        age = (datetime.now(timezone.utc) - parsed_generated).total_seconds()
+-    failure_key = f"{dashboard_type}:{snapshot_key}"
+-    failure = _observability_refresh_failures.get(failure_key)
+-    if (
+-        record
+-        and failure
+-        and not refresh
+-        and asyncio.get_running_loop().time() - failure[0] < 10
+-    ):
+-        payload = _snapshot_payload(record)
+-        payload["cache"] = _observability_cache_meta(
+-            record,
+-            state="stale",
+-            refreshing=False,
+-            layer=layer,
+-            response_bytes=_observability_response_bytes(payload),
+-        )
+-        return payload
+-    if record and age is not None and age <= fresh_seconds and not refresh:
+-        if record.get("last_refresh_error"):
+-            task = await _start_observability_refresh(dashboard_type, snapshot_key, builder)
+-            payload = _snapshot_payload(record)
+-            payload["cache"] = _observability_cache_meta(
+-                record,
+-                state="refreshing" if not task.done() else "stale",
+-                refreshing=not task.done(),
+-                layer=layer,
+-                response_bytes=_observability_response_bytes(payload),
+-            )
+-            return payload
+-        payload = _snapshot_payload(record)
+-        payload["cache"] = _observability_cache_meta(record, state="fresh", layer=layer, response_bytes=_observability_response_bytes(payload))
++    age = None
++    parsed_generated = _parse_generated_at(record.get("generated_at")) if record else None
++    if parsed_generated:
++        age = (datetime.now(timezone.utc) - parsed_generated).total_seconds()
++    failure_key = f"{dashboard_type}:{snapshot_key}"
++    failure = _observability_refresh_failures.get(failure_key)
++    if (
++        record
++        and failure
++        and not refresh
++        and asyncio.get_running_loop().time() - failure[0] < 10
++    ):
++        payload = _snapshot_payload(record)
++        payload["cache"] = _observability_cache_meta(
++            record,
++            state="stale",
++            refreshing=False,
++            layer=layer,
++            response_bytes=_observability_response_bytes(payload),
++        )
++        return payload
++    if record and age is not None and age <= fresh_seconds and not refresh:
++        if record.get("last_refresh_error"):
++            task = await _start_observability_refresh(dashboard_type, snapshot_key, builder)
++            payload = _snapshot_payload(record)
++            payload["cache"] = _observability_cache_meta(
++                record,
++                state="refreshing" if not task.done() else "stale",
++                refreshing=not task.done(),
++                layer=layer,
++                response_bytes=_observability_response_bytes(payload),
++            )
++            return payload
++        payload = _snapshot_payload(record)
++        payload["cache"] = _observability_cache_meta(record, state="fresh", layer=layer, response_bytes=_observability_response_bytes(payload))
+         logger.info("observability overview dashboard=%s snapshot_ms=%.0f total_ms=%.0f cache_layer=%s cache_state=fresh response_bytes=%s", dashboard_type, (asyncio.get_running_loop().time() - lookup_started) * 1000, (asyncio.get_running_loop().time() - lookup_started) * 1000, layer, payload["cache"]["responseBytes"])
+         return payload
+     if record and age is not None and age <= stale_seconds:
+@@ -714,7 +714,7 @@ async def _cached_observability_dashboard(
+         payload = _snapshot_payload(record)
+         payload["cache"] = _observability_cache_meta(record, state="refreshing" if not task.done() else "stale", refreshing=not task.done(), layer=layer, response_bytes=_observability_response_bytes(payload))
+         return payload
+-    failure = _observability_refresh_failures.get(failure_key)
++    failure = _observability_refresh_failures.get(failure_key)
+     if failure and asyncio.get_running_loop().time() - failure[0] < 10:
+         return _observability_pending_payload(dashboard_type, key_payload, error=failure[1])
+     task = await _start_observability_refresh(dashboard_type, snapshot_key, builder)
+@@ -2084,6 +2084,22 @@ async def start_organization_outbox_worker() -> None:
+     _organization_outbox_task = asyncio.create_task(organization_outbox_loop(), name="organization-outbox-loop")
+ 
+ 
++def organization_license_only_unavailable(status: dict[str, Any]) -> bool:
++    """True only when the sole failed probe is /organization/list rejected for a missing Enterprise license."""
++
++    if status.get("teams") is not True or status.get("keys") is not True:
++        return False
++    errors = status.get("errors")
++    if not isinstance(errors, dict) or set(errors) != {"organizations"}:
++        return False
++    error = errors.get("organizations") or {}
++    return (
++        isinstance(error, dict)
++        and error.get("statusCode") == 403
++        and "Enterprise" in str(error.get("detail") or "")
++    )
++
++
+ def require_real_organization_capability() -> None:
+     if organization_real_enabled() and not _organization_capability_status.get("available"):
+         raise auth_http_error(
+@@ -2093,7 +2109,7 @@ def require_real_organization_capability() -> None:
+         )
+ 
+ 
+-async def close_litellm_client() -> None:
++async def close_litellm_client() -> None:
+     global _usage_sync_task, _usage_refresh_task, _usage_sync_stop, _organization_outbox_task, _organization_outbox_stop, _usage_realtime_task, _usage_realtime_worker
+     if _usage_realtime_worker is not None:
+         _usage_realtime_worker.stop_event.set()
+@@ -2103,8 +2119,8 @@ async def close_litellm_client() -> None:
+             await _usage_realtime_task
+         except asyncio.CancelledError:
+             pass
+-        _usage_realtime_task = None
+-        _usage_realtime_worker = None
++        _usage_realtime_task = None
++        _usage_realtime_worker = None
+     if _organization_outbox_stop is not None:
+         _organization_outbox_stop.set()
+     if _organization_outbox_task is not None:
+@@ -2327,9 +2343,9 @@ def organization_access_fields(
+         "organizationRole": role,
+         "canViewOrganizationUsage": can_view_usage,
+         "canViewOrganizationBilling": can_view_billing,
+-        "canSimulateOrganizationTopup": bool(
+-            can_view_billing and (organization_demo_enabled() or billing.mock_payment_enabled())
+-        ),
++        "canSimulateOrganizationTopup": bool(
++            can_view_billing and (organization_demo_enabled() or billing.mock_payment_enabled())
++        ),
+         "canManageOrganizationTokens": bool(enabled and role == "admin"),
+         "canAdjustOrganizationCredit": bool(enabled and user.get("isPlatformAdmin")),
+         "canManageOrganization": bool(enabled and role == "admin"),
+@@ -4145,136 +4161,136 @@ def local_personal_usage_cache_key(user_id: str, start_date: str, end_date: str,
+     return f"usage:local:v3:{revision}:{user_id}:{start_date}:{end_date}:{source or 'all'}"
+ 
+ 
+-def admin_usage_cache_key(email: str, start_date: str, end_date: str, source: str, employee: str | None, revision: str = "", model: list[str] | None = None) -> str:
+-    model_key = ",".join(sorted(str(item).strip().lower() for item in (model or []) if str(item).strip()))
+-    return f"admin-usage:v7:{revision}:{email.strip().lower()}:{start_date}:{end_date}:{source or 'all'}:{(employee or '').strip().lower()}:{model_key}"
+-
+-
+-def admin_live_totals_cache_key(kind: str, start_date: str, end_date: str) -> str:
+-    backend_ids = []
+-    try:
+-        backend_ids = sorted(str(item.id) for item in client().backends)
+-    except Exception:
+-        backend_ids = []
+-    fingerprint = hashlib.sha256(
+-        json.dumps({"backends": backend_ids, "timezone": usage_timezone_offset_minutes()}, sort_keys=True).encode("utf-8")
+-    ).hexdigest()[:16]
+-    return f"admin-live:v2:{kind}:{start_date}:{end_date}:{fingerprint}"
+-
+-
+-async def _refresh_admin_live_totals(kind: str, start_date: str, end_date: str, key: str) -> dict[str, Any]:
+-    started = asyncio.get_running_loop().time()
+-    try:
+-        operation = client().global_activity_totals(start_date, end_date) if kind == "activity" else client().global_spend_totals(start_date, end_date)
+-        value = await asyncio.wait_for(operation, timeout=max(5, env_int("ADMIN_LIVE_TOTALS_REFRESH_TIMEOUT_SECONDS", 120)))
+-        value = dict(value or {})
+-        value["complete"] = bool(value.get("complete"))
+-        value["cachedAt"] = datetime.now(timezone.utc).isoformat()
+-        value["refreshDurationMs"] = round((asyncio.get_running_loop().time() - started) * 1000, 1)
+-        # Never replace a good cache with an incomplete multi-backend result.
+-        if value["complete"]:
+-            await _admin_live_totals_cache.set(key, value)
+-        return {"value": value, "cacheStatus": "fresh" if value["complete"] else "miss", "cacheAgeSeconds": 0, "refreshInProgress": False, "refreshError": ""}
+-    finally:
+-        task = asyncio.current_task()
+-        if task is not None and _admin_live_refresh_tasks.get(key) is task:
+-            _admin_live_refresh_tasks.pop(key, None)
+-
+-
+-async def get_live_totals_cached(kind: str, start_date: str, end_date: str, refresh: bool = False) -> dict[str, Any]:
+-    key = admin_live_totals_cache_key(kind, start_date, end_date)
+-    cached = None if refresh else await _admin_live_totals_cache.get(key)
+-    ttl = max(1, env_int("ADMIN_LIVE_TOTALS_CACHE_TTL_SECONDS", 60))
+-    stale = max(ttl, env_int("ADMIN_LIVE_TOTALS_STALE_SECONDS", 300))
+-    if cached and isinstance(cached.get("value"), dict):
+-        age = float(cached.get("ageSeconds") or 0)
+-        if age <= ttl and not refresh:
+-            return {"value": cached["value"], "cacheStatus": "fresh", "cacheAgeSeconds": age, "refreshInProgress": False, "refreshError": ""}
+-        if age <= stale and not refresh:
+-            async with _admin_live_refresh_lock:
+-                task = _admin_live_refresh_tasks.get(key)
+-                if task is None or task.done():
+-                    task = asyncio.create_task(_refresh_admin_live_totals(kind, start_date, end_date, key))
+-                    _admin_live_refresh_tasks[key] = task
+-                    task.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
+-            return {"value": cached["value"], "cacheStatus": "stale", "cacheAgeSeconds": age, "refreshInProgress": True, "refreshError": ""}
+-    async with _admin_live_refresh_lock:
+-        task = _admin_live_refresh_tasks.get(key)
+-        if task is None or task.done():
+-            task = asyncio.create_task(_refresh_admin_live_totals(kind, start_date, end_date, key))
+-            _admin_live_refresh_tasks[key] = task
+-            task.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
+-    try:
+-        return await asyncio.shield(task)
+-    except Exception as exc:
+-        if cached and isinstance(cached.get("value"), dict):
+-            return {"value": cached["value"], "cacheStatus": "stale", "cacheAgeSeconds": cached.get("ageSeconds", 0), "refreshInProgress": False, "refreshError": exc.__class__.__name__}
+-        return {"value": {"available": False, "complete": False, "missingBackends": ["unknown"], "errorCode": exc.__class__.__name__}, "cacheStatus": "miss", "cacheAgeSeconds": 0, "refreshInProgress": False, "refreshError": exc.__class__.__name__}
+-
+-
+-async def live_totals_cache_diagnostics(start_date: str, end_date: str) -> dict[str, Any]:
+-    items = {}
+-    for kind in ("activity", "spend"):
+-        cached = await _admin_live_totals_cache.get(admin_live_totals_cache_key(kind, start_date, end_date))
+-        if cached is None:
+-            items[kind] = {"status": "miss", "ageSeconds": None}
+-            continue
+-        age = float(cached.get("ageSeconds") or 0)
+-        ttl = max(1, env_int("ADMIN_LIVE_TOTALS_CACHE_TTL_SECONDS", 60))
+-        items[kind] = {"status": "fresh" if age <= ttl else "stale", "ageSeconds": round(age, 1)}
+-    return {
+-        "liveCacheStatus": "stale" if any(item["status"] == "stale" for item in items.values()) else ("miss" if any(item["status"] == "miss" for item in items.values()) else "fresh"),
+-        "liveCacheAgeSeconds": max((item["ageSeconds"] or 0 for item in items.values()), default=0),
+-        "activityCacheStatus": items["activity"]["status"],
+-        "spendCacheStatus": items["spend"]["status"],
+-        "liveRefreshInProgress": any(key.startswith(f"admin-live:v2:{kind}:{start_date}:{end_date}:") for key in _admin_live_refresh_tasks for kind in ("activity", "spend")),
+-    }
+-
+-
+-async def admin_live_totals_prefetch_loop() -> None:
+-    stop = _admin_live_prefetch_stop
+-    interval = max(30, env_int("ADMIN_LIVE_TOTALS_PREFETCH_INTERVAL_SECONDS", 60))
+-    while stop is None or not stop.is_set():
+-        today = usage_today()
+-        windows = [(today - timedelta(days=days - 1)).isoformat() for days in (1, 3)]
+-        for start_date in windows:
+-            try:
+-                activity = await get_live_totals_cached("activity", start_date, today.isoformat())
+-                value = activity.get("value") or {}
+-                # 与 admin_usage_payload 同一判据：活动汇总自带完整金额时用不到明细，不预取
+-                if not (value.get("complete") and value.get("spendAvailable", True)):
+-                    await get_live_totals_cached("spend", start_date, today.isoformat())
+-            except Exception as exc:
+-                logger.warning("admin live totals prefetch failed error=%s", exc.__class__.__name__)
+-        if stop is None:
+-            await asyncio.sleep(interval)
+-        else:
+-            try:
+-                await asyncio.wait_for(stop.wait(), timeout=interval)
+-            except asyncio.TimeoutError:
+-                pass
+-
+-
+-def start_admin_live_totals_prefetch() -> None:
+-    global _admin_live_prefetch_task, _admin_live_prefetch_stop
+-    if not env_bool("ADMIN_LIVE_TOTALS_PREFETCH_ENABLED", True) or _admin_live_prefetch_task is not None:
+-        return
+-    _admin_live_prefetch_stop = asyncio.Event()
+-    _admin_live_prefetch_task = asyncio.create_task(admin_live_totals_prefetch_loop(), name="admin-live-totals-prefetch")
+-
+-
+-async def stop_admin_live_totals_prefetch() -> None:
+-    global _admin_live_prefetch_task, _admin_live_prefetch_stop
+-    if _admin_live_prefetch_stop is not None:
+-        _admin_live_prefetch_stop.set()
+-    if _admin_live_prefetch_task is not None:
+-        _admin_live_prefetch_task.cancel()
+-        try:
+-            await _admin_live_prefetch_task
+-        except asyncio.CancelledError:
+-            pass
+-    _admin_live_prefetch_task = None
+-    _admin_live_prefetch_stop = None
++def admin_usage_cache_key(email: str, start_date: str, end_date: str, source: str, employee: str | None, revision: str = "", model: list[str] | None = None) -> str:
++    model_key = ",".join(sorted(str(item).strip().lower() for item in (model or []) if str(item).strip()))
++    return f"admin-usage:v7:{revision}:{email.strip().lower()}:{start_date}:{end_date}:{source or 'all'}:{(employee or '').strip().lower()}:{model_key}"
++
++
++def admin_live_totals_cache_key(kind: str, start_date: str, end_date: str) -> str:
++    backend_ids = []
++    try:
++        backend_ids = sorted(str(item.id) for item in client().backends)
++    except Exception:
++        backend_ids = []
++    fingerprint = hashlib.sha256(
++        json.dumps({"backends": backend_ids, "timezone": usage_timezone_offset_minutes()}, sort_keys=True).encode("utf-8")
++    ).hexdigest()[:16]
++    return f"admin-live:v2:{kind}:{start_date}:{end_date}:{fingerprint}"
++
++
++async def _refresh_admin_live_totals(kind: str, start_date: str, end_date: str, key: str) -> dict[str, Any]:
++    started = asyncio.get_running_loop().time()
++    try:
++        operation = client().global_activity_totals(start_date, end_date) if kind == "activity" else client().global_spend_totals(start_date, end_date)
++        value = await asyncio.wait_for(operation, timeout=max(5, env_int("ADMIN_LIVE_TOTALS_REFRESH_TIMEOUT_SECONDS", 120)))
++        value = dict(value or {})
++        value["complete"] = bool(value.get("complete"))
++        value["cachedAt"] = datetime.now(timezone.utc).isoformat()
++        value["refreshDurationMs"] = round((asyncio.get_running_loop().time() - started) * 1000, 1)
++        # Never replace a good cache with an incomplete multi-backend result.
++        if value["complete"]:
++            await _admin_live_totals_cache.set(key, value)
++        return {"value": value, "cacheStatus": "fresh" if value["complete"] else "miss", "cacheAgeSeconds": 0, "refreshInProgress": False, "refreshError": ""}
++    finally:
++        task = asyncio.current_task()
++        if task is not None and _admin_live_refresh_tasks.get(key) is task:
++            _admin_live_refresh_tasks.pop(key, None)
++
++
++async def get_live_totals_cached(kind: str, start_date: str, end_date: str, refresh: bool = False) -> dict[str, Any]:
++    key = admin_live_totals_cache_key(kind, start_date, end_date)
++    cached = None if refresh else await _admin_live_totals_cache.get(key)
++    ttl = max(1, env_int("ADMIN_LIVE_TOTALS_CACHE_TTL_SECONDS", 60))
++    stale = max(ttl, env_int("ADMIN_LIVE_TOTALS_STALE_SECONDS", 300))
++    if cached and isinstance(cached.get("value"), dict):
++        age = float(cached.get("ageSeconds") or 0)
++        if age <= ttl and not refresh:
++            return {"value": cached["value"], "cacheStatus": "fresh", "cacheAgeSeconds": age, "refreshInProgress": False, "refreshError": ""}
++        if age <= stale and not refresh:
++            async with _admin_live_refresh_lock:
++                task = _admin_live_refresh_tasks.get(key)
++                if task is None or task.done():
++                    task = asyncio.create_task(_refresh_admin_live_totals(kind, start_date, end_date, key))
++                    _admin_live_refresh_tasks[key] = task
++                    task.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
++            return {"value": cached["value"], "cacheStatus": "stale", "cacheAgeSeconds": age, "refreshInProgress": True, "refreshError": ""}
++    async with _admin_live_refresh_lock:
++        task = _admin_live_refresh_tasks.get(key)
++        if task is None or task.done():
++            task = asyncio.create_task(_refresh_admin_live_totals(kind, start_date, end_date, key))
++            _admin_live_refresh_tasks[key] = task
++            task.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
++    try:
++        return await asyncio.shield(task)
++    except Exception as exc:
++        if cached and isinstance(cached.get("value"), dict):
++            return {"value": cached["value"], "cacheStatus": "stale", "cacheAgeSeconds": cached.get("ageSeconds", 0), "refreshInProgress": False, "refreshError": exc.__class__.__name__}
++        return {"value": {"available": False, "complete": False, "missingBackends": ["unknown"], "errorCode": exc.__class__.__name__}, "cacheStatus": "miss", "cacheAgeSeconds": 0, "refreshInProgress": False, "refreshError": exc.__class__.__name__}
++
++
++async def live_totals_cache_diagnostics(start_date: str, end_date: str) -> dict[str, Any]:
++    items = {}
++    for kind in ("activity", "spend"):
++        cached = await _admin_live_totals_cache.get(admin_live_totals_cache_key(kind, start_date, end_date))
++        if cached is None:
++            items[kind] = {"status": "miss", "ageSeconds": None}
++            continue
++        age = float(cached.get("ageSeconds") or 0)
++        ttl = max(1, env_int("ADMIN_LIVE_TOTALS_CACHE_TTL_SECONDS", 60))
++        items[kind] = {"status": "fresh" if age <= ttl else "stale", "ageSeconds": round(age, 1)}
++    return {
++        "liveCacheStatus": "stale" if any(item["status"] == "stale" for item in items.values()) else ("miss" if any(item["status"] == "miss" for item in items.values()) else "fresh"),
++        "liveCacheAgeSeconds": max((item["ageSeconds"] or 0 for item in items.values()), default=0),
++        "activityCacheStatus": items["activity"]["status"],
++        "spendCacheStatus": items["spend"]["status"],
++        "liveRefreshInProgress": any(key.startswith(f"admin-live:v2:{kind}:{start_date}:{end_date}:") for key in _admin_live_refresh_tasks for kind in ("activity", "spend")),
++    }
++
++
++async def admin_live_totals_prefetch_loop() -> None:
++    stop = _admin_live_prefetch_stop
++    interval = max(30, env_int("ADMIN_LIVE_TOTALS_PREFETCH_INTERVAL_SECONDS", 60))
++    while stop is None or not stop.is_set():
++        today = usage_today()
++        windows = [(today - timedelta(days=days - 1)).isoformat() for days in (1, 3)]
++        for start_date in windows:
++            try:
++                activity = await get_live_totals_cached("activity", start_date, today.isoformat())
++                value = activity.get("value") or {}
++                # 与 admin_usage_payload 同一判据：活动汇总自带完整金额时用不到明细，不预取
++                if not (value.get("complete") and value.get("spendAvailable", True)):
++                    await get_live_totals_cached("spend", start_date, today.isoformat())
++            except Exception as exc:
++                logger.warning("admin live totals prefetch failed error=%s", exc.__class__.__name__)
++        if stop is None:
++            await asyncio.sleep(interval)
++        else:
++            try:
++                await asyncio.wait_for(stop.wait(), timeout=interval)
++            except asyncio.TimeoutError:
++                pass
++
++
++def start_admin_live_totals_prefetch() -> None:
++    global _admin_live_prefetch_task, _admin_live_prefetch_stop
++    if not env_bool("ADMIN_LIVE_TOTALS_PREFETCH_ENABLED", True) or _admin_live_prefetch_task is not None:
++        return
++    _admin_live_prefetch_stop = asyncio.Event()
++    _admin_live_prefetch_task = asyncio.create_task(admin_live_totals_prefetch_loop(), name="admin-live-totals-prefetch")
++
++
++async def stop_admin_live_totals_prefetch() -> None:
++    global _admin_live_prefetch_task, _admin_live_prefetch_stop
++    if _admin_live_prefetch_stop is not None:
++        _admin_live_prefetch_stop.set()
++    if _admin_live_prefetch_task is not None:
++        _admin_live_prefetch_task.cancel()
++        try:
++            await _admin_live_prefetch_task
++        except asyncio.CancelledError:
++            pass
++    _admin_live_prefetch_task = None
++    _admin_live_prefetch_stop = None
+ 
+ 
+ def department_usage_cache_key(email: str, start_date: str, end_date: str, source: str, department: str | None, revision: str = "") -> str:
+@@ -4368,17 +4384,17 @@ def empty_usage_totals() -> dict[str, Any]:
+     }
+ 
+ 
+-def add_usage_totals(target: dict[str, Any], row: dict[str, Any]) -> None:
++def add_usage_totals(target: dict[str, Any], row: dict[str, Any]) -> None:
+     for field in ("promptTokens", "completionTokens", "totalTokens", "requestCount", "successCount", "failureCount"):
+         target[field] += int(row.get(field) or 0)
+-    target["spend"] += float(row.get("spend") or 0)
+-
+-
+-def aggregate_usage_totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
+-    totals = empty_usage_totals()
+-    for row in rows:
+-        add_usage_totals(totals, row)
+-    return totals
++    target["spend"] += float(row.get("spend") or 0)
++
++
++def aggregate_usage_totals(rows: list[dict[str, Any]]) -> dict[str, Any]:
++    totals = empty_usage_totals()
++    for row in rows:
++        add_usage_totals(totals, row)
++    return totals
+ 
+ 
+ def reaggregate_team_employees_after_model_filter(
+@@ -4687,12 +4703,12 @@ async def _personal_usage_payload(app_user: dict[str, Any], start_date: str, end
+                     "endDate": end_date,
+                     "source": source,
+                     "rows": rows,
+-                    "summary": usage_summary(rows),
+-                    "mappingCache": {"hit": True, "ttlSeconds": 0},
+-                    "coveredBackends": stored.get("coveredBackends", usage_backend_ids()),
+-                    "missingBackends": stored.get("missingBackends", []),
+-                    "coverage": {"complete": not bool(stored.get("missingBackends"))},
+-                }, stored.get("lastSyncedAt"), start_date, end_date, revision)
++                    "summary": usage_summary(rows),
++                    "mappingCache": {"hit": True, "ttlSeconds": 0},
++                    "coveredBackends": stored.get("coveredBackends", usage_backend_ids()),
++                    "missingBackends": stored.get("missingBackends", []),
++                    "coverage": {"complete": not bool(stored.get("missingBackends"))},
++                }, stored.get("lastSyncedAt"), start_date, end_date, revision)
+                 cache_usage_payload(
+                     personal_usage_cache,
+                     cache_key,
+@@ -4963,7 +4979,7 @@ async def person_usage_rows(email: str, name: str | None, start_date: str, end_d
+     return payload["rows"], user_ids
+ 
+ 
+-async def admin_usage_payload(admin: dict[str, Any], start_date: str, end_date: str, source: str, employee: str | None, refresh: bool = False, model: list[str] | None = None) -> dict[str, Any]:
++async def admin_usage_payload(admin: dict[str, Any], start_date: str, end_date: str, source: str, employee: str | None, refresh: bool = False, model: list[str] | None = None) -> dict[str, Any]:
+     request_started = asyncio.get_running_loop().time()
+     revision = "development-upstream"
+     if usage_store() is not None:
+@@ -5016,31 +5032,31 @@ async def admin_usage_payload(admin: dict[str, Any], start_date: str, end_date:
+             stored = await store.admin_rows(start_date, end_date, source, employee, usage_backend_ids())
+             queried_at = asyncio.get_running_loop().time()
+             logger.info("admin usage sql refresh=%s connect_ms=%.0f query_ms=%.0f total_ms=%.0f", refresh, (connected_at - db_started) * 1000, (queried_at - connected_at) * 1000, (queried_at - request_started) * 1000)
+-            if stored is not None:
++            if stored is not None:
+                 stored = dict(stored)
+                 last_synced = stored.pop("lastSyncedAt", None)
+-                attach_snapshot_freshness(stored, last_synced, start_date, end_date, revision)
+-                default_scope = source == "all" and not employee and not (model or [])
+-                if default_scope:
+-                    activity_cached = await get_live_totals_cached("activity", start_date, end_date, refresh)
+-                    activity_live = activity_cached.get("value") or {}
+-                    # 活动汇总完整且自带金额时，下面根本不用逐请求明细的金额。而明细在上游
+-                    # 一天超过 10000 条时必然 UpstreamResultLimit（不完整 ⇒ 永不进缓存），
+-                    # 以前每次请求都同步再扫一遍，约 2 秒白等，还每 5 秒给上游压一次。
+-                    # 只有活动汇总缺金额时才去取明细。
+-                    if activity_live.get("complete") and activity_live.get("spendAvailable", True):
+-                        spend_cached = {
+-                            "value": {"complete": True, "missingBackends": [], "perBackend": {}, "skipped": "activity_spend_available"},
+-                            "cacheStatus": activity_cached.get("cacheStatus"),
+-                            "cacheAgeSeconds": activity_cached.get("cacheAgeSeconds", 0),
+-                            "refreshInProgress": False,
+-                            "refreshError": "",
+-                        }
+-                    else:
+-                        spend_cached = await get_live_totals_cached("spend", start_date, end_date, refresh)
+-                    spend_live = spend_cached.get("value") or {}
+-                    snapshot_totals = aggregate_usage_totals(stored.get("summaryRows") or stored.get("rows") or [])
+-                    activity_totals = activity_live.get("totals") or empty_usage_totals()
++                attach_snapshot_freshness(stored, last_synced, start_date, end_date, revision)
++                default_scope = source == "all" and not employee and not (model or [])
++                if default_scope:
++                    activity_cached = await get_live_totals_cached("activity", start_date, end_date, refresh)
++                    activity_live = activity_cached.get("value") or {}
++                    # 活动汇总完整且自带金额时，下面根本不用逐请求明细的金额。而明细在上游
++                    # 一天超过 10000 条时必然 UpstreamResultLimit（不完整 ⇒ 永不进缓存），
++                    # 以前每次请求都同步再扫一遍，约 2 秒白等，还每 5 秒给上游压一次。
++                    # 只有活动汇总缺金额时才去取明细。
++                    if activity_live.get("complete") and activity_live.get("spendAvailable", True):
++                        spend_cached = {
++                            "value": {"complete": True, "missingBackends": [], "perBackend": {}, "skipped": "activity_spend_available"},
++                            "cacheStatus": activity_cached.get("cacheStatus"),
++                            "cacheAgeSeconds": activity_cached.get("cacheAgeSeconds", 0),
++                            "refreshInProgress": False,
++                            "refreshError": "",
++                        }
++                    else:
++                        spend_cached = await get_live_totals_cached("spend", start_date, end_date, refresh)
++                    spend_live = spend_cached.get("value") or {}
++                    snapshot_totals = aggregate_usage_totals(stored.get("summaryRows") or stored.get("rows") or [])
++                    activity_totals = activity_live.get("totals") or empty_usage_totals()
+                     # Activity metadata is the complete upstream aggregate;
+                     # request-level Spend Logs may be capped by the UI API.
+                     activity_spend_available = bool(
+@@ -5051,47 +5067,47 @@ async def admin_usage_payload(admin: dict[str, Any], start_date: str, end_date:
+                         if activity_spend_available
+                         else (spend_live.get("totals") or empty_usage_totals())
+                     )
+-                    live = {
+-                        "activityTotals": activity_totals,
++                    live = {
++                        "activityTotals": activity_totals,
+                         "spendTotals": spend_totals if activity_spend_available else {"spend": None},
+                         "totals": {**activity_totals, "spend": spend_totals.get("spend") if activity_spend_available else None},
+-                        "perBackendActivity": activity_live.get("perBackend") or {},
+-                        "perBackendSpend": spend_live.get("perBackend") or {},
+-                        "activitySource": "daily_activity_aggregated",
++                        "perBackendActivity": activity_live.get("perBackend") or {},
++                        "perBackendSpend": spend_live.get("perBackend") or {},
++                        "activitySource": "daily_activity_aggregated",
+                         "spendSource": "daily_activity_aggregated" if activity_spend_available else "spend_logs_ui",
+                         "complete": bool(activity_live.get("complete")),
+-                        "activityStatus": "complete" if activity_live.get("complete") else "partial",
++                        "activityStatus": "complete" if activity_live.get("complete") else "partial",
+                         "spendStatus": "complete" if activity_spend_available else "unavailable",
+                         "spendAvailable": activity_spend_available,
+                         "spendFallback": bool(activity_spend_available and not spend_live.get("complete")),
+-                        "missingActivityBackends": activity_live.get("missingBackends") or [],
+-                        "missingSpendBackends": spend_live.get("missingBackends") or [],
+-                        "missingBackends": list(dict.fromkeys((activity_live.get("missingBackends") or []) + (spend_live.get("missingBackends") or []))),
+-                        "source": "upstream_global_activity_and_spend_logs",
+-                        "cacheStatus": "stale" if "stale" in {activity_cached.get("cacheStatus"), spend_cached.get("cacheStatus")} else ("miss" if "miss" in {activity_cached.get("cacheStatus"), spend_cached.get("cacheStatus")} else "fresh"),
+-                        "cacheAgeSeconds": max(float(activity_cached.get("cacheAgeSeconds") or 0), float(spend_cached.get("cacheAgeSeconds") or 0)),
+-                        "refreshInProgress": bool(activity_cached.get("refreshInProgress") or spend_cached.get("refreshInProgress")),
+-                        "refreshError": ";".join(str(item) for item in (activity_cached.get("refreshError"), spend_cached.get("refreshError")) if item),
+-                    }
+-                    live["differenceFromSnapshot"] = {
++                        "missingActivityBackends": activity_live.get("missingBackends") or [],
++                        "missingSpendBackends": spend_live.get("missingBackends") or [],
++                        "missingBackends": list(dict.fromkeys((activity_live.get("missingBackends") or []) + (spend_live.get("missingBackends") or []))),
++                        "source": "upstream_global_activity_and_spend_logs",
++                        "cacheStatus": "stale" if "stale" in {activity_cached.get("cacheStatus"), spend_cached.get("cacheStatus")} else ("miss" if "miss" in {activity_cached.get("cacheStatus"), spend_cached.get("cacheStatus")} else "fresh"),
++                        "cacheAgeSeconds": max(float(activity_cached.get("cacheAgeSeconds") or 0), float(spend_cached.get("cacheAgeSeconds") or 0)),
++                        "refreshInProgress": bool(activity_cached.get("refreshInProgress") or spend_cached.get("refreshInProgress")),
++                        "refreshError": ";".join(str(item) for item in (activity_cached.get("refreshError"), spend_cached.get("refreshError")) if item),
++                    }
++                    live["differenceFromSnapshot"] = {
+                         field: abs(float((activity_totals if field != "spend" or activity_spend_available else {}).get(field, 0) or 0) - float(snapshot_totals.get(field, 0))) / max(1.0, abs(float(snapshot_totals.get(field, 0))))
+-                        for field in ("totalTokens", "requestCount", "spend")
+-                    }
+-                    quality = dict(stored.get("dataQuality") or {})
+-                    quality.update({"liveCacheStatus": live.get("cacheStatus"), "liveCacheAgeSeconds": live.get("cacheAgeSeconds"), "liveRefreshInProgress": live.get("refreshInProgress", False), "liveRefreshError": live.get("refreshError", "")})
+-                    if not activity_live.get("complete"):
+-                        quality.update({"liveTotalsStatus": "partial", "liveTotalsSource": "daily_activity_aggregated", "missingBackends": live["missingBackends"], "liveTotalsReason": "实时活动汇总不可用"})
+-                    if not spend_live.get("complete"):
+-                        quality.update({"liveSpendStatus": "unavailable", "liveSpendSource": "spend_logs_ui", "missingSpendBackends": live["missingSpendBackends"], "liveSpendReason": "实时金额暂不可用，未显示可能不完整的金额"})
++                        for field in ("totalTokens", "requestCount", "spend")
++                    }
++                    quality = dict(stored.get("dataQuality") or {})
++                    quality.update({"liveCacheStatus": live.get("cacheStatus"), "liveCacheAgeSeconds": live.get("cacheAgeSeconds"), "liveRefreshInProgress": live.get("refreshInProgress", False), "liveRefreshError": live.get("refreshError", "")})
++                    if not activity_live.get("complete"):
++                        quality.update({"liveTotalsStatus": "partial", "liveTotalsSource": "daily_activity_aggregated", "missingBackends": live["missingBackends"], "liveTotalsReason": "实时活动汇总不可用"})
++                    if not spend_live.get("complete"):
++                        quality.update({"liveSpendStatus": "unavailable", "liveSpendSource": "spend_logs_ui", "missingSpendBackends": live["missingSpendBackends"], "liveSpendReason": "实时金额暂不可用，未显示可能不完整的金额"})
+                     if live["spendFallback"]:
+                         quality.update({"liveSpendStatus": "fallback", "liveSpendSource": "daily_activity_aggregated", "liveSpendReason": "逐请求明细达到上游返回上限，金额采用完整活动汇总"})
+                     stored["dataQuality"] = quality
+                     live["available"] = bool(activity_live.get("complete"))
+-                    stored["liveTotals"] = live
+-                # 命中时要用 last_synced 重算新鲜度，跟着缓存一起存（返回前去掉，不进响应）
+-                admin_usage_cache.set(cache_key, {**stored, "_lastSyncedAt": last_synced}, env_int("ADMIN_USAGE_CACHE_TTL_SECONDS", 300))
+-                stored["cache"] = {"hit": False, "ttlSeconds": 0}
+-                return stored
++                    stored["liveTotals"] = live
++                # 命中时要用 last_synced 重算新鲜度，跟着缓存一起存（返回前去掉，不进响应）
++                admin_usage_cache.set(cache_key, {**stored, "_lastSyncedAt": last_synced}, env_int("ADMIN_USAGE_CACHE_TTL_SECONDS", 300))
++                stored["cache"] = {"hit": False, "ttlSeconds": 0}
++                return stored
+         except Exception as exc:
+             logger.exception("local admin usage query failed")
+             raise manual_refresh_database_unavailable() from exc
+@@ -5641,42 +5657,42 @@ async def current_upstream_user(request: Request, refresh: bool = False) -> tupl
+         }
+         if not local_account_is_active(app_user):
+             return app_user, local_scope
+-        try:
+-            upstream_info = await client().user_info(upstream_user_id)
++        try:
++            upstream_info = await client().user_info(upstream_user_id)
+             if not isinstance(upstream_info, dict) or not str(
+                 upstream_info.get("user_id") or upstream_info.get("id") or ""
+             ).strip():
+                 raise HTTPException(status_code=404, detail="上游用户记录为空")
+-        except HTTPException as exc:
+-            if exc.status_code != 404:
+-                raise
+-            # A local mapping is authoritative only after the mapped upstream
+-            # user exists. Never replace a missing local account with a weak
+-            # same-email match from the upstream directory.
+-            await auth_store_call(
+-                "set_provisioning_status",
+-                local_user_id,
+-                "provisioning_failed",
+-                "primary",
+-                upstream_user_id,
+-                "上游个人账号不存在，等待重新开通",
+-            )
+-            repaired = await provision_local_user(local_user)
+-            if repaired.get("status") != "provisioned":
+-                raise auth_http_error(
+-                    409,
+-                    "账号开通异常，请稍后重试或联系管理员",
+-                    "AUTH_PROVISIONING_FAILED",
+-                )
+-            refreshed_id = str(repaired.get("upstream_user_id") or repaired.get("upstreamUserId") or upstream_user_id)
+-            upstream_info = await client().user_info(refreshed_id)
+-            if not isinstance(upstream_info, dict) or not str(upstream_info.get("user_id") or upstream_info.get("id") or "").strip():
+-                raise auth_http_error(409, "账号开通异常，请稍后重试或联系管理员", "AUTH_PROVISIONING_FAILED")
+-            local_scope["user_id"] = refreshed_id
+-            local_scope["matched_user_ids"] = [refreshed_id]
+-            local_scope["matched_accounts"] = [{"backend": "primary", "source": "通衢 API", "user_id": refreshed_id, "account_id": refreshed_id, "matchSources": ["local_mapping"]}]
+-            local_scope["matched_sources"] = {refreshed_id: ["local_mapping"]}
+-            return app_user, local_scope
++        except HTTPException as exc:
++            if exc.status_code != 404:
++                raise
++            # A local mapping is authoritative only after the mapped upstream
++            # user exists. Never replace a missing local account with a weak
++            # same-email match from the upstream directory.
++            await auth_store_call(
++                "set_provisioning_status",
++                local_user_id,
++                "provisioning_failed",
++                "primary",
++                upstream_user_id,
++                "上游个人账号不存在，等待重新开通",
++            )
++            repaired = await provision_local_user(local_user)
++            if repaired.get("status") != "provisioned":
++                raise auth_http_error(
++                    409,
++                    "账号开通异常，请稍后重试或联系管理员",
++                    "AUTH_PROVISIONING_FAILED",
++                )
++            refreshed_id = str(repaired.get("upstream_user_id") or repaired.get("upstreamUserId") or upstream_user_id)
++            upstream_info = await client().user_info(refreshed_id)
++            if not isinstance(upstream_info, dict) or not str(upstream_info.get("user_id") or upstream_info.get("id") or "").strip():
++                raise auth_http_error(409, "账号开通异常，请稍后重试或联系管理员", "AUTH_PROVISIONING_FAILED")
++            local_scope["user_id"] = refreshed_id
++            local_scope["matched_user_ids"] = [refreshed_id]
++            local_scope["matched_accounts"] = [{"backend": "primary", "source": "通衢 API", "user_id": refreshed_id, "account_id": refreshed_id, "matchSources": ["local_mapping"]}]
++            local_scope["matched_sources"] = {refreshed_id: ["local_mapping"]}
++            return app_user, local_scope
+ 
+         # Tool-account mappings can have sibling accounts for the same exact
+         # mailbox. Resolve those only for the canonical account ids used by
+@@ -5829,25 +5845,25 @@ class VerificationRequest(BaseModel):
+     turnstileToken: str = Field(default="", max_length=4096)
+ 
+ 
+-class RegisterRequest(BaseModel):
++class RegisterRequest(BaseModel):
+     email: str = Field(min_length=3, max_length=320)
+     name: str = Field(min_length=1, max_length=100)
+     password: str = Field(min_length=8, max_length=128)
+     verificationCode: str = Field(default="", max_length=12)
+-    turnstileToken: str = Field(default="", max_length=4096)
+-
+-
+-class EnterpriseRegisterRequest(RegisterRequest):
+-    email: str = Field(default="", max_length=320)
+-    name: str = Field(default="", max_length=100)
+-    adminEmail: str = Field(default="", max_length=320)
+-    adminName: str = Field(default="", max_length=100)
+-    organizationName: str = Field(min_length=2, max_length=128)
+-
+-    @field_validator("organizationName")
+-    @classmethod
+-    def strip_organization_name(cls, value: str) -> str:
+-        return value.strip()
++    turnstileToken: str = Field(default="", max_length=4096)
++
++
++class EnterpriseRegisterRequest(RegisterRequest):
++    email: str = Field(default="", max_length=320)
++    name: str = Field(default="", max_length=100)
++    adminEmail: str = Field(default="", max_length=320)
++    adminName: str = Field(default="", max_length=100)
++    organizationName: str = Field(min_length=2, max_length=128)
++
++    @field_validator("organizationName")
++    @classmethod
++    def strip_organization_name(cls, value: str) -> str:
++        return value.strip()
+ 
+ 
+ class PasswordLoginRequest(BaseModel):
+@@ -5932,15 +5948,15 @@ class RedeemRequest(BaseModel):
+         return value.strip().upper()
+ 
+ 
+-class CreateTopupOrderRequest(BaseModel):
+-    amount: float = Field(gt=0)
+-    paymentMethod: Literal["", "alipay", "wxpay", "mock"] = ""
+-    channel: Literal["epay", "manual_qr", "mock"] = "epay"
+-    cursorAmountUsd: float = Field(default=0, ge=0)
+-    claudeCodeAmountUsd: float = Field(default=0, ge=0)
++class CreateTopupOrderRequest(BaseModel):
++    amount: float = Field(gt=0)
++    paymentMethod: Literal["", "alipay", "wxpay", "mock"] = ""
++    channel: Literal["epay", "manual_qr", "mock"] = "epay"
++    cursorAmountUsd: float = Field(default=0, ge=0)
++    claudeCodeAmountUsd: float = Field(default=0, ge=0)
+ 
+ 
+-class SubmitManualPaymentRequest(BaseModel):
++class SubmitManualPaymentRequest(BaseModel):
+     payerNote: str = Field(default="", max_length=500)
+ 
+     @field_validator("payerNote")
+@@ -5949,32 +5965,32 @@ class SubmitManualPaymentRequest(BaseModel):
+         return value.strip()
+ 
+ 
+-class ReviewOrderRequest(BaseModel):
++class ReviewOrderRequest(BaseModel):
+     note: str = Field(default="", max_length=500)
+ 
+     @field_validator("note")
+     @classmethod
+     def strip_note(cls, value: str) -> str:
+-        return value.strip()
+-
+-
+-class OrganizationTopupOrderRequest(BaseModel):
+-    model_config = ConfigDict(extra="forbid")
+-
+-    amount: float = Field(gt=0)
+-    paymentMethod: Literal["", "alipay", "wxpay"] = ""
+-    channel: Literal["manual_qr"] = "manual_qr"
+-    idempotencyKey: str = Field(default="", max_length=128)
+-
+-    @field_validator("idempotencyKey", "paymentMethod")
+-    @classmethod
+-    def strip_order_text(cls, value: str) -> str:
+-        return value.strip()
+-
+-
+-class PlatformPersonalCustomerStatusRequest(BaseModel):
+-    model_config = ConfigDict(extra="forbid")
+-    status: Literal["active", "suspended"]
++        return value.strip()
++
++
++class OrganizationTopupOrderRequest(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    amount: float = Field(gt=0)
++    paymentMethod: Literal["", "alipay", "wxpay"] = ""
++    channel: Literal["manual_qr"] = "manual_qr"
++    idempotencyKey: str = Field(default="", max_length=128)
++
++    @field_validator("idempotencyKey", "paymentMethod")
++    @classmethod
++    def strip_order_text(cls, value: str) -> str:
++        return value.strip()
++
++
++class PlatformPersonalCustomerStatusRequest(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++    status: Literal["active", "suspended"]
+ 
+ 
+ class CreateRedemptionRequest(BaseModel):
+@@ -6487,7 +6503,7 @@ async def debug_me_usage_compare(
+ 
+ 
+ @app.get("/api/debug/admin-usage-compare")
+-async def debug_admin_usage_compare(
++async def debug_admin_usage_compare(
+     request: Request,
+     start_date: str | None = None,
+     end_date: str | None = None,
+@@ -6496,11 +6512,11 @@ async def debug_admin_usage_compare(
+ ) -> dict[str, Any]:
+     if not env_bool("DEBUG_MAPPING_ENABLED", False):
+         raise HTTPException(status_code=404, detail="接口不存在")
+-    require_admin(request)
+-    start_date, end_date = resolve_usage_range(start_date, end_date)
+-    result = await client().admin_usage_compare(start_date, end_date, source)
+-    result.update(await live_totals_cache_diagnostics(start_date, end_date))
+-    return result
++    require_admin(request)
++    start_date, end_date = resolve_usage_range(start_date, end_date)
++    result = await client().admin_usage_compare(start_date, end_date, source)
++    result.update(await live_totals_cache_diagnostics(start_date, end_date))
++    return result
+ 
+ 
+ @app.get("/api/health")
+@@ -6527,7 +6543,14 @@ async def health() -> dict[str, Any]:
+         ),
+     }
+     if organization_real_enabled() and not _organization_capability_status.get("available"):
+-        result["status"] = "degraded"
++        if organization_license_only_unavailable(_organization_capability_status):
++            # 上游没有 Enterprise 许可：/organization/* 永远 403。这是部署的固有限制，不是故障；
++            # 整体一直挂着 degraded 会把真正的故障淹没。组织管理功能仍按原逻辑 fail-closed，
++            # 这里只在组织一栏里如实标出原因，不影响整体状态。
++            result["organization"]["status"] = "unavailable"
++            result["organization"]["knownLimitation"] = "upstream_enterprise_license_missing"
++        else:
++            result["status"] = "degraded"
+     if organization_real_enabled() and isinstance(_organization_store, PostgreSQLOrganizationRepository):
+         try:
+             outbox = await _organization_store.outbox_health()
+@@ -6939,8 +6962,8 @@ async def request_verification(data: VerificationRequest, request: Request) -> d
+     return {"ok": True, "message": "如果邮箱可以使用，验证码已发送", "expiresIn": expires_in}
+ 
+ 
+-@app.post("/api/auth/register")
+-async def register(data: RegisterRequest, request: Request) -> dict[str, Any]:
++@app.post("/api/auth/register")
++async def register(data: RegisterRequest, request: Request) -> dict[str, Any]:
+     require_signup_ready()
+     await enforce_csrf(request)
+     await verify_turnstile(request, data.turnstileToken)
+@@ -6979,54 +7002,54 @@ async def register(data: RegisterRequest, request: Request) -> dict[str, Any]:
+     account = await provision_local_user(user)
+     await auth_store_call("record_audit_event", "registered", str(user["id"]), email, request_ip(request), True, {"accountStatus": account.get("status")})
+     payload = await auth_user_payload(user)
+-    return {"ok": True, "user": payload, "message": "注册成功，请登录"}
+-
+-
+-@app.post("/api/auth/enterprise/register")
+-async def enterprise_register(data: EnterpriseRegisterRequest, request: Request) -> dict[str, Any]:
+-    """Create a verified enterprise administrator and a pending tenant."""
+-    require_signup_ready()
+-    await enforce_csrf(request)
+-    await verify_turnstile(request, data.turnstileToken)
+-    email = validate_public_signup_email(data.email or data.adminEmail)
+-    admin_name = (data.name or data.adminName).strip()
+-    if not admin_name:
+-        raise auth_http_error(400, "请输入企业管理员姓名", "AUTH_INVALID_INPUT")
+-    await enforce_rate_limit("register_ip", request_ip(request), 10, 3600)
+-    if await auth_store_call("get_user_by_email", email):
+-        raise auth_http_error(409, "该邮箱已注册，请直接登录", "AUTH_EMAIL_EXISTS")
+-    try:
+-        password_hash = await asyncio.to_thread(hash_password, data.password)
+-        user = await auth_store_call(
+-            "create_user_from_verification", email, admin_name, password_hash,
+-            "signup", hash_auth_token(data.verificationCode.strip()), status="active",
+-            account_type="enterprise_managed", identity_status="pending_approval",
+-        )
+-        if user is None:
+-            raise auth_http_error(400, "验证码无效或已过期", "AUTH_CODE_INVALID")
+-        organization = await organization_store_call(
+-            "create_organization_with_admin", data.organizationName, admin_name, email,
+-            _require_capability=False,
+-        )
+-        member = organization.get("member") or organization.get("admin") or {}
+-        organization_id = str((organization.get("organization") or {}).get("id") or "")
+-        member_id = str(member.get("id") or "")
+-        if organization_real_enabled() and organization_id and member_id:
+-            await organization_store_call(
+-                "set_member_account", organization_id, member_id, str(user["id"]),
+-                _require_capability=False,
+-            )
+-        await auth_store_call("record_audit_event", "enterprise_registered", str(user["id"]), email, request_ip(request), True, {"organizationId": organization_id})
+-    except (DuplicateEmailError, OrganizationConflictError, DuplicateMemberEmailError) as exc:
+-        raise auth_http_error(409, "企业名称或管理员邮箱已存在", "ENTERPRISE_ALREADY_EXISTS") from exc
+-    except ValueError as exc:
+-        raise auth_http_error(400, str(exc), "AUTH_INVALID_INPUT") from exc
+-    return {
+-        "ok": True,
+-        "status": "pending_approval",
+-        "organization": organization.get("organization"),
+-        "message": "企业注册申请已提交，平台完成开通后即可登录使用",
+-    }
++    return {"ok": True, "user": payload, "message": "注册成功，请登录"}
++
++
++@app.post("/api/auth/enterprise/register")
++async def enterprise_register(data: EnterpriseRegisterRequest, request: Request) -> dict[str, Any]:
++    """Create a verified enterprise administrator and a pending tenant."""
++    require_signup_ready()
++    await enforce_csrf(request)
++    await verify_turnstile(request, data.turnstileToken)
++    email = validate_public_signup_email(data.email or data.adminEmail)
++    admin_name = (data.name or data.adminName).strip()
++    if not admin_name:
++        raise auth_http_error(400, "请输入企业管理员姓名", "AUTH_INVALID_INPUT")
++    await enforce_rate_limit("register_ip", request_ip(request), 10, 3600)
++    if await auth_store_call("get_user_by_email", email):
++        raise auth_http_error(409, "该邮箱已注册，请直接登录", "AUTH_EMAIL_EXISTS")
++    try:
++        password_hash = await asyncio.to_thread(hash_password, data.password)
++        user = await auth_store_call(
++            "create_user_from_verification", email, admin_name, password_hash,
++            "signup", hash_auth_token(data.verificationCode.strip()), status="active",
++            account_type="enterprise_managed", identity_status="pending_approval",
++        )
++        if user is None:
++            raise auth_http_error(400, "验证码无效或已过期", "AUTH_CODE_INVALID")
++        organization = await organization_store_call(
++            "create_organization_with_admin", data.organizationName, admin_name, email,
++            _require_capability=False,
++        )
++        member = organization.get("member") or organization.get("admin") or {}
++        organization_id = str((organization.get("organization") or {}).get("id") or "")
++        member_id = str(member.get("id") or "")
++        if organization_real_enabled() and organization_id and member_id:
++            await organization_store_call(
++                "set_member_account", organization_id, member_id, str(user["id"]),
++                _require_capability=False,
++            )
++        await auth_store_call("record_audit_event", "enterprise_registered", str(user["id"]), email, request_ip(request), True, {"organizationId": organization_id})
++    except (DuplicateEmailError, OrganizationConflictError, DuplicateMemberEmailError) as exc:
++        raise auth_http_error(409, "企业名称或管理员邮箱已存在", "ENTERPRISE_ALREADY_EXISTS") from exc
++    except ValueError as exc:
++        raise auth_http_error(400, str(exc), "AUTH_INVALID_INPUT") from exc
++    return {
++        "ok": True,
++        "status": "pending_approval",
++        "organization": organization.get("organization"),
++        "message": "企业注册申请已提交，平台完成开通后即可登录使用",
++    }
+ 
+ 
+ @app.post("/api/auth/login")
+@@ -7168,7 +7191,7 @@ async def change_password(data: ChangePasswordRequest, request: Request) -> dict
+     return {"ok": True, "user": payload, "csrfToken": csrf_value}
+ 
+ 
+-def self_service_billing_available(user: dict[str, Any]) -> bool:
++def self_service_billing_available(user: dict[str, Any]) -> bool:
+     """Whether the sidebar top-up destination applies to this identity.
+ 
+     Deliberately I/O free: it answers only the navigation-visibility question
+@@ -7181,12 +7204,12 @@ def self_service_billing_available(user: dict[str, Any]) -> bool:
+     An SSO employee uses a department budget and never self-serves top-ups.
+     """
+ 
+-    if local_mock_enabled():
+-        # Mock dev-login identities are personal by default; enterprise demo
+-        # identities carry an organization id and keep the enterprise billing
+-        # contract instead.
+-        return not bool(user.get("organizationId") or user.get("organization_id"))
+-    if not billing.billing_enabled():
++    if local_mock_enabled():
++        # Mock dev-login identities are personal by default; enterprise demo
++        # identities carry an organization id and keep the enterprise billing
++        # contract instead.
++        return not bool(user.get("organizationId") or user.get("organization_id"))
++    if not billing.billing_enabled():
+         return False
+     store = billing_store()
+     if store is None or store.pool is None:
+@@ -7199,20 +7222,20 @@ def self_service_billing_available(user: dict[str, Any]) -> bool:
+ 
+ 
+ @app.get("/api/auth/scope")
+-async def auth_scope(request: Request) -> dict[str, Any]:
+-    user = require_user(request)
+-    if local_mock_enabled() and not user.get("id"):
+-        # Loopback mock customers have no durable auth row; keep the scope
+-        # endpoint side-effect free while still exposing personal billing.
+-        return {
+-            "isTeamLeader": False,
+-            "teamBoardStatus": "none",
+-            "team": None,
+-            "leaderTeams": [],
+-            **(await organization_scope_fields_for_user(user)),
+-            "billingAvailable": True,
+-        }
+-    if organization_demo_enabled() and user.get("isPlatformAdmin"):
++async def auth_scope(request: Request) -> dict[str, Any]:
++    user = require_user(request)
++    if local_mock_enabled() and not user.get("id"):
++        # Loopback mock customers have no durable auth row; keep the scope
++        # endpoint side-effect free while still exposing personal billing.
++        return {
++            "isTeamLeader": False,
++            "teamBoardStatus": "none",
++            "team": None,
++            "leaderTeams": [],
++            **(await organization_scope_fields_for_user(user)),
++            "billingAvailable": True,
++        }
++    if organization_demo_enabled() and user.get("isPlatformAdmin"):
+         # The seller's local customer-console demo is fully side-effect free.
+         # Do not wait on the legacy upstream team resolver merely to bootstrap
+         # a platform administrator who has no customer membership or team
+@@ -7577,10 +7600,10 @@ async def accept_organization_claim(
+ 
+ 
+ @app.get("/api/organization/current")
+-async def organization_current(request: Request) -> dict[str, Any]:
+-    if not organization_enabled():
+-        raise HTTPException(status_code=404, detail="企业组织功能尚未启用")
+-    require_real_organization_capability()
++async def organization_current(request: Request) -> dict[str, Any]:
++    if not organization_enabled():
++        raise HTTPException(status_code=404, detail="企业组织功能尚未启用")
++    require_real_organization_capability()
+     user = await require_organization_directory_viewer(request)
+     return await organization_current_payload(user)
+ 
+@@ -7692,32 +7715,32 @@ async def organization_current_department_usage(
+ 
+ 
+ @app.get("/api/organization/current/billing")
+-async def organization_current_billing(
++async def organization_current_billing(
+     request: Request,
+     page: int = Query(1, ge=1, le=100000),
+     pageSize: int = Query(20, ge=1, le=100),
+-) -> dict[str, Any]:
+-    """Return a customer administrator's isolated Mock enterprise credit balance."""
+-
+-    if not organization_enabled():
+-        raise HTTPException(status_code=404, detail="企业组织功能尚未启用")
+-    require_real_organization_capability()
++) -> dict[str, Any]:
++    """Return a customer administrator's isolated Mock enterprise credit balance."""
++
++    if not organization_enabled():
++        raise HTTPException(status_code=404, detail="企业组织功能尚未启用")
++    require_real_organization_capability()
+     user = await require_organization_billing_viewer(request)
+     organization_id = organization_identifier(organization_current_member(user))
+     try:
+-        payload = await organization_scoped_store_call(
+-            organization_id,
+-            "billing_payload",
+-            page=page,
+-            page_size=pageSize,
+-        )
+-        return {**payload, "mockTopupEnabled": billing.mock_payment_enabled(), "enterprisePayment": billing.enterprise_qr_config()}
++        payload = await organization_scoped_store_call(
++            organization_id,
++            "billing_payload",
++            page=page,
++            page_size=pageSize,
++        )
++        return {**payload, "mockTopupEnabled": billing.mock_payment_enabled(), "enterprisePayment": billing.enterprise_qr_config()}
+     except OrganizationStoreError as exc:
+         raise organization_store_error(exc) from exc
+ 
+ 
+-@app.post("/api/organization/current/billing/topups")
+-async def organization_current_billing_topup(
++@app.post("/api/organization/current/billing/topups")
++async def organization_current_billing_topup(
+     data: OrganizationBillingTopupRequest,
+     request: Request,
+     page: int = Query(1, ge=1, le=100000),
+@@ -7725,90 +7748,90 @@ async def organization_current_billing_topup(
+ ) -> dict[str, Any]:
+     """Credit only the session-derived customer balance; never take payment."""
+ 
+-    if not billing.mock_payment_enabled() and organization_real_enabled():
+-        raise auth_http_error(410, "企业模拟充值未启用，请联系平台运营授信", "ORGANIZATION_TOPUP_DISABLED")
++    if not billing.mock_payment_enabled() and organization_real_enabled():
++        raise auth_http_error(410, "企业模拟充值未启用，请联系平台运营授信", "ORGANIZATION_TOPUP_DISABLED")
+     await enforce_csrf(request)
+     user = await require_organization_billing_topup_operator(request)
+     organization_id = organization_identifier(organization_current_member(user))
+     try:
+-        operator = str(user.get("name") or user.get("email") or "Customer administrator")
+-        operator_email = str(user.get("email") or "")
+-        if organization_real_enabled():
+-            store = organization_store()
+-            if not isinstance(store, PostgreSQLOrganizationRepository):
+-                raise auth_http_error(503, "企业额度服务暂不可用", "ORGANIZATION_BILLING_UNAVAILABLE")
+-            mock_trade_no = billing.generate_trade_no(organization_id)
+-            record = await store.adjust_billing(
+-                organization_id,
+-                operation="grant",
+-                amount_usd=data.amountUsd,
+-                reason="模拟充值，仅用于功能联调，不产生真实支付",
+-                operator=operator,
+-                operator_email=operator_email,
+-                external_reference=mock_trade_no,
+-                idempotency_key=f"mock-topup:{mock_trade_no}",
+-            )
+-            result = await store.billing_payload(organization_id, page=page, page_size=pageSize)
+-            result = {**result, "record": record, "mockTopupEnabled": True, "syncQueued": True}
+-        else:
+-            result = await organization_scoped_store_call(
+-                organization_id,
+-                "simulate_billing_topup",
+-                data.amountUsd,
+-                operator=operator,
+-                operator_email=operator_email,
+-                page=page,
+-                page_size=pageSize,
+-            )
+-            result = {**result, "mockTopupEnabled": billing.mock_payment_enabled()}
+-    except OrganizationStoreError as exc:
+-        raise organization_store_error(exc) from exc
+-    return {"ok": True, **result}
+-
+-
+-@app.get("/api/organization/current/billing/orders")
+-async def organization_billing_orders(
+-    request: Request,
+-    limit: int = Query(20, ge=1, le=100),
+-    offset: int = Query(0, ge=0),
+-) -> dict[str, Any]:
+-    user = await require_organization_billing_viewer(request)
+-    store = require_billing_store()
+-    organization_id = organization_identifier(organization_current_member(user))
+-    orders = await store.list_organization_orders(organization_id, limit, offset)
+-    return {"config": billing.enterprise_qr_config(), "orders": orders}
+-
+-
+-@app.post("/api/organization/current/billing/orders")
+-async def create_organization_billing_order(data: OrganizationTopupOrderRequest, request: Request) -> dict[str, Any]:
+-    await enforce_csrf(request)
+-    user = await require_organization_billing_topup_operator(request)
+-    if not billing.enterprise_qr_enabled():
+-        raise HTTPException(status_code=503, detail="企业收款码充值暂未开放")
+-    try:
+-        amount = billing.normalize_amount(data.amount)
+-    except ValueError as exc:
+-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+-    organization_id = organization_identifier(organization_current_member(user))
+-    trade_no = billing.generate_trade_no(f"org:{organization_id}")
+-    order = await require_billing_store().create_organization_order(
+-        trade_no, organization_id, str(user.get("id") or ""), data.channel,
+-        amount, billing.money_for_amount(amount), billing.exchange_rate(),
+-        data.paymentMethod, data.idempotencyKey,
+-    )
+-    return {"ok": True, "order": order, "payment": billing.enterprise_qr_config()}
+-
+-
+-@app.post("/api/organization/current/billing/orders/{trade_no}/submit")
+-async def submit_organization_billing_order(trade_no: str, data: SubmitManualPaymentRequest, request: Request) -> dict[str, Any]:
+-    await enforce_csrf(request)
+-    user = await require_organization_billing_topup_operator(request)
+-    organization_id = organization_identifier(organization_current_member(user))
+-    try:
+-        order = await require_billing_store().submit_organization_payment(trade_no, organization_id, data.payerNote)
+-    except BillingStoreError as exc:
+-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+-    return {"ok": True, "order": order, "reviewMinutes": billing.manual_review_minutes()}
++        operator = str(user.get("name") or user.get("email") or "Customer administrator")
++        operator_email = str(user.get("email") or "")
++        if organization_real_enabled():
++            store = organization_store()
++            if not isinstance(store, PostgreSQLOrganizationRepository):
++                raise auth_http_error(503, "企业额度服务暂不可用", "ORGANIZATION_BILLING_UNAVAILABLE")
++            mock_trade_no = billing.generate_trade_no(organization_id)
++            record = await store.adjust_billing(
++                organization_id,
++                operation="grant",
++                amount_usd=data.amountUsd,
++                reason="模拟充值，仅用于功能联调，不产生真实支付",
++                operator=operator,
++                operator_email=operator_email,
++                external_reference=mock_trade_no,
++                idempotency_key=f"mock-topup:{mock_trade_no}",
++            )
++            result = await store.billing_payload(organization_id, page=page, page_size=pageSize)
++            result = {**result, "record": record, "mockTopupEnabled": True, "syncQueued": True}
++        else:
++            result = await organization_scoped_store_call(
++                organization_id,
++                "simulate_billing_topup",
++                data.amountUsd,
++                operator=operator,
++                operator_email=operator_email,
++                page=page,
++                page_size=pageSize,
++            )
++            result = {**result, "mockTopupEnabled": billing.mock_payment_enabled()}
++    except OrganizationStoreError as exc:
++        raise organization_store_error(exc) from exc
++    return {"ok": True, **result}
++
++
++@app.get("/api/organization/current/billing/orders")
++async def organization_billing_orders(
++    request: Request,
++    limit: int = Query(20, ge=1, le=100),
++    offset: int = Query(0, ge=0),
++) -> dict[str, Any]:
++    user = await require_organization_billing_viewer(request)
++    store = require_billing_store()
++    organization_id = organization_identifier(organization_current_member(user))
++    orders = await store.list_organization_orders(organization_id, limit, offset)
++    return {"config": billing.enterprise_qr_config(), "orders": orders}
++
++
++@app.post("/api/organization/current/billing/orders")
++async def create_organization_billing_order(data: OrganizationTopupOrderRequest, request: Request) -> dict[str, Any]:
++    await enforce_csrf(request)
++    user = await require_organization_billing_topup_operator(request)
++    if not billing.enterprise_qr_enabled():
++        raise HTTPException(status_code=503, detail="企业收款码充值暂未开放")
++    try:
++        amount = billing.normalize_amount(data.amount)
++    except ValueError as exc:
++        raise HTTPException(status_code=400, detail=str(exc)) from exc
++    organization_id = organization_identifier(organization_current_member(user))
++    trade_no = billing.generate_trade_no(f"org:{organization_id}")
++    order = await require_billing_store().create_organization_order(
++        trade_no, organization_id, str(user.get("id") or ""), data.channel,
++        amount, billing.money_for_amount(amount), billing.exchange_rate(),
++        data.paymentMethod, data.idempotencyKey,
++    )
++    return {"ok": True, "order": order, "payment": billing.enterprise_qr_config()}
++
++
++@app.post("/api/organization/current/billing/orders/{trade_no}/submit")
++async def submit_organization_billing_order(trade_no: str, data: SubmitManualPaymentRequest, request: Request) -> dict[str, Any]:
++    await enforce_csrf(request)
++    user = await require_organization_billing_topup_operator(request)
++    organization_id = organization_identifier(organization_current_member(user))
++    try:
++        order = await require_billing_store().submit_organization_payment(trade_no, organization_id, data.payerNote)
++    except BillingStoreError as exc:
++        raise HTTPException(status_code=400, detail=str(exc)) from exc
++    return {"ok": True, "order": order, "reviewMinutes": billing.manual_review_minutes()}
+ 
+ 
+ @app.post("/api/organization/current/departments")
+@@ -10410,7 +10433,7 @@ async def admin_usage(
+     source_filter = normalize_usage_sources(source)
+     source = next(iter(source_filter), "all") if len(source_filter) <= 1 else "all"
+     start_date, end_date = resolve_usage_range(start_date, end_date)
+-    payload = apply_usage_source_filter(apply_usage_model_filter(await admin_usage_payload(admin, start_date, end_date, source, employee, refresh, model), model), list(source_filter))
++    payload = apply_usage_source_filter(apply_usage_model_filter(await admin_usage_payload(admin, start_date, end_date, source, employee, refresh, model), model), list(source_filter))
+     return {
+         "admin": {"email": admin["email"], "name": admin["name"]},
+         "startDate": start_date,
+@@ -10421,7 +10444,7 @@ async def admin_usage(
+     }
+ 
+ 
+-@app.get("/api/admin/users")
++@app.get("/api/admin/users")
+ async def admin_users(
+     request: Request,
+     start_date: str | None = None,
+@@ -10433,178 +10456,178 @@ async def admin_users(
+     admin = require_admin(request)
+     start_date, end_date = resolve_usage_range(start_date, end_date)
+     payload = await admin_usage_payload(admin, start_date, end_date, source, q, refresh)
+-    return {"users": payload["employees"], "total": len(payload["employees"]), "startDate": start_date, "endDate": end_date, "source": source, "cache": payload.get("cache", {"hit": False, "ttlSeconds": 0})}
+-
+-
+-def _platform_personal_customer_summary(user: dict[str, Any]) -> dict[str, Any]:
+-    account_type = str(user.get("accountType") or user.get("account_type") or "personal")
+-    if account_type != "personal":
+-        raise HTTPException(status_code=404, detail="个人客户不存在")
+-    upstream = auth_store().get_upstream_account(str(user["id"]), "primary") or {}
+-    return {
+-        "id": str(user["id"]),
+-        "email": user.get("email"),
+-        "name": user.get("name"),
+-        "loginName": user.get("loginName"),
+-        "accountType": account_type,
+-        "status": user.get("status"),
+-        "emailVerified": bool(user.get("emailVerified")),
+-        "identityStatus": user.get("identityStatus") or "verified",
+-        "createdAt": user.get("createdAt"),
+-        "updatedAt": user.get("updatedAt"),
+-        "lastLoginAt": user.get("lastLoginAt"),
+-        "provisioningStatus": upstream.get("status") or "pending",
+-        "provisioningError": str(upstream.get("last_error") or upstream.get("lastError") or "")[:300],
+-        "upstreamUserId": upstream.get("upstream_user_id") or upstream.get("upstreamUserId"),
+-        "upstreamAvailable": bool(upstream.get("upstream_user_id") or upstream.get("upstreamUserId")),
+-    }
+-
+-
+-@app.get("/api/platform/customers/personal")
+-async def platform_personal_customers(
+-    request: Request,
+-    page: int = Query(1, ge=1, le=100000),
+-    pageSize: int = Query(20, ge=1, le=100),
+-    search: str = Query("", max_length=120),
+-    status: str = Query("", max_length=32),
+-    entitlement: str = Query("", max_length=32),
+-    sort: str = Query("created_at_desc", max_length=32),
+-) -> dict[str, Any]:
+-    require_platform_admin(request)
+-    payload = await auth_store_call(
+-        "list_personal_users", page=page, page_size=pageSize, search=search, status=status, sort=sort
+-    )
+-    store = billing_store()
+-    items = []
+-    for item in payload["items"]:
+-        item = {**item, "entitlementStatus": "inactive", "spentUsd": None}
+-        upstream_id = str(item.get("upstreamUserId") or "").strip()
+-        if upstream_id and item.get("provisioningStatus") == "provisioned":
+-            try:
+-                info = await client().user_info(upstream_id)
+-                models = info.get("models") if isinstance(info, dict) else None
+-                blocked = bool(info.get("blocked")) if isinstance(info, dict) else False
+-                item["entitlementStatus"] = "active" if not blocked and any(str(model) != "no-default-models" for model in (models or [])) else "inactive"
+-                if isinstance(info, dict) and info.get("spend") is not None:
+-                    item["spentUsd"] = float(info.get("spend") or 0.0)
+-            except Exception:
+-                item["entitlementStatus"] = "unavailable"
+-        if store is not None and store.pool is not None:
+-            try:
+-                account = await store.get_account(str(item["id"]))
+-                item.update({"topupTotalUsd": account.get("topupTotalUsd", 0.0), "balanceUsd": account.get("balanceUsd", 0.0), "updatedAt": account.get("updatedAt")})
+-            except Exception:
+-                item.update({"topupTotalUsd": None, "balanceUsd": None, "billingUnavailable": True})
+-        else:
+-            item.update({"topupTotalUsd": None, "balanceUsd": None, "billingUnavailable": True})
+-        if entitlement and item["entitlementStatus"] != entitlement:
+-            continue
+-        items.append(item)
+-    return {**payload, "items": items}
+-
+-
+-@app.get("/api/platform/customers/personal/{user_id}")
+-async def platform_personal_customer_detail(user_id: str, request: Request) -> dict[str, Any]:
+-    require_platform_admin(request)
+-    user = await auth_store_call("get_user", user_id)
+-    if not user:
+-        raise HTTPException(status_code=404, detail="个人客户不存在")
+-    summary = _platform_personal_customer_summary(user)
+-    events = await auth_store_call("list_audit_events", user_id, 50)
+-    orders: dict[str, Any] = {"items": [], "total": 0}
+-    account: dict[str, Any] = {"balanceUsd": None, "topupTotalUsd": None}
+-    upstream_state: dict[str, Any] = {"exists": False, "keyCount": None, "modelAccess": "unavailable"}
+-    upstream_id = str(summary.get("upstreamUserId") or "")
+-    if upstream_id:
+-        try:
+-            info, keys = await asyncio.gather(client().user_info(upstream_id), client().keys_for_user_ids([upstream_id], refresh=True))
+-            models = info.get("models") if isinstance(info, dict) else []
+-            upstream_state = {
+-                "exists": bool(info and info.get("user_id")),
+-                "keyCount": len(keys or []),
+-                "modelAccess": "active" if any(str(model) != "no-default-models" for model in (models or [])) else "inactive",
+-            }
+-        except Exception as exc:
+-            upstream_state["error"] = f"{exc.__class__.__name__}: {exc}"[:300]
+-    store = billing_store()
+-    if store is not None and store.pool is not None:
+-        try:
+-            account = await store.get_account(user_id)
+-            orders = await store.list_user_orders(user_id, limit=20, offset=0)
+-        except Exception:
+-            pass
+-    return {"customer": {**summary, **account, "upstream": upstream_state}, "account": account, "orders": orders, "auditEvents": events}
+-
+-
+-@app.post("/api/platform/customers/personal/{user_id}/status")
+-async def platform_personal_customer_status(
+-    user_id: str, data: PlatformPersonalCustomerStatusRequest, request: Request
+-) -> dict[str, Any]:
+-    admin = require_platform_admin(request)
+-    user = await auth_store_call("get_user", user_id)
+-    if not user:
+-        raise HTTPException(status_code=404, detail="个人客户不存在")
+-    _platform_personal_customer_summary(user)
+-    updated = await auth_store_call("set_user_status", user_id, data.status)
+-    upstream_blocked = True
+-    upstream_error = ""
+-    if data.status == "suspended":
+-        upstream = await auth_store_call("get_upstream_account", user_id, "primary") or {}
+-        upstream_id = str(upstream.get("upstream_user_id") or upstream.get("upstreamUserId") or "")
+-        if upstream_id:
+-            try:
+-                keys = await client().keys_for_user(upstream_id, client().backends[0], refresh=True)
+-                for key in keys:
+-                    key_id = str(key.get("id") or "")
+-                    if key_id:
+-                        await client().block_key(key_id, upstream_id, str(admin.get("email") or "platform-admin"))
+-            except Exception as exc:
+-                upstream_blocked = False
+-                upstream_error = f"{exc.__class__.__name__}: {exc}"[:300]
+-    await auth_store_call(
+-        "record_audit_event", "platform_customer_status_changed", user_id,
+-        str(updated.get("email") or "") if updated else None,
+-        request_ip(request), True, {"status": data.status, "operator": admin.get("email", ""), "upstreamBlocked": upstream_blocked},
+-    )
+-    response = {"ok": True, "customer": _platform_personal_customer_summary(updated or user), "upstreamBlocked": upstream_blocked}
+-    if upstream_error:
+-        response["upstreamError"] = upstream_error
+-    return response
+-
+-
+-@app.post("/api/platform/customers/personal/{user_id}/provision/retry")
+-async def platform_personal_customer_provision_retry(user_id: str, request: Request) -> dict[str, Any]:
+-    require_platform_admin(request)
+-    user = await auth_store_call("get_user", user_id)
+-    if not user:
+-        raise HTTPException(status_code=404, detail="个人客户不存在")
+-    summary = _platform_personal_customer_summary(user)
+-    if summary["provisioningStatus"] not in {"provisioning", "provisioning_failed", "pending", "provisioned"}:
+-        raise HTTPException(status_code=409, detail="当前账号无需重试开通")
+-    if summary["provisioningStatus"] == "provisioned":
+-        upstream_id = str(summary.get("upstreamUserId") or "")
+-        try:
+-            info = await client().user_info(upstream_id)
+-            if not isinstance(info, dict) or not info.get("user_id"):
+-                raise HTTPException(status_code=404, detail="上游用户记录为空")
+-        except HTTPException as exc:
+-            if exc.status_code != 404:
+-                raise
+-            await auth_store_call("set_provisioning_status", user_id, "provisioning_failed", "primary", upstream_id, "上游个人账号不存在，等待重新开通")
+-    await retry_local_provisioning(await auth_store_call("get_user", user_id) or user)
+-    refreshed = await auth_store_call("get_user", user_id) or user
+-    refreshed_account = await auth_store_call("get_upstream_account", user_id, "primary") or {}
+-    refreshed_upstream_id = str(refreshed_account.get("upstream_user_id") or "")
+-    store = billing_store()
+-    if refreshed_account.get("status") == "provisioned" and refreshed_upstream_id and store is not None and store.pool is not None:
+-        try:
+-            account = await store.get_account(user_id)
+-            if float(account.get("topupTotalUsd") or 0) > 0:
+-                await billing.sync_upstream_entitlement(client(), refreshed_upstream_id, float(account["topupTotalUsd"]))
+-                await ensure_personal_key_after_entitlement(user_id, refreshed_upstream_id)
+-        except Exception:
+-            logger.exception("personal customer entitlement repair failed user_id=%s", user_id)
+-    return {"ok": True, "customer": _platform_personal_customer_summary(refreshed)}
++    return {"users": payload["employees"], "total": len(payload["employees"]), "startDate": start_date, "endDate": end_date, "source": source, "cache": payload.get("cache", {"hit": False, "ttlSeconds": 0})}
++
++
++def _platform_personal_customer_summary(user: dict[str, Any]) -> dict[str, Any]:
++    account_type = str(user.get("accountType") or user.get("account_type") or "personal")
++    if account_type != "personal":
++        raise HTTPException(status_code=404, detail="个人客户不存在")
++    upstream = auth_store().get_upstream_account(str(user["id"]), "primary") or {}
++    return {
++        "id": str(user["id"]),
++        "email": user.get("email"),
++        "name": user.get("name"),
++        "loginName": user.get("loginName"),
++        "accountType": account_type,
++        "status": user.get("status"),
++        "emailVerified": bool(user.get("emailVerified")),
++        "identityStatus": user.get("identityStatus") or "verified",
++        "createdAt": user.get("createdAt"),
++        "updatedAt": user.get("updatedAt"),
++        "lastLoginAt": user.get("lastLoginAt"),
++        "provisioningStatus": upstream.get("status") or "pending",
++        "provisioningError": str(upstream.get("last_error") or upstream.get("lastError") or "")[:300],
++        "upstreamUserId": upstream.get("upstream_user_id") or upstream.get("upstreamUserId"),
++        "upstreamAvailable": bool(upstream.get("upstream_user_id") or upstream.get("upstreamUserId")),
++    }
++
++
++@app.get("/api/platform/customers/personal")
++async def platform_personal_customers(
++    request: Request,
++    page: int = Query(1, ge=1, le=100000),
++    pageSize: int = Query(20, ge=1, le=100),
++    search: str = Query("", max_length=120),
++    status: str = Query("", max_length=32),
++    entitlement: str = Query("", max_length=32),
++    sort: str = Query("created_at_desc", max_length=32),
++) -> dict[str, Any]:
++    require_platform_admin(request)
++    payload = await auth_store_call(
++        "list_personal_users", page=page, page_size=pageSize, search=search, status=status, sort=sort
++    )
++    store = billing_store()
++    items = []
++    for item in payload["items"]:
++        item = {**item, "entitlementStatus": "inactive", "spentUsd": None}
++        upstream_id = str(item.get("upstreamUserId") or "").strip()
++        if upstream_id and item.get("provisioningStatus") == "provisioned":
++            try:
++                info = await client().user_info(upstream_id)
++                models = info.get("models") if isinstance(info, dict) else None
++                blocked = bool(info.get("blocked")) if isinstance(info, dict) else False
++                item["entitlementStatus"] = "active" if not blocked and any(str(model) != "no-default-models" for model in (models or [])) else "inactive"
++                if isinstance(info, dict) and info.get("spend") is not None:
++                    item["spentUsd"] = float(info.get("spend") or 0.0)
++            except Exception:
++                item["entitlementStatus"] = "unavailable"
++        if store is not None and store.pool is not None:
++            try:
++                account = await store.get_account(str(item["id"]))
++                item.update({"topupTotalUsd": account.get("topupTotalUsd", 0.0), "balanceUsd": account.get("balanceUsd", 0.0), "updatedAt": account.get("updatedAt")})
++            except Exception:
++                item.update({"topupTotalUsd": None, "balanceUsd": None, "billingUnavailable": True})
++        else:
++            item.update({"topupTotalUsd": None, "balanceUsd": None, "billingUnavailable": True})
++        if entitlement and item["entitlementStatus"] != entitlement:
++            continue
++        items.append(item)
++    return {**payload, "items": items}
++
++
++@app.get("/api/platform/customers/personal/{user_id}")
++async def platform_personal_customer_detail(user_id: str, request: Request) -> dict[str, Any]:
++    require_platform_admin(request)
++    user = await auth_store_call("get_user", user_id)
++    if not user:
++        raise HTTPException(status_code=404, detail="个人客户不存在")
++    summary = _platform_personal_customer_summary(user)
++    events = await auth_store_call("list_audit_events", user_id, 50)
++    orders: dict[str, Any] = {"items": [], "total": 0}
++    account: dict[str, Any] = {"balanceUsd": None, "topupTotalUsd": None}
++    upstream_state: dict[str, Any] = {"exists": False, "keyCount": None, "modelAccess": "unavailable"}
++    upstream_id = str(summary.get("upstreamUserId") or "")
++    if upstream_id:
++        try:
++            info, keys = await asyncio.gather(client().user_info(upstream_id), client().keys_for_user_ids([upstream_id], refresh=True))
++            models = info.get("models") if isinstance(info, dict) else []
++            upstream_state = {
++                "exists": bool(info and info.get("user_id")),
++                "keyCount": len(keys or []),
++                "modelAccess": "active" if any(str(model) != "no-default-models" for model in (models or [])) else "inactive",
++            }
++        except Exception as exc:
++            upstream_state["error"] = f"{exc.__class__.__name__}: {exc}"[:300]
++    store = billing_store()
++    if store is not None and store.pool is not None:
++        try:
++            account = await store.get_account(user_id)
++            orders = await store.list_user_orders(user_id, limit=20, offset=0)
++        except Exception:
++            pass
++    return {"customer": {**summary, **account, "upstream": upstream_state}, "account": account, "orders": orders, "auditEvents": events}
++
++
++@app.post("/api/platform/customers/personal/{user_id}/status")
++async def platform_personal_customer_status(
++    user_id: str, data: PlatformPersonalCustomerStatusRequest, request: Request
++) -> dict[str, Any]:
++    admin = require_platform_admin(request)
++    user = await auth_store_call("get_user", user_id)
++    if not user:
++        raise HTTPException(status_code=404, detail="个人客户不存在")
++    _platform_personal_customer_summary(user)
++    updated = await auth_store_call("set_user_status", user_id, data.status)
++    upstream_blocked = True
++    upstream_error = ""
++    if data.status == "suspended":
++        upstream = await auth_store_call("get_upstream_account", user_id, "primary") or {}
++        upstream_id = str(upstream.get("upstream_user_id") or upstream.get("upstreamUserId") or "")
++        if upstream_id:
++            try:
++                keys = await client().keys_for_user(upstream_id, client().backends[0], refresh=True)
++                for key in keys:
++                    key_id = str(key.get("id") or "")
++                    if key_id:
++                        await client().block_key(key_id, upstream_id, str(admin.get("email") or "platform-admin"))
++            except Exception as exc:
++                upstream_blocked = False
++                upstream_error = f"{exc.__class__.__name__}: {exc}"[:300]
++    await auth_store_call(
++        "record_audit_event", "platform_customer_status_changed", user_id,
++        str(updated.get("email") or "") if updated else None,
++        request_ip(request), True, {"status": data.status, "operator": admin.get("email", ""), "upstreamBlocked": upstream_blocked},
++    )
++    response = {"ok": True, "customer": _platform_personal_customer_summary(updated or user), "upstreamBlocked": upstream_blocked}
++    if upstream_error:
++        response["upstreamError"] = upstream_error
++    return response
++
++
++@app.post("/api/platform/customers/personal/{user_id}/provision/retry")
++async def platform_personal_customer_provision_retry(user_id: str, request: Request) -> dict[str, Any]:
++    require_platform_admin(request)
++    user = await auth_store_call("get_user", user_id)
++    if not user:
++        raise HTTPException(status_code=404, detail="个人客户不存在")
++    summary = _platform_personal_customer_summary(user)
++    if summary["provisioningStatus"] not in {"provisioning", "provisioning_failed", "pending", "provisioned"}:
++        raise HTTPException(status_code=409, detail="当前账号无需重试开通")
++    if summary["provisioningStatus"] == "provisioned":
++        upstream_id = str(summary.get("upstreamUserId") or "")
++        try:
++            info = await client().user_info(upstream_id)
++            if not isinstance(info, dict) or not info.get("user_id"):
++                raise HTTPException(status_code=404, detail="上游用户记录为空")
++        except HTTPException as exc:
++            if exc.status_code != 404:
++                raise
++            await auth_store_call("set_provisioning_status", user_id, "provisioning_failed", "primary", upstream_id, "上游个人账号不存在，等待重新开通")
++    await retry_local_provisioning(await auth_store_call("get_user", user_id) or user)
++    refreshed = await auth_store_call("get_user", user_id) or user
++    refreshed_account = await auth_store_call("get_upstream_account", user_id, "primary") or {}
++    refreshed_upstream_id = str(refreshed_account.get("upstream_user_id") or "")
++    store = billing_store()
++    if refreshed_account.get("status") == "provisioned" and refreshed_upstream_id and store is not None and store.pool is not None:
++        try:
++            account = await store.get_account(user_id)
++            if float(account.get("topupTotalUsd") or 0) > 0:
++                await billing.sync_upstream_entitlement(client(), refreshed_upstream_id, float(account["topupTotalUsd"]))
++                await ensure_personal_key_after_entitlement(user_id, refreshed_upstream_id)
++        except Exception:
++            logger.exception("personal customer entitlement repair failed user_id=%s", user_id)
++    return {"ok": True, "customer": _platform_personal_customer_summary(refreshed)}
+ 
+ 
+ @app.get("/api/admin/departments/usage")
+@@ -11118,9 +11141,9 @@ def _stability_ranking_attempt_fields(item: dict[str, Any] | None) -> dict[str,
+     }
+ 
+ 
+-async def _build_stability_overview(start_date: str, end_date: str, model: str) -> dict[str, Any]:
+-    store = _admin_observability_store()
+-    started = asyncio.get_running_loop().time()
++async def _build_stability_overview(start_date: str, end_date: str, model: str) -> dict[str, Any]:
++    store = _admin_observability_store()
++    started = asyncio.get_running_loop().time()
+     aggregate_query = getattr(store, "stability_overview_aggregates", None)
+     if callable(aggregate_query):
+         metric_period = _metric_period(start_date, end_date)
+@@ -11212,16 +11235,16 @@ async def _build_stability_overview(start_date: str, end_date: str, model: str)
+             item["totalShare"] = item["count"] / event_count if event_count else None
+         error_codes = sorted(merged_codes.values(), key=lambda item: (-item["count"], item["errorCode"]))
+         sync_states = await store.stability_sync_states()
+-        window_covered, missing_reasons = _stability_missing_reasons(
++        window_covered, missing_reasons = _stability_missing_reasons(
+             sync_states, start_date=start_date, end_date=end_date,
+-            configured_backends=set(usage_backend_ids()), event_count=event_count,
+-        )
+-        logger.info(
+-            "stability overview stage=aggregate start_date=%s end_date=%s model=%s eventCount=%s aggregateRows=%s stage_ms=%.0f",
+-            start_date, end_date, model, event_count,
+-            sum(len(aggregates.get(key) or []) for key in ("daily", "models", "scenarios")),
+-            (asyncio.get_running_loop().time() - started) * 1000,
+-        )
++            configured_backends=set(usage_backend_ids()), event_count=event_count,
++        )
++        logger.info(
++            "stability overview stage=aggregate start_date=%s end_date=%s model=%s eventCount=%s aggregateRows=%s stage_ms=%.0f",
++            start_date, end_date, model, event_count,
++            sum(len(aggregates.get(key) or []) for key in ("daily", "models", "scenarios")),
++            (asyncio.get_running_loop().time() - started) * 1000,
++        )
+         return _observability_envelope(
+             {
+                 "overview": overview,
+@@ -11251,12 +11274,12 @@ async def _build_stability_overview(start_date: str, end_date: str, model: str)
+     sync_states = await store.stability_sync_states()
+     attempt_events = await _stability_attempt_events(store, start_date, end_date, model=model)
+     metric_period = _metric_period(start_date, end_date)
+-    overview = stability_metrics(events, attempt_events, period=metric_period, as_of=end_date)
+-    logger.info(
+-        "stability overview stage=python_fallback start_date=%s end_date=%s model=%s eventCount=%s stage_ms=%.0f",
+-        start_date, end_date, model, len(events),
+-        (asyncio.get_running_loop().time() - started) * 1000,
+-    )
++    overview = stability_metrics(events, attempt_events, period=metric_period, as_of=end_date)
++    logger.info(
++        "stability overview stage=python_fallback start_date=%s end_date=%s model=%s eventCount=%s stage_ms=%.0f",
++        start_date, end_date, model, len(events),
++        (asyncio.get_running_loop().time() - started) * 1000,
++    )
+     by_day: dict[str, list[dict[str, Any]]] = {}
+     by_model: dict[str, list[dict[str, Any]]] = {}
+     by_scenario: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+@@ -13418,17 +13441,17 @@ async def delete_team_key(
+ # ---- 充值中心 ----
+ 
+ 
+-async def billing_identity(request: Request) -> tuple[dict[str, Any], str]:
++async def billing_identity(request: Request) -> tuple[dict[str, Any], str]:
+     """返回当前用户与其上游账号标识。
+ 
+     刻意不调用 :func:`require_active_local_entitlement`：新注册用户正是要靠充值
+     才能拿到权限，若在这里挡住，新用户永远无法自助开通。
+     """
+-    app_user = require_user(request)
+-    if local_mock_enabled() and not app_user.get("id"):
+-        email = str(app_user.get("email") or "local.customer@example.com").strip().lower()
+-        mock_id = f"mock:{email}"
+-        return {**app_user, "id": mock_id, "accountType": "personal"}, email.split("@", 1)[0]
++    app_user = require_user(request)
++    if local_mock_enabled() and not app_user.get("id"):
++        email = str(app_user.get("email") or "local.customer@example.com").strip().lower()
++        mock_id = f"mock:{email}"
++        return {**app_user, "id": mock_id, "accountType": "personal"}, email.split("@", 1)[0]
+     if str(
+         app_user.get("accountType") or app_user.get("account_type") or "personal"
+     ) == "enterprise_managed":
+@@ -13449,134 +13472,134 @@ async def billing_identity(request: Request) -> tuple[dict[str, Any], str]:
+         raise auth_http_error(401, "登录已失效，请重新登录", "AUTH_LOGIN_REQUIRED")
+     account = await auth_store_call("get_upstream_account", local_user_id, "primary")
+     upstream_user_id = str((account or {}).get("upstream_user_id") or "")
+-    if not account or account.get("status") != "provisioned" or not upstream_user_id:
+-        raise auth_http_error(409, "账号仍在开通中，请稍后重试", "AUTH_PROVISIONING_PENDING")
+-    try:
+-        info = await client().user_info(upstream_user_id)
+-        if not isinstance(info, dict) or not str(info.get("user_id") or info.get("id") or "").strip():
+-            raise HTTPException(status_code=404, detail="上游用户记录为空")
+-    except HTTPException as exc:
+-        if exc.status_code != 404:
+-            raise
+-        await auth_store_call("set_provisioning_status", local_user_id, "provisioning_failed", "primary", upstream_user_id, "上游个人账号不存在，等待重新开通")
+-        repaired = await provision_local_user(local_user)
+-        if repaired.get("status") != "provisioned":
+-            raise auth_http_error(409, "账号开通异常，请稍后重试或联系管理员", "AUTH_PROVISIONING_FAILED")
+-        upstream_user_id = str(repaired.get("upstream_user_id") or repaired.get("upstreamUserId") or upstream_user_id)
+-    store = billing_store()
+-    if store is not None and store.pool is not None:
+-        try:
+-            account_snapshot = await store.get_account(local_user_id)
+-            topup_total = float(account_snapshot.get("topupTotalUsd") or 0)
+-            if topup_total > 0:
+-                await billing.sync_upstream_entitlement(client(), upstream_user_id, topup_total)
+-                await ensure_personal_key_after_entitlement(local_user_id, upstream_user_id)
+-        except Exception:
+-            logger.exception("personal entitlement compensation check failed user_id=%s", local_user_id)
+-    return app_user, upstream_user_id
+-
+-async def apply_topup_entitlement(trade_no: str, user_id: str, upstream_user_id: str) -> dict[str, Any]:
++    if not account or account.get("status") != "provisioned" or not upstream_user_id:
++        raise auth_http_error(409, "账号仍在开通中，请稍后重试", "AUTH_PROVISIONING_PENDING")
++    try:
++        info = await client().user_info(upstream_user_id)
++        if not isinstance(info, dict) or not str(info.get("user_id") or info.get("id") or "").strip():
++            raise HTTPException(status_code=404, detail="上游用户记录为空")
++    except HTTPException as exc:
++        if exc.status_code != 404:
++            raise
++        await auth_store_call("set_provisioning_status", local_user_id, "provisioning_failed", "primary", upstream_user_id, "上游个人账号不存在，等待重新开通")
++        repaired = await provision_local_user(local_user)
++        if repaired.get("status") != "provisioned":
++            raise auth_http_error(409, "账号开通异常，请稍后重试或联系管理员", "AUTH_PROVISIONING_FAILED")
++        upstream_user_id = str(repaired.get("upstream_user_id") or repaired.get("upstreamUserId") or upstream_user_id)
++    store = billing_store()
++    if store is not None and store.pool is not None:
++        try:
++            account_snapshot = await store.get_account(local_user_id)
++            topup_total = float(account_snapshot.get("topupTotalUsd") or 0)
++            if topup_total > 0:
++                await billing.sync_upstream_entitlement(client(), upstream_user_id, topup_total)
++                await ensure_personal_key_after_entitlement(local_user_id, upstream_user_id)
++        except Exception:
++            logger.exception("personal entitlement compensation check failed user_id=%s", local_user_id)
++    return app_user, upstream_user_id
++
++async def apply_topup_entitlement(trade_no: str, user_id: str, upstream_user_id: str) -> dict[str, Any]:
+     """把已落账的充值同步到上游额度。
+ 
+     上游写入失败不回滚本地余额——钱已经收到了。这里只把订单标成待同步，由
+     :func:`retry_pending_billing_sync` 补偿，并在健康检查里暴露积压数量。
+     """
+-    store = require_billing_store()
+-    account = await store.get_account(user_id)
+-    order = await store.get_order(trade_no)
+-    try:
+-        if order and (float(order.get("cursorAmountUsd") or 0) > 0 or float(order.get("claudeCodeAmountUsd") or 0) > 0):
+-            result = {"budget": 0.0, "models": [], "keys": []}
+-        else:
+-            result = await billing.sync_upstream_entitlement(
+-                client(), upstream_user_id, float(account["topupTotalUsd"])
+-            )
++    store = require_billing_store()
++    account = await store.get_account(user_id)
++    order = await store.get_order(trade_no)
++    try:
++        if order and (float(order.get("cursorAmountUsd") or 0) > 0 or float(order.get("claudeCodeAmountUsd") or 0) > 0):
++            result = {"budget": 0.0, "models": [], "keys": []}
++        else:
++            result = await billing.sync_upstream_entitlement(
++                client(), upstream_user_id, float(account["topupTotalUsd"])
++            )
+     except Exception as exc:
+         error = f"{exc.__class__.__name__}: {exc}"
+         await store.mark_sync_state(trade_no, SYNC_PENDING, error)
+         logger.exception("topup upstream sync failed trade_no=%s", trade_no)
+         return {"synced": False, "error": error}
+-    await store.mark_sync_state(trade_no, SYNC_DONE, "")
+-    # 权限可能刚被放开，清缓存让前端立刻看到可用状态。
+-    local_entitlement_cache.delete(f"local-entitlement:{upstream_user_id}")
+-    try:
+-        if order and (float(order.get("cursorAmountUsd") or 0) > 0 or float(order.get("claudeCodeAmountUsd") or 0) > 0):
+-            allocations = await store.allocated_totals(user_id)
+-            key_result = await ensure_template_keys_after_entitlement(
+-                user_id,
+-                allocations["cursor"],
+-                allocations["claude"],
+-            )
+-        else:
+-            key_result = await ensure_personal_key_after_entitlement(user_id, upstream_user_id)
+-    except Exception as exc:
+-        error = f"key_provisioning:{exc.__class__.__name__}: {exc}"[:500]
+-        await store.mark_sync_state(trade_no, SYNC_PENDING, error)
+-        logger.exception("topup key provisioning failed trade_no=%s user_id=%s", trade_no, user_id)
+-        return {"synced": True, "keyProvisioned": False, "keyProvisionError": error, **result}
+-    return {"synced": True, "keyProvisioned": True, **key_result, **result}
+-
+-
+-async def ensure_personal_key_after_entitlement(user_id: str, upstream_user_id: str) -> dict[str, Any]:
+-    """Create the single customer key after entitlement is granted, idempotently."""
+-    keys = await client().keys_for_user_ids([upstream_user_id], refresh=True)
+-    active_keys = [item for item in keys if str(item.get("status") or "正常") not in {"已停用", "已删除", "blocked"}]
+-    if active_keys:
+-        return {"created": False, "keyCount": len(active_keys)}
+-    created = await client().create_key(
+-        upstream_user_id,
+-        "个人充值访问密钥",
+-        "topup",
+-        "never",
+-        billing.topup_default_models(),
+-        "billing-provisioning",
+-    )
+-    warning = store_created_key(upstream_user_id, created)
+-    return {"created": True, "keyCount": 1, "keyId": created.get("id"), "warning": warning}
+-
+-
+-async def ensure_template_keys_after_entitlement(
+-    user_id: str, cursor_amount: float, claude_code_amount: float
+-) -> dict[str, Any]:
+-    """Provision the two 198 tool keys from live liuguoxian templates."""
+-    local_user = await auth_store_call("get_user", user_id)
+-    if not local_user:
+-        raise HTTPException(status_code=404, detail="本地账号不存在")
+-    stable = str(user_id)
+-    email = str(local_user.get("email") or "").strip().lower()
+-    suffix = email.split("@", 1)[0] or stable[:8]
+-    results: dict[str, Any] = {}
+-    for kind, amount in (("cursor", cursor_amount), ("claude-code", claude_code_amount)):
+-        if amount <= 0:
+-            results[kind] = {"skipped": True}
+-            continue
+-        upstream_id = f"{kind}-{suffix}"
+-        try:
+-            info = await client().user_info(upstream_id)
+-            actual = str(info.get("user_id") or info.get("userId") or "") if isinstance(info, dict) else ""
+-            if actual != upstream_id:
+-                raise HTTPException(status_code=502, detail=f"{kind} 工具账号归属校验失败")
+-        except HTTPException as exc:
+-            if exc.status_code != 404:
+-                raise
+-            await client().create_internal_user(upstream_id, email, str(local_user.get("name") or ""))
+-        # The generated key must be authorized on the tool user first; the
+-        # template models are the sole source of truth for this grant.
+-        template = await client().personal_template_key(kind)
+-        await client().set_user_budget(upstream_id, amount)
+-        await client().grant_default_models(upstream_id, template["models"])
+-        keys = await client().keys_for_user_ids([upstream_id], refresh=True)
+-        active = [item for item in keys if str(item.get("status") or "正常") not in {"已停用", "已删除", "blocked"}]
+-        if active:
+-            await client().set_user_budget(upstream_id, amount)
+-            results[kind] = {"created": False, "keyCount": len(active), "userId": upstream_id}
+-            continue
+-        created = await client().create_personal_template_key(
+-            upstream_id, kind, suffix, max_budget=amount, changed_by="billing-provisioning"
+-        )
+-        warning = store_created_key(upstream_id, created)
+-        results[kind] = {"created": True, "keyCount": 1, "userId": upstream_id, "warning": warning}
+-    return results
++    await store.mark_sync_state(trade_no, SYNC_DONE, "")
++    # 权限可能刚被放开，清缓存让前端立刻看到可用状态。
++    local_entitlement_cache.delete(f"local-entitlement:{upstream_user_id}")
++    try:
++        if order and (float(order.get("cursorAmountUsd") or 0) > 0 or float(order.get("claudeCodeAmountUsd") or 0) > 0):
++            allocations = await store.allocated_totals(user_id)
++            key_result = await ensure_template_keys_after_entitlement(
++                user_id,
++                allocations["cursor"],
++                allocations["claude"],
++            )
++        else:
++            key_result = await ensure_personal_key_after_entitlement(user_id, upstream_user_id)
++    except Exception as exc:
++        error = f"key_provisioning:{exc.__class__.__name__}: {exc}"[:500]
++        await store.mark_sync_state(trade_no, SYNC_PENDING, error)
++        logger.exception("topup key provisioning failed trade_no=%s user_id=%s", trade_no, user_id)
++        return {"synced": True, "keyProvisioned": False, "keyProvisionError": error, **result}
++    return {"synced": True, "keyProvisioned": True, **key_result, **result}
++
++
++async def ensure_personal_key_after_entitlement(user_id: str, upstream_user_id: str) -> dict[str, Any]:
++    """Create the single customer key after entitlement is granted, idempotently."""
++    keys = await client().keys_for_user_ids([upstream_user_id], refresh=True)
++    active_keys = [item for item in keys if str(item.get("status") or "正常") not in {"已停用", "已删除", "blocked"}]
++    if active_keys:
++        return {"created": False, "keyCount": len(active_keys)}
++    created = await client().create_key(
++        upstream_user_id,
++        "个人充值访问密钥",
++        "topup",
++        "never",
++        billing.topup_default_models(),
++        "billing-provisioning",
++    )
++    warning = store_created_key(upstream_user_id, created)
++    return {"created": True, "keyCount": 1, "keyId": created.get("id"), "warning": warning}
++
++
++async def ensure_template_keys_after_entitlement(
++    user_id: str, cursor_amount: float, claude_code_amount: float
++) -> dict[str, Any]:
++    """Provision the two 198 tool keys from live liuguoxian templates."""
++    local_user = await auth_store_call("get_user", user_id)
++    if not local_user:
++        raise HTTPException(status_code=404, detail="本地账号不存在")
++    stable = str(user_id)
++    email = str(local_user.get("email") or "").strip().lower()
++    suffix = email.split("@", 1)[0] or stable[:8]
++    results: dict[str, Any] = {}
++    for kind, amount in (("cursor", cursor_amount), ("claude-code", claude_code_amount)):
++        if amount <= 0:
++            results[kind] = {"skipped": True}
++            continue
++        upstream_id = f"{kind}-{suffix}"
++        try:
++            info = await client().user_info(upstream_id)
++            actual = str(info.get("user_id") or info.get("userId") or "") if isinstance(info, dict) else ""
++            if actual != upstream_id:
++                raise HTTPException(status_code=502, detail=f"{kind} 工具账号归属校验失败")
++        except HTTPException as exc:
++            if exc.status_code != 404:
++                raise
++            await client().create_internal_user(upstream_id, email, str(local_user.get("name") or ""))
++        # The generated key must be authorized on the tool user first; the
++        # template models are the sole source of truth for this grant.
++        template = await client().personal_template_key(kind)
++        await client().set_user_budget(upstream_id, amount)
++        await client().grant_default_models(upstream_id, template["models"])
++        keys = await client().keys_for_user_ids([upstream_id], refresh=True)
++        active = [item for item in keys if str(item.get("status") or "正常") not in {"已停用", "已删除", "blocked"}]
++        if active:
++            await client().set_user_budget(upstream_id, amount)
++            results[kind] = {"created": False, "keyCount": len(active), "userId": upstream_id}
++            continue
++        created = await client().create_personal_template_key(
++            upstream_id, kind, suffix, max_budget=amount, changed_by="billing-provisioning"
++        )
++        warning = store_created_key(upstream_id, created)
++        results[kind] = {"created": True, "keyCount": 1, "userId": upstream_id, "warning": warning}
++    return results
+ 
+ 
+ async def retry_pending_billing_sync(limit: int = 20) -> int:
+@@ -13620,7 +13643,7 @@ async def my_billing(
+         spent_usd = 0.0
+     account["spentUsd"] = spent_usd
+     account["balanceUsd"] = max(0.0, float(account["topupTotalUsd"]) - spent_usd)
+-    return {"config": billing.public_config(local_mock=local_mock_enabled()), "account": account, "orders": orders}
++    return {"config": billing.public_config(local_mock=local_mock_enabled()), "account": account, "orders": orders}
+ 
+ 
+ @app.post("/api/me/billing/redeem")
+@@ -13643,13 +13666,13 @@ async def redeem_code(data: RedeemRequest, request: Request) -> dict[str, Any]:
+ 
+ 
+ @app.post("/api/me/billing/orders")
+-async def create_topup_order(data: CreateTopupOrderRequest, request: Request) -> dict[str, Any]:
++async def create_topup_order(data: CreateTopupOrderRequest, request: Request) -> dict[str, Any]:
+     await enforce_csrf(request)
+     store = require_billing_store()
+-    app_user, upstream_user_id = await billing_identity(request)
+-    channel = data.channel
+-    if channel == CHANNEL_MOCK and not (billing.mock_payment_enabled() or local_mock_enabled()):
+-        raise HTTPException(status_code=503, detail="模拟充值暂未开放")
++    app_user, upstream_user_id = await billing_identity(request)
++    channel = data.channel
++    if channel == CHANNEL_MOCK and not (billing.mock_payment_enabled() or local_mock_enabled()):
++        raise HTTPException(status_code=503, detail="模拟充值暂未开放")
+     if channel == CHANNEL_EPAY and not billing.epay_enabled():
+         # 自动支付未开通时优先退到收款码渠道，别把用户堵在死路上。
+         channel = CHANNEL_MANUAL_QR if billing.manual_qr_enabled() else channel
+@@ -13657,20 +13680,20 @@ async def create_topup_order(data: CreateTopupOrderRequest, request: Request) ->
+         raise HTTPException(status_code=503, detail="在线支付暂未开放，请联系管理员")
+     if channel == CHANNEL_MANUAL_QR and not billing.manual_qr_enabled():
+         raise HTTPException(status_code=503, detail="扫码转账暂未开放，请联系管理员")
+-    try:
+-        amount = billing.normalize_amount(data.amount)
+-    except ValueError as exc:
+-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+-    cursor_amount = round(float(data.cursorAmountUsd), 6)
+-    claude_amount = round(float(data.claudeCodeAmountUsd), 6)
+-    if cursor_amount <= 0 and claude_amount <= 0:
+-        raise HTTPException(status_code=400, detail="至少分配一类客户端额度")
+-    if abs(cursor_amount + claude_amount - amount) > 0.000001:
+-        raise HTTPException(status_code=400, detail="Cursor 与 Claude Code 分配金额必须等于充值总额")
+-    money = 0.0 if channel == CHANNEL_MOCK else billing.money_for_amount(amount)
+-    if channel != CHANNEL_MOCK and money < 0.01:
++    try:
++        amount = billing.normalize_amount(data.amount)
++    except ValueError as exc:
++        raise HTTPException(status_code=400, detail=str(exc)) from exc
++    cursor_amount = round(float(data.cursorAmountUsd), 6)
++    claude_amount = round(float(data.claudeCodeAmountUsd), 6)
++    if cursor_amount <= 0 and claude_amount <= 0:
++        raise HTTPException(status_code=400, detail="至少分配一类客户端额度")
++    if abs(cursor_amount + claude_amount - amount) > 0.000001:
++        raise HTTPException(status_code=400, detail="Cursor 与 Claude Code 分配金额必须等于充值总额")
++    money = 0.0 if channel == CHANNEL_MOCK else billing.money_for_amount(amount)
++    if channel != CHANNEL_MOCK and money < 0.01:
+         raise HTTPException(status_code=400, detail="充值金额过小，请提高充值额度")
+-    if channel == CHANNEL_MANUAL_QR:
++    if channel == CHANNEL_MANUAL_QR:
+         allowed = {item["method"] for item in billing.manual_qr_methods()}
+         if data.paymentMethod not in allowed:
+             raise HTTPException(status_code=400, detail="该支付方式暂未开放")
+@@ -13698,40 +13721,40 @@ async def create_topup_order(data: CreateTopupOrderRequest, request: Request) ->
+             channel,
+             amount,
+             money,
+-            billing.exchange_rate(),
+-            "mock" if channel == CHANNEL_MOCK else data.paymentMethod,
+-            cursor_amount,
+-            claude_amount,
+-        )
++            billing.exchange_rate(),
++            "mock" if channel == CHANNEL_MOCK else data.paymentMethod,
++            cursor_amount,
++            claude_amount,
++        )
+     except BillingStoreError as exc:
+         raise HTTPException(status_code=500, detail="创建充值订单失败，请稍后重试") from exc
+-    payload: dict[str, Any] = {
++    payload: dict[str, Any] = {
+         "tradeNo": trade_no,
+         "channel": channel,
+-        "amountUsd": amount,
+-        "cursorAmountUsd": cursor_amount,
+-        "claudeCodeAmountUsd": claude_amount,
++        "amountUsd": amount,
++        "cursorAmountUsd": cursor_amount,
++        "claudeCodeAmountUsd": claude_amount,
+         "moneyCny": money,
+-        "paymentMethod": "mock" if channel == CHANNEL_MOCK else data.paymentMethod,
+-    }
+-    if channel == CHANNEL_MOCK:
+-        result = await store.settle_order(
+-            trade_no,
+-            upstream_trade_no=f"mock:{trade_no}",
+-            notify_payload=json.dumps({"channel": "mock"}, ensure_ascii=False),
+-            reviewed_by="mock-payment",
+-            review_note="模拟充值，仅用于功能联调，不产生真实支付",
+-        )
+-        sync = await apply_topup_entitlement(trade_no, str(app_user["id"]), upstream_user_id)
+-        payload.update(
+-            {
+-                "order": result["order"],
+-                "account": result["account"],
+-                "entitlementSynced": bool(sync.get("synced")),
+-                "notice": "模拟充值，仅用于功能联调，不产生真实支付",
+-            }
+-        )
+-    elif channel == CHANNEL_EPAY:
++        "paymentMethod": "mock" if channel == CHANNEL_MOCK else data.paymentMethod,
++    }
++    if channel == CHANNEL_MOCK:
++        result = await store.settle_order(
++            trade_no,
++            upstream_trade_no=f"mock:{trade_no}",
++            notify_payload=json.dumps({"channel": "mock"}, ensure_ascii=False),
++            reviewed_by="mock-payment",
++            review_note="模拟充值，仅用于功能联调，不产生真实支付",
++        )
++        sync = await apply_topup_entitlement(trade_no, str(app_user["id"]), upstream_user_id)
++        payload.update(
++            {
++                "order": result["order"],
++                "account": result["account"],
++                "entitlementSynced": bool(sync.get("synced")),
++                "notice": "模拟充值，仅用于功能联调，不产生真实支付",
++            }
++        )
++    elif channel == CHANNEL_EPAY:
+         payload["submitUrl"] = submit_url
+         payload["params"] = params
+         payload["redirectUrl"] = billing.epay_redirect_url(params)
+@@ -13975,75 +13998,75 @@ async def admin_reject_order(
+     return {"ok": True}
+ 
+ 
+-@app.post("/api/admin/billing/sync/retry")
+-async def admin_retry_billing_sync(request: Request) -> dict[str, Any]:
++@app.post("/api/admin/billing/sync/retry")
++async def admin_retry_billing_sync(request: Request) -> dict[str, Any]:
+     """重试积压的上游额度写入。"""
+     await enforce_csrf(request)
+     store = require_billing_store()
+     require_admin(request)
+-    repaired = await retry_pending_billing_sync()
+-    return {"ok": True, "repaired": repaired, "pendingSyncCount": await store.pending_sync_count()}
+-
+-
+-@app.get("/api/admin/organization-billing/orders")
+-async def admin_list_organization_billing_orders(
+-    request: Request,
+-    keyword: str = Query("", max_length=100),
+-    limit: int = Query(50, ge=1, le=200),
+-    offset: int = Query(0, ge=0),
+-) -> dict[str, Any]:
+-    require_platform_admin(request)
+-    return await require_billing_store().list_all_organization_orders(keyword, limit, offset)
+-
+-
+-@app.post("/api/admin/organization-billing/orders/{trade_no}/complete")
+-async def admin_complete_organization_billing_order(
+-    trade_no: str, request: Request, data: ReviewOrderRequest | None = None
+-) -> dict[str, Any]:
+-    await enforce_csrf(request)
+-    admin = require_platform_admin(request)
+-    store = require_billing_store()
+-    order = await store.get_organization_order(trade_no)
+-    if order is None:
+-        raise HTTPException(status_code=404, detail="企业充值订单不存在")
+-    try:
+-        result = await store.settle_organization_order(
+-            trade_no,
+-            reviewed_by=str(admin.get("email") or ""),
+-            review_note=(data.note if data else "") or "管理员确认企业到账",
+-        )
+-    except BillingStoreError as exc:
+-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+-    if result.get("settled") or order.get("status") == "success":
+-        ledger = organization_store()
+-        if not isinstance(ledger, PostgreSQLOrganizationRepository):
+-            raise HTTPException(status_code=503, detail="企业账本暂不可用")
+-        try:
+-            record = await ledger.adjust_billing(
+-                order["organizationId"], operation="grant", amount_usd=order["amountUsd"],
+-                reason="企业收款码充值到账", operator=str(admin.get("email") or "平台运营"),
+-                operator_email=str(admin.get("email") or ""), external_reference=trade_no,
+-                idempotency_key=f"enterprise-topup:{trade_no}",
+-            )
+-        except OrganizationStoreError as exc:
+-            raise organization_store_error(exc) from exc
+-        return {"ok": True, "settled": bool(result.get("settled")), "order": result["order"], "record": record}
+-    return {"ok": True, "settled": False, "order": result["order"]}
+-
+-
+-@app.post("/api/admin/organization-billing/orders/{trade_no}/reject")
+-async def admin_reject_organization_billing_order(
+-    trade_no: str, request: Request, data: ReviewOrderRequest | None = None
+-) -> dict[str, Any]:
+-    await enforce_csrf(request)
+-    admin = require_platform_admin(request)
+-    changed = await require_billing_store().fail_organization_order(
+-        trade_no, reviewed_by=str(admin.get("email") or ""),
+-        review_note=(data.note if data else "") or "管理员驳回企业充值订单",
+-    )
+-    if not changed:
+-        raise HTTPException(status_code=400, detail="该订单已被处理或不存在")
+-    return {"ok": True}
++    repaired = await retry_pending_billing_sync()
++    return {"ok": True, "repaired": repaired, "pendingSyncCount": await store.pending_sync_count()}
++
++
++@app.get("/api/admin/organization-billing/orders")
++async def admin_list_organization_billing_orders(
++    request: Request,
++    keyword: str = Query("", max_length=100),
++    limit: int = Query(50, ge=1, le=200),
++    offset: int = Query(0, ge=0),
++) -> dict[str, Any]:
++    require_platform_admin(request)
++    return await require_billing_store().list_all_organization_orders(keyword, limit, offset)
++
++
++@app.post("/api/admin/organization-billing/orders/{trade_no}/complete")
++async def admin_complete_organization_billing_order(
++    trade_no: str, request: Request, data: ReviewOrderRequest | None = None
++) -> dict[str, Any]:
++    await enforce_csrf(request)
++    admin = require_platform_admin(request)
++    store = require_billing_store()
++    order = await store.get_organization_order(trade_no)
++    if order is None:
++        raise HTTPException(status_code=404, detail="企业充值订单不存在")
++    try:
++        result = await store.settle_organization_order(
++            trade_no,
++            reviewed_by=str(admin.get("email") or ""),
++            review_note=(data.note if data else "") or "管理员确认企业到账",
++        )
++    except BillingStoreError as exc:
++        raise HTTPException(status_code=400, detail=str(exc)) from exc
++    if result.get("settled") or order.get("status") == "success":
++        ledger = organization_store()
++        if not isinstance(ledger, PostgreSQLOrganizationRepository):
++            raise HTTPException(status_code=503, detail="企业账本暂不可用")
++        try:
++            record = await ledger.adjust_billing(
++                order["organizationId"], operation="grant", amount_usd=order["amountUsd"],
++                reason="企业收款码充值到账", operator=str(admin.get("email") or "平台运营"),
++                operator_email=str(admin.get("email") or ""), external_reference=trade_no,
++                idempotency_key=f"enterprise-topup:{trade_no}",
++            )
++        except OrganizationStoreError as exc:
++            raise organization_store_error(exc) from exc
++        return {"ok": True, "settled": bool(result.get("settled")), "order": result["order"], "record": record}
++    return {"ok": True, "settled": False, "order": result["order"]}
++
++
++@app.post("/api/admin/organization-billing/orders/{trade_no}/reject")
++async def admin_reject_organization_billing_order(
++    trade_no: str, request: Request, data: ReviewOrderRequest | None = None
++) -> dict[str, Any]:
++    await enforce_csrf(request)
++    admin = require_platform_admin(request)
++    changed = await require_billing_store().fail_organization_order(
++        trade_no, reviewed_by=str(admin.get("email") or ""),
++        review_note=(data.note if data else "") or "管理员驳回企业充值订单",
++    )
++    if not changed:
++        raise HTTPException(status_code=400, detail="该订单已被处理或不存在")
++    return {"ok": True}
+ 
+ 
+ @app.get("/api/models")
+diff --git a/tests/test_health_org_license_limitation.py b/tests/test_health_org_license_limitation.py
+new file mode 100644
+index 0000000..036051d
+--- /dev/null
++++ b/tests/test_health_org_license_limitation.py
+@@ -0,0 +1,60 @@
++"""健康检查：上游没有 LiteLLM Enterprise 许可时 /organization/list 永远 403，
++这是部署限制不是故障，不能让整体一直 degraded（2026-10-29 198 实测）。
++其它组织探针失败（teams/keys 不通、401、5xx、非许可原因的 403）仍然要报 degraded。"""
++
++from backend.main import organization_license_only_unavailable
++
++LICENSE_403 = (
++    "上游接口失败：Organizations are only available for LiteLLM Enterprise users. "
++    "You must be a LiteLLM Enterprise user to use this feature."
++)
++
++
++def _status(**overrides):
++    status = {
++        "available": False,
++        "organizations": False,
++        "teams": True,
++        "keys": True,
++        "errors": {"organizations": {"statusCode": 403, "detail": LICENSE_403}},
++    }
++    status.update(overrides)
++    return status
++
++
++def test_license_only_403_is_a_known_limitation() -> None:
++    assert organization_license_only_unavailable(_status()) is True
++
++
++def test_admin_key_rejected_is_still_a_fault() -> None:
++    """10-28 那种旧 key：organizations/teams/keys 全 403「管理员密钥无权限」⇒ 必须报 degraded。"""
++    detail = {"statusCode": 403, "detail": "管理员密钥无权限或已失效"}
++    status = _status(teams=False, keys=False, errors={"organizations": detail, "teams": detail, "keys": detail})
++    assert organization_license_only_unavailable(status) is False
++
++
++def test_org_403_for_other_reason_is_a_fault() -> None:
++    status = _status(errors={"organizations": {"statusCode": 403, "detail": "管理员密钥无权限或已失效"}})
++    assert organization_license_only_unavailable(status) is False
++
++
++def test_org_5xx_is_a_fault() -> None:
++    status = _status(errors={"organizations": {"statusCode": 502, "detail": "bad gateway"}})
++    assert organization_license_only_unavailable(status) is False
++
++
++def test_teams_down_alongside_license_is_a_fault() -> None:
++    status = _status(
++        teams=False,
++        errors={
++            "organizations": {"statusCode": 403, "detail": LICENSE_403},
++            "teams": {"statusCode": 500, "detail": "db"},
++        },
++    )
++    assert organization_license_only_unavailable(status) is False
++
++
++def test_probe_exception_is_a_fault() -> None:
++    """探针本身抛异常时 refresh 写的是 error 状态，没有 errors 字典。"""
++    status = {"status": "error", "available": False, "organizations": False, "teams": False, "keys": False, "error": "RuntimeError"}
++    assert organization_license_only_unavailable(status) is False
+diff --git a/tests/test_organization_capability_recovery.py b/tests/test_organization_capability_recovery.py
+index 4deafb5..2bec130 100644
+--- a/tests/test_organization_capability_recovery.py
++++ b/tests/test_organization_capability_recovery.py
+@@ -200,3 +200,44 @@ def test_health_triggers_due_probe(monkeypatch):
+     assert upstream.calls == 1
+     assert payload["organization"]["available"] is True
+     assert payload["organization"]["status"] == "ready"
++
++
++LICENSE_403 = "上游接口失败：Organizations are only available for LiteLLM Enterprise users."
++
++
++def _health_with_probe(monkeypatch, probe):
++    _reset_status(monkeypatch)
++    monkeypatch.setenv("ORGANIZATION_CAPABILITY_RECHECK_SECONDS", "0")
++    monkeypatch.setattr(main, "client", lambda: _Client([probe]))
++
++    async def fake_start_worker():
++        return None
++
++    monkeypatch.setattr(main, "start_organization_outbox_worker", fake_start_worker)
++    return asyncio.run(main.health())
++
++
++def test_health_missing_enterprise_license_does_not_degrade_overall(monkeypatch):
++    """10-29：198 无 Enterprise 许可，/organization/list 永远 403，整体一直 degraded 会淹没真故障。"""
++    payload = _health_with_probe(monkeypatch, {
++        "available": False, "organizations": False, "teams": True, "keys": True,
++        "errors": {"organizations": {"statusCode": 403, "detail": LICENSE_403}},
++    })
++
++    assert payload["status"] == "ok"
++    assert payload["organization"]["status"] == "unavailable"
++    assert payload["organization"]["knownLimitation"] == "upstream_enterprise_license_missing"
++    # 组织管理功能仍然 fail-closed
++    assert payload["organization"]["available"] is False
++
++
++def test_health_rejected_admin_key_still_degrades_overall(monkeypatch):
++    """阴性对照：10-28 那种旧 master key，三项全 403 ⇒ 必须报 degraded。"""
++    detail = {"statusCode": 403, "detail": "管理员密钥无权限或已失效"}
++    payload = _health_with_probe(monkeypatch, {
++        "available": False, "organizations": False, "teams": False, "keys": False,
++        "errors": {"organizations": detail, "teams": detail, "keys": detail},
++    })
++
++    assert payload["status"] == "degraded"
++    assert "knownLimitation" not in payload["organization"]
+-- 
+2.53.0
+

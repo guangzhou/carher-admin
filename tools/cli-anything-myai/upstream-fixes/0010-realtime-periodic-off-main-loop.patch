@@ -1,0 +1,219 @@
+From ed4a432d4a5dcbe5b59eca84b186106b97e6e3cc Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Thu, 29 Oct 2026 11:07:26 +0800
+Subject: [PATCH] =?UTF-8?q?=E5=AE=9E=E6=97=B6=20worker=20=E7=9B=AE?=
+ =?UTF-8?q?=E5=BD=95=E5=88=B7=E6=96=B0=E5=92=8C=20reconcile=20=E7=A7=BB?=
+ =?UTF-8?q?=E5=88=B0=E5=90=8E=E5=8F=B0=EF=BC=8C=E9=81=BF=E5=85=8D=E4=B8=BB?=
+ =?UTF-8?q?=E5=BE=AA=E7=8E=AF=E5=81=9C=E6=91=86?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+10-29 实测：目录刷新 + 15 分钟回扫同步执行时，live poll 每 5s 一次的循环会停约 100s，健康检查掉 REALTIME_STALE。
+
+- _refresh_directories 改成 _spawn_periodic（上一轮没跑完就跳过）
+- reconcile 也移到后台
+- 清理时取消所有 periodic task
+- 新增两个测试：慢刷新不阻塞 live 轮询，periodic task 不堆叠
+- 基线 15 个失败不变
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/usage_realtime_worker.py | 56 +++++++++++++++----
+ tests/test_usage_realtime.py     | 94 ++++++++++++++++++++++++++++++++
+ 2 files changed, 139 insertions(+), 11 deletions(-)
+
+diff --git a/backend/usage_realtime_worker.py b/backend/usage_realtime_worker.py
+index 9a9a1e7..8c80d07 100644
+--- a/backend/usage_realtime_worker.py
++++ b/backend/usage_realtime_worker.py
+@@ -764,6 +764,40 @@ class UsageRealtimeWorker:
+                 )
+                 continue
+ 
++    async def reconcile_once(self, now: datetime) -> None:
++        """Re-scan the last 15 minutes for late upstream writes (dedup by request id)."""
++        for backend in self.client.backends:
++            try:
++                await asyncio.wait_for(
++                    self.poll_backend(backend, now, lookback_minutes=15),
++                    timeout=self.backend_timeout_seconds,
++                )
++            except asyncio.TimeoutError:
++                logger.error("REALTIME_RECONCILE_TIMEOUT backend=%s", backend.id)
++            except Exception:
++                logger.exception("REALTIME_RECONCILE_FAILED backend=%s", backend.id)
++
++    def _spawn_periodic(self, name: str, factory: Any) -> bool:
++        """Run slow periodic work beside the live loop; skip if the last run is still going."""
++        tasks = getattr(self, "_periodic_tasks", None)
++        if tasks is None:
++            tasks = self._periodic_tasks = {}
++        task = tasks.get(name)
++        if task is not None and not task.done():
++            logger.info("realtime periodic task still running, skipped name=%s", name)
++            return False
++
++        async def run() -> None:
++            try:
++                await factory()
++            except asyncio.CancelledError:
++                raise
++            except Exception:
++                logger.exception("realtime periodic task failed name=%s", name)
++
++        tasks[name] = asyncio.create_task(run(), name=f"usage-realtime-{name}")
++        return True
++
+     async def schedule_background_once(self, now: datetime) -> None:
+         """Start one background pass without holding up live polling."""
+ 
+@@ -921,8 +955,10 @@ class UsageRealtimeWorker:
+                     await self.recover()
+                     last_reconcile = now
+                     last_directory_refresh = now
++                # 目录刷新（翻全量 /user/list）和 15 分钟回扫各要几十秒；放在主循环里同步跑，
++                # 每 5 分钟实时轮询就停摆约 100s（10-29 实测），所以都丢到后台，上一次没跑完就跳过。
+                 if (now - last_directory_refresh).total_seconds() >= self.directory_refresh_seconds:
+-                    await self._refresh_directories()
++                    self._spawn_periodic("directory", self._refresh_directories)
+                     last_directory_refresh = now
+                 # Live polling and publication always happen before any
+                 # settlement, refresh, cost, or historical backfill work.
+@@ -939,16 +975,7 @@ class UsageRealtimeWorker:
+                 except Exception:
+                     logger.exception("REALTIME_PUBLISH_FAILED")
+                 if (now - last_reconcile).total_seconds() >= self.reconcile_seconds:
+-                    for backend in self.client.backends:
+-                        try:
+-                            await asyncio.wait_for(
+-                                self.poll_backend(backend, now, lookback_minutes=15),
+-                                timeout=self.backend_timeout_seconds,
+-                            )
+-                        except asyncio.TimeoutError:
+-                            logger.error("REALTIME_RECONCILE_TIMEOUT backend=%s", backend.id)
+-                        except Exception:
+-                            logger.exception("REALTIME_RECONCILE_FAILED backend=%s", backend.id)
++                    self._spawn_periodic("reconcile", lambda at=now: self.reconcile_once(at))
+                     last_reconcile = now
+                 await self.schedule_background_once(now)
+                 try:
+@@ -967,6 +994,13 @@ class UsageRealtimeWorker:
+                 except asyncio.CancelledError:
+                     pass
+                 self._background_task = None
++            for periodic_task in list((getattr(self, "_periodic_tasks", None) or {}).values()):
++                periodic_task.cancel()
++                try:
++                    await periodic_task
++                except asyncio.CancelledError:
++                    pass
++            self._periodic_tasks = {}
+             if self._lock_renew_task is not None:
+                 self._lock_renew_task.cancel()
+                 try:
+diff --git a/tests/test_usage_realtime.py b/tests/test_usage_realtime.py
+index e59e5c8..8d54951 100644
+--- a/tests/test_usage_realtime.py
++++ b/tests/test_usage_realtime.py
+@@ -1268,3 +1268,97 @@ def test_realtime_archive_stream_is_length_capped() -> None:
+     assert "redis.call('XADD', stream_key" in script
+     assert "MAXLEN" in script
+     assert "~" in script
++
++
++def test_slow_directory_refresh_does_not_block_live_polling(monkeypatch) -> None:
++    """10-29: 目录刷新同步跑约 100s，期间实时轮询停摆、健康检查掉 REALTIME_STALE。"""
++    live_calls = 0
++    refresh_started = asyncio.Event()
++    refresh_release = asyncio.Event()
++
++    class Store:
++        async def connect(self):
++            return None
++
++    class Realtime:
++        async def connect(self):
++            return None
++
++        async def acquire_worker_lock(self, _worker_id):
++            return True
++
++        async def release_worker_lock(self, _worker_id):
++            return None
++
++    worker = UsageRealtimeWorker.__new__(UsageRealtimeWorker)
++    worker.store = Store()
++    worker.realtime = Realtime()
++    worker.synchronizer = type("Sync", (), {"organization_repository": None})()
++    worker.client = type("Client", (), {"backends": []})()
++    worker.worker_id = "worker-a"
++    worker.poll_seconds = 0
++    worker.directory_refresh_seconds = 0
++    worker.reconcile_seconds = 10**9
++    worker.live_cycle_timeout_seconds = 5
++    worker.current_day = __import__("backend.usage_realtime_worker", fromlist=["usage_today"]).usage_today()
++    worker.stop_event = asyncio.Event()
++    worker._lock_lost = asyncio.Event()
++    worker._lock_renew_task = None
++    worker._startup_member_sync_task = None
++    worker._startup_reconcile_task = None
++
++    async def noop(*_args, **_kwargs):
++        return None
++
++    async def slow_refresh(**_kwargs):
++        refresh_started.set()
++        await refresh_release.wait()
++
++    async def live_once(_now):
++        nonlocal live_calls
++        live_calls += 1
++        if live_calls >= 5:
++            worker.stop_event.set()
++        await asyncio.sleep(0)
++
++    monkeypatch.setattr(worker, "_connect_repository", noop)
++    monkeypatch.setattr(worker, "_renew_worker_lock_loop", lambda: worker.stop_event.wait())
++    monkeypatch.setattr(worker, "recover", noop)
++    monkeypatch.setattr(worker, "startup_member_snapshot_sync", noop)
++    monkeypatch.setattr(worker, "startup_reconcile", noop)
++    monkeypatch.setattr(worker, "_refresh_directories", slow_refresh)
++    monkeypatch.setattr(worker, "run_live_once", live_once)
++    monkeypatch.setattr(worker, "schedule_background_once", noop)
++
++    async def scenario():
++        await asyncio.wait_for(worker.run(), timeout=5)
++
++    asyncio.run(scenario())
++
++    assert refresh_started.is_set()
++    assert not refresh_release.is_set()
++    assert live_calls >= 5
++    assert worker._periodic_tasks == {}
++
++
++def test_periodic_task_is_not_stacked_while_previous_run_is_active() -> None:
++    worker = UsageRealtimeWorker.__new__(UsageRealtimeWorker)
++    runs = 0
++    release = asyncio.Event()
++
++    async def job():
++        nonlocal runs
++        runs += 1
++        await release.wait()
++
++    async def scenario():
++        assert worker._spawn_periodic("directory", job) is True
++        await asyncio.sleep(0)
++        assert worker._spawn_periodic("directory", job) is False
++        release.set()
++        await worker._periodic_tasks["directory"]
++        assert worker._spawn_periodic("directory", job) is True
++        await worker._periodic_tasks["directory"]
++
++    asyncio.run(scenario())
++    assert runs == 2
+-- 
+2.53.0
+

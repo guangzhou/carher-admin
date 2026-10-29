@@ -1,0 +1,86 @@
+From 063a1ca3d109bdeeb696ce61ccc752f6e6e0eadd Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Thu, 29 Oct 2026 11:53:31 +0800
+Subject: [PATCH] =?UTF-8?q?=E5=AE=9E=E6=97=B6=E7=BB=93=E7=AE=97=E6=B0=B4?=
+ =?UTF-8?q?=E4=BD=8D=E5=8F=AA=E5=89=8D=E8=BF=9B=E4=B8=8D=E5=90=8E=E9=80=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+10-29 实测：每次重启 startup_resettle 从当天 0 点逐分钟重结算，set_verified_through 直接 hset 覆盖，
+Redis 水位被打回凌晨，健康检查报结算滞后 4 万秒（unhealthy），要几分钟才追回。
+PG 侧本来就是 GREATEST，Redis 侧对齐。
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/usage_realtime.py    | 18 +++++++++++++++---
+ tests/test_usage_realtime.py | 27 +++++++++++++++++++++++++++
+ 2 files changed, 42 insertions(+), 3 deletions(-)
+
+diff --git a/backend/usage_realtime.py b/backend/usage_realtime.py
+index fc420c0..c606af6 100644
+--- a/backend/usage_realtime.py
++++ b/backend/usage_realtime.py
+@@ -320,9 +320,21 @@ return {1, revision}
+         )
+ 
+     async def set_verified_through(self, backend_id: str, value: datetime) -> None:
+-        await self.client.hset(
+-            f"{self.prefix}:settlements", backend_id, value.astimezone(timezone.utc).isoformat()
+-        )
++        # 只前进不后退（与 PG usage_realtime_settlement 的 GREATEST 一致）。启动时 resettle_today
++        # 从当天 0 点逐分钟重结算，直接覆盖会把水位打回凌晨，健康检查瞬间报滞后 4 万秒。
++        key = f"{self.prefix}:settlements"
++        new_value = value.astimezone(timezone.utc)
++        current = await self.client.hget(key, backend_id)
++        if current:
++            try:
++                parsed = datetime.fromisoformat(str(current).replace("Z", "+00:00"))
++                if parsed.tzinfo is None:
++                    parsed = parsed.replace(tzinfo=timezone.utc)
++                if parsed >= new_value:
++                    return
++            except ValueError:
++                pass
++        await self.client.hset(key, backend_id, new_value.isoformat())
+ 
+     async def set_settlement_status(self, backend_id: str, status: str, error: str = "") -> None:
+         payload = json.dumps({"status": status, "error": error[:500]}, ensure_ascii=False)
+diff --git a/tests/test_usage_realtime.py b/tests/test_usage_realtime.py
+index 5d75710..66183be 100644
+--- a/tests/test_usage_realtime.py
++++ b/tests/test_usage_realtime.py
+@@ -1430,3 +1430,30 @@ def test_settlement_is_spawned_every_loop_iteration_not_round_robin(monkeypatch)
+     asyncio.run(asyncio.wait_for(worker.run(), timeout=5))
+ 
+     assert settle_calls >= 5
++
++
++def test_verified_through_never_moves_backwards() -> None:
++    """10-29: 启动 resettle_today 从 0 点重结算，把 Redis 水位打回凌晨，健康检查报滞后 41210s。"""
++
++    class Client:
++        def __init__(self):
++            self.data: dict[str, dict[str, str]] = {}
++
++        async def hget(self, key, field):
++            return self.data.get(key, {}).get(field)
++
++        async def hset(self, key, field, value):
++            self.data.setdefault(key, {})[field] = value
++
++    store = UsageRealtimeStore.__new__(UsageRealtimeStore)
++    store.client = Client()
++    store.prefix = "usage:realtime"
++    late = datetime(2026, 10, 29, 3, 50, tzinfo=timezone.utc)
++    early = datetime(2026, 10, 28, 16, 1, tzinfo=timezone.utc)
++    later = datetime(2026, 10, 29, 3, 51, tzinfo=timezone.utc)
++
++    asyncio.run(store.set_verified_through("primary", late))
++    asyncio.run(store.set_verified_through("primary", early))
++    assert store.client.data["usage:realtime:settlements"]["primary"] == late.isoformat()
++    asyncio.run(store.set_verified_through("primary", later))
++    assert store.client.data["usage:realtime:settlements"]["primary"] == later.isoformat()
+-- 
+2.53.0
+

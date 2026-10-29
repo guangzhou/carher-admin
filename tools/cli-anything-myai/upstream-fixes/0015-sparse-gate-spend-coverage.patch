@@ -1,0 +1,146 @@
+From de58446b959cfb0ee16a605486cc543405649e76 Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Thu, 29 Oct 2026 12:52:46 +0800
+Subject: [PATCH] =?UTF-8?q?=E7=A8=80=E7=96=8F=E9=97=A8=E7=A6=81=E8=A6=86?=
+ =?UTF-8?q?=E7=9B=96=E7=8E=87=E6=94=B9=E6=8C=89=E8=8A=B1=E8=B4=B9=E6=AF=94?=
+ =?UTF-8?q?=EF=BC=8C=E4=B8=8D=E6=8C=89=E8=AF=B7=E6=B1=82=E6=95=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+her 10-15 生产实测：key 补漏后采到 124/189 条、$22.04/$21.91。差的 65 条是不带 key 的鉴权失败（花费 0），
+不归属任何 key，按请求数比永远到不了 99%，门禁一直挡。改为与 _log_coverage_gap 同口径按花费比。
+阴性对照：采到 $0.14/$21.91 仍挡；上游花费 0 不走覆盖率放行。
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/usage_sync.py                         | 16 +++++---
+ ...t_sparse_fallback_upstream_confirmation.py | 39 ++++++++++---------
+ 2 files changed, 31 insertions(+), 24 deletions(-)
+
+diff --git a/backend/usage_sync.py b/backend/usage_sync.py
+index 1982bf3..c8582a4 100644
+--- a/backend/usage_sync.py
++++ b/backend/usage_sync.py
+@@ -873,6 +873,7 @@ class UsageSynchronizer:
+         start_date: str,
+         end_date: str,
+         collected_requests: int,
++        collected_spend: float = 0.0,
+     ) -> bool:
+         """上游全局汇总能否证明「这段时间本来就几乎没流量」。
+ 
+@@ -898,17 +899,20 @@ class UsageSynchronizer:
+             if not isinstance(metadata, dict) or metadata.get("total_api_requests") is None:
+                 return False
+             upstream_requests = int(metadata.get("total_api_requests") or 0)
++            upstream_spend = float(metadata.get("total_spend") or 0)
+         except Exception:
+             logger.exception("sparse fallback upstream check failed backend=%s", backend.id)
+             return False
+         days = (date.fromisoformat(end_date) - date.fromisoformat(start_date)).days + 1
+-        # 门禁要挡的是「上游有量、我们没采到」。采到的（含 key 补漏）已覆盖上游全局总数的 99%，
+-        # 说明人少只是量集中在少数 key 上，不是漏数据（her 10-15：189 条几乎全在 carher-1 等 3 把 key）。
+-        coverage_ok = upstream_requests > 0 and collected_requests >= upstream_requests * 0.99
++        # 门禁要挡的是「上游有量、我们没采到」。采到的花费（含 key 补漏）已覆盖上游全局 99%，
++        # 说明人少只是量集中在少数 key 上，不是漏数据（her 10-15：$21.9 几乎全在 carher-1）。
++        # 比花费不比请求数：没带 key 的鉴权失败（her 10-15 有 65 条，花费 0）不归属任何 key，
++        # 永远进不了 key 补漏，按请求数比会一直挡。与 _log_coverage_gap 同一把尺子。
++        coverage_ok = upstream_spend > 0 and collected_spend >= upstream_spend * 0.99
+         confirmed = upstream_requests <= max_daily * max(1, days) or coverage_ok
+         logger.info(
+-            "sparse fallback upstream check backend=%s start=%s end=%s upstream_requests=%s collected_requests=%s confirmed=%s",
+-            backend.id, start_date, end_date, upstream_requests, collected_requests, confirmed,
++            "sparse fallback upstream check backend=%s start=%s end=%s upstream_requests=%s collected_requests=%s upstream_spend=%.4f collected_spend=%.4f confirmed=%s",
++            backend.id, start_date, end_date, upstream_requests, collected_requests, upstream_spend, collected_spend, confirmed,
+         )
+         return confirmed
+ 
+@@ -1477,7 +1481,7 @@ class UsageSynchronizer:
+             and fallback_stats["attemptedUsers"] >= 20
+             and fallback_stats["usersWithUsage"] < expected_nonempty
+         )
+-        if sparse_fallback and await self._upstream_confirms_near_zero_traffic(backend, start_date, end_date, request_count):
++        if sparse_fallback and await self._upstream_confirms_near_zero_traffic(backend, start_date, end_date, request_count, spend):
+             # 「非空用户过少」本意是挡住按人回退漏数据。如果上游自己的全局汇总也说这几天
+             # 几乎没请求（her 09-28 迁走后每天个位数），空结果就是真的，不该判不完整。
+             # 以前这里永远判 partial ⇒ 刷新队列里这类请求无限重试（10-20 最多 1002 次），
+diff --git a/tests/test_sparse_fallback_upstream_confirmation.py b/tests/test_sparse_fallback_upstream_confirmation.py
+index aeaa5d6..8865609 100644
+--- a/tests/test_sparse_fallback_upstream_confirmation.py
++++ b/tests/test_sparse_fallback_upstream_confirmation.py
+@@ -15,7 +15,7 @@ class Backend:
+     source = "Her"
+ 
+ 
+-def _client(upstream_requests, *, users=30, used_by=0, upstream_error=False):
++def _client(upstream_requests, *, users=30, used_by=0, upstream_error=False, upstream_spend=0.0):
+     calls: list[str] = []
+ 
+     class FakeClient:
+@@ -49,7 +49,7 @@ def _client(upstream_requests, *, users=30, used_by=0, upstream_error=False):
+             calls.append(path)
+             if upstream_error:
+                 raise TimeoutError()
+-            return {"daily_data": [], "metadata": {"total_api_requests": upstream_requests, "total_spend": 0.0}}
++            return {"daily_data": [], "metadata": {"total_api_requests": upstream_requests, "total_spend": upstream_spend}}
+ 
+     return FakeClient(), calls
+ 
+@@ -136,34 +136,37 @@ def test_refresh_claim_prefers_fewer_attempts_before_age() -> None:
+     assert order == "attempts, requested_at"
+ 
+ 
+-def test_sparse_users_but_full_coverage_passes_the_gate() -> None:
+-    """10-29: her 10-15 上游 189 条几乎都在 owner 为空的 carher-1 等 key 上，
+-    补漏后采到的已等于上游总数 ⇒ 人少不是漏数据，不该挡（之前挡了 125 次）。"""
+-    client, _ = _client(upstream_requests=189)
+-    snapshot = asyncio.run(
+-        _with_rollup(client, rollup_requests=189)
+-    )
++def test_sparse_users_but_full_spend_coverage_passes_the_gate() -> None:
++    """10-29 生产：her 10-15 上游 189 条/$21.91，补漏后采到 124 条/$22.04。
++    差的 65 条是没带 key 的鉴权失败（花费 0），不归属任何 key ⇒ 按花费判已覆盖，不该挡。"""
++    client, _ = _client(upstream_requests=189, upstream_spend=21.91)
++    snapshot = asyncio.run(_with_rollup(client, rollup_requests=124, rollup_spend=22.04))
+     assert snapshot.quality["complete"] is True
+ 
+ 
+-def test_sparse_users_with_real_gap_still_blocked() -> None:
+-    """阴性对照：补漏后仍明显少于上游全局 ⇒ 照旧挡。"""
+-    client, _ = _client(upstream_requests=189)
+-    snapshot = asyncio.run(
+-        _with_rollup(client, rollup_requests=72)
+-    )
++def test_sparse_users_with_real_spend_gap_still_blocked() -> None:
++    """阴性对照：改前 10-15 只采到 $0.14（上游 $21.91）⇒ 真漏数据，照旧挡。"""
++    client, _ = _client(upstream_requests=189, upstream_spend=21.91)
++    snapshot = asyncio.run(_with_rollup(client, rollup_requests=5, rollup_spend=0.14))
+     assert snapshot.quality["complete"] is False
+ 
+ 
+-async def _with_rollup(client, *, rollup_requests):
++def test_zero_upstream_spend_does_not_open_the_coverage_path() -> None:
++    """上游全是失败请求（花费 0）时花费覆盖率没意义，不能当放行依据。"""
++    client, _ = _client(upstream_requests=5000, upstream_spend=0.0)
++    snapshot = asyncio.run(_with_rollup(client, rollup_requests=10, rollup_spend=0.0))
++    assert snapshot.quality["complete"] is False
++
++
++async def _with_rollup(client, *, rollup_requests, rollup_spend=0.0):
+     async def key_rollup_rows(_start, _end, _backend=None):
+         rows = [{
+             "date": "2026-10-19", "source": "Her", "model": "m", "totalTokens": 1,
+             "requestCount": rollup_requests, "successCount": rollup_requests, "failureCount": 0,
+-            "spend": 0.0, "keyId": "sha-1", "keyAlias": "carher-1", "keyOwnerUserId": "",
++            "spend": rollup_spend, "keyId": "sha-1", "keyAlias": "carher-1", "keyOwnerUserId": "",
+             "keyTeamId": "", "keyExists": True,
+         }]
+-        return rows, {"requestCount": rollup_requests, "spend": 0.0}
++        return rows, {"requestCount": rollup_requests, "spend": rollup_spend}
+ 
+     client.key_rollup_rows = key_rollup_rows
+     return await UsageSynchronizer(client, object()).collect_backend(Backend(), "2026-10-19", "2026-10-19")
+-- 
+2.53.0
+

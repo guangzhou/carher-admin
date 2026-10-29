@@ -1,0 +1,202 @@
+From 33184013f1d5cbf6489ccd2a9056ea98ef7ef024 Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Thu, 29 Oct 2026 10:11:23 +0800
+Subject: [PATCH] =?UTF-8?q?=E5=8F=91=E5=B8=83=E5=90=88=E5=B9=B6=E5=8D=95?=
+ =?UTF-8?q?=E7=8B=AC=E7=BB=99=E9=95=BF=E8=B6=85=E6=97=B6=EF=BC=8C=E6=95=B4?=
+ =?UTF-8?q?=E5=A4=A9=E4=BA=8B=E4=BB=B6=E5=90=88=E5=B9=B6=E4=B8=8D=E5=86=8D?=
+ =?UTF-8?q?=E8=A2=AB=2030s=20=E6=8E=90=E6=96=AD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+连接池 command_timeout=30s，整天约 20 万行 usage_event_attribution 合并实测 43~74s，
+10-28 起当天快照每轮都在合并阶段 TimeoutError，看板快照停更。
+新增 USAGE_PUBLISH_MERGE_TIMEOUT_SECONDS（默认 600，下限 30）。
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/usage_store.py                  |  5 +-
+ tests/test_publish_merge_timeout.py     | 70 +++++++++++++++++++++++++
+ tests/test_snapshot_reader_worker.py    |  6 +--
+ tests/test_stability_partial_publish.py |  4 +-
+ tests/test_sync_source_isolation.py     |  2 +-
+ tests/test_usage_store.py               |  2 +-
+ 6 files changed, 81 insertions(+), 8 deletions(-)
+ create mode 100644 tests/test_publish_merge_timeout.py
+
+diff --git a/backend/usage_store.py b/backend/usage_store.py
+index 558e53e..c705231 100644
+--- a/backend/usage_store.py
++++ b/backend/usage_store.py
+@@ -3024,9 +3024,12 @@ class UsageStore:
+                             synced_at=EXCLUDED.synced_at""",
+                     ),
+                 )
++                # 连接池 command_timeout=30s 是给普通读写的；整天约 20 万行事件的合并
++                # 要写 10 个索引，实测 43~74s，用池默认值会在合并时被掐断、整轮白跑。
++                merge_timeout = max(30, _env_int("USAGE_PUBLISH_MERGE_TIMEOUT_SECONDS", 600))
+                 for target, query in stage_merges:
+                     try:
+-                        await connection.execute(query)
++                        await connection.execute(query, timeout=merge_timeout)
+                     except Exception:
+                         logger.exception(
+                             "usage snapshot publish stage merge failed target=%s start=%s end=%s",
+diff --git a/tests/test_publish_merge_timeout.py b/tests/test_publish_merge_timeout.py
+new file mode 100644
+index 0000000..998fc44
+--- /dev/null
++++ b/tests/test_publish_merge_timeout.py
+@@ -0,0 +1,70 @@
++import asyncio
++
++from backend.usage_store import UsageStore
++
++
++def _run_publish(monkeypatch, env_value=None):
++    if env_value is not None:
++        monkeypatch.setenv("USAGE_PUBLISH_MERGE_TIMEOUT_SECONDS", env_value)
++    else:
++        monkeypatch.delenv("USAGE_PUBLISH_MERGE_TIMEOUT_SECONDS", raising=False)
++    merges: list[object] = []
++
++    class Transaction:
++        async def __aenter__(self):
++            return None
++
++        async def __aexit__(self, *_args):
++            return None
++
++    class Connection:
++        def transaction(self):
++            return Transaction()
++
++        async def execute(self, query, *_args, timeout=None):
++            if "SELECT * FROM usage_" in query and "_stage_" in query:
++                merges.append(timeout)
++
++        async def copy_records_to_table(self, *_args, **_kwargs):
++            return None
++
++        async def fetchval(self, *_args):
++            return "2026-10-28 08:00:00+00"
++
++    class Acquire:
++        async def __aenter__(self):
++            return Connection()
++
++        async def __aexit__(self, *_args):
++            return None
++
++    class Pool:
++        def acquire(self):
++            return Acquire()
++
++    snapshot = type(
++        "Snapshot",
++        (),
++        {
++            "backend_id": "primary",
++            "rows": [{"date": "2026-10-28", "userId": "user-1", "source": "Codex", "model": "m", "totalTokens": 1}],
++            "memberships": [],
++            "events": None,
++            "departments": [],
++        },
++    )()
++    store = UsageStore("postgresql://unused")
++    store.pool = Pool()
++    asyncio.run(store.publish_snapshots("2026-10-28", "2026-10-28", [snapshot]))
++    return merges
++
++
++def test_stage_merges_use_long_timeout_not_pool_default(monkeypatch) -> None:
++    merges = _run_publish(monkeypatch)
++    assert merges
++    assert all(timeout == 600 for timeout in merges)
++
++
++def test_stage_merge_timeout_env_override_has_floor(monkeypatch) -> None:
++    assert set(_run_publish(monkeypatch, "900")) == {900}
++    assert set(_run_publish(monkeypatch, "5")) == {30}
+diff --git a/tests/test_snapshot_reader_worker.py b/tests/test_snapshot_reader_worker.py
+index 9781f6d..8377de6 100644
+--- a/tests/test_snapshot_reader_worker.py
++++ b/tests/test_snapshot_reader_worker.py
+@@ -438,7 +438,7 @@ def test_publish_snapshots_uses_copy_before_atomic_replace() -> None:
+         def transaction(self):
+             return Transaction()
+ 
+-        async def execute(self, query, *_args):
++        async def execute(self, query, *_args, **_kwargs):
+             normalized = " ".join(query.split())
+             calls.append(("execute", normalized))
+ 
+@@ -519,7 +519,7 @@ def test_publish_snapshots_converts_date_window_arguments_before_sql() -> None:
+         def transaction(self):
+             return Transaction()
+ 
+-        async def execute(self, query, *args):
++        async def execute(self, query, *args, **_kwargs):
+             if "DELETE FROM usage_daily" in query:
+                 captured.append(args)
+ 
+@@ -573,7 +573,7 @@ def test_publish_snapshots_merges_stage_rows_without_duplicate_key_failures() ->
+         def transaction(self):
+             return Transaction()
+ 
+-        async def execute(self, query, *_args):
++        async def execute(self, query, *_args, **_kwargs):
+             calls.append(" ".join(query.split()))
+ 
+         async def copy_records_to_table(self, *_args, **_kwargs):
+diff --git a/tests/test_stability_partial_publish.py b/tests/test_stability_partial_publish.py
+index 6fc88f5..e697865 100644
+--- a/tests/test_stability_partial_publish.py
++++ b/tests/test_stability_partial_publish.py
+@@ -25,7 +25,7 @@ class _StateConnection:
+     def transaction(self):
+         return _Transaction()
+ 
+-    async def execute(self, query: str, *args: Any):
++    async def execute(self, query: str, *args: Any, **_kwargs):
+         normalized = " ".join(query.split())
+         self.queries.append(normalized)
+         if normalized.startswith("DELETE FROM usage_event_attribution"):
+@@ -174,7 +174,7 @@ def test_partial_multi_backend_snapshot_skips_event_window_delete() -> None:
+         def transaction(self):
+             return Transaction()
+ 
+-        async def execute(self, query, *_args):
++        async def execute(self, query, *_args, **_kwargs):
+             self.queries.append(" ".join(query.split()))
+ 
+         async def copy_records_to_table(self, *_args, **_kwargs):
+diff --git a/tests/test_sync_source_isolation.py b/tests/test_sync_source_isolation.py
+index 0d8c99d..597ddf6 100644
+--- a/tests/test_sync_source_isolation.py
++++ b/tests/test_sync_source_isolation.py
+@@ -54,7 +54,7 @@ def test_real_publisher_only_deletes_and_covers_healthy_source(healthy):
+         async def transaction(self):
+             yield self
+ 
+-        async def execute(self, query, *args):
++        async def execute(self, query, *args, **_kwargs):
+             calls.append((query, args))
+ 
+         async def fetchval(self, *args):
+diff --git a/tests/test_usage_store.py b/tests/test_usage_store.py
+index 95bb55d..d01e79c 100644
+--- a/tests/test_usage_store.py
++++ b/tests/test_usage_store.py
+@@ -1009,7 +1009,7 @@ def test_refresh_usage_identity_columns_only_replaces_empty_or_user_id_names() -
+         def __init__(self) -> None:
+             self.calls: list[tuple[str, tuple[object, ...]]] = []
+ 
+-        async def execute(self, query, *args):
++        async def execute(self, query, *args, **_kwargs):
+             self.calls.append((query, args))
+             return "UPDATE 3"
+ 
+-- 
+2.53.0
+

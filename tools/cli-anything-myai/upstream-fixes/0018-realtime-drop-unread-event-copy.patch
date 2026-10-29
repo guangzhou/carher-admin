@@ -1,0 +1,56 @@
+From 3994a87db5545cd6b18397e4343f7ac0d738ff74 Mon Sep 17 00:00:00 2001
+From: Liuguoxian <Liuguoxian@MacBook-Pro.local>
+Date: Thu, 29 Oct 2026 14:15:24 +0800
+Subject: [PATCH] =?UTF-8?q?=E5=AE=9E=E6=97=B6=E5=85=A5=E5=BA=93=E4=B8=8D?=
+ =?UTF-8?q?=E5=86=8D=E5=86=99=E6=97=A0=E4=BA=BA=E8=AF=BB=E5=8F=96=E7=9A=84?=
+ =?UTF-8?q?=E9=80=90=E6=9D=A1=E4=BA=8B=E4=BB=B6=E5=89=AF=E6=9C=AC?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+usage:realtime:event:* 全仓没有读取方，3 天 TTL 下常驻约 67 万条 / 1.1GB（占 Redis 用量 78%），
+撑满 2GB maxmemory 后 volatile-ttl 淘汰，10-29 累计淘汰 114 万 key（可能连带 dedup/aggregate）。
+去重（dedup_key）、聚合（aggregate）、归档（stream）均不依赖它。已有 key 自然过期。
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ backend/usage_realtime.py    |  4 +++-
+ tests/test_usage_realtime.py | 10 ++++++++++
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/backend/usage_realtime.py b/backend/usage_realtime.py
+index c606af6..efae027 100644
+--- a/backend/usage_realtime.py
++++ b/backend/usage_realtime.py
+@@ -86,7 +86,9 @@ redis.call('HINCRBYFLOAT', aggregate_key, 'spend', ARGV[22])
+ redis.call('EXPIRE', aggregate_key, ARGV[1])
+ redis.call('SADD', aggregate_index, aggregate_key)
+ redis.call('EXPIRE', aggregate_index, ARGV[1])
+-redis.call('SET', event_key, ARGV[23], 'EX', ARGV[1])
++-- KEYS[7]（逐条事件原文 usage:realtime:event:*）不再写：全仓无读取方，3 天 TTL 下
++-- 常驻约 67 万条 / 1.1GB，占满 2GB maxmemory 后触发 volatile-ttl 淘汰（10-29 累计 114 万）。
++-- 归档走 stream（ARGV[25]），去重走 dedup_key，两者都不依赖它。KEYS[7] 保留以兼容调用方。
+ local revision = redis.call('INCR', revision_key)
+ local latest = redis.call('GET', latest_event_key)
+ if latest == false or ARGV[24] > latest then
+diff --git a/tests/test_usage_realtime.py b/tests/test_usage_realtime.py
+index 66183be..93ee542 100644
+--- a/tests/test_usage_realtime.py
++++ b/tests/test_usage_realtime.py
+@@ -1457,3 +1457,13 @@ def test_verified_through_never_moves_backwards() -> None:
+     assert store.client.data["usage:realtime:settlements"]["primary"] == late.isoformat()
+     asyncio.run(store.set_verified_through("primary", later))
+     assert store.client.data["usage:realtime:settlements"]["primary"] == later.isoformat()
++
++
++def test_ingest_does_not_store_unread_per_event_copy() -> None:
++    """10-29: usage:realtime:event:* 无读取方却常驻 1.1GB，撑满 maxmemory 触发淘汰。"""
++    script = UsageRealtimeStore._INGEST_LUA
++    assert "redis.call('SET', event_key" not in script
++    # 去重、聚合、归档三条真正被用到的路径都还在
++    assert "redis.call('SET', dedup_key, '1', 'NX', 'EX', ARGV[1])" in script
++    assert "redis.call('HINCRBY', aggregate_key, 'requestCount', ARGV[19])" in script
++    assert "redis.call('XADD', stream_key" in script
+-- 
+2.53.0
+

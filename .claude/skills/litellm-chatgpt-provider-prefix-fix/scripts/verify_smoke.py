@@ -6,7 +6,7 @@
 deployment，覆盖尽量多的 acct。
 
 用法（在 198 上 sudo 后）:
-    export MK=$(kubectl -n litellm-product get secret litellm-secrets \
+    export MK=$(kubectl -n litellm-product get secret litellm-secrets-r2 \
         -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
     python3 verify_smoke.py [次数=36] [proxy_base]
 

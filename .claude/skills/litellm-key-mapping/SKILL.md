@@ -368,7 +368,7 @@ WHERE key_alias LIKE 'carher-%' OR key_alias LIKE 'claude-code-%';
 
 ```bash
 # 在 198 host 跑；base=NodePort，master key 从 secret 取
-jms ssh AIYJY-litellm 'MK=$(kubectl -n litellm-product get secret litellm-secrets \
+jms ssh AIYJY-litellm 'MK=$(kubectl -n litellm-product get secret litellm-secrets-r2 \
   -o jsonpath="{.data.LITELLM_MASTER_KEY}" | base64 -d)
 LITELLM_BASE=http://127.0.0.1:30402 LITELLM_MASTER_KEY=$MK \
   python3 /root/litellm-grok-key-allowlist.py'                 # dry-run 看各组计数

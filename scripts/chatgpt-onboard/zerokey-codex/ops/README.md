@@ -58,7 +58,7 @@ Each zerokey model needs `use_chat_completions_api: true` in live cm.
 Verify on 198:
 
 ```bash
-MK=$(kubectl get secret litellm-secrets -n litellm-product -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+MK=$(kubectl get secret litellm-secrets-r2 -n litellm-product -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 curl -s -X POST -H "Authorization: Bearer $MK" localhost:30402/v1/responses \
   -d '{"model":"zerokey-gpt-5.5","input":"hi","stream":false}'
 ```

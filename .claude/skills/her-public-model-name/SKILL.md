@@ -192,7 +192,7 @@ scripts/litellm-her-key-model-regress.sh --uids 425,1000 \
 
 ```bash
 # 198 上；首选 --clone-key：克隆目标 key 的 models+aliases 起 20m 临时 key，finally 里删并回查
-export LITELLM_MASTER_KEY=$(sudo kubectl -n litellm-product get secret litellm-secrets \
+export LITELLM_MASTER_KEY=$(sudo kubectl -n litellm-product get secret litellm-secrets-r2 \
   -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 ARGS=$(sudo kubectl -n litellm-product get pods -l carher.net/litellm-production-route=enabled \
   -o jsonpath='{range .items[*]}--pod-ip {.status.podIP} {end}')

@@ -50,7 +50,7 @@ metadata:
 
 ```bash
 # 在 198 上（sudo 后）：
-MK=$(kubectl -n litellm-product get secret litellm-secrets -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+MK=$(kubectl -n litellm-product get secret litellm-secrets-r2 -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 python3 scripts/scan_bad_models.py   # 见本 skill scripts/，需 MK 环境变量
 ```
 

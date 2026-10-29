@@ -2,7 +2,7 @@
 """删除误注册的 chatgpt/ 条目并按 openai/ + api_base 模式重注册。
 
 用法（在 198 上 sudo 后）:
-    export MK=$(kubectl -n litellm-product get secret litellm-secrets \
+    export MK=$(kubectl -n litellm-product get secret litellm-secrets-r2 \
         -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
     export PK=$(kubectl -n litellm-product exec deploy/chatgpt-acct-62 -- \
         printenv LITELLM_MASTER_KEY)   # POOL_KEY，任一在役 acct pod 都是同一把

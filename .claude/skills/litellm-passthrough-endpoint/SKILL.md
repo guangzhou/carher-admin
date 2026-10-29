@@ -96,7 +96,7 @@ provider 全表在 `utils.py:9109 get_provider_video_config`：`openai`/`azure`/
 
 ```bash
 # 198 上
-MK=$(sudo kubectl -n litellm-product get secret litellm-secrets \
+MK=$(sudo kubectl -n litellm-product get secret litellm-secrets-r2 \
       -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 export LITELLM_MASTER_KEY=$MK
 

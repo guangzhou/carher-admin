@@ -1470,7 +1470,7 @@ D1 的空闲腿**不参与**退出码：空闲天生有三义（§C4），
 **D2. LiteLLM 层 —— 用户面真正走的路**（643 把 cursor-* key 都打这里）：
 
 ```bash
-ssh cltx@10.68.13.198 'MK=$(sudo kubectl -n litellm-product get secret litellm-secrets \
+ssh cltx@10.68.13.198 'MK=$(sudo kubectl -n litellm-product get secret litellm-secrets-r2 \
   -o jsonpath="{.data.LITELLM_MASTER_KEY}" | base64 -d)
 for m in sa-grok-4.5 sa-grok-4.6 sa-grok-4.20; do ... done'
 ```

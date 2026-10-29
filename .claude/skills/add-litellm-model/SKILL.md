@@ -63,7 +63,7 @@ kubectl patch secret carher-env-keys -n <ns> --type=json \
   -p='[{"op":"replace","path":"/data/WANGSU_API_KEY","value":"'$(echo -n "<NEW_KEY>" | base64 -w0)'"}]'
 ```
 
-不要去 `litellm-secrets` 找 `WANGSU_API_KEY` —— 不在那。
+不要去 `litellm-secrets-r2` 找 `WANGSU_API_KEY` —— 不在那。
 
 ### Pre-flight key probe（key 轮换 / 新通道首次接入必跑）
 
@@ -667,7 +667,7 @@ git push origin main
 | `kubectl exec deploy/litellm-proxy -- env MK=$MK python3 <<'PY' ... PY` 静默成功但 0 字节 stdout，0 个 key 被更新（"假成功"） | bash heredoc + python heredoc 多层 quoting，env / stdin 被 ssh / kubectl exec 的 wrapper 吞掉，python 根本没执行就 `exit 0` | 改用本地 `kubectl port-forward svc/litellm-proxy 14000:4000` + 本地 `python3 <<PY ... PY`；总跑完后**反查 LiteLLM `/spend/keys` 真实 allowlist 字段**确认，不要靠 exit code |
 | aliyun litellm-proxy `rollout status` 报 `exceeded its progress deadline` | `terminationGracePeriodSeconds: 600s` + nodeAffinity 限 3 节点 + hostPort 4000 + 2 副本：新 pod 必须等老 pod 完全终止才能调度上同一节点；老 pod 走完整 600s grace 才被 SIGKILL | 不是失败，等就行（总 15-20 min）。判断：`kubectl get pods -l app=litellm-proxy` 双副本始终 ≥2 ready，service 不中断 |
 | 网宿 cheliantianxia1 key 轮换后某些请求 401，但其他请求 200 | 三套环境（aliyun / 198 prod / 198 dev）共享同一把 `WANGSU_API_KEY`，只在一个 namespace 改了 secret 但其他没改 | 三套环境**同步**轮换 `kubectl patch secret carher-env-keys`（见上面"网宿 cheliantianxia1 同步"章节） |
-| 不知道 `WANGSU_API_KEY` 在哪 / 改了 `litellm-secrets` 但不生效 | wangsu 系列 env 在 `carher-env-keys` 不在 `litellm-secrets`（litellm-proxy `envFrom` 同时挂两个） | 见上面"前置 → Provider env vars 的来源" |
+| 不知道 `WANGSU_API_KEY` 在哪 / 改了 `litellm-secrets-r2` 但不生效 | wangsu 系列 env 在 `carher-env-keys` 不在 `litellm-secrets-r2`（litellm-proxy `envFrom` 同时挂两个） | 见上面"前置 → Provider env vars 的来源" |
 | **所有 key 写入突然 403 `only available for LiteLLM Enterprise`** | CM 里被引入了含 `*` 的 `model_name` ⇒ `pro198` 变成 wildcard-route access group，`_check_model_access_group` 在 `premium_user=False` 下直接拒 | 把那条通配条目删掉。⛔ 用着 access group 就永远不许往这个 CM 引入通配 `model_name` |
 | 新模型上完，`/v1/models` 有、master key 打得通，但 her 的 key 403 | 375 把 `carher-*` key 的 `models` **全部非空**，白名单里没这个名字 | 桥模型 ⇒ 打 `access_groups: ["pro198"]` 零 key 写入；非桥 ⇒ `litellm-198-key-allowlist.py --prefix carher-` |
 | 允许清单脚本报 "0 keys planned"（读起来像"都已经有了"）| 默认 `--prefix` 是 `cursor-,claude-`，压根没扫 carher 家族 | 必须显式 `--prefix carher-` |

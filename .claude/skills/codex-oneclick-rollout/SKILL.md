@@ -182,7 +182,7 @@ claude 系改一个小 bug 要 2~3 分钟，**有无目录一样慢**，别当�
 
 ```bash
 # 在 198 上跑
-export LITELLM_MASTER_KEY=$(kubectl -n litellm-product get secret litellm-secrets \
+export LITELLM_MASTER_KEY=$(kubectl -n litellm-product get secret litellm-secrets-r2 \
   -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 python3 litellm-198-key-allowlist.py --prefix carher- --add-model gpt-image-2          # dry-run
 python3 litellm-198-key-allowlist.py --prefix carher- --add-model gpt-image-2 --limit 1 \

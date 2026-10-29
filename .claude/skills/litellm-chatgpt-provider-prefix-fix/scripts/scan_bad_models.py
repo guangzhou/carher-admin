@@ -3,7 +3,7 @@
 
 DB 的 litellm_params 加密存储，psql LIKE 查询是假阴性 —— 必须走 /model/info。
 用法（在 198 上 sudo 后）:
-    export MK=$(kubectl -n litellm-product get secret litellm-secrets \
+    export MK=$(kubectl -n litellm-product get secret litellm-secrets-r2 \
         -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
     python3 scan_bad_models.py [proxy_base]   # 默认 http://127.0.0.1:30402/pro
 """

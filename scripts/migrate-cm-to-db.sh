@@ -50,7 +50,7 @@ echo "  ✅ DB 备份完成"
 # ---- Step 3: 注册 acct-1 的 4 个 deployment 到 DB ----
 echo ""
 echo "==[3/7]== 通过 /model/new 注册 acct-1 的 4 个 chatgpt-* deployment 到 DB"
-MK=$(jms ssh AIYJY-litellm "kubectl get secret litellm-secrets -n litellm-product \
+MK=$(jms ssh AIYJY-litellm "kubectl get secret litellm-secrets-r2 -n litellm-product \
   -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d")
 
 for model in chatgpt-gpt-5.5 chatgpt-gpt-5.4 chatgpt-gpt-5.3-codex chatgpt-gpt-5.3-codex-spark; do

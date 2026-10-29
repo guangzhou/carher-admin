@@ -88,7 +88,7 @@ CONTROL_BY_KEY = {
 
 def master_key():
     out = subprocess.run(SSH + ['echo "Hn8#mKLp3QxZ" | sudo -S sh -c '
-                                '"kubectl -n litellm-product get secret litellm-secrets '
+                                '"kubectl -n litellm-product get secret litellm-secrets-r2 '
                                 '-o jsonpath={.data.LITELLM_MASTER_KEY}"'],
                          capture_output=True, text=True, timeout=60)
     return base64.b64decode(out.stdout.strip().split("\n")[-1]).decode()
@@ -118,7 +118,7 @@ def arm_map():
         'echo "Hn8#mKLp3QxZ" | sudo -S sh -c \''
         'POD=$(kubectl -n litellm-product get pod -l app=litellm-proxy '
         '-o jsonpath="{.items[0].metadata.name}"); '
-        'MK=$(kubectl -n litellm-product get secret litellm-secrets '
+        'MK=$(kubectl -n litellm-product get secret litellm-secrets-r2 '
         '-o jsonpath="{.data.LITELLM_MASTER_KEY}" | base64 -d); '
         f'kubectl -n litellm-product exec "$POD" -- sh -c '
         f'"echo {b64} | base64 -d > /tmp/armmap.py; MK=$MK python3 /tmp/armmap.py"\''

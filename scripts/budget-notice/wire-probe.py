@@ -36,7 +36,7 @@ def kubectl(*args):
 
 
 BASE = "http://%s:4000" % kubectl("get", "svc", SVC, "-o", "jsonpath={.spec.clusterIP}")
-MK = base64.b64decode(kubectl("get", "secret", "litellm-secrets", "-o",
+MK = base64.b64decode(kubectl("get", "secret", "litellm-secrets-r2", "-o",
                               "jsonpath={.data.LITELLM_MASTER_KEY}")).decode()
 
 

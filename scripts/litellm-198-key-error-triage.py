@@ -189,7 +189,7 @@ def psql_json(sql: str):
 
 
 def master_key() -> str:
-    raw = _sh(["sudo", "-n", "kubectl", "-n", NS, "get", "secret", "litellm-secrets",
+    raw = _sh(["sudo", "-n", "kubectl", "-n", NS, "get", "secret", "litellm-secrets-r2",
                "-o", "jsonpath={.data.LITELLM_MASTER_KEY}"])
     mk = base64.b64decode(raw).decode()
     if len(mk) < 20:

@@ -32,7 +32,7 @@ DBPOD=$(sudo -n kubectl -n litellm-product get pod --no-headers </dev/null | awk
 [ -n "$DBPOD" ] || { echo "找不到 litellm-db pod"; exit 4; }
 # 密码是**可选**的：在 litellm-db-0 容器内用 unix socket 连本地库走的是 trust 认证，
 # PGPASSWORD 为空照样连得上（实测）。所以这里绝不能因为"取不到密码"就退出——
-# 那会把一把好用的尺子自己挡死（2026-09-02 踩过：litellm-secrets 里根本没有
+# 那会把一把好用的尺子自己挡死（2026-09-02 踩过：litellm-secrets-r2 里根本没有
 # POSTGRES_PASSWORD 这个键，而在此之前的查询一直是拿空密码跑通的）。
 PW=$(sudo -n kubectl -n litellm-product get secret litellm-db-credentials \
      -o jsonpath='{.data.password}' </dev/null 2>/dev/null | base64 -d 2>/dev/null)

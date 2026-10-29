@@ -121,7 +121,7 @@ def probe(mod, models):
 # 不回传、不打印。9router key 用 `kubectl exec` 取进变量(命令替换,不经 stdout)。
 PREAMBLE = f"""set -eu
 NS={NS}
-MK=$(sudo kubectl -n $NS get secret litellm-secrets -o jsonpath='{{.data.LITELLM_MASTER_KEY}}' | base64 -d)
+MK=$(sudo kubectl -n $NS get secret litellm-secrets-r2 -o jsonpath='{{.data.LITELLM_MASTER_KEY}}' | base64 -d)
 PORT=$(sudo kubectl -n $NS get svc litellm-proxy-nodeport -o jsonpath='{{.spec.ports[0].nodePort}}')
 L="http://127.0.0.1:$PORT"
 RP=$(sudo kubectl -n $NS get pods -l app=9router -o jsonpath='{{.items[0].metadata.name}}')

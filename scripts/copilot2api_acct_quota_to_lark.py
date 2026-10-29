@@ -326,7 +326,7 @@ def fetch_arm_map() -> dict:
     sh = (
         'POD=$(sudo kubectl -n litellm-product get pod -l app=litellm-proxy '
         '-o jsonpath="{.items[0].metadata.name}"); '
-        'MK=$(sudo kubectl -n litellm-product get secret litellm-secrets '
+        'MK=$(sudo kubectl -n litellm-product get secret litellm-secrets-r2 '
         '-o jsonpath="{.data.LITELLM_MASTER_KEY}" | base64 -d); '
         # ship the python source via SCRIPT env var (b64), decode inside pod
         f'sudo kubectl -n litellm-product exec "$POD" -- '

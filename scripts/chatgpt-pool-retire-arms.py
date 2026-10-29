@@ -57,7 +57,7 @@ def main():
     a = ap.parse_args()
     targets = sorted(set(a.accts))
 
-    mk = base64.b64decode(sh(K + ["-n", NS, "get", "secret", "litellm-secrets", "-o",
+    mk = base64.b64decode(sh(K + ["-n", NS, "get", "secret", "litellm-secrets-r2", "-o",
                                   "jsonpath={.data.LITELLM_MASTER_KEY}"])).decode().strip()
     hdr = {"Authorization": "Bearer " + mk, "Content-Type": "application/json"}
 

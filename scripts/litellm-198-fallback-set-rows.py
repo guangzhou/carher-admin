@@ -119,7 +119,7 @@ def pods() -> list[tuple[str, str]]:
 
 
 def master_key() -> str:
-    b64 = sh(["kubectl", "-n", NS, "get", "secret", "litellm-secrets",
+    b64 = sh(["kubectl", "-n", NS, "get", "secret", "litellm-secrets-r2",
               "-o", "jsonpath={.data.LITELLM_MASTER_KEY}"])
     return base64.b64decode(b64).decode()
 

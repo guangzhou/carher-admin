@@ -52,7 +52,7 @@ def master_key():
     """从 k8s secret 读，不落盘、不过 argv、不进日志。"""
     r = subprocess.run(
         ["sudo", "-n", "kubectl", "-n", "litellm-product", "get", "secret",
-         "litellm-secrets", "-o", "jsonpath={.data.LITELLM_MASTER_KEY}"],
+         "litellm-secrets-r2", "-o", "jsonpath={.data.LITELLM_MASTER_KEY}"],
         capture_output=True, text=True, check=True)
     import base64
     return base64.b64decode(r.stdout.strip()).decode().strip()

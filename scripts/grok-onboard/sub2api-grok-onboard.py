@@ -1214,7 +1214,7 @@ def cmd_regress(a):
         print("        422s above are scattered, i.e. normal retry noise.")
 
     print("\n=== D2 LiteLLM user plane: unique nonce through the real entries ===")
-    mk = sh("sudo kubectl -n %s get secret litellm-secrets "
+    mk = sh("sudo kubectl -n %s get secret litellm-secrets-r2 "
             "-o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d" % PROD_NS).strip()
     pod = sh("sudo kubectl -n %s get pod -l app=litellm-proxy "
              "--field-selector=status.phase=Running "

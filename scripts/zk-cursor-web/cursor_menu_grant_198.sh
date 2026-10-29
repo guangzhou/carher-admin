@@ -76,7 +76,7 @@ POD=\$(sudo kubectl -n $NS get pod -l carher.net/litellm-production-route=enable
 [ -n "\$POD" ] || { echo "!! 找不到带路由标签的 Running proxy pod —— 判据失效,停"; exit 1; }
 echo "   proxy pod = \$POD"
 
-MK=\$(sudo kubectl -n $NS get secret litellm-secrets -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+MK=\$(sudo kubectl -n $NS get secret litellm-secrets-r2 -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 [ -n "\$MK" ] || { echo "!! 读不到 LITELLM_MASTER_KEY"; exit 1; }
 
 # 名单和 key 表送进 pod(master key 不出集群)

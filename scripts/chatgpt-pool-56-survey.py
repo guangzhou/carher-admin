@@ -124,7 +124,7 @@ def get_svc_ip(acct_n: int) -> str | None:
 
 def get_master_key() -> str:
     raw = jms_ssh(
-        f"kubectl get secret litellm-secrets -n {NS} "
+        f"kubectl get secret litellm-secrets-r2 -n {NS} "
         f'-o jsonpath="{{.data.LITELLM_MASTER_KEY}}" | base64 -d'
     ).strip()
     if not raw:

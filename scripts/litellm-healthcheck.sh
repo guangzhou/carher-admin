@@ -58,7 +58,7 @@ check "null_byte_sanitize: PrismaClient.jsonify_object patch" \
   "echo \"\$LOG\" | grep -q 'null_byte_sanitize: patched PrismaClient.jsonify_object'"
 
 echo "[4] Runtime registry (callbacks + fallbacks)"
-MK=$(kubectl get secret litellm-secrets -n "$NS" -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+MK=$(kubectl get secret litellm-secrets-r2 -n "$NS" -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 kubectl port-forward "svc/$APP" 4000:4000 -n "$NS" >/dev/null 2>&1 &
 PF=$!
 trap "kill $PF 2>/dev/null; wait 2>/dev/null" EXIT

@@ -15,7 +15,7 @@
 
 在 198 本机跑：
 
-    MK=$(sudo kubectl -n litellm-product get secret litellm-secrets \
+    MK=$(sudo kubectl -n litellm-product get secret litellm-secrets-r2 \
           -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
     export LITELLM_MASTER_KEY=$MK
     python3 litellm-198-sub2api-video-passthrough.py plan       # 只读，看现状
@@ -116,7 +116,7 @@ def master_key() -> str:
     k = os.environ.get("LITELLM_MASTER_KEY")
     if not k:
         sys.exit("LITELLM_MASTER_KEY not set "
-                 "(sudo kubectl -n litellm-product get secret litellm-secrets "
+                 "(sudo kubectl -n litellm-product get secret litellm-secrets-r2 "
                  "-o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)")
     return k
 

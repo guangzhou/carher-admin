@@ -48,7 +48,7 @@ def sh(cmd):
     return subprocess.check_output(cmd).decode()
 
 MK = __import__('base64').b64decode(
-    sh(['kubectl', 'get', 'secret', 'litellm-secrets', '-n', NS,
+    sh(['kubectl', 'get', 'secret', 'litellm-secrets-r2', '-n', NS,
         '-o', 'jsonpath={.data.LITELLM_MASTER_KEY}'])).decode()
 
 def api(path):

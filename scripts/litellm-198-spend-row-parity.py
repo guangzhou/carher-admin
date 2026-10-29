@@ -34,9 +34,9 @@ def kc(*a, stdin=None):
 
 def master_key():
     import base64
-    raw = kc("get", "secret", "litellm-secrets", "-o", "jsonpath={.data.LITELLM_MASTER_KEY}")
+    raw = kc("get", "secret", "litellm-secrets-r2", "-o", "jsonpath={.data.LITELLM_MASTER_KEY}")
     if not raw:
-        sys.exit("no master key in secret litellm-secrets")
+        sys.exit("no master key in secret litellm-secrets-r2")
     return base64.b64decode(raw).decode()
 
 

@@ -65,7 +65,7 @@ shift || true
 
 # 在 198 上跑一段 bash;$MK 是从 secret 取出的 master key
 remote() {
-  jms ssh "$HOST" "MK=\$(kubectl -n $NS get secret litellm-secrets -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d); $1"
+  jms ssh "$HOST" "MK=\$(kubectl -n $NS get secret litellm-secrets-r2 -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d); $1"
 }
 
 # 在 db pod 里跑 SQL 文件(避开 jms ssh + kubectl exec + psql -c 的多层引号地狱)

@@ -203,7 +203,7 @@ def pool_ports_from_cm() -> set[int]:
 
 def pool_ports_live() -> set[int]:
     MK = base64.b64decode(
-        sh(["kubectl", "get", "secret", "litellm-secrets", "-n", NS,
+        sh(["kubectl", "get", "secret", "litellm-secrets-r2", "-n", NS,
             "-o", "jsonpath={.data.LITELLM_MASTER_KEY}"])
     ).decode().strip()
     req = urllib.request.Request(

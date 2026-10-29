@@ -58,7 +58,7 @@ else
   MODEL_LIKE="model_id LIKE 'chatgpt-acct-%-%'"
 fi
 
-DB_URL=$(kctl get secret litellm-secrets -n "$NS" -o jsonpath='{.data.DATABASE_URL}' | base64 -d)
+DB_URL=$(kctl get secret litellm-secrets-r2 -n "$NS" -o jsonpath='{.data.DATABASE_URL}' | base64 -d)
 USER=$(echo "$DB_URL" | sed -E 's|.*://([^:]+):.*|\1|')
 DB=$(echo "$DB_URL" | sed -E 's|.*/([^?]+).*|\1|')
 

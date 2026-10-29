@@ -198,7 +198,7 @@ def master_key(namespace: str) -> str:
         "kubectl",
         "get",
         "secret",
-        "litellm-secrets",
+        "litellm-secrets-r2",
         "-n",
         namespace,
         "-o",

@@ -44,7 +44,7 @@ Five invariants this encodes, each measured on 198 (2026-09-17):
 Usage (run on 198, where 127.0.0.1:30402 is the litellm-product NodePort)::
 
     export LITELLM_MASTER_KEY=$(sudo kubectl -n litellm-product get secret \
-      litellm-secrets -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+      litellm-secrets-r2 -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 
     S=~/litellm-198-key-fallback-<sid>.py   # session-numbered: 198 runs parallel sessions
 

@@ -17,7 +17,7 @@ base64 塞进 function_call_output（单张几 MB、token 才 ~1k），``deepsee
 
 用法（198 上跑，用 master key；gray=30405 prod=30402 guarded-old=30406）
 ====
-    KEY=$(sudo -n kubectl -n litellm-product get secret litellm-secrets \
+    KEY=$(sudo -n kubectl -n litellm-product get secret litellm-secrets-r2 \
           -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
     python3 litellm-198-deepseek-lane-regress.py http://127.0.0.1:30405 "$KEY" gpt-5.5 sa-grok-4.7
 

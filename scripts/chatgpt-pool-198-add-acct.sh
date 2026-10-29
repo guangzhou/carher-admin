@@ -73,7 +73,7 @@ leaf_probe() {  # $1=endpoint IP → SERVES / 失败原因
 }
 
 # 两把共用的 key 只取一次
-POOLKEY=$(kx "kubectl -n $NS get secret litellm-secrets -o jsonpath={.data.LITELLM_MASTER_KEY}" | tr -d ' \n' | base64 -d)
+POOLKEY=$(kx "kubectl -n $NS get secret litellm-secrets-r2 -o jsonpath={.data.LITELLM_MASTER_KEY}" | tr -d ' \n' | base64 -d)
 AK=$(kx "kubectl -n $NS get secret chatgpt-pool-master-key -o jsonpath={.data.LITELLM_MASTER_KEY}" | tr -d ' \n' | base64 -d)
 [ ${#POOLKEY} -eq 39 ] || { echo "!!!! 取不到 198 router master key(len=${#POOLKEY}),检查 ssh/sudo"; exit 1; }
 [ ${#AK} -gt 20 ] || { echo "!!!! 取不到叶子 key chatgpt-pool-master-key"; exit 1; }

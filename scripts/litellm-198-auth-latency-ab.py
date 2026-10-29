@@ -34,7 +34,7 @@ def kc(*a):
 
 
 def master_key():
-    raw = kc("get", "secret", "litellm-secrets", "-o", "jsonpath={.data.LITELLM_MASTER_KEY}")
+    raw = kc("get", "secret", "litellm-secrets-r2", "-o", "jsonpath={.data.LITELLM_MASTER_KEY}")
     return base64.b64decode(raw).decode()
 
 

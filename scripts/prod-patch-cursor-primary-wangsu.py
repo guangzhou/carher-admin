@@ -84,7 +84,7 @@ else:
 import urllib.request
 
 MK = subprocess.check_output(
-    ['kubectl', 'get', 'secret', 'litellm-secrets', '-n', NS,
+    ['kubectl', 'get', 'secret', 'litellm-secrets-r2', '-n', NS,
      '-o', 'jsonpath={.data.LITELLM_MASTER_KEY}']
 ).decode()
 MK = __import__('base64').b64decode(MK).decode()

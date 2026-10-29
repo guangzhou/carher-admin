@@ -13,7 +13,7 @@
 set -euo pipefail
 NS=carher
 BASE="http://$(kubectl -n $NS get svc litellm-proxy -o jsonpath='{.spec.clusterIP}'):4000"
-MK=$(kubectl -n $NS get secret litellm-secrets -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+MK=$(kubectl -n $NS get secret litellm-secrets-r2 -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 test -n "$MK"
 
 python3 - "$BASE" "$MK" <<'PY'

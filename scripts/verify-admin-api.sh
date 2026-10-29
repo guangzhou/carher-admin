@@ -34,7 +34,7 @@ if ! command -v jms >/dev/null 2>&1; then
   exit 1
 fi
 
-MK=$(jms ssh AIYJY-litellm "kubectl get secret litellm-secrets -n litellm-product \
+MK=$(jms ssh AIYJY-litellm "kubectl get secret litellm-secrets-r2 -n litellm-product \
   -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d")
 [[ -z "$MK" ]] && { echo "ERROR: 拿不到 LITELLM_MASTER_KEY"; exit 1; }
 

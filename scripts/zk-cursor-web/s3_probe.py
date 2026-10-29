@@ -36,7 +36,7 @@ def sh(cmd, timeout=60):
 
 
 def master_key():
-    data = json.loads(sh(f"kubectl -n {NS} get secret litellm-secrets -o json"))["data"]
+    data = json.loads(sh(f"kubectl -n {NS} get secret litellm-secrets-r2 -o json"))["data"]
     for k, v in data.items():
         if "MASTER_KEY" in k:
             return base64.b64decode(v).decode()

@@ -67,7 +67,7 @@
     有的上游返 url（踩过：只量 b64 把健康的 sa-grok-imagine 判成假绿）。
 
 两把 master key 别混（混了是假红）：
-  母路由 litellm-proxy → secret `litellm-secrets`      / env LITELLM_MASTER_KEY
+  母路由 litellm-proxy → secret `litellm-secrets-r2`      / env LITELLM_MASTER_KEY
   叶子 chatgpt-acct-N  → secret `chatgpt-pool-master-key` / env POOL_MASTER_KEY
   拿母路由那把打叶子 → H400 `{"error":{"message":"No connected db."}}`
 

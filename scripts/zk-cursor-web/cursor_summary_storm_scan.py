@@ -21,7 +21,7 @@
   python3 cursor_summary_storm_scan.py --json       # 给别的脚本吃
 """
 import argparse, json, os, sys
-# 🔴 10-29:原来自己 ssh + 从 secret `litellm-secrets` 解 DATABASE_URL ⇒ 当天 key 轮换把 secret
+# 🔴 10-29:原来自己 ssh + 从 secret `litellm-secrets-r2` 解 DATABASE_URL ⇒ 当天 key 轮换把 secret
 #    换成了 `litellm-secrets-r2`,脚本直接 FATAL。改用共用的 remote198.psql():它在 db pod 里用
 #    $POSTGRES_USER 连库(不碰任何 secret),且事务开成 READ ONLY ⇒ 写不进去。
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools", "cli-anything-litellm"))

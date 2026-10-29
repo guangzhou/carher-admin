@@ -140,7 +140,7 @@ print("  ✅ plan=" + plan + " 5h=" + str(pct5h) + "% week=" + str(pctwk) + "% a
 
 # ── 5/7: 注册到 198 prod LiteLLM ─────────────────────────────────────
 echo "==[5/7]== 注册到 198 prod LiteLLM (admin API)"
-MK=$(jms ssh AIYJY-litellm "kubectl get secret litellm-secrets -n litellm-product -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d")
+MK=$(jms ssh AIYJY-litellm "kubectl get secret litellm-secrets-r2 -n litellm-product -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d")
 for model in chatgpt-gpt-5.5 chatgpt-gpt-5.4 chatgpt-gpt-5.3-codex chatgpt-gpt-5.3-codex-spark; do
   MID="chatgpt-${ACCT}-${model#chatgpt-}"
   # base_model 必填: model_name 是别名, 不在内置价表里。少了它 /v1/messages 路径会按别名

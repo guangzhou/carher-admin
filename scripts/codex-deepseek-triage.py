@@ -304,7 +304,7 @@ def section_groups() -> None:
     """DeepSeek 的 mode:chat 组若没有 -responses 改写，Codex 打它必走 bridge ⇒ 工具历史/结构化输出 400。"""
     print("\n=== DeepSeek 组 × Codex 改写覆盖 ===")
     out = _ssh(f"""
-MK=$(kubectl -n {NS} get secret litellm-secrets -o jsonpath={{.data.LITELLM_MASTER_KEY}} | base64 -d)
+MK=$(kubectl -n {NS} get secret litellm-secrets-r2 -o jsonpath={{.data.LITELLM_MASTER_KEY}} | base64 -d)
 P=$(kubectl -n {NS} get pods -l carher.net/litellm-production-route=enabled -o jsonpath='{{.items[0].status.podIP}}')
 curl -s -m 60 http://$P:4000/model/info -H "Authorization: Bearer $MK" | python3 -c '
 import json,sys

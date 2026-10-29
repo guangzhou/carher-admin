@@ -164,7 +164,7 @@ spec:
                   key: LITELLM_MASTER_KEY
           envFrom:
             - secretRef:
-                name: litellm-secrets
+                name: litellm-secrets-r2
             - secretRef:
                 name: carher-env-keys
           resources:

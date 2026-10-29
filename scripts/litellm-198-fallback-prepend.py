@@ -81,7 +81,7 @@ DB_POD = "litellm-db-0"
 DB_USER = "litellm"
 DB_NAME = "litellm"
 PROD_SELECTOR = "carher.net/litellm-production-route=enabled"
-SECRET = "litellm-secrets"
+SECRET = "litellm-secrets-r2"
 
 DEFAULT_GROUP = "sa-grok-4.6"
 DEFAULT_TARGET = "openrouter-deepseek-v4.1-flash"

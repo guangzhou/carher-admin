@@ -7,7 +7,7 @@
 
 在 198 本机跑（需要 127.0.0.1:30402 和 sudo kubectl）：
 
-    MK=$(sudo kubectl -n litellm-product get secret litellm-secrets \
+    MK=$(sudo kubectl -n litellm-product get secret litellm-secrets-r2 \
           -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
     LITELLM_MASTER_KEY=$MK python3 litellm-198-add-openrouter-jev.py plan
     LITELLM_MASTER_KEY=$MK python3 litellm-198-add-openrouter-jev.py add --apply
@@ -18,7 +18,7 @@
   * **OpenRouter 上 jev 只有一个名：`typesafe/jev-router`**。`typesafe/jev-latest`
     和 `typesafe/jev` 都 404（2026-09-28 查 `/api/v1/models`，458 个名里 1 命中）。
   * **api_key 不写死，用 `os.environ/OPENROUTER_API_KEY`**。198 的 litellm-proxy
-    `envFrom` 挂了 `carher-env-keys`（不在 `litellm-secrets`！），容器内已实测
+    `envFrom` 挂了 `carher-env-keys`（不在 `litellm-secrets-r2`！），容器内已实测
     该 env 存在（len 73）。既有 18 行 db_model 的 openrouter 条目也都是靠 env
     隐式取 key（`api_key` 为 None），这里保持同一形状。
   * **不写 cost 字段，这是刻意的。** OpenRouter 对它的定价是 `prompt/completion:
@@ -150,7 +150,7 @@ def existing_models(key: str) -> dict[str, dict]:
 def master_key() -> str:
     k = os.environ.get("LITELLM_MASTER_KEY")
     if not k:
-        sys.exit("LITELLM_MASTER_KEY not set (read it from secret/litellm-secrets)")
+        sys.exit("LITELLM_MASTER_KEY not set (read it from secret/litellm-secrets-r2)")
     return k
 
 

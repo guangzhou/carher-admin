@@ -63,7 +63,7 @@ NAMESPACE = "litellm-product"
 DB_POD = "litellm-db-0"
 DB_USER = "litellm"
 DB_NAME = "litellm"
-SECRET = "litellm-secrets"
+SECRET = "litellm-secrets-r2"
 PROXY_PORT = "4000"
 # 生产车道判据：Service litellm-proxy-nodeport（nodePort 30402）的 selector。
 PROD_POD_SELECTOR = "carher.net/litellm-production-route=enabled"

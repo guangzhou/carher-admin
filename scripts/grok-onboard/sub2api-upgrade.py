@@ -322,7 +322,7 @@ def run_probe(specs):
     """Probe from inside a litellm-proxy pod: that is the path 1200+ real keys
     take.  Probing sub2api directly skips the entry/alias layer that has broken
     on its own before."""
-    mk = sh("kubectl -n %s get secret litellm-secrets -o jsonpath="
+    mk = sh("kubectl -n %s get secret litellm-secrets-r2 -o jsonpath="
             "'{.data.LITELLM_MASTER_KEY}' | base64 -d" % PROD_NS).strip()
     pod = pod_of(PROD_NS, "app=litellm-proxy")
     tmp = "/tmp/.s2a-probe-%d.py" % random.randint(10**6, 10**7)
@@ -705,7 +705,7 @@ def cmd_patch_regress(a):
               "and cost real callers.  --force to run anyway." % a.min_legs)
         return 0
     t0 = sh("date -u +%Y-%m-%dT%H:%M:%SZ").strip()
-    mk = sh("kubectl -n %s get secret litellm-secrets -o jsonpath="
+    mk = sh("kubectl -n %s get secret litellm-secrets-r2 -o jsonpath="
             "'{.data.LITELLM_MASTER_KEY}' | base64 -d" % PROD_NS).strip()
     pod = pod_of(PROD_NS, "app=litellm-proxy")
     tmp = "/tmp/.s2a-burst-%d.py" % random.randint(10**6, 10**7)

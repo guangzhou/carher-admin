@@ -13,7 +13,7 @@ def proxy():
     ip = sh(f"kubectl -n {NS} get svc litellm-proxy -o jsonpath='{{.spec.clusterIP}}'").strip().strip("'")
     return f"http://{ip}:4000"
 def master_key():
-    d = json.loads(sh(f"kubectl -n {NS} get secret litellm-secrets -o json"))["data"]
+    d = json.loads(sh(f"kubectl -n {NS} get secret litellm-secrets-r2 -o json"))["data"]
     return base64.b64decode(d["LITELLM_MASTER_KEY"]).decode()
 def post(base, key, path, body, timeout=300):
     req = urllib.request.Request(base + path, data=json.dumps(body).encode(),

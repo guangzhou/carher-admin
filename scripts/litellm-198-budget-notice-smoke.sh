@@ -21,7 +21,7 @@ NS=litellm-product
 SVC="${SVC:-litellm-proxy}"
 BASE="http://$(kubectl -n $NS get svc "${SVC}" -o jsonpath='{.spec.clusterIP}'):4000"
 echo "target svc=${SVC} base=${BASE}"
-MK=$(kubectl -n $NS get secret litellm-secrets -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+MK=$(kubectl -n $NS get secret litellm-secrets-r2 -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 BILLABLE_MODEL="wangsu7-gpt-5.6-sol"   # 非高配、真实计费、便宜
 PREMIUM_MODEL="claude-opus-4.8"       # 高配桶(Opus)、真实计费 ~$0.0005/次
 

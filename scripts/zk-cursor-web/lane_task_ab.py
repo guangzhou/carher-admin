@@ -66,7 +66,7 @@ def proxy():
 
 
 def master_key():
-    data = json.loads(sh(f"kubectl -n {NS} get secret litellm-secrets -o json"))["data"]
+    data = json.loads(sh(f"kubectl -n {NS} get secret litellm-secrets-r2 -o json"))["data"]
     return base64.b64decode(data["LITELLM_MASTER_KEY"]).decode()
 
 

@@ -31,7 +31,7 @@ EXACT_BASE = {
 }
 PREFIXES = ("chatgpt-acct-", "uasplit-", "zerokey-codex", "cursor/")
 def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True).stdout.strip()
-MK = sh("kubectl -n litellm-product get secret litellm-secrets -o jsonpath={.data.LITELLM_MASTER_KEY} | base64 -d")
+MK = sh("kubectl -n litellm-product get secret litellm-secrets-r2 -o jsonpath={.data.LITELLM_MASTER_KEY} | base64 -d")
 EP = "http://127.0.0.1:30402"
 
 def get(path):

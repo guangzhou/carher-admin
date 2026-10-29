@@ -24,7 +24,7 @@ Runtime
 -------
 Runs where ``kubectl -n litellm-product ...`` works (i.e. on the 198 host as
 root, or with a kubeconfig that has access). Reads the master key from the
-``litellm-secrets`` Secret; reads/writes ``router_settings`` via the DB pod;
+``litellm-secrets-r2`` Secret; reads/writes ``router_settings`` via the DB pod;
 verifies live propagation on every proxy pod and, only if a raw DB write is not
 picked up, triggers a zero-interruption ``rollout restart`` (on boot the proxy
 reloads router_settings from the DB, which overrides the ConfigMap).
@@ -60,7 +60,7 @@ DB_NAME = "litellm"
 #    2026-09-25 修：这里原先写死 `app=litellm-proxy`，会验到不在服务的车道。
 PROXY_SELECTOR = "carher.net/litellm-production-route=enabled"
 PROXY_PORT = "4000"
-SECRET = "litellm-secrets"
+SECRET = "litellm-secrets-r2"
 
 DEFAULT_ANCHOR = "deepseek-v4-flash-responses"
 DEFAULT_APPEND = "deepseek-v4-pro-responses"

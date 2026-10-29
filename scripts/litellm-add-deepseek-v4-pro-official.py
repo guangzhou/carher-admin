@@ -20,7 +20,7 @@ scripts/litellm-198-gpt-fallback-append.py and the runbook).
 
 Secret hygiene: the DeepSeek key is read from the DEEPSEEK_API_KEY env var
 (same account/key as the existing official flash entries and the Aliyun
-litellm-secrets). It is never hardcoded, logged, or written to any backup; any
+litellm-secrets-r2). It is never hardcoded, logged, or written to any backup; any
 diagnostic dump redacts api_key.
 
 Environment:

@@ -46,7 +46,7 @@ name gpt-5.6-sol on the canary key and check SpendLogs:
   expect model = openai/chatgpt-gpt-5.6-terra  (model rewritten to terra)
          model_id = chatgpt-acct-*-gpt-5.6-terra  (went to a terra deployment)
 
-Usage (run on 198 host; NodePort base + master key from litellm-secrets):
+Usage (run on 198 host; NodePort base + master key from litellm-secrets-r2):
     LITELLM_BASE=http://127.0.0.1:30402 LITELLM_MASTER_KEY=... \
         python3 litellm-cursor-sol-to-terra.py                       # dry-run all
     ... --only cursor-me-xxxx --backup /root/sol-terra-canary.json --apply

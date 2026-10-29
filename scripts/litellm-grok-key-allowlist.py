@@ -17,7 +17,7 @@ union — `models` is a whole-field REPLACE in LiteLLM, so we read-merge-write.
 There is no fallback target: the grok subscription is a single upstream account,
 nothing to fall back to. (Cf. project_grok_subscription_litellm_live_2026_08_15.)
 
-Usage (run on 198 host; NodePort base + master key from litellm-secrets):
+Usage (run on 198 host; NodePort base + master key from litellm-secrets-r2):
     LITELLM_BASE=http://127.0.0.1:30402 LITELLM_MASTER_KEY=... \
         python3 litellm-grok-key-allowlist.py                      # dry-run all groups
     ... --only-prefix cursor- --limit 1 --backup /root/grok-canary.json --apply

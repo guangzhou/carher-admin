@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """198 号池 router 腿(arms)审计 —— 在 198 本机跑(proxy 只在 127.0.0.1:30402 / pod IP 可达)。
 
-    K=<litellm-secrets master key> python3 - <cmd> ... < chatgpt-pool-198-arms.py
+    K=<litellm-secrets-r2 master key> python3 - <cmd> ... < chatgpt-pool-198-arms.py
 
 子命令:
     pick-ref <N>                   选参照号:除 N 外 unique arms 最多的号(并列取编号最大)

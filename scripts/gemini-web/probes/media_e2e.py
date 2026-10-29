@@ -3,7 +3,7 @@
 Temp key = cursor-liuguoxian-std's models/aliases (+ the media names under test) and
 allowed_passthrough_routes=/gemini-deepresearch, 40 min / $2, deleted in finally.
 
-    MK=$(sudo kubectl -n litellm-product get secret litellm-secrets -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d) \
+    MK=$(sudo kubectl -n litellm-product get secret litellm-secrets-r2 -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d) \
       python3 media_e2e.py image music video research
 
 Each item burns real account quota (video has its own small daily cap) — run only what you need.

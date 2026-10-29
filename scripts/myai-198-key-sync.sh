@@ -41,22 +41,29 @@ if [ "$NEW_H" = "$CUR_H" ]; then echo "OK 一致，无需处理"; exit 0; fi
 if [ "$MODE" = check ]; then echo "DRIFT myai 的 key 不是 198 现役 key（跑 apply 修）"; exit 1; fi
 
 # 2) 从 243 实打（myai 用的就是这个地址）
-CODES=$(retry243 'IFS= read -r K; S=$(date -u -d "-2 min" "+%Y-%m-%d+%H%%3A%M%%3A%S"); E=$(date -u "+%Y-%m-%d+%H%%3A%M%%3A%S");
+CODES=$(retry243 'IFS= read -r K; [ ${#K} -ge 20 ] || { echo "000 000"; exit 0; }; S=$(date -u -d "-2 min" "+%Y-%m-%d+%H%%3A%M%%3A%S"); E=$(date -u "+%Y-%m-%d+%H%%3A%M%%3A%S");
   a=$(curl -s -o /dev/null -w "%{http_code}" -m 30 https://cc.auto-link.com.cn/pro/model/info -H "Authorization: Bearer $K");
   b=$(curl -s -o /dev/null -w "%{http_code}" -m 30 "https://cc.auto-link.com.cn/pro/spend/logs/v2?start_date=$S&end_date=$E&page=1&page_size=1" -H "Authorization: Bearer $K");
   echo "$a $b"' < "$TMP")
 echo "新 key 从 243 实打: model/info+spend/logs/v2 = ${CODES}"
 [ "$CODES" = "200 200" ] || { echo "STOP 新 key 从 243 打不通，不写入" >&2; exit 4; }
 
-# 3) 备份 → patch → 回读
-r243 "set -e; IFS= read -r K; B=/Data/migration/dashboard-secrets.pre-keysync.\$(date -u +%Y%m%dT%H%M%S).yaml;
+# 3) 先等同步安全窗口，再写 key：写完马上要重启，同步发布阶段拿着长事务锁，这时换 pod 会被 liveness 杀。
+#    必须在写之前等：写完再失败，下次 apply 看到 sha 一致就不会再重启，新 key 永远没加载。
+"$HERE/myai-wait-sync-idle.sh" 2400 || { echo "STOP 等不到同步安全窗口，什么都没改" >&2; exit 5; }
+# 3b) 备份 → patch → 回读
+# 🔴 key 经 stdin 传：sshpass + stdin 偶发传成空（10-29 一次 cat > file 落了 0 字节）⇒ 远端先校验长度+sha 再写
+r243 "set -e; IFS= read -r K; [ \${#K} -ge 20 ] || { echo 'STOP 远端收到的 key 为空/过短，未写入' >&2; exit 7; };
+  [ \$(printf %s \"\$K\" | sha256sum | cut -c1-12) = $NEW_H ] || { echo 'STOP 远端收到的 key 与 198 不一致，未写入' >&2; exit 7; };
+  B=/Data/migration/dashboard-secrets.pre-keysync.\$(date -u +%Y%m%dT%H%M%S).yaml;
   kubectl -n $NS get secret dashboard-secrets -o yaml > \$B; chmod 600 \$B; echo backup=\$B;
   E=\$(printf %s \"\$K\" | base64 -w0);
   kubectl -n $NS patch secret dashboard-secrets --type=json -p \"[{\\\"op\\\":\\\"replace\\\",\\\"path\\\":\\\"/data/LITELLM_ADMIN_KEY\\\",\\\"value\\\":\\\"\$E\\\"}]\" >/dev/null;
   echo after=\$(kubectl -n $NS get secret dashboard-secrets -o jsonpath='{.data.LITELLM_ADMIN_KEY}' | base64 -d | sha256sum | cut -c1-12)" < "$TMP"
 
-# 4) 逐个 rollout（worker 同时起会在 apply_usage_schema 互锁），放到 243 后台，免得 ssh 断开带断
-r243 "nohup bash -c 'for d in ai-token-dashboard-chat ai-token-dashboard usage-realtime-worker usage-sync-worker; do echo == \$d; kubectl -n $NS rollout restart deploy/\$d && kubectl -n $NS rollout status deploy/\$d --timeout=300s; sleep 40; done; echo DONE' > /tmp/myai-keysync-rollout.log 2>&1 &"
+# 4) 逐个 rollout（worker 同时起会在 apply_usage_schema 互锁），放到 243 后台，免得 ssh 断开带断。
+#    主看板 ai-token-dashboard 10-29 起 0 副本，不重启（rollout restart 会等一个不存在的 pod）。
+r243 "nohup bash -c 'for d in ai-token-dashboard-chat usage-realtime-worker usage-sync-worker; do echo == \$d; kubectl -n $NS rollout restart deploy/\$d && kubectl -n $NS rollout status deploy/\$d --timeout=300s; sleep 40; done; echo DONE' > /tmp/myai-keysync-rollout.log 2>&1 &"
 for _ in $(seq 1 40); do
   sleep 15
   out=$(retry243 'cat /tmp/myai-keysync-rollout.log' 2>/dev/null || true)

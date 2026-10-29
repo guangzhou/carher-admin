@@ -305,3 +305,50 @@ def test_probe_target_default_and_override():
     assert c["resources"]["limits"]["memory"] == "2Gi" and c["command"] == ["sleep", "60"]
     assert m["spec"]["restartPolicy"] == "Never"
     assert {e.get("configMapRef", e.get("secretRef"))["name"] for e in c["envFrom"]} == {"dashboard-config", "dashboard-secrets"}
+
+
+
+def test_health_server_known_limitation_marker_is_known():
+    """10-29 起服务端在 organization.knownLimitation 标出许可限制（补丁 0014）。"""
+    body = {
+        "status": "ok",
+        "organization": {
+            "status": "unavailable",
+            "knownLimitation": "upstream_enterprise_license_missing",
+            "errors": {"organizations": {"statusCode": 403, "detail": "上游接口失败：Organizations are only available for LiteLLM Enterprise users."}},
+        },
+    }
+    findings = health.summarize(body, NOW)["findings"]
+    assert [f["level"] for f in findings if f["check"] == "organization"] == ["known"]
+
+
+def test_health_rejected_admin_key_is_not_known():
+    """阴性对照：10-28 旧 master key 三项全 403 ⇒ warn，不能被当成常驻许可限制。"""
+    detail = {"statusCode": 403, "detail": "管理员密钥无权限或已失效"}
+    body = {"status": "degraded", "organization": {"errors": {"organizations": detail, "teams": detail, "keys": detail}}}
+    assert health.summarize(body, NOW)["findings"][0]["level"] == "warn"
+
+
+def test_health_normal_settlement_lag_is_not_flagged():
+    """正常 60~140s 滞后不报；超过 180s 才报（与服务端阈值一致）。"""
+    ok = {"status": "ok", "usageRealtime": {"status": "ok", "maxSettlementLagSeconds": 140}}
+    assert not [f for f in health.summarize(ok, NOW)["findings"] if f["check"] == "usageRealtime"]
+    slow = {"status": "ok", "usageRealtime": {"status": "ok", "maxSettlementLagSeconds": 240}}
+    assert [f for f in health.summarize(slow, NOW)["findings"] if f["check"] == "usageRealtime"]
+
+
+
+def test_health_running_queue_item_is_not_backlog():
+    """10-29 实测：pendingCount=0 runningCount=1 oldestAge=4582s ⇒ 只是正在跑，不是积压。"""
+    body = {"status": "ok", "usageRefreshQueue": {"pendingCount": 0, "runningCount": 1, "oldestAgeSeconds": 4582, "maxAttempts": 4}}
+    assert not [f for f in health.summarize(body, NOW)["findings"] if f["check"] == "usageRefreshQueue"]
+    stuck = {"status": "ok", "usageRefreshQueue": {"pendingCount": 2, "runningCount": 0, "oldestAgeSeconds": 90000, "maxAttempts": 120}}
+    assert [f for f in health.summarize(stuck, NOW)["findings"] if f["check"] == "usageRefreshQueue"]
+
+
+def test_health_never_settled_org_is_known_not_mismatch():
+    body = {"status": "ok", "organization": {"settlement": {"settledDayCount": 0, "reconciliationDifferenceCount": 55, "reconciliationDifferenceUsd": 23832.79}}}
+    f = [x for x in health.summarize(body, NOW)["findings"] if x["check"] == "organization.settlement"]
+    assert f and f[0]["level"] == "known"
+    real = {"status": "ok", "organization": {"settlement": {"settledDayCount": 30, "reconciliationDifferenceCount": 2, "reconciliationDifferenceUsd": 10.0}}}
+    assert [x for x in health.summarize(real, NOW)["findings"] if x["check"] == "organization.settlement"][0]["level"] == "warn"

@@ -1,4 +1,4 @@
-"""Read-only ops CLI for myai.carher.net (ai_token_dashboard on the 243 K3s host)."""
+"""Read-only ops CLI for myai (chat.auto-link.com.cn/myai, ai_token_dashboard on the 243 K3s host)."""
 
 from __future__ import annotations
 
@@ -60,13 +60,13 @@ def _sql(ctx: click.Context, statement: str, title: str) -> None:
 @click.option("--json", "use_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.option("--host", help="ssh target (default cltx@10.68.13.243 or MYAI_HOST).")
 @click.option("--namespace", help="K8s namespace (default ai-token-dashboard).")
-@click.option("--public-url", help="Public base URL (default https://chat.auto-link.com.cn/myai; CF 腿用 https://myai.carher.net).")
+@click.option("--public-url", help="Public base URL (default https://chat.auto-link.com.cn/myai, the only entry since 2026-10-29).")
 @click.option("--timeout", type=click.FloatRange(min=1), default=180.0, show_default=True)
 @click.option("--probe-pod", "use_probe_pod", is_flag=True, help="Run upstream probes in the isolated pod/myai-probe (see `probe-pod up`).")
 @click.version_option(__version__)
 @click.pass_context
 def cli(ctx: click.Context, use_json: bool, host: str | None, namespace: str | None, public_url: str | None, timeout: float, use_probe_pod: bool) -> None:
-    """Inspect myai.carher.net: health, sync pipeline, refresh queue, billing, upstream.
+    """Inspect myai: health, sync pipeline, refresh queue, billing, upstream.
 
     Every command is read-only. SSH auth: MYAI_SSH_PASSWORD (via sshpass env) or ssh keys.
     """

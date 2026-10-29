@@ -32,7 +32,8 @@
 
 环境变量（在 LiteLLM Proxy 部署中配置）
 ========================================
-OBSERVABILITY_INGEST_URL        采集接口地址（默认 https://myai.carher.net/api/internal/observability/events）
+OBSERVABILITY_INGEST_URL        采集接口地址（默认 243 myai NodePort http://10.68.13.243:30810/api/internal/observability/events；
+                                myai.carher.net 2026-10-29 已下线。198 生产 deploy 用 env 覆盖，见 skill cli-anything-myai）
 OBSERVABILITY_INGEST_HMAC_SECRET 与看板 OBSERVABILITY_INGEST_HMAC_SECRET 相同的密钥（必填，否则禁用）
 OBSERVABILITY_BACKEND_ID        本 LiteLLM 后端的标识，必须与看板 usage_backend_ids()（或
                                 USAGE_SNAPSHOT_BACKEND_IDS）中的 id 一致（必填）
@@ -178,7 +179,7 @@ class ObservabilityAttemptPusher(CustomLogger):
         backend_id = os.getenv("OBSERVABILITY_BACKEND_ID", "").strip()
         url = os.getenv(
             "OBSERVABILITY_INGEST_URL",
-            "https://myai.carher.net/api/internal/observability/events",
+            "http://10.68.13.243:30810/api/internal/observability/events",
         ).strip()
         if not secret or not backend_id or not url:
             logger.warning(

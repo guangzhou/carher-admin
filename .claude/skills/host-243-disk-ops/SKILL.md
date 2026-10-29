@@ -3,7 +3,7 @@ name: host-243-disk-ops
 description: >-
   243（10.68.13.243，单节点 k3s + snap LXD，跑 myai 和 Astrill 出口）的磁盘布局、巡检、
   以及「根盘满 ⇒ myai 挂」的排查和恢复。根盘只有 38G，会涨的东西都放在 500G 的 /Data。
-  Use when: myai 打不开（myai.carher.net 报 Cloudflare 1033 / 502，或 chat.auto-link.com.cn/myai/ 报 502）、pod 全部 Pending 或 ErrImageNeverPull、
+  Use when: myai 打不开（chat.auto-link.com.cn/myai/ 报 502；myai.carher.net 10-29 已下线）、pod 全部 Pending 或 ErrImageNeverPull、
   节点 DiskPressure、「243 磁盘满了」、要往 243 导镜像、要新建或挪 LXD 容器、要动 243 的 k3s 数据目录。
 ---
 
@@ -43,8 +43,8 @@ scripts/host-243-disk-check.sh
 
 ## §2 myai 打不开时的排查顺序
 
-0. **先分清是"坏了"还是"慢"**：巡检全绿、只有 myai.carher.net 慢或时好时坏 ⇒ 是 CF 线路问题，不是 243，让用户改用 `https://chat.auto-link.com.cn/myai/`（skill `cli-anything-myai` §国内入口）。10-19 用户报「又打不开」就是这种情况
-1. **`host-243-disk-check.sh`**。1033 = 隧道没进程（cloudflared 没在跑），502 = 隧道通了但 dashboard 没起来
+0. **先分清是"打不开"还是"数据不更新"**：页面 200 但看板停在某个时间点 ⇒ 不是 243 磁盘，走 skill `cli-anything-myai` §health 判据（10-28 那次是 198 换 key 后 403）。myai.carher.net 10-29 已下线（CF 530 是预期），只看 chat 入口
+1. **`host-243-disk-check.sh`**。chat 入口 502 = 198 nginx 到 243 NodePort 30810 不通，或 `deploy/ai-token-dashboard-chat` 没起来。它也会检查 `ai-token-dashboard`/`cloudflared` 仍是 0 副本
 2. `DiskPressure=True` ⇒ 节点有 NoSchedule 污点，pod 全部 Pending；kubelet 还会**驱逐所有 pod（包括 cloudflared）**，
    同时跑 image GC（高水位 85%，降到 80%）。先腾空间（§3），污点会自动消失
 3. pod 报 `ErrImageNeverPull` ⇒ 本地镜像被 GC 删了。`host-243-image-import.sh /Data/migration/image-*.tar`，

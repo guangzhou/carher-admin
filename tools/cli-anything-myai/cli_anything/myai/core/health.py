@@ -1,8 +1,9 @@
 """Public /api/health (unauthenticated) and a compact summary of its fields.
 
-Field meanings follow backend/main.py ``/api/health`` at 2818c0d. ``status`` is
-``degraded`` whenever any sub-check is degraded; organizations=403 (LiteLLM
-non-Enterprise) is permanent on this deployment and is reported as ``known``.
+Field meanings follow backend/main.py ``/api/health`` (patches 0014/0016, 2026-10-29).
+organizations=403 (LiteLLM non-Enterprise) is permanent on this deployment: the server
+now marks it ``organization.knownLimitation`` and no longer degrades overall ``status``;
+here it is reported as ``known``. Any other organization probe failure is ``warn``.
 """
 
 from __future__ import annotations
@@ -46,7 +47,9 @@ def summarize(health: dict[str, Any], now: datetime | None = None) -> dict[str, 
     org_errors = org.get("errors") or {}
     org_detail = json.dumps(org_errors, ensure_ascii=False)
     if org_errors:
-        known = KNOWN_ORG_403 in org_detail and set(org_errors) == {"organizations"}
+        known = org.get("knownLimitation") == "upstream_enterprise_license_missing" or (
+            KNOWN_ORG_403 in org_detail and set(org_errors) == {"organizations"}
+        )
         findings.append({
             "check": "organization",
             "level": "known" if known else "warn",
@@ -64,7 +67,8 @@ def summarize(health: dict[str, Any], now: datetime | None = None) -> dict[str, 
         findings.append({"check": "usageSync.heartbeat", "level": "warn", "detail": f"worker 心跳滞后 {sync.get('heartbeatLagSeconds')}s"})
 
     oldest = queue.get("oldestAgeSeconds")
-    if oldest and int(oldest) > 3600:
+    # oldestAgeSeconds 也算 running：同步首尾相接，正在跑的那条可能已排了一个多小时。只看真正积压的 pending。
+    if oldest and int(oldest) > 3600 and int(queue.get("pendingCount") or 0) > 0:
         findings.append({
             "check": "usageRefreshQueue",
             "level": "warn",
@@ -72,13 +76,21 @@ def summarize(health: dict[str, Any], now: datetime | None = None) -> dict[str, 
         })
 
     lag = realtime.get("maxSettlementLagSeconds")
-    if realtime.get("status") != "ok" or (lag and int(lag) > 600):
+    # 结算水位取整到分钟 + 只做已关闭 60s 的窗口 ⇒ 正常就有 60~140s 滞后；服务端阈值 180s（补丁 0016）
+    if realtime.get("status") != "ok" or (lag and int(lag) > 180):
         findings.append({"check": "usageRealtime", "level": "warn", "detail": f"status={realtime.get('status')} maxSettlementLag={lag}s"})
 
     if outbox.get("failedCount"):
         findings.append({"check": "organization.outbox", "level": "warn", "detail": f"outbox failed={outbox.get('failedCount')} pending={outbox.get('pendingCount')};查 `billing outbox`"})
     settlement = org.get("settlement") or {}
-    if settlement.get("reconciliationDifferenceCount"):
+    # 组织结算从没跑过（settledDayCount=0）时，「差异」= 北汽开通计费以来每天的归属用量，不是对不上，报 known。
+    if settlement.get("reconciliationDifferenceCount") and not settlement.get("settledDayCount"):
+        findings.append({
+            "check": "organization.settlement",
+            "level": "known",
+            "detail": f"组织日结从未写入（settledDayCount=0）；{settlement.get('reconciliationDifferenceCount')} 天归属用量未结算 ${settlement.get('reconciliationDifferenceUsd')}，不是对账错",
+        })
+    elif settlement.get("reconciliationDifferenceCount"):
         findings.append({
             "check": "organization.settlement",
             "level": "warn",

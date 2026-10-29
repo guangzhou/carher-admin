@@ -34,9 +34,12 @@ systemctl show snap.lxd.daemon -p RequiresMountsFor | grep -q /mnt/lxd-data && o
 
 # myai 唯一入口 chat.auto-link.com.cn/myai/ ← deploy/ai-token-dashboard-chat（NodePort 30810，198 nginx 转发过来）；
 # myai.carher.net（deploy/ai-token-dashboard + cloudflared）2026-10-29 已缩到 0
-for dpl in ai-token-dashboard ai-token-dashboard-chat; do
-  rd=$(kubectl -n ai-token-dashboard get deploy "$dpl" -o jsonpath='{.status.readyReplicas}/{.spec.replicas}' 2>/dev/null || echo "missing")
-  case "$rd" in 1/1) ok "deploy/$dpl ready $rd";; *) warn "deploy/$dpl ready=${rd}（不 ready ⇒ 对应入口 502）";; esac
+rd=$(kubectl -n ai-token-dashboard get deploy ai-token-dashboard-chat -o jsonpath='{.status.readyReplicas}/{.spec.replicas}' 2>/dev/null || echo "missing")
+case "$rd" in 1/1) ok "deploy/ai-token-dashboard-chat ready $rd";; *) warn "deploy/ai-token-dashboard-chat ready=${rd}（不 ready ⇒ myai 唯一入口 502）";; esac
+# 已下线的两个应保持 0；被意外拉起会让老域名重新可用、且多一个进程跑后台预取
+for dpl in ai-token-dashboard cloudflared; do
+  want=$(kubectl -n ai-token-dashboard get deploy "$dpl" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "missing")
+  [ "$want" = 0 ] && ok "deploy/$dpl 已下线（0 副本）" || warn "deploy/$dpl 副本=${want}（10-29 起应为 0，myai.carher.net 已下线）"
 done
 c=$(curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:30810/api/health || true)
 [ "$c" = 200 ] && ok "NodePort 30810 /api/health 200（chat 入口的源站）" || warn "NodePort 30810 /api/health=$c"

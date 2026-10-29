@@ -1,8 +1,10 @@
 # ai_token_dashboard 上游修复（未进 GitHub）
 
 `davidzhu2021/ai_token_dashboard` 我们没有推送权限。0001/0002 是 243 sync worker 正在跑的
-`ai-token-dashboard:fix-9f250f8` 相对线上 `2818c0d` 的两个提交；0003~0008（2026-10-20，**均已上线**）
-叠在 9f250f8 上，修全员看板慢、刷新队列卡死、发布时 CrashLoop。等有权限或交给项目负责人合并：
+`ai-token-dashboard:fix-9f250f8` 相对线上 `2818c0d` 的两个提交；0003~0008（2026-10-20）修全员看板慢、刷新队列卡死、
+发布时 CrashLoop；0009~0018（2026-10-28/29）修 198 换 key 后暴露的发布超时、实时 worker 卡顿、her 漏算、health 误报、
+稳定性看板停更、Redis 撑满。**全部已上线**（现役镜像以 `kubectl get deploy` 为准，10-29 是 `perf-3994a87`）。
+叠在 9f250f8 上，等有权限或交给项目负责人合并（交接文档飞书 `LnDFdifILo1Wuix7irecEbKOnkh`）：
 
 | 文件 | 内容 |
 |---|---|
@@ -27,7 +29,7 @@
 | `DESIGN-log-scan-cap.md` / `DESIGN-key-coverage.md` | 0001/0002 的设计与实测数据 |
 | `litellm_spendlog_cap_report.md` | LiteLLM 10000 计数封顶的来源调研（PR #31825 等） |
 
-应用：`git am --keep-cr tools/cli-anything-myai/upstream-fixes/000*.patch`（基于 `2818c0d`；0001/0002 对 master `b13f58c` 两个文件无冲突）。
+应用：`git am --keep-cr tools/cli-anything-myai/upstream-fixes/00*.patch`（基于 `2818c0d`；0001/0002 对 master `b13f58c` 两个文件无冲突）。
 🔴 **必须带 `--keep-cr`**：`backend/main.py` 是 CRLF/LF 混合行尾，不带会在 0004 报 `补丁未应用`。
 
 测试：改前已有 15 个失败（前端/静态资源断言，与这几个补丁无关），0003~0008 每个提交单独跑都是这 15 个、不新增；

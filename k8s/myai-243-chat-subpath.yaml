@@ -1,14 +1,15 @@
-# myai（ai_token_dashboard）的第二个入口：https://chat.auto-link.com.cn/myai/
-# 跑在 243 单节点 k3s，ns ai-token-dashboard。myai.carher.net 那份（deploy/ai-token-dashboard）不动。
+# myai（ai_token_dashboard）的唯一入口：https://chat.auto-link.com.cn/myai/
+# 跑在 243 单节点 k3s，ns ai-token-dashboard。myai.carher.net 那份（deploy/ai-token-dashboard + cloudflared）2026-10-29 已缩到 0。
 #
 # 为什么是第二个 Deployment，而不是给原来那份多加一个域名（读 2818c0d 源码确认）:
 #   - enforce_csrf 拿 Origin 和 APP_BASE_URL 严格比 scheme+netloc ⇒ 一个进程只认一个域名
 #   - sso_start 的 redirect_uri = APP_BASE_URL + /api/auth/callback
 # 同镜像、同 ConfigMap/Secret、同库、同 app-data PVC（auth.sqlite3 是 WAL + busy_timeout，同节点已有 3 个 pod 共用）。
-# 只覆盖 APP_BASE_URL，并关掉没必要跑两份的后台预取。
+# 只覆盖 APP_BASE_URL（10-29 起共享 CM/Secret 里也是这个值，留着防有人改回）。
+# 后台预取（ADMIN_LIVE_TOTALS_PREFETCH）原本由主看板跑、这里关掉；主看板下线后由这份跑，所以不再覆盖。
 #
 # 前面是 198 nginx（chat.auto-link.com.cn.conf 里 `# >>> myai-subpath >>>` 那一段），转发到下面的 NodePort。
-# 部署/回滚走 scripts/myai-chat-subpath-deploy.sh；SOP 见 skill host-243-disk-ops 旁边的 cli-anything-myai §入口。
+# 部署/回滚走 scripts/myai-chat-subpath/deploy.sh；SOP 见 skill cli-anything-myai §入口。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,7 +26,9 @@ spec:
     spec:
       containers:
       - name: dashboard
-        image: ai-token-dashboard:latest
+        # 🔴 镜像以线上为准，发布走 scripts/myai-release.sh（会 set image）。这里写的是 perf-3994a87，
+        # 写成 :latest 会在 apply 时把它打回 10-10 的老版本（无补丁 0003~0018）。
+        image: ai-token-dashboard:perf-3994a87
         imagePullPolicy: Never
         envFrom:
         - configMapRef: {name: dashboard-config}
@@ -33,7 +36,6 @@ spec:
         # env 优先级高于 envFrom ⇒ 这里的值会盖过 Secret 里的 APP_BASE_URL
         env:
         - {name: APP_BASE_URL, value: "https://chat.auto-link.com.cn/myai"}
-        - {name: ADMIN_LIVE_TOTALS_PREFETCH_ENABLED, value: "false"}
         - {name: USAGE_SYNC_ROLE, value: reader}
         - {name: USAGE_DB_POOL_MIN_SIZE, value: "1"}
         - {name: USAGE_DB_POOL_MAX_SIZE, value: "5"}

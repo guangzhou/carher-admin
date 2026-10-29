@@ -25,7 +25,7 @@ else echo "FATAL: kubectl 读不到集群"; exit 1; fi
 
 mkdir -p "$BK"; chmod 700 "$BK"
 echo "== 备份目录: $BK"
-MK=$($K -n "$NS" get secret litellm-secrets -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+MK=$($K -n "$NS" get secret litellm-secrets-r2 -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 
 # ───────── 1. 读当前完整形状 + 备份 ─────────
 echo "== 读 /model/info 当前形状"

@@ -37,6 +37,18 @@ sleep 2 && kubectl get nodes
 
 ## DB 凭证
 
+🔴 **secret 名按集群/命名空间不同**(10-29 实测):
+
+| 在哪 | secret 名 |
+|---|---|
+| 198 `litellm-product`(含 `jms ssh AIYJY-litellm`,同一集群) | **`litellm-secrets-r2`**(10-28 17:41 轮换,旧名已删 ⇒ NotFound) |
+| 198 `litellm-dev` / `litellm-staging` | `litellm-secrets`(没轮换) |
+| ACK `carher`(本节下面这些命令) | `litellm-secrets`(没轮换) |
+
+198 生产别写死名字:`bash scripts/litellm-198-master-key.sh`(跟着 proxy 的 envFrom 走、实打一次 /model/info),
+或在 Python 里 `from litellm_198_secret import SHELL_RESOLVE / name_for`。只读查库优先用
+`tools/cli-anything-litellm` 的 `remote198.psql()`(在 db pod 里用 `$POSTGRES_USER`,不碰 secret)。
+
 ```bash
 kubectl get secret litellm-secrets -n carher \
   -o jsonpath='{.data.DATABASE_URL}' | base64 -d

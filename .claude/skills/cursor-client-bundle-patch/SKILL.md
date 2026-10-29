@@ -31,7 +31,10 @@ description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 
 | `cursor_ctx_param_gate.js` | `context` 档位参数门禁(⏸ 还没接进安装器/巡检) | — |
 | `cursor_queue_diag_patch.py` | 诊断用:把泵换成"每秒打 tick 日志"版,只观测不改行为 | `@cx-queue-diag:v3.2` |
 | `bundle_anchor_probe.js` | 只读数锚点命中(live Cursor 或**显式给 bundle 文件**,新版预检不用装) | — |
-| `bundle_patch_regress.sh` | **改 PATCHES 后的离线回归台架(⑯ 腿)**(见「新版本漂移修复流程」) | — |
+| `bundle_patch_regress.sh` | **改 PATCHES / 安装器后的离线回归台架(①~㉔,带 `--new-bundles --new-app` 时 ~140 项)**(见「新版本漂移修复流程」);⑬~㉔ 是 10-28~29 加的,每条都有就地重实现旧行为的阳性对照 | — |
+| `cursor_selfheal.sh` | **补丁自愈的 mac 包装**(launchd `com.carher.cursor-selfheal` 每 300s):只找 Cursor 二进制再调 `cursor_team_setup.js --selfheal`,**判定只在 JS 里一份**(台架 ㉓ 断言这里不许出现 pgrep/marker) | — |
+| `cursor_precompact_probe.js` | 挂官方 `preCompact` 钩子:压缩真发生时记 Cursor 自己算的 `context_window_size` 到 `~/.carher/cursor-precompact.jsonl`,`<4096` = 坏值;`--report` 看汇总。官方明说这钩子拦不住压缩 ⇒ 只是量具 | — |
+| `cursor_summary_storm_scan.py` | 只读 198 SpendLogs:谁在「上下文很空」时频繁压缩(压缩率 + 触发时上下文)+ **版本覆盖表**(量过清单直接读 `VERIFIED_EXACT`)。只给名单不下结论 | — |
 | `retire_model_offline_cases.sh` | **改模型清单后的九腿/28 断言离线台架**(整表赋值逐字按序 + 选中位 re-point + 写库前快照 + `--uninstall` 还原 + `--upgrade` 不问 Key;带 `RETIRE_JS=` 阳性对照) | — |
 | `cursor_key_read.js` | **只读解开本机 BYOK Key**(默认掩码,`--reveal` 才明文);诊断用,**不进交付 zip** | — |
 | `cursor_keysan_offline_cases.js` | 台架第 ⑫ 腿:**Key 不可见字符**(真 `new Headers()` 对账 + 旧行为阳性对照,51 项);见「Key 里的不可见字符」 | — |
@@ -44,16 +47,34 @@ description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 
 **`@cxteam-norelay`(2026-08-25 连发折叠+僵尸真根因修)**。
 2026-09-23 加到 **10 处**:`@cxteam-nocloud` / `@cxteam-nocloudset`(见下「会话被改道去 Cloud Agents」)。
 
-## 🔴 「同事说 Cursor 比 Claude 慢」怎么查(2026-10-28)
+## 🔴 「同事说 Cursor 比 Claude 慢 / 没反应」怎么查(2026-10-28~29)
 
-先按**承载它的 kiro 槽**分组比,不按客户端整体比 —— 人和槽不是随机分布的。
-10-28 实测:同槽里 Cursor 与 Claude Code 一样快(85.100 槽两者首字 p50 都 9.2s),
-慢的是 STUDENT 槽 `sg-47.236.200.98`(首字 p50 121s)与排队中的 jp 槽,
-而那两个槽上的人恰好大多用 Cursor ⇒ 看着像「Cursor 慢」。工具:
-`.work/cursor-slow/slot_latency.sh`(198 上 `bash -s -- <小时>`)。
-已证伪:Cursor 线型 vs Claude 线型同速(300KB 上下文也一样)、zk-delta 小代理与直连同速
-(长回答不攒批)、Cursor 本地准备 p50 0.14s、hooks 均 <60ms。
-→ [[project_cursor_slow_is_kiro_slot_not_client_2026_10_28]]
+**根因(算出来的,不是猜的)**:Cursor **自动升级会整个换掉 app 目录 ⇒ 我们的补丁全没、不报错**。
+- 件C 没了 ⇒ 压缩触发线 `min(300-1e4, 300*.9) = -9700` ⇒ `used >= -9700` 恒真 ⇒ **每条消息都压缩一次**,
+  每次 43~98s。我们**不是**要关掉压缩 —— 补丁在时只在快满才压(300k 窗口约 27 万),那是对的(用户原话)。
+- 件D 没了 + 服务端开了 `agent_host_local_loop` ⇒ 每轮被送去 Cursor 自家后端,源码写明不支持 BYOK
+  ⇒ 报错 / 没反应(10-29 lupeng1)。
+- 升级锁 10-13 才默认开 ⇒ **更早装的人全在风险里**;锁上之后用户自己点升级也会冲掉。
+
+**按这个顺序查(每步都有现成工具,别自己搓)**:
+1. 本人双击 **DOCTOR**:第 1) 节 marker 全 0 ⇒ 就是这个病。2.55 节说自愈在等(Cursor 开着它不动手);
+   第 4) 节有「要命的组合」⇒ local_loop + 件D 没摘。
+2. 处置:**⌘Q 完全退出 Cursor**(装了自愈的 Mac 5 分钟内自己补好)或双击 REPAIR。
+   修不好(锚点认不出 = Cursor 太新)⇒ 先量新版:`sh bundle_patch_regress.sh --fetch-latest`。
+   10-29 lupeng1 是「卸载再重装」好的。
+3. 面上扫谁中招:`python3 scripts/zk-cursor-web/cursor_summary_storm_scan.py --hours 72`
+   (压缩率 + 触发时上下文 + 版本覆盖表;只给名单不下结论)。
+4. 机器自己留证据:preCompact 探针 `~/.carher/cursor-precompact.jsonl`,窗口值 `<4096` = 坏。
+
+**排除过的(10-28 实测,别再查)**:Cursor 线型 vs Claude 线型同速(300KB 上下文也一样)、zk-delta 小代理
+与直连同速(长回答不攒批)、Cursor 本地准备 p50 0.14s、hooks 均 <60ms、压缩请求是后台跑的(和主请求重叠,
+不是让人干等的那段)。另有一条**用户否掉的**线索:同槽里 Cursor 与 Claude 同速,慢集中在 STUDENT 槽
+`sg-47.236.200.98` 与排队的 jp 槽(`scripts/cursor-slow-diagnose/slot_latency.sh`)—— 用户 10-28 说「不是那个原因」,
+**别当结论用**。→ [[project_cursor_slow_is_kiro_slot_not_client_2026_10_28]]
+
+🔴 **SpendLogs 对时**:`startTime` 是 naive UTC,北京时间写 `"startTime" + interval '8 hours'`,
+**不许**写 `at time zone 'Asia/Shanghai'`(往回减 8h)。10-29 我用错写法把 lupeng1「今天 15:23 被升级」
+排成「昨晚 23:23」,还据此说「他下午的消息一条都没到网关」—— 全是假的。DOCTOR 里的会话时间是 UTC(带 Z)。
 
 **客户端侧真找到的四件事(都已修,commit 805541e / 45fd8d9 / 2bc2131)**:
 
@@ -884,8 +905,9 @@ ELECTRON_RUN_AS_NODE=1 /Applications/Cursor.app/Contents/MacOS/Cursor cursor_tea
   插入点也别拼 `function X(e,t){` 这种字面头:改成 `m.replace("{", ...)` 取参数表后第一个 `{`
   (参数表里不可能有 `{`),这样连空格差异也不依赖。
   ⚠️ 判据是 **3.21.18 与 3.20.17 两代都 4/4**:只让新版过,等于把老用户换成新的受害者。
-- **升级策略**:默认允许 Cursor 自动升级,升级掀翻补丁后跑 `--repair` 一键重打
-  (锚点=语义地标,3.16→3.19.19 全部存活);要锁死不升级才用 `--pin-update`。
+- **升级策略**(🔴 09 月的旧口径作废):**10-13 起默认禁止 Cursor 自动升级**(`update.mode=none` 等三项,
+  `setUpdateNone`)—— 升级会冲掉全部补丁,冲掉件C 就每条消息都压缩。10-28 起再加两层兜底:
+  装的时候件C/件D 没打上会列红;Mac 装了自愈(launchd 每 5 分钟,Cursor 关着且补丁缺就 `--repair`)。
 
 ### 🔴 离线台架全绿 ≠ 新版能用(2026-10-12 真机打脸)
 

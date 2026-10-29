@@ -15,12 +15,17 @@
   🔴 这个脚本只给**名单和证据**,不下结论。确认要让本人双击 DOCTOR 看
   `ctxwin(@cx-ctxwin:v3)` 那四行是不是都 =3;<3 就让他双击 REPAIR。
 
-用法(本机跑,走 ssh 读 198 的 SpendLogs,只读):
+用法(本机跑,经 remote198.psql 只读 198 的 SpendLogs):
   python3 cursor_summary_storm_scan.py              # 近 24h
   python3 cursor_summary_storm_scan.py --hours 72
   python3 cursor_summary_storm_scan.py --json       # 给别的脚本吃
 """
-import argparse, json, subprocess, sys
+import argparse, json, os, sys
+# 🔴 10-29:原来自己 ssh + 从 secret `litellm-secrets` 解 DATABASE_URL ⇒ 当天 key 轮换把 secret
+#    换成了 `litellm-secrets-r2`,脚本直接 FATAL。改用共用的 remote198.psql():它在 db pod 里用
+#    $POSTGRES_USER 连库(不碰任何 secret),且事务开成 READ ONLY ⇒ 写不进去。
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools", "cli-anything-litellm"))
+from cli_anything.litellm.utils import remote198  # noqa: E402
 
 SUMM_PREFIX = "You are an intelligent assistant, tasked with summ"
 # 判「上下文还很空就压」的界:最小真实窗口 200k,10% = 2 万 token。
@@ -30,7 +35,6 @@ MIN_SUMM = 3            # 少于这么多次不报(偶发/手动压缩不算风�
 STORM_RATE = 5.0        # 每 100 条主请求压缩 ≥5 次才算风暴
 
 SQL = """
-SET statement_timeout='280s';
 WITH a AS (
   SELECT metadata->>'user_api_key_alias' alias,
          substring(request_tags::text from 'Cursor/([0-9.]+)') ver,
@@ -51,19 +55,7 @@ SELECT coalesce(alias,'(no alias)') alias, coalesce(max(ver),'?') ver,
 FROM a GROUP BY 1 HAVING count(*) FILTER (WHERE summ) > 0 ORDER BY 4 DESC;
 """
 
-REMOTE = r"""
-set -u
-DU=$(sudo kubectl -n litellm-product get secret litellm-secrets -o jsonpath='{.data.DATABASE_URL}' | base64 -d)
-U=$(echo "$DU"|sed -E 's#^[a-z+]+://([^:]+):.*#\1#')
-PW=$(echo "$DU"|sed -E 's#^[a-z+]+://[^:]+:([^@]+)@.*#\1#')
-D=$(echo "$DU"|sed -E 's#.*/([^/?]+)(\?.*)?$#\1#')
-q(){ sudo kubectl -n litellm-product exec litellm-db-0 -- env PGPASSWORD="$PW" psql -h 127.0.0.1 -U "$U" -d "$D" "$@"; }
-# 阳性对照:这一步不是正整数,下面的空结果就不许当读数
-CTL=$(q -t -A -c 'SELECT count(*) FROM "LiteLLM_SpendLogs" WHERE "startTime">now()-interval '"'"'30 minutes'"'"';' 2>&1)
-case "$CTL" in ''|*[!0-9]*) echo "FATAL 阳性对照失败,读不到库: $CTL" >&2; exit 2;; esac
-echo "CTL=$CTL" >&2
-q -t -A -F '|' -c "$SQLTEXT"
-"""
+
 
 
 # 10-28:只看"压缩风暴"会漏掉真实风险面 —— 同事跑在**我们从没量过锚点**的小版本上时,
@@ -82,7 +74,6 @@ def verified_exact(repo_root):
 
 
 VER_SQL = """
-SET statement_timeout='200s';
 SELECT coalesce(substring(request_tags::text from 'Cursor/([0-9.]+)'),'(未知)') ver,
        count(DISTINCT metadata->>'user_api_key_alias') people, count(*) reqs
 FROM "LiteLLM_SpendLogs"
@@ -94,46 +85,28 @@ GROUP BY 1 ORDER BY 2 DESC, 3 DESC;
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=int, default=24)
-    ap.add_argument("--host", default="cltx@10.68.13.198")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
 
     sql = SQL % (SUMM_PREFIX, a.hours, LOW_CTX_TOKENS)
-    r = subprocess.run(
-        ["ssh", "-o", "ConnectTimeout=20", "-o", "ClearAllForwardings=yes", a.host,
-         "SQLTEXT=" + json_quote(sql) + " bash -s"],
-        input=REMOTE, capture_output=True, text=True, timeout=600)
-    if r.returncode != 0:
-        sys.stderr.write(r.stderr)
-        sys.exit("读库失败,上面是原文(空结果不许当成『没人压缩』)")
-
+    # 阳性对照:窗口里必须读得到行,否则下面的「没人压缩」不许当读数
+    ctl = remote198.psql('SELECT count(*) AS n FROM "LiteLLM_SpendLogs" WHERE "startTime" > now() - interval \'30 minutes\'', timeout_ms=120000)
+    if not ctl or not ctl[0].get("n", "").isdigit() or int(ctl[0]["n"]) == 0:
+        sys.exit("FATAL 阳性对照失败:近 30 分钟读到 %r 行 ⇒ 下面的空结果不许当成『没人压缩』" % (ctl,))
+    res = remote198.psql(sql, timeout_ms=280000)
     rows = []
-    for line in r.stdout.splitlines():
-        p = line.split("|")
-        if len(p) != 8:
-            continue
-        alias, ver, main_n, summ, low, ctx_p50, ctx_min, mins = p
-        main_n, summ, low = int(main_n), int(summ), int(low)
+    for r in res:
+        main_n, summ, low = int(r["main"]), int(r["summ"]), int(r["summ_low_ctx"])
         rate = 100.0 * summ / max(main_n, 1)
         rows.append({
-            "alias": alias, "cursor": ver, "main": main_n, "summaries": summ,
+            "alias": r["alias"], "cursor": r["ver"], "main": main_n, "summaries": summ,
             "per_100_main": round(rate, 1), "low_ctx_summaries": low,
-            "ctx_at_trigger_k_p50": int(ctx_p50), "ctx_at_trigger_k_min": int(ctx_min),
-            "summary_minutes": int(mins),
+            "ctx_at_trigger_k_p50": int(r["summ_ctx_k_p50"]), "ctx_at_trigger_k_min": int(r["summ_ctx_k_min"]),
+            "summary_minutes": int(r["summ_minutes"]),
             # 风暴 = 发得勤 **且** 触发时上下文很空。只满足一条不算。
             "storm": summ >= MIN_SUMM and rate >= STORM_RATE and low >= MIN_SUMM,
         })
-
-    # 版本覆盖表(同一次 ssh 再跑一条,只读)
-    vr = subprocess.run(
-        ["ssh", "-o", "ConnectTimeout=20", "-o", "ClearAllForwardings=yes", a.host,
-         "SQLTEXT=" + json_quote(VER_SQL % a.hours) + " bash -s"],
-        input=REMOTE, capture_output=True, text=True, timeout=600)
-    vrows = []
-    for line in vr.stdout.splitlines():
-        p2 = line.split("|")
-        if len(p2) == 3 and p2[1].isdigit():
-            vrows.append((p2[0], int(p2[1]), int(p2[2])))
+    vrows = [(r["ver"], int(r["people"]), int(r["reqs"])) for r in remote198.psql(VER_SQL % a.hours, timeout_ms=200000)]
 
     if a.json:
         print(json.dumps({"storms": rows, "versions": [
@@ -186,8 +159,7 @@ def print_versions(rows, hours, repo_root):
         print("     只能请本人双击一次 DOCTOR 把报告发来。")
 
 
-def json_quote(s):
-    return "'" + s.replace("'", "'\"'\"'") + "'"
+
 
 
 if __name__ == "__main__":

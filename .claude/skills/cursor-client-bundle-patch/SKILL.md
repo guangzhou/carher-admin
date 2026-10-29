@@ -70,7 +70,7 @@ description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 
 与直连同速(长回答不攒批)、Cursor 本地准备 p50 0.14s、hooks 均 <60ms、压缩请求是后台跑的(和主请求重叠,
 不是让人干等的那段)。另有一条**用户否掉的**线索:同槽里 Cursor 与 Claude 同速,慢集中在 STUDENT 槽
 `sg-47.236.200.98` 与排队的 jp 槽(`scripts/cursor-slow-diagnose/slot_latency.sh`)—— 用户 10-28 说「不是那个原因」,
-**别当结论用**。→ [[project_cursor_slow_is_kiro_slot_not_client_2026_10_28]]
+**别当结论用**。→ [[project_cursor_slow_is_patches_wiped_by_auto_upgrade_2026_10_28]]
 
 🔴 **SpendLogs 对时**:`startTime` 是 naive UTC,北京时间写 `"startTime" + interval '8 hours'`,
 **不许**写 `at time zone 'Asia/Shanghai'`(往回减 8h)。10-29 我用错写法把 lupeng1「今天 15:23 被升级」

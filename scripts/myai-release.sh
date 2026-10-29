@@ -122,7 +122,10 @@ EOF
 
 case "$ACTION" in
   build) : "${HOST243_PW:?需要 HOST243_PW}"; build ;;
-  deploy) : "${HOST243_PW:?需要 HOST243_PW}"; deploy ;;
+  deploy) : "${HOST243_PW:?需要 HOST243_PW}"
+          # 同步在跑时换 pod，新 pod 建表等锁 → liveness 杀（10-29 实测）；先等空闲
+          [ "${SKIP_IDLE_WAIT:-}" = 1 ] || "$(dirname "$0")/myai-wait-sync-idle.sh" "${IDLE_WAIT_MAX:-1800}" || exit 1
+          deploy ;;
   rollback) : "${HOST243_PW:?需要 HOST243_PW}"; rollback ;;
   *) echo "用法: $0 build|deploy|rollback（COMMIT=<sha> 可指定提交）" >&2; exit 2 ;;
 esac

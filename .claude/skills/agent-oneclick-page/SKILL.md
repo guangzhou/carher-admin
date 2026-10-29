@@ -64,7 +64,21 @@ scripts/agent-oneclick-docs/
 ## 改版 → 上线
 
 🔴 **一律用 `bash scripts/agent-oneclick-docs/release_all.sh`**(网页和飞书是同一批文件的两个出口)。
-10-16 只跑了 publish_198.sh,飞书 Codex 文档里还挂着旧脚本,收尾门禁才抓到。下面是单步命令:
+10-16 只跑了 publish_198.sh,飞书 Codex 文档里还挂着旧脚本,收尾门禁才抓到。
+
+🔴 **`release_all.sh` 只换飞书附件,不推飞书正文**(10-29 发现):改了 `bodies.py` 必须另跑
+`python3 scripts/agent-oneclick-docs/apply.py <doc_id>`(Cursor = `OQCPdLd4MovEVoxGzdMcD3CJnCf`)再跑
+`agent-oneclick-docs-audit.py`。release_all 的门禁绿**不代表正文已更新** —— 回读确认一次
+(`lark-cli docs +fetch --doc <id> | grep <新句子>`)。
+
+**文案门禁(10-29 加,网页 `build_html.py` / 飞书 `agent-oneclick-docs-audit.py` 同一口径)**:
+- 「Cursor 不会自动升级」**不加时间限定**会被拦 —— 升级锁 10-13 才默认开,更早装的人恰恰被升级冲掉了补丁。
+  🔴 豁免只看**同一句**(到下一个句号)里有没有「10 月 13 日」:网页门禁第一版看「后 120 字有 UPGRADE」,
+  原句后面紧跟「双击 UPGRADE」把它豁免了,塞回旧句照样绿;飞书正文我第一版把限定写进**下一句**,规则拦了我自己。
+- Cursor 排障表必须有「每发一句都要等很久」那一行(同事真实说法,最常见的病)。
+- 改门禁一律带阳性对照:把旧句子塞回模板,必须红;还原,必须绿。
+
+下面是单步命令:
 
 ```bash
 # 改 scripts/agent-oneclick-docs/oneclick-all.html 后

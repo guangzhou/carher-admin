@@ -82,6 +82,9 @@ claude-oneclick/
 | 🔴 **组件目录换布局**(10-28 复核 4.29 发现;本机 3.1623.4 已是) | 本机那份从 `claude-code/<ver>/` 改成 `claude-code/<ver>/<sha 前 12 位>/`(App 代码 `installDirFor`;老目录当 legacy 启动时搬走);VM 那份 `claude-code-vm/<ver>/` 不变。只写老目录 ⇒ App 一搬走 doctor 就误报「组件没准备好」、重跑又下 100MB | 安装器按 asar 里有没有 `it cannot name an install folder` 判新/老布局;doctor 两种目录都认;回归 `tests/test_desktop_app.py -k hashed`(真跑预置脚本 + 本地假镜像) |
 | Linux App(deb `/usr/lib/claude-desktop`)| 10-28 起有官方 Linux 版,同样每开会话下组件;本机那份是**单个 `claude` 二进制**(useBundle 只在 darwin),userData = `~/.config/Claude-3p` | 安装器 Linux 分支同样预置(不下 VM 那份,Linux 是否起 VM 没实测) |
 
+- 组件下载(mac ~100MB、win ~300MB)**偶发 `socket hang up`**(10-28 干净 HOME 实测 1 次,随后连跑 4 次都好)⇒
+  两个安装器都已加「断了自动重试 3 次、4xx 不重试」。用户看到「组件没准备好:socket hang up」时让他重跑一次即可。
+
 **App 升级后复核流程**(10-28 跑过):从镜像下 mac zip / win msix / linux deb 各解出 app.asar →
 ① manifest 正则能读到 ② `Claude-3p`/`coworkEgressAllowedHosts`/`inferenceModels` 键还在 ③ 读 `installDirFor`/`getHostTarget` 看目录规则 →
 把安装器里的预置 JS 切出来对三个 asar 真跑(`CARHER_ASAR/CARHER_UD/CARHER_OS/CARHER_ARCH`),目录名要等于 manifest sha 前 12 位 → 干净 HOME 真装 + doctor。

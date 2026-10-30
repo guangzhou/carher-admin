@@ -38,8 +38,8 @@ const { URL } = require('url')
 const F = require('../common/framing')
 
 const PORT = parseInt(process.env.ZKD_PORT || '8788', 10)
-const DELTA_URL = process.env.ZKD_DELTA_URL || 'https://cc.auto-link.com.cn/zkd/v1/delta'
-const UPSTREAM = process.env.ZKD_UPSTREAM || 'https://cc.auto-link.com.cn/pro'
+const DELTA_URL = process.env.ZKD_DELTA_URL || 'https://chat.auto-link.com.cn/zkd/v1/delta'
+const UPSTREAM = process.env.ZKD_UPSTREAM || 'https://chat.auto-link.com.cn/model'
 const OFF = process.env.ZKD_OFF === '1'
 const CAPTURE = process.env.ZKD_CAPTURE || ''
 // 采集必须封顶：真实 body 每条几 MB、Cursor 每轮一发，不封顶跑一天能把本机磁盘写爆。

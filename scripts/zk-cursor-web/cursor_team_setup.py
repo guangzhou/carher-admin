@@ -42,7 +42,7 @@ Cursor 把 OpenAI key 存在 `secret://cursorAuth/openAIKey`,值是 `v10`+AES �
   python3 cursor_team_setup.py --apply              # 执行(自动备份到 ~/.cursor-team-setup-backup)
   python3 cursor_team_setup.py --revert             # 从最近备份回滚(bundle+vscdb行+settings)
   python3 cursor_team_setup.py --apply \
-      --base-url https://cc.auto-link.com.cn/pro/v1 \
+      --base-url https://chat.auto-link.com.cn/model/v1 \
       --models cr-g-5.6,cr-g-5.6-instant,cr-g-5.6-mini,cr-g-5.6-pro,cr-g-5.6-thinking,cr-g-5.6-luna
 
 打完必须重启 Cursor(bundle 只在窗口启动时加载;vscdb 改动也要重启才读)。
@@ -64,7 +64,7 @@ APP_USER_KEY = ("src.vs.platform.reactivestorage.browser.reactiveStorageServiceI
 BACKUP_ROOT = os.path.expanduser("~/.cursor-team-setup-backup")
 
 SUPPORTED_MAJOR_MINOR = "3.16"
-DEFAULT_BASE_URL = "https://cc.auto-link.com.cn/pro/v1"
+DEFAULT_BASE_URL = "https://chat.auto-link.com.cn/model/v1"
 # 菜单 = 这份清单,**逐字、按序、全量**(2026-09-20 第二轮改成整表赋值)。
 # **必须与 cursor_team_setup.js 的 DEFAULT_MODELS 逐字相等**(含顺序)—— 两份实现分叉过一次
 # (js 已换代、py 还留着旧 6 名),门在 setup_impl_parity.py。

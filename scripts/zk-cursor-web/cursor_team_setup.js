@@ -199,7 +199,17 @@ const VERIFIED_VERSIONS = [...new Set(VERIFIED_EXACT.map((v) => v.split(".").sli
    代价要说清:`cursor_team_setup.py` 在 3.24 上会少打 localagent 这一处;它不进交付 zip
    (只发 js),所以同事侧无影响,但第③腿(js==py byte-equal)在 3.24 上不可能绿 ——
    那是两实现对同一版本的真实分叉,不许靠改期望值糊过去。 */
-const DEFAULT_BASE_URL = "https://cc.auto-link.com.cn/pro/v1";
+const DEFAULT_BASE_URL = "https://chat.auto-link.com.cn/model/v1";
+/* 10-29 换对外域名:旧地址 cc…/pro/v1 与新地址共存一段时间 ⇒ 两个都算「我们的网关」。
+   老用户:「刷模型」/ UPGRADE 时用他的 Key 打新地址 /models 拿到列表(=新地址通)才把库里的
+   openAIBaseUrl 和 ~/.carher/image.json 换成新地址;不通就保持旧地址(旧地址这段时间照样能用)。
+   只认这一个旧地址,同事自己填的别的地址(127.0.0.1 小代理、别家网关)一律不碰。 */
+const LEGACY_BASE_URL = "https://cc.auto-link.com.cn/pro/v1";
+const isLegacyBase = (u) => typeof u === "string" && u.trim().replace(/\/+$/, "") === LEGACY_BASE_URL;
+// 这次实际用的公网地址:默认新地址;新地址这会儿不通而旧地址通 ⇒ 这一趟先用旧地址(见 fetchKeyModelsAny)
+let ACTIVE_BASE_URL = DEFAULT_BASE_URL;
+// 本趟有没有用这把 Key 在新地址上真拉到列表。没量过(没 Key / 断网 / --models 直给)⇒ 库里的旧地址原样留着
+let NEW_BASE_VERIFIED = false;
 /* ── 菜单 = 这把 key 在网关上能用的模型(2026-10-19 起**动态**,不再写死)──────────────
    原来这里是一个写死的 39 名数组(DEFAULT_MODELS)。10-19 量 198:488 把当代 cursor key 全都有
    gpt-reserve / kimi-k3,菜单里却没有;菜单里的 deepseek-v4-flash / composer-2.5 已经 0 把 key 有,
@@ -356,6 +366,27 @@ async function fetchKeyModels(key, base) {
   const ids = ((body && body.data) || []).map((x) => x && x.id).filter((x) => typeof x === "string" && x);
   if (!ids.length) return { ok: false, ids: [], why: "网关没返回任何模型" };
   return { ok: true, ids };
+}
+/* 先打新地址;只有「连不上/网关报错」(不是 Key 无效)时再试旧地址。返回值多一个 base = 实际拉到列表的地址。
+   测试钩子 CX_NEW_BASE_DOWN=1:假装新地址不通(台架量「新地址不通就别改」那一侧)。 */
+async function fetchKeyModelsAny(key) {
+  let r = process.env.CX_NEW_BASE_DOWN === "1" ? { ok: false, ids: [], why: "连不上网关(台架:新地址不通)" }
+    : await fetchKeyModels(key, DEFAULT_BASE_URL);
+  if (r.ok) return { ...r, base: DEFAULT_BASE_URL };
+  if (/Key 无效/.test(r.why || "") || !key) return { ...r, base: DEFAULT_BASE_URL };
+  const o = await fetchKeyModels(key, LEGACY_BASE_URL);
+  if (o.ok) return { ...o, base: LEGACY_BASE_URL, newWhy: r.why };
+  return { ...r, base: DEFAULT_BASE_URL };
+}
+/* ~/.carher/image.json 里存的网关地址还是旧的 ⇒ 换成新的(调用方已确认新地址用这把 Key 拉得到列表)。 */
+function migrateKeyCopy() {
+  try {
+    const j = JSON.parse(fs.readFileSync(KEY_COPY, "utf8"));
+    if (!isLegacyBase(j.base)) return false;
+    j.base = DEFAULT_BASE_URL;
+    fs.writeFileSync(KEY_COPY, JSON.stringify(j, null, 2) + "\n", { mode: 0o600 });
+    return true;
+  } catch (e) { return false; }
 }
 const OPENAI_KEY_SECRET = "secret://cursorAuth/openAIKey"; // Cursor 存 BYOK Key 的 secret 行(OSCrypt 密文)
 
@@ -1781,7 +1812,10 @@ async function mergeConfig(args, dry) {
   if (!raw) { console.log("   !! applicationUser blob 不存在(Cursor 没初始化过?)"); db.close(); process.exit(3); }
   const d = JSON.parse(raw);
   const before = { baseUrl: d.openAIBaseUrl, useKey: d.useOpenAIKey };
-  d.openAIBaseUrl = args.baseUrl;
+  // 10-29 换域名:库里是旧地址、而这趟没确认新地址能用 ⇒ 别换(旧地址共存期照样能用,下次刷模型/升级再换)
+  const keepLegacy = isLegacyBase(d.openAIBaseUrl) && args.baseUrl === DEFAULT_BASE_URL && !NEW_BASE_VERIFIED;
+  d.openAIBaseUrl = keepLegacy ? d.openAIBaseUrl : args.baseUrl;
+  if (keepLegacy) console.log("   ↳ 没能确认新网关地址可用,BYOK 地址先保持旧地址");
   d.useOpenAIKey = true;
   const ai = (d.aiSettings = d.aiSettings || {});
   // --zk-delta-only 连模型清单都不加：那台机器要么已经装好了，要么就是我的基准机，
@@ -1882,7 +1916,7 @@ async function mergeConfig(args, dry) {
     defModelSet = ACTIVE_DEFAULT_MODEL;
   }
   console.log("   config diff: baseUrl %j -> %j ; useOpenAIKey %j -> true ; defaultModel -> %s",
-    before.baseUrl, args.baseUrl, before.useKey, defModelSet);
+    before.baseUrl, d.openAIBaseUrl, before.useKey, defModelSet);
   if (exact) {
     console.log("   模型清单 = 本方案那 %d 个(整表赋值,顺序即菜单顺序):%d 条 -> %d 条",
       wantModels.length, uamBefore.length, ai.userAddedModels.length);
@@ -2526,8 +2560,8 @@ const ZKD_HOME = path.join(os.homedir(), ".zk-delta");
 const ZKD_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", "com.zkdelta.sidecar.plist");
 const ZKD_LOG = path.join(os.homedir(), "Library", "Logs", "zk-delta-sidecar.log");
 const ZKD_LOCAL_URL = "http://127.0.0.1:8788/v1";
-const ZKD_DELTA_URL = "https://cc.auto-link.com.cn/zkd/v1/delta";
-const ZKD_UPSTREAM = "https://cc.auto-link.com.cn/pro";
+const ZKD_DELTA_URL = "https://chat.auto-link.com.cn/zkd/v1/delta";
+const ZKD_UPSTREAM = "https://chat.auto-link.com.cn/model";
 // 源文件在包里的位置。装的时候必须保住这个相对结构：sidecar.js 里写的是 require('../common/framing')。
 const ZKD_FILES = [
   ["zk-delta/sidecar/sidecar.js", path.join("sidecar", "sidecar.js")],
@@ -3266,13 +3300,14 @@ async function main() {
     if (!zkdOn && zkdSupported() && zkdAlive()) {
       zkdOn = true;
       console.log("   ↳ 这一步装不上,但 8788 上已有一个活着的小代理 ⇒ 地址保持 %s(不降级)。", ZKD_LOCAL_URL);
-    } else if (!zkdOn && args.apply) console.log("   → 地址保持公网直连（%s），功能不受影响。", DEFAULT_BASE_URL);
+    } else if (!zkdOn && args.apply) console.log("   → 地址保持公网直连，功能不受影响。");
   }
   // dry-run 下 zkdInstall 返回 {ok:true,dry:true} = "这些前置条件都满足，真跑能装上"；
   // 返回 ok:false（缺文件 / 非 mac / 起不来）就必须**一路影响到地址**，
   // 否则会出现"上面说拒绝安装，下面又说地址改成 127.0.0.1"这种自相矛盾的预览。
   const wantLocal = args.zkDelta && zkdOn;
-  if (!args.baseUrl) args.baseUrl = wantLocal ? ZKD_LOCAL_URL : DEFAULT_BASE_URL;
+  // (公网地址等 resolveMenu 量过新地址通不通再定,见下)
+  const pickBase = () => { if (!args.baseUrl) args.baseUrl = wantLocal ? ZKD_LOCAL_URL : ACTIVE_BASE_URL; };
 
   // 菜单要按这把 Key 现拉 ⇒ Key 必须在写菜单**之前**拿到(只读,写 Key 仍在落盘之后的第 5 步)。
   let rawKey = cleanKey(args.key);
@@ -3280,6 +3315,7 @@ async function main() {
     rawKey = cleanKey(await promptLine("   请粘贴你的 API Key 后回车(直接回车=稍后自己在 Cursor 里填): "));
   }
   if (!args.zkDeltaOnly) await resolveMenu(args, rawKey);
+  pickBase();
 
   console.log("--- 3) BYOK 配置差异 ---");
   const oldBlob = await mergeConfig(args, !args.apply);
@@ -3337,7 +3373,7 @@ async function main() {
   //    Key 在 Cursor 库里是加密的,工具读不到 ⇒ 用户这次粘了 Key 就另存一份到 ~/.carher/image.json(600);
   //    --upgrade 不问 Key ⇒ 已有 image.json 就沿用,没有就只装 skill、提示下次 INSTALL 时补上。
   //    Node 用 Cursor 自己的二进制(ELECTRON_RUN_AS_NODE=1),同事不用另装 Node。
-  if (!args.zkDeltaOnly) { try { installImageSkill(rawKey || args.upgradeKey); } catch (e) { console.log("   ⚠️  画图这一步出错(不影响其余): " + (e && e.message || e)); } }
+  if (!args.zkDeltaOnly) { try { installImageSkill(rawKey || args.upgradeKey, ACTIVE_BASE_URL); } catch (e) { console.log("   ⚠️  画图这一步出错(不影响其余): " + (e && e.message || e)); } }
   if (!args.zkDeltaOnly) { try { installRefreshSkill(); } catch (e) { console.log("   ⚠️  「刷模型」这一步出错(不影响其余): " + (e && e.message || e)); } }
   if (!args.zkDeltaOnly) { try { installPrecompactProbe(false); } catch (e) { console.log("   ⚠️  探针这一步出错(不影响其余): " + (e && e.message || e)); } }
   if (!args.zkDeltaOnly) { try { installSelfheal(false); } catch (e) { console.log("   ⚠️  自愈这一步出错(不影响其余): " + (e && e.message || e)); } }
@@ -3374,7 +3410,11 @@ async function resolveMenu(args, rawKey) {
     key = cleanKey(await promptLine("   菜单要按你的 Key 刷新,这台机器还没存过 —— 粘一次 Key 后回车(直接回车=菜单不动): "));
     if (key) args.upgradeKey = key;
   }
-  const r = await fetchKeyModels(key, DEFAULT_BASE_URL);
+  const r = await fetchKeyModelsAny(key);
+  if (r.ok && r.base === LEGACY_BASE_URL) {
+    ACTIVE_BASE_URL = LEGACY_BASE_URL;
+    console.log("   ↳ 新网关地址暂时不通(%s),这次先用旧地址;以后「刷模型」/升级时新地址通了会自动换过去。", r.newWhy);
+  } else if (r.ok) { NEW_BASE_VERIFIED = true; migrateKeyCopy() && console.log("   ✔ 画图/刷模型用的网关地址已换成新地址"); }
   if (!r.ok) {
     args.models = []; args.menuWhy = r.why;
     console.log("   ⚠️  没拉到模型列表:%s ⇒ 这次菜单不动。", r.why);
@@ -3475,8 +3515,10 @@ async function refreshModels(args) {
     rlog("!! 刷模型:这台机器没存 Key(~/.carher/image.json)。先双击 INSTALL 粘一次 Key,以后就能「刷模型」了。");
     process.exitCode = 3; return;
   }
-  const r = await fetchKeyModels(key, DEFAULT_BASE_URL);
+  const r = await fetchKeyModelsAny(key);
   if (!r.ok) { rlog("!! 刷模型:没拉到模型列表(" + r.why + "),菜单没动。"); process.exitCode = 4; return; }
+  const newOk = r.base === DEFAULT_BASE_URL;
+  if (!newOk) rlog("   新网关地址暂时不通(" + r.newWhy + "),这次用旧地址拉的菜单,地址先不换。");
   const menu = orderMenu(r.ids, DEFAULT_MODEL);
   if (!menu.length) { rlog("!! 刷模型:这把 Key 只有画图模型,聊天菜单没动。"); process.exitCode = 4; return; }
   let d;
@@ -3484,6 +3526,10 @@ async function refreshModels(args) {
   catch (e) { rlog("!! 刷模型:读不到 Cursor 配置库(" + ((e && e.message) || e) + ")"); process.exitCode = 3; return; }
   const curOn = ((d.aiSettings || {}).modelOverrideEnabled) || [];
   const add = menu.filter((m) => !curOn.includes(m)), del = curOn.filter((m) => !menu.includes(m));
+  // 老地址 + 新地址这把 Key 拉得到 ⇒ 这次一起换(Cursor 开着时同样要等它退出再写库,所以和菜单变化同等对待)
+  const moveBase = newOk && isLegacyBase(d.openAIBaseUrl);
+  NEW_BASE_VERIFIED = newOk;
+  if (newOk && !worker && migrateKeyCopy()) rlog("   画图/刷模型用的网关地址已换成新地址");
   if (!worker) {
     console.log("你的 Key 现在能用 %d 个聊天模型。", menu.length);
     if (add.length) console.log("  + 新增 %d:%s", add.length, add.join(", "));
@@ -3509,7 +3555,8 @@ async function refreshModels(args) {
         ? "    多半是 Cursor 自动升级把补丁冲掉了。处理:⌘Q 完全退出 Cursor,5 分钟内会自动补好(或者直接双击 REPAIR),再打开。"
         : "    多半是 Cursor 自动升级把补丁冲掉了。处理:完全退出 Cursor,双击 REPAIR,再打开。");
     }
-    if (!add.length && !del.length) { console.log("菜单已经是最新的,不用改。"); if (!h.ok) console.log("(菜单不用改,但上面那条要处理)"); return; }
+    if (moveBase) console.log("  网关地址换成新地址 %s(同一个网关,换了域名)", DEFAULT_BASE_URL);
+    if (!add.length && !del.length && !moveBase) { console.log("菜单已经是最新的,不用改。"); if (!h.ok) console.log("(菜单不用改,但上面那条要处理)"); return; }
   }
   const running = !process.env.CX_SKIP_RUNNING_CHECK && cursorRunning();
   if (running && !worker) {
@@ -3538,10 +3585,11 @@ async function refreshModels(args) {
     rlog("  Cursor 已退出(" + t + " 秒)");
     await sleep(1500);
   }
-  args.models = menu; args.keepModel = true; args.baseUrl = d.openAIBaseUrl || DEFAULT_BASE_URL;
+  args.models = menu; args.keepModel = true;
+  args.baseUrl = moveBase ? DEFAULT_BASE_URL : (d.openAIBaseUrl || r.base);
   ACTIVE_DEFAULT_MODEL = pickDefault(menu);
   await mergeConfig(args, false);
-  rlog("✅ 刷模型完成:菜单 " + menu.length + " 个" + (add.length ? ";新增 " + add.join(",") : "") + (del.length ? ";删除 " + del.join(",") : ""));
+  rlog("✅ 刷模型完成:菜单 " + menu.length + " 个" + (add.length ? ";新增 " + add.join(",") : "") + (del.length ? ";删除 " + del.join(",") : "") + (moveBase ? ";网关地址已换成新地址" : ""));
   if (worker) { launchCursor(); rlog("已重新打开 Cursor"); }
 }
 
@@ -3770,7 +3818,7 @@ function installPrecompactProbe(dry) {
   } catch (e) { console.log("   ⚠️  装探针出错(不影响其余): " + ((e && e.message) || e)); }
 }
 
-function installImageSkill(rawKey) {
+function installImageSkill(rawKey, base) {
   console.log("--- 6) 画图工具 ---");
   const src = path.join(__dirname, "carher_image.js");
   if (!fs.existsSync(src)) { console.log("   跳过(包里没有 carher_image.js)"); return; }
@@ -3781,7 +3829,8 @@ function installImageSkill(rawKey) {
   // 画图和「刷模型」共用这一份 Key 副本(600)。路径就是 KEY_COPY,这里按 home 现算(台架会换 HOME)。
   const key = String(rawKey || "").replace(/[\s\u00A0\u200B-\u200F\u2028-\u202F\uFEFF]/g, "");
   if (key) {
-    fs.writeFileSync(cfg, JSON.stringify({ key, base: DEFAULT_BASE_URL }, null, 2) + "\n", { mode: 0o600 });
+    // base:这趟实际用的公网地址(新地址不通、退到旧地址时传旧的);不传 = 默认新地址
+    fs.writeFileSync(cfg, JSON.stringify({ key, base: base || DEFAULT_BASE_URL }, null, 2) + "\n", { mode: 0o600 });
     try { fs.chmodSync(cfg, 0o600); } catch (e) { /* Windows 无 chmod 语义 */ }
   }
   const md = fs.readFileSync(path.join(__dirname, "image_skill.md"), "utf8");

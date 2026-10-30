@@ -419,7 +419,11 @@ grep -q '新增 .*kimi-k3' "$L14" && ok "⑭ 输出点名新增的 kimi-k3" || b
 CN14="$(jq_get "$B14" 'd.aiSettings.modelConfig.composer.modelName')"
 [ "$CN14" = "$DEF" ] && ok "⑭ composer 钉的已删名字 gpt-5.2 改回 $DEF" || bad "⑭ composer 还钉着 $CN14"
 BASE14="$(jq_get "$B14" 'd.openAIBaseUrl')"
-[ "$BASE14" = "https://cc.auto-link.com.cn/pro/v1" ] && ok "⑭ 地址原样没动" || bad "⑭ 刷模型改了地址:$BASE14"
+# 10-29 换域名:库里是旧地址、新地址用这把 Key 拉得到列表 ⇒ 刷模型顺带换成新地址(注入的网关返回 = 新地址通)
+NEW_BASE="$(grep -m1 '^const DEFAULT_BASE_URL = ' "$JS" | sed 's/.*"\(.*\)".*/\1/')"
+[ "$BASE14" = "$NEW_BASE" ] && ok "⑭ 旧网关地址换成新地址 $NEW_BASE" || bad "⑭ 刷模型没把旧地址换成新地址:$BASE14"
+IMG14="$(cat "$TMP/home/.carher/image.json")"
+case "$IMG14" in *gw.example*) ok "⑭ image.json 里不是旧地址的(gw.example)原样不动" ;; *) bad "⑭ image.json 被乱改:$IMG14" ;; esac
 grep -q 'patched:' "$L14" && bad "⑭ 刷模型动了 bundle(不该)" || ok "⑭ 没碰 bundle"
 # 幂等:再刷一次 ⇒「已经是最新的」且 blob 逐字节不变
 run_installer "$UD14" --refresh-models </dev/null >"$L14.b" 2>&1 || true
@@ -429,6 +433,27 @@ run_installer_nokey() { UD="$1"; shift; env ELECTRON_RUN_AS_NODE=1 HOME="$TMP/ho
 run_installer_nokey "$UD14" --refresh-models </dev/null >"$L14.c" 2>&1; RC14=$?
 [ "$RC14" != 0 ] && grep -q 'INSTALL 粘一次 Key' "$L14.c" && [ "$(read_blob "$UD14")" = "$B14" ] \
   && ok "⑭ 没 Key 的机器:拒绝 + 指路 + 库不变" || bad "⑭ 没 Key 时行为不对 rc=$RC14(见 $L14.c)"
+
+# ── ⑮ 换域名的两条反面(10-29):新地址不通 ⇒ 旧地址原样;同事自己填的地址 ⇒ 从不碰 ──
+#    阳性对照就是上面 ⑭(同样的种子,新地址通 ⇒ 换了);这里只变一个量。
+UD15="$TMP/u15"
+seed_db "$UD15" '{"openAIBaseUrl":"https://cc.auto-link.com.cn/pro/v1","useOpenAIKey":true,"aiSettings":{"userAddedModels":["grok-4.7"],"modelOverrideEnabled":["grok-4.7"]}}'
+printf '{"key":"sk-FAKE-bench","base":"https://cc.auto-link.com.cn/pro/v1"}\n' > "$TMP/home/.carher/image.json"
+# 🔴 必须包子 shell:/bin/sh(bash POSIX 模式)里「VAR=x 函数」的赋值在函数返回后**还留着**,
+#    第一版就这么写,下一发「新地址通了」照样被当成不通(恒红,理由指错)。
+( CX_NEW_BASE_DOWN=1; export CX_NEW_BASE_DOWN; run_installer "$UD15" --refresh-models </dev/null >"$TMP/run15a.log" 2>&1 ) || true
+unset CX_NEW_BASE_DOWN
+B15="$(jq_get "$(read_blob "$UD15")" 'd.openAIBaseUrl')"
+[ "$B15" = "https://cc.auto-link.com.cn/pro/v1" ] && ok "⑮ 新地址不通 ⇒ BYOK 旧地址原样" || bad "⑮ 新地址不通却改了地址:$B15(见 $TMP/run15a.log)"
+grep -q '"base": *"https://cc.auto-link.com.cn/pro/v1"' "$TMP/home/.carher/image.json" && ok "⑮ 新地址不通 ⇒ image.json 旧地址原样" || bad "⑮ 新地址不通却改了 image.json"
+run_installer "$UD15" --refresh-models </dev/null >"$TMP/run15b.log" 2>&1 || true
+grep -q '"base": *"'"$NEW_BASE"'"' "$TMP/home/.carher/image.json" && ok "⑮ 新地址通了 ⇒ image.json 换成新地址" || bad "⑮ 新地址通了 image.json 没换:$(cat "$TMP/home/.carher/image.json")"
+UD15c="$TMP/u15c"
+seed_db "$UD15c" '{"openAIBaseUrl":"https://my-own.example/v1","useOpenAIKey":true,"aiSettings":{"userAddedModels":["grok-4.7"],"modelOverrideEnabled":["grok-4.7"]}}'
+run_installer "$UD15c" --refresh-models </dev/null >"$TMP/run15c.log" 2>&1 || true
+B15c="$(jq_get "$(read_blob "$UD15c")" 'd.openAIBaseUrl')"
+[ "$B15c" = "https://my-own.example/v1" ] && ok "⑮ 同事自己填的地址从不碰" || bad "⑮ 动了同事自己的地址:$B15c"
+printf '{"key":"sk-FAKE-bench","base":"https://gw.example/pro/v1"}\n' > "$TMP/home/.carher/image.json"
 
 # ── ⑬ 拉不到列表(没 Key)⇒ 菜单一个字不动(绝不拿空列表把人家菜单清空)──
 UD13="$TMP/u13"

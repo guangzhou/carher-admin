@@ -337,7 +337,7 @@ __MODEL_PREFIX__ 一键安装(零依赖,不用装 Python / Node)
        再双击一次 REMOTE-SSH。服务器要补的是新版本那一份,不重跑 = 远程窗口又回到没补的样子。
   如果它说「远端的 8788 端口被别的程序占着」:那台服务器上别人的服务占了这个端口,
        隧道建不起来。请服务器管理员把那个程序换个端口;或者只在这台服务器上把
-       Cursor → Settings → Models 的 OpenAI Base URL 临时改成 https://cc.auto-link.com.cn/pro/v1。
+       Cursor → Settings → Models 的 OpenAI Base URL 临时改成 https://chat.auto-link.com.cn/model/v1。
   撤掉:同一个按钮里没有撤销;要撤跑 `sh cursor_remote_ssh.sh --host <那台> --remove --apply`,
        或直接还原它给你留的备份 ~/.ssh/config.bak-<时间戳>(它写之前一定先备份)。
   两个常见误会:

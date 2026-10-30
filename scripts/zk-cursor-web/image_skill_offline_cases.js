@@ -6,13 +6,14 @@ const src = fs.readFileSync(path.join(__dirname, "cursor_team_setup.js"), "utf8"
 const body = src.slice(src.indexOf("function installImageSkill("), src.indexOf("\nmain().catch"));
 let fail = 0;
 const ok = (b, m) => { console.log((b ? "  PASS " : "  FAIL ") + m); if (!b) fail++; };
-function run(key) {
+function run(key, base) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cximg-"));
   const fakeOs = { ...os, homedir: () => home };
   const pkg = path.join(__dirname, "..", "..", "codex-oneclick", "src");
-  const fn = new Function("fs", "path", "os", "__dirname", "EXEC", "DEFAULT_BASE_URL", "console", body + ";return installImageSkill;")(
-    fs, path, fakeOs, pkg, "/X/Cursor", "https://gw.example/pro/v1", { log() {} });
-  fn(key);
+  // 10-28 起 skill 里的命令改用 cursorBin()(不再直接读 EXEC);台架照样注入一个假的,不然整腿 ReferenceError
+  const fn = new Function("fs", "path", "os", "__dirname", "EXEC", "cursorBin", "DEFAULT_BASE_URL", "console", body + ";return installImageSkill;")(
+    fs, path, fakeOs, pkg, "/X/Cursor", () => "/X/Cursor", "https://gw.example/pro/v1", { log() {} });
+  fn(key, base);
   return home;
 }
 const h = run(" sk-test0000​ ");
@@ -22,6 +23,9 @@ ok(process.platform === "win32" || (fs.statSync(path.join(h, ".carher", "image.j
 const sk = fs.readFileSync(path.join(h, ".cursor", "skills", "carher-image", "SKILL.md"), "utf8");
 ok(!sk.includes("@@") && sk.includes('ELECTRON_RUN_AS_NODE=1 "/X/Cursor" "' + path.join(h, ".carher", "carher_image.js") + '"'), "skill 里的命令用 Cursor 二进制跑工具,占位符都替换掉");
 ok(fs.existsSync(path.join(h, ".carher", "carher_image.js")), "工具文件已复制");
+// 10-29 换域名:安装时新地址不通、退到旧地址 ⇒ image.json 记实际用的那个(刷模型以后再换);不传 = 默认新地址
+const h3 = run("sk-test0000", "https://old.example/pro/v1");
+ok(JSON.parse(fs.readFileSync(path.join(h3, ".carher", "image.json"), "utf8")).base === "https://old.example/pro/v1", "传了实际用的地址 ⇒ image.json 记它");
 const h2 = run("");
 ok(!fs.existsSync(path.join(h2, ".carher", "image.json")) && fs.existsSync(path.join(h2, ".cursor", "skills", "carher-image", "SKILL.md")), "--upgrade 没给 Key ⇒ 只装 skill,不写空 Key");
 console.log(fail ? "FAIL " + fail : "ALL PASS");

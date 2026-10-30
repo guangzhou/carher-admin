@@ -1,0 +1,202 @@
+# muse2api on 198 k3s: pinned + hardened image, pinned to node 242, ClusterIP only.
+# Image: 127.0.0.1:5000/muse2api:<upstream-sha12>-h5 (built from harden.py on 188, pushed to 198 registry).
+# Secret muse2api-env (MUSE2API_KEY) is created by deploy-198.sh, never committed.
+# Data (account cookies, media) lives on PVC muse2api-data (local-path on 242).
+#
+# 🔴 NOT APPLIED YET (2026-10-29). The image 5b8bba9561fd-h5 is in the registry and the
+# per-account-egress env below is written out, but nothing here has been rolled out:
+# the cluster still runs b19b4842eedf-h4 with the old single-exit layout. Before applying,
+# read the "升级到 v1.6.4 + 每号固定出口" section of skill muse2api-pool-ops.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: muse2api
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: muse2api-data
+  namespace: muse2api
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: muse2api
+  namespace: muse2api
+  labels:
+    app: muse2api
+spec:
+  replicas: 1
+  # Single writer on accounts.json + one Chromium; never run two copies.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: muse2api
+  template:
+    metadata:
+      labels:
+        app: muse2api
+    spec:
+      # Service "muse2api" would inject MUSE2API_PORT=tcp://..., which the app reads as its port.
+      enableServiceLinks: false
+      # egress sidecar runs as uid 10001 and must read the 0440 key Secret.
+      securityContext:
+        fsGroup: 10001
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-litellm-242
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: new-node
+          effect: NoSchedule
+      containers:
+        - name: muse2api
+          # Left at the running tag on purpose: deploy-198.sh rewrites this line from
+          # MUSE2API_SHA/MUSE2API_HARDEN_REV at apply time.
+          image: 127.0.0.1:5000/muse2api:5b8bba9561fd-h6
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 18610
+          envFrom:
+            - secretRef:
+                name: muse2api-env
+          env:
+            - name: MUSE2API_PORT
+              value: "18610"
+            # Total tasks in flight = accounts x MUSE2API_PER_ACCOUNT_SLOTS (harden #8, 2026-10-29).
+            # 10-30: 12 个活号 x 5 槽 = 60。加号/废号后用 pool_status.py 看这个数对不对。
+            - name: MUSE2API_CONCURRENCY
+              value: "60"
+            - name: MUSE2API_PER_ACCOUNT_SLOTS
+              value: "5"
+            # 5 tabs opening at once: 2 of 5 missed the default 60s page-load wait.
+            - name: MUSE2API_LOGIN_WAIT
+              value: "150"
+            - name: MUSE2API_CHAT_TIMEOUT
+              value: "300"
+            # Without it media links are relative (/v1/media/x.webp) and no client behind
+            # LiteLLM can open them. 198 nginx block `carher-muse-media` (cc.auto-link.com.cn.conf)
+            # maps /muse-media/v1/media/<32hex>.<ext> -> NodePort 30610, GET/HEAD only.
+            - name: MUSE2API_PUBLIC_BASE
+              value: "https://cc.auto-link.com.cn/muse-media"
+            # All muse.ai traffic exits from Aliyun Singapore 47.84.85.100 (2026-10-16), not the
+            # shared Japan exit where 3 of 4 accounts were logged out in one night.
+            # Chromium: harden #6 --proxy-server; requests: ALL_PROXY via PySocks.
+            - name: MUSE2API_EGRESS_PROXY
+              value: "socks5h://127.0.0.1:1080"
+            # Per-account exit IP (harden #7, 2026-10-29). "label=proxy-url" pairs,
+            # comma separated; an account not listed keeps the Singapore tunnel above.
+            # Values are mihomo exits in ns kiro-rs, by ClusterIP because this pod uses
+            # public DNS and cannot resolve svc names. They require HTTP Basic (407
+            # otherwise), so the credential lives in a Secret and muse2api's own
+            # proxy_bridge adds it upstream -- it never reaches Chromium's argv.
+            #   kiro-px-1 10.43.25.225  kiro-px-2 10.43.89.121  kiro-px-3 10.43.38.234
+            #   kiro-px-4 10.43.11.21   kiro-px-5 10.43.50.224
+            #   kiro-uk-egress 10.43.226.25  kiro-us-egress 10.43.195.12
+            # 🔴 ClusterIPs are stable only while those Services exist; recreating one
+            # changes its IP and silently moves that account back onto... nothing (the
+            # request errors out, which is the intended behaviour). Re-read them with
+            # `kubectl -n kiro-rs get svc` before applying.
+            # Reachability needs netpol kiro-rs/cliproxy-muse-to-kiro-egress, which
+            # matches pods labelled app=muse2api in ns muse2api (already in place).
+            - name: MUSE2API_EGRESS_MAP
+              valueFrom:
+                secretKeyRef:
+                  name: muse2api-egress-map
+                  key: MUSE2API_EGRESS_MAP
+                  optional: true
+            - name: ALL_PROXY
+              value: "socks5h://127.0.0.1:1080"
+            - name: HTTPS_PROXY
+              value: "socks5h://127.0.0.1:1080"
+            - name: NO_PROXY
+              value: "127.0.0.1,localhost,.svc,.cluster.local,10.0.0.0/8"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              memory: 8Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 18610
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 18610
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
+        # ssh -D sidecar: museegress@47.84.85.100 (Aliyun SG node .122 / jms asset dify).
+        # That user only has port-forwarding (authorized_keys restrict + sshd Match block, no shell).
+        # Started before the main container so the first Chromium launch already has a proxy.
+        - name: egress
+          image: 127.0.0.1:5000/muse2api-egress:20261016
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: EGRESS_HOST, value: "47.84.85.100"}
+            - {name: EGRESS_USER, value: "museegress"}
+          volumeMounts:
+            - {name: egress-ssh, mountPath: /keys, readOnly: true}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "curl -fsS -m 8 --socks5-hostname 127.0.0.1:1080 -o /dev/null https://api.ipify.org"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+      volumes:
+        - name: egress-ssh
+          secret:
+            secretName: muse2api-egress-ssh
+            defaultMode: 0440
+        - name: data
+          persistentVolumeClaim:
+            claimName: muse2api-data
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: muse2api
+  namespace: muse2api
+spec:
+  type: ClusterIP
+  selector:
+    app: muse2api
+  ports:
+    - port: 18610
+      targetPort: 18610
+---
+# Admin console / API on the intranet: http://10.68.13.198:30610/admin (Bearer key still required).
+apiVersion: v1
+kind: Service
+metadata:
+  name: muse2api-admin
+  namespace: muse2api
+spec:
+  type: NodePort
+  selector:
+    app: muse2api
+  ports:
+    - port: 18610
+      targetPort: 18610
+      nodePort: 30610

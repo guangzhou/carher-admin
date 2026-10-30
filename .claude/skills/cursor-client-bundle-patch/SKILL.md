@@ -154,6 +154,17 @@ Cursor 没拿到焦点,按键打进了用户另一个终端里正在跑的 CC �
 `agent.request` / `client.network_ttft` / `ComposerChatService.preNetwork`,
 见 `.work/cursor-slow/spans.py`)+ 直接发请求。
 
+## 对外域名 = chat.auto-link.com.cn(2026-10-29)
+
+- `DEFAULT_BASE_URL` = `https://chat.auto-link.com.cn/model/v1`;小代理 `ZKD_DELTA_URL`/`ZKD_UPSTREAM` = chat 的 `/zkd/v1/delta` / `/model`
+  (plist 里写死,装过小代理的同事要跑一次 INSTALL/UPGRADE 才换;旧 cc 共存期照样能用)。`zk-delta/sidecar/sidecar.js` 默认值同步改了。
+- 旧地址 `LEGACY_BASE_URL` 只用于「认出是我们的」。`fetchKeyModelsAny`:先打新地址,连不上(不是 Key 无效)再试旧地址 ⇒ 这趟用旧的。
+- **迁移**:「刷模型」/ UPGRADE 用 Key 在新地址真拉到列表(`NEW_BASE_VERIFIED`)才把库里**等于旧地址**的 `openAIBaseUrl`、`~/.carher/image.json` 的 base 换掉;
+  没确认(没 Key/断网/`--models` 直给)⇒ `mergeConfig` 保留旧地址。127.0.0.1 小代理地址、同事自己填的地址从不碰。
+- 台架 `retire_model_offline_cases.sh` ⑭(通 ⇒ 换)/ ⑮(`CX_NEW_BASE_DOWN=1` ⇒ 不换、自填地址不碰)。
+  🔴 `/bin/sh` 里 `VAR=x 函数` 的赋值函数返回后**还留着**(POSIX 规定,bash 交互模式不会)⇒ 给函数临时设变量要包子 shell,第一版 ⑮ 恒红就是这个。
+- `image_skill_offline_cases.js` 10-28 起就坏着(`cursorBin` 没注入 ⇒ ReferenceError),10-29 已补。
+
 ## 🔴 菜单按 Key 动态拉取,不再写死(2026-10-19 起)
 
 `DEFAULT_MODELS` 常量**已删**。下文所有「改 `DEFAULT_MODELS`」「抠 `DEFAULT_MODELS`」「菜单 39 个」都是历史。现状:
@@ -631,7 +642,7 @@ doctor:「目录 = 24 条,装了但目录里没有的名字」20 个 = 全部 gp
   `variants` 为空。本机实测 59 条里 38 条自带。
   🔴 **grep bundle 证明不了任何事** —— 自带清单是服务端推下来的,不在 bundle 里。
 - 09-21 本机 403 的完整链条:composer 钉着 `gpt-5.6-sol`(撞名)→ 没进 `userAddedModels`、
-  只有 override 开关 → 请求沿 `127.0.0.1:8788` → `cc.auto-link.com.cn/pro` 出去 →
+  只有 override 开关 → 请求沿 `127.0.0.1:8788` → `chat.auto-link.com.cn/model` 出去(10-29 前是 `cc.auto-link.com.cn/pro`) →
   那把 key 的 allowlist 里没这个名 → 403 `key_model_access_denied`/`param: model` →
   `cursor-agent-exec` 归类 `LocalProviderError`→`NonRetriableError`,第一个 token 之前就中止
   (`pre_network_ms` 127~211ms)。旁证:同一进程生命周期内 22:43 `code=200`(`sa-grok-4.6-latest`)

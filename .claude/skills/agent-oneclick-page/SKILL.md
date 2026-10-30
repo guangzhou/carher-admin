@@ -15,11 +15,17 @@ description: 给同事的「Cursor · Codex · Claude Code 一键配置」单页
 或者「刷模型」不见了,都会报红。三个工具的菜单都按 key 现拉,见 skill `cursor-client-bundle-patch` /
 `codex-oneclick-rollout` / `claude-oneclick-rollout` 里的「刷模型」一节。
 
+## 对外域名 = chat.auto-link.com.cn(2026-10-29)
+
+- 页面、飞书正文、三套安装器/自检里对外只出现 `chat.auto-link.com.cn`(网关 `/model`,镜像 `/ccdl`,增量 `/zkd`,画图 `/muse-media`);
+  旧 `cc.auto-link.com.cn` 共存一段时间。门禁:`build_html.py` 的 BANNED 和 `agent-oneclick-docs-audit.py` 的 COMMON_STALE 都拦 `//cc.auto-link.com.cn`(含 href)。
+- 镜像 HEAD 门禁现在打的是 chat 上的 `/ccdl`;chat 那段 nginx 没挂好时会全红(落到 OWUI 返回 200 text/html 1 万多字节 ⇒ 「太小」)。
+
 ## 三个桌面 App 安装包都在 198 镜像(2026-10-26)
 
 | App | 稳定链接(页面/飞书只链这些) | 谁维护 |
 |---|---|---|
-| Claude | `cc.auto-link.com.cn/ccdl/desktop/Claude-{mac.zip,windows-x64.msix,windows-arm64.msix}` | `claude-oneclick/ccdl-sync.sh`,cron 06:17 |
+| Claude | `chat.auto-link.com.cn/ccdl/desktop/Claude-{mac.zip,windows-x64.msix,windows-arm64.msix}` | `claude-oneclick/ccdl-sync.sh`,cron 06:17 |
 | Cursor | `…/ccdl/apps/Cursor-{mac.dmg,windows-x64.exe,windows-arm64.exe}` | `scripts/agent-oneclick-docs/app-mirror-sync.sh`(198 `/usr/local/bin/carher-app-mirror-sync.sh`),cron 06:37 |
 | Codex | `…/ccdl/apps/Codex-{mac.dmg,windows-x64.msix,windows-arm64.msix}` | 同上 |
 

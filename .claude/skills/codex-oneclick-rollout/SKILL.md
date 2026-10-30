@@ -23,6 +23,14 @@ description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 
 > Claude Code《一键配置》`MeLad7oMiobwf6xnpA2cWy0nnSg`(源 `claude-oneclick/`,结构照抄本目录的 `build.sh`)。
 > 三篇文档里都有一句「同一把 key」+ 互链,改一篇时顺手核另两篇别说法打架。
 
+## 对外域名 = chat.auto-link.com.cn(2026-10-29)
+
+- 安装器写 `https://chat.auto-link.com.cn/model/v1`;新地址拉不到 `/models`、旧 `cc…/pro/v1` 拉得到 ⇒ 这次先写旧的(装完能用)。
+- **老用户迁移在模型同步里**(`.py`/`.js` 同逻辑,`migrate_base_urls`/`migrateBaseUrls`):config.toml 的 base_url 是旧地址 ⇒ 先用 auth.json 的 key 打新地址 `/models`,
+  拿到列表才把**值等于旧地址**的 `base_url`/`openai_base_url` 行改掉(用户自己的 provider 不碰);不通就原样、日志写「新网关地址暂时不通」。
+  每天定时 + 「刷模型」都会跑 ⇒ 老用户不用重装。回归 `tests/test_domain_migrate.py`(假网关 + 两份实现逐项比 + 不通/错 key 不动)。
+- doctor:旧地址只报⚠️(还能用),不报🔴。
+
 ## 刷模型(2026-10-19)
 
 - 同步脚本(两份)现在会打印「新增 N / 删除 N / 和上次一样」;`model =` 钉着的名字 key 里没了,就改成 `gpt-5.6-terra`(在的话)
@@ -87,7 +95,7 @@ Desktop App 不由脚本装 ⇒ 文档第 3 节挂 dmg/msix。
 > 在用户本机验安装器 = `config.toml` 被整份重写 ⇒ 先整目录 rsync 备份,验完还原 config/auth/chatgpt 三件 + 撤 LaunchAgent。
 
 > **10-13 起统一走 `muse-image`**(用户点名「画图都用 muse 那个工具」)。它返回**相对路径** `/v1/media/<32hex>.webp`,
-> 文件在 muse2api 上 ⇒ 198 nginx 加了只读出口 `https://cc.auto-link.com.cn/muse-media/<32hex>.<ext>`
+> 文件在 muse2api 上 ⇒ 198 nginx 加了只读出口 `https://chat.auto-link.com.cn/muse-media/<32hex>.<ext>`(10-29 前是 cc 域名,工具按 base_url 的域名拼,两边都挂着)
 > (`# >>> carher-muse-media >>>` 段,备份在 `/etc/nginx/backup-ccdl/`,回滚=删段+reload),工具里改写过去下载;
 > 输出后缀按文件头改成 .webp。🔴 key **先读 auth.json 再兜底环境变量**:用户 shell 常有另一把 `OPENAI_API_KEY`(本机实测没开 muse ⇒ 恒 403)。
 > 验收=空 HOME 装完后 `codex exec "画一张…"` 日志里出现 `carher_image.py` 且产出图片(10-13 PASS)。

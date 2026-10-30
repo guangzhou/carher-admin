@@ -33,7 +33,8 @@ FILES = {
 }
 MIME = {".command": "application/octet-stream", ".bat": "application/octet-stream", ".zip": "application/zip"}
 # 用户页面里不许出现的东西(同 agent-oneclick-docs-audit.py 的口径)
-BANNED = ["kiro", "cc.auto-link.com.cn/pro", "claude-router-", "~/Downloads/"]
+# 10-29 起对外只用 chat.auto-link.com.cn:旧 cc 域名整个不许出现在页面上(含 /ccdl 下载链接)
+BANNED = ["kiro", "//cc.auto-link.com.cn", "claude-router-", "~/Downloads/"]
 KEY_RE = re.compile(r"sk-[A-Za-z0-9_-]{16,}")
 
 
@@ -57,10 +58,10 @@ def check(tpl: str) -> list:
     # 10-26 起三个桌面 App 的安装包都走 198 镜像(/ccdl/desktop = Claude、/ccdl/apps = Cursor/Codex)。
     #   官方直链会过期(Cursor 写死 3.24.12 那次)或在国内卡住(Codex 商店在线安装器),不许再回来。
     if hits := re.findall(r'href="(https://(?:downloads\.cursor\.com|persistent\.oaistatic\.com|get\.microsoft\.com)[^"]*)"', tpl):
-        red.append(f"App 下载又指向官方直链(应走 cc.auto-link.com.cn/ccdl/apps): {hits[:3]}")
+        red.append(f"App 下载又指向官方直链(应走 chat.auto-link.com.cn/ccdl/apps): {hits[:3]}")
     # 镜像链接必须真能下(HEAD 200 且有字节数);离线构建设 CX_SKIP_MIRROR_HEAD=1 跳过,但发版脚本不设
     if not os.environ.get("CX_SKIP_MIRROR_HEAD"):
-        for u in sorted(set(re.findall(r'href="(https://cc\.auto-link\.com\.cn/ccdl/(?:apps|desktop)/[^"]+)"', tpl))):
+        for u in sorted(set(re.findall(r'href="(https://chat\.auto-link\.com\.cn/ccdl/(?:apps|desktop)/[^"]+)"', tpl))):
             try:
                 r = urllib.request.urlopen(urllib.request.Request(u, method="HEAD"), timeout=30)
                 n = int(r.headers.get("Content-Length") or 0)

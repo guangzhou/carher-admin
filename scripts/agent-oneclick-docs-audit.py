@@ -45,7 +45,9 @@ COMMON_STALE = ["cr-g-5.6", "sa-grok-4.6-latest", "3.20.21", "3.21.18",
                 # 10-13 用户点名的三处:CLI 写成 App 的附属、写死下载目录的终端命令、Claude 里的十六进制模型编码表
                 "想自己装命令行", "~/Downloads/", "claude-router-",
                 # 10-14 用户:文档里不出现要用户手填的网关地址,该改的交给脚本/按钮
-                "cc.auto-link.com.cn/pro"]
+                "cc.auto-link.com.cn/pro",
+                # 10-29 对外域名换成 chat.auto-link.com.cn:旧 cc 域名(含 /ccdl 下载链接)不再出现(带斜杠 ⇒ 查原始 xml,href 里也拦)
+                "//cc.auto-link.com.cn"]
 DOCS = {
     CURSOR_A: dict(name="Cursor-A", figures=2, imgs=3,   # 10-15 起 Mac / Windows 两个包
                    attach={"cursor-mac.zip": ZIP_MAC, "cursor-windows.zip": ZIP_WIN},

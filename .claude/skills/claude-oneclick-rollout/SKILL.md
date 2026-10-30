@@ -14,6 +14,15 @@ description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的�
 **发版**:改完跑 `bash scripts/agent-oneclick-docs/release_all.sh`(网页 + 飞书附件 + 门禁一起)。
 **自检(doctor,10-16)**:`src/doctor-{mac.sh,windows.ps1}` → build 出 `claude-doctor-{mac.command,windows.bat}`,单页「出问题了」里可下载。只读;查 settings.json(BASE/API_KEY/AUTH_TOKEN 并存/发现开关/claude-router- 旧名)、rc 与当前终端的覆盖变量、桌面 App 3P 配置与两把 key 是否一致、App 钉死版本的组件是否预置 + 198 镜像有没有这版、App 日志 `Host Claude Code binary not available`、代理、key 实打 /v1/messages。回归 `tests/test_doctor.py`;Windows 版 App 日志路径按 App 代码=`%LOCALAPPDATA%\Claude-3p\logs`(未实机验)。
 
+## 对外域名 = chat.auto-link.com.cn(2026-10-29)
+
+- 安装器写 `https://chat.auto-link.com.cn/model`(settings.json + App 3P 配置),组件镜像走 `chat…/ccdl/claude-code-releases`;
+  新地址检查 key 不是 200/401/403、旧 `cc…/pro` 是 200 ⇒ 这次先写旧的。
+- **老用户迁移在 `carher_models_refresh.js`**(开会话 hook + 「刷模型」都走它):`env.ANTHROPIC_BASE_URL` 精确等于旧地址 ⇒ 用这把 key 真打新地址 `/v1/models`
+  (`fetchIdsLive`,不吃 `CARHER_MODELS` 测试注入),拿到列表才改;App 那条(CarHer + 同 key)的 `inferenceGatewayBaseUrl` 同步换,App 要完全退出重开。
+  不通 ⇒ 原样,`refresh.log` 记 `keep old base`。别家网关/本机代理/形状不同的地址一律不碰。回归 `tests/test_domain_migrate.py`(含阳性对照)。
+- doctor:旧地址只报⚠️。
+
 ## /model 菜单 = 只放我们按 key 生成的那份(10-25 定型)
 
 **菜单是三拨叠加的**:Claude Code 自带(Default/Opus/Fable/Sonnet/Haiku)+ 网关发现(`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`,

@@ -17,8 +17,8 @@ KEYLINK = ('<a href="https://t83dfrspj4.feishu.cn/share/base/query/shrcnf5OElDgu
 KEY_LI = f'<b>拿 key</b>：{KEYLINK}。Cursor、Codex、Claude Code 用同一把。'
 QUIT = '完全退出（Mac 按 <code>Cmd + Q</code>；Windows 右键任务栏图标 → 退出）'
 WIN_WARN = '<p>Windows 弹出蓝色安全提示：点「更多信息」→「仍要运行」。</p>'
-APPS = "https://cc.auto-link.com.cn/ccdl/apps"   # 10-26 起 Cursor/Codex 安装包也走 198 镜像(app-mirror-sync.sh 每天跟版)
-CCDL = "https://cc.auto-link.com.cn/ccdl/desktop"
+APPS = "https://chat.auto-link.com.cn/ccdl/apps"   # 10-26 起 Cursor/Codex 安装包也走 198 镜像(app-mirror-sync.sh 每天跟版)
+CCDL = "https://chat.auto-link.com.cn/ccdl/desktop"
 
 
 def pre(*lines):

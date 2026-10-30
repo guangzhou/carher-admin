@@ -2816,6 +2816,30 @@ def test_split_capacity_passes_when_projected_demand_fits(tmp_path: Path):
     assert payload["residual_risk"]
 
 
+def test_split_capacity_ignores_websocket_upgrades(tmp_path: Path):
+    """2026-10-29: three 101 websocket upgrades held open ~16h each made the gate read
+    `responses` at 1252 s/request on canary and refuse 50% for a lane at 6.6/container.
+
+    Same base log as the passing control, plus long 101s on both pools: the verdict and
+    the projection must be byte-for-byte what they are without them.
+    """
+    base = capacity_fixtures.access_log(tmp_path, name="base.log")
+    _, clean = _capacity(base, capacity_fixtures.readiness_envelope(tmp_path))
+    noisy = tmp_path / "noisy.log"
+    stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    ws = [
+        f"ts={stamp} 10.0.0.9 101 58395.874 pool=canary upstream=127.0.0.1:30403 rt=58395.874 uri_class=responses sid=-",
+        f"ts={stamp} 10.0.0.9 101 57217.473 pool=stable upstream=127.0.0.1:30403 rt=57217.473 uri_class=responses sid=-",
+    ]
+    noisy.write_text(base.read_text() + "\n".join(ws) + "\n")
+    noisy.chmod(0o600)
+    result, payload = _capacity(noisy, capacity_fixtures.readiness_envelope(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert payload["status"] == "PASS"
+    assert payload["projected_concurrency_per_container"] == clean["projected_concurrency_per_container"]
+    assert payload["max_supportable_split"] == clean["max_supportable_split"]
+
+
 def test_split_capacity_judges_upstream_seconds_not_request_count(tmp_path: Path):
     """The test that justifies the ruler.
 

@@ -638,6 +638,39 @@ def test_monitor_loop_drops_the_partial_first_line_only_when_it_byte_cuts(tmp_pa
     assert (raw / "access.log").read_text(encoding="utf-8").splitlines() == lines
 
 
+def test_monitor_loop_drops_spend_source_when_split_returns_to_zero(tmp_path):
+    """2026-10-21 05:06: split 20 -> 0 left SPEND_SOURCE pointing at a file no longer refreshed;
+    every split=0 cycle then failed 'spend reconciliation evidence is stale' and the run rolled back."""
+    import re as _re
+    import subprocess as _sp
+
+    loop = (TOOLS / "gray-monitor-loop.sh").read_text(encoding="utf-8")
+    fn = _re.search(r"collect_spend\(\) \{\n.*?\n\}\n", loop, _re.S)
+    assert fn, "collect_spend() not found"
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    probe = tmp_path / "probe.py"
+    probe.write_text("import sys\nopen(sys.argv[sys.argv.index('--output')+1],'w').write('{}')\n")
+    harness = (
+        f'RAW_DIR="{raw}"; LOG_FILE="{tmp_path}/log"; SPEND_SOURCE=""\n'
+        f'SPEND_COLLECTOR="{probe}"; SPEND_PROBE_KEY_FILE=k; SPEND_PROBE_MODEL=m; SPEND_PROBES=1\n'
+        f'SPEND_PROBE_BASE_URL=x; SPEND_CARRY_FILE="{raw}/carry"\n'
+        "log() { :; }\n" + fn.group(0) +
+        'collect_spend 20; echo "after20=[$SPEND_SOURCE]"\n'
+        'collect_spend 0; echo "after0=[$SPEND_SOURCE] exists=$([ -e "' + str(raw) + '/spend.json" ] && echo y || echo n)"\n'
+    )
+    out = _sp.run(["bash", "-c", harness], check=True, capture_output=True, text=True).stdout
+    assert f"after20=[{raw}/spend.json]" in out
+    assert "after0=[] exists=n" in out
+    # 用户手传的静态 --spend 文件不能被清
+    static = tmp_path / "static.json"
+    static.write_text("{}")
+    harness2 = (f'RAW_DIR="{raw}"; SPEND_SOURCE="{static}"\nlog() {{ :; }}\n' + fn.group(0) +
+                'collect_spend 0; echo "kept=[$SPEND_SOURCE]"\n')
+    out2 = _sp.run(["bash", "-c", harness2], check=True, capture_output=True, text=True).stdout
+    assert f"kept=[{static}]" in out2 and static.exists()
+
+
 def test_lane_callback_swap_keeps_the_lanes_current_replica_count():
     """2026-10-04: a hand-rolled swap script wrote replicas=4 into every refreeze and
     silently undid a requested scale-down of guarded-old (4 -> 2 -> 4)."""

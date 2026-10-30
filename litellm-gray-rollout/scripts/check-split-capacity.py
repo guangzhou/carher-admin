@@ -196,6 +196,14 @@ def read_access_log(
         age = now - stamp
         if age < dt.timedelta(0) or age > window:
             continue
+        # A 101 is a websocket upgrade (Codex /pro/v1/responses -> ws_ingress on
+        # 30403): its `rt` is how long the socket stayed open, not service time, and
+        # it never touches the gray lane's workers.  2026-10-29: three 101s of
+        # 54000-58000 s each made `responses` look 1252 s/request on the canary pool
+        # and the gate read 22% max split for a lane at 6.6 concurrency / container.
+        # Same exclusion metrics.py makes for latency (LATENCY_EXCLUDED_STATUSES).
+        if match.group("status") == "101":
+            continue
         seconds = collector.upstream_response_time(
             match.group("upstream_times"), match.group("request_time")
         )

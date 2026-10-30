@@ -5,7 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_lib.sh"
 
 PERCENT="${1:-}"
-[[ "$PERCENT" =~ ^(0|1|5|10|50|100)$ ]] || die "split must be one of 0,1,5,10,50,100"
+# 20 加于 2026-10-20：网信脱敏插件（sec_redact）按用户要求灰度 20% 用户。它走的门禁和 10 档一样
+# （<50 不要容量/桥接证据），所以只是多一个合法档位，不放松任何门禁。
+# 80 加于 2026-10-29（同一插件，用户要求 50→80）：≥50 ⇒ 照样要容量 + 桥接证据。
+[[ "$PERCENT" =~ ^(0|1|5|10|20|50|80|100)$ ]] || die "split must be one of 0,1,5,10,20,50,80,100"
 lock_acquire
 load_state
 [[ "$STATE_PHASE" == "normal_gray" && "$STATE_FROZEN" == "0" ]] || die "split is frozen in phase=$STATE_PHASE"

@@ -321,7 +321,18 @@ collect_readiness() {
 # document that would then have to be trusted for rollback.
 collect_spend() {
   local split="$1"
-  [[ "$split" -gt 0 ]] || return 0
+  if [[ "$split" -le 0 ]]; then
+    # 2026-10-28：split 从 >0 回到 0 时，上一周期设过的 SPEND_SOURCE 还挂在全局上，
+    # cycle() 照旧把这份不再刷新的文件传给 collect-metrics，5 分钟后它判「stale」⇒ 之后每个周期 FAIL，
+    # 连续 FAIL 让 run 被收成 rolled_back（10-21 05:06 sec-redact-shadow 实测，此后 split=0 上 FAIL 了 4 天）。
+    # split=0 时 spend 本来就该缺席（见 cycle() 里的注释），所以这里显式清掉。
+    # 用户用 --spend 传入的静态文件不受影响：那条路径不经过本函数的赋值，也不会被删。
+    if [[ "$SPEND_SOURCE" == "$RAW_DIR/spend.json" ]]; then
+      rm -f "$SPEND_SOURCE"
+      SPEND_SOURCE=""
+    fi
+    return 0
+  fi
   if [[ -z "$SPEND_COLLECTOR" || -z "$SPEND_PROBE_KEY_FILE" || -z "$SPEND_PROBE_MODEL" ]]; then
     # Only a hard failure above split 0: metrics.py returns
     # SPEND_RECONCILIATION_MISSING there anyway, and failing here says why.

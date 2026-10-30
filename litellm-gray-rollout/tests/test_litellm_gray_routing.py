@@ -535,6 +535,37 @@ def test_split_requires_sample_and_capacity_gates(run_root):
     assert ((run_root / "active").resolve() / "split.conf").read_text() == "1% litellm_gray;\n* litellm_product;\n"
 
 
+def test_split_twenty_is_a_tier_with_the_same_gates_as_ten(run_root):
+    init_run(run_root)
+    assert run_script("gray-phase.sh", "set", "normal_gray", env={"GRAY_ROOT": run_root}).returncode == 0
+    denied = run_script("gray-split-update.sh", "20", env={"GRAY_ROOT": run_root})
+    assert denied.returncode != 0
+    assert "sample" in denied.stderr.lower()
+    allowed = run_script(
+        "gray-split-update.sh",
+        "20",
+        env={"GRAY_ROOT": run_root, "GRAY_SAMPLE_OK": "1", "GRAY_MONITOR_CONTINUITY_OK": "1"},
+    )
+    assert allowed.returncode == 0, allowed.stderr
+    assert "split=20" in ((run_root / "active").resolve() / "state.env").read_text()
+    assert ((run_root / "active").resolve() / "split.conf").read_text() == "20% litellm_gray;\n* litellm_product;\n"
+    # 未列入的档位仍拒绝
+    assert run_script("gray-split-update.sh", "25", env={"GRAY_ROOT": run_root}).returncode != 0
+
+
+def test_split_eighty_requires_capacity_and_bridge(run_root):
+    init_run(run_root)
+    assert run_script("gray-phase.sh", "set", "normal_gray", env={"GRAY_ROOT": run_root}).returncode == 0
+    base = {"GRAY_ROOT": run_root, "GRAY_SAMPLE_OK": "1", "GRAY_MONITOR_CONTINUITY_OK": "1"}
+    denied = run_script("gray-split-update.sh", "80", env=base)
+    assert denied.returncode != 0
+    assert "capacity" in denied.stderr.lower()
+    allowed = run_script("gray-split-update.sh", "80",
+                         env={**base, "GRAY_CAPACITY_OK": "1", "GRAY_BRIDGE_READY": "1"})
+    assert allowed.returncode == 0, allowed.stderr
+    assert ((run_root / "active").resolve() / "split.conf").read_text() == "80% litellm_gray;\n* litellm_product;\n"
+
+
 def test_split_fifty_requires_capacity_and_bridge(run_root):
     init_run(run_root)
     assert run_script("gray-phase.sh", "set", "normal_gray", env={"GRAY_ROOT": run_root}).returncode == 0

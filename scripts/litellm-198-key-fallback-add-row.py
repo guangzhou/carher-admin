@@ -106,6 +106,8 @@ def main() -> int:
     ap.add_argument("--target", action="append", default=[])
     ap.add_argument("--for-alias-source", help="选有这个对外名 alias 的 key（改映射之前先补兜底）")
     ap.add_argument("--limit", type=int)
+    ap.add_argument("--only-alias", action="append", default=[],
+                    help="只处理这些 key_alias（可重复）；其余符合条件的 key 一把不碰")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--backup")
     ap.add_argument("--restore")
@@ -142,6 +144,11 @@ def main() -> int:
         sys.exit("FATAL: --group and at least one --target required")
     keys = all_keys()
     todo = plan(keys, a.group, a.target, a.for_alias_source)
+    if a.only_alias:
+        todo = [(k, new) for k, new in todo if k.get("key_alias") in set(a.only_alias)]
+        missing = set(a.only_alias) - {k.get("key_alias") for k, _ in todo}
+        if missing:
+            sys.exit(f"FATAL: --only-alias not eligible (no per-key table / cannot reach group / row exists): {sorted(missing)}")
     if a.limit:
         todo = todo[: a.limit]
     with_tbl = sum(1 for k in keys if table_of(k))

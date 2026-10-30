@@ -101,6 +101,9 @@ bash $S list                                  # 冒烟：能列出 sid 才算环
 
 ⚠️ **`list` 报 `invalid active generation: [Errno 2] ... '/var/lib/litellm-gray-rollout/active'` 不是状态坏了，是 `GRAY_ROOT` 没设**，即 `frozen-env.sh` 没 source。这个报错极具误导性，别顺着它去查状态文件。
 
+🔴 **`gray-monitor-loop.sh` 也必须在 source 过 `frozen-env.sh` 的 shell 里起**（10-28 sec_redact 灰度）：没 source 时监控照常出 FAIL，
+但 dispatcher 缺 `GRAY_NGINX_TEST_CMD` 等 ⇒ **自动回退静默不执行**。起完看 loop 日志里 `frozen_env_vars=N`（N>0）才算止损腿是亮的。
+
 ## 2. 选人：明文从哪来
 
 权威源是飞书多维表格：
@@ -335,6 +338,13 @@ GROUP BY mg,grp,win ORDER BY mg,grp,win;
 而且它要 `global_rollback` 门禁证据（`GRAY_PROD_HEALTHY`）。**证据文件不存在时这个按钮按不下去**——真出事的时候不会想现场造证据。走 force-gray 路线前应该提醒用户预先备好。
 
 **日常回滚就用逐把 `force-prod`。** 它不改 phase、随时可用、可来回切。
+
+**被自动回退后想继续**（10-28/29 sec_redact 两次：一把 key 的上游 429 被记到 gray 头上）：rolled_back 下 key 路由也冻结，
+连 `protect-prod` 都加不了 ⇒ `gray-run-close.sh` 关旧 run → 新 run，先把肇事 key `protect-prod`（明文 stdin）再放量。
+回退原因先按 key 拆（[[feedback_gray_pool_failure_can_be_one_keys_router_settings]]），别先怀疑被测补丁。
+
+**档位**：`gray-split-update.sh` 合法档 `0 1 5 10 20 50 80 100`（10-29 加 20/80）；≥50 要容量 + 桥接证据。
+容量门（`check-split-capacity.py`）跳过 101 websocket 升级（Codex ws_ingress 连接挂 15h，曾把 responses 算成 1252 s/req）。
 
 ## 11. 交付话术模板（删除/覆盖类操作必须带）
 

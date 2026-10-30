@@ -32,7 +32,7 @@ description: >-
 | `scripts/litellm-198-fallback-insert-before.py` | 在**点名的一组** group 里，把 target 插到 **anchor 之前** | 升级某条既有腿（新腿在前、老腿保留为下一跳） |
 | `scripts/litellm-198-gpt-fallback-append.py` | 全表扫「以 anchor **结尾**」的链，往后追加 | 给一大批链加统一的末端兜底 |
 | `scripts/litellm-198-key-fallback.py drop` | **减法**：摘掉**单把 key 单个组**的整条链 | 「把某人某个模型的兜底去掉」见 §8 |
-| `scripts/litellm-198-key-fallback-add-row.py` | **per-key 表补一行**：`--audit` 找出「能路由到组却缺行」的 key，追加/回滚 | 全局行写完后必跑，见 §10.1 |
+| `scripts/litellm-198-key-fallback-add-row.py` | **per-key 表补一行**：`--audit` 找出「能路由到组却缺行」的 key，追加/回滚；`--only-alias X`（可重复）只动点名的 key，不在候选里直接 FATAL | 全局行写完后必跑，见 §10.1。用户只批一把时用 `--only-alias`（10-28 只补 carher-75，另 217 把 her key 同缺 `chatgpt-gpt-6.1-sol` 行，用户说先不动） |
 | `scripts/litellm-198-fallback-set-rows.py` | **整行增/改**：spec 文件里每个组的链设成给定列表（没有就加、有就换），一次写入 | 一批组大多还没有行、或要整条替换时，见 §9 |
 
 前三把都是 `--apply` 需 `--backup`、`--restore` 回滚、默认 dry-run（`set-rows` 同）。

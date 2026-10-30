@@ -42,6 +42,8 @@ description: >-
 | §3.2 | `step.sh` / `chain.sh` / `ramp.sh` / `obs.sh` / `protect-noisy-keys.sh` | 放量 |
 | ≥50 | `capacity.sh <50\|100>` | 驾驶台卡「容量还没测」时现量一份本 generation 的 |
 | §5 | `converge.sh "<依据>"`（要 `GO_VERSION` `ROUTER_COUNTS` `DB_MIGRATIONS`）→ `commit.sh "<回归依据>"` | 收敛转正 |
+| 任何 helm 前 | `render-lane-check.sh <gray\|prod\|guarded-old> [$D]` | 用 run 自己的快照链渲染、不 upgrade，逐项比 live（image/envFrom/env/mounts/每个 callback/config/replicas）⇒ `RENDER == LIVE` 才能动 |
+| 带外改完 | `snap-backfill-from-live.py check\|apply <lane> --file X.py --config --env NAME` | 只回填点名的项；env 逐行改不重写 yaml；备份 `<inputs>/backfill-<ts>-live`，`restore` 可回 |
 
 ## 0. 看新版本（只读）
 
@@ -123,7 +125,8 @@ release 原文用 `curl api.github.com/.../releases/tags/vX.Y.Z` 取（WebFetch 
 - `--deployment` 用上一轮冻结时那份 Deployment 形状（卷名对得上），再补上带外加的 callback mount、去掉要下线的。
   🔴 **不能直接拿 live Deployment**：helm 渲染出的卷名是 `snapshot-*`，prepare-values 报 `volume snapshot-… has no --snapshot`；
   live 上的悬空 mount（`websearch_you_com.py`，CM 无此 key）也要去掉，否则报 `mounts … which the audited directory lacks`。
-- gray 要保留的带外件（10-26：sec_redact 影子 + `SEC_REDACT_SHADOW=1`）照 **live gray 的列表位置** 插（放末尾 ⇒ 形状门禁报 ORDER）。
+- 带外件照 **live 的列表位置** 插（放末尾 ⇒ 形状门禁报 ORDER）。10-29 起 sec_redact 在 **prod + gray 都装、替换模式、无 SHADOW env**
+  ⇒ 不再是「gray 独有」，prod 快照也要有它（[[litellm-198-sec-redact]]）。
 - 冻结出的 gray replicas 取 live 值；放量前扩到 **= prod 副本数**（10-26 2→4），只改 replicas、渲染 diff 恰 2 行，扩完重 pin + 重 baseline、
   monitor `--expected-ready` 跟着改。转正后再缩回 2（同样只改 replicas）。
 - 开新 run 前若有闲置的旧 run 占着 `active`（10-26：sec-redact 影子 run，split=0 force-gray 空）：停它的 monitor → 签 `global_rollback` → `gray-global-rollback.sh`
@@ -222,6 +225,9 @@ python3 $W/litellm-198-lane-callback-add.py rollback litellm-proxy-gray /root/cb
 
 - swap 只许「callbacks CM 换代 + 点名的 key 变」，冻结后断言 values 里 sha 已变（防 rev10 静默空操作）。
 - drift 报「只有 repo 有」的 `streaming_output_backfill_logonly.py`（阿里云专用）、`inject_prompt_cache_key.py`（198 未启用）是预期的，别装。
+- 换已在线的单个文件（不走 helm 快照）：`scripts/litellm-198-lane-callback-replace.py replace <deploy> <file>`（只换 CM 里这一个 key、
+  一次 patch 卷名、备份 `/root/cb-add-backup/`）；`kubectl set env` 改开关同理。两者都是带外，改完跑上表「带外改完」两步。
+  守卫：`scripts/litellm-198-gray-change-guard.py snapshot` → 改 → `verify-replace` / `verify-env`（断言只变了声明项）。
 - 🔴 add 是 helm 带外改动：swap 有守卫（live 引用的 CM 名 ≠ helm manifest ⇒ STOP），**下次 helm upgrade 前必须先把 live 回填进快照**。
   10-20 起守卫**只比真挂载的卷**：live 上「只声明未挂载」的旧卷（历次升级残留，如 prod 曾有 4 个 `litellm-stable-*`）
   逐条打印 `ignore unmounted live volume …` 后忽略，helm upgrade 会顺手去掉它们（不影响运行）。挂载卷不一致照旧 STOP。
@@ -235,6 +241,9 @@ python3 $W/litellm-198-lane-callback-add.py rollback litellm-proxy-gray /root/cb
   10-20：sgfc 回填后 gray rev26、prod rev21 已收编进 helm。🔴 prod 别 `helm rollback` 到 rev20（那版没有 sgfc = 事故配置），用 tune 的 `--restore`。
   任何 helm upgrade 前后跑兜底契约检查，红了就是被冲掉了。
 - `litellm-callback-install.py` 是 helm 化之前的老路（写可变 CM），别用。
+- 🔴 **别的会话会改 run 快照依赖的东西而不回填**：10-28 master key 轮换（envFrom `litellm-secrets`→`-r2`，旧 secret 删）、
+  kiro→aws-legacy 改名动了 config 和两个 callback ⇒ up1064 快照照着 helm 会让 pod 起不来 / 冲掉别人改动。
+  10-29 用 `render-lane-check.sh` 三车道查出来，回填后 = live。**开 run / 动 helm 之前先跑它**；DIFF 不是自己的改动 ⇒ 先证明三车道 live 一致再回填，或告诉对方。
 - 漂移两个方向都踩过（git 新于线上 / 线上独有，10-03 一次入库 14 个）：动之前先把线上版原样入库作基线。
 
 ### 6.1 改 config 标量 / 下线 callback：`lane-config-tune.sh`（10-20 起）

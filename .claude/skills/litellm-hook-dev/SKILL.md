@@ -35,6 +35,7 @@ description: >-
 | `k8s/litellm-callbacks/deepseek_id_prefix.py` | 出站：给裸 UUID item id 补 `fc_`/`rs_` 前缀 + **SSE 字节层**把降级过的 custom tool 还原成 `custom_tool_call`（客户端声明 custom，收到 function_call 认不出→工具执行不了）| monkey-patch `BaseResponsesAPIStreamingIterator._process_chunk` + `proxy_server._format_streaming_sse_chunk` | `_is_deepseek` + contextvar 隔离 |
 | `k8s/litellm-callbacks/streaming_bridge.py` | 1) 全局 monkey-patch `BaseAnthropicMessagesStreamingIterator.__init__` 修正 `startTime`（所有 `anthropic_messages` 请求）<br>2) SSE 心跳防 Cloudflare 524 + 首个 `content_block_delta` 打 `completion_start_time` 修 TTFT（按 `key_alias` 前缀 gate）<br>3) 出口流过滤 OpenRouter `data: [DONE]` 残留（带 32B carry-over 处理跨 chunk 边界）| `async_post_call_streaming_iterator_hook` + 模块级 monkey-patch | `STREAMING_BRIDGE_KEY_PREFIXES` / `STREAMING_BRIDGE_KEY_ALIASES` env |
 | `k8s/litellm-callbacks/budget_notice.py`（**198 prod**）| key 日额度可见性三件套：① `/查余额` pre-call 短路（mock_response / ModifyResponseException）② 80%/95% 双档预警（总额 + 本次模型所属系列桶，10-20 起）注入流式最后一个 text block/part 内部（三路由：anthropic 字节流状态机 / responses pydantic 事件 / chat 对象流）③ 超预算**软拦截成 200 友好文案**——monkey-patch `_virtual_key_max_budget_check` 吞 BudgetExceededError + module mark + pre-call 出 mock（Cursor 吞 429 body，200 是唯一可见通道）| `async_pre_call_hook` + `async_post_call_streaming_iterator_hook` + **auth 层函数 monkey-patch** | `BUDGET_NOTICE_KEY_PREFIXES` / `BUDGET_NOTICE_DISABLED` / `BUDGET_FRIENDLY_MOCK_DISABLED` env |
+| `k8s/litellm-callbacks/sec_redact.py`（**198 prod+gray**）| 网信出口脱敏：请求/响应双向就地替换（密钥/手机/身份证/卡号/内网 IP/MAC），**不阻断**；agent key 只做凭证。三线型流式缓冲 + Responses done/completed 副本整树扫 + 影子模式只读扫描器。运维见 [[litellm-198-sec-redact]] | `async_pre_call_hook` + `async_post_call_success_hook` + `async_post_call_streaming_iterator_hook` | `SEC_REDACT_SHADOW` / `SEC_REDACT_DISABLED` / `SEC_REDACT_AGENT_PREFIXES` env |
 | `k8s/litellm-callbacks/local_gpu_max_tokens_clamp.py`（**阿里云 ns carher**）| 把打到自建 local-gpu 盒子（36.151.241.10:8000）的 `max_tokens`/`max_completion_tokens`/`max_output_tokens` 钳到 65536。her catalog 按厂商规格发 384000，盒子 `max_model_len=393216` 且输入+输出一起算 → 不钳则真实会话全 400 回落官方，盒子接不到流量 | `async_pre_call_deployment_hook`（兜底路径也过）| deployment `api_base` 含盒子 IP |
 
 **所有 hook 挂到同一个 ConfigMap `litellm-callbacks` 里，写在 `litellm_settings.callbacks` 列表里按顺序执行。**
@@ -183,6 +184,16 @@ responses 家族别漏 `_aresponses_websocket`（Codex 会先试 WebSocket）。
 `x-litellm-model-id` 落点：钳制生效=落目标 deployment；没生效=被
 `context_window_fallbacks` 兜走落 fallback（HTTP 都是 200，**只看状态码分不出**）。
 现成探针：`scripts/litellm-aliyun-her-dsflash-local-box.py probe`。
+
+## ⚠️ 别用 `@dataclass`（10-20 sec_redact 实测）
+
+litellm 用 `spec_from_file_location` 加载 callback **且不登记 `sys.modules`** ⇒ dataclass 定义时按 `__module__` 回查模块拿到 None
+⇒ import 期 `AttributeError` ⇒ proxy 起不来。用 `__slots__` 普通类。单测 loader 也**别**手动登记 `sys.modules`，否则把坑盖住。
+
+## ⚠️ 影子模式要另起只读路径，别复用改写路径
+
+想先「只数命中不改内容」时，流式 hook 里**原样 yield 每个事件**、另起一个只读扫描器（异常全吞），结束时扫一次记日志。
+复用改写路径加个 `if shadow` 不够：缓冲/改字段那条路一出错就打断用户的流。见 `sec_redact._ShadowScanner`。
 
 ## ⚠️ `_log.info` 在 198 proxy 上看不见
 

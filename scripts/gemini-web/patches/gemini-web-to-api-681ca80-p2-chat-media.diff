@@ -1,0 +1,241 @@
+--- a/internal/modules/openai/openai_service.go
++++ b/internal/modules/openai/openai_service.go
+@@ -82,6 +82,9 @@
+ 	if len(inputFiles) > 0 {
+ 		opts = append(opts, providers.WithInputFiles(inputFiles))
+ 	}
++	if mediaPublicBase() != "" { // carher: fetch generated images with the account cookie
++		opts = append(opts, providers.WithGeneratedImageDownload(true))
++	}
+ 
+ 	// Logic: Call Provider
+ 	response, err := s.client.GenerateContent(ctx, prompt, opts...)
+@@ -113,7 +116,7 @@
+ 		if len(response.Images) > 0 {
+ 			var imgMarkdowns []string
+ 			for _, img := range response.Images {
+-				imgMarkdowns = append(imgMarkdowns, fmt.Sprintf("![image](%s)", img.URL))
++				imgMarkdowns = append(imgMarkdowns, fmt.Sprintf("![image](%s)", chatImageURL(img)))
+ 			}
+ 			if content != "" {
+ 				content += "\n\n"
+--- a/internal/modules/openai/openai_controller.go
++++ b/internal/modules/openai/openai_controller.go
+@@ -366,4 +366,20 @@
+ 	group.Get("/videos/:id", c.HandleGetVideo)
+ 	group.Delete("/videos/:id", c.HandleDeleteVideo)
+ 	group.Get("/videos/:id/content", c.HandleVideoContent)
++	group.Get("/media/:id", c.HandleMedia) // carher: chat-path image copies
++}
++
++// HandleMedia serves an image kept by chatImageURL. Unguessable 128-bit ids, 24h TTL.
++func (h *OpenAIController) HandleMedia(c fiber.Ctx) error {
++	id := c.Params("id")
++	if !validMediaID(id) {
++		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
++	}
++	it, ok := chatMedia.get(id)
++	if !ok {
++		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "expired or unknown"})
++	}
++	c.Set(fiber.HeaderContentType, it.mime)
++	c.Set(fiber.HeaderCacheControl, "private, max-age=86400")
++	return c.Send(it.data)
+ }
+--- /dev/null
++++ b/internal/modules/openai/media_store.go
+@@ -0,0 +1,125 @@
++package openai
++
++// carher: chat-path images. Gemini returns gg-dl links that only open with the
++// Google account's cookie, so a chat client (Cursor, Cherry, OWUI) renders a
++// broken image. The provider already downloads with that cookie when asked; we
++// keep the bytes here and hand the client a link to this gateway instead.
++
++import (
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/hex"
++	"os"
++	"strings"
++	"sync"
++	"time"
++
++	"gemini-web-to-api/internal/modules/providers"
++)
++
++const (
++	mediaTTL      = 24 * time.Hour
++	mediaMaxBytes = 512 << 20
++)
++
++type mediaItem struct {
++	data    []byte
++	mime    string
++	created time.Time
++}
++
++type mediaStore struct {
++	mu    sync.Mutex
++	items map[string]*mediaItem
++	order []string
++	size  int
++}
++
++var chatMedia = &mediaStore{items: map[string]*mediaItem{}}
++
++// mediaPublicBase is where clients reach GET /openai/v1/media/:id. Empty disables rewriting.
++func mediaPublicBase() string {
++	return strings.TrimRight(strings.TrimSpace(os.Getenv("GEMINI_MEDIA_PUBLIC_BASE")), "/")
++}
++
++func (s *mediaStore) put(b64, mime string) (string, bool) {
++	data, err := base64.StdEncoding.DecodeString(b64)
++	if err != nil || len(data) == 0 {
++		return "", false
++	}
++	buf := make([]byte, 16)
++	if _, err := rand.Read(buf); err != nil {
++		return "", false
++	}
++	id := hex.EncodeToString(buf)
++	if mime == "" || !strings.HasPrefix(mime, "image/") {
++		mime = sniffImageMime(data)
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.evictLocked(len(data))
++	s.items[id] = &mediaItem{data: data, mime: mime, created: time.Now()}
++	s.order = append(s.order, id)
++	s.size += len(data)
++	return id, true
++}
++
++func (s *mediaStore) get(id string) (*mediaItem, bool) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	it, ok := s.items[id]
++	if !ok || time.Since(it.created) > mediaTTL {
++		return nil, false
++	}
++	return it, true
++}
++
++func (s *mediaStore) evictLocked(incoming int) {
++	for len(s.order) > 0 {
++		head := s.items[s.order[0]]
++		expired := head == nil || time.Since(head.created) > mediaTTL
++		if !expired && s.size+incoming <= mediaMaxBytes {
++			return
++		}
++		if head != nil {
++			s.size -= len(head.data)
++		}
++		delete(s.items, s.order[0])
++		s.order = s.order[1:]
++	}
++}
++
++func sniffImageMime(b []byte) string {
++	switch {
++	case len(b) >= 3 && b[0] == 0xff && b[1] == 0xd8 && b[2] == 0xff:
++		return "image/jpeg"
++	case len(b) >= 12 && string(b[0:4]) == "RIFF" && string(b[8:12]) == "WEBP":
++		return "image/webp"
++	case len(b) >= 4 && string(b[0:4]) == "GIF8":
++		return "image/gif"
++	default:
++		return "image/png"
++	}
++}
++
++// chatImageURL returns a link the chat client can open: our own copy when the
++// provider handed us the bytes, otherwise the original (cookie-bound) URL.
++func chatImageURL(img providers.Image) string {
++	base := mediaPublicBase()
++	if base == "" || img.B64JSON == "" {
++		return img.URL
++	}
++	id, ok := chatMedia.put(img.B64JSON, img.MimeType)
++	if !ok {
++		return img.URL
++	}
++	return base + "/openai/v1/media/" + id
++}
++
++func validMediaID(id string) bool {
++	if len(id) != 32 {
++		return false
++	}
++	_, err := hex.DecodeString(id)
++	return err == nil
++}
+--- /dev/null
++++ b/internal/modules/openai/media_store_test.go
+@@ -0,0 +1,66 @@
++package openai
++
++import (
++	"encoding/base64"
++	"strings"
++	"testing"
++
++	"gemini-web-to-api/internal/modules/providers"
++)
++
++func TestChatImageURLKeepsOriginalWithoutPublicBase(t *testing.T) {
++	t.Setenv("GEMINI_MEDIA_PUBLIC_BASE", "")
++	img := providers.Image{URL: "https://lh3.googleusercontent.com/gg-dl/x", B64JSON: "QUJD"}
++	if got := chatImageURL(img); got != img.URL {
++		t.Fatalf("got %q", got)
++	}
++}
++
++func TestChatImageURLFallsBackWhenDownloadFailed(t *testing.T) {
++	t.Setenv("GEMINI_MEDIA_PUBLIC_BASE", "http://gw:1")
++	img := providers.Image{URL: "https://lh3.googleusercontent.com/gg-dl/x"}
++	if got := chatImageURL(img); got != img.URL {
++		t.Fatalf("got %q", got)
++	}
++}
++
++func TestChatImageURLServesOwnCopy(t *testing.T) {
++	t.Setenv("GEMINI_MEDIA_PUBLIC_BASE", "http://gw:1/")
++	jpeg := []byte{0xff, 0xd8, 0xff, 0xe0, 1, 2, 3}
++	img := providers.Image{URL: "https://lh3.googleusercontent.com/gg-dl/x",
++		B64JSON: base64.StdEncoding.EncodeToString(jpeg)}
++	got := chatImageURL(img)
++	prefix := "http://gw:1/openai/v1/media/"
++	if !strings.HasPrefix(got, prefix) {
++		t.Fatalf("got %q", got)
++	}
++	id := strings.TrimPrefix(got, prefix)
++	if !validMediaID(id) {
++		t.Fatalf("bad id %q", id)
++	}
++	it, ok := chatMedia.get(id)
++	if !ok || it.mime != "image/jpeg" || string(it.data) != string(jpeg) {
++		t.Fatalf("stored %+v ok=%v", it, ok)
++	}
++}
++
++func TestValidMediaIDRejectsTraversal(t *testing.T) {
++	for _, id := range []string{"", "../etc/passwd", strings.Repeat("z", 32), strings.Repeat("a", 31)} {
++		if validMediaID(id) {
++			t.Fatalf("accepted %q", id)
++		}
++	}
++}
++
++func TestMediaStoreEvictsOverBudget(t *testing.T) {
++	s := &mediaStore{items: map[string]*mediaItem{}}
++	big := base64.StdEncoding.EncodeToString(make([]byte, mediaMaxBytes/2+1))
++	a, _ := s.put(big, "image/png")
++	b, _ := s.put(big, "image/png")
++	if _, ok := s.get(a); ok {
++		t.Fatal("oldest item should be evicted")
++	}
++	if _, ok := s.get(b); !ok {
++		t.Fatal("newest item should stay")
++	}
++}

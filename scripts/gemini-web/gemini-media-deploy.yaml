@@ -1,0 +1,128 @@
+# gemini-media (litellm-dev): gemini-web-to-api@681ca80 + carher patches, single Google account.
+# Exported from live 2026-10-16 (the copy in 198:/root/gwt-build/k8s.yaml was stale).
+# Image build: scripts/gemini-web/patches/apply.sh media. Cookies: Secret gemini-media-env (not here).
+# GEMINI_MEDIA_PUBLIC_BASE = where chat clients open generated images (p2 chat-media patch);
+# 198 nginx block carher-muse-media maps /gemini-media/openai/v1/media/<32hex> to this Service.
+# The gateway has no auth: NetworkPolicy gemini-media-ingress only admits ns litellm-product
+# (host-network nginx reaches the ClusterIP from the node, which the policy does not filter).
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "gemini-media",
+    "namespace": "litellm-dev",
+    "labels": {
+      "app": "gemini-media"
+    }
+  },
+  "spec": {
+    "replicas": 1,
+    "strategy": {
+      "type": "Recreate"
+    },
+    "selector": {
+      "matchLabels": {
+        "app": "gemini-media"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "gemini-media"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "env": [
+              {
+                "name": "GEMINI_MEDIA_PUBLIC_BASE",
+                "value": "https://chat.auto-link.com.cn/gemini-media"
+              }
+            ],
+            "envFrom": [
+              {
+                "secretRef": {
+                  "name": "gemini-media-env"
+                }
+              }
+            ],
+            "image": "127.0.0.1:5000/gemini-web-to-api:20261016-681ca80-p2",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "gemini-media",
+            "ports": [
+              {
+                "containerPort": 4981,
+                "protocol": "TCP"
+              }
+            ],
+            "readinessProbe": {
+              "failureThreshold": 3,
+              "httpGet": {
+                "path": "/health",
+                "port": 4981,
+                "scheme": "HTTP"
+              },
+              "initialDelaySeconds": 5,
+              "periodSeconds": 15,
+              "successThreshold": 1,
+              "timeoutSeconds": 1
+            },
+            "resources": {
+              "limits": {
+                "memory": "1Gi"
+              },
+              "requests": {
+                "cpu": "50m",
+                "memory": "128Mi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/home/appuser/.cookies",
+                "name": "data"
+              },
+              {
+                "mountPath": "/tmp",
+                "name": "tmp"
+              },
+              {
+                "mountPath": "/home/appuser/.cache",
+                "name": "cache"
+              }
+            ]
+          }
+        ],
+        "dnsConfig": {
+          "nameservers": [
+            "1.1.1.1",
+            "8.8.8.8"
+          ]
+        },
+        "dnsPolicy": "None",
+        "nodeSelector": {
+          "kubernetes.io/hostname": "aiyjy-litellm"
+        },
+        "securityContext": {
+          "fsGroup": 65534
+        },
+        "volumes": [
+          {
+            "name": "data",
+            "persistentVolumeClaim": {
+              "claimName": "gemini-media-data"
+            }
+          },
+          {
+            "emptyDir": {},
+            "name": "tmp"
+          },
+          {
+            "emptyDir": {},
+            "name": "cache"
+          }
+        ]
+      }
+    }
+  }
+}

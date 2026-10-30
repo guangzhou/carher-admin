@@ -15,6 +15,14 @@ description: >-
   要给某个模型组换/加备用腿，或**去掉/摘掉/取消某人某把 key 某个模型的兜底**。
   or 「上游挂了，把所有 key 的 X 先切到 Y、原来的做兜底」/「恢复了改回来、Y 当第一兜底」
   （§10：先审计 per-key 表、先补兜底再改映射、克隆真 key 演练、死主腿 ~30s 才兜底=num_retries）。
+  **§11（10-18 加）= 某条兜底腿整体死了/欠费了，要把所有挂着它的链全线换掉**：
+  三层都得动（全局整行 + per-key 行内换腿 `key-fallback-swap-leg.py`），
+  含「DeepSeek 官方 chat 组现在接得住 grok 半截对话（证伪 §9.2）、`-responses` 仍不行」、
+  「别把 chat 线型的组兜到只剩 responses 腿」、「按上游真实模型而非组名前缀排除某家族」、
+  以及两个会把活腿读成全挂的坏尺子（§4.3）。
+  **§0.6（10-30 加）= 「请求等了几十分钟才报错 / 兜底切得太慢 / 要不要降 timeout」**：
+  单腿无重试策略组 = 300s×6；别降全局 timeout（九成长请求是正常长回答）；
+  按腿设 `litellm-198-leg-timeout.py` + 组级 `litellm-198-retry-policy.py`（策略行必写 DefaultRetries）。
 ---
 
 # 198 全局兜底链改法与三层验收
@@ -34,6 +42,7 @@ description: >-
 | `scripts/litellm-198-key-fallback.py drop` | **减法**：摘掉**单把 key 单个组**的整条链 | 「把某人某个模型的兜底去掉」见 §8 |
 | `scripts/litellm-198-key-fallback-add-row.py` | **per-key 表补一行**：`--audit` 找出「能路由到组却缺行」的 key，追加/回滚；`--only-alias X`（可重复）只动点名的 key，不在候选里直接 FATAL | 全局行写完后必跑，见 §10.1。用户只批一把时用 `--only-alias`（10-28 只补 carher-75，另 217 把 her key 同缺 `chatgpt-gpt-6.1-sol` 行，用户说先不动） |
 | `scripts/litellm-198-fallback-set-rows.py` | **整行增/改**：spec 文件里每个组的链设成给定列表（没有就加、有就换），一次写入 | 一批组大多还没有行、或要整条替换时，见 §9 |
+| `scripts/litellm-198-key-fallback-swap-leg.py` | **per-key 行内换腿**：把已有行里的某条腿原位换成另一条（或摘掉），保位置、不动其余腿 | 一条腿整体死了要全线换掉，见 §11 |
 
 前三把都是 `--apply` 需 `--backup`、`--restore` 回滚、默认 dry-run（`set-rows` 同）。
 ⚠️ **`gpt-fallback-append.py` 的 pod selector 写死成 `app=litellm-proxy`**，见 §0.5 ——
@@ -136,6 +145,49 @@ kubectl -n litellm-product get pods -l carher.net/litellm-production-route=enabl
 车道搬过家，还会再搬。`litellm-198-fallback-insert-before.py` 按标签选，
 并有一条测试钉住这件事（`test_production_lane_is_selected_by_route_label_...`，
 实测把 selector 改回 `app=litellm-proxy` 它会真的红）。
+
+## 0.6 「切兜底要等很久」先查重试和单腿超时，别降全局 timeout（10-30 加）
+
+兜底什么时候才触发 = **单次超时 × (重试次数+1)**。198 现网 DB `router_settings`：`timeout=300`、`num_retries=5`
+（ConfigMap 里的 `request_timeout` 被 DB 覆盖，别读 ConfigMap）。**单腿 + 没有 `model_group_retry_policy` 行**的组，
+一条挂住的腿要烧 300×6=1800s 才轮到兜底 —— `ag-gemini-3.8-flash` 10-30 有 7 次 1830~1863s，算术吻合到秒。
+
+✅ **这一条 10-30 晚已上线并已验到效果**（10-31 02:5x 复核，判据不是「配置写进去了」而是「那个形状没再出现」）：
+腿 `cliproxy/ag-gemini-3.8-flash` `timeout=180`、组策略行 `{"DefaultRetries":1,"TimeoutErrorRetries":0}` 都在 DB 里；
+该组 24h **4012 成功 / 4 失败**，3 次 1834s 全部发生在 **10-30 10:34（改之前）**，改后 7 小时 474 次请求 **max 86s**。
+🔴 现网 `router_settings` 的 `model_group_retry_policy` 已有 **39 行**（`aws-*` 24 行 + `sa-grok-*` 5 + 生成类 5 + deepseek 4 + `ag-gemini-3.8-flash`）
+⇒ 用 `--restore` 整表替换前先看这 39 行里有多少不是你加的（见下面脚本注释里那条）。
+
+🔴 **别降全局 timeout**：同一 24h 里 >290s 的 446 行，396 行是**正常长回答**（status 非 failure，平均 3857 completion tokens）。
+降到 90~120s 每天砍约 380 个真请求。先把慢行分三类，每类修法不同：
+
+| 慢行长什么样 | 判据 | 修法 |
+|---|---|---|
+| 慢但成功 | `status` 非 failure、`completion_tokens>0` | 不修 |
+| 慢且失败、原文是 `Timeout passed=300` | 该组单腿、无策略行 | 按腿 timeout + 策略行（下面两把脚本） |
+| 慢且失败、原文是载荷问题 | 例：`too many inline media segments: 102 exceeds limit 100` | 改超时没用，是大载荷沿兜底链重传 |
+
+两把脚本（都默认 dry-run、`--apply` 必带 `--backup`、带 `--verify` / `--restore`）：
+
+```bash
+# 单腿超时：spec {"<model_id>": 秒|null}；按那条腿自己 7 天成功 p99 留余量
+python3 scripts/litellm-198-leg-timeout.py --spec legs.json
+# 组级重试策略：spec {"<group>": {"DefaultRetries":1,"TimeoutErrorRetries":0}}；多腿组要 --allow-multi-leg
+python3 scripts/litellm-198-retry-policy.py --spec pol.json
+```
+
+- `leg-timeout` 走 `jsonb_set(litellm_params,'{timeout}',…)`，**不走 `/model/update`**：`model`/`api_base`/`api_key` 是加密存的，
+  /model/update 要整份 params 回写，会重新加密并可能写坏。写后回读：只有点名的腿变了、其余全部 byte-identical、行数不变。
+- 🔴 **策略行必须写 `DefaultRetries`**（线上镜像实测，`litellm/router_utils/get_retry_from_policy.py`）：
+  只写 `TimeoutErrorRetries:0` 的行，遇到 500/429/连接错误返回 None ⇒ **漏回全局 num_retries=5**。脚本已拦。
+  `{"TimeoutErrorRetries":0,"DefaultRetries":1}` 实测：Timeout→0、APIConnection/500/429/ContextWindow→1。
+- 🔴 **数腿用 `/model/info` 按 `model_name` 计数**。`/model_group/info` 没有腿列表（`providers` 是去重后的厂商名）；
+  我拿不存在的 `model_ids` 字段数出全 0，差点得出「没有单腿组」。现网 332 组里 233 个单腿无策略行，其中 47 个有兜底链。
+- `allowed_fails: 3` 是 no-op（= litellm 默认值），单腿组本来就不进按比例冷却。
+- 🔴 **生成类组（歌/视频/图）必须 0 重试**（10-30 已设 web-gemini-music/video/image、muse-video/image，备份
+  `198:/root/litellm-rs-backups/rs_backup_20261030T194501.json`）：服务端重试 = 上游再生成一份、多扣一次额度，
+  客户端 `max_retries=0` 管不到。e2e 实测：歌 300s 超时被重试多出一首；视频忙 429 被重试 5 次（上游收到 6 次）。
+  改后复测视频忙时上游只收到 1 次。以后新加生成类组，加完就照这个 spec 加一行。
 
 ## 1. 写法：只准 `jsonb_set` 一个键
 
@@ -258,11 +310,12 @@ grok-4.20）不吃。不归本次改动，但新腿排前了会**更早**撞上�
 ⚠️ 400 是不可重试错误，链在这跳**停住**（该 request_id 只有一行，没继续兜到 4.6）——
 那一发用户是真失败。要不要治是另一件事，别混进"兜住没有"的结论里。
 
-## 4. 十四个坏尺子（每一个我都实际踩过）
+## 4. 十六个坏尺子（每一个我都实际踩过）
 
 > 前 8 个在本节，第 9 个在 §7.1，第 10/11 个在 §4.1，
 > 第 12 个（脚本自己的装载尺子写死组名）在 §4.2，
-> 第 13/14 个（`/key/info?key_alias=` 返 200 全 null、全局表被读成 0 行）在 §8.4。
+> 第 13/14 个（`/key/info?key_alias=` 返 200 全 null、全局表被读成 0 行）在 §8.4，
+> 第 15/16 个（`model` 列只在被拒时存组名、`successful_requests` 恒 0）在 §4.3。
 
 1. 🔴 **`metadata->>'model_group'` 必超时。** `LiteLLM_SpendLogs` 有**真列
    `model_group`**，走 JSONB 提取用不上索引 —— 我两次查询都 120s 超时进后台且永不返回。
@@ -354,6 +407,30 @@ grok-4.20）不吃。不归本次改动，但新腿排前了会**更早**撞上�
     ```
 
     没有第三行那个阳性对照，「4/4 NO」既可能是尺子瞎了也可能是真没装载，两者同形。
+
+### 4.3 第 15、16 个坏尺子：拿 SpendLogs / DailyUserSpend 判「这条腿活没活」（2026-10-18）
+
+两个都会把**好腿读成「100 次调用 0 次成功」**，连着看会互相印证成一个完全错的故事。
+
+15. 🔴 **SpendLogs 的 `model` 列只在请求**被拒**时存组名。** §4 第 2 条说的是
+    「组名查不到、落点才查得到」；真正的坑在反面 —— 它**有时确实等于组名**：
+    入口层拒掉的请求（403 `ModelAccessDeniedProxyException`、429 `BudgetExceededError`）
+    根本没到上游，没有落点可记，于是 `model` 就是组名、`status=failure`。
+    ⇒ `where model='<组名>'` 捞到的是**一堆被拒记录**，成功的真流量一条都不在里面。
+    10-18 实测 `deepseek-v4-flash` 这样查出 1372 行、`fail=1372`，看着像"全站挂了"，
+    而同一时刻我手打这个组是 200。**别拿它判腿的健康**，它只能回答"谁被拒了"。
+
+16. 🔴 **`LiteLLM_DailyUserSpend.successful_requests` 在 198 恒 0。**
+    10-18 查 9 个 deepseek 组，`ok` 列全是 0 —— 包括我刚亲手打通的那个。
+    这列在本实例上不可信（没查为什么，可能是聚合侧没写）。
+    拿它算成功率会得出"整个 DeepSeek 家族全死"。
+
+    **判一条腿活没活，唯一可靠的判据是现在打一发**（`disable_fallbacks:true` + 真实载荷），
+    见 §11 开头那两条命令。历史趋势要看就只看 `api_requests` / `failed_requests`，
+    且先用一个**已知活着**的组做阳性对照，确认这张表当天有在写。
+
+    ⚠️ master key 的探针**不进 SpendLogs**（不记账），所以"我刚打了一发但查不到"是正常的，
+    不是写入丢了。想在 SpendLogs 里看到自己的探针得用真 key。
 
 ## 5. 目标组上线前要核的两件事
 
@@ -474,8 +551,7 @@ ct=0 全在 **failure 行**上（那是正常的），success 行**全部 ct>0**
 
 ```bash
 S=~/litellm-198-key-fallback-<sid>.py   # 198 多会话并行，文件名带会话号
-export LITELLM_MASTER_KEY=$(sudo kubectl -n litellm-product get secret litellm-secrets \
-  -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
+export LITELLM_MASTER_KEY=$(bash ~/litellm-198-master-key.sh)   # 跟着 proxy envFrom 找 key；10-28 已轮换到 litellm-secrets-r2
 
 python3 $S drop --key cursor-<name>-<sfx> --group gpt-6-astra              # ① dry-run
 python3 $S drop --key cursor-<name>-<sfx> --group gpt-6-astra \
@@ -657,6 +733,9 @@ sudo python3 $S --restore ~/rs-bak/<file>.json --apply             # 整表回�
 
 ### 9.1 现行配置（10-12 终态，120 行）
 
+> ⚠️ **下表的 `openrouter-deepseek-v4.1-flash` 已于 10-18 全线换掉**（欠费 402），
+> 现行是 `deepseek-v4.1-flash`；表共 129 行。读本表只为理解当时的意图，**现状看 §11.4**。
+
 | 组 | 兜底 |
 |---|---|
 | `sa-grok-4.6` / `sa-grok-4.7` | `openrouter-deepseek-v4.1-flash` → `deepseek-v4-flash-responses` |
@@ -677,7 +756,11 @@ sudo python3 $S --restore ~/rs-bak/<file>.json --apply             # 整表回�
 出图互兜成环是安全的：`fallback_event_handlers.py` 的 `attempted_targets` 跨层共享去重，
 同一目标一次请求只试一次，外加 `max_fallbacks` 深度上限（读运行 pod 源码核过）。
 
-### 9.2 🔴 为什么不是 DeepSeek 官方：写入 3 分钟就回滚的那一版
+### 9.2 ⚠️（已部分作废，见 §11.1）为什么不是 DeepSeek 官方：写入 3 分钟就回滚的那一版
+
+> 🔴 **2026-10-18 实测推翻了本节的结论**：DeepSeek 官方 **chat** 组现在**能**接住 grok
+> 写到一半的对话（10-14 的 `reasoning_content` 补丁修好了），下面这段只当历史和方法论读。
+> `-responses` 组仍不行。要换官方腿先看 **§11.1**。
 
 第一版按「Responses 请求要原生组」的推理写了
 `[deepseek-v4.1-flash-responses, deepseek-v4.1-flash]`。上线前单轮 nonce 三端点全 200。
@@ -733,6 +816,11 @@ python3 $S ... --limit 1 --apply --backup <f>           # 金丝雀 → 全量 �
 
 只追加不改其他行；空表 key 不碰（写了反而把它从全局表上摘下来、冻结住）。
 单测 `backend/tests/test_litellm_198_key_fallback_add_row.py`。
+10-28 同形状又咬一次：kiro 改名 aws-* 后 710 把 per-key 表都没有 `aws-claude-opus/sonnet-5-5` 行 ⇒
+lihailong 的 opus 429 直接 502 给用户（同分钟走全局表的人 68 次被兜到 sa-grok-4.20）。16:40 已补 743 把（备份 `198:~/fb-1028/`）。
+**改组名 / 加新组 = 必跑 `--audit`**。key 级 `metadata.disable_fallbacks=true` 也会让兜底不跑，全库只有 guran 一把，本人要求，别动。
+事后分诊用 `scripts/litellm-198-5xx-attribution.py`（skill `litellm-198-key-error-triage` §502/504）。
+
 ⚠️ 10-15 审计顺带发现：`sa-grok-4.7` 有 552 把 key（经 `claude-grok-4.7` alias）的 per-key 表缺行
 ⇒ grok 挂了它们零兜底。**未修**，等用户定。
 
@@ -774,12 +862,149 @@ update "LiteLLM_Config" set param_value = jsonb_set(param_value, '{model_group_r
 热加载 ~30s，逐 pod 读 `/get/config/callbacks` 数组数确认。10-15 改后同一演练 **28~36s → 3.6~7.1s**。
 代价：主腿偶发抖动会更快切走 —— 兜底是同模型（网宿）时可接受；兜底是别家模型时先问用户。
 
+🔴 **整个上游实例停掉的场景更狠**（10-24 kiro 槽位实例演练）：不是慢 30s，而是请求挂 120s+ 直到实例恢复，兜底一次都没走。
+`kiro-slots-*` 组现在全部 `*Retries=0`（兜底是同模型的老 kiro 实例），加新 `kiro-slots-*` 组后跑
+`scripts/kiro-slots-router.py plan|apply` 补兜底行 + 重试 0（见 skill `kiro-rs-slots` §4）。
+
 ### 10.5 现行 `model_group_retry_policy`（10-15，10 组）
 
 grok 5 组 `{DefaultRetries:1, Timeout/RateLimit/ServiceUnavailable:5}`（早先就有）；
 DeepSeek 5 组 `{DefaultRetries:1}`：`deepseek-v4.1-flash` / `-responses` / `-her`、`wangsu-deepseek-v4.1-flash` / `-her`。
 回滚 `198:~/rs-bak/router_settings.pre-ds41-retry1-20261015T054748Z.json`。
-🔴 **整个上游实例停掉的场景更狠**（10-24 kiro 槽位实例演练）：不是慢 30s，而是请求挂 120s+ 直到实例恢复，兜底一次都没走。
-`kiro-slots-*` 组现在全部 `*Retries=0`（兜底是同模型的老 kiro 实例），加新 `kiro-slots-*` 组后跑
-`scripts/kiro-slots-router.py plan|apply` 补兜底行 + 重试 0（见 skill `kiro-rs-slots` §4）。
+10-16 加第 11 组 `kiro-kimi-k3 {DefaultRetries:1}`，回滚 `198:~/rs-bak/router_settings.pre-kimi-retry1-20261016.json`。
 
+🔴 **SQL 别经 `ssh '…'` 内联**：外层单引号会把 `'router_settings'`、`'{model_group_retry_policy}'` 的引号吃掉，
+psql 报 `column "router_settings" does not exist`（10-16 那次在 `begin` 里，整段回滚零写入，算运气）。
+⇒ SQL 写本地文件，`ssh … 'kubectl exec -i litellm-db-0 -- psql …' < file.sql`，文件首行 `\set ON_ERROR_STOP on`。
+
+### 10.6 新模型带两跳兜底：建组 → 写两行 → 两跳都演（10-16 kimi-k3 实跑）
+
+诉求「X fallback 到 A 再到 B」，A 还不是现成组：
+
+1. `/model/new` 建 A（**不传 `model_info.mode`**），`disable_fallbacks:true` + 函数工具真打两发。
+2. `fallback-set-rows.py` 一次写两行：`{X: [A, B], A: [B]}`。后一行是给「直接调 A 的人」的，不写就只有 X 有兜底。
+   🔴 dry-run 若报 `TimeoutError`（`/model_group/info` 30s 超时）：刚滚完 pod 的冷启动，等 1~2 分钟重跑，别改脚本超时。
+3. 演练两跳（§10.3 的死组 + 临时 key，fallbacks 挂 per-key）：
+   - 主腿死 → A：`attempted_fallbacks=1`，10-16 实测 4~5s；
+   - 主腿 + A 都死 → B：`attempted_fallbacks=2`，30s（死的 A 吃了全局 `num_retries=5`；真 A 不会是死组，只在 A 真挂时才付这笔）。
+   判据看响应头 `x-litellm-attempted-fallbacks` + 回复里有工具调用，**不是 200**。
+4. 兜底腿额度小时报给用户（10-16 A = Kimi Code 会员 key，5h 100 次）。
+
+## 11. 整条腿死了要全线换掉（2026-10-18 OpenRouter 欠费实战）
+
+诉求形状：「某条兜底腿挂了/欠费了，把所有挂着它的链换成 X」。
+这一节是 §9（全局整行）+ §10.1（per-key）+ 新脚本 §11.3 的合用，**三层都要动，漏一层等于没改**。
+
+🆕 **先量影响面，一条命令**：`python3 scripts/litellm-198-key-error-triage.py upstream <供应商子串>`
+（skill `litellm-198-key-error-triage`）—— 逐组直打 + 白名单/per-key 兜底（★第一跳死）/全局兜底/7 天真人流量
+一次列全，巡检 key 和经兜底落进来的流量已分开。10-20 OpenRouter 跑出：33 组全死、215 把 carher key 的
+`claude-opus-4-6`/`claude-sonnet-4-6` per-key 行第一跳是死腿、全局 10 行源组已不存在。
+
+🔴 **先量腿是死是活，别从配置推**。10-18 用户说的是「openrouter 那条腿指向旧版本」，
+实测发现它根本是 **402 欠费全死**：
+
+```bash
+# ① 直打该腿（必须 disable_fallbacks，否则你量到的是它的兜底）
+curl -s -H "Authorization: Bearer $MK" -H 'Content-Type: application/json' \
+  http://127.0.0.1:30402/v1/chat/completions \
+  -d '{"model":"<腿>","messages":[{"role":"user","content":"say ok"}],"max_tokens":12,"disable_fallbacks":true}'
+# ② 账号余额（OpenRouter 实例）：pod 里读 OPENROUTER_API_KEY 打 /api/v1/credits 和 /api/v1/key
+#    10-18 实测 total_credits=155803 / total_usage=155806.25 ⇒ 已透支，整号 402，换哪个模型名都没用
+```
+
+### 11.1 🔴 DeepSeek 官方 chat 组现在接得住 grok 的半截对话（证伪 §9.2）
+
+§9.2 记的「官方接不了别家写到一半的对话」是 **10-12** 的事实。10-14 的
+`reasoning_content` 回填补丁（`project_198_deepseek_v41_flash_tool_history_400_2026_10_14`）之后，
+10-18 用**当时致命的那个载荷**（空 `content` 的 assistant + `tool_calls` + tool 结果 + 函数工具）
+重测：
+
+| 腿 | 结果 |
+|---|---|
+| `deepseek-v4.1-flash`（chat） | **200**，流式/非流式都过 |
+| `deepseek-official-v4-flash`（chat） | **200** |
+| `deepseek-v4-pro`（chat） | **200** |
+| `deepseek-v4-flash-responses`（responses 组，用 chat 线型打） | **400** |
+
+⇒ 换官方腿**只选 chat 组**。`-responses` 组在自己原生 `/v1/responses` 上是好的，
+别因为这个 400 判它坏（我一度误判，用错端点量出来的）。
+
+⚠️ 这条结论本身有保质期：它依赖那个 callback 补丁还在。再换之前**照样重测一遍**，
+别因为这里写着"能接住"就跳过——§9.2 就是这么翻车的。
+
+### 11.2 替换规则：先看链里还有没有同家族的活腿
+
+把挂着死腿的行分两类，**不要一律加新腿**：
+
+| 情形 | 做法 |
+|---|---|
+| 链里已有**同线型**的活 DeepSeek 腿 | 死腿原位换成它、或直接摘掉 |
+| 死腿是唯一的 DeepSeek 腿 | 原位换成 `deepseek-v4.1-flash`（保持下标，链首的仍在链首） |
+
+🔴 **别把 chat 线型的组兜到只剩 `-responses` 腿**。10-18 第一版 spec 里 `sa-grok-4.6/4.7`
+删掉死腿后只剩 `deepseek-v4-flash-responses`，而 grok 是 chat 线型 ⇒ 兜过去必 400。
+改成 `[deepseek-v4.1-flash, deepseek-v4-flash-responses]`。
+生成 spec 后**断言每行至少有一条 chat DeepSeek 腿**，再交给 `fallback-set-rows.py`。
+
+⚠️ `fallback-set-rows.py` 的活组闸门会挡下**组名已不存在**的行。10-18 有 10 行属于这类
+（`chatgpt-vip-biancaoming-*`、`chatgpt-vip-guran-*`、`chatgpt-pool-gpt-5.5`、
+`chatgpt-gpt-5.3-codex-spark`、`zerokey-pool-gpt-5.3-codex`、`ua-split-gpt-5.6-terra`）——
+兜底表里有行、组早没了，是历史残留。从 spec 里剔掉，别为它们改脚本闸门。
+
+### 11.3 per-key 层：换腿要用 `key-fallback-swap-leg.py`（10-18 新加）
+
+全局 54 行改完，**真正在服务的 key 可能一行都没变** —— per-key 表整张替换全局表（§0）。
+10-18 实测：her-pro 的 218 把 carher key 自己的表里两条 her 行都还挂着死腿。
+原有两把脚本都接不上这个活：
+
+| 脚本 | 语义 | 为什么不够 |
+|---|---|---|
+| `key-fallback-add-row.py` | 只**追加**缺失的整行 | 行已存在 = 跳过 |
+| `key-fallback.py drop` | 删**整行** | 会把该组其他兜底腿一起删 |
+| **`key-fallback-swap-leg.py`** | **行内换腿/摘腿，保位置** | 本节要的就是它 |
+
+```bash
+export LITELLM_MASTER_KEY=$(bash ~/litellm-198-master-key.sh)   # 跟着 proxy envFrom 找 key；10-28 已轮换到 litellm-secrets-r2
+S=~/kfb-swapleg-<sid>.py        # scripts/litellm-198-key-fallback-swap-leg.py
+python3 $S --audit --from <死腿>                      # 只读：哪些 key/组/第几跳，带真实上游
+python3 $S --from <死腿> --to <活腿>                   # dry-run，逐行 before -> after
+python3 $S --from <死腿> --to <活腿> --exclude-family anthropic/anthropic.claude \
+          --exclude-family cu/claude                  # 跳过某个模型家族
+python3 $S ... --limit 1 --apply --backup <f>          # 金丝雀 → 全量
+python3 $S --restore <f> --apply                       # 回滚
+```
+
+闸门：`--to` 必须是活组；空表 key 不碰；换入去重且**绝不让组兜回自己**；
+摘到空腿时保留原行（"有行但零兜底"比留着死腿更难查，交回人判断）；
+回读换尺子重拉全量，断言整表一致 + 行数无漂移 + 死腿已消失。
+单测 `backend/tests/test_litellm_198_key_fallback_swap_leg.py`。
+
+🔴 **按上游真实模型排除，不是按组名前缀**。`--exclude-family` 匹配的是
+`litellm_params.model` 子串。10-18 用户说"claude 类型忽略"，按前缀会误判两个：
+
+| 组名 | 真实上游 | 是 claude 吗 |
+|---|---|---|
+| `claude-grok-4.6` | `openai/grok-4.6` | ❌ grok 走 anthropic 线型而已，要改 |
+| `cursor-fc-composer-2.5` | `openai/cu/composer-2.5` | ❌ 要改 |
+| `claude-opus-4-8` | `anthropic/anthropic.claude-opus-4-8` | ✅ 跳过 |
+| `cursor-fc-opus-5` | `openai/cu/claude-opus-5-medium` | ✅ 跳过 |
+
+`--audit` 会把每个组的上游打出来，先看一眼再定 `--exclude-family`。
+
+### 11.4 10-18 终态与回滚件
+
+| 层 | 改了什么 |
+|---|---|
+| 全局表 | 54 行死腿原位换成 `deepseek-v4.1-flash`；10 行跳过（组已不存在） |
+| per-key（her-pro） | 218 把 carher key × 2 行摘掉死腿 → `[wangsu-...-her, sa-grok-4.7, deepseek-v4-flash-responses]` |
+| per-key（3 把链首） | `carher-13/14/75` 的 72 行非 claude 换成官方腿；21 行 claude 按用户要求留着（仍 402） |
+| 模型组 | `deepseek-official-v4-flash` / `-responses` 上游从**已下架**的 `deepseek-v4-flash` 改成 `deepseek-flash` |
+
+回滚件全在 `198:/home/cltx/rs-bak/`：
+`router_settings.pre-herpro-drop-dead-openrouter-20261018T025616Z.json`、
+`router_settings.pre-openrouter-dead-to-official-20261018T032746Z.json`、
+`pkfb.pre-herpro-drop-dead-openrouter-20261018T030335Z.jsonl`（218 把整表）、
+`pkfb.pre-3keys-dead-to-official-20261018T032858Z.jsonl`、
+`proxymodel.pre-v4flash-rename-20261018T025741Z.jsonl`。
+
+⏳ 未做：OpenRouter 仍透支约 3 美元（现生产链路已不依赖它）；21 行 claude 第一跳仍是死腿。

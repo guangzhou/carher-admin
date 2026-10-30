@@ -394,6 +394,14 @@ def context_window_public_message(exc: Any, rid: str) -> Optional[str]:
     文案用词避开 _LEAK_RE（账户/账号/池子/deployment 都会被 contains_leak
     命中，那样这句话自己就会被 scrub 成通用文案）。
 
+    🔴 2026-10-23：文案**必须以 Anthropic 原句开头**
+    ``prompt is too long: <N> tokens > <M> maximum``。Claude Code 只认这句
+    （子串 ``prompt is too long`` 触发自动压缩，两个数字算要砍多少；本机 mock
+    网关 A/B：原句 ⇒ 压缩后重发成功，纯中文提示 ⇒ 只显示报错不压缩）。
+    中文提示跟在后面给 OWUI 等人读。数字两种来源：router 自己的 pre-call
+    （``Got=``/``Max Input Tokens=``）和上游 Anthropic 形状（kiro.rs 0010 起
+    也回这个）。都抓不到就用不带数字的那句，仍然命中子串。
+
     kill switch：CONTEXT_WINDOW_FRIENDLY_MSG_DISABLED=1
     """
     try:
@@ -408,17 +416,91 @@ def context_window_public_message(exc: Any, rid: str) -> Optional[str]:
             raw = ""
         got = re.search(r"Got\s*[=:]\s*(\d+)", raw, re.IGNORECASE)
         cap = re.search(r"Max\s*Input\s*Tokens\s*[=:]\s*(\d+)", raw, re.IGNORECASE)
+        anth = _PROMPT_TOO_LONG_RE.search(raw)
         if got and cap:
-            nums = f"（本次约 {int(got.group(1)):,} token，上限 {int(cap.group(1)):,}）"
+            n, m = int(got.group(1)), int(cap.group(1))
+        elif anth:
+            n, m = int(anth.group(1)), int(anth.group(2))
         else:
+            n = m = None
+        if n is not None:
+            head = f"prompt is too long: {n} tokens > {m} maximum"
+            nums = f"（本次约 {n:,} token，上限 {m:,}）"
+        else:
+            # 上游 litellm 给 bedrock_mantle 用的同一句无数字兜底（exception_mapping_utils）
+            head = "prompt is too long: your prompt exceeds the model's context window"
             nums = ""
         return (
+            f"{head}. "
             f"当前对话的上下文超出该模型的输入上限{nums}。"
             f"请新建一个会话，或删掉前面的部分历史后重试。"
             f"(req: {rid})"
         )
     except Exception:
         return None
+
+
+def media_public_message(exc: Any, rid: str) -> Optional[str]:
+    """转写 / 生视频 / 生歌这几类请求的对外文案豁免分支（2026-10-30）。
+
+    起因：10-30 端到端测试里，用户对这几类失败只看得到「API 异常 (req: …)」：
+    - 第二个视频任务被上游拒（同一时刻只许一个），用户不知道要等，只会重发；
+    - 空文件 / 坏文件 / 中文数字长音频被防复读闸门拦下，用户不知道是自己文件的问题。
+    原因只在 SpendLogs 的 error_information 里，用户看不到。
+
+    🔴 10-30 先确认了这条路径真的会跑：上一次（10-29）把音频豁免加在一个转写请求根本
+    不经过的钩子上，代码上线了但从没执行。这次逐类实测过，三类失败都走
+    async_post_call_failure_hook（日志 ``error_sanitize: masked req=<rid>``：
+    视频 429 = RateLimitError、空文件 = BadRequestError）。
+
+    和 budget / context_window 两个分支同一套规矩：**文案由本函数从零拼出，
+    不透传原文任何片段**。只拿原文去匹配下面这张固定白名单，命中了就回白名单里
+    我们自己写好的那句话；一个都不命中就返回 None，照旧走通用「API 异常」。
+    所以就算上游原文里带着内部地址，也一个字都出不去。
+
+    仅豁免文案，置换机制不变：返回的 msg 仍走 sanitize_exception 就地改写，
+    状态码与异常类型原样保留。文案用词避开 _LEAK_RE。
+
+    kill switch：MEDIA_FRIENDLY_MSG_DISABLED=1
+    """
+    try:
+        if os.environ.get("MEDIA_FRIENDLY_MSG_DISABLED") == "1":
+            return None
+        raw = original_text(exc)
+        if not raw:
+            return None
+        for pat, text in _MEDIA_FRIENDLY:
+            if pat.search(raw):
+                return f"{text} (req: {rid})"
+        return None
+    except Exception:
+        return None
+
+
+# (原文特征, 对外文案)。原文来自 whisper2gemini/app.py 的 err(...) 和 gemini-web-to-api
+# 的视频/音乐错误。顺序 = 优先级。只加「用户自己能处理」的那几类。
+_MEDIA_FRIENDLY = [
+    (re.compile(r"a video is already being generated", re.I),
+     "已有一个视频正在生成（同一时间只能生成一个），请等它完成后再提交。"),
+    (re.compile(r"上传文件为空|音频时长为 0"),
+     "上传的音频文件是空的，请检查文件后重试。"),
+    (re.compile(r"无法解析音频时长|音频解码失败|不支持的文件扩展名"),
+     "音频文件无法解码，可能已损坏或不是受支持的音频格式（支持 mp3 / m4a / wav / ogg / flac / webm）。"),
+    (re.compile(r"超过上限\s*\d+MB"),
+     "音频文件太大，超过了上传上限，请压缩或切分后重试。"),
+    (re.compile(r"退化为数字串|复读循环|高度重复|被长度上限截断"),
+     "这段音频没有转写成功：识别结果不可信（出现大段重复或乱码），已拦下没有返回。"
+     "可以把音频切成更短的片段后重试。"),
+    (re.compile(r"Music was not ready before the deadline", re.I),
+     "歌曲生成超时，可能稍后仍会生成出来。请不要立即重试，以免重复生成。"),
+    (re.compile(r"Gemini did not run its music tool", re.I),
+     "这次描述没有触发歌曲生成，请把描述写得更明确（例如注明曲风、带人声或纯音乐）后重试。"),
+]
+
+
+# Anthropic 官方超长 400 的文案形状（也是 Claude Code 抓数字用的那条正则）
+_PROMPT_TOO_LONG_RE = re.compile(
+    r"prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)", re.IGNORECASE)
 
 
 def contains_leak(value: Any) -> bool:
@@ -636,6 +718,7 @@ class ErrorSanitize(CustomLogger):
             msg = (
                 budget_public_message(original_exception, user_api_key_dict, rid)
                 or context_window_public_message(original_exception, rid)
+                or media_public_message(original_exception, rid)
                 or public_message(rid)
             )
             original = original_text(original_exception)

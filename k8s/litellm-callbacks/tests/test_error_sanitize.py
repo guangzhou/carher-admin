@@ -634,5 +634,158 @@ class BudgetFriendly429Test(unittest.TestCase):
         self.assertIn("API 异常", exc.message)
 
 
+# --- 2026-10-23：超长文案必须以 Anthropic 原句开头（Claude Code 只认它才自动压缩）---
+
+class ContextWindowExceededError(Exception):
+    """litellm.ContextWindowExceededError 形状（error_sanitize 按 __name__ 识别）。"""
+
+    def __init__(self, message):
+        self.message = message
+        self.status_code = 400
+        super().__init__(message)
+
+
+# Claude Code 2.1.309 二进制里的两条判据，原样抄下来
+def _cc_triggers_compact(msg):
+    low = msg.lower()
+    return "prompt is too long" in low or "input is too long for requested model" in low
+
+
+CC_NUM_RE = __import__("re").compile(
+    r"prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)", __import__("re").IGNORECASE)
+
+# 1.105.1 离线复现（.work/cc-ctxwin-1023/repro_router.py）里 kiro 0010 的 400 被映射后的 message 原样
+UPSTREAM_KIRO_0010 = (
+    'litellm.ContextWindowExceededError: litellm.BadRequestError: AnthropicError - '
+    '{"type":"error","error":{"type":"invalid_request_error",'
+    '"message":"prompt is too long: 1012345 tokens > 1000000 maximum"}}')
+# router 自己 _pre_call_checks 抛的形状（09-19 wanglihua 那次）
+ROUTER_PRECALL = (
+    "litellm.ContextWindowExceededError: litellm._pre_call_checks: Context Window exceeded "
+    "for given call. Model=grok-4.6, Max Input Tokens=500000, Got=547720")
+
+
+class ContextWindowAnthropicWordingTest(unittest.TestCase):
+    def _run(self, exc):
+        asyncio.run(M.error_sanitize.async_post_call_failure_hook(
+            request_data=REQ, original_exception=exc, user_api_key_dict=None, traceback_str=None))
+        return exc.message
+
+    def test_upstream_anthropic_shape_keeps_numbers(self):
+        msg = self._run(ContextWindowExceededError(UPSTREAM_KIRO_0010))
+        self.assertTrue(msg.startswith("prompt is too long: 1012345 tokens > 1000000 maximum"), msg)
+        self.assertTrue(_cc_triggers_compact(msg))
+        self.assertEqual(CC_NUM_RE.search(msg).groups(), ("1012345", "1000000"))
+        self.assertIn("请新建一个会话", msg)
+        self.assertIn(CALL_ID[:8], msg)
+
+    def test_router_precall_shape_keeps_numbers(self):
+        msg = self._run(ContextWindowExceededError(ROUTER_PRECALL))
+        self.assertEqual(CC_NUM_RE.search(msg).groups(), ("547720", "500000"))
+        self.assertIn("本次约 547,720 token", msg)
+
+    def test_no_numbers_still_triggers_compact(self):
+        msg = self._run(ContextWindowExceededError("context window exceeded"))
+        self.assertTrue(_cc_triggers_compact(msg), msg)
+        self.assertIsNone(CC_NUM_RE.search(msg))
+
+    def test_leaky_upstream_text_not_echoed(self):
+        exc = ContextWindowExceededError(
+            UPSTREAM_KIRO_0010 + " api_base='http://chatgpt-acct-95.litellm-product.svc.cluster.local'")
+        msg = self._run(exc)
+        self.assertFalse(M.contains_leak(msg), msg)
+        self.assertNotIn("AnthropicError", msg)
+
+    def test_status_preserved(self):
+        exc = ContextWindowExceededError(UPSTREAM_KIRO_0010)
+        self._run(exc)
+        self.assertEqual(exc.status_code, 400)
+
+    def test_negative_control_old_chinese_only_wording_does_not_trigger(self):
+        # 修前的文案原样：纯中文 ⇒ Claude Code 判据不命中（mock A/B 实测只报错不压缩）
+        old = "当前对话的上下文超出该模型的输入上限（本次约 1,012,345 token，上限 1,000,000）。请新建一个会话，或删掉前面的部分历史后重试。(req: abcd1234)"
+        self.assertFalse(_cc_triggers_compact(old))
+
+    def test_kill_switch(self):
+        os.environ["CONTEXT_WINDOW_FRIENDLY_MSG_DISABLED"] = "1"
+        try:
+            msg = self._run(ContextWindowExceededError(UPSTREAM_KIRO_0010))
+            self.assertIn("API 异常", msg)
+        finally:
+            os.environ.pop("CONTEXT_WINDOW_FRIENDLY_MSG_DISABLED", None)
+
+    def test_non_context_errors_unchanged(self):
+        exc = BudgetExceededError(75.0, 70.0)
+        asyncio.run(M.error_sanitize.async_post_call_failure_hook(
+            request_data=REQ, original_exception=exc, user_api_key_dict=None, traceback_str=None))
+        self.assertNotIn("prompt is too long", exc.message)
+
+
+class MediaFriendlyMessageTest(unittest.TestCase):
+    """2026-10-30：转写/视频/音乐几类「用户自己能处理」的失败给人话；文案全部来自白名单。"""
+
+    # 原文照抄 10-30 线上 SpendLogs / 网关回包（含真实会出现的内部地址，用来证明它们出不去）
+    VIDEO_BUSY = ('litellm.RateLimitError: RateLimitError: OpenAIException - {"error":{"message":'
+                  '"a video is already being generated; wait for it to finish"}} '
+                  'api_base=http://gemini-media.litellm-dev.svc.cluster.local:4981/openai/v1')
+    EMPTY = ("litellm.BadRequestError: OpenAIException - 上传文件为空\n\nLiteLLM: model group "
+             "'whisper-1' failed with the error above and no fallback model group was found")
+    DIGITS = ("litellm.InternalServerError: OpenAIException - 上游输出退化为数字串（数字占 72%、"
+              "几乎无文字），已拒绝返回这份不可信的转写 http://whisper2gemini.litellm-dev.svc.cluster.local:8321")
+
+    def _msg(self, exc):
+        _run_failure(exc)
+        return exc.message
+
+    def test_video_busy(self):
+        m = self._msg(FakeRateLimitError(self.VIDEO_BUSY))
+        self.assertIn("已有一个视频正在生成", m)
+        self.assertIn(CALL_ID[:8], m)
+
+    def test_empty_audio(self):
+        m = self._msg(FakeProxyException(self.EMPTY, type="invalid_request_error", code=400))
+        self.assertIn("上传的音频文件是空的", m)
+
+    def test_degenerate_transcript(self):
+        m = self._msg(FakeProxyException(self.DIGITS, type="api_error", code=502))
+        self.assertIn("这段音频没有转写成功", m)
+
+    def test_no_raw_text_leaks(self):
+        """命中白名单时，原文一个字都不许出去（内部地址、组名、原句都不行）。"""
+        for raw in (self.VIDEO_BUSY, self.EMPTY, self.DIGITS):
+            e = FakeRateLimitError(raw)
+            _run_failure(e)
+            blob = _texts(e)
+            for needle in ("svc.cluster.local", "litellm-dev", "whisper-1", "api_base",
+                           "already being generated", "上游输出", "OpenAIException"):
+                self.assertNotIn(needle, blob, f"{needle!r} 漏到对外文案里: {blob[:300]}")
+            self.assertFalse(M.contains_leak(e.message), e.message)
+
+    def test_status_code_preserved(self):
+        e = FakeRateLimitError(self.VIDEO_BUSY)
+        _run_failure(e)
+        self.assertEqual(e.status_code, 429)
+
+    def test_unlisted_error_stays_generic(self):
+        e = FakeRateLimitError("some other upstream failure http://10.68.13.198:30402")
+        _run_failure(e)
+        self.assertIn("API 异常", e.message)
+        self.assertNotIn("10.68.13.198", _texts(e))
+
+    def test_kill_switch(self):
+        os.environ["MEDIA_FRIENDLY_MSG_DISABLED"] = "1"
+        try:
+            e = FakeRateLimitError(self.VIDEO_BUSY)
+            _run_failure(e)
+            self.assertIn("API 异常", e.message)
+            self.assertNotIn("已有一个视频正在生成", e.message)
+        finally:
+            os.environ.pop("MEDIA_FRIENDLY_MSG_DISABLED", None)
+
+    def test_every_friendly_text_is_leak_free(self):
+        for _, text in M._MEDIA_FRIENDLY:
+            self.assertFalse(M.contains_leak(text), text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

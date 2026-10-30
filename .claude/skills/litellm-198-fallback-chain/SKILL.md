@@ -181,8 +181,15 @@ python3 scripts/litellm-198-retry-policy.py --spec pol.json
 - 🔴 **策略行必须写 `DefaultRetries`**（线上镜像实测，`litellm/router_utils/get_retry_from_policy.py`）：
   只写 `TimeoutErrorRetries:0` 的行，遇到 500/429/连接错误返回 None ⇒ **漏回全局 num_retries=5**。脚本已拦。
   `{"TimeoutErrorRetries":0,"DefaultRetries":1}` 实测：Timeout→0、APIConnection/500/429/ContextWindow→1。
-- 🔴 **数腿用 `/model/info` 按 `model_name` 计数**。`/model_group/info` 没有腿列表（`providers` 是去重后的厂商名）；
-  我拿不存在的 `model_ids` 字段数出全 0，差点得出「没有单腿组」。现网 332 组里 233 个单腿无策略行，其中 47 个有兜底链。
+- 🔴 **数腿用 `/model/info`（或 `/v2/model/info` 翻页）按 `model_name` 计数**，**不是** `/model_group/info`。
+  后者在 1.106.4 上每组只回一行、`model_ids` 是 **None**、`providers` 收敛成去重后的厂商名
+  （实测 `web-gemini-music` 40 腿在它那里读成 `model_ids=None, providers=['openai']`）。
+  踩过两次：① 拿不存在的 `model_ids` 数出全 0，差点得出「没有单腿组」；
+  ② 10-31 `retry-policy.py` 的 `leg_count()` 用它 ⇒ 40 腿组读成 `legs=1` ⇒
+  **把「0 重试落在多腿组」那道守卫整个跳过了** —— 那道守卫存在的唯一目的就是拦这件事。
+  ⚠️ `/v2/model/info` **分页 50 行/页**（见 [[feedback_v2_model_info_is_paginated]]），要翻完；
+  `/model/info` 不分页（现网一次回 1071 行）。读数为空要当成「尺子坏了」而不是「配置是空的」。
+  现网（10-31 02:5x）：**332 组、264 个单腿、其中 227 个没有策略行、这 227 里 54 个有兜底链**。
 - `allowed_fails: 3` 是 no-op（= litellm 默认值），单腿组本来就不进按比例冷却。
 - 🔴 **生成类组（歌/视频/图）必须 0 重试**（10-30 已设 web-gemini-music/video/image、muse-video/image，备份
   `198:/root/litellm-rs-backups/rs_backup_20261030T194501.json`）：服务端重试 = 上游再生成一份、多扣一次额度，

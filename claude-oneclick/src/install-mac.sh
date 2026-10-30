@@ -17,7 +17,8 @@ warn() { printf '%s%s%s\n' "$YELLOW" "$1" "$NC"; }
 die()  { printf '%s%s%s\n' "$RED" "$1" "$NC" >&2; exit 1; }
 
 # ── 固定配置（用户无需感知）────────────────────────────────────────────
-BASE_URL="https://cc.auto-link.com.cn/pro"
+BASE_URL="https://chat.auto-link.com.cn/model"
+LEGACY_BASE_URL="https://cc.auto-link.com.cn/pro"   # 10-29 前的旧地址,共存期只在新地址不通时兜底
 NPM_REGISTRY="https://registry.npmmirror.com"
 NODE_MIRROR="https://cdn.npmmirror.com/binaries/node"
 NODE_MAJOR_MIN=22
@@ -154,6 +155,15 @@ echo
 # 先验 key 能用,再写配置(写了个坏 key 进去用户只会看到 401 不知道为什么)
 say "→ 检查 key ..."
 CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -H "x-api-key: $APIKEY" "$BASE_URL/v1/models" || echo 000)"
+# 10-29 换了网关域名(旧地址还能用一段时间):新地址这会儿不通、旧地址通 ⇒ 先用旧地址,
+#   以后每次开 Claude Code 的自动刷新会在新地址通了以后自动换过去。
+if [ "$CODE" != 200 ] && [ "$CODE" != 401 ] && [ "$CODE" != 403 ]; then
+  OLD_CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -H "x-api-key: $APIKEY" "$LEGACY_BASE_URL/v1/models" || echo 000)"
+  if [ "$OLD_CODE" = 200 ]; then
+    warn "↳ 新网关地址暂时不通(HTTP ${CODE}),这次先用旧地址;以后会自动换到新地址。"
+    BASE_URL="$LEGACY_BASE_URL"; CODE=200
+  fi
+fi
 case "$CODE" in
   200) ok "✔ key 可用" ;;
   401|403) die "✗ key 无效(HTTP $CODE)。去 key 表里重新「全选复制」那一格再试。" ;;
@@ -271,12 +281,12 @@ fs.writeFileSync(metaP, JSON.stringify(meta, null, 2) + "\n", { mode: 0o600 });
 #    `Host Claude Code binary not available` ⇒ 会话永远起不来,界面上就是"不回复"。
 #    App 只认自己的 storageDir + `.verified`(里面写 manifest 的 sha256),不认 npm 装的那个
 #    (npm 版是 plain 二进制,App 在 mac 上要 claude.app bundle;实测两者 sha 不同)。
-#    ⇒ 从我们自己的镜像 cc.auto-link.com.cn/ccdl/ 取**官方原样**文件,按 App 的目录形状放好,
+#    ⇒ 从我们自己的镜像 chat.auto-link.com.cn/ccdl/ 取**官方原样**文件,按 App 的目录形状放好,
 #    并用 App 内嵌 manifest 的 sha256 校验。版本号从 App 里读(App 升级后自动跟)。
 # 10-28 起 Linux 也有官方 App(deb,/usr/lib/claude-desktop),同样每开会话先去国外下组件 ⇒ 一起预置。
 if [ "$OS" = darwin ]; then APP_ASAR="/Applications/Claude.app/Contents/Resources/app.asar"
 else APP_ASAR="/usr/lib/claude-desktop/resources/app.asar"; fi
-CCDL="https://cc.auto-link.com.cn/ccdl/claude-code-releases"
+CCDL="https://chat.auto-link.com.cn/ccdl/claude-code-releases"
 if [ -f "$APP_ASAR" ]; then
   say "→ 准备桌面 App 需要的 Claude Code 组件(约 100MB,首次会慢一点)..."
   CARHER_ASAR="$APP_ASAR" CARHER_UD="$APP_UD" CARHER_CCDL="$CCDL" CARHER_ARCH="$ARCH" CARHER_OS="$OS" node -e '

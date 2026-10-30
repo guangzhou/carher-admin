@@ -30,7 +30,7 @@ claude-oneclick/
 | 症状 | 真因 | 脚本做了什么 |
 |---|---|---|
 | 「App unavailable / only in certain regions」 | App **不读** `~/.claude/settings.json` 切网关;它有独立的三方模式,配置在 `<userData>-3p/configLibrary/` | 写 `_meta.json`(appliedId)+ `<uuid>.json`(inferenceProvider=gateway …),只追加一条 CarHer,保留用户已有条目 |
-| 发消息不回复,日志 `Host Claude Code binary not available` | App 每开会话先从 `downloads.claude.ai` 拉它**钉死版本**的 Claude Code(host + Linux VM),国内超时 | 从 198 镜像 `https://cc.auto-link.com.cn/ccdl/claude-code-releases/<ver>/` 取官方原样文件,sha 对 App 内嵌 manifest,按 `storageDir/<ver>/` + `.verified` 放好 |
+| 发消息不回复,日志 `Host Claude Code binary not available` | App 每开会话先从 `downloads.claude.ai` 拉它**钉死版本**的 Claude Code(host + Linux VM),国内超时 | 从 198 镜像 `https://chat.auto-link.com.cn/ccdl/claude-code-releases/<ver>/` 取官方原样文件,sha 对 App 内嵌 manifest,按 `storageDir/<ver>/` + `.verified` 放好 |
 
 ### 镜像(198 nginx)
 

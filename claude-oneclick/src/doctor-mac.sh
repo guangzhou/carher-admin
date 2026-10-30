@@ -8,7 +8,8 @@ set +e
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
 CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-WANT_BASE="https://cc.auto-link.com.cn/pro"
+WANT_BASE="https://chat.auto-link.com.cn/model"
+LEGACY_BASE="https://cc.auto-link.com.cn/pro"   # 10-29 前的旧地址,共存期仍能用(开 Claude Code 时自动刷新会换成新地址)
 GW="${CARHER_DOCTOR_BASE:-$WANT_BASE}"   # 实际去打的地址(测试时指向本机假网关);判配置对不对仍用 WANT_BASE
 CLAUDE_MIN="2.1.257"
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -77,7 +78,8 @@ if [ -f "$S" ]; then
     KSW="还没问过"; [ "$KS" = approved ] && KSW="是"; [ "$KS" = rejected ] && KSW="否(之前点了 No)"
     P "  这把 key 已同意使用 = ${KSW}"
     [ "$KS" = rejected ] && red "命令行显示「Not logged in」:这把 key 之前被选了「不使用」。下载最新的 claude-mac.command 重跑一次(或在 Claude Code 里说「刷模型」)就会修好"
-    [ "$BASE" = "$WANT_BASE" ] || red "settings.json 没指向公司网关(ANTHROPIC_BASE_URL=${BASE:-空}):重新跑一次 claude-mac.command"
+    if [ "$BASE" = "$LEGACY_BASE" ]; then yel "settings.json 还是旧网关地址(还能用,之后会停):在 Claude Code 里说「刷模型」或重新跑一次 claude-mac.command 就换成新地址"
+    else [ "$BASE" = "$WANT_BASE" ] || red "settings.json 没指向公司网关(ANTHROPIC_BASE_URL=${BASE:-空}):重新跑一次 claude-mac.command"; fi
     [ -n "$KEY" ] || red "settings.json 里没有 key:重新跑一次 claude-mac.command"
     [ -n "$TOK" ] && red "同时有 AUTH_TOKEN 和 API_KEY(/model 里只剩几个 Claude):重新跑一次 claude-mac.command"
     [ -n "$OFF" ] && red "开了 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC(会关掉模型发现):重新跑一次 claude-mac.command"
@@ -117,7 +119,8 @@ if [ "$(uname -s)" = Darwin ] && [ -d "$APP" ]; then
     if [ -n "$AID" ] && [ -f "$CF" ]; then
       PV=$(jget "$CF" inferenceProvider); GB=$(jget "$CF" inferenceGatewayBaseUrl); GK=$(jget "$CF" inferenceGatewayApiKey)
       P "App 网关配置 : provider=$PV  base=$GB  key: $(keyfp "$GK")"
-      [ "$PV" = gateway ] && [ "$GB" = "$WANT_BASE" ] || red "桌面 App 没指向公司网关:完全退出 App,重新跑一次 claude-mac.command"
+      if [ "$PV" = gateway ] && [ "$GB" = "$LEGACY_BASE" ]; then yel "桌面 App 还是旧网关地址(还能用,之后会停):在 Claude Code 里说「刷模型」后完全退出 App 再开"
+      else [ "$PV" = gateway ] && [ "$GB" = "$WANT_BASE" ] || red "桌面 App 没指向公司网关:完全退出 App,重新跑一次 claude-mac.command"; fi
       [ -n "$KEY" ] && [ -n "$GK" ] && [ "$KEY" != "$GK" ] && red "命令行和桌面 App 用的不是同一把 key:重新跑一次 claude-mac.command"
       # 10-25:这项没写 ⇒ App 给 Code/Cowork 会话开「严格沙箱」且一个外网都不放 ⇒ npm install 失败(终端正常)
       EG=$(jget "$CF" coworkEgressAllowedHosts)
@@ -143,7 +146,7 @@ if [ "$(uname -s)" = Darwin ] && [ -d "$APP" ]; then
     if [ -n "$D" ]; then P "App 组件     : Claude Code $PIN 已就绪"
     else P "App 组件     : Claude Code $PIN 没准备好"
       red "桌面 App 需要的组件(Claude Code $PIN)没准备好 ⇒ 发消息不回/很慢:完全退出 App,重新跑一次 claude-mac.command"; fi
-    MIR=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://cc.auto-link.com.cn/ccdl/claude-code-releases/$PIN/manifest.json")
+    MIR=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://chat.auto-link.com.cn/ccdl/claude-code-releases/$PIN/manifest.json")
     P "公司镜像     : $PIN → HTTP $MIR"
     [ "$MIR" = 200 ] || red "公司镜像里还没有 App 要的 Claude Code $PIN(App 刚自动升级过):把这份报告发给运维"
   else

@@ -17,7 +17,8 @@ function Warn($m) { Write-Host $m -ForegroundColor Yellow }
 function Die($m)  { Write-Host $m -ForegroundColor Red; exit 1 }
 
 # ── 固定配置（用户无需感知）────────────────────────────────────────────
-$baseUrl     = 'https://cc.auto-link.com.cn/pro'
+$baseUrl     = 'https://chat.auto-link.com.cn/model'
+$legacyBaseUrl = 'https://cc.auto-link.com.cn/pro'   # 10-29 前的旧地址,共存期只在新地址不通时兜底
 $npmRegistry = 'https://registry.npmmirror.com'
 $nodeMirror  = 'https://cdn.npmmirror.com/binaries/node'
 $nodeMajorMin = 22
@@ -127,6 +128,13 @@ try {
   $code = [int]$r.StatusCode
 } catch {
   $code = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+}
+# 10-29 换了网关域名(旧地址还能用一段时间):新地址这会儿不通、旧地址通 ⇒ 先用旧地址,以后自动刷新会换过去
+if ($code -ne 200 -and $code -ne 401 -and $code -ne 403) {
+  try {
+    $r2 = Invoke-WebRequest -Uri "$legacyBaseUrl/v1/models" -Headers @{ 'x-api-key' = $apiKey } -TimeoutSec 30 -UseBasicParsing
+    if ([int]$r2.StatusCode -eq 200) { Warn "↳ 新网关地址暂时不通(HTTP $code),这次先用旧地址;以后会自动换到新地址。"; $baseUrl = $legacyBaseUrl; $code = 200 }
+  } catch {}
 }
 if ($code -eq 200) { Ok "√ key 可用" }
 elseif ($code -eq 401 -or $code -eq 403) { Die "x key 无效(HTTP $code)。去 key 表里重新「全选复制」那一格再试。" }
@@ -280,7 +288,7 @@ if (-not $appAsar) { Warn "! 没找到 Claude 桌面 App 的安装目录,跳过�
 if ($appAsar) {
   Say "→ 准备桌面 App 需要的 Claude Code 组件(约 55MB)..."
   $env:CARHER_ASAR = $appAsar; $env:CARHER_UD = (Join-Path $env:LOCALAPPDATA 'Claude-3p')
-  $env:CARHER_CCDL = 'https://cc.auto-link.com.cn/ccdl/claude-code-releases'; $env:CARHER_ARCH = $arch
+  $env:CARHER_CCDL = 'https://chat.auto-link.com.cn/ccdl/claude-code-releases'; $env:CARHER_ARCH = $arch
   $ccdJs = @'
 const fs=require("fs"),path=require("path"),crypto=require("crypto"),zlib=require("zlib"),https=require("https");
 const b=fs.readFileSync(process.env.CARHER_ASAR).toString("latin1");

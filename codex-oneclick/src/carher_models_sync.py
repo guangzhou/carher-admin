@@ -37,6 +37,10 @@ TEMPLATE_SLUG = "gpt-5.5"
 # 不进选择器：生图模型不能对话；审查专用模型 codex 自己会调
 SKIP = re.compile(r"image|imagine|video|music|^codex-auto-review$")  # 出图/视频/音乐生成名不能对话
 PREFERRED = "gpt-5.6-terra"  # 与一键脚本的默认模型一致
+# 10-29 换对外域名:旧 /pro/v1 → chat.auto-link.com.cn/model/v1(同一个网关)。共存期新旧都算我们的;
+# 是旧的 ⇒ 先用这把 key 打新地址 /models,拿到列表才改写 config.toml(只改值等于旧地址的那几行)。
+NEW_BASE = os.environ.get("CARHER_MIGRATE_TO") or "https://chat.auto-link.com.cn/model/v1"  # 环境变量只给测试用
+LEGACY_BASE = re.compile(r"^https://cc\.auto-link\.com\.cn/pro/v1/?$")
 
 
 LOG_FILE = CODEX_HOME / "carher-models-sync.log"
@@ -229,6 +233,26 @@ def our_provider_name(text: str, base: str) -> str | None:
     return None
 
 
+def is_legacy_base(url: str | None) -> bool:
+    return bool(url) and bool(LEGACY_BASE.match(str(url).strip()))
+
+
+def migrate_base_urls(text: str, new_base: str) -> str | None:
+    """把 config.toml 里**值等于旧网关地址**的 `base_url` / `openai_base_url` 行改成 new_base,别的一个字不动
+    (用户自己配的其它 provider 地址不同,天然不会被碰)。没有要改的返回 None。与 Node 版 migrateBaseUrls 一致。"""
+    n = 0
+
+    def repl(m):
+        nonlocal n
+        if not is_legacy_base(m.group(3)):
+            return m.group(0)
+        n += 1
+        return m.group(1) + m.group(2) + new_base + m.group(4)
+
+    out = re.sub(r'^(\s*(?:openai_)?base_url\s*=\s*)(")([^"]*)(")', repl, text, flags=re.M)
+    return out if n else None
+
+
 def catalog_path_from_config(text: str) -> Path | None:
     m = re.search(r"""^\s*model_catalog_json\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')""", text, re.M)
     if not m:
@@ -253,7 +277,20 @@ def ensure_config_line(text: str, path: Path) -> str:
 
 def main() -> int:
     key, base_url = read_credentials()
-    ids = fetch_model_ids(key, base_url)
+    ids = None
+    if is_legacy_base(base_url):  # 10-29 换域名:新地址用这把 key 拉得到列表才改
+        try:
+            ids = fetch_model_ids(key, NEW_BASE) or None
+        except Exception as exc:
+            log(f"新网关地址暂时不通，这次照旧用老地址：{exc}")
+        if ids:
+            t = migrate_base_urls(CONFIG.read_text(encoding="utf-8"), NEW_BASE)
+            if t is not None:
+                CONFIG.write_text(t, encoding="utf-8")
+            log(f"网关地址已换成新地址 {NEW_BASE}（同一个网关，换了域名）")
+            base_url = NEW_BASE
+    if ids is None:
+        ids = fetch_model_ids(key, base_url)
     if not ids:
         raise RuntimeError("网关没返回任何模型，保持现有目录不变")
 

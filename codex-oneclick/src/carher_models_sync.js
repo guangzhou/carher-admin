@@ -25,6 +25,10 @@ const TEMPLATE_SLUG = "gpt-5.5";   // 非 OpenAI 模型套 gpt-5.5 的元数据(
 const SKIP = /image|imagine|video|music|^codex-auto-review$/;   // 出图/视频/音乐生成名不能对话
 const PREFERRED = "gpt-5.6-terra";   // 与一键脚本的默认模型一致
 const LOG_FILE = path.join(CODEX_HOME, "carher-models-sync.log");
+// 10-29 换对外域名(同 Python 版):旧 /pro/v1 → chat.auto-link.com.cn/model/v1;新地址拉得到列表才改写
+const NEW_BASE = process.env.CARHER_MIGRATE_TO || "https://chat.auto-link.com.cn/model/v1";   // 环境变量只给测试用
+const LEGACY_BASE = /^https:\/\/cc\.auto-link\.com\.cn\/pro\/v1\/?$/;
+const isLegacyBase = (u) => !!u && LEGACY_BASE.test(String(u).trim());
 
 function pad(n) { return String(n).padStart(2, "0"); }
 function log(msg) {
@@ -175,6 +179,16 @@ function ourProviderName(text, base) {
   return null;
 }
 
+/* 值等于旧网关地址的 base_url / openai_base_url 行改成 newBase,别的不动;没有要改的返回 null。与 Python 版一致。 */
+function migrateBaseUrls(text, newBase) {
+  let n = 0;
+  const out = text.replace(/^(\s*(?:openai_)?base_url\s*=\s*)(")([^"]*)(")/gm, (all, a, q1, v, q2) => {
+    if (!isLegacyBase(v)) return all;
+    n++; return a + q1 + newBase + q2;
+  });
+  return n ? out : null;
+}
+
 function catalogPathFromConfig(text) {
   const m = /^\s*model_catalog_json\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')/m.exec(text);
   if (!m) return null;
@@ -191,8 +205,19 @@ function ensureConfigLine(text, p) {
 }
 
 async function main() {
-  const [key, base] = readCredentials();
-  const ids = await fetchModelIds(key, base);
+  let [key, base] = readCredentials();
+  let ids = null;
+  if (isLegacyBase(base)) {   // 10-29 换域名:新地址用这把 key 拉得到列表才改
+    try { ids = (await fetchModelIds(key, NEW_BASE)); if (!ids.length) ids = null; }
+    catch (e) { log(`新网关地址暂时不通，这次照旧用老地址：${e.message}`); }
+    if (ids) {
+      const t = migrateBaseUrls(fs.readFileSync(CONFIG, "utf8"), NEW_BASE);
+      if (t !== null) fs.writeFileSync(CONFIG, t, "utf8");
+      log(`网关地址已换成新地址 ${NEW_BASE}（同一个网关，换了域名）`);
+      base = NEW_BASE;
+    }
+  }
+  if (!ids) ids = await fetchModelIds(key, base);
   if (!ids.length) throw new Error("网关没返回任何模型，保持现有目录不变");
   const configText = fs.readFileSync(CONFIG, "utf8");
   const target = catalogPathFromConfig(configText) || DEFAULT_CATALOG;
@@ -234,7 +259,7 @@ async function main() {
   return 0;
 }
 
-module.exports = { buildCatalog, catalogPathFromConfig, ensureConfigLine, fixDefaultModel, ourProviderName, codexCandidates, loadTemplates };
+module.exports = { buildCatalog, catalogPathFromConfig, ensureConfigLine, fixDefaultModel, ourProviderName, codexCandidates, loadTemplates, migrateBaseUrls, isLegacyBase };
 
 if (require.main === module) {
   try { if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 512 * 1024) fs.writeFileSync(LOG_FILE, ""); } catch (e) {}

@@ -6,7 +6,8 @@ $ProgressPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
-$wantBase = 'https://cc.auto-link.com.cn/pro/v1'
+$wantBase = 'https://chat.auto-link.com.cn/model/v1'
+$legacyBase = 'https://cc.auto-link.com.cn/pro/v1'   # 10-29 前的旧地址,共存期仍能用
 $wantProv = 'carher_prod'
 $script:out = New-Object System.Collections.Generic.List[string]
 $script:red = New-Object System.Collections.Generic.List[string]
@@ -86,7 +87,9 @@ if (Test-Path $cfg) {
   P "  provider base_url = $(if ($burl) { $burl } else { '<没写>' })"
   P "  openai_base_url   = $(if ($oburl) { $oburl } else { '<没写>' })"
   P "  key(config)       : $(KeyFp $k1)"
-  if ($prov) { if ($burl -ne $wantBase) { Red "当前 provider「$prov」不指向公司网关:重新双击 codex-windows.bat" } }
+  if ($prov -and $burl -eq $legacyBase) { Yel "config.toml 还是旧网关地址(还能用,之后会停):在 Codex 里说「刷模型」或重新双击 codex-windows.bat 就换成新地址" }
+  elseif ($prov) { if ($burl -ne $wantBase) { Red "当前 provider「$prov」不指向公司网关:重新双击 codex-windows.bat" } }
+  elseif ($oburl -eq $legacyBase) { Yel "config.toml 还是旧网关地址(还能用,之后会停):重新双击 codex-windows.bat 就换成新地址" }
   elseif ($oburl -ne $wantBase) { Red "config.toml 没指向公司网关:重新双击 codex-windows.bat" }
   if ($prov -ne $wantProv) { P "  (不是一键脚本写的标准配置;有问题时先重新双击 codex-windows.bat,原配置会自动备份)" }
 } else { P "config.toml   : 没有"; Red "没有 $cfg ⇒ 一键配置没跑成功:重新双击 codex-windows.bat" }

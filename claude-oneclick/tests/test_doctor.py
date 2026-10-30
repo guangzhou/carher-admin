@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "src" / "doctor-mac.sh"
 PS = (ROOT / "src" / "doctor-windows.ps1").read_text(encoding="utf-8-sig")
 KEY = "sk-doctorTEST0123456789abc"
-BASE = "https://cc.auto-link.com.cn/pro"
+BASE = "https://chat.auto-link.com.cn/model"
 
 
 def _settings(**over):
@@ -120,6 +120,8 @@ def test_good_config_is_green_readonly_and_masked(tmp_path, gw):
     ("零宽字符", dict(settings=_settings(ANTHROPIC_API_KEY=KEY + "​")), "看不见的字符"),
     ("rc 里有覆盖 export", dict(zshrc="export ANTHROPIC_BASE_URL=https://x\n"), "会盖过配置"),
     ("JSON 坏了", dict(settings="{not json"), "不是合法 JSON"),
+    # 10-29 换域名:旧地址共存期还能用 ⇒ 只报黄(提示刷模型换过去),不报「没指向公司网关」
+    ("还是旧网关地址", dict(settings=_settings(ANTHROPIC_BASE_URL="https://cc.auto-link.com.cn/pro")), "还是旧网关地址"),
     # 10-19 sunqiang:没设 haiku ⇒ Claude Code 默认要 claude-haiku-5-5,网关没有 ⇒ 后台任务报错
     ("haiku 默认值网关没有", dict(settings=_settings(ANTHROPIC_DEFAULT_HAIKU_MODEL=None)), "claude-haiku-5-5 你的 key 没有"),
 ])

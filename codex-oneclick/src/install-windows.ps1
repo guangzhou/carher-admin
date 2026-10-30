@@ -12,7 +12,8 @@ function Die($m)  { Write-Host $m -ForegroundColor Red; exit 1 }
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 
 # 固定配置（用户无需感知）
-$baseUrl  = 'https://cc.auto-link.com.cn/pro/v1'
+$baseUrl  = 'https://chat.auto-link.com.cn/model/v1'
+$legacyBaseUrl = 'https://cc.auto-link.com.cn/pro/v1'   # 10-29 前的旧地址,共存期只在新地址不通时兜底
 $provider = 'carher_prod'
 $model    = 'gpt-5.6-terra'
 
@@ -116,7 +117,12 @@ Write-Host ""
 # 🔴 10-16 同事实机:key 只开了 deepseek-v4.1-flash,脚本写死 gpt-5.6-terra ⇒ 每一轮都 403。
 #    网关 /models 已按 key 白名单过滤 ⇒ 默认模型在里面就用它,不在就用列表里第一个能聊天的。
 try {
-  $ml = Invoke-RestMethod -Uri "$baseUrl/models" -Headers @{ Authorization = "Bearer $apiKey" } -TimeoutSec 20
+  try { $ml = Invoke-RestMethod -Uri "$baseUrl/models" -Headers @{ Authorization = "Bearer $apiKey" } -TimeoutSec 20 }
+  catch {
+    # 10-29 换了网关域名:新地址这会儿不通、旧地址通 ⇒ 先用旧地址,每天的模型同步会换过去
+    $ml = Invoke-RestMethod -Uri "$legacyBaseUrl/models" -Headers @{ Authorization = "Bearer $apiKey" } -TimeoutSec 20
+    Warn "↳ 新网关地址暂时不通,这次先用旧地址;以后会自动换到新地址。"; $baseUrl = $legacyBaseUrl
+  }
   $ids = @($ml.data | ForEach-Object { [string]$_.id })
   if ($ids.Count -gt 0 -and -not ($ids -contains $model)) {
     $alt = $ids | Where-Object { $_ -notmatch 'image|imagine' -and $_ -ne 'codex-auto-review' } | Select-Object -First 1

@@ -8,9 +8,10 @@ set +e
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
-BASE_URL="${CARHER_DOCTOR_BASE:-https://cc.auto-link.com.cn/pro/v1}"
+BASE_URL="${CARHER_DOCTOR_BASE:-https://chat.auto-link.com.cn/model/v1}"
 WANT_PROVIDER="carher_prod"
-WANT_BASE="https://cc.auto-link.com.cn/pro/v1"
+WANT_BASE="https://chat.auto-link.com.cn/model/v1"
+LEGACY_BASE="https://cc.auto-link.com.cn/pro/v1"   # 10-29 前的旧地址,共存期仍能用(每天的模型同步会换成新地址)
 TS="$(date +%Y%m%d-%H%M%S)"
 RED=(); YEL=()
 red() { RED+=("$1"); }
@@ -81,9 +82,11 @@ if [ -f "$CFG" ]; then
   grep -q '^model_catalog_json' "$CFG" && P "  model_catalog_json = $(sed -n 's/^model_catalog_json *= *//p' "$CFG" | head -n1)"
   # 两种写法都能走网关:一键脚本写的 model_provider=carher_prod;或不写 provider、靠 openai_base_url + auth.json
   if [ -n "$PROV" ]; then
-    [ "$BURL" = "$WANT_BASE" ] || red "当前 provider「${PROV}」不指向公司网关(base_url=${BURL:-空}):重新跑一次 codex-mac.command"
+    if [ "$BURL" = "$LEGACY_BASE" ]; then yel "config.toml 还是旧网关地址(还能用,之后会停):在 Codex 里说「刷模型」或重新跑一次 codex-mac.command 就换成新地址"
+    else [ "$BURL" = "$WANT_BASE" ] || red "当前 provider「${PROV}」不指向公司网关(base_url=${BURL:-空}):重新跑一次 codex-mac.command"; fi
   else
-    [ "$OBURL" = "$WANT_BASE" ] || red "config.toml 没指向公司网关:重新跑一次 codex-mac.command"
+    if [ "$OBURL" = "$LEGACY_BASE" ]; then yel "config.toml 还是旧网关地址(还能用,之后会停):重新跑一次 codex-mac.command 就换成新地址"
+    else [ "$OBURL" = "$WANT_BASE" ] || red "config.toml 没指向公司网关:重新跑一次 codex-mac.command"; fi
   fi
   [ "$PROV" = "$WANT_PROVIDER" ] || P "  (不是一键脚本写的标准配置;有问题时先重新跑一次 codex-mac.command,原配置会自动备份)"
 else

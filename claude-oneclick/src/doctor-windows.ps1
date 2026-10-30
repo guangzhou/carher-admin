@@ -6,7 +6,8 @@ $ProgressPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
 $claudeHome = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
-$wantBase = 'https://cc.auto-link.com.cn/pro'
+$wantBase = 'https://chat.auto-link.com.cn/model'
+$legacyBase = 'https://cc.auto-link.com.cn/pro'   # 10-29 前的旧地址,共存期仍能用
 $claudeMin = [version]'2.1.257'
 $script:out = New-Object System.Collections.Generic.List[string]
 $script:red = New-Object System.Collections.Generic.List[string]
@@ -88,7 +89,8 @@ if (Test-Path $s) {
     $ks = 'new'; try { $r = (Get-Content $gj -Raw | ConvertFrom-Json).customApiKeyResponses; if ($r.rejected -contains $kt) { $ks = 'rejected' } elseif ($r.approved -contains $kt) { $ks = 'approved' } } catch {}
     P "  这把 key 已同意使用 = $(switch ($ks) { 'approved' { '是' } 'rejected' { '否(之前点了 No)' } default { '还没问过' } })"
     if ($ks -eq 'rejected') { Red "命令行显示「Not logged in」:这把 key 之前被选了「不使用」。下载最新的 claude-windows.bat 重跑一次(或在 Claude Code 里说「刷模型」)就会修好" }
-    if ($base -ne $wantBase) { Red "settings.json 没指向公司网关:重新双击 claude-windows.bat" }
+    if ($base -eq $legacyBase) { Yel "settings.json 还是旧网关地址(还能用,之后会停):在 Claude Code 里说「刷模型」或重新双击 claude-windows.bat 就换成新地址" }
+    elseif ($base -ne $wantBase) { Red "settings.json 没指向公司网关:重新双击 claude-windows.bat" }
     if (-not $key) { Red "settings.json 里没有 key:重新双击 claude-windows.bat" }
     if ($tok) { Red "同时有 AUTH_TOKEN 和 API_KEY(/model 里只剩几个 Claude):重新双击 claude-windows.bat" }
     if ($off) { Red "开了 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC(会关掉模型发现):重新双击 claude-windows.bat" }
@@ -127,7 +129,8 @@ if ($pkg -or $asar) {
   if ($meta -and $meta.appliedId -and (Test-Path (Join-Path $lib ($meta.appliedId + '.json')))) {
     $cf = ReadJson (Join-Path $lib ($meta.appliedId + '.json'))
     P "App 网关配置 : provider=$($cf.inferenceProvider)  base=$($cf.inferenceGatewayBaseUrl)  key: $(KeyFp ([string]$cf.inferenceGatewayApiKey))"
-    if ($cf.inferenceProvider -ne 'gateway' -or $cf.inferenceGatewayBaseUrl -ne $wantBase) { Red "桌面 App 没指向公司网关:完全退出 App,重新双击 claude-windows.bat" }
+    if ($cf.inferenceProvider -eq 'gateway' -and $cf.inferenceGatewayBaseUrl -eq $legacyBase) { Yel "桌面 App 还是旧网关地址(还能用,之后会停):在 Claude Code 里说「刷模型」后完全退出 App 再开" }
+    elseif ($cf.inferenceProvider -ne 'gateway' -or $cf.inferenceGatewayBaseUrl -ne $wantBase) { Red "桌面 App 没指向公司网关:完全退出 App,重新双击 claude-windows.bat" }
     if ($key -and $cf.inferenceGatewayApiKey -and $key -ne $cf.inferenceGatewayApiKey) { Red "命令行和桌面 App 用的不是同一把 key:重新双击 claude-windows.bat" }
     # 10-25:这项没写 ⇒ App 给 Code/Cowork 会话开「严格沙箱」且一个外网都不放 ⇒ npm install 失败(终端正常)
     $eg = @($cf.coworkEgressAllowedHosts)
@@ -151,7 +154,7 @@ if ($pkg -or $asar) {
       if ($hitDir) { P "App 组件     : Claude Code $pin 已就绪 ($hitDir)" }
       elseif ($anyExe) { P "App 组件     : Claude Code $pin 有 claude.exe 但没有 .verified ($anyExe)"; Yel "桌面 App 组件可能没校验过:发消息不回时完全退出 App,重新双击 claude-windows.bat" }
       else { P "App 组件     : Claude Code $pin 没找到 (查了:$($cands -join ' ; '))"; Yel "桌面 App 组件没找到:如果 App 能正常回消息就不用管(App 可能自己下好放在别处);发消息不回再完全退出 App,重新双击 claude-windows.bat" }
-      $mir = Http "https://cc.auto-link.com.cn/ccdl/claude-code-releases/$pin/manifest.json" @{} $null
+      $mir = Http "https://chat.auto-link.com.cn/ccdl/claude-code-releases/$pin/manifest.json" @{} $null
       P "公司镜像     : $pin → HTTP $($mir.code)"
       if ($mir.code -ne 200) { Red "公司镜像里还没有 App 要的 Claude Code $pin(App 刚自动升级过):把这份报告发给运维" }
     } else { P "App 组件     : 读不到 App 钉死的版本" }

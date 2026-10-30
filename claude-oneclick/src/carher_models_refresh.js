@@ -19,6 +19,13 @@ const path = require("path");
 const CLAUDE_HOME = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
 const SETTINGS = process.env.CARHER_SETTINGS || path.join(CLAUDE_HOME, "settings.json");
 const BEHAVES_AS = "claude-sonnet-5-5";
+
+/* 10-29 换对外域名:网关地址从旧的 /pro 换成 chat.auto-link.com.cn/model(同一个网关,路径改名)。
+   旧地址共存一段时间 ⇒ 新旧两种都认作「我们的网关」。是旧的 ⇒ 先用这把 key 打新地址 /v1/models,
+   拿到列表(200)才改写;不通就保持原样,下次开会话再试。只认我们那一个地址,用户自己指的别的网关不碰。 */
+const NEW_BASE = process.env.CARHER_MIGRATE_TO || "https://chat.auto-link.com.cn/model";   // 环境变量只给测试用
+const LEGACY_BASE = /^https:\/\/cc\.auto-link\.com\.cn\/pro\/?$/;
+const isLegacyBase = (b) => LEGACY_BASE.test(String(b || "").trim());
 const CLAUDE_FAMILY = ["fable", "opus", "sonnet", "haiku"];
 const familyRank = (i) => { const k = CLAUDE_FAMILY.findIndex((f) => i.startsWith(`claude-${f}-`)); return k < 0 ? CLAUDE_FAMILY.length : k; };
 
@@ -107,27 +114,44 @@ function appConfigEntries() {
   }
   return out;
 }
-function syncAppModels(ids, key) {
+/* newBase:这次已用这把 key 在新地址上拉到了列表 ⇒ App 我们那条还写着旧地址就一起换过去(10-29 换域名)。 */
+function syncAppModels(ids, key, newBase) {
   const want = ids.filter((i) => /^claude-/.test(i) && !/image|imagine|video|music/.test(i))
     .sort((a, b) => familyRank(a) - familyRank(b) || b.localeCompare(a, "en", { numeric: true }));
   const res = [];
   for (const p of appConfigEntries()) {
     let c; try { c = JSON.parse(fs.readFileSync(p, "utf8")); } catch (e) { continue; }
     if (key && c.inferenceGatewayApiKey && c.inferenceGatewayApiKey !== key) continue;   // 不是这把 key 配的那条,不动
+    const baseMoved = !!(newBase && isLegacyBase(c.inferenceGatewayBaseUrl));
+    if (baseMoved) c.inferenceGatewayBaseUrl = newBase;
     const before = Array.isArray(c.inferenceModels) ? c.inferenceModels.map((m) => (typeof m === "string" ? m : m && m.name)).filter(Boolean) : null;
+    let menuChanged = true;
     if (!want.length) {
       // key 里一个 Claude 模型都没有 ⇒ 别写空列表(App 会没有可选的),交回 App 自己拉
-      if (before) { delete c.inferenceModels; } else continue;
-    } else {
-      if (before && before.join("\n") === want.join("\n")) { res.push({ p, changed: false, models: want }); continue; }
-      c.inferenceModels = want;
-    }
+      if (before) { delete c.inferenceModels; } else if (baseMoved) menuChanged = false; else continue;
+    } else if (before && before.join("\n") === want.join("\n")) {
+      if (!baseMoved) { res.push({ p, changed: false, models: want }); continue; }
+      menuChanged = false;
+    } else c.inferenceModels = want;
     const tmp = p + ".carher-tmp-" + process.pid;
     fs.writeFileSync(tmp, JSON.stringify(c, null, 2) + "\n", { mode: 0o600 });
     fs.renameSync(tmp, p);
-    res.push({ p, changed: true, models: want, added: want.filter((m) => !(before || []).includes(m)), removed: (before || []).filter((m) => !want.includes(m)) });
+    res.push({ p, changed: true, menuChanged, baseMoved, models: want, added: want.filter((m) => !(before || []).includes(m)), removed: (before || []).filter((m) => !want.includes(m)) });
   }
   return res;
+}
+
+/* settings.json 里是旧网关地址 ⇒ 用这把 key 打新地址;拿到列表才改 d.env.ANTHROPIC_BASE_URL。
+   fetch 可注入(测试)。返回 {ids, base, moved:bool, why?}:moved=false 时 ids 为 null,调用方照旧地址拉。 */
+async function migrateIfReachable(d, key, fetch = fetchIdsLive) {
+  const cur = d && d.env && d.env.ANTHROPIC_BASE_URL;
+  if (!isLegacyBase(cur)) return { ids: null, base: cur, moved: false };
+  try {
+    const ids = await fetch(NEW_BASE, key);
+    if (!ids.length) return { ids: null, base: cur, moved: false, why: "新地址没返回任何模型" };
+    d.env.ANTHROPIC_BASE_URL = NEW_BASE;
+    return { ids, base: NEW_BASE, moved: true };
+  } catch (e) { return { ids: null, base: cur, moved: false, why: e.message }; }
 }
 
 /* 把这把 key 记成「已同意」(10-27 王德升:命令行右下角一直「Not logged in · Run /login」)。
@@ -169,6 +193,10 @@ function hookEntry(d, nodeAbs, scriptAbs) {
 
 async function fetchIds(base, key) {
   if (process.env.CARHER_MODELS != null) return process.env.CARHER_MODELS.split("\n").map((s) => s.trim()).filter(Boolean);
+  return fetchIdsLive(base, key);
+}
+/* 一定真打网关(不吃 CARHER_MODELS):换地址前「新地址真的通」只能靠真请求判 */
+async function fetchIdsLive(base, key) {
   const r = await fetch(String(base).replace(/\/+$/, "") + "/v1/models", {
     headers: { "x-api-key": key, "anthropic-version": "2023-06-01" }, signal: AbortSignal.timeout(30000),
   });
@@ -203,7 +231,11 @@ async function main() {
   const key = process.env.CARHER_KEY || env.ANTHROPIC_API_KEY, base = process.env.CARHER_BASE || env.ANTHROPIC_BASE_URL;
   if (!key || !base) throw new Error("settings.json 里没有 ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL,先跑一键配置脚本");
   let ids;
-  try { ids = await fetchIds(base, key); }
+  // 10-29 换域名:旧地址 ⇒ 新地址拿得到列表才改写(只在没被 CARHER_BASE 指定时;安装器/测试会指定)
+  const mig = process.env.CARHER_BASE ? { ids: null, moved: false } : await migrateIfReachable(d, key);
+  if (mig.moved) { ids = mig.ids; logLine(`moved base ${base} -> ${mig.base}`); }
+  else if (mig.why) logLine(`keep old base (新地址不通:${mig.why})`);
+  try { if (!ids) ids = await fetchIds(base, key); }
   catch (e) { throw new Error(`没拉到模型列表(${e.message}),菜单没动`); }
   if (!ids.length) throw new Error("网关没返回任何模型,菜单没动");
   const r = applyModels(d, ids);
@@ -218,8 +250,10 @@ async function main() {
   }
   try { fs.unlinkSync(path.join(CLAUDE_HOME, "cache", "gateway-models.json")); } catch (e) { /* 没有就算了 */ }
   let app = [];
-  try { app = syncAppModels(ids, key); } catch (e) { logLine("app sync failed " + e.message); }
-  for (const a of app) if (a.changed) logLine("app menu " + a.models.join(","));
+  // App 那条只在「这一趟真从新地址拉到了列表」时才换地址(CARHER_MODELS 注入的不算真通)
+  const newVerified = mig.moved || (base === NEW_BASE && process.env.CARHER_MODELS == null);
+  try { app = syncAppModels(ids, key, newVerified ? NEW_BASE : null); } catch (e) { logLine("app sync failed " + e.message); }
+  for (const a of app) if (a.changed) logLine("app menu " + a.models.join(",") + (a.baseMoved ? " base->" + NEW_BASE : ""));
   let keyFixed = false;
   try { keyFixed = approveApiKey(key, process.env.CLAUDE_CONFIG_DIR); } catch (e) { /* 写不了就算了,不影响菜单 */ }
   if (keyFixed) logLine("approved api key (was rejected/unanswered)");
@@ -232,8 +266,11 @@ async function main() {
   if (!r.added.length && !r.removed.length) say("菜单和上次一样,没有变化");
   if (r.modelReset) say(`你之前选的 ${r.modelReset} 已经没有权限,已改回默认模型`);
   if (r.haikuSet) say(`后台小任务用的模型设为 ${r.haikuSet}(你的 key 里最新的 haiku)`);
+  if (mig.moved) say(`网关地址已换成新地址 ${NEW_BASE}(同一个网关,换了域名)`);
   for (const a of app) {
     if (!a.changed) { say(`桌面 App 菜单和上次一样(${a.models.length} 个 Claude 模型)`); continue; }
+    if (a.baseMoved) say(`桌面 App 的网关地址也换成了 ${NEW_BASE}`);
+    if (a.menuChanged === false) { say("  ⚠️ 桌面 App 要**完全退出再打开**才会用新地址"); continue; }
     say(`桌面 App 菜单已更新为 ${a.models.length} 个 Claude 模型:${a.models.join(", ")}`);
     if (a.added && a.added.length) say(`  App 新增:${a.added.join(", ")}`);
     if (a.removed && a.removed.length) say(`  App 删除:${a.removed.join(", ")}`);
@@ -243,7 +280,7 @@ async function main() {
   say("新开一个 Claude Code 会话(或桌面 App 新开对话)后 /model 里就是新列表");
 }
 
-module.exports = { pickerRows, applyModels, hookEntry, approveApiKey, syncAppModels, appConfigEntries };
+module.exports = { pickerRows, applyModels, hookEntry, approveApiKey, syncAppModels, appConfigEntries, migrateIfReachable, isLegacyBase, NEW_BASE };
 
 if (require.main === module) {
   main().catch((e) => {

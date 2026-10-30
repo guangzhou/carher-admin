@@ -19,7 +19,8 @@ function Die($m)  { Write-Host $m -ForegroundColor Red; exit 1 }
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 
 # 固定配置（用户无需感知）
-$baseUrl  = 'https://cc.auto-link.com.cn/pro/v1'
+$baseUrl  = 'https://chat.auto-link.com.cn/model/v1'
+$legacyBaseUrl = 'https://cc.auto-link.com.cn/pro/v1'   # 10-29 前的旧地址,共存期只在新地址不通时兜底
 $provider = 'carher_prod'
 $model    = 'gpt-5.6-terra'
 
@@ -123,7 +124,12 @@ Write-Host ""
 # 🔴 10-16 同事实机:key 只开了 deepseek-v4.1-flash,脚本写死 gpt-5.6-terra ⇒ 每一轮都 403。
 #    网关 /models 已按 key 白名单过滤 ⇒ 默认模型在里面就用它,不在就用列表里第一个能聊天的。
 try {
-  $ml = Invoke-RestMethod -Uri "$baseUrl/models" -Headers @{ Authorization = "Bearer $apiKey" } -TimeoutSec 20
+  try { $ml = Invoke-RestMethod -Uri "$baseUrl/models" -Headers @{ Authorization = "Bearer $apiKey" } -TimeoutSec 20 }
+  catch {
+    # 10-29 换了网关域名:新地址这会儿不通、旧地址通 ⇒ 先用旧地址,每天的模型同步会换过去
+    $ml = Invoke-RestMethod -Uri "$legacyBaseUrl/models" -Headers @{ Authorization = "Bearer $apiKey" } -TimeoutSec 20
+    Warn "↳ 新网关地址暂时不通,这次先用旧地址;以后会自动换到新地址。"; $baseUrl = $legacyBaseUrl
+  }
   $ids = @($ml.data | ForEach-Object { [string]$_.id })
   if ($ids.Count -gt 0 -and -not ($ids -contains $model)) {
     $alt = $ids | Where-Object { $_ -notmatch 'image|imagine' -and $_ -ne 'codex-auto-review' } | Select-Object -First 1
@@ -401,6 +407,10 @@ TEMPLATE_SLUG = "gpt-5.5"
 # 不进选择器：生图模型不能对话；审查专用模型 codex 自己会调
 SKIP = re.compile(r"image|imagine|video|music|^codex-auto-review$")  # 出图/视频/音乐生成名不能对话
 PREFERRED = "gpt-5.6-terra"  # 与一键脚本的默认模型一致
+# 10-29 换对外域名:旧 /pro/v1 → chat.auto-link.com.cn/model/v1(同一个网关)。共存期新旧都算我们的;
+# 是旧的 ⇒ 先用这把 key 打新地址 /models,拿到列表才改写 config.toml(只改值等于旧地址的那几行)。
+NEW_BASE = os.environ.get("CARHER_MIGRATE_TO") or "https://chat.auto-link.com.cn/model/v1"  # 环境变量只给测试用
+LEGACY_BASE = re.compile(r"^https://cc\.auto-link\.com\.cn/pro/v1/?$")
 
 
 LOG_FILE = CODEX_HOME / "carher-models-sync.log"
@@ -593,6 +603,26 @@ def our_provider_name(text: str, base: str) -> str | None:
     return None
 
 
+def is_legacy_base(url: str | None) -> bool:
+    return bool(url) and bool(LEGACY_BASE.match(str(url).strip()))
+
+
+def migrate_base_urls(text: str, new_base: str) -> str | None:
+    """把 config.toml 里**值等于旧网关地址**的 `base_url` / `openai_base_url` 行改成 new_base,别的一个字不动
+    (用户自己配的其它 provider 地址不同,天然不会被碰)。没有要改的返回 None。与 Node 版 migrateBaseUrls 一致。"""
+    n = 0
+
+    def repl(m):
+        nonlocal n
+        if not is_legacy_base(m.group(3)):
+            return m.group(0)
+        n += 1
+        return m.group(1) + m.group(2) + new_base + m.group(4)
+
+    out = re.sub(r'^(\s*(?:openai_)?base_url\s*=\s*)(")([^"]*)(")', repl, text, flags=re.M)
+    return out if n else None
+
+
 def catalog_path_from_config(text: str) -> Path | None:
     m = re.search(r"""^\s*model_catalog_json\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')""", text, re.M)
     if not m:
@@ -617,7 +647,20 @@ def ensure_config_line(text: str, path: Path) -> str:
 
 def main() -> int:
     key, base_url = read_credentials()
-    ids = fetch_model_ids(key, base_url)
+    ids = None
+    if is_legacy_base(base_url):  # 10-29 换域名:新地址用这把 key 拉得到列表才改
+        try:
+            ids = fetch_model_ids(key, NEW_BASE) or None
+        except Exception as exc:
+            log(f"新网关地址暂时不通，这次照旧用老地址：{exc}")
+        if ids:
+            t = migrate_base_urls(CONFIG.read_text(encoding="utf-8"), NEW_BASE)
+            if t is not None:
+                CONFIG.write_text(t, encoding="utf-8")
+            log(f"网关地址已换成新地址 {NEW_BASE}（同一个网关，换了域名）")
+            base_url = NEW_BASE
+    if ids is None:
+        ids = fetch_model_ids(key, base_url)
     if not ids:
         raise RuntimeError("网关没返回任何模型，保持现有目录不变")
 
@@ -835,6 +878,10 @@ const TEMPLATE_SLUG = "gpt-5.5";   // 非 OpenAI 模型套 gpt-5.5 的元数据(
 const SKIP = /image|imagine|video|music|^codex-auto-review$/;   // 出图/视频/音乐生成名不能对话
 const PREFERRED = "gpt-5.6-terra";   // 与一键脚本的默认模型一致
 const LOG_FILE = path.join(CODEX_HOME, "carher-models-sync.log");
+// 10-29 换对外域名(同 Python 版):旧 /pro/v1 → chat.auto-link.com.cn/model/v1;新地址拉得到列表才改写
+const NEW_BASE = process.env.CARHER_MIGRATE_TO || "https://chat.auto-link.com.cn/model/v1";   // 环境变量只给测试用
+const LEGACY_BASE = /^https:\/\/cc\.auto-link\.com\.cn\/pro\/v1\/?$/;
+const isLegacyBase = (u) => !!u && LEGACY_BASE.test(String(u).trim());
 
 function pad(n) { return String(n).padStart(2, "0"); }
 function log(msg) {
@@ -985,6 +1032,16 @@ function ourProviderName(text, base) {
   return null;
 }
 
+/* 值等于旧网关地址的 base_url / openai_base_url 行改成 newBase,别的不动;没有要改的返回 null。与 Python 版一致。 */
+function migrateBaseUrls(text, newBase) {
+  let n = 0;
+  const out = text.replace(/^(\s*(?:openai_)?base_url\s*=\s*)(")([^"]*)(")/gm, (all, a, q1, v, q2) => {
+    if (!isLegacyBase(v)) return all;
+    n++; return a + q1 + newBase + q2;
+  });
+  return n ? out : null;
+}
+
 function catalogPathFromConfig(text) {
   const m = /^\s*model_catalog_json\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')/m.exec(text);
   if (!m) return null;
@@ -1001,8 +1058,19 @@ function ensureConfigLine(text, p) {
 }
 
 async function main() {
-  const [key, base] = readCredentials();
-  const ids = await fetchModelIds(key, base);
+  let [key, base] = readCredentials();
+  let ids = null;
+  if (isLegacyBase(base)) {   // 10-29 换域名:新地址用这把 key 拉得到列表才改
+    try { ids = (await fetchModelIds(key, NEW_BASE)); if (!ids.length) ids = null; }
+    catch (e) { log(`新网关地址暂时不通，这次照旧用老地址：${e.message}`); }
+    if (ids) {
+      const t = migrateBaseUrls(fs.readFileSync(CONFIG, "utf8"), NEW_BASE);
+      if (t !== null) fs.writeFileSync(CONFIG, t, "utf8");
+      log(`网关地址已换成新地址 ${NEW_BASE}（同一个网关，换了域名）`);
+      base = NEW_BASE;
+    }
+  }
+  if (!ids) ids = await fetchModelIds(key, base);
   if (!ids.length) throw new Error("网关没返回任何模型，保持现有目录不变");
   const configText = fs.readFileSync(CONFIG, "utf8");
   const target = catalogPathFromConfig(configText) || DEFAULT_CATALOG;
@@ -1044,7 +1112,7 @@ async function main() {
   return 0;
 }
 
-module.exports = { buildCatalog, catalogPathFromConfig, ensureConfigLine, fixDefaultModel, ourProviderName, codexCandidates, loadTemplates };
+module.exports = { buildCatalog, catalogPathFromConfig, ensureConfigLine, fixDefaultModel, ourProviderName, codexCandidates, loadTemplates, migrateBaseUrls, isLegacyBase };
 
 if (require.main === module) {
   try { if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 512 * 1024) fs.writeFileSync(LOG_FILE, ""); } catch (e) {}

@@ -23,11 +23,11 @@ PS = (ROOT / "src" / "doctor-windows.ps1").read_text(encoding="utf-8-sig")
 KEY = "sk-doctorTEST0123456789abc"
 GOOD_CFG = f'''model = "gpt-5.6-terra"
 model_provider = "carher_prod"
-openai_base_url = "https://cc.auto-link.com.cn/pro/v1"
+openai_base_url = "https://chat.auto-link.com.cn/model/v1"
 
 [model_providers.carher_prod]
 name = "CarHer"
-base_url = "https://cc.auto-link.com.cn/pro/v1"
+base_url = "https://chat.auto-link.com.cn/model/v1"
 wire_api = "responses"
 experimental_bearer_token = "{KEY}"
 '''
@@ -117,7 +117,9 @@ def test_good_config_is_green_readonly_and_masked(tmp_path, gw):
     ("零宽字符", dict(cfg=GOOD_CFG.replace(KEY, KEY + "​"), auth_key=KEY + "​"), "看不见的字符"),
     ("不是 apikey 模式", dict(mode="chatgpt"), "不是 apikey 模式"),
     ("默认模型不在 key 里", dict(cfg=GOOD_CFG.replace('model = "gpt-5.6-terra"', 'model = "gpt-6-sol"')), "默认模型 gpt-6-sol 不在这把 key 里"),
-    ("provider 指错", dict(cfg=GOOD_CFG.replace('base_url = "https://cc.auto-link.com.cn/pro/v1"\nwire', 'base_url = "https://api.openai.com/v1"\nwire')), "不指向公司网关"),
+    # 10-29 换域名:旧地址共存期还能用 ⇒ 只报黄
+    ("还是旧网关地址", dict(cfg=GOOD_CFG.replace("chat.auto-link.com.cn/model/v1", "cc.auto-link.com.cn/pro/v1")), "还是旧网关地址"),
+    ("provider 指错", dict(cfg=GOOD_CFG.replace('base_url = "https://chat.auto-link.com.cn/model/v1"\nwire', 'base_url = "https://api.openai.com/v1"\nwire')), "不指向公司网关"),
 ])
 def test_each_failure_is_reported(tmp_path, gw, case, kw, expect):
     h = _home(tmp_path, **kw)

@@ -14,7 +14,8 @@ die()  { printf '%s%s%s\n' "$RED" "$1" "$NC" >&2; exit 1; }
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 
 # 固定配置（用户无需感知）
-BASE_URL="https://cc.auto-link.com.cn/pro/v1"
+BASE_URL="https://chat.auto-link.com.cn/model/v1"
+LEGACY_BASE_URL="https://cc.auto-link.com.cn/pro/v1"   # 10-29 前的旧地址,共存期只在新地址不通时兜底
 PROVIDER="carher_prod"
 MODEL="gpt-5.6-terra"
 
@@ -132,6 +133,16 @@ echo
 #    拿不到列表(网络问题)就保持原默认,不阻断安装。
 IDS="$(curl -fsS --max-time 20 -H "Authorization: Bearer $APIKEY" "$BASE_URL/models" 2>/dev/null \
   | grep -oE '"id" *: *"[^"]+"' | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+# 10-29 换了网关域名(旧地址还能用一段时间):新地址这会儿拉不到、旧地址拉得到 ⇒ 先用旧地址,
+#   每天的模型同步 / 「刷模型」会在新地址通了以后自动换过去。
+if [ -z "$IDS" ]; then
+  OLD_IDS="$(curl -fsS --max-time 20 -H "Authorization: Bearer $APIKEY" "$LEGACY_BASE_URL/models" 2>/dev/null \
+    | grep -oE '"id" *: *"[^"]+"' | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+  if [ -n "$OLD_IDS" ]; then
+    warn "↳ 新网关地址暂时不通,这次先用旧地址;以后会自动换到新地址。"
+    BASE_URL="$LEGACY_BASE_URL"; IDS="$OLD_IDS"
+  fi
+fi
 if [ -n "$IDS" ]; then
   if ! printf '%s\n' "$IDS" | grep -qx "$MODEL"; then
     ALT="$(printf '%s\n' "$IDS" | grep -vE 'image|imagine|^codex-auto-review$' | head -n1)"

@@ -3,6 +3,7 @@
 #
 #   scripts/chat-model-subpath/deploy.sh render              # 只打印要插的段
 #   scripts/chat-model-subpath/deploy.sh apply               # 198 装上（备份 → 插段 → nginx -t → reload → verify）
+#   scripts/chat-model-subpath/deploy.sh update              # 已装 ⇒ 原地换成当前 render（改了段内容后用）
 #   KEY=sk-... scripts/chat-model-subpath/deploy.sh verify   # 外网验收（不给 KEY 就跳过要真 key 的几项）
 #   scripts/host-198-chat-subpath.sh remove model            # 回滚（同一套标记段）
 #
@@ -39,6 +40,9 @@ render(){
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-LLM-Debug "";
+        # 入口标记（只观测）：LiteLLM 原生把这个头写进 SpendLogs.metadata.spend_logs_metadata ⇒ 统计谁走新地址。
+        # 覆盖客户端自带的同名头；cc 直连的请求没有这个标记。客户端能在 cc 上伪造它 ⇒ 只能当统计，不能当拦截依据。
+        proxy_set_header x-litellm-spend-logs-metadata '{"entry":"chat"}';
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade_owui;
         # cc 侧若回跳转，/pro/… 一律改回 /${NAME}/…（相对/绝对两种都兜）
@@ -149,9 +153,40 @@ verify(){
   [ $fail = 0 ] && echo "VERIFY PASS" || { echo "VERIFY FAIL ${fail} 项"; return 3; }
 }
 
+# 已装的段原地换成新 render（不先 remove，避免中间几秒 /model 落到 Open WebUI）
+update(){
+  echo "== 新段"; render
+  local b64; b64=$(render | base64 | tr -d '\n')
+  remote "CONF='${CONF}' NAME='${NAME}' B64='${b64}' bash -s" <<'REMOTE'
+set -uo pipefail
+S="sudo -n"; BK=/etc/nginx/backups; TS=$(date +%Y%m%dT%H%M%S)
+fail(){ echo "STOP: $*"; exit "${2:-1}"; }
+$S mkdir -p "${BK}"; BAK="${BK}/chat.auto-link.com.cn.conf.${TS}.pre-update-${NAME}"
+$S cp -a "${CONF}" "${BAK}" && echo "OK   备份 ${BAK}"
+echo "${B64}" | base64 -d > /tmp/chat-subpath-blk.$$
+$S python3 - "${CONF}" "${NAME}" /tmp/chat-subpath-blk.$$ <<'PY' || { rm -f /tmp/chat-subpath-blk.$$; fail "替换失败，未改动"; }
+import sys, re
+p, n, b = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(p).read(); blk = open(b).read()
+pat = re.compile(r'^    # >>> chat-subpath:' + re.escape(n) + r' >>>.*?^    # <<< chat-subpath:' + re.escape(n) + r' <<<\n', re.S | re.M)
+s2, k = pat.subn(lambda m: blk, s)
+assert k == 1, f"matched {k}"
+open(p, 'w').write(s2)
+PY
+rm -f /tmp/chat-subpath-blk.$$
+if ! $S nginx -t 2>&1; then $S cp -a "${BAK}" "${CONF}"; fail "nginx -t 失败，已恢复备份" 2; fi
+$S nginx -s reload && echo "OK   nginx reload"
+REMOTE
+  local rc=$?
+  [ $rc = 255 ] && die "ssh 失败" 4
+  [ $rc = 0 ] || exit $rc
+  sleep 5; verify
+}
+
 case "${1:-}" in
   render) render;;
   apply) apply;;
+  update) update;;
   verify) verify;;
   *) sed -n 2,8p "$0" | sed 's/^# \{0,1\}//'; exit 1;;
 esac

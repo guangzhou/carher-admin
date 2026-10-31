@@ -22,7 +22,8 @@ sha() { shasum -a 256 | cut -c1-64; }
 
 sync198() {
   local f head work
-  for f in sub2api-upgrade.py patches/*.patch; do
+  # 相对 $REL 展开,不吃调用者 cwd(10-31 首跑在 repo 根展开成字面 patches/*.patch ⇒ 假 STOP)
+  for f in sub2api-upgrade.py $(cd "$REPO/$REL" && ls patches/*.patch); do
     head=$(git -C "$REPO" show "HEAD:$REL/$f" 2>/dev/null | sha)
     work=$(sha < "$REPO/$REL/$f")
     if [ "${head}" != "${work}" ]; then
@@ -51,15 +52,16 @@ case "${1:-}" in
   sync) sync198 ;;
   go)
     sync198 || exit $?
-    if "${SSH[@]}" 'pgrep -f "sub2api-upgrade.py go" >/dev/null'; then
+    # [s]ub2api:pgrep -f 会匹配到这条 ssh 自己的 bash -c 命令行,方括号让模式不匹配自身
+    if "${SSH[@]}" 'pgrep -f "[s]ub2api-upgrade.py go" >/dev/null'; then
       echo "STOP 198 上已有一个 go 在跑,先 status" >&2; exit 4
     fi
     # setsid + </dev/null:ssh 立即返回,远端进程不挂在这条连接上
     "${SSH[@]}" "sudo -n setsid bash -c 'cd /root && exec python3 -u $OPS/sub2api-upgrade.py go > $LOG 2>&1' </dev/null >/dev/null 2>&1 &" || exit 4
     echo "started on 198, log $LOG ;下一步: $0 status" ;;
   status)
-    "${SSH[@]}" "pgrep -f 'sub2api-upgrade.py go' >/dev/null && echo RUNNING || echo NOT-RUNNING;
-      sudo -n tail -n 25 \$(sudo -n ls -t /root/sub2api-backup/go-*.log | head -1)" ;;
+    "${SSH[@]}" "pgrep -f '[s]ub2api-upgrade.py go' >/dev/null && echo RUNNING || echo NOT-RUNNING;
+      sudo -n bash -c 'l=\$(ls -t /root/sub2api-backup/go-*.log 2>/dev/null | head -1); [ -n \"\$l\" ] && echo \"== \$l\" && tail -n 25 \"\$l\"'" ;;
   run)
     shift; [ $# -ge 1 ] || { sed -n '2,8p' "$0"; exit 2; }
     sync198 || exit $?

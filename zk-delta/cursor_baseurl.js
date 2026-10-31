@@ -15,7 +15,7 @@
  *
  * 用法：
  *   node zk-delta/cursor_baseurl.js get
- *   node zk-delta/cursor_baseurl.js set https://cc.auto-link.com.cn/pro/v1
+ *   node zk-delta/cursor_baseurl.js set https://chat.auto-link.com.cn/model/v1
  */
 
 const fs = require('fs')

@@ -27,7 +27,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 # 本机 composer 现在正是基准 cursor-web-fc-82-terra，拿它当开关会把基准换掉。
 FLIP="$HERE/cursor_baseurl.js"
 
-TODAY_URL="https://cc.auto-link.com.cn/pro/v1"
+TODAY_URL="https://chat.auto-link.com.cn/model/v1"
 DELTA_URL="http://127.0.0.1:8788/v1"
 
 PLIST="$HOME/Library/LaunchAgents/com.zkdelta.sidecar.plist"
@@ -70,8 +70,8 @@ install_agent () {
   </array>
   <key>EnvironmentVariables</key><dict>
     <key>ZKD_PORT</key><string>8788</string>
-    <key>ZKD_DELTA_URL</key><string>https://cc.auto-link.com.cn/zkd/v1/delta</string>
-    <key>ZKD_UPSTREAM</key><string>https://cc.auto-link.com.cn/pro</string>
+    <key>ZKD_DELTA_URL</key><string>https://chat.auto-link.com.cn/zkd/v1/delta</string>
+    <key>ZKD_UPSTREAM</key><string>https://chat.auto-link.com.cn/model</string>
     <key>ZKD_CAPTURE</key><string>${CAPTURE_DIR}</string>
     <key>ZKD_CAPTURE_MAX</key><string>${CAPTURE_MAX}</string>
   </dict>
@@ -133,7 +133,7 @@ case "${1:-status}" in
     echo -n "小代理: "; sidecar_alive && curl -s http://127.0.0.1:8788/healthz || echo "没活"
     echo
     echo -n "常驻: "; [[ -f "$PLIST" ]] && echo "已装 ($PLIST)" || echo "没装"
-    echo -n "198 zk-delta: "; curl -fsS -m 8 https://cc.auto-link.com.cn/zkd/healthz || echo "打不通"
+    echo -n "198 zk-delta: "; curl -fsS -m 8 https://chat.auto-link.com.cn/zkd/healthz || echo "打不通"
     echo
     if sidecar_alive; then echo "本轮统计:"; curl -s http://127.0.0.1:8788/metrics.json; echo; fi
     ;;

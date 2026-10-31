@@ -438,6 +438,10 @@ def state_path():
     return os.path.join(STATE_DIR, "upgrade-pre-state.json")
 
 
+def last_build_path():
+    return os.path.join(STATE_DIR, "last-build.json")
+
+
 def cmd_backup(a):
     os.makedirs(STATE_DIR, exist_ok=True)
     os.chmod(STATE_DIR, 0o700)
@@ -658,6 +662,9 @@ def cmd_build(a):
         sys.exit("built image does not prove itself -- not cutting over this")
     print("\nnext: cutover --image %s" % tag)
     a.built_image = tag
+    os.makedirs(STATE_DIR, exist_ok=True)
+    json.dump({"image": tag, "version": ver, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+               "patches": [p["file"] for p in PATCHES]}, open(last_build_path(), "w"))
     return 0
 
 
@@ -774,9 +781,15 @@ def image_has_local_patches(img):
 def cmd_cutover(a):
     img = a.image
     if not img:
-        tags = json.loads(sh("curl -s http://127.0.0.1:5000/v2/sub2api/tags/list"))
-        cand = sorted([t for t in tags.get("tags", []) if "-v" in t])[-1]
-        img = "%s:%s" % (REGISTRY, cand)
+        # Default = what `build` last produced and proved, not "newest-looking
+        # tag in the registry": that sorted by name, and 10-24's throwaway
+        # `…-ps429b-buildtest` sorts AFTER the real `…-ps429b`.
+        try:
+            img = json.load(open(last_build_path()))["image"]
+            print("(image from last `build`: %s)" % img)
+        except (OSError, ValueError, KeyError):
+            sys.exit("no --image and no record of a `build` in %s -- pass --image"
+                     % last_build_path())
     cur = running_image()
     if img == cur:
         print("already running %s" % img)
@@ -1187,7 +1200,7 @@ def cmd_go(a):
 
     hour = int(time.strftime("%H"))
     if not (hour >= 23 or hour <= 6) and not a.force:
-        sys.exit("\nPREPARED, NOT CUT OVER.  It is %02d:00 and this cutover drops "
+        sys.exit("\nPREPARED, NOT CUT OVER.  It is %02d:xx and this cutover drops "
                  "grok + kimi + the cursor fallback chain for ~1min.\n"
                  "The dump and the verified image are already in place, so the "
                  "only step left is one command:\n"

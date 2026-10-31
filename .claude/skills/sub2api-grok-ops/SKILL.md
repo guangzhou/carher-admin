@@ -1584,6 +1584,21 @@ zerokey-pool-\* / claude-gpt-\* / claude-zerokey-\* / openrouter-\* / ua-split-\
 
 **升级 = 一条 `go`，补丁由脚本重打**（10-24 把手跑的七步收进脚本 `build` / `patch-regress`，同日在 198 实跑 `build` 一遍：约 12min，补丁标记 present、自报 0.2.18）：
 
+**🔴 入口是本机这条，不是自己 ssh 去 198 敲**（10-31 加）：
+
+```bash
+scripts/grok-onboard/sub2api-upgrade-198.sh go        # 三方核 sha + 同步脚本/补丁到 198 → 198 后台跑 go（停在切换闸门前）
+scripts/grok-onboard/sub2api-upgrade-198.sh status    # 看跑到哪（build 约 25min）
+scripts/grok-onboard/sub2api-upgrade-198.sh run cutover --yes   # 切到上次 build 出的镜像（默认读 last-build.json）
+scripts/grok-onboard/sub2api-upgrade-198.sh run verify
+scripts/grok-onboard/sub2api-upgrade-198.sh run probe --tag post
+```
+- 为什么要包一层：10-31 198 上的 `sub2api-upgrade.py` 落后 repo 一个提交（生产 secret 改名 `-r2` 没同步），直接跑探针会读不到 master key。包装每次先比 **git HEAD / 工作区 / 198** 三方 sha，工作区有未提交改动就 STOP（rc=3），198 不同才备份+替换。
+- **所有 docker/kubectl 都在 198 上执行，本机一条 docker 都不跑**（用户问过「为啥启动我本地 docker」——查下来不是本流程，但入口收在这里就不用再解释）。
+- 用户说「升级」= 一直做到切换+验证完，不用停在闸门前回来问（10-31 用户：「升级就好了 其他不用关心」）。闸门是给夜间无人值守 `go` 用的。
+
+198 上直接跑（包装内部就是这些）：
+
 ```bash
 sudo python3 /Data/sub2api-ops/sub2api-upgrade.py go      # check → probe pre → backup → build → [窗口闸] → cutover → verify → probe post → patch-regress
 sudo python3 /Data/sub2api-ops/sub2api-upgrade.py build --version 0.2.19   # 单跑：只出镜像，不碰线上
@@ -1597,7 +1612,7 @@ sudo python3 /Data/sub2api-ops/sub2api-upgrade.py patch-regress            # 单
 ④ golang 容器跑每个补丁登记的 `go test -tags=unit -run …`（模块缓存 `/Data/sub2api-gomod-cache`）；
 ⑤ classic build（~10min，日志 `/Data/sub2api-build-<ver>/build.log`）；
 ⑥ 以**现役镜像**为 base 换 `/app/sub2api` + `/app/resources`、改 label；顺手比 `docker-entrypoint.sh`，上游改了会喊；
-⑦ push + k3s 拉得到 + 二进制 `--version` / label / 补丁标记三样都对上才给 `next: cutover --image …`。
+⑦ push + k3s 拉得到 + 二进制 `--version` / label / 补丁标记三样都对上才给 `next: cutover --image …`，并记进 `~/sub2api-backup/last-build.json`——`cutover` 不带 `--image` 时就切它（以前按 registry tag 名排序取最新，10-24 的 `…-ps429b-buildtest` 会排在真镜像后面被选中）。
 **新增补丁** = patch 文件放 `scripts/grok-onboard/patches/` + 在脚本 `PATCHES` 加一行（file / marker / test）——`cutover` 闸门的 `LOCAL_PATCH_MARKERS` 由它派生，不用另改。
 
 `patch-regress` 判据与边界（10-24 第二次实跑踩出来的）：
@@ -1749,6 +1764,17 @@ dump 里含 `accounts` 表的 grok/kimi OAuth token，**是凭据文件**，脚�
 **+1 → 292 / `242_drop_platform_check_constraints.sql`**;10-12 的 `probe-pre` 4/4 ok、`probe-post` 8/8 ok
 (`/root/sub2api-backup/`,dump `sub2api-20261012-1637.dump`,升级前镜像 `20261002-v0.2.13`、74 号/64 active);
 现 pod `restartCount=0`。rollout 时长、ERROR 数、verify 结果**没留记录**,别补编。
+
+带补丁以后的三次（都从 198 现场输出抄的）：
+
+| | 10-16 v0.2.17 | 10-24 v0.2.18-ps429b | **10-31 v0.2.19-ps429b** |
+|---|---|---|---|
+| 出镜像 | 上游 `pull` | 手跑七步（~25min） | `go` 里的 `build`（~25min，含 ~10min classic build） |
+| 迁移 | +0 → 296 | +1 → 297（246 生图开关） | **+2 → 299**（247 新表、248 加列默认 false，纯加法） |
+| rollout / ERROR | 31s / 0 | 30s / 0 | ~30s / 0 |
+| 账号 | 156/144 零翻转 | 165/153 零翻转 | 165/153 零翻转 |
+| 回归 | 4/4 → 8/8 | 4/4 → 8/8 + 5 并发 multi-agent 5/5 | 4/4 → 8/8；`patch-regress` 没跑：grok 能服务腿=0（49 条额度冷却到 11-01），切换窗口零流量 ⇒ user plane「0 fail」不是 pass |
+| dump | `…20261016-2032` | `…20261024-1534` `b8a9c16a…` | `…20261031-1718` `fa79e525…` |
 
 | | 09-08 v0.2.3 | 09-10 v0.2.4 | 09-20 v0.2.7 | 09-24 v0.2.8 | **10-01 v0.2.11** |
 |---|---|---|---|---|---|

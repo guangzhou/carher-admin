@@ -129,6 +129,38 @@ ensure_pg() {
   return 1
 }
 
+# 🔴 真库开关不止我知道的那两个：分支会自带新的。feat/org-settlement 就引入了
+#    ORG_SETTLEMENT_TEST_DSN，不认它就有 7 条日结用例默默跳过 —— 又一次"默认 skip
+#    导致假绿"。所以这里从目标分支自己的 tests/ 里把所有 *_DSN / *_DATABASE_URL
+#    开关扫出来，缺哪个就点名哪个，而不是只检查硬编码的两个。
+# $1 工作目录；输出到全局 DSN_GATES_MISSING（空格分隔）
+scan_dsn_gates() {
+  local wd="$1" name
+  DSN_GATES_MISSING=""
+  for name in $(grep -rhoE 'os\.getenv\("[A-Z0-9_]*(DSN|DATABASE_URL)[A-Z0-9_]*"' "$wd/tests" 2>/dev/null \
+                 | sed -E 's/.*"([A-Z0-9_]+)"/\1/' | sort -u); do
+    [ -n "$(eval "printf '%s' \"\${$name:-}\"")" ] || DSN_GATES_MISSING="${DSN_GATES_MISSING:+$DSN_GATES_MISSING }$name"
+  done
+  # ORG_SETTLEMENT_TEST_DSN 要的是"可写的空库"，本机测试库已经起着，直接给它一个独立库。
+  local g
+  for g in $DSN_GATES_MISSING; do
+    case "$g" in
+      ORG_SETTLEMENT_TEST_DSN)
+        if [ "$PG_READY" = 1 ] && [ -n "$(docker ps -q -f "name=^${PG_BILLING_NAME}$" 2>/dev/null)" ]; then
+          docker exec "$PG_BILLING_NAME" psql -U postgres -q -c 'CREATE DATABASE org_settlement_test' >/dev/null 2>&1 || true
+          export ORG_SETTLEMENT_TEST_DSN="postgresql://postgres:testpw@127.0.0.1:$PG_BILLING_PORT/org_settlement_test"
+          note "补上 ORG_SETTLEMENT_TEST_DSN（org_settlement_test 库）"
+        fi ;;
+    esac
+  done
+  # 补过之后重算一遍，剩下的才是真缺
+  DSN_GATES_MISSING=""
+  for name in $(grep -rhoE 'os\.getenv\("[A-Z0-9_]*(DSN|DATABASE_URL)[A-Z0-9_]*"' "$wd/tests" 2>/dev/null \
+                 | sed -E 's/.*"([A-Z0-9_]+)"/\1/' | sort -u); do
+    [ -n "$(eval "printf '%s' \"\${$name:-}\"")" ] || DSN_GATES_MISSING="${DSN_GATES_MISSING:+$DSN_GATES_MISSING }$name"
+  done
+}
+
 # ---------- 跑一次 pytest，回显 "失败集合 / 计数" ----------
 # $1 工作目录  $2.. pytest 选择参数（空 = tests 全量）
 # 输出到全局：RUN_FAILED_SET / RUN_PASSED / RUN_FAILED / RUN_SKIPPED / RUN_TAIL
@@ -154,7 +186,11 @@ run_pytest() {
     RUN_TAIL="$(printf '%s\n' "$out" | tail -8)"
     return 1
   fi
-  RUN_FAILED_SET="$(printf '%s\n' "$out" | grep -E '^(FAILED|ERROR)' | sed 's/ - .*//' | sort -u)"
+  # 🔴 不能只匹配 ^(FAILED|ERROR)：应用日志里的 "ERROR    ai-token-dashboard:main.py:..."
+  #    也顶格以 ERROR 开头，且带 trade_no/user_id 这类每次都变的串 ⇒ 永远匹配不上基线，
+  #    会被当成"新增失败"，让门禁对 4 条分支一律判不过（实测每条都多报 22 条）。
+  #    这里要求后面跟 pytest 的用例标识 tests/...::，只收真正的用例结果行。
+  RUN_FAILED_SET="$(printf '%s\n' "$out" | grep -E '^(FAILED|ERROR) tests/[^[:space:]]*::' | sed 's/ - .*//' | sort -u)"
   RUN_PASSED="$(printf  '%s\n' "$out" | grep -oE '[0-9]+ passed'  | tail -1 | grep -oE '[0-9]+' || echo 0)"
   RUN_SKIPPED="$(printf '%s\n' "$out" | grep -oE '[0-9]+ skipped' | tail -1 | grep -oE '[0-9]+' || echo 0)"
   RUN_FAILED="$(printf '%s\n' "$RUN_FAILED_SET" | grep -c . || true)"
@@ -177,9 +213,28 @@ json_arr() {  # 每行一个元素
 # 分支可能 checkout 在别的 worktree 里（本仓就是这么用的）。git 不允许同一分支被两处 checkout，
 # 所以这里只找、不切：找不到就报错让人自己建，绝不在别人的 worktree 上动手。
 worktree_for() {
-  local branch="$1"
-  git -C "$REPO" worktree list --porcelain | awk -v b="refs/heads/$branch" '
-    /^worktree /{wt=substr($0,10)} /^branch /{if (substr($0,8)==b) {print wt; exit}}'
+  local branch="$1" wt
+  wt="$(git -C "$REPO" worktree list --porcelain | awk -v b="refs/heads/$branch" '
+    /^worktree /{wt=substr($0,10)} /^branch /{if (substr($0,8)==b) {print wt; exit}}')"
+  [ -z "$wt" ] || { printf '%s\n' "$wt"; return 0; }
+  # 没有以该分支 checkout 的 worktree 时，退一步找一个 HEAD 正好等于该分支提交的
+  # worktree（通常是 detached 的那个）。只读、不切、不建分支 —— 内容逐字节一致，
+  # 用来跑测试等价。
+  local want cand dirty_cand
+  want="$(git -C "$REPO" rev-parse --verify -q "$branch^{commit}")" || return 1
+  # 优先挑干净的：带未提交改动的 worktree 跑出来的结果不代表这个提交。
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    if [ -z "$(git -C "$cand" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+      printf '%s\n' "$cand"; return 0
+    fi
+    dirty_cand="${dirty_cand:-$cand}"
+  done <<EOF_WT
+$(git -C "$REPO" worktree list --porcelain | awk -v want="$want" '
+    /^worktree /{wt=substr($0,10)} /^HEAD /{if (substr($0,6)==want) print wt}')
+EOF_WT
+  [ -z "$dirty_cand" ] || { printf '%s\n' "$dirty_cand"; return 0; }
+  return 1
 }
 
 # ---------- 门禁主体 ----------
@@ -198,6 +253,9 @@ gate_one() {
   [ -z "$(git -C "$wd" status --porcelain --untracked-files=no)" ] || dirty=true
   note "=== $branch @ $sha  ($wd)${dirty:+ }$([ "$dirty" = true ] && echo '⚠️ 有未提交改动')"
 
+  # 这个分支自带哪些真库开关？缺的要点名（见 scan_dsn_gates 的说明）
+  scan_dsn_gates "$wd"
+
   # 全量
   if ! run_pytest "$wd"; then
     echo "!!! pytest 没跑起来：" >&2; printf '%s\n' "$RUN_TAIL" >&2; return 2
@@ -207,8 +265,8 @@ gate_one() {
   # 与基线比：只看"新增"，基线里的已知失败不拦
   local extra="" base_count=0
   if [ -f "$BASELINE" ]; then
-    base_count="$(grep -cE '^(FAILED|ERROR)' "$BASELINE" || true)"
-    extra="$(comm -13 <(grep -E '^(FAILED|ERROR)' "$BASELINE" | sed 's/ - .*//' | sort -u) \
+    base_count="$(grep -cE '^(FAILED|ERROR) tests/[^[:space:]]*::' "$BASELINE" || true)"
+    extra="$(comm -13 <(grep -E '^(FAILED|ERROR) tests/[^[:space:]]*::' "$BASELINE" | sed 's/ - .*//' | sort -u) \
                      <(printf '%s\n' "$all_set" | grep -v '^$' | sort -u) || true)"
   else
     note "⚠️ 缺基线 ${BASELINE}（跑 baseline 动作生成）；这一轮只报失败数，不做新增比对"
@@ -236,12 +294,23 @@ gate_one() {
     else
       reason="${reason:+${reason}；}REQUIRE_PG=0，真库缺失仅告警"
     fi
+  elif [ -n "${DSN_GATES_MISSING:-}" ]; then
+    # 真库起着，但这个分支还要别的库开关（如 ORG_SETTLEMENT_TEST_DSN）⇒ 那批用例在跳过
+    if [ "$REQUIRE_PG" = 1 ]; then
+      verdict=fail; reason="${reason:+${reason}；}缺真库开关 ${DSN_GATES_MISSING}，对应用例被 skipif 跳过"
+    else
+      reason="${reason:+${reason}；}缺真库开关 ${DSN_GATES_MISSING}（REQUIRE_PG=0，仅告警）"
+    fi
   fi
 
   echo "    全量: passed=${all_passed} failed=${all_failed} skipped=${all_skipped}（基线 ${base_count} 条已知失败）"
   if [ "$all_skipped" -gt 0 ]; then
     # 🔴 skip 必须说清是什么被跳过了，不能让它静静地变成"0 failed"
-    echo "    ⚠️ 跳过 $all_skipped 条。真库开关：BILLING_TEST_DATABASE_URL=${BILLING_TEST_DATABASE_URL:+已配}${BILLING_TEST_DATABASE_URL:-未配} OPS_TEST_DATABASE_URL=${OPS_TEST_DATABASE_URL:+已配}${OPS_TEST_DATABASE_URL:-未配}"
+    if [ -n "${DSN_GATES_MISSING:-}" ]; then
+      echo "    ⚠️ 跳过 ${all_skipped} 条；缺这些真库开关：${DSN_GATES_MISSING}"
+    else
+      echo "    ⚠️ 跳过 ${all_skipped} 条；真库开关都已配（跳过的是别的原因，用 pytest -rs 看）"
+    fi
   fi
   # printf '%s\n' $(...) 会按空白再切一次词，把 "FAILED tests/x.py::y" 拆成两行；用 while 逐行读
   [ -z "$extra" ] || { echo "    新增失败："; printf '%s\n' "$extra" | grep -v '^$' | while IFS= read -r l; do echo "      $l"; done; }
@@ -259,7 +328,8 @@ gate_one() {
   "realDatabase": { "ready": $([ "$PG_READY" = 1 ] && echo true || echo false),
                     "required": $([ "$REQUIRE_PG" = 1 ] && echo true || echo false),
                     "billingDsnConfigured": $([ -n "${BILLING_TEST_DATABASE_URL:-}" ] && echo true || echo false),
-                    "opsDsnConfigured": $([ -n "${OPS_TEST_DATABASE_URL:-}" ] && echo true || echo false) },
+                    "opsDsnConfigured": $([ -n "${OPS_TEST_DATABASE_URL:-}" ] && echo true || echo false),
+                    "missingDsnGates": $(printf '%s\n' ${DSN_GATES_MISSING:-} | json_arr) },
   "total": { "passed": $all_passed, "failed": $all_failed, "skipped": $all_skipped },
   "baseline": { "path": "$(json_str "$BASELINE")", "present": $([ -f "$BASELINE" ] && echo true || echo false), "knownFailures": $base_count },
   "failures": $(printf '%s\n' "$all_set" | json_arr),

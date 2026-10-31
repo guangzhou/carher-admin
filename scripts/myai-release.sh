@@ -124,6 +124,15 @@ EOF
 case "$ACTION" in
   build) : "${HOST243_PW:?需要 HOST243_PW}"; build ;;
   deploy) : "${HOST243_PW:?需要 HOST243_PW}"
+          # 🔴 只许发布已合入发布分支的提交。2026-10-31 教训：多个 agent 在同一个工作树上切分支，
+          # 主工作树当时停在 feat/ops-trends-p1-upstream，而 COMMIT 默认取的是「工作树 HEAD」⇒
+          # 不传 COMMIT 就会把未审的功能分支（含未上线的资金改动）推到生产。
+          REL_BRANCH="${RELEASE_BRANCH:-perf/admin-board-latency}"
+          if ! git -C "$REPO" merge-base --is-ancestor "$C" "$REL_BRANCH" 2>/dev/null; then
+            echo "!!! 拒绝发布：提交 ${C} 不在发布分支 ${REL_BRANCH} 上（当前工作树分支=$(git -C "$REPO" branch --show-current 2>/dev/null))" >&2
+            echo "    先把它合入 ${REL_BRANCH} 再发；确需发布分支外的提交，显式设 RELEASE_BRANCH=<分支>" >&2
+            exit 1
+          fi
           # 同步在跑时换 pod，新 pod 建表等锁 → liveness 杀（10-29 实测）；先等空闲
           [ "${SKIP_IDLE_WAIT:-}" = 1 ] || "$(dirname "$0")/myai-wait-sync-idle.sh" "${IDLE_WAIT_MAX:-1800}" || exit 1
           deploy ;;

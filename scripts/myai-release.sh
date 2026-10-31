@@ -39,8 +39,12 @@ build(){
   #    这里的判据是"失败集合"，不是 rc，所以 rc 一律吞掉；但输出里必须有 passed 行，否则是 pytest 本身没跑起来
   local out; out=$(cd "$REPO" && .venv/bin/python -m pytest tests -q -p no:cacheprovider 2>&1 || true)
   printf '%s\n' "$out" | grep -qE "[0-9]+ passed" || { echo "pytest 没跑起来：" >&2; printf '%s\n' "$out" | tail -5 >&2; exit 1; }
-  local now; now=$(printf '%s\n' "$out" | grep -E "^(FAILED|ERROR)" | sed 's/ - .*//' | sort -u || true)
-  local extra; extra=$(comm -13 <(grep -E '^(FAILED|ERROR)' "$base" | sort -u) <(printf '%s\n' "$now" | grep -v '^$' | sort -u) || true)
+  # 只认 pytest 的失败行格式：`FAILED tests/x.py::name` / `ERROR tests/x.py`。
+  # 原来的 `^(FAILED|ERROR)` 会把应用日志里以 ERROR 开头的行也收进失败集合
+  # （基线里有 35 条兜着时看不出来；基线归零后就会误判）—— 10-31 回归守门人发现。
+  local pat='^(FAILED|ERROR) (tests/|[A-Za-z0-9_./-]+::)'
+  local now; now=$(printf '%s\n' "$out" | grep -E "$pat" | sed 's/ - .*//' | sort -u || true)
+  local extra; extra=$(comm -13 <(grep -E "$pat" "$base" | sed 's/ - .*//' | sort -u) <(printf '%s\n' "$now" | grep -v '^$' | sort -u) || true)
   [ -z "$extra" ] || { echo "新增失败：" >&2; echo "$extra" >&2; exit 1; }
   echo "   OK（$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | tail -1)；失败 $(printf '%s\n' "$now" | grep -c FAILED || true) 个，均在基线内）"
 

@@ -30,6 +30,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 | 美国槽（10-28） | `us-170.178.173.10`，权重 2。出口=ns `kiro-rs` 里的 mihomo（deploy/svc `kiro-us-egress`，manifest `k8s/kiro-rs/slots/kiro-us-egress.yaml`，镜像 `127.0.0.1:5000/mihomo:v1.19.33-carher1` = 198 上 cli-anything-mihomo 下载并验过 sha 的二进制 + scratch）。5 个 iGuge 美国节点按固定顺序 `fallback`（第一个活着就一直用它 ⇒ IP 只在节点挂时才变；变了槽名不会跟着改，以 `ipinfo` 现量为准）。配置+节点密码+代理密码在 Secret `kiro-us-egress`，源文件 `198:~/kiro-us-egress/`（`pw` 是代理密码）。只有 `app=kiro-rs-slots` 和带 `kiro-us-egress-probe=1` 的 pod 能连（NetworkPolicy），且必须带 `kiro:<pw>`（无密码=407）。🔴 槽测试 `POST /slots/<i>/test` 要带 JSON `{"model":"claude-opus-5-5","scenario":"hello|tool"}`。撤：Admin 停用该槽 ⇒ 再删 deploy。 |
 | 英国槽（10-28） | `uk-213.255.246.28`，权重 1（延迟比美国多 1~2s）。出口=ns `kiro-rs` 里**单独一个** mihomo deploy/svc `kiro-uk-egress`（manifest `k8s/kiro-rs/slots/kiro-uk-egress.yaml`，和美国分开 ⇒ 改一个不会重启另一个），钉死单节点「UK - 英国 - 01」⇒ IP 固定。节点挂 = 槽挂：Admin 停用 ⇒ 改钉「UK - 英国 - 02」（185.245.83.24）⇒ 重验 ⇒ 改槽名。源文件 `198:~/kiro-uk-egress/`（`pw`=代理密码，和美国的不同）。NetworkPolicy 只放 `app=kiro-rs-slots` 和 `kiro-uk-egress-probe=1`。 |
 | 二期 5 槽（10-28） | 槽 8~12：`kr-203.231.254.184` w3 / `ph-49.157.61.223` w3 / `sg-109.176.19.134` w2 / `sg-103.47.211.19` w2 / `de-64.118.159.27` w1。🔴 **槽名一律 `<国家码>-<出口IP>`**（用户 10-28 定；交接文档写的 `px-` 不带国家是错的，已改）。🔴 **「槽 N」= Admin 上显示的编号 = API index+1**（`/slots/<index>/test` 用 index）。🔴 **改槽名 = 清空这个槽的用户绑定**（绑定按名字存），名字一次起对。来源=198 上第二个 mihomo 实例 `acct2`（端口 18891~18895 各钉一个节点），每个端口在 ns `kiro-rs` 里**各一个** deploy/svc `kiro-px-<端口末位>`。🔴 加/重建用 `k8s/kiro-rs/slots/kiro-px-egress.sh <端口> <出口IP>`（读 acct2 配置生成 Secret+deploy+svc+netpol），验收+加槽用 `kiro-px-verify.sh <端口>:<IP>:<权重>…`（集群内验出口 IP / Kiro / 无密码 407 ⇒ PUT 追加槽 ⇒ 三发槽测试，每步 OK/STOP），都在 198 上以 cltx 跑。密码 `198:~/kiro-px-egress/<n>/pw`。节点挂：Admin 停该槽 ⇒ acct2 改钉 ⇒ 重跑两个脚本（IP 变 ⇒ 新槽名，旧槽删掉）。 |
+| 测速 + 31 出口（10-31，slots52） | `SlotConfig.bench`（kiroSecs / downMbps / score / rank / of / measured）只展示不参与调度；卡片显示「综合第 N/31 · 分 · 连 Kiro · 下载」，设置页槽位配置多一列「测速」，改出口地址会清掉旧测速。数据源=飞书文档 `JCCmdmnGjo0KElxbEhkcgPhGn9W`（综合分=连Kiro 60%+下载 40%）。31 个出口：7 个已是槽（只补测速）、24 个新加为**停用**槽（不上号；`kiro-px-16..39`，其中 36~39 是给 muse 也在用的 4 个节点单独起的 kiro 代理，不碰 muse-px）。🔴 批量写用 `k8s/kiro-rs/slots/kiro-slots-bench-apply.py plan.json [--apply]`（按出口 IP 去重、版本闸门、空槽闸门、并发闸门、一次 PUT、回读核对、`--restore` 回滚；备份 `198:~/kiro-px-egress/slots-config-before-bench-*.json`）。只读探针 `kiro-px-probe.sh <n>:<ip>…`。🔴 停用槽**不在卡片里**，页面「槽 N」只数生效的。要启用某个新槽 = 设置页打开开关（那一刻才从冷备上号）。 |
 | 并发参数 | 起步 16 / 最小 2 / 最大 24 / 自动调；排队超时 120s；「暂不接新人」倍数 1.5 |
 | 状态文件（PVC） | `config.json` `credentials.json` `kiro_slots.json`（绑定/槽→号/退役/原代理）`kiro_account_usage.json`（按号×模型×北京日，留 8 天）|
 | 状态备份 | `198:~/kiro-deploy/backup/slots-pre-<tag>-<ts>/`（每次换镜像前四个文件）；实例初始配置 `198:~/kiro-deploy/slots-inst/` |
@@ -40,6 +41,10 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
 - **已封口 / 暂不接新人**：某槽 30 分钟用量 > 平均 ×1.5 且 ≥20 次 ⇒ 不再分新人，**已绑的人照常用**。四个全封口时忽略封口照同样顺序挑，不会没人接（10-24 用户问过）。
 - **并发**：每槽 AIMD —— 429 时上限 ×0.7；安静 5 分钟且打满 ⇒ +1。满了排队，排队超 120s 回 529（LiteLLM 兜底到老实例）。
 - **429**：先按官方退避 + retry-after 重试；**402 额度用尽 / 被限（restricted）才退役换号**，冷备里挑一个顶上（要 opus 的槽只挑能跑 opus 的号）。别的错误不退役。
+- **回给 LiteLLM 的状态码**（`handlers.rs::map_provider_error`）：超长 ⇒ 400 `prompt is too long`（不兜底）；槽位过载 / 60s 预算用尽 / **429 重试用尽** ⇒ 529（兜底）；其余 ⇒ 502。
+  🔴 slots49（10-28 16:26，commit 375b60c，`slotRequestBudgetSecs` 默认 60）之前 429 用尽回的是 **502**，单次等 48~65s；
+  10-28 下午 guran 45 个 502 就是这个（他 key 关了兜底才看得见，同分钟别人被兜到 grok）。查法 `scripts/litellm-198-5xx-attribution.py`。
+  预算只管「排队 + 重试 + 退避」；请求已发上游、上游自己卡住不受它管。
 - **判「号被限」**（opus 空回复后）：用同号、号**自己的** profileArn 打 runtime 入口，发**固定中性问题**（不带用户内容）。中性问题也 CONTENT_FILTERED ⇒ 被限换号；正常出字 ⇒ 号没事；403/超时 ⇒ 测不了、不换。
   🔴 slots24 及以前拿**用户原文**去探 ⇒ 敏感内容在任何号上都 CONTENT_FILTERED ⇒ 10-25 #3 justin 被冤退役；且用占位 ARN ⇒ social 号恒 403 永远测不出。slots25 修。
 - **opus-5.5 安全审查**：空回复且号没被限 ⇒ 自动换备用模型重答 + 提示，见 §2.1。
@@ -256,5 +261,20 @@ Kiro 按 token 计 credit：10-25 实测 4 个能算的号**每百万输入 toke
 - 🔴 **新加坡槽的出口代理是阿里云 ns `kiro-sg` 里的 squid**（deploy `kiro-egress-226/122/86/241` ⇒ 47.84.112.136 / 47.84.85.100 / 47.236.200.98 / 47.84.101.218，hostNetwork + `nodeName` 钉在对应节点，共用 CM `kiro-egress-squid` 和 secret `kiro-egress-auth`（用户 `kiro`，密码与其它槽相同），本机经 `jms proxy k8s-work-226 16443 172.16.1.163 6443` 隧道操作）。
   **加一个 IP 槽 = 三步**（10-27 加 218 就这么做的，5 分钟）：① 那台机器若是 `kubectl get nodes -o wide` 里 EXTERNAL-IP 对得上的节点，复制 `kiro-egress-86` 的 deploy，只改名字 / `node` 标签 / `nodeName`，apply；② 从 198 经 `http://kiro:<pw>@<IP>:3128` 打 q.us-east-1（404）、chatgpt（401）、无密码（000）、非白名单（000）；③ Admin `PUT /slots/config` 追加一条（密码取现有槽的），再 `POST /slots/<i>/test` 打 hello + tool 两发。不需要登那台机器装东西。
   10-26 起同时放行 ChatGPT（`acl chatgpt_dst dstdomain .chatgpt.com .openai.com`），给 198 ChatGPT 号池分出口用。
+- **槽 6~12 = 集群内 mihomo 出口**（`k8s/kiro-rs/slots/`：`kiro-us-egress.yaml`、`kiro-uk-egress.yaml`、`kiro-px-egress.sh` 生成 `kiro-px-1..5`、`kiro-px-verify.sh` 验收+加槽）。
+  🔴 **每个出口只能钉单个节点**（IP 固定）。10-30 前 `kiro-us-egress` 是 5 节点 `fallback`，后 3 个备份节点会换 IP ⇒ 已改成只钉 `US - 美国鲨鱼2 - 06`（170.178.173.10），旧配置备份 198 `~/kiro-us-egress/*.pre-pin-*`。
+  改一个出口的节点：198 上改 `~/kiro-*-egress/config.yaml`（`proxies` 只留一个、`listeners[].proxy`/`rules` 指它）→ `docker run … mihomo -t` 验 → `kubectl create secret … --dry-run | apply` → `rollout restart`（maxUnavailable 0，零中断）→ 集群内探针 5 次出口 IP + Kiro 404 + 无密码 407 → `POST /slots/<i>/test` 三发。
+  选节点只用「30 分钟 IP 不变」的（清单 `.work/shellcrash/ipdrift-summary.txt`），会变的：日本01/日本原生05/洛杉矶02/圣何塞04/洛杉矶09/洛杉矶13/香港12。
+  10-30 全 12 槽出口实测都固定（槽 1~5 squid/243 用 `api.ipify.org` 测，ipinfo 不在 squid 白名单会 FAIL）。
+  **10-31 起有 25 个 `kiro-px-<n>`**：1~5 在槽 8~12；**16~35 是 10-31 新建的备用出口（20 个，未加进 Admin）**，对应 198 acct2 端口 `18890+n`，清单 `.work/shellcrash/31-proxies.md`。
+  加成槽：`bash ~/kiro-px-verify.sh "<18890+n>:<出口IP>:<权重>" …`（探针 + 加槽 + 三发测试，槽名自动 `国家码-IP`）。`kiro-px-egress.sh` 的 n = 端口 − 18890（10-31 起，原来取端口末位只能到 9）。
+  **10-31 起有 25 个 `kiro-px-<n>`**：1~5 在槽 8~12；**16~35 是 10-31 新建的备用出口（20 个，未加进 Admin）**，对应 198 acct2 端口 `18890+n`，清单 `.work/shellcrash/31-proxies.md`。
+  加成槽：`bash ~/kiro-px-verify.sh "<18890+n>:<出口IP>:<权重>" …`（探针 + 加槽 + 三发测试，槽名自动 `国家码-IP`）。`kiro-px-egress.sh` 的 n = 端口 − 18890（10-31 起，原来取端口末位只能到 9）。
+  **盯出口 IP 变没变**：`k8s/kiro-rs/slots/kiro-egress-ip-watch.sh`（198 上跑；从 Admin 现读所有 `*.kiro-rs.svc:7890` 的槽，期望 IP = 槽名后缀，阿里云 squid 槽不管）。
+  `nohup setsid bash ~/kiro-egress-ip-watch.sh --rounds 20 --interval 1800 > ~/kiro-egress-watch/run.log 2>&1 &`；变了 run.log 出 `ALERT`；汇总 `bash ~/kiro-egress-ip-watch.sh --summary`。
+- **另一种出口来源：机场节点（iGuge 订阅 → 198 上 mihomo，skill `cli-anything-mihomo`）**。10-28 已备 8 个候选出口（美/英/韩/菲/新×2/德等，现量 `cli-anything-mihomo instance list` + `-a <账户> exit table`），**都还没接进 30891**：
+  它们只听 198 的 127.0.0.1，kiro-rs-slots 在 242 连不到 ⇒ 先做 k3s Deployment+ClusterIP+每端口密码（动生产先问）。
+  handoff 用脚本现量生成：`scripts/mihomo-198.sh handoff acct2 18891-18895 --out …`（`--no-country` 不写国家；现状 `scripts/mihomo-198.sh status`）；已出三份在 `.work/handoff/kiro-slots-*-handoff.md`。
+  和阿里云 squid 槽的差别：多人共用 IP（风控可能更差）、延迟 +0.4~2.3s（日本槽 0.61s 对照）、节点挂了槽就挂 ⇒ 权重 1~3 起步。🔴 选国家只认出口 IP（节点名会骗人），没有印度/越南/加拿大/澳大利亚。
   改 ACL：先 `squid -k parse` 在 pod 里验新文件 → apply CM（~5s 同步进 pod）→ **逐个 `kubectl exec <pod> -- kill -HUP 1`** 热加载
   （`squid -k reconfigure` 不能用：配置里 `pid_filename none` ⇒ FATAL）。每个之后从 198 经该槽代理各打一发 kiro（404）和 chatgpt（401）再动下一个。

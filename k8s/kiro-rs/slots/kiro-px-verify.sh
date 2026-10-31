@@ -21,7 +21,7 @@ EOF
 $K wait --for=condition=Ready pod/px-egress-probe --timeout=120s >/dev/null
 trap '$K delete pod px-egress-probe --wait=false >/dev/null 2>&1' EXIT
 for spec in "$@"; do
-  IFS=: read -r PORT IP W <<<"$spec"; N=${PORT: -1}; NAME=kiro-px-$N; SLOT=
+  IFS=: read -r PORT IP W <<<"$spec"; N=$((PORT - 18890)); NAME=kiro-px-$N; SLOT=
   PW=$(cat ~/kiro-px-egress/$N/pw)
   R=$($K exec -i px-egress-probe -- env PW="$PW" HOST="$NAME" WANT="$IP" python3 - <<'EOF'
 import os, urllib.request, json, time

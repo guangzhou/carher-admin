@@ -10,16 +10,24 @@
 # 🔴 Renaming a slot later clears its user bindings (bindings are keyed by slot name) ⇒ get the name right first time.
 set -euo pipefail
 PORT=$1 IP=$2
-N=${PORT: -1}
+# Optional 3rd arg = acct2 node name, for a node that has no listener port on 198 (10-31: the 4 nodes muse2api
+# also uses). The port is then only the numbering key (kiro-px-<port-18890>), nothing listens on it.
+NODE=${3:-}
+# n = port - 18890 (18891 -> 1 … 18895 -> 5, 18906 -> 16); the 1..5 names stay what they were on 10-28
+N=$((PORT - 18890))
+[ "$N" -ge 1 ] && [ "$N" -le 99 ] || { echo "STOP port $PORT: expected 18891..18989"; exit 1; }
 NAME=kiro-px-$N
+# never repoint an existing proxy to a different exit: a slot on it would silently change IP
+OLD_IP=$(sudo -n kubectl -n kiro-rs get deploy $NAME -o jsonpath='{.metadata.labels.kiro-egress-ip}' 2>/dev/null || true)
+[ -z "$OLD_IP" ] || [ "$OLD_IP" = "$IP" ] || { echo "STOP $NAME already exists for $OLD_IP, not $IP"; exit 1; }
 D=~/kiro-px-egress/$N
 umask 077; mkdir -p "$D"; cd "$D"
 [ -s pw ] || python3 -c "import secrets;print(secrets.token_urlsafe(24))" > pw
-PORT=$PORT python3 - <<'EOF'
+PORT=$PORT NODE="$NODE" python3 - <<'EOF'
 import os, yaml
 src = yaml.safe_load(open(os.path.expanduser("~/mihomo-harness/acct2/config.yaml")))
 px = {p["name"]: p for p in src["proxies"]}
-node = next(l["proxy"] for l in src["listeners"] if l["port"] == int(os.environ["PORT"]))
+node = os.environ["NODE"] or next(l["proxy"] for l in src["listeners"] if l["port"] == int(os.environ["PORT"]))
 assert node in px, f"port {os.environ['PORT']} pinned to a group, not a single node: {node!r}"
 pw = open("pw").read().strip()
 cfg = {"mixed-port": 0, "allow-lan": True, "bind-address": "*", "mode": "rule", "log-level": "warning", "ipv6": False,

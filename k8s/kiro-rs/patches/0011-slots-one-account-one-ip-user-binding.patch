@@ -19,7 +19,7 @@
    return data
  }
  
-@@ -121,5 +121,270 @@
+@@ -121,5 +121,282 @@
  // 设置 window 模式参数（立即生效并写回 config.json）
  export async function setWindowSettings(settings: WindowSettings): Promise<WindowSettings> {
    const { data } = await api.put<WindowSettings>('/config/window', settings)
@@ -68,6 +68,17 @@
 +  acceptNew: boolean
 +  vipAliases: string[]
 +  vipUsers: number
++  bench?: SlotBench | null
++}
++
++/** 出口测速：连 Kiro 耗时 / 下载速度 / 综合分 / 在同批出口里的综合排名（配置里填的，只展示） */
++export interface SlotBench {
++  kiroSecs: number
++  downMbps: number
++  score: number
++  rank: number
++  of: number
++  measured?: string
 +}
 +
 +export interface SlotAlarms {
@@ -218,6 +229,7 @@
 +  weight: number
 +  acceptNew: boolean
 +  vipAliases: string[]
++  bench?: SlotBench | null
 +}
 +
 +export async function getSlotConfigs(): Promise<SlotConfig[]> {
@@ -2396,7 +2408,7 @@
 +}
 --- a/admin-ui/src/components/slot-config-editor.tsx
 +++ b/admin-ui/src/components/slot-config-editor.tsx
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,160 @@
 +import { useEffect, useState } from 'react'
 +import { toast } from 'sonner'
 +import { Button } from '@/components/ui/button'
@@ -2419,8 +2431,9 @@
 +  const [vipText, setVipText] = useState<Record<number, string>>({})
 +  useEffect(() => { if (data) { setRows(data); setVipText({}) } }, [data])
 +
++  // 改了出口 ⇒ 旧测速不再对应这个出口，清掉
 +  const set = (i: number, patch: Partial<SlotConfig>) =>
-+    setRows((r) => r.map((x, j) => (j === i ? { ...x, ...patch } : x)))
++    setRows((r) => r.map((x, j) => (j === i ? { ...x, ...patch, ...('proxyUrl' in patch && patch.proxyUrl !== x.proxyUrl ? { bench: null } : {}) } : x)))
 +  const add = () => setRows((r) => [...r, { name: '', proxyUrl: null, proxyUsername: null, proxyPassword: null, enabled: true, weight: 5, acceptNew: true, vipAliases: [] }])
 +  const remove = (i: number) => {
 +    const n = rows[i].name || '（未命名）'
@@ -2482,6 +2495,7 @@
 +              <th className='px-3 py-2 text-left font-medium' title='1~10，默认 5。越大分到的人越多、在途上限越高（10 = 标准的两倍）'>权重</th>
 +              <th className='px-3 py-2 text-left font-medium' title='关掉 = 不自动分配新用户进来（已绑的人照常用，手动挪进来可以）'>接新人</th>
 +              <th className='px-3 py-2 text-left font-medium' title='填 LiteLLM key 别名前缀，逗号或换行分隔。命中的 key 自动进这个槽；普通用户不会被分进来'>专属 key</th>
++              <th className='px-3 py-2 text-left font-medium whitespace-nowrap' title='出口测速（只展示）：综合排名 / 综合分、连 Kiro 耗时、下载速度'>测速</th>
 +              <th className='w-16 px-3 py-2'></th>
 +            </tr>
 +          </thead>
@@ -2525,6 +2539,14 @@
 +                    }}
 +                  />
 +                </td>
++                <td className='px-3 py-2 text-xs whitespace-nowrap'>
++                  {r.bench ? (
++                    <span title={r.bench.measured || ''}>
++                      <span className='font-medium'>第 {r.bench.rank}/{r.bench.of} · {r.bench.score.toFixed(1)} 分</span>
++                      <span className='block text-muted-foreground'>{r.bench.kiroSecs.toFixed(2)}s · {Math.round(r.bench.downMbps)} Mbps</span>
++                    </span>
++                  ) : <span className='text-muted-foreground'>—</span>}
++                </td>
 +                <td className='px-3 py-2 text-right'>
 +                  {!r.enabled && (
 +                    <Button size='sm' variant='ghost' className='text-red-600' onClick={() => remove(i)}>删除</Button>
@@ -2533,7 +2555,7 @@
 +              </tr>
 +            ))}
 +            {rows.length === 0 && (
-+              <tr><td colSpan={9} className='px-3 py-6 text-center text-muted-foreground'>还没有槽位</td></tr>
++              <tr><td colSpan={10} className='px-3 py-6 text-center text-muted-foreground'>还没有槽位</td></tr>
 +            )}
 +          </tbody>
 +        </table>
@@ -2959,7 +2981,7 @@
 +}
 --- a/admin-ui/src/components/slots-panel.tsx
 +++ b/admin-ui/src/components/slots-panel.tsx
-@@ -0,0 +1,467 @@
+@@ -0,0 +1,476 @@
 +import { CreditsTrend } from '@/components/credits-trend'
 +import { EmptyEventsDialog } from '@/components/empty-events-dialog'
 +import { SlotUsersDialog } from '@/components/slot-users-dialog'
@@ -3129,6 +3151,15 @@
 +        </div>
 +        <div><div className='text-xs text-muted-foreground'>7 日请求</div><div className='font-semibold tabular-nums'>{today?.requests ?? 0}</div></div>
 +      </div>
++      {s.bench && (
++        <div
++          className='mt-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 rounded-md border border-dashed px-2 py-1 text-xs'
++          title={`出口测速${s.bench.measured ? `（${s.bench.measured}）` : ''}：连 Kiro = 经这个出口访问 Kiro 接口的耗时中位数；下载 = 10MB 下载速度中位数；综合分 = 连 Kiro 60% + 下载 40%（0~100）`}
++        >
++          <span className='font-medium'>综合第 {s.bench.rank}/{s.bench.of} · {s.bench.score.toFixed(1)} 分</span>
++          <span className='text-muted-foreground'>连 Kiro {s.bench.kiroSecs.toFixed(2)}s · 下载 {Math.round(s.bench.downMbps)} Mbps</span>
++        </div>
++      )}
 +      <div className='mt-2 flex justify-between text-xs text-muted-foreground'>
 +        <span title='权重越大分到的人越多、在途上限越高（5 = 标准）'>权重 {s.weight}{s.vipAliases.length > 0 ? ` · 专属用户 ${s.vipUsers}` : ''}</span>
 +        <span title='近 30 分钟「发出 → 首个有内容事件」的平均耗时，跟请求大小和模型关系很大，仅供参考'>
@@ -8047,7 +8078,7 @@
  }
  
  /// window 模式参数
-@@ -661,6 +701,109 @@
+@@ -661,6 +701,111 @@
      pub token: String,
  }
  
@@ -8152,12 +8183,14 @@
 +    pub vip_aliases: Vec<String>,
 +    /// 绑在这里的人里，命中专属名单的有几个
 +    pub vip_users: usize,
++    /// 出口测速（配置里填的，只展示）
++    pub bench: Option<crate::model::config::SlotBench>,
 +}
 +
  impl MultiTokenManager {
      /// 创建多凭据 Token 管理器
      ///
-@@ -769,6 +912,24 @@
+@@ -769,6 +914,24 @@
                  cooldown_secs: config.window_cooldown_secs.clamp(1, 3600),
              }
          };
@@ -8182,7 +8215,7 @@
          let manager = Self {
              config,
              proxy,
-@@ -781,6 +942,24 @@
+@@ -781,6 +944,24 @@
              last_stats_save_at: Mutex::new(None),
              stats_dirty: AtomicBool::new(false),
              window_settings: Mutex::new(window_settings),
@@ -8207,7 +8240,7 @@
          };
  
          // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
-@@ -794,6 +973,17 @@
+@@ -794,6 +975,17 @@
  
          // 加载持久化的统计数据（success_count, last_used_at）
          manager.load_stats();
@@ -8225,7 +8258,7 @@
  
          Ok(manager)
      }
-@@ -825,6 +1015,8 @@
+@@ -825,6 +1017,8 @@
          model: Option<&str>,
          session_key: Option<&str>,
      ) -> Option<(u64, KiroCredentials)> {
@@ -8234,7 +8267,7 @@
          let entries = self.entries.lock();
  
          // 检查是否是 opus 模型
-@@ -832,11 +1024,12 @@
+@@ -832,11 +1026,12 @@
              .map(|m| m.to_lowercase().contains("opus"))
              .unwrap_or(false);
  
@@ -8248,7 +8281,7 @@
                      return false;
                  }
                  // 如果是 opus 模型，需要检查订阅等级
-@@ -852,7 +1045,8 @@
+@@ -852,7 +1047,8 @@
          }
  
          let mode = self.load_balancing_mode.lock().clone();
@@ -8258,7 +8291,7 @@
  
          match mode {
              "window" => {
-@@ -915,7 +1109,7 @@
+@@ -915,7 +1111,7 @@
                  // window 与 balanced 一样每次重选（窗口内按在途数挑），不粘 current_id
                  let is_balanced = matches!(
                      self.load_balancing_mode.lock().as_str(),
@@ -8267,7 +8300,7 @@
                  );
  
                  // balanced 模式：每次请求都重新均衡选择，不固定 current_id
-@@ -923,11 +1117,12 @@
+@@ -923,11 +1119,12 @@
                  let current_hit = if is_balanced {
                      None
                  } else {
@@ -8281,7 +8314,7 @@
                          .map(|e| (e.id, e.credentials.clone()))
                  };
  
-@@ -1049,7 +1244,10 @@
+@@ -1049,7 +1246,10 @@
          }
  
          // 第一次检查（无锁）：快速判断是否需要刷新
@@ -8293,7 +8326,7 @@
  
          let creds = if needs_refresh {
              // 获取刷新锁，确保同一时间只有一个刷新操作
-@@ -1130,6 +1328,11 @@
+@@ -1130,6 +1330,11 @@
      fn persist_credentials(&self) -> anyhow::Result<bool> {
          use anyhow::Context;
  
@@ -8305,7 +8338,7 @@
          // 仅多凭据格式才回写
          if !self.is_multiple_format {
              return Ok(false);
-@@ -1140,6 +1343,8 @@
+@@ -1140,6 +1345,8 @@
              None => return Ok(false),
          };
  
@@ -8314,7 +8347,7 @@
          // 收集所有凭据
          let credentials: Vec<KiroCredentials> = {
              let entries = self.entries.lock();
-@@ -1158,12 +1363,13 @@
+@@ -1158,12 +1365,13 @@
          // 序列化为 pretty JSON
          let json = serde_json::to_string_pretty(&credentials).context("序列化凭据失败")?;
  
@@ -8332,7 +8365,7 @@
          }
  
          tracing::debug!("已回写凭据到文件: {:?}", path);
-@@ -1216,6 +1422,9 @@
+@@ -1216,6 +1424,9 @@
  
      /// 将当前统计数据持久化到磁盘
      fn save_stats(&self) {
@@ -8342,7 +8375,7 @@
          let path = match self.stats_path() {
              Some(p) => p,
              None => return,
-@@ -1291,9 +1500,1218 @@
+@@ -1291,9 +1502,1225 @@
          self.save_stats_debounced();
      }
  
@@ -8561,6 +8594,12 @@
 +        for c in &cfgs {
 +            if c.vip_aliases.len() > 200 || c.vip_aliases.iter().any(|x| x.len() > 128) {
 +                anyhow::bail!("槽位 {} 的专属名单太长（最多 200 条、每条 128 字）", c.name);
++            }
++            if let Some(b) = &c.bench {
++                let finite = b.kiro_secs.is_finite() && b.down_mbps.is_finite() && b.score.is_finite();
++                if !finite || b.kiro_secs < 0.0 || b.down_mbps < 0.0 || !(0.0..=100.0).contains(&b.score) || b.rank > b.of || b.measured.len() > 64 {
++                    anyhow::bail!("槽位 {} 的测速数据不合法", c.name);
++                }
 +            }
 +        }
 +        if cfgs.iter().filter(|c| c.enabled).count() > 20 {
@@ -9488,6 +9527,7 @@
 +                accept_new: s.accept_new,
 +                vip_aliases: s.vip.clone(),
 +                vip_users: vip_users[s.index],
++                bench: cfgs.get(s.index).and_then(|c| c.bench.clone()),
 +            })
 +            .collect()
 +    }
@@ -9562,7 +9602,7 @@
      }
  
      /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
-@@ -1640,6 +3058,7 @@
+@@ -1640,6 +3067,7 @@
                          DisabledReason::QuotaExceeded => "QuotaExceeded",
                          DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                          DisabledReason::InvalidConfig => "InvalidConfig",
@@ -9570,7 +9610,7 @@
                      }.to_string()),
                      endpoint: e.credentials.endpoint.clone(),
                      subscription_title: e.credentials.subscription_title.clone(),
-@@ -1671,6 +3090,12 @@
+@@ -1671,6 +3099,12 @@
          }
          // 持久化更改
          self.persist_credentials()?;
@@ -9583,7 +9623,7 @@
          Ok(())
      }
  
-@@ -1736,9 +3161,9 @@
+@@ -1736,9 +3170,9 @@
                  .clone()
                  .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
          } else {
@@ -9596,7 +9636,7 @@
  
              if needs_refresh {
                  let _guard = self.refresh_lock.lock().await;
-@@ -1955,6 +3380,9 @@
+@@ -1955,6 +3389,9 @@
          self.persist_credentials()?;
  
          tracing::info!("成功添加凭据 #{}", new_id);
@@ -9606,7 +9646,7 @@
          Ok(new_id)
      }
  
-@@ -2020,6 +3448,27 @@
+@@ -2020,6 +3457,27 @@
          // 立即回写统计数据，清除已删除凭据的残留条目
          self.save_stats();
  
@@ -9634,7 +9674,7 @@
          tracing::info!("已删除凭据 #{}", id);
          Ok(())
      }
-@@ -2029,6 +3478,11 @@
+@@ -2029,6 +3487,11 @@
      /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
      /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
      pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
@@ -9646,7 +9686,7 @@
          let credentials = {
              let entries = self.entries.lock();
              entries
-@@ -2076,6 +3530,9 @@
+@@ -2076,6 +3539,9 @@
  
      /// 设置 window 模式参数（Admin API）：校验 → 写回 config.json → 生效。写盘失败则不生效。
      pub fn set_window_settings(&self, ws: WindowSettings) -> anyhow::Result<()> {
@@ -9656,7 +9696,7 @@
          use anyhow::Context;
          ws.validate()?;
          if let Some(path) = self.config.config_path() {
-@@ -2101,6 +3558,10 @@
+@@ -2101,6 +3567,10 @@
      }
  
      fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
@@ -9667,7 +9707,7 @@
          use anyhow::Context;
  
          let config_path = match self.config.config_path() {
-@@ -2123,8 +3584,11 @@
+@@ -2123,8 +3593,11 @@
  
      /// 设置负载均衡模式（Admin API）
      pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
@@ -9680,7 +9720,7 @@
              anyhow::bail!("无效的负载均衡模式: {}", mode);
          }
  
-@@ -2140,9 +3604,35 @@
+@@ -2140,9 +3613,35 @@
              return Err(err);
          }
  
@@ -9716,7 +9756,7 @@
  }
  
  impl Drop for MultiTokenManager {
-@@ -2150,6 +3640,7 @@
+@@ -2150,6 +3649,7 @@
          if self.stats_dirty.load(Ordering::Relaxed) {
              self.save_stats();
          }
@@ -9724,7 +9764,7 @@
      }
  }
  
-@@ -2325,7 +3816,622 @@
+@@ -2325,7 +3825,655 @@
          assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");
      }
  
@@ -9889,6 +9929,39 @@
 +        bad.push(crate::model::config::SlotConfig { name: "x".into(), proxy_url: Some("http://1.2.3.4:1".into()), proxy_username: Some("u".into()), proxy_password: Some(MASKED_PASSWORD.into()), enabled: true, ..Default::default() });
 +        assert!(m.set_slot_configs(bad).is_err(), "新槽填打码密码要拒");
 +        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_slot_bench_round_trip_does_not_touch_binding_or_account() {
++        // 10-31：给已有槽补测速 = 只改 bench 字段，绑定 / 号 / 权重都不动；停用的新槽不上号
++        let (m, dir) = slot_mgr(2, 4);
++        let user = m.slot_for_user_test("u:a").0;
++        let id0 = m.slots_snapshot()[0].account_id;
++        let mut cfgs: Vec<_> = m.get_slot_configs();
++        cfgs[0].bench = Some(crate::model::config::SlotBench { kiro_secs: 0.75, down_mbps: 102.0, score: 95.0, rank: 1, of: 31, measured: "10-31".into() });
++        cfgs.push(crate::model::config::SlotConfig { name: "new-off".into(), proxy_url: Some("http://10.0.0.99:7890".into()), enabled: false, ..Default::default() });
++        m.set_slot_configs(cfgs).unwrap();
++        let snap = m.slots_snapshot();
++        assert_eq!(snap.len(), 2, "停用的新槽不进运行时槽表");
++        assert_eq!(snap[0].account_id, id0, "补测速不换号");
++        assert_eq!(snap[0].bench.as_ref().map(|b| b.rank), Some(1));
++        assert_eq!(m.slot_for_user_test("u:a"), (user, false), "补测速不动绑定");
++        let back = m.get_slot_configs();
++        assert_eq!(back.len(), 3);
++        assert_eq!(back[0].bench.as_ref().map(|b| b.of), Some(31), "测速随配置落盘回读");
++        assert!(back[1].bench.is_none());
++        let mut bad = back.clone();
++        bad[1].bench = Some(crate::model::config::SlotBench { kiro_secs: 1.0, down_mbps: 1.0, score: 101.0, rank: 1, of: 1, measured: String::new() });
++        assert!(m.set_slot_configs(bad).is_err(), "综合分超出 0~100 要拒");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_old_config_without_bench_still_loads() {
++        let c: crate::model::config::SlotConfig = serde_json::from_str(r#"{"name":"s","proxyUrl":"http://1.2.3.4:1","enabled":true,"weight":3}"#).unwrap();
++        assert!(c.bench.is_none());
++        let s = serde_json::to_string(&c).unwrap();
++        assert!(!s.contains("bench"), "没测速不写 bench 字段，老版本读回不受影响: {}", s);
 +    }
 +
 +    #[test]
@@ -10347,7 +10420,7 @@
      fn test_window_settings_validate_and_persist() {
          let config_path = std::env::temp_dir().join(format!("kiro-window-{}.json", uuid::Uuid::new_v4()));
          std::fs::write(&config_path, r#"{"loadBalancingMode":"window"}"#).unwrap();
-@@ -2441,6 +4547,65 @@
+@@ -2441,6 +4589,65 @@
          credentials.refresh_token = Some("a".repeat(150));
          let result = validate_refresh_token(&credentials);
          assert!(result.is_ok());
@@ -10722,7 +10795,7 @@
      #[serde(default = "default_tls_backend")]
      pub tls_backend: TlsBackend,
  
-@@ -183,6 +235,84 @@
+@@ -183,6 +235,105 @@
      60
  }
  
@@ -10788,6 +10861,27 @@
 +    /// 专属 key：别名前缀命中的 key 自动落到这个槽（如 VIP 名单）；空 = 普通槽
 +    #[serde(default)]
 +    pub vip_aliases: Vec<String>,
++    /// 出口测速结果（只给 Admin 看，不参与调度）
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub bench: Option<SlotBench>,
++}
++
++/// 一个出口的测速：经该出口连 Kiro 的耗时、下载速度、综合分和在同批出口里的排名
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
++#[serde(rename_all = "camelCase")]
++pub struct SlotBench {
++    /// 连 Kiro 耗时（秒，中位数）
++    pub kiro_secs: f64,
++    /// 下载速度（Mbps，中位数）
++    pub down_mbps: f64,
++    /// 综合分 0~100
++    pub score: f64,
++    /// 综合排名（1 = 最好）/ 同批共几个
++    pub rank: u32,
++    pub of: u32,
++    /// 测量时间 / 来源，如 "10-31 iGuge 31 出口"
++    #[serde(default)]
++    pub measured: String,
 +}
 +
 +fn default_slot_enabled() -> bool {
@@ -10800,14 +10894,14 @@
 +
 +impl Default for SlotConfig {
 +    fn default() -> Self {
-+        Self { name: String::new(), proxy_url: None, proxy_username: None, proxy_password: None, enabled: true, weight: default_slot_weight(), accept_new: true, vip_aliases: Vec::new() }
++        Self { name: String::new(), proxy_url: None, proxy_username: None, proxy_password: None, enabled: true, weight: default_slot_weight(), accept_new: true, vip_aliases: Vec::new(), bench: None }
 +    }
 +}
 +
  fn default_extract_thinking() -> bool {
      true
  }
-@@ -208,6 +338,19 @@
+@@ -208,6 +359,19 @@
              window_min_k: default_window_min_k(),
              window_max_k: default_window_max_k(),
              window_cooldown_secs: default_window_cooldown_secs(),

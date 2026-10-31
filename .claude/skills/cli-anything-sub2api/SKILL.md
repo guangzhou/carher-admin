@@ -11,15 +11,15 @@ description: >-
 
 # cli-anything-sub2api
 
-## 版本现状(2026-10-24 实测)
+## 版本现状(2026-10-31 实测)
 
 | | 版本 | 怎么量 |
 |---|---|---|
-| **198 线上** | **v0.2.18 + 本地补丁 ps429b**(`127.0.0.1:5000/sub2api:20261024-v0.2.18-ps429b`,10-24 16:01 切;补丁见 `sub2api-grok-ops` §G) | `$S versions`(READY=1 那行)/ `$S status` 的 `system.version` |
-| 上游最新 | v0.2.18(10-24 现量,198 已同版) | `$S versions` 末段 |
+| **198 线上** | **v0.2.19 + 本地补丁 ps429b**(`127.0.0.1:5000/sub2api:20261031-v0.2.19-ps429b`,10-31 17:43 切;补丁见 `sub2api-grok-ops` §G) | `$S versions`(READY=1 那行)/ `$S status` 的 `system.version` |
+| 上游最新 | v0.2.19(10-31 现量,198 已同版) | `$S versions` 末段 |
 | 源码 clone | `~/codes/sub2api`,v0.2.18 tag 已在本地(10-24 核) | |
 
-198 升级史(rs 镜像 tag):v0.2.7(09-20) → v0.2.8(09-24) → v0.2.11(10-01) → v0.2.13(10-02) → v0.2.15(10-12) → v0.2.16(10-13) → v0.2.17(10-16) → v0.2.17-ps429b(10-22) → v0.2.18-ps429b(10-24)。
+198 升级史(rs 镜像 tag):v0.2.7(09-20) → v0.2.8(09-24) → v0.2.11(10-01) → v0.2.13(10-02) → v0.2.15(10-12) → v0.2.16(10-13) → v0.2.17(10-16) → v0.2.17-ps429b(10-22) → v0.2.18-ps429b(10-24) → v0.2.19-ps429b(10-31)。
 备份/探针在 198 `/root/sub2api-backup/`(10-12 那轮:dump + `probe-pre/post.json` 全 ok,8 条腿)。
 ⚠️ **别信记忆/skill 里写的"当前线上版本"**(10-13 发现停在 v0.2.11 十二天、漏了两次升级),每次现量:
 
@@ -27,7 +27,7 @@ description: >-
 scripts/sub2api-cli.sh versions   # 198 rs 镜像历史(READY=1 那行=线上)+ health + 上游最新 tag
 ```
 
-**读源码对 198 行为要看部署那个 tag**:`git -C ~/codes/sub2api show v0.2.18:<path>`(+ 补丁 `scripts/grok-onboard/patches/`),别看工作区。
+**读源码对 198 行为要看部署那个 tag**:`git -C ~/codes/sub2api show v0.2.19:<path>`(+ 补丁 `scripts/grok-onboard/patches/`),别看工作区。
 本地到 GitHub **时通时不通**(10-13 同一天通过又断;断时 `git fetch` 静默挂几分钟,`versions` 限 20s)
 ⇒ 不通走 188:`ssh cltx@10.68.13.188 'curl -sL https://raw.githubusercontent.com/Wei-Shaw/sub2api/<tag>/<path>'`。
 
@@ -45,6 +45,7 @@ scripts/sub2api-cli.sh versions   # 198 rs 镜像历史(READY=1 那行=线上)+ 
   **v0.2.16→v0.2.17 `routes/admin.go` 零 diff**,admin handler 只改了 codex 导入和 antigravity 测试模型过滤通配符;
   10-16 实跑 `versions`/`status`(自报 0.2.17)+ harness 测试 35/35 ⇒ CLI 不用改。
   **v0.2.17→v0.2.18 `routes/admin.go` 零 diff**;10-24 `status` 自报 0.2.18、auth_scheme=bearer-jwt ⇒ CLI 不用改。
+  **v0.2.18→v0.2.19** admin.go 只加 scoped admin key 路由 + 给 `admin-api-key` regenerate/delete 加 step-up 鉴权,harness 用到的路由没删没改名。
   「写接口会骗人」表引用的 `openai_gateway_grok.go` / `grok_upstream_errors.go` / `admin_user.go` 在这两版之间零 diff,表照旧成立。
 - cli-anything 本体 = Codex skill `~/.codex/skills/cli-anything`(不是 PATH 命令);
   上游 `HKUDS/CLI-Anything` 10-13 对比:HARNESS.md / repl_skin / 模板一致,只有 `skill_generator.py` 上游更新(正则→AST)。

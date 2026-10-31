@@ -1578,8 +1578,8 @@ zerokey-pool-\* / claude-gpt-\* / claude-zerokey-\* / openrouter-\* / ua-split-\
 | 病 | x.ai multi-agent 限 **每号每模型每秒 2 个**（429 `resource-exhausted` … `Requests per Second (actual/limit): 2/2`）。原版 sub2api 当普通限流 ⇒ **冻整个号 2min、所有模型一起停**；单腿时整池 503。10-22 下午 5h 断 25 次、13700 请求没接住 |
 | 补丁 | `grok_upstream_failure.go`：`isGrokModelCapacityText` 加认 `requests per second` ⇒ 走 capacity 分支（同号 0.5s 重试 1 次、不冻号）。每分钟/token 限流照旧冻号（阴性对照测试守着） |
 | 源 | 🔴 **以 repo `scripts/grok-onboard/patches/sub2api-grok-per-second-429-as-capacity.patch` 为准**（sha256 `56995d09…`，2 文件 57 行，**0 migration**）。`~/codes/sub2api` 那个分支上**零提交**，补丁只是工作区未提交改动（10-24 才发现），别指望 cherry-pick |
-| 线上镜像 | `127.0.0.1:5000/sub2api:20261024-v0.2.18-ps429b`（10-24 16:01 切；= 0.2.17 prod 镜像为 base，换 `/app/sub2api` + `/app/resources`，label 改 0.2.18）。前一版 `20261022-v0.2.17-ps429b` |
-| 回滚 | `kubectl -n litellm-dev set image deploy/sub2api sub2api=127.0.0.1:5000/sub2api:20261022-v0.2.17-ps429b`（0.2.18 只加迁移 246=把 gemini/antigravity 分组生图开关置 true，旧版不读这列的语义差，回退不用 pg_restore；dump `/root/sub2api-backup/sub2api-20261024-1534.dump`） |
+| 线上镜像 | `127.0.0.1:5000/sub2api:20261031-v0.2.19-ps429b`（10-31 17:43 切，`go` 全自动出的镜像）。前一版 `20261024-v0.2.18-ps429b` |
+| 回滚 | `kubectl -n litellm-dev set image deploy/sub2api sub2api=127.0.0.1:5000/sub2api:20261024-v0.2.18-ps429b`（0.2.19 迁移 247=新表 `scoped_admin_api_keys`、248=`groups.image_count_billing` 默认 false，都是纯加法，旧版不读 ⇒ 回退不用 pg_restore；dump `/root/sub2api-backup/sub2api-20261031-1718.dump`） |
 | 闸门 | `sub2api-upgrade.py cutover` 读目标镜像二进制里有没有 `LOCAL_PATCH_MARKERS`，**没有就拒绝**；上游修了才用 `--drop-local-patches` |
 
 **升级 = 一条 `go`，补丁由脚本重打**（10-24 把手跑的七步收进脚本 `build` / `patch-regress`，同日在 198 实跑 `build` 一遍：约 12min，补丁标记 present、自报 0.2.18）：
@@ -1615,8 +1615,8 @@ sudo python3 /Data/sub2api-ops/sub2api-upgrade.py patch-regress            # 单
 `scripts/grok-onboard/sub2api-upgrade.py`，两边 sha256 应逐字相等，改完必同步）。
 09-08（v0.1.179→v0.2.3）、09-10（v0.2.3→v0.2.4）、09-20（v0.2.4→v0.2.7）、
 09-24（v0.2.7→v0.2.8）、**10-01（v0.2.8→v0.2.11，跨三个版本）**、10-02 23:31（→v0.2.13）、
-10-12 16:39（v0.2.13→v0.2.15）、10-13（→v0.2.16）、10-16（→v0.2.17）、10-22（补丁 ps429b）、10-24（→v0.2.18-ps429b，首次带补丁升级）共十一次，每次踩到的坑都已固化进脚本。
-**当前线上 v0.2.18-ps429b**（10-24 16:01 切，迁移 +1→297，用户面切换那分钟 ok=39/fail=1，0 ERROR，165 号/153 active 零翻转，post 8/8 绿）。⚠️ 这行会过时 ⇒ 现量命令见 skill
+10-12 16:39（v0.2.13→v0.2.15）、10-13（→v0.2.16）、10-16（→v0.2.17）、10-22（补丁 ps429b）、10-24（→v0.2.18-ps429b，首次带补丁升级）、10-31（→v0.2.19-ps429b，首次全程 `go`）共十二次，每次踩到的坑都已固化进脚本。
+**当前线上 v0.2.19-ps429b**（10-31 17:43 切，第一次全程走 `go`+`build`；迁移 +2→299，0 ERROR，165 号/153 active 零翻转，pre 4/4→post 8/8 绿）。⚠️ 这行会过时 ⇒ 现量命令见 skill
 `cli-anything-sub2api`「版本现状」。升级用的那份**脚本**现 sha256 `68bbfc55…`（10-24 加 `build`/`patch-regress`、`go` 改走 build；198 旧版留 `.bak-20261024`=`65a369c8…`）。更早 `08a40bd2…`（10-16 改：Hub API 不通回退 GitHub releases；user plane 只数 sub2api 腿——旧版按名字含 grok/kimi 数，把 router9 `cursor-fc-grok-*` 504/openrouter 402/网宿黑名单 37 条切换前失败算成「Recreate 空档」；198 旧版留 `.bak-20261016`=`268ce0e4…`）
 （10-01 改了 `verify` 的三处 + `check` 的暴露面，见下；198 上旧版留作
 `sub2api-upgrade.py.bak-20261001` = `aea83379…`，更早的 `.bak-20260924`/`.bak-20260920` 也还在）。
@@ -1981,7 +1981,7 @@ claude-/carher-/其他 398 把**没动**，要铺按同一条路径走。
    判活只能拿 pool key 打真实推理。
 
 全记录：[[project_kimi_allegro_sub2api_198_2026_09_08]]、
-升级史与 SOP（`created_at` 修复出自 v0.2.3；**当前线上 v0.2.18-ps429b**，10-24 16:01 切的）：见 **§G** +
+升级史与 SOP（`created_at` 修复出自 v0.2.3；**当前线上 v0.2.19-ps429b**，10-31 17:43 切的）：见 **§G** +
 [[project_sub2api_198_upgrade_v023_2026_09_08]]。
 
 ## 同一个 sub2api 上还挂着 antigravity（09-10 补到 6 条，09-16 又被加到 9 条）

@@ -73,7 +73,7 @@ python3 ~/kiro-px-egress/kiro-slots-bench-apply.py plan.json [--apply]   # 批�
 | 首页「账户」列表 | 勾选 →「已选 N 个 · 批量操作」→ 批量启用 / 批量停用（**立即生效**） | 在槽的号停用 ⇒ 槽立刻换冷备号（用户绑定不变，换号 = Kiro 缓存作废一次）；冷备不够 ⇒ 摘成空槽；启用 ⇒ 进冷备、补空槽、清失败计数、去退役标记。一次请求 `POST /api/admin/credentials/disabled-batch {ids, disabled}`，返回 changed/skipped/notFound/slotsSwapped/slotsFilled/emptySlots。全部跳过也会发（自愈上次中途失败）|
 | 账户列表 · 状态筛选 | 「启用且不在用（没在槽上）」 | = 冷备池（非槽位模式下 = 启用且不是当前号）。冷备估算还要排除 FREE 档和退役号（`slotEligible`）|
 
-### 1.3.1 定时停 STUDENT 槽（11-01 用户定）
+### 1.3.1 定时停 STUDENT 槽（11-01 用户定，11-02 用户要求删掉 cron ⇒ 已停用，脚本留着可手动跑）
 
 198 cltx crontab `*/30` 跑 `~/kiro-slots-student-off.py`（源 `k8s/kiro-rs/slots/`）：生效槽当前号档位含 STUDENT ⇒ 停这个槽（先停在途 0、人少的）；**生效槽剩到 8 个就不再停**（`--floor 8`）。目的 = 先消耗其他档位的号。日志 `~/kiro-student-off/run.log`（每轮一行 OK / FLOOR / SKIP / STOP），写前备份同目录（留 50 份）。`--dry-run` 只看。撤：`crontab -e` 删那行。
 🔴 只停槽挡不住 STUDENT 号回来：槽换号时按优先级从冷备挑，STUDENT 号优先级被调成 3（11-01 19:13 前有人改，和 PRO+ 同级）就会被挑上 ⇒ 这就是要定时查的原因。

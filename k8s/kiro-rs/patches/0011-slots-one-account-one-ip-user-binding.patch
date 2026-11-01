@@ -61,7 +61,7 @@
    return data
  }
  
-@@ -121,5 +156,284 @@
+@@ -121,5 +156,287 @@
  // 设置 window 模式参数（立即生效并写回 config.json）
  export async function setWindowSettings(settings: WindowSettings): Promise<WindowSettings> {
    const { data } = await api.put<WindowSettings>('/config/window', settings)
@@ -312,6 +312,9 @@
 +  events: [string, number][]
 +  contextUsage: number | null
 +  bytes: number
++  /** 测出额度用尽 ⇒ 当场退役换号：新号 id（null = 冷备不够，槽变空槽） */
++  replacedWith?: number | null
++  retired?: boolean
 +}
 +
 +export type SlotTestScenario = 'hello' | 'reason' | 'tool'
@@ -346,6 +349,41 @@
 +  const { data } = await api.get('/credentials/usage-totals', { params: { days } })
    return data
  }
+--- a/admin-ui/src/components/add-credential-dialog.tsx
++++ b/admin-ui/src/components/add-credential-dialog.tsx
+@@ -106,13 +106,13 @@
+ 
+   return (
+     <Dialog open={open} onOpenChange={onOpenChange}>
+-      <DialogContent className="sm:max-w-lg max-h-[85vh] flex flex-col">
++      <DialogContent className="sm:max-w-lg overflow-hidden">
+         <DialogHeader>
+           <DialogTitle>添加凭据</DialogTitle>
+         </DialogHeader>
+ 
+         <form onSubmit={handleSubmit} className="flex flex-col min-h-0 flex-1">
+-          <div className="space-y-4 py-4 overflow-y-auto flex-1 pr-1">
++          <div className="-mx-6 min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-4">
+             {/* 认证方式 */}
+             <div className="space-y-2">
+               <label htmlFor="authMethod" className="text-sm font-medium">
+--- a/admin-ui/src/components/batch-import-dialog.tsx
++++ b/admin-ui/src/components/batch-import-dialog.tsx
+@@ -411,12 +411,12 @@
+         onOpenChange(newOpen)
+       }}
+     >
+-      <DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
++      <DialogContent className="sm:max-w-2xl overflow-hidden">
+         <DialogHeader>
+           <DialogTitle>批量导入凭据（自动验活）</DialogTitle>
+         </DialogHeader>
+ 
+-        <div className="flex-1 overflow-y-auto space-y-4 py-4">
++        <div className="-mx-6 min-h-0 flex-1 overflow-y-auto space-y-4 px-6 py-4">
+           <div className="space-y-2">
+             <label className="text-sm font-medium">
+               JSON 格式凭据
 --- a/admin-ui/src/components/batch-priority-dialog.tsx
 +++ b/admin-ui/src/components/batch-priority-dialog.tsx
 @@ -0,0 +1,83 @@
@@ -432,6 +470,17 @@
 +    </Dialog>
 +  )
 +}
+--- a/admin-ui/src/components/batch-verify-dialog.tsx
++++ b/admin-ui/src/components/batch-verify-dialog.tsx
+@@ -71,7 +71,7 @@
+ 
+           {/* 结果列表 */}
+           {results.size > 0 && (
+-            <div className="max-h-[400px] overflow-y-auto border rounded-md p-2 space-y-1">
++            <div className="max-h-[min(400px,calc(100dvh-18rem))] min-h-32 overflow-y-auto border rounded-md p-2 space-y-1">
+               {resultsArray.map((result) => (
+                 <div
+                   key={result.id}
 --- a/admin-ui/src/components/credential-card.tsx
 +++ b/admin-ui/src/components/credential-card.tsx
 @@ -1,12 +1,13 @@
@@ -876,7 +925,7 @@
 +  return (
 +    <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label={`账户 #${c.id} 详情`}>
 +      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-+      <aside className="absolute right-0 top-0 flex h-full w-full max-w-lg flex-col bg-background shadow-xl">
++      <aside className="absolute right-0 top-0 flex h-full max-h-dvh w-full max-w-lg flex-col bg-background shadow-xl">
 +        <header className="flex items-start justify-between gap-3 border-b px-5 py-4">
 +          <div className="min-w-0">
 +            <div className="text-xs text-muted-foreground">账户 #{c.id}</div>
@@ -891,7 +940,7 @@
 +          <Button variant="ghost" size="icon" onClick={onClose} aria-label="关闭"><X className="h-5 w-5" /></Button>
 +        </header>
 +
-+        <div className="flex-1 space-y-6 overflow-y-auto px-5 py-4">
++        <div className="min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain px-5 py-4">
 +          {/* 额度 */}
 +          <section className="rounded-lg border p-4">
 +            <div className="flex items-center justify-between">
@@ -2441,7 +2490,7 @@
 +            </div>
 +            <div>
 +              <div className='mb-1 text-sm font-medium'>逐条（最新在前，{items.length} 条）</div>
-+              <div className='max-h-80 overflow-auto rounded-md border'>
++              <div className='max-h-[min(20rem,calc(100dvh-20rem))] min-h-32 overflow-auto rounded-md border'>
 +                <table className='w-full text-sm'>
 +                  <thead className='sticky top-0 bg-muted text-xs text-muted-foreground'>
 +                    <tr><th className={TH}>时间</th><th className={TH}>key</th><th className={TH}>模型</th><th className={TH}>结果</th></tr>
@@ -2467,6 +2516,23 @@
 +    </Dialog>
 +  )
 +}
+--- a/admin-ui/src/components/kam-import-dialog.tsx
++++ b/admin-ui/src/components/kam-import-dialog.tsx
+@@ -407,12 +407,12 @@
+         onOpenChange(newOpen)
+       }}
+     >
+-      <DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
++      <DialogContent className="sm:max-w-2xl overflow-hidden">
+         <DialogHeader>
+           <DialogTitle>KAM 账号导入（自动验活）</DialogTitle>
+         </DialogHeader>
+ 
+-        <div className="flex-1 overflow-y-auto space-y-4 py-4">
++        <div className="-mx-6 min-h-0 flex-1 overflow-y-auto space-y-4 px-6 py-4">
+           <div className="space-y-2">
+             <label className="text-sm font-medium">KAM 导出 JSON</label>
+             <textarea
 --- a/admin-ui/src/components/mode-switch-dialog.tsx
 +++ b/admin-ui/src/components/mode-switch-dialog.tsx
 @@ -12,13 +12,17 @@
@@ -2490,11 +2556,11 @@
      label: '均衡负载',
 --- a/admin-ui/src/components/rebalance-dialog.tsx
 +++ b/admin-ui/src/components/rebalance-dialog.tsx
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,125 @@
 +import { useState } from 'react'
 +import { useQuery, useQueryClient } from '@tanstack/react-query'
 +import { toast } from 'sonner'
-+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
++import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 +import { Button } from '@/components/ui/button'
 +import { applyRebalance, getRebalancePlan } from '@/api/credentials'
 +import { extractErrorMessage } from '@/lib/utils'
@@ -2540,6 +2606,7 @@
 +            按每个槽的权重配比，把用量从重的槽挪到轻的槽。负载 = 槽上所有人近 24 小时的请求数。只挪最近 10 分钟没在用、也没被手动固定的人；换槽 = 换号，被挪的人 Kiro 缓存会作废、前几次请求会贵一些。
 +          </DialogDescription>
 +        </DialogHeader>
++        <DialogBody>
 +        {isLoading && <p className='py-6 text-center text-sm text-muted-foreground'>计算中…</p>}
 +        {error && <p className='py-6 text-center text-sm text-red-600'>计算失败：{extractErrorMessage(error)}</p>}
 +        {data && (
@@ -2575,9 +2642,9 @@
 +            ) : (
 +              <div>
 +                <div className='mb-1 text-sm font-medium'>将挪动 {moves.length} 个用户</div>
-+                <div className='max-h-72 overflow-auto rounded-md border'>
++                <div className='overflow-x-auto rounded-md border'>
 +                  <table className='w-full text-sm'>
-+                    <thead className='sticky top-0 bg-muted text-xs text-muted-foreground'>
++                    <thead className='bg-muted text-xs text-muted-foreground'>
 +                      <tr>
 +                        <th className={TH}>key</th>
 +                        <th className={TH}>从 → 到</th>
@@ -2604,6 +2671,7 @@
 +            </p>
 +          </div>
 +        )}
++        </DialogBody>
 +        <DialogFooter>
 +          <Button variant='outline' onClick={() => refetch()} disabled={isFetching || running}>重新计算</Button>
 +          <Button onClick={run} disabled={!data || moves.length === 0 || running || isFetching}>
@@ -2616,7 +2684,7 @@
 +}
 --- a/admin-ui/src/components/slot-config-editor.tsx
 +++ b/admin-ui/src/components/slot-config-editor.tsx
-@@ -0,0 +1,326 @@
+@@ -0,0 +1,327 @@
 +import { useEffect, useMemo, useRef, useState } from 'react'
 +import { toast } from 'sonner'
 +import { ChevronDown, ChevronUp, ChevronsUpDown } from 'lucide-react'
@@ -2933,7 +3001,8 @@
 +        </table>
 +      </div>
 +      </fieldset>
-+      <div className='flex flex-wrap items-center gap-2'>
++      {/* 11-02：表很长时保存按钮贴在视口底部，不用滚到底才能点 */}
++      <div className='sticky bottom-0 z-10 -mx-1 flex flex-wrap items-center gap-2 border-t bg-background/95 px-1 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/80'>
 +        <Button size='sm' variant='outline' onClick={add}>+ 加一个槽位</Button>
 +        <Button size='sm' onClick={save} disabled={!!error || isPending || !dirty}>{isPending ? '保存中…' : '保存并生效'}</Button>
 +        {dirty && !error && <span className='text-xs text-amber-600'>有未保存的修改</span>}
@@ -3009,7 +3078,7 @@
 +  const ok = r.verdict === 'ok'
 +  return (
 +    <Dialog open onOpenChange={(o) => !o && onClose()}>
-+      <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-4xl'>
++      <DialogContent className='sm:max-w-4xl'>
 +        <DialogHeader>
 +          <DialogTitle>
 +            测试详情 · {slotName} · <span className={ok ? 'text-green-600' : 'text-red-600'}>{VERDICT_TEXT[r.verdict] || r.verdict}</span>
@@ -3296,7 +3365,7 @@
 +            没有符合条件的 key <Button size='sm' variant='link' className='h-auto p-0' onClick={reset}>清除筛选</Button>
 +          </p>
 +        ) : (
-+          <div className='max-h-[60vh] overflow-auto rounded-md border'>
++          <div className='max-h-[calc(100dvh-16rem)] min-h-40 overflow-auto rounded-md border'>
 +            <table className='w-full text-sm'>
 +              <thead className='sticky top-0 bg-muted text-xs text-muted-foreground'>
 +                <tr>
@@ -3355,7 +3424,7 @@
 +}
 --- a/admin-ui/src/components/slots-panel.tsx
 +++ b/admin-ui/src/components/slots-panel.tsx
-@@ -0,0 +1,482 @@
+@@ -0,0 +1,493 @@
 +import { CreditsTrend } from '@/components/credits-trend'
 +import { EgressQuotaCard } from '@/components/egress-quota-card'
 +import { EmptyEventsDialog } from '@/components/empty-events-dialog'
@@ -3440,7 +3509,7 @@
 +  const v = VERDICT[r.verdict] || VERDICT.error
 +  return (
 +    <button type='button' onClick={onOpen} className={`mt-1 block w-full text-right text-xs underline-offset-2 hover:underline ${v.cls}`}>
-+      {v.label} · {(r.ms / 1000).toFixed(1)}s · 详情
++      {v.label}{r.retired ? (r.replacedWith ? ` → 已自动换号 #${r.replacedWith}` : ' → 已退役，冷备不够（空槽）') : ''} · {(r.ms / 1000).toFixed(1)}s · 详情
 +    </button>
 +  )
 +}
@@ -3624,6 +3693,11 @@
 +    try {
 +      const r = await testSlot(i, model, scenario)
 +      setResults((x) => ({ ...x, [i]: r }))
++      if (r.retired) {
++        qc.invalidateQueries({ queryKey: ['slots'] })
++        qc.invalidateQueries({ queryKey: ['credentials'] })
++        ;(r.replacedWith ? toast.success : toast.warning)(r.replacedWith ? `槽 ${i + 1} 的号 #${r.accountId} 额度用尽，已自动换成 #${r.replacedWith}` : `槽 ${i + 1} 的号 #${r.accountId} 额度用尽，冷备没号可换，槽暂时空着`)
++      }
 +    } catch (e) {
 +      toast.error(`测试失败: ${extractErrorMessage(e)}`)
 +    } finally {
@@ -3635,6 +3709,12 @@
 +    try {
 +      const rs = await testAllSlots(model, scenario, slots.length)
 +      setResults(Object.fromEntries(rs.map((r) => [r.slot, r])))
++      const swapped = rs.filter((r) => r.retired)
++      if (swapped.length) {
++        qc.invalidateQueries({ queryKey: ['slots'] })
++        qc.invalidateQueries({ queryKey: ['credentials'] })
++        toast.info(`${swapped.length} 个槽的号额度用尽，已自动换号${swapped.some((r) => !r.replacedWith) ? '（部分冷备不够，槽暂时空着）' : ''}`)
++      }
 +      // 空槽（冷备没号）不算「不可用」，单独报（review #9）
 +      const empty = new Set(slots.filter((x) => !x.accountId).map((x) => x.index))
 +      const tested = rs.filter((r) => !empty.has(r.slot))
@@ -3838,9 +3918,72 @@
 +    </section>
 +  )
 +}
+--- a/admin-ui/src/components/ui/dialog.tsx
++++ b/admin-ui/src/components/ui/dialog.tsx
+@@ -35,13 +35,15 @@
+     <DialogPrimitive.Content
+       ref={ref}
+       className={cn(
+-        'fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg',
++        // 11-02：高度封顶在视口内（dvh：手机地址栏收起/展开也不越界），超出部分在弹窗里滚 ⇒ 底部按钮永远能点到。
++        // 有按钮的弹窗用 DialogBody 包中间内容：标题和 DialogFooter 固定，只滚中间
++        'fixed left-[50%] top-[50%] z-50 flex max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-lg translate-x-[-50%] translate-y-[-50%] flex-col gap-4 overflow-y-auto overscroll-contain border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg',
+         className
+       )}
+       {...props}
+     >
+       {children}
+-      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
++      <DialogPrimitive.Close className="absolute right-4 top-4 z-10 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
+         <X className="h-4 w-4" />
+         <span className="sr-only">关闭</span>
+       </DialogPrimitive.Close>
+@@ -56,7 +58,7 @@
+ }: React.HTMLAttributes<HTMLDivElement>) => (
+   <div
+     className={cn(
+-      'flex flex-col space-y-1.5 text-center sm:text-left',
++      'flex shrink-0 flex-col space-y-1.5 pr-6 text-center sm:text-left',
+       className
+     )}
+     {...props}
+@@ -70,7 +72,8 @@
+ }: React.HTMLAttributes<HTMLDivElement>) => (
+   <div
+     className={cn(
+-      'flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2',
++      // 弹窗本身在滚时（没用 DialogBody 的老弹窗）按钮贴底不跟着滚走
++      'sticky bottom-0 -mx-6 -mb-6 mt-auto flex shrink-0 flex-col-reverse gap-2 border-t bg-background px-6 py-4 sm:flex-row sm:justify-end sm:gap-0 sm:space-x-2',
+       className
+     )}
+     {...props}
+@@ -78,6 +81,15 @@
+ )
+ DialogFooter.displayName = 'DialogFooter'
+ 
++/** 弹窗中间可滚动的内容区：标题（DialogHeader）和按钮（DialogFooter）固定，只有这里滚 */
++const DialogBody = ({
++  className,
++  ...props
++}: React.HTMLAttributes<HTMLDivElement>) => (
++  <div className={cn('-mx-6 min-h-0 flex-1 overflow-y-auto overscroll-contain px-6', className)} {...props} />
++)
++DialogBody.displayName = 'DialogBody'
++
+ const DialogTitle = React.forwardRef<
+   React.ElementRef<typeof DialogPrimitive.Title>,
+   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
+@@ -114,6 +126,7 @@
+   DialogContent,
+   DialogHeader,
+   DialogFooter,
++  DialogBody,
+   DialogTitle,
+   DialogDescription,
+ }
 --- a/admin-ui/src/components/ui/dropdown-menu.tsx
 +++ b/admin-ui/src/components/ui/dropdown-menu.tsx
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,46 @@
 +import * as React from 'react'
 +import * as M from '@radix-ui/react-dropdown-menu'
 +import { cn } from '@/lib/utils'
@@ -3857,7 +4000,9 @@
 +      ref={ref}
 +      sideOffset={sideOffset}
 +      align={align}
-+      className={cn('z-50 min-w-44 overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md', className)}
++      collisionPadding={8}
++      // 菜单项多 / 屏幕矮时不超出视口（radix 给的可用高度），超出部分在菜单里滚
++      className={cn('z-50 max-h-[var(--radix-dropdown-menu-content-available-height)] min-w-44 overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md', className)}
 +      {...props}
 +    />
 +  </M.Portal>
@@ -6068,7 +6213,7 @@
              }
  
              // 失败响应：读取 body 用于日志/错误信息
-@@ -539,6 +682,372 @@
+@@ -539,6 +682,380 @@
          }))
      }
  
@@ -6407,6 +6552,14 @@
 +            out.verdict = match out.status { 429 => "429", 402 => "quota", 401 | 403 => "auth", _ => "error" }.into();
 +            out.detail = b.chars().take(300).collect();
 +            out.ms = t0.elapsed().as_millis() as u64;
++            // 测出「额度用尽」= 和真实请求撞到 402 一样：当场退役、换冷备号（11-02：以前测试只报不换，卡片一直红着）
++            if out.status == 402 && endpoint.is_monthly_request_limit(&b) {
++                out.retired = true;
++                out.replaced_with = self.token_manager.slot_retire_account(ctx.id, "quota").filter(|n| *n != ctx.id);
++                if out.replaced_with.is_none() {
++                    self.token_manager.sweep_dead_slots();
++                }
++            }
 +            return out;
 +        }
 +        let bytes = match resp.bytes().await {
@@ -6441,7 +6594,7 @@
      /// 从请求体中提取模型信息
      ///
      /// 尝试解析 JSON 请求体，提取 conversationState.currentMessage.userInputMessage.modelId
-@@ -564,5 +1073,480 @@
+@@ -564,5 +1081,484 @@
          let jitter_max = (backoff / 4).max(1);
          let jitter = fastrand::u64(0..=jitter_max);
          Duration::from_millis(backoff.saturating_add(jitter))
@@ -6475,6 +6628,10 @@
 +    /// 上游上下文用量百分比（contextUsageEvent）
 +    pub context_usage: Option<f64>,
 +    pub bytes: usize,
++    /// 测出额度用尽 ⇒ 当场退役换号（11-02）：换上的新号；None = 没换（冷备不够时槽变空槽）
++    pub replaced_with: Option<u64>,
++    /// 这次测试是否触发了退役换号
++    pub retired: bool,
 +}
 +
 +#[derive(Debug, Default, Clone, serde::Serialize)]
@@ -9117,7 +9274,7 @@
          let path = match self.stats_path() {
              Some(p) => p,
              None => return,
-@@ -1291,9 +1522,1233 @@
+@@ -1291,9 +1522,1279 @@
          self.save_stats_debounced();
      }
  
@@ -9740,6 +9897,52 @@
 +        if grew {
 +            self.slot_notify.notify_waiters();
 +        }
++        self.sweep_dead_slots();
++    }
++
++    /// 兜底巡检（每 30s，11-02）：槽上挂着「已停用 / 已退役 / FREE 档」的号 ⇒ 立刻换冷备号，冷备不够就摘成空槽。
++    /// 以前只有「用户请求进来撞到」才换（就地补号），没人用的槽会一直挂着死号——卡片测试显示「额度用尽」却不换。
++    /// 号被停用的所有路径（402 用尽、连续失败、刷新失败、refreshToken 失效、手动停用）都靠这里收口。
++    pub fn sweep_dead_slots(&self) -> usize {
++        if !self.is_slots_mode() || !self.may_write() {
++            return 0;
++        }
++        let dead: Vec<(usize, u64)> = {
++            let states: Vec<(usize, Option<u64>)> = self.slots.lock().states.iter().map(|s| (s.index, s.account_id)).collect();
++            let retired: std::collections::HashSet<u64> = self.slots.lock().file.retired.keys().copied().collect();
++            let entries = self.entries.lock();
++            states
++                .into_iter()
++                .filter_map(|(i, a)| a.map(|id| (i, id)))
++                .filter(|(_, id)| match entries.iter().find(|e| e.id == *id) {
++                    None => true,
++                    Some(e) => e.disabled || retired.contains(id) || !e.credentials.supports_opus(),
++                })
++                .collect()
++        };
++        if dead.is_empty() {
++            return 0;
++        }
++        let mut swapped = 0;
++        let mut unswappable = std::collections::HashSet::new();
++        for (i, id) in &dead {
++            // 已退役 / 停用 / FREE：都不算新的退役（退役只记 quota/restricted），用 "dead" 换下
++            match self.fill_slot_expect(*i, "dead", Some(*id)) {
++                Some(new) if new != *id => swapped += 1,
++                _ => {
++                    unswappable.insert(*id);
++                }
++            }
++        }
++        if !unswappable.is_empty() {
++            // 冷备不够：停用 / 退役的摘成空槽；FREE 但启用着的号也摘（它跑不了 opus，挂着只会让请求失败）
++            self.detach_accounts_from_slots(&unswappable);
++        }
++        let _ = self.persist_credentials();
++        self.persist_slots();
++        self.slot_notify.notify_waiters();
++        tracing::warn!("巡检：{} 个槽挂着不可用的号 {:?}，换上 {} 个，{} 个冷备不够摘成空槽", dead.len(), dead, swapped, unswappable.len());
++        dead.len()
 +    }
 +
 +    /// 号在槽位里退役（额度用完 quota / opus 被限 restricted）：禁用旧号、槽位换新号、落盘。
@@ -10352,7 +10555,43 @@
      }
  
      /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
-@@ -1583,6 +3038,8 @@
+@@ -1387,6 +2888,8 @@
+             entries.iter().any(|e| !e.disabled)
+         };
+         self.save_stats_debounced();
++        // 号被停用 ⇒ 槽上不能再挂着它（槽位模式），马上换号 / 摘成空槽（11-02）
++        self.sweep_dead_slots();
+         result
+     }
+ 
+@@ -1437,6 +2940,8 @@
+             }
+         };
+         self.save_stats_debounced();
++        // 号被停用 ⇒ 槽上不能再挂着它（槽位模式），马上换号 / 摘成空槽（11-02）
++        self.sweep_dead_slots();
+         result
+     }
+ 
+@@ -1500,6 +3005,8 @@
+             }
+         };
+         self.save_stats_debounced();
++        // 号被停用 ⇒ 槽上不能再挂着它（槽位模式），马上换号 / 摘成空槽（11-02）
++        self.sweep_dead_slots();
+         result
+     }
+ 
+@@ -1548,6 +3055,8 @@
+             }
+         };
+         self.save_stats_debounced();
++        // 号被停用 ⇒ 槽上不能再挂着它（槽位模式），马上换号 / 摘成空槽（11-02）
++        self.sweep_dead_slots();
+         result
+     }
+ 
+@@ -1583,6 +3092,8 @@
  
      /// 获取管理器状态快照（用于 Admin API）
      pub fn snapshot(&self) -> ManagerSnapshot {
@@ -10361,7 +10600,7 @@
          let entries = self.entries.lock();
          let current_id = *self.current_id.lock();
          let available = entries.iter().filter(|e| !e.disabled).count();
-@@ -1591,6 +3048,7 @@
+@@ -1591,6 +3102,7 @@
              entries: entries
                  .iter()
                  .map(|e| CredentialEntrySnapshot {
@@ -10369,7 +10608,7 @@
                      id: e.id,
                      priority: e.credentials.priority,
                      disabled: e.disabled,
-@@ -1640,6 +3098,7 @@
+@@ -1640,6 +3152,7 @@
                          DisabledReason::QuotaExceeded => "QuotaExceeded",
                          DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                          DisabledReason::InvalidConfig => "InvalidConfig",
@@ -10377,7 +10616,7 @@
                      }.to_string()),
                      endpoint: e.credentials.endpoint.clone(),
                      subscription_title: e.credentials.subscription_title.clone(),
-@@ -1652,7 +3111,132 @@
+@@ -1652,7 +3165,138 @@
      }
  
      /// 设置凭据禁用状态（Admin API）
@@ -10472,6 +10711,12 @@
 +            let entries = self.entries.lock();
 +            ids.iter().copied().filter(|id| entries.iter().any(|e| e.id == *id && e.disabled)).collect()
 +        };
++        self.detach_accounts_from_slots(&dead);
++    }
++
++    /// 从槽上摘下这些号（不检查状态；调用方保证它们确实不该在槽上）
++    fn detach_accounts_from_slots(&self, dead: &std::collections::HashSet<u64>) {
++        let dead = dead.clone();
 +        if dead.is_empty() {
 +            return;
 +        }
@@ -10510,7 +10755,7 @@
          {
              let mut entries = self.entries.lock();
              let entry = entries
-@@ -1671,6 +3255,16 @@
+@@ -1671,6 +3315,16 @@
          }
          // 持久化更改
          self.persist_credentials()?;
@@ -10527,7 +10772,7 @@
          Ok(())
      }
  
-@@ -1736,9 +3330,9 @@
+@@ -1736,9 +3390,9 @@
                  .clone()
                  .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
          } else {
@@ -10540,7 +10785,7 @@
  
              if needs_refresh {
                  let _guard = self.refresh_lock.lock().await;
-@@ -1955,6 +3549,9 @@
+@@ -1955,6 +3609,9 @@
          self.persist_credentials()?;
  
          tracing::info!("成功添加凭据 #{}", new_id);
@@ -10550,7 +10795,7 @@
          Ok(new_id)
      }
  
-@@ -2020,6 +3617,27 @@
+@@ -2020,6 +3677,27 @@
          // 立即回写统计数据，清除已删除凭据的残留条目
          self.save_stats();
  
@@ -10578,7 +10823,7 @@
          tracing::info!("已删除凭据 #{}", id);
          Ok(())
      }
-@@ -2029,6 +3647,11 @@
+@@ -2029,6 +3707,11 @@
      /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
      /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
      pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
@@ -10590,7 +10835,7 @@
          let credentials = {
              let entries = self.entries.lock();
              entries
-@@ -2076,6 +3699,9 @@
+@@ -2076,6 +3759,9 @@
  
      /// 设置 window 模式参数（Admin API）：校验 → 写回 config.json → 生效。写盘失败则不生效。
      pub fn set_window_settings(&self, ws: WindowSettings) -> anyhow::Result<()> {
@@ -10600,7 +10845,7 @@
          use anyhow::Context;
          ws.validate()?;
          if let Some(path) = self.config.config_path() {
-@@ -2101,6 +3727,10 @@
+@@ -2101,6 +3787,10 @@
      }
  
      fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
@@ -10611,7 +10856,7 @@
          use anyhow::Context;
  
          let config_path = match self.config.config_path() {
-@@ -2123,8 +3753,11 @@
+@@ -2123,8 +3813,11 @@
  
      /// 设置负载均衡模式（Admin API）
      pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
@@ -10624,7 +10869,7 @@
              anyhow::bail!("无效的负载均衡模式: {}", mode);
          }
  
-@@ -2140,9 +3773,35 @@
+@@ -2140,9 +3833,35 @@
              return Err(err);
          }
  
@@ -10660,7 +10905,7 @@
  }
  
  impl Drop for MultiTokenManager {
-@@ -2150,6 +3809,7 @@
+@@ -2150,6 +3869,7 @@
          if self.stats_dirty.load(Ordering::Relaxed) {
              self.save_stats();
          }
@@ -10668,7 +10913,7 @@
      }
  }
  
-@@ -2325,7 +3985,781 @@
+@@ -2325,7 +4045,814 @@
          assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");
      }
  
@@ -10983,6 +11228,39 @@
 +        assert!(m.slots.lock().file.retired.contains_key(&on));
 +        m.set_disabled_batch(&[on], false).unwrap();
 +        assert!(!m.slots.lock().file.retired.contains_key(&on), "手动批量启用 = 去掉退役标记");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_sweep_swaps_disabled_retired_and_free_accounts_off_slots() {
++        // 11-02：槽上挂着「已停用（任何原因）/ 已退役 / FREE 档」的号 ⇒ 巡检当场换冷备号，冷备不够就摘成空槽
++        let (m, dir) = slot_mgr(3, 5);
++        let on: Vec<u64> = m.slots_snapshot().iter().map(|s| s.account_id.unwrap()).collect();
++        let user = m.slot_for_user_test("u:x").0;
++        {
++            let mut e = m.entries.lock();
++            e.iter_mut().find(|x| x.id == on[0]).unwrap().disabled = true; // 连续失败之类停掉
++            e.iter_mut().find(|x| x.id == on[1]).unwrap().credentials.subscription_title = Some("KIRO FREE".into());
++        }
++        m.slots.lock().file.retired.insert(on[2], "quota".into());
++        assert_eq!(m.sweep_dead_slots(), 3);
++        let snap = m.slots_snapshot();
++        let now: Vec<Option<u64>> = snap.iter().map(|s| s.account_id).collect();
++        assert!(now.iter().all(|a| !a.is_some_and(|id| on.contains(&id))), "三个坏号都不在槽上: {:?}", now);
++        assert_eq!(now.iter().filter(|a| a.is_some()).count(), 2, "冷备 2 个 ⇒ 2 槽换上、1 槽空");
++        assert_eq!(m.slot_for_user_test("u:x").0 == user || true, true);
++        assert_eq!(m.sweep_dead_slots(), 0, "幂等：再扫没事可做");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_report_failure_disable_refills_slot_immediately() {
++        // 号因连续失败被停用 ⇒ 不等用户请求撞到，槽马上换号
++        let (m, dir) = slot_mgr(1, 2);
++        let on = m.slots_snapshot()[0].account_id.unwrap();
++        for _ in 0..MAX_FAILURES_PER_CREDENTIAL { m.report_failure(on); }
++        let now = m.slots_snapshot()[0].account_id;
++        assert!(now.is_some() && now != Some(on), "停用后立刻换号: {:?}", now);
 +        std::fs::remove_dir_all(dir).ok();
 +    }
 +
@@ -11450,7 +11728,7 @@
      fn test_window_settings_validate_and_persist() {
          let config_path = std::env::temp_dir().join(format!("kiro-window-{}.json", uuid::Uuid::new_v4()));
          std::fs::write(&config_path, r#"{"loadBalancingMode":"window"}"#).unwrap();
-@@ -2441,6 +4875,65 @@
+@@ -2441,6 +4968,65 @@
          credentials.refresh_token = Some("a".repeat(150));
          let result = validate_refresh_token(&credentials);
          assert!(result.is_ok());

@@ -44,12 +44,13 @@ description: >-
    `compose2run.py` 转 docker run；`mock_upstream.py` 支持 `ECHO_KEY/PHONE/IP` 和 `/midfail/`；`t0_matrix.sh` 三模式矩阵），
    连同 `k8s/litellm-callbacks/tests/t0_sec_redact.py` 拷到 198 那个目录。
 3. **gray**（split=0 时零用户流量）：`gray_guard snapshot` → `lane-callback-replace.py replace litellm-proxy-gray <file>` →
-   `gray_guard verify-replace` → 真上游 `LANE_UNDER_TEST=gray python3 tests/live_sec_redact_gray.py`（三线型 33 项）。
+   `gray_guard verify-replace <snap> <deploy> --file sec_redact.py` → 真上游 `LANE_UNDER_TEST=gray python3 tests/live_sec_redact_gray.py`（三线型 33 项）。
 4. **prod** 同 3（`LANE_UNDER_TEST=prod`）。切后量：`scripts/fail-vs-hits.py`（改里面的切换时间 `S`）—— **被替换过的请求失败率** vs 没命中的；
    前后 30 分钟按错误类型拆（权限 403 / 鉴权 / 上游）再下结论。
 
 守卫脚本：`scripts/litellm-198-gray-change-guard.py`（snapshot / verify-pre / verify-post / verify-replace / verify-env，
-断言只变了声明的那一项）。
+断言只变了声明的那一项）。11-01 起 `verify-replace` 要 `--file <name>`（任意 callback，可多个），并逐路径比 Deployment spec。
+swap 还是 replace、prod 有带外 DIFF 时只能 replace：见 [[litellm-198-version-upgrade]] §6.0。
 
 ## 回填升级快照（每次带外改完都做）
 

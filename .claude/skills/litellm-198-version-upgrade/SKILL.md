@@ -213,9 +213,39 @@ chart 必须渲染出 live 的样子（8e14e5f 四处）：ClusterIP `litellm-pr
 
 ## 6. 转正后换 / 加 callback
 
+### 6.0 换已在线的 callback：swap 还是 replace（11-01 定）
+
+**先跑 `render-lane-check.sh <lane> $D`，看它打印什么再选，别凭印象：**
+
+| render-lane-check 结果 | 用哪个 | 为什么 |
+|---|---|---|
+| `RENDER == LIVE` | `lane-callback-swap.sh`（走 helm，改快照 + values + release 一次做完） | 快照 == live，helm 不会冲掉任何东西；换完不用回填 |
+| `DIFF`（带外改动，**不管是不是你的**） | `scripts/litellm-198-lane-callback-replace.py replace` + guard `verify-replace --file` + `snap-backfill-from-live.py apply --file` | 以 live CM 为底只换一个 key，不碰 DIFF 里那几项；swap/helm 从快照渲染会把它们静默冲掉 |
+| 渲染失败（`RENDER FAIL`） | 都不用，先修快照 | swap 会在同一处失败 |
+
+🔴 **prod 现在有别的会话 10-30 的带外 DIFF**（`error_sanitize.py` / `video_id_alias_auth.py` + mount / config 一行，
+现状和回填计划见 `.work/myai-billing-plan/45-lane-tooling.md`）⇒ **prod 只能 replace，禁止 swap / helm upgrade / lane-config-tune**，
+直到那 3 项回填、`render-lane-check.sh prod` 打印 RENDER == LIVE。gray / guarded-old 11-01 是 RENDER == LIVE，两条都可以 swap。
+
+replace 一套（198 root；报告 42 实跑过的顺序）：
+```bash
+G=scripts/litellm-198-gray-change-guard.py; RP=scripts/litellm-198-lane-callback-replace.py; F=<本地新文件>.py
+python3 $G snapshot   /root/guard-<dep>.json <dep>          # 带整份 spec
+python3 $G verify-pre /root/guard-<dep>.json <dep>          # 期间没人动
+python3 $RP replace <dep> $F                                # 打印 ROLLBACK 命令，记下来
+python3 $G verify-replace /root/guard-<dep>.json <dep> --file $F   # spec 只许 callbacks 卷名变；CM 只许这一个 key 变；live sha == $F
+python3 litellm-gray-rollout/scripts/run/snap-backfill-from-live.py apply <lane> --file $(basename $F)   # 只回填自己这一个文件
+bash    litellm-gray-rollout/scripts/run/render-lane-check.sh <lane> $D   # DIFF 清单只能和换之前一样（不能多出这个文件）
+```
+- `verify-replace` 11-01 起 **`--file` 必填、可多个、任意文件名**（以前写死 `sec_redact.py`，换别的文件必误报）；
+  `--file` 是本地路径时顺带比 sha。判据 = 报告 42 手写 `specdiff.py` 的逐路径比对，已并进 guard。
+- swap 11-01 修了两处：gray 的 `--deployment` 源改成 `gray-deployment.yaml`（prod 改成 `prod-deployment.yaml`，旧值文件不存在），
+  且动手前断言源的 callback 挂载 == live；新文件先进 `swap-<ts>/callbacks-stage` 冻结过门禁，**门禁全过才写快照**，helm 失败 trap 自动还原。
+  离线测试：`litellm-gray-rollout/tests/test_lane_callback_swap_offline.py`、`scripts/tests/test_gray_change_guard.py`。
+
 ```bash
 python3 scripts/litellm-198-callbacks-drift.py            # 退出码 1 = 有漂移；方向看 --diff 再定
-# 换已有（198 root；FILES_DIR 放 git 那份）——顺序 gray（零流量，实打验证）→ guarded-old → prod，完了再跑一次 drift
+# 换已有、且 render-lane-check = RENDER == LIVE（198 root；FILES_DIR 放 git 那份）——顺序 gray → guarded-old → prod，完了再跑一次 drift
 $SRC/scripts/lane-callback-swap.sh --lane gray --run-dir $D --files-dir $D/swsrc <file>...
 # 新增还没挂载的（以 live 为底、只做加法；默认插在 responses_aclose 行后）
 python3 $W/litellm-198-lane-callback-add.py install  litellm-proxy-gray $W/<mod>.py <mod>.<instance>
@@ -227,7 +257,7 @@ python3 $W/litellm-198-lane-callback-add.py rollback litellm-proxy-gray /root/cb
 - drift 报「只有 repo 有」的 `streaming_output_backfill_logonly.py`（阿里云专用）、`inject_prompt_cache_key.py`（198 未启用）是预期的，别装。
 - 换已在线的单个文件（不走 helm 快照）：`scripts/litellm-198-lane-callback-replace.py replace <deploy> <file>`（只换 CM 里这一个 key、
   一次 patch 卷名、备份 `/root/cb-add-backup/`）；`kubectl set env` 改开关同理。两者都是带外，改完跑上表「带外改完」两步。
-  守卫：`scripts/litellm-198-gray-change-guard.py snapshot` → 改 → `verify-replace` / `verify-env`（断言只变了声明项）。
+  守卫：`scripts/litellm-198-gray-change-guard.py snapshot` → 改 → `verify-replace --file <f>` / `verify-env`（断言只变了声明项，见 6.0）。
 - 🔴 add 是 helm 带外改动：swap 有守卫（live 引用的 CM 名 ≠ helm manifest ⇒ STOP），**下次 helm upgrade 前必须先把 live 回填进快照**。
   10-20 起守卫**只比真挂载的卷**：live 上「只声明未挂载」的旧卷（历次升级残留，如 prod 曾有 4 个 `litellm-stable-*`）
   逐条打印 `ignore unmounted live volume …` 后忽略，helm upgrade 会顺手去掉它们（不影响运行）。挂载卷不一致照旧 STOP。
@@ -300,4 +330,5 @@ codex 压缩格假红两类已修（model_id 变 12 位 hex 哈希不再按族�
 
 - 灰度期：自动止损会自己 `rolled_back`；人工：驾驶台「全部退回旧版」或 `gray-global-rollback.sh`（= split 0 + 试点逐把 `force-prod`）。降级永远不设门禁。
 - committed 后：`gray-post-commit-rollback.sh prepare → prod-restored → finish`（guarded-old 必须 Ready）。
-- 单个 callback：`swap-<ts>/*.before` 放回再跑 `lane-callback-swap.sh`，或 `helm rollback`。
+- 单个 callback：swap 换的 ⇒ `swap-<ts>/*.before` 放进 files-dir 再跑一次 swap；replace 换的 ⇒ 它打印的 `rollback <dep> <backup.json>`
+  + `snap-backfill-from-live.py restore`。🔴 prod 别 `helm rollback`（rev24 指回已删的 secret，且丢 sec_redact 和 10-30 的改动）。

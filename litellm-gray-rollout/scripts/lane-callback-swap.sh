@@ -3,6 +3,7 @@
 #
 # 用法:
 #   lane-callback-swap.sh --lane prod|gray|guarded-old --run-dir <D> --files-dir <dir> FILE [FILE...]
+#   只在 render-lane-check.sh <lane> 打印 RENDER == LIVE 时用；有带外 DIFF ⇒ 改用 litellm-198-lane-callback-replace.py
 #
 #   <D>    本轮 run 目录（含 target.env、chart3/*.tgz、prod-target/ gray-inputs/ go-inputs/）
 #   <dir>  放着要上线的那几个 callback 文件的目录（逐字节 = git 里那份）
@@ -17,6 +18,13 @@
 #      ⇒ 本脚本冻结后**断言 values 里该文件的 sha 已变成目标 sha**，否则拒绝 upgrade。
 #   2. 门禁只许「callbacks CM 换代 + 且只有点名的这几个 key 变」——别的任何对象/键变了就停。
 #   3. 验收看每个在服务 pod 里 /app/<file> 的 sha 和 ImportError，不看 rollout 状态。
+#   4.（11-01）--deployment 源 = render-lane-check.sh 用的那份（gray=gray-deployment.yaml、prod=prod-deployment.yaml）。
+#      旧版 gray 指着 10-29 的 gray-inputs/prod-deployment.yaml，里面没有 sec_redact 的 mount ⇒ prepare-values
+#      在 helm 之前失败（报告 39）；prod 指着根本不存在的 prod-live-deployment.yaml。
+#      ⇒ 动手前先断言该源的 callback 挂载集合 == live，不等就停。
+#   5.（11-01）旧版**先改快照再冻结**，失败不还原 ⇒ 快照里留着新文件、live 还是旧的。现在新文件先放进
+#      $WORK/callbacks-stage（快照的整份拷贝）冻结 + 过全部门禁，**门禁全过才写回快照**；helm upgrade
+#      失败由 trap 自动还原快照和 values。helm 成功之后验收红不还原（此时快照 == live）。
 #
 # 车道角色（scheduler）不在这里改：gray / guarded-old 永远 disabled，prod 永远 primary，
 # 由 prepare-values 按 profile 决定；本脚本只把 prepare-values 的报告打出来供核对。
@@ -46,8 +54,8 @@ TOOLS="$SRC"
 umask 077
 
 case "$LANE" in
-  prod)        I=$RUN_DIR/prod-target; VAL=$I/prod-target-values.yaml; REL=litellm-product-proxy;       PROF=k8s/values-prod.yaml;        DEP=litellm-proxy;             DEPLOY_SRC=$I/prod-live-deployment.yaml; MODE=primary ;;
-  gray)        I=$RUN_DIR/gray-inputs;  VAL=$RUN_DIR/gray/gray-values.yaml; REL=litellm-product-gray;  PROF=k8s/values-gray.yaml;        DEP=litellm-proxy-gray;        DEPLOY_SRC=$I/prod-deployment.yaml;     MODE=disabled ;;
+  prod)        I=$RUN_DIR/prod-target; VAL=$I/prod-target-values.yaml; REL=litellm-product-proxy;       PROF=k8s/values-prod.yaml;        DEP=litellm-proxy;             DEPLOY_SRC=$I/prod-deployment.yaml;      MODE=primary ;;
+  gray)        I=$RUN_DIR/gray-inputs;  VAL=$RUN_DIR/gray/gray-values.yaml; REL=litellm-product-gray;  PROF=k8s/values-gray.yaml;        DEP=litellm-proxy-gray;        DEPLOY_SRC=$I/gray-deployment.yaml;     MODE=disabled ;;
   guarded-old) I=$RUN_DIR/go-inputs;    VAL=$RUN_DIR/go/go-values.yaml;     REL=litellm-product-guarded-old; PROF=k8s/values-guarded-old.yaml; DEP=litellm-proxy-guarded-old; DEPLOY_SRC=$I/prod-deployment.yaml; MODE=disabled ;;
   *) echo "unknown lane $LANE" >&2; exit 2 ;;
 esac
@@ -87,6 +95,27 @@ PY
   echo "  先把 live 的 callbacks/config 回填进 $SNAP 与 $DEPLOY_SRC 再跑，否则 helm upgrade 会静默回退。" >&2
   exit 1; }
 
+# 4b. --deployment 源的 callback 挂载必须 == live（11-01：gray 源过时 ⇒ prepare-values 才报错，太晚）
+python3 - "$DEPLOY_SRC" "$DEP" <<'PY'
+import json, subprocess, sys, yaml
+src, dep = sys.argv[1:]
+def cb_mounts(d):
+    c = d["spec"]["template"]["spec"]["containers"][0]
+    return {m.get("subPath") or "" for m in c.get("volumeMounts", []) if m.get("name") == "callbacks"}
+docs = [d for d in yaml.safe_load_all(open(src)) if d]
+sd = next((d for d in docs if d.get("kind", "Deployment") == "Deployment"), None)
+if sd is None:
+    sys.exit(f"STOP: no Deployment in {src}")
+live = json.loads(subprocess.run(["kubectl", "-n", "litellm-product", "get", "deploy", dep, "-o", "json"],
+                                 capture_output=True, text=True, check=True).stdout)
+a, b = cb_mounts(sd), cb_mounts(live)
+if a != b:
+    print(f"STOP: {src} 的 callback 挂载 != live {dep}: 源独有={sorted(a - b)} live 独有={sorted(b - a)}", file=sys.stderr)
+    print("  源文件过时或 live 有带外 mount。先跑 render-lane-check.sh，RENDER == LIVE 再来；快照没动。", file=sys.stderr)
+    sys.exit(1)
+print(f"  deploy source ok: {src} ({len(a)} callback mounts == live)")
+PY
+
 # 5. 已知坏版本指纹（与 scripts/litellm-198-callbacks-drift.py 的 KNOWN_BAD 同一份清单），动快照之前就拒。
 #    2026-10-25：spendlog 清洗旧版（_LITERAL_HIGH_LONE_RE）⇒ SpendLogs 丢行，git 87515f0 修复；
 #    旧版在历代快照 / .work 拷贝里到处都有，拿错一份发上去 = bug 回来且所有门禁全绿。
@@ -99,19 +128,21 @@ for f in "${FILES[@]}"; do
   esac
 done
 
-declare -A WANT
+# 6. 新文件只进暂存目录（快照整份拷贝）；快照本身等全部门禁过了才写（头注释 5）
+STAGE=$WORK/callbacks-stage
+cp -a "$SNAP/callbacks" "$STAGE"
+want_of() { sha256sum < "$STAGE/$1" | cut -c1-12; }   # 不用 declare -A：离线测试在本机 bash 3.2 上跑
 for f in "${FILES[@]}"; do
   [[ -f "$FILES_DIR/$f" ]] || { echo "missing $FILES_DIR/$f" >&2; exit 2; }
-  [[ -f "$SNAP/callbacks/$f" ]] || { echo "$f is not an installed callback on $LANE (use litellm-callback-install.py for new ones)" >&2; exit 2; }
+  [[ -f "$SNAP/callbacks/$f" ]] || { echo "$f is not an installed callback on $LANE (new ones: litellm-198-lane-callback-add.py)" >&2; exit 2; }
   cp -p "$SNAP/callbacks/$f" "$WORK/$f.before"
-  cp "$FILES_DIR/$f" "$SNAP/callbacks/$f"
-  WANT[$f]=$(sha256sum < "$SNAP/callbacks/$f" | cut -c1-12)
+  cp "$FILES_DIR/$f" "$STAGE/$f"
 done
-echo "backups: $WORK/*.before"
-
 cp -p "$VAL" "$WORK/values.before.yaml"
+echo "staged in $STAGE; snapshot untouched until gates pass (backups: $WORK/*.before)"
+
 COMMON=(--profile "$PROF" --repository 127.0.0.1:5000/litellm-carher --digest "$DIGEST"
-  --config "$SNAP/config/config.yaml" --callbacks-dir "$SNAP/callbacks" --callbacks-volume callbacks
+  --config "$SNAP/config/config.yaml" --callbacks-dir "$STAGE" --callbacks-volume callbacks
   --snapshot hooks="$SNAP/hooks" --snapshot chatgpt-noauth="$SNAP/chatgpt-noauth" --snapshot deepcopy-patch="$SNAP/deepcopy-patch"
   --snapshot streaming-handler-patch="$SNAP/streaming-handler-patch"
   --snapshot passthrough-streaming-handler-patch="$SNAP/passthrough-streaming-handler-patch"
@@ -136,7 +167,8 @@ open(p, "w").write(yaml.safe_dump(v, sort_keys=False))
 PY
 for f in "${FILES[@]}"; do
   got=$(python3 -c "import yaml,sys,hashlib;v=yaml.safe_load(open(sys.argv[1]));print(hashlib.sha256(v['callbacks']['data'][sys.argv[2]].encode()).hexdigest()[:12])" "$WORK/values.yaml" "$f")
-  [[ "$got" == "${WANT[$f]}" ]] || { echo "STOP: frozen $f=$got != wanted ${WANT[$f]} (freeze silently kept the old file)" >&2; exit 1; }
+  w=$(want_of "$f")
+  [[ "$got" == "$w" ]] || { echo "STOP: frozen $f=$got != wanted $w (freeze silently kept the old file)" >&2; exit 1; }
 done
 
 helm get manifest $REL -n $NS > "$WORK/live.yaml"
@@ -171,12 +203,29 @@ PY
     --approval "$WORK/approval.json" --output "$WORK/deletion-set.json" >/dev/null 2>&1 ) || true
 python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print('  deletion-set',d['status'],d.get('errors'));sys.exit(0 if d['status']=='PASS' else 1)" "$WORK/deletion-set.json"
 
+# 7. 门禁全过：写快照 + values，然后 helm。helm 失败 ⇒ trap 还原两者
+SNAP_DIRTY=0
+restore_snapshot() {
+  local rc=$?
+  if [[ $SNAP_DIRTY == 1 ]]; then
+    for f in "${FILES[@]}"; do cp -p "$WORK/$f.before" "$SNAP/callbacks/$f"; done
+    cp -p "$WORK/values.before.yaml" "$VAL"
+    echo "RESTORED snapshot + values from $WORK (helm upgrade failed rc=$rc)." >&2
+    echo "  helm 可能已部分生效：跑 render-lane-check.sh $LANE 和 helm history $REL 再决定下一步" >&2
+  fi
+}
+trap restore_snapshot EXIT
+SNAP_DIRTY=1
+for f in "${FILES[@]}"; do cp -p "$STAGE/$f" "$SNAP/callbacks/$f"; done
 cp "$WORK/values.yaml" "$VAL"
-helm upgrade $REL "$CHART" -n $NS --values "$VAL" --reset-values 2>&1 | grep -E 'REVISION|STATUS'
+helm upgrade $REL "$CHART" -n $NS --values "$VAL" --reset-values > "$WORK/helm-upgrade.out" 2>&1 \
+  || { cat "$WORK/helm-upgrade.out" >&2; exit 1; }
+grep -E 'REVISION|STATUS' "$WORK/helm-upgrade.out" || true
+SNAP_DIRTY=0   # helm 已落地：快照 == live，后面验收红也不还原
 kubectl -n $NS rollout status deploy/$DEP --timeout=1500s | tail -1
 want_pods=$(kubectl -n $NS get deploy $DEP -o jsonpath='{.spec.replicas}')
 for _ in $(seq 1 90); do
-  [[ $(kubectl -n $NS get po -l app=$DEP --no-headers | wc -l) == "$want_pods" ]] && break; sleep 10
+  [[ $(kubectl -n $NS get po -l app=$DEP --no-headers | wc -l | tr -d ' ') == "$want_pods" ]] && break; sleep 10
 done
 bad=0
 for p in $(kubectl -n $NS get po -l app=$DEP --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'); do
@@ -184,7 +233,7 @@ for p in $(kubectl -n $NS get po -l app=$DEP --field-selector=status.phase=Runni
   line="  $p import_err=$err"
   for f in "${FILES[@]}"; do
     s=$(kubectl -n $NS exec "$p" -c litellm -- sha256sum /app/$f | cut -c1-12)
-    line+=" $f=$([[ $s == "${WANT[$f]}" ]] && echo ok || { bad=1; echo "BAD($s)"; })"
+    if [[ $s == "$(want_of "$f")" ]]; then line+=" $f=ok"; else bad=1; line+=" $f=BAD($s)"; fi
   done
   [[ $err == 0 ]] || bad=1
   echo "$line"

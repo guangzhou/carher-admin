@@ -191,10 +191,61 @@ python3 scripts/litellm-198-retry-policy.py --spec pol.json
   `/model/info` 不分页（现网一次回 1071 行）。读数为空要当成「尺子坏了」而不是「配置是空的」。
   现网（10-31 02:5x）：**332 组、264 个单腿、其中 227 个没有策略行、这 227 里 54 个有兜底链**。
 - `allowed_fails: 3` 是 no-op（= litellm 默认值），单腿组本来就不进按比例冷却。
-- 🔴 **生成类组（歌/视频/图）必须 0 重试**（10-30 已设 web-gemini-music/video/image、muse-video/image，备份
-  `198:/root/litellm-rs-backups/rs_backup_20261030T194501.json`）：服务端重试 = 上游再生成一份、多扣一次额度，
-  客户端 `max_retries=0` 管不到。e2e 实测：歌 300s 超时被重试多出一首；视频忙 429 被重试 5 次（上游收到 6 次）。
-  改后复测视频忙时上游只收到 1 次。以后新加生成类组，加完就照这个 spec 加一行。
+- ⚠️ **生成类组「一律 0 重试」10-31 已推翻，按腿数分两种写法**（原话是
+  「生成类组（歌/视频/图）必须 0 重试」，10-30 对 web-gemini-music/video/image、muse-video/image 全设了全零行）。
+  当时**全部是单腿**，0 重试是对的：服务端重试 = 上游再生成一份、多扣一次额度，客户端 `max_retries=0` 管不到
+  （e2e 实测：歌 300s 超时被重试多出一首；视频忙 429 上游收到 6 次；改后只收到 1 次）。
+  但同一天 `web-gemini-music`/`web-gemini-video` 从 1 腿扩到 **40 腿**，全零行就变成了反向故障：
+  **一个号忙 → 整单直接报给用户，另外 39 个空号一个都不试。**
+
+  **为什么不能靠上游的「同组换号」接住**（10-31 pod 内单变量实测，判据=叶子函数收到的 `model_info.id`）：
+  上游有两条换腿机制，而生成类接口只碰得到其中一条 ——
+
+  | 机制 | 触发条件 | 哪些 call_type 能用 |
+  |---|---|---|
+  | `num_retries` 重试循环 | `model_group_retry_policy` / `num_retries` > 0 | **全部**（每次重试都重新 `async_get_available_deployment` ⇒ 换号） |
+  | weighted intra-group failover（`enable_weighted_failover=True`，现网开着） | 异常上带 `failed_deployment_id` | **只有 chat / responses / anthropic_messages / video** |
+
+  第二条对**图片 / 转写 / 语音（歌）** 根本不触发：`_aimage_generation` / `_atranscription` / `_aspeech`
+  的 except 分支调的是 `_stamp_retry_skip_deployment_id`（只写 `retry_skip_deployment_id`），
+  而 `_maybe_run_weighted_failover` 读的是 `failed_deployment_id`（`router.py:7570`），
+  只有 `_acompletion` / `_ageneric_api_call_with_fallbacks_helper` 走
+  `_stamp_failed_deployment_id_with_effective_model_info` 才会写它。pod 内实测：
+
+      acompletion        failed_deployment_id='leg0'  => 换号生效
+      avideo_generation  failed_deployment_id='leg3'  => 换号生效
+      aspeech            failed_deployment_id=None    => 换号死（只有 retry_skip）
+      aimage_generation  failed_deployment_id=None    => 换号死
+      atranscription     failed_deployment_id=None    => 换号死
+
+  ⇒ 40 腿 `aspeech` 组 + 全零策略行 = **1 次尝试就报错**（实测 attempts=1、distinct=1）；
+  把策略行拿掉（回落 `num_retries=5`）变成 attempts=6、**distinct=6**（6 个不同号）。
+
+  **现在的写法**（10-31 已上线，备份 `198:/root/litellm-rv2ll-backups/retry_policy.before_full.json`）：
+
+  ```jsonc
+  // 多腿生成类组（web-gemini-music / web-gemini-video，各 40 腿）
+  {"DefaultRetries":2,"TimeoutErrorRetries":0,"BadRequestErrorRetries":0,
+   "ContentPolicyViolationErrorRetries":0,"AuthenticationErrorRetries":0}
+  // 单腿生成/转写组（whisper-1 / muse-asr / gemini-transcribe / sa-grok-imagine*）
+  {"DefaultRetries":1,"TimeoutErrorRetries":0,"BadRequestErrorRetries":0,
+   "ContentPolicyViolationErrorRetries":0,"AuthenticationErrorRetries":0}
+  ```
+
+  三条判据，缺一条就别抄：
+  1. **`TimeoutErrorRetries:0` 必须留**：生成类的超时意味着上游很可能已经在生成了，重试 = 多生成一份多扣一次。
+  2. **`BadRequestErrorRetries:0` / `ContentPolicyViolationErrorRetries:0` 必须留**：空文件、坏文件、
+     违规描述重试几次都是同样的 400，只是让用户多等。实测 400 下 attempts=1。
+  3. **`DefaultRetries` 按腿数**：多腿才给 >0（重试落在别的号上 ⇒ 实测 attempts=3、**distinct_accts=3**），
+     单腿给 1（只是容一次瞬时 500，仍然只打同一个号）。单腿组给 2 以上纯属浪费用户的等待时间。
+
+  🔴 **「这个组是单腿还是多腿」现在是决定性输入，而不是注解** —— 数腿的尺子见上一条
+  （必须 `/v2/model/info` 翻页，`/model_group/info` 会把 40 腿读成 1）。
+  以后给生成类组加策略行，先数腿，再从上面两个模板里挑。
+- 🔴 **单腿组没有策略行 = 一条死腿打 6 次**（`num_retries=5`，腿自己 `litellm_params.num_retries` **盖不住**：
+  pod 内实测 `whisper-1` 的腿写着 `num_retries=1`、`muse-asr` 写着 `0`，两者都照样 attempts=6）。
+  10-31 这么中枪的媒体组有 7 个：`whisper-1`、`muse-asr`、`gemini-transcribe`、`sa-grok-imagine`（+`-image`
+  `-image-2.0` `-image-quality`），全部已补行。
 
 ## 1. 写法：只准 `jsonb_set` 一个键
 
@@ -870,8 +921,11 @@ update "LiteLLM_Config" set param_value = jsonb_set(param_value, '{model_group_r
 代价：主腿偶发抖动会更快切走 —— 兜底是同模型（网宿）时可接受；兜底是别家模型时先问用户。
 
 🔴 **整个上游实例停掉的场景更狠**（10-24 kiro 槽位实例演练）：不是慢 30s，而是请求挂 120s+ 直到实例恢复，兜底一次都没走。
-`kiro-slots-*` 组现在全部 `*Retries=0`（兜底是同模型的老 kiro 实例），加新 `kiro-slots-*` 组后跑
-`scripts/kiro-slots-router.py plan|apply` 补兜底行 + 重试 0（见 skill `kiro-rs-slots` §4）。
+10-27 起 kiro 槽位实例的组名是 **`aws-*`**（不再是 `kiro-slots-*`），全部 `*Retries=0`，兜底是**别家模型**（老 kiro 池已死，不再兜它）：
+如 `aws-claude-opus-5-5 → [sa-grok-4.20, anthropic.wangsu5.claude-opus-5]`。新加组用 `aws-groups.py` + `aws-router.py`（skill `kiro-rs-slots` §4.0）；
+`kiro-slots-router.py` 是 10-27 前的旧规则（`kiro-slots-X → kiro-X`），只用于回退。
+🔴 加组 / 改组名后对**整族**审 per-key 表：`litellm-198-key-fallback-add-row.py --audit-prefix aws-`（11-01 漏过 8 组 ~4000 行）。
+kiro 侧 slots49 起整请求 60s 预算用尽 / 429 重试用尽回 **529**（兜底），以前 502 不兜。
 
 ### 10.5 现行 `model_group_retry_policy`（10-15，10 组）
 

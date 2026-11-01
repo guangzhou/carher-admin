@@ -13,7 +13,7 @@
 # 用法
 #   scripts/kiro-rs-ship.sh <镜像tag> <sha256>            # 只送进 242（不碰生产）
 #   scripts/kiro-rs-ship.sh <镜像tag> <sha256> --keep-tarball  # 同上，198 留 ~/kiro-ship/img.tar.gz 给 e2e
-#   scripts/kiro-rs-ship.sh <镜像tag> <sha256> --switch   # 送进 242 + 切生产（停机约 10s）
+#   scripts/kiro-rs-ship.sh <镜像tag> <sha256> --switch   # 送进 242 + 切生产（老实例 Recreate 停机约 10s；--slots 槽位实例 RollingUpdate 零断流）
 #   scripts/kiro-rs-ship.sh <镜像tag> <sha256> --switch --expect-ui '(\.\d{3})\d+/'  # 改了 admin-ui 时必带
 #   scripts/kiro-rs-ship.sh <镜像tag> <sha256> --switch --slots   # 切槽位实例 kiro-rs-slots（:30891）而不是老实例
 #
@@ -133,9 +133,13 @@ EOF
 
 [ "$SWITCH" = 1 ] || { echo "== 未带 --switch：只送进 242，生产没动"; exit 0; }
 
-echo "== 4. 切生产 deploy/${DEPLOY}（Recreate）"
+echo "== 4. 切生产 deploy/${DEPLOY}"
 pool() { env ${POOL_ENV[@]+"${POOL_ENV[@]}"} python3 "$REPO_ROOT/scripts/kiro-pool.py" show 2>/dev/null | grep '^API' | sed 's/^API *//'; }
+# 槽位模式：currentId 本来就会轮换 ⇒ 比「槽名 / 每槽有没有号 / 冷备数」，不比 id（11-01 审计：老判据基本每次误报）
+slots_shape() { ssh "$PROD" 'AK=$(cat ~/kiro-us-egress/.ak); curl -s -m 10 -H "x-api-key: $AK" http://127.0.0.1:'"$ADMIN_PORT"'/api/admin/slots' 2>/dev/null \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["slots"]), "slots", d.get("spare"), "spare", "empty:", ",".join(s["name"] for s in d["slots"] if not s.get("accountId")) or "-")' 2>/dev/null; }
 BEFORE=$(pool); echo "   切前 $BEFORE"
+[ "$SLOTS" = 1 ] && { SB=$(slots_shape); echo "   切前 槽 $SB"; }
 ssh "$PROD" "IMG='$IMG' TAG='$TAG' DEPLOY='$DEPLOY' WAIT='$WAIT' SLOTS='$SLOTS' bash -s" <<'EOF'
 set -euo pipefail
 K="sudo -n kubectl -n kiro-rs"
@@ -156,7 +160,12 @@ echo "   备份 198:$BAK"
 echo "   回滚: sudo kubectl -n kiro-rs set image deploy/$DEPLOY kiro-rs=$OLD seed-config=$OLD"
 EOF
 AFTER=$(pool); echo "   切后 $AFTER"
-[ "$BEFORE" = "$AFTER" ] || echo "⚠️ 池子读数切前切后不同（currentId 在两次读之间自然轮换也会变，人工看一眼）"
+if [ "$SLOTS" = 1 ]; then
+  SA=$(slots_shape); echo "   切后 槽 $SA"
+  [ "$SB" = "$SA" ] && echo "   ✅ 槽数 / 冷备 / 空槽 切前切后一致" || echo "⚠️ 槽形状变了：$SB → $SA（冷备数在两次读之间被消耗/补号也会变，人工看一眼）"
+else
+  [ "$BEFORE" = "$AFTER" ] || echo "⚠️ 池子读数切前切后不同（currentId 在两次读之间自然轮换也会变，人工看一眼）"
+fi
 
 js=$(curl -s -m 8 http://10.68.13.198:$ADMIN_PORT/admin | grep -o '/admin/assets/index-[^"]*\.js' || true)
 [ -n "$js" ] && echo "   Admin UI 200，bundle $js" || echo "⚠️ Admin UI 没拿到 bundle"

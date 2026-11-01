@@ -6,7 +6,7 @@ Run on 198 as cltx (needs slots49+ /slots/config with the `bench` field, i.e. sl
     python3 kiro-slots-bench-apply.py plan.json            # dry-run: prints every row's decision
     python3 kiro-slots-bench-apply.py plan.json --apply    # backup → one PUT → read back and check
 
-plan.json rows (from .work/px31/plan.py): ip, kiroSecs, downMbps, score, rank, of, action, proxyUrl, [slotName], cc.
+plan.json rows (from k8s/kiro-rs/slots/bench-1031/plan.py; the 36-exit re-rank lives in bench/): ip, kiroSecs, downMbps, score, rank, of, action, proxyUrl, [slotName], cc.
   action=existing ⇒ find the slot by exit IP in its name, set bench only (name / proxy / weight / enabled untouched)
   action=new      ⇒ append {name: <cc>-<ip>, proxyUrl, user kiro, password from ~/kiro-px-egress/<n>/pw,
                      enabled: false, weight}. Disabled slots never get an account (reconcile only fills enabled ones).
@@ -106,8 +106,8 @@ def main():
     dup = {x for x in names if names.count(x) > 1} | {x for x in urls if urls.count(x) > 1} | {x for x in ips if ips.count(x) > 1}
     if dup:
         print("STOP duplicates:", sorted(dup)); return 1
-    if len(final) > 50:
-        print("STOP: more than 50 slot rows"); return 1
+    if len(final) > 200:  # slots54+: server cap MAX_SLOT_ROWS = 200
+        print("STOP: more than 200 slot rows"); return 1
     for x in problems:
         print("SKIP", x)
     print(f"current {len(cur)} rows → {len(final)} rows (new {len(new_rows)}, all disabled); enabled stays {sum(r['enabled'] for r in final)}")

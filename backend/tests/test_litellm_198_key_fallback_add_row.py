@@ -58,3 +58,12 @@ def test_audit_groups_by_which_table_the_key_reads():
     assert r["global_table"] == ["empty-table"]
     assert r["per_key_has_row"] == ["has-row"]
     assert sorted(r["missing"]) == ["via-alias", "via-models"]
+
+
+def test_groups_with_prefix_lists_every_reachable_aws_group_once():
+    # 11-01：改名后只审了两组，另外 8 个 aws-* 组缺行没人看见 ⇒ 前缀审计必须把所有能路由到的组都列出来
+    keys = [k("a", ["aws-claude-opus-5-5", "x"], {"opus": "aws-claude-opus-5-5"}, [{"x": ["y"]}]),
+            k("b", [], {"sonnet": "aws-claude-sonnet-5-5", "glm": "aws-glm-5"}, []),
+            k("c", ["aws-*", "all-proxy-models"], {}, [])]
+    assert M.groups_with_prefix(keys, "aws-") == ["aws-claude-opus-5-5", "aws-claude-sonnet-5-5", "aws-glm-5"]
+    assert M.groups_with_prefix(keys, "nope-") == []

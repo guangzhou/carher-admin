@@ -7,11 +7,11 @@ description: >-
   逐号判死活（`scripts/kiro-probe.py`）、接进 198 LiteLLM 21 条 `kiro-*` 道
   （含绕 LiteLLM 重名劫持的别名前缀）、回归压测、回滚。
   改镜像/升上游走三个脚本 `kiro-rs-build.sh`（188 打本仓补丁+测试对照）→ `kiro-rs-ship.sh`（送 242，`--switch` 切生产）
-  → `kiro-rs-e2e.sh`（隔离容器真上游 13 例），补丁真源 `k8s/kiro-rs/patches/`。
+  → `kiro-rs-e2e.sh`（隔离容器真上游 14 例），补丁真源 `k8s/kiro-rs/patches/`。
   Use when 用户说 "kiro 还剩多少额度/credit"、"kiro 支持 xx 模型吗"、"kiro 打不通"、
   "给 kiro 加个模型 / 把 kiro 上的新模型开给大家"、"给 kiro 加个账号 / 把某个号摘掉"、
   "admin 上看不了余额 / 权限不足 403"、"kiro-* 那些道怎么样了"、
-  "升级 kiro.rs / 官方有新版吗 / 新版有什么提升"、"30890 那个 kiro admin 界面 / 改界面 / 排序"、
+  "升级 kiro.rs / 官方有新版吗 / 新版有什么提升"、"30890/30891 那个 kiro admin 界面 / 改界面 / 排序"、
   "Claude Code 走走停停 / opus-5.5 空回复 / 0 token end_turn"、
   "kiro 协议太老 / 11-09 断连 / profileArn is required / 学生号没有 profileArn"、
   或者要给生产 key 授权 `kiro-*` 名字。
@@ -27,9 +27,9 @@ description: >-
 
 | 项 | 值 |
 |---|---|
-| ns / Service | `kiro-rs`。**两个实例**：旧 `kiro-rs` ClusterIP `10.43.109.5:8990`（NodePort 30890）；🔴**加号目标** `kiro-rs-slots` ClusterIP `10.43.170.188:8990`（NodePort 30891，LiteLLM 侧 DB 里的 `kiro-slots-*` 组走 svc `kiro-rs-slots` `10.43.252.245`）。本文下面手搓命令里的 `10.43.109.5` / `deploy/kiro-rs` / `kiro-rs-bootstrap` 都是旧实例，操作 30891 时换成 slots 那三个 |
+| ns / Service | `kiro-rs`。**两个实例**：旧 `kiro-rs` ClusterIP `10.43.109.5:8990`（NodePort 30890）；🔴**加号目标** `kiro-rs-slots` ClusterIP `10.43.170.188:8990`（NodePort 30891，LiteLLM 侧 DB 里的 `aws-*` 组（10-27 前叫 `kiro-slots-*`，旧名现为隐藏别名）走 svc `kiro-rs-slots` `10.43.252.245`）。本文下面手搓命令里的 `10.43.109.5` / `deploy/kiro-rs` / `kiro-rs-bootstrap` 都是旧实例，操作 30891 时换成 slots 那三个 |
 | 节点 | **`aiyjy-litellm-242`**，nodeSelector 硬钉 + toleration `dedicated=new-node:NoSchedule` |
-| 镜像 | 老实例 **`kiro-rs:v2026.10.1-carher-ctxwin`**（0001~0008+0010）；槽位实例 **`v2026.10.1-carher-slots25`**（+0011）。现读：`sudo kubectl -n kiro-rs get deploy -o wide`。自建，**只在 242 本地 containerd**（见 §C）|
+| 镜像 | 老实例 **`kiro-rs:v2026.10.1-carher-ctxwin`**（0001~0008+0010）；槽位实例 11-01 现读 **`v2026.10.1-carher-slots59`**（+0011 起一串，版本史见 skill `kiro-rs-slots`）。现读：`sudo kubectl -n kiro-rs get deploy -o wide`。自建，**只在 242 本地 containerd**（见 §C）|
 | 账号 | 🔴 **一律现读，别信写死的数** —— 一条命令出全表（id / 邮箱 / `authMethod` / 档位 / live 余额 / 在役哪个 / 盘上一致否 / 零重启否）：<br>`python3 scripts/kiro-pool.py show --with-quota`<br>这张表 09-17~09-24 因为手维护漂过两次，**已不再在这里复述池子状态**。不可推导的部分（每个号的加入经过、备份路径、踩过的坑）在 §D4。<br>只留两条常驻事实：**档位已见六种**（FREE **50** / PRO 1000 / **STUDENT 1000** / PRO+ 2000 / PRO MAX 5000 / POWER 10000，跨度 **200 倍** ⇒ **算容量前必读 live cap**，别按某个数硬算；每新加一个号都可能再冒一种）；**`authMethod` 混编且无规律**（idc / social 在 id 轴上交替出现，10-08 加的 21 个里 16 idc + 5 social；**别按 id 区间推 authMethod**，现读 `show` 那一列，两条刷新路行为相反见 §D3 第 0 步）。**盘上 `email` 可能是 null**（social 那种导出形状，id46~52 就是）⇒ 任何按 email 关联账号的脚本都要有第二把判据。重置为**每月 1 日 00:00 UTC** |
 | 档位↔模型 | 🔴 **「升档只买额度不买模型」已被推翻（10-01）** —— 那句话在 PRO+/MAX/POWER/STUDENT 四档之间成立（条数一致），但 **FREE 档只有 9 个模型**，且是付费档的**真子集**。<br>⚠️ **付费档的条数本身会变**：10-01 是 20，10-02 上游新出 `claude-sonnet-5.5`（1.3x，1M/128K）后变 **21** —— **别把条数写成判据，条数不对先查上游是不是出新模型**（见 [[project_kiro_sonnet55_appeared_upstream_no_lane_2026_10_02]]，198 侧至今 0 条道）。<br>FREE 能用：`auto` `claude-haiku-4.5` `claude-sonnet-4` `claude-sonnet-4.5` `deepseek-3.2` `glm-5` `minimax-m2.1` `minimax-m2.5` `qwen3-coder-next`<br>**掉档即失去的 11 个**：`claude-opus-4.5/4.6/4.7/4.8/5/5.5`、`claude-sonnet-4.6`、`claude-sonnet-5`、`gpt-5.6-sol/terra/luna` —— **全部 opus、sonnet-5/4.6 和三条 gpt 都在里面**，即 20 条道里**最贵也最常用的那批**。<br>⇒ 判「某个号能不能跑 opus」**必须看它当下的档位**，不能靠「它以前能跑」。订阅过期/掉 FREE 与「模型没了」是同一件事的两面。 |
 | 出口 | **全部经 `10.68.13.243:8120`**（Astrill Los Angeles → `104.129.16.172`，09-17 19:36 从 8119 Seattle 改指），见 §D2。⚠️**全局唯一，无 per-account 路由**；⚠️ 8118/8119/8120 **三条都与 `chatgpt-acct-*` 共用**（分别 8/7/6 个对象），**没有独占 IP 可选** |
@@ -112,7 +112,7 @@ export KIRO_PROXY_HOSTPORT=127.0.0.1:18120        # ② 只给 kiro-probe.py 改
 | `kiro-admin-ui/verify.sh` | 只读线上（一次 GET /credentials）+ 本机 | **改 Admin UI 先跑它**（10-18 加）：干净上游 admin-ui + 全部 UI 补丁 → tsc/vite → mock 回放 live 池子（写请求一律 403 并计数）→ Playwright 逐条件对条数。见 §C「改 Admin UI」 |
 | `kiro-upstream-probe.py` | **纯只读**（直打 `generateAssistantResponse`，绕过 kiro.rs） | 10-22 加。`dump`（原样打印 HTTP 头 + 每帧全部帧头，不过滤）/ `ruler`（空回复判据 8 场景自校验）/ `gate`（版本 × profileArn 闸门矩阵）。判据门禁 `backend/tests/test_kiro_upstream_empty_verdict.py`（合成帧离线跑；判据改回「缺 metering」会挂）。凭据/出口/指纹复用 `kiro-probe.py`；缺省自动挑一个能回话的启用 idc 号。见 §G |
 | `kiro-slots-watch.py` / `kiro-slots-groups.py` / `kiro-slots-router.py` / `kiro-slots-switch-keys.py` / `kiro-haiku55-groups.py` | 槽位实例五件套（10-24~25） | 观察 / 加 `kiro-slots-*` 组 / 兜底+重试0 / 按 key 切新老 / haiku-5.5 组。用法见 skill `kiro-rs-slots` §4 |
-| `kiro-enable-overage.py` | **写**（Kiro Management API） | 为 social 号批量开启 overage（超额计费）。`<id…>` 按 id 指定 / `all-new` 选未消耗的 social 号 / `--check` 只读验证不写。从 PVC 读凭据 → refresh → `setUserPreference` → `getUsageLimits` 验证。开完自动轮询到 ENABLED（`--wait N`，默认 45s，10-15 实测 ~30s 才翻）；退出码全 ENABLED=0。cap/rate 读 `usageBreakdownList[0]`（10-15 修：之前读错位置恒 None）|
+| `kiro-enable-overage.py` | **写**（Kiro Management API） | 为号批量开启 overage（超额计费）。`<id…>` 按 id 指定 / `all-new` 选未消耗的 social 号 / `--check` 只读验证不写。从 PVC 读凭据 → **按 `authMethod` 分流拿 AT**（`access_token_for()`：social 打 kiro.dev；**IdC 走 kiro.rs 自己的 `POST /credentials/{id}/refresh`（OIDC）再从 PVC 读回新 AT**）→ `setUserPreference` → `getUsageLimits` 验证。开完自动轮询到 ENABLED（`--wait N`，默认 45s，10-15 实测 ~30s 才翻）；退出码全 ENABLED=0。cap/rate 读 `usageBreakdownList[0]`（10-15 修：之前读错位置恒 None）。<br>🔴 **10-30 之前只有 social 一条路** ⇒ IdC 号在这里一律假报 `401 Bad credentials`（号是好的，是脚本缺分支）；IdC 刷新修通后 overage 仍 **403**，那是 IdC 号自身属性（见 §D3 末）|
 
 🔴 **`kiro-lane-add.py` 与 `litellm-198-key-behavior-regress.py` 是 09-29 从 198 盘上
 两个一次性脚本（`~cltx/add-kiro-opus55-lane.py`、`~cltx/o55-keytest.py`）泛化进仓的。**
@@ -335,7 +335,7 @@ ssh <188> "curl -s https://api.github.com/repos/hank9999/kiro.rs/commits?per_pag
 
 | 项 | 值 |
 |---|---|
-| 现役镜像 | 槽位实例 `v2026.10.1-carher-slots25`（10-25，= 0001~0008+0010+0011，换镜像 `kiro-rs-ship.sh … --switch --slots`）；老实例 **`kiro-rs:v2026.10.1-carher-ctxwin`**（10-23 上线，= 0001~0008 + 0010；回滚 tag `v2026.10.1-carher-sticky`，备份 `198:~/kiro-rs-deploy.pre-v2026.10.1-carher-ctxwin.json`）|
+| 现役镜像 | 槽位实例 11-01 现读 `v2026.10.1-carher-slots59`（换镜像 `kiro-rs-ship.sh … --switch --slots`；pod template 有别的改动如加 volume 时 ship 不管，见 skill `kiro-rs-slots`）；老实例 **`kiro-rs:v2026.10.1-carher-ctxwin`**（10-23 上线，= 0001~0008 + 0010；回滚 tag `v2026.10.1-carher-sticky`，备份 `198:~/kiro-rs-deploy.pre-v2026.10.1-carher-ctxwin.json`）|
 | 上游基线 | `hank9999/kiro.rs` master `22f36e69`（v2026.10.1，10-08）|
 | 补丁真源 | **本仓 `k8s/kiro-rs/patches/000N-*.patch`**（按文件名序打；`*.5ca5703.patch` 是旧基线存档，不打）。每个补丁做什么、验证记录 ⇒ 同目录 `README.md` |
 | 构建树（188）| `/Data/kiro-build/kiro-up/`（= 上游 + 补丁，**脚本每次从干净上游重建**）· 干净上游 `kiro-up-pristine/` · 旧基线 `kiro.rs/` `kiro-ws/` `kiro-ui/` 只读留档 |
@@ -405,7 +405,7 @@ scripts/kiro-rs-build.sh <上游sha|tag> <镜像tag>            # 先加 --skip-
 # 2. 送进 242（不碰生产）。🔴 带 --keep-tarball，否则第 3 步结束就删了 198 上的 tarball，e2e 找不到
 scripts/kiro-rs-ship.sh <镜像tag> <sha256> --keep-tarball
 
-# 3. 隔离 E2E：198 docker 起新镜像，单号 + 假 refreshToken，打真上游 13 例（10-16 加 kimi-k3 两例）
+# 3. 隔离 E2E：198 docker 起新镜像，单号 + 假 refreshToken，打真上游 14 例（10-16 加 kimi-k3 两例；10-23 加「超长拒收=Anthropic 原句」，旧镜像必 STOP = 阴性对照）
 scripts/kiro-rs-e2e.sh <镜像tag> --tarball /home/cltx/kiro-ship/img.tar.gz && ssh cltx@10.68.13.198 'rm -rf ~/kiro-ship'
 #    阴性对照：同脚本跑旧 tag，「tool_result 夹图片」和 models 条数应 STOP（10-15 实测旧版 9/11）
 #    加了透传模型 ⇒ 先改 `kiro_rs_e2e_cases.py` 的 EXPECTED_MODELS（10-16 33→34）再跑，否则 models-list 必 STOP
@@ -443,6 +443,12 @@ cargo **不报错只是不跑**，只出一行 `warning: function test_xxx is ne
 - 🔴 **`"$VAR」"` / `"$VAR（"` 在本机 bash 3.2 + UTF-8 下把全角字符首字节吞进变量名** ⇒ `set -u` 报 `VAR�: unbound variable`
   （没 `set -u` 则静默展开成空）。10-18 `ship --expect-ui` 判据已过，却在打印 ✅ 那行崩 rc≠0；198 的 bash 5.1 不复现。
   紧贴中文的变量一律 `${VAR}`；改完跑 `scripts/lint-bash-cjk-vars.py`（10-18 全仓扫出并修了 26 处 / 20 个脚本）。
+- 🔴 **`while read … done < file` 循环体里调 `ssh`/`python3 <脚本>`/`kubectl exec -i`/`curl` 会吞掉剩余输入**
+  ⇒ 循环**在第一条后静默退出**，漏掉的条目连失败都不算。已踩四次（08-20 eip-batch、10-14
+  gemini add-account「ready 1/10 failed: none」、10-26 搜索探针、11-01 kiro 抽样推理 6 组只出 1 组）。
+  修 = 先读进数组 / `read -u 3` / 子调用 `</dev/null`；自查 `scripts/lint-bash-stdin-drain.py`（11-01 新增）。
+  ⚠️ **本机 bash 3.2 没有 `mapfile`** —— 11-01 改用它之后 `command not found` 静默失败、
+  却照样打了「收尾」⇒ 数组用 `while IFS= read -r x; do A+=("$x"); done < f`（循环体不调外部命令就不会吞）。
 - 🔴 透传新模型 = 补丁里**三处**一起加：`PASSTHROUGH_MODELS`（窗口取 catalog `maxInputTokens`）、
   `/v1/models` 一条（`max_tokens` 取 `maxOutputTokens`）、单测（新名 + `kiro-` 前缀 + 一个相近名的阴性对照）。
   先例 `0005-kimi-k3-passthrough.patch`（在 188 构建树上 cp → 断言替换 → `diff -ruN --label` 生成）。
@@ -474,7 +480,7 @@ scripts/kiro-lane-regress.sh --rounds 2
 - 改排序前先拿 live 数据跑同一个比较函数看第 1 页，用户要的是「第一页看到什么」。
   想按「什么时候用完」排 ⇒ 直接用 `lastUsedAt`：`QuotaExceeded` / `InvalidRefreshToken` 禁号时后端写成禁号时刻；`Manual` 不改它。
 - `--expect-ui` 选**补丁新增的中文文案**最稳（vite 不改字符串、上游里 `grep -rF` 0 命中容易核）。0004 用 `(\.\d{3})\d+/`，0006 用 `没有符合条件的凭据`。
-- `kiro-rs-e2e.sh` 13 例全是 API 行为，只改 UI 可跳过（汇报写明）。cargo test 对照仍要过（rust-embed 把 UI 编进二进制）。
+- `kiro-rs-e2e.sh` 14 例全是 API 行为，只改 UI 可跳过（汇报写明）。cargo test 对照仍要过（rust-embed 把 UI 编进二进制）。
 - 镜像 tag 每次起新名（`-sort2`、`-filter`），别复用现役 tag：242 containerd 同名会被覆盖，回滚链就断。
 - 🔴 本机 `pnpm build` 内存紧时 tsc 被 SIGKILL（rc=137，**没有任何报错文字**，像「编译失败」）⇒ `node node_modules/typescript/bin/tsc -b` 直跑（verify.sh 已这样）。
 - 🔴 Playwright 定位 `[aria-live=polite]` 会撞 sonner 的通知区（也是 aria-live）⇒ 带标签名 `span[aria-live=polite]`。
@@ -491,7 +497,7 @@ scripts/kiro-lane-regress.sh --rounds 2
   而且**不给你看清退出码**。必须 `gunzip -c` 管道进去。
 - 242 上 **`crictl` 不在 PATH**，`k3s crictl` 缺 config，只能用
   `k3s ctr -a /run/k3s/containerd/containerd.sock`。
-- `strategy: Recreate` ⇒ **先杀后起**，镜像没预拉成功就是纯停机。先 import 并复核 `images ls`，再 set image（`kiro-rs-ship.sh` 不带 `--switch` 就只做到这步）。
+- 老实例 `kiro-rs` 是 `strategy: Recreate` ⇒ **先杀后起**，镜像没预拉成功就是纯停机（槽位实例 `kiro-rs-slots` 10-26 起是 RollingUpdate maxUnavailable=0 + 租约交接，镜像没进 242 时新 pod 起不来、旧 pod 继续接客）。先 import 并复核 `images ls`，再 set image（`kiro-rs-ship.sh` 不带 `--switch` 就只做到这步）。
 - **两个容器**（`kiro-rs` + `seed-config`）都得改，漏一个 initContainer 会拉不到镜像。
 - 镜像 Dockerfile **只有 CMD 没有 ENTRYPOINT**，只写 `args:` 会让 runc 拿 `-c`
   当可执行文件（`RunContainerError`）；必须同时给 `command: ["./kiro-rs"]`。
@@ -528,6 +534,10 @@ PVC 的正当性由上面那条**已实测**的回写事实支撑。）
   改完用 yaml 比对断言「model_list +1 行、其余行/顶层键逐字相同」再 cutover。
 - 🔴 **kiro 上游拒「没有 `description` 的工具」**：`400 Invalid tool use format`（kimi-k3/glm-5/sonnet-5 同形）。
   探针造工具必带 description，否则会把好道判死（10-16 第一次直打就这么 502 了两发）。
+- 🔴 **同一句 `Invalid tool use format` 还有一个来源：历史 tool_use_id 形状**（10-27）。只认 `[A-Za-z0-9_-]` 且 ≤64 字符；
+  换行/空格/点/冒号/中文/65 字符都整单拒。槽位实例 slots45（补丁 0014）已规整；**老实例 `kiro-rs` 没打 0014**。
+  见到这句 ⇒ `scripts/kiro-fallback-shape-triage.py <alias>`（兜底行 vs 落 kiro 行逐特征对照），候选用
+  `scripts/kiro-tool-shape-probe.py` 直打 kiro.rs 单变量复现。🔴 别经网关测字符规则：LiteLLM 会先把非法字符换成 `_`。
 - 兜底腿不是现成组时先 `/model/new`（**不传 `model_info.mode`**），带 `disable_fallbacks:true` + 函数工具真打过再进链。
 - 兜底链演练（死主腿临时组 + 临时 key 挂 per-key fallbacks，见 skill `litellm-198-fallback-chain` §10.3）：
   两跳都要演，量墙钟；kiro 道加 `model_group_retry_policy {DefaultRetries:1}`（同 §10.4）。
@@ -966,6 +976,21 @@ rm -rf /tmp/kb        # 里面是 live refreshToken
 **10-16 现行收尾（社交/IdC 混批，5 号 ~10 分钟）**：工作目录放仓内 `work-kiro-add-<日期>/`（已 gitignore，别放 /tmp），
 add 完接 `kiro-enable-overage.py <social ids…> --wait 90`（IdC 跳过）→
 `kiro_import_social_rt.py --pool-id <全部新 id>`（10-16 起 IdC 也收）→ 回归 → `rm -rf` 工作目录 → §D4 台账补一行。
+
+🔴 **IdC 号 overage 必 403，这是号的属性不是故障（10-30 定论）。** 两个独立的坑叠在一起过：
+1. `kiro-enable-overage.py` 10-30 之前**只有 social 刷新一条路**，IdC 的 refreshToken 被拿去打
+   kiro.dev 的 social 端点 ⇒ 一律 `401 {"message":"Bad credentials"}`。
+   **证伪腿**：同一份凭据 kiro.rs `POST /credentials/{id}/refresh`（AWS OIDC）**5/5 成功**、
+   `/balance` 读到 KIRO POWER 10000、上游真推理 200 出文本 ⇒ 号是好的，是脚本缺分支。已修。
+2. 刷新修通后 `getUsageLimits`/`setUserPreference` 仍 **403** —— 这套 management 接口用共享
+   `PROFILE_ARN`，BuilderId 个人号对它无权（与「IdC 号无 profileArn 是正常的」同源）。
+   导出里那个 `638616132270:profile/AAAACCCCXXXX` 是占位符不是真 ARN。
+
+**分清这两者唯一靠阳性对照**：同一函数、同一份代码，social 号（id=91/176）回 `ENABLED`，
+IdC 号（id=162/173）回 `ERR:403`。⇒ 函数没坏，是号的类型决定的。
+⚠️ 我中途手搓过一个「只换 ARN」的 A/B，三组全回 `400 UnknownOperationException` ——
+**那是实验搭错了**（端点调用方式不对），不是 ARN 的结论。要测就用脚本自己的函数 + social 阳性对照，别手搓 httpx。
+⇒ **IdC 号 overage 开不了不影响可用**，判活只认 `kiro-upstream-probe.py dump` 的 200 + `empty=False`。
 🔴 **导出 `apiRegion: eu-central-1` 是现在的常态**（10-16 两批 6/6 都是）。`kiro-batch-prepare.py` 已自动丢弃/改写，
 单号 `add` 有闸门拦；**手搓拍平时自己改成 us-east-1**，否则 Admin 余额 403、真推理也打 403 的 region。
 
@@ -1342,6 +1367,26 @@ key 的来源是 `secret/kiro-rs-bootstrap` 的 `config.json`（ns 里**没有**
 | **256** | `elinagilhuly@gmail.com`（**Google social**） | 10-21 00:2x | `add-batch` 自动备份 | 用户贴单份导出（带 `apiRegion: eu-central-1`，筛子已丢弃），七步直通。**`KIRO PRO MAX` 5000**、21 模型，overage `--wait 90` ENABLED（cap 10000）。`--priority 0` 池 246→247，在役 id254 不切。AcctMgr 223→224。回归 21/21；gpt5.6 三道 in_tok +8.4% 同 id248 那次的旧偏离 |
 | **260~262** | `hamitkoyun349@gmail.com`（Google social）+ `wallemondderom` / `wadalebygreaielle@gmail.com`（BuilderId IdC） | 10-21 14:5x | `add-batch` 自动备份（末份 `credentials.json.20261021-145405`） | 用户分两次贴导出（IdC 两份带 `apiRegion: eu-central-1`，筛子已改）。按要求 `--priority 1`，池 250→253，在役 id239（prio 1）不切。id260 `KIRO PRO MAX` 5000、overage ENABLED（cap 10000）；IdC 两个不开超额。AcctMgr 227→230。回归 21/21；gpt5.6 三道 in_tok +8% 同旧偏离 |
 | **275** | `mastanshah70250@gmail.com`（**BuilderId IdC**，非 binus） | 10-22 13:35 | `credentials.json.20261022-133502` | 用户贴单份导出（带 `apiRegion: eu-central-1`，筛子已改成 us-east-1），按 `kiro-account-manager-ops`「只拿到一份导出」七步直通。判重 0 命中，probe `KIRO PRO MAX` 5000 满额、21 模型、`rotated:false`。`add --priority 2` 落地 id275（身份门过），池 265→266、available 27→28，在役 id262 不切（现读 262 余 1396/5000 ⇒ 按 SOP 不动 priority）。⛔ IdC 不开 overage。AcctMgr 242→243（App 未开，现读 `len`+按 email 复核）。回归 **20/21**：`minimax-m2.1` 首发 180s 超时，`--only … --rounds 3` 复打 **3/3**（ttft 151.9/5.6/1.9，in_tok 3709 在基线内）⇒ 上游长尾抖动不是坏道。🔴 **写入 `--priority 2`，10 分钟后现读变成 prio=1**（在役 262 也从 prio=1 漂成 0），又一次 [[feedback_kiro_pool_priority_and_disabled_change_without_us]] |
+| **276~279** | `mdimtij85` / `poovaisvinothkumar` / `sathibabusiva114` / `xp167790`（均 @gmail.com，**BuilderId IdC**） | 10-22 15:0x | `add-batch` 自动备份（`credentials.json.20261022-150633`） | 用户贴 4 份导出（全带 `apiRegion: eu-central-1`，筛子已改 us-east-1）。判重 0 命中，probe **4/4 全 `KIRO PRO MAX` 5000 满额、21 模型、`rotated:false`**（合计新增 20000 credits）。dry-run 对账「加成 4 / 共 4」（probe 产物先 `rm -f *.probe.*`，不让 glob 多吃文件）⇒ `add-batch --priority 1` 4/4，池 266→270、available 23→27，零重启。⛔ IdC 不开 overage。AcctMgr 243→247（App 未开，4 条现读复核）。回归 **21/21 绿**，in_tok 20 条全在基线 ±5%。🔴 在役在本轮里自己从 id275 漂到 id276 又回 275（没执行 priority），同 [[feedback_kiro_pool_priority_and_disabled_change_without_us]] |
+| **295~296** | `ukanhedo@gmail.com` / `aghelaparasv@gmail.com`（**Google social**） | 10-23 10:5x | `add-batch` 自动备份 | 用户贴的导出**只有 `refreshToken`+`provider`，连 email 都没有**。两处脚本缺口当场补：① `kiro-batch-prepare.py` 无 email 时文件名全落 `x.json` 互相覆盖却仍报「写了 2 份」⇒ 改成 `noemail_<machineId前12>` + 撞名即退；② `kiro_import_social_rt.py` 无 email 直接 SKIP（0/2 rc=0）⇒ 改从 `getUsageLimits.userInfo.email` 补，`--pool-id` 时池里没 provider ⇒ 新增 `--provider Google`（不给就落成 Github 标签）。probe 2/2 `KIRO PRO MAX` 5000、21 模型、`rotated:false`。`add-batch --priority 1` 2/2，池 280→282。overage `--wait 90` 2/2 ENABLED（cap 10000）。AcctMgr 257→259。回归 21/21 HTTP 200；`kimi-k3` in_tok +6.5% 偏基线（与加号无关，未查）。在役 id294 在本轮 `QuotaExceeded` ⇒ 服务端自己切到 id295 |
+| **297~298** | `abiotic.human90@icloud.com` / `among.divan6f@icloud.com`（Github social） | 10-23 14:3x | `add-batch` 自动备份 | 标准导出（带 email，`apiRegion=eu-central-1` 已被 prepare 丢弃）。probe 2/2 `KIRO PRO MAX` 5000、21 模型、`rotated:false`。`add-batch --priority 0` 对齐在役 id296，2/2，池 282→284。overage `--wait 90` 2/2 ENABLED（cap 10000）。AcctMgr 259→261。回归 21/21、in_tok 全在基线 ±5% 内。在役仍是 id296，未切 |
+| **299~301** | `kopaczshiplet@gmail.com` / `samybhandari07@gmail.com` / `tashiarives@gmail.com`（**Google social**） | 10-23 14:5x | `add-batch` 自动备份 | 标准导出（带 email/profileArn，region us-east-1）。probe 3/3 `KIRO PRO MAX` 5000、21 模型、`rotated:false`。`add-batch --priority 1`（在役 id296 prio0 当主力，新号作备用）3/3，池 284→287。overage `--wait 90` 3/3 ENABLED（cap 10000）。AcctMgr `--provider Google` 261→264。回归 21/21、in_tok 全在基线 ±5% 内。在役仍是 id296，未切 |
+| **slots#12~13** | `shakhgmail4@gmail.com` / `uchunkiro7@gmail.com`（**Google social**） | 10-24 21:0x | `add-batch` 自动备份 | 进 **slots 实例 30891**。标准导出（`apiRegion=eu-central-1` 已被 prepare 丢弃）。probe 2/2 `KIRO PRO MAX` 5000、22 模型、`rotated:false`。`add-batch --priority 0` 对齐在役 id6，2/2。overage `--wait 90` 2/2 ENABLED。AcctMgr 293→295（回读两号都在）。逐号上游 `dump` 2/2 HTTP 200 `empty=False` |
+| **slots#54~55** | `jjonathon197@gmail.com` / `haltonwatler@gmail.com`（**Google social**） | 10-25 17:3x | `add-batch` 自动备份 | 进 **slots 实例 30891**。标准导出（`apiRegion=eu-central-1` 已被 prepare 丢弃），判重 0 命中（slots 53 + kiro-rs 305）。probe 2/2 `KIRO PRO MAX` 5000、22 模型、`rotated:false`。`add-batch --priority 1` 对齐在役 id11~13。先 id54 单号闭环（池→overage→AcctMgr→上游 dump）再 id55。overage 2/2 `ENABLED`（cap 10000）。AcctMgr 335→337。逐号上游 `dump` 2/2 `HTTP 200 empty=False` |
+| **slots#56~58** | `vinningorizabal` / `yuichiroshioya219` / `sohreuhlman`（@gmail.com，**Google social**） | 10-25 18:2x | `add-batch` 自动备份 | 进 **slots 30891**。导出带 `accessToken`/`expiresAt`/`profileArn`（无 apiRegion），prepare 判 3 新 0 重。probe 3/3 `KIRO PRO MAX` 5000 满额、22 模型、`rotated:false`。在役 id9/11~13 已是 prio 5 ⇒ `--priority 5`。先 id56 闭环再 57~58。overage 3/3 ENABLED，AcctMgr 337→340，逐号上游 3/3 `HTTP 200 empty=False`。⚠️ 用户贴的注释里有邮箱/Outlook 密码，未写入任何文件 |
+| **slots#79** | `ocamposalexanderc307@gmail.com`（**Github social**） | 10-27 11:2x | `add-batch` 自动备份 `credentials.json.20261027-112343-26801` | 进 **slots 30891**。标准导出（region us-east-1，`authMethod=social` `provider=Github`），prepare 判 1 新 0 重（slots 78 + kiro-rs 305）。probe `KIRO POWER` 10000 满额、22 模型、`rotated:false`。在役 id39/40/44 是 prio 5 ⇒ `--priority 5`。overage `--wait 90` ENABLED（cap 10000 rate 0.04）。AcctMgr 360→361（`--provider Github`）。逐号上游 `dump` `HTTP 200 empty=False`（文本='是'）。加号这刻 currentId 仍 34，新号当备用不提前切 |
+| **slots#80** | `buitragovnelsonm08@gmail.com`（**Github social**） | 10-27 16:1x | `add-batch` 自动备份 `credentials.json.20261027-161227-86216` | 进 **slots 30891**。导出带 `accessToken`/`expiresAt`(ISO 串)/`profileArn`，region us-east-1，prepare 判 1 新 0 重（slots 79 + kiro-rs 305）。probe `KIRO POWER` 10000 满额、22 模型、`rotated:false`。在役同时有 prio 0（id79/21，id79 已被人调到 0）和 prio 5（id48/53/59）⇒ `--priority 5` 当备用。overage ENABLED，AcctMgr 361→362（`--provider Github`），逐号上游 `HTTP 200 empty=False` |
+| **slots#81** | `pyrites_seats.12@icloud.com`（**Github social**） | 10-27 17:2x | `credentials.json.20261027-172624-53284` | 进 **slots 30891**。导出 `profileArn` 与 id80 同一个（`…/EHGA3GRVQMUK`），判重仍 1 新 0 重（比 rt_sha/machineId/email）。probe `KIRO POWER` 10000、22 模型。`--priority 5`。overage ENABLED，AcctMgr 362→363（`--provider Github`），逐号上游 `HTTP 200 empty=False` |
+| **slots#82~83** | `lekobissoli67` / `valdinrita`（@gmail.com，**Google social**） | 10-27 17:2x | `credentials.json.20261027-172711-54197` / `…172718-54197` | 进 **slots 30891**。导出只有 email/accessToken/refreshToken/provider（无 region/authMethod），prepare 判 2 新 0 重。probe 2/2 `KIRO POWER` 10000、22 模型。`--priority 5`。overage 2/2 ENABLED，AcctMgr 363→365（`--provider Google`），逐号上游 2/2 `HTTP 200 empty=False`。和 id81 后台链并行跑，互不冲突 |
+| **slots#84** | `albuquerqueodai@gmail.com`（**Google social**） | 10-27 17:3x | `credentials.json.20261027-173623-61509` | 进 **slots 30891**。导出只有 email/accessToken/refreshToken/provider，判 1 新 0 重。probe `KIRO POWER` 10000、22 模型。`--priority 5`。overage ENABLED，AcctMgr 365→366（`--provider Google`），逐号上游 `HTTP 200 empty=False` |
+| **slots#85~86** | `kainanmalles` / `mfranci705`（@gmail.com，**Google social**） | 10-27 17:4x | `credentials.json.20261027-174353-67443` / `…174400-67443` | 进 **slots 30891**。判 2 新 0 重。probe 2/2 `KIRO POWER` 10000、22 模型。`--priority 5`。overage 2/2 ENABLED，AcctMgr 366→368（`--provider Google`），逐号上游 2/2 `HTTP 200 empty=False`。🔴 第一遍把 id 放进 `$IDS` 变量传参，zsh 不拆词 ⇒ 后三步拿到 `"85 86"` 一个参数、全部静默无输出；改成直接写 id 重跑才过 |
+| **slots#87** | `giesbrechttacke@gmail.com`（**Google social**） | 10-27 19:4x | `credentials.json.20261027-194042-10626` | 进 **slots 30891**。导出带 `profileArn`（又是 `…/EHGA3GRVQMUK`，同 id80/81），判 1 新 0 重。probe `KIRO POWER` 10000、22 模型。`--priority 5`。overage ENABLED，AcctMgr 368→369（`--provider Google`），逐号上游 `HTTP 200 empty=False` |
+| **slots#89~92** | `asubuhishule57` / `calebmorga9` / `glorymartty` / `sekesekenyingi`（@gmail.com，**Google social**） | 10-27 20:3x | `credentials.json.20261027-2037{22,30,39,47}-52710` | 进 **slots 30891**。导出带 `apiRegion=eu-central-1`（prepare 已丢弃回落 us-east-1）+ 同一 `profileArn …/EHGA3GRVQMUK`，判 4 新 0 重。probe 4/4 `KIRO POWER` 10000、22 模型。`--priority 5`。overage 4/4 ENABLED，AcctMgr 370→374（`--provider Google`），逐号上游 4/4 `HTTP 200 empty=False`。slots#88 不是本会话加的 |
+| **slots#94** | `jikojikoni31@gmail.com`（**Google social**） | 10-27 21:2x | `credentials.json.20261027-212555-85551` | 进 **slots 30891**。导出带 `apiRegion=eu-central-1`（已丢弃）+ `profileArn …/EHGA3GRVQMUK`，判 1 新 0 重。probe `KIRO POWER` 10000、22 模型。`--priority 5`。overage ENABLED，AcctMgr 375→376（`--provider Google`），逐号上游 `HTTP 200 empty=False`。slots#93 不是本会话加的 |
+| **slots#128~129** | `crearmorcos` / `zborilj238`（@gmail.com，**Google social**） | 10-28 12:3x | `credentials.json.20261028-1238{08,16}-86680` | 进 **slots 30891**。导出只有 refreshToken/authMethod/provider/apiRegion=eu-central-1（已丢弃）/email，判 2 新 0 重。probe 2/2 `KIRO POWER` 10000、22 模型。`--priority 5`。overage 2/2 ENABLED，AcctMgr 409→411（`--provider Google`），逐号上游 2/2 `HTTP 200 empty=False`。slots#95~127 不是本会话加的 |
+| **slots#130** | `katariinabutta@gmail.com`（**Github social**） | 10-28 14:4x | `credentials.json.20261028-144933-94181` | 进 **slots 30891**。导出**自带 `machineId`**（UUID 形，prepare 没派生、原样保留）+ `apiRegion=eu-central-1`（已丢弃），判 1 新 0 重。probe `KIRO POWER` 10000、22 模型。`--priority 5`。overage ENABLED，AcctMgr 411→412（`--provider Github`），逐号上游 `HTTP 200 empty=False` |
+| **slots#131~133** | `kertzseider754` / `runnerrichrdson441` / `yanduradovey`（@gmail.com，**Google social**） | 10-28 17:5x | `credentials.json.20261028-1755{35,44,53}-13846` | 进 **slots 30891**。导出只有 refreshToken/authMethod/provider/apiRegion=eu-central-1（已丢弃）/email，判 3 新 0 重。probe 3/3 `KIRO POWER` 10000、22 模型。`--priority 5`。overage 3/3 ENABLED，AcctMgr 412→415（`--provider Google`），逐号上游 3/3 `HTTP 200 empty=False` |
+| **slots#134~135** | `doreallen410` / `vardarokushin`（@gmail.com，**Google social**） | 10-28 19:4x | `credentials.json.20261028-1944{29,36}-21844` | 进 **slots 30891**。用户贴的是**两个裸对象**（不是 JSON 数组），手动包成 list 再进 prepare；导出带 `expiresAt`(ISO)/`profileArn`、无 apiRegion，判 2 新 0 重。probe 2/2 `KIRO POWER` 10000、22 模型。`--priority 5`。overage 2/2 ENABLED，AcctMgr 415→417（`--provider Google`），逐号上游 2/2 `HTTP 200 empty=False` |
 | ⛔ **darren.philipsintoro**（进不了池） | — | 10-13 入 AcctMgr | — | **AWS 把号封停了**：探针 403 `Your User ID (b4b89498-…) temporarily is suspended. We've locked your account as a security precaution.`，指向 `app.kiro.dev/account/usage?support_form` 提工单验证身份 ⇒ 自动化救不了。这解释了它为何只在 AcctMgr（token 还活）却从来没进池 |
 | ⏳ **nur.inayah**（待凭据） | — | — | — | 两边都没有。飞书直连查（`record_scope=all_records` `field_scope=all_fields`）确认「新Kiro密码/新2fa/新邮箱密码」三栏全空，只有原始的 `密码` + `2fa`。密码能过（登录到了 MFA 页）但**那个 seed 被 AWS 拒**（反复填码不过）⇒ 2FA 大概换过没回填。另：它「邮箱密码」栏是转发邮箱地址不是密码 ⇒ 无邮箱取码能力 |
 

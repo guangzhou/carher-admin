@@ -1,7 +1,9 @@
 #!/bin/bash
 # Build + apply one in-cluster egress proxy per kiro slot for the acct2 mihomo ports (10-28).
-# Run on 198 as cltx:  bash kiro-px-egress.sh <198 local port> <expected exit IP>
+# Run on 198 as cltx:  bash kiro-px-egress.sh <198 local port> <expected exit IP> [acct2 node name]
 #   e.g. bash kiro-px-egress.sh 18891 203.231.254.184
+#   n = port - 18890 (kiro-px-1..5 = 18891..18895, kiro-px-16..39 = 18906..18929); an existing kiro-px-<n> whose
+#   kiro-egress-ip label differs from <expected exit IP> ⇒ STOP (never silently repoint a slot's exit).
 # Same shape as kiro-us-egress.yaml: separate Deployment/Service/NetworkPolicy `kiro-px-<n>` per port, so
 # re-pinning one never restarts another. The node is whatever 198:~/mihomo-harness/acct2 pins that port to
 # (single node ⇒ fixed IP). Proxy password per port in ~/kiro-px-egress/<n>/pw (0600), node credentials only

@@ -2,6 +2,13 @@
 # Verify kiro-px-<n> proxies from inside the cluster (on 242), then add each as a slot and run slot tests.
 # Run on 198 as cltx:  bash kiro-px-verify.sh "18891:203.231.254.184:3" ["18892:49.157.61.223:3" ...]
 # Each arg = <198 port>:<expected exit IP>:<weight>. Per port prints OK/STOP + reason; stops at the first STOP.
+# The port is only the numbering key: proxy = kiro-px-<port-18890> (also for nodes with no 198 listener, e.g. 36~39).
+# Slot name = <country code>-<exit IP> from ipinfo through the proxy; ipinfo GB is written as uk- to match the live
+# uk-213.255.246.28 / uk-185.245.83.24 (renaming a slot later clears its user bindings).
+# Adds the slot ENABLED (takes a cold-spare account at once). To add without an account use kiro-slots-bench-apply.py
+# (appends disabled). Admin key = ~/kiro-us-egress/.ak (same value as adminApiKey in the slots pod config.json).
+# 🔴 No concurrency gate: GET → PUT of the whole slot list; don't run it while someone edits slots in the Admin page.
+# The "槽N" it prints = config row index + 1, not the page's card number (cards only count enabled slots).
 set -uo pipefail
 K="sudo -n kubectl -n kiro-rs"
 AK=$(cat ~/kiro-us-egress/.ak)
@@ -47,7 +54,7 @@ print(("STOP " + "; ".join(bad)) if bad else f"OK ip={want} kiro={q[2]}s/{a[2]}s
 EOF
 )
   # slot name = <country code>-<exit IP>, same as jp-/sg-/us-/uk- slots; country measured through the proxy itself
-  CC=${R##* cc=}; SLOT=$CC-$IP
+  CC=${R##* cc=}; [ "$CC" = gb ] && CC=uk; SLOT=$CC-$IP   # ipinfo says GB; live slots use uk- (uk-213…, uk-185…)
   echo "$SLOT probe: $R"; case "$R" in OK*) ;; *) exit 1;; esac
   [ ${#CC} = 2 ] || { echo "$IP STOP: no country code from ipinfo ($CC)"; exit 1; }
   curl -s -m 10 -H "x-api-key: $AK" $B/slots/config > /tmp/px-cur.json

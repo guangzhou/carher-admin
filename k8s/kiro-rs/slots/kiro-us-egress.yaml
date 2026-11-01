@@ -1,6 +1,9 @@
-# US egress proxy for one kiro slot (10-28). mihomo with 5 US nodes from the iGuge subscription,
-# `fallback` group in a fixed order: it stays on the first healthy node, so the slot's exit IP only
-# changes when that node is down (unlike url-test, which keeps hopping to the fastest one).
+# US egress proxy for one kiro slot (10-28). mihomo pinned to ONE iGuge node, `US - 美国鲨鱼2 - 06`
+# (exit 170.178.173.10), so the slot's IP never changes.
+# 10-30: was a 5-node `fallback` group; 3 of its backups (圣何塞-04 / 洛杉矶-02 / 洛杉矶-09) rotate exit IPs
+# (30-min test 10-29), so a failover would have silently changed the slot's IP. Now: node down => slot down,
+# disable it in Admin. Fixed-IP replacements with Kiro latency/speed measured 10-30: 西雅图-03 172.83.155.68
+# (1.35s, 50Mbps), 美国-01 64.118.153.83 (1.54s, 42Mbps). Backup of the old config: 198 ~/kiro-us-egress/*.pre-pin-*.
 # Config + node credentials + proxy password live in Secret kiro-us-egress (generated on 198 under
 # ~/kiro-us-egress/, not in git). Only kiro-rs-slots pods can reach it (NetworkPolicy), and it needs
 # user `kiro` + password even then. The slot in Admin: http://kiro-us-egress.kiro-rs.svc:7890.

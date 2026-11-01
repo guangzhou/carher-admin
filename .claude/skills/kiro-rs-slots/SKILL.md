@@ -313,14 +313,10 @@ Kiro 按 token 计 credit：10-25 实测 4 个能算的号**每百万输入 toke
   改一个出口的节点：198 上改 `~/kiro-*-egress/config.yaml`（`proxies` 只留一个、`listeners[].proxy`/`rules` 指它）→ `docker run … mihomo -t` 验 → `kubectl create secret … --dry-run | apply` → `rollout restart`（maxUnavailable 0，零中断）→ 集群内探针 5 次出口 IP + Kiro 404 + 无密码 407 → `POST /slots/<i>/test` 三发。
   选节点只用「30 分钟 IP 不变」的（清单 `.work/shellcrash/ipdrift-summary.txt`），会变的：日本01/日本原生05/洛杉矶02/圣何塞04/洛杉矶09/洛杉矶13/香港12。
   10-30 全 12 槽出口实测都固定（槽 1~5 squid/243 用 `api.ipify.org` 测，ipinfo 不在 squid 白名单会 FAIL）。
-  **10-31 起有 25 个 `kiro-px-<n>`**：1~5 在槽 8~12；**16~35 是 10-31 新建的备用出口（20 个，未加进 Admin）**，对应 198 acct2 端口 `18890+n`，清单 `.work/shellcrash/31-proxies.md`。
-  加成槽：`bash ~/kiro-px-verify.sh "<18890+n>:<出口IP>:<权重>" …`（探针 + 加槽 + 三发测试，槽名自动 `国家码-IP`）。`kiro-px-egress.sh` 的 n = 端口 − 18890（10-31 起，原来取端口末位只能到 9）。
-  **10-31 起有 25 个 `kiro-px-<n>`**：1~5 在槽 8~12；**16~35 是 10-31 新建的备用出口（20 个，未加进 Admin）**，对应 198 acct2 端口 `18890+n`，清单 `.work/shellcrash/31-proxies.md`。
-  加成槽：`bash ~/kiro-px-verify.sh "<18890+n>:<出口IP>:<权重>" …`（探针 + 加槽 + 三发测试，槽名自动 `国家码-IP`）。`kiro-px-egress.sh` 的 n = 端口 − 18890（10-31 起，原来取端口末位只能到 9）。
+  **现有 kiro-px-1~5、16~39**（36~39 是 11-01 给 muse 也在用的 4 个节点另建的 kiro 专用份）；都已在 Admin 配置里（10-31 起，生效与否看现量）。`kiro-px-egress.sh` 的 n = 端口 − 18890。
   **盯出口 IP 变没变**：`k8s/kiro-rs/slots/kiro-egress-ip-watch.sh`（198 上跑；从 Admin 现读所有 `*.kiro-rs.svc:7890` 的槽，期望 IP = 槽名后缀，阿里云 squid 槽不管）。
   `nohup setsid bash ~/kiro-egress-ip-watch.sh --rounds 20 --interval 1800 > ~/kiro-egress-watch/run.log 2>&1 &`；变了 run.log 出 `ALERT`；汇总 `bash ~/kiro-egress-ip-watch.sh --summary`。
-- **另一种出口来源：机场节点（iGuge 订阅 → 198 上 mihomo，skill `cli-anything-mihomo`）**。10-28 已备 8 个候选出口（美/英/韩/菲/新×2/德等，现量 `cli-anything-mihomo instance list` + `-a <账户> exit table`），**都还没接进 30891**：
-  它们只听 198 的 127.0.0.1，kiro-rs-slots 在 242 连不到 ⇒ 先做 k3s Deployment+ClusterIP+每端口密码（动生产先问）。
+- **机场节点来源（iGuge 订阅 → 198 上 mihomo，skill `cli-anything-mihomo`）**：198 上的 mihomo 只听 127.0.0.1，**不直接给槽用**；槽用的是 §1.1 的集群内代理（每个从 198 的 acct2 配置里抽出单节点生成）。
   handoff 用脚本现量生成：`scripts/mihomo-198.sh handoff acct2 18891-18895 --out …`（`--no-country` 不写国家；现状 `scripts/mihomo-198.sh status`）；已出三份在 `.work/handoff/kiro-slots-*-handoff.md`。
   和阿里云 squid 槽的差别：多人共用 IP（风控可能更差）、延迟 +0.4~2.3s（日本槽 0.61s 对照）、节点挂了槽就挂 ⇒ 权重 1~3 起步。🔴 选国家只认出口 IP（节点名会骗人），没有印度/越南/加拿大/澳大利亚。
   改 ACL：先 `squid -k parse` 在 pod 里验新文件 → apply CM（~5s 同步进 pod）→ **逐个 `kubectl exec <pod> -- kill -HUP 1`** 热加载

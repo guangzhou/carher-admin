@@ -15,12 +15,18 @@
 
     export LITELLM_MASTER_KEY=...
     python3 S --audit --group G                               # 只读：谁能路由到 G 但 per-key 表缺 G 行
+    python3 S --audit-prefix aws-                             # 只读：所有 aws-* 组一次审完，每组一行
     python3 S --group G --target T1 --target T2               # dry-run
     python3 S --group G --target T1 ... --limit 1 --apply --backup f.json
     python3 S --group G --target T1 ... --apply --backup f.json
     python3 S --restore f.json --apply                        # 回滚（整表恢复为快照）
 
 全局行写完后必跑 ``--audit``：缺行的 key 在 G 挂掉时**零兜底且零报错**。
+
+🔴 **改组名 / 新加 aws-* 组之后，对所有 aws-* 组都要审，不是只审刚改的那个**：
+``--audit-prefix aws-`` 一次列出全部。10-28 kiro 改名 aws-* 只补了 opus/sonnet-5-5 两组（743 把），
+11-01 才发现另有 8 个 aws-* 组各缺 ~4000 行。组清单取自「key 的 models + aliases 值」里匹配前缀的名字
+（没有任何 key 路由到的组不需要行，自然不在清单里）；models 含通配 / all-proxy-models 的 key 不算「能路由到」。
 """
 from __future__ import annotations
 
@@ -100,6 +106,15 @@ def audit(keys: list[dict], group: str) -> dict[str, list[str]]:
     return out
 
 
+def groups_with_prefix(keys: list[dict], prefix: str) -> list[str]:
+    """所有 key 能路由到的、名字以 prefix 开头的组（models + aliases 的值；通配名不算）。"""
+    names = set()
+    for k in keys:
+        names.update(k.get("models") or [])
+        names.update((k.get("aliases") or {}).values())
+    return sorted(n for n in names if isinstance(n, str) and n.startswith(prefix) and "*" not in n)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--group")
@@ -112,9 +127,26 @@ def main() -> int:
     ap.add_argument("--backup")
     ap.add_argument("--restore")
     ap.add_argument("--audit", action="store_true", help="只读：按读哪张表分组，列出缺行的 key，有缺行 exit 1")
+    ap.add_argument("--audit-prefix", metavar="P",
+                    help="只读：审计所有名字以 P 开头、有 key 能路由到的组（如 aws-），每组一行，任一组缺行 exit 1")
     a = ap.parse_args()
     if not MASTER:
         sys.exit("FATAL: LITELLM_MASTER_KEY not set")
+
+    if a.audit_prefix:
+        keys = all_keys()
+        groups = groups_with_prefix(keys, a.audit_prefix)
+        if not groups:
+            sys.exit(f"FATAL: no group matching {a.audit_prefix!r} is reachable by any key -- wrong prefix or broken read")
+        total = 0
+        for g in groups:
+            r = audit(keys, g)
+            total += len(r["missing"])
+            print(f"{'MISSING' if r['missing'] else 'OK':7} group={g} global_table={len(r['global_table'])} "
+                  f"per_key_has_row={len(r['per_key_has_row'])} missing={len(r['missing'])}"
+                  + (f"  e.g. {r['missing'][:3]}" if r["missing"] else ""))
+        print(f"prefix={a.audit_prefix} groups={len(groups)} missing_rows_total={total}")
+        return 1 if total else 0
 
     if a.audit:
         if not a.group:

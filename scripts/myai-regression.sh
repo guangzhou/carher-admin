@@ -53,7 +53,8 @@ die()  { echo "ERROR: $*" >&2; exit 2; }
 note() { echo "[regression] $*"; }
 
 command -v git >/dev/null || die "缺 git"
-[ -d "$REPO/.git" ] || die "没有本地仓库 $REPO"
+# worktree 里 .git 是文件不是目录，`-d` 会把它误判成「没有仓库」⇒ 用 git 自己判
+git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "没有本地仓库 ${REPO}"
 
 # ---------- 本地测试 PG ----------
 # 🔴 端口不能只看 docker：15432 曾被别的会话的 ssh -L 隧道占着，docker 的监听排在后面，
@@ -243,6 +244,12 @@ gate_one() {
   if [ "$branch" = "@HEAD" ]; then
     wd="$(pwd)"
     git -C "$wd" rev-parse --git-dir >/dev/null 2>&1 || wd="$REPO"
+    # 11-01 踩坑：在 carher-admin 根目录跑，pwd 也是个 git 仓 ⇒ 静默拿 carher-admin 去跑 pytest，
+    # 报的是「operator 包名冲突」这种和 myai 毫无关系的错。不是 myai 仓（没有 backend/main.py）就退回 REPO。
+    if [ ! -f "$wd/backend/main.py" ]; then
+      echo "[regression] 当前目录 $wd 不是 myai 仓，改用 REPO=${REPO}" >&2
+      wd="$REPO"
+    fi
     branch="$(git -C "$wd" rev-parse --abbrev-ref HEAD)"
   else
     wd="$(worktree_for "$branch")"

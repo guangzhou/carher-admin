@@ -5,6 +5,8 @@
 
 | 版本 | 上线（北京） | 改动 | 回滚注意 |
 |---|---|---|---|
+| slots62 | **已构建未上线**（11-02 01:48，188 有 tarball） | 槽上挂「停用 / 退役 / FREE」号 ⇒ 每 30s 巡检当场换冷备号，冷备不够摘成空槽（`sweep_dead_slots`）；测试测出 402 额度用尽 ⇒ 当场退役换号（结果带 `replacedWith`）；`report_failure / report_refresh_* / report_quota_exhausted` 停号后立即巡检。🔴 仓库 0011 补丁 e2d426c5 起就含这些，**现网仍是 slots61** | 上线前先修 ui61 回归的 2 处（footer 盖住最后 8~24px、批量验活按钮初始在视口外） |
+| slots61 | 11-02 01:15 | 弹窗统一封顶视口高度、DialogBody + sticky DialogFooter；下拉菜单按可用高度滚；抽屉 max-h-dvh；槽位配置保存栏 sticky | |
 | slots60 | 11-01 19:20 | 设置 → 槽位配置表加「槽号」列（= 卡片编号，按槽名对运行时 index+1；停用显示「—」）+ 该槽现在的号 #id · 档位；可按槽号排序 | |
 | slots59 | 11-01 12:24 | 账户「批量启用/停用」`POST /credentials/disabled-batch`（在槽停用即换冷备号，冷备不够摘成空槽；启用清失败计数、去退役、补空槽；全部跳过也发请求以自愈）；单个停用同样摘空槽；交接中拒写；状态筛选「启用且不在用」；`slotEligible` 字段；「代理余额」卡片 `GET /egress/quota`（Secret `kiro-egress-subs`）| 🔴 pod template 加了 volume `egress-subs`（json patch，不是 ship）。回 slots58 及以前 `set image` 即可，volume 留着无害（optional）。整份回滚 `kubectl replace -f 198:~/kiro-rs-slots-deploy.pre-slots59-20261101T122329.json` |
 | slots58 | 未上线 | = slots59 去掉 review 修复（重定向 / 自愈发请求） | — |

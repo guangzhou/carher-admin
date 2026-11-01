@@ -16,7 +16,7 @@ key 日额度（claude-code-* $70/天、cursor-* $100/天，北京 0 点重置�
    ``ModifyResponseException``（路由对它有原生 200 + stream 处理；
    ``litellm_params.mock_response`` 在该路径返回非流式对象，与 Claude Code 的
    stream:true 错配）。
-② 总额度、以及本次请求模型所属的系列桶（cursor = 高配 Opus/Astra），已用跨过
+② 总额度、以及本次请求模型所属的系列桶（cursor = 高配 Astra/Kimi-K3），已用跨过
    80% / 95%（2026-10-20 起双档，`BUDGET_NOTICE_WARN_RATIOS` 可调）且未满 ——
    每 (桶, 档位) 每北京日提醒一次，附 cye 同款「今日累计 + 按模型」表；系列桶跨档时
    一并列出满后仍可用的模型。④ 系列桶用完的拦截文案列出全部可用模型。
@@ -42,6 +42,9 @@ key 日额度（claude-code-* $70/天、cursor-* $100/天，北京 0 点重置�
    Cursor key 使用 Claude 家族（Fable/Opus/Sonnet/Haiku）$100、其他所有模型
    （含 GPT-5.3、gpt/deepseek/glm…）共用 $500；其他 gated key 仍保留 GPT-5.3
    独立桶 $200（env 可调、key metadata 可按人覆盖）。
+   2026-10-14 起 cursor key 实际走的是高配桶（见 `_PREMIUM_FAMILY_RULES`），上面那套
+   claude/other 桶只在高配前缀关掉时回滚用；2026-11-02 用户：Opus 移出高配桶，
+   只受 key 总额约束 ⇒ cursor key 打 opus 不归任何系列桶。
    litellm 原生 model_max_budget 精确匹配无系列桶且滚动 24h 窗，故自建：
    success 事件按 (family, token, 北京日) redis 累加，pre_call 查桶超限出
    200 mock「该系列额度已用完，其他系列不受影响」。/查余额 附带各系列用量。
@@ -71,8 +74,10 @@ BUDGET_FAMILY_ENABLED=1                        启用 ④ 系列额度（默认�
 BUDGET_FAMILY_GPT53_USD=200                    非 Cursor gated key 的 GPT-5.3 限额
 BUDGET_FAMILY_CLAUDE_USD=100                   ④ Claude 家族每日限额
 BUDGET_FAMILY_OTHER_USD=500                    ④ 其他所有模型每日限额（Cursor 含 GPT-5.3）
-BUDGET_FAMILY_PREMIUM_KEY_ALIASES=a,b          ④ 只限高配（Opus 系列 + gpt-6-astra 共用一桶）
+BUDGET_FAMILY_PREMIUM_KEY_ALIASES=a,b          ④ 只限高配（gpt-6-astra + kimi-k3 共用一桶）
                                               的精确名单；未设=只 cursor-liuguoxian-std
+                                              （2026-11-02 用户：Opus 移出高配桶，只受 key
+                                              总额约束）
 BUDGET_FAMILY_PREMIUM_KEY_PREFIXES=cursor-     ④ 高配规则的前缀放量；未设=cursor-（10-14 起
                                               全部 cursor key）；设成空串=退回 claude/other 桶
 BUDGET_FAMILY_PREMIUM_RATIO=0.5                ④ 高配桶额度 = key 每日总额 × 该比例
@@ -1432,7 +1437,7 @@ def _allowed_names(user_api_key_dict: Any) -> List[str]:
 async def _available_models(user_api_key_dict: Any, blocked: str) -> List[str]:
     """``blocked`` 这个系列桶满了以后，这把 key 白名单里**还能打**的聊天模型。
 
-    还能打 = 不归任何系列桶（高配规则下 Opus/Astra 之外全是这种），或归另一个
+    还能打 = 不归任何系列桶（高配规则下 Astra/Kimi-K3 之外全是这种），或归另一个
     **还没满**的桶。key 总额（max_budget）满了时 ③ 先拦，走不到这里。
     白名单为空（= 不限制）返回 []：几百个组列出来没有意义，文案退回「其他模型不受影响」。
     """
@@ -1841,8 +1846,10 @@ _FAMILY_DEFAULT_USD = {"gpt53": 200.0, "claude": 100.0, "other": 500.0, "premium
 # Cursor 专属规则：GPT-5.3 不再单独计账，直接进入 other。
 _CURSOR_FAMILY_RULES = tuple(rule for rule in _FAMILY_RULES if rule[0] != "gpt53")
 
-# 高配规则（2026-10-12 用户点名）：**只**限 Opus 系列 + gpt-6-astra，两者共用一个桶；
-# 其余模型（含 sonnet/haiku）不记账不拦，只受 key 自身 max_budget 约束。
+# 高配规则（2026-10-12 用户点名）：**只**限 gpt-6-astra；2026-10-24 用户：kimi-k3
+# 也进这个桶（共用、额度不变；kimi-k2.7-code 不算）。
+# 2026-11-02 用户：Opus 移出高配桶，只受 key 总额约束。
+# 其余模型（含 opus/sonnet/haiku）不记账不拦，只受 key 自身 max_budget 约束。
 # 按 key 名放量而不是 metadata：记账路径（async_log_success_event）只拿得到
 # alias/hash，拿不到 key metadata，用 metadata 选规则会让执法和记账各认各的桶。
 # 默认名单写死一把（同 _DEFAULT_ALIASES 的灰度写法），设了 env 就以 env 为准。
@@ -1852,10 +1859,15 @@ _PREMIUM_DEFAULT_ALIASES = frozenset({"cursor-liuguoxian-std"})
 _PREMIUM_DEFAULT_PREFIXES: Tuple[str, ...] = ("cursor-",)
 _PREMIUM_DEFAULT_RATIO = 0.5
 _PREMIUM_MODEL_RE = _re.compile(
-    r"(?:^|[-_./])(?:opus(?=$|[-_./0-9])|gpt-6-astra(?=$|[-_./]))"
+    # kimi-k3 覆盖公开名和全部落点：kiro-kimi-k3 / kiro-slots-kimi-k3 /
+    # kimi-official-k3（兜底腿）/ claude-kimi-k3 / sa-kimi-k3-responses。
+    # 2026-11-02 用户：Opus 移出高配桶，只受 key 总额约束 ⇒ 这里不再匹配 opus，
+    # cursor key 打 opus 之后不归任何系列桶（不记账、不拦）。
+    r"(?:^|[-_./])(?:gpt-6-astra(?=$|[-_./])"
+    r"|kimi-k3(?=$|[-_./])|kimi-official-k3(?=$|[-_./]))"
 )
 _PREMIUM_FAMILY_RULES = (
-    ("premium", "高配模型(Opus/Astra)",
+    ("premium", "高配模型(Astra/Kimi-K3)",
      lambda m: bool(_PREMIUM_MODEL_RE.search(m))),
 )
 
@@ -2338,7 +2350,8 @@ async def _release_daily(token: str, slot: str = "") -> None:
 
 # ---------------------------------------------------------- ② 多档提醒决策
 #
-# 2026-10-20 用户定：总额度与系列桶（cursor = 高配 Opus/Astra）各在 80% / 95% 提醒一次，
+# 2026-10-20 用户定：总额度与系列桶（cursor = 高配 Astra/Kimi-K3）各在 80% / 95% 提醒一次，
+# 2026-11-02 用户：Opus 移出高配桶，只受 key 总额约束。
 # 提醒里附 cye 同款「今日按模型」表；系列桶跨档时提前列出满了之后还能用的模型。
 #
 # 去重粒度 = (桶, 档位, key, 北京日)。一步从 70% 跳到 96% 只发 95% 那条，并把 80%

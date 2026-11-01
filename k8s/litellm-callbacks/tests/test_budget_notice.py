@@ -1890,18 +1890,30 @@ class FamilyBudgetTest(unittest.TestCase):
         out = self._pre_fam(d, "acompletion", key=key)
         self.assertIn("GPT-5.3 系列 额度已用完", out.get("mock_response", ""))
 
-    # ---- 高配桶（2026-10-12）：只限 Opus 系列 + gpt-6-astra，共用一桶 ----
+    # ---- 高配桶（2026-10-12；10-24 加 kimi-k3；11-02 移出 Opus）：只限
+    #      gpt-6-astra + kimi-k3，共用一桶 ----
     PREMIUM = "cursor-liuguoxian-std"
 
-    def test_premium_matcher_only_opus_and_astra(self):
+    def test_premium_matcher_only_astra_and_kimi(self):
         k = _Key(alias=self.PREMIUM)
-        for m in ("kiro-claude-opus-5-5", "claude-opus-5-5", "kiro-claude-opus-4-6",
-                  "anthropic.claude-opus-4-8", "anthropic.wangsu5.claude-opus-5",
-                  "chatgpt-gpt-6-astra", "gpt-6-astra"):
+        for m in ("chatgpt-gpt-6-astra", "gpt-6-astra",
+                  # 2026-10-24 kimi-k3 进高配桶：公开名 + 198 上全部实际落点
+                  "kimi-k3", "kiro-kimi-k3", "kiro-slots-kimi-k3", "kimi-official-k3",
+                  "claude-kimi-k3", "cursor-kimi-k3", "sa-kimi-k3", "sa-kimi-k3-responses",
+                  "openrouter-kimi-k3", "wangsu-cheliantianxia1-kimi-k3",
+                  "claude-kimi-k3-member-level-27"):
             self.assertEqual(M._family_of(m, k)[0], "premium", m)
         for m in ("kiro-claude-sonnet-5-5", "claude-haiku-4-5", "gpt-6-sol",
                   "chatgpt-gpt-6.1-sol", "gpt-5.5", "sa-grok-4.7",
-                  "deepseek-v4.1-flash", "gpt-6-astral", "claude-opusx"):
+                  "deepseek-v4.1-flash", "gpt-6-astral", "claude-opusx",
+                  # 2026-11-02 用户：Opus 移出高配桶 ⇒ 不归任何系列桶，
+                  # 只受 key 自身 max_budget 约束
+                  "kiro-claude-opus-5-5", "claude-opus-5-5", "kiro-claude-opus-4-6",
+                  "anthropic.claude-opus-4-8", "anthropic.wangsu5.claude-opus-5",
+                  "kiro-claude-opus-5",
+                  # kimi-k2.7-code 不算高配（用户 10-24 定）
+                  "kimi-k2.7-code", "claude-kimi-k2.7-code", "sa-kimi-code",
+                  "sa-kimi-code-responses", "kimi-k30", "kimi-k3x"):
             self.assertIsNone(M._family_of(m, k), m)
 
     def test_premium_rules_only_for_listed_keys_when_prefix_off(self):
@@ -1925,17 +1937,18 @@ class FamilyBudgetTest(unittest.TestCase):
         k = _Key(alias=self.PREMIUM, max_budget=None)
         self.assertEqual(M._family_limit("premium", k), 300.0)       # 无总额 ⇒ 兜底额度
 
-    def test_premium_shared_bucket_blocks_both_and_spares_others(self):
+    def test_premium_shared_bucket_blocks_astra_and_kimi_and_spares_opus(self):
         key = _Key(alias=self.PREMIUM, token="tok-prem")
         self._seed("tok-prem", "premium", 300.0)
-        for model in ("claude-opus-5-5", "gpt-6-astra"):
+        for model in ("gpt-6-astra", "kimi-k3", "kimi-official-k3"):
             out = self._pre_fam({"model": model, "messages": [{"role": "user", "content": "hi"}]},
                                 "acompletion", key=key)
-            self.assertIn("高配模型(Opus/Astra) 额度已用完", out.get("mock_response", ""), model)
-        # sonnet 不受任何系列额度约束（旧 claude 桶已去掉）
+            self.assertIn("高配模型(Astra/Kimi-K3) 额度已用完", out.get("mock_response", ""), model)
+        # 2026-11-02：opus 已移出高配桶 ⇒ 桶满了也不拦
         self._seed("tok-prem", "claude", 999.0)
         self._seed("tok-prem", "other", 999.0)
-        for model in ("claude-sonnet-5-5", "gpt-6-sol", "grok-4.7"):
+        for model in ("claude-opus-5-5", "kiro-claude-opus-5-5",
+                      "claude-sonnet-5-5", "gpt-6-sol", "grok-4.7", "kimi-k2.7-code"):
             out = self._pre_fam({"model": model, "messages": [{"role": "user", "content": "hi"}]},
                                 "acompletion", key=key)
             self.assertNotIn("mock_response", out, model)
@@ -1946,21 +1959,25 @@ class FamilyBudgetTest(unittest.TestCase):
                    "metadata": {"user_api_key_alias": self.PREMIUM, "user_api_key_hash": "tok-pacc"}}
             _with_env(FAM_ENV, lambda: asyncio.run(M.budget_notice.async_log_success_event(
                 {"standard_logging_object": slp}, None, None, None)))
-        log("kiro-claude-opus-5-5", 2.0)
         log("chatgpt-gpt-6-astra", 1.5)
+        log("kiro-kimi-k3", 4.0)
+        log("kimi-official-k3", 0.5)
+        # 以下都不归任何桶（opus 自 2026-11-02 起也在这一类），一分钱都不该落进 premium
+        log("kiro-claude-opus-5-5", 2.0)
         log("kiro-claude-sonnet-5-5", 9.0)
         log("sa-grok-4.7", 9.0)
+        log("claude-kimi-k2.7-code", 9.0)
 
         async def rd():
             return [await M._family_get_spend("tok-pacc", f) for f in ("premium", "claude", "other")]
-        self.assertEqual(asyncio.run(rd()), [3.5, 0.0, 0.0])
+        self.assertEqual(asyncio.run(rd()), [6.0, 0.0, 0.0])
 
     def test_premium_quota_reply_shows_premium_line(self):
         key = _Key(alias=self.PREMIUM, token="tok-pq")
         self._seed("tok-pq", "premium", 12.0)
         out = self._pre_fam({"model": "gpt-6-sol", "messages": [{"role": "user", "content": "/查余额"}]},
                             "acompletion", key=key)
-        self.assertIn("| 系列额度 · 高配模型(Opus/Astra) | $12.00 / $35.00 |", out.get("mock_response", ""))  # 70 × 50%
+        self.assertIn("| 系列额度 · 高配模型(Astra/Kimi-K3) | $12.00 / $35.00 |", out.get("mock_response", ""))  # 70 × 50%
         self.assertNotIn("Claude 家族", out["mock_response"])
 
 
@@ -1989,9 +2006,11 @@ class PremiumFleetDefaultTest(unittest.TestCase):
     def test_every_cursor_key_uses_premium_rules(self):
         for alias in ("cursor-u1", "cursor-zhangsan-ab12", "cursor-0a0bac70-e7gi"):
             k = _Key(alias=alias)
-            self.assertEqual(M._family_of("kiro-claude-opus-5-5", k)[0], "premium", alias)
             self.assertEqual(M._family_of("gpt-6-astra", k)[0], "premium", alias)
-            for m in ("kiro-claude-sonnet-5-5", "claude-haiku-4-5", "gpt-6-sol", "sa-grok-4.7"):
+            self.assertEqual(M._family_of("kimi-k3", k)[0], "premium", alias)
+            # opus 自 2026-11-02 起不归桶（只受 key 总额约束）
+            for m in ("kiro-claude-opus-5-5", "kiro-claude-sonnet-5-5",
+                      "claude-haiku-4-5", "gpt-6-sol", "sa-grok-4.7"):
                 self.assertIsNone(M._family_of(m, k), (alias, m))
 
     def test_non_cursor_keys_keep_old_buckets(self):
@@ -2013,19 +2032,22 @@ class PremiumFleetDefaultTest(unittest.TestCase):
         out = self._pre("claude-sonnet-5-5", key)
         self.assertNotIn("mock_response", out)
 
-    def test_opus_and_astra_blocked_at_half_budget(self):
+    def test_astra_blocked_at_half_budget_and_opus_spared(self):
         key = _Key(alias="cursor-u1", token="tok-fd2", max_budget=500.0)
         M._fam_local[M._family_spend_key("premium", "tok-fd2")] = 250.0
-        for m in ("claude-opus-5-5", "gpt-6-astra"):
+        for m in ("gpt-6-astra", "kimi-k3"):
             out = self._pre(m, key)
-            self.assertIn("高配模型(Opus/Astra) 额度已用完", out.get("mock_response", ""), m)
+            self.assertIn("高配模型(Astra/Kimi-K3) 额度已用完", out.get("mock_response", ""), m)
+        # 2026-11-02：opus 已移出高配桶 ⇒ 桶满仍放行
+        for m in ("claude-opus-5-5", "kiro-claude-opus-5-5"):
+            self.assertNotIn("mock_response", self._pre(m, key), m)
         self.assertNotIn("mock_response", self._pre("gpt-6-sol", key))
 
     def test_quota_reply_shows_half_budget_line(self):
         key = _Key(alias="cursor-u1", token="tok-fd3", max_budget=500.0)
         M._fam_local[M._family_spend_key("premium", "tok-fd3")] = 20.0
         out = self._pre("gpt-6-sol", key, text="/查余额")
-        self.assertIn("| 系列额度 · 高配模型(Opus/Astra) | $20.00 / $250.00 |", out.get("mock_response", ""))
+        self.assertIn("| 系列额度 · 高配模型(Astra/Kimi-K3) | $20.00 / $250.00 |", out.get("mock_response", ""))
         self.assertNotIn("Claude 家族", out["mock_response"])
 
     def test_prefix_kill_switch_restores_old_rules(self):
@@ -3226,13 +3248,15 @@ class TieredWarnTest(unittest.TestCase):
     def test_premium_bucket_warns_independently_with_fallback_list(self):
         # 总额 30%（不跨档），高配桶 $500 的 82%
         M._fam_local[M._family_spend_key("premium", "tw3")] = 410.0
-        n = self._stream(self._key("tw3", spend=300.0), model="kiro-claude-opus-5-5")
-        self.assertIn("**额度提醒**：高配模型(Opus/Astra) 今日已用 82%", n)
+        n = self._stream(self._key("tw3", spend=300.0), model="gpt-6-astra")
+        self.assertIn("**额度提醒**：高配模型(Astra/Kimi-K3) 今日已用 82%", n)
         self.assertNotIn("你的 key 今日额度已用", n)            # 总额没跨档，不进标题
         self.assertIn("| 今日总额度  ", n)                       # 只在表里陪同展示，不打 ⚠️
-        self.assertIn("| ⚠️ 高配模型(Opus/Astra) |", n)
+        self.assertIn("| ⚠️ 高配模型(Astra/Kimi-K3) |", n)
         self.assertIn("|  82% |", n)
-        self.assertIn("用完后仍可用**（2 个）", n)
+        self.assertIn("用完后仍可用**（3 个）", n)
+        # opus 自 2026-11-02 起不归高配桶 ⇒ 它也是满后还能打的那一类
+        self.assertIn("| kiro   | kiro-claude-opus-5-5 ", n)
         self.assertIn("| claude | claude-sonnet-5-5 ", n)
         self.assertIn("| gpt    | gpt-6-sol ", n)
         self.assertNotIn("grok-imagine", n)                       # 画图模型不推荐
@@ -3290,13 +3314,15 @@ class TieredWarnTest(unittest.TestCase):
                     "gpt-6-sol"]
         k.aliases = {"claude-sonnet-5-5": "kiro-claude-sonnet-5-5",
                      "gpt-6-sol": "chatgpt-gpt-6-sol"}
-        d = {"model": "kiro-claude-opus-5-5",
+        d = {"model": "gpt-6-astra",
              "messages": [{"role": "user", "content": "hi"}]}
         out = _with_env(self.ENV, lambda: asyncio.run(M.budget_notice.async_pre_call_hook(
             k, None, d, _CallType("acompletion"))))
         t = out.get("mock_response", "")
-        # 今天用过的加粗、排本行最前；花费最高的那家（gpt）排第一行
+        # 今天用过的加粗、排本行最前；花费最高的那家（opus，11-02 起不归高配桶）排第一行
+        self.assertLess(t.index("| kiro "), t.index("| gpt "))
         self.assertLess(t.index("| gpt "), t.index("| claude "))
+        self.assertIn("| kiro   | **kiro-claude-opus-5-5** ", t)
         self.assertIn("| gpt    | **gpt-6-sol** ", t)
         self.assertIn("| claude | **claude-sonnet-5-5**、claude-haiku-4-5 |", t)
 
@@ -3315,21 +3341,23 @@ class TieredWarnTest(unittest.TestCase):
 
     def test_premium_block_lists_all_available_models(self):
         M._fam_local[M._family_spend_key("premium", "tw7")] = 500.0
-        d = {"model": "kiro-claude-opus-5-5",
+        d = {"model": "gpt-6-astra",
              "messages": [{"role": "user", "content": "hi"}]}
         out = _with_env(self.ENV, lambda: asyncio.run(M.budget_notice.async_pre_call_hook(
             self._key("tw7", spend=600.0), None, d, _CallType("acompletion"))))
         t = out.get("mock_response", "")
-        self.assertIn("高配模型(Opus/Astra) 额度已用完", t)
+        self.assertIn("高配模型(Astra/Kimi-K3) 额度已用完", t)
         self.assertIn("不受影响", t)
-        self.assertIn("即可继续（2 个）", t)
+        self.assertIn("即可继续（3 个）", t)
+        # opus 自 2026-11-02 起不归高配桶 ⇒ 列在仍可继续那一栏里
+        self.assertIn("| kiro   | kiro-claude-opus-5-5 ", t)
         self.assertIn("| claude | claude-sonnet-5-5 ", t)
         self.assertIn("| gpt    | gpt-6-sol ", t)
         self.assertNotIn("gpt-6-astra", t.split("即可继续")[1])
         self.assertIn("| $600.00 / $1000.00 |  60% |", t)
         self.assertNotIn("剩余", t)
         # 两个桶重置时刻不同 ⇒ 分开说，不压成一个
-        self.assertIn("⏰ 高配模型(Opus/Astra) 北京时间 ", t)
+        self.assertIn("⏰ 高配模型(Astra/Kimi-K3) 北京时间 ", t)
         self.assertIn("；总额度 北京时间 08-20 00:00 重置", t)
         self.assertIn("cye", t)
         self.assertNotIn("提额", t)

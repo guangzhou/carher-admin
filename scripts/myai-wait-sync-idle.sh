@@ -19,15 +19,17 @@ export MYAI_SSH_PASSWORD="${HOST243_PW:-${MYAI_SSH_PASSWORD:-}}"
 probe() {
   # 输出 "<status> <已运行秒数>"；JSON 按字段取，不靠表格空白匹配
   MYAI_HUMAN= "$HERE/myai-cli.sh" db sql \
-    "SELECT r.status, extract(epoch from now()-r.started_at)::int AS age FROM usage_sync_runs r WHERE NOT (r.status='running' AND EXISTS (SELECT 1 FROM usage_sync_runs n WHERE n.started_at > r.started_at)) ORDER BY r.started_at DESC LIMIT 1" 2>/dev/null \
+    "SELECT CASE WHEN r.status='running' AND r.start_date=r.end_date AND r.end_date < (now() AT TIME ZONE 'Asia/Shanghai')::date THEN 'repair' ELSE r.status END AS status, extract(epoch from now()-r.started_at)::int AS age FROM usage_sync_runs r WHERE NOT (r.status='running' AND EXISTS (SELECT 1 FROM usage_sync_runs n WHERE n.started_at > r.started_at)) ORDER BY r.started_at DESC LIMIT 1" 2>/dev/null \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["status"], d[0]["age"]) if d else print("none 0")'
 }
 end=$(( $(date +%s) + MAX ))
 while :; do
   if out=$(probe); then
     st=${out% *}; age=${out#* }
-    if [ "$st" != running ]; then echo "safe: 最新一轮 ${st} $(date -u +%T)"; exit 0; fi
-    if [ "$age" -lt "$SAFE" ]; then echo "safe: 新一轮刚开始 ${age}s（<${SAFE}s，还没进发布） $(date -u +%T)"; exit 0; fi
+    if [ "$st" != running ] && [ "$st" != repair ]; then echo "safe: 最新一轮 ${st} $(date -u +%T)"; exit 0; fi
+    # 收尾修复轮（单日、日期早于今天）：换 pod 会把它杀掉并白白耗掉一次 repairAttempts（上限 2），必须等它结束。
+    if [ "$st" = repair ]; then echo "等待：收尾修复轮在跑（${age}s），不能打断 $(date -u +%T)" >&2
+    elif [ "$age" -lt "$SAFE" ]; then echo "safe: 新一轮刚开始 ${age}s（<${SAFE}s，还没进发布） $(date -u +%T)"; exit 0; fi
   else
     echo "读不到同步状态，重试" >&2
   fi

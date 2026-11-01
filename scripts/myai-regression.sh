@@ -152,6 +152,13 @@ scan_dsn_gates() {
           export ORG_SETTLEMENT_TEST_DSN="postgresql://postgres:testpw@127.0.0.1:$PG_BILLING_PORT/org_settlement_test"
           note "补上 ORG_SETTLEMENT_TEST_DSN（org_settlement_test 库）"
         fi ;;
+      ROSTER_IMPORT_TEST_DSN)
+        # 这批用例每条都会 DROP SCHEMA public CASCADE ⇒ 只能给独立的一次性库，绝不复用别的测试库。
+        if [ "$PG_READY" = 1 ] && [ -n "$(docker ps -q -f "name=^${PG_BILLING_NAME}$" 2>/dev/null)" ]; then
+          docker exec "$PG_BILLING_NAME" psql -U postgres -q -c 'CREATE DATABASE roster_import_test' >/dev/null 2>&1 || true
+          export ROSTER_IMPORT_TEST_DSN="postgresql://postgres:testpw@127.0.0.1:$PG_BILLING_PORT/roster_import_test"
+          note "补上 ROSTER_IMPORT_TEST_DSN（roster_import_test 一次性库）"
+        fi ;;
     esac
   done
   # 补过之后重算一遍，剩下的才是真缺

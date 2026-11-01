@@ -23,11 +23,13 @@ BASE="http://$(kubectl -n $NS get svc "${SVC}" -o jsonpath='{.spec.clusterIP}'):
 echo "target svc=${SVC} base=${BASE}"
 MK=$(kubectl -n $NS get secret litellm-secrets-r2 -o jsonpath='{.data.LITELLM_MASTER_KEY}' | base64 -d)
 BILLABLE_MODEL="wangsu7-gpt-5.6-sol"   # 非高配、真实计费、便宜
-PREMIUM_MODEL="claude-opus-4.8"       # 高配桶(Opus)、真实计费 ~$0.0005/次
+# 2026-11-02 起 Opus 移出高配桶（桶只剩 Astra/Kimi-K3）⇒ 高配用 kimi-k3 组，opus 改当阴性对照
+PREMIUM_MODEL="aws-kimi-k3"           # 高配桶(Kimi-K3)、真实计费
+OPUS_MODEL="claude-opus-4.8"          # 已不归高配桶：桶满后仍须放行
 
-python3 - "$BASE" "$MK" "$BILLABLE_MODEL" "$PREMIUM_MODEL" <<'PY'
+python3 - "$BASE" "$MK" "$BILLABLE_MODEL" "$PREMIUM_MODEL" "$OPUS_MODEL" <<'PY'
 import datetime, hashlib, json, subprocess, sys, time, urllib.request, urllib.error
-BASE, MK, BMODEL, PMODEL = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+BASE, MK, BMODEL, PMODEL, OMODEL = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 
 def call(path, payload=None, key=None, method="POST", timeout=120):
     req = urllib.request.Request(BASE+path,
@@ -81,7 +83,7 @@ call("/key/delete", {"keys":[k]})
 # opus 组打一发 ⇒ 落账 ⇒ 第二发被拦;非高配模型同一把 key 照常放行(阴性对照)。
 st,b = call("/key/generate",
             {"key_alias":"cursor-smokefam-"+ts,"max_budget":5.0,"budget_duration":"1d",
-             "models":[PMODEL, BMODEL],
+             "models":[PMODEL, BMODEL, OMODEL],
              "metadata":{"budget_family_overrides":{"premium":0.000001}}})
 kf=json.loads(b)["key"]
 token = hashlib.sha256(kf.encode()).hexdigest()
@@ -112,6 +114,11 @@ st,b = call("/v1/chat/completions",
             {"model":BMODEL,"messages":[{"role":"user","content":"只回一个字:好"}],"max_tokens":16}, key=kf)
 check("S6 non-premium model not blocked (negative control)", st==200 and "额度已用完" not in all_text(b), f"{st} {b[:250]}")
 
+st,b = call("/v1/chat/completions",
+            {"model":OMODEL,"messages":[{"role":"user","content":"只回一个字:好"}],"max_tokens":16}, key=kf)
+check("S6b opus not blocked when premium bucket full (2026-11-02 opus out)",
+      st==200 and "额度已用完" not in all_text(b), f"{st} {b[:250]}")
+
 st,b = call("/v1/chat/completions", {"model":BMODEL,"messages":[{"role":"user","content":"/查余额"}]}, key=kf)
 check("S7 quota query shows families",
       st==200 and "今日用量" in all_text(b), f"{st} {b[:400]}")
@@ -139,7 +146,7 @@ redis("SET", f"budget_notice:fam:premium:{tw}:{bj}", "0.85", "EX", "3600")
 st,b = call("/v1/chat/completions", {"model":PMODEL, **msg}, key=kw)
 t=all_text(b)
 check("S10 premium 80% tier injected with fallback list",
-      st==200 and "高配模型(Opus/Astra/Kimi-K3) 今日已用 85%" in t and "用完后仍可用" in t and BMODEL in t,
+      st==200 and "高配模型(Astra/Kimi-K3) 今日已用 85%" in t and "用完后仍可用" in t and BMODEL in t,
       f"{st} {t[-600:]}")
 # S11:表里的名字 = 用户发的那个(这把 key 发的就是 PMODEL/BMODEL,它们本身是组名);
 # 只看表的第一列(全文还有可用模型行等,不该参与判定)。

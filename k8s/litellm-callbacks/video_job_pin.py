@@ -52,7 +52,16 @@ from typing import Any, Optional
 
 from litellm.integrations.custom_logger import CustomLogger
 
-_log = logging.getLogger("litellm.video_job_pin")
+# 🔴 必须用 litellm 自己的 logger，不能用 logging.getLogger("...") 自建的。
+#    11-01 实测：自建 logger 在服务进程里没有 handler ⇒ 这个模块的所有 info 日志
+#    **一行都不出现**，而 `weighted_affinity` 用 verbose_router_logger 就能打出
+#    `initialized`。当时 4/4 副本的 `installed` 都是 0，看着像补丁没装上，
+#    实际是日志被丢了（import 和两个 hook 都正常、功能实测 10/10 命中原腿）。
+#    ⇒ 验收判据「日志里 installed ≥ 1 行」要能成立，就得挂在 litellm 配好的 logger 上。
+try:
+    from litellm._logging import verbose_router_logger as _log
+except Exception:  # 上游挪了位置也不要让补丁崩
+    _log = logging.getLogger("litellm.video_job_pin")
 
 _PREFIX = "video_job_pin:v1:"
 _SUBMIT_CALL_TYPES = {"avideo_generation", "video_generation", "create_video", "acreate_video"}

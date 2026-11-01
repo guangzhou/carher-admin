@@ -1,6 +1,6 @@
 ---
 name: cursor-client-bundle-patch
-description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 Cursor.app 的模型菜单(cursor-g 现行名单)、安装器、keepmine/noagenthost 等补丁与诊断。同事 Cursor 菜单缺模型、冒出不该有的模型、BYOK 报不支持时使用。"
+description: "Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x):改用户本机 Cursor.app 的模型菜单(cursor-g 现行名单)、安装器、keepmine/noagenthost 等补丁与诊断。画图 / 一句话生成视频(skill + User Rules)。同事 Cursor 菜单缺模型、冒出不该有的模型、BYOK 报不支持,或 Cursor 说「我没法直接生成视频」、画图/视频 skill 不生效时使用。"
 ---
 
 # Cursor 客户端 bundle 补丁 SOP(3.16.x~3.24.x;安装器跨平台,诊断/日志路径示例为 macOS)
@@ -612,7 +612,39 @@ AST 子节点的 `start/end` 里 `src.slice()` 出来搬运,不写进任何模�
 `glm-5.3-flash→openrouter-glm-5.3-flash` / `qwen3-coder-next→kiro-qwen3-coder-next` 三条。
 补 alias 是**生产变更,单独一轮、要签字**。
 
-### 档位(10-16 keepmine-fill v2)与画图
+### 档位(10-16 keepmine-fill v2)与画图、生成视频
+
+## 一句话生成视频(2026-11-01 新增)
+
+工具 `codex-oneclick/src/carher_video.js`(**三个一键共用一份源**,与 `carher_image.js` 同目录同套 key 查找顺序)+ 说明模板 `src/video_skill.md`。
+模型 = 网关 `gemini-video`(OpenAI 视频三段式 `POST /videos` → 轮询 → `/content`),一条约 1.5~3 分钟,出 10 秒 1280x720(`--portrait` 竖屏)h264+aac。
+离线回归 `codex-oneclick/tests/test_video_tool.py`(26 项,假网关,不扣额度)。
+
+🔴 **三个 App 里实测出来的四条,工具形态就是为它们长成这样的**:
+1. **提交 / 等待分离**:`carher_video.js "描述" 路径` 只负责提交 + 最多等 90 秒,真正干活的是 `--worker` **detached 子进程**;
+   没出完就打印 `--wait <任务号>` 让 agent 接着等。原因:Codex App 的 unified exec **10 秒**就交回半截输出(`yield_time_ms`,没有命令超时),
+   模型当成「输出丢了」→ 自己重跑 → 多扣额度;Cursor GUI 默认 **30 秒**转后台;Claude Code 的 Bash 默认 2 分钟掐。
+2. **幂等**:同一「描述 + 输出位置 + 画幅」30 分钟内不重复提交(任务记录 `~/.carher/video-jobs/<id>.json` + sha1 签名):
+   还在跑就接上去等,刚出完直接报结果,**刚失败过必须显式 `--retry`**。agent 再怎么重跑都只扣一份额度。
+3. **本机排队锁** `~/.carher/video.lock`(目录锁 + owner 心跳 + 第二把短锁串行化破锁):同一把 key 同时提交多个视频,网关只能取回一个(见 [[gemini-web-pool-198]])。
+4. **沙箱**:提交前先试写任务目录 + HEAD 一次 `/models`,被拦就报「被命令沙箱拦住了 / 连不上网关,还没提交不扣额度」。
+   Cursor Auto-review 默认沙箱禁网、禁写 `~/.carher`;说明里要求申请沙箱外运行(`required_permissions: ["all"]`)。
+
+常驻说明(和画图同一套标记块机制,重跑只替换本块):Codex=`~/.codex/AGENTS.md` 的 `CARHER-VIDEO` 块;
+Claude=`~/.claude/CLAUDE.md` 的 `CARHER-VIDEO` 块 + `skills/carher-video`;Cursor=`~/.cursor/skills/carher-video` **外加 User Rules**(见下)。
+
+🔴 **Cursor 只装 skill 不够,必须同时写 User Rules**(11-01 实测:用户在 GUI 说「生成一个小鸡吃米的视频」,
+agent 回「我没法直接生成视频」然后用 PIL+ffmpeg 画了段动画,transcript `~/.cursor/projects/<ws>/agent-transcripts/b0df6326-*.jsonl`)。
+真因在 Cursor 自己的代码:`Contents/Resources/app/extensions/cursor-agent-host/dist/main.js` 的 `gS()` 给 skill 列表的预算是
+**模型上限的 2%**(`Math.floor(.02*agentTokenLimit)`),超了先把所有 description 砍掉(`yS`)、再整条省略(`wS`);
+而它扫 `.cursor/skills`、`.cursor/skills-cursor`、`.claude/skills`、`.codex/skills`、`.agents/skills`、`.claude/plugins` 共六处
+(`bS` 里的清单),装得多的机器(本机 400+)必然超 ⇒ 系统提示里只剩一串 `<agent_skill fullPath=… />`,模型不知道有视频工具。
+豁免名单 `mS` 只保 Cursor 自带的 canvas / visualize 等,**我们的 skill 进不去**。
+⇒ 安装器 `installMediaUserRule()` 把画图 + 视频两条命令写进 `state.vscdb` 的 `ItemTable.aicontext.personalContext`
+(= 系统提示里的 `<user_rules>`,**没有预算、每个工作区都发**),标记块 `CARHER-MEDIA-BEGIN/END`,重跑只替换本块。
+🔴 写它和写 BYOK 一样**要求 Cursor 完全退出**(外部写 state.vscdb 有内存覆盖竞态);判「退出了没」要排除
+`~/.zk-delta/sidecar/sidecar.js` —— 它也是 `pgrep -x Cursor` 命中的进程(用 Cursor 二进制当 node 跑)。
+
 - wangzhongwei:名字在、`variants` 空 ⇒ opus 不能换 High/Medium/Low。v2 带 `cursor_tier_catalog.json`(本机 21 个有档位名字的快照)补档位;目录自带档位的不动。v1 机器 UPGRADE 原地升级。台架 `keepfill_offline_cases.js <已打 bundle>`。模板过期(加了新的带档位模型)⇒ 从一台正常机器重新导出这个 json。
 - 画图:INSTALL/UPGRADE 第 6 步装 `~/.cursor/skills/carher-image` + `~/.carher/image.json`(Key 只在 INSTALL 粘的那次写入);工具用 Cursor 二进制 `ELECTRON_RUN_AS_NODE=1` 跑。台架 `image_skill_offline_cases.js`。
 

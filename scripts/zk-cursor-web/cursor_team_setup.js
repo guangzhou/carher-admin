@@ -3818,6 +3818,42 @@ function installPrecompactProbe(dry) {
   } catch (e) { console.log("   ⚠️  装探针出错(不影响其余): " + ((e && e.message) || e)); }
 }
 
+/* ── 画图 / 生成视频写进 Cursor 的 User Rules(11-01)──
+   🔴 为什么不能只靠 skill:Cursor 给 skill 列表的预算只有模型上限的 **2%**
+   (`cursor-agent-host/dist/main.js` 的 gS:`Math.floor(.02*agentTokenLimit)`),超了就先砍掉所有
+   skill 的 description、再整条省略。它扫 `.cursor/skills`、`.claude/skills`、`.codex/skills`、
+   `.agents/skills` 等**五个**目录,装得多的机器(本机 400+ 个)一定超预算 ⇒ 模型只看到一串路径,
+   不知道有视频工具 ⇒ 11-01 实测它回「我没法直接生成视频」然后自己用 PIL+ffmpeg 画动画。
+   User Rules(ItemTable 的 `aicontext.personalContext`,渲染进系统提示的 <user_rules>)没有这个预算,
+   每个工作区都发 ⇒ 把「要图/要视频就跑这条命令」钉在这里。标记块重跑只替换本块,不碰用户自己写的。 */
+const USER_RULE_BEGIN = "<!-- CARHER-MEDIA-BEGIN -->", USER_RULE_END = "<!-- CARHER-MEDIA-END -->";
+function mediaUserRuleBlock(nodeCmd, imgTool, vidTool) {
+  return [USER_RULE_BEGIN,
+    "用户要画图/配图/插画/海报/头像时,只用这条命令(公司的 muse-image,key 已配好),约 30 秒出图:",
+    "    " + nodeCmd + ' "' + imgTool + '" "画面描述" 输出路径',
+    "用户要生成视频/短视频时,只用这条命令(公司的 gemini-video,真实出 10 秒带声音的 mp4):",
+    "    " + nodeCmd + ' "' + vidTool + '" "画面描述" 输出路径',
+    "- 绝不说「没法生成图片/视频」,也不要用 SVG / HTML / 代码画动画 / PIL / ffmpeg 合成代替。",
+    "- 视频命令最多等约 1.5 分钟就自己结束:打印「已生成:…」就把该路径告诉用户;打印「⏳ 视频还没好」就运行它给出的那条 --wait 命令接着等(还没好就再运行一次),不要重新提交原命令(会多扣额度)。",
+    "- 跑这两条命令要联网、要能写 ~/.carher:在沙箱里会报 EPERM / 连不上网关,这时申请在沙箱外运行(required_permissions: [\"all\"]),此时还没扣额度。命令被转到后台就等它结束读最后几行,不要直接结束回合。",
+    "- 命令报错把原文告诉用户,不要自动重试(要重试在命令末尾加 --retry)。不要向用户要 key。",
+    USER_RULE_END].join("\n");
+}
+function installMediaUserRule(nodeCmd, imgTool, vidTool) {
+  let db;
+  try { db = openDb(); }
+  catch (e) { console.log("   ⚠️  User Rules 这步跳过:" + e.message); return false; }
+  try {
+    const cur = String(db.get("aicontext.personalContext") || "");
+    const i = cur.indexOf(USER_RULE_BEGIN), j = cur.indexOf(USER_RULE_END);
+    let keep = (i >= 0 && j > i) ? (cur.slice(0, i) + cur.slice(j + USER_RULE_END.length)) : cur;
+    keep = keep.replace(/\n{3,}/g, "\n\n").trim();
+    const blk = mediaUserRuleBlock(nodeCmd, imgTool, vidTool);
+    db.set("aicontext.personalContext", (keep ? keep + "\n\n" : "") + blk + "\n");
+    return true;
+  } finally { try { db.close(); } catch (e) {} }
+}
+
 function installImageSkill(rawKey, base) {
   console.log("--- 6) 画图工具 ---");
   const src = path.join(__dirname, "carher_image.js");
@@ -3844,6 +3880,21 @@ function installImageSkill(rawKey, base) {
   fs.writeFileSync(path.join(sd, "SKILL.md"), md.split('@@NODE@@ "@@TOOL@@"').join(node + ' "' + tool + '"'));
   if (fs.existsSync(cfg)) console.log("   ✅ 已开通画图:在 Cursor 里说「画一张…」即可(用 muse-image)");
   else console.log("   ⚠️  画图 skill 已装,但还没有 Key —— 下次双击 INSTALL 粘一次 Key 就能画了");
+  // 11-01:一句话生成视频(gemini-video)。同一份 Key 副本、同一个 node 命令,只是工具和 skill 不同
+  const vsrc = path.join(__dirname, "carher_video.js"), vmdSrc = path.join(__dirname, "video_skill.md");
+  if (fs.existsSync(vsrc) && fs.existsSync(vmdSrc)) {
+    const vtool = path.join(dir, "carher_video.js");
+    fs.copyFileSync(vsrc, vtool);
+    const vsd = path.join(home, ".cursor", "skills", "carher-video");
+    fs.mkdirSync(vsd, { recursive: true });
+    fs.writeFileSync(path.join(vsd, "SKILL.md"),
+      fs.readFileSync(vmdSrc, "utf8").split('@@NODE@@ "@@TOOL@@"').join(node + ' "' + vtool + '"'));
+    if (fs.existsSync(cfg)) console.log("   ✅ 已开通生成视频:在 Cursor 里说「生成一个…的视频」即可(用 gemini-video)");
+    // skill 列表有 2% 预算、装多了会被砍description ⇒ 同一份说明再钉进 User Rules(没有预算、每个工作区都发)
+    try {
+      if (installMediaUserRule(node, tool, vtool)) console.log("   ✅ 画图/视频说明已写进 Cursor 的 User Rules(每个项目都生效)");
+    } catch (e) { console.log("   ⚠️  写 User Rules 出错(不影响其余):" + (e && e.message || e)); }
+  }
 }
 
 main().catch((e) => { console.error("!! 未预期错误:", e && e.message ? e.message : e); process.exit(9); });

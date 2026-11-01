@@ -58,6 +58,7 @@ REQUIRED_MEMBERS = {
     "INSTALL-Windows.cmd", "UPGRADE-Windows.cmd", "REPAIR-Windows.cmd", "DOCTOR-Windows.cmd",
     "REMOTE-SSH-Windows.cmd", "UNINSTALL-Windows.cmd", "cursor_remote_ssh.cmd", "README.txt",
     "cursor_tier_catalog.json", "carher_image.js", "image_skill.md",
+    "carher_video.js", "video_skill.md",
 }
 JS_MEMBER = "cursor_team_setup.js"
 
@@ -107,6 +108,8 @@ def extract_models(js):
 SOURCE_ELSEWHERE = {
     "carher_image.js": os.path.join(BASE, "..", "..", "codex-oneclick", "src", "carher_image.js"),
     "image_skill.md": os.path.join(BASE, "..", "..", "codex-oneclick", "src", "image_skill.md"),
+    "carher_video.js": os.path.join(BASE, "..", "..", "codex-oneclick", "src", "carher_video.js"),
+    "video_skill.md": os.path.join(BASE, "..", "..", "codex-oneclick", "src", "video_skill.md"),
 }
 
 

@@ -214,6 +214,11 @@ $syncJsSrc = @'
 [System.IO.File]::WriteAllText((Join-Path $codexHome 'carher_image.js'), $imgJsSrc, $utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $codexHome 'carher_models_sync.py'), $syncSrc, $utf8NoBom)
 [System.IO.File]::WriteAllText((Join-Path $codexHome 'carher_models_sync.js'), $syncJsSrc, $utf8NoBom)
+# 11-01:一句话生成视频(gemini-video),只有 Node 版
+$videoJsSrc = @'
+@@EMBED carher_video.js@@
+'@
+[System.IO.File]::WriteAllText((Join-Path $codexHome 'carher_video.js'), $videoJsSrc, $utf8NoBom)
 if ($true) {
 
   # 探测真正能跑的 python：Windows 上通常是 python 或 py，不是 python3。
@@ -268,6 +273,44 @@ $end
     Ok "√ 已开通生图能力"
   } else {
     Warn "! 没有 Node 也没有 Python，生图能力未开通（其余配置已生效）"
+  }
+
+  # --- 6b. 一句话生成视频(11-01):和画图同一个路子,AGENTS.md 里一个标记块 ---
+  if ($nodeExe) {
+    $agents = Join-Path $codexHome 'AGENTS.md'
+    $vbegin = '<!-- CARHER-VIDEO-BEGIN -->'
+    $vend   = '<!-- CARHER-VIDEO-END -->'
+    $kept = ''
+    if (Test-Path $agents) {
+      $skip = $false
+      foreach ($ln in Get-Content $agents -Encoding UTF8) {
+        if ($ln -eq $vbegin) { $skip = $true; continue }
+        if ($ln -eq $vend)   { $skip = $false; continue }
+        if (-not $skip) { $kept += $ln + "`n" }
+      }
+    }
+    $vidCmd = '"' + $nodeExe + '" "' + (Join-Path $codexHome 'carher_video.js') + '"'
+    $vblock = @"
+$vbegin
+## 生成视频
+
+用户要生成视频、做短视频、出一段视频时，**只用下面这个命令**（它调公司的 gemini-video 真实生成 10 秒带声音的 mp4），
+**不要说「没法生成视频」，不要用代码画动画 / PIL / ffmpeg / HTML 合成代替**：
+
+    $vidCmd "画面描述" 输出路径
+
+- 画面描述用用户的原话，可以补充镜头、动作、风格、光线等细节。用户要竖屏（手机、抖音）就在末尾加 --portrait。
+- 命令最多等约 1.5 分钟就自己结束：最后一行是「已生成：…」就把这个路径告诉用户；
+  打印「⏳ 视频还没好」就**运行它给出的那条 --wait 命令接着等**（还没好就再运行一次），直到「已生成：…」。
+  不要重新提交原命令（会多扣一次额度），不要另开 ls / ps / sleep 去查。
+- 一次只出一个。key 已配好，不要向用户索要，也不要在命令里写 key。
+- 命令报错就把报错原文告诉用户，**不要自动重试**、不要换别的方式硬做；用户说再试一次时在原命令末尾加 --retry。
+$vend
+"@
+    [System.IO.File]::WriteAllText($agents, ($kept + $vblock + "`n"), $utf8NoBom)
+    Ok "√ 已开通生成视频（说「生成一个…的视频」即可）"
+  } else {
+    Warn "! 没有 Node，生成视频未开通（其余配置已生效）"
   }
 }
 

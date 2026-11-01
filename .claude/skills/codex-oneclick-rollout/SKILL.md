@@ -1,6 +1,6 @@
 ---
 name: codex-oneclick-rollout
-description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 SOP——每个系统一个文件（codex-mac.command / codex-windows.bat），写配置 + 装生图工具 + 把 key 能用的全部模型同步进 Codex CLI 和 Desktop App 的选择器并每日自动刷新。含 src/+build.sh 单文件打包、飞书《Codex一键配置》附件替换与 sha 回环、非 OpenAI 模型目录元数据的三个实测坑、gpt-image-2 白名单批量开通。Use when 要给同事配 codex / 改 codex-oneclick 下任何脚本 / 用户说选择器里没有某模型、选了 claude/grok 改不了文件、画图画成 SVG 或 403 / 要更新《Codex一键配置》文档。
+description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 SOP——每个系统一个文件（codex-mac.command / codex-windows.bat），写配置 + 装生图工具 + 把 key 能用的全部模型同步进 Codex CLI 和 Desktop App 的选择器并每日自动刷新。含 src/+build.sh 单文件打包、飞书《Codex一键配置》附件替换与 sha 回环、非 OpenAI 模型目录元数据的三个实测坑、gpt-image-2 白名单批量开通。Use when 要给同事配 codex / 改 codex-oneclick 下任何脚本 / 要生成视频 / 视频生成不出来 / Codex 说没法生成视频 / 用户说选择器里没有某模型、选了 claude/grok 改不了文件、画图画成 SVG 或 403 / 要更新《Codex一键配置》文档。
 ---
 
 # Codex 一键接入（配置 + 生图 + 模型同步）
@@ -30,6 +30,25 @@ description: 给全公司铺 Codex 接入（198 carher 网关）的一键脚本 
   拿到列表才把**值等于旧地址**的 `base_url`/`openai_base_url` 行改掉(用户自己的 provider 不碰);不通就原样、日志写「新网关地址暂时不通」。
   每天定时 + 「刷模型」都会跑 ⇒ 老用户不用重装。回归 `tests/test_domain_migrate.py`(假网关 + 两份实现逐项比 + 不通/错 key 不动)。
 - doctor:旧地址只报⚠️(还能用),不报🔴。
+
+## 一句话生成视频(2026-11-01 新增)
+
+工具 `codex-oneclick/src/carher_video.js`(**三个一键共用一份源**,与 `carher_image.js` 同目录同套 key 查找顺序)+ 说明模板 `src/video_skill.md`。
+模型 = 网关 `gemini-video`(OpenAI 视频三段式 `POST /videos` → 轮询 → `/content`),一条约 1.5~3 分钟,出 10 秒 1280x720(`--portrait` 竖屏)h264+aac。
+离线回归 `codex-oneclick/tests/test_video_tool.py`(26 项,假网关,不扣额度)。
+
+🔴 **三个 App 里实测出来的四条,工具形态就是为它们长成这样的**:
+1. **提交 / 等待分离**:`carher_video.js "描述" 路径` 只负责提交 + 最多等 90 秒,真正干活的是 `--worker` **detached 子进程**;
+   没出完就打印 `--wait <任务号>` 让 agent 接着等。原因:Codex App 的 unified exec **10 秒**就交回半截输出(`yield_time_ms`,没有命令超时),
+   模型当成「输出丢了」→ 自己重跑 → 多扣额度;Cursor GUI 默认 **30 秒**转后台;Claude Code 的 Bash 默认 2 分钟掐。
+2. **幂等**:同一「描述 + 输出位置 + 画幅」30 分钟内不重复提交(任务记录 `~/.carher/video-jobs/<id>.json` + sha1 签名):
+   还在跑就接上去等,刚出完直接报结果,**刚失败过必须显式 `--retry`**。agent 再怎么重跑都只扣一份额度。
+3. **本机排队锁** `~/.carher/video.lock`(目录锁 + owner 心跳 + 第二把短锁串行化破锁):同一把 key 同时提交多个视频,网关只能取回一个(见 [[gemini-web-pool-198]])。
+4. **沙箱**:提交前先试写任务目录 + HEAD 一次 `/models`,被拦就报「被命令沙箱拦住了 / 连不上网关,还没提交不扣额度」。
+   Cursor Auto-review 默认沙箱禁网、禁写 `~/.carher`;说明里要求申请沙箱外运行(`required_permissions: ["all"]`)。
+
+常驻说明(和画图同一套标记块机制,重跑只替换本块):Codex=`~/.codex/AGENTS.md` 的 `CARHER-VIDEO` 块;
+Claude=`~/.claude/CLAUDE.md` 的 `CARHER-VIDEO` 块 + `skills/carher-video`;Cursor=`~/.cursor/skills/carher-video` **外加 User Rules**(见下)。
 
 ## 刷模型(2026-10-19)
 

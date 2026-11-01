@@ -157,3 +157,8 @@ if [ -n "$f" ]; then bash "$f"; else echo "没找到 …"; fi       # Cursor:是
   Cursor 菜单根本没动。现在两个名字带工具后缀,描述写「仅限 X」。新加跨工具 skill 都按这个规矩。
 - Cursor 退出检测只认可执行文件本身是 Cursor 的进程(`isCursorExe`);整行匹配会把命令行里带 Cursor 路径的 shell 当 GUI,等 53 秒。
 - Codex 隔离测:`CODEX_HOME=<临时目录>` 跑安装器会**覆盖全局 LaunchAgent `net.carher.codex-models-sync`**(label 全局),测完 bootout 并删 plist。
+
+## 一句话生成视频的文案(11-01)
+
+三段「开始用」里画图那句后面各加了一句「生成视频直接说「生成一个……的视频」」(`bodies.py` 三处 + `oneclick-all.html` 三处)。
+视频模型本来就被模型同步的 `SKIP`(`image|imagine|video|music`)挡在聊天菜单外,不用改菜单。详见 skill [[codex-oneclick-rollout]] 的「一句话生成视频」节。

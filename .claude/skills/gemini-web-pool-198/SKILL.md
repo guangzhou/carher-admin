@@ -11,9 +11,12 @@ description: >-
   「哪些 google 号登不上 / 在飞书表里标出来 / 不在池中的号加进来」、要歌曲 / 歌词。
   「视频额度用光 / 只有一个号 / 给 gemini-media 扩号」、要并发出视频。
   含：为什么 Argon 只能走网页（Antigravity 只给 Ultra）、一条命令全自动加号（188 浏览器 + TOTP）、
-  gemini-media 已扩到 39 个成员号（video/music 各 40 腿、image 仍单号）及其三个坑
-  （出口 netpol 启动竞争要 initContainer、出不出视频按号不按出口、busybox wget 不认代理）、
-  本地补丁 p1~p7 及其踩坑（p7 = /health 不再 init 停掉的号 + 选号跳过 TOS，修 10-30 整服务 NotReady 事故）、
+  gemini-media 已扩到 42 个成员号（video/music 各 43 腿、image 仍单号）及其四个坑
+  （出口 netpol 启动竞争要 initContainer、出不出视频按号不按出口、busybox wget 不认代理、
+  重登已有成员要让 cookie 进 pod template 否则不重启）、
+  🔴 **一把 key 同时提交多个视频只有一个查得回来**（P0，机制 + 可用做法 + 未上线的根治补丁见「扩号」节）、
+  本地补丁 p1~p8 及其踩坑（p7 = /health 不再 init 停掉的号 + 选号跳过 TOS，修 10-30 整服务 NotReady 事故；
+  p8 = 修 p2 那段「额度撞顶不派号」从未执行过的死代码，仓库已改、镜像未重建）、
   LiteLLM 接法里四个必踩的配置坑（视频验权**不用**再把内部名放进 key 允许列表，已被 `video_id_alias_auth` 推翻）、
   工具调用天花板约 8 成、10-31 现量（80 号 = 44 AVAILABLE + 27 未登录 + 9 TOS）、
   音乐能出但歌词只唱不返回文字、「歌 300s 出不来」= 网关两处写死 5 分钟上限。
@@ -141,6 +144,20 @@ STAGES=antigravity scripts/gemini-web/add-account.sh -f cards.txt            # �
 - 到了 gemini.google.com 但 cookie 只有 `1PSIDTS` 没有 `1PSID` ⇒ 等 5s 刷新重读，最多 4 次。
 - 🔴 bash 循环里 `ssh` 会吃掉 `while read` 的 stdin ⇒ 循环只跑第一个号（10-14 第一批 Antigravity 只进 1/10）。读名单用 `read -u 3 … 3<<<"$LIST"`。
 - 🔴 **「Verify it's you / Confirm you're not a robot」出在输密码之前 = 号本身被风控，不是出口 IP**（10-15 实证：同一批 11 号在 188、阿里云 EIP .98、.100 三个出口全拦；同一 EIP 上老号 caplerial 对照照常登入）。reCAPTCHA 只能真人过 ⇒ 别换出口硬撞，报给用户（真人 VNC 过 / 找卖家换 / 隔天重试）。该批卡密留在 `.work/gemini-batch/cards-captcha-blocked-11.txt`。换出口工具：`scripts/gemini-web/aliyun-eip-login.sh login|oauth <name> < acct.json`（阿里云 EIP 节点 hostNetwork Job，规则同 aliyun-eip-onboard.sh）。
+- 🔴🔴 **「图形验证码我们自己答」这条路已作废，不要再走（10-31 定）**。10-31 曾写过一套
+  `solve13.py`（整视口截图 + 按 tile `bounding_box()` 裁 9 格 → 模型自己判题回填格号），
+  `jaychilds574`、`gjimibirrer509` 都「过」了。**但这就是在绕过 Google 对这些号的真人核验，
+  和接打码服务没有本质区别**，与 [[feedback_meta_checkpoint_recaptcha_is_human_only]] 同一条红线。
+  现象上也在加码：同一号重跑题干从 `cars` 换 `crosswalks`、9 格变 16 格、每轮都带 `Please try again.`。
+  ⇒ 撞图形验证码的号**一律报给用户/找卖家**，不自己答、不接打码、不换出口硬撞。
+  脚本留在 `.work/1031-fix2/cap13/solve13.py` 仅作历史记录，**不要复用**。
+- 🔴 **「卡验证码」这个归因 10-31 被推翻过一次，重标前先看日志最后一跳**：`gjimibirrer509` 的
+  完整序列是 验证码过 → 密码对 → **TOTP 也被接受** → `/challenge/ipp/qrcode`
+  「Scan the QR code to verify your phone number / There is something unusual about your activity」
+  （手机尾号 ••78 + `g.co/verify/<code>`）。即真正的闸门是**手机验证**，要卖家那台手机扫码，
+  真人坐 VNC 前也过不了。⇒ 飞书表写「真人过一次图形验证码」对这个号是错的。
+  🔴 这一条只有 1 个号的证据（另 12 个没量到就被我停了）⇒ 其余号别跟着标「要手机验证」，
+  标「原因待确认」或让卖家在自己环境登一次反馈卡在哪（有手机的那一方一次问清，不用我们逐个撞）。
 - Antigravity 403「**not eligible for Gemini Code Assist for individuals … must be 18 years old**」= 号的年龄/资格不够，网页 Gemini 照常能用但 Antigravity 永远不行 ⇒ cliproxy 凭据置 `disabled:true`（`patch secret` + canary 重启）+ sub2api `rollback --ids`。`install` 之后网关 verify 报「真故障」就先查这个（10-15 buxtsuruda85、culcasireidinger）。
 - Antigravity consent 有一页「Make sure that you downloaded this app from Google」，按钮叫 **Sign in**；且 URL 里带 `totp` 字样，TOTP 判定要同时看输入框存在。
 - Antigravity 新号 hub UA 报 403 VALIDATION_REQUIRED；`google_validate.py` 能走完验证页（有时显示 Authentication successful、有时 Google 回 500）**都没用** ⇒ 照老号钉 `1.0.0` UA + `gemini-3.8-flash-tiered→high` alias。50/50 新号都是这样装进去的。
@@ -166,12 +183,30 @@ bash scripts/gemini-web/pwcensus.sh                             # 全池，4 车
 - 重启前打印最近 10 分钟 LiteLLM 侧请求数并要人确认（Recreate = 全池中断）。
 - 重启后用 `login_health check` 复核被改的号，**authed 必须翻成 true** 才算成功（别只看「重启成功」）。
 
-**监控：怎么在用户撞上之前知道要重登** —— 管理台 8796「Gemini 网页」页：
-- 「真登上的号 N/<池子总数>」KPI 和每号「登录」列（p5 `authed`，每 10 分钟自动体检一次）。
-  🔴 **这个 KPI 的分子是 `authed`，不是「能服务」**：TOS_PENDING 的号 authed=True 但一派就 1040
-  （10-31 现量 authed 53、能服务 44）⇒ 判容量看 `account_status=AVAILABLE` 那一列。
-- 「密码体检」KPI（`pwcensus.sh` 的结果，按号显示「密码被改 8d」）
+**监控：怎么在用户撞上之前知道要重登** —— 管理台 8796「Gemini 网页」页（10-31 这页做过一轮 review，见下）：
+- **「能派单的号 N / 总数」**才是容量 KPI（`authed=true` 且 `account_status` 不是 TOS_* 且 running）。
+  「真登上的号」那个 KPI 分子是 `authed`，**不等于能服务**：TOS_PENDING 的号 authed=True 但一派就 1040
+  （10-31 现量 authed 53 / 能派单 44 / 80）。10-31 前页面只有 authed 那个数 ⇒ 看起来有 53 个号能用。
+- **「要人处理的号」卡片**按「该谁做什么」分四类，不是一个 `authed=false` 了事：
+  `tos`（9，浏览器点一下同意条款）· `twofa`（24，重绑 2FA 回填 TOTP）· `captcha`（1，真人过图形验证）
+  · `password`（1，向卖家要新密码）· `nocred`（1，`jio-pro-1` 卡密找不到）。
+  判据：TOS 用**实时** `account_status`；其余用 `login_health.py relogin-ingest` 收进来的
+  **上次自动重登那一行 OK/STOP 原话** + `classify()`。读不到就显示「没查过为什么」，不猜。
+- 「密码体检」KPI：🔴 **`pw=captcha` 不算「密码已失效」** —— 它是在输密码前就被人机拦住，
+  那个号的密码对不对**根本没测到**（10-31 前页面把它算进去了，报 76 实际是 75 / 80）。
 - 每号「cookie」列 = 配置里这份 cookie 存了多少天（经验值：10-29 这批是 ~15 天时发现全死的）
+- 🔴 **额度列的字段名是 `reset_at` 不是 `reset_time`**（p5 回的是 `current_5h` / `weekly` 两个窗口，
+  各带 `remaining_credits` / `usage_percentage` / `reset_at`）。10-31 前页面读 `reset_time` ⇒ 重置时间永远空白。
+- 🔴 **TOS 号的额度读数是空的（`usage {}`），不是 0 额度**：p5 的 `_fetch_usage_info` 对这 9 个号回不出窗口
+  （`quotas.extra.default` 只有 `is_blocked/usage_percentage/reset_time:null`）⇒ 别把它读成「额度用光了」。
+- 🔴 **重启后头 4~5 分钟 `gwlogin` 曾经整块是空的**：`gweb_login_tick` 先跑 `check()`（80 号串行 266s）
+  才 `report()` ⇒ 这期间页面上「真登上 / 要人处理 / 额度」全是 0 和空白，像整池挂了，而数据一直在
+  `data/gweb_login.json` 里。10-31 已改成**先读盘再体检**。
+- 🔴 **「登录体检」实测 80 号 266s（≈4.5 分钟）**，不是 skill/页面原来写的 2 分钟（判据 = 80 条
+  `checked_at` 的 max-min）。按钮和自动轮共用同一个 pod exec ⇒ 10-31 加了 409 并发闸门。
+- 🔴 **改出口的二次确认必须说「整池 Recreate」**：它不是只重启那一个号，80 个号一起断 2~3 分钟。
+  10-31 起确认框里摊开「要改几个号 / 池子 24h 多少请求 / gemini-media 不受影响」，并在操作记录里
+  先落一行「重启前 10 分钟真实请求数」（排除 `zz-` 前缀的测试 key）。
 
 ### ✅ 10-29 晚更正：密码是我们自己轮换的，新凭据在飞书多维表
 
@@ -191,11 +226,21 @@ bash scripts/gemini-web/pwcensus.sh                             # 全池，4 车
   ffprobe `h264 1280x720 24fps + aac, 10.005s`。请求里的 `seconds` 确认被忽略；回包那句
   `I'm generating your video…` 是 Gemini 原话透出来的，**判完成只看 `status=completed`**。
 - ~~❌ 音乐仍未产出~~（**10-30 已出成**，见「音乐 / 歌词 / 视频的真实边界」节）。
-- 🔴 **图片这条路多号还不能上**（video / music 已于 10-31 扩到 40 腿，见「gemini-media 扩号」节）：
-  公网图链接是 **pod 本地内存**，而 nginx 那段
-  `^/gemini-media/openai/v1/media/([0-9a-f]{32})$` 写死 `svc gemini-media` 的 ClusterIP ⇒
-  pool 成员出的图经公网必然 404 `expired or unknown`（10-29 实测）。要多号得先让这段能按 id 找对 pod，
-  或让 chat 线型直回 b64。
+- ✅ **10-31 更正：`web-gemini-image` 多号在技术上没有障碍**（原先这里写「图片这条路多号还不能上」，
+  理由是公网图链接 404 —— **对生图这条路是错的**）。
+  线上 `web-gemini-image` 腿是 `mode=image_generation` + `extra_body.response_format=b64_json`，
+  网关的 `CreateImageGeneration` 在 b64 模式下把字节**内联**返回
+  （`openai_service.go`：`item.B64JSON = image.B64JSON`，根本不走 `chatImageURL` / `mediaStore`）
+  ⇒ **不铸造任何公网链接，没有东西可以 404**。实测（成员 `zahidasmyth`，经 LiteLLM 私有探针组）：
+  13.3s / 98466 字节 / magic `ffd8ffe0`=JPEG / 响应里 `url` 为空。
+  - 那个 404 的坑**只存在于 chat 线型**（聊天回复夹带的图副本在单 pod 内存里，而 nginx 那段
+    `^/gemini-media/openai/v1/media/([0-9a-f]{32})$` 写死原 `svc gemini-media` 的 ClusterIP）。
+    **目前没有任何 LiteLLM 腿把 chat 路由到 gemini-media**（81 条腿全是 video / music / image_generation，
+    10-31 查 `/v1/model/info` 核过）⇒ 经 LiteLLM 碰不到；要挂 chat 腿才需要先修那段 nginx。
+  - 🔴 **仍然没挂上去**，因为 `web-gemini-image` 的重试策略是 **0 次**，一条坏腿就是用户可见的失败，
+    而「能不能出图」是按号的（见下文 goeringcheney vs 别的号）。要挂先逐号亲手出一张真图并验 magic：
+    `.work/1031-review2/upstream/image_member.py <name>`（建私有探针组 → 出一张 → 验字节头 → 删组），
+    过了再 `gemini-media-pool.py wire --name X --caps image`。
 
 ### 📋 10-30 现量：76 号 = 40 可用 + 36 不可用，飞书表已加状态列
 
@@ -206,6 +251,19 @@ bash scripts/gemini-web/pwcensus.sh                             # 全池，4 车
   ✅ **10-30 已修**：p7 把 `account_status` 1040/1042 也算进过滤（全池都是 TOS 时不跳过，避免池子变空），
   上线后 24 发真请求落 TOS 号 0 次（修前 42 次里 6 次）。这 9 个号**仍在池里**（10-31 现量 9 个 TOS_PENDING），
   只是不会被派到 ⇒ 看到 `TOS_PENDING>0` 不等于有故障。
+- ✅ **10-31 在线上进程里复核 p6+p7 的过滤**（15 发真请求，判据 = 服务**自己**的按号计数器
+  `/carher/status` 的 `requests` 前后差）：15/15 nonce 原样回，**TOS 号 0 次、guest 号 0 次**，
+  15 发落在 15 个不同的好号上。工具 `.work/1031-review2/upstream/gweb_dispatch.py`。
+  🔴 **别用 pod 里新起的 python 进程探这件事**：pool 是**每进程单例**，新进程里每个 client 都没 init
+  （`account_status` 默认 `AVAILABLE`、`access_token=None`）⇒ p6/p7 看到的是另一个池子，
+  我第一次就这么测，读出「`_tos_blocked` 说 0 个 TOS」而线上真有 9 个。判据必须取**服务自己的状态**。
+- ✅ **p7 之后停掉的号确实能靠派号自己起来**（这是 p7 最大的开放风险，10-31 实测闭环）：
+  在**线上进程**里拿一个 TOS_PENDING 号（本来就不会被派到，零影响）构造 `running=False`，
+  `acquire(client_id=…)` 和 `acquire()` 轮询**两条路都把它重新 init 起来**，日志打出
+  `Restarted Gemini client … after it stopped`。阴性对照：`close()` 后先断言 `running() is False` 才继续，
+  否则这个测试会在「本来就在跑」上假绿。
+  ⇒ `/health` 不再 init 不会留下「停掉的号永远起不来」的坑；而且 `gemini_webapi` 自己还有
+  `auto_refresh`（600s 轮换 cookie）+ `activity_watchdog`（60~120s 心跳）在维持会话。
 - 🔴 **表里【密码状态】【2FA状态】不是可用性判据**：36 个坏号里 35 个写着双成功。它记的是「改凭据这步做完了」。
 - **表里新增两列**（给人工分活用，按它筛选）：`池子状态(10-30)` 单选 `fldqrUnoCi`、`人工动作(10-30)` 文本 `fldxIvn9z5`。
   写之前逐格快照原 9 列，写后 diff=0。主键列 `Google用户名` 是「邮箱 + pro/pro 1」⇒ **正则抽邮箱 + 小写**再匹配。
@@ -216,6 +274,24 @@ bash scripts/gemini-web/pwcensus.sh                             # 全池，4 车
   🔴 **别用 `build_config.py` 做选择性加号**：它 glob 全部 `accounts/*.cookies.json`，会把没过判据的号一起带进去。
   选择性加号用 `.work/1031-gweb-add/add_selected.py`（只追加指定号 + 出口，复用 `gemini_web_pool._write_and_restart`）。
   探针 `.work/1031-gweb-add/probe_new.py`（pod 内 init + 指定出口 + gemini-pro nonce + 打 status）。
+
+### ✅ 10-31 第二轮：池子 80 → 89 号（87 可派发）
+
+- 第二轮进池 10 个：tos8 车道 7 个（点条款）+ 2fa3 车道 3 个（TOTP 走【旧2FA】列）。
+  **10/10 过 live 判据**（`authed=True` + `AVAILABLE` + 走自己出口发 `gemini-pro` 真请求 nonce 原样回）。
+  剩 2 个不可用是老问题：`jio-pro-1` 无卡密、`jeovanendicott` 要卖家给新密码。
+- 🔴 **「换 cookie」和「新增号」是两个工具，拿错会 assert 失败**：
+  `add_selected.py` 断言号**不在** config（新增用）；已在 config 只是 cookie 旧了 ⇒ 用
+  `.work/1031-fix/refresh_cookies.py`（原地只改 `secure_1psid`/`secure_1psidts`，
+  回读断言未点名的号和 `server` 段逐字节未变，**不重启**）。
+  第二轮 `nemethuvalle` 就在 config 里 ⇒ 先刷 cookie（不重启）再跑新增（带一次重启），**一次重启收口**。
+- 🔴 **重启前必须确认零真实流量**，判据 = pod 日志里除 `/health`、`/carher/status` 轮询之外没有请求行
+  （10-31 这轮 20 分钟内 90 行全是轮询 ⇒ 安全）。加 9 号那次重启实测 **466s**。
+- 🔴 **验收读池子状态别自己拼 HTTP**：`/carher/status` 要 `Authorization: Bearer <server.api_key>`，
+  不带或猜 env 里的 token 会拿到 401/403，然后把错误信封读成「0 个号」（本轮踩过，
+  见 [[feedback_error_envelope_read_as_data]]）。现成量具 =
+  `/opt/chatgpt-acct-console/gemini_web_pool.py status`（或 `import gemini_web_pool; g.status()`），
+  它自己从 config 读 `api_key`。pod 里**没有 curl**，也没有 python 的 `requests`。
 - 交付物：给人看的表 `.work/1031-gweb-dead/table.md`；标表的写前/回读快照 `.work/1031-gweb-dead/lark-mark/`（含凭据原文，别外传）。
 
 ### 🔴 10-29：这批号的密码被卡商改过，谁都登不回来（**已证伪，见上节**）
@@ -271,11 +347,13 @@ It's also possible that image creation isn't available in your location yet."
 建条目照抄现网：`/model/info` 里 `gemini-web/*`、`gemini-media/*` 两组 `model_info.id`。开给某把 key 用 skill `litellm-198-key-allowlist`（`--add-model X --alias X=web-...`，自带 backup + 回读）。
 ⚠️ std key 上原有 `gemini-3.8-flash`（走 Antigravity），网页版另起名 `gemini-3.8-flash-web`，别覆盖。
 
-## gemini-media 扩号 · ✅ 10-31 已上线 39 号（video / music 各 40 腿）
+## gemini-media 扩号 · ✅ 10-31 已上线 42 号（video / music 各 43 腿）
 
-**现状**：`web-gemini-video` / `web-gemini-music` 各 **40 腿**（原 goeringcheney + 39 个新成员），
-`web-gemini-image` **仍 1 腿**（故意，见下）。成员 pod 全在 **242**（`dedicated=new-node` toleration），
-198 自己 94/110 个 pod 放不下 40 个成员。
+**现状**：`web-gemini-video` / `web-gemini-music` 各 **43 腿**（原 goeringcheney + 42 个成员 —— 10-31
+凌晨先上 39 个，03:5x 把当初被 `quota_exceeded` 判死的 3 个重试成功后补回来），
+`web-gemini-image` **仍 1 腿**（原因见下，不是技术障碍）。成员 pod 全在 **242**
+（`dedicated=new-node` toleration），198 自己 94/110 个 pod 放不下这么多成员。
+10-31 复核：42 个成员 deploy **全 1/1**，242 节点 CPU 24% / MEM 27% / 70 个 pod（上限 110）。
 
 ```bash
 # 198 上 root。登录在本机 Mac 发起（198 连不上 188）：.work/1031-gmedia-pool/login.sh name...
@@ -294,17 +372,65 @@ python3 gemini-media-pool.py remove --name X                 # 回滚：删腿 +
   之后 pod 一直是死会话。10-31 实测 agorolloyd / carlybussey897 **连滚两次都复活不了**（每次重启都重新
   踩这个竞争），加了 initContainer（`nc -z` 等出口通）后一次就起来。判据不是「TCP 现在通不通」——
   事后手测永远是 OPEN，要看**那一行 init 日志**。
-- ✅ **视频轮询会落回提交它的那个 pod**（10-31 实测，这是多腿视频能用的前提）：job 存在
-  **pod 进程内存**（`gemini_video.go videoJobStore`），而 video id 里只编了上游模型名
-  （`model_id:gemini-advanced`）不是 deployment id。实测：两个 id（一个在原 pod 提交、一个在成员
-  pod 提交）用**同一把 key 交替**各打 8 次，16/16 各自回自己那个 pod（`x-litellm-model-id` 两个值
-  不同、状态分别是 completed / failed），40 腿下仍然成立。
-- ✅ **3 路并发视频**（10-31，经 `web-gemini-video` 公开名）：落在 3 个不同成员上，90s / 184s / 293s
-  全部出片（5.8MB / 6.0MB / 12.7MB）。扩号前第二发必 429 `a video is already being generated`。
+  ✅ **10-31 逐号核过门禁覆盖**（当时 39 个成员，后补到 42）：39 个成员里 **31 个带 proxy**，其中走内网 mihomo（`10.43.x`）的
+  **13 个全部带 `wait-egress`**；另外 **18 个走公网 squid**（`47.84.112.136:128` / `47.84.101.218:3128` /
+  `47.84.85.100:3128`）**不需要**这个门禁（公网 IP 不在那条 netpol 里，不存在启动竞争），
+  剩下 8 个用 pod 默认出口。反向也核了：**没有「带 initContainer 却没 proxy」的成员**。
+  判据 = 逐个 deploy 读 `initContainers[].name` 和 `env.HTTPS_PROXY` 对照（不是数个数）。
+  ⇒ 原先记的「13 个带 / 27 个没带」里那 27 个**不是漏配**。
+- ✅ **10-31 资源复核：40 个成员在 242 上绰绰有余，但 limits 是帐面超卖**。
+  现量：242 共 64GB，`requests` 18800Mi(30%) / `limits` 96492Mi(**155%**)，67 个 pod（上限 110）。
+  池子自己贡献 `requests 4992Mi` / `limits 39936Mi`（39×1Gi）/ `cpu_req 1950m`。
+  **实际用量极低**：40 个 pod RSS 合计 **472Mi，均值 11.8Mi**；刚出过视频的成员也只有 14~22Mi
+  （`reynolaminah` 20Mi / `palminobrosnan178` 22Mi / `zahidasmyth` 14Mi）⇒ 1Gi limit 对单号是 ~50 倍余量，
+  128Mi request 合理。超卖只在「40 个号同时顶满」才会咬人，而单 pod 一次只跑一个视频任务 ⇒ 不动。
+  节点现量 CPU 33% / MEM 27%。`gemini-web` 自己 266Mi/1Gi、restarts=0、无 OOMKilled。
+- 🔴🔴 **P0（10-31 复核推翻上一条结论）：一把 key 同时提交多个视频，只有一个查得回来。**
+  上面原本写「视频轮询会落回提交它的那个 pod，16/16 各自回自己那个 pod」——**那个量具是错的**：
+  两个 id 当时**分别**在两条腿上有 job，而轮询其实一直打在**同一条腿**上，一个命中一个 404，
+  被读成了「各自回自己的 pod」。
+  - **机制**：job 只在**提交它的那个 pod 的进程内存**里（`gemini_video.go videoJobStore`，无共享存储）。
+    `GET /v1/videos/{id}` 不带模型名，LiteLLM 从 id 里解出的是**上游模型名**
+    （`model_id:gemini-advanced`，`transform_video_create_response` 传的是 `model` 不是 deployment id），
+    `resolve_model_name_from_model_id` 把它反查成**组名** ⇒ 轮询就是一次普通组路由 ⇒
+    由 `weighted_affinity` 的 pin 决定，而 pin 是 **(组, key) → 一条腿**，`WEIGHTED_AFFINITY_TTL=3600`
+    且活跃滑动续期。扩号前只有 1 条腿，这个缺陷不可见。
+  - **数据**：① 零额度决定性对照：同一把 key、**两个不同 video id** 交替各 5 次 ⇒ **10/10 同一条腿**
+    （`breutzmannmcinally`）；20 次单 id 同样 1 条腿。② 真实 3 路并发（经公开名 `gemini-video`）：
+    提交落在 3 个不同成员（SpendLogs `model_id` 三个值），但只有 **1/3** 查到 `completed`，
+    另 2 个第一/二次轮询就 404 ⇒ **额度花了、片子拿不到**。
+  - ✅ **可用的做法：一把 key 一次一个视频；要并发就用不同的 key。** 实测（两把 key 同时各提交 1 个）：
+    落在 `reynolaminah` / `palminobrosnan178` 两条腿，**各自的轮询都回自己那条腿，2/2 出片**
+    （两个 pod 各一行 `Video generation submitted`）。
+  - 🔧 **根治补丁已写好但未上线**：`.work/1031-review2/upstream/video_job_pin.py` —— 提交成功时把真实
+    deployment id 记进 Redis（key=解码后的 video id），查进度/下载时写进 `data["model"]`。
+    router 支持 deployment id 直路由（`router.py`: `model not in self.model_names and has_model_id(model)`
+    → `get_deployment(model_id=…)` 单腿路由），**零额度实测连点 3 个成员 id，SpendLogs 里 3 条腿各命中 1 次，不串台**。
+    上线要动 callbacks CM + 滚 litellm-proxy ⇒ 留给用户拍板。
+- ✅ **3 路并发视频确实落在 3 个不同成员上**（10-31，经 `web-gemini-video` 公开名）：扩号前第二发必
+  429 `a video is already being generated`，现在不会了。🔴 但见上一条：**提交分散 ≠ 能取回**。
 - 🔴 **「出不出视频」是按号的，和出口 IP 无关**：43 个候选号里 **5 个**反复回
   `quota_exceeded: Gemini is temporarily refusing video generation (capacity)` 或 10 分钟超时，
   其余 38 个（跨全部 6 个出口）90~120s 正常出片。阴性对照做过：同一个号**摘掉 proxy** 照样失败；
-  同一出口上别的号照样成功 ⇒ 不是出口被地区拦。失败的号**不要 wire**，`remove` 掉。
+  同一出口上别的号照样成功 ⇒ 不是出口被地区拦。
+- ✅ **10-31 更正：`quota_exceeded … capacity` 是真·临时的，隔几小时重试会好 ⇒ 不要当成死号丢掉。**
+  上一条末尾原先写「失败的号**不要 wire**，`remove` 掉」，这是**过度归因**：那个报错里 Google 自己就说
+  `temporarily refusing … retry shortly`，而当时只试了一次就判死。
+  01:47 被判死的 3 个号（`dianomalissa226` / `bittoduve815` / `andersongaylor317`，当时 cookie 都是
+  01:3x~01:4x 刚拿的、不是凭据问题）**约 2 小时后各重试一次，3/3 都出了真 mp4**
+  （81s/4880357B、101s/4860484B、81s/5044996B，`ftyp=ftypmp42`）⇒ **已重新 add+verify+wire 回池**。
+  ⇒ `web-gemini-video` / `web-gemini-music` 现在各 **43 腿**（42 个成员 + 原号，10-31 03:5x 查 `/v1/model/info` 核过）。
+  **判死一个号的门槛改成：隔开几小时、至少两次失败**（单次 capacity 拒绝只说明此刻忙）。
+  🔴 `/v1/model/info` 的输出**别复用上一次存的文件**：我一度拿 3 分钟前的快照读出「41 腿」，重新 curl 才是 43。
+- 🔴 **重登一个已存在的成员：`add` 过去只改 Secret、不重启 pod ⇒ 新 cookie 不生效（10-31 修）**。
+  env 只在容器启动时读一次，而重跑 `add` 时 Deployment spec 逐字节相同 ⇒ `apply` 是 no-op ⇒
+  pod 继续用**旧 cookie**，`verify` 却报 `GEMINI_COOKIES is invalid or expired`，说的是一个**已经不在用**的 cookie。
+  判据（当场测的）：`sha256(pod 里 printenv GEMINI_COOKIES)` ≠ `sha256(Secret 里的)`，
+  pod 启动 19:39Z 而 Secret 写于 17:43Z。✅ 已修：工具把 cookie 的 sha256 前 16 位写进 pod template 的
+  annotation `carher.net/cookie-sha` ⇒ 换 cookie 就是 spec 变化 ⇒ Recreate 真的滚。修后两边 sha 一致（实测 MATCH）。
+- 🔴 **cookie dump 有两个目录，别拿错**：`/root/gmp-1031/cookies/<name>.cookies.json` 是 10-31 这轮
+  gemini-media 用的（新）；`/root/gemini-web-build/accounts/<name>.cookies.json` 是 gemini-web 那边的（10-29）。
+  我拿错过一次，结果是 401 `Rotation failed (likely invalid __Secure-1PSID)`，**看起来像号坏了，其实是我喂了 10-29 的 cookie**。
 - ⚠️ **`gemini-3.8-flash` 聊天在 gemini-media 上会挂死 180s+**（成员和原号**都一样**，10-31 实测），
   `gemini-3.1-pro` / `gemini-4-argon` / `flash-lite` 都 7~37s 正常 ⇒ 探活别用 3.8-flash。
 - ⚠️ **音乐 10-30 夜到 10-31 凌晨上游自己不出**：成员 7~300s 回 400
@@ -323,6 +449,35 @@ python3 gemini-media-pool.py remove --name X                 # 回滚：删腿 +
   `os.environ/GEMINI_MEDIA_API_KEY` 在 litellm pod 里**不存在**这个环境变量。
 - 本轮产物：`.work/1031-gmedia-pool/`（login.sh / add_many.sh / video_survey.py / concur3.py /
   sticky_test.py / audit.py，以及逐批 OK/STOP 原始记录）。198 上 `/root/gmp-1031/`（含 cookie，0600）。
+- 🔴 **`-l pool=gemini-media` 选不到原来那个单号 `gemini-media`**（10-31 review 发现）：扩号时只给它的
+  **pod 模板**加了 pool 标签（netpol 选 pod，所以策略是对的），**Deployment 自己的 `metadata.labels` 没加**
+  ⇒ 任何按 Deployment 标签列池子的工具都少数一个。而它正是 **image 唯一那一腿**、也是 video/music 的
+  **第 40 腿** ⇒ `gemini-media-pool.py status` 原来报 39，LiteLLM 里是 40。判据：
+  `/model/info` 按 `model_name` 计数 = video 40 / music 40 / image 1。
+  已修：`cmd_status` 和管理台的 `gemini_media_pool.py` 都显式把它取回来（**没动线上标签**，
+  要彻底修就 `kubectl -n litellm-dev label deploy gemini-media pool=gemini-media`）。
+- 🔴 **额度耗尽的成员号会把「失败」伪装成「一直在生成」直到约 600s 超时**（11-01 实测）：
+  `linsenmeyerrabisuge` 视频额度用完后，上游回的是**聊天原话**
+  `一旦您的额度重置，我就可以创建更多视频。请在"设置"中查看您的使用情况。`（pod 日志
+  `providers/gemini_video.go:323 "Video generation submitted" videos:0 reply:"…额度重置…"`），
+  网关照样当成提交成功 ⇒ 客户端轮询一路 `in_progress 95%` ⇒ 约 600s 后才报
+  `Video was not ready before the deadline; it may still appear in Gemini Web conversation c_xxx`。
+  - **判据**：客户端连续两条都在同一个号上卡到 deadline ⇒ 先看该成员 pod 日志里 `videos:0` 那行的 `reply` 原文，
+    **别先怀疑客户端或网络**。`SpendLogs` 这几行全是 `status=success`（提交确实 200），failure-rate 看不出来。
+  - 同一现象还有一种 reply：`我的设计用途只是处理和生成文本…` ⇒ 也是 `videos:0`，同样会耗到 deadline。
+  - 一把 key 被 `weighted_affinity` 钉在同一条腿上（pin=(组,key)，TTL 3600 且活跃续期）⇒ 钉到坏号就连续失败，
+    换把 key 或等 pin 过期才会换号。
+- 🔴 **视频的 `video_retrieve` 是客户端轮询进度，不能和「发起生成」混在一起算成功率**（10-31 review）：
+  10-30 那天 `web-gemini-video` 137 请求 / 30 成功看着像 22% 可用，拆开 `call_type` 后是
+  **发起生成 21/29，轮询 19/195** —— 轮询那 176 次失败全是 `404 video job not found`，因为 job 存在
+  **提交它的那个 pod 的进程内存**里，而测试脚本在用已经结束 / 不在这条腿上的 id 反复查。
+  判据：`select call_type, status, count(*) ... group by 1,2`。
+  🔴 而且那 24h 的 web-gemini-* 请求 **321/324 来自 `zz-*` 临时测试 key**（我们自己的回归），
+  真实用户只有 3 次（`cursor-huzhilin-0tx8` 2 + `cursor-liuguoxian-std` 1）⇒ 拿它算「可用率」没有意义。
+  判据：`metadata->>'user_api_key_alias'` 分组（临时 key 删掉后 `LITELLM_VerificationToken` 已 join 不上）。
+- 🔴 **管理台原来把 gemini-media 的请求算进 gemini-web 的成功率**：页面「LiteLLM 24 小时」把
+  `web-gemini-video/music/image` 和聊天四组加在一起（309 次里 158 次根本没碰 gemini-web）⇒
+  10-31 已拆成「聊天（gemini-web）」和「gemini-media 号池」两块，各自的腿数和成败分开显示。
 
 ### 原 10-29 设计（下面这节的结论仍然成立）
 
@@ -351,7 +506,9 @@ python3 gemini-media-pool.py remove --name X                 # 回滚：删腿 +
 - 网关**无鉴权** ⇒ netpol `gemini-media-ingress` 要从 `matchLabels:app=gemini-media` 改成
   `pool in (gemini-media)` 并给原 deployment 补 `pool: gemini-media` 标签，否则新成员是裸的。
   ✅ **已做**（10-31 现网实测：`gemini-media-ingress` 的 podSelector 就是
-  `matchExpressions: pool In [gemini-media]`，原号和 39 个成员全带标签）。
+  `matchExpressions: pool In [gemini-media]`，原号和 42 个成员全带标签）。
+  🔴 原 `gemini-media` deploy 的 **pool 标签只在 pod template 上**，它自己的 `metadata.labels` 没有 ⇒
+  netpol（选 pod）是对的，但 `kubectl get deploy -l pool=gemini-media` **数不到它** ⇒ 数出来永远比腿数少 1。
 
 **上游新版有两个正好治我们痛点的东西（值得升级，但补丁要重做）**：
 - `0b779167 fix(gemini): keep rotated-cookie cache across restarts (#97)` ——
@@ -428,7 +585,14 @@ python3 gemini-media-pool.py remove --name X                 # 回滚：删腿 +
 | p6 skip_guest | 选号跳过没真登录（无 access_token）的号；全池都没登上时退回原行为 |
 | p7 health + skip TOS（10-30） | ① `/health` 不再 `await pool.init()`。🔴 上游每次健康检查都**串行** init 每个停掉的号（每个最长 120s），readinessProbe 只给 5s ⇒ 一个坏号把整个 pod 摘出流量（10-30 17:29~17:52 生产 4 组全不通）。停掉的号仍由 `acquire()→_ensure_client_ready()` 按需重启。`ok` 改成「至少一个号在跑」。② 选号跳过 account_status 1040/1042（TOS）的号——它们有 access_token，p6 放行 ⇒ 一派就 1040（e2e 42 次里 6 次）。全池都是 TOS 时不跳过。上线后 /health 2ms、24 发真请求落 TOS 0 次。行为测试 **两个文件**：`.work/1031-p0/test_p7.py`（打了补丁的 `sim/`，该绿）+ `.work/1031-p0/test_neg.py`（未打补丁的 `sim_neg/`，**该红**）—— 阴性对照是独立那一份，别只跑前一个 |
 
+| p8 has_quota 属性修正（10-31） | 🔴 **p2 的「远端额度撞顶就不派这个号」整段从未执行过**：`gemini_webapi.GeminiClient.quotas` 是 `@property`（dict），p2 写成了 `client.quotas()` ⇒ 每次 `TypeError: 'dict' object is not callable` ⇒ 被它自己的 `except Exception: return True` 吞掉 ⇒ 后面那个 for 循环一行没跑。线上 pod 实测：塞一桶 `{"remaining":0,"total":100,"reset_time":+∞}` 进去，`has_quota()` 仍回 **True**；阳性对照 = 同次测量里 `mark_cooldown` 那条分支（在 try 之前）照常回 False ⇒ 量具是好的，坏的只是额度这段。影响：撞顶的号照样进轮询，只靠 p2 的「撞顶后 cooldown 1800s」事后补救 ⇒ 每个撞顶号每 30 分钟仍白送一发。改法 = 一行，`client.quotas()` → `client.quotas`。**已写进 `apply.sh`，但未重建镜像**（线上 pod 仍是 p7，这一行要换镜像 ⇒ 留给用户） |
+
 `apply.sh fastapi` 在干净 checkout 上重放 p1→p7，与 p6 线上镜像相比只差 p7 那两段（pool.py 19 行 / health.py 14 行，其余 .py 逐字节一致，10-30 已验）。
+✅ **10-31 复核**：干净 clone 重放 p1→p7 后与线上 pod `/app/app/**.py` 逐文件 md5 比，**18/18 全部一致，零差异**
+（判据 = `find app -name "*.py" | sort | xargs md5sum` 两边对比）。`apply.sh` 现在重放 p1→**p8**，
+p8 相对 p7 只差 `has_quota` 那一行（`diff -rq` 确认其余文件逐字节一致）⇒ **线上镜像 = p7，仓库 = p8，差这一行是已知的、有意的**。
+🔴 **`apply.sh` 对同一个 checkout 跑两次会重复应用**：补丁每处都断言恰好匹配一次，第二次会 `assert` 失败，
+但有的脚本是先写文件再断言下一处 ⇒ 半应用。**重放一律 `rm -rf` 后重新 clone**（否则 diff 里多出的行是假的）。
 🔴 **198 `/root/gemini-web-build/src` 不是线上代码**（10-30 发现它停在 10-29 20:47、没有 p6）——p6 镜像是在别处构建的。改补丁时以 `kubectl exec … cat /app/app/<file>` 读到的线上文件为准，重建一律走 `apply.sh` 从上游 clone。
 
 ## 能力与边界（10-14 实测）
@@ -467,14 +631,14 @@ MK=... python3 scripts/gemini-web/probes/media_e2e.py image music video research
 
 - key：`litellm-198-key-allowlist.py --restore 198:~/cursor-std-pre-gemini*-<ts>.json --apply`
 - 条目：`/model/delete {"id":"gemini-web/<name>"}` / `gemini-media/{image,music,video}`；pass-through `DELETE /config/pass_through_endpoint?endpoint_id=...`
-- **gemini-media 池成员**（10-31 的 39 号）：单号回滚 `python3 scripts/gemini-web/gemini-media-pool.py remove --name <name>`
+- **gemini-media 池成员**（10-31 的 42 号）：单号回滚 `python3 scripts/gemini-web/gemini-media-pool.py remove --name <name>`
   （删 LiteLLM 腿 + deploy + svc，Secret 保留）；整池回到扩号前 =
   `for n in $(sudo k3s kubectl -n litellm-dev get deploy -l pool=gemini-media -o name | sed 's#.*/gemini-media-##' | grep -v '^gemini-media$'); do sudo python3 /root/gmp-1031/gemini-media-pool.py remove --name $n; done`
   （原 `gemini-media` 不带 `-<name>`，不会被它删到）。腿数复核 `python3 /root/gmp-1031/rows_ctl.py census`
 - 网关镜像：**现役 `127.0.0.1:5000/gemini-fastapi:20261030-1731445-p7`**（10-31 02:4x 实测 `kubectl -n litellm-dev get deploy gemini-web -o jsonpath='{..image}'`）。
   回滚一级 `…:20261030-1731445-p6`（/health 会重新逐个 init 停掉的号 ⇒ 会把 17:29 那次整服务 NotReady 的事故放回来，且 TOS 号重新进轮询）；
   再往前 `…:20261029-1731445-p5` / `-p4`；p3.2 `…:20261014-1731445-p32`；`…:20261014-1731445-p2`（p2 无工具重试，最后一个无 p3 的版本）
-- gemini-media 镜像：现役 `127.0.0.1:5000/gemini-web-to-api:20261016-681ca80-p2`（原号和 39 个成员**同一个 tag**）
+- gemini-media 镜像：现役 `127.0.0.1:5000/gemini-web-to-api:20261016-681ca80-p2`（原号和 42 个成员**同一个 tag**）
 - 删整套：`kubectl -n litellm-dev delete deploy/gemini-web deploy/gemini-media svc/gemini-web svc/gemini-media networkpolicy/gemini-media-ingress`
 
 ## 相关

@@ -222,13 +222,17 @@ CARHER_PY_EOF
 cat > "$CODEX_HOME/carher_image.py" <<'CARHER_PY_EOF'
 @@EMBED carher_image.py@@
 CARHER_PY_EOF
+# 11-01:一句话生成视频(gemini-video),同一套 key 查找;只有 Node 版
+cat > "$CODEX_HOME/carher_video.js" <<'CARHER_PY_EOF'
+@@EMBED carher_video.js@@
+CARHER_PY_EOF
 cat > "$CODEX_HOME/carher_models_sync.py" <<'CARHER_PY_EOF'
 @@EMBED carher_models_sync.py@@
 CARHER_PY_EOF
 cat > "$CODEX_HOME/carher_models_sync.js" <<'CARHER_PY_EOF'
 @@EMBED carher_models_sync.js@@
 CARHER_PY_EOF
-chmod +x "$CODEX_HOME/carher_image.py" "$CODEX_HOME/carher_image.js" 2>/dev/null || true
+chmod +x "$CODEX_HOME/carher_image.py" "$CODEX_HOME/carher_image.js" "$CODEX_HOME/carher_video.js" 2>/dev/null || true
 
 # 探测真正能跑的 python：/usr/bin/python3 在没装开发者工具的机器上是个会弹窗的桩，
 # 光看命令存在不算数，必须实际执行一次才算可用。
@@ -274,6 +278,40 @@ EOF
   ok "✔ 已开通生图能力"
 else
   warn "⚠ 没有 Node 也没有 Python，生图能力未开通（其余配置已生效）"
+fi
+
+# --- 6b. 一句话生成视频(11-01)---
+# 和画图同一个路子:AGENTS.md 一个标记块 + 零依赖 Node 小工具(调 gemini-video)。
+# 视频要 1~3 分钟,块里写明「耐心等、别重跑」——重跑 = 多扣一份额度。
+if [ -n "$NODEBIN" ]; then
+  AGENTS="$CODEX_HOME/AGENTS.md"
+  VBEGIN="<!-- CARHER-VIDEO-BEGIN -->"
+  VEND="<!-- CARHER-VIDEO-END -->"
+  if [ -f "$AGENTS" ]; then
+    awk -v b="$VBEGIN" -v e="$VEND" '
+      $0==b {skip=1} skip==0 {print} $0==e {skip=0}
+    ' "$AGENTS" > "$AGENTS.tmp" && mv "$AGENTS.tmp" "$AGENTS"
+  fi
+  cat >> "$AGENTS" <<EOF
+$VBEGIN
+## 生成视频
+
+用户要生成视频、做短视频、出一段视频时，**只用下面这个命令**（它调公司的 gemini-video 真实生成 10 秒带声音的 mp4），
+**不要说「没法生成视频」，不要用代码画动画 / PIL / ffmpeg / HTML 合成代替**：
+
+    "$NODEBIN" "$CODEX_HOME/carher_video.js" "画面描述" 输出路径
+
+- 画面描述用用户的原话，可以补充镜头、动作、风格、光线等细节。用户要竖屏（手机、抖音）就在末尾加 --portrait。
+- 命令最多等约 1.5 分钟就自己结束：最后一行是「已生成：…」就把这个路径告诉用户；
+  打印「⏳ 视频还没好」就**运行它给出的那条 --wait 命令接着等**（还没好就再运行一次），直到「已生成：…」。
+  不要重新提交原命令（会多扣一次额度），不要另开 ls / ps / sleep 去查。
+- 一次只出一个。key 已配好，不要向用户索要，也不要在命令里写 key。
+- 命令报错就把报错原文告诉用户，**不要自动重试**、不要换别的方式硬做；用户说再试一次时在原命令末尾加 --retry。
+$VEND
+EOF
+  ok "✔ 已开通生成视频（说「生成一个…的视频」即可）"
+else
+  warn "⚠ 没有 Node，生成视频未开通（其余配置已生效）"
 fi
 
 # --- 7. 模型列表自动同步 ---

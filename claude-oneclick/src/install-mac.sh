@@ -388,6 +388,27 @@ const blk=B+"\n## 画图\n\n用户要画图、生成图片、出图、做配图/
 fs.writeFileSync(p,(t?t+"\n\n":"")+blk);'
 ok "✔ 已开通画图(说「画一张…」即可)"
 
+# ── 4d2. 一句话生成视频(11-01):同一个路子,skill carher-video + CLAUDE.md 标记块 ──
+mkdir -p "$CLAUDE_HOME/skills/carher-video"
+cat > "$IMG_DIR/carher_video.js" <<'CARHER_JS_EOF'
+@@EMBED carher_video.js@@
+CARHER_JS_EOF
+CARHER_NODE="$NODE_ABS" CARHER_TOOL="$IMG_DIR/carher_video.js" node -e '
+const fs=require("fs");let t=fs.readFileSync(0,"utf8");
+t=t.split("@@NODE@@").join(process.env.CARHER_NODE).split("@@TOOL@@").join(process.env.CARHER_TOOL);
+process.stdout.write(t);' > "$CLAUDE_HOME/skills/carher-video/SKILL.md" <<'CARHER_MD_EOF'
+@@EMBED video_skill.md@@
+CARHER_MD_EOF
+CARHER_MD="$CMD_MD" CARHER_LINE="\"$NODE_ABS\" \"$IMG_DIR/carher_video.js\" \"画面描述\" 输出路径" node -e '
+const fs=require("fs"),p=process.env.CARHER_MD,B="<!-- CARHER-VIDEO-BEGIN -->",E="<!-- CARHER-VIDEO-END -->";
+let t="";try{t=fs.readFileSync(p,"utf8")}catch(e){}
+const i=t.indexOf(B),j=t.indexOf(E);if(i>=0&&j>i)t=t.slice(0,i)+t.slice(j+E.length);
+t=t.replace(/\n+$/,"");
+const blk=B+"\n## 生成视频\n\n用户要生成视频、做短视频、出一段视频时，**只用下面这个命令**（它调公司的 gemini-video 真实生成 10 秒带声音的 mp4），**不要说「没法生成视频」，不要用代码画动画 / PIL / ffmpeg / HTML 合成代替**：\n\n    "+process.env.CARHER_LINE+"\n\n"
+ +"- 画面描述用用户的原话，可以补充镜头、动作、风格、光线等细节。用户要竖屏（手机、抖音）就在末尾加 --portrait。\n- 命令最多等约 1.5 分钟就自己结束：最后一行是「已生成：…」就把这个路径告诉用户；\n  打印「⏳ 视频还没好」就**运行它给出的那条 --wait 命令接着等**（还没好就再运行一次），直到「已生成：…」。\n  不要重新提交原命令（会多扣一次额度），不要另开 ls / ps / sleep 去查。\n- 一次只出一个。key 已配好，不要向用户索要，也不要在命令里写 key。\n- 命令报错就把报错原文告诉用户，**不要自动重试**、不要换别的方式硬做；用户说再试一次时在原命令末尾加 --retry。\n"+E+"\n";
+fs.writeFileSync(p,(t?t+"\n\n":"")+blk);'
+ok "✔ 已开通生成视频(说「生成一个…的视频」即可)"
+
 # ── 4e. 「刷模型」(10-19):说这三个字就按 key 重拉 /model 菜单(旧的删、新的加)──
 # 10-27:旧名 carher-refresh-models 和 Cursor 的同名 ⇒ Cursor agent 也读 ~/.claude/skills,说「刷模型」跑成了 Claude 的刷新。改名并删旧目录
 rm -rf "$CLAUDE_HOME/skills/carher-refresh-models"

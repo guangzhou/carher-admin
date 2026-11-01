@@ -355,6 +355,29 @@ if ($nodeAbs) {
   [IO.File]::WriteAllText($cmdMd, $blk, $noBom)
   Ok "√ 已开通画图(说「画一张…」即可)"
 
+  # ── 4d2. 一句话生成视频(11-01):skill carher-video + CLAUDE.md 标记块 ──
+  $vSkillDir = Join-Path $claudeHome 'skills\carher-video'
+  New-Item -ItemType Directory -Force -Path $vSkillDir | Out-Null
+  $vidJs = @'
+@@EMBED carher_video.js@@
+'@
+  $vidMd = @'
+@@EMBED video_skill.md@@
+'@
+  $vToolPath = Join-Path $imgDir 'carher_video.js'
+  [IO.File]::WriteAllText($vToolPath, $vidJs, $noBom)
+  [IO.File]::WriteAllText((Join-Path $vSkillDir 'SKILL.md'), $vidMd.Replace('@@NODE@@', $nodeAbs).Replace('@@TOOL@@', $vToolPath), $noBom)
+  $old = [IO.File]::ReadAllText($cmdMd)
+  $VB = '<!-- CARHER-VIDEO-BEGIN -->'; $VE = '<!-- CARHER-VIDEO-END -->'
+  $i = $old.IndexOf($VB); $j = $old.IndexOf($VE)
+  if ($i -ge 0 -and $j -gt $i) { $old = $old.Substring(0, $i) + $old.Substring($j + $VE.Length) }
+  $old = $old.TrimEnd()
+  $vline = '"' + $nodeAbs + '" "' + $vToolPath + '" "画面描述" 输出路径'
+  $vblk = $VB + "`n## 生成视频`n`n用户要生成视频、做短视频、出一段视频时，**只用下面这个命令**（它调公司的 gemini-video 真实生成 10 秒带声音的 mp4），**不要说「没法生成视频」，不要用代码画动画 / PIL / ffmpeg / HTML 合成代替**：`n`n    " + $vline + "`n`n- 画面描述用用户的原话，可以补充镜头、动作、风格、光线等细节。用户要竖屏（手机、抖音）就在末尾加 --portrait。`n- 命令最多等约 1.5 分钟就自己结束：最后一行是「已生成：…」就把这个路径告诉用户；`n  打印「⏳ 视频还没好」就**运行它给出的那条 --wait 命令接着等**（还没好就再运行一次），直到「已生成：…」。`n  不要重新提交原命令（会多扣一次额度），不要另开 ls / ps / sleep 去查。`n- 一次只出一个。key 已配好，不要向用户索要，也不要在命令里写 key。`n- 命令报错就把报错原文告诉用户，**不要自动重试**、不要换别的方式硬做；用户说再试一次时在原命令末尾加 --retry。`n" + $VE + "`n"
+  if ($old) { $vblk = $old + "`n`n" + $vblk }
+  [IO.File]::WriteAllText($cmdMd, $vblk, $noBom)
+  Ok "√ 已开通生成视频(说「生成一个…的视频」即可)"
+
   # ── 4e. 「刷模型」(10-19):说这三个字就按 key 重拉 /model 菜单 ──
   # 10-27:旧名和 Cursor 的同名 ⇒ Cursor agent 读到这份、跑成 Claude 的刷新。改名并删旧目录
   Remove-Item (Join-Path $claudeHome 'skills\carher-refresh-models') -Recurse -Force -ErrorAction SilentlyContinue

@@ -20,6 +20,9 @@ cp "$HERE/cursor_tier_catalog.json" "$STAGE/"
 # 画图工具 + skill 模板(10-16):与 Codex / Claude 一键共用同一份源,不复制
 cp "$HERE/../../codex-oneclick/src/carher_image.js" "$STAGE/"
 cp "$HERE/../../codex-oneclick/src/image_skill.md" "$STAGE/"
+# 一句话生成视频(11-01):同一份源
+cp "$HERE/../../codex-oneclick/src/carher_video.js" "$STAGE/"
+cp "$HERE/../../codex-oneclick/src/video_skill.md" "$STAGE/"
 
 # 远程窗口直通(09-21 加)。本机包装好之后 BYOK 地址是 127.0.0.1:8788,而远程窗口里的
 # 127.0.0.1 是**远端那台机** ⇒ 模型全报连不上。这个引擎往 ~/.ssh/config 加一条反向

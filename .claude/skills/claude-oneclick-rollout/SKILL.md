@@ -1,6 +1,6 @@
 ---
 name: claude-oneclick-rollout
-description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的一键脚本 SOP——claude-mac.command / claude-windows.bat,自动装 Node/claude、合并 settings.json、配桌面 App 三方模式、预置 App 钉死的 Claude Code 组件、198 /ccdl/ 国内镜像(每日自动跟版)。Use when 改 claude-oneclick 下任何脚本 / 同事说 Claude App「App unavailable」「发消息很慢不回」「只能选一个模型」/ /model 菜单重复、太多、有画图模型或 Fable / App 里 npm install 失败、设置页「严格沙箱 · 组织开启」/ 新开窗口报 Model "claude-router-…" isn't recognized / 要更新《Claude Code 一键配置》文档 / App 自动升级后卡住。
+description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的一键脚本 SOP——claude-mac.command / claude-windows.bat,自动装 Node/claude、合并 settings.json、配桌面 App 三方模式、预置 App 钉死的 Claude Code 组件、198 /ccdl/ 国内镜像(每日自动跟版)。Use when 改 claude-oneclick 下任何脚本 / 要生成视频 / 视频出不来 / 同事说 Claude App「App unavailable」「发消息很慢不回」「只能选一个模型」/ /model 菜单重复、太多、有画图模型或 Fable / App 里 npm install 失败、设置页「严格沙箱 · 组织开启」/ 新开窗口报 Model "claude-router-…" isn't recognized / 要更新《Claude Code 一键配置》文档 / App 自动升级后卡住。
 ---
 
 # Claude Code 一键配置(CLI + 桌面 App)
@@ -13,6 +13,25 @@ description: 给同事铺 Claude Code(命令行 + 桌面 App)接 198 网关的�
 **画图(10-16)**:安装器第 4d 步装 `~/.claude/carher/carher_image.js`(源在 codex-oneclick/src,build.sh 的 @@EMBED 从那里取)+ `skills/carher-image` + `~/.claude/CLAUDE.md` 里 `CARHER-IMAGE` 标记块。🔴 只放 skill 不够:实测 `claude -p "画一张…"` 直接写 SVG,不调 skill;加了常驻说明块才真出图。
 **发版**:改完跑 `bash scripts/agent-oneclick-docs/release_all.sh`(网页 + 飞书附件 + 门禁一起)。
 **自检(doctor,10-16)**:`src/doctor-{mac.sh,windows.ps1}` → build 出 `claude-doctor-{mac.command,windows.bat}`,单页「出问题了」里可下载。只读;查 settings.json(BASE/API_KEY/AUTH_TOKEN 并存/发现开关/claude-router- 旧名)、rc 与当前终端的覆盖变量、桌面 App 3P 配置与两把 key 是否一致、App 钉死版本的组件是否预置 + 198 镜像有没有这版、App 日志 `Host Claude Code binary not available`、代理、key 实打 /v1/messages。回归 `tests/test_doctor.py`;Windows 版 App 日志路径按 App 代码=`%LOCALAPPDATA%\Claude-3p\logs`(未实机验)。
+
+## 一句话生成视频(2026-11-01 新增)
+
+工具 `codex-oneclick/src/carher_video.js`(**三个一键共用一份源**,与 `carher_image.js` 同目录同套 key 查找顺序)+ 说明模板 `src/video_skill.md`。
+模型 = 网关 `gemini-video`(OpenAI 视频三段式 `POST /videos` → 轮询 → `/content`),一条约 1.5~3 分钟,出 10 秒 1280x720(`--portrait` 竖屏)h264+aac。
+离线回归 `codex-oneclick/tests/test_video_tool.py`(26 项,假网关,不扣额度)。
+
+🔴 **三个 App 里实测出来的四条,工具形态就是为它们长成这样的**:
+1. **提交 / 等待分离**:`carher_video.js "描述" 路径` 只负责提交 + 最多等 90 秒,真正干活的是 `--worker` **detached 子进程**;
+   没出完就打印 `--wait <任务号>` 让 agent 接着等。原因:Codex App 的 unified exec **10 秒**就交回半截输出(`yield_time_ms`,没有命令超时),
+   模型当成「输出丢了」→ 自己重跑 → 多扣额度;Cursor GUI 默认 **30 秒**转后台;Claude Code 的 Bash 默认 2 分钟掐。
+2. **幂等**:同一「描述 + 输出位置 + 画幅」30 分钟内不重复提交(任务记录 `~/.carher/video-jobs/<id>.json` + sha1 签名):
+   还在跑就接上去等,刚出完直接报结果,**刚失败过必须显式 `--retry`**。agent 再怎么重跑都只扣一份额度。
+3. **本机排队锁** `~/.carher/video.lock`(目录锁 + owner 心跳 + 第二把短锁串行化破锁):同一把 key 同时提交多个视频,网关只能取回一个(见 [[gemini-web-pool-198]])。
+4. **沙箱**:提交前先试写任务目录 + HEAD 一次 `/models`,被拦就报「被命令沙箱拦住了 / 连不上网关,还没提交不扣额度」。
+   Cursor Auto-review 默认沙箱禁网、禁写 `~/.carher`;说明里要求申请沙箱外运行(`required_permissions: ["all"]`)。
+
+常驻说明(和画图同一套标记块机制,重跑只替换本块):Codex=`~/.codex/AGENTS.md` 的 `CARHER-VIDEO` 块;
+Claude=`~/.claude/CLAUDE.md` 的 `CARHER-VIDEO` 块 + `skills/carher-video`;Cursor=`~/.cursor/skills/carher-video` **外加 User Rules**(见下)。
 
 ## 对外域名 = chat.auto-link.com.cn(2026-10-29)
 

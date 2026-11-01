@@ -8544,7 +8544,7 @@
          let path = match self.stats_path() {
              Some(p) => p,
              None => return,
-@@ -1291,9 +1505,1226 @@
+@@ -1291,9 +1505,1233 @@
          self.save_stats_debounced();
      }
  
@@ -8779,15 +8779,22 @@
 +        }
 +        let mut cfgs = cfgs;
 +        {
++            // 改名（11-01 UI 回归发现）：只改槽名、密码栏还是打码 ⇒ 按名字查不到。找「同一出口地址 + 同一用户名」的旧槽沿用其密码；
++            // 出口地址也改了 ⇒ 仍要重填（不能把已知密码挂到别的代理上）
++            let old_by_proxy: HashMap<(Option<String>, Option<String>), String> = self
++                .slot_configs_all
++                .lock()
++                .iter()
++                .filter_map(|o| o.proxy_password.clone().map(|p| ((o.proxy_url.clone(), o.proxy_username.clone()), p)))
++                .collect();
 +            let mut sec = self.slot_secrets.lock();
 +            for c in cfgs.iter_mut() {
 +                match c.proxy_password.as_deref() {
 +                    Some(MASKED_PASSWORD) => {
-+                        c.proxy_password = Some(
-+                            sec.get(&c.name)
-+                                .cloned()
-+                                .ok_or_else(|| anyhow::anyhow!("槽位 {} 没有已知密码，请重新填写", c.name))?,
-+                        );
++                        let known = sec.get(&c.name).cloned().or_else(|| old_by_proxy.get(&(c.proxy_url.clone(), c.proxy_username.clone())).cloned());
++                        let p = known.ok_or_else(|| anyhow::anyhow!("槽位 {} 没有已知密码，请重新填写", c.name))?;
++                        sec.insert(c.name.clone(), p.clone());
++                        c.proxy_password = Some(p);
 +                    }
 +                    Some(p) => {
 +                        sec.insert(c.name.clone(), p.to_string());
@@ -9772,7 +9779,7 @@
      }
  
      /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
-@@ -1640,6 +3071,7 @@
+@@ -1640,6 +3078,7 @@
                          DisabledReason::QuotaExceeded => "QuotaExceeded",
                          DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                          DisabledReason::InvalidConfig => "InvalidConfig",
@@ -9780,7 +9787,7 @@
                      }.to_string()),
                      endpoint: e.credentials.endpoint.clone(),
                      subscription_title: e.credentials.subscription_title.clone(),
-@@ -1671,6 +3103,12 @@
+@@ -1671,6 +3110,12 @@
          }
          // 持久化更改
          self.persist_credentials()?;
@@ -9793,7 +9800,7 @@
          Ok(())
      }
  
-@@ -1736,9 +3174,9 @@
+@@ -1736,9 +3181,9 @@
                  .clone()
                  .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
          } else {
@@ -9806,7 +9813,7 @@
  
              if needs_refresh {
                  let _guard = self.refresh_lock.lock().await;
-@@ -1955,6 +3393,9 @@
+@@ -1955,6 +3400,9 @@
          self.persist_credentials()?;
  
          tracing::info!("成功添加凭据 #{}", new_id);
@@ -9816,7 +9823,7 @@
          Ok(new_id)
      }
  
-@@ -2020,6 +3461,27 @@
+@@ -2020,6 +3468,27 @@
          // 立即回写统计数据，清除已删除凭据的残留条目
          self.save_stats();
  
@@ -9844,7 +9851,7 @@
          tracing::info!("已删除凭据 #{}", id);
          Ok(())
      }
-@@ -2029,6 +3491,11 @@
+@@ -2029,6 +3498,11 @@
      /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
      /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
      pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
@@ -9856,7 +9863,7 @@
          let credentials = {
              let entries = self.entries.lock();
              entries
-@@ -2076,6 +3543,9 @@
+@@ -2076,6 +3550,9 @@
  
      /// 设置 window 模式参数（Admin API）：校验 → 写回 config.json → 生效。写盘失败则不生效。
      pub fn set_window_settings(&self, ws: WindowSettings) -> anyhow::Result<()> {
@@ -9866,7 +9873,7 @@
          use anyhow::Context;
          ws.validate()?;
          if let Some(path) = self.config.config_path() {
-@@ -2101,6 +3571,10 @@
+@@ -2101,6 +3578,10 @@
      }
  
      fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
@@ -9877,7 +9884,7 @@
          use anyhow::Context;
  
          let config_path = match self.config.config_path() {
-@@ -2123,8 +3597,11 @@
+@@ -2123,8 +3604,11 @@
  
      /// 设置负载均衡模式（Admin API）
      pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
@@ -9890,7 +9897,7 @@
              anyhow::bail!("无效的负载均衡模式: {}", mode);
          }
  
-@@ -2140,9 +3617,35 @@
+@@ -2140,9 +3624,35 @@
              return Err(err);
          }
  
@@ -9926,7 +9933,7 @@
  }
  
  impl Drop for MultiTokenManager {
-@@ -2150,6 +3653,7 @@
+@@ -2150,6 +3660,7 @@
          if self.stats_dirty.load(Ordering::Relaxed) {
              self.save_stats();
          }
@@ -9934,7 +9941,7 @@
      }
  }
  
-@@ -2325,7 +3829,676 @@
+@@ -2325,7 +3836,697 @@
          assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");
      }
  
@@ -10144,6 +10151,27 @@
 +            cfgs.push(crate::model::config::SlotConfig { name: format!("y{}", n), enabled: false, ..Default::default() });
 +        }
 +        assert!(m.set_slot_configs(cfgs).is_err());
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_rename_with_masked_password_keeps_password_only_for_same_proxy() {
++        let (m, dir) = slot_mgr(3, 4);
++        let masked: Vec<_> = m
++            .get_slot_configs()
++            .into_iter()
++            .map(|mut c| { if c.proxy_password.is_some() { c.proxy_password = Some(MASKED_PASSWORD.into()); } c })
++            .collect();
++        // 只改名 ⇒ 沿用原密码
++        let mut renamed = masked.clone();
++        renamed[1].name = "s1-renamed".into();
++        m.set_slot_configs(renamed.clone()).unwrap();
++        assert_eq!(m.get_slot_configs()[1].proxy_password.as_deref(), Some("pw"));
++        // 改名 + 改出口 ⇒ 必须重填
++        let mut moved = renamed.clone();
++        moved[2].name = "s2-moved".into();
++        moved[2].proxy_url = Some("http://10.9.9.9:3128".into());
++        assert!(m.set_slot_configs(moved).is_err(), "换了出口还用打码密码要拒");
 +        std::fs::remove_dir_all(dir).ok();
 +    }
 +
@@ -10611,7 +10639,7 @@
      fn test_window_settings_validate_and_persist() {
          let config_path = std::env::temp_dir().join(format!("kiro-window-{}.json", uuid::Uuid::new_v4()));
          std::fs::write(&config_path, r#"{"loadBalancingMode":"window"}"#).unwrap();
-@@ -2441,6 +4614,65 @@
+@@ -2441,6 +4642,65 @@
          credentials.refresh_token = Some("a".repeat(150));
          let result = validate_refresh_token(&credentials);
          assert!(result.is_ok());

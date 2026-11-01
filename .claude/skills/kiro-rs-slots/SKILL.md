@@ -7,44 +7,85 @@ description: >-
   Use when 用户说 "槽位 / 30891 / 新版 kiro admin"、"已封口 / 暂不接新人 / 冷备"、"把某些 key 切到新版 / 切回老版"、
   "老环境还有哪些 key"、"槽被禁用了用户会不会受影响"、"按 kiro 账户看用了什么模型多少 token"、
   "用量对不上 / 次数对不上"、"30891 打不开"、"加个槽 / 减个槽 / 换出口"、"kiro 上 haiku-5.5"、
-  "opus-5.5 空回复 / 安全审查 / 被拦 / 自动换 opus-5 / 改备用模型 / 改提示文案"。
+  "opus-5.5 空回复 / 安全审查 / 被拦 / 自动换 opus-5 / 改备用模型 / 改提示文案"、
+  "加出口 / 加代理槽 / iGuge 节点入槽 / 槽名 / 测速 / 综合排名"、"批量启用 / 批量停用 / 启用且不在用 / 冷备"、
+  "代理余额 / 订阅流量"、"排队太久 / 兜底 / 529 / 首字卡住"。
 ---
 
 # kiro.rs 槽位实例（0011）
 
 老实例 / 加号 / 改镜像的通用流程在 skill `kiro-rs-ops`；加号 SOP 在 `kiro-account-manager-ops`。本篇只讲槽位实例特有的东西。
 
-## 1. 现状（一律现读，下面只是 10-25 的形状）
+## 1. 现状（一律现读；下面是 11-01 的形状）
 
 ```bash
-python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/耗时/key 数 + 每槽 在途/排队/429/被限/用尽/排队超时 + 冷备数
+python3 scripts/kiro-slots-watch.py --minutes 30   # 每槽 在途/排队/429/被限/用尽/排队超时 + 冷备数
+# 现网镜像 / 槽 / 冷备 / 关键配置（198 上，cltx）
+sudo kubectl -n kiro-rs get deploy kiro-rs-slots -o jsonpath='{.spec.template.spec.containers[0].image}'
+AK=$(cat ~/kiro-us-egress/.ak); curl -s -H "x-api-key: $AK" http://127.0.0.1:30891/api/admin/slots | jq '{n:(.slots|length),spare}'
 ```
 
 | 项 | 值 |
 |---|---|
-| 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 Recreate，grace 300s），Admin `http://10.68.13.198:30891/admin`，adminApiKey 在实例自己的 `config.json`（和老实例不同）|
-| 老实例 | deploy `kiro-rs`（:30890，镜像 ctxwin）。只剩 `carher-hangzhou`、`claude-code-buyitian` 两把 key 主走它，另外是新实例的兜底 |
-| 镜像 | **现网 `slots47`**（10-27 22:48 北京 = slots46 + 0013 改版：安全审查提示去掉「没有作答（不是网络或服务故障）」、默认文案按备用模型名；**现网 `slotRefusalFallbackModel=claude-opus-5`**；回滚 `set image … slots46`，状态备份 `slots-pre-v2026.10.1-carher-slots47-20261027T224743`，配置备份 `config-pre-opus5-fallback-20261027T224711`）。之前 `slots46`（10-27 17:20 北京 = slots45 + 卡片「额度用尽」改名「429 重试仍失败」并加悬停说明（它数的是撞 429 后 6 次重试仍失败报错给用户的请求，不是号额度用完）+「排队超时」悬停说明；回滚 `set image … slots45`，状态备份 `slots-pre-v2026.10.1-carher-slots43-20261027T171551`——目录名是撞号时取的，内容就是切 46 前的状态）。之前 `slots45`（10-27 14:30 北京 = slots43 + 0014 tool_use_id 规整：历史 id 含非法字符或 >64 字符被 Kiro 400 `Invalid tool use format` ⇒ 兜底 grok；回滚 `set image … slots43`，状态备份 `slots-pre-v2026.10.1-carher-slots45-20261027T143038`）。之前 `slots43`（10-27 10:30 = slots42 + 0013 opus-5.5 安全审查自动换 4.8；回滚 `set image … slots42`，状态备份 `slots-pre-v2026.10.1-carher-slots43-20261027T103017`）。之前 **`slots42`**（10-27 01:16 滚动上线，ready 后端全程不为 0、34 请求 0 失败；= slots41 + 告警只看 24h/可清除 + 接新人开关 + 专属 key 槽；回滚 `set image … slots41` 即可，两版探针相同；切前备份 `198:~/kiro-deploy/backup/slots-pre-v2026.10.1-carher-slots42-20261027T011640/`）。slots41（10-26 19:25 上线 = slots40 无缝换版 + 重新分配 / 槽位权重 / 手动挪 key，sha `cbef9f8e…`）。🔴 回滚到 slots31 **不能 `set image`**：slots31 没有 `/readyz`，新 manifest 的 readiness 永远不过 ⇒ 要 `kubectl replace -f 198:~/kiro-rs-slots-deploy.pre-slots41.json`（旧 Recreate + TCP 探针整份 deploy），切前状态文件在 `198:~/kiro-deploy/backup/slots-pre-v2026.10.1-carher-slots41-20261026T192216/`。`kiro-rs:v2026.10.1-carher-slots40`（10-26，无缝换版：零断流；slots31 空回复明细；回滚 tag slots31）；slots29：积分消耗趋势图 `GET /credits/trend?hours=24|168|720`、每页 10/100/1000、批量查额度含停用号、用量统计单位统一万/亿；回滚 tag slots28）= 0001~0008 + 0010 + 0011；补丁 `k8s/kiro-rs/patches/0011-*.patch` |
-| manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、secret `kiro-rs-slots-bootstrap`）|
-| 槽 | 生效 4 个：`jp-172.235.204.67`（经 243 代理）、`sg-47.84.112.136`、`sg-47.84.85.100`、`sg-47.84.101.218`（10-27 加）；停用 `sg-47.236.200.98`；出口配在 `config.json.slots[]`，全局 `proxyUrl=null` |
-| 美国槽（10-28） | `us-170.178.173.10`，权重 2。出口=ns `kiro-rs` 里的 mihomo（deploy/svc `kiro-us-egress`，manifest `k8s/kiro-rs/slots/kiro-us-egress.yaml`，镜像 `127.0.0.1:5000/mihomo:v1.19.33-carher1` = 198 上 cli-anything-mihomo 下载并验过 sha 的二进制 + scratch）。5 个 iGuge 美国节点按固定顺序 `fallback`（第一个活着就一直用它 ⇒ IP 只在节点挂时才变；变了槽名不会跟着改，以 `ipinfo` 现量为准）。配置+节点密码+代理密码在 Secret `kiro-us-egress`，源文件 `198:~/kiro-us-egress/`（`pw` 是代理密码）。只有 `app=kiro-rs-slots` 和带 `kiro-us-egress-probe=1` 的 pod 能连（NetworkPolicy），且必须带 `kiro:<pw>`（无密码=407）。🔴 槽测试 `POST /slots/<i>/test` 要带 JSON `{"model":"claude-opus-5-5","scenario":"hello|tool"}`。撤：Admin 停用该槽 ⇒ 再删 deploy。 |
-| 英国槽（10-28） | `uk-213.255.246.28`，权重 1（延迟比美国多 1~2s）。出口=ns `kiro-rs` 里**单独一个** mihomo deploy/svc `kiro-uk-egress`（manifest `k8s/kiro-rs/slots/kiro-uk-egress.yaml`，和美国分开 ⇒ 改一个不会重启另一个），钉死单节点「UK - 英国 - 01」⇒ IP 固定。节点挂 = 槽挂：Admin 停用 ⇒ 改钉「UK - 英国 - 02」（185.245.83.24）⇒ 重验 ⇒ 改槽名。源文件 `198:~/kiro-uk-egress/`（`pw`=代理密码，和美国的不同）。NetworkPolicy 只放 `app=kiro-rs-slots` 和 `kiro-uk-egress-probe=1`。 |
-| 二期 5 槽（10-28） | 槽 8~12：`kr-203.231.254.184` w3 / `ph-49.157.61.223` w3 / `sg-109.176.19.134` w2 / `sg-103.47.211.19` w2 / `de-64.118.159.27` w1。🔴 **槽名一律 `<国家码>-<出口IP>`**（用户 10-28 定；交接文档写的 `px-` 不带国家是错的，已改）。🔴 **「槽 N」= Admin 上显示的编号 = API index+1**（`/slots/<index>/test` 用 index）。🔴 **改槽名 = 清空这个槽的用户绑定**（绑定按名字存），名字一次起对。来源=198 上第二个 mihomo 实例 `acct2`（端口 18891~18895 各钉一个节点），每个端口在 ns `kiro-rs` 里**各一个** deploy/svc `kiro-px-<端口末位>`。🔴 加/重建用 `k8s/kiro-rs/slots/kiro-px-egress.sh <端口> <出口IP>`（读 acct2 配置生成 Secret+deploy+svc+netpol），验收+加槽用 `kiro-px-verify.sh <端口>:<IP>:<权重>…`（集群内验出口 IP / Kiro / 无密码 407 ⇒ PUT 追加槽 ⇒ 三发槽测试，每步 OK/STOP），都在 198 上以 cltx 跑。密码 `198:~/kiro-px-egress/<n>/pw`。节点挂：Admin 停该槽 ⇒ acct2 改钉 ⇒ 重跑两个脚本（IP 变 ⇒ 新槽名，旧槽删掉）。 |
-| 测速 + 36 出口（10-31 晚重算，slots52） | `SlotConfig.bench`（kiroSecs / downMbps / score / rank / of / measured）只展示不参与调度；卡片显示「综合第 N/36 · 分 · 连 Kiro · 下载」，设置页槽位配置多一列「测速」，改出口地址会清掉旧测速。综合分 = 连 Kiro 60% + 下载 40%，两项各按**本次集合**的最好/最差归一化 ⇒ 🔴 **集合一变（加/减出口）全部名次和分数都要重算，旧的「第 N/31」不能再用**。现量 36 槽 = iGuge 31 + 自建 5，`measured="10-31 全 36 出口（含自建）"`。🔴 批量写用 `k8s/kiro-rs/slots/kiro-slots-bench-apply.py plan.json [--apply]`（按出口 IP 去重、版本闸门、空槽闸门、并发闸门、一次 PUT、回读核对、`--restore` 回滚；备份 `198:~/kiro-px-egress/slots-config-before-bench-*.json`）。🔴 它读 `~/kiro-us-egress/.ak` ⇒ **以 cltx 跑，别加 sudo**（sudo 把 `~` 变成 /root，报 FileNotFoundError）。只读探针 `kiro-px-probe.sh <n>:<ip>…`。🔴 停用槽**不在卡片里**，页面「槽 N」只数生效的。要启用某个新槽 = 设置页打开开关（那一刻才从冷备上号）。 |
-| 去 20 上限 + 排序 + 批量启停（11-01，slots54） | 🔴 **生效槽数不再封顶 20**（总条数上限 200 防手滑）；真实上限 = 冷备号数，号不够 ⇒ 多出的槽是「空槽」（卡片橙色徽标，不接流量、不分用户、全部测试不算失败）。封口平均只算有号的槽（空槽多时不误封）。全部测试 8 个一批、前端超时按槽数放大。设置页：表头/下拉排序（只改显示，保存按原顺序，编辑时冻结顺序不跳行）、勾选（按行记）+ 批量启用/停用（点保存才写，确认框列名单 + 冷备够不够）。回归脚本 `.work/kiro-0011/ui53/phaseA~I.py`（只打隔离实例）。 |
-| 账户批量启停 + 代理余额（11-01，slots59） | **账户列表**勾选 →「批量操作」→ 批量启用 / 批量停用：一次请求 `POST /api/admin/credentials/disabled-batch {ids, disabled}`；在槽的号停用 ⇒ 槽立刻换冷备号，冷备不够 ⇒ 摘成空槽（单个停用同样）；启用清失败计数 + 去退役标记 + 补空槽；全部跳过也会发请求（自愈）。状态筛选新增「启用且不在用（没在槽上）」= 冷备。**代理余额**卡片（首页积分趋势下）= `GET /api/admin/egress/quota`，现查 iGuge 订阅响应头（不跟随重定向、不带 Referer、不回显地址），订阅地址在 Secret `kiro-egress-subs`（`subs.json`=[{name,url}]，pod 挂 `/etc/kiro-egress-subs`，optional）；新增账户 = 改这个 Secret（现读文件，不用重启）。🔴 这次 pod template 多了一个 volume：以后 `kubectl apply` manifest 前先核对 image 行（仓库 yaml 里 image 仍是占位 slots9）。 |
-| 出口来源（10-31） | 36 个出口两类来源，**页面上还看不到**（`slots[]` 没有存来源的字段，加它要发 slots53：改 kiro.rs 结构体 + 前端表格 + bench-apply 闸门；字段按字符串存来源名 `iguge`/`self-aliyun-squid`/`self-243`，不做布尔，以后新来源直接加值）。🔴 **iGuge 是多数不是少数**：31 iGuge + 5 自建（阿里云 squid 4 + 日本 243 astrill 1）。判来源看上游节点域名：`~/kiro-px-egress/<n>/config.yaml` 的 `server:` 是机场伪装域名（`71edgeiqiyi.com`/`nttsoftgroup.com`/`cdnxiaohongshu.com`/`huawei-static.com`…，多条共用订阅号）⇒ iGuge；槽 1~5 走阿里云 squid / 243 ⇒ 自建。排名/来源/现状三列已写进飞书 `JCCmdmnGjo0KElxbEhkcgPhGn9W`（rev 10）。 |
-| 🔴 自建 4 个的「下载」是 EIP 上限不是实测 | 阿里云 squid 白名单**只放了 Kiro 接口和 `api.ipify.org`**，7 个下载源全部 `ERR:URLError` ⇒ 下载测不出来。10-31 采信阿里云控制台标注的 EIP 带宽：`47.84.112.136`=40 / `47.84.101.218`=20 / `47.84.85.100`=5 / `47.236.200.98`=**1 Mbps（按流量计费）**。连 Kiro 这项 5 个都是实测（18 次中位数，和 iGuge 同口径）⇒ 可直接比；下载这项**不同源不可比**，文档和页面都要标「上限」。想改成实测就得动 4 个在带量的 squid 的 ACL（热加载 SOP 见下「改 ACL」行），没用户拍板别动。工具 `.work/px36/{probe_allow.py,bench_self5.py,rank36.py,build_doc.py}`。 |
-| 🔴 `47.236.200.98` 现状 | **生效槽、权重 1、带宽只有 1 Mbps 且按流量计费**，综合第 23/36。skill 以前记它「停用」已过时（10-31 现量 `enabled=true`）。它就是之前查到的「275 KB/s 慢出口」，官方数字对上了。要不要停由用户/管这个实例的 session 定（停用会动在服务用户的绑定）。 |
-| 并发参数 | 起步 16 / 最小 2 / 最大 24 / 自动调；排队超时 120s；「暂不接新人」倍数 1.5 |
-| 状态文件（PVC） | `config.json` `credentials.json` `kiro_slots.json`（绑定/槽→号/退役/原代理）`kiro_account_usage.json`（按号×模型×北京日，留 8 天）|
-| 状态备份 | `198:~/kiro-deploy/backup/slots-pre-<tag>-<ts>/`（每次换镜像前四个文件）；实例初始配置 `198:~/kiro-deploy/slots-inst/` |
+| 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 **RollingUpdate 无缝换版**，内存 2Gi，grace 300s），Admin `http://10.68.13.198:30891/admin`。adminApiKey 在实例自己的 `config.json`；198 上脚本统一读 `~/kiro-us-egress/.ak`（同一个值的副本） |
+| 镜像 | **现网 `slots59`**（11-01）。各版改动和回滚注意 ⇒ `HISTORY.md`。回滚一般 `set image … <上一版>` |
+| 老实例 | deploy `kiro-rs`（:30890）。只剩少数 key 主走它；它的号池已死，别再当兜底 |
+| manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、Secret `kiro-rs-slots-bootstrap`；11-01 起挂 Secret `kiro-egress-subs`）。🔴 **仓库 yaml 的 image 是占位 `slots9`**：`kubectl apply` 前必须先改 image，否则回退 |
+| 关键配置（`config.json`） | `slotQueueTimeoutSecs=120`（单次排队上限）、`slotRequestBudgetSecs=60`（整请求预算，超了 529 交兜底）、`slotRefusalFallbackModel=claude-opus-5`；并发 起步 16 / 最小 2 / 最大 24 / 自动调；封口倍数 1.5 |
+| 槽 | 11-01：**36 行配置 / 30 生效**，冷备 83。生效槽数**不封顶**（slots54 起），真实上限 = 冷备号数（每个生效槽占一个号；不够 ⇒ 空槽，橙色徽标，不接流量）。总条数上限 200 |
+| 状态文件（PVC） | `config.json` `credentials.json` `kiro_slots.json`（绑定 / 槽→号 / 退役 / 原代理 / userMeta / alarmAck）`kiro_account_usage.json`（按号 × 模型 × 北京日，留 8 天）`kiro_pool_balance.json` |
+| 状态备份 | `198:~/kiro-deploy/backup/slots-pre-<tag>-<ts>/`（ship 换镜像前自动）；整份 deploy 备份 `198:~/kiro-rs-slots-deploy.pre-*.json` |
+
+### 1.1 出口（36 个 = iGuge 机场 31 + 自建 5）
+
+| 类 | 槽名 / 代理 | 怎么建 / 改 |
+|---|---|---|
+| 自建 · 阿里云 squid ×4 | `sg-47.84.112.136` `sg-47.84.85.100` `sg-47.84.101.218` `sg-47.236.200.98` ⇒ `http://<IP>:3128`（112.136 是 `:128`）| ns `kiro-sg` 的 squid（deploy `kiro-egress-226/122/86/241`，hostNetwork + nodeName）。加一个 = 复制 `kiro-egress-86` 改名/节点 ⇒ 从 198 验 `http://kiro:<pw>@<IP>:3128`（q.us-east-1 404 / 无密码 000）⇒ Admin 追加槽。🔴 白名单只放 Kiro + `api.ipify.org` ⇒ 下载测不出，测速里的下载是 EIP 上限（40/5/20/**1** Mbps）|
+| 自建 · 243 astrill | `jp-172.235.204.67` ⇒ `http://10.68.13.243:8120` | — |
+| iGuge 集群内代理 | `kiro-us-egress`（us-170.178.173.10）、`kiro-uk-egress`（uk-213.255.246.28）、`kiro-px-<n>`（n=1~5、16~39）⇒ `http://<deploy>.kiro-rs.svc:7890`，用户 `kiro` | 每个出口一份 mihomo deploy/svc/netpol（改一个不重启别的），钉死单节点 ⇒ IP 固定。镜像 `127.0.0.1:5000/mihomo:v1.19.33-carher1`。密码 `198:~/kiro-px-egress/<n>/pw`。netpol 只放 `app=kiro-rs-slots` 和 `kiro-px-egress-probe=1` |
+
+**iGuge 出口三件套（198 上以 cltx 跑，别加 sudo）**：
+
+```bash
+bash ~/kiro-px-egress.sh <198端口> <出口IP> [节点名]   # n = 端口-18890；读 acct2 配置生成 Secret+deploy+svc+netpol；已存在且 IP 不同 ⇒ STOP
+bash ~/kiro-px-probe.sh <n>:<IP> ...                   # 只读：集群内验出口 IP×3 / 国家 / Kiro 404 / 无密码 407
+bash ~/kiro-px-verify.sh <端口>:<IP>:<权重> ...         # 探针 ⇒ 槽名=<国家码>-<IP> ⇒ 备份 ⇒ PUT 追加（生效）⇒ 三发槽测试
+python3 ~/kiro-px-egress/kiro-slots-bench-apply.py plan.json [--apply]   # 批量补测速 + 追加**停用**槽（不上号），按 IP 去重
+```
+仓库源：`k8s/kiro-rs/slots/`。第三个参数「节点名」用于 acct2 没开监听端口的节点（10-31 那 4 个 muse 也在用的节点：kiro-px-36~39 是 kiro 自己的一份，不碰 muse-px）。
+
+规则（都踩过）：
+- 🔴 **槽名 = `<国家码>-<出口IP>`**，国家码按经代理实测的 ipinfo（`gb` 写成 `uk`）。🔴 **改槽名 = 清空这个槽的用户绑定**（绑定按名字存），名字一次起对。
+- 🔴 **「槽 N」= 页面卡片上的编号**：卡片只列生效槽，编号只数生效的；API `/slots/<index>/test` 用运行时 index（= 卡片编号 − 1）；配置表行号又是另一套。对用户只说卡片编号。
+- 🔴 **机场 IP 会漂**：iGuge 节点「钉死」只保证用同一节点，不保证节点出口不换（10-31 两个 TW 节点漂了）。按小时巡检 `nohup setsid bash ~/kiro-egress-ip-watch.sh --rounds 20 --interval 1800 > ~/kiro-egress-watch/run.log 2>&1 &`。漂了：先停槽，再按新 IP 建新槽（不要改旧槽名）。
+- 槽测试 `POST /slots/<i>/test` 要 JSON `{"model":"claude-opus-5-5","scenario":"hello|tool"}`（不带 body ⇒ 415/422）。会花 Kiro 积分，回归别乱打。
+- 撤一个出口：Admin 停用该槽（人下个请求自动换槽）⇒ 再删 deploy/svc/netpol/secret。
+
+### 1.2 测速（`SlotConfig.bench`，slots52 起）
+
+`{kiroSecs, downMbps, score, rank, of, measured}`，只展示不参与调度：卡片「综合第 N/of · 分 · 连 Kiro · 下载」，设置页配置表「测速」列（可排序）。综合分 = 连 Kiro 60% + 下载 40%，两项按**本次集合**的最好/最差归一化 ⇒ 🔴 **集合一变全部重算**，旧的「第 N/31」作废。数据源 = 飞书 `JCCmdmnGjo0KElxbEhkcgPhGn9W`（rev 10 起 36 行：来源 / 现状列）。改出口地址时前端自动清掉该行测速。
+
+### 1.3 Admin 上的批量操作（slots54 / 59 起）
+
+| 在哪 | 做什么 | 语义 |
+|---|---|---|
+| 设置 → 槽位配置 | 表头 / 右上下拉排序；勾选（按行记）→ 批量启用 / 批量停用 → **点「保存并生效」才写** | 排序只改显示，保存按原顺序（槽编号不变），编辑时冻结顺序不跳行；保存前确认框列启用/停用名单、冷备够不够（含这次停用放回的号） |
+| 首页「账户」列表 | 勾选 →「已选 N 个 · 批量操作」→ 批量启用 / 批量停用（**立即生效**） | 在槽的号停用 ⇒ 槽立刻换冷备号（用户绑定不变，换号 = Kiro 缓存作废一次）；冷备不够 ⇒ 摘成空槽；启用 ⇒ 进冷备、补空槽、清失败计数、去退役标记。一次请求 `POST /api/admin/credentials/disabled-batch {ids, disabled}`，返回 changed/skipped/notFound/slotsSwapped/slotsFilled/emptySlots。全部跳过也会发（自愈上次中途失败）|
+| 账户列表 · 状态筛选 | 「启用且不在用（没在槽上）」 | = 冷备池（非槽位模式下 = 启用且不是当前号）。冷备估算还要排除 FREE 档和退役号（`slotEligible`）|
+
+### 1.4 代理余额卡片（slots59 起）
+
+首页积分趋势下「代理余额（iGuge 订阅流量）」= `GET /api/admin/egress/quota`：后端现查每个订阅地址的响应头 `subscription-userinfo`（和插件页、`scripts/mihomo-198.sh quota` 同一份数据），算已用/剩余/重置日/暂停/提醒（≥80% 或 <30 天）。打开页面查一次，10 分钟缓存，「刷新」现查。
+- 订阅地址 = 凭据：只在 Secret `kiro-rs/kiro-egress-subs`（`subs.json` = `[{"name":"老账户","url":"https://…"}]`），pod 挂 `/etc/kiro-egress-subs`（optional，没建 ⇒ 页面「未配置」）。接口和错误信息**不回显地址**；不跟随重定向、不带 Referer（跳转会把地址带给别的域名）。
+- 加一个订阅账户 = 改这个 Secret（代码每次现读文件，**不用重启**）：在本机从 `~/.config/cli-anything-mihomo[-<账户>]/sub.url` 拼 JSON，经 ssh stdin 写到 198 临时文件 ⇒ `kubectl create secret … --dry-run=client -o yaml | kubectl apply -f -` ⇒ 删临时文件。别把地址放进命令行参数。
+- 198 / 242 直连订阅地址 200（11-01 实测）；188 SOCKS 只是本机 CLI 要用。
 
 ## 2. 调度规则（界面上的字是什么意思）
 
 - **绑人**：只有带身份的请求（`u:<key hash>`）才写绑定表，新人分给（在途 ÷ 权重少 → 绑定人数 ÷ 权重少 → 30 分钟用量 ÷ 权重低）的槽（`slots.rs::choose_slot_weighted`）。没身份的按会话哈希临时挑槽，不写绑定。
-- **已封口 / 暂不接新人**：某槽 30 分钟用量 > 平均 ×1.5 且 ≥20 次 ⇒ 不再分新人，**已绑的人照常用**。四个全封口时忽略封口照同样顺序挑，不会没人接（10-24 用户问过）。
-- **并发**：每槽 AIMD —— 429 时上限 ×0.7；安静 5 分钟且打满 ⇒ +1。满了排队，排队超 120s 回 529（LiteLLM 兜底到老实例）。
+- **已封口 / 暂不接新人**：某槽 30 分钟用量 ÷ 权重 > **有号的槽**的平均 ×1.5 且 ≥20 次 ⇒ 不再分新人，**已绑的人照常用**（slots54 起空槽不进平均，否则空槽多时有号的全被误封）。全封口时忽略封口照同样顺序挑，不会没人接。
+- **并发**：每槽 AIMD —— 429 时上限 ×0.7；安静 5 分钟且打满 ⇒ +1。满了排队；排队 / 重试 / 退避合计超过整请求预算（60s）⇒ 529 ⇒ LiteLLM 兜底到别家模型。
+- **空槽**：生效槽上没号（冷备不够）⇒ 卡片橙色「空槽」，不分新人、绑在上面的人下个请求换槽、「全部测试」不算失败。停用在槽的号时冷备不够也会把号摘下变空槽（单个 / 批量都一样，slots59）。
 - **429**：先按官方退避 + retry-after 重试；**402 额度用尽 / 被限（restricted）才退役换号**，冷备里挑一个顶上（要 opus 的槽只挑能跑 opus 的号）。别的错误不退役。
 - **回给 LiteLLM 的状态码**（`handlers.rs::map_provider_error`）：超长 ⇒ 400 `prompt is too long`（不兜底）；槽位过载 / 60s 预算用尽 / **429 重试用尽** ⇒ 529（兜底）；其余 ⇒ 502。
   🔴 slots49（10-28 16:26，commit 375b60c，`slotRequestBudgetSecs` 默认 60）之前 429 用尽回的是 **502**，单次等 48~65s；
@@ -54,7 +95,7 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
   🔴 slots24 及以前拿**用户原文**去探 ⇒ 敏感内容在任何号上都 CONTENT_FILTERED ⇒ 10-25 #3 justin 被冤退役；且用占位 ARN ⇒ social 号恒 403 永远测不出。slots25 修。
 - **opus-5.5 安全审查**：空回复且号没被限 ⇒ 自动换备用模型重答 + 提示，见 §2.1。
 - **槽停用 / 删除**：在 Admin「槽位设置」关开关 ⇒ 该槽的人在下一个请求自动换到别的槽（`SLOT_GONE` ⇒ 重选），在途的跑完。删除只允许先停用。8 个停用分支都有单测。
-- **冷备数** = 启用 − 在槽 − 退役（只算 quota/restricted）。手动在 Admin 启用一个号会清掉它的退役标记。
+- **冷备数** = 启用 − 在槽 − 退役（只算 quota/restricted），且补槽只挑能跑 opus 的号（FREE 档不算）。手动在 Admin 启用一个号（单个或批量）会清掉它的退役标记。
 - **权重（slots41 起）**：`config.json.slots[].weight` 1~10，默认 5，界面「设置 → 槽位配置」改。作用三处：新人分配、封口判定（用量 ÷ 权重）、在途上限（自动值 × 权重/5，手动锁定值不缩放）。**改权重不自动挪已绑的人**，要挪点「重新分配用户」。
 - **重新分配（slots41 起）**：槽位卡片上方「重新分配用户」⇒ 先预览再确认。负载 = 槽上所有人**近 24 小时请求数**之和，目标按权重配比；只挪「10 分钟没发请求、且没有在跑的请求、且没被固定」的人；偏差在目标 ±10% 或 <5 次不挪；用量 0 的人不挪（挪了白丢缓存）。执行时每条再核一遍，不满足就跳过（返回 moved/requested）。重新分配挪的人**不固定**。
 - **手动挪 key（slots41 起）**：卡片上点「用户」数字 ⇒ 该槽 key 列表（别名、7 日请求 / token、最后使用、在用、是否固定）⇒「挪到」。手动挪 = 固定（重新分配不动），可「取消」。下一个请求起走新槽，在途的跑完。🔴 换槽 = 换号，那个人的 Kiro 缓存作废（缓存按号，见记忆 project_kiro_prompt_cache_works_ttl_5min）。
@@ -66,7 +107,8 @@ python3 scripts/kiro-slots-watch.py --minutes 30   # 新老两条道成功率/�
   - 「专属 key」填 LiteLLM key **别名前缀**（逗号 / 换行分隔，同灰度名单规则）：命中的 key **下一个请求起自动挪进**这个槽（换号 ⇒ 缓存作废一次）；普通人分不进来；手动固定在别处的 VIP 不被抢；专属槽没号时 VIP 照常分到别的槽。🔴 **要独享必须同时关「接新人」**：新人自动分配只看这个开关，填了专属名单但开关开着 ⇒ 普通新人仍会被分进来（无身份请求和重新分配倒是已经避开专属槽）。
   - 这两类槽不参与「重新分配」（不往里挪、也不往外挪），预览里会写「不参与」。
 - **首字耗时**：卡片「首字 Xs」= 近 30 分钟「发出 → 首个有内容事件」平均，跟 prompt 大小和模型强相关，只作参考，没参与调度。
-- **槽全停** ⇒ 529，不回老路径（老路径同一出口会和槽撞 IP）；LiteLLM 层兜底到老实例。
+- **槽全停** ⇒ 529，不回老路径（老路径同一出口会和槽撞 IP）；LiteLLM 层兜底到别家模型。
+- **首字卡住（上游已收请求、迟迟不出字）不受 60s 预算管**：等到 LiteLLM 300s 超时才兜底（10-28 有 14 次）。Kiro 官方 CLI 有同样现象（kirodotdev/Kiro#12144「first prompt hangs 5 min」）。根因未定；对策「首字超时 90s 换号重试」已提方案未做。
 
 ## 2.1 opus-5.5 安全审查 ⇒ 自动换备用模型（补丁 0013，slots43 起）
 

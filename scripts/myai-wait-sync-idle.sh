@@ -5,7 +5,8 @@
 # apply_usage_schema 等锁、被 liveness 杀（10-29 chat 金丝雀重启 1 次）。
 # 同步是首尾相接跑的（上一轮结束同一秒下一轮开始），永远等不到「完全空闲」，所以判据是：
 #   只看最新一条同步：不在跑 ⇒ 安全；在跑但刚开始不到 SAFE_SECONDS（还在拉上游、没进发布）⇒ 安全。
-# 旧的 'running' 行（被重启的 worker 遗留，永远不会结束）不看，只看最新一条。
+# 旧的 'running' 行（被重启的 worker 遗留，永远不会结束）不看：只要它之后还有更新的一轮，就当孤儿跳过。
+# 🔴 11-01：deploy 换掉 worker 留下 16088，旧判据被它卡到超时；新判据下孤儿行不再是「最新一条」。
 #
 # 用法: HOST243_PW=... scripts/myai-wait-sync-idle.sh [最长等待秒数，默认 2400]
 #   SAFE_SECONDS 默认 480（10-29 实测一轮 24 分钟，发布在最后约 1 分钟）
@@ -18,7 +19,7 @@ export MYAI_SSH_PASSWORD="${HOST243_PW:-${MYAI_SSH_PASSWORD:-}}"
 probe() {
   # 输出 "<status> <已运行秒数>"；JSON 按字段取，不靠表格空白匹配
   MYAI_HUMAN= "$HERE/myai-cli.sh" db sql \
-    "SELECT status, extract(epoch from now()-started_at)::int AS age FROM usage_sync_runs ORDER BY started_at DESC LIMIT 1" 2>/dev/null \
+    "SELECT r.status, extract(epoch from now()-r.started_at)::int AS age FROM usage_sync_runs r WHERE NOT (r.status='running' AND EXISTS (SELECT 1 FROM usage_sync_runs n WHERE n.started_at > r.started_at)) ORDER BY r.started_at DESC LIMIT 1" 2>/dev/null \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["status"], d[0]["age"]) if d else print("none 0")'
 }
 end=$(( $(date +%s) + MAX ))

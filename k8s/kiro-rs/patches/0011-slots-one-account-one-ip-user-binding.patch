@@ -1,6 +1,48 @@
 --- a/admin-ui/src/api/credentials.ts
 +++ b/admin-ui/src/api/credentials.ts
-@@ -94,14 +94,14 @@
+@@ -45,6 +45,41 @@
+   return data
+ }
+ 
++// 出口代理（iGuge 订阅）流量余额；后端现查订阅响应头，订阅地址不回显
++export interface EgressQuota {
++  name: string
++  status: 'ok' | 'warn' | 'error'
++  usedBytes: number
++  totalBytes: number
++  leftBytes: number
++  usedPct: number | null
++  expire: number | null
++  daysLeft: number | null
++  resetDate: string | null
++  accountStatus: string | null
++  error: string | null
++}
++
++export async function getEgressQuota(): Promise<{ configured: boolean; fetchedAt: number; accounts: EgressQuota[] }> {
++  const { data } = await api.get('/egress/quota', { timeout: 60000 })
++  return data
++}
++
++// 批量启用 / 停用：一次请求、后端整批落盘一次；在槽的号停用 ⇒ 槽立刻换冷备号
++export interface BatchDisableResult {
++  changed: number[]
++  skipped: number[]
++  notFound: number[]
++  slotsSwapped: number
++  slotsFilled: number
++  emptySlots: number
++}
++
++export async function setCredentialsDisabledBatch(ids: number[], disabled: boolean): Promise<BatchDisableResult> {
++  const { data } = await api.post<BatchDisableResult>('/credentials/disabled-batch', { ids, disabled }, { timeout: 60000 })
++  return data
++}
++
+ // 设置凭据优先级
+ export async function setCredentialPriority(
+   id: number,
+@@ -94,14 +129,14 @@
  }
  
  // 获取负载均衡模式
@@ -19,7 +61,7 @@
    return data
  }
  
-@@ -121,5 +121,284 @@
+@@ -121,5 +156,284 @@
  // 设置 window 模式参数（立即生效并写回 config.json）
  export async function setWindowSettings(settings: WindowSettings): Promise<WindowSettings> {
    const { data } = await api.put<WindowSettings>('/config/window', settings)
@@ -983,7 +1025,25 @@
 +}
 --- a/admin-ui/src/components/credential-filters.tsx
 +++ b/admin-ui/src/components/credential-filters.tsx
-@@ -126,6 +126,12 @@
+@@ -6,7 +6,7 @@
+ // 凭据列表的查询条件。只在前端过滤显示，不改后端数据，也不影响调度。
+ export interface CredentialFilterState {
+   keyword: string
+-  // 'all' | 'enabled' | 'current' | 'disabled' | 'disabled:<原因>'
++  // 'all' | 'enabled' | 'idle' | 'current' | 'disabled' | 'disabled:<原因>'（idle = 启用且不在槽上 = 冷备）
+   status: string
+   authMethod: string
+   priority: string
+@@ -83,6 +83,8 @@
+ function matchStatus(c: CredentialStatusItem, status: string): boolean {
+   if (status === 'all') return true
+   if (status === 'enabled') return !c.disabled
++  // 启用且不在槽上（槽位模式下 = 冷备池）；非槽位模式 = 启用且不是当前号
++  if (status === 'idle') return !c.disabled && !c.slotName && !c.isCurrent
+   if (status === 'current') return c.isCurrent
+   if (status === 'disabled') return c.disabled
+   if (status.startsWith('disabled:')) {
+@@ -126,6 +128,12 @@
    return Array.from(m.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
  }
  
@@ -996,7 +1056,7 @@
  const selectClass =
    'h-9 rounded-md border border-input bg-background px-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
  
-@@ -140,14 +146,23 @@
+@@ -140,14 +148,24 @@
    const set = <K extends keyof CredentialFilterState>(key: K, value: CredentialFilterState[K]) =>
      onChange({ ...filters, [key]: value })
  
@@ -1008,6 +1068,7 @@
 +  const statusBase = facet('status')
 +  const enabledCount = statusBase.filter(c => !c.disabled).length
 +  const currentCount = statusBase.filter(c => c.isCurrent).length
++  const idleCount = statusBase.filter(c => matchStatus(c, 'idle')).length
 +  const disabledList = statusBase.filter(c => c.disabled)
    const reasons = countBy(disabledList, c => c.disabledReason || '未知')
 -  const auths = countBy(credentials, c => c.authMethod || '')
@@ -1027,7 +1088,7 @@
    const active = isFilterActive(filters)
  
    return (
-@@ -177,11 +192,11 @@
+@@ -177,11 +195,12 @@
          <label className="flex items-center gap-1 text-sm text-muted-foreground">
            状态
            <select className={selectClass} value={filters.status} onChange={e => set('status', e.target.value)}>
@@ -1035,6 +1096,7 @@
 +            <option value="all">全部（{statusBase.length}）</option>
              <option value="enabled">启用（{enabledCount}）</option>
 -            <option value="current">当前在用</option>
++            <option value="idle">　└ 启用且不在用（没在槽上 · {idleCount}）</option>
 +            <option value="current">当前在用（{currentCount}）</option>
              <option value="disabled">已禁用（{disabledList.length}）</option>
 -            {reasons.map(([r, n]) => (
@@ -1042,7 +1104,7 @@
                <option key={r} value={`disabled:${r}`}>
                  　└ {REASON_LABELS[r] || r}（{n}）
                </option>
-@@ -192,7 +207,7 @@
+@@ -192,7 +211,7 @@
          <label className="flex items-center gap-1 text-sm text-muted-foreground">
            登录方式
            <select className={selectClass} value={filters.authMethod} onChange={e => set('authMethod', e.target.value)}>
@@ -1051,7 +1113,7 @@
              {auths.map(([a, n]) => (
                <option key={a || 'none'} value={a}>
                  {AUTH_LABELS[a] || a || '未知'}（{n}）
-@@ -204,7 +219,7 @@
+@@ -204,7 +223,7 @@
          <label className="flex items-center gap-1 text-sm text-muted-foreground">
            账户等级
            <select className={selectClass} value={filters.tier} onChange={e => set('tier', e.target.value)}>
@@ -1060,7 +1122,7 @@
              {tiers.map(([t, n]) => (
                <option key={t} value={t}>
                  {tierLabel(t)}（{n}）
-@@ -216,7 +231,7 @@
+@@ -216,7 +235,7 @@
          <label className="flex items-center gap-1 text-sm text-muted-foreground">
            优先级
            <select className={selectClass} value={filters.priority} onChange={e => set('priority', e.target.value)}>
@@ -1069,7 +1131,7 @@
              {priorities.map(([p, n]) => (
                <option key={p} value={p}>
                  {p}（{n}）
-@@ -228,7 +243,7 @@
+@@ -228,7 +247,7 @@
          <label className="flex items-center gap-1 text-sm text-muted-foreground">
            邮箱域名
            <select className={selectClass} value={filters.domain} onChange={e => set('domain', e.target.value)}>
@@ -1485,7 +1547,7 @@
 @@ -1,22 +1,27 @@
  import { useState, useEffect, useRef } from 'react'
 -import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2 } from 'lucide-react'
-+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, MoreVertical, Wallet, ArrowUpDown } from 'lucide-react'
++import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, MoreVertical, Wallet, ArrowUpDown, Power, PowerOff } from 'lucide-react'
  import { useQueryClient } from '@tanstack/react-query'
  import { toast } from 'sonner'
  import { storage } from '@/lib/storage'
@@ -1511,7 +1573,7 @@
  import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
  import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode } from '@/hooks/use-credentials'
 -import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
-+import { getCredentialBalance, forceRefreshToken, setCredentialPriority } from '@/api/credentials'
++import { getCredentialBalance, forceRefreshToken, setCredentialPriority, setCredentialsDisabledBatch } from '@/api/credentials'
 +import { BatchPriorityDialog, type PriorityOp } from '@/components/batch-priority-dialog'
  import { extractErrorMessage } from '@/lib/utils'
  import type { BalanceResponse } from '@/types/api'
@@ -1653,7 +1715,58 @@
    // 批量删除（仅删除已禁用项）
    const handleBatchDelete = async () => {
      if (selectedIds.size === 0) {
-@@ -327,6 +408,47 @@
+@@ -234,6 +315,50 @@
+     deselectAll()
+   }
+ 
++  // 批量启用 / 停用（11-01）：一次请求；在槽的号停用 ⇒ 槽立刻换冷备号（冷备不够 ⇒ 空槽）
++  const [batchToggling, setBatchToggling] = useState(false)
++  const handleBatchSetDisabled = async (disabled: boolean) => {
++    const picked = (data?.credentials || []).filter((c) => selectedIds.has(c.id))
++    if (picked.length === 0) { toast.error('请先选择账户'); return }
++    const todo = picked.filter((c) => c.disabled !== disabled)
++    const skip = picked.length - todo.length
++    // 全部本来就是目标状态：仍然发请求（后端会去退役标记 / 补空槽 / 摘死号，上次中途失败时能自愈），只是不弹确认
++    const allSkipped = todo.length === 0
++    const verb = disabled ? '停用' : '启用'
++    let msg = allSkipped ? '' : `${verb} ${todo.length} 个账户${skip ? `（另有 ${skip} 个本来就是${verb}状态，跳过）` : ''}？\n\n`
++    if (disabled) {
++      const onSlot = todo.filter((c) => c.slotName)
++      // 冷备 = 启用、不在槽、能上槽（非 FREE、没退役）、且不在这次要停的名单里（review #4）
++      const spare = (data?.credentials || []).filter((c) => !c.disabled && !c.slotName && c.slotEligible !== false && !selectedIds.has(c.id)).length
++      msg += onSlot.length
++        ? `· 其中 ${onSlot.length} 个正在槽上（${onSlot.map((c) => `#${c.id}→${c.slotName}`).slice(0, 8).join('、')}${onSlot.length > 8 ? ' …' : ''}）：这些槽会立刻换一个冷备号，槽上的用户下一个请求起换号（Kiro 缓存作废一次，前几次请求贵一些）\n`
++        : '· 都不在槽上，不影响正在用的槽\n'
++      if (onSlot.length > spare) msg += `· 冷备只剩约 ${spare} 个可用号：有 ${onSlot.length - spare} 个槽会变成空槽（不接流量）\n`
++      msg += '· 停用记为「手动禁用」，随时可以再启用'
++    } else {
++      msg += '· 启用后进入冷备池；有空槽的话马上补上去\n· 失败次数清零；之前因额度用尽 / 被限而退役的号，手动启用后允许再上槽'
++    }
++    if (!allSkipped && !confirm(msg)) return
++    setBatchToggling(true)
++    try {
++      const r = await setCredentialsDisabledBatch(picked.map((c) => c.id), disabled)
++      queryClient.invalidateQueries({ queryKey: ['credentials'] })
++      queryClient.invalidateQueries({ queryKey: ['slots'] })
++      const parts = [allSkipped ? `选中的 ${picked.length} 个本来就是${verb}状态，已重新检查槽位` : `已${verb} ${r.changed.length} 个`]
++      if (r.skipped.length) parts.push(`跳过 ${r.skipped.length} 个`)
++      if (r.notFound.length) parts.push(`不存在 ${r.notFound.length} 个（#${r.notFound.join('、#')}）`)
++      if (disabled && r.slotsSwapped) parts.push(`${r.slotsSwapped} 个槽换了号`)
++      if (r.slotsFilled) parts.push(`补上 ${r.slotsFilled} 个槽`)
++      if (r.emptySlots) parts.push(`现在还有 ${r.emptySlots} 个空槽`)
++      ;(r.notFound.length || r.emptySlots ? toast.warning : toast.success)(parts.join('，'))
++      deselectAll()
++    } catch (e) {
++      toast.error(`批量${verb}失败: ${extractErrorMessage(e)}`)
++    } finally {
++      setBatchToggling(false)
++    }
++  }
++
+   // 批量恢复异常
+   const handleBatchResetFailure = async () => {
+     if (selectedIds.size === 0) {
+@@ -327,6 +452,47 @@
      deselectAll()
    }
  
@@ -1701,7 +1814,7 @@
    // 一键清除所有已禁用凭据
    const handleClearAll = async () => {
      if (!data?.credentials || data.credentials.length === 0) {
-@@ -377,68 +499,44 @@
+@@ -377,68 +543,44 @@
    }
  
    // 查询当前页凭据信息（逐个查询，避免瞬时并发）
@@ -1798,7 +1911,7 @@
    const handleBatchVerify = async () => {
      if (selectedIds.size === 0) {
        toast.error('请先选择要验活的凭据')
-@@ -562,169 +660,105 @@
+@@ -562,169 +704,108 @@
      <div className="min-h-screen bg-background">
        {/* 顶部导航 */}
        <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -1957,6 +2070,9 @@
 +                    <Button size="sm" variant="secondary">已选 {selectedIds.size} 个 · 批量操作</Button>
 +                  </DropdownMenuTrigger>
 +                  <DropdownMenuContent>
++                    <DropdownMenuItem onSelect={() => handleBatchSetDisabled(false)} disabled={batchToggling}><Power className="h-4 w-4" />批量启用</DropdownMenuItem>
++                    <DropdownMenuItem onSelect={() => handleBatchSetDisabled(true)} disabled={batchToggling}><PowerOff className="h-4 w-4" />批量停用</DropdownMenuItem>
++                    <DropdownMenuSeparator />
 +                    <DropdownMenuItem onSelect={handleBatchVerify}><CheckCircle2 className="h-4 w-4" />批量验活</DropdownMenuItem>
 +                    <DropdownMenuItem onSelect={handleBatchForceRefresh} disabled={batchRefreshing}>
 +                      <RefreshCw className="h-4 w-4" />{batchRefreshing ? `刷新中 ${batchRefreshProgress.current}/${batchRefreshProgress.total}` : '批量刷新 Token'}
@@ -2045,7 +2161,7 @@
              </div>
            </div>
            {data?.credentials.length === 0 ? (
-@@ -748,23 +782,25 @@
+@@ -748,23 +829,25 @@
                    </CardContent>
                  </Card>
                )}
@@ -2086,7 +2202,7 @@
                    <Button
                      variant="outline"
                      size="sm"
-@@ -780,10 +816,21 @@
+@@ -780,10 +863,21 @@
                      variant="outline"
                      size="sm"
                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
@@ -2109,7 +2225,7 @@
                  </div>
                )}
              </>
-@@ -791,13 +838,21 @@
+@@ -791,13 +885,21 @@
          </div>
        </main>
  
@@ -2136,7 +2252,7 @@
        <WindowSettingsDialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen} />
  
        <ModeSwitchDialog open={modeDialogOpen} onOpenChange={setModeDialogOpen} />
-@@ -806,6 +861,15 @@
+@@ -806,6 +908,15 @@
        <AddCredentialDialog
          open={addDialogOpen}
          onOpenChange={setAddDialogOpen}
@@ -2152,6 +2268,96 @@
        />
  
        {/* 批量导入对话框 */}
+--- a/admin-ui/src/components/egress-quota-card.tsx
++++ b/admin-ui/src/components/egress-quota-card.tsx
+@@ -0,0 +1,87 @@
++import { useQuery } from '@tanstack/react-query'
++import { RefreshCw } from 'lucide-react'
++import { Button } from '@/components/ui/button'
++import { Badge } from '@/components/ui/badge'
++import { getEgressQuota, type EgressQuota } from '@/api/credentials'
++import { extractErrorMessage } from '@/lib/utils'
++
++// 出口代理（iGuge 订阅）流量余额。数据 = 订阅响应头 subscription-userinfo，和插件「客户端下载与订阅」页同一份。
++// 每次刷新是现查（后端去请求订阅地址只取头），不自动轮询；打开页面查一次，之后 10 分钟内用缓存。
++const gb = (b: number) => `${(b / 1024 ** 3).toFixed(b >= 100 * 1024 ** 3 ? 1 : 2)} GB`
++
++function Row({ q }: { q: EgressQuota }) {
++  if (q.status === 'error') {
++    return (
++      <div className='flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm'>
++        <span className='font-medium'>{q.name}</span>
++        <span className='text-red-600'>查询失败：{q.error}</span>
++      </div>
++    )
++  }
++  if (q.usedPct == null) {
++    return (
++      <div className='flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm'>
++        <span className='flex items-center gap-2 font-medium'>{q.name}<Badge variant='secondary'>未知</Badge></span>
++        <span className='text-muted-foreground'>{q.error || '订阅没给总量'} · 已用 {gb(q.usedBytes)}</span>
++      </div>
++    )
++  }
++  const pct = q.usedPct
++  const bar = pct >= 90 ? 'bg-red-500' : pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500'
++  return (
++    <div className='rounded-md border px-3 py-2 text-sm'>
++      <div className='flex flex-wrap items-center justify-between gap-2'>
++        <span className='flex items-center gap-2 font-medium'>
++          {q.name}
++          {q.accountStatus === '暂停'
++            ? <Badge variant='destructive' title='当月流量用满，客户端订阅暂停到重置日'>暂停</Badge>
++            : q.status === 'warn' ? <Badge variant='warning' title='已用 ≥ 80% 或离到期不足 30 天'>注意</Badge>
++              : <Badge variant='success'>正常</Badge>}
++        </span>
++        <span className='tabular-nums'>
++          剩 <span className='font-semibold'>{gb(q.leftBytes)}</span>
++          <span className='text-muted-foreground'> · 已用 {gb(q.usedBytes)} / {gb(q.totalBytes)}{q.usedPct != null ? `（${q.usedPct.toFixed(1)}%）` : ''}</span>
++        </span>
++      </div>
++      <div className='mt-1.5 h-1.5 rounded-full bg-muted' role='progressbar' aria-label={`${q.name} 已用流量`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, Math.round(pct))}>
++        <div className={`h-1.5 rounded-full ${bar}`} style={{ width: `${Math.min(100, pct)}%` }} />
++      </div>
++      <div className='mt-1.5 flex flex-wrap justify-between gap-x-4 text-xs text-muted-foreground'>
++        <span>下次重置 {q.resetDate ?? '—'}</span>
++        <span>到期 {q.expire ? new Date(q.expire * 1000).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—'}{q.daysLeft != null ? `（还有 ${q.daysLeft} 天）` : ''}</span>
++      </div>
++    </div>
++  )
++}
++
++export function EgressQuotaCard() {
++  const { data, error, isFetching, refetch, dataUpdatedAt } = useQuery({
++    queryKey: ['egressQuota'],
++    queryFn: getEgressQuota,
++    staleTime: 10 * 60 * 1000,
++    refetchOnWindowFocus: false,
++  })
++  return (
++    <div className='rounded-lg border bg-card p-4'>
++      <div className='flex flex-wrap items-center justify-between gap-2'>
++        <div>
++          <div className='font-medium'>代理余额（iGuge 订阅流量）</div>
++          <div className='text-xs text-muted-foreground'>
++            和插件「客户端下载与订阅」页同一份数据 · 每月按到期日重置 · 用满当月暂停到重置日
++            {dataUpdatedAt ? ` · ${new Date(dataUpdatedAt).toLocaleTimeString('zh-CN')} 查询` : ''}
++          </div>
++        </div>
++        <Button size='sm' variant='outline' onClick={() => refetch()} disabled={isFetching} aria-label={isFetching ? '查询中' : '刷新代理余额'}>
++          <RefreshCw className={`mr-1.5 h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} aria-hidden='true' />{isFetching ? '查询中…' : '刷新'}
++        </Button>
++      </div>
++      <div className='mt-3 space-y-2'>
++        {error ? <p className='text-sm text-red-600'>查询失败：{extractErrorMessage(error)}</p>
++          : !data ? <p className='text-sm text-muted-foreground'>查询中…</p>
++            : !data.configured ? <p className='text-sm text-muted-foreground'>未配置订阅（Secret kiro-egress-subs 没挂上）</p>
++              : data.accounts.length === 0 ? <p className='text-sm text-muted-foreground'>没有账户</p>
++                : data.accounts.map((q, i) => <Row key={`${i}-${q.name}`} q={q} />)}
++      </div>
++    </div>
++  )
++}
 --- a/admin-ui/src/components/empty-events-dialog.tsx
 +++ b/admin-ui/src/components/empty-events-dialog.tsx
 @@ -0,0 +1,106 @@
@@ -3127,8 +3333,9 @@
 +}
 --- a/admin-ui/src/components/slots-panel.tsx
 +++ b/admin-ui/src/components/slots-panel.tsx
-@@ -0,0 +1,480 @@
+@@ -0,0 +1,482 @@
 +import { CreditsTrend } from '@/components/credits-trend'
++import { EgressQuotaCard } from '@/components/egress-quota-card'
 +import { EmptyEventsDialog } from '@/components/empty-events-dialog'
 +import { SlotUsersDialog } from '@/components/slot-users-dialog'
 +import { RebalanceDialog } from '@/components/rebalance-dialog'
@@ -3578,6 +3785,7 @@
 +      )}
 +      <Summary d={data} />
 +      <CreditsTrend />
++      <EgressQuotaCard />
 +      {data.slots.length > 0 ? (
 +        <SlotTable slots={data.slots} today={today} />
 +      ) : (
@@ -3831,21 +4039,285 @@
  }
 --- a/admin-ui/src/types/api.ts
 +++ b/admin-ui/src/types/api.ts
-@@ -13,6 +13,8 @@
+@@ -13,6 +13,10 @@
    disabled: boolean
    failureCount: number
    isCurrent: boolean
 +  slotName?: string
 +  slotNo?: number
++  /** 能不能上槽（非 FREE 档、没被退役） */
++  slotEligible?: boolean
    expiresAt: string | null
    authMethod: string | null
    hasProfileArn: boolean
+--- a/src/admin/egress_quota.rs
++++ b/src/admin/egress_quota.rs
+@@ -0,0 +1,240 @@
++//! 出口代理（iGuge 订阅）流量余额：Admin「代理余额」卡片用。
++//!
++//! 数据源与 `cli-anything-mihomo sub quota` 相同：请求订阅地址时响应头里的
++//! `subscription-userinfo: upload=…; download=…; total=…; expire=<unix>`（11-01 实测和插件页对得上）。
++//! 订阅地址 = 凭据（拿到就能用这个账户的流量），只从挂载的 Secret 文件读，**绝不回显**：
++//! 接口只返回账户名和数字；错误信息里也不带地址。
++//!
++//! 文件 `KIRO_EGRESS_SUBS_FILE`（默认 /etc/kiro-egress-subs/subs.json）：`[{"name": "老账户", "url": "https://…"}]`。
++//! 没挂 ⇒ 接口返回 configured=false，页面显示「未配置」。
++//! 只读响应头（拿到头就丢弃 body），不调插件的任何接口（插件有「重置订阅链接」接口，误调会让所有出口失效）。
++
++use serde::{Deserialize, Serialize};
++use std::time::Duration;
++
++/// 订阅接口按 UA 返回不同格式；和 198 上 mihomo 拉订阅用同一个
++const USER_AGENT: &str = "clash-verge/v1.3.8";
++/// 已用 ≥ 80% 或离到期 < 30 天 ⇒ 提醒（和 `sub quota` 的默认阈值一致）
++const WARN_PCT: f64 = 80.0;
++const WARN_DAYS: i64 = 30;
++
++#[derive(Deserialize)]
++struct SubEntry {
++    name: String,
++    url: String,
++}
++
++#[derive(Debug, Default, Serialize, Clone, PartialEq)]
++#[serde(rename_all = "camelCase")]
++pub struct EgressQuota {
++    pub name: String,
++    /// ok / warn / error
++    pub status: String,
++    pub used_bytes: u64,
++    pub total_bytes: u64,
++    pub left_bytes: u64,
++    pub used_pct: Option<f64>,
++    /// unix 秒；None = 订阅没给到期日
++    pub expire: Option<i64>,
++    pub days_left: Option<i64>,
++    /// 下次流量重置日 YYYY-MM-DD（每月按到期日的「日」重置）
++    pub reset_date: Option<String>,
++    /// 正常 / 暂停（当月用满 200G 客户端暂停到重置日）
++    pub account_status: Option<String>,
++    pub error: Option<String>,
++}
++
++#[derive(Debug, Default, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct EgressQuotaResponse {
++    pub configured: bool,
++    pub fetched_at: i64,
++    pub accounts: Vec<EgressQuota>,
++}
++
++fn subs_file() -> String {
++    std::env::var("KIRO_EGRESS_SUBS_FILE").unwrap_or_else(|_| "/etc/kiro-egress-subs/subs.json".into())
++}
++
++/// `upload=1; download=2; total=3; expire=4` → 各字段（缺的为 None）
++pub fn parse_userinfo(h: &str) -> std::collections::HashMap<String, i64> {
++    h.split(';')
++        .filter_map(|kv| {
++            let (k, v) = kv.split_once('=')?;
++            // 只认非负整数（和参考实现的 isdigit 一致）；1e300 / inf 之类直接丢掉，避免溢出（review #4）
++            Some((k.trim().to_ascii_lowercase(), v.trim().parse::<u64>().ok().map(|n| n.min(i64::MAX as u64) as i64)?))
++        })
++        .collect()
++}
++
++/// 下次重置日：每月到期日的那个「日」（大于月底取月底）；今天 ≥ 那天 ⇒ 下个月
++pub fn next_reset(expire: i64, today: chrono::NaiveDate) -> Option<String> {
++    use chrono::{Datelike, NaiveDate, TimeZone};
++    let tz = chrono::FixedOffset::east_opt(8 * 3600)?;
++    let day = tz.timestamp_opt(expire, 0).single()?.day();
++    let (mut y, mut m) = (today.year(), today.month());
++    if today.day() >= day {
++        (y, m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
++    }
++    let last = (28..=31).rev().find(|d| NaiveDate::from_ymd_opt(y, m, *d).is_some())?;
++    NaiveDate::from_ymd_opt(y, m, day.min(last)).map(|d| d.format("%Y-%m-%d").to_string())
++}
++
++pub fn quota_from_header(name: &str, header: &str, now: i64) -> EgressQuota {
++    let u = parse_userinfo(header);
++    let used = (u.get("upload").copied().unwrap_or(0).max(0) as u64).saturating_add(u.get("download").copied().unwrap_or(0).max(0) as u64);
++    let total = u.get("total").copied().unwrap_or(0).max(0) as u64;
++    let expire = u.get("expire").copied().filter(|e| *e > 0);
++    let used_pct = (total > 0).then(|| (used as f64 / total as f64 * 10000.0).round() / 100.0);
++    if total == 0 {
++        // 头里没给总量：不判「正常」，前端显示未知
++        return EgressQuota { name: name.to_string(), status: "warn".into(), used_bytes: used, expire, error: Some("订阅没给总量".into()), ..Default::default() };
++    }
++    let days_left = expire.map(|e| (e - now).div_euclid(86400));
++    let today = chrono::DateTime::from_timestamp(now, 0).map(|t| (t + chrono::Duration::hours(8)).date_naive());
++    let reset_date = expire.zip(today).and_then(|(e, t)| next_reset(e, t));
++    let warn = used_pct.is_some_and(|p| p >= WARN_PCT) || days_left.is_some_and(|d| d < WARN_DAYS);
++    EgressQuota {
++        name: name.to_string(),
++        status: if warn { "warn" } else { "ok" }.into(),
++        used_bytes: used,
++        total_bytes: total,
++        left_bytes: total.saturating_sub(used),
++        used_pct,
++        expire,
++        days_left,
++        reset_date,
++        account_status: (total > 0).then(|| if used >= total { "暂停" } else { "正常" }.to_string()),
++        error: None,
++    }
++}
++
++/// 逐个账户请求订阅地址、只取响应头。失败的账户单独报错，不影响其它账户。
++/// `proxy`：出网走的代理（None = 直连；10-31 实测 198/242 直连订阅地址 200）
++pub async fn fetch_all(proxy: Option<&str>) -> EgressQuotaResponse {
++    fetch_from(&subs_file(), proxy).await
++}
++
++async fn fetch_from(path: &str, proxy: Option<&str>) -> EgressQuotaResponse {
++    let now = chrono::Utc::now().timestamp();
++    let raw = match std::fs::read_to_string(path) {
++        Ok(s) => s,
++        // 只有「文件不存在」才算没配置；权限等错误如实报（review #5）
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return EgressQuotaResponse { configured: false, fetched_at: now, accounts: vec![] },
++        Err(_) => {
++            return EgressQuotaResponse {
++                configured: true,
++                fetched_at: now,
++                accounts: vec![EgressQuota { name: "?".into(), status: "error".into(), error: Some("订阅配置文件读不了（权限？）".into()), ..Default::default() }],
++            }
++        }
++    };
++    let subs: Vec<SubEntry> = match serde_json::from_str(&raw) {
++        Ok(v) => v,
++        Err(_) => {
++            return EgressQuotaResponse {
++                configured: true,
++                fetched_at: now,
++                accounts: vec![EgressQuota { name: "?".into(), status: "error".into(), error: Some("订阅配置文件格式不对".into()), ..Default::default() }],
++            }
++        }
++    };
++    // 不跟随重定向、不带 Referer：跳转会把订阅地址（含 token）经 Referer 带给别的域名，也绕过 https 校验（review #1）。
++    // 参考实现 curl 也不跟（遇 3xx 直接报 HTTP 302）
++    let mut b = reqwest::Client::builder()
++        .timeout(Duration::from_secs(20))
++        .user_agent(USER_AGENT)
++        .use_rustls_tls()
++        .redirect(reqwest::redirect::Policy::none())
++        .referer(false);
++    if let Some(p) = proxy.and_then(|p| reqwest::Proxy::all(p).ok()) {
++        b = b.proxy(p);
++    }
++    let Ok(client) = b.build() else {
++        return EgressQuotaResponse { configured: true, fetched_at: now, accounts: vec![] };
++    };
++    let futs = subs.into_iter().map(|s| {
++        let client = client.clone();
++        async move {
++            let err = |m: String| EgressQuota { name: s.name.clone(), status: "error".into(), error: Some(m), ..Default::default() };
++            if !s.url.starts_with("https://") {
++                return err("订阅地址不是 https".into());
++            }
++            match client.get(&s.url).send().await {
++                // 只要头：拿到就 drop 响应（不读 body）
++                Ok(r) if r.status().is_success() => match r.headers().get("subscription-userinfo").and_then(|v| v.to_str().ok()) {
++                    Some(h) => quota_from_header(&s.name, h, now),
++                    None => err("订阅没返回流量信息".into()),
++                },
++                // 错误信息只带状态码 / 错误类别，不带地址
++                Ok(r) => err(format!("订阅返回 HTTP {}", r.status().as_u16())),
++                Err(e) => err(if e.is_timeout() { "请求超时".into() } else if e.is_connect() { "连不上订阅服务器".into() } else { "请求失败".into() }),
++            }
++        }
++    });
++    EgressQuotaResponse { configured: true, fetched_at: now, accounts: futures::future::join_all(futs).await }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn parses_header_like_the_cli() {
++        // 11-01 acct2 的真实头（数字）；和 `sub quota` 的输出一致：25.21 / 200 GB，到期 2027-10-28
++        let h = "upload=0; download=27065129061; total=214748364800; expire=1824717469";
++        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap().and_hms_opt(4, 0, 0).unwrap().and_utc().timestamp();
++        let q = quota_from_header("新账户", h, now);
++        assert_eq!(q.used_bytes, 27065129061);
++        assert_eq!(q.total_bytes, 214748364800);
++        assert_eq!(q.used_pct, Some(12.6));
++        assert_eq!(q.reset_date.as_deref(), Some("2026-11-28"));
++        assert_eq!(q.account_status.as_deref(), Some("正常"));
++        assert_eq!(q.status, "ok");
++        assert!(q.days_left.unwrap() > 300);
++    }
++
++    #[test]
++    fn warn_and_pause_rules() {
++        let now = 1_800_000_000;
++        let full = quota_from_header("a", &format!("upload=0; download=200; total=200; expire={}", now + 400 * 86400), now);
++        assert_eq!((full.status.as_str(), full.account_status.as_deref()), ("warn", Some("暂停")));
++        let soon = quota_from_header("b", &format!("upload=1; download=1; total=100; expire={}", now + 10 * 86400), now);
++        assert_eq!(soon.status, "warn", "离到期 < 30 天");
++        let none = quota_from_header("c", "upload=1; download=1", now);
++        assert_eq!((none.used_pct, none.account_status.clone(), none.status.as_str()), (None, None, "warn"), "没总量 ⇒ 不判正常");
++        let huge = quota_from_header("d", "upload=1e300; download=18446744073709551615; total=10", now);
++        assert_eq!(huge.used_bytes, i64::MAX as u64, "超大值饱和、不 panic");
++    }
++
++    #[test]
++    fn reset_date_rolls_month_and_clamps() {
++        use chrono::NaiveDate;
++        // 到期日是 31 号（北京时间） ⇒ 2 月按月底
++        let exp31 = NaiveDate::from_ymd_opt(2027, 1, 31).unwrap().and_hms_opt(4, 0, 0).unwrap().and_utc().timestamp();
++        assert_eq!(next_reset(exp31, NaiveDate::from_ymd_opt(2027, 2, 3).unwrap()).as_deref(), Some("2027-02-28"));
++        let exp14 = NaiveDate::from_ymd_opt(2027, 10, 14).unwrap().and_hms_opt(4, 0, 0).unwrap().and_utc().timestamp();
++        assert_eq!(next_reset(exp14, NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()).as_deref(), Some("2026-11-14"));
++        assert_eq!(next_reset(exp14, NaiveDate::from_ymd_opt(2026, 11, 14).unwrap()).as_deref(), Some("2026-12-14"), "当天已重置 ⇒ 下个月");
++        assert_eq!(next_reset(exp14, NaiveDate::from_ymd_opt(2026, 12, 20).unwrap()).as_deref(), Some("2027-01-14"));
++    }
++
++    #[tokio::test]
++    async fn missing_file_means_not_configured() {
++        let r = fetch_from("/nonexistent/subs.json", None).await;
++        assert!(!r.configured && r.accounts.is_empty());
++        // 格式错 / 非 https：单独报错，不 panic，不回显地址
++        let dir = std::env::temp_dir().join(format!("egq-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let bad = dir.join("bad.json");
++        std::fs::write(&bad, "not json").unwrap();
++        let r = fetch_from(bad.to_str().unwrap(), None).await;
++        assert!(r.configured && r.accounts[0].status == "error");
++        let http = dir.join("http.json");
++        std::fs::write(&http, r#"[{"name":"x","url":"http://secret-token.example/abc"}]"#).unwrap();
++        let r = fetch_from(http.to_str().unwrap(), None).await;
++        assert_eq!(r.accounts[0].status, "error");
++        assert!(!serde_json::to_string(&r).unwrap().contains("secret-token"), "错误里不能带订阅地址");
++        std::fs::remove_dir_all(dir).ok();
++    }
++}
 --- a/src/admin/handlers.rs
 +++ b/src/admin/handlers.rs
-@@ -158,3 +158,297 @@
-         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+@@ -37,6 +37,17 @@
      }
  }
+ 
++/// POST /api/admin/credentials/disabled-batch —— 批量启用 / 停用（在槽的号停用 ⇒ 槽立刻换冷备号）
++pub async fn set_credentials_disabled_batch(
++    State(state): State<AdminState>,
++    Json(payload): Json<super::types::SetDisabledBatchRequest>,
++) -> impl IntoResponse {
++    match state.service.set_disabled_batch(&payload.ids, payload.disabled) {
++        Ok(r) => Json(r).into_response(),
++        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
++    }
++}
++
+ /// POST /api/admin/credentials/:id/priority
+ /// 设置凭据优先级
+ pub async fn set_credential_priority(
+@@ -157,4 +168,303 @@
+         Ok(response) => Json(response).into_response(),
+         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+     }
++}
 +
 +/// GET /api/admin/slots —— 槽位总览（每槽号/在途/排队/上限/429 统计）
 +pub async fn get_slots(State(state): State<AdminState>) -> impl IntoResponse {
@@ -4011,6 +4483,11 @@
 +    }
 +}
 +
++/// GET /api/admin/egress/quota —— 出口代理（iGuge 订阅）流量余额。每次请求现查（只取订阅响应头，不回显订阅地址）
++pub async fn get_egress_quota() -> impl IntoResponse {
++    Json(super::egress_quota::fetch_all(None).await)
++}
++
 +/// GET /api/admin/slots/gray —— 槽位灰度名单（key 别名前缀；空 = 全员）
 +pub async fn get_slot_gray(State(state): State<AdminState>) -> impl IntoResponse {
 +    Json(state.service.get_slot_gray())
@@ -4139,7 +4616,7 @@
 +            "inputTokens": c.input_tokens, "outputTokens": c.output_tokens})))
 +        .collect();
 +    Json(serde_json::json!({"days": days, "totals": t})).into_response()
-+}
+ }
 --- a/src/admin/middleware.rs
 +++ b/src/admin/middleware.rs
 @@ -21,6 +21,8 @@
@@ -4167,7 +4644,11 @@
  
 --- a/src/admin/mod.rs
 +++ b/src/admin/mod.rs
-@@ -20,7 +20,7 @@
+@@ -17,10 +17,11 @@
+ //! ```
+ 
+ mod error;
++pub mod egress_quota;
  mod handlers;
  mod middleware;
  mod router;
@@ -4178,15 +4659,23 @@
  pub use middleware::AdminState;
 --- a/src/admin/router.rs
 +++ b/src/admin/router.rs
-@@ -10,6 +10,7 @@
+@@ -9,7 +9,8 @@
+     handlers::{
          add_credential, delete_credential, force_refresh_token, get_all_credentials,
          get_credential_balance, get_load_balancing_mode, get_window_settings, reset_failure_count,
-         set_credential_disabled, set_credential_priority, set_load_balancing_mode, set_window_settings,
-+        get_slots, get_burn_trend, get_empty_events, get_slot_users, post_slot_rebind, post_slot_unpin, get_slot_rebalance, post_slot_rebalance, post_slot_ack_alarms, post_handoff, set_slot_limits, set_slot_lock, get_slot_configs, set_slot_configs, get_slot_gray, set_slot_gray, test_slot, test_all_slots, get_credential_usage, get_credentials_usage_totals,
+-        set_credential_disabled, set_credential_priority, set_load_balancing_mode, set_window_settings,
++        set_credential_disabled, set_credentials_disabled_batch, set_credential_priority, set_load_balancing_mode, set_window_settings,
++        get_slots, get_burn_trend, get_empty_events, get_slot_users, post_slot_rebind, post_slot_unpin, get_slot_rebalance, post_slot_rebalance, post_slot_ack_alarms, post_handoff, set_slot_limits, set_slot_lock, get_slot_configs, set_slot_configs, get_slot_gray, set_slot_gray, get_egress_quota, test_slot, test_all_slots, get_credential_usage, get_credentials_usage_totals,
      },
      middleware::{AdminState, admin_auth_middleware},
  };
-@@ -46,6 +47,8 @@
+@@ -41,11 +42,14 @@
+             get(get_all_credentials).post(add_credential),
+         )
+         .route("/credentials/{id}", delete(delete_credential))
++        .route("/credentials/disabled-batch", post(set_credentials_disabled_batch))
+         .route("/credentials/{id}/disabled", post(set_credential_disabled))
+         .route("/credentials/{id}/priority", post(set_credential_priority))
          .route("/credentials/{id}/reset", post(reset_failure_count))
          .route("/credentials/{id}/refresh", post(force_refresh_token))
          .route("/credentials/{id}/balance", get(get_credential_balance))
@@ -4195,7 +4684,7 @@
          .route(
              "/config/load-balancing",
              get(get_load_balancing_mode).put(set_load_balancing_mode),
-@@ -54,6 +57,22 @@
+@@ -54,6 +58,23 @@
              "/config/window",
              get(get_window_settings).put(set_window_settings),
          )
@@ -4212,6 +4701,7 @@
 +        .route("/slots/limits", axum::routing::put(set_slot_limits))
 +        .route("/slots/config", get(get_slot_configs).put(set_slot_configs))
 +        .route("/slots/gray", get(get_slot_gray).put(set_slot_gray))
++        .route("/egress/quota", get(get_egress_quota))
 +        .route("/slots/test-all", post(test_all_slots))
 +        .route("/slots/{slot}/test", post(test_slot))
 +        .route("/slots/{slot}/lock", post(set_slot_lock))
@@ -4255,7 +4745,7 @@
  
          let mut credentials: Vec<CredentialStatusItem> = snapshot
              .entries
-@@ -72,7 +89,9 @@
+@@ -72,7 +89,10 @@
                  priority: entry.priority,
                  disabled: entry.disabled,
                  failure_count: entry.failure_count,
@@ -4263,10 +4753,31 @@
 +                is_current: if slotted.is_empty() { entry.id == snapshot.current_id } else { slotted.contains_key(&entry.id) },
 +                slot_name: slotted.get(&entry.id).map(|x| x.0.clone()),
 +                slot_no: slotted.get(&entry.id).map(|x| x.1),
++                slot_eligible: entry.slot_eligible,
                  expires_at: entry.expires_at,
                  auth_method: entry.auth_method,
                  has_profile_arn: entry.has_profile_arn,
-@@ -299,16 +318,169 @@
+@@ -103,6 +123,19 @@
+     }
+ 
+     /// 设置凭据禁用状态
++    pub fn set_disabled_batch(&self, ids: &[u64], disabled: bool) -> Result<crate::kiro::token_manager::BatchDisableResult, AdminServiceError> {
++        if ids.is_empty() || ids.len() > 5000 {
++            return Err(AdminServiceError::InvalidCredential("ids 要 1~5000 个".into()));
++        }
++        let current_id = self.token_manager.snapshot().current_id;
++        let r = self.token_manager.set_disabled_batch(ids, disabled).map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
++        // 非槽位模式：停掉的里面有当前号 ⇒ 和单个停用一样切到下一个
++        if disabled && r.changed.contains(&current_id) {
++            let _ = self.token_manager.switch_to_next();
++        }
++        Ok(r)
++    }
++
+     pub fn set_disabled(&self, id: u64, disabled: bool) -> Result<(), AdminServiceError> {
+         // 先获取当前凭据 ID，用于判断是否需要切换
+         let snapshot = self.token_manager.snapshot();
+@@ -299,16 +332,169 @@
          Ok(self.token_manager.get_window_settings())
      }
  
@@ -4442,7 +4953,7 @@
          self.token_manager
 --- a/src/admin/types.rs
 +++ b/src/admin/types.rs
-@@ -30,8 +30,14 @@
+@@ -30,8 +30,16 @@
      pub disabled: bool,
      /// 连续失败次数
      pub failure_count: u32,
@@ -4455,9 +4966,25 @@
 +    /// 槽位序号（从 1 起，和槽位卡片上的编号一致）
 +    #[serde(skip_serializing_if = "Option::is_none")]
 +    pub slot_no: Option<usize>,
++    /// 能不能上槽（非 FREE 档、没被退役）——前端估算冷备够不够用
++    pub slot_eligible: bool,
      /// Token 过期时间（RFC3339 格式）
      pub expires_at: Option<String>,
      /// 认证方式
+@@ -74,6 +82,13 @@
+ #[serde(rename_all = "camelCase")]
+ pub struct SetDisabledRequest {
+     /// 是否禁用
++    pub disabled: bool,
++}
++
++/// 批量启用 / 停用请求
++#[derive(Debug, Deserialize)]
++pub struct SetDisabledBatchRequest {
++    pub ids: Vec<u64>,
+     pub disabled: bool,
+ }
+ 
 --- a/src/anthropic/converter.rs
 +++ b/src/anthropic/converter.rs
 @@ -172,7 +172,12 @@
@@ -8200,7 +8727,16 @@
  }
  
  /// 统计数据持久化条目
-@@ -535,6 +538,43 @@
+@@ -454,6 +457,8 @@
+ pub struct CredentialEntrySnapshot {
+     /// 凭据唯一 ID
+     pub id: u64,
++    /// 能不能上槽：支持 opus（非 FREE 档）且没被退役（额度用尽 / 被限）。冷备估算用
++    pub slot_eligible: bool,
+     /// 优先级
+     pub priority: u32,
+     /// 是否被禁用
+@@ -535,6 +540,43 @@
      stats_dirty: AtomicBool,
      /// window 模式参数（运行时可改，Admin 页面设置）
      window_settings: Mutex<WindowSettings>,
@@ -8244,7 +8780,7 @@
  }
  
  /// window 模式参数
-@@ -661,6 +701,114 @@
+@@ -661,6 +703,129 @@
      pub token: String,
  }
  
@@ -8275,6 +8811,21 @@
 +    std::fs::write(&path, serde_json::to_string(&creds).unwrap()).unwrap();
 +    let m = MultiTokenManager::new(Config::default(), creds, None, Some(path), true).unwrap();
 +    (Arc::new(m), dir)
++}
++
++/// 批量启用 / 停用的结果
++#[derive(Debug, Clone, Default, serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct BatchDisableResult {
++    pub changed: Vec<u64>,
++    pub skipped: Vec<u64>,
++    pub not_found: Vec<u64>,
++    /// 停用里有几个原本在槽上（这些槽要换号）
++    pub slots_swapped: usize,
++    /// 这次补上号的槽数
++    pub slots_filled: usize,
++    /// 操作后仍没有可用号的生效槽数
++    pub empty_slots: usize,
 +}
 +
 +/// 槽位配置总条数上限（含停用）：只为防手滑，生效槽数受冷备号数约束
@@ -8359,7 +8910,7 @@
  impl MultiTokenManager {
      /// 创建多凭据 Token 管理器
      ///
-@@ -769,6 +917,24 @@
+@@ -769,6 +934,24 @@
                  cooldown_secs: config.window_cooldown_secs.clamp(1, 3600),
              }
          };
@@ -8384,7 +8935,7 @@
          let manager = Self {
              config,
              proxy,
-@@ -781,6 +947,24 @@
+@@ -781,6 +964,24 @@
              last_stats_save_at: Mutex::new(None),
              stats_dirty: AtomicBool::new(false),
              window_settings: Mutex::new(window_settings),
@@ -8409,7 +8960,7 @@
          };
  
          // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
-@@ -794,6 +978,17 @@
+@@ -794,6 +995,17 @@
  
          // 加载持久化的统计数据（success_count, last_used_at）
          manager.load_stats();
@@ -8427,7 +8978,7 @@
  
          Ok(manager)
      }
-@@ -825,6 +1020,8 @@
+@@ -825,6 +1037,8 @@
          model: Option<&str>,
          session_key: Option<&str>,
      ) -> Option<(u64, KiroCredentials)> {
@@ -8436,7 +8987,7 @@
          let entries = self.entries.lock();
  
          // 检查是否是 opus 模型
-@@ -832,11 +1029,12 @@
+@@ -832,11 +1046,12 @@
              .map(|m| m.to_lowercase().contains("opus"))
              .unwrap_or(false);
  
@@ -8450,7 +9001,7 @@
                      return false;
                  }
                  // 如果是 opus 模型，需要检查订阅等级
-@@ -852,7 +1050,8 @@
+@@ -852,7 +1067,8 @@
          }
  
          let mode = self.load_balancing_mode.lock().clone();
@@ -8460,7 +9011,7 @@
  
          match mode {
              "window" => {
-@@ -915,7 +1114,7 @@
+@@ -915,7 +1131,7 @@
                  // window 与 balanced 一样每次重选（窗口内按在途数挑），不粘 current_id
                  let is_balanced = matches!(
                      self.load_balancing_mode.lock().as_str(),
@@ -8469,7 +9020,7 @@
                  );
  
                  // balanced 模式：每次请求都重新均衡选择，不固定 current_id
-@@ -923,11 +1122,12 @@
+@@ -923,11 +1139,12 @@
                  let current_hit = if is_balanced {
                      None
                  } else {
@@ -8483,7 +9034,7 @@
                          .map(|e| (e.id, e.credentials.clone()))
                  };
  
-@@ -1049,7 +1249,10 @@
+@@ -1049,7 +1266,10 @@
          }
  
          // 第一次检查（无锁）：快速判断是否需要刷新
@@ -8495,7 +9046,7 @@
  
          let creds = if needs_refresh {
              // 获取刷新锁，确保同一时间只有一个刷新操作
-@@ -1130,6 +1333,11 @@
+@@ -1130,6 +1350,11 @@
      fn persist_credentials(&self) -> anyhow::Result<bool> {
          use anyhow::Context;
  
@@ -8507,7 +9058,7 @@
          // 仅多凭据格式才回写
          if !self.is_multiple_format {
              return Ok(false);
-@@ -1140,6 +1348,8 @@
+@@ -1140,6 +1365,8 @@
              None => return Ok(false),
          };
  
@@ -8516,7 +9067,7 @@
          // 收集所有凭据
          let credentials: Vec<KiroCredentials> = {
              let entries = self.entries.lock();
-@@ -1158,12 +1368,13 @@
+@@ -1158,12 +1385,13 @@
          // 序列化为 pretty JSON
          let json = serde_json::to_string_pretty(&credentials).context("序列化凭据失败")?;
  
@@ -8534,7 +9085,7 @@
          }
  
          tracing::debug!("已回写凭据到文件: {:?}", path);
-@@ -1216,6 +1427,9 @@
+@@ -1216,6 +1444,9 @@
  
      /// 将当前统计数据持久化到磁盘
      fn save_stats(&self) {
@@ -8544,7 +9095,7 @@
          let path = match self.stats_path() {
              Some(p) => p,
              None => return,
-@@ -1291,9 +1505,1233 @@
+@@ -1291,9 +1522,1233 @@
          self.save_stats_debounced();
      }
  
@@ -9779,7 +10330,24 @@
      }
  
      /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
-@@ -1640,6 +3078,7 @@
+@@ -1583,6 +3038,8 @@
+ 
+     /// 获取管理器状态快照（用于 Admin API）
+     pub fn snapshot(&self) -> ManagerSnapshot {
++        // 先读退役名单（slots 锁）再拿 entries，不嵌套持锁
++        let retired: std::collections::HashSet<u64> = self.slots.lock().file.retired.keys().copied().collect();
+         let entries = self.entries.lock();
+         let current_id = *self.current_id.lock();
+         let available = entries.iter().filter(|e| !e.disabled).count();
+@@ -1591,6 +3048,7 @@
+             entries: entries
+                 .iter()
+                 .map(|e| CredentialEntrySnapshot {
++                    slot_eligible: e.credentials.supports_opus() && !retired.contains(&e.id),
+                     id: e.id,
+                     priority: e.credentials.priority,
+                     disabled: e.disabled,
+@@ -1640,6 +3098,7 @@
                          DisabledReason::QuotaExceeded => "QuotaExceeded",
                          DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                          DisabledReason::InvalidConfig => "InvalidConfig",
@@ -9787,7 +10355,140 @@
                      }.to_string()),
                      endpoint: e.credentials.endpoint.clone(),
                      subscription_title: e.credentials.subscription_title.clone(),
-@@ -1671,6 +3110,12 @@
+@@ -1652,7 +3111,132 @@
+     }
+ 
+     /// 设置凭据禁用状态（Admin API）
++    /// 批量启用 / 停用（Admin「账户」列表勾选后批量操作，11-01）。
++    /// 语义与单个 set_disabled 一致：启用清失败计数并去掉退役标记；停用记为手动禁用；在槽的号停用 ⇒ 槽立刻换冷备号，
++    /// 冷备不够 ⇒ 槽变空槽（不报错）。凭据文件只写一次，再补一次槽。
++    /// 返回每个 id 的结果：changed / skipped（本来就是这个状态）/ notFound。
++    pub fn set_disabled_batch(&self, ids: &[u64], disabled: bool) -> anyhow::Result<BatchDisableResult> {
++        // 待命 / 已交接：内存改了但不落盘，接管后会丢（review #5）⇒ 直接拒
++        if !self.may_write() {
++            anyhow::bail!("本实例正在交接，请稍后重试");
++        }
++        let mut out = BatchDisableResult::default();
++        let mut seen = std::collections::HashSet::new();
++        {
++            let mut entries = self.entries.lock();
++            for &id in ids {
++                if !seen.insert(id) {
++                    continue;
++                }
++                let Some(entry) = entries.iter_mut().find(|e| e.id == id) else {
++                    out.not_found.push(id);
++                    continue;
++                };
++                if entry.disabled == disabled {
++                    out.skipped.push(id);
++                    continue;
++                }
++                entry.disabled = disabled;
++                if disabled {
++                    entry.disabled_reason = Some(DisabledReason::Manual);
++                } else {
++                    entry.failure_count = 0;
++                    entry.refresh_failure_count = 0;
++                    entry.disabled_reason = None;
++                }
++                out.changed.push(id);
++            }
++        }
++        // 有改动才写凭据；但下面「去退役标记 + 补槽」即使全部跳过也照做：
++        // 上次写盘失败后重试（内存已是目标状态）、或「启用 + 退役」的号再点启用，都能自愈（review #1/#2）
++        if !out.changed.is_empty() {
++            self.persist_credentials()?;
++        }
++        if !disabled {
++            let mut rt = self.slots.lock();
++            let before = rt.file.retired.len();
++            for id in out.changed.iter().chain(out.skipped.iter()) {
++                rt.file.retired.remove(id);
++            }
++            let touched = rt.file.retired.len() != before;
++            drop(rt);
++            if touched {
++                self.persist_slots();
++            }
++        }
++        // 非槽位模式不碰槽位记录（切回非槽位后槽表仍保留），也不报空槽（review #3）
++        if !self.is_slots_mode() {
++            return Ok(out);
++        }
++        let targets: std::collections::HashSet<u64> = if disabled { out.changed.iter().chain(out.skipped.iter()).copied().collect() } else { Default::default() };
++        let slot_view = |tm: &Self| -> Vec<(String, Option<u64>, bool)> {
++            let states: Vec<(String, Option<u64>)> = tm.slots.lock().states.iter().map(|s| (s.name.clone(), s.account_id)).collect();
++            let entries = tm.entries.lock();
++            states.into_iter().map(|(n, a)| { let live = a.is_some_and(|id| entries.iter().any(|e| e.id == id && !e.disabled)); (n, a, live) }).collect()
++        };
++        // 操作前：哪些槽挂着这次被停的号（要换）、哪些本来就没可用号（要补）——按槽名记
++        let before = slot_view(self);
++        let swap_names: Vec<String> = before.iter().filter(|(_, a, _)| a.is_some_and(|id| targets.contains(&id))).map(|(n, _, _)| n.clone()).collect();
++        let empty_names: Vec<String> = before.iter().filter(|(_, a, live)| !*live && !a.is_some_and(|id| targets.contains(&id))).map(|(n, _, _)| n.clone()).collect();
++        self.fill_empty_slots(if disabled { "disabled-batch" } else { "enabled-batch" });
++        // 冷备不够、没换上号的槽：把停用号从槽上摘掉，变成真正的空槽（卡片显示「空槽」、不再把新人分进来、
++        // 绑在上面的人下一个请求换槽；以前要等请求进来才发现号死了，再「就地补号」失败 ⇒ 529）
++        if disabled {
++            self.detach_dead_accounts(&targets);
++        }
++        let after = slot_view(self);
++        let live_now: std::collections::HashSet<&String> = after.iter().filter(|(_, _, l)| *l).map(|(n, _, _)| n).collect();
++        out.slots_swapped = swap_names.iter().filter(|n| live_now.contains(n)).count();
++        out.slots_filled = empty_names.iter().filter(|n| live_now.contains(n)).count();
++        out.empty_slots = after.iter().filter(|(_, _, l)| !*l).count();
++        tracing::info!(
++            "批量{}：改 {} 个 / 跳过 {} / 不存在 {}；换号 {} 槽、补上 {} 槽，现空槽 {}",
++            if disabled { "停用" } else { "启用" }, out.changed.len(), out.skipped.len(), out.not_found.len(), out.slots_swapped, out.slots_filled, out.empty_slots
++        );
++        Ok(out)
++    }
++
++    /// 把这些（已停用的）号从槽上摘下来：只摘「此刻仍挂在槽上且确实已停用」的，避免并发里刚补上的号被误摘
++    fn detach_dead_accounts(&self, ids: &std::collections::HashSet<u64>) {
++        let dead: std::collections::HashSet<u64> = {
++            let entries = self.entries.lock();
++            ids.iter().copied().filter(|id| entries.iter().any(|e| e.id == *id && e.disabled)).collect()
++        };
++        if dead.is_empty() {
++            return;
++        }
++        let mut freed = Vec::new();
++        {
++            let mut rt = self.slots.lock();
++            for st in rt.states.iter_mut() {
++                if st.account_id.is_some_and(|id| dead.contains(&id)) {
++                    freed.push(st.account_id.take().unwrap());
++                }
++            }
++            if !freed.is_empty() {
++                rt.sync_file_accounts();
++            }
++        }
++        if freed.is_empty() {
++            return;
++        }
++        let originals = self.slots.lock().file.original_proxy.clone();
++        {
++            let mut entries = self.entries.lock();
++            for e in entries.iter_mut().filter(|e| freed.contains(&e.id)) {
++                restore_proxy(&mut e.credentials, &originals);
++            }
++        }
++        let _ = self.persist_credentials();
++        self.persist_slots();
++        self.slot_notify.notify_waiters();
++        tracing::warn!("冷备不够：号 {:?} 已从槽上摘下，对应槽为空槽", freed);
++    }
++
+     pub fn set_disabled(&self, id: u64, disabled: bool) -> anyhow::Result<()> {
++        if !self.may_write() {
++            anyhow::bail!("本实例正在交接，请稍后重试");
++        }
+         {
+             let mut entries = self.entries.lock();
+             let entry = entries
+@@ -1671,6 +3255,16 @@
          }
          // 持久化更改
          self.persist_credentials()?;
@@ -9797,10 +10498,14 @@
 +        }
 +        // 槽位：手动禁用在槽的号 ⇒ 槽立刻补新号；启用一个号 ⇒ 有空槽就补上
 +        self.fill_empty_slots(if disabled { "disabled" } else { "enabled" });
++        // 冷备不够 ⇒ 摘下变空槽（和批量一致，review #10）
++        if disabled && self.is_slots_mode() {
++            self.detach_dead_accounts(&std::iter::once(id).collect());
++        }
          Ok(())
      }
  
-@@ -1736,9 +3181,9 @@
+@@ -1736,9 +3330,9 @@
                  .clone()
                  .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
          } else {
@@ -9813,7 +10518,7 @@
  
              if needs_refresh {
                  let _guard = self.refresh_lock.lock().await;
-@@ -1955,6 +3400,9 @@
+@@ -1955,6 +3549,9 @@
          self.persist_credentials()?;
  
          tracing::info!("成功添加凭据 #{}", new_id);
@@ -9823,7 +10528,7 @@
          Ok(new_id)
      }
  
-@@ -2020,6 +3468,27 @@
+@@ -2020,6 +3617,27 @@
          // 立即回写统计数据，清除已删除凭据的残留条目
          self.save_stats();
  
@@ -9851,7 +10556,7 @@
          tracing::info!("已删除凭据 #{}", id);
          Ok(())
      }
-@@ -2029,6 +3498,11 @@
+@@ -2029,6 +3647,11 @@
      /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
      /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
      pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
@@ -9863,7 +10568,7 @@
          let credentials = {
              let entries = self.entries.lock();
              entries
-@@ -2076,6 +3550,9 @@
+@@ -2076,6 +3699,9 @@
  
      /// 设置 window 模式参数（Admin API）：校验 → 写回 config.json → 生效。写盘失败则不生效。
      pub fn set_window_settings(&self, ws: WindowSettings) -> anyhow::Result<()> {
@@ -9873,7 +10578,7 @@
          use anyhow::Context;
          ws.validate()?;
          if let Some(path) = self.config.config_path() {
-@@ -2101,6 +3578,10 @@
+@@ -2101,6 +3727,10 @@
      }
  
      fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
@@ -9884,7 +10589,7 @@
          use anyhow::Context;
  
          let config_path = match self.config.config_path() {
-@@ -2123,8 +3604,11 @@
+@@ -2123,8 +3753,11 @@
  
      /// 设置负载均衡模式（Admin API）
      pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
@@ -9897,7 +10602,7 @@
              anyhow::bail!("无效的负载均衡模式: {}", mode);
          }
  
-@@ -2140,9 +3624,35 @@
+@@ -2140,9 +3773,35 @@
              return Err(err);
          }
  
@@ -9933,7 +10638,7 @@
  }
  
  impl Drop for MultiTokenManager {
-@@ -2150,6 +3660,7 @@
+@@ -2150,6 +3809,7 @@
          if self.stats_dirty.load(Ordering::Relaxed) {
              self.save_stats();
          }
@@ -9941,7 +10646,7 @@
      }
  }
  
-@@ -2325,7 +3836,697 @@
+@@ -2325,7 +3985,781 @@
          assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");
      }
  
@@ -10172,6 +10877,90 @@
 +        moved[2].name = "s2-moved".into();
 +        moved[2].proxy_url = Some("http://10.9.9.9:3128".into());
 +        assert!(m.set_slot_configs(moved).is_err(), "换了出口还用打码密码要拒");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_batch_disable_swaps_slotted_accounts_and_keeps_bindings() {
++        // 3 槽、6 号：停用 2 个在槽的 + 1 个冷备 + 1 个不存在 + 1 个已停用 ⇒ 2 槽立刻换冷备号，绑定不变
++        let (m, dir) = slot_mgr(3, 6);
++        let u = m.slot_for_user_test("u:a").0;
++        let on: Vec<u64> = m.slots_snapshot().iter().filter_map(|s| s.account_id).collect();
++        let spare: Vec<u64> = (1..=6).filter(|i| !on.contains(i)).collect();
++        m.set_disabled(spare[1], true).unwrap();
++        let r = m.set_disabled_batch(&[on[0], on[1], spare[0], 999, spare[1], on[0]], true).unwrap();
++        assert_eq!(r.changed, vec![on[0], on[1], spare[0]], "重复 id 只算一次");
++        assert_eq!(r.skipped, vec![spare[1]]);
++        assert_eq!(r.not_found, vec![999]);
++        // 2 个在槽的被停，冷备只剩 1 个 ⇒ 1 个槽换上号，1 个变空槽；没有「本来就空」的槽 ⇒ filled 0
++        assert_eq!(r.slots_swapped, 1, "变空槽的不算换了号");
++        let snap = m.slots_snapshot();
++        assert!(snap.iter().all(|s| !s.account_id.is_some_and(|id| r.changed.contains(&id))), "停用号都不在槽上（换掉或摘掉成空槽）: {:?}", snap.iter().map(|s| s.account_id).collect::<Vec<_>>());
++        assert_eq!(snap.iter().filter(|s| s.account_id.is_none()).count(), 1, "冷备不够的那个槽是真空槽");
++        assert_eq!(r.slots_filled, 0, "同一次换号不再算成「补上」");
++        assert_eq!(r.empty_slots, 1);
++        assert_eq!(m.slot_for_user_test("u:a"), (u, false), "绑定不变");
++        assert!(m.entries.lock().iter().filter(|e| r.changed.contains(&e.id)).all(|e| e.disabled && e.disabled_reason == Some(DisabledReason::Manual)));
++        // 批量启用 ⇒ 空槽补上，失败计数清零
++        m.entries.lock().iter_mut().find(|e| e.id == on[0]).unwrap().failure_count = 7;
++        let r2 = m.set_disabled_batch(&[on[0], on[1]], false).unwrap();
++        assert_eq!(r2.changed.len(), 2);
++        assert_eq!(r2.empty_slots, 0);
++        assert_eq!(r2.slots_filled, 1);
++        assert_eq!(m.entries.lock().iter().find(|e| e.id == on[0]).unwrap().failure_count, 0);
++        assert!(m.slots_snapshot().iter().all(|s| s.account_id.is_some()));
++        // 全部跳过 ⇒ 不落盘也不报错
++        let r3 = m.set_disabled_batch(&[on[0]], false).unwrap();
++        assert!(r3.changed.is_empty() && r3.skipped == vec![on[0]]);
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_batch_retry_after_partial_failure_still_refills_and_clears_retired() {
++        // review #1/#2：号已是启用（内存先改了）但还挂着退役标记 / 槽是空的 ⇒ 再点批量启用要能自愈
++        let (m, dir) = slot_mgr(1, 2);
++        let on = m.slots_snapshot()[0].account_id.unwrap();
++        m.slot_retire_account(on, "quota");
++        m.entries.lock().iter_mut().find(|e| e.id == on).unwrap().disabled = false; // 「启用 + 退役」
++        let r = m.set_disabled_batch(&[on], false).unwrap();
++        assert!(r.changed.is_empty() && r.skipped == vec![on]);
++        assert!(!m.slots.lock().file.retired.contains_key(&on), "跳过的也要去掉退役标记");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_single_disable_without_spare_leaves_true_empty_slot() {
++        // review #10：单个停用和批量一致——冷备没号 ⇒ 槽变空槽，不挂着死号
++        let (m, dir) = slot_mgr(2, 2);
++        let on0 = m.slots_snapshot()[0].account_id.unwrap();
++        m.set_disabled(on0, true).unwrap();
++        let snap = m.slots_snapshot();
++        assert_eq!(snap[0].account_id, None);
++        assert!(snap[1].account_id.is_some());
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_batch_disable_in_non_slots_mode_does_not_touch_slot_records() {
++        // review #3：非槽位模式下不摘槽、不报空槽
++        let (m, dir) = slot_mgr(2, 3);
++        let on0 = m.slots_snapshot()[0].account_id.unwrap();
++        m.set_load_balancing_mode("priority".into()).unwrap();
++        let r = m.set_disabled_batch(&[on0], true).unwrap();
++        assert_eq!(r.changed, vec![on0]);
++        assert_eq!((r.slots_swapped, r.slots_filled, r.empty_slots), (0, 0, 0));
++        assert_eq!(m.slots.lock().states[0].account_id, Some(on0), "槽位记录原样保留");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_batch_enable_clears_retired_mark() {
++        let (m, dir) = slot_mgr(1, 2);
++        let on = m.slots_snapshot()[0].account_id.unwrap();
++        m.slot_retire_account(on, "quota");
++        assert!(m.slots.lock().file.retired.contains_key(&on));
++        m.set_disabled_batch(&[on], false).unwrap();
++        assert!(!m.slots.lock().file.retired.contains_key(&on), "手动批量启用 = 去掉退役标记");
 +        std::fs::remove_dir_all(dir).ok();
 +    }
 +
@@ -10639,7 +11428,7 @@
      fn test_window_settings_validate_and_persist() {
          let config_path = std::env::temp_dir().join(format!("kiro-window-{}.json", uuid::Uuid::new_v4()));
          std::fs::write(&config_path, r#"{"loadBalancingMode":"window"}"#).unwrap();
-@@ -2441,6 +4642,65 @@
+@@ -2441,6 +4875,65 @@
          credentials.refresh_token = Some("a".repeat(150));
          let result = validate_refresh_token(&credentials);
          assert!(result.is_ok());

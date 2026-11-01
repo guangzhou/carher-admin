@@ -154,6 +154,10 @@ spec:
         volumeMounts:
         - mountPath: /app/config
           name: config
+        # 11-01：出口代理（iGuge 订阅）余额卡片读这里；optional ⇒ 没建 Secret 也能起，页面显示「未配置」
+        - mountPath: /etc/kiro-egress-subs
+          name: egress-subs
+          readOnly: true
       dnsPolicy: ClusterFirst
       initContainers:
       - command:
@@ -189,6 +193,11 @@ spec:
         operator: Equal
         value: new-node
       volumes:
+      - name: egress-subs
+        secret:
+          secretName: kiro-egress-subs
+          optional: true
+          defaultMode: 0400
       - name: config
         persistentVolumeClaim:
           claimName: kiro-rs-slots-config

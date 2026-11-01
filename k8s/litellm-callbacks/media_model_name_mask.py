@@ -65,6 +65,25 @@ def _prefixes() -> tuple:
     return tuple(p.strip() for p in raw.split(",") if p.strip())
 
 
+def _public_name_for(backend: str, user_api_key_dict) -> Optional[str]:
+    """在这把 key 自己的 alias 表里，找一个指向 `backend` 的公开名。
+
+    key 的 `aliases` 形如 {"gemini-video": "muse-video"} ⇒ 反查得到 "gemini-video"。
+    找不到就返回 None（调用方据此放弃遮蔽，照实回）。
+    多个公开名指向同一后端时取字典序最小的那个，保证同一请求每次都给同一个答案
+    （否则同一个视频两次轮询回不同的 model，客户端更困惑）。
+    """
+    try:
+        aliases = getattr(user_api_key_dict, "aliases", None) or {}
+        if not isinstance(aliases, dict):
+            return None
+        hits = sorted(k for k, v in aliases.items()
+                      if v == backend and isinstance(k, str) and not k.startswith(_prefixes()))
+        return hits[0] if hits else None
+    except Exception:
+        return None
+
+
 class MediaModelNameMask(CustomLogger):
     async def async_post_call_success_hook(self, data: dict, user_api_key_dict, response):
         try:
@@ -74,17 +93,26 @@ class MediaModelNameMask(CustomLogger):
             # data 里不一定有 call_type（不同端点塞的字段不同）⇒ 再看有没有视频/图片的痕迹
             if call_type and call_type not in _MEDIA_CALL_TYPES:
                 return response
-            public = (data or {}).get("model")
-            if not public or not isinstance(public, str):
-                return response
-            if public.startswith(_prefixes()):
-                # 用户自己就是按 muse 名调的（比如运维用 master key）⇒ 不遮，照实回
-                return response
             cur = getattr(response, "model", None)
             if cur is None and isinstance(response, dict):
                 cur = response.get("model")
             if not isinstance(cur, str) or not cur.startswith(_prefixes()):
                 return response
+
+            public = (data or {}).get("model")
+            # 🔴 retrieve/content/delete 这条路上 `data["model"]` **不是用户传的名字**：
+            #    video_endpoints/endpoints.py:277 用 video_id 反解出 model_id 再
+            #    `resolve_model_name_from_model_id()`，把 data["model"] 直接设成**底层组名**
+            #    （muse-video）。11-01 实测：提交那条路遮住了、查进度没遮住，日志里这个 hook
+            #    在 retrieve 时连一行都没打 —— 因为「用户传的不是 muse 名」这个条件永远不成立。
+            #    ⇒ 这种情况下改从**该 key 自己的 alias 表**反查公开名（一个公开名指向它）。
+            if isinstance(public, str) and public and not public.startswith(_prefixes()):
+                pass                      # 提交路：data["model"] 就是用户传的公开名，直接用
+            else:
+                public = _public_name_for(cur, user_api_key_dict)
+                if not public:
+                    # 反查不到（运维用 master key、或这把 key 真的只认 muse 名）⇒ 照实回，不骗自己人
+                    return response
             if isinstance(response, dict):
                 response["model"] = public
             else:

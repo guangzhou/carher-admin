@@ -25,7 +25,7 @@ REPO="${REPO:-$ROOT/.work/myai-admin-perf/ai_token_dashboard}"
 ACTION="${1:-}"
 H188=cltx@10.68.13.188
 LOCK="${LOCK:-/Data/myai-build-2818c0d/freeze-9f.txt}"
-[ -d "$REPO/.git" ] || { echo "没有本地仓库 $REPO" >&2; exit 2; }
+git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || { echo "没有本地仓库 $REPO" >&2; exit 2; }
 C="${COMMIT:-$(git -C "$REPO" rev-parse --short HEAD)}"
 TAG="ai-token-dashboard:perf-$C"
 RUN="$ROOT/scripts/host-243-run.sh"
@@ -37,7 +37,10 @@ build(){
   [ -f "$base" ] || { echo "缺基线 ${base}（在 9f250f8 上跑一遍 pytest 生成）" >&2; exit 1; }
   # 🔴 pytest 有失败就 rc=1，pipefail 会把它带到整条管道 ⇒ set -e 直接静默杀掉脚本（首跑就这样）。
   #    这里的判据是"失败集合"，不是 rc，所以 rc 一律吞掉；但输出里必须有 passed 行，否则是 pytest 本身没跑起来
-  local out; out=$(cd "$REPO" && .venv/bin/python -m pytest tests -q -p no:cacheprovider 2>&1 || true)
+  # worktree 里没有 .venv（venv 只装在主检出）⇒ 允许 VENV 覆盖，默认找 REPO 自己的，再退回主检出的
+  local py="${VENV:-$REPO/.venv/bin/python}"
+  [ -x "$py" ] || py="$ROOT/.work/myai-admin-perf/ai_token_dashboard/.venv/bin/python"
+  local out; out=$(cd "$REPO" && "$py" -m pytest tests -q -p no:cacheprovider 2>&1 || true)
   printf '%s\n' "$out" | grep -qE "[0-9]+ passed" || { echo "pytest 没跑起来：" >&2; printf '%s\n' "$out" | tail -5 >&2; exit 1; }
   # 只认 pytest 的失败行格式：`FAILED tests/x.py::name` / `ERROR tests/x.py`。
   # 原来的 `^(FAILED|ERROR)` 会把应用日志里以 ERROR 开头的行也收进失败集合

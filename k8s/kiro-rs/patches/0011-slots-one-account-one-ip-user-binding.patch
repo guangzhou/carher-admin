@@ -2616,7 +2616,7 @@
 +}
 --- a/admin-ui/src/components/slot-config-editor.tsx
 +++ b/admin-ui/src/components/slot-config-editor.tsx
-@@ -0,0 +1,304 @@
+@@ -0,0 +1,326 @@
 +import { useEffect, useMemo, useRef, useState } from 'react'
 +import { toast } from 'sonner'
 +import { ChevronDown, ChevronUp, ChevronsUpDown } from 'lucide-react'
@@ -2625,6 +2625,7 @@
 +import { Switch } from '@/components/ui/switch'
 +import { Badge } from '@/components/ui/badge'
 +import { Checkbox } from '@/components/ui/checkbox'
++import { SlotNo } from '@/components/credential-table'
 +import { useSetSlotConfigs, useSlotConfigs, useSlots } from '@/hooks/use-credentials'
 +import type { SlotConfig } from '@/api/credentials'
 +import { extractErrorMessage } from '@/lib/utils'
@@ -2634,16 +2635,17 @@
 +// 排序只改显示顺序：保存时按原顺序写回（槽的编号 / 调度顺序不因为排序而变）。
 +const same = (a?: SlotConfig, b?: SlotConfig) => JSON.stringify(a) === JSON.stringify(b)
 +
-+type SortKey = 'order' | 'enabled' | 'name' | 'weight' | 'rank' | 'kiro' | 'down'
++type SortKey = 'order' | 'slot' | 'enabled' | 'name' | 'weight' | 'rank' | 'kiro' | 'down'
 +interface SortState { key: SortKey; dir: 'asc' | 'desc' }
 +// 第一次点：排名 / 连 Kiro 先看最好的（升序），下载 / 权重先看最大的（降序），生效先看开着的
-+const FIRST_DIR: Record<SortKey, 'asc' | 'desc'> = { order: 'asc', enabled: 'desc', name: 'asc', weight: 'desc', rank: 'asc', kiro: 'asc', down: 'desc' }
-+const SORT_LABEL: Record<SortKey, string> = { order: '原顺序', enabled: '生效', name: '槽位名', weight: '权重', rank: '综合排名', kiro: '连 Kiro', down: '下载' }
++const FIRST_DIR: Record<SortKey, 'asc' | 'desc'> = { order: 'asc', slot: 'asc', enabled: 'desc', name: 'asc', weight: 'desc', rank: 'asc', kiro: 'asc', down: 'desc' }
++const SORT_LABEL: Record<SortKey, string> = { order: '原顺序', slot: '槽号', enabled: '生效', name: '槽位名', weight: '权重', rank: '综合排名', kiro: '连 Kiro', down: '下载' }
 +
 +// 没测速的行排在最后（不管升降序）
-+function sortValue(r: SlotConfig, k: SortKey): number | string | null {
++function sortValue(r: SlotConfig, k: SortKey, slotNo: (name: string) => number | null): number | string | null {
 +  switch (k) {
 +    case 'order': return null
++    case 'slot': return slotNo(r.name)
 +    case 'enabled': return r.enabled ? 1 : 0
 +    case 'name': return r.name.toLowerCase()
 +    case 'weight': return r.weight
@@ -2670,6 +2672,9 @@
 +export function SlotConfigEditor() {
 +  const { data } = useSlotConfigs()
 +  const { data: live } = useSlots()
++  // 槽号 = 首页卡片上的编号（只数生效的槽，= 运行时 index + 1）；停用槽没有槽号。按槽名对，不按行号
++  const liveByName = useMemo(() => new Map((live?.slots || []).map((s) => [s.name, s])), [live])
++  const slotNoOf = (name: string) => { const x = liveByName.get(name.trim()); return x ? x.index + 1 : null }
 +  const { mutate, isPending } = useSetSlotConfigs()
 +  const [rows, setRows] = useState<SlotConfig[]>([])
 +  // 专属名单输入框原文（边打字边解析，逗号不能被吃掉）；按行的原始下标记
@@ -2708,12 +2713,13 @@
 +    if (sort.key === 'order') return sort.dir === 'asc' ? idx : idx.reverse()
 +    const sign = sort.dir === 'asc' ? 1 : -1
 +    return idx.sort((a, b) => {
-+      const va = sortValue(rows[a], sort.key), vb = sortValue(rows[b], sort.key)
++      const va = sortValue(rows[a], sort.key, slotNoOf), vb = sortValue(rows[b], sort.key, slotNoOf)
 +      if (va === null || vb === null) return va === null && vb === null ? a - b : va === null ? 1 : -1
 +      const c = typeof va === 'number' && typeof vb === 'number' ? va - vb : String(va).localeCompare(String(vb), 'zh-CN')
 +      return c !== 0 ? c * sign : a - b
 +    })
-+  }, [rows, sort])
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [rows, sort, liveByName])
 +  // 新加的行（不在冻结顺序里）排到最后
 +  sortedRef.current = sorted
 +  const view = frozen ? [...frozen.filter((i) => i < rows.length), ...rows.map((_, i) => i).filter((i) => !frozen.includes(i))] : sorted
@@ -2806,6 +2812,7 @@
 +            onChange={(e) => { const [k, d] = e.target.value.split(':') as [SortKey, 'asc' | 'desc']; setSort({ key: k, dir: d }) }}
 +          >
 +            <option value='order:asc'>原顺序</option>
++            <option value='slot:asc'>槽号 小→大（停用的在后）</option>
 +            <option value='rank:asc'>综合排名 好→差</option>
 +            <option value='rank:desc'>综合排名 差→好</option>
 +            <option value='kiro:asc'>连 Kiro 快→慢</option>
@@ -2818,7 +2825,7 @@
 +            <option value='weight:asc'>权重 小→大</option>
 +            <option value='name:asc'>槽位名 A→Z</option>
 +            <option value='name:desc'>槽位名 Z→A</option>
-+            {!['order:asc', 'rank:asc', 'rank:desc', 'kiro:asc', 'kiro:desc', 'down:desc', 'down:asc', 'enabled:desc', 'enabled:asc', 'weight:desc', 'weight:asc', 'name:asc', 'name:desc'].includes(`${sort.key}:${sort.dir}`) && (
++            {!['order:asc', 'slot:asc', 'rank:asc', 'rank:desc', 'kiro:asc', 'kiro:desc', 'down:desc', 'down:asc', 'enabled:desc', 'enabled:asc', 'weight:desc', 'weight:asc', 'name:asc', 'name:desc'].includes(`${sort.key}:${sort.dir}`) && (
 +              <option value={`${sort.key}:${sort.dir}`}>{SORT_LABEL[sort.key]} {sort.dir === 'asc' ? '升序' : '降序'}</option>
 +            )}
 +          </select>
@@ -2831,6 +2838,7 @@
 +          <thead className='bg-muted/50 text-xs text-muted-foreground'>
 +            <tr>
 +              <th className='w-10 px-3 py-2'><Checkbox checked={allPicked ? true : pickedIdx.length ? 'indeterminate' : false} onCheckedChange={(v) => setAll(!!v)} aria-label='全选' /></th>
++              <SortTh k='slot' label='槽号' sort={sort} onSort={onSort} className='w-16' title='和首页卡片上的编号一致（只数生效的槽）；停用的槽没有槽号。下面一行是这个槽现在上的号' />
 +              <SortTh k='enabled' label='生效' sort={sort} onSort={onSort} className='w-24' />
 +              <SortTh k='name' label='槽位名' sort={sort} onSort={onSort} />
 +              <th className='px-3 py-2 text-left font-medium'>出口代理</th>
@@ -2850,6 +2858,20 @@
 +                <tr key={i} className={`border-t ${r.enabled ? '' : 'bg-muted/40 text-muted-foreground'}`}>
 +                  <td className='px-3 py-2'>
 +                    <Checkbox checked={picked.has(i)} onCheckedChange={() => togglePick(i)} aria-label={`选择 ${r.name || '新槽位'}`} />
++                  </td>
++                  <td className='px-3 py-2 whitespace-nowrap'>
++                    {(() => {
++                      const x = liveByName.get(r.name.trim())
++                      if (!x) return <span className='text-muted-foreground' title={r.enabled ? '保存后才分配槽号' : '停用的槽没有槽号'}>—</span>
++                      return (
++                        <div className='flex flex-col items-start gap-0.5'>
++                          <SlotNo n={x.index + 1} size='sm' />
++                          <span className='text-[11px] text-muted-foreground' title={x.accountEmail || ''}>
++                            {x.accountId ? `#${x.accountId}${x.accountTier ? ` · ${x.accountTier.replace(/^KIRO\s+/i, '')}` : ''}` : '空槽'}
++                          </span>
++                        </div>
++                      )
++                    })()}
 +                  </td>
 +                  <td className='px-3 py-2'>
 +                    <div className='flex items-center gap-2'>
@@ -2905,7 +2927,7 @@
 +              )
 +            })}
 +            {rows.length === 0 && (
-+              <tr><td colSpan={11} className='px-3 py-6 text-center text-muted-foreground'>还没有槽位</td></tr>
++              <tr><td colSpan={12} className='px-3 py-6 text-center text-muted-foreground'>还没有槽位</td></tr>
 +            )}
 +          </tbody>
 +        </table>

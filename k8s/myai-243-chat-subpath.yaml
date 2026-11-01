@@ -28,7 +28,7 @@ spec:
       - name: dashboard
         # 🔴 镜像以线上为准，发布走 scripts/myai-release.sh（会 set image）。这里写的是 perf-3994a87，
         # 写成 :latest 会在 apply 时把它打回 10-10 的老版本（无补丁 0003~0018）。
-        image: ai-token-dashboard:perf-3994a87
+        image: ai-token-dashboard:perf-1a644a7
         imagePullPolicy: Never
         envFrom:
         - configMapRef: {name: dashboard-config}
@@ -57,9 +57,14 @@ spec:
           limits: {cpu: "2", memory: 2Gi}
         volumeMounts:
         - {mountPath: /app/.data, name: app-data}
+        # 支付宝收款码（11-01 上线）。图不进 git：CM pay-qr 用 create/replace 建（apply 会因 256KB 注解上限失败），
+        # 见 .work/myai-billing-plan/43-qr-golive-runbook.md 第 2 步。
+        - {mountPath: /app/assets/pay, name: pay-qr, readOnly: true}
       volumes:
       - name: app-data
         persistentVolumeClaim: {claimName: app-data}
+      - name: pay-qr
+        configMap: {name: pay-qr}
 ---
 apiVersion: v1
 kind: Service

@@ -27,7 +27,9 @@
 - HMAC 签名算法与看板 ``internal_observability_events`` 完全一致：
   ``signature = sha256_hmac(secret, f"{timestamp}.{sha256(body)}")``，头
   ``x-observability-timestamp`` / ``x-observability-signature: sha256=<hex>``；
-- eventId 在 backend_id + call_id + attempt_index 维度唯一，看板侧幂等去重；
+- eventId 在 backend_id + call_id + attempt_index 维度唯一（兜底跳的 attemptId 再加 fb<depth>:<接住的组>），看板侧幂等去重；
+- fallback 读取顺序：litellm_params.metadata / litellm_metadata 的 attempted_fallbacks →
+  成功响应 hidden header ``x-litellm-attempted-fallbacks`` → 都没有视为非兜底；
 - 任一配置缺失时推送方自动禁用（记录日志），不影响代理运行。
 
 环境变量（在 LiteLLM Proxy 部署中配置）
@@ -254,8 +256,14 @@ class ObservabilityAttemptPusher(CustomLogger):
         retry_index = attempted_retries if attempted_retries > 0 else 0
         attempt_index = attempted_retries  # Router 每次 retry 递增；首次尝试为 0
 
-        # fallback 信号：成功响应携带 x-litellm-attempted-fallbacks 头（写入 hidden params）。
-        attempted_fallbacks = self._read_fallback_header(response_obj)
+        # fallback 信号（读取顺序：metadata → 成功响应 hidden header → 无）。
+        # 1.106.4 实测：run_async_fallback 每跳都把 attempted_fallbacks / original_model_group
+        # 写进该跳的 metadata（成功、失败事件都带）；hidden header 只在成功事件、且只有
+        # chat/responses 路径带，anthropic_messages 成功事件里是 None。
+        attempted_fallbacks, original_model_group = self._read_fallback_metadata(litellm_params)
+        if attempted_fallbacks is None and status == "success":
+            attempted_fallbacks = self._read_fallback_header(response_obj)
+        is_fallback = attempted_fallbacks is not None and attempted_fallbacks > 0
 
         start_epoch = _epoch(start_time)
         end_epoch = _epoch(end_time)
@@ -263,12 +271,23 @@ class ObservabilityAttemptPusher(CustomLogger):
         if start_epoch is not None and end_epoch is not None:
             duration_ms = round(max(0.0, (end_epoch - start_epoch) * 1000), 2)
 
+        # eventId：兜底各跳与主腿共用同一个 litellm_call_id、attempted_retries 也从 0 重新数，
+        # 旧格式 `<backend>:<call>:<attempt>` 会让兜底成功事件和主腿失败事件撞同一个 id，
+        # 看板 ON CONFLICT DO NOTHING 静默丢掉后到的那条（11-01 生产 81/81 兜底请求只剩 failure）。
+        # 主腿（depth 0）保持旧格式不变；兜底跳 attemptId 追加 `:fb<depth>:<served group>`。
+        # attemptId 同理：看板 terminal_attempts 按 (trace, attempt_id) DISTINCT ON 取最后一条，
+        # 兜底跳不单独编号会把主腿 failure 覆盖掉（上游异常率少算）。
+        attempt_id = call_id or request_id
+        if is_fallback:
+            attempt_id = f"{attempt_id}:fb{attempted_fallbacks}:{model_group or actual_model or 'unknown'}"
+        event_id = f"{self._backend_id}:{attempt_id}:{attempt_index}"
+
         event: dict[str, Any] = {
-            "eventId": f"{self._backend_id}:{call_id or request_id}:{attempt_index}",
+            "eventId": event_id[:256],
             "backendId": self._backend_id,
             "traceId": trace_id,
             "requestId": request_id,
-            "attemptId": call_id or request_id,
+            "attemptId": attempt_id[:256],
             "attemptIndex": attempt_index,
             "retryIndex": retry_index,
             "requestedModelGroup": model_group,
@@ -281,14 +300,16 @@ class ObservabilityAttemptPusher(CustomLogger):
             "endedAt": _iso_utc(end_time),
             "durationMs": duration_ms,
             "isRetry": retry_index > 0,
-            # fallback 信号只能从成功响应头 x-litellm-attempted-fallbacks 读到：
-            # 经历过兜底且最终成功的请求会标记 isFallback，最终仍失败的请求
-            # 只有 failure 事件（不计入 recovered，仍计入 fallback_triggered）。
-            "isFallback": attempted_fallbacks is not None and attempted_fallbacks > 0,
+            # 兜底跳（depth>0）的成功和失败事件都标 isFallback：成功的计入 recovered，
+            # 失败的只计入 fallback_triggered（看板按 status 区分）。
+            "isFallback": is_fallback,
         }
-        if attempted_fallbacks and attempted_fallbacks > 0:
-            event["fallbackFrom"] = model_group
-            event["fallbackTo"] = actual_model or "unknown"
+        if is_fallback:
+            # metadata.model_group 在兜底跳里已被改写成实际接住的组（= SpendLogs.model_group），
+            # 原组在 original_model_group。proxy 下 litellm_params.model 恒为 None，
+            # 所以 actual_model 实际也是这个组名；from/to 同为组名才可比。
+            event["fallbackFrom"] = original_model_group or "unknown"
+            event["fallbackTo"] = model_group or actual_model or "unknown"
 
         if status == "failure" and exception is not None:
             error_code = _text(getattr(exception, "status_code", "") or getattr(exception, "code", ""), 120)
@@ -310,6 +331,28 @@ class ObservabilityAttemptPusher(CustomLogger):
 
         # 只保留白名单字段，杜绝敏感字段外泄。
         return {key: value for key, value in event.items() if key in _ALLOWED_FIELDS and value is not None and value != ""}
+
+    @staticmethod
+    def _read_fallback_metadata(litellm_params: Any) -> tuple[Optional[int], str]:
+        """从 litellm_params.metadata / litellm_metadata 读 (attempted_fallbacks, original_model_group)。
+
+        两个字段由 Router 写入，proxy 入口会剥掉客户端同名字段（litellm_pre_call_utils
+        _ROUTER_RESERVED_METADATA_FIELDS），所以可信。都没有时返回 (None, "")。
+        """
+        try:
+            if not isinstance(litellm_params, dict):
+                return None, ""
+            for name in ("metadata", "litellm_metadata"):
+                bucket = litellm_params.get(name)
+                if not isinstance(bucket, dict):
+                    continue
+                value = bucket.get("attempted_fallbacks")
+                if value is None:
+                    continue
+                return _as_int(value), _text(bucket.get("original_model_group"))
+            return None, ""
+        except Exception:
+            return None, ""
 
     @staticmethod
     def _read_fallback_header(response_obj: Any) -> Optional[int]:

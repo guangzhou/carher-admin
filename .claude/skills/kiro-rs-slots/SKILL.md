@@ -28,7 +28,7 @@ AK=$(cat ~/kiro-us-egress/.ak); curl -s -H "x-api-key: $AK" http://127.0.0.1:308
 | 项 | 值 |
 |---|---|
 | 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 **RollingUpdate 无缝换版**，内存 2Gi，grace 300s），Admin `http://10.68.13.198:30891/admin`。adminApiKey 在实例自己的 `config.json`；198 上脚本统一读 `~/kiro-us-egress/.ak`（同一个值的副本） |
-| 镜像 | **现网 `slots60`**（11-01 19:20）。各版改动和回滚注意 ⇒ `HISTORY.md`。回滚一般 `set image … <上一版>` |
+| 镜像 | **现网 `slots63`**（11-02 11:10）。各版改动和回滚注意 ⇒ `HISTORY.md`。回滚一般 `set image … <上一版>` |
 | 老实例 | deploy `kiro-rs`（:30890）。只剩少数 key 主走它；它的号池已死，别再当兜底 |
 | manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、Secret `kiro-rs-slots-bootstrap`；11-01 起挂 Secret `kiro-egress-subs`）。🔴 **仓库 yaml 的 image 是占位 `slots9`**：`kubectl apply` 前必须先改 image，否则回退 |
 | 关键配置（`config.json`） | `slotQueueTimeoutSecs=120`（单次排队上限）、`slotRequestBudgetSecs=60`（整请求预算，超了 529 交兜底）、`slotRefusalFallbackModel=claude-opus-5`；并发 起步 16 / 最小 2 / 最大 24 / 自动调；封口倍数 1.5 |
@@ -56,7 +56,7 @@ python3 ~/kiro-px-egress/kiro-slots-bench-apply.py plan.json [--apply]   # 批�
 
 规则（都踩过）：
 - 🔴 **槽名 = `<国家码>-<出口IP>`**，国家码按经代理实测的 ipinfo（`gb` 写成 `uk`）。🔴 **改槽名 = 清空这个槽的用户绑定**（绑定按名字存），名字一次起对。
-- 🔴 **「槽 N」= 页面卡片上的编号**：卡片只列生效槽，编号只数生效的；API `/slots/<index>/test` 用运行时 index（= 卡片编号 − 1）；配置表行号又是另一套。对用户只说卡片编号。
+- 🔴 **「槽 N」= 固定槽号 `no`**（slots63 起）= 该槽在配置全表里的 1-based 行号，停用别的槽不变；卡片 / 配置表 / 账户表 / 挪人下拉 / 提示都用它。API `/slots/<index>/test` 仍用运行时 index（只数生效槽，≠ no−1）。
 - 🔴 **机场 IP 会漂**：iGuge 节点「钉死」只保证用同一节点，不保证节点出口不换（10-31 两个 TW 节点漂了）。按小时巡检 `nohup setsid bash ~/kiro-egress-ip-watch.sh --rounds 20 --interval 1800 > ~/kiro-egress-watch/run.log 2>&1 &`。漂了：先停槽，再按新 IP 建新槽（不要改旧槽名）。
 - 槽测试 `POST /slots/<i>/test` 要 JSON `{"model":"claude-opus-5-5","scenario":"hello|tool"}`（不带 body ⇒ 415/422）。会花 Kiro 积分，回归别乱打。
 - 撤一个出口：Admin 停用该槽（人下个请求自动换槽）⇒ 再删 deploy/svc/netpol/secret。

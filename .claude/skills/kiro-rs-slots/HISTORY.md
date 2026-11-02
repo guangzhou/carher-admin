@@ -5,7 +5,8 @@
 
 | 版本 | 上线（北京） | 改动 | 回滚注意 |
 |---|---|---|---|
-| slots62 | **已构建未上线**（11-02 01:48，188 有 tarball） | 槽上挂「停用 / 退役 / FREE」号 ⇒ 每 30s 巡检当场换冷备号，冷备不够摘成空槽（`sweep_dead_slots`）；测试测出 402 额度用尽 ⇒ 当场退役换号（结果带 `replacedWith`）；`report_failure / report_refresh_* / report_quota_exhausted` 停号后立即巡检。🔴 仓库 0011 补丁 e2d426c5 起就含这些，**现网仍是 slots61** | 上线前先修 ui61 回归的 2 处（footer 盖住最后 8~24px、批量验活按钮初始在视口外） |
+| slots63 | 11-02 11:10 | 合并 slots62（30s 巡检把停用/退役/FREE 号从槽上换掉、测试测出 402 当场换号、report_* 停号后立即巡检）+ 排版重构：顶层标签 总览/槽位配置/账户（hash+localStorage 记忆，旧「设置」按钮删除）；总览问题条（有异常/空槽/暂不接新人/排队/额度低计数 + 只看异常 + 问题优先排序）；**固定槽号 `SlotView.no`**（= 配置全表 1-based 行号，停用不变；卡片/配置表/账户表/挪人下拉/toast 统一）；`SlotConfig.source`（iguge/self-aliyun/self-243）+ 配置表「来源」列；账户批量条常驻（未勾选置灰「先勾选账户」）；key→槽搜索；所有弹窗 Header/Body/Footer、footer `-bottom-6` 不盖内容；Badge 浅底深字 | 上线后 40s 内巡检已自动换下 1 个 TooManyRefreshFailures 的死号（槽 22 #189→#194） |
+| slots62 | 未上线（并入 slots63） | | 槽上挂「停用 / 退役 / FREE」号 ⇒ 每 30s 巡检当场换冷备号，冷备不够摘成空槽（`sweep_dead_slots`）；测试测出 402 额度用尽 ⇒ 当场退役换号（结果带 `replacedWith`）；`report_failure / report_refresh_* / report_quota_exhausted` 停号后立即巡检。🔴 仓库 0011 补丁 e2d426c5 起就含这些，**现网仍是 slots61** | 上线前先修 ui61 回归的 2 处（footer 盖住最后 8~24px、批量验活按钮初始在视口外） |
 | slots61 | 11-02 01:15 | 弹窗统一封顶视口高度、DialogBody + sticky DialogFooter；下拉菜单按可用高度滚；抽屉 max-h-dvh；槽位配置保存栏 sticky | |
 | slots60 | 11-01 19:20 | 设置 → 槽位配置表加「槽号」列（= 卡片编号，按槽名对运行时 index+1；停用显示「—」）+ 该槽现在的号 #id · 档位；可按槽号排序 | |
 | slots59 | 11-01 12:24 | 账户「批量启用/停用」`POST /credentials/disabled-batch`（在槽停用即换冷备号，冷备不够摘成空槽；启用清失败计数、去退役、补空槽；全部跳过也发请求以自愈）；单个停用同样摘空槽；交接中拒写；状态筛选「启用且不在用」；`slotEligible` 字段；「代理余额」卡片 `GET /egress/quota`（Secret `kiro-egress-subs`）| 🔴 pod template 加了 volume `egress-subs`（json patch，不是 ship）。回 slots58 及以前 `set image` 即可，volume 留着无害（optional）。整份回滚 `kubectl replace -f 198:~/kiro-rs-slots-deploy.pre-slots59-20261101T122329.json` |

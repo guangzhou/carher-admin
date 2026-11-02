@@ -61,7 +61,7 @@
    return data
  }
  
-@@ -121,5 +156,287 @@
+@@ -121,5 +156,293 @@
  // 设置 window 模式参数（立即生效并写回 config.json）
  export async function setWindowSettings(settings: WindowSettings): Promise<WindowSettings> {
    const { data } = await api.put<WindowSettings>('/config/window', settings)
@@ -90,6 +90,8 @@
 +
 +export interface SlotView {
 +  index: number
++  /** 固定槽号：在完整槽位配置（含停用）里的 1-based 位置；停用别的槽不会变 */
++  no: number
 +  name: string
 +  accountId: number | null
 +  accountEmail: string | null
@@ -111,6 +113,8 @@
 +  vipAliases: string[]
 +  vipUsers: number
 +  bench?: SlotBench | null
++  /** 出口来源（配置里填的，只展示） */
++  source?: string | null
 +}
 +
 +/** 出口测速：连 Kiro 耗时 / 下载速度 / 综合分 / 在同批出口里的综合排名（配置里填的，只展示） */
@@ -272,6 +276,8 @@
 +  acceptNew: boolean
 +  vipAliases: string[]
 +  bench?: SlotBench | null
++  /** 出口来源（只展示、不参与调度）：iguge / self-aliyun / self-243；≤32 字、仅 [a-z0-9-] */
++  source?: string | null
 +}
 +
 +export async function getSlotConfigs(): Promise<SlotConfig[]> {
@@ -384,11 +390,20 @@
            <div className="space-y-2">
              <label className="text-sm font-medium">
                JSON 格式凭据
+@@ -468,7 +468,7 @@
+               </div>
+ 
+               {/* 结果列表 */}
+-              <div className="border rounded-md divide-y max-h-[300px] overflow-y-auto">
++              <div className="border rounded-md divide-y">
+                 {results.map((result) => (
+                   <div key={result.index} className="p-3">
+                     <div className="flex items-start gap-3">
 --- a/admin-ui/src/components/batch-priority-dialog.tsx
 +++ b/admin-ui/src/components/batch-priority-dialog.tsx
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,85 @@
 +import { useState, useEffect } from 'react'
-+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
++import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 +import { Button } from '@/components/ui/button'
 +import { Input } from '@/components/ui/input'
 +
@@ -425,6 +440,7 @@
 +          <DialogTitle>批量调整优先级</DialogTitle>
 +          <DialogDescription>已选 {count} 个账户。数字越小越先用（0 最优先）；槽位模式下冷备顶号也按它挑。</DialogDescription>
 +        </DialogHeader>
++        <DialogBody>
 +        <div className="space-y-4">
 +          <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="调整方式">
 +            {([['set', '统一设为'], ['add', '在原值上加减']] as const).map(([k, label]) => (
@@ -460,6 +476,7 @@
 +            </p>
 +          )}
 +        </div>
++        </DialogBody>
 +        <DialogFooter>
 +          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={running}>取消</Button>
 +          <Button onClick={() => onSubmit(op, n)} disabled={!valid || running}>
@@ -472,15 +489,56 @@
 +}
 --- a/admin-ui/src/components/batch-verify-dialog.tsx
 +++ b/admin-ui/src/components/batch-verify-dialog.tsx
-@@ -71,7 +71,7 @@
+@@ -1,9 +1,4 @@
+-import {
+-  Dialog,
+-  DialogContent,
+-  DialogHeader,
+-  DialogTitle,
+-} from '@/components/ui/dialog'
++import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+ import { Button } from '@/components/ui/button'
+ import { Badge } from '@/components/ui/badge'
+ 
+@@ -42,7 +37,7 @@
+           <DialogTitle>批量验活</DialogTitle>
+         </DialogHeader>
+ 
+-        <div className="space-y-4 py-4">
++        <DialogBody className="space-y-4 py-1">
+           {/* 进度显示 */}
+           {verifying && (
+             <div className="space-y-2">
+@@ -71,7 +66,7 @@
  
            {/* 结果列表 */}
            {results.size > 0 && (
 -            <div className="max-h-[400px] overflow-y-auto border rounded-md p-2 space-y-1">
-+            <div className="max-h-[min(400px,calc(100dvh-18rem))] min-h-32 overflow-y-auto border rounded-md p-2 space-y-1">
++            <div className="border rounded-md p-2 space-y-1">
                {resultsArray.map((result) => (
                  <div
                    key={result.id}
+@@ -117,9 +112,9 @@
+               💡 验活过程中每次请求间隔 2 秒，防止被封号。你可以关闭此窗口，验活会在后台继续进行。
+             </p>
+           )}
+-        </div>
++        </DialogBody>
+ 
+-        <div className="flex justify-end gap-2">
++        <DialogFooter>
+           {verifying ? (
+             <>
+               <Button
+@@ -145,7 +140,7 @@
+               关闭
+             </Button>
+           )}
+-        </div>
++        </DialogFooter>
+       </DialogContent>
+     </Dialog>
+   )
 --- a/admin-ui/src/components/credential-card.tsx
 +++ b/admin-ui/src/components/credential-card.tsx
 @@ -1,12 +1,13 @@
@@ -1593,10 +1651,10 @@
 +}
 --- a/admin-ui/src/components/dashboard.tsx
 +++ b/admin-ui/src/components/dashboard.tsx
-@@ -1,22 +1,27 @@
+@@ -1,22 +1,28 @@
  import { useState, useEffect, useRef } from 'react'
 -import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2 } from 'lucide-react'
-+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, MoreVertical, Wallet, ArrowUpDown, Power, PowerOff } from 'lucide-react'
++import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, MoreVertical, Wallet, ArrowUpDown, Power, PowerOff, ChevronDown } from 'lucide-react'
  import { useQueryClient } from '@tanstack/react-query'
  import { toast } from 'sonner'
  import { storage } from '@/lib/storage'
@@ -1609,12 +1667,13 @@
 +import { CredentialDrawer } from '@/components/credential-drawer'
 +import { useQuery } from '@tanstack/react-query'
 +import { getUsageTotals } from '@/api/credentials'
-+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
++import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
  import { CredentialFilters, EMPTY_FILTERS, filterCredentials, type CredentialFilterState } from '@/components/credential-filters'
 -import { BalanceDialog } from '@/components/balance-dialog'
 +import { UsageDialog } from '@/components/usage-dialog'
  import { WindowSettingsDialog } from '@/components/window-settings-dialog'
-+import { SlotsPanel } from '@/components/slots-panel'
++import { SlotsConfigPanel, SlotsOverviewPanel } from '@/components/slots-panel'
++import { TopTabs, TOP_TABS, useTopTab } from '@/components/top-tabs'
  import { ModeSwitchDialog, MODE_INFO, type LbMode } from '@/components/mode-switch-dialog'
  import { AddCredentialDialog } from '@/components/add-credential-dialog'
  import { BatchImportDialog } from '@/components/batch-import-dialog'
@@ -1627,7 +1686,7 @@
  import { extractErrorMessage } from '@/lib/utils'
  import type { BalanceResponse } from '@/types/api'
  
-@@ -25,8 +30,10 @@
+@@ -25,8 +31,10 @@
  }
  
  export function Dashboard({ onLogout }: DashboardProps) {
@@ -1640,7 +1699,7 @@
    const [windowDialogOpen, setWindowDialogOpen] = useState(false)
    const [modeDialogOpen, setModeDialogOpen] = useState(false)
    const [addDialogOpen, setAddDialogOpen] = useState(false)
-@@ -43,10 +50,28 @@
+@@ -43,10 +51,28 @@
    const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
    const [batchRefreshing, setBatchRefreshing] = useState(false)
    const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
@@ -1670,7 +1729,22 @@
    const [darkMode, setDarkMode] = useState(() => {
      if (typeof window !== 'undefined') {
        return document.documentElement.classList.contains('dark')
-@@ -72,11 +97,43 @@
+@@ -60,6 +86,14 @@
+   const { mutate: resetFailure } = useResetFailure()
+   const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
+ 
++  // 顶层标签：只有槽位模式才有「总览 / 槽位配置」；其它模式只剩「账户」。
++  // 记下的标签（hash / localStorage）不改写，切回槽位模式时还是原来那页
++  const [tab, setTab] = useTopTab()
++  const slotsMode = loadBalancingData?.mode === 'slots'
++  const visibleTabs = slotsMode || isLoadingMode ? TOP_TABS : TOP_TABS.filter(t => t.k === 'accounts')
++  const activeTab = visibleTabs.some(t => t.k === tab) ? tab : 'accounts'
++  const noneSelected = selectedIds.size === 0
++
+   // 显示顺序：启用（当前在用置顶）→ 已禁用；组内按 lastUsedAt 倒序（最近用完/用过的在前），
+   // 从未使用的排组尾；其余保持后端的 priority 顺序（sort 是稳定的）。只影响显示，调度不变。
+   // lastUsedAt 是 RFC3339 且带 9 位小数，部分浏览器 Date.parse 不认 ⇒ 先截到毫秒
+@@ -72,11 +106,43 @@
      const rank = (c: { isCurrent: boolean; disabled: boolean }) => (c.disabled ? 2 : c.isCurrent ? 0 : 1)
      const ta = lastUsedMs(a.lastUsedAt)
      const tb = lastUsedMs(b.lastUsedAt)
@@ -1716,7 +1790,7 @@
  
    // 计算分页
    const totalPages = Math.ceil(filteredCredentials.length / itemsPerPage)
-@@ -146,11 +203,6 @@
+@@ -146,11 +212,6 @@
      document.documentElement.classList.toggle('dark')
    }
  
@@ -1728,7 +1802,7 @@
    const handleRefresh = () => {
      refetch()
      toast.success('已刷新凭据列表')
-@@ -177,6 +229,35 @@
+@@ -177,6 +238,35 @@
      setSelectedIds(new Set())
    }
  
@@ -1764,7 +1838,7 @@
    // 批量删除（仅删除已禁用项）
    const handleBatchDelete = async () => {
      if (selectedIds.size === 0) {
-@@ -234,6 +315,50 @@
+@@ -234,6 +324,50 @@
      deselectAll()
    }
  
@@ -1815,7 +1889,7 @@
    // 批量恢复异常
    const handleBatchResetFailure = async () => {
      if (selectedIds.size === 0) {
-@@ -327,6 +452,47 @@
+@@ -327,6 +461,47 @@
      deselectAll()
    }
  
@@ -1863,7 +1937,7 @@
    // 一键清除所有已禁用凭据
    const handleClearAll = async () => {
      if (!data?.credentials || data.credentials.length === 0) {
-@@ -377,68 +543,44 @@
+@@ -377,68 +552,44 @@
    }
  
    // 查询当前页凭据信息（逐个查询，避免瞬时并发）
@@ -1960,7 +2034,7 @@
    const handleBatchVerify = async () => {
      if (selectedIds.size === 0) {
        toast.error('请先选择要验活的凭据')
-@@ -562,169 +704,108 @@
+@@ -562,171 +713,155 @@
      <div className="min-h-screen bg-background">
        {/* 顶部导航 */}
        <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -1968,7 +2042,8 @@
 +        <div className="mx-auto flex h-14 max-w-[1600px] items-center justify-between px-4 md:px-6">
            <div className="flex items-center gap-2">
              <Server className="h-5 w-5" />
-             <span className="font-semibold">Kiro Admin</span>
+-            <span className="font-semibold">Kiro Admin</span>
++            <span className="whitespace-nowrap font-semibold">Kiro Admin</span>
            </div>
 -          <div className="flex items-center gap-2">
 -            <Button
@@ -1980,7 +2055,7 @@
 -            >
 -              {isLoadingMode ? '加载中...' : `调度：${modeLabel(loadBalancingData?.mode)}`}
 +          <div className="flex items-center gap-1.5">
-+            <Button variant="outline" size="sm" onClick={() => setModeDialogOpen(true)} disabled={isLoadingMode} title="切换调度模式">
++            <Button variant="outline" size="sm" className="max-w-[42vw] sm:max-w-none" onClick={() => setModeDialogOpen(true)} disabled={isLoadingMode} title="切换调度模式">
 +              {isLoadingMode ? '加载中…' : modeLabel(loadBalancingData?.mode)}
              </Button>
 -            <Button
@@ -2020,7 +2095,7 @@
          </div>
        </header>
  
-       {/* 主内容 */}
+-      {/* 主内容 */}
 -      <main className="container mx-auto px-4 md:px-8 py-6">
 -        {/* 统计卡片 */}
 -        <div className="grid gap-4 md:grid-cols-3 mb-6">
@@ -2057,12 +2132,37 @@
 -              </div>
 -            </CardContent>
 -          </Card>
--        </div>
--
-+      <main className="mx-auto max-w-[1600px] space-y-8 px-4 py-6 md:px-6">
-+        <SlotsPanel />
++      {/* 顶层标签：总览 / 槽位配置 / 账户（非槽位模式只剩账户） */}
++      <div className="sticky top-14 z-40 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
++        <div className="mx-auto flex max-w-[1600px] items-end justify-between gap-3 px-4 md:px-6">
++          <TopTabs tab={activeTab} onChange={setTab} tabs={visibleTabs} />
++          {!slotsMode && !isLoadingMode && (
++            <span className="hidden pb-2.5 text-xs text-muted-foreground sm:inline">
++              当前是「{modeLabel(loadBalancingData?.mode)}」模式，没有槽位，总览 / 槽位配置已隐藏
++            </span>
++          )}
+         </div>
++      </div>
+ 
++      {/* 主内容 */}
++      <main className="mx-auto max-w-[1600px] px-4 py-6 md:px-6">
++        {!slotsMode && !isLoadingMode && (
++          <p className="mb-4 rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground sm:hidden">
++            当前是「{modeLabel(loadBalancingData?.mode)}」模式，没有槽位，总览 / 槽位配置已隐藏（右上角可切换调度模式）
++          </p>
++        )}
++        {activeTab === 'overview' && (
++          <div role="tabpanel" id="panel-overview" aria-labelledby="tab-overview">
++            <SlotsOverviewPanel />
++          </div>
++        )}
++        {activeTab === 'config' && (
++          <div role="tabpanel" id="panel-config" aria-labelledby="tab-config">
++            <SlotsConfigPanel />
++          </div>
++        )}
          {/* 凭据列表 */}
-         <div className="space-y-4">
+-        <div className="space-y-4">
 -          <div className="flex items-center justify-between">
 -            <div className="flex items-center gap-4">
 -              <h2 className="text-xl font-semibold">凭据管理</h2>
@@ -2074,6 +2174,8 @@
 -                  </Button>
 -                </div>
 -              )}
++        {activeTab === 'accounts' && (
++        <section role="tabpanel" id="panel-accounts" aria-labelledby="tab-accounts" className="space-y-4">
 +          <div className="flex flex-wrap items-center justify-between gap-3">
 +            <div className="flex flex-wrap items-center gap-3">
 +              <h2 className="text-lg font-semibold">账户</h2>
@@ -2083,8 +2185,7 @@
 +              </span>
              </div>
 -            <div className="flex gap-2">
-+            <div className="flex flex-wrap items-center gap-2">
-               {selectedIds.size > 0 && (
+-              {selectedIds.size > 0 && (
 -                <>
 -                  <Button onClick={handleBatchVerify} size="sm" variant="outline">
 -                    <CheckCircle2 className="h-4 w-4 mr-2" />
@@ -2114,29 +2215,8 @@
 -                    批量删除
 -                  </Button>
 -                </>
-+                <DropdownMenu>
-+                  <DropdownMenuTrigger asChild>
-+                    <Button size="sm" variant="secondary">已选 {selectedIds.size} 个 · 批量操作</Button>
-+                  </DropdownMenuTrigger>
-+                  <DropdownMenuContent>
-+                    <DropdownMenuItem onSelect={() => handleBatchSetDisabled(false)} disabled={batchToggling}><Power className="h-4 w-4" />批量启用</DropdownMenuItem>
-+                    <DropdownMenuItem onSelect={() => handleBatchSetDisabled(true)} disabled={batchToggling}><PowerOff className="h-4 w-4" />批量停用</DropdownMenuItem>
-+                    <DropdownMenuSeparator />
-+                    <DropdownMenuItem onSelect={handleBatchVerify}><CheckCircle2 className="h-4 w-4" />批量验活</DropdownMenuItem>
-+                    <DropdownMenuItem onSelect={handleBatchForceRefresh} disabled={batchRefreshing}>
-+                      <RefreshCw className="h-4 w-4" />{batchRefreshing ? `刷新中 ${batchRefreshProgress.current}/${batchRefreshProgress.total}` : '批量刷新 Token'}
-+                    </DropdownMenuItem>
-+                    <DropdownMenuItem onSelect={() => setPriorityDialogOpen(true)}><ArrowUpDown className="h-4 w-4" />批量调整优先级</DropdownMenuItem>
-+                    <DropdownMenuItem onSelect={handleBatchResetFailure}><RotateCcw className="h-4 w-4" />清零失败次数</DropdownMenuItem>
-+                    <DropdownMenuSeparator />
-+                    <DropdownMenuItem danger onSelect={handleBatchDelete} disabled={selectedDisabledCount === 0}>
-+                      <Trash2 className="h-4 w-4" />删除已禁用的（{selectedDisabledCount}）
-+                    </DropdownMenuItem>
-+                    <DropdownMenuSeparator />
-+                    <DropdownMenuItem onSelect={deselectAll}>取消选择</DropdownMenuItem>
-+                  </DropdownMenuContent>
-+                </DropdownMenu>
-               )}
+-              )}
++            <div className="flex flex-wrap items-center gap-2">
                {verifying && !verifyDialogOpen && (
                  <Button onClick={() => setVerifyDialogOpen(true)} size="sm" variant="secondary">
 -                  <CheckCircle2 className="h-4 w-4 mr-2 animate-spin" />
@@ -2184,15 +2264,6 @@
 -              <Button onClick={() => setKamImportDialogOpen(true)} size="sm" variant="outline">
 -                <FileUp className="h-4 w-4 mr-2" />
 -                Kiro Account Manager 导入
--              </Button>
--              <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline">
--                <Upload className="h-4 w-4 mr-2" />
--                批量导入
--              </Button>
--              <Button onClick={() => setAddDialogOpen(true)} size="sm">
--                <Plus className="h-4 w-4 mr-2" />
--                添加凭据
--              </Button>
 +              <DropdownMenu>
 +                <DropdownMenuTrigger asChild>
 +                  <Button size="sm" variant="outline"><Upload className="mr-1.5 h-4 w-4" />导入</Button>
@@ -2207,10 +2278,62 @@
 +                </DropdownMenuContent>
 +              </DropdownMenu>
 +              <Button onClick={() => setAddDialogOpen(true)} size="sm"><Plus className="mr-1.5 h-4 w-4" />添加账户</Button>
++            </div>
++          </div>
++          {/* 批量操作条：一直显示；没勾选时按钮置灰并提示「先勾选账户」 */}
++          {(data?.credentials.length || 0) > 0 && (
++            <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card px-3 py-2" role="toolbar" aria-label="批量操作">
++              <span className="min-w-[5.5rem] text-sm tabular-nums" aria-live="polite">
++                已选 <span className={selectedIds.size ? 'font-semibold text-foreground' : 'text-muted-foreground'}>{selectedIds.size}</span> 个
++              </span>
++              <Button size="sm" variant="outline" disabled={noneSelected || batchToggling} onClick={() => handleBatchSetDisabled(false)} title={noneSelected ? '先勾选账户' : '启用选中的账户（进冷备池，有空槽马上补上）'}>
++                <Power className="h-4 w-4 text-emerald-600" />批量启用
+               </Button>
+-              <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline">
+-                <Upload className="h-4 w-4 mr-2" />
+-                批量导入
++              <Button size="sm" variant="outline" disabled={noneSelected || batchToggling} onClick={() => handleBatchSetDisabled(true)} title={noneSelected ? '先勾选账户' : '停用选中的账户（在槽上的会立刻换冷备号）'}>
++                <PowerOff className="h-4 w-4 text-red-600" />批量停用
+               </Button>
+-              <Button onClick={() => setAddDialogOpen(true)} size="sm">
+-                <Plus className="h-4 w-4 mr-2" />
+-                添加凭据
+-              </Button>
++              <DropdownMenu>
++                <DropdownMenuTrigger asChild>
++                  <Button size="sm" variant="secondary">更多批量操作<ChevronDown className="h-4 w-4" /></Button>
++                </DropdownMenuTrigger>
++                <DropdownMenuContent align="start">
++                  {noneSelected && <DropdownMenuLabel>先勾选账户（表格左侧复选框）</DropdownMenuLabel>}
++                  <DropdownMenuItem onSelect={() => handleBatchSetDisabled(false)} disabled={noneSelected || batchToggling}><Power className="h-4 w-4" />批量启用</DropdownMenuItem>
++                  <DropdownMenuItem onSelect={() => handleBatchSetDisabled(true)} disabled={noneSelected || batchToggling}><PowerOff className="h-4 w-4" />批量停用</DropdownMenuItem>
++                  <DropdownMenuSeparator />
++                  <DropdownMenuItem onSelect={handleBatchVerify} disabled={noneSelected}><CheckCircle2 className="h-4 w-4" />批量验活</DropdownMenuItem>
++                  <DropdownMenuItem onSelect={handleBatchForceRefresh} disabled={noneSelected || batchRefreshing}>
++                    <RefreshCw className="h-4 w-4" />{batchRefreshing ? `刷新中 ${batchRefreshProgress.current}/${batchRefreshProgress.total}` : '批量刷新 Token'}
++                  </DropdownMenuItem>
++                  <DropdownMenuItem onSelect={() => setPriorityDialogOpen(true)} disabled={noneSelected}><ArrowUpDown className="h-4 w-4" />批量调整优先级</DropdownMenuItem>
++                  <DropdownMenuItem onSelect={handleBatchResetFailure} disabled={noneSelected}><RotateCcw className="h-4 w-4" />清零失败次数</DropdownMenuItem>
++                  <DropdownMenuItem onSelect={handleQuerySelectedBalances} disabled={noneSelected || queryingInfo}><Wallet className="h-4 w-4" />查已选的额度</DropdownMenuItem>
++                  <DropdownMenuSeparator />
++                  <DropdownMenuItem danger onSelect={handleBatchDelete} disabled={selectedDisabledCount === 0}>
++                    <Trash2 className="h-4 w-4" />删除已禁用的（{selectedDisabledCount}）
++                  </DropdownMenuItem>
++                  <DropdownMenuSeparator />
++                  <DropdownMenuItem onSelect={deselectAll} disabled={noneSelected}>取消选择</DropdownMenuItem>
++                </DropdownMenuContent>
++              </DropdownMenu>
++              {!noneSelected && (
++                <Button size="sm" variant="ghost" onClick={deselectAll}>取消选择</Button>
++              )}
++              {noneSelected && <span className="text-xs text-muted-foreground">先在表格左侧勾选账户，再批量启用 / 停用</span>}
              </div>
-           </div>
+-          </div>
++          )}
            {data?.credentials.length === 0 ? (
-@@ -748,23 +829,25 @@
+             <Card>
+               <CardContent className="py-8 text-center text-muted-foreground">
+@@ -748,23 +883,25 @@
                    </CardContent>
                  </Card>
                )}
@@ -2251,7 +2374,7 @@
                    <Button
                      variant="outline"
                      size="sm"
-@@ -780,10 +863,21 @@
+@@ -780,24 +917,44 @@
                      variant="outline"
                      size="sm"
                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
@@ -2274,8 +2397,10 @@
                  </div>
                )}
              </>
-@@ -791,13 +885,21 @@
-         </div>
+           )}
+-        </div>
++        </section>
++        )}
        </main>
  
 -      {/* 余额对话框 */}
@@ -2301,7 +2426,7 @@
        <WindowSettingsDialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen} />
  
        <ModeSwitchDialog open={modeDialogOpen} onOpenChange={setModeDialogOpen} />
-@@ -806,6 +908,15 @@
+@@ -806,6 +963,15 @@
        <AddCredentialDialog
          open={addDialogOpen}
          onOpenChange={setAddDialogOpen}
@@ -2409,10 +2534,10 @@
 +}
 --- a/admin-ui/src/components/empty-events-dialog.tsx
 +++ b/admin-ui/src/components/empty-events-dialog.tsx
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,108 @@
 +import { useState } from 'react'
 +import { useQuery } from '@tanstack/react-query'
-+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
++import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 +import { getEmptyEvents } from '@/api/credentials'
 +import { extractErrorMessage } from '@/lib/utils'
 +
@@ -2456,6 +2581,7 @@
 +            上游返回 200 但没有任何文字和工具调用。「key」是 198 LiteLLM 的 key 别名。只保留最近 {data?.keep ?? 500} 条，kiro.rs 重启后清空（与卡片计数同口径）。
 +          </DialogDescription>
 +        </DialogHeader>
++        <DialogBody>
 +        <label className='flex items-center gap-2 text-sm text-muted-foreground'>
 +          <input type='checkbox' className='h-4 w-4 accent-primary' checked={onlyReturned} onChange={(e) => setOnlyReturned(e.target.checked)} />
 +          只看原样返回给用户的（没救回来）
@@ -2490,7 +2616,7 @@
 +            </div>
 +            <div>
 +              <div className='mb-1 text-sm font-medium'>逐条（最新在前，{items.length} 条）</div>
-+              <div className='max-h-[min(20rem,calc(100dvh-20rem))] min-h-32 overflow-auto rounded-md border'>
++              <div className='overflow-x-auto rounded-md border'>
 +                <table className='w-full text-sm'>
 +                  <thead className='sticky top-0 bg-muted text-xs text-muted-foreground'>
 +                    <tr><th className={TH}>时间</th><th className={TH}>key</th><th className={TH}>模型</th><th className={TH}>结果</th></tr>
@@ -2512,6 +2638,7 @@
 +            </div>
 +          </div>
 +        ))}
++        </DialogBody>
 +      </DialogContent>
 +    </Dialog>
 +  )
@@ -2533,9 +2660,30 @@
            <div className="space-y-2">
              <label className="text-sm font-medium">KAM 导出 JSON</label>
              <textarea
+@@ -482,7 +482,7 @@
+                 </span>
+               </div>
+ 
+-              <div className="border rounded-md divide-y max-h-[300px] overflow-y-auto">
++              <div className="border rounded-md divide-y">
+                 {results.map((result) => (
+                   <div key={result.index} className="p-3">
+                     <div className="flex items-start gap-3">
 --- a/admin-ui/src/components/mode-switch-dialog.tsx
 +++ b/admin-ui/src/components/mode-switch-dialog.tsx
-@@ -12,13 +12,17 @@
+@@ -1,18 +1,11 @@
+ import { useEffect, useState } from 'react'
+ import { toast } from 'sonner'
+-import {
+-  Dialog,
+-  DialogContent,
+-  DialogDescription,
+-  DialogFooter,
+-  DialogHeader,
+-  DialogTitle,
+-} from '@/components/ui/dialog'
++import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+ import { Button } from '@/components/ui/button'
  import { useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
  import { extractErrorMessage } from '@/lib/utils'
  
@@ -2544,16 +2692,33 @@
  
  export const MODE_INFO: Record<LbMode, { label: string; desc: string; warn?: string }> = {
    priority: { label: '优先级模式', desc: '只用优先级最高的 1 个号，用完额度再换下一个。' },
-   window: {
+@@ -20,6 +13,10 @@
      label: '小窗口轮换',
      desc: '只让优先级最前的几个号同时在线（数量在「窗口设置」里调），同一会话尽量固定同一个号；被限流就立刻换号，其余号冷备。',
-+  },
+   },
 +  slots: {
 +    label: '槽位模式（一号一 IP）',
 +    desc: '固定几个槽位，每槽 1 个号 + 1 个固定出口 IP；用户按 key 固定在一个槽，不跨号。限流时排队等，不换号；号额度用完或 opus 被限制才换新号。',
-   },
++  },
    balanced: {
      label: '均衡负载',
+     desc: '全池所有启用的号一起分摊请求。',
+@@ -61,6 +58,7 @@
+           <DialogTitle>切换调度模式</DialogTitle>
+           <DialogDescription>当前：{MODE_INFO[current].label}。立即对线上所有请求生效。</DialogDescription>
+         </DialogHeader>
++        <DialogBody>
+         <div className="space-y-2 py-2" role="radiogroup" aria-label="调度模式">
+           {(Object.keys(MODE_INFO) as LbMode[]).map((m) => (
+             <label
+@@ -90,6 +88,7 @@
+             将从 <b>{MODE_INFO[current].label}</b> 切换为 <b>{MODE_INFO[target].label}</b>
+           </p>
+         )}
++        </DialogBody>
+         <DialogFooter>
+           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+           <Button onClick={handleConfirm} disabled={target === current || isPending}>
 --- a/admin-ui/src/components/rebalance-dialog.tsx
 +++ b/admin-ui/src/components/rebalance-dialog.tsx
 @@ -0,0 +1,125 @@
@@ -2684,7 +2849,7 @@
 +}
 --- a/admin-ui/src/components/slot-config-editor.tsx
 +++ b/admin-ui/src/components/slot-config-editor.tsx
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,377 @@
 +import { useEffect, useMemo, useRef, useState } from 'react'
 +import { toast } from 'sonner'
 +import { ChevronDown, ChevronUp, ChevronsUpDown } from 'lucide-react'
@@ -2703,19 +2868,29 @@
 +// 排序只改显示顺序：保存时按原顺序写回（槽的编号 / 调度顺序不因为排序而变）。
 +const same = (a?: SlotConfig, b?: SlotConfig) => JSON.stringify(a) === JSON.stringify(b)
 +
-+type SortKey = 'order' | 'slot' | 'enabled' | 'name' | 'weight' | 'rank' | 'kiro' | 'down'
++type SortKey = 'order' | 'slot' | 'enabled' | 'name' | 'source' | 'weight' | 'rank' | 'kiro' | 'down'
 +interface SortState { key: SortKey; dir: 'asc' | 'desc' }
 +// 第一次点：排名 / 连 Kiro 先看最好的（升序），下载 / 权重先看最大的（降序），生效先看开着的
-+const FIRST_DIR: Record<SortKey, 'asc' | 'desc'> = { order: 'asc', slot: 'asc', enabled: 'desc', name: 'asc', weight: 'desc', rank: 'asc', kiro: 'asc', down: 'desc' }
-+const SORT_LABEL: Record<SortKey, string> = { order: '原顺序', slot: '槽号', enabled: '生效', name: '槽位名', weight: '权重', rank: '综合排名', kiro: '连 Kiro', down: '下载' }
++const FIRST_DIR: Record<SortKey, 'asc' | 'desc'> = { order: 'asc', slot: 'asc', enabled: 'desc', name: 'asc', source: 'asc', weight: 'desc', rank: 'asc', kiro: 'asc', down: 'desc' }
++const SORT_LABEL: Record<SortKey, string> = { order: '原顺序', slot: '槽号', enabled: '生效', name: '槽位名', source: '来源', weight: '权重', rank: '综合排名', kiro: '连 Kiro', down: '下载' }
 +
-+// 没测速的行排在最后（不管升降序）
-+function sortValue(r: SlotConfig, k: SortKey, slotNo: (name: string) => number | null): number | string | null {
++// 出口来源：只展示、不参与调度。值 ≤32 字、仅 [a-z0-9-]（后端校验）
++const SOURCES: { value: string; label: string }[] = [
++  { value: 'iguge', label: 'iGuge' },
++  { value: 'self-aliyun', label: '自建·阿里云' },
++  { value: 'self-243', label: '自建·243' },
++]
++const sourceLabel = (v?: string | null) => (v ? SOURCES.find((x) => x.value === v)?.label ?? v : '')
++
++// 没测速 / 没填来源的行排在最后（不管升降序）
++// 槽号 = 行号 + 1（固定，含停用的行）：和首页卡片、账号列表里的槽号一致
++function sortValue(r: SlotConfig, k: SortKey, i: number): number | string | null {
 +  switch (k) {
 +    case 'order': return null
-+    case 'slot': return slotNo(r.name)
++    case 'slot': return i + 1
 +    case 'enabled': return r.enabled ? 1 : 0
 +    case 'name': return r.name.toLowerCase()
++    case 'source': return r.source ? sourceLabel(r.source) : null
 +    case 'weight': return r.weight
 +    case 'rank': return r.bench ? r.bench.rank : null
 +    case 'kiro': return r.bench ? r.bench.kiroSecs : null
@@ -2740,14 +2915,16 @@
 +export function SlotConfigEditor() {
 +  const { data } = useSlotConfigs()
 +  const { data: live } = useSlots()
-+  // 槽号 = 首页卡片上的编号（只数生效的槽，= 运行时 index + 1）；停用槽没有槽号。按槽名对，不按行号
++  // 槽号 = 行号 + 1（固定，停用的行也有号，和首页卡片 / 账号列表的 no 一致）。
++  // 槽上现在的号按槽名对到线上 /slots（不按行号：未保存的增删改名会让行号和线上暂时对不上）
 +  const liveByName = useMemo(() => new Map((live?.slots || []).map((s) => [s.name, s])), [live])
-+  const slotNoOf = (name: string) => { const x = liveByName.get(name.trim()); return x ? x.index + 1 : null }
 +  const { mutate, isPending } = useSetSlotConfigs()
 +  const [rows, setRows] = useState<SlotConfig[]>([])
 +  // 专属名单输入框原文（边打字边解析，逗号不能被吃掉）；按行的原始下标记
 +  const [vipText, setVipText] = useState<Record<number, string>>({})
 +  const [sort, setSort] = useState<SortState>({ key: 'order', dir: 'asc' })
++  // 按来源筛选（只影响显示）：'' = 全部，'-' = 没填
++  const [srcFilter, setSrcFilter] = useState('')
 +  // 勾选按行（原始下标）记：同名 / 改名 / 空名行都不会勾错（review #4）；删行时下标跟着前移
 +  const [picked, setPicked] = useState<Set<number>>(new Set())
 +  // 排序冻结：只在点排序时按当时的数据排一次，之后编辑（改名 / 权重 / 拨开关）不让行跳走（review #5）
@@ -2781,16 +2958,19 @@
 +    if (sort.key === 'order') return sort.dir === 'asc' ? idx : idx.reverse()
 +    const sign = sort.dir === 'asc' ? 1 : -1
 +    return idx.sort((a, b) => {
-+      const va = sortValue(rows[a], sort.key, slotNoOf), vb = sortValue(rows[b], sort.key, slotNoOf)
++      const va = sortValue(rows[a], sort.key, a), vb = sortValue(rows[b], sort.key, b)
 +      if (va === null || vb === null) return va === null && vb === null ? a - b : va === null ? 1 : -1
 +      const c = typeof va === 'number' && typeof vb === 'number' ? va - vb : String(va).localeCompare(String(vb), 'zh-CN')
 +      return c !== 0 ? c * sign : a - b
 +    })
 +    // eslint-disable-next-line react-hooks/exhaustive-deps
-+  }, [rows, sort, liveByName])
++  }, [rows, sort])
 +  // 新加的行（不在冻结顺序里）排到最后
 +  sortedRef.current = sorted
-+  const view = frozen ? [...frozen.filter((i) => i < rows.length), ...rows.map((_, i) => i).filter((i) => !frozen.includes(i))] : sorted
++  const ordered = frozen ? [...frozen.filter((i) => i < rows.length), ...rows.map((_, i) => i).filter((i) => !frozen.includes(i))] : sorted
++  const view = srcFilter ? ordered.filter((i) => (srcFilter === '-' ? !rows[i].source : rows[i].source === srcFilter)) : ordered
++  // 筛选下拉：预设 + 配置里出现过的其它值
++  const srcOptions = [...SOURCES, ...[...new Set(rows.map((r) => r.source).filter((v): v is string => !!v && !SOURCES.some((x) => x.value === v)))].map((v) => ({ value: v, label: v }))]
 +  useEffect(() => { setFrozen(null) }, [sort])
 +  const onSort = (k: SortKey) => setSort((s) => (s.key !== k ? { key: k, dir: FIRST_DIR[k] }
 +    : s.dir === FIRST_DIR[k] ? { key: k, dir: FIRST_DIR[k] === 'asc' ? 'desc' : 'asc' } : { key: 'order', dir: 'asc' }))
@@ -2872,6 +3052,19 @@
 +        <Button size='sm' variant='outline' className='h-8' disabled={!pickedIdx.length} onClick={() => bulkEnable(false)}>批量停用</Button>
 +        {pickedIdx.length > 0 && <Button size='sm' variant='ghost' className='h-8' onClick={() => setAll(false)}>取消选择</Button>}
 +        <label className='ml-auto flex items-center gap-2 text-xs text-muted-foreground'>
++          来源
++          <select
++            aria-label='按来源筛选'
++            className='h-8 rounded-md border bg-background px-2 text-sm text-foreground'
++            value={srcFilter}
++            onChange={(e) => setSrcFilter(e.target.value)}
++          >
++            <option value=''>全部</option>
++            {srcOptions.map((x) => <option key={x.value} value={x.value}>{x.label}</option>)}
++            <option value='-'>（没填）</option>
++          </select>
++        </label>
++        <label className='flex items-center gap-2 text-xs text-muted-foreground'>
 +          排序
 +          <select
 +            aria-label='排序方式'
@@ -2880,7 +3073,9 @@
 +            onChange={(e) => { const [k, d] = e.target.value.split(':') as [SortKey, 'asc' | 'desc']; setSort({ key: k, dir: d }) }}
 +          >
 +            <option value='order:asc'>原顺序</option>
-+            <option value='slot:asc'>槽号 小→大（停用的在后）</option>
++            <option value='slot:asc'>槽号 小→大</option>
++            <option value='slot:desc'>槽号 大→小</option>
++            <option value='source:asc'>来源</option>
 +            <option value='rank:asc'>综合排名 好→差</option>
 +            <option value='rank:desc'>综合排名 差→好</option>
 +            <option value='kiro:asc'>连 Kiro 快→慢</option>
@@ -2893,7 +3088,7 @@
 +            <option value='weight:asc'>权重 小→大</option>
 +            <option value='name:asc'>槽位名 A→Z</option>
 +            <option value='name:desc'>槽位名 Z→A</option>
-+            {!['order:asc', 'slot:asc', 'rank:asc', 'rank:desc', 'kiro:asc', 'kiro:desc', 'down:desc', 'down:asc', 'enabled:desc', 'enabled:asc', 'weight:desc', 'weight:asc', 'name:asc', 'name:desc'].includes(`${sort.key}:${sort.dir}`) && (
++            {!['order:asc', 'slot:asc', 'slot:desc', 'source:asc', 'rank:asc', 'rank:desc', 'kiro:asc', 'kiro:desc', 'down:desc', 'down:asc', 'enabled:desc', 'enabled:asc', 'weight:desc', 'weight:asc', 'name:asc', 'name:desc'].includes(`${sort.key}:${sort.dir}`) && (
 +              <option value={`${sort.key}:${sort.dir}`}>{SORT_LABEL[sort.key]} {sort.dir === 'asc' ? '升序' : '降序'}</option>
 +            )}
 +          </select>
@@ -2906,9 +3101,10 @@
 +          <thead className='bg-muted/50 text-xs text-muted-foreground'>
 +            <tr>
 +              <th className='w-10 px-3 py-2'><Checkbox checked={allPicked ? true : pickedIdx.length ? 'indeterminate' : false} onCheckedChange={(v) => setAll(!!v)} aria-label='全选' /></th>
-+              <SortTh k='slot' label='槽号' sort={sort} onSort={onSort} className='w-16' title='和首页卡片上的编号一致（只数生效的槽）；停用的槽没有槽号。下面一行是这个槽现在上的号' />
++              <SortTh k='slot' label='槽号' sort={sort} onSort={onSort} className='w-16' title='固定槽号 = 这张表里的行号（停用的也占号，停用 / 启用别的槽不会让号变），和首页卡片、账号列表一致。下面一行是这个槽现在上的号' />
 +              <SortTh k='enabled' label='生效' sort={sort} onSort={onSort} className='w-24' />
 +              <SortTh k='name' label='槽位名' sort={sort} onSort={onSort} />
++              <SortTh k='source' label='来源' sort={sort} onSort={onSort} title='出口是哪来的（只展示，不影响调度）' />
 +              <th className='px-3 py-2 text-left font-medium'>出口代理</th>
 +              <th className='px-3 py-2 text-left font-medium'>用户名</th>
 +              <th className='px-3 py-2 text-left font-medium'>密码</th>
@@ -2929,13 +3125,16 @@
 +                  </td>
 +                  <td className='px-3 py-2 whitespace-nowrap'>
 +                    {(() => {
-+                      const x = liveByName.get(r.name.trim())
-+                      if (!x) return <span className='text-muted-foreground' title={r.enabled ? '保存后才分配槽号' : '停用的槽没有槽号'}>—</span>
++                      const x = r.enabled ? liveByName.get(r.name.trim()) : undefined
 +                      return (
 +                        <div className='flex flex-col items-start gap-0.5'>
-+                          <SlotNo n={x.index + 1} size='sm' />
-+                          <span className='text-[11px] text-muted-foreground' title={x.accountEmail || ''}>
-+                            {x.accountId ? `#${x.accountId}${x.accountTier ? ` · ${x.accountTier.replace(/^KIRO\s+/i, '')}` : ''}` : '空槽'}
++                          <span className={r.enabled ? '' : 'opacity-40 grayscale'} title={r.enabled ? undefined : '停用的槽也占这个号'}>
++                            <SlotNo n={i + 1} size='sm' />
++                          </span>
++                          <span className='text-[11px] text-muted-foreground' title={x?.accountEmail || ''}>
++                            {!r.enabled ? '停用'
++                              : !x ? '保存后上号'
++                                : x.accountId ? `#${x.accountId}${x.accountTier ? ` · ${x.accountTier.replace(/^KIRO\s+/i, '')}` : ''}` : '空槽'}
 +                          </span>
 +                        </div>
 +                      )
@@ -2948,6 +3147,19 @@
 +                    </div>
 +                  </td>
 +                  <td className='min-w-36 px-3 py-2'>{cell(i, 'name', '槽位名')}</td>
++                  <td className='px-3 py-2'>
++                    <select
++                      aria-label={`${r.name || '新槽位'} 来源`}
++                      className='h-8 rounded-md border bg-background px-2 text-sm text-foreground'
++                      value={r.source || ''}
++                      // 选「（空）」= 去掉字段（undefined 不进 JSON，和服务端没填时一致，不算改动）
++                      onChange={(e) => set(i, { source: e.target.value || undefined })}
++                    >
++                      <option value=''>（空）</option>
++                      {SOURCES.map((x) => <option key={x.value} value={x.value}>{x.label}</option>)}
++                      {r.source && !SOURCES.some((x) => x.value === r.source) && <option value={r.source}>{r.source}</option>}
++                    </select>
++                  </td>
 +                  <td className='min-w-56 px-3 py-2'>{cell(i, 'proxyUrl', 'http://IP:端口')}</td>
 +                  <td className='min-w-28 px-3 py-2'>{cell(i, 'proxyUsername', '用户名')}</td>
 +                  <td className='min-w-28 px-3 py-2'>{cell(i, 'proxyPassword', '密码', 'password')}</td>
@@ -2994,8 +3206,11 @@
 +                </tr>
 +              )
 +            })}
++            {rows.length > 0 && view.length === 0 && (
++              <tr><td colSpan={13} className='px-3 py-6 text-center text-muted-foreground'>没有这个来源的槽位</td></tr>
++            )}
 +            {rows.length === 0 && (
-+              <tr><td colSpan={12} className='px-3 py-6 text-center text-muted-foreground'>还没有槽位</td></tr>
++              <tr><td colSpan={13} className='px-3 py-6 text-center text-muted-foreground'>还没有槽位</td></tr>
 +            )}
 +          </tbody>
 +        </table>
@@ -3045,10 +3260,170 @@
 +  )
 +}
 +
+--- a/admin-ui/src/components/slot-key-search.tsx
++++ b/admin-ui/src/components/slot-key-search.tsx
+@@ -0,0 +1,95 @@
++import { useEffect, useMemo, useState } from 'react'
++import { useQuery } from '@tanstack/react-query'
++import { Search, X } from 'lucide-react'
++import { Input } from '@/components/ui/input'
++import { getSlotUsers } from '@/api/credentials'
++import type { SlotView } from '@/api/credentials'
++import { SlotNo } from '@/components/credential-table'
++import { SlotUsersDialog } from '@/components/slot-users-dialog'
++import { slotNo } from '@/components/slot-status'
++import { extractErrorMessage } from '@/lib/utils'
++
++const MAX_SHOWN = 20
++
++// 「这把 key 在哪个槽」：输入别名或 hash 片段 ⇒ 列出命中的 key、槽号、槽名、24h 请求；点一条打开该槽的 key 列表
++export function SlotKeySearch({ slots }: { slots: SlotView[] }) {
++  const [text, setText] = useState('')
++  const [q, setQ] = useState('')
++  const [openSlot, setOpenSlot] = useState<string | null>(null)
++  useEffect(() => {
++    const t = setTimeout(() => setQ(text.trim().toLowerCase()), 300)
++    return () => clearTimeout(t)
++  }, [text])
++  // 只有框里有字才拉；全量名单缓存 30 秒
++  const { data, isFetching, error } = useQuery({
++    queryKey: ['slotUsers', null],
++    queryFn: () => getSlotUsers(null),
++    enabled: q !== '',
++    staleTime: 30000,
++  })
++  const byName = useMemo(() => new Map(slots.map((s) => [s.name, s])), [slots])
++  const hits = useMemo(() => {
++    if (!q || !data) return []
++    return data.items.filter((u) => (u.keyAlias || '').toLowerCase().includes(q) || u.keyHash.toLowerCase().includes(q))
++  }, [q, data])
++  const show = q !== ''
++  return (
++    <div className='relative w-full sm:w-80'>
++      <Search className='pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground' aria-hidden='true' />
++      <Input
++        value={text}
++        onChange={(e) => setText(e.target.value)}
++        onKeyDown={(e) => { if (e.key === 'Escape') setText('') }}
++        placeholder='查 key 在哪个槽：别名或 hash 片段'
++        aria-label='查 key 在哪个槽'
++        aria-controls='slot-key-search-results'
++        className='h-9 pl-8 pr-8'
++      />
++      {text && (
++        <button type='button' onClick={() => setText('')} className='absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground' aria-label='清空'>
++          <X className='h-4 w-4' />
++        </button>
++      )}
++      {show && (
++        <div id='slot-key-search-results' role='region' aria-live='polite' aria-label='查找结果'
++          className='absolute right-0 z-30 mt-1 max-h-80 w-full overflow-y-auto rounded-md border bg-popover p-1 text-sm text-popover-foreground shadow-md sm:w-96'>
++          {error ? <div className='px-2 py-2 text-red-600'>查询失败：{extractErrorMessage(error)}</div>
++            : !data && isFetching ? <div className='px-2 py-2 text-muted-foreground'>查询中…</div>
++            : hits.length === 0 ? <div className='px-2 py-2 text-muted-foreground'>没有匹配的 key（只列出绑定在槽上的）</div>
++            : (
++              <>
++                <div className='px-2 py-1 text-xs text-muted-foreground'>
++                  命中 {hits.length} 把{hits.length > MAX_SHOWN ? `，只显示前 ${MAX_SHOWN} 把，输入更多字缩小范围` : ''} · 点一条看该槽的 key 列表
++                </div>
++                <ul>
++                  {hits.slice(0, MAX_SHOWN).map((u) => {
++                    const s = byName.get(u.slot)
++                    return (
++                      <li key={u.user}>
++                        <button type='button' onClick={() => setOpenSlot(u.slot)}
++                          className='flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-accent focus-visible:bg-accent focus-visible:outline-none'>
++                          {s ? <SlotNo n={slotNo(s)} size='sm' /> : <span className='text-xs text-muted-foreground'>—</span>}
++                          <span className='min-w-0 flex-1'>
++                            <span className='block truncate font-medium'>{u.keyAlias || <span className='text-muted-foreground'>（待下次请求）</span>}</span>
++                            <span className='block truncate text-xs text-muted-foreground'>
++                              {s ? `槽 ${slotNo(s)}` : '槽'} · {u.slot} · <span className='font-mono'>{u.keyHash.slice(0, 8)}…</span>
++                            </span>
++                          </span>
++                          <span className='shrink-0 text-right text-xs text-muted-foreground'>
++                            24h <span className='font-medium tabular-nums text-foreground'>{u.requests24h.toLocaleString()}</span>
++                          </span>
++                        </button>
++                      </li>
++                    )
++                  })}
++                </ul>
++              </>
++            )}
++        </div>
++      )}
++      {openSlot != null && (
++        <SlotUsersDialog slot={openSlot} slots={slots} open onOpenChange={(o) => { if (!o) setOpenSlot(null) }} />
++      )}
++    </div>
++  )
++}
+--- a/admin-ui/src/components/slot-status.ts
++++ b/admin-ui/src/components/slot-status.ts
+@@ -0,0 +1,59 @@
++import type { SlotView, SlotsOverview } from '@/api/credentials'
++
++// 固定槽号：B 的后端改动上线后 SlotView 带 `no`（按配置行数、停用不挪位）；之前回退到 index + 1。
++// 网络请求（测试 / 锁定）仍然用 index，只有显示用 no。
++export const slotNo = (s: SlotView): number => s.no ?? s.index + 1
++
++// 卡片上「近 24 小时告警」的条目（和卡片底部那行红字同一套规则）
++export function slotIssues(s: SlotView): [string, number][] {
++  const al = s.alarms
++  return ([
++    ['429', al.http429], ['空回复给了用户', al.emptyReturned], ['排队超时', al.queueTimeouts],
++    ['429 重试仍失败', al.exhausted], ['被限制', al.restricted],
++  ] as [string, number][]).filter(([, n]) => n > 0)
++}
++
++// 号额度低 = 已用 ≥ 85%（和账户表「已用额度」条变红的阈值一致）
++export const LOW_BALANCE_USED = 0.85
++
++export function lowBalanceIds(d: SlotsOverview): Set<number> {
++  return new Set((d.balances || []).filter((b) => b.limit > 0 && 1 - b.remaining / b.limit >= LOW_BALANCE_USED).map((b) => b.id))
++}
++
++export type IssueKind = 'empty' | 'alarm' | 'closed' | 'queued' | 'low'
++
++export const ISSUE_LABEL: Record<IssueKind, string> = {
++  empty: '空槽',
++  alarm: '有异常',
++  closed: '暂不接新人',
++  queued: '排队中',
++  low: '号额度低',
++}
++
++export const ISSUE_HINT: Record<IssueKind, string> = {
++  empty: '冷备没有号可补：这个槽不接流量，补号后自动上号',
++  alarm: '近 24 小时（清除告警之后）有 429 / 空回复 / 排队超时 / 重试仍失败 / 被限制',
++  closed: '近 30 分钟用量明显高于其它槽，暂不分配新用户；老用户不受影响',
++  queued: '现在有请求在这个槽排队等并发',
++  low: `槽上的号已用额度 ≥ ${LOW_BALANCE_USED * 100}%（和账户表额度条变红的阈值一致）`,
++}
++
++export type SlotFlags = Record<IssueKind, boolean>
++
++// 各项独立判断（一个槽可以同时「有异常」又「排队中」），规则与卡片徽章一致
++export function slotFlags(s: SlotView, low: Set<number>): SlotFlags {
++  return {
++    empty: !s.accountId,
++    alarm: slotIssues(s).length > 0,
++    closed: !!s.accountId && s.closed && s.acceptNew,
++    queued: s.queued > 0,
++    low: s.accountId != null && low.has(s.accountId),
++  }
++}
++
++export const hasIssue = (f: SlotFlags) => f.empty || f.alarm || f.closed || f.queued || f.low
++
++// 排序：空槽 > 有异常 > 暂不接新人 > 排队 > 号额度低 > 正常；同级按槽号
++export function slotRank(f: SlotFlags): number {
++  return f.empty ? 0 : f.alarm ? 1 : f.closed ? 2 : f.queued ? 3 : f.low ? 4 : 5
++}
 --- a/admin-ui/src/components/slot-test-dialog.tsx
 +++ b/admin-ui/src/components/slot-test-dialog.tsx
-@@ -0,0 +1,73 @@
-+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+@@ -0,0 +1,76 @@
++import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 +import type { SlotTestResult } from '@/api/credentials'
 +
 +// 槽位测试详情：左边是发出去的输入，右边是上游回来的输出
@@ -3073,7 +3448,8 @@
 +  )
 +}
 +
-+export function SlotTestDialog({ r, slotName, onClose }: { r: SlotTestResult | null; slotName: string; onClose: () => void }) {
++// slotNo = 固定槽号（停用别的槽也不挪位）；slotName 是槽名
++export function SlotTestDialog({ r, slotNo, slotName, onClose }: { r: SlotTestResult | null; slotNo?: number; slotName: string; onClose: () => void }) {
 +  if (!r) return null
 +  const ok = r.verdict === 'ok'
 +  return (
@@ -3081,12 +3457,13 @@
 +      <DialogContent className='sm:max-w-4xl'>
 +        <DialogHeader>
 +          <DialogTitle>
-+            测试详情 · {slotName} · <span className={ok ? 'text-green-600' : 'text-red-600'}>{VERDICT_TEXT[r.verdict] || r.verdict}</span>
++            测试详情 · {slotNo != null ? `槽 ${slotNo} · ` : ''}{slotName} · <span className={ok ? 'text-green-600' : 'text-red-600'}>{VERDICT_TEXT[r.verdict] || r.verdict}</span>
 +          </DialogTitle>
 +          <DialogDescription>
 +            号 #{r.accountId ?? '—'} · 出口 {r.egress && r.egress !== 'direct' ? r.egress : '本机'} · HTTP {r.status || '—'} · {(r.ms / 1000).toFixed(1)} 秒
 +          </DialogDescription>
 +        </DialogHeader>
++        <DialogBody>
 +        <div className='grid gap-4 md:grid-cols-2'>
 +          <section className='space-y-2'>
 +            <h3 className='text-sm font-semibold'>输入</h3>
@@ -3117,18 +3494,19 @@
 +            <Row k='响应大小'>{r.bytes ? `${r.bytes.toLocaleString()} 字节` : '—'}</Row>
 +          </section>
 +        </div>
++        </DialogBody>
 +      </DialogContent>
 +    </Dialog>
 +  )
 +}
 --- a/admin-ui/src/components/slot-users-dialog.tsx
 +++ b/admin-ui/src/components/slot-users-dialog.tsx
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,300 @@
 +import { useMemo, useState } from 'react'
 +import { useQuery, useQueryClient } from '@tanstack/react-query'
 +import { toast } from 'sonner'
 +import { Search, X, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react'
-+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
++import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 +import { Button } from '@/components/ui/button'
 +import { Badge } from '@/components/ui/badge'
 +import { Input } from '@/components/ui/input'
@@ -3301,6 +3679,7 @@
 +            「key」是 198 LiteLLM 的 key 别名；老用户的别名要等它下一次请求后才显示。7 日按北京时间、含今天，从这个版本上线起开始记。
 +          </DialogDescription>
 +        </DialogHeader>
++        <DialogBody className='space-y-3'>
 +        {isLoading && <p className='py-6 text-center text-sm text-muted-foreground'>加载中…</p>}
 +        {error && <p className='py-6 text-center text-sm text-red-600'>加载失败：{extractErrorMessage(error)}</p>}
 +        {!isLoading && !error && items.length > 0 && (
@@ -3365,7 +3744,7 @@
 +            没有符合条件的 key <Button size='sm' variant='link' className='h-auto p-0' onClick={reset}>清除筛选</Button>
 +          </p>
 +        ) : (
-+          <div className='max-h-[calc(100dvh-16rem)] min-h-40 overflow-auto rounded-md border'>
++          <div className='overflow-x-auto rounded-md border'>
 +            <table className='w-full text-sm'>
 +              <thead className='sticky top-0 bg-muted text-xs text-muted-foreground'>
 +                <tr>
@@ -3409,7 +3788,7 @@
 +                        onChange={(e) => e.target.value && move(u.user, u.keyAlias, e.target.value)}
 +                      >
 +                        <option value=''>{targets.length ? '选择槽…' : '没有别的槽'}</option>
-+                        {targets.map((t) => <option key={t.name} value={t.name}>槽 {t.index + 1} · {t.name}{t.vipAliases.length ? '（专属）' : !t.acceptNew ? '（不接新人）' : ''}</option>)}
++                        {targets.map((t) => <option key={t.name} value={t.name}>槽 {t.no ?? t.index + 1} · {t.name}{t.vipAliases.length ? '（专属）' : !t.acceptNew ? '（不接新人）' : ''}</option>)}
 +                      </select>
 +                    </td>
 +                  </tr>
@@ -3418,19 +3797,20 @@
 +            </table>
 +          </div>
 +        ))}
++        </DialogBody>
 +      </DialogContent>
 +    </Dialog>
 +  )
 +}
 --- a/admin-ui/src/components/slots-panel.tsx
 +++ b/admin-ui/src/components/slots-panel.tsx
-@@ -0,0 +1,493 @@
+@@ -0,0 +1,615 @@
 +import { CreditsTrend } from '@/components/credits-trend'
 +import { EgressQuotaCard } from '@/components/egress-quota-card'
 +import { EmptyEventsDialog } from '@/components/empty-events-dialog'
 +import { SlotUsersDialog } from '@/components/slot-users-dialog'
 +import { RebalanceDialog } from '@/components/rebalance-dialog'
-+import { useEffect, useState } from 'react'
++import { useEffect, useMemo, useState } from 'react'
 +import { toast } from 'sonner'
 +import { Button } from '@/components/ui/button'
 +import { Input } from '@/components/ui/input'
@@ -3442,12 +3822,17 @@
 +import type { SlotView, SlotsOverview, SlotTestResult, SlotTestScenario } from '@/api/credentials'
 +import { SlotTestDialog } from '@/components/slot-test-dialog'
 +import { SlotNo } from '@/components/credential-table'
++import { SlotKeySearch } from '@/components/slot-key-search'
 +import { useQuery } from '@tanstack/react-query'
 +import { getUsageTotals } from '@/api/credentials'
 +import { testAllSlots, testSlot } from '@/api/credentials'
 +import { extractErrorMessage } from '@/lib/utils'
 +import { SlotConfigEditor } from '@/components/slot-config-editor'
 +import { SlotGrayEditor } from '@/components/slot-gray-editor'
++import {
++  ISSUE_HINT, ISSUE_LABEL, hasIssue, lowBalanceIds, slotFlags, slotIssues, slotNo, slotRank,
++  type IssueKind, type SlotFlags,
++} from '@/components/slot-status'
 +
 +const fmt = (x: number) => Math.round(x).toLocaleString()
 +const short = (n: number) => (n >= 1e8 ? `${(n / 1e8).toFixed(1)}亿` : n >= 1e4 ? `${(n / 1e4).toFixed(1)}万` : n.toLocaleString('zh-CN'))
@@ -3526,10 +3911,7 @@
 +  const st = s.stats
 +  // 告警只看最近 24 小时、且在「清除告警」之后的；累计数在「明细」里
 +  const al = s.alarms
-+  const issues = ([
-+    ['429', al.http429], ['空回复给了用户', al.emptyReturned], ['排队超时', al.queueTimeouts],
-+    ['429 重试仍失败', al.exhausted], ['被限制', al.restricted],
-+  ] as [string, number][]).filter(([, n]) => n > 0)
++  const issues = slotIssues(s)
 +  const total = issues.reduce((a, [, n]) => a + n, 0)
 +  const oldAccount = total > 0 && al.onCurrentAccount === 0
 +  const ack = async () => {
@@ -3563,7 +3945,7 @@
 +    <div className={`flex flex-col rounded-lg border bg-card p-4 ${s.closed ? 'border-amber-400' : ''}`}>
 +      <div className='flex items-start justify-between gap-2'>
 +        <div className='flex min-w-0 items-center gap-2.5'>
-+          <SlotNo n={s.index + 1} />
++          <SlotNo n={slotNo(s)} />
 +          <div className='min-w-0'>
 +          <div className='truncate font-medium'>{s.name}</div>
 +          <div className='truncate text-xs text-muted-foreground'>出口 {s.egress ? s.egress.replace(/^https?:\/\//, '') : '本机'}</div>
@@ -3670,15 +4052,17 @@
 +  'claude-opus-4-8', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-5-5', 'claude-haiku-4-5',
 +]
 +
-+function SlotTable({ slots, today }: { slots: SlotView[]; today: Record<string, { requests: number; inputTokens: number; outputTokens: number }> }) {
++// 显示的槽（已经按「有问题的在前」排好），测试 / 锁定仍按各自的 index 走
++function SlotTable({ slots, all, today }: { slots: SlotView[]; all: SlotView[]; today: Record<string, { requests: number; inputTokens: number; outputTokens: number }> }) {
 +  const [model, setModel] = useState(TEST_MODELS[0])
 +  const [scenario, setScenario] = useState<SlotTestScenario>('hello')
 +  const [open, setOpen] = useState<number | null>(null)
 +  const [results, setResults] = useState<Record<number, SlotTestResult>>({})
 +  const [busy, setBusy] = useState<Record<number, boolean>>({})
-+  const [all, setAll] = useState(false)
++  const [allBusy, setAll] = useState(false)
 +  const [rebalance, setRebalance] = useState(false)
 +  const qc = useQueryClient()
++  const noOf = (i: number) => { const x = all.find((s) => s.index === i); return x ? slotNo(x) : i + 1 }
 +  const ackAll = async () => {
 +    try {
 +      await ackSlotAlarms(null)
@@ -3696,7 +4080,7 @@
 +      if (r.retired) {
 +        qc.invalidateQueries({ queryKey: ['slots'] })
 +        qc.invalidateQueries({ queryKey: ['credentials'] })
-+        ;(r.replacedWith ? toast.success : toast.warning)(r.replacedWith ? `槽 ${i + 1} 的号 #${r.accountId} 额度用尽，已自动换成 #${r.replacedWith}` : `槽 ${i + 1} 的号 #${r.accountId} 额度用尽，冷备没号可换，槽暂时空着`)
++        ;(r.replacedWith ? toast.success : toast.warning)(r.replacedWith ? `槽 ${noOf(i)} 的号 #${r.accountId} 额度用尽，已自动换成 #${r.replacedWith}` : `槽 ${noOf(i)} 的号 #${r.accountId} 额度用尽，冷备没号可换，槽暂时空着`)
 +      }
 +    } catch (e) {
 +      toast.error(`测试失败: ${extractErrorMessage(e)}`)
@@ -3707,7 +4091,7 @@
 +  const everyone = async () => {
 +    setAll(true)
 +    try {
-+      const rs = await testAllSlots(model, scenario, slots.length)
++      const rs = await testAllSlots(model, scenario, all.length)
 +      setResults(Object.fromEntries(rs.map((r) => [r.slot, r])))
 +      const swapped = rs.filter((r) => r.retired)
 +      if (swapped.length) {
@@ -3716,7 +4100,7 @@
 +        toast.info(`${swapped.length} 个槽的号额度用尽，已自动换号${swapped.some((r) => !r.replacedWith) ? '（部分冷备不够，槽暂时空着）' : ''}`)
 +      }
 +      // 空槽（冷备没号）不算「不可用」，单独报（review #9）
-+      const empty = new Set(slots.filter((x) => !x.accountId).map((x) => x.index))
++      const empty = new Set(all.filter((x) => !x.accountId).map((x) => x.index))
 +      const tested = rs.filter((r) => !empty.has(r.slot))
 +      const ok = tested.filter((r) => r.verdict === 'ok').length
 +      ;(ok === tested.length ? toast.success : toast.error)(`${model}：${ok}/${tested.length} 个有号的槽可用${empty.size ? `（另有 ${empty.size} 个空槽没号，没测）` : ''}`)
@@ -3746,21 +4130,22 @@
 +      >
 +        {SCENARIOS.map((x) => <option key={x.k} value={x.k}>{x.label}</option>)}
 +      </select>
-+      <Button size='sm' variant='outline' disabled={all} onClick={everyone}>{all ? '测试中…' : '全部槽位测一遍'}</Button>
-+      <Button size='sm' variant='ghost' className='ml-auto' disabled={!slots.some((s) => s.alarms.http429 + s.alarms.emptyReturned + s.alarms.queueTimeouts + s.alarms.exhausted + s.alarms.restricted > 0)} onClick={ackAll} title='把所有槽卡片上的告警清零（累计数不删，之后再发生会重新报）'>清除全部告警</Button>
++      <Button size='sm' variant='outline' disabled={allBusy} onClick={everyone}>{allBusy ? '测试中…' : '全部槽位测一遍'}</Button>
++      <Button size='sm' variant='ghost' className='ml-auto' disabled={!all.some((s) => s.alarms.http429 + s.alarms.emptyReturned + s.alarms.queueTimeouts + s.alarms.exhausted + s.alarms.restricted > 0)} onClick={ackAll} title='把所有槽卡片上的告警清零（累计数不删，之后再发生会重新报）'>清除全部告警</Button>
 +      <Button size='sm' variant='outline' onClick={() => setRebalance(true)} title='按权重和近 24 小时用量重新分配用户（先预览）'>重新分配用户</Button>
 +      <RebalanceDialog open={rebalance} onOpenChange={setRebalance} />
 +      <span className='text-xs text-muted-foreground'>用该槽的号、走该槽出口真打一发；不占并发、不计统计、不换号。点结果看输入/输出</span>
 +    </div>
 +    <SlotTestDialog
 +      r={open == null ? null : results[open] || null}
-+      slotName={open == null ? '' : slots.find((x) => x.index === open)?.name || ''}
++      slotNo={open == null ? undefined : noOf(open)}
++      slotName={open == null ? '' : all.find((x) => x.index === open)?.name || ''}
 +      onClose={() => setOpen(null)}
 +    />
 +    <div className='grid gap-4 sm:grid-cols-2 xl:grid-cols-4'>
 +      {slots.map((s) => (
-+        <SlotCard key={s.index} s={s} slots={slots} today={s.accountId != null ? today[String(s.accountId)] : undefined} result={results[s.index]}
-+          testing={!!busy[s.index] || all} onTest={() => one(s.index)} onOpen={() => setOpen(s.index)} />
++        <SlotCard key={s.name} s={s} slots={all} today={s.accountId != null ? today[String(s.accountId)] : undefined} result={results[s.index]}
++          testing={!!busy[s.index] || allBusy} onTest={() => one(s.index)} onOpen={() => setOpen(s.index)} />
 +      ))}
 +    </div>
 +    </div>
@@ -3859,26 +4244,148 @@
 +}
 +
 +const TABS = [
-+  { k: 'slots', label: '槽位配置' },
++  { k: 'slots', label: '槽位列表' },  // 外层标签已叫「槽位配置」，这里避免重名
 +  { k: 'gray', label: '灰度名单' },
 +  { k: 'limits', label: '并发上限' },
 +] as const
 +
-+export function SlotsPanel() {
++// 「槽位配置」顶层标签页的内容：原先藏在概览卡片下面的「设置」里，8-01 挪到这里
++export function SlotsConfigPanel() {
++  const { data } = useSlots()
++  const [tab, setTab] = useState<'slots' | 'gray' | 'limits'>('slots')
++  return (
++    <section className='space-y-4' aria-label='槽位配置'>
++      {data && !data.enabled && (
++        <div className='rounded-lg border border-amber-400 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950 dark:text-amber-200'>
++          当前调度模式不是槽位模式，下面的配置保存了也不会生效（在右上角切到「槽位」后每条槽各用一个出口 IP）。
++        </div>
++      )}
++      <Card>
++        <div role='tablist' aria-label='槽位配置分类' className='flex gap-1 overflow-x-auto border-b px-4 pt-3'>
++          {TABS.map((t) => (
++            <button
++              key={t.k}
++              role='tab'
++              aria-selected={tab === t.k}
++              onClick={() => setTab(t.k)}
++              onKeyDown={(e) => {
++                const i = TABS.findIndex((x) => x.k === tab)
++                const next = e.key === 'ArrowRight' ? (i + 1) % TABS.length : e.key === 'ArrowLeft' ? (i - 1 + TABS.length) % TABS.length : -1
++                if (next < 0) return
++                e.preventDefault()
++                setTab(TABS[next].k)
++                const el = (e.currentTarget.parentElement?.children[next] as HTMLElement | undefined)
++                el?.focus()
++              }}
++              className={`-mb-px shrink-0 border-b-2 px-3 py-2 text-sm ${tab === t.k ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'}`}
++            >
++              {t.label}
++            </button>
++          ))}
++        </div>
++        <CardContent className='pt-4'>
++          {tab === 'slots' && <SlotConfigEditor />}
++          {tab === 'gray' && <SlotGrayEditor />}
++          {tab === 'limits' && <LimitsForm />}
++        </CardContent>
++      </Card>
++    </section>
++  )
++}
++
++const ISSUE_ORDER: IssueKind[] = ['empty', 'alarm', 'closed', 'queued', 'low']
++
++function IssueBar({ flags, counts, focus, onFocus }: {
++  flags: SlotFlags[]
++  counts: Record<IssueKind, number>
++  focus: IssueKind | 'any' | null
++  onFocus: (f: IssueKind | 'any' | null) => void
++}) {
++  const withIssue = flags.filter(hasIssue).length
++  const tone = (k: IssueKind) => k === 'empty' || k === 'alarm' ? 'text-red-700 dark:text-red-300' : 'text-amber-700 dark:text-amber-300'
++  return (
++    <div className='flex flex-wrap items-center gap-2 rounded-lg border bg-card px-3 py-2'>
++      <span className='text-sm text-muted-foreground'>槽位状态</span>
++      {ISSUE_ORDER.map((k) => {
++        const on = focus === k
++        return (
++          <button
++            key={k}
++            type='button'
++            aria-pressed={on}
++            title={`${ISSUE_HINT[k]}${counts[k] ? `\n点一下只看这一类，再点一下看全部` : ''}`}
++            disabled={counts[k] === 0}
++            onClick={() => onFocus(on ? null : k)}
++            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors disabled:cursor-default disabled:opacity-60 ${
++              on ? 'border-primary bg-accent font-medium' : 'hover:bg-accent'
++            }`}
++          >
++            <span className={counts[k] ? tone(k) : 'text-muted-foreground'}>{ISSUE_LABEL[k]}</span>
++            <span className='font-semibold tabular-nums'>{counts[k]}</span>
++          </button>
++        )
++      })}
++      <Button
++        size='sm'
++        variant={focus === 'any' ? 'default' : 'outline'}
++        aria-pressed={focus === 'any'}
++        disabled={withIssue === 0}
++        onClick={() => onFocus(focus === 'any' ? null : 'any')}
++        title='只显示有问题的槽（空槽 / 有异常 / 暂不接新人 / 排队中 / 号额度低）'
++      >
++        只看异常（{withIssue}）
++      </Button>
++      <span className='ml-auto text-xs text-muted-foreground'>有问题的槽排在前面：空槽 → 有异常 → 暂不接新人 → 排队 → 号额度低</span>
++    </div>
++  )
++}
++
++const ONLY_KEY = 'kiroSlotsOnlyIssues'
++
++// 「总览」顶层标签页的内容：概览卡 + 趋势 + 代理余额 + 问题条 + 槽卡片
++export function SlotsOverviewPanel() {
 +  const { data, isLoading } = useSlots()
 +  const { data: todayData } = useQuery({ queryKey: ['usageTotals', 7], queryFn: () => getUsageTotals(7), refetchInterval: 15000 })
 +  const today = todayData?.totals || {}
-+  const [open, setOpen] = useState(false)
-+  const [tab, setTab] = useState<'slots' | 'gray' | 'limits'>('slots')
++  // 只看异常：记在本浏览器，刷新回来还是这个状态
++  const [only, setOnly] = useState<boolean>(() => {
++    try { return localStorage.getItem(ONLY_KEY) === '1' } catch { return false }
++  })
++  const [kind, setKind] = useState<IssueKind | null>(null)
++  const setOnlyPersist = (v: boolean) => {
++    setOnly(v)
++    if (!v) setKind(null)
++    try { v ? localStorage.setItem(ONLY_KEY, '1') : localStorage.removeItem(ONLY_KEY) } catch { /* 无痕模式等写不进去就算了 */ }
++  }
++  const focus: IssueKind | 'any' | null = kind ?? (only ? 'any' : null)
++  const onFocus = (f: IssueKind | 'any' | null) => {
++    if (f === 'any') { setOnlyPersist(true); setKind(null); return }
++    setKind(f)
++    setOnlyPersist(f != null)
++  }
++  const low = useMemo(() => (data ? lowBalanceIds(data) : new Set<number>()), [data])
++  const flags = useMemo(() => (data ? data.slots.map((s) => slotFlags(s, low)) : []), [data, low])
++  const counts = useMemo(() => {
++    const c: Record<IssueKind, number> = { empty: 0, alarm: 0, closed: 0, queued: 0, low: 0 }
++    flags.forEach((f) => ISSUE_ORDER.forEach((k) => { if (f[k]) c[k]++ }))
++    return c
++  }, [flags])
++  const shown = useMemo(() => {
++    if (!data) return []
++    const idx = new Map(data.slots.map((s, i) => [s.name, i]))
++    const keep = data.slots.filter((_, i) => focus == null || (focus === 'any' ? hasIssue(flags[i]) : flags[i][focus]))
++    return [...keep].sort((a, b) => {
++      const fa = flags[idx.get(a.name)!], fb = flags[idx.get(b.name)!]
++      return slotRank(fa) - slotRank(fb) || slotNo(a) - slotNo(b)
++    })
++  }, [data, flags, focus])
 +  if (isLoading || !data) return null
 +  const r = data.runway
 +  return (
 +    <section className='space-y-4'>
 +      <div className='flex flex-wrap items-center justify-between gap-2'>
 +        <h2 className='text-lg font-semibold'>槽位（一号一 IP）</h2>
-+        <Button size='sm' variant='outline' onClick={() => setOpen((x) => !x)} aria-expanded={open}>
-+          {open ? '收起设置' : '设置'}
-+        </Button>
++        <SlotKeySearch slots={data.slots} />
 +      </div>
 +      {r?.alert && (
 +        <div role='alert' className='rounded-lg border border-red-500 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 dark:bg-red-950 dark:text-red-300'>
@@ -3889,35 +4396,145 @@
 +      <CreditsTrend />
 +      <EgressQuotaCard />
 +      {data.slots.length > 0 ? (
-+        <SlotTable slots={data.slots} today={today} />
++        <>
++          <IssueBar
++            flags={flags}
++            counts={counts}
++            focus={focus}
++            onFocus={onFocus}
++          />
++          {shown.length === 0 ? (
++            <div className='rounded-lg border p-6 text-center text-sm text-muted-foreground'>
++              {focus == null ? '还没有槽位，去「槽位配置」里添加' : '没有符合这个条件的槽'}
++            </div>
++          ) : (
++            <SlotTable slots={shown} all={data.slots} today={today} />
++          )}
++        </>
 +      ) : (
-+        <div className='rounded-lg border p-6 text-center text-sm text-muted-foreground'>还没有槽位，点右上角「设置」添加</div>
-+      )}
-+      {open && (
-+        <Card>
-+          <div role='tablist' className='flex gap-1 border-b px-4 pt-3'>
-+            {TABS.map((t) => (
-+              <button
-+                key={t.k}
-+                role='tab'
-+                aria-selected={tab === t.k}
-+                onClick={() => setTab(t.k)}
-+                className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === t.k ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'}`}
-+              >
-+                {t.label}
-+              </button>
-+            ))}
-+          </div>
-+          <CardContent className='pt-4'>
-+            {tab === 'slots' && <SlotConfigEditor />}
-+            {tab === 'gray' && <SlotGrayEditor />}
-+            {tab === 'limits' && <LimitsForm />}
-+          </CardContent>
-+        </Card>
++        <div className='rounded-lg border p-6 text-center text-sm text-muted-foreground'>还没有槽位，去「槽位配置」里添加</div>
 +      )}
 +    </section>
 +  )
 +}
++
++// 兼容旧引用：概览内容（不含配置面板）
++export const SlotsPanel = SlotsOverviewPanel
+--- a/admin-ui/src/components/top-tabs.tsx
++++ b/admin-ui/src/components/top-tabs.tsx
+@@ -0,0 +1,93 @@
++import { useCallback, useEffect, useRef, useState } from 'react'
++
++export type TopTab = 'overview' | 'config' | 'accounts'
++
++export const TOP_TABS: { k: TopTab; label: string }[] = [
++  { k: 'overview', label: '总览' },
++  { k: 'config', label: '槽位配置' },
++  { k: 'accounts', label: '账户' },
++]
++
++const STORE_KEY = 'kiroAdminTab'
++const isTab = (x: string | null | undefined): x is TopTab => TOP_TABS.some((t) => t.k === x)
++
++function initialTab(): TopTab {
++  const h = typeof window !== 'undefined' ? window.location.hash.replace(/^#/, '') : ''
++  if (isTab(h)) return h
++  try {
++    const v = localStorage.getItem(STORE_KEY)
++    if (isTab(v)) return v
++  } catch { /* 无痕模式等读不到就用默认 */ }
++  return 'overview'
++}
++
++// 当前标签记在 URL hash（#overview / #config / #accounts，可直接分享链接）和 localStorage（刷新 / 下次打开不丢）
++export function useTopTab(): [TopTab, (t: TopTab) => void] {
++  const [tab, setTabState] = useState<TopTab>(initialTab)
++  const setTab = useCallback((t: TopTab) => {
++    setTabState(t)
++    try { localStorage.setItem(STORE_KEY, t) } catch { /* 写不进去就算了 */ }
++    if (window.location.hash !== `#${t}`) window.history.replaceState(null, '', `#${t}`)
++  }, [])
++  useEffect(() => {
++    // 首次进来没有 hash ⇒ 补上，地址栏和页面一致
++    if (window.location.hash !== `#${tab}`) window.history.replaceState(null, '', `#${tab}`)
++    const onHash = () => {
++      const h = window.location.hash.replace(/^#/, '')
++      if (isTab(h)) setTab(h)
++    }
++    window.addEventListener('hashchange', onHash)
++    return () => window.removeEventListener('hashchange', onHash)
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [])
++  return [tab, setTab]
++}
++
++// 顶层标签栏：ARIA tablist，←/→/Home/End 切换；手机上横向滚动
++export function TopTabs({ tab, onChange, tabs = TOP_TABS, badges }: {
++  tab: TopTab
++  onChange: (t: TopTab) => void
++  tabs?: { k: TopTab; label: string }[]
++  badges?: Partial<Record<TopTab, React.ReactNode>>
++}) {
++  const refs = useRef<Record<string, HTMLButtonElement | null>>({})
++  const onKey = (e: React.KeyboardEvent) => {
++    const i = tabs.findIndex((t) => t.k === tab)
++    let next = -1
++    if (e.key === 'ArrowRight') next = (i + 1) % tabs.length
++    else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length
++    else if (e.key === 'Home') next = 0
++    else if (e.key === 'End') next = tabs.length - 1
++    if (next < 0) return
++    e.preventDefault()
++    const k = tabs[next].k
++    onChange(k)
++    refs.current[k]?.focus()
++  }
++  return (
++    <div role='tablist' aria-label='页面' onKeyDown={onKey} className='-mb-px flex gap-1 overflow-x-auto [scrollbar-width:none]'>
++      {tabs.map((t) => {
++        const on = t.k === tab
++        return (
++          <button
++            key={t.k}
++            ref={(el) => { refs.current[t.k] = el }}
++            id={`tab-${t.k}`}
++            role='tab'
++            type='button'
++            aria-selected={on}
++            aria-controls={`panel-${t.k}`}
++            tabIndex={on ? 0 : -1}
++            onClick={() => onChange(t.k)}
++            className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
++              on ? 'border-primary font-medium text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'
++            }`}
++          >
++            {t.label}
++            {badges?.[t.k]}
++          </button>
++        )
++      })}
++    </div>
++  )
++}
+--- a/admin-ui/src/components/ui/badge.tsx
++++ b/admin-ui/src/components/ui/badge.tsx
+@@ -12,12 +12,13 @@
+         secondary:
+           'border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80',
+         destructive:
+-          'border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/80',
++          'border-transparent bg-red-100 text-red-800 hover:bg-red-200/80 dark:bg-red-900/40 dark:text-red-200',
+         outline: 'text-foreground',
++        // 白字配 500 色只有 1.9~2.3:1，不达 AA ⇒ 浅底深字（11-02 审计）
+         success:
+-          'border-transparent bg-green-500 text-white hover:bg-green-500/80',
++          'border-transparent bg-emerald-100 text-emerald-800 hover:bg-emerald-200/80 dark:bg-emerald-900/40 dark:text-emerald-200',
+         warning:
+-          'border-transparent bg-yellow-500 text-white hover:bg-yellow-500/80',
++          'border-transparent bg-amber-100 text-amber-900 hover:bg-amber-200/80 dark:bg-amber-900/40 dark:text-amber-200',
+       },
+     },
+     defaultVariants: {
 --- a/admin-ui/src/components/ui/dialog.tsx
 +++ b/admin-ui/src/components/ui/dialog.tsx
 @@ -35,13 +35,15 @@
@@ -3953,7 +4570,7 @@
      className={cn(
 -      'flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2',
 +      // 弹窗本身在滚时（没用 DialogBody 的老弹窗）按钮贴底不跟着滚走
-+      'sticky bottom-0 -mx-6 -mb-6 mt-auto flex shrink-0 flex-col-reverse gap-2 border-t bg-background px-6 py-4 sm:flex-row sm:justify-end sm:gap-0 sm:space-x-2',
++      'sticky -bottom-6 -mx-6 -mb-6 mt-auto flex shrink-0 flex-col-reverse gap-2 border-t bg-background px-6 py-4 sm:flex-row sm:justify-end sm:gap-0 sm:space-x-2',
        className
      )}
      {...props}
@@ -4032,10 +4649,10 @@
 +)
 --- a/admin-ui/src/components/usage-dialog.tsx
 +++ b/admin-ui/src/components/usage-dialog.tsx
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,99 @@
 +import { useState } from 'react'
 +import { useQuery } from '@tanstack/react-query'
-+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
++import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 +import { getCredentialUsage } from '@/api/credentials'
 +import { extractErrorMessage } from '@/lib/utils'
 +
@@ -4074,6 +4691,7 @@
 +          <DialogTitle>用量统计 · #{credentialId}</DialogTitle>
 +          <DialogDescription>{email || ''}　按北京时间统计，10 秒自动刷新</DialogDescription>
 +        </DialogHeader>
++        <DialogBody>
 +        <div role='tablist' className='flex gap-1 border-b'>
 +          {([1, 7] as const).map((d) => (
 +            <button key={d} role='tab' aria-selected={days === d} onClick={() => setDays(d)}
@@ -4126,10 +4744,44 @@
 +        <p className='text-xs text-muted-foreground'>
 +          账户表格里的「7 日 token」= 这里最近 7 天的「合计 token」（输入 + 输出）。输入 token 来自上游返回的上下文用量；输出 token 按回复文本和工具参数估算，和 LiteLLM 账单可能有约 1% 出入。
 +        </p>
++        </DialogBody>
 +      </DialogContent>
 +    </Dialog>
 +  )
 +}
+--- a/admin-ui/src/components/window-settings-dialog.tsx
++++ b/admin-ui/src/components/window-settings-dialog.tsx
+@@ -1,13 +1,6 @@
+ import { useEffect, useState } from 'react'
+ import { toast } from 'sonner'
+-import {
+-  Dialog,
+-  DialogContent,
+-  DialogDescription,
+-  DialogFooter,
+-  DialogHeader,
+-  DialogTitle,
+-} from '@/components/ui/dialog'
++import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+ import { Button } from '@/components/ui/button'
+ import { Input } from '@/components/ui/input'
+ import { useLoadBalancingMode, useSetWindowSettings, useWindowSettings } from '@/hooks/use-credentials'
+@@ -72,6 +65,7 @@
+             只让优先级最前的几个号同时在线，其余号冷备。号被限流时冷却并立刻换号，冷却期间从后面补位，最多补到上限。保存后立即生效。
+           </DialogDescription>
+         </DialogHeader>
++        <DialogBody>
+         <p className={`text-sm rounded-md border px-3 py-2 ${mode === 'window' ? '' : 'border-amber-500 text-amber-700 dark:text-amber-400'}`}>
+           当前调度模式：<b>{MODE_INFO[mode]?.label || mode}</b>
+           {mode !== 'window' && '（这里的设置只在「小窗口轮换」模式下生效，切模式请点页头的「调度」按钮）'}
+@@ -91,6 +85,7 @@
+           </label>
+           {error && <p className="text-sm text-red-500" role="alert">{error}</p>}
+         </div>
++        </DialogBody>
+         <DialogFooter>
+           <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+           <Button onClick={handleSave} disabled={!!error || isPending}>
 --- a/admin-ui/src/hooks/use-credentials.ts
 +++ b/admin-ui/src/hooks/use-credentials.ts
 @@ -10,6 +10,13 @@
@@ -4904,7 +5556,7 @@
 +            self.token_manager
 +                .slots_snapshot()
 +                .into_iter()
-+                .filter_map(|s| s.account_id.map(|id| (id, (s.name, s.index + 1))))
++                .filter_map(|s| s.account_id.map(|id| (id, (s.name, s.no))))
 +                .collect()
 +        } else {
 +            Default::default()
@@ -8959,7 +9611,7 @@
  }
  
  /// window 模式参数
-@@ -661,6 +703,129 @@
+@@ -661,6 +703,133 @@
      pub token: String,
  }
  
@@ -9056,6 +9708,8 @@
 +#[serde(rename_all = "camelCase")]
 +pub struct SlotView {
 +    pub index: usize,
++    /// 固定槽号：该槽名在完整槽位配置（含停用）里的 1-based 位置；停用 / 启用别的槽不会让它变
++    pub no: usize,
 +    pub name: String,
 +    pub account_id: Option<u64>,
 +    /// 槽上号的邮箱 / 订阅（Admin 展示用）
@@ -9084,12 +9738,14 @@
 +    pub vip_users: usize,
 +    /// 出口测速（配置里填的，只展示）
 +    pub bench: Option<crate::model::config::SlotBench>,
++    /// 出口来源（配置里填的，只展示）
++    pub source: Option<String>,
 +}
 +
  impl MultiTokenManager {
      /// 创建多凭据 Token 管理器
      ///
-@@ -769,6 +934,24 @@
+@@ -769,6 +938,24 @@
                  cooldown_secs: config.window_cooldown_secs.clamp(1, 3600),
              }
          };
@@ -9114,7 +9770,7 @@
          let manager = Self {
              config,
              proxy,
-@@ -781,6 +964,24 @@
+@@ -781,6 +968,24 @@
              last_stats_save_at: Mutex::new(None),
              stats_dirty: AtomicBool::new(false),
              window_settings: Mutex::new(window_settings),
@@ -9139,7 +9795,7 @@
          };
  
          // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
-@@ -794,6 +995,17 @@
+@@ -794,6 +999,17 @@
  
          // 加载持久化的统计数据（success_count, last_used_at）
          manager.load_stats();
@@ -9157,7 +9813,7 @@
  
          Ok(manager)
      }
-@@ -825,6 +1037,8 @@
+@@ -825,6 +1041,8 @@
          model: Option<&str>,
          session_key: Option<&str>,
      ) -> Option<(u64, KiroCredentials)> {
@@ -9166,7 +9822,7 @@
          let entries = self.entries.lock();
  
          // 检查是否是 opus 模型
-@@ -832,11 +1046,12 @@
+@@ -832,11 +1050,12 @@
              .map(|m| m.to_lowercase().contains("opus"))
              .unwrap_or(false);
  
@@ -9180,7 +9836,7 @@
                      return false;
                  }
                  // 如果是 opus 模型，需要检查订阅等级
-@@ -852,7 +1067,8 @@
+@@ -852,7 +1071,8 @@
          }
  
          let mode = self.load_balancing_mode.lock().clone();
@@ -9190,7 +9846,7 @@
  
          match mode {
              "window" => {
-@@ -915,7 +1131,7 @@
+@@ -915,7 +1135,7 @@
                  // window 与 balanced 一样每次重选（窗口内按在途数挑），不粘 current_id
                  let is_balanced = matches!(
                      self.load_balancing_mode.lock().as_str(),
@@ -9199,7 +9855,7 @@
                  );
  
                  // balanced 模式：每次请求都重新均衡选择，不固定 current_id
-@@ -923,11 +1139,12 @@
+@@ -923,11 +1143,12 @@
                  let current_hit = if is_balanced {
                      None
                  } else {
@@ -9213,7 +9869,7 @@
                          .map(|e| (e.id, e.credentials.clone()))
                  };
  
-@@ -1049,7 +1266,10 @@
+@@ -1049,7 +1270,10 @@
          }
  
          // 第一次检查（无锁）：快速判断是否需要刷新
@@ -9225,7 +9881,7 @@
  
          let creds = if needs_refresh {
              // 获取刷新锁，确保同一时间只有一个刷新操作
-@@ -1130,6 +1350,11 @@
+@@ -1130,6 +1354,11 @@
      fn persist_credentials(&self) -> anyhow::Result<bool> {
          use anyhow::Context;
  
@@ -9237,7 +9893,7 @@
          // 仅多凭据格式才回写
          if !self.is_multiple_format {
              return Ok(false);
-@@ -1140,6 +1365,8 @@
+@@ -1140,6 +1369,8 @@
              None => return Ok(false),
          };
  
@@ -9246,7 +9902,7 @@
          // 收集所有凭据
          let credentials: Vec<KiroCredentials> = {
              let entries = self.entries.lock();
-@@ -1158,12 +1385,13 @@
+@@ -1158,12 +1389,13 @@
          // 序列化为 pretty JSON
          let json = serde_json::to_string_pretty(&credentials).context("序列化凭据失败")?;
  
@@ -9264,7 +9920,7 @@
          }
  
          tracing::debug!("已回写凭据到文件: {:?}", path);
-@@ -1216,6 +1444,9 @@
+@@ -1216,6 +1448,9 @@
  
      /// 将当前统计数据持久化到磁盘
      fn save_stats(&self) {
@@ -9274,7 +9930,7 @@
          let path = match self.stats_path() {
              Some(p) => p,
              None => return,
-@@ -1291,9 +1522,1279 @@
+@@ -1291,9 +1526,1297 @@
          self.save_stats_debounced();
      }
  
@@ -9466,6 +10122,14 @@
 +    /// 按名字对齐：没变的槽号和绑定都不动；改了出口的槽，号的代理同步改。
 +    pub fn set_slot_configs(&self, cfgs: Vec<crate::model::config::SlotConfig>) -> anyhow::Result<()> {
 +        use anyhow::Context;
++        // 来源：前端「（空）」可能传 "" ⇒ 当作没填
++        let cfgs: Vec<_> = cfgs
++            .into_iter()
++            .map(|mut c| {
++                c.source = c.source.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
++                c
++            })
++            .collect();
 +        // 已交接 / 待命：这里写了 config.json 但在岗实例内存不知道，管理员却看到「成功」（10-28 review #6）
 +        if !self.may_write() {
 +            anyhow::bail!("本实例正在交接，请稍后重试");
@@ -9498,6 +10162,11 @@
 +                let finite = b.kiro_secs.is_finite() && b.down_mbps.is_finite() && b.score.is_finite();
 +                if !finite || b.kiro_secs < 0.0 || b.down_mbps < 0.0 || !(0.0..=100.0).contains(&b.score) || b.rank > b.of || b.measured.len() > 64 {
 +                    anyhow::bail!("槽位 {} 的测速数据不合法", c.name);
++                }
++            }
++            if let Some(s) = c.source.as_deref() {
++                if s.is_empty() || s.len() > 32 || !s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
++                    anyhow::bail!("槽位 {} 的来源不合法（≤32 字、只能小写字母 / 数字 / -）: {}", c.name, s);
 +                }
 +            }
 +        }
@@ -10438,6 +11107,8 @@
 +            .map(|e| (e.id, (e.credentials.email.clone(), e.credentials.subscription_title.clone())))
 +            .collect();
 +        let cfgs = self.slot_configs.lock().clone();
++        let no_by_name: HashMap<String, usize> =
++            self.slot_configs_all.lock().iter().enumerate().map(|(i, c)| (c.name.clone(), i + 1)).collect();
 +        let mut rt = self.slots.lock();
 +        let usage = rt.usage_sums(now);
 +        let live: Vec<bool> = rt.states.iter().map(|s| s.account_id.is_some()).collect();
@@ -10460,6 +11131,8 @@
 +            .iter()
 +            .map(|s| SlotView {
 +                index: s.index,
++                // 理论上运行时槽名一定在完整配置里；万一不在（配置刚换、运行时还没对齐）退回 index+1
++                no: no_by_name.get(&s.name).copied().unwrap_or(s.index + 1),
 +                name: s.name.clone(),
 +                account_id: s.account_id,
 +                account_email: s.account_id.and_then(|id| info.get(&id).and_then(|x| x.0.clone())),
@@ -10481,6 +11154,7 @@
 +                vip_aliases: s.vip.clone(),
 +                vip_users: vip_users[s.index],
 +                bench: cfgs.get(s.index).and_then(|c| c.bench.clone()),
++                source: cfgs.get(s.index).and_then(|c| c.source.clone()),
 +            })
 +            .collect()
 +    }
@@ -10555,7 +11229,7 @@
      }
  
      /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
-@@ -1387,6 +2888,8 @@
+@@ -1387,6 +2910,8 @@
              entries.iter().any(|e| !e.disabled)
          };
          self.save_stats_debounced();
@@ -10564,7 +11238,7 @@
          result
      }
  
-@@ -1437,6 +2940,8 @@
+@@ -1437,6 +2962,8 @@
              }
          };
          self.save_stats_debounced();
@@ -10573,7 +11247,7 @@
          result
      }
  
-@@ -1500,6 +3005,8 @@
+@@ -1500,6 +3027,8 @@
              }
          };
          self.save_stats_debounced();
@@ -10582,7 +11256,7 @@
          result
      }
  
-@@ -1548,6 +3055,8 @@
+@@ -1548,6 +3077,8 @@
              }
          };
          self.save_stats_debounced();
@@ -10591,7 +11265,7 @@
          result
      }
  
-@@ -1583,6 +3092,8 @@
+@@ -1583,6 +3114,8 @@
  
      /// 获取管理器状态快照（用于 Admin API）
      pub fn snapshot(&self) -> ManagerSnapshot {
@@ -10600,7 +11274,7 @@
          let entries = self.entries.lock();
          let current_id = *self.current_id.lock();
          let available = entries.iter().filter(|e| !e.disabled).count();
-@@ -1591,6 +3102,7 @@
+@@ -1591,6 +3124,7 @@
              entries: entries
                  .iter()
                  .map(|e| CredentialEntrySnapshot {
@@ -10608,7 +11282,7 @@
                      id: e.id,
                      priority: e.credentials.priority,
                      disabled: e.disabled,
-@@ -1640,6 +3152,7 @@
+@@ -1640,6 +3174,7 @@
                          DisabledReason::QuotaExceeded => "QuotaExceeded",
                          DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                          DisabledReason::InvalidConfig => "InvalidConfig",
@@ -10616,7 +11290,7 @@
                      }.to_string()),
                      endpoint: e.credentials.endpoint.clone(),
                      subscription_title: e.credentials.subscription_title.clone(),
-@@ -1652,7 +3165,138 @@
+@@ -1652,7 +3187,138 @@
      }
  
      /// 设置凭据禁用状态（Admin API）
@@ -10755,7 +11429,7 @@
          {
              let mut entries = self.entries.lock();
              let entry = entries
-@@ -1671,6 +3315,16 @@
+@@ -1671,6 +3337,16 @@
          }
          // 持久化更改
          self.persist_credentials()?;
@@ -10772,7 +11446,7 @@
          Ok(())
      }
  
-@@ -1736,9 +3390,9 @@
+@@ -1736,9 +3412,9 @@
                  .clone()
                  .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
          } else {
@@ -10785,7 +11459,7 @@
  
              if needs_refresh {
                  let _guard = self.refresh_lock.lock().await;
-@@ -1955,6 +3609,9 @@
+@@ -1955,6 +3631,9 @@
          self.persist_credentials()?;
  
          tracing::info!("成功添加凭据 #{}", new_id);
@@ -10795,7 +11469,7 @@
          Ok(new_id)
      }
  
-@@ -2020,6 +3677,27 @@
+@@ -2020,6 +3699,27 @@
          // 立即回写统计数据，清除已删除凭据的残留条目
          self.save_stats();
  
@@ -10823,7 +11497,7 @@
          tracing::info!("已删除凭据 #{}", id);
          Ok(())
      }
-@@ -2029,6 +3707,11 @@
+@@ -2029,6 +3729,11 @@
      /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
      /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
      pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
@@ -10835,7 +11509,7 @@
          let credentials = {
              let entries = self.entries.lock();
              entries
-@@ -2076,6 +3759,9 @@
+@@ -2076,6 +3781,9 @@
  
      /// 设置 window 模式参数（Admin API）：校验 → 写回 config.json → 生效。写盘失败则不生效。
      pub fn set_window_settings(&self, ws: WindowSettings) -> anyhow::Result<()> {
@@ -10845,7 +11519,7 @@
          use anyhow::Context;
          ws.validate()?;
          if let Some(path) = self.config.config_path() {
-@@ -2101,6 +3787,10 @@
+@@ -2101,6 +3809,10 @@
      }
  
      fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
@@ -10856,7 +11530,7 @@
          use anyhow::Context;
  
          let config_path = match self.config.config_path() {
-@@ -2123,8 +3813,11 @@
+@@ -2123,8 +3835,11 @@
  
      /// 设置负载均衡模式（Admin API）
      pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
@@ -10869,7 +11543,7 @@
              anyhow::bail!("无效的负载均衡模式: {}", mode);
          }
  
-@@ -2140,9 +3833,35 @@
+@@ -2140,9 +3855,35 @@
              return Err(err);
          }
  
@@ -10905,7 +11579,7 @@
  }
  
  impl Drop for MultiTokenManager {
-@@ -2150,6 +3869,7 @@
+@@ -2150,6 +3891,7 @@
          if self.stats_dirty.load(Ordering::Relaxed) {
              self.save_stats();
          }
@@ -10913,7 +11587,7 @@
      }
  }
  
-@@ -2325,7 +4045,814 @@
+@@ -2325,7 +4067,895 @@
          assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");
      }
  
@@ -11103,6 +11777,87 @@
 +        bad[1].bench = Some(crate::model::config::SlotBench { kiro_secs: 1.0, down_mbps: 1.0, score: 101.0, rank: 1, of: 1, measured: String::new() });
 +        assert!(m.set_slot_configs(bad).is_err(), "综合分超出 0~100 要拒");
 +        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_slot_no_fixed_when_disabling_and_enabling() {
++        // 固定槽号 = 完整配置（含停用）里的位置：停用 s1 后 s2/s3 的号不往前挪；再启用也不变
++        let (m, dir) = slot_mgr(4, 6);
++        let nos = |m: &MultiTokenManager| -> Vec<(String, usize, usize)> {
++            m.slots_snapshot().into_iter().map(|s| (s.name, s.no, s.index)).collect()
++        };
++        let before = nos(&m);
++        assert_eq!(before.iter().map(|x| x.1).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
++        let mut cfgs = m.get_slot_configs();
++        cfgs[1].enabled = false;
++        m.set_slot_configs(cfgs.clone()).unwrap();
++        let off = nos(&m);
++        assert_eq!(off.iter().map(|x| (x.0.as_str(), x.1)).collect::<Vec<_>>(), vec![("s0", 1), ("s2", 3), ("s3", 4)], "停用 s1 不让后面的号前移");
++        assert_eq!(off.iter().map(|x| x.2).collect::<Vec<_>>(), vec![0, 1, 2], "运行时 index 仍是紧凑的");
++        cfgs[1].enabled = true;
++        m.set_slot_configs(cfgs).unwrap();
++        assert_eq!(nos(&m).iter().map(|x| (x.0.clone(), x.1)).collect::<Vec<_>>(), before.iter().map(|x| (x.0.clone(), x.1)).collect::<Vec<_>>(), "再启用回到原号");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_slot_no_with_disabled_rows_interleaved() {
++        // 配置：on0, off1, on2, off3, off4, on5 ⇒ 生效槽的号 = 1, 3, 6
++        let (m, dir) = slot_mgr(1, 4);
++        let mut cfgs = m.get_slot_configs();
++        for (i, en) in [(1, false), (2, true), (3, false), (4, false), (5, true)] {
++            cfgs.push(crate::model::config::SlotConfig { name: format!("t{}", i), proxy_url: Some(format!("http://10.0.2.{}:7890", i)), enabled: en, ..Default::default() });
++        }
++        m.set_slot_configs(cfgs).unwrap();
++        let snap = m.slots_snapshot();
++        assert_eq!(snap.iter().map(|s| (s.name.as_str(), s.no)).collect::<Vec<_>>(), vec![("s0", 1), ("t2", 3), ("t5", 6)]);
++        assert_eq!(snap.iter().map(|s| s.index).collect::<Vec<_>>(), vec![0, 1, 2]);
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_slot_source_round_trip_and_validation() {
++        let (m, dir) = slot_mgr(3, 4);
++        let id0 = m.slots_snapshot()[0].account_id;
++        let mut cfgs = m.get_slot_configs();
++        cfgs[0].source = Some("iguge".into());
++        cfgs[1].source = Some("self-aliyun".into());
++        cfgs[2].source = Some("".into()); // 前端「（空）」
++        m.set_slot_configs(cfgs.clone()).unwrap();
++        let back = m.get_slot_configs();
++        assert_eq!(back.iter().map(|c| c.source.as_deref()).collect::<Vec<_>>(), vec![Some("iguge"), Some("self-aliyun"), None]);
++        assert_eq!(m.slots_snapshot()[0].account_id, id0, "改来源不换号");
++        assert_eq!(m.slots_snapshot()[1].source.as_deref(), Some("self-aliyun"));
++        // 落盘回读：重新加载 config.json 也在
++        if let Some(path) = m.config.config_path() {
++            let c = Config::load(path).unwrap();
++            assert_eq!(c.slots[1].source.as_deref(), Some("self-aliyun"));
++        }
++        for bad in ["IGUGE", "self_243", "a b", "中文", &"x".repeat(33)] {
++            let mut b = back.clone();
++            b[0].source = Some(bad.to_string());
++            assert!(m.set_slot_configs(b).is_err(), "来源 {:?} 要拒", bad);
++        }
++        let mut ok = back.clone();
++        ok[0].source = Some("x".repeat(32));
++        assert!(m.set_slot_configs(ok).is_ok(), "32 字刚好可以");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_slot_config_source_serde_old_config_loads() {
++        use crate::model::config::SlotConfig;
++        // 老配置没有 source 字段 ⇒ 能读，source = None；序列化时 None 不写出
++        let old: SlotConfig = serde_json::from_str(r#"{"name":"jp","proxyUrl":"http://1.2.3.4:3128","enabled":true}"#).unwrap();
++        assert_eq!(old.source, None);
++        assert!(!serde_json::to_string(&old).unwrap().contains("source"));
++        let c = SlotConfig { name: "sg".into(), source: Some("self-243".into()), ..Default::default() };
++        let j = serde_json::to_string(&c).unwrap();
++        assert!(j.contains(r#""source":"self-243""#), "{}", j);
++        let back: SlotConfig = serde_json::from_str(&j).unwrap();
++        assert_eq!(back, c);
++        let full: Config = serde_json::from_str(r#"{"slots":[{"name":"a"},{"name":"b","source":"iguge"}]}"#).unwrap();
++        assert_eq!(full.slots.iter().map(|s| s.source.as_deref()).collect::<Vec<_>>(), vec![None, Some("iguge")]);
 +    }
 +
 +    #[test]
@@ -11728,7 +12483,7 @@
      fn test_window_settings_validate_and_persist() {
          let config_path = std::env::temp_dir().join(format!("kiro-window-{}.json", uuid::Uuid::new_v4()));
          std::fs::write(&config_path, r#"{"loadBalancingMode":"window"}"#).unwrap();
-@@ -2441,6 +4968,65 @@
+@@ -2441,6 +5071,65 @@
          credentials.refresh_token = Some("a".repeat(150));
          let result = validate_refresh_token(&credentials);
          assert!(result.is_ok());
@@ -12103,7 +12858,7 @@
      #[serde(default = "default_tls_backend")]
      pub tls_backend: TlsBackend,
  
-@@ -183,6 +235,105 @@
+@@ -183,6 +235,108 @@
      60
  }
  
@@ -12172,6 +12927,9 @@
 +    /// 出口测速结果（只给 Admin 看，不参与调度）
 +    #[serde(default, skip_serializing_if = "Option::is_none")]
 +    pub bench: Option<SlotBench>,
++    /// 出口来源（只给 Admin 看，不参与调度）：iguge / self-aliyun / self-243 …；≤32 字、仅 [a-z0-9-]
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub source: Option<String>,
 +}
 +
 +/// 一个出口的测速：经该出口连 Kiro 的耗时、下载速度、综合分和在同批出口里的排名
@@ -12202,14 +12960,14 @@
 +
 +impl Default for SlotConfig {
 +    fn default() -> Self {
-+        Self { name: String::new(), proxy_url: None, proxy_username: None, proxy_password: None, enabled: true, weight: default_slot_weight(), accept_new: true, vip_aliases: Vec::new(), bench: None }
++        Self { name: String::new(), proxy_url: None, proxy_username: None, proxy_password: None, enabled: true, weight: default_slot_weight(), accept_new: true, vip_aliases: Vec::new(), bench: None, source: None }
 +    }
 +}
 +
  fn default_extract_thinking() -> bool {
      true
  }
-@@ -208,6 +359,19 @@
+@@ -208,6 +362,19 @@
              window_min_k: default_window_min_k(),
              window_max_k: default_window_max_k(),
              window_cooldown_secs: default_window_cooldown_secs(),

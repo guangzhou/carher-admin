@@ -131,7 +131,7 @@ def test_each_failure_is_reported(tmp_path, gw, case, kw, expect):
 def test_windows_doctor_static():
     # 只用 5.1 语法:不许 ?? / ?. / 三元
     assert not re.search(r"\?\?|\?\.", PS)
-    for must in ("Get-AppxPackage", "auth_mode", "experimental_bearer_token", "muse-image", "/responses",
+    for must in ("Get-AppxPackage", "auth_mode", "experimental_bearer_token", "画图模型", "/responses",
                  "Set-Clipboard", "Mask", "KeyFp", "BadChars", "=== 结论 ==="):
         assert must in PS, must
     # key 只走 KeyFp / 请求头,不直接 P 出来

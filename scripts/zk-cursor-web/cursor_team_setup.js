@@ -3829,7 +3829,7 @@ function installPrecompactProbe(dry) {
 const USER_RULE_BEGIN = "<!-- CARHER-MEDIA-BEGIN -->", USER_RULE_END = "<!-- CARHER-MEDIA-END -->";
 function mediaUserRuleBlock(nodeCmd, imgTool, vidTool) {
   return [USER_RULE_BEGIN,
-    "用户要画图/配图/插画/海报/头像时,只用这条命令(公司的 muse-image,key 已配好),约 30 秒出图:",
+    "用户要画图/配图/插画/海报/头像时,只用这条命令(公司的画图模型,key 已配好),约 30 秒出图:",
     "    " + nodeCmd + ' "' + imgTool + '" "画面描述" 输出路径',
     "用户要生成视频/短视频时,只用这条命令(公司的 gemini-video,真实出 10 秒带声音的 mp4):",
     "    " + nodeCmd + ' "' + vidTool + '" "画面描述" 输出路径',
@@ -3878,7 +3878,7 @@ function installImageSkill(rawKey, base) {
   fs.mkdirSync(sd, { recursive: true });
   // 注意:skill 模板里命令是 `@@NODE@@ "@@TOOL@@"`,NODE 这里已带好自己的引号
   fs.writeFileSync(path.join(sd, "SKILL.md"), md.split('@@NODE@@ "@@TOOL@@"').join(node + ' "' + tool + '"'));
-  if (fs.existsSync(cfg)) console.log("   ✅ 已开通画图:在 Cursor 里说「画一张…」即可(用 muse-image)");
+  if (fs.existsSync(cfg)) console.log("   ✅ 已开通画图:在 Cursor 里说「画一张…」即可");
   else console.log("   ⚠️  画图 skill 已装,但还没有 Key —— 下次双击 INSTALL 粘一次 Key 就能画了");
   // 11-01:一句话生成视频(gemini-video)。同一份 Key 副本、同一个 node 命令,只是工具和 skill 不同
   const vsrc = path.join(__dirname, "carher_video.js"), vmdSrc = path.join(__dirname, "video_skill.md");

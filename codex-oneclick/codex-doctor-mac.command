@@ -186,10 +186,16 @@ else
     FIRST=$(printf '%s' "$BODY" | grep -o '"id" *: *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | grep -vE 'image|imagine|^codex-auto-review$' | head -n1)
     [ -n "$FIRST" ] && red "默认模型 ${MODEL:-gpt-5.6-terra} 不在这把 key 里(每一轮都会 403)。下载最新的 codex-mac.command 重跑一次会自动改成 ${FIRST};或在 Codex 里用 /model 选 ${FIRST}"
   fi
-  for m in ${MODEL:-gpt-5.6-terra} muse-image; do
+  for m in ${MODEL:-gpt-5.6-terra}; do
     if printf '%s' "$BODY" | grep -q "\"$m\""; then P "  $m : 已开通"; else P "  $m : 没开通"
       [ "$CODE" = 200 ] && yel "这把 key 没开通 $m:找运维开通,或换一个模型"; fi
   done
+  # 11-02:画图/视频**别写死名字**查(公开名改过、每把 key 开的不一样);工具自己按 /models 现挑 ⇒ 这里只看有没有
+  IMG=$(printf '%s' "$BODY" | grep -o '"id" *: *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | grep -E 'image|imagine' | grep -v edit | head -n1)
+  if [ -n "$IMG" ]; then P "  画图模型    : 已开通($IMG)"; else P "  画图模型    : 没开通"
+    [ "$CODE" = 200 ] && yel "这把 key 没有任何画图模型:找运维开通(比如 gemini-image)"; fi
+  if printf '%s' "$BODY" | grep -qE '"(gemini-video|muse-video)"'; then P "  视频模型    : 已开通"; else P "  视频模型    : 没开通"
+    [ "$CODE" = 200 ] && yel "这把 key 没开通视频模型:找运维开通 gemini-video"; fi
   if [ "$CODE" = 200 ]; then
     M=${MODEL:-gpt-5.6-terra}
     R=$(curl -s -w '\n%{http_code} %{time_total}s' --max-time 60 -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \

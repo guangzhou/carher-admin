@@ -158,9 +158,13 @@ if (-not $key) { P "(没有 key,跳过)" } else {
     $first = $ids | Where-Object { $_ -notmatch 'image|imagine' -and $_ -ne 'codex-auto-review' } | Select-Object -First 1
     if ($first) { Red "默认模型 $mm 不在这把 key 里(每一轮都会 403)。下载最新的 codex-windows.bat 重跑一次会自动改成 ${first};或在 Codex 里用 /model 选 ${first}" }
   }
-  foreach ($x in @($mm, 'muse-image')) {
+  foreach ($x in @($mm)) {
     if ($ids -contains $x) { P "  $x : 已开通" } else { P "  $x : 没开通"; if ($m.code -eq 200) { Yel "这把 key 没开通 ${x}:找运维开通,或换一个模型" } }
   }
+  # 11-02:画图/视频别写死名字查(公开名改过、每把 key 不一样);工具自己按 /models 现挑
+  $img = $ids | Where-Object { $_ -match 'image|imagine' -and $_ -notmatch 'edit' } | Select-Object -First 1
+  if ($img) { P "  画图模型    : 已开通($img)" } else { P "  画图模型    : 没开通"; if ($m.code -eq 200) { Yel "这把 key 没有任何画图模型:找运维开通(比如 gemini-image)" } }
+  if ($ids -contains 'gemini-video' -or $ids -contains 'muse-video') { P "  视频模型    : 已开通" } else { P "  视频模型    : 没开通"; if ($m.code -eq 200) { Yel "这把 key 没开通视频模型:找运维开通 gemini-video" } }
   if ($m.code -eq 200) {
     $r = Http "$wantBase/responses" $h ('{"model":"' + $mm + '","input":"Reply with only: OK","max_output_tokens":400}')
     $txt = ''

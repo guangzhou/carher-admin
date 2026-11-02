@@ -350,7 +350,7 @@ if ($nodeAbs) {
   if ($i -ge 0 -and $j -gt $i) { $old = $old.Substring(0, $i) + $old.Substring($j + $E.Length) }
   $old = $old.TrimEnd()
   $line = '"' + $nodeAbs + '" "' + $toolPath + '" "画面描述" 输出路径'
-  $blk = $B + "`n## 画图`n`n用户要画图、生成图片、出图、做配图/插画/海报/头像时,**只用这个命令**(调公司的 muse-image,key 已配好),不要用 SVG / ASCII / HTML / 代码画图代替:`n`n    " + $line + "`n`n- 约 30 秒出图;以命令最后打印的「已生成:…」路径为准告诉用户。`n- 不要向用户要 key。命令报错就把原文告诉用户,不要换别的方式硬画。`n" + $E + "`n"
+  $blk = $B + "`n## 画图`n`n用户要画图、生成图片、出图、做配图/插画/海报/头像时,**只用这个命令**(调公司的画图模型,key 已配好),不要用 SVG / ASCII / HTML / 代码画图代替:`n`n    " + $line + "`n`n- 约 30 秒出图;以命令最后打印的「已生成:…」路径为准告诉用户。`n- 不要向用户要 key。命令报错就把原文告诉用户,不要换别的方式硬画。`n" + $E + "`n"
   if ($old) { $blk = $old + "`n`n" + $blk }
   [IO.File]::WriteAllText($cmdMd, $blk, $noBom)
   Ok "√ 已开通画图(说「画一张…」即可)"

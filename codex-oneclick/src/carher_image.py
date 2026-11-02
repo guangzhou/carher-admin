@@ -8,7 +8,8 @@ key / base_url 从同目录 auth.json + config.toml 读取，不接受命令行�
 用法：
   python3 ~/.codex/carher_image.py "画面描述" [输出路径]
 
-2026-10-13 起统一用 muse-image(用户点名「画图都用 muse 那个工具」)。
+2026-10-13 起统一用 muse(用户点名「画图都用 muse 那个工具」)——11-02 起客户端写的是它的对外名 `gemini-image`,
+后端还是组 `muse-image`,同一套图;两个名字都没开才退到别家生图。
 muse-image 返回的是**相对路径** `/v1/media/<32hex>.webp`(文件在 muse2api 上,经网关拿不到),
 198 nginx 加了只读出口 `https://<网关域名>/muse-media/<32hex>.<ext>` ⇒ 这里把相对路径改写过去下载。
 输出文件后缀以**实际图片格式**为准(webp 就存 .webp),不把 webp 字节写进 .png 名字里骗看图软件。
@@ -23,7 +24,33 @@ import urllib.error
 import urllib.request
 
 CODEX_HOME = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
-DEFAULT_MODEL = os.environ.get("CARHER_IMAGE_MODEL", "muse-image")
+# 11-02:别写死模型名。画图仍走 muse,变的只是客户端该写哪个名字:`gemini-image` 是后端组
+# `muse-image` 的**对外公开名**(alias),同一套图;而能直接写 muse-image 的 key 只剩 3 把 ⇒ 写死就 403。
+# 先挑 muse 的两个名字,都没开才退到别家生图。详见 carher_image.js 同处注释。
+MODEL_ENV = os.environ.get("CARHER_IMAGE_MODEL", "")
+MODEL_PREF = ["gemini-image", "muse-image", "gpt-image-2", "grok-imagine-image-quality",
+              "grok-imagine-image-2.0", "grok-imagine", "gemini-3.1-flash-image"]
+
+
+def pick_model(key, base):
+    if MODEL_ENV:
+        return MODEL_ENV
+    ids = []
+    try:
+        req = urllib.request.Request(base + "/models", headers={"Authorization": "Bearer " + key})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            ids = [m.get("id") for m in (json.loads(resp.read()).get("data") or []) if m.get("id")]
+    except Exception:
+        pass
+    for m in MODEL_PREF:
+        if m in ids:
+            return m
+    other = next((i for i in ids if ("image" in i or "imagine" in i) and "edit" not in i), None)
+    if other:
+        return other
+    if ids:
+        sys.exit("你的 key 没有开通任何画图模型，请联系运维开通（比如 gemini-image）。")
+    return MODEL_PREF[0]
 DEFAULT_SIZE = "1024x1024"
 
 
@@ -98,8 +125,9 @@ def fix_ext(path, data):
 
 def generate(prompt, out_path):
     key, base = read_credentials()
+    model = pick_model(key, base)
     body = json.dumps({
-        "model": DEFAULT_MODEL,
+        "model": model,
         "prompt": prompt,
         "size": DEFAULT_SIZE,
         "n": 1,
@@ -118,7 +146,7 @@ def generate(prompt, out_path):
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")
         if e.code == 403:
-            sys.exit("你的 key 还没有开通画图模型 %s，请联系运维开通后重试。" % DEFAULT_MODEL)
+            sys.exit("你的 key 还没有开通画图模型 %s（这是按你的 key 能用的列表挑的）。请联系运维开通画图模型。" % model)
         if e.code == 401:
             sys.exit("key 已失效，请找运维重新颁发。")
         sys.exit("生成失败（HTTP %s）：%s" % (e.code, detail[:300]))

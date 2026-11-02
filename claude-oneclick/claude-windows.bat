@@ -639,13 +639,37 @@ $imgJs = @'
      2. ~/.codex/auth.json + ~/.codex/config.toml        (Codex 一键)
      3. ~/.claude/settings.json 的 env.ANTHROPIC_API_KEY  (Claude Code 一键;网关地址加 /v1)
      4. ~/.carher/image.json {"key","base"}              (Cursor 一键写的)
-   2026-10-13 起统一用 muse-image。它返回相对路径 /v1/media/<32hex>.webp(文件在 muse2api 上),
+   画图模型按 /models 现挑:先 muse 的两个名字(`gemini-image` 是 `muse-image` 的对外名,同一套图)、
+   都没开才退到 gpt-image-2 等别家;`CARHER_IMAGE_MODEL` 可覆盖。
+   muse 那条路返回相对路径 /v1/media/<32hex>.webp(文件在 muse2api 上),
    198 nginx 开了只读出口 https://<网关域名>/muse-media/<32hex>.<ext> ⇒ 改写过去下载。
    输出文件后缀以实际图片格式为准(webp 就存 .webp)。 */
 "use strict";
 const fs = require("fs"), os = require("os"), path = require("path");
 
-const MODEL = process.env.CARHER_IMAGE_MODEL || "muse-image";
+// 11-02:别写死模型名。画图仍然走 muse —— 变的只是**客户端该写哪个名字**:
+//   `gemini-image`(对外公开名)在网关里 alias 到后端组 **`muse-image`**(key/info 的
+//   aliases: {"gemini-image": "muse-image"})⇒ 两个名字出的是同一套 muse 图,不是换模型。
+// 现量 1743 把活 key:能直接写 `muse-image` 的只剩 3 把,`gpt-image-2` 1142 把 ⇒
+// 写死 `muse-image` 的人全部 403(用户 11-02 本机实测:「你的 key 还没有开通画图模型 muse-image」)。
+// ⇒ 按 /models(已按这把 key 的白名单过滤)挑:**先找 muse 的两个名字**,都没有才退到别家生图。
+const MODEL_ENV = process.env.CARHER_IMAGE_MODEL || "";
+// 前两个都是 muse(gemini-image = muse-image 的对外名);后面几个是**别家**的生图,只在 muse 两个名字都没开时兜底
+const MODEL_PREF = ["gemini-image", "muse-image", "gpt-image-2", "grok-imagine-image-quality",
+                    "grok-imagine-image-2.0", "grok-imagine", "gemini-3.1-flash-image"];
+async function pickModel(key, base) {
+  if (MODEL_ENV) return MODEL_ENV;
+  let ids = [];
+  try {
+    const r = await fetch(base + "/models", { headers: { Authorization: "Bearer " + key }, signal: AbortSignal.timeout(30000) });
+    if (r.ok) ids = ((await r.json()).data || []).map((m) => m && m.id).filter(Boolean);
+  } catch (e) { /* 拉不到就按偏好第一个试,错误文案照旧 */ }
+  for (const m of MODEL_PREF) if (ids.includes(m)) return m;
+  const other = ids.find((i) => /image|imagine/.test(i) && !/edit/.test(i));
+  if (other) return other;
+  if (ids.length) die("你的 key 没有开通任何画图模型,请联系运维开通(比如 gemini-image)。");
+  return MODEL_PREF[0];
+}
 const SIZE = "1024x1024";
 const HOME = os.homedir();
 
@@ -707,6 +731,7 @@ function fixExt(p, d) {
 
 async function generate(prompt, out) {
   const [key, base] = credentials();
+  const MODEL = await pickModel(key, base);
   const t0 = Date.now();
   console.log("正在生成,约需 30 秒…");
   let r;
@@ -719,7 +744,7 @@ async function generate(prompt, out) {
   } catch (e) { die("生成失败:" + e.message); }
   if (!r.ok) {
     const detail = (await r.text()).slice(0, 300);
-    if (r.status === 403) die("你的 key 还没有开通画图模型 " + MODEL + ",请联系运维开通后重试。");
+    if (r.status === 403) die("你的 key 还没有开通画图模型 " + MODEL + "(这是按你的 key 能用的列表挑的)。请联系运维开通画图模型。");
     if (r.status === 401) die("key 已失效,请找运维重新颁发。");
     die("生成失败(HTTP " + r.status + "):" + detail);
   }
@@ -746,12 +771,12 @@ generate(args[0], out).catch((e) => die("生成失败:" + e.message));
 $imgMd = @'
 ---
 name: carher-image
-description: 画图 / 生成图片 / 出图 / 做配图、插画、海报、头像、示意图时用。调公司的 muse-image 出一张真图片(约 30 秒),保存到当前文件夹。用户说「画一张…」「生成一张图」「帮我做个配图」都用它,不要用 SVG、ASCII、HTML 或代码画图代替。
+description: 画图 / 生成图片 / 出图 / 做配图、插画、海报、头像、示意图时用。调公司的画图模型出一张真图片(约 30 秒),保存到当前文件夹。用户说「画一张…」「生成一张图」「帮我做个配图」都用它,不要用 SVG、ASCII、HTML 或代码画图代替。
 ---
 
 # 画图
 
-用户要图片时,**只用下面这个命令**(它调公司的 muse-image,key 已经配好):
+用户要图片时,**只用下面这个命令**(它调公司的画图模型,key 已经配好):
 
 ```
 @@NODE@@ "@@TOOL@@" "画面描述" 输出路径
@@ -777,7 +802,7 @@ if ($nodeAbs) {
   if ($i -ge 0 -and $j -gt $i) { $old = $old.Substring(0, $i) + $old.Substring($j + $E.Length) }
   $old = $old.TrimEnd()
   $line = '"' + $nodeAbs + '" "' + $toolPath + '" "画面描述" 输出路径'
-  $blk = $B + "`n## 画图`n`n用户要画图、生成图片、出图、做配图/插画/海报/头像时,**只用这个命令**(调公司的 muse-image,key 已配好),不要用 SVG / ASCII / HTML / 代码画图代替:`n`n    " + $line + "`n`n- 约 30 秒出图;以命令最后打印的「已生成:…」路径为准告诉用户。`n- 不要向用户要 key。命令报错就把原文告诉用户,不要换别的方式硬画。`n" + $E + "`n"
+  $blk = $B + "`n## 画图`n`n用户要画图、生成图片、出图、做配图/插画/海报/头像时,**只用这个命令**(调公司的画图模型,key 已配好),不要用 SVG / ASCII / HTML / 代码画图代替:`n`n    " + $line + "`n`n- 约 30 秒出图;以命令最后打印的「已生成:…」路径为准告诉用户。`n- 不要向用户要 key。命令报错就把原文告诉用户,不要换别的方式硬画。`n" + $E + "`n"
   if ($old) { $blk = $old + "`n`n" + $blk }
   [IO.File]::WriteAllText($cmdMd, $blk, $noBom)
   Ok "√ 已开通画图(说「画一张…」即可)"

@@ -216,7 +216,8 @@ key / base_url 从同目录 auth.json + config.toml 读取，不接受命令行�
 用法：
   python3 ~/.codex/carher_image.py "画面描述" [输出路径]
 
-2026-10-13 起统一用 muse-image(用户点名「画图都用 muse 那个工具」)。
+2026-10-13 起统一用 muse(用户点名「画图都用 muse 那个工具」)——11-02 起客户端写的是它的对外名 `gemini-image`,
+后端还是组 `muse-image`,同一套图;两个名字都没开才退到别家生图。
 muse-image 返回的是**相对路径** `/v1/media/<32hex>.webp`(文件在 muse2api 上,经网关拿不到),
 198 nginx 加了只读出口 `https://<网关域名>/muse-media/<32hex>.<ext>` ⇒ 这里把相对路径改写过去下载。
 输出文件后缀以**实际图片格式**为准(webp 就存 .webp),不把 webp 字节写进 .png 名字里骗看图软件。
@@ -231,7 +232,33 @@ import urllib.error
 import urllib.request
 
 CODEX_HOME = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
-DEFAULT_MODEL = os.environ.get("CARHER_IMAGE_MODEL", "muse-image")
+# 11-02:别写死模型名。画图仍走 muse,变的只是客户端该写哪个名字:`gemini-image` 是后端组
+# `muse-image` 的**对外公开名**(alias),同一套图;而能直接写 muse-image 的 key 只剩 3 把 ⇒ 写死就 403。
+# 先挑 muse 的两个名字,都没开才退到别家生图。详见 carher_image.js 同处注释。
+MODEL_ENV = os.environ.get("CARHER_IMAGE_MODEL", "")
+MODEL_PREF = ["gemini-image", "muse-image", "gpt-image-2", "grok-imagine-image-quality",
+              "grok-imagine-image-2.0", "grok-imagine", "gemini-3.1-flash-image"]
+
+
+def pick_model(key, base):
+    if MODEL_ENV:
+        return MODEL_ENV
+    ids = []
+    try:
+        req = urllib.request.Request(base + "/models", headers={"Authorization": "Bearer " + key})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            ids = [m.get("id") for m in (json.loads(resp.read()).get("data") or []) if m.get("id")]
+    except Exception:
+        pass
+    for m in MODEL_PREF:
+        if m in ids:
+            return m
+    other = next((i for i in ids if ("image" in i or "imagine" in i) and "edit" not in i), None)
+    if other:
+        return other
+    if ids:
+        sys.exit("你的 key 没有开通任何画图模型，请联系运维开通（比如 gemini-image）。")
+    return MODEL_PREF[0]
 DEFAULT_SIZE = "1024x1024"
 
 
@@ -306,8 +333,9 @@ def fix_ext(path, data):
 
 def generate(prompt, out_path):
     key, base = read_credentials()
+    model = pick_model(key, base)
     body = json.dumps({
-        "model": DEFAULT_MODEL,
+        "model": model,
         "prompt": prompt,
         "size": DEFAULT_SIZE,
         "n": 1,
@@ -326,7 +354,7 @@ def generate(prompt, out_path):
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")
         if e.code == 403:
-            sys.exit("你的 key 还没有开通画图模型 %s，请联系运维开通后重试。" % DEFAULT_MODEL)
+            sys.exit("你的 key 还没有开通画图模型 %s（这是按你的 key 能用的列表挑的）。请联系运维开通画图模型。" % model)
         if e.code == 401:
             sys.exit("key 已失效，请找运维重新颁发。")
         sys.exit("生成失败（HTTP %s）：%s" % (e.code, detail[:300]))
@@ -746,13 +774,37 @@ $imgJsSrc = @'
      2. ~/.codex/auth.json + ~/.codex/config.toml        (Codex 一键)
      3. ~/.claude/settings.json 的 env.ANTHROPIC_API_KEY  (Claude Code 一键;网关地址加 /v1)
      4. ~/.carher/image.json {"key","base"}              (Cursor 一键写的)
-   2026-10-13 起统一用 muse-image。它返回相对路径 /v1/media/<32hex>.webp(文件在 muse2api 上),
+   画图模型按 /models 现挑:先 muse 的两个名字(`gemini-image` 是 `muse-image` 的对外名,同一套图)、
+   都没开才退到 gpt-image-2 等别家;`CARHER_IMAGE_MODEL` 可覆盖。
+   muse 那条路返回相对路径 /v1/media/<32hex>.webp(文件在 muse2api 上),
    198 nginx 开了只读出口 https://<网关域名>/muse-media/<32hex>.<ext> ⇒ 改写过去下载。
    输出文件后缀以实际图片格式为准(webp 就存 .webp)。 */
 "use strict";
 const fs = require("fs"), os = require("os"), path = require("path");
 
-const MODEL = process.env.CARHER_IMAGE_MODEL || "muse-image";
+// 11-02:别写死模型名。画图仍然走 muse —— 变的只是**客户端该写哪个名字**:
+//   `gemini-image`(对外公开名)在网关里 alias 到后端组 **`muse-image`**(key/info 的
+//   aliases: {"gemini-image": "muse-image"})⇒ 两个名字出的是同一套 muse 图,不是换模型。
+// 现量 1743 把活 key:能直接写 `muse-image` 的只剩 3 把,`gpt-image-2` 1142 把 ⇒
+// 写死 `muse-image` 的人全部 403(用户 11-02 本机实测:「你的 key 还没有开通画图模型 muse-image」)。
+// ⇒ 按 /models(已按这把 key 的白名单过滤)挑:**先找 muse 的两个名字**,都没有才退到别家生图。
+const MODEL_ENV = process.env.CARHER_IMAGE_MODEL || "";
+// 前两个都是 muse(gemini-image = muse-image 的对外名);后面几个是**别家**的生图,只在 muse 两个名字都没开时兜底
+const MODEL_PREF = ["gemini-image", "muse-image", "gpt-image-2", "grok-imagine-image-quality",
+                    "grok-imagine-image-2.0", "grok-imagine", "gemini-3.1-flash-image"];
+async function pickModel(key, base) {
+  if (MODEL_ENV) return MODEL_ENV;
+  let ids = [];
+  try {
+    const r = await fetch(base + "/models", { headers: { Authorization: "Bearer " + key }, signal: AbortSignal.timeout(30000) });
+    if (r.ok) ids = ((await r.json()).data || []).map((m) => m && m.id).filter(Boolean);
+  } catch (e) { /* 拉不到就按偏好第一个试,错误文案照旧 */ }
+  for (const m of MODEL_PREF) if (ids.includes(m)) return m;
+  const other = ids.find((i) => /image|imagine/.test(i) && !/edit/.test(i));
+  if (other) return other;
+  if (ids.length) die("你的 key 没有开通任何画图模型,请联系运维开通(比如 gemini-image)。");
+  return MODEL_PREF[0];
+}
 const SIZE = "1024x1024";
 const HOME = os.homedir();
 
@@ -814,6 +866,7 @@ function fixExt(p, d) {
 
 async function generate(prompt, out) {
   const [key, base] = credentials();
+  const MODEL = await pickModel(key, base);
   const t0 = Date.now();
   console.log("正在生成,约需 30 秒…");
   let r;
@@ -826,7 +879,7 @@ async function generate(prompt, out) {
   } catch (e) { die("生成失败:" + e.message); }
   if (!r.ok) {
     const detail = (await r.text()).slice(0, 300);
-    if (r.status === 403) die("你的 key 还没有开通画图模型 " + MODEL + ",请联系运维开通后重试。");
+    if (r.status === 403) die("你的 key 还没有开通画图模型 " + MODEL + "(这是按你的 key 能用的列表挑的)。请联系运维开通画图模型。");
     if (r.status === 401) die("key 已失效,请找运维重新颁发。");
     die("生成失败(HTTP " + r.status + "):" + detail);
   }
@@ -1504,7 +1557,7 @@ if ($true) {
 $begin
 ## 画图
 
-用户要画图、生成图片、出图、做配图/插画/海报/头像时，**只用下面这个命令**（它调公司的 muse-image），
+用户要画图、生成图片、出图、做配图/插画/海报/头像时，**只用下面这个命令**（它调公司的画图模型），
 **不要询问、不要用 SVG / ASCII / HTML / matplotlib 代替，也不要用内置 image_gen 或别的生图方式**：
 
     $imgCmd "画面描述" 输出路径

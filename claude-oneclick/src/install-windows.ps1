@@ -270,13 +270,24 @@ $appAsar = $null
 #    C:\Program Files\WindowsApps\Claude_<版本>_x64__<发布者>\app\ —— 那个目录普通用户**列不出来**,
 #    递归搜永远搜不到。⇒ 先问系统要 MSIX 的安装位置(Get-AppxPackage,不要管理员),
 #    文件本身是可读的(app\resources\app.asar),拿不到再退回老的目录搜索(兼容 .exe 安装版)。
+# 🔴 11-03 zhaojing:`-Name 'Claude'` 是**精确匹配**,他机器上一个都没命中 ⇒ 这一步静默跳过,
+#    App 的组件没预置(表现:闪退/发消息不回),而屏幕上只写"完成"。改模糊匹配 + 发布者过滤。
 try {
-  $pkg = Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+  $pkg = Get-AppxPackage -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match 'Claude' -and $_.Publisher -match 'Anthropic' } |
+    Sort-Object Version -Descending | Select-Object -First 1
   if ($pkg -and $pkg.InstallLocation) {
     $cand = Join-Path $pkg.InstallLocation 'app\resources\app.asar'
     if (Test-Path $cand) { $appAsar = $cand }
   }
 } catch {}
+# 从正在运行的进程反推(.exe 版装在自定义目录时,下面的目录搜索也可能搜不到)
+if (-not $appAsar) {
+  try {
+    $pp = Get-Process -Name 'Claude' -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -First 1
+    if ($pp) { $cand = Join-Path (Split-Path $pp.Path -Parent) 'resources\app.asar'; if (Test-Path $cand) { $appAsar = $cand } }
+  } catch {}
+}
 $roots = @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs')) | Where-Object { $_ -and (Test-Path $_) }
 if (-not $appAsar) { foreach ($r in $roots) {
   $hit = Get-ChildItem -Path $r -Filter app.asar -Recurse -Depth 5 -ErrorAction SilentlyContinue |

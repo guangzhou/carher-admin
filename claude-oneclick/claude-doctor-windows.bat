@@ -116,10 +116,30 @@ if ((Test-Path (Join-Path $claudeHome 'carher\carher_image.js')) -and (Test-Path
 else { P "画图工具      : 没装"; Yel "画图工具没装上:下载最新的 claude-windows.bat 重跑一次" }
 
 P ""; P "--- 3) 桌面 App ---"
+# 🔴 11-03 zhaojing 实机:报告里「App : 没找到」却同时「运行中 : 是」—— 自相矛盾,
+#    而且 App 那一整节(网关配置 / 组件 / 日志)被整段跳过,真因全查不到。
+#    `Get-AppxPackage -Name 'Claude'` 是**精确匹配**;装 .exe 版的人根本没有 Appx 包,
+#    MSIX 版在某些机器上包名也带前缀(同族产品叫 AnthropicClaude)⇒ 一个都没命中。
+#    ⇒ 用模糊匹配 + 发布者过滤,再加一条"从正在运行的进程反推安装目录"的兜底。
 $pkg = $null
-try { $pkg = Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1 } catch {}
+try {
+  $pkg = Get-AppxPackage -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match 'Claude' -and $_.Publisher -match 'Anthropic' } |
+    Sort-Object Version -Descending | Select-Object -First 1
+} catch {}
 $asar = $null
 if ($pkg -and $pkg.InstallLocation) { P "App     : MSIX $($pkg.Version)  $($pkg.InstallLocation)"; $c = Join-Path $pkg.InstallLocation 'app\resources\app.asar'; if (Test-Path $c) { $asar = $c } }
+# 从进程反推:装在任何地方(含自定义目录的 .exe 安装版)都兜得住
+if (-not $asar) {
+  try {
+    $pp = Get-Process -Name 'Claude' -ErrorAction SilentlyContinue |
+      Where-Object { $_.Path } | Select-Object -First 1
+    if ($pp) {
+      $c = Join-Path (Split-Path $pp.Path -Parent) 'resources\app.asar'
+      if (Test-Path $c) { $asar = $c; P "App     : $(Split-Path $pp.Path -Parent)  (从运行中的进程找到)" }
+    }
+  } catch {}
+}
 if (-not $asar) {
   foreach ($r in @($env:LOCALAPPDATA, (Join-Path $env:LOCALAPPDATA 'Programs'), $env:ProgramFiles)) {
     if (-not $r -or -not (Test-Path $r)) { continue }
@@ -131,6 +151,11 @@ if (-not $asar) {
 if (-not $pkg -and -not $asar) { P "App     : 没找到(只用命令行可以忽略)" }
 $run = Get-Process -Name 'claude' -ErrorAction SilentlyContinue
 P "运行中  : $(if ($run) { '是' } else { '否' })"
+# 「没找到」却「运行中=是」= 上面三条路都没认出来(以前会整段跳过 App 检查,等于什么都没查)
+if ($run -and -not $pkg -and -not $asar) {
+  Yel "App 在跑但没认出安装位置:把这份报告发给运维(自检会漏查 App 的网关配置和组件)"
+  try { $p0 = ($run | Where-Object { $_.Path } | Select-Object -First 1); if ($p0) { P "  进程路径: $($p0.Path)" } } catch {}
+}
 $ud = Join-Path $env:LOCALAPPDATA 'Claude-3p'; $lib = Join-Path $ud 'configLibrary'
 if ($pkg -or $asar) {
   $meta = ReadJson (Join-Path $lib '_meta.json')
@@ -173,9 +198,20 @@ if ($pkg -or $asar) {
   if (Test-Path $log) {
     P "App 日志 ($log) 最近的关键行:"
     $tail = Get-Content $log -Tail 400 -Encoding UTF8
-    $tail | Select-String -Pattern '3P mode active|Model discovery|Host Claude Code binary not available|still initializing|\[error\]' | Select-Object -Last 8 |
+    $tail | Select-String -Pattern '3P mode active|Model discovery|Host Claude Code binary not available|still initializing|crash|GPU process|renderer process|out of memory|\[error\]' | Select-Object -Last 8 |
       ForEach-Object { $l = Mask $_.Line; if ($l.Length -gt 240) { $l = $l.Substring(0, 240) }; P "  $l" }
     if ($tail -match 'Host Claude Code binary not available') { Red "App 日志最近有「Host Claude Code binary not available」⇒ 组件没准备好:完全退出 App,重新双击 claude-windows.bat" }
+    # 11-03:同事报「App 总是闪退」⇒ 把崩溃记录也带上(Electron 的 Crashpad 转储)
+    foreach ($cd in @((Join-Path $ud 'Crashpad\reports'), (Join-Path $env:APPDATA 'Claude-3p\Crashpad\reports'),
+                      (Join-Path $ud 'Crashpad'), (Join-Path $env:APPDATA 'Claude\Crashpad\reports'))) {
+      if (-not (Test-Path $cd)) { continue }
+      $dm = Get-ChildItem $cd -Filter *.dmp -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 3
+      if ($dm) {
+        P "App 崩溃记录 : $($dm.Count) 个(最近 $($dm[0].LastWriteTime.ToString('MM-dd HH:mm')),$cd)"
+        Red "桌面 App 最近崩溃过(闪退):把这份报告发给运维"
+        break
+      }
+    }
   }
 }
 

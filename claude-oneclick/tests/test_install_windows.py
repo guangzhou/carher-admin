@@ -91,9 +91,17 @@ def test_bat_header_is_ascii_crlf(tmp_path):
 
 def test_windows_finds_msix_app_and_test_prompt_survives_cmd():
     """10-15 同事 Windows 实机两处:①装了 App 却「没找到安装目录」(官方包是 MSIX,
-    WindowsApps 目录普通用户列不出来)②测试题经 cmd /c 被切成「9511+」。"""
+    WindowsApps 目录普通用户列不出来)②测试题经 cmd /c 被切成「9511+」。
+
+    🔴 11-03 zhaojing:MSIX 那条原来写 `-Name 'Claude'`(**精确**匹配),他机器上一个都没命中
+    ⇒ 预置 App 组件整段静默跳过(表现:闪退/发消息不回),屏幕上只写"完成"。
+    现在要求:模糊匹配 + 按发布者过滤 + 还有一条"从运行中的进程反推"的兜底。"""
     import re
-    assert "Get-AppxPackage -Name 'Claude'" in PS
+    code = "\n".join(l for l in PS.splitlines() if not l.lstrip().startswith("#"))
+    assert "Get-AppxPackage" in code
+    assert "Get-AppxPackage -Name 'Claude'" not in code, "别用精确包名匹配(11-03 zhaojing 一个都没命中)"
+    assert re.search(r"\$_\.Name -match 'Claude'", code) and re.search(r"\$_\.Publisher -match 'Anthropic'", code)
+    assert "Get-Process -Name 'Claude'" in code, "要有从进程反推安装目录的兜底"
     assert "app\\\\resources\\\\app.asar" in PS or "app\\resources\\app.asar" in PS
     q = re.search(r'\$q = "([^"]+)"', PS).group(1)
     assert not [c for c in '+?&|<>^%"' if c in q], q

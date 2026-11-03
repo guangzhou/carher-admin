@@ -284,7 +284,13 @@ fs.writeFileSync(metaP, JSON.stringify(meta, null, 2) + "\n", { mode: 0o600 });
 #    ⇒ 从我们自己的镜像 chat.auto-link.com.cn/ccdl/ 取**官方原样**文件,按 App 的目录形状放好,
 #    并用 App 内嵌 manifest 的 sha256 校验。版本号从 App 里读(App 升级后自动跟)。
 # 10-28 起 Linux 也有官方 App(deb,/usr/lib/claude-desktop),同样每开会话先去国外下组件 ⇒ 一起预置。
-if [ "$OS" = darwin ]; then APP_ASAR="/Applications/Claude.app/Contents/Resources/app.asar"
+@@EMBED find_app_mac.sh@@
+if [ "$OS" = darwin ]; then
+  APP_DIR="$(carher_find_claude_app)"
+  APP_ASAR="${APP_DIR:+$APP_DIR/Contents/Resources/app.asar}"
+  # 11-03:原来写死 /Applications/Claude.app ⇒ 装在 ~/Applications 的同事这一步静默跳过,
+  # App 每开会话都去国外下组件 ⇒ 表现是"发消息不回",而屏幕上只写了"完成"。
+  [ -n "$APP_ASAR" ] || say "→ 没找到 Claude 桌面 App(只用命令行可以忽略;装了 App 的话打开一次再重跑本脚本)"
 else APP_ASAR="/usr/lib/claude-desktop/resources/app.asar"; fi
 CCDL="https://chat.auto-link.com.cn/ccdl/claude-code-releases"
 if [ -f "$APP_ASAR" ]; then

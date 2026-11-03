@@ -108,8 +108,9 @@ if [ -f "$CLAUDE_HOME/carher/carher_image.js" ] && [ -f "$CLAUDE_HOME/skills/car
 else P "画图工具      : 没装"; yel "画图工具没装上:下载最新的 claude-mac.command 重跑一次"; fi
 
 P ""; P "--- 3) 桌面 App ---"
-APP="${CARHER_DOCTOR_APP:-/Applications/Claude.app}"
-if [ "$(uname -s)" = Darwin ] && [ -d "$APP" ]; then
+@@EMBED find_app_mac.sh@@
+APP="$(carher_find_claude_app)"
+if [ "$(uname -s)" = Darwin ] && [ -n "$APP" ] && [ -d "$APP" ]; then
   P "App     : $APP  版本 $(defaults read "$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null)"
   if pgrep -f "$APP/Contents/MacOS/Claude" >/dev/null 2>&1; then P "运行中  : 是"; else P "运行中  : 否"; fi
   UD="$HOME/Library/Application Support/Claude-3p"; LIB="$UD/configLibrary"

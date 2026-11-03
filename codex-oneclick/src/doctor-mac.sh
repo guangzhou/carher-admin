@@ -54,8 +54,9 @@ done
 grep -ls '>>> carher-codex >>>' "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" 2>/dev/null | sed 's/^/PATH 块 : /'
 
 P ""; P "--- 2) 桌面 App ---"
-APP=""
-for a in "/Applications/Codex.app" "/Applications/OpenAI Codex.app" "$HOME/Applications/Codex.app"; do [ -d "$a" ] && APP="$a" && break; done
+@@EMBED find_app_mac.sh@@
+# 11-03:原来只扫三个写死路径 ⇒ 装在别处/改过名字就报「没装」(buyitian 的 Claude App 就是这么被漏的)
+APP="$(carher_find_codex_app)"
 if [ -n "$APP" ]; then
   P "App     : $APP  版本 $(defaults read "$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null)"
   if pgrep -f "$APP/Contents/MacOS" >/dev/null 2>&1; then P "运行中  : 是"; else P "运行中  : 否"; fi

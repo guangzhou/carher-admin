@@ -545,6 +545,8 @@ def codex_candidates() -> list[str]:
 def run_codex(codex: str, *args: str) -> subprocess.CompletedProcess:
     env = dict(os.environ, CODEX_HOME=str(CODEX_HOME))
     # codex 输出 UTF-8（含中文/符号）；不写 encoding 会按系统编码解，中文 Windows(GBK) 直接解码失败
+    # 输出很大（0.166 的 --bundled 有 728KiB 且在涨）；Python 这边 capture_output 没有上限，
+    # 不用像 .js 那样设 maxBuffer（那边默认 1MiB，11-03 真机踩到 ENOBUFS）。
     return subprocess.run([codex, "debug", "models", *args], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=60, env=env)
 
@@ -993,7 +995,7 @@ function codexCandidates() {
   prefixes.push(...(process.env.CARHER_CODEX_SYS_PREFIXES ? process.env.CARHER_CODEX_SYS_PREFIXES.split(path.delimiter) : ["/opt/homebrew/lib", "/usr/local/lib"]));   // 环境变量仅测试用
   for (const p of prefixes) if (fs.existsSync(js(p))) add([process.execPath, [fs.realpathSync(js(p))]]);
   // PATH 里的 codex:posix 上多半是指向 codex.js 的软链
-  const which = process.platform === "win32" ? null : cp.spawnSync("sh", ["-c", "command -v codex"], { encoding: "utf8" }).stdout.trim();
+  const which = process.platform === "win32" ? null : cp.spawnSync("sh", ["-c", "command -v codex"], { encoding: "utf8", maxBuffer: CODEX_MAX_BUFFER }).stdout.trim();
   if (which) {
     let real = which; try { real = fs.realpathSync(which); } catch (e) {}
     add(real.endsWith(".js") ? [process.execPath, [real]] : [real, []]);
@@ -1003,10 +1005,17 @@ function codexCandidates() {
   return out;
 }
 
+// 🔴 2026-11-03 shixiaojie(Win, codex 0.166):`spawnSync ... ENOBUFS` ⇒ 整条同步失败,
+//    下拉里只剩自带的几个 GPT。真因是 **spawnSync 的默认 maxBuffer 只有 1MiB**,
+//    而 `codex debug models --bundled` 的输出随版本在涨(0.153=506KiB、0.166=728KiB),
+//    已经逼近 1MiB ⇒ 超一点就 ENOBUFS。给 64MiB,留一个数量级余量。
+const CODEX_MAX_BUFFER = 64 * 1024 * 1024;
+
 function runCodex(codex, args) {
   const [bin, pre] = codex;
   return cp.spawnSync(bin, [...pre, "debug", "models", ...args], {
-    encoding: "utf8", timeout: 60000, env: Object.assign({}, process.env, { CODEX_HOME }), windowsHide: true,
+    encoding: "utf8", timeout: 60000, maxBuffer: CODEX_MAX_BUFFER,
+    env: Object.assign({}, process.env, { CODEX_HOME }), windowsHide: true,
   });
 }
 

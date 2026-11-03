@@ -168,3 +168,31 @@ def test_old_codex_first_falls_back_to_working_one(tmp_path):
     both = run()
     assert both["n"] == 2 and both["r"]["ok"] == 1 and both["r"]["n"] == len(TEMPLATES), both
     assert ".carher-npm-global" in both["r"]["who"]
+
+
+def test_big_bundled_output_does_not_enobufs(tmp_path):
+    """🔴 11-03 shixiaojie(Win, codex 0.166):同步日志 `spawnSync ... ENOBUFS` ⇒ 整条同步失败,
+    下拉里只剩自带 GPT。真因:spawnSync 默认 maxBuffer 1MiB,而 `debug models --bundled` 的输出
+    随版本在涨(0.153=506KiB、0.166=728KiB)⇒ 逼近上限就炸。阳性对照:把 maxBuffer 去掉这条必红。"""
+    import os
+    import shutil
+    home = tmp_path / "home"
+    d = home / ".carher-npm-global" / "lib" / "node_modules" / "@openai" / "codex" / "bin"
+    d.mkdir(parents=True)
+    # 造一份 3MiB 的输出(远超 1MiB 默认上限,又在真实量级同一侧):给每个模板塞一段填充字段
+    pad = "x" * 40000
+    big = [dict(m, _pad=pad) for m in TEMPLATES] * max(1, 3 * 1024 * 1024 // (40000 * max(1, len(TEMPLATES))))
+    (d / "codex.js").write_text(
+        f"const m={json.dumps(TEMPLATES)};const p={json.dumps(pad)};"
+        f"const big=[];for(let i=0;i<{len(big)};i++)big.push(Object.assign({{_pad:p}},m[i%m.length]));"
+        "process.stdout.write(JSON.stringify({models:big}))")
+    code = (f"const m=require({json.dumps(str(SRC / 'carher_models_sync.js'))});"
+            "const c=m.codexCandidates();let r;"
+            "try{const t=m.loadTemplates(c,'/nonexistent');r={ok:1,n:t.models.length}}catch(e){r={ok:0,err:e.message}}"
+            "process.stdout.write('\\n'+JSON.stringify(r)+'\\n')")
+    out = subprocess.run([shutil.which("node"), "-e", code], capture_output=True, text=True, check=True,
+                         env=dict(os.environ, HOME=str(home), CODEX_HOME=str(tmp_path / "ch"), PATH="/usr/bin:/bin",
+                                  CARHER_CODEX_SYS_PREFIXES=str(tmp_path / "none")))
+    r = json.loads(out.stdout.rstrip().splitlines()[-1])
+    assert r["ok"] == 1, r          # 失败时 err 里会带 ENOBUFS
+    assert r["n"] == len(big)

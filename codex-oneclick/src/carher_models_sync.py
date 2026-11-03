@@ -147,6 +147,8 @@ def codex_candidates() -> list[str]:
 def run_codex(codex: str, *args: str) -> subprocess.CompletedProcess:
     env = dict(os.environ, CODEX_HOME=str(CODEX_HOME))
     # codex 输出 UTF-8（含中文/符号）；不写 encoding 会按系统编码解，中文 Windows(GBK) 直接解码失败
+    # 输出很大（0.166 的 --bundled 有 728KiB 且在涨）；Python 这边 capture_output 没有上限，
+    # 不用像 .js 那样设 maxBuffer（那边默认 1MiB，11-03 真机踩到 ENOBUFS）。
     return subprocess.run([codex, "debug", "models", *args], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=60, env=env)
 

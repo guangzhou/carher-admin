@@ -1,0 +1,214 @@
+# 账户库 account-store(11-04 用户拍板:独立服务、不进 LiteLLM、放 198 k3s 的其他节点、库放挂载盘)
+#
+# 节点  aiyjy-vllm-standby(10.68.10.37):/Data = vdb ext4 492G 本地盘(不是 NFS);空闲最多
+# 库    hostPath /Data/account-store/accounts.db(SQLite WAL)。⚠️ 不用 local-path PVC:它 reclaimPolicy=Delete
+# 主密钥 hostPath /etc/account-store/kek.bin(37 的 root 盘 vda3,0400 归 10110),**不放 k8s Secret**,
+#        和库分盘;库的备份里不带它。离线托管一份给用户本人。
+# 镜像  127.0.0.1:5000/open-webui:v0.11.3(和 keyprobe 同一个,自带 python3.11 + cryptography),代码走 ConfigMap
+# 访问  ClusterIP account-store.account-store.svc:80;NetworkPolicy 只放行 198 宿主机(门户/管理员)和本 ns 的备份任务
+# 备份  CronJob 每天 03:00(北京)跑在 198 上,经 /v1/backup 拉一份(只有密文)→ 198:/Data/backup/account-store/,留 14 份
+# 部署  scripts/account-store/deploy_198.sh(会建 ns / token / ConfigMap 再 apply 本文件)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: account-store
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: account-store
+  namespace: account-store
+  labels: {app: account-store}
+spec:
+  replicas: 1                      # SQLite 单写者:永远只有 1 个副本
+  strategy: {type: Recreate}       # 不允许新旧两个进程同时开库
+  selector:
+    matchLabels: {app: account-store}
+  template:
+    metadata:
+      labels: {app: account-store}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector:
+        kubernetes.io/hostname: aiyjy-vllm-standby
+      tolerations:
+      - {key: dedicated, operator: Equal, value: vllm-standby, effect: NoSchedule}
+      securityContext:
+        runAsUser: 10110
+        runAsGroup: 10110
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: account-store
+        image: 127.0.0.1:5000/open-webui:v0.11.3
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "-u", "-B", "/opt/account-store/server.py"]
+        workingDir: /tmp                         # 镜像 WORKDIR 是 /app/backend,只读根下建不出来
+        env:
+        - {name: LISTEN, value: "0.0.0.0:8080"}
+        - {name: ACCOUNT_STORE_DB, value: /data/accounts.db}
+        - {name: ACCOUNT_STORE_KEK, value: /kek/kek.bin}
+        - {name: ACCOUNT_STORE_TOKENS, value: /etc/account-store-tokens/tokens.json}
+        - {name: TMPDIR, value: /tmp}
+        - {name: USER, value: account-store}     # 10110 不在镜像 /etc/passwd 里;CLI 审计 actor 用它
+        - {name: HOME, value: /tmp}
+        ports:
+        - {name: http, containerPort: 8080}
+        readinessProbe:
+          httpGet: {path: /healthz, port: http}
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: {path: /healthz, port: http}
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        resources:
+          requests: {cpu: 20m, memory: 64Mi}
+          limits: {cpu: "1", memory: 512Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        volumeMounts:
+        - {name: src, mountPath: /opt/account-store, readOnly: true}
+        - {name: data, mountPath: /data}
+        - {name: kek, mountPath: /kek, readOnly: true}
+        - {name: tokens, mountPath: /etc/account-store-tokens, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+      volumes:
+      - name: src
+        configMap: {name: account-store-src}
+      - name: data
+        hostPath: {path: /Data/account-store, type: Directory}
+      - name: kek
+        hostPath: {path: /etc/account-store, type: Directory}
+      - name: tokens
+        secret: {secretName: account-store-tokens, defaultMode: 0444}
+      - name: tmp
+        emptyDir: {medium: Memory, sizeLimit: 64Mi}   # 迁移时的飞书凭据只落内存
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: account-store
+  namespace: account-store
+spec:
+  type: ClusterIP
+  selector: {app: account-store}
+  ports:
+  - {name: http, port: 80, targetPort: http}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: account-store-ingress
+  namespace: account-store
+spec:
+  podSelector:
+    matchLabels: {app: account-store}
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from:
+    - ipBlock: {cidr: 10.42.0.0/32}      # 198 宿主机经 flannel.1 出来的源地址(门户 / 管理员在 198 上)
+    - ipBlock: {cidr: 10.68.13.198/32}
+    - podSelector:
+        matchLabels: {app: account-store-backup}
+    ports:
+    - {protocol: TCP, port: 8080}
+  egress:                                # 服务本身不外呼;迁移(kubectl exec 里跑)要连飞书 443
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels: {k8s-app: kube-dns}
+    ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  - ports:
+    - {protocol: TCP, port: 443}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: account-store-backup-script
+  namespace: account-store
+data:
+  backup.py: |
+    import datetime, os, sqlite3, sys, urllib.request
+    d = "/backup"
+    tok = open("/token/token").read().strip()
+    req = urllib.request.Request("http://account-store.account-store.svc/v1/backup",
+                                 headers={"Authorization": "Bearer " + tok})
+    raw = urllib.request.urlopen(req, timeout=120).read()
+    if raw[:16] != b"SQLite format 3\x00":
+        sys.exit("backup: 返回的不是 SQLite 文件")
+    name = "accounts-" + datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ") + ".db"
+    tmp = os.path.join(d, "." + name + ".part")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(raw); f.flush(); os.fsync(f.fileno())
+    c = sqlite3.connect(tmp)
+    ok = c.execute("PRAGMA integrity_check").fetchone()[0]
+    n = c.execute("SELECT count(*) FROM account").fetchone()[0]
+    c.close()
+    if ok != "ok":
+        os.unlink(tmp); sys.exit("backup: integrity_check=" + ok)
+    os.rename(tmp, os.path.join(d, name))
+    keep = sorted(f for f in os.listdir(d) if f.startswith("accounts-") and f.endswith(".db"))
+    for old in keep[:-14]:
+        os.unlink(os.path.join(d, old))
+    print("backup ok", name, len(raw), "bytes", n, "accounts; kept", min(len(keep), 14))
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: account-store-backup
+  namespace: account-store
+spec:
+  schedule: "0 19 * * *"           # UTC 19:00 = 北京 03:00
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels: {app: account-store-backup}
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          nodeSelector:
+            kubernetes.io/hostname: aiyjy-litellm      # 198:和库(37)不在同一台机器;目录由部署脚本 sudo 建好
+          securityContext:
+            runAsUser: 10110
+            runAsGroup: 10110
+            runAsNonRoot: true
+          containers:
+          - name: backup
+            image: 127.0.0.1:5000/open-webui:v0.11.3
+            imagePullPolicy: IfNotPresent
+            command: ["python3", "-u", "-B", "/script/backup.py"]
+            workingDir: /tmp
+            resources:
+              requests: {cpu: 10m, memory: 32Mi}
+              limits: {cpu: 500m, memory: 256Mi}
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities: {drop: [ALL]}
+            volumeMounts:
+            - {name: script, mountPath: /script, readOnly: true}
+            - {name: token, mountPath: /token, readOnly: true}
+            - {name: backup, mountPath: /backup}
+            - {name: tmp, mountPath: /tmp}
+          volumes:
+          - name: script
+            configMap: {name: account-store-backup-script}
+          - name: token
+            secret: {secretName: account-store-backup-token, defaultMode: 0444}
+          - name: backup
+            hostPath: {path: /Data/backup/account-store, type: Directory}
+          - name: tmp
+            emptyDir: {medium: Memory, sizeLimit: 64Mi}

@@ -1,0 +1,7 @@
+{
+  "name": "carher-ext-login",
+  "version": "0.1.0",
+  "type": "commonjs",
+  "main": "index.js",
+  "private": true
+}

@@ -1,0 +1,24 @@
+{
+  "id": "carher-ext-login",
+  "name": "CarHer External Login Link",
+  "description": "外部用户在私聊里发「登录」,确定性地回一条一次性登录链接(不经过模型)。身份只取飞书事件里的 sender,名单在 PVC 文件里。",
+  "version": "0.1.0",
+  "entry": "./index.js",
+  "activation": { "onStartup": true },
+  "channels": [],
+  "contracts": { "tools": [] },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "stateDir": {
+        "type": "string",
+        "description": "名单/审计所在目录。默认 /data/.openclaw/carher-ext-login(实际由同名 env 决定)。"
+      },
+      "portalUrl": {
+        "type": "string",
+        "description": "门户签发接口地址。默认 https://chat.auto-link.com.cn/ai/api/internal/magic-link。"
+      }
+    }
+  }
+}

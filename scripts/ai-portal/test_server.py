@@ -433,6 +433,94 @@ def lite():
     s.shutdown()
 
 
+# ── 假账户库(申请 = POST /v1/accounts)────────────────────────────────────
+# 形状照 scripts/account-store/acct_issue.py:回包没有明文,门户要明文另走 /reveal(reveal:self)。
+# 真账户库 + 真门户的联调在 .work/ai-portal/e2e/e2e.py(那里是真进程,只有网关是假的)。
+STORE_ISSUE_TOKEN = "ast_portal-issue-test-token-0123456789"
+
+
+class FakeStoreState:
+    def reset(self):
+        self.calls = []             # (method, path, body)
+        self.accounts = {}          # id -> {"owner", "plain", "alias", "record_id", "prefix"}
+        self.by_owner = {}          # union_id -> id(当前可用那把)
+        self.n = 0
+        self.fail = {}              # path 片段 -> (status, body)
+        self.down = False           # True ⇒ 连接直接断(连不上)
+
+
+STORE = FakeStoreState()
+STORE.reset()
+
+
+class FakeStore(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def out(self, code, obj):
+        b = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_POST(self):  # noqa: N802
+        b = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        STORE.calls.append(("POST", self.path, b))
+        if STORE.down:
+            self.connection.close()
+            return
+        if (self.headers.get("Authorization") or "") != "Bearer " + STORE_ISSUE_TOKEN:
+            return self.out(401, {"error": "unauthorized"})
+        for frag, (st, body) in STORE.fail.items():
+            if frag in self.path:
+                return self.out(st, body)
+        import re as _re
+        if self.path == "/v1/accounts":
+            uid = b.get("union_id")
+            if uid in STORE.by_owner:
+                a = STORE.accounts[STORE.by_owner[uid]]
+                return self.out(200, {"account_id": STORE.by_owner[uid], "key_alias": a["alias"], "existing": True,
+                                      "masked": "sk-…" + a["plain"][-4:], "models": GW_MODELS, "max_budget": 20.0,
+                                      "email_prefix": a["prefix"]})
+            STORE.n += 1
+            prefix = b.get("email_prefix") or uid[-8:]
+            plain = "sk-store%04d%s" % (STORE.n, secrets.token_hex(8))
+            STORE.accounts[STORE.n] = {"owner": uid, "plain": plain, "alias": "cursor-%s-ab%02d" % (prefix, STORE.n),
+                                       "record_id": None, "prefix": prefix, "body": b}
+            STORE.by_owner[uid] = STORE.n
+            return self.out(200, {"account_id": STORE.n, "key_alias": STORE.accounts[STORE.n]["alias"], "existing": False,
+                                  "masked": "sk-…" + plain[-4:], "models": GW_MODELS, "max_budget": 20.0,
+                                  "budget_duration": "1d", "team_id": "", "email_prefix": prefix})
+        m = _re.fullmatch(r"/v1/accounts/(\d+)/(reveal|link)", self.path)
+        if m and int(m.group(1)) in STORE.accounts:
+            a = STORE.accounts[int(m.group(1))]
+            if m.group(2) == "reveal":
+                if b.get("on_behalf_of") != a["owner"] or not b.get("reason") or not b.get("actor"):
+                    return self.out(403, {"error": "只能取自己名下的 key"})
+                return self.out(200, {"account_id": int(m.group(1)), "kind": "api_key", "key": a["plain"]})
+            a["record_id"] = b.get("record_id")
+            return self.out(200, {"account_id": int(m.group(1)), "lark_record_id": a["record_id"]})
+        self.out(404, {"error": "not found"})
+
+
+@pytest.fixture(scope="module")
+def store_srv():
+    s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeStore)
+    s.daemon_threads = True
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    yield "http://127.0.0.1:%d" % s.server_port
+    s.shutdown()
+
+
+def store_token_file(tmp_path, content=STORE_ISSUE_TOKEN):
+    p = tmp_path / "portal-issue.token"
+    p.write_text(content + "\n", encoding="utf-8")
+    os.chmod(p, 0o600)
+    return str(p)
+
+
 class Clock:
     def __init__(self):
         self.t = 1_800_000_000.0
@@ -537,23 +625,32 @@ def clock():
     return Clock()
 
 
+def with_store(store_url, tmp_path, over):
+    """门户默认接上假账户库(申请只走账户库)。显式传了 ACCOUNT_STORE_* 的测试按它的来。"""
+    out = {"ACCOUNT_STORE_URL": store_url, "ACCOUNT_STORE_ISSUE_TOKEN_FILE": store_token_file(tmp_path)}
+    out.update(over)
+    return out
+
+
 @pytest.fixture
-def portal(fake, tmp_path, clock):
+def portal(fake, store_srv, tmp_path, clock):
     FAKE.reset()
+    STORE.reset()
     FAKE.tables[("DlT9bsrwMad12VsogEpcK9Ptncc", "tblJT2s6Y6xjYj5A")] = seed()
-    p = Portal(fake, make_cfg(fake, tmp_path), clock)
+    p = Portal(fake, make_cfg(fake, tmp_path, **with_store(store_srv, tmp_path, {})), clock)
     yield p
     p.close()
 
 
 @pytest.fixture
-def portal_factory(fake, tmp_path, clock):
+def portal_factory(fake, store_srv, tmp_path, clock):
     made = []
 
     def mk(**over):
         FAKE.reset()
+        STORE.reset()
         FAKE.tables[("DlT9bsrwMad12VsogEpcK9Ptncc", "tblJT2s6Y6xjYj5A")] = seed()
-        p = Portal(fake, make_cfg(fake, tmp_path, **over), clock)
+        p = Portal(fake, make_cfg(fake, tmp_path, **with_store(store_srv, tmp_path, over)), clock)
         made.append(p)
         return p
     yield mk
@@ -957,17 +1054,29 @@ def test_apply_dry_run_is_default():
     assert S.DEFAULTS["APPLY_DRY_RUN"] == "1"
 
 
-def test_apply_writes_exact_shape_when_enabled(portal_factory):
+def test_apply_writes_exact_shape_when_enabled(portal_factory, clock):
+    """11-05 起:申请 = 账户库发 key;飞书表那一行是**发完之后**补写的(形状 = poller 发完 key 写回的那几列)。"""
     p = portal_factory(APPLY_DRY_RUN="0")
     sn = p.sid("N")
     FAKE.calls.clear()
     s, d, _, _ = p.req("POST", "/ai/api/apply", {}, cookie=sn)            # account_type 省略 ⇒ Cursor
     assert s == 200 and d["dry_run"] is False and d["record_id"].startswith("recNEW")
-    assert FAKE.tables[KEYTBL][d["record_id"]] == {"姓名": [{"id": USERS["N"]["union_id"]}], "账户类型": ["Cursor"]}
-    creates = [c for c in FAKE.calls if c[1].endswith("/records")]
-    assert len(creates) == 1
-    forbidden = {"API Key", "open_id", "邮箱前缀", "状态", "key_alias"}
-    assert not forbidden & set(FAKE.tables[KEYTBL][d["record_id"]])
+    plain = STORE.accounts[d["account_id"]]["plain"]
+    assert d["key"] == plain and d["masked"] == S.mask_key(plain) and d["existing"] is False
+    row = FAKE.tables[KEYTBL][d["record_id"]]
+    assert row == {"姓名": [{"id": USERS["N"]["union_id"]}], "账户类型": ["Cursor"], "API Key": plain,
+                   "key_alias": "cursor-new", "邮箱前缀": "new", "状态": "有效", "申请时间": int(clock.t * 1000),
+                   "每日预算": 20.0, "可用模型": ", ".join(GW_MODELS)}
+    assert set(row) <= S.ISSUE_ROW_FIELDS and "open_id" not in row, "open_id 列是 poller 应用视角,门户不写"
+    assert row["状态"] in REAL_STATUS_OPTIONS
+    assert len([c for c in FAKE.calls if c[1].endswith("/records")]) == 1
+    # 申请 → 账户库 → 取本人明文 → 回填 record_id,顺序和参数都钉住
+    assert [c[1] for c in STORE.calls] == ["/v1/accounts", "/v1/accounts/1/reveal", "/v1/accounts/1/link"]
+    ident = STORE.calls[0][2]
+    assert ident["union_id"] == USERS["N"]["union_id"] and ident["email_prefix"] == "new"
+    assert ident["organization"] == "无锡车联" and ident["department"] == "" and "open_id" not in ident
+    assert STORE.calls[1][2]["on_behalf_of"] == USERS["N"]["union_id"]
+    assert STORE.calls[2][2]["record_id"] == d["record_id"]
 
 
 def test_apply_org_name_optional(portal_factory):
@@ -1738,6 +1847,49 @@ def test_magic_post_needs_xrw_and_origin(mportal):
 def test_magic_consume_rate_limited(mportal):
     codes = [consume(mportal, "B" * 43, ip="10.8.8.8")[0] for _ in range(11)]
     assert codes == [400] * 10 + [429]
+
+
+def test_magic_issue_rate_limited_per_person(portal_factory):
+    """11-05:签发原来**一点限流都没有** —— 密钥对就能给任意 union_id 无限签会话。
+    按人 3/min:前 3 次签出来,第 4 次 429,而**换一个人照常**(证明是按人不是全局误伤)。"""
+    p = portal_factory(INTERNAL_SECRET=INTERNAL, MAGIC_ISSUE_PER_MIN="3")
+    assert [issue(p, "X")[0] for _ in range(4)] == [200, 200, 200, 429]
+    assert issue(p, "A")[0] == 200, "另一个人不该被别人的配额拖累"
+
+
+def test_magic_issue_rate_limited_globally(portal_factory):
+    """全局闸:拿到密钥后换着 union_id 刷链接,也会先撞全局(按人闸换个人就绕开了)。"""
+    p = portal_factory(INTERNAL_SECRET=INTERNAL, MAGIC_ISSUE_PER_MIN="99", MAGIC_ISSUE_ALL_PER_MIN="2")
+    uids = ["on_%028d" % i for i in range(4)]
+    codes = [issue(p, body={"union_id": u})[0] for u in uids]
+    assert codes == [200, 200, 429, 429]
+
+
+def test_magic_issue_unlimited_unguarded(portal_factory):
+    """UNGUARDED 对照:把两道闸都开到很大 ⇒ 同一个人连签 6 次全 200。
+    证明上面的 429 来自新加的限流,不是别处(鉴权/参数/库)顺手挡的。"""
+    p = portal_factory(INTERNAL_SECRET=INTERNAL, MAGIC_ISSUE_PER_MIN="99", MAGIC_ISSUE_ALL_PER_MIN="99")
+    assert [issue(p, "X")[0] for _ in range(6)] == [200] * 6
+
+
+def test_magic_issue_bad_body_does_not_eat_quota(portal_factory):
+    """形状不对的请求不许消耗配额(本仓 test_apply_bad_type 同一个坑):
+    先用坏 body 打 5 次(都 400),再用好 body 打 3 次必须全 200。"""
+    p = portal_factory(INTERNAL_SECRET=INTERNAL, MAGIC_ISSUE_PER_MIN="3")
+    for _ in range(5):
+        assert issue(p, body={"union_id": "ou_not_a_union"})[0] == 400
+    assert [issue(p, "X")[0] for _ in range(3)] == [200, 200, 200]
+
+
+def test_magic_issue_rate_limit_logged(portal_factory, capsys):
+    """撞闸要留痕,而且日志里分得清是按人还是全局(排障时要能一眼看出来)。"""
+    p = portal_factory(INTERNAL_SECRET=INTERNAL, MAGIC_ISSUE_PER_MIN="1", MAGIC_ISSUE_ALL_PER_MIN="99")
+    assert issue(p, "X")[0] == 200
+    capsys.readouterr()
+    assert issue(p, "X")[0] == 429
+    out = capsys.readouterr().out
+    assert "magic 签发被限流(按人)" in out
+    assert USERS["X"]["union_id"] not in out, "日志只记前缀,不记完整 union_id"
 
 
 def test_internal_wrong_secret(mportal):
@@ -3240,8 +3392,13 @@ def test_known_company_allowed_and_org_written_per_person(oportal):
     s, d = _apply(oportal, _ext_user(oportal, BAIC_TENANT))
     assert s == 200 and d["record_id"].startswith("recNEW"), d
     assert len(FAKE.tables[KEYTBL]) == n + 1
-    assert FAKE.tables[KEYTBL][d["record_id"]] == {"姓名": [{"id": USERS["X"]["union_id"]}], "账户类型": ["Cursor"],
-                                                   "组织名称": "北汽集团"}
+    row = FAKE.tables[KEYTBL][d["record_id"]]
+    assert {k: row[k] for k in ("姓名", "账户类型", "组织名称", "部门名称", "状态")} == {
+        "姓名": [{"id": USERS["X"]["union_id"]}], "账户类型": ["Cursor"], "组织名称": "北汽集团",
+        "部门名称": ["北汽集团"], "状态": "有效"}
+    # 发给账户库的身份:外部人 部门 = 公司(同 poller「跨租户:部门 = 公司」)
+    ident = STORE.calls[0][2]
+    assert (ident["organization"], ident["department"], ident["tenant_key"]) == ("北汽集团", "北汽集团", BAIC_TENANT)
     # 另一个外部人在上海车联的租户 ⇒ 写的是上海车联(按人取值,不是全站一个值)
     # (换人而不是同一个人再申请一次:同一人 24h 内有申请锁)
     s, d = _apply(oportal, _ext_user(oportal, "2a0b_other_tenant", who="N"))
@@ -3370,3 +3527,120 @@ def test_frontend_shows_company_next_to_name():
     assert 'id="who-org"' in h and "me.org_name" in h
     # 走 textContent,不拼 HTML(公司名来自映射文件,也当不可信文本)
     assert '$("who-org").textContent' in h and "who-org\").innerHTML" not in h
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 19. 申请走账户库(11-05「以后所有的 cursor key 生成不走多维表格了,都走这儿」)
+#     三种人各一条 + 双写失败不影响拿 key + 失败关闭。每条拒绝都有阳性对照。
+# ════════════════════════════════════════════════════════════════════════
+def test_store_apply_internal_gets_key_immediately(portal_factory):
+    p = portal_factory(APPLY_DRY_RUN="0")
+    sn = p.sid("N")
+    s, d = _apply(p, sn)
+    assert s == 200 and d["key"].startswith("sk-store") and not d.get("pending"), d
+    assert "1~2" not in json.dumps(d, ensure_ascii=False)
+    # 「我的 key」(还读飞书表)马上能看到这一把,状态=可用、是 current
+    ks = p.req("GET", "/ai/api/keys", cookie=sn)[1]["keys"]
+    assert [(k["record_id"], k["status"], k["current"]) for k in ks] == [(d["record_id"], "可用", True)]
+    # 再点一次:账户库按人去重 ⇒ 门户看到 current ⇒ existing,不再调账户库
+    n = len(STORE.calls)
+    s, d2 = _apply(p, sn)
+    assert s == 200 and d2["existing"] is True and len(STORE.calls) == n
+
+
+def test_store_apply_known_company_external(oportal):
+    s, d = _apply(oportal, _ext_user(oportal, BAIC_TENANT))
+    assert s == 200 and d["key"].startswith("sk-store"), d
+    assert STORE.calls[0][2]["organization"] == "北汽集团"
+
+
+def test_store_apply_personal_edition_never_reaches_store(oportal):
+    s, d = _apply(oportal, _ext_user(oportal, PERSONAL_TENANT))
+    assert s == 403 and d["error"] == S.APPLY_UNKNOWN_ORG_MSG and not STORE.calls, (s, d, STORE.calls)
+    # POSITIVE:同一门户,换已知公司的租户 ⇒ 到账户库、拿到 key
+    s, d = _apply(oportal, _ext_user(oportal, BAIC_TENANT))
+    assert s == 200 and d["key"] and [c[1] for c in STORE.calls][0] == "/v1/accounts"
+
+
+def test_store_apply_external_review_mode_unchanged(oportal):
+    """APPLY_ALLOW_EXTERNAL=0 ⇒ 外部人仍只登记待审核,不发 key、不碰账户库;内部人照发。"""
+    oportal.app.cfg["APPLY_ALLOW_EXTERNAL"] = "0"
+    s, d = _apply(oportal, _ext_user(oportal, BAIC_TENANT))
+    assert s == 200 and d.get("review") is True and not STORE.calls
+    s, d = _apply(oportal, oportal.sid("N"))
+    assert s == 200 and d["key"]
+
+
+def test_store_apply_feishu_write_fails_user_still_gets_key(portal_factory, monkeypatch, capsys):
+    p = portal_factory(APPLY_DRY_RUN="0")
+    sn = p.sid("N")
+    n = len(FAKE.tables[KEYTBL])
+
+    def boom(*a, **k):
+        raise S.FeishuError("/bitable/records", 1254290, "TooManyRequest")
+    monkeypatch.setattr(p.app.client, "create_record", boom)
+    capsys.readouterr()
+    s, d = _apply(p, sn)
+    assert s == 200 and d["key"] == STORE.accounts[d["account_id"]]["plain"] and d.get("warning"), d
+    assert len(FAKE.tables[KEYTBL]) == n, "飞书没写进去"
+    assert not [c for c in STORE.calls if c[1].endswith("/link")], "没有 record_id 可回填"
+    logs = capsys.readouterr()
+    assert "ALERT apply 双写飞书失败" in logs.out and d["key"] not in logs.out + logs.err, "告警了,且日志里没明文"
+    # 不回滚:账户库里那把还在;锁已放 ⇒ 下一次点申请走「复用 + 补写」把表补齐,不生成第二把
+    monkeypatch.undo()
+    s, d2 = _apply(p, sn)
+    assert s == 200 and d2["existing"] is True and d2["key"] == d["key"] and STORE.n == 1
+    assert len(FAKE.tables[KEYTBL]) == n + 1 and FAKE.tables[KEYTBL][d2["record_id"]]["API Key"] == d["key"]
+
+
+def test_store_apply_fails_closed_without_store(portal_factory):
+    """没配账户库 ⇒ 503,**不**退回写飞书表(退回去就又多一条发 key 的路)。"""
+    p = portal_factory(APPLY_DRY_RUN="0", ACCOUNT_STORE_ISSUE_TOKEN_FILE="")
+    n = len(FAKE.tables[KEYTBL])
+    s, d = _apply(p, p.sid("N"))
+    assert s == 503 and d["error"] == S.APPLY_STORE_OFF_MSG and len(FAKE.tables[KEYTBL]) == n
+    assert not STORE.calls
+    # 锁没留下:配好以后同一人马上能申请(POSITIVE)
+    p2 = portal_factory(APPLY_DRY_RUN="0")
+    assert _apply(p2, p2.sid("N"))[0] == 200
+
+
+def test_store_apply_store_errors_mapped_and_unlock(portal_factory):
+    p = portal_factory(APPLY_DRY_RUN="0")
+    sn = p.sid("N")
+    STORE.fail = {"/v1/accounts": (502, {"error": "generate_failed", "message": "网关发 key 失败"})}
+    s, d = _apply(p, sn)
+    assert s == 502 and "sk-" not in json.dumps(d), d
+    STORE.fail = {"/v1/accounts": (409, {"error": "in_progress"})}
+    s, d = _apply(p, sn)
+    assert s == 200 and d.get("pending") is True
+    STORE.fail = {}
+    STORE.down = True
+    assert _apply(p, sn)[0] == 502
+    STORE.down = False
+    p.app.rl_apply = S.RateLimiter(100, 60, p.app.now)
+    s, d = _apply(p, sn)
+    assert s == 200 and d["key"], "失败后锁要放掉,恢复后能申请"
+
+
+def test_store_apply_reveal_denied_still_ok_without_plaintext(portal_factory):
+    p = portal_factory(APPLY_DRY_RUN="0")
+    STORE.fail = {"/reveal": (403, {"error": "只能取自己名下的 key"})}
+    n = len(FAKE.tables[KEYTBL])
+    s, d = _apply(p, p.sid("N"))
+    assert s == 200 and "key" not in d and d["message"] and len(FAKE.tables[KEYTBL]) == n, d
+
+
+def test_store_apply_token_not_leaked(portal_factory, capsys):
+    p = portal_factory(APPLY_DRY_RUN="0")
+    capsys.readouterr()
+    s, d = _apply(p, p.sid("N"))
+    out = capsys.readouterr()
+    assert s == 200 and "apply" in out.out
+    assert STORE_ISSUE_TOKEN not in out.out + out.err and d["key"] not in out.out + out.err
+
+
+def test_frontend_no_longer_promises_minutes_after_apply():
+    h = (HERE / "static" / "index.html").read_text(encoding="utf-8")
+    assert "已提交申请，大约 1~2 分钟生成好" not in h
+    assert "apply-done" in h and "r.key" in h

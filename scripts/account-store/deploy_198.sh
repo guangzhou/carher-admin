@@ -26,7 +26,7 @@ PY="${PYTHON:-.work/ai-portal/account-store/.venv/bin/python}"; [ -x "$PY" ] || 
 "$PY" -m pytest scripts/account-store -q -p no:cacheprovider
 
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
-cp scripts/account-store/{account_store.py,server.py,migrate_from_lark.py} k8s/account-store.yaml "$STAGE/"
+cp scripts/account-store/{account_store.py,server.py,acct_issue.py,migrate_from_lark.py} k8s/account-store.yaml "$STAGE/"
 
 # 1) 37:目录 + 主密钥(只出指纹)
 cat > "$STAGE/node.sh" <<'NODE'
@@ -58,7 +58,7 @@ if ! $J ssh $H198 'sudo -n test -s /etc/account-store/kek.escrow' >/dev/null 2>&
 fi
 
 # 2) 198:token、ConfigMap、apply、验收
-COPYFILE_DISABLE=1 tar -C "$STAGE" -czf "$STAGE/as.tgz" account_store.py server.py migrate_from_lark.py account-store.yaml
+COPYFILE_DISABLE=1 tar -C "$STAGE" -czf "$STAGE/as.tgz" account_store.py server.py acct_issue.py migrate_from_lark.py account-store.yaml
 $J scp "$STAGE/as.tgz" $H198:/tmp/as.tgz
 cat > "$STAGE/remote.sh" <<'REMOTE'
 set -euo pipefail
@@ -66,19 +66,22 @@ S="sudo -n"; K="sudo -n kubectl"
 MIGRATE="$1"
 W=$(mktemp -d); trap 'rm -rf "$W" /tmp/as.tgz' EXIT
 tar -C "$W" -xzf /tmp/as.tgz
-python3 -m py_compile "$W/account_store.py" "$W/server.py" "$W/migrate_from_lark.py"
+python3 -m py_compile "$W/account_store.py" "$W/server.py" "$W/acct_issue.py" "$W/migrate_from_lark.py"
 $S python3 -c 'import hashlib;print("escrow kek_id=kek-"+hashlib.sha256(b"account-store kek id|"+open("/etc/account-store/kek.escrow","rb").read()).hexdigest()[:12])'
 $S install -d -m 0700 /Data/backup/account-store && $S chown 10110:10110 /Data/backup/account-store
 $S install -d -m 0700 /etc/account-store/clients
 # token:有就沿用(换了 = 门户等调用方失效);没有才生成。明文只在 198 root 0600 文件里
-for c in portal admin backup report; do
+for c in portal admin backup report adminweb poller; do   # adminweb = 门户 /ai/admin/ 后台专用;poller = 188 表单发 key
   $S test -s /etc/account-store/clients/$c.token || \
     $S sh -c "umask 077; python3 -c 'import secrets;print(\"ast_\"+secrets.token_urlsafe(32))' > /etc/account-store/clients/$c.token"
 done
 $S python3 - > "$W/tokens.json" <<'PY'
 import hashlib, json
-scopes = {"portal": ["read", "reveal:self"], "admin": ["read", "reveal:any", "backup"],
-          "backup": ["backup"], "report": ["read"]}
+# 11-05 发 key 走账户库:portal 加 issue(申请);poller 只有 issue + reveal:issued(只能取自己刚发的那把)
+scopes = {"portal": ["read", "reveal:self", "issue"], "admin": ["read", "reveal:any", "backup"],
+          "backup": ["backup"], "report": ["read"],
+          "adminweb": ["read", "reveal:any", "audit:read"],   # 只给门户管理后台;明文在 198 root 0600
+          "poller": ["issue", "reveal:issued"]}
 out = {c: {"sha256": hashlib.sha256(open(f"/etc/account-store/clients/{c}.token").read().strip().encode()).hexdigest(),
            "scopes": s} for c, s in scopes.items()}
 print(json.dumps({"clients": out}))
@@ -90,10 +93,24 @@ $S sh -c "printf %s \"\$(cat /etc/account-store/clients/backup.token)\" > $W/tok
 $K -n account-store create secret generic account-store-backup-token --from-file=token="$W/token" \
    --dry-run=client -o yaml | $K apply -f - >/dev/null
 $S rm -f "$W/token" "$W/tokens.json"
+# 网关 master key → 本 ns 的 account-store-gateway(发 key 用)。secret 名跟着 deploy/litellm-proxy 的 envFrom 走
+# (同 scripts/litellm_198_secret.py 的 SHELL_RESOLVE),**不写死 -r2**。值只在管道里,不落盘、不打印
+LITELLM_SECRET=""
+for __s in $($K -n litellm-product get deploy litellm-proxy -o jsonpath='{range .spec.template.spec.containers[0].envFrom[*]}{.secretRef.name}{"\n"}{end}' 2>/dev/null); do
+  if $K -n litellm-product get secret "$__s" -o jsonpath='{.data.LITELLM_MASTER_KEY}' 2>/dev/null | grep -q .; then LITELLM_SECRET="$__s"; break; fi
+done
+if [ -n "$LITELLM_SECRET" ]; then
+  echo "网关 master key 取自 litellm-product/$LITELLM_SECRET"
+  $K -n litellm-product get secret "$LITELLM_SECRET" -o jsonpath='{.data.LITELLM_MASTER_KEY}' \
+    | python3 -c 'import sys,json;print(json.dumps({"apiVersion":"v1","kind":"Secret","type":"Opaque","metadata":{"name":"account-store-gateway","namespace":"account-store"},"data":{"LITELLM_MASTER_KEY":sys.stdin.read().strip()}}))' \
+    | $K apply -f - >/dev/null
+else
+  echo "!! 从 deploy/litellm-proxy 读不出 master key 的 secret ⇒ 不更新 account-store-gateway(发 key 会 503)" >&2
+fi
 $K -n account-store create configmap account-store-src --from-file="$W/account_store.py" --from-file="$W/server.py" \
-   --from-file="$W/migrate_from_lark.py" --dry-run=client -o yaml | $K apply -f - >/dev/null
+   --from-file="$W/acct_issue.py" --from-file="$W/migrate_from_lark.py" --dry-run=client -o yaml | $K apply -f - >/dev/null
 OLD_CM=$($K -n account-store get deploy account-store -o jsonpath='{.spec.template.metadata.annotations.account-store/src-sha}' 2>/dev/null || true)
-NEW_CM=$(cat "$W/account_store.py" "$W/server.py" "$W/migrate_from_lark.py" | sha256sum | cut -c1-16)
+NEW_CM=$( (cat "$W/account_store.py" "$W/server.py" "$W/acct_issue.py" "$W/migrate_from_lark.py"; $K -n account-store get secret account-store-gateway -o jsonpath="{.metadata.resourceVersion}" 2>/dev/null) | sha256sum | cut -c1-16)
 $K apply -f "$W/account-store.yaml"
 [ "$OLD_CM" = "$NEW_CM" ] || $K -n account-store patch deploy account-store --type merge \
    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"account-store/src-sha\":\"$NEW_CM\"}}}}}"
@@ -106,6 +123,28 @@ RT=$($S cat /etc/account-store/clients/report.token)
 echo "401(无 token): $(curl -s -o /dev/null -w %{http_code} -m 5 "http://$IP/v1/stats")"
 echo "stats: $(curl -sS -m 10 -H "Authorization: Bearer $RT" "http://$IP/v1/stats")"
 unset RT
+
+# 188(hermestest-14 的 poller)的入口:198 宿主机 nginx 监听 10.68.13.198:18110,只 allow 188,只放发 key 那三个路径,
+# 转给 Service ClusterIP。到账户库时源地址是 198 宿主机 ⇒ NetworkPolicy 不用为 188 开口子。
+# 11-05 实测:188 容器 → 198:80/5000/8795 通(198 没对 188 做端口限制),18110 现在没人监听(ECONNREFUSED)。
+# ⚠️ 188↔198 是内网明文 HTTP,token 在头里;poller token 只有 issue + reveal:issued,泄露面 = 只能取它刚发的那几把。
+$S tee /etc/nginx/sites-available/account-store-188.conf >/dev/null <<NGX
+# 账户库给 188 poller 的入口(scripts/account-store/deploy_198.sh 生成;回滚 = 删 sites-enabled 里的软链 + reload)
+server {
+    listen 10.68.13.198:18110;
+    allow 10.68.13.188;
+    deny all;
+    access_log /var/log/nginx/account-store-188.log;
+    client_max_body_size 64k;
+    location = /v1/accounts { limit_except POST { deny all; } proxy_pass http://$IP; proxy_read_timeout 180s; }
+    location ~ ^/v1/accounts/[0-9]+/(reveal|link)\$ { limit_except POST { deny all; } proxy_pass http://$IP; }
+    location / { return 404; }
+}
+NGX
+$S ln -sf /etc/nginx/sites-available/account-store-188.conf /etc/nginx/sites-enabled/account-store-188.conf
+if $S nginx -t 2>/dev/null; then $S systemctl reload nginx; echo "nginx 18110 → $IP 已生效"
+else $S rm -f /etc/nginx/sites-enabled/account-store-188.conf; echo "!! nginx -t 失败,已撤掉 18110 入口" >&2; fi
+echo "188 入口(本机打,应为 403=只放 188): $(curl -s -o /dev/null -w %{http_code} -m 5 -X POST http://10.68.13.198:18110/v1/accounts)"
 
 # 管理员取 key 的入口
 $S tee /usr/local/sbin/account-store-reveal >/dev/null <<'CLI'

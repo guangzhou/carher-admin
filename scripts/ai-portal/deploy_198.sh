@@ -29,13 +29,45 @@ case "$ROTATE" in 0|1) ;; *) echo "ROTATE_DRY_RUN 只能是 0 或 1" >&2; exit 1
 APPLYDR="${APPLY_DRY_RUN-0}"
 case "$APPLYDR" in 0|1) ;; *) echo "APPLY_DRY_RUN 只能是 0 或 1" >&2; exit 1 ;; esac
 case "$PILOT" in *[!A-Za-z0-9_,]*) echo "PILOT_UNION_IDS 只能是 on_xxx,on_yyy" >&2; exit 1 ;; esac
+ADMIN_IDS="${ADMIN_UNION_IDS:-on_0577e767b8995740ebbf83f06d9f8bd1}"   # 管理后台白名单(默认只有刘国现)
+case "$ADMIN_IDS" in *[!A-Za-z0-9_,]*) echo "ADMIN_UNION_IDS 只能是 on_xxx,on_yyy" >&2; exit 1 ;; esac
 
 # 0) 本地门禁:测试 + e2e 不过就停
 # 门禁测试**不能继承部署开关**:server.py 会从环境变量读配置,ROTATE_DRY_RUN=0 漏进测试里的子进程
 # ⇒ 它没配 master key 就按设计拒绝启动 ⇒ 门禁假红、部署被挡(11-04 真踩到)。用 env -u 剥掉。
-env -u ROTATE_DRY_RUN -u APPLY_DRY_RUN -u PILOT_UNION_IDS \
-  python3 -m pytest scripts/ai-portal scripts/feedback scripts/ai-portal/installer -q -p no:cacheprovider
-env -u ROTATE_DRY_RUN -u APPLY_DRY_RUN -u PILOT_UNION_IDS python3 .work/ai-portal/e2e/e2e.py
+# 🔴 11-05 两个**真让门禁装绿**的坑,一起修在这儿:
+#
+# 坑一:`pytest <父目录> <子目录>` 会静默丢测试,退出码还是 0。实测(本机 pytest 9.1.1):
+#     pytest scripts/ai-portal                                  → 386 条
+#     pytest scripts/ai-portal scripts/ai-portal/installer      → **0 条**,rc=0
+#     pytest scripts/ai-portal scripts/feedback scripts/account-store → **0 条**,rc=0
+#   也就是说原来那条三参数的门禁命令**一条测试都没跑过**,一直"全绿"。
+#   ⇒ 只传互不嵌套的目录,再用条数门禁兜底(数字写小一点,只拦"整批被丢",不拦正常增删)。
+#
+# 坑二:`env -u X \` 下一行是**注释**时,反斜杠续的是注释行,`env` 就只剩自己 ⇒ 变成"打印环境变量"
+#   然后退出 0,后面的 pytest 变成另一条**没有 env -u 前缀**的命令(实测:LEAK=1 照样可见)。
+#   而 env -u 在这里是必需的:server.py 从环境变量读配置,ROTATE_DRY_RUN=0 漏进测试子进程
+#   ⇒ 它没配 master key 就按设计拒绝启动 ⇒ 门禁假红、部署被挡(11-04 真踩到)。
+#   ⇒ 不用续行:把要剥的变量定义成一个数组,每条命令都显式带上。
+GATE_ENV=(env -u ROTATE_DRY_RUN -u APPLY_DRY_RUN -u PILOT_UNION_IDS)
+GATE_DIRS=(scripts/ai-portal scripts/feedback)      # 互不嵌套;installer 已在 scripts/ai-portal 里
+# 阳性自检:env -u 真的生效了吗(续行坑会让它静默失效)
+ROTATE_DRY_RUN=0 "${GATE_ENV[@]}" python3 -c 'import os,sys; sys.exit(1 if "ROTATE_DRY_RUN" in os.environ else 0)' \
+  || { echo "FATAL: 门禁的 env -u 没生效(多半是续行/注释把命令拆断了)" >&2; exit 1; }
+N=$("${GATE_ENV[@]}" python3 -m pytest "${GATE_DIRS[@]}" -q -p no:cacheprovider --collect-only 2>/dev/null \
+      | tail -1 | grep -oE '^[0-9]+')
+[ "${N:-0}" -ge 380 ] || { echo "FATAL: 门禁只收到 ${N:-0} 条测试(应 ≥380)⇒ 收集被静默丢了,先查 pytest 参数" >&2; exit 1; }
+echo "门禁收集到 $N 条测试"
+"${GATE_ENV[@]}" python3 -m pytest "${GATE_DIRS[@]}" -q -p no:cacheprovider
+# 账户库那套要 cryptography,解释器可能和上面不同 ⇒ 单独一跑,缺依赖就明说而不是当它不存在
+if python3 -c 'import cryptography' 2>/dev/null; then
+  "${GATE_ENV[@]}" python3 -m pytest scripts/account-store -q -p no:cacheprovider
+else
+  echo "!! 本机 python3 没有 cryptography ⇒ 跳过 scripts/account-store 的 71 条(门户部署不依赖它)" >&2
+fi
+"${GATE_ENV[@]}" python3 .work/ai-portal/e2e/e2e.py
+# nginx 加固段的离线验收(它改的是生产 nginx,不能只靠部署时 nginx -t)
+"${GATE_ENV[@]}" python3 scripts/ai-portal/test_nginx_harden.py
 
 # 1) 安装器产物(要带「从 env CARHER_KEY 读 key」)
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
@@ -54,8 +86,10 @@ done
 
 # 2) 打包上传(一个 tar,少几次 jms 往返)
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
-mkdir -p "$STAGE/ai-portal/static" "$STAGE/feedback" "$STAGE/installer/pkg"
-cp scripts/ai-portal/server.py "$STAGE/ai-portal/"
+mkdir -p "$STAGE/ai-portal/static" "$STAGE/ai-portal/admin" "$STAGE/feedback" "$STAGE/installer/pkg"
+cp scripts/ai-portal/server.py scripts/ai-portal/admin_console.py "$STAGE/ai-portal/"
+# 管理后台页面:不放 static/(那里的文件不过闸门),由 admin_console.py 过完闸门才出
+cp scripts/ai-portal/admin/admin.html "$STAGE/ai-portal/admin/"
 # 公司映射(tenant_key → 公司名):外部人申请要按它判「是不是合作公司」。🔴 漏拷 = 服务端读不到 ⇒ 失败关闭
 # ⇒ **所有外部人申请全 403**(内部同事不受影响,所以不容易被发现)。只有公司标识,不含个人 id / key。
 [ -s scripts/ai-portal/tenant_map.json ] || { echo "FATAL: 缺 scripts/ai-portal/tenant_map.json(外部人申请会全部被拒)" >&2; exit 1; }
@@ -77,13 +111,17 @@ S="sudo -n"
 PILOT="$1"
 RDR="$2"
 ADR="$3"
+ADMIN_IDS="$4"
+case "$ADMIN_IDS" in *[!A-Za-z0-9_,]*|"") echo "远端没拿到 ADMIN_UNION_IDS" >&2; exit 1 ;; esac
 W=$(mktemp -d); trap 'rm -rf "$W" /tmp/ap.tgz' EXIT
 tar -C "$W" -xzf /tmp/ap.tgz
-/usr/bin/python3 -m py_compile "$W/ai-portal/server.py" "$W/feedback/feedback_server.py"
+/usr/bin/python3 -m py_compile "$W/ai-portal/server.py" "$W/ai-portal/admin_console.py" "$W/feedback/feedback_server.py"
 # 1) 文件
-$S mkdir -p /opt/carher-ai-portal/ai-portal/static /opt/carher-ai-portal/feedback /var/www/ai-installer/pkg
+$S mkdir -p /opt/carher-ai-portal/ai-portal/static /opt/carher-ai-portal/ai-portal/admin /opt/carher-ai-portal/feedback /var/www/ai-installer/pkg
 $S install -d -m 0700 /var/lib/carher-ai-portal
 $S install -m 0644 "$W/ai-portal/server.py" /opt/carher-ai-portal/ai-portal/server.py
+$S install -m 0644 "$W/ai-portal/admin_console.py" /opt/carher-ai-portal/ai-portal/admin_console.py
+$S install -m 0644 "$W/ai-portal/admin/admin.html" /opt/carher-ai-portal/ai-portal/admin/admin.html
 $S install -m 0644 "$W/ai-portal/tenant_map.json" /opt/carher-ai-portal/ai-portal/tenant_map.json
 $S install -m 0644 "$W/ai-portal/static/index.html" /opt/carher-ai-portal/ai-portal/static/index.html
 $S install -m 0644 "$W/feedback/feedback_server.py" /opt/carher-ai-portal/feedback/feedback_server.py
@@ -114,6 +152,9 @@ SS="$(old SESSION_SECRET)"; IS="$(old INTERNAL_SECRET)"
 #   master key 10-28 轮换过一次(secret 名从 litellm-secrets 变成 -r2),沿用旧值 = 轮换后重置静默全失败。
 #   secret 名跟着 deploy/litellm-proxy 的 envFrom 走(同 scripts/litellm_198_secret.py 的 SHELL_RESOLVE)。
 MK="$($S sh -c 'for s in $(kubectl -n litellm-product get deploy litellm-proxy -o jsonpath="{range .spec.template.spec.containers[0].envFrom[*]}{.secretRef.name}{\"\n\"}{end}"); do v=$(kubectl -n litellm-product get secret "$s" -o jsonpath="{.data.LITELLM_MASTER_KEY}" 2>/dev/null); [ -n "$v" ] && { printf %s "$v" | base64 -d; break; }; done')"
+ASIP="$($S kubectl -n account-store get svc account-store -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
+[ -n "$ASIP" ] || echo "!! 读不到 account-store Service ⇒ 管理后台会 503" >&2
+$S test -s /etc/account-store/clients/adminweb.token || echo "!! 缺 /etc/account-store/clients/adminweb.token(先跑 scripts/account-store/deploy_198.sh)⇒ 管理后台会 503" >&2
 [ -n "$MK" ] || echo "!! 读不到 198 网关 master key ⇒ 「重置我的 key」会自动关闭(页面退回「请提反馈」)" >&2
 # 🔴 这段跑在 **198 上**:本机的 ROTATE_DRY_RUN 传不过来,只能靠参数 $2(11-04 踩到:本机设了 0,
 #    远端读自己的环境变量拿不到 ⇒ 永远落到默认值,部署全绿、却一直是演练模式)
@@ -137,6 +178,13 @@ case "$ADR" in 0|1) ;; *) echo "远端没拿到 APPLY_DRY_RUN(应为 0/1,实际�
   echo "APPLY_ALLOW_EXTERNAL=1"   # 11-04 用户定:外部人登录飞书后就能申请;要收紧改 0
   [ -n "$MK" ] && echo "LITELLM_MASTER_KEY=$MK"
   echo "ROTATE_DRY_RUN=$RDR"
+  # 管理后台 /ai/admin/:白名单默认只有刘国现;账户库地址现读 Service ClusterIP;token 文件 root 0600
+  # (由 scripts/account-store/deploy_198.sh 生成)。缺任一项 ⇒ 后台 503,门户其余功能不受影响
+  echo "ADMIN_UNION_IDS=${ADMIN_IDS}"
+  [ -n "$ASIP" ] && echo "ACCOUNT_STORE_URL=http://$ASIP"
+  echo "ACCOUNT_STORE_TOKEN_FILE=/etc/account-store/clients/adminweb.token"
+  # 11-05 申请走账户库(POST /v1/accounts):portal client = read + reveal:self + issue。缺 ⇒ 申请 503(不退回写表)
+  echo "ACCOUNT_STORE_ISSUE_TOKEN_FILE=/etc/account-store/clients/portal.token"
 } > "$W/new.env"
 unset SS IS MK
 $S install -m 0600 -o root -g root "$W/new.env" /etc/carher-ai-portal.env
@@ -210,7 +258,110 @@ PY
 fi
 REMOTE
 $J scp "$STAGE/remote.sh" $H:/tmp/ap_remote.sh
-$J ssh $H "bash /tmp/ap_remote.sh '$PILOT' '$ROTATE' '$APPLYDR'; rc=\$?; rm -f /tmp/ap_remote.sh; exit \$rc"
+$J ssh $H "bash /tmp/ap_remote.sh '$PILOT' '$ROTATE' '$APPLYDR' '$ADMIN_IDS'; rc=\$?; rm -f /tmp/ap_remote.sh; exit \$rc"
+
+# 4b) 加固段(internal + magic)—— **幂等 reconcile**,每次部署都对齐
+# 为什么单独一段:11-04 这两段是手工加到 198 上的,**没进本脚本** ⇒ 谁要是重走一遍 4) 的首次插入
+# 路径(换 conf / 删过那一段),加固就静默消失,而部署照样全绿。这里按内容比对,缺了就补、旧了就换。
+#
+# 🔴 11-05 实测修掉的真 bug:原来 internal 段写的是 `allow 127.0.0.1; deny all;`,
+#    但 198 的 nginx 前面还有一层前置代理 ⇒ 这个 location **没有** realip 指令时,
+#    $remote_addr 永远是前置代理那一个(实测 10.68.13.97),127.0.0.1 这条规则**一次都不可能命中**。
+#    证据:机器人 pod 里带正确密钥打这个接口 → nginx 自己的 403 页(error log: "access forbidden by
+#    rule, client: 10.68.13.97"),请求根本没到门户进程;同一时刻在 198 本机打 127.0.0.1:8793 → 401。
+#    ⇒ 外部人发「登录」拿不到链接(机器人侧 audit 里 11-04 14:08 还成功过一次,18:26 加固后就断了)。
+#    修法:这个 location 也带上 realip(信任前置代理的 X-Real-IP —— 实测它会**覆盖**客户端伪造的值),
+#    再按**机器人 pod 的真实出口 IP** 放行。门户侧另有 INTERNAL_SECRET + 按人/全局两道签发限流。
+BOT_EGRESS="${BOT_EGRESS_IP:-47.96.23.21}"   # her-236(机器人)所在集群的出口 IP,11-05 在 pod 里实测
+case "$BOT_EGRESS" in *[!0-9.]*) echo "BOT_EGRESS_IP 只能是 IPv4" >&2; exit 1 ;; esac
+cat > "$STAGE/harden.sh" <<REMOTE2
+set -euo pipefail
+S="sudo -n"
+CONF=/etc/nginx/sites-enabled/chat.auto-link.com.cn.conf
+BOT_EGRESS="\$1"
+TS=\$(date +%Y%m%d-%H%M%S); \$S mkdir -p /etc/nginx/backup-ai-portal
+\$S cp -a "\$CONF" /etc/nginx/backup-ai-portal/chat.auto-link.com.cn.conf.harden.\$TS
+\$S python3 - "\$CONF" "\$BOT_EGRESS" <<'PY'
+import re, sys
+p, bot = sys.argv[1], sys.argv[2]
+s = open(p).read()
+PROXY = "10.68.13.97"   # 前置代理;只信它的 X-Real-IP(11-04/11-05 实测:伪造值会被它覆盖)
+
+internal = """    # >>> carher-ai-portal:internal >>> 签发一次性登录链接的内部接口。只有机器人该调。
+    # 11-04 红队 P0-3:这个接口原来公网可达,只靠 INTERNAL_SECRET 挡着,而拿到它就能给**任意** union_id
+    #   签出会话 ⇒ 全部 key 可读。
+    # 🔴 11-05:原来写 `allow 127.0.0.1` —— 这个 location 没有 realip ⇒ $remote_addr 恒为前置代理,
+    #   该规则**永不命中**,机器人带对密钥也被 nginx 403(实测),外部人因此登不进来。
+    #   现在:带上 realip 再按机器人出口 IP 放行。回滚=删这一段。
+    location ^~ /ai/api/internal/ {
+        set_real_ip_from %s;
+        real_ip_header X-Real-IP;
+        allow 127.0.0.1;
+        allow ::1;
+        allow %s;
+        deny all;
+        proxy_pass http://127.0.0.1:8793;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        client_max_body_size 64k;
+    }
+    # <<< carher-ai-portal:internal <<<
+""" % (PROXY, bot)
+
+harden = """    # >>> carher-ai-portal:harden >>> 11-04 P2-3:一次性登录 token 在 query 里,这条路径不记访问日志;
+    # realip:只信前置代理 %s 的 X-Real-IP(它会覆盖客户端伪造的值,11-04 实测)。回滚=删这一段
+    location = /ai/auth/magic {
+        access_log off;
+        set_real_ip_from %s;
+        real_ip_header X-Real-IP;
+        proxy_pass http://127.0.0.1:8793;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Cookie $http_cookie;
+        client_max_body_size 64k;
+        proxy_read_timeout 60s;
+    }
+    # <<< carher-ai-portal:harden <<<
+""" % (PROXY, PROXY)
+
+def reconcile(src, tag, block):
+    """按 >>> tag >>> … <<< tag <<< 整段替换;没有就插在 `location ^~ /ai/ {` 之前。"""
+    beg, end = ">>> carher-ai-portal:%s >>>" % tag, "<<< carher-ai-portal:%s <<<" % tag
+    pat = re.compile(r"[ \t]*#[^\n]*" + re.escape(beg) + r".*?" + re.escape(end) + r"[^\n]*\n",
+                     re.S)
+    hits = pat.findall(src)
+    if len(hits) > 1:
+        raise SystemExit("FATAL: %s 段出现 %d 次,人工看一眼再说" % (tag, len(hits)))
+    if hits:
+        return (src.replace(hits[0], block), "updated" if hits[0] != block else "same")
+    anchor = "    location ^~ /ai/ {"
+    if src.count(anchor) != 1:
+        raise SystemExit("FATAL: 找不到唯一的 `location ^~ /ai/ {` 锚点,拒绝瞎插")
+    return (src.replace(anchor, block + anchor), "inserted")
+
+out = s
+notes = []
+for tag, blk in (("internal", internal), ("harden", harden)):
+    out, how = reconcile(out, tag, blk)
+    notes.append("%s=%s" % (tag, how))
+if out != s:
+    open(p, "w").write(out)
+print("harden reconcile:", " ".join(notes))
+PY
+if ! \$S nginx -t 2>/dev/null; then
+  \$S cp -a /etc/nginx/backup-ai-portal/chat.auto-link.com.cn.conf.harden.\$TS "\$CONF"
+  echo "HARDEN ROLLED-BACK(nginx -t 不过)"; \$S nginx -t; exit 1
+fi
+\$S systemctl reload nginx
+# 回读:放行名单里必须有机器人出口 IP,且这个 location 带了 realip(两样缺一个都等于没修)
+\$S sed -n '/>>> carher-ai-portal:internal/,/<<< carher-ai-portal:internal/p' "\$CONF" \
+  | grep -q "allow \$BOT_EGRESS;" || { echo "FATAL: 回读没看到 allow \$BOT_EGRESS"; exit 1; }
+\$S sed -n '/>>> carher-ai-portal:internal/,/<<< carher-ai-portal:internal/p' "\$CONF" \
+  | grep -q "real_ip_header X-Real-IP;" || { echo "FATAL: internal 段没有 realip,allow 规则不会命中"; exit 1; }
+echo "nginx 加固段已对齐(备份 .harden.\$TS)"
+REMOTE2
+$J scp "$STAGE/harden.sh" $H:/tmp/ap_harden.sh
+$J ssh $H "bash /tmp/ap_harden.sh '$BOT_EGRESS'; rc=\$?; rm -f /tmp/ap_harden.sh; exit \$rc"
 
 # 5) 外网验收
 U=https://chat.auto-link.com.cn
@@ -225,6 +376,10 @@ chk "外部人可申请 APPLY_ALLOW_EXTERNAL" "$($J ssh $H "sudo -n grep -E '^AP
 chk "灰度名单 PILOT_UNION_IDS" "$($J ssh $H "sudo -n grep -E '^PILOT_UNION_IDS=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" "$PILOT"
 chk "网关 master key 已配" "$($J ssh $H "sudo -n grep -cE '^LITELLM_MASTER_KEY=.{20,}' /etc/carher-ai-portal.env" 2>/dev/null | tr -d '\r' | tail -1)" 1
 chk "未登录 /ai/api/me" "$(curl -s -o /dev/null -w '%{http_code}' -m 10 $U/ai/api/me)" 401
+chk "未登录 /ai/api/admin/accounts" "$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'X-Requested-With: ai-admin' $U/ai/api/admin/accounts)" 401
+chk "未登录 /ai/admin/ 跳登录" "$(curl -s -o /dev/null -w '%{http_code}' -m 10 $U/ai/admin/)" 302
+chk "管理后台页不在静态目录" "$(curl -s -o /dev/null -w '%{http_code}' -m 10 $U/ai/admin/admin.html)" 404
+chk "门户已接上账户库(日志无「账户库未接入」)" "$($J ssh $H "sudo -n journalctl -u carher-ai-portal --since '-2min' --no-pager | grep -c 账户库未接入" 2>/dev/null | tr -d '\r' | tail -1)" 0
 chk "页面 /ai/" "$(curl -s -o /dev/null -w '%{http_code}' -m 10 $U/ai/)" 200
 loc="$(curl -s -o /dev/null -w '%{redirect_url}' -m 10 "$U/ai/auth/login?redirect=/ai/")"
 case "$loc" in

@@ -29,6 +29,10 @@ def _load_feedback_module():
 
 
 fb = _load_feedback_module()
+# 账户库管理后台 /ai/admin/(逻辑全在 admin_console.py;这里只挂钩子,见 App.__init__ / _get / _post)
+_adm_spec = importlib.util.spec_from_file_location("ai_portal_admin_console", HERE / "admin_console.py")
+adm = importlib.util.module_from_spec(_adm_spec)
+_adm_spec.loader.exec_module(adm)
 KEY_RE = fb.KEY_RE
 text_of = fb.text_of
 
@@ -76,6 +80,12 @@ DEFAULTS = {
     # 按 mtime 热加载:每天刷新映射不用重启服务。
     "TENANT_MAP_PATH": str(HERE / "tenant_map.json"),
     "APPLY_LOCK_TTL": "86400",
+    # 11-05「以后所有的 cursor key 生成不走多维表格了,都走这儿」:申请 = 调账户库 POST /v1/accounts
+    # (地址复用管理后台的 ACCOUNT_STORE_URL;token 是 portal client:read + reveal:self + issue)。
+    # 没配 ⇒ 申请 503(失败关闭,不退回写表 —— 退回去就又是两条发 key 的路)。
+    "ACCOUNT_STORE_ISSUE_TOKEN_FILE": "",
+    "ACCOUNT_STORE_ISSUE_TIMEOUT": "120",     # 账户库自己调网关:读参照 + team + 生成,网关慢时要等
+    "APPLY_INTERNAL_ORG": "无锡车联",          # 内部人的 organization_alias(= poller resolveApplicantIdentity 对内部人写死的值)
     # 重置自己的 key(轮换)。没配 LITELLM_MASTER_KEY ⇒ 整个功能关闭(接口 501,前端退回「提反馈」)
     "LITELLM_MASTER_KEY": "",
     "LITELLM_BASE": "https://chat.auto-link.com.cn/model",   # 198 product 的新地址(cc…/pro 是旧地址,共存期后会停)
@@ -88,6 +98,9 @@ DEFAULTS = {
     "ROTATE_PROBE_MAX_TOKENS": "16",
     "INSTALL_CODE_TTL": "600",
     "MAGIC_TTL": "600",
+    # 签发一次性登录链接的两道闸(见 App.rl_magic_issue)。按人 / 全局,只数真要签的那一次。
+    "MAGIC_ISSUE_PER_MIN": "3",
+    "MAGIC_ISSUE_ALL_PER_MIN": "30",
     # 11-04 红队 P1-2:两道闸都**只数失败**(错码/格式错/过期/用过)。
     #   安装码 160 bit,撞库靠的是失败次数;成功的换取要先有一个真码,真码由 issue_code 按人限流签出来。
     #   原来全局闸每次尝试都算 ⇒ 12 个 IP 各打 10 个错码就能把全公司的安装卡住 1 分钟。
@@ -132,6 +145,11 @@ TOOLS = ("cursor", "codex", "claude")      # 三个工具共用同一把 current
 #   ④ 库里 install_codes.tool 是一列文本,"all" 直接存得下,不改表。
 ISSUABLE = TOOLS + ("all",)                # /api/install-code 能签的;redeem 原样回这一列
 APPLY_FIELD_ALLOW = {"姓名", "账户类型", "组织名称"}   # API Key/open_id/邮箱前缀/状态/key_alias 一律不许写
+# 双写期:账户库发完 key 后补写飞书表的那一行 = poller 发完 key 后 updateRecord 的字段形状(litellm-key-poller.js:1006)
+# + 申请时就有的三列。open_id 列不写:poller 写的是**它那个应用**(cli_a915…)视角的 open_id,门户拿不到。
+ISSUE_ROW_FIELDS = APPLY_FIELD_ALLOW | {"API Key", "key_alias", "邮箱前缀", "状态", "申请时间", "每日预算", "可用模型", "部门名称"}
+ISSUE_ROW_STATUS = "有效"                 # 表里已有的选项(同 poller)
+APPLY_STORE_OFF_MSG = "申请通道暂时不可用,请稍后再试或提反馈"
 # 重置时允许写的列(白名单;姓名/账户类型/组织名称/open_id/邮箱前缀 一律不动 —— 重置不改归属)
 ROTATE_FIELD_ALLOW = {"API Key", "状态", "key_alias", "点我体检", "Cursor Key", "Claude Code Key"}
 ROTATE_STATUS = "有效（已重新生成）"   # 🔴 必须是表里**已有**的选项(单选列写新值会被拒/造脏选项)
@@ -177,10 +195,10 @@ def parse_env_file(path):
 def load_config(environ=None, env_file=None):
     environ = os.environ if environ is None else environ
     filev = parse_env_file(env_file) if env_file else {}
-    keys = set(DEFAULTS) | set(REQUIRED) | set(OPTIONAL_SECRETS)
+    keys = set(DEFAULTS) | set(REQUIRED) | set(OPTIONAL_SECRETS) | set(adm.DEFAULTS)
     cfg = {}
     for k in keys:
-        cfg[k] = environ.get(k, filev.get(k, DEFAULTS.get(k, "")))
+        cfg[k] = environ.get(k, filev.get(k, DEFAULTS.get(k, adm.DEFAULTS.get(k, ""))))
     return cfg
 
 
@@ -217,6 +235,10 @@ def check_config(cfg):
         # master key 会放在 Authorization 头里发出去 ⇒ 明文 http 不许(本机回环除外,给测试)
         if not base.startswith("http://127.0.0.1") and not base.startswith("http://localhost"):
             errs.append("LITELLM_BASE 必须是 https://(master key 走这条连接)")
+    errs += adm.check_config(cfg)
+    v = str(cfg.get("ACCOUNT_STORE_ISSUE_TIMEOUT") or "120").strip()
+    if not v.isdigit() or int(v) < 1:
+        errs.append("ACCOUNT_STORE_ISSUE_TIMEOUT 要是正整数(现在是 %r)" % v)
     return errs
 
 
@@ -426,6 +448,43 @@ class LiteLLMClient:
         if st == 200 and isinstance((d or {}).get("choices"), list) and d["choices"]:
             return True, "200 model=%s" % model
         return False, "HTTP %s %s" % (st, _lit_msg(d))
+
+
+class StoreIssueError(Exception):
+    def __init__(self, status):
+        super().__init__("account-store HTTP %s" % status)
+        self.status = status
+
+
+class StoreIssueClient:
+    """申请用的账户库客户端(portal client:read + reveal:self + issue)。和管理后台的 adminweb token 分开:
+    后台有 reveal:any,申请这条路不该拿到。token 只在 Authorization 头里;回包里的明文只交给 apply()。"""
+
+    def __init__(self, cfg, read_token_file):
+        url = (cfg.get("ACCOUNT_STORE_URL") or "").strip().rstrip("/")
+        tok, why = read_token_file((cfg.get("ACCOUNT_STORE_ISSUE_TOKEN_FILE") or "").strip())
+        self.base, self.token = url, tok
+        self.timeout = int(cfg.get("ACCOUNT_STORE_ISSUE_TIMEOUT") or 120)
+        self.why = "没配 ACCOUNT_STORE_URL" if not url else ("" if tok else why)
+        self.enabled = bool(url and tok)
+
+    def call(self, method, path, body=None):
+        """返回 (status, json)。4xx/5xx 不抛(调用方按状态码分支);连不上抛 StoreIssueError(-1)。"""
+        data = json.dumps(body).encode() if body is not None else None
+        h = {"Authorization": "Bearer " + (self.token or ""), "Accept": "application/json"}
+        if data is not None:
+            h["Content-Type"] = "application/json"
+        req = urllib.request.Request(self.base + path, data=data, method=method, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read() or b"{}")
+            except ValueError:
+                return e.code, {}
+        except (urllib.error.URLError, OSError, ValueError):
+            raise StoreIssueError(-1)
 
 
 def _lit_msg(d):
@@ -746,6 +805,14 @@ class App:
         self.rl_redeem_ip = RateLimiter(cfg["REDEEM_PER_IP_PER_MIN"], 60, now)
         self.rl_redeem_all = RateLimiter(cfg["REDEEM_GLOBAL_PER_MIN"], 60, now)
         self.rl_issue = RateLimiter(5, 60, now)
+        # 11-05:签发一次性登录链接(/api/internal/magic-link)原来**一点限流都没有** ——
+        # 只要密钥对,就能给任意 union_id 无限次签会话。密钥在机器人 pod 的盘上(0600),
+        # 不是"不可能泄",所以这里按"每个 union_id"和"全局"各加一道:
+        #   · 按人 MAGIC_ISSUE_PER_MIN:正常人发一句「登录」拿一条,3 次/分钟绰绰有余;
+        #   · 全局 MAGIC_ISSUE_ALL_PER_MIN:拿到密钥后批量给陌生 union_id 刷链接会先撞这道,
+        #     而正常流量(全公司加起来)远到不了。两道都只在**真要签**时计数。
+        self.rl_magic_issue = RateLimiter(cfg["MAGIC_ISSUE_PER_MIN"], 60, now)
+        self.rl_magic_issue_all = RateLimiter(cfg["MAGIC_ISSUE_ALL_PER_MIN"], 60, now)
         # 11-04 红队 P1-1:/api/keys 和 /api/apply 原来一点限流都没有,而它们每次都真打飞书接口
         # (用的是全租户共享的 tenant token)⇒ 打满会连带 key poller、反馈服务一起受影响;
         # 而且前端本身每 20 秒轮询一次。按人限流,比上限宽松得多、够正常使用。
@@ -756,6 +823,8 @@ class App:
         self.litellm = litellm or LiteLLMClient(cfg)
         self._rows_cache, self._rows_lock = {}, threading.Lock()     # my_rows 的按人缓存
         self._tmap, self._tmap_sig, self._tmap_lock = {}, None, threading.Lock()   # tenant_key → 公司(热加载)
+        self.admin = adm.Admin(self, HttpError, RateLimiter, mask_deep, page_csp, log, short)   # /ai/admin/
+        self.store_issue = StoreIssueClient(cfg, adm.read_token_file)   # 申请 = 账户库发 key(没配 ⇒ 申请 503)
 
     def q(self, sql, args=(), one=False):
         with self.dblock:
@@ -906,6 +975,14 @@ class App:
         for k in ("open_id", "tenant_key", "name"):
             if body.get(k) is not None and not isinstance(body.get(k), str):
                 raise HttpError(400, "%s 要是字符串" % k)
+        # 🔴 限流在参数校验**之后**、真签之前:形状不对的请求不该消耗配额(本仓同一个坑踩过一次,
+        #    见 test_apply_bad_type),而真要签的每一次都要计数。日志里分得清撞的是哪一道。
+        if not self.rl_magic_issue.hit(uid):
+            log("magic 签发被限流(按人)", short(uid))
+            raise HttpError(429, "这个账号签发太频繁,过一分钟再试")
+        if not self.rl_magic_issue_all.hit("*"):
+            log("magic 签发被限流(全局)", short(uid))
+            raise HttpError(429, "签发太频繁,稍后再试")
         user = self.session_shape({"union_id": uid, "open_id": (body.get("open_id") or "")[:80],
                                    "tenant_key": (body.get("tenant_key") or "")[:80],
                                    "name": (body.get("name") or "")[:80]}, "magic")
@@ -1196,22 +1273,98 @@ class App:
         if self.cfg["APPLY_DRY_RUN"] != "0":
             log("apply dry-run", short(user["union_id"]))
             return {"ok": True, "dry_run": True, "fields": fields}
-        # 本地锁:表格搜索有延迟,连点两下时第二次可能还搜不到第一次写的行
+        if not self.store_issue.enabled:
+            log("apply 拒绝:账户库未配置", short(user["union_id"]), self.store_issue.why)
+            raise HttpError(503, APPLY_STORE_OFF_MSG)
+        # 本地锁:连点两下 / 飞书表搜索延迟时,第二次可能还搜不到第一次写的行
         t = self.now()
         self.q("delete from apply_locks where created<?", (t - int(self.cfg["APPLY_LOCK_TTL"]),))
         try:
             self.q("insert into apply_locks values(?,?,?)", (user["union_id"], APPLY_TYPE, t))
         except sqlite3.IntegrityError:
             return {"ok": True, "pending": True, "dry_run": False}
+        keep_lock = False
         try:
-            rec = self.client.create_record(self.cfg["KEY_BASE_TOKEN"], self.cfg["KEY_TABLE_ID"], fields)
+            out, keep_lock = self._apply_via_store(user, fields, rows)
+            return out
+        finally:
+            if not keep_lock:
+                self.q("delete from apply_locks where union_id=? and account_type=?", (user["union_id"], APPLY_TYPE))
+            self.drop_rows_cache(user["union_id"])
+
+    def _apply_identity(self, user, fields):
+        """发给账户库的申请人身份。全部来自登录会话(门户从不调通讯录)。
+        - organization:外部人 = 映射里的 org(apply_fields 已按人取);内部人 = APPLY_INTERNAL_ORG(同 poller)
+        - department:外部人 = 公司(同 poller「跨租户:部门 = 公司」);内部人**门户拿不到**(bot token 读通讯录
+          无 department_ids)⇒ 留空,由 lark-org-tree-sync dept → litellm-198-key-dept-sync.py 事后补
+        - open_id:留空。会话里的是 carher-236 视角,key metadata.lark_open_id 约定是 poller 应用视角,混进去会认错人"""
+        org = fields.get("组织名称") if user.get("external") else (self.cfg.get("APPLY_INTERNAL_ORG") or "").strip()
+        email = (user.get("email") or "").strip()
+        return {"union_id": user["union_id"], "name": user.get("name") or "", "email": email,
+                "email_prefix": email.split("@")[0] if re.fullmatch(r"[A-Za-z0-9._-]+@[A-Za-z0-9.-]+", email) else "",
+                "tenant_key": user.get("tenant_key") or "", "organization": org or "",
+                "department": (org or "") if user.get("external") else "", "account_type": APPLY_TYPE,
+                "actor": user["union_id"], "source": "ai-portal/apply"}
+
+    def _apply_via_store(self, user, fields, rows):
+        """账户库发 key → 本人当场取明文(reveal:self,进审计)→ 补写飞书表(失败只告警)→ 回填 record_id。
+        返回 (回包, 要不要留着 apply_locks)。留锁 = 飞书表已写好、等它被搜到;其它情况都放锁让下一次能修。"""
+        uid, S_ = user["union_id"], self.store_issue
+        try:
+            st, j = S_.call("POST", "/v1/accounts", self._apply_identity(user, fields))
+        except StoreIssueError as e:
+            log("apply 账户库不通", short(uid), e.status)
+            raise HttpError(502, "申请没成功(账户库连不上),稍后再试")
+        if st == 409 and j.get("error") == "in_progress":
+            return {"ok": True, "pending": True, "dry_run": False}, False
+        if st != 200 or not isinstance(j.get("account_id"), int):
+            log("apply 账户库拒绝", short(uid), st, str(j.get("error") or "")[:40])
+            raise HttpError(502 if st >= 500 or st < 400 else 503, "申请没成功,稍后再试;一直这样请提反馈")
+        aid, existing = j["account_id"], bool(j.get("existing"))
+        try:
+            rst, rj = S_.call("POST", "/v1/accounts/%d/reveal" % aid,
+                              {"kind": "api_key", "actor": uid, "on_behalf_of": uid,
+                               "reason": "门户申请成功,当场给本人看" if not existing else "门户申请:复用已有 key"})
+        except StoreIssueError as e:
+            rst, rj = e.status, {}
+        plain = rj.get("key") if rst == 200 else None
+        if not (isinstance(plain, str) and plain.startswith("sk-")):
+            log("apply 已发出但取不到明文", short(uid), aid, rst)
+            return {"ok": True, "dry_run": False, "account_id": aid, "existing": existing, "masked": j.get("masked") or "",
+                    "message": "key 已经生成,但这次没能显示出来。过一会儿刷新页面再看;还看不到请提反馈"}, False
+        out = {"ok": True, "dry_run": False, "account_id": aid, "existing": existing, "key": plain,
+               "masked": mask_key(plain), "key_alias": j.get("key_alias") or ""}
+        # 双写:飞书表里已经有这把(sha256 对得上的任意一行)就不再写 —— 复用旧 key / 上次补写成功但搜索延迟
+        if any(r["key"] == plain for r in rows):
+            return out, True
+        rec_fields = dict(fields)
+        rec_fields.update({"API Key": plain, "key_alias": "cursor-" + (j.get("email_prefix") or ""),
+                           "邮箱前缀": j.get("email_prefix") or "", "状态": ISSUE_ROW_STATUS,
+                           "申请时间": int(self.now() * 1000),
+                           "可用模型": ", ".join(m for m in (j.get("models") or []) if isinstance(m, str))})
+        if isinstance(j.get("max_budget"), (int, float)):
+            rec_fields["每日预算"] = j["max_budget"]
+        if user.get("external") and fields.get("组织名称"):
+            rec_fields["部门名称"] = [fields["组织名称"]]      # 同 poller:表上空的「部门名称」补成部门(外部人=公司)
+        assert set(rec_fields) <= ISSUE_ROW_FIELDS
+        try:
+            rec = self.client.create_record(self.cfg["KEY_BASE_TOKEN"], self.cfg["KEY_TABLE_ID"], rec_fields)
         except FeishuError as e:
-            self.q("delete from apply_locks where union_id=? and account_type=?", (user["union_id"], APPLY_TYPE))
-            log("apply 写表失败", short(user["union_id"]), e.code)
-            raise HttpError(502, "提交失败,稍后再试")
-        self.drop_rows_cache(user["union_id"])  # 新写了一行「生成中」⇒ 页面马上要看到,好开始轮询
-        log("apply", short(user["union_id"]), rec.get("record_id"))
-        return {"ok": True, "dry_run": False, "record_id": rec.get("record_id")}
+            # 🔴 只告警不回滚:key 已经在账户库里、用户也拿到了。下一次点申请会走「复用 + 补写」把表补上
+            log("ALERT apply 双写飞书失败(账户库已发出,未回滚)", short(uid), "account_id", aid, e.code)
+            out["warning"] = "key 已生成,但「我的 key」列表要稍后才能看到。请先把这把 key 复制保存好"
+            return out, False
+        rid = rec.get("record_id") or ""
+        out["record_id"] = rid
+        if REC_ID.match(rid):
+            try:
+                lst, _ = S_.call("POST", "/v1/accounts/%d/link" % aid, {"record_id": rid, "actor": uid})
+                if lst != 200:
+                    log("apply 回填 record_id 未成", short(uid), aid, lst)
+            except StoreIssueError as e:
+                log("apply 回填 record_id 失败", short(uid), aid, e.status)
+        log("apply", "existing" if existing else "issued", short(uid), "account_id", aid, rid)
+        return out, True
 
     # 重置自己的 key(轮换)
     def audit_rotate(self, user, rid, ip, step, result, old_alias="", new_alias="", detail=""):
@@ -1864,6 +2017,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 # 外部人的公司名(tenant 映射里的 name;内部人 / 查不到 ⇒ "")。页面放在名字旁边;
                 # org_ok=false ⇒ 外部人点申请会被 403(页面据此提前说清楚,而不是让他点了才知道)
                 "org_name": org["name"] if org else "", "org_ok": bool(org and org["org"])})
+        if p in ("/admin", "/admin/") or p.startswith("/api/admin/"):
+            return a.admin.handle_get(self, p, q)     # 闸门(OAuth + 本租户 + 白名单)和 CSRF 都在里面
         if p == "/api/keys":
             return self.send_json(200, a.keys(self.user()))
         if p.startswith("/api/"):
@@ -1893,6 +2048,8 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True}, [self.cookie(SID_COOKIE, "", a.base + "/", 0)])
         if public:
             return self.send_json(200, a.redeem(self.body_json(), self.client_ip(), self.headers.get("User-Agent") or ""))
+        if p.startswith("/api/admin/"):
+            return a.admin.handle_post(self, p)       # 上面 same_origin(required) 已过;里面再验 X-Requested-With
         routes = {"/api/apply": a.apply, "/api/install-code": a.issue_code, "/api/feedback": a.feedback}
         withip = {"/api/keys/reveal": a.reveal, "/api/keys/rotate": a.rotate}   # 这两个要记审计 ⇒ 带 IP
         if p not in routes and p not in withip:

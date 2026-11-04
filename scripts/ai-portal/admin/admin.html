@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>账户库后台</title>
+<!-- 挂在 https://chat.auto-link.com.cn/ai/admin/ 。单文件：CSS/JS 内联（CSP 按 sha256 放行），不引任何外链，
+     不许内联 style="" / onclick=""。闸门全在服务端（admin_console.py）：飞书 OAuth 会话 + 本公司租户 + ADMIN_UNION_IDS。
+     🔴 明文：只在点「显示」并填原因后现取，只放进那一格的 textContent；30 秒 / 切走标签页 / 翻页就重新打码；
+     不进 URL / localStorage / console。localStorage 只存主题偏好。本页只读：封禁 / 换发走 SOP。 -->
+<style>
+/* 变量照抄 static/index.html（同一套明暗主题） */
+:root{
+  --bg:#f5f6f8; --surface:#ffffff; --fg:#151c27; --muted:#5d6878; --line:#e0e4ea; --rail:#cfd5de;
+  --code-bg:#eef1f5; --accent:#2f5bd3; --on-t:#ffffff; --t:#151c27;
+  --ok:#11795a; --ok-bg:#e3f4ec; --warn:#8a5a00; --warn-bg:#fff6e5; --warn-line:#e8c57a;
+  --err:#b42318; --err-bg:#fdecea; --err-line:#f2b8b1; --ext:#6b3fb8; --ext-bg:#f0eafb;
+  --font-body:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC","Noto Sans SC","Source Han Sans SC",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono","SF Mono",Consolas,"Liberation Mono",monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0f141b; --surface:#171e28; --fg:#e7ecf3; --muted:#9aa6b6; --line:#29323f; --rail:#344050;
+  --code-bg:#1f2834; --accent:#86a7ff; --on-t:#0f141b; --t:#e7ecf3;
+  --ok:#4fd1a1; --ok-bg:#12302a; --warn:#f0c068; --warn-bg:#2a2314; --warn-line:#5c4a22;
+  --err:#ff9b8f; --err-bg:#3a1916; --err-line:#6b2b25; --ext:#c3a6ff; --ext-bg:#2a2040; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f141b; --surface:#171e28; --fg:#e7ecf3; --muted:#9aa6b6; --line:#29323f; --rail:#344050;
+  --code-bg:#1f2834; --accent:#86a7ff; --on-t:#0f141b; --t:#e7ecf3;
+  --ok:#4fd1a1; --ok-bg:#12302a; --warn:#f0c068; --warn-bg:#2a2314; --warn-line:#5c4a22;
+  --err:#ff9b8f; --err-bg:#3a1916; --err-line:#6b2b25; --ext:#c3a6ff; --ext-bg:#2a2040; color-scheme:dark}
+
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-body);font-size:15px;line-height:1.65;
+  padding:22px max(16px,env(safe-area-inset-right,0px)) 56px max(16px,env(safe-area-inset-left,0px));overflow-wrap:break-word}
+.wrap{max-width:1200px;margin:0 auto}
+p{margin:0}
+a{color:var(--accent);text-underline-offset:3px}
+a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+[hidden]{display:none!important}
+code{font-family:var(--font-mono);font-size:.88em;background:var(--code-bg);padding:1px 6px;border-radius:4px;word-break:break-all}
+.sub{font-size:13px;color:var(--muted)}
+.sr{position:absolute!important;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;margin:-1px}
+.skip:focus{position:fixed!important;left:12px;top:12px;width:auto;height:auto;clip:auto;margin:0;z-index:9;background:var(--surface);color:var(--accent);border:1px solid var(--line);border-radius:8px;padding:6px 12px}
+.mono{font-family:var(--font-mono);font-variant-ligatures:none;word-break:break-all}
+
+/* 按钮（同 index.html） */
+.btn{appearance:none;display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--t);color:var(--on-t);
+  font:inherit;font-weight:700;font-size:14.5px;text-decoration:none;border:1.5px solid var(--t);padding:6px 16px;border-radius:9px;
+  min-height:40px;cursor:pointer;line-height:1.4;text-align:center;white-space:nowrap}
+.btn:hover{opacity:.9}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.ghost{background:var(--surface);color:var(--fg);border-color:var(--line);font-weight:500}
+.btn.ghost:hover{border-color:var(--muted);opacity:1}
+.btn.sm{min-height:32px;padding:3px 11px;font-size:13px;border-radius:7px}
+.btn.danger{background:var(--err);border-color:var(--err);color:#fff}
+
+/* 顶栏 / 标签页 */
+.top{display:flex;align-items:center;justify-content:space-between;gap:8px 16px;flex-wrap:wrap;margin-bottom:16px;min-height:40px}
+.brand{font-weight:900;font-size:17px;letter-spacing:.02em;display:flex;align-items:center;gap:8px}
+.brand i{width:10px;height:10px;border-radius:3px;background:linear-gradient(135deg,var(--accent),var(--ok) 50%,var(--err));display:inline-block}
+.brand .tag{font-size:12px;font-weight:700;padding:1px 8px;border-radius:999px;color:var(--ext);background:var(--ext-bg)}
+.who{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap;font-size:14px}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:16px;overflow-x:auto}
+.tabs button{appearance:none;font:inherit;font-size:15px;background:none;border:0;border-bottom:2.5px solid transparent;padding:8px 16px;
+  color:var(--muted);cursor:pointer;font-weight:600;white-space:nowrap;min-height:42px}
+.tabs button[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--accent)}
+
+/* 卡片 / 提示条 */
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;min-width:0}
+.note{border-radius:10px;padding:10px 14px;font-size:14px;border:1px solid var(--warn-line);background:var(--warn-bg)}
+.note.err{border-color:var(--err-line);background:var(--err-bg);color:var(--fg)}
+.note.err b{color:var(--err)}
+.sop{margin-top:16px;display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline}
+
+/* 筛选 */
+form.filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px 12px;align-items:end}
+form.filters .wide{grid-column:span 2}
+label.f{display:flex;flex-direction:column;gap:3px;font-size:13px;color:var(--muted);min-width:0;font-weight:600}
+input,select,textarea{font:inherit;font-size:14.5px;font-weight:400;color:var(--fg);background:var(--surface);border:1px solid var(--line);border-radius:8px;
+  padding:6px 10px;min-height:40px;width:100%;min-width:0}
+textarea{resize:vertical;min-height:76px}
+.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.bar{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:6px 14px;margin:14px 0 8px;font-size:14px}
+.bar #count{font-weight:700}
+.bar select{width:auto;min-height:34px;padding:3px 8px}
+.bar .actions{flex-wrap:nowrap}
+
+/* 表格 */
+table{width:100%;border-collapse:separate;border-spacing:0;background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:14px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12.5px;color:var(--muted);font-weight:700;background:var(--code-bg);white-space:nowrap}
+tbody tr:last-child td{border-bottom:0}
+td b{font-weight:700}
+td .sub{display:block}
+td.empty{padding:28px;text-align:center;color:var(--muted)}
+.st{display:inline-block;font-size:12.5px;font-weight:700;padding:1px 9px;border-radius:999px;line-height:1.6;white-space:nowrap}
+.st.ok{color:var(--ok);background:var(--ok-bg)}
+.st.pend{color:var(--warn);background:var(--warn-bg)}
+.st.off,.st.dis{color:var(--muted);background:var(--code-bg)}
+.st.fail{color:var(--err);background:var(--err-bg)}
+.keycell{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center}
+.keycell .k{color:var(--muted)}
+.keycell .k.plain{color:var(--fg);background:var(--warn-bg);border-radius:4px;padding:0 4px}
+.keycell .t{font-size:12px;color:var(--warn);font-variant-numeric:tabular-nums}
+.pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:10px;font-size:14px;flex-wrap:wrap}
+
+/* 统计 */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px}
+.kpi b{display:block;font-size:28px;font-weight:900;line-height:1.2;font-variant-numeric:tabular-nums}
+.kpi span{font-size:13px;color:var(--muted)}
+.dist{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.dist h3{margin:0 0 8px;font-size:15px}
+.dist ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.dist li{display:grid;grid-template-columns:minmax(0,9em) minmax(0,1fr) auto;gap:8px;align-items:center;font-size:13.5px}
+.dist li .n{font-variant-numeric:tabular-nums;color:var(--muted);text-align:right;min-width:3em}
+.dist li .lb{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dist meter{width:100%;height:10px;accent-color:var(--accent)}
+.dist meter::-webkit-meter-bar{background:var(--code-bg);border:0;border-radius:5px}
+.dist meter::-webkit-meter-optimum-value{background:var(--accent);border-radius:5px}
+.dist meter::-moz-meter-bar{background:var(--accent)}
+
+/* 显示明文：原因对话框 */
+dialog{border:1px solid var(--line);border-radius:14px;background:var(--surface);color:var(--fg);padding:18px 20px;width:min(460px,calc(100vw - 32px))}
+dialog::backdrop{background:rgba(15,20,27,.45)}
+dialog h2{margin:0 0 6px;font-size:17px}
+dialog form{display:flex;flex-direction:column;gap:12px}
+dialog .who{font-size:14px}
+.err-msg{color:var(--err);font-size:13.5px}
+
+/* 窄屏：表格变卡片 */
+@media (max-width:760px){
+  body{font-size:14.5px;padding-top:14px}
+  form.filters{grid-template-columns:1fr 1fr}
+  form.filters .wide{grid-column:1 / -1}
+  table,thead,tbody,tr,td{display:block}
+  table{border:0;background:none}
+  thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+  tbody tr{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:8px 12px;margin-bottom:10px}
+  td{border:0;padding:3px 0 3px 6em;display:block;position:relative;min-height:1.6em}
+  td::before{content:attr(data-l);position:absolute;left:0;top:4px;color:var(--muted);font-size:12.5px;font-weight:700}
+  .bar{align-items:flex-start}
+  td.empty{display:block}
+  td.empty::before{content:none}
+  .kpi b{font-size:24px}
+}
+</style>
+</head>
+<body>
+<a href="#main" class="sr skip">跳到正文</a>
+<div id="live" class="sr" aria-live="polite" aria-atomic="true"></div>
+<div id="alert" class="sr" role="alert" aria-atomic="true"></div>
+
+<div class="wrap">
+<header class="top">
+  <div class="brand"><i aria-hidden="true"></i>账户库后台 <span class="tag">只读</span></div>
+  <div class="who">
+    <span>管理员 <b id="who-name">…</b></span>
+    <button type="button" class="btn ghost sm" id="theme" aria-label="切换明暗主题">主题</button>
+    <a class="btn ghost sm" href="/ai/">回门户</a>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+<div class="note err" id="fatal" hidden></div>
+
+<div class="tabs" role="tablist" aria-label="后台功能">
+  <button type="button" role="tab" id="tab-list" aria-controls="p-list" aria-selected="true">查询</button>
+  <button type="button" role="tab" id="tab-stats" aria-controls="p-stats" aria-selected="false" tabindex="-1">统计</button>
+  <button type="button" role="tab" id="tab-audit" aria-controls="p-audit" aria-selected="false" tabindex="-1">审计</button>
+</div>
+
+<!-- ═══ 查询 ═══ -->
+<section id="p-list" role="tabpanel" aria-labelledby="tab-list">
+  <form class="filters card" id="f" autocomplete="off">
+    <label class="f wide">姓名 / key_alias / 邮箱前缀<input id="f-q" name="q" type="search" maxlength="100" placeholder="例：张三 或 cursor-zhangsan"></label>
+    <label class="f">组织<input id="f-org" name="org" maxlength="100" placeholder="精确，如 无锡车联"></label>
+    <label class="f">部门<input id="f-dept" name="dept" maxlength="100" placeholder="包含即可"></label>
+    <label class="f">状态<select id="f-status" name="status">
+      <option value="">全部</option><option value="active">有效</option><option value="disabled">已禁用</option>
+      <option value="completed">已完成</option><option value="failed">生成失败</option><option value="unknown">未知</option></select></label>
+    <label class="f">类型<select id="f-type" name="type">
+      <option value="">全部</option><option value="cursor">Cursor</option><option value="claude_code">Claude Code</option>
+      <option value="carher">CarHer</option></select></label>
+    <div class="actions">
+      <button class="btn" type="submit">搜索</button>
+      <button class="btn ghost" type="reset" id="f-reset">清空</button>
+    </div>
+  </form>
+  <div class="bar">
+    <span><span id="count">—</span> <span class="sub" id="gwnote"></span></span>
+    <span class="actions">
+      <label class="sub" for="f-size">每页</label>
+      <select id="f-size" class="sm-select"><option>20</option><option selected>50</option><option>100</option></select>
+      <button type="button" class="btn ghost sm" id="export">导出 CSV（不含明文）</button>
+    </span>
+  </div>
+  <table id="tbl" aria-describedby="count">
+    <thead><tr><th scope="col">人</th><th scope="col">组织 / 部门</th><th scope="col">类型</th><th scope="col">状态</th>
+      <th scope="col">key（打码）</th><th scope="col">申请时间</th><th scope="col">网关</th></tr></thead>
+    <tbody id="rows"><tr><td class="empty" colspan="7">加载中…</td></tr></tbody>
+  </table>
+  <nav class="pager" aria-label="翻页">
+    <button type="button" class="btn ghost sm" id="prev">上一页</button>
+    <span id="pageinfo" class="sub"></span>
+    <button type="button" class="btn ghost sm" id="next">下一页</button>
+  </nav>
+</section>
+
+<!-- ═══ 统计 ═══ -->
+<section id="p-stats" role="tabpanel" aria-labelledby="tab-stats" hidden>
+  <div class="kpis">
+    <div class="card kpi"><b id="k-total">—</b><span>账户总数</span></div>
+    <div class="card kpi"><b id="k-persons">—</b><span>人数</span></div>
+    <div class="card kpi"><b id="k-7d">—</b><span>近 7 天新发（按申请时间）</span></div>
+    <div class="card kpi"><b id="k-active">—</b><span>有效</span></div>
+  </div>
+  <div class="dist">
+    <div class="card"><h3>按组织</h3><ol id="d-org"></ol></div>
+    <div class="card"><h3>按状态</h3><ol id="d-status"></ol></div>
+    <div class="card"><h3>按类型</h3><ol id="d-type"></ol></div>
+    <div class="card"><h3>近 7 天每天（北京时间）</h3><ol id="d-7d"></ol></div>
+  </div>
+</section>
+
+<!-- ═══ 审计 ═══ -->
+<section id="p-audit" role="tabpanel" aria-labelledby="tab-audit" hidden>
+  <div class="bar">
+    <span class="sub">谁在什么时候看了谁的 key、原因是什么。来自账户库审计表（只能追加，改不了）。</span>
+    <span class="actions">
+      <label class="sub" for="a-scope">范围</label>
+      <select id="a-scope"><option value="reveal" selected>只看取明文</option><option value="all">全部动作</option></select>
+    </span>
+  </div>
+  <table>
+    <thead><tr><th scope="col">时间</th><th scope="col">谁</th><th scope="col">动作</th><th scope="col">看了谁的</th><th scope="col">原因</th></tr></thead>
+    <tbody id="arows"><tr><td class="empty" colspan="5">加载中…</td></tr></tbody>
+  </table>
+  <nav class="pager"><button type="button" class="btn ghost sm" id="amore" hidden>更早的</button></nav>
+</section>
+
+<p class="sop sub" id="sop"><b>封禁 / 换发不在这里做。</b><span id="sop-text"></span><code id="sop-path"></code></p>
+</main>
+</div>
+
+<dialog id="dlg" aria-labelledby="dlg-h">
+  <form id="dlg-f" method="dialog">
+    <h2 id="dlg-h">显示明文 key</h2>
+    <p class="who">要看 <b id="dlg-who"></b> 的 key（<span id="dlg-alias" class="mono"></span>）。</p>
+    <label class="f">原因（必填，写进审计）<textarea id="dlg-reason" maxlength="200" aria-required="true" placeholder="例：本人丢了 key 来要 / 排查 502"></textarea></label>
+    <p class="sub">显示 30 秒后自动重新打码。每次显示都会记一条审计。</p>
+    <p class="err-msg" id="dlg-err" role="alert"></p>
+    <div class="actions">
+      <button class="btn danger" type="submit" id="dlg-ok">显示</button>
+      <button class="btn ghost" type="button" id="dlg-cancel">取消</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+(function(){
+"use strict";
+var $ = function(id){ return document.getElementById(id); };
+var REMASK_MS = 30000;
+var ST = { active:["有效","ok"], disabled:["已禁用","dis"], completed:["已完成","off"], failed:["生成失败","fail"], unknown:["未知","pend"] };
+var TY = { cursor:"Cursor", claude_code:"Claude Code", carher:"CarHer" };
+var GW = { ok:["正常","ok"], blocked:["已封禁","fail"], missing:["网关无此 key","pend"], error:["没查到","off"], nokey:["无 key","off"], unchecked:["未查","off"] };
+var state = { page:1, size:50, total:0, filt:{}, rows:[], shown:null, auditBefore:null, me:null };
+
+function say(m){ var l=$("live"); l.textContent=""; setTimeout(function(){ l.textContent=m; }, 30); }
+function shout(m){ var l=$("alert"); l.textContent=""; setTimeout(function(){ l.textContent=m; }, 30); }
+function el(tag, cls, text){ var e=document.createElement(tag); if (cls) e.className=cls; if (text!==undefined && text!==null) e.textContent=String(text); return e; }
+function pref(k, v){ try{ if (v === undefined) return localStorage.getItem("acctadmin-"+k); localStorage.setItem("acctadmin-"+k, v); }catch(e){ return null; } }
+// ───────── 主题：自动 → 亮 → 暗（只存这一个偏好） ─────────
+var THEMES = ["", "light", "dark"], THEME_TXT = { "":"主题：跟随系统", light:"主题：亮", dark:"主题：暗" };
+function applyTheme(t){
+  if (t) document.documentElement.setAttribute("data-theme", t); else document.documentElement.removeAttribute("data-theme");
+  $("theme").textContent = THEME_TXT[t] || THEME_TXT[""];
+}
+applyTheme(pref("theme") || "");
+$("theme").addEventListener("click", function(){
+  var cur = document.documentElement.getAttribute("data-theme") || "";
+  var nx = THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length];
+  applyTheme(nx); pref("theme", nx); say(THEME_TXT[nx]);
+});
+
+// ───────── 接口：每个请求都带 X-Requested-With（服务端 CSRF 校验） ─────────
+function ApiError(m, s){ this.message = m; this.status = s; }
+function api(method, path, body, raw){
+  var opt = { method:method, credentials:"same-origin", cache:"no-store", redirect:"error",
+              headers:{ "Accept": raw ? "text/csv" : "application/json", "X-Requested-With":"ai-admin" } };
+  if (body !== undefined){ opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  return fetch(path, opt).then(function(r){
+    if (r.status === 401){ location.href = "/ai/auth/login?redirect=" + encodeURIComponent("/ai/admin/"); throw new ApiError("登录过期了", 401); }
+    if (raw && r.ok) return r.blob();
+    return r.text().then(function(t){
+      var j = null; try{ j = t ? JSON.parse(t) : {}; }catch(e){}
+      if (r.ok && j) return j;
+      throw new ApiError((j && typeof j.message === "string" && j.message) || ("请求没成功（HTTP " + r.status + "）"), r.status);
+    });
+  }, function(){ throw new ApiError("连不上服务器，检查网络后再试", 0); });
+}
+function fatal(e){ var f=$("fatal"); f.textContent=""; f.appendChild(el("b", "", "出错了：")); f.appendChild(document.createTextNode(e.message || String(e))); f.hidden=false; shout(e.message || "出错了"); }
+function clearFatal(){ $("fatal").hidden = true; }
+
+function fmtTime(iso){
+  if (!iso) return "—";
+  var d = new Date(iso); if (isNaN(d)) return String(iso);
+  try{ return d.toLocaleString("zh-CN", { timeZone:"Asia/Shanghai", year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12:false }); }
+  catch(e){ return d.toISOString().slice(0,16).replace("T"," "); }
+}
+function chip(map, k){ var v = map[k] || [k || "—", "off"]; return el("span", "st " + v[1], v[0]); }
+function td(label, cls){ var c = el("td", cls); c.setAttribute("data-l", label); return c; }
+
+// ───────── 标签页 ─────────
+var TABS = ["list", "stats", "audit"], loaded = {};
+function tab(name, focus){
+  TABS.forEach(function(t){
+    var b = $("tab-"+t), on = t === name;
+    b.setAttribute("aria-selected", on ? "true" : "false"); b.tabIndex = on ? 0 : -1;
+    $("p-"+t).hidden = !on;
+  });
+  if (focus) $("tab-"+name).focus();
+  remask();
+  if (name === "stats" && !loaded.stats) loadStats();
+  if (name === "audit" && !loaded.audit) loadAudit(true);
+  try{ history.replaceState(null, "", "#" + name); }catch(e){}
+}
+TABS.forEach(function(t, i){
+  var b = $("tab-"+t);
+  b.addEventListener("click", function(){ tab(t); });
+  b.addEventListener("keydown", function(ev){
+    if (ev.key === "ArrowRight" || ev.key === "ArrowLeft"){
+      ev.preventDefault(); tab(TABS[(i + (ev.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length], true);
+    }
+  });
+});
+
+// ───────── 查询 ─────────
+function readFilters(){
+  var f = {};
+  ["q","org","dept","status","type"].forEach(function(k){ var v = $("f-"+k).value.trim(); if (v) f[k] = v; });
+  return f;
+}
+function qs(o){ return Object.keys(o).map(function(k){ return encodeURIComponent(k) + "=" + encodeURIComponent(o[k]); }).join("&"); }
+function loadList(){
+  remask();
+  var p = Object.assign({}, state.filt, { page:state.page, size:state.size });
+  $("rows").setAttribute("aria-busy", "true");
+  return api("GET", "/ai/api/admin/accounts?" + qs(p)).then(function(d){
+    clearFatal();
+    state.rows = d.items || []; state.total = d.total || 0;
+    renderRows();
+  }, fatal).then(function(){ $("rows").removeAttribute("aria-busy"); });
+}
+function renderRows(){
+  var tb = $("rows"); tb.textContent = "";
+  var pages = Math.max(1, Math.ceil(state.total / state.size));
+  $("count").textContent = "共 " + state.total + " 个账户";
+  $("pageinfo").textContent = "第 " + state.page + " / " + pages + " 页";
+  $("prev").disabled = state.page <= 1; $("next").disabled = state.page >= pages;
+  if (!state.rows.length){ var tr = el("tr"), c = el("td", "empty", "没有符合条件的账户"); c.colSpan = 7; tr.appendChild(c); tb.appendChild(tr); return; }
+  state.rows.forEach(function(r){
+    var tr = el("tr");
+    var c1 = td("人"); c1.appendChild(el("b", "", r.name || "（无姓名）"));
+    if (r.email_prefix) c1.appendChild(el("span", "sub", r.email_prefix));
+    if (r.alias) c1.appendChild(el("span", "sub mono", r.alias));
+    var c2 = td("组织"); c2.appendChild(el("span", "", r.org || "—"));
+    if (r.depts && r.depts.length) c2.appendChild(el("span", "sub", r.depts.join("、")));
+    var c3 = td("类型", ""); c3.textContent = TY[r.type] || r.type || "—";
+    var c4 = td("状态"); c4.appendChild(chip(ST, r.status));
+    if (r.status_raw && r.status === "failed") c4.appendChild(el("span", "sub", r.status_raw));
+    var c5 = td("key"); var kc = el("div", "keycell");
+    var k = el("span", "k mono", r.masked || "—"); k.id = "k-" + r.id; kc.appendChild(k);
+    if (r.kinds && r.kinds.indexOf("api_key") >= 0){
+      var b = el("button", "btn ghost sm", "显示"); b.type = "button";
+      b.setAttribute("aria-label", "显示 " + (r.name || "") + " 的明文 key");
+      b.addEventListener("click", function(){ askReveal(r, b); });
+      kc.appendChild(b);
+    } else if (r.secret_state && r.secret_state !== "encrypted"){
+      kc.appendChild(el("span", "sub", r.secret_state === "hash_only" ? "只存了哈希，取不回" : r.secret_state));
+    }
+    var t = el("span", "t"); t.id = "t-" + r.id; kc.appendChild(t);
+    c5.appendChild(kc);
+    var c6 = td("申请"); c6.textContent = fmtTime(r.applied_at);
+    var c7 = td("网关"); c7.appendChild(chip(GW, r.gw));
+    [c1,c2,c3,c4,c5,c6,c7].forEach(function(c){ tr.appendChild(c); });
+    tb.appendChild(tr);
+  });
+  say("共 " + state.total + " 个账户，第 " + state.page + " 页");
+}
+$("f").addEventListener("submit", function(ev){ ev.preventDefault(); state.filt = readFilters(); state.page = 1; loadList(); });
+$("f").addEventListener("reset", function(){ setTimeout(function(){ state.filt = {}; state.page = 1; loadList(); }, 0); });
+$("f-size").addEventListener("change", function(){ state.size = parseInt($("f-size").value, 10) || 50; state.page = 1; loadList(); });
+$("prev").addEventListener("click", function(){ if (state.page > 1){ state.page--; loadList(); } });
+$("next").addEventListener("click", function(){ state.page++; loadList(); });
+
+// ───────── 显示明文：先填原因；30 秒 / 切走标签页 / 翻页 / 换标签 ⇒ 重新打码 ─────────
+var dlgRow = null, dlgBtn = null;
+function askReveal(r, btn){
+  if (state.shown && state.shown.id === r.id){ remask(); return; }
+  dlgRow = r; dlgBtn = btn;
+  $("dlg-who").textContent = r.name || "（无姓名）"; $("dlg-alias").textContent = r.alias || r.masked || "";
+  $("dlg-reason").value = ""; $("dlg-err").textContent = "";
+  $("dlg").showModal(); $("dlg-reason").focus();
+}
+$("dlg-cancel").addEventListener("click", function(){ $("dlg").close(); if (dlgBtn) dlgBtn.focus(); });
+$("dlg-f").addEventListener("submit", function(ev){
+  ev.preventDefault();
+  var reason = $("dlg-reason").value.trim();
+  if (reason.length < 2){ $("dlg-err").textContent = "要写原因（至少 2 个字），会写进审计"; $("dlg-reason").focus(); return; }
+  var r = dlgRow, btn = dlgBtn; $("dlg-ok").disabled = true;
+  api("POST", "/ai/api/admin/reveal", { account_id:r.id, kind:"api_key", reason:reason }).then(function(d){
+    $("dlg").close(); showPlain(r, btn, d.key); d.key = null;
+  }, function(e){ $("dlg-err").textContent = e.message; }).then(function(){ $("dlg-ok").disabled = false; });
+});
+function showPlain(r, btn, key){
+  remask();
+  var k = $("k-" + r.id), t = $("t-" + r.id); if (!k) return;
+  k.textContent = key; k.classList.add("plain"); btn.textContent = "藏起来";
+  var left = REMASK_MS / 1000; t.textContent = left + " 秒后打码";
+  state.shown = { id:r.id, masked:r.masked, btn:btn,
+    tick: setInterval(function(){ left--; t.textContent = left > 0 ? left + " 秒后打码" : ""; }, 1000),
+    timer: setTimeout(remask, REMASK_MS) };
+  say("已显示明文，30 秒后自动打码");
+}
+function remask(){
+  var s = state.shown; if (!s) return;
+  clearTimeout(s.timer); clearInterval(s.tick); state.shown = null;
+  var k = $("k-" + s.id), t = $("t-" + s.id);
+  if (k){ k.textContent = s.masked || "—"; k.classList.remove("plain"); }
+  if (t) t.textContent = "";
+  if (s.btn) s.btn.textContent = "显示";
+}
+document.addEventListener("visibilitychange", function(){ if (document.hidden) remask(); });
+window.addEventListener("pagehide", remask);
+// ───────── 导出（服务端生成，不含明文） ─────────
+$("export").addEventListener("click", function(){
+  var b = $("export"); b.disabled = true;
+  api("GET", "/ai/api/admin/export.csv?" + qs(readFilters()), undefined, true).then(function(blob){
+    var u = URL.createObjectURL(blob), a = document.createElement("a");
+    a.href = u; a.download = "accounts-" + new Date().toISOString().slice(0,10) + ".csv";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(u); }, 5000);
+    say("已导出");
+  }, fatal).then(function(){ b.disabled = false; });
+});
+
+// ───────── 统计 ─────────
+var ST_TXT = { active:"有效", disabled:"已禁用", completed:"已完成", failed:"生成失败", unknown:"未知" };
+function dist(id, pairs, label){
+  var ol = $(id); ol.textContent = "";
+  var max = 0; (pairs || []).forEach(function(p){ if (p[1] > max) max = p[1]; });
+  if (!pairs || !pairs.length){ ol.appendChild(el("li", "sub", "没有数据")); return; }
+  pairs.forEach(function(p){
+    var li = el("li"), name = label ? label(p[0]) : p[0];
+    var lb = el("span", "lb", name); lb.title = name; li.appendChild(lb);
+    var m = document.createElement("meter"); m.min = 0; m.max = max || 1; m.value = p[1];
+    m.setAttribute("aria-label", name + " " + p[1]); li.appendChild(m);
+    li.appendChild(el("span", "n", p[1])); ol.appendChild(li);
+  });
+}
+function loadStats(){
+  return api("GET", "/ai/api/admin/stats").then(function(d){
+    clearFatal(); loaded.stats = true;
+    $("k-total").textContent = d.accounts; $("k-persons").textContent = d.persons; $("k-7d").textContent = d.applied_7d;
+    var act = 0; (d.by_status || []).forEach(function(p){ if (p[0] === "active") act = p[1]; }); $("k-active").textContent = act;
+    dist("d-org", d.by_org); dist("d-status", d.by_status, function(k){ return ST_TXT[k] || k; });
+    dist("d-type", d.by_type, function(k){ return TY[k] || k; }); dist("d-7d", d.applied_by_day_7d);
+  }, fatal);
+}
+
+// ───────── 审计 ─────────
+var ACT = { "reveal":"取明文", "reveal.denied":"取明文被拒", "reveal.fail":"取明文失败", "backup.export":"备份导出" };
+function loadAudit(reset){
+  if (reset){ state.auditBefore = null; $("arows").textContent = ""; }
+  var p = { scope:$("a-scope").value }; if (state.auditBefore) p.before_id = state.auditBefore;
+  return api("GET", "/ai/api/admin/audit?" + qs(p)).then(function(d){
+    clearFatal(); loaded.audit = true;
+    var tb = $("arows");
+    if (reset && !(d.items || []).length){ var tr0 = el("tr"), c0 = el("td", "empty", "还没有记录"); c0.colSpan = 5; tr0.appendChild(c0); tb.appendChild(tr0); }
+    (d.items || []).forEach(function(it){
+      var tr = el("tr");
+      var a = td("时间"); a.textContent = fmtTime(it.ts);
+      var b = td("谁"); b.appendChild(el("span", "mono", it.actor));
+      var c = td("动作"); c.textContent = ACT[it.action] || it.action;
+      var e = td("看了谁"); e.appendChild(el("span", "", it.owner_name || (it.account_id ? "#" + it.account_id : "—")));
+      if (it.key_alias) e.appendChild(el("span", "sub mono", it.key_alias));
+      var f = td("原因"); f.textContent = it.reason || "—";
+      [a,b,c,e,f].forEach(function(x){ tr.appendChild(x); }); tb.appendChild(tr);
+    });
+    state.auditBefore = d.next_before_id; $("amore").hidden = !d.next_before_id;
+  }, fatal);
+}
+$("a-scope").addEventListener("change", function(){ loadAudit(true); });
+$("amore").addEventListener("click", function(){ loadAudit(false); });
+
+// ───────── 启动 ─────────
+api("GET", "/ai/api/admin/me").then(function(me){
+  state.me = me; $("who-name").textContent = me.name || "";
+  $("sop-text").textContent = me.sop.text + " "; $("sop-path").textContent = me.sop.skill;
+  $("gwnote").textContent = me.gw_check ? "「网关」列 = 198 网关上这把 key 现在是否封禁" : "（网关状态没开：门户没配网关 key）";
+  if (!me.store_ok) fatal({ message:"后台还没接上账户库" });
+  var h = (location.hash || "").slice(1);
+  loadList();
+  if (TABS.indexOf(h) > 0) tab(h);
+}, fatal);
+})();
+</script>
+</body>
+</html>

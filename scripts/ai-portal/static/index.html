@@ -414,6 +414,19 @@ body:not(.is-ext) .ext-only{display:none!important}
           <p class="sub">新 key 只在这里显示这一次；以后要看，点上面列表里的「显示」也行。</p>
         </div>
       </div>
+      <!-- ═══ 申请成功 ═══ 新 key 明文只在 applyPlain 变量里(同 rotPlain 的规矩):点「显示」才进 DOM,30 秒自动藏 -->
+      <div class="rot-done" id="apply-done" tabindex="-1" hidden>
+        <h3>key 已经生成好了</h3>
+        <div class="rot-key">
+          <code id="apply-val" aria-live="off"></code>
+          <span class="acts">
+            <button type="button" class="btn ghost sm" id="apply-show">显示</button>
+            <button type="button" class="btn sm" id="apply-copy">复制</button>
+          </span>
+        </div>
+        <p><b>下一步：</b>去下面<a href="#s-install" id="apply-to-install">第 2 步</a>复制一行命令，在电脑上跑一次就配好了。</p>
+        <p class="note" id="apply-warn" hidden></p>
+      </div>
       <details class="hist" id="keys-hist" hidden>
         <summary id="hist-sum">历史 key</summary>
         <div class="keys" id="hist-list"></div>
@@ -423,8 +436,7 @@ body:not(.is-ext) .ext-only{display:none!important}
       <div id="keys-empty" hidden>
         <div class="body">
           <div class="card">
-            <p><b id="empty-h">你还没有可用的 key。</b>点一下就申请，大约 <b>1~2 分钟</b>生成好。<br>
-              <span class="sub">不会有飞书通知，请留在这个页面，好了这里会自动出来。</span></p>
+            <p><b id="empty-h">你还没有可用的 key。</b>点一下就申请，<b>几秒钟</b>就生成好，直接显示在这里。</p>
             <div class="row">
               <button type="button" class="btn" id="apply-btn">申请 key</button>
               <span class="sub" id="apply-msg"></span>
@@ -805,6 +817,7 @@ document.addEventListener("visibilitychange", function(){ if (document.hidden) r
 function renderKeys(){
   remaskAll(); remaskers = [];
   if (typeof rotRemask === "function") remaskers.push(rotRemask);   // 重置结果卡片里的新 key 也一起藏
+  if (typeof applyRemask === "function") remaskers.push(applyRemask);   // 申请成功卡片里的新 key 同理
   var box = $("keys-list"), hb = $("hist-list"); box.textContent = ""; hb.textContent = "";
   var cur = state.keys.filter(isCurrent), old = state.keys.filter(function(k){ return !isCurrent(k); });
   cur.forEach(function(k){ box.appendChild(keyRow(k)); });
@@ -921,7 +934,17 @@ function doApply(b, msgEl){
       say(m);
       return;
     }
-    say("已提交申请，大约 1~2 分钟生成好，请留在这个页面");
+    if (r && typeof r.key === "string" && r.key.indexOf("sk-") === 0){
+      // 账户库当场发好的 key：直接给本人看（不用再等轮询）
+      applyPlain = r.key; applyMasked = r.masked || "sk-…"; r.key = null;
+      applyRemask();
+      show("apply-warn", !!r.warning); $("apply-warn").textContent = r.warning || "";
+      show("apply-done", true); $("apply-done").focus();
+      say(r.existing ? "你已经有一把 key 了，就是这把" : "key 已经生成好了，去第 2 步复制一行命令");
+      return loadKeys(true);
+    }
+    if (r && r.message){ if (msgEl) msgEl.textContent = r.message; say(r.message); }
+    else say(r && r.pending ? "key 正在生成，稍等几秒" : "已提交申请");
     return loadKeys(false);
   }, function(e){
     if (e.status === 401) return;
@@ -931,6 +954,38 @@ function doApply(b, msgEl){
   }).then(function(){ if (b.isConnected){ b.disabled = false; b.textContent = label; } });
 }
 $("apply-btn").addEventListener("click", function(){ doApply($("apply-btn"), $("apply-msg")); });
+// 申请成功卡片：明文只在 applyPlain；藏起来 / 切走标签页 都会清掉 DOM 里的明文
+var applyPlain = null, applyMasked = "", applyShown = false, applyTimer = 0, applyLeft = 0;
+function applyRemask(){
+  clearInterval(applyTimer); applyShown = false;
+  $("apply-val").textContent = applyMasked; $("apply-show").textContent = "显示";
+}
+document.addEventListener("visibilitychange", function(){ if (document.hidden && applyShown) applyRemask(); });
+$("apply-show").addEventListener("click", function(){
+  if (applyShown){ applyRemask(); say("key 已藏起来"); return; }
+  if (!applyPlain){ flash($("apply-show"), "已失效"); return; }
+  applyShown = true; applyLeft = REMASK_MS / 1000;
+  var tick = function(){
+    $("apply-val").textContent = applyPlain + "（" + applyLeft + " 秒后自动藏起来）";
+    $("apply-show").textContent = "藏起来";
+    if (applyLeft-- <= 0) applyRemask();
+  };
+  clearInterval(applyTimer); tick(); applyTimer = setInterval(tick, 1000);
+  say("key 已显示，30 秒后自动藏起来");
+});
+$("apply-copy").addEventListener("click", function(){
+  var b = $("apply-copy");
+  if (!applyPlain){ flash(b, "已失效"); return; }
+  copyText(applyPlain).then(function(ok){
+    if (ok){ flash(b, "已复制", "done"); say("key 已复制到剪贴板"); }
+    else { if (!applyShown) $("apply-show").click(); flash(b, "请手动复制"); shout("浏览器不让自动复制，key 已显示出来，请选中后按 Ctrl/Cmd + C"); }
+  });
+});
+$("apply-to-install").addEventListener("click", function(e){
+  e.preventDefault();
+  $("s-install").scrollIntoView({ behavior: "smooth", block: "start" });
+  var c = $("cmd-copy"); if (c && !c.disabled) c.focus({ preventScroll: true });
+});
 function openFeedback(e){
   if (e) e.preventDefault();
   var d = $("fb-box"); d.open = true; pickFbTool();

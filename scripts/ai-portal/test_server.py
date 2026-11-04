@@ -2541,9 +2541,10 @@ def test_rotate_refuses_blocked_key_no_self_unblock(rotate_portal):
 
 
 def test_external_apply_goes_to_review_not_auto_issue(portal):
-    """外部人自助申请 ≠ 直接发 key:飞书个人版注册几乎零成本,自动发 = 批量注册批量拿 key(红队 P2-4)。
-    APPLY_ALLOW_EXTERNAL 默认关 ⇒ 外部人点申请只登记待审核、**不写 key 表**(写了 poller 就会发)。"""
+    """收紧开关 APPLY_ALLOW_EXTERNAL=0 时:外部人点申请只登记待审核、**不写 key 表**(写了 poller 就会发)。
+    默认是 1(用户 11-04 定:外部人登录飞书后就能申请)⇒ 这条测的是「需要收紧时这个开关真管用」。"""
     portal.app.cfg["APPLY_DRY_RUN"] = "0"
+    portal.app.cfg["APPLY_ALLOW_EXTERNAL"] = "0"
     try:
         sx = portal.sid("X")
         for r in list(FAKE.tables[KEYTBL]):
@@ -2557,7 +2558,7 @@ def test_external_apply_goes_to_review_not_auto_issue(portal):
         s, d = portal.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sx)[:2]
         assert s == 200 and not d.get("review") and len(FAKE.tables[KEYTBL]) == n + 1, d
     finally:
-        portal.app.cfg["APPLY_DRY_RUN"] = "1"; portal.app.cfg["APPLY_ALLOW_EXTERNAL"] = "0"
+        portal.app.cfg["APPLY_DRY_RUN"] = "1"; portal.app.cfg["APPLY_ALLOW_EXTERNAL"] = "1"
 
 
 def test_internal_apply_unaffected_by_external_gate(portal):
@@ -2566,6 +2567,25 @@ def test_internal_apply_unaffected_by_external_gate(portal):
         sn = portal.sid("N")                                       # 内部新人,表里没有行
         n = len(FAKE.tables[KEYTBL])
         s, d = portal.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sn)[:2]
+        assert s == 200 and not d.get("review") and len(FAKE.tables[KEYTBL]) == n + 1, d
+    finally:
+        portal.app.cfg["APPLY_DRY_RUN"] = "1"
+
+
+def test_external_can_apply_by_default_but_must_be_logged_in(portal):
+    """用户 11-04 定:外部人登录飞书后就能申请。默认开;门槛是**必须登录**。"""
+    assert portal.app.cfg["APPLY_ALLOW_EXTERNAL"] == "1"
+    portal.app.cfg["APPLY_DRY_RUN"] = "0"
+    try:
+        for r in list(FAKE.tables[KEYTBL]):
+            if r == "recX1": del FAKE.tables[KEYTBL][r]
+        n = len(FAKE.tables[KEYTBL])
+        # 没登录 ⇒ 401,什么都不写
+        s, d = portal.req("POST", "/ai/api/apply", {"account_type": "Cursor"})[:2]
+        assert s == 401 and len(FAKE.tables[KEYTBL]) == n, (s, d)
+        # 登录后 ⇒ 真写表(poller 接着发 key)
+        sx = portal.sid("X")
+        s, d = portal.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sx)[:2]
         assert s == 200 and not d.get("review") and len(FAKE.tables[KEYTBL]) == n + 1, d
     finally:
         portal.app.cfg["APPLY_DRY_RUN"] = "1"

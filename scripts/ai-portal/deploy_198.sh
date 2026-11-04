@@ -127,6 +127,7 @@ case "$ADR" in 0|1) ;; *) echo "远端没拿到 APPLY_DRY_RUN(应为 0/1,实际�
   echo "DB_PATH=/var/lib/carher-ai-portal/ai_portal.db"
   echo "TRUST_PROXY=1"
   echo "APPLY_DRY_RUN=$ADR"
+  echo "APPLY_ALLOW_EXTERNAL=1"   # 11-04 用户定:外部人登录飞书后就能申请;要收紧改 0
   [ -n "$MK" ] && echo "LITELLM_MASTER_KEY=$MK"
   echo "ROTATE_DRY_RUN=$RDR"
 } > "$W/new.env"
@@ -212,6 +213,7 @@ chk "健康检查 /ai/healthz" "$(curl -s -m 10 $U/ai/healthz)" '{"ok": true}'
 # 回读 198 上真正生效的值,别信「我传了」:上一版传不过去,部署照样全绿
 chk "重置模式 ROTATE_DRY_RUN" "$($J ssh $H "sudo -n grep -E '^ROTATE_DRY_RUN=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" "$ROTATE"
 chk "申请模式 APPLY_DRY_RUN" "$($J ssh $H "sudo -n grep -E '^APPLY_DRY_RUN=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" "$APPLYDR"
+chk "外部人可申请 APPLY_ALLOW_EXTERNAL" "$($J ssh $H "sudo -n grep -E '^APPLY_ALLOW_EXTERNAL=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" 1
 chk "灰度名单 PILOT_UNION_IDS" "$($J ssh $H "sudo -n grep -E '^PILOT_UNION_IDS=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" "$PILOT"
 chk "网关 master key 已配" "$($J ssh $H "sudo -n grep -cE '^LITELLM_MASTER_KEY=.{20,}' /etc/carher-ai-portal.env" 2>/dev/null | tr -d '\r' | tail -1)" 1
 chk "未登录 /ai/api/me" "$(curl -s -o /dev/null -w '%{http_code}' -m 10 $U/ai/api/me)" 401

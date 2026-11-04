@@ -8,10 +8,15 @@
 #    CARHER_DOCTOR_APP 可强制指定;CARHER_APP_ROOTS 只给台架用。
 CARHER_CLAUDE_BUNDLE_ID=com.anthropic.claudefordesktop
 CARHER_CODEX_BUNDLE_ID=com.openai.codex
+# 11-04:网页一行命令(ai-portal 安装码)要判 Cursor 装没装。Cursor 的 bundle id 是 todesktop 打包时给的,
+#    本机 /Applications/Cursor.app 实测(`defaults read …/Info CFBundleIdentifier`)。
+CARHER_CURSOR_BUNDLE_ID=com.todesktop.230313mzl4w4u92
 
-# 真身判据 = 有 app.asar + MacOS 下有可执行文件(光有个壳子目录不算)
+# 真身判据 = 有 app.asar(Claude/Codex)或 app/package.json(Cursor 不打 asar,资源是目录)
+#            + MacOS 下有可执行文件(光有个壳子目录不算)
 _cfa_ok() {
-  [ -n "$1" ] && [ -d "$1" ] && [ -f "$1/Contents/Resources/app.asar" ] &&
+  [ -n "$1" ] && [ -d "$1" ] &&
+    { [ -f "$1/Contents/Resources/app.asar" ] || [ -f "$1/Contents/Resources/app/package.json" ]; } &&
     [ -n "$(ls "$1/Contents/MacOS" 2>/dev/null | head -n1)" ]
 }
 _cfa_id() { defaults read "$1/Contents/Info" CFBundleIdentifier 2>/dev/null; }
@@ -73,3 +78,4 @@ EOF4
 
 carher_find_claude_app() { carher_find_app_by_id "$CARHER_CLAUDE_BUNDLE_ID" ""; }
 carher_find_codex_app()  { carher_find_app_by_id "$CARHER_CODEX_BUNDLE_ID" Codex; }
+carher_find_cursor_app() { carher_find_app_by_id "$CARHER_CURSOR_BUNDLE_ID" Cursor; }

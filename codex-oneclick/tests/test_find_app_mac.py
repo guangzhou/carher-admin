@@ -77,6 +77,37 @@ def test_codex_prefers_codex_bundle_over_chatgpt(tmp_path):
     assert find(tmp_path, "bash", "carher_find_codex_app") == str(tmp_path / "OpenAI Codex.app")
 
 
+CURSOR_ID = "com.todesktop.230313mzl4w4u92"
+
+
+def make_cursor_app(path: Path):
+    """Cursor 不打 asar:资源是 Contents/Resources/app/ 目录(本机 /Applications/Cursor.app 实测)。"""
+    (path / "Contents" / "MacOS").mkdir(parents=True)
+    (path / "Contents" / "Resources" / "app").mkdir(parents=True)
+    (path / "Contents" / "Resources" / "app" / "package.json").write_text("{}")
+    (path / "Contents" / "MacOS" / "Cursor").write_text("")
+    with (path / "Contents" / "Info.plist").open("wb") as f:
+        plistlib.dump({"CFBundleIdentifier": CURSOR_ID}, f)
+    return path
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh", "sh"])
+def test_cursor_found_by_bundle_id_without_asar(tmp_path, shell):
+    """11-04 ai-portal 一行命令要判 Cursor 装没装:Cursor 没有 app.asar,原判据会把它当空壳。"""
+    make_cursor_app(tmp_path / "My Cursor.app")
+    make_app(tmp_path / "Claude.app", CLAUDE_ID)
+    assert find(tmp_path, shell, "carher_find_cursor_app") == str(tmp_path / "My Cursor.app")
+    assert find(tmp_path, shell, "carher_find_claude_app") == str(tmp_path / "Claude.app")
+
+
+def test_cursor_absent_says_absent(tmp_path):
+    """连 ps 兜底也屏蔽:开发机上真开着的 Cursor 会被「从进程反推」那条找到(本机实测就是这么红的)。"""
+    make_app(tmp_path / "Claude.app", CLAUDE_ID)
+    script = f'. "{FINDER}"\nmdfind(){{ return 1; }}\nps(){{ return 0; }}\nCARHER_APP_ROOTS="{tmp_path}" carher_find_cursor_app\n'
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout.strip() == "", r.stdout + r.stderr
+
+
 def test_both_doctors_embed_the_shared_finder():
     """两个自检都必须用这一份源(各写一份就会漂移,漂移了没人会来报)。"""
     for p in [SRC / "doctor-mac.sh", SRC.parent.parent / "claude-oneclick" / "src" / "doctor-mac.sh"]:

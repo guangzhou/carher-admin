@@ -67,6 +67,11 @@ const TARGETS=[
   {f:"extensions/cursor-agent-exec/dist/main.js",          kind:"min"},
   {f:"extensions/cursor-agent-host/dist/agent-host-daemon/dist/bin/daemon.cjs", kind:"src"},
 ];
+// 🔴 2026-11-04(3.28.7):agent-host 的摘要阈值被 webpack 拆进按需 chunk(dist/900.js)。
+//    与 cursor_team_setup.js 的 ctxwinChunkTargets 同语义:扫这三条 extension 的 dist 下 `<数字>.js`,
+//    含阈值名或已带 marker 才算目标。≤3.27 的 chunk 里没有阈值名 ⇒ 一个都不加。
+//    真正的扫描在 RELEVANT 定义之后(见下方 addChunkTargets)。
+const CHUNK_DIRS=["cursor-agent-host","cursor-agent-exec","cursor-local-agent-runtime"];
 
 // 🔴 名字位一律用 ID 捕获,不许写死 —— 函数名、**参数名、局部变量名**都算名字位。
 // 3.20.21 栽在函数名($7y),3.21.18 栽在局部变量名与参数名(见锚点 B/C 注释)。
@@ -118,6 +123,20 @@ const NORM_MIN='function __cxN(x){return "number"==typeof x&&x>0&&x<4096?(1===x?
 //    「这份里压根没有要补的东西」≠「锚点漂了」。判据用上游自己的字段名(不被 minify)。
 //    与 cursor_team_setup.js 的 CW_RELEVANT 同语义,两边必须一起改。
 const RELEVANT=/unusedTokensThresholdTo(?:Start|Persist)BackgroundSummarization/;
+(function addChunkTargets(){
+  // Buffer.indexOf 扫,不做 utf8 解码(三个 dist 约 130MB,实测 5ms)。
+  const N1=Buffer.from("unusedTokensThresholdToStartBackgroundSummarization");
+  const N2=Buffer.from("unusedTokensThresholdToPersistBackgroundSummarization");
+  const MK=Buffer.from(MARK);
+  for(const d of CHUNK_DIRS){
+    const rel="extensions/"+d+"/dist";
+    let names=[]; try{ names=fs.readdirSync(path.join(ROOT,rel)); }catch(e){ continue; }
+    for(const n of names.filter(n=>/^\d+\.js$/.test(n)).sort()){
+      let b; try{ b=fs.readFileSync(path.join(ROOT,rel,n)); }catch(e){ continue; }
+      if(b.indexOf(MK)>=0||b.indexOf(N1)>=0||b.indexOf(N2)>=0) TARGETS.push({f:rel+"/"+n, kind:"min", chunk:true});
+    }
+  }
+})();
 function planFile(p, kind){
   let s; try{ s=fs.readFileSync(p,"utf8"); }catch(e){ return {err:"读不到: "+e.code}; }
   if(s.includes(MARK)) return {skip:true};

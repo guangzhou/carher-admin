@@ -159,6 +159,7 @@ const VERIFIED_EXACT = [
   "3.27.12", "3.27.14",                   // 10-26
   "3.27.22",                              // 10-29 lupeng1 实报后量:workbench 16 锚点 ×2 全过、件C 4/4、件D 2/2;--upgrade/--repair/自愈都在副本上打全
   "3.28.5",                               // 10-28 全量量过:workbench 16 锚点 ×2 份全 exactly-1、件D 2/2、件C 3 个该打的全过 + 1 个不适用(agent-host 那份上游挪走了)
+  "3.28.7",                               // 11-04 198 镜像/latest 轨:workbench 16 锚点 ×2 全 exactly-1(AST 与正则一致)、件D 2/2、件C 4 个该打的全过(含新发现的 agent-host chunk 900.js)+ main.js 不适用
 ];
 const VERIFIED_VERSIONS = [...new Set(VERIFIED_EXACT.map((v) => v.split(".").slice(0, 2).join(".")))];
 /* 2026-09-22 加 "3.21" 的实测依据(不是"看起来应该行"):同事报 3.21.16/win32 弹未验告警,
@@ -1254,6 +1255,40 @@ const cwNormSrc = (v) =>
    它们是 B/C 两处要改的那段算术的名字,**不被 minify**(上游自己的字段名)。
    一个都没有 ⇒ 这份 bundle 不参与摘要判定 ⇒ 不适用,不是漂移。 */
 const CW_RELEVANT = /unusedTokensThresholdTo(?:Start|Persist)BackgroundSummarization/;
+/* 🔴 2026-11-04(3.28.7):上面那句「挪到另两条 bundle」只对了一半 —— agent-host 自己的那份
+   没有消失,是被 webpack **拆进了按需加载的 chunk**(`cursor-agent-host/dist/900.js`,
+   由 main.js 的 `r.e(900)` 在 managed local-loop / private-inference / agent-harness 那几条路上加载)。
+   A/B/C 三锚点在那个 chunk 里各 exactly-1。原来的目标表写死 `dist/main.js` ⇒ 它从来没被看过。
+   chunk 文件名是打包序号,下一版可能换 ⇒ 不写死名字:扫**三条 extension 的 dist** 下的 `<数字>.js`
+   (agent-host / agent-exec / local-agent-runtime —— 今天只有 agent-host 命中,但另两条是同一套
+   webpack 配置,下一版拆谁都量得到),**含阈值名(或已带我们的 marker)才算目标**。
+   ≤3.27 的 chunk 里一个阈值名都没有(3.27.14 实测 0 命中)⇒ 一个都不加,老版本行为逐字不变。
+   ⚠️ 这条路在 BYOK 轮次里到底跑不跑**没有现场数据**(只证明了代码在、能打上);
+   打它是因为归一对 0 和 ≥4096 原样放行,打了无害,漏了就是 10-28 那种每轮压缩。 */
+const CW_CHUNK_DIRS = ["cursor-agent-host", "cursor-agent-exec", "cursor-local-agent-runtime"];
+function ctxwinChunkTargets(root) {
+  // 用 Buffer.indexOf 扫(三个 dist 共约 130MB、130 多个 chunk):不做 utf8 解码,实测 5ms;
+  // 这段在模块加载期跑,--doctor / --refresh-models 也会过,所以别用 toString()。
+  // 两个针与 CW_RELEVANT 逐字同源(别放宽成前缀:放宽了会把无关 chunk 收进来,
+  // 然后它们全报 NA —— 看着像"结构变了"的那种假情报)。
+  const N1 = Buffer.from("unusedTokensThresholdToStartBackgroundSummarization");
+  const N2 = Buffer.from("unusedTokensThresholdToPersistBackgroundSummarization");
+  const MK = Buffer.from(CTXWIN_MARKER);
+  const out = [];
+  for (const d of CW_CHUNK_DIRS) {
+    const dirRel = path.join("extensions", d, "dist");
+    let names = [];
+    try { names = fs.readdirSync(path.join(root, dirRel)); } catch (e) { continue; }
+    for (const n of names.filter((x) => /^\d+\.js$/.test(x)).sort()) {
+      let b;
+      try { b = fs.readFileSync(path.join(root, dirRel, n)); } catch (e) { continue; }
+      if (b.indexOf(MK) >= 0 || b.indexOf(N1) >= 0 || b.indexOf(N2) >= 0)
+        out.push({ rel: path.join(dirRel, n), kind: "min", chunk: true });
+    }
+  }
+  return out;
+}
+CTXWIN_TARGETS.push(...ctxwinChunkTargets(RES));
 function ctxwinApplyToText(src, kind) {
   if (src.includes(CTXWIN_MARKER)) return { ok: false, why: "已打过", skip: true };
   if (!CW_RELEVANT.test(src)) return { ok: false, why: "这份 bundle 不含摘要阈值(上游把那段挪走了)⇒ 不适用", skip: true, na: true };
@@ -2876,7 +2911,7 @@ async function doDoctor() {
   }
   if (cwBad) P("    🔴 件C 没打全(该打的 " + cwNeed + " 个文件里有 " + cwBad + " 个不对)⇒ 会**每轮都自动压缩对话**,"
     + "表现就是「发一句要等很久」。先双击 REPAIR,再重启 Cursor;修完还慢就把这份报告发给管理员。");
-  else if (!cwNeed) P("    ⚠️ 四个文件都不含摘要阈值 —— 要么 Cursor 换了结构,要么路径不对,把这份报告发给管理员。");
+  else if (!cwNeed) P("    ⚠️ " + CTXWIN_TARGETS.length + " 个文件都不含摘要阈值 —— 要么 Cursor 换了结构,要么路径不对,把这份报告发给管理员。");
   // 件D:0 = local loop 没被摘 ⇒ 若下面第 4 节那个 gate 是 on,这台机器就会把这一轮
   // 打到 Cursor 自家 InferenceService(BYOK 的 key 压根不参与)。
   P("  noloop(" + NOLOOP_MARKER + "):");
@@ -3129,7 +3164,10 @@ async function main() {
     // @cx-chain:v3 链式增量:默认**关**(服务端那半已下线)。不给这个开关时,
     // 安装器会把已装的 chain 补丁摘掉;服务端那半回来再用 --chain 装回去。
     chain: has("--chain"),
-    key: opt("--key", ""),
+    // 11-04:网页一行命令(ai-portal 安装码)用环境变量 CARHER_KEY 传 key ——
+    //   --key 会进命令行,同机任何人 `ps` 都看得见;环境变量只有本进程和子进程能读。读完就从环境里删掉,
+    //   免得后面 spawnSync 起的小代理 / launchctl / lark-cli 继承到。--key 仍优先(老用法不变)。
+    key: opt("--key", "") || process.env.CARHER_KEY || "",
     // zk-delta：默认**开**。理由是它对上游逐字节透明（重建在 LiteLLM 之前），
     // 门① 不可能被它破坏，而省的那一跳是同事每天都在付的成本。
     // 三条退路都验过了（集群挂→回落直连 / 进程挂→KeepAlive / 想彻底退→--no-zk-delta）。
@@ -3148,6 +3186,7 @@ async function main() {
     refreshModels: has("--refresh-models"),
     bareSa: has("--bare-sa"),
   };
+  delete process.env.CARHER_KEY;
 
   /* ── `--bare-sa`：把菜单里的 `sa-*` 换成去前缀的裸名（2026-09-22 加）────────
      用户面的理由：裸名（`grok-4.6`、`grok-4.7`…）是 **Cursor 自带目录里认识的名字**，
@@ -3820,7 +3859,8 @@ function installPrecompactProbe(dry) {
 
 /* ── 画图 / 生成视频写进 Cursor 的 User Rules(11-01)──
    🔴 为什么不能只靠 skill:Cursor 给 skill 列表的预算只有模型上限的 **2%**
-   (`cursor-agent-host/dist/main.js` 的 gS:`Math.floor(.02*agentTokenLimit)`),超了就先砍掉所有
+   (`cursor-agent-host/dist/main.js` 的 gS:`Math.floor(.02*agentTokenLimit)`;3.28.7 起在 agent-exec /
+   local-agent-runtime 的 main.js 和 agent-host 的 chunk 900.js 里,仍是 `.02`),超了就先砍掉所有
    skill 的 description、再整条省略。它扫 `.cursor/skills`、`.claude/skills`、`.codex/skills`、
    `.agents/skills` 等**五个**目录,装得多的机器(本机 400+ 个)一定超预算 ⇒ 模型只看到一串路径,
    不知道有视频工具 ⇒ 11-01 实测它回「我没法直接生成视频」然后自己用 PIL+ffmpeg 画动画。

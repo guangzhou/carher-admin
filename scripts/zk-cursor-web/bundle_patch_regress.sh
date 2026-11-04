@@ -123,6 +123,14 @@ if [ "$FETCH" = "1" ]; then
         cp "$MNT/Cursor.app/Contents/Resources/app/$rel" \
            "$NEWAPP/Contents/Resources/app/$rel" 2>/dev/null || bad "拷件C 目标失败:$rel"
       done
+      # 🔴 2026-11-04(3.28.7):agent-host 的阈值被 webpack 拆进按需 chunk(dist/<数字>.js)。
+      #    只拷上面那四条 ⇒ chunk 根本不在副本里,①b 会把它当"不存在"静默漏掉。
+      #    名字是打包序号、每版会变 ⇒ 整个 dist 下的 `<数字>.js` 全拷(几十 MB,够用)。
+      for f in "$MNT"/Cursor.app/Contents/Resources/app/extensions/cursor-agent-host/dist/[0-9]*.js; do
+        [ -f "$f" ] || continue
+        cp "$f" "$NEWAPP/Contents/Resources/app/extensions/cursor-agent-host/dist/" 2>/dev/null \
+          || bad "拷 agent-host chunk 失败:$(basename "$f")"
+      done
       hdiutil detach "$MNT" >/dev/null 2>&1
     else bad "挂载 dmg 失败"; fi
   fi
@@ -176,6 +184,10 @@ if [ -n "$NEWAPP" ]; then
     NOK=$(grep -c '^OK ' "$TMP/cw.txt")
     NXX=$(grep -c '^XX ' "$TMP/cw.txt")
     NNA=$(grep -c '^NA ' "$TMP/cw.txt")
+    # 🔴 2026-11-04:目标数不再是常数 4 —— 3.28.7 起 agent-host 的阈值在按需 chunk 里,
+    #    数量由盘上有几个含阈值的 chunk 决定。写死 4 的话:多出一个目标就恒红(假红),
+    #    少一个(老版本)也量不出来。改成按**报告里的状态行**算总数,再要求"全被覆盖"。
+    NTOT=$(grep -c '^\(OK\|NA\|XX\|==\) ' "$TMP/cw.txt")
     # 判据:XX 必须 0,且 OK+NA 覆盖全部 4 个目标。
     # 🔴 NA =「这份 bundle 不含摘要阈值,上游挪走了」(3.28.5 的 agent-host),不是失败;
     #    但 NA **不许全覆盖** —— 四个都 NA 说明换了结构或路径错了,那是真问题。
@@ -186,9 +198,9 @@ if [ -n "$NEWAPP" ]; then
       NVER="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("version","?"))' "$NAPP_RES/package.json" 2>/dev/null || echo '?')"
       if [ "$NEWAPP_IS_SNAPSHOT" = "1" ]; then
         skip "①b:没给 --new-app ⇒ 量的是 $CWSNAP 那份原厂快照(**不是新版**;快照目录里没有 package.json,所以这里不报版本号);新版本漂移时必须给 --new-app"
-      elif [ "$NXX" = "0" ] && [ "$((NOK+NNA))" = "4" ] && [ "$NOK" -gt 0 ]; then
-        ok "①b 件C 在 $NVER 上锚点全 exactly-1(该打的 $NOK 个全过,$NNA 个不适用)"
-      else bad "①b 件C 在 $NVER 上 OK=$NOK XX=$NXX NA=$NNA(须 XX=0、OK+NA=4、OK>0)"; fi ;;
+      elif [ "$NXX" = "0" ] && [ "$NTOT" -ge 4 ] && [ "$((NOK+NNA))" = "$NTOT" ] && [ "$NOK" -gt 0 ]; then
+        ok "①b 件C 在 $NVER 上锚点全 exactly-1(该打的 $NOK 个全过,$NNA 个不适用,共 $NTOT 个目标)"
+      else bad "①b 件C 在 $NVER 上 OK=$NOK XX=$NXX NA=$NNA TOT=$NTOT(须 XX=0、TOT≥4、OK+NA=TOT、OK>0)"; fi ;;
     esac
   else skip "①b:$NEWAPP 里找不到 extensions/cursor-agent-exec/dist/main.js"; fi
 else skip "①b:没给 --new-app / --fetch(新版本漂移时这腿必须跑)"; fi

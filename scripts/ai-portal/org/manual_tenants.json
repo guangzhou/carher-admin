@@ -1,0 +1,18 @@
+{
+ "_note": "半权威来源(b):不在关联组织(trust_party)里、靠实测 tenant_key + 公司名证据人工维护。org = key 表「组织名称」单选里已有的选项。build_tenant_map.py 每次合并进映射；自动刷新不会覆盖这里。",
+ "2d3a8ecde0cf575e": {
+  "name": "北汽集团", "org": "北汽集团",
+  "evidence": "21 人实测:9 个 p2p 会话 tenant_key(.work/baic-friends/p2pall.json) + 12 人 search-user department=北汽集团 且 p2p 群成员 tenant_key=2d3a8ecde0cf575e(unmeasured-search.json);表里这些人的行「组织名称」全是 北汽集团(梁海强另持 20 行 巧虎)",
+  "verified_at": "2026-11-04"
+ },
+ "1b8fa518c242175f": {
+  "name": "妙趣童年", "org": "妙趣童年",
+  "evidence": "2 人(尚文泽/陈鑫涛)p2p 会话 tenant_key + search-user department=妙趣童年;表里 4 行 组织名称=妙趣童年",
+  "verified_at": "2026-11-04"
+ },
+ "2e9e916eff8f1650": {
+  "name": "奇瑞", "org": "奇瑞",
+  "evidence": "周奇烽:p2p 群 oc_28a9… 成员 tenant_key=2e9e916eff8f1650(对照:同法测北汽安娜得 2d3a8ecde0cf575e 与已知一致);search-user department=Chery;表里 2 行 组织名称=奇瑞。仅 1 人样本",
+  "verified_at": "2026-11-04"
+ }
+}

@@ -70,6 +70,7 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--code-bg);padd
 .who b{font-weight:700}
 .tag{display:inline-block;font-size:12px;font-weight:700;line-height:1.5;padding:1px 8px;border-radius:999px;white-space:nowrap}
 .tag.ext{color:var(--ext);background:var(--ext-bg)}
+.who .org{font-size:13px;color:var(--ext);max-width:16em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .who a{font-size:14px}
 
 /* 通用卡片 / 提示条 */
@@ -270,6 +271,7 @@ body:not(.is-ext) .ext-only{display:none!important}
   <div class="brand"><i aria-hidden="true"></i>AI 工具自助台</div>
   <div class="who" id="who" hidden>
     <span>你好，<b id="who-name"></b></span>
+    <span class="org" id="who-org" hidden></span>
     <span class="tag ext" id="who-ext" hidden title="你登录的飞书账号不属于本公司">外部合作方</span>
     <button type="button" class="btn ghost sm" id="logout">退出</button>
   </div>
@@ -688,6 +690,10 @@ function boot(){
     B.classList.toggle("is-ext", !!me.external);
     state.reviewAt = +me.apply_review_at || 0;
     show("who-ext", !!me.external);
+    // 外部人的公司名(后端按 tenant_key 查合作公司映射;查不到 = 空,不显示)。textContent,不拼 HTML
+    $("who-org").textContent = me.external && me.org_name ? "· " + me.org_name : "";
+    $("who-org").title = me.org_name || "";
+    show("who-org", !!(me.external && me.org_name));
     // tenant 是飞书 tenant_key（一串 id，不是公司名）⇒ 不展示给用户
     if (me.external) $("who-ext").title = "你登录的飞书账号不属于无锡车联";
     view("app");
@@ -1231,6 +1237,15 @@ $("fb-box").addEventListener("toggle", function(){ if (this.open) pickFbTool(); 
     $("login-err").textContent = LOGIN_ERR[le] || LOGIN_ERR.invalid; show("login-err", true);
     qs.delete("login_error");
     try{ history.replaceState(null, "", location.pathname + (qs.toString() ? "?" + qs : "") + location.hash); }catch(e){}
+    // 11-04 用户:「如果是外部用户,登录失败直接跳转到机器人的邀请链接。让外租户员工授权机器人就可以了。」
+    // ⇒ 外部人点了飞书登录(20010)就直接带他去飞书里的机器人,不让他停在一句报错上自己找入口。
+    //   留 2.5 秒让他看到上面那句说明(否则一闪而过,不知道为什么跳走了),再跳。
+    //   AppLink 只认 appId 一个参数(官方文档),所以只能把他送进机器人会话,没法顺带告诉机器人「他是来登录的」。
+    if (le === "external"){
+      var BOT_APPLINK = "https://applink.feishu.cn/client/bot/open?appId=cli_aa8505afb0f89cb2";
+      $("login-err").textContent = LOGIN_ERR.external + " 正在为你打开飞书里的机器人…";
+      setTimeout(function(){ location.href = BOT_APPLINK; }, 2500);
+    }
   }
   boot();
 })();

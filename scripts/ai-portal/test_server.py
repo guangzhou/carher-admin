@@ -37,6 +37,15 @@ USERS = {
     "N": {"union_id": "on_nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn", "open_id": "ou_nnnn", "tenant_key": OUR_TENANT,
           "name": "新人", "email": "new@auto-link.com.cn", "avatar_url": ""},
 }
+# tenant_key → 公司映射(形状同 .work/ai-portal/org/tenant_map.json)。tenant_key 用真实值,方便对照
+BAIC_TENANT, PERSONAL_TENANT, WUHU_TENANT = "2d3a8ecde0cf575e", "142a7d85c499574f", "1bf59f4a67ca574f"
+TENANT_MAP = {
+    "_meta": {"org_options": ["无锡车联", "上海车联", "北汽集团", "妙趣童年", "奇瑞", "巧虎", "美团"]},
+    "2a0b_other_tenant": {"name": "上海车联", "org": "上海车联", "source": "trust_party", "verified_at": "2026-11-04"},
+    BAIC_TENANT: {"name": "北汽集团", "org": "北汽集团", "source": "manual", "verified_at": "2026-11-04"},
+    # 公司认出来了(关联组织),但 key 表没有对应选项 ⇒ org=null
+    WUHU_TENANT: {"name": "芜湖车联天下智能科技有限公司", "org": None, "source": "trust_party", "verified_at": "2026-11-04"},
+}
 KEY_A1 = "sk-AAAAaaaa1111cursorA0001"
 KEY_A2 = "sk-AAAAaaaa2222claudeA0002"
 KEY_B = "sk-BBBBbbbb3333cursorB0003"
@@ -437,13 +446,16 @@ def make_cfg(fake_url, tmp_path, **over):
     static.mkdir(exist_ok=True)
     (static / "index.html").write_text("<!doctype html><title>AI 自助</title>PORTAL-INDEX", encoding="utf-8")
     (static / "app.js").write_text("console.log(1)", encoding="utf-8")
+    # 外部人 X 的租户在映射里(老测试里 X 申请要能成功);映射本身的规则在 §18 专门测
+    tmap = tmp_path / "tenant_map.json"
+    tmap.write_text(json.dumps(TENANT_MAP, ensure_ascii=False), encoding="utf-8")
     cfg = S.load_config(environ={})
     cfg.update(FEISHU_APP_ID=APP_ID, FEISHU_APP_SECRET=APP_SECRET, SESSION_SECRET=SECRET,
                FEISHU_OPEN_BASE=fake_url + "/open-apis", FEISHU_AUTHORIZE_URL=fake_url + "/authorize",
                DB_PATH=str(tmp_path / "portal.db"), STATIC_DIR=str(static), TRUST_PROXY="1",
                # my_rows 缓存默认关:老测试大量「改假表 → 立刻再读」,它们测的是规则不是缓存。
                # 缓存自己的行为在 §17 专门测(MY_ROWS_TTL 显式打开)。
-               MY_ROWS_TTL="0")
+               MY_ROWS_TTL="0", TENANT_MAP_PATH=str(tmap))
     cfg.update(over)
     return cfg
 
@@ -3187,3 +3199,174 @@ def test_frontend_external_copy_has_no_dead_internal_links():
     import re as _re
     markup = _re.sub(r"<script\b.*?</script>", "", h, flags=_re.S)
     assert not _re.search(r'<[^>]+\sstyle="', markup) and not _re.search(r'<[^>]+\son[a-z]+="', markup)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 18. 外部人按 tenant_key 认公司(11-04「个人版不让申请」)
+#     个人版和企业外部人的事件字段一模一样 ⇒ 唯一判据 = tenant_key 在不在合作公司映射里。
+#     每条拒绝都配阳性对照:同一个门户、同一个开关,只换 tenant_key(或只放回映射)⇒ 必须放行。
+# ════════════════════════════════════════════════════════════════════════
+def _ext_user(p, tenant_key, who="X"):
+    """机器人签 magic link 时带上事件里的 tenant_key ⇒ 这就是线上外部人拿到会话的唯一路径。"""
+    u = dict(USERS[who])
+    body = {"union_id": u["union_id"], "open_id": u["open_id"], "tenant_key": tenant_key, "name": u["name"]}
+    t = tok_of(issue(p, who, body=body)[1]["url"])
+    s, d, _, sc = consume(p, t)
+    assert s == 200, d
+    return "ai_sid=" + cookie_of(sc, "ai_sid")
+
+
+def _clear_x_rows():
+    for r in list(FAKE.tables[KEYTBL]):
+        if r == "recX1":
+            del FAKE.tables[KEYTBL][r]
+
+
+@pytest.fixture
+def oportal(portal_factory):
+    p = portal_factory(INTERNAL_SECRET=INTERNAL, APPLY_DRY_RUN="0")
+    _clear_x_rows()
+    return p
+
+
+def _apply(p, sid):
+    return p.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sid)[:2]
+
+
+def test_known_company_allowed_and_org_written_per_person(oportal):
+    """已知企业(北汽,manual 来源)⇒ 放行,组织名称=映射里的 org;不是 APPLY_ORG_NAME 写死的值。"""
+    oportal.app.cfg["APPLY_ORG_NAME"] = "无锡车联"          # 内部人的写死值不许漏给外部人
+    n = len(FAKE.tables[KEYTBL])
+    s, d = _apply(oportal, _ext_user(oportal, BAIC_TENANT))
+    assert s == 200 and d["record_id"].startswith("recNEW"), d
+    assert len(FAKE.tables[KEYTBL]) == n + 1
+    assert FAKE.tables[KEYTBL][d["record_id"]] == {"姓名": [{"id": USERS["X"]["union_id"]}], "账户类型": ["Cursor"],
+                                                   "组织名称": "北汽集团"}
+    # 另一个外部人在上海车联的租户 ⇒ 写的是上海车联(按人取值,不是全站一个值)
+    # (换人而不是同一个人再申请一次:同一人 24h 内有申请锁)
+    s, d = _apply(oportal, _ext_user(oportal, "2a0b_other_tenant", who="N"))
+    assert s == 200 and FAKE.tables[KEYTBL][d["record_id"]]["组织名称"] == "上海车联", d
+
+
+def test_personal_edition_denied_with_positive_control(oportal):
+    n = len(FAKE.tables[KEYTBL])
+    FAKE.calls.clear()
+    s, d = _apply(oportal, _ext_user(oportal, PERSONAL_TENANT))
+    assert s == 403 and d["error"] == S.APPLY_UNKNOWN_ORG_MSG, (s, d)
+    assert len(FAKE.tables[KEYTBL]) == n and not [c for c in FAKE.calls if c[1].endswith("/records")]
+    # 个人号连「待审核登记」也进不去(不刷反馈表)
+    oportal.app.cfg["APPLY_ALLOW_EXTERNAL"] = "0"
+    s, d = _apply(oportal, _ext_user(oportal, PERSONAL_TENANT))
+    assert s == 403 and not oportal.app.list_apply_requests(), (s, d)
+    oportal.app.cfg["APPLY_ALLOW_EXTERNAL"] = "1"
+    # POSITIVE:同一个人只换 tenant_key 为已知企业 ⇒ 放行
+    s, d = _apply(oportal, _ext_user(oportal, BAIC_TENANT))
+    assert s == 200 and len(FAKE.tables[KEYTBL]) == n + 1, (s, d)
+
+
+def test_unknown_tenant_denied_with_positive_control(oportal, tmp_path):
+    new_co = "1f00000000new575e"
+    s, d = _apply(oportal, _ext_user(oportal, new_co))
+    assert s == 403 and d["error"] == S.APPLY_UNKNOWN_ORG_MSG, (s, d)
+    # 空 tenant_key(机器人漏传)也是拒
+    s, d = _apply(oportal, _ext_user(oportal, ""))
+    assert s == 403, (s, d)
+    # POSITIVE:把这家新公司加进映射(不重启,热加载)⇒ 同一个会话直接放行
+    sid = _ext_user(oportal, new_co)
+    m = dict(TENANT_MAP, **{new_co: {"name": "美团", "org": "美团", "source": "manual", "verified_at": "2026-11-04"}})
+    path = Path(oportal.app.cfg["TENANT_MAP_PATH"])
+    path.write_text(json.dumps(m, ensure_ascii=False) + "\n", encoding="utf-8")   # 尺寸变了 ⇒ 一定重读
+    s, d = _apply(oportal, sid)
+    assert s == 200 and FAKE.tables[KEYTBL][d["record_id"]]["组织名称"] == "美团", (s, d)
+
+
+def test_known_company_without_table_option_denied(oportal):
+    """芜湖车联:关联组织认得出,但 key 表「组织名称」没有它的选项 ⇒ 拒(写新值会造脏选项)。"""
+    s, d = _apply(oportal, _ext_user(oportal, WUHU_TENANT))
+    assert s == 403 and "芜湖车联天下智能科技有限公司" in d["error"] and "还没开通" in d["error"], (s, d)
+    # org 写了、但不在 _meta.org_options 快照里 ⇒ 也拒
+    m = json.loads(json.dumps(TENANT_MAP))
+    m[WUHU_TENANT]["org"] = "芜湖车联"
+    path = Path(oportal.app.cfg["TENANT_MAP_PATH"])
+    path.write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+    s, d = _apply(oportal, _ext_user(oportal, WUHU_TENANT))
+    assert s == 403, (s, d)
+    # POSITIVE:选项快照里加上 ⇒ 放行,写的就是这个选项
+    m["_meta"]["org_options"].append("芜湖车联")
+    path.write_text(json.dumps(m, ensure_ascii=False) + "  ", encoding="utf-8")
+    s, d = _apply(oportal, _ext_user(oportal, WUHU_TENANT))
+    assert s == 200 and FAKE.tables[KEYTBL][d["record_id"]]["组织名称"] == "芜湖车联", (s, d)
+
+
+@pytest.mark.parametrize("breakage", ["missing", "garbage", "no_meta", "unset"])
+def test_map_missing_fails_closed_for_external_only(portal_factory, tmp_path, breakage):
+    over = {"TENANT_MAP_PATH": ""} if breakage == "unset" else {}
+    p = portal_factory(INTERNAL_SECRET=INTERNAL, APPLY_DRY_RUN="0", **over)
+    _clear_x_rows()
+    path = Path(p.app.cfg["TENANT_MAP_PATH"]) if breakage != "unset" else None
+    if breakage == "missing":
+        path.unlink()
+    elif breakage == "garbage":
+        path.write_text("{not json", encoding="utf-8")
+    elif breakage == "no_meta":
+        path.write_text(json.dumps({k: v for k, v in TENANT_MAP.items() if k != "_meta"}), encoding="utf-8")
+    sx = _ext_user(p, BAIC_TENANT)
+    n = len(FAKE.tables[KEYTBL])
+    s, d = _apply(p, sx)
+    assert s == 403 and len(FAKE.tables[KEYTBL]) == n, (breakage, s, d)
+    me = p.req("GET", "/ai/api/me", cookie=sx)[1]
+    assert me["org_name"] == "" and me["org_ok"] is False
+    # 内部人不受影响(新人 N 照常写表)
+    s, d = _apply(p, p.sid("N"))
+    assert s == 200 and d["record_id"].startswith("recNEW") and len(FAKE.tables[KEYTBL]) == n + 1, (s, d)
+    # POSITIVE:把映射放回来 ⇒ 同一个外部会话放行
+    good = tmp_path / "good_map.json"
+    good.write_text(json.dumps(TENANT_MAP, ensure_ascii=False), encoding="utf-8")
+    p.app.cfg["TENANT_MAP_PATH"] = str(good)
+    s, d = _apply(p, sx)
+    assert s == 200 and FAKE.tables[KEYTBL][d["record_id"]]["组织名称"] == "北汽集团", (s, d)
+
+
+def test_internal_unaffected_by_tenant_map(portal_factory):
+    """内部同事(tenant_key=本租户)不读映射:映射里没有本租户、甚至映射整个缺失,照常申请,组织名称按 APPLY_ORG_NAME。"""
+    p = portal_factory(APPLY_DRY_RUN="0", APPLY_ORG_NAME="无锡车联", TENANT_MAP_PATH="/nonexistent/tenant_map.json")
+    assert OUR_TENANT not in TENANT_MAP
+    s, d = _apply(p, p.sid("N"))
+    assert s == 200 and FAKE.tables[KEYTBL][d["record_id"]]["组织名称"] == "无锡车联", (s, d)
+    me = p.req("GET", "/ai/api/me", cookie=p.sid("A"))[1]
+    assert me["external"] is False and me["org_name"] == ""
+    # 对照:同一个门户里外部人确实被映射缺失挡住(证明上面放行不是因为闸门没生效)
+    sx = _ext_user_factory(p, BAIC_TENANT)
+    assert _apply(p, sx)[0] == 403
+
+
+def _ext_user_factory(p, tenant_key):
+    """给没配 INTERNAL_SECRET 的门户造外部会话:直接走 session_shape + new_session(和 magic 消费同一条路)。"""
+    u = USERS["X"]
+    sid = p.app.new_session(p.app.session_shape({"union_id": u["union_id"], "open_id": u["open_id"],
+                                                 "tenant_key": tenant_key, "name": u["name"]}, "magic"))
+    return "ai_sid=" + sid
+
+
+def test_tenant_key_in_map_cannot_be_spoofed_from_client(oportal):
+    """公司只认会话里的 tenant_key(机器人签发时从飞书事件取)。请求体里塞 tenant_key / 组织名称 不起作用。"""
+    sid = _ext_user(oportal, PERSONAL_TENANT)
+    s, d = oportal.req("POST", "/ai/api/apply", {"account_type": "Cursor", "tenant_key": BAIC_TENANT,
+                                                  "组织名称": "北汽集团"}, cookie=sid)[:2]
+    assert s == 403, (s, d)
+
+
+def test_me_shows_company_name_for_external(oportal):
+    me = oportal.req("GET", "/ai/api/me", cookie=_ext_user(oportal, BAIC_TENANT))[1]
+    assert me["external"] is True and me["org_name"] == "北汽集团" and me["org_ok"] is True
+    me = oportal.req("GET", "/ai/api/me", cookie=_ext_user(oportal, WUHU_TENANT))[1]
+    assert me["org_name"] == "芜湖车联天下智能科技有限公司" and me["org_ok"] is False
+    me = oportal.req("GET", "/ai/api/me", cookie=_ext_user(oportal, PERSONAL_TENANT))[1]
+    assert me["org_name"] == "" and me["org_ok"] is False
+
+
+def test_frontend_shows_company_next_to_name():
+    h = (HERE / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="who-org"' in h and "me.org_name" in h
+    # 走 textContent,不拼 HTML(公司名来自映射文件,也当不可信文本)
+    assert '$("who-org").textContent' in h and "who-org\").innerHTML" not in h

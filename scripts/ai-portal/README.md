@@ -89,7 +89,8 @@ POST 都要 `Content-Type: application/json`；除 redeem 外都要本站 `Origi
 | `BATCH_GAP_MS` | `60000` | 批量是每 ~3 秒一把（最长一次间隔 27 秒），本人手动申请两次以天计 |
 | `BATCH_MIN_ROWS` | `5` | |
 | `APPLY_DRY_RUN` | `1` | `0` 才真写表 |
-| `APPLY_ORG_NAME` | 空 | 非空则写进「组织名称」，必须是表里已有选项（本服务不校验） |
+| `APPLY_ORG_NAME` | 空 | **只管内部人**：非空则写进「组织名称」，必须是表里已有选项（本服务不校验） |
+| `TENANT_MAP_PATH` | `<server.py 同目录>/tenant_map.json` | 外部人 tenant_key → 公司映射（`.work/ai-portal/org/build_tenant_map.py` 生成，按 mtime 热加载）。查不到 / `org` 空 / `org` 不在 `_meta.org_options` / 文件缺失 ⇒ 外部人申请 403「你的账号不是我们合作公司的，请联系对接人」；命中 ⇒ `org` 写进「组织名称」、页面名字旁显示 `name`。内部人不读它 |
 | `INSTALL_CODE_TTL` | `600` | 秒 |
 | `REDEEM_PER_IP_PER_MIN` / `REDEEM_GLOBAL_PER_MIN` | `10` / `120` | |
 | `FEEDBACK_BASE_TOKEN` / `FEEDBACK_TABLE_ID` | 同 feedback 服务的「反馈」表 | |

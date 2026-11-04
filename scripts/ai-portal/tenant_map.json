@@ -1,0 +1,97 @@
+{
+ "_meta": {
+  "built_at": "2026-11-04T19:44:00+08:00",
+  "org_options": [
+   "无锡车联",
+   "上海车联",
+   "北汽研究院",
+   "奇瑞",
+   "美团",
+   "巧虎",
+   "北汽集团",
+   "妙趣童年",
+   "零跑汽车"
+  ],
+  "trust_party_collected_at": "2026-11-04T19:30:31+08:00",
+  "key_table_read_at": "2026-11-04T19:32:33+08:00",
+  "note": "org=null ⇒ 门户拒绝(公司已识别但 key 表没有对应选项)",
+  "coverage": {
+   "放行:映射命中": {
+    "上海车联": 271,
+    "奇瑞": 2,
+    "北汽集团": 51,
+    "巧虎": 20,
+    "美团": 20,
+    "妙趣童年": 4
+   },
+   "未测到 tenant_key(关联组织里看不见/没聊过)": {
+    "上海车联": 50,
+    "北汽集团": 20
+   },
+   "持有人是本租户(内部人代持)": {
+    "零跑汽车": 10
+   }
+  }
+ },
+ "153f0ee88f0a575e": {
+  "name": "上海车联",
+  "org": "上海车联",
+  "full_name": "上海车联天下信息技术有限公司",
+  "source": "trust_party",
+  "verified_at": "2026-11-04",
+  "visible_users": 343
+ },
+ "15e7c0e34797d740": {
+  "name": "无锡车联天下信息技术有限公司广州分公司",
+  "org": null,
+  "full_name": "无锡车联天下信息技术有限公司广州分公司",
+  "source": "trust_party",
+  "verified_at": "2026-11-04",
+  "visible_users": 99
+ },
+ "140bcbdb99059740": {
+  "name": "无锡图灵智显科技有限公司",
+  "org": null,
+  "full_name": "无锡图灵智显科技有限公司",
+  "source": "trust_party",
+  "verified_at": "2026-11-04",
+  "visible_users": 34
+ },
+ "1bf59f4a67ca574f": {
+  "name": "芜湖车联天下智能科技有限公司",
+  "org": null,
+  "full_name": "芜湖车联天下智能科技有限公司",
+  "source": "trust_party",
+  "verified_at": "2026-11-04",
+  "visible_users": 10
+ },
+ "1a6031ef541d9758": {
+  "name": "无锡车联天下信息技术有限公司深圳分公司",
+  "org": null,
+  "full_name": "无锡车联天下信息技术有限公司深圳分公司",
+  "source": "trust_party",
+  "verified_at": "2026-11-04",
+  "visible_users": 60
+ },
+ "2d3a8ecde0cf575e": {
+  "name": "北汽集团",
+  "org": "北汽集团",
+  "full_name": "北汽集团",
+  "source": "manual",
+  "verified_at": "2026-11-04"
+ },
+ "1b8fa518c242175f": {
+  "name": "妙趣童年",
+  "org": "妙趣童年",
+  "full_name": "妙趣童年",
+  "source": "manual",
+  "verified_at": "2026-11-04"
+ },
+ "2e9e916eff8f1650": {
+  "name": "奇瑞",
+  "org": "奇瑞",
+  "full_name": "奇瑞",
+  "source": "manual",
+  "verified_at": "2026-11-04"
+ }
+}

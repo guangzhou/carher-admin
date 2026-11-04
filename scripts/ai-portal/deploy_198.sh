@@ -56,6 +56,12 @@ done
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/ai-portal/static" "$STAGE/feedback" "$STAGE/installer/pkg"
 cp scripts/ai-portal/server.py "$STAGE/ai-portal/"
+# 公司映射(tenant_key → 公司名):外部人申请要按它判「是不是合作公司」。🔴 漏拷 = 服务端读不到 ⇒ 失败关闭
+# ⇒ **所有外部人申请全 403**(内部同事不受影响,所以不容易被发现)。只有公司标识,不含个人 id / key。
+[ -s scripts/ai-portal/tenant_map.json ] || { echo "FATAL: 缺 scripts/ai-portal/tenant_map.json(外部人申请会全部被拒)" >&2; exit 1; }
+python3 -c 'import json,sys;d=json.load(open("scripts/ai-portal/tenant_map.json"));n=sum(1 for k,v in d.items() if k!="_meta" and isinstance(v,dict) and v.get("org"));sys.exit(0 if n>0 else 1)' \
+  || { echo "FATAL: tenant_map.json 里一个能放行的公司都没有" >&2; exit 1; }
+cp scripts/ai-portal/tenant_map.json "$STAGE/ai-portal/"
 cp scripts/ai-portal/static/index.html "$STAGE/ai-portal/static/"
 cp scripts/feedback/feedback_server.py "$STAGE/feedback/"
 cp scripts/ai-portal/installer/install.sh scripts/ai-portal/installer/install.ps1 "$STAGE/installer/"
@@ -78,6 +84,7 @@ tar -C "$W" -xzf /tmp/ap.tgz
 $S mkdir -p /opt/carher-ai-portal/ai-portal/static /opt/carher-ai-portal/feedback /var/www/ai-installer/pkg
 $S install -d -m 0700 /var/lib/carher-ai-portal
 $S install -m 0644 "$W/ai-portal/server.py" /opt/carher-ai-portal/ai-portal/server.py
+$S install -m 0644 "$W/ai-portal/tenant_map.json" /opt/carher-ai-portal/ai-portal/tenant_map.json
 $S install -m 0644 "$W/ai-portal/static/index.html" /opt/carher-ai-portal/ai-portal/static/index.html
 $S install -m 0644 "$W/feedback/feedback_server.py" /opt/carher-ai-portal/feedback/feedback_server.py
 $S install -m 0644 "$W/installer/install.sh" "$W/installer/install.ps1" /var/www/ai-installer/
@@ -213,6 +220,7 @@ chk "健康检查 /ai/healthz" "$(curl -s -m 10 $U/ai/healthz)" '{"ok": true}'
 # 回读 198 上真正生效的值,别信「我传了」:上一版传不过去,部署照样全绿
 chk "重置模式 ROTATE_DRY_RUN" "$($J ssh $H "sudo -n grep -E '^ROTATE_DRY_RUN=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" "$ROTATE"
 chk "申请模式 APPLY_DRY_RUN" "$($J ssh $H "sudo -n grep -E '^APPLY_DRY_RUN=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" "$APPLYDR"
+chk "公司映射已上线(能放行的公司数>0)" "$($J ssh $H "sudo -n python3 -c 'import json;d=json.load(open(\"/opt/carher-ai-portal/ai-portal/tenant_map.json\"));print(int(sum(1 for k,v in d.items() if k!=\"_meta\" and isinstance(v,dict) and v.get(\"org\"))>0))'" 2>/dev/null | tr -d '\r' | tail -1)" 1
 chk "外部人可申请 APPLY_ALLOW_EXTERNAL" "$($J ssh $H "sudo -n grep -E '^APPLY_ALLOW_EXTERNAL=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" 1
 chk "灰度名单 PILOT_UNION_IDS" "$($J ssh $H "sudo -n grep -E '^PILOT_UNION_IDS=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" "$PILOT"
 chk "网关 master key 已配" "$($J ssh $H "sudo -n grep -cE '^LITELLM_MASTER_KEY=.{20,}' /etc/carher-ai-portal.env" 2>/dev/null | tr -d '\r' | tail -1)" 1

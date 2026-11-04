@@ -69,7 +69,12 @@ DEFAULTS = {
     # 登录链接 ⇒ 身份是飞书给的、不可伪造。已知风险:飞书个人版注册成本低,可被批量刷 ——
     # 需要收紧时设 0,外部人申请改为登记待审核(audit_apply_request),不用改代码。
     "APPLY_ALLOW_EXTERNAL": "1",
-    "APPLY_ORG_NAME": "",       # 非空则写进「组织名称」;⚠️ 必须是表里已有的选项,本服务不校验
+    "APPLY_ORG_NAME": "",       # **只管内部人**:非空则写进「组织名称」;⚠️ 必须是表里已有的选项,本服务不校验
+    # 外部人的「组织名称」按人取:会话里的 tenant_key 查这张映射(.work/ai-portal/org/build_tenant_map.py 生成)。
+    # 形状 {tenant_key: {name, org, source, verified_at}} + "_meta": {org_options: [key 表「组织名称」选项快照]}。
+    # 查不到 / org 空 / org 不在选项快照里 / 文件缺失或坏 ⇒ 外部人一律不能申请(失败关闭);内部人不读它。
+    # 按 mtime 热加载:每天刷新映射不用重启服务。
+    "TENANT_MAP_PATH": str(HERE / "tenant_map.json"),
     "APPLY_LOCK_TTL": "86400",
     # 重置自己的 key(轮换)。没配 LITELLM_MASTER_KEY ⇒ 整个功能关闭(接口 501,前端退回「提反馈」)
     "LITELLM_MASTER_KEY": "",
@@ -103,6 +108,10 @@ REQUIRED = ("FEISHU_APP_ID", "FEISHU_APP_SECRET", "SESSION_SECRET")
 OPTIONAL_SECRETS = ("INTERNAL_SECRET",)    # 没配 ⇒ /api/internal/* 整个关闭(404)
 APPLY_TYPE = "Cursor"                      # poller 不管写什么都落成 Cursor
 OAUTH_EXTERNAL_MSG = "这个按钮只认无锡车联(auto-link)的飞书账号"
+# 外部人申请时 tenant_key 不在映射里(飞书个人版 / 还没登记的公司 / 已知公司的人用私人号)
+APPLY_UNKNOWN_ORG_MSG = "你的账号不是我们合作公司的,请联系对接人"
+# 公司认出来了,但 key 表「组织名称」里还没有它的选项(映射里 org 为空)
+APPLY_ORG_NOT_OPEN_MSG = "你的公司(%s)还没开通自助申请,请联系对接人"
 # 外部人待审核申请 —— 写进反馈行「详细描述」给管理员看的处理步骤(最小可行审核流程,见 README「外部人」一节)
 APPLY_REVIEW_HOWTO = (
     "union_id=%s\ntenant_key=%s\n\n"
@@ -746,6 +755,7 @@ class App:
         self.rl_feedback = RateLimiter(cfg["FEEDBACK_PER_MIN"], 60, now)
         self.litellm = litellm or LiteLLMClient(cfg)
         self._rows_cache, self._rows_lock = {}, threading.Lock()     # my_rows 的按人缓存
+        self._tmap, self._tmap_sig, self._tmap_lock = {}, None, threading.Lock()   # tenant_key → 公司(热加载)
 
     def q(self, sql, args=(), one=False):
         with self.dblock:
@@ -1057,10 +1067,64 @@ class App:
                 return r
         return None
 
+    # tenant_key → 公司(外部人申请的闸门 + 页面上的公司名)
+    def tenant_map(self):
+        """读 TENANT_MAP_PATH,按 (mtime, size) 热加载。缺失 / 读不了 / 不是合法 JSON / 形状不对 ⇒ 空映射
+        (= 外部人一律不能申请)。只在形状合法时才替换缓存:刷新脚本写了一半的文件不会把旧映射冲掉成空。"""
+        path = (self.cfg.get("TENANT_MAP_PATH") or "").strip()
+        try:
+            st = os.stat(path) if path else None
+        except OSError:
+            st = None
+        if st is None:
+            with self._tmap_lock:
+                if self._tmap_sig is not None:
+                    log("tenant 映射文件不见了,外部人申请关闭", path)
+                self._tmap, self._tmap_sig = {}, None
+            return {}
+        sig = (st.st_mtime_ns, st.st_size)
+        with self._tmap_lock:
+            if sig == self._tmap_sig:
+                return self._tmap
+        try:
+            d = json.loads(Path(path).read_text(encoding="utf-8"))
+            opts = (d.get("_meta") or {}).get("org_options")
+            if not isinstance(d, dict) or not isinstance(opts, list):
+                raise ValueError("缺 _meta.org_options")
+        except (OSError, ValueError, AttributeError) as e:
+            log("tenant 映射读不了,外部人申请关闭", path, type(e).__name__)
+            with self._tmap_lock:
+                self._tmap, self._tmap_sig = {}, sig
+            return {}
+        with self._tmap_lock:
+            self._tmap, self._tmap_sig = d, sig
+        log("tenant 映射已加载", path, len([k for k in d if k != "_meta"]), "个租户")
+        return d
+
+    def org_of(self, user):
+        """外部人的公司:{name, org}。org = 要写进 key 表「组织名称」的值,不在选项快照里就当 None。
+        内部人 / 查不到 ⇒ None。只认会话里的 tenant_key(登录时由飞书/机器人给的,用户改不了)。"""
+        if not user.get("external"):
+            return None
+        tk = user.get("tenant_key") or ""
+        m = self.tenant_map()
+        e = m.get(tk) if tk and tk != "_meta" else None
+        if not isinstance(e, dict) or not isinstance(e.get("name"), str) or not e["name"].strip():
+            return None
+        opts = set((m.get("_meta") or {}).get("org_options") or [])
+        org = e.get("org") if isinstance(e.get("org"), str) and e.get("org") in opts else None
+        return {"name": e["name"].strip(), "org": org}
+
     # 申请
     def apply_fields(self, user):
         fields = {"姓名": [{"id": user["union_id"]}], "账户类型": [APPLY_TYPE]}
-        if self.cfg["APPLY_ORG_NAME"].strip():
+        if user.get("external"):
+            # 外部人:组织名称按人取(apply 里已经过了闸门,这里 org 一定有值;没有就宁可炸也不写空)
+            o = self.org_of(user)
+            if not o or not o["org"]:
+                raise HttpError(403, APPLY_UNKNOWN_ORG_MSG)
+            fields["组织名称"] = o["org"]
+        elif self.cfg["APPLY_ORG_NAME"].strip():
             fields["组织名称"] = self.cfg["APPLY_ORG_NAME"].strip()
         assert set(fields) <= APPLY_FIELD_ALLOW
         return fields
@@ -1104,6 +1168,17 @@ class App:
             raise HttpError(400, "账户类型只能是 Cursor(三个工具共用这一把)")
         if not self.rl_apply.hit(user["union_id"]):
             raise HttpError(429, "申请太频繁了,过一分钟再试")
+        if user.get("external"):
+            # 11-04:外部人按 tenant_key 认公司。个人版和企业外部人的事件字段一模一样,唯一能分开的是
+            # tenant_key 在不在我们登记的合作公司映射里 ⇒ 不在 = 拒(个人版 / 新公司 / 用私人号来的都挡住)。
+            # 放在审核分支前面:个人号连「登记待审核」也进不去,不会刷管理员的反馈表。
+            o = self.org_of(user)
+            if not o:
+                log("apply 拒绝:租户不在映射", short(user["union_id"]), user.get("tenant_key") or "-")
+                raise HttpError(403, APPLY_UNKNOWN_ORG_MSG)
+            if not o["org"]:
+                log("apply 拒绝:公司无组织名称选项", short(user["union_id"]), user.get("tenant_key") or "-")
+                raise HttpError(403, APPLY_ORG_NOT_OPEN_MSG % o["name"])
         if user.get("external") and self.cfg["APPLY_ALLOW_EXTERNAL"] != "1":
             # 外部人:不写表(写了 poller 会直接发 key),只登记一条待审核,管理员在反馈表里看得到
             self.audit_apply_request(user)
@@ -1773,6 +1848,7 @@ class H(http.server.BaseHTTPRequestHandler):
                                  [self.cookie(SID_COOKIE, "", a.base + "/", 0)])
         if p == "/api/me":
             u = self.user()
+            org = a.org_of(u)
             return self.send_json(200, {"login": True, **{k: u.get(k, "") for k in (
                 "union_id", "open_id", "tenant_key", "name", "avatar", "email", "external", "login")},
                 "tenant": u.get("tenant_key", ""),
@@ -1784,7 +1860,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 "feedback_choices": fb.CHOICES,
                 # 外部人待审核申请的登记时间(秒,0 = 没有);前端刷新后据此显示「已登记、等审核」
                 "apply_review_at": a.apply_review_at(u),
-                "apply_external_review": a.cfg["APPLY_ALLOW_EXTERNAL"] != "1"})
+                "apply_external_review": a.cfg["APPLY_ALLOW_EXTERNAL"] != "1",
+                # 外部人的公司名(tenant 映射里的 name;内部人 / 查不到 ⇒ "")。页面放在名字旁边;
+                # org_ok=false ⇒ 外部人点申请会被 403(页面据此提前说清楚,而不是让他点了才知道)
+                "org_name": org["name"] if org else "", "org_ok": bool(org and org["org"])})
         if p == "/api/keys":
             return self.send_json(200, a.keys(self.user()))
         if p.startswith("/api/"):

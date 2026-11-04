@@ -20,6 +20,8 @@
 #   4. 改前快照整份备份到 $I/tune-<ts>/snap-before/；回滚 = `--restore <tune-dir>`（把快照放回再走同一条链）
 #      或 `helm rollback <rel> <上一 revision>`。
 # 不做：不碰 nginx / 路由 / replicas / 镜像 / env，不 kubectl apply。
+# 11-04：--deployment 源与 lane-callback-swap.sh / render-lane-check.sh 同一张表（gray=gray-deployment.yaml、prod=prod-deployment.yaml）；
+#        旧表 gray 指着没有 sec_redact mount 的 prod-deployment.yaml ⇒ prepare-values 报 audited callbacks the deployment does not mount。
 set -euo pipefail
 
 LANE="" RUN_DIR="" DRY=0 RESTORE="" ADOPT_LIVE=0
@@ -48,8 +50,8 @@ TOOLS="$SRC"
 umask 077
 
 case "$LANE" in
-  prod)        I=$RUN_DIR/prod-target; VAL=$I/prod-target-values.yaml; REL=litellm-product-proxy;       PROF=k8s/values-prod.yaml;        DEP=litellm-proxy;             DEPLOY_SRC=$I/prod-live-deployment.yaml; MODE=primary ;;
-  gray)        I=$RUN_DIR/gray-inputs;  VAL=$RUN_DIR/gray/gray-values.yaml; REL=litellm-product-gray;  PROF=k8s/values-gray.yaml;        DEP=litellm-proxy-gray;        DEPLOY_SRC=$I/prod-deployment.yaml;     MODE=disabled ;;
+  prod)        I=$RUN_DIR/prod-target; VAL=$I/prod-target-values.yaml; REL=litellm-product-proxy;       PROF=k8s/values-prod.yaml;        DEP=litellm-proxy;             DEPLOY_SRC=$I/prod-deployment.yaml;      MODE=primary ;;
+  gray)        I=$RUN_DIR/gray-inputs;  VAL=$RUN_DIR/gray/gray-values.yaml; REL=litellm-product-gray;  PROF=k8s/values-gray.yaml;        DEP=litellm-proxy-gray;        DEPLOY_SRC=$I/gray-deployment.yaml;     MODE=disabled ;;
   guarded-old) I=$RUN_DIR/go-inputs;    VAL=$RUN_DIR/go/go-values.yaml;     REL=litellm-product-guarded-old; PROF=k8s/values-guarded-old.yaml; DEP=litellm-proxy-guarded-old; DEPLOY_SRC=$I/prod-deployment.yaml; MODE=disabled ;;
   *) echo "unknown lane $LANE" >&2; exit 2 ;;
 esac
@@ -211,6 +213,9 @@ for d in docs:
             print("  adopt-live: ignore dangling live mount (subPath not in callbacks CM):", m["mountPath"])
         d["spec"]["template"]["spec"]["volumes"] = live_dep["spec"]["template"]["spec"]["volumes"]
         d["spec"]["template"]["spec"]["containers"][0]["env"] = lc.get("env", [])
+        # 11-04：envFrom 也会被带外改（10-28 master key 轮换把 prod 的 litellm-secrets 换成 -r2，helm manifest 仍是旧名）。
+        # 不换成 live ⇒ 门禁把「快照 == live」误判成「Deployment 变了」；快照里 envFrom 已是 r2（render-lane-check 核过）
+        d["spec"]["template"]["spec"]["containers"][0]["envFrom"] = lc.get("envFrom", [])
         d["spec"]["template"]["spec"]["containers"][0]["volumeMounts"] = [m for m in lc["volumeMounts"] if m not in dangling]
     if d["kind"] == "ConfigMap" and ("-config-" in d["metadata"]["name"] or "-callbacks-" in d["metadata"]["name"]):
         role = "config" if "-config-" in d["metadata"]["name"] else "callbacks"

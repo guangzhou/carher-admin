@@ -22,11 +22,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 PILOT="${PILOT_UNION_IDS-on_0577e767b8995740ebbf83f06d9f8bd1}"   # 刘国现(carher-236 开发商下的 union_id)
+# 「重置我的 key」:0 = 真换(11-04 用户定:「要改成真换,不要演练,好多人在后面等着呢」);1 = 只演练
+ROTATE="${ROTATE_DRY_RUN-0}"
+case "$ROTATE" in 0|1) ;; *) echo "ROTATE_DRY_RUN 只能是 0 或 1" >&2; exit 1 ;; esac
 case "$PILOT" in *[!A-Za-z0-9_,]*) echo "PILOT_UNION_IDS 只能是 on_xxx,on_yyy" >&2; exit 1 ;; esac
 
 # 0) 本地门禁:测试 + e2e 不过就停
-python3 -m pytest scripts/ai-portal scripts/feedback scripts/ai-portal/installer -q -p no:cacheprovider
-python3 .work/ai-portal/e2e/e2e.py
+# 门禁测试**不能继承部署开关**:server.py 会从环境变量读配置,ROTATE_DRY_RUN=0 漏进测试里的子进程
+# ⇒ 它没配 master key 就按设计拒绝启动 ⇒ 门禁假红、部署被挡(11-04 真踩到)。用 env -u 剥掉。
+env -u ROTATE_DRY_RUN -u APPLY_DRY_RUN -u PILOT_UNION_IDS \
+  python3 -m pytest scripts/ai-portal scripts/feedback scripts/ai-portal/installer -q -p no:cacheprovider
+env -u ROTATE_DRY_RUN -u APPLY_DRY_RUN -u PILOT_UNION_IDS python3 .work/ai-portal/e2e/e2e.py
 
 # 1) 安装器产物(要带「从 env CARHER_KEY 读 key」)
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
@@ -60,6 +66,7 @@ cat > "$STAGE/remote.sh" <<'REMOTE'
 set -euo pipefail
 S="sudo -n"
 PILOT="$1"
+RDR="$2"
 W=$(mktemp -d); trap 'rm -rf "$W" /tmp/ap.tgz' EXIT
 tar -C "$W" -xzf /tmp/ap.tgz
 /usr/bin/python3 -m py_compile "$W/ai-portal/server.py" "$W/feedback/feedback_server.py"
@@ -97,9 +104,9 @@ SS="$(old SESSION_SECRET)"; IS="$(old INTERNAL_SECRET)"
 #   secret 名跟着 deploy/litellm-proxy 的 envFrom 走(同 scripts/litellm_198_secret.py 的 SHELL_RESOLVE)。
 MK="$($S sh -c 'for s in $(kubectl -n litellm-product get deploy litellm-proxy -o jsonpath="{range .spec.template.spec.containers[0].envFrom[*]}{.secretRef.name}{\"\n\"}{end}"); do v=$(kubectl -n litellm-product get secret "$s" -o jsonpath="{.data.LITELLM_MASTER_KEY}" 2>/dev/null); [ -n "$v" ] && { printf %s "$v" | base64 -d; break; }; done')"
 [ -n "$MK" ] || echo "!! 读不到 198 网关 master key ⇒ 「重置我的 key」会自动关闭(页面退回「请提反馈」)" >&2
-# 重置默认只演练。真写要显式 ROTATE_DRY_RUN=0 bash deploy_198.sh(而且要先拿自己的 key 走一遍)
-RDR="${ROTATE_DRY_RUN:-1}"
-case "$RDR" in 0|1) ;; *) echo "ROTATE_DRY_RUN 只能是 0 或 1" >&2; exit 1 ;; esac
+# 🔴 这段跑在 **198 上**:本机的 ROTATE_DRY_RUN 传不过来,只能靠参数 $2(11-04 踩到:本机设了 0,
+#    远端读自己的环境变量拿不到 ⇒ 永远落到默认值,部署全绿、却一直是演练模式)
+case "$RDR" in 0|1) ;; *) echo "远端没拿到 ROTATE_DRY_RUN(应为 0/1,实际「$RDR」)" >&2; exit 1 ;; esac
 [ ${#SS} -ge 32 ] || SS="$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')"
 [ ${#IS} -ge 32 ] && [ "$IS" != "$SS" ] || IS="$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')"
 [ "$IS" != "$SS" ]
@@ -190,13 +197,16 @@ PY
 fi
 REMOTE
 $J scp "$STAGE/remote.sh" $H:/tmp/ap_remote.sh
-$J ssh $H "bash /tmp/ap_remote.sh '$PILOT'; rc=\$?; rm -f /tmp/ap_remote.sh; exit \$rc"
+$J ssh $H "bash /tmp/ap_remote.sh '$PILOT' '$ROTATE'; rc=\$?; rm -f /tmp/ap_remote.sh; exit \$rc"
 
 # 5) 外网验收
 U=https://chat.auto-link.com.cn
 fail=0
 chk() { if [ "$2" = "$3" ]; then echo "OK   $1 = $2"; else echo "FAIL $1 = $2(应 $3)"; fail=1; fi; }
 chk "健康检查 /ai/healthz" "$(curl -s -m 10 $U/ai/healthz)" '{"ok": true}'
+# 回读 198 上真正生效的值,别信「我传了」:上一版传不过去,部署照样全绿
+chk "重置模式 ROTATE_DRY_RUN" "$($J ssh $H "sudo -n grep -E '^ROTATE_DRY_RUN=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" "$ROTATE"
+chk "网关 master key 已配" "$($J ssh $H "sudo -n grep -cE '^LITELLM_MASTER_KEY=.{20,}' /etc/carher-ai-portal.env" 2>/dev/null | tr -d '\r' | tail -1)" 1
 chk "未登录 /ai/api/me" "$(curl -s -o /dev/null -w '%{http_code}' -m 10 $U/ai/api/me)" 401
 chk "页面 /ai/" "$(curl -s -o /dev/null -w '%{http_code}' -m 10 $U/ai/)" 200
 loc="$(curl -s -o /dev/null -w '%{redirect_url}' -m 10 "$U/ai/auth/login?redirect=/ai/")"

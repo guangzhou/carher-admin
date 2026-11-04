@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Cursor / Codex 桌面 App 安装包的国内镜像(198 nginx /ccdl/apps/)。在 198 上跑,幂等,只增不删旧版本。
+# Cursor / Codex 桌面 App 安装包的国内镜像(198 nginx /ccdl/apps/)。在 198 上跑,幂等。
+# 🔴 11-04 起:镜像整体放在**挂载盘** /Data/ccdl(/var/www/ccdl 是指过去的软链),
+#    每个产品**只留最近 2 个版本**(+ 稳定链接还指着的版本),旧的每天跑完自动删。
+#    原来放在系统盘、只增不删 ⇒ 一版 Codex mac 就 3G,系统盘满了整台 198 一起出事。见 mirror-retention.sh。
 #
 # 为什么要有它(2026-10-26,用户:「有 app 的都把 app 下载好,放到服务器上供用户下载」):
 #   oneclick 页上 Cursor / Codex 的下载按钮指向官方:
@@ -28,7 +31,10 @@
 #             sudo bash app-mirror-sync.sh cursor|codex|claude-linux   # 只跟一个
 # 依赖:同目录 msstore_msix_urls.py(装到 /usr/local/bin/carher-msstore-msix-urls.py)
 set -euo pipefail
-ROOT=/var/www/ccdl/apps
+# shellcheck source=/dev/null
+. "${MIRROR_RETENTION_LIB:-/usr/local/bin/carher-mirror-retention.sh}"
+mirror_relocate_to_data
+ROOT="$MIRROR_WEB_ROOT/apps"
 UA="Mozilla/5.0"
 MSSTORE="${MSSTORE:-/usr/local/bin/carher-msstore-msix-urls.py}"
 ONLY="${1:-all}"
@@ -174,4 +180,13 @@ case "$ONLY" in
   *) echo "用法: $0 [all|cursor|codex|claude-linux]" >&2; exit 64 ;;
 esac
 chmod -R a+rX "$ROOT"
+
+# ── 只留最近 KEEP_VERSIONS 个版本(默认 2)。稳定名软链还指着的版本一律保留 ──
+# 放在**全部同步完之后**:新版切好软链,才轮到删旧的 ⇒ 任何时刻对外都至少有一版完整可下。
+echo "→ 清理旧版本(每个产品留最近 $KEEP_VERSIONS 个)"
+mirror_prune "$ROOT/cursor" "$(mirror_pinned "$ROOT" cursor)"
+mirror_prune "$ROOT/codex"  "$(mirror_pinned "$ROOT" codex)" ""        # Windows(微软商店版本号)
+mirror_prune "$ROOT/codex"  "$(mirror_pinned "$ROOT" codex)" "mac-"    # Mac / Linux(appcast 版本号)
+mirror_prune "$ROOT/claude" "$(mirror_pinned "$ROOT" claude)"
+df -h "$MIRROR_DATA_ROOT" | tail -n 1 | awk '{print "  挂载盘余量:"$4" / "$2"(已用 "$5")"}'
 exit "$rc"

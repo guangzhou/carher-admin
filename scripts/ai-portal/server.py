@@ -67,7 +67,7 @@ DEFAULTS = {
     "APPLY_LOCK_TTL": "86400",
     # 重置自己的 key(轮换)。没配 LITELLM_MASTER_KEY ⇒ 整个功能关闭(接口 501,前端退回「提反馈」)
     "LITELLM_MASTER_KEY": "",
-    "LITELLM_BASE": "https://cc.auto-link.com.cn/pro",   # 同 poller:198 product,nginx 前缀 /pro
+    "LITELLM_BASE": "https://chat.auto-link.com.cn/model",   # 198 product 的新地址(cc…/pro 是旧地址,共存期后会停)
     "LITELLM_TIMEOUT": "60",
     "ROTATE_DRY_RUN": "1",          # 同 APPLY_DRY_RUN 的风格:只有显式 "0" 才真写
     "ROTATE_COOLDOWN": "600",       # 两次**成功**重置之间的最小间隔(秒);0 = 不限
@@ -90,7 +90,22 @@ REQUIRED = ("FEISHU_APP_ID", "FEISHU_APP_SECRET", "SESSION_SECRET")
 OPTIONAL_SECRETS = ("INTERNAL_SECRET",)    # 没配 ⇒ /api/internal/* 整个关闭(404)
 APPLY_TYPE = "Cursor"                      # poller 不管写什么都落成 Cursor
 TOOLS = ("cursor", "codex", "claude")      # 三个工具共用同一把 current 的 Cursor key
+# 11-04 用户要求「一条命令配置和装三个 app,同时也支持分开安装」。
+# 形状选 **tool="all"**(而不是 tool 收数组、也不是一次签三个码):
+#   ① 一个码装三个 = 用户只复制一行。签三个码要么让他贴三行,要么让安装器连换三次(码是一次性的,
+#      换第二次就 400),两条都不行。
+#   ② 本来就是**同一把 key** 发给三个工具(TOOLS 注释那句),所以 "all" 只是收货人变了,不涉及多把 key。
+#   ③ 数组形状(tool:["codex","claude"])会让「装哪几个」变成 2^3 种组合:库里那一列、安装器的
+#      校验、前端的卡片、补装话术全要跟着分叉,而产品上只有「装一个」和「装三个」两种诉求。
+#   ④ 库里 install_codes.tool 是一列文本,"all" 直接存得下,不改表。
+ISSUABLE = TOOLS + ("all",)                # /api/install-code 能签的;redeem 原样回这一列
 APPLY_FIELD_ALLOW = {"姓名", "账户类型", "组织名称"}   # API Key/open_id/邮箱前缀/状态/key_alias 一律不许写
+# 重置时允许写的列(白名单;姓名/账户类型/组织名称/open_id/邮箱前缀 一律不动 —— 重置不改归属)
+ROTATE_FIELD_ALLOW = {"API Key", "状态", "key_alias", "点我体检", "Cursor Key", "Claude Code Key"}
+ROTATE_STATUS = "有效（已重新生成）"   # 🔴 必须是表里**已有**的选项(单选列写新值会被拒/造脏选项)
+KEY_PROBE_FIELD = "点我体检"           # 超链接列,不跟着 API Key 自动走(见 keyprobe/backfill_lark_link.py)
+KEYPROBE_PAGE = "https://chat.auto-link.com.cn/keyprobe/"
+KEYPROBE_TEXT = "▶ 测这把 key"
 NO_MATCH_CODES = {1254018}                 # InvalidFilter:假 id/截断 id/类型不匹配 ⇒ 当「查无记录」
 MAX_BODY = 1024 * 1024     # 反馈带自检报告(前端上限 200KB,JSON 转义后会变大)
 
@@ -155,6 +170,21 @@ def check_config(cfg):
         errs.append("INTERNAL_SECRET 不能和 SESSION_SECRET 相同")
     if not (cfg.get("BASE_PATH") or "").startswith("/") or cfg["BASE_PATH"].endswith("/"):
         errs.append("BASE_PATH 要形如 /ai")
+    mk = (cfg.get("LITELLM_MASTER_KEY") or "").strip()
+    if mk and (mk == s or mk == isec):
+        errs.append("LITELLM_MASTER_KEY 不能和 SESSION_SECRET / INTERNAL_SECRET 相同")
+    # 真写模式必须有 master key,否则页面上出着真按钮、点下去只能 501
+    if mk == "" and (cfg.get("ROTATE_DRY_RUN") or "1") == "0":
+        errs.append("ROTATE_DRY_RUN=0 但没配 LITELLM_MASTER_KEY(重置 key 要调 198 网关)")
+    for k in ("ROTATE_COOLDOWN", "ROTATE_LOCK_TTL", "ROTATE_PER_MIN", "ROTATE_PROBE_MAX_TOKENS", "LITELLM_TIMEOUT"):
+        v = (cfg.get(k) or "").strip()
+        if not v.isdigit():
+            errs.append("%s 要是非负整数(现在是 %r)" % (k, v))
+    base = (cfg.get("LITELLM_BASE") or "").strip()
+    if base and not base.startswith("https://"):
+        # master key 会放在 Authorization 头里发出去 ⇒ 明文 http 不许(本机回环除外,给测试)
+        if not base.startswith("http://127.0.0.1") and not base.startswith("http://localhost"):
+            errs.append("LITELLM_BASE 必须是 https://(master key 走这条连接)")
     return errs
 
 
@@ -267,6 +297,114 @@ class FeishuClient:
                      {"fields": fields})
         return d.get("record") or {}
 
+    def update_record(self, app_token, table_id, record_id, fields):
+        """逐字段覆盖:只发这几个字段,别人手改过的其它列不动(同 keyprobe/backfill_lark_link.py)。"""
+        d = self.bot("PUT", "/bitable/v1/apps/%s/tables/%s/records/%s?user_id_type=union_id" % (
+            app_token, table_id, record_id), {"fields": fields})
+        return d.get("record") or {}
+
+
+# ── 198 LiteLLM client(可注入;测试里用假的)────────────────────────────
+class LiteLLMError(Exception):
+    def __init__(self, where, status, msg):
+        super().__init__("%s: HTTP %s %s" % (where, status, msg))
+        self.where, self.status, self.msg = where, status, msg
+
+
+class LiteLLMClient:
+    """只用得到的四个口。master key 只在 Authorization 头里,不进日志、不进响应。
+
+    🔴 读 key 必须用 `/key/info?key=<token 的 sha256>`:
+    - `/key/info?key_alias=` 在 198 上返回 **HTTP 200 + 所有字段 null**(实测,见
+      scripts/litellm-198-key-fallback.py 的注释)—— 什么都不抛,下游把 None 当 []
+      就会"跑得很顺、什么都没改"。
+    - `/key/list?key_alias=` 能回全行,但得先信飞书表里的 key_alias 那一列;
+      我们手上有用户**真正在用的明文**,按它的 sha256 查才是对的归属判据。
+    """
+
+    def __init__(self, cfg, timeout=None):
+        self.base = cfg["LITELLM_BASE"].rstrip("/")
+        self.mk = (cfg.get("LITELLM_MASTER_KEY") or "").strip()
+        self.timeout = int(timeout or cfg["LITELLM_TIMEOUT"])
+
+    @property
+    def enabled(self):
+        return bool(self.mk)
+
+    def _http(self, method, path, body=None, auth=None, timeout=None):
+        url = self.base + path
+        data = json.dumps(body).encode() if body is not None else None
+        h = {"Authorization": "Bearer " + (auth or self.mk)}
+        if data is not None:
+            h["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, method=method, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            raw = e.read() or b""
+            try:
+                return e.code, json.loads(raw)
+            except ValueError:
+                return e.code, {"raw": raw.decode("utf-8", "replace")[:300]}
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise LiteLLMError(path.split("?")[0], -1, type(e).__name__)
+
+    def key_info(self, token_sha):
+        """返回那一行(dict),不存在返回 None。token 列本身被接口置空,我们自己已经有。"""
+        st, d = self._http("GET", "/key/info?key=" + urllib.parse.quote(token_sha, safe=""))
+        if st == 404:
+            return None
+        if st != 200:
+            raise LiteLLMError("/key/info", st, _lit_msg(d))
+        info = (d or {}).get("info")
+        if not isinstance(info, dict) or not info:
+            return None
+        return info
+
+    def generate(self, payload):
+        st, d = self._http("POST", "/key/generate", payload)
+        key = (d or {}).get("key")
+        if st != 200 or not isinstance(key, str) or not key.startswith("sk-"):
+            raise LiteLLMError("/key/generate", st, _lit_msg(d))
+        return d
+
+    def update(self, payload):
+        st, d = self._http("POST", "/key/update", payload)
+        if st != 200:
+            raise LiteLLMError("/key/update", st, _lit_msg(d))
+        return d or {}
+
+    def delete_by_alias(self, alias):
+        st, d = self._http("POST", "/key/delete", {"key_aliases": [alias]})
+        if st != 200:
+            raise LiteLLMError("/key/delete", st, _lit_msg(d))
+        return d or {}
+
+    def probe(self, plaintext, model, max_tokens):
+        """用新 key 真发一发。判据只看「认证和权限过了没」⇒ 有 choices 就算过。
+
+        🔴 不要求 content 非空:菜单里多是推理模型,max_tokens 给小了会被 reasoning token
+        吃光,返回 200 但 content="" —— 那是探针自己饿死,不是 key 不能用
+        (见 .work/ext-user-onboarding/15-key-lifecycle.md §6)。真正能分辨好坏的是 401/403。
+        """
+        st, d = self._http("POST", "/v1/chat/completions", {
+            "model": model, "max_tokens": int(max_tokens),
+            "messages": [{"role": "user", "content": "ping"}]}, auth=plaintext)
+        if st == 200 and isinstance((d or {}).get("choices"), list) and d["choices"]:
+            return True, "200 model=%s" % model
+        return False, "HTTP %s %s" % (st, _lit_msg(d))
+
+
+def _lit_msg(d):
+    """错误信封里的人话;**不回显整包**(请求体可能被回显,里面有 payload)。"""
+    if not isinstance(d, dict):
+        return ""
+    e = d.get("error")
+    if isinstance(e, dict):
+        return str(e.get("message") or e.get("type") or "")[:200]
+    return str(e or d.get("message") or d.get("detail") or d.get("raw") or "")[:200]
+
 
 # ── 纯函数(单测直接打)────────────────────────────────────────────────
 def mask_key(k):
@@ -308,6 +446,91 @@ def front_status(raw, key):
     if s.startswith("已禁用"):
         return "已禁用"
     return s        # 「生成失败: <原因>」原样带原因;其它原样
+
+
+# ── 重置 key 用的纯函数 ──────────────────────────────────────────────────
+# alias 基名:只剥 poller 加的那种 4 位 36 进制后缀(Date.now().toString(36).slice(-4),
+# litellm-key-poller.js:689),同 poller 自己的 loadPrefixOwners 正则。
+# 🔴 不能无脑 rsplit("-",1):真表里有 `cursor-buyitian` 这种**没有后缀**的 alias,
+# 剥一刀就变成 `cursor`,新 key 会叫 `cursor-xxxx` —— 名字里的人没了,还可能撞别人。
+ALIAS_SUFFIX_RE = re.compile(r"^(.+?)-[a-z0-9]{4}$")
+ALIAS_OK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-/@]{0,253}[A-Za-z0-9]$")   # LiteLLM 的严格形状
+
+# 逐字段平移(同 scripts/litellm-198-key-reissue.py 的 CARRY_COLS,那套在 127 把真 key 上跑过)。
+# 只平移**非空**的字段:空的发过去可能被服务端当成"显式清空"。
+# 故意不抄:token/key_name(新发)、key_alias(换后缀)、spend/model_spend(从 0 起)、
+# blocked(重置的目的就是给一把能用的)、created_*/updated_*/budget_reset_at、rotation_*/auto_rotate。
+ROTATE_CARRY = ("user_id", "team_id", "organization_id", "models", "aliases", "metadata",
+                "max_budget", "budget_duration", "soft_budget_cooldown", "tpm_limit", "rpm_limit",
+                "tpd_limit", "max_parallel_requests", "model_max_budget", "permissions",
+                "allowed_cache_controls", "allowed_routes", "config", "budget_id", "project_id",
+                "router_settings", "policies", "key_type")
+# 回读必须一致的字段:"建出来了" 和 "闸装上了/权限对了" 是两件事
+ROTATE_ASSERT = ("models", "max_budget", "budget_duration", "team_id", "user_id")
+# 探针模型从**这把 key 自己的 models** 里挑,不按 alias 前缀猜:两个 key 族模型名前缀是反的
+# (cursor-* 裸名 claude-haiku-4-5,claude-code-* 带 anthropic. 前缀),猜错拿到的 403 是量具错。
+PROBE_PREF = ("claude-haiku-4-5", "anthropic.claude-haiku-4-5", "deepseek-v4.1-flash",
+              "claude-haiku-5-5", "anthropic.claude-haiku-5-5")
+
+
+def alias_base(alias):
+    m = ALIAS_SUFFIX_RE.match((alias or "").strip())
+    return m.group(1) if m else (alias or "").strip()
+
+
+def new_alias(alias, suffix):
+    return "%s-%s" % (alias_base(alias), suffix)
+
+
+def retired_alias(alias, ts):
+    """旧 key 改名用:把规范 alias 腾出来,审计行留在主表里。"""
+    return "%s-retired-%s" % (alias_base(alias), ts)
+
+
+def pick_probe_model(models):
+    ms = [m for m in (models or []) if isinstance(m, str) and m]
+    if not ms or any(m.startswith("all-") for m in ms):
+        return None     # all-team-models / all-proxy-models:一个词,解析只对 team 成员生效,探不出来
+    for p in PROBE_PREF:
+        if p in ms:
+            return p
+    cheap = [m for m in ms if "haiku" in m or "flash" in m or "mini" in m]
+    return (cheap or ms)[0]
+
+
+def empty_val(v):
+    return v is None or v == "" or v == [] or v == {}
+
+
+def rotate_payload(old, alias, now_iso):
+    """新 key 的 /key/generate 请求体:老行的非空字段逐个抄过来 + 本次重置的记账。"""
+    p = {"key_alias": alias}
+    for c in ROTATE_CARRY:
+        v = old.get(c)
+        if not empty_val(v):
+            p[c] = v
+    md = dict(p.get("metadata") or {})
+    md["base_alias"] = alias_base(alias)
+    md["rotated_from"] = old.get("key_alias") or ""
+    md["rotated_at"] = now_iso
+    md["rotated_by"] = "ai-portal/self-service"
+    p["metadata"] = md
+    return p
+
+
+def carry_mismatch(old, new):
+    """回读比对。只报真漂移:老的为空、新的被服务端补上(key_type 恒 default、
+    organization_id 按 team 补齐)不算漏平移 —— 这两条在换发脚本上报过假红。"""
+    bad = []
+    for c in ROTATE_ASSERT:
+        ov, nv = old.get(c), new.get(c)
+        if empty_val(ov) and empty_val(nv):
+            continue
+        if empty_val(ov) and not empty_val(nv):
+            continue
+        if json.dumps(ov, sort_keys=True) != json.dumps(nv, sort_keys=True):
+            bad.append(c)
+    return bad
 
 
 def to_ms(v):
@@ -424,6 +647,10 @@ create table if not exists magic_tokens(token_hash text primary key, user text n
     used real);
 create table if not exists reveal_audit(id integer primary key autoincrement, at real, union_id text, name text,
     record_id text, ip text, login text, result text);
+-- 重置 key:进行中锁(主键 = 一个人只能有一把在转)+ 审计。两张表都**不存明文**,只存 alias。
+create table if not exists rotate_locks(union_id text primary key, record_id text, created real);
+create table if not exists rotate_audit(id integer primary key autoincrement, at real, union_id text, name text,
+    record_id text, ip text, login text, step text, result text, old_alias text, new_alias text, detail text);
 """
 REC_ID = re.compile(r"^rec[A-Za-z0-9]{1,40}$")
 CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"    # base32:不分大小写、不含 0/1/8/9 易混字符
@@ -446,7 +673,7 @@ class MagicError(HttpError):
 
 
 class App:
-    def __init__(self, cfg, client=None, now=time.time):
+    def __init__(self, cfg, client=None, now=time.time, litellm=None):
         errs = check_config(cfg)
         if errs:
             raise ConfigError(";".join(errs))
@@ -466,6 +693,7 @@ class App:
         self.db.executescript(SCHEMA)
         self.dblock = threading.Lock()
         self.tools = TOOLS
+        self.issuable = ISSUABLE
         self.exclude_orgs = {t.strip() for t in cfg["EXCLUDE_ORGS"].split(",") if t.strip()}
         self.batch_min = int(cfg["BATCH_MIN_ROWS"])
         self.batch_gap_ms = int(cfg["BATCH_GAP_MS"])
@@ -478,7 +706,9 @@ class App:
         # 而且前端本身每 20 秒轮询一次。按人限流,比上限宽松得多、够正常使用。
         self.rl_keys = RateLimiter(cfg["KEYS_PER_MIN"], 60, now)
         self.rl_apply = RateLimiter(cfg["APPLY_PER_MIN"], 60, now)
+        self.rl_rotate = RateLimiter(cfg["ROTATE_PER_MIN"], 60, now)
         self.rl_feedback = RateLimiter(cfg["FEEDBACK_PER_MIN"], 60, now)
+        self.litellm = litellm or LiteLLMClient(cfg)
 
     def q(self, sql, args=(), one=False):
         with self.dblock:
@@ -649,7 +879,11 @@ class App:
             raw_status = text_of(f.get(c["KEY_STATUS_FIELD"])).strip()
             rows.append({"record_id": it.get("record_id") or "", "key": key, "raw_status": raw_status,
                          "status": front_status(raw_status, key), "types": as_list(f.get(c["KEY_TYPE_FIELD"])),
-                         "org": text_of(f.get(c["KEY_ORG_FIELD"])).strip(), "at": to_ms(f.get(c["KEY_TIME_FIELD"]))})
+                         "org": text_of(f.get(c["KEY_ORG_FIELD"])).strip(), "at": to_ms(f.get(c["KEY_TIME_FIELD"])),
+                         # 重置要跟着换的两类副本列。只在这里原样带着,/api/keys 出去前整体打码。
+                         "probe_link": bool(f.get(KEY_PROBE_FIELD)),
+                         "extra_keys": {k: text_of(f.get(k)).strip() for k in ("Cursor Key", "Claude Code Key")
+                                        if f.get(k)}})
         rows = self.drop_batches(rows, user)
         cand = [r for r in rows if r["raw_status"].startswith("有效") and "Cursor" in r["types"]
                 and r["key"].startswith("sk-")]
@@ -767,15 +1001,246 @@ class App:
         log("apply", short(user["union_id"]), rec.get("record_id"))
         return {"ok": True, "dry_run": False, "record_id": rec.get("record_id")}
 
-    def rotate(self, user, body):
-        # poller 没有轮换路径;清空 API Key 会让新旧两把同时有效 ⇒ 先不做
-        raise HttpError(501, "需要换 key 请提反馈")
+    # 重置自己的 key(轮换)
+    def audit_rotate(self, user, rid, ip, step, result, old_alias="", new_alias="", detail=""):
+        """🔴 只记 alias / 步骤 / 结果,不记任何明文(detail 再过一遍 sk- 打码兜底)。"""
+        self.q("insert into rotate_audit(at, union_id, name, record_id, ip, login, step, result, old_alias,"
+               " new_alias, detail) values(?,?,?,?,?,?,?,?,?,?,?)",
+               (self.now(), user["union_id"], user.get("name") or "", rid, ip, user.get("login") or "",
+                step, result, old_alias, new_alias, mask_deep(str(detail))[:500]))
+
+    def rotate_cooldown_left(self, union_id):
+        """上一次**成功**重置离现在还差多少秒(0 = 可以重置)。失败和 dry-run 不计入。"""
+        cd = int(self.cfg["ROTATE_COOLDOWN"])
+        if cd <= 0:
+            return 0
+        row = self.q("select max(at) from rotate_audit where union_id=? and result='ok'", (union_id,), one=True)
+        last = (row or [None])[0]
+        return 0 if not last else max(0, int(cd - (self.now() - last)))
+
+    def rotate_lock(self, user, rid):
+        """进行中锁:主键 = union_id ⇒ 同一人并发只有一个 insert 成功。"""
+        t = self.now()
+        self.q("delete from rotate_locks where created<?", (t - int(self.cfg["ROTATE_LOCK_TTL"]),))
+        try:
+            self.q("insert into rotate_locks values(?,?,?)", (user["union_id"], rid, t))
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def rotate_unlock(self, union_id):
+        self.q("delete from rotate_locks where union_id=?", (union_id,))
+
+    def rotate(self, user, body, ip=""):
+        """把这个人**当前那把** key 换成新的。
+
+        顺序是定死的:**先生成新的 → 回读确认 → 真发一发 → 写表 → 最后才封旧的**。
+        理由是只有这个顺序能保证「绝不出现旧的废了、新的没给他」:
+        - 任何一步失败,用户手里那把**原封不动还能用**,表也没动 ⇒ 重试即可。
+        - 新 key 建出来但后面失败 ⇒ 把新的删掉再报错(不留两把都活着的状态)。
+        - 封旧 key 放最后:到这一步表里已经是新 key,就算封禁调用失败,用户是好的,
+          只剩一把该封没封的旧 key —— 这是**可以事后补**的,而反过来不行。
+
+        旧 key 的处置是**改名 + blocked=true**,不是删除:
+        - 改名把规范 alias 腾出来,审计行留在主表里(`/key/delete` 是硬删,只往
+          DeletedVerificationToken 另存);blocked 可以解封 ⇒ 万一这次重置有问题还能救回来。
+        - 要彻底删,由运维对 `*-retired-*` 那批另做一轮(自助入口不做不可逆的事)。
+        """
+        rid_in = body.get("record_id")
+        if rid_in is not None and not (isinstance(rid_in, str) and REC_ID.match(rid_in)):
+            raise HttpError(400, "record_id 不对")
+        if not self.litellm.enabled:
+            # 没配网关 master key ⇒ 功能整个关闭。前端看到 501 就退回「提反馈」那条路。
+            raise HttpError(501, "需要换 key 请提反馈")
+        if not self.rl_rotate.hit(user["union_id"]):
+            raise HttpError(429, "操作太频繁了,过一分钟再试")
+        left = self.rotate_cooldown_left(user["union_id"])
+        if left:
+            raise HttpError(429, "刚刚才重置过。%s 后才能再重置一次(这样做是为了避免连点生成一堆 key)"
+                                 % ("%d 分钟" % ((left + 59) // 60) if left >= 60 else "%d 秒" % left))
+        cur = self.current_key(user)            # 🔴 只按登录身份查;前端传什么都不决定改谁
+        if not cur:
+            raise HttpError(404, "你现在没有可用的 key,不用重置 —— 直接申请一把新的就行")
+        rid = cur["record_id"]
+        if rid_in is not None and rid_in != rid:
+            # 前端那一行和服务端认定的 current 不是同一把(页面放久了 / 期间换过)
+            raise HttpError(409, "页面上这把 key 和服务器上的不是同一把了,刷新页面再试")
+        if not self.rotate_lock(user, rid):
+            raise HttpError(409, "你的 key 正在重置中,等几秒刷新页面看看")
+        try:
+            return self._rotate_locked(user, cur, rid, ip)
+        finally:
+            self.rotate_unlock(user["union_id"])
+
+    def _rotate_locked(self, user, cur, rid, ip):
+        c, L = self.cfg, self.litellm
+        old_plain = cur["key"]
+        try:
+            old = L.key_info(sha(old_plain))
+        except LiteLLMError as e:
+            self.audit_rotate(user, rid, ip, "read", "fail", detail="key_info %s %s" % (e.status, e.msg))
+            log("rotate 读旧 key 失败", short(user["union_id"]), e.status)
+            raise HttpError(502, "网关暂时读不到你的 key,没有做任何改动,稍后再试")
+        if not old:
+            self.audit_rotate(user, rid, ip, "read", "fail", detail="not-found-on-gateway")
+            log("rotate 旧 key 网关上查不到", short(user["union_id"]), rid)
+            raise HttpError(409, "表里这把 key 在网关上查不到(可能已经被换过),没有做任何改动。"
+                                 "刷新页面看看;还是这样请提反馈")
+        # 🔴 被封的 key 绝不能自助重置 —— 否则就是**自助解封**。
+        #   新 key 照抄字段但不抄 blocked(重置的目的就是给一把能用的)⇒ 给被封的人一重置,他就拿到一把能用的。
+        #   而 10-29 起的异常账户处置(skill litellm-198-key-usage-audit)是**只在网关上封 key、不动飞书表**:
+        #   表里那一行状态照样是「有效」,所以 current_key() 会照常把它挑出来 —— 只看表根本拦不住。
+        #   必须以**网关上的 blocked**为准。封号恢复只能管理员做(要用户点头,见那份 skill)。
+        if old.get("blocked") is True:
+            self.audit_rotate(user, rid, ip, "read", "fail", old_alias=(old.get("key_alias") or ""),
+                              detail="old-key-blocked")
+            log("rotate 拒绝:旧 key 已被封", short(user["union_id"]), rid)
+            raise HttpError(403, "这把 key 已被停用,不能自助重置。有疑问请联系管理员")
+        old_alias = (old.get("key_alias") or "").strip()
+        if not old_alias or not ALIAS_OK_RE.match(old_alias):
+            # 没名字就没法「改名退役」,也没法给新 key 起名 ⇒ 失败关闭,不猜
+            self.audit_rotate(user, rid, ip, "read", "fail", old_alias=old_alias, detail="bad-alias")
+            log("rotate 旧 key 没有可用 alias", short(user["union_id"]), rid)
+            raise HttpError(409, "你这把 key 在网关上没有规范的名字,自助重置处理不了,请提反馈(我们手工换)")
+        # 新 alias:同基名 + 新后缀;和旧后缀撞上会 400(alias 全局唯一)⇒ 换一个
+        alias = ""
+        for _ in range(8):
+            cand = new_alias(old_alias, "".join(secrets.choice("0123456789abcdefghijklmnopqrstuvwxyz")
+                                                for _ in range(4)))
+            if cand != old_alias and ALIAS_OK_RE.match(cand):
+                alias = cand
+                break
+        if not alias:
+            raise HttpError(500, "服务出错")
+        carried = [k for k in ROTATE_CARRY if not empty_val(old.get(k))]
+        if c["ROTATE_DRY_RUN"] != "0":
+            self.audit_rotate(user, rid, ip, "dry-run", "dry-run", old_alias, alias)
+            log("rotate dry-run", short(user["union_id"]), old_alias, "→", alias)
+            return {"ok": True, "dry_run": True, "record_id": rid, "old_alias": old_alias,
+                    "new_alias": alias, "carry": carried, "masked": mask_key(old_plain),
+                    "message": "演练模式:没有生成新 key,也没有改任何东西。"}
+        return self._rotate_apply(user, cur, rid, ip, old, old_alias, alias, carried)
+
+    def _rotate_apply(self, user, cur, rid, ip, old, old_alias, alias, carried):
+        c, L = self.cfg, self.litellm
+        uid = user["union_id"]
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(self.now()))
+
+        # ① 生成新 key。失败 ⇒ 什么都没动,旧 key 照常能用
+        try:
+            res = L.generate(rotate_payload(old, alias, now_iso))
+        except LiteLLMError as e:
+            self.audit_rotate(user, rid, ip, "generate", "fail", old_alias, alias,
+                              "generate %s %s" % (e.status, e.msg))
+            log("rotate 生成失败", short(uid), alias, e.status)
+            raise HttpError(502, "没有生成出新 key。你现在的 key 还能继续用,什么都没变,稍后再试")
+        plain = res["key"]
+        self.audit_rotate(user, rid, ip, "generate", "ok", old_alias, alias)
+
+        def rollback(step, msg, detail):
+            """新 key 已生成但后面失败:把新的删掉,回到「只有旧 key」的干净状态。"""
+            try:
+                L.delete_by_alias(alias)
+                self.audit_rotate(user, rid, ip, step, "rolled-back", old_alias, alias, detail)
+                log("rotate 回滚:已删掉新 key", short(uid), alias, step)
+                return HttpError(502, msg + "已经把刚生成的那把撤掉了,你现在的 key 还能继续用,稍后再试")
+            except LiteLLMError as e2:
+                # 删不掉 ⇒ 两把都活着。必须说清楚,不能假装成功
+                self.audit_rotate(user, rid, ip, step, "orphan", old_alias, alias,
+                                  "%s;delete %s %s" % (detail, e2.status, e2.msg))
+                log("🔴 rotate 回滚失败,新 key 成了孤儿", short(uid), alias, e2.status)
+                return HttpError(502, msg + "而且刚生成的那把也没撤掉。你现在的 key 还能继续用,"
+                                            "但请立刻提一条反馈(把这句话复制过去),我们来清理")
+
+        # ② 回读确认:建出来了 ≠ 预算/权限/归属都跟过来了
+        try:
+            back = L.key_info(sha(plain))
+        except LiteLLMError as e:
+            raise rollback("verify", "新 key 生成后读不回来。", "readback %s %s" % (e.status, e.msg))
+        if not back:
+            raise rollback("verify", "新 key 生成后在网关上查不到。", "readback-empty")
+        bad = carry_mismatch(old, back)
+        if bad:
+            raise rollback("verify", "新 key 的配置和旧的不一致(" + "、".join(bad) + ")。", "mismatch:" + ",".join(bad))
+
+        # ③ 真发一发。只有这一步能证明「这把 key 真能用」,/key/info 读得回来不算
+        if c["ROTATE_PROBE"] != "0":
+            model = pick_probe_model(back.get("models"))
+            if not model:
+                self.audit_rotate(user, rid, ip, "probe", "skipped", old_alias, alias, "no-concrete-model")
+                log("rotate 探针跳过(没有能直接打的模型名)", short(uid), alias)
+            else:
+                try:
+                    ok, why = L.probe(plain, model, c["ROTATE_PROBE_MAX_TOKENS"])
+                except LiteLLMError as e:
+                    ok, why = False, "%s %s" % (e.status, e.msg)
+                if not ok:
+                    raise rollback("probe", "新 key 生成出来了但试调不通(" + why[:80] + ")。", "probe:" + why)
+                self.audit_rotate(user, rid, ip, "probe", "ok", old_alias, alias, why)
+
+        # ④ 写表。这一步是用户拿到新 key 的唯一途径 ⇒ 失败必须回滚,不能留两把活的
+        fields = self.rotate_fields(cur, plain, alias)
+        try:
+            self.client.update_record(c["KEY_BASE_TOKEN"], c["KEY_TABLE_ID"], rid, fields)
+        except FeishuError as e:
+            raise rollback("bitable", "新 key 生成了但没写进表里(飞书 code=%s)。" % e.code,
+                           "update_record %s" % e.code)
+        self.audit_rotate(user, rid, ip, "bitable", "ok", old_alias, alias)
+
+        # ⑤ 最后才封旧的。到这儿用户已经有能用的新 key 了 ⇒ 这步失败**不算整体失败**,
+        #    只是留了一把该封没封的旧 key(可以事后补);反过来先封再写表就会把人锁在外面。
+        #    🔴 /key/update 三个坑:不捎带 metadata(整体替换会擦掉 lark_open_id 这些)、
+        #    不传 budget_duration(会重算 budget_reset_at,窗口无限后推)、回读只认 /key/info。
+        warning = ""
+        try:
+            # 用 sha256 定位,不用 old["token"]:`/key/info` 把 token 列置空了(实测),信它会发出 key=None
+            L.update({"key": sha(cur["key"]),
+                      "key_alias": retired_alias(old_alias, time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(self.now()))),
+                      "blocked": True})
+            self.audit_rotate(user, rid, ip, "block-old", "ok", old_alias, alias)
+            log("rotate 完成", short(uid), old_alias, "→", alias)
+        except LiteLLMError as e:
+            warning = "旧 key 没能立刻停用(我们会处理)。在那之前旧 key 可能还能用,别再把它给别人。"
+            self.audit_rotate(user, rid, ip, "block-old", "fail", old_alias, alias,
+                              "update %s %s" % (e.status, e.msg))
+            log("🔴 rotate 旧 key 封禁失败(新 key 已生效)", short(uid), old_alias, e.status)
+        self.audit_rotate(user, rid, ip, "done", "ok", old_alias, alias, "warn" if warning else "")
+        out = {"ok": True, "dry_run": False, "record_id": rid, "key": plain, "masked": mask_key(plain),
+               "old_alias": old_alias, "new_alias": alias, "carry": carried, "old_blocked": not warning}
+        if warning:
+            out["warning"] = warning
+        return out
+
+    def rotate_fields(self, cur, plain, alias):
+        """写回表的字段。只动这几列,别人手改过的其它列不碰(飞书 PUT 是逐字段覆盖)。
+
+        - `API Key`:新明文。这是所有下游(安装器 / redeem / 体检页)唯一读的那一列。
+        - `状态`:写表里**已有的选项**「有效（已重新生成）」(前缀仍是「有效」⇒ 还是 current、还能装)。
+          故意**不先写「重新生成中」**:那会让 front_status 变成「生成中」⇒ 页面把安装命令收起来,
+          万一后面失败就得再写一次改回去 —— 多一次写就多一种把行留在错状态上的可能。
+        - `key_alias`:写**基名**(表里历来就是基名,poller 和换发脚本都这样写),不带后缀。
+        - **不动 `申请时间`**:这一行本来就是 current(最新的有效 Cursor 行),换 key 不改变这一点;
+          而客户批量 key 的聚类规则(drop_batches)读的就是这一列,改它可能把一行本人 key 聚进批量里藏掉。
+        - `点我体检`:超链接列,不会自己跟着 API Key 走(公式列才会)。不更新就指向已经封掉的旧 key,
+          用户点体检会看到「这把 key 不可用」,以为新 key 坏了。
+        """
+        c = self.cfg
+        f = {c["KEY_FIELD"]: plain, c["KEY_STATUS_FIELD"]: ROTATE_STATUS, "key_alias": alias_base(alias)}
+        if cur.get("probe_link"):
+            f[KEY_PROBE_FIELD] = {"link": KEYPROBE_PAGE + "#k=" + plain, "text": KEYPROBE_TEXT}
+        # 这两列真表里基本是空的;只有当它存的就是这把旧 key 时才跟着换,否则不碰
+        for col in ("Cursor Key", "Claude Code Key"):
+            if cur.get("extra_keys", {}).get(col) == cur["key"]:
+                f[col] = plain
+        assert set(f) <= ROTATE_FIELD_ALLOW, set(f) - ROTATE_FIELD_ALLOW
+        return f
 
     # 一次性安装码
     def issue_code(self, user, body):
         tool = body.get("tool")
-        if tool not in self.tools:
-            raise HttpError(400, "tool 只能是:" + "、".join(self.tools))
+        # all = 一个码装三个(安装器按 ALL_TOOLS 顺序依次装);仍然只发同一把 key
+        if tool not in self.issuable:
+            raise HttpError(400, "tool 只能是:" + "、".join(self.issuable))
         if not self.rl_issue.hit(user["union_id"]):
             raise HttpError(429, "太频繁了,一分钟后再试")
         if not self.current_key(user):
@@ -820,6 +1285,7 @@ class App:
         # 不回网关地址:两个安装器都不读它(grep 零命中),网关地址写在子安装器自己的 BASE_URL 里
         # (codex-oneclick/src/install-mac.sh:17、claude-oneclick/src/install-mac.sh:20,还带旧地址兜底逻辑)。
         # 回一个没人读的字段 = 让下一个人以为"改服务端就能换网关",实际改了不生效。
+        # tool 原样回签发时存的那个值,可能是 "all"(安装器看到 all 就依次装三个,仍只用这一把 key)。
         return {"key": r["key"], "account_type": APPLY_TYPE, "tool": row[2]}
 
     # 反馈
@@ -1031,6 +1497,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 "union_id", "open_id", "tenant_key", "name", "avatar", "email", "external", "login")},
                 "tenant": u.get("tenant_key", ""),
                 "account_types": [APPLY_TYPE], "tools": list(a.tools), "apply_dry_run": a.cfg["APPLY_DRY_RUN"] != "0",
+                "issuable_tools": list(a.issuable),   # 含 "all";前端不读它(卡片写死),给排障看
+                # 前端据此决定「重置我的 key」出真按钮还是退回「提反馈」。没配网关 key ⇒ false
+                "rotate_enabled": a.litellm.enabled, "rotate_dry_run": a.cfg["ROTATE_DRY_RUN"] != "0",
+                "rotate_cooldown": int(a.cfg["ROTATE_COOLDOWN"]),     # 二次确认里写「N 分钟内不能再重置」
                 "feedback_choices": fb.CHOICES})
         if p == "/api/keys":
             return self.send_json(200, a.keys(self.user()))
@@ -1061,13 +1531,13 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True}, [self.cookie(SID_COOKIE, "", a.base + "/", 0)])
         if public:
             return self.send_json(200, a.redeem(self.body_json(), self.client_ip()))
-        routes = {"/api/apply": a.apply, "/api/keys/rotate": a.rotate,
-                  "/api/install-code": a.issue_code, "/api/feedback": a.feedback}
-        if p != "/api/keys/reveal" and p not in routes:
+        routes = {"/api/apply": a.apply, "/api/install-code": a.issue_code, "/api/feedback": a.feedback}
+        withip = {"/api/keys/reveal": a.reveal, "/api/keys/rotate": a.rotate}   # 这两个要记审计 ⇒ 带 IP
+        if p not in routes and p not in withip:
             raise HttpError(404, "not found")
         u = self.user()
-        if p == "/api/keys/reveal":
-            return self.send_json(200, a.reveal(u, self.body_json(), self.client_ip()))
+        if p in withip:
+            return self.send_json(200, withip[p](u, self.body_json(), self.client_ip()))
         return self.send_json(200, routes[p](u, self.body_json()))
 
     def static(self, p, referrer_none=False):

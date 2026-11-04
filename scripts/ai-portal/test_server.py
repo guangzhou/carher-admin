@@ -7,7 +7,7 @@
     而不是路由不存在 / 桩没实现 / 参数本来就错。
   - 放开对照(UNGUARDED):用 monkeypatch 把那道校验关掉 ⇒ 攻击必须得逞。证明这条测试有牙。
 """
-import http.client, http.server, importlib.util, json, os, socket, subprocess, sys, threading, time
+import http.client, http.server, importlib.util, json, os, secrets, socket, subprocess, sys, threading, time
 import urllib.parse
 from pathlib import Path
 
@@ -83,6 +83,20 @@ def seed():
     return d
 
 
+# 「状态」是单选列,只能写**表里已有的选项**。这 16 个是 11-04 读真表拿到的全集
+# (.work/ai-portal/data/fields.json)。假飞书按它卡,防止代码里写出一个表上不存在的状态。
+REAL_STATUS_OPTIONS = {
+    "有效", "已禁用", "有效（重复提交，复用已有key）", "生成中", "有效（已重新生成）", "重新生成中",
+    "待生成（第三方合作伙伴）", "待生成（第三方合作伙伴补录）", "已完成",
+    "生成失败: timeout", "生成失败: Client network socket disconnected before secure T",
+    '生成失败(Cursor): LiteLLM error: {"error":{"message":"Auth',
+    '生成失败: LiteLLM error: {"error":{"message":"Authentication',
+    '生成失败(Cursor): Non-JSON response: <html>\r\n<head><title>',
+    '生成失败: Non-JSON response: <html>\r\n<head><title>502 Bad Ga',
+    '生成失败: Non-JSON response: <html>\r\n<head><title>500 Intern',
+}
+
+
 # ── 假飞书 ──────────────────────────────────────────────────────────────
 class Fake:
     def reset(self):
@@ -97,6 +111,7 @@ class Fake:
         self.fail_create_person = False
         self.n = 0
         self.search_error = None   # 非 None ⇒ search 直接回这个错误码(模拟权限/限流等真失败)
+        self.update_error = None   # 非 None ⇒ 记录更新直接回这个错误码(模拟写表失败)
 
 
 FAKE = Fake()
@@ -189,6 +204,29 @@ class FakeFeishu(http.server.BaseHTTPRequestHandler):
                 return self.out(200, {"code": 0, "data": {"record": {"record_id": rid, "fields": f}}})
         self.out(404, {"code": 404, "msg": "fake: no route " + u.path})
 
+    def do_PUT(self):
+        """逐字段覆盖(真飞书的 PUT /records/<rid> 语义):只合并发来的字段,其它列不动。"""
+        u = urllib.parse.urlsplit(self.path)
+        b = self.body()
+        FAKE.calls.append(("PUT", u.path))
+        if not u.path.startswith("/open-apis/bitable/v1/apps/"):
+            return self.out(404, {"code": 404, "msg": "fake: no route " + u.path})
+        if self.bearer() not in FAKE.tenant_tokens:
+            return self.out(400, {"code": 99991663, "msg": "Invalid access token for authorization"})
+        parts = u.path.split("/")   # [...,apps,APP,tables,TBL,records,RID]
+        tbl = FAKE.tables.setdefault((parts[5], parts[7]), {})
+        rid = parts[9]
+        if FAKE.update_error is not None:
+            return self.out(400, {"code": FAKE.update_error, "msg": "fake update error"})
+        if rid not in tbl:
+            return self.out(400, {"code": 1254043, "msg": "RecordIdNotFound"})
+        # 单选列只接受表里已有的选项(真飞书写新值会报错);这里按 test 里的真实选项集合卡
+        st = b["fields"].get("状态")
+        if st is not None and st not in REAL_STATUS_OPTIONS:
+            return self.out(400, {"code": 1254045, "msg": "FieldNameNotFound/option not exist: %s" % st})
+        tbl[rid].update(b["fields"])
+        return self.out(200, {"code": 0, "data": {"record": {"record_id": rid, "fields": tbl[rid]}}})
+
     def search(self, tbl, q, b):
         id_type = q.get("user_id_type", "open_id")
         conds = (b.get("filter") or {}).get("conditions") or []
@@ -236,6 +274,153 @@ def fake():
     s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeFeishu)
     threading.Thread(target=s.serve_forever, daemon=True).start()
     yield "http://127.0.0.1:%d" % s.server_port
+    s.shutdown()
+
+
+# ── 假 198 LiteLLM ──────────────────────────────────────────────────────
+# 🔴 全程不碰真网关。形状照 .work/ext-user-onboarding/15-key-lifecycle.md 的实测:
+#   /key/info?key=<sha256>  → {"info": {...}}，**token 列被置空**（实测如此，代码不能信它）
+#   /key/generate           → 200 {"key": "sk-…"}；alias 重名 → 400（唯一性在应用层）
+#   /key/update             → 改名 / blocked
+#   /key/delete             → {"key_aliases":[...]}
+#   /v1/chat/completions    → 带 key 的真调用；blocked / 不存在 ⇒ 401
+MASTER = "sk-fake-master-key-for-tests-0001"
+# 旧 key 在网关上的样子:按 198 cursor-* 族的真实形状(逐个列模型名,不是 all-team-models)
+GW_MODELS = ["gpt-5.5", "claude-haiku-4-5", "claude-opus-5-5", "kimi-k3"]
+
+
+class FakeLite:
+    def reset(self):
+        self.calls = []        # (method, path)
+        self.keys = {}         # sha256(plain) -> row
+        self.plain = {}        # sha256(plain) -> plain(只有假网关自己知道,服务端不读)
+        self.n = 0
+        self.fail = {}         # path 片段 -> (status, body)，模拟某一步真失败
+        self.probe_401_for = set()   # sha256:探针一律 401(模拟"建出来了但调不动")
+        self.generate_hook = None    # 生成成功后的回调(测并发/竞态)
+
+    def add(self, plain, alias, **over):
+        row = {"key_alias": alias, "key_name": S.mask_key(plain), "token": None,  # 🔴 实测 token 被置空
+               "models": list(GW_MODELS), "aliases": {}, "team_id": "team-cursor-198",
+               "user_id": S.alias_base(alias), "max_budget": 20.0, "budget_duration": "30d",
+               "spend": 1.25, "blocked": False, "key_type": "default",
+               "metadata": {"lark_open_id": "ou_xxx", "base_alias": S.alias_base(alias),
+                            "account_type": "Cursor", "email": "x@auto-link.com.cn"}}
+        row.update(over)
+        h = S.sha(plain)
+        self.keys[h] = row
+        self.plain[h] = plain
+        return row
+
+
+LITE = FakeLite()
+LITE.reset()
+
+
+class FakeLiteLLM(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def out(self, code, obj):
+        b = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def bearer(self):
+        return (self.headers.get("Authorization") or "").removeprefix("Bearer ")
+
+    def body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(n) or b"{}")
+
+    def hit_fail(self, path):
+        for frag, (st, msg) in LITE.fail.items():
+            if frag in path:
+                self.out(st, {"error": {"message": msg}})
+                return True
+        return False
+
+    def do_GET(self):
+        u = urllib.parse.urlsplit(self.path)
+        q = dict(urllib.parse.parse_qsl(u.query))
+        LITE.calls.append(("GET", u.path))
+        if self.bearer() != MASTER:
+            return self.out(401, {"error": {"message": "Invalid proxy server token passed"}})
+        if self.hit_fail(u.path):
+            return
+        if u.path == "/pro/key/info":
+            row = LITE.keys.get(q.get("key", ""))
+            if not row:
+                return self.out(404, {"error": {"message": "Key not found"}})
+            return self.out(200, {"key": q["key"], "info": dict(row)})
+        self.out(404, {"error": {"message": "fake-litellm: no route " + u.path}})
+
+    def do_POST(self):
+        u = urllib.parse.urlsplit(self.path)
+        b = self.body()
+        LITE.calls.append(("POST", u.path))
+        if u.path == "/pro/v1/chat/completions":
+            return self.chat(b)
+        if self.bearer() != MASTER:
+            return self.out(401, {"error": {"message": "Invalid proxy server token passed"}})
+        if self.hit_fail(u.path):
+            return
+        if u.path == "/pro/key/generate":
+            alias = b.get("key_alias")
+            if any(r["key_alias"] == alias for r in LITE.keys.values()):
+                # 实测:重名 400,**不会建出第二把**
+                return self.out(400, {"error": {"message": "Key with alias '%s' already exists. Unique key "
+                                                           "aliases across all keys are required." % alias}})
+            LITE.n += 1
+            plain = "sk-fakenew%04d%s" % (LITE.n, secrets.token_hex(6))
+            row = {k: v for k, v in b.items()}
+            row.setdefault("models", [])
+            row.update({"token": None, "key_name": S.mask_key(plain), "spend": 0.0, "blocked": False,
+                        "key_type": row.get("key_type") or "default"})
+            LITE.keys[S.sha(plain)] = row
+            LITE.plain[S.sha(plain)] = plain
+            if LITE.generate_hook:
+                LITE.generate_hook(plain, row)
+            return self.out(200, {"key": plain, "key_alias": alias})
+        if u.path == "/pro/key/update":
+            row = LITE.keys.get(b.get("key") or "")
+            if not row:
+                return self.out(400, {"error": {"message": "Key not found"}})
+            for k, v in b.items():
+                if k != "key":
+                    row[k] = v
+            return self.out(200, {"key": b["key"]})
+        if u.path == "/pro/key/delete":
+            gone = []
+            for h, r in list(LITE.keys.items()):
+                if r.get("key_alias") in (b.get("key_aliases") or []):
+                    gone.append(r["key_alias"])
+                    LITE.keys.pop(h)
+                    LITE.plain.pop(h, None)
+            return self.out(200, {"deleted_keys": gone})
+        self.out(404, {"error": {"message": "fake-litellm: no route " + u.path}})
+
+    def chat(self, b):
+        h = S.sha(self.bearer())
+        row = LITE.keys.get(h)
+        if not row or row.get("blocked"):
+            return self.out(401, {"error": {"message": "Authentication Error, Key is blocked."}})
+        if h in LITE.probe_401_for:
+            return self.out(401, {"error": {"message": "Authentication Error"}})
+        if b.get("model") not in (row.get("models") or []):
+            return self.out(400, {"error": {"message": "Invalid model name passed in model=%s" % b.get("model")}})
+        return self.out(200, {"model": b["model"], "choices": [{"message": {"role": "assistant", "content": "OK"}}],
+                              "usage": {"completion_tokens": 2}})
+
+
+@pytest.fixture(scope="module")
+def lite():
+    s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeLiteLLM)
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    yield "http://127.0.0.1:%d/pro" % s.server_port
     s.shutdown()
 
 
@@ -362,6 +547,53 @@ def portal_factory(fake, tmp_path, clock):
 
 
 KEYTBL = ("DlT9bsrwMad12VsogEpcK9Ptncc", "tblJT2s6Y6xjYj5A")
+
+
+@pytest.fixture
+def rotate_portal(fake, lite, tmp_path, clock):
+    """开了「重置 key」的门户 + 假 198 网关。表里 A 的 current(recA1)在假网关上有对应的行。
+
+    默认 ROTATE_DRY_RUN=0(真写),因为每条测试都要看到「真写之后表和网关变成什么样」;
+    dry-run 的默认值另有专门一条钉它。
+    """
+    made = []
+
+    def mk(**over):
+        FAKE.reset()
+        FAKE.tables[KEYTBL] = seed()
+        LITE.reset()
+        LITE.add(KEY_A1, "cursor-zhangsan-ab12")        # A 的 current
+        LITE.add(KEY_B, "cursor-lisi-cd34")             # B 的(用来证明 A 动不了它)
+        cfg = make_cfg(fake, tmp_path, LITELLM_BASE=lite, LITELLM_MASTER_KEY=MASTER, ROTATE_DRY_RUN="0")
+        cfg.update(over)
+        p = Portal(fake, cfg, clock)
+        made.append(p)
+        return p
+    yield mk
+    for p in made:
+        p.close()
+
+
+def do_rotate(p, sid, body=None, ip="10.4.4.4"):
+    return p.req("POST", "/ai/api/keys/rotate", {} if body is None else body, cookie=sid,
+                 headers={"X-Real-IP": ip})
+
+
+def row_key(rid="recA1"):
+    """表里那一行当前的 API Key 明文(文本列可能是富文本数组)。"""
+    v = FAKE.tables[KEYTBL][rid].get("API Key")
+    return v if isinstance(v, str) else "".join(x.get("text", "") for x in (v or []))
+
+
+def gw_alias(plain):
+    r = LITE.keys.get(S.sha(plain))
+    return r and r["key_alias"]
+
+
+def audit_rows(p):
+    rows, _ = p.app.q("select step, result, old_alias, new_alias, union_id, ip, name, login, detail, at"
+                      " from rotate_audit order by id")
+    return rows
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1278,11 +1510,14 @@ def test_wrong_app_id_refused():
     assert S.check_config(cfg) == []
 
 
-def test_rotate_is_501(portal):
+def test_rotate_off_without_master_key(portal):
+    """没配 LITELLM_MASTER_KEY ⇒ 功能整个关闭(501),表和「提反馈」那条路保持原样。"""
     sa = portal.sid("A")
+    assert portal.app.litellm.enabled is False
     s, d, _, _ = portal.req("POST", "/ai/api/keys/rotate", {"record_id": "recA1"}, cookie=sa)
     assert s == 501 and d["message"] == "需要换 key 请提反馈"
-    assert FAKE.tables[KEYTBL]["recA1"]["API Key"][0]["text"] == KEY_A1, "没动表"
+    assert row_key() == KEY_A1, "没动表"
+    assert portal.req("GET", "/ai/api/me", cookie=sa)[1]["rotate_enabled"] is False
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1548,12 +1783,39 @@ def test_redeem_returns_tool_and_base_url_for_installer(portal):
     后端测试和安装器测试各自都是绿的(各对着自己写的假对端),只有接起来才看得见。
     这里钉住安装器依赖的契约;端到端版本在 .work/ai-portal/e2e/e2e.py(真后端 + 真安装器)。"""
     sa = portal.sid("A")
-    for tool in ("cursor", "codex", "claude"):
+    for tool in ("cursor", "codex", "claude", "all"):
         code = portal.req("POST", "/ai/api/install-code", {"tool": tool}, cookie=sa)[1]["code"]
         s, b = _redeem(portal, code)
         assert s == 200 and b["key"] == KEY_A1, (s, b)
         assert b["tool"] == tool, b                          # 安装器按它决定装哪个工具
         assert "base_url" not in b, "安装器不读它;网关地址在子安装器自己的 BASE_URL 里,别留死字段"
+
+
+def test_install_code_all_one_code_three_tools(portal):
+    """tool=all:一个码装三个 —— 用户只复制一行 ⇒ 绝不能签三个码 / 让安装器换三次。
+    换回来的 tool 必须原样是 "all"(安装器据此依次装 Codex → Claude Code → Cursor),
+    key 还是**同一把** current 的(三个工具本来就共用这一把)。"""
+    sa = portal.sid("A")
+    s, d, _, _ = portal.req("POST", "/ai/api/install-code", {"tool": "all"}, cookie=sa)
+    assert s == 200 and d["tool"] == "all" and d["expires_in"] == 600, d
+    import re
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{3,63}", d["code"]), "前端 CODE_RE:会拼进 shell 命令"
+    # 库里存的就是 "all"(一列文本,不改表)
+    assert portal.app.q("select tool from install_codes", one=True)[0] == "all"
+    s, r = _redeem(portal, d["code"])
+    assert s == 200 and r == {"key": KEY_A1, "account_type": "Cursor", "tool": "all"}, r
+    # 还是一次性:同一个码换第二次就 400(安装器只许换一次,key 自己复用给三个工具)
+    assert _redeem(portal, d["code"])[0] == 400
+
+
+def test_install_code_rejects_unknown_tool_but_takes_all(portal):
+    """tool 白名单 = cursor/codex/claude/all,别的一律 400(会拼进 shell 命令的东西不许放开)。"""
+    sa = portal.sid("A")
+    for bad in ("ALL", "all,cursor", "cursor codex", ["codex", "claude"], "", None, "rm -rf", "*"):
+        s, d, _, _ = portal.req("POST", "/ai/api/install-code", {"tool": bad}, cookie=sa)
+        assert s == 400, (bad, s, d)
+    assert portal.req("POST", "/ai/api/install-code", {"tool": "all"}, cookie=sa)[0] == 200   # POSITIVE
+    assert "all" in portal.req("GET", "/ai/api/me", cookie=sa)[1]["issuable_tools"]
 
 
 def test_pilot_gate_blocks_both_login_paths(mportal):
@@ -1632,3 +1894,647 @@ def test_tightening_pilot_gate_kills_existing_sessions(portal):
     finally:
         portal.app.cfg["PILOT_UNION_IDS"] = ""
     assert portal.req("GET", "/ai/api/me", cookie=sa)[0] == 200          # 放开后旧会话照常可用
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 16. 重置我的 key(轮换)
+#
+# 顺序是产品承诺的一部分:**先生成新的 → 回读 → 真发一发 → 写表 → 最后封旧的**。
+# 下面每条失败路径都断言「旧 key 还能用 + 表没动」,就是在钉这条承诺。
+# 全程只打假飞书 + 假 198 网关,**不碰任何真 key**。
+# ════════════════════════════════════════════════════════════════════════
+def test_rotate_happy_path(rotate_portal):
+    p = rotate_portal()
+    sa = p.sid("A")
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 200, d
+    new = d["key"]
+    # ① 回给用户的是新明文,不是旧的
+    assert new.startswith("sk-") and new != KEY_A1 and d["masked"] == S.mask_key(new)
+    assert d["dry_run"] is False and d["record_id"] == "recA1" and d["old_blocked"] is True
+    # ② 表里那一行换成了新明文;状态是表上**已有**的「有效（已重新生成）」⇒ 前端仍是「可用」
+    assert row_key() == new
+    f = FAKE.tables[KEYTBL]["recA1"]
+    assert f["状态"] == "有效（已重新生成）" and S.front_status(f["状态"], new) == "可用"
+    assert f["key_alias"] == "cursor-zhangsan", "表里历来写基名,不带 4 位后缀"
+    assert f["申请时间"] == T0 + 3 * DAY, "申请时间不动(聚类规则读它)"
+    assert f["Cursor Key"] == new, "副本列存的就是旧 key ⇒ 跟着换"
+    # ③ 超链接体检列跟着换了(它不会自己跟 API Key 走)
+    assert f["点我体检"] == {"link": "https://chat.auto-link.com.cn/keyprobe/#k=" + new, "text": "▶ 测这把 key"}
+    # ④ 新 key 在网关上:配置逐字段平移过来了
+    row = LITE.keys[S.sha(new)]
+    old = LITE.keys.get(S.sha(KEY_A1))
+    assert row["models"] == GW_MODELS and row["max_budget"] == 20.0 and row["budget_duration"] == "30d"
+    assert row["team_id"] == "team-cursor-198" and row["user_id"] == "cursor-zhangsan"
+    assert row["metadata"]["lark_open_id"] == "ou_xxx", "身份 metadata 跟过来"
+    assert row["metadata"]["rotated_from"] == "cursor-zhangsan-ab12" and row["metadata"]["rotated_at"]
+    assert row["key_alias"] == d["new_alias"] != "cursor-zhangsan-ab12"
+    assert S.alias_base(row["key_alias"]) == "cursor-zhangsan", "基名不变 ⇒ 名字里的人还在"
+    # ⑤ 旧 key:改名退役 + 封禁(不是删除 ⇒ 还能解封救回来)
+    assert old is not None, "旧 key 不该被删掉"
+    assert old["blocked"] is True and old["key_alias"].startswith("cursor-zhangsan-retired-")
+    # ⑥ 顺序:generate 在 update(封旧)之前
+    paths = [c[1] for c in LITE.calls]
+    assert paths.index("/pro/key/generate") < paths.index("/pro/key/update")
+    assert "/pro/v1/chat/completions" in paths, "换表前真发了一发"
+    assert "/pro/key/delete" not in paths, "成功路径上不删任何东西"
+
+
+def test_rotate_new_key_works_old_key_is_dead(rotate_portal):
+    """阳性 + 阴性对照:新 key 真能调,旧 key 真被拒。只认真实调用,不认「字段写对了」。"""
+    p = rotate_portal()
+    new = do_rotate(p, p.sid("A"))[1]["key"]
+    L = p.app.litellm
+    assert L.probe(new, "gpt-5.5", 16)[0] is True                  # 阳性
+    ok, why = L.probe(KEY_A1, "gpt-5.5", 16)
+    assert ok is False and "401" in why, why                       # 阴性:旧的调不动了
+
+
+def test_rotate_only_own_current_key(rotate_portal):
+    """只能重置**自己当前那把**:前端传谁的 record_id 都不决定改谁。"""
+    p = rotate_portal(ROTATE_PER_MIN="100")          # 这条要连打 9 次,别让每分钟限流先挡住
+    sa = p.sid("A")
+    before_b, before_a2 = row_key("recB1"), row_key("recA2")
+    for rid, want in (("recB1", 409),        # 别人的行
+                      ("recX1", 409),        # 外部人的行
+                      ("recAB", 409),        # A+B 多人格(谁的都不算)
+                      ("recQ1", 409),        # 客户批量 key(巧虎)
+                      ("recBT0", 409),       # 客户批量(聚类排除)
+                      ("recA2", 409),        # 自己的、但不是 current(Claude Code 那把)
+                      ("recA3", 409),        # 自己的已禁用行
+                      ("recNOPE", 409)):     # 不存在
+        s, d, _, _ = do_rotate(p, sa, {"record_id": rid})
+        assert s == want, (rid, s, d)
+        assert "key" not in d and "sk-" not in json.dumps(d, ensure_ascii=False), rid
+    # 一把都没动:别人的行、自己的其它行、网关上 B 的 key 全原样
+    assert row_key("recB1") == before_b and row_key("recA2") == before_a2 and row_key() == KEY_A1
+    assert gw_alias(KEY_B) == "cursor-lisi-cd34" and LITE.keys[S.sha(KEY_B)]["blocked"] is False
+    assert [c for c in LITE.calls if c[1] in ("/pro/key/generate", "/pro/key/update", "/pro/key/delete")] == []
+    # POSITIVE:同一个人不传 record_id(或传 current 那个)⇒ 成功。证明上面被拒是归属/current 判断
+    assert do_rotate(p, sa, {"record_id": "recA1"})[0] == 200
+
+
+def test_rotate_b_rotating_does_not_touch_a(rotate_portal):
+    """B 重置自己的,A 的 key 完全不受影响(按登录身份查 current,不是按请求体)。"""
+    p = rotate_portal()
+    sb = p.sid("B")
+    s, d, _, _ = do_rotate(p, sb, {"record_id": "recA1"})        # B 拿着 A 的 record_id 来
+    assert s == 409 and "key" not in d
+    assert row_key() == KEY_A1 and LITE.keys[S.sha(KEY_A1)]["blocked"] is False
+    # POSITIVE:B 不传 record_id ⇒ 改的是 B 自己那行,A 仍然不动
+    s, d, _, _ = do_rotate(p, sb)
+    assert s == 200 and d["record_id"] == "recB1" and row_key("recB1") == d["key"]
+    assert row_key() == KEY_A1 and LITE.keys[S.sha(KEY_A1)]["blocked"] is False
+
+
+def test_rotate_dry_run_default_and_writes_nothing(rotate_portal):
+    """dry-run 是默认:只回「将会怎么做」,**一次写都不发**(飞书和网关都查得到证据)。"""
+    assert S.DEFAULTS["ROTATE_DRY_RUN"] == "1"
+    p = rotate_portal(ROTATE_DRY_RUN="1")
+    sa = p.sid("A")
+    before = json.dumps(FAKE.tables[KEYTBL], sort_keys=True, ensure_ascii=False)
+    gw_before = json.dumps(LITE.keys, sort_keys=True)
+    LITE.calls.clear()
+    FAKE.calls.clear()
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 200 and d["dry_run"] is True and "key" not in d
+    assert d["old_alias"] == "cursor-zhangsan-ab12" and S.alias_base(d["new_alias"]) == "cursor-zhangsan"
+    assert "models" in d["carry"] and "max_budget" in d["carry"] and d["masked"] == S.mask_key(KEY_A1)
+    assert json.dumps(FAKE.tables[KEYTBL], sort_keys=True, ensure_ascii=False) == before, "表没动"
+    assert json.dumps(LITE.keys, sort_keys=True) == gw_before, "网关没动"
+    assert [c for c in LITE.calls if c[0] == "POST"] == [], "dry-run 不许发任何 POST"
+    assert [c for c in FAKE.calls if c[0] == "PUT"] == [], "dry-run 不许写表"
+    assert [c for c in LITE.calls if c[1] == "/pro/key/info"], "阳性:确实读过网关(只读)"
+    # UNGUARDED:关掉 dry-run ⇒ 同一个请求就真写了。证明上面「没动」来自这个开关
+    p.app.cfg["ROTATE_DRY_RUN"] = "0"
+    assert do_rotate(p, sa)[1]["dry_run"] is False and row_key() != KEY_A1
+
+
+def test_rotate_cooldown_blocks_second_reset(rotate_portal, clock):
+    """频率限制:成功一次之后 N 分钟内不能再重置(防连点生成一堆 key)。"""
+    p = rotate_portal(ROTATE_COOLDOWN="600")
+    sa = p.sid("A")
+    first = do_rotate(p, sa)[1]["key"]
+    n = len(LITE.keys)
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 429 and "分钟" in d["message"] and "key" not in d
+    assert len(LITE.keys) == n, "被限流时一把新 key 都不能生成"
+    assert row_key() == first, "表也没再动"
+    # POSITIVE:冷却过去了就能再重置(证明 429 是冷却,不是 key 坏了)
+    clock.t += 601
+    s2, d2, _, _ = do_rotate(p, sa)
+    assert s2 == 200 and d2["key"] not in (first, KEY_A1)
+    # 关掉冷却 ⇒ 立刻又能重置。证明上面的 429 来自 ROTATE_COOLDOWN
+    p.app.cfg["ROTATE_COOLDOWN"] = "0"
+    assert do_rotate(p, sa)[0] == 200
+
+
+def test_rotate_failed_attempt_does_not_consume_cooldown(rotate_portal):
+    """只有**成功**才进冷却:生成失败不该把人锁在外面 10 分钟。"""
+    p = rotate_portal(ROTATE_COOLDOWN="600")
+    sa = p.sid("A")
+    LITE.fail["/key/generate"] = (500, "boom")
+    assert do_rotate(p, sa)[0] == 502
+    LITE.fail.clear()
+    assert do_rotate(p, sa)[0] == 200, "上一次失败不占冷却额度"
+
+
+def test_rotate_per_minute_rate_limit(rotate_portal, clock):
+    p = rotate_portal(ROTATE_COOLDOWN="0", ROTATE_PER_MIN="3")
+    sa = p.sid("A")
+    LITE.fail["/key/generate"] = (500, "boom")     # 让每次都失败,只看限流计数
+    codes = [do_rotate(p, sa)[0] for _ in range(4)]
+    assert codes == [502, 502, 502, 429], codes
+    clock.t += 61
+    assert do_rotate(p, sa)[0] == 502, "窗口过去后恢复"
+
+
+def test_rotate_concurrent_only_one_wins(rotate_portal):
+    """并发只有一个成功:进行中锁(主键 union_id)。两个都成功 = 生成了两把、表只留一把。"""
+    p = rotate_portal(ROTATE_COOLDOWN="0")
+    sa = p.sid("A")
+    gate = threading.Event()
+    seen = []
+
+    def hook(plain, row):
+        seen.append(plain)
+        gate.wait(5)          # 第一个请求卡在 generate 之后,让第二个请求撞上锁
+    LITE.generate_hook = hook
+    out = []
+    t = threading.Thread(target=lambda: out.append(do_rotate(p, sa)))
+    t.start()
+    for _ in range(100):      # 等第一个真的进到 generate 里面
+        if seen:
+            break
+        time.sleep(0.02)
+    assert seen, "第一个请求没走到 generate"
+    second = do_rotate(p, sa)
+    gate.set()
+    t.join(20)
+    LITE.generate_hook = None
+    assert second[0] == 409 and "key" not in second[1], second
+    assert out and out[0][0] == 200, out
+    assert len(seen) == 1, "只生成了一把新 key"
+    assert row_key() == out[0][1]["key"]
+
+
+def test_rotate_lock_released_after_failure(rotate_portal):
+    """失败也要解锁,不然一次网关抖动就把这个人永久锁住。"""
+    p = rotate_portal(ROTATE_COOLDOWN="0")
+    sa = p.sid("A")
+    LITE.fail["/key/generate"] = (500, "boom")
+    assert do_rotate(p, sa)[0] == 502
+    assert p.app.q("select count(*) from rotate_locks", one=True)[0] == 0
+    LITE.fail.clear()
+    assert do_rotate(p, sa)[0] == 200, "上一次失败没把锁留下"
+
+
+def test_rotate_stale_lock_expires(rotate_portal, clock):
+    """进程中途被杀留下的锁有兜底过期,不会永久锁住一个人。"""
+    p = rotate_portal(ROTATE_COOLDOWN="0", ROTATE_LOCK_TTL="300")
+    sa = p.sid("A")
+    p.app.q("insert into rotate_locks values(?,?,?)", (USERS["A"]["union_id"], "recA1", p.app.now()))
+    assert do_rotate(p, sa)[0] == 409
+    clock.t += 301
+    assert do_rotate(p, sa)[0] == 200
+
+
+# ── 失败路径:每一条都必须落在「旧的还能用」上 ─────────────────────────────
+def test_rotate_generate_failure_leaves_old_key_usable(rotate_portal):
+    p = rotate_portal()
+    sa = p.sid("A")
+    LITE.fail["/key/generate"] = (500, "upstream exploded")
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 502 and "还能继续用" in d["message"] and "key" not in d
+    assert "upstream exploded" not in json.dumps(d, ensure_ascii=False), "不把上游原文回给浏览器"
+    assert row_key() == KEY_A1 and LITE.keys[S.sha(KEY_A1)]["blocked"] is False
+    assert p.app.litellm.probe(KEY_A1, "gpt-5.5", 16)[0] is True, "旧 key 真的还能调"
+
+
+def test_rotate_readback_failure_rolls_back_new_key(rotate_portal):
+    """生成成功但回读不回来 ⇒ 删掉新的,回到「只有旧 key」。绝不留两把活的。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    calls = {"n": 0}
+    real = p.app.litellm.key_info
+
+    def flaky(h):
+        calls["n"] += 1
+        if calls["n"] >= 2:           # 第 1 次是读旧 key,第 2 次是回读新 key
+            raise S.LiteLLMError("/key/info", 500, "flaky")
+        return real(h)
+    p.app.litellm.key_info = flaky
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 502 and "撤掉" in d["message"] and "key" not in d
+    assert row_key() == KEY_A1, "表没动"
+    assert gw_alias(KEY_A1) == "cursor-zhangsan-ab12" and LITE.keys[S.sha(KEY_A1)]["blocked"] is False
+    assert len(LITE.keys) == 2, "新生成那把已经删掉了(只剩 A、B 两把)"
+    assert ("POST", "/pro/key/delete") in LITE.calls
+
+
+def test_rotate_config_mismatch_rolls_back(rotate_portal):
+    """回读到了,但预算/权限没跟过来 ⇒ 当失败处理并回滚。「建出来了」≠「闸装上了」。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    real = p.app.litellm.generate
+
+    def lossy(payload):
+        r = real(dict(payload, max_budget=None))       # 模拟服务端把预算吞了
+        LITE.keys[S.sha(r["key"])]["max_budget"] = None
+        return r
+    p.app.litellm.generate = lossy
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 502 and "max_budget" in d["message"] and "key" not in d
+    assert row_key() == KEY_A1 and len(LITE.keys) == 2, "新的已回滚"
+
+
+def test_rotate_probe_failure_rolls_back(rotate_portal):
+    """🔴 建出来、字段也对,但真发一发打不通 ⇒ 不许写表。/key/info 读得回来不证明能调。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    real = p.app.litellm.generate
+
+    def gen(payload):
+        r = real(payload)
+        LITE.probe_401_for.add(S.sha(r["key"]))
+        return r
+    p.app.litellm.generate = gen
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 502 and "试调不通" in d["message"] and "key" not in d
+    assert row_key() == KEY_A1 and len(LITE.keys) == 2
+    assert p.app.litellm.probe(KEY_A1, "gpt-5.5", 16)[0] is True, "旧 key 还能用"
+    # UNGUARDED:把探针关掉 ⇒ 同一个坏 key 就会被写进表(证明这条是探针在挡)
+    LITE.probe_401_for.clear()
+    p.app.cfg["ROTATE_PROBE"] = "0"
+    p.app.cfg["ROTATE_COOLDOWN"] = "0"
+
+    def gen2(payload):
+        r = real(payload)
+        LITE.probe_401_for.add(S.sha(r["key"]))
+        return r
+    p.app.litellm.generate = gen2
+    s2, d2, _, _ = do_rotate(p, sa)
+    assert s2 == 200 and row_key() == d2["key"]
+
+
+def test_rotate_bitable_write_failure_rolls_back(rotate_portal):
+    """🔴 最糟的那种:新 key 生成了但表没更新 = 用户拿不到新 key。必须回滚成「只有旧 key」。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    FAKE.update_error = 1254045
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 502 and "没写进表里" in d["message"] and "key" not in d
+    assert row_key() == KEY_A1, "表里还是旧明文"
+    assert FAKE.tables[KEYTBL]["recA1"]["状态"] == "有效", "状态也没被改坏"
+    assert gw_alias(KEY_A1) == "cursor-zhangsan-ab12" and LITE.keys[S.sha(KEY_A1)]["blocked"] is False
+    assert len(LITE.keys) == 2, "新生成那把已删掉 ⇒ 不存在两把都活着"
+    assert p.app.litellm.probe(KEY_A1, "gpt-5.5", 16)[0] is True
+    # POSITIVE:写表恢复 ⇒ 同一个请求成功。证明 502 来自写表失败
+    FAKE.update_error = None
+    p.app.cfg["ROTATE_COOLDOWN"] = "0"
+    assert do_rotate(p, sa)[0] == 200
+
+
+def test_rotate_rollback_delete_also_fails_is_reported(rotate_portal):
+    """写表失败 + 回滚删除也失败 ⇒ 两把都活着。必须明确告知,不许假装成功。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    FAKE.update_error = 1254045
+    LITE.fail["/key/delete"] = (500, "cannot delete")
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 502 and "没撤掉" in d["message"] and "提一条反馈" in d["message"]
+    assert row_key() == KEY_A1 and len(LITE.keys) == 3, "确实留了一把孤儿(所以要告知)"
+    assert [r for r in audit_rows(p) if r[1] == "orphan"], "审计里有 orphan 这一条,运维能捞出来"
+
+
+def test_rotate_block_old_failure_still_succeeds_with_warning(rotate_portal):
+    """封旧 key 放在最后:这一步失败**不算整体失败** —— 用户已经拿到能用的新 key 了。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    LITE.fail["/key/update"] = (500, "block failed")
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 200 and d["key"] != KEY_A1 and d["old_blocked"] is False
+    assert "旧 key 没能立刻停用" in d["warning"]
+    assert row_key() == d["key"], "新 key 已经在表里 ⇒ 用户能用"
+    assert LITE.keys[S.sha(KEY_A1)]["blocked"] is False, "旧的确实没封上(所以要警告)"
+    assert [r for r in audit_rows(p) if r[0] == "block-old" and r[1] == "fail"]
+
+
+def test_rotate_gateway_unknown_key_refuses(rotate_portal):
+    """表里有明文、网关上查不到(已经被别的流程换过)⇒ 停手,不猜、不写。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    LITE.keys.pop(S.sha(KEY_A1))
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 409 and "查不到" in d["message"] and "没有做任何改动" in d["message"]
+    assert row_key() == KEY_A1 and len(LITE.keys) == 1
+
+
+def test_rotate_gateway_read_error_is_502_not_a_guess(rotate_portal):
+    """读旧 key 时网关出错 ≠「这把 key 不存在」。必须 502,不能当成「可以新建一把」。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    LITE.fail["/key/info"] = (500, "db down")
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 502 and "没有做任何改动" in d["message"]
+    assert len(LITE.keys) == 2 and row_key() == KEY_A1
+    assert [c for c in LITE.calls if c[1] == "/pro/key/generate"] == []
+
+
+def test_rotate_key_without_alias_refused(rotate_portal):
+    """网关上这把 key 没有规范 alias ⇒ 没法改名退役、也没法给新 key 起名 ⇒ 失败关闭,不猜名字。"""
+    p = rotate_portal(ROTATE_PER_MIN="100")
+    sa = p.sid("A")
+    for bad in (None, "", "   ", "a", "bad name", "x" * 300, "../etc/passwd"):
+        LITE.keys[S.sha(KEY_A1)]["key_alias"] = bad
+        s, d, _, _ = do_rotate(p, sa)
+        assert s == 409 and "规范的名字" in d["message"], (bad, s, d)
+        assert row_key() == KEY_A1 and len(LITE.keys) == 2, bad
+    LITE.keys[S.sha(KEY_A1)]["key_alias"] = "cursor-zhangsan-ab12"     # POSITIVE
+    assert do_rotate(p, sa)[0] == 200
+
+
+def test_rotate_new_suffix_never_equals_old(rotate_portal, monkeypatch):
+    """随机后缀恰好和旧 key 的后缀一样 ⇒ 换一个(新旧同名的话 generate 会 400,用户白失败一次)。
+    ⚠️ 只防「和自己旧 key 同名」;撞上**别人**的 alias 概率是 36^-4 且基名按人区分,撞了就是 502 让他重试。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    real = S.secrets.choice
+    seq = iter("ab12")                      # 第一轮 4 个字符恰好拼出旧后缀 ab12
+
+    def choice(xs):
+        try:
+            return next(seq)
+        except StopIteration:
+            return real(xs)
+    monkeypatch.setattr(S.secrets, "choice", choice)
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 200 and d["new_alias"] != "cursor-zhangsan-ab12", d
+    assert S.alias_base(d["new_alias"]) == "cursor-zhangsan"
+
+
+# ── 鉴权 / 审计 / 不记明文 ────────────────────────────────────────────────
+def test_rotate_unauthenticated_is_401(rotate_portal):
+    p = rotate_portal()
+    sa = p.sid("A")
+    for bad in (None, "ai_sid=", "ai_sid=forged.sig", sa + "x", sa.split(".")[0] + ".deadbeef"):
+        s, d, _, _ = do_rotate(p, bad)
+        assert s == 401 and "key" not in d, bad
+    assert row_key() == KEY_A1 and len(LITE.keys) == 2, "未登录的请求一次写都没发出去"
+    assert do_rotate(p, sa)[0] == 200                              # POSITIVE
+
+
+def test_rotate_checks_origin(rotate_portal):
+    p = rotate_portal()
+    sa = p.sid("A")
+    for o in ("https://evil.example", "null", "https://chat.auto-link.com.cn.evil.example"):
+        s, _, _, _ = p.req("POST", "/ai/api/keys/rotate", {}, cookie=sa, origin=o)
+        assert s == 403, o
+    assert p.req("POST", "/ai/api/keys/rotate", {}, cookie=sa, origin=None)[0] == 403
+    assert row_key() == KEY_A1
+    assert do_rotate(p, sa)[0] == 200                              # POSITIVE
+
+
+def test_rotate_pilot_gate_applies(rotate_portal):
+    """灰度名单外的人连会话都没有 ⇒ 重置入口自然也进不来。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    p.app.cfg["PILOT_UNION_IDS"] = USERS["B"]["union_id"]
+    try:
+        assert do_rotate(p, sa)[0] == 401
+        assert row_key() == KEY_A1
+    finally:
+        p.app.cfg["PILOT_UNION_IDS"] = ""
+    assert do_rotate(p, sa)[0] == 200                              # POSITIVE
+
+
+def test_rotate_bad_record_id(rotate_portal):
+    p = rotate_portal()
+    sa = p.sid("A")
+    for bad in (123, "", "../x", "recA1' or 1=1", ["recA1"], {"x": 1}):
+        s, d, _, _ = do_rotate(p, sa, {"record_id": bad})
+        assert s == 400 and "key" not in d, bad
+    assert row_key() == KEY_A1 and len(LITE.keys) == 2
+
+
+def test_rotate_audit_has_every_step_and_no_plaintext(rotate_portal):
+    """审计:谁、什么时候、旧 alias、新 alias、每一步的结果 —— 且**一个明文都没有**。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    new = do_rotate(p, sa, ip="10.7.7.1")[1]["key"]
+    rows = audit_rows(p)
+    steps = [(r[0], r[1]) for r in rows]
+    assert ("generate", "ok") in steps and ("probe", "ok") in steps
+    assert ("bitable", "ok") in steps and ("block-old", "ok") in steps and ("done", "ok") in steps
+    for r in rows:
+        assert r[2] == "cursor-zhangsan-ab12" or r[2] == "", r
+        assert r[4] == USERS["A"]["union_id"] and r[5] == "10.7.7.1" and r[6] == "张三" and r[7] == "oauth"
+        assert r[9], "要有时间戳"
+    assert {r[3] for r in rows if r[3]} == {[x[3] for x in rows if x[3]][0]}, "新 alias 只有一个"
+    # 🔴 不记明文:库文件里既没有旧明文也没有新明文
+    db = Path(p.app.cfg["DB_PATH"]).read_bytes()
+    assert KEY_A1.encode() not in db and new.encode() not in db and MASTER.encode() not in db
+    assert not S.SK_RE.search(json.dumps(rows, ensure_ascii=False))
+
+
+def test_rotate_audit_records_failures_too(rotate_portal):
+    """失败也要有审计行(否则排障时只看得到成功的那些)。"""
+    p = rotate_portal(ROTATE_COOLDOWN="0")
+    sa = p.sid("A")
+    LITE.fail["/key/generate"] = (500, "boom sk-shouldnotleak1234")
+    assert do_rotate(p, sa)[0] == 502
+    rows = audit_rows(p)
+    assert [r for r in rows if (r[0], r[1]) == ("generate", "fail")]
+    assert "shouldnotleak" not in json.dumps(rows), "上游原话里夹的 key 也要打码"
+    assert not S.SK_RE.search(json.dumps(rows, ensure_ascii=False)), "只许出现 sk-…1234 这种打码形状"
+
+
+def test_rotate_logs_never_contain_secrets(rotate_portal, capsys):
+    p = rotate_portal(ROTATE_COOLDOWN="0")
+    sa = p.sid("A")
+    capsys.readouterr()
+    new = do_rotate(p, sa)[1]["key"]
+    LITE.fail["/key/generate"] = (500, "boom")
+    do_rotate(p, sa)
+    out = capsys.readouterr()
+    logs = out.out + out.err
+    assert "rotate 完成" in logs and "rotate 生成失败" in logs, "阳性:确实在打日志"
+    for s in (KEY_A1, new, MASTER, APP_SECRET, SECRET):
+        assert s not in logs, s[:8]
+
+
+def test_rotate_response_carries_message_for_frontend(rotate_portal):
+    p = rotate_portal()
+    sa = p.sid("A")
+    LITE.fail["/key/generate"] = (500, "boom")
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 502 and d["message"] and d["message"] == d["error"]
+
+
+def test_me_exposes_rotate_flags(rotate_portal):
+    p = rotate_portal(ROTATE_DRY_RUN="1")
+    me = p.req("GET", "/ai/api/me", cookie=p.sid("A"))[1]
+    assert me["rotate_enabled"] is True and me["rotate_dry_run"] is True
+    p2 = rotate_portal(ROTATE_DRY_RUN="0")
+    assert p2.req("GET", "/ai/api/me", cookie=p2.sid("A"))[1]["rotate_dry_run"] is False
+
+
+def test_rotate_master_key_never_reaches_browser_or_table(rotate_portal):
+    p = rotate_portal()
+    sa = p.sid("A")
+    d = do_rotate(p, sa)[1]
+    assert MASTER not in json.dumps(d, ensure_ascii=False)
+    assert MASTER not in json.dumps(list(FAKE.tables.values()), ensure_ascii=False)
+    assert MASTER not in json.dumps(p.req("GET", "/ai/api/keys", cookie=sa)[1], ensure_ascii=False)
+
+
+def test_rotate_keys_list_masks_new_key(rotate_portal):
+    """重置完刷新列表:仍然只给打码,明文只有 reveal / 重置那一次的响应里有。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    new = do_rotate(p, sa)[1]["key"]
+    d = p.req("GET", "/ai/api/keys", cookie=sa)[1]
+    raw = json.dumps(d, ensure_ascii=False)
+    assert new not in raw and S.mask_key(new) in raw
+    m = {k["record_id"]: k for k in d["keys"]}
+    assert m["recA1"]["status"] == "可用" and m["recA1"]["current"] is True
+    # 重置完还能照常拿安装码、换出来的就是新 key
+    code = p.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sa)[1]["code"]
+    assert _redeem(p, code)[1]["key"] == new
+    # reveal 出来的也是新的
+    assert p.req("POST", "/ai/api/keys/reveal", {"record_id": "recA1"}, cookie=sa)[1]["key"] == new
+
+
+# ── 纯函数 ───────────────────────────────────────────────────────────────
+def test_alias_base_only_strips_the_pollers_suffix():
+    """🔴 真表里有 `cursor-buyitian` 这种**没有后缀**的 alias。
+    无脑 rsplit('-',1) 会把它剥成 `cursor` ⇒ 新 key 叫 `cursor-xxxx`,名字里的人没了。"""
+    assert S.alias_base("cursor-zhangsan-ab12") == "cursor-zhangsan"
+    assert S.alias_base("cursor-buyitian") == "cursor-buyitian"
+    assert S.alias_base("cursor-wanghengzhang-49q3") == "cursor-wanghengzhang"
+    assert S.alias_base("cursor-wangzhongwei-w1qn") == "cursor-wangzhongwei"
+    # 只认 poller 那种**恰好 4 位**的后缀。手工起的 `-std`(3 位)不剥 ⇒ 新 key 叫
+    # `…-std-xxxx`,名字稍长但人没丢;剥错了才会撞到别人头上,所以宁可不剥。
+    assert S.alias_base("claude-code-liuguoxian-std") == "claude-code-liuguoxian-std"
+    assert S.alias_base("") == "" and S.alias_base(None) == ""
+    # 基名幂等:对已剥过的再剥一次不该继续吃掉东西(除非它本来就像个后缀)
+    assert S.alias_base(S.alias_base("cursor-zhangsan-ab12")) == "cursor-zhangsan"
+    assert S.new_alias("cursor-zhangsan-ab12", "cd34") == "cursor-zhangsan-cd34"
+    assert S.retired_alias("cursor-zhangsan-ab12", "20261104T120000Z") == \
+        "cursor-zhangsan-retired-20261104T120000Z"
+    # 退役名还在 LiteLLM 的严格 alias 形状里(以后把那个开关打开也不会挂)
+    assert S.ALIAS_OK_RE.match(S.retired_alias("cursor-zhangsan-ab12", "20261104T120000Z"))
+
+
+def test_pick_probe_model_never_guesses_by_prefix():
+    """🔴 探针模型只能从**这把 key 自己的 models** 里取:两个 key 族前缀是反的,
+    按 alias 猜会拿到 403 —— 那是量具错,不是 key 坏(换发脚本 10-31 踩过)。"""
+    assert S.pick_probe_model(["gpt-5.5", "claude-haiku-4-5"]) == "claude-haiku-4-5"
+    assert S.pick_probe_model(["gpt-5.5", "anthropic.claude-haiku-4-5"]) == "anthropic.claude-haiku-4-5"
+    assert S.pick_probe_model(["gpt-5.5", "kimi-k3"]) == "gpt-5.5"          # 没有偏好的就挑第一个
+    assert S.pick_probe_model(["gpt-5.5", "deepseek-v4.1-flash"]) == "deepseek-v4.1-flash"
+    # all-team-models 是一个词,只对 team 成员解析,master key 直接打它 400 ⇒ 探不出来,跳过
+    assert S.pick_probe_model(["all-team-models"]) is None
+    assert S.pick_probe_model(["all-proxy-models"]) is None
+    assert S.pick_probe_model([]) is None and S.pick_probe_model(None) is None
+    assert S.pick_probe_model([None, 1, ""]) is None
+
+
+def test_rotate_payload_carries_and_drops_the_right_fields():
+    old = {"key_alias": "cursor-zhangsan-ab12", "token": "deadbeef", "key_name": "sk-...0001",
+           "models": ["gpt-5.5"], "max_budget": 20.0, "budget_duration": "30d", "team_id": "T",
+           "user_id": "cursor-zhangsan", "metadata": {"lark_open_id": "ou_x", "base_alias": "cursor-zhangsan"},
+           "spend": 9.5, "model_spend": {"gpt-5.5": 9.5}, "blocked": True, "aliases": {},
+           "created_at": "2026-01-01", "updated_at": "2026-02-02", "budget_reset_at": "2026-03-03",
+           "rotation_count": 3, "auto_rotate": True, "tpm_limit": None}
+    p = S.rotate_payload(old, "cursor-zhangsan-cd34", "2026-11-04T12:00:00+0800")
+    assert p["key_alias"] == "cursor-zhangsan-cd34"
+    for k in ("models", "max_budget", "budget_duration", "team_id", "user_id"):
+        assert p[k] == old[k], k
+    for k in ("token", "key_name", "spend", "model_spend", "blocked", "created_at", "updated_at",
+              "budget_reset_at", "rotation_count", "auto_rotate"):
+        assert k not in p, k
+    assert "aliases" not in p and "tpm_limit" not in p, "空字段不发(别被当成显式清空)"
+    assert p["metadata"]["lark_open_id"] == "ou_x", "身份 metadata 整份跟过来"
+    assert p["metadata"]["base_alias"] == "cursor-zhangsan"
+    assert p["metadata"]["rotated_from"] == "cursor-zhangsan-ab12"
+    assert p["metadata"]["rotated_at"] == "2026-11-04T12:00:00+0800"
+    assert old["metadata"] == {"lark_open_id": "ou_x", "base_alias": "cursor-zhangsan"}, "不改入参"
+
+
+def test_carry_mismatch_only_reports_real_drift():
+    old = {"models": ["a"], "max_budget": 20.0, "budget_duration": "30d", "team_id": "T", "user_id": "u"}
+    assert S.carry_mismatch(old, dict(old)) == []
+    assert S.carry_mismatch(old, dict(old, max_budget=None)) == ["max_budget"]
+    assert S.carry_mismatch(old, dict(old, models=["a", "b"])) == ["models"]
+    assert S.carry_mismatch(old, dict(old, team_id="OTHER")) == ["team_id"]
+    # 老的为空、新的被服务端补上 ⇒ 不算漏平移(key_type 恒 default、organization_id 按 team 补齐)
+    assert S.carry_mismatch(dict(old, team_id=None), dict(old, team_id="T")) == []
+    assert S.carry_mismatch({}, {}) == []
+
+
+def test_litellm_disabled_without_master_key(fake, tmp_path):
+    cfg = make_cfg(fake, tmp_path)
+    assert S.LiteLLMClient(cfg).enabled is False
+    assert S.LiteLLMClient(dict(cfg, LITELLM_MASTER_KEY=MASTER)).enabled is True
+    assert S.LiteLLMClient(dict(cfg, LITELLM_MASTER_KEY="   ")).enabled is False
+
+
+def test_litellm_config_checks(fake, tmp_path):
+    def errs(**over):
+        return S.check_config(make_cfg(fake, tmp_path, **over))
+    assert errs() == []
+    assert any("LITELLM_MASTER_KEY" in e for e in errs(LITELLM_MASTER_KEY=SECRET)), "不能和会话密钥同值"
+    assert any("ROTATE_DRY_RUN=0" in e for e in errs(ROTATE_DRY_RUN="0")), "真写却没配网关 key ⇒ 拒绝启动"
+    assert errs(ROTATE_DRY_RUN="0", LITELLM_MASTER_KEY=MASTER) == []          # POSITIVE
+    assert any("https" in e for e in errs(LITELLM_BASE="http://cc.auto-link.com.cn/pro")), "master key 不走明文"
+    assert errs(LITELLM_BASE="http://127.0.0.1:4000") == [], "回环放过(给测试/198 本机)"
+    for bad in ("", "x", "-1", "1.5"):
+        assert any("ROTATE_COOLDOWN" in e for e in errs(ROTATE_COOLDOWN=bad)), bad
+
+
+def test_rotate_field_allowlist_never_touches_identity():
+    """重置不改归属:姓名 / 账户类型 / 组织名称 / open_id / 邮箱前缀 一律不在白名单里。"""
+    for f in ("姓名", "账户类型", "组织名称", "open_id", "邮箱前缀", "是否在职", "部门名称", "每日预算"):
+        assert f not in S.ROTATE_FIELD_ALLOW, f
+    assert S.ROTATE_STATUS in REAL_STATUS_OPTIONS, "状态必须是表里已有的选项"
+
+
+def test_rotate_does_not_touch_identity_columns(rotate_portal):
+    p = rotate_portal()
+    sa = p.sid("A")
+    before = {k: json.dumps(v, ensure_ascii=False, sort_keys=True)
+              for k, v in FAKE.tables[KEYTBL]["recA1"].items()}
+    do_rotate(p, sa)
+    after = FAKE.tables[KEYTBL]["recA1"]
+    changed = {k for k in after if before.get(k) != json.dumps(after[k], ensure_ascii=False, sort_keys=True)}
+    assert changed <= S.ROTATE_FIELD_ALLOW, changed
+    assert changed == {"API Key", "状态", "key_alias", "点我体检", "Cursor Key"}, changed
+
+
+def test_rotate_leaves_other_rows_alone(rotate_portal):
+    p = rotate_portal()
+    sa = p.sid("A")
+    before = {rid: json.dumps(f, ensure_ascii=False, sort_keys=True)
+              for rid, f in FAKE.tables[KEYTBL].items() if rid != "recA1"}
+    do_rotate(p, sa)
+    for rid, snap in before.items():
+        assert json.dumps(FAKE.tables[KEYTBL][rid], ensure_ascii=False, sort_keys=True) == snap, rid
+
+
+def test_rotate_refuses_blocked_key_no_self_unblock(rotate_portal):
+    """🔴 被封的 key 绝不能自助重置 —— 否则就是**自助解封**:新 key 照抄字段但不抄 blocked。
+    真实数据(11-04 量):网关上已封的 key 有 15 把在飞书表里状态**仍是「有效」**
+    (异常账户处置只在网关上封 key、不动表)⇒ 门户只看表就会把它挑成 current,只看表拦不住。"""
+    p = rotate_portal()
+    sa = p.sid("A")
+    LITE.keys[S.sha(KEY_A1)]["blocked"] = True                 # 网关上封了,表里照旧「有效」
+    n_before = len(LITE.keys)
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 403 and "停用" in d.get("message", ""), (s, d)
+    assert len(LITE.keys) == n_before, "被拒时一把新 key 都不能生成"
+    assert row_key() == KEY_A1 and LITE.keys[S.sha(KEY_A1)]["blocked"] is True
+    # 阳性对照:同一个人解封后就能重置 ⇒ 上面的 403 是因为 blocked,不是别的原因
+    LITE.keys[S.sha(KEY_A1)]["blocked"] = False
+    s, d, _, _ = do_rotate(p, sa)
+    assert s == 200 and d["key"] != KEY_A1, (s, d)

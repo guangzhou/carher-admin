@@ -135,6 +135,23 @@ details.hist .keys{margin-top:2px}
 @media (prefers-reduced-motion:reduce){.spin{animation:none}}
 .row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
 
+/* 重置 key：入口 / 二次确认 / 结果 */
+.rot{display:flex;flex-direction:column;gap:10px}
+.rot-entry{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;font-size:14px;color:var(--muted)}
+.btn.danger{background:var(--err);border-color:var(--err);color:#fff}
+.btn.danger-alt{background:var(--surface);color:var(--err);border-color:var(--err-line);font-weight:600}
+.btn.danger-alt:hover{border-color:var(--err);opacity:1}
+.rot-confirm{border:1.5px solid var(--err-line);background:var(--err-bg);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.rot-confirm h3{margin:0;font-size:16px;line-height:1.5;color:var(--err)}
+.rot-confirm ul{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+.rot-confirm label{display:flex;gap:8px;align-items:flex-start;font-size:14.5px;cursor:pointer}
+.rot-confirm input[type=checkbox]{width:18px;height:18px;margin-top:4px;flex:none;accent-color:var(--err)}
+.rot-done{border:1.5px solid var(--ok);background:var(--ok-bg);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.rot-done h3{margin:0;font-size:16px;line-height:1.5;color:var(--ok)}
+.rot-key{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.rot-key code{flex:1 1 220px;min-width:0;background:none;padding:0;font-size:14px;word-break:break-all;font-variant-ligatures:none}
+.rot-key .acts{display:flex;gap:8px;flex-wrap:wrap}
+
 /* 外部用户：先跟机器人说话 */
 .botbox{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
 /* 🔴 padding = 二维码静默区。位图贴边，37 模块画在 164px 内容区 ≈4.4px/模块，22px ≈ 5 模块（≥4 才扫得稳），别改小 */
@@ -155,6 +172,10 @@ ol.list li::marker{color:var(--muted)}
 .tool[aria-checked="true"] b{color:var(--c)}
 .tool[aria-checked="true"]::after{content:"✓";position:absolute;top:10px;right:12px;width:22px;height:22px;border-radius:50%;background:var(--c);color:var(--on-t);font-size:13px;display:grid;place-items:center;font-weight:700}
 .tool[data-tool="cursor"]{--c:var(--cursor)} .tool[data-tool="codex"]{--c:var(--codex)} .tool[data-tool="claude"]{--c:var(--claude)}
+/* 「三个都装」= 默认，占满第一行；三条单装卡保留在下面一行 */
+.tool[data-tool="all"]{--c:var(--accent);grid-column:1 / -1}
+.tool.all b{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.tool.all em{font-style:normal;font-size:12px;font-weight:700;line-height:1.6;padding:0 8px;border-radius:999px;background:var(--ok-bg);color:var(--ok)}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--surface)}
 .seg button{appearance:none;font:inherit;font-size:14px;border:0;background:none;color:var(--muted);padding:6px 14px;cursor:pointer;min-height:36px}
 .seg button+button{border-left:1px solid var(--line)}
@@ -206,7 +227,9 @@ footer{color:var(--muted);font-size:12.5px;margin:6px 0 0 62px}
 body.os-mac .win-only, body.os-mac .linux-only,
 body.os-win .mac-only, body.os-win .linux-only, body.os-win .unix-only,
 body.os-linux .mac-only, body.os-linux .win-only{display:none!important}
-body:not(.tool-cursor) .for-cursor{display:none!important}
+/* Cursor 专属提示：只装 Cursor 和「三个都装」（里面有 Cursor）时都要出 */
+body:not(.tool-cursor):not(.tool-all) .for-cursor{display:none!important}
+body:not(.tool-all) .for-all{display:none!important}
 
 @media (max-width:640px){
   body{padding-block:16px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
@@ -218,6 +241,7 @@ body:not(.tool-cursor) .for-cursor{display:none!important}
   .trio li::before{grid-row:1 / span 2;margin:0}
   .tools{grid-template-columns:1fr;gap:8px}
   .tool{flex-direction:row;align-items:baseline;gap:10px;padding:10px 14px}
+  .tool.all{flex-direction:column;align-items:flex-start;gap:0}
   .step{grid-template-columns:30px minmax(0,1fr);gap:0 12px}
   .step::before{width:28px;height:28px;font-size:14px}
   .step::after{left:14px;top:34px}
@@ -230,7 +254,7 @@ body:not(.tool-cursor) .for-cursor{display:none!important}
 }
 </style>
 </head>
-<body class="tool-cursor os-mac">
+<body class="tool-all os-mac">
 <a href="#main" class="sr skip">跳到正文</a>
 <!-- 所有「已复制 / 出错」都在这里播报给读屏；视觉上各按钮自己变字 -->
 <div id="live" class="sr" aria-live="polite" aria-atomic="true"></div>
@@ -323,7 +347,64 @@ body:not(.tool-cursor) .for-cursor{display:none!important}
         <div><b>key 正在生成，大约 1~2 分钟。</b>申请后<b>不会有飞书通知</b>，请留在这个页面，好了会自动出来（每 20 秒查一次）。
           <div class="sub" id="poll-at" style="margin-top:2px"></div></div>
       </div>
+      <!-- 没开重置功能（后端 rotate_enabled=false）时的老入口 -->
       <p class="sub" id="keys-swap" hidden>需要换一把 key？<a href="#s-fb" id="swap-link">请提反馈</a>，我们帮你换。</p>
+
+      <!-- ═══ 重置我的 key ═══
+           🔴 新 key 明文只在重置成功那一次的响应里有，放在闭包变量 rotPlain 里：
+           不进 DOM（除非点「显示」）、不进 URL / localStorage / console；30 秒自动藏，切走标签页立刻藏。 -->
+      <div class="rot" id="rot" hidden>
+        <div class="rot-entry" id="rot-entry">
+          <span>key 泄露了、或者想换一把新的？</span>
+          <button type="button" class="btn danger-alt sm" id="rot-open" aria-expanded="false" aria-controls="rot-confirm">重置我的 key</button>
+        </div>
+
+        <div class="rot-confirm" id="rot-confirm" role="group" aria-labelledby="rot-h" hidden>
+          <h3 id="rot-h">确定要重置吗？</h3>
+          <ul>
+            <li>会给你生成一把<b>新 key</b>，现在这把<b>立刻停用</b>。</li>
+            <li>你<b>所有配过的电脑</b>（Cursor / Codex / Claude Code）会马上用不了，要在每台电脑上<b>重新跑一次第 2 步那行命令</b>才能恢复。</li>
+            <li>重置成功后 <span id="rot-cd-txt">10 分钟</span>内不能再重置。</li>
+          </ul>
+          <label><input type="checkbox" id="rot-ack"> 我知道了：旧 key 马上失效，所有电脑都要重新跑一次命令</label>
+          <div class="row">
+            <button type="button" class="btn danger" id="rot-go" disabled>确定重置</button>
+            <button type="button" class="btn ghost" id="rot-cancel">先不了</button>
+          </div>
+        </div>
+
+        <div class="note" id="rot-busy" role="status" hidden>
+          <span class="spin" aria-hidden="true" style="display:inline-block;vertical-align:-3px;margin:0 8px 0 0"></span>
+          正在生成新 key 并试调一次，大约 5~20 秒，请别关页面。<b>在这一步完成之前，旧 key 一直能用。</b>
+        </div>
+
+        <div class="note err" id="rot-err" role="alert" hidden>
+          <b>没有重置成功。</b> <span id="rot-err-msg"></span>
+          <div style="margin-top:8px" class="row">
+            <button type="button" class="btn ghost sm" id="rot-err-close">知道了</button>
+            <a href="#s-fb" class="sub" id="rot-err-fb">还是不行？提反馈</a>
+          </div>
+        </div>
+
+        <div class="note" id="rot-dry" role="status" hidden>
+          <b>演练模式：</b><span id="rot-dry-msg"></span>
+          <div class="sub" id="rot-dry-detail" style="margin-top:4px"></div>
+        </div>
+
+        <div class="rot-done" id="rot-done" tabindex="-1" hidden>
+          <h3>已经换好了，这是你的新 key</h3>
+          <div class="rot-key">
+            <code id="rot-val" aria-live="off"></code>
+            <span class="acts">
+              <button type="button" class="btn ghost sm" id="rot-show">显示</button>
+              <button type="button" class="btn sm" id="rot-copy">复制</button>
+            </span>
+          </div>
+          <p><b>下一步：</b>去下面<a href="#s-install" id="rot-to-install">第 2 步</a><b>重新复制一行命令</b>，在每台用过的电脑上各跑一次。旧 key 已经停用了。</p>
+          <p class="note" id="rot-warn" hidden></p>
+          <p class="sub">新 key 只在这里显示这一次；以后要看，点上面列表里的「显示」也行。</p>
+        </div>
+      </div>
       <details class="hist" id="keys-hist" hidden>
         <summary id="hist-sum">历史 key</summary>
         <div class="keys" id="hist-list"></div>
@@ -354,9 +435,10 @@ body:not(.tool-cursor) .for-cursor{display:none!important}
     <h2 id="inst-h">一键装好 <span class="sub">复制一行命令，粘进终端回车</span></h2>
     <div class="body">
       <div class="tools" role="radiogroup" aria-label="选工具">
-        <button type="button" class="tool" role="radio" data-tool="cursor" aria-checked="true"><b>Cursor</b><span>写代码的编辑器</span></button>
-        <button type="button" class="tool" role="radio" data-tool="codex" aria-checked="false"><b>Codex</b><span>命令行 + 桌面 App</span></button>
-        <button type="button" class="tool" role="radio" data-tool="claude" aria-checked="false"><b>Claude Code</b><span>命令行 + 桌面 App</span></button>
+        <button type="button" class="tool all" role="radio" data-tool="all" aria-checked="true"><b>三个都装<em>推荐</em></b><span>一条命令，三个一起配好</span></button>
+        <button type="button" class="tool" role="radio" data-tool="cursor" aria-checked="false"><b>只装 Cursor</b><span>写代码的编辑器</span></button>
+        <button type="button" class="tool" role="radio" data-tool="codex" aria-checked="false"><b>只装 Codex</b><span>命令行 + 桌面 App</span></button>
+        <button type="button" class="tool" role="radio" data-tool="claude" aria-checked="false"><b>只装 Claude Code</b><span>命令行 + 桌面 App</span></button>
       </div>
       <div class="osline">
         <span id="os-guess">认出你用的是 Mac，不对就改：</span>
@@ -389,8 +471,14 @@ body:not(.tool-cursor) .for-cursor{display:none!important}
           <ul class="does" aria-label="这行命令会做什么">
             <li><b>装好 <span class="tname">Cursor</span></b><span>没装过就自动下载安装，装过的跳过</span></li>
             <li><b>写好 key</b><span>自动把你的 key 配进去，不用你粘</span></li>
-            <li><b>重开 <span class="tname">Cursor</span></b><span>看到「完成」就能用了，第一次约 2~5 分钟</span></li>
+            <li><b>重开 <span class="tname">Cursor</span></b><span id="does-eta">看到「完成」就能用了，第一次约 2~5 分钟</span></li>
           </ul>
+          <div class="note for-all">
+            <b>这一条命令会依次装三个</b>：先 Codex、再 Claude Code、最后 Cursor（Cursor 要求先完全退出，所以放最后）。
+            三个 App 安装包加起来有 1~2 GB，<b>整个过程大约 10~40 分钟</b>，看网速；已经装过的 App 会跳过。
+            <br>跑的时候<b>别关终端窗口</b>，让它一直跑完。中间某个没装成不影响另外两个，最后会列出每个的结果；
+            没成的那个回这里<b>单独选它</b>再跑一次就行。
+          </div>
           <p class="sub for-cursor">唯一例外：新版 Cursor 要你在设置里粘一次 key。脚本会先把 key 放进剪贴板，并告诉你点哪里（Settings → Models → OpenAI API Key → 粘贴 → Verify）。</p>
 
           <div class="note win-only">
@@ -470,7 +558,9 @@ var QRCode;!function(){function a(a){this.mode=c.MODE_8BIT_BYTE,this.data=a,this
 // ───────── 常量 ─────────
 var ORIGIN = "https://chat.auto-link.com.cn";
 var APPLINK = "https://applink.feishu.cn/client/bot/open?appId=cli_aa8505afb0f89cb2";
-var TOOLS = {cursor:"Cursor", codex:"Codex", claude:"Claude Code"};
+// all = 一条命令装三个（后端 tool="all"，安装器按 Codex → Claude Code → Cursor 依次装，共用同一把 key）
+var TOOLS = {all:"三个工具", cursor:"Cursor", codex:"Codex", claude:"Claude Code"};
+var DEFAULT_TOOL = "all";
 var OSES = {mac:"Mac", win:"Windows", linux:"Linux"};
 var POLL_MS = 20000, REMASK_MS = 30000;
 // 状态一律按**前缀**判（后端会给「生成失败: <原因>」这种带后缀的值）。顺序有意义：先长后短。
@@ -485,7 +575,7 @@ var CODE_RE = /^[A-Za-z0-9][A-Za-z0-9-]{3,63}$/; // 安装码会拼进 shell 命
 
 var $ = function(id){ return document.getElementById(id); };
 var B = document.body;
-var state = { me:null, keys:[], tool:"cursor", os:"mac", codes:{}, pollT:0, tickT:0, dead:false };
+var state = { me:null, keys:[], tool:DEFAULT_TOOL, os:"mac", codes:{}, pollT:0, tickT:0, dead:false };
 
 function pref(k, v){ try{ if (v === undefined) return localStorage.getItem("aiportal-"+k); localStorage.setItem("aiportal-"+k, v); }catch(e){ return null; } }
 function say(msg){ var l=$("live"); l.textContent=""; setTimeout(function(){ l.textContent=msg; }, 30); }
@@ -524,6 +614,7 @@ function view(name){
 function stopAll(){ state.dead = true; clearTimeout(state.pollT); clearInterval(state.tickT); }
 function toLogin(){
   stopAll(); if (typeof remaskAll === "function") remaskAll(); state.keys = []; state.codes = {};
+  if (typeof rotForget === "function") rotForget();       // 登出 / 会话过期:新 key 明文也清掉
   $("keys-list").textContent = ""; $("cmd").textContent = "";
   var here = location.pathname + location.search;
   if (here.indexOf("/ai/") !== 0 || here.indexOf("/ai/auth/") === 0) here = "/ai/";
@@ -679,6 +770,7 @@ function remaskAll(){ remaskers.forEach(function(f){ try{ f(); }catch(e){} }); }
 document.addEventListener("visibilitychange", function(){ if (document.hidden) remaskAll(); });
 function renderKeys(){
   remaskAll(); remaskers = [];
+  if (typeof rotRemask === "function") remaskers.push(rotRemask);   // 重置结果卡片里的新 key 也一起藏
   var box = $("keys-list"), hb = $("hist-list"); box.textContent = ""; hb.textContent = "";
   var cur = state.keys.filter(isCurrent), old = state.keys.filter(function(k){ return !isCurrent(k); });
   cur.forEach(function(k){ box.appendChild(keyRow(k)); });
@@ -686,7 +778,10 @@ function renderKeys(){
   var hasOk = activeKeys().length > 0, hasPend = pendingKeys().length > 0, hasFail = curKeys("fail").length > 0;
   show("keys-list", cur.length > 0);
   show("keys-pending", hasPend);
-  show("keys-swap", hasOk);
+  // 后端开了重置 ⇒ 真入口；没开 ⇒ 老的「请提反馈」。成功结果卡片在显示时，入口一直留着（它自己管）
+  var rotOn = !!(state.me && state.me.rotate_enabled);
+  show("keys-swap", hasOk && !rotOn);
+  show("rot", rotOn && (hasOk || (rot && rot.busy) || !$("rot-done").hidden || !$("rot-err").hidden));
   show("keys-hist", old.length > 0);
   $("hist-sum").textContent = "历史 key（" + old.length + " 把，已不再使用）";
   // 失败的那行自带「重新申请」，不再重复出申请卡
@@ -785,9 +880,105 @@ function doApply(b, msgEl){
   }).then(function(){ if (b.isConnected){ b.disabled = false; b.textContent = label; } });
 }
 $("apply-btn").addEventListener("click", function(){ doApply($("apply-btn"), $("apply-msg")); });
-$("swap-link").addEventListener("click", function(e){
-  e.preventDefault(); var d = $("fb-box"); d.open = true; pickFbTool();
+function openFeedback(e){
+  if (e) e.preventDefault();
+  var d = $("fb-box"); d.open = true; pickFbTool();
   $("s-fb").scrollIntoView({ behavior: "smooth", block: "start" }); $("fb-title").focus({ preventScroll: true });
+}
+$("swap-link").addEventListener("click", openFeedback);
+
+// ───────── 重置我的 key ─────────
+// 流程：入口按钮 → 二次确认（要勾选才能点）→ 忙 → 成功卡片（新 key 打码 + 显示 + 复制）/ 失败按后端 message。
+// 🔴 新 key 明文只在 rotPlain 这个变量里；藏起来 / 切走标签页 / 登出 都会清掉 DOM 里的明文。
+var rot = { busy:false };
+var rotPlain = null, rotMasked = "", rotShown = false, rotTimer = 0, rotLeft = 0;
+function rotPhase(p){
+  // p: idle | confirm | busy | done | err | dry
+  show("rot-entry", p === "idle" || p === "err" || p === "dry");
+  show("rot-confirm", p === "confirm");
+  show("rot-busy", p === "busy");
+  if (p !== "err") show("rot-err", false);
+  if (p !== "dry") show("rot-dry", false);
+  if (p !== "done") show("rot-done", false);
+  $("rot-open").setAttribute("aria-expanded", p === "confirm" ? "true" : "false");
+}
+function rotRemask(){
+  clearInterval(rotTimer); rotShown = false;
+  $("rot-val").textContent = rotMasked; $("rot-show").textContent = "显示";
+}
+function rotForget(){ rotRemask(); rotPlain = null; rotMasked = ""; }
+remaskers.push(rotRemask);   // renderKeys 开头会重置 remaskers ⇒ 在下面 renderKeys 里也补挂
+function rotCooldownText(){
+  var s = +((state.me && state.me.rotate_cooldown) || 600);
+  return s >= 60 ? Math.round(s / 60) + " 分钟" : s + " 秒";
+}
+$("rot-open").addEventListener("click", function(){
+  $("rot-ack").checked = false; $("rot-go").disabled = true;
+  $("rot-cd-txt").textContent = rotCooldownText();
+  rotPhase("confirm");
+  $("rot-ack").focus();
+});
+$("rot-ack").addEventListener("change", function(){ $("rot-go").disabled = !$("rot-ack").checked; });
+$("rot-cancel").addEventListener("click", function(){ rotPhase("idle"); $("rot-open").focus(); });
+$("rot-err-close").addEventListener("click", function(){ rotPhase("idle"); $("rot-open").focus(); });
+$("rot-err-fb").addEventListener("click", openFeedback);
+$("rot-go").addEventListener("click", function(){
+  if (rot.busy || !$("rot-ack").checked) return;
+  var cur = activeKeys()[0];
+  rot.busy = true; $("rot-go").disabled = true;
+  rotPhase("busy"); say("正在重置 key，请稍等");
+  // 带上页面上那一行的 record_id：服务端只用它做「页面没过期」的核对，改谁永远按登录身份算
+  api("POST", "/ai/api/keys/rotate", cur ? { record_id: cur.record_id } : {}).then(function(r){
+    if (r && r.dry_run){
+      $("rot-dry-msg").textContent = r.message || "没有生成新 key，也没有改任何东西。";
+      $("rot-dry-detail").textContent = r.old_alias ? ("将会把 " + r.old_alias + " 换成 " + r.new_alias + "，平移 " + ((r.carry || []).length) + " 项配置。") : "";
+      rotPhase("dry"); show("rot-dry", true);
+      say("演练模式：没有真的重置");
+      return;
+    }
+    if (!r || typeof r.key !== "string" || r.key.indexOf("sk-") !== 0) throw new ApiError("服务器没给回新 key。请刷新页面看看列表里是不是已经换了；没换的话旧 key 还能用。", 200);
+    rotPlain = r.key; rotMasked = r.masked || "sk-…";
+    r.key = null;
+    rotRemask();
+    show("rot-warn", !!r.warning); $("rot-warn").textContent = r.warning || "";
+    // 安装码绑的是旧 key 的那一刻 ⇒ 作废页面上已经拿到的码，第 2 步重新取
+    state.codes = {};
+    rotPhase("done"); show("rot-done", true);
+    $("rot-done").focus();
+    say("key 已经换好了。去第 2 步重新复制一行命令，在每台电脑上跑一次。");
+    return loadKeys(true);
+  }, function(e){
+    if (e.status === 401) return;
+    $("rot-err-msg").textContent = e.message;
+    rotPhase("err"); show("rot-err", true);
+    shout("没有重置成功：" + e.message);
+    if (e.status === 409) loadKeys(true);   // 页面过期 / 正在重置 ⇒ 刷一下列表
+  }).then(function(){ rot.busy = false; renderKeys(); });
+});
+$("rot-show").addEventListener("click", function(){
+  if (rotShown){ rotRemask(); say("key 已藏起来"); return; }
+  if (!rotPlain){ flash($("rot-show"), "已失效"); return; }
+  rotShown = true; rotLeft = REMASK_MS / 1000;
+  var tick = function(){
+    $("rot-val").textContent = rotPlain + "（" + rotLeft + " 秒后自动藏起来）";
+    $("rot-show").textContent = "藏起来";
+    if (rotLeft-- <= 0) rotRemask();
+  };
+  clearInterval(rotTimer); tick(); rotTimer = setInterval(tick, 1000);
+  say("新 key 已显示，30 秒后自动藏起来");
+});
+$("rot-copy").addEventListener("click", function(){
+  var b = $("rot-copy");
+  if (!rotPlain){ flash(b, "已失效"); return; }
+  copyText(rotPlain).then(function(ok){
+    if (ok){ flash(b, "已复制", "done"); say("新 key 已复制到剪贴板"); }
+    else { if (!rotShown) $("rot-show").click(); flash(b, "请手动复制"); shout("浏览器不让自动复制，新 key 已显示出来，请选中后按 Ctrl/Cmd + C"); }
+  });
+});
+$("rot-to-install").addEventListener("click", function(e){
+  e.preventDefault();
+  $("s-install").scrollIntoView({ behavior: "smooth", block: "start" });
+  var c = $("cmd-copy"); if (c && !c.disabled) c.focus({ preventScroll: true });
 });
 
 // ───────── 外部用户的二维码 ─────────
@@ -805,6 +996,8 @@ function drawQR(){
 
 // ───────── 一键配置 ─────────
 // 命令形状（Mac/Linux 已定；Windows 为占位，等安装脚本定了再改这一处）
+// tool=all 走 /ai/i/all.sh|.ps1（nginx 和另外三个一样都 alias 到同一个 install.sh / install.ps1；
+// 真正装哪个以安装码换回来的 tool 为准，网址只是个名字）
 function buildCmd(tool, os, code){
   if (os === "win"){
     return ["powershell -ExecutionPolicy Bypass -c \"irm " + ORIGIN + "/ai/i/" + tool + ".ps1 | iex; Install-Carher -Code ", code, "\""];
@@ -814,11 +1007,16 @@ function buildCmd(tool, os, code){
 function codeValid(c){ return c && c.exp - Date.now() > 3000; }
 
 function pickTool(t, save){
-  if (!TOOLS[t]) t = "cursor";
+  if (!TOOLS[t]) t = DEFAULT_TOOL;
   state.tool = t;
   [].forEach.call(document.querySelectorAll(".tool"), function(b){ b.setAttribute("aria-checked", b.dataset.tool === t ? "true" : "false"); b.tabIndex = b.dataset.tool === t ? 0 : -1; });
+  // tool-all 不染色（保持默认主题色）；for-cursor 那段提示在「三个都装」时也要出（里面就有 Cursor）
   ["cursor","codex","claude"].forEach(function(x){ B.classList.toggle("tool-"+x, x === t); });
+  B.classList.toggle("tool-all", t === "all");
   [].forEach.call(document.querySelectorAll(".tname"), function(n){ n.textContent = TOOLS[t]; });
+  $("does-eta").textContent = t === "all"
+    ? "三个都装完才算好，第一次约 10~40 分钟"
+    : "看到「完成」就能用了，第一次约 2~5 分钟";
   if (save) pref("tool", t);
   renderInstall();
 }
@@ -959,9 +1157,10 @@ $("fb").addEventListener("submit", function(e){
     msg.textContent = "没提交成功：" + e.message + "（你写的内容还在，可以直接再点提交）"; shout(msg.textContent);
   }).then(function(){ b.disabled = false; b.textContent = "提交"; });
 });
-// 反馈里的「哪个工具」默认跟着上面选的工具走
+// 反馈里的「哪个工具」默认跟着上面选的工具走（"三个都装" 没有对应的单选项 ⇒ 落到「其他」）
 function pickFbTool(){
-  var v = TOOLS[state.tool], r = document.querySelector('input[name="tool"][value="' + v + '"]');
+  var v = state.tool === "all" ? "其他" : TOOLS[state.tool];
+  var r = document.querySelector('input[name="tool"][value="' + v + '"]');
   if (r) r.checked = true;
 }
 $("fb-box").addEventListener("toggle", function(){ if (this.open) pickFbTool(); });
@@ -969,7 +1168,7 @@ $("fb-box").addEventListener("toggle", function(){ if (this.open) pickFbTool(); 
 // ───────── 启动 ─────────
 (function init(){
   var h = (location.hash || "").slice(1);
-  pickTool(TOOLS[h] ? h : (pref("tool") || "cursor"), false);
+  pickTool(TOOLS[h] ? h : (pref("tool") || DEFAULT_TOOL), false);
   var ua = navigator.userAgent || "", guess = /Windows/i.test(ua) ? "win" : (/Linux|X11|CrOS/i.test(ua) && !/Android/i.test(ua)) ? "linux" : "mac";
   var saved = pref("os");
   pickOS(saved || guess, false);

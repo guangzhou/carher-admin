@@ -44,8 +44,8 @@ python3 -m pytest scripts/ai-portal -q
 | POST | `/ai/api/keys/reveal` `{record_id}` | 是 | `API Key` 列明文；只在自己的行里找；已禁用/无 key ⇒ 403；每次记审计（`reveal_audit` 表，不记明文） |
 | POST | `/ai/api/keys/rotate` | 是 | 501「需要换 key 请提反馈」（poller 没有轮换路径） |
 | POST | `/ai/api/apply` `{account_type?}` | 是 | 固定 Cursor；先精确查，已有 current ⇒ `{existing:true}` 不写；生成中 ⇒ `{pending:true}`；默认 dry-run |
-| POST | `/ai/api/install-code` `{tool}` | 是 | `tool`=cursor/codex/claude，三个工具共用同一把 current 的 Cursor key；`{code, expires_in, tool}`；码形如 `XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX`（base32，160 bit），10 分钟，用一次作废 |
-| POST | `/ai/api/install-code/redeem` `{code}` | **否** | 脚本用；`{key, account_type}`；不分大小写、横线可省；按 IP + 全局限流 |
+| POST | `/ai/api/install-code` `{tool}` | 是 | `tool`=cursor/codex/claude/**all**（all = 一个码装三个，安装器依次装 Codex → Claude Code → Cursor），三个工具共用同一把 current 的 Cursor key；`{code, expires_in, tool}`；码形如 `XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX`（base32，160 bit），10 分钟，用一次作废 |
+| POST | `/ai/api/install-code/redeem` `{code}` | **否** | 脚本用；`{key, account_type, tool}`（tool 原样回签发时的值，可能是 `all`）；不分大小写、横线可省；按 IP + 全局限流 |
 | POST | `/ai/api/feedback` `{type, tool, title, detail, report, os, page}` | 是 | 写「反馈」表；字段校验和 key 打码复用 `scripts/feedback/feedback_server.py`；自检报告并进「详细描述」 |
 | GET | `/ai/healthz` | 否 | 健康检查 |
 

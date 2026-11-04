@@ -75,8 +75,8 @@ case "$CODE" in *[!A-Za-z0-9_-]*) die "✗ 安装码格式不对(只应有字母
 case "$(uname -s)" in Darwin) OS=darwin ;; Linux) OS=linux ;;
   *) die "✗ 不支持的系统:$(uname -s)。Windows 请用网页上的 PowerShell 那条命令。" ;; esac
 
-W="$(mktemp -d "${TMPDIR:-/tmp}/carher-install.XXXXXX")"; MNT=""
-trap '[ -n "$MNT" ] && hdiutil detach -quiet "$MNT" >/dev/null 2>&1; rm -rf "$W"' EXIT
+WROOT="$(mktemp -d "${TMPDIR:-/tmp}/carher-install.XXXXXX")"; W="$WROOT"; MNT=""
+trap '[ -n "$MNT" ] && hdiutil detach -quiet "$MNT" >/dev/null 2>&1; rm -rf "$WROOT"' EXIT
 
 mask_key() { printf '长度 %s,后4位 …%s' "${#1}" "${1: -4}"; }
 
@@ -308,6 +308,20 @@ EOF
   ok "✔ ${APP_NAME} 已装到 $dest"
 }
 
+# ════════════════════════════════════════════════════════════════════════
+# install_one <tool> —— 装一个工具(第 2~5 步)。单工具时在 main 里直接调(exit 行为和以前逐字一致);
+# tool=all 时每个工具在**自己的子 shell** 里调 ⇒ 里面的 die / exit 只结束那一个工具,另外两个照跑。
+# 读 $KEY(上面换来的那一把,三个工具共用)、$W、$OS;写 $TOOL / $APP / $RC 等局部名。
+# ════════════════════════════════════════════════════════════════════════
+install_one() {
+TOOL="$1"
+# 每个工具的 App:显示名 / bundle id / 镜像文件 / 苹果签名团队号(本机三个正版 App `codesign -dv` 实测)
+case "$TOOL" in
+  cursor) TOOL_LABEL=Cursor;      APP_NAME=Cursor;          APP_ID="$CARHER_CURSOR_BUNDLE_ID"; APP_PKG="apps/Cursor-mac.dmg";    APP_TEAM=VDXQ22DGB9 ;;
+  codex)  TOOL_LABEL=Codex;       APP_NAME=Codex;           APP_ID="$CARHER_CODEX_BUNDLE_ID";  APP_PKG="apps/Codex-mac.dmg";     APP_TEAM=2DC432GLL2 ;;
+  claude) TOOL_LABEL="Claude Code"; APP_NAME="Claude 桌面 App"; APP_ID="$CARHER_CLAUDE_BUNDLE_ID"; APP_PKG="desktop/Claude-mac.zip"; APP_TEAM=Q6L2SF6YDW ;;
+esac
+
 APP=""
 # CARHER_SKIP_APP_INSTALL=1 ⇒ App 相关一概不碰(不找、不装、不退出、不重开)。
 #   台架靠它保证:在开发机上跑测试时,mdfind 找到的是**真装着的** Codex/Claude/Cursor,不许去退出它们。
@@ -397,14 +411,100 @@ if [ "$OS" = darwin ] && [ -n "$APP" ] && { [ "$RC" = 0 ] || [ "$RC" = 5 ]; }; t
 fi
 
 if [ "$RC" = 0 ]; then
+  if [ "$MULTI" = 1 ]; then ok "✔ ${TOOL_LABEL} 装好了。"; return 0; fi
   ok "✅ 全部完成。"
 elif [ "$RC" = 5 ]; then
   warn "⚠ 基本装好了,但上面有标红的项(退出码 5)。把这一屏截图发给运维。"
   exit 5
 else
+  if [ "$MULTI" = 1 ]; then
+    die "✗ ${TOOL_LABEL} 没装成:安装器退出码 ${RC}(原因见上面的报错)。" "$RC"
+  fi
   die "✗ 安装器没跑完(退出码 ${RC})。这个安装码已经用掉了:看上面的报错处理后,回网页重新生成一条命令再跑。
   也可以用备用下载页:${FALLBACK_PAGE}" "$RC"
 fi
+}
+
+# ════════════════════════════════════════════════════════════════════════
+# 装一个 / 装三个
+# ════════════════════════════════════════════════════════════════════════
+if [ "$MULTI" != 1 ]; then
+  install_one "$TOOL"
+  exit 0
+fi
+
+# ── tool=all:依次装三个,每个各自 try;一个失败不影响另外两个 ──────────────
+# 总体预估先说清楚:App 包是大头(每个几百 MB ~ 1GB),三个一起装慢网下要半小时以上。
+say "   三个工具一起装:Codex → Claude Code → Cursor"
+say "   要下 3 个 App 安装包(每个几百 MB,已装过的会跳过),整个过程大约 10~40 分钟,看网速。"
+warn "   ⚠ 中途别关这个终端窗口。Cursor 放在最后装(它要求先完全退出,最可能需要你动手)。"
+echo
+
+TOTAL=0; for t in $ALL_TOOLS; do TOTAL=$((TOTAL + 1)); done
+SUM_DIR="$W/summary"; mkdir -p "$SUM_DIR"
+N=0
+for t in $ALL_TOOLS; do
+  N=$((N + 1))
+  echo
+  say "═══ 第 ${N}/${TOTAL} 个:${t} ═══"
+  echo
+  # 每个工具一个子 shell:里面的 die / exit / set -e 只结束这一个工具。
+  # 失败原因写进 SUM_DIR/<tool>.err(子 shell 的变量传不回来),退出码写 .rc。
+  # 🔴 子 shell 不继承父 shell 的 EXIT trap(bash 3.2 实测)⇒ dmg 要在子 shell 里自己卸,
+  #    否则这个工具失败退出时挂载点留着,父 shell 的 trap 看到的 MNT 还是空的。
+  #    只卸 dmg、不删 $WROOT:汇总文件还在里面,父 shell 的 trap 最后统一删。
+  set +e
+  ( ERR_SINK="$SUM_DIR/${t}.err"; W="$WROOT/${t}"; mkdir -p "$W"
+    trap '[ -n "$MNT" ] && hdiutil detach -quiet "$MNT" >/dev/null 2>&1' EXIT
+    install_one "$t" )
+  printf '%s' "$?" > "$SUM_DIR/${t}.rc"
+  set -e
+done
+unset KEY
+echo
+
+# ── 汇总 ────────────────────────────────────────────────────────────────
+say "==================================================="
+say "   安装结果"
+say "==================================================="
+NOK=0; NBAD=0; NWARN=0; FAILED=""
+for t in $ALL_TOOLS; do
+  case "$t" in codex) L=Codex ;; claude) L="Claude Code" ;; cursor) L=Cursor ;; *) L="$t" ;; esac
+  TRC="$(cat "$SUM_DIR/${t}.rc" 2>/dev/null || echo 1)"
+  if [ "$TRC" = 0 ]; then
+    NOK=$((NOK + 1)); ok "  ✔ ${L}  装好了"
+  elif [ "$TRC" = 5 ]; then
+    NOK=$((NOK + 1)); NWARN=$((NWARN + 1)); warn "  ⚠ ${L}  装上了,但有标红的项(退出码 5)"
+  else
+    NBAD=$((NBAD + 1)); FAILED="${FAILED}${L}、"
+    printf '%s  ✗ %s  没装成(退出码 %s)%s\n' "$RED" "$L" "$TRC" "$NC"
+    # 失败原因原话(最后一条,就是 die 的那句)
+    if [ -s "$SUM_DIR/${t}.err" ]; then
+      printf '%s      原因:%s%s\n' "$RED" "$(tail -n 20 "$SUM_DIR/${t}.err" | tr '\n' ' ' | sed 's/  */ /g')" "$NC"
+    fi
+  fi
+done
+echo
+if [ "$NBAD" = 0 ] && [ "$NWARN" = 0 ]; then
+  ok "✅ 三个都装好了。"
+  exit 0
+fi
+if [ "$NBAD" = 0 ]; then
+  warn "⚠ 三个都装上了,但有标红的项(退出码 5)。把这一屏截图发给运维。"
+  exit 5
+fi
+FAILED="${FAILED%、}"
+if [ "$NOK" = 0 ]; then
+  printf '%s✗ 三个都没装成(%s)。看上面每个的原因处理后,回网页 %s/ 重新生成一条命令再跑。%s\n' \
+    "$RED" "$FAILED" "$PORTAL" "$NC" >&2
+  printf '%s  也可以用备用下载页:%s%s\n' "$RED" "$FALLBACK_PAGE" "$NC" >&2
+  exit 8
+fi
+printf '%s⚠ %s 个装好了,%s 没装成。%s\n' "$YELLOW" "$NOK" "$FAILED" "$NC" >&2
+printf '%s  这个安装码已经用掉了 ⇒ 补装方法:回网页 %s/ ,在「选工具」里**单独选 %s**,复制那一行再跑一次。%s\n' \
+  "$YELLOW" "$PORTAL" "$FAILED" "$NC" >&2
+printf '%s  已经装好的不用再动(重复装也不会坏)。备用下载页:%s%s\n' "$YELLOW" "$FALLBACK_PAGE" "$NC" >&2
+exit 7
 }
 
 main "$@"

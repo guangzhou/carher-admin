@@ -145,8 +145,10 @@ def cursor_zip(new_engine=True) -> bytes:
 @pytest.fixture
 def portal():
     p = Portal()
-    p.files["/ai/i/codex.sh"] = p.files["/ai/i/claude.sh"] = p.files["/ai/i/cursor.sh"] = SH.read_bytes()
-    p.files["/ai/i/codex.ps1"] = p.files["/ai/i/claude.ps1"] = p.files["/ai/i/cursor.ps1"] = PS1.read_bytes()
+    # all.sh / all.ps1 和另外三个是**同一个文件**(nginx 都 alias 到同一份),这里也照这个形状喂
+    for t in ("codex", "claude", "cursor", "all"):
+        p.files[f"/ai/i/{t}.sh"] = SH.read_bytes()
+        p.files[f"/ai/i/{t}.ps1"] = PS1.read_bytes()
     for t in ("codex", "claude"):
         p.files[f"/ai/i/pkg/{t}-mac.command"] = STUB_SH.replace("$STUB_NAME", t).encode()
     p.files["/ai/i/pkg/cursor-mac.zip"] = cursor_zip(True)
@@ -226,6 +228,143 @@ def test_good_code_runs_matching_installer_with_key(work, portal, tool):
     assert "全部完成" in out
     # 只换了一次码,请求体就是那个码
     assert [json.loads(x) for x in portal.requests] == [{"code": "GOOD1"}]
+
+
+# ── 1b. tool=all:一个码装三个 ────────────────────────────────────────────────
+ALL_ORDER = ["codex", "claude", "cursor"]   # 🔴 Cursor 必须最后(它要求先完全退出,最可能要人动手)
+
+
+def test_all_runs_three_installers_with_same_key_and_one_redeem(work, portal):
+    """tool=all:三个桩都被调起、各自拿到**同一把** key、码只换了一次。"""
+    portal.codes["ALL1"] = {"tool": "all", "key": KEY, "state": "ok"}
+    p_r, p_w = os.pipe()
+    try:
+        rc, out, logs = run_sh(work, portal, ["--code", "ALL1"], stdin=p_r, timeout=120)
+    finally:
+        os.close(p_r)
+        os.close(p_w)
+    assert rc == 0, out
+    for t in ALL_ORDER:
+        got = stub_got(logs, t)
+        assert got, f"{t} 安装器桩没被调起:\n{out}"
+        assert got["key"] == KEY, t
+        assert got["stdin"] == "EOF", t          # 三个都不许读 stdin(curl|bash 下会吃掉脚本)
+        assert got["argv"] == (["--apply"] if t == "cursor" else []), (t, got["argv"])
+    # 🔴 只换一次码(码是一次性的,换第二次服务端就 400)
+    assert [json.loads(x) for x in portal.requests] == [{"code": "ALL1"}], portal.requests
+    # 进度提示 + 总体预估 + 汇总
+    assert "三个都装" in out and "10~40 分钟" in out and "别关这个终端" in out
+    for n in ("第 1/3 个", "第 2/3 个", "第 3/3 个"):
+        assert n in out, n
+    assert "安装结果" in out and "✅ 三个都装好了" in out
+    for lbl in ("Codex", "Claude Code", "Cursor"):
+        assert ("✔ " + lbl) in out, lbl
+    assert KEY not in out
+    assert "长度 %d" % len(KEY) in out and "后4位 …wxyz" in out
+
+
+def test_all_installs_in_order_cursor_last(work, portal):
+    """顺序钉死 codex → claude → cursor:Cursor 要先退出 App,放最后 ⇒ 卡住时另外两个已装完。"""
+    portal.codes["ALL2"] = {"tool": "all", "key": KEY, "state": "ok"}
+    rc, out, logs = run_sh(work, portal, ["--code", "ALL2"], timeout=120)
+    assert rc == 0, out
+    # 屏幕上「第 N/3 个:<tool>」的出现顺序就是执行顺序
+    seen = re.findall(r"第 \d/3 个:(codex|claude|cursor)", out)
+    assert seen == ALL_ORDER, seen
+    # 桩的落盘时间也对得上(同一个 key 文件的 mtime 单调)
+    ts = [(logs / t / "key").stat().st_mtime for t in ALL_ORDER]
+    assert ts == sorted(ts), ts
+
+
+@pytest.mark.parametrize("bad", ALL_ORDER)
+def test_all_one_failure_does_not_stop_the_others(work, portal, bad):
+    """中间一个失败:另外两个仍然跑完、汇总写清谁没成、退出码 7(部分成功)。"""
+    # 让 bad 那个工具的安装器桩退出码非 0(其余 0)
+    fail = STUB_SH.replace('exit "${STUB_RC:-0}"', "exit 9")
+    if bad == "cursor":
+        import io
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("cursor-mac/cursor_team_setup.sh", fail.replace("$STUB_NAME", "cursor"))
+            z.writestr("cursor-mac/cursor_team_setup.js", "// stub\nprocess.env.CARHER_KEY;\n")
+        portal.files["/ai/i/pkg/cursor-mac.zip"] = buf.getvalue()
+    else:
+        portal.files[f"/ai/i/pkg/{bad}-mac.command"] = fail.replace("$STUB_NAME", bad).encode()
+    portal.codes["ALL3"] = {"tool": "all", "key": KEY, "state": "ok"}
+    rc, out, logs = run_sh(work, portal, ["--code", "ALL3"], timeout=120)
+    assert rc == 7, f"部分成功要用 7(拿到 {rc}):\n{out}"
+    # 另外两个照样跑完、拿到同一把 key
+    for t in ALL_ORDER:
+        got = stub_got(logs, t)
+        assert got and got["key"] == KEY, (t, out[-800:])
+    label = {"codex": "Codex", "claude": "Claude Code", "cursor": "Cursor"}
+    assert ("✗ %s  没装成" % label[bad]) in out, out[-900:]
+    assert "退出码 9" in out
+    for t in ALL_ORDER:
+        if t != bad:
+            assert ("✔ %s  装好了" % label[t]) in out, t
+    # 怎么补:回网页单独选那个工具再装一次
+    assert "单独选" in out and label[bad] in out and "2 个装好了" in out
+    assert KEY not in out
+    assert [json.loads(x) for x in portal.requests] == [{"code": "ALL3"}]   # 还是只换一次
+
+
+def test_all_three_failures_exit_8(work, portal):
+    """三个都没成 ⇒ 退出码 8,和部分成功(7)分得开。"""
+    fail = STUB_SH.replace('exit "${STUB_RC:-0}"', "exit 9")
+    for t in ("codex", "claude"):
+        portal.files[f"/ai/i/pkg/{t}-mac.command"] = fail.replace("$STUB_NAME", t).encode()
+    import io
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("cursor-mac/cursor_team_setup.sh", fail.replace("$STUB_NAME", "cursor"))
+        z.writestr("cursor-mac/cursor_team_setup.js", "// stub\nprocess.env.CARHER_KEY;\n")
+    portal.files["/ai/i/pkg/cursor-mac.zip"] = buf.getvalue()
+    portal.codes["ALL4"] = {"tool": "all", "key": KEY, "state": "ok"}
+    rc, out, _ = run_sh(work, portal, ["--code", "ALL4"], timeout=120)
+    assert rc == 8, out[-800:]
+    assert "三个都没装成" in out
+    for lbl in ("Codex", "Claude Code", "Cursor"):
+        assert ("✗ " + lbl) in out, lbl
+
+
+def test_all_download_failure_counts_as_one_tool_only(work, portal):
+    """不是安装器退出码,而是**下载安装器本身**失败(镜像 404)⇒ 也只算这一个工具失败。"""
+    del portal.files["/ai/i/pkg/claude-mac.command"]
+    portal.codes["ALL5"] = {"tool": "all", "key": KEY, "state": "ok"}
+    rc, out, logs = run_sh(work, portal, ["--code", "ALL5"], timeout=120)
+    assert rc == 7, out[-800:]
+    assert stub_got(logs, "codex") and stub_got(logs, "cursor"), out[-800:]
+    assert not stub_got(logs, "claude")
+    assert "✗ Claude Code  没装成" in out and "下载安装器失败" in out
+
+
+def test_all_tool_follows_code_not_url(work, portal):
+    """网址是单工具、码是 all ⇒ 按码装三个(反之见 test_tool_follows_code_not_url)。"""
+    portal.codes["ALL6"] = {"tool": "all", "key": KEY, "state": "ok"}
+    rc, out, logs = run_sh(work, portal, ["--code", "ALL6", "--tool", "cursor"], timeout=120)
+    assert rc == 0, out
+    assert "按安装码装三个" in out
+    assert all(stub_got(logs, t) for t in ALL_ORDER)
+
+
+def test_single_tool_output_unchanged_by_all_support(work, portal):
+    """🔴 单工具路径一个字节都不许变:还是那句「✅ 全部完成。」,不出任何 all 的字样。"""
+    portal.codes["SOLO"] = {"tool": "codex", "key": KEY, "state": "ok"}
+    rc, out, logs = run_sh(work, portal, ["--code", "SOLO"])
+    assert rc == 0, out
+    assert "✔ 安装码有效:装 codex,key 已拿到" in out
+    assert "✅ 全部完成。" in out
+    for s in ("三个都装", "第 1/3 个", "安装结果", "装好了。"):
+        assert s not in out, s
+    assert stub_got(logs, "codex")["key"] == KEY
+    assert not stub_got(logs, "claude") and not stub_got(logs, "cursor")
+
+
+def test_all_installer_is_byte_identical_to_single(portal):
+    """/ai/i/all.sh 和 /ai/i/<tool>.sh 是同一个文件(nginx alias 同一份 install.sh)。"""
+    portal.files["/ai/i/all.sh"] = SH.read_bytes()
+    assert portal.files["/ai/i/all.sh"] == portal.files["/ai/i/cursor.sh"]
 
 
 def test_old_cursor_engine_falls_back_to_key_flag(work, portal):
@@ -527,7 +666,8 @@ def run_ps(work: Path, portal: Portal, argv, extra=None, timeout=120):
     logs.mkdir(exist_ok=True)
     env = {"HOME": str(home), "TMPDIR": str(work) + "/", "PATH": SYS_PATH, "LANG": "en_US.UTF-8",
            "CARHER_PORTAL_BASE": portal.base + "/ai", "CARHER_MIRROR_BASE": portal.base + "/ccdl",
-           "CARHER_SKIP_APP_INSTALL": "1", "STUB_LOG": str(logs), "STUB_NAME": "codex"}
+           "CARHER_SKIP_APP_INSTALL": "1", "STUB_LOG": str(logs), "STUB_NAME": "codex",
+           "CARHER_PWSH": PWSH or ""}   # 假 cursor 引擎的 .cmd 在 mac 上用它起 PowerShell(见 _win_stub_cursor_zip)
     env.update(extra or {})
     r = subprocess.run([PWSH, *argv], env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
     return r.returncode, (r.stdout + r.stderr).decode("utf-8", "replace"), logs
@@ -545,6 +685,97 @@ def test_ps1_oneliner_good_code(work, portal):
     assert "stub-ps: CARHER_SELF=" in out and "codex-windows.bat" in out
     assert KEY not in out and "后4位 ...wxyz" in out
     assert "全部完成" in out
+
+
+def _win_stub_bat(tool: str, rc: str = "") -> bytes:
+    """假的 <tool>-windows.bat:正文是 STUB_BAT_PS,但把 STUB_NAME 写死成这个工具
+    (入口脚本不会替我们设 STUB_NAME,三个工具一起装时得各自落到自己的目录)。"""
+    ps = STUB_BAT_PS.replace("$env:STUB_NAME", "'%s'" % tool)
+    if rc:
+        ps = ps.replace('exit [int]("0" + $env:STUB_RC)', "exit %s" % rc)
+    return ("@echo off\r\nsetlocal\r\nexit /b\r\n##CARHER-PS1\r\n" + ps.replace("\n", "\r\n")).encode()
+
+
+def _win_stub_cursor_zip(rc: str = "0") -> bytes:
+    """假的 cursor-windows.zip:里面的 cursor_team_setup.cmd 走 PowerShell 落同样的日志。"""
+    import io
+    ps = ("$L = Join-Path $env:STUB_LOG 'cursor'\r\n"
+          "New-Item -ItemType Directory -Path $L -Force | Out-Null\r\n"
+          "[IO.File]::WriteAllText((Join-Path $L 'key'), \"$env:CARHER_KEY\")\r\n"
+          "[IO.File]::WriteAllText((Join-Path $L 'argv'), ($args -join \"`n\"))\r\n"
+          "[IO.File]::WriteAllText((Join-Path $L 'stdin'), 'EOF')\r\n"
+          # 不往屏幕上打 key:install.ps1 没有 install.sh 那层 mask_stream(既有行为,这轮不改),
+          # 桩故意打就等于自己造一条「key 上屏」的假阳性。key 只写进日志文件给断言读。
+          "Write-Host 'stub-cursor: ran'\r\n"
+          "exit %s\r\n" % rc)
+    # mac 上没有 cmd.exe:pwsh 直接 `& x.cmd` 会按**可执行文件**跑它 ⇒ 这个桩得是带 shebang 的 sh 脚本。
+    # 🔴 行尾必须 LF:写成 "#!/bin/sh\r\n" 的话解释器名字就成了 "/bin/sh\r",
+    #    报的错是「No such file or directory」(看着像 .cmd 不存在,其实是 \r)。
+    # 真 Windows 上这个文件由 cmd.exe 解释,形状不一样 ⇒ 这正是「Windows 真机没验」的那一处。
+    cmd = ("#!/bin/sh\n"
+           '"$CARHER_PWSH" -NoProfile -File "$(dirname "$0")/cursor_team_setup.ps1" "$@"\n')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        # 带可执行位:mac 上 pwsh 调原生命令要 +x,否则报的是「does not exist」(很会误导)
+        zi = zipfile.ZipInfo("cursor-windows/cursor_team_setup.cmd")
+        zi.external_attr = (0o755 << 16) | 0o100000
+        z.writestr(zi, cmd)
+        z.writestr("cursor-windows/cursor_team_setup.ps1", ps)
+        z.writestr("cursor-windows/cursor_team_setup.js", "// stub\nprocess.env.CARHER_KEY;\n")
+    return buf.getvalue()
+
+
+@need_pwsh
+def test_ps1_all_runs_three_with_same_key_and_one_redeem(work, portal):
+    """Windows 的 tool=all:三个都调起、同一把 key、只换一次码、汇总 + 退出 0。
+    🔴 本机只有 pwsh(macOS 上跑);Windows 真机没验(App 那步 CARHER_SKIP_APP_INSTALL=1 整段跳过)。"""
+    for t in ("codex", "claude"):
+        portal.files[f"/ai/i/pkg/{t}-windows.bat"] = _win_stub_bat(t)
+    portal.files["/ai/i/pkg/cursor-windows.zip"] = _win_stub_cursor_zip()
+    portal.codes["WALL"] = {"tool": "all", "key": KEY, "state": "ok"}
+    rc, out, logs = run_ps(work, portal, win_oneliner(portal.base, "all", "WALL"), timeout=240)
+    assert rc == 0, out
+    for t in ALL_ORDER:
+        got = stub_got(logs, t)
+        assert got, f"{t} 桩没被调起:\n{out[-1500:]}"
+        assert got["key"] == KEY, t
+    assert [json.loads(x) for x in portal.requests] == [{"code": "WALL"}], portal.requests
+    seen = re.findall(r"第 \d/3 个:(codex|claude|cursor)", out)
+    assert seen == ALL_ORDER, (seen, out[-800:])
+    assert "三个都装" in out and "10~40 分钟" in out
+    assert "安装结果" in out and "三个都装好了" in out
+    assert KEY not in out and "后4位 ...wxyz" in out
+
+
+@need_pwsh
+def test_ps1_all_one_failure_keeps_going_and_exits_7(work, portal):
+    portal.files["/ai/i/pkg/codex-windows.bat"] = _win_stub_bat("codex", rc="9")
+    portal.files["/ai/i/pkg/claude-windows.bat"] = _win_stub_bat("claude")
+    portal.files["/ai/i/pkg/cursor-windows.zip"] = _win_stub_cursor_zip()
+    portal.codes["WALL2"] = {"tool": "all", "key": KEY, "state": "ok"}
+    rc, out, logs = run_ps(work, portal, win_oneliner(portal.base, "all", "WALL2"), timeout=240)
+    assert rc == 7, f"部分成功要用 7(拿到 {rc}):\n{out[-1500:]}"
+    # codex 失败,claude / cursor 照样跑完
+    for t in ("claude", "cursor"):
+        assert stub_got(logs, t) and stub_got(logs, t)["key"] == KEY, (t, out[-1200:])
+    assert "x Codex  没装成" in out and "退出码 9" in out
+    assert "√ Claude Code  装好了" in out and "√ Cursor  装好了" in out
+    assert "单独选" in out and "2 个装好了" in out
+    assert KEY not in out
+
+
+@need_pwsh
+def test_ps1_single_tool_output_unchanged(work, portal):
+    """🔴 Windows 单工具路径不许变:还是「√ 全部完成。」,不出 all 的字样。"""
+    portal.files["/ai/i/pkg/codex-windows.bat"] = _win_stub_bat("codex")
+    portal.codes["WSOLO"] = {"tool": "codex", "key": KEY, "state": "ok"}
+    rc, out, logs = run_ps(work, portal, win_oneliner(portal.base, "codex", "WSOLO"))
+    assert rc == 0, out
+    assert "√ 安装码有效:装 codex,key 已拿到" in out and "√ 全部完成。" in out
+    for s in ("三个都装", "第 1/3 个", "安装结果"):
+        assert s not in out, s
+    assert stub_got(logs, "codex")["key"] == KEY
+    assert not stub_got(logs, "claude") and not stub_got(logs, "cursor")
 
 
 @need_pwsh

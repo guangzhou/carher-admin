@@ -92,6 +92,14 @@ print("FEISHU_APP_ID="+cid); print("FEISHU_APP_SECRET="+sec)
 # 已有的两个密钥沿用;没有才在本机生成。两个必须不同(server.py 也会拒绝启动)
 old() { $S sh -c "test -f /etc/carher-ai-portal.env && grep -E '^$1=' /etc/carher-ai-portal.env | tail -1 | cut -d= -f2-" || true; }
 SS="$(old SESSION_SECRET)"; IS="$(old INTERNAL_SECRET)"
+# 「重置我的 key」要 198 网关的 master key。和 FEISHU_APP_SECRET 一样**每次现读**,不进 git、不沿用旧值:
+#   master key 10-28 轮换过一次(secret 名从 litellm-secrets 变成 -r2),沿用旧值 = 轮换后重置静默全失败。
+#   secret 名跟着 deploy/litellm-proxy 的 envFrom 走(同 scripts/litellm_198_secret.py 的 SHELL_RESOLVE)。
+MK="$($S sh -c 'for s in $(kubectl -n litellm-product get deploy litellm-proxy -o jsonpath="{range .spec.template.spec.containers[0].envFrom[*]}{.secretRef.name}{\"\n\"}{end}"); do v=$(kubectl -n litellm-product get secret "$s" -o jsonpath="{.data.LITELLM_MASTER_KEY}" 2>/dev/null); [ -n "$v" ] && { printf %s "$v" | base64 -d; break; }; done')"
+[ -n "$MK" ] || echo "!! 读不到 198 网关 master key ⇒ 「重置我的 key」会自动关闭(页面退回「请提反馈」)" >&2
+# 重置默认只演练。真写要显式 ROTATE_DRY_RUN=0 bash deploy_198.sh(而且要先拿自己的 key 走一遍)
+RDR="${ROTATE_DRY_RUN:-1}"
+case "$RDR" in 0|1) ;; *) echo "ROTATE_DRY_RUN 只能是 0 或 1" >&2; exit 1 ;; esac
 [ ${#SS} -ge 32 ] || SS="$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')"
 [ ${#IS} -ge 32 ] && [ "$IS" != "$SS" ] || IS="$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')"
 [ "$IS" != "$SS" ]
@@ -107,8 +115,10 @@ SS="$(old SESSION_SECRET)"; IS="$(old INTERNAL_SECRET)"
   echo "DB_PATH=/var/lib/carher-ai-portal/ai_portal.db"
   echo "TRUST_PROXY=1"
   echo "APPLY_DRY_RUN=1"
+  [ -n "$MK" ] && echo "LITELLM_MASTER_KEY=$MK"
+  echo "ROTATE_DRY_RUN=$RDR"
 } > "$W/new.env"
-unset SS IS
+unset SS IS MK
 $S install -m 0600 -o root -g root "$W/new.env" /etc/carher-ai-portal.env
 rm -f "$W/fs.env" "$W/new.env"
 # 3) systemd
@@ -147,7 +157,9 @@ p=sys.argv[1]; s=open(p).read()
 one = ('    location = /ai/i/{t}.{e} {{ alias /var/www/ai-installer/install.{e}; '
        'types {{ }} default_type "text/plain; charset=utf-8"; '
        'add_header Cache-Control "no-cache" always; limit_except GET HEAD {{ deny all; }} }}\n')
-sh = "".join(one.format(t=t, e=e) for t in ("cursor", "codex", "claude") for e in ("sh", "ps1"))
+# all = 「三个都装」那条命令的网址(/ai/i/all.sh)。四个名字都 alias 到同一份 install.sh / install.ps1,
+# 装哪个以安装码换回来的 tool 为准 ⇒ 加名字不改脚本。
+sh = "".join(one.format(t=t, e=e) for t in ("cursor", "codex", "claude", "all") for e in ("sh", "ps1"))
 blk='''    # >>> carher-ai-portal >>> AI 自助门户(127.0.0.1:8793)+ 一行命令安装器(/var/www/ai-installer)。回滚=删这一段
     location = /ai { return 301 /ai/; }
 ''' + sh + '''    location ^~ /ai/i/pkg/ {
@@ -194,8 +206,11 @@ case "$loc" in
   *) chk "登录跳飞书(client_id=carher-236 + 回调)" "$loc" "accounts.feishu.cn?client_id=cli_aa85…&redirect_uri=…/ai/auth/callback" ;;
 esac
 mkdir -p "$STAGE/dl/pkg"
-for t in cursor codex claude; do
-  curl -fsS -m 30 "$U/ai/i/$t.sh" -o "$STAGE/dl/sh_$t"; curl -fsS -m 30 "$U/ai/i/$t.ps1" -o "$STAGE/dl/ps_$t"
+# 🔴 all 也要验:上面 nginx 那段是「只加一次」,11-04 之前已经加过的机器上**没有** all.sh / all.ps1
+#    这两条 location ⇒ 网页默认那条「三个都装」命令会 404。这里验出 diff 就是这个原因,
+#    要手动往 `# >>> carher-ai-portal >>>` 段里补两行(照 cursor.sh 那行改名),nginx -t 再 reload。
+for t in cursor codex claude all; do
+  curl -fsS -m 30 "$U/ai/i/$t.sh" -o "$STAGE/dl/sh_$t" || true; curl -fsS -m 30 "$U/ai/i/$t.ps1" -o "$STAGE/dl/ps_$t" || true
   cmp -s "$STAGE/dl/sh_$t" scripts/ai-portal/installer/install.sh && chk "/ai/i/$t.sh 逐字节" ok ok || chk "/ai/i/$t.sh 逐字节" diff ok
   cmp -s "$STAGE/dl/ps_$t" scripts/ai-portal/installer/install.ps1 && chk "/ai/i/$t.ps1 逐字节" ok ok || chk "/ai/i/$t.ps1 逐字节" diff ok
 done

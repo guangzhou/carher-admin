@@ -12,7 +12,7 @@ key:飞书多维表格 key 表,bot 的 tenant_access_token + user_id_type=union_
 配置:env 文件(--env 或 AI_PORTAL_ENV)+ 进程环境变量(进程环境优先)。SESSION_SECRET 没配就拒绝启动。
 日志里不打印 key 明文 / token / code / state。
 """
-import argparse, hashlib, hmac, html, http.server, importlib.util, json, mimetypes, os, re, secrets
+import argparse, base64, copy, hashlib, hmac, html, http.server, importlib.util, json, mimetypes, os, re, secrets
 import socketserver, sqlite3, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 
@@ -83,18 +83,35 @@ DEFAULTS = {
     "ROTATE_PROBE_MAX_TOKENS": "16",
     "INSTALL_CODE_TTL": "600",
     "MAGIC_TTL": "600",
-    "REDEEM_PER_IP_PER_MIN": "10",
-    "REDEEM_GLOBAL_PER_MIN": "120",
+    # 11-04 红队 P1-2:两道闸都**只数失败**(错码/格式错/过期/用过)。
+    #   安装码 160 bit,撞库靠的是失败次数;成功的换取要先有一个真码,真码由 issue_code 按人限流签出来。
+    #   原来全局闸每次尝试都算 ⇒ 12 个 IP 各打 10 个错码就能把全公司的安装卡住 1 分钟。
+    #   ⚠️ 198 上 nginx 没配 realip 时所有人的 IP 都是前置代理那一个(实测 10.68.13.97)⇒「每 IP」= 全局。
+    "REDEEM_PER_IP_PER_MIN": "10",      # 每 IP 每分钟允许失败几次;到了 ⇒ 这个 IP 一律 429(真码也不判,不给对/错信号)
+    "REDEEM_GLOBAL_PER_MIN": "120",     # 全站每分钟失败数的告警线;超了 ⇒ 每 IP 只许失败 1 次,**没失败过的 IP 照常换**
+    "MY_ROWS_TTL": "15",                # 「我的 key」列表的进程内缓存秒数(只给 GET /api/keys 和签码用;0=关)
     # 反馈:默认写 feedback_server 同一张「反馈」表
     "FEEDBACK_BASE_TOKEN": fb.CFG["BASE_TOKEN"], "FEEDBACK_TABLE_ID": fb.CFG["TABLE_ID"],
     "FEEDBACK_PER_MIN": "3",
-    "SESSION_TTL": "43200",
+    # 11-04 红队 P2-6:12h → 4h。登录本来就是一键;cookie 被偷后的可用窗口跟着缩。
+    # 封号要立刻踢人用 `server.py --env … --kill-sessions <union_id>`(见 kill_user)。
+    "SESSION_TTL": "14400",
     "STATE_TTL": "600",
     "TRUST_PROXY": "0",     # 1 = 对端是 127.0.0.1 时信 X-Real-IP(nginx 必须 proxy_set_header 覆盖它)
 }
 REQUIRED = ("FEISHU_APP_ID", "FEISHU_APP_SECRET", "SESSION_SECRET")
 OPTIONAL_SECRETS = ("INTERNAL_SECRET",)    # 没配 ⇒ /api/internal/* 整个关闭(404)
 APPLY_TYPE = "Cursor"                      # poller 不管写什么都落成 Cursor
+OAUTH_EXTERNAL_MSG = "这个按钮只认无锡车联(auto-link)的飞书账号"
+# 外部人待审核申请 —— 写进反馈行「详细描述」给管理员看的处理步骤(最小可行审核流程,见 README「外部人」一节)
+APPLY_REVIEW_HOWTO = (
+    "union_id=%s\ntenant_key=%s\n\n"
+    "审核通过:在 key 表新建一行 —— 「姓名」选这个人(人员格,按 union_id)、「账户类型」=Cursor、"
+    "「组织名称」选他公司(表里已有的选项),API Key 留空。poller 约 1 分钟内发 key;"
+    "他刷新 https://chat.auto-link.com.cn/ai/ 就能看到并一行命令装好(poller 的群通知外部人收不到,别指望它)。\n"
+    "不通过:把本条状态改成已解决,处理说明写原因。\n"
+    "(门户自动登记;同一人 24 小时内只登记一次。没进反馈表时运维可在 198 上跑 "
+    "server.py --list-apply-requests 看本地登记)")
 TOOLS = ("cursor", "codex", "claude")      # 三个工具共用同一把 current 的 Cursor key
 # 11-04 用户要求「一条命令配置和装三个 app,同时也支持分开安装」。
 # 形状选 **tool="all"**(而不是 tool 收数组、也不是一次签三个码):
@@ -636,10 +653,16 @@ class RateLimiter:
             return n < self.limit
 
     def record(self, key):
-        """只记成功的(feedback 用,同 feedback_server:填错表单不扣次数)。"""
+        """只记该记的那次(feedback 记成功的,同 feedback_server:填错表单不扣次数;redeem 记失败的)。"""
         with self.lock:
             t, h = self._window(key)
             h.append(t)
+
+    def count(self, key):
+        with self.lock:
+            n = len(self._window(key)[1])
+            self._forget_if_idle(key)
+            return n
 
 
 # ── 应用 ────────────────────────────────────────────────────────────────
@@ -655,6 +678,13 @@ create table if not exists reveal_audit(id integer primary key autoincrement, at
     record_id text, ip text, login text, result text);
 -- 重置 key:进行中锁(主键 = 一个人只能有一把在转)+ 审计。两张表都**不存明文**,只存 alias。
 create table if not exists rotate_locks(union_id text primary key, record_id text, created real);
+-- 安装码换 key(P1-3):出事时查「这把 key 装到了哪台机器 / 哪个 IP」。**不存明文**:
+-- key_sha = sha256(明文)(和 LiteLLM 的 token 列 / SpendLogs.api_key 同一个值,能直接 join 网关用量),
+-- code_id = 安装码 HMAC 的前 16 位(能 join install_codes.code_hash 查是谁什么时候签的)。
+create table if not exists redeem_audit(id integer primary key autoincrement, at real, union_id text, tool text,
+    record_id text, key_sha text, key_masked text, code_id text, ip text, ua text, result text);
+create index if not exists redeem_audit_key on redeem_audit(key_sha);
+create index if not exists redeem_audit_uid on redeem_audit(union_id, at);
 create table if not exists rotate_audit(id integer primary key autoincrement, at real, union_id text, name text,
     record_id text, ip text, login text, step text, result text, old_alias text, new_alias text, detail text);
 """
@@ -715,6 +745,7 @@ class App:
         self.rl_rotate = RateLimiter(cfg["ROTATE_PER_MIN"], 60, now)
         self.rl_feedback = RateLimiter(cfg["FEEDBACK_PER_MIN"], 60, now)
         self.litellm = litellm or LiteLLMClient(cfg)
+        self._rows_cache, self._rows_lock = {}, threading.Lock()     # my_rows 的按人缓存
 
     def q(self, sql, args=(), one=False):
         with self.dblock:
@@ -758,6 +789,35 @@ class App:
             return None
         return u
 
+    def kill_user(self, union_id):
+        """P2-6 运维入口:踢掉这个人的**全部**会话,顺带作废他手上还没用的安装码和一次性登录链接
+        (安装码不需要会话就能换明文,只删会话等于没踢干净)。返回各删了几条。"""
+        if not isinstance(union_id, str) or not re.fullmatch(r"on_[A-Za-z0-9]{8,64}", union_id):
+            raise ValueError("union_id 要形如 on_xxx")
+        rows, _ = self.q("select sid_hash, user from sessions")
+        sids = []
+        for sh, u in rows:
+            try:
+                if json.loads(u).get("union_id") == union_id:
+                    sids.append(sh)
+            except ValueError:
+                continue
+        for sh in sids:
+            self.q("delete from sessions where sid_hash=?", (sh,))
+        _, n_code = self.q("delete from install_codes where union_id=? and used is null", (union_id,))
+        mrows, _ = self.q("select token_hash, user from magic_tokens where used is null")
+        n_magic = 0
+        for th, u in mrows:
+            try:
+                if json.loads(u).get("union_id") == union_id:
+                    self.q("delete from magic_tokens where token_hash=?", (th,))
+                    n_magic += 1
+            except ValueError:
+                continue
+        self.drop_rows_cache(union_id)
+        log("踢人", short(union_id), "会话", len(sids), "安装码", n_code, "登录链接", n_magic)
+        return {"sessions": len(sids), "install_codes": n_code, "magic_tokens": n_magic}
+
     def drop_session(self, cookie_header):
         sid = parse_cookies(cookie_header).get(SID_COOKIE, "").partition(".")[0]
         if sid:
@@ -793,6 +853,10 @@ class App:
             info = self.client.user_info(uat)
         except FeishuError as e:
             log("登录失败", e.where, e.code)
+            if e.code == 20010:
+                # 20010「用户无应用使用权限」= 外部公司 / 飞书个人版点了内部登录按钮(网页 OAuth 只认本租户)。
+                # 原来回一句「飞书登录失败,请重试」⇒ 他会一直重试一个永远不会成功的按钮。
+                raise HttpError(403, OAUTH_EXTERNAL_MSG)
             raise HttpError(502, "飞书登录失败,请重试")
         user = {
             "union_id": info["union_id"], "open_id": info.get("open_id") or "",
@@ -871,7 +935,33 @@ class App:
         return self.new_session(user)
 
     # key 表
-    def my_rows(self, user):
+    # 11-04 红队 P1-1 补充:按 union_id 的进程内缓存(MY_ROWS_TTL 秒)。
+    #   只有「看列表 / 签安装码」吃缓存;**交明文或写表的路径(reveal / redeem / apply / rotate)一律 fresh=True**,
+    #   而且它们做完都会 drop_rows_cache(uid) ⇒ 重置后页面下一次轮询必看到新 key,管理员停用后
+    #   最多 MY_ROWS_TTL 秒后列表跟上,但在那之前也已经交不出明文(reveal/redeem 不吃缓存)。
+    def my_rows(self, user, fresh=False):
+        uid = user["union_id"]
+        ttl = int(self.cfg.get("MY_ROWS_TTL") or 0)
+        if not fresh and ttl > 0:
+            with self._rows_lock:
+                hit = self._rows_cache.get(uid)
+                if hit and self.now() - hit[0] < ttl:
+                    return copy.deepcopy(hit[1])
+        rows = self._my_rows_uncached(user)
+        if ttl > 0:
+            with self._rows_lock:
+                t = self.now()
+                if len(self._rows_cache) > 2000:        # 常驻进程别只增不减(同 P1-4)
+                    for k in [k for k, v in self._rows_cache.items() if t - v[0] >= ttl]:
+                        del self._rows_cache[k]
+                self._rows_cache[uid] = (t, copy.deepcopy(rows))
+        return rows
+
+    def drop_rows_cache(self, uid):
+        with self._rows_lock:
+            self._rows_cache.pop(uid, None)
+
+    def _my_rows_uncached(self, user):
         """本人的行(已排除客户批量 key),每行带前端状态和 current 标记。所有行字段已按 sk- 整行打码进 masked_fields。"""
         c = self.cfg
         items = self.client.search_by_person(c["KEY_BASE_TOKEN"], c["KEY_TABLE_ID"], c["KEY_PERSON_FIELD"],
@@ -945,7 +1035,9 @@ class App:
         rid = body.get("record_id")
         if not isinstance(rid, str) or not REC_ID.match(rid):
             raise HttpError(400, "record_id 不对")
-        for r in self.my_rows(user):            # 只在「他自己的行」里找,不按 id 直接取
+        # 交明文 ⇒ 不吃缓存(停用后不能再显示),做完也让这个人的缓存失效
+        self.drop_rows_cache(user["union_id"])
+        for r in self.my_rows(user, fresh=True):  # 只在「他自己的行」里找,不按 id 直接取
             if r["record_id"] != rid:
                 continue
             if r["status"] == "已禁用" or not r["key"].startswith("sk-"):
@@ -959,8 +1051,8 @@ class App:
         log("reveal 拒绝", short(user["union_id"]), rid)
         raise HttpError(404, "没有这条记录")   # 别人的行和不存在的行同一个回答,不泄露存在性
 
-    def current_key(self, user):
-        for r in self.my_rows(user):
+    def current_key(self, user, fresh=False):
+        for r in self.my_rows(user, fresh=fresh):
             if r["current"]:
                 return r
         return None
@@ -980,12 +1072,31 @@ class App:
             self.q("insert into apply_requests values(?,?,?,?)",
                    (user["union_id"], user.get("name") or "", user.get("tenant_key") or "", self.now()))
             try:
-                self.feedback(user, {"type": "其他", "tool": "其他", "title": "外部合作方申请 key:%s" % (user.get("name") or "未知"),
-                                     "detail": "union_id=%s\ntenant_key=%s\n(门户自动登记,审核通过后在 key 表里给他建一行即可)"
-                                               % (user["union_id"], user.get("tenant_key") or "")})
+                # 🔴 11-04 外部旅程实测:原来写的 type="其他" 不在反馈表「类型」选项里(只有「其他建议」)
+                #    ⇒ build_fields 抛 ValueError ⇒ 被下面的 except 吞掉 ⇒ **每一条待审核申请都没进反馈表**,
+                #    管理员永远看不到,外部人永远等不到。
+                self.feedback(user, {"type": "其他建议", "tool": "其他",
+                                     "title": "外部合作方申请 key:%s" % (user.get("name") or user["union_id"][:12]),
+                                     "detail": APPLY_REVIEW_HOWTO % (user["union_id"], user.get("tenant_key") or "")})
             except Exception as e:      # noqa: BLE001 —— 登记失败不能让用户看到报错
                 log("外部申请写反馈表失败", short(user["union_id"]), type(e).__name__)
         log("外部申请待审核", short(user["union_id"]))
+
+    def list_apply_requests(self, days=30):
+        self.q("create table if not exists apply_requests(union_id text, name text, tenant_key text, at real)")
+        rows, _ = self.q("select union_id, name, tenant_key, at from apply_requests where at>? order by at desc",
+                         (self.now() - days * 86400,))
+        return rows
+
+    def apply_review_at(self, user):
+        """外部人最近 7 天内登记过的待审核申请时间(秒),没有就 0。页面刷新后据此显示「已登记、等审核」,
+        而不是再出一个申请按钮让他以为没提交上。key 发下来以后页面有 current key,这条自然不再显示。"""
+        if not user.get("external"):
+            return 0
+        self.q("create table if not exists apply_requests(union_id text, name text, tenant_key text, at real)")
+        row = self.q("select max(at) from apply_requests where union_id=? and at>?",
+                     (user["union_id"], self.now() - 7 * 86400), one=True)
+        return int((row or [0])[0] or 0)
 
     def apply(self, user, body):
         at = body.get("account_type", APPLY_TYPE)
@@ -998,7 +1109,7 @@ class App:
             self.audit_apply_request(user)
             return {"ok": True, "review": True,
                     "message": "已收到申请。外部合作方的 key 需要管理员审核,通过后会出现在这个页面上(一般 1 个工作日内)"}
-        rows = self.my_rows(user)               # 写之前先精确查一遍
+        rows = self.my_rows(user, fresh=True)   # 写之前先精确查一遍(不吃缓存)
         cur = next((r for r in rows if r["current"]), None)
         if cur:
             log("apply 已有 current,不写", short(user["union_id"]))
@@ -1023,6 +1134,7 @@ class App:
             self.q("delete from apply_locks where union_id=? and account_type=?", (user["union_id"], APPLY_TYPE))
             log("apply 写表失败", short(user["union_id"]), e.code)
             raise HttpError(502, "提交失败,稍后再试")
+        self.drop_rows_cache(user["union_id"])  # 新写了一行「生成中」⇒ 页面马上要看到,好开始轮询
         log("apply", short(user["union_id"]), rec.get("record_id"))
         return {"ok": True, "dry_run": False, "record_id": rec.get("record_id")}
 
@@ -1083,7 +1195,7 @@ class App:
         if left:
             raise HttpError(429, "刚刚才重置过。%s 后才能再重置一次(这样做是为了避免连点生成一堆 key)"
                                  % ("%d 分钟" % ((left + 59) // 60) if left >= 60 else "%d 秒" % left))
-        cur = self.current_key(user)            # 🔴 只按登录身份查;前端传什么都不决定改谁
+        cur = self.current_key(user, fresh=True)   # 🔴 只按登录身份查;前端传什么都不决定改谁
         if not cur:
             raise HttpError(404, "你现在没有可用的 key,不用重置 —— 直接申请一把新的就行")
         rid = cur["record_id"]
@@ -1096,6 +1208,7 @@ class App:
             return self._rotate_locked(user, cur, rid, ip)
         finally:
             self.rotate_unlock(user["union_id"])
+            self.drop_rows_cache(user["union_id"])   # 换过表 ⇒ 下一次 /api/keys 必须看到新 key
 
     def _rotate_locked(self, user, cur, rid, ip):
         c, L = self.cfg, self.litellm
@@ -1279,31 +1392,66 @@ class App:
         log("install-code 签发", short(user["union_id"]), tool)
         return {"code": code, "expires_in": ttl, "tool": tool}
 
-    def redeem(self, body, ip):
-        if not (self.rl_redeem_ip.hit(ip) and self.rl_redeem_all.hit("*")):
-            raise HttpError(429, "尝试太频繁,稍后再试")
+    def redeem_blocked(self, ip):
+        """P1-2:闸只看**失败**次数。
+        - 这个 IP 一分钟内失败满 REDEEM_PER_IP_PER_MIN 次 ⇒ 429(真码也不判,不给撞库对/错信号)。
+        - 全站失败数过了 REDEEM_GLOBAL_PER_MIN(有人在多 IP 撞库)⇒ 只收紧**失败过的** IP(1 次就停),
+          一次都没失败过的 IP 照常换 ⇒ 打满全局闸再也锁不住正常用户。"""
+        if not self.rl_redeem_ip.allowed(ip):
+            return True
+        if not self.rl_redeem_all.allowed("*") and self.rl_redeem_ip.count(ip) > 0:
+            return True
+        return False
+
+    def redeem_fail(self, ip):
+        self.rl_redeem_ip.record(ip)
+        self.rl_redeem_all.record("*")
+
+    def audit_redeem(self, ip, ua, result, union_id=None, tool=None, rec=None, code_hash=""):
+        """P1-3:安装码换出明文的审计。🔴 不记明文:只记 key 的 sha256(= LiteLLM 库里的 token 列 /
+        SpendLogs.api_key,能直接 join 网关用量)和打码尾巴;安装码只记它 HMAC 的前 16 位(可 join install_codes)。"""
+        key = (rec or {}).get("key") or ""
+        self.q("insert into redeem_audit(at, union_id, tool, record_id, key_sha, key_masked, code_id, ip, ua, result)"
+               " values(?,?,?,?,?,?,?,?,?,?)",
+               (self.now(), union_id, tool, (rec or {}).get("record_id"), sha(key) if key.startswith("sk-") else None,
+                mask_key(key) if key else None, code_hash[:16] or None, ip, mask_deep((ua or "")[:200]), result))
+
+    def redeem(self, body, ip, ua=""):
+        if self.redeem_blocked(ip):
+            log("redeem 限流", ip)
+            raise HttpError(429, "尝试太频繁,稍后再试")      # 不写审计:撞库时这条最多,只进日志
         code = body.get("code")
         raw = code.replace("-", "").strip().upper() if isinstance(code, str) else ""
         if len(raw) != CODE_LEN or any(ch not in CODE_ALPHABET for ch in raw):
+            self.redeem_fail(ip)
+            self.audit_redeem(ip, ua, "denied:bad-format")
             raise HttpError(400, "安装码无效或已过期")
         ch = self._h(self._k_code, raw)
         row = self.q("select union_id, account_type, tool from install_codes where code_hash=? and used is null and expires>?",
                      (ch, self.now()), one=True)
         if not row:
+            self.redeem_fail(ip)
+            self.audit_redeem(ip, ua, "denied:invalid", code_hash=ch)
             log("redeem 拒绝", ip)
             raise HttpError(400, "安装码无效或已过期")   # 错码/过期/用过 同一个回答
         try:
-            r = self.current_key({"union_id": row[0]})
+            # 交明文的这一步不吃缓存:管理员刚在表里停用的 key 不能再装出去
+            r = self.current_key({"union_id": row[0]}, fresh=True)
         except FeishuError as e:
             log("redeem 查表失败", e.code)            # 不作废码:飞书抖一下让他重试
+            self.audit_redeem(ip, ua, "error:feishu-%s" % e.code, row[0], row[2], code_hash=ch)
             raise HttpError(502, "查询失败,稍后再试")
         if not r:
+            self.audit_redeem(ip, ua, "denied:nokey", row[0], row[2], code_hash=ch)
             raise HttpError(404, "这个账号下没有可用的 key")
         _, n = self.q("update install_codes set used=? where code_hash=? and used is null and expires>?",
                       (self.now(), ch, self.now()))
         if n != 1:                                      # 并发换取:只有一个赢
+            self.redeem_fail(ip)
+            self.audit_redeem(ip, ua, "denied:race", row[0], row[2], code_hash=ch)
             raise HttpError(400, "安装码无效或已过期")
-        log("redeem", short(row[0]), row[2])
+        self.audit_redeem(ip, ua, "ok", row[0], row[2], r, ch)
+        log("redeem", short(row[0]), row[2], ip)
         # 🔴 11-04 联调时发现:签发时存了 tool,换取时却没回 ⇒ 安装器
         #    (installer/install.sh:113)拿不到 tool 就 die「安装服务没说要装哪个工具」⇒ **每一次安装都在第一步失败**。
         #    两边各自的测试都是绿的(各自对着自己的假对端),只有接起来才看得见。
@@ -1337,7 +1485,12 @@ class App:
             fields = fb.build_fields(form, user["email"])
         except ValueError as e:
             raise HttpError(400, str(e))
-        tag = "\n\n—— 提交人:%s(%s)" % (user["name"], "外部" if user["external"] else "内部")
+        # 外部人:机器人签链接时不传名字(name 恒空)、人员格也可能写不进 ⇒ 只剩这行能认人。
+        # 带上 union_id + tenant_key,管理员才知道是谁、去哪个租户找(都不是凭据)。
+        who = user["name"] or "(没有名字)"
+        if user["external"]:
+            who += " union_id=%s tenant_key=%s" % (user["union_id"], user.get("tenant_key") or "-")
+        tag = "\n\n—— 提交人:%s(%s)" % (who, "外部" if user["external"] else "内部")
         fields["详细描述"] = (fields["详细描述"] + tag)[:20000]
         c = self.cfg
         try:
@@ -1357,21 +1510,92 @@ class App:
 
 
 # ── HTTP ────────────────────────────────────────────────────────────────
+# 11-04 红队 P2-2:安全头。
+# - 非页面响应(JSON / 302 / 错误页)一律最严的 CSP:什么都不许加载、不许被嵌。
+# - 页面(index.html)的内联 <script>/<style> 按**内容的 sha256** 放行(serve 时现算,文件改了自动跟上),
+#   不用 'unsafe-inline'。🔴 页面里**不能有**内联 style="" / onclick="" / <script src>:
+#   hash 管不到属性,会被 CSP 直接拦掉(test_index_has_no_inline_attrs 钉着)。
+# - img-src data::二维码库先用 data: GIF 探测、再把 canvas 转成 data: PNG 显示。
+# - 没有 font-src / 外链:展示明文 key 的页面不加载任何第三方资源(Google Fonts 已删)。
+# ⚠️ CSP 只管「这个页面里跑什么」。同域别的页面(OWUI / myai / feedback)一旦有 XSS,
+#   仍然可以直接 fetch('/ai/api/keys/reveal')(同源请求会带 Path=/ai/ 的 cookie)——
+#   这条只有把门户挪到**独立子域**才能根治;frame-ancestors + COOP 只堵住了「嵌/开一个 /ai/ 窗口去读 DOM」。
+CSP_STRICT = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+PERMISSIONS_POLICY = ("camera=(), microphone=(), geolocation=(), payment=(), usb=(), "
+                      "clipboard-read=(), clipboard-write=(self)")
+# <script>/<style> 是 raw text 元素:浏览器在**第一个**结束标签处收尾 ⇒ 非贪婪匹配和浏览器切法一致。
+# 🔴 别在 CSS/HTML 注释里写字面的开始标签,会被当成一块(test_index_has_no_external_resources_or_inline_attrs 钉着)
+INLINE_BLOCK_RE = re.compile(rb"<(script|style)>(.*?)</\1>", re.S)
+_csp_cache = {}
+
+
+def csp_hashes(b):
+    """页面字节 → (script 的 hash 列表, style 的 hash 列表)。按浏览器的算法:对标签之间的原始字节做 sha256。"""
+    out = {b"script": [], b"style": []}
+    for m in INLINE_BLOCK_RE.finditer(b):
+        out[m.group(1)].append("'sha256-%s'" % base64.b64encode(hashlib.sha256(m.group(2)).digest()).decode())
+    return out[b"script"], out[b"style"]
+
+
+def page_csp(b):
+    key = hashlib.sha256(b).digest()
+    v = _csp_cache.get(key)
+    if v is None:
+        sc, st = csp_hashes(b)
+        v = ("default-src 'none'; script-src %s; style-src %s; img-src 'self' data:; connect-src 'self'; "
+             "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+             % (" ".join(sc) or "'none'", " ".join(st) or "'none'"))
+        if len(_csp_cache) > 16:
+            _csp_cache.clear()
+        _csp_cache[key] = v
+    return v
+
+
+ALLOW = "GET, HEAD, POST, OPTIONS"
+HEAD_OK = ("", "/healthz", "/auth/magic")   # HEAD 只给没有副作用的路径 + 静态文件(login 会建 state,logout 会删会话)
+
+
 class H(http.server.BaseHTTPRequestHandler):
     server_version = "ai-portal"
     sys_version = ""
     app = None          # make_server 里绑定
+    _head = False
 
     def log_message(self, fmt, *a):
         pass            # 默认访问日志会带 query(code/state),整个关掉
 
+    def version_string(self):
+        return "ai-portal"      # 不报 BaseHTTP/x.y Python/x.y(P2-5)
+
     # 输出
-    def _common_headers(self, referrer="same-origin"):
+    def _common_headers(self, referrer="same-origin", csp=CSP_STRICT):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", referrer)
         self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", csp)
+        self.send_header("Permissions-Policy", PERMISSIONS_POLICY)
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
 
-    def send_json(self, code, obj, cookies=()):
+    def _write(self, b):
+        if not self._head:
+            self.wfile.write(b)
+
+    def send_error(self, code, message=None, explain=None):
+        """P2-5:http.server 自己发的错误(请求行坏了 / 不支持的方法 / 头太长)也走统一的 JSON 信封,
+        不出它默认那张会回显请求内容、带 Python 版本的 HTML 页。"""
+        if code == 501:         # 不认识的方法 ⇒ 405 + Allow,而不是「服务器没实现」
+            code = 405
+        msg = {400: "请求格式不对", 405: "不支持这个方法", 408: "请求超时", 414: "地址太长",
+               431: "请求头太大"}.get(code, "请求没成功")
+        self.close_connection = True
+        try:
+            self.send_json(code, {"error": msg, "message": msg},
+                           extra=(("Allow", ALLOW),) if code == 405 else ())
+        except Exception:       # noqa: BLE001 —— 连接已经坏了就算了
+            pass
+
+    def send_json(self, code, obj, cookies=(), extra=()):
         b = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1379,9 +1603,11 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b)))
         for c in cookies:
             self.send_header("Set-Cookie", c)
+        for k, v in extra:
+            self.send_header(k, v)
         self._common_headers()
         self.end_headers()
-        self.wfile.write(b)
+        self._write(b)
 
     def redirect(self, loc, cookies=()):
         self.send_response(302)
@@ -1402,7 +1628,7 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b)))
         self._common_headers()
         self.end_headers()
-        self.wfile.write(b)
+        self._write(b)
 
     def cookie(self, name, value, path, max_age):
         return "%s=%s; Path=%s; Max-Age=%d; HttpOnly; Secure; SameSite=Lax" % (name, value, path, max_age)
@@ -1462,6 +1688,31 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self._run(self._post)
 
+    def do_HEAD(self):
+        """P2-5:HEAD 只对没副作用的路径(静态文件 / healthz / magic 落地页)= GET 去掉正文;其余 405。"""
+        self._head = True
+        self._run(self._head_route)
+
+    def _head_route(self):
+        p = self.sub()
+        if p is None or p in HEAD_OK or not (p.startswith("/api/") or p.startswith("/auth/")):
+            return self._get()
+        raise HttpError(405, "不支持这个方法")
+
+    def do_OPTIONS(self):
+        """不做 CORS:只回 Allow,**不给任何 Access-Control-Allow-***(跨站预检因此必失败)。"""
+        self.send_response(204)
+        self.send_header("Allow", ALLOW)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self._common_headers()
+        self.end_headers()
+
+    def _method_not_allowed(self):
+        self.send_error(405)
+
+    do_PUT = do_DELETE = do_PATCH = do_TRACE = do_CONNECT = _method_not_allowed
+
     def _run(self, fn):
         try:
             fn()
@@ -1470,7 +1721,8 @@ class H(http.server.BaseHTTPRequestHandler):
         except HttpError as e:
             if e.status == 401:
                 return self.send_json(401, {"login": False, "error": e.msg, "message": e.msg})
-            self.send_json(e.status, {"error": e.msg, "message": e.msg})   # 前端读 message
+            self.send_json(e.status, {"error": e.msg, "message": e.msg},   # 前端读 message
+                           extra=(("Allow", ALLOW),) if e.status == 405 else ())
         except FeishuError as e:
             log("飞书出错", e.where, e.code)
             self.send_json(502, {"error": "飞书接口暂时不可用,稍后再试", "message": "飞书接口暂时不可用,稍后再试"})
@@ -1497,6 +1749,9 @@ class H(http.server.BaseHTTPRequestHandler):
                 sid, nxt = a.login_finish((q.get("code") or [""])[0], (q.get("state") or [""])[0],
                                           self.headers.get("Cookie"))
             except HttpError as e:
+                if e.msg == OAUTH_EXTERNAL_MSG:
+                    # 外部人点错按钮 ⇒ 送回首页,页面按 login_error=external 告诉他去找机器人(白名单查表,不带原文)
+                    return self.redirect(a.base + "/?login_error=external", [clear])
                 self.send_response(e.status)        # 页面形式回给浏览器,顺手清掉 state cookie
                 b = ("<!doctype html><meta charset=utf-8><p>%s</p><p><a href=\"%s/auth/login\">重新登录</a></p>"
                      % (html.escape(e.msg), a.base)).encode()
@@ -1506,7 +1761,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 self.send_header("Set-Cookie", clear)
                 self._common_headers()
                 self.end_headers()
-                return self.wfile.write(b)
+                return self._write(b)
             return self.redirect(nxt, [clear, self.cookie(SID_COOKIE, sid, a.base + "/", int(a.cfg["SESSION_TTL"]))])
         if p == "/auth/magic":
             # 🔴 GET 只出页面,绝不消费 token(飞书链接预览/安全扫描会先 GET 一次)
@@ -1526,7 +1781,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 # 前端据此决定「重置我的 key」出真按钮还是退回「提反馈」。没配网关 key ⇒ false
                 "rotate_enabled": a.litellm.enabled, "rotate_dry_run": a.cfg["ROTATE_DRY_RUN"] != "0",
                 "rotate_cooldown": int(a.cfg["ROTATE_COOLDOWN"]),     # 二次确认里写「N 分钟内不能再重置」
-                "feedback_choices": fb.CHOICES})
+                "feedback_choices": fb.CHOICES,
+                # 外部人待审核申请的登记时间(秒,0 = 没有);前端刷新后据此显示「已登记、等审核」
+                "apply_review_at": a.apply_review_at(u),
+                "apply_external_review": a.cfg["APPLY_ALLOW_EXTERNAL"] != "1"})
         if p == "/api/keys":
             return self.send_json(200, a.keys(self.user()))
         if p.startswith("/api/"):
@@ -1555,7 +1813,7 @@ class H(http.server.BaseHTTPRequestHandler):
             a.drop_session(self.headers.get("Cookie"))
             return self.send_json(200, {"ok": True}, [self.cookie(SID_COOKIE, "", a.base + "/", 0)])
         if public:
-            return self.send_json(200, a.redeem(self.body_json(), self.client_ip()))
+            return self.send_json(200, a.redeem(self.body_json(), self.client_ip(), self.headers.get("User-Agent") or ""))
         routes = {"/api/apply": a.apply, "/api/install-code": a.issue_code, "/api/feedback": a.feedback}
         withip = {"/api/keys/reveal": a.reveal, "/api/keys/rotate": a.rotate}   # 这两个要记审计 ⇒ 带 IP
         if p not in routes and p not in withip:
@@ -1583,9 +1841,10 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b)))
         self.send_header("Cache-Control", "no-store" if referrer_none else
                          ("no-cache" if f.name == "index.html" else "public, max-age=300"))
-        self._common_headers(referrer="no-referrer" if referrer_none else "same-origin")
+        self._common_headers(referrer="no-referrer" if referrer_none else "same-origin",
+                             csp=page_csp(b) if ctype.startswith("text/html") else CSP_STRICT)
         self.end_headers()
-        self.wfile.write(b)
+        self._write(b)
 
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -1600,6 +1859,10 @@ def make_server(app, host="127.0.0.1", port=0):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="AI 自助门户后端")
     ap.add_argument("--env", default=os.environ.get("AI_PORTAL_ENV"), help="env 文件路径")
+    ap.add_argument("--kill-sessions", metavar="UNION_ID", action="append",
+                    help="运维:踢掉这个人的全部会话 + 作废他没用的安装码/登录链接,然后退出(不起服务)。可重复")
+    ap.add_argument("--list-apply-requests", action="store_true",
+                    help="运维:列出外部人待审核的 key 申请(本地库,最近 30 天),然后退出")
     args = ap.parse_args(argv)
     cfg = load_config(env_file=args.env)
     errs = check_config(cfg)
@@ -1607,6 +1870,23 @@ def main(argv=None):
         print("拒绝启动:" + ";".join(errs), file=sys.stderr)
         return 2
     app = App(cfg)
+    if args.list_apply_requests:
+        # 反馈表写不进时(11-04 实测 carher-236 对反馈表 91403)待审核申请只在本地库里 ⇒ 运维从这里看
+        for uid, name, tk, at in app.list_apply_requests():
+            print("%s\t%s\t%s\t%s" % (time.strftime("%F %T", time.localtime(at)), uid, tk or "-", name or "-"))
+        return 0
+    if args.kill_sessions:
+        rc = 0
+        for uid in args.kill_sessions:
+            try:
+                r = app.kill_user(uid.strip())
+            except ValueError as e:
+                print("跳过 %s:%s" % (uid, e), file=sys.stderr)
+                rc = 1
+                continue
+            print("已踢 %s:会话 %d 条,未用安装码 %d 个,未用登录链接 %d 个" % (
+                short(uid), r["sessions"], r["install_codes"], r["magic_tokens"]))
+        return rc
     if cfg["APPLY_DRY_RUN"] != "0":
         log("APPLY_DRY_RUN 开着:申请只返回将要写的字段,不写表")
     host, port = cfg["LISTEN"].rsplit(":", 1)

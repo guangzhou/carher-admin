@@ -100,3 +100,13 @@ POST 都要 `Content-Type: application/json`；除 redeem 外都要本站 `Origi
 ## 部署
 
 待定。
+
+## 外部人（其他公司 / 飞书个人版）
+
+- 登录：网页 OAuth 只认本租户（外部 20010 ⇒ 后端回跳 `/ai/?login_error=external`）。外部人唯一入口 = 给机器人「ai管理的her」发「登录」⇒ 一次性链接。
+- 申请：`APPLY_ALLOW_EXTERNAL=1`（现网）⇒ 和内部一样真写 key 表、poller 发；`=0` ⇒ 只登记待审核。
+- 待审核的最小流程（`APPLY_ALLOW_EXTERNAL=0` 时）：
+  1. 门户写一条反馈「外部合作方申请 key:…」，详细描述里有 union_id 和处理步骤。反馈表写不进时只在本地库：`python3 server.py --env /etc/carher-ai-portal.env --list-apply-requests`。
+  2. 管理员在 key 表新建一行：姓名 = 这个人、账户类型 = Cursor、组织名称 = 他公司（已有选项），API Key 留空 ⇒ poller 约 1 分钟发 key。
+  3. 外部人收不到 poller 的群通知，也收不到反馈服务的私信（那个服务用另一个飞书应用）⇒ 页面承诺的是「重新发『登录』进来看」，必要时由对接人告诉他。
+- 外部人打不开的东西：key 表分享链接（`share_entity=same_tenant`、`external_access_entity=closed`）、内部群、`/feedback/`（要 openchat 登录）。`/oneclick/` 和 `/ccdl/` 下载能打开，但里面的「查看 key」打不开 ⇒ 页面让他在门户第 1 步复制 key。

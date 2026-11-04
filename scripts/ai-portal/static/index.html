@@ -7,9 +7,6 @@
      接口约定见 dev_mock.py 顶部注释。🔴 key 明文：只在点「显示/复制」时现取，
      不进 URL / localStorage / console；显示 30 秒后重新打码，复制完立刻丢掉变量。
      localStorage 只存「选了哪个工具 / 哪个系统」两个偏好。 -->
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&display=swap">
 <style>
 /* 视觉延续 scripts/agent-oneclick-docs/oneclick-all.html：同一套变量、左侧编号引导线、三张工具卡 */
 :root{
@@ -18,7 +15,8 @@
   --cursor:#2b3a52; --codex:#0d7a6b; --claude:#b3532b;
   --ok:#11795a; --ok-bg:#e3f4ec; --warn:#8a5a00; --warn-bg:#fff6e5; --warn-line:#e8c57a;
   --err:#b42318; --err-bg:#fdecea; --err-line:#f2b8b1; --ext:#6b3fb8; --ext-bg:#f0eafb;
-  --font-body:"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  /* 11-04 P2-2:不再加载 Google Fonts(展示明文 key 的页面不许外链,CSP 也没给 font-src)。按系统字体走 */
+  --font-body:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC","Noto Sans SC","Source Han Sans SC",system-ui,sans-serif;
   --font-mono:"JetBrains Mono","SF Mono",Consolas,"Liberation Mono",monospace;
 }
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
@@ -230,6 +228,8 @@ body.os-linux .mac-only, body.os-linux .win-only{display:none!important}
 /* Cursor 专属提示：只装 Cursor 和「三个都装」（里面有 Cursor）时都要出 */
 body:not(.tool-cursor):not(.tool-all) .for-cursor{display:none!important}
 body:not(.tool-all) .for-all{display:none!important}
+/* 只给外部合作方看的提示（boot 时按 /api/me 的 external 给 body 加 is-ext） */
+body:not(.is-ext) .ext-only{display:none!important}
 
 @media (max-width:640px){
   body{padding-block:16px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
@@ -252,6 +252,11 @@ body:not(.tool-all) .for-all{display:none!important}
   #qr{width:176px;height:176px;padding:20px}
   .cmd{font-size:13px}
 }
+/* 11-04 P2-2:CSP 只按 hash 放行内联的样式块和脚本块,标签上的 style 属性会被拦 ⇒ 原内联样式挪成类 */
+.w60{width:60%} .w75{width:75%} .w90{width:90%} .w120{width:120px} .w220{width:220px}
+.mt2{margin-top:2px} .mt4{margin-top:4px} .mt6{margin-top:6px} .mt8{margin-top:8px} .mt10{margin-top:10px}
+.fatal-h{font-size:22px;margin:0} .c-err{color:var(--err)}
+.spin-inline{display:inline-block;vertical-align:-3px;margin:0 8px 0 0}
 </style>
 </head>
 <body class="tool-all os-mac">
@@ -274,7 +279,7 @@ body:not(.tool-all) .for-all{display:none!important}
 
 <!-- ═══ 加载中 ═══ -->
 <section id="v-loading" class="center" aria-busy="true" aria-label="正在加载">
-  <div class="skel" style="width:60%"></div><div class="skel" style="width:90%"></div><div class="skel" style="width:75%"></div>
+  <div class="skel w60"></div><div class="skel w90"></div><div class="skel w75"></div>
 </section>
 
 <!-- ═══ 未登录 ═══ -->
@@ -290,22 +295,23 @@ body:not(.tool-all) .for-all{display:none!important}
   </ol>
   <div id="login-err" class="note err" role="alert" hidden></div>
   <div class="card lcard">
-    <h2>本公司同事</h2>
+    <h2>无锡车联同事 <span class="sub">飞书企业「无锡车联」/ auto-link 邮箱</span></h2>
     <div><a class="btn feishu big" id="login-btn" href="/ai/auth/login">用飞书登录</a></div>
-    <p class="sub">用你的工作飞书一键登录。这个按钮只认本公司账号。</p>
+    <p class="sub">用你的工作飞书一键登录。<b>只认无锡车联的飞书账号</b>，别的公司点了会被飞书拒绝。</p>
   </div>
-  <div class="card lcard">
-    <h2>外部合作方 / 飞书个人版</h2>
-    <p>在飞书里给机器人「ai管理的her」发一句 <b>登录</b>，它会回你一个登录链接，点开就进来了（10 分钟内有效）。</p>
+  <div class="card lcard" id="ext-card">
+    <h2>其他公司 / 飞书个人版 <span class="sub">上海车联、北汽、奇瑞、零跑…都走这里</span></h2>
+    <p>在飞书里给机器人「ai管理的her」发一句 <b>登录</b>，它会回你一个登录链接，<b>在电脑上</b>点开就进来了（10 分钟内有效，只能用一次）。</p>
     <div class="botbox">
       <div id="qr" role="img" aria-label="二维码：用飞书扫一扫打开机器人 ai管理的her"></div>
       <div class="txt">
         <a class="btn feishu" href="https://applink.feishu.cn/client/bot/open?appId=cli_aa8505afb0f89cb2" target="_blank" rel="noopener">用飞书打开机器人</a>
         <p class="sub">手机上用<b>飞书的「扫一扫」</b>扫这个码（微信、相机扫不开）。</p>
         <p class="sub">第一次打开会先看到机器人介绍：点「申请使用」→「开启单聊」，再发「登录」。</p>
+        <p class="sub">在手机飞书里收到链接也行：把链接<b>转发 / 复制到电脑</b>上打开，因为装工具的命令要在电脑上跑。</p>
       </div>
     </div>
-    <p class="sub">上面那个「用飞书登录」按钮对外部公司和个人版账号不管用（飞书会拒绝），请走这里。</p>
+    <p class="sub">发了「登录」机器人没回？多半是你的账号还没开通，<b>请联系给你开通 AI 工具的那位对接人</b>，把你的飞书名字告诉他。</p>
   </div>
   <p class="sub">登录只用来认出你是谁，我们拿不到你的飞书密码，也不读你的聊天记录。</p>
 </section>
@@ -315,10 +321,11 @@ body:not(.tool-all) .for-all{display:none!important}
 <section id="v-magic" class="magic" hidden aria-labelledby="magic-h">
   <h1 id="magic-h">确认登录 AI 工具自助台</h1>
   <p id="magic-lead" class="sub">这是机器人发给你的登录链接。点下面的按钮就登录了，这个链接只能用一次。</p>
+  <p id="magic-phone" class="note" hidden><b>你现在是在手机上。</b>装工具的命令要在<b>电脑</b>上跑：先别点，把这个链接转发 / 复制到电脑上再打开（点过一次就失效了）。只想看看自己的 key 也可以直接点。</p>
   <div><button type="button" class="btn feishu big" id="magic-btn">确认登录</button></div>
   <div id="magic-err" class="note err" role="alert" hidden>
     <span id="magic-err-msg"></span>
-    <div class="row" style="margin-top:10px">
+    <div class="row mt10">
       <a class="btn feishu sm" href="https://applink.feishu.cn/client/bot/open?appId=cli_aa8505afb0f89cb2" target="_blank" rel="noopener">用飞书打开机器人</a>
       <a class="sub" href="/ai/">回首页</a>
     </div>
@@ -327,7 +334,7 @@ body:not(.tool-all) .for-all{display:none!important}
 
 <!-- ═══ 整页出错（/me 都拿不到） ═══ -->
 <section id="v-fatal" class="center" hidden aria-labelledby="fatal-h">
-  <h1 id="fatal-h" style="font-size:22px;margin:0">页面没加载出来</h1>
+  <h1 id="fatal-h" class="fatal-h">页面没加载出来</h1>
   <p id="fatal-msg" class="sub"></p>
   <button type="button" class="btn" id="fatal-retry">重新加载</button>
 </section>
@@ -340,12 +347,12 @@ body:not(.tool-all) .for-all{display:none!important}
   <section class="step" id="s-keys" aria-labelledby="keys-h">
     <h2 id="keys-h">我的 key <span class="sub">三个工具共用这一把</span></h2>
     <div class="body">
-      <div id="keys-loading" class="krow" aria-busy="true"><div class="meta"><div class="skel" style="width:120px"></div></div><div class="val"><div class="skel" style="width:220px;margin-top:6px"></div></div></div>
+      <div id="keys-loading" class="krow" aria-busy="true"><div class="meta"><div class="skel w120"></div></div><div class="val"><div class="skel w220 mt6"></div></div></div>
       <div id="keys-list" class="keys" hidden></div>
       <div id="keys-pending" class="note pending" hidden>
         <span class="spin" aria-hidden="true"></span>
         <div><b>key 正在生成，大约 1~2 分钟。</b>申请后<b>不会有飞书通知</b>，请留在这个页面，好了会自动出来（每 20 秒查一次）。
-          <div class="sub" id="poll-at" style="margin-top:2px"></div></div>
+          <div class="sub mt2" id="poll-at"></div></div>
       </div>
       <!-- 没开重置功能（后端 rotate_enabled=false）时的老入口 -->
       <p class="sub" id="keys-swap" hidden>需要换一把 key？<a href="#s-fb" id="swap-link">请提反馈</a>，我们帮你换。</p>
@@ -374,13 +381,13 @@ body:not(.tool-all) .for-all{display:none!important}
         </div>
 
         <div class="note" id="rot-busy" role="status" hidden>
-          <span class="spin" aria-hidden="true" style="display:inline-block;vertical-align:-3px;margin:0 8px 0 0"></span>
+          <span class="spin spin-inline" aria-hidden="true"></span>
           正在生成新 key 并试调一次，大约 5~20 秒，请别关页面。<b>在这一步完成之前，旧 key 一直能用。</b>
         </div>
 
         <div class="note err" id="rot-err" role="alert" hidden>
           <b>没有重置成功。</b> <span id="rot-err-msg"></span>
-          <div style="margin-top:8px" class="row">
+          <div class="row mt8">
             <button type="button" class="btn ghost sm" id="rot-err-close">知道了</button>
             <a href="#s-fb" class="sub" id="rot-err-fb">还是不行？提反馈</a>
           </div>
@@ -388,7 +395,7 @@ body:not(.tool-all) .for-all{display:none!important}
 
         <div class="note" id="rot-dry" role="status" hidden>
           <b>演练模式：</b><span id="rot-dry-msg"></span>
-          <div class="sub" id="rot-dry-detail" style="margin-top:4px"></div>
+          <div class="sub mt4" id="rot-dry-detail"></div>
         </div>
 
         <div class="rot-done" id="rot-done" tabindex="-1" hidden>
@@ -420,13 +427,22 @@ body:not(.tool-all) .for-all{display:none!important}
               <button type="button" class="btn" id="apply-btn">申请 key</button>
               <span class="sub" id="apply-msg"></span>
             </div>
+            <p class="sub ext-only" id="empty-ext">你是其他公司的账号：以前在别的地方申请过 key 但这里看不到？多半是登记在你公司另一个飞书账号名下，请联系你的对接人确认。</p>
           </div>
         </div>
       </div>
 
+      <!-- 外部人待审核（后端 APPLY_ALLOW_EXTERNAL=0）：已登记，别再让他点一次申请 -->
+      <div id="keys-review" class="note" role="status" hidden>
+        <b>申请已登记，等管理员审核。</b>
+        <span id="review-at"></span>
+        审核通过后 key 会直接出现在这个页面（<b>不会有飞书消息</b>，一般 1 个工作日内），到时候<b>重新给机器人发「登录」</b>进来看就行。
+        <div class="sub mt4">等了超过 1 个工作日还没有？请联系你的对接人，或在下面提一条反馈。</div>
+      </div>
+
       <div id="keys-err" class="note err" hidden>
         <b>key 列表没读出来。</b> <span id="keys-err-msg"></span>
-        <div style="margin-top:8px"><button type="button" class="btn ghost sm" id="keys-retry">再试一次</button></div>
+        <div class="mt8"><button type="button" class="btn ghost sm" id="keys-retry">再试一次</button></div>
       </div>
     </div>
   </section>
@@ -481,11 +497,15 @@ body:not(.tool-all) .for-all{display:none!important}
           </div>
           <p class="sub for-cursor">唯一例外：新版 Cursor 要你在设置里粘一次 key。脚本会先把 key 放进剪贴板，并告诉你点哪里（Settings → Models → OpenAI API Key → 粘贴 → Verify）。</p>
 
-          <div class="note win-only">
-            <b>被公司电脑拦住了？</b>找 IT 开一下权限，把报错原文给他看就行：
-            提示「禁止运行脚本」「已被组策略阻止」是要开 <b>PowerShell 执行权限</b>；
-            提示装不上应用、「旁加载」「MSIX」之类，是要开 <b>安装应用（旁加载）的权限</b>。
+          <div class="note">
+            <b>被公司电脑拦住了？</b>找<b>你们公司的 IT</b> 开一下权限，把报错原文给他看就行：
+            <span class="win-only">提示「禁止运行脚本」「已被组策略阻止」是要开 <b>PowerShell 执行权限</b>；
+            提示装不上应用、「旁加载」「MSIX」之类，是要开 <b>安装应用（旁加载）的权限</b>。</span>
+            <span class="unix-only">提示没有权限装到「应用程序」、或 curl 连不上 chat.auto-link.com.cn，是公司策略 / 代理拦了，
+            需要放行这个网址。</span>
             等不了的话，先用<a href="https://chat.auto-link.com.cn/oneclick/" target="_blank" rel="noopener">下载安装包，双击安装</a>的老办法。
+            <span class="ext-only"><br><b>其他公司的同学注意：</b>那个页面里的「查看我的 cursor key」「点这里申请」只对无锡车联账号开放，你打不开。
+              key 请在<b>这里第 1 步</b>点「复制」拿到，再粘进安装包里；安装包、自检都能正常用。</span>
           </div>
         </div>
       </div>
@@ -520,7 +540,7 @@ body:not(.tool-all) .for-all{display:none!important}
           <div class="field">
             <label for="fb-title">一句话说说 <span class="sub">（必填）</span></label>
             <input type="text" id="fb-title" maxlength="120" required aria-describedby="fb-title-err" placeholder="比如：Windows 上跑命令提示没有权限">
-            <p class="sub" id="fb-title-err" style="color:var(--err)" hidden>写一句再提交</p>
+            <p class="sub c-err" id="fb-title-err" hidden>写一句再提交</p>
           </div>
           <div class="field">
             <label for="fb-detail">详细描述 <span class="sub">（选填：做了什么、看到什么报错）</span></label>
@@ -568,7 +588,9 @@ var ST_PREFIX = [["可用","ok"],["active","ok"],["生成中","pend"],["pending"
 var LOGIN_ERR = {
   expired: "登录链接过期了（10 分钟内有效）。再给机器人发一句「登录」，拿一个新链接。",
   used:    "这个登录链接已经用过了，每个链接只能用一次。再给机器人发一句「登录」，拿一个新链接。",
-  invalid: "这个登录链接不对，可能没复制完整。再给机器人发一句「登录」，拿一个新链接。"
+  invalid: "这个登录链接不对，可能没复制完整。再给机器人发一句「登录」，拿一个新链接。",
+  // 外部公司 / 个人版点了「用飞书登录」⇒ 飞书 20010 ⇒ 后端回跳 login_error=external
+  external: "你登录的不是无锡车联的飞书账号，上面那个按钮用不了。请看下面「其他公司 / 飞书个人版」：在飞书里给机器人发一句「登录」。"
 };
 var MAGIC_T_RE = /^[A-Za-z0-9._~-]{8,512}$/;
 var CODE_RE = /^[A-Za-z0-9][A-Za-z0-9-]{3,63}$/; // 安装码会拼进 shell 命令 ⇒ 严格白名单，不合规就不出命令
@@ -627,6 +649,8 @@ function toLogin(){
 // 读完 t 就从地址栏抹掉（不留在历史记录 / Referer 里）；t 只留在这个闭包变量里，用完清空。
 function bootMagic(t){
   view("magic");
+  // 外部人多半在手机飞书里点开机器人发的链接；安装命令要在电脑上跑 ⇒ 先提醒，别把一次性链接消耗在手机上
+  show("magic-phone", /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || ""));
   try{ history.replaceState(null, "", location.pathname); }catch(e){}
   if (!MAGIC_T_RE.test(t || "")){ magicFail("invalid"); return; }
   var b = $("magic-btn");
@@ -659,9 +683,13 @@ function boot(){
   view("loading");
   api("GET", "/ai/api/me").then(function(me){
     state.me = me;
-    $("who-name").textContent = me.name || "同学";
+    // 机器人签的登录链接不带名字（外部人查不到通讯录）⇒ 外部人别叫「同学」，就说「你好」
+    $("who-name").textContent = me.name || (me.external ? "" : "同学");
+    B.classList.toggle("is-ext", !!me.external);
+    state.reviewAt = +me.apply_review_at || 0;
     show("who-ext", !!me.external);
-    if (me.external && me.tenant) $("who-ext").title = "你登录的是「" + me.tenant + "」的飞书账号";
+    // tenant 是飞书 tenant_key（一串 id，不是公司名）⇒ 不展示给用户
+    if (me.external) $("who-ext").title = "你登录的飞书账号不属于无锡车联";
     view("app");
     loadKeys(false);
   }, function(e){
@@ -785,7 +813,11 @@ function renderKeys(){
   show("keys-hist", old.length > 0);
   $("hist-sum").textContent = "历史 key（" + old.length + " 把，已不再使用）";
   // 失败的那行自带「重新申请」，不再重复出申请卡
-  show("keys-empty", !hasOk && !hasPend && !hasFail);
+  // 外部人已登记待审核 ⇒ 出「等审核」卡，不再出申请卡（否则刷新后看着像没申请上，会反复点）
+  var inReview = !hasOk && !hasPend && !hasFail && !!state.reviewAt;
+  show("keys-review", inReview);
+  if (inReview) $("review-at").textContent = "（登记于 " + new Date(state.reviewAt * 1000).toLocaleString("zh-CN", { hour12: false }) + "）";
+  show("keys-empty", !hasOk && !hasPend && !hasFail && !inReview);
   renderInstall();
 }
 
@@ -871,8 +903,14 @@ function doApply(b, msgEl){
   if (msgEl) msgEl.textContent = "";
   api("POST", "/ai/api/apply", { account_type: APPLY_TYPE }).then(function(r){
     // 外部人待审核 / 演练模式:**不能**说「1~2 分钟生成好」—— 那样他会一直等一把永远不会来的 key
-    if (r && (r.review || r.dry_run)){
-      var m = r.message || (r.review ? "已收到申请，需要管理员审核" : "申请功能还没开放，请先提反馈");
+    if (r && r.review){
+      // 切到「等审核」卡（刷新后 /api/me 的 apply_review_at 也会让它继续显示）
+      state.reviewAt = Math.floor(Date.now() / 1000);
+      renderKeys(); say("申请已登记，等管理员审核");
+      return;
+    }
+    if (r && r.dry_run){
+      var m = r.message || "申请功能还没开放，请先提反馈";
       if (msgEl) msgEl.textContent = m;
       say(m);
       return;
@@ -1153,7 +1191,9 @@ $("fb").addEventListener("submit", function(e){
   }).then(function(r){
     $("fb").reset(); $("fb").hidden = true;
     var d = $("fb-done");
-    d.textContent = "收到了" + (r && r.id ? "（编号 " + r.id + "）" : "") + "。处理好了会在飞书里通知你。";
+    // 外部人：解决通知是 feedback 服务用另一个飞书应用按 open_id 私信的，外部人收不到 ⇒ 不承诺飞书通知
+    d.textContent = "收到了" + (r && r.id ? "（编号 " + r.id + "）" : "") + "。" +
+      (state.me && state.me.external ? "我们处理好后会联系你的对接人；也可以过一两天回这个页面看看。" : "处理好了会在飞书里通知你。");
     var again = document.createElement("button"); again.type = "button"; again.className = "btn ghost sm"; again.textContent = "再提一条";
     again.style.marginLeft = "10px";
     again.addEventListener("click", function(){ d.hidden = true; $("fb").hidden = false; pickFbTool(); $("fb-title").focus(); });
@@ -1161,7 +1201,8 @@ $("fb").addEventListener("submit", function(e){
     d.hidden = false; d.focus(); say(d.firstChild.textContent);
   }, function(e){
     if (e.status === 401) return;
-    msg.textContent = "没提交成功：" + e.message + "（你写的内容还在，可以直接再点提交）"; shout(msg.textContent);
+    msg.textContent = "没提交成功：" + e.message + "（你写的内容还在，可以直接再点提交）" +
+      (state.me && state.me.external ? "。一直提交不了，请把问题直接发给你的对接人。" : ""); shout(msg.textContent);
   }).then(function(){ b.disabled = false; b.textContent = "提交"; });
 });
 // 反馈里的「哪个工具」默认跟着上面选的工具走（"三个都装" 没有对应的单选项 ⇒ 落到「其他」）

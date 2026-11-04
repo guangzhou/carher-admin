@@ -126,7 +126,8 @@ class H(BaseHTTPRequestHandler):
     def _me(self, s):
         rot = {"rotate_enabled": s != "rotate_off", "rotate_dry_run": s == "rotate_dry", "rotate_cooldown": 600}
         if s.startswith("external"):
-            return dict(rot, name="王小明", external=True, tenant="示例科技有限公司")
+            # 真后端:机器人签的登录链接 name 恒为空、tenant 是 tenant_key(一串 id),这里照实模拟
+            return dict(rot, name="", external=True, tenant="2a0b_example_tenant", apply_review_at=0)
         return dict(rot, name="刘国现", external=False, tenant="CarHer")
 
     def _keys(self, s, poll=False):

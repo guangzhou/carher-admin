@@ -440,7 +440,10 @@ def make_cfg(fake_url, tmp_path, **over):
     cfg = S.load_config(environ={})
     cfg.update(FEISHU_APP_ID=APP_ID, FEISHU_APP_SECRET=APP_SECRET, SESSION_SECRET=SECRET,
                FEISHU_OPEN_BASE=fake_url + "/open-apis", FEISHU_AUTHORIZE_URL=fake_url + "/authorize",
-               DB_PATH=str(tmp_path / "portal.db"), STATIC_DIR=str(static), TRUST_PROXY="1")
+               DB_PATH=str(tmp_path / "portal.db"), STATIC_DIR=str(static), TRUST_PROXY="1",
+               # my_rows 缓存默认关:老测试大量「改假表 → 立刻再读」,它们测的是规则不是缓存。
+               # 缓存自己的行为在 §17 专门测(MY_ROWS_TTL 显式打开)。
+               MY_ROWS_TTL="0")
     cfg.update(over)
     return cfg
 
@@ -642,7 +645,7 @@ def test_logout_kills_session_server_side(portal):
 
 def test_session_expires(portal, clock):
     sid = portal.sid("A")
-    clock.t += 43200 + 1
+    clock.t += int(S.DEFAULTS["SESSION_TTL"]) + 1
     assert portal.req("GET", "/ai/api/me", cookie=sid)[0] == 401
     clock.t -= 2          # POSITIVE: 没过期时同一个 cookie 能用
     assert portal.req("GET", "/ai/api/me", cookie=sid)[0] == 200
@@ -977,7 +980,7 @@ def test_apply_returns_existing_current_without_writing(portal_factory, monkeypa
     s, d, _, _ = p.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sa)
     assert s == 200 and d["existing"] is True and d["record_id"] == "recA1" and len(FAKE.tables[KEYTBL]) == n
     # UNGUARDED:让「先精确查一遍」返回空 ⇒ 就会重复写一行
-    monkeypatch.setattr(p.app, "my_rows", lambda u: [])
+    monkeypatch.setattr(p.app, "my_rows", lambda u, **kw: [])
     assert p.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sa)[1]["dry_run"] is False
     assert len(FAKE.tables[KEYTBL]) == n + 1
 
@@ -1003,7 +1006,7 @@ def test_apply_double_click_while_table_lags(portal_factory, monkeypatch):
     p = portal_factory(APPLY_DRY_RUN="0")
     sn = p.sid("N")
     real = p.app.my_rows
-    monkeypatch.setattr(p.app, "my_rows", lambda u: [r for r in real(u) if not r["record_id"].startswith("recNEW")])
+    monkeypatch.setattr(p.app, "my_rows", lambda u, **kw: [r for r in real(u, **kw) if not r["record_id"].startswith("recNEW")])
     assert p.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sn)[1]["dry_run"] is False
     assert p.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sn)[1]["pending"] is True
     assert len([r for r in FAKE.tables[KEYTBL] if r.startswith("recNEW")]) == 1
@@ -1138,14 +1141,71 @@ def test_redeem_rate_limited_per_ip(portal, clock):
 
 def test_redeem_rate_limit_unguarded(portal, monkeypatch):
     """UNGUARDED:限流关掉 ⇒ 同 IP 打 30 次都不会 429。证明上一条的 429 来自限流器。"""
-    monkeypatch.setattr(portal.app.rl_redeem_ip, "hit", lambda k: True)
+    monkeypatch.setattr(portal.app, "redeem_blocked", lambda ip: False)
     assert 429 not in [_redeem(portal, "Z" * 32, ip="10.1.1.9")[0] for _ in range(30)]
 
 
 def test_redeem_global_rate_limit(portal_factory):
+    """全站失败数过线(多 IP 撞库)⇒ 失败过的 IP 只许失败 1 次;换 IP 也只能每个 IP 试 1 次。"""
     p = portal_factory(REDEEM_GLOBAL_PER_MIN="5")
     codes = [_redeem(p, "Q" * 32, ip="10.2.0.%d" % i)[0] for i in range(7)]
-    assert codes == [400] * 5 + [429] * 2, "换 IP 也绕不过全局闸"
+    assert codes == [400] * 7, "过线前后,新 IP 的第一次都照常判(没失败过的 IP 不受全局闸影响)"
+    # 过线后:已经失败过的 IP 再试 ⇒ 429(没过线时这几个 IP 本来还有 9 次额度)
+    assert [_redeem(p, "Q" * 32, ip="10.2.0.%d" % i)[0] for i in range(3)] == [429] * 3
+
+
+# ── P1-2:全局闸只数失败,打满了也锁不住正常用户 ──────────────────────────
+def test_redeem_global_flood_does_not_lock_out_real_users(portal_factory):
+    """红队 8.2 原样复现:12 个 IP × 10 个错码 = 120 次失败把全局闸打满 ⇒ 真用户照样装得上。"""
+    p = portal_factory(REDEEM_GLOBAL_PER_MIN="120", REDEEM_PER_IP_PER_MIN="10")
+    sa = p.sid("A")
+    good = p.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sa)[1]["code"]
+    junk = [_redeem(p, "Z" * 32, ip="11.0.%d.%d" % (i // 10, i % 10))[0] for i in range(120)]
+    assert junk == [400] * 120
+    assert not p.app.rl_redeem_all.allowed("*"), "前提:全局失败线确实打满了"
+    assert _redeem(p, good, ip="12.0.0.1")[0] == 200, "没失败过的 IP 拿真码必须能换"
+    # 攻击者自己的 IP 在过线后被收紧到 0 次(真码也不判)
+    good2 = p.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sa)[1]["code"]
+    assert _redeem(p, good2, ip="11.0.0.1")[0] == 429
+
+
+def test_redeem_global_flood_unguarded_old_behavior_locks_everyone(portal_factory, monkeypatch):
+    """反向对照:把闸改回「每次尝试都数」(旧实现)⇒ 同样的 120 次错码之后真用户 429。证明上一条测得出 P1-2。"""
+    p = portal_factory(REDEEM_GLOBAL_PER_MIN="120", REDEEM_PER_IP_PER_MIN="10")
+    sa = p.sid("A")
+    good = p.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sa)[1]["code"]
+    app = p.app
+    monkeypatch.setattr(app, "redeem_blocked",
+                        lambda ip: not (app.rl_redeem_ip.hit(ip) and app.rl_redeem_all.hit("*")))
+    monkeypatch.setattr(app, "redeem_fail", lambda ip: None)
+    [_redeem(p, "Z" * 32, ip="11.0.%d.%d" % (i // 10, i % 10)) for i in range(120)]
+    assert _redeem(p, good, ip="12.0.0.1")[0] == 429
+
+
+def test_redeem_success_does_not_count_against_ip(portal):
+    """只数失败:同一个 IP(198 上 nginx 没开 realip 时**所有人**都是前置代理那一个 IP)连续换 15 个真码都成功。"""
+    sa, sb = portal.sid("A"), portal.sid("B")
+    out = []
+    for i in range(15):
+        sid = sa if i % 2 else sb      # 每人每分钟只能签 5 个码 ⇒ 两个人轮着签,再推时钟
+        c = portal.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sid)[1]["code"]
+        out.append(_redeem(portal, c, ip="10.68.13.97")[0])
+        if i % 8 == 7:
+            portal.clock.t += 61
+    assert out == [200] * 15
+    # POSITIVE:同一个 IP 失败 10 次就 429(闸还在,只是不数成功)
+    assert [_redeem(portal, "Z" * 32, ip="10.68.13.97")[0] for _ in range(11)] == [400] * 10 + [429]
+
+
+def test_redeem_failure_after_limit_still_hides_signal(portal):
+    """被限流的 IP 拿真码也只得到 429,不知道码对不对;且 429 本身不再累加(不会越限越久)。"""
+    sa = portal.sid("A")
+    good = portal.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sa)[1]["code"]
+    [_redeem(portal, "Z" * 32, ip="10.7.7.7") for _ in range(10)]
+    assert _redeem(portal, good, ip="10.7.7.7")[0] == 429
+    assert portal.app.rl_redeem_ip.count("10.7.7.7") == 10
+    portal.clock.t += 61
+    assert _redeem(portal, good, ip="10.7.7.7")[0] == 200, "窗口过去后同一个真码还能换(429 没把码作废)"
 
 
 def test_redeem_ignores_spoofed_xff_when_not_trusted(portal_factory):
@@ -1196,7 +1256,9 @@ def test_feedback_external_falls_back_without_person(portal):
     s, d, _, _ = portal.req("POST", "/ai/api/feedback", FB, cookie=sx)
     assert s == 200
     f = FAKE.tables[FBTBL][d["id"]]
-    assert "提交人" not in f and f["提交人邮箱"] == "" and "外部王五(外部)" in f["详细描述"]
+    # 11-04 外部旅程:外部人的标签里加了 union_id / tenant_key(人员格写不进时只剩这行能认人)
+    assert "提交人" not in f and f["提交人邮箱"] == "" and "提交人:外部王五 union_id=" + USERS["X"]["union_id"] in f["详细描述"]
+    assert f["详细描述"].endswith("(外部)")
 
 
 def test_feedback_validation_and_rate_limit(portal):
@@ -2589,3 +2651,539 @@ def test_external_can_apply_by_default_but_must_be_logged_in(portal):
         assert s == 200 and not d.get("review") and len(FAKE.tables[KEYTBL]) == n + 1, d
     finally:
         portal.app.cfg["APPLY_DRY_RUN"] = "1"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 17. 11-04 放开后加固(P1-3 redeem 审计 / P2-2 CSP / P2-5 方法与错误页 / P2-6 会话 / P1-1 my_rows 缓存)
+# ════════════════════════════════════════════════════════════════════════
+def redeem_audit_rows(p):
+    rows, _ = p.app.q("select union_id, tool, record_id, key_sha, key_masked, code_id, ip, ua, result, at"
+                      " from redeem_audit order by id")
+    return rows
+
+
+def test_redeem_audit_records_who_what_where_without_plaintext(portal):
+    sa = portal.sid("A")
+    code = portal.req("POST", "/ai/api/install-code", {"tool": "all"}, cookie=sa)[1]["code"]
+    s, d, _, _ = portal.req("POST", "/ai/api/install-code/redeem", {"code": code}, origin=None,
+                            headers={"X-Real-IP": "203.0.113.7", "User-Agent": "curl/8.7.1"})
+    assert s == 200 and d["key"] == KEY_A1
+    rows = redeem_audit_rows(portal)
+    assert len(rows) == 1
+    uid, tool, rid, ksha, kmask, code_id, ip, ua, result, at = rows[0]
+    assert (uid, tool, rid, ip, ua, result) == (USERS["A"]["union_id"], "all", "recA1", "203.0.113.7", "curl/8.7.1", "ok")
+    assert ksha == S.sha(KEY_A1) and kmask == S.mask_key(KEY_A1) and at == portal.clock()
+    # code_id 能 join 回签发记录(谁签的、什么时候)
+    signed = portal.app.q("select union_id, tool from install_codes where substr(code_hash,1,16)=?", (code_id,), one=True)
+    assert signed == (USERS["A"]["union_id"], "all")
+    # 🔴 明文 key 和安装码都不落库(整库字节里搜)
+    db = Path(portal.app.cfg["DB_PATH"]).read_bytes()
+    raw = code.replace("-", "")
+    assert KEY_A1.encode() not in db and raw.encode() not in db and code.encode() not in db
+
+
+def test_redeem_audit_answers_where_did_this_key_go(portal):
+    """出事时的那条查询:给一把泄露的 key(手上只有明文或它的 sha256)⇒ 查出装到了哪些 IP。"""
+    sa = portal.sid("A")
+    for ip in ("198.51.100.1", "198.51.100.2"):
+        c = portal.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sa)[1]["code"]
+        assert _redeem(portal, c, ip=ip)[0] == 200
+    sb = portal.sid("B")
+    c = portal.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sb)[1]["code"]
+    assert _redeem(portal, c, ip="198.51.100.9")[0] == 200
+    got, _ = portal.app.q("select ip from redeem_audit where key_sha=? and result='ok' order by at", (S.sha(KEY_A1),))
+    assert [r[0] for r in got] == ["198.51.100.1", "198.51.100.2"]
+
+
+def test_redeem_audit_records_failures_but_not_rate_limited(portal):
+    sa = portal.sid("A")
+    good = portal.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sa)[1]["code"]
+    _redeem(portal, "nope", ip="10.8.0.1")
+    _redeem(portal, "Z" * 32, ip="10.8.0.1")
+    assert _redeem(portal, good, ip="10.8.0.2")[0] == 200
+    assert _redeem(portal, good, ip="10.8.0.3")[0] == 400           # 用过的码再换
+    res = [(r[8], r[6], r[0]) for r in redeem_audit_rows(portal)]
+    assert res == [("denied:bad-format", "10.8.0.1", None), ("denied:invalid", "10.8.0.1", None),
+                   ("ok", "10.8.0.2", USERS["A"]["union_id"]), ("denied:invalid", "10.8.0.3", None)]
+    # 被限流的那些不进审计表(撞库时它最多,只进日志)
+    n = len(redeem_audit_rows(portal))
+    for _ in range(12):
+        _redeem(portal, "Z" * 32, ip="10.8.0.9")
+    assert len(redeem_audit_rows(portal)) == n + 10
+
+
+def test_redeem_audit_nokey_and_feishu_error(portal):
+    sa = portal.sid("A")
+    code = portal.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sa)[1]["code"]
+    FAKE.search_error = 91403
+    try:
+        assert _redeem(portal, code, ip="10.8.1.1")[0] == 502
+    finally:
+        FAKE.search_error = None
+    FAKE.tables[KEYTBL]["recA1"]["状态"] = "已禁用"
+    for k in [k for k, v in FAKE.tables[KEYTBL].items() if v["状态"].startswith("有效") or v["状态"] == "已完成"]:
+        FAKE.tables[KEYTBL][k]["状态"] = "已禁用"
+    assert _redeem(portal, code, ip="10.8.1.1")[0] == 404
+    res = [r[8] for r in redeem_audit_rows(portal)]
+    assert res == ["error:feishu-91403", "denied:nokey"], res
+    assert all(r[3] is None for r in redeem_audit_rows(portal)), "没交出 key 的行不记 key_sha"
+
+
+def test_redeem_audit_unguarded(portal, monkeypatch):
+    """反向对照:把审计关掉 ⇒ 上面那条「这把 key 去了哪」的查询查不到任何东西。"""
+    monkeypatch.setattr(portal.app, "audit_redeem", lambda *a, **k: None)
+    sa = portal.sid("A")
+    c = portal.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sa)[1]["code"]
+    assert _redeem(portal, c, ip="198.51.100.1")[0] == 200
+    assert portal.app.q("select count(*) from redeem_audit where key_sha=?", (S.sha(KEY_A1),), one=True)[0] == 0
+
+
+def test_redeem_audit_ua_is_masked_and_bounded(portal):
+    sa = portal.sid("A")
+    c = portal.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sa)[1]["code"]
+    portal.req("POST", "/ai/api/install-code/redeem", {"code": c}, origin=None,
+               headers={"X-Real-IP": "10.9.9.9", "User-Agent": "x " + KEY_B + " " + "y" * 500})
+    ua = redeem_audit_rows(portal)[0][7]
+    assert KEY_B not in ua and len(ua) <= 200
+
+
+# ── P2-2 CSP ──────────────────────────────────────────────────────────────
+REAL_INDEX = HERE / "static" / "index.html"
+
+
+def real_portal(fake, tmp_path, clock):
+    FAKE.reset()
+    FAKE.tables[KEYTBL] = seed()
+    cfg = make_cfg(fake, tmp_path)
+    cfg["STATIC_DIR"] = str(HERE / "static")
+    return Portal(fake, cfg, clock)
+
+
+def headers_of(p, method, path):
+    c = http.client.HTTPConnection("127.0.0.1", p.port, timeout=5)
+    c.request(method, path)
+    r = c.getresponse()
+    b = r.read()
+    c.close()
+    return r.status, {k.lower(): v for k, v in r.getheaders()}, b
+
+
+def parse_csp(v):
+    out = {}
+    for part in v.split(";"):
+        bits = part.split()
+        if bits:
+            out[bits[0]] = bits[1:]
+    return out
+
+
+def test_page_csp_is_strict_and_matches_inline_blocks(fake, tmp_path, clock):
+    import base64, hashlib, re
+    p = real_portal(fake, tmp_path, clock)
+    try:
+        for path in ("/ai/", "/ai/auth/magic?t=" + "a" * 43):
+            s, h, b = headers_of(p, "GET", path)
+            assert s == 200
+            csp = parse_csp(h["content-security-policy"])
+            for d, want in (("default-src", ["'none'"]), ("frame-ancestors", ["'none'"]), ("base-uri", ["'none'"]),
+                            ("form-action", ["'self'"]), ("connect-src", ["'self'"])):
+                assert csp[d] == want, (d, csp.get(d))
+            for d in ("script-src", "style-src"):
+                assert csp[d] and all(x.startswith("'sha256-") for x in csp[d]), (d, csp[d])
+                assert "'unsafe-inline'" not in csp[d] and "'unsafe-eval'" not in csp[d]
+            assert "font-src" not in csp, "页面不该再加载任何字体"
+            # 每一个内联块的 hash 都在里面(浏览器按标签之间的原始字节算)
+            for tag, d in (("script", "script-src"), ("style", "style-src")):
+                blocks = re.findall(rb"<%s>(.*?)</%s>" % (tag.encode(), tag.encode()), b, re.S)
+                assert blocks
+                want = {"'sha256-%s'" % base64.b64encode(hashlib.sha256(x).digest()).decode() for x in blocks}
+                assert want == set(csp[d]), tag
+            assert h["x-content-type-options"] == "nosniff" and h["x-frame-options"] == "DENY"
+            assert "camera=()" in h["permissions-policy"] and "clipboard-write=(self)" in h["permissions-policy"]
+            assert h["referrer-policy"] in ("same-origin", "no-referrer")
+            assert h["cross-origin-opener-policy"] == "same-origin"
+    finally:
+        p.close()
+
+
+def test_page_csp_hash_tracks_file_content(portal):
+    """反向对照:页面内容一变,hash 跟着变(serve 时现算)⇒ 改了 JS 不会因为 hash 过期把整页打死。
+    同时证明 CSP 真的「只放这一段」:别的脚本内容算出来的 hash 不在里面。"""
+    import base64, hashlib
+    idx = Path(portal.app.cfg["STATIC_DIR"]) / "index.html"
+    idx.write_text("<!doctype html><script>var a=1</script><style>p{}</style>", encoding="utf-8")
+    csp1 = parse_csp(headers_of(portal, "GET", "/ai/")[1]["content-security-policy"])
+    idx.write_text("<!doctype html><script>var a=2</script><style>p{}</style>", encoding="utf-8")
+    csp2 = parse_csp(headers_of(portal, "GET", "/ai/")[1]["content-security-policy"])
+    h = lambda s: "'sha256-%s'" % base64.b64encode(hashlib.sha256(s.encode()).digest()).decode()
+    assert csp1["script-src"] == [h("var a=1")] and csp2["script-src"] == [h("var a=2")]
+    assert h("alert(document.cookie)") not in csp2["script-src"]
+    assert csp1["style-src"] == csp2["style-src"] == [h("p{}")]
+
+
+def test_non_page_responses_have_lockdown_csp(portal):
+    for m, path in (("GET", "/ai/api/me"), ("GET", "/ai/healthz"), ("GET", "/ai/nope"), ("GET", "/ai")):
+        h = headers_of(portal, m, path)[1]
+        csp = parse_csp(h["content-security-policy"])
+        assert csp["default-src"] == ["'none'"] and csp["frame-ancestors"] == ["'none'"], path
+
+
+def test_index_has_no_external_resources_or_inline_attrs():
+    """CSP 用 hash 放行的只有 <script>/<style> 块:内联属性(style="" / onclick="")、外链脚本/样式/字体
+    都会被拦 ⇒ 这里钉住页面里没有它们(否则浏览器里功能静默坏掉)。"""
+    import re
+    t = REAL_INDEX.read_text(encoding="utf-8")
+    assert "fonts.googleapis.com" not in t and "fonts.gstatic.com" not in t
+    assert not re.search(r"<(link|script|img|iframe)\b[^>]*\b(href|src)=\"https?://", t), "不许外链资源"
+    assert not re.search(r"<link\b", t), "不许 <link>(样式表 / preconnect 都算外链)"
+    markup = re.sub(r"<script>.*?</script>|<style>.*?</style>", "", t, flags=re.S)   # 只看标签,不看 JS 字符串
+    assert not re.search(r"<[a-z][^>]*\sstyle=\"", markup), "内联 style 属性会被 CSP 拦"
+    assert not re.search(r"<[a-z][^>]*\son[a-z]+=", markup), "内联事件属性会被 CSP 拦"
+    assert "<style>" in t and "<script>" in t      # POSITIVE:剥块的正则确实剥到了东西
+    assert t.count("<script>") == t.count("</script>") and "<script " not in t
+    assert t.count("<style>") == t.count("</style>") and "<style " not in t
+
+
+# ── P2-5 方法 / 错误页 ────────────────────────────────────────────────────
+def raw_http(p, data):
+    s = socket.create_connection(("127.0.0.1", p.port), 5)
+    s.sendall(data)
+    buf = b""
+    while True:
+        c = s.recv(65536)
+        if not c:
+            break
+        buf += c
+    s.close()
+    return buf.decode("utf-8", "replace")
+
+
+def test_head_is_get_without_body_only_on_safe_paths(portal):
+    s, h, b = headers_of(portal, "HEAD", "/ai/")
+    assert s == 200 and b == b"" and int(h["content-length"]) > 0 and "content-security-policy" in h
+    s, h, b = headers_of(portal, "HEAD", "/ai/healthz")
+    assert s == 200 and b == b""
+    # 有副作用 / 要会话的路径不给 HEAD
+    for path in ("/ai/auth/login", "/ai/auth/logout", "/ai/api/me", "/ai/api/keys"):
+        s, h, b = headers_of(portal, "HEAD", path)
+        assert s == 405 and b == b"" and "POST" in h["allow"], path
+    # HEAD /auth/login 不该建 state 行
+    assert portal.app.q("select count(*) from oauth_states", one=True)[0] == 0
+
+
+def test_head_logout_does_not_kill_session(portal):
+    sid = portal.sid("A")
+    c = http.client.HTTPConnection("127.0.0.1", portal.port, timeout=5)
+    c.request("HEAD", "/ai/auth/logout", headers={"Cookie": sid})
+    c.getresponse().read()
+    c.close()
+    assert portal.req("GET", "/ai/api/me", cookie=sid)[0] == 200
+
+
+def test_options_has_no_cors(portal):
+    c = http.client.HTTPConnection("127.0.0.1", portal.port, timeout=5)
+    c.request("OPTIONS", "/ai/api/keys/reveal", headers={"Origin": "https://evil.example",
+                                                         "Access-Control-Request-Method": "POST"})
+    r = c.getresponse()
+    r.read()
+    hs = {k.lower(): v for k, v in r.getheaders()}
+    c.close()
+    assert r.status == 204 and "POST" in hs["allow"]
+    assert not [k for k in hs if k.startswith("access-control-")]
+
+
+@pytest.mark.parametrize("line", [b"PUT /ai/api/keys HTTP/1.1", b"DELETE /ai/api/keys HTTP/1.1",
+                                  b"<script>alert(1)</script> /ai/ HTTP/1.1",
+                                  b'GET /ai/"><img src=x onerror=alert(1)> HTTP/1.1', b"GARBAGE",
+                                  b"GET /ai/ HTTP/9.9"])
+def test_bad_requests_get_uniform_json_no_python_banner(portal, line):
+    r = raw_http(portal, line + b"\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+    head, _, body = r.partition("\r\n\r\n")
+    assert "Python" not in head and "BaseHTTP" not in head, head
+    assert "Server: ai-portal" in head
+    j = json.loads(body)
+    assert j["message"] and "<" not in body and "alert" not in body, body
+    assert "content-security-policy" in head.lower()
+
+
+def test_unknown_method_is_405_with_allow(portal):
+    r = raw_http(portal, b"PATCH /ai/api/keys HTTP/1.1\r\nHost: x\r\n\r\n")
+    assert r.startswith("HTTP/1.1 405") or r.startswith("HTTP/1.0 405"), r[:40]
+    assert "Allow: GET, HEAD, POST, OPTIONS" in r
+
+
+def test_server_header_has_no_version(portal):
+    h = headers_of(portal, "GET", "/ai/healthz")[1]
+    assert h["server"] == "ai-portal"
+
+
+# ── P2-6 会话 TTL / 踢人 ──────────────────────────────────────────────────
+def test_session_ttl_is_4h(portal, clock):
+    assert S.DEFAULTS["SESSION_TTL"] == "14400"
+    st, loc, sid, _ = portal.login("A")
+    _, _, _, sc = portal.req("GET", "/ai/auth/login")       # 只为拿一份 cookie 串看属性
+    clock.t += 4 * 3600 - 5
+    assert portal.req("GET", "/ai/api/me", cookie=sid)[0] == 200    # POSITIVE:4h 内能用
+    clock.t += 10
+    assert portal.req("GET", "/ai/api/me", cookie=sid)[0] == 401
+
+
+def test_session_cookie_max_age_matches_ttl(portal):
+    _, _, loc, _ = portal.req("GET", "/ai/auth/login")
+    st, loc, sid, _ = portal.login("A")
+    # login() 吃掉了 Set-Cookie;重新走一遍拿原文
+    path = "/ai/auth/login"
+    s, _, loc, sc = portal.req("GET", path)
+    stc = cookie_of(sc, "ai_oauth")
+    _, _, loc2, _ = fake_get(loc + "&as=A")
+    _, _, _, sc3 = portal.req("GET", loc2[len(ORIGIN):], cookie="ai_oauth=" + stc)
+    c = [x for x in sc3 if x.startswith("ai_sid=")][0]
+    assert "Max-Age=14400" in c
+
+
+def test_kill_sessions_kicks_every_device_and_pending_codes(mportal):
+    p = mportal
+    s1, s2 = p.sid("A"), p.sid("A")
+    s3 = magic_sid(p, "A")                                   # 第三台:一次性登录链接
+    sb = p.sid("B")
+    code = p.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=s1)[1]["code"]
+    pending_magic = tok_of(issue(p, "A")[1]["url"])          # 还没点的登录链接
+    r = p.app.kill_user(USERS["A"]["union_id"])
+    assert r == {"sessions": 3, "install_codes": 1, "magic_tokens": 1}
+    for s in (s1, s2, s3):
+        assert p.req("GET", "/ai/api/me", cookie=s)[0] == 401
+    assert _redeem(p, code, ip="10.6.6.6")[0] == 400, "踢人之前签的安装码不能再换出明文"
+    assert consume(p, pending_magic, ip="10.6.6.7")[0] == 400, "踢人之前签的登录链接不能再用"
+    # POSITIVE:别人不受影响
+    assert p.req("GET", "/ai/api/me", cookie=sb)[0] == 200
+    # 踢完他还能重新登录(踢人 ≠ 封号;封号要在表/网关上停 key)
+    assert p.req("GET", "/ai/api/me", cookie=p.sid("A"))[0] == 200
+
+
+def test_kill_sessions_unguarded_logout_only_kills_one(portal):
+    """反向对照:没有踢人入口时,只能退出当前这一条,其他设备上的 cookie 照样能用(红队 4.3)。"""
+    s1, s2 = portal.sid("A"), portal.sid("A")
+    portal.req("POST", "/ai/auth/logout", {}, cookie=s1)
+    assert portal.req("GET", "/ai/api/me", cookie=s2)[0] == 200
+
+
+def test_kill_sessions_rejects_bad_id(portal):
+    for bad in ("", "on_", "%", "on_a' or 1=1 --", None):
+        with pytest.raises(ValueError):
+            portal.app.kill_user(bad)
+
+
+def test_kill_sessions_cli(fake, tmp_path, clock):
+    """真进程跑 `server.py --env … --kill-sessions on_xxx`:踢完退出,不起服务;输出不带完整 union_id。"""
+    FAKE.reset()
+    FAKE.tables[KEYTBL] = seed()
+    cfg = make_cfg(fake, tmp_path)
+    p = Portal(fake, cfg, clock)
+    try:
+        sid, sb = p.sid("A"), p.sid("B")
+        env = tmp_path / "k.env"
+        env.write_text("\n".join("%s=%s" % (k, cfg[k]) for k in (
+            "FEISHU_APP_ID", "FEISHU_APP_SECRET", "SESSION_SECRET", "DB_PATH", "FEISHU_OPEN_BASE")), encoding="utf-8")
+        r = subprocess.run([sys.executable, str(HERE / "server.py"), "--env", str(env),
+                            "--kill-sessions", USERS["A"]["union_id"]],
+                           capture_output=True, text=True, timeout=30,
+                           env={k: v for k, v in os.environ.items() if k not in S.DEFAULTS and k not in S.REQUIRED})
+        assert r.returncode == 0, r.stderr
+        assert "已踢" in r.stdout and "会话 1 条" in r.stdout and USERS["A"]["union_id"] not in r.stdout, r.stdout
+        assert p.req("GET", "/ai/api/me", cookie=sid)[0] == 401
+        assert p.req("GET", "/ai/api/me", cookie=sb)[0] == 200
+        bad = subprocess.run([sys.executable, str(HERE / "server.py"), "--env", str(env), "--kill-sessions", "nope"],
+                             capture_output=True, text=True, timeout=30,
+                             env={k: v for k, v in os.environ.items() if k not in S.DEFAULTS and k not in S.REQUIRED})
+        assert bad.returncode == 1
+    finally:
+        p.close()
+
+
+# ── P1-1 补充:my_rows 缓存 + 写操作失效 ──────────────────────────────────
+def searches():
+    return len([c for c in FAKE.calls if c[1].endswith("/records/search")])
+
+
+def test_my_rows_cache_cuts_feishu_calls(portal_factory, clock):
+    p = portal_factory(MY_ROWS_TTL="15")
+    sa = p.sid("A")
+    FAKE.calls.clear()
+    assert p.req("GET", "/ai/api/keys", cookie=sa)[0] == 200
+    one = searches()                        # 一次真查 = 假飞书分页的页数
+    assert one >= 1
+    for _ in range(4):
+        assert p.req("GET", "/ai/api/keys", cookie=sa)[0] == 200
+    assert searches() == one, "TTL 内的 4 次全部吃缓存"
+    clock.t += 16
+    p.req("GET", "/ai/api/keys", cookie=sa)
+    assert searches() == 2 * one, "过了 TTL 要重新查"
+    # 按人隔离:B 的请求不吃 A 的缓存,也拿不到 A 的行
+    n = searches()
+    kb = p.req("GET", "/ai/api/keys", cookie=p.sid("B"))[1]["keys"]
+    assert searches() > n and [k["record_id"] for k in kb] == ["recB1"]
+
+
+def test_my_rows_cache_unguarded_ttl0(portal_factory):
+    """反向对照:TTL=0 ⇒ 每次都打飞书(证明上一条的 1 次来自缓存)。"""
+    p = portal_factory(MY_ROWS_TTL="0")
+    sa = p.sid("A")
+    FAKE.calls.clear()
+    p.req("GET", "/ai/api/keys", cookie=sa)
+    one = searches()
+    for _ in range(4):
+        p.req("GET", "/ai/api/keys", cookie=sa)
+    assert searches() == 5 * one
+
+
+def test_rotate_invalidates_cache_so_page_shows_new_key(rotate_portal):
+    p = rotate_portal(MY_ROWS_TTL="30")
+    sa = p.sid("A")
+    before = [k for k in p.req("GET", "/ai/api/keys", cookie=sa)[1]["keys"] if k["current"]][0]
+    assert before["masked"] == S.mask_key(KEY_A1)
+    s, d = do_rotate(p, sa)[:2]
+    assert s == 200 and d["key"] != KEY_A1
+    after = [k for k in p.req("GET", "/ai/api/keys", cookie=sa)[1]["keys"] if k["current"]][0]
+    assert after["masked"] == S.mask_key(d["key"]), "重置后页面必须马上看到新 key(缓存已失效)"
+    # 签码 → 换出来的也是新 key
+    c = p.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sa)[1]["code"]
+    assert _redeem(p, c, ip="10.4.4.5")[1]["key"] == d["key"]
+
+
+def test_rotate_cache_unguarded_shows_stale_key(rotate_portal, monkeypatch):
+    """反向对照:不失效缓存 ⇒ 重置后页面还显示旧 key。证明上一条测得出缺失效的 bug。"""
+    p = rotate_portal(MY_ROWS_TTL="30")
+    monkeypatch.setattr(p.app, "drop_rows_cache", lambda uid: None)
+    sa = p.sid("A")
+    p.req("GET", "/ai/api/keys", cookie=sa)
+    d = do_rotate(p, sa)[1]
+    after = [k for k in p.req("GET", "/ai/api/keys", cookie=sa)[1]["keys"] if k["current"]][0]
+    assert after["masked"] == S.mask_key(KEY_A1) != S.mask_key(d["key"])
+
+
+def test_reveal_and_redeem_bypass_cache_after_admin_disables(portal_factory):
+    """管理员在表里停用 key:列表最多 TTL 秒后跟上,但**交明文**的两条路(reveal / redeem)立刻拒。"""
+    p = portal_factory(MY_ROWS_TTL="60")
+    sa = p.sid("A")
+    p.req("GET", "/ai/api/keys", cookie=sa)                          # 填缓存
+    code = p.req("POST", "/ai/api/install-code", {"tool": "cursor"}, cookie=sa)[1]["code"]
+    FAKE.tables[KEYTBL]["recA1"]["状态"] = "已禁用"
+    s, _ = p.req("POST", "/ai/api/keys/reveal", {"record_id": "recA1"}, cookie=sa)[:2]
+    assert s == 403
+    s, d = _redeem(p, code, ip="10.4.4.6")
+    assert s == 200 and d["key"] != KEY_A1, "停用后 redeem 换出来的不能是那把被停的"
+
+
+def test_apply_invalidates_cache(portal_factory):
+    p = portal_factory(MY_ROWS_TTL="60", APPLY_DRY_RUN="0")
+    sn = p.sid("N")
+    assert p.req("GET", "/ai/api/keys", cookie=sn)[1]["keys"] == []
+    assert p.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sn)[0] == 200
+    ks = p.req("GET", "/ai/api/keys", cookie=sn)[1]["keys"]
+    assert len(ks) == 1 and ks[0]["record_id"].startswith("recNEW"), "申请后页面要马上看到「生成中」那一行"
+
+
+def test_cache_returns_copies(portal_factory):
+    """缓存里的行不能被调用方改脏(keys() 会往外打码,rotate 会读 extra_keys)。"""
+    p = portal_factory(MY_ROWS_TTL="60")
+    u = {"union_id": USERS["A"]["union_id"]}
+    r1 = p.app.my_rows(u)
+    r1[0]["key"] = "tampered"
+    assert p.app.my_rows(u)[0]["key"] != "tampered"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 外部人旅程(11-04 外部用户体验走查,.work/ai-portal/external/)
+# ════════════════════════════════════════════════════════════════════════
+def _fb_rows():
+    return list(FAKE.tables.get(FBTBL, {}).values())
+
+
+def test_external_review_request_actually_lands_in_feedback_table(portal):
+    """🔴 原来写 type="其他"(不在「类型」选项里)⇒ build_fields 抛错被吞 ⇒ 待审核申请一条都进不了反馈表。"""
+    portal.app.cfg["APPLY_ALLOW_EXTERNAL"] = "0"
+    try:
+        sx = portal.sid("X")
+        s, d = portal.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sx)[:2]
+        assert s == 200 and d.get("review") is True, d
+        rows = [f for f in _fb_rows() if "申请 key" in f.get("一句话说明", "")]
+        assert len(rows) == 1, _fb_rows()
+        f = rows[0]
+        assert f["类型"] in S.fb.CHOICES["类型"] and f["工具"] in S.fb.CHOICES["工具"]
+        # 管理员拿到这一行就能处理:有 union_id、有处理步骤
+        assert USERS["X"]["union_id"] in f["详细描述"] and "key 表新建一行" in f["详细描述"]
+        # 24 小时内重复点 ⇒ 不刷屏
+        portal.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sx)
+        assert len([f for f in _fb_rows() if "申请 key" in f.get("一句话说明", "")]) == 1
+    finally:
+        portal.app.cfg["APPLY_ALLOW_EXTERNAL"] = "1"
+
+
+def test_review_request_type_is_a_real_choice_unguarded():
+    """放开对照:旧值 "其他" 确实过不了 build_fields(证明上一条测的是那个修复,不是桩宽松)。"""
+    with pytest.raises(ValueError):
+        S.fb.build_fields(S.App.feedback_form({"type": "其他", "tool": "其他", "title": "x"}), "")
+    S.fb.build_fields(S.App.feedback_form({"type": "其他建议", "tool": "其他", "title": "x"}), "")
+
+
+def test_me_reports_pending_review_so_reload_shows_it(portal):
+    portal.app.cfg["APPLY_ALLOW_EXTERNAL"] = "0"
+    try:
+        sx = portal.sid("X")
+        assert portal.req("GET", "/ai/api/me", cookie=sx)[1]["apply_review_at"] == 0
+        portal.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sx)
+        me = portal.req("GET", "/ai/api/me", cookie=sx)[1]
+        assert me["apply_review_at"] > 0 and me["apply_external_review"] is True
+        # 内部人永远是 0(他们不走审核)
+        assert portal.req("GET", "/ai/api/me", cookie=portal.sid("A"))[1]["apply_review_at"] == 0
+        assert [r[0] for r in portal.app.list_apply_requests()] == [USERS["X"]["union_id"]]
+    finally:
+        portal.app.cfg["APPLY_ALLOW_EXTERNAL"] = "1"
+
+
+def test_external_feedback_tag_identifies_the_person(portal):
+    """机器人签链接不传名字 ⇒ 外部人 name 常为空;人员格还可能写不进 ⇒ 描述里必须带 union_id。"""
+    FAKE.fail_create_person = True
+    sx = portal.sid("X")
+    s, d = portal.req("POST", "/ai/api/feedback", {"title": "被公司电脑拦了", "类型": "用不了/报错", "工具": "Cursor"},
+                      cookie=sx)[:2]
+    assert s == 200, d
+    f = _fb_rows()[-1]
+    assert "提交人" not in f and USERS["X"]["union_id"] in f["详细描述"] and "(外部)" in f["详细描述"]
+    # 内部人的描述里不加 id(他们有人员格 + 邮箱)
+    FAKE.fail_create_person = False
+    portal.req("POST", "/ai/api/feedback", {"title": "t", "类型": "其他建议", "工具": "其他"}, cookie=portal.sid("A"))
+    assert USERS["A"]["union_id"] not in _fb_rows()[-1]["详细描述"]
+
+
+def test_oauth_20010_sends_external_user_back_to_bot_path(portal, monkeypatch):
+    """外部公司点了内部登录按钮 ⇒ 飞书 20010 ⇒ 回首页 login_error=external,而不是一页「飞书登录失败,请重试」。"""
+    def boom(*a, **k):
+        raise S.FeishuError("oauth/token", 20010, "user has no app permission")
+    monkeypatch.setattr(portal.app.client, "exchange_code", boom)
+    _, _, loc0, sc0 = portal.req("GET", "/ai/auth/login")
+    _, _, loc2, _ = fake_get(loc0 + "&as=X")
+    st, _, loc, sc = portal.req("GET", loc2[len(ORIGIN):], cookie="ai_oauth=" + cookie_of(sc0, "ai_oauth"))
+    assert st == 302 and loc == "/ai/?login_error=external" and not cookie_of(sc, "ai_sid"), (st, loc)
+    # 对照:别的飞书错误码仍是原来的 502 页
+    def boom2(*a, **k):
+        raise S.FeishuError("oauth/token", 20003, "invalid_grant")
+    monkeypatch.setattr(portal.app.client, "exchange_code", boom2)
+    _, _, loc0, sc0 = portal.req("GET", "/ai/auth/login")
+    _, _, loc2, _ = fake_get(loc0 + "&as=X")
+    st, _, loc, _ = portal.req("GET", loc2[len(ORIGIN):], cookie="ai_oauth=" + cookie_of(sc0, "ai_oauth"))
+    assert st == 502 and not loc
+
+
+def test_frontend_external_copy_has_no_dead_internal_links():
+    """外部人能看到的页面上,不能出现外部人打不开的内部资源(飞书表格分享链接、内部群、内部人名)。"""
+    h = (HERE / "static" / "index.html").read_text(encoding="utf-8")
+    for bad in ("feishu.cn/share/base", "feishu.cn/wiki", "feishu.cn/docx", "符金冬", "刘国现"):
+        assert bad not in h, bad
+    # 有外部人专属提示,且 login_error=external 有对应文案
+    assert 'class="sub ext-only"' in h and "external:" in h and "is-ext" in h
+    # CSP 只放行 hash 过的内联块 ⇒ 不许 style= 属性 / on*= 内联事件
+    #   (只查标记部分;内联的二维码库 JS 字符串里有 '<table style=',那是它自己的降级分支,不是页面标记)
+    import re as _re
+    markup = _re.sub(r"<script\b.*?</script>", "", h, flags=_re.S)
+    assert not _re.search(r'<[^>]+\sstyle="', markup) and not _re.search(r'<[^>]+\son[a-z]+="', markup)

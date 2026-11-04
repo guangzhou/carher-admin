@@ -135,7 +135,8 @@ def pick(v, field):
     return v if v in CHOICES[field] else None
 
 
-def create(user, form):
+def build_fields(form, email):
+    """校验表单 + 组「反馈」表字段(不含 提交人/截图)。scripts/ai-portal 也复用这一份,别各抄一遍。"""
     title = (form.get("title") or "").strip()[:200]
     if not title:
         raise ValueError("「一句话说明」不能空")
@@ -149,12 +150,17 @@ def create(user, form):
         "类型": form["类型"], "工具": form["工具"],
         "详细描述": detail,
         "来源页面": (form.get("source") or "")[:300],
-        "提交人邮箱": user["email"],
+        "提交人邮箱": email,
         "状态": "新提交",
     }
     for f in ("电脑", "紧急程度"):
         if pick(form.get(f), f):
             fields[f] = form[f]
+    return fields
+
+
+def create(user, form):
+    fields = build_fields(form, user["email"])
     if user["open_id"]:
         fields["提交人"] = [{"id": user["open_id"]}]
     imgs = form.get("images") or []

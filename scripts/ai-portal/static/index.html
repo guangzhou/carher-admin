@@ -1,0 +1,992 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="same-origin">
+<title>AI 工具自助台</title>
+<!-- 挂在 https://chat.auto-link.com.cn/ai/ 。单文件：CSS/JS/二维码库全部内联，不引第三方脚本。
+     接口约定见 dev_mock.py 顶部注释。🔴 key 明文：只在点「显示/复制」时现取，
+     不进 URL / localStorage / console；显示 30 秒后重新打码，复制完立刻丢掉变量。
+     localStorage 只存「选了哪个工具 / 哪个系统」两个偏好。 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&display=swap">
+<style>
+/* 视觉延续 scripts/agent-oneclick-docs/oneclick-all.html：同一套变量、左侧编号引导线、三张工具卡 */
+:root{
+  --bg:#f5f6f8; --surface:#ffffff; --fg:#151c27; --muted:#5d6878; --line:#e0e4ea; --rail:#cfd5de;
+  --code-bg:#eef1f5; --accent:#2f5bd3; --on-t:#ffffff; --t:#151c27;
+  --cursor:#2b3a52; --codex:#0d7a6b; --claude:#b3532b;
+  --ok:#11795a; --ok-bg:#e3f4ec; --warn:#8a5a00; --warn-bg:#fff6e5; --warn-line:#e8c57a;
+  --err:#b42318; --err-bg:#fdecea; --err-line:#f2b8b1; --ext:#6b3fb8; --ext-bg:#f0eafb;
+  --font-body:"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono","SF Mono",Consolas,"Liberation Mono",monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0f141b; --surface:#171e28; --fg:#e7ecf3; --muted:#9aa6b6; --line:#29323f; --rail:#344050;
+  --code-bg:#1f2834; --accent:#86a7ff; --on-t:#0f141b; --t:#e7ecf3;
+  --cursor:#c9d4e6; --codex:#3fc2ad; --claude:#ec8d61;
+  --ok:#4fd1a1; --ok-bg:#12302a; --warn:#f0c068; --warn-bg:#2a2314; --warn-line:#5c4a22;
+  --err:#ff9b8f; --err-bg:#3a1916; --err-line:#6b2b25; --ext:#c3a6ff; --ext-bg:#2a2040; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f141b; --surface:#171e28; --fg:#e7ecf3; --muted:#9aa6b6; --line:#29323f; --rail:#344050;
+  --code-bg:#1f2834; --accent:#86a7ff; --on-t:#0f141b; --t:#e7ecf3;
+  --cursor:#c9d4e6; --codex:#3fc2ad; --claude:#ec8d61;
+  --ok:#4fd1a1; --ok-bg:#12302a; --warn:#f0c068; --warn-bg:#2a2314; --warn-line:#5c4a22;
+  --err:#ff9b8f; --err-bg:#3a1916; --err-line:#6b2b25; --ext:#c3a6ff; --ext-bg:#2a2040; color-scheme:dark}
+
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-body);font-size:15.5px;line-height:1.75;
+  padding-left:max(20px,env(safe-area-inset-left,0px));padding-right:max(20px,env(safe-area-inset-right,0px));padding-block:28px 64px;overflow-wrap:break-word}
+body.tool-cursor{--t:var(--cursor)} body.tool-codex{--t:var(--codex)} body.tool-claude{--t:var(--claude)}
+.wrap{max-width:820px;margin:0 auto}
+p{margin:0}
+a{color:var(--accent);text-underline-offset:3px}
+a:focus-visible,button:focus-visible,summary:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+[hidden]{display:none!important}
+code{font-family:var(--font-mono);font-size:.88em;background:var(--code-bg);padding:1px 6px;border-radius:4px;word-break:break-all}
+.sub{font-size:14px;color:var(--muted)}
+.nb{white-space:nowrap;display:inline-block}
+.skip:focus{position:fixed!important;left:12px;top:12px;width:auto;height:auto;clip:auto;margin:0;z-index:9;background:var(--surface);color:var(--accent);border:1px solid var(--line);border-radius:8px;padding:6px 12px}
+.sr{position:absolute!important;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;margin:-1px}
+
+/* 按钮 */
+.btn{appearance:none;display:inline-flex;align-items:center;justify-content:center;gap:8px;background:var(--t);color:var(--on-t);
+  font:inherit;font-weight:700;font-size:15px;text-decoration:none;border:1.5px solid var(--t);padding:8px 18px;border-radius:9px;
+  min-height:42px;cursor:pointer;line-height:1.4;text-align:center}
+.btn:hover{opacity:.9}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.alt{background:none;color:var(--t)}
+.btn.ghost{background:var(--surface);color:var(--fg);border-color:var(--line);font-weight:500}
+.btn.ghost:hover{border-color:var(--muted);opacity:1}
+.btn.sm{min-height:34px;padding:4px 12px;font-size:13.5px;border-radius:7px}
+.btn.big{min-height:52px;font-size:16.5px;padding:12px 26px;border-radius:11px}
+.btn.done{background:var(--ok);border-color:var(--ok);color:#fff}
+.btn.feishu{background:#3370ff;border-color:#3370ff;color:#fff}
+
+/* 顶栏 */
+.top{display:flex;align-items:center;justify-content:space-between;gap:8px 16px;flex-wrap:wrap;margin-bottom:26px;min-height:42px}
+.brand{font-weight:900;font-size:17px;letter-spacing:.02em;display:flex;align-items:center;gap:8px}
+.brand i{width:10px;height:10px;border-radius:3px;background:linear-gradient(135deg,var(--cursor),var(--codex) 50%,var(--claude));display:inline-block}
+.who{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap;font-size:14.5px}
+.who b{font-weight:700}
+.tag{display:inline-block;font-size:12px;font-weight:700;line-height:1.5;padding:1px 8px;border-radius:999px;white-space:nowrap}
+.tag.ext{color:var(--ext);background:var(--ext-bg)}
+.who a{font-size:14px}
+
+/* 通用卡片 / 提示条 */
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.note{border-radius:10px;padding:11px 14px;font-size:14px;border:1px solid var(--warn-line);background:var(--warn-bg)}
+.note.err{border-color:var(--err-line);background:var(--err-bg);color:var(--fg)}
+.note.err b{color:var(--err)}
+.note.ok{border-color:transparent;background:var(--ok-bg)}
+
+/* 未登录 */
+.hero{max-width:600px;margin:6vh auto 0;display:flex;flex-direction:column;gap:22px}
+.hero h1{font-size:30px;font-weight:900;line-height:1.3;margin:0;text-wrap:balance}
+.hero .lead{color:var(--muted);font-size:16px;margin-top:8px}
+.trio{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;counter-reset:t;list-style:none;margin:0;padding:0}
+.trio li{counter-increment:t;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 14px;font-size:14px;line-height:1.55;min-width:0}
+.trio li::before{content:counter(t);display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--fg);color:var(--bg);font-size:13px;font-weight:700;margin-bottom:6px}
+.trio b{display:block;font-size:15px}
+.trio span{color:var(--muted)}
+.lcard h2{margin:0;font-size:17px;display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px}
+.lcard h2 .sub{font-weight:400}
+.magic{max-width:480px;margin:10vh auto 0;display:flex;flex-direction:column;gap:16px}
+.magic h1{font-size:24px;font-weight:900;margin:0;line-height:1.35}
+
+/* 引导线（同 oneclick-all.html） */
+.flow{counter-reset:step;display:flex;flex-direction:column}
+.step{display:grid;grid-template-columns:44px minmax(0,1fr);gap:0 18px;counter-increment:step;position:relative;padding-bottom:34px}
+.step::before{content:counter(step);grid-row:1 / span 2;width:36px;height:36px;border-radius:50%;background:var(--t);color:var(--on-t);
+  font-weight:700;font-size:16px;display:grid;place-items:center;margin-top:2px;justify-self:center;position:relative;z-index:1}
+.step::after{content:"";position:absolute;left:21px;top:42px;bottom:4px;width:2px;background:var(--rail)}
+.step.last::after{display:none}
+.step.off::before{background:var(--rail);color:var(--muted)}
+.step h2{margin:0 0 12px;font-size:19px;font-weight:700;line-height:1.5;text-wrap:balance;display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px}
+.step h2 .sub{font-weight:400}
+.body{display:flex;flex-direction:column;gap:12px;min-width:0}
+
+/* key 列表 */
+.keys{display:flex;flex-direction:column;gap:10px}
+.krow{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px;display:grid;
+  grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"meta acts" "val acts";gap:4px 14px;align-items:center}
+.krow .meta{grid-area:meta;display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;min-width:0}
+.krow .type{font-weight:700}
+.krow .val{grid-area:val;font-family:var(--font-mono);font-size:14px;color:var(--muted);word-break:break-all;min-width:0;font-variant-ligatures:none}
+.krow .val.plain{color:var(--fg)}
+.krow .acts{grid-area:acts;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.krow.dim{opacity:.66}
+.st{font-size:12.5px;font-weight:700;padding:1px 9px;border-radius:999px;line-height:1.6;white-space:nowrap}
+.st.ok{color:var(--ok);background:var(--ok-bg)}
+.st.pend{color:var(--warn);background:var(--warn-bg)}
+.st.off,.st.dis{color:var(--muted);background:var(--code-bg)}
+.st.fail{color:var(--err);background:var(--err-bg)}
+.krow .why{grid-column:1 / -1;font-size:13.5px;color:var(--muted);font-family:var(--font-body)}
+.krow.fail .why{color:var(--err)}
+.krow.fail{border-color:var(--err-line)}
+details.hist{padding:9px 16px}
+details.hist summary{font-weight:500;color:var(--muted);font-size:14.5px}
+details.hist .keys{margin-top:2px}
+.hint30{font-size:12.5px;color:var(--muted);font-family:var(--font-body)}
+.pending{display:flex;gap:12px;align-items:flex-start}
+.spin{flex:none;width:18px;height:18px;border-radius:50%;border:2.5px solid var(--warn-line);border-top-color:var(--warn);animation:sp 1s linear infinite;margin-top:4px}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
+
+/* 外部用户：先跟机器人说话 */
+.botbox{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+/* 🔴 padding = 二维码静默区。位图贴边，37 模块画在 164px 内容区 ≈4.4px/模块，22px ≈ 5 模块（≥4 才扫得稳），别改小 */
+#qr{width:208px;height:208px;flex:none;background:#fff;padding:22px;border-radius:10px;border:1px solid var(--line)}
+#qr img,#qr canvas{display:block;width:100%;height:auto;image-rendering:pixelated}
+.botbox .txt{flex:1 1 220px;min-width:0;display:flex;flex-direction:column;gap:10px}
+ol.list{margin:0;padding-left:1.25em;display:flex;flex-direction:column;gap:4px}
+ol.list li::marker{color:var(--muted)}
+
+/* 一键配置 */
+.tools{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.tool{appearance:none;font:inherit;text-align:left;cursor:pointer;background:var(--surface);color:var(--fg);border:1.5px solid var(--line);border-radius:12px;
+  padding:12px 16px;display:flex;flex-direction:column;gap:0;min-width:0;position:relative}
+.tool b{font-size:17px}
+.tool span{font-size:13.5px;color:var(--muted)}
+.tool:hover{border-color:var(--muted)}
+.tool[aria-checked="true"]{border-color:var(--c);box-shadow:0 0 0 1px var(--c) inset}
+.tool[aria-checked="true"] b{color:var(--c)}
+.tool[aria-checked="true"]::after{content:"✓";position:absolute;top:10px;right:12px;width:22px;height:22px;border-radius:50%;background:var(--c);color:var(--on-t);font-size:13px;display:grid;place-items:center;font-weight:700}
+.tool[data-tool="cursor"]{--c:var(--cursor)} .tool[data-tool="codex"]{--c:var(--codex)} .tool[data-tool="claude"]{--c:var(--claude)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--surface)}
+.seg button{appearance:none;font:inherit;font-size:14px;border:0;background:none;color:var(--muted);padding:6px 14px;cursor:pointer;min-height:36px}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-checked="true"]{background:var(--t);color:var(--on-t);font-weight:700}
+.osline{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;font-size:14px;color:var(--muted)}
+.cmdbox{background:var(--code-bg);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.cmdhead{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px 12px;font-size:13.5px;color:var(--muted)}
+.cmdhead .where b{color:var(--fg)}
+.cmd{margin:0;font-family:var(--font-mono);font-size:14px;line-height:1.65;white-space:pre-wrap;word-break:break-all;color:var(--fg);
+  font-variant-ligatures:none;font-feature-settings:"liga" 0,"calt" 0;min-height:3.3em}
+.cmd .code{background:var(--surface);border-radius:4px;padding:0 4px;font-weight:700;color:var(--t);white-space:nowrap;display:inline-block}
+.cmd.stale{opacity:.45}
+.cmdfoot{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
+.timer{font-size:13.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.timer.soon{color:var(--warn)}
+.does{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;list-style:none;margin:0;padding:0}
+.does li{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:14px;line-height:1.55;min-width:0}
+.does b{display:block}
+.does span{color:var(--muted);font-size:13.5px}
+.placeholder{font-size:12px;font-weight:700;color:var(--warn);background:var(--warn-bg);border:1px dashed var(--warn-line);border-radius:6px;padding:0 6px;white-space:nowrap}
+
+/* 反馈 */
+form.fb{display:flex;flex-direction:column;gap:14px}
+.field{display:flex;flex-direction:column;gap:6px;min-width:0;border:0;margin:0;padding:0}
+.field > label,.field > legend{font-weight:700;font-size:14.5px;padding:0}
+.field .sub{font-weight:400}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chips label{position:relative;cursor:pointer}
+.chips input{position:absolute;opacity:0;width:1px;height:1px}
+.chips span{display:inline-block;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:4px 13px;font-size:14px;line-height:1.6}
+.chips input:checked + span{border-color:var(--t);background:var(--t);color:var(--on-t);font-weight:700}
+.chips input:focus-visible + span{outline:2px solid var(--accent);outline-offset:2px}
+input[type=text],textarea{width:100%;font:inherit;font-size:15px;padding:9px 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--fg)}
+textarea{min-height:96px;resize:vertical;line-height:1.6}
+textarea.mono{font-family:var(--font-mono);font-size:13px;min-height:72px}
+input[type=file]{font:inherit;font-size:14px;color:var(--muted);max-width:100%}
+.fb-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
+
+details{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:11px 18px;min-width:0}
+summary{cursor:pointer;font-weight:700}
+details[open] summary{margin-bottom:10px}
+footer{color:var(--muted);font-size:12.5px;margin:6px 0 0 62px}
+
+/* 全屏的加载/出错 */
+.center{max-width:520px;margin:10vh auto 0;display:flex;flex-direction:column;gap:14px;align-items:flex-start}
+.skel{height:14px;border-radius:7px;background:var(--line);opacity:.7}
+
+/* 系统切换：mac-only / win-only / linux-only；unix-only = Mac+Linux */
+body.os-mac .win-only, body.os-mac .linux-only,
+body.os-win .mac-only, body.os-win .linux-only, body.os-win .unix-only,
+body.os-linux .mac-only, body.os-linux .win-only{display:none!important}
+body:not(.tool-cursor) .for-cursor{display:none!important}
+
+@media (max-width:640px){
+  body{padding-block:16px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+  .hero{margin-top:2vh}
+  .hero h1{font-size:25px}
+  .trio,.does{grid-template-columns:1fr}
+  .trio{gap:8px}
+  .trio li{display:grid;grid-template-columns:24px minmax(0,1fr);gap:0 12px;align-items:center;padding:10px 14px}
+  .trio li::before{grid-row:1 / span 2;margin:0}
+  .tools{grid-template-columns:1fr;gap:8px}
+  .tool{flex-direction:row;align-items:baseline;gap:10px;padding:10px 14px}
+  .step{grid-template-columns:30px minmax(0,1fr);gap:0 12px}
+  .step::before{width:28px;height:28px;font-size:14px}
+  .step::after{left:14px;top:34px}
+  .step h2{font-size:17.5px}
+  .krow{grid-template-columns:minmax(0,1fr);grid-template-areas:"meta" "val" "acts"}
+  .krow .acts{justify-content:flex-start}
+  footer{margin-left:0}
+  #qr{width:176px;height:176px;padding:20px}
+  .cmd{font-size:13px}
+}
+</style>
+</head>
+<body class="tool-cursor os-mac">
+<a href="#main" class="sr skip">跳到正文</a>
+<!-- 所有「已复制 / 出错」都在这里播报给读屏；视觉上各按钮自己变字 -->
+<div id="live" class="sr" aria-live="polite" aria-atomic="true"></div>
+<div id="alert" class="sr" role="alert" aria-atomic="true"></div>
+
+<div class="wrap">
+<header class="top">
+  <div class="brand"><i aria-hidden="true"></i>AI 工具自助台</div>
+  <div class="who" id="who" hidden>
+    <span>你好，<b id="who-name"></b></span>
+    <span class="tag ext" id="who-ext" hidden title="你登录的飞书账号不属于本公司">外部合作方</span>
+    <button type="button" class="btn ghost sm" id="logout">退出</button>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+
+<!-- ═══ 加载中 ═══ -->
+<section id="v-loading" class="center" aria-busy="true" aria-label="正在加载">
+  <div class="skel" style="width:60%"></div><div class="skel" style="width:90%"></div><div class="skel" style="width:75%"></div>
+</section>
+
+<!-- ═══ 未登录 ═══ -->
+<section id="v-login" class="hero" hidden aria-labelledby="login-h">
+  <div>
+    <h1 id="login-h">用飞书登录，<span class="nb">自己拿 key</span><br><span class="nb">一行命令</span><span class="nb">装好 AI 工具</span></h1>
+    <p class="lead">Cursor、Codex、Claude Code 三个工具都能装。不用找人要 key，不用下载一堆文件。</p>
+  </div>
+  <ol class="trio">
+    <li><b>登录</b><span>同事一键登录，外部找机器人要链接</span></li>
+    <li><b>看到你的 key</b><span>没有就点一下申请</span></li>
+    <li><b>复制一行命令</b><span>粘进终端，自动装好</span></li>
+  </ol>
+  <div id="login-err" class="note err" role="alert" hidden></div>
+  <div class="card lcard">
+    <h2>本公司同事</h2>
+    <div><a class="btn feishu big" id="login-btn" href="/ai/auth/login">用飞书登录</a></div>
+    <p class="sub">用你的工作飞书一键登录。这个按钮只认本公司账号。</p>
+  </div>
+  <div class="card lcard">
+    <h2>外部合作方 / 飞书个人版</h2>
+    <p>在飞书里给机器人「ai管理的her」发一句 <b>登录</b>，它会回你一个登录链接，点开就进来了（10 分钟内有效）。</p>
+    <div class="botbox">
+      <div id="qr" role="img" aria-label="二维码：用飞书扫一扫打开机器人 ai管理的her"></div>
+      <div class="txt">
+        <a class="btn feishu" href="https://applink.feishu.cn/client/bot/open?appId=cli_aa8505afb0f89cb2" target="_blank" rel="noopener">用飞书打开机器人</a>
+        <p class="sub">手机上用<b>飞书的「扫一扫」</b>扫这个码（微信、相机扫不开）。</p>
+        <p class="sub">第一次打开会先看到机器人介绍：点「申请使用」→「开启单聊」，再发「登录」。</p>
+      </div>
+    </div>
+    <p class="sub">上面那个「用飞书登录」按钮对外部公司和个人版账号不管用（飞书会拒绝），请走这里。</p>
+  </div>
+  <p class="sub">登录只用来认出你是谁，我们拿不到你的飞书密码，也不读你的聊天记录。</p>
+</section>
+
+<!-- ═══ 机器人发的一次性登录链接落地：/ai/auth/magic?t=… ═══
+     只显示一个按钮，点了才 POST。飞书会预取链接做预览，GET 落地就消耗 token 的话，人还没点就失效了。 -->
+<section id="v-magic" class="magic" hidden aria-labelledby="magic-h">
+  <h1 id="magic-h">确认登录 AI 工具自助台</h1>
+  <p id="magic-lead" class="sub">这是机器人发给你的登录链接。点下面的按钮就登录了，这个链接只能用一次。</p>
+  <div><button type="button" class="btn feishu big" id="magic-btn">确认登录</button></div>
+  <div id="magic-err" class="note err" role="alert" hidden>
+    <span id="magic-err-msg"></span>
+    <div class="row" style="margin-top:10px">
+      <a class="btn feishu sm" href="https://applink.feishu.cn/client/bot/open?appId=cli_aa8505afb0f89cb2" target="_blank" rel="noopener">用飞书打开机器人</a>
+      <a class="sub" href="/ai/">回首页</a>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 整页出错（/me 都拿不到） ═══ -->
+<section id="v-fatal" class="center" hidden aria-labelledby="fatal-h">
+  <h1 id="fatal-h" style="font-size:22px;margin:0">页面没加载出来</h1>
+  <p id="fatal-msg" class="sub"></p>
+  <button type="button" class="btn" id="fatal-retry">重新加载</button>
+</section>
+
+<!-- ═══ 登录后 ═══ -->
+<div id="v-app" hidden>
+<div class="flow">
+
+  <!-- ① 我的 key -->
+  <section class="step" id="s-keys" aria-labelledby="keys-h">
+    <h2 id="keys-h">我的 key <span class="sub">三个工具共用这一把</span></h2>
+    <div class="body">
+      <div id="keys-loading" class="krow" aria-busy="true"><div class="meta"><div class="skel" style="width:120px"></div></div><div class="val"><div class="skel" style="width:220px;margin-top:6px"></div></div></div>
+      <div id="keys-list" class="keys" hidden></div>
+      <div id="keys-pending" class="note pending" hidden>
+        <span class="spin" aria-hidden="true"></span>
+        <div><b>key 正在生成，大约 1~2 分钟。</b>申请后<b>不会有飞书通知</b>，请留在这个页面，好了会自动出来（每 20 秒查一次）。
+          <div class="sub" id="poll-at" style="margin-top:2px"></div></div>
+      </div>
+      <p class="sub" id="keys-swap" hidden>需要换一把 key？<a href="#s-fb" id="swap-link">请提反馈</a>，我们帮你换。</p>
+      <details class="hist" id="keys-hist" hidden>
+        <summary id="hist-sum">历史 key</summary>
+        <div class="keys" id="hist-list"></div>
+      </details>
+
+      <!-- 没有 key -->
+      <div id="keys-empty" hidden>
+        <div class="body">
+          <div class="card">
+            <p><b id="empty-h">你还没有可用的 key。</b>点一下就申请，大约 <b>1~2 分钟</b>生成好。<br>
+              <span class="sub">不会有飞书通知，请留在这个页面，好了这里会自动出来。</span></p>
+            <div class="row">
+              <button type="button" class="btn" id="apply-btn">申请 key</button>
+              <span class="sub" id="apply-msg"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="keys-err" class="note err" hidden>
+        <b>key 列表没读出来。</b> <span id="keys-err-msg"></span>
+        <div style="margin-top:8px"><button type="button" class="btn ghost sm" id="keys-retry">再试一次</button></div>
+      </div>
+    </div>
+  </section>
+  <!-- ② 一键配置 -->
+  <section class="step" id="s-install" aria-labelledby="inst-h">
+    <h2 id="inst-h">一键装好 <span class="sub">复制一行命令，粘进终端回车</span></h2>
+    <div class="body">
+      <div class="tools" role="radiogroup" aria-label="选工具">
+        <button type="button" class="tool" role="radio" data-tool="cursor" aria-checked="true"><b>Cursor</b><span>写代码的编辑器</span></button>
+        <button type="button" class="tool" role="radio" data-tool="codex" aria-checked="false"><b>Codex</b><span>命令行 + 桌面 App</span></button>
+        <button type="button" class="tool" role="radio" data-tool="claude" aria-checked="false"><b>Claude Code</b><span>命令行 + 桌面 App</span></button>
+      </div>
+      <div class="osline">
+        <span id="os-guess">认出你用的是 Mac，不对就改：</span>
+        <div class="seg" role="radiogroup" aria-label="选电脑系统">
+          <button type="button" role="radio" data-os="mac" aria-checked="true">Mac</button>
+          <button type="button" role="radio" data-os="win" aria-checked="false">Windows</button>
+          <button type="button" role="radio" data-os="linux" aria-checked="false">Linux</button>
+        </div>
+      </div>
+
+      <div id="inst-locked" class="note" hidden>先在上面拿到一把<b>可用</b>的 key，这里才会出命令。</div>
+
+      <div id="inst-ready">
+        <div class="body">
+          <div class="cmdbox">
+            <div class="cmdhead">
+              <span class="where"><span class="mac-only">打开「<b>终端</b>」（启动台搜 Terminal）</span><span class="linux-only">打开<b>终端</b></span><span class="win-only">打开 <b>PowerShell</b>（开始菜单搜 PowerShell）</span>，粘进去回车：</span>
+              <span class="placeholder win-only" title="Windows 安装脚本的命令形式还没定，先占位">Windows 命令为占位</span>
+            </div>
+            <pre class="cmd" id="cmd" aria-label="安装命令" aria-live="off"></pre>
+            <div class="cmdfoot">
+              <button type="button" class="btn" id="cmd-copy" disabled>复制命令</button>
+              <span class="timer" id="cmd-timer" aria-live="off"></span>
+            </div>
+            <p class="sub" id="cmd-err" hidden></p>
+          </div>
+          <p class="sub">命令里那串 <code>--code</code> 是<b>一次性安装码</b>：只能用一次、10 分钟内有效，过期页面会自动换新的。
+            它不是你的 key，就算被人看到也只能用这一次。</p>
+
+          <ul class="does" aria-label="这行命令会做什么">
+            <li><b>装好 <span class="tname">Cursor</span></b><span>没装过就自动下载安装，装过的跳过</span></li>
+            <li><b>写好 key</b><span>自动把你的 key 配进去，不用你粘</span></li>
+            <li><b>重开 <span class="tname">Cursor</span></b><span>看到「完成」就能用了，第一次约 2~5 分钟</span></li>
+          </ul>
+          <p class="sub for-cursor">唯一例外：新版 Cursor 要你在设置里粘一次 key。脚本会先把 key 放进剪贴板，并告诉你点哪里（Settings → Models → OpenAI API Key → 粘贴 → Verify）。</p>
+
+          <div class="note win-only">
+            <b>被公司电脑拦住了？</b>找 IT 开一下权限，把报错原文给他看就行：
+            提示「禁止运行脚本」「已被组策略阻止」是要开 <b>PowerShell 执行权限</b>；
+            提示装不上应用、「旁加载」「MSIX」之类，是要开 <b>安装应用（旁加载）的权限</b>。
+            等不了的话，先用<a href="https://chat.auto-link.com.cn/oneclick/" target="_blank" rel="noopener">下载安装包，双击安装</a>的老办法。
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ③ 反馈 -->
+  <section class="step last" id="s-fb" aria-labelledby="fb-h">
+    <h2 id="fb-h">遇到问题 <span class="sub">说一句，我们来处理</span></h2>
+    <div class="body">
+      <details id="fb-box">
+        <summary>提交反馈</summary>
+        <form class="fb" id="fb" novalidate>
+          <fieldset class="field">
+            <legend>是什么问题</legend>
+            <div class="chips">
+              <label><input type="radio" name="type" value="用不了/报错" checked><span>用不了 / 报错</span></label>
+              <label><input type="radio" name="type" value="想要新功能/新模型"><span>想要新功能 / 新模型</span></label>
+              <label><input type="radio" name="type" value="文档看不懂"><span>看不懂</span></label>
+              <label><input type="radio" name="type" value="其他建议"><span>其他</span></label>
+            </div>
+          </fieldset>
+          <fieldset class="field">
+            <legend>哪个工具</legend>
+            <div class="chips">
+              <label><input type="radio" name="tool" value="Cursor" checked><span>Cursor</span></label>
+              <label><input type="radio" name="tool" value="Codex"><span>Codex</span></label>
+              <label><input type="radio" name="tool" value="Claude Code"><span>Claude Code</span></label>
+              <label><input type="radio" name="tool" value="其他"><span>其他 / 这个网页</span></label>
+            </div>
+          </fieldset>
+          <div class="field">
+            <label for="fb-title">一句话说说 <span class="sub">（必填）</span></label>
+            <input type="text" id="fb-title" maxlength="120" required aria-describedby="fb-title-err" placeholder="比如：Windows 上跑命令提示没有权限">
+            <p class="sub" id="fb-title-err" style="color:var(--err)" hidden>写一句再提交</p>
+          </div>
+          <div class="field">
+            <label for="fb-detail">详细描述 <span class="sub">（选填：做了什么、看到什么报错）</span></label>
+            <textarea id="fb-detail" maxlength="4000"></textarea>
+          </div>
+          <div class="field">
+            <label for="fb-report">自检报告 <span class="sub">（选填：粘贴，或选一个 .txt 文件）</span></label>
+            <textarea id="fb-report" class="mono" placeholder="安装脚本出错时会提示你复制自检报告，粘到这里"></textarea>
+            <input type="file" id="fb-file" accept=".txt,.log,text/plain" aria-label="选择自检报告文件">
+            <p class="sub">报告里不会有你的 key（脚本已打码）。上限 200KB。</p>
+          </div>
+          <div class="fb-actions">
+            <button type="submit" class="btn" id="fb-submit">提交</button>
+            <span class="sub" id="fb-msg"></span>
+          </div>
+        </form>
+        <div class="note ok" id="fb-done" hidden tabindex="-1"></div>
+      </details>
+    </div>
+  </section>
+</div>
+<footer>key 只会在你点「显示」或「复制」时从服务器取一次，不会存在这个网页或浏览器里。用完记得别把 key 发到群里。</footer>
+</div>
+</div>
+</div>
+</main>
+</div>
+<!-- qrcode.js（davidshimjs/qrcodejs，MIT），原样内联自 .work/ext-user-onboarding/web-selfservice/qrcode.min.js -->
+<script>
+var QRCode;!function(){function a(a){this.mode=c.MODE_8BIT_BYTE,this.data=a,this.parsedData=[];for(var b=[],d=0,e=this.data.length;e>d;d++){var f=this.data.charCodeAt(d);f>65536?(b[0]=240|(1835008&f)>>>18,b[1]=128|(258048&f)>>>12,b[2]=128|(4032&f)>>>6,b[3]=128|63&f):f>2048?(b[0]=224|(61440&f)>>>12,b[1]=128|(4032&f)>>>6,b[2]=128|63&f):f>128?(b[0]=192|(1984&f)>>>6,b[1]=128|63&f):b[0]=f,this.parsedData=this.parsedData.concat(b)}this.parsedData.length!=this.data.length&&(this.parsedData.unshift(191),this.parsedData.unshift(187),this.parsedData.unshift(239))}function b(a,b){this.typeNumber=a,this.errorCorrectLevel=b,this.modules=null,this.moduleCount=0,this.dataCache=null,this.dataList=[]}function i(a,b){if(void 0==a.length)throw new Error(a.length+"/"+b);for(var c=0;c<a.length&&0==a[c];)c++;this.num=new Array(a.length-c+b);for(var d=0;d<a.length-c;d++)this.num[d]=a[d+c]}function j(a,b){this.totalCount=a,this.dataCount=b}function k(){this.buffer=[],this.length=0}function m(){return"undefined"!=typeof CanvasRenderingContext2D}function n(){var a=!1,b=navigator.userAgent;return/android/i.test(b)&&(a=!0,aMat=b.toString().match(/android ([0-9]\.[0-9])/i),aMat&&aMat[1]&&(a=parseFloat(aMat[1]))),a}function r(a,b){for(var c=1,e=s(a),f=0,g=l.length;g>=f;f++){var h=0;switch(b){case d.L:h=l[f][0];break;case d.M:h=l[f][1];break;case d.Q:h=l[f][2];break;case d.H:h=l[f][3]}if(h>=e)break;c++}if(c>l.length)throw new Error("Too long data");return c}function s(a){var b=encodeURI(a).toString().replace(/\%[0-9a-fA-F]{2}/g,"a");return b.length+(b.length!=a?3:0)}a.prototype={getLength:function(){return this.parsedData.length},write:function(a){for(var b=0,c=this.parsedData.length;c>b;b++)a.put(this.parsedData[b],8)}},b.prototype={addData:function(b){var c=new a(b);this.dataList.push(c),this.dataCache=null},isDark:function(a,b){if(0>a||this.moduleCount<=a||0>b||this.moduleCount<=b)throw new Error(a+","+b);return this.modules[a][b]},getModuleCount:function(){return this.moduleCount},make:function(){this.makeImpl(!1,this.getBestMaskPattern())},makeImpl:function(a,c){this.moduleCount=4*this.typeNumber+17,this.modules=new Array(this.moduleCount);for(var d=0;d<this.moduleCount;d++){this.modules[d]=new Array(this.moduleCount);for(var e=0;e<this.moduleCount;e++)this.modules[d][e]=null}this.setupPositionProbePattern(0,0),this.setupPositionProbePattern(this.moduleCount-7,0),this.setupPositionProbePattern(0,this.moduleCount-7),this.setupPositionAdjustPattern(),this.setupTimingPattern(),this.setupTypeInfo(a,c),this.typeNumber>=7&&this.setupTypeNumber(a),null==this.dataCache&&(this.dataCache=b.createData(this.typeNumber,this.errorCorrectLevel,this.dataList)),this.mapData(this.dataCache,c)},setupPositionProbePattern:function(a,b){for(var c=-1;7>=c;c++)if(!(-1>=a+c||this.moduleCount<=a+c))for(var d=-1;7>=d;d++)-1>=b+d||this.moduleCount<=b+d||(this.modules[a+c][b+d]=c>=0&&6>=c&&(0==d||6==d)||d>=0&&6>=d&&(0==c||6==c)||c>=2&&4>=c&&d>=2&&4>=d?!0:!1)},getBestMaskPattern:function(){for(var a=0,b=0,c=0;8>c;c++){this.makeImpl(!0,c);var d=f.getLostPoint(this);(0==c||a>d)&&(a=d,b=c)}return b},createMovieClip:function(a,b,c){var d=a.createEmptyMovieClip(b,c),e=1;this.make();for(var f=0;f<this.modules.length;f++)for(var g=f*e,h=0;h<this.modules[f].length;h++){var i=h*e,j=this.modules[f][h];j&&(d.beginFill(0,100),d.moveTo(i,g),d.lineTo(i+e,g),d.lineTo(i+e,g+e),d.lineTo(i,g+e),d.endFill())}return d},setupTimingPattern:function(){for(var a=8;a<this.moduleCount-8;a++)null==this.modules[a][6]&&(this.modules[a][6]=0==a%2);for(var b=8;b<this.moduleCount-8;b++)null==this.modules[6][b]&&(this.modules[6][b]=0==b%2)},setupPositionAdjustPattern:function(){for(var a=f.getPatternPosition(this.typeNumber),b=0;b<a.length;b++)for(var c=0;c<a.length;c++){var d=a[b],e=a[c];if(null==this.modules[d][e])for(var g=-2;2>=g;g++)for(var h=-2;2>=h;h++)this.modules[d+g][e+h]=-2==g||2==g||-2==h||2==h||0==g&&0==h?!0:!1}},setupTypeNumber:function(a){for(var b=f.getBCHTypeNumber(this.typeNumber),c=0;18>c;c++){var d=!a&&1==(1&b>>c);this.modules[Math.floor(c/3)][c%3+this.moduleCount-8-3]=d}for(var c=0;18>c;c++){var d=!a&&1==(1&b>>c);this.modules[c%3+this.moduleCount-8-3][Math.floor(c/3)]=d}},setupTypeInfo:function(a,b){for(var c=this.errorCorrectLevel<<3|b,d=f.getBCHTypeInfo(c),e=0;15>e;e++){var g=!a&&1==(1&d>>e);6>e?this.modules[e][8]=g:8>e?this.modules[e+1][8]=g:this.modules[this.moduleCount-15+e][8]=g}for(var e=0;15>e;e++){var g=!a&&1==(1&d>>e);8>e?this.modules[8][this.moduleCount-e-1]=g:9>e?this.modules[8][15-e-1+1]=g:this.modules[8][15-e-1]=g}this.modules[this.moduleCount-8][8]=!a},mapData:function(a,b){for(var c=-1,d=this.moduleCount-1,e=7,g=0,h=this.moduleCount-1;h>0;h-=2)for(6==h&&h--;;){for(var i=0;2>i;i++)if(null==this.modules[d][h-i]){var j=!1;g<a.length&&(j=1==(1&a[g]>>>e));var k=f.getMask(b,d,h-i);k&&(j=!j),this.modules[d][h-i]=j,e--,-1==e&&(g++,e=7)}if(d+=c,0>d||this.moduleCount<=d){d-=c,c=-c;break}}}},b.PAD0=236,b.PAD1=17,b.createData=function(a,c,d){for(var e=j.getRSBlocks(a,c),g=new k,h=0;h<d.length;h++){var i=d[h];g.put(i.mode,4),g.put(i.getLength(),f.getLengthInBits(i.mode,a)),i.write(g)}for(var l=0,h=0;h<e.length;h++)l+=e[h].dataCount;if(g.getLengthInBits()>8*l)throw new Error("code length overflow. ("+g.getLengthInBits()+">"+8*l+")");for(g.getLengthInBits()+4<=8*l&&g.put(0,4);0!=g.getLengthInBits()%8;)g.putBit(!1);for(;;){if(g.getLengthInBits()>=8*l)break;if(g.put(b.PAD0,8),g.getLengthInBits()>=8*l)break;g.put(b.PAD1,8)}return b.createBytes(g,e)},b.createBytes=function(a,b){for(var c=0,d=0,e=0,g=new Array(b.length),h=new Array(b.length),j=0;j<b.length;j++){var k=b[j].dataCount,l=b[j].totalCount-k;d=Math.max(d,k),e=Math.max(e,l),g[j]=new Array(k);for(var m=0;m<g[j].length;m++)g[j][m]=255&a.buffer[m+c];c+=k;var n=f.getErrorCorrectPolynomial(l),o=new i(g[j],n.getLength()-1),p=o.mod(n);h[j]=new Array(n.getLength()-1);for(var m=0;m<h[j].length;m++){var q=m+p.getLength()-h[j].length;h[j][m]=q>=0?p.get(q):0}}for(var r=0,m=0;m<b.length;m++)r+=b[m].totalCount;for(var s=new Array(r),t=0,m=0;d>m;m++)for(var j=0;j<b.length;j++)m<g[j].length&&(s[t++]=g[j][m]);for(var m=0;e>m;m++)for(var j=0;j<b.length;j++)m<h[j].length&&(s[t++]=h[j][m]);return s};for(var c={MODE_NUMBER:1,MODE_ALPHA_NUM:2,MODE_8BIT_BYTE:4,MODE_KANJI:8},d={L:1,M:0,Q:3,H:2},e={PATTERN000:0,PATTERN001:1,PATTERN010:2,PATTERN011:3,PATTERN100:4,PATTERN101:5,PATTERN110:6,PATTERN111:7},f={PATTERN_POSITION_TABLE:[[],[6,18],[6,22],[6,26],[6,30],[6,34],[6,22,38],[6,24,42],[6,26,46],[6,28,50],[6,30,54],[6,32,58],[6,34,62],[6,26,46,66],[6,26,48,70],[6,26,50,74],[6,30,54,78],[6,30,56,82],[6,30,58,86],[6,34,62,90],[6,28,50,72,94],[6,26,50,74,98],[6,30,54,78,102],[6,28,54,80,106],[6,32,58,84,110],[6,30,58,86,114],[6,34,62,90,118],[6,26,50,74,98,122],[6,30,54,78,102,126],[6,26,52,78,104,130],[6,30,56,82,108,134],[6,34,60,86,112,138],[6,30,58,86,114,142],[6,34,62,90,118,146],[6,30,54,78,102,126,150],[6,24,50,76,102,128,154],[6,28,54,80,106,132,158],[6,32,58,84,110,136,162],[6,26,54,82,110,138,166],[6,30,58,86,114,142,170]],G15:1335,G18:7973,G15_MASK:21522,getBCHTypeInfo:function(a){for(var b=a<<10;f.getBCHDigit(b)-f.getBCHDigit(f.G15)>=0;)b^=f.G15<<f.getBCHDigit(b)-f.getBCHDigit(f.G15);return(a<<10|b)^f.G15_MASK},getBCHTypeNumber:function(a){for(var b=a<<12;f.getBCHDigit(b)-f.getBCHDigit(f.G18)>=0;)b^=f.G18<<f.getBCHDigit(b)-f.getBCHDigit(f.G18);return a<<12|b},getBCHDigit:function(a){for(var b=0;0!=a;)b++,a>>>=1;return b},getPatternPosition:function(a){return f.PATTERN_POSITION_TABLE[a-1]},getMask:function(a,b,c){switch(a){case e.PATTERN000:return 0==(b+c)%2;case e.PATTERN001:return 0==b%2;case e.PATTERN010:return 0==c%3;case e.PATTERN011:return 0==(b+c)%3;case e.PATTERN100:return 0==(Math.floor(b/2)+Math.floor(c/3))%2;case e.PATTERN101:return 0==b*c%2+b*c%3;case e.PATTERN110:return 0==(b*c%2+b*c%3)%2;case e.PATTERN111:return 0==(b*c%3+(b+c)%2)%2;default:throw new Error("bad maskPattern:"+a)}},getErrorCorrectPolynomial:function(a){for(var b=new i([1],0),c=0;a>c;c++)b=b.multiply(new i([1,g.gexp(c)],0));return b},getLengthInBits:function(a,b){if(b>=1&&10>b)switch(a){case c.MODE_NUMBER:return 10;case c.MODE_ALPHA_NUM:return 9;case c.MODE_8BIT_BYTE:return 8;case c.MODE_KANJI:return 8;default:throw new Error("mode:"+a)}else if(27>b)switch(a){case c.MODE_NUMBER:return 12;case c.MODE_ALPHA_NUM:return 11;case c.MODE_8BIT_BYTE:return 16;case c.MODE_KANJI:return 10;default:throw new Error("mode:"+a)}else{if(!(41>b))throw new Error("type:"+b);switch(a){case c.MODE_NUMBER:return 14;case c.MODE_ALPHA_NUM:return 13;case c.MODE_8BIT_BYTE:return 16;case c.MODE_KANJI:return 12;default:throw new Error("mode:"+a)}}},getLostPoint:function(a){for(var b=a.getModuleCount(),c=0,d=0;b>d;d++)for(var e=0;b>e;e++){for(var f=0,g=a.isDark(d,e),h=-1;1>=h;h++)if(!(0>d+h||d+h>=b))for(var i=-1;1>=i;i++)0>e+i||e+i>=b||(0!=h||0!=i)&&g==a.isDark(d+h,e+i)&&f++;f>5&&(c+=3+f-5)}for(var d=0;b-1>d;d++)for(var e=0;b-1>e;e++){var j=0;a.isDark(d,e)&&j++,a.isDark(d+1,e)&&j++,a.isDark(d,e+1)&&j++,a.isDark(d+1,e+1)&&j++,(0==j||4==j)&&(c+=3)}for(var d=0;b>d;d++)for(var e=0;b-6>e;e++)a.isDark(d,e)&&!a.isDark(d,e+1)&&a.isDark(d,e+2)&&a.isDark(d,e+3)&&a.isDark(d,e+4)&&!a.isDark(d,e+5)&&a.isDark(d,e+6)&&(c+=40);for(var e=0;b>e;e++)for(var d=0;b-6>d;d++)a.isDark(d,e)&&!a.isDark(d+1,e)&&a.isDark(d+2,e)&&a.isDark(d+3,e)&&a.isDark(d+4,e)&&!a.isDark(d+5,e)&&a.isDark(d+6,e)&&(c+=40);for(var k=0,e=0;b>e;e++)for(var d=0;b>d;d++)a.isDark(d,e)&&k++;var l=Math.abs(100*k/b/b-50)/5;return c+=10*l}},g={glog:function(a){if(1>a)throw new Error("glog("+a+")");return g.LOG_TABLE[a]},gexp:function(a){for(;0>a;)a+=255;for(;a>=256;)a-=255;return g.EXP_TABLE[a]},EXP_TABLE:new Array(256),LOG_TABLE:new Array(256)},h=0;8>h;h++)g.EXP_TABLE[h]=1<<h;for(var h=8;256>h;h++)g.EXP_TABLE[h]=g.EXP_TABLE[h-4]^g.EXP_TABLE[h-5]^g.EXP_TABLE[h-6]^g.EXP_TABLE[h-8];for(var h=0;255>h;h++)g.LOG_TABLE[g.EXP_TABLE[h]]=h;i.prototype={get:function(a){return this.num[a]},getLength:function(){return this.num.length},multiply:function(a){for(var b=new Array(this.getLength()+a.getLength()-1),c=0;c<this.getLength();c++)for(var d=0;d<a.getLength();d++)b[c+d]^=g.gexp(g.glog(this.get(c))+g.glog(a.get(d)));return new i(b,0)},mod:function(a){if(this.getLength()-a.getLength()<0)return this;for(var b=g.glog(this.get(0))-g.glog(a.get(0)),c=new Array(this.getLength()),d=0;d<this.getLength();d++)c[d]=this.get(d);for(var d=0;d<a.getLength();d++)c[d]^=g.gexp(g.glog(a.get(d))+b);return new i(c,0).mod(a)}},j.RS_BLOCK_TABLE=[[1,26,19],[1,26,16],[1,26,13],[1,26,9],[1,44,34],[1,44,28],[1,44,22],[1,44,16],[1,70,55],[1,70,44],[2,35,17],[2,35,13],[1,100,80],[2,50,32],[2,50,24],[4,25,9],[1,134,108],[2,67,43],[2,33,15,2,34,16],[2,33,11,2,34,12],[2,86,68],[4,43,27],[4,43,19],[4,43,15],[2,98,78],[4,49,31],[2,32,14,4,33,15],[4,39,13,1,40,14],[2,121,97],[2,60,38,2,61,39],[4,40,18,2,41,19],[4,40,14,2,41,15],[2,146,116],[3,58,36,2,59,37],[4,36,16,4,37,17],[4,36,12,4,37,13],[2,86,68,2,87,69],[4,69,43,1,70,44],[6,43,19,2,44,20],[6,43,15,2,44,16],[4,101,81],[1,80,50,4,81,51],[4,50,22,4,51,23],[3,36,12,8,37,13],[2,116,92,2,117,93],[6,58,36,2,59,37],[4,46,20,6,47,21],[7,42,14,4,43,15],[4,133,107],[8,59,37,1,60,38],[8,44,20,4,45,21],[12,33,11,4,34,12],[3,145,115,1,146,116],[4,64,40,5,65,41],[11,36,16,5,37,17],[11,36,12,5,37,13],[5,109,87,1,110,88],[5,65,41,5,66,42],[5,54,24,7,55,25],[11,36,12],[5,122,98,1,123,99],[7,73,45,3,74,46],[15,43,19,2,44,20],[3,45,15,13,46,16],[1,135,107,5,136,108],[10,74,46,1,75,47],[1,50,22,15,51,23],[2,42,14,17,43,15],[5,150,120,1,151,121],[9,69,43,4,70,44],[17,50,22,1,51,23],[2,42,14,19,43,15],[3,141,113,4,142,114],[3,70,44,11,71,45],[17,47,21,4,48,22],[9,39,13,16,40,14],[3,135,107,5,136,108],[3,67,41,13,68,42],[15,54,24,5,55,25],[15,43,15,10,44,16],[4,144,116,4,145,117],[17,68,42],[17,50,22,6,51,23],[19,46,16,6,47,17],[2,139,111,7,140,112],[17,74,46],[7,54,24,16,55,25],[34,37,13],[4,151,121,5,152,122],[4,75,47,14,76,48],[11,54,24,14,55,25],[16,45,15,14,46,16],[6,147,117,4,148,118],[6,73,45,14,74,46],[11,54,24,16,55,25],[30,46,16,2,47,17],[8,132,106,4,133,107],[8,75,47,13,76,48],[7,54,24,22,55,25],[22,45,15,13,46,16],[10,142,114,2,143,115],[19,74,46,4,75,47],[28,50,22,6,51,23],[33,46,16,4,47,17],[8,152,122,4,153,123],[22,73,45,3,74,46],[8,53,23,26,54,24],[12,45,15,28,46,16],[3,147,117,10,148,118],[3,73,45,23,74,46],[4,54,24,31,55,25],[11,45,15,31,46,16],[7,146,116,7,147,117],[21,73,45,7,74,46],[1,53,23,37,54,24],[19,45,15,26,46,16],[5,145,115,10,146,116],[19,75,47,10,76,48],[15,54,24,25,55,25],[23,45,15,25,46,16],[13,145,115,3,146,116],[2,74,46,29,75,47],[42,54,24,1,55,25],[23,45,15,28,46,16],[17,145,115],[10,74,46,23,75,47],[10,54,24,35,55,25],[19,45,15,35,46,16],[17,145,115,1,146,116],[14,74,46,21,75,47],[29,54,24,19,55,25],[11,45,15,46,46,16],[13,145,115,6,146,116],[14,74,46,23,75,47],[44,54,24,7,55,25],[59,46,16,1,47,17],[12,151,121,7,152,122],[12,75,47,26,76,48],[39,54,24,14,55,25],[22,45,15,41,46,16],[6,151,121,14,152,122],[6,75,47,34,76,48],[46,54,24,10,55,25],[2,45,15,64,46,16],[17,152,122,4,153,123],[29,74,46,14,75,47],[49,54,24,10,55,25],[24,45,15,46,46,16],[4,152,122,18,153,123],[13,74,46,32,75,47],[48,54,24,14,55,25],[42,45,15,32,46,16],[20,147,117,4,148,118],[40,75,47,7,76,48],[43,54,24,22,55,25],[10,45,15,67,46,16],[19,148,118,6,149,119],[18,75,47,31,76,48],[34,54,24,34,55,25],[20,45,15,61,46,16]],j.getRSBlocks=function(a,b){var c=j.getRsBlockTable(a,b);if(void 0==c)throw new Error("bad rs block @ typeNumber:"+a+"/errorCorrectLevel:"+b);for(var d=c.length/3,e=[],f=0;d>f;f++)for(var g=c[3*f+0],h=c[3*f+1],i=c[3*f+2],k=0;g>k;k++)e.push(new j(h,i));return e},j.getRsBlockTable=function(a,b){switch(b){case d.L:return j.RS_BLOCK_TABLE[4*(a-1)+0];case d.M:return j.RS_BLOCK_TABLE[4*(a-1)+1];case d.Q:return j.RS_BLOCK_TABLE[4*(a-1)+2];case d.H:return j.RS_BLOCK_TABLE[4*(a-1)+3];default:return void 0}},k.prototype={get:function(a){var b=Math.floor(a/8);return 1==(1&this.buffer[b]>>>7-a%8)},put:function(a,b){for(var c=0;b>c;c++)this.putBit(1==(1&a>>>b-c-1))},getLengthInBits:function(){return this.length},putBit:function(a){var b=Math.floor(this.length/8);this.buffer.length<=b&&this.buffer.push(0),a&&(this.buffer[b]|=128>>>this.length%8),this.length++}};var l=[[17,14,11,7],[32,26,20,14],[53,42,32,24],[78,62,46,34],[106,84,60,44],[134,106,74,58],[154,122,86,64],[192,152,108,84],[230,180,130,98],[271,213,151,119],[321,251,177,137],[367,287,203,155],[425,331,241,177],[458,362,258,194],[520,412,292,220],[586,450,322,250],[644,504,364,280],[718,560,394,310],[792,624,442,338],[858,666,482,382],[929,711,509,403],[1003,779,565,439],[1091,857,611,461],[1171,911,661,511],[1273,997,715,535],[1367,1059,751,593],[1465,1125,805,625],[1528,1190,868,658],[1628,1264,908,698],[1732,1370,982,742],[1840,1452,1030,790],[1952,1538,1112,842],[2068,1628,1168,898],[2188,1722,1228,958],[2303,1809,1283,983],[2431,1911,1351,1051],[2563,1989,1423,1093],[2699,2099,1499,1139],[2809,2213,1579,1219],[2953,2331,1663,1273]],o=function(){var a=function(a,b){this._el=a,this._htOption=b};return a.prototype.draw=function(a){function g(a,b){var c=document.createElementNS("http://www.w3.org/2000/svg",a);for(var d in b)b.hasOwnProperty(d)&&c.setAttribute(d,b[d]);return c}var b=this._htOption,c=this._el,d=a.getModuleCount();Math.floor(b.width/d),Math.floor(b.height/d),this.clear();var h=g("svg",{viewBox:"0 0 "+String(d)+" "+String(d),width:"100%",height:"100%",fill:b.colorLight});h.setAttributeNS("http://www.w3.org/2000/xmlns/","xmlns:xlink","http://www.w3.org/1999/xlink"),c.appendChild(h),h.appendChild(g("rect",{fill:b.colorDark,width:"1",height:"1",id:"template"}));for(var i=0;d>i;i++)for(var j=0;d>j;j++)if(a.isDark(i,j)){var k=g("use",{x:String(i),y:String(j)});k.setAttributeNS("http://www.w3.org/1999/xlink","href","#template"),h.appendChild(k)}},a.prototype.clear=function(){for(;this._el.hasChildNodes();)this._el.removeChild(this._el.lastChild)},a}(),p="svg"===document.documentElement.tagName.toLowerCase(),q=p?o:m()?function(){function a(){this._elImage.src=this._elCanvas.toDataURL("image/png"),this._elImage.style.display="block",this._elCanvas.style.display="none"}function d(a,b){var c=this;if(c._fFail=b,c._fSuccess=a,null===c._bSupportDataURI){var d=document.createElement("img"),e=function(){c._bSupportDataURI=!1,c._fFail&&_fFail.call(c)},f=function(){c._bSupportDataURI=!0,c._fSuccess&&c._fSuccess.call(c)};return d.onabort=e,d.onerror=e,d.onload=f,d.src="data:image/gif;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAAAABJRU5ErkJggg==",void 0}c._bSupportDataURI===!0&&c._fSuccess?c._fSuccess.call(c):c._bSupportDataURI===!1&&c._fFail&&c._fFail.call(c)}if(this._android&&this._android<=2.1){var b=1/window.devicePixelRatio,c=CanvasRenderingContext2D.prototype.drawImage;CanvasRenderingContext2D.prototype.drawImage=function(a,d,e,f,g,h,i,j){if("nodeName"in a&&/img/i.test(a.nodeName))for(var l=arguments.length-1;l>=1;l--)arguments[l]=arguments[l]*b;else"undefined"==typeof j&&(arguments[1]*=b,arguments[2]*=b,arguments[3]*=b,arguments[4]*=b);c.apply(this,arguments)}}var e=function(a,b){this._bIsPainted=!1,this._android=n(),this._htOption=b,this._elCanvas=document.createElement("canvas"),this._elCanvas.width=b.width,this._elCanvas.height=b.height,a.appendChild(this._elCanvas),this._el=a,this._oContext=this._elCanvas.getContext("2d"),this._bIsPainted=!1,this._elImage=document.createElement("img"),this._elImage.style.display="none",this._el.appendChild(this._elImage),this._bSupportDataURI=null};return e.prototype.draw=function(a){var b=this._elImage,c=this._oContext,d=this._htOption,e=a.getModuleCount(),f=d.width/e,g=d.height/e,h=Math.round(f),i=Math.round(g);b.style.display="none",this.clear();for(var j=0;e>j;j++)for(var k=0;e>k;k++){var l=a.isDark(j,k),m=k*f,n=j*g;c.strokeStyle=l?d.colorDark:d.colorLight,c.lineWidth=1,c.fillStyle=l?d.colorDark:d.colorLight,c.fillRect(m,n,f,g),c.strokeRect(Math.floor(m)+.5,Math.floor(n)+.5,h,i),c.strokeRect(Math.ceil(m)-.5,Math.ceil(n)-.5,h,i)}this._bIsPainted=!0},e.prototype.makeImage=function(){this._bIsPainted&&d.call(this,a)},e.prototype.isPainted=function(){return this._bIsPainted},e.prototype.clear=function(){this._oContext.clearRect(0,0,this._elCanvas.width,this._elCanvas.height),this._bIsPainted=!1},e.prototype.round=function(a){return a?Math.floor(1e3*a)/1e3:a},e}():function(){var a=function(a,b){this._el=a,this._htOption=b};return a.prototype.draw=function(a){for(var b=this._htOption,c=this._el,d=a.getModuleCount(),e=Math.floor(b.width/d),f=Math.floor(b.height/d),g=['<table style="border:0;border-collapse:collapse;">'],h=0;d>h;h++){g.push("<tr>");for(var i=0;d>i;i++)g.push('<td style="border:0;border-collapse:collapse;padding:0;margin:0;width:'+e+"px;height:"+f+"px;background-color:"+(a.isDark(h,i)?b.colorDark:b.colorLight)+';"></td>');g.push("</tr>")}g.push("</table>"),c.innerHTML=g.join("");var j=c.childNodes[0],k=(b.width-j.offsetWidth)/2,l=(b.height-j.offsetHeight)/2;k>0&&l>0&&(j.style.margin=l+"px "+k+"px")},a.prototype.clear=function(){this._el.innerHTML=""},a}();QRCode=function(a,b){if(this._htOption={width:256,height:256,typeNumber:4,colorDark:"#000000",colorLight:"#ffffff",correctLevel:d.H},"string"==typeof b&&(b={text:b}),b)for(var c in b)this._htOption[c]=b[c];"string"==typeof a&&(a=document.getElementById(a)),this._android=n(),this._el=a,this._oQRCode=null,this._oDrawing=new q(this._el,this._htOption),this._htOption.text&&this.makeCode(this._htOption.text)},QRCode.prototype.makeCode=function(a){this._oQRCode=new b(r(a,this._htOption.correctLevel),this._htOption.correctLevel),this._oQRCode.addData(a),this._oQRCode.make(),this._el.title=a,this._oDrawing.draw(this._oQRCode),this.makeImage()},QRCode.prototype.makeImage=function(){"function"==typeof this._oDrawing.makeImage&&(!this._android||this._android>=3)&&this._oDrawing.makeImage()},QRCode.prototype.clear=function(){this._oDrawing.clear()},QRCode.CorrectLevel=d}();
+</script>
+<script>
+(function(){
+"use strict";
+// ───────── 常量 ─────────
+var ORIGIN = "https://chat.auto-link.com.cn";
+var APPLINK = "https://applink.feishu.cn/client/bot/open?appId=cli_aa8505afb0f89cb2";
+var TOOLS = {cursor:"Cursor", codex:"Codex", claude:"Claude Code"};
+var OSES = {mac:"Mac", win:"Windows", linux:"Linux"};
+var POLL_MS = 20000, REMASK_MS = 30000;
+// 状态一律按**前缀**判（后端会给「生成失败: <原因>」这种带后缀的值）。顺序有意义：先长后短。
+var ST_PREFIX = [["可用","ok"],["active","ok"],["生成中","pend"],["pending","pend"],["已禁用","dis"],["生成失败","fail"],["failed","fail"]];
+var LOGIN_ERR = {
+  expired: "登录链接过期了（10 分钟内有效）。再给机器人发一句「登录」，拿一个新链接。",
+  used:    "这个登录链接已经用过了，每个链接只能用一次。再给机器人发一句「登录」，拿一个新链接。",
+  invalid: "这个登录链接不对，可能没复制完整。再给机器人发一句「登录」，拿一个新链接。"
+};
+var MAGIC_T_RE = /^[A-Za-z0-9._~-]{8,512}$/;
+var CODE_RE = /^[A-Za-z0-9][A-Za-z0-9-]{3,63}$/; // 安装码会拼进 shell 命令 ⇒ 严格白名单，不合规就不出命令
+
+var $ = function(id){ return document.getElementById(id); };
+var B = document.body;
+var state = { me:null, keys:[], tool:"cursor", os:"mac", codes:{}, pollT:0, tickT:0, dead:false };
+
+function pref(k, v){ try{ if (v === undefined) return localStorage.getItem("aiportal-"+k); localStorage.setItem("aiportal-"+k, v); }catch(e){ return null; } }
+function say(msg){ var l=$("live"); l.textContent=""; setTimeout(function(){ l.textContent=msg; }, 30); }
+function shout(msg){ var l=$("alert"); l.textContent=""; setTimeout(function(){ l.textContent=msg; }, 30); }
+function show(id, on){ $(id).hidden = !on; }
+
+// ───────── 接口 ─────────
+function ApiError(msg, status){ this.message = msg; this.status = status; }
+function api(method, path, body){
+  var opt = { method:method, credentials:"same-origin", cache:"no-store",
+              headers:{ "Accept":"application/json", "X-Requested-With":"ai-portal" } };
+  if (body !== undefined){ opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  return fetch(path, opt).then(function(r){
+    if (r.status === 401){ toLogin(); throw new ApiError("登录过期了，请重新登录", 401); }
+    return r.text().then(function(t){
+      var j = null; try{ j = t ? JSON.parse(t) : {}; }catch(e){}
+      if (r.ok && j) return j;
+      var m = j && typeof j.message === "string" && j.message ? j.message : null;
+      if (!m){
+        if (r.status >= 500) m = "服务器那边出了点问题（HTTP " + r.status + "），过一会儿再试；一直不行请在下面提交反馈。";
+        else if (r.ok) m = "服务器回的内容看不懂，刷新页面再试。";
+        else m = "请求没成功（HTTP " + r.status + "）。";
+      }
+      throw new ApiError(m, r.status);
+    });
+  }, function(){
+    throw new ApiError("连不上服务器。检查一下网络（公司 VPN / 代理）后再试。", 0);
+  });
+}
+
+// ───────── 视图切换 ─────────
+function view(name){
+  ["v-loading","v-login","v-magic","v-fatal","v-app"].forEach(function(v){ show(v, v === "v-"+name); });
+  show("who", name === "app");
+}
+function stopAll(){ state.dead = true; clearTimeout(state.pollT); clearInterval(state.tickT); }
+function toLogin(){
+  stopAll(); if (typeof remaskAll === "function") remaskAll(); state.keys = []; state.codes = {};
+  $("keys-list").textContent = ""; $("cmd").textContent = "";
+  var here = location.pathname + location.search;
+  if (here.indexOf("/ai/") !== 0 || here.indexOf("/ai/auth/") === 0) here = "/ai/";
+  $("login-btn").href = "/ai/auth/login?redirect=" + encodeURIComponent(here);
+  view("login");
+  drawQR();
+}
+
+// ───────── 一次性登录链接（外部合作方 / 飞书个人版） ─────────
+// 读完 t 就从地址栏抹掉（不留在历史记录 / Referer 里）；t 只留在这个闭包变量里，用完清空。
+function bootMagic(t){
+  view("magic");
+  try{ history.replaceState(null, "", location.pathname); }catch(e){}
+  if (!MAGIC_T_RE.test(t || "")){ magicFail("invalid"); return; }
+  var b = $("magic-btn");
+  b.addEventListener("click", function(){
+    if (!t) return;
+    b.disabled = true; b.textContent = "正在登录…"; show("magic-err", false);
+    fetch("/ai/auth/magic", { method:"POST", credentials:"same-origin", cache:"no-store",
+      headers:{ "Accept":"application/json", "Content-Type":"application/json", "X-Requested-With":"ai-portal" },
+      body: JSON.stringify({ t: t }) }).then(function(r){
+      return r.text().then(function(x){
+        var j = null; try{ j = x ? JSON.parse(x) : {}; }catch(e){}
+        if (r.ok){ t = null; say("登录成功，正在进入"); location.replace("/ai/"); return; }
+        var code = j && typeof j.error === "string" ? j.error : "";
+        if (LOGIN_ERR[code]){ t = null; magicFail(code); }
+        else magicFail("", (j && j.message) || ("登录没成功（HTTP " + r.status + "），刷新页面再点一次；还不行就再给机器人发一句「登录」。"));
+      });
+    }, function(){ magicFail("", "连不上服务器。检查一下网络后再点一次「确认登录」。"); })
+    .then(function(){ if (t){ b.disabled = false; b.textContent = "确认登录"; } });
+  });
+}
+function magicFail(code, msg){
+  $("magic-err-msg").textContent = LOGIN_ERR[code] || msg;
+  show("magic-err", true);
+  if (code){ show("magic-btn", false); $("magic-lead").textContent = "这个链接用不了了。"; }
+  shout($("magic-err-msg").textContent);
+}
+
+function boot(){
+  state.dead = false;
+  view("loading");
+  api("GET", "/ai/api/me").then(function(me){
+    state.me = me;
+    $("who-name").textContent = me.name || "同学";
+    show("who-ext", !!me.external);
+    if (me.external && me.tenant) $("who-ext").title = "你登录的是「" + me.tenant + "」的飞书账号";
+    view("app");
+    loadKeys(false);
+  }, function(e){
+    if (e.status === 401) return;
+    $("fatal-msg").textContent = e.message;
+    view("fatal");
+  });
+}
+$("fatal-retry").addEventListener("click", boot);
+$("logout").addEventListener("click", function(){
+  stopAll();
+  location.href = "/ai/auth/logout?redirect=" + encodeURIComponent("/ai/");
+});
+
+// ───────── 复制（带 Safari 兼容） ─────────
+// textOrPromise：字符串，或「返回字符串的 Promise」（key 要现取）。
+// Safari 要求写剪贴板发生在点击的同一拍里，fetch 回来再写会被拒 ⇒ 用 ClipboardItem 包 Promise。
+function copyText(textOrPromise){
+  var p = (typeof textOrPromise === "string") ? Promise.resolve(textOrPromise) : textOrPromise;
+  try{
+    if (typeof textOrPromise !== "string" && window.ClipboardItem && navigator.clipboard && navigator.clipboard.write){
+      var item = new ClipboardItem({ "text/plain": p.then(function(t){ return new Blob([t], {type:"text/plain"}); }) });
+      return navigator.clipboard.write([item]).then(function(){ return true; }, function(e){
+        // 取 key 本身失败 ⇒ 把那个错误抛出去；剪贴板拒绝 ⇒ 退回 writeText
+        return p.then(function(t){ return writeText(t); });
+      });
+    }
+  }catch(e){}
+  return p.then(writeText);
+}
+function writeText(t){
+  if (navigator.clipboard && navigator.clipboard.writeText){
+    return navigator.clipboard.writeText(t).then(function(){ return true; }, function(){ return legacyCopy(t); });
+  }
+  return Promise.resolve(legacyCopy(t));
+}
+function legacyCopy(t){
+  var ta = document.createElement("textarea");
+  ta.value = t; ta.setAttribute("readonly", ""); ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+  document.body.appendChild(ta); ta.select();
+  var ok = false; try{ ok = document.execCommand("copy"); }catch(e){}
+  ta.value = ""; document.body.removeChild(ta);
+  return ok;
+}
+function flash(btn, txt, cls){
+  var old = btn.dataset.label || btn.textContent; btn.dataset.label = old;
+  btn.textContent = txt; if (cls) btn.classList.add(cls);
+  clearTimeout(btn._ft);
+  btn._ft = setTimeout(function(){ btn.textContent = btn.dataset.label; btn.classList.remove("done"); }, 1800);
+}
+
+// ───────── 我的 key ─────────
+function stKind(s){
+  s = String(s || "").trim();
+  for (var i = 0; i < ST_PREFIX.length; i++) if (s.indexOf(ST_PREFIX[i][0]) === 0) return ST_PREFIX[i][1];
+  return "off";
+}
+// 「生成失败: 原因」⇒ 拆成 [前缀, 原因]
+function splitStatus(s){
+  s = String(s || "").trim();
+  var m = s.match(/^(生成失败|已禁用|failed)\s*[:：]?\s*(.*)$/);
+  return m ? [m[1], m[2]] : [s, ""];
+}
+function isCurrent(k){ return k.current !== false; } // 缺字段按当前算（兼容旧后端）
+function curKeys(kind){ return state.keys.filter(function(k){ return isCurrent(k) && stKind(k.status) === kind; }); }
+function activeKeys(){ return curKeys("ok"); }
+function pendingKeys(){ return curKeys("pend"); }
+
+function loadKeys(quiet){
+  clearTimeout(state.pollT);
+  if (!quiet){ show("keys-loading", true); show("keys-err", false); }
+  return api("GET", "/ai/api/keys").then(function(r){
+    if (state.dead) return;
+    var wasOk = activeKeys().length > 0;
+    var list = Array.isArray(r) ? r : (r && Array.isArray(r.keys) ? r.keys : null);
+    if (!list) throw new ApiError("服务器回的 key 列表格式不对，刷新页面再试。", 200);
+    state.keys = list;
+    show("keys-loading", false); show("keys-err", false);
+    renderKeys();
+    if (!wasOk && activeKeys().length && quiet) say("你的 key 已经生成好了");
+    if (pendingKeys().length){
+      var d = new Date();
+      $("poll-at").textContent = "上次检查 " + d.toTimeString().slice(0,8) + "，20 秒后再查";
+      state.pollT = setTimeout(function(){ loadKeys(true); }, POLL_MS);
+    }
+  }, function(e){
+    if (state.dead || e.status === 401) return;
+    show("keys-loading", false);
+    if (quiet && state.keys.length){
+      // 轮询途中偶发失败：不把已显示的内容清掉，稍后再试
+      $("poll-at").textContent = "刚才没刷新成功（" + e.message + "），20 秒后再试";
+      state.pollT = setTimeout(function(){ loadKeys(true); }, POLL_MS);
+      return;
+    }
+    $("keys-err-msg").textContent = e.message;
+    show("keys-err", true); show("keys-list", false); show("keys-empty", false); show("keys-pending", false);
+    shout("key 列表没读出来：" + e.message);
+    renderInstall();
+  });
+}
+$("keys-retry").addEventListener("click", function(){ loadKeys(false); });
+
+// 每行的「藏起来」：重画列表、切走标签页、登出时统一调用，避免明文留在旧节点 / 计时器里
+var remaskers = [];
+function remaskAll(){ remaskers.forEach(function(f){ try{ f(); }catch(e){} }); }
+document.addEventListener("visibilitychange", function(){ if (document.hidden) remaskAll(); });
+function renderKeys(){
+  remaskAll(); remaskers = [];
+  var box = $("keys-list"), hb = $("hist-list"); box.textContent = ""; hb.textContent = "";
+  var cur = state.keys.filter(isCurrent), old = state.keys.filter(function(k){ return !isCurrent(k); });
+  cur.forEach(function(k){ box.appendChild(keyRow(k)); });
+  old.forEach(function(k){ hb.appendChild(keyRow(k)); });
+  var hasOk = activeKeys().length > 0, hasPend = pendingKeys().length > 0, hasFail = curKeys("fail").length > 0;
+  show("keys-list", cur.length > 0);
+  show("keys-pending", hasPend);
+  show("keys-swap", hasOk);
+  show("keys-hist", old.length > 0);
+  $("hist-sum").textContent = "历史 key（" + old.length + " 把，已不再使用）";
+  // 失败的那行自带「重新申请」，不再重复出申请卡
+  show("keys-empty", !hasOk && !hasPend && !hasFail);
+  renderInstall();
+}
+
+function keyRow(k){
+  var kind = stKind(k.status), parts = splitStatus(k.status);
+  var row = document.createElement("div"); row.className = "krow" + ((kind === "off" || kind === "dis") ? " dim" : "") + (kind === "fail" ? " fail" : "");
+  var meta = document.createElement("div"); meta.className = "meta";
+  var t = document.createElement("span"); t.className = "type"; t.textContent = k.account_type || "key";
+  var s = document.createElement("span"); s.className = "st " + kind; s.textContent = (kind === "fail" || kind === "dis") ? parts[0] : (k.status || "未知");
+  meta.appendChild(t); meta.appendChild(s);
+  var val = document.createElement("div"); val.className = "val";
+  var masked = k.masked || (kind === "pend" ? "生成中…" : kind === "fail" ? "没有生成出来" : "••••••••");
+  val.textContent = masked;
+  var acts = document.createElement("div"); acts.className = "acts";
+  row.appendChild(meta); row.appendChild(val); row.appendChild(acts);
+  function why(txt){ var w = document.createElement("div"); w.className = "why"; w.textContent = txt; row.appendChild(w); }
+  if (kind === "dis"){ why("这把 key 已停用（常见原因：离职 / 换新），不能再用了。"); return row; }
+  if (kind === "fail"){
+    why("失败原因：" + (parts[1] || "没给出原因") + (isCurrent(k) ? "。可以直接重新申请；连续失败请提反馈。" : "。"));
+    if (isCurrent(k)){
+      var bRe = document.createElement("button"); bRe.type = "button"; bRe.className = "btn sm"; bRe.textContent = "重新申请";
+      bRe.addEventListener("click", function(){ doApply(bRe, null); });
+      acts.appendChild(bRe);
+    }
+    return row;
+  }
+  if (kind !== "ok") return row;
+
+  var bShow = document.createElement("button"); bShow.type = "button"; bShow.className = "btn ghost sm"; bShow.textContent = "显示";
+  var bCopy = document.createElement("button"); bCopy.type = "button"; bCopy.className = "btn sm"; bCopy.textContent = "复制";
+  bShow.setAttribute("aria-label", "显示 " + (k.account_type || "") + " 的 key");
+  bCopy.setAttribute("aria-label", "复制 " + (k.account_type || "") + " 的 key");
+  acts.appendChild(bShow); acts.appendChild(bCopy);
+  var shown = false, timer = 0, left = 0, hint = null;
+
+  function remask(){
+    clearInterval(timer); shown = false;
+    val.textContent = masked; val.classList.remove("plain");
+    bShow.textContent = "显示";
+  }
+  function reveal(){ return api("POST", "/ai/api/keys/reveal", { record_id: k.record_id }).then(function(r){
+    if (!r || typeof r.key !== "string" || !r.key) throw new ApiError("服务器没给回 key，刷新页面再试。", 200);
+    return r.key;
+  }); }
+  function showPlain(plain){
+    shown = true; left = REMASK_MS / 1000;
+    val.textContent = plain; val.classList.add("plain");
+    hint = document.createElement("span"); hint.className = "hint30";
+    val.appendChild(document.createTextNode(" ")); val.appendChild(hint);
+    var tick = function(){ hint.textContent = "（" + left + " 秒后自动藏起来）"; bShow.textContent = "藏起来"; if (left-- <= 0) remask(); };
+    clearInterval(timer); tick(); timer = setInterval(tick, 1000);
+    plain = null;
+  }
+  bShow.addEventListener("click", function(){
+    if (shown){ remask(); say("key 已藏起来"); return; }
+    bShow.disabled = true;
+    reveal().then(function(plain){ showPlain(plain); say("key 已显示，30 秒后自动藏起来"); }, function(e){
+      if (e.status !== 401){ flash(bShow, "没取到"); shout("显示 key 失败：" + e.message); }
+    }).then(function(){ bShow.disabled = false; });
+  });
+  bCopy.addEventListener("click", function(){
+    bCopy.disabled = true;
+    var p = reveal();
+    copyText(p).then(function(ok){
+      if (ok){ flash(bCopy, "已复制", "done"); say("key 已复制到剪贴板"); }
+      else {
+        // 剪贴板被浏览器拒了 ⇒ 显示出来让他自己选中复制（30 秒后照样藏起来）
+        p.then(function(plain){ if (!shown) showPlain(plain); plain = null; });
+        flash(bCopy, "请手动复制"); shout("浏览器不让自动复制，key 已显示出来，请选中后按 Ctrl/Cmd + C");
+      }
+    }, function(e){
+      if (e && e.status !== 401){ flash(bCopy, "没取到"); shout("复制 key 失败：" + (e.message || "未知错误")); }
+    }).then(function(){ bCopy.disabled = false; p = null; });
+  });
+  remaskers.push(function(){ if (shown) remask(); });
+  return row;
+}
+
+// ───────── 申请 ─────────
+var APPLY_TYPE = "Cursor"; // 已定：后端 poller 无论写什么都落成 Cursor
+function doApply(b, msgEl){
+  var label = b.textContent; b.disabled = true; b.textContent = "正在申请…";
+  if (msgEl) msgEl.textContent = "";
+  api("POST", "/ai/api/apply", { account_type: APPLY_TYPE }).then(function(){
+    say("已提交申请，大约 1~2 分钟生成好，请留在这个页面");
+    return loadKeys(false);
+  }, function(e){
+    if (e.status === 401) return;
+    if (msgEl) msgEl.textContent = e.message; else flash(b, "没成功");
+    shout("申请没成功：" + e.message);
+    if (e.status === 409) loadKeys(false);
+  }).then(function(){ if (b.isConnected){ b.disabled = false; b.textContent = label; } });
+}
+$("apply-btn").addEventListener("click", function(){ doApply($("apply-btn"), $("apply-msg")); });
+$("swap-link").addEventListener("click", function(e){
+  e.preventDefault(); var d = $("fb-box"); d.open = true; pickFbTool();
+  $("s-fb").scrollIntoView({ behavior: "smooth", block: "start" }); $("fb-title").focus({ preventScroll: true });
+});
+
+// ───────── 外部用户的二维码 ─────────
+var qrDone = false;
+function drawQR(){
+  if (qrDone) return; qrDone = true;
+  var box = $("qr");
+  // 🔴 画 592px 再 CSS 缩小；按显示尺寸画会糊到解不出（见 HANDOFF §6）
+  try{ new QRCode(box, { text: APPLINK, width: 592, height: 592, correctLevel: QRCode.CorrectLevel.M }); }
+  catch(e){
+    box.textContent = "二维码没画出来，请点右边的按钮。";
+    box.style.cssText += ";display:flex;align-items:center;justify-content:center;font-size:13px;color:#5d6878;text-align:center";
+  }
+}
+
+// ───────── 一键配置 ─────────
+// 命令形状（Mac/Linux 已定；Windows 为占位，等安装脚本定了再改这一处）
+function buildCmd(tool, os, code){
+  if (os === "win"){
+    return ["powershell -ExecutionPolicy Bypass -c \"irm " + ORIGIN + "/ai/i/" + tool + ".ps1 | iex; Install-Carher -Code ", code, "\""];
+  }
+  return ["curl -fsSL " + ORIGIN + "/ai/i/" + tool + ".sh | bash -s -- --code ", code, ""];
+}
+function codeValid(c){ return c && c.exp - Date.now() > 3000; }
+
+function pickTool(t, save){
+  if (!TOOLS[t]) t = "cursor";
+  state.tool = t;
+  [].forEach.call(document.querySelectorAll(".tool"), function(b){ b.setAttribute("aria-checked", b.dataset.tool === t ? "true" : "false"); b.tabIndex = b.dataset.tool === t ? 0 : -1; });
+  ["cursor","codex","claude"].forEach(function(x){ B.classList.toggle("tool-"+x, x === t); });
+  [].forEach.call(document.querySelectorAll(".tname"), function(n){ n.textContent = TOOLS[t]; });
+  if (save) pref("tool", t);
+  renderInstall();
+}
+function pickOS(o, save){
+  if (!OSES[o]) o = "mac";
+  state.os = o;
+  [].forEach.call(document.querySelectorAll(".seg button"), function(b){ b.setAttribute("aria-checked", b.dataset.os === o ? "true" : "false"); b.tabIndex = b.dataset.os === o ? 0 : -1; });
+  ["mac","win","linux"].forEach(function(x){ B.classList.toggle("os-"+x, x === o); });
+  if (save) pref("os", o);
+  renderInstall();
+}
+// radiogroup 的方向键（ARIA 惯例：组内一个 tab 停靠点，方向键移动）
+function arrowNav(sel, onPick){
+  var items = [].slice.call(document.querySelectorAll(sel));
+  items.forEach(function(b, i){
+    b.addEventListener("click", function(){ onPick(b); });
+    b.addEventListener("keydown", function(e){
+      var d = (e.key === "ArrowRight" || e.key === "ArrowDown") ? 1 : (e.key === "ArrowLeft" || e.key === "ArrowUp") ? -1 : 0;
+      if (!d) return; e.preventDefault();
+      var n = items[(i + d + items.length) % items.length]; n.focus(); onPick(n);
+    });
+  });
+}
+arrowNav(".tool", function(b){ pickTool(b.dataset.tool, true); });
+arrowNav(".seg button", function(b){ pickOS(b.dataset.os, true); });
+
+var fetching = {};
+function renderInstall(){
+  var ready = activeKeys().length > 0;
+  show("inst-locked", !ready); show("inst-ready", ready);
+  $("inst-locked").textContent = pendingKeys().length ? "key 生成好之后，这里会自动出命令。" : "先在上面拿到一把可用的 key，这里才会出命令。";
+  $("s-install").classList.toggle("off", !ready);
+  if (!ready){ clearInterval(state.tickT); return; }
+  var c = state.codes[state.tool];
+  if (codeValid(c)) paintCmd(c); else fetchCode(state.tool);
+  clearInterval(state.tickT); state.tickT = setInterval(tick, 1000); tick();
+}
+function paintCmd(c){
+  var pre = $("cmd"); pre.textContent = ""; pre.classList.remove("stale");
+  var parts = buildCmd(state.tool, state.os, c.code);
+  pre.appendChild(document.createTextNode(parts[0]));
+  var s = document.createElement("span"); s.className = "code"; s.textContent = parts[1]; pre.appendChild(s);
+  pre.appendChild(document.createTextNode(parts[2]));
+  $("cmd-copy").disabled = false; show("cmd-err", false);
+}
+function fetchCode(tool){
+  if (fetching[tool] || state.dead) return;
+  fetching[tool] = true;
+  var pre = $("cmd");
+  if (!state.codes[tool]){ pre.textContent = "正在生成安装码…"; }
+  pre.classList.add("stale");
+  $("cmd-copy").disabled = true; $("cmd-timer").textContent = "";
+  api("POST", "/ai/api/install-code", { tool: tool }).then(function(r){
+    if (!r || !CODE_RE.test(String(r.code || ""))) throw new ApiError("服务器给的安装码格式不对，刷新页面再试。", 200);
+    var ttl = Math.max(30, Math.min(3600, +r.expires_in || 600));
+    state.codes[tool] = { code: String(r.code), exp: Date.now() + ttl * 1000, ttl: ttl };
+    if (tool === state.tool) paintCmd(state.codes[tool]);
+  }, function(e){
+    if (e.status === 401) return;
+    delete state.codes[tool];
+    if (tool === state.tool){
+      pre.textContent = ""; pre.classList.remove("stale");
+      $("cmd-err").textContent = "安装码没拿到：" + e.message; show("cmd-err", true);
+      $("cmd-timer").textContent = "";
+      var retry = document.createElement("button"); retry.type = "button"; retry.className = "btn ghost sm"; retry.textContent = "再试一次";
+      retry.addEventListener("click", function(){ fetchCode(tool); });
+      $("cmd-err").appendChild(document.createTextNode(" ")); $("cmd-err").appendChild(retry);
+      shout("安装码没拿到：" + e.message);
+    }
+  }).then(function(){ fetching[tool] = false; tick(); });
+}
+function tick(){
+  var c = state.codes[state.tool], el = $("cmd-timer");
+  if (!c){ return; }
+  var left = Math.round((c.exp - Date.now()) / 1000);
+  if (left <= 3){
+    // 过期：页面在前台才换（后台不白白消耗安装码），回到前台时 visibilitychange 会补上
+    if (!document.hidden) fetchCode(state.tool);
+    el.textContent = "安装码过期了，正在换新的…"; el.classList.remove("soon");
+    return;
+  }
+  var m = Math.floor(left / 60), s = left % 60;
+  var life = c.ttl >= 60 ? Math.round(c.ttl / 60) + " 分钟" : c.ttl + " 秒";
+  el.textContent = life + "内有效，还剩 " + m + ":" + (s < 10 ? "0" : "") + s + "，过期自动换新码";
+  el.classList.toggle("soon", left < 60);
+}
+document.addEventListener("visibilitychange", function(){ if (!document.hidden && !$("inst-ready").hidden) tick(); });
+
+$("cmd-copy").addEventListener("click", function(){
+  var c = state.codes[state.tool]; if (!codeValid(c)) return fetchCode(state.tool);
+  var parts = buildCmd(state.tool, state.os, c.code), b = $("cmd-copy");
+  copyText(parts.join("")).then(function(ok){
+    if (ok){ flash(b, "已复制", "done"); say("命令已复制，粘进" + (state.os === "win" ? " PowerShell" : "终端") + "回车"); }
+    else {
+      var r = document.createRange(); r.selectNodeContents($("cmd")); var sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      flash(b, "按 Ctrl/Cmd+C"); shout("浏览器不让自动复制，命令已选中，请按 Ctrl/Cmd + C");
+    }
+  });
+});
+
+// ───────── 反馈 ─────────
+var REPORT_MAX = 200 * 1024;
+$("fb-file").addEventListener("change", function(){
+  var f = this.files && this.files[0]; if (!f) return;
+  var msg = $("fb-msg");
+  if (f.size > REPORT_MAX){ msg.textContent = "文件太大了（上限 200KB），请只粘出错的那一段。"; shout(msg.textContent); this.value = ""; return; }
+  var rd = new FileReader();
+  rd.onload = function(){ $("fb-report").value = String(rd.result || ""); msg.textContent = "已读入 " + f.name; say("已读入自检报告 " + f.name); };
+  rd.onerror = function(){ msg.textContent = "文件没读出来，请直接把内容粘进上面的框。"; shout(msg.textContent); };
+  rd.readAsText(f);
+});
+function radio(name){ var c = document.querySelector('input[name="' + name + '"]:checked'); return c ? c.value : ""; }
+$("fb").addEventListener("submit", function(e){
+  e.preventDefault();
+  var title = $("fb-title").value.trim(), msg = $("fb-msg");
+  if (!title){
+    show("fb-title-err", true); $("fb-title").setAttribute("aria-invalid", "true"); $("fb-title").focus(); shout("一句话说明是必填的");
+    return;
+  }
+  show("fb-title-err", false); $("fb-title").removeAttribute("aria-invalid");
+  var report = $("fb-report").value;
+  if (new Blob([report]).size > REPORT_MAX){ msg.textContent = "自检报告太长了（上限 200KB），请只粘出错的那一段。"; shout(msg.textContent); return; }
+  var b = $("fb-submit"); b.disabled = true; b.textContent = "正在提交…"; msg.textContent = "";
+  api("POST", "/ai/api/feedback", {
+    type: radio("type"), tool: radio("tool"), title: title, detail: $("fb-detail").value.trim(),
+    report: report, os: OSES[state.os], page: "/ai/"
+  }).then(function(r){
+    $("fb").reset(); $("fb").hidden = true;
+    var d = $("fb-done");
+    d.textContent = "收到了" + (r && r.id ? "（编号 " + r.id + "）" : "") + "。处理好了会在飞书里通知你。";
+    var again = document.createElement("button"); again.type = "button"; again.className = "btn ghost sm"; again.textContent = "再提一条";
+    again.style.marginLeft = "10px";
+    again.addEventListener("click", function(){ d.hidden = true; $("fb").hidden = false; pickFbTool(); $("fb-title").focus(); });
+    d.appendChild(again);
+    d.hidden = false; d.focus(); say(d.firstChild.textContent);
+  }, function(e){
+    if (e.status === 401) return;
+    msg.textContent = "没提交成功：" + e.message + "（你写的内容还在，可以直接再点提交）"; shout(msg.textContent);
+  }).then(function(){ b.disabled = false; b.textContent = "提交"; });
+});
+// 反馈里的「哪个工具」默认跟着上面选的工具走
+function pickFbTool(){
+  var v = TOOLS[state.tool], r = document.querySelector('input[name="tool"][value="' + v + '"]');
+  if (r) r.checked = true;
+}
+$("fb-box").addEventListener("toggle", function(){ if (this.open) pickFbTool(); });
+
+// ───────── 启动 ─────────
+(function init(){
+  var h = (location.hash || "").slice(1);
+  pickTool(TOOLS[h] ? h : (pref("tool") || "cursor"), false);
+  var ua = navigator.userAgent || "", guess = /Windows/i.test(ua) ? "win" : (/Linux|X11|CrOS/i.test(ua) && !/Android/i.test(ua)) ? "linux" : "mac";
+  var saved = pref("os");
+  pickOS(saved || guess, false);
+  $("os-guess").textContent = saved ? "按你上次选的系统显示：" : ("认出你用的是 " + OSES[guess] + "，不对就改：");
+  if (h === "feedback") $("fb-box").open = true;
+  var qs = new URLSearchParams(location.search);
+  // 一次性登录链接落地：/ai/auth/magic?t=…（兼容 /ai/?t=…）
+  if (/\/auth\/magic\/?$/.test(location.pathname) || qs.has("t")){ bootMagic(qs.get("t") || ""); return; }
+  // 后端回跳带的 ?login_error=expired|used|invalid：白名单查表，不把原文写进页面
+  var le = qs.get("login_error");
+  if (le !== null){
+    $("login-err").textContent = LOGIN_ERR[le] || LOGIN_ERR.invalid; show("login-err", true);
+    qs.delete("login_error");
+    try{ history.replaceState(null, "", location.pathname + (qs.toString() ? "?" + qs : "") + location.hash); }catch(e){}
+  }
+  boot();
+})();
+})();
+</script>
+</body></html>

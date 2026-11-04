@@ -2538,3 +2538,34 @@ def test_rotate_refuses_blocked_key_no_self_unblock(rotate_portal):
     LITE.keys[S.sha(KEY_A1)]["blocked"] = False
     s, d, _, _ = do_rotate(p, sa)
     assert s == 200 and d["key"] != KEY_A1, (s, d)
+
+
+def test_external_apply_goes_to_review_not_auto_issue(portal):
+    """外部人自助申请 ≠ 直接发 key:飞书个人版注册几乎零成本,自动发 = 批量注册批量拿 key(红队 P2-4)。
+    APPLY_ALLOW_EXTERNAL 默认关 ⇒ 外部人点申请只登记待审核、**不写 key 表**(写了 poller 就会发)。"""
+    portal.app.cfg["APPLY_DRY_RUN"] = "0"
+    try:
+        sx = portal.sid("X")
+        for r in list(FAKE.tables[KEYTBL]):
+            if r == "recX1": del FAKE.tables[KEYTBL][r]            # 让 X 名下没有 key
+        n = len(FAKE.tables[KEYTBL])
+        s, d = portal.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sx)[:2]
+        assert s == 200 and d.get("review") is True and "审核" in d.get("message", ""), d
+        assert len(FAKE.tables[KEYTBL]) == n, "外部人申请不能写 key 表"
+        # 阳性对照:同一个开关打开 ⇒ 外部人申请真写表
+        portal.app.cfg["APPLY_ALLOW_EXTERNAL"] = "1"
+        s, d = portal.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sx)[:2]
+        assert s == 200 and not d.get("review") and len(FAKE.tables[KEYTBL]) == n + 1, d
+    finally:
+        portal.app.cfg["APPLY_DRY_RUN"] = "1"; portal.app.cfg["APPLY_ALLOW_EXTERNAL"] = "0"
+
+
+def test_internal_apply_unaffected_by_external_gate(portal):
+    portal.app.cfg["APPLY_DRY_RUN"] = "0"
+    try:
+        sn = portal.sid("N")                                       # 内部新人,表里没有行
+        n = len(FAKE.tables[KEYTBL])
+        s, d = portal.req("POST", "/ai/api/apply", {"account_type": "Cursor"}, cookie=sn)[:2]
+        assert s == 200 and not d.get("review") and len(FAKE.tables[KEYTBL]) == n + 1, d
+    finally:
+        portal.app.cfg["APPLY_DRY_RUN"] = "1"

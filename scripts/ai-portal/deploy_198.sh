@@ -25,6 +25,9 @@ PILOT="${PILOT_UNION_IDS-on_0577e767b8995740ebbf83f06d9f8bd1}"   # 刘国现(car
 # 「重置我的 key」:0 = 真换(11-04 用户定:「要改成真换,不要演练,好多人在后面等着呢」);1 = 只演练
 ROTATE="${ROTATE_DRY_RUN-0}"
 case "$ROTATE" in 0|1) ;; *) echo "ROTATE_DRY_RUN 只能是 0 或 1" >&2; exit 1 ;; esac
+# 申请 key:0 = 真写表让 poller 发(内部同事);外部人另有 APPLY_ALLOW_EXTERNAL 默认关,走审核
+APPLYDR="${APPLY_DRY_RUN-0}"
+case "$APPLYDR" in 0|1) ;; *) echo "APPLY_DRY_RUN 只能是 0 或 1" >&2; exit 1 ;; esac
 case "$PILOT" in *[!A-Za-z0-9_,]*) echo "PILOT_UNION_IDS 只能是 on_xxx,on_yyy" >&2; exit 1 ;; esac
 
 # 0) 本地门禁:测试 + e2e 不过就停
@@ -67,6 +70,7 @@ set -euo pipefail
 S="sudo -n"
 PILOT="$1"
 RDR="$2"
+ADR="$3"
 W=$(mktemp -d); trap 'rm -rf "$W" /tmp/ap.tgz' EXIT
 tar -C "$W" -xzf /tmp/ap.tgz
 /usr/bin/python3 -m py_compile "$W/ai-portal/server.py" "$W/feedback/feedback_server.py"
@@ -107,6 +111,7 @@ MK="$($S sh -c 'for s in $(kubectl -n litellm-product get deploy litellm-proxy -
 # 🔴 这段跑在 **198 上**:本机的 ROTATE_DRY_RUN 传不过来,只能靠参数 $2(11-04 踩到:本机设了 0,
 #    远端读自己的环境变量拿不到 ⇒ 永远落到默认值,部署全绿、却一直是演练模式)
 case "$RDR" in 0|1) ;; *) echo "远端没拿到 ROTATE_DRY_RUN(应为 0/1,实际「$RDR」)" >&2; exit 1 ;; esac
+case "$ADR" in 0|1) ;; *) echo "远端没拿到 APPLY_DRY_RUN(应为 0/1,实际「$ADR」)" >&2; exit 1 ;; esac
 [ ${#SS} -ge 32 ] || SS="$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')"
 [ ${#IS} -ge 32 ] && [ "$IS" != "$SS" ] || IS="$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')"
 [ "$IS" != "$SS" ]
@@ -121,7 +126,7 @@ case "$RDR" in 0|1) ;; *) echo "远端没拿到 ROTATE_DRY_RUN(应为 0/1,实际
   echo "STATIC_DIR=/opt/carher-ai-portal/ai-portal/static"
   echo "DB_PATH=/var/lib/carher-ai-portal/ai_portal.db"
   echo "TRUST_PROXY=1"
-  echo "APPLY_DRY_RUN=1"
+  echo "APPLY_DRY_RUN=$ADR"
   [ -n "$MK" ] && echo "LITELLM_MASTER_KEY=$MK"
   echo "ROTATE_DRY_RUN=$RDR"
 } > "$W/new.env"
@@ -197,7 +202,7 @@ PY
 fi
 REMOTE
 $J scp "$STAGE/remote.sh" $H:/tmp/ap_remote.sh
-$J ssh $H "bash /tmp/ap_remote.sh '$PILOT' '$ROTATE'; rc=\$?; rm -f /tmp/ap_remote.sh; exit \$rc"
+$J ssh $H "bash /tmp/ap_remote.sh '$PILOT' '$ROTATE' '$APPLYDR'; rc=\$?; rm -f /tmp/ap_remote.sh; exit \$rc"
 
 # 5) 外网验收
 U=https://chat.auto-link.com.cn
@@ -206,6 +211,8 @@ chk() { if [ "$2" = "$3" ]; then echo "OK   $1 = $2"; else echo "FAIL $1 = $2(�
 chk "健康检查 /ai/healthz" "$(curl -s -m 10 $U/ai/healthz)" '{"ok": true}'
 # 回读 198 上真正生效的值,别信「我传了」:上一版传不过去,部署照样全绿
 chk "重置模式 ROTATE_DRY_RUN" "$($J ssh $H "sudo -n grep -E '^ROTATE_DRY_RUN=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" "$ROTATE"
+chk "申请模式 APPLY_DRY_RUN" "$($J ssh $H "sudo -n grep -E '^APPLY_DRY_RUN=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" "$APPLYDR"
+chk "灰度名单 PILOT_UNION_IDS" "$($J ssh $H "sudo -n grep -E '^PILOT_UNION_IDS=' /etc/carher-ai-portal.env | cut -d= -f2" 2>/dev/null | tr -d '\r' | tail -1)" "$PILOT"
 chk "网关 master key 已配" "$($J ssh $H "sudo -n grep -cE '^LITELLM_MASTER_KEY=.{20,}' /etc/carher-ai-portal.env" 2>/dev/null | tr -d '\r' | tail -1)" 1
 chk "未登录 /ai/api/me" "$(curl -s -o /dev/null -w '%{http_code}' -m 10 $U/ai/api/me)" 401
 chk "页面 /ai/" "$(curl -s -o /dev/null -w '%{http_code}' -m 10 $U/ai/)" 200

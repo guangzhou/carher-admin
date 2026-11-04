@@ -63,6 +63,10 @@ DEFAULTS = {
     "BATCH_GAP_MS": "60000",    # 真表里批量是每 ~3 秒一把(最长一次 27 秒);本人手动申请两次相隔以天计
     # 申请:字段形状已定({"姓名":[{"id":on_}],"账户类型":["Cursor"]} + 可选 组织名称);默认 dry-run 不写表
     "APPLY_DRY_RUN": "1",
+    # 外部人能不能自助申请 —— 和 APPLY_DRY_RUN **分开**的开关(红队 P2-4:别让一个 env 同时打开两件事)。
+    # 飞书个人版注册几乎零成本 ⇒ 外部人自助申请 = 批量注册批量拿 key。默认关:外部人点申请只登记,
+    # 由管理员审核放行(他们本来就是合作方,数量少)。内部同事不受影响。
+    "APPLY_ALLOW_EXTERNAL": "0",
     "APPLY_ORG_NAME": "",       # 非空则写进「组织名称」;⚠️ 必须是表里已有的选项,本服务不校验
     "APPLY_LOCK_TTL": "86400",
     # 重置自己的 key(轮换)。没配 LITELLM_MASTER_KEY ⇒ 整个功能关闭(接口 501,前端退回「提反馈」)
@@ -967,12 +971,31 @@ class App:
         assert set(fields) <= APPLY_FIELD_ALLOW
         return fields
 
+    def audit_apply_request(self, user):
+        """外部人申请待审核:记一行本地审计 + 尽量写进反馈表(管理员在那里看)。写反馈表失败不影响回给用户的话。"""
+        self.q("create table if not exists apply_requests(union_id text, name text, tenant_key text, at real)")
+        if not self.q("select 1 from apply_requests where union_id=? and at>?", (user["union_id"], self.now() - 86400), one=True):
+            self.q("insert into apply_requests values(?,?,?,?)",
+                   (user["union_id"], user.get("name") or "", user.get("tenant_key") or "", self.now()))
+            try:
+                self.feedback(user, {"type": "其他", "tool": "其他", "title": "外部合作方申请 key:%s" % (user.get("name") or "未知"),
+                                     "detail": "union_id=%s\ntenant_key=%s\n(门户自动登记,审核通过后在 key 表里给他建一行即可)"
+                                               % (user["union_id"], user.get("tenant_key") or "")})
+            except Exception as e:      # noqa: BLE001 —— 登记失败不能让用户看到报错
+                log("外部申请写反馈表失败", short(user["union_id"]), type(e).__name__)
+        log("外部申请待审核", short(user["union_id"]))
+
     def apply(self, user, body):
         at = body.get("account_type", APPLY_TYPE)
         if at != APPLY_TYPE:            # 先验参数再记次数:填错不该扣额度(照 feedback 的口径)
             raise HttpError(400, "账户类型只能是 Cursor(三个工具共用这一把)")
         if not self.rl_apply.hit(user["union_id"]):
             raise HttpError(429, "申请太频繁了,过一分钟再试")
+        if user.get("external") and self.cfg["APPLY_ALLOW_EXTERNAL"] != "1":
+            # 外部人:不写表(写了 poller 会直接发 key),只登记一条待审核,管理员在反馈表里看得到
+            self.audit_apply_request(user)
+            return {"ok": True, "review": True,
+                    "message": "已收到申请。外部合作方的 key 需要管理员审核,通过后会出现在这个页面上(一般 1 个工作日内)"}
         rows = self.my_rows(user)               # 写之前先精确查一遍
         cur = next((r for r in rows if r["current"]), None)
         if cur:

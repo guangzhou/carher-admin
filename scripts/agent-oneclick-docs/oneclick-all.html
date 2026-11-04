@@ -137,12 +137,24 @@ body.tool-claude .for-cursor, body.tool-claude .for-codex{display:none}
   .cmds{grid-template-columns:1fr}
 }
 pre,code{font-variant-ligatures:none;font-feature-settings:"liga" 0,"calt" 0}
+.newportal{display:block;margin:16px 0 8px;padding:14px 16px;border-radius:12px;text-decoration:none;
+  background:var(--accent,#2563eb);color:#fff;box-shadow:0 2px 8px rgba(37,99,235,.25)}
+.newportal b{display:block;font-size:17px;margin-bottom:4px}
+.newportal span{font-size:14px;opacity:.95}
+.newportal:hover,.newportal:focus-visible{filter:brightness(1.08);outline:2px solid #fff;outline-offset:2px}
 </style>
 
 <div class="wrap">
 <header>
   <h1>Cursor · Codex · Claude Code 一键配置</h1>
   <p class="lead">从上往下做，几分钟就能用上。三个工具共用一把 key。</p>
+  <!-- 11-04:新的自助页上线 —— 飞书登录就能看到自己的 key,一行命令装好三个,不用找 key、粘 key。
+       本页保留:公司电脑拦了一行命令时的备用办法(新页面「被公司电脑拦住了」那句就链到这里)。 -->
+  <a class="newportal" href="https://chat.auto-link.com.cn/ai/">
+    <b>🆕 更简单的办法：飞书登录，一行命令装好</b>
+    <span>不用找 key、不用粘 key，Cursor / Codex / Claude Code 三个一起装。还能自己重置 key。→ 打开新页面</span>
+  </a>
+  <p class="sub">下面这套「下载安装包、双击安装」的老办法照样能用：公司电脑拦了一行命令时，用这个。</p>
 </header>
 
 <div class="flow">

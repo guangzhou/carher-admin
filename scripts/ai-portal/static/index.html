@@ -869,7 +869,14 @@ var APPLY_TYPE = "Cursor"; // 已定：后端 poller 无论写什么都落成 Cu
 function doApply(b, msgEl){
   var label = b.textContent; b.disabled = true; b.textContent = "正在申请…";
   if (msgEl) msgEl.textContent = "";
-  api("POST", "/ai/api/apply", { account_type: APPLY_TYPE }).then(function(){
+  api("POST", "/ai/api/apply", { account_type: APPLY_TYPE }).then(function(r){
+    // 外部人待审核 / 演练模式:**不能**说「1~2 分钟生成好」—— 那样他会一直等一把永远不会来的 key
+    if (r && (r.review || r.dry_run)){
+      var m = r.message || (r.review ? "已收到申请，需要管理员审核" : "申请功能还没开放，请先提反馈");
+      if (msgEl) msgEl.textContent = m;
+      say(m);
+      return;
+    }
     say("已提交申请，大约 1~2 分钟生成好，请留在这个页面");
     return loadKeys(false);
   }, function(e){

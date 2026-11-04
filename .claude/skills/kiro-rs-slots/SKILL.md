@@ -28,10 +28,12 @@ AK=$(cat ~/kiro-us-egress/.ak); curl -s -H "x-api-key: $AK" http://127.0.0.1:308
 | 项 | 值 |
 |---|---|
 | 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 **RollingUpdate 无缝换版**，内存 2Gi，grace 300s），Admin `http://10.68.13.198:30891/admin`。adminApiKey 在实例自己的 `config.json`；198 上脚本统一读 `~/kiro-us-egress/.ak`（同一个值的副本） |
-| 镜像 | **现网 `slots63`**（11-02 11:10）。各版改动和回滚注意 ⇒ `HISTORY.md`。回滚一般 `set image … <上一版>` |
+| 镜像 | **现网 `slots73`**（11-02 下午 65→73：统一并发按钮 / 列表按槽号排 / 失败借空闲槽 / 锁定值落盘 / 大户铺开 / 排队超 3s 借空闲槽 / 会话分槽 key 不参与配平 / 重新分配不看「在用」/ **换号先非 STUDENT**）。各版改动和回滚 ⇒ `HISTORY.md`（slots64、slots70 未单独上线） |
 | 老实例 | deploy `kiro-rs`（:30890）。只剩少数 key 主走它；它的号池已死，别再当兜底 |
 | manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、Secret `kiro-rs-slots-bootstrap`；11-01 起挂 Secret `kiro-egress-subs`）。🔴 **仓库 yaml 的 image 是占位 `slots9`**：`kubectl apply` 前必须先改 image，否则回退 |
-| 关键配置（`config.json`） | `slotQueueTimeoutSecs=120`（单次排队上限）、`slotRequestBudgetSecs=60`（整请求预算，超了 529 交兜底）、`slotRefusalFallbackModel=claude-opus-5`；并发 起步 16 / 最小 2 / 最大 24 / 自动调；封口倍数 1.5 |
+| 🔴 按会话分槽 | **`slotUnboundKeyAliases=["carher-hangzhou"]`**（11-02 用户定）。命中这个前缀的 key **不按 key 绑槽**，改按会话键散到各槽（Claude Code 走 `sid:<UUID>`；其它客户端走「系统提示+首条 user 消息」的 sha256 `anc:`），同一会话仍稳定落同一槽（保 prompt cache），**不写绑定表**。其余所有 key 一律照旧 `u:<hash>` 按用户绑死。起因：hangzhou 背后是 300 人共用一把 key，一人 12552 次/24h = 全站 20%，一个 key 只能绑一槽 ⇒ 那个槽必然是平均的 7 倍，均衡算法挪不动。开后 677 次请求散到 32 个槽，原独占槽掉出前 14。🔴 **前缀是 `starts_with`**，加名单前先查有没有同前缀的别的 key 会被连带。🔴 **改它要滚动重启**（`config.json` 只在启动时读），备份 `198:~/kiro-deploy/backup/config-pre-unbound-*.json` |
+| 🔴 排队借号 | **`slotQueueBorrowMs=3000`**（slots71 起，默认值；0 = 关闭回到一直排）。在自己槽上软等这么久还没轮到 ⇒ 借一个**真空闲**的槽发出去（判据同 slots67：有空位 + `queued==0` + 60s 内没撞 429 + 接新人 + 非专属），借不到回去接着排，**不改绑定**。治「自己槽满了排队、旁边一堆槽空着」。⚠️ 借号这发请求 prompt cache 不命中 ⇒ 别调太小。看效果：`grep "排队超.*借空闲槽位"` pod 日志 |
+| 关键配置（`config.json`） | `slotQueueTimeoutSecs=120`（单次排队上限）、`slotRequestBudgetSecs=60`（整请求预算，超了 529 交兜底）、`slotRefusalFallbackModel=claude-opus-5`；并发 起步 16 / 最小 2 / 最大 24 / 自动调；封口倍数 1.5。🔴 **11-02 起 36 槽并发已被「统一并发」按钮统一锁定为 6**（`POST /slots/lock-all` {limit:6}；锁定值不走权重缩放；slots66 起**落盘**在 `/app/config/kiro_slots.json` 的 `lockedLimits` ⇒ 换版 / 重启 / 换号都不丢，回滚到 slots65 及以前才会回到自动调节） |
 | 槽 | 11-01：**36 行配置 / 30 生效**，冷备 83。生效槽数**不封顶**（slots54 起），真实上限 = 冷备号数（每个生效槽占一个号；不够 ⇒ 空槽，橙色徽标，不接流量）。总条数上限 200 |
 | 状态文件（PVC） | `config.json` `credentials.json` `kiro_slots.json`（绑定 / 槽→号 / 退役 / 原代理 / userMeta / alarmAck）`kiro_account_usage.json`（按号 × 模型 × 北京日，留 8 天）`kiro_pool_balance.json` |
 | 状态备份 | `198:~/kiro-deploy/backup/slots-pre-<tag>-<ts>/`（ship 换镜像前自动）；整份 deploy 备份 `198:~/kiro-rs-slots-deploy.pre-*.json` |
@@ -42,7 +44,7 @@ AK=$(cat ~/kiro-us-egress/.ak); curl -s -H "x-api-key: $AK" http://127.0.0.1:308
 |---|---|---|
 | 自建 · 阿里云 squid ×4 | `sg-47.84.112.136` `sg-47.84.85.100` `sg-47.84.101.218` `sg-47.236.200.98` ⇒ `http://<IP>:3128`（112.136 是 `:128`）| ns `kiro-sg` 的 squid（deploy `kiro-egress-226/122/86/241`，hostNetwork + nodeName）。加一个 = 复制 `kiro-egress-86` 改名/节点 ⇒ 从 198 验 `http://kiro:<pw>@<IP>:3128`（q.us-east-1 404 / 无密码 000）⇒ Admin 追加槽。🔴 白名单只放 Kiro + `api.ipify.org` ⇒ 下载测不出，测速里的下载是 EIP 上限（40/5/20/**1** Mbps）|
 | 自建 · 243 astrill | `jp-172.235.204.67` ⇒ `http://10.68.13.243:8120` | — |
-| iGuge 集群内代理 | `kiro-us-egress`（us-170.178.173.10）、`kiro-uk-egress`（uk-213.255.246.28）、`kiro-px-<n>`（n=1~5、16~39）⇒ `http://<deploy>.kiro-rs.svc:7890`，用户 `kiro` | 每个出口一份 mihomo deploy/svc/netpol（改一个不重启别的），钉死单节点 ⇒ IP 固定。镜像 `127.0.0.1:5000/mihomo:v1.19.33-carher1`。密码 `198:~/kiro-px-egress/<n>/pw`。netpol 只放 `app=kiro-rs-slots` 和 `kiro-px-egress-probe=1` |
+| iGuge 集群内代理 | `kiro-us-egress`（us-170.178.173.10）、`kiro-uk-egress`（uk-213.255.246.28）、`kiro-px-<n>`（n=1~5、16~39）⇒ `http://<deploy>.kiro-rs.svc:7890`，用户 `kiro` | 每个出口一份 mihomo deploy/svc/netpol（改一个不重启别的），钉死单节点 ⇒ IP 固定。镜像 `127.0.0.1:5000/mihomo:v1.19.33-carher1`。密码 `198:~/kiro-px-egress/<n>/pw`。netpol 只放 `app=kiro-rs-slots` 和 `kiro-px-egress-probe=1`。🔴 **别的池子要用这些出口，必须在它自己那条 netpol 里单独放行**（见下「别的池子借用出口」）|
 
 **iGuge 出口三件套（198 上以 cltx 跑，别加 sudo）**：
 
@@ -102,7 +104,11 @@ python3 ~/kiro-px-egress/kiro-slots-bench-apply.py plan.json [--apply]   # 批�
 - **opus-5.5 安全审查**：空回复且号没被限 ⇒ 自动换备用模型重答 + 提示，见 §2.1。
 - **槽停用 / 删除**：在 Admin「槽位设置」关开关 ⇒ 该槽的人在下一个请求自动换到别的槽（`SLOT_GONE` ⇒ 重选），在途的跑完。删除只允许先停用。8 个停用分支都有单测。
 - **冷备数** = 启用 − 在槽 − 退役（只算 quota/restricted），且补槽只挑能跑 opus 的号（FREE 档不算）。手动在 Admin 启用一个号（单个或批量）会清掉它的退役标记。
-- **权重（slots41 起）**：`config.json.slots[].weight` 1~10，默认 5，界面「设置 → 槽位配置」改。作用三处：新人分配、封口判定（用量 ÷ 权重）、在途上限（自动值 × 权重/5，手动锁定值不缩放）。**改权重不自动挪已绑的人**，要挪点「重新分配用户」。
+- 🔴 **VIP 专属槽 = 槽21 `jp-64.118.148.165`**（11-02 用户定）：`vipAliases=["cursor-buyitian-pwcf"]` + `acceptNew=false`。三重隔离都验过：①只有命中前缀的 key 能进 ②自动分配/重新分配都不往里放人 ③重新分配整槽排除（`excludedSlots` 含它）④**专属槽不外借**（借槽判据要求 `vip.is_empty()`）⇒ 别人排队也抢不到它的名额。改法：`PUT /slots/config` 整体替换第 21 行（**热生效，不用重启**）。
+- 🔴 **换号档位优先（slots73 起）**：先非 STUDENT，没有才 STUDENT，FREE 永不用。⚠️ **逻辑生效 ≠ 有号**：11-02 冷备 381 个只剩 1 个 PRO ⇒ 查 `/credentials` 的 `subscriptionTitle` 分布确认池里真有非 STUDENT，否则这条是空转。
+- 🔴 **重新分配的能力边界（11-02 实测，别再重复诊断）**：`REBALANCE_IDLE_SECS=0` + 解掉全部固定后，可挪 25 人、算法已收敛（再预览只剩 1 人），但**差距仍 7326 下不来**。原因是数学硬限制：平均每槽 1756，而单个 key 就有 8193（4.7×）、7329、5025、4355——**一人一槽前提下，超大户在哪个槽那槽就是最高点**，挪他只是把高点搬个位置还连累一槽人白丢缓存（所以那条 5025 的挪动被我剔掉没执行）。⇒ 想真平只有「按会话分槽」，但 **11-02 用户定：除 carher-hangzhou 外其他 key 都不按会话分槽** ⇒ 这个差距是设计必然，不是故障。
+- 🔴 **借号比例 ≠ 负载不平衡**：11-02 做完重新分配后借号从 18% **涨到 30.3%**（排队借 180 + 失败借 184 / 1203 请求），说明它不是分布问题。当时的判断是**总并发容量**（36 槽 × 并发 6 = 216 个位，而每分钟 ~240 个请求）+ 上游 429（失败借号那一半跟分布无关）。🔴 **这个判断未验证**——要证伪就调高并发看借号比例是否下降；排队超时一直是 0，用户并没有卡住。
+- **权重（slots41 起）：`config.json.slots[].weight` 1~10，默认 5，界面「设置 → 槽位配置」改。作用三处：新人分配、封口判定（用量 ÷ 权重）、在途上限（自动值 × 权重/5，手动锁定值不缩放）。**改权重不自动挪已绑的人**，要挪点「重新分配用户」。
 - **重新分配（slots41 起）**：槽位卡片上方「重新分配用户」⇒ 先预览再确认。负载 = 槽上所有人**近 24 小时请求数**之和，目标按权重配比；只挪「10 分钟没发请求、且没有在跑的请求、且没被固定」的人；偏差在目标 ±10% 或 <5 次不挪；用量 0 的人不挪（挪了白丢缓存）。执行时每条再核一遍，不满足就跳过（返回 moved/requested）。重新分配挪的人**不固定**。
 - **手动挪 key（slots41 起）**：卡片上点「用户」数字 ⇒ 该槽 key 列表（别名、7 日请求 / token、最后使用、在用、是否固定）⇒「挪到」。手动挪 = 固定（重新分配不动），可「取消」。下一个请求起走新槽，在途的跑完。🔴 换槽 = 换号，那个人的 Kiro 缓存作废（缓存按号，见记忆 project_kiro_prompt_cache_works_ttl_5min）。
   - 别名 / 7 日数据存在 `kiro_slots.json.userMeta`（30s 落一次盘），**从 slots41 上线起才开始记**；老用户别名要等它下次请求。固定存 `pinned`；绑定没了（槽停用/删）固定也作废。
@@ -330,3 +336,55 @@ Kiro 按 token 计 credit：10-25 实测 4 个能算的号**每百万输入 toke
   和阿里云 squid 槽的差别：多人共用 IP（风控可能更差）、延迟 +0.4~2.3s（日本槽 0.61s 对照）、节点挂了槽就挂 ⇒ 权重 1~3 起步。🔴 选国家只认出口 IP（节点名会骗人），没有印度/越南/加拿大/澳大利亚。
   改 ACL：先 `squid -k parse` 在 pod 里验新文件 → apply CM（~5s 同步进 pod）→ **逐个 `kubectl exec <pod> -- kill -HUP 1`** 热加载
   （`squid -k reconfigure` 不能用：配置里 `pid_filename none` ⇒ FATAL）。每个之后从 198 经该槽代理各打一发 kiro（404）和 chatgpt（401）再动下一个。
+
+## 别的池子借用这些出口：每个池子一条 netpol，加新出口要逐条扩（11-01/11-02 各踩一次）
+
+`kiro-px-*` 这些出口 deploy 的 netpol 默认只放 `app=kiro-rs-slots`。
+别的池子（Gemini 网页、ChatGPT 号池、cli-proxy、muse2api）各有**自己的一条** netpol
+把来源放进来，而那些 netpol 的 `podSelector` 是**写死的一串出口名**：
+
+| netpol（ns `kiro-rs`） | 放行的来源 | 11-01 之前放行的出口 |
+|---|---|---|
+| `cliproxy-muse-to-kiro-egress` | cli-proxy / muse2api / **gemini-web** | 只有 8 个（`kiro-px-1..5` + uk/us/cac）|
+| `chatgpt-acct-to-kiro-egress` | `pool=chatgpt-acct` | 只有 8 个（同上）|
+
+⇒ **新建的 `kiro-px-16..39` 全部被拒**，症状是「连不到代理（Connection refused）」，
+看起来像出口坏了，其实是策略没放行。两次实测：
+
+- **11-01 Gemini 网页**：36 个出口只有 10 个能用 ⇒ 扩 `cliproxy-muse-to-kiro-egress`
+  的放行目标 8 → 32 ⇒ **34/36 能用**
+- **11-02 ChatGPT 号池**：36 个出口只有 12 个能连 chatgpt.com ⇒ 扩
+  `chatgpt-acct-to-kiro-egress` 8 → 32 ⇒ **35/38 能用**
+
+```bash
+# 判这个池子被卡住没有：从它自己的 pod 经两个代理各打一次，一个在老 8 个里、一个在新的里
+# 老的通、新的 Connection refused ⇒ 就是 netpol，不是出口坏
+kubectl -n kiro-rs get netpol <那条> -o json | python3 -c "
+import json,sys; d=json.load(sys.stdin)
+print(len(d['spec']['podSelector']['matchExpressions'][0]['values']))"
+```
+扩法：取 live netpol → `matchExpressions[0].values` 并上全部 `kiro-px-*` deploy 名 → `apply`。
+🔴 **断言 `kiro-px` 数到 ≥29 再写**（数到 0 就写等于把放行清空）；来源那几条不要动；
+改前备份到 `198:~/netpol-backups/<netpol>-<ts>.json`。
+
+🔴 **「能连 Kiro」不等于「能连 ChatGPT/Gemini」**：同一个出口 IP 对不同上游是不同待遇。
+11-02 实测 35 个出口能连 chatgpt.com，但其中 2 个（`142.111.55.165`、`170.178.173.10`）
+对 chatgpt.com 是 **TLS 握手被切**（别的网站正常）；Google 那边还另有按 IP 的地区闸门
+（36 个里 16 个真推理回 `400 User location is not supported`，而连通测试全绿）。
+⇒ 每个池子要用哪些出口，必须**用那个池子自己的协议实测**，不能照搬别处的清单。
+
+## ChatGPT 号池的出口分配（11-02）
+
+- **「可用号」不等于「在跑的 pod」**：165 个 deploy / 62 个 pod Running /
+  **额度查得通只有 20 个** / 真正可用（在跑 + 额度通 + 挂在 router 里）**16 个**
+  （42 个是 token 失效/401）。按 62 算会得出「要分批、62 次重启」的错结论；
+  按 16 算，36 个出口做到一号一 IP 只需挪 5 个号。
+- 16 个号原本挤在 11 个出口（3+2+2+2 共用），挪 5 个即**一号一 IP**。
+- 换出口 = `egress_ops.run`，会**重启号 pod + 刷一次性 refresh_token**（写回失败号就废）
+  ⇒ `workers=1`、先 `/api/egress-preview`、做完核验出口真落到目标 IP 才做下一个。
+  改前备份自动存 `198:/home/cltx/kiro-deploy/cac/acct-<n>-deploy.pre-egress-<ts>.json`。
+- 验收三层：出口 IP 唯一 → 额度查得通 → **真推理 `verdict=SERVES`**。
+  11-02 一次 `UNKNOWN` 是上游 `Our servers are currently overloaded`，复测即通 ⇒ 不是号坏。
+- 🔴 **多会话同时改出口会互相覆盖**：11-02 我 10:02~10:11 排好一号一 IP，
+  10:43~10:59 另一个会话做了一次全池重排（备份文件时间戳可证），出口数退回 13。
+  动之前先看 `~/kiro-deploy/cac/` 最近的备份时间戳，有人刚动过就先对齐口径，别来回覆盖。

@@ -108,8 +108,15 @@ sync_cursor() {
 sync_codex() {
   local mac=https://persistent.oaistatic.com/codex-app-prod/Codex.dmg ver json D a url want sha
   # Windows 版本号以微软目录为准(mac 的 Codex.dmg 是固定名、不带版本 ⇒ 用 Last-Modified 区分)
-  json="$(python3 "$MSSTORE" 9PLM9XGG6VKS)"
-  ver="$(printf '%s' "$json" | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["version"])')"
+  json="$(python3 "$MSSTORE" 9PLM9XGG6VKS)" || json=""
+  ver="$(printf '%s' "$json" | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["version"])' 2>/dev/null)" || ver=""
+  # 🔴 11-05 06:40 真踩到:商店目录这次没拿到版本号 ⇒ ver 为空 ⇒ D=codex/ ⇒ 后面把
+  #    Codex-windows-*.msix 软链到 `codex//Codex-windows-x64.msix`(不存在)⇒ 所有 Windows 用户下 Codex 404。
+  #    版本号不像版本号就整段不动 Windows(旧软链照样能用),只报错。
+  case "$ver" in
+    [0-9]*.[0-9]*) : ;;
+    *) echo "✗ 读不到 Codex Windows 版本号(微软商店目录返回:${json:0:120}),Windows 软链保持不变" >&2; return 1 ;;
+  esac
   D="$ROOT/codex/$ver"; mkdir -p "$D"
   echo "→ Codex $ver"
   for a in x64 arm64; do
@@ -141,7 +148,8 @@ sync_codex() {
     if [ ! -s "$DM/$out" ] && [ -s "$D/$out" ] && [ "$(size_of "$D/$out")" = "$want" ]; then mv -f "$D/$out" "$DM/$out"; fi
     fetch "$src" "$DM/$out" "$want"
   done
-  ( cd "$ROOT" && for f in Codex-windows-x64.msix Codex-windows-arm64.msix; do ln -sfn "codex/$ver/$f" "$f"; done
+  # 软链只指向**真实存在且非空**的文件:目标缺了就保留旧软链(11-05 空版本号把 Windows 链接指向不存在的文件)
+  ( cd "$ROOT" && for f in Codex-windows-x64.msix Codex-windows-arm64.msix; do [ -s "codex/$ver/$f" ] && ln -sfn "codex/$ver/$f" "$f" || echo "✗ codex/$ver/$f 不存在,$f 保持原链接" >&2; done
     for f in Codex-mac.dmg Codex-linux-amd64.deb Codex-linux-arm64.deb Codex-linux-x86_64.rpm Codex-linux-aarch64.rpm; do ln -sfn "codex/mac-$mver/$f" "$f"; done )
   set_version codex "$ver"; set_version codex-mac "$mver"
   echo "✔ Codex 稳定链接 → Windows $ver · Mac/Linux $mver"

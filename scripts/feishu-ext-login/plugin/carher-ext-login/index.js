@@ -386,6 +386,20 @@ const plugin = {
       log("warn", `api.on failed: ${String(e).slice(0, 120)}`);
     }
     log("info", `registered ${registered} before_dispatch listener(s, deduped by message_id); allow=${ALLOW_FILE}`);
+
+    // 按公司自动放行(只放 allow-tenants.json 里的合作公司;文件没有 ⇒ 不放任何人)。见 auto-admit.js
+    if (process.env.CARHER_EXT_LOGIN_AUTO_ADMIT !== "0" && !globalThis.__carherAutoAdmit) {
+      try {
+        globalThis.__carherAutoAdmit = require("./auto-admit.js").start({
+          stateDir: STATE_DIR,
+          dmStoreFile: process.env.CARHER_EXT_LOGIN_DM_STORE || "/data/.openclaw/credentials/feishu-allowFrom.json",
+          allowFile: ALLOW_FILE, feishuBase: FEISHU_BASE, tenantToken, httpJson, audit, log,
+        });
+        log("info", "auto-admit started");
+      } catch (e) {
+        log("warn", `auto-admit start failed: ${String(e).slice(0, 120)}`);
+      }
+    }
   },
 };
 

@@ -42,7 +42,7 @@ param([string]$Code = '', [string]$Tool = '')
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # PS5 的进度条会让下载慢 10 倍
-$fallbackPage = 'https://chat.auto-link.com.cn/oneclick/'
+$fallbackPage = 'https://chat.auto-link.com.cn/ai/'   # 11-05 /oneclick 已合并进 /ai/(302)
 function Say($m)  { Write-Host $m -ForegroundColor Cyan }
 function Ok($m)   { Write-Host $m -ForegroundColor Green }
 function Warn($m) { Write-Host $m -ForegroundColor Yellow }

@@ -51,7 +51,7 @@ BLUE="${ESC}[1;34m"; GREEN="${ESC}[1;32m"; YELLOW="${ESC}[1;33m"; RED="${ESC}[1;
 say()  { printf '%s%s%s\n' "$BLUE" "$1" "$NC"; }
 ok()   { printf '%s%s%s\n' "$GREEN" "$1" "$NC"; }
 warn() { printf '%s%s%s\n' "$YELLOW" "$1" "$NC"; }
-FALLBACK_PAGE="https://chat.auto-link.com.cn/oneclick/"
+FALLBACK_PAGE="https://chat.auto-link.com.cn/ai/"   # 11-05 /oneclick 已合并进 /ai/(302)
 # ERR_SINK:tool=all 时每个工具在自己的子 shell 里跑,失败原因写进这个文件,最后汇总时原话读回来
 # (子 shell 的变量传不回父 shell)。单工具时不设 ⇒ 行为和以前完全一样。
 die()  { if [ -n "${ERR_SINK:-}" ]; then printf '%s\n' "$1" >> "$ERR_SINK" 2>/dev/null || true; fi

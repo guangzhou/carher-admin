@@ -616,7 +616,7 @@ def test_admin_html_has_no_inline_attrs_or_external_resources():
     assert "localStorage" in js and js.count("localStorage.") == 2, "localStorage 只存主题"
     # 复用门户的 CSS 变量
     idx = (Path(__file__).resolve().parent / "static" / "index.html").read_text(encoding="utf-8")
-    for var in ("--bg:#f5f6f8", "--surface:#ffffff", "--accent:#2f5bd3", "--bg:#0f141b"):
+    for var in ("--bg:#f4f6fb", "--surface:#ffffff", "--accent:#2f5bd3", "--bg:#0f141b"):   # 11-05 配色微调,两页同步
         assert var in idx and var in t, var
 
 

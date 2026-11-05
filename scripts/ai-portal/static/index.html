@@ -10,9 +10,9 @@
 <style>
 /* 视觉延续 scripts/agent-oneclick-docs/oneclick-all.html：同一套变量、左侧编号引导线、三张工具卡 */
 :root{
-  --bg:#f5f6f8; --surface:#ffffff; --fg:#151c27; --muted:#5d6878; --line:#e0e4ea; --rail:#cfd5de;
-  --code-bg:#eef1f5; --accent:#2f5bd3; --on-t:#ffffff; --t:#151c27;
-  --cursor:#2b3a52; --codex:#0d7a6b; --claude:#b3532b;
+  --bg:#f4f6fb; --surface:#ffffff; --fg:#16202e; --muted:#5a6678; --line:#e1e6ef; --rail:#d3dae6;
+  --code-bg:#eef2f8; --accent:#2f5bd3; --on-t:#ffffff; --t:#2f5bd3;
+  --cursor:#334766; --codex:#0d7a6b; --claude:#b3532b;
   --ok:#11795a; --ok-bg:#e3f4ec; --warn:#8a5a00; --warn-bg:#fff6e5; --warn-line:#e8c57a;
   --err:#b42318; --err-bg:#fdecea; --err-line:#f2b8b1; --ext:#6b3fb8; --ext-bg:#f0eafb;
   /* 11-04 P2-2:不再加载 Google Fonts(展示明文 key 的页面不许外链,CSP 也没给 font-src)。按系统字体走 */
@@ -21,13 +21,13 @@
 }
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
   --bg:#0f141b; --surface:#171e28; --fg:#e7ecf3; --muted:#9aa6b6; --line:#29323f; --rail:#344050;
-  --code-bg:#1f2834; --accent:#86a7ff; --on-t:#0f141b; --t:#e7ecf3;
+  --code-bg:#1f2834; --accent:#86a7ff; --on-t:#0f141b; --t:#86a7ff;
   --cursor:#c9d4e6; --codex:#3fc2ad; --claude:#ec8d61;
   --ok:#4fd1a1; --ok-bg:#12302a; --warn:#f0c068; --warn-bg:#2a2314; --warn-line:#5c4a22;
   --err:#ff9b8f; --err-bg:#3a1916; --err-line:#6b2b25; --ext:#c3a6ff; --ext-bg:#2a2040; color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#0f141b; --surface:#171e28; --fg:#e7ecf3; --muted:#9aa6b6; --line:#29323f; --rail:#344050;
-  --code-bg:#1f2834; --accent:#86a7ff; --on-t:#0f141b; --t:#e7ecf3;
+  --code-bg:#1f2834; --accent:#86a7ff; --on-t:#0f141b; --t:#86a7ff;
   --cursor:#c9d4e6; --codex:#3fc2ad; --claude:#ec8d61;
   --ok:#4fd1a1; --ok-bg:#12302a; --warn:#f0c068; --warn-bg:#2a2314; --warn-line:#5c4a22;
   --err:#ff9b8f; --err-bg:#3a1916; --err-line:#6b2b25; --ext:#c3a6ff; --ext-bg:#2a2040; color-scheme:dark}
@@ -101,6 +101,23 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--code-bg);padd
   font-weight:700;font-size:16px;display:grid;place-items:center;margin-top:2px;justify-self:center;position:relative;z-index:1}
 .step::after{content:"";position:absolute;left:21px;top:42px;bottom:4px;width:2px;background:var(--rail)}
 .step.last::after{display:none}
+/* ④ 常见问题 */
+body:not(.tool-codex):not(.tool-all) .for-codex,body:not(.tool-claude):not(.tool-all) .for-claude{display:none!important}
+.qa{display:flex;flex-direction:column;gap:10px}
+.qa details summary{font-weight:600}
+.tw{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.tw table{width:100%;border-collapse:collapse;font-size:14px;line-height:1.6}
+.tw th,.tw td{text-align:left;vertical-align:top;padding:8px 10px;border-bottom:1px solid var(--line)}
+.tw code{word-break:normal;overflow-wrap:anywhere}
+.tw th{font-weight:600;color:var(--muted);font-size:13px;background:var(--code-bg)}
+.tw td:first-child{width:44%}
+.tw tr:last-child td{border-bottom:0}
+ul.dl{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:4px;font-size:14.5px}
+ul.dl a{color:var(--accent)}
+@media (max-width:760px){.tw td:first-child{width:auto}.tw table{font-size:13.5px}}
+/* 11-05 配色:卡片轻阴影 + 页面顶部一道很淡的主色晕,让层次清楚一点(暗色下阴影自然看不见) */
+.card,details,.word{box-shadow:0 1px 2px rgba(22,32,46,.04),0 1px 8px rgba(22,32,46,.04)}
+body{background-image:radial-gradient(1200px 260px at 50% -120px,color-mix(in srgb,var(--accent) 9%,transparent),transparent)}
 .words{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
 .word{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
 .word kbd{align-self:flex-start;font-family:inherit;font-weight:700;font-size:17px;line-height:1.4;letter-spacing:.04em;background:var(--code-bg);border:1px solid var(--line);border-bottom-width:3px;border-radius:8px;padding:4px 14px;color:var(--fg);cursor:pointer;user-select:all}
@@ -566,7 +583,112 @@ body:not(.is-ext) .ext-only{display:none!important}
     </div>
   </section>
 
-  <!-- ④ 反馈 -->
+  <!-- ④ 常见问题(11-05 从 /oneclick/ 搬来;/oneclick 已 302 到本页) -->
+  <section class="step" id="s-qa" aria-labelledby="qa-h">
+    <h2 id="qa-h">常见问题 <span class="sub">按上面选的工具显示</span></h2>
+    <div class="body qa">
+      <p class="sub">大多数问题：<b>回到第 2 步重新复制一行命令再跑一次</b>（会自动修好配置，聊天记录不动），然后完全退出 App 重开。</p>
+
+      <details class="for-cursor">
+        <summary>Cursor 出问题了</summary>
+        <div class="tw"><table>
+          <thead><tr><th>现象</th><th>怎么办</th></tr></thead>
+          <tbody>
+            <tr><td>报 <code>401</code>，或 key 没写上</td><td>重跑第 2 步的命令（会自动写好 key），完全退出 Cursor 重开</td></tr>
+            <tr><td>报 <code>key not allowed to access model</code>，或提示额度用完</td><td>发 <b>查余额</b> 看额度；没开通的模型换一个或找运维开通</td></tr>
+            <tr><td>报 <code>An unexpected error occurred</code> / <code>does not support custom API keys</code>；看不到 High / Fast</td><td>完全退出 Cursor，重跑第 2 步的命令</td></tr>
+            <tr><td>每发一句都要等很久，反复出现 <code>Summarizing</code></td><td>多半是 Cursor 升级冲掉了补丁。完全退出 Cursor，重跑第 2 步的命令</td></tr>
+            <tr><td>模型不见了</td><td>发 <b>刷模型</b>；还不行就重跑第 2 步的命令</td></tr>
+            <tr><td>某个模型不回话 / 一直转圈 / 报 <code>502</code></td><td>先发 <b>测模型</b> 看它是不是暂时不可用；换回 <code>grok-4.7</code>，把模型名和时间提反馈</td></tr>
+            <tr><td>远程窗口（Remote-SSH）模型报错</td><td>见下面「连远程服务器」</td></tr>
+          </tbody>
+        </table></div>
+      </details>
+
+      <details class="for-cursor">
+        <summary>Cursor 连远程服务器（Remote-SSH）</summary>
+        <ol class="list">
+          <li>用 Cursor 连一次服务器（左下角 → Connect to Host），等显示已连接。</li>
+          <li>在电脑上找到装 Cursor 时留下的安装包文件夹，运行里面的 <code>REMOTE-SSH</code>（<span class="win-only"><code>REMOTE-SSH-Windows.cmd</code></span><span class="unix-only"><code>REMOTE-SSH-Mac.command</code></span>），输入服务器名，回车，再输 <code>yes</code>。</li>
+          <li>看到「✅ 已补好」，关掉远程窗口重连。每台服务器做一次。</li>
+        </ol>
+        <p class="sub">找不到安装包文件夹：提反馈，我们发给你。</p>
+      </details>
+
+      <details class="for-codex">
+        <summary>Codex 出问题了</summary>
+        <div class="tw"><table>
+          <thead><tr><th>现象</th><th>怎么办</th></tr></thead>
+          <tbody>
+            <tr><td>报 <code>401</code></td><td>重跑第 2 步的命令</td></tr>
+            <tr><td>报 <code>key not allowed to access model</code>，或提示额度用完</td><td>发 <b>查余额</b> 看额度；没开通的模型换一个或找运维开通</td></tr>
+            <tr><td>命令行提示找不到 <code>codex</code></td><td>关掉终端新开一个</td></tr>
+            <tr><td>App 没生效，或报错地址是 <code>api.openai.com</code></td><td>把 App 完全退出再打开</td></tr>
+            <tr><td>模型列表里只有几个 GPT</td><td>发 <b>刷模型</b>，新开会话</td></tr>
+            <tr><td>每一轮都报 <code>403</code></td><td>默认模型你的 key 没开：重跑第 2 步的命令（会换成你能用的），或 <code>/model</code> 手动选</td></tr>
+            <tr><td>某个模型不回话 / 一直转圈 / 报 <code>502</code></td><td>先发 <b>测模型</b>；换回 <code>gpt-5.6-terra</code>，把模型名和时间提反馈</td></tr>
+            <tr><td>用着用着被踢下线</td><td>别同时开多个 Codex</td></tr>
+          </tbody>
+        </table></div>
+        <p class="sub">还原：原配置备份在 <code>~/.codex/</code> 里 <code>backup-carher-</code> 开头的文件夹，把里面的文件拷回 <code>~/.codex/</code>。</p>
+      </details>
+
+      <details class="for-claude">
+        <summary>Claude Code 出问题了</summary>
+        <div class="tw"><table>
+          <thead><tr><th>现象</th><th>怎么办</th></tr></thead>
+          <tbody>
+            <tr><td>报 <code>401</code></td><td>重跑第 2 步的命令</td></tr>
+            <tr><td>报 <code>403</code> 或 <code>key not allowed to access model</code>，或提示额度用完</td><td>发 <b>查余额</b> 看额度；没开通的模型换一个或找运维开通</td></tr>
+            <tr><td>命令行 <code>/model</code> 里只有几个 Claude</td><td>关掉终端新开一个</td></tr>
+            <tr><td>App 提示「App unavailable」，或发消息很慢、一直不回</td><td>完全退出 App，重跑第 2 步的命令，再打开</td></tr>
+            <tr><td>Windows 上 App 提示「Virtual Machine Platform not available」</td><td>只影响 Cowork，Code 和聊天照常能用。要用 Cowork：重跑第 2 步的命令，弹出管理员授权点「是」，然后重启电脑；没有管理员权限请找 IT 开启「虚拟机平台」</td></tr>
+            <tr><td>App 里只能选一个模型</td><td>把 App 完全退出再打开</td></tr>
+            <tr><td>某个模型不回话 / 一直转圈 / 报 <code>502</code></td><td>先发 <b>测模型</b>；换回 <code>claude-opus-5-5</code>，把模型名和时间提反馈</td></tr>
+          </tbody>
+        </table></div>
+        <p class="sub">卸载：命令行删掉 <code>~/.claude/settings.json</code> 里 <code>env</code> 那几行；App 删掉
+          <code class="mac-only">~/Library/Application Support/Claude-3p</code><code class="linux-only">~/.config/Claude-3p</code><code class="win-only">%LOCALAPPDATA%\Claude-3p</code> 文件夹。</p>
+      </details>
+
+      <details>
+        <summary>还是不行？跑一次自检，把报告发给我们</summary>
+        <p>自检只检查、不改任何东西，报告里没有 key，跑完会自动复制并在桌面存一份。</p>
+        <div class="row">
+          <a class="btn ghost sm unix-only" href="/ai/i/pkg/cursor-mac.zip" download>Cursor 安装包（内含 DOCTOR）</a>
+          <a class="btn ghost sm win-only" href="/ai/i/pkg/cursor-windows.zip" download>Cursor 安装包（内含 DOCTOR）</a>
+          <a class="btn ghost sm unix-only" href="/ai/i/pkg/codex-doctor-mac.command" download>Codex 自检</a>
+          <a class="btn ghost sm win-only" href="/ai/i/pkg/codex-doctor-windows.bat" download>Codex 自检</a>
+          <a class="btn ghost sm unix-only" href="/ai/i/pkg/claude-doctor-mac.command" download>Claude 自检</a>
+          <a class="btn ghost sm win-only" href="/ai/i/pkg/claude-doctor-windows.bat" download>Claude 自检</a>
+        </div>
+        <p class="sub"><span class="unix-only">Mac：在终端运行 <code>bash ~/Downloads/codex-doctor-mac.command</code>（Claude 同理，文件名换一下）。</span><span class="win-only">Windows：双击下载的文件，弹出蓝色提示点「更多信息」→「仍要运行」。</span>
+          然后把报告粘到下面「提交反馈」里。</p>
+      </details>
+
+      <details>
+        <summary>想手动下载 App 安装包</summary>
+        <p class="sub">一行命令会自动装 App；被公司电脑拦住时也可以手动下载（公司内网镜像）：</p>
+        <ul class="dl">
+          <li><b>Cursor</b>
+            <a class="mac-only" href="https://chat.auto-link.com.cn/ccdl/apps/Cursor-mac.dmg">Mac</a>
+            <span class="win-only"><a href="https://chat.auto-link.com.cn/ccdl/apps/Cursor-windows-x64.exe">Windows x64</a> · <a href="https://chat.auto-link.com.cn/ccdl/apps/Cursor-windows-arm64.exe">ARM64</a></span>
+            <span class="linux-only"><a href="https://chat.auto-link.com.cn/ccdl/apps/Cursor-linux-amd64.deb">deb x64</a> · <a href="https://chat.auto-link.com.cn/ccdl/apps/Cursor-linux-arm64.deb">deb arm64</a> · <a href="https://chat.auto-link.com.cn/ccdl/apps/Cursor-linux-x86_64.rpm">rpm x64</a> · <a href="https://chat.auto-link.com.cn/ccdl/apps/Cursor-linux-aarch64.rpm">rpm arm64</a></span></li>
+          <li><b>Codex</b>
+            <a class="mac-only" href="https://chat.auto-link.com.cn/ccdl/apps/Codex-mac.dmg">Mac</a>
+            <span class="win-only"><a href="https://chat.auto-link.com.cn/ccdl/apps/Codex-windows-x64.msix">Windows x64</a> · <a href="https://chat.auto-link.com.cn/ccdl/apps/Codex-windows-arm64.msix">ARM64</a></span>
+            <span class="linux-only"><a href="https://chat.auto-link.com.cn/ccdl/apps/Codex-linux-amd64.deb">deb x64</a> · <a href="https://chat.auto-link.com.cn/ccdl/apps/Codex-linux-arm64.deb">deb arm64</a> · <a href="https://chat.auto-link.com.cn/ccdl/apps/Codex-linux-x86_64.rpm">rpm x64</a> · <a href="https://chat.auto-link.com.cn/ccdl/apps/Codex-linux-aarch64.rpm">rpm arm64</a></span></li>
+          <li><b>Claude</b>
+            <a class="mac-only" href="https://chat.auto-link.com.cn/ccdl/desktop/Claude-mac.zip">Mac</a>
+            <span class="win-only"><a href="https://chat.auto-link.com.cn/ccdl/desktop/Claude-windows-x64.msix">Windows x64</a> · <a href="https://chat.auto-link.com.cn/ccdl/desktop/Claude-windows-arm64.msix">ARM64</a></span>
+            <span class="linux-only"><a href="https://chat.auto-link.com.cn/ccdl/apps/Claude-linux-amd64.deb">deb x64</a> · <a href="https://chat.auto-link.com.cn/ccdl/apps/Claude-linux-arm64.deb">deb arm64</a></span></li>
+        </ul>
+        <p class="sub">装好 App 后回第 2 步复制一行命令跑一次，key 和模型就配好了。</p>
+      </details>
+    </div>
+  </section>
+
+  <!-- ⑤ 反馈 -->
   <section class="step last" id="s-fb" aria-labelledby="fb-h">
     <h2 id="fb-h">遇到问题 <span class="sub">说一句，我们来处理</span></h2>
     <div class="body">

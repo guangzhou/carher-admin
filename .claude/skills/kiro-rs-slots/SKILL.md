@@ -28,7 +28,7 @@ AK=$(cat ~/kiro-us-egress/.ak); curl -s -H "x-api-key: $AK" http://127.0.0.1:308
 | 项 | 值 |
 |---|---|
 | 实例 | deploy `kiro-rs/kiro-rs-slots`（242，单副本 **RollingUpdate 无缝换版**，内存 2Gi，grace 300s），Admin `http://10.68.13.198:30891/admin`。adminApiKey 在实例自己的 `config.json`；198 上脚本统一读 `~/kiro-us-egress/.ak`（同一个值的副本） |
-| 镜像 | **现网 `slots73`**（11-02 下午 65→73：统一并发按钮 / 列表按槽号排 / 失败借空闲槽 / 锁定值落盘 / 大户铺开 / 排队超 3s 借空闲槽 / 会话分槽 key 不参与配平 / 重新分配不看「在用」/ **换号先非 STUDENT**）。各版改动和回滚 ⇒ `HISTORY.md`（slots64、slots70 未单独上线） |
+| 镜像 | **现网 `slots77`**（11-05：0015 思考标签空回复 / 0016 丢帧打日志 / 0017 不自称 Kiro / 0018 未知事件日志限流；slots75 = 11-04 `allowOpus` 热生效 API，slots74 = `allowOpus` 开关 + 手动指定号上槽；更早见 `HISTORY.md`）。回滚 `set image … <上一版>` |
 | 老实例 | deploy `kiro-rs`（:30890）。只剩少数 key 主走它；它的号池已死，别再当兜底 |
 | manifest | `k8s/kiro-rs/slots/kiro-rs-slots.yaml`（PVC `kiro-rs-slots-config`、svc `kiro-rs-slots`、NodePort 30891、Secret `kiro-rs-slots-bootstrap`；11-01 起挂 Secret `kiro-egress-subs`）。🔴 **仓库 yaml 的 image 是占位 `slots9`**：`kubectl apply` 前必须先改 image，否则回退 |
 | 🔴 按会话分槽 | **`slotUnboundKeyAliases=["carher-hangzhou"]`**（11-02 用户定）。命中这个前缀的 key **不按 key 绑槽**，改按会话键散到各槽（Claude Code 走 `sid:<UUID>`；其它客户端走「系统提示+首条 user 消息」的 sha256 `anc:`），同一会话仍稳定落同一槽（保 prompt cache），**不写绑定表**。其余所有 key 一律照旧 `u:<hash>` 按用户绑死。起因：hangzhou 背后是 300 人共用一把 key，一人 12552 次/24h = 全站 20%，一个 key 只能绑一槽 ⇒ 那个槽必然是平均的 7 倍，均衡算法挪不动。开后 677 次请求散到 32 个槽，原独占槽掉出前 14。🔴 **前缀是 `starts_with`**，加名单前先查有没有同前缀的别的 key 会被连带。🔴 **改它要滚动重启**（`config.json` 只在启动时读），备份 `198:~/kiro-deploy/backup/config-pre-unbound-*.json` |
@@ -104,6 +104,10 @@ python3 ~/kiro-px-egress/kiro-slots-bench-apply.py plan.json [--apply]   # 批�
 - **opus-5.5 安全审查**：空回复且号没被限 ⇒ 自动换备用模型重答 + 提示，见 §2.1。
 - **槽停用 / 删除**：在 Admin「槽位设置」关开关 ⇒ 该槽的人在下一个请求自动换到别的槽（`SLOT_GONE` ⇒ 重选），在途的跑完。删除只允许先停用。8 个停用分支都有单测。
 - **冷备数** = 启用 − 在槽 − 退役（只算 quota/restricted），且补槽只挑能跑 opus 的号（FREE 档不算）。手动在 Admin 启用一个号（单个或批量）会清掉它的退役标记。
+- 🔴 **特殊 FREE 号（`allowOpus`）**：标题 `KIRO FREE` 但**实测能跑 opus、额度上限 550**（普通 FREE 很小）。**11-04 已上 28 个（#886~#913）**，36 槽里只剩 7 个 STUDENT + 槽21 的 PRO+。每个额度上限 550（普通 FREE 很小），28 个探针全 8/8。用户目标 30 个，池里 id 到 913 已用尽。
+  **每个号两步（slots75 起不用重启）**：①`scripts/kiro-upstream-probe.py ruler --account <id> --model claude-opus-5.5` 必须 **8/8 落地**（别跳过——不验就是拿生产槽赌）②`POST /credentials/{id}/allow-opus {"allow":true}` → `POST /slots/{index}/account {"accountId":<id>}`。
+  🔴 **`{slot}` 是运行时 index（只数启用的槽），≠ 固定槽号 no−1**；上槽后回读 `slotNo`、`allowOpus` 和 429 率确认。
+  ⛔ **别再用 `kubectl cp` 改 `credentials.json`**：旧 pod 退出前会反写覆盖，11-04 为此丢了两批标记 ⇒ [[feedback_pvc_file_write_reverted_by_old_pod]]。
 - 🔴 **VIP 专属槽 = 槽21 `jp-64.118.148.165`**（11-02 用户定）：`vipAliases=["cursor-buyitian-pwcf"]` + `acceptNew=false`。三重隔离都验过：①只有命中前缀的 key 能进 ②自动分配/重新分配都不往里放人 ③重新分配整槽排除（`excludedSlots` 含它）④**专属槽不外借**（借槽判据要求 `vip.is_empty()`）⇒ 别人排队也抢不到它的名额。改法：`PUT /slots/config` 整体替换第 21 行（**热生效，不用重启**）。
 - 🔴 **换号档位优先（slots73 起）**：先非 STUDENT，没有才 STUDENT，FREE 永不用。⚠️ **逻辑生效 ≠ 有号**：11-02 冷备 381 个只剩 1 个 PRO ⇒ 查 `/credentials` 的 `subscriptionTitle` 分布确认池里真有非 STUDENT，否则这条是空转。
 - 🔴 **重新分配的能力边界（11-02 实测，别再重复诊断）**：`REBALANCE_IDLE_SECS=0` + 解掉全部固定后，可挪 25 人、算法已收敛（再预览只剩 1 人），但**差距仍 7326 下不来**。原因是数学硬限制：平均每槽 1756，而单个 key 就有 8193（4.7×）、7329、5025、4355——**一人一槽前提下，超大户在哪个槽那槽就是最高点**，挪他只是把高点搬个位置还连累一槽人白丢缓存（所以那条 5025 的挪动被我剔掉没执行）。⇒ 想真平只有「按会话分槽」，但 **11-02 用户定：除 carher-hangzhou 外其他 key 都不按会话分槽** ⇒ 这个差距是设计必然，不是故障。

@@ -113,8 +113,16 @@ if ($cur -and $cur -ge $claudeMin) {
 Write-Host ""
 
 # ── 3. 读 key ────────────────────────────────────────────────────────
-Say "粘贴你的 key(sk- 开头,和 Cursor / Codex 用的是同一把),然后回车:"
-$apiKey = Read-Host "key"
+# 11-04:网页一行命令(ai-portal 安装码)换好 key 后用环境变量 CARHER_KEY 交进来 ⇒ 不问;没给就照旧交互粘贴
+#   (下面写配置时会自己再设一次 $env:CARHER_KEY 给 node 用、用完删,这里先摘掉别让 npm 子进程继承)
+if ($env:CARHER_KEY) {
+  $apiKey = "$env:CARHER_KEY"; Remove-Item Env:CARHER_KEY -ErrorAction SilentlyContinue
+  $tail = if ($apiKey.Length -ge 4) { $apiKey.Substring($apiKey.Length - 4) } else { '' }
+  Ok "√ 已收到 key(长度 $($apiKey.Length),后4位 ...$tail)"
+} else {
+  Say "粘贴你的 key(sk- 开头,和 Cursor / Codex 用的是同一把),然后回车:"
+  $apiKey = Read-Host "key"
+}
 # 剥掉所有空白 + 零宽字符(从飞书表格复制最容易带进来,带进去请求根本发不出去)
 $apiKey = ($apiKey -replace '[\s\u00A0\u200B-\u200F\u2028-\u202F\uFEFF]', '')
 if ([string]::IsNullOrWhiteSpace($apiKey)) { Die "x 没有输入 key,已取消。" }
@@ -255,6 +263,73 @@ try { & node $appMjs; $arc = $LASTEXITCODE } finally {
 }
 if ($arc -eq 0) { Ok "√ Claude 桌面 App 已配好(Code 标签页走同一个网关)" }
 else { Warn "! 桌面 App 配置没写成(不影响命令行 claude)" }
+
+# ── 4b2. 桌面 App 的 Cowork 要「虚拟机平台」:自动开 ───────────────────
+# 11-05 同事装完 App 报「Virtual Machine Platform not available — Claude's workspace requires the
+#   Virtual Machine Platform on Windows. Enable this feature, then restart.」
+# 读 App 源码(198 镜像 4.16336.0 的 app.asar):这个提示只来自 Cowork/工作区(本机跑一个 Linux VM);
+#   判据是 App 自带原生模块的 getHcsStatus().available(HCS = Hyper-V 计算服务,由「虚拟机平台」提供),
+#   开法就是 enableWindowsOptionalFeature("VirtualMachinePlatform"),开完要重启电脑。Code 标签页和
+#   聊天在三方网关模式下直接在本机跑,不受影响。用户定:脚本自动开(11-05)。
+# 这一步**绝不让安装失败**:开不了(不是管理员、UAC 点了否、被组策略禁)就只说一句人话,其余照常。
+# ⚠️ Windows 真机没测(本仓无 Windows 机器);用的是系统自带命令 Enable-WindowsOptionalFeature / DISM。
+function Get-VmpState {
+  # 普通用户也能查:Get-WindowsOptionalFeature / DISM 都要管理员;WMI 的 Win32_OptionalFeature 普通用户可读
+  try {
+    $f = Get-CimInstance -ClassName Win32_OptionalFeature -Filter "Name='VirtualMachinePlatform'" -ErrorAction Stop
+    if (-not $f) { return 'missing' }
+    switch ([int]$f.InstallState) { 1 { 'enabled' } 2 { 'disabled' } 3 { 'absent' } default { 'unknown' } }
+  } catch { 'unknown' }
+}
+function Get-VirtFirmware {
+  # 'on' / 'off' / 'unknown'。Hyper-V 已在跑时 VirtualizationFirmwareEnabled 会报 False,那时以 HypervisorPresent 为准
+  try {
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+    if ($cs.HypervisorPresent) { return 'on' }
+    $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
+    if ($null -eq $cpu.VirtualizationFirmwareEnabled) { return 'unknown' }
+    if ($cpu.VirtualizationFirmwareEnabled) { 'on' } else { 'off' }
+  } catch { 'unknown' }
+}
+if ($env:CARHER_SKIP_VMP -eq '1') { Warn "↳ 跳过虚拟机平台检查(CARHER_SKIP_VMP=1)" }
+else {
+  $vmp = Get-VmpState
+  if ($vmp -eq 'enabled') { Ok "√ 虚拟机平台已开启(桌面 App 的 Cowork 可用)" }
+  elseif ($vmp -eq 'disabled' -and (Get-VirtFirmware) -eq 'off') {
+    # BIOS 里没开虚拟化 ⇒ 开了虚拟机平台也起不来 VM,白要一次管理员 + 重启
+    Warn "! 这台电脑在 BIOS 里没开 CPU 虚拟化,桌面 App 的 Cowork 用不了;Code 和聊天正常能用。"
+    Warn "  想用 Cowork:请 IT 在 BIOS 里打开「Intel VT-x / AMD-V(SVM)」,再重跑这条命令。"
+  }
+  elseif ($vmp -eq 'disabled') {
+    Say "→ 桌面 App 的 Cowork 需要开启 Windows「虚拟机平台」。马上会弹出管理员授权窗口,请点「是」..."
+    $vlog = Join-Path $env:TEMP "carher-vmp-$([guid]::NewGuid().ToString('N')).txt"
+    # 只把这一条命令提权;结果写进临时文件读回来(提权进程的输出拿不到)
+    $vq = $vlog -replace "'", "''"   # 用户名里带 ' (如 O'Brien)时单引号字符串会断
+    $inner = "try { `$r = Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -All -NoRestart -ErrorAction Stop; " +
+             "'ok restart=' + [int][bool]`$r.RestartNeeded | Out-File -Encoding ascii '$vq' } catch { 'err ' + `$_.Exception.Message | Out-File -Encoding utf8 '$vq' }"
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+    $res = ''
+    try {
+      $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -Wait -PassThru `
+             -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc -ErrorAction Stop
+      if (Test-Path $vlog) { $res = (Get-Content -Raw $vlog).Trim() }
+    } catch { $res = 'uac_denied' }
+    Remove-Item $vlog -Force -ErrorAction SilentlyContinue
+    if ($res -like 'ok*' -or (Get-VmpState) -eq 'enabled') {
+      Ok "√ 已开启虚拟机平台。**请重启一次电脑**,之后桌面 App 的 Cowork 就能用了(Code 和聊天现在就能用)。"
+    } elseif ($res -eq 'uac_denied') {
+      Warn "! 没有拿到管理员授权,虚拟机平台没开。只影响桌面 App 的 Cowork;Code 和聊天正常能用。"
+      Warn "  想用 Cowork:重跑这条命令并在弹窗里点「是」;没有管理员权限的话,请公司 IT 开启「虚拟机平台」。"
+    } else {
+      Warn "! 虚拟机平台没开成($res)。只影响桌面 App 的 Cowork;Code 和聊天正常能用。"
+      Warn "  请把这句话发给公司 IT,让他开启 Windows 功能「虚拟机平台(VirtualMachinePlatform)」后重启。"
+    }
+  }
+  elseif ($vmp -eq 'absent' -or $vmp -eq 'missing') {
+    Warn "! 这台电脑的 Windows 版本没有「虚拟机平台」功能,桌面 App 的 Cowork 用不了;Code 和聊天正常能用。"
+  }
+  else { Warn "↳ 没能查到虚拟机平台状态,跳过(只影响桌面 App 的 Cowork)。" }
+}
 
 # ── 4c. 桌面 App 要的 Claude Code 二进制:预先放好 ────────────────────
 # 真因与 mac 同(10-13 实测):App 每开会话先从 downloads.claude.ai 拉它钉死版本的 Claude Code,

@@ -122,7 +122,7 @@ if (!keyUsable) {
   if (keyState === "absent") {
     console.log("  · 库里根本没有 Key —— 装的时候在「请粘贴你的 API Key 后回车」那一步直接敲了回车,");
     console.log("    安装器会照样打完补丁、写完地址和菜单并打印 ✅ 完成,只是没有 Key。");
-    console.log("    修:Cursor → Settings → Models → OpenAI API Key 粘一次点 Verify;");
+    console.log("    修:退出 Cursor,重跑一次网页上那条安装命令(会自动把 Key 写回去);");
     console.log("       或退出 Cursor 后重跑 INSTALL,在那一步真的把 Key 粘进去。");
   } else if (keyState === "malformed") {
     console.log("  · secret 行在,但不是 Cursor 认得的密文结构 —— 手填一次覆盖掉它。");

@@ -2120,9 +2120,48 @@ function sanitizeKey(raw) {
   return { clean: clean.trim(), stripped };
 }
 
-// 返回 {ok, reason?, confirmed?}。两道自检:①能解开 Cursor 现有 Key(证明方案与 Cursor 完全一致)
-// ②加密回环相等。任一不过 → 不写,回退手填(绝不假绿)。
+/* ── 11-05:自动写 Key 的**交接路径**(新版 Cursor 不用再手工粘)──
+   加密路径要 keytar 读钥匙串主密码,3.24.12 起 keytar 被摘 ⇒ 新装机全落到"请手工粘一次"。
+   但 Cursor 自己留了一条迁移逻辑(3.27.14 本机实测 + 3.28.7 镜像包源码逐字相同):
+     hydrateKey():secret://cursorAuth/openAIKey **没有** 且明文行 cursorAuth/openAIKey **有**
+       ⇒ 用它、`secretStorageService.set()` 自己加密存进 secret,再 syncLegacyPlaintextFallback
+         把明文行删掉(type==="persisted" 时)。
+   实测(独立 profile):写明文 → 启动 Cursor → 明文行消失、secret 出现(Buffer v10 密文,不含明文)。
+   🔴 secret 已存在时明文**被忽略**(实测:secret 不变、明文原样留着)⇒ 必须先把旧 secret 删掉。
+   加密由 Cursor 自己做(mac 钥匙串 / Windows DPAPI),所以这条路**不分平台**。
+   代价:Cursor 下次启动前,这把 Key 以明文躺在本人的 state.vscdb 里(只有本人账户可读);启动即被加密并删除。 */
+const OPENAI_KEY_LEGACY = "cursorAuth/openAIKey";
+async function handOffOpenAIKey(cleanKey, dry) {
+  const db = openDb();
+  try {
+    if (!dry) {
+      await db.set(OPENAI_KEY_SECRET, "");          // 旧 secret 不清,Cursor 不会读明文(实测)
+      await db.set(OPENAI_KEY_LEGACY, cleanKey);
+      const back = await db.get(OPENAI_KEY_LEGACY);
+      if (back !== cleanKey) return { ok: false, reason: "写入后回读不一致" };
+    }
+    return { ok: true, handoff: true };
+  } finally { db.close(); }
+}
+
 async function writeOpenAIKey(rawKey, RES, dry) {
+  const san = sanitizeKey(rawKey);
+  if (!san.clean) return { ok: false, reason: "剥掉不可见字符后 Key 是空的 —— 复制到的全是空白,请重新复制" };
+  const r = await writeOpenAIKeyEncrypted(rawKey, RES, dry);
+  if (r.ok) return r;
+  // 加密写不了(新版 Cursor 没 keytar / Windows / 方案自检不过)⇒ 交给 Cursor 自己加密
+  try {
+    const h = await handOffOpenAIKey(san.clean, dry);
+    if (h.ok) return { ok: true, handoff: true, why: r.reason };
+    return { ok: false, reason: r.reason + ";交接路径也失败:" + h.reason };
+  } catch (e) {
+    return { ok: false, reason: r.reason + ";交接路径也失败:" + (e && e.message || e) };
+  }
+}
+
+// 返回 {ok, reason?, confirmed?}。两道自检:①能解开 Cursor 现有 Key(证明方案与 Cursor 完全一致)
+// ②加密回环相等。任一不过 → 不写,由 writeOpenAIKey 走交接路径(绝不假绿)。
+async function writeOpenAIKeyEncrypted(rawKey, RES, dry) {
   if (process.platform === "win32")
     return { ok: false, reason: "Windows 暂不支持自动写(OSCrypt=DPAPI,未实测),请在 Cursor 里手动粘一次" };
   const key = await deriveOsCryptKey(RES);
@@ -2531,7 +2570,9 @@ async function uninstall(dry) {
   try {
     const db = openDb();
     const k = await db.get(OPENAI_KEY_SECRET);
-    if (!keyPresent(k)) console.log("   库里没有 Key 记录(或已是空串),跳过");
+    const legacy = await db.get(OPENAI_KEY_LEGACY);   // 交接路径写的明文行(Cursor 还没启动过就卸载时会留着)
+    if (legacy && !dry) await db.set(OPENAI_KEY_LEGACY, "");
+    if (!keyPresent(k)) console.log("   库里没有 Key 记录(或已是空串),跳过" + (legacy ? ";明文交接行已清掉" : ""));
     else { if (!dry) await db.set(OPENAI_KEY_SECRET, ""); console.log("   %s Key(置空)", dry ? "将摘掉" : "已摘掉"); }
     db.close();
   } catch (e) { console.log("   !! Key 清理失败(%s)—— 可在 Cursor 设置里手动删", e.message); }
@@ -3402,7 +3443,8 @@ async function main() {
   else if (args.zkDeltaOnly) { keyDone = true; }
   else if (rawKey) {
     const r = await writeOpenAIKey(rawKey, RES, false);
-    if (r.ok) { keyDone = true; console.log("   ✅ Key 已写入" + (r.confirmed ? "(方案已用现有 Key 校验一致)" : "")); }
+    if (r.ok && r.handoff) { keyDone = true; console.log("   ✅ Key 已写入(打开 Cursor 时它会自动加密保存,不用再粘)"); }
+    else if (r.ok) { keyDone = true; console.log("   ✅ Key 已写入" + (r.confirmed ? "(方案已用现有 Key 校验一致)" : "")); }
     else console.log("   ⚠️  自动写 Key 跳过:%s —— 请稍后在 Cursor 里手动粘一次。", r.reason);
   } else {
     console.log("   (没输入 Key,跳过——稍后在 Cursor 里粘一次即可)");
@@ -3423,7 +3465,7 @@ async function main() {
     ? "启动 Cursor 即可，选中的模型没被动过。"
     : keyDone
     ? "启动 Cursor,模型菜单默认就是 " + ACTIVE_DEFAULT_MODEL + ",直接用。"
-    : "还差一步:启动 Cursor → Settings → Models → OpenAI API Key,粘贴你的 key 点 Verify。"));
+    : "Key 没写进去(原因见上)。重跑一次这条安装命令即可;还不行把这一屏发给运维。"));
   if (reportMissed()) process.exitCode = 5;
   if (zkdOn) {
     console.log("   zk-delta 已开：Cursor → 127.0.0.1:8788 → 公网只发增量。");

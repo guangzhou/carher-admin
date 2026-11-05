@@ -288,42 +288,41 @@ body:not(.is-ext) .ext-only{display:none!important}
 <section id="v-login" class="hero" hidden aria-labelledby="login-h">
   <div>
     <h1 id="login-h">用飞书登录，<span class="nb">自己拿 key</span><br><span class="nb">一行命令</span><span class="nb">装好 AI 工具</span></h1>
-    <p class="lead">Cursor、Codex、Claude Code 三个工具都能装。不用找人要 key，不用下载一堆文件。</p>
+    <p class="lead">Cursor、Codex、Claude Code 都能装。</p>
   </div>
   <ol class="trio">
-    <li><b>登录</b><span>同事一键登录，外部找机器人要链接</span></li>
-    <li><b>看到你的 key</b><span>没有就点一下申请</span></li>
-    <li><b>复制一行命令</b><span>粘进终端，自动装好</span></li>
+    <li><b>登录</b><span>飞书登录</span></li>
+    <li><b>拿 key</b><span>没有就点申请</span></li>
+    <li><b>装工具</b><span>复制一行命令运行</span></li>
   </ol>
   <div id="login-err" class="note err" role="alert" hidden></div>
   <div class="card lcard">
-    <h2>无锡车联同事 <span class="sub">飞书企业「无锡车联」/ auto-link 邮箱</span></h2>
+    <h2>无锡车联同事</h2>
     <div><a class="btn feishu big" id="login-btn" href="/ai/auth/login">用飞书登录</a></div>
-    <p class="sub">用你的工作飞书一键登录。<b>只认无锡车联的飞书账号</b>，别的公司点了会被飞书拒绝。</p>
+    <p class="sub">仅限无锡车联飞书账号。</p>
   </div>
   <div class="card lcard" id="ext-card">
-    <h2>其他公司 / 飞书个人版 <span class="sub">上海车联、北汽、奇瑞、零跑…都走这里</span></h2>
-    <p>在飞书里给机器人「ai管理的her」发一句 <b>登录</b>，它会回你一个登录链接，<b>在电脑上</b>点开就进来了（10 分钟内有效，只能用一次）。</p>
+    <h2>其他公司同事 <span class="sub">上海车联、北汽、奇瑞等</span></h2>
+    <p>飞书扫码打开机器人，发一句 <b>登录</b>，把回复的链接在<b>电脑上</b>打开。</p>
     <div class="botbox">
       <div id="qr" role="img" aria-label="二维码：用飞书扫一扫打开机器人 ai管理的her"></div>
       <div class="txt">
         <a class="btn feishu" href="https://applink.feishu.cn/client/bot/open?appId=cli_aa8505afb0f89cb2" target="_blank" rel="noopener">用飞书打开机器人</a>
-        <p class="sub">手机上用<b>飞书的「扫一扫」</b>扫这个码（微信、相机扫不开）。</p>
-        <p class="sub">第一次打开会先看到机器人介绍：点「申请使用」→「开启单聊」，再发「登录」。</p>
-        <p class="sub">在手机飞书里收到链接也行：把链接<b>转发 / 复制到电脑</b>上打开，因为装工具的命令要在电脑上跑。</p>
-      </div>
+        <p class="sub">用飞书「扫一扫」（微信扫不开）。</p>
+        <p class="sub">首次打开：点「开启单聊」再发「登录」。</p>
+              </div>
     </div>
-    <p class="sub">发了「登录」机器人没回？多半是你的账号还没开通，<b>请联系给你开通 AI 工具的那位对接人</b>，把你的飞书名字告诉他。</p>
+    <p class="sub">链接 10 分钟内有效，只能用一次。机器人没回？联系你的对接人。</p>
   </div>
-  <p class="sub">登录只用来认出你是谁，我们拿不到你的飞书密码，也不读你的聊天记录。</p>
+  <p class="sub">登录只用于识别身份，不读取密码和聊天记录。</p>
 </section>
 
 <!-- ═══ 机器人发的一次性登录链接落地：/ai/auth/magic?t=… ═══
      只显示一个按钮，点了才 POST。飞书会预取链接做预览，GET 落地就消耗 token 的话，人还没点就失效了。 -->
 <section id="v-magic" class="magic" hidden aria-labelledby="magic-h">
   <h1 id="magic-h">确认登录 AI 工具自助台</h1>
-  <p id="magic-lead" class="sub">这是机器人发给你的登录链接。点下面的按钮就登录了，这个链接只能用一次。</p>
-  <p id="magic-phone" class="note" hidden><b>你现在是在手机上。</b>装工具的命令要在<b>电脑</b>上跑：先别点，把这个链接转发 / 复制到电脑上再打开（点过一次就失效了）。只想看看自己的 key 也可以直接点。</p>
+  <p id="magic-lead" class="sub">点按钮登录。链接只能用一次。</p>
+  <p id="magic-phone" class="note" hidden><b>你在手机上。</b>装工具要用电脑：请把链接发到电脑上再打开（点过就失效）。</p>
   <div><button type="button" class="btn feishu big" id="magic-btn">确认登录</button></div>
   <div id="magic-err" class="note err" role="alert" hidden>
     <span id="magic-err-msg"></span>
@@ -353,29 +352,29 @@ body:not(.is-ext) .ext-only{display:none!important}
       <div id="keys-list" class="keys" hidden></div>
       <div id="keys-pending" class="note pending" hidden>
         <span class="spin" aria-hidden="true"></span>
-        <div><b>key 正在生成，大约 1~2 分钟。</b>申请后<b>不会有飞书通知</b>，请留在这个页面，好了会自动出来（每 20 秒查一次）。
+        <div><b>key 正在生成，约 1~2 分钟。</b>请留在本页，好了自动显示。
           <div class="sub mt2" id="poll-at"></div></div>
       </div>
       <!-- 没开重置功能（后端 rotate_enabled=false）时的老入口 -->
-      <p class="sub" id="keys-swap" hidden>需要换一把 key？<a href="#s-fb" id="swap-link">请提反馈</a>，我们帮你换。</p>
+      <p class="sub" id="keys-swap" hidden>要换 key？<a href="#s-fb" id="swap-link">提反馈</a>。</p>
 
       <!-- ═══ 重置我的 key ═══
            🔴 新 key 明文只在重置成功那一次的响应里有，放在闭包变量 rotPlain 里：
            不进 DOM（除非点「显示」）、不进 URL / localStorage / console；30 秒自动藏，切走标签页立刻藏。 -->
       <div class="rot" id="rot" hidden>
         <div class="rot-entry" id="rot-entry">
-          <span>key 泄露了、或者想换一把新的？</span>
+          <span>key 泄露了或想换新的？</span>
           <button type="button" class="btn danger-alt sm" id="rot-open" aria-expanded="false" aria-controls="rot-confirm">重置我的 key</button>
         </div>
 
         <div class="rot-confirm" id="rot-confirm" role="group" aria-labelledby="rot-h" hidden>
           <h3 id="rot-h">确定要重置吗？</h3>
           <ul>
-            <li>会给你生成一把<b>新 key</b>，现在这把<b>立刻停用</b>。</li>
-            <li>你<b>所有配过的电脑</b>（Cursor / Codex / Claude Code）会马上用不了，要在每台电脑上<b>重新跑一次第 2 步那行命令</b>才能恢复。</li>
+            <li>生成<b>新 key</b>，旧的<b>立刻停用</b>。</li>
+            <li>每台装过的电脑都要<b>重跑一次第 2 步的命令</b>。</li>
             <li>重置成功后 <span id="rot-cd-txt">10 分钟</span>内不能再重置。</li>
           </ul>
-          <label><input type="checkbox" id="rot-ack"> 我知道了：旧 key 马上失效，所有电脑都要重新跑一次命令</label>
+          <label><input type="checkbox" id="rot-ack"> 我知道旧 key 会立刻失效</label>
           <div class="row">
             <button type="button" class="btn danger" id="rot-go" disabled>确定重置</button>
             <button type="button" class="btn ghost" id="rot-cancel">先不了</button>
@@ -384,7 +383,7 @@ body:not(.is-ext) .ext-only{display:none!important}
 
         <div class="note" id="rot-busy" role="status" hidden>
           <span class="spin spin-inline" aria-hidden="true"></span>
-          正在生成新 key 并试调一次，大约 5~20 秒，请别关页面。<b>在这一步完成之前，旧 key 一直能用。</b>
+          正在生成新 key，约 5~20 秒，请别关页面。完成前旧 key 仍可用。
         </div>
 
         <div class="note err" id="rot-err" role="alert" hidden>
@@ -409,9 +408,9 @@ body:not(.is-ext) .ext-only{display:none!important}
               <button type="button" class="btn sm" id="rot-copy">复制</button>
             </span>
           </div>
-          <p><b>下一步：</b>去下面<a href="#s-install" id="rot-to-install">第 2 步</a><b>重新复制一行命令</b>，在每台用过的电脑上各跑一次。旧 key 已经停用了。</p>
+          <p><b>下一步：</b>到<a href="#s-install" id="rot-to-install">第 2 步</a>复制命令，在每台电脑上各跑一次。</p>
           <p class="note" id="rot-warn" hidden></p>
-          <p class="sub">新 key 只在这里显示这一次；以后要看，点上面列表里的「显示」也行。</p>
+          <p class="sub">以后也可在上方列表点「显示」查看。</p>
         </div>
       </div>
       <!-- ═══ 申请成功 ═══ 新 key 明文只在 applyPlain 变量里(同 rotPlain 的规矩):点「显示」才进 DOM,30 秒自动藏 -->
@@ -436,12 +435,12 @@ body:not(.is-ext) .ext-only{display:none!important}
       <div id="keys-empty" hidden>
         <div class="body">
           <div class="card">
-            <p><b id="empty-h">你还没有可用的 key。</b>点一下就申请，<b>几秒钟</b>就生成好，直接显示在这里。</p>
+            <p><b id="empty-h">你还没有 key。</b>点申请，几秒钟就好。</p>
             <div class="row">
               <button type="button" class="btn" id="apply-btn">申请 key</button>
               <span class="sub" id="apply-msg"></span>
             </div>
-            <p class="sub ext-only" id="empty-ext">你是其他公司的账号：以前在别的地方申请过 key 但这里看不到？多半是登记在你公司另一个飞书账号名下，请联系你的对接人确认。</p>
+            <p class="sub ext-only" id="empty-ext">以前申请过但这里看不到？可能登记在你的另一个飞书账号下，请联系对接人。</p>
           </div>
         </div>
       </div>
@@ -450,8 +449,8 @@ body:not(.is-ext) .ext-only{display:none!important}
       <div id="keys-review" class="note" role="status" hidden>
         <b>申请已登记，等管理员审核。</b>
         <span id="review-at"></span>
-        审核通过后 key 会直接出现在这个页面（<b>不会有飞书消息</b>，一般 1 个工作日内），到时候<b>重新给机器人发「登录」</b>进来看就行。
-        <div class="sub mt4">等了超过 1 个工作日还没有？请联系你的对接人，或在下面提一条反馈。</div>
+        通过后 key 会显示在本页（一般 1 个工作日），届时给机器人发「登录」进来查看。
+        <div class="sub mt4">超过 1 个工作日没消息？联系对接人或提反馈。</div>
       </div>
 
       <div id="keys-err" class="note err" hidden>
@@ -462,7 +461,7 @@ body:not(.is-ext) .ext-only{display:none!important}
   </section>
   <!-- ② 一键配置 -->
   <section class="step" id="s-install" aria-labelledby="inst-h">
-    <h2 id="inst-h">一键装好 <span class="sub">复制一行命令，粘进终端回车</span></h2>
+    <h2 id="inst-h">一键安装</h2>
     <div class="body">
       <div class="tools" role="radiogroup" aria-label="选工具">
         <button type="button" class="tool all" role="radio" data-tool="all" aria-checked="true"><b>三个都装<em>推荐</em></b><span>一条命令，三个一起配好</span></button>
@@ -479,15 +478,14 @@ body:not(.is-ext) .ext-only{display:none!important}
         </div>
       </div>
 
-      <div id="inst-locked" class="note" hidden>先在上面拿到一把<b>可用</b>的 key，这里才会出命令。</div>
+      <div id="inst-locked" class="note" hidden>先在上面拿到可用的 key。</div>
 
       <div id="inst-ready">
         <div class="body">
           <div class="cmdbox">
             <div class="cmdhead">
               <span class="where"><span class="mac-only">打开「<b>终端</b>」（启动台搜 Terminal）</span><span class="linux-only">打开<b>终端</b></span><span class="win-only">打开 <b>PowerShell</b>（开始菜单搜 PowerShell）</span>，粘进去回车：</span>
-              <span class="placeholder win-only" title="Windows 安装脚本的命令形式还没定，先占位">Windows 命令为占位</span>
-            </div>
+                          </div>
             <pre class="cmd" id="cmd" aria-label="安装命令" aria-live="off"></pre>
             <div class="cmdfoot">
               <button type="button" class="btn" id="cmd-copy" disabled>复制命令</button>
@@ -495,26 +493,21 @@ body:not(.is-ext) .ext-only{display:none!important}
             </div>
             <p class="sub" id="cmd-err" hidden></p>
           </div>
-          <p class="sub">命令里那串 <code>--code</code> 是<b>一次性安装码</b>：只能用一次、10 分钟内有效，过期页面会自动换新的。
-            它不是你的 key，就算被人看到也只能用这一次。</p>
+          <p class="sub">命令里的安装码 10 分钟内有效、只能用一次，过期自动刷新。它不是你的 key。</p>
 
           <ul class="does" aria-label="这行命令会做什么">
-            <li><b>装好 <span class="tname">Cursor</span></b><span>没装过就自动下载安装，装过的跳过</span></li>
-            <li><b>写好 key</b><span>自动把你的 key 配进去，不用你粘</span></li>
-            <li><b>重开 <span class="tname">Cursor</span></b><span id="does-eta">看到「完成」就能用了，第一次约 2~5 分钟</span></li>
+            <li><b>装 <span class="tname">Cursor</span></b><span>没装就下载，装过跳过</span></li>
+            <li><b>配 key</b><span>自动配好，不用粘</span></li>
+            <li><b>打开 <span class="tname">Cursor</span></b><span id="does-eta">看到「完成」即可使用，首次约 2~5 分钟</span></li>
           </ul>
           <div class="note for-all">
-            <b>这一条命令会依次装三个</b>：先 Codex、再 Claude Code、最后 Cursor（Cursor 要求先完全退出，所以放最后）。
-            三个 App 安装包加起来有 1~2 GB，<b>整个过程大约 10~40 分钟</b>，看网速；已经装过的 App 会跳过。
-            <br>跑的时候<b>别关终端窗口</b>，让它一直跑完。中间某个没装成不影响另外两个，最后会列出每个的结果；
-            没成的那个回这里<b>单独选它</b>再跑一次就行。
+            依次装 Codex、Claude Code、Cursor，约 <b>10~40 分钟</b>，装过的跳过。<b>别关终端窗口</b>。
+            <br>某个没装成，单独选它再跑一次。
           </div>
-          <p class="sub for-cursor">唯一例外：新版 Cursor 要你在设置里粘一次 key。脚本会先把 key 放进剪贴板，并告诉你点哪里（Settings → Models → OpenAI API Key → 粘贴 → Verify）。</p>
-
+          
           <div class="note">
-            <b>被公司电脑拦住了？</b>找<b>你们公司的 IT</b> 开一下权限，把报错原文给他看就行：
-            <span class="win-only">提示「禁止运行脚本」「已被组策略阻止」是要开 <b>PowerShell 执行权限</b>；
-            提示装不上应用、「旁加载」「MSIX」之类，是要开 <b>安装应用（旁加载）的权限</b>。</span>
+            <b>被公司电脑拦住了？</b>把报错发给公司 IT 开权限：
+            <span class="win-only">「禁止运行脚本 / 组策略阻止」⇒ PowerShell 执行权限；「旁加载 / MSIX」⇒ 安装应用权限。</span>
             <span class="unix-only">提示没有权限装到「应用程序」</span>
           </div>
         </div>
@@ -572,7 +565,7 @@ body:not(.is-ext) .ext-only{display:none!important}
     </div>
   </section>
 </div>
-<footer>key 只会在你点「显示」或「复制」时从服务器取一次，不会存在这个网页或浏览器里。用完记得别把 key 发到群里。</footer>
+<footer>key 只在点「显示 / 复制」时读取，不存于浏览器。请勿把 key 发到群里。</footer>
 </div>
 </div>
 </div>

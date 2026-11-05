@@ -1,0 +1,99 @@
+diff -ruN -x target -x dist -x node_modules base/src/kiro/model/events/base.rs work/src/kiro/model/events/base.rs
+--- a/src/kiro/model/events/base.rs	2026-11-05 16:10:25.695812984 +0800
++++ b/src/kiro/model/events/base.rs	2026-11-05 16:48:49.044348581 +0800
+@@ -5,6 +5,25 @@
+ use crate::kiro::parser::error::{ParseError, ParseResult};
+ use crate::kiro::parser::frame::Frame;
+ 
++/// 未知事件类型的进程级计数（只用于限流日志）
++static UNKNOWN_EVENT_COUNTS: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<String, u64>>> =
++    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
++
++/// 同一种未知事件类型每这么多次才再记一行
++pub(crate) const UNKNOWN_EVENT_LOG_EVERY: u64 = 10_000;
++
++/// 计一次，返回该类型累计次数（从 1 开始）。类型名截到 64 字符、最多记 64 种，防止上游乱发撑爆内存。
++fn note_unknown_event(event_type: &str) -> u64 {
++    let key: String = event_type.chars().take(64).collect();
++    let mut m = UNKNOWN_EVENT_COUNTS.lock();
++    if !m.contains_key(&key) && m.len() >= 64 {
++        return 0; // 种类超上限：不再新增，也不打日志
++    }
++    let c = m.entry(key).or_insert(0);
++    *c += 1;
++    *c
++}
++
+ /// 事件类型枚举
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+ pub enum EventType {
+@@ -131,15 +150,23 @@
+     pub fn from_frame_logged(frame: Frame, site: &'static str, model: &str) -> Option<Self> {
+         match Self::from_frame_ref(&frame) {
+             Ok(Self::Unknown {}) => {
+-                tracing::warn!(
+-                    site,
+-                    model,
+-                    message_type = frame.message_type().unwrap_or("-"),
+-                    event_type = frame.event_type().unwrap_or("-"),
+-                    payload_len = frame.payload.len(),
+-                    payload_sha12 = %payload_sha12(&frame.payload),
+-                    "上游事件类型未知，已忽略"
+-                );
++                // 同一种未知事件类型，整个进程只记第一次 + 之后每 UNKNOWN_EVENT_LOG_EVERY 次记一行计数。
++                // 2026-11-05 slots76 上线：上游每个推理请求都发几十个 reasoningContentEvent，
++                // 逐帧打 warn ⇒ 4 分钟 1.7 万行、占全部日志 97%，把真正要看的帧解析失败淹没。
++                let et = frame.event_type().unwrap_or("-");
++                let n = note_unknown_event(et);
++                if n == 1 || (n > 0 && n % UNKNOWN_EVENT_LOG_EVERY == 0) {
++                    tracing::warn!(
++                        site,
++                        model,
++                        message_type = frame.message_type().unwrap_or("-"),
++                        event_type = et,
++                        payload_len = frame.payload.len(),
++                        payload_sha12 = %payload_sha12(&frame.payload),
++                        seen_total = n,
++                        "上游事件类型未知，已忽略"
++                    );
++                }
+                 Some(Self::Unknown {})
+             }
+             Ok(event) => Some(event),
+@@ -308,7 +335,7 @@
+             // 截断的 JSON
+             ("toolUseEvent", format!(r#"{{"name":"t","toolUseId":"x","input":"{secret}"#).into_bytes()),
+             // 未知事件类型
+-            ("brandNewEvent", format!(r#"{{"k":"{secret}"}}"#).into_bytes()),
++            ("brandNewEventLeakCase", format!(r#"{{"k":"{secret}"}}"#).into_bytes()),
+         ];
+         for (et, payload) in cases {
+             let f = frame(Some("event"), Some(et), &payload);
+@@ -346,6 +373,27 @@
+         assert!(!log.contains(r#"{"a":1}"#), "日志不该带 payload 原文: {log}");
+     }
+ 
++    /// 2026-11-05：上游每个推理请求发几十个 reasoningContentEvent ⇒ 同类型只记第一次 + 每 N 次一行
++    #[test]
++    fn test_logged_unknown_event_type_is_rate_limited() {
++        let et = "dedupeProbeEvent";
++        let mk = || frame(Some("event"), Some(et), br#"{"a":1}"#);
++        let (_, first) = capture(|| Event::from_frame_logged(mk(), "stream", "m"));
++        assert!(first.contains("上游事件类型未知") && first.contains("seen_total=1"), "{first}");
++        let (ev, second) = capture(|| Event::from_frame_logged(mk(), "stream", "m"));
++        assert!(matches!(ev, Some(Event::Unknown {})), "去重不能改返回值");
++        assert!(!second.contains("上游事件类型未知"), "第二次不该再打: {second}");
++        for _ in 2..UNKNOWN_EVENT_LOG_EVERY - 1 {
++            let _ = Event::from_frame_logged(mk(), "stream", "m");
++        }
++        let (_, nth) = capture(|| Event::from_frame_logged(mk(), "stream", "m"));
++        assert!(nth.contains(&format!("seen_total={}", UNKNOWN_EVENT_LOG_EVERY)), "{nth}");
++        let (_, other) = capture(|| {
++            Event::from_frame_logged(frame(Some("event"), Some("dedupeOtherEvent"), b"{}"), "stream", "m")
++        });
++        assert!(other.contains("event_type=\"dedupeOtherEvent\""), "{other}");
++    }
++
+     /// 阴性对照：正常帧（含 metering / error / exception）不打任何日志、结果与原接口一致
+     #[test]
+     fn test_logged_normal_frames_are_silent() {

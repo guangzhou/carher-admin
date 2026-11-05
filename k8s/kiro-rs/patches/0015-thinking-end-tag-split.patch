@@ -1,0 +1,198 @@
+diff -ruN -x dist base/src/anthropic/stream.rs fix/src/anthropic/stream.rs
+--- base/src/anthropic/stream.rs	2026-10-08 17:40:39.000000000 +0800
++++ fix/src/anthropic/stream.rs	2026-11-05 15:15:50.487903246 +0800
+@@ -88,16 +88,27 @@
+         // 检查后面的内容
+         let after_content = &buffer[after_pos..];
+ 
+-        // 如果标签后面内容不足以判断是否有双换行符，等待更多内容
+-        if after_content.len() < 2 {
+-            return None;
+-        }
+-
+         // 真正的 thinking 结束标签后面会有双换行符 `\n\n`
+         if after_content.starts_with("\n\n") {
+             return Some(absolute_pos);
+         }
+ 
++        // 行首的结束标签（前一个字符是 `\n`）后面可能直接跟正文，或只隔一个 `\n`，
++        // 如 `...\n</thinking>正文`。此时只要（跳过至多一个 `\n` 后）是非空白字符，
++        // 就认定为真正的结束标签；仍为空则等待更多内容。
++        // 行中提到的 `</thinking>`（前面不是 `\n`）不走这条，仍要求 `\n\n`。
++        if absolute_pos > 0 && buffer.as_bytes()[absolute_pos - 1] == b'\n' {
++            let rest = after_content.strip_prefix('\n').unwrap_or(after_content);
++            match rest.as_bytes().first() {
++                None => return None,
++                Some(b) if !b.is_ascii_whitespace() => return Some(absolute_pos),
++                _ => {}
++            }
++        } else if after_content.len() < 2 {
++            // 如果标签后面内容不足以判断是否有双换行符，等待更多内容
++            return None;
++        }
++
+         // 不是双换行符，跳过继续搜索
+         search_start = absolute_pos + 1;
+     }
+@@ -105,6 +116,20 @@
+     None
+ }
+ 
++/// `find_real_thinking_end_tag` 命中后，从 `end_pos` 起需要剥离的字节数：
++/// `</thinking>` 加上其后的 `\n\n`；没有 `\n\n` 时（行首标签直接接正文）至多剥离一个 `\n`。
++fn thinking_end_tag_strip_len(buffer: &str, end_pos: usize) -> usize {
++    let after = &buffer[end_pos + "</thinking>".len()..];
++    let newlines = if after.starts_with("\n\n") {
++        2
++    } else if after.starts_with('\n') {
++        1
++    } else {
++        0
++    };
++    "</thinking>".len() + newlines
++}
++
+ /// 查找缓冲区末尾的 thinking 结束标签（允许末尾只有空白字符）
+ ///
+ /// 用于“边界事件”场景：例如 thinking 结束后立刻进入 tool_use，或流结束，
+@@ -193,7 +218,7 @@
+         if let Some(end_pos) = find_real_thinking_end_tag(after_open) {
+             (
+                 &after_open[..end_pos],
+-                &after_open[end_pos + "</thinking>\n\n".len()..],
++                &after_open[end_pos + thinking_end_tag_strip_len(after_open, end_pos)..],
+             )
+         } else if let Some(end_pos) = find_real_thinking_end_tag_at_buffer_end(after_open) {
+             let after_tag = end_pos + "</thinking>".len();
+@@ -799,9 +824,10 @@
+                         }
+                     }
+ 
+-                    // 剥离 `</thinking>\n\n`（find_real_thinking_end_tag 已确认 \n\n 存在）
++                    // 剥离 `</thinking>\n\n`（行首标签直接接正文时只剥离标签和至多一个 `\n`）
++                    let strip_len = thinking_end_tag_strip_len(&self.thinking_buffer, end_pos);
+                     self.thinking_buffer =
+-                        self.thinking_buffer[end_pos + "</thinking>\n\n".len()..].to_string();
++                        self.thinking_buffer[end_pos + strip_len..].to_string();
+                 } else {
+                     // 没有找到结束标签，发送当前缓冲区内容作为 thinking_delta。
+                     // 保留末尾可能是部分 `</thinking>\n\n` 的内容：
+@@ -1986,4 +2012,118 @@
+             "stop_reason should be tool_use when tool_use is present"
+         );
+     }
++
++    /// 辅助函数：取 message_delta 的 stop_reason
++    fn stop_reason_of(events: &[SseEvent]) -> String {
++        events
++            .iter()
++            .find(|e| e.event == "message_delta")
++            .and_then(|e| e.data["delta"]["stop_reason"].as_str())
++            .unwrap_or("")
++            .to_string()
++    }
++
++    /// 辅助函数：断言没有任何 thinking_delta 带出了结束标签
++    fn assert_no_end_tag_in_thinking(events: &[SseEvent]) {
++        let thinking = collect_thinking_content(events);
++        assert!(
++            !thinking.contains("</thinking>"),
++            "`</thinking>` leaked into thinking_delta: {:?}",
++            thinking
++        );
++    }
++
++    #[test]
++    fn test_end_tag_at_chunk_end_then_text_without_newline() {
++        // 线上复现形状：`\n</thinking>` 恰好在一段末尾，下一段直接是正文（没有 `\n\n`）
++        let mut ctx = StreamContext::new_with_thinking("claude-opus-5", 1000, true, HashMap::new());
++        let _initial_events = ctx.generate_initial_events();
++
++        let mut all = Vec::new();
++        all.extend(ctx.process_assistant_response(
++            "<thinking>\nLet me check creds-b25-binus.txt.\n</thinking>",
++        ));
++        all.extend(ctx.process_assistant_response("等一下，这组凭据有个重要发现——先核"));
++        all.extend(ctx.generate_final_events());
++
++        assert_no_end_tag_in_thinking(&all);
++        assert_eq!(collect_thinking_content(&all), "Let me check creds-b25-binus.txt.\n");
++        assert_eq!(collect_text_content(&all), "等一下，这组凭据有个重要发现——先核");
++        assert_eq!(stop_reason_of(&all), "end_turn");
++    }
++
++    #[test]
++    fn test_end_tag_followed_directly_by_text_same_chunk() {
++        // 行首 `</thinking>` 后紧跟正文，且在同一个 chunk
++        let mut ctx = StreamContext::new_with_thinking("test-model", 1, true, HashMap::new());
++        let _initial_events = ctx.generate_initial_events();
++
++        let mut all = Vec::new();
++        all.extend(ctx.process_assistant_response("<thinking>\nabc\n</thinking>你好"));
++        all.extend(ctx.generate_final_events());
++
++        assert_no_end_tag_in_thinking(&all);
++        assert_eq!(collect_thinking_content(&all), "abc\n");
++        assert_eq!(collect_text_content(&all), "你好");
++        assert_eq!(stop_reason_of(&all), "end_turn");
++    }
++
++    #[test]
++    fn test_end_tag_split_mid_tag_then_text() {
++        // `</thinking>` 被切成 `</thin` + `king>正文`
++        let mut ctx = StreamContext::new_with_thinking("test-model", 1, true, HashMap::new());
++        let _initial_events = ctx.generate_initial_events();
++
++        let mut all = Vec::new();
++        all.extend(ctx.process_assistant_response("<thinking>\nabc\n</thin"));
++        all.extend(ctx.process_assistant_response("king>你好"));
++        all.extend(ctx.generate_final_events());
++
++        assert_no_end_tag_in_thinking(&all);
++        assert_eq!(collect_thinking_content(&all), "abc\n");
++        assert_eq!(collect_text_content(&all), "你好");
++        assert_eq!(stop_reason_of(&all), "end_turn");
++    }
++
++    #[test]
++    fn test_end_tag_single_newline_then_text() {
++        // 行首 `</thinking>` 后只有一个换行就是正文，换行在下一段
++        let mut ctx = StreamContext::new_with_thinking("test-model", 1, true, HashMap::new());
++        let _initial_events = ctx.generate_initial_events();
++
++        let mut all = Vec::new();
++        all.extend(ctx.process_assistant_response("<thinking>\nabc\n</thinking>"));
++        all.extend(ctx.process_assistant_response("\n你好"));
++        all.extend(ctx.generate_final_events());
++
++        assert_no_end_tag_in_thinking(&all);
++        assert_eq!(collect_thinking_content(&all), "abc\n");
++        assert_eq!(collect_text_content(&all), "你好");
++        assert_eq!(stop_reason_of(&all), "end_turn");
++    }
++
++    #[test]
++    fn test_inline_end_tag_mention_mid_line_still_ignored() {
++        // 阴性对照：thinking 里行中提到 `</thinking>`（前面不是换行）仍不能当结束标签
++        let mut ctx = StreamContext::new_with_thinking("test-model", 1, true, HashMap::new());
++        let _initial_events = ctx.generate_initial_events();
++
++        let mut all = Vec::new();
++        all.extend(ctx.process_assistant_response("<thinking>\n关于 </thinking> 标签的讨论\nabc"));
++        all.extend(ctx.process_assistant_response("</thinking>\n\n你好"));
++        all.extend(ctx.generate_final_events());
++
++        assert_eq!(collect_thinking_content(&all), "关于 </thinking> 标签的讨论\nabc");
++        assert_eq!(collect_text_content(&all), "你好");
++        assert_eq!(stop_reason_of(&all), "end_turn");
++    }
++
++    #[test]
++    fn test_extract_complete_text_end_tag_followed_directly_by_text() {
++        // 非流式路径同一形状：行首 `</thinking>` 后紧跟正文
++        let (thinking, text) =
++            extract_thinking_from_complete_text("<thinking>\nabc\n</thinking>你好");
++        assert_eq!(thinking.as_deref(), Some("abc\n"));
++        assert_eq!(text, "你好");
++    }
+ }

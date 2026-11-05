@@ -1,0 +1,320 @@
+diff -ruN -x target -x node_modules -x dist base15/src/anthropic/handlers.rs work15/src/anthropic/handlers.rs
+--- base15/src/anthropic/handlers.rs	2026-11-05 16:04:56.976332781 +0800
++++ work15/src/anthropic/handlers.rs	2026-11-05 16:04:57.002333222 +0800
+@@ -648,7 +648,7 @@
+                             for result in decoder.decode_iter() {
+                                 match result {
+                                     Ok(frame) => {
+-                                        if let Ok(event) = Event::from_frame(frame) {
++                                        if let Some(event) = Event::from_frame_logged(frame, "stream", &ctx.model) {
+                                             let sse_events = ctx.process_kiro_event(&event);
+                                             events.extend(sse_events);
+                                         }
+@@ -756,7 +756,7 @@
+     for result in decoder.decode_iter() {
+         match result {
+             Ok(frame) => {
+-                if let Ok(event) = Event::from_frame(frame) {
++                if let Some(event) = Event::from_frame_logged(frame, "non_stream", model) {
+                     match event {
+                         Event::AssistantResponse(resp) => {
+                             text_content.push_str(&resp.content);
+@@ -1182,7 +1182,7 @@
+                                 for result in decoder.decode_iter() {
+                                     match result {
+                                         Ok(frame) => {
+-                                            if let Ok(event) = Event::from_frame(frame) {
++                                            if let Some(event) = Event::from_frame_logged(frame, "buffered", ctx.model()) {
+                                                 // 缓冲事件（复用 StreamContext 的处理逻辑）
+                                                 ctx.process_and_buffer(&event);
+                                             }
+diff -ruN -x target -x node_modules -x dist base15/src/anthropic/search_loop.rs work15/src/anthropic/search_loop.rs
+--- base15/src/anthropic/search_loop.rs	2026-11-05 16:04:56.976332781 +0800
++++ work15/src/anthropic/search_loop.rs	2026-11-05 16:04:57.002333222 +0800
+@@ -184,7 +184,7 @@
+ 
+     for result in decoder.decode_iter() {
+         let Ok(frame) = result else { continue };
+-        let Ok(event) = Event::from_frame(frame) else { continue };
++        let Some(event) = Event::from_frame_logged(frame, "search_loop", model) else { continue };
+         match event {
+             Event::AssistantResponse(resp) => turn.text.push_str(&resp.content),
+             Event::ToolUse(tu) => {
+diff -ruN -x target -x node_modules -x dist base15/src/anthropic/stream.rs work15/src/anthropic/stream.rs
+--- base15/src/anthropic/stream.rs	2026-11-05 16:04:56.985332934 +0800
++++ work15/src/anthropic/stream.rs	2026-11-05 16:04:57.003333239 +0800
+@@ -1177,6 +1177,11 @@
+ }
+ 
+ impl BufferedStreamContext {
++    /// 请求的模型名称（日志用）
++    pub fn model(&self) -> &str {
++        &self.inner.model
++    }
++
+     /// 创建缓冲流上下文
+     pub fn new(
+         model: impl Into<String>,
+diff -ruN -x target -x node_modules -x dist base15/src/kiro/model/events/base.rs work15/src/kiro/model/events/base.rs
+--- base15/src/kiro/model/events/base.rs	2026-10-08 17:40:39.000000000 +0800
++++ work15/src/kiro/model/events/base.rs	2026-11-05 16:06:04.942480003 +0800
+@@ -89,9 +89,77 @@
+     },
+ }
+ 
++/// 日志用：payload 字节 sha256 的前 12 位十六进制。
++///
++/// 🔴 日志里绝不放 payload 原文：上游 payload 是模型输出，可能含密钥 / 手机号，
++/// 198 的脱敏插件管不到 kiro-rs 的日志。要对照同一帧时用这个指纹。
++fn payload_sha12(payload: &[u8]) -> String {
++    use sha2::{Digest, Sha256};
++    let mut h = hex::encode(Sha256::digest(payload));
++    h.truncate(12);
++    h
++}
++
++/// 日志用的错误描述，不含 payload 原文。
++///
++/// serde_json 的错误信息会引用出错的值（例如 `invalid type: string "sk-…", expected f64`），
++/// 所以 `PayloadDeserialize` 只留错误类别和行列号；其他变体不含 payload，照原样输出。
++fn redacted_error(e: &ParseError) -> String {
++    match e {
++        ParseError::PayloadDeserialize(je) => format!(
++            "Payload 反序列化失败: {:?} at line {} column {}",
++            je.classify(),
++            je.line(),
++            je.column()
++        ),
++        other => other.to_string(),
++    }
++}
++
+ impl Event {
+     /// 从帧解析事件
+     pub fn from_frame(frame: Frame) -> ParseResult<Self> {
++        Self::from_frame_ref(&frame)
++    }
++
++    /// 解析帧；**解析失败或事件类型未知时打 warn 日志**（只记长度和 sha256 指纹，不记 payload 原文）（原先调用方 `if let Ok(..)` 静默丢帧，
++    /// 线上截断时分不清「上游没发」还是「收到了但解析失败扔了」）。
++    ///
++    /// 返回 `None` = 解析失败，调用方跳过这一帧（与原 `if let Ok` 行为一致，只多一行日志）。
++    /// 未知事件类型仍返回 `Some(Event::Unknown {})`，下游照旧忽略。
++    /// `site` 标明是哪条路径（stream / buffered / non_stream / search_loop），`model` 为请求模型。
++    pub fn from_frame_logged(frame: Frame, site: &'static str, model: &str) -> Option<Self> {
++        match Self::from_frame_ref(&frame) {
++            Ok(Self::Unknown {}) => {
++                tracing::warn!(
++                    site,
++                    model,
++                    message_type = frame.message_type().unwrap_or("-"),
++                    event_type = frame.event_type().unwrap_or("-"),
++                    payload_len = frame.payload.len(),
++                    payload_sha12 = %payload_sha12(&frame.payload),
++                    "上游事件类型未知，已忽略"
++                );
++                Some(Self::Unknown {})
++            }
++            Ok(event) => Some(event),
++            Err(e) => {
++                tracing::warn!(
++                    site,
++                    model,
++                    error = %redacted_error(&e),
++                    message_type = frame.message_type().unwrap_or("-"),
++                    event_type = frame.event_type().unwrap_or("-"),
++                    payload_len = frame.payload.len(),
++                    payload_sha12 = %payload_sha12(&frame.payload),
++                    "上游帧解析失败，已丢弃"
++                );
++                None
++            }
++        }
++    }
++
++    fn from_frame_ref(frame: &Frame) -> ParseResult<Self> {
+         let message_type = frame.message_type().unwrap_or("event");
+ 
+         match message_type {
+@@ -103,22 +171,22 @@
+     }
+ 
+     /// 解析事件类型消息
+-    fn parse_event(frame: Frame) -> ParseResult<Self> {
++    fn parse_event(frame: &Frame) -> ParseResult<Self> {
+         let event_type_str = frame.event_type().unwrap_or("unknown");
+         let event_type = EventType::from_str(event_type_str);
+ 
+         match event_type {
+             EventType::AssistantResponse => {
+-                let payload = super::AssistantResponseEvent::from_frame(&frame)?;
++                let payload = super::AssistantResponseEvent::from_frame(frame)?;
+                 Ok(Self::AssistantResponse(payload))
+             }
+             EventType::ToolUse => {
+-                let payload = super::ToolUseEvent::from_frame(&frame)?;
++                let payload = super::ToolUseEvent::from_frame(frame)?;
+                 Ok(Self::ToolUse(payload))
+             }
+             EventType::Metering => Ok(Self::Metering(())),
+             EventType::ContextUsage => {
+-                let payload = super::ContextUsageEvent::from_frame(&frame)?;
++                let payload = super::ContextUsageEvent::from_frame(frame)?;
+                 Ok(Self::ContextUsage(payload))
+             }
+             EventType::Unknown => Ok(Self::Unknown {}),
+@@ -126,7 +194,7 @@
+     }
+ 
+     /// 解析错误类型消息
+-    fn parse_error(frame: Frame) -> ParseResult<Self> {
++    fn parse_error(frame: &Frame) -> ParseResult<Self> {
+         let error_code = frame
+             .headers
+             .error_code()
+@@ -141,7 +209,7 @@
+     }
+ 
+     /// 解析异常类型消息
+-    fn parse_exception(frame: Frame) -> ParseResult<Self> {
++    fn parse_exception(frame: &Frame) -> ParseResult<Self> {
+         let exception_type = frame
+             .headers
+             .exception_type()
+@@ -175,6 +243,136 @@
+         assert_eq!(EventType::from_str("unknown_type"), EventType::Unknown);
+     }
+ 
++    use crate::kiro::parser::header::{HeaderValue, Headers};
++    use std::sync::{Arc, Mutex};
++
++    fn frame(message_type: Option<&str>, event_type: Option<&str>, payload: &[u8]) -> Frame {
++        let mut headers = Headers::new();
++        if let Some(m) = message_type {
++            headers.insert(":message-type".into(), HeaderValue::String(m.into()));
++        }
++        if let Some(e) = event_type {
++            headers.insert(":event-type".into(), HeaderValue::String(e.into()));
++        }
++        Frame { headers, payload: payload.to_vec() }
++    }
++
++    /// 把 tracing 输出收进内存，断言真的打了日志（不是只看返回值）
++    #[derive(Clone, Default)]
++    struct Cap(Arc<Mutex<Vec<u8>>>);
++    impl std::io::Write for Cap {
++        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
++            self.0.lock().unwrap().extend_from_slice(b);
++            Ok(b.len())
++        }
++        fn flush(&mut self) -> std::io::Result<()> {
++            Ok(())
++        }
++    }
++    fn capture<R>(f: impl FnOnce() -> R) -> (R, String) {
++        let cap = Cap::default();
++        let w = cap.clone();
++        let sub = tracing_subscriber::fmt()
++            .with_writer(move || w.clone())
++            .with_ansi(false)
++            .with_max_level(tracing::Level::TRACE)
++            .finish();
++        let r = tracing::subscriber::with_default(sub, f);
++        let out = String::from_utf8(cap.0.lock().unwrap().clone()).unwrap();
++        (r, out)
++    }
++
++    #[test]
++    fn test_logged_bad_payload_warns_and_drops() {
++        let f = frame(Some("event"), Some("assistantResponseEvent"), br#"{"content": 12"#);
++        assert!(Event::from_frame(f.clone()).is_err(), "前提：原接口对坏 JSON 返回 Err");
++        let (ev, log) = capture(|| Event::from_frame_logged(f, "stream", "claude-opus-5.5"));
++        assert!(ev.is_none());
++        assert!(log.contains("WARN"), "{log}");
++        assert!(log.contains("上游帧解析失败"), "{log}");
++        assert!(log.contains("site=\"stream\""), "{log}");
++        assert!(log.contains("model=\"claude-opus-5.5\""), "{log}");
++        assert!(log.contains("event_type=\"assistantResponseEvent\""), "{log}");
++        assert!(log.contains("payload_len=14"), "{log}");
++        assert!(log.contains(&format!("payload_sha12={}", payload_sha12(br#"{"content": 12"#))), "{log}");
++        assert!(!log.contains(r#""content": 12"#), "日志不该带 payload 原文: {log}");
++    }
++
++    /// 日志里不出现 payload 原文：坏 payload 里的密钥既不能直接出现，也不能经 serde 错误信息带出来
++    #[test]
++    fn test_logged_never_leaks_payload_text() {
++        let secret = "sk-proj-AbCdEf0123456789";
++        let cases: Vec<(&str, Vec<u8>)> = vec![
++            // 类型不符：serde 错误信息会引用这个字符串值
++            ("contextUsageEvent", format!(r#"{{"contextUsagePercentage":"{secret}"}}"#).into_bytes()),
++            // 截断的 JSON
++            ("toolUseEvent", format!(r#"{{"name":"t","toolUseId":"x","input":"{secret}"#).into_bytes()),
++            // 未知事件类型
++            ("brandNewEvent", format!(r#"{{"k":"{secret}"}}"#).into_bytes()),
++        ];
++        for (et, payload) in cases {
++            let f = frame(Some("event"), Some(et), &payload);
++            if let Err(e) = Event::from_frame(f.clone()) {
++                if et == "contextUsageEvent" {
++                    // 阳性对照：原始错误信息确实会带出密钥（证明 redacted_error 不是多余的）
++                    assert!(e.to_string().contains(secret), "{e}");
++                }
++            }
++            let (_, log) = capture(|| Event::from_frame_logged(f, "stream", "m"));
++            assert!(log.contains("WARN"), "{et}: {log}");
++            assert!(!log.contains("sk-proj-"), "{et}: 日志泄露了 payload 原文: {log}");
++            assert!(log.contains(&format!("payload_sha12={}", payload_sha12(&payload))), "{et}: {log}");
++        }
++    }
++
++    #[test]
++    fn test_logged_invalid_message_type_warns_and_drops() {
++        let f = frame(Some("bogus"), None, b"x");
++        let (ev, log) = capture(|| Event::from_frame_logged(f, "non_stream", "m"));
++        assert!(ev.is_none());
++        assert!(log.contains("上游帧解析失败"), "{log}");
++        assert!(log.contains("message_type=\"bogus\""), "{log}");
++        assert!(log.contains("bogus"), "{log}");
++    }
++
++    #[test]
++    fn test_logged_unknown_event_type_warns_but_keeps_unknown() {
++        let f = frame(Some("event"), Some("brandNewEvent"), br#"{"a":1}"#);
++        let (ev, log) = capture(|| Event::from_frame_logged(f, "buffered", "m"));
++        assert!(matches!(ev, Some(Event::Unknown {})));
++        assert!(log.contains("上游事件类型未知"), "{log}");
++        assert!(log.contains("event_type=\"brandNewEvent\""), "{log}");
++        assert!(log.contains("payload_sha12="), "{log}");
++        assert!(!log.contains(r#"{"a":1}"#), "日志不该带 payload 原文: {log}");
++    }
++
++    /// 阴性对照：正常帧（含 metering / error / exception）不打任何日志、结果与原接口一致
++    #[test]
++    fn test_logged_normal_frames_are_silent() {
++        let cases = vec![
++            frame(Some("event"), Some("assistantResponseEvent"), br#"{"content":"hi"}"#),
++            frame(Some("event"), Some("meteringEvent"), b"{}"),
++            frame(None, Some("assistantResponseEvent"), br#"{"content":"x"}"#),
++            frame(Some("error"), None, b"boom"),
++            frame(Some("exception"), None, b"too long"),
++        ];
++        for f in cases {
++            let want = format!("{:?}", Event::from_frame(f.clone()).unwrap());
++            let (ev, log) = capture(|| Event::from_frame_logged(f, "stream", "m"));
++            assert_eq!(format!("{:?}", ev.unwrap()), want);
++            assert!(log.is_empty(), "正常帧不该打日志: {log}");
++        }
++    }
++
++    #[test]
++    fn test_payload_sha12_shape() {
++        // sha256("") = e3b0c44298fc1c149afbf4c8996fb924…
++        assert_eq!(payload_sha12(b""), "e3b0c44298fc");
++        let h = payload_sha12(b"anything");
++        assert_eq!(h.len(), 12);
++        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
++    }
++
+     #[test]
+     fn test_event_type_as_str() {
+         assert_eq!(

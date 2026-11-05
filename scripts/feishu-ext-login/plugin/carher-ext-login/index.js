@@ -255,6 +255,44 @@ const plugin = {
   register(api) {
     logger = api?.logger ?? console;
 
+    // 🔴 11-05 上海车联外包实测「没能确认你的飞书身份」:gateway 调 before_dispatch 时
+    //   **不传 messageId**(dispatch-DnzGTpPs.js:1737 的事件对象里只有 content/senderId/isGroup 等),
+    //   audit 里两次失败都是 message_id:"" ⇒ resolveIdentity 直接拒。
+    //   message_received 钩子带 messageId + senderId,且在同一次 dispatch 里**更早**触发(:1444),
+    //   handler 同步部分先跑 ⇒ 在这里按 senderId 记下最近一条消息 id,before_dispatch 取用。
+    const lastMsg = new Map(); // senderId → {id, at}
+    const MSG_TTL_MS = 60_000;
+    const onReceived = (event, ctx) => {
+      try {
+        const sid = String(event?.senderId ?? ctx?.senderId ?? "");
+        const mid = String(event?.messageId ?? event?.metadata?.messageId ?? "");
+        if (OPEN_ID_RE.test(sid) && /^om_[A-Za-z0-9]+$/.test(mid)) {
+          lastMsg.set(sid, { id: mid, at: Date.now() });
+        }
+      } catch {}
+    };
+    const messageIdFor = (event, ctx, openId) => {
+      const direct = String(event?.messageId ?? ctx?.messageId ?? "");
+      if (direct) return direct;
+      const r = lastMsg.get(openId);
+      return r && Date.now() - r.at < MSG_TTL_MS ? r.id : "";
+    };
+    // message_received 是 fire-and-forget,理论上可能比 before_dispatch 晚一点点 ⇒ 最多等 1.5 秒
+    const waitMessageId = async (event, ctx, openId) => {
+      for (let i = 0; i < 15; i++) {
+        const id = messageIdFor(event, ctx, openId);
+        if (id) return id;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return "";
+    };
+    try {
+      if (typeof api.on === "function") api.on("message_received", onReceived, { name: "ext-login-msgid" });
+      else if (typeof api.registerHook === "function") api.registerHook("message_received", onReceived, { name: "ext-login-msgid" });
+    } catch (e) {
+      log("warn", `message_received register failed: ${String(e).slice(0, 120)}`);
+    }
+
     const handler = async (event, ctx) => {
       try {
         if (!findTrigger(event, ctx)) return; // 不是我们的词 ⇒ 完全不介入
@@ -275,7 +313,7 @@ const plugin = {
           return { handled: true, text: "请求有点频繁,过一分钟再发一次「登录」。" };
         }
 
-        const messageId = String(event?.messageId ?? ctx?.messageId ?? "");
+        const messageId = await waitMessageId(event, ctx, openId);
         const identity = await resolveIdentity(openId, messageId);
         if (!identity) {
           audit({ ev: "identity_failed", open_id: openId, message_id: messageId });
@@ -317,13 +355,17 @@ const plugin = {
     const DEDUP_TTL_MS = 120_000;
     const seen = new Map();   // messageId → {at, result}
     const dedupedHandler = async (event, ctx) => {
-      const mid = String(event?.messageId ?? ctx?.messageId ?? "");
+      // 去重键:有 messageId 用它;没有(gateway 不传)就用 发件人+消息时间戳 —— 两个监听器拿到的是同一个事件对象,
+      // 时间戳一致;两条不同消息的时间戳不同。缺了键就退化成不去重(宁可多签,不吞消息)。
+      const sid = String(event?.senderId ?? ctx?.senderId ?? "");
+      const direct = String(event?.messageId ?? ctx?.messageId ?? "");
+      const mid = direct || (sid && event?.timestamp != null ? "ts:" + sid + ":" + event.timestamp : "");
       const now = Date.now();
       for (const [k, v] of seen) if (now - v.at > DEDUP_TTL_MS) seen.delete(k);
-      if (mid && seen.has(mid)) return seen.get(mid).result;   // 第二个监听器:复用,不重签
-      const result = await handler(event, ctx);
-      if (mid) seen.set(mid, { at: now, result });
-      return result;
+      if (mid && seen.has(mid)) return await seen.get(mid).result;   // 第二个监听器:复用,不重签(含进行中)
+      const p = handler(event, ctx);
+      if (mid) seen.set(mid, { at: now, result: p });
+      return await p;
     };
 
     let registered = 0;

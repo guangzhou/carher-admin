@@ -83,7 +83,9 @@ function register(plugin) {
     registerHook: (name, fn) => hooks.push({ via: "registerHook", name, fn }),
     on: (name, fn) => hooks.push({ via: "on", name, fn }),
   });
-  return { hooks, logs };
+  const all = hooks;
+  return { hooks: all.filter((h) => h.name === "before_dispatch"),
+           received: all.filter((h) => h.name === "message_received"), logs };
 }
 
 /** 假飞书 + 假门户:记下每一次调用,便于数"真签了几次"。 */
@@ -158,6 +160,29 @@ ta("不同消息仍然各签一次(去重不许误伤)", async () => {
   await hooks[0].fn(ev(), cx());
   await hooks[0].fn(ev({ messageId: "om_" + "9".repeat(32) }), cx());
   assert.strictEqual(calls.portal, 2);
+});
+
+ta("gateway 不传 messageId(11-05 真实形状)⇒ 从 message_received 取到 id,照常签", async () => {
+  const d = freshState();
+  const { hooks, received } = register(loadPlugin(d, "http://portal.test/api/internal/magic-link"));
+  const calls = fakeUpstreams();
+  assert.strictEqual(received.length, 1, "要挂 message_received 来拿 messageId");
+  received[0].fn({ senderId: OPEN_ID, messageId: MSG_ID, content: "登录" }, { channelId: "feishu" });
+  const e = { senderId: OPEN_ID, content: "登录", isGroup: false, timestamp: 1730770000000 };
+  const r1 = await hooks[0].fn(e, cx());
+  const r2 = await hooks[1].fn(e, cx());
+  assert.ok(r1 && r1.handled && r1.text.includes("一次性登录链接"), "应签出链接,实际:" + JSON.stringify(r1));
+  assert.strictEqual(calls.portal, 1, "两个监听器仍只签一次,实际 " + calls.portal);
+  assert.deepStrictEqual(r2, r1);
+});
+
+ta("阴性对照:既没 messageId 也没 message_received ⇒ 拒签(这就是修前用户看到的提示)", async () => {
+  const d = freshState();
+  const { hooks } = register(loadPlugin(d, "http://portal.test/api/internal/magic-link"));
+  const calls = fakeUpstreams();
+  const r = await hooks[0].fn({ senderId: OPEN_ID, content: "登录", isGroup: false, timestamp: 1 }, cx());
+  assert.ok(r && r.text.includes("没能确认你的飞书身份"));
+  assert.strictEqual(calls.portal, 0);
 });
 
 // ── 2) 名单与触发词 ───────────────────────────────────────────────────────

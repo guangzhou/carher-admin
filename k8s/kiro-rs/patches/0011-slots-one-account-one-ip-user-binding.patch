@@ -1,6 +1,6 @@
 --- a/admin-ui/src/api/credentials.ts
 +++ b/admin-ui/src/api/credentials.ts
-@@ -45,6 +45,41 @@
+@@ -45,6 +45,41 @@ export async function setCredentialDisabled(
    return data
  }
  
@@ -42,7 +42,7 @@
  // 设置凭据优先级
  export async function setCredentialPriority(
    id: number,
-@@ -94,14 +129,14 @@
+@@ -94,14 +129,14 @@ export async function deleteCredential(id: number): Promise<SuccessResponse> {
  }
  
  // 获取负载均衡模式
@@ -61,12 +61,10 @@
    return data
  }
  
-@@ -121,5 +156,293 @@
- // 设置 window 模式参数（立即生效并写回 config.json）
- export async function setWindowSettings(settings: WindowSettings): Promise<WindowSettings> {
+@@ -123,3 +158,297 @@ export async function setWindowSettings(settings: WindowSettings): Promise<Windo
    const { data } = await api.put<WindowSettings>('/config/window', settings)
-+  return data
-+}
+   return data
+ }
 +
 +// ===== 槽位模式 =====
 +export interface SlotLimits {
@@ -266,6 +264,12 @@
 +  await api.post(`/slots/${slot}/lock`, { limit })
 +}
 +
++// 统一锁定所有槽的并发（在途上限）；limit=null 全部解锁回自动调节
++export async function setAllSlotLocks(limit: number | null): Promise<{ slots: number }> {
++  const { data } = await api.post<{ ok: boolean; slots: number }>('/slots/lock-all', { limit })
++  return data
++}
++
 +export interface SlotConfig {
 +  name: string
 +  proxyUrl?: string | null
@@ -353,11 +357,11 @@
 +
 +export async function getUsageTotals(days: 1 | 7): Promise<{ days: number; totals: Record<string, { requests: number; failed: number; inputTokens: number; outputTokens: number }> }> {
 +  const { data } = await api.get('/credentials/usage-totals', { params: { days } })
-   return data
- }
++  return data
++}
 --- a/admin-ui/src/components/add-credential-dialog.tsx
 +++ b/admin-ui/src/components/add-credential-dialog.tsx
-@@ -106,13 +106,13 @@
+@@ -106,13 +106,13 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
  
    return (
      <Dialog open={open} onOpenChange={onOpenChange}>
@@ -375,7 +379,7 @@
                <label htmlFor="authMethod" className="text-sm font-medium">
 --- a/admin-ui/src/components/batch-import-dialog.tsx
 +++ b/admin-ui/src/components/batch-import-dialog.tsx
-@@ -411,12 +411,12 @@
+@@ -411,12 +411,12 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
          onOpenChange(newOpen)
        }}
      >
@@ -390,7 +394,7 @@
            <div className="space-y-2">
              <label className="text-sm font-medium">
                JSON 格式凭据
-@@ -468,7 +468,7 @@
+@@ -468,7 +468,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
                </div>
  
                {/* 结果列表 */}
@@ -399,7 +403,8 @@
                  {results.map((result) => (
                    <div key={result.index} className="p-3">
                      <div className="flex items-start gap-3">
---- a/admin-ui/src/components/batch-priority-dialog.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/batch-priority-dialog.tsx
 @@ -0,0 +1,85 @@
 +import { useState, useEffect } from 'react'
@@ -500,7 +505,7 @@
  import { Button } from '@/components/ui/button'
  import { Badge } from '@/components/ui/badge'
  
-@@ -42,7 +37,7 @@
+@@ -42,7 +37,7 @@ export function BatchVerifyDialog({
            <DialogTitle>批量验活</DialogTitle>
          </DialogHeader>
  
@@ -509,7 +514,7 @@
            {/* 进度显示 */}
            {verifying && (
              <div className="space-y-2">
-@@ -71,7 +66,7 @@
+@@ -71,7 +66,7 @@ export function BatchVerifyDialog({
  
            {/* 结果列表 */}
            {results.size > 0 && (
@@ -518,7 +523,7 @@
                {resultsArray.map((result) => (
                  <div
                    key={result.id}
-@@ -117,9 +112,9 @@
+@@ -117,9 +112,9 @@ export function BatchVerifyDialog({
                💡 验活过程中每次请求间隔 2 秒，防止被封号。你可以关闭此窗口，验活会在后台继续进行。
              </p>
            )}
@@ -530,7 +535,7 @@
            {verifying ? (
              <>
                <Button
-@@ -145,7 +140,7 @@
+@@ -145,7 +140,7 @@ export function BatchVerifyDialog({
                关闭
              </Button>
            )}
@@ -556,7 +561,7 @@
  import {
    Dialog,
    DialogContent,
-@@ -27,6 +28,7 @@
+@@ -27,6 +28,7 @@ import {
  interface CredentialCardProps {
    credential: CredentialStatusItem
    onViewBalance: (id: number) => void
@@ -564,7 +569,7 @@
    selected: boolean
    onToggleSelect: () => void
    balance: BalanceResponse | null
-@@ -52,6 +54,7 @@
+@@ -52,6 +54,7 @@ function formatLastUsed(lastUsedAt: string | null): string {
  export function CredentialCard({
    credential,
    onViewBalance,
@@ -572,7 +577,7 @@
    selected,
    onToggleSelect,
    balance,
-@@ -141,236 +144,151 @@
+@@ -141,236 +144,151 @@ export function CredentialCard({
      })
    }
  
@@ -766,6 +771,13 @@
 -              {loadingBalance ? (
 -                <span className="text-sm ml-1">
 -                  <Loader2 className="inline w-3 h-3 animate-spin" /> 加载中...
+-                </span>
+-              ) : balance ? (
+-                <span className="font-medium ml-1">
+-                  {balance.remaining.toFixed(2)} / {balance.usageLimit.toFixed(2)}
+-                  <span className="text-xs text-muted-foreground ml-1">
+-                    ({(100 - balance.usagePercentage).toFixed(1)}% 剩余)
+-                  </span>
 +          </div>
 +
 +          {/* 关键指标：单列两端对齐，不再挤成乱序网格 */}
@@ -779,13 +791,6 @@
 +                  <Button size="sm" variant="ghost" className="h-7 w-7 p-0" aria-label="取消"
 +                    onClick={() => { setEditingPriority(false); setPriorityValue(String(credential.priority)) }}>✕</Button>
                  </span>
--              ) : balance ? (
--                <span className="font-medium ml-1">
--                  {balance.remaining.toFixed(2)} / {balance.usageLimit.toFixed(2)}
--                  <span className="text-xs text-muted-foreground ml-1">
--                    ({(100 - balance.usagePercentage).toFixed(1)}% 剩余)
--                  </span>
--                </span>
                ) : (
 -                <span className="text-sm text-muted-foreground ml-1">未知</span>
 +                <span className="inline-flex items-center gap-1">
@@ -884,11 +889,7 @@
 -            >
 -              <ChevronUp className="h-4 w-4 mr-1" />
 -              提高优先级
-+            <Button size="sm" variant="ghost" onClick={handleReset}
-+              disabled={resetFailure.isPending || (credential.failureCount === 0 && credential.refreshFailureCount === 0)}
-+              title="把失败计数清零">
-+              重置失败
-             </Button>
+-            </Button>
 -            <Button
 -              size="sm"
 -              variant="outline"
@@ -914,7 +915,11 @@
 -            >
 -              <Wallet className="h-4 w-4 mr-1" />
 -              查看余额
--            </Button>
++            <Button size="sm" variant="ghost" onClick={handleReset}
++              disabled={resetFailure.isPending || (credential.failureCount === 0 && credential.refreshFailureCount === 0)}
++              title="把失败计数清零">
++              重置失败
+             </Button>
 -            <Button
 -              size="sm"
 -              variant="destructive"
@@ -931,7 +936,8 @@
              </Button>
            </div>
          </CardContent>
---- a/admin-ui/src/components/credential-drawer.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/credential-drawer.tsx
 @@ -0,0 +1,196 @@
 +import { useState } from 'react'
@@ -1132,7 +1138,7 @@
 +}
 --- a/admin-ui/src/components/credential-filters.tsx
 +++ b/admin-ui/src/components/credential-filters.tsx
-@@ -6,7 +6,7 @@
+@@ -6,7 +6,7 @@ import type { CredentialStatusItem } from '@/types/api'
  // 凭据列表的查询条件。只在前端过滤显示，不改后端数据，也不影响调度。
  export interface CredentialFilterState {
    keyword: string
@@ -1141,7 +1147,7 @@
    status: string
    authMethod: string
    priority: string
-@@ -83,6 +83,8 @@
+@@ -83,6 +83,8 @@ function matchKeyword(c: CredentialStatusItem, terms: string[]): boolean {
  function matchStatus(c: CredentialStatusItem, status: string): boolean {
    if (status === 'all') return true
    if (status === 'enabled') return !c.disabled
@@ -1150,7 +1156,7 @@
    if (status === 'current') return c.isCurrent
    if (status === 'disabled') return c.disabled
    if (status.startsWith('disabled:')) {
-@@ -126,6 +128,12 @@
+@@ -126,6 +128,12 @@ function countBy(list: CredentialStatusItem[], key: (c: CredentialStatusItem) =>
    return Array.from(m.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
  }
  
@@ -1163,7 +1169,7 @@
  const selectClass =
    'h-9 rounded-md border border-input bg-background px-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
  
-@@ -140,14 +148,24 @@
+@@ -140,14 +148,24 @@ export function CredentialFilters({ credentials, filters, onChange, matchedCount
    const set = <K extends keyof CredentialFilterState>(key: K, value: CredentialFilterState[K]) =>
      onChange({ ...filters, [key]: value })
  
@@ -1195,7 +1201,7 @@
    const active = isFilterActive(filters)
  
    return (
-@@ -177,11 +195,12 @@
+@@ -177,11 +195,12 @@ export function CredentialFilters({ credentials, filters, onChange, matchedCount
          <label className="flex items-center gap-1 text-sm text-muted-foreground">
            状态
            <select className={selectClass} value={filters.status} onChange={e => set('status', e.target.value)}>
@@ -1211,7 +1217,7 @@
                <option key={r} value={`disabled:${r}`}>
                  　└ {REASON_LABELS[r] || r}（{n}）
                </option>
-@@ -192,7 +211,7 @@
+@@ -192,7 +211,7 @@ export function CredentialFilters({ credentials, filters, onChange, matchedCount
          <label className="flex items-center gap-1 text-sm text-muted-foreground">
            登录方式
            <select className={selectClass} value={filters.authMethod} onChange={e => set('authMethod', e.target.value)}>
@@ -1220,7 +1226,7 @@
              {auths.map(([a, n]) => (
                <option key={a || 'none'} value={a}>
                  {AUTH_LABELS[a] || a || '未知'}（{n}）
-@@ -204,7 +223,7 @@
+@@ -204,7 +223,7 @@ export function CredentialFilters({ credentials, filters, onChange, matchedCount
          <label className="flex items-center gap-1 text-sm text-muted-foreground">
            账户等级
            <select className={selectClass} value={filters.tier} onChange={e => set('tier', e.target.value)}>
@@ -1229,7 +1235,7 @@
              {tiers.map(([t, n]) => (
                <option key={t} value={t}>
                  {tierLabel(t)}（{n}）
-@@ -216,7 +235,7 @@
+@@ -216,7 +235,7 @@ export function CredentialFilters({ credentials, filters, onChange, matchedCount
          <label className="flex items-center gap-1 text-sm text-muted-foreground">
            优先级
            <select className={selectClass} value={filters.priority} onChange={e => set('priority', e.target.value)}>
@@ -1238,7 +1244,7 @@
              {priorities.map(([p, n]) => (
                <option key={p} value={p}>
                  {p}（{n}）
-@@ -228,7 +247,7 @@
+@@ -228,7 +247,7 @@ export function CredentialFilters({ credentials, filters, onChange, matchedCount
          <label className="flex items-center gap-1 text-sm text-muted-foreground">
            邮箱域名
            <select className={selectClass} value={filters.domain} onChange={e => set('domain', e.target.value)}>
@@ -1247,7 +1253,8 @@
              {domains.map(([d, n]) => (
                <option key={d} value={d}>
                  {d}（{n}）
---- a/admin-ui/src/components/credential-table.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/credential-table.tsx
 @@ -0,0 +1,230 @@
 +import { toast } from 'sonner'
@@ -1480,7 +1487,8 @@
 +    </div>
 +  )
 +}
---- a/admin-ui/src/components/credits-trend.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/credits-trend.tsx
 @@ -0,0 +1,166 @@
 +import { useState } from 'react'
@@ -1686,7 +1694,7 @@
  import { extractErrorMessage } from '@/lib/utils'
  import type { BalanceResponse } from '@/types/api'
  
-@@ -25,8 +31,10 @@
+@@ -25,8 +31,10 @@ interface DashboardProps {
  }
  
  export function Dashboard({ onLogout }: DashboardProps) {
@@ -1699,7 +1707,7 @@
    const [windowDialogOpen, setWindowDialogOpen] = useState(false)
    const [modeDialogOpen, setModeDialogOpen] = useState(false)
    const [addDialogOpen, setAddDialogOpen] = useState(false)
-@@ -43,10 +51,28 @@
+@@ -43,10 +51,28 @@ export function Dashboard({ onLogout }: DashboardProps) {
    const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
    const [batchRefreshing, setBatchRefreshing] = useState(false)
    const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
@@ -1729,10 +1737,13 @@
    const [darkMode, setDarkMode] = useState(() => {
      if (typeof window !== 'undefined') {
        return document.documentElement.classList.contains('dark')
-@@ -60,6 +86,14 @@
+@@ -60,23 +86,61 @@ export function Dashboard({ onLogout }: DashboardProps) {
    const { mutate: resetFailure } = useResetFailure()
    const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
  
+-  // 显示顺序：启用（当前在用置顶）→ 已禁用；组内按 lastUsedAt 倒序（最近用完/用过的在前），
+-  // 从未使用的排组尾；其余保持后端的 priority 顺序（sort 是稳定的）。只影响显示，调度不变。
+-  // lastUsedAt 是 RFC3339 且带 9 位小数，部分浏览器 Date.parse 不认 ⇒ 先截到毫秒
 +  // 顶层标签：只有槽位模式才有「总览 / 槽位配置」；其它模式只剩「账户」。
 +  // 记下的标签（hash / localStorage）不改写，切回槽位模式时还是原来那页
 +  const [tab, setTab] = useTopTab()
@@ -1741,16 +1752,22 @@
 +  const activeTab = visibleTabs.some(t => t.k === tab) ? tab : 'accounts'
 +  const noneSelected = selectedIds.size === 0
 +
-   // 显示顺序：启用（当前在用置顶）→ 已禁用；组内按 lastUsedAt 倒序（最近用完/用过的在前），
-   // 从未使用的排组尾；其余保持后端的 priority 顺序（sort 是稳定的）。只影响显示，调度不变。
-   // lastUsedAt 是 RFC3339 且带 9 位小数，部分浏览器 Date.parse 不认 ⇒ 先截到毫秒
-@@ -72,11 +106,43 @@
-     const rank = (c: { isCurrent: boolean; disabled: boolean }) => (c.disabled ? 2 : c.isCurrent ? 0 : 1)
-     const ta = lastUsedMs(a.lastUsedAt)
-     const tb = lastUsedMs(b.lastUsedAt)
++  // lastUsedAt 是 RFC3339 且带 9 位小数，部分浏览器 Date.parse 不认 ⇒ 先截到毫秒（「最后使用」表头排序用）
+   const lastUsedMs = (s: string | null) => {
+     if (!s) return -Infinity
+     const t = Date.parse(s.replace(/(\.\d{3})\d+/, '$1'))
+     return Number.isNaN(t) ? -Infinity : t
+   }
++  // 显示顺序：固定按槽号（在槽的号在前，槽号小的在前）；不在槽的号排后面，按账户 id。
++  // 不再按「当前在用 / 最后使用时间」排——那两个每次请求都在变，列表会一直跳。只影响显示，调度不变。
+   const sortedCredentials = [...(data?.credentials || [])].sort((a, b) => {
+-    const rank = (c: { isCurrent: boolean; disabled: boolean }) => (c.disabled ? 2 : c.isCurrent ? 0 : 1)
+-    const ta = lastUsedMs(a.lastUsedAt)
+-    const tb = lastUsedMs(b.lastUsedAt)
 -    return rank(a) - rank(b) || (ta === tb ? 0 : tb > ta ? 1 : -1)
-+    const slotOrder = (a.slotNo ?? 99) - (b.slotNo ?? 99)
-+    return rank(a) - rank(b) || slotOrder || (ta === tb ? 0 : tb > ta ? 1 : -1)
++    const sa = a.slotNo ?? Number.MAX_SAFE_INTEGER
++    const sb = b.slotNo ?? Number.MAX_SAFE_INTEGER
++    return sa - sb || a.id - b.id
    })
  
    // 查询条件只过滤显示；批量操作仍按勾选的 ID 走，「清除已禁用」仍针对全部已禁用凭据
@@ -1790,7 +1807,7 @@
  
    // 计算分页
    const totalPages = Math.ceil(filteredCredentials.length / itemsPerPage)
-@@ -146,11 +212,6 @@
+@@ -146,11 +210,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
      document.documentElement.classList.toggle('dark')
    }
  
@@ -1802,7 +1819,7 @@
    const handleRefresh = () => {
      refetch()
      toast.success('已刷新凭据列表')
-@@ -177,6 +238,35 @@
+@@ -177,6 +236,35 @@ export function Dashboard({ onLogout }: DashboardProps) {
      setSelectedIds(new Set())
    }
  
@@ -1838,7 +1855,7 @@
    // 批量删除（仅删除已禁用项）
    const handleBatchDelete = async () => {
      if (selectedIds.size === 0) {
-@@ -234,6 +324,50 @@
+@@ -234,6 +322,50 @@ export function Dashboard({ onLogout }: DashboardProps) {
      deselectAll()
    }
  
@@ -1889,7 +1906,7 @@
    // 批量恢复异常
    const handleBatchResetFailure = async () => {
      if (selectedIds.size === 0) {
-@@ -327,6 +461,47 @@
+@@ -327,6 +459,47 @@ export function Dashboard({ onLogout }: DashboardProps) {
      deselectAll()
    }
  
@@ -1937,7 +1954,7 @@
    // 一键清除所有已禁用凭据
    const handleClearAll = async () => {
      if (!data?.credentials || data.credentials.length === 0) {
-@@ -377,68 +552,44 @@
+@@ -377,68 +550,44 @@ export function Dashboard({ onLogout }: DashboardProps) {
    }
  
    // 查询当前页凭据信息（逐个查询，避免瞬时并发）
@@ -2034,7 +2051,7 @@
    const handleBatchVerify = async () => {
      if (selectedIds.size === 0) {
        toast.error('请先选择要验活的凭据')
-@@ -562,171 +713,155 @@
+@@ -562,171 +711,155 @@ export function Dashboard({ onLogout }: DashboardProps) {
      <div className="min-h-screen bg-background">
        {/* 顶部导航 */}
        <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -2065,9 +2082,7 @@
 -              title="设置同时在线的号数（小窗口轮换模式）"
 -            >
 -              窗口设置
-+            <Button variant="ghost" size="icon" onClick={handleRefresh} aria-label="刷新" title="刷新">
-+              <RefreshCw className="h-4 w-4" />
-             </Button>
+-            </Button>
 -            <Button variant="ghost" size="icon" onClick={toggleDarkMode}>
 -              {darkMode ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
 -            </Button>
@@ -2076,7 +2091,9 @@
 -            </Button>
 -            <Button variant="ghost" size="icon" onClick={handleLogout}>
 -              <LogOut className="h-5 w-5" />
--            </Button>
++            <Button variant="ghost" size="icon" onClick={handleRefresh} aria-label="刷新" title="刷新">
++              <RefreshCw className="h-4 w-4" />
+             </Button>
 +            <DropdownMenu>
 +              <DropdownMenuTrigger asChild>
 +                <Button variant="ghost" size="icon" aria-label="更多"><MoreVertical className="h-4 w-4" /></Button>
@@ -2264,6 +2281,10 @@
 -              <Button onClick={() => setKamImportDialogOpen(true)} size="sm" variant="outline">
 -                <FileUp className="h-4 w-4 mr-2" />
 -                Kiro Account Manager 导入
+-              </Button>
+-              <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline">
+-                <Upload className="h-4 w-4 mr-2" />
+-                批量导入
 +              <DropdownMenu>
 +                <DropdownMenuTrigger asChild>
 +                  <Button size="sm" variant="outline"><Upload className="mr-1.5 h-4 w-4" />导入</Button>
@@ -2289,16 +2310,12 @@
 +              <Button size="sm" variant="outline" disabled={noneSelected || batchToggling} onClick={() => handleBatchSetDisabled(false)} title={noneSelected ? '先勾选账户' : '启用选中的账户（进冷备池，有空槽马上补上）'}>
 +                <Power className="h-4 w-4 text-emerald-600" />批量启用
                </Button>
--              <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline">
--                <Upload className="h-4 w-4 mr-2" />
--                批量导入
-+              <Button size="sm" variant="outline" disabled={noneSelected || batchToggling} onClick={() => handleBatchSetDisabled(true)} title={noneSelected ? '先勾选账户' : '停用选中的账户（在槽上的会立刻换冷备号）'}>
-+                <PowerOff className="h-4 w-4 text-red-600" />批量停用
-               </Button>
 -              <Button onClick={() => setAddDialogOpen(true)} size="sm">
 -                <Plus className="h-4 w-4 mr-2" />
 -                添加凭据
--              </Button>
++              <Button size="sm" variant="outline" disabled={noneSelected || batchToggling} onClick={() => handleBatchSetDisabled(true)} title={noneSelected ? '先勾选账户' : '停用选中的账户（在槽上的会立刻换冷备号）'}>
++                <PowerOff className="h-4 w-4 text-red-600" />批量停用
+               </Button>
 +              <DropdownMenu>
 +                <DropdownMenuTrigger asChild>
 +                  <Button size="sm" variant="secondary">更多批量操作<ChevronDown className="h-4 w-4" /></Button>
@@ -2333,7 +2350,7 @@
            {data?.credentials.length === 0 ? (
              <Card>
                <CardContent className="py-8 text-center text-muted-foreground">
-@@ -748,23 +883,25 @@
+@@ -748,23 +881,25 @@ export function Dashboard({ onLogout }: DashboardProps) {
                    </CardContent>
                  </Card>
                )}
@@ -2374,7 +2391,7 @@
                    <Button
                      variant="outline"
                      size="sm"
-@@ -780,24 +917,44 @@
+@@ -780,22 +915,42 @@ export function Dashboard({ onLogout }: DashboardProps) {
                      variant="outline"
                      size="sm"
                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
@@ -2414,24 +2431,20 @@
 +        onClose={() => setDrawerId(null)}
 +        onQueryBalance={fetchOneBalance}
 +        onDelete={handleDeleteOne}
-       />
- 
++      />
++
 +      <UsageDialog
 +        credentialId={usageId}
 +        email={data?.credentials.find((c) => c.id === usageId)?.email}
 +        open={usageId != null}
 +        onOpenChange={(o) => { if (!o) setUsageId(null) }}
-+      />
-+
-       <WindowSettingsDialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen} />
+       />
  
-       <ModeSwitchDialog open={modeDialogOpen} onOpenChange={setModeDialogOpen} />
-@@ -806,6 +963,15 @@
-       <AddCredentialDialog
-         open={addDialogOpen}
+       <WindowSettingsDialog open={windowDialogOpen} onOpenChange={setWindowDialogOpen} />
+@@ -808,6 +963,15 @@ export function Dashboard({ onLogout }: DashboardProps) {
          onOpenChange={setAddDialogOpen}
-+      />
-+
+       />
+ 
 +      <BatchPriorityDialog
 +        open={priorityDialogOpen}
 +        onOpenChange={setPriorityDialogOpen}
@@ -2439,10 +2452,13 @@
 +        running={prioritySaving}
 +        progress={priorityProgress}
 +        onSubmit={handleBatchPriority}
-       />
- 
++      />
++
        {/* 批量导入对话框 */}
---- a/admin-ui/src/components/egress-quota-card.tsx
+       <BatchImportDialog
+         open={batchImportDialogOpen}
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/egress-quota-card.tsx
 @@ -0,0 +1,87 @@
 +import { useQuery } from '@tanstack/react-query'
@@ -2532,7 +2548,8 @@
 +    </div>
 +  )
 +}
---- a/admin-ui/src/components/empty-events-dialog.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/empty-events-dialog.tsx
 @@ -0,0 +1,108 @@
 +import { useState } from 'react'
@@ -2645,7 +2662,7 @@
 +}
 --- a/admin-ui/src/components/kam-import-dialog.tsx
 +++ b/admin-ui/src/components/kam-import-dialog.tsx
-@@ -407,12 +407,12 @@
+@@ -407,12 +407,12 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
          onOpenChange(newOpen)
        }}
      >
@@ -2660,7 +2677,7 @@
            <div className="space-y-2">
              <label className="text-sm font-medium">KAM 导出 JSON</label>
              <textarea
-@@ -482,7 +482,7 @@
+@@ -482,7 +482,7 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
                  </span>
                </div>
  
@@ -2692,7 +2709,7 @@
  
  export const MODE_INFO: Record<LbMode, { label: string; desc: string; warn?: string }> = {
    priority: { label: '优先级模式', desc: '只用优先级最高的 1 个号，用完额度再换下一个。' },
-@@ -20,6 +13,10 @@
+@@ -20,6 +13,10 @@ export const MODE_INFO: Record<LbMode, { label: string; desc: string; warn?: str
      label: '小窗口轮换',
      desc: '只让优先级最前的几个号同时在线（数量在「窗口设置」里调），同一会话尽量固定同一个号；被限流就立刻换号，其余号冷备。',
    },
@@ -2703,7 +2720,7 @@
    balanced: {
      label: '均衡负载',
      desc: '全池所有启用的号一起分摊请求。',
-@@ -61,6 +58,7 @@
+@@ -61,6 +58,7 @@ export function ModeSwitchDialog({ open, onOpenChange }: ModeSwitchDialogProps)
            <DialogTitle>切换调度模式</DialogTitle>
            <DialogDescription>当前：{MODE_INFO[current].label}。立即对线上所有请求生效。</DialogDescription>
          </DialogHeader>
@@ -2711,7 +2728,7 @@
          <div className="space-y-2 py-2" role="radiogroup" aria-label="调度模式">
            {(Object.keys(MODE_INFO) as LbMode[]).map((m) => (
              <label
-@@ -90,6 +88,7 @@
+@@ -90,6 +88,7 @@ export function ModeSwitchDialog({ open, onOpenChange }: ModeSwitchDialogProps)
              将从 <b>{MODE_INFO[current].label}</b> 切换为 <b>{MODE_INFO[target].label}</b>
            </p>
          )}
@@ -2719,7 +2736,8 @@
          <DialogFooter>
            <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
            <Button onClick={handleConfirm} disabled={target === current || isPending}>
---- a/admin-ui/src/components/rebalance-dialog.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/rebalance-dialog.tsx
 @@ -0,0 +1,125 @@
 +import { useState } from 'react'
@@ -2847,7 +2865,8 @@
 +    </Dialog>
 +  )
 +}
---- a/admin-ui/src/components/slot-config-editor.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/slot-config-editor.tsx
 @@ -0,0 +1,377 @@
 +import { useEffect, useMemo, useRef, useState } from 'react'
@@ -3227,7 +3246,8 @@
 +    </div>
 +  )
 +}
---- a/admin-ui/src/components/slot-gray-editor.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/slot-gray-editor.tsx
 @@ -0,0 +1,30 @@
 +import { useEffect, useState } from 'react'
@@ -3260,7 +3280,8 @@
 +  )
 +}
 +
---- a/admin-ui/src/components/slot-key-search.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/slot-key-search.tsx
 @@ -0,0 +1,95 @@
 +import { useEffect, useMemo, useState } from 'react'
@@ -3358,7 +3379,8 @@
 +    </div>
 +  )
 +}
---- a/admin-ui/src/components/slot-status.ts
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/slot-status.ts
 @@ -0,0 +1,59 @@
 +import type { SlotView, SlotsOverview } from '@/api/credentials'
@@ -3420,7 +3442,8 @@
 +export function slotRank(f: SlotFlags): number {
 +  return f.empty ? 0 : f.alarm ? 1 : f.closed ? 2 : f.queued ? 3 : f.low ? 4 : 5
 +}
---- a/admin-ui/src/components/slot-test-dialog.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/slot-test-dialog.tsx
 @@ -0,0 +1,76 @@
 +import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -3499,7 +3522,8 @@
 +    </Dialog>
 +  )
 +}
---- a/admin-ui/src/components/slot-users-dialog.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/slot-users-dialog.tsx
 @@ -0,0 +1,300 @@
 +import { useMemo, useState } from 'react'
@@ -3802,9 +3826,10 @@
 +    </Dialog>
 +  )
 +}
---- a/admin-ui/src/components/slots-panel.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/slots-panel.tsx
-@@ -0,0 +1,615 @@
+@@ -0,0 +1,657 @@
 +import { CreditsTrend } from '@/components/credits-trend'
 +import { EgressQuotaCard } from '@/components/egress-quota-card'
 +import { EmptyEventsDialog } from '@/components/empty-events-dialog'
@@ -3816,7 +3841,7 @@
 +import { Input } from '@/components/ui/input'
 +import { Badge } from '@/components/ui/badge'
 +import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-+import { useSetSlotLimits, useSetSlotLock, useSlots } from '@/hooks/use-credentials'
++import { useSetAllSlotLocks, useSetSlotLimits, useSetSlotLock, useSlots } from '@/hooks/use-credentials'
 +import { useQueryClient } from '@tanstack/react-query'
 +import { ackSlotAlarms } from '@/api/credentials'
 +import type { SlotView, SlotsOverview, SlotTestResult, SlotTestScenario } from '@/api/credentials'
@@ -3830,7 +3855,7 @@
 +import { SlotConfigEditor } from '@/components/slot-config-editor'
 +import { SlotGrayEditor } from '@/components/slot-gray-editor'
 +import {
-+  ISSUE_HINT, ISSUE_LABEL, hasIssue, lowBalanceIds, slotFlags, slotIssues, slotNo, slotRank,
++  ISSUE_HINT, ISSUE_LABEL, hasIssue, lowBalanceIds, slotFlags, slotIssues, slotNo,
 +  type IssueKind, type SlotFlags,
 +} from '@/components/slot-status'
 +
@@ -3865,6 +3890,48 @@
 +    <Button size='sm' variant='outline' disabled={isPending} onClick={() => mutate({ slot: s.index, limit: null })}>解锁</Button>
 +  ) : (
 +    <Button size='sm' variant='ghost' disabled={isPending} onClick={lock}>锁定</Button>
++  )
++}
++
++// 统一调整所有 IP 槽位的并发（在途上限）：输一个值一次锁到全部槽；解锁则回到自动调节（AIMD）
++function LockAllButton({ slots }: { slots: SlotView[] }) {
++  const { mutate, isPending } = useSetAllSlotLocks()
++  const lockedCount = slots.filter((s) => s.locked).length
++  const lockedValues = Array.from(new Set(slots.filter((s) => s.locked).map((s) => s.limit)))
++  const allSame = lockedCount === slots.length && lockedValues.length === 1
++  const current = allSame ? `，当前统一为 ${lockedValues[0]}` : lockedCount > 0 ? `，当前 ${lockedCount}/${slots.length} 个已锁定` : ''
++  const lockAll = () => {
++    const v = window.prompt(`把全部 ${slots.length} 个槽位的并发（在途上限）统一锁定为（1~64）${current}`, String(allSame ? lockedValues[0] : 6))
++    if (!v) return
++    const n = Number(v)
++    if (!Number.isInteger(n) || n < 1 || n > 64) {
++      toast.error('并发需为 1~64 的整数')
++      return
++    }
++    mutate(n, {
++      onSuccess: (r) => toast.success(`已把 ${r.slots} 个槽位的并发统一锁定为 ${n}`),
++      onError: (e) => toast.error(extractErrorMessage(e)),
++    })
++  }
++  const unlockAll = () => {
++    if (!window.confirm(`解除全部 ${slots.length} 个槽位的并发锁定，回到自动调节？`)) return
++    mutate(null, {
++      onSuccess: (r) => toast.success(`已解锁 ${r.slots} 个槽位，回到自动调节`),
++      onError: (e) => toast.error(extractErrorMessage(e)),
++    })
++  }
++  return (
++    <div className='flex items-center gap-2'>
++      <Button size='sm' variant='outline' disabled={isPending || slots.length === 0} onClick={lockAll}
++        title='一次把所有 IP 槽位的在途上限锁成同一个值（锁定值不受权重缩放影响）'>
++        统一并发{allSame ? `（${lockedValues[0]}）` : ''}
++      </Button>
++      {lockedCount > 0 && (
++        <Button size='sm' variant='ghost' disabled={isPending} onClick={unlockAll} title='全部回到 AIMD 自动调节'>
++          全部解锁
++        </Button>
++      )}
++    </div>
 +  )
 +}
 +
@@ -4372,12 +4439,9 @@
 +  }, [flags])
 +  const shown = useMemo(() => {
 +    if (!data) return []
-+    const idx = new Map(data.slots.map((s, i) => [s.name, i]))
 +    const keep = data.slots.filter((_, i) => focus == null || (focus === 'any' ? hasIssue(flags[i]) : flags[i][focus]))
-+    return [...keep].sort((a, b) => {
-+      const fa = flags[idx.get(a.name)!], fb = flags[idx.get(b.name)!]
-+      return slotRank(fa) - slotRank(fb) || slotNo(a) - slotNo(b)
-+    })
++    // 固定按槽号排：状态（异常/排队/额度低）变化时行不跳位置，要看异常用上面的问题条筛选
++    return [...keep].sort((a, b) => slotNo(a) - slotNo(b))
 +  }, [data, flags, focus])
 +  if (isLoading || !data) return null
 +  const r = data.runway
@@ -4385,7 +4449,10 @@
 +    <section className='space-y-4'>
 +      <div className='flex flex-wrap items-center justify-between gap-2'>
 +        <h2 className='text-lg font-semibold'>槽位（一号一 IP）</h2>
-+        <SlotKeySearch slots={data.slots} />
++        <div className='flex flex-wrap items-center gap-2'>
++          <LockAllButton slots={data.slots} />
++          <SlotKeySearch slots={data.slots} />
++        </div>
 +      </div>
 +      {r?.alert && (
 +        <div role='alert' className='rounded-lg border border-red-500 bg-red-50 px-4 py-3 text-sm font-medium text-red-700 dark:bg-red-950 dark:text-red-300'>
@@ -4420,7 +4487,8 @@
 +
 +// 兼容旧引用：概览内容（不含配置面板）
 +export const SlotsPanel = SlotsOverviewPanel
---- a/admin-ui/src/components/top-tabs.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/top-tabs.tsx
 @@ -0,0 +1,93 @@
 +import { useCallback, useEffect, useRef, useState } from 'react'
@@ -4518,7 +4586,7 @@
 +}
 --- a/admin-ui/src/components/ui/badge.tsx
 +++ b/admin-ui/src/components/ui/badge.tsx
-@@ -12,12 +12,13 @@
+@@ -12,12 +12,13 @@ const badgeVariants = cva(
          secondary:
            'border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80',
          destructive:
@@ -4537,7 +4605,7 @@
      defaultVariants: {
 --- a/admin-ui/src/components/ui/dialog.tsx
 +++ b/admin-ui/src/components/ui/dialog.tsx
-@@ -35,13 +35,15 @@
+@@ -35,13 +35,15 @@ const DialogContent = React.forwardRef<
      <DialogPrimitive.Content
        ref={ref}
        className={cn(
@@ -4555,7 +4623,7 @@
          <X className="h-4 w-4" />
          <span className="sr-only">关闭</span>
        </DialogPrimitive.Close>
-@@ -56,7 +58,7 @@
+@@ -56,7 +58,7 @@ const DialogHeader = ({
  }: React.HTMLAttributes<HTMLDivElement>) => (
    <div
      className={cn(
@@ -4564,7 +4632,7 @@
        className
      )}
      {...props}
-@@ -70,7 +72,8 @@
+@@ -70,7 +72,8 @@ const DialogFooter = ({
  }: React.HTMLAttributes<HTMLDivElement>) => (
    <div
      className={cn(
@@ -4574,7 +4642,7 @@
        className
      )}
      {...props}
-@@ -78,6 +81,15 @@
+@@ -78,6 +81,15 @@ const DialogFooter = ({
  )
  DialogFooter.displayName = 'DialogFooter'
  
@@ -4590,7 +4658,7 @@
  const DialogTitle = React.forwardRef<
    React.ElementRef<typeof DialogPrimitive.Title>,
    React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
-@@ -114,6 +126,7 @@
+@@ -114,6 +126,7 @@ export {
    DialogContent,
    DialogHeader,
    DialogFooter,
@@ -4598,7 +4666,8 @@
    DialogTitle,
    DialogDescription,
  }
---- a/admin-ui/src/components/ui/dropdown-menu.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/ui/dropdown-menu.tsx
 @@ -0,0 +1,46 @@
 +import * as React from 'react'
@@ -4647,7 +4716,8 @@
 +export const DropdownMenuLabel = ({ children }: { children: React.ReactNode }) => (
 +  <M.Label className="px-2 py-1.5 text-xs font-medium text-muted-foreground">{children}</M.Label>
 +)
---- a/admin-ui/src/components/usage-dialog.tsx
+new file mode 100644
+--- /dev/null
 +++ b/admin-ui/src/components/usage-dialog.tsx
 @@ -0,0 +1,99 @@
 +import { useState } from 'react'
@@ -4766,7 +4836,7 @@
  import { Button } from '@/components/ui/button'
  import { Input } from '@/components/ui/input'
  import { useLoadBalancingMode, useSetWindowSettings, useWindowSettings } from '@/hooks/use-credentials'
-@@ -72,6 +65,7 @@
+@@ -72,6 +65,7 @@ export function WindowSettingsDialog({ open, onOpenChange }: WindowSettingsDialo
              只让优先级最前的几个号同时在线，其余号冷备。号被限流时冷却并立刻换号，冷却期间从后面补位，最多补到上限。保存后立即生效。
            </DialogDescription>
          </DialogHeader>
@@ -4774,7 +4844,7 @@
          <p className={`text-sm rounded-md border px-3 py-2 ${mode === 'window' ? '' : 'border-amber-500 text-amber-700 dark:text-amber-400'}`}>
            当前调度模式：<b>{MODE_INFO[mode]?.label || mode}</b>
            {mode !== 'window' && '（这里的设置只在「小窗口轮换」模式下生效，切模式请点页头的「调度」按钮）'}
-@@ -91,6 +85,7 @@
+@@ -91,6 +85,7 @@ export function WindowSettingsDialog({ open, onOpenChange }: WindowSettingsDialo
            </label>
            {error && <p className="text-sm text-red-500" role="alert">{error}</p>}
          </div>
@@ -4784,7 +4854,7 @@
            <Button onClick={handleSave} disabled={!!error || isPending}>
 --- a/admin-ui/src/hooks/use-credentials.ts
 +++ b/admin-ui/src/hooks/use-credentials.ts
-@@ -10,6 +10,13 @@
+@@ -10,6 +10,14 @@ import {
    deleteCredential,
    getLoadBalancingMode,
    getWindowSettings,
@@ -4795,15 +4865,14 @@
 +  setSlotConfigs,
 +  setSlotLimits,
 +  setSlotLock,
++  setAllSlotLocks,
    setWindowSettings,
    setLoadBalancingMode,
  } from '@/api/credentials'
-@@ -137,5 +144,57 @@
-     onSuccess: () => {
-       queryClient.invalidateQueries({ queryKey: ['windowSettings'] })
+@@ -139,3 +147,63 @@ export function useSetWindowSettings() {
      },
-+  })
-+}
+   })
+ }
 +
 +// 槽位总览（5 秒刷新）
 +export function useSlots() {
@@ -4818,6 +4887,14 @@
 +  const queryClient = useQueryClient()
 +  return useMutation({
 +    mutationFn: setSlotLimits,
++    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['slots'] }),
++  })
++}
++
++export function useSetAllSlotLocks() {
++  const queryClient = useQueryClient()
++  return useMutation({
++    mutationFn: (limit: number | null) => setAllSlotLocks(limit),
 +    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['slots'] }),
 +  })
 +}
@@ -4854,11 +4931,11 @@
 +  return useMutation({
 +    mutationFn: setSlotGray,
 +    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['slotGray'] }),
-   })
- }
++  })
++}
 --- a/admin-ui/src/types/api.ts
 +++ b/admin-ui/src/types/api.ts
-@@ -13,6 +13,10 @@
+@@ -13,6 +13,10 @@ export interface CredentialStatusItem {
    disabled: boolean
    failureCount: number
    isCurrent: boolean
@@ -4869,7 +4946,8 @@
    expiresAt: string | null
    authMethod: string | null
    hasProfileArn: boolean
---- a/src/admin/egress_quota.rs
+new file mode 100644
+--- /dev/null
 +++ b/src/admin/egress_quota.rs
 @@ -0,0 +1,240 @@
 +//! 出口代理（iGuge 订阅）流量余额：Admin「代理余额」卡片用。
@@ -5114,7 +5192,7 @@
 +}
 --- a/src/admin/handlers.rs
 +++ b/src/admin/handlers.rs
-@@ -37,6 +37,17 @@
+@@ -37,6 +37,17 @@ pub async fn set_credential_disabled(
      }
  }
  
@@ -5132,11 +5210,10 @@
  /// POST /api/admin/credentials/:id/priority
  /// 设置凭据优先级
  pub async fn set_credential_priority(
-@@ -157,4 +168,303 @@
-         Ok(response) => Json(response).into_response(),
+@@ -158,3 +169,348 @@ pub async fn set_window_settings(
          Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
      }
-+}
+ }
 +
 +/// GET /api/admin/slots —— 槽位总览（每槽号/在途/排队/上限/429 统计）
 +pub async fn get_slots(State(state): State<AdminState>) -> impl IntoResponse {
@@ -5201,6 +5278,52 @@
 +) -> impl IntoResponse {
 +    match state.service.set_slot_lock(slot, payload.limit) {
 +        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
++        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
++    }
++}
++
++#[derive(serde::Deserialize)]
++pub struct AllowOpusRequest {
++    pub allow: bool,
++}
++
++/// POST /api/admin/credentials/{id}/allow-opus —— 标记「这个号允许跑 opus」（特殊 FREE 号）。
++/// 热生效 + 落盘；开了之后空槽会立刻补号。
++pub async fn set_allow_opus(
++    State(state): State<AdminState>,
++    axum::extract::Path(id): axum::extract::Path<u64>,
++    Json(payload): Json<AllowOpusRequest>,
++) -> impl IntoResponse {
++    match state.service.set_allow_opus(id, payload.allow) {
++        Ok(()) => Json(serde_json::json!({"ok": true, "id": id, "allowOpus": payload.allow})).into_response(),
++        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
++    }
++}
++
++#[derive(serde::Deserialize)]
++pub struct SlotAssignRequest {
++    pub account_id: u64,
++}
++
++/// POST /api/admin/slots/{slot}/account —— 手动把指定号放到这个槽（换下来的旧号回冷备）
++pub async fn assign_slot_account(
++    State(state): State<AdminState>,
++    axum::extract::Path(slot): axum::extract::Path<usize>,
++    Json(payload): Json<SlotAssignRequest>,
++) -> impl IntoResponse {
++    match state.service.assign_slot_account(slot, payload.account_id) {
++        Ok(replaced) => Json(serde_json::json!({"ok": true, "replaced": replaced})).into_response(),
++        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
++    }
++}
++
++/// POST /api/admin/slots/lock-all —— 统一锁定所有槽的在途上限（limit=null 全部解锁）
++pub async fn set_all_slot_locks(
++    State(state): State<AdminState>,
++    Json(payload): Json<SlotLockRequest>,
++) -> impl IntoResponse {
++    match state.service.set_all_slot_locks(payload.limit) {
++        Ok(n) => Json(serde_json::json!({"ok": true, "slots": n})).into_response(),
 +        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
 +    }
 +}
@@ -5435,10 +5558,10 @@
 +            "inputTokens": c.input_tokens, "outputTokens": c.output_tokens})))
 +        .collect();
 +    Json(serde_json::json!({"days": days, "totals": t})).into_response()
- }
++}
 --- a/src/admin/middleware.rs
 +++ b/src/admin/middleware.rs
-@@ -21,6 +21,8 @@
+@@ -21,6 +21,8 @@ pub struct AdminState {
      pub admin_api_key: String,
      /// Admin 服务
      pub service: Arc<AdminService>,
@@ -5447,20 +5570,21 @@
  }
  
  impl AdminState {
-@@ -28,7 +30,13 @@
+@@ -28,8 +30,14 @@ impl AdminState {
          Self {
              admin_api_key: admin_api_key.into(),
              service: Arc::new(service),
 +            provider: None,
          }
-+    }
+     }
 +
 +    pub fn with_provider(mut self, p: Arc<crate::kiro::provider::KiroProvider>) -> Self {
 +        self.provider = Some(p);
 +        self
-     }
++    }
  }
  
+ /// Admin API 认证中间件
 --- a/src/admin/mod.rs
 +++ b/src/admin/mod.rs
 @@ -17,10 +17,11 @@
@@ -5478,23 +5602,24 @@
  pub use middleware::AdminState;
 --- a/src/admin/router.rs
 +++ b/src/admin/router.rs
-@@ -9,7 +9,8 @@
+@@ -9,7 +9,8 @@ use super::{
      handlers::{
          add_credential, delete_credential, force_refresh_token, get_all_credentials,
          get_credential_balance, get_load_balancing_mode, get_window_settings, reset_failure_count,
 -        set_credential_disabled, set_credential_priority, set_load_balancing_mode, set_window_settings,
 +        set_credential_disabled, set_credentials_disabled_batch, set_credential_priority, set_load_balancing_mode, set_window_settings,
-+        get_slots, get_burn_trend, get_empty_events, get_slot_users, post_slot_rebind, post_slot_unpin, get_slot_rebalance, post_slot_rebalance, post_slot_ack_alarms, post_handoff, set_slot_limits, set_slot_lock, get_slot_configs, set_slot_configs, get_slot_gray, set_slot_gray, get_egress_quota, test_slot, test_all_slots, get_credential_usage, get_credentials_usage_totals,
++        get_slots, get_burn_trend, get_empty_events, get_slot_users, post_slot_rebind, post_slot_unpin, get_slot_rebalance, post_slot_rebalance, post_slot_ack_alarms, post_handoff, set_slot_limits, set_slot_lock, set_all_slot_locks, assign_slot_account, set_allow_opus, get_slot_configs, set_slot_configs, get_slot_gray, set_slot_gray, get_egress_quota, test_slot, test_all_slots, get_credential_usage, get_credentials_usage_totals,
      },
      middleware::{AdminState, admin_auth_middleware},
  };
-@@ -41,11 +42,14 @@
+@@ -41,11 +42,15 @@ pub fn create_admin_router(state: AdminState) -> Router {
              get(get_all_credentials).post(add_credential),
          )
          .route("/credentials/{id}", delete(delete_credential))
 +        .route("/credentials/disabled-batch", post(set_credentials_disabled_batch))
          .route("/credentials/{id}/disabled", post(set_credential_disabled))
          .route("/credentials/{id}/priority", post(set_credential_priority))
++        .route("/credentials/{id}/allow-opus", post(set_allow_opus))
          .route("/credentials/{id}/reset", post(reset_failure_count))
          .route("/credentials/{id}/refresh", post(force_refresh_token))
          .route("/credentials/{id}/balance", get(get_credential_balance))
@@ -5503,7 +5628,7 @@
          .route(
              "/config/load-balancing",
              get(get_load_balancing_mode).put(set_load_balancing_mode),
-@@ -54,6 +58,23 @@
+@@ -54,6 +59,25 @@ pub fn create_admin_router(state: AdminState) -> Router {
              "/config/window",
              get(get_window_settings).put(set_window_settings),
          )
@@ -5523,13 +5648,15 @@
 +        .route("/egress/quota", get(get_egress_quota))
 +        .route("/slots/test-all", post(test_all_slots))
 +        .route("/slots/{slot}/test", post(test_slot))
++        .route("/slots/lock-all", post(set_all_slot_locks))
 +        .route("/slots/{slot}/lock", post(set_slot_lock))
++        .route("/slots/{slot}/account", post(assign_slot_account))
          .layer(middleware::from_fn_with_state(
              state.clone(),
              admin_auth_middleware,
 --- a/src/admin/service.rs
 +++ b/src/admin/service.rs
-@@ -40,6 +40,9 @@
+@@ -40,6 +40,9 @@ pub struct AdminService {
      known_endpoints: HashSet<String>,
  }
  
@@ -5539,7 +5666,7 @@
  impl AdminService {
      pub fn new(
          token_manager: Arc<MultiTokenManager>,
-@@ -59,10 +62,24 @@
+@@ -59,10 +62,24 @@ impl AdminService {
          }
      }
  
@@ -5564,7 +5691,7 @@
  
          let mut credentials: Vec<CredentialStatusItem> = snapshot
              .entries
-@@ -72,7 +89,10 @@
+@@ -72,7 +89,11 @@ impl AdminService {
                  priority: entry.priority,
                  disabled: entry.disabled,
                  failure_count: entry.failure_count,
@@ -5573,10 +5700,11 @@
 +                slot_name: slotted.get(&entry.id).map(|x| x.0.clone()),
 +                slot_no: slotted.get(&entry.id).map(|x| x.1),
 +                slot_eligible: entry.slot_eligible,
++                allow_opus: entry.allow_opus,
                  expires_at: entry.expires_at,
                  auth_method: entry.auth_method,
                  has_profile_arn: entry.has_profile_arn,
-@@ -103,6 +123,19 @@
+@@ -103,6 +124,19 @@ impl AdminService {
      }
  
      /// 设置凭据禁用状态
@@ -5596,7 +5724,16 @@
      pub fn set_disabled(&self, id: u64, disabled: bool) -> Result<(), AdminServiceError> {
          // 先获取当前凭据 ID，用于判断是否需要切换
          let snapshot = self.token_manager.snapshot();
-@@ -299,16 +332,169 @@
+@@ -236,6 +270,8 @@ impl AdminService {
+             disabled: false, // 新添加的凭据默认启用
+             kiro_api_key: req.kiro_api_key,
+             endpoint: req.endpoint,
++            // 新加的号默认不开 opus 例外（只有手动标了的特殊 FREE 号才开）
++            allow_opus: false,
+         };
+ 
+         // 调用 token_manager 添加凭据
+@@ -299,16 +335,206 @@ impl AdminService {
          Ok(self.token_manager.get_window_settings())
      }
  
@@ -5742,13 +5879,50 @@
 +        self.token_manager.slot_rebalance_plan()
 +    }
 +
++    /// idle_secs 可调的预览（界面「连刚用过的也挪」用）
++    pub fn slot_rebalance_plan_idle(&self, idle_secs: i64) -> crate::kiro::slots::RebalancePlan {
++        self.token_manager.slot_rebalance_plan_idle(idle_secs.clamp(0, 86400))
++    }
++
 +    pub fn slot_rebalance_apply(&self, moves: &[(String, String, String)]) -> Result<usize, AdminServiceError> {
 +        self.token_manager.slot_rebalance_apply(moves).map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))
++    }
++
++    /// 同上，idle_secs 与预览保持一致
++    pub fn slot_rebalance_apply_idle(
++        &self,
++        moves: &[(String, String, String)],
++        idle_secs: i64,
++    ) -> Result<usize, AdminServiceError> {
++        self.token_manager
++            .slot_rebalance_apply_idle(moves, idle_secs.clamp(0, 86400))
++            .map_err(|e| AdminServiceError::InternalError(e.to_string()))
 +    }
 +
 +    pub fn set_slot_lock(&self, slot: usize, limit: Option<u32>) -> Result<(), AdminServiceError> {
 +        self.token_manager
 +            .set_slot_lock(slot, limit)
++            .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))
++    }
++
++    /// 标记/取消「允许跑 opus」（热生效，不用重启）
++    pub fn set_allow_opus(&self, account_id: u64, allow: bool) -> Result<(), AdminServiceError> {
++        self.token_manager
++            .set_allow_opus(account_id, allow)
++            .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))
++    }
++
++    /// 手动把某个号放到某个槽（11-04 加）
++    pub fn assign_slot_account(&self, slot: usize, account_id: u64) -> Result<Option<u64>, AdminServiceError> {
++        self.token_manager
++            .assign_slot_account(slot, account_id)
++            .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))
++    }
++
++    /// 统一锁定所有槽的在途上限（None = 全部解锁）
++    pub fn set_all_slot_locks(&self, limit: Option<u32>) -> Result<usize, AdminServiceError> {
++        self.token_manager
++            .set_all_slot_locks(limit)
 +            .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))
 +    }
 +
@@ -5772,7 +5946,7 @@
          self.token_manager
 --- a/src/admin/types.rs
 +++ b/src/admin/types.rs
-@@ -30,8 +30,16 @@
+@@ -30,8 +30,18 @@ pub struct CredentialStatusItem {
      pub disabled: bool,
      /// 连续失败次数
      pub failure_count: u32,
@@ -5787,26 +5961,28 @@
 +    pub slot_no: Option<usize>,
 +    /// 能不能上槽（非 FREE 档、没被退役）——前端估算冷备够不够用
 +    pub slot_eligible: bool,
++    /// 手动标的「允许跑 opus」（特殊 FREE 号）；界面据此显示标记
++    pub allow_opus: bool,
      /// Token 过期时间（RFC3339 格式）
      pub expires_at: Option<String>,
      /// 认证方式
-@@ -74,6 +82,13 @@
- #[serde(rename_all = "camelCase")]
- pub struct SetDisabledRequest {
-     /// 是否禁用
-+    pub disabled: bool,
-+}
-+
+@@ -77,6 +87,13 @@ pub struct SetDisabledRequest {
+     pub disabled: bool,
+ }
+ 
 +/// 批量启用 / 停用请求
 +#[derive(Debug, Deserialize)]
 +pub struct SetDisabledBatchRequest {
 +    pub ids: Vec<u64>,
-     pub disabled: bool,
- }
- 
++    pub disabled: bool,
++}
++
+ /// 修改优先级请求
+ #[derive(Debug, Deserialize)]
+ #[serde(rename_all = "camelCase")]
 --- a/src/anthropic/converter.rs
 +++ b/src/anthropic/converter.rs
-@@ -172,7 +172,12 @@
+@@ -172,7 +172,12 @@ pub fn map_model(model: &str) -> Option<String> {
              None
          }
      } else if model_lower.contains("haiku") {
@@ -5820,7 +5996,7 @@
      } else {
          None
      }
-@@ -194,6 +199,7 @@
+@@ -194,6 +199,7 @@ pub fn get_context_window_size(model: &str) -> i32 {
                  || mapped == "claude-sonnet-5"
                  || mapped == "claude-sonnet-5.5"
                  || mapped == "claude-opus-5.5"
@@ -5828,12 +6004,10 @@
                  || mapped == "claude-opus-5"
                  || mapped == "claude-sonnet-4.6"
                  || mapped == "claude-opus-4.6"
-@@ -1094,6 +1100,17 @@
-         ] {
-             assert_eq!(map_model(model), Some(expected.to_string()), "{model}");
+@@ -1096,6 +1102,17 @@ mod tests {
          }
-+    }
-+
+     }
+ 
 +    #[test]
 +    fn test_map_model_haiku_5_5() {
 +        assert_eq!(map_model("claude-haiku-5-5"), Some("claude-haiku-5.5".to_string()));
@@ -5843,12 +6017,14 @@
 +        assert_eq!(map_model("claude-haiku-4-5-20251001"), Some("claude-haiku-4.5".to_string()), "4.5 不被劫持");
 +        assert_eq!(get_context_window_size("claude-haiku-5-5"), 1_000_000);
 +        assert_eq!(get_context_window_size("claude-haiku-4-5"), 200_000);
-     }
- 
++    }
++
      #[test]
+     fn test_map_model_haiku() {
+         assert!(
 --- a/src/anthropic/handlers.rs
 +++ b/src/anthropic/handlers.rs
-@@ -11,7 +11,7 @@
+@@ -11,7 +11,7 @@ use axum::{
      Json as JsonExtractor,
      body::Body,
      extract::State,
@@ -5857,7 +6033,7 @@
      response::{IntoResponse, Json, Response},
  };
  use bytes::Bytes;
-@@ -61,6 +61,15 @@
+@@ -61,6 +61,15 @@ pub(crate) fn map_provider_error(err: Error, model: &str, input_tokens: i32) ->
          )
              .into_response();
      }
@@ -5873,10 +6049,11 @@
      tracing::error!("Kiro API 调用失败: {}", err);
      (
          StatusCode::BAD_GATEWAY,
-@@ -370,6 +379,24 @@
+@@ -369,6 +378,24 @@ pub async fn get_models() -> impl IntoResponse {
+             model_type: "chat".to_string(),
              max_tokens: 64000,
          },
-         Model {
++        Model {
 +            id: "claude-haiku-5-5".to_string(),
 +            object: "model".to_string(),
 +            created: 1792886400, // Oct 24, 2026 —— 上游 catalog 首次出现
@@ -5894,11 +6071,10 @@
 +            model_type: "chat".to_string(),
 +            max_tokens: 128_000,
 +        },
-+        Model {
+         Model {
              id: "claude-haiku-4-5-20251001".to_string(),
              object: "model".to_string(),
-             created: 1760486400, // Oct 15, 2025
-@@ -400,6 +427,7 @@
+@@ -400,6 +427,7 @@ pub async fn get_models() -> impl IntoResponse {
  /// 创建消息（对话）
  pub async fn post_messages(
      State(state): State<AppState>,
@@ -5906,7 +6082,7 @@
      JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
  ) -> Response {
      tracing::info!(
-@@ -432,7 +460,8 @@
+@@ -432,7 +460,8 @@ pub async fn post_messages(
      if websearch::has_server_web_search(&payload)
          && !websearch::is_claude_code_search_subrequest(&payload)
      {
@@ -5916,7 +6092,7 @@
      }
  
      // Claude Code 的 WebSearch 子请求：直接返回原始搜索结果
-@@ -510,7 +539,7 @@
+@@ -510,7 +539,7 @@ pub async fn post_messages(
          .unwrap_or(false);
  
      let tool_name_map = conversion_result.tool_name_map;
@@ -5925,7 +6101,7 @@
  
      if payload.stream {
          // 流式响应
-@@ -926,6 +955,7 @@
+@@ -926,6 +955,7 @@ pub async fn count_tokens(
  /// - message_start 中的 input_tokens 是从 contextUsageEvent 计算的准确值
  pub async fn post_messages_cc(
      State(state): State<AppState>,
@@ -5933,7 +6109,7 @@
      JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
  ) -> Response {
      tracing::info!(
-@@ -959,7 +989,8 @@
+@@ -959,7 +989,8 @@ pub async fn post_messages_cc(
      if websearch::has_server_web_search(&payload)
          && !websearch::is_claude_code_search_subrequest(&payload)
      {
@@ -5943,7 +6119,7 @@
      }
  
      // Claude Code 的 WebSearch 子请求：直接返回原始搜索结果
-@@ -1037,7 +1068,7 @@
+@@ -1037,7 +1068,7 @@ pub async fn post_messages_cc(
          .unwrap_or(false);
  
      let tool_name_map = conversion_result.tool_name_map;
@@ -5952,11 +6128,10 @@
  
      if payload.stream {
          // 流式响应（缓冲模式）
-@@ -1269,4 +1300,38 @@
-         assert_eq!(body["error"]["type"], "api_error");
+@@ -1270,3 +1301,37 @@ mod map_provider_error_tests {
          assert!(!body["error"]["message"].as_str().unwrap().contains("prompt is too long"));
      }
-+}
+ }
 +
 +/// LiteLLM 带来的 key hash ⇒ `u:<hash>`（槽位模式按用户绑号）；
 +/// 别名在 slotUnboundKeyAliases 里的共享 key、或没带头 ⇒ 用原会话键
@@ -5990,10 +6165,10 @@
 +        return fallback;
 +    }
 +    Some(format!("u:{}", hash))
- }
++}
 --- a/src/anthropic/middleware.rs
 +++ b/src/anthropic/middleware.rs
-@@ -38,8 +38,8 @@
+@@ -38,8 +38,8 @@ impl AppState {
      }
  
      /// 设置 KiroProvider
@@ -6015,7 +6190,7 @@
  mod handlers;
  mod middleware;
  mod router;
-@@ -31,4 +31,5 @@
+@@ -31,4 +31,5 @@ mod stream;
  pub mod types;
  mod websearch;
  
@@ -6024,7 +6199,7 @@
 +pub use router::{create_router_with_provider, create_router_with_ready};
 --- a/src/anthropic/router.rs
 +++ b/src/anthropic/router.rs
-@@ -14,6 +14,18 @@
+@@ -14,6 +14,18 @@ use super::{
      middleware::{AppState, auth_middleware, cors_layer},
  };
  
@@ -6043,14 +6218,14 @@
  /// 请求体最大大小限制 (50MB)
  const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
  
-@@ -36,9 +48,19 @@
+@@ -36,8 +48,18 @@ const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
  /// 创建带有 KiroProvider 的 Anthropic API 路由
  pub fn create_router_with_provider(
      api_key: impl Into<String>,
 -    kiro_provider: Option<KiroProvider>,
 +    kiro_provider: Option<std::sync::Arc<KiroProvider>>,
-     extract_thinking: bool,
- ) -> Router {
++    extract_thinking: bool,
++) -> Router {
 +    create_router_with_ready(api_key, kiro_provider, extract_thinking, crate::kiro::ready::ReadyGate::new())
 +}
 +
@@ -6058,13 +6233,12 @@
 +pub fn create_router_with_ready(
 +    api_key: impl Into<String>,
 +    kiro_provider: Option<std::sync::Arc<KiroProvider>>,
-+    extract_thinking: bool,
+     extract_thinking: bool,
 +    ready: crate::kiro::ready::ReadyGate,
-+) -> Router {
+ ) -> Router {
      let mut state = AppState::new(api_key, extract_thinking);
      if let Some(provider) = kiro_provider {
-         state = state.with_kiro_provider(provider);
-@@ -64,10 +86,62 @@
+@@ -64,10 +86,62 @@ pub fn create_router_with_provider(
              auth_middleware,
          ));
  
@@ -6091,7 +6265,7 @@
          .layer(cors_layer())
          .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
          .with_state(state)
-+}
+ }
 +
 +#[cfg(test)]
 +mod caller_layer_tests {
@@ -6126,10 +6300,10 @@
 +        // 阴性对照：不带头 ⇒ 空
 +        assert_eq!(hit(app(), Request::builder().uri("/x").body(Body::empty()).unwrap()).await, "|");
 +    }
- }
++}
 --- a/src/anthropic/search_loop.rs
 +++ b/src/anthropic/search_loop.rs
-@@ -79,6 +79,7 @@
+@@ -79,6 +79,7 @@ pub async fn handle_search_loop(
      provider: Arc<KiroProvider>,
      payload: MessagesRequest,
      extract_thinking_cfg: bool,
@@ -6137,7 +6311,7 @@
  ) -> Response {
      let estimated_input = token::count_all_tokens(
          payload.model.clone(),
-@@ -105,7 +106,15 @@
+@@ -105,7 +106,15 @@ pub async fn handle_search_loop(
          Ok(x) => x,
          Err(resp) => return resp,
      };
@@ -6154,7 +6328,7 @@
      let first = match provider.call_api_for(&body, session_key.as_deref()).await {
          Ok(resp) => resp,
          Err(e) => return super::handlers::map_provider_error(e, &payload.model, estimated_input),
-@@ -114,7 +123,7 @@
+@@ -114,7 +123,7 @@ pub async fn handle_search_loop(
      let model = payload.model.clone();
      let stream_mode = payload.stream;
      let message_id = format!("msg_{}", Uuid::new_v4().to_string().replace('-', ""));
@@ -6163,7 +6337,7 @@
  
      if !stream_mode {
          let out = fut.await;
-@@ -234,6 +243,7 @@
+@@ -234,6 +243,7 @@ async fn run_loop(
      mut tool_name_map: HashMap<String, String>,
      extract_thinking: bool,
      estimated_input: i32,
@@ -6171,7 +6345,7 @@
  ) -> LoopOutput {
      let max_uses = websearch::server_web_search_max_uses(&payload)
          .unwrap_or(DEFAULT_MAX_USES)
-@@ -260,7 +270,7 @@
+@@ -260,7 +270,7 @@ async fn run_loop(
                      }
                  };
                  tool_name_map = map;
@@ -6180,7 +6354,8 @@
                      Ok(r) => r,
                      Err(e) => {
                          tracing::warn!(round, "搜索回合续调上游失败: {}", e);
---- a/src/kiro/account_usage.rs
+new file mode 100644
+--- /dev/null
 +++ b/src/kiro/account_usage.rs
 @@ -0,0 +1,136 @@
 +//! 按 kiro 账户统计用量：每个号 × 模型 × 北京日 记 请求数 / 成功 / 失败 / 输入 token / 输出 token。
@@ -6321,7 +6496,7 @@
 +}
 --- a/src/kiro/endpoint/ide.rs
 +++ b/src/kiro/endpoint/ide.rs
-@@ -62,6 +62,11 @@
+@@ -62,6 +62,11 @@ impl KiroEndpoint for IdeEndpoint {
      }
  
      fn api_url(&self, ctx: &RequestContext<'_>) -> String {
@@ -6333,7 +6508,7 @@
          format!(
              "https://q.{}.amazonaws.com/generateAssistantResponse",
              self.api_region(ctx)
-@@ -127,6 +132,29 @@
+@@ -127,6 +132,29 @@ fn inject_profile_arn(request_body: &str, profile_arn: &Option<String>) -> Strin
  
  #[cfg(test)]
  mod tests {
@@ -6363,7 +6538,8 @@
      use super::inject_profile_arn;
      use serde_json::Value;
  
---- a/src/kiro/lease.rs
+new file mode 100644
+--- /dev/null
 +++ b/src/kiro/lease.rs
 @@ -0,0 +1,295 @@
 +//! 接管租约（无缝换版用）
@@ -6676,16 +6852,79 @@
 +pub mod ready;
 +pub mod slots;
  pub mod token_manager;
+--- a/src/kiro/model/credentials.rs
++++ b/src/kiro/model/credentials.rs
+@@ -109,6 +109,12 @@ pub struct KiroCredentials {
+     /// 端点名必须在启动时注册的端点 registry 中存在。
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub endpoint: Option<String>,
++
++    /// 特殊 FREE 号：标题是 KIRO FREE 但实测能跑 opus ⇒ 开这个开关后不被 FREE 判据挡住。
++    /// 11-04 用户给的一批号就是这样（#886 saxon3992 实测 8/8 场景落地：出字、工具、计量都正常）。
++    /// 🔴 只对标了这个开关的号例外，其余普通 FREE 号行为不变（池里有 300 多个普通 FREE）。
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub allow_opus: bool,
+ }
+ 
+ /// 判断是否为零（用于跳过序列化）
+@@ -250,6 +256,11 @@ impl KiroCredentials {
+     ///
+     /// Free 账号不支持 Opus 模型，需要 PRO 或更高等级订阅
+     pub fn supports_opus(&self) -> bool {
++        // 手动标了 allowOpus 的号直接放行（特殊 FREE 号，实测能跑 opus）。
++        // 改这一处 = 五个过滤点（选号 / 补号 / 换号 / 冷备计数 / slotEligible）一起放行，不用逐个改。
++        if self.allow_opus {
++            return true;
++        }
+         match &self.subscription_title {
+             Some(title) => {
+                 let title_upper = title.to_uppercase();
+@@ -343,6 +354,7 @@ mod tests {
+             disabled: false,
+             kiro_api_key: None,
+             endpoint: None,
++            allow_opus: false,
+         };
+ 
+         let json = creds.to_pretty_json().unwrap();
+@@ -461,6 +473,7 @@ mod tests {
+             disabled: false,
+             kiro_api_key: None,
+             endpoint: None,
++            allow_opus: false,
+         };
+ 
+         let json = creds.to_pretty_json().unwrap();
+@@ -492,6 +505,7 @@ mod tests {
+             disabled: false,
+             kiro_api_key: None,
+             endpoint: None,
++            allow_opus: false,
+         };
+ 
+         let json = creds.to_pretty_json().unwrap();
+@@ -606,6 +620,7 @@ mod tests {
+             disabled: false,
+             kiro_api_key: None,
+             endpoint: None,
++            allow_opus: false,
+         };
+ 
+         let json = original.to_pretty_json().unwrap();
 --- a/src/kiro/provider.rs
 +++ b/src/kiro/provider.rs
-@@ -25,6 +25,81 @@
+@@ -25,6 +25,85 @@ const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
  /// 总重试次数硬上限（避免无限重试）
  const MAX_TOTAL_RETRIES: usize = 9;
  
 +/// 槽位模式：单个请求最多尝试次数（含 429 退避重发）
 +const SLOT_MAX_ATTEMPTS: usize = 6;
-+/// 槽位模式：单个请求最多换号次数
++/// 槽位模式：单个请求最多换号次数（额度用尽 / 被限 ⇒ 槽位换新号）
 +const SLOT_MAX_SWAPS: u32 = 2;
++/// 一个用户固定一个槽（一个 kiro 号）：固定槽重试仍失败后，允许借用其他空闲槽重试，最多这么多次（不改绑定）
++const SLOT_MAX_ALT_TRIES: u32 = 3;
++/// 固定槽上失败几次后才去借别的槽（首发 + 一次重试都失败）
++const SLOT_PINNED_FAILS_BEFORE_ALT: u32 = 2;
 +/// 本次请求是哪把 LiteLLM key（只用于本地统计，不转发给 Kiro）。由 anthropic 层在处理请求时设置。
 +#[derive(Debug, Clone, Default)]
 +pub struct CallerIdentity {
@@ -6760,7 +6999,7 @@
  /// Kiro API Provider
  ///
  /// 核心组件，负责与 Kiro API 通信
-@@ -121,6 +196,10 @@
+@@ -121,6 +200,10 @@ impl KiroProvider {
          request_body: &str,
          session_key: Option<&str>,
      ) -> anyhow::Result<reqwest::Response> {
@@ -6771,7 +7010,7 @@
          self.call_api_with_retry(request_body, false, session_key).await
      }
  
-@@ -135,9 +214,64 @@
+@@ -135,9 +218,69 @@ impl KiroProvider {
          request_body: &str,
          session_key: Option<&str>,
      ) -> anyhow::Result<reqwest::Response> {
@@ -6792,13 +7031,18 @@
 +
 +    /// 共享服务 key（别名命中 slotUnboundKeyAliases 的前缀）不按 key 绑号
 +    pub fn unbound_alias(&self, alias: &str) -> bool {
-+        !alias.is_empty()
++        let hit = !alias.is_empty()
 +            && self
 +                .token_manager
 +                .config()
 +                .slot_unbound_key_aliases
 +                .iter()
-+                .any(|p| !p.is_empty() && alias.starts_with(p.as_str()))
++                .any(|p| !p.is_empty() && alias.starts_with(p.as_str()));
++        if hit {
++            // 顺手清掉改配置前留下的旧绑定（否则它的 24h 用量会一直参与配平，见 slot_drop_unbound_binding）
++            self.token_manager.slot_drop_unbound_binding(&caller().key_hash);
++        }
++        hit
 +    }
 +
 +    /// 槽位模式下的用户键：开了槽位模式就用（有 key hash 用 u:hash，没有用会话键兜底）
@@ -6836,7 +7080,7 @@
      /// 发送 MCP API 请求（WebSearch 等工具调用）
      pub async fn call_mcp(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
          self.call_mcp_with_retry(request_body).await
-@@ -151,8 +285,16 @@
+@@ -151,8 +294,16 @@ impl KiroProvider {
          let mut force_refreshed: HashSet<u64> = HashSet::new();
  
          for attempt in 0..max_retries {
@@ -6855,7 +7099,7 @@
                  Ok(c) => c,
                  Err(e) => {
                      last_error = Some(e);
-@@ -381,7 +523,8 @@
+@@ -381,7 +532,8 @@ impl KiroProvider {
              // 成功响应
              if status.is_success() {
                  self.token_manager.report_success(ctx.id);
@@ -6865,7 +7109,7 @@
              }
  
              // 失败响应：读取 body 用于日志/错误信息
-@@ -539,6 +682,380 @@
+@@ -539,6 +691,500 @@ impl KiroProvider {
          }))
      }
  
@@ -6886,6 +7130,10 @@
 +        let mut swaps = 0u32;
 +        let mut tries_429 = 0u32;
 +        let mut regone = 0u32;
++        // 用户固定在一个槽（一个 kiro 号）；固定槽重试失败后借其他空闲槽，最多 SLOT_MAX_ALT_TRIES 次，不改绑定
++        let mut pinned_fails = 0u32;
++        let mut alt_tries = 0u32;
++        let mut alt_excluded: Vec<String> = Vec::new();
 +        // 一个用户请求记一次（重试 / 换号不重复记）；别名只本地显示，不转发给 Kiro
 +        let alias = caller().key_alias;
 +        self.token_manager.slot_touch_user(user_key, &alias);
@@ -6899,23 +7147,77 @@
 +        let over_budget = |what: &str| {
 +            anyhow::anyhow!("{}: 槽位{}，{}s 内没拿到上游响应，交给兜底", crate::kiro::slots::OVERLOADED_MARK, what, budget.as_secs())
 +        };
++        // 固定槽这一发失败（发送失败 / 429 / 5xx）后调用：够次数就借一个空闲的其他槽重发，成功直接返回
++        macro_rules! try_alt {
++            ($name:expr) => {{
++                pinned_fails += 1;
++                if !alt_excluded.contains(&$name) {
++                    alt_excluded.push($name.clone());
++                }
++                if pinned_fails >= SLOT_PINNED_FAILS_BEFORE_ALT && alt_tries < SLOT_MAX_ALT_TRIES {
++                    alt_tries += 1;
++                    if let Some((r, id, alt_permit)) = self.try_alt_slot(request_body, &mut alt_excluded, deadline, alt_tries).await {
++                        let model = Self::extract_model_from_request(request_body).unwrap_or_default();
++                        let metered = meter_response_for(r, self.token_manager.clone(), id, model, user_guard.take());
++                        return Ok(hold_permit(metered, alt_permit));
++                    }
++                }
++            }};
++        }
 +        for attempt in 0..SLOT_MAX_ATTEMPTS {
 +            if std::time::Instant::now() >= deadline {
 +                return Err(last_error.map(|e| over_budget(&format!("重试中（上一发：{}）", e.to_string().chars().take(60).collect::<String>()))).unwrap_or_else(|| over_budget("繁忙")));
 +            }
 +            let (slot, ctx) = self.token_manager.acquire_slot_context_as(user_key, &alias).await?;
-+            let permit = match self.token_manager.acquire_slot_permit_until(slot, Some(deadline)).await {
-+                Ok(p) => p,
-+                // 排队时这个槽被删 / 停用：用户绑定已随槽清掉，重新选槽即落到别的槽，用户无感
-+                Err(e) if e.to_string().contains(crate::kiro::slots::SLOT_GONE_MARK) && regone < 2 => {
-+                    regone += 1;
-+                    tracing::info!("槽位已移除，用户 {} 重新选槽", user_key);
-+                    continue;
++            // 自己的槽满了在排队、旁边却有空闲槽 ⇒ 先软等一小会儿，还没轮到就借个空闲槽发出去。
++            // （11-02 实测槽2 满载 6/6 还排 4 个人、同时 22 个槽全空；排队不算失败 ⇒ 失败触发的借号兜不住这种）
++            let borrow_ms = self.token_manager.config().slot_queue_borrow_ms;
++            let mut soft_permit = None;
++            if borrow_ms > 0 && alt_tries < SLOT_MAX_ALT_TRIES {
++                let left = deadline.saturating_duration_since(std::time::Instant::now());
++                let soft = Duration::from_millis(borrow_ms).min(left);
++                if !soft.is_zero() {
++                    match self.token_manager.acquire_slot_permit_soft(slot, soft).await {
++                        // 软等期间轮到了：照常用自己的槽（缓存不丢）
++                        Ok(Some(p)) => soft_permit = Some(p),
++                        // 等满还没轮到：借一个真空闲的槽把这发请求送出去（不改绑定，下次还回自己的号）
++                        Ok(None) => {
++                            let name = self.token_manager.slot_name_at(slot).unwrap_or_default();
++                            let mut ex = vec![name.clone()];
++                            alt_tries += 1;
++                            if let Some((r, id, alt_permit)) = self.try_alt_slot(request_body, &mut ex, deadline, alt_tries).await {
++                                tracing::info!("槽位 {} 排队超 {}ms，借空闲槽位 {} 发出", name, borrow_ms, alt_permit.slot_name());
++                                let model = Self::extract_model_from_request(request_body).unwrap_or_default();
++                                let metered = meter_response_for(r, self.token_manager.clone(), id, model, user_guard.take());
++                                return Ok(hold_permit(metered, alt_permit));
++                            }
++                            // 借不到（都忙 / 都刚撞过 429）⇒ 回去接着在自己槽上排
++                        }
++                        Err(e) if e.to_string().contains(crate::kiro::slots::SLOT_GONE_MARK) && regone < 2 => {
++                            regone += 1;
++                            continue;
++                        }
++                        Err(e) => return Err(e),
++                    }
 +                }
-+                Err(e) => return Err(e),
++            }
++            let permit = match soft_permit.take() {
++                // 软等期间已经拿到名额，直接用
++                Some(p) => p,
++                None => match self.token_manager.acquire_slot_permit_until(slot, Some(deadline)).await {
++                    Ok(p) => p,
++                    // 排队时这个槽被删 / 停用：用户绑定已随槽清掉，重新选槽即落到别的槽，用户无感
++                    Err(e) if e.to_string().contains(crate::kiro::slots::SLOT_GONE_MARK) && regone < 2 => {
++                        regone += 1;
++                        tracing::info!("槽位已移除，用户 {} 重新选槽", user_key);
++                        continue;
++                    }
++                    Err(e) => return Err(e),
++                },
 +            };
 +            // 之后所有「记到某个槽」的统计都按槽名现查下标（等待期间可能增删槽，见 slot_index_of）
 +            let slot_name = permit.slot_name().to_string();
++            let pinned_name = slot_name.clone();
 +            let tm = self.token_manager.clone();
 +            let cur_slot = move || tm.slot_index_of(&slot_name);
 +            let config = self.token_manager.config();
@@ -6951,6 +7253,7 @@
 +                    drop(permit);
 +                    tracing::warn!("槽位 {} 请求发送失败（{}/{}）: {}", slot, attempt + 1, SLOT_MAX_ATTEMPTS, e);
 +                    last_error = Some(e.into());
++                    try_alt!(pinned_name);
 +                    sleep_until_budget(deadline, Self::slot_backoff(attempt as u32, None)).await;
 +                    continue;
 +                }
@@ -7021,11 +7324,13 @@
 +                if let Some(i) = cur_slot() { self.token_manager.slot_report_429(i, tries_429 == 0, ra); }
 +                tries_429 += 1;
 +                last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
++                try_alt!(pinned_name);
 +                sleep_until_budget(deadline, Self::slot_backoff(tries_429, ra)).await;
 +                continue;
 +            }
 +            last_error = Some(anyhow::anyhow!("{} API 请求失败: {} {}", api_type, status, body));
 +            if status.is_server_error() || status.as_u16() == 408 {
++                try_alt!(pinned_name);
 +                sleep_until_budget(deadline, Self::slot_backoff(attempt as u32, None)).await;
 +                continue;
 +            }
@@ -7041,6 +7346,65 @@
 +                last_error.map(|e| e.to_string().chars().take(80).collect::<String>()).unwrap_or_default()));
 +        }
 +        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("{} API 请求失败：槽位重试用尽", api_type)))
++    }
++
++    /// 借一个空闲的其他槽把请求发一次（用户绑定不动）。成功拿到有内容的响应返回 Some；任何失败返回 None（名额随 permit 释放）。
++    async fn try_alt_slot(
++        &self,
++        request_body: &str,
++        exclude: &mut Vec<String>,
++        deadline: std::time::Instant,
++        nth: u32,
++    ) -> Option<(reqwest::Response, u64, crate::kiro::token_manager::SlotPermit)> {
++        if std::time::Instant::now() >= deadline {
++            return None;
++        }
++        let (_, ctx, permit) = self.token_manager.acquire_idle_alt_slot(exclude).await?;
++        // acquire_idle_alt_slot 已把借过的槽记进 exclude（同一请求不重复借同一个槽）
++        let name = permit.slot_name().to_string();
++        let config = self.token_manager.config();
++        let machine_id = machine_id::generate_from_credentials(&ctx.credentials, config);
++        let endpoint = self.endpoint_for(&ctx.credentials).ok()?;
++        let rctx = RequestContext { credentials: &ctx.credentials, token: &ctx.token, machine_id: &machine_id, config };
++        let url = endpoint.api_url(&rctx);
++        let body = endpoint.transform_api_body(request_body, &rctx);
++        let client = self.client_for(&ctx.credentials).ok()?;
++        let base = client
++            .post(&url)
++            .body(body)
++            .header("content-type", "application/json")
++            .header("Connection", "close");
++        let built = endpoint.decorate_api(base, &rctx).build().ok()?;
++        let sent_at = std::time::Instant::now();
++        let response = match client.execute(built).await {
++            Ok(r) => r,
++            Err(e) => {
++                tracing::warn!("借用槽位 {} 重试（第 {}/{} 次）发送失败: {}", name, nth, SLOT_MAX_ALT_TRIES, e);
++                return None;
++            }
++        };
++        let status = response.status();
++        if status.is_success() {
++            return match peek_for_content(response).await {
++                Peeked::Ready(r) => {
++                    self.token_manager.report_success(ctx.id);
++                    if let Some(i) = self.token_manager.slot_index_of(&name) {
++                        self.token_manager.slot_record_latency(i, sent_at.elapsed().as_millis() as u64);
++                    }
++                    tracing::info!("固定槽重试失败，借用空闲槽位 {}（号 #{}）重试成功（第 {}/{} 次）", name, ctx.id, nth, SLOT_MAX_ALT_TRIES);
++                    Some((r, ctx.id, permit))
++                }
++                Peeked::Empty(_) => None,
++            };
++        }
++        let body = response.text().await.unwrap_or_default();
++        if status.as_u16() == 429 {
++            if let Some(i) = self.token_manager.slot_index_of(&name) {
++                self.token_manager.slot_report_429(i, true, Self::retry_after(&body));
++            }
++        }
++        tracing::warn!("借用槽位 {} 重试（第 {}/{} 次）失败: {} {}", name, nth, SLOT_MAX_ALT_TRIES, status, body.chars().take(120).collect::<String>());
++        None
 +    }
 +
 +    /// 官方 Kiro IDE 的 429 退避：1s×2^(n-1)，±20% 抖动，封顶 20s；上游给了 retry-after 就按它（封顶 300s）
@@ -7246,12 +7610,10 @@
      /// 从请求体中提取模型信息
      ///
      /// 尝试解析 JSON 请求体，提取 conversationState.currentMessage.userInputMessage.modelId
-@@ -564,5 +1081,484 @@
-         let jitter_max = (backoff / 4).max(1);
-         let jitter = fastrand::u64(0..=jitter_max);
+@@ -566,3 +1212,482 @@ impl KiroProvider {
          Duration::from_millis(backoff.saturating_add(jitter))
-+    }
-+}
+     }
+ }
 +
 +/// Admin 槽位测试结果
 +#[derive(Debug, Default, Clone, serde::Serialize)]
@@ -7729,9 +8091,10 @@
 +            .await;
 +        assert_eq!(got.key_alias, "cursor-alice");
 +        assert_eq!(got.key_hash, "h1");
-     }
- }
---- a/src/kiro/ready.rs
++    }
++}
+new file mode 100644
+--- /dev/null
 +++ b/src/kiro/ready.rs
 @@ -0,0 +1,57 @@
 +//! 「能不能接客」闸门（无缝换版用）
@@ -7791,9 +8154,10 @@
 +        assert!(g2.is_ready());
 +    }
 +}
---- a/src/kiro/slots.rs
+new file mode 100644
+--- /dev/null
 +++ b/src/kiro/slots.rs
-@@ -0,0 +1,1745 @@
+@@ -0,0 +1,2002 @@
 +//! 槽位模式：固定 N 个槽位，每槽 = 1 个号 + 1 个固定出口。
 +//!
 +//! - 用户（LiteLLM key hash）第一次来分到「没封口、在途最少」的槽，之后一直固定；绑定落盘。
@@ -7907,6 +8271,8 @@
 +        self.weight = old.weight;
 +        self.accept_new = old.accept_new;
 +        self.vip = old.vip.clone();
++        // 换号不该解开手动锁定的并发（否则换一次号就回到自动调节）
++        self.locked_limit = old.locked_limit;
 +    }
 +
 +    /// 别名是否命中本槽专属名单（前缀匹配，与灰度名单同规则）
@@ -7998,6 +8364,10 @@
 +    /// 槽名 → 告警清零时刻（unix 秒）。卡片告警只算这之后的事件（累计计数不动）
 +    #[serde(default)]
 +    pub alarm_ack: HashMap<String, i64>,
++    /// 槽名 → 手动锁定的在途上限。落盘，换版 / 重启后仍然生效
++    /// （11-02：之前只在内存，「统一并发锁 6」换个版就悄悄回到自动调节 16）
++    #[serde(default)]
++    pub locked_limits: HashMap<String, u32>,
 +}
 +
 +/// 告警类事件：卡片上「有异常」只看最近 24 小时、且晚于手动清零的这些事件
@@ -8122,8 +8492,14 @@
 +    }
 +}
 +
-+/// 重新分配：多久没用才算「空闲」、可以挪（用户 10-26 定：10 分钟）
-+pub const REBALANCE_IDLE_SECS: i64 = 600;
++/// 重新分配：多久没用才算「空闲」、可以挪。
++/// 🔴 **11-02 用户定：0 —— 「在用也可以挪，重新分配的时候不用考虑这些」**。
++/// 原值 600（10-26 定），但大户一直在发请求 ⇒ 按 10 分钟判永远不空闲 ⇒ 21 个大户只有 3 个挪得动、
++/// 38 人卡在「在用」、负载永远平不了（症状：18% 的请求要借号）。
++/// 代价：被挪的人这次之后换号换 IP，prompt cache 作废一次。
++/// 🔴 即便为 0，`user_idle_within` 仍排除「此刻有请求在跑」的人——那是硬底线，
++/// 挪一个正在跑的请求等于让它中途换号。
++pub const REBALANCE_IDLE_SECS: i64 = 0;
 +/// 权重范围与默认值（用户 10-26 定：1~10，默认 5，手动设）
 +pub const WEIGHT_MIN: u32 = 1;
 +pub const WEIGHT_MAX: u32 = 10;
@@ -8279,29 +8655,36 @@
 +    pub load_after: u64,
 +}
 +
++/// 重新分配的槽位输入：(槽名, 权重, 有号)
++pub type RebalanceInput = (String, u32, bool);
++
 +/// 计划重新分配（纯函数，便于单测）。
 +/// - 目标：每个槽的负载 ∝ 权重（负载 = 绑在它上面的人近 30 分钟用量之和）
 +/// - 只挪「最近 10 分钟没在用、且没被固定」的人（换槽 = 换号 = Kiro 缓存全部作废）
 +/// - 贪心：从最超载的槽里挑用量最大的可挪用户，挪到最欠载的槽；挪了会让两边差距变小才挪
 +/// - 用量为 0 的人不挪（挪了不改变负载，白白丢缓存）
 +pub fn plan_rebalance(
-+    slots: &[(String, u32, bool)],        // (槽名, 权重, 有号)
++    slots: &[RebalanceInput],
 +    users: &[(String, String, u64, bool, bool)], // (用户键, 所在槽名, 用量, 可挪=空闲且未固定, 被固定)
 +    aliases: &HashMap<String, String>,
 +    active_users: usize,
 +) -> RebalancePlan {
 +    let live: Vec<usize> = (0..slots.len()).filter(|&i| slots[i].2).collect();
-+    let wsum: u64 = live.iter().map(|&i| slots[i].1.clamp(WEIGHT_MIN, WEIGHT_MAX) as u64).sum::<u64>().max(1);
-+    let mut load: Vec<u64> = slots.iter().map(|(n, _, _)| users.iter().filter(|u| &u.1 == n).map(|u| u.2).sum()).collect();
++    // 目标负载 ∝ 权重。11-02 用户定：不按失败率给槽打折——槽的 429 高是因为压力大（分到它头上的人多），
++    // 不是号坏；按失败率扣分会把「压力大」当成「号坏」，还绕一圈才减压。均衡本身就够了。
++    let eff = |i: usize| -> f64 { slots[i].1.clamp(WEIGHT_MIN, WEIGHT_MAX) as f64 };
++    let wsum: f64 = live.iter().map(|&i| eff(i)).sum::<f64>().max(1e-9);
++    let mut load: Vec<u64> = slots.iter().map(|s| users.iter().filter(|u| u.1 == s.0).map(|u| u.2).sum()).collect();
 +    let total: u64 = load.iter().sum();
 +    let target: Vec<u64> = (0..slots.len())
-+        .map(|i| if slots[i].2 { total * slots[i].1.clamp(WEIGHT_MIN, WEIGHT_MAX) as u64 / wsum } else { 0 })
++        .map(|i| if slots[i].2 { (total as f64 * eff(i) / wsum) as u64 } else { 0 })
 +        .collect();
 +    let load_now = load.clone();
 +    // 每个槽里可挪的人（用量从大到小）
 +    let mut movable: Vec<Vec<(String, u64)>> = slots
 +        .iter()
-+        .map(|(n, _, _)| {
++        .map(|s| {
++            let n = &s.0;
 +            let mut v: Vec<(String, u64)> = users.iter().filter(|u| &u.1 == n && u.3 && u.2 > 0).map(|u| (u.0.clone(), u.2)).collect();
 +            v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 +            v
@@ -8316,6 +8699,16 @@
 +        e < 5 || e * 10 <= target[i]
 +    };
 +    let all: Vec<usize> = (0..slots.len()).collect();
++    // 「大户」= 用量达到平均每槽目标的一半：这种人一个就够压住一个槽，
++    // 两个挤同一个槽时谁都快不了（11-02 实测 my-202.43.102.53 上 4335+763、sg-47.84.112.136 上 3726+795，
++    // 旁边 15 个槽负载不到平均 1/4）⇒ 优先把大户铺开，一个槽尽量只放一个
++    let avg_target = if live.is_empty() { 0 } else { total / live.len().max(1) as u64 };
++    let heavy_cut = (avg_target / 2).max(1);
++    // 每槽现有大户数；随着挪动实时更新（只读 users 的话，连挪两个大户到同一个槽时它还是 0）
++    let mut heavy_cnt: Vec<usize> = slots
++        .iter()
++        .map(|s| users.iter().filter(|u| u.1 == s.0 && u.2 >= heavy_cut).count())
++        .collect();
 +    // 最多挪 users.len() 次，防死循环
 +    for _ in 0..users.len() {
 +        // 超出的槽按超出多少排、欠载的（只限有号的槽）按欠多少排；挑第一对能让偏差变小的挪动
@@ -8324,22 +8717,48 @@
 +        let mut unders: Vec<usize> = live.iter().copied().filter(|&i| excess(i, &load) < 0).collect();
 +        unders.sort_by_key(|&i| excess(i, &load));
 +        let mut found = None;
++        // 收人的槽：先挑「还没有大户」的（把大户铺开），都有大户了再按欠载程度挑
++        let mut unders_ranked = unders.clone();
++        unders_ranked.sort_by_key(|&i| (heavy_cnt[i] > 0, excess(i, &load)));
 +        'outer: for &o in &overs {
-+            for &u in &unders {
++            for &u in &unders_ranked {
 +                let gap_o = excess(o, &load);
 +                let gap_u = -excess(u, &load);
 +                // 挪过去会让「两边偏差之和」变小的人（用量从大到小试）
 +                if let Some(k) = movable[o].iter().position(|(_, x)| {
-+                    let x = *x as i64;
-+                    (gap_o - x).abs() + (gap_u - x).abs() < gap_o + gap_u
++                    let xi = *x as i64;
++                    let better = (gap_o - xi).abs() + (gap_u - xi).abs() < gap_o + gap_u;
++                    // 大户不往已经有大户的槽挪（除非那边完全空着）：否则两个大户挤一起
++                    let heavy_ok = *x < heavy_cut || heavy_cnt[u] == 0;
++                    better && heavy_ok
 +                }) {
 +                    found = Some((o, u, k));
 +                    break 'outer;
 +                }
 +            }
 +        }
++        // 没有满足「大户铺开」的挪法时，退回只看偏差（保证原有的配平能力不退化）
++        if found.is_none() {
++            'fallback: for &o in &overs {
++                for &u in &unders {
++                    let gap_o = excess(o, &load);
++                    let gap_u = -excess(u, &load);
++                    if let Some(k) = movable[o].iter().position(|(_, x)| {
++                        let x = *x as i64;
++                        (gap_o - x).abs() + (gap_u - x).abs() < gap_o + gap_u
++                    }) {
++                        found = Some((o, u, k));
++                        break 'fallback;
++                    }
++                }
++            }
++        }
 +        let Some((o, u, k)) = found else { break };
 +        let (user, x) = movable[o].remove(k);
++        if x >= heavy_cut {
++            heavy_cnt[o] = heavy_cnt[o].saturating_sub(1);
++            heavy_cnt[u] += 1;
++        }
 +        let reason = format!(
 +            "{} 负载 {} 高于目标 {}，{} 负载 {} 低于目标 {}",
 +            slots[o].0, load[o], target[o], slots[u].0, load[u], target[u]
@@ -8361,7 +8780,13 @@
 +        slots: slots
 +            .iter()
 +            .enumerate()
-+            .map(|(i, (n, w, _))| RebalanceSlot { name: n.clone(), weight: *w, load_now: load_now[i], load_target: target[i], load_after: load[i] })
++            .map(|(i, s)| RebalanceSlot {
++                name: s.0.clone(),
++                weight: s.1,
++                load_now: load_now[i],
++                load_target: target[i],
++                load_after: load[i],
++            })
 +            .collect(),
 +        skipped_active: active_users,
 +        skipped_pinned,
@@ -8379,17 +8804,37 @@
 +    occupied: &[u64],
 +    need_opus: bool,
 +) -> Option<u64> {
++    let tiered: Vec<(u64, u32, bool, bool, bool)> =
++        candidates.iter().map(|&(id, pri, dis, opus)| (id, pri, dis, opus, false)).collect();
++    pick_replacement_tiered(&tiered, excluded, occupied, need_opus)
++}
++
++/// 同上，但**优先挑非 STUDENT 的号**（11-02 用户定：额度用完顶替时先用非 student，
++/// 没有了才用 student；FREE 一律不用——它 `supports_opus()=false`，`need_opus` 时本来就被过滤）。
++/// candidates: (id, priority, disabled, supports_opus, is_student)
++pub fn pick_replacement_tiered(
++    candidates: &[(u64, u32, bool, bool, bool)],
++    excluded: &[u64],
++    occupied: &[u64],
++    need_opus: bool,
++) -> Option<u64> {
 +    let mut c: Vec<_> = candidates
 +        .iter()
-+        .filter(|(id, _, disabled, opus)| {
++        .filter(|(id, _, disabled, opus, _)| {
 +            !disabled
 +                && (!need_opus || *opus)
 +                && !excluded.contains(id)
 +                && !occupied.contains(id)
 +        })
 +        .collect();
-+    c.sort_by_key(|(id, pri, _, _)| (*pri, *id));
-+    c.first().map(|(id, _, _, _)| *id)
++    // 先按「是不是 student」分层（false 在前），层内仍按 priority, id —— 原有排序语义不变
++    c.sort_by_key(|(id, pri, _, _, student)| (*student, *pri, *id));
++    c.first().map(|(id, _, _, _, _)| *id)
++}
++
++/// 档位是不是 STUDENT（判据只看标题，和 `supports_opus` 看 FREE 同一套写法）
++pub fn is_student_tier(title: Option<&str>) -> bool {
++    title.is_some_and(|t| t.to_uppercase().contains("STUDENT"))
 +}
 +
 +/// 槽位运行时（内存 + 落盘内容）
@@ -8482,6 +8927,7 @@
 +            let mut st = SlotState::new(i, start);
 +            st.name = name.clone();
 +            st.account_id = rt.file.slot_accounts.get(name).copied();
++            st.locked_limit = rt.file.locked_limits.get(name).copied();
 +            rt.states.push(st);
 +            rt.usage.push(UsageWindow::default());
 +            rt.stats.push(SlotStats::default());
@@ -8512,6 +8958,7 @@
 +                let mut st = SlotState::new(i, start);
 +                st.name = name.clone();
 +                st.account_id = self.file.slot_accounts.get(name).copied();
++                st.locked_limit = self.file.locked_limits.get(name).copied();
 +                (st, UsageWindow::default(), SlotStats::default())
 +            });
 +            st.index = i;
@@ -8577,6 +9024,14 @@
 +        let i = choose_slot_weighted(&self.states, &usage, &users, ratio, &weights)?;
 +        self.file.bindings.insert(user.to_string(), self.states[i].name.clone());
 +        Some((i, true))
++    }
++
++    /// 这个 key 改成「按会话分槽」后，把它遗留的绑定和固定标记清掉（返回是否清了）。
++    /// 不清的话绑定表里会留一条僵尸记录：请求早就不走它了，但它的 24h 用量还在参与配平（见 plan_rebalance 注释）。
++    pub fn drop_binding(&mut self, user: &str) -> bool {
++        let had = self.file.bindings.remove(user).is_some();
++        self.file.pinned.remove(user);
++        had
 +    }
 +
 +    /// 别名命中的专属槽（有号的；多个命中取最长前缀，再按槽顺序）
@@ -8669,10 +9124,18 @@
 +        }
 +    }
 +
-+    /// 空闲 = 最近 10 分钟没发过请求，且现在没有在跑的请求
++    /// 空闲 = 最近 REBALANCE_IDLE_SECS 没发过请求，且现在没有在跑的请求
 +    pub fn user_idle(&self, user: &str, now: i64) -> bool {
++        self.user_idle_within(user, now, REBALANCE_IDLE_SECS)
++    }
++
++    /// 同上，但「多久没用才算空闲」由调用方给。
++    /// 🔴 `idle_secs` 再小也必须排除「此刻有请求在跑」的人：挪一个正在跑的请求 = 它中途换号换 IP。
++    /// 11-02：大户一直在发请求 ⇒ 按 10 分钟判永远不空闲 ⇒ 38 个人挪不动、负载永远平不了
++    /// （症状是 18% 的请求要借号）。所以阈值要可调，但「在跑」这条是硬底线。
++    pub fn user_idle_within(&self, user: &str, now: i64, idle_secs: i64) -> bool {
 +        let last = self.file.user_meta.get(user).map(|m| m.last_used).unwrap_or(0);
-+        now - last >= REBALANCE_IDLE_SECS && !self.user_in_flight.contains_key(user)
++        now - last >= idle_secs && !self.user_in_flight.contains_key(user)
 +    }
 +
 +    /// 记一次请求结束：token 累加；也刷新最后使用时间（长请求跑完那一刻才算「刚用过」）
@@ -8713,10 +9176,16 @@
 +    }
 +
 +    /// 重新分配预览：负载 = 近 24 小时请求数；只挪空闲 10 分钟以上、没被固定的
-+    pub fn plan_rebalance(&self, now: i64) -> RebalancePlan {
++    /// unbound = 按会话分槽的 key 别名前缀（这些 key 不按 key 绑槽）
++    pub fn plan_rebalance(&self, now: i64, unbound: &[String]) -> RebalancePlan {
++        self.plan_rebalance_idle(now, unbound, REBALANCE_IDLE_SECS)
++    }
++
++    /// idle_secs = 多久没发请求才算可挪（小 = 更激进地配平，代价是被挪的人丢一次 prompt cache）
++    pub fn plan_rebalance_idle(&self, now: i64, unbound: &[String], idle_secs: i64) -> RebalancePlan {
 +        // 「不接新人」的槽、专属槽：不参与自动配平（不往里挪，也不从里面挪走人；只有手动挪能动它们）
 +        let auto = |s: &SlotState| s.accept_new && s.vip.is_empty();
-+        let slots: Vec<(String, u32, bool)> = self
++        let slots: Vec<RebalanceInput> = self
 +            .states
 +            .iter()
 +            .filter(|s| auto(s))
@@ -8727,15 +9196,25 @@
 +        let mut aliases = HashMap::new();
 +        let mut active = 0usize;
 +        let mut skipped_locked = 0usize;
++        let is_unbound = |alias: &str| {
++            !alias.is_empty() && unbound.iter().any(|p| !p.is_empty() && alias.starts_with(p.as_str()))
++        };
 +        for (u, slot) in &self.file.bindings {
 +            if excluded.contains(&slot.as_str()) {
 +                skipped_locked += 1;
 +                continue;
 +            }
 +            let meta = self.file.user_meta.get(u);
++            // 🔴 按会话分槽的 key（slotUnboundKeyAliases）不参与配平：它的请求早就不走绑定表了，
++            // 但绑定表里可能还留着改配置前的旧绑定 + 24h 用量。拿它算负载 = 拿一条僵尸数据配平：
++            // 11-02 实测 carher-hangzhou 的旧绑定（12552）被挪到 kr 槽，算法随即判 kr 超载，
++            // 又把 kr 上真正在用的 7 个人全赶走 ⇒ 一条假数据引发 9 次连锁搬家，每次白丢一次缓存。
++            if meta.is_some_and(|m| is_unbound(&m.key_alias)) {
++                continue;
++            }
 +            let load = meta.map(|m| m.req_24h(now)).unwrap_or(0);
 +            let pinned = self.file.pinned.contains(u);
-+            let idle = self.user_idle(u, now);
++            let idle = self.user_idle_within(u, now, idle_secs);
 +            if !pinned && !idle {
 +                active += 1;
 +            }
@@ -8754,11 +9233,17 @@
 +    /// 执行预览里确认过的挪动：每条再核一遍（还在原槽、没被固定、仍空闲、目标槽还在且有号），不满足就跳过。
 +    /// 返回实际挪了的条数。挪动不固定（下次重新分配仍可调整）。
 +    pub fn apply_moves(&mut self, moves: &[(String, String, String)], now: i64) -> usize {
++        self.apply_moves_idle(moves, now, REBALANCE_IDLE_SECS)
++    }
++
++    /// 🔴 idle_secs 必须和算出这批 moves 时用的**同一个值**：预览按 60 秒算出可挪、
++    /// 执行按 600 秒复核，会把它们全判成「还在用」而跳过 ⇒ moved=0，看着像没生效
++    pub fn apply_moves_idle(&mut self, moves: &[(String, String, String)], now: i64, idle_secs: i64) -> usize {
 +        let mut n = 0;
 +        for (user, from, to) in moves {
 +            let ok_from = self.file.bindings.get(user) == Some(from);
 +            let ok_pin = !self.file.pinned.contains(user);
-+            let ok_idle = self.user_idle(user, now);
++            let ok_idle = self.user_idle_within(user, now, idle_secs);
 +            let ok_to = self.states.iter().any(|s| &s.name == to && s.account_id.is_some() && s.accept_new && s.vip.is_empty());
 +            let ok_src = self.states.iter().any(|s| &s.name == from && s.accept_new && s.vip.is_empty());
 +            if ok_from && ok_pin && ok_idle && ok_to && ok_src && from != to {
@@ -8806,6 +9291,15 @@
 +            self.file.ever_slotted.push(new_id);
 +        }
 +        self.sync_file_accounts();
++    }
++
++    /// 把各槽当前的手动锁定值同步进落盘结构（调用方随后 persist）
++    pub fn sync_file_locks(&mut self) {
++        self.file.locked_limits = self
++            .states
++            .iter()
++            .filter_map(|s| s.locked_limit.map(|l| (s.name.clone(), l)))
++            .collect();
 +    }
 +
 +    pub fn sync_file_accounts(&mut self) {
@@ -9003,7 +9497,7 @@
 +mod tests {
 +    use super::*;
 +
-+    fn live(names: &[(&str, u32)]) -> Vec<(String, u32, bool)> {
++    fn live(names: &[(&str, u32)]) -> Vec<RebalanceInput> {
 +        names.iter().map(|(n, w)| (n.to_string(), *w, true)).collect()
 +    }
 +
@@ -9110,7 +9604,7 @@
 +        assert_ne!(rt.slot_for_user_as("u:v9", "vip-wang", 1.5, now).unwrap().0, 1);
 +        // 重新分配不碰专属槽和它上面的人
 +        rt.states[1].account_id = Some(2);
-+        let p = rt.plan_rebalance(2_000_000_000);
++        let p = rt.plan_rebalance(2_000_000_000, &[]);
 +        assert!(p.slots.iter().all(|s| s.name != "b"));
 +        assert!(p.moves.iter().all(|m| m.from != "b" && m.to != "b"));
 +        assert_eq!(p.excluded_slots, vec!["b".to_string()]);
@@ -9185,6 +9679,129 @@
 +    }
 +
 +    #[test]
++    fn rebalance_ignores_unbound_alias_zombie_binding() {
++        // 🔴 11-02 线上：carher-hangzhou 改按会话分槽后，绑定表里仍留着旧绑定（12552 的 24h 用量）。
++        // 拿它配平 ⇒ 把这条僵尸挪到别的槽，算法随即判那个槽超载，又把上面真正在用的人全赶走
++        // （实测一条假数据引发 9 次连锁搬家）。按会话分槽的 key 必须完全不参与配平。
++        let names = vec!["a".to_string(), "b".to_string()];
++        let mut f = SlotsFile::default();
++        f.slot_accounts.insert("a".into(), 1);
++        f.slot_accounts.insert("b".into(), 2);
++        f.bindings.insert("u:hz".into(), "a".into());
++        f.bindings.insert("u:normal".into(), "a".into());
++        let mut m1 = UserMeta::default();
++        m1.key_alias = "carher-hangzhou".into();
++        m1.hourly = vec![(2_000_000_000 - 100, 12552, 0)];
++        f.user_meta.insert("u:hz".into(), m1);
++        let mut m2 = UserMeta::default();
++        m2.key_alias = "cursor-someone".into();
++        m2.hourly = vec![(2_000_000_000 - 100, 100, 0)];
++        f.user_meta.insert("u:normal".into(), m2);
++        let rt = SlotsRuntime::new(&names, 16, f);
++        let now = 2_000_000_000;
++        // 不传名单（老行为）：僵尸绑定参与配平 ⇒ 会挪它
++        let p_old = rt.plan_rebalance(now, &[]);
++        assert!(p_old.moves.iter().any(|m| m.user == "u:hz"), "对照：不排除时会挪僵尸绑定");
++        // 传了名单：它完全不参与 ⇒ 不挪它，负载里也不算它
++        let p = rt.plan_rebalance(now, &["carher-hangzhou".to_string()]);
++        assert!(!p.moves.iter().any(|m| m.user == "u:hz"), "按会话分槽的 key 不该被挪: {:?}", p.moves);
++        let a = p.slots.iter().find(|x| x.name == "a").unwrap();
++        assert_eq!(a.load_now, 100, "负载只算真正按 key 绑槽的人，不含僵尸的 12552");
++    }
++
++    #[test]
++    fn drop_binding_clears_binding_and_pin() {
++        let mut rt = rt3();
++        rt.file.bindings.insert("u:x".into(), "a".into());
++        rt.file.pinned.insert("u:x".into());
++        assert!(rt.drop_binding("u:x"), "清掉返回 true");
++        assert!(!rt.file.bindings.contains_key("u:x"));
++        assert!(!rt.file.pinned.contains("u:x"), "固定标记也要清，否则下次又被当手动固定");
++        assert!(!rt.drop_binding("u:x"), "已经没有了返回 false（调用方据此决定是否落盘）");
++    }
++
++    #[test]
++    fn replacement_prefers_non_student_and_never_free() {
++        // 11-02 用户定：顶替先用非 student；FREE 一律不用（它 supports_opus=false）。
++        // (id, priority, disabled, supports_opus, is_student)
++        let c = vec![
++            (1u64, 3u32, false, true, true),   // STUDENT，优先级最好
++            (2, 5, false, true, false),        // 非 STUDENT，优先级差一些
++            (3, 1, false, false, false),       // FREE（不支持 opus）＋优先级最好 ⇒ 绝不能被选中
++        ];
++        assert_eq!(pick_replacement_tiered(&c, &[], &[], true), Some(2),
++            "非 student 优先，哪怕它 priority 更差；FREE 不能选");
++        // 非 student 被占用 / 退役后，才退回 student
++        assert_eq!(pick_replacement_tiered(&c, &[], &[2], true), Some(1), "没有非 student 了才用 student");
++        assert_eq!(pick_replacement_tiered(&c, &[2], &[], true), Some(1));
++        // 层内仍按 priority, id 排（原有语义不变）
++        let c2 = vec![(10u64, 5u32, false, true, false), (11, 2, false, true, false)];
++        assert_eq!(pick_replacement_tiered(&c2, &[], &[], true), Some(11), "同层按 priority");
++        // 只剩 FREE ⇒ 宁可没有，也不上 FREE
++        let c3 = vec![(20u64, 1u32, false, false, false)];
++        assert_eq!(pick_replacement_tiered(&c3, &[], &[], true), None, "只剩 FREE 时返回 None");
++        assert!(is_student_tier(Some("KIRO STUDENT")));
++        assert!(!is_student_tier(Some("KIRO PRO+")));
++        assert!(!is_student_tier(None), "没取到订阅信息不算 student");
++    }
++
++    #[test]
++    fn active_user_is_movable_but_in_flight_is_not() {
++        // 🔴 11-02 用户定：「在用也可以挪，重新分配的时候不用考虑这些」⇒ REBALANCE_IDLE_SECS=0。
++        // 但「此刻有请求在跑」仍是硬底线（挪它=让正在跑的请求中途换号换 IP）。
++        let mut rt = rt3();
++        let now = 2_000_000_000;
++        rt.file.bindings.insert("u:busy".into(), "a".into());
++        rt.file.user_meta.entry("u:busy".into()).or_default().last_used = now; // 刚刚才用过
++        assert!(rt.user_idle("u:busy", now), "刚用过也算可挪（阈值 0）");
++        rt.user_begin("u:busy");
++        assert!(!rt.user_idle("u:busy", now), "有请求在跑 ⇒ 绝不挪");
++        rt.user_end("u:busy", now);
++        assert!(rt.user_idle("u:busy", now), "跑完了又可挪");
++        // 老行为对照：按 600 秒判，刚用过的人挪不动（这就是 38 人卡住的原因）
++        assert!(!rt.user_idle_within("u:busy", now, 600), "对照：阈值 600 时刚用过判为不可挪");
++    }
++
++    #[test]
++    fn rebalance_drains_overloaded_slot_to_idle_ones() {
++        // 11-02 线上形状：一个槽压着远超平均的量，旁边好几个槽几乎空着 ⇒ 该把人铺到闲槽
++        // （用户定：槽的 429 高是压力大造成的，不是号坏 ⇒ 只做均衡，不给槽打健康折扣）
++        let slots = live(&[("hot", 5), ("idle1", 5), ("idle2", 5), ("idle3", 5)]);
++        let users = vec![
++            u("a", "hot", 400), u("b", "hot", 300), u("c", "hot", 200), u("d", "hot", 100),
++            u("e", "idle1", 10),
++        ];
++        let p = plan_rebalance(&slots, &users, &HashMap::new(), 0);
++        let after: Vec<u64> = p.slots.iter().map(|s| s.load_after).collect();
++        let hot_before = p.slots[0].load_now;
++        assert!(after[0] < hot_before, "热槽负载该降下来: {} -> {}", hot_before, after[0]);
++        let spread: usize = after[1..].iter().filter(|&&x| x > 0).count();
++        assert!(spread >= 2, "量该铺到多个闲槽，实际 after={:?}", after);
++        let hi = *after.iter().max().unwrap() as i64;
++        let lo = *after.iter().min().unwrap() as i64;
++        assert!(hi - lo < hot_before as i64, "挪完后最大最小差距该收窄: after={:?}", after);
++    }
++
++    #[test]
++    fn rebalance_spreads_heavy_users_across_slots() {
++        // 两个大户挤在 a，b / c 闲着 ⇒ 大户该被铺开，不能两个都落到同一个槽
++        // （11-02 线上 my-202.43.102.53 上 4335+763、sg-47.84.112.136 上 3726+795，旁边一堆闲槽）
++        let slots = live(&[("a", 5), ("b", 5), ("c", 5)]);
++        let users = vec![u("big1", "a", 300), u("big2", "a", 300), u("s1", "b", 10)];
++        let p = plan_rebalance(&slots, &users, &HashMap::new(), 0);
++        let dest: Vec<&str> = p.moves.iter().map(|m| m.to.as_str()).collect();
++        assert!(!p.moves.is_empty(), "该挪");
++        // 两个大户最终不在同一个槽
++        let mut where_of: HashMap<&str, &str> = HashMap::from([("big1", "a"), ("big2", "a")]);
++        for m in &p.moves {
++            if let Some(v) = where_of.get_mut(m.user.as_str()) {
++                *v = m.to.as_str();
++            }
++        }
++        assert_ne!(where_of["big1"], where_of["big2"], "两个大户不该还在同一个槽: {:?} moves={:?}", where_of, dest);
++    }
++
++    #[test]
 +    fn rebalance_already_balanced_does_nothing_and_drains_dead_slot() {
 +        let slots = live(&[("a", 5), ("b", 5)]);
 +        let users = vec![u("u1", "a", 52), u("u2", "b", 48)];
@@ -9219,13 +9836,17 @@
 +        rt.touch_user("u:y", "alias-y", now - 1000, "d");
 +        assert!(rt.rebind_user("u:nobody", "b").is_err());
 +        assert!(rt.rebind_user("u:x", "nope").is_err());
-+        // 预览里 u:x 刚用过、u:y 空闲；执行时逐条再核
++        // 11-02 用户定 REBALANCE_IDLE_SECS=0 ⇒「刚用过」也挪；只有「此刻有请求在跑」才拦
 +        let moves = vec![("u:x".to_string(), "a".to_string(), "b".to_string()), ("u:y".to_string(), "a".to_string(), "b".to_string())];
++        rt.user_begin("u:x");
 +        rt.user_begin("u:y");
-+        assert_eq!(rt.apply_moves(&moves, now), 0, "长请求还在跑（开始早于 10 分钟）也不挪");
++        assert_eq!(rt.apply_moves(&moves, now), 0, "两个都有请求在跑 ⇒ 都不挪（挪了会让在跑的请求中途换号）");
 +        rt.user_end("u:y", now - 1000);
-+        assert_eq!(rt.apply_moves(&moves, now), 1, "刚用过的不挪");
++        assert_eq!(rt.apply_moves(&moves, now), 1, "u:y 跑完了可挪；u:x 还在跑仍不挪");
 +        assert_eq!(rt.file.bindings["u:y"], "b");
++        assert_eq!(rt.file.bindings["u:x"], "a", "在跑的人原地不动");
++        rt.user_end("u:x", now - 10);
++        assert_eq!(rt.apply_moves(&moves, now), 1, "u:x 跑完后，哪怕 10 秒前才用过也能挪（阈值 0）");
 +        assert!(!rt.file.pinned.contains("u:y"), "重新分配挪的不固定");
 +        rt.rebind_user("u:x", "b").unwrap();
 +        assert!(rt.file.pinned.contains("u:x"), "手动挪 = 固定");
@@ -9541,7 +10162,7 @@
 +}
 --- a/src/kiro/token_manager.rs
 +++ b/src/kiro/token_manager.rs
-@@ -13,6 +13,7 @@
+@@ -13,6 +13,7 @@ use tokio::sync::Mutex as TokioMutex;
  use std::collections::HashMap;
  use std::fmt;
  use std::path::PathBuf;
@@ -9549,7 +10170,7 @@
  use std::sync::atomic::{AtomicBool, Ordering};
  use std::time::{Duration as StdDuration, Instant};
  
-@@ -435,6 +436,8 @@
+@@ -435,6 +436,8 @@ enum DisabledReason {
      InvalidRefreshToken,
      /// 凭据配置无效（如 authMethod=api_key 但缺少 kiroApiKey）
      InvalidConfig,
@@ -9558,16 +10179,18 @@
  }
  
  /// 统计数据持久化条目
-@@ -454,6 +457,8 @@
+@@ -454,6 +457,10 @@ struct StatsEntry {
  pub struct CredentialEntrySnapshot {
      /// 凭据唯一 ID
      pub id: u64,
 +    /// 能不能上槽：支持 opus（非 FREE 档）且没被退役（额度用尽 / 被限）。冷备估算用
 +    pub slot_eligible: bool,
++    /// 是否手动标了「允许跑 opus」（特殊 FREE 号）
++    pub allow_opus: bool,
      /// 优先级
      pub priority: u32,
      /// 是否被禁用
-@@ -535,6 +540,43 @@
+@@ -535,6 +542,43 @@ pub struct MultiTokenManager {
      stats_dirty: AtomicBool,
      /// window 模式参数（运行时可改，Admin 页面设置）
      window_settings: Mutex<WindowSettings>,
@@ -9611,7 +10234,7 @@
  }
  
  /// window 模式参数
-@@ -661,6 +703,133 @@
+@@ -661,6 +705,137 @@ pub struct CallContext {
      pub token: String,
  }
  
@@ -9664,6 +10287,10 @@
 +
 +/// Admin 回显密码时的占位符；提交它表示沿用原密码
 +pub const MASKED_PASSWORD: &str = "******";
++
++
++/// 刚撞过 429 的槽多久之内不外借（它正被上游限速，借过去大概率还是 429，白耗请求预算）
++pub const ALT_SKIP_AFTER_429: StdDuration = StdDuration::from_secs(60);
 +
 +/// 槽位在途名额；drop 时归还（流结束 / 出错都会归还）
 +pub struct SlotPermit {
@@ -9745,7 +10372,7 @@
  impl MultiTokenManager {
      /// 创建多凭据 Token 管理器
      ///
-@@ -769,6 +938,24 @@
+@@ -769,6 +944,24 @@ impl MultiTokenManager {
                  cooldown_secs: config.window_cooldown_secs.clamp(1, 3600),
              }
          };
@@ -9770,7 +10397,7 @@
          let manager = Self {
              config,
              proxy,
-@@ -781,6 +968,24 @@
+@@ -781,6 +974,24 @@ impl MultiTokenManager {
              last_stats_save_at: Mutex::new(None),
              stats_dirty: AtomicBool::new(false),
              window_settings: Mutex::new(window_settings),
@@ -9795,7 +10422,7 @@
          };
  
          // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
-@@ -794,6 +999,17 @@
+@@ -794,6 +1005,17 @@ impl MultiTokenManager {
  
          // 加载持久化的统计数据（success_count, last_used_at）
          manager.load_stats();
@@ -9813,7 +10440,7 @@
  
          Ok(manager)
      }
-@@ -825,6 +1041,8 @@
+@@ -825,6 +1047,8 @@ impl MultiTokenManager {
          model: Option<&str>,
          session_key: Option<&str>,
      ) -> Option<(u64, KiroCredentials)> {
@@ -9822,7 +10449,7 @@
          let entries = self.entries.lock();
  
          // 检查是否是 opus 模型
-@@ -832,11 +1050,12 @@
+@@ -832,11 +1056,12 @@ impl MultiTokenManager {
              .map(|m| m.to_lowercase().contains("opus"))
              .unwrap_or(false);
  
@@ -9836,7 +10463,7 @@
                      return false;
                  }
                  // 如果是 opus 模型，需要检查订阅等级
-@@ -852,7 +1071,8 @@
+@@ -852,7 +1077,8 @@ impl MultiTokenManager {
          }
  
          let mode = self.load_balancing_mode.lock().clone();
@@ -9846,7 +10473,7 @@
  
          match mode {
              "window" => {
-@@ -915,7 +1135,7 @@
+@@ -915,7 +1141,7 @@ impl MultiTokenManager {
                  // window 与 balanced 一样每次重选（窗口内按在途数挑），不粘 current_id
                  let is_balanced = matches!(
                      self.load_balancing_mode.lock().as_str(),
@@ -9855,7 +10482,7 @@
                  );
  
                  // balanced 模式：每次请求都重新均衡选择，不固定 current_id
-@@ -923,11 +1143,12 @@
+@@ -923,11 +1149,12 @@ impl MultiTokenManager {
                  let current_hit = if is_balanced {
                      None
                  } else {
@@ -9869,7 +10496,7 @@
                          .map(|e| (e.id, e.credentials.clone()))
                  };
  
-@@ -1049,7 +1270,10 @@
+@@ -1049,7 +1276,10 @@ impl MultiTokenManager {
          }
  
          // 第一次检查（无锁）：快速判断是否需要刷新
@@ -9881,7 +10508,7 @@
  
          let creds = if needs_refresh {
              // 获取刷新锁，确保同一时间只有一个刷新操作
-@@ -1130,6 +1354,11 @@
+@@ -1130,6 +1360,11 @@ impl MultiTokenManager {
      fn persist_credentials(&self) -> anyhow::Result<bool> {
          use anyhow::Context;
  
@@ -9893,7 +10520,7 @@
          // 仅多凭据格式才回写
          if !self.is_multiple_format {
              return Ok(false);
-@@ -1140,6 +1369,8 @@
+@@ -1140,6 +1375,8 @@ impl MultiTokenManager {
              None => return Ok(false),
          };
  
@@ -9902,7 +10529,7 @@
          // 收集所有凭据
          let credentials: Vec<KiroCredentials> = {
              let entries = self.entries.lock();
-@@ -1158,12 +1389,13 @@
+@@ -1158,12 +1395,13 @@ impl MultiTokenManager {
          // 序列化为 pretty JSON
          let json = serde_json::to_string_pretty(&credentials).context("序列化凭据失败")?;
  
@@ -9920,7 +10547,7 @@
          }
  
          tracing::debug!("已回写凭据到文件: {:?}", path);
-@@ -1216,6 +1448,9 @@
+@@ -1216,6 +1454,9 @@ impl MultiTokenManager {
  
      /// 将当前统计数据持久化到磁盘
      fn save_stats(&self) {
@@ -9930,16 +10557,27 @@
          let path = match self.stats_path() {
              Some(p) => p,
              None => return,
-@@ -1291,9 +1526,1297 @@
+@@ -1291,154 +1532,1697 @@ impl MultiTokenManager {
          self.save_stats_debounced();
      }
  
+-    /// 当前是否 window 模式
+-    pub fn is_window_mode(&self) -> bool {
+-        self.load_balancing_mode.lock().as_str() == "window"
 +    // ===================== 槽位模式 =====================
 +
 +    fn slots_path(&self) -> Option<PathBuf> {
 +        self.cache_dir().map(|d| d.join("kiro_slots.json"))
-+    }
-+
+     }
+ 
+-    /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
+-    /// 返回窗口外是否还有别的号可换（调用方据此决定立刻换号还是按原逻辑处理）。
+-    pub fn report_rate_limited(&self, id: u64) -> bool {
+-        let ws = *self.window_settings.lock();
+-        let mut entries = self.entries.lock();
+-        let now = Instant::now();
+-        if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
+-            e.cooldown_until = Some(now + StdDuration::from_secs(ws.cooldown_secs));
 +    /// 槽位模式是否生效（模式=slots 且配置了槽位）
 +    pub fn is_slots_mode(&self) -> bool {
 +        // 只看模式：槽全被停用时仍是槽位模式（请求回 529 让 LiteLLM 兜底到老实例），
@@ -9993,12 +10631,25 @@
 +                }
 +                Err(e) => tracing::warn!("接管前重读凭据失败（用内存里的）: {}", e),
 +            }
-+        }
+         }
+-        // 只有「窗口上限内还有没在冷却的号」才算有得换；整窗都在冷却就别连珠炮重发，
+-        // 交回原逻辑（短退避），避免 9 次请求在 1 秒内全砸向上游。
+-        let mut avail: Vec<&CredentialEntry> = entries.iter().filter(|e| !e.disabled).collect();
+-        avail.sort_by_key(|e| (e.credentials.priority, e.id));
+-        let max_k = ws.max_k.max(ws.min_k).max(1);
+-        avail
+-            .iter()
+-            .take(max_k)
+-            .any(|e| e.cooldown_until.is_none_or(|t| t <= now))
 +        self.load_stats();
 +        self.load_pool_balance_history();
 +        self.load_account_usage();
-+    }
-+
+     }
+ 
+-    /// 在途计数 +1（发请求前）
+-    pub fn begin_request(&self, id: u64) {
+-        if let Some(e) = self.entries.lock().iter_mut().find(|e| e.id == id) {
+-            e.in_flight += 1;
 +    /// 接管状态目录：读 kiro_slots.json，按当前槽位配置对齐，把槽位出口写进号。
 +    /// 🔴 只能在拿到接管租约之后调用（见 kiro::lease）。幂等：重复调用等价于重新对齐一次。
 +    pub fn init_slots(&self) {
@@ -10029,9 +10680,13 @@
 +            if let Err(e) = self.reconcile_slots(&cfgs) {
 +                tracing::warn!("槽位初始化失败: {}", e);
 +            }
-+        }
-+    }
-+
+         }
+     }
+ 
+-    /// 在途计数 -1（拿到响应头后；流式正文仍在传，但上游并发判定发生在请求受理时）
+-    pub fn end_request(&self, id: u64) {
+-        if let Some(e) = self.entries.lock().iter_mut().find(|e| e.id == id) {
+-            e.in_flight = e.in_flight.saturating_sub(1);
 +    /// 把配置里的权重 / 接不接新人 / 专属名单写到运行时槽（按名字）；改了权重要唤醒排队（上限可能变大）
 +    fn apply_slot_weights(&self, cfgs: &[crate::model::config::SlotConfig]) {
 +        {
@@ -10043,10 +10698,19 @@
 +                    st.vip = c.vip_aliases.iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
 +                }
 +            }
-+        }
+         }
 +        self.slot_notify.notify_waiters();
-+    }
-+
+     }
+ 
+-    /// 报告指定凭据 API 调用失败
+-    ///
+-    /// 增加失败计数，达到阈值时禁用凭据并切换到优先级最高的可用凭据
+-    /// 返回是否还有可用凭据可以重试
+-    ///
+-    /// # Arguments
+-    /// * `id` - 凭据 ID（来自 CallContext）
+-    pub fn report_failure(&self, id: u64) -> bool {
+-        let result = {
 +    /// 按槽位配置对齐运行时：删掉的槽放号回冷备（清代理），新槽补号，所有在槽号重写代理
 +    fn reconcile_slots(&self, cfgs: &[crate::model::config::SlotConfig]) -> anyhow::Result<()> {
 +        let names: Vec<String> = cfgs.iter().map(|c| c.name.clone()).collect();
@@ -10055,7 +10719,8 @@
 +        self.apply_slot_weights(cfgs);
 +        if !released.is_empty() {
 +            let originals = self.slots.lock().file.original_proxy.clone();
-+            let mut entries = self.entries.lock();
+             let mut entries = self.entries.lock();
+-            let mut current_id = self.current_id.lock();
 +            for e in entries.iter_mut().filter(|e| released.contains(&e.id)) {
 +                restore_proxy(&mut e.credentials, &originals);
 +            }
@@ -10080,21 +10745,37 @@
 +        self.slot_notify.notify_waiters();
 +        Ok(())
 +    }
-+
+ 
+-            let entry = match entries.iter_mut().find(|e| e.id == id) {
+-                Some(e) => e,
+-                None => return entries.iter().any(|e| !e.disabled),
+-            };
 +    /// 灰度：这个 key 别名走不走槽位（名单空 = 全走）
 +    pub fn slot_gray_allows(&self, alias: &str) -> bool {
 +        let g = self.slot_gray.lock();
 +        g.is_empty() || (!alias.is_empty() && g.iter().any(|p| !p.is_empty() && alias.starts_with(p.as_str())))
 +    }
-+
+ 
+-            if entry.disabled {
+-                return entries.iter().any(|e| !e.disabled);
+-            }
 +    pub fn slot_gray_active(&self) -> bool {
 +        !self.slot_gray.lock().is_empty()
 +    }
-+
+ 
+-            entry.failure_count += 1;
+-            entry.last_used_at = Some(Utc::now().to_rfc3339());
+-            let failure_count = entry.failure_count;
 +    pub fn get_slot_gray(&self) -> Vec<String> {
 +        self.slot_gray.lock().clone()
 +    }
-+
+ 
+-            tracing::warn!(
+-                "凭据 #{} API 调用失败（{}/{}）",
+-                id,
+-                failure_count,
+-                MAX_FAILURES_PER_CREDENTIAL
+-            );
 +    /// Admin：改灰度名单，立即生效并写回 config.json
 +    pub fn set_slot_gray(&self, list: Vec<String>) -> anyhow::Result<()> {
 +        // 已交接：配置写入交给新进程（这里再写会覆盖它）
@@ -10112,12 +10793,30 @@
 +        *self.slot_gray.lock() = list;
 +        Ok(())
 +    }
-+
+ 
+-            if failure_count >= MAX_FAILURES_PER_CREDENTIAL {
+-                entry.disabled = true;
+-                entry.disabled_reason = Some(DisabledReason::TooManyFailures);
+-                tracing::error!("凭据 #{} 已连续失败 {} 次，已被禁用", id, failure_count);
 +    /// 全部槽位配置（含停用的）
 +    pub fn get_slot_configs(&self) -> Vec<crate::model::config::SlotConfig> {
 +        self.slot_configs_all.lock().clone()
 +    }
-+
+ 
+-                // 切换到优先级最高的可用凭据
+-                if let Some(next) = entries
+-                    .iter()
+-                    .filter(|e| !e.disabled)
+-                    .min_by_key(|e| e.credentials.priority)
+-                {
+-                    *current_id = next.id;
+-                    tracing::info!(
+-                        "已切换到凭据 #{}（优先级 {}）",
+-                        next.id,
+-                        next.credentials.priority
+-                    );
+-                } else {
+-                    tracing::error!("所有凭据均已禁用！");
 +    /// Admin：整体替换槽位配置（增 / 删 / 改出口 / 改名），立即生效并写回 config.json。
 +    /// 按名字对齐：没变的槽号和绑定都不动；改了出口的槽，号的代理同步改。
 +    pub fn set_slot_configs(&self, cfgs: Vec<crate::model::config::SlotConfig>) -> anyhow::Result<()> {
@@ -10199,8 +10898,8 @@
 +                        sec.insert(c.name.clone(), p.to_string());
 +                    }
 +                    None => {}
-+                }
-+            }
+                 }
+             }
 +        }
 +        if let Some(path) = self.config.config_path() {
 +            let mut c = Config::load(path).with_context(|| format!("重新加载配置失败: {}", path.display()))?;
@@ -10227,7 +10926,8 @@
 +        );
 +        Ok(())
 +    }
-+
+ 
+-            entries.iter().any(|e| !e.disabled)
 +    fn persist_slots(&self) {
 +        // 已交接：不再写状态文件（新进程已接管）
 +        if !self.may_write() {
@@ -10239,7 +10939,9 @@
 +        let json = {
 +            let rt = self.slots.lock();
 +            serde_json::to_string_pretty(&rt.file)
-+        };
+         };
+-        self.save_stats_debounced();
+-        result
 +        let Ok(json) = json else { return };
 +        let tmp = path.with_extension("json.tmp");
 +        let write = || std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, &path));
@@ -10251,22 +10953,48 @@
 +        if r.is_err() {
 +            tracing::warn!("保存槽位绑定失败: {:?}", path);
 +        }
-+    }
-+
+     }
+ 
+-    /// 报告指定凭据额度已用尽
+-    ///
+-    /// 用于处理 402 Payment Required 且 reason 为 `MONTHLY_REQUEST_COUNT` 的场景：
+-    /// - 立即禁用该凭据（不等待连续失败阈值）
+-    /// - 切换到下一个可用凭据继续重试
+-    /// - 返回是否还有可用凭据
+-    pub fn report_quota_exhausted(&self, id: u64) -> bool {
+-        let result = {
+-            let mut entries = self.entries.lock();
+-            let mut current_id = self.current_id.lock();
+-
+-            let entry = match entries.iter_mut().find(|e| e.id == id) {
+-                Some(e) => e,
+-                None => return entries.iter().any(|e| !e.disabled),
+-            };
 +    /// 槽 i 换一个从没上过槽的号；返回新号 id。reason 写进旧号退役原因
 +    fn fill_slot(&self, i: usize, reason: &str) -> Option<u64> {
 +        self.fill_slot_expect(i, reason, None)
 +    }
-+
+ 
+-            if entry.disabled {
+-                return entries.iter().any(|e| !e.disabled);
 +    /// expect = Some(旧号)：只有槽上**此刻**还是这个号才换（10-28 review：同一号 8 个请求同时撞 402，
 +    /// 第二个请求进来时槽上已是新号 B，旧代码会把 B 也当「用尽」退役掉 ⇒ 好号被永久拉黑）。
 +    /// 槽上已经不是它 ⇒ 不动，返回槽上现在的号（调用方直接重发即可）。
 +    fn fill_slot_expect(&self, i: usize, reason: &str, expect: Option<u64>) -> Option<u64> {
-+        let candidates: Vec<(u64, u32, bool, bool)> = self
++        // 带上「是不是 STUDENT」：顶替时先用非 student（11-02 用户定）
++        let candidates: Vec<(u64, u32, bool, bool, bool)> = self
 +            .entries
 +            .lock()
 +            .iter()
-+            .map(|e| (e.id, e.credentials.priority, e.disabled, e.credentials.supports_opus()))
++            .map(|e| {
++                (
++                    e.id,
++                    e.credentials.priority,
++                    e.disabled,
++                    e.credentials.supports_opus(),
++                    crate::kiro::slots::is_student_tier(e.credentials.subscription_title.as_deref()),
++                )
++            })
 +            .collect();
 +        let start = self.slot_limits.lock().start;
 +        let live_ids: Vec<u64> = candidates.iter().map(|c| c.0).collect();
@@ -10278,7 +11006,7 @@
 +        if let Some(old) = expect {
 +            if rt.states[i].account_id != Some(old) {
 +                return rt.states[i].account_id;
-+            }
+             }
 +        }
 +        // 槽上挂着的号已被删除：先清掉引用（不记退役，它不是被限/用尽）
 +        if rt.states[i].account_id.is_some_and(|id| !live_ids.contains(&id)) {
@@ -10289,7 +11017,7 @@
 +        let occupied = rt.occupied();
 +        // 只排除「因额度用尽 / 被限制而退役」的号；被正常换下（停槽、手动调整）的号仍可再上槽
 +        let retired: Vec<u64> = rt.file.retired.keys().copied().collect();
-+        let new_id = crate::kiro::slots::pick_replacement(&candidates, &retired, &occupied, true)?;
++        let new_id = crate::kiro::slots::pick_replacement_tiered(&candidates, &retired, &occupied, true)?;
 +        if rt.states[i].account_id.is_some() {
 +            rt.swap_account(i, new_id, reason, start);
 +        } else {
@@ -10314,12 +11042,32 @@
 +        tracing::info!("槽位 {} 上号 #{}（{}）", i, new_id, reason);
 +        Some(new_id)
 +    }
-+
+ 
+-            entry.disabled = true;
+-            entry.disabled_reason = Some(DisabledReason::QuotaExceeded);
+-            entry.last_used_at = Some(Utc::now().to_rfc3339());
+-            // 设为阈值，便于在管理面板中直观看到该凭据已不可用
+-            entry.failure_count = MAX_FAILURES_PER_CREDENTIAL;
+-
+-            tracing::error!("凭据 #{} 额度已用尽（MONTHLY_REQUEST_COUNT / OVERAGE_REQUEST_LIMIT_EXCEEDED），已被禁用", id);
 +    /// 槽位模式选号：用户键 → 槽 → 号。返回 (槽, 号id, 凭据)
 +    fn select_slot_credential(&self, user_key: &str) -> Option<(usize, u64, KiroCredentials)> {
 +        self.select_slot_credential_as(user_key, "")
 +    }
-+
+ 
+-            // 切换到优先级最高的可用凭据
+-            if let Some(next) = entries
+-                .iter()
+-                .filter(|e| !e.disabled)
+-                .min_by_key(|e| e.credentials.priority)
+-            {
+-                *current_id = next.id;
+-                tracing::info!(
+-                    "已切换到凭据 #{}（优先级 {}）",
+-                    next.id,
+-                    next.credentials.priority
+-                );
+-                true
 +    /// alias = LiteLLM key 别名（专属槽名单按它匹配；只在本地用，不转发给 Kiro）
 +    fn select_slot_credential_as(&self, user_key: &str, alias: &str) -> Option<(usize, u64, KiroCredentials)> {
 +        let ratio = self.config.slot_heavy_ratio;
@@ -10328,11 +11076,17 @@
 +            // 带用户身份的永久绑定；其它（会话键 / MCP）只按哈希挑槽，不写绑定表
 +            let (slot, is_new) = if user_key.starts_with("u:") {
 +                rt.slot_for_user_as(user_key, alias, ratio, Instant::now())?
-+            } else {
+             } else {
+-                tracing::error!("所有凭据均已禁用！");
+-                false
+-            }
 +                (rt.pick_ephemeral(user_key)?, false)
 +            };
 +            (slot, is_new, rt.states[slot].account_id?)
-+        };
+         };
+-        self.save_stats_debounced();
+-        result
+-    }
 +        if is_new {
 +            self.persist_slots();
 +        }
@@ -10356,6 +11110,58 @@
 +    /// 槽位占一个在途名额；满了排队，超时返回 Err（调用方回 529）
 +    pub async fn acquire_slot_permit(self: &Arc<Self>, slot: usize) -> anyhow::Result<SlotPermit> {
 +        self.acquire_slot_permit_until(slot, None).await
++    }
++
++    /// 软等待：在本槽排队最多 `soft` 这么久。拿到 ⇒ Ok(Some)；没拿到但槽还在 ⇒ Ok(None)（调用方去借空闲槽）。
++    /// 🔴 与 `acquire_slot_permit_until` 的区别：软等待到点**不计「排队超时」、不返回过载错误**——
++    /// 它不是失败，只是「这个槽现在忙，先去借别人」。拿它当超时会把每次借号记成一次排队超时，统计就假了。
++    pub async fn acquire_slot_permit_soft(
++        self: &Arc<Self>,
++        slot: usize,
++        soft: StdDuration,
++    ) -> anyhow::Result<Option<SlotPermit>> {
++        let name = self
++            .slots
++            .lock()
++            .states
++            .get(slot)
++            .map(|s| s.name.clone())
++            .ok_or_else(|| anyhow::anyhow!("{}: 槽位 {} 已不存在", crate::kiro::slots::SLOT_GONE_MARK, slot))?;
++        let deadline = Instant::now() + soft;
++        let mut queued = false;
++        loop {
++            let notified = self.slot_notify.notified();
++            match self.try_take_slot(&name, queued) {
++                TakeSlot::Taken(account_id) => {
++                    return Ok(Some(SlotPermit { mgr: Arc::clone(self), slot_name: name, account_id, done: false }));
++                }
++                TakeSlot::Gone => {
++                    // 槽没了：排队计数跟着槽一起消失，不用扣（扣了会 panic / 扣到别的槽）
++                    anyhow::bail!("{}: 槽位 {} 已被删除/停用", crate::kiro::slots::SLOT_GONE_MARK, name);
++                }
++                TakeSlot::Full => {}
++            }
++            if !queued {
++                queued = true;
++                let mut rt = self.slots.lock();
++                if let Some(st) = rt.states.iter_mut().find(|s| s.name == name) {
++                    st.queued += 1;
++                }
++            }
++            let now = Instant::now();
++            if now >= deadline {
++                // 软等到点：把自己从排队数里摘掉（🔴 不记 queue_timeouts、不报过载——这不是失败）
++                if queued {
++                    let mut rt = self.slots.lock();
++                    if let Some(st) = rt.states.iter_mut().find(|s| s.name == name) {
++                        st.queued = st.queued.saturating_sub(1);
++                    }
++                }
++                return Ok(None);
++            }
++            let left = (deadline - now).min(StdDuration::from_millis(200));
++            let _ = tokio::time::timeout(left, notified).await;
++        }
 +    }
 +
 +    /// 同上，但排队最多等到 `until`（整个请求的剩余预算），与配置的单次排队上限取较早者
@@ -10408,6 +11214,54 @@
 +        }
 +    }
 +
++    /// 重试换号第一步（不碰网络，便于单测）：挑一个**此刻空闲**的其他槽并占住一个名额。
++    /// 条件：有号、没暂停、有空位、接新人且非专属、不在 exclude 里。候选按「在途 ÷ 上限」从小到大试。
++    /// 不排队、不绑定用户、不改绑定表——用户仍固定在原槽，这只是这一次请求的临时借用。
++    pub fn take_idle_alt_permit(self: &Arc<Self>, exclude: &[String]) -> Option<SlotPermit> {
++        let cands: Vec<String> = {
++            let rt = self.slots.lock();
++            let now = Instant::now();
++            let mut v: Vec<(u64, usize, String)> = rt
++                .states
++                .iter()
++                .filter(|s| s.account_id.is_some() && s.accept_new && s.vip.is_empty())
++                // 🔴 has_room 只说明此刻有个空位，不代表这个槽闲：满负荷又有人排队时，
++                // 刚有请求结束腾出的位子会被借走、插在排队的人前面 ⇒ 被借的槽自己排到 60s 预算用尽回 529
++                // （11-02 实测 jp-172.235.204.67 被反复外借后自己超时）。所以有人排队的槽不外借，自己的人优先。
++                .filter(|s| s.queued == 0)
++                // 最近撞过 429 的槽也不借（它正被上游限速，借过去也是 429，白耗预算）
++                .filter(|s| !s.last_429.is_some_and(|t| now.duration_since(t) < ALT_SKIP_AFTER_429))
++                .filter(|s| !exclude.contains(&s.name) && s.has_room(now))
++                .map(|s| (s.in_flight as u64 * 1_000_000 / s.effective_limit().max(1) as u64, s.index, s.name.clone()))
++                .collect();
++            v.sort();
++            v.into_iter().map(|(_, _, n)| n).collect()
++        };
++        for name in cands {
++            if let TakeSlot::Taken(account_id) = self.try_take_slot(&name, false) {
++                return Some(SlotPermit { mgr: Arc::clone(self), slot_name: name, account_id, done: false });
++            }
++        }
++        None
++    }
++
++    /// 同上，再把该槽当前号的 token 备好；取不到 token 就换下一个候选。找不到返回 None。
++    pub async fn acquire_idle_alt_slot(self: &Arc<Self>, exclude: &mut Vec<String>) -> Option<(usize, CallContext, SlotPermit)> {
++        loop {
++            let permit = self.take_idle_alt_permit(exclude)?;
++            let name = permit.slot_name().to_string();
++            exclude.push(name.clone());
++            let Some(i) = self.slot_index_of(&name) else { continue };
++            match self.slot_context_for_test(i).await {
++                Ok(ctx) => return Some((i, ctx, permit)),
++                Err(e) => {
++                    tracing::warn!("借用槽位 {} 取 token 失败，试下一个: {}", name, e);
++                    continue;
++                }
++            }
++        }
++    }
++
 +    fn try_take_slot(&self, name: &str, was_queued: bool) -> TakeSlot {
 +        let mut rt = self.slots.lock();
 +        let now = Instant::now();
@@ -10442,6 +11296,11 @@
 +            }
 +        }
 +        self.slot_notify.notify_waiters();
++    }
++
++    /// 按下标取槽名（下标来自刚选出的槽；槽不存在返回 None）
++    pub fn slot_name_at(&self, slot: usize) -> Option<String> {
++        self.slots.lock().states.get(slot).map(|s| s.name.clone())
 +    }
 +
 +    /// 按槽名取**此刻**的下标（10-28 review #3：provider 拿到下标后要经过排队 / 上游等待，
@@ -10657,6 +11516,22 @@
 +    }
 +
 +    /// 请求开始：记下这个用户的 LiteLLM key 别名、最后使用时间、请求数（只 `u:` 用户；不立即写盘）
++    /// 按会话分槽的 key（slotUnboundKeyAliases）：把它改配置之前留下的旧绑定清掉。
++    /// 这些 key 的请求不带 `u:` 前缀 ⇒ 不会走 slot_touch_user ⇒ 旧绑定不会自己消失，
++    /// 会一直以僵尸数据参与重新分配的配平（11-02 实测引发 9 次连锁搬家）。
++    pub fn slot_drop_unbound_binding(&self, key_hash: &str) {
++        if key_hash.is_empty() {
++            return;
++        }
++        let user = format!("u:{}", key_hash);
++        let dropped = self.slots.lock().drop_binding(&user);
++        if dropped {
++            tracing::info!("按会话分槽的 key 旧绑定已清除: {}", user);
++            self.slots_dirty.store(true, Ordering::Relaxed);
++            self.persist_slots();
++        }
++    }
++
 +    pub fn slot_touch_user(&self, user_key: &str, alias: &str) {
 +        if !user_key.starts_with("u:") {
 +            return;
@@ -10787,18 +11662,30 @@
 +
 +    /// Admin：重新分配预览（不改任何东西）
 +    pub fn slot_rebalance_plan(&self) -> crate::kiro::slots::RebalancePlan {
-+        self.slots.lock().plan_rebalance(chrono::Utc::now().timestamp())
++        self.slot_rebalance_plan_idle(crate::kiro::slots::REBALANCE_IDLE_SECS)
++    }
++
++    /// 同上，idle_secs 可调（小 = 连「刚刚还在用」的人也挪，用缓存换平衡）
++    pub fn slot_rebalance_plan_idle(&self, idle_secs: i64) -> crate::kiro::slots::RebalancePlan {
++        let unbound = self.config.slot_unbound_key_aliases.clone();
++        self.slots.lock().plan_rebalance_idle(chrono::Utc::now().timestamp(), &unbound, idle_secs)
 +    }
 +
 +    /// Admin：执行确认过的挪动（每条再核一次，条件变了就跳过）。返回实际挪了几个
 +    pub fn slot_rebalance_apply(&self, moves: &[(String, String, String)]) -> anyhow::Result<usize> {
++        self.slot_rebalance_apply_idle(moves, crate::kiro::slots::REBALANCE_IDLE_SECS)
++    }
++
++    /// 🔴 执行时必须用和预览**同一个** idle_secs：预览按 60 秒算出可挪，执行按 600 秒复核
++    /// 就会把它们全判成「还在用」而跳过，返回 moved=0，看着像没生效
++    pub fn slot_rebalance_apply_idle(&self, moves: &[(String, String, String)], idle_secs: i64) -> anyhow::Result<usize> {
 +        if self.is_handed_off() {
 +            anyhow::bail!("本实例正在交接，请稍后重试");
 +        }
 +        if self.standby() {
 +            anyhow::bail!("本实例还没接管，请稍后重试");
 +        }
-+        let n = self.slots.lock().apply_moves(moves, chrono::Utc::now().timestamp());
++        let n = self.slots.lock().apply_moves_idle(moves, chrono::Utc::now().timestamp(), idle_secs);
 +        if n > 0 {
 +            self.persist_slots();
 +        }
@@ -10854,6 +11741,88 @@
 +            e.credentials.proxy_username = sc.proxy_username.clone();
 +            e.credentials.proxy_password = sc.proxy_password.clone();
 +        }
++    }
++
++    /// Admin：标记/取消「这个号允许跑 opus」（特殊 FREE 号用）。热生效 + 落盘。
++    /// 🔴 为什么必须有这个 API：直接改 PVC 里的 credentials.json 不可靠——运行中的进程内存里
++    /// 持有凭据表，旧 pod 退出前（grace 300s）会再落一次盘，把外部写入的改动冲掉。
++    /// 11-04 实测：写完立刻 rollout restart 仍被旧 pod 反写（909~913 的标记丢了）。
++    pub fn set_allow_opus(&self, account_id: u64, allow: bool) -> anyhow::Result<()> {
++        {
++            let mut entries = self.entries.lock();
++            let e = entries
++                .iter_mut()
++                .find(|e| e.id == account_id)
++                .ok_or_else(|| anyhow::anyhow!("号 #{} 不存在", account_id))?;
++            e.credentials.allow_opus = allow;
++        }
++        self.persist_credentials()?;
++        // 开了之后它就能上槽了：空槽立刻补号，免得干等下一次巡检
++        if allow {
++            self.fill_empty_slots("allow_opus");
++        }
++        self.slot_notify.notify_waiters();
++        tracing::info!("号 #{} allowOpus = {}", account_id, allow);
++        Ok(())
++    }
++
++    /// Admin：把指定的号手动放到指定槽（11-04 加：原来只能自动补号，没法把某个号放到某个槽）。
++    /// 旧号换下来清掉它身上的槽位代理并放回冷备（不记退役——它不是被限/用尽）。
++    /// 校验：号存在、没禁用、不在别的槽上、槽存在。
++    pub fn assign_slot_account(&self, slot: usize, account_id: u64) -> anyhow::Result<Option<u64>> {
++        if self.is_handed_off() {
++            anyhow::bail!("本实例正在交接，请稍后重试");
++        }
++        let start = self.slot_limits.lock().start;
++        let ok = self
++            .entries
++            .lock()
++            .iter()
++            .any(|e| e.id == account_id && !e.disabled);
++        if !ok {
++            anyhow::bail!("号 #{} 不存在或已停用", account_id);
++        }
++        let replaced = {
++            let mut rt = self.slots.lock();
++            if slot >= rt.states.len() {
++                anyhow::bail!("槽位 {} 不存在", slot);
++            }
++            if let Some(other) = rt.slot_of_account(account_id) {
++                if other != slot {
++                    anyhow::bail!("号 #{} 已在槽位 {} 上，先把它换下来", account_id, rt.states[other].name);
++                }
++                return Ok(None); // 已经在这个槽上，什么也不做
++            }
++            let old = rt.states[slot].account_id;
++            // reason 用 "manual"：swap_account 只把 quota / restricted 记进退役名单，手动换的旧号仍可再上槽
++            if old.is_some() {
++                rt.swap_account(slot, account_id, "manual", start);
++            } else {
++                let keep = rt.states[slot].clone();
++                rt.states[slot] = crate::kiro::slots::SlotState::new(slot, start);
++                rt.states[slot].keep_settings(&keep);
++                rt.states[slot].account_id = Some(account_id);
++                if !rt.file.ever_slotted.contains(&account_id) {
++                    rt.file.ever_slotted.push(account_id);
++                }
++                rt.sync_file_accounts();
++            }
++            old
++        };
++        // 旧号换下来：还原它上槽前自己的代理（和自动补号同一套做法）
++        if let Some(old) = replaced.filter(|o| *o != account_id) {
++            let originals = self.slots.lock().file.original_proxy.clone();
++            let mut entries = self.entries.lock();
++            if let Some(e) = entries.iter_mut().find(|e| e.id == old) {
++                restore_proxy(&mut e.credentials, &originals);
++            }
++        }
++        self.stamp_slot_proxy(slot, account_id);
++        let _ = self.persist_credentials();
++        self.persist_slots();
++        self.slot_notify.notify_waiters();
++        tracing::info!("手动换号：槽位 {} 换成号 #{}（换下 {:?}）", slot, account_id, replaced);
++        Ok(replaced)
 +    }
 +
 +    /// 空槽（没号、或号已不存在/已禁用）从冷备补号；无空槽不做事
@@ -11198,13 +12167,40 @@
 +                anyhow::bail!("锁定值需在 1~64");
 +            }
 +        }
-+        let mut rt = self.slots.lock();
-+        let st = rt.states.get_mut(slot).ok_or_else(|| anyhow::anyhow!("槽位 {} 不存在", slot))?;
-+        st.locked_limit = limit;
++        {
++            let mut rt = self.slots.lock();
++            let st = rt.states.get_mut(slot).ok_or_else(|| anyhow::anyhow!("槽位 {} 不存在", slot))?;
++            st.locked_limit = limit;
++            rt.sync_file_locks();
++        }
 +        let _ = p;
-+        drop(rt);
++        // 锁定值落盘：换版 / 重启后仍然生效
++        self.persist_slots();
 +        self.slot_notify.notify_waiters();
 +        Ok(())
++    }
++
++    /// Admin：把**所有槽**的在途上限统一锁成同一个值（None = 全部解锁回自动调节）。
++    /// 返回改了多少个槽。锁定值不受权重缩放影响（effective_limit 里 locked 优先），
++    /// 所以「统一设为 N」=每个槽都真的是 N，不会被权重放大/缩小。
++    pub fn set_all_slot_locks(&self, limit: Option<u32>) -> anyhow::Result<usize> {
++        if let Some(l) = limit {
++            if l < 1 || l > 64 {
++                anyhow::bail!("锁定值需在 1~64");
++            }
++        }
++        let n = {
++            let mut rt = self.slots.lock();
++            for st in rt.states.iter_mut() {
++                st.locked_limit = limit;
++            }
++            rt.sync_file_locks();
++            rt.states.len()
++        };
++        // 落盘，换版 / 重启后 36 个槽仍是这个并发（11-02 之前只在内存，换版就丢）
++        self.persist_slots();
++        self.slot_notify.notify_waiters();
++        Ok(n)
 +    }
 +
 +    /// 冷备里还能上槽的号数（没禁用、支持 opus、从没上过槽）
@@ -11221,24 +12217,163 @@
 +            .count()
 +    }
 +
-     /// 当前是否 window 模式
++    /// 当前是否 window 模式
 +    /// 老路径是否按 window 处理（slots 模式下灰度外流量同样按 window：429 冷却换号）
-     pub fn is_window_mode(&self) -> bool {
--        self.load_balancing_mode.lock().as_str() == "window"
++    pub fn is_window_mode(&self) -> bool {
 +        matches!(self.load_balancing_mode.lock().as_str(), "window" | "slots")
-     }
- 
-     /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
-@@ -1387,6 +2910,8 @@
-             entries.iter().any(|e| !e.disabled)
-         };
-         self.save_stats_debounced();
++    }
++
++    /// window 模式：该号被 429，冷却 window_cooldown_secs 秒（不禁用、不计失败）。
++    /// 返回窗口外是否还有别的号可换（调用方据此决定立刻换号还是按原逻辑处理）。
++    pub fn report_rate_limited(&self, id: u64) -> bool {
++        let ws = *self.window_settings.lock();
++        let mut entries = self.entries.lock();
++        let now = Instant::now();
++        if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
++            e.cooldown_until = Some(now + StdDuration::from_secs(ws.cooldown_secs));
++        }
++        // 只有「窗口上限内还有没在冷却的号」才算有得换；整窗都在冷却就别连珠炮重发，
++        // 交回原逻辑（短退避），避免 9 次请求在 1 秒内全砸向上游。
++        let mut avail: Vec<&CredentialEntry> = entries.iter().filter(|e| !e.disabled).collect();
++        avail.sort_by_key(|e| (e.credentials.priority, e.id));
++        let max_k = ws.max_k.max(ws.min_k).max(1);
++        avail
++            .iter()
++            .take(max_k)
++            .any(|e| e.cooldown_until.is_none_or(|t| t <= now))
++    }
++
++    /// 在途计数 +1（发请求前）
++    pub fn begin_request(&self, id: u64) {
++        if let Some(e) = self.entries.lock().iter_mut().find(|e| e.id == id) {
++            e.in_flight += 1;
++        }
++    }
++
++    /// 在途计数 -1（拿到响应头后；流式正文仍在传，但上游并发判定发生在请求受理时）
++    pub fn end_request(&self, id: u64) {
++        if let Some(e) = self.entries.lock().iter_mut().find(|e| e.id == id) {
++            e.in_flight = e.in_flight.saturating_sub(1);
++        }
++    }
++
++    /// 报告指定凭据 API 调用失败
++    ///
++    /// 增加失败计数，达到阈值时禁用凭据并切换到优先级最高的可用凭据
++    /// 返回是否还有可用凭据可以重试
++    ///
++    /// # Arguments
++    /// * `id` - 凭据 ID（来自 CallContext）
++    pub fn report_failure(&self, id: u64) -> bool {
++        let result = {
++            let mut entries = self.entries.lock();
++            let mut current_id = self.current_id.lock();
++
++            let entry = match entries.iter_mut().find(|e| e.id == id) {
++                Some(e) => e,
++                None => return entries.iter().any(|e| !e.disabled),
++            };
++
++            if entry.disabled {
++                return entries.iter().any(|e| !e.disabled);
++            }
++
++            entry.failure_count += 1;
++            entry.last_used_at = Some(Utc::now().to_rfc3339());
++            let failure_count = entry.failure_count;
++
++            tracing::warn!(
++                "凭据 #{} API 调用失败（{}/{}）",
++                id,
++                failure_count,
++                MAX_FAILURES_PER_CREDENTIAL
++            );
++
++            if failure_count >= MAX_FAILURES_PER_CREDENTIAL {
++                entry.disabled = true;
++                entry.disabled_reason = Some(DisabledReason::TooManyFailures);
++                tracing::error!("凭据 #{} 已连续失败 {} 次，已被禁用", id, failure_count);
++
++                // 切换到优先级最高的可用凭据
++                if let Some(next) = entries
++                    .iter()
++                    .filter(|e| !e.disabled)
++                    .min_by_key(|e| e.credentials.priority)
++                {
++                    *current_id = next.id;
++                    tracing::info!(
++                        "已切换到凭据 #{}（优先级 {}）",
++                        next.id,
++                        next.credentials.priority
++                    );
++                } else {
++                    tracing::error!("所有凭据均已禁用！");
++                }
++            }
++
++            entries.iter().any(|e| !e.disabled)
++        };
++        self.save_stats_debounced();
 +        // 号被停用 ⇒ 槽上不能再挂着它（槽位模式），马上换号 / 摘成空槽（11-02）
 +        self.sweep_dead_slots();
-         result
-     }
++        result
++    }
++
++    /// 报告指定凭据额度已用尽
++    ///
++    /// 用于处理 402 Payment Required 且 reason 为 `MONTHLY_REQUEST_COUNT` 的场景：
++    /// - 立即禁用该凭据（不等待连续失败阈值）
++    /// - 切换到下一个可用凭据继续重试
++    /// - 返回是否还有可用凭据
++    pub fn report_quota_exhausted(&self, id: u64) -> bool {
++        let result = {
++            let mut entries = self.entries.lock();
++            let mut current_id = self.current_id.lock();
++
++            let entry = match entries.iter_mut().find(|e| e.id == id) {
++                Some(e) => e,
++                None => return entries.iter().any(|e| !e.disabled),
++            };
++
++            if entry.disabled {
++                return entries.iter().any(|e| !e.disabled);
++            }
++
++            entry.disabled = true;
++            entry.disabled_reason = Some(DisabledReason::QuotaExceeded);
++            entry.last_used_at = Some(Utc::now().to_rfc3339());
++            // 设为阈值，便于在管理面板中直观看到该凭据已不可用
++            entry.failure_count = MAX_FAILURES_PER_CREDENTIAL;
++
++            tracing::error!("凭据 #{} 额度已用尽（MONTHLY_REQUEST_COUNT / OVERAGE_REQUEST_LIMIT_EXCEEDED），已被禁用", id);
++
++            // 切换到优先级最高的可用凭据
++            if let Some(next) = entries
++                .iter()
++                .filter(|e| !e.disabled)
++                .min_by_key(|e| e.credentials.priority)
++            {
++                *current_id = next.id;
++                tracing::info!(
++                    "已切换到凭据 #{}（优先级 {}）",
++                    next.id,
++                    next.credentials.priority
++                );
++                true
++            } else {
++                tracing::error!("所有凭据均已禁用！");
++                false
++            }
++        };
++        self.save_stats_debounced();
++        // 号被停用 ⇒ 槽上不能再挂着它（槽位模式），马上换号 / 摘成空槽（11-02）
++        self.sweep_dead_slots();
++        result
++    }
  
-@@ -1437,6 +2962,8 @@
+     /// 报告指定凭据刷新 Token 失败。
+     ///
+@@ -1500,6 +3284,8 @@ impl MultiTokenManager {
              }
          };
          self.save_stats_debounced();
@@ -11247,7 +12382,7 @@
          result
      }
  
-@@ -1500,6 +3027,8 @@
+@@ -1548,6 +3334,8 @@ impl MultiTokenManager {
              }
          };
          self.save_stats_debounced();
@@ -11256,16 +12391,7 @@
          result
      }
  
-@@ -1548,6 +3077,8 @@
-             }
-         };
-         self.save_stats_debounced();
-+        // 号被停用 ⇒ 槽上不能再挂着它（槽位模式），马上换号 / 摘成空槽（11-02）
-+        self.sweep_dead_slots();
-         result
-     }
- 
-@@ -1583,6 +3114,8 @@
+@@ -1583,6 +3371,8 @@ impl MultiTokenManager {
  
      /// 获取管理器状态快照（用于 Admin API）
      pub fn snapshot(&self) -> ManagerSnapshot {
@@ -11274,15 +12400,16 @@
          let entries = self.entries.lock();
          let current_id = *self.current_id.lock();
          let available = entries.iter().filter(|e| !e.disabled).count();
-@@ -1591,6 +3124,7 @@
+@@ -1591,6 +3381,8 @@ impl MultiTokenManager {
              entries: entries
                  .iter()
                  .map(|e| CredentialEntrySnapshot {
 +                    slot_eligible: e.credentials.supports_opus() && !retired.contains(&e.id),
++                    allow_opus: e.credentials.allow_opus,
                      id: e.id,
                      priority: e.credentials.priority,
                      disabled: e.disabled,
-@@ -1640,6 +3174,7 @@
+@@ -1640,6 +3432,7 @@ impl MultiTokenManager {
                          DisabledReason::QuotaExceeded => "QuotaExceeded",
                          DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
                          DisabledReason::InvalidConfig => "InvalidConfig",
@@ -11290,10 +12417,12 @@
                      }.to_string()),
                      endpoint: e.credentials.endpoint.clone(),
                      subscription_title: e.credentials.subscription_title.clone(),
-@@ -1652,7 +3187,138 @@
+@@ -1651,8 +3444,139 @@ impl MultiTokenManager {
+         }
      }
  
-     /// 设置凭据禁用状态（Admin API）
+-    /// 设置凭据禁用状态（Admin API）
++    /// 设置凭据禁用状态（Admin API）
 +    /// 批量启用 / 停用（Admin「账户」列表勾选后批量操作，11-01）。
 +    /// 语义与单个 set_disabled 一致：启用清失败计数并去掉退役标记；停用记为手动禁用；在槽的号停用 ⇒ 槽立刻换冷备号，
 +    /// 冷备不够 ⇒ 槽变空槽（不报错）。凭据文件只写一次，再补一次槽。
@@ -11429,7 +12558,7 @@
          {
              let mut entries = self.entries.lock();
              let entry = entries
-@@ -1671,6 +3337,16 @@
+@@ -1671,6 +3595,16 @@ impl MultiTokenManager {
          }
          // 持久化更改
          self.persist_credentials()?;
@@ -11446,7 +12575,7 @@
          Ok(())
      }
  
-@@ -1736,9 +3412,9 @@
+@@ -1736,9 +3670,9 @@ impl MultiTokenManager {
                  .clone()
                  .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
          } else {
@@ -11459,7 +12588,7 @@
  
              if needs_refresh {
                  let _guard = self.refresh_lock.lock().await;
-@@ -1955,6 +3631,9 @@
+@@ -1955,6 +3889,9 @@ impl MultiTokenManager {
          self.persist_credentials()?;
  
          tracing::info!("成功添加凭据 #{}", new_id);
@@ -11469,7 +12598,7 @@
          Ok(new_id)
      }
  
-@@ -2020,6 +3699,27 @@
+@@ -2020,6 +3957,27 @@ impl MultiTokenManager {
          // 立即回写统计数据，清除已删除凭据的残留条目
          self.save_stats();
  
@@ -11497,7 +12626,7 @@
          tracing::info!("已删除凭据 #{}", id);
          Ok(())
      }
-@@ -2029,6 +3729,11 @@
+@@ -2029,6 +3987,11 @@ impl MultiTokenManager {
      /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
      /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
      pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
@@ -11509,7 +12638,7 @@
          let credentials = {
              let entries = self.entries.lock();
              entries
-@@ -2076,6 +3781,9 @@
+@@ -2076,6 +4039,9 @@ impl MultiTokenManager {
  
      /// 设置 window 模式参数（Admin API）：校验 → 写回 config.json → 生效。写盘失败则不生效。
      pub fn set_window_settings(&self, ws: WindowSettings) -> anyhow::Result<()> {
@@ -11519,7 +12648,7 @@
          use anyhow::Context;
          ws.validate()?;
          if let Some(path) = self.config.config_path() {
-@@ -2101,6 +3809,10 @@
+@@ -2101,6 +4067,10 @@ impl MultiTokenManager {
      }
  
      fn persist_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
@@ -11530,7 +12659,7 @@
          use anyhow::Context;
  
          let config_path = match self.config.config_path() {
-@@ -2123,8 +3835,11 @@
+@@ -2123,8 +4093,11 @@ impl MultiTokenManager {
  
      /// 设置负载均衡模式（Admin API）
      pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
@@ -11543,7 +12672,7 @@
              anyhow::bail!("无效的负载均衡模式: {}", mode);
          }
  
-@@ -2140,9 +3855,35 @@
+@@ -2140,9 +4113,35 @@ impl MultiTokenManager {
              return Err(err);
          }
  
@@ -11579,7 +12708,7 @@
  }
  
  impl Drop for MultiTokenManager {
-@@ -2150,6 +3891,7 @@
+@@ -2150,6 +4149,7 @@ impl Drop for MultiTokenManager {
          if self.stats_dirty.load(Ordering::Relaxed) {
              self.save_stats();
          }
@@ -11587,7 +12716,7 @@
      }
  }
  
-@@ -2325,7 +4067,895 @@
+@@ -2325,6 +4325,1043 @@ mod tests {
          assert!(!m.report_rate_limited(2), "上限 2 内全冷却 ⇒ 不连珠炮换到 #3");
      }
  
@@ -11621,7 +12750,7 @@
 +        (std::sync::Arc::new(m), dir)
 +    }
 +
-     #[test]
++    #[test]
 +    fn test_slot_config_accept_new_vip_and_alarm_ack_persist() {
 +        let (m, dir) = slot_mgr(2, 4);
 +        let mut cfgs = m.get_slot_configs();
@@ -12451,6 +13580,29 @@
 +    }
 +
 +    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++    async fn test_soft_permit_returns_none_without_counting_timeout() {
++        // 软等（排队太久就去借空闲槽）到点 ⇒ Ok(None)，且**不**记「排队超时」、不报过载。
++        // 🔴 这条是判据的关键：拿 acquire_slot_permit_until 当软等会把每次借号都记成一次排队超时，
++        // 统计就假了（界面上会看到一堆不存在的超时）。
++        let (m, dir) = slot_mgr(1, 2);
++        m.set_slot_lock(0, Some(1)).unwrap();
++        let p1 = m.acquire_slot_permit(0).await.unwrap();
++        let t0 = Instant::now();
++        let got = m.acquire_slot_permit_soft(0, StdDuration::from_millis(200)).await.unwrap();
++        assert!(got.is_none(), "满了且等不到 ⇒ None");
++        assert!(t0.elapsed() >= StdDuration::from_millis(150), "该真的等了一会儿");
++        let snap = &m.slots_snapshot()[0];
++        assert_eq!(snap.stats.queue_timeouts, 0, "软等到点不算排队超时");
++        assert_eq!(snap.queued, 0, "排队计数要归零，不能泄漏");
++        // 名额放开后软等应立刻拿到（阴性对照：证明上面的 None 是「忙」不是「永远拿不到」）
++        drop(p1);
++        let got2 = m.acquire_slot_permit_soft(0, StdDuration::from_millis(500)).await.unwrap();
++        assert!(got2.is_some(), "空出来就该拿到");
++        assert_eq!(m.slots_snapshot()[0].in_flight, 1);
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 +    async fn test_slot_permit_queues_then_times_out_and_releases() {
 +        let (m, dir) = slot_mgr(1, 2);
 +        m.set_slot_lock(0, Some(2)).unwrap();
@@ -12468,6 +13620,132 @@
 +    }
 +
 +    #[test]
++    fn test_set_allow_opus_hot_and_persists() {
++        // 11-04：改 PVC 里 credentials.json 不可靠（旧 pod 退出前会反写覆盖）⇒ 必须有热生效 API
++        let (m, dir) = slot_mgr(1, 2);
++        let id = m.slots_snapshot()[0].account_id.unwrap();
++        m.set_allow_opus(id, true).unwrap();
++        assert!(m.entries.lock().iter().find(|e| e.id == id).unwrap().credentials.allow_opus, "内存立刻生效");
++        // 落盘：重读文件能看到
++        let txt = std::fs::read_to_string(dir.join("credentials.json")).unwrap();
++        let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
++        let hit = v.as_array().unwrap().iter().any(|c| c.get("allowOpus").and_then(|x| x.as_bool()) == Some(true));
++        assert!(hit, "allowOpus 必须落盘，否则重启就丢");
++        // 取消也要落盘（否则重启又把它捡回来）
++        m.set_allow_opus(id, false).unwrap();
++        let txt2 = std::fs::read_to_string(dir.join("credentials.json")).unwrap();
++        let v2: serde_json::Value = serde_json::from_str(&txt2).unwrap();
++        let still = v2.as_array().unwrap().iter().any(|c| c.get("allowOpus").and_then(|x| x.as_bool()) == Some(true));
++        assert!(!still, "取消后盘上不该还是 true");
++        assert!(m.set_allow_opus(999999, true).is_err(), "不存在的号要报错");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_assign_slot_account_manual_swap() {
++        // 11-04：原来只能自动补号，没法把「某个特定号」放到「某个特定槽」
++        let (m, dir) = slot_mgr(2, 4);
++        let before = m.slots_snapshot()[0].account_id.unwrap();
++        let other = m.slots_snapshot()[1].account_id.unwrap();
++        // 挑一个不在槽上的号
++        let on_slots: Vec<u64> = m.slots_snapshot().iter().filter_map(|s| s.account_id).collect();
++        let spare = (1..=4u64).find(|id| !on_slots.contains(id)).expect("要有冷备号");
++        let replaced = m.assign_slot_account(0, spare).unwrap();
++        assert_eq!(replaced, Some(before), "返回被换下的旧号");
++        assert_eq!(m.slots_snapshot()[0].account_id, Some(spare), "槽0 换成指定号");
++        // 旧号不进退役名单（手动换 ≠ 额度用尽/被限）⇒ 还能再上槽
++        let again = m.assign_slot_account(0, before).unwrap();
++        assert_eq!(again, Some(spare));
++        assert_eq!(m.slots_snapshot()[0].account_id, Some(before), "换回来也行");
++        // 已在别的槽上的号不能抢
++        assert!(m.assign_slot_account(0, other).is_err(), "号在别的槽上应报错");
++        // 同槽重复指定 = 空操作
++        assert_eq!(m.assign_slot_account(0, before).unwrap(), None);
++        // 不存在的号 / 槽
++        assert!(m.assign_slot_account(0, 99999).is_err());
++        assert!(m.assign_slot_account(99, before).is_err());
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
++    fn test_set_all_slot_locks_uniform_and_unlock() {
++        // 「统一并发」按钮：一次把所有槽锁成同一个值；锁定值不参与权重缩放 ⇒ 每槽都真的是这个数
++        let (m, dir) = slot_mgr(3, 3);
++        {
++            let mut rt = m.slots.lock();
++            rt.states[0].weight = 10;
++            rt.states[1].weight = 1;
++        }
++        let n = m.set_all_slot_locks(Some(6)).unwrap();
++        assert_eq!(n, 3);
++        for s in m.slots_snapshot() {
++            assert!(s.locked, "每个槽都应锁定");
++            assert_eq!(s.limit, 6, "权重 10 / 1 的槽也必须是 6，不被缩放");
++        }
++        // 落盘：换版 / 重启后仍是 6（11-02 之前只在内存，换个版 36 槽的锁 6 就悄悄回到自动调节）
++        let txt = std::fs::read_to_string(dir.join("kiro_slots.json")).unwrap();
++        let f: crate::kiro::slots::SlotsFile = serde_json::from_str(&txt).unwrap();
++        assert_eq!(f.locked_limits.len(), 3, "三个槽的锁定值都落盘");
++        assert!(f.locked_limits.values().all(|v| *v == 6));
++        let names: Vec<String> = m.slots_snapshot().iter().map(|s| s.name.clone()).collect();
++        let reloaded = crate::kiro::slots::SlotsRuntime::new(&names, 16, f);
++        assert!(reloaded.states.iter().all(|s| s.locked_limit == Some(6)), "重启后恢复锁定值");
++        assert!(m.set_all_slot_locks(Some(0)).is_err(), "0 应被拒");
++        assert!(m.set_all_slot_locks(Some(65)).is_err(), "65 应被拒");
++        // 解锁后回到自动调节（权重重新生效）
++        m.set_all_slot_locks(None).unwrap();
++        assert!(m.slots_snapshot().iter().all(|s| !s.locked), "全部解锁");
++        let txt = std::fs::read_to_string(dir.join("kiro_slots.json")).unwrap();
++        let f: crate::kiro::slots::SlotsFile = serde_json::from_str(&txt).unwrap();
++        assert!(f.locked_limits.is_empty(), "解锁也要落盘，重启不会把锁捡回来");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++    async fn test_take_idle_alt_permit_skips_excluded_and_full() {
++        // 固定槽失败后借别的空闲槽：排除自己那个槽，满的槽不借；全满 ⇒ None
++        let (m, dir) = slot_mgr(2, 3);
++        let name0 = m.slots_snapshot()[0].name.clone();
++        let name1 = m.slots_snapshot()[1].name.clone();
++        m.set_all_slot_locks(Some(1)).unwrap();
++        let p1 = m.acquire_slot_permit(1).await.unwrap();
++        assert!(m.take_idle_alt_permit(&[name0.clone()]).is_none(), "排除槽0且槽1已满 ⇒ 借不到");
++        drop(p1);
++        let got = m.take_idle_alt_permit(&[name0.clone()]).expect("槽1空闲时应能借到");
++        assert_eq!(got.slot_name(), name1, "只能借到没被排除的槽");
++        assert_eq!(m.slots_snapshot()[1].in_flight, 1, "借用占一个在途名额");
++        drop(got);
++        assert_eq!(m.slots_snapshot()[1].in_flight, 0, "放手后名额归还");
++        // 🔴 有人排队的槽不外借：否则借走的是刚腾出的位子，插在排队的人前面，
++        // 被借的槽自己排到预算用尽回 529（11-02 jp-172.235.204.67 实测）
++        {
++            let mut rt = m.slots.lock();
++            rt.states[1].queued = 1;
++        }
++        assert!(m.take_idle_alt_permit(&[name0.clone()]).is_none(), "有人排队的槽不外借");
++        {
++            let mut rt = m.slots.lock();
++            rt.states[1].queued = 0;
++        }
++        assert!(m.take_idle_alt_permit(&[name0.clone()]).is_some(), "队列空了才可借");
++        // 刚撞 429 的槽不外借（正被上游限速，借过去还是 429）
++        m.slot_report_429(1, true, None);
++        assert!(m.take_idle_alt_permit(&[name0.clone()]).is_none(), "刚撞 429 的槽不外借");
++        {
++            let mut rt = m.slots.lock();
++            rt.states[1].last_429 = Some(Instant::now() - ALT_SKIP_AFTER_429 - StdDuration::from_secs(1));
++            rt.states[1].locked_limit = Some(1);
++        }
++        assert!(m.take_idle_alt_permit(&[name0.clone()]).is_some(), "过了冷却期可以借");
++        // 不接新人 / 专属槽不外借
++        let mut cfgs = m.get_slot_configs();
++        cfgs[1].accept_new = false;
++        m.set_slot_configs(cfgs).unwrap();
++        assert!(m.take_idle_alt_permit(&[name0.clone()]).is_none(), "不接新人的槽不外借");
++        std::fs::remove_dir_all(dir).ok();
++    }
++
++    #[test]
 +    fn test_slot_429_lowers_limit_and_counts() {
 +        let (m, dir) = slot_mgr(2, 3);
 +        m.slot_report_429(0, true, None);
@@ -12479,16 +13757,13 @@
 +        std::fs::remove_dir_all(dir).ok();
 +    }
 +
-+    #[test]
+     #[test]
      fn test_window_settings_validate_and_persist() {
          let config_path = std::env::temp_dir().join(format!("kiro-window-{}.json", uuid::Uuid::new_v4()));
-         std::fs::write(&config_path, r#"{"loadBalancingMode":"window"}"#).unwrap();
-@@ -2441,6 +5071,65 @@
-         credentials.refresh_token = Some("a".repeat(150));
-         let result = validate_refresh_token(&credentials);
+@@ -2443,6 +5480,65 @@ mod tests {
          assert!(result.is_ok());
-+    }
-+
+     }
+ 
 +    /// 无缝换版：交接后禁止一切写盘。旧进程的收尾期和新进程重叠，
 +    /// 这里再写会覆盖新进程的数据（10-26 review 发现的第 2 个问题）。
 +    #[tokio::test(flavor = "multi_thread")]
@@ -12546,12 +13821,14 @@
 +            after
 +        );
 +        let _ = std::fs::remove_dir_all(&dir);
-     }
- 
++    }
++
      #[test]
+     fn test_sha256_hex() {
+         let result = sha256_hex("test");
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -31,6 +31,11 @@
+@@ -31,6 +31,11 @@ async fn main() {
          )
          .init();
  
@@ -12563,7 +13840,7 @@
      // 加载配置
      let config_path = args
          .config
-@@ -141,12 +146,37 @@
+@@ -141,12 +146,37 @@ async fn main() {
          std::process::exit(1);
      });
      let token_manager = Arc::new(token_manager);
@@ -12603,7 +13880,7 @@
  
      // 初始化 count_tokens 配置
      token::init_config(token::CountTokensConfig {
-@@ -157,11 +187,15 @@
+@@ -157,11 +187,15 @@ async fn main() {
          tls_backend: config.tls_backend,
      });
  
@@ -12621,7 +13898,7 @@
      );
  
      // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
-@@ -179,7 +213,7 @@
+@@ -179,7 +213,7 @@ async fn main() {
          } else {
              let admin_service =
                  admin::AdminService::new(token_manager.clone(), endpoint_names.clone());
@@ -12630,7 +13907,7 @@
              let admin_app = admin::create_admin_router(admin_state);
  
              // 创建 Admin UI 路由
-@@ -215,5 +249,165 @@
+@@ -215,5 +249,165 @@ async fn main() {
      }
  
      let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
@@ -12799,7 +14076,7 @@
  }
 --- a/src/model/config.rs
 +++ b/src/model/config.rs
-@@ -71,6 +71,58 @@
+@@ -71,6 +71,64 @@ pub struct Config {
      #[serde(default = "default_window_cooldown_secs")]
      pub window_cooldown_secs: u64,
  
@@ -12839,6 +14116,12 @@
 +    #[serde(default)]
 +    pub slot_unbound_key_aliases: Vec<String>,
 +
++    /// 槽位：在自己的槽上排队超过这么多毫秒，就去借一个空闲槽把请求发出去（0 = 关闭，一直排）。
++    /// 治「自己的槽满了在排队、旁边一堆槽空着」：11-02 实测槽2 满载 6/6 还排 4 个人，同时 22 个槽全空。
++    /// 借号这次请求的 prompt cache 不命中 ⇒ 别设太小，否则正常的短暂排队也会被抢走缓存。
++    #[serde(default = "default_slot_queue_borrow_ms")]
++    pub slot_queue_borrow_ms: u64,
++
 +    /// 槽位：opus 空回复时用 runtime 入口探测 CONTENT_FILTERED，确认被限就换号
 +    #[serde(default = "default_true")]
 +    pub slot_restricted_probe: bool,
@@ -12858,7 +14141,7 @@
      #[serde(default = "default_tls_backend")]
      pub tls_backend: TlsBackend,
  
-@@ -183,6 +235,108 @@
+@@ -183,6 +241,112 @@ fn default_window_cooldown_secs() -> u64 {
      60
  }
  
@@ -12872,6 +14155,10 @@
 +
 +fn default_slot_max_in_flight() -> u32 {
 +    16
++}
++
++fn default_slot_queue_borrow_ms() -> u64 {
++    3000
 +}
 +
 +fn default_slot_queue_timeout_secs() -> u64 {
@@ -12967,7 +14254,7 @@
  fn default_extract_thinking() -> bool {
      true
  }
-@@ -208,6 +362,19 @@
+@@ -208,6 +372,20 @@ impl Default for Config {
              window_min_k: default_window_min_k(),
              window_max_k: default_window_max_k(),
              window_cooldown_secs: default_window_cooldown_secs(),
@@ -12980,6 +14267,7 @@
 +            slot_request_budget_secs: default_slot_request_budget_secs(),
 +            slot_heavy_ratio: default_slot_heavy_ratio(),
 +            slot_unbound_key_aliases: Vec::new(),
++            slot_queue_borrow_ms: default_slot_queue_borrow_ms(),
 +            slot_restricted_probe: true,
 +            test_upstream_override: None,
 +            slot_gray_aliases: Vec::new(),

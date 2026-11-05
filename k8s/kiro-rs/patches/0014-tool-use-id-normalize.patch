@@ -1,0 +1,179 @@
+diff -ruN -x target -x node_modules -x dist base/src/anthropic/converter.rs work/src/anthropic/converter.rs
+--- base/src/anthropic/converter.rs	2026-10-27 09:54:03
++++ work/src/anthropic/converter.rs	2026-10-27 14:18:24
+@@ -495,6 +495,7 @@
+                         }
+                         "tool_result" => {
+                             if let Some(tool_use_id) = block.tool_use_id {
++                                let tool_use_id = normalize_tool_use_id(&tool_use_id);
+                                 // tool_result 内容中可能夹带 image 块（例如读取图片文件的工具），
+                                 // 需一并提取，否则图片会被静默丢弃
+                                 let (result_content, result_images) =
+@@ -721,6 +722,36 @@
+     format!("{}_{}", prefix, hash_suffix)
+ }
+ 
++/// Kiro API tool_use_id 最大长度（实测 64 过、65 起 400 Invalid tool use format）
++const TOOL_USE_ID_MAX_LEN: usize = 64;
++
++/// 把 tool_use_id 规整成 Kiro 接受的形状：只含 `[A-Za-z0-9_-]` 且 ≤ 64 字符
++/// （实测换行/空格/点/冒号/制表符/中文、或超过 64 字符，整单 400 Invalid tool use format）。
++///
++/// 客户端（如 Cursor 跨模型续聊）会把别家模型的 id 带进历史（`call-<uuid>-N\nfc_…` 共 81 字符），
++/// 原样转发整单被拒 ⇒ LiteLLM 兜底到别的模型。
++/// 合法 id 原样不动；不合法的 ⇒ 非法字符换 `_`、截前缀 + `_` + 原 id 的 8 位 SHA256 hex
++/// （按原 id 算哈希，只差非法字符或尾巴的两个 id 不会撞）。
++/// tool_use 与 tool_result 两侧走同一函数，配对不变；只改历史里的 id，
++/// 本轮新生成的 id 由上游下发，客户端无需反向映射。
++fn normalize_tool_use_id(id: &str) -> String {
++    let valid_char = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
++    if id.len() <= TOOL_USE_ID_MAX_LEN && id.chars().all(valid_char) {
++        return id.to_string();
++    }
++    let mut hasher = Sha256::new();
++    hasher.update(id.as_bytes());
++    let hash_hex = format!("{:x}", hasher.finalize());
++    let hash_suffix = &hash_hex[..8];
++    // 55 prefix + 1 underscore + 8 hash = 64（替换后全是 ASCII，按字符截即按字节截）
++    let prefix: String = id
++        .chars()
++        .map(|c| if valid_char(c) { c } else { '_' })
++        .take(TOOL_USE_ID_MAX_LEN - 1 - 8)
++        .collect();
++    format!("{}_{}", prefix, hash_suffix)
++}
++
+ /// 如果名称超长则缩短，并记录映射（short → original）
+ fn map_tool_name(name: &str, tool_name_map: &mut HashMap<String, String>) -> String {
+     if name.len() <= TOOL_NAME_MAX_LEN {
+@@ -983,7 +1014,10 @@
+                             if let (Some(id), Some(name)) = (block.id, block.name) {
+                                 let input = block.input.unwrap_or(serde_json::json!({}));
+                                 let mapped_name = map_tool_name(&name, tool_name_map);
+-                                tool_uses.push(ToolUseEntry::new(id, mapped_name).with_input(input));
++                                tool_uses.push(
++                                    ToolUseEntry::new(normalize_tool_use_id(&id), mapped_name)
++                                        .with_input(input),
++                                );
+                             }
+                         }
+                         // 上一轮服务端搜索的回显块：srvtoolu id 从未进过 Kiro 历史，
+@@ -1602,6 +1636,118 @@
+             }
+         }
+         assert!(found, "应该在历史中找到 tool_use");
++    }
++
++    #[test]
++    fn test_normalize_tool_use_id_short_passthrough() {
++        assert_eq!(normalize_tool_use_id("toolu_01"), "toolu_01");
++        let id64 = "a".repeat(64);
++        assert_eq!(normalize_tool_use_id(&id64), id64);
++        assert_eq!(normalize_tool_use_id("a-b_C9"), "a-b_C9");
++    }
++
++    #[test]
++    fn test_normalize_tool_use_id_invalid_chars() {
++        let valid = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
++        for bad in ["call\n1", "call 1", "call.1", "call:1", "call\t1", "调用1"] {
++            let n = normalize_tool_use_id(bad);
++            assert!(valid(&n) && n.len() <= TOOL_USE_ID_MAX_LEN, "{bad:?} -> {n:?}");
++        }
++        // 只差一个非法字符的两个 id 不能撞（按原 id 算哈希）
++        assert_ne!(normalize_tool_use_id("call.1"), normalize_tool_use_id("call:1"));
++    }
++
++    #[test]
++    fn test_normalize_tool_use_id_long_shortened() {
++        let cursor_id = "call-4e0795d0-a4da-4595-96fd-1230a3a85030-27\nfc_p53Lqy3-2byqsH-00cb1185-aws_uw2_4";
++        let a = normalize_tool_use_id(cursor_id);
++        assert!(a.len() <= TOOL_USE_ID_MAX_LEN, "len={}", a.len());
++        assert_eq!(a, normalize_tool_use_id(cursor_id), "必须确定性");
++        // 前缀相同、尾部不同的两个长 id 不能撞
++        let other = cursor_id.replace("aws_uw2_4", "aws_uw2_5");
++        assert_ne!(a, normalize_tool_use_id(&other));
++        assert!(!a.contains('\n'));
++        let cjk = "调".repeat(40);
++        let c = normalize_tool_use_id(&cjk);
++        assert!(c.len() <= TOOL_USE_ID_MAX_LEN && c.is_ascii());
++    }
++
++    #[test]
++    fn test_long_tool_use_id_normalized_on_both_sides() {
++        use super::super::types::{Message as AnthropicMessage, Tool as AnthropicTool};
++
++        let id1 = "call-4e0795d0-a4da-4595-96fd-1230a3a85030-27\nfc_p53Lqy3-2byqsH-00cb1185-aws_uw2_4";
++        let id2 = "call-cfb9ee69-344d-40f7-bcbf-27d1e760e40b-42\nfc_p53MJrK-2byqsH-2072307d-aws_uw2_0";
++        let mut schema = std::collections::HashMap::new();
++        schema.insert("type".to_string(), serde_json::json!("object"));
++        schema.insert("properties".to_string(), serde_json::json!({}));
++
++        let req = MessagesRequest {
++            model: "claude-sonnet-4-5-20250929".to_string(),
++            max_tokens: 1024,
++            messages: vec![
++                AnthropicMessage { role: "user".to_string(), content: serde_json::json!("ls") },
++                AnthropicMessage {
++                    role: "assistant".to_string(),
++                    content: serde_json::json!([{"type": "tool_use", "id": id1, "name": "Shell", "input": {}}]),
++                },
++                AnthropicMessage {
++                    role: "user".to_string(),
++                    content: serde_json::json!([{"type": "tool_result", "tool_use_id": id1, "content": "a.txt"}]),
++                },
++                AnthropicMessage {
++                    role: "assistant".to_string(),
++                    content: serde_json::json!([{"type": "tool_use", "id": id2, "name": "Shell", "input": {}}]),
++                },
++                AnthropicMessage {
++                    role: "user".to_string(),
++                    content: serde_json::json!([{"type": "tool_result", "tool_use_id": id2, "content": "b.txt"}]),
++                },
++            ],
++            system: None,
++            stream: false,
++            tools: Some(vec![AnthropicTool {
++                name: "Shell".to_string(),
++                description: "Run a shell command".to_string(),
++                input_schema: schema,
++                tool_type: None,
++                max_uses: None,
++            }]),
++            thinking: None,
++            tool_choice: None,
++            output_config: None,
++            metadata: None,
++        };
++
++        let result = convert_request(&req).unwrap();
++        let (n1, n2) = (normalize_tool_use_id(id1), normalize_tool_use_id(id2));
++
++        // 历史：两个 tool_use 都在（没被当孤立删掉）且是短 id；历史里的 tool_result 也是短 id
++        let mut uses = Vec::new();
++        let mut hist_results = Vec::new();
++        for msg in &result.conversation_state.history {
++            match msg {
++                Message::Assistant(a) => {
++                    for tu in a.assistant_response_message.tool_uses.iter().flatten() {
++                        uses.push(tu.tool_use_id.clone());
++                    }
++                }
++                Message::User(u) => {
++                    for r in &u.user_input_message.user_input_message_context.tool_results {
++                        hist_results.push(r.tool_use_id.clone());
++                    }
++                }
++            }
++        }
++        assert_eq!(uses, vec![n1.clone(), n2.clone()]);
++        assert_eq!(hist_results, vec![n1]);
++        // 当前消息的 tool_result
++        let cur = &result.conversation_state.current_message.user_input_message
++            .user_input_message_context.tool_results;
++        assert_eq!(cur.iter().map(|r| r.tool_use_id.clone()).collect::<Vec<_>>(), vec![n2]);
++        for id in uses.iter() {
++            assert!(id.len() <= TOOL_USE_ID_MAX_LEN);
++        }
+     }
+ 
+     #[test]

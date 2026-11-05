@@ -217,6 +217,48 @@ RULES: tuple = (
 _CRED_RULES = tuple(r for r in RULES if r.credential)
 
 
+# ---------------------------------------------------------------- 身份（只管响应方向）
+#
+# 2026-11-05：Kiro 上游在服务端注入自己的系统提示，经 kiro 的回复会自称「我是 Kiro，一个 AI 驱动的
+# 开发环境…」（198 SpendLogs 30 分钟：aws-* 3296 个里 13 个；非 kiro 6243 个里 0 个；抽样多数请求里
+# 根本没有 kiro 字样）。用户硬要求：返回给员工的内容里绝不出现模型自称 Kiro。
+#
+# 只抓「自称」句式（我是/I'm/I am/This is … Kiro），不抓 Kiro 这个词本身：员工的代码库里大量
+# kiro-pool.py / kiro_common.py / kiro.rs，模型必须能正常读写提及。词后面跟 - _ / 或 .字母 ⇒ 是文件名/
+# 标识符，放过。只替换「Kiro」这个词，句子其余部分原样（「我是 Kiro，一个 AI 驱动的开发环境」⇒
+# 「我是 AI 编程助手，一个 AI 驱动的开发环境」读起来仍通顺）。
+#
+# - 不进请求方向：请求里的「我是 Kiro」是员工自己的话或历史，改了反而让模型对不上上下文。
+# - 不进 RULES：RULES 也被请求方向用。身份规则单独挂在响应方向的规则集上，所有 key 都生效
+#   （agent key 原来只跑 3-* 凭证规则，这条也要跑 —— 员工看到的就是 agent 的回复）。
+# - 不吃「示例」白名单：那个白名单只给非凭证规则用，身份这条按凭证同样处理（Rule.credential 由
+#   名字前缀决定，这里手动置 True）。
+# - 关：SEC_REDACT_IDENTITY_DISABLED=1。
+IDENTITY_LABEL = os.environ.get("SEC_REDACT_IDENTITY_LABEL", "AI 编程助手")
+
+_IDENTITY_RE = re.compile(
+    r"(?P<pre>(?:我是|我叫|我就是|本助手是|I\s*['’]\s*m|I\s+am|This\s+is|my\s+name\s+is)\s*(?:一个\s*)?)"
+    r"Kiro(?![\w\-/]|\.[A-Za-z0-9])",
+    re.I,
+)
+
+
+def _identity_replace(m):
+    pre = m.group("pre")
+    # 英文句式换英文标签，避免「I'm AI 编程助手」这种中英混搭
+    if re.match(r"(?i)I\s*['’]\s*m|I\s+am|This\s+is|my\s+name\s+is", pre):
+        return pre + "an AI coding assistant"
+    return pre + IDENTITY_LABEL
+
+
+_IDENTITY_RULE = Rule("9-身份", _IDENTITY_RE, _identity_replace)
+_IDENTITY_RULE.credential = True  # 不吃「示例」白名单；见上方注释
+
+
+def _identity_disabled() -> bool:
+    return os.environ.get("SEC_REDACT_IDENTITY_DISABLED") == "1"
+
+
 def _is_example(text: str, start: int) -> bool:
     return bool(_EXAMPLE_MARK.search(text[max(0, start - 30): start]))
 
@@ -300,6 +342,14 @@ def _rules_for(user_api_key_dict) -> tuple:
     if alias.startswith(_agent_prefixes()):
         return _CRED_RULES
     return RULES
+
+
+def _response_rules_for(user_api_key_dict) -> tuple:
+    """响应方向 = 请求方向那套 + 身份规则（所有 key）。请求方向不带身份规则。"""
+    base = _rules_for(user_api_key_dict)
+    if _identity_disabled():
+        return base
+    return base + (_IDENTITY_RULE,)
 
 
 def _scan_bounded_uncached(text: str, rules) -> list:
@@ -602,7 +652,7 @@ class SecRedact(CustomLogger):
         try:
             if _disabled() or response is None:
                 return None
-            rules = _rules_for(user_api_key_dict)
+            rules = _response_rules_for(user_api_key_dict)
             cid = _call_id(data)
             slots = _resp_text_slots(response)
             for get, put in slots:
@@ -627,13 +677,13 @@ class SecRedact(CustomLogger):
             # 影子模式：原样转发每个事件，另起一条只读的扫描（扫描本身出任何错都不影响这条流）。
             # 不复用下面的改写路径——那条路径为了跨片段替换要缓冲、改字段，出错会打断用户的流；
             # 影子期的目标只是数「会命中多少」，必须做到对用户零影响。
-            scanner = _ShadowScanner(_rules_for(user_api_key_dict), user_api_key_dict, _call_id(request_data))
+            scanner = _ShadowScanner(_response_rules_for(user_api_key_dict), user_api_key_dict, _call_id(request_data))
             async for item in response:
                 scanner.observe(item)
                 yield item
             scanner.finish()
             return
-        rules = _rules_for(user_api_key_dict)
+        rules = _response_rules_for(user_api_key_dict)
         buf = _Bufs(rules, user_api_key_dict, _call_id(request_data))
         last_delta: dict = {}
         sse = b""
@@ -697,14 +747,25 @@ class SecRedact(CustomLogger):
                         final = bool(_get(ch, "finish_reason"))
                         if not isinstance(content, str) and not final:
                             continue
-                        out = buf(("c", _get(ch, "index") or 0)).feed(content if isinstance(content, str) else "", final=final)
+                        ck = ("c", _get(ch, "index") or 0)
+                        # 留一份外壳模板：流中途断掉时要靠它把尾巴补发出去
+                        if isinstance(content, str):
+                            last_delta[ck] = item
+                        out = buf(ck).feed(content if isinstance(content, str) else "", final=final)
                         _set(delta, "content", out if (out or isinstance(content, str)) else content)
                     yield item
                     continue
                 yield item
         except Exception as exc:
+            # 上游断开/报错：先把扣着的正文放干再抛，否则短回复会被整句吞掉
             _log.warning("sec_redact: ERROR stream %r", exc)
+            for out in _drain_tails(buf, last_delta):
+                yield out
             raise
+        # 流正常结束：收尾事件可能压根没来（chat 缺 finish_reason / Responses 缺 .done /
+        # anthropic 末尾残留不完整事件），这些都不会触发各形态的放尾巴分支
+        for out in _drain_tails(buf, last_delta):
+            yield out
         if sse:
             yield sse
 
@@ -804,6 +865,69 @@ def _anthropic_delta(idx, text: str) -> bytes:
     return b"event: content_block_delta\ndata: " + json.dumps(d, ensure_ascii=False).encode() + b"\n\n"
 
 
+def _drain_tails(buf: "_Bufs", last_delta: dict | None = None):
+    """流以任何方式结束时，把三种形态缓冲里扣着的尾巴全部放干。
+
+    2026-11-05：`_HOLDBACK` 让每一路正文永远扣住最后 160 字符，原先只在各形态的
+    「收尾事件」上放（anthropic: ``content_block_stop`` / ``message_delta`` /
+    ``message_stop``；chat: ``finish_reason``；Responses: ``*.done``）。
+    一旦流**没走到**那个收尾事件就结束（上游断开走 except、末尾残留不完整事件、
+    收尾事件 JSON 解析失败走 passthrough），扣着的字就永久丢失 ——
+    短于 160 字符的回复会被整句吞掉，用户看到半句或空回复。
+
+    三种形态的 buf key 形状不同，按 key 分派回各自的事件外壳：
+      * ``("a", idx)``            → anthropic SSE 字节
+      * ``("c", index)``          → chat ModelResponseStream（照 last_delta 复制外壳）
+      * ``(et, item_id, index)``  → Responses 事件（照 last_delta 复制外壳）
+    """
+    out = []
+    last_delta = last_delta or {}
+    for key, b in list(buf.by_key.items()):
+        try:
+            tail = b.feed("", final=True)
+        except Exception as exc:  # 放干本身绝不能再打断流
+            _log.warning("sec_redact: drain failed key=%r %r", key, exc)
+            continue
+        if not tail:
+            continue
+        try:
+            if key[0] == "a":
+                out.append(_anthropic_delta(key[1], tail))
+            elif key[0] == "c":
+                tmpl = last_delta.get(key)
+                if tmpl is None:
+                    _log.warning("sec_redact: drain chat tail dropped (no template) key=%r", key)
+                    continue
+                extra = copy.deepcopy(tmpl)
+                for ch in (_get(extra, "choices") or []):
+                    delta = _get(ch, "delta")
+                    if delta is not None:
+                        _set(delta, "content", tail)
+                    # 放干出来的是补发片段，不再带结束标记
+                    if _get(ch, "finish_reason") is not None:
+                        _set(ch, "finish_reason", None)
+                out.append(extra)
+            else:
+                tmpl = last_delta.get(key)
+                if tmpl is None:
+                    _log.warning("sec_redact: drain responses tail dropped (no template) key=%r", key)
+                    continue
+                extra = copy.deepcopy(tmpl)
+                _set(extra, "type", key[0])
+                _set(extra, "delta", tail)
+                if isinstance(extra, dict):
+                    extra.pop("text", None)
+                    extra.pop("logprobs", None)
+                elif isinstance(_get(extra, "text"), str):
+                    _set(extra, "text", "")
+                out.append(extra)
+        except Exception as exc:
+            _log.warning("sec_redact: drain emit failed key=%r %r", key, exc)
+    if out:
+        _log.warning("sec_redact: drained %d tail(s) at stream end", len(out))
+    return out
+
+
 def _rewrite_anthropic_event(ev: bytes, buf: "_Bufs"):
     """一个 anthropic SSE 事件 → 0~2 个事件。只碰 text_delta；收尾事件前把尾巴放出去。"""
     try:
@@ -833,7 +957,20 @@ def _rewrite_anthropic_event(ev: bytes, buf: "_Bufs"):
                         yield _anthropic_delta(key[1], tail)
         yield ev
     except Exception as exc:
+        # 事件本身坏了（JSON 截断等）：无法判断它是不是收尾事件，
+        # 但宁可早放也不能吞字 —— 扣着的尾巴在这里一并放掉，再原样转发坏事件。
         _log.warning("sec_redact: anthropic event passthrough %r", exc)
+        # 这里只有 anthropic 一路在跑（字节流形态），放干它自己的尾巴即可
+        for key, b in list(buf.by_key.items()):
+            if key[0] != "a":
+                continue
+            try:
+                tail = b.feed("", final=True)
+            except Exception as e2:
+                _log.warning("sec_redact: drain failed key=%r %r", key, e2)
+                continue
+            if tail:
+                yield _anthropic_delta(key[1], tail)
         yield ev
 
 

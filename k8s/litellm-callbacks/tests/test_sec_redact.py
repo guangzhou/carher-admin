@@ -541,5 +541,315 @@ class StreamAnthropicTest(unittest.TestCase):
         self.assertLess(out.index("短句".encode()), out.index(b"content_block_stop"))
 
 
+class StreamAnthropicNoTerminalEventTest(unittest.TestCase):
+    """流没走到收尾事件就结束 ⇒ _HOLDBACK 扣着的正文必须放干（2026-11-05）。
+
+    `_HOLDBACK` 让每路正文永远扣住最后 160 字符，原先只在 content_block_stop /
+    message_delta / message_stop 上放。短于 160 字符的回复整句都在缓冲里，
+    一旦流没走到这三种事件（上游断开、末尾残留不完整事件、收尾事件 JSON 坏掉），
+    用户就看到半句或空回复。
+
+    上面的 StreamAnthropicTest.run_bytes 永远补发 message_delta + message_stop，
+    所以兜底始终生效 —— 这几个场景是它覆盖不到的。
+    """
+
+    SHORT = "等一下，这组凭据有个重要发现——先核"
+
+    @staticmethod
+    def sse(obj, name):
+        return f"event: {name}\ndata: {json.dumps(obj, ensure_ascii=False)}\n\n".encode()
+
+    def _head(self, text, seg=6):
+        evs = [self.sse({"type": "message_start", "message": {}}, "message_start"),
+               self.sse({"type": "content_block_start", "index": 0,
+                         "content_block": {"type": "text", "text": ""}}, "content_block_start")]
+        for i in range(0, len(text), seg):
+            evs.append(self.sse({"type": "content_block_delta", "index": 0,
+                                 "delta": {"type": "text_delta", "text": text[i:i + seg]}},
+                                "content_block_delta"))
+        return evs
+
+    def _text_of(self, out: bytes) -> str:
+        text = ""
+        for ev in out.split(b"\n\n"):
+            for line in ev.split(b"\n"):
+                if line.startswith(b"data:"):
+                    try:
+                        o = json.loads(line[5:])
+                    except Exception:
+                        continue
+                    if o.get("type") == "content_block_delta":
+                        text += o.get("delta", {}).get("text", "")
+        return text
+
+    def _drive(self, chunks, raise_at_end=False):
+        async def up():
+            for c in chunks:
+                yield c
+            if raise_at_end:
+                raise RuntimeError("upstream closed")
+
+        async def collect():
+            got = []
+            try:
+                async for item in M.sec_redact.async_post_call_streaming_iterator_hook(
+                        AGENT, up(), {}):
+                    if isinstance(item, (bytes, bytearray)):
+                        got.append(bytes(item))
+            except RuntimeError:
+                pass  # 断流本身照旧向上抛，这里只验证放干的内容
+            return b"".join(got)
+
+        return run(collect())
+
+    def test_no_terminal_event_at_all(self):
+        out = self._drive(self._head(self.SHORT))
+        self.assertEqual(self._text_of(out), self.SHORT, "没有任何收尾事件时正文不能被吞")
+
+    def test_upstream_raises_before_terminal_event(self):
+        out = self._drive(self._head(self.SHORT), raise_at_end=True)
+        self.assertEqual(self._text_of(out), self.SHORT, "上游断开前扣着的正文必须放干")
+
+    def test_trailing_incomplete_event(self):
+        chunks = self._head(self.SHORT) + [b'event: message_stop\ndata: {"type": "message_s']
+        out = self._drive(chunks)
+        self.assertEqual(self._text_of(out), self.SHORT, "末尾残留不完整事件时正文不能被吞")
+
+    def test_terminal_event_broken_json(self):
+        chunks = self._head(self.SHORT) + ["event: message_stop\ndata: {坏JSON\n\n".encode()]
+        out = self._drive(chunks)
+        self.assertEqual(self._text_of(out), self.SHORT, "收尾事件 JSON 坏掉时正文不能被吞")
+
+    def test_secret_still_redacted_when_stream_breaks(self):
+        """阳性对照：放干不能把脱敏放过去 —— 断流时密钥照样要被替换。"""
+        out = self._drive(self._head(f"key={KEY} 完毕"), raise_at_end=True)
+        self.assertNotIn(KEY.encode(), out, "断流放干时密钥绝不能原样出网")
+        self.assertIn(M.CRED_LABEL, self._text_of(out))
+
+
+class StreamChatNoFinishReasonTest(unittest.TestCase):
+    """chat 形态同一个洞：缺 finish_reason 或上游断开 ⇒ 扣着的正文必须放干。
+
+    StreamChatTest.stream 永远补发 ``chat_chunk("", finish="stop")``，兜底始终生效，
+    所以那组测试覆盖不到这里。
+    """
+
+    SHORT = "等一下，这组凭据有个重要发现——先核"
+
+    def _drive(self, pieces, raise_at_end=False, finish=False, who=AGENT):
+        chunks = [chat_chunk(p) for p in pieces]
+        if finish:
+            chunks.append(chat_chunk("", finish="stop"))
+
+        async def up():
+            for c in chunks:
+                yield c
+            if raise_at_end:
+                raise RuntimeError("upstream closed")
+
+        async def collect():
+            got = []
+            try:
+                async for item in M.sec_redact.async_post_call_streaming_iterator_hook(who, up(), {}):
+                    got.append(item)
+            except RuntimeError:
+                pass
+            return got
+
+        return run(collect())
+
+    def _segs(self, text, n=6):
+        return [text[i:i + n] for i in range(0, len(text), n)]
+
+    def test_no_finish_reason(self):
+        out = self._drive(self._segs(self.SHORT))
+        self.assertEqual(chat_text(out), self.SHORT, "缺 finish_reason 时正文不能被吞")
+
+    def test_upstream_raises(self):
+        out = self._drive(self._segs(self.SHORT), raise_at_end=True)
+        self.assertEqual(chat_text(out), self.SHORT, "上游断开时扣着的正文必须放干")
+
+    def test_secret_still_redacted_on_break(self):
+        out = self._drive(self._segs(f"key={KEY} 完毕", 7), raise_at_end=True)
+        text = chat_text(out)
+        self.assertNotIn(KEY, text, "chat 放干时密钥绝不能原样出网")
+        self.assertIn(M.CRED_LABEL, text)
+
+    def test_no_duplicate_when_finish_reason_present(self):
+        out = self._drive(self._segs(self.SHORT), finish=True)
+        self.assertEqual(chat_text(out), self.SHORT, "有 finish_reason 时放干不应重复下发")
+
+
+class StreamResponsesNoDoneTest(unittest.TestCase):
+    """Responses 形态同一个洞：缺 ``*.done`` 或上游断开 ⇒ 扣着的正文必须放干。"""
+
+    SHORT = "等一下，这组凭据有个重要发现——先核"
+
+    def _drive(self, pieces, raise_at_end=False, with_done=False, who=AGENT):
+        evs = [{"type": "response.output_text.delta", "item_id": "m1",
+                "content_index": 0, "delta": p} for p in pieces]
+        if with_done:
+            evs.append({"type": "response.output_text.done", "item_id": "m1",
+                        "content_index": 0, "text": "".join(pieces)})
+
+        async def up():
+            for e in evs:
+                yield e
+            if raise_at_end:
+                raise RuntimeError("upstream closed")
+
+        async def collect():
+            got = []
+            try:
+                async for item in M.sec_redact.async_post_call_streaming_iterator_hook(who, up(), {}):
+                    got.append(item)
+            except RuntimeError:
+                pass
+            return got
+
+        return run(collect())
+
+    @staticmethod
+    def _text(out):
+        return "".join(e.get("delta") or "" for e in out
+                       if isinstance(e, dict) and e.get("type") == "response.output_text.delta")
+
+    def _segs(self, text, n=6):
+        return [text[i:i + n] for i in range(0, len(text), n)]
+
+    def test_no_done_event(self):
+        out = self._drive(self._segs(self.SHORT))
+        self.assertEqual(self._text(out), self.SHORT, "缺 .done 时正文不能被吞")
+
+    def test_upstream_raises(self):
+        out = self._drive(self._segs(self.SHORT), raise_at_end=True)
+        self.assertEqual(self._text(out), self.SHORT, "上游断开时扣着的正文必须放干")
+
+    def test_secret_still_redacted_on_break(self):
+        out = self._drive(self._segs(f"key={KEY} 完毕", 7), raise_at_end=True)
+        text = self._text(out)
+        self.assertNotIn(KEY, text, "Responses 放干时密钥绝不能原样出网")
+        self.assertIn(M.CRED_LABEL, text)
+
+    def test_no_duplicate_when_done_present(self):
+        out = self._drive(self._segs(self.SHORT), with_done=True)
+        self.assertEqual(self._text(out), self.SHORT, "有 .done 时放干不应重复下发")
+
+
+class IdentityTest(unittest.TestCase):
+    """响应里模型自称 Kiro ⇒ 换掉（2026-11-05 用户硬要求）。
+
+    样本取自 198 SpendLogs 真实回复；合法提及取自本仓真实文件名/说法。
+    """
+
+    REAL = [
+        "我是 Kiro，一个 AI 驱动的开发环境。",
+        "Hi! 我是 Kiro，在 carher-admin 仓库里待命。",
+        "Hi, I'm Kiro. Your message came through",
+        "Hi! I'm Kiro, your AI dev environment",
+        "I am Kiro, an AI assistant",
+        "我是Kiro，一个AI编程助手",
+        "This is Kiro speaking",
+        "I’m Kiro!",
+    ]
+    LEGIT = [
+        "运行 scripts/kiro-pool.py show 看池子",
+        "kiro-rs-slots 只有 1 个副本",
+        "我是 kiro-rs 的维护者吗？不是",
+        "I'm Kiro-curious, let me read kiro_common.py",
+        "我们的 Kiro 账号池现在 947 个号",
+        "上游是 Kiro（AWS），我们改不了它的系统提示",
+        "This is kiro.rs upstream",
+        "this is kiro/src/main.rs",
+        "I am kiro_common's author",
+    ]
+
+    def setUp(self):
+        os.environ.pop("SEC_REDACT_IDENTITY_DISABLED", None)
+
+    def tearDown(self):
+        os.environ.pop("SEC_REDACT_IDENTITY_DISABLED", None)
+
+    def rules(self, who=AGENT):
+        return M._response_rules_for(who)
+
+    def test_real_self_identification_replaced(self):
+        for s in self.REAL:
+            out = M.apply_hits(s, M.scan(s, self.rules()))
+            self.assertNotRegex(out, r"(?i)(我是|I'm|I’m|I am|This is)\s*Kiro", s)
+
+    def test_legit_mentions_untouched(self):
+        for s in self.LEGIT:
+            self.assertEqual(M.apply_hits(s, M.scan(s, self.rules())), s, s)
+
+    def test_rest_of_sentence_kept(self):
+        s = "我是 Kiro，一个 AI 驱动的开发环境。"
+        self.assertEqual(M.apply_hits(s, M.scan(s, self.rules())), f"我是 {M.IDENTITY_LABEL}，一个 AI 驱动的开发环境。")
+        s = "Hi, I'm Kiro. Your message came through"
+        self.assertEqual(M.apply_hits(s, M.scan(s, self.rules())), "Hi, I'm an AI coding assistant. Your message came through")
+
+    def test_applies_to_all_key_types(self):
+        s = "我是 Kiro，一个 AI 编程助手"
+        for who in (AGENT, HER, Who("claude-code-x"), Who("codex-x"), Who("whatever")):
+            self.assertNotIn("Kiro", M.apply_hits(s, M.scan(s, M._response_rules_for(who))), who.key_alias)
+
+    def test_request_direction_untouched(self):
+        """员工自己说「我是 Kiro」或历史里有 ⇒ 不改请求，免得模型对不上上下文。"""
+        data = {"messages": [{"role": "user", "content": "上次你说「我是 Kiro」，为什么？"}]}
+        run(M.sec_redact.async_pre_call_hook(AGENT, None, data, "acompletion"))
+        self.assertEqual(data["messages"][0]["content"], "上次你说「我是 Kiro」，为什么？")
+
+    def test_kill_switch(self):
+        os.environ["SEC_REDACT_IDENTITY_DISABLED"] = "1"
+        s = "我是 Kiro，一个 AI 编程助手"
+        self.assertEqual(M.apply_hits(s, M.scan(s, M._response_rules_for(AGENT))), s)
+
+    def _chat_stream(self, pieces, finish=True):
+        chunks = [chat_chunk(p) for p in pieces] + ([chat_chunk("", finish="stop")] if finish else [])
+        return chat_text(run(_collect(M.sec_redact.async_post_call_streaming_iterator_hook(AGENT, _aiter(chunks), {}))))
+
+    def test_stream_chat_split_across_chunks(self):
+        # 「我是 Ki」「ro，一个」切开 ⇒ 缓冲必须拼上再换
+        text = self._chat_stream(["你好！我是 Ki", "ro，一个 AI ", "驱动的开发环境。"])
+        self.assertNotIn("Kiro", text)
+        self.assertIn(M.IDENTITY_LABEL, text)
+
+    def test_stream_chat_no_finish_reason(self):
+        text = self._chat_stream(["我是 Kiro，", "一个 AI 编程助手"], finish=False)
+        self.assertNotIn("Kiro", text)
+
+    def test_stream_anthropic_split(self):
+        def sse(o, n):
+            return f"event: {n}\ndata: {json.dumps(o, ensure_ascii=False)}\n\n".encode()
+        evs = [sse({"type": "message_start", "message": {}}, "message_start"),
+               sse({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}, "content_block_start")]
+        for p in ["Hi! I'm Ki", "ro, your AI dev ", "environment."]:
+            evs.append(sse({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": p}}, "content_block_delta"))
+        evs += [sse({"type": "content_block_stop", "index": 0}, "content_block_stop"),
+                sse({"type": "message_stop"}, "message_stop")]
+        out = b"".join(run(_collect(M.sec_redact.async_post_call_streaming_iterator_hook(AGENT, _aiter(evs), {}))))
+        text = ""
+        for ev in out.split(b"\n\n"):
+            for line in ev.split(b"\n"):
+                if line.startswith(b"data:"):
+                    o = json.loads(line[5:])
+                    if o.get("type") == "content_block_delta":
+                        text += o["delta"]["text"]
+        self.assertEqual(text, "Hi! I'm an AI coding assistant, your AI dev environment.")
+
+    def test_stream_responses_and_done_copies(self):
+        evs = [{"type": "response.output_text.delta", "item_id": "m1", "content_index": 0, "delta": "我是 Kiro，"},
+               {"type": "response.output_text.delta", "item_id": "m1", "content_index": 0, "delta": "一个开发助手"},
+               {"type": "response.output_text.done", "item_id": "m1", "content_index": 0, "text": "我是 Kiro，一个开发助手"},
+               {"type": "response.completed", "response": {"output": [{"content": [{"type": "output_text", "text": "我是 Kiro，一个开发助手"}]}]}}]
+        out = run(_collect(M.sec_redact.async_post_call_streaming_iterator_hook(AGENT, _aiter(evs), {})))
+        self.assertNotIn("我是 Kiro", json.dumps(out, ensure_ascii=False), "delta 和 done/completed 里的整段副本都要换")
+
+    def test_non_stream_anthropic_dict(self):
+        resp = {"type": "message", "content": [{"type": "text", "text": "我是 Kiro，一个 AI 开发助手。"}]}
+        run(M.sec_redact.async_post_call_success_hook({}, AGENT, resp))
+        self.assertNotIn("Kiro", resp["content"][0]["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

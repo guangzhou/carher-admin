@@ -34,9 +34,20 @@
 #   CARHER_APP_ROOTS        透传给 find_app_mac.sh(台架用)
 
 main() {
-set -euo pipefail
+# 🔴 只用 POSIX 那一套:本文件要在 **bash / sh / zsh / dash** 四种解释器下都对。
+#    文件头写的是 `| bash`,但用户会手改成 `| sh`(Linux 上 /bin/sh 多是 dash),
+#    也会存成文件再用默认 shell(mac 默认 zsh)跑。11-05 四种解释器实测踩到三条:
+#    ① `set -o pipefail` dash 不认 ⇒ **第 37 行就死**,一个中文字都没打出来(rc=2)
+#    ② `${PIPESTATUS[0]}` zsh 没有(它叫 pipestatus、下标从 1)⇒ set -u 下 fatal:
+#       安装器明明装成功了(桩日志已落盘),用户看到的是一行英文 + 非零码
+#    ③ `for t in $ALL_TOOLS` zsh **不分词** ⇒ tool=all 退化成「装一个叫
+#       `codex claude cursor` 的工具」,三个一个都没装(rc=8)
+#    ⇒ 不要再往回写 pipefail / PIPESTATUS / ${x: -4} / $'...' / 数组;
+#      改完务必四种都跑一遍(台架 test_installer.py 的 test_sh_runs_under_* 钉住了)。
+set -eu
 
-BLUE=$'\033[1;34m'; GREEN=$'\033[1;32m'; YELLOW=$'\033[1;33m'; RED=$'\033[1;31m'; NC=$'\033[0m'
+ESC="$(printf '\033')"
+BLUE="${ESC}[1;34m"; GREEN="${ESC}[1;32m"; YELLOW="${ESC}[1;33m"; RED="${ESC}[1;31m"; NC="${ESC}[0m"
 say()  { printf '%s%s%s\n' "$BLUE" "$1" "$NC"; }
 ok()   { printf '%s%s%s\n' "$GREEN" "$1" "$NC"; }
 warn() { printf '%s%s%s\n' "$YELLOW" "$1" "$NC"; }
@@ -58,7 +69,16 @@ while [ $# -gt 0 ]; do
     --code=*) CODE="${1#--code=}"; shift ;;
     --tool) TOOL_ARG="${2:-}"; shift 2 || shift ;;
     --tool=*) TOOL_ARG="${1#--tool=}"; shift ;;
-    *) shift ;;
+    # 🔴 光秃秃一个码也收(用户少复制了 `--code` 那几个字,或自己手敲)——
+    #    修前实测 `bash install.sh AR1` ⇒ rc=1 +「命令里没有安装码」,码明明就在手里。
+    #    不会跟别的参数混:安装码是 **4 组 8 个 base32 字符用 - 连起来**(server.py:1614-1616 实读,
+    #    CODE_ALPHABET=A-Z2-7、CODE_LEN=32 ⇒ 35 个字符),不以 - 开头、不含别的符号。
+    #    只在还没拿到码时认,且形状要对;对不上就继续当没认识的参数忽略(行为和以前一样)。
+    -*) shift ;;
+    *) if [ -z "$CODE" ] && [ "${#1}" -ge 32 ]; then
+         case "$1" in *[!A-Za-z0-9_-]*) ;; *) CODE="$1" ;; esac
+       fi
+       shift ;;
   esac
 done
 
@@ -75,10 +95,27 @@ case "$CODE" in *[!A-Za-z0-9_-]*) die "✗ 安装码格式不对(只应有字母
 case "$(uname -s)" in Darwin) OS=darwin ;; Linux) OS=linux ;;
   *) die "✗ 不支持的系统:$(uname -s)。Windows 请用网页上的 PowerShell 那条命令。" ;; esac
 
-WROOT="$(mktemp -d "${TMPDIR:-/tmp}/carher-install.XXXXXX")"; W="$WROOT"; MNT=""
+# 临时目录建不出来(TMPDIR 指到不存在的盘 / 盘满 / 没权限)原来只会漏出 mktemp 的英文一行
+# (实测:`mktemp: mkdtemp failed on /nonexistent-xyz//carher-install.XXX: No such file or directory`)
+# ⇒ 自己兜一句人话 + 下一步。先试 TMPDIR,不行再退 /tmp(TMPDIR 坏掉是最常见的那种)。
+WROOT="$(mktemp -d "${TMPDIR:-/tmp}/carher-install.XXXXXX" 2>/dev/null || true)"
+if [ -z "$WROOT" ] && [ "${TMPDIR:-/tmp}" != /tmp ]; then
+  WROOT="$(mktemp -d "/tmp/carher-install.XXXXXX" 2>/dev/null || true)"
+  [ -n "$WROOT" ] && warn "↳ 临时目录 ${TMPDIR} 用不了,改用 /tmp。"
+fi
+[ -n "$WROOT" ] || die "✗ 建不了临时目录(${TMPDIR:-/tmp} 和 /tmp 都不行)。
+  常见原因是磁盘满了:用「关于本机 → 储存空间」看一眼,腾出 2GB 以上再回网页重新生成命令。
+  (重启一次电脑也常能清掉临时文件。)"
+W="$WROOT"; MNT=""
 trap '[ -n "$MNT" ] && hdiutil detach -quiet "$MNT" >/dev/null 2>&1; rm -rf "$WROOT"' EXIT
 
-mask_key() { printf '长度 %s,后4位 …%s' "${#1}" "${1: -4}"; }
+# 🔴 取后 4 位不能用 `${1: -4}`:dash 直接 `Bad substitution`(实测)。
+#    用「砍掉最后 4 个字符得到前缀,再把前缀从原串前面去掉」⇒ 四种解释器都对。
+#    key 不足 4 位时 `%????` 不匹配 ⇒ 前缀=原串 ⇒ 后 4 位打空(和原来 bash 行为一致)。
+mask_key() {
+  _mk_t="${1%????}"
+  printf '长度 %s,后4位 …%s' "${#1}" "${1#"$_mk_t"}"
+}
 
 # 从 JSON 里取一个字符串字段。mac 用 plutil(系统自带,能解 \uXXXX);
 # ⛔ mac 上不碰 python3:没装开发者工具时 /usr/bin/python3 是个会弹安装窗口的桩。
@@ -107,7 +144,22 @@ RESP="$(curl -sS --connect-timeout 15 --max-time 30 \
   --data-binary "{\"code\":\"${CODE}\"}" -w '\n__CARHER_HTTP__%{http_code}' \
   "${PORTAL}/api/install-code/redeem" 2>&1 || true)"
 HTTP="${RESP##*__CARHER_HTTP__}"
-BODY="${RESP%__CARHER_HTTP__*}"; BODY="${BODY%$'\n'}"
+# `${BODY%$'\n'}` 的 $'...' 是 bash/zsh 扩展,dash 不认(会原样当成 4 个字符去匹配)⇒ 自己造个换行
+NLCH="$(printf '\nx')"; NLCH="${NLCH%x}"
+BODY="${RESP%__CARHER_HTTP__*}"; BODY="${BODY%"$NLCH"}"
+# curl 自己没跑起来(PATH 里没 curl / 被策略拦)时 -w 那段不会输出 ⇒ HTTP 位置上会是
+# 「command not found」这种**错误原文**。实测原话:`✗ 安装码没换成功(HTTP install.sh: line
+# 108: curl: command not found)` —— 错误信封被当数据读了。⇒ 不是三位数字就按「没发出去」算。
+case "$HTTP" in
+  [0-9][0-9][0-9]) ;;
+  *) command -v curl >/dev/null 2>&1 \
+       || die "✗ 这台电脑上没有 curl,安装脚本发不出请求。
+  macOS 自带 curl,一般是 PATH 被改过:新开一个终端窗口再粘一次那条命令。
+  Linux 请先装 curl(Ubuntu/Debian:sudo apt install curl;CentOS:sudo yum install curl),再回网页重新生成命令。"
+     die "✗ 请求没发出去(本机 curl 报错):$(printf '%s' "$HTTP" | head -c 200)
+  常见原因是公司网络/代理把它拦了。换个网络(手机热点)再试,或把这一屏发给 IT 让他们放行 ${PORTAL}/。
+  然后回网页重新生成一条命令。" ;;
+esac
 if [ "$HTTP" != 200 ]; then
   ERR="$(json_field error "$BODY")"
   if [ -z "$ERR" ]; then  # 不是我们服务的标准回包(网络错/网关错)⇒ 原文截一段,顺手遮掉万一出现的 key
@@ -115,16 +167,45 @@ if [ "$HTTP" != 200 ]; then
   fi
   if [ "$HTTP" = 000 ]; then
     die "✗ 连不上安装服务(${PORTAL}):${ERR}
-  检查网络后,回网页重新生成一条命令再试。"
+  常见原因是公司网络/代理把它拦了。换个网络(手机热点)再试,或把这一屏发给 IT 让他们放行 ${PORTAL}/。
+  然后回网页重新生成一条命令。"
   fi
-  die "✗ 安装码没换成功(HTTP ${HTTP}):${ERR}"
+  # 🔴 这是最常见的失败(码 10 分钟过期、只能用一次),但服务端为了不给撞库对/错信号,
+  #    403/400 回的就是一句「安装码无效或已过期」(server.py 实读:错码/过期/用过**同一个回答**),
+  #    一个「下一步」都没有 ⇒ 下一步由脚本这边补齐,按状态码分开说。
+  case "$HTTP" in
+    400|404|409|410)
+      # HTTP 码保留在原话里:用户截图给运维时那是唯一能分开「码不对 / 已用过 / 过期」的线索
+      die "✗ 这个安装码不能用了(HTTP ${HTTP}:${ERR})。
+  安装码只有 10 分钟有效、而且只能用一次 —— 多半是放久了,或者这条命令已经跑过一次。
+  下一步:回网页 ${PORTAL}/ 重新点一次「一行命令安装」,复制**新的**那一行马上粘进来跑。" ;;
+    429)
+      die "✗ 换得太频繁,被安装服务挡了一下(HTTP ${HTTP}:${ERR})。
+  下一步:等 1 分钟,再回网页 ${PORTAL}/ 重新生成一条命令跑。" ;;
+    401|403)
+      die "✗ 安装服务不认这条请求(HTTP ${HTTP}:${ERR})。
+  多半是公司代理改写了请求。换个网络(手机热点)再试一次;还不行就把这一屏发给运维。
+  也可以用备用下载页:${FALLBACK_PAGE}" ;;
+    5*)
+      die "✗ 安装服务暂时出问题了(HTTP ${HTTP}:${ERR})。
+  这不是你的操作问题。过几分钟回网页 ${PORTAL}/ 重新生成一条命令再试;一直这样就把这一屏发给运维。" ;;
+    *)
+      die "✗ 安装码没换成功(HTTP ${HTTP}):${ERR}
+  下一步:回网页 ${PORTAL}/ 重新生成一条命令再试;还不行就把这一屏发给运维。" ;;
+  esac
 fi
 KEY="$(json_field key "$BODY")"; TOOL="$(json_field tool "$BODY")"
 unset RESP BODY
 [ -n "$KEY" ] || die "✗ 安装服务回包里没有 key(服务端问题),把这一屏截图发给运维。"
 case "$KEY" in *[!A-Za-z0-9_-]*) die "✗ 安装服务给的 key 格式不对(服务端问题),把这一屏截图发给运维。" ;; esac
 # 🔴 顺序 = codex → claude → cursor,Cursor 最后(理由见文件头)。改顺序要同时改 test_installer.py 里钉顺序那条。
-ALL_TOOLS="codex claude cursor"
+# 🔴 写成**函数**而不是 `ALL_TOOLS="codex claude cursor"` + `for t in $ALL_TOOLS`:
+#    zsh 默认不对普通变量展开分词(no SH_WORD_SPLIT)⇒ 那个 for 在 zsh 下只循环一次、
+#    `$t` 是整串 "codex claude cursor"。11-05 zsh 实测屏幕原话:
+#      `═══ 第 1/1 个:codex claude cursor ═══` / `→ 下载 codex claude cursor 一键安装器 ...`
+#    ⇒ tool=all 时三个工具**一个都没装**,最后报 rc=8「三个都没装成」。
+#    `$(cmd)` 的分词 zsh 是做的(实测 split=3),所以换成函数 + $(all_tools) 四种解释器都对。
+all_tools() { printf '%s\n' codex claude cursor; }
 case "$TOOL" in cursor|codex|claude) ;; all) MULTI=1 ;;
   *) die "✗ 安装服务没说要装哪个工具(tool=${TOOL:-空}),把这一屏截图发给运维。" ;; esac
 if [ -n "$TOOL_ARG" ] && [ "$TOOL_ARG" != "$TOOL" ]; then
@@ -143,17 +224,68 @@ echo
 
 # 子进程输出过一遍遮罩:万一哪个安装器把 key 打出来,屏幕上也只剩 ***。
 # key 走环境变量进 perl(不进命令行参数);按块读、留 len-1 字节尾巴,跨块的 key 也遮得住,进度条不卡。
+# 🔴 没有 perl 时**不许退回 `cat`**:那等于把遮罩整个关掉。11-05 实测(PATH 里去掉 perl):
+#    屏幕上原样出现 `stub: 我是被调起的安装器,key=<整把 key>`(台架断言 KEY_ON_SCREEN=True)。
+#    ⇒ 退回 awk,key 同样走**环境变量**进去(ENVIRON[],不进 argv ⇒ ps 看不见;
+#      `sed s/$KEY/…/` 和 `awk -v k=$KEY` 都会把 key 放进命令行,绝对不能用)。
+#    awk 是按**行**读的:key 被切在两次 write 之间时遮不住,但子安装器的 key 都是
+#    一行内打完的(整行 printf),且这只是「万一」的第二层兜底 ⇒ 可接受;
+#    perl 那支仍是首选(按块读、留 len-1 尾巴,跨块也遮得住)。
+#    key 的字符集已校验过只有 [A-Za-z0-9_-] ⇒ 进 awk 的 gsub 不会被当正则元字符。
 mask_stream() {
   if command -v perl >/dev/null 2>&1; then
     CARHER_MASK_K="$KEY" perl -e '$|=1;$k=$ENV{CARHER_MASK_K};$n=length($k);$t="";
       while(sysread(STDIN,$b,4096)){$t.=$b;$t=~s/\Q$k\E/***/g;
         if(length($t)>=$n){print substr($t,0,length($t)-$n+1);$t=substr($t,length($t)-$n+1);}}
       $t=~s/\Q$k\E/***/g;print $t;'
-  else cat; fi
+  elif command -v awk >/dev/null 2>&1; then
+    CARHER_MASK_K="$KEY" awk '{ k = ENVIRON["CARHER_MASK_K"]; if (k != "") gsub(k, "***"); print; fflush() }'
+  else
+    # 连 awk 都没有(几乎不可能):宁可不给用户看子安装器的输出,也不能让 key 上屏。
+    warn "↳ 这台电脑上没有 perl / awk,安装器的输出不显示了(怕把密钥打到屏幕上)。装完的结果照样会汇总。"
+    cat >/dev/null
+  fi
 }
 
-dl() {  # dl <url> <文件>:GET 可以安全重试
-  curl -fSL --connect-timeout 15 --retry 3 --retry-delay 2 --progress-bar -o "$2" "$1"
+# dl <url> <文件>:GET 可以安全重试。
+# 🔴 原来只有 `--retry 3`:它只重试**连接阶段**的失败,「连上了、下了一半被掐断」(curl 18 /
+#    transfer closed)**一次都不重试**。实测(本机假服务,前两次中途断开 3MB 的包):
+#      旧:`curl -fSL --retry 3 …` ⇒ rc=18、文件只有 500KB —— App 包几百 MB ~ 1GB,
+#          公司网抖一下就得从头再来,而安装码只有 10 分钟。
+#      新:`--retry-all-errors -C -` ⇒ rc=0、3000000 字节拿全(接着断点续,不从头下)。
+# ⚠ 两个前提,都实测过:
+#    ① `--retry-all-errors` 要 curl 7.71+(mac 12+ 自带 8.x;Win10 1803 自带的 7.55 不认)
+#       ⇒ 先探测再用,不认就退回老参数(不认的 flag 会让 curl 直接报 option is unknown 并退出)。
+#    ② `-C -` 碰上不支持 Range 的服务端会**硬失败 rc=33**(实测原话
+#       `HTTP server doesn't seem to support byte ranges. Cannot resume.`)。我们的包都是 nginx
+#       静态文件(/ai/i/pkg/ 和 /ccdl/ 都是 alias 静态目录),支持 Range;但为了不把一个本来
+#       能成的下载变成失败,只在**已经有半截文件**时才加 -C -,且失败后删掉半截再整下一遍。
+DL_RETRY_ALL=""
+dl_probe() {
+  [ -n "$DL_RETRY_ALL" ] && return 0
+  if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then DL_RETRY_ALL=yes; else DL_RETRY_ALL=no; fi
+}
+dl() {
+  dl_probe
+  _dl_extra=""
+  [ "$DL_RETRY_ALL" = yes ] && _dl_extra="--retry-all-errors"
+  # 第一遍:没有半截文件 ⇒ 不加 -C -(避免服务端不支持 Range 时白白失败)
+  rm -f "$2" 2>/dev/null || true
+  curl -fSL --connect-timeout 15 --retry 3 --retry-delay 2 ${_dl_extra} --progress-bar -o "$2" "$1" && return 0
+  # 断在半截:有东西就试着续传(续不动就删了整下一遍),再给两次机会
+  _dl_i=0
+  while [ "$_dl_i" -lt 2 ]; do
+    _dl_i=$((_dl_i + 1))
+    if [ -s "$2" ]; then
+      warn "↳ 下载被打断了,从断点接着下(第 ${_dl_i} 次重试)..."
+      curl -fSL --connect-timeout 15 --retry 3 --retry-delay 2 ${_dl_extra} -C - --progress-bar -o "$2" "$1" && return 0
+      rm -f "$2" 2>/dev/null || true   # 续不动(服务端不支持 Range 等)⇒ 下一轮整下
+    else
+      warn "↳ 下载失败,重试(第 ${_dl_i} 次)..."
+      curl -fSL --connect-timeout 15 --retry 3 --retry-delay 2 ${_dl_extra} --progress-bar -o "$2" "$1" && return 0
+    fi
+  done
+  return 1
 }
 
 # ── 2. App ───────────────────────────────────────────────────────────
@@ -295,13 +427,19 @@ install_app_mac() {
   done <<EOF
 $(printf '%s' "${CARHER_APP_DEST_ROOTS:-/Applications:$HOME/Applications}" | tr ':' '\n')
 EOF
-  [ -n "$dest" ] || die "✗ 没有能装 App 的目录(/Applications 和 ~/Applications 都写不进去)。"
+  [ -n "$dest" ] || die "✗ 没有能装 App 的目录(/Applications 和 ~/Applications 都写不进去)。
+  公司电脑常见原因是没有安装 App 的权限:请找 IT 开放「安装应用程序」权限,然后回网页重新生成命令。
+  也可以去 ${FALLBACK_PAGE} 手动下载安装 App 后,回网页重新生成命令再跑。"
   dest="$dest/$(basename "$src")"
   if [ -e "$dest" ]; then  # 同名但上面没认出来 = 坏的/空壳。改名留着,不删用户的东西
     ts="$(date +%Y%m%d-%H%M%S)"; mv "$dest" "$dest.bak-carher-$ts"
     warn "↳ 原来的 $dest 不完整,已改名为 $dest.bak-carher-$ts"
   fi
-  ditto "$src" "$dest" || die "✗ 拷贝 ${APP_NAME} 到 $dest 失败。"
+  # 拷不过去最常见的两件事:盘满(App 几百 MB ~ 1GB)、目录没写权限
+  ditto "$src" "$dest" || die "✗ 拷贝 ${APP_NAME} 到 $dest 失败。
+  常见原因是磁盘空间不够(这个 App 要 1~2GB)或这台电脑限制了安装 App:
+  先用「关于本机 → 储存空间」腾出 3GB 以上;如果是权限问题请找 IT 开放「安装应用程序」权限。
+  然后回网页重新生成一条命令再跑。"
   xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
   if [ -n "$MNT" ]; then hdiutil detach -quiet "$MNT" >/dev/null 2>&1 || true; MNT=""; fi
   rm -f "$W/app.${ext}"; rm -rf "$W/unz"
@@ -368,16 +506,31 @@ fi
 say "→ 下载 ${TOOL} 一键安装器 ..."
 case "$TOOL" in
   codex|claude)
-    dl "${PORTAL}/i/pkg/${TOOL}-mac.command" "$W/inst.command" || die "✗ 下载安装器失败:${PORTAL}/i/pkg/${TOOL}-mac.command"
+    dl "${PORTAL}/i/pkg/${TOOL}-mac.command" "$W/inst.command" || die "✗ 下载安装器失败:${PORTAL}/i/pkg/${TOOL}-mac.command
+  网络断了或被公司代理拦了。换个网络(手机热点)再试,或把这一屏发给 IT 让他们放行 ${PORTAL}/。
+  然后回网页重新生成一条命令;也可以用备用下载页:${FALLBACK_PAGE}"
+    # 子安装器(codex/claude-mac.command)是 bash 脚本 ⇒ 本机必须有 bash 才跑得起来。
+    # 原来直接 `bash -n` 当完整性校验:bash 不在 PATH 里时报的是「安装器下载不完整」,
+    # 把「你缺 bash」说成「我们的包坏了」(实测 PATH=只含 sh 时就是这句)。
+    command -v bash >/dev/null 2>&1 || die "✗ 这台电脑上没有 bash,装 ${TOOL_LABEL} 需要它。
+  macOS 自带 bash,一般是 PATH 被改过:新开一个终端窗口再粘一次那条命令。
+  Linux 请先装 bash(sudo apt install bash / sudo yum install bash),再回网页重新生成命令。"
     bash -n "$W/inst.command" 2>/dev/null || die "✗ 安装器下载不完整(语法检查没过),回网页重新生成命令再试。"
     echo
     set +e
-    ( export CARHER_KEY="$KEY"; exec bash "$W/inst.command" ) </dev/null 2>&1 | mask_stream
-    RC="${PIPESTATUS[0]}"
+    # 🔴 退出码**走文件**,不用 ${PIPESTATUS[0]}:zsh 里没有这个数组(它叫 pipestatus、
+    #    下标从 1)⇒ set -u 下读它 fatal,**安装器装成功了用户却看到一行英文报错 + 非零码**
+    #    (11-05 zsh 实测原话:`install_one:60: PIPESTATUS[0]: parameter not set`)。
+    #    因此也不能 `exec bash …`(exec 会把子 shell 顶掉,后面写不了 rc)。
+    ( export CARHER_KEY="$KEY"; bash "$W/inst.command"; printf '%s' "$?" > "$W/inst.rc" ) \
+      </dev/null 2>&1 | mask_stream
+    RC="$(cat "$W/inst.rc" 2>/dev/null || true)"; [ -n "$RC" ] || RC=1
     set -e
     ;;
   cursor)
-    dl "${PORTAL}/i/pkg/cursor-mac.zip" "$W/cursor.zip" || die "✗ 下载安装器失败:${PORTAL}/i/pkg/cursor-mac.zip"
+    dl "${PORTAL}/i/pkg/cursor-mac.zip" "$W/cursor.zip" || die "✗ 下载安装器失败:${PORTAL}/i/pkg/cursor-mac.zip
+  网络断了或被公司代理拦了。换个网络(手机热点)再试,或把这一屏发给 IT 让他们放行 ${PORTAL}/。
+  然后回网页重新生成一条命令;也可以用备用下载页:${FALLBACK_PAGE}"
     mkdir -p "$W/cz"
     unzip -q -o "$W/cursor.zip" -d "$W/cz" </dev/null || die "✗ 安装器解压失败(没下完整?),回网页重新生成命令再试。"
     ENG="$W/cz/cursor-mac"
@@ -385,14 +538,20 @@ case "$TOOL" in
     echo
     set +e
     # 新引擎认 CARHER_KEY 环境变量(不进命令行,ps 看不到);老包只认 --key ⇒ 看包里的引擎认不认再决定
+    # 退出码走文件(不用 ${PIPESTATUS[0]},理由同上 codex/claude 那支);也因此不能 exec
     if grep -q 'process.env.CARHER_KEY' "$ENG/cursor_team_setup.js"; then
       ( export CARHER_KEY="$KEY"; if [ "$OS" = darwin ] && [ -n "$APP" ]; then export CURSOR_APP="$APP"; fi
-        exec sh "$ENG/cursor_team_setup.sh" --apply ) </dev/null 2>&1 | mask_stream
+        sh "$ENG/cursor_team_setup.sh" --apply; printf '%s' "$?" > "$W/inst.rc" ) </dev/null 2>&1 | mask_stream
     else
+      # 🔴 这是**整个脚本里唯一把 key 放进命令行参数**的地方 ⇒ 这几秒内 `ps` 看得见
+      #    (11-05 实测:`sh sc.sh --key SECRETABC` 在 `ps -Ao args=` 里原样出现)。
+      #    只有「已经发出去的老 cursor-mac.zip」才会走到这儿;现役包认 CARHER_KEY(实测命中)
+      #    ⇒ 正常走不到。老包彻底没人用了以后,这一支连同 grep 判断一起删掉。
+      #    台架 test_old_cursor_engine_key_in_argv_is_documented_risk 钉着这条注释和现役包的形状。
       ( if [ "$OS" = darwin ] && [ -n "$APP" ]; then export CURSOR_APP="$APP"; fi
-        exec sh "$ENG/cursor_team_setup.sh" --apply --key "$KEY" ) </dev/null 2>&1 | mask_stream
+        sh "$ENG/cursor_team_setup.sh" --apply --key "$KEY"; printf '%s' "$?" > "$W/inst.rc" ) </dev/null 2>&1 | mask_stream
     fi
-    RC="${PIPESTATUS[0]}"
+    RC="$(cat "$W/inst.rc" 2>/dev/null || true)"; [ -n "$RC" ] || RC=1
     set -e
     ;;
 esac
@@ -418,7 +577,10 @@ elif [ "$RC" = 5 ]; then
   exit 5
 else
   if [ "$MULTI" = 1 ]; then
-    die "✗ ${TOOL_LABEL} 没装成:安装器退出码 ${RC}(原因见上面的报错)。" "$RC"
+    # tool=all 里的某一个失败:这句会被下面的汇总原话读回来,补装办法在汇总那段说(单独选这个工具)。
+    # 这里也带一个出口,免得用户只看到中间这一行就走了。
+    die "✗ ${TOOL_LABEL} 没装成:安装器退出码 ${RC}(原因见上面的报错)。
+  补装办法见最后的「安装结果」那段;也可以用备用下载页:${FALLBACK_PAGE}" "$RC"
   fi
   die "✗ 安装器没跑完(退出码 ${RC})。这个安装码已经用掉了:看上面的报错处理后,回网页重新生成一条命令再跑。
   也可以用备用下载页:${FALLBACK_PAGE}" "$RC"
@@ -440,10 +602,10 @@ say "   要下 3 个 App 安装包(每个几百 MB,已装过的会跳过),整个
 warn "   ⚠ 中途别关这个终端窗口。Cursor 放在最后装(它要求先完全退出,最可能需要你动手)。"
 echo
 
-TOTAL=0; for t in $ALL_TOOLS; do TOTAL=$((TOTAL + 1)); done
+TOTAL=0; for t in $(all_tools); do TOTAL=$((TOTAL + 1)); done
 SUM_DIR="$W/summary"; mkdir -p "$SUM_DIR"
 N=0
-for t in $ALL_TOOLS; do
+for t in $(all_tools); do
   N=$((N + 1))
   echo
   say "═══ 第 ${N}/${TOTAL} 个:${t} ═══"
@@ -468,7 +630,7 @@ say "==================================================="
 say "   安装结果"
 say "==================================================="
 NOK=0; NBAD=0; NWARN=0; FAILED=""
-for t in $ALL_TOOLS; do
+for t in $(all_tools); do
   case "$t" in codex) L=Codex ;; claude) L="Claude Code" ;; cursor) L=Cursor ;; *) L="$t" ;; esac
   TRC="$(cat "$SUM_DIR/${t}.rc" 2>/dev/null || echo 1)"
   if [ "$TRC" = 0 ]; then

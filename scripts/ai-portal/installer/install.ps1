@@ -22,6 +22,24 @@
 # 只给测试用:$env:CARHER_PORTAL_BASE / CARHER_MIRROR_BASE / CARHER_SKIP_APP_INSTALL=1
 param([string]$Code = '', [string]$Tool = '')
 
+# ════════════════════════════════════════════════════════════════════════
+# 🔴 整个脚本包在 Install-Carher 里、最后几行才派发 —— 因为**网页给用户的那一行有两种形态**,
+#    两种都得跑对(11-05 实测):
+#      ① 网页 index.html 真正生成的是(实读 :1109):
+#         `powershell -ExecutionPolicy Bypass -c "irm <url>/ai/i/<tool>.ps1 | iex; Install-Carher -Code <码>"`
+#         `irm | iex` 会把脚本正文**先整跑一遍**(那时 $Code 是空),然后才调 `Install-Carher -Code 码`。
+#         改之前本文件里**根本没有 Install-Carher 这个函数** ⇒ 正文空跑一遍后打
+#         `x 命令里没有安装码。回网页…重新复制完整的一行命令。` 然后 rc=1,
+#         接着 `Install-Carher` 又报 CommandNotFoundException ——
+#         **用户照网页复制粘贴、一个字没错,也装不上,还被告知「是你没复制全」**。
+#      ② 台架 win_oneliner() 里那条(`& ([scriptblock]::Create(…)) -Code 码`)是直接带参数调,
+#         正文第一遍就有码 ⇒ 之前只有这一条是通的,所以台架全绿也没发现 ①。
+#    ⇒ 现在:正文永远在函数里,末尾按「有没有拿到码」派发;两种形态 + `-File` 直接跑都对。
+#    (和 install.sh 的 `main() { … }` + `main "$@"` 同一个形状。)
+# ════════════════════════════════════════════════════════════════════════
+function Install-Carher {
+param([string]$Code = '', [string]$Tool = '')
+
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # PS5 的进度条会让下载慢 10 倍
 $fallbackPage = 'https://chat.auto-link.com.cn/oneclick/'
@@ -408,3 +426,21 @@ Write-Host "! $nOk 个装好了,$fl 没装成。" -ForegroundColor Yellow
 Write-Host "  这个安装码已经用掉了 ⇒ 补装方法:回网页 $portal/ ,在「选工具」里**单独选 $fl**,复制那一行再跑一次。" -ForegroundColor Yellow
 Write-Host "  已经装好的不用再动(重复装也不会坏)。备用下载页:$fallbackPage" -ForegroundColor Yellow
 exit 7
+}
+
+# ════════════════════════════════════════════════════════════════════════
+# 派发(见文件头那段):
+#   · 第一遍就带着码进来(`& ([scriptblock]::Create(…)) -Code 码` / `-File install.ps1 -Code 码`)
+#     ⇒ 直接跑。
+#   · `irm | iex` 把正文空跑一遍(没有码)⇒ 什么都不做,只把 Install-Carher 这个函数留在当前会话里,
+#     等后面那半句 `Install-Carher -Code 码` 来调。
+#   · 用户自己 `.\install.ps1` / `-File install.ps1`(双击、直接跑,没给码)
+#     ⇒ 照旧打「命令里没有安装码」。**不许静默返回**:那样屏幕上一个字都没有,比报错更糟
+#     (我第一版拿 $MyInvocation.Line 判就踩了这个 —— -File 下 Line 是空的,于是 rc=0 零输出,
+#      台架 test_ps1_no_code_at_all_still_says_so 当场抓到)。
+#   · 判据用 **$PSCommandPath**:实测只有「当文件跑」这一种形态它非空
+#     (-File ⇒ /path/install.ps1;`irm|iex` ⇒ 空;`& scriptblock` ⇒ 空)。
+#     `& scriptblock` 不带码的情况由 $MyInvocation.Line 非空兜住(iex 下它是空)。
+# ════════════════════════════════════════════════════════════════════════
+if ($Code -or $env:CARHER_INSTALL_CODE) { Install-Carher -Code $Code -Tool $Tool }
+elseif ($PSCommandPath -or -not [string]::IsNullOrEmpty($MyInvocation.Line)) { Install-Carher -Code '' -Tool $Tool }

@@ -436,6 +436,47 @@ def test_missing_code(work, portal):
     assert rc != 0 and "没有安装码" in out
 
 
+# 真安装码的形状:4 组 8 个 base32 字符用 - 连起来(server.py:1614-1616 实读 ⇒ 35 字符)
+REAL_CODE = "ABCDEFGH-IJKLMNOP-QRSTUVWX-YZ234567"
+
+
+@pytest.mark.parametrize("args,desc", [
+    ([REAL_CODE], "只粘了码(少复制了 --code 那几个字)"),
+    (["--tool", "cursor", REAL_CODE], "裸码 + --tool"),
+    (["--nonsense", REAL_CODE], "未知 flag + 裸码"),
+])
+def test_bare_code_without_the_code_flag_still_works(work, portal, args, desc):
+    """用户少复制了 `--code` 时也得能装(零操作)。修前实测 `install.sh <码>` ⇒ rc=1 +
+    「命令里没有安装码」—— 码明明就在命令里。
+    正向对照见 test_short_positional_is_not_mistaken_for_a_code(短串不许被当成码)。"""
+    portal.codes[REAL_CODE] = {"tool": "codex", "key": KEY, "state": "ok"}
+    rc, out, logs = run_sh(work, portal, args)
+    assert rc == 0, f"{desc}:\n{out[-700:]}"
+    assert stub_got(logs, "codex")["key"] == KEY, desc
+    assert [json.loads(x) for x in portal.requests] == [{"code": REAL_CODE}], portal.requests
+
+
+@pytest.mark.parametrize("junk", ["short", "ABCDEFGH", "--weird", "-x"])
+def test_short_positional_is_not_mistaken_for_a_code(work, portal, junk):
+    """🔴 正向对照:比真码短 / 像 flag 的东西**不许**被当成安装码发出去
+    (否则等于把任意参数当码往服务端打)。"""
+    rc, out, _ = run_sh(work, portal, [junk])
+    assert rc != 0, out[-500:]
+    assert "没有安装码" in out, out[-500:]
+    assert portal.requests == [], f"{junk!r} 被当成码发出去了:{portal.requests}"
+
+
+@need_pwsh
+def test_ps1_bare_code_binds_positionally(work, portal):
+    """Windows 侧不用改:param 的第一个位置就是 Code(实测 `-File install.ps1 ABC` ⇒ Code=[ABC])。
+    这条钉住它,免得以后有人往 param 前面插别的参数。"""
+    portal.files["/ai/i/pkg/codex-windows.bat"] = _win_stub_bat("codex")
+    portal.codes[REAL_CODE] = {"tool": "codex", "key": KEY, "state": "ok"}
+    rc, out, logs = run_ps(work, portal, ["-NoProfile", "-File", str(PS1), REAL_CODE])
+    assert rc == 0, out[-900:]
+    assert stub_got(logs, "codex")["key"] == KEY, out[-900:]
+
+
 def test_installer_failure_propagates(work, portal):
     portal.codes["GOOD4"] = {"tool": "codex", "key": KEY, "state": "ok"}
     rc, out, _ = run_sh(work, portal, ["--code", "GOOD4"], {"STUB_RC": "1"})
@@ -567,12 +608,515 @@ def test_bash_syntax_and_cjk_lint(f):
     assert r.returncode == 0, r.stdout + r.stderr
 
 
+# ── 5b. 解释器矩阵:install.sh 要在 bash / sh / zsh / dash 下都真跑得对 ────────────
+# 11-05 实测三条真缺陷(修前):
+#   zsh  ⇒ `${PIPESTATUS[0]}: parameter not set`(安装器装成功了却报错 rc=1)
+#   zsh  ⇒ `for t in $ALL_TOOLS` 不分词 ⇒ tool=all 变「第 1/1 个:codex claude cursor」rc=8
+#   dash ⇒ 第 37 行 `set: Illegal option -o pipefail`,一个中文字都没打(rc=2)
+# 用户默认 shell 是 zsh(mac),`curl | sh` 在 Linux 上多是 dash ⇒ 这四个都是真路径。
+INTERPS = [p for p in ("/bin/bash", "/bin/sh", "/bin/zsh", "/bin/dash") if Path(p).exists()]
+
+
+@pytest.mark.parametrize("interp", INTERPS)
+@pytest.mark.parametrize("tool", ["codex", "cursor"])
+def test_sh_runs_under_every_interpreter(work, portal, interp, tool):
+    """单工具:四种解释器下都 rc=0、安装器真被调起、key 没上屏。"""
+    portal.codes["IN1"] = {"tool": tool, "key": KEY, "state": "ok"}
+    rc, out, logs = run_sh(work, portal, [], cmd=[interp, str(SH), "--code", "IN1"])
+    assert rc == 0, f"{interp} rc={rc}:\n{out}"
+    got = stub_got(logs, tool)
+    assert got and got["key"] == KEY, f"{interp}:\n{out}"
+    assert "全部完成" in out, out[-600:]
+    assert KEY not in out
+    # 解释器自己的报错一个都不许漏出来(这是修前 zsh / dash 的形状)
+    for bad in ("PIPESTATUS", "parameter not set", "Illegal option", "Bad substitution", "bad substitution"):
+        assert bad not in out, (interp, bad, out[-600:])
+
+
+@pytest.mark.parametrize("interp", INTERPS)
+def test_sh_all_runs_three_under_every_interpreter(work, portal, interp):
+    """tool=all:四种解释器下都真装三个(修前 zsh 只循环一次、三个全没装)。"""
+    portal.codes["IN2"] = {"tool": "all", "key": KEY, "state": "ok"}
+    rc, out, logs = run_sh(work, portal, [], cmd=[interp, str(SH), "--code", "IN2"], timeout=120)
+    assert rc == 0, f"{interp} rc={rc}:\n{out[-1200:]}"
+    seen = re.findall(r"第 \d/3 个:(codex|claude|cursor)", out)
+    assert seen == ALL_ORDER, (interp, seen, out[-800:])
+    for t in ALL_ORDER:
+        got = stub_got(logs, t)
+        assert got and got["key"] == KEY, (interp, t, out[-800:])
+    assert "✅ 三个都装好了" in out
+    # 修前 zsh 的形状:工具名变成整串
+    assert "codex claude cursor" not in out, out[-800:]
+    assert KEY not in out
+
+
+@pytest.mark.parametrize("interp", INTERPS)
+def test_installer_failure_code_is_seen_under_every_interpreter(work, portal, interp):
+    """🔴 退出码改成走文件了(不再用 PIPESTATUS)⇒ 四种解释器下**失败仍必须被看见**。
+    正向对照:这条就是「rc 读不回来」的对照 —— 若 rc 丢了会被当 0 ⇒ 这里的 rc==9 断言变红。"""
+    portal.codes["IN3"] = {"tool": "codex", "key": KEY, "state": "ok"}
+    rc, out, _ = run_sh(work, portal, [], {"STUB_RC": "9"}, cmd=[interp, str(SH), "--code", "IN3"])
+    assert rc == 9, f"{interp} 安装器退出码 9 没传出来(拿到 {rc}):\n{out[-800:]}"
+    assert "安装器没跑完(退出码 9)" in out, out[-600:]
+
+
+def test_sh_has_no_bashism_left():
+    """静态兜底:四个已踩过的 bash/zsh-only 构造不许再回来(语法检查查不出它们)。"""
+    body = "\n".join(l for l in SH.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#"))
+    for pat, why in [(r"\bPIPESTATUS\b", "zsh 没有这个数组"),
+                     (r"set -[a-z]*o[a-z]* pipefail|set -o pipefail", "dash 不认 pipefail"),
+                     (r"\$\{[A-Za-z_][A-Za-z0-9_]*: -[0-9]", "${x: -n} dash 报 Bad substitution"),
+                     (r"\$'", "$'...' dash 不认"),
+                     (r"for [a-zA-Z_]+ in \$[A-Za-z_][A-Za-z0-9_]*(\s|;)", "zsh 不对普通变量分词")]:
+        m = re.search(pat, body)
+        assert not m, f"install.sh 里又出现了 {why}:{m.group(0)!r}"
+
+
 def test_script_body_is_wrapped_in_main():
     """curl | bash 边下边跑:脚本要整个包在函数里、最后一行才调用(下载断在半截不会执行半截)。"""
     lines = [l for l in SH.read_text(encoding="utf-8").splitlines() if l.strip()]
     assert lines[-1] == 'main "$@"'
     code = [l for l in lines if not l.startswith("#")]
     assert code[0] == "main() {"
+
+
+# ── 5c. 失败出口都要有人话 + 下一步(不许只回一个非零码 / 只漏工具的英文报错)──────────
+def _thin_path(work: Path, keep_out) -> Path:
+    """造一个只含指定命令的 PATH 目录(模拟「这台电脑上没有 X」)。"""
+    b = work / ("thin-" + "".join(sorted(keep_out))[:8].replace("/", "_"))
+    b.mkdir(exist_ok=True)
+    base = ("uname mktemp sed head printf date mv rm cat tr sort awk ls find curl unzip bash "
+            "basename mkdir grep sleep chmod dirname perl cp touch df").split()
+    for n in base:
+        if n in keep_out:
+            continue
+        src = shutil.which(n)
+        if src:
+            tgt = b / n
+            if not tgt.exists():
+                tgt.symlink_to(src)
+    return b
+
+
+def test_no_curl_gives_plain_chinese_not_error_as_http_code(work, portal):
+    """🔴 修前:curl 不在 PATH 时,-w 那段不输出 ⇒ 「command not found」被填进 HTTP 码的位置,
+    屏幕原话 `✗ 安装码没换成功(HTTP install.sh: line 108: curl: command not found)`
+    —— 错误信封当数据读。现在要给一句人话 + 怎么办。"""
+    portal.codes["NC1"] = {"tool": "codex", "key": KEY, "state": "ok"}
+    thin = _thin_path(work, {"curl"})
+    rc, out, logs = run_sh(work, portal, ["--code", "NC1"], {"PATH": str(thin)})
+    assert rc != 0
+    assert "没有 curl" in out, out[-700:]
+    assert "新开一个终端窗口" in out or "apt install curl" in out, out[-700:]
+    assert "HTTP install.sh" not in out and "command not found)" not in out, out[-700:]
+    assert not stub_got(logs, "codex")
+
+
+def test_no_bash_says_you_need_bash_not_broken_package(work, portal):
+    """修前:bash 不在 PATH ⇒ `bash -n` 失败 ⇒ 报「安装器下载不完整」,
+    把「你缺 bash」说成「我们的包坏了」(实测)。"""
+    portal.codes["NB1"] = {"tool": "codex", "key": KEY, "state": "ok"}
+    thin = _thin_path(work, {"bash"})
+    rc, out, _ = run_sh(work, portal, [], {"PATH": str(thin)},
+                        cmd=["/bin/sh", str(SH), "--code", "NB1"])
+    assert rc != 0
+    assert "没有 bash" in out, out[-700:]
+    assert "下载不完整" not in out, "缺 bash 被说成包坏了:\n" + out[-700:]
+
+
+def test_unusable_tmpdir_falls_back_then_says_disk_in_chinese(work, portal):
+    """TMPDIR 指到不存在的盘:先退 /tmp 把活干完(用户零操作);两个都不行才报磁盘满。
+    修前只漏 mktemp 的英文一行 `mktemp: mkdtemp failed on …: No such file or directory`。"""
+    portal.codes["TD1"] = {"tool": "codex", "key": KEY, "state": "ok"}
+    rc, out, logs = run_sh(work, portal, ["--code", "TD1"],
+                           {"TMPDIR": str(work / "no-such-dir-xyz") + "/"})
+    assert rc == 0, out[-800:]           # 退到 /tmp 后照样装完 ⇒ 用户不用做任何事
+    assert "改用 /tmp" in out, out[-700:]
+    assert "mkdtemp failed" not in out, out[-700:]
+    assert stub_got(logs, "codex")["key"] == KEY
+
+
+def test_mask_stream_without_perl_still_masks_the_key(work, portal):
+    """🔴 修前:没有 perl 时 mask_stream 退回 `cat` ⇒ 遮罩整个关掉,
+    屏幕上真出现 `stub: 我是被调起的安装器,key=<整把 key>`(实测 KEY_ON_SCREEN=True)。
+    正向对照:把本仓这条修改回 `else cat; fi`,这个断言立刻变红。"""
+    portal.codes["NP1"] = {"tool": "codex", "key": KEY, "state": "ok"}
+    thin = _thin_path(work, {"perl"})
+    rc, out, logs = run_sh(work, portal, ["--code", "NP1"], {"PATH": str(thin)})
+    assert rc == 0, out[-800:]
+    assert stub_got(logs, "codex")["key"] == KEY     # 安装器照样拿到 key
+    assert KEY not in out, "没有 perl 时 key 上屏了(遮罩被关掉了):\n" + out[-700:]
+    assert "key=***" in out, "awk 兜底没遮成 ***:\n" + out[-700:]
+
+
+def test_mask_stream_without_perl_or_awk_hides_output_rather_than_leak(work, portal):
+    """perl / awk 都没有:宁可不显示子安装器的输出,也不许 key 上屏。"""
+    portal.codes["NA1"] = {"tool": "codex", "key": KEY, "state": "ok"}
+    thin = _thin_path(work, {"perl", "awk"})
+    rc, out, logs = run_sh(work, portal, ["--code", "NA1"], {"PATH": str(thin)})
+    assert stub_got(logs, "codex")["key"] == KEY
+    assert KEY not in out, out[-700:]
+    assert "没有 perl / awk" in out, out[-700:]
+
+
+# ── 5d. key 的安全:不许进 log / 临时文件 / 命令行参数(ps) / 报错 ────────────────────
+# 🔴 `ps` 能看到 argv 是实测过的,不是推测:`/bin/sh ./psleak.sh --apply --key sk-SECRETLEAKTEST123`
+#    在 `ps -Ao args=` 里原样出现(11-05)。所以 key 只许走环境变量。
+def test_key_never_lands_in_tempfiles_or_ps_or_output(work, portal):
+    """安装器在跑的**那一刻**抓现场:扫整个临时目录树 + `ps -Ao args=` + 屏幕输出。
+    正向对照见 test_key_audit_catches_a_planted_leak(故意种一处泄漏,这套断言必须变红)。"""
+    # 桩安装器拖住 6 秒,给 Python 时间抓现场
+    slow = STUB_SH.replace('exit "${STUB_RC:-0}"', 'sleep 6\nexit 0')
+    portal.files["/ai/i/pkg/codex-mac.command"] = slow.replace("$STUB_NAME", "codex").encode()
+    portal.codes["SEC1"] = {"tool": "codex", "key": KEY, "state": "ok"}
+    found = _run_and_audit(work, portal, "SEC1")
+    assert found["stub_key"] == KEY, "桩没拿到 key(台架自己坏了,下面的断言就不算数)"
+    assert not found["tmp_hits"], f"key 落到了临时文件里:{found['tmp_hits']}"
+    assert not found["ps_hits"], f"key 出现在命令行参数里(ps 看得见):{found['ps_hits']}"
+    assert KEY not in found["out"], "key 上屏了"
+
+
+def _run_and_audit(work: Path, portal: Portal, code: str, extra_env=None):
+    """跑一遍 install.sh,在子安装器跑着的时候扫 临时目录 / ps;回来再扫输出。
+    STUB_LOG 是台架自己存 key 的地方(断言要读),扫的时候排除它。"""
+    import glob
+    import time
+    tmp = work / "tmp"
+    tmp.mkdir(exist_ok=True)
+    logs = work / "logs"
+    logs.mkdir(exist_ok=True)
+    hits = {"tmp_hits": [], "ps_hits": [], "stub_key": None}
+
+    def scan():
+        for root in glob.glob(str(tmp / "carher-install.*")):
+            for dp, _dn, fn in os.walk(root):
+                for n in fn:
+                    f = Path(dp) / n
+                    try:
+                        if KEY.encode() in f.read_bytes():
+                            hits["tmp_hits"].append(str(f))
+                    except Exception:
+                        pass
+        ps = subprocess.run(["ps", "-Ao", "args="], capture_output=True).stdout.decode("utf-8", "replace")
+        for line in ps.splitlines():
+            if KEY in line:
+                hits["ps_hits"].append(line[:200])
+
+    done = threading.Event()
+
+    def watcher():
+        while not done.wait(0.4):
+            scan()
+
+    th = threading.Thread(target=watcher, daemon=True)
+    th.start()
+    try:
+        rc, out, _ = run_sh(work, portal, ["--code", code], extra_env, timeout=120)
+    finally:
+        done.set()
+        th.join(timeout=5)
+    time.sleep(0.1)
+    hits["out"] = out
+    hits["rc"] = rc
+    got = stub_got(logs, "codex")
+    hits["stub_key"] = got["key"] if got else None
+    return hits
+
+
+def test_key_audit_catches_a_planted_leak(work, portal):
+    """🔴 正向对照:故意让子安装器把 key 写进**临时目录**里一个文件 +
+    用带 key 的命令行起一个子进程。上面那条审计的两个断言必须真的能抓到它们。"""
+    # 🔴 种 argv 泄漏必须用「sh <脚本文件> --key K」这个形状,不能用 `sh -c 'sleep 6' --key K`:
+    #    后者 sh 只有一条命令时会直接 exec 掉自己 ⇒ argv 被 `sleep 6` 顶替,ps 里反而看不到 key。
+    #    第一版对照就是这么写的,结果「种了泄漏却抓不到」—— 是对照自己坏了,不是审计坏了(实测确认:
+    #    `sh -c 'sleep 5' --planted-key SECRETXYZ` ⇒ ps 无;`sh sc.sh --key SECRETABC` ⇒ ps 里原样可见)。
+    leaky = STUB_SH.replace('exit "${STUB_RC:-0}"',
+                            'printf "%s" "$CARHER_KEY" > "$(dirname "$0")/leaked.txt"\n'
+                            'printf "#!/bin/sh\\nsleep 6\\n" > "$(dirname "$0")/planted.sh"\n'
+                            'sh "$(dirname "$0")/planted.sh" --planted-key "$CARHER_KEY" &\n'
+                            'sleep 6\nexit 0')
+    portal.files["/ai/i/pkg/codex-mac.command"] = leaky.replace("$STUB_NAME", "codex").encode()
+    portal.codes["SEC2"] = {"tool": "codex", "key": KEY, "state": "ok"}
+    found = _run_and_audit(work, portal, "SEC2")
+    assert found["tmp_hits"], "种了一处临时文件泄漏却没抓到 ⇒ 这套审计是假的"
+    assert found["ps_hits"], "种了一处 argv 泄漏(ps 看得见)却没抓到 ⇒ 这套审计是假的"
+
+
+def test_key_not_in_rc_or_err_sidecar_files(work, portal):
+    """退出码改走文件了(inst.rc)、tool=all 的失败原因也写文件(<tool>.err)⇒
+    这两类「我们自己写的」文件里绝不能有 key。失败路径也要扫(报错信息里也不许有)。"""
+    fail = STUB_SH.replace('exit "${STUB_RC:-0}"', "sleep 4\nexit 9")
+    for t in ("codex", "claude"):
+        portal.files[f"/ai/i/pkg/{t}-mac.command"] = fail.replace("$STUB_NAME", t).encode()
+    import io
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("cursor-mac/cursor_team_setup.sh", fail.replace("$STUB_NAME", "cursor"))
+        z.writestr("cursor-mac/cursor_team_setup.js", "// stub\nprocess.env.CARHER_KEY;\n")
+    portal.files["/ai/i/pkg/cursor-mac.zip"] = buf.getvalue()
+    portal.codes["SEC3"] = {"tool": "all", "key": KEY, "state": "ok"}
+    found = _run_and_audit(work, portal, "SEC3")
+    assert found["rc"] == 8, found["out"][-600:]
+    assert not found["tmp_hits"], f"失败路径把 key 写进临时文件了:{found['tmp_hits']}"
+    assert not found["ps_hits"], f"失败路径让 key 进了 argv:{found['ps_hits']}"
+    assert KEY not in found["out"]
+
+
+def test_old_cursor_engine_key_in_argv_is_documented_risk():
+    """🔴 老 cursor 引擎(不认 CARHER_KEY)那一支是**唯一**把 key 放进命令行的地方
+    ⇒ `ps` 看得见(11-05 实测 argv 在 `ps -Ao args=` 里原样出现)。
+    现役包已经认 CARHER_KEY(scripts/zk-cursor-web/cursor-mac.zip 实测命中 2 处)⇒ 正常走不到那支。
+    这条钉住:① 代码里那支必须带警告注释;② 现役包必须还认环境变量(认了就走不到老支)。"""
+    body = SH.read_text(encoding="utf-8")
+    i = body.index("sh \"$ENG/cursor_team_setup.sh\" --apply --key \"$KEY\"")
+    ctx = body[max(0, i - 900):i]
+    assert "ps 看不到" in ctx or "ps 看得见" in ctx, "老引擎 --key 那支旁边要留着「key 进 argv」的警告"
+    z = ROOT / "scripts/zk-cursor-web/cursor-mac.zip"
+    if z.exists():
+        js = subprocess.run(["unzip", "-p", str(z), "cursor-mac/cursor_team_setup.js"],
+                            capture_output=True).stdout.decode("utf-8", "replace")
+        assert "process.env.CARHER_KEY" in js, \
+            "现役 cursor-mac.zip 不认 CARHER_KEY 了 ⇒ 会退回 --key ⇒ key 进 argh/ps。重建这个包"
+
+
+# ── 5f. 幂等 / 可重跑:连跑两次要干净,且 install.sh 自己不碰用户配置 ──────────────────
+QUIET_STUB = ('#!/usr/bin/env bash\nL="$STUB_LOG/$STUB_NAME"; mkdir -p "$L"\n'
+              'printf "%s" "${CARHER_KEY:-}" > "$L/key"\n: > "$L/argv"\necho EOF > "$L/stdin"\nexit 0\n')
+
+
+def _quiet_pkgs(portal: Portal):
+    """安装器桩什么都不写(真安装器才写配置)⇒ HOME 里的任何变化都只能是 install.sh 自己干的。"""
+    import io
+    for t in ("codex", "claude"):
+        portal.files[f"/ai/i/pkg/{t}-mac.command"] = QUIET_STUB.replace("$STUB_NAME", t).encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("cursor-mac/cursor_team_setup.sh", QUIET_STUB.replace("$STUB_NAME", "cursor"))
+        z.writestr("cursor-mac/cursor_team_setup.js", "// stub\nprocess.env.CARHER_KEY;\n")
+    portal.files["/ai/i/pkg/cursor-mac.zip"] = buf.getvalue()
+
+
+def _snap(root: Path):
+    s = {}
+    for dp, dn, fn in os.walk(root):
+        for n in fn:
+            f = Path(dp) / n
+            try:
+                s[str(f)] = (f.stat().st_size, f.read_bytes()[:4096])
+            except Exception:
+                s[str(f)] = None
+        for n in dn:
+            s[str(Path(dp) / n) + "/"] = "dir"
+    return s
+
+
+def test_install_sh_never_writes_into_home_itself(work, portal):
+    """install.sh 这一层不许往 $HOME 里写任何东西(写配置是子安装器的事,它们自己做备份)。
+    这条也是「用户已有配置不许被覆盖没了」的第一道闸:这一层根本不碰,就谈不上覆盖。"""
+    _quiet_pkgs(portal)
+    portal.codes["HM1"] = {"tool": "all", "key": KEY, "state": "ok"}
+    home = work / "home"
+    home.mkdir(exist_ok=True)
+    # 放一份「用户已有配置」进去,跑完必须一字不动
+    (home / ".codex").mkdir(exist_ok=True)
+    (home / ".codex" / "config.toml").write_text("model = '我的旧配置'\n", encoding="utf-8")
+    (home / ".codex" / "sessions").mkdir(exist_ok=True)
+    (home / ".codex" / "sessions" / "s1.jsonl").write_text('{"keep":"历史会话不许丢"}\n', encoding="utf-8")
+    before = _snap(home)
+    rc, out, logs = run_sh(work, portal, ["--code", "HM1"], timeout=120)
+    assert rc == 0, out[-800:]
+    after = _snap(home)
+    assert after == before, f"install.sh 自己动了 $HOME 里的东西:\n新增/改动 = {set(after) ^ set(before)}"
+
+
+def test_running_twice_is_clean_and_keeps_user_config(work, portal):
+    """同一台机器连跑两次(两个码,码是一次性的):第二次照样成功、不装两份、
+    用户已有配置一字不动、临时目录不留垃圾。"""
+    _quiet_pkgs(portal)
+    home = work / "home"
+    home.mkdir(exist_ok=True)
+    (home / ".claude").mkdir(exist_ok=True)
+    (home / ".claude" / "settings.json").write_text('{"mine": "别覆盖我"}\n', encoding="utf-8")
+    before = _snap(home)
+    for i in (1, 2):
+        portal.codes[f"TW{i}"] = {"tool": "all", "key": KEY, "state": "ok"}
+        rc, out, logs = run_sh(work, portal, ["--code", f"TW{i}"], timeout=120)
+        assert rc == 0, f"第 {i} 次跑失败:\n{out[-800:]}"
+        assert "✅ 三个都装好了" in out, (i, out[-500:])
+        for t in ALL_ORDER:
+            assert stub_got(logs, t)["key"] == KEY, (i, t)
+    assert _snap(home) == before, "跑两次之后用户配置变了"
+    # 临时目录不留东西(每个 App 包几百 MB,留着就是用户的盘)
+    leftover = list((work / "tmp").glob("carher-install.*"))
+    assert not leftover, f"临时目录有残留:{leftover}"
+
+
+@mac_only
+def test_second_run_skips_already_installed_app(work, portal):
+    """App 已经装上了 ⇒ 第二次不许再下一遍几百 MB,也不许装出第二份。"""
+    _quiet_pkgs(portal)
+    env, dest = _app_env(work)
+    _fake_app(dest, "com.anthropic.claudefordesktop")
+    for i in (1, 2):
+        portal.codes[f"AP{i}"] = {"tool": "claude", "key": KEY, "state": "ok"}
+        rc, out, logs = run_sh(work, portal, ["--code", f"AP{i}"], env, skip_app=False)
+        assert rc == 0, (i, out[-800:])
+        assert "已装 Claude 桌面 App" in out, (i, out[-500:])
+        assert "从公司镜像下载" not in out, f"第 {i} 次又去下 App 了:\n{out[-500:]}"
+    assert sorted(x.name for x in dest.iterdir()) == ["Claude.app"], \
+        f"装出了多份:{sorted(x.name for x in dest.iterdir())}"
+
+
+@pytest.mark.parametrize("interp", INTERPS)
+def test_tempdir_cleaned_up_on_failure(work, portal, interp):
+    """失败退出时也要把临时目录删掉(里面可能有刚下了一半的几百 MB)。"""
+    portal.codes["CL1"] = {"tool": "codex", "key": KEY, "state": "ok"}
+    rc, out, _ = run_sh(work, portal, [], {"STUB_RC": "9"}, cmd=[interp, str(SH), "--code", "CL1"])
+    assert rc == 9, out[-600:]
+    leftover = list((work / "tmp").glob("carher-install.*"))
+    assert not leftover, f"{interp} 失败后临时目录没清:{leftover}"
+
+
+# ── 5e. 下载被掐断:要么续传、要么重下,不能让用户从头跑一遍(安装码只有 10 分钟)──────
+class FlakyPortal(Portal):
+    """前 N 次 GET 在传到一半时掐断连接(= 公司网抖一下的形状),之后正常。
+    支持 Range(和线上 nginx 静态目录一致)⇒ 能验证断点续传真的接上了。"""
+
+    def __init__(self, break_times=2, size=600_000):
+        self.break_left = break_times
+        self.blob = b"Z" * size
+        self.get_count = 0
+        self.range_requests = []
+        super().__init__()
+        portal = self
+        inner = self.srv.RequestHandlerClass
+
+        class H(inner):
+            def do_GET(self):
+                if not self.path.endswith(".flaky"):
+                    return inner.do_GET(self)
+                portal.get_count += 1
+                rng = self.headers.get("Range")
+                start = 0
+                if rng:
+                    portal.range_requests.append(rng)
+                    start = int(rng.split("=")[1].split("-")[0])
+                body = portal.blob[start:]
+                self.send_response(206 if rng else 200)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Accept-Ranges", "bytes")
+                if rng:
+                    self.send_header("Content-Range",
+                                     f"bytes {start}-{len(portal.blob) - 1}/{len(portal.blob)}")
+                self.end_headers()
+                if portal.break_left > 0:
+                    portal.break_left -= 1
+                    self.wfile.write(body[: max(1, len(body) // 4)])
+                    self.wfile.flush()
+                    try:
+                        self.connection.close()
+                    except Exception:
+                        pass
+                    return
+                self.wfile.write(body)
+
+        self.srv.RequestHandlerClass = H
+
+
+def test_dl_resumes_after_mid_transfer_break(work, portal):
+    """🔴 修前 `curl -fSL --retry 3` 只重试**连接**失败:连上后被掐断一次都不重试。
+    实测旧参数 ⇒ rc=18、文件只剩 500KB(App 包几百 MB,公司网抖一下就得从头来)。
+    这条用一个「前两次中途断开」的假服务验 dl() 现在能把文件拿全。
+    正向对照见 test_dl_old_flags_would_have_failed(同一个服务,旧参数必须失败)。"""
+    fp = FlakyPortal(break_times=2)
+    try:
+        out_file = work / "got.bin"
+        # 直接验 dl():把它从 install.sh 里切出来单跑(不想为了这条下一个真 App 包)
+        body = SH.read_text(encoding="utf-8")
+        i = body.index("DL_RETRY_ALL=\"\"")
+        j = body.index("\n}\n", body.index("dl() {", i)) + 3
+        snippet = ("set -eu\nYELLOW=''; NC=''\nwarn() { printf '%s\\n' \"$1\"; }\n"
+                   + body[i:j] + f'\ndl "{fp.base}/big.flaky" "{out_file}"\n')
+        r = subprocess.run(["/bin/sh", "-c", snippet], capture_output=True, timeout=120)
+        o = (r.stdout + r.stderr).decode("utf-8", "replace")
+        assert r.returncode == 0, f"被掐断两次就放弃了:\n{o[-800:]}"
+        assert out_file.stat().st_size == len(fp.blob), (out_file.stat().st_size, len(fp.blob), o[-500:])
+        # 🔴 这里**不**断言「从断点接着下」那句:实测在 curl 8.x 上 `--retry-all-errors` 自己就把
+        #    「传一半被掐断」重试掉了(第一条 curl 里 `Warning: Problem (retrying all errors)` ⇒
+        #    直接成功),外层那个续传循环根本没跑到。那是**更好**的路径,不该因此判失败。
+        #    外层循环是给老 curl(< 7.71,不认 retry-all-errors,比如 Win10 1803 自带的 7.55)兜底的。
+        assert fp.get_count >= 2, f"假服务没真被掐断过(只收到 {fp.get_count} 次 GET)⇒ 这条没测到东西"
+    finally:
+        fp.close()
+
+
+def test_dl_resumes_on_old_curl_without_retry_all_errors(work, portal):
+    """老 curl(< 7.71,不认 --retry-all-errors:Win10 1803 自带的是 7.55)走的是外层那个
+    续传/重下循环。本机 curl 是 8.x ⇒ 用一个**假装不认这个 flag** 的 curl 包装来跑这条,
+    否则这段兜底代码一行都没被执行过(「代码存在 ≠ 该路径跑了」)。"""
+    fp = FlakyPortal(break_times=2)
+    try:
+        fake = work / "oldcurl"
+        fake.mkdir(exist_ok=True)
+        real = shutil.which("curl")
+        # `curl --help all` 里不出现 retry-all-errors ⇒ dl_probe 判成 no;真下载时也把这个 flag 滤掉
+        # 🔴 `exec real --help "$2" | grep -v …` 是错的:exec 作用在管道的**那一段**上,
+        #    grep 过滤不掉前面已经 exec 出去的输出(第一版就这么写,fake 的 --help 里
+        #    retry-all-errors 还在 ⇒ 探测仍判 yes)。要老老实实用 `|` 不用 exec。
+        (fake / "curl").write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--help" ]; then %s --help "$2" | grep -v -- "--retry-all-errors"; exit 0; fi\n' % real
+            + 'for x in "$@"; do [ "$x" = "--retry-all-errors" ] && { echo "curl: option '
+            '--retry-all-errors: is unknown" >&2; exit 2; }; done\n'
+            'exec %s "$@"\n' % real)
+        (fake / "curl").chmod(0o755)
+        out_file = work / "oldgot.bin"
+        body = SH.read_text(encoding="utf-8")
+        i = body.index("DL_RETRY_ALL=\"\"")
+        j = body.index("\n}\n", body.index("dl() {", i)) + 3
+        snippet = ("set -eu\nYELLOW=''; NC=''\nwarn() { printf '%s\\n' \"$1\"; }\n"
+                   + body[i:j] + f'\ndl "{fp.base}/big.flaky" "{out_file}"\n')
+        env = dict(os.environ, PATH=f"{fake}:{SYS_PATH}")
+        r = subprocess.run(["/bin/sh", "-c", snippet], capture_output=True, timeout=120, env=env)
+        o = (r.stdout + r.stderr).decode("utf-8", "replace")
+        assert r.returncode == 0, f"老 curl 下被掐断就放弃了:\n{o[-900:]}"
+        assert out_file.stat().st_size == len(fp.blob), (out_file.stat().st_size, o[-500:])
+        assert "从断点接着下" in o or "重试(第" in o, "外层兜底循环没跑到:\n" + o[-700:]
+        assert fp.range_requests, f"老 curl 路径没用上断点续传(全从头下):{fp.get_count} 次 GET"
+    finally:
+        fp.close()
+
+
+def test_dl_old_flags_would_have_failed(work):
+    """🔴 正向对照:同一个假服务,用**修前**那条 curl 参数必须失败 ——
+    证明上面那条测的是真缺陷,不是测了个本来就会过的东西。"""
+    fp = FlakyPortal(break_times=2)
+    try:
+        out_file = work / "old.bin"
+        r = subprocess.run(["curl", "-fSL", "--connect-timeout", "15", "--retry", "3",
+                            "--retry-delay", "1", "-s", "-o", str(out_file),
+                            f"{fp.base}/big.flaky"], capture_output=True, timeout=120)
+        assert r.returncode != 0, "旧参数居然成功了 ⇒ 这个假服务没复现出「传一半被掐断」"
+        assert out_file.stat().st_size < len(fp.blob)
+    finally:
+        fp.close()
+
+
+def test_every_die_message_is_chinese_with_a_next_step():
+    """静态:每一个 die 的第一句都得是中文人话(不是只甩一个英文/退出码)。"""
+    # 先把 $(...) 抠掉再匹配:消息里嵌的命令替换自己带引号,不去掉的话正则会在那里断
+    # (第一版就这么漂的:一条 die 被截成 `✗ 请求没发出去(本机 curl 报错):$(printf '%s' "`)。
+    body = re.sub(r"\$\([^()]*\)", "<sub>", SH.read_text(encoding="utf-8"))
+    msgs = re.findall(r'die "(✗[^"]*)"', body, re.S)
+    assert len(msgs) >= 25, f"只抠到 {len(msgs)} 条 die,正则漂了"
+    for m in msgs:
+        first = m.splitlines()[0]
+        assert re.search(r"[一-鿿]", first), f"die 第一句没有中文:{first!r}"
+    # 「下一步怎么办」:整条消息里要出现一个出口(回网页 / 备用页 / 找 IT / 发运维 / 具体动作)
+    exits = ("回网页", "备用下载页", "找 IT", "发给运维", "重新复制", "新开一个终端", "先装", "腾出",
+             "网页上的 PowerShell", "手动打开", "按 Cmd+Q", "换个网络")
+    for m in msgs:
+        assert any(e in m for e in exits), f"这条 die 没告诉用户下一步:{m[:120]!r}"
 
 
 # ── 6. 现有安装器的最小改动:CARHER_KEY 给了就不问、不读 stdin;不给照旧粘贴 ─────────
@@ -659,6 +1203,17 @@ def win_oneliner(base: str, tool: str, code: str) -> list:
     return ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", inner]
 
 
+def win_oneliner_page(base: str, tool: str, code: str) -> list:
+    """🔴 **网页此刻真正发给用户的那一行**(scripts/ai-portal/static/index.html:1109 逐字对照):
+        powershell -ExecutionPolicy Bypass -c "irm <ORIGIN>/ai/i/<tool>.ps1 | iex; Install-Carher -Code <码>"
+    和 win_oneliner() 的 `& ([scriptblock]::Create(…)) -Code 码` **不是一个形状**:
+    `irm | iex` 先把正文整跑一遍(那时没有码),再调 Install-Carher。
+    11-05 实测:修前这条 rc=1,屏幕上是「x 命令里没有安装码。回网页…重新复制完整的一行命令。」
+    —— 用户照网页复制粘贴一个字没错也装不上,还被说成是自己没复制全。"""
+    return ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+            f"irm {base}/ai/i/{tool}.ps1 | iex; Install-Carher -Code {code}"]
+
+
 def run_ps(work: Path, portal: Portal, argv, extra=None, timeout=120):
     home = work / "home"
     home.mkdir(exist_ok=True)
@@ -723,6 +1278,64 @@ def _win_stub_cursor_zip(rc: str = "0") -> bytes:
         z.writestr("cursor-windows/cursor_team_setup.ps1", ps)
         z.writestr("cursor-windows/cursor_team_setup.js", "// stub\nprocess.env.CARHER_KEY;\n")
     return buf.getvalue()
+
+
+@need_pwsh
+def test_ps1_page_oneliner_irm_iex_actually_installs(work, portal):
+    """🔴 网页真给的那一行(irm|iex; Install-Carher -Code 码)必须真能装上。
+    正向对照:把 install.ps1 末尾的派发那两行删掉(或把正文从函数里挪出来),这条立刻变红。"""
+    portal.files["/ai/i/pkg/codex-windows.bat"] = _win_stub_bat("codex")
+    portal.codes["WPAGE"] = {"tool": "codex", "key": KEY, "state": "ok"}
+    rc, out, logs = run_ps(work, portal, win_oneliner_page(portal.base, "codex", "WPAGE"))
+    assert rc == 0, out[-1200:]
+    got = stub_got(logs, "codex")
+    assert got and got["key"] == KEY, out[-1200:]
+    assert "√ 全部完成。" in out, out[-900:]
+    # 修前的形状:正文空跑一遍 ⇒ 这句 + CommandNotFound
+    assert "命令里没有安装码" not in out, out[-900:]
+    assert "Install-Carher" not in out or "CommandNotFound" not in out, out[-900:]
+    assert KEY not in out
+    assert [json.loads(x) for x in portal.requests] == [{"code": "WPAGE"}], portal.requests
+
+
+@need_pwsh
+def test_ps1_page_oneliner_matches_what_the_page_emits():
+    """钉住形状本身:网页那段 JS 只要还在发 `irm … | iex; Install-Carher -Code`,
+    本文件就必须有 Install-Carher 这个函数。两边谁先改都会在这里相遇。"""
+    js = (ROOT / "scripts/ai-portal/static/index.html").read_text(encoding="utf-8")
+    m = re.search(r'return \["powershell[^\n]*?/ai/i/" \+ tool \+ "\.ps1([^\n]*?)\];', js)
+    assert m, "网页里生成 Windows 一行命令那段变了,来对一下这边的形状"
+    emitted = m.group(1)
+    if "iex" in emitted and "Install-Carher" in emitted:
+        body = PS1.read_text(encoding="utf-8")
+        assert re.search(r"^function Install-Carher\b", body, re.M), \
+            "网页发的是 `irm|iex; Install-Carher …`,但 install.ps1 里没有 Install-Carher 函数 ⇒ 用户照抄也装不上"
+
+
+@need_pwsh
+@pytest.mark.parametrize("tool", ["codex", "all"])
+def test_ps1_direct_invocation_still_works(work, portal, tool):
+    """另一种形态(& scriptblock -Code 码 / -File … -Code 码)不许被上面那条改法弄坏。"""
+    for t in ("codex", "claude"):
+        portal.files[f"/ai/i/pkg/{t}-windows.bat"] = _win_stub_bat(t)
+    portal.files["/ai/i/pkg/cursor-windows.zip"] = _win_stub_cursor_zip()
+    portal.codes["WDIR"] = {"tool": tool, "key": KEY, "state": "ok"}
+    rc, out, logs = run_ps(work, portal, ["-NoProfile", "-File", str(PS1), "-Code", "WDIR"], timeout=240)
+    assert rc == 0, out[-1200:]
+    if tool == "all":
+        for t in ALL_ORDER:
+            assert stub_got(logs, t), (t, out[-900:])
+    else:
+        assert stub_got(logs, "codex")["key"] == KEY, out[-900:]
+    assert KEY not in out
+
+
+@need_pwsh
+def test_ps1_no_code_at_all_still_says_so(work, portal):
+    """直接跑、一个码都没给(用户双击 / 自己敲):必须还是那句人话,不许静默什么都不做。"""
+    rc, out, _ = run_ps(work, portal, ["-NoProfile", "-File", str(PS1)])
+    assert rc != 0, out[-600:]
+    assert "没有安装码" in out, out[-600:]
 
 
 @need_pwsh

@@ -1,6 +1,6 @@
 # kiro.rs 本地补丁
 
-上游 `hank9999/kiro.rs`。**槽位实例 `kiro-rs-slots` 镜像 `v2026.10.1-carher-slots24`（10-25，= 0001~0008 + 0010 + 0011）；老实例 `kiro-rs` 镜像 `kiro-rs:v2026.10.1-carher-ctxwin`（10-23 起，= 0001~0008 + 0010；0009 未入镜像）**；更早 `kiro-rs:v2026.10.1-carher-filter`（10-18 起）= 上游 v2026.10.1（master `22f36e69`，10-08）+ 下面 0001~0006 按文件名序打上。**
+上游 `hank9999/kiro.rs`。**槽位实例 `kiro-rs-slots` 镜像 `v2026.10.1-carher-slots77`（11-05，= 目录下 0001~0018 全打；回滚 slots76 = 不含 0018、slots75 = 0001~0014）；老实例 `kiro-rs` 镜像 `kiro-rs:v2026.10.1-carher-ctxwin`（10-23 起，= 0001~0008 + 0010；0009 未入镜像）**；更早 `kiro-rs:v2026.10.1-carher-filter`（10-18 起）= 上游 v2026.10.1（master `22f36e69`，10-08）+ 下面 0001~0006 按文件名序打上。**
 本目录是补丁的唯一真源；188 上的构建树只是产物，`scripts/kiro-rs-build.sh` 每次从干净上游重建。
 
 ```bash
@@ -26,6 +26,10 @@ scripts/kiro-lane-regress.sh --rounds 2                     # 经 LiteLLM 回归
 | `0010-context-overflow-anthropic-wording.patch` | 上游超长（`CONTENT_LENGTH_EXCEEDS_THRESHOLD` / `Input is too long`）⇒ 400 `prompt is too long: N tokens > M maximum`（Anthropic 原句，N≥M+1）。Claude Code 只认这句才自动压缩；LiteLLM 只认这句才映射 ContextWindowExceeded、不走普通兜底（修前被兜到 sa-grok-4.20 复读）。6 个单测；e2e 加「超长拒收」一例（新 14/14，旧 sticky 13/14 = 阴性对照） | 10-23 `v2026.10.1-carher-ctxwin`（= 0001~0008 + 0010，**不含 0009**） |
 | `0011-slots-one-account-one-ip-user-binding.patch` | 槽位模式 `loadBalancingMode=slots`：N 个命名槽，每槽 1 号 + 1 固定出口；带身份（`x-litellm-user_api_key_hash`，只在本模式读、不发 Kiro 官方）的 key 绑槽；AIMD 并发 + 排队超时 529；429 官方退避；402/被限退役换冷备；槽运行时增删停用（按名字 reconcile，停用即换绑）；灰度名单；按号×模型×北京日用量 + 统计前基线；SIGTERM 优雅停机；haiku-5.5 映射；Admin 槽位面板/配置/测试/批量查额度。cargo test 321 | 10-25 `v2026.10.1-carher-slots25`（被限探测改中性问题+号自己的 ARN；slots24 用户原文探测会冤退役好号）（**只给槽位实例**）。运维见 skill `kiro-rs-slots` |
 | `0013-opus55-refusal-switch-model.patch` | 槽位：opus-5.5 安全审查静默空回复（号没被限）⇒ 同槽改用 `slotRefusalFallbackModel`（默认 opus-4.8）重答 + 末尾提示，同会话 6h 粘住；4.8 也空回明确提示。cargo test 352 | 10-27 `v2026.10.1-carher-slots43`（只给槽位实例） |
+| `0015-thinking-end-tag-split.patch` | thinking 模式下行首 `</thinking>` 后直接接正文（无 `\n\n`）时识别不出结束标签 ⇒ 正文整段被当成 thinking_delta、text 只剩补发的空格、stop_reason 误报 `max_tokens`（用户看到空回复）。改：行首标签后跳过至多一个 `\n` 遇非空白即判结束；行中提到的 `</thinking>` 仍要求 `\n\n`。只改 `stream.rs`。隔离 A/B（mock 上游）：slots75 text=`' '` stop=max_tokens，slots76 正文完整 end_turn | 11-05 `v2026.10.1-carher-slots76`（只给槽位实例） |
+| `0016-log-dropped-upstream-frames.patch` | 量具：上游帧 `Event::from_frame` 返回 Err 原先在 handlers 三处（stream / non_stream / buffered）+ search_loop 被 `if let Ok` 静默丢弃，`Event::Unknown` 也静默吞 ⇒ `Event::from_frame_logged(frame, site, model)` 打 warn「上游帧解析失败，已丢弃」/「上游事件类型未知，已忽略」，字段 site / model / message_type / event_type / payload_len / **payload_sha12**。🔴 日志不带 payload 原文；serde 错误信息会引用坏值（可带出密钥）⇒ `redacted_error` 只留类别+行列。行为不变（失败仍丢、Unknown 仍忽略）。`provider.rs` 计量/探测不改（同一份字节会重复记） | 11-05 slots76 |
+| `0017-suppress-upstream-identity.patch` | Kiro 上游服务端注入自己的身份 ⇒ 模型自称「我是 Kiro，一个 AI 驱动的开发环境」（11-05 198 SpendLogs 30 分钟 aws-* 3296 个里 13 个；非 kiro 6243 个里 0 个）。`converter.rs` 在发往上游的系统消息末尾追加简短身份策略（不得自称/提及 Kiro；按对话系统提示给的身份回答，否则说 AI assistant built on Claude；不限制用户自己代码里叫 kiro 的文件），有 system / 只有 thinking 前缀 / 两者都无三条路径都带。关：`KIRO_IDENTITY_POLICY=0`。兜底在 198 `sec_redact.py` 响应规则 `9-身份` | 11-05 slots76 |
+| `0018-rate-limit-unknown-event-log.patch` | 0016 上线即发现上游每个推理请求发几十个 `reasoningContentEvent`（未处理类型）⇒ 逐帧 warn，4 分钟 1.7 万行占全部日志 97%。改：同一未知类型进程内只记第一次 + 每 10000 次一行（带 `seen_total`），最多记 64 种。隔离 A/B：3 发×50 帧 slots76 151 行 / slots77 2 行；生产切后 1 分钟 1 行。⚠️ `reasoningContentEvent` 仍被忽略（推理内容不转发），要支持需另做 | 11-05 `v2026.10.1-carher-slots77`（现役） |
 
 存档：`0001-carher-base-models.5ca5703.patch` 是旧基线版 0001（含 opus-5.5，上游后来自带了），`kiro-rs-build.sh` 不会打它。
 

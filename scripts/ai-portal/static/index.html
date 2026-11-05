@@ -101,6 +101,15 @@ code{font-family:var(--font-mono);font-size:.88em;background:var(--code-bg);padd
   font-weight:700;font-size:16px;display:grid;place-items:center;margin-top:2px;justify-self:center;position:relative;z-index:1}
 .step::after{content:"";position:absolute;left:21px;top:42px;bottom:4px;width:2px;background:var(--rail)}
 .step.last::after{display:none}
+.words{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.word{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.word kbd{align-self:flex-start;font-family:inherit;font-weight:700;font-size:17px;line-height:1.4;letter-spacing:.04em;background:var(--code-bg);border:1px solid var(--line);border-bottom-width:3px;border-radius:8px;padding:4px 14px;color:var(--fg);cursor:pointer;user-select:all}
+.word kbd:hover,.word kbd:focus-visible{border-color:var(--accent);outline:none}
+.word kbd.done{background:var(--accent);border-color:var(--accent);color:#fff}
+.word p{margin:0;font-size:14px;line-height:1.6}
+.word .meta{display:flex;flex-wrap:wrap;gap:6px}
+.word .meta span{font-size:12.5px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 9px}
+@media (max-width:760px){.words{grid-template-columns:1fr}}
 .step.off::before{background:var(--rail);color:var(--muted)}
 .step h2{margin:0 0 12px;font-size:19px;font-weight:700;line-height:1.5;text-wrap:balance;display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px}
 .step h2 .sub{font-weight:400}
@@ -517,7 +526,32 @@ body:not(.is-ext) .ext-only{display:none!important}
     </div>
   </section>
 
-  <!-- ③ 反馈 -->
+  <!-- ③ 开始用 -->
+  <section class="step" id="s-use" aria-labelledby="use-h">
+    <h2 id="use-h">装好后，在聊天框里发这三个词 <span class="sub">Cursor、Codex、Claude Code 都能用</span></h2>
+    <div class="body">
+      <div class="words">
+        <div class="word">
+          <kbd tabindex="0" role="button" data-copy="查余额" title="点一下复制">查余额</kbd>
+          <p>看今天用了多少、还剩多少、何时重置，以及各模型响应速度。</p>
+          <div class="meta"><span>立刻返回</span><span>不花钱</span></div>
+        </div>
+        <div class="word">
+          <kbd tabindex="0" role="button" data-copy="测模型" title="点一下复制">测模型</kbd>
+          <p>把你能用的模型挨个试一遍，列出哪些能用、哪些不能用。</p>
+          <div class="meta"><span>约 1~2 分钟</span><span>花一点点额度</span></div>
+        </div>
+        <div class="word">
+          <kbd tabindex="0" role="button" data-copy="刷模型" title="点一下复制">刷模型</kbd>
+          <p>按你的 key 更新模型列表：新开通的加上，没权限的删掉。</p>
+          <div class="meta"><span>Cursor 会自己重开</span><span>Codex / Claude 新开会话生效</span></div>
+        </div>
+      </div>
+      <p class="sub">像平常聊天一样只发这一个词，前面不加 <code>/</code>。点词可复制。</p>
+    </div>
+  </section>
+
+  <!-- ④ 反馈 -->
   <section class="step last" id="s-fb" aria-labelledby="fb-h">
     <h2 id="fb-h">遇到问题 <span class="sub">说一句，我们来处理</span></h2>
     <div class="body">
@@ -1295,6 +1329,19 @@ $("fb-box").addEventListener("toggle", function(){ if (this.open) pickFbTool(); 
   }
   boot();
 })();
+
+// ③ 开始用:点词复制
+document.querySelectorAll(".word kbd[data-copy]").forEach(function(k){
+  var go = function(){
+    var t = k.getAttribute("data-copy"), old = k.textContent;
+    copyText(t).then(function(ok){
+      k.textContent = ok ? "已复制" : old; k.classList.toggle("done", !!ok);
+      setTimeout(function(){ k.textContent = old; k.classList.remove("done"); }, 1200);
+    });
+  };
+  k.addEventListener("click", go);
+  k.addEventListener("keydown", function(e){ if (e.key === "Enter" || e.key === " "){ e.preventDefault(); go(); } });
+});
 })();
 </script>
 </body></html>
